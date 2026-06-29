@@ -1,0 +1,443 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1782699048377,
+  "projectRoot": "F:\\3d-babylon-editor",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": ">=22.12.0",
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "react",
+        "version": "19.2.7",
+        "category": "frontend"
+      },
+      {
+        "name": "react-dom",
+        "version": "19.2.7",
+        "category": "frontend"
+      },
+      {
+        "name": "vite",
+        "version": "8.0.16",
+        "category": "build"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": "Node.js 22.12.0"
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": "npm run dev",
+    "scripts": {
+      "dev": "vite --host 127.0.0.1",
+      "dev:electron": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+      "build": "tsc -b && vite build && npm run build:electron",
+      "build:electron": "tsc -p tsconfig.node.json",
+      "typecheck": "tsc -b",
+      "preview": "vite preview --host 127.0.0.1"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "src"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 1,
+      "lastAccessed": 1782699048269,
+      "keyFiles": [
+        "index.html"
+      ]
+    },
+    "dist-electron": {
+      "path": "dist-electron",
+      "purpose": null,
+      "fileCount": 10,
+      "lastAccessed": 1782699048286,
+      "keyFiles": [
+        "main.d.ts",
+        "main.js",
+        "modelUnits.d.ts",
+        "modelUnits.js",
+        "preload.cjs"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 0,
+      "lastAccessed": 1782699048287,
+      "keyFiles": []
+    },
+    "electron": {
+      "path": "electron",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1782699048287,
+      "keyFiles": [
+        "main.ts",
+        "modelUnits.ts",
+        "preload.cts",
+        "preload.ts",
+        "types.ts"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 3,
+      "lastAccessed": 1782699048288,
+      "keyFiles": [
+        "App.tsx",
+        "main.tsx",
+        "vite-env.d.ts"
+      ]
+    },
+    "dist\\assets": {
+      "path": "dist\\assets",
+      "purpose": "Static assets",
+      "fileCount": 95,
+      "lastAccessed": 1782699048289,
+      "keyFiles": [
+        "abstractSoundSource-DjoY0Cla.js",
+        "animation.pure-CxZZ7w8Y.js",
+        "buffer.pure-DGiJYl2Z.js"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "",
+      "accessCount": 180,
+      "lastAccessed": 1782722030094,
+      "type": "directory"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 93,
+      "lastAccessed": 1782721998912,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\panels\\ProjectPanel.tsx",
+      "accessCount": 42,
+      "lastAccessed": 1782710013242,
+      "type": "file"
+    },
+    {
+      "path": "src\\runtime\\babylon\\SceneRuntime.ts",
+      "accessCount": 31,
+      "lastAccessed": 1782723851379,
+      "type": "file"
+    },
+    {
+      "path": "src\\runtime\\babylon\\createEngine.ts",
+      "accessCount": 28,
+      "lastAccessed": 1782701734859,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\project\\SceneSerializer.ts",
+      "accessCount": 25,
+      "lastAccessed": 1782696012556,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\store\\editorStore.ts",
+      "accessCount": 23,
+      "lastAccessed": 1782723850833,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\ui\\Toolbar.tsx",
+      "accessCount": 22,
+      "lastAccessed": 1782665753958,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\panels\\InspectorPanel.tsx",
+      "accessCount": 21,
+      "lastAccessed": 1782695133457,
+      "type": "file"
+    },
+    {
+      "path": "src\\styles\\global.css",
+      "accessCount": 21,
+      "lastAccessed": 1782721903844,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\model\\SceneDocument.ts",
+      "accessCount": 20,
+      "lastAccessed": 1782708546419,
+      "type": "file"
+    },
+    {
+      "path": "electron\\ipc\\assetIpc.ts",
+      "accessCount": 17,
+      "lastAccessed": 1782694338049,
+      "type": "file"
+    },
+    {
+      "path": "electron\\preload.ts",
+      "accessCount": 16,
+      "lastAccessed": 1782662674347,
+      "type": "file"
+    },
+    {
+      "path": "src\\vite-env.d.ts",
+      "accessCount": 16,
+      "lastAccessed": 1782694763436,
+      "type": "file"
+    },
+    {
+      "path": "electron\\types.ts",
+      "accessCount": 16,
+      "lastAccessed": 1782696360148,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\assets\\AssetDatabase.ts",
+      "accessCount": 16,
+      "lastAccessed": 1782723851995,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\panels\\SceneViewPanel.tsx",
+      "accessCount": 15,
+      "lastAccessed": 1782710012634,
+      "type": "file"
+    },
+    {
+      "path": "electron\\main.ts",
+      "accessCount": 14,
+      "lastAccessed": 1782661326652,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\model\\components.ts",
+      "accessCount": 14,
+      "lastAccessed": 1782701663909,
+      "type": "file"
+    },
+    {
+      "path": "package.json",
+      "accessCount": 14,
+      "lastAccessed": 1782709987776,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\layout\\EditorLayout.module.css",
+      "accessCount": 14,
+      "lastAccessed": 1782721819029,
+      "type": "file"
+    },
+    {
+      "path": "electron\\ipc\\projectIpc.ts",
+      "accessCount": 13,
+      "lastAccessed": 1782662643574,
+      "type": "file"
+    },
+    {
+      "path": "src",
+      "accessCount": 12,
+      "lastAccessed": 1782663886905,
+      "type": "directory"
+    },
+    {
+      "path": "src\\editor\\layout\\EditorLayout.tsx",
+      "accessCount": 12,
+      "lastAccessed": 1782710014226,
+      "type": "file"
+    },
+    {
+      "path": "electron",
+      "accessCount": 11,
+      "lastAccessed": 1782634629199,
+      "type": "directory"
+    },
+    {
+      "path": "docs\\superpowers\\plans\\2026-06-28-infinite-ground-grid.md",
+      "accessCount": 10,
+      "lastAccessed": 1782608541857,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\commands\\entityCommands.ts",
+      "accessCount": 10,
+      "lastAccessed": 1782723851406,
+      "type": "file"
+    },
+    {
+      "path": "src\\runtime\\babylon\\TransformGizmoController.ts",
+      "accessCount": 9,
+      "lastAccessed": 1782723851100,
+      "type": "file"
+    },
+    {
+      "path": "tsconfig.node.json",
+      "accessCount": 8,
+      "lastAccessed": 1782694337959,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\commands\\CommandHistory.ts",
+      "accessCount": 6,
+      "lastAccessed": 1782549364327,
+      "type": "file"
+    },
+    {
+      "path": "tsconfig.json",
+      "accessCount": 5,
+      "lastAccessed": 1782701735081,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\model\\Entity.ts",
+      "accessCount": 5,
+      "lastAccessed": 1782723852005,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\panels\\HierarchyPanel.tsx",
+      "accessCount": 4,
+      "lastAccessed": 1782549042199,
+      "type": "file"
+    },
+    {
+      "path": "electron\\ipc\\assetRegistry.ts",
+      "accessCount": 4,
+      "lastAccessed": 1782661632561,
+      "type": "file"
+    },
+    {
+      "path": "src\\App.tsx",
+      "accessCount": 4,
+      "lastAccessed": 1782701688496,
+      "type": "file"
+    },
+    {
+      "path": "C:\\Users\\wangyun\\.claude\\plugins\\cache\\claude-plugins-official\\superpowers\\5.0.7\\skills\\brainstorming\\visual-companion.md",
+      "accessCount": 4,
+      "lastAccessed": 1782710178109,
+      "type": "file"
+    },
+    {
+      "path": "docs\\superpowers\\plans\\2026-06-28-ground-grid-glow.md",
+      "accessCount": 3,
+      "lastAccessed": 1782582234204,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\model\\math.ts",
+      "accessCount": 3,
+      "lastAccessed": 1782701688627,
+      "type": "file"
+    },
+    {
+      "path": "src\\main.tsx",
+      "accessCount": 2,
+      "lastAccessed": 1782517804719,
+      "type": "file"
+    },
+    {
+      "path": "vite.config.ts",
+      "accessCount": 1,
+      "lastAccessed": 1782517798830,
+      "type": "file"
+    },
+    {
+      "path": "docs\\superpowers\\plans\\2026-06-15-babylon-electron-unity-editor-mvp.md",
+      "accessCount": 1,
+      "lastAccessed": 1782517799384,
+      "type": "file"
+    },
+    {
+      "path": "index.html",
+      "accessCount": 1,
+      "lastAccessed": 1782517816351,
+      "type": "file"
+    },
+    {
+      "path": "docs",
+      "accessCount": 1,
+      "lastAccessed": 1782517828722,
+      "type": "directory"
+    },
+    {
+      "path": "src\\editor\\panels\\ConsolePanel.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1782517852194,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\commands\\Command.ts",
+      "accessCount": 1,
+      "lastAccessed": 1782517855121,
+      "type": "file"
+    },
+    {
+      "path": "src\\shared\\ids.ts",
+      "accessCount": 1,
+      "lastAccessed": 1782517857174,
+      "type": "file"
+    },
+    {
+      "path": "docs\\superpowers\\plans\\2026-06-18-transform-gizmo-mvp.md",
+      "accessCount": 1,
+      "lastAccessed": 1782517858733,
+      "type": "file"
+    },
+    {
+      "path": "C:\\Users\\wangyun\\.claude\\plans\\crystalline-stargazing-crab.md",
+      "accessCount": 1,
+      "lastAccessed": 1782527921831,
+      "type": "file"
+    },
+    {
+      "path": ".superpowers\\brainstorm",
+      "accessCount": 1,
+      "lastAccessed": 1782577001794,
+      "type": "directory"
+    },
+    {
+      "path": ".superpowers\\brainstorm\\1491-1782576984\\state\\server-info",
+      "accessCount": 1,
+      "lastAccessed": 1782577017956,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

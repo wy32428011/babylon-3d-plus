@@ -1,0 +1,79 @@
+<h2>Project 资源库面板：实现方式选择</h2>
+<p class="subtitle">你已经选择“完整结构”。下面是 3 种实现方式，重点比较后续扩展性与当前改动范围。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="height:170px;background:#202020;border:1px solid #454545;color:#ddd;font-family:Arial, sans-serif;display:flex;flex-direction:column;overflow:hidden;">
+        <div style="display:flex;height:32px;background:#1b1b1b;border-bottom:1px solid #111;">
+          <div style="padding:8px 18px;background:#323232;color:#fff;border-top:2px solid #1ec7d6;">模型库</div>
+          <div style="padding:8px 18px;">POI库</div>
+          <div style="padding:8px 18px;">主题库</div>
+          <div style="padding:8px 18px;">组合库</div>
+          <div style="padding:8px 18px;">环境库</div>
+          <div style="padding:8px 18px;">图表库</div>
+          <div style="padding:8px 18px;">图片库</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 14px;background:#2a2a2a;border-bottom:1px solid #3d3d3d;">
+          <span style="font-size:12px;color:#aaa;">资源名称</span><div style="width:170px;height:24px;background:#1f1f1f;border:1px solid #454545;color:#777;font-size:12px;display:flex;align-items:center;padding-left:10px;">请输入资源名称...</div>
+        </div>
+        <div style="display:flex;gap:14px;padding:12px 14px;">
+          <div style="width:82px;height:92px;background:#303030;border:1px solid #4b4b4b;padding:4px;text-align:center;"><div style="height:56px;background:linear-gradient(#151d3d,#111);color:#15d5e5;display:flex;align-items:center;justify-content:center;font-size:24px;">□</div><div style="font-size:12px;margin-top:8px;">资源占位</div></div>
+          <div style="width:82px;height:92px;background:#303030;border:1px solid #4b4b4b;padding:4px;text-align:center;"><div style="height:56px;background:linear-gradient(#151d3d,#111);color:#15d5e5;display:flex;align-items:center;justify-content:center;font-size:24px;">◎</div><div style="font-size:12px;margin-top:8px;">资源占位</div></div>
+          <div style="width:82px;height:92px;background:#303030;border:1px solid #4b4b4b;padding:4px;text-align:center;"><div style="height:56px;background:linear-gradient(#151d3d,#111);color:#15d5e5;display:flex;align-items:center;justify-content:center;font-size:24px;">▣</div><div style="font-size:12px;margin-top:8px;">资源占位</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 单组件静态视觉壳（推荐）</h3>
+      <p>在现有 ProjectPanel 内完成页签、搜索栏和占位卡片；扫描功能保留但退到后续可接入位置。改动小、最快稳定。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="height:170px;background:#202020;border:1px solid #454545;color:#ddd;font-family:Arial, sans-serif;display:flex;flex-direction:column;overflow:hidden;">
+        <div style="display:flex;height:32px;background:#1b1b1b;border-bottom:1px solid #111;">
+          <div style="padding:8px 18px;background:#323232;color:#fff;border-top:2px solid #1ec7d6;">模型库</div>
+          <div style="padding:8px 18px;">POI库</div><div style="padding:8px 18px;">主题库</div><div style="padding:8px 18px;">...</div>
+        </div>
+        <div style="padding:16px;color:#aaa;">拆出 AssetLibraryPanel、ResourceTabs、ResourceCard 等多个组件</div>
+        <div style="display:flex;gap:12px;padding:0 16px;">
+          <div style="width:90px;height:78px;background:#303030;border:1px dashed #555;"></div>
+          <div style="width:90px;height:78px;background:#303030;border:1px dashed #555;"></div>
+          <div style="width:90px;height:78px;background:#303030;border:1px dashed #555;"></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 组件化重构</h3>
+      <p>为后续功能预先拆组件。扩展性最好，但当前只是改样式，文件与接口会偏多。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="height:170px;background:#202020;border:1px solid #454545;color:#ddd;font-family:Arial, sans-serif;display:flex;flex-direction:column;overflow:hidden;">
+        <div style="display:flex;height:32px;background:#1b1b1b;border-bottom:1px solid #111;">
+          <div style="padding:8px 18px;background:#323232;color:#fff;border-top:2px solid #1ec7d6;">模型库</div>
+          <div style="padding:8px 18px;">POI库</div><div style="padding:8px 18px;">主题库</div><div style="padding:8px 18px;">...</div>
+        </div>
+        <div style="padding:12px;color:#bbb;">直接把现有扫描结果接入各资源库分类</div>
+        <div style="display:flex;gap:12px;padding:0 12px;">
+          <div style="width:105px;height:88px;background:#293139;border:1px solid #477;display:flex;align-items:center;justify-content:center;color:#6ff;">.glb</div>
+          <div style="width:105px;height:88px;background:#293139;border:1px solid #477;display:flex;align-items:center;justify-content:center;color:#6ff;">.scene</div>
+          <div style="width:105px;height:88px;background:#293139;border:1px solid #477;display:flex;align-items:center;justify-content:center;color:#6ff;">.png</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 视觉 + 真实扫描数据混合</h3>
+      <p>当前就把扫描结果映射到新库。看起来更“可用”，但会超出“功能暂不做”的边界。</p>
+    </div>
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros"><h4>推荐 A 的原因</h4><ul><li>符合“先改样式，功能暂不做”的边界</li><li>保留当前扫描代码，后续可平滑接入</li><li>改动集中，风险低</li></ul></div>
+  <div class="cons"><h4>暂不推荐 B/C 的原因</h4><ul><li>B 对当前目标偏重，容易过早抽象</li><li>C 会引入真实分类和交互，偏离本次需求</li></ul></div>
+</div>

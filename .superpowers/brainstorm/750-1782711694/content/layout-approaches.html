@@ -1,0 +1,63 @@
+<h2>布局自适应方案对比</h2>
+<p class="subtitle">目标：窗口缩小到 1024×640 时仍保持 Toolbar、Hierarchy、Scene、Console、Inspector、Project 五面板可见；不实现拖拽分隔条。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="height:220px;border:1px solid #3a4a5a;background:#151515;display:grid;grid-template-rows:28px 1fr 110px;font-size:10px;color:#d7d7d7;">
+        <div style="background:#2d2d30;display:flex;align-items:center;padding:0 8px;gap:6px;white-space:nowrap;overflow:hidden;">Toolbar · 按钮横向滚动</div>
+        <div style="display:grid;grid-template-columns:clamp(180px,22vw,260px) minmax(360px,1fr) clamp(220px,26vw,320px);min-height:0;">
+          <div style="background:#252526;border-right:1px solid #111;padding:6px;overflow:hidden;">Hierarchy<br><span style="color:#8f8f8f">内部滚动</span></div>
+          <div style="display:grid;grid-template-rows:minmax(0,1fr) clamp(96px,18vh,150px);min-width:0;">
+            <div style="background:#111b22;border-bottom:1px solid #111;display:grid;place-items:center;color:#19c7d4;">Scene 自动占满剩余空间</div>
+            <div style="background:#252526;padding:6px;">Console 可压缩</div>
+          </div>
+          <div style="background:#252526;border-left:1px solid #111;padding:6px;overflow:hidden;">Inspector<br><span style="color:#8f8f8f">控件内部自适应</span></div>
+        </div>
+        <div style="background:#262626;border-top:1px solid #111;padding:6px;overflow:hidden;">Project：clamp(180px, 28vh, 260px)，卡片横向滚动</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. CSS 弹性轨道（推荐）</h3>
+      <p>用 clamp/minmax 替换固定尺寸，配合面板内部滚动；改动小、稳定，符合当前 MVP。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="height:220px;border:1px solid #3a4a5a;background:#151515;display:grid;grid-template-rows:28px 1fr 96px;font-size:10px;color:#d7d7d7;">
+        <div style="background:#2d2d30;display:flex;align-items:center;padding:0 8px;">Toolbar</div>
+        <div style="display:grid;grid-template-columns:170px minmax(440px,1fr) 200px;">
+          <div style="background:#252526;border-right:1px solid #111;padding:6px;">Hierarchy</div>
+          <div style="background:#10212b;display:grid;place-items:center;color:#19c7d4;">Scene 优先</div>
+          <div style="background:#252526;border-left:1px solid #111;padding:6px;">Inspector</div>
+        </div>
+        <div style="background:#262626;border-top:1px solid #111;padding:6px;">Project 更早压缩</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. Scene 优先压缩策略</h3>
+      <p>Scene 保持最大，侧栏更小；适合建模/预览优先，但 Inspector/Hierarchy 可读性下降。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="height:220px;border:1px solid #3a4a5a;background:#151515;display:grid;grid-template-rows:28px 1fr 90px;font-size:10px;color:#d7d7d7;transform:scale(.96);transform-origin:center;">
+        <div style="background:#2d2d30;display:flex;align-items:center;padding:0 8px;">Toolbar</div>
+        <div style="display:grid;grid-template-columns:200px minmax(300px,1fr) 240px;">
+          <div style="background:#252526;border-right:1px solid #111;padding:6px;">Hierarchy</div>
+          <div style="background:#11202a;display:grid;place-items:center;color:#19c7d4;">整体紧缩</div>
+          <div style="background:#252526;border-left:1px solid #111;padding:6px;">Inspector</div>
+        </div>
+        <div style="background:#262626;border-top:1px solid #111;padding:6px;">Project 缩放密度更高</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 响应式密度模式</h3>
+      <p>小窗口切换更紧凑的 padding、字体、卡片尺寸；视觉更精细，但改动范围更大。</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">可以在浏览器点击你偏好的方案；也可以直接在终端回复。</p>

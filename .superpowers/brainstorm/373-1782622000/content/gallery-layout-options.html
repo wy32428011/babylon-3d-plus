@@ -1,0 +1,228 @@
+<style>
+  .layout-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 18px;
+  }
+  .layout-card {
+    border: 1px solid rgba(255,255,255,.16);
+    border-radius: 14px;
+    overflow: hidden;
+    background: rgba(255,255,255,.045);
+    cursor: pointer;
+  }
+  .layout-card:hover {
+    border-color: rgba(25,199,212,.75);
+    box-shadow: 0 0 0 1px rgba(25,199,212,.25), 0 14px 38px rgba(0,0,0,.24);
+  }
+  .mock-editor {
+    display: grid;
+    grid-template-rows: 24px 1fr var(--project-height);
+    height: 320px;
+    background: #1e1e1e;
+    color: #ddd;
+    font-size: 10px;
+  }
+  .mock-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px;
+    border-bottom: 1px solid #111;
+    background: #2d2d30;
+  }
+  .mock-workspace {
+    display: grid;
+    grid-template-columns: 52px 1fr 68px;
+    min-height: 0;
+  }
+  .mock-left,
+  .mock-right,
+  .mock-console,
+  .mock-project {
+    background: #252526;
+    border-color: #111;
+  }
+  .mock-left { border-right: 1px solid #111; }
+  .mock-right { border-left: 1px solid #111; }
+  .mock-center {
+    display: grid;
+    grid-template-rows: 1fr 34px;
+    min-height: 0;
+  }
+  .mock-scene {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(#101014 0 46%, #062226 47%, #0b1014 100%);
+  }
+  .mock-grid {
+    position: absolute;
+    inset: 48% 0 0;
+    background-image: linear-gradient(rgba(25,199,212,.35) 1px, transparent 1px), linear-gradient(90deg, rgba(25,199,212,.35) 1px, transparent 1px);
+    background-size: 18px 18px;
+    transform: perspective(120px) rotateX(62deg) scale(1.8);
+    transform-origin: top center;
+  }
+  .mock-console {
+    padding: 4px 6px;
+    border-top: 1px solid #111;
+    color: #aaa;
+  }
+  .mock-project {
+    display: grid;
+    grid-template-rows: 22px 30px 1fr;
+    min-height: 0;
+    border-top: 1px solid #111;
+  }
+  .mock-tabs {
+    display: flex;
+    background: #171717;
+  }
+  .mock-tab {
+    width: 42px;
+    border-right: 1px solid #242424;
+    display: grid;
+    place-items: center;
+  }
+  .mock-tab:first-child {
+    background: #333;
+    box-shadow: inset 0 2px 0 #19c7d4;
+  }
+  .mock-filter {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 8px;
+    border-top: 1px solid #111;
+    border-bottom: 1px solid #3a3a3a;
+    background: #303030;
+  }
+  .mock-input {
+    width: 78px;
+    height: 16px;
+    border: 1px solid #474747;
+    background: #202020;
+  }
+  .mock-assets {
+    display: flex;
+    gap: 8px;
+    align-items: start;
+    padding: 7px 8px;
+    overflow: hidden;
+    background: #262626;
+  }
+  .mock-asset {
+    display: grid;
+    grid-template-rows: 42px 16px;
+    width: 58px;
+    min-width: 58px;
+    border: 1px solid #4a4a4a;
+    background: #343434;
+  }
+  .mock-thumb {
+    display: grid;
+    place-items: center;
+    margin: 3px;
+    border: 1px solid #1e3144;
+    color: #15d7e6;
+    background: linear-gradient(180deg, #141a3a 0%, #10172f 65%, #0d0f17 100%);
+  }
+  .mock-name {
+    display: grid;
+    place-items: center;
+    color: #ccc;
+  }
+  .too-small .mock-asset:nth-child(n+1) {
+    transform: translateY(2px);
+  }
+  .recommended-badge {
+    display: inline-flex;
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    color: #071517;
+    background: #19c7d4;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .layout-body {
+    padding: 14px;
+  }
+  .layout-body h3 {
+    margin: 0 0 8px;
+  }
+  .layout-body p {
+    margin: 0;
+    color: #bdbdbd;
+    line-height: 1.55;
+  }
+  @media (max-width: 1100px) {
+    .layout-grid { grid-template-columns: 1fr; }
+  }
+</style>
+
+<h2>底部图库区域高度方案对比</h2>
+<p class="subtitle">你已经选择“固定加高”。这里对比三个固定高度，重点看图库卡片是否完整、Scene 区域是否仍然够用。建议选 B。</p>
+
+<div class="layout-grid">
+  <div class="layout-card too-small" data-choice="a-220" onclick="toggleSelect(this)">
+    <div class="mock-editor" style="--project-height: 78px">
+      <div class="mock-toolbar">Toolbar · Move · Rotate · Scale</div>
+      <div class="mock-workspace">
+        <div class="mock-left">Hierarchy</div>
+        <div class="mock-center"><div class="mock-scene"><div class="mock-grid"></div></div><div class="mock-console">Console</div></div>
+        <div class="mock-right">Inspector</div>
+      </div>
+      <div class="mock-project">
+        <div class="mock-tabs"><div class="mock-tab">模型</div><div class="mock-tab">POI</div><div class="mock-tab">主题</div></div>
+        <div class="mock-filter">模型名称 <span class="mock-input"></span></div>
+        <div class="mock-assets"><div class="mock-asset"><div class="mock-thumb">◇</div><div class="mock-name">触发</div></div><div class="mock-asset"><div class="mock-thumb">◇</div><div class="mock-name">发送</div></div></div>
+      </div>
+    </div>
+    <div class="layout-body">
+      <h3>A · 约 220px</h3>
+      <p>比当前 180px 明显改善，但卡片和底部间距仍偏紧；对后续真实缩略图不够从容。</p>
+    </div>
+  </div>
+
+  <div class="layout-card" data-choice="b-240" onclick="toggleSelect(this)">
+    <div class="mock-editor" style="--project-height: 96px">
+      <div class="mock-toolbar">Toolbar · Move · Rotate · Scale</div>
+      <div class="mock-workspace">
+        <div class="mock-left">Hierarchy</div>
+        <div class="mock-center"><div class="mock-scene"><div class="mock-grid"></div></div><div class="mock-console">Console</div></div>
+        <div class="mock-right">Inspector</div>
+      </div>
+      <div class="mock-project">
+        <div class="mock-tabs"><div class="mock-tab">模型</div><div class="mock-tab">POI</div><div class="mock-tab">主题</div></div>
+        <div class="mock-filter">模型名称 <span class="mock-input"></span></div>
+        <div class="mock-assets"><div class="mock-asset"><div class="mock-thumb">◇</div><div class="mock-name">触发</div></div><div class="mock-asset"><div class="mock-thumb">◇</div><div class="mock-name">发送</div></div><div class="mock-asset"><div class="mock-thumb">○</div><div class="mock-name">产生</div></div></div>
+      </div>
+    </div>
+    <div class="layout-body">
+      <h3>B · 约 240px <span class="recommended-badge">推荐</span></h3>
+      <p>完整展示 tabs、筛选行、卡片和底部留白；Scene 仍占主视觉区域，适合当前资源库外观阶段。</p>
+    </div>
+  </div>
+
+  <div class="layout-card" data-choice="c-260" onclick="toggleSelect(this)">
+    <div class="mock-editor" style="--project-height: 112px">
+      <div class="mock-toolbar">Toolbar · Move · Rotate · Scale</div>
+      <div class="mock-workspace">
+        <div class="mock-left">Hierarchy</div>
+        <div class="mock-center"><div class="mock-scene"><div class="mock-grid"></div></div><div class="mock-console">Console</div></div>
+        <div class="mock-right">Inspector</div>
+      </div>
+      <div class="mock-project">
+        <div class="mock-tabs"><div class="mock-tab">模型</div><div class="mock-tab">POI</div><div class="mock-tab">主题</div></div>
+        <div class="mock-filter">模型名称 <span class="mock-input"></span></div>
+        <div class="mock-assets"><div class="mock-asset"><div class="mock-thumb">◇</div><div class="mock-name">触发</div></div><div class="mock-asset"><div class="mock-thumb">◇</div><div class="mock-name">发送</div></div><div class="mock-asset"><div class="mock-thumb">○</div><div class="mock-name">产生</div></div></div>
+      </div>
+    </div>
+    <div class="layout-body">
+      <h3>C · 约 260px</h3>
+      <p>图库更宽裕，适合更大缩略图；但会进一步压缩 Scene 视口，不建议当前一步到位。</p>
+    </div>
+  </div>
+</div>

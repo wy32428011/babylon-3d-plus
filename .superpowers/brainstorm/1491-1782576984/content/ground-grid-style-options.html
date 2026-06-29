@@ -1,0 +1,48 @@
+<h2>地面网格与呼吸光晕方案</h2>
+<p class="subtitle">请比较三种 Scene View 辅助地面的视觉方向。推荐选 A：清晰、克制，不干扰模型编辑。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="height:220px;border-radius:12px;background:radial-gradient(circle at 50% 58%, rgba(84,170,255,.28), rgba(16,24,34,.08) 28%, rgba(10,12,16,1) 72%);position:relative;overflow:hidden;border:1px solid rgba(120,180,255,.25);">
+        <div style="position:absolute;left:0;right:0;bottom:16px;height:120px;transform:perspective(420px) rotateX(62deg);transform-origin:bottom;background-image:linear-gradient(rgba(80,160,255,.34) 1px, transparent 1px),linear-gradient(90deg, rgba(80,160,255,.34) 1px, transparent 1px);background-size:18px 18px;box-shadow:0 0 32px rgba(80,160,255,.22), inset 0 0 50px rgba(80,160,255,.08);"></div>
+        <div style="position:absolute;left:50%;bottom:58px;width:170px;height:52px;border-radius:999px;transform:translateX(-50%);background:radial-gradient(ellipse, rgba(80,180,255,.36), rgba(80,180,255,0));filter:blur(4px);"></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 科技蓝编辑器网格（推荐）</h3>
+      <p>深色地面网格，中心有低强度蓝色呼吸光晕；适合长期编辑，不抢模型视觉焦点。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="height:220px;border-radius:12px;background:radial-gradient(circle at 50% 58%, rgba(247,215,116,.34), rgba(32,25,10,.12) 30%, rgba(10,12,16,1) 72%);position:relative;overflow:hidden;border:1px solid rgba(247,215,116,.28);">
+        <div style="position:absolute;left:0;right:0;bottom:16px;height:120px;transform:perspective(420px) rotateX(62deg);transform-origin:bottom;background-image:linear-gradient(rgba(247,215,116,.38) 1px, transparent 1px),linear-gradient(90deg, rgba(247,215,116,.38) 1px, transparent 1px);background-size:18px 18px;box-shadow:0 0 42px rgba(247,215,116,.25), inset 0 0 50px rgba(247,215,116,.10);"></div>
+        <div style="position:absolute;left:50%;bottom:58px;width:190px;height:58px;border-radius:999px;transform:translateX(-50%);background:radial-gradient(ellipse, rgba(247,215,116,.42), rgba(247,215,116,0));filter:blur(5px);"></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 暖金聚焦网格</h3>
+      <p>与当前选中高亮色接近，视觉更醒目；适合展示，但可能与选中对象高亮竞争。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="height:220px;border-radius:12px;background:radial-gradient(circle at 50% 58%, rgba(105,255,190,.25), rgba(8,30,24,.1) 30%, rgba(10,12,16,1) 72%);position:relative;overflow:hidden;border:1px solid rgba(105,255,190,.22);">
+        <div style="position:absolute;left:0;right:0;bottom:16px;height:120px;transform:perspective(420px) rotateX(62deg);transform-origin:bottom;background-image:linear-gradient(rgba(105,255,190,.28) 1px, transparent 1px),linear-gradient(90deg, rgba(105,255,190,.28) 1px, transparent 1px);background-size:14px 14px;box-shadow:0 0 24px rgba(105,255,190,.18), inset 0 0 34px rgba(105,255,190,.08);"></div>
+        <div style="position:absolute;left:50%;bottom:58px;width:130px;height:44px;border-radius:999px;transform:translateX(-50%);background:radial-gradient(ellipse, rgba(105,255,190,.28), rgba(105,255,190,0));filter:blur(4px);"></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 极简薄荷网格</h3>
+      <p>更轻、更冷静，网格密度更高；适合弱化存在感，但呼吸光晕不如 A 明显。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>推荐实现边界</h3>
+  <p>地面网格作为编辑器辅助层创建在 Babylon runtime，不进入 SceneDocument，不参与保存/加载，也不被 Scene View 点击选中。</p>
+</div>

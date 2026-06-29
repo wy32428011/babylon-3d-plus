@@ -1,0 +1,70 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - strong [ref=e5]: Babylon Unity-like Editor
+    - button "Cube" [ref=e6] [cursor=pointer]
+    - button "Sphere" [active] [ref=e7] [cursor=pointer]
+    - button "Plane" [ref=e8] [cursor=pointer]
+    - button "Undo" [ref=e9] [cursor=pointer]
+    - button "Redo" [disabled] [ref=e10]
+    - button "保存场景" [ref=e11] [cursor=pointer]
+    - button "加载场景" [ref=e12] [cursor=pointer]
+  - generic [ref=e13]:
+    - complementary [ref=e14]:
+      - generic [ref=e15]:
+        - heading "Hierarchy" [level=2] [ref=e16]
+        - generic [ref=e34]:
+          - button "Cube" [ref=e35] [cursor=pointer]
+          - button "Sphere" [ref=e36] [cursor=pointer]
+          - button "Cube" [ref=e37] [cursor=pointer]
+          - button "Sphere" [ref=e76] [cursor=pointer]
+    - main [ref=e18]:
+      - heading "Scene" [level=2] [ref=e20]
+      - generic [ref=e22]:
+        - heading "Console" [level=2] [ref=e23]
+        - generic [ref=e24]:
+          - generic [ref=e77]: 创建 Sphere
+          - generic [ref=e38]: 创建 Cube
+          - generic [ref=e39]: 创建 Sphere
+          - generic [ref=e40]: 加载场景失败：Cannot read properties of undefined (reading 'loadScene')
+          - generic [ref=e41]: 创建 Cube
+          - generic [ref=e25]: 编辑器已启动。
+    - complementary [ref=e26]:
+      - generic [ref=e27]:
+        - heading "Inspector" [level=2] [ref=e28]
+        - heading "Sphere" [level=3] [ref=e78]
+        - group "position" [ref=e43]:
+          - generic [ref=e44]: position
+          - generic [ref=e45]:
+            - generic [ref=e46]: X
+            - spinbutton "X" [ref=e47]: "0"
+          - generic [ref=e48]:
+            - generic [ref=e49]: "Y"
+            - spinbutton "Y" [ref=e50]: "0"
+          - generic [ref=e51]:
+            - generic [ref=e52]: Z
+            - spinbutton "Z" [ref=e53]: "0"
+        - group "rotation" [ref=e54]:
+          - generic [ref=e55]: rotation
+          - generic [ref=e56]:
+            - generic [ref=e57]: X
+            - spinbutton "X" [ref=e58]: "0"
+          - generic [ref=e59]:
+            - generic [ref=e60]: "Y"
+            - spinbutton "Y" [ref=e61]: "0"
+          - generic [ref=e62]:
+            - generic [ref=e63]: Z
+            - spinbutton "Z" [ref=e64]: "0"
+        - group "scale" [ref=e65]:
+          - generic [ref=e66]: scale
+          - generic [ref=e67]:
+            - generic [ref=e68]: X
+            - spinbutton "X" [ref=e69]: "1"
+          - generic [ref=e70]:
+            - generic [ref=e71]: "Y"
+            - spinbutton "Y" [ref=e72]: "1"
+          - generic [ref=e73]:
+            - generic [ref=e74]: Z
+            - spinbutton "Z" [ref=e75]: "1"
+  - generic [ref=e31]:
+    - heading "Project" [level=2] [ref=e32]
+    - button "扫描 Assets 目录" [ref=e33] [cursor=pointer]
