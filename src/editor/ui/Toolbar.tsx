@@ -1,4 +1,11 @@
 import type {
+  EditorCameraSettings,
+  EditorCameraViewRangeKey,
+  EditorGridCellSize,
+  EditorGridSettings,
+} from '../../runtime/babylon/createEngine';
+import { EDITOR_CAMERA_VIEW_RANGES, EDITOR_GRID_CELL_SIZES } from '../../runtime/babylon/createEngine';
+import type {
   TransformSnapSettingKey,
   TransformSnapSettings,
   TransformSpace,
@@ -17,20 +24,32 @@ const TRANSFORM_SPACE_LABELS: Record<TransformSpace, string> = {
   global: '全局',
 };
 
+const TOOLBAR_ICONS = {
+  translate: '↔',
+  rotate: '⟳',
+  scale: '⛶',
+  local: '⌖',
+  global: '◎',
+  delete: '⌫',
+  undo: '↶',
+  redo: '↷',
+  save: '💾',
+  load: '📂',
+} as const;
+
 type ToolbarProps = {
   transformTool: TransformTool;
   transformSpace: TransformSpace;
   snapSettings: TransformSnapSettings;
+  gridSettings: EditorGridSettings;
+  cameraSettings: EditorCameraSettings;
   onSetTransformTool: (tool: TransformTool) => void;
   onSetTransformSpace: (space: TransformSpace) => void;
   onSetSnapEnabled: (enabled: boolean) => void;
   onUpdateSnapSetting: (key: TransformSnapSettingKey, value: number) => void;
-  onCreateCube: () => void;
-  onCreateSphere: () => void;
-  onCreatePlane: () => void;
-  onCreateHemisphericLight: () => void;
-  onCreateDirectionalLight: () => void;
-  onCreatePointLight: () => void;
+  onSetGridVisible: (visible: boolean) => void;
+  onSetGridCellSize: (cellSizeMeters: EditorGridCellSize) => void;
+  onSetCameraViewRange: (viewRangeKey: EditorCameraViewRangeKey) => void;
   onDeleteSelectedEntity: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -40,6 +59,29 @@ type ToolbarProps = {
   canUndo: boolean;
   canRedo: boolean;
 };
+
+type ToolbarIconButtonProps = {
+  active?: boolean;
+  disabled?: boolean;
+  icon: string;
+  label: string;
+  onClick: () => void;
+};
+
+function ToolbarIconButton(props: ToolbarIconButtonProps) {
+  return (
+    <button
+      aria-label={props.label}
+      className={props.active ? 'toolbar-button toolbar-icon-button active' : 'toolbar-button toolbar-icon-button'}
+      disabled={props.disabled}
+      onClick={props.onClick}
+      title={props.label}
+      type="button"
+    >
+      <span aria-hidden="true">{props.icon}</span>
+    </button>
+  );
+}
 
 export function Toolbar(props: ToolbarProps) {
   /** 将数字输入转为有效吸附步长，非法输入交由 store 保持原值。 */
@@ -52,40 +94,56 @@ export function Toolbar(props: ToolbarProps) {
     props.onUpdateSnapSetting(key, nextValue);
   }
 
+  /** 将下拉框字符串转换为受支持的米制格子大小，避免 Toolbar 传出任意数字。 */
+  function handleGridCellSizeChange(rawValue: string): void {
+    const nextValue = Number(rawValue);
+    if (!EDITOR_GRID_CELL_SIZES.includes(nextValue as EditorGridCellSize)) return;
+
+    props.onSetGridCellSize(nextValue as EditorGridCellSize);
+  }
+
+  /** 将下拉框字符串转换为受支持的相机视野档位，避免 Toolbar 传出未知档位。 */
+  function handleCameraViewRangeChange(rawValue: string): void {
+    const nextRange = EDITOR_CAMERA_VIEW_RANGES.find((range) => range.key === rawValue);
+    if (!nextRange) return;
+
+    props.onSetCameraViewRange(nextRange.key);
+  }
+
   return (
     <header className="toolbar">
       <strong className="toolbar-title">Babylon Unity-like Editor</strong>
-      <button
-        className={props.transformTool === 'translate' ? 'toolbar-button active' : 'toolbar-button'}
+      <ToolbarIconButton
+        active={props.transformTool === 'translate'}
+        icon={TOOLBAR_ICONS.translate}
+        label={TRANSFORM_TOOL_LABELS.translate}
         onClick={() => props.onSetTransformTool('translate')}
-      >
-        {TRANSFORM_TOOL_LABELS.translate}
-      </button>
-      <button
-        className={props.transformTool === 'rotate' ? 'toolbar-button active' : 'toolbar-button'}
+      />
+      <ToolbarIconButton
+        active={props.transformTool === 'rotate'}
+        icon={TOOLBAR_ICONS.rotate}
+        label={TRANSFORM_TOOL_LABELS.rotate}
         onClick={() => props.onSetTransformTool('rotate')}
-      >
-        {TRANSFORM_TOOL_LABELS.rotate}
-      </button>
-      <button
-        className={props.transformTool === 'scale' ? 'toolbar-button active' : 'toolbar-button'}
+      />
+      <ToolbarIconButton
+        active={props.transformTool === 'scale'}
+        icon={TOOLBAR_ICONS.scale}
+        label={TRANSFORM_TOOL_LABELS.scale}
         onClick={() => props.onSetTransformTool('scale')}
-      >
-        {TRANSFORM_TOOL_LABELS.scale}
-      </button>
+      />
       <div className="toolbar-segment" aria-label="变换坐标空间">
-        <button
-          className={props.transformSpace === 'local' ? 'toolbar-button active' : 'toolbar-button'}
+        <ToolbarIconButton
+          active={props.transformSpace === 'local'}
+          icon={TOOLBAR_ICONS.local}
+          label={TRANSFORM_SPACE_LABELS.local}
           onClick={() => props.onSetTransformSpace('local')}
-        >
-          {TRANSFORM_SPACE_LABELS.local}
-        </button>
-        <button
-          className={props.transformSpace === 'global' ? 'toolbar-button active' : 'toolbar-button'}
+        />
+        <ToolbarIconButton
+          active={props.transformSpace === 'global'}
+          icon={TOOLBAR_ICONS.global}
+          label={TRANSFORM_SPACE_LABELS.global}
           onClick={() => props.onSetTransformSpace('global')}
-        >
-          {TRANSFORM_SPACE_LABELS.global}
-        </button>
+        />
       </div>
       <label className="toolbar-checkbox">
         <input
@@ -94,6 +152,40 @@ export function Toolbar(props: ToolbarProps) {
           onChange={(event) => props.onSetSnapEnabled(event.target.checked)}
         />
         吸附
+      </label>
+      <label className="toolbar-checkbox">
+        <input
+          type="checkbox"
+          checked={props.gridSettings.visible}
+          onChange={(event) => props.onSetGridVisible(event.target.checked)}
+        />
+        网格
+      </label>
+      <label className="toolbar-select">
+        <span>格子</span>
+        <select
+          value={props.gridSettings.cellSizeMeters}
+          onChange={(event) => handleGridCellSizeChange(event.target.value)}
+        >
+          {EDITOR_GRID_CELL_SIZES.map((cellSizeMeters) => (
+            <option key={cellSizeMeters} value={cellSizeMeters}>
+              {`${cellSizeMeters} ${SCENE_LENGTH_UNIT_SYMBOL}`}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="toolbar-select">
+        <span>视野</span>
+        <select
+          value={props.cameraSettings.viewRangeKey}
+          onChange={(event) => handleCameraViewRangeChange(event.target.value)}
+        >
+          {EDITOR_CAMERA_VIEW_RANGES.map((range) => (
+            <option key={range.key} value={range.key}>
+              {range.label}
+            </option>
+          ))}
+        </select>
       </label>
       <label className="toolbar-number">
         <span>{`位置 (${SCENE_LENGTH_UNIT_SYMBOL})`}</span>
@@ -125,17 +217,11 @@ export function Toolbar(props: ToolbarProps) {
           onChange={(event) => handleSnapSettingChange('scale', event.target.value)}
         />
       </label>
-      <button onClick={props.onCreateCube}>创建立方体</button>
-      <button onClick={props.onCreateSphere}>创建球体</button>
-      <button onClick={props.onCreatePlane}>创建平面</button>
-      <button onClick={props.onCreateHemisphericLight}>创建半球光</button>
-      <button onClick={props.onCreateDirectionalLight}>创建方向光</button>
-      <button onClick={props.onCreatePointLight}>创建点光源</button>
-      <button onClick={props.onDeleteSelectedEntity} disabled={!props.canDelete}>删除</button>
-      <button onClick={props.onUndo} disabled={!props.canUndo}>撤销</button>
-      <button onClick={props.onRedo} disabled={!props.canRedo}>重做</button>
-      <button onClick={props.onSaveScene}>保存场景</button>
-      <button onClick={props.onLoadScene}>加载场景</button>
+      <ToolbarIconButton disabled={!props.canDelete} icon={TOOLBAR_ICONS.delete} label="删除" onClick={props.onDeleteSelectedEntity} />
+      <ToolbarIconButton disabled={!props.canUndo} icon={TOOLBAR_ICONS.undo} label="撤销" onClick={props.onUndo} />
+      <ToolbarIconButton disabled={!props.canRedo} icon={TOOLBAR_ICONS.redo} label="重做" onClick={props.onRedo} />
+      <ToolbarIconButton icon={TOOLBAR_ICONS.save} label="保存场景" onClick={props.onSaveScene} />
+      <ToolbarIconButton icon={TOOLBAR_ICONS.load} label="加载场景" onClick={props.onLoadScene} />
     </header>
   );
 }

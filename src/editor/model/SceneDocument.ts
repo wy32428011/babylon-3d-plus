@@ -23,7 +23,7 @@ export function createEmptySceneDocument(name = 'Untitled Scene'): SceneDocument
   };
 }
 
-export function createMeshEntity(meshKind: MeshKind): Entity {
+export function createMeshEntity(meshKind: MeshKind, position: Vector3Data = vector3()): Entity {
   const id = createId('entity');
   const displayName = meshKind.charAt(0).toUpperCase() + meshKind.slice(1);
 
@@ -34,7 +34,7 @@ export function createMeshEntity(meshKind: MeshKind): Entity {
     childrenIds: [],
     components: {
       transform: {
-        position: vector3(),
+        position: vector3(position.x, position.y, position.z),
         rotation: vector3(),
         scale: vector3(1, 1, 1),
       },
@@ -46,9 +46,11 @@ export function createMeshEntity(meshKind: MeshKind): Entity {
   };
 }
 
-export function createLightEntity(lightKind: LightKind): Entity {
+export function createLightEntity(lightKind: LightKind, position?: Vector3Data): Entity {
   const id = createId('entity');
   const displayName = `${lightKind.charAt(0).toUpperCase()}${lightKind.slice(1)} Light`;
+  const defaultPosition = lightKind === 'hemispheric' ? vector3(0, 2, 0) : vector3(0, 3, 0);
+  const lightPosition = position ? vector3(position.x, position.y, position.z) : defaultPosition;
 
   return {
     id,
@@ -57,7 +59,7 @@ export function createLightEntity(lightKind: LightKind): Entity {
     childrenIds: [],
     components: {
       transform: {
-        position: lightKind === 'hemispheric' ? vector3(0, 2, 0) : vector3(0, 3, 0),
+        position: lightPosition,
         rotation: vector3(),
         scale: vector3(1, 1, 1),
       },

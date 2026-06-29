@@ -28,12 +28,15 @@ export function EditorLayout() {
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
+  const gridSettings = useEditorStore((state) => state.gridSettings);
+  const cameraSettings = useEditorStore((state) => state.cameraSettings);
   const setTransformTool = useEditorStore((state) => state.setTransformTool);
   const setTransformSpace = useEditorStore((state) => state.setTransformSpace);
   const setSnapEnabled = useEditorStore((state) => state.setSnapEnabled);
   const updateSnapSetting = useEditorStore((state) => state.updateSnapSetting);
-  const createMesh = useEditorStore((state) => state.createMesh);
-  const createLight = useEditorStore((state) => state.createLight);
+  const setGridVisible = useEditorStore((state) => state.setGridVisible);
+  const setGridCellSize = useEditorStore((state) => state.setGridCellSize);
+  const setCameraViewRange = useEditorStore((state) => state.setCameraViewRange);
   const deleteSelectedEntity = useEditorStore((state) => state.deleteSelectedEntity);
   const saveScene = useEditorStore((state) => state.saveScene);
   const loadScene = useEditorStore((state) => state.loadScene);
@@ -73,16 +76,15 @@ export function EditorLayout() {
         transformTool={transformTool}
         transformSpace={transformSpace}
         snapSettings={snapSettings}
+        gridSettings={gridSettings}
+        cameraSettings={cameraSettings}
         onSetTransformTool={setTransformTool}
         onSetTransformSpace={setTransformSpace}
         onSetSnapEnabled={setSnapEnabled}
         onUpdateSnapSetting={updateSnapSetting}
-        onCreateCube={() => createMesh('cube')}
-        onCreateSphere={() => createMesh('sphere')}
-        onCreatePlane={() => createMesh('plane')}
-        onCreateHemisphericLight={() => createLight('hemispheric')}
-        onCreateDirectionalLight={() => createLight('directional')}
-        onCreatePointLight={() => createLight('point')}
+        onSetGridVisible={setGridVisible}
+        onSetGridCellSize={setGridCellSize}
+        onSetCameraViewRange={setCameraViewRange}
         onDeleteSelectedEntity={deleteSelectedEntity}
         onUndo={undo}
         onRedo={redo}

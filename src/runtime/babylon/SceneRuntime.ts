@@ -35,6 +35,7 @@ type EditorMeshMetadata = {
 type ModelRuntimeEntry = {
   sourceUrl: string;
   root: TransformNode;
+  contentRoot: TransformNode;
   container: AssetContainer | null;
   meshes: AbstractMesh[];
   highlighted: boolean;
@@ -203,18 +204,23 @@ export class SceneRuntime {
 
     const current = this.models.get(entity.id);
     if (current) {
-      this.applyModelTransform(current.root, entity.components.transform, modelAsset.unitScaleToMeters);
+      this.applyTransform(current.root, entity.components.transform);
+      this.applyModelUnitScale(current.contentRoot, modelAsset.unitScaleToMeters);
       this.applyModelSelection(current, selected);
       return;
     }
 
     const root = new TransformNode(`${entity.id}_modelRoot`, this.scene);
-    this.applyModelTransform(root, entity.components.transform, modelAsset.unitScaleToMeters);
+    const contentRoot = new TransformNode(`${entity.id}_modelContentRoot`, this.scene);
+    contentRoot.parent = root;
+    this.applyTransform(root, entity.components.transform);
+    this.applyModelUnitScale(contentRoot, modelAsset.unitScaleToMeters);
 
     const loadToken = ++this.modelLoadSequence;
     const pending: ModelRuntimeEntry = {
       sourceUrl: modelAsset.sourceUrl,
       root,
+      contentRoot,
       container: null,
       meshes: [],
       highlighted: false,
@@ -331,6 +337,7 @@ export class SceneRuntime {
   private disposeModel(entityId: string, model: ModelRuntimeEntry): void {
     this.applyModelSelection(model, false);
     model.container?.dispose();
+    model.contentRoot.dispose();
     model.root.dispose();
     this.models.delete(entityId);
   }
@@ -365,15 +372,9 @@ export class SceneRuntime {
     target.scaling = new Vector3(transform.scale.x, transform.scale.y, transform.scale.z);
   }
 
-  /** 将导入模型源单位换算到米，再叠加用户 Transform 缩放。 */
-  private applyModelTransform(target: TransformNode, transform: TransformComponent, unitScaleToMeters: number): void {
-    target.position = new Vector3(transform.position.x, transform.position.y, transform.position.z);
-    target.rotation = new Vector3(transform.rotation.x, transform.rotation.y, transform.rotation.z);
-    target.scaling = new Vector3(
-      transform.scale.x * unitScaleToMeters,
-      transform.scale.y * unitScaleToMeters,
-      transform.scale.z * unitScaleToMeters,
-    );
+  /** 将导入模型源单位换算到米，避免污染可被 Gizmo 写回的实体根 Transform。 */
+  private applyModelUnitScale(target: TransformNode, unitScaleToMeters: number): void {
+    target.scaling = new Vector3(unitScaleToMeters, unitScaleToMeters, unitScaleToMeters);
   }
 
   /** 根据选中状态给导入模型添加或移除 HighlightLayer 高亮，不破坏原始材质。 */
@@ -393,14 +394,14 @@ export class SceneRuntime {
     model.highlighted = selected;
   }
 
-  /** 仅把 glTF 顶层节点挂到编辑器根节点，保留模型内部层级、骨骼和动画关系。 */
+  /** 仅把 glTF 顶层节点挂到模型内容节点，保留模型内部层级、骨骼和动画关系。 */
   private parentTopLevelModelNodes(model: ModelRuntimeEntry): void {
     const transformNodes = model.container?.transformNodes ?? [];
     const allImportedNodes = new Set([...model.meshes, ...transformNodes]);
 
     for (const node of allImportedNodes) {
       if (!node.parent || !allImportedNodes.has(node.parent as AbstractMesh | TransformNode)) {
-        node.parent = model.root;
+        node.parent = model.contentRoot;
       }
     }
   }

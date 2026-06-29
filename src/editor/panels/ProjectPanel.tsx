@@ -1,20 +1,39 @@
 import { useEffect, useMemo, useState, type DragEvent } from 'react';
 import {
+  BUILT_IN_ASSET_DRAG_MIME_TYPE,
+  encodeBuiltInAssetDragPayload,
   encodeModelAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
   type AssetEntry,
+  type BuiltInAssetDragPayload,
 } from '../assets/AssetDatabase';
+import type { LightKind, MeshKind } from '../model/components';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/sceneUnits';
 import { useEditorStore } from '../store/editorStore';
 
 type ProjectLibraryKey = 'model' | 'poi' | 'theme' | 'composition' | 'environment' | 'chart' | 'image';
 
-type ProjectLibraryItem = {
+type BuiltInProjectLibraryItem = {
   id: string;
   name: string;
   icon: string;
-  asset?: AssetEntry;
+  builtIn: BuiltInAssetDragPayload;
 };
+
+type ImportedProjectLibraryItem = {
+  id: string;
+  name: string;
+  icon: string;
+  asset: AssetEntry;
+};
+
+type PlaceholderProjectLibraryItem = {
+  id: string;
+  name: string;
+  icon: string;
+};
+
+type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | PlaceholderProjectLibraryItem;
 
 type ProjectLibrary = {
   key: ProjectLibraryKey;
@@ -28,6 +47,15 @@ type ModelFolderStatus = {
   message: string;
   kind: 'info' | 'error';
 };
+
+const BUILT_IN_MODEL_LIBRARY_ITEMS: BuiltInProjectLibraryItem[] = [
+  { id: 'builtin-cube', name: '立方体', icon: 'cube', builtIn: { kind: 'mesh', meshKind: 'cube' } },
+  { id: 'builtin-sphere', name: '球体', icon: 'ring', builtIn: { kind: 'mesh', meshKind: 'sphere' } },
+  { id: 'builtin-plane', name: '地面', icon: 'panel', builtIn: { kind: 'mesh', meshKind: 'plane' } },
+  { id: 'builtin-hemispheric-light', name: '半球光', icon: 'marker', builtIn: { kind: 'light', lightKind: 'hemispheric' } },
+  { id: 'builtin-directional-light', name: '方向光', icon: 'marker', builtIn: { kind: 'light', lightKind: 'directional' } },
+  { id: 'builtin-point-light', name: '点光源', icon: 'marker', builtIn: { kind: 'light', lightKind: 'point' } },
+];
 
 const PROJECT_LIBRARIES: ProjectLibrary[] = [
   {
@@ -116,7 +144,7 @@ const PROJECT_LIBRARIES: ProjectLibrary[] = [
   },
 ];
 
-function createModelLibraryItems(modelAssets: AssetEntry[]): ProjectLibraryItem[] {
+function createModelLibraryItems(modelAssets: AssetEntry[]): ImportedProjectLibraryItem[] {
   return modelAssets.map((asset) => ({
     id: asset.id,
     name: asset.displayName?.trim() || asset.name.replace(/\.(gltf|glb)$/i, ''),
@@ -129,6 +157,14 @@ function ResourceIcon({ icon }: { icon: ProjectLibraryItem['icon'] }) {
   return <span className={`resource-card-icon resource-card-icon-${icon}`} aria-hidden="true" />;
 }
 
+function isBuiltInProjectLibraryItem(item: ProjectLibraryItem): item is BuiltInProjectLibraryItem {
+  return 'builtIn' in item;
+}
+
+function isImportedProjectLibraryItem(item: ProjectLibraryItem): item is ImportedProjectLibraryItem {
+  return 'asset' in item;
+}
+
 function getModelUnitTitle(asset: AssetEntry): string {
   const lengthUnit = asset.lengthUnit ?? DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit;
   return `源单位：${formatModelLengthUnit(lengthUnit)} → m`;
@@ -136,6 +172,8 @@ function getModelUnitTitle(asset: AssetEntry): string {
 
 export function ProjectPanel() {
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
+  const createMesh = useEditorStore((state) => state.createMesh);
+  const createLight = useEditorStore((state) => state.createLight);
   const pushLog = useEditorStore((state) => state.pushLog);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
   const [modelAssets, setModelAssets] = useState<AssetEntry[]>([]);
@@ -152,7 +190,9 @@ export function ProjectPanel() {
 
   const activeItems = useMemo(() => {
     if (activeLibrary.key === 'model') {
-      return hasImportedModelFolder ? createModelLibraryItems(modelAssets) : activeLibrary.items;
+      return hasImportedModelFolder
+        ? [...BUILT_IN_MODEL_LIBRARY_ITEMS, ...createModelLibraryItems(modelAssets)]
+        : BUILT_IN_MODEL_LIBRARY_ITEMS;
     }
 
     return activeLibrary.items;
@@ -237,19 +277,37 @@ export function ProjectPanel() {
   }
 
   function handleResourceCardClick(item: ProjectLibraryItem): void {
-    if (!item.asset) return;
-    importModelAsset(item.asset);
-  }
+    if (isBuiltInProjectLibraryItem(item)) {
+      if (item.builtIn.kind === 'mesh') {
+        createMesh(item.builtIn.meshKind as MeshKind);
+        return;
+      }
 
-  function handleResourceCardDragStart(event: DragEvent<HTMLButtonElement>, item: ProjectLibraryItem): void {
-    if (!item.asset) {
-      event.preventDefault();
+      createLight(item.builtIn.lightKind as LightKind);
       return;
     }
 
-    event.dataTransfer.effectAllowed = 'copy';
-    event.dataTransfer.setData(MODEL_ASSET_DRAG_MIME_TYPE, encodeModelAssetDragPayload(item.asset));
-    event.dataTransfer.setData('text/plain', item.name);
+    if (isImportedProjectLibraryItem(item)) {
+      importModelAsset(item.asset);
+    }
+  }
+
+  function handleResourceCardDragStart(event: DragEvent<HTMLButtonElement>, item: ProjectLibraryItem): void {
+    if (isBuiltInProjectLibraryItem(item)) {
+      event.dataTransfer.effectAllowed = 'copy';
+      event.dataTransfer.setData(BUILT_IN_ASSET_DRAG_MIME_TYPE, encodeBuiltInAssetDragPayload(item.builtIn));
+      event.dataTransfer.setData('text/plain', item.name);
+      return;
+    }
+
+    if (isImportedProjectLibraryItem(item)) {
+      event.dataTransfer.effectAllowed = 'copy';
+      event.dataTransfer.setData(MODEL_ASSET_DRAG_MIME_TYPE, encodeModelAssetDragPayload(item.asset));
+      event.dataTransfer.setData('text/plain', item.name);
+      return;
+    }
+
+    event.preventDefault();
   }
 
   const isModelImportButtonDisabled = isImportingModelFolder || isLoadingProjectAssets;
@@ -308,20 +366,24 @@ export function ProjectPanel() {
           <p className="library-empty-state">未发现可导入模型包</p>
         ) : null}
         {activeItems.map((item) => {
-          const isImportedModel = Boolean(item.asset);
+          const isBuiltInItem = isBuiltInProjectLibraryItem(item);
+          const isImportedModel = isImportedProjectLibraryItem(item);
+          const isActionableItem = isBuiltInItem || isImportedModel;
 
           return (
             <button
-              className={isImportedModel ? 'resource-card resource-card-clickable' : 'resource-card'}
-              disabled={!isImportedModel}
-              draggable={isImportedModel}
+              className={isActionableItem ? 'resource-card resource-card-clickable' : 'resource-card'}
+              disabled={!isActionableItem}
+              draggable={isActionableItem}
               key={item.id}
               onClick={() => handleResourceCardClick(item)}
               onDragStart={(event) => handleResourceCardDragStart(event, item)}
               title={
-                isImportedModel && item.asset
-                  ? `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`
-                  : '占位资源，功能后续接入'
+                isBuiltInItem
+                  ? `点击创建或拖拽到 Scene：${item.name}`
+                  : isImportedModel
+                    ? `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`
+                    : '占位资源，功能后续接入'
               }
               type="button"
             >

@@ -15,6 +15,11 @@ export type AssetEntry = {
 };
 
 export const MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-model-asset';
+export const BUILT_IN_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-built-in-asset';
+
+export type BuiltInAssetDragPayload =
+  | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
+  | { kind: 'light'; lightKind: 'hemispheric' | 'directional' | 'point' };
 
 type AssetEntryRecord = Record<string, unknown>;
 
@@ -47,6 +52,10 @@ function readOptionalFiniteNumber(record: AssetEntryRecord, key: keyof AssetEntr
 
 export function encodeModelAssetDragPayload(asset: AssetEntry): string {
   return JSON.stringify(asset);
+}
+
+export function encodeBuiltInAssetDragPayload(payload: BuiltInAssetDragPayload): string {
+  return JSON.stringify(payload);
 }
 
 export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | null {
@@ -82,6 +91,29 @@ export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | nu
     if (unitScaleToMeters !== undefined) asset.unitScaleToMeters = unitScaleToMeters;
 
     return asset;
+  } catch {
+    return null;
+  }
+}
+
+export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetDragPayload | null {
+  try {
+    const payload: unknown = JSON.parse(rawPayload);
+    if (!isRecord(payload)) return null;
+
+    if (payload.kind === 'mesh') {
+      const meshKind = payload.meshKind;
+      if (meshKind !== 'cube' && meshKind !== 'sphere' && meshKind !== 'plane') return null;
+      return { kind: 'mesh', meshKind };
+    }
+
+    if (payload.kind === 'light') {
+      const lightKind = payload.lightKind;
+      if (lightKind !== 'hemispheric' && lightKind !== 'directional' && lightKind !== 'point') return null;
+      return { kind: 'light', lightKind };
+    }
+
+    return null;
   } catch {
     return null;
   }

@@ -3,6 +3,8 @@ import { createBabylonViewport, type BabylonViewport } from '../../runtime/babyl
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import { TransformGizmoController } from '../../runtime/babylon/TransformGizmoController';
 import {
+  BUILT_IN_ASSET_DRAG_MIME_TYPE,
+  decodeBuiltInAssetDragPayload,
   decodeModelAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
@@ -27,7 +29,11 @@ export function SceneViewPanel() {
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
+  const gridSettings = useEditorStore((state) => state.gridSettings);
+  const cameraSettings = useEditorStore((state) => state.cameraSettings);
   const selectEntity = useEditorStore((state) => state.selectEntity);
+  const createMesh = useEditorStore((state) => state.createMesh);
+  const createLight = useEditorStore((state) => state.createLight);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
@@ -70,29 +76,47 @@ export function SceneViewPanel() {
     clickSnapshotRef.current = null;
   }
 
-  /** 仅当拖拽数据是模型资产时允许浏览器在 Scene 画布触发 drop。 */
+  /** 仅当拖拽数据是模型资产或内置资源时允许浏览器在 Scene 画布触发 drop。 */
   function handleCanvasDragOver(event: DragEvent<HTMLCanvasElement>): void {
-    if (!event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE)) return;
+    const hasSupportedPayload =
+      event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE) ||
+      event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE);
+    if (!hasSupportedPayload) return;
 
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
   }
 
-  /** 在鼠标释放位置把模型资产投射到地面平面并创建场景实体。 */
+  /** 在鼠标释放位置把模型资产或内置资源投射到地面平面并创建场景实体。 */
   function handleCanvasDrop(event: DragEvent<HTMLCanvasElement>): void {
-    const rawPayload = event.dataTransfer.getData(MODEL_ASSET_DRAG_MIME_TYPE);
-    const asset = decodeModelAssetDragPayload(rawPayload);
-    if (!asset) return;
-
-    event.preventDefault();
-    clickSnapshotRef.current = null;
-
     const placementPosition = runtimeRef.current?.getGroundPointAtCanvasPoint(
       event.clientX,
       event.clientY,
       event.currentTarget,
     ) ?? { x: 0, y: 0, z: 0 };
-    importModelAsset(asset, placementPosition);
+
+    const rawModelPayload = event.dataTransfer.getData(MODEL_ASSET_DRAG_MIME_TYPE);
+    const modelAsset = decodeModelAssetDragPayload(rawModelPayload);
+    if (modelAsset) {
+      event.preventDefault();
+      clickSnapshotRef.current = null;
+      importModelAsset(modelAsset, placementPosition);
+      return;
+    }
+
+    const rawBuiltInPayload = event.dataTransfer.getData(BUILT_IN_ASSET_DRAG_MIME_TYPE);
+    const builtInAsset = decodeBuiltInAssetDragPayload(rawBuiltInPayload);
+    if (!builtInAsset) return;
+
+    event.preventDefault();
+    clickSnapshotRef.current = null;
+
+    if (builtInAsset.kind === 'mesh') {
+      createMesh(builtInAsset.meshKind, placementPosition);
+      return;
+    }
+
+    createLight(builtInAsset.lightKind, placementPosition);
   }
 
   useEffect(() => {
@@ -116,7 +140,7 @@ export function SceneViewPanel() {
       window.removeEventListener('resize', resize);
       gizmo.dispose();
       runtime.dispose();
-      viewport.engine.dispose();
+      viewport.dispose();
       viewportRef.current = null;
       runtimeRef.current = null;
       gizmoRef.current = null;
@@ -144,6 +168,14 @@ export function SceneViewPanel() {
   useEffect(() => {
     gizmoRef.current?.setSnapSettings(snapSettings);
   }, [snapSettings]);
+
+  useEffect(() => {
+    viewportRef.current?.setGridSettings(gridSettings);
+  }, [gridSettings]);
+
+  useEffect(() => {
+    viewportRef.current?.setCameraSettings(cameraSettings);
+  }, [cameraSettings]);
 
   return (
     <section className="scene-panel">

@@ -1,7 +1,0 @@
-{
-  "tool_name": "Agent",
-  "tool_input_preview": "{\"description\":\"审查响应式布局改动\",\"prompt\":\"请审查当前工作区中响应式布局相关改动，重点文件：\\n- src/editor/layout/EditorLayout.module.css\\n- src/styles/global.css\\n- README.md\\n- docs/superpowers/specs/2026-06-29-layout-responsive-...",
-  "error": "Failed to resolve base branch \"HEAD\": git rev-parse failed",
-  "timestamp": "2026-06-29T08:55:34.852Z",
-  "retry_count": 1
-}

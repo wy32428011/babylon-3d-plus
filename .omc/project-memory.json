@@ -140,68 +140,86 @@
   "hotPaths": [
     {
       "path": "",
-      "accessCount": 180,
-      "lastAccessed": 1782722030094,
+      "accessCount": 217,
+      "lastAccessed": 1782748942382,
       "type": "directory"
     },
     {
       "path": "README.md",
-      "accessCount": 93,
-      "lastAccessed": 1782721998912,
+      "accessCount": 127,
+      "lastAccessed": 1782748866569,
       "type": "file"
     },
     {
       "path": "src\\editor\\panels\\ProjectPanel.tsx",
-      "accessCount": 42,
-      "lastAccessed": 1782710013242,
-      "type": "file"
-    },
-    {
-      "path": "src\\runtime\\babylon\\SceneRuntime.ts",
-      "accessCount": 31,
-      "lastAccessed": 1782723851379,
-      "type": "file"
-    },
-    {
-      "path": "src\\runtime\\babylon\\createEngine.ts",
-      "accessCount": 28,
-      "lastAccessed": 1782701734859,
-      "type": "file"
-    },
-    {
-      "path": "src\\editor\\project\\SceneSerializer.ts",
-      "accessCount": 25,
-      "lastAccessed": 1782696012556,
-      "type": "file"
-    },
-    {
-      "path": "src\\editor\\store\\editorStore.ts",
-      "accessCount": 23,
-      "lastAccessed": 1782723850833,
+      "accessCount": 57,
+      "lastAccessed": 1782741442565,
       "type": "file"
     },
     {
       "path": "src\\editor\\ui\\Toolbar.tsx",
-      "accessCount": 22,
-      "lastAccessed": 1782665753958,
+      "accessCount": 49,
+      "lastAccessed": 1782748726577,
+      "type": "file"
+    },
+    {
+      "path": "src\\runtime\\babylon\\createEngine.ts",
+      "accessCount": 48,
+      "lastAccessed": 1782748554693,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\store\\editorStore.ts",
+      "accessCount": 41,
+      "lastAccessed": 1782748640589,
+      "type": "file"
+    },
+    {
+      "path": "src\\runtime\\babylon\\SceneRuntime.ts",
+      "accessCount": 37,
+      "lastAccessed": 1782724280663,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\panels\\SceneViewPanel.tsx",
+      "accessCount": 31,
+      "lastAccessed": 1782748799706,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\layout\\EditorLayout.tsx",
+      "accessCount": 29,
+      "lastAccessed": 1782748771840,
+      "type": "file"
+    },
+    {
+      "path": "src\\styles\\global.css",
+      "accessCount": 28,
+      "lastAccessed": 1782748076644,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\project\\SceneSerializer.ts",
+      "accessCount": 26,
+      "lastAccessed": 1782744327424,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\model\\SceneDocument.ts",
+      "accessCount": 25,
+      "lastAccessed": 1782744295843,
+      "type": "file"
+    },
+    {
+      "path": "src\\editor\\assets\\AssetDatabase.ts",
+      "accessCount": 23,
+      "lastAccessed": 1782741416922,
       "type": "file"
     },
     {
       "path": "src\\editor\\panels\\InspectorPanel.tsx",
       "accessCount": 21,
       "lastAccessed": 1782695133457,
-      "type": "file"
-    },
-    {
-      "path": "src\\styles\\global.css",
-      "accessCount": 21,
-      "lastAccessed": 1782721903844,
-      "type": "file"
-    },
-    {
-      "path": "src\\editor\\model\\SceneDocument.ts",
-      "accessCount": 20,
-      "lastAccessed": 1782708546419,
       "type": "file"
     },
     {
@@ -229,15 +247,9 @@
       "type": "file"
     },
     {
-      "path": "src\\editor\\assets\\AssetDatabase.ts",
+      "path": "package.json",
       "accessCount": 16,
-      "lastAccessed": 1782723851995,
-      "type": "file"
-    },
-    {
-      "path": "src\\editor\\panels\\SceneViewPanel.tsx",
-      "accessCount": 15,
-      "lastAccessed": 1782710012634,
+      "lastAccessed": 1782745650542,
       "type": "file"
     },
     {
@@ -250,12 +262,6 @@
       "path": "src\\editor\\model\\components.ts",
       "accessCount": 14,
       "lastAccessed": 1782701663909,
-      "type": "file"
-    },
-    {
-      "path": "package.json",
-      "accessCount": 14,
-      "lastAccessed": 1782709987776,
       "type": "file"
     },
     {
@@ -275,12 +281,6 @@
       "accessCount": 12,
       "lastAccessed": 1782663886905,
       "type": "directory"
-    },
-    {
-      "path": "src\\editor\\layout\\EditorLayout.tsx",
-      "accessCount": 12,
-      "lastAccessed": 1782710014226,
-      "type": "file"
     },
     {
       "path": "electron",
@@ -332,8 +332,8 @@
     },
     {
       "path": "src\\editor\\panels\\HierarchyPanel.tsx",
-      "accessCount": 4,
-      "lastAccessed": 1782549042199,
+      "accessCount": 5,
+      "lastAccessed": 1782731112557,
       "type": "file"
     },
     {

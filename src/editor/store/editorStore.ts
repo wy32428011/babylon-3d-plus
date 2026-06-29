@@ -14,6 +14,16 @@ import {
   updateMeshRendererCommand,
   updateTransformCommand,
 } from '../commands/entityCommands';
+import {
+  DEFAULT_EDITOR_CAMERA_SETTINGS,
+  DEFAULT_EDITOR_GRID_SETTINGS,
+  EDITOR_CAMERA_VIEW_RANGES,
+  EDITOR_GRID_CELL_SIZES,
+  type EditorCameraSettings,
+  type EditorCameraViewRangeKey,
+  type EditorGridCellSize,
+  type EditorGridSettings,
+} from '../../runtime/babylon/createEngine';
 import type { AssetEntry } from '../assets/AssetDatabase';
 import type { LightComponent, LightKind, MeshKind, MeshRendererComponent, TransformComponent } from '../model/components';
 import {
@@ -58,12 +68,17 @@ type EditorState = {
   transformTool: TransformTool;
   transformSpace: TransformSpace;
   snapSettings: TransformSnapSettings;
+  gridSettings: EditorGridSettings;
+  cameraSettings: EditorCameraSettings;
   setTransformTool: (tool: TransformTool) => void;
   setTransformSpace: (space: TransformSpace) => void;
   setSnapEnabled: (enabled: boolean) => void;
   updateSnapSetting: (key: TransformSnapSettingKey, value: number) => void;
-  createMesh: (meshKind: MeshKind) => void;
-  createLight: (lightKind: LightKind) => void;
+  setGridVisible: (visible: boolean) => void;
+  setGridCellSize: (cellSizeMeters: EditorGridCellSize) => void;
+  setCameraViewRange: (viewRangeKey: EditorCameraViewRangeKey) => void;
+  createMesh: (meshKind: MeshKind, placementPosition?: Vector3Data) => void;
+  createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
   loadSceneAsset: (asset: AssetEntry) => Promise<void>;
   selectEntity: (entityId: string | null) => void;
@@ -159,6 +174,16 @@ function isColorLike(value: string): boolean {
   return /^#[0-9a-fA-F]{6}$/.test(value);
 }
 
+function sanitizeGridCellSize(value: EditorGridCellSize): EditorGridCellSize {
+  return EDITOR_GRID_CELL_SIZES.includes(value) ? value : DEFAULT_EDITOR_GRID_SETTINGS.cellSizeMeters;
+}
+
+function sanitizeCameraViewRangeKey(value: EditorCameraViewRangeKey): EditorCameraViewRangeKey {
+  return EDITOR_CAMERA_VIEW_RANGES.some((range) => range.key === value)
+    ? value
+    : DEFAULT_EDITOR_CAMERA_SETTINGS.viewRangeKey;
+}
+
 function getSelectedEntity(state: EditorState) {
   const selectedId = state.scene.selectedEntityId;
   if (!selectedId) return null;
@@ -172,6 +197,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   transformTool: 'translate',
   transformSpace: 'local',
   snapSettings: DEFAULT_SNAP_SETTINGS,
+  gridSettings: DEFAULT_EDITOR_GRID_SETTINGS,
+  cameraSettings: DEFAULT_EDITOR_CAMERA_SETTINGS,
   setTransformTool: (tool) => {
     set((state) => {
       if (state.transformTool === tool) return state;
@@ -218,8 +245,49 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  createMesh: (meshKind) => {
-    const entity = createMeshEntity(meshKind);
+  setGridVisible: (visible) => {
+    set((state) => {
+      if (state.gridSettings.visible === visible) return state;
+
+      return {
+        gridSettings: {
+          ...state.gridSettings,
+          visible,
+        },
+        logs: prependLog(state.logs, visible ? '显示地面网格。' : '隐藏地面网格。'),
+      };
+    });
+  },
+  setGridCellSize: (cellSizeMeters) => {
+    set((state) => {
+      const nextCellSizeMeters = sanitizeGridCellSize(cellSizeMeters);
+      if (state.gridSettings.cellSizeMeters === nextCellSizeMeters) return state;
+
+      return {
+        gridSettings: {
+          ...state.gridSettings,
+          cellSizeMeters: nextCellSizeMeters,
+        },
+        logs: prependLog(state.logs, `网格格子大小：${nextCellSizeMeters} m。`),
+      };
+    });
+  },
+  setCameraViewRange: (viewRangeKey) => {
+    set((state) => {
+      const nextViewRangeKey = sanitizeCameraViewRangeKey(viewRangeKey);
+      if (state.cameraSettings.viewRangeKey === nextViewRangeKey) return state;
+
+      const label = EDITOR_CAMERA_VIEW_RANGES.find((range) => range.key === nextViewRangeKey)?.label ?? '标准';
+      return {
+        cameraSettings: {
+          viewRangeKey: nextViewRangeKey,
+        },
+        logs: prependLog(state.logs, `Scene View 可视范围：${label}。`),
+      };
+    });
+  },
+  createMesh: (meshKind, placementPosition) => {
+    const entity = createMeshEntity(meshKind, sanitizeVector3(placementPosition));
     const command = createEntityCommand(entity);
 
     set((state) => {
@@ -230,8 +298,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  createLight: (lightKind) => {
-    const entity = createLightEntity(lightKind);
+  createLight: (lightKind, placementPosition) => {
+    const entity = createLightEntity(lightKind, placementPosition ? sanitizeVector3(placementPosition) : undefined);
     const command = createEntityCommand(entity);
 
     set((state) => {
