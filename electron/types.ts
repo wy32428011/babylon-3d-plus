@@ -42,6 +42,7 @@ export type AssetEntry = {
   displayName?: string;
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
+  parameterConfig?: unknown;
 };
 
 export type ImportModelFolderSkippedEntry = {

@@ -1,6 +1,7 @@
 import type { Command } from './Command';
 import type { LightComponent, MeshRendererComponent, TransformComponent } from '../model/components';
 import type { Entity } from '../model/Entity';
+import type { ModelParameterValues } from '../model/modelParameters';
 import type { SceneDocument } from '../model/SceneDocument';
 
 export function createEntityCommand(entity: Entity): Command {
@@ -113,6 +114,18 @@ export function updateLightCommand(entityId: string, before: LightComponent, aft
   };
 }
 
+export function updateModelParameterValuesCommand(
+  entityId: string,
+  before: ModelParameterValues,
+  after: ModelParameterValues,
+): Command {
+  return {
+    label: '更新模型参数',
+    execute: (scene) => updateModelParameterValues(scene, entityId, after),
+    undo: (scene) => updateModelParameterValues(scene, entityId, before),
+  };
+}
+
 function updateEntityName(scene: SceneDocument, entityId: string, name: string): SceneDocument {
   const entity = scene.entities[entityId];
   if (!entity) return scene;
@@ -180,6 +193,33 @@ function updateLight(scene: SceneDocument, entityId: string, light: LightCompone
         components: {
           ...entity.components,
           light,
+        },
+      },
+    },
+  };
+}
+
+function updateModelParameterValues(
+  scene: SceneDocument,
+  entityId: string,
+  parameterValues: ModelParameterValues,
+): SceneDocument {
+  const entity = scene.entities[entityId];
+  const modelAsset = entity?.components.modelAsset;
+  if (!entity || !modelAsset) return scene;
+
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [entityId]: {
+        ...entity,
+        components: {
+          ...entity.components,
+          modelAsset: {
+            ...modelAsset,
+            parameterValues,
+          },
         },
       },
     },

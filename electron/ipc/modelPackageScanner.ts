@@ -8,6 +8,7 @@ const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
 
 type ModelPackageMetadata = ModelLengthUnitInfo & {
   displayName?: string;
+  parameterConfig?: unknown;
 };
 
 type ModelPackageScanResult = {
@@ -304,6 +305,18 @@ function extractDisplayNameFromMetadata(metadata: unknown): string | undefined {
   return undefined;
 }
 
+function extractModelParameterConfigFromMetadata(metadata: unknown): unknown | undefined {
+  if (!isPlainObject(metadata) || !isPlainObject(metadata.modelParameters)) return undefined;
+
+  const config = metadata.modelParameters;
+  if (config.schema !== 'babylon-editor.model-parameters' || config.version !== 1) return undefined;
+  if (!Array.isArray(config.parameters) || !Array.isArray(config.bindings)) return undefined;
+  if (config.parameters.length > 64 || config.bindings.length > 256) return undefined;
+  if (Array.isArray(config.rules) && config.rules.length > 128) return undefined;
+
+  return config;
+}
+
 async function readModelPackageMetadata(
   packagePath: string,
   modelFilePath: string,
@@ -325,6 +338,7 @@ async function readModelPackageMetadata(
     return {
       metadataPath,
       displayName: extractDisplayNameFromMetadata(parsed),
+      parameterConfig: extractModelParameterConfigFromMetadata(parsed),
       ...unitInfo,
     };
   } catch (error) {
@@ -375,6 +389,7 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
       displayName: metadata.displayName ?? packageName ?? path.parse(modelFileName).name,
       lengthUnit: metadata.lengthUnit,
       unitScaleToMeters: metadata.unitScaleToMeters,
+      parameterConfig: metadata.parameterConfig,
     },
   };
 }

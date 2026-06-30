@@ -1,4 +1,5 @@
 import type { Vector3Data } from './math';
+import type { ModelParameterConfig, ModelParameterValues } from './modelParameters';
 import type { ModelSourceLengthUnit } from './sceneUnits';
 
 export type TransformComponent = {
@@ -19,6 +20,8 @@ export type ModelAssetComponent = {
   sourceUrl: string;
   lengthUnit: ModelSourceLengthUnit;
   unitScaleToMeters: number;
+  parameterConfig?: ModelParameterConfig;
+  parameterValues?: ModelParameterValues;
 };
 
 export type CameraComponent = {

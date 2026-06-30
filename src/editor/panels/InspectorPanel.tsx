@@ -3,6 +3,7 @@ import type { LightKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import { useEditorStore } from '../store/editorStore';
+import { ModelParametersInspector } from './ModelParametersInspector';
 
 type TransformField = 'position' | 'rotation' | 'scale';
 
@@ -137,12 +138,15 @@ export function InspectorPanel() {
         </fieldset>
       ) : null}
       {modelAsset ? (
-        <fieldset className="transform-fieldset">
-          <legend>Model Asset</legend>
-          <p className="muted asset-path" title={modelAsset.sourcePath}>{modelAsset.sourcePath}</p>
-          <p className="muted">源单位：{formatModelLengthUnit(modelAsset.lengthUnit)}</p>
-          <p className="muted">换算到米：×{modelAsset.unitScaleToMeters}</p>
-        </fieldset>
+        <>
+          <fieldset className="transform-fieldset">
+            <legend>Model Asset</legend>
+            <p className="muted asset-path" title={modelAsset.sourcePath}>{modelAsset.sourcePath}</p>
+            <p className="muted">源单位：{formatModelLengthUnit(modelAsset.lengthUnit)}</p>
+            <p className="muted">换算到米：×{modelAsset.unitScaleToMeters}</p>
+          </fieldset>
+          <ModelParametersInspector modelAsset={modelAsset} />
+        </>
       ) : null}
     </section>
   );

@@ -115,6 +115,7 @@ function normalizeIndexedAsset(value: unknown): AssetEntry | null {
     displayName: typeof asset.displayName === 'string' ? asset.displayName : undefined,
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
+    parameterConfig: isPlainObject(asset.parameterConfig) ? asset.parameterConfig : undefined,
   };
 }
 

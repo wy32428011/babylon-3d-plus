@@ -2,6 +2,7 @@ import type { Entity } from '../model/Entity';
 import type { SceneDocument } from '../model/SceneDocument';
 import type { EntityComponents, LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
+import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
 import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit } from '../model/sceneUnits';
 
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
@@ -198,11 +199,19 @@ function normalizeModelAsset(value: unknown): EntityComponents['modelAsset'] {
     throwUnsupportedSceneFileError();
   }
 
+  const parameterConfig = normalizeModelParameterConfig(modelAsset.parameterConfig);
+  const parameterValues = parameterConfig
+    ? 'parameterValues' in modelAsset
+      ? sanitizeModelParameterValues(parameterConfig, modelAsset.parameterValues)
+      : createDefaultModelParameterValues(parameterConfig)
+    : undefined;
+
   return {
     sourcePath,
     sourceUrl,
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
+    ...(parameterConfig ? { parameterConfig, parameterValues } : {}),
   };
 }
 

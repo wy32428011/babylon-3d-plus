@@ -1,3 +1,6 @@
+import type { ModelParameterConfig } from '../model/modelParameters';
+import { normalizeModelParameterConfig } from '../model/modelParameters';
+
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
 
 export type AssetEntry = {
@@ -12,6 +15,7 @@ export type AssetEntry = {
   displayName?: string;
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
+  parameterConfig?: ModelParameterConfig;
 };
 
 export const MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-model-asset';
@@ -82,6 +86,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | nu
     const displayName = readOptionalString(payload, 'displayName');
     const lengthUnit = readOptionalLengthUnit(payload);
     const unitScaleToMeters = readOptionalFiniteNumber(payload, 'unitScaleToMeters');
+    const parameterConfig = normalizeModelParameterConfig(payload.parameterConfig);
 
     if (packagePath) asset.packagePath = packagePath;
     if (metadataPath) asset.metadataPath = metadataPath;
@@ -89,6 +94,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | nu
     if (displayName) asset.displayName = displayName;
     if (lengthUnit) asset.lengthUnit = lengthUnit;
     if (unitScaleToMeters !== undefined) asset.unitScaleToMeters = unitScaleToMeters;
+    if (parameterConfig) asset.parameterConfig = parameterConfig;
 
     return asset;
   } catch {

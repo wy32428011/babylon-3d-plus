@@ -12,6 +12,7 @@ import {
   renameEntityCommand,
   updateLightCommand,
   updateMeshRendererCommand,
+  updateModelParameterValuesCommand,
   updateTransformCommand,
 } from '../commands/entityCommands';
 import {
@@ -34,6 +35,16 @@ import {
   type SceneDocument,
 } from '../model/SceneDocument';
 import type { Vector3Data } from '../model/math';
+import {
+  areModelParameterValuesEqual,
+  cloneModelParameterValues,
+  findModelParameterDefinition,
+  normalizeModelParameterConfig,
+  sanitizeModelParameterValue,
+  sanitizeModelParameterValues,
+  type ModelParameterValue,
+  type ModelParameterValues,
+} from '../model/modelParameters';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, type ModelLengthUnitInfo } from '../model/sceneUnits';
 import { deserializeScene, serializeScene } from '../project/SceneSerializer';
 
@@ -87,6 +98,9 @@ type EditorState = {
   updateSelectedTransform: (field: TransformField, axis: keyof Vector3Data, value: number) => void;
   updateSelectedMaterialColor: (materialColor: string) => void;
   updateSelectedLight: (patch: Partial<LightComponent>) => void;
+  updateSelectedModelParameterValue: (key: string, value: ModelParameterValue) => void;
+  previewSelectedModelParameterValue: (key: string, value: ModelParameterValue) => void;
+  commitSelectedModelParameterValues: (before: ModelParameterValues, after: ModelParameterValues) => void;
   previewEntityTransform: (entityId: string, transform: TransformComponent) => void;
   commitEntityTransform: (entityId: string, before: TransformComponent, after: TransformComponent) => void;
   previewSelectedTransform: (transform: TransformComponent) => void;
@@ -130,6 +144,36 @@ function cloneLight(light: LightComponent): LightComponent {
     lightKind: light.lightKind,
     intensity: light.intensity,
   };
+}
+
+function getSelectedModelParameterValues(state: EditorState): ModelParameterValues | null {
+  const modelAsset = getSelectedEntity(state)?.components.modelAsset;
+  if (!modelAsset?.parameterConfig) return null;
+
+  return cloneModelParameterValues(modelAsset.parameterValues ?? {});
+}
+
+function patchModelParameterValue(
+  values: ModelParameterValues,
+  key: string,
+  value: ModelParameterValue,
+): ModelParameterValues {
+  return {
+    ...cloneModelParameterValues(values),
+    [key]: value,
+  };
+}
+
+function sanitizeSelectedModelParameterValue(
+  state: EditorState,
+  key: string,
+  value: ModelParameterValue,
+): ModelParameterValue | null {
+  const modelAsset = getSelectedEntity(state)?.components.modelAsset;
+  const definition = findModelParameterDefinition(modelAsset?.parameterConfig, key);
+  if (!definition) return null;
+
+  return sanitizeModelParameterValue(definition, value);
 }
 
 function isFiniteVector3(vector: Vector3Data): boolean {
@@ -324,6 +368,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       displayName,
       unitInfo,
       sanitizeVector3(placementPosition),
+      normalizeModelParameterConfig(asset.parameterConfig) ?? undefined,
     );
     const command = createEntityCommand(entity);
 
@@ -450,6 +495,86 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (before.lightKind === after.lightKind && before.intensity === after.intensity) return state;
 
       const command = updateLightCommand(entity.id, before, after);
+      const result = executeCommand(state.scene, state.history, command);
+
+      return {
+        ...result,
+        logs: prependLog(state.logs, `${command.label}: ${entity.name}`),
+      };
+    });
+  },
+  updateSelectedModelParameterValue: (key, value) => {
+    set((state) => {
+      const entity = getSelectedEntity(state);
+      const modelAsset = entity?.components.modelAsset;
+      if (!entity || !modelAsset?.parameterConfig) return state;
+
+      const sanitizedValue = sanitizeSelectedModelParameterValue(state, key, value);
+      if (sanitizedValue === null) return state;
+
+      const before = getSelectedModelParameterValues(state);
+      if (!before) return state;
+
+      const after = patchModelParameterValue(before, key, sanitizedValue);
+      if (areModelParameterValuesEqual(before, after)) return state;
+
+      const command = updateModelParameterValuesCommand(entity.id, before, after);
+      const result = executeCommand(state.scene, state.history, command);
+
+      return {
+        ...result,
+        logs: prependLog(state.logs, `${command.label}: ${entity.name}`),
+      };
+    });
+  },
+  previewSelectedModelParameterValue: (key, value) => {
+    set((state) => {
+      const entity = getSelectedEntity(state);
+      const modelAsset = entity?.components.modelAsset;
+      if (!entity || !modelAsset?.parameterConfig) return state;
+
+      const sanitizedValue = sanitizeSelectedModelParameterValue(state, key, value);
+      if (sanitizedValue === null) return state;
+
+      const before = getSelectedModelParameterValues(state);
+      if (!before) return state;
+
+      const after = patchModelParameterValue(before, key, sanitizedValue);
+      if (areModelParameterValuesEqual(before, after)) return state;
+
+      return {
+        scene: {
+          ...state.scene,
+          entities: {
+            ...state.scene.entities,
+            [entity.id]: {
+              ...entity,
+              components: {
+                ...entity.components,
+                modelAsset: {
+                  ...modelAsset,
+                  parameterValues: after,
+                },
+              },
+            },
+          },
+        },
+      };
+    });
+  },
+  commitSelectedModelParameterValues: (before, after) => {
+    if (areModelParameterValuesEqual(before, after)) return;
+
+    set((state) => {
+      const entity = getSelectedEntity(state);
+      const modelAsset = entity?.components.modelAsset;
+      if (!entity || !modelAsset?.parameterConfig) return state;
+
+      const sanitizedBefore = sanitizeModelParameterValues(modelAsset.parameterConfig, before);
+      const sanitizedAfter = sanitizeModelParameterValues(modelAsset.parameterConfig, after);
+      if (areModelParameterValuesEqual(sanitizedBefore, sanitizedAfter)) return state;
+
+      const command = updateModelParameterValuesCommand(entity.id, sanitizedBefore, sanitizedAfter);
       const result = executeCommand(state.scene, state.history, command);
 
       return {

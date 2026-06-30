@@ -31,7 +31,7 @@
 **Files:**
 - Modify: `src/editor/ui/Toolbar.tsx:19-138`
 
-- [ ] **Step 1: 删除 ToolbarProps 中五个 props**
+- [x] **Step 1: 删除 ToolbarProps 中五个 props**
 
 删除：
 
@@ -49,7 +49,7 @@ onCreatePointLight: () => void;
 onCreateHemisphericLight: () => void;
 ```
 
-- [ ] **Step 2: 删除 JSX 中五个按钮**
+- [x] **Step 2: 删除 JSX 中五个按钮**
 
 删除：
 
@@ -72,7 +72,7 @@ onCreateHemisphericLight: () => void;
 **Files:**
 - Modify: `src/editor/layout/EditorLayout.tsx:26-93`
 
-- [ ] **Step 1: 删除 createMesh selector**
+- [x] **Step 1: 删除 createMesh selector**
 
 删除：
 
@@ -86,7 +86,7 @@ const createMesh = useEditorStore((state) => state.createMesh);
 const createLight = useEditorStore((state) => state.createLight);
 ```
 
-- [ ] **Step 2: 删除 Toolbar 五个 props**
+- [x] **Step 2: 删除 Toolbar 五个 props**
 
 删除：
 
@@ -109,7 +109,7 @@ onCreateHemisphericLight={() => createLight('hemispheric')}
 **Files:**
 - Modify: `README.md:64-120`
 
-- [ ] **Step 1: 更新基础操作创建说明**
+- [x] **Step 1: 更新基础操作创建说明**
 
 删除：
 
@@ -125,7 +125,7 @@ onCreateHemisphericLight={() => createLight('hemispheric')}
 - 创建基础对象与常用灯光：在模型库中点击或拖拽 `立方体`、`球体`、`地面`、`方向光`、`点光源` 内置资源卡片。
 ```
 
-- [ ] **Step 2: 更新最近完成**
+- [x] **Step 2: 更新最近完成**
 
 在 `## 最近完成` 顶部插入：
 
@@ -133,7 +133,7 @@ onCreateHemisphericLight={() => createLight('hemispheric')}
 - 2026-06-29：移除 Toolbar 中已迁移到模型库的立方体、球体、地面、方向光、点光源创建按钮，保留半球光创建入口。
 ```
 
-- [ ] **Step 3: 运行类型检查**
+- [x] **Step 3: 运行类型检查**
 
 Run:
 
@@ -143,7 +143,7 @@ npm run typecheck
 
 Expected: `tsc -b` 通过，退出码为 0。
 
-- [ ] **Step 4: 运行 diff 检查**
+- [x] **Step 4: 运行 diff 检查**
 
 Run:
 
@@ -153,7 +153,7 @@ git diff --check -- src/editor/ui/Toolbar.tsx src/editor/layout/EditorLayout.tsx
 
 Expected: 不出现 whitespace error；Windows 行尾提示不视为失败。
 
-- [ ] **Step 5: 浏览器验证**
+- [x] **Step 5: 浏览器验证**
 
 启动 Vite 并检查：
 

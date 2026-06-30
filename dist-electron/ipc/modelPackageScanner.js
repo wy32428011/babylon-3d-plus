@@ -244,6 +244,20 @@ function extractDisplayNameFromMetadata(metadata) {
     }
     return undefined;
 }
+function extractModelParameterConfigFromMetadata(metadata) {
+    if (!isPlainObject(metadata) || !isPlainObject(metadata.modelParameters))
+        return undefined;
+    const config = metadata.modelParameters;
+    if (config.schema !== 'babylon-editor.model-parameters' || config.version !== 1)
+        return undefined;
+    if (!Array.isArray(config.parameters) || !Array.isArray(config.bindings))
+        return undefined;
+    if (config.parameters.length > 64 || config.bindings.length > 256)
+        return undefined;
+    if (Array.isArray(config.rules) && config.rules.length > 128)
+        return undefined;
+    return config;
+}
 async function readModelPackageMetadata(packagePath, modelFilePath) {
     const metadataPath = path.join(packagePath, 'meta.json');
     try {
@@ -259,6 +273,7 @@ async function readModelPackageMetadata(packagePath, modelFilePath) {
         return {
             metadataPath,
             displayName: extractDisplayNameFromMetadata(parsed),
+            parameterConfig: extractModelParameterConfigFromMetadata(parsed),
             ...unitInfo,
         };
     }
@@ -304,6 +319,7 @@ export async function scanModelPackage(packagePath) {
             displayName: metadata.displayName ?? packageName ?? path.parse(modelFileName).name,
             lengthUnit: metadata.lengthUnit,
             unitScaleToMeters: metadata.unitScaleToMeters,
+            parameterConfig: metadata.parameterConfig,
         },
     };
 }

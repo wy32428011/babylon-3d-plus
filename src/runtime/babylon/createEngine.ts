@@ -70,6 +70,13 @@ const GRID_LINE_GLOW_ALPHA_PULSE = 0.035;
 const GRID_LINE_GLOW_INTENSITY_BASE = 0.08;
 const GRID_LINE_GLOW_INTENSITY_PULSE = 0.12;
 const BREATHING_SPEED = 0.0018;
+const EDITOR_CAMERA_MIN_RADIUS_METERS = 0.35;
+const EDITOR_CAMERA_MIN_Z_METERS = 0.02;
+
+/** 限制编辑器相机距离，避免滚轮缩放过近时穿过模型或被近裁剪面裁空。 */
+function clampCameraRadius(radiusMeters: number): number {
+  return Math.max(radiusMeters, EDITOR_CAMERA_MIN_RADIUS_METERS);
+}
 
 /** 按当前米制网格间距吸附位置，保证网格跟随相机时仍然对齐世界坐标。 */
 function snapToGrid(value: number, cellSizeMeters: EditorGridCellSize): number {
@@ -83,11 +90,12 @@ function getGridSubdivisions(cellSizeMeters: EditorGridCellSize): number {
 
 /** 根据视野档位返回编辑器相机距离，非法档位回退到标准视野。 */
 function getCameraViewRangeRadius(settings: EditorCameraSettings): number {
-  return (
+  const radiusMeters =
     EDITOR_CAMERA_VIEW_RANGES.find((range) => range.key === settings.viewRangeKey)?.radiusMeters ??
     EDITOR_CAMERA_VIEW_RANGES.find((range) => range.key === DEFAULT_EDITOR_CAMERA_SETTINGS.viewRangeKey)?.radiusMeters ??
-    18
-  );
+    18;
+
+  return clampCameraRadius(radiusMeters);
 }
 
 /** 创建一组编辑器辅助地面网格资源；网格不进入 SceneDocument，也不可被拾取选中。 */
@@ -234,6 +242,8 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewpor
   );
   camera.attachControl(canvas, true);
   camera.wheelPrecision = 40;
+  camera.minZ = EDITOR_CAMERA_MIN_Z_METERS;
+  camera.lowerRadiusLimit = EDITOR_CAMERA_MIN_RADIUS_METERS;
 
   const light = new HemisphericLight('EditorLight', new Vector3(0, 1, 0), scene);
   light.intensity = 0.8;

@@ -30,7 +30,7 @@
 **Files:**
 - Modify: `src/editor/ui/Toolbar.tsx:8-130`
 
-- [ ] **Step 1: 新增图标映射常量**
+- [x] **Step 1: 新增图标映射常量**
 
 在 label 常量下方加入：
 
@@ -50,7 +50,7 @@ const TOOLBAR_ICONS = {
 } as const;
 ```
 
-- [ ] **Step 2: 新增 ToolbarIconButton 组件**
+- [x] **Step 2: 新增 ToolbarIconButton 组件**
 
 在 `ToolbarProps` 后、`Toolbar` 前加入：
 
@@ -79,7 +79,7 @@ function ToolbarIconButton(props: ToolbarIconButtonProps) {
 }
 ```
 
-- [ ] **Step 3: 替换移动/旋转/缩放按钮**
+- [x] **Step 3: 替换移动/旋转/缩放按钮**
 
 将三个工具按钮替换为：
 
@@ -104,7 +104,7 @@ function ToolbarIconButton(props: ToolbarIconButtonProps) {
 />
 ```
 
-- [ ] **Step 4: 替换局部/全局按钮**
+- [x] **Step 4: 替换局部/全局按钮**
 
 将坐标空间两个按钮替换为：
 
@@ -123,7 +123,7 @@ function ToolbarIconButton(props: ToolbarIconButtonProps) {
 />
 ```
 
-- [ ] **Step 5: 替换剩余操作按钮**
+- [x] **Step 5: 替换剩余操作按钮**
 
 将底部六个操作按钮替换为：
 
@@ -141,7 +141,7 @@ function ToolbarIconButton(props: ToolbarIconButtonProps) {
 **Files:**
 - Modify: `src/styles/global.css:69-90`
 
-- [ ] **Step 1: 新增 `.toolbar-icon-button` 样式**
+- [x] **Step 1: 新增 `.toolbar-icon-button` 样式**
 
 在 `.toolbar button` 后加入：
 
@@ -164,7 +164,7 @@ Expected: `.toolbar-button.active` 继续能作用于图标按钮。
 **Files:**
 - Modify: `README.md:64-122`
 
-- [ ] **Step 1: 更新基础操作文字**
+- [x] **Step 1: 更新基础操作文字**
 
 将：
 
@@ -190,7 +190,7 @@ Expected: `.toolbar-button.active` 继续能作用于图标按钮。
 - 切换 Gizmo：点击顶部工具栏的移动、旋转、缩放图标按钮，或使用 W/E/R 快捷键。
 ```
 
-- [ ] **Step 2: 更新最近完成**
+- [x] **Step 2: 更新最近完成**
 
 在最近完成顶部插入：
 
@@ -198,7 +198,7 @@ Expected: `.toolbar-button.active` 继续能作用于图标按钮。
 - 2026-06-29：Toolbar 按钮切换为纯图标显示，并通过悬停提示和无障碍标签保留中文说明。
 ```
 
-- [ ] **Step 3: 运行类型检查**
+- [x] **Step 3: 运行类型检查**
 
 Run:
 
@@ -208,7 +208,7 @@ npm run typecheck
 
 Expected: `tsc -b` 通过，退出码为 0。
 
-- [ ] **Step 4: 运行 diff 检查**
+- [x] **Step 4: 运行 diff 检查**
 
 Run:
 
@@ -218,7 +218,7 @@ git diff --check -- src/editor/ui/Toolbar.tsx src/styles/global.css README.md do
 
 Expected: 不出现 whitespace error；Windows 行尾提示不视为失败。
 
-- [ ] **Step 5: 浏览器验证**
+- [x] **Step 5: 浏览器验证**
 
 启动 Vite 并检查：
 

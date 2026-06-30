@@ -26,6 +26,7 @@ type ReadTextFileResult = {
 };
 
 type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
+type ModelParameterConfig = import('./editor/model/modelParameters').ModelParameterConfig;
 
 type AssetEntry = {
   id: string;
@@ -39,6 +40,7 @@ type AssetEntry = {
   displayName?: string;
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
+  parameterConfig?: ModelParameterConfig;
 };
 
 type ImportModelFolderSkippedEntry = {

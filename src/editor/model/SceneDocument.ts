@@ -2,6 +2,8 @@ import { createId } from '../../shared/ids';
 import type { LightKind, MeshKind } from './components';
 import type { Entity } from './Entity';
 import type { Vector3Data } from './math';
+import type { ModelParameterConfig } from './modelParameters';
+import { createDefaultModelParameterValues } from './modelParameters';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, type ModelLengthUnitInfo } from './sceneUnits';
 import { vector3 } from './math';
 
@@ -77,6 +79,7 @@ export function createModelEntity(
   displayName: string,
   unitInfo: ModelLengthUnitInfo = DEFAULT_MODEL_LENGTH_UNIT_INFO,
   position: Vector3Data = vector3(),
+  parameterConfig?: ModelParameterConfig,
 ): Entity {
   const id = createId('entity');
   const trimmedName = displayName.trim();
@@ -97,6 +100,12 @@ export function createModelEntity(
         sourceUrl,
         lengthUnit: unitInfo.lengthUnit,
         unitScaleToMeters: unitInfo.unitScaleToMeters,
+        ...(parameterConfig
+          ? {
+              parameterConfig,
+              parameterValues: createDefaultModelParameterValues(parameterConfig),
+            }
+          : {}),
       },
     },
   };
