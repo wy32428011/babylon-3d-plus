@@ -1,0 +1,161 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - strong [ref=e5]: Babylon Unity-like Editor
+    - button "移动" [ref=e6] [cursor=pointer]:
+      - generic [ref=e7]: ↔
+    - button "旋转" [ref=e8] [cursor=pointer]:
+      - generic [ref=e9]: ⟳
+    - button "缩放" [ref=e10] [cursor=pointer]:
+      - generic [ref=e11]: ⛶
+    - generic "变换坐标空间" [ref=e12]:
+      - button "局部" [ref=e13] [cursor=pointer]:
+        - generic [ref=e14]: ⌖
+      - button "全局" [ref=e15] [cursor=pointer]:
+        - generic [ref=e16]: ◎
+    - generic [ref=e17]:
+      - checkbox "吸附" [ref=e18]
+      - text: 吸附
+    - generic [ref=e19]:
+      - checkbox "网格" [checked] [ref=e20]
+      - text: 网格
+    - generic [ref=e21]:
+      - generic [ref=e22]: 格子
+      - combobox "格子" [ref=e23]:
+        - option "1 m"
+        - option "2 m"
+        - option "5 m" [selected]
+        - option "10 m"
+    - generic [ref=e24]:
+      - generic [ref=e25]: 视野
+      - combobox "视野" [ref=e26]:
+        - option "近景"
+        - option "标准" [selected]
+        - option "远景"
+        - option "全景"
+    - generic [ref=e27]:
+      - generic [ref=e28]: 位置 (m)
+      - spinbutton "位置 (m)" [ref=e29]: "0.5"
+    - generic [ref=e30]:
+      - generic [ref=e31]: 旋转
+      - spinbutton "旋转" [ref=e32]: "15"
+    - generic [ref=e33]:
+      - generic [ref=e34]: 缩放
+      - spinbutton "缩放" [ref=e35]: "0.1"
+    - button "删除" [disabled] [ref=e36]:
+      - generic [ref=e37]: ⌫
+    - button "撤销" [disabled] [ref=e38]:
+      - generic [ref=e39]: ↶
+    - button "重做" [disabled] [ref=e40]:
+      - generic [ref=e41]: ↷
+    - button "导入CAD参考图" [ref=e42] [cursor=pointer]:
+      - generic [ref=e43]: ▧
+    - button "配置 MQTT 与本地模拟" [ref=e44] [cursor=pointer]:
+      - generic [ref=e45]: MQ
+    - button "保存场景" [ref=e46] [cursor=pointer]:
+      - generic [ref=e47]: 💾
+    - button "加载场景" [ref=e48] [cursor=pointer]:
+      - generic [ref=e49]: 📂
+  - generic [ref=e50]:
+    - complementary [ref=e51]:
+      - generic [ref=e52]:
+        - generic [ref=e53]: Stacker MQTT Demo
+        - generic [ref=e54]: 模型树
+        - generic [ref=e55]:
+          - generic [ref=e56]:
+            - generic [ref=e57]: ⌕
+            - searchbox "搜索模型树对象" [ref=e58]
+          - button "+ 新建" [ref=e59] [cursor=pointer]
+        - generic [ref=e60]:
+          - generic "Stacker DDJ2" [ref=e61] [cursor=pointer]:
+            - button "隐藏 Stacker DDJ2" [ref=e62]
+            - button "锁定 Stacker DDJ2" [ref=e64]
+            - button [disabled]
+            - generic [ref=e66]: ◎
+            - generic [ref=e67]: Stacker DDJ2
+          - generic "目标位 1-1-1" [ref=e68] [cursor=pointer]:
+            - button "隐藏 目标位 1-1-1" [ref=e69]
+            - button "锁定 目标位 1-1-1" [ref=e71]
+            - button [disabled]
+            - generic [ref=e73]: ◎
+            - generic [ref=e74]: 目标位 1-1-1
+          - generic "目标位 2-1-1" [ref=e75] [cursor=pointer]:
+            - button "隐藏 目标位 2-1-1" [ref=e76]
+            - button "锁定 目标位 2-1-1" [ref=e78]
+            - button [disabled]
+            - generic [ref=e80]: ◎
+            - generic [ref=e81]: 目标位 2-1-1
+          - generic "目标位 3-2-1" [ref=e82] [cursor=pointer]:
+            - button "隐藏 目标位 3-2-1" [ref=e83]
+            - button "锁定 目标位 3-2-1" [ref=e85]
+            - button [disabled]
+            - generic [ref=e87]: ◎
+            - generic [ref=e88]: 目标位 3-2-1
+          - generic "运动参考地面" [ref=e89] [cursor=pointer]:
+            - button "隐藏 运动参考地面" [ref=e90]
+            - button "解锁 运动参考地面" [ref=e92]
+            - button [disabled]
+            - generic [ref=e94]: ◎
+            - generic [ref=e95]: 运动参考地面
+          - generic "Stacker 演示光源" [ref=e96] [cursor=pointer]:
+            - button "隐藏 Stacker 演示光源" [ref=e97]
+            - button "锁定 Stacker 演示光源" [ref=e99]
+            - button [disabled]
+            - generic [ref=e101]: ◎
+            - generic [ref=e102]: Stacker 演示光源
+    - main [ref=e103]:
+      - heading "Scene" [level=2] [ref=e105]
+      - region "Console 日志面板" [ref=e108]:
+        - generic [ref=e109]:
+          - heading "Console" [level=2] [ref=e110]
+          - button "最小化 Console" [expanded] [ref=e111] [cursor=pointer]:
+            - generic [ref=e112]: "-"
+        - generic [ref=e113]:
+          - generic [ref=e114]: 场景已加载：Stacker MQTT 模拟演示场景
+          - generic [ref=e115]: 编辑器已启动。
+    - complementary [ref=e116]:
+      - generic [ref=e117]:
+        - heading "Inspector" [level=2] [ref=e118]
+        - paragraph [ref=e119]: 请选择一个对象。
+  - region "Project 资源库" [ref=e121]:
+    - navigation "资源库分类" [ref=e122]:
+      - button "模型库" [pressed] [ref=e123] [cursor=pointer]
+      - button "POI库" [ref=e124] [cursor=pointer]
+      - button "主题库" [ref=e125] [cursor=pointer]
+      - button "组合库" [ref=e126] [cursor=pointer]
+      - button "环境库" [ref=e127] [cursor=pointer]
+      - button "图表库" [ref=e128] [cursor=pointer]
+      - button "图片库" [ref=e129] [cursor=pointer]
+    - generic "模型库筛选占位" [ref=e130]:
+      - generic [ref=e131]: 模型名称
+      - textbox "模型名称" [ref=e132]:
+        - /placeholder: 请输入模型名称...
+      - button "导入模型文件夹" [ref=e133] [cursor=pointer]
+    - generic "模型库资源列表" [ref=e134]:
+      - button "立方体 基础对象" [ref=e135] [cursor=pointer]:
+        - generic [ref=e138]:
+          - strong [ref=e139]: 立方体
+          - generic [ref=e140]: 基础对象
+      - button "球体 基础对象" [ref=e141] [cursor=pointer]:
+        - generic [ref=e144]:
+          - strong [ref=e145]: 球体
+          - generic [ref=e146]: 基础对象
+      - button "地面 基础对象" [ref=e147] [cursor=pointer]:
+        - generic [ref=e150]:
+          - strong [ref=e151]: 地面
+          - generic [ref=e152]: 基础对象
+      - button "虚拟定位线框 基础对象" [ref=e153] [cursor=pointer]:
+        - generic [ref=e156]:
+          - strong [ref=e157]: 虚拟定位线框
+          - generic [ref=e158]: 基础对象
+      - button "半球光 灯光" [ref=e159] [cursor=pointer]:
+        - generic [ref=e162]:
+          - strong [ref=e163]: 半球光
+          - generic [ref=e164]: 灯光
+      - button "方向光 灯光" [ref=e165] [cursor=pointer]:
+        - generic [ref=e168]:
+          - strong [ref=e169]: 方向光
+          - generic [ref=e170]: 灯光
+      - button "点光源 灯光" [ref=e171] [cursor=pointer]:
+        - generic [ref=e174]:
+          - strong [ref=e175]: 点光源
+          - generic [ref=e176]: 灯光

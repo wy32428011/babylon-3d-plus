@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YZJ 左端固定长度验证</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0e1114;
+        color: #eef4f8;
+        font-family: "Microsoft YaHei", Arial, sans-serif;
+      }
+
+      #renderCanvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      #status {
+        position: fixed;
+        left: 16px;
+        top: 16px;
+        max-width: 860px;
+        padding: 12px 14px;
+        border: 1px solid rgba(90, 219, 228, 0.5);
+        background: rgba(8, 14, 18, 0.82);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .ok {
+        color: #8ee5b0;
+      }
+
+      .error {
+        color: #ff9c9c;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="renderCanvas"></canvas>
+    <div id="status">YZJ 左端固定长度验证加载中...</div>
+    <script type="module">
+      import {
+        ArcRotateCamera,
+        Color3,
+        Engine,
+        HemisphericLight,
+        MeshBuilder,
+        Scene,
+        SceneLoader,
+        StandardMaterial,
+        TransformNode,
+        Vector3,
+      } from "@babylonjs/core";
+      import "@babylonjs/loaders/glTF/index.js";
+      import { ExternalModelScriptRuntime } from "/src/runtime/babylon/ExternalModelScriptRuntime.ts";
+
+      const canvas = document.querySelector("#renderCanvas");
+      const status = document.querySelector("#status");
+      const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+      const scene = new Scene(engine);
+      scene.clearColor.set(0.05, 0.06, 0.07, 1);
+
+      const camera = new ArcRotateCamera("camera", -Math.PI / 2, Math.PI * 0.43, 5.4, new Vector3(0, 0.55, 0), scene);
+      camera.attachControl(canvas, true);
+      camera.lowerRadiusLimit = 2;
+      camera.upperRadiusLimit = 12;
+
+      const light = new HemisphericLight("light", new Vector3(0.2, 1, 0.4), scene);
+      light.intensity = 0.95;
+
+      const groundMaterial = new StandardMaterial("groundMaterial", scene);
+      groundMaterial.diffuseColor = new Color3(0.11, 0.15, 0.17);
+      groundMaterial.specularColor = Color3.Black();
+      const ground = MeshBuilder.CreateGround("ground", { width: 5.2, height: 3.2 }, scene);
+      ground.material = groundMaterial;
+      ground.position.y = -0.012;
+
+      const markerMaterial = new StandardMaterial("leftAnchorMaterial", scene);
+      markerMaterial.diffuseColor = new Color3(0.05, 0.9, 0.95);
+      markerMaterial.emissiveColor = new Color3(0.02, 0.45, 0.5);
+      markerMaterial.alpha = 0.85;
+
+      const metadata = await fetch("./yzj-assets/meta.json").then((response) => response.json());
+      const defaultValues = {
+        chainLength: 1.828,
+        platformLength: 1.022,
+        chainWidth: 1.194,
+        chainHeight: 0.803,
+        rollerWidth: 0.062,
+        rollerPosition: 0,
+        rollerDensity: 1,
+        showFrontSupport: true,
+        showRearSupport: true,
+      };
+
+      const cases = [
+        { label: "默认长度", z: -0.78, values: { ...defaultValues } },
+        { label: "加长到 3.1m", z: 0.78, values: { ...defaultValues, chainLength: 3.1, rollerDensity: 4 } },
+      ];
+
+      function syncModelScriptMetadata(target, values) {
+        const scripts = (metadata.parameterScripts ?? []).map((script) => {
+          const clonedScript = structuredClone(script);
+          clonedScript.values = clonedScript.values ?? {};
+          for (const [key, value] of Object.entries(values)) {
+            const previousValue = typeof clonedScript.values[key] === "object" && clonedScript.values[key] !== null
+              ? clonedScript.values[key]
+              : {};
+            clonedScript.values[key] = { ...previousValue, value };
+          }
+          return clonedScript;
+        });
+        target.metadata = { ...(target.metadata ?? {}), scripts };
+      }
+
+      function parentTopLevelModelNodes(container, contentRoot) {
+        const importedNodes = new Set([...container.meshes, ...container.transformNodes]);
+        for (const node of importedNodes) {
+          if (!node.parent || !importedNodes.has(node.parent)) {
+            node.parent = contentRoot;
+          }
+        }
+      }
+
+      function getWorldBounds(root) {
+        const meshes = root.getChildMeshes(false);
+        let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+        let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+        for (const mesh of meshes) {
+          mesh.computeWorldMatrix(true);
+          mesh.refreshBoundingInfo?.();
+          const box = mesh.getBoundingInfo().boundingBox;
+          minimum = Vector3.Minimize(minimum, box.minimumWorld);
+          maximum = Vector3.Maximize(maximum, box.maximumWorld);
+        }
+        return { minimum, maximum };
+      }
+
+      function normalizeModelContentOrigin(root) {
+        root.computeWorldMatrix(true);
+        const bounds = getWorldBounds(root);
+        const bottomCenter = new Vector3((bounds.minimum.x + bounds.maximum.x) / 2, bounds.minimum.y, (bounds.minimum.z + bounds.maximum.z) / 2);
+        const localBottomCenter = Vector3.TransformCoordinates(bottomCenter, root.getWorldMatrix().clone().invert());
+        for (const child of root.getChildren()) {
+          if (child instanceof TransformNode) {
+            child.position.subtractInPlace(localBottomCenter);
+          }
+        }
+      }
+
+      async function createYZJCase(testCase) {
+        const root = new TransformNode(`${testCase.label}_root`, scene);
+        root.position.z = testCase.z;
+
+        const contentRoot = new TransformNode(`${testCase.label}_contentRoot`, scene);
+        contentRoot.parent = root;
+        contentRoot.scaling = new Vector3(0.01, 0.01, 0.01);
+
+        const container = await SceneLoader.LoadAssetContainerAsync("./yzj-assets/", "YZJ.glb", scene);
+        container.addAllToScene();
+        parentTopLevelModelNodes(container, contentRoot);
+        normalizeModelContentOrigin(root);
+        syncModelScriptMetadata(contentRoot, testCase.values);
+
+        const modelAsset = {
+          sourcePath: "./yzj-assets/YZJ.glb",
+          sourceUrl: "./yzj-assets/YZJ.glb",
+          lengthUnit: "meter",
+          unitScaleToMeters: 1,
+          scriptAssets: [
+            {
+              path: "./yzj-assets/yzj.model.ts",
+              sourceUrl: "./yzj-assets/yzj.model.txt",
+              name: "yzj.model.ts",
+            },
+          ],
+          parameterScriptMetadata: metadata.parameterScripts ?? [],
+          animationScriptMetadata: metadata.animationScripts ?? [],
+          parameterValues: testCase.values,
+        };
+
+        const runtime = new ExternalModelScriptRuntime(contentRoot, modelAsset);
+        runtime.updateParameterValues(testCase.values);
+        await runtime.start();
+        runtime.update();
+        return root;
+      }
+
+      try {
+        const roots = [];
+        for (const testCase of cases) {
+          roots.push(await createYZJCase(testCase));
+        }
+
+        const defaultBounds = getWorldBounds(roots[0]);
+        const extendedBounds = getWorldBounds(roots[1]);
+        const anchorX = defaultBounds.minimum.x;
+        const delta = Math.abs(defaultBounds.minimum.x - extendedBounds.minimum.x);
+        const rightExtension = extendedBounds.maximum.x - defaultBounds.maximum.x;
+        const isValid = delta < 0.005 && rightExtension > 0.2;
+        const marker = MeshBuilder.CreateBox("leftAnchorMarker", { width: 0.018, height: 1.35, depth: 2.2 }, scene);
+        marker.position = new Vector3(anchorX, 0.66, 0);
+        marker.material = markerMaterial;
+
+        status.innerHTML = `<span class="${isValid ? "ok" : "error"}">${isValid ? "完成" : "异常"}</span>：左侧基准线固定，默认 minX=${defaultBounds.minimum.x.toFixed(4)}，加长 minX=${extendedBounds.minimum.x.toFixed(4)}，左差值=${delta.toFixed(5)}；右侧延长 ${rightExtension.toFixed(4)}`;
+        engine.runRenderLoop(() => scene.render());
+        window.__YZJ_LEFT_ANCHOR_READY__ = isValid;
+        window.__YZJ_LEFT_ANCHOR_DELTA__ = delta;
+        window.__YZJ_RIGHT_EXTENSION__ = rightExtension;
+      } catch (error) {
+        console.error(error);
+        status.innerHTML = `<span class="error">失败</span>：${error instanceof Error ? error.message : String(error)}`;
+        window.__YZJ_LEFT_ANCHOR_READY__ = false;
+      }
+
+      window.addEventListener("resize", () => engine.resize());
+    </script>
+  </body>
+</html>

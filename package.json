@@ -6,7 +6,10 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "dev:electron": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "dev:electron": "node scripts/dev-electron.mjs",
+    "demo:stacker:scene": "node scripts/create-stacker-mqtt-demo-scene.mjs",
+    "demo:stacker:mqtt": "node scripts/simulate-stacker-mqtt.mjs",
+    "wait:renderer": "node scripts/wait-for-vite-renderer.mjs",
     "build": "tsc -b && vite build && npm run build:electron",
     "build:electron": "tsc -p tsconfig.node.json",
     "typecheck": "tsc -b",
@@ -18,6 +21,8 @@
   "dependencies": {
     "@babylonjs/core": "^9.12.0",
     "@babylonjs/loaders": "^9.12.0",
+    "@linkiez/dxf-renew": "^7.4.5",
+    "mqtt": "^5.15.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "zustand": "^5.0.14"

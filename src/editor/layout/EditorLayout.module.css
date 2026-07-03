@@ -40,6 +40,10 @@
   grid-template-rows: minmax(0, 1fr) clamp(96px, 18vh, 150px);
 }
 
+.centerColumnConsoleMinimized {
+  grid-template-rows: minmax(0, 1fr) 32px;
+}
+
 .bottomBar {
   overflow: hidden;
 }

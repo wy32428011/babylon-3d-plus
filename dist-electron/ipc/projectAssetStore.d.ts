@@ -1,10 +1,16 @@
-import type { AssetEntry, ImportModelFolderSkippedEntry, ProjectAssetIndex, ProjectListAssetsResult } from '../types.js';
+import type { AssetEntry, ImportModelFolderSkippedEntry, ProjectAssetIndex, ProjectListAssetsResult, RecentWorkspacesResult } from '../types.js';
 type ImportModelPackagesIntoProjectResult = {
     assets: AssetEntry[];
     skipped: ImportModelFolderSkippedEntry[];
 };
 export declare function getCurrentProjectRoot(): string | null;
 export declare function setCurrentProjectRoot(projectRoot: string): void;
+export declare function getRecentWorkspaces(): Promise<RecentWorkspacesResult>;
+export declare function rememberRecentProjectRoot(projectRoot: string, lastScenePath?: string): Promise<void>;
+export declare function rememberRecentSceneFile(filePath: string, projectRoot?: string | null): Promise<void>;
+export declare function assertRecentSceneFile(filePath: string): Promise<string>;
+export declare function removeRecentWorkspaceItem(kind: 'project' | 'scene', itemPath: string): Promise<void>;
+export declare function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult>;
 export declare function getProjectModelsRoot(projectRoot: string): string;
 export declare function getProjectAssetIndexPath(projectRoot: string): string;
 export declare function ensureProjectDirectories(projectRoot: string): Promise<void>;
@@ -13,6 +19,7 @@ export declare function writeProjectAssetIndex(projectRoot: string, index: Proje
 export declare function toSafePackageDirectoryName(name: string): string;
 export declare function copyDirectory(source: string, target: string): Promise<void>;
 export declare function ensureCurrentProjectRootWithDialog(): Promise<string | null>;
+export declare function selectCurrentProjectRootWithDialog(): Promise<string | null>;
 export declare function listProjectAssets(): Promise<ProjectListAssetsResult>;
 export declare function importModelPackagesIntoProject(scannedAssets: AssetEntry[]): Promise<ImportModelPackagesIntoProjectResult>;
 export {};

@@ -1,8 +1,8 @@
 import { dialog, ipcMain } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { AssetEntry, ImportModelFolderResult } from '../types.js';
-import { authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl } from './assetRegistry.js';
+import type { AssetEntry, ImportCadFileResult, ImportModelFolderResult } from '../types.js';
+import { authorizeAssetFile, authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl } from './assetRegistry.js';
 import { scanModelFolder } from './modelPackageScanner.js';
 import { ensureCurrentProjectRootWithDialog, getCurrentProjectRoot, importModelPackagesIntoProject } from './projectAssetStore.js';
 
@@ -62,6 +62,38 @@ export function registerAssetIpc(): void {
         kind,
       };
     });
+  });
+
+  ipcMain.handle('assets:importCadFile', async (): Promise<ImportCadFileResult> => {
+    const result = await dialog.showOpenDialog({
+      title: '选择 CAD DXF 图纸',
+      properties: ['openFile'],
+      filters: [{ name: 'CAD DXF', extensions: ['dxf'] }],
+    });
+
+    const [filePath] = result.filePaths;
+
+    if (result.canceled || !filePath) {
+      return { canceled: true, filePath: null, sourceUrl: null, fileSizeBytes: 0 };
+    }
+
+    if (path.extname(filePath).toLowerCase() !== '.dxf') {
+      throw new Error('仅支持导入 .dxf CAD 图纸。');
+    }
+
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) {
+      throw new Error('请选择有效的 DXF 文件。');
+    }
+
+    authorizeAssetFile(filePath);
+
+    return {
+      canceled: false,
+      filePath,
+      sourceUrl: encodeAssetUrl(filePath),
+      fileSizeBytes: stat.size,
+    };
   });
 
   ipcMain.handle('assets:importModelFolder', async (): Promise<ImportModelFolderResult> => {

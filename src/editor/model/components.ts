@@ -15,11 +15,57 @@ export type MeshRendererComponent = {
   materialColor: string;
 };
 
+export type LocatorComponent = {
+  assetId: string;
+  length: number;
+  width: number;
+  height: number;
+};
+
+export type CadReferenceOriginMode = 'center';
+
+export type CadReferenceLayerStat = {
+  name: string;
+  entityCount: number;
+  polylineCount: number;
+  pointCount: number;
+};
+
+export type CadReferenceBounds = {
+  min: Vector3Data;
+  max: Vector3Data;
+  size: Vector3Data;
+  center: Vector3Data;
+};
+
+export type CadReferenceComponent = {
+  sourcePath: string;
+  sourceUrl: string;
+  unitScaleToMeters: number;
+  originMode: CadReferenceOriginMode;
+  lineColor: string;
+  opacity: number;
+  layerStats: CadReferenceLayerStat[];
+  bounds: CadReferenceBounds;
+  polylineCount: number;
+  pointCount: number;
+};
+
+export type ModelScriptAsset = {
+  path: string;
+  sourceUrl: string;
+  name: string;
+};
+
 export type ModelAssetComponent = {
+  assetCode: string;
   sourcePath: string;
   sourceUrl: string;
   lengthUnit: ModelSourceLengthUnit;
   unitScaleToMeters: number;
+  scriptAssets?: ModelScriptAsset[];
+  parameterScriptMetadata?: unknown[];
+  animationScriptMetadata?: unknown[];
   parameterConfig?: ModelParameterConfig;
   parameterValues?: ModelParameterValues;
 };
@@ -40,6 +86,8 @@ export type LightComponent = {
 export type EntityComponents = {
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
+  locator?: LocatorComponent;
+  cadReference?: CadReferenceComponent;
   modelAsset?: ModelAssetComponent;
   camera?: CameraComponent;
   light?: LightComponent;

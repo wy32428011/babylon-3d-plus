@@ -22,16 +22,56 @@ export type ReadTextFileResult = {
     filePath: string;
     content: string;
 };
+export type LoadSceneFileRequest = {
+    filePath: string;
+};
+export type OpenRecentProjectRequest = {
+    projectRoot: string;
+};
+export type RemoveRecentWorkspaceItemRequest = {
+    kind: 'project' | 'scene';
+    path: string;
+};
+export type RecentProjectEntry = {
+    projectRoot: string;
+    displayName: string;
+    lastOpenedAt: string;
+    exists: boolean;
+    assetCount: number;
+    lastScenePath?: string;
+};
+export type RecentSceneEntry = {
+    filePath: string;
+    displayName: string;
+    lastOpenedAt: string;
+    exists: boolean;
+    projectRoot?: string;
+};
+export type RecentWorkspacesResult = {
+    projects: RecentProjectEntry[];
+    scenes: RecentSceneEntry[];
+};
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
+export type ModelScriptAsset = {
+    path: string;
+    sourceUrl: string;
+    name: string;
+};
 export type AssetEntry = {
     id: string;
     name: string;
     path: string;
     sourceUrl: string;
+    thumbnailPath?: string;
+    thumbnailUrl?: string;
     kind: 'folder' | 'model' | 'texture' | 'scene' | 'unknown';
     packagePath?: string;
     metadataPath?: string;
     scriptPaths?: string[];
+    scriptAssets?: ModelScriptAsset[];
+    parameterScriptMetadata?: unknown[];
+    animationScriptMetadata?: unknown[];
+    defaultAssetCode?: string;
     displayName?: string;
     lengthUnit?: ModelSourceLengthUnit;
     unitScaleToMeters?: number;
@@ -47,6 +87,12 @@ export type ImportModelFolderResult = {
     projectRoot: string | null;
     assets: AssetEntry[];
     skipped: ImportModelFolderSkippedEntry[];
+};
+export type ImportCadFileResult = {
+    canceled: boolean;
+    filePath: string | null;
+    sourceUrl: string | null;
+    fileSizeBytes: number;
 };
 export type ProjectAssetIndex = {
     version: 1;

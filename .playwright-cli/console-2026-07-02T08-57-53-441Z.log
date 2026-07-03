@@ -1,0 +1,14 @@
+[   31338ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5500/node_modules/.vite/deps/react-dom_client.js?v=34e8aa24:14337
+[   31783ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:5500/favicon.ico:0
+[   32020ms] [LOG] BJS - [16:58:25]: Babylon.js v9.12.0 - WebGL2 - Parallel shader compilation @ http://127.0.0.1:5500/node_modules/.vite/deps/logger-BcrUU1RW.js?v=34e8aa24:39
+[   32114ms] [LOG] BJS - [16:58:25]: Babylon.js v9.12.0 - WebGL2 - Parallel shader compilation @ http://127.0.0.1:5500/node_modules/.vite/deps/logger-BcrUU1RW.js?v=34e8aa24:39
+[   32492ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5500/@fs/F:/3d-models/models/Stacker/stacker.model.ts:0
+[   32492ms] [WARNING] 模型脚本加载失败：stacker.model.ts Error: 无法读取脚本：500
+    at fetchScriptText (http://127.0.0.1:5500/src/runtime/babylon/ExternalModelScriptRuntime.ts:129:9)
+    at async loadCompiledExternalModelScript (http://127.0.0.1:5500/src/runtime/babylon/ExternalModelScriptRuntime.ts:117:21)
+    at async ExternalModelScriptRuntime.startScriptAsset (http://127.0.0.1:5500/src/runtime/babylon/ExternalModelScriptRuntime.ts:69:27)
+    at async ExternalModelScriptRuntime.start (http://127.0.0.1:5500/src/runtime/babylon/ExternalModelScriptRuntime.ts:33:4) @ http://127.0.0.1:5500/@vite/client:524
+[   69057ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5500/node_modules/.vite/deps/react-dom_client.js?v=34e8aa24:14337
+[   69286ms] [LOG] BJS - [16:59:02]: Babylon.js v9.12.0 - WebGL2 - Parallel shader compilation @ http://127.0.0.1:5500/node_modules/.vite/deps/logger-BcrUU1RW.js?v=34e8aa24:39
+[   69345ms] [LOG] BJS - [16:59:02]: Babylon.js v9.12.0 - WebGL2 - Parallel shader compilation @ http://127.0.0.1:5500/node_modules/.vite/deps/logger-BcrUU1RW.js?v=34e8aa24:39
+[   89569ms] [LOG] [vite] server connection lost. Polling for restart... @ http://127.0.0.1:5500/@vite/client:992

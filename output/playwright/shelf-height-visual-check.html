@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shelf 高度与三角支架视觉验证</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #111417;
+        color: #edf3f7;
+        font-family: "Microsoft YaHei", Arial, sans-serif;
+      }
+
+      #renderCanvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      #status {
+        position: fixed;
+        left: 16px;
+        top: 16px;
+        max-width: 980px;
+        padding: 12px 14px;
+        border: 1px solid rgba(166, 190, 205, 0.38);
+        background: rgba(11, 15, 19, 0.82);
+        font-size: 13px;
+        line-height: 1.55;
+      }
+
+      .ok {
+        color: #88e6ae;
+      }
+
+      .error {
+        color: #ff9b9b;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="renderCanvas"></canvas>
+    <div id="status">Shelf 高度与三角支架视觉验证加载中...</div>
+    <script type="module">
+      import {
+        ArcRotateCamera,
+        Color3,
+        Engine,
+        HemisphericLight,
+        MeshBuilder,
+        Scene,
+        SceneLoader,
+        StandardMaterial,
+        TransformNode,
+        Vector3,
+      } from "@babylonjs/core";
+      import "@babylonjs/loaders/glTF/index.js";
+      import { ExternalModelScriptRuntime } from "/src/runtime/babylon/ExternalModelScriptRuntime.ts";
+
+      const canvas = document.querySelector("#renderCanvas");
+      const status = document.querySelector("#status");
+      const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+      const scene = new Scene(engine);
+      scene.clearColor.set(0.067, 0.079, 0.091, 1);
+
+      const camera = new ArcRotateCamera("camera", Math.PI * 0.18, Math.PI * 0.28, 54, new Vector3(0, 7, 0), scene);
+      camera.attachControl(canvas, true);
+      camera.lowerRadiusLimit = 8;
+      camera.upperRadiusLimit = 90;
+
+      const light = new HemisphericLight("light", new Vector3(0.2, 1, 0.4), scene);
+      light.intensity = 0.95;
+
+      const groundMaterial = new StandardMaterial("groundMaterial", scene);
+      groundMaterial.diffuseColor = new Color3(0.13, 0.16, 0.17);
+      groundMaterial.specularColor = Color3.Black();
+      const ground = MeshBuilder.CreateGround("ground", { width: 58, height: 34 }, scene);
+      ground.material = groundMaterial;
+      ground.position.y = -0.02;
+
+      const braceMaterial = new StandardMaterial("braceHighlightMaterial", scene);
+      braceMaterial.diffuseColor = new Color3(1, 0.22, 0.06);
+      braceMaterial.emissiveColor = new Color3(0.28, 0.04, 0.02);
+      braceMaterial.specularColor = Color3.Black();
+
+      const metadata = await fetch("./shelf-assets/meta.json").then((response) => response.json());
+      const defaultValues = {
+        layerCount: 1,
+        columnCount: 1,
+        cellWidth: 0.801,
+        cellHeight: 4.525,
+        cellDepth: 1.183,
+        postWidth: 0.08,
+        aisleWidth: 1.2,
+        aisleHeight: 1,
+        doubleDeepEnabled: false,
+        deepSlotGap: 0.2,
+        deepSlotLift: 0,
+        shelfStyle: "beam",
+      };
+
+      const braceNames = ["Box008", "Box007", "node15", "node21"];
+      const cases = [
+        { label: "默认高 4.525", x: -18, z: -5.4, rotationY: 0, values: { ...defaultValues } },
+        { label: "单层高 5.5", x: -9, z: -5.4, rotationY: 0, values: { ...defaultValues, cellHeight: 5.5 } },
+        { label: "单层高 6.8", x: 0, z: -5.4, rotationY: 0, values: { ...defaultValues, cellHeight: 6.8 } },
+        { label: "单层高 9.05", x: 9, z: -5.4, rotationY: 0, values: { ...defaultValues, cellHeight: 9.05 } },
+        { label: "单层高 13.575", x: 18, z: -5.4, rotationY: 0, values: { ...defaultValues, cellHeight: 13.575 } },
+        { label: "2层高 6.8 双深", x: -13, z: 8, rotationY: 0, values: { ...defaultValues, layerCount: 2, columnCount: 2, cellHeight: 6.8, doubleDeepEnabled: true } },
+        { label: "旋转高 6.8", x: 8, z: 8, rotationY: Math.PI / 4, values: { ...defaultValues, layerCount: 2, columnCount: 3, cellHeight: 6.8 } },
+      ];
+
+      function matchesBraceName(node) {
+        const rawName = String(node?.metadata?.sourceNodeName ?? node?.name ?? "");
+        return braceNames.some((name) => new RegExp(`^${name}(?:\\.|_|$)`, "i").test(rawName));
+      }
+
+      function syncModelScriptMetadata(target, values) {
+        const scripts = (metadata.parameterScripts ?? []).map((script) => {
+          const clonedScript = structuredClone(script);
+          clonedScript.values = clonedScript.values ?? {};
+          for (const [key, value] of Object.entries(values)) {
+            const previousValue = typeof clonedScript.values[key] === "object" && clonedScript.values[key] !== null
+              ? clonedScript.values[key]
+              : {};
+            clonedScript.values[key] = { ...previousValue, value };
+          }
+          return clonedScript;
+        });
+        target.metadata = { ...(target.metadata ?? {}), scripts };
+      }
+
+      function parentTopLevelModelNodes(container, contentRoot) {
+        const allImportedNodes = new Set([...container.meshes, ...container.transformNodes]);
+        for (const node of allImportedNodes) {
+          if (!node.parent || !allImportedNodes.has(node.parent)) {
+            node.parent = contentRoot;
+          }
+        }
+      }
+
+      function normalizeModelContentOrigin(root) {
+        root.computeWorldMatrix(true);
+        const childMeshes = root.getChildMeshes(false);
+        if (childMeshes.length === 0) return;
+
+        let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+        let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+        for (const mesh of childMeshes) {
+          mesh.computeWorldMatrix(true);
+          const box = mesh.getBoundingInfo().boundingBox;
+          minimum = Vector3.Minimize(minimum, box.minimumWorld);
+          maximum = Vector3.Maximize(maximum, box.maximumWorld);
+        }
+
+        const bottomCenter = new Vector3((minimum.x + maximum.x) / 2, minimum.y, (minimum.z + maximum.z) / 2);
+        const localBottomCenter = Vector3.TransformCoordinates(bottomCenter, root.getWorldMatrix().clone().invert());
+        for (const child of root.getChildren()) {
+          if (child instanceof TransformNode) {
+            child.position.subtractInPlace(localBottomCenter);
+          }
+        }
+      }
+
+      function highlightAndCountBraces(root) {
+        const braceRoots = new Set();
+        const candidates = [...scene.transformNodes, ...scene.meshes]
+          .filter((node) => node === root || node.isDescendantOf?.(root));
+        for (const node of candidates) {
+          if (!matchesBraceName(node)) continue;
+          braceRoots.add(node);
+          if (node.material !== undefined) node.material = braceMaterial;
+          if (typeof node.getChildMeshes === "function") {
+            node.getChildMeshes(false).forEach((mesh) => {
+              mesh.material = braceMaterial;
+            });
+          }
+        }
+        return braceRoots.size;
+      }
+
+      function getRootBounds(root) {
+        const meshes = root.getChildMeshes(false).filter((mesh) => mesh.isEnabled());
+        let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+        let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+        for (const mesh of meshes) {
+          mesh.computeWorldMatrix(true);
+          mesh.refreshBoundingInfo();
+          const box = mesh.getBoundingInfo().boundingBox;
+          minimum = Vector3.Minimize(minimum, box.minimumWorld);
+          maximum = Vector3.Maximize(maximum, box.maximumWorld);
+        }
+        const size = maximum.subtract(minimum);
+        return {
+          meshCount: meshes.length,
+          size: {
+            x: Number(size.x.toFixed(3)),
+            y: Number(size.y.toFixed(3)),
+            z: Number(size.z.toFixed(3)),
+          },
+        };
+      }
+
+      async function createShelfCase(testCase) {
+        const root = new TransformNode(`${testCase.label}_root`, scene);
+        root.position.x = testCase.x;
+        root.position.z = testCase.z ?? 0;
+        root.rotation.y = testCase.rotationY ?? 0;
+        const contentRoot = new TransformNode(`${testCase.label}_contentRoot`, scene);
+        contentRoot.parent = root;
+        contentRoot.scaling = new Vector3(0.001, 0.001, 0.001);
+
+        const container = await SceneLoader.LoadAssetContainerAsync("./shelf-assets/", "Shelf.glb", scene);
+        container.addAllToScene();
+        parentTopLevelModelNodes(container, contentRoot);
+        normalizeModelContentOrigin(root);
+        syncModelScriptMetadata(contentRoot, testCase.values);
+
+        const modelAsset = {
+          sourcePath: "./shelf-assets/Shelf.glb",
+          sourceUrl: "./shelf-assets/Shelf.glb",
+          lengthUnit: "millimeter",
+          unitScaleToMeters: 0.001,
+          scriptAssets: [
+            {
+              path: "./shelf-assets/shelf.model.ts",
+              sourceUrl: "./shelf-assets/shelf.model.txt",
+              name: "shelf.model.ts",
+            },
+          ],
+          parameterScriptMetadata: metadata.parameterScripts ?? [],
+          animationScriptMetadata: metadata.animationScripts ?? [],
+          parameterValues: testCase.values,
+        };
+
+        const runtime = new ExternalModelScriptRuntime(contentRoot, modelAsset);
+        runtime.updateParameterValues(testCase.values);
+        await runtime.start();
+        runtime.update();
+        return { label: testCase.label, braceCount: highlightAndCountBraces(root), ...getRootBounds(root) };
+      }
+
+      try {
+        const reports = [];
+        for (const testCase of cases) {
+          reports.push(await createShelfCase(testCase));
+        }
+        const summary = reports
+          .map((item) => `${item.label}: brace=${item.braceCount}, mesh=${item.meshCount}, size=${item.size.x}/${item.size.y}/${item.size.z}`)
+          .join("<br />");
+        status.innerHTML = `<span class="ok">完成</span><br />${summary}`;
+        engine.runRenderLoop(() => scene.render());
+        window.__SHELF_HEIGHT_REPORT__ = reports;
+        window.__SHELF_HEIGHT_READY__ = true;
+      } catch (error) {
+        console.error(error);
+        status.innerHTML = `<span class="error">失败</span>：${error instanceof Error ? error.message : String(error)}`;
+        window.__SHELF_HEIGHT_READY__ = false;
+      }
+
+      window.addEventListener("resize", () => engine.resize());
+    </script>
+  </body>
+</html>

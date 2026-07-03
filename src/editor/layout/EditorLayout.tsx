@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ConsolePanel } from '../panels/ConsolePanel';
 import { HierarchyPanel } from '../panels/HierarchyPanel';
 import { InspectorPanel } from '../panels/InspectorPanel';
@@ -25,11 +25,15 @@ function isKeyboardEditableTarget(target: EventTarget | null): boolean {
 }
 
 export function EditorLayout() {
+  const [isConsoleMinimized, setConsoleMinimized] = useState(false);
+  const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
   const gridSettings = useEditorStore((state) => state.gridSettings);
   const cameraSettings = useEditorStore((state) => state.cameraSettings);
+  const cadImportProgress = useEditorStore((state) => state.cadImportProgress);
+  const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const setTransformTool = useEditorStore((state) => state.setTransformTool);
   const setTransformSpace = useEditorStore((state) => state.setTransformSpace);
   const setSnapEnabled = useEditorStore((state) => state.setSnapEnabled);
@@ -38,18 +42,71 @@ export function EditorLayout() {
   const setGridCellSize = useEditorStore((state) => state.setGridCellSize);
   const setCameraViewRange = useEditorStore((state) => state.setCameraViewRange);
   const deleteSelectedEntity = useEditorStore((state) => state.deleteSelectedEntity);
+  const hideSelectedEntities = useEditorStore((state) => state.hideSelectedEntities);
+  const lockSelectedEntities = useEditorStore((state) => state.lockSelectedEntities);
+  const copySelectedEntities = useEditorStore((state) => state.copySelectedEntities);
+  const pasteEntityClipboard = useEditorStore((state) => state.pasteEntityClipboard);
+  const groupSelectedEntities = useEditorStore((state) => state.groupSelectedEntities);
+  const ungroupSelectedEntities = useEditorStore((state) => state.ungroupSelectedEntities);
+  const requestSceneFocusForSelection = useEditorStore((state) => state.requestSceneFocusForSelection);
+  const importCadReference = useEditorStore((state) => state.importCadReference);
   const saveScene = useEditorStore((state) => state.saveScene);
   const loadScene = useEditorStore((state) => state.loadScene);
+  const updateMqttConfig = useEditorStore((state) => state.updateMqttConfig);
   const undo = useEditorStore((state) => state.undo);
   const redo = useEditorStore((state) => state.redo);
-  const canDelete = useEditorStore((state) => state.scene.selectedEntityId !== null);
+  const canDelete = useEditorStore((state) => {
+    const selectedEntityId = state.scene.selectedEntityId;
+    const selectedEntity = selectedEntityId ? state.scene.entities[selectedEntityId] : null;
+    const parentEntity = selectedEntity?.parentId ? state.scene.entities[selectedEntity.parentId] : null;
+    const isLocked = selectedEntity?.locked === true || parentEntity?.locked === true;
+
+    return Boolean(selectedEntity && !isLocked);
+  });
   const canUndo = useEditorStore((state) => state.history.undoStack.length > 0);
   const canRedo = useEditorStore((state) => state.history.redoStack.length > 0);
 
   useEffect(() => {
-    /** 处理 W/E/R 工具快捷键与 Delete 删除快捷键，保持和 Toolbar 按钮共用同一条 store 更新路径。 */
+    /** 处理编辑器全局快捷键，保持和菜单/Toolbar 共用同一条 store 更新路径。 */
     function handleWindowKeyDown(event: KeyboardEvent): void {
-      if (event.ctrlKey || event.metaKey || event.altKey || isKeyboardEditableTarget(event.target)) return;
+      if (event.altKey || isKeyboardEditableTarget(event.target)) return;
+
+      const key = event.key.toLowerCase();
+      const isCommandKey = event.ctrlKey || event.metaKey;
+
+      if (isCommandKey) {
+        if (key === 'c') {
+          event.preventDefault();
+          copySelectedEntities();
+          return;
+        }
+
+        if (key === 'v') {
+          event.preventDefault();
+          pasteEntityClipboard();
+          return;
+        }
+
+        if (key === 'k') {
+          event.preventDefault();
+          lockSelectedEntities();
+          return;
+        }
+
+        if (key === 'g' && !event.shiftKey) {
+          event.preventDefault();
+          groupSelectedEntities();
+          return;
+        }
+
+        return;
+      }
+
+      if (event.shiftKey && key === 'g') {
+        event.preventDefault();
+        ungroupSelectedEntities();
+        return;
+      }
 
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault();
@@ -57,7 +114,19 @@ export function EditorLayout() {
         return;
       }
 
-      const tool = TOOL_SHORTCUTS[event.key.toLowerCase()];
+      if (key === 'f') {
+        event.preventDefault();
+        requestSceneFocusForSelection();
+        return;
+      }
+
+      if (key === 'h') {
+        event.preventDefault();
+        hideSelectedEntities();
+        return;
+      }
+
+      const tool = TOOL_SHORTCUTS[key];
       if (!tool) return;
 
       event.preventDefault();
@@ -68,7 +137,26 @@ export function EditorLayout() {
     return () => {
       window.removeEventListener('keydown', handleWindowKeyDown);
     };
-  }, [deleteSelectedEntity, setTransformTool]);
+  }, [
+    copySelectedEntities,
+    deleteSelectedEntity,
+    groupSelectedEntities,
+    hideSelectedEntities,
+    lockSelectedEntities,
+    pasteEntityClipboard,
+    requestSceneFocusForSelection,
+    setTransformTool,
+    ungroupSelectedEntities,
+  ]);
+
+  /** 仅在当前编辑会话内切换 Console 折叠状态，避免写入场景文件或全局 store。 */
+  function toggleConsoleMinimized(): void {
+    setConsoleMinimized((value) => !value);
+  }
+
+  const centerColumnClassName = isConsoleMinimized
+    ? `${styles.centerColumn} ${styles.centerColumnConsoleMinimized}`
+    : styles.centerColumn;
 
   return (
     <div className={styles.editorShell}>
@@ -90,6 +178,13 @@ export function EditorLayout() {
         onRedo={redo}
         onSaveScene={() => void saveScene()}
         onLoadScene={() => void loadScene()}
+        onImportCadReference={() => void importCadReference()}
+        mqttConfig={mqttConfig}
+        mqttConfigDialogOpen={isMqttConfigDialogOpen}
+        onOpenMqttConfig={() => setMqttConfigDialogOpen(true)}
+        onCloseMqttConfig={() => setMqttConfigDialogOpen(false)}
+        onSaveMqttConfig={updateMqttConfig}
+        cadImportProgress={cadImportProgress}
         canDelete={canDelete}
         canUndo={canUndo}
         canRedo={canRedo}
@@ -98,9 +193,9 @@ export function EditorLayout() {
         <aside className={styles.leftColumn}>
           <HierarchyPanel />
         </aside>
-        <main className={styles.centerColumn}>
+        <main className={centerColumnClassName}>
           <SceneViewPanel />
-          <ConsolePanel />
+          <ConsolePanel isMinimized={isConsoleMinimized} onToggleMinimized={toggleConsoleMinimized} />
         </main>
         <aside className={styles.rightColumn}>
           <InspectorPanel />

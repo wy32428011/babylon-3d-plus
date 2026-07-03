@@ -1,0 +1,367 @@
+{
+  "parameterScripts": [
+    {
+      "modelFilename": "YZJ.glb",
+      "scriptFilename": "yzj.model.ts",
+      "className": "ParametricModelParamsComponent",
+      "fields": [
+        {
+          "key": "modelKey",
+          "label": "模型标识",
+          "type": "string",
+          "defaultValue": "yzj",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "deviceType",
+          "label": "设备类型",
+          "type": "string",
+          "defaultValue": "输送",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "deviceName",
+          "label": "设备名称",
+          "type": "string",
+          "defaultValue": "一体式顶升移载",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "description",
+          "label": "参数说明",
+          "type": "string",
+          "defaultValue": "支持链条机长宽高、顶升模块独立长度、辊筒宽度位置密度和前后支架显示隐藏参数化。",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "chainLength",
+          "label": "链条机长度",
+          "type": "number",
+          "defaultValue": 1.828,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "platformLength",
+          "label": "顶升模块长度",
+          "type": "number",
+          "defaultValue": 1.022,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "chainWidth",
+          "label": "链条机宽度",
+          "type": "number",
+          "defaultValue": 1.194,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "chainHeight",
+          "label": "链条机高度",
+          "type": "number",
+          "defaultValue": 0.803,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "rollerWidth",
+          "label": "辊筒宽度",
+          "type": "number",
+          "defaultValue": 0.062,
+          "configuration": {
+            "type": "number",
+            "min": 0.01,
+            "max": 100,
+            "step": 0.01
+          }
+        },
+        {
+          "key": "rollerPosition",
+          "label": "辊筒位置",
+          "type": "number",
+          "defaultValue": 0,
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "rollerDensity",
+          "label": "辊筒密度",
+          "type": "number",
+          "defaultValue": 1,
+          "configuration": {
+            "type": "number",
+            "min": 1,
+            "max": 100,
+            "step": 1
+          }
+        },
+        {
+          "key": "showFrontSupport",
+          "label": "显示前支架",
+          "type": "boolean",
+          "defaultValue": true,
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        {
+          "key": "showRearSupport",
+          "label": "显示后支架",
+          "type": "boolean",
+          "defaultValue": true,
+          "configuration": {
+            "type": "boolean"
+          }
+        }
+      ],
+      "values": {
+        "modelKey": {
+          "type": "string",
+          "value": "yzj",
+          "label": "模型标识",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "deviceType": {
+          "type": "string",
+          "value": "输送",
+          "label": "设备类型",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "deviceName": {
+          "type": "string",
+          "value": "一体式顶升移载",
+          "label": "设备名称",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string",
+          "value": "支持链条机长宽高、顶升模块独立长度、辊筒宽度位置密度和前后支架显示隐藏参数化。",
+          "label": "参数说明",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "chainLength": {
+          "type": "number",
+          "value": 1.828,
+          "label": "链条机长度",
+          "configuration": {
+            "type": "number",
+            "min": 0.01,
+            "max": 100,
+            "step": 0.01
+          }
+        },
+        "platformLength": {
+          "type": "number",
+          "value": 1.022,
+          "label": "顶升模块长度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "chainWidth": {
+          "type": "number",
+          "value": 1.194,
+          "label": "链条机宽度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "chainHeight": {
+          "type": "number",
+          "value": 0.803,
+          "label": "链条机高度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "rollerWidth": {
+          "type": "number",
+          "value": 0.062,
+          "label": "辊筒宽度",
+          "configuration": {
+            "type": "number",
+            "min": 0.01,
+            "max": 100,
+            "step": 0.01
+          }
+        },
+        "rollerPosition": {
+          "type": "number",
+          "value": 0,
+          "label": "辊筒位置",
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "rollerDensity": {
+          "type": "number",
+          "value": 1,
+          "label": "辊筒密度",
+          "configuration": {
+            "type": "number",
+            "min": 1,
+            "max": 100,
+            "step": 1
+          }
+        },
+        "showFrontSupport": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示前支架",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "showRearSupport": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示后支架",
+          "configuration": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  ],
+  "animationScripts": [
+    {
+      "modelFilename": "YZJ.glb",
+      "scriptFilename": "yzj.model.ts",
+      "className": "ParametricModelRuntimeComponent",
+      "fields": [],
+      "values": {}
+    }
+  ],
+  "modelParameters": {
+    "schema": "babylon-editor.model-parameters",
+    "version": 1,
+    "parameters": [
+      {
+        "key": "chainLength",
+        "label": "链条机长度",
+        "type": "number",
+        "defaultValue": 1.828,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "platformLength",
+        "label": "顶升模块长度",
+        "type": "number",
+        "defaultValue": 1.022,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "chainWidth",
+        "label": "链条机宽度",
+        "type": "number",
+        "defaultValue": 1.194,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "chainHeight",
+        "label": "链条机高度",
+        "type": "number",
+        "defaultValue": 0.803,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "rollerWidth",
+        "label": "辊筒宽度",
+        "type": "number",
+        "defaultValue": 0.062,
+        "min": 0.01,
+        "max": 100,
+        "step": 0.01
+      },
+      {
+        "key": "rollerPosition",
+        "label": "辊筒位置",
+        "type": "number",
+        "defaultValue": 0,
+        "min": -100,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "rollerDensity",
+        "label": "辊筒密度",
+        "type": "number",
+        "defaultValue": 1,
+        "min": 1,
+        "max": 100,
+        "step": 1
+      },
+      {
+        "key": "showFrontSupport",
+        "label": "显示前支架",
+        "type": "boolean",
+        "defaultValue": true
+      },
+      {
+        "key": "showRearSupport",
+        "label": "显示后支架",
+        "type": "boolean",
+        "defaultValue": true
+      }
+    ],
+    "bindings": []
+  }
+}

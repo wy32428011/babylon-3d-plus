@@ -1,0 +1,321 @@
+{
+  "parameterScripts": [
+    {
+      "modelFilename": "Stacker.glb",
+      "scriptFilename": "stacker.model.ts",
+      "className": "ParametricModelParamsComponent",
+      "fields": [
+        {
+          "key": "modelKey",
+          "label": "模型标识",
+          "type": "string",
+          "defaultValue": "stacker",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "deviceType",
+          "label": "设备类型",
+          "type": "string",
+          "defaultValue": "堆垛机",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "deviceName",
+          "label": "设备名称",
+          "type": "string",
+          "defaultValue": "叉式堆垛机",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "description",
+          "label": "参数说明",
+          "type": "string",
+          "defaultValue": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "bodyLength",
+          "label": "主体长度",
+          "type": "number",
+          "defaultValue": 23.012,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "bodyWidth",
+          "label": "主体宽度",
+          "type": "number",
+          "defaultValue": 0.452,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "bodyHeight",
+          "label": "主体高度",
+          "type": "number",
+          "defaultValue": 7.837,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "platformLength",
+          "label": "载货台长度",
+          "type": "number",
+          "defaultValue": 1.279,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "platformHeight",
+          "label": "载货台高度",
+          "type": "number",
+          "defaultValue": 1.695,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "forkLength",
+          "label": "货叉长度",
+          "type": "number",
+          "defaultValue": 0.941,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "forkGap",
+          "label": "货叉间距",
+          "type": "number",
+          "defaultValue": 0.6,
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 50,
+            "step": 0.05
+          }
+        }
+      ],
+      "values": {
+        "modelKey": {
+          "type": "string",
+          "value": "stacker",
+          "label": "模型标识",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "deviceType": {
+          "type": "string",
+          "value": "堆垛机",
+          "label": "设备类型",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "deviceName": {
+          "type": "string",
+          "value": "叉式堆垛机",
+          "label": "设备名称",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string",
+          "value": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+          "label": "参数说明",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "bodyLength": {
+          "type": "number",
+          "value": 23.012,
+          "label": "主体长度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "bodyWidth": {
+          "type": "number",
+          "value": 0.452,
+          "label": "主体宽度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "bodyHeight": {
+          "type": "number",
+          "value": 7.837,
+          "label": "主体高度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "platformLength": {
+          "type": "number",
+          "value": 1.279,
+          "label": "载货台长度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "platformHeight": {
+          "type": "number",
+          "value": 1.695,
+          "label": "载货台高度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "forkLength": {
+          "type": "number",
+          "value": 0.941,
+          "label": "货叉长度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "forkGap": {
+          "type": "number",
+          "value": 0.6,
+          "label": "货叉间距",
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 50,
+            "step": 0.05
+          }
+        }
+      }
+    }
+  ],
+  "animationScripts": [
+    {
+      "modelFilename": "Stacker.glb",
+      "scriptFilename": "stacker.model.ts",
+      "className": "ParametricModelRuntimeComponent",
+      "fields": [],
+      "values": {}
+    }
+  ],
+  "modelParameters": {
+    "schema": "babylon-editor.model-parameters",
+    "version": 1,
+    "parameters": [
+      {
+        "key": "bodyLength",
+        "label": "主体长度",
+        "type": "number",
+        "defaultValue": 23.012,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "bodyWidth",
+        "label": "主体宽度",
+        "type": "number",
+        "defaultValue": 0.452,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "bodyHeight",
+        "label": "主体高度",
+        "type": "number",
+        "defaultValue": 7.837,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "platformLength",
+        "label": "载货台长度",
+        "type": "number",
+        "defaultValue": 1.279,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "platformHeight",
+        "label": "载货台高度",
+        "type": "number",
+        "defaultValue": 1.695,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "forkLength",
+        "label": "货叉长度",
+        "type": "number",
+        "defaultValue": 0.941,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "forkGap",
+        "label": "货叉间距",
+        "type": "number",
+        "defaultValue": 0.6,
+        "min": 0,
+        "max": 50,
+        "step": 0.05
+      }
+    ],
+    "bindings": []
+  }
+}

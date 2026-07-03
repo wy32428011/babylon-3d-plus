@@ -5,10 +5,16 @@ import type { AssetEntry, ImportModelFolderSkippedEntry } from '../types.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
+const MODEL_THUMBNAIL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
 type ModelPackageMetadata = ModelLengthUnitInfo & {
   displayName?: string;
+  thumbnailPath?: string;
+  thumbnailUrl?: string;
   parameterConfig?: unknown;
+  parameterScriptMetadata?: unknown[];
+  animationScriptMetadata?: unknown[];
+  defaultAssetCode?: string;
 };
 
 type ModelPackageScanResult = {
@@ -275,6 +281,50 @@ function selectPrimaryModelFile(packagePath: string, fileNames: string[]): strin
   return null;
 }
 
+function extractThumbnailReferenceFromMetadata(metadata: unknown): string | undefined {
+  if (!isPlainObject(metadata)) return undefined;
+
+  for (const key of ['thumbnail', 'cover']) {
+    const value = metadata[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+
+  return undefined;
+}
+
+/** 只接受模型包内部相对图片路径作为卡片封面，避免元数据越权引用外部文件。 */
+async function resolveModelThumbnail(packagePath: string, metadata: unknown): Promise<Pick<AssetEntry, 'thumbnailPath' | 'thumbnailUrl'> | undefined> {
+  const reference = extractThumbnailReferenceFromMetadata(metadata);
+  if (!reference) return undefined;
+
+  const normalizedReference = reference.replace(/\\/g, '/');
+  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(normalizedReference) || path.isAbsolute(normalizedReference)) {
+    return undefined;
+  }
+
+  const thumbnailPath = path.resolve(packagePath, normalizedReference);
+  const relativePath = path.relative(packagePath, thumbnailPath);
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return undefined;
+  }
+
+  if (!MODEL_THUMBNAIL_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) {
+    return undefined;
+  }
+
+  try {
+    const stat = await fs.stat(thumbnailPath);
+    if (!stat.isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  return {
+    thumbnailPath,
+    thumbnailUrl: encodeAssetUrl(thumbnailPath),
+  };
+}
+
 function extractDisplayNameFromMetadata(metadata: unknown): string | undefined {
   if (!isPlainObject(metadata) || !Array.isArray(metadata.parameterScripts)) return undefined;
 
@@ -317,6 +367,126 @@ function extractModelParameterConfigFromMetadata(metadata: unknown): unknown | u
   return config;
 }
 
+function extractJsonArrayMetadata(metadata: unknown, key: 'parameterScripts' | 'animationScripts'): unknown[] | undefined {
+  if (!isPlainObject(metadata) || !Array.isArray(metadata[key])) return undefined;
+
+  return metadata[key].map((item) => JSON.parse(JSON.stringify(item)) as unknown);
+}
+
+function readFieldConfiguration(field: Record<string, unknown>): Record<string, unknown> {
+  return isPlainObject(field.configuration) ? field.configuration : {};
+}
+
+function readFieldNumber(field: Record<string, unknown>, configuration: Record<string, unknown>, key: string): number | undefined {
+  const directValue = field[key];
+  const configuredValue = configuration[key];
+  if (typeof directValue === 'number' && Number.isFinite(directValue)) return directValue;
+  return typeof configuredValue === 'number' && Number.isFinite(configuredValue) ? configuredValue : undefined;
+}
+
+function normalizeStringOptions(value: unknown, defaultValue: string): { value: string; label: string }[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+
+  const options = value.map((item) => {
+    if (typeof item === 'string' && item.trim()) return { value: item.trim(), label: item.trim() };
+    if (!isPlainObject(item)) return null;
+    const optionValue = typeof item.value === 'string' && item.value.trim() ? item.value.trim() : null;
+    const optionLabel = typeof item.label === 'string' && item.label.trim() ? item.label.trim() : optionValue;
+    return optionValue && optionLabel ? { value: optionValue, label: optionLabel } : null;
+  });
+
+  if (!options.every(Boolean)) return null;
+  const normalizedOptions = options as { value: string; label: string }[];
+  if (!normalizedOptions.some((option) => option.value === defaultValue)) {
+    normalizedOptions.unshift({ value: defaultValue, label: defaultValue });
+  }
+  return normalizedOptions;
+}
+
+function isHexColor(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
+function isParameterInfoField(key: string): boolean {
+  return ['modelKey', 'deviceType', 'deviceName', 'description'].includes(key);
+}
+
+function createParameterDefinitionFromScriptField(field: unknown): unknown | null {
+  if (!isPlainObject(field)) return null;
+
+  const key = typeof field.key === 'string' && field.key.trim() ? field.key.trim() : null;
+  const label = typeof field.label === 'string' && field.label.trim() ? field.label.trim() : key;
+  if (!key || !label) return null;
+
+  const configuration = readFieldConfiguration(field);
+  const type = typeof field.type === 'string' ? field.type : configuration.type;
+  const defaultValue = field.defaultValue;
+  const base = { key, label };
+
+  if (type === 'number' && typeof defaultValue === 'number' && Number.isFinite(defaultValue)) {
+    return {
+      ...base,
+      type: 'number',
+      defaultValue,
+      min: readFieldNumber(field, configuration, 'min'),
+      max: readFieldNumber(field, configuration, 'max'),
+      step: readFieldNumber(field, configuration, 'step'),
+    };
+  }
+
+  if (type === 'boolean' && typeof defaultValue === 'boolean') {
+    return { ...base, type: 'boolean', defaultValue };
+  }
+
+  if (typeof defaultValue === 'string') {
+    const options = normalizeStringOptions(field.options ?? configuration.options, defaultValue);
+    if (options) return { ...base, type: 'enum', defaultValue, options };
+    if (isHexColor(defaultValue)) return { ...base, type: 'color', defaultValue };
+    if (type === 'texture' && /\.(png|jpe?g|webp)$/i.test(defaultValue)) {
+      return { ...base, type: 'texture', defaultValue, allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp'] };
+    }
+    if (isParameterInfoField(key)) return null;
+  }
+
+  if (isPlainObject(defaultValue) &&
+    typeof defaultValue.x === 'number' &&
+    typeof defaultValue.y === 'number' &&
+    typeof defaultValue.z === 'number') {
+    return {
+      ...base,
+      type: 'vector3',
+      defaultValue: { x: defaultValue.x, y: defaultValue.y, z: defaultValue.z },
+      min: readFieldNumber(field, configuration, 'min'),
+      max: readFieldNumber(field, configuration, 'max'),
+      step: readFieldNumber(field, configuration, 'step'),
+    };
+  }
+
+  return null;
+}
+
+function extractModelParameterConfigFromParameterScripts(metadata: unknown): unknown | undefined {
+  if (!isPlainObject(metadata) || !Array.isArray(metadata.parameterScripts)) return undefined;
+
+  const parameters: unknown[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const script of metadata.parameterScripts) {
+    if (!isPlainObject(script) || !Array.isArray(script.fields)) continue;
+
+    for (const field of script.fields) {
+      const definition = createParameterDefinitionFromScriptField(field);
+      if (!isPlainObject(definition) || typeof definition.key !== 'string' || seenKeys.has(definition.key)) continue;
+      seenKeys.add(definition.key);
+      parameters.push(definition);
+    }
+  }
+
+  return parameters.length > 0
+    ? { schema: 'babylon-editor.model-parameters', version: 1, parameters, bindings: [] }
+    : undefined;
+}
+
 async function readModelPackageMetadata(
   packagePath: string,
   modelFilePath: string,
@@ -335,10 +505,15 @@ async function readModelPackageMetadata(
       throw new Error(`模型单位不受支持：${isPlainObject(parsed) ? String(parsed.lengthUnit) : 'unknown'}`);
     }
 
+    const thumbnail = await resolveModelThumbnail(packagePath, parsed);
+
     return {
       metadataPath,
+      ...(thumbnail ?? {}),
       displayName: extractDisplayNameFromMetadata(parsed),
-      parameterConfig: extractModelParameterConfigFromMetadata(parsed),
+      parameterConfig: extractModelParameterConfigFromMetadata(parsed) ?? extractModelParameterConfigFromParameterScripts(parsed),
+      parameterScriptMetadata: extractJsonArrayMetadata(parsed, 'parameterScripts'),
+      animationScriptMetadata: extractJsonArrayMetadata(parsed, 'animationScripts'),
       ...unitInfo,
     };
   } catch (error) {
@@ -356,6 +531,30 @@ function findModelScripts(packagePath: string, fileNames: string[]): string[] {
     .map((fileName) => path.join(packagePath, fileName));
 }
 
+/** 从模型包脚本 dataDriven.device.defaultAssetCode 中只读提取导入实例编号前缀。 */
+async function readDefaultAssetCodeFromScripts(scriptPaths: string[]): Promise<string | undefined> {
+  for (const scriptPath of scriptPaths) {
+    try {
+      const sourceText = await fs.readFile(scriptPath, 'utf-8');
+      const match = sourceText.match(/\bdefaultAssetCode\s*:\s*["'`]([^"'`]{1,128})["'`]/);
+      const defaultAssetCode = match?.[1]?.trim();
+      if (defaultAssetCode) return defaultAssetCode;
+    } catch {
+      // 单个脚本读取失败不影响模型包导入，默认编号会退回通用前缀。
+    }
+  }
+
+  return undefined;
+}
+
+function createModelScriptAssets(scriptPaths: string[]): NonNullable<AssetEntry['scriptAssets']> {
+  return scriptPaths.map((scriptPath) => ({
+    path: scriptPath,
+    sourceUrl: encodeAssetUrl(scriptPath),
+    name: path.basename(scriptPath),
+  }));
+}
+
 export async function scanModelPackage(packagePath: string): Promise<ModelPackageScanResult> {
   const entries = await fs.readdir(packagePath, { withFileTypes: true });
   const fileNames = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
@@ -371,8 +570,10 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
     };
   }
 
-  const metadata = await readModelPackageMetadata(packagePath, modelFilePath);
   const scriptPaths = findModelScripts(packagePath, fileNames);
+  const metadata = await readModelPackageMetadata(packagePath, modelFilePath);
+  const defaultAssetCode = await readDefaultAssetCodeFromScripts(scriptPaths);
+  const scriptAssets = createModelScriptAssets(scriptPaths);
   const modelFileName = path.basename(modelFilePath);
   const packageName = path.basename(packagePath);
 
@@ -385,7 +586,13 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
       kind: 'model',
       packagePath,
       metadataPath: metadata.metadataPath,
+      thumbnailPath: metadata.thumbnailPath,
+      thumbnailUrl: metadata.thumbnailUrl,
       scriptPaths,
+      scriptAssets,
+      parameterScriptMetadata: metadata.parameterScriptMetadata,
+      animationScriptMetadata: metadata.animationScriptMetadata,
+      defaultAssetCode: defaultAssetCode ?? metadata.defaultAssetCode,
       displayName: metadata.displayName ?? packageName ?? path.parse(modelFileName).name,
       lengthUnit: metadata.lengthUnit,
       unitScaleToMeters: metadata.unitScaleToMeters,

@@ -1,5 +1,6 @@
-import { useEffect, useRef, type DragEvent, type PointerEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent, type PointerEvent } from 'react';
 import { createBabylonViewport, type BabylonViewport } from '../../runtime/babylon/createEngine';
+import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import { TransformGizmoController } from '../../runtime/babylon/TransformGizmoController';
 import {
@@ -18,25 +19,37 @@ type PointerClickSnapshot = {
   clientY: number;
 };
 
+/** 将未知异常转换成可展示的简短消息。 */
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function SceneViewPanel() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<BabylonViewport | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
   const gizmoRef = useRef<TransformGizmoController | null>(null);
+  const mqttTelemetryClientRef = useRef<MqttStackerTelemetryClient | null>(null);
   const clickSnapshotRef = useRef<PointerClickSnapshot | null>(null);
+  const [viewportError, setViewportError] = useState<string | null>(null);
   const sceneDocument = useEditorStore((state) => state.scene);
+  const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const selectedEntityId = useEditorStore((state) => state.scene.selectedEntityId);
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
   const gridSettings = useEditorStore((state) => state.gridSettings);
   const cameraSettings = useEditorStore((state) => state.cameraSettings);
+  const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
   const selectEntity = useEditorStore((state) => state.selectEntity);
   const createMesh = useEditorStore((state) => state.createMesh);
+  const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
+  const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
+  const pushLog = useEditorStore((state) => state.pushLog);
 
   /** 记录左键按下位置，用于区分单击选中和拖拽旋转视角。 */
   function handleCanvasPointerDown(event: PointerEvent<HTMLCanvasElement>): void {
@@ -116,36 +129,66 @@ export function SceneViewPanel() {
       return;
     }
 
+    if (builtInAsset.kind === 'locator') {
+      createLocator(placementPosition);
+      return;
+    }
+
     createLight(builtInAsset.lightKind, placementPosition);
   }
 
   useEffect(() => {
     if (!canvasRef.current) return;
 
-    const viewport = createBabylonViewport(canvasRef.current);
-    const runtime = new SceneRuntime(viewport.scene);
-    const gizmo = new TransformGizmoController(viewport.scene, {
-      previewTransform: previewEntityTransform,
-      commitTransform: commitEntityTransform,
-    });
+    let viewport: BabylonViewport | null = null;
+    let runtime: SceneRuntime | null = null;
+    let gizmo: TransformGizmoController | null = null;
+    let mqttTelemetryClient: MqttStackerTelemetryClient | null = null;
+
+    try {
+      viewport = createBabylonViewport(canvasRef.current);
+      runtime = new SceneRuntime(viewport.scene, pushLog);
+      gizmo = new TransformGizmoController(viewport.scene, {
+        previewTransform: previewEntityTransform,
+        commitTransform: commitEntityTransform,
+      });
+      mqttTelemetryClient = new MqttStackerTelemetryClient(pushLog);
+      setViewportError(null);
+    } catch (error) {
+      console.error('Scene View 渲染引擎初始化失败。', error);
+      mqttTelemetryClient?.dispose();
+      gizmo?.dispose();
+      runtime?.dispose();
+      viewport?.dispose();
+      setViewportError(`Scene View 渲染引擎初始化失败：${getErrorMessage(error)}`);
+      return;
+    }
+
+    const initializedViewport = viewport;
+    const initializedRuntime = runtime;
+    const initializedGizmo = gizmo;
+    const initializedMqttTelemetryClient = mqttTelemetryClient;
     viewportRef.current = viewport;
     runtimeRef.current = runtime;
     gizmoRef.current = gizmo;
+    mqttTelemetryClientRef.current = mqttTelemetryClient;
 
-    const resize = () => viewport.engine.resize();
+    const resize = () => initializedViewport.engine.resize();
     window.addEventListener('resize', resize);
     resize();
 
     return () => {
       window.removeEventListener('resize', resize);
-      gizmo.dispose();
-      runtime.dispose();
-      viewport.dispose();
+      initializedMqttTelemetryClient?.dispose();
+      initializedGizmo.dispose();
+      initializedRuntime.dispose();
+      initializedViewport.dispose();
       viewportRef.current = null;
       runtimeRef.current = null;
       gizmoRef.current = null;
+      mqttTelemetryClientRef.current = null;
     };
-  }, [previewEntityTransform, commitEntityTransform]);
+  }, [previewEntityTransform, commitEntityTransform, pushLog]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -156,6 +199,10 @@ export function SceneViewPanel() {
     const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityId);
     gizmo.attachToTarget(selectedTarget, selectedEntityId);
   }, [sceneDocument, selectedEntityId]);
+
+  useEffect(() => {
+    mqttTelemetryClientRef.current?.updateConfig(mqttConfig);
+  }, [mqttConfig]);
 
   useEffect(() => {
     gizmoRef.current?.setTool(transformTool);
@@ -177,18 +224,38 @@ export function SceneViewPanel() {
     viewportRef.current?.setCameraSettings(cameraSettings);
   }, [cameraSettings]);
 
+  useEffect(() => {
+    if (!sceneFocusRequest) return;
+
+    const runtime = runtimeRef.current;
+    const viewport = viewportRef.current;
+    if (!runtime || !viewport) return;
+
+    const bounds = runtime.getEntitiesWorldBounds(sceneFocusRequest.entityIds);
+    if (bounds) viewport.focusOnBounds(bounds);
+    consumeSceneFocusRequest(sceneFocusRequest.id);
+  }, [sceneFocusRequest, consumeSceneFocusRequest]);
+
   return (
     <section className="scene-panel">
       <h2>Scene</h2>
-      <canvas
-        ref={canvasRef}
-        className="scene-canvas"
-        onDragOver={handleCanvasDragOver}
-        onDrop={handleCanvasDrop}
-        onPointerDown={handleCanvasPointerDown}
-        onPointerUp={handleCanvasPointerUp}
-        onPointerCancel={handleCanvasPointerCancel}
-      />
+      <div className="scene-viewport">
+        <canvas
+          ref={canvasRef}
+          className="scene-canvas"
+          onDragOver={handleCanvasDragOver}
+          onDrop={handleCanvasDrop}
+          onPointerDown={handleCanvasPointerDown}
+          onPointerUp={handleCanvasPointerUp}
+          onPointerCancel={handleCanvasPointerCancel}
+        />
+        {viewportError ? (
+          <div className="scene-error" role="alert">
+            <strong>Scene View 无法启动</strong>
+            <p>{viewportError}</p>
+          </div>
+        ) : null}
+      </div>
     </section>
   );
 }

@@ -1,182 +1,41 @@
-import { useEffect, useMemo, useState, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
   encodeBuiltInAssetDragPayload,
   encodeModelAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
   type AssetEntry,
-  type BuiltInAssetDragPayload,
 } from '../assets/AssetDatabase';
-import type { LightKind, MeshKind } from '../model/components';
-import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/sceneUnits';
+import {
+  BUILT_IN_MODEL_LIBRARY_ITEMS,
+  PROJECT_LIBRARIES,
+  createModelLibraryItems,
+  getModelUnitTitle,
+  isBuiltInProjectLibraryItem,
+  isImportedProjectLibraryItem,
+  type ProjectLibraryItem,
+  type ProjectLibraryKey,
+} from '../assets/projectLibrary';
 import { useEditorStore } from '../store/editorStore';
-
-type ProjectLibraryKey = 'model' | 'poi' | 'theme' | 'composition' | 'environment' | 'chart' | 'image';
-
-type BuiltInProjectLibraryItem = {
-  id: string;
-  name: string;
-  icon: string;
-  builtIn: BuiltInAssetDragPayload;
-};
-
-type ImportedProjectLibraryItem = {
-  id: string;
-  name: string;
-  icon: string;
-  asset: AssetEntry;
-};
-
-type PlaceholderProjectLibraryItem = {
-  id: string;
-  name: string;
-  icon: string;
-};
-
-type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | PlaceholderProjectLibraryItem;
-
-type ProjectLibrary = {
-  key: ProjectLibraryKey;
-  label: string;
-  searchLabel: string;
-  searchPlaceholder: string;
-  items: ProjectLibraryItem[];
-};
+import { ResourceCard } from '../ui/ResourceCard';
 
 type ModelFolderStatus = {
   message: string;
   kind: 'info' | 'error';
 };
 
-const BUILT_IN_MODEL_LIBRARY_ITEMS: BuiltInProjectLibraryItem[] = [
-  { id: 'builtin-cube', name: '立方体', icon: 'cube', builtIn: { kind: 'mesh', meshKind: 'cube' } },
-  { id: 'builtin-sphere', name: '球体', icon: 'ring', builtIn: { kind: 'mesh', meshKind: 'sphere' } },
-  { id: 'builtin-plane', name: '地面', icon: 'panel', builtIn: { kind: 'mesh', meshKind: 'plane' } },
-  { id: 'builtin-hemispheric-light', name: '半球光', icon: 'marker', builtIn: { kind: 'light', lightKind: 'hemispheric' } },
-  { id: 'builtin-directional-light', name: '方向光', icon: 'marker', builtIn: { kind: 'light', lightKind: 'directional' } },
-  { id: 'builtin-point-light', name: '点光源', icon: 'marker', builtIn: { kind: 'light', lightKind: 'point' } },
-];
-
-const PROJECT_LIBRARIES: ProjectLibrary[] = [
-  {
-    key: 'model',
-    label: '模型库',
-    searchLabel: '模型名称',
-    searchPlaceholder: '请输入模型名称...',
-    items: [
-      { id: 'model-trigger', name: '事件触发器', icon: 'cube' },
-      { id: 'model-sender', name: '发送器', icon: 'cube' },
-      { id: 'model-receiver', name: '回收器', icon: 'cube' },
-      { id: 'model-generator', name: '模型产生器', icon: 'ring' },
-    ],
-  },
-  {
-    key: 'poi',
-    label: 'POI库',
-    searchLabel: 'POI名称',
-    searchPlaceholder: '请输入POI名称...',
-    items: [
-      { id: 'poi-chart-marker', name: '图表立标', icon: 'marker' },
-      { id: 'poi-panel', name: '图表面板', icon: 'panel' },
-      { id: 'poi-alarm', name: '报警管理器', icon: 'cube' },
-      { id: 'poi-roam', name: '手动漫游', icon: 'person' },
-    ],
-  },
-  {
-    key: 'theme',
-    label: '主题库',
-    searchLabel: '主题名称',
-    searchPlaceholder: '请输入主题名称...',
-    items: [
-      { id: 'theme-tech-blue', name: '科技蓝主题', icon: 'panel' },
-      { id: 'theme-dark-city', name: '暗色城市', icon: 'ring' },
-      { id: 'theme-energy', name: '能源监控', icon: 'marker' },
-      { id: 'theme-command', name: '指挥中心', icon: 'panel' },
-    ],
-  },
-  {
-    key: 'composition',
-    label: '组合库',
-    searchLabel: '组合名称',
-    searchPlaceholder: '请输入组合名称...',
-    items: [
-      { id: 'composition-device', name: '设备组合', icon: 'cube' },
-      { id: 'composition-dashboard', name: '看板组合', icon: 'panel' },
-      { id: 'composition-alarm', name: '告警组合', icon: 'marker' },
-      { id: 'composition-scene', name: '场景组合', icon: 'ring' },
-    ],
-  },
-  {
-    key: 'environment',
-    label: '环境库',
-    searchLabel: '环境名称',
-    searchPlaceholder: '请输入环境名称...',
-    items: [
-      { id: 'environment-sky', name: '天空环境', icon: 'ring' },
-      { id: 'environment-ground', name: '地面环境', icon: 'marker' },
-      { id: 'environment-light', name: '灯光环境', icon: 'panel' },
-      { id: 'environment-weather', name: '天气环境', icon: 'cube' },
-    ],
-  },
-  {
-    key: 'chart',
-    label: '图表库',
-    searchLabel: '图表名称',
-    searchPlaceholder: '请输入图表名称...',
-    items: [
-      { id: 'chart-board', name: '图表面板', icon: 'panel' },
-      { id: 'chart-column', name: '柱状图', icon: 'marker' },
-      { id: 'chart-line', name: '折线图', icon: 'panel' },
-      { id: 'chart-ring', name: '环形图', icon: 'ring' },
-    ],
-  },
-  {
-    key: 'image',
-    label: '图片库',
-    searchLabel: '图片名称',
-    searchPlaceholder: '请输入图片名称...',
-    items: [
-      { id: 'image-bg', name: '背景图片', icon: 'panel' },
-      { id: 'image-icon', name: '图标贴图', icon: 'cube' },
-      { id: 'image-mask', name: '遮罩图片', icon: 'ring' },
-      { id: 'image-texture', name: '材质贴图', icon: 'marker' },
-    ],
-  },
-];
-
-function createModelLibraryItems(modelAssets: AssetEntry[]): ImportedProjectLibraryItem[] {
-  return modelAssets.map((asset) => ({
-    id: asset.id,
-    name: asset.displayName?.trim() || asset.name.replace(/\.(gltf|glb)$/i, ''),
-    icon: 'cube',
-    asset,
-  }));
-}
-
-function ResourceIcon({ icon }: { icon: ProjectLibraryItem['icon'] }) {
-  return <span className={`resource-card-icon resource-card-icon-${icon}`} aria-hidden="true" />;
-}
-
-function isBuiltInProjectLibraryItem(item: ProjectLibraryItem): item is BuiltInProjectLibraryItem {
-  return 'builtIn' in item;
-}
-
-function isImportedProjectLibraryItem(item: ProjectLibraryItem): item is ImportedProjectLibraryItem {
-  return 'asset' in item;
-}
-
-function getModelUnitTitle(asset: AssetEntry): string {
-  const lengthUnit = asset.lengthUnit ?? DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit;
-  return `源单位：${formatModelLengthUnit(lengthUnit)} → m`;
-}
-
 export function ProjectPanel() {
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const createMesh = useEditorStore((state) => state.createMesh);
+  const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
+  const projectAssetFocusRequest = useEditorStore((state) => state.projectAssetFocusRequest);
+  const consumeProjectAssetFocusRequest = useEditorStore((state) => state.consumeProjectAssetFocusRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
+  const resourceCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
   const [modelAssets, setModelAssets] = useState<AssetEntry[]>([]);
+  const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [hasImportedModelFolder, setHasImportedModelFolder] = useState(false);
   const [isImportingModelFolder, setIsImportingModelFolder] = useState(false);
@@ -233,6 +92,40 @@ export function ProjectPanel() {
     };
   }, [pushLog]);
 
+  useEffect(() => {
+    if (!projectAssetFocusRequest) return;
+
+    const matchedAsset = modelAssets.find((asset) =>
+      asset.sourceUrl === projectAssetFocusRequest.sourceUrl ||
+      asset.path === projectAssetFocusRequest.sourcePath,
+    );
+
+    if (!matchedAsset) {
+      pushLog(`库聚焦失败：未找到 ${projectAssetFocusRequest.entityName} 对应的模型卡片。`);
+      consumeProjectAssetFocusRequest(projectAssetFocusRequest.id);
+      return;
+    }
+
+    setActiveLibraryKey('model');
+    setFocusedAssetId(matchedAsset.id);
+    pushLog(`库聚焦到模型卡片：${matchedAsset.displayName ?? matchedAsset.name}`);
+    consumeProjectAssetFocusRequest(projectAssetFocusRequest.id);
+  }, [consumeProjectAssetFocusRequest, modelAssets, projectAssetFocusRequest, pushLog]);
+
+  useEffect(() => {
+    if (!focusedAssetId || activeLibraryKey !== 'model') return;
+
+    const card = resourceCardRefs.current.get(focusedAssetId);
+    if (!card) return;
+
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    const timeoutId = window.setTimeout(() => setFocusedAssetId(null), 1800);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [activeLibraryKey, focusedAssetId, activeItems]);
+
   async function handleImportModelFolder(): Promise<void> {
     if (!window.editorApi?.importModelFolder) {
       const statusMessage = '导入模型文件夹需要 Electron 桌面环境，请使用 npm run dev:electron 启动编辑器。';
@@ -279,11 +172,16 @@ export function ProjectPanel() {
   function handleResourceCardClick(item: ProjectLibraryItem): void {
     if (isBuiltInProjectLibraryItem(item)) {
       if (item.builtIn.kind === 'mesh') {
-        createMesh(item.builtIn.meshKind as MeshKind);
+        createMesh(item.builtIn.meshKind);
         return;
       }
 
-      createLight(item.builtIn.lightKind as LightKind);
+      if (item.builtIn.kind === 'locator') {
+        createLocator();
+        return;
+      }
+
+      createLight(item.builtIn.lightKind);
       return;
     }
 
@@ -371,13 +269,22 @@ export function ProjectPanel() {
           const isActionableItem = isBuiltInItem || isImportedModel;
 
           return (
-            <button
-              className={isActionableItem ? 'resource-card resource-card-clickable' : 'resource-card'}
+            <ResourceCard
               disabled={!isActionableItem}
               draggable={isActionableItem}
+              focused={item.id === focusedAssetId}
+              item={item}
               key={item.id}
+              library={activeLibrary}
               onClick={() => handleResourceCardClick(item)}
               onDragStart={(event) => handleResourceCardDragStart(event, item)}
+              setButtonRef={(node) => {
+                if (node) {
+                  resourceCardRefs.current.set(item.id, node);
+                } else {
+                  resourceCardRefs.current.delete(item.id);
+                }
+              }}
               title={
                 isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`
@@ -385,13 +292,7 @@ export function ProjectPanel() {
                     ? `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`
                     : '占位资源，功能后续接入'
               }
-              type="button"
-            >
-              <span className="resource-card-preview">
-                <ResourceIcon icon={item.icon} />
-              </span>
-              <strong className="resource-card-name">{item.name}</strong>
-            </button>
+            />
           );
         })}
       </div>

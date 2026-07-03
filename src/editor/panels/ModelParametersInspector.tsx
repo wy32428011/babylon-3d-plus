@@ -16,6 +16,7 @@ import { useEditorStore } from '../store/editorStore';
 
 type ModelParametersInspectorProps = {
   modelAsset: ModelAssetComponent;
+  disabled?: boolean;
 };
 
 type DraftValues = Record<string, string>;
@@ -46,7 +47,7 @@ function getContinuousDraftKey(parameterKey: string, axis?: keyof Vector3Data): 
   return axis ? `${parameterKey}.${axis}` : parameterKey;
 }
 
-export function ModelParametersInspector({ modelAsset }: ModelParametersInspectorProps) {
+export function ModelParametersInspector({ modelAsset, disabled = false }: ModelParametersInspectorProps) {
   const updateSelectedModelParameterValue = useEditorStore((state) => state.updateSelectedModelParameterValue);
   const previewSelectedModelParameterValue = useEditorStore((state) => state.previewSelectedModelParameterValue);
   const commitSelectedModelParameterValues = useEditorStore((state) => state.commitSelectedModelParameterValues);
@@ -118,6 +119,7 @@ export function ModelParametersInspector({ modelAsset }: ModelParametersInspecto
         <span>{definition.label}</span>
         <input
           type="number"
+          disabled={disabled}
           min={definition.min}
           max={definition.max}
           step={definition.step ?? 0.1}
@@ -144,6 +146,7 @@ export function ModelParametersInspector({ modelAsset }: ModelParametersInspecto
         <span>{definition.label}</span>
         <input
           type="color"
+          disabled={disabled}
           value={formatValue(values[definition.key])}
           onBlur={commitContinuousEdit}
           onChange={(event) => previewValue(definition, event.target.value)}
@@ -160,6 +163,7 @@ export function ModelParametersInspector({ modelAsset }: ModelParametersInspecto
         <span>{definition.label}</span>
         <input
           type="checkbox"
+          disabled={disabled}
           checked={values[definition.key] === true}
           onChange={(event) => updateSelectedModelParameterValue(definition.key, event.target.checked)}
         />
@@ -172,6 +176,7 @@ export function ModelParametersInspector({ modelAsset }: ModelParametersInspecto
       <label className="inspector-row" key={definition.key}>
         <span>{definition.label}</span>
         <select
+          disabled={disabled}
           value={formatValue(values[definition.key])}
           onChange={(event) => updateSelectedModelParameterValue(definition.key, event.target.value)}
         >
@@ -198,6 +203,7 @@ export function ModelParametersInspector({ modelAsset }: ModelParametersInspecto
               <span>{axis.toUpperCase()}</span>
               <input
                 type="number"
+                disabled={disabled}
                 min={definition.min}
                 max={definition.max}
                 step={definition.step ?? 0.1}
@@ -232,6 +238,7 @@ export function ModelParametersInspector({ modelAsset }: ModelParametersInspecto
         <label className="inspector-row" key={definition.key}>
           <span>{definition.label}</span>
           <select
+            disabled={disabled}
             value={formatValue(values[definition.key])}
             onChange={(event) => updateSelectedModelParameterValue(definition.key, event.target.value)}
           >
@@ -248,6 +255,7 @@ export function ModelParametersInspector({ modelAsset }: ModelParametersInspecto
         <span>{definition.label}</span>
         <input
           type="text"
+          disabled={disabled}
           value={formatValue(values[definition.key])}
           onChange={(event) => updateSelectedModelParameterValue(definition.key, event.target.value)}
         />

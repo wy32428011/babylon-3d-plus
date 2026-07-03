@@ -1,0 +1,109 @@
+{
+  "lengthUnit": "meter",
+  "parameterScripts": [
+    {
+      "fields": [
+        {
+          "key": "deviceName",
+          "label": "显示名称",
+          "defaultValue": "参数链路示例机柜"
+        }
+      ]
+    }
+  ],
+  "modelParameters": {
+    "schema": "babylon-editor.model-parameters",
+    "version": 1,
+    "parameters": [
+      {
+        "key": "bodyColor",
+        "label": "主体颜色",
+        "type": "color",
+        "defaultValue": "#2f86ff"
+      },
+      {
+        "key": "cabinetHeight",
+        "label": "主体高度",
+        "type": "number",
+        "defaultValue": 1.2,
+        "min": 0.6,
+        "max": 2.2,
+        "step": 0.1,
+        "unit": "m"
+      },
+      {
+        "key": "showAccentPanel",
+        "label": "显示侧边面板",
+        "type": "boolean",
+        "defaultValue": true
+      },
+      {
+        "key": "screenTexture",
+        "label": "屏幕贴图",
+        "type": "texture",
+        "defaultValue": "textures/screen-grid.png",
+        "allowedExtensions": [
+          ".png"
+        ],
+        "options": [
+          {
+            "value": "textures/screen-grid.png",
+            "label": "蓝色网格"
+          },
+          {
+            "value": "textures/screen-stripes.png",
+            "label": "黄色斜纹"
+          }
+        ]
+      }
+    ],
+    "bindings": [
+      {
+        "target": {
+          "kind": "material",
+          "name": "BodyMaterial"
+        },
+        "property": "baseColor",
+        "value": {
+          "param": "bodyColor"
+        }
+      },
+      {
+        "target": {
+          "kind": "mesh",
+          "name": "Body"
+        },
+        "property": "scaling",
+        "value": {
+          "vector3": [
+            1,
+            {
+              "param": "cabinetHeight"
+            },
+            1
+          ]
+        }
+      },
+      {
+        "target": {
+          "kind": "mesh",
+          "name": "AccentPanel"
+        },
+        "property": "visible",
+        "value": {
+          "param": "showAccentPanel"
+        }
+      },
+      {
+        "target": {
+          "kind": "material",
+          "name": "ScreenMaterial"
+        },
+        "property": "baseTexture",
+        "value": {
+          "param": "screenTexture"
+        }
+      }
+    ]
+  }
+}

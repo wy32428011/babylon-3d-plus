@@ -11,6 +11,7 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import { SCENE_LENGTH_UNIT_SYMBOL } from '../../editor/model/sceneUnits';
+import type { Vector3Data } from '../../editor/model/math';
 
 export type EditorGridCellSize = 1 | 2 | 5 | 10;
 export type EditorCameraViewRangeKey = 'near' | 'standard' | 'far' | 'overview';
@@ -30,6 +31,11 @@ export type EditorGridSettings = {
   cellSizeMeters: EditorGridCellSize;
 };
 
+export type EditorWorldBounds = {
+  center: Vector3Data;
+  radiusMeters: number;
+};
+
 type EditorGroundGridResources = {
   grid: Mesh;
   gridMaterial: StandardMaterial;
@@ -42,6 +48,7 @@ export type BabylonViewport = {
   engine: Engine;
   scene: Scene;
   camera: ArcRotateCamera;
+  focusOnBounds: (bounds: EditorWorldBounds) => void;
   setCameraSettings: (settings: EditorCameraSettings) => void;
   setGridSettings: (settings: EditorGridSettings) => void;
   dispose: () => void;
@@ -72,6 +79,18 @@ const GRID_LINE_GLOW_INTENSITY_PULSE = 0.12;
 const BREATHING_SPEED = 0.0018;
 const EDITOR_CAMERA_MIN_RADIUS_METERS = 0.35;
 const EDITOR_CAMERA_MIN_Z_METERS = 0.02;
+
+/** 将未知异常转换成可读消息，便于向上层 UI 呈现 Babylon 初始化失败原因。 */
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** 在创建 Babylon Engine 前检查 WebGL 能力，避免 Electron 内容区静默白屏。 */
+function assertWebGLSupported(): void {
+  if (Engine.isSupported()) return;
+
+  throw new Error('当前 Electron 渲染进程不支持 WebGL，无法创建 Babylon Scene View。');
+}
 
 /** 限制编辑器相机距离，避免滚轮缩放过近时穿过模型或被近裁剪面裁空。 */
 function clampCameraRadius(radiusMeters: number): number {
@@ -227,8 +246,22 @@ function createEditorGround(scene: Scene, initialSettings: EditorGridSettings) {
   };
 }
 
+/** 根据包围半径计算相机观察距离，给对象周围预留一圈编辑空间。 */
+function getFocusCameraRadius(bounds: EditorWorldBounds): number {
+  const radiusMeters = Number.isFinite(bounds.radiusMeters) ? bounds.radiusMeters : 1;
+  return clampCameraRadius(Math.max(radiusMeters * 2.2, 2.5));
+}
+
 export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewport {
-  const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+  assertWebGLSupported();
+
+  let engine: Engine;
+  try {
+    engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+  } catch (error) {
+    throw new Error(`Babylon Engine 创建失败：${getErrorMessage(error)}`);
+  }
+
   const scene = new Scene(engine);
   scene.clearColor.set(0.08, 0.08, 0.09, 1);
 
@@ -258,6 +291,10 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewpor
     engine,
     scene,
     camera,
+    focusOnBounds: (bounds) => {
+      camera.setTarget(new Vector3(bounds.center.x, bounds.center.y, bounds.center.z));
+      camera.radius = getFocusCameraRadius(bounds);
+    },
     setCameraSettings: (settings) => {
       camera.radius = getCameraViewRangeRadius(settings);
     },

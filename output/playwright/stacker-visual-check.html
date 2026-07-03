@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stacker 旋转参数化视觉验证</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #101418;
+        color: #eef4f8;
+        font-family: "Microsoft YaHei", Arial, sans-serif;
+      }
+
+      #renderCanvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      #status {
+        position: fixed;
+        left: 16px;
+        top: 16px;
+        max-width: 760px;
+        padding: 12px 14px;
+        border: 1px solid rgba(159, 191, 211, 0.35);
+        background: rgba(9, 15, 20, 0.78);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .ok {
+        color: #88e6ae;
+      }
+
+      .error {
+        color: #ff9b9b;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="renderCanvas"></canvas>
+    <div id="status">Stacker 旋转参数化视觉验证加载中...</div>
+    <script type="module">
+      import {
+        ArcRotateCamera,
+        Color3,
+        Engine,
+        HemisphericLight,
+        MeshBuilder,
+        Scene,
+        SceneLoader,
+        StandardMaterial,
+        TransformNode,
+        Vector3,
+      } from "@babylonjs/core";
+      import "@babylonjs/loaders/glTF/index.js";
+      import { ExternalModelScriptRuntime } from "/src/runtime/babylon/ExternalModelScriptRuntime.ts";
+
+      const canvas = document.querySelector("#renderCanvas");
+      const status = document.querySelector("#status");
+      const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+      const scene = new Scene(engine);
+      scene.clearColor.set(0.06, 0.08, 0.1, 1);
+
+      const camera = new ArcRotateCamera("camera", Math.PI * 0.14, Math.PI * 0.3, 68, new Vector3(0, 4, 0), scene);
+      camera.attachControl(canvas, true);
+      camera.lowerRadiusLimit = 6;
+      camera.upperRadiusLimit = 80;
+
+      const light = new HemisphericLight("light", new Vector3(0.2, 1, 0.4), scene);
+      light.intensity = 0.9;
+
+      const gridMaterial = new StandardMaterial("gridMaterial", scene);
+      gridMaterial.diffuseColor = new Color3(0.12, 0.18, 0.22);
+      gridMaterial.specularColor = Color3.Black();
+      const ground = MeshBuilder.CreateGround("ground", { width: 76, height: 44 }, scene);
+      ground.material = gridMaterial;
+      ground.position.y = -0.02;
+
+      const metadata = await fetch("./stacker-assets/meta.json").then((response) => response.json());
+      const defaultValues = {
+        bodyLength: 23.012,
+        bodyWidth: 0.452,
+        bodyHeight: 7.837,
+        platformLength: 1.279,
+        platformHeight: 1.695,
+        forkLength: 0.941,
+        forkGap: 0.6,
+      };
+      const cases = [
+        { label: "0° 默认 forkGap=0.6", x: -24, z: -9, rotationY: 0, values: { ...defaultValues, forkGap: 0.6 } },
+        { label: "45° 组合 bodyHeight=12 forkGap=1.2 forkLength=2", x: 0, z: 0, rotationY: Math.PI / 4, values: { ...defaultValues, bodyHeight: 12, platformHeight: 3, forkGap: 1.2, forkLength: 2 } },
+        { label: "90° 加宽 forkGap=1.2 forkLength=2", x: 24, z: 9, rotationY: Math.PI / 2, values: { ...defaultValues, forkGap: 1.2, forkLength: 2 } },
+      ];
+
+      function syncModelScriptMetadata(target, values) {
+        const scripts = (metadata.parameterScripts ?? []).map((script) => {
+          const clonedScript = structuredClone(script);
+          clonedScript.values = clonedScript.values ?? {};
+          for (const [key, value] of Object.entries(values)) {
+            const previousValue = typeof clonedScript.values[key] === "object" && clonedScript.values[key] !== null
+              ? clonedScript.values[key]
+              : {};
+            clonedScript.values[key] = { ...previousValue, value };
+          }
+          return clonedScript;
+        });
+        target.metadata = { ...(target.metadata ?? {}), scripts };
+      }
+
+      function parentTopLevelModelNodes(container, contentRoot) {
+        const allImportedNodes = new Set([...container.meshes, ...container.transformNodes]);
+        for (const node of allImportedNodes) {
+          if (!node.parent || !allImportedNodes.has(node.parent)) {
+            node.parent = contentRoot;
+          }
+        }
+      }
+
+      function normalizeModelContentOrigin(root) {
+        root.computeWorldMatrix(true);
+        const childMeshes = root.getChildMeshes(false);
+        if (childMeshes.length === 0) return;
+
+        let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+        let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+        for (const mesh of childMeshes) {
+          mesh.computeWorldMatrix(true);
+          const box = mesh.getBoundingInfo().boundingBox;
+          minimum = Vector3.Minimize(minimum, box.minimumWorld);
+          maximum = Vector3.Maximize(maximum, box.maximumWorld);
+        }
+
+        const bottomCenter = new Vector3((minimum.x + maximum.x) / 2, minimum.y, (minimum.z + maximum.z) / 2);
+        const localBottomCenter = Vector3.TransformCoordinates(bottomCenter, root.getWorldMatrix().clone().invert());
+        for (const child of root.getChildren()) {
+          if (child instanceof TransformNode) {
+            child.position.subtractInPlace(localBottomCenter);
+          }
+        }
+      }
+
+      async function createStackerCase(testCase) {
+        const root = new TransformNode(`${testCase.label}_root`, scene);
+        root.position.x = testCase.x;
+        root.position.z = testCase.z ?? 0;
+        root.rotation.y = testCase.rotationY ?? 0;
+        const contentRoot = new TransformNode(`${testCase.label}_contentRoot`, scene);
+        contentRoot.parent = root;
+        contentRoot.scaling = new Vector3(0.001, 0.001, 0.001);
+
+        const container = await SceneLoader.LoadAssetContainerAsync("./stacker-assets/", "Stacker.glb", scene);
+        container.addAllToScene();
+        parentTopLevelModelNodes(container, contentRoot);
+        normalizeModelContentOrigin(root);
+        syncModelScriptMetadata(contentRoot, testCase.values);
+
+        const modelAsset = {
+          sourcePath: "./stacker-assets/Stacker.glb",
+          sourceUrl: "./stacker-assets/Stacker.glb",
+          lengthUnit: "millimeter",
+          unitScaleToMeters: 0.001,
+          scriptAssets: [
+            {
+              path: "./stacker-assets/stacker.model.ts",
+              sourceUrl: "./stacker-assets/stacker.model.txt",
+              name: "stacker.model.ts",
+            },
+          ],
+          parameterScriptMetadata: metadata.parameterScripts ?? [],
+          animationScriptMetadata: metadata.animationScripts ?? [],
+          parameterValues: testCase.values,
+        };
+
+        const runtime = new ExternalModelScriptRuntime(contentRoot, modelAsset);
+        runtime.updateParameterValues(testCase.values);
+        await runtime.start();
+        runtime.update();
+        return root;
+      }
+
+      try {
+        for (const testCase of cases) {
+          await createStackerCase(testCase);
+        }
+        status.innerHTML = `<span class="ok">完成</span>：${cases.map((item) => item.label).join(" / ")}`;
+        engine.runRenderLoop(() => scene.render());
+        window.__STACKER_VISUAL_READY__ = true;
+      } catch (error) {
+        console.error(error);
+        status.innerHTML = `<span class="error">失败</span>：${error instanceof Error ? error.message : String(error)}`;
+        window.__STACKER_VISUAL_READY__ = false;
+      }
+
+      window.addEventListener("resize", () => engine.resize());
+    </script>
+  </body>
+</html>

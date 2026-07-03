@@ -1,0 +1,481 @@
+{
+  "parameterScripts": [
+    {
+      "modelFilename": "Shelf.glb",
+      "scriptFilename": "shelf.model.ts",
+      "className": "ParametricModelParamsComponent",
+      "fields": [
+        {
+          "key": "modelKey",
+          "label": "模型标识",
+          "type": "string",
+          "defaultValue": "shelf",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "deviceType",
+          "label": "设备类型",
+          "type": "string",
+          "defaultValue": "多穿库",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "deviceName",
+          "label": "设备名称",
+          "type": "string",
+          "defaultValue": "多穿货架",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "description",
+          "label": "参数说明",
+          "type": "string",
+          "defaultValue": "Shelf.glb 专用参数化：层数沿 Y 复制，宽度仅拉伸 node1/node3/node25/node35 对应横梁和层板并保留端部搭接量，四根立柱和连接件跟随这些节点的宽深新端点移动，侧面三角斜撑随深度和层高同步适配。",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "layerCount",
+          "label": "层数",
+          "type": "number",
+          "defaultValue": 1,
+          "configuration": {
+            "type": "number",
+            "min": 1,
+            "max": 20,
+            "step": 1
+          }
+        },
+        {
+          "key": "columnCount",
+          "label": "列数",
+          "type": "number",
+          "defaultValue": 1,
+          "configuration": {
+            "type": "number",
+            "min": 1,
+            "max": 100,
+            "step": 1
+          }
+        },
+        {
+          "key": "cellWidth",
+          "label": "货格宽度",
+          "type": "number",
+          "defaultValue": 0.801,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "cellHeight",
+          "label": "货格高度",
+          "type": "number",
+          "defaultValue": 4.525,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "cellDepth",
+          "label": "货格深度",
+          "type": "number",
+          "defaultValue": 1.183,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "postWidth",
+          "label": "立柱宽度",
+          "type": "number",
+          "defaultValue": 0.08,
+          "configuration": {
+            "type": "number",
+            "min": 0.01,
+            "max": 10,
+            "step": 0.01
+          }
+        },
+        {
+          "key": "aisleWidth",
+          "label": "巷道宽度",
+          "type": "number",
+          "defaultValue": 1.2,
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "aisleHeight",
+          "label": "巷道高度",
+          "type": "number",
+          "defaultValue": 1,
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "doubleDeepEnabled",
+          "label": "启用双深货位",
+          "type": "boolean",
+          "defaultValue": false,
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        {
+          "key": "deepSlotGap",
+          "label": "深位间隔",
+          "type": "number",
+          "defaultValue": 0.2,
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "step": 0.05
+          }
+        },
+        {
+          "key": "deepSlotLift",
+          "label": "深位提升",
+          "type": "number",
+          "defaultValue": 0,
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 0.05
+          }
+        },
+        {
+          "key": "shelfStyle",
+          "label": "货架样式",
+          "type": "string",
+          "defaultValue": "beam",
+          "configuration": {
+            "type": "string",
+            "options": [
+              "beam",
+              "plate"
+            ]
+          }
+        }
+      ],
+      "values": {
+        "modelKey": {
+          "type": "string",
+          "value": "shelf",
+          "label": "模型标识",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "deviceType": {
+          "type": "string",
+          "value": "多穿库",
+          "label": "设备类型",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "deviceName": {
+          "type": "string",
+          "value": "多穿货架",
+          "label": "设备名称",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string",
+          "value": "Shelf.glb 专用参数化：层数沿 Y 复制，宽度仅拉伸 node1/node3/node25/node35 对应横梁和层板并保留端部搭接量，四根立柱和连接件跟随这些节点的宽深新端点移动，侧面三角斜撑随深度和层高同步适配。",
+          "label": "参数说明",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "layerCount": {
+          "type": "number",
+          "value": 1,
+          "label": "层数",
+          "configuration": {
+            "type": "number",
+            "min": 1,
+            "max": 20,
+            "step": 1
+          }
+        },
+        "columnCount": {
+          "type": "number",
+          "value": 1,
+          "label": "列数",
+          "configuration": {
+            "type": "number",
+            "min": 1,
+            "max": 100,
+            "step": 1
+          }
+        },
+        "cellWidth": {
+          "type": "number",
+          "value": 0.801,
+          "label": "货格宽度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "cellHeight": {
+          "type": "number",
+          "value": 4.525,
+          "label": "货格高度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "cellDepth": {
+          "type": "number",
+          "value": 1.183,
+          "label": "货格深度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "postWidth": {
+          "type": "number",
+          "value": 0.08,
+          "label": "立柱宽度",
+          "configuration": {
+            "type": "number",
+            "min": 0.01,
+            "max": 10,
+            "step": 0.01
+          }
+        },
+        "aisleWidth": {
+          "type": "number",
+          "value": 1.2,
+          "label": "巷道宽度",
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "aisleHeight": {
+          "type": "number",
+          "value": 1,
+          "label": "巷道高度",
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "doubleDeepEnabled": {
+          "type": "boolean",
+          "value": false,
+          "label": "启用双深货位",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "deepSlotGap": {
+          "type": "number",
+          "value": 0.2,
+          "label": "深位间隔",
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "step": 0.05
+          }
+        },
+        "deepSlotLift": {
+          "type": "number",
+          "value": 0,
+          "label": "深位提升",
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 0.05
+          }
+        },
+        "shelfStyle": {
+          "type": "string",
+          "value": "beam",
+          "label": "货架样式",
+          "configuration": {
+            "type": "string",
+            "options": [
+              "beam",
+              "plate"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "animationScripts": [
+    {
+      "modelFilename": "Shelf.glb",
+      "scriptFilename": "shelf.model.ts",
+      "className": "ParametricModelRuntimeComponent",
+      "fields": [],
+      "values": {}
+    }
+  ],
+  "modelParameters": {
+    "schema": "babylon-editor.model-parameters",
+    "version": 1,
+    "parameters": [
+      {
+        "key": "layerCount",
+        "label": "层数",
+        "type": "number",
+        "defaultValue": 1,
+        "min": 1,
+        "max": 20,
+        "step": 1
+      },
+      {
+        "key": "columnCount",
+        "label": "列数",
+        "type": "number",
+        "defaultValue": 1,
+        "min": 1,
+        "max": 100,
+        "step": 1
+      },
+      {
+        "key": "cellWidth",
+        "label": "货格宽度",
+        "type": "number",
+        "defaultValue": 0.801,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "cellHeight",
+        "label": "货格高度",
+        "type": "number",
+        "defaultValue": 4.525,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "cellDepth",
+        "label": "货格深度",
+        "type": "number",
+        "defaultValue": 1.183,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "postWidth",
+        "label": "立柱宽度",
+        "type": "number",
+        "defaultValue": 0.08,
+        "min": 0.01,
+        "max": 10,
+        "step": 0.01
+      },
+      {
+        "key": "aisleWidth",
+        "label": "巷道宽度",
+        "type": "number",
+        "defaultValue": 1.2,
+        "min": 0,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "aisleHeight",
+        "label": "巷道高度",
+        "type": "number",
+        "defaultValue": 1,
+        "min": 0,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "doubleDeepEnabled",
+        "label": "启用双深货位",
+        "type": "boolean",
+        "defaultValue": false
+      },
+      {
+        "key": "deepSlotGap",
+        "label": "深位间隔",
+        "type": "number",
+        "defaultValue": 0.2,
+        "min": 0,
+        "max": 100,
+        "step": 0.05
+      },
+      {
+        "key": "deepSlotLift",
+        "label": "深位提升",
+        "type": "number",
+        "defaultValue": 0,
+        "min": -100,
+        "max": 100,
+        "step": 0.05
+      },
+      {
+        "key": "shelfStyle",
+        "label": "货架样式",
+        "type": "enum",
+        "defaultValue": "beam",
+        "options": [
+          {
+            "value": "beam",
+            "label": "beam"
+          },
+          {
+            "value": "plate",
+            "label": "plate"
+          }
+        ]
+      }
+    ],
+    "bindings": []
+  }
+}

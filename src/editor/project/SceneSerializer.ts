@@ -1,5 +1,13 @@
 import type { Entity } from '../model/Entity';
-import type { SceneDocument } from '../model/SceneDocument';
+import {
+  DEFAULT_MQTT_CONFIG,
+  MODEL_ASSET_CODE_MAX_LENGTH,
+  createModelAssetCode,
+  normalizeStackerSimulationScenario,
+  sanitizeMqttConfig,
+  type MqttConfig,
+  type SceneDocument,
+} from '../model/SceneDocument';
 import type { EntityComponents, LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
@@ -8,7 +16,11 @@ import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit }
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
 const MESH_KINDS: readonly MeshKind[] = ['cube', 'sphere', 'plane'];
 const LIGHT_KINDS: readonly LightKind[] = ['hemispheric', 'directional', 'point'];
-const AUTHORIZED_MODEL_URL_PREFIX = 'editor-asset://local/';
+const AUTHORIZED_LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
+const MODEL_SCRIPT_EXTENSION = '.model.ts';
+const LOCATOR_MIN_DIMENSION = 0.01;
+const LOCATOR_ASSET_ID_MAX_LENGTH = 128;
+const CAD_REFERENCE_LAYER_STATS_MAX_LENGTH = 512;
 
 type SceneFileUnits = {
   length: SceneLengthUnit;
@@ -109,22 +121,53 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     entityIds,
     entities,
     selectedEntityId: null,
+    mqttConfig: normalizeMqttConfig(scene.mqttConfig),
   };
+}
+
+function normalizeMqttConfig(value: unknown): MqttConfig {
+  if (value === undefined) return DEFAULT_MQTT_CONFIG;
+
+  const config = assertPlainObject(value);
+  return sanitizeMqttConfig({
+    enabled: assertOptionalBoolean(config.enabled, DEFAULT_MQTT_CONFIG.enabled),
+    ip: config.ip === undefined ? DEFAULT_MQTT_CONFIG.ip : assertString(config.ip),
+    address: config.address === undefined ? DEFAULT_MQTT_CONFIG.address : assertString(config.address),
+    topic: config.topic === undefined ? DEFAULT_MQTT_CONFIG.topic : assertString(config.topic),
+    simulatorEnabled: assertOptionalBoolean(config.simulatorEnabled, DEFAULT_MQTT_CONFIG.simulatorEnabled),
+    simulatorAssetCode: config.simulatorAssetCode === undefined
+      ? DEFAULT_MQTT_CONFIG.simulatorAssetCode
+      : assertString(config.simulatorAssetCode),
+    simulatorScenario: normalizeStackerSimulationScenario(config.simulatorScenario),
+    simulatorIntervalMs: config.simulatorIntervalMs === undefined
+      ? DEFAULT_MQTT_CONFIG.simulatorIntervalMs
+      : assertFiniteNumber(config.simulatorIntervalMs),
+  });
 }
 
 function normalizeEntity(value: unknown): Entity {
   const entity = assertPlainObject(value);
+  const id = assertString(entity.id);
+  const isFolder = assertOptionalBoolean(entity.isFolder, false);
+  const components = normalizeComponents(entity.components, id);
+
+  if (isFolder && hasRuntimeComponent(components)) {
+    throwUnsupportedSceneFileError();
+  }
 
   return {
-    id: assertString(entity.id),
+    id,
     name: assertString(entity.name),
+    isFolder,
+    visible: assertOptionalBoolean(entity.visible, true),
+    locked: assertOptionalBoolean(entity.locked, false),
     parentId: assertNullableString(entity.parentId),
     childrenIds: assertUniqueStringArray(entity.childrenIds),
-    components: normalizeComponents(entity.components),
+    components,
   };
 }
 
-function normalizeComponents(value: unknown): EntityComponents {
+function normalizeComponents(value: unknown, entityId: string): EntityComponents {
   const components = assertPlainObject(value);
   const normalized: EntityComponents = {
     transform: normalizeTransform(components.transform),
@@ -134,8 +177,16 @@ function normalizeComponents(value: unknown): EntityComponents {
     normalized.meshRenderer = normalizeMeshRenderer(components.meshRenderer);
   }
 
+  if ('locator' in components && components.locator !== undefined) {
+    normalized.locator = normalizeLocator(components.locator);
+  }
+
+  if ('cadReference' in components && components.cadReference !== undefined) {
+    normalized.cadReference = normalizeCadReference(components.cadReference);
+  }
+
   if ('modelAsset' in components && components.modelAsset !== undefined) {
-    normalized.modelAsset = normalizeModelAsset(components.modelAsset);
+    normalized.modelAsset = normalizeModelAsset(components.modelAsset, entityId);
   }
 
   if ('camera' in components && components.camera !== undefined) {
@@ -183,12 +234,111 @@ function normalizeMeshRenderer(value: unknown): EntityComponents['meshRenderer']
   };
 }
 
-function normalizeModelAsset(value: unknown): EntityComponents['modelAsset'] {
+function normalizeLocator(value: unknown): EntityComponents['locator'] {
+  const locator = assertPlainObject(value);
+
+  return {
+    assetId: assertString(locator.assetId).trim().slice(0, LOCATOR_ASSET_ID_MAX_LENGTH),
+    length: normalizeLocatorDimension(locator.length),
+    width: normalizeLocatorDimension(locator.width),
+    height: normalizeLocatorDimension(locator.height),
+  };
+}
+
+function normalizeLocatorDimension(value: unknown): number {
+  return Math.max(LOCATOR_MIN_DIMENSION, assertFiniteNumber(value));
+}
+
+function normalizeCadReference(value: unknown): EntityComponents['cadReference'] {
+  const cadReference = assertPlainObject(value);
+  const sourcePath = assertString(cadReference.sourcePath);
+  const sourceUrl = assertString(cadReference.sourceUrl);
+
+  if (!sourcePath.toLowerCase().endsWith('.dxf')) {
+    throwUnsupportedSceneFileError();
+  }
+
+  if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) {
+    throwUnsupportedSceneFileError();
+  }
+
+  if (cadReference.originMode !== 'center') {
+    throwUnsupportedSceneFileError();
+  }
+
+  return {
+    sourcePath,
+    sourceUrl,
+    unitScaleToMeters: assertPositiveFiniteNumber(cadReference.unitScaleToMeters),
+    originMode: 'center',
+    lineColor: assertColorString(cadReference.lineColor),
+    opacity: normalizeOpacity(cadReference.opacity),
+    layerStats: normalizeCadReferenceLayerStats(cadReference.layerStats),
+    bounds: normalizeCadReferenceBounds(cadReference.bounds),
+    polylineCount: normalizeNonNegativeInteger(cadReference.polylineCount),
+    pointCount: normalizeNonNegativeInteger(cadReference.pointCount),
+  };
+}
+
+function normalizeCadReferenceLayerStats(value: unknown): NonNullable<EntityComponents['cadReference']>['layerStats'] {
+  if (!Array.isArray(value) || value.length > CAD_REFERENCE_LAYER_STATS_MAX_LENGTH) {
+    throwUnsupportedSceneFileError();
+  }
+
+  return value.map((item) => {
+    const stat = assertPlainObject(item);
+
+    return {
+      name: assertString(stat.name).trim().slice(0, 128) || '0',
+      entityCount: normalizeNonNegativeInteger(stat.entityCount),
+      polylineCount: normalizeNonNegativeInteger(stat.polylineCount),
+      pointCount: normalizeNonNegativeInteger(stat.pointCount),
+    };
+  });
+}
+
+function normalizeCadReferenceBounds(value: unknown): NonNullable<EntityComponents['cadReference']>['bounds'] {
+  const bounds = assertPlainObject(value);
+
+  return {
+    min: normalizeVector3(bounds.min),
+    max: normalizeVector3(bounds.max),
+    size: normalizeVector3(bounds.size),
+    center: normalizeVector3(bounds.center),
+  };
+}
+
+function normalizeOpacity(value: unknown): number {
+  const opacity = assertFiniteNumber(value);
+  if (opacity < 0 || opacity > 1) throwUnsupportedSceneFileError();
+  return opacity;
+}
+
+function normalizeNonNegativeInteger(value: unknown): number {
+  const numberValue = assertFiniteNumber(value);
+  if (numberValue < 0 || !Number.isInteger(numberValue)) throwUnsupportedSceneFileError();
+  return numberValue;
+}
+
+function assertPositiveFiniteNumber(value: unknown): number {
+  const numberValue = assertFiniteNumber(value);
+  if (numberValue <= 0) throwUnsupportedSceneFileError();
+  return numberValue;
+}
+
+function assertColorString(value: unknown): string {
+  const color = assertString(value);
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) throwUnsupportedSceneFileError();
+  return color;
+}
+
+function normalizeModelAsset(value: unknown, entityId: string): EntityComponents['modelAsset'] {
   const modelAsset = assertPlainObject(value);
+  const assetCode = normalizeModelAssetCode(modelAsset.assetCode, entityId);
   const sourcePath = assertString(modelAsset.sourcePath);
   const sourceUrl = assertString(modelAsset.sourceUrl);
 
-  if (!sourceUrl.startsWith(AUTHORIZED_MODEL_URL_PREFIX)) {
+  if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) {
     throwUnsupportedSceneFileError();
   }
 
@@ -205,14 +355,77 @@ function normalizeModelAsset(value: unknown): EntityComponents['modelAsset'] {
       ? sanitizeModelParameterValues(parameterConfig, modelAsset.parameterValues)
       : createDefaultModelParameterValues(parameterConfig)
     : undefined;
+  const scriptAssets = normalizeModelScriptAssets(modelAsset.scriptAssets);
+  const parameterScriptMetadata = normalizeOptionalJsonArray(modelAsset.parameterScriptMetadata);
+  const animationScriptMetadata = normalizeOptionalJsonArray(modelAsset.animationScriptMetadata);
 
   return {
+    assetCode,
     sourcePath,
     sourceUrl,
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
+    ...(scriptAssets.length ? { scriptAssets } : {}),
+    ...(parameterScriptMetadata.length ? { parameterScriptMetadata } : {}),
+    ...(animationScriptMetadata.length ? { animationScriptMetadata } : {}),
     ...(parameterConfig ? { parameterConfig, parameterValues } : {}),
   };
+}
+
+function normalizeModelAssetCode(value: unknown, entityId: string): string {
+  if (value === undefined) return createModelAssetCode(undefined, entityId);
+  const normalizedAssetCode = assertString(value).trim().slice(0, MODEL_ASSET_CODE_MAX_LENGTH);
+  return normalizedAssetCode || createModelAssetCode(undefined, entityId);
+}
+
+function normalizeModelScriptAssets(
+  value: unknown,
+): NonNullable<NonNullable<EntityComponents['modelAsset']>['scriptAssets']> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 16) throwUnsupportedSceneFileError();
+
+  return value.map((item) => {
+    const asset = assertPlainObject(item);
+    const scriptPath = assertString(asset.path);
+    const sourceUrl = assertString(asset.sourceUrl);
+    const name = assertString(asset.name);
+
+    if (!scriptPath.toLowerCase().endsWith(MODEL_SCRIPT_EXTENSION)) throwUnsupportedSceneFileError();
+    if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) throwUnsupportedSceneFileError();
+    if (!name.toLowerCase().endsWith(MODEL_SCRIPT_EXTENSION)) throwUnsupportedSceneFileError();
+
+    return { path: scriptPath, sourceUrl, name };
+  });
+}
+
+function normalizeOptionalJsonArray(value: unknown): unknown[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 32) throwUnsupportedSceneFileError();
+
+  return value.map((item) => normalizeJsonValue(item, 0, { count: 0 }));
+}
+
+function normalizeJsonValue(value: unknown, depth: number, seen: { count: number }): unknown {
+  seen.count += 1;
+  if (depth > 12 || seen.count > 2048) throwUnsupportedSceneFileError();
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throwUnsupportedSceneFileError();
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length > 256) throwUnsupportedSceneFileError();
+    return value.map((item) => normalizeJsonValue(item, depth + 1, seen));
+  }
+
+  const record = assertPlainObject(value);
+  return Object.fromEntries(
+    Object.entries(record).map(([key, item]) => {
+      if (!key || key.length > 128) throwUnsupportedSceneFileError();
+      return [key, normalizeJsonValue(item, depth + 1, seen)];
+    }),
+  );
 }
 
 function normalizeCamera(value: unknown): EntityComponents['camera'] {
@@ -246,20 +459,39 @@ function validateEntityHierarchy(entityIds: string[], entities: Record<string, E
     const entity = entities[entityId];
     if (!entity) throwUnsupportedSceneFileError();
 
+    if (entity.isFolder && entity.parentId !== null) {
+      throwUnsupportedSceneFileError();
+    }
+
+    if (!entity.isFolder && entity.childrenIds.length > 0) {
+      throwUnsupportedSceneFileError();
+    }
+
     if (entity.parentId !== null) {
       const parent = entities[entity.parentId];
-      if (!parent || !parent.childrenIds.includes(entityId)) {
+      if (!parent?.isFolder || !parent.childrenIds.includes(entityId)) {
         throwUnsupportedSceneFileError();
       }
     }
 
     for (const childId of entity.childrenIds) {
       const child = entities[childId];
-      if (!entityIdSet.has(childId) || !child || child.parentId !== entityId) {
+      if (!entity.isFolder || !entityIdSet.has(childId) || !child || child.isFolder || child.parentId !== entityId) {
         throwUnsupportedSceneFileError();
       }
     }
   }
+}
+
+function hasRuntimeComponent(components: EntityComponents): boolean {
+  return Boolean(
+    components.meshRenderer ||
+    components.locator ||
+    components.cadReference ||
+    components.modelAsset ||
+    components.camera ||
+    components.light,
+  );
 }
 
 function assertPlainObject(value: unknown): PlainObject {
@@ -280,6 +512,15 @@ function assertString(value: unknown): string {
 
 function assertNullableString(value: unknown): string | null {
   if (value !== null && typeof value !== 'string') {
+    throwUnsupportedSceneFileError();
+  }
+
+  return value;
+}
+
+function assertOptionalBoolean(value: unknown, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') {
     throwUnsupportedSceneFileError();
   }
 

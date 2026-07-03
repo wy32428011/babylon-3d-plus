@@ -9,6 +9,8 @@ const PROJECT_ASSET_INDEX_FILE = 'asset-index.json';
 const PROJECT_ASSETS_DIRECTORY = 'Assets';
 const PROJECT_MODELS_DIRECTORY = 'Models';
 const RECENT_PROJECT_FILE = 'recent-project.json';
+const RECENT_WORKSPACES_FILE = 'recent-workspaces.json';
+const MAX_RECENT_WORKSPACE_ITEMS = 12;
 const PROJECT_ASSET_INDEX_ERROR = '项目资产索引格式不正确。';
 let currentProjectRoot = null;
 let hasLoadedRecentProjectRoot = false;
@@ -18,27 +20,215 @@ function isPlainObject(value) {
 function getRecentProjectFilePath() {
     return path.join(app.getPath('userData'), RECENT_PROJECT_FILE);
 }
+function getRecentWorkspacesFilePath() {
+    return path.join(app.getPath('userData'), RECENT_WORKSPACES_FILE);
+}
+function createEmptyRecentWorkspaceIndex() {
+    return {
+        version: 1,
+        projects: [],
+        scenes: [],
+    };
+}
+function normalizeTimestamp(value) {
+    if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) {
+        return new Date().toISOString();
+    }
+    return value;
+}
+function normalizeRecentProjectEntry(value) {
+    if (!isPlainObject(value) || typeof value.projectRoot !== 'string' || !value.projectRoot.trim()) {
+        return null;
+    }
+    const projectRoot = normalizeFilePath(value.projectRoot);
+    const lastScenePath = typeof value.lastScenePath === 'string' && value.lastScenePath.trim()
+        ? normalizeFilePath(value.lastScenePath)
+        : undefined;
+    return {
+        projectRoot,
+        lastOpenedAt: normalizeTimestamp(value.lastOpenedAt),
+        lastScenePath,
+    };
+}
+function normalizeRecentSceneEntry(value) {
+    if (!isPlainObject(value) || typeof value.filePath !== 'string' || !value.filePath.trim()) {
+        return null;
+    }
+    const filePath = normalizeFilePath(value.filePath);
+    const projectRoot = typeof value.projectRoot === 'string' && value.projectRoot.trim()
+        ? normalizeFilePath(value.projectRoot)
+        : undefined;
+    return {
+        filePath,
+        lastOpenedAt: normalizeTimestamp(value.lastOpenedAt),
+        projectRoot,
+    };
+}
+function normalizeRecentWorkspaceIndex(value) {
+    if (!isPlainObject(value) || value.version !== 1) {
+        return createEmptyRecentWorkspaceIndex();
+    }
+    return {
+        version: 1,
+        projects: Array.isArray(value.projects)
+            ? value.projects.map(normalizeRecentProjectEntry).filter((entry) => entry !== null)
+            : [],
+        scenes: Array.isArray(value.scenes)
+            ? value.scenes.map(normalizeRecentSceneEntry).filter((entry) => entry !== null)
+            : [],
+    };
+}
+async function pathExists(filePath) {
+    try {
+        await fs.access(filePath);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+async function isDirectoryPath(filePath) {
+    try {
+        return (await fs.stat(filePath)).isDirectory();
+    }
+    catch {
+        return false;
+    }
+}
+async function isFilePath(filePath) {
+    try {
+        return (await fs.stat(filePath)).isFile();
+    }
+    catch {
+        return false;
+    }
+}
+async function readLegacyRecentProjectIndex() {
+    try {
+        const content = await fs.readFile(getRecentProjectFilePath(), 'utf-8');
+        const parsed = JSON.parse(content);
+        if (!isPlainObject(parsed) || typeof parsed.projectRoot !== 'string' || !parsed.projectRoot.trim()) {
+            return createEmptyRecentWorkspaceIndex();
+        }
+        return {
+            version: 1,
+            projects: [{
+                    projectRoot: normalizeFilePath(parsed.projectRoot),
+                    lastOpenedAt: new Date().toISOString(),
+                }],
+            scenes: [],
+        };
+    }
+    catch {
+        return createEmptyRecentWorkspaceIndex();
+    }
+}
+async function readRecentWorkspaceIndex() {
+    try {
+        const content = await fs.readFile(getRecentWorkspacesFilePath(), 'utf-8');
+        return normalizeRecentWorkspaceIndex(JSON.parse(content));
+    }
+    catch (error) {
+        if (isNodeError(error) && error.code === 'ENOENT') {
+            return readLegacyRecentProjectIndex();
+        }
+        if (error instanceof SyntaxError) {
+            return createEmptyRecentWorkspaceIndex();
+        }
+        throw error;
+    }
+}
+async function writeRecentWorkspaceIndex(index) {
+    await fs.mkdir(path.dirname(getRecentWorkspacesFilePath()), { recursive: true });
+    await fs.writeFile(getRecentWorkspacesFilePath(), `${JSON.stringify(index, null, 2)}\n`, 'utf-8');
+}
+function sortRecentEntries(entries) {
+    return [...entries]
+        .sort((left, right) => Date.parse(right.lastOpenedAt) - Date.parse(left.lastOpenedAt))
+        .slice(0, MAX_RECENT_WORKSPACE_ITEMS);
+}
+function upsertRecentProject(index, projectRoot, lastScenePath) {
+    const normalizedProjectRoot = normalizeFilePath(projectRoot);
+    const existing = index.projects.find((entry) => entry.projectRoot === normalizedProjectRoot);
+    const nextEntry = {
+        projectRoot: normalizedProjectRoot,
+        lastOpenedAt: new Date().toISOString(),
+        lastScenePath: lastScenePath ? normalizeFilePath(lastScenePath) : existing?.lastScenePath,
+    };
+    return {
+        version: 1,
+        projects: sortRecentEntries([
+            nextEntry,
+            ...index.projects.filter((entry) => entry.projectRoot !== normalizedProjectRoot),
+        ]),
+        scenes: index.scenes,
+    };
+}
+function upsertRecentScene(index, filePath, projectRoot) {
+    const normalizedFilePath = normalizeFilePath(filePath);
+    const existing = index.scenes.find((entry) => entry.filePath === normalizedFilePath);
+    const normalizedProjectRoot = projectRoot ? normalizeFilePath(projectRoot) : existing?.projectRoot;
+    const nextEntry = {
+        filePath: normalizedFilePath,
+        lastOpenedAt: new Date().toISOString(),
+        projectRoot: normalizedProjectRoot,
+    };
+    return {
+        version: 1,
+        projects: normalizedProjectRoot
+            ? upsertRecentProject(index, normalizedProjectRoot, normalizedFilePath).projects
+            : index.projects,
+        scenes: sortRecentEntries([
+            nextEntry,
+            ...index.scenes.filter((entry) => entry.filePath !== normalizedFilePath),
+        ]),
+    };
+}
+async function toRecentProjectEntry(entry) {
+    const exists = await pathExists(entry.projectRoot);
+    let assetCount = 0;
+    if (exists) {
+        try {
+            assetCount = (await readProjectAssetIndex(entry.projectRoot)).assets.length;
+        }
+        catch {
+            assetCount = 0;
+        }
+    }
+    return {
+        projectRoot: entry.projectRoot,
+        displayName: path.basename(entry.projectRoot) || entry.projectRoot,
+        lastOpenedAt: entry.lastOpenedAt,
+        exists,
+        assetCount,
+        lastScenePath: entry.lastScenePath,
+    };
+}
+async function toRecentSceneEntry(entry) {
+    return {
+        filePath: entry.filePath,
+        displayName: path.basename(entry.filePath) || entry.filePath,
+        lastOpenedAt: entry.lastOpenedAt,
+        exists: await pathExists(entry.filePath),
+        projectRoot: entry.projectRoot,
+    };
+}
 async function loadRecentProjectRoot() {
     if (currentProjectRoot)
         return currentProjectRoot;
     if (hasLoadedRecentProjectRoot)
         return null;
     hasLoadedRecentProjectRoot = true;
-    try {
-        const content = await fs.readFile(getRecentProjectFilePath(), 'utf-8');
-        const parsed = JSON.parse(content);
-        if (!isPlainObject(parsed) || typeof parsed.projectRoot !== 'string' || !parsed.projectRoot.trim()) {
-            return null;
-        }
-        const recentProjectRoot = normalizeFilePath(parsed.projectRoot);
-        setCurrentProjectRoot(recentProjectRoot);
-        await ensureProjectDirectories(recentProjectRoot);
-        authorizeAssetRoot(getProjectModelsRoot(recentProjectRoot));
-        return recentProjectRoot;
+    const recentWorkspaces = await readRecentWorkspaceIndex();
+    for (const project of sortRecentEntries(recentWorkspaces.projects)) {
+        if (!(await pathExists(project.projectRoot)))
+            continue;
+        setCurrentProjectRoot(project.projectRoot);
+        await ensureProjectDirectories(project.projectRoot);
+        authorizeAssetRoot(getProjectModelsRoot(project.projectRoot));
+        return project.projectRoot;
     }
-    catch {
-        return null;
-    }
+    return null;
 }
 async function persistCurrentProjectRoot(projectRoot) {
     await fs.mkdir(path.dirname(getRecentProjectFilePath()), { recursive: true });
@@ -55,6 +245,12 @@ function normalizeOptionalPath(value) {
         return undefined;
     return normalizeFilePath(assertString(value));
 }
+function normalizeOptionalTrimmedString(value) {
+    if (value === undefined)
+        return undefined;
+    const trimmedValue = assertString(value).trim();
+    return trimmedValue || undefined;
+}
 function normalizeOptionalStringArray(value) {
     if (value === undefined)
         return undefined;
@@ -62,6 +258,35 @@ function normalizeOptionalStringArray(value) {
         throw new Error(PROJECT_ASSET_INDEX_ERROR);
     }
     return value.map((item) => normalizeFilePath(item));
+}
+function normalizeOptionalScriptAssets(value) {
+    if (value === undefined)
+        return undefined;
+    if (!Array.isArray(value))
+        throw new Error(PROJECT_ASSET_INDEX_ERROR);
+    return value.map((item) => {
+        if (!isPlainObject(item) || typeof item.path !== 'string') {
+            throw new Error(PROJECT_ASSET_INDEX_ERROR);
+        }
+        const scriptPath = normalizeFilePath(item.path);
+        return {
+            path: scriptPath,
+            sourceUrl: encodeAssetUrl(scriptPath),
+            name: typeof item.name === 'string' && item.name.trim() ? item.name : path.basename(scriptPath),
+        };
+    });
+}
+function normalizeOptionalMetadataArray(value) {
+    return Array.isArray(value) ? value : undefined;
+}
+function createScriptAssetsFromPaths(scriptPaths) {
+    if (!scriptPaths?.length)
+        return undefined;
+    return scriptPaths.map((scriptPath) => ({
+        path: scriptPath,
+        sourceUrl: encodeAssetUrl(scriptPath),
+        name: path.basename(scriptPath),
+    }));
 }
 function normalizeIndexedAsset(value) {
     const asset = isPlainObject(value) ? value : null;
@@ -73,7 +298,10 @@ function normalizeIndexedAsset(value) {
     const name = assertString(asset.name);
     const packagePath = normalizeOptionalPath(asset.packagePath);
     const metadataPath = normalizeOptionalPath(asset.metadataPath);
+    const thumbnailPath = normalizeOptionalPath(asset.thumbnailPath);
+    const defaultAssetCode = normalizeOptionalTrimmedString(asset.defaultAssetCode);
     const scriptPaths = normalizeOptionalStringArray(asset.scriptPaths);
+    const scriptAssets = normalizeOptionalScriptAssets(asset.scriptAssets) ?? createScriptAssetsFromPaths(scriptPaths);
     const unitInfo = normalizeModelLengthUnit(asset.lengthUnit) ?? DEFAULT_MODEL_LENGTH_UNIT_INFO;
     return {
         id: modelPath,
@@ -83,7 +311,13 @@ function normalizeIndexedAsset(value) {
         kind: 'model',
         packagePath,
         metadataPath,
+        thumbnailPath,
+        thumbnailUrl: thumbnailPath ? encodeAssetUrl(thumbnailPath) : undefined,
         scriptPaths,
+        scriptAssets,
+        parameterScriptMetadata: normalizeOptionalMetadataArray(asset.parameterScriptMetadata),
+        animationScriptMetadata: normalizeOptionalMetadataArray(asset.animationScriptMetadata),
+        defaultAssetCode,
         displayName: typeof asset.displayName === 'string' ? asset.displayName : undefined,
         lengthUnit: unitInfo.lengthUnit,
         unitScaleToMeters: unitInfo.unitScaleToMeters,
@@ -104,6 +338,63 @@ export function getCurrentProjectRoot() {
 }
 export function setCurrentProjectRoot(projectRoot) {
     currentProjectRoot = normalizeFilePath(projectRoot);
+}
+export async function getRecentWorkspaces() {
+    const index = await readRecentWorkspaceIndex();
+    return {
+        projects: await Promise.all(sortRecentEntries(index.projects).map(toRecentProjectEntry)),
+        scenes: await Promise.all(sortRecentEntries(index.scenes).map(toRecentSceneEntry)),
+    };
+}
+export async function rememberRecentProjectRoot(projectRoot, lastScenePath) {
+    const index = await readRecentWorkspaceIndex();
+    await writeRecentWorkspaceIndex(upsertRecentProject(index, projectRoot, lastScenePath));
+}
+export async function rememberRecentSceneFile(filePath, projectRoot = currentProjectRoot) {
+    const index = await readRecentWorkspaceIndex();
+    await writeRecentWorkspaceIndex(upsertRecentScene(index, filePath, projectRoot));
+}
+export async function assertRecentSceneFile(filePath) {
+    const normalizedFilePath = normalizeFilePath(filePath);
+    const index = await readRecentWorkspaceIndex();
+    const isKnownRecentScene = index.scenes.some((entry) => entry.filePath === normalizedFilePath);
+    if (!isKnownRecentScene) {
+        throw new Error('只能打开最近记录中的场景文件。');
+    }
+    if (!(await isFilePath(normalizedFilePath))) {
+        throw new Error('最近场景文件不存在或不是文件。');
+    }
+    return normalizedFilePath;
+}
+export async function removeRecentWorkspaceItem(kind, itemPath) {
+    const normalizedPath = normalizeFilePath(itemPath);
+    const index = await readRecentWorkspaceIndex();
+    await writeRecentWorkspaceIndex({
+        version: 1,
+        projects: kind === 'project'
+            ? index.projects.filter((entry) => entry.projectRoot !== normalizedPath)
+            : index.projects,
+        scenes: kind === 'scene'
+            ? index.scenes.filter((entry) => entry.filePath !== normalizedPath)
+            : index.scenes,
+    });
+}
+export async function openRecentProject(projectRoot) {
+    const normalizedProjectRoot = normalizeFilePath(projectRoot);
+    const index = await readRecentWorkspaceIndex();
+    const isKnownRecentProject = index.projects.some((entry) => entry.projectRoot === normalizedProjectRoot);
+    if (!isKnownRecentProject) {
+        throw new Error('只能打开最近记录中的项目目录。');
+    }
+    if (!(await isDirectoryPath(normalizedProjectRoot))) {
+        throw new Error('最近项目路径不存在或不是目录。');
+    }
+    setCurrentProjectRoot(normalizedProjectRoot);
+    await ensureProjectDirectories(normalizedProjectRoot);
+    authorizeAssetRoot(getProjectModelsRoot(normalizedProjectRoot));
+    await persistCurrentProjectRoot(normalizedProjectRoot);
+    await rememberRecentProjectRoot(normalizedProjectRoot);
+    return listProjectAssets();
 }
 export function getProjectModelsRoot(projectRoot) {
     return path.join(normalizeFilePath(projectRoot), PROJECT_ASSETS_DIRECTORY, PROJECT_MODELS_DIRECTORY);
@@ -151,6 +442,9 @@ export async function ensureCurrentProjectRootWithDialog() {
     const recentProjectRoot = await loadRecentProjectRoot();
     if (recentProjectRoot)
         return recentProjectRoot;
+    return selectCurrentProjectRootWithDialog();
+}
+export async function selectCurrentProjectRootWithDialog() {
     const result = await dialog.showOpenDialog({
         title: '选择项目目录',
         properties: ['openDirectory', 'createDirectory'],
@@ -164,6 +458,7 @@ export async function ensureCurrentProjectRootWithDialog() {
     await ensureProjectDirectories(selectedProjectRoot);
     authorizeAssetRoot(getProjectModelsRoot(selectedProjectRoot));
     await persistCurrentProjectRoot(selectedProjectRoot);
+    await rememberRecentProjectRoot(selectedProjectRoot);
     return selectedProjectRoot;
 }
 export async function listProjectAssets() {
@@ -176,6 +471,12 @@ export async function listProjectAssets() {
     const index = await readProjectAssetIndex(projectRoot);
     for (const asset of index.assets) {
         authorizeAssetFile(asset.path);
+        if (asset.thumbnailPath) {
+            authorizeAssetFile(asset.thumbnailPath);
+        }
+        for (const scriptAsset of asset.scriptAssets ?? []) {
+            authorizeAssetFile(scriptAsset.path);
+        }
     }
     return { projectRoot, assets: index.assets };
 }
@@ -202,6 +503,12 @@ export async function importModelPackagesIntoProject(scannedAssets) {
             if (copiedPackage.asset) {
                 importedAssets.push(copiedPackage.asset);
                 authorizeAssetFile(copiedPackage.asset.path);
+                if (copiedPackage.asset.thumbnailPath) {
+                    authorizeAssetFile(copiedPackage.asset.thumbnailPath);
+                }
+                for (const scriptAsset of copiedPackage.asset.scriptAssets ?? []) {
+                    authorizeAssetFile(scriptAsset.path);
+                }
             }
             if (copiedPackage.skipped) {
                 skipped.push(copiedPackage.skipped);

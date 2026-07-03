@@ -1,0 +1,311 @@
+{
+  "version": 1,
+  "units": {
+    "length": "meter"
+  },
+  "scene": {
+    "id": "scene_parameter_chain_demo",
+    "name": "Parameter Chain Demo",
+    "entityIds": [
+      "entity_parameter_chain_default",
+      "entity_parameter_chain_variant",
+      "entity_parameter_chain_light"
+    ],
+    "entities": {
+      "entity_parameter_chain_default": {
+        "id": "entity_parameter_chain_default",
+        "name": "参数链路示例 - 默认蓝色网格",
+        "parentId": null,
+        "childrenIds": [],
+        "components": {
+          "transform": {
+            "position": {
+              "x": -0.85,
+              "y": 0,
+              "z": 0
+            },
+            "rotation": {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            }
+          },
+          "modelAsset": {
+            "sourcePath": "F:\\3d-babylon-editor\\examples\\model-packages\\ParameterChainDemo\\ParameterChainDemo.gltf",
+            "sourceUrl": "editor-asset://local/F%3A%5C3d-babylon-editor%5Cexamples%5Cmodel-packages%5CParameterChainDemo%5CParameterChainDemo.gltf",
+            "lengthUnit": "meter",
+            "unitScaleToMeters": 1,
+            "parameterConfig": {
+              "schema": "babylon-editor.model-parameters",
+              "version": 1,
+              "parameters": [
+                {
+                  "key": "bodyColor",
+                  "label": "主体颜色",
+                  "type": "color",
+                  "defaultValue": "#2f86ff"
+                },
+                {
+                  "key": "cabinetHeight",
+                  "label": "主体高度",
+                  "type": "number",
+                  "defaultValue": 1.2,
+                  "min": 0.6,
+                  "max": 2.2,
+                  "step": 0.1,
+                  "unit": "m"
+                },
+                {
+                  "key": "showAccentPanel",
+                  "label": "显示侧边面板",
+                  "type": "boolean",
+                  "defaultValue": true
+                },
+                {
+                  "key": "screenTexture",
+                  "label": "屏幕贴图",
+                  "type": "texture",
+                  "defaultValue": "textures/screen-grid.png",
+                  "allowedExtensions": [
+                    ".png"
+                  ],
+                  "options": [
+                    {
+                      "value": "textures/screen-grid.png",
+                      "label": "蓝色网格"
+                    },
+                    {
+                      "value": "textures/screen-stripes.png",
+                      "label": "黄色斜纹"
+                    }
+                  ]
+                }
+              ],
+              "bindings": [
+                {
+                  "target": {
+                    "kind": "material",
+                    "name": "BodyMaterial"
+                  },
+                  "property": "baseColor",
+                  "value": {
+                    "param": "bodyColor"
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "mesh",
+                    "name": "Body"
+                  },
+                  "property": "scaling",
+                  "value": {
+                    "vector3": [
+                      1,
+                      {
+                        "param": "cabinetHeight"
+                      },
+                      1
+                    ]
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "mesh",
+                    "name": "AccentPanel"
+                  },
+                  "property": "visible",
+                  "value": {
+                    "param": "showAccentPanel"
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "material",
+                    "name": "ScreenMaterial"
+                  },
+                  "property": "baseTexture",
+                  "value": {
+                    "param": "screenTexture"
+                  }
+                }
+              ]
+            },
+            "parameterValues": {
+              "bodyColor": "#2f86ff",
+              "cabinetHeight": 1.2,
+              "showAccentPanel": true,
+              "screenTexture": "textures/screen-grid.png"
+            }
+          }
+        }
+      },
+      "entity_parameter_chain_variant": {
+        "id": "entity_parameter_chain_variant",
+        "name": "参数链路示例 - 红色高柜斜纹",
+        "parentId": null,
+        "childrenIds": [],
+        "components": {
+          "transform": {
+            "position": {
+              "x": 0.85,
+              "y": 0,
+              "z": 0
+            },
+            "rotation": {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            }
+          },
+          "modelAsset": {
+            "sourcePath": "F:\\3d-babylon-editor\\examples\\model-packages\\ParameterChainDemo\\ParameterChainDemo.gltf",
+            "sourceUrl": "editor-asset://local/F%3A%5C3d-babylon-editor%5Cexamples%5Cmodel-packages%5CParameterChainDemo%5CParameterChainDemo.gltf",
+            "lengthUnit": "meter",
+            "unitScaleToMeters": 1,
+            "parameterConfig": {
+              "schema": "babylon-editor.model-parameters",
+              "version": 1,
+              "parameters": [
+                {
+                  "key": "bodyColor",
+                  "label": "主体颜色",
+                  "type": "color",
+                  "defaultValue": "#2f86ff"
+                },
+                {
+                  "key": "cabinetHeight",
+                  "label": "主体高度",
+                  "type": "number",
+                  "defaultValue": 1.2,
+                  "min": 0.6,
+                  "max": 2.2,
+                  "step": 0.1,
+                  "unit": "m"
+                },
+                {
+                  "key": "showAccentPanel",
+                  "label": "显示侧边面板",
+                  "type": "boolean",
+                  "defaultValue": true
+                },
+                {
+                  "key": "screenTexture",
+                  "label": "屏幕贴图",
+                  "type": "texture",
+                  "defaultValue": "textures/screen-grid.png",
+                  "allowedExtensions": [
+                    ".png"
+                  ],
+                  "options": [
+                    {
+                      "value": "textures/screen-grid.png",
+                      "label": "蓝色网格"
+                    },
+                    {
+                      "value": "textures/screen-stripes.png",
+                      "label": "黄色斜纹"
+                    }
+                  ]
+                }
+              ],
+              "bindings": [
+                {
+                  "target": {
+                    "kind": "material",
+                    "name": "BodyMaterial"
+                  },
+                  "property": "baseColor",
+                  "value": {
+                    "param": "bodyColor"
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "mesh",
+                    "name": "Body"
+                  },
+                  "property": "scaling",
+                  "value": {
+                    "vector3": [
+                      1,
+                      {
+                        "param": "cabinetHeight"
+                      },
+                      1
+                    ]
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "mesh",
+                    "name": "AccentPanel"
+                  },
+                  "property": "visible",
+                  "value": {
+                    "param": "showAccentPanel"
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "material",
+                    "name": "ScreenMaterial"
+                  },
+                  "property": "baseTexture",
+                  "value": {
+                    "param": "screenTexture"
+                  }
+                }
+              ]
+            },
+            "parameterValues": {
+              "bodyColor": "#ef476f",
+              "cabinetHeight": 1.75,
+              "showAccentPanel": false,
+              "screenTexture": "textures/screen-stripes.png"
+            }
+          }
+        }
+      },
+      "entity_parameter_chain_light": {
+        "id": "entity_parameter_chain_light",
+        "name": "参数链路示例光源",
+        "parentId": null,
+        "childrenIds": [],
+        "components": {
+          "transform": {
+            "position": {
+              "x": 0,
+              "y": 3,
+              "z": -2
+            },
+            "rotation": {
+              "x": 0.6,
+              "y": 0,
+              "z": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            }
+          },
+          "light": {
+            "lightKind": "point",
+            "intensity": 1
+          }
+        }
+      }
+    },
+    "selectedEntityId": "entity_parameter_chain_default"
+  }
+}

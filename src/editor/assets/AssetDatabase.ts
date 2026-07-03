@@ -1,5 +1,6 @@
 import type { ModelParameterConfig } from '../model/modelParameters';
 import { normalizeModelParameterConfig } from '../model/modelParameters';
+import type { ModelScriptAsset } from '../model/components';
 
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
 
@@ -8,10 +9,16 @@ export type AssetEntry = {
   name: string;
   path: string;
   sourceUrl: string;
+  thumbnailPath?: string;
+  thumbnailUrl?: string;
   kind: 'folder' | 'model' | 'texture' | 'scene' | 'unknown';
   packagePath?: string;
   metadataPath?: string;
   scriptPaths?: string[];
+  scriptAssets?: ModelScriptAsset[];
+  parameterScriptMetadata?: unknown[];
+  animationScriptMetadata?: unknown[];
+  defaultAssetCode?: string;
   displayName?: string;
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
@@ -23,6 +30,7 @@ export const BUILT_IN_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-built
 
 export type BuiltInAssetDragPayload =
   | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
+  | { kind: 'locator'; locatorKind: 'box-wire' }
   | { kind: 'light'; lightKind: 'hemispheric' | 'directional' | 'point' };
 
 type AssetEntryRecord = Record<string, unknown>;
@@ -42,6 +50,19 @@ function readOptionalStringArray(record: AssetEntryRecord, key: keyof AssetEntry
 
   const strings = value.filter((item): item is string => typeof item === 'string');
   return strings.length === value.length ? strings : undefined;
+}
+
+function readOptionalScriptAssets(record: AssetEntryRecord): ModelScriptAsset[] | undefined {
+  const value = record.scriptAssets;
+  if (!Array.isArray(value)) return undefined;
+
+  const assets = value.map((item) => {
+    if (!isRecord(item)) return null;
+    if (typeof item.path !== 'string' || typeof item.sourceUrl !== 'string' || typeof item.name !== 'string') return null;
+    return { path: item.path, sourceUrl: item.sourceUrl, name: item.name };
+  });
+
+  return assets.every(Boolean) ? assets as ModelScriptAsset[] : undefined;
 }
 
 function readOptionalLengthUnit(record: AssetEntryRecord): ModelSourceLengthUnit | undefined {
@@ -82,15 +103,25 @@ export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | nu
 
     const packagePath = readOptionalString(payload, 'packagePath');
     const metadataPath = readOptionalString(payload, 'metadataPath');
+    const thumbnailPath = readOptionalString(payload, 'thumbnailPath');
+    const thumbnailUrl = readOptionalString(payload, 'thumbnailUrl');
     const scriptPaths = readOptionalStringArray(payload, 'scriptPaths');
+    const scriptAssets = readOptionalScriptAssets(payload);
     const displayName = readOptionalString(payload, 'displayName');
+    const defaultAssetCode = readOptionalString(payload, 'defaultAssetCode');
     const lengthUnit = readOptionalLengthUnit(payload);
     const unitScaleToMeters = readOptionalFiniteNumber(payload, 'unitScaleToMeters');
     const parameterConfig = normalizeModelParameterConfig(payload.parameterConfig);
 
     if (packagePath) asset.packagePath = packagePath;
     if (metadataPath) asset.metadataPath = metadataPath;
+    if (thumbnailPath) asset.thumbnailPath = thumbnailPath;
+    if (thumbnailUrl) asset.thumbnailUrl = thumbnailUrl;
     if (scriptPaths) asset.scriptPaths = scriptPaths;
+    if (scriptAssets) asset.scriptAssets = scriptAssets;
+    if (Array.isArray(payload.parameterScriptMetadata)) asset.parameterScriptMetadata = payload.parameterScriptMetadata;
+    if (Array.isArray(payload.animationScriptMetadata)) asset.animationScriptMetadata = payload.animationScriptMetadata;
+    if (defaultAssetCode) asset.defaultAssetCode = defaultAssetCode;
     if (displayName) asset.displayName = displayName;
     if (lengthUnit) asset.lengthUnit = lengthUnit;
     if (unitScaleToMeters !== undefined) asset.unitScaleToMeters = unitScaleToMeters;
@@ -111,6 +142,12 @@ export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetD
       const meshKind = payload.meshKind;
       if (meshKind !== 'cube' && meshKind !== 'sphere' && meshKind !== 'plane') return null;
       return { kind: 'mesh', meshKind };
+    }
+
+    if (payload.kind === 'locator') {
+      const locatorKind = payload.locatorKind;
+      if (locatorKind !== 'box-wire') return null;
+      return { kind: 'locator', locatorKind };
     }
 
     if (payload.kind === 'light') {
