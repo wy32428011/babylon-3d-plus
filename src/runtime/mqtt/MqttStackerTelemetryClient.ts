@@ -1,14 +1,14 @@
 import mqtt, { type MqttClient } from 'mqtt';
 import type { MqttConfig } from '../../editor/model/SceneDocument';
 import {
-  parseStackerTelemetryMessage,
-  stackerTelemetryStore,
-} from './stackerTelemetry';
+  deviceTelemetryStore,
+  parseDeviceTelemetryMessage,
+} from './deviceTelemetry';
 import { StackerTelemetrySimulator } from './StackerTelemetrySimulator';
 
 type MqttTelemetryLog = (message: string) => void;
 
-/** 管理场景级 MQTT 连接，并把 stacker 遥测写入内存快照。 */
+/** 管理场景级 MQTT 连接，并把多设备遥测写入内存快照。 */
 export class MqttStackerTelemetryClient {
   private client: MqttClient | null = null;
   private configSignature = '';
@@ -33,11 +33,11 @@ export class MqttStackerTelemetryClient {
     if (signature === this.configSignature) return;
 
     this.configSignature = signature;
-    this.disconnect(false);
+    this.disconnect(true);
     this.simulator.updateConfig(config);
 
     if (!config.enabled) {
-      stackerTelemetryStore.clear();
+      deviceTelemetryStore.clear();
       return;
     }
 
@@ -48,13 +48,13 @@ export class MqttStackerTelemetryClient {
 
     if (!config.address || !config.topic) {
       this.pushLog('MQTT 未连接：地址或 Topic 为空。');
-      stackerTelemetryStore.clear();
+      deviceTelemetryStore.clear();
       return;
     }
 
     if (!/^wss?:\/\//i.test(config.address)) {
       this.pushLog('MQTT 未连接：浏览器运行时仅支持 ws:// 或 wss:// 地址。');
-      stackerTelemetryStore.clear();
+      deviceTelemetryStore.clear();
       return;
     }
 
@@ -66,11 +66,12 @@ export class MqttStackerTelemetryClient {
     this.configSignature = '';
     this.simulator.dispose();
     this.disconnect(true);
-    stackerTelemetryStore.clear();
+    deviceTelemetryStore.clear();
   }
 
-  /** 建立 MQTT over WebSocket 连接并订阅 stacker topic。 */
+  /** 建立 MQTT over WebSocket 连接并订阅一个或多个设备遥测 topic。 */
   private connect(config: MqttConfig): void {
+    const topics = splitMqttTopics(config.topic);
     const client = mqtt.connect(config.address, {
       clean: true,
       clientId: `babylon-editor-${crypto.randomUUID()}`,
@@ -80,21 +81,21 @@ export class MqttStackerTelemetryClient {
     this.client = client;
 
     client.on('connect', () => {
-      client.subscribe(config.topic, { qos: 0 }, (error) => {
+      client.subscribe(topics, { qos: 0 }, (error) => {
         if (error) {
           this.pushLog(`MQTT 订阅失败：${error.message}`);
           return;
         }
 
-        this.pushLog(`MQTT 已连接并订阅：${config.topic}`);
+        this.pushLog(`MQTT 已连接并订阅：${topics.join(', ')}`);
       });
     });
 
     client.on('message', (topic, payload) => {
       try {
-        const snapshot = parseStackerTelemetryMessage(topic, payload.toString('utf8'));
+        const snapshot = parseDeviceTelemetryMessage(topic, payload.toString('utf8'));
         if (!snapshot) return;
-        stackerTelemetryStore.upsert(snapshot);
+        deviceTelemetryStore.upsert(snapshot);
       } catch (error) {
         this.reportParseError(error);
       }
@@ -116,7 +117,7 @@ export class MqttStackerTelemetryClient {
       this.client = null;
     }
     if (clearStore) {
-      stackerTelemetryStore.clear();
+      deviceTelemetryStore.clear();
     }
   }
 
@@ -126,6 +127,14 @@ export class MqttStackerTelemetryClient {
     if (now - this.lastParseErrorAt < 3000) return;
     this.lastParseErrorAt = now;
     const message = error instanceof Error ? error.message : String(error);
-    this.pushLog(`MQTT stacker 数据解析失败：${message}`);
+    this.pushLog(`MQTT 设备遥测解析失败：${message}`);
   }
+}
+
+/** 将逗号分隔 topic 归一为 mqtt.js 可订阅数组。 */
+function splitMqttTopics(topic: string): string[] {
+  return topic
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }

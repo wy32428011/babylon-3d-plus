@@ -99,7 +99,7 @@ type EntityClipboard = {
   entities: Entity[];
 };
 
-export type EntityArrayAxis = 'x' | 'y' | 'z';
+export type EntityArrayDirection = 'x' | '-x' | 'y' | '-y' | 'z' | '-z';
 
 export type SceneFocusRequest = {
   id: string;
@@ -136,6 +136,16 @@ const LOCATOR_MIN_DIMENSION = 0.01;
 const LOCATOR_ASSET_ID_MAX_LENGTH = 128;
 const CLIPBOARD_PASTE_OFFSET_METERS = 0.35;
 const ARRAY_COPY_COUNT_MAX = 100;
+
+/** 模型阵列方向到世界坐标单位偏移的映射，负方向通过向量符号表达。 */
+const ENTITY_ARRAY_DIRECTION_VECTORS: Record<EntityArrayDirection, Vector3Data> = {
+  x: { x: 1, y: 0, z: 0 },
+  '-x': { x: -1, y: 0, z: 0 },
+  y: { x: 0, y: 1, z: 0 },
+  '-y': { x: 0, y: -1, z: 0 },
+  z: { x: 0, y: 0, z: 1 },
+  '-z': { x: 0, y: 0, z: -1 },
+};
 
 type EditorState = {
   scene: SceneDocument;
@@ -174,7 +184,7 @@ type EditorState = {
   lockSelectedEntities: () => void;
   copySelectedEntities: () => void;
   pasteEntityClipboard: (targetFolderId?: string | null) => void;
-  arraySelectedEntities: (copyCount: number, axis: EntityArrayAxis, spacingMeters: number) => void;
+  arraySelectedEntities: (copyCount: number, direction: EntityArrayDirection, spacingMeters: number) => void;
   groupSelectedEntities: () => void;
   ungroupSelectedEntities: () => void;
   requestSceneFocusForSelection: () => void;
@@ -1243,7 +1253,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  arraySelectedEntities: (copyCount, axis, spacingMeters) => {
+  arraySelectedEntities: (copyCount, direction, spacingMeters) => {
     set((state) => {
       const sourceIds = getSelectedRuntimeEntityIds(state);
       if (sourceIds.length === 0) return state;
@@ -1253,14 +1263,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         Math.max(1, Math.floor(Number.isFinite(copyCount) ? copyCount : 3)),
       );
       const spacing = sanitizePositiveNumber(spacingMeters, 1);
+      const directionVector = ENTITY_ARRAY_DIRECTION_VECTORS[direction] ?? ENTITY_ARRAY_DIRECTION_VECTORS.x;
       const existingNames = new Set(Object.values(state.scene.entities).map((entity) => entity.name));
       const duplicatedEntities: Entity[] = [];
 
       for (let copyIndex = 1; copyIndex <= normalizedCopyCount; copyIndex += 1) {
+        // 间距只表示相邻副本的绝对距离，方向正负由单位向量承载。
         const offset = {
-          x: axis === 'x' ? spacing * copyIndex : 0,
-          y: axis === 'y' ? spacing * copyIndex : 0,
-          z: axis === 'z' ? spacing * copyIndex : 0,
+          x: directionVector.x * spacing * copyIndex,
+          y: directionVector.y * spacing * copyIndex,
+          z: directionVector.z * spacing * copyIndex,
         };
 
         for (const sourceId of sourceIds) {

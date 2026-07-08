@@ -57,7 +57,7 @@ function printHelp() {
   --asset <code>       资产编号，默认 ${DEFAULT_ASSET_CODE}
   --device-type <type> 设备类型，默认 ${DEFAULT_DEVICE_TYPE}
   --topic <topic>      完整 topic，默认按设备类型和资产编号生成
-  --scenario <name>    cycle | target | movement | fault，默认 cycle
+  --scenario <name>    cycle | target | movement | fault，默认 cycle；conveyor 默认静止，movement 时运动
   --interval-ms <ms>   发布间隔，默认 ${DEFAULT_INTERVAL_MS}
   --duration-ms <ms>   持续时间，0 表示一直运行
   --once               只发布或打印一条
@@ -184,6 +184,75 @@ function resolveTargetContainerCode(cargoCode, phaseProgress) {
   return phaseProgress >= 0.96 ? '' : cargoCode;
 }
 
+/** 按输送线协议生成静止、运动或故障状态。 */
+function resolveConveyorState(elapsedMs, scenario) {
+  if (scenario === 'fault') {
+    return {
+      mode: 4,
+      task: 304,
+      movementX: 0,
+      movementY: 0,
+      signalBits: 2,
+      containerCode: '',
+      normal: false,
+      errorCode: 9101,
+      message: '模拟输送线故障',
+      layer: 0,
+      rotation: 0,
+      containerQuantity: 0,
+      folding: 0,
+      flip: 0,
+      fork: 0,
+      result: 0,
+      result2: 0,
+    };
+  }
+
+  if (scenario === 'movement') {
+    const seconds = elapsedMs / 1000;
+    const direction = Math.floor(seconds / 4) % 2 === 0 ? 1 : 2;
+    return {
+      mode: 2,
+      task: 304 + Math.floor(seconds),
+      movementX: direction,
+      movementY: 0,
+      signalBits: 2,
+      containerCode: `BOX-${String(Math.floor(seconds / 4) + 1).padStart(3, '0')}`,
+      normal: true,
+      errorCode: 0,
+      message: direction === 1 ? '模拟输送线正向运行' : '模拟输送线反向运行',
+      layer: 0,
+      rotation: 360,
+      containerQuantity: 1,
+      folding: 0,
+      flip: 0,
+      fork: 0,
+      result: 0,
+      result2: 0,
+    };
+  }
+
+  return {
+    mode: 2,
+    task: 304,
+    movementX: 0,
+    movementY: 0,
+    signalBits: 2,
+    containerCode: '',
+    normal: true,
+    errorCode: 0,
+    message: '正常',
+    layer: 0,
+    rotation: 0,
+    containerQuantity: 0,
+    folding: 0,
+    flip: 0,
+    fork: 0,
+    result: 0,
+    result2: 0,
+  };
+}
+
 /** 生成一条符合 twindatadriven/joint 协议的 Stacker 消息。 */
 function createStackerPayload(options, tick, startMs) {
   const elapsedMs = Date.now() - startMs;
@@ -234,6 +303,45 @@ function createStackerPayload(options, tick, startMs) {
   };
 }
 
+/** 生成一条符合 twindatadriven/joint 协议的 Conveyor 消息。 */
+function createConveyorPayload(options, tick, startMs) {
+  const elapsedMs = Date.now() - startMs;
+  const state = resolveConveyorState(elapsedMs, options.scenario);
+
+  return {
+    data: [
+      point(options.asset, 'deviceCode', options.asset),
+      point(options.asset, 'mode', state.mode),
+      point(options.asset, 'task', state.task + tick),
+      point(options.asset, 'movement_x', state.movementX),
+      point(options.asset, 'movement_y', state.movementY),
+      point(options.asset, 'signalBits', state.signalBits),
+      point(options.asset, 'containerCode', state.containerCode),
+      point(options.asset, 'workingHours_x', round(elapsedMs / 3600000)),
+      point(options.asset, 'workingHours_y', round(elapsedMs / 7200000)),
+      point(options.asset, 'normal', state.normal),
+      point(options.asset, 'errorCode', state.errorCode),
+      point(options.asset, 'message', state.message),
+      point(options.asset, 'layer', state.layer),
+      point(options.asset, 'rotation', state.rotation),
+      point(options.asset, 'container_quantity', state.containerQuantity),
+      point(options.asset, 'folding', state.folding),
+      point(options.asset, 'flip', state.flip),
+      point(options.asset, 'fork', state.fork),
+      point(options.asset, 'result', state.result),
+      point(options.asset, 'result2', state.result2),
+    ],
+    ts: new Date().toISOString(),
+  };
+}
+
+/** 根据设备类型选择 payload 生成器。 */
+function createTelemetryPayload(options, tick, startMs) {
+  return options.deviceType.toLowerCase() === 'conveyor'
+    ? createConveyorPayload(options, tick, startMs)
+    : createStackerPayload(options, tick, startMs);
+}
+
 /** 将模拟数值收敛到 4 位小数，避免 payload 过长。 */
 function round(value) {
   return Math.round(value * 10000) / 10000;
@@ -241,7 +349,7 @@ function round(value) {
 
 /** 打印或发布一条消息。 */
 function emitPayload(client, options, tick, startMs) {
-  const payload = createStackerPayload(options, tick, startMs);
+  const payload = createTelemetryPayload(options, tick, startMs);
   const payloadText = JSON.stringify(payload);
   if (options.stdout) {
     console.log(`${options.topic} ${payloadText}`);
@@ -270,7 +378,7 @@ function runStdout(options) {
 function runMqtt(options) {
   const client = mqtt.connect(options.broker, {
     clean: true,
-    clientId: `stacker-simulator-${options.asset}-${process.pid}`,
+    clientId: `telemetry-simulator-${options.deviceType}-${options.asset}-${process.pid}`,
     connectTimeout: 8000,
     reconnectPeriod: 3000,
   });

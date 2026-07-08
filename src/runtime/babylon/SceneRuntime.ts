@@ -49,12 +49,13 @@ import {
 } from '../../editor/cad/cadReference';
 import { ExternalModelScriptRuntime } from './ExternalModelScriptRuntime';
 import {
+  deviceTelemetryStore,
   readIntegerField,
   readNumberField,
   readStringField,
-  stackerTelemetryStore,
+  type DeviceTelemetrySnapshot,
   type StackerTelemetrySnapshot,
-} from '../mqtt/stackerTelemetry';
+} from '../mqtt/deviceTelemetry';
 import { resolveRelativeEditorAssetUrl, resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
@@ -73,6 +74,13 @@ const STACKER_RPM_TO_METERS_PER_SECOND = 0.01;
 const STACKER_CARGO_COLOR = '#d8a03a';
 const STACKER_CARGO_EMISSIVE_COLOR = '#3a2508';
 const STACKER_CARGO_SIZE = new Vector3(0.8, 0.42, 0.8);
+const CONVEYOR_CARGO_COLOR = '#4fa3d8';
+const CONVEYOR_CARGO_EMISSIVE_COLOR = '#09283a';
+const CONVEYOR_CARGO_SIZE = new Vector3(0.72, 0.34, 0.72);
+const CONVEYOR_ANONYMOUS_CARGO_CODE = '__anonymous__';
+const CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS = 1.2;
+const CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND = 180;
+const CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND = 0.3;
 const STACKER_FALLBACK_FIXED_NODE_NAMES = ['guidaoshang.1', 'guidaoxia.2'];
 const STACKER_FALLBACK_TRAVEL_NODE_NAMES = [
   'dingbuhuagui2.3',
@@ -96,6 +104,7 @@ type ModelRuntimeEntry = {
   sourceUrl: string;
   assetCode: string;
   stackerCapable: boolean;
+  conveyorCapable: boolean;
   root: TransformNode;
   contentRoot: TransformNode;
   container: AssetContainer | null;
@@ -108,6 +117,7 @@ type ModelRuntimeEntry = {
   externalScriptRuntime: ExternalModelScriptRuntime | null;
   externalScriptSignature: string;
   stackerTelemetry: StackerModelTelemetryState;
+  conveyorTelemetry: ConveyorModelTelemetryState;
   stackerTelemetryReady: boolean;
 };
 
@@ -155,6 +165,35 @@ type StackerModelTelemetryState = {
   lastTargetKey: string | null;
 };
 
+type ConveyorNodeBaseline = {
+  position: Vector3;
+};
+
+type ConveyorModelTelemetryState = {
+  cargoCode: string | null;
+  cargoTravelOffset: number;
+  motionOffsets: Map<string, number>;
+  nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;
+};
+
+type ConveyorCargoRuntimeEntry = {
+  assetCode: string;
+  containerCode: string;
+  mesh: Mesh;
+  material: StandardMaterial;
+};
+
+type ConveyorMotionConfig = {
+  key: string;
+  fields: string[];
+  kind: 'rotate' | 'translate';
+  axis: 'x' | 'y' | 'z';
+  actionMap: Record<string, number>;
+  speed: number;
+  nodes: string[];
+  fallbackPattern: string | null;
+};
+
 type CadReferenceRuntimeEntry = {
   sourceUrl: string;
   unitScaleToMeters: number;
@@ -183,6 +222,7 @@ export class SceneRuntime {
   private readonly cadReferences = new Map<string, CadReferenceRuntimeEntry>();
   private readonly models = new Map<string, ModelRuntimeEntry>();
   private readonly stackerCargoMeshes = new Map<string, StackerCargoRuntimeEntry>();
+  private readonly conveyorCargoMeshes = new Map<string, ConveyorCargoRuntimeEntry>();
   private readonly lights = new Map<string, Light>();
   private readonly entityStates = new Map<string, EntityRuntimeState>();
   private readonly modelHighlightLayer: HighlightLayer;
@@ -197,7 +237,7 @@ export class SceneRuntime {
     private readonly pushLog: (message: string) => void = () => undefined,
   ) {
     this.modelHighlightLayer = new HighlightLayer('EditorModelHighlightLayer', scene);
-    this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyStackerTelemetryFrame());
+    this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
   }
 
   /** 根据实体 ID 获取当前运行时中可被 Gizmo 绑定的 Babylon 节点。 */
@@ -463,6 +503,9 @@ export class SceneRuntime {
     for (const cargo of this.stackerCargoMeshes.values()) {
       this.disposeStackerCargo(cargo);
     }
+    for (const cargo of this.conveyorCargoMeshes.values()) {
+      this.disposeConveyorCargo(cargo);
+    }
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
     }
@@ -473,6 +516,7 @@ export class SceneRuntime {
     this.cadReferences.clear();
     this.models.clear();
     this.stackerCargoMeshes.clear();
+    this.conveyorCargoMeshes.clear();
     this.lights.clear();
     this.entityStates.clear();
   }
@@ -668,11 +712,14 @@ export class SceneRuntime {
       this.applyTransform(current.root, entity.components.transform);
       if (current.assetCode !== modelAsset.assetCode) {
         this.disposeStackerCargoForAssetCode(current.assetCode);
+        this.disposeConveyorCargoForAssetCode(current.assetCode);
         current.stackerTelemetry.frontCargoCode = null;
         current.stackerTelemetry.backCargoCode = null;
+        this.resetConveyorTelemetryState(current);
       }
       current.assetCode = modelAsset.assetCode;
       current.stackerCapable = this.isStackerModelAsset(modelAsset);
+      current.conveyorCapable = this.isConveyorModelAsset(modelAsset);
       current.stackerTelemetry.rootBasePosition = current.root.position.clone();
       this.applyModelUnitScale(current.contentRoot, modelAsset.unitScaleToMeters);
       this.applyModelParameters(entity, current);
@@ -693,6 +740,7 @@ export class SceneRuntime {
       sourceUrl: modelAsset.sourceUrl,
       assetCode: modelAsset.assetCode,
       stackerCapable: this.isStackerModelAsset(modelAsset),
+      conveyorCapable: this.isConveyorModelAsset(modelAsset),
       root,
       contentRoot,
       container: null,
@@ -705,6 +753,7 @@ export class SceneRuntime {
       externalScriptRuntime: null,
       externalScriptSignature: '',
       stackerTelemetry: this.createStackerTelemetryState(root),
+      conveyorTelemetry: this.createConveyorTelemetryState(),
       stackerTelemetryReady: false,
     };
     this.models.set(entity.id, pending);
@@ -778,33 +827,63 @@ export class SceneRuntime {
     }
   }
 
+  /** 每帧把最新 MQTT 设备遥测分发到对应设备运行时。 */
+  private applyDeviceTelemetryFrame(): void {
+    this.applyStackerTelemetryFrame();
+    this.applyConveyorTelemetryFrame();
+  }
+
   /** 每帧把最新 MQTT stacker 遥测应用到匹配的模型实例。 */
   private applyStackerTelemetryFrame(): void {
-    const snapshots = stackerTelemetryStore.getStackerSnapshots();
+    const snapshots = deviceTelemetryStore.getSnapshotsByDeviceType('stacker') as StackerTelemetrySnapshot[];
     if (snapshots.length === 0) return;
 
     const snapshotAssetCodes = new Set(snapshots.map((snapshot) => snapshot.assetCode));
     const telemetryModels = [...this.models.values()].filter(
-      (model) => model.container && model.stackerTelemetryReady && (model.stackerCapable || snapshotAssetCodes.has(model.assetCode)),
+      (model) => model.container && model.stackerTelemetryReady && snapshotAssetCodes.has(model.assetCode),
     );
     if (telemetryModels.length === 0) return;
 
     const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
     for (const model of telemetryModels) {
-      const snapshot = this.resolveStackerTelemetrySnapshot(model, telemetryModels.length);
+      const snapshot = this.resolveStackerTelemetrySnapshot(model);
       if (!snapshot) continue;
 
       this.applyStackerTelemetryToModel(model, snapshot, deltaSeconds);
     }
   }
 
-  /** 优先按模型资产编号精确匹配遥测；单候选模型单设备时允许唯一兜底。 */
-  private resolveStackerTelemetrySnapshot(model: ModelRuntimeEntry, stackerModelCount: number): StackerTelemetrySnapshot | null {
-    const exactSnapshot = stackerTelemetryStore.getSnapshot(model.assetCode);
-    if (exactSnapshot) return exactSnapshot;
+  /** 按模型资产编号精确匹配 Stacker 遥测，避免现场编号配置错误时误驱动唯一模型。 */
+  private resolveStackerTelemetrySnapshot(model: ModelRuntimeEntry): StackerTelemetrySnapshot | null {
+    return deviceTelemetryStore.getSnapshot(model.assetCode, 'stacker') as StackerTelemetrySnapshot | null;
+  }
 
-    const snapshots = stackerTelemetryStore.getStackerSnapshots();
-    return stackerModelCount === 1 && snapshots.length === 1 ? snapshots[0] : null;
+  /** 每帧把最新 MQTT conveyor 遥测应用到匹配的输送线模型实例。 */
+  private applyConveyorTelemetryFrame(): void {
+    const snapshots = deviceTelemetryStore.getSnapshotsByDeviceType('conveyor');
+    if (snapshots.length === 0) return;
+
+    const snapshotAssetCodes = new Set(snapshots.map((snapshot) => snapshot.assetCode));
+    const telemetryModels = [...this.models.values()].filter((model) => {
+      return model.container
+        && model.stackerTelemetryReady
+        && snapshotAssetCodes.has(model.assetCode)
+        && this.isConveyorRuntimeModel(model);
+    });
+    if (telemetryModels.length === 0) return;
+
+    const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
+    for (const model of telemetryModels) {
+      const snapshot = this.resolveConveyorTelemetrySnapshot(model);
+      if (!snapshot) continue;
+
+      this.applyConveyorTelemetryToModel(model, snapshot, deltaSeconds);
+    }
+  }
+
+  /** 按模型资产编号精确匹配 Conveyor 遥测，避免不同线体编号被唯一兜底误绑。 */
+  private resolveConveyorTelemetrySnapshot(model: ModelRuntimeEntry): DeviceTelemetrySnapshot | null {
+    return deviceTelemetryStore.getSnapshot(model.assetCode, 'conveyor');
   }
 
   /** 对单台 stacker 应用根节点、载货台和前后叉的遥测驱动。 */
@@ -815,6 +894,7 @@ export class SceneRuntime {
   ): void {
     const targetLocator = snapshot.targetLocationKey ? this.locatorTargets.get(snapshot.targetLocationKey) ?? null : null;
     this.reportStackerRuntimeState(snapshot, targetLocator);
+    this.writeDeviceTelemetryMetadata(model, snapshot);
     this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
 
     const targetPosition = targetLocator?.root.getAbsolutePosition() ?? null;
@@ -823,6 +903,77 @@ export class SceneRuntime {
     this.applyStackerForkMotion(model, snapshot, deltaSeconds);
     this.applyStackerNodeMotionOffsets(model);
     this.applyStackerCargoMotion(model, snapshot, targetLocator);
+  }
+
+  /** 对单条输送线应用滚筒/链条动作、货物占位和状态 metadata。 */
+  private applyConveyorTelemetryToModel(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    deltaSeconds: number,
+  ): void {
+    this.reportConveyorRuntimeState(snapshot);
+    this.writeDeviceTelemetryMetadata(model, snapshot);
+
+    if (!snapshot.faulted) {
+      this.applyConveyorMotion(model, snapshot, deltaSeconds);
+    }
+
+    this.applyConveyorCargoMotion(model, snapshot, deltaSeconds);
+  }
+
+  /** 根据模型脚本 dataDriven.motion 配置驱动 Conveyor 节点。 */
+  private applyConveyorMotion(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    deltaSeconds: number,
+  ): void {
+    for (const config of this.readConveyorMotionConfigs(model)) {
+      const direction = this.readConveyorMotionDirection(snapshot, config);
+      if (direction === 0) continue;
+
+      const nodes = this.findConveyorMotionNodes(model, config);
+      if (nodes.length === 0) continue;
+
+      if (config.kind === 'rotate') {
+        const speed = this.readConveyorRotationSpeed(snapshot, config);
+        this.rotateConveyorNodes(nodes, config.axis, direction * speed * deltaSeconds);
+      } else {
+        const nextOffset = this.updateConveyorMotionOffset(model, config, direction * config.speed * deltaSeconds);
+        this.translateConveyorNodesFromBaseline(model, nodes, config.axis, nextOffset);
+      }
+    }
+  }
+
+  /** 根据 containerCode 或 container_quantity 创建输送线上只存在于运行时的货物盒。 */
+  private applyConveyorCargoMotion(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    deltaSeconds: number,
+  ): void {
+    const containerCode = this.readContainerCode(snapshot, 'containerCode');
+    const containerQuantity = readNumberField(snapshot.fields, 'container_quantity') ?? 0;
+    const activeContainerCode = containerCode ?? (containerQuantity > 0 ? CONVEYOR_ANONYMOUS_CARGO_CODE : null);
+    if (!activeContainerCode) {
+      this.disposeConveyorCargoForAssetCode(model.assetCode);
+      model.conveyorTelemetry.cargoCode = null;
+      return;
+    }
+    if (model.conveyorTelemetry.cargoCode && model.conveyorTelemetry.cargoCode !== activeContainerCode) {
+      this.disposeConveyorCargoForAssetCode(model.assetCode);
+    }
+
+    const movementDirection = this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
+    if (!snapshot.faulted && movementDirection !== 0) {
+      model.conveyorTelemetry.cargoTravelOffset = this.wrapConveyorOffset(
+        model.conveyorTelemetry.cargoTravelOffset + movementDirection * CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND * deltaSeconds,
+      );
+    }
+
+    const cargo = this.getOrCreateConveyorCargo(model.assetCode, activeContainerCode);
+    cargo.mesh.position.copyFrom(this.getConveyorCargoPosition(model));
+    cargo.mesh.rotationQuaternion = this.getNodeWorldRotation(model.root);
+    cargo.mesh.setEnabled(true);
+    model.conveyorTelemetry.cargoCode = activeContainerCode;
   }
 
   /** 根据 distance_x 校准行走机构虚拟位置，并在有目标位或 movement_x 时沿轨道推进。 */
@@ -1021,7 +1172,7 @@ export class SceneRuntime {
   }
 
   /** 读取托盘条码，空字符串表示当前叉没有可视化货物。 */
-  private readContainerCode(snapshot: StackerTelemetrySnapshot, key: 'front_containerCode' | 'back_containerCode'): string | null {
+  private readContainerCode(snapshot: DeviceTelemetrySnapshot, key: string): string | null {
     const value = readStringField(snapshot.fields, key)?.trim();
     return value ? value : null;
   }
@@ -1136,12 +1287,325 @@ export class SceneRuntime {
     return rotation;
   }
 
-  /** 生成货物运行时对象的唯一键。 */
+  /** 读取模型脚本声明的输送线运动配置，运行时只接受 devType=conveyor 的 dataDriven 配置。 */
+  private readConveyorMotionConfigs(model: ModelRuntimeEntry): ConveyorMotionConfig[] {
+    const configs: ConveyorMotionConfig[] = [];
+    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+      if (!this.isPlainRecord(dataDriven)) continue;
+      const deviceConfig = this.isPlainRecord(dataDriven.device) ? dataDriven.device : {};
+      const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
+      if (devType !== 'conveyor') continue;
+
+      const motionConfig = this.isPlainRecord(dataDriven.motion) ? dataDriven.motion : null;
+      if (!motionConfig) continue;
+
+      for (const [key, rawConfig] of Object.entries(motionConfig)) {
+        const config = this.readConveyorMotionConfig(key, rawConfig);
+        if (config) configs.push(config);
+      }
+    }
+
+    return configs;
+  }
+
+  /** 把单个 dataDriven.motion 配置归一成运行时可直接执行的输送线动作。 */
+  private readConveyorMotionConfig(key: string, rawConfig: unknown): ConveyorMotionConfig | null {
+    if (!this.isPlainRecord(rawConfig)) return null;
+
+    const rawKind = typeof rawConfig.kind === 'string' ? rawConfig.kind.trim().toLowerCase() : '';
+    if (rawKind !== 'rotate' && rawKind !== 'translate') return null;
+    const kind: ConveyorMotionConfig['kind'] = rawKind;
+
+    const rawAxis = typeof rawConfig.axis === 'string' ? rawConfig.axis.trim().toLowerCase() : '';
+    const axis: ConveyorMotionConfig['axis'] = rawAxis === 'x' || rawAxis === 'y' || rawAxis === 'z'
+      ? rawAxis
+      : 'z';
+    const fallbackSpeed = kind === 'rotate'
+      ? CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND
+      : CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
+    const rawSpeed = typeof rawConfig.speed === 'number' ? rawConfig.speed : Number(rawConfig.speed);
+    const speed = Number.isFinite(rawSpeed) && rawSpeed > 0 ? rawSpeed : fallbackSpeed;
+    const fields = this.readStringArrayPath(rawConfig, ['fields']);
+    const nodes = this.readStringArrayPath(rawConfig, ['nodes']);
+    const rawFallbackPattern = typeof rawConfig.fallbackPattern === 'string' ? rawConfig.fallbackPattern.trim() : '';
+
+    return {
+      key,
+      fields: fields.length > 0 ? fields : (kind === 'rotate' ? ['movement_x', 'rotation'] : ['movement_x']),
+      kind,
+      axis,
+      actionMap: this.readConveyorActionMap(rawConfig.actionMap),
+      speed,
+      nodes,
+      fallbackPattern: rawFallbackPattern || null,
+    };
+  }
+
+  /** 读取 movement 编码映射，缺省遵循 0=停、1=正向、2=反向。 */
+  private readConveyorActionMap(rawActionMap: unknown): Record<string, number> {
+    const actionMap: Record<string, number> = { 0: 0, 1: 1, 2: -1 };
+    if (!this.isPlainRecord(rawActionMap)) return actionMap;
+
+    for (const [key, value] of Object.entries(rawActionMap)) {
+      const numberValue = typeof value === 'number' ? value : Number(value);
+      if (Number.isFinite(numberValue)) {
+        actionMap[key] = numberValue;
+      }
+    }
+
+    return actionMap;
+  }
+
+  /** 判断当前模型是否具备输送线驱动能力，脚本声明优先于文件名兜底识别。 */
+  private isConveyorRuntimeModel(model: ModelRuntimeEntry): boolean {
+    return model.conveyorCapable || this.readConveyorMotionConfigs(model).length > 0;
+  }
+
+  /** 通过模型包脚本、路径和资产编号兜底识别输送线模型。 */
+  private isConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
+    const signature = JSON.stringify([
+      modelAsset.assetCode,
+      modelAsset.sourcePath,
+      modelAsset.sourceUrl,
+      modelAsset.parameterScriptMetadata ?? [],
+      modelAsset.animationScriptMetadata ?? [],
+    ]).toLowerCase();
+
+    return signature.includes('conveyor')
+      || signature.includes('roller-conveyor')
+      || signature.includes('chain-conveyor')
+      || signature.includes('输送')
+      || signature.includes('滚筒')
+      || signature.includes('链条');
+  }
+
+  /** 创建输送线运行时状态，所有运动偏移和货物占位只保存在内存。 */
+  private createConveyorTelemetryState(): ConveyorModelTelemetryState {
+    return {
+      cargoCode: null,
+      cargoTravelOffset: 0,
+      motionOffsets: new Map(),
+      nodeBaselines: new Map(),
+    };
+  }
+
+  /** 模型脚本或资产编号变化后重置输送线基线，避免旧节点偏移污染新模型。 */
+  private resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
+    model.conveyorTelemetry.cargoCode = null;
+    model.conveyorTelemetry.cargoTravelOffset = 0;
+    model.conveyorTelemetry.motionOffsets.clear();
+    model.conveyorTelemetry.nodeBaselines.clear();
+  }
+
+  /** 按 motion.fields 读取输送线方向，支持模型脚本自定义 actionMap。 */
+  private readConveyorMotionDirection(snapshot: DeviceTelemetrySnapshot, config: ConveyorMotionConfig): number {
+    for (const field of config.fields) {
+      const fieldValue = readNumberField(snapshot.fields, field);
+      if (fieldValue === null) continue;
+
+      const mappedValue = config.actionMap[String(Math.trunc(fieldValue))];
+      if (Number.isFinite(mappedValue)) return mappedValue;
+      return this.readConveyorMovementDirection(fieldValue);
+    }
+
+    return 0;
+  }
+
+  /** 输送线 movement_x 编码：0 静止，1 正向，2 反向，正负数做现场兼容兜底。 */
+  private readConveyorMovementDirection(value: number | null): number {
+    if (value === 1) return 1;
+    if (value === 2) return -1;
+    if (value !== null && value > 0) return 1;
+    if (value !== null && value < 0) return -1;
+    return 0;
+  }
+
+  /** 读取滚筒角速度，rotation 大于 3 时按度/秒处理，否则沿用模型脚本默认速度。 */
+  private readConveyorRotationSpeed(snapshot: DeviceTelemetrySnapshot, config: ConveyorMotionConfig): number {
+    const rotationSpeed = readNumberField(snapshot.fields, 'rotation');
+    const degreesPerSecond = rotationSpeed !== null && rotationSpeed > 3 ? rotationSpeed : config.speed;
+    return degreesPerSecond * Math.PI / 180;
+  }
+
+  /** 查找输送线 motion 声明的节点，优先精确名称，失败后按 fallbackPattern 或通用名称兜底。 */
+  private findConveyorMotionNodes(model: ModelRuntimeEntry, config: ConveyorMotionConfig): TransformNode[] {
+    const configuredNodes = config.nodes.length > 0 ? this.findModelNodesByName(model, config.nodes) : [];
+    if (configuredNodes.length > 0) return this.filterTopLevelMotionNodes(configuredNodes);
+
+    const fallbackPattern = this.createConveyorFallbackPattern(config.fallbackPattern);
+    return fallbackPattern ? this.filterTopLevelMotionNodes(this.findModelNodes(model, fallbackPattern)) : [];
+  }
+
+  /** 创建模型脚本显式声明的兜底正则；未声明或非法时跳过，避免猜中静态结构。 */
+  private createConveyorFallbackPattern(patternText: string | null): RegExp | null {
+    if (!patternText) return null;
+    try {
+      return new RegExp(patternText, 'i');
+    } catch {
+      return null;
+    }
+  }
+
+  /** 按局部轴旋转滚筒节点，兼容 GLB 节点使用 rotationQuaternion 的情况。 */
+  private rotateConveyorNodes(nodes: TransformNode[], axis: 'x' | 'y' | 'z', radians: number): void {
+    if (Math.abs(radians) <= 0.000001) return;
+    const deltaRotation = Quaternion.RotationAxis(this.createLocalAxis(axis), radians);
+
+    for (const node of nodes) {
+      if (node.rotationQuaternion) {
+        node.rotationQuaternion = node.rotationQuaternion.multiply(deltaRotation);
+      } else {
+        node.rotation[axis] += radians;
+      }
+    }
+  }
+
+  /** 更新链条平移偏移，使用循环偏移避免节点长期漂移到模型外。 */
+  private updateConveyorMotionOffset(model: ModelRuntimeEntry, config: ConveyorMotionConfig, delta: number): number {
+    const previousOffset = model.conveyorTelemetry.motionOffsets.get(config.key) ?? 0;
+    const nextOffset = this.wrapConveyorOffset(previousOffset + delta);
+    model.conveyorTelemetry.motionOffsets.set(config.key, nextOffset);
+    return nextOffset;
+  }
+
+  /** 从首次驱动前的节点基线出发做局部轴平移，避免每帧累计误差。 */
+  private translateConveyorNodesFromBaseline(
+    model: ModelRuntimeEntry,
+    nodes: TransformNode[],
+    axis: 'x' | 'y' | 'z',
+    offset: number,
+  ): void {
+    const localOffset = this.createLocalAxis(axis).scale(offset);
+    for (const node of this.filterTopLevelMotionNodes(nodes)) {
+      const baseline = this.getConveyorNodeBaseline(model, node);
+      node.position = baseline.position.add(localOffset);
+    }
+  }
+
+  /** 读取输送线节点基线，模型重新加载或脚本变化时会被 resetConveyorTelemetryState 清空。 */
+  private getConveyorNodeBaseline(model: ModelRuntimeEntry, node: TransformNode): ConveyorNodeBaseline {
+    const existing = model.conveyorTelemetry.nodeBaselines.get(node);
+    if (existing) return existing;
+
+    const baseline = { position: node.position.clone() };
+    model.conveyorTelemetry.nodeBaselines.set(node, baseline);
+    return baseline;
+  }
+
+  /** 把连续偏移约束在一个短循环内，适合链条和货物的运行时视觉表现。 */
+  private wrapConveyorOffset(value: number): number {
+    if (!Number.isFinite(value)) return 0;
+    const loop = CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS;
+    const halfLoop = loop / 2;
+    return ((((value + halfLoop) % loop) + loop) % loop) - halfLoop;
+  }
+
+  /** 创建或复用输送线运行时货物，占位物不写入场景文档。 */
+  private getOrCreateConveyorCargo(assetCode: string, containerCode: string): ConveyorCargoRuntimeEntry {
+    const key = this.getConveyorCargoKey(assetCode, containerCode);
+    const existing = this.conveyorCargoMeshes.get(key);
+    if (existing) return existing;
+
+    const mesh = MeshBuilder.CreateBox(`conveyor_cargo_${this.sanitizeBabylonName(assetCode)}_${this.sanitizeBabylonName(containerCode)}`, {
+      width: CONVEYOR_CARGO_SIZE.x,
+      height: CONVEYOR_CARGO_SIZE.y,
+      depth: CONVEYOR_CARGO_SIZE.z,
+    }, this.scene);
+    const material = new StandardMaterial(`${mesh.name}_mat`, this.scene);
+    material.diffuseColor = Color3.FromHexString(CONVEYOR_CARGO_COLOR);
+    material.emissiveColor = Color3.FromHexString(CONVEYOR_CARGO_EMISSIVE_COLOR);
+    mesh.material = material;
+    mesh.isPickable = false;
+    mesh.metadata = { ...(mesh.metadata ?? {}), conveyorCargo: true, assetCode, containerCode };
+
+    const entry: ConveyorCargoRuntimeEntry = {
+      assetCode,
+      containerCode,
+      mesh,
+      material,
+    };
+    this.conveyorCargoMeshes.set(key, entry);
+    return entry;
+  }
+
+  /** 基于输送线几何包围盒计算货物位置，并沿输送方向加入短循环偏移。 */
+  private getConveyorCargoPosition(model: ModelRuntimeEntry): Vector3 {
+    const configuredNodes = this.readConveyorMotionConfigs(model).flatMap((config) => this.findConveyorMotionNodes(model, config));
+    const conveyorNodes = configuredNodes.length > 0
+      ? configuredNodes
+      : this.findModelNodes(model, /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i);
+    const bounds = (conveyorNodes.length > 0 ? this.getNodesWorldBounds(conveyorNodes) : null) ?? this.getModelWorldBounds(model);
+    const center = bounds
+      ? bounds.minimum.add(bounds.maximum).scale(0.5)
+      : model.root.getAbsolutePosition();
+    const verticalOffset = this.getModelAxis(model.root, 'y').scale(CONVEYOR_CARGO_SIZE.y * 0.75);
+    const travelAxis = this.getHorizontalModelAxis(model.root, this.readConveyorCargoTravelAxis(model));
+
+    return center
+      .add(verticalOffset)
+      .add(travelAxis.scale(model.conveyorTelemetry.cargoTravelOffset));
+  }
+
+  /** 推断货物沿模型局部 x/z 哪个方向移动，滚筒线默认垂直于滚筒轴。 */
+  private readConveyorCargoTravelAxis(model: ModelRuntimeEntry): 'x' | 'z' {
+    const configs = this.readConveyorMotionConfigs(model);
+    const translateConfig = configs.find((config) => config.kind === 'translate' && config.axis !== 'y');
+    if (translateConfig?.axis === 'x' || translateConfig?.axis === 'z') return translateConfig.axis;
+
+    const rotateConfig = configs.find((config) => config.kind === 'rotate');
+    if (rotateConfig?.axis === 'x') return 'z';
+    return 'x';
+  }
+
+  /** 生成输送线运行时货物的唯一键。 */
+  private getConveyorCargoKey(assetCode: string, containerCode: string): string {
+    return `${assetCode}:${containerCode}`;
+  }
+
+  /** 删除指定输送线实例生成的运行时货物，不影响其他设备。 */
+  private disposeConveyorCargoForAssetCode(assetCode: string): void {
+    for (const [key, cargo] of this.conveyorCargoMeshes.entries()) {
+      if (cargo.assetCode !== assetCode) continue;
+      this.disposeConveyorCargo(cargo);
+      this.conveyorCargoMeshes.delete(key);
+    }
+  }
+
+  /** 释放单个输送线运行时货物及其材质。 */
+  private disposeConveyorCargo(cargo: ConveyorCargoRuntimeEntry): void {
+    cargo.material.dispose();
+    cargo.mesh.dispose();
+  }
+
+  /** 生成堆垛机运行时货物的唯一键。 */
   private getStackerCargoKey(assetCode: string, containerCode: string): string {
     return `${assetCode}:${containerCode}`;
   }
 
-  /** 写入运行时 metadata，供脚本或调试面板读取最新状态。 */
+  /** 写入通用设备 telemetry metadata，供脚本、调试面板和现场排查读取。 */
+  private writeDeviceTelemetryMetadata(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): void {
+    const telemetryMetadata = {
+      deviceType: snapshot.deviceType,
+      assetCode: snapshot.assetCode,
+      payloadDeviceCode: snapshot.payloadDeviceCode,
+      sourceTimestamp: snapshot.sourceTimestamp,
+      receivedAt: snapshot.receivedAt,
+      faulted: snapshot.faulted,
+      message: snapshot.message,
+      fields: { ...snapshot.fields },
+    };
+
+    model.root.metadata = {
+      ...(model.root.metadata ?? {}),
+      telemetry: telemetryMetadata,
+    };
+    model.contentRoot.metadata = {
+      ...(model.contentRoot.metadata ?? {}),
+      telemetry: telemetryMetadata,
+    };
+  }
+
+  /** 写入堆垛机兼容 metadata，保留旧调试入口 stackerTelemetry。 */
   private writeStackerTelemetryMetadata(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
@@ -1173,19 +1637,20 @@ export class SceneRuntime {
 
   /** 对故障和目标位缺失做一次性 Console 提示，避免每帧刷屏。 */
   private reportStackerRuntimeState(snapshot: StackerTelemetrySnapshot, targetLocator: LocatorRuntimeEntry | null): void {
+    const deviceKey = `${snapshot.deviceType}:${snapshot.assetCode}`;
     const mode = readIntegerField(snapshot.fields, 'mode');
     const frontCommand = readIntegerField(snapshot.fields, 'front_command');
     const backCommand = readIntegerField(snapshot.fields, 'back_command');
     const statusSignature = JSON.stringify([mode, frontCommand, backCommand, snapshot.message]);
-    if (this.reportedStatuses.get(snapshot.assetCode) !== statusSignature) {
-      this.reportedStatuses.set(snapshot.assetCode, statusSignature);
+    if (this.reportedStatuses.get(deviceKey) !== statusSignature) {
+      this.reportedStatuses.set(deviceKey, statusSignature);
       this.pushLog(
         `Stacker ${snapshot.assetCode} 状态：mode=${mode ?? '未知'}，front=${frontCommand ?? '未知'}，back=${backCommand ?? '未知'}${snapshot.message ? `，${snapshot.message}` : ''}`,
       );
     }
 
     if (snapshot.hasTargetLocation && !targetLocator && snapshot.targetLocationKey) {
-      const missingTargetKey = `${snapshot.assetCode}:${snapshot.targetLocationKey}`;
+      const missingTargetKey = `${deviceKey}:${snapshot.targetLocationKey}`;
       if (!this.reportedMissingTargets.has(missingTargetKey)) {
         this.reportedMissingTargets.add(missingTargetKey);
         this.pushLog(`Stacker ${snapshot.assetCode} 未找到目标定位线框：${snapshot.targetLocationKey}`);
@@ -1193,15 +1658,41 @@ export class SceneRuntime {
     }
 
     if (!snapshot.faulted) {
-      this.reportedFaults.delete(snapshot.assetCode);
+      this.reportedFaults.delete(deviceKey);
       return;
     }
 
     const faultMessage = snapshot.message || `errorCode=${readIntegerField(snapshot.fields, 'errorCode') ?? 0}`;
-    if (this.reportedFaults.get(snapshot.assetCode) === faultMessage) return;
+    if (this.reportedFaults.get(deviceKey) === faultMessage) return;
 
-    this.reportedFaults.set(snapshot.assetCode, faultMessage);
+    this.reportedFaults.set(deviceKey, faultMessage);
     this.pushLog(`Stacker ${snapshot.assetCode} 故障/急停：${faultMessage}`);
+  }
+
+  /** 对输送线状态和故障做节流日志，实时字段仍完整写入 metadata。 */
+  private reportConveyorRuntimeState(snapshot: DeviceTelemetrySnapshot): void {
+    const deviceKey = `${snapshot.deviceType}:${snapshot.assetCode}`;
+    const mode = readIntegerField(snapshot.fields, 'mode');
+    const task = readIntegerField(snapshot.fields, 'task');
+    const movementX = readIntegerField(snapshot.fields, 'movement_x');
+    const statusSignature = JSON.stringify([mode, task, movementX, snapshot.message]);
+    if (this.reportedStatuses.get(deviceKey) !== statusSignature) {
+      this.reportedStatuses.set(deviceKey, statusSignature);
+      this.pushLog(
+        `Conveyor ${snapshot.assetCode} 状态：mode=${mode ?? '未知'}，task=${task ?? '未知'}，movement_x=${movementX ?? '未知'}${snapshot.message ? `，${snapshot.message}` : ''}`,
+      );
+    }
+
+    if (!snapshot.faulted) {
+      this.reportedFaults.delete(deviceKey);
+      return;
+    }
+
+    const faultMessage = snapshot.message || `errorCode=${readIntegerField(snapshot.fields, 'errorCode') ?? 0}`;
+    if (this.reportedFaults.get(deviceKey) === faultMessage) return;
+
+    this.reportedFaults.set(deviceKey, faultMessage);
+    this.pushLog(`Conveyor ${snapshot.assetCode} 故障：${faultMessage}`);
   }
 
   /** 创建 stacker 遥测运行态，所有偏移都只保存在内存中。 */
@@ -1701,6 +2192,7 @@ export class SceneRuntime {
     this.applyModelSelection(model, false);
     model.externalScriptRuntime?.dispose();
     this.disposeStackerCargoForAssetCode(model.assetCode);
+    this.disposeConveyorCargoForAssetCode(model.assetCode);
     for (const texture of model.textureCache.values()) {
       texture.dispose();
     }
@@ -1935,6 +2427,7 @@ export class SceneRuntime {
       model.externalScriptRuntime = null;
       model.externalScriptSignature = '';
       this.resetStackerTelemetryState(model);
+      this.resetConveyorTelemetryState(model);
       model.stackerTelemetryReady = true;
       return;
     }
@@ -1964,6 +2457,7 @@ export class SceneRuntime {
         if (!current || current.loadToken !== loadToken) return;
         runtime.update();
         this.resetStackerTelemetryState(current);
+        this.resetConveyorTelemetryState(current);
         current.stackerTelemetryReady = true;
       });
       return;
@@ -1973,6 +2467,7 @@ export class SceneRuntime {
     model.externalScriptRuntime.updateParameterValues(modelAsset.parameterValues);
     model.externalScriptRuntime.update();
     this.resetStackerTelemetryState(model);
+    this.resetConveyorTelemetryState(model);
     model.stackerTelemetryReady = true;
   }
 

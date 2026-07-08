@@ -8,7 +8,7 @@ import {
   type MouseEvent,
 } from 'react';
 import type { Entity } from '../model/Entity';
-import { useEditorStore, type EntityArrayAxis } from '../store/editorStore';
+import { useEditorStore, type EntityArrayDirection } from '../store/editorStore';
 
 const HIERARCHY_DRAG_MIME_TYPE = 'application/x-babylon-editor-hierarchy-entities';
 const CONTEXT_MENU_WIDTH = 188;
@@ -31,7 +31,7 @@ type HierarchyContextMenuState = {
 
 type ArrayDialogState = {
   copyCount: number;
-  axis: EntityArrayAxis;
+  direction: EntityArrayDirection;
   spacingMeters: number;
 };
 
@@ -179,7 +179,7 @@ export function HierarchyPanel() {
 
   /** 打开模型阵列弹窗，弹窗确认后统一调用 store 的可撤销阵列命令。 */
   function openArrayDialog(): void {
-    setArrayDialog({ copyCount: 3, axis: 'x', spacingMeters: 1 });
+    setArrayDialog({ copyCount: 3, direction: 'x', spacingMeters: 1 });
     setContextMenu(null);
   }
 
@@ -214,7 +214,7 @@ export function HierarchyPanel() {
   /** 提交线性模型阵列参数。 */
   function submitArrayDialog(): void {
     if (!arrayDialog) return;
-    arraySelectedEntities(arrayDialog.copyCount, arrayDialog.axis, arrayDialog.spacingMeters);
+    arraySelectedEntities(arrayDialog.copyCount, arrayDialog.direction, arrayDialog.spacingMeters);
     setArrayDialog(null);
   }
 
@@ -616,16 +616,21 @@ export function HierarchyPanel() {
             <label className="hierarchy-array-dialog-row">
               <span>方向</span>
               <select
-                onChange={(event) => setArrayDialog({ ...arrayDialog, axis: event.target.value as EntityArrayAxis })}
-                value={arrayDialog.axis}
+                onChange={(event) =>
+                  setArrayDialog({ ...arrayDialog, direction: event.target.value as EntityArrayDirection })
+                }
+                value={arrayDialog.direction}
               >
-                <option value="x">X</option>
-                <option value="y">Y</option>
-                <option value="z">Z</option>
+                <option value="x">+X</option>
+                <option value="-x">-X</option>
+                <option value="y">+Y</option>
+                <option value="-y">-Y</option>
+                <option value="z">+Z</option>
+                <option value="-z">-Z</option>
               </select>
             </label>
             <label className="hierarchy-array-dialog-row">
-              <span>间距(m)</span>
+              <span>阵列间距(m)</span>
               <input
                 min={0.01}
                 onChange={(event) => setArrayDialog({ ...arrayDialog, spacingMeters: Number(event.target.value) })}

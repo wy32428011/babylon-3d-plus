@@ -32,7 +32,7 @@ Babylon Electron Unity-like Editor 是一个基于 Electron、Vite、React、Typ
 - Project 资源库外观：底部 Project 面板已切换为资源库浏览器样式，并将图库区域固定加高到约 `260px`，包含模型库、POI库、主题库、组合库、环境库、图表库、图片库七个页签，以及筛选占位行和横向资源卡片；模型库卡片使用深色直角卡、上方缩略图、下方两行居中文字和单行省略标题，模型库内置立方体、球体、地面、虚拟定位线框、半球光、方向光、点光源七类基础资源，并支持导入模型文件夹展示项目内模型卡片。
 - 模型文件夹导入：模型库可选择类似 `F:\3d-models\models` 的模型根目录，扫描一级模型包中的 `.glb/.gltf`、读取 `meta.json` 展示名称、`lengthUnit` 源单位与可选封面图，并将有效模型包复制到当前项目目录的 `Assets/Models` 下，通过 `.babylon-editor/asset-index.json` 在下次打开项目时自动恢复模型库。导入模型最终按米进入场景；`meta.json.lengthUnit` 支持 `meter`/`m`、`centimeter`/`cm`、`millimeter`/`mm`，`meta.json.thumbnail` 或 `meta.json.cover` 可指向模型包内 `.png/.jpg/.jpeg/.webp` 相对路径作为卡片缩略图；缺失 `lengthUnit` 时会优先根据 GLB 包围盒与 `meta.json` 中的长宽高等尺寸参数推断米/毫米/厘米，无法推断时默认按 `meter` 处理，不支持的显式单位会跳过该模型包。
 - 导入模型资产编号：每个导入模型实例都会生成并保存 `modelAsset.assetCode`，Inspector 的 `Model Asset` 区域可编辑该编号；复制、粘贴和模型阵列会按新实体 ID 重新生成编号，避免多个实例共享后续动画数据识别键。
-- MQTT 配置入口：Toolbar 提供 MQTT 配置按钮，可在弹窗中填写 MQTT IP/域名和 MQTT over WebSocket 地址；只填写 IP 时会自动生成 `ws://<IP>:8083/mqtt`，运行时支持通过 WebSocket 连接 broker 并订阅 Stacker 数据 topic，默认 topic 为 `dt/factory/logistics/stacker/+/twindatadriven/joint`。现场尚未部署 MQTT 时，可勾选本地模拟，运行时会直接生成 Stacker 协议数据驱动场景。
+- MQTT 配置入口：Toolbar 提供 MQTT 配置按钮，可在弹窗中填写 MQTT IP/域名和 MQTT over WebSocket 地址；只填写 IP 时会自动生成 `ws://<IP>:8083/mqtt`，运行时支持通过 WebSocket 连接 broker 并订阅 PLC/MQTT 遥测 topic，通用默认 topic 为 `dt/factory/logistics/+/+/twindatadriven/joint`。现场尚未部署 MQTT 时，可勾选本地模拟，运行时会直接生成 Stacker 协议数据驱动场景。
 - 外置参数化脚本：模型包内的 `*.model.ts` 会随模型包复制到项目目录并作为受控 `editor-asset://` 资产授权；导入模型加载完成后，renderer 会以本地可信脚本方式转译并运行同包脚本，兼容 `ParametricModelRuntimeComponent`、`export default class`、`onStart/onUpdate/onStop` 生命周期以及 `babylonjs-editor-tools` 的 `visibleAs*` 装饰器写法。
 - 参数化模型：模型包 `meta.json.modelParameters` 可声明 number、color、boolean、enum、vector3、texture 参数，以及绑定到模型节点、网格或材质的安全 JSON DSL；选中带参数配置的导入模型后，Inspector 会显示“模型参数”区域，修改参数会通过场景文档实时驱动 Babylon 模型外观变化，并支持随场景保存/加载与撤销/重做。
 - 模型库拖拽放置：模型库中已导入的真实模型卡片可直接拖拽到 Scene View，释放鼠标时会按当前鼠标射线与 `y = 0` 地面平面的交点创建模型实体；点击模型卡片仍保留原点快捷导入行为。
@@ -105,33 +105,52 @@ npm run dev:electron
 
 运行时会把当前实例编号写入模型内容根节点 `metadata.assetCode` 与 `metadata.modelAsset.assetCode`，并注入外置模型脚本实例的 `assetCode` 属性；模型脚本中已声明的 `dataDriven.device.assetCodeField = "assetCode"` 可直接读取该实例编号。
 
+PLC/MQTT 遥测不会按模型名称、Hierarchy 名称或脚本文件名匹配设备，只使用 topic 中的资产编号匹配 `modelAsset.assetCode`。现场联调时应先确认模型实例的 `modelAsset.assetCode` 与 PLC 上报资产编号一致，例如堆垛机 `DDJ2`、输送线 `1001`。
+
 ## MQTT 配置入口
 
 Toolbar 的 `MQ` 按钮用于维护场景级 MQTT 配置。弹窗包含“启用配置”、“本地模拟”、“模拟资产”、“模拟场景”、“间隔(ms)”、“IP/域名”、“地址”和“Topic”字段；如果只填写 IP/域名，保存时会按默认 MQTT over WebSocket 端口和路径生成 `ws://<IP>:8083/mqtt`，如果填写完整地址则以完整地址为准。
 
-该配置会写入当前 `SceneDocument.mqttConfig` 并随 `.scene.json` 保存、加载。启用后运行时通过 MQTT over WebSocket 连接 broker 并订阅 Stacker 动作数据；默认订阅 topic 为 `dt/factory/logistics/stacker/+/twindatadriven/joint`。
+该配置会写入当前 `SceneDocument.mqttConfig` 并随 `.scene.json` 保存、加载。启用后运行时通过 MQTT over WebSocket 连接 broker 并订阅 PLC/MQTT 遥测数据；通用默认订阅 topic 为 `dt/factory/logistics/+/+/twindatadriven/joint`。
 
 如果启用“本地模拟”，运行时不会连接 MQTT broker，而是按 `simulatorAssetCode` 生成 `dt/factory/logistics/stacker/<资产编号>/twindatadriven/joint` 消息并写入同一个内存遥测通道。模拟场景支持 `cycle`、`target`、`movement`、`fault`：`cycle` 会在目标位追踪和全 0 movement 模式之间切换，`target` 只追目标位，`movement` 固定发送 `to_x=0,to_y=0,to_z=0`，`fault` 发送急停/故障状态。
 
-topic 中的 `stacker` 表示设备类型，通配段表示资产编号，例如 `DDJ2`。运行时只把资产编号与场景中导入模型实例的 `modelAsset.assetCode` 匹配，匹配成功后才驱动对应模型。
+topic 路径固定为 `dt/factory/logistics/<设备类型>/<资产编号>/twindatadriven/joint`。第一个通配段表示设备类型，例如 `stacker` 或 `conveyor`；第二个通配段表示资产编号，例如 `DDJ2` 或 `1001`。运行时只把资产编号与场景中导入模型实例的 `modelAsset.assetCode` 匹配，匹配成功后才驱动对应模型。
+
+payload 使用 `data[]` 数组承载 PLC 点位，每一项按 `e/p/v` 三个字段解释：
+
+| 字段 | 用途 |
+| --- | --- |
+| `data[].e` | 点位所属设备资产编号，通常与 topic 中的资产编号一致；现场数据不一致时优先排查 PLC 映射。 |
+| `data[].p` | 点位名称，例如 `movement_x`、`containerCode`、`normal`。 |
+| `data[].v` | 点位当前值，运行时按设备语义转换为数字、布尔或字符串。 |
+
+运行时会以 topic 中的资产编号为准过滤点位：`data[].e` 为空时按兼容数据接收，`data[].e` 非空且与 topic 资产编号不一致时，该点位会被忽略，避免混合 payload 污染当前设备状态。
 
 实时 MQTT 数据只保存在运行时内存中，不写入 `SceneDocument`，也不进入 undo history。
 
 ## Stacker MQTT 动作解析与目标位规则
 
-Stacker payload 使用 `data[]` 数组承载点位，运行时按每项的 `p` 识别字段，读取 `v` 作为当前值。
+Stacker payload 使用通用 `data[]` 数组承载点位，DDJ2 堆垛机数据应发布到 `dt/factory/logistics/stacker/DDJ2/twindatadriven/joint`。运行时按每项的 `e` 校验资产来源，按 `p` 识别字段，读取 `v` 作为当前值。
 
 | `data[].p` | 用途 |
 | --- | --- |
+| `deviceCode` | PLC 侧设备编号或设备类型辅助字段；模型匹配仍以 topic 资产编号和 `modelAsset.assetCode` 为准。 |
+| `mode` | 设备模式；运行时写入状态日志和 metadata，用于现场判断自动/手动/故障等状态。 |
+| `front_task`、`back_task` | 前叉、后叉当前任务号或任务计数。 |
+| `signalBits`、`front_signalBits`、`back_signalBits` | 整机、前叉、后叉信号位快照；第一版用于 metadata 与排查，不直接改变几何运动。 |
 | `movement_x`、`movement_y` | 水平行走和载货台升降的连续运动方向。 |
 | `front_movement_z`、`back_movement_z` | 前/后货叉伸缩的连续运动方向。 |
 | `rpm_x`、`rpm_y`、`front_rpm_z`、`back_rpm_z` | 水平、升降、前叉、后叉速度参考；没有正值时使用模型默认速度。 |
 | `distance_x`、`distance_y`、`front_distance_z`、`ront_distance_z`、`back_distance_z` | 编码器校准值。 |
+| `workingHours_x`、`workingHours_y`、`front_workingHours_z`、`back_workingHours_z` | 水平、升降、前叉、后叉累计运行小时；第一版用于 metadata 与排查。 |
 | `front_containerCode`、`back_containerCode` | 前叉、后叉当前托盘条码；非空时运行时创建对应货物并随该侧货叉运动。 |
 | `front_command`、`back_command` | 前叉、后叉作业状态；`3/4/5` 表示放货阶段，会把该侧货物送入目标定位线框。 |
 | `normal`、`errorCode`、`message` | 正常、故障码与故障消息状态。 |
 | `front_x`、`front_y`、`front_z` | 前载货台当前位置。 |
 | `to_x`、`to_y`、`to_z` | 目标位坐标。 |
+
+DDJ2 运动编码按第一版运行时规则解释：`movement_x = 0/1/2` 分别表示静止、前进、后退；`movement_y = 0/1/2` 分别表示原位、上升、下降；`front_movement_z/back_movement_z = 1/2/3/4` 分别表示右伸、左缩、左伸、右缩。`rpm_*` 为正值时换算为速度参考，否则使用模型默认速度；`normal = false`、`errorCode != 0`、`front_command = 8` 或 `back_command = 8` 会进入故障/急停状态，暂停目标追踪和连续运动。
 
 `to_x`、`to_y`、`to_z` 三个值非零有效时，运行时生成目标位 ID `${to_x}-${to_y}-${to_z}`，并查找场景中的 `locator.assetId`，例如 `1-1-1`。目标位存在时模型追踪该 locator；三者全为 `0` 时不查目标位，模型按 `movement_*` 字段持续运动。
 
@@ -143,6 +162,40 @@ Stacker 水平行走不会移动导入模型根节点。运行时优先读取模
 
 收到故障或急停状态时，运行时暂停追目标和 `movement_*` 积分，只保留编码器校准与故障状态展示；故障解除后再恢复动作解析。
 
+## Conveyor 输送线 MQTT 第一版语义
+
+Conveyor 输送线复用同一套 PLC/MQTT 遥测层，1001 输送线数据应发布到 `dt/factory/logistics/conveyor/1001/twindatadriven/joint`。场景中被驱动的输送线模型实例必须把 `modelAsset.assetCode` 设置为 `1001`，否则 payload 即使被订阅也不会驱动该模型。
+
+第一版 Conveyor 语义聚焦实时联动和现场可视排查：运动、条码和机构状态只进入运行时内存快照，驱动模型脚本或运行时动画；不会写入 `.scene.json`，也不会进入 undo history。
+
+| `data[].p` | 第一版用途 |
+| --- | --- |
+| `deviceCode` | PLC 侧设备编号或输送线编码，作为 topic 资产编号的辅助校验字段。 |
+| `mode` | 输送线运行模式，写入运行时状态和 metadata。 |
+| `task` | 当前输送任务号或任务状态。 |
+| `movement_x`、`movement_y` | 输送线局部 X/Y 方向运动信号；`0` 表示停止，`1` 或正值表示沿局部正向运行，`2` 或负值表示沿局部反向运行。 |
+| `signalBits` | 输送线 IO/传感器信号位快照，第一版用于 metadata 与现场排查。 |
+| `containerCode` | 当前容器、托盘或料箱条码；非空时可在运行时创建或绑定对应内存货物。 |
+| `workingHours_x`、`workingHours_y` | X/Y 方向机构累计运行小时，用于状态展示和排查。 |
+| `normal`、`errorCode`、`message` | 正常、故障码与故障消息；`normal = false` 或 `errorCode != 0` 时应暂停输送运动并保留故障信息。 |
+| `layer` | 当前层、楼层或线体层级。 |
+| `rotation` | 容器或转向机构旋转角度/状态，按模型脚本约定映射到可视旋转。 |
+| `container_quantity` | 当前线体上容器数量或占用数量。 |
+| `folding`、`flip`、`fork` | 折叠、翻转、拨叉/货叉等机构状态；第一版作为脚本输入和 metadata，不改变场景持久数据。 |
+| `result`、`result2` | 主结果码和扩展结果码，用于展示任务完成、失败或异常状态。 |
+
+Conveyor 第一版运动规则按“资产编号匹配 + 局部轴驱动 + 状态兜底”处理：topic 资产编号先匹配 `modelAsset.assetCode`；匹配成功后，`movement_x/movement_y` 只驱动该输送线模型声明的可动节点或货物运行态，不移动无关模型；`containerCode` 为空时只更新设备状态，非空时才创建或绑定容器货物；故障状态出现时停止连续运动，但保留最后一帧位置、条码和状态供现场排查。
+
+## MQTT 现场排查步骤
+
+1. 先确认 MQ 配置启用，并检查 WebSocket 地址是否能连接到 broker；只填 IP/域名时应自动生成 `ws://<IP>:8083/mqtt`。
+2. 确认订阅 topic 使用通用格式 `dt/factory/logistics/+/+/twindatadriven/joint`，现场实际消息应落在 `dt/factory/logistics/stacker/DDJ2/twindatadriven/joint` 或 `dt/factory/logistics/conveyor/1001/twindatadriven/joint` 这类具体 topic 上。
+3. 确认 payload 是 JSON，且 `data[]` 每项都包含 `e/p/v`；`e` 应与 topic 中的资产编号一致，`p` 必须是当前设备支持的字段名。
+4. 在 Inspector 检查目标模型的 `modelAsset.assetCode`，堆垛机应为 `DDJ2`，输送线应为 `1001`；不匹配时运行时不会驱动模型。
+5. 排查 DDJ2 时优先看 `normal/errorCode/message`、`movement_x/movement_y/front_movement_z/back_movement_z`、`rpm_*`、`distance_*` 和 `to_x/to_y/to_z`；目标位模式还要确认场景中存在对应 `locator.assetId`。
+6. 排查 1001 时优先看 `normal/errorCode/message`、`movement_x/movement_y`、`containerCode`、`signalBits`、`layer/rotation/container_quantity/folding/flip/fork/result/result2`。
+7. 如果画面不动但 Console 有 MQTT 日志，优先检查设备类型段、资产编号、payload 字段名和模型脚本声明；实时数据只在内存中，保存/加载场景或执行撤销/重做不会保留上一帧遥测。
+
 ## Stacker MQTT 演示场景与模拟器
 
 仓库提供一组本地演示场景，用于验证 Stacker MQTT 数据驱动链路：
@@ -152,7 +205,7 @@ Stacker 水平行走不会移动导入模型根节点。运行时优先读取模
 - 场景内模型资产编号：`DDJ2`
 - 场景内目标位：`locator.assetId = "1-1-1"`、`"2-1-1"`、`"3-2-1"`
 - 默认 MQTT 地址：`ws://127.0.0.1:8083/mqtt`
-- 默认订阅 topic：`dt/factory/logistics/stacker/+/twindatadriven/joint`
+- 演示场景订阅 topic：`dt/factory/logistics/stacker/+/twindatadriven/joint`，用于 Stacker 示例；现场通用订阅可改为 `dt/factory/logistics/+/+/twindatadriven/joint`
 - 默认本地模拟：启用，资产编号 `DDJ2`，场景 `cycle`，间隔 `500ms`
 
 演示场景生成脚本会读取真实 `Stacker.glb` 的 bounds 和模型包 `meta.json`，自动推断源单位；当前真实模型会保存为 `lengthUnit = "millimeter"`、`unitScaleToMeters = 0.001`，避免把毫米模型误按米处理后被参数脚本放大或拉伸。
@@ -211,7 +264,7 @@ npm run build
 - 选择对象：点击 Hierarchy 项，或在 Scene View 中单击对象；Hierarchy 中可使用 Ctrl/Cmd 多选、Shift 连续多选。
 - 整理层级：在 Hierarchy 点击 `新建` 可创建纯分组文件夹，将一个或多个普通实体拖入文件夹可完成分组；拖到 `根层级` 可移出文件夹。选中文件夹时，组内实体会在 Scene View 中一起高亮；文件夹只影响左侧列表归类，不改变模型世界坐标或 Transform 父子关系。右键菜单中的 `群组对象` 会创建新分组并把当前普通实体选区移入分组，`解组对象` 会把选中文件夹或选中对象所在文件夹释放回根层级。
 - 控制对象状态：Hierarchy 实体与文件夹行前的显示按钮可隐藏/显示对象或整组对象，锁定按钮可锁定/解锁对象或整组对象；右键菜单和快捷键支持批量隐藏、批量锁定与批量删除。隐藏对象不会在 Scene View 显示或被拾取，锁定对象仍显示但不能被画布拾取、挂载 Gizmo、删除或通过 Inspector 编辑。
-- 复制、粘贴与阵列：在 Hierarchy 右键菜单或快捷键中复制当前普通实体选区；粘贴到右键文件夹时进入该文件夹，粘贴到右键普通对象时进入同级，粘贴副本会生成新 ID 并轻微偏移位置；`模型阵列` 可按 X/Y/Z 方向、间距和副本数量生成线性阵列副本。
+- 复制、粘贴与阵列：在 Hierarchy 右键菜单或快捷键中复制当前普通实体选区；粘贴到右键文件夹时进入该文件夹，粘贴到右键普通对象时进入同级，粘贴副本会生成新 ID 并轻微偏移位置；`模型阵列` 可按 +X/-X/+Y/-Y/+Z/-Z 方向、可配置间距和副本数量生成线性阵列副本。
 - 聚焦对象：右键菜单 `场景聚焦` 或 F 会根据当前 Hierarchy 选区世界包围盒移动 Scene View 相机；导入模型可用 `库聚焦` 切换到底部 Project 模型库并滚动高亮对应资源卡片。
 - 清空选择：在 Scene View 中单击空白区域。
 - 切换 Gizmo：点击顶部工具栏的移动、旋转、缩放图标按钮，或使用 W/E/R 快捷键。
@@ -263,7 +316,7 @@ npm run build
 - `虚拟定位线框` 实体会保存 `locator.assetId`、`locator.length`、`locator.width`、`locator.height`，重新加载 `.scene.json` 后仍能恢复资产编号与长方体线框尺寸。
 - `CAD参考图` 实体会保存 `cadReference.sourcePath`、`sourceUrl`、米制换算比例、中心归零方式、线色、透明度、图层统计与包围盒；重新加载场景时会重新授权对应 `.dxf` 文件，若源文件被移动或删除，参考图无法恢复线稿。
 - 带外置脚本的模型实体会额外保存 `modelAsset.scriptAssets`、`parameterScriptMetadata` 与 `animationScriptMetadata`；加载场景时主进程会重新授权这些 `.model.ts` 文件，运行时把当前参数和 `assetCode` 同步到脚本实例与 Babylon 节点 metadata。
-- 场景级 MQTT 配置保存在 `mqttConfig.enabled`、`mqttConfig.ip`、`mqttConfig.address`、`mqttConfig.topic`、`mqttConfig.simulatorEnabled`、`mqttConfig.simulatorAssetCode`、`mqttConfig.simulatorScenario` 和 `mqttConfig.simulatorIntervalMs` 中；旧场景缺少该字段时会自动补齐默认 Stacker topic 和本地模拟默认值。
+- 场景级 MQTT 配置保存在 `mqttConfig.enabled`、`mqttConfig.ip`、`mqttConfig.address`、`mqttConfig.topic`、`mqttConfig.simulatorEnabled`、`mqttConfig.simulatorAssetCode`、`mqttConfig.simulatorScenario` 和 `mqttConfig.simulatorIntervalMs` 中；旧场景缺少该字段时会自动补齐 MQTT 默认 topic 和本地模拟默认值。
 
 ## 当前限制
 
@@ -279,6 +332,8 @@ npm run build
 
 ## 最近完成
 
+- 2026-07-03：模型阵列方向扩展为 +X/-X/+Y/-Y/+Z/-Z 六向选择，阵列间距继续按米配置，负向阵列会按同一间距反向生成副本。
+- 2026-07-03：补充通用 PLC/MQTT 遥测层文档；默认 topic 扩展为 `dt/factory/logistics/+/+/twindatadriven/joint`，说明 `data[].e/p/v`、`modelAsset.assetCode` 资产匹配、DDJ2 堆垛机字段、1001 输送线第一版语义和现场排查步骤。
 - 2026-07-03：补齐 Stacker 前叉/后叉货物运行时语义；`front_containerCode/back_containerCode` 会创建内存货物并随对应货叉运动，`front_command/back_command=3/4/5` 且目标位有效时货物进入 locator 虚拟定位框，放货完成后条码清空也会保留在目标框内。
 - 2026-07-02：修正 Stacker 遥测水平行走语义；`movement_x`/目标位只驱动模型脚本 `dataDriven.motion.travel.nodes` 声明的行走机构，`fixedNodes` 上下轨道保持固定，并将行走、升降、货叉伸缩合成为节点级世界偏移后再写回本地坐标。
 - 2026-07-02：补强 Stacker 轨道约束；水平行走会按固定轨道包围范围夹紧，超出轨道长度的 `distance_x`、movement 积分或轨道外目标位不会把机体推出轨道端点。

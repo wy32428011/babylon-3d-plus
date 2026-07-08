@@ -13,7 +13,8 @@ export const MODEL_ASSET_CODE_MAX_LENGTH = 128;
 const DEFAULT_MODEL_ASSET_CODE_PREFIX = 'MODEL';
 const DEFAULT_MQTT_WS_PORT = 8083;
 const DEFAULT_MQTT_WS_PATH = '/mqtt';
-export const DEFAULT_STACKER_MQTT_TOPIC = 'dt/factory/logistics/stacker/+/twindatadriven/joint';
+export const DEFAULT_DEVICE_MQTT_TOPIC = 'dt/factory/logistics/+/+/twindatadriven/joint';
+export const DEFAULT_STACKER_MQTT_TOPIC = DEFAULT_DEVICE_MQTT_TOPIC;
 export const DEFAULT_STACKER_SIMULATOR_ASSET_CODE = 'DDJ2';
 export const DEFAULT_STACKER_SIMULATOR_INTERVAL_MS = 500;
 
