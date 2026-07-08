@@ -12,7 +12,7 @@ Babylon Electron Unity-like Editor 是一个基于 Electron、Vite、React、Typ
 - 首页启动台：进入五面板编辑器前会先显示首页，聚焦最近项目、最近场景、新建场景、打开项目目录和打开场景文件等项目相关入口；最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
 - Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；在约 `1024×640` 及以上窗口中保持五面板可见，Console 可通过右上角按钮局部最小化以释放 Scene 视口高度，Toolbar、Project 页签与资源卡片通过内部横向滚动承接溢出。
-- Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用 `标准` 视野，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑。
+- Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑。
 - 米制场景单位：编辑器约定 `1 scene unit = 1 m`，Inspector 中 position、位置吸附步长与地面网格均按米解释。
 - 编辑器地面辅助层：Scene View 显示视觉无限的科技蓝地面网格，默认每小格表示 `5 m`，可在 Toolbar 中切换显示/隐藏并选择 `1 m`、`2 m`、`5 m`、`10 m` 四档格子大小；网格线自身带有微弱低强度呼吸光晕效果，辅助层不参与选中、保存、加载或撤销/重做。
 - CAD/DXF 网格参考层：Toolbar 支持导入 `.dxf` CAD 图纸，导入过程中会显示读取、解析和创建参考层进度；首版会把 `LINE`、`ARC`、`CIRCLE`、`LWPOLYLINE`、`POLYLINE` 转为贴近 `y = 0` 网格层的半透明线稿；参考图默认锁定、不可被 Scene View 鼠标拾取，不干扰模型选择和 Gizmo，并会随场景保存/加载恢复。
@@ -332,6 +332,7 @@ npm run build
 
 ## 最近完成
 
+- 2026-07-08：优化 Scene View 默认相机构图，`标准` 视野采用更远的观察距离和更低俯仰角，让地面网格不再铺满首屏，保留更多黑色背景可见范围。
 - 2026-07-03：模型阵列方向扩展为 +X/-X/+Y/-Y/+Z/-Z 六向选择，阵列间距继续按米配置，负向阵列会按同一间距反向生成副本。
 - 2026-07-03：补充通用 PLC/MQTT 遥测层文档；默认 topic 扩展为 `dt/factory/logistics/+/+/twindatadriven/joint`，说明 `data[].e/p/v`、`modelAsset.assetCode` 资产匹配、DDJ2 堆垛机字段、1001 输送线第一版语义和现场排查步骤。
 - 2026-07-03：补齐 Stacker 前叉/后叉货物运行时语义；`front_containerCode/back_containerCode` 会创建内存货物并随对应货叉运动，`front_command/back_command=3/4/5` 且目标位有效时货物进入 locator 虚拟定位框，放货完成后条码清空也会保留在目标框内。

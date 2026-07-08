@@ -56,10 +56,10 @@ export type BabylonViewport = {
 
 export const EDITOR_GRID_CELL_SIZES: readonly EditorGridCellSize[] = [1, 2, 5, 10];
 export const EDITOR_CAMERA_VIEW_RANGES: readonly EditorCameraViewRange[] = [
-  { key: 'near', label: '近景', radiusMeters: 8 },
-  { key: 'standard', label: '标准', radiusMeters: 18 },
-  { key: 'far', label: '远景', radiusMeters: 32 },
-  { key: 'overview', label: '全景', radiusMeters: 50 },
+  { key: 'near', label: '近景', radiusMeters: 10 },
+  { key: 'standard', label: '标准', radiusMeters: 28 },
+  { key: 'far', label: '远景', radiusMeters: 48 },
+  { key: 'overview', label: '全景', radiusMeters: 72 },
 ];
 export const DEFAULT_EDITOR_CAMERA_SETTINGS: EditorCameraSettings = {
   viewRangeKey: 'standard',
@@ -79,6 +79,8 @@ const GRID_LINE_GLOW_INTENSITY_PULSE = 0.12;
 const BREATHING_SPEED = 0.0018;
 const EDITOR_CAMERA_MIN_RADIUS_METERS = 0.35;
 const EDITOR_CAMERA_MIN_Z_METERS = 0.02;
+const EDITOR_CAMERA_DEFAULT_ALPHA = Math.PI / 4;
+const EDITOR_CAMERA_DEFAULT_BETA = Math.PI * 0.43;
 
 /** 将未知异常转换成可读消息，便于向上层 UI 呈现 Babylon 初始化失败原因。 */
 function getErrorMessage(error: unknown): string {
@@ -267,8 +269,8 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewpor
 
   const camera = new ArcRotateCamera(
     'EditorCamera',
-    Math.PI / 4,
-    Math.PI / 3,
+    EDITOR_CAMERA_DEFAULT_ALPHA,
+    EDITOR_CAMERA_DEFAULT_BETA,
     getCameraViewRangeRadius(DEFAULT_EDITOR_CAMERA_SETTINGS),
     Vector3.Zero(),
     scene,
