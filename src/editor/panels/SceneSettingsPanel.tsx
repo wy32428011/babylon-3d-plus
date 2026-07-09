@@ -1,5 +1,11 @@
-import { useEffect, useMemo, useState, type KeyboardEvent, type ReactElement } from 'react';
-import type { AssetEntry } from '../assets/AssetDatabase';
+import { useEffect, useMemo, useState, type DragEvent, type KeyboardEvent, type ReactElement } from 'react';
+import {
+  decodeModelAssetDragPayload,
+  ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE,
+  MODEL_ASSET_DRAG_MIME_TYPE,
+  type AssetEntry,
+} from '../assets/AssetDatabase';
+import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
 import {
   createModelLibraryItems,
   getModelUnitTitle,
@@ -11,8 +17,6 @@ import {
   SCENE_SENSITIVITY_MIN,
   SCENE_VIEW_DISTANCE_MAX,
   SCENE_VIEW_DISTANCE_MIN,
-  sanitizeSceneEnvironment,
-  type SceneEnvironmentSettings,
   type SceneEnvironmentVariant,
 } from '../model/SceneDocument';
 import { useEditorStore, type SceneSensitivitySettingKey } from '../store/editorStore';
@@ -39,23 +43,22 @@ function parseFiniteNumber(rawValue: string): number | null {
   return Number.isFinite(nextValue) ? nextValue : null;
 }
 
-function createFallbackVariant(asset: AssetEntry): SceneEnvironmentVariant {
-  return {
-    name: asset.displayName?.trim() || asset.name.replace(/\.(gltf|glb)$/i, '') || '默认预设',
-    sourcePath: asset.path,
-    sourceUrl: asset.sourceUrl,
-  };
+/** 判断拖拽事件是否包含可用于环境属性的模型资产载荷。 */
+function hasEnvironmentAssetDragPayload(event: DragEvent<HTMLElement>): boolean {
+  return (
+    event.dataTransfer.types.includes(ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE) ||
+    event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE)
+  );
 }
 
-function createEnvironmentFromAsset(asset: AssetEntry, variants: SceneEnvironmentVariant[]): SceneEnvironmentSettings | null {
-  const safeVariants = variants.length > 0 ? variants : [createFallbackVariant(asset)];
+/** 读取环境属性 drop 使用的模型资产，环境库专用载荷优先于普通模型库载荷。 */
+function readEnvironmentAssetFromDrop(event: DragEvent<HTMLElement>): AssetEntry | null {
+  const rawEnvironmentPayload = event.dataTransfer.getData(ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE);
+  const environmentAsset = decodeModelAssetDragPayload(rawEnvironmentPayload);
+  if (environmentAsset) return environmentAsset;
 
-  return sanitizeSceneEnvironment({
-    packagePath: asset.packagePath ?? asset.path,
-    thumbnailUrl: asset.thumbnailUrl,
-    activeVariantUrl: safeVariants[0].sourceUrl,
-    variants: safeVariants,
-  });
+  const rawModelPayload = event.dataTransfer.getData(MODEL_ASSET_DRAG_MIME_TYPE);
+  return decodeModelAssetDragPayload(rawModelPayload);
 }
 
 export function SceneSettingsPanel() {
@@ -73,6 +76,7 @@ export function SceneSettingsPanel() {
   const [modelAssets, setModelAssets] = useState<AssetEntry[]>([]);
   const [environmentDialogOpen, setEnvironmentDialogOpen] = useState(false);
   const [environmentStatus, setEnvironmentStatus] = useState<string | null>(null);
+  const [environmentDropActive, setEnvironmentDropActive] = useState(false);
 
   const environment = scene.sceneSettings.environment;
   const presetVariant = environment?.variants[0] ?? null;
@@ -144,21 +148,13 @@ export function SceneSettingsPanel() {
   }
 
   async function handleSelectEnvironmentAsset(asset: AssetEntry): Promise<void> {
-    let variants: SceneEnvironmentVariant[] = [createFallbackVariant(asset)];
-
     try {
-      if (asset.packagePath && window.editorApi?.listModelPackageVariants) {
-        const result = await window.editorApi.listModelPackageVariants({ packagePath: asset.packagePath });
-        if (result.length > 0) {
-          variants = result.map((variant) => ({
-            name: variant.name,
-            sourcePath: variant.path,
-            sourceUrl: variant.sourceUrl,
-          }));
-        }
+      const environmentConfig = await loadEnvironmentFromAsset(asset);
+      if (!environmentConfig) {
+        setEnvironmentStatus('环境模型配置无效，未更新场景环境。');
+        return;
       }
 
-      const environmentConfig = createEnvironmentFromAsset(asset, variants);
       updateEnvironmentConfig(environmentConfig);
       setEnvironmentDialogOpen(false);
       setEnvironmentStatus(null);
@@ -166,6 +162,34 @@ export function SceneSettingsPanel() {
       const message = error instanceof Error ? error.message : String(error);
       setEnvironmentStatus(`环境模型读取失败：${message}`);
     }
+  }
+
+  /** 允许模型库和环境库模型卡片在环境预览区触发 drop。 */
+  function handleEnvironmentDragOver(event: DragEvent<HTMLButtonElement>): void {
+    if (!hasEnvironmentAssetDragPayload(event)) return;
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setEnvironmentDropActive(true);
+  }
+
+  /** 拖拽离开环境预览区时移除高亮，避免悬停态残留。 */
+  function handleEnvironmentDragLeave(event: DragEvent<HTMLButtonElement>): void {
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
+
+    setEnvironmentDropActive(false);
+  }
+
+  /** 在环境预览区释放模型卡片时应用为场景环境，不创建场景实体。 */
+  function handleEnvironmentDrop(event: DragEvent<HTMLButtonElement>): void {
+    const asset = readEnvironmentAssetFromDrop(event);
+    if (!asset) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    setEnvironmentDropActive(false);
+    void handleSelectEnvironmentAsset(asset);
   }
 
   function renderEffectButton(variant: SceneEnvironmentVariant, label: string): ReactElement {
@@ -263,9 +287,13 @@ export function SceneSettingsPanel() {
         <label className="environment-preview-row">
           <span>环境模型</span>
           <button
-            className="environment-preview-button"
+            className={environmentDropActive ? 'environment-preview-button environment-preview-button-drop-active' : 'environment-preview-button'}
+            onDragEnter={handleEnvironmentDragOver}
+            onDragLeave={handleEnvironmentDragLeave}
+            onDragOver={handleEnvironmentDragOver}
+            onDrop={handleEnvironmentDrop}
             onClick={() => setEnvironmentDialogOpen(true)}
-            title="选择环境模型"
+            title="选择或拖入环境模型"
             type="button"
           >
             {environment?.thumbnailUrl ? (

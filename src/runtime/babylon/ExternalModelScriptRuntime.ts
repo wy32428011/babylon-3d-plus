@@ -107,7 +107,7 @@ export class ExternalModelScriptRuntime {
   /** 启动单个 .model.ts 文件中声明的运行组件。 */
   private async startScriptAsset(scriptAsset: ModelScriptAsset): Promise<void> {
     try {
-      const compiledScript = await loadCompiledExternalModelScript(scriptAsset);
+      const compiledScript = await loadCompiledExternalModelScript(scriptAsset, this.modelAsset.assetRevision);
       if (this.disposed) return;
       if (compiledScript.dataDriven !== undefined) {
         this.dataDrivenConfigs.push(compiledScript.dataDriven);
@@ -168,8 +168,11 @@ export class ExternalModelScriptRuntime {
 }
 
 /** 加载并缓存已经转译好的外置脚本。 */
-async function loadCompiledExternalModelScript(scriptAsset: ModelScriptAsset): Promise<CompiledExternalModelScript> {
-  const sourceText = await fetchScriptText(scriptAsset);
+async function loadCompiledExternalModelScript(
+  scriptAsset: ModelScriptAsset,
+  assetRevision: string | undefined,
+): Promise<CompiledExternalModelScript> {
+  const sourceText = await fetchScriptText(scriptAsset, assetRevision);
   const cacheKey = `${scriptAsset.sourceUrl}:${hashText(sourceText)}`;
   const cachedScript = compiledScriptCache.get(cacheKey);
   if (cachedScript) return cachedScript;
@@ -180,12 +183,21 @@ async function loadCompiledExternalModelScript(scriptAsset: ModelScriptAsset): P
 }
 
 /** 从 editor-asset 协议读取模型包内的 TypeScript 源码。 */
-async function fetchScriptText(scriptAsset: ModelScriptAsset): Promise<string> {
-  const response = await fetch(resolveRuntimeAssetUrl(scriptAsset.sourceUrl));
+async function fetchScriptText(scriptAsset: ModelScriptAsset, assetRevision: string | undefined): Promise<string> {
+  const response = await fetch(createVersionedRuntimeAssetUrl(scriptAsset.sourceUrl, assetRevision));
   if (!response.ok) {
     throw new Error(`无法读取脚本：${response.status}`);
   }
   return response.text();
+}
+
+/** 外置脚本跟随模型包导入版本追加查询参数，避免重新导入后仍读取旧脚本文本。 */
+function createVersionedRuntimeAssetUrl(sourceUrl: string, assetRevision: string | undefined): string {
+  const runtimeUrl = resolveRuntimeAssetUrl(sourceUrl);
+  if (!assetRevision) return runtimeUrl;
+
+  const separator = runtimeUrl.includes('?') ? '&' : '?';
+  return `${runtimeUrl}${separator}assetRevision=${encodeURIComponent(assetRevision)}`;
 }
 
 /** 将 .model.ts 转成可在 renderer 内执行的本地函数模块。 */

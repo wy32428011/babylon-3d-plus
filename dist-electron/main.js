@@ -138,7 +138,11 @@ function registerEditorAssetProtocol() {
             return new Response('Forbidden', { status: 403 });
         }
         const content = await fs.readFile(filePath);
-        return new Response(content);
+        return new Response(content, {
+            headers: {
+                'Cache-Control': 'no-store',
+            },
+        });
     });
 }
 app.whenReady().then(() => {

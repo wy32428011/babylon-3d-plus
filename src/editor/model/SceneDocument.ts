@@ -431,6 +431,7 @@ export function createModelEntity(
   parameterScriptMetadata?: unknown[],
   animationScriptMetadata?: unknown[],
   defaultAssetCodePrefix?: string,
+  assetRevision?: string,
 ): Entity {
   const id = createId('entity');
   const trimmedName = displayName.trim();
@@ -453,6 +454,7 @@ export function createModelEntity(
         assetCode,
         sourcePath,
         sourceUrl,
+        ...(assetRevision ? { assetRevision } : {}),
         lengthUnit: unitInfo.lengthUnit,
         unitScaleToMeters: unitInfo.unitScaleToMeters,
         ...(scriptAssets?.length ? { scriptAssets } : {}),

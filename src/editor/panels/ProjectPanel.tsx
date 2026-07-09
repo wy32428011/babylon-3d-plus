@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
+  ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE,
   encodeBuiltInAssetDragPayload,
   encodeModelAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
   type AssetEntry,
 } from '../assets/AssetDatabase';
+import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
 import {
   BUILT_IN_MODEL_LIBRARY_ITEMS,
   PROJECT_LIBRARIES,
@@ -26,6 +28,8 @@ type ModelFolderStatus = {
 
 export function ProjectPanel() {
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
+  const refreshModelInstancesFromAssets = useEditorStore((state) => state.refreshModelInstancesFromAssets);
+  const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
@@ -52,6 +56,10 @@ export function ProjectPanel() {
       return hasImportedModelFolder
         ? [...BUILT_IN_MODEL_LIBRARY_ITEMS, ...createModelLibraryItems(modelAssets)]
         : BUILT_IN_MODEL_LIBRARY_ITEMS;
+    }
+
+    if (activeLibrary.key === 'environment') {
+      return createModelLibraryItems(modelAssets);
     }
 
     return activeLibrary.items;
@@ -127,15 +135,17 @@ export function ProjectPanel() {
   }, [activeLibraryKey, focusedAssetId, activeItems]);
 
   async function handleImportModelFolder(): Promise<void> {
+    const assetKindLabel = activeLibrary.key === 'environment' ? '环境模型' : '模型';
+
     if (!window.editorApi?.importModelFolder) {
-      const statusMessage = '导入模型文件夹需要 Electron 桌面环境，请使用 npm run dev:electron 启动编辑器。';
+      const statusMessage = `导入${assetKindLabel}文件夹需要 Electron 桌面环境，请使用 npm run dev:electron 启动编辑器。`;
       setModelFolderStatus({ message: statusMessage, kind: 'error' });
       pushLog(statusMessage);
       return;
     }
 
     setIsImportingModelFolder(true);
-    setModelFolderStatus({ message: '正在扫描模型文件夹...', kind: 'info' });
+    setModelFolderStatus({ message: `正在扫描${assetKindLabel}文件夹...`, kind: 'info' });
 
     try {
       const result = await window.editorApi.importModelFolder();
@@ -148,24 +158,44 @@ export function ProjectPanel() {
       setModelAssets(result.assets);
       setProjectRoot(result.projectRoot);
       setHasImportedModelFolder(result.assets.length > 0);
+      const refreshedCount = refreshModelInstancesFromAssets(result.assets);
 
       const skippedSuffix = result.skipped.length > 0 ? `，跳过 ${result.skipped.length} 个目录` : '';
-      const rootLabel = result.rootPath ?? '模型文件夹';
+      const rootLabel = result.rootPath ?? `${assetKindLabel}文件夹`;
       const projectSuffix = result.projectRoot ? `，已写入项目：${result.projectRoot}` : '';
-      const message = `模型文件夹已导入项目：${rootLabel}，发现 ${result.assets.length} 个模型${skippedSuffix}${projectSuffix}。`;
+      const refreshSuffix = refreshedCount > 0 ? `，已刷新 ${refreshedCount} 个场景模型实例` : '';
+      const message = `${assetKindLabel}文件夹已导入项目：${rootLabel}，发现 ${result.assets.length} 个模型${skippedSuffix}${projectSuffix}${refreshSuffix}。`;
       setModelFolderStatus({ message, kind: 'info' });
       pushLog(message);
 
       if (result.assets.length === 0) {
-        setModelFolderStatus({ message: '未发现可导入模型包。', kind: 'info' });
+        setModelFolderStatus({ message: `未发现可导入${assetKindLabel}包。`, kind: 'info' });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const statusMessage = `导入模型文件夹失败：${message}`;
+      const statusMessage = `导入${assetKindLabel}文件夹失败：${message}`;
       setModelFolderStatus({ message: statusMessage, kind: 'error' });
       pushLog(statusMessage);
     } finally {
       setIsImportingModelFolder(false);
+    }
+  }
+
+  /** 从环境库把项目模型应用为场景环境，不创建 Hierarchy 实体。 */
+  async function handleEnvironmentAssetApply(asset: AssetEntry): Promise<void> {
+    try {
+      const environmentConfig = await loadEnvironmentFromAsset(asset);
+      if (!environmentConfig) {
+        pushLog('环境模型配置无效，未更新场景环境。');
+        return;
+      }
+
+      updateEnvironmentConfig(environmentConfig);
+      const displayName = asset.displayName?.trim() || asset.name.replace(/\.(gltf|glb)$/i, '');
+      pushLog(`环境模型已应用：${displayName}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`环境模型读取失败：${message}`);
     }
   }
 
@@ -186,6 +216,11 @@ export function ProjectPanel() {
     }
 
     if (isImportedProjectLibraryItem(item)) {
+      if (activeLibrary.key === 'environment') {
+        void handleEnvironmentAssetApply(item.asset);
+        return;
+      }
+
       importModelAsset(item.asset);
     }
   }
@@ -200,7 +235,10 @@ export function ProjectPanel() {
 
     if (isImportedProjectLibraryItem(item)) {
       event.dataTransfer.effectAllowed = 'copy';
-      event.dataTransfer.setData(MODEL_ASSET_DRAG_MIME_TYPE, encodeModelAssetDragPayload(item.asset));
+      event.dataTransfer.setData(
+        activeLibrary.key === 'environment' ? ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE : MODEL_ASSET_DRAG_MIME_TYPE,
+        encodeModelAssetDragPayload(item.asset),
+      );
       event.dataTransfer.setData('text/plain', item.name);
       return;
     }
@@ -209,11 +247,13 @@ export function ProjectPanel() {
   }
 
   const isModelImportButtonDisabled = isImportingModelFolder || isLoadingProjectAssets;
+  const supportsProjectModelImport = activeLibrary.key === 'model' || activeLibrary.key === 'environment';
+  const importTargetLabel = activeLibrary.key === 'environment' ? '环境模型' : '模型';
   const modelImportButtonLabel = isLoadingProjectAssets
     ? '加载项目中...'
     : isImportingModelFolder
       ? '导入中...'
-      : '导入模型文件夹';
+      : `导入${importTargetLabel}文件夹`;
 
   return (
     <section className="panel project-library" aria-label="Project 资源库">
@@ -247,7 +287,7 @@ export function ProjectPanel() {
           type="text"
           value=""
         />
-        {activeLibrary.key === 'model' ? (
+        {supportsProjectModelImport ? (
           <button
             className="library-import-button"
             disabled={isModelImportButtonDisabled}
@@ -263,10 +303,14 @@ export function ProjectPanel() {
         {activeLibrary.key === 'model' && hasImportedModelFolder && activeItems.length === 0 ? (
           <p className="library-empty-state">未发现可导入模型包</p>
         ) : null}
+        {activeLibrary.key === 'environment' && activeItems.length === 0 ? (
+          <p className="library-empty-state">请先导入环境模型文件夹</p>
+        ) : null}
         {activeItems.map((item) => {
           const isBuiltInItem = isBuiltInProjectLibraryItem(item);
           const isImportedModel = isImportedProjectLibraryItem(item);
-          const isActionableItem = isBuiltInItem || isImportedModel;
+          const isEnvironmentLibrary = activeLibrary.key === 'environment';
+          const isActionableItem = (!isEnvironmentLibrary && isBuiltInItem) || isImportedModel;
 
           return (
             <ResourceCard
@@ -289,7 +333,9 @@ export function ProjectPanel() {
                 isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`
                   : isImportedModel
-                    ? `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`
+                    ? isEnvironmentLibrary
+                      ? `点击应用或拖拽到环境属性：${item.name}，${getModelUnitTitle(item.asset)}`
+                      : `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`
                     : '占位资源，功能后续接入'
               }
             />
@@ -297,10 +343,10 @@ export function ProjectPanel() {
         })}
       </div>
 
-      {activeLibrary.key === 'model' && modelFolderStatus ? (
+      {supportsProjectModelImport && modelFolderStatus ? (
         <p className={`library-status library-status-${modelFolderStatus.kind}`}>{modelFolderStatus.message}</p>
       ) : null}
-      {activeLibrary.key === 'model' && projectRoot ? (
+      {supportsProjectModelImport && projectRoot ? (
         <p className="library-status library-status-info">当前项目：{projectRoot}</p>
       ) : null}
     </section>

@@ -1,5 +1,6 @@
 import { app, dialog } from 'electron';
 import { promises as fs } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
   AssetEntry,
@@ -379,6 +380,7 @@ function normalizeIndexedAsset(value: unknown): AssetEntry | null {
 
   const modelPath = normalizeFilePath(assertString(asset.path));
   const name = assertString(asset.name);
+  const assetRevision = normalizeOptionalTrimmedString(asset.assetRevision);
   const packagePath = normalizeOptionalPath(asset.packagePath);
   const metadataPath = normalizeOptionalPath(asset.metadataPath);
   const thumbnailPath = normalizeOptionalPath(asset.thumbnailPath);
@@ -392,6 +394,7 @@ function normalizeIndexedAsset(value: unknown): AssetEntry | null {
     name,
     path: modelPath,
     sourceUrl: encodeAssetUrl(modelPath),
+    assetRevision,
     kind: 'model',
     packagePath,
     metadataPath,
@@ -426,6 +429,11 @@ export function getCurrentProjectRoot(): string | null {
 
 export function setCurrentProjectRoot(projectRoot: string): void {
   currentProjectRoot = normalizeFilePath(projectRoot);
+}
+
+/** 生成项目内模型包导入版本，用于同一路径被覆盖后通知 renderer 和运行时重载资源。 */
+function createProjectAssetRevision(): string {
+  return `${Date.now().toString(36)}-${randomUUID()}`;
 }
 
 export async function getRecentWorkspaces(): Promise<RecentWorkspacesResult> {
@@ -635,13 +643,17 @@ export async function importModelPackagesIntoProject(
       const copiedPackage = await scanModelPackage(targetPackagePath);
 
       if (copiedPackage.asset) {
-        importedAssets.push(copiedPackage.asset);
-        authorizeAssetFile(copiedPackage.asset.path);
-        if (copiedPackage.asset.thumbnailPath) {
-          authorizeAssetFile(copiedPackage.asset.thumbnailPath);
+        const importedAsset: AssetEntry = {
+          ...copiedPackage.asset,
+          assetRevision: createProjectAssetRevision(),
+        };
+        importedAssets.push(importedAsset);
+        authorizeAssetFile(importedAsset.path);
+        if (importedAsset.thumbnailPath) {
+          authorizeAssetFile(importedAsset.thumbnailPath);
         }
 
-        for (const scriptAsset of copiedPackage.asset.scriptAssets ?? []) {
+        for (const scriptAsset of importedAsset.scriptAssets ?? []) {
           authorizeAssetFile(scriptAsset.path);
         }
       }

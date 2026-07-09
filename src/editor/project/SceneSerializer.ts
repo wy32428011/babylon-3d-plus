@@ -416,6 +416,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
   const assetCode = normalizeModelAssetCode(modelAsset.assetCode, entityId);
   const sourcePath = assertString(modelAsset.sourcePath);
   const sourceUrl = assertString(modelAsset.sourceUrl);
+  const assetRevision = normalizeOptionalString(modelAsset.assetRevision);
 
   if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) {
     throwUnsupportedSceneFileError();
@@ -442,6 +443,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     assetCode,
     sourcePath,
     sourceUrl,
+    ...(assetRevision ? { assetRevision } : {}),
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(scriptAssets.length ? { scriptAssets } : {}),
@@ -449,6 +451,12 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     ...(animationScriptMetadata.length ? { animationScriptMetadata } : {}),
     ...(parameterConfig ? { parameterConfig, parameterValues } : {}),
   };
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  const normalizedValue = assertString(value).trim();
+  return normalizedValue || undefined;
 }
 
 function normalizeModelAssetCode(value: unknown, entityId: string): string {

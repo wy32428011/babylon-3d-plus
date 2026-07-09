@@ -157,7 +157,11 @@ function registerEditorAssetProtocol(): void {
     }
 
     const content = await fs.readFile(filePath);
-    return new Response(content);
+    return new Response(content, {
+      headers: {
+        'Cache-Control': 'no-store',
+      },
+    });
   });
 }
 

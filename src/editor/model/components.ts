@@ -61,6 +61,7 @@ export type ModelAssetComponent = {
   assetCode: string;
   sourcePath: string;
   sourceUrl: string;
+  assetRevision?: string;
   lengthUnit: ModelSourceLengthUnit;
   unitScaleToMeters: number;
   scriptAssets?: ModelScriptAsset[];

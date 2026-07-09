@@ -194,6 +194,7 @@ type EditorState = {
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
+  refreshModelInstancesFromAssets: (assets: AssetEntry[]) => number;
   importCadReference: () => Promise<void>;
   loadSceneAsset: (asset: AssetEntry) => Promise<void>;
   selectEntity: (entityId: string | null) => void;
@@ -489,6 +490,162 @@ function isSceneEnvironmentEqual(
   right: SceneEnvironmentSettings | null,
 ): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+/** 归一化导入资产匹配路径，避免 Windows 分隔符和大小写差异影响同包识别。 */
+function normalizeAssetMatchPath(value: string | undefined): string {
+  return (value ?? '').trim().replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase();
+}
+
+/** 获取模型包目录匹配键，优先使用扫描得到的 packagePath。 */
+function getAssetPackageMatchPath(asset: AssetEntry): string {
+  return normalizeAssetMatchPath(asset.packagePath ?? getDirectoryPath(asset.path));
+}
+
+/** 从模型文件路径中取出所在目录，用于重新导入后文件名变化时的兜底匹配。 */
+function getDirectoryPath(filePath: string | undefined): string {
+  const normalizedPath = (filePath ?? '').trim().replace(/\\/g, '/');
+  const separatorIndex = normalizedPath.lastIndexOf('/');
+  return separatorIndex > 0 ? normalizedPath.slice(0, separatorIndex) : '';
+}
+
+/** 为本轮导入的模型资产建立精确路径、URL 和唯一包目录三类索引。 */
+function createImportedAssetIndexes(assets: AssetEntry[]): {
+  byPath: Map<string, AssetEntry>;
+  bySourceUrl: Map<string, AssetEntry>;
+  uniqueByPackagePath: Map<string, AssetEntry>;
+} {
+  const modelAssets = assets.filter((asset) => asset.kind === 'model');
+  const byPath = new Map<string, AssetEntry>();
+  const bySourceUrl = new Map<string, AssetEntry>();
+  const packageAssetLists = new Map<string, AssetEntry[]>();
+
+  for (const asset of modelAssets) {
+    const pathKey = normalizeAssetMatchPath(asset.path);
+    if (pathKey) byPath.set(pathKey, asset);
+
+    const sourceUrlKey = asset.sourceUrl.trim();
+    if (sourceUrlKey) bySourceUrl.set(sourceUrlKey, asset);
+
+    const packageKey = getAssetPackageMatchPath(asset);
+    if (!packageKey) continue;
+
+    const packageAssets = packageAssetLists.get(packageKey) ?? [];
+    packageAssets.push(asset);
+    packageAssetLists.set(packageKey, packageAssets);
+  }
+
+  const uniqueByPackagePath = new Map<string, AssetEntry>();
+  for (const [packageKey, packageAssets] of packageAssetLists.entries()) {
+    if (packageAssets.length === 1) uniqueByPackagePath.set(packageKey, packageAssets[0]);
+  }
+
+  return { byPath, bySourceUrl, uniqueByPackagePath };
+}
+
+/** 按 sourcePath/sourceUrl 精确匹配模型实例，必要时按唯一包目录兜底。 */
+function findImportedAssetForModelAsset(
+  modelAsset: ModelAssetComponent,
+  indexes: ReturnType<typeof createImportedAssetIndexes>,
+): AssetEntry | null {
+  const pathMatch = indexes.byPath.get(normalizeAssetMatchPath(modelAsset.sourcePath));
+  if (pathMatch) return pathMatch;
+
+  const sourceUrlMatch = indexes.bySourceUrl.get(modelAsset.sourceUrl.trim());
+  if (sourceUrlMatch) return sourceUrlMatch;
+
+  const packageMatch = indexes.uniqueByPackagePath.get(normalizeAssetMatchPath(getDirectoryPath(modelAsset.sourcePath)));
+  return packageMatch ?? null;
+}
+
+/** 根据新导入的资产快照生成场景实例的新 modelAsset，同时保留现场资产编号。 */
+function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: AssetEntry): ModelAssetComponent {
+  const parameterConfig = normalizeModelParameterConfig(asset.parameterConfig) ?? undefined;
+  const unitInfo: ModelLengthUnitInfo = {
+    lengthUnit: asset.lengthUnit ?? DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit,
+    unitScaleToMeters: asset.unitScaleToMeters ?? DEFAULT_MODEL_LENGTH_UNIT_INFO.unitScaleToMeters,
+  };
+
+  return {
+    assetCode: modelAsset.assetCode,
+    sourcePath: asset.path,
+    sourceUrl: asset.sourceUrl,
+    ...(asset.assetRevision ? { assetRevision: asset.assetRevision } : {}),
+    lengthUnit: unitInfo.lengthUnit,
+    unitScaleToMeters: unitInfo.unitScaleToMeters,
+    ...(asset.scriptAssets?.length ? { scriptAssets: cloneJsonValue(asset.scriptAssets) } : {}),
+    ...(asset.parameterScriptMetadata?.length ? { parameterScriptMetadata: cloneJsonValue(asset.parameterScriptMetadata) } : {}),
+    ...(asset.animationScriptMetadata?.length ? { animationScriptMetadata: cloneJsonValue(asset.animationScriptMetadata) } : {}),
+    ...(parameterConfig
+      ? {
+          parameterConfig,
+          parameterValues: sanitizeModelParameterValues(parameterConfig, modelAsset.parameterValues),
+        }
+      : {}),
+  };
+}
+
+/** 比较可序列化元数据，供字段级模型快照比较复用。 */
+function areJsonValuesEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+/** 判断刷新前后的模型资产快照是否等价，用于避免写入空的撤销历史。 */
+function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetComponent): boolean {
+  return (
+    left.assetCode === right.assetCode &&
+    left.sourcePath === right.sourcePath &&
+    left.sourceUrl === right.sourceUrl &&
+    (left.assetRevision ?? '') === (right.assetRevision ?? '') &&
+    left.lengthUnit === right.lengthUnit &&
+    left.unitScaleToMeters === right.unitScaleToMeters &&
+    areJsonValuesEqual(left.scriptAssets, right.scriptAssets) &&
+    areJsonValuesEqual(left.parameterScriptMetadata, right.parameterScriptMetadata) &&
+    areJsonValuesEqual(left.animationScriptMetadata, right.animationScriptMetadata) &&
+    areJsonValuesEqual(left.parameterConfig, right.parameterConfig) &&
+    areModelParameterValuesEqual(left.parameterValues ?? {}, right.parameterValues ?? {})
+  );
+}
+
+/** 批量刷新当前场景内引用本轮导入模型包的实例，并返回刷新数量。 */
+function refreshSceneModelAssetsFromImportedAssets(
+  scene: SceneDocument,
+  assets: AssetEntry[],
+): { scene: SceneDocument; refreshedCount: number } {
+  const indexes = createImportedAssetIndexes(assets);
+  let refreshedCount = 0;
+  const entities: SceneDocument['entities'] = { ...scene.entities };
+
+  for (const entityId of scene.entityIds) {
+    const entity = scene.entities[entityId];
+    const modelAsset = entity?.components.modelAsset;
+    if (!entity || !modelAsset) continue;
+
+    const importedAsset = findImportedAssetForModelAsset(modelAsset, indexes);
+    if (!importedAsset) continue;
+
+    const refreshedModelAsset = createRefreshedModelAsset(modelAsset, importedAsset);
+    if (areModelAssetsEqual(modelAsset, refreshedModelAsset)) continue;
+
+    refreshedCount += 1;
+    entities[entityId] = {
+      ...entity,
+      components: {
+        ...entity.components,
+        modelAsset: refreshedModelAsset,
+      },
+    };
+  }
+
+  if (refreshedCount === 0) return { scene, refreshedCount };
+
+  return {
+    scene: {
+      ...scene,
+      entities,
+    },
+    refreshedCount,
+  };
 }
 
 function getSelectedEntity(state: EditorState) {
@@ -1123,6 +1280,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       asset.parameterScriptMetadata,
       asset.animationScriptMetadata,
       asset.defaultAssetCode,
+      asset.assetRevision,
     );
     const command = createEntityCommand(entity);
 
@@ -1134,6 +1292,26 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         logs: prependLog(state.logs, `导入模型：${asset.name}`),
       };
     });
+  },
+  refreshModelInstancesFromAssets: (assets) => {
+    let refreshedCount = 0;
+
+    set((state) => {
+      const refreshResult = refreshSceneModelAssetsFromImportedAssets(state.scene, assets);
+      refreshedCount = refreshResult.refreshedCount;
+      if (refreshedCount === 0) return state;
+
+      const command = updateSceneDocumentCommand('刷新导入模型', () => refreshResult.scene);
+      const result = executeCommand(state.scene, state.history, command);
+
+      return {
+        ...result,
+        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds),
+        logs: prependLog(state.logs, `已刷新 ${refreshedCount} 个场景模型实例。`),
+      };
+    });
+
+    return refreshedCount;
   },
   importCadReference: async () => {
     if (get().cadImportProgress?.active) {

@@ -9,6 +9,7 @@ export type AssetEntry = {
   name: string;
   path: string;
   sourceUrl: string;
+  assetRevision?: string;
   thumbnailPath?: string;
   thumbnailUrl?: string;
   kind: 'folder' | 'model' | 'texture' | 'scene' | 'unknown';
@@ -26,6 +27,7 @@ export type AssetEntry = {
 };
 
 export const MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-model-asset';
+export const ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-environment-model-asset';
 export const BUILT_IN_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-built-in-asset';
 
 export type BuiltInAssetDragPayload =
@@ -102,6 +104,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | nu
     };
 
     const packagePath = readOptionalString(payload, 'packagePath');
+    const assetRevision = readOptionalString(payload, 'assetRevision');
     const metadataPath = readOptionalString(payload, 'metadataPath');
     const thumbnailPath = readOptionalString(payload, 'thumbnailPath');
     const thumbnailUrl = readOptionalString(payload, 'thumbnailUrl');
@@ -114,6 +117,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | nu
     const parameterConfig = normalizeModelParameterConfig(payload.parameterConfig);
 
     if (packagePath) asset.packagePath = packagePath;
+    if (assetRevision) asset.assetRevision = assetRevision;
     if (metadataPath) asset.metadataPath = metadataPath;
     if (thumbnailPath) asset.thumbnailPath = thumbnailPath;
     if (thumbnailUrl) asset.thumbnailUrl = thumbnailUrl;

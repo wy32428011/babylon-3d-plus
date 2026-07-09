@@ -102,6 +102,8 @@ type EditorMeshMetadata = {
 
 type ModelRuntimeEntry = {
   sourceUrl: string;
+  assetRevision: string | null;
+  assetSignature: string;
   assetCode: string;
   stackerCapable: boolean;
   conveyorCapable: boolean;
@@ -779,8 +781,9 @@ export class SceneRuntime {
     const modelAsset = entity.components.modelAsset;
     if (!modelAsset) return;
 
+    const assetSignature = this.createModelAssetSignature(modelAsset);
     const existing = this.models.get(entity.id);
-    if (existing && existing.sourceUrl !== modelAsset.sourceUrl) {
+    if (existing && existing.assetSignature !== assetSignature) {
       this.disposeModel(entity.id, existing);
     }
 
@@ -795,6 +798,8 @@ export class SceneRuntime {
         this.resetConveyorTelemetryState(current);
       }
       current.assetCode = modelAsset.assetCode;
+      current.assetRevision = modelAsset.assetRevision ?? null;
+      current.assetSignature = assetSignature;
       current.stackerCapable = this.isStackerModelAsset(modelAsset);
       current.conveyorCapable = this.isConveyorModelAsset(modelAsset);
       current.stackerTelemetry.rootBasePosition = current.root.position.clone();
@@ -815,6 +820,8 @@ export class SceneRuntime {
     const loadToken = ++this.modelLoadSequence;
     const pending: ModelRuntimeEntry = {
       sourceUrl: modelAsset.sourceUrl,
+      assetRevision: modelAsset.assetRevision ?? null,
+      assetSignature,
       assetCode: modelAsset.assetCode,
       stackerCapable: this.isStackerModelAsset(modelAsset),
       conveyorCapable: this.isConveyorModelAsset(modelAsset),
@@ -836,12 +843,12 @@ export class SceneRuntime {
     this.models.set(entity.id, pending);
     this.applyModelInteractivity(pending, entity.id);
 
-    const { rootUrl, fileName } = this.splitAssetUrl(resolveRuntimeAssetUrl(modelAsset.sourceUrl));
+    const { rootUrl, fileName } = this.splitAssetUrl(this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision));
 
     void SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene)
       .then((container) => {
         const activeEntry = this.models.get(entity.id);
-        if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.sourceUrl !== modelAsset.sourceUrl) {
+        if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.assetSignature !== assetSignature) {
           container.dispose();
           return;
         }
@@ -3133,7 +3140,7 @@ export class SceneRuntime {
   }
 
   private loadOrReuseTexture(relativePath: string, modelAsset: ModelAssetComponent, model: ModelRuntimeEntry): Texture | null {
-    const textureUrl = this.resolveModelRelativeAssetUrl(modelAsset.sourceUrl, relativePath);
+    const textureUrl = this.resolveModelRelativeAssetUrl(modelAsset, relativePath);
     if (!textureUrl) return null;
 
     const existing = model.textureCache.get(textureUrl);
@@ -3144,9 +3151,26 @@ export class SceneRuntime {
     return texture;
   }
 
-  private resolveModelRelativeAssetUrl(sourceUrl: string, relativePath: string): string | null {
-    const editorAssetUrl = resolveRelativeEditorAssetUrl(sourceUrl, relativePath, /\.(png|jpe?g|webp)$/i);
-    return editorAssetUrl ? resolveRuntimeAssetUrl(editorAssetUrl) : null;
+  private resolveModelRelativeAssetUrl(modelAsset: ModelAssetComponent, relativePath: string): string | null {
+    const editorAssetUrl = resolveRelativeEditorAssetUrl(modelAsset.sourceUrl, relativePath, /\.(png|jpe?g|webp)$/i);
+    return editorAssetUrl ? this.resolveVersionedRuntimeAssetUrl(editorAssetUrl, modelAsset.assetRevision) : null;
+  }
+
+  /** 用模型源 URL 和导入版本生成加载签名，同路径覆盖时也能触发重新载入。 */
+  private createModelAssetSignature(modelAsset: ModelAssetComponent): string {
+    return JSON.stringify({
+      sourceUrl: modelAsset.sourceUrl,
+      assetRevision: modelAsset.assetRevision ?? null,
+    });
+  }
+
+  /** 给运行时资源 URL 追加导入版本参数，绕开浏览器和 Electron 对同路径资源的缓存。 */
+  private resolveVersionedRuntimeAssetUrl(sourceUrl: string, assetRevision: string | undefined | null): string {
+    const runtimeUrl = resolveRuntimeAssetUrl(sourceUrl);
+    if (!assetRevision) return runtimeUrl;
+
+    const separator = runtimeUrl.includes('?') ? '&' : '?';
+    return `${runtimeUrl}${separator}assetRevision=${encodeURIComponent(assetRevision)}`;
   }
 
   /** 根据选中状态给导入模型添加或移除 HighlightLayer 高亮，不破坏原始材质。 */

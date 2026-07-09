@@ -966,6 +966,13 @@ select {
     linear-gradient(180deg, #4a4a4a 0%, #2f2f2f 58%, #171717 100%);
 }
 
+.environment-preview-button-drop-active {
+  border-color: #20dce9;
+  box-shadow:
+    inset 0 0 0 1px rgb(32 220 233 / 76%),
+    0 0 12px rgb(32 220 233 / 24%);
+}
+
 .environment-preview-button img {
   display: block;
   width: 100%;

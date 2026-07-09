@@ -76,6 +76,7 @@ export type AssetEntry = {
   name: string;
   path: string;
   sourceUrl: string;
+  assetRevision?: string;
   thumbnailPath?: string;
   thumbnailUrl?: string;
   kind: 'folder' | 'model' | 'texture' | 'scene' | 'unknown';
