@@ -906,6 +906,111 @@ select {
   padding: 2px;
 }
 
+.inspector-panel-compact-model {
+  padding: 8px;
+  font-size: 12px;
+}
+
+.inspector-panel-compact-model h2 {
+  margin-bottom: 6px;
+}
+
+.inspector-panel-compact-model .transform-fieldset {
+  min-inline-size: 0;
+  gap: 4px;
+  margin: 6px 0;
+  padding: 4px 6px 6px;
+}
+
+.inspector-panel-compact-model .transform-fieldset legend {
+  padding: 0 4px;
+  color: #eeeeee;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.inspector-panel-compact-model .transform-axis-fieldset {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  column-gap: 4px;
+}
+
+.inspector-panel-compact-model .transform-axis-fieldset legend {
+  grid-column: 1 / -1;
+}
+
+.inspector-panel-compact-model .inspector-row,
+.inspector-panel-compact-model .number-row {
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 6px;
+  min-height: 24px;
+}
+
+.inspector-panel-compact-model .transform-axis-fieldset .number-row {
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 3px;
+  min-width: 0;
+}
+
+.inspector-panel-compact-model .inspector-row span,
+.inspector-panel-compact-model .number-row span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-panel-compact-model .inspector-row input,
+.inspector-panel-compact-model .inspector-row select,
+.inspector-panel-compact-model .number-row input {
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.inspector-panel-compact-model .inspector-row input[type="color"] {
+  height: 24px;
+  padding: 2px;
+}
+
+.inspector-panel-compact-model .inspector-row input[type="checkbox"] {
+  justify-self: start;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+}
+
+.inspector-panel-compact-model .model-asset-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.inspector-panel-compact-model .muted {
+  margin: 0;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.inspector-panel-compact-model .asset-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-panel-compact-model .model-parameters-fieldset {
+  gap: 4px;
+}
+
+.inspector-panel-compact-model .model-parameter-vector {
+  margin: 4px 0 0;
+  padding: 4px 6px 5px;
+}
+
 .project-library {
   display: grid;
   grid-template-rows: 32px 42px minmax(0, 1fr) auto;
@@ -1015,10 +1120,13 @@ select {
 .project-library .resource-card-list {
   display: flex;
   align-items: flex-start;
-  gap: 30px;
+  align-content: flex-start;
+  flex-wrap: wrap;
+  gap: 14px 18px;
   min-width: 0;
   padding: 6px 14px 8px;
-  overflow-x: auto;
+  /* 资源卡片按宽度自动换行，禁用横向滚动，超出高度后走纵向滚动。 */
+  overflow-x: hidden;
   overflow-y: auto;
   background: #262626;
 }
@@ -1530,52 +1638,130 @@ select {
   }
 }
 
-.console-panel {
+.console-dock {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  border-top: 1px solid #151515;
+  background: #202020;
+}
+
+.console-dock-button {
   display: grid;
-  grid-template-rows: 20px minmax(0, 1fr);
-  gap: 6px;
-  padding: 6px 10px;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 0;
+  color: #d7d7d7;
+  background: transparent;
+  text-align: left;
+}
+
+.console-dock-button:hover {
+  color: #ffffff;
+  background: #2b2b2b;
+}
+
+.console-dock-button:focus-visible {
+  box-shadow: inset 0 0 0 1px #20dce9;
+  outline: none;
+}
+
+.console-dock-button strong {
+  color: #f0f0f0;
+  font-size: 12px;
+}
+
+.console-dock-count {
+  display: inline-grid;
+  min-width: 22px;
+  height: 18px;
+  place-items: center;
+  padding: 0 6px;
+  border: 1px solid #3d6b70;
+  border-radius: 999px;
+  color: #9feef6;
+  background: #17363a;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.console-dock-message {
+  min-width: 0;
   overflow: hidden;
+  color: #9fb7bb;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.console-panel-minimized {
-  grid-template-rows: 20px;
+.console-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  align-items: end;
+  justify-items: center;
+  padding: 0 24px 42px;
+  background: rgb(0 0 0 / 34%);
 }
 
-.console-panel-header {
+.console-dialog {
+  display: grid;
+  grid-template-rows: 36px minmax(0, 1fr);
+  width: min(720px, calc(100vw - 48px));
+  height: min(420px, 55vh);
+  overflow: hidden;
+  border: 1px solid #404040;
+  background: #222222;
+  box-shadow: 0 18px 44px rgb(0 0 0 / 48%);
+}
+
+.console-dialog-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  min-height: 20px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid #151515;
+  background: #181818;
 }
 
-.console-panel-header h2 {
+.console-dialog-header h2 {
   min-width: 0;
   margin: 0;
   overflow: hidden;
+  color: #f0f0f0;
+  font-size: 13px;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.panel .console-minimize-button {
+.console-dialog-close-button {
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
-  width: 22px;
-  min-width: 22px;
-  height: 20px;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
   padding: 0;
-  border-color: #4a4a4a;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
   color: #d7d7d7;
   background: #303030;
   font-family: Consolas, monospace;
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1;
 }
 
-.panel .console-minimize-button:hover {
+.console-dialog-close-button:hover {
   border-color: #6a6a6a;
   color: #ffffff;
   background: #3a3a3a;
@@ -1586,6 +1772,7 @@ select {
   align-content: start;
   gap: 2px;
   min-height: 0;
+  padding: 10px 12px;
   overflow: auto;
   font-family: Consolas, monospace;
   font-size: 12px;

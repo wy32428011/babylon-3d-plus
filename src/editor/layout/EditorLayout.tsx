@@ -25,7 +25,7 @@ function isKeyboardEditableTarget(target: EventTarget | null): boolean {
 }
 
 export function EditorLayout() {
-  const [isConsoleMinimized, setConsoleMinimized] = useState(false);
+  const [isConsoleDialogOpen, setConsoleDialogOpen] = useState(false);
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
@@ -149,15 +149,6 @@ export function EditorLayout() {
     ungroupSelectedEntities,
   ]);
 
-  /** 仅在当前编辑会话内切换 Console 折叠状态，避免写入场景文件或全局 store。 */
-  function toggleConsoleMinimized(): void {
-    setConsoleMinimized((value) => !value);
-  }
-
-  const centerColumnClassName = isConsoleMinimized
-    ? `${styles.centerColumn} ${styles.centerColumnConsoleMinimized}`
-    : styles.centerColumn;
-
   return (
     <div className={styles.editorShell}>
       <Toolbar
@@ -193,16 +184,22 @@ export function EditorLayout() {
         <aside className={styles.leftColumn}>
           <HierarchyPanel />
         </aside>
-        <main className={centerColumnClassName}>
+        <main className={styles.centerColumn}>
           <SceneViewPanel />
-          <ConsolePanel isMinimized={isConsoleMinimized} onToggleMinimized={toggleConsoleMinimized} />
         </main>
         <aside className={styles.rightColumn}>
           <InspectorPanel />
         </aside>
       </div>
       <div className={styles.bottomBar}>
-        <ProjectPanel />
+        <div className={styles.bottomWorkspace}>
+          <ProjectPanel />
+          <ConsolePanel
+            isOpen={isConsoleDialogOpen}
+            onClose={() => setConsoleDialogOpen(false)}
+            onOpen={() => setConsoleDialogOpen(true)}
+          />
+        </div>
       </div>
     </div>
   );
