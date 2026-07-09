@@ -17,6 +17,7 @@ import { useEditorStore } from '../store/editorStore';
 type ModelParametersInspectorProps = {
   modelAsset: ModelAssetComponent;
   disabled?: boolean;
+  compact?: boolean;
 };
 
 type DraftValues = Record<string, string>;
@@ -47,7 +48,7 @@ function getContinuousDraftKey(parameterKey: string, axis?: keyof Vector3Data): 
   return axis ? `${parameterKey}.${axis}` : parameterKey;
 }
 
-export function ModelParametersInspector({ modelAsset, disabled = false }: ModelParametersInspectorProps) {
+export function ModelParametersInspector({ modelAsset, disabled = false, compact = false }: ModelParametersInspectorProps) {
   const updateSelectedModelParameterValue = useEditorStore((state) => state.updateSelectedModelParameterValue);
   const previewSelectedModelParameterValue = useEditorStore((state) => state.previewSelectedModelParameterValue);
   const commitSelectedModelParameterValues = useEditorStore((state) => state.commitSelectedModelParameterValues);
@@ -190,9 +191,12 @@ export function ModelParametersInspector({ modelAsset, disabled = false }: Model
 
   function renderVector3Parameter(definition: ModelVector3ParameterDefinition) {
     const currentValue = values[definition.key];
+    const fieldsetClassName = compact
+      ? 'transform-fieldset model-parameter-vector model-parameter-vector-compact'
+      : 'transform-fieldset model-parameter-vector';
 
     return (
-      <fieldset className="transform-fieldset model-parameter-vector" key={definition.key}>
+      <fieldset className={fieldsetClassName} key={definition.key}>
         <legend>{definition.label}{definition.unit ? ` (${definition.unit})` : ''}</legend>
         {axes.map((axis) => {
           const draftKey = getContinuousDraftKey(definition.key, axis);
@@ -273,7 +277,7 @@ export function ModelParametersInspector({ modelAsset, disabled = false }: Model
   }
 
   return (
-    <fieldset className="transform-fieldset">
+    <fieldset className={compact ? 'transform-fieldset model-parameters-fieldset model-parameters-fieldset-compact' : 'transform-fieldset model-parameters-fieldset'}>
       <legend>模型参数</legend>
       {config.parameters.map(renderParameter)}
     </fieldset>

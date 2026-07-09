@@ -12,6 +12,8 @@ type LocatorDimensionField = 'length' | 'width' | 'height';
 const axes: Array<keyof Vector3Data> = ['x', 'y', 'z'];
 const fields: TransformField[] = ['position', 'rotation', 'scale'];
 const lightKinds: LightKind[] = ['hemispheric', 'directional', 'point'];
+const RADIANS_TO_DEGREES = 180 / Math.PI;
+const DEGREES_TO_RADIANS = Math.PI / 180;
 const locatorDimensionFields: Array<{ key: LocatorDimensionField; label: string }> = [
   { key: 'length', label: '长(X)' },
   { key: 'width', label: '宽(Z)' },
@@ -20,8 +22,36 @@ const locatorDimensionFields: Array<{ key: LocatorDimensionField; label: string 
 
 function getTransformLegend(field: TransformField): string {
   if (field === 'position') return `${field} (${SCENE_LENGTH_UNIT_SYMBOL})`;
+  if (field === 'rotation') return `${field} (deg)`;
 
   return field;
+}
+
+/** 将 Babylon 内部弧度转换为 Inspector 面向用户的角度。 */
+function radiansToDegrees(value: number): number {
+  return value * RADIANS_TO_DEGREES;
+}
+
+/** 将 Inspector 输入的角度转换回 Babylon Transform 使用的弧度。 */
+function degreesToRadians(value: number): number {
+  return value * DEGREES_TO_RADIANS;
+}
+
+/** 限制角度显示的小数噪声，避免 Gizmo 回写后 Inspector 出现很长的小数。 */
+function formatRotationDegrees(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+
+  return Number(value.toFixed(3));
+}
+
+/** 根据 Transform 字段返回 Inspector 输入框显示值，rotation 单独从弧度转为角度。 */
+function getTransformInputValue(field: TransformField, value: number): number {
+  return field === 'rotation' ? formatRotationDegrees(radiansToDegrees(value)) : value;
+}
+
+/** 根据 Transform 字段返回合适步长，rotation 使用角度步长。 */
+function getTransformInputStep(field: TransformField): string {
+  return field === 'rotation' ? '1' : '0.1';
 }
 
 export function InspectorPanel() {
@@ -56,7 +86,7 @@ export function InspectorPanel() {
     const nextValue = Number(rawValue);
     if (!Number.isFinite(nextValue)) return;
 
-    updateSelectedTransform(field, axis, nextValue);
+    updateSelectedTransform(field, axis, field === 'rotation' ? degreesToRadians(nextValue) : nextValue);
   }
 
   function handleLightIntensityChange(rawValue: string) {
@@ -131,9 +161,10 @@ export function InspectorPanel() {
   const cadReference = selectedEntity.components.cadReference;
   const light = selectedEntity.components.light;
   const modelAsset = selectedEntity.components.modelAsset;
+  const isCompactModelInspector = Boolean(modelAsset || meshRenderer);
 
   return (
-    <section className="panel">
+    <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
       <h2>Inspector</h2>
       <label className="inspector-row">
         <span>名称</span>
@@ -147,7 +178,7 @@ export function InspectorPanel() {
         />
       </label>
       {fields.map((field) => (
-        <fieldset className="transform-fieldset" key={field}>
+        <fieldset className="transform-fieldset transform-axis-fieldset" key={field}>
           <legend>{getTransformLegend(field)}</legend>
           {axes.map((axis) => (
             <label className="number-row" key={`${field}-${axis}`}>
@@ -155,8 +186,8 @@ export function InspectorPanel() {
               <input
                 type="number"
                 disabled={isLocked}
-                step="0.1"
-                value={transform[field][axis]}
+                step={getTransformInputStep(field)}
+                value={getTransformInputValue(field, transform[field][axis])}
                 onChange={(event) => handleTransformChange(field, axis, event.target.value)}
               />
             </label>
@@ -282,11 +313,13 @@ export function InspectorPanel() {
                 onChange={(event) => updateSelectedModelAssetCode(event.target.value)}
               />
             </label>
-            <p className="muted asset-path" title={modelAsset.sourcePath}>{modelAsset.sourcePath}</p>
-            <p className="muted">源单位：{formatModelLengthUnit(modelAsset.lengthUnit)}</p>
-            <p className="muted">换算到米：×{modelAsset.unitScaleToMeters}</p>
+            <div className="model-asset-meta">
+              <p className="muted asset-path" title={modelAsset.sourcePath}>{modelAsset.sourcePath}</p>
+              <p className="muted">源单位：{formatModelLengthUnit(modelAsset.lengthUnit)}</p>
+              <p className="muted">换算到米：×{modelAsset.unitScaleToMeters}</p>
+            </div>
           </fieldset>
-          <ModelParametersInspector modelAsset={modelAsset} disabled={isLocked} />
+          <ModelParametersInspector modelAsset={modelAsset} disabled={isLocked} compact={isCompactModelInspector} />
         </>
       ) : null}
     </section>
