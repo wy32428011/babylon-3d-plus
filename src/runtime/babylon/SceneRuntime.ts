@@ -139,6 +139,28 @@ type StackerTravelConstraint = {
 
 type StackerForkSide = 'front' | 'back';
 
+type StackerForkReachConfig = {
+  stageOne: number;
+  stageTwo: number;
+  total: number;
+};
+
+type StackerForkOffsetParts = {
+  totalOffset: number;
+  stageOneOffset: number;
+  stageTwoOffset: number;
+  activeStage: 0 | 1 | 2;
+};
+
+type StackerForkNodeGroups = {
+  frontNodes: TransformNode[];
+  backNodes: TransformNode[];
+  frontStageOneNodes: TransformNode[];
+  frontStageTwoNodes: TransformNode[];
+  backStageOneNodes: TransformNode[];
+  backStageTwoNodes: TransformNode[];
+};
+
 type StackerCargoRuntimeEntry = {
   assetCode: string;
   containerCode: string;
@@ -950,14 +972,14 @@ export class SceneRuntime {
     const targetLocator = snapshot.targetLocationKey ? this.locatorTargets.get(snapshot.targetLocationKey) ?? null : null;
     this.reportStackerRuntimeState(snapshot, targetLocator);
     this.writeDeviceTelemetryMetadata(model, snapshot);
-    this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
 
     const targetPosition = targetLocator?.root.getAbsolutePosition() ?? null;
     this.applyStackerRootMotion(model, snapshot, targetPosition, deltaSeconds);
     this.applyStackerLiftMotion(model, snapshot, targetPosition, deltaSeconds);
-    this.applyStackerForkMotion(model, snapshot, deltaSeconds);
+    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds);
     this.applyStackerNodeMotionOffsets(model);
     this.applyStackerCargoMotion(model, snapshot, targetLocator);
+    this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
   }
 
   /** 对单条输送线应用滚筒/链条动作、货物占位和状态 metadata。 */
@@ -1110,6 +1132,7 @@ export class SceneRuntime {
   private applyStackerForkMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
+    targetPosition: Vector3 | null,
     deltaSeconds: number,
   ): void {
     const frontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
@@ -1118,13 +1141,25 @@ export class SceneRuntime {
     const backDistance = readNumberField(snapshot.fields, 'back_distance_z');
     const frontForkSpeed = this.readSpeed(snapshot, 'front_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const backForkSpeed = this.readSpeed(snapshot, 'back_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
+    const reach = this.readStackerForkReachConfig(model);
     const state = model.stackerTelemetry;
+    const frontCommand = readIntegerField(snapshot.fields, 'front_command');
+    const backCommand = readIntegerField(snapshot.fields, 'back_command');
+    const frontContainerCode = this.readContainerCode(snapshot, 'front_containerCode');
+    const backContainerCode = this.readContainerCode(snapshot, 'back_containerCode');
 
     state.frontForkOffset = this.updateForkOffset(
       state.frontForkOffset,
-      frontDistance,
+      this.resolveForkCalibrationDistance(
+        model,
+        'front',
+        frontDistance,
+        targetPosition,
+        this.shouldUseForkTargetProjection(frontMovement, frontCommand, frontContainerCode),
+      ),
       frontMovement,
       frontForkSpeed,
+      reach.total,
       deltaSeconds,
       snapshot.faulted,
       (direction) => {
@@ -1134,9 +1169,16 @@ export class SceneRuntime {
     );
     state.backForkOffset = this.updateForkOffset(
       state.backForkOffset,
-      backDistance,
+      this.resolveForkCalibrationDistance(
+        model,
+        'back',
+        backDistance,
+        targetPosition,
+        this.shouldUseForkTargetProjection(backMovement, backCommand, backContainerCode),
+      ),
       backMovement,
       backForkSpeed,
+      reach.total,
       deltaSeconds,
       snapshot.faulted,
       (direction) => {
@@ -1147,12 +1189,13 @@ export class SceneRuntime {
 
   }
 
-  /** 更新单侧货叉偏移：编码值负责校准，movement_z 负责动作趋势。 */
+  /** 更新单侧货叉偏移：编码器/目标投影优先校准，movement_z 只在没有距离时兜底。 */
   private updateForkOffset(
     currentOffset: number,
     distance: number | null,
     movement: number | null,
     speed: number,
+    maxReach: number,
     deltaSeconds: number,
     faulted: boolean,
     rememberDirection: (direction: number) => void,
@@ -1166,18 +1209,134 @@ export class SceneRuntime {
       const calibrationDirection = movementDirection || Math.sign(nextOffset) || lastDirection || 1;
       nextOffset = this.lerpNumber(
         nextOffset,
-        Math.abs(distance) * calibrationDirection,
+        this.clampNumber(Math.abs(distance), 0, maxReach) * calibrationDirection,
         this.getCalibrationAlpha(deltaSeconds),
       );
+      return this.clampForkOffset(nextOffset, maxReach);
     }
 
-    if (faulted) return nextOffset;
+    if (faulted) return this.clampForkOffset(nextOffset, maxReach);
 
     if (movement === 2 || movement === 4) {
-      return this.moveNumberTowards(nextOffset, 0, speed * deltaSeconds);
+      return this.moveNumberTowards(this.clampForkOffset(nextOffset, maxReach), 0, speed * deltaSeconds);
     }
 
-    return nextOffset + movementDirection * speed * deltaSeconds;
+    return this.clampForkOffset(nextOffset + movementDirection * speed * deltaSeconds, maxReach);
+  }
+
+  /** 读取模型脚本中的两段货叉行程配置，Inspector 参数优先于 dataDriven 默认值。 */
+  private readStackerForkReachConfig(model: ModelRuntimeEntry): StackerForkReachConfig {
+    const stageOne = this.readPositiveStackerModelNumber(
+      model,
+      'forkStageOneReach',
+      this.readStackerDataDrivenNumber(model, ['motion', 'fork', 'stageOneReach']) ?? 0.8,
+    );
+    const stageTwo = this.readNonNegativeStackerModelNumber(
+      model,
+      'forkStageTwoReach',
+      this.readStackerDataDrivenNumber(model, ['motion', 'fork', 'stageTwoReach']) ?? 0.8,
+    );
+
+    return {
+      stageOne,
+      stageTwo,
+      total: Math.max(0, stageOne + stageTwo),
+    };
+  }
+
+  /** 将货叉总偏移拆分成第一段和第二段，保留正负方向语义。 */
+  private splitForkOffset(offset: number, reach: StackerForkReachConfig): StackerForkOffsetParts {
+    const direction = Math.sign(offset) || 1;
+    const absoluteOffset = this.clampNumber(Math.abs(offset), 0, reach.total);
+    const stageOneDistance = Math.min(absoluteOffset, reach.stageOne);
+    const stageTwoDistance = Math.max(0, absoluteOffset - reach.stageOne);
+
+    return {
+      totalOffset: absoluteOffset * direction,
+      stageOneOffset: stageOneDistance * direction,
+      stageTwoOffset: stageTwoDistance * direction,
+      activeStage: stageTwoDistance > 0.001 ? 2 : (stageOneDistance > 0.001 ? 1 : 0),
+    };
+  }
+
+  /** 将货叉偏移限制在两段总行程内。 */
+  private clampForkOffset(offset: number, maxReach: number): number {
+    const reach = Math.max(0, maxReach);
+    return this.clampNumber(offset, -reach, reach);
+  }
+
+  /** 编码器优先；缺少编码器时按目标定位框在模型局部 X 轴上的投影估算伸出距离。 */
+  private resolveForkCalibrationDistance(
+    model: ModelRuntimeEntry,
+    side: StackerForkSide,
+    encodedDistance: number | null,
+    targetPosition: Vector3 | null,
+    useTargetProjection: boolean,
+  ): number | null {
+    if (encodedDistance !== null) return encodedDistance;
+    if (!targetPosition || !useTargetProjection) return null;
+
+    const forkGroups = this.findStackerForkNodeGroups(model);
+    const stageOneNodes = side === 'front' ? forkGroups.frontStageOneNodes : forkGroups.backStageOneNodes;
+    const forkBounds = this.getNodesWorldBounds(stageOneNodes);
+    if (!forkBounds) return null;
+
+    const forkCenter = forkBounds.minimum.add(forkBounds.maximum).scale(0.5);
+    const forkAxis = this.getModelAxis(model.root, 'x');
+    const projectedDistance = Math.abs(Vector3.Dot(targetPosition.subtract(forkCenter), forkAxis));
+    return Number.isFinite(projectedDistance) ? projectedDistance : null;
+  }
+
+  /** 只有有命令、动作或叉上货物的一侧才用目标 locator 估算行程，避免无编码器时两侧同时被目标牵引。 */
+  private shouldUseForkTargetProjection(movement: number | null, command: number | null, containerCode: string | null): boolean {
+    return movement !== null && movement !== 0
+      || command !== null && command > 0 && command !== 8
+      || Boolean(containerCode);
+  }
+
+  /** 从 Stacker 脚本 metadata 或当前参数值读取正数参数。 */
+  private readPositiveStackerModelNumber(model: ModelRuntimeEntry, key: string, fallback: number): number {
+    const value = this.readStackerModelNumber(model, key);
+    return value !== null && value > 0 ? value : fallback;
+  }
+
+  /** 从 Stacker 脚本 metadata 或当前参数值读取非负参数。 */
+  private readNonNegativeStackerModelNumber(model: ModelRuntimeEntry, key: string, fallback: number): number {
+    const value = this.readStackerModelNumber(model, key);
+    return value !== null && value >= 0 ? value : fallback;
+  }
+
+  /** 读取模型脚本 values 中的数值字段。 */
+  private readStackerModelNumber(model: ModelRuntimeEntry, key: string): number | null {
+    const scripts = Array.isArray(model.contentRoot.metadata?.scripts) ? model.contentRoot.metadata.scripts : [];
+    for (const script of scripts) {
+      if (!this.isPlainRecord(script)) continue;
+      const values = this.isPlainRecord(script.values) ? script.values : {};
+      const rawValue = this.readWrappedNumber(values[key]);
+      if (rawValue !== null) return rawValue;
+    }
+
+    return null;
+  }
+
+  /** 读取模型脚本 dataDriven 配置中的数值字段。 */
+  private readStackerDataDrivenNumber(model: ModelRuntimeEntry, path: string[]): number | null {
+    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+      const value = this.readNumberPath(dataDriven, path);
+      if (value !== null) return value;
+    }
+
+    return null;
+  }
+
+  /** 兼容 meta.json 中 { value } 包装和普通数值。 */
+  private readWrappedNumber(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (this.isPlainRecord(value)) {
+      const nestedValue = value.value ?? value.currentValue ?? value.defaultValue;
+      if (typeof nestedValue === 'number' && Number.isFinite(nestedValue)) return nestedValue;
+    }
+    return null;
   }
 
   /** 根据前叉/后叉托盘条码驱动货物：取货时随叉运动，放货时进入目标定位线框。 */
@@ -1208,9 +1367,10 @@ export class SceneRuntime {
     const cargo = this.getOrCreateStackerCargo(model.assetCode, activeContainerCode);
     const forkPosition = this.getStackerForkCargoPosition(model, side);
     const targetPosition = targetLocator?.root.getAbsolutePosition() ?? null;
+    const reach = this.readStackerForkReachConfig(model);
     const placingProgress = this.getStackerCargoPlacingProgress(command, side === 'front'
       ? model.stackerTelemetry.frontForkOffset
-      : model.stackerTelemetry.backForkOffset);
+      : model.stackerTelemetry.backForkOffset, reach);
     const nextPosition = targetPosition && placingProgress > 0
       ? this.lerpVector(forkPosition, targetPosition, placingProgress)
       : forkPosition;
@@ -1303,10 +1463,10 @@ export class SceneRuntime {
   }
 
   /** 放货中逐步进入目标框，放货完成时完全落入目标框。 */
-  private getStackerCargoPlacingProgress(command: number | null, forkOffset: number): number {
+  private getStackerCargoPlacingProgress(command: number | null, forkOffset: number, reach: StackerForkReachConfig): number {
     if (command === 5) return 1;
     if (command === 4) return 0.85;
-    if (command === 3) return Math.max(0.45, Math.min(0.95, Math.abs(forkOffset) / 0.8));
+    if (command === 3) return Math.max(0.45, Math.min(0.95, Math.abs(forkOffset) / Math.max(0.1, reach.total)));
     return 0;
   }
 
@@ -1666,6 +1826,9 @@ export class SceneRuntime {
     snapshot: StackerTelemetrySnapshot,
     targetLocator: LocatorRuntimeEntry | null,
   ): void {
+    const forkReach = this.readStackerForkReachConfig(model);
+    const frontFork = this.splitForkOffset(model.stackerTelemetry.frontForkOffset, forkReach);
+    const backFork = this.splitForkOffset(model.stackerTelemetry.backForkOffset, forkReach);
     const telemetryMetadata = {
       assetCode: snapshot.assetCode,
       payloadDeviceCode: snapshot.payloadDeviceCode,
@@ -1678,6 +1841,11 @@ export class SceneRuntime {
       faulted: snapshot.faulted,
       message: snapshot.message,
       fields: snapshot.fields,
+      forkReach,
+      forkOffsets: {
+        front: frontFork,
+        back: backFork,
+      },
     };
 
     model.root.metadata = {
@@ -1789,14 +1957,48 @@ export class SceneRuntime {
     const travelWorldOffset = travelPosition.subtract(state.rootBasePosition);
     const liftWorldOffset = this.getModelAxis(model.root, 'y').scale(state.liftOffset);
     const forkAxis = this.getModelAxis(model.root, 'x');
-    const { frontNodes, backNodes } = this.findStackerForkNodeGroups(model);
+    const forkReach = this.readStackerForkReachConfig(model);
+    const frontOffset = this.splitForkOffset(state.frontForkOffset, forkReach);
+    const backOffset = this.splitForkOffset(state.backForkOffset, forkReach);
+    const {
+      frontStageOneNodes,
+      frontStageTwoNodes,
+      backStageOneNodes,
+      backStageTwoNodes,
+    } = this.findStackerForkNodeGroups(model);
     const offsets = new Map<TransformNode, Vector3>();
 
     this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(this.findStackerTravelNodes(model)), travelWorldOffset);
     this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(this.findStackerLiftNodes(model)), liftWorldOffset);
-    this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(frontNodes), forkAxis.scale(state.frontForkOffset));
-    this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(backNodes), forkAxis.scale(state.backForkOffset));
+    this.addStackerForkStageOffsets(offsets, frontStageOneNodes, frontStageTwoNodes, forkAxis, frontOffset);
+    this.addStackerForkStageOffsets(offsets, backStageOneNodes, backStageTwoNodes, forkAxis, backOffset);
+    this.setStackerForkStageTwoNodesEnabled(frontStageTwoNodes, Math.abs(frontOffset.stageTwoOffset) > 0.001);
+    this.setStackerForkStageTwoNodesEnabled(backStageTwoNodes, Math.abs(backOffset.stageTwoOffset) > 0.001);
     this.offsetNodesFromBaselineByWorldOffsets(model, offsets);
+  }
+
+  /** 将单侧货叉总偏移拆到一段/二段节点；没有二段节点时保持旧模型整体伸缩行为。 */
+  private addStackerForkStageOffsets(
+    offsets: Map<TransformNode, Vector3>,
+    stageOneNodes: TransformNode[],
+    stageTwoNodes: TransformNode[],
+    forkAxis: Vector3,
+    offset: StackerForkOffsetParts,
+  ): void {
+    if (stageTwoNodes.length === 0) {
+      this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(stageOneNodes), forkAxis.scale(offset.totalOffset));
+      return;
+    }
+
+    this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(stageOneNodes), forkAxis.scale(offset.stageOneOffset));
+    this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(stageTwoNodes), forkAxis.scale(offset.totalOffset));
+  }
+
+  /** 第二段收纳时隐藏克隆件，避免与第一段重叠产生闪烁。 */
+  private setStackerForkStageTwoNodesEnabled(nodes: TransformNode[], enabled: boolean): void {
+    for (const node of nodes) {
+      node.setEnabled(enabled);
+    }
   }
 
   /** 查找随水平行走机构移动的节点；优先使用模型脚本 dataDriven 声明，缺失时回退当前 Stacker GLB 名称。 */
@@ -1804,7 +2006,12 @@ export class SceneRuntime {
     const configuredNames = this.readStackerMotionNodeNames(model, 'travel');
     const configuredNodes = configuredNames.length > 0 ? this.findModelNodesByName(model, configuredNames) : [];
     if (configuredNodes.length > 0) {
-      return this.excludeStackerFixedNodes(model, configuredNodes);
+      const forkGroups = this.findStackerForkNodeGroups(model);
+      return this.excludeStackerFixedNodes(model, this.uniqueTransformNodes([
+        ...configuredNodes,
+        ...forkGroups.frontStageTwoNodes,
+        ...forkGroups.backStageTwoNodes,
+      ]));
     }
 
     const exactNodes = this.findModelNodesByName(model, STACKER_FALLBACK_TRAVEL_NODE_NAMES);
@@ -1885,21 +2092,51 @@ export class SceneRuntime {
   }
 
   /** 查找前后货叉节点，精确命名优先，名称变化时按顺序兜底。 */
-  private findStackerForkNodeGroups(model: ModelRuntimeEntry): { frontNodes: TransformNode[]; backNodes: TransformNode[] } {
-    const exactFrontNodes = this.findModelNodesByName(model, ['huocha.9']);
-    const exactBackNodes = this.findModelNodesByName(model, ['huocha2.10']);
-    if (exactFrontNodes.length > 0 || exactBackNodes.length > 0) {
+  private findStackerForkNodeGroups(model: ModelRuntimeEntry): StackerForkNodeGroups {
+    const exactFrontStageOneNodes = this.findModelNodesByName(model, ['huocha.9']).filter((node) => !this.isStackerForkStageTwoNode(node));
+    const exactBackStageOneNodes = this.findModelNodesByName(model, ['huocha2.10']).filter((node) => !this.isStackerForkStageTwoNode(node));
+    const exactFrontStageTwoNodes = this.findModelNodesByName(model, ['huocha.9_stage2']);
+    const exactBackStageTwoNodes = this.findModelNodesByName(model, ['huocha2.10_stage2']);
+    if (exactFrontStageOneNodes.length > 0 || exactBackStageOneNodes.length > 0) {
       return {
-        frontNodes: exactFrontNodes,
-        backNodes: exactBackNodes,
+        frontNodes: this.uniqueTransformNodes([...exactFrontStageOneNodes, ...exactFrontStageTwoNodes]),
+        backNodes: this.uniqueTransformNodes([...exactBackStageOneNodes, ...exactBackStageTwoNodes]),
+        frontStageOneNodes: exactFrontStageOneNodes,
+        frontStageTwoNodes: exactFrontStageTwoNodes,
+        backStageOneNodes: exactBackStageOneNodes,
+        backStageTwoNodes: exactBackStageTwoNodes,
       };
     }
 
     const forkNodes = this.findModelNodes(model, /fork|叉|huocha|cha\d*/i);
+    const stageOneNodes = forkNodes.filter((node) => !this.isStackerForkStageTwoNode(node));
+    const stageTwoNodes = forkNodes.filter((node) => this.isStackerForkStageTwoNode(node));
+    const frontStageOneNodes = stageOneNodes.slice(0, 1);
+    const backStageOneNodes = stageOneNodes.slice(1, 2);
     return {
-      frontNodes: forkNodes.slice(0, 1),
-      backNodes: forkNodes.slice(1, 2),
+      frontNodes: this.uniqueTransformNodes([...frontStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'front')]),
+      backNodes: this.uniqueTransformNodes([...backStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'back')]),
+      frontStageOneNodes,
+      frontStageTwoNodes: stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'front'),
+      backStageOneNodes,
+      backStageTwoNodes: stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'back'),
     };
+  }
+
+  /** 判断节点是否为参数脚本生成的第二段货叉。 */
+  private isStackerForkStageTwoNode(node: TransformNode): boolean {
+    const metadata = this.isPlainRecord(node.metadata) ? node.metadata : {};
+    return metadata.stackerForkStage === 2 || String(node.name ?? '').endsWith('_stage2');
+  }
+
+  /** 读取第二段货叉所属侧，元数据缺失时按节点名称兜底。 */
+  private readStackerForkSide(node: TransformNode): StackerForkSide | null {
+    const metadata = this.isPlainRecord(node.metadata) ? node.metadata : {};
+    if (metadata.stackerForkSide === 'front' || metadata.stackerForkSide === 'back') return metadata.stackerForkSide;
+    const name = String(node.name ?? '').toLowerCase();
+    if (name.includes('huocha2') || name.includes('back')) return 'back';
+    if (name.includes('huocha') || name.includes('front')) return 'front';
+    return null;
   }
 
   /** 读取模型脚本 dataDriven.motion.<key>.nodes 中声明的节点名。 */
@@ -1934,6 +2171,17 @@ export class SceneRuntime {
     return current.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
   }
 
+  /** 按路径读取数值配置，供模型脚本 dataDriven 扩展字段使用。 */
+  private readNumberPath(source: unknown, path: string[]): number | null {
+    let current: unknown = source;
+    for (const key of path) {
+      if (!this.isPlainRecord(current)) return null;
+      current = current[key];
+    }
+
+    return typeof current === 'number' && Number.isFinite(current) ? current : null;
+  }
+
   /** 在导入模型子树中按精确名称查找节点。 */
   private findModelNodesByName(model: ModelRuntimeEntry, names: string[]): TransformNode[] {
     const nameSet = new Set(names);
@@ -1951,6 +2199,8 @@ export class SceneRuntime {
       model.contentRoot,
       ...(model.container?.transformNodes ?? []),
       ...model.meshes,
+      ...this.scene.transformNodes,
+      ...this.scene.meshes,
     ].filter((node) => node !== model.root && node.isDescendantOf?.(model.root));
 
     return this.uniqueTransformNodes(nodes);

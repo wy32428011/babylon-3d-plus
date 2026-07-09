@@ -209,9 +209,9 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
 
   const seconds = elapsedMs / 1000;
   const targetSequence = [
-    { x: 1, y: 1, z: 1, distanceX: 4, distanceY: 1.2 },
-    { x: 2, y: 1, z: 1, distanceX: 7, distanceY: 1.2 },
-    { x: 3, y: 2, z: 1, distanceX: 10, distanceY: 2.2 },
+    { x: 1, y: 1, z: 1, distanceX: 4, distanceY: 1.2, forkDistance: 0.55 },
+    { x: 2, y: 1, z: 1, distanceX: 7, distanceY: 1.2, forkDistance: 1.15 },
+    { x: 3, y: 2, z: 1, distanceX: 10, distanceY: 2.2, forkDistance: 1.55 },
   ];
   const sequenceIndex = Math.floor(seconds / 8) % targetSequence.length;
   const phaseProgress = (seconds % 8) / 8;
@@ -224,8 +224,8 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
       target: null,
       distanceX: 5 + Math.sin(seconds * 0.65) * 2.4,
       distanceY: 1.2 + Math.sin(seconds * 0.4) * 0.6,
-      frontDistanceZ: Math.max(0, Math.sin(seconds * 0.9) * 0.7),
-      backDistanceZ: Math.max(0, Math.cos(seconds * 0.8) * 0.5),
+      frontDistanceZ: Math.max(0, Math.sin(seconds * 0.9) * 1.35),
+      backDistanceZ: Math.max(0, Math.cos(seconds * 0.8) * 1.45),
       movementX: direction,
       movementY: Math.sin(seconds * 0.4) >= 0 ? 1 : 2,
       frontMovementZ: [1, 2, 3, 4][forkCycle],
@@ -242,7 +242,7 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
 
   const activeSide: StackerForkSide = sequenceIndex % 2 === 0 ? 'front' : 'back';
   const cargoCode = `PALLET-${String(sequenceIndex + 1).padStart(2, '0')}-${activeTarget.x}${activeTarget.y}${activeTarget.z}`;
-  const forkDistance = resolveTargetForkDistance(phaseProgress);
+  const forkDistance = resolveTargetForkDistance(phaseProgress, activeTarget.forkDistance);
   const frontActive = activeSide === 'front';
 
   return {
@@ -261,7 +261,7 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
     backContainerCode: frontActive ? '' : resolveTargetContainerCode(cargoCode, phaseProgress),
     normal: true,
     errorCode: 0,
-    message: `${frontActive ? '前叉' : '后叉'}放货到目标位 ${activeTarget.x}-${activeTarget.y}-${activeTarget.z}`,
+    message: `${frontActive ? '前叉' : '后叉'}${activeTarget.forkDistance <= 0.8 ? '近位一段' : '远位两段'}放货到目标位 ${activeTarget.x}-${activeTarget.y}-${activeTarget.z}`,
   };
 }
 
@@ -282,11 +282,11 @@ function resolveTargetForkMovement(phaseProgress: number, extendCode: number, re
 }
 
 /** 目标位演示中生成货叉编码器距离，用于校准货物进入虚拟定位框的过程。 */
-function resolveTargetForkDistance(phaseProgress: number): number {
+function resolveTargetForkDistance(phaseProgress: number, targetDistance: number): number {
   if (phaseProgress < 0.52) return 0.12;
-  if (phaseProgress < 0.8) return 0.12 + ((phaseProgress - 0.52) / 0.28) * 0.78;
-  if (phaseProgress < 0.92) return 0.9;
-  return Math.max(0.12, 0.9 - ((phaseProgress - 0.92) / 0.08) * 0.78);
+  if (phaseProgress < 0.8) return 0.12 + ((phaseProgress - 0.52) / 0.28) * (targetDistance - 0.12);
+  if (phaseProgress < 0.92) return targetDistance;
+  return Math.max(0.12, targetDistance - ((phaseProgress - 0.92) / 0.08) * (targetDistance - 0.12));
 }
 
 /** 放货完成后清空叉上条码，验证运行时能让上一帧货物留在 locator 内。 */

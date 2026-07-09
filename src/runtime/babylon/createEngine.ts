@@ -7,7 +7,7 @@ import {
   Mesh,
   MeshBuilder,
   Scene,
-  StandardMaterial,
+  ShaderMaterial,
   Vector3,
 } from '@babylonjs/core';
 import { SCENE_LENGTH_UNIT_SYMBOL } from '../../editor/model/sceneUnits';
@@ -34,9 +34,9 @@ export type EditorWorldBounds = {
 
 type EditorGroundGridResources = {
   grid: Mesh;
-  gridMaterial: StandardMaterial;
+  gridMaterial: ShaderMaterial;
   lineGlowGrid: Mesh;
-  lineGlowMaterial: StandardMaterial;
+  lineGlowMaterial: ShaderMaterial;
   lineGlowLayer: GlowLayer;
 };
 
@@ -59,7 +59,7 @@ export const DEFAULT_EDITOR_GRID_SETTINGS: EditorGridSettings = {
   cellSizeMeters: 5,
 };
 
-const GRID_SIZE_METERS = 240;
+const GRID_SIZE_METERS = 80000;
 const GRID_ALPHA_BASE = 0.14;
 const GRID_ALPHA_PULSE = 0.025;
 const GRID_LINE_GLOW_ALPHA_BASE = 0.025;
@@ -73,6 +73,50 @@ const EDITOR_CAMERA_DEFAULT_ALPHA = Math.PI / 4;
 const EDITOR_CAMERA_DEFAULT_BETA = Math.PI * 0.43;
 const EDITOR_CAMERA_DEFAULT_RADIUS = 28;
 const EDITOR_CAMERA_DEFAULT_TARGET = Vector3.Zero();
+const GRID_VERTEX_SHADER = `
+precision highp float;
+
+attribute vec3 position;
+
+uniform mat4 world;
+uniform mat4 worldViewProjection;
+
+varying vec3 vWorldPosition;
+
+void main(void) {
+  vec4 worldPosition = world * vec4(position, 1.0);
+  vWorldPosition = worldPosition.xyz;
+  gl_Position = worldViewProjection * vec4(position, 1.0);
+}
+`;
+const GRID_FRAGMENT_SHADER = `
+#extension GL_OES_standard_derivatives : enable
+precision highp float;
+
+varying vec3 vWorldPosition;
+
+uniform float cellSizeMeters;
+uniform vec3 lineColor;
+uniform float lineAlpha;
+uniform float lineWidth;
+
+float getGridLine(vec2 worldPosition, float cellSize) {
+  vec2 gridPosition = worldPosition / max(cellSize, 0.0001);
+  vec2 derivative = max(fwidth(gridPosition), vec2(0.0001));
+  vec2 grid = abs(fract(gridPosition - 0.5) - 0.5) / derivative;
+  float distanceToLine = min(grid.x, grid.y);
+  return 1.0 - smoothstep(lineWidth, lineWidth + 1.0, distanceToLine);
+}
+
+void main(void) {
+  float line = getGridLine(vWorldPosition.xz, cellSizeMeters);
+  if (line <= 0.001) {
+    discard;
+  }
+
+  gl_FragColor = vec4(lineColor, line * lineAlpha);
+}
+`;
 
 /** 将未知异常转换成可读消息，便于向上层 UI 呈现 Babylon 初始化失败原因。 */
 function getErrorMessage(error: unknown): string {
@@ -91,38 +135,61 @@ function clampCameraRadius(radiusMeters: number): number {
   return Math.max(radiusMeters, EDITOR_CAMERA_MIN_RADIUS_METERS);
 }
 
-/** 按当前米制网格间距吸附位置，保证网格跟随相机时仍然对齐世界坐标。 */
-function snapToGrid(value: number, cellSizeMeters: EditorGridCellSize): number {
-  return Math.round(value / cellSizeMeters) * cellSizeMeters;
-}
+/** 创建地面网格过程式材质，用世界坐标绘制米制网格线，避免大范围网格生成海量几何。 */
+function createEditorGridShaderMaterial(
+  scene: Scene,
+  name: string,
+  lineColor: Color3,
+  lineAlpha: number,
+  lineWidth: number,
+  cellSizeMeters: EditorGridCellSize,
+): ShaderMaterial {
+  const material = new ShaderMaterial(
+    name,
+    scene,
+    {
+      vertexSource: GRID_VERTEX_SHADER,
+      fragmentSource: GRID_FRAGMENT_SHADER,
+    },
+    {
+      attributes: ['position'],
+      uniforms: ['world', 'worldViewProjection', 'cellSizeMeters', 'lineColor', 'lineAlpha', 'lineWidth'],
+      needAlphaBlending: true,
+    },
+  );
+  material.backFaceCulling = false;
+  material.setColor3('lineColor', lineColor);
+  material.setFloat('lineAlpha', lineAlpha);
+  material.setFloat('lineWidth', lineWidth);
+  material.setFloat('cellSizeMeters', cellSizeMeters);
 
-/** 根据当前格子大小计算网格细分数，保持辅助网格总覆盖范围不变。 */
-function getGridSubdivisions(cellSizeMeters: EditorGridCellSize): number {
-  return GRID_SIZE_METERS / cellSizeMeters;
+  return material;
 }
 
 /** 创建一组编辑器辅助地面网格资源；网格不进入 SceneDocument，也不可被拾取选中。 */
 function createEditorGroundGridResources(scene: Scene, settings: EditorGridSettings): EditorGroundGridResources {
-  const subdivisions = getGridSubdivisions(settings.cellSizeMeters);
   const cellSizeLabel = `${settings.cellSizeMeters} ${SCENE_LENGTH_UNIT_SYMBOL}`;
   const grid = MeshBuilder.CreateGround(
     'EditorGroundGrid',
     {
       width: GRID_SIZE_METERS,
       height: GRID_SIZE_METERS,
-      subdivisions,
+      subdivisions: 1,
     },
     scene,
   );
   grid.isPickable = false;
+  grid.alwaysSelectAsActiveMesh = true;
   grid.metadata = { cellSizeLabel };
 
-  const gridMaterial = new StandardMaterial('EditorGroundGridMaterial', scene);
-  gridMaterial.diffuseColor = Color3.FromHexString('#4fa8ff');
-  gridMaterial.emissiveColor = Color3.FromHexString('#1e6fb5');
-  gridMaterial.alpha = GRID_ALPHA_BASE;
-  gridMaterial.wireframe = true;
-  gridMaterial.backFaceCulling = false;
+  const gridMaterial = createEditorGridShaderMaterial(
+    scene,
+    'EditorGroundGridMaterial',
+    Color3.FromHexString('#4fa8ff'),
+    GRID_ALPHA_BASE,
+    0.75,
+    settings.cellSizeMeters,
+  );
   grid.material = gridMaterial;
 
   const lineGlowGrid = MeshBuilder.CreateGround(
@@ -130,19 +197,23 @@ function createEditorGroundGridResources(scene: Scene, settings: EditorGridSetti
     {
       width: GRID_SIZE_METERS,
       height: GRID_SIZE_METERS,
-      subdivisions,
+      subdivisions: 1,
     },
     scene,
   );
   lineGlowGrid.position.y = 0.006;
   lineGlowGrid.isPickable = false;
+  lineGlowGrid.alwaysSelectAsActiveMesh = true;
+  lineGlowGrid.metadata = { cellSizeLabel };
 
-  const lineGlowMaterial = new StandardMaterial('EditorGroundLineGlowMaterial', scene);
-  lineGlowMaterial.diffuseColor = Color3.FromHexString('#7fd4ff');
-  lineGlowMaterial.emissiveColor = Color3.FromHexString('#7fd4ff');
-  lineGlowMaterial.alpha = GRID_LINE_GLOW_ALPHA_BASE;
-  lineGlowMaterial.wireframe = true;
-  lineGlowMaterial.backFaceCulling = false;
+  const lineGlowMaterial = createEditorGridShaderMaterial(
+    scene,
+    'EditorGroundLineGlowMaterial',
+    Color3.FromHexString('#7fd4ff'),
+    GRID_LINE_GLOW_ALPHA_BASE,
+    1.1,
+    settings.cellSizeMeters,
+  );
   lineGlowGrid.material = lineGlowMaterial;
 
   const lineGlowLayer = new GlowLayer('EditorGroundLineGlowLayer', scene);
@@ -174,9 +245,14 @@ function createEditorGround(scene: Scene, initialSettings: EditorGridSettings) {
   let settings = { ...initialSettings };
   let resources: EditorGroundGridResources | null = createEditorGroundGridResources(scene, settings);
 
-  function rebuildGrid(): void {
-    disposeEditorGroundGridResources(resources);
-    resources = createEditorGroundGridResources(scene, settings);
+  function applyGridCellSize(): void {
+    if (!resources) return;
+
+    const cellSizeLabel = `${settings.cellSizeMeters} ${SCENE_LENGTH_UNIT_SYMBOL}`;
+    resources.grid.metadata = { cellSizeLabel };
+    resources.lineGlowGrid.metadata = { cellSizeLabel };
+    resources.gridMaterial.setFloat('cellSizeMeters', settings.cellSizeMeters);
+    resources.lineGlowMaterial.setFloat('cellSizeMeters', settings.cellSizeMeters);
   }
 
   function applyVisibility(): void {
@@ -192,21 +268,11 @@ function createEditorGround(scene: Scene, initialSettings: EditorGridSettings) {
   const beforeRenderObserver = scene.onBeforeRenderObservable.add(() => {
     if (!resources) return;
 
-    const cameraPosition = scene.activeCamera?.position;
-    if (cameraPosition) {
-      const snappedX = snapToGrid(cameraPosition.x, settings.cellSizeMeters);
-      const snappedZ = snapToGrid(cameraPosition.z, settings.cellSizeMeters);
-      resources.grid.position.x = snappedX;
-      resources.grid.position.z = snappedZ;
-      resources.lineGlowGrid.position.x = snappedX;
-      resources.lineGlowGrid.position.z = snappedZ;
-    }
-
     if (!settings.visible) return;
 
     const pulse = (Math.sin(performance.now() * BREATHING_SPEED) + 1) / 2;
-    resources.gridMaterial.alpha = GRID_ALPHA_BASE + pulse * GRID_ALPHA_PULSE;
-    resources.lineGlowMaterial.alpha = GRID_LINE_GLOW_ALPHA_BASE + pulse * GRID_LINE_GLOW_ALPHA_PULSE;
+    resources.gridMaterial.setFloat('lineAlpha', GRID_ALPHA_BASE + pulse * GRID_ALPHA_PULSE);
+    resources.lineGlowMaterial.setFloat('lineAlpha', GRID_LINE_GLOW_ALPHA_BASE + pulse * GRID_LINE_GLOW_ALPHA_PULSE);
     resources.lineGlowLayer.intensity = GRID_LINE_GLOW_INTENSITY_BASE + pulse * GRID_LINE_GLOW_INTENSITY_PULSE;
   });
 
@@ -216,8 +282,7 @@ function createEditorGround(scene: Scene, initialSettings: EditorGridSettings) {
       settings = { ...nextSettings };
 
       if (cellSizeChanged) {
-        rebuildGrid();
-        return;
+        applyGridCellSize();
       }
 
       applyVisibility();

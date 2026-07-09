@@ -168,6 +168,30 @@
                     }
                   },
                   {
+                    "key": "forkStageOneReach",
+                    "label": "货叉第一段行程",
+                    "type": "number",
+                    "defaultValue": 0.8,
+                    "configuration": {
+                      "type": "number",
+                      "min": 0,
+                      "max": 10,
+                      "step": 0.05
+                    }
+                  },
+                  {
+                    "key": "forkStageTwoReach",
+                    "label": "货叉第二段行程",
+                    "type": "number",
+                    "defaultValue": 0.8,
+                    "configuration": {
+                      "type": "number",
+                      "min": 0,
+                      "max": 10,
+                      "step": 0.05
+                    }
+                  },
+                  {
                     "key": "forkGap",
                     "label": "货叉间距",
                     "type": "number",
@@ -279,6 +303,28 @@
                       "step": 0.1
                     }
                   },
+                  "forkStageOneReach": {
+                    "type": "number",
+                    "value": 0.8,
+                    "label": "货叉第一段行程",
+                    "configuration": {
+                      "type": "number",
+                      "min": 0,
+                      "max": 10,
+                      "step": 0.05
+                    }
+                  },
+                  "forkStageTwoReach": {
+                    "type": "number",
+                    "value": 0.8,
+                    "label": "货叉第二段行程",
+                    "configuration": {
+                      "type": "number",
+                      "min": 0,
+                      "max": 10,
+                      "step": 0.05
+                    }
+                  },
                   "forkGap": {
                     "type": "number",
                     "value": 0.6,
@@ -359,6 +405,24 @@
                   "min": 0.1,
                   "max": 100,
                   "step": 0.1
+                },
+                {
+                  "key": "forkStageOneReach",
+                  "label": "货叉第一段行程",
+                  "type": "number",
+                  "defaultValue": 0.8,
+                  "min": 0,
+                  "max": 10,
+                  "step": 0.05
+                },
+                {
+                  "key": "forkStageTwoReach",
+                  "label": "货叉第二段行程",
+                  "type": "number",
+                  "defaultValue": 0.8,
+                  "min": 0,
+                  "max": 10,
+                  "step": 0.05
                 },
                 {
                   "key": "forkGap",
