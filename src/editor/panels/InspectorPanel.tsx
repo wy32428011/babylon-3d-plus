@@ -4,6 +4,7 @@ import type { Vector3Data } from '../model/math';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import { useEditorStore } from '../store/editorStore';
 import { ModelParametersInspector } from './ModelParametersInspector';
+import { SceneSettingsPanel } from './SceneSettingsPanel';
 
 type TransformField = 'position' | 'rotation' | 'scale';
 type LocatorDimensionField = 'length' | 'width' | 'height';
@@ -93,12 +94,7 @@ export function InspectorPanel() {
   }
 
   if (!selectedEntity) {
-    return (
-      <section className="panel">
-        <h2>Inspector</h2>
-        <p className="muted">请选择一个对象。</p>
-      </section>
-    );
+    return <SceneSettingsPanel />;
   }
 
   const parentEntity = selectedEntity.parentId ? scene.entities[selectedEntity.parentId] : null;

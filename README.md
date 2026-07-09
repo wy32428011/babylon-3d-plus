@@ -279,6 +279,14 @@ npm run build
 - 放置模型：模型库中已导入的真实模型卡片支持点击或拖拽；点击会把模型导入到原点，拖拽到 Scene View 后释放会按鼠标位置投射到地面平面并在对应世界坐标创建模型。
 - 资源库功能边界：模型库当前支持内置基础资源创建与真实模型文件夹导入；同名模型包再次导入会覆盖项目目录中对应模型包，其余资源库仍为样式占位。导入模型文件夹依赖 Electron preload 暴露的本地文件 API，需要使用 `npm run dev:electron` 启动桌面编辑器，普通 Vite 浏览器页面不具备该能力；Electron 主窗口通过 CommonJS preload 产物 `dist-electron/preload.cjs` 注入 `window.editorApi`。
 
+场景级属性面板：
+
+- 在 Scene View 点击非模型位置后，右侧 Inspector 会显示场景级设置，而不是对象属性。
+- 场景区支持修改场景名称、初始化空白场景和导入 CAD 参考图；初始化会清空当前实体、历史记录和场景级设置。
+- 相机区支持保存当前视角、复位到已保存视角，以及通过连续滑杆设置 Scene View 可视距离。
+- 编辑器设置区支持缩放、移动、旋转三类相机操作灵敏度，数值范围为 `1-20`，默认值为 `10`。
+- 环境属性区可从项目模型库选择一个模型包作为不可拾取的环境底座；包内主模型作为默认预设，其余 `.glb/.gltf` 文件会作为自定义效果卡片切换。
+
 虚拟定位线框最短验收：
 
 1. 执行 `npm run dev:electron` 启动 Electron 编辑器。
@@ -317,6 +325,8 @@ npm run build
 - `CAD参考图` 实体会保存 `cadReference.sourcePath`、`sourceUrl`、米制换算比例、中心归零方式、线色、透明度、图层统计与包围盒；重新加载场景时会重新授权对应 `.dxf` 文件，若源文件被移动或删除，参考图无法恢复线稿。
 - 带外置脚本的模型实体会额外保存 `modelAsset.scriptAssets`、`parameterScriptMetadata` 与 `animationScriptMetadata`；加载场景时主进程会重新授权这些 `.model.ts` 文件，运行时把当前参数和 `assetCode` 同步到脚本实例与 Babylon 节点 metadata。
 - 场景级 MQTT 配置保存在 `mqttConfig.enabled`、`mqttConfig.ip`、`mqttConfig.address`、`mqttConfig.topic`、`mqttConfig.simulatorEnabled`、`mqttConfig.simulatorAssetCode`、`mqttConfig.simulatorScenario` 和 `mqttConfig.simulatorIntervalMs` 中；旧场景缺少该字段时会自动补齐 MQTT 默认 topic 和本地模拟默认值。
+- 场景级编辑设置保存在 `sceneSettings.camera`、`sceneSettings.sensitivity` 和 `sceneSettings.environment` 中；旧场景缺少该字段时会自动补齐默认可视距离、默认灵敏度和空环境模型。
+- `sceneSettings.environment` 只记录环境模型包路径、缩略图、当前激活变体和包内变体列表；运行时加载的环境底座不进入 Hierarchy、不参与拾取和 Gizmo，也不会影响实体保存。
 
 ## 当前限制
 

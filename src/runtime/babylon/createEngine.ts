@@ -12,19 +12,15 @@ import {
 } from '@babylonjs/core';
 import { SCENE_LENGTH_UNIT_SYMBOL } from '../../editor/model/sceneUnits';
 import type { Vector3Data } from '../../editor/model/math';
+import {
+  SCENE_VIEW_DISTANCE_DEFAULT,
+  sanitizeSceneSensitivityValue,
+  sanitizeSceneViewDistance,
+  type SceneCameraPose,
+  type SceneSensitivitySettings,
+} from '../../editor/model/SceneDocument';
 
 export type EditorGridCellSize = 1 | 2 | 5 | 10;
-export type EditorCameraViewRangeKey = 'near' | 'standard' | 'far' | 'overview';
-
-export type EditorCameraViewRange = {
-  key: EditorCameraViewRangeKey;
-  label: string;
-  radiusMeters: number;
-};
-
-export type EditorCameraSettings = {
-  viewRangeKey: EditorCameraViewRangeKey;
-};
 
 export type EditorGridSettings = {
   visible: boolean;
@@ -49,21 +45,15 @@ export type BabylonViewport = {
   scene: Scene;
   camera: ArcRotateCamera;
   focusOnBounds: (bounds: EditorWorldBounds) => void;
-  setCameraSettings: (settings: EditorCameraSettings) => void;
+  setViewDistance: (meters: number) => void;
+  setSensitivity: (settings: SceneSensitivitySettings) => void;
+  getCameraPose: () => SceneCameraPose;
+  applyCameraPose: (pose: SceneCameraPose | null) => void;
   setGridSettings: (settings: EditorGridSettings) => void;
   dispose: () => void;
 };
 
 export const EDITOR_GRID_CELL_SIZES: readonly EditorGridCellSize[] = [1, 2, 5, 10];
-export const EDITOR_CAMERA_VIEW_RANGES: readonly EditorCameraViewRange[] = [
-  { key: 'near', label: '近景', radiusMeters: 10 },
-  { key: 'standard', label: '标准', radiusMeters: 28 },
-  { key: 'far', label: '远景', radiusMeters: 48 },
-  { key: 'overview', label: '全景', radiusMeters: 72 },
-];
-export const DEFAULT_EDITOR_CAMERA_SETTINGS: EditorCameraSettings = {
-  viewRangeKey: 'standard',
-};
 export const DEFAULT_EDITOR_GRID_SETTINGS: EditorGridSettings = {
   visible: true,
   cellSizeMeters: 5,
@@ -81,6 +71,8 @@ const EDITOR_CAMERA_MIN_RADIUS_METERS = 0.35;
 const EDITOR_CAMERA_MIN_Z_METERS = 0.02;
 const EDITOR_CAMERA_DEFAULT_ALPHA = Math.PI / 4;
 const EDITOR_CAMERA_DEFAULT_BETA = Math.PI * 0.43;
+const EDITOR_CAMERA_DEFAULT_RADIUS = 28;
+const EDITOR_CAMERA_DEFAULT_TARGET = Vector3.Zero();
 
 /** 将未知异常转换成可读消息，便于向上层 UI 呈现 Babylon 初始化失败原因。 */
 function getErrorMessage(error: unknown): string {
@@ -107,16 +99,6 @@ function snapToGrid(value: number, cellSizeMeters: EditorGridCellSize): number {
 /** 根据当前格子大小计算网格细分数，保持辅助网格总覆盖范围不变。 */
 function getGridSubdivisions(cellSizeMeters: EditorGridCellSize): number {
   return GRID_SIZE_METERS / cellSizeMeters;
-}
-
-/** 根据视野档位返回编辑器相机距离，非法档位回退到标准视野。 */
-function getCameraViewRangeRadius(settings: EditorCameraSettings): number {
-  const radiusMeters =
-    EDITOR_CAMERA_VIEW_RANGES.find((range) => range.key === settings.viewRangeKey)?.radiusMeters ??
-    EDITOR_CAMERA_VIEW_RANGES.find((range) => range.key === DEFAULT_EDITOR_CAMERA_SETTINGS.viewRangeKey)?.radiusMeters ??
-    18;
-
-  return clampCameraRadius(radiusMeters);
 }
 
 /** 创建一组编辑器辅助地面网格资源；网格不进入 SceneDocument，也不可被拾取选中。 */
@@ -254,6 +236,39 @@ function getFocusCameraRadius(bounds: EditorWorldBounds): number {
   return clampCameraRadius(Math.max(radiusMeters * 2.2, 2.5));
 }
 
+/** 将场景灵敏度映射到 Babylon 相机参数，滑杆 10 对应原始默认手感。 */
+function applyCameraSensitivity(camera: ArcRotateCamera, settings: SceneSensitivitySettings): void {
+  const zoom = sanitizeSceneSensitivityValue(settings.zoom);
+  const pan = sanitizeSceneSensitivityValue(settings.pan);
+  const rotate = sanitizeSceneSensitivityValue(settings.rotate);
+
+  camera.wheelPrecision = 400 / (zoom * 10);
+  camera.panningSensibility = 10000 / (pan * 10);
+  camera.angularSensibilityX = 10000 / (rotate * 10);
+  camera.angularSensibilityY = 10000 / (rotate * 10);
+}
+
+/** 读取当前 ArcRotateCamera 位姿，保存为可写入场景文件的纯数据。 */
+function readCameraPose(camera: ArcRotateCamera): SceneCameraPose {
+  const target = camera.getTarget();
+
+  return {
+    alpha: camera.alpha,
+    beta: camera.beta,
+    radius: camera.radius,
+    target: { x: target.x, y: target.y, z: target.z },
+  };
+}
+
+/** 应用保存的相机位姿；未保存时回到编辑器默认观察角度。 */
+function applySavedCameraPose(camera: ArcRotateCamera, pose: SceneCameraPose | null): void {
+  const target = pose ? new Vector3(pose.target.x, pose.target.y, pose.target.z) : EDITOR_CAMERA_DEFAULT_TARGET.clone();
+  camera.alpha = pose?.alpha ?? EDITOR_CAMERA_DEFAULT_ALPHA;
+  camera.beta = pose?.beta ?? EDITOR_CAMERA_DEFAULT_BETA;
+  camera.radius = clampCameraRadius(pose?.radius ?? EDITOR_CAMERA_DEFAULT_RADIUS);
+  camera.setTarget(target);
+}
+
 export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewport {
   assertWebGLSupported();
 
@@ -271,14 +286,16 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewpor
     'EditorCamera',
     EDITOR_CAMERA_DEFAULT_ALPHA,
     EDITOR_CAMERA_DEFAULT_BETA,
-    getCameraViewRangeRadius(DEFAULT_EDITOR_CAMERA_SETTINGS),
-    Vector3.Zero(),
+    EDITOR_CAMERA_DEFAULT_RADIUS,
+    EDITOR_CAMERA_DEFAULT_TARGET.clone(),
     scene,
   );
   camera.attachControl(canvas, true);
-  camera.wheelPrecision = 40;
   camera.minZ = EDITOR_CAMERA_MIN_Z_METERS;
   camera.lowerRadiusLimit = EDITOR_CAMERA_MIN_RADIUS_METERS;
+  camera.maxZ = SCENE_VIEW_DISTANCE_DEFAULT;
+  camera.upperRadiusLimit = SCENE_VIEW_DISTANCE_DEFAULT;
+  applyCameraSensitivity(camera, { zoom: 10, pan: 10, rotate: 10 });
 
   const light = new HemisphericLight('EditorLight', new Vector3(0, 1, 0), scene);
   light.intensity = 0.8;
@@ -297,8 +314,18 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewpor
       camera.setTarget(new Vector3(bounds.center.x, bounds.center.y, bounds.center.z));
       camera.radius = getFocusCameraRadius(bounds);
     },
-    setCameraSettings: (settings) => {
-      camera.radius = getCameraViewRangeRadius(settings);
+    setViewDistance: (meters) => {
+      const viewDistance = sanitizeSceneViewDistance(meters);
+      camera.maxZ = viewDistance;
+      camera.upperRadiusLimit = viewDistance;
+      camera.radius = clampCameraRadius(Math.min(camera.radius, viewDistance));
+    },
+    setSensitivity: (settings) => {
+      applyCameraSensitivity(camera, settings);
+    },
+    getCameraPose: () => readCameraPose(camera),
+    applyCameraPose: (pose) => {
+      applySavedCameraPose(camera, pose);
     },
     setGridSettings: editorGround.setSettings,
     dispose: () => {

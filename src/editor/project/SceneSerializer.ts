@@ -1,12 +1,18 @@
 import type { Entity } from '../model/Entity';
 import {
+  AUTHORIZED_LOCAL_ASSET_URL_PREFIX,
+  createDefaultSceneSettings,
   DEFAULT_MQTT_CONFIG,
   MODEL_ASSET_CODE_MAX_LENGTH,
   createModelAssetCode,
   normalizeStackerSimulationScenario,
   sanitizeMqttConfig,
+  sanitizeSceneSettings,
   type MqttConfig,
   type SceneDocument,
+  type SceneEnvironmentSettings,
+  type SceneEnvironmentVariant,
+  type SceneSettings,
 } from '../model/SceneDocument';
 import type { EntityComponents, LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
@@ -16,7 +22,6 @@ import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit }
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
 const MESH_KINDS: readonly MeshKind[] = ['cube', 'sphere', 'plane'];
 const LIGHT_KINDS: readonly LightKind[] = ['hemispheric', 'directional', 'point'];
-const AUTHORIZED_LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
 const MODEL_SCRIPT_EXTENSION = '.model.ts';
 const LOCATOR_MIN_DIMENSION = 0.01;
 const LOCATOR_ASSET_ID_MAX_LENGTH = 128;
@@ -122,6 +127,7 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     entities,
     selectedEntityId: null,
     mqttConfig: normalizeMqttConfig(scene.mqttConfig),
+    sceneSettings: normalizeSceneSettings(scene.sceneSettings),
   };
 }
 
@@ -142,6 +148,79 @@ function normalizeMqttConfig(value: unknown): MqttConfig {
     simulatorIntervalMs: config.simulatorIntervalMs === undefined
       ? DEFAULT_MQTT_CONFIG.simulatorIntervalMs
       : assertFiniteNumber(config.simulatorIntervalMs),
+  });
+}
+
+function normalizeSceneSettings(value: unknown): SceneSettings {
+  if (value === undefined) return createDefaultSceneSettings();
+
+  const settings = assertPlainObject(value);
+  const camera = assertPlainObject(settings.camera);
+  const sensitivity = assertPlainObject(settings.sensitivity);
+
+  return sanitizeSceneSettings({
+    camera: {
+      savedPose: normalizeSceneCameraPose(camera.savedPose),
+      viewDistance: assertFiniteNumber(camera.viewDistance),
+    },
+    sensitivity: {
+      zoom: assertFiniteNumber(sensitivity.zoom),
+      pan: assertFiniteNumber(sensitivity.pan),
+      rotate: assertFiniteNumber(sensitivity.rotate),
+    },
+    environment: normalizeSceneEnvironmentSettings(settings.environment),
+  });
+}
+
+function normalizeSceneCameraPose(value: unknown): SceneSettings['camera']['savedPose'] {
+  if (value === null || value === undefined) return null;
+
+  const pose = assertPlainObject(value);
+  return {
+    alpha: assertFiniteNumber(pose.alpha),
+    beta: assertFiniteNumber(pose.beta),
+    radius: assertFiniteNumber(pose.radius),
+    target: normalizeVector3(pose.target),
+  };
+}
+
+function normalizeSceneEnvironmentSettings(value: unknown): SceneEnvironmentSettings | null {
+  if (value === null || value === undefined) return null;
+
+  const environment = assertPlainObject(value);
+  const variants = normalizeSceneEnvironmentVariants(environment.variants);
+  const activeVariantUrl = assertString(environment.activeVariantUrl);
+
+  if (!activeVariantUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) {
+    throwUnsupportedSceneFileError();
+  }
+
+  return {
+    packagePath: assertString(environment.packagePath),
+    ...(environment.thumbnailUrl === undefined ? {} : { thumbnailUrl: assertString(environment.thumbnailUrl) }),
+    activeVariantUrl,
+    variants,
+  };
+}
+
+function normalizeSceneEnvironmentVariants(value: unknown): SceneEnvironmentVariant[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) {
+    throwUnsupportedSceneFileError();
+  }
+
+  return value.map((item) => {
+    const variant = assertPlainObject(item);
+    const sourceUrl = assertString(variant.sourceUrl);
+
+    if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) {
+      throwUnsupportedSceneFileError();
+    }
+
+    return {
+      name: assertString(variant.name),
+      sourcePath: assertString(variant.sourcePath),
+      sourceUrl,
+    };
   });
 }
 

@@ -511,6 +511,31 @@ export async function scanModelPackage(packagePath) {
         },
     };
 }
+/** 列出模型包内所有可作为环境效果切换的 glTF/GLB 变体，并把主模型排在首位。 */
+export async function listModelPackageVariants(packagePath) {
+    const entries = await fs.readdir(packagePath, { withFileTypes: true });
+    const fileNames = entries
+        .filter((entry) => entry.isFile())
+        .map((entry) => entry.name)
+        .filter(isModelFile)
+        .sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'));
+    const primaryModelPath = selectPrimaryModelFile(packagePath, fileNames);
+    const primaryFileName = primaryModelPath ? path.basename(primaryModelPath) : fileNames[0] ?? null;
+    if (!primaryFileName)
+        return [];
+    const orderedFileNames = [
+        primaryFileName,
+        ...fileNames.filter((fileName) => fileName !== primaryFileName),
+    ];
+    return orderedFileNames.map((fileName) => {
+        const modelPath = path.join(packagePath, fileName);
+        return {
+            name: path.parse(fileName).name,
+            path: modelPath,
+            sourceUrl: encodeAssetUrl(modelPath),
+        };
+    });
+}
 export async function scanModelFolder(rootPath) {
     const entries = await fs.readdir(rootPath, { withFileTypes: true });
     const packageDirectories = entries.filter((entry) => entry.isDirectory());

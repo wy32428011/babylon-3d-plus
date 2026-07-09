@@ -1,9 +1,15 @@
 import { dialog, ipcMain } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { AssetEntry, ImportCadFileResult, ImportModelFolderResult } from '../types.js';
+import type {
+  AssetEntry,
+  ImportCadFileResult,
+  ImportModelFolderResult,
+  ListModelPackageVariantsRequest,
+  ModelPackageVariant,
+} from '../types.js';
 import { authorizeAssetFile, authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl } from './assetRegistry.js';
-import { scanModelFolder } from './modelPackageScanner.js';
+import { listModelPackageVariants, scanModelFolder } from './modelPackageScanner.js';
 import { ensureCurrentProjectRootWithDialog, getCurrentProjectRoot, importModelPackagesIntoProject } from './projectAssetStore.js';
 
 function getAssetKind(filePath: string, isDirectory: boolean): AssetEntry['kind'] {
@@ -126,4 +132,19 @@ export function registerAssetIpc(): void {
       skipped: [...scanSkipped, ...copySkipped],
     };
   });
+
+  ipcMain.handle(
+    'assets:listModelPackageVariants',
+    async (_event, request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> => {
+      const packagePath = path.resolve(request.packagePath);
+      const stat = await fs.stat(packagePath);
+
+      if (!stat.isDirectory()) {
+        throw new Error('请选择有效的模型包目录。');
+      }
+
+      authorizeAssetRoot(packagePath);
+      return listModelPackageVariants(packagePath);
+    },
+  );
 }

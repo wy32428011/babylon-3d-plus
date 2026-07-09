@@ -77,6 +77,14 @@ export type AssetEntry = {
     unitScaleToMeters?: number;
     parameterConfig?: unknown;
 };
+export type ModelPackageVariant = {
+    name: string;
+    path: string;
+    sourceUrl: string;
+};
+export type ListModelPackageVariantsRequest = {
+    packagePath: string;
+};
 export type ImportModelFolderSkippedEntry = {
     packagePath: string;
     reason: string;

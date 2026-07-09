@@ -39,8 +39,9 @@ export function SceneViewPanel() {
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
   const gridSettings = useEditorStore((state) => state.gridSettings);
-  const cameraSettings = useEditorStore((state) => state.cameraSettings);
   const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
+  const cameraPoseSaveRequest = useEditorStore((state) => state.cameraPoseSaveRequest);
+  const cameraResetRequest = useEditorStore((state) => state.cameraResetRequest);
   const selectEntity = useEditorStore((state) => state.selectEntity);
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
@@ -49,6 +50,8 @@ export function SceneViewPanel() {
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
+  const consumeCameraPoseSaveRequest = useEditorStore((state) => state.consumeCameraPoseSaveRequest);
+  const consumeCameraResetRequest = useEditorStore((state) => state.consumeCameraResetRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
 
   /** 记录左键按下位置，用于区分单击选中和拖拽旋转视角。 */
@@ -221,8 +224,33 @@ export function SceneViewPanel() {
   }, [gridSettings]);
 
   useEffect(() => {
-    viewportRef.current?.setCameraSettings(cameraSettings);
-  }, [cameraSettings]);
+    const viewport = viewportRef.current;
+    const runtime = runtimeRef.current;
+    if (!viewport || !runtime) return;
+
+    viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
+    viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
+    runtime.syncEnvironment(sceneDocument.sceneSettings.environment);
+  }, [sceneDocument.sceneSettings]);
+
+  useEffect(() => {
+    if (!cameraPoseSaveRequest) return;
+
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    consumeCameraPoseSaveRequest(cameraPoseSaveRequest.id, viewport.getCameraPose());
+  }, [cameraPoseSaveRequest, consumeCameraPoseSaveRequest]);
+
+  useEffect(() => {
+    if (!cameraResetRequest) return;
+
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    viewport.applyCameraPose(sceneDocument.sceneSettings.camera.savedPose);
+    consumeCameraResetRequest(cameraResetRequest.id);
+  }, [cameraResetRequest, consumeCameraResetRequest, sceneDocument.sceneSettings.camera.savedPose]);
 
   useEffect(() => {
     if (!sceneFocusRequest) return;

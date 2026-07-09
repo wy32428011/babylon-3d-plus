@@ -1,11 +1,9 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import type {
-  EditorCameraSettings,
-  EditorCameraViewRangeKey,
   EditorGridCellSize,
   EditorGridSettings,
 } from '../../runtime/babylon/createEngine';
-import { EDITOR_CAMERA_VIEW_RANGES, EDITOR_GRID_CELL_SIZES } from '../../runtime/babylon/createEngine';
+import { EDITOR_GRID_CELL_SIZES } from '../../runtime/babylon/createEngine';
 import {
   STACKER_SIMULATION_SCENARIOS,
   createMqttAddressFromIp,
@@ -60,14 +58,12 @@ type ToolbarProps = {
   transformSpace: TransformSpace;
   snapSettings: TransformSnapSettings;
   gridSettings: EditorGridSettings;
-  cameraSettings: EditorCameraSettings;
   onSetTransformTool: (tool: TransformTool) => void;
   onSetTransformSpace: (space: TransformSpace) => void;
   onSetSnapEnabled: (enabled: boolean) => void;
   onUpdateSnapSetting: (key: TransformSnapSettingKey, value: number) => void;
   onSetGridVisible: (visible: boolean) => void;
   onSetGridCellSize: (cellSizeMeters: EditorGridCellSize) => void;
-  onSetCameraViewRange: (viewRangeKey: EditorCameraViewRangeKey) => void;
   onDeleteSelectedEntity: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -145,14 +141,6 @@ export function Toolbar(props: ToolbarProps) {
     if (!EDITOR_GRID_CELL_SIZES.includes(nextValue as EditorGridCellSize)) return;
 
     props.onSetGridCellSize(nextValue as EditorGridCellSize);
-  }
-
-  /** 将下拉框字符串转换为受支持的相机视野档位，避免 Toolbar 传出未知档位。 */
-  function handleCameraViewRangeChange(rawValue: string): void {
-    const nextRange = EDITOR_CAMERA_VIEW_RANGES.find((range) => range.key === rawValue);
-    if (!nextRange) return;
-
-    props.onSetCameraViewRange(nextRange.key);
   }
 
   /** 将模拟场景选择限制在 Stacker 支持的场景集合内。 */
@@ -259,19 +247,6 @@ export function Toolbar(props: ToolbarProps) {
           {EDITOR_GRID_CELL_SIZES.map((cellSizeMeters) => (
             <option key={cellSizeMeters} value={cellSizeMeters}>
               {`${cellSizeMeters} ${SCENE_LENGTH_UNIT_SYMBOL}`}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="toolbar-select">
-        <span>视野</span>
-        <select
-          value={props.cameraSettings.viewRangeKey}
-          onChange={(event) => handleCameraViewRangeChange(event.target.value)}
-        >
-          {EDITOR_CAMERA_VIEW_RANGES.map((range) => (
-            <option key={range.key} value={range.key}>
-              {range.label}
             </option>
           ))}
         </select>

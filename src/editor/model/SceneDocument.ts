@@ -17,10 +17,54 @@ export const DEFAULT_DEVICE_MQTT_TOPIC = 'dt/factory/logistics/+/+/twindatadrive
 export const DEFAULT_STACKER_MQTT_TOPIC = DEFAULT_DEVICE_MQTT_TOPIC;
 export const DEFAULT_STACKER_SIMULATOR_ASSET_CODE = 'DDJ2';
 export const DEFAULT_STACKER_SIMULATOR_INTERVAL_MS = 500;
+export const AUTHORIZED_LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
+export const SCENE_VIEW_DISTANCE_MIN = 100;
+export const SCENE_VIEW_DISTANCE_MAX = 20000;
+export const SCENE_VIEW_DISTANCE_DEFAULT = 5000;
+export const SCENE_SENSITIVITY_MIN = 1;
+export const SCENE_SENSITIVITY_MAX = 20;
+export const SCENE_SENSITIVITY_DEFAULT = 10;
 
 export const STACKER_SIMULATION_SCENARIOS = ['cycle', 'target', 'movement', 'fault'] as const;
 
 export type StackerSimulationScenario = (typeof STACKER_SIMULATION_SCENARIOS)[number];
+
+export type SceneCameraPose = {
+  alpha: number;
+  beta: number;
+  radius: number;
+  target: Vector3Data;
+};
+
+export type SceneCameraSettings = {
+  savedPose: SceneCameraPose | null;
+  viewDistance: number;
+};
+
+export type SceneSensitivitySettings = {
+  zoom: number;
+  pan: number;
+  rotate: number;
+};
+
+export type SceneEnvironmentVariant = {
+  name: string;
+  sourcePath: string;
+  sourceUrl: string;
+};
+
+export type SceneEnvironmentSettings = {
+  packagePath: string;
+  thumbnailUrl?: string;
+  activeVariantUrl: string;
+  variants: SceneEnvironmentVariant[];
+};
+
+export type SceneSettings = {
+  camera: SceneCameraSettings;
+  sensitivity: SceneSensitivitySettings;
+  environment: SceneEnvironmentSettings | null;
+};
 
 export type MqttConfig = {
   enabled: boolean;
@@ -43,6 +87,112 @@ export const DEFAULT_MQTT_CONFIG: MqttConfig = {
   simulatorScenario: 'cycle',
   simulatorIntervalMs: DEFAULT_STACKER_SIMULATOR_INTERVAL_MS,
 };
+
+export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
+  camera: {
+    savedPose: null,
+    viewDistance: SCENE_VIEW_DISTANCE_DEFAULT,
+  },
+  sensitivity: {
+    zoom: SCENE_SENSITIVITY_DEFAULT,
+    pan: SCENE_SENSITIVITY_DEFAULT,
+    rotate: SCENE_SENSITIVITY_DEFAULT,
+  },
+  environment: null,
+};
+
+/** 将数值约束在指定范围内，非法输入直接回退到默认值。 */
+function clampFiniteNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+/** 归一化 Scene View 可视距离，避免写入会导致相机裁剪异常的数值。 */
+export function sanitizeSceneViewDistance(value: number): number {
+  return clampFiniteNumber(value, SCENE_VIEW_DISTANCE_MIN, SCENE_VIEW_DISTANCE_MAX, SCENE_VIEW_DISTANCE_DEFAULT);
+}
+
+/** 归一化相机操作灵敏度，滑杆值越大代表操作响应越快。 */
+export function sanitizeSceneSensitivityValue(value: number): number {
+  return clampFiniteNumber(value, SCENE_SENSITIVITY_MIN, SCENE_SENSITIVITY_MAX, SCENE_SENSITIVITY_DEFAULT);
+}
+
+/** 拷贝 Vector3 数据，保证场景设置不会共享可变引用。 */
+function cloneVector3Data(vector: Vector3Data): Vector3Data {
+  return { x: vector.x, y: vector.y, z: vector.z };
+}
+
+/** 判断相机位姿是否为可安全回放的有限数值。 */
+function isValidCameraPose(pose: SceneCameraPose | null): pose is SceneCameraPose {
+  return Boolean(
+    pose &&
+      Number.isFinite(pose.alpha) &&
+      Number.isFinite(pose.beta) &&
+      Number.isFinite(pose.radius) &&
+      Number.isFinite(pose.target.x) &&
+      Number.isFinite(pose.target.y) &&
+      Number.isFinite(pose.target.z),
+  );
+}
+
+/** 归一化环境模型设置，非法 URL 或空变体会回退为未启用环境模型。 */
+export function sanitizeSceneEnvironment(
+  environment: SceneEnvironmentSettings | null | undefined,
+): SceneEnvironmentSettings | null {
+  if (!environment) return null;
+
+  const packagePath = environment.packagePath.trim();
+  const variants = environment.variants
+    .map((variant) => ({
+      name: variant.name.trim() || '环境模型',
+      sourcePath: variant.sourcePath.trim(),
+      sourceUrl: variant.sourceUrl.trim(),
+    }))
+    .filter((variant) => variant.sourcePath && variant.sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX));
+
+  if (!packagePath || variants.length === 0) return null;
+
+  const activeVariantUrl = environment.activeVariantUrl.trim();
+  const activeVariant = variants.find((variant) => variant.sourceUrl === activeVariantUrl) ?? variants[0];
+  const thumbnailUrl = environment.thumbnailUrl?.trim();
+
+  return {
+    packagePath,
+    ...(thumbnailUrl ? { thumbnailUrl } : {}),
+    activeVariantUrl: activeVariant.sourceUrl,
+    variants,
+  };
+}
+
+/** 归一化场景级编辑设置，作为 UI、运行时和序列化共同使用的边界。 */
+export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
+  const savedPose = isValidCameraPose(settings.camera.savedPose)
+    ? {
+        alpha: settings.camera.savedPose.alpha,
+        beta: settings.camera.savedPose.beta,
+        radius: settings.camera.savedPose.radius,
+        target: cloneVector3Data(settings.camera.savedPose.target),
+      }
+    : null;
+
+  return {
+    camera: {
+      savedPose,
+      viewDistance: sanitizeSceneViewDistance(settings.camera.viewDistance),
+    },
+    sensitivity: {
+      zoom: sanitizeSceneSensitivityValue(settings.sensitivity.zoom),
+      pan: sanitizeSceneSensitivityValue(settings.sensitivity.pan),
+      rotate: sanitizeSceneSensitivityValue(settings.sensitivity.rotate),
+    },
+    environment: sanitizeSceneEnvironment(settings.environment),
+  };
+}
+
+/** 创建一份新的默认场景设置，避免共享 DEFAULT_SCENE_SETTINGS 的嵌套引用。 */
+export function createDefaultSceneSettings(): SceneSettings {
+  return sanitizeSceneSettings(DEFAULT_SCENE_SETTINGS);
+}
 
 /** 按默认 MQTT over WebSocket 端口和路径，从 IP/域名生成浏览器可连接地址。 */
 export function createMqttAddressFromIp(ip: string): string {
@@ -116,6 +266,7 @@ export type SceneDocument = {
   entities: Record<string, Entity>;
   selectedEntityId: string | null;
   mqttConfig: MqttConfig;
+  sceneSettings: SceneSettings;
 };
 
 export function createEmptySceneDocument(name = 'Untitled Scene'): SceneDocument {
@@ -126,6 +277,7 @@ export function createEmptySceneDocument(name = 'Untitled Scene'): SceneDocument
     entities: {},
     selectedEntityId: null,
     mqttConfig: DEFAULT_MQTT_CONFIG,
+    sceneSettings: createDefaultSceneSettings(),
   };
 }
 

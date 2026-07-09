@@ -15,4 +15,5 @@ contextBridge.exposeInMainWorld('editorApi', {
     selectProjectDirectory: () => ipcRenderer.invoke('project:selectDirectory'),
     importCadFile: () => ipcRenderer.invoke('assets:importCadFile'),
     importModelFolder: () => ipcRenderer.invoke('assets:importModelFolder'),
+    listModelPackageVariants: (request) => ipcRenderer.invoke('assets:listModelPackageVariants', request),
 });

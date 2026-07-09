@@ -103,6 +103,16 @@ type ImportModelFolderResult = {
   skipped: ImportModelFolderSkippedEntry[];
 };
 
+type ModelPackageVariant = {
+  name: string;
+  path: string;
+  sourceUrl: string;
+};
+
+type ListModelPackageVariantsRequest = {
+  packagePath: string;
+};
+
 type ImportCadFileResult = {
   canceled: boolean;
   filePath: string | null;
@@ -135,5 +145,6 @@ interface Window {
     selectProjectDirectory: () => Promise<SelectProjectDirectoryResult>;
     importCadFile: () => Promise<ImportCadFileResult>;
     importModelFolder: () => Promise<ImportModelFolderResult>;
+    listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
   };
 }

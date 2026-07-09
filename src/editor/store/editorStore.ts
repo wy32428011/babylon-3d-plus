@@ -23,12 +23,8 @@ import {
   updateTransformCommand,
 } from '../commands/entityCommands';
 import {
-  DEFAULT_EDITOR_CAMERA_SETTINGS,
   DEFAULT_EDITOR_GRID_SETTINGS,
-  EDITOR_CAMERA_VIEW_RANGES,
   EDITOR_GRID_CELL_SIZES,
-  type EditorCameraSettings,
-  type EditorCameraViewRangeKey,
   type EditorGridCellSize,
   type EditorGridSettings,
 } from '../../runtime/babylon/createEngine';
@@ -57,7 +53,13 @@ import {
   createModelAssetCode,
   extractModelAssetCodePrefix,
   sanitizeMqttConfig,
+  sanitizeSceneEnvironment,
+  sanitizeSceneSensitivityValue,
+  sanitizeSceneViewDistance,
+  type SceneCameraPose,
   type MqttConfig,
+  type SceneEnvironmentSettings,
+  type SceneSensitivitySettings,
   type SceneDocument,
 } from '../model/SceneDocument';
 import type { Vector3Data } from '../model/math';
@@ -113,10 +115,19 @@ export type ProjectAssetFocusRequest = {
   entityName: string;
 };
 
+export type CameraPoseSaveRequest = {
+  id: string;
+};
+
+export type CameraResetRequest = {
+  id: string;
+};
+
 type TransformField = 'position' | 'rotation' | 'scale';
 export type TransformTool = 'translate' | 'rotate' | 'scale';
 export type TransformSpace = 'local' | 'global';
 export type TransformSnapSettingKey = 'position' | 'rotationDegrees' | 'scale';
+export type SceneSensitivitySettingKey = keyof SceneSensitivitySettings;
 
 export type TransformSnapSettings = {
   enabled: boolean;
@@ -154,20 +165,30 @@ type EditorState = {
   entityClipboard: EntityClipboard | null;
   sceneFocusRequest: SceneFocusRequest | null;
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
+  cameraPoseSaveRequest: CameraPoseSaveRequest | null;
+  cameraResetRequest: CameraResetRequest | null;
   cadImportProgress: CadImportProgress | null;
   logs: EditorLog[];
   transformTool: TransformTool;
   transformSpace: TransformSpace;
   snapSettings: TransformSnapSettings;
   gridSettings: EditorGridSettings;
-  cameraSettings: EditorCameraSettings;
   setTransformTool: (tool: TransformTool) => void;
   setTransformSpace: (space: TransformSpace) => void;
   setSnapEnabled: (enabled: boolean) => void;
   updateSnapSetting: (key: TransformSnapSettingKey, value: number) => void;
   setGridVisible: (visible: boolean) => void;
   setGridCellSize: (cellSizeMeters: EditorGridCellSize) => void;
-  setCameraViewRange: (viewRangeKey: EditorCameraViewRangeKey) => void;
+  renameScene: (name: string) => void;
+  resetSceneToBlank: () => void;
+  setCameraViewDistance: (viewDistance: number) => void;
+  updateSensitivitySetting: (key: SceneSensitivitySettingKey, value: number) => void;
+  updateEnvironmentConfig: (environment: SceneEnvironmentSettings | null) => void;
+  setEnvironmentActiveVariant: (sourceUrl: string) => void;
+  requestCameraPoseSave: () => void;
+  consumeCameraPoseSaveRequest: (requestId: string, pose: SceneCameraPose) => void;
+  requestCameraReset: () => void;
+  consumeCameraResetRequest: (requestId: string) => void;
   createMesh: (meshKind: MeshKind, placementPosition?: Vector3Data) => void;
   createLocator: (placementPosition?: Vector3Data) => void;
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
@@ -234,6 +255,8 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     entityClipboard: null,
     sceneFocusRequest: null,
     projectAssetFocusRequest: null,
+    cameraPoseSaveRequest: null,
+    cameraResetRequest: null,
     logs: prependLog(state.logs, message),
   };
 }
@@ -449,6 +472,10 @@ function sanitizeEntityName(name: string): string {
   return name.trim().slice(0, 80);
 }
 
+function sanitizeSceneName(name: string): string {
+  return name.trim().slice(0, 128);
+}
+
 function isColorLike(value: string): boolean {
   return /^#[0-9a-fA-F]{6}$/.test(value);
 }
@@ -457,10 +484,11 @@ function sanitizeGridCellSize(value: EditorGridCellSize): EditorGridCellSize {
   return EDITOR_GRID_CELL_SIZES.includes(value) ? value : DEFAULT_EDITOR_GRID_SETTINGS.cellSizeMeters;
 }
 
-function sanitizeCameraViewRangeKey(value: EditorCameraViewRangeKey): EditorCameraViewRangeKey {
-  return EDITOR_CAMERA_VIEW_RANGES.some((range) => range.key === value)
-    ? value
-    : DEFAULT_EDITOR_CAMERA_SETTINGS.viewRangeKey;
+function isSceneEnvironmentEqual(
+  left: SceneEnvironmentSettings | null,
+  right: SceneEnvironmentSettings | null,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function getSelectedEntity(state: EditorState) {
@@ -793,13 +821,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   entityClipboard: null,
   sceneFocusRequest: null,
   projectAssetFocusRequest: null,
+  cameraPoseSaveRequest: null,
+  cameraResetRequest: null,
   cadImportProgress: null,
   logs: [{ id: 'log_boot', message: '编辑器已启动。' }],
   transformTool: 'translate',
   transformSpace: 'local',
   snapSettings: DEFAULT_SNAP_SETTINGS,
   gridSettings: DEFAULT_EDITOR_GRID_SETTINGS,
-  cameraSettings: DEFAULT_EDITOR_CAMERA_SETTINGS,
   setTransformTool: (tool) => {
     set((state) => {
       if (state.transformTool === tool) return state;
@@ -873,17 +902,153 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  setCameraViewRange: (viewRangeKey) => {
-    set((state) => {
-      const nextViewRangeKey = sanitizeCameraViewRangeKey(viewRangeKey);
-      if (state.cameraSettings.viewRangeKey === nextViewRangeKey) return state;
+  renameScene: (name) => {
+    const nextName = sanitizeSceneName(name);
+    if (!nextName) return;
 
-      const label = EDITOR_CAMERA_VIEW_RANGES.find((range) => range.key === nextViewRangeKey)?.label ?? '标准';
+    set((state) => {
+      if (state.scene.name === nextName) return state;
+
+      const command = updateSceneDocumentCommand('重命名场景', (scene) => ({
+        ...scene,
+        name: nextName,
+      }));
+      const result = executeCommand(state.scene, state.history, command);
+
       return {
-        cameraSettings: {
-          viewRangeKey: nextViewRangeKey,
+        ...result,
+        logs: prependLog(state.logs, `${command.label}: ${nextName}`),
+      };
+    });
+  },
+  resetSceneToBlank: () => {
+    set((state) => createLoadedSceneState(state, createEmptySceneDocument(), '场景已初始化。'));
+  },
+  setCameraViewDistance: (viewDistance) => {
+    set((state) => {
+      const nextViewDistance = sanitizeSceneViewDistance(viewDistance);
+      if (state.scene.sceneSettings.camera.viewDistance === nextViewDistance) return state;
+
+      return {
+        scene: {
+          ...state.scene,
+          sceneSettings: {
+            ...state.scene.sceneSettings,
+            camera: {
+              ...state.scene.sceneSettings.camera,
+              viewDistance: nextViewDistance,
+            },
+          },
         },
-        logs: prependLog(state.logs, `Scene View 可视范围：${label}。`),
+      };
+    });
+  },
+  updateSensitivitySetting: (key, value) => {
+    set((state) => {
+      const nextValue = sanitizeSceneSensitivityValue(value);
+      if (state.scene.sceneSettings.sensitivity[key] === nextValue) return state;
+
+      return {
+        scene: {
+          ...state.scene,
+          sceneSettings: {
+            ...state.scene.sceneSettings,
+            sensitivity: {
+              ...state.scene.sceneSettings.sensitivity,
+              [key]: nextValue,
+            },
+          },
+        },
+      };
+    });
+  },
+  updateEnvironmentConfig: (environment) => {
+    set((state) => {
+      const nextEnvironment = sanitizeSceneEnvironment(environment);
+      if (isSceneEnvironmentEqual(state.scene.sceneSettings.environment, nextEnvironment)) return state;
+
+      const command = updateSceneDocumentCommand('更新环境模型', (scene) => ({
+        ...scene,
+        sceneSettings: {
+          ...scene.sceneSettings,
+          environment: nextEnvironment,
+        },
+      }));
+      const result = executeCommand(state.scene, state.history, command);
+
+      return {
+        ...result,
+        logs: prependLog(state.logs, nextEnvironment ? '环境模型已更新。' : '环境模型已清除。'),
+      };
+    });
+  },
+  setEnvironmentActiveVariant: (sourceUrl) => {
+    set((state) => {
+      const environment = state.scene.sceneSettings.environment;
+      if (!environment || environment.activeVariantUrl === sourceUrl) return state;
+
+      const activeVariant = environment.variants.find((variant) => variant.sourceUrl === sourceUrl);
+      if (!activeVariant) return state;
+
+      const command = updateSceneDocumentCommand('切换环境效果', (scene) => ({
+        ...scene,
+        sceneSettings: {
+          ...scene.sceneSettings,
+          environment: scene.sceneSettings.environment
+            ? {
+                ...scene.sceneSettings.environment,
+                activeVariantUrl: activeVariant.sourceUrl,
+              }
+            : null,
+        },
+      }));
+      const result = executeCommand(state.scene, state.history, command);
+
+      return {
+        ...result,
+        logs: prependLog(state.logs, `${command.label}: ${activeVariant.name}`),
+      };
+    });
+  },
+  requestCameraPoseSave: () => {
+    set((state) => ({
+      cameraPoseSaveRequest: { id: createId('camera_pose_save') },
+      logs: prependLog(state.logs, '准备保存当前视角。'),
+    }));
+  },
+  consumeCameraPoseSaveRequest: (requestId, pose) => {
+    set((state) => {
+      if (state.cameraPoseSaveRequest?.id !== requestId) return state;
+
+      return {
+        cameraPoseSaveRequest: null,
+        scene: {
+          ...state.scene,
+          sceneSettings: {
+            ...state.scene.sceneSettings,
+            camera: {
+              ...state.scene.sceneSettings.camera,
+              savedPose: pose,
+            },
+          },
+        },
+        logs: prependLog(state.logs, '当前视角已保存。'),
+      };
+    });
+  },
+  requestCameraReset: () => {
+    set((state) => ({
+      cameraResetRequest: { id: createId('camera_reset') },
+      logs: prependLog(state.logs, '准备复位视角。'),
+    }));
+  },
+  consumeCameraResetRequest: (requestId) => {
+    set((state) => {
+      if (state.cameraResetRequest?.id !== requestId) return state;
+
+      return {
+        cameraResetRequest: null,
+        logs: prependLog(state.logs, '视角已复位。'),
       };
     });
   },

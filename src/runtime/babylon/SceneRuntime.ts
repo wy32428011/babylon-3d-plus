@@ -41,7 +41,7 @@ import type {
   ModelParameterValues,
 } from '../../editor/model/modelParameters';
 import type { Vector3Data } from '../../editor/model/math';
-import type { SceneDocument } from '../../editor/model/SceneDocument';
+import type { SceneDocument, SceneEnvironmentSettings } from '../../editor/model/SceneDocument';
 import {
   consumeCadReferenceParseResult,
   parseCadReferenceDxf,
@@ -205,6 +205,13 @@ type CadReferenceRuntimeEntry = {
   opacity: number;
 };
 
+type EnvironmentRuntimeEntry = {
+  sourceUrl: string;
+  root: TransformNode;
+  container: AssetContainer | null;
+  loadToken: number;
+};
+
 type EntityRuntimeState = {
   visible: boolean;
   locked: boolean;
@@ -230,7 +237,9 @@ export class SceneRuntime {
   private readonly reportedMissingTargets = new Set<string>();
   private readonly reportedFaults = new Map<string, string>();
   private readonly reportedStatuses = new Map<string, string>();
+  private environment: EnvironmentRuntimeEntry | null = null;
   private modelLoadSequence = 0;
+  private environmentLoadSequence = 0;
 
   constructor(
     private readonly scene: Scene,
@@ -484,6 +493,51 @@ export class SceneRuntime {
     this.rebuildLocatorTargetIndex(document);
   }
 
+  /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
+  syncEnvironment(environment: SceneEnvironmentSettings | null): void {
+    const sourceUrl = environment?.activeVariantUrl ?? null;
+    if (!sourceUrl) {
+      this.disposeEnvironment();
+      return;
+    }
+
+    if (this.environment?.sourceUrl === sourceUrl) return;
+
+    this.disposeEnvironment();
+
+    const root = new TransformNode('EnvironmentRoot', this.scene);
+    const loadToken = ++this.environmentLoadSequence;
+    this.environment = { sourceUrl, root, container: null, loadToken };
+
+    const { rootUrl, fileName } = this.splitAssetUrl(resolveRuntimeAssetUrl(sourceUrl));
+
+    void SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene)
+      .then((container) => {
+        const activeEnvironment = this.environment;
+        if (!activeEnvironment || activeEnvironment.loadToken !== loadToken || activeEnvironment.sourceUrl !== sourceUrl) {
+          container.dispose();
+          return;
+        }
+
+        container.addAllToScene();
+        activeEnvironment.container = container;
+        this.parentTopLevelEnvironmentNodes(activeEnvironment);
+
+        for (const mesh of container.meshes) {
+          mesh.isPickable = false;
+        }
+      })
+      .catch((error) => {
+        const activeEnvironment = this.environment;
+        if (activeEnvironment?.loadToken === loadToken) {
+          this.disposeEnvironment();
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        this.pushLog(`环境模型加载失败：${message}`);
+      });
+  }
+
   dispose(): void {
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
@@ -509,6 +563,7 @@ export class SceneRuntime {
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
     }
+    this.disposeEnvironment();
     this.modelHighlightLayer.dispose();
     this.meshes.clear();
     this.locators.clear();
@@ -2202,6 +2257,15 @@ export class SceneRuntime {
     this.models.delete(entityId);
   }
 
+  /** 释放当前环境底座模型，切换场景或切换效果时避免 Babylon 资源残留。 */
+  private disposeEnvironment(): void {
+    if (!this.environment) return;
+
+    this.environment.container?.dispose();
+    this.environment.root.dispose();
+    this.environment = null;
+  }
+
   /** 删除指定 Stacker 实例生成的运行时货物，不污染场景文档。 */
   private disposeStackerCargoForAssetCode(assetCode: string): void {
     for (const [key, cargo] of this.stackerCargoMeshes.entries()) {
@@ -2860,6 +2924,19 @@ export class SceneRuntime {
     for (const node of allImportedNodes) {
       if (!node.parent || !allImportedNodes.has(node.parent as AbstractMesh | TransformNode)) {
         node.parent = model.contentRoot;
+      }
+    }
+  }
+
+  /** 将环境模型的顶层节点挂到独立根节点下，避免污染场景实体层级。 */
+  private parentTopLevelEnvironmentNodes(environment: EnvironmentRuntimeEntry): void {
+    const meshes = environment.container?.meshes ?? [];
+    const transformNodes = environment.container?.transformNodes ?? [];
+    const allImportedNodes = new Set([...meshes, ...transformNodes]);
+
+    for (const node of allImportedNodes) {
+      if (!node.parent || !allImportedNodes.has(node.parent as AbstractMesh | TransformNode)) {
+        node.parent = environment.root;
       }
     }
   }

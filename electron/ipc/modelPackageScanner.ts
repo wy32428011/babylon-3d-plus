@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, normalizeModelLengthUnit, type ModelLengthUnitInfo } from '../modelUnits.js';
-import type { AssetEntry, ImportModelFolderSkippedEntry } from '../types.js';
+import type { AssetEntry, ImportModelFolderSkippedEntry, ModelPackageVariant } from '../types.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
@@ -599,6 +599,35 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
       parameterConfig: metadata.parameterConfig,
     },
   };
+}
+
+/** 列出模型包内所有可作为环境效果切换的 glTF/GLB 变体，并把主模型排在首位。 */
+export async function listModelPackageVariants(packagePath: string): Promise<ModelPackageVariant[]> {
+  const entries = await fs.readdir(packagePath, { withFileTypes: true });
+  const fileNames = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter(isModelFile)
+    .sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'));
+
+  const primaryModelPath = selectPrimaryModelFile(packagePath, fileNames);
+  const primaryFileName = primaryModelPath ? path.basename(primaryModelPath) : fileNames[0] ?? null;
+  if (!primaryFileName) return [];
+
+  const orderedFileNames = [
+    primaryFileName,
+    ...fileNames.filter((fileName) => fileName !== primaryFileName),
+  ];
+
+  return orderedFileNames.map((fileName) => {
+    const modelPath = path.join(packagePath, fileName);
+
+    return {
+      name: path.parse(fileName).name,
+      path: modelPath,
+      sourceUrl: encodeAssetUrl(modelPath),
+    };
+  });
 }
 
 export async function scanModelFolder(

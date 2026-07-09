@@ -1,8 +1,10 @@
 import type {
   ImportCadFileResult,
   ImportModelFolderResult,
+  ListModelPackageVariantsRequest,
   LoadSceneFileRequest,
   LoadSceneResult,
+  ModelPackageVariant,
   OpenRecentProjectRequest,
   ProjectListAssetsResult,
   ReadTextFileRequest,
@@ -28,4 +30,6 @@ contextBridge.exposeInMainWorld('editorApi', {
   selectProjectDirectory: (): Promise<SelectProjectDirectoryResult> => ipcRenderer.invoke('project:selectDirectory'),
   importCadFile: (): Promise<ImportCadFileResult> => ipcRenderer.invoke('assets:importCadFile'),
   importModelFolder: (): Promise<ImportModelFolderResult> => ipcRenderer.invoke('assets:importModelFolder'),
+  listModelPackageVariants: (request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> =>
+    ipcRenderer.invoke('assets:listModelPackageVariants', request),
 });

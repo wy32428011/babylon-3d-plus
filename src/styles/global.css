@@ -906,6 +906,303 @@ select {
   padding: 2px;
 }
 
+.scene-settings-panel .transform-fieldset {
+  padding: 8px;
+}
+
+.scene-settings-button-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.scene-settings-button-row button,
+.environment-clear-button {
+  min-height: 26px;
+}
+
+.scene-slider-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) 52px;
+  align-items: center;
+  gap: 8px;
+  color: #d7d7d7;
+  font-size: 12px;
+}
+
+.scene-slider-row input[type="range"] {
+  width: 100%;
+  accent-color: #3d8cff;
+}
+
+.scene-slider-row input[type="number"] {
+  width: 100%;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid #555555;
+  border-radius: 3px;
+  color: #d7d7d7;
+  background: #1e1e1e;
+}
+
+.environment-preview-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.environment-preview-button {
+  display: grid;
+  width: 100%;
+  min-height: 120px;
+  padding: 0;
+  overflow: hidden;
+  place-items: center;
+  border-color: #4a4a4a;
+  background:
+    radial-gradient(circle at 50% 82%, rgb(80 80 80 / 34%) 0 20%, transparent 21% 42%),
+    linear-gradient(180deg, #4a4a4a 0%, #2f2f2f 58%, #171717 100%);
+}
+
+.environment-preview-button img {
+  display: block;
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+}
+
+.environment-preview-placeholder {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border: 3px solid #8f8f8f;
+}
+
+.environment-preview-placeholder::before,
+.environment-preview-placeholder::after {
+  position: absolute;
+  content: '';
+}
+
+.environment-preview-placeholder::before {
+  inset: -9px 8px 24px;
+  border: 3px solid #8f8f8f;
+  border-bottom: 0;
+}
+
+.environment-preview-placeholder::after {
+  inset: 8px;
+  border-radius: 999px;
+  background: #8f8f8f;
+}
+
+.environment-clear-button {
+  justify-self: start;
+  padding: 0 10px;
+}
+
+.scene-effect-section {
+  display: grid;
+  gap: 5px;
+}
+
+.scene-effect-title {
+  display: block;
+  padding: 4px 6px;
+  color: #e0e0e0;
+  background: #202020;
+  font-size: 12px;
+}
+
+.scene-effect-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 40px;
+  align-items: flex-start;
+}
+
+.scene-effect-card {
+  display: grid;
+  grid-template-rows: 18px 28px;
+  width: 76px;
+  min-height: 52px;
+  padding: 3px;
+  border: 1px solid #444444;
+  border-radius: 2px;
+  background: #242424;
+  text-align: left;
+}
+
+.scene-effect-card.active {
+  border-color: #3d8cff;
+  background: #2f6be8;
+}
+
+.scene-effect-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-effect-icon {
+  position: relative;
+  display: block;
+  width: 24px;
+  height: 24px;
+  justify-self: center;
+  border: 3px solid #8f8f8f;
+}
+
+.scene-effect-card.active .scene-effect-icon {
+  border-color: #dfeaff;
+}
+
+.scene-effect-icon::before,
+.scene-effect-icon::after {
+  position: absolute;
+  content: '';
+}
+
+.scene-effect-icon::before {
+  inset: -8px 6px 18px;
+  border: 3px solid currentcolor;
+  border-bottom: 0;
+  color: inherit;
+}
+
+.scene-effect-icon::after {
+  inset: 6px;
+  border-radius: 999px;
+  background: currentcolor;
+}
+
+.environment-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 34%);
+}
+
+.environment-dialog {
+  display: grid;
+  grid-template-rows: 38px minmax(0, 1fr);
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(560px, calc(100vh - 48px));
+  border: 1px solid #4a4a4a;
+  color: #e2e2e2;
+  background: #262626;
+  box-shadow: 0 18px 42px rgb(0 0 0 / 46%);
+}
+
+.environment-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  border-bottom: 1px solid #171717;
+  background: #202020;
+}
+
+.environment-dialog-header h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.environment-dialog-header button {
+  min-height: 24px;
+  padding: 0 10px;
+}
+
+.environment-dialog-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 12px;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.environment-resource-card {
+  position: relative;
+  display: grid;
+  grid-template-rows: 88px 42px;
+  flex: 0 0 136px;
+  width: 136px;
+  height: 140px;
+  padding: 5px;
+  border: 1px solid #444444;
+  border-radius: 2px;
+  color: #d7d7d7;
+  background: #1f1f1f;
+  cursor: pointer;
+  text-align: center;
+}
+
+.environment-resource-card:hover {
+  border-color: #20dce9;
+  background: #233033;
+}
+
+.environment-resource-card .resource-card-preview {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  place-items: center;
+  border: 1px solid #2e2e2e;
+  background:
+    radial-gradient(circle at 50% 80%, rgb(80 80 80 / 34%) 0 20%, transparent 21% 42%),
+    linear-gradient(180deg, #3a3a3a 0%, #2b2b2b 56%, #171717 100%);
+}
+
+.environment-resource-card .resource-card-thumbnail {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.environment-resource-card .resource-card-text {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  padding-top: 3px;
+}
+
+.environment-resource-card .resource-card-name,
+.environment-resource-card .resource-card-subtitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.environment-resource-card .resource-card-name {
+  color: #cfcfcf;
+  font-size: 13px;
+}
+
+.environment-resource-card .resource-card-subtitle {
+  color: #a8a8a8;
+  font-size: 11px;
+}
+
+.environment-dialog-status {
+  width: 100%;
+  margin: 0;
+  color: #9fb7bb;
+  font-size: 12px;
+}
+
 .project-library {
   display: grid;
   grid-template-rows: 32px 42px minmax(0, 1fr) auto;

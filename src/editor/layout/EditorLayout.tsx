@@ -31,7 +31,6 @@ export function EditorLayout() {
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
   const gridSettings = useEditorStore((state) => state.gridSettings);
-  const cameraSettings = useEditorStore((state) => state.cameraSettings);
   const cadImportProgress = useEditorStore((state) => state.cadImportProgress);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const setTransformTool = useEditorStore((state) => state.setTransformTool);
@@ -40,7 +39,6 @@ export function EditorLayout() {
   const updateSnapSetting = useEditorStore((state) => state.updateSnapSetting);
   const setGridVisible = useEditorStore((state) => state.setGridVisible);
   const setGridCellSize = useEditorStore((state) => state.setGridCellSize);
-  const setCameraViewRange = useEditorStore((state) => state.setCameraViewRange);
   const deleteSelectedEntity = useEditorStore((state) => state.deleteSelectedEntity);
   const hideSelectedEntities = useEditorStore((state) => state.hideSelectedEntities);
   const lockSelectedEntities = useEditorStore((state) => state.lockSelectedEntities);
@@ -165,14 +163,12 @@ export function EditorLayout() {
         transformSpace={transformSpace}
         snapSettings={snapSettings}
         gridSettings={gridSettings}
-        cameraSettings={cameraSettings}
         onSetTransformTool={setTransformTool}
         onSetTransformSpace={setTransformSpace}
         onSetSnapEnabled={setSnapEnabled}
         onUpdateSnapSetting={updateSnapSetting}
         onSetGridVisible={setGridVisible}
         onSetGridCellSize={setGridCellSize}
-        onSetCameraViewRange={setCameraViewRange}
         onDeleteSelectedEntity={deleteSelectedEntity}
         onUndo={undo}
         onRedo={redo}
