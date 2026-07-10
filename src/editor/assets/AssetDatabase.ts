@@ -1,8 +1,10 @@
 import type { ModelParameterConfig } from '../model/modelParameters';
 import { normalizeModelParameterConfig } from '../model/modelParameters';
 import type { ModelScriptAsset } from '../model/components';
+import { normalizeModelDataDrivenConfig, type ModelDataDrivenConfig } from '../model/telemetryBinding';
 
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
+export type ModelAssetLibraryKind = 'model' | 'environment';
 
 export type AssetEntry = {
   id: string;
@@ -24,6 +26,13 @@ export type AssetEntry = {
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
   parameterConfig?: ModelParameterConfig;
+  dataDrivenConfig?: ModelDataDrivenConfig;
+  libraryKind?: ModelAssetLibraryKind;
+};
+
+export type ProjectModelAssetEntry = AssetEntry & {
+  kind: 'model';
+  libraryKind: ModelAssetLibraryKind;
 };
 
 export const MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-model-asset';
@@ -77,7 +86,13 @@ function readOptionalFiniteNumber(record: AssetEntryRecord, key: keyof AssetEntr
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-export function encodeModelAssetDragPayload(asset: AssetEntry): string {
+/** 读取并校验项目模型所属分库，避免旧载荷或非法载荷跨库生效。 */
+function readProjectModelLibraryKind(record: AssetEntryRecord): ModelAssetLibraryKind | null {
+  return record.libraryKind === 'model' || record.libraryKind === 'environment' ? record.libraryKind : null;
+}
+
+/** 编码项目模型拖拽载荷时保留分库标识，供接收端二次校验 MIME 与资产归属。 */
+export function encodeModelAssetDragPayload(asset: ProjectModelAssetEntry): string {
   return JSON.stringify(asset);
 }
 
@@ -85,22 +100,26 @@ export function encodeBuiltInAssetDragPayload(payload: BuiltInAssetDragPayload):
   return JSON.stringify(payload);
 }
 
-export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | null {
+/** 解码项目模型拖拽载荷；缺少 libraryKind 的旧载荷会被拒绝，防止静默跨库。 */
+export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAssetEntry | null {
   try {
     const payload: unknown = JSON.parse(rawPayload);
     if (!isRecord(payload)) return null;
     if (payload.kind !== 'model') return null;
+    const libraryKind = readProjectModelLibraryKind(payload);
+    if (!libraryKind) return null;
     if (typeof payload.id !== 'string') return null;
     if (typeof payload.name !== 'string') return null;
     if (typeof payload.path !== 'string') return null;
     if (typeof payload.sourceUrl !== 'string') return null;
 
-    const asset: AssetEntry = {
+    const asset: ProjectModelAssetEntry = {
       id: payload.id,
       name: payload.name,
       path: payload.path,
       sourceUrl: payload.sourceUrl,
       kind: 'model',
+      libraryKind,
     };
 
     const packagePath = readOptionalString(payload, 'packagePath');
@@ -115,6 +134,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | nu
     const lengthUnit = readOptionalLengthUnit(payload);
     const unitScaleToMeters = readOptionalFiniteNumber(payload, 'unitScaleToMeters');
     const parameterConfig = normalizeModelParameterConfig(payload.parameterConfig);
+    const dataDrivenConfig = normalizeModelDataDrivenConfig(payload.dataDrivenConfig);
 
     if (packagePath) asset.packagePath = packagePath;
     if (assetRevision) asset.assetRevision = assetRevision;
@@ -130,6 +150,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): AssetEntry | nu
     if (lengthUnit) asset.lengthUnit = lengthUnit;
     if (unitScaleToMeters !== undefined) asset.unitScaleToMeters = unitScaleToMeters;
     if (parameterConfig) asset.parameterConfig = parameterConfig;
+    if (dataDrivenConfig) asset.dataDrivenConfig = dataDrivenConfig;
 
     return asset;
   } catch {

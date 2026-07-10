@@ -56,8 +56,10 @@ export async function loadEnvironmentVariantsFromAsset(asset: AssetEntry): Promi
   }));
 }
 
-/** 从项目模型资产创建完整环境配置，供环境库点击、拖拽和 Inspector 弹窗选择共用。 */
+/** 从项目环境资产创建完整环境配置，非 environment 分库资产直接拒绝，形成跨库防御边界。 */
 export async function loadEnvironmentFromAsset(asset: AssetEntry): Promise<SceneEnvironmentSettings | null> {
+  if (asset.libraryKind !== 'environment') return null;
+
   const variants = await loadEnvironmentVariantsFromAsset(asset);
   return createEnvironmentFromAsset(asset, variants);
 }

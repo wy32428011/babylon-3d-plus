@@ -7,6 +7,7 @@ import type {
   ModelAssetComponent,
   TransformComponent,
 } from '../model/components';
+import type { TelemetryBindingComponent } from '../model/telemetryBinding';
 import type { Entity } from '../model/Entity';
 import type { ModelParameterValues } from '../model/modelParameters';
 import type { SceneDocument } from '../model/SceneDocument';
@@ -410,6 +411,43 @@ function updateCadReference(
         },
       },
     },
+  };
+}
+
+
+/** 更新实体遥测绑定组件，支持设置覆盖或清空回默认。 */
+function updateTelemetryBinding(
+  scene: SceneDocument,
+  entityId: string,
+  telemetryBinding: TelemetryBindingComponent | null,
+): SceneDocument {
+  const entity = scene.entities[entityId];
+  if (!entity?.components.modelAsset) return scene;
+  const components = { ...entity.components };
+  if (telemetryBinding) components.telemetryBinding = telemetryBinding;
+  else delete components.telemetryBinding;
+
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [entityId]: {
+        ...entity,
+        components,
+      },
+    },
+  };
+}
+
+export function updateTelemetryBindingCommand(
+  entityId: string,
+  before: TelemetryBindingComponent | null,
+  after: TelemetryBindingComponent | null,
+): Command {
+  return {
+    label: '更新数据驱动绑定',
+    execute: (scene) => updateTelemetryBinding(scene, entityId, after),
+    undo: (scene) => updateTelemetryBinding(scene, entityId, before),
   };
 }
 

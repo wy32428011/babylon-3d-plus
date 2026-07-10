@@ -111,7 +111,11 @@ function isEntityEffectivelyLocked(entities: Record<string, Entity>, entity: Ent
   return entities[entity.parentId]?.locked === true;
 }
 
-export function HierarchyPanel() {
+type HierarchyPanelProps = {
+  readOnly?: boolean;
+};
+
+export function HierarchyPanel(props: HierarchyPanelProps) {
   const sceneName = useEditorStore((state) => state.scene.name);
   const entityIds = useEditorStore((state) => state.scene.entityIds);
   const entities = useEditorStore((state) => state.scene.entities);
@@ -155,14 +159,14 @@ export function HierarchyPanel() {
   const activeSelectionEntities = activeSelectionIds.map((entityId) => entities[entityId]).filter((entity): entity is Entity => Boolean(entity));
   const hasSelection = activeSelectionIds.length > 0;
   const hasRuntimeSelection = activeSelectionEntities.some((entity) => !entity.isFolder);
-  const canMutateSelection = activeSelectionEntities.some((entity) => !isEntityEffectivelyLocked(entities, entity));
+  const canMutateSelection = !props.readOnly && activeSelectionEntities.some((entity) => !isEntityEffectivelyLocked(entities, entity));
   const canMutateRuntimeSelection = activeSelectionEntities.some(
-    (entity) => !entity.isFolder && !isEntityEffectivelyLocked(entities, entity),
+    (entity) => !props.readOnly && !entity.isFolder && !isEntityEffectivelyLocked(entities, entity),
   );
   const canRenameSelection = activeSelectionIds.length === 1 && canMutateSelection;
   const canLibraryFocus = Boolean(contextEntity?.components.modelAsset);
-  const canPaste = Boolean(entityClipboard && entityClipboard.entities.length > 0);
-  const canUngroup = activeSelectionEntities.some((entity) => entity.isFolder || Boolean(entity.parentId));
+  const canPaste = !props.readOnly && Boolean(entityClipboard && entityClipboard.entities.length > 0);
+  const canUngroup = !props.readOnly && activeSelectionEntities.some((entity) => entity.isFolder || Boolean(entity.parentId));
 
   /** 执行菜单动作后统一收起菜单，保持右键菜单只响应一次命令。 */
   function runContextMenuAction(action: () => void): void {
@@ -179,12 +183,14 @@ export function HierarchyPanel() {
 
   /** 打开模型阵列弹窗，弹窗确认后统一调用 store 的可撤销阵列命令。 */
   function openArrayDialog(): void {
+    if (props.readOnly) return;
     setArrayDialog({ copyCount: 3, direction: 'x', spacingMeters: 1 });
     setContextMenu(null);
   }
 
   /** 提交行内重命名，空名称由 store 侧继续过滤。 */
   function commitRename(): void {
+    if (props.readOnly) return;
     if (!renamingEntityId) return;
     renameSelectedEntity(renameDraft);
     setRenamingEntityId(null);
@@ -213,6 +219,7 @@ export function HierarchyPanel() {
 
   /** 提交线性模型阵列参数。 */
   function submitArrayDialog(): void {
+    if (props.readOnly) return;
     if (!arrayDialog) return;
     arraySelectedEntities(arrayDialog.copyCount, arrayDialog.direction, arrayDialog.spacingMeters);
     setArrayDialog(null);
@@ -371,15 +378,15 @@ export function HierarchyPanel() {
             onChange={(event) => setSearchText(event.target.value)}
           />
         </label>
-        <button className="hierarchy-new-folder-button" onClick={createFolder} type="button">
+        <button className="hierarchy-new-folder-button" disabled={props.readOnly} onClick={createFolder} type="button">
           + 新建
         </button>
       </div>
       {entityIds.length === 0 ? <p className="muted">点击顶部工具栏创建对象。</p> : null}
       <div
         className="entity-list"
-        onDragOver={handleDragOver}
-        onDrop={(event) => handleDrop(event, null)}
+        onDragOver={props.readOnly ? undefined : handleDragOver}
+        onDrop={props.readOnly ? undefined : (event) => handleDrop(event, null)}
       >
         {rows.length === 0 && entityIds.length > 0 ? <p className="muted">没有匹配对象。</p> : null}
         {rows.map((row, rowIndex) => {
@@ -402,19 +409,20 @@ export function HierarchyPanel() {
           return (
             <div
               className={rowClassName}
-              draggable={!isFolder}
+              draggable={!props.readOnly && !isFolder}
               key={entity.id}
               onClick={(event) => handleRowClick(event, row, rowIndex)}
               onContextMenu={(event) => handleRowContextMenu(event, row, rowIndex)}
-              onDragOver={isFolder ? handleDragOver : undefined}
-              onDragStart={(event) => handleRowDragStart(event, entity)}
-              onDrop={isFolder ? (event) => handleDrop(event, entity.id) : undefined}
+              onDragOver={!props.readOnly && isFolder ? handleDragOver : undefined}
+              onDragStart={props.readOnly ? undefined : (event) => handleRowDragStart(event, entity)}
+              onDrop={!props.readOnly && isFolder ? (event) => handleDrop(event, entity.id) : undefined}
               style={{ '--entity-depth': row.depth } as CSSProperties}
               title={entity.name}
             >
               <button
                 aria-label={isVisible ? `隐藏 ${entity.name}` : `显示 ${entity.name}`}
                 className="entity-state-button"
+                disabled={props.readOnly}
                 onClick={(event) => handleVisibleClick(event, entity.id)}
                 title={isVisible ? '隐藏' : '显示'}
                 type="button"
@@ -424,6 +432,7 @@ export function HierarchyPanel() {
               <button
                 aria-label={isLocked ? `解锁 ${entity.name}` : `锁定 ${entity.name}`}
                 className="entity-state-button"
+                disabled={props.readOnly}
                 onClick={(event) => handleLockedClick(event, entity.id)}
                 title={isLocked ? '解锁' : '锁定'}
                 type="button"
@@ -449,6 +458,7 @@ export function HierarchyPanel() {
                 <input
                   autoFocus
                   className="entity-tree-rename-input"
+                  disabled={props.readOnly}
                   onBlur={commitRename}
                   onChange={(event) => setRenameDraft(event.target.value)}
                   onClick={(event) => event.stopPropagation()}
@@ -508,7 +518,7 @@ export function HierarchyPanel() {
           </button>
           <button
             className="hierarchy-context-menu-item"
-            disabled={!hasRuntimeSelection}
+            disabled={props.readOnly || !hasRuntimeSelection}
             onClick={() => runContextMenuAction(copySelectedEntities)}
             role="menuitem"
             type="button"
@@ -609,6 +619,7 @@ export function HierarchyPanel() {
                 min={1}
                 max={100}
                 onChange={(event) => setArrayDialog({ ...arrayDialog, copyCount: Number(event.target.value) })}
+                disabled={props.readOnly}
                 type="number"
                 value={arrayDialog.copyCount}
               />
@@ -616,6 +627,7 @@ export function HierarchyPanel() {
             <label className="hierarchy-array-dialog-row">
               <span>方向</span>
               <select
+                disabled={props.readOnly}
                 onChange={(event) =>
                   setArrayDialog({ ...arrayDialog, direction: event.target.value as EntityArrayDirection })
                 }
@@ -634,6 +646,7 @@ export function HierarchyPanel() {
               <input
                 min={0.01}
                 onChange={(event) => setArrayDialog({ ...arrayDialog, spacingMeters: Number(event.target.value) })}
+                disabled={props.readOnly}
                 step={0.1}
                 type="number"
                 value={arrayDialog.spacingMeters}
@@ -641,7 +654,7 @@ export function HierarchyPanel() {
             </label>
             <div className="hierarchy-array-dialog-actions">
               <button onClick={() => setArrayDialog(null)} type="button">取消</button>
-              <button className="primary" onClick={submitArrayDialog} type="button">确认</button>
+              <button className="primary" disabled={props.readOnly} onClick={submitArrayDialog} type="button">确认</button>
             </div>
           </div>
         </div>

@@ -1,4 +1,5 @@
 export const TELEMETRY_TOPIC_PREFIX = 'dt/factory/logistics';
+export const DEFAULT_TELEMETRY_SOURCE_ID = 'default';
 
 export type DeviceTelemetryFields = Record<string, unknown>;
 
@@ -7,12 +8,45 @@ export type ParsedDeviceTelemetryTopic = {
   assetCode: string;
 };
 
+export type TelemetryAdapterConfig = EpvTelemetryAdapterConfig | JsonPathTelemetryAdapterConfig;
+
+export type EpvTelemetryAdapterConfig = {
+  kind?: 'epv';
+  sourceId?: string;
+};
+
+export type JsonPathTelemetryAdapterConfig = {
+  kind: 'json-path';
+  sourceId?: string;
+  deviceTypePath?: string;
+  assetCodePath?: string;
+  timestampPath?: string;
+  sequencePath?: string;
+  fields: Record<string, string>;
+};
+
+export type MqttSubscriptionConfig = {
+  topic: string;
+  qos?: 0 | 1 | 2;
+  adapter?: TelemetryAdapterConfig;
+};
+
+export type TelemetryConnectionState =
+  | 'disabled'
+  | 'simulating'
+  | 'connecting'
+  | 'connected'
+  | 'disconnected'
+  | 'error';
+
 export type DeviceTelemetrySnapshot = {
+  sourceId: string;
   topic: string;
   deviceType: string;
   assetCode: string;
   payloadDeviceCode: string | null;
-  sourceTimestamp: string | null;
+  sourceTimestamp: number | null;
+  sequence: number | null;
   receivedAt: number;
   fields: DeviceTelemetryFields;
   currentLocationKey: string | null;
@@ -20,6 +54,11 @@ export type DeviceTelemetrySnapshot = {
   hasTargetLocation: boolean;
   faulted: boolean;
   message: string;
+};
+
+export type DeviceTelemetrySnapshotHistory = {
+  previous: DeviceTelemetrySnapshot | null;
+  current: DeviceTelemetrySnapshot | null;
 };
 
 export type StackerTelemetrySnapshot = DeviceTelemetrySnapshot;
@@ -35,9 +74,12 @@ type DevicePayloadItem = {
 type DeviceTelemetryPayload = {
   data?: unknown;
   ts?: unknown;
+  seq?: unknown;
+  sequence?: unknown;
 };
 
 const DEVICE_TOPIC_PATTERN = /^dt\/factory\/logistics\/([^/]+)\/([^/]+)\/twindatadriven\/joint$/;
+const SAFE_PATH_SEGMENT_PATTERN = /^[A-Za-z_$][\w$]*(?:\[\d+\])*$/;
 
 /** 从 MQTT topic 中解析设备类型和资产编号。 */
 export function parseDeviceTelemetryTopic(topic: string): ParsedDeviceTelemetryTopic | null {
@@ -50,34 +92,18 @@ export function parseDeviceTelemetryTopic(topic: string): ParsedDeviceTelemetryT
   };
 }
 
-/** 解析 twindatadriven/joint 消息，并把 data[].p/v 展平成通用运行时快照。 */
-export function parseDeviceTelemetryMessage(topic: string, payloadText: string): DeviceTelemetrySnapshot | null {
-  const topicInfo = parseDeviceTelemetryTopic(topic);
-  if (!topicInfo) return null;
-
+/** 按适配器配置解析设备遥测消息，默认使用兼容 twindatadriven/joint 的 EPV 协议。 */
+export function parseDeviceTelemetryMessage(
+  topic: string,
+  payloadText: string,
+  adapter: TelemetryAdapterConfig = { kind: 'epv' },
+): DeviceTelemetrySnapshot | null {
   const payload = JSON.parse(payloadText) as DeviceTelemetryPayload;
-  const fields = parseTelemetryFields(payload.data, topicInfo.assetCode);
-  normalizeStackerCompatibleFields(topicInfo.deviceType, fields);
+  if (adapter.kind === 'json-path') {
+    return parseJsonPathTelemetryMessage(topic, payload, adapter);
+  }
 
-  const stackerLocation = createStackerLocationState(topicInfo.deviceType, fields);
-  const normal = readBooleanField(fields, 'normal');
-  const errorCode = readIntegerField(fields, 'errorCode') ?? 0;
-  const message = readStringField(fields, 'message') ?? '';
-
-  return {
-    topic,
-    deviceType: topicInfo.deviceType,
-    assetCode: topicInfo.assetCode,
-    payloadDeviceCode: readPayloadDeviceCode(payload.data),
-    sourceTimestamp: typeof payload.ts === 'string' ? payload.ts : null,
-    receivedAt: Date.now(),
-    fields,
-    currentLocationKey: stackerLocation.currentLocationKey,
-    targetLocationKey: stackerLocation.targetLocationKey,
-    hasTargetLocation: stackerLocation.targetLocationKey !== null,
-    faulted: resolveFaulted(topicInfo.deviceType, fields, normal, errorCode),
-    message,
-  };
+  return parseEpvTelemetryMessage(topic, payload, { kind: 'epv', sourceId: adapter.sourceId });
 }
 
 /** 兼容旧 Stacker 调用方，只接受 stacker 设备类型。 */
@@ -124,35 +150,88 @@ export function readBooleanField(fields: DeviceTelemetryFields, key: string): bo
   return null;
 }
 
-/** 保存最新设备遥测快照，供 Babylon 运行时逐帧读取。 */
+/** 保存最新设备遥测快照和上一帧历史，供 Babylon 运行时逐帧读取。 */
 export class DeviceTelemetryStore {
-  private readonly snapshots = new Map<string, DeviceTelemetrySnapshot>();
+  private readonly histories = new Map<string, DeviceTelemetrySnapshotHistory>();
+  private readonly effectiveSnapshotsByKey = new Map<string, DeviceTelemetrySnapshot>();
   private readonly listeners = new Set<DeviceTelemetryListener>();
 
-  /** 写入某个设备实例的最新遥测快照。 */
-  upsert(snapshot: DeviceTelemetrySnapshot): void {
-    this.snapshots.set(this.createSnapshotKey(snapshot.deviceType, snapshot.assetCode), snapshot);
+  /** 写入某个设备实例的最新遥测快照；乱序或重复数据返回 false。 */
+  upsert(snapshot: DeviceTelemetrySnapshot): boolean {
+    const key = this.createSnapshotKey(snapshot.sourceId, snapshot.deviceType, snapshot.assetCode);
+    const history = this.histories.get(key) ?? { previous: null, current: null };
+    if (history.current && isDuplicateSnapshot(snapshot, history.current)) {
+      this.refreshUntimedHeartbeatLastSeen(key, history.current, snapshot);
+      return false;
+    }
+    const currentForOrdering = history.current
+      ? this.effectiveSnapshotsByKey.get(key) ?? history.current
+      : null;
+    if (currentForOrdering && !isNewerSnapshot(snapshot, currentForOrdering)) return false;
+
+    this.histories.set(key, {
+      previous: history.current,
+      current: snapshot,
+    });
+    this.effectiveSnapshotsByKey.set(key, snapshot);
+    this.emitChange();
+    return true;
+  }
+
+  /** 刷新无序号无源时间的相同内容心跳在线时间，不推进 previous/current 两帧运动历史。 */
+  private refreshUntimedHeartbeatLastSeen(
+    key: string,
+    current: DeviceTelemetrySnapshot,
+    snapshot: DeviceTelemetrySnapshot,
+  ): void {
+    if (!isUntimedSnapshot(snapshot) || !isUntimedSnapshot(current)) return;
+    const effectiveSnapshot = this.effectiveSnapshotsByKey.get(key) ?? current;
+    if (snapshot.receivedAt <= effectiveSnapshot.receivedAt) return;
+
+    this.effectiveSnapshotsByKey.set(key, {
+      ...current,
+      receivedAt: snapshot.receivedAt,
+    });
     this.emitChange();
   }
 
-  /** 按资产编号和可选设备类型读取最新快照。 */
-  getSnapshot(assetCode: string, deviceType?: string): DeviceTelemetrySnapshot | null {
+  /** 按资产编号、设备类型和可选数据源读取最新快照，默认兼容旧 sourceId。 */
+  getSnapshot(assetCode: string, deviceType?: string, sourceId = DEFAULT_TELEMETRY_SOURCE_ID): DeviceTelemetrySnapshot | null {
     if (deviceType) {
-      return this.snapshots.get(this.createSnapshotKey(deviceType, assetCode)) ?? null;
+      const key = this.createSnapshotKey(sourceId, deviceType, assetCode);
+      const current = this.histories.get(key)?.current ?? null;
+      return current ? this.effectiveSnapshotsByKey.get(key) ?? current : null;
     }
 
-    return this.getSnapshots().find((snapshot) => snapshot.assetCode === assetCode) ?? null;
+    return this.getSnapshots().find((snapshot) => snapshot.sourceId === sourceId && snapshot.assetCode === assetCode) ?? null;
   }
 
-  /** 读取全部设备快照，调用方按设备类型自行筛选。 */
+  /** 按资产编号、设备类型和可选数据源读取当前/上一帧历史。 */
+  getSnapshotHistory(
+    assetCode: string,
+    deviceType: string,
+    sourceId = DEFAULT_TELEMETRY_SOURCE_ID,
+  ): DeviceTelemetrySnapshotHistory {
+    return this.histories.get(this.createSnapshotKey(sourceId, deviceType, assetCode)) ?? {
+      previous: null,
+      current: null,
+    };
+  }
+
+  /** 读取全部设备最新快照，调用方按设备类型自行筛选。 */
   getSnapshots(): DeviceTelemetrySnapshot[] {
-    return [...this.snapshots.values()];
+    return [...this.histories.entries()].flatMap(([key, history]) => (
+      history.current ? [this.effectiveSnapshotsByKey.get(key) ?? history.current] : []
+    ));
   }
 
-  /** 读取指定设备类型的快照。 */
-  getSnapshotsByDeviceType(deviceType: string): DeviceTelemetrySnapshot[] {
+  /** 读取指定设备类型的快照，可传入 sourceId 精确筛选。 */
+  getSnapshotsByDeviceType(deviceType: string, sourceId?: string): DeviceTelemetrySnapshot[] {
     const normalizedDeviceType = deviceType.toLowerCase();
-    return this.getSnapshots().filter((snapshot) => snapshot.deviceType === normalizedDeviceType);
+    return this.getSnapshots().filter(
+      (snapshot) =>
+        snapshot.deviceType === normalizedDeviceType && (sourceId === undefined || snapshot.sourceId === normalizeSourceId(sourceId)),
+    );
   }
 
   /** 读取当前所有 stacker 快照，用于旧调用方兼容。 */
@@ -160,11 +239,31 @@ export class DeviceTelemetryStore {
     return this.getSnapshotsByDeviceType('stacker');
   }
 
-  /** 清空运行时快照，通常用于 MQTT 断开或配置关闭。 */
-  clear(): void {
-    if (this.snapshots.size === 0) return;
-    this.snapshots.clear();
+  /** 清空运行时快照；传入 sourceId 时兼容转发到 clearSource。 */
+  clear(sourceId?: string): void {
+    if (sourceId !== undefined) {
+      this.clearSource(sourceId);
+      return;
+    }
+
+    if (this.histories.size === 0) return;
+    this.histories.clear();
+    this.effectiveSnapshotsByKey.clear();
     this.emitChange();
+  }
+
+  /** 清理指定数据源的运行时快照，避免多个 MQTT 客户端互相清空。 */
+  clearSource(sourceId: string): void {
+    const normalizedSourceId = normalizeSourceId(sourceId);
+    let changed = false;
+    for (const [key, history] of this.histories.entries()) {
+      if (history.current?.sourceId === normalizedSourceId) {
+        this.histories.delete(key);
+        this.effectiveSnapshotsByKey.delete(key);
+        changed = true;
+      }
+    }
+    if (changed) this.emitChange();
   }
 
   /** 订阅快照变化，返回取消订阅函数。 */
@@ -173,9 +272,9 @@ export class DeviceTelemetryStore {
     return () => this.listeners.delete(listener);
   }
 
-  /** 创建设备类型和资产编号组合键，避免不同设备类型编号相同互相覆盖。 */
-  private createSnapshotKey(deviceType: string, assetCode: string): string {
-    return `${deviceType.toLowerCase()}:${assetCode}`;
+  /** 创建设备数据源、类型和资产编号组合键，避免不同数据源互相覆盖。 */
+  private createSnapshotKey(sourceId: string, deviceType: string, assetCode: string): string {
+    return normalizeSourceId(sourceId) + ':' + deviceType.toLowerCase() + ':' + assetCode;
   }
 
   /** 通知所有监听者已有新遥测。 */
@@ -189,7 +288,78 @@ export class DeviceTelemetryStore {
 export const deviceTelemetryStore = new DeviceTelemetryStore();
 export const stackerTelemetryStore = deviceTelemetryStore;
 
-/** 对 Stacker 历史拼写和正式字段做兼容归一。 */
+/** 使用 EPV 协议解析 twindatadriven/joint 消息。 */
+function parseEpvTelemetryMessage(
+  topic: string,
+  payload: DeviceTelemetryPayload,
+  adapter: EpvTelemetryAdapterConfig,
+): DeviceTelemetrySnapshot | null {
+  const topicInfo = parseDeviceTelemetryTopic(topic);
+  if (!topicInfo) return null;
+
+  const fields = parseTelemetryFields(payload.data, topicInfo.assetCode);
+  return createSnapshot({
+    sourceId: normalizeSourceId(adapter.sourceId),
+    topic,
+    deviceType: topicInfo.deviceType,
+    assetCode: topicInfo.assetCode,
+    payloadDeviceCode: readPayloadDeviceCode(payload.data),
+    sourceTimestamp: readTimestamp(payload.ts),
+    sequence: readSequence(payload.seq ?? payload.sequence),
+    fields,
+  });
+}
+
+/** 使用安全 JSON Path 配置解析任意结构遥测消息。 */
+function parseJsonPathTelemetryMessage(
+  topic: string,
+  payload: unknown,
+  adapter: JsonPathTelemetryAdapterConfig,
+): DeviceTelemetrySnapshot | null {
+  if (!adapter.deviceTypePath || !adapter.assetCodePath) return null;
+  const deviceType = readPathString(payload, adapter.deviceTypePath)?.toLowerCase() ?? null;
+  const assetCode = readPathString(payload, adapter.assetCodePath);
+  if (!deviceType || !assetCode) return null;
+
+  const fields: DeviceTelemetryFields = {};
+  for (const [fieldName, fieldPath] of Object.entries(adapter.fields)) {
+    const value = readSafeJsonPath(payload, fieldPath);
+    if (value === undefined || isInvalidTelemetryFieldValue(value)) continue;
+    fields[fieldName] = value;
+  }
+
+  return createSnapshot({
+    sourceId: normalizeSourceId(adapter.sourceId),
+    topic,
+    deviceType,
+    assetCode,
+    payloadDeviceCode: assetCode,
+    sourceTimestamp: adapter.timestampPath ? readTimestamp(readSafeJsonPath(payload, adapter.timestampPath)) : null,
+    sequence: adapter.sequencePath ? readSequence(readSafeJsonPath(payload, adapter.sequencePath)) : null,
+    fields,
+  });
+}
+
+/** 创建统一快照，并补齐 Stacker 位置和故障兼容语义。 */
+function createSnapshot(input: Omit<DeviceTelemetrySnapshot, 'receivedAt' | 'currentLocationKey' | 'targetLocationKey' | 'hasTargetLocation' | 'faulted' | 'message'>): DeviceTelemetrySnapshot {
+  normalizeStackerCompatibleFields(input.deviceType, input.fields);
+  const stackerLocation = createStackerLocationState(input.deviceType, input.fields);
+  const normal = readBooleanField(input.fields, 'normal');
+  const errorCode = readIntegerField(input.fields, 'errorCode') ?? 0;
+  const message = readStringField(input.fields, 'message') ?? '';
+
+  return {
+    ...input,
+    receivedAt: Date.now(),
+    currentLocationKey: stackerLocation.currentLocationKey,
+    targetLocationKey: stackerLocation.targetLocationKey,
+    hasTargetLocation: stackerLocation.targetLocationKey !== null,
+    faulted: resolveFaulted(input.deviceType, input.fields, normal, errorCode),
+    message,
+  };
+}
+
+/** 将 Stacker 历史拼写和正式字段做兼容归一。 */
 function normalizeStackerCompatibleFields(deviceType: string, fields: DeviceTelemetryFields): void {
   if (deviceType !== 'stacker') return;
 
@@ -240,20 +410,21 @@ function resolveFaulted(
   return readIntegerField(fields, 'front_command') === 8 || readIntegerField(fields, 'back_command') === 8;
 }
 
-/** 把 payload.data 数组转换成字段表，只接收 e 缺失或与 topic 资产编号一致的点位。 */
+/** 将 payload.data 数组转换成字段表，只接收 e 缺失或与 topic 资产编号一致的有限点位。 */
 function parseTelemetryFields(data: unknown, assetCode: string): DeviceTelemetryFields {
   if (!Array.isArray(data)) return {};
 
   return data.reduce<DeviceTelemetryFields>((fields, item: DevicePayloadItem) => {
-    if (!item || typeof item !== 'object' || typeof item.p !== 'string') return fields;
+    if (!item || typeof item !== 'object' || typeof item.p !== 'string' || item.p.trim() === '') return fields;
     const pointDeviceCode = readPayloadItemDeviceCode(item);
     if (pointDeviceCode && pointDeviceCode !== assetCode) return fields;
+    if (isInvalidTelemetryFieldValue(item.v)) return fields;
     fields[item.p] = item.v;
     return fields;
   }, {});
 }
 
-/** 读取 payload 内部的 e 字段，仅作为辅助元数据，不覆盖 topic 资产编号。 */
+/** 读取 payload 内部 e 字段，仅作为辅助元数据，不覆盖 topic 资产编号。 */
 function readPayloadDeviceCode(data: unknown): string | null {
   if (!Array.isArray(data)) return null;
 
@@ -282,5 +453,151 @@ function readPayloadItemDeviceCode(item: DevicePayloadItem | null | undefined): 
 function createLocationKey(x: number | null, y: number | null, z: number | null, keepZeroTarget: boolean): string | null {
   if (x === null || y === null || z === null) return null;
   if (!keepZeroTarget && x === 0 && y === 0 && z === 0) return null;
-  return `${x}-${y}-${z}`;
+  return String(x) + '-' + String(y) + '-' + String(z);
+}
+
+/** 将 sourceId 归一为非空字符串，兼容旧调用方默认数据源。 */
+function normalizeSourceId(sourceId: string | undefined): string {
+  const normalizedSourceId = sourceId?.trim();
+  return normalizedSourceId || DEFAULT_TELEMETRY_SOURCE_ID;
+}
+
+/** 读取毫秒时间戳，兼容数字、数字字符串和 ISO 时间字符串。 */
+function readTimestamp(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const numericValue = Number(value);
+  if (Number.isFinite(numericValue)) return numericValue;
+  const parsedDate = Date.parse(value);
+  return Number.isFinite(parsedDate) ? parsedDate : null;
+}
+
+/** 读取遥测序号，仅保留有限整数。 */
+function readSequence(value: unknown): number | null {
+  const sequence = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(sequence)) return null;
+  return Number.isInteger(sequence) ? sequence : Math.trunc(sequence);
+}
+
+/** 判断字段值是否不可写入遥测快照。 */
+function isInvalidTelemetryFieldValue(value: unknown): boolean {
+  return typeof value === 'number' && !Number.isFinite(value);
+}
+
+/** 从安全 JSON Path 读取字符串字段，空字符串视为缺失。 */
+function readPathString(payload: unknown, path: string): string | null {
+  const value = readSafeJsonPath(payload, path);
+  if (typeof value === 'string') {
+    const trimmedValue = value.trim();
+    return trimmedValue || null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+/** 使用仅支持点号和数组索引的安全路径读取对象值，不执行任何脚本表达式。 */
+function readSafeJsonPath(payload: unknown, path: string): unknown {
+  const segments = parseSafeJsonPath(path);
+  if (!segments) return undefined;
+
+  let current: unknown = payload;
+  for (const segment of segments) {
+    if (typeof segment === 'number') {
+      if (!Array.isArray(current)) return undefined;
+      current = current[segment];
+      continue;
+    }
+
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
+    const record = current as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(record, segment)) return undefined;
+    current = record[segment];
+  }
+  return current;
+}
+
+/** 解析安全 JSON Path，拒绝括号脚本、原型链和空段。 */
+function parseSafeJsonPath(path: string): Array<string | number> | null {
+  const trimmedPath = path.trim();
+  const pathWithoutRoot = normalizeJsonPathRoot(trimmedPath);
+  if (pathWithoutRoot === null || pathWithoutRoot.includes('..')) return null;
+
+  const segments: Array<string | number> = [];
+  for (const rawSegment of pathWithoutRoot.split('.')) {
+    if (!SAFE_PATH_SEGMENT_PATTERN.test(rawSegment)) return null;
+    const propertyName = rawSegment.replace(/\[\d+\]/g, '');
+    if (propertyName === '__proto__' || propertyName === 'prototype' || propertyName === 'constructor') return null;
+    segments.push(propertyName);
+
+    for (const indexMatch of rawSegment.matchAll(/\[(\d+)\]/g)) {
+      segments.push(Number(indexMatch[1]));
+    }
+  }
+  return segments;
+}
+
+/** 规范化 JSON Path 根节点，兼容文档式根前缀并拒绝空路径。 */
+function normalizeJsonPathRoot(trimmedPath: string): string | null {
+  if (!trimmedPath) return null;
+  const jsonPathRoot = String.fromCharCode(36);
+  if (trimmedPath === jsonPathRoot) return '';
+  return trimmedPath.startsWith(jsonPathRoot + '.') ? trimmedPath.slice(2) : trimmedPath;
+}
+
+/** 生成不包含 receivedAt 的稳定快照内容签名，用于无序号遥测去重。 */
+function createSnapshotContentSignature(snapshot: DeviceTelemetrySnapshot): string {
+  return stableStringify({
+    sourceId: snapshot.sourceId,
+    topic: snapshot.topic,
+    deviceType: snapshot.deviceType,
+    assetCode: snapshot.assetCode,
+    payloadDeviceCode: snapshot.payloadDeviceCode,
+    fields: snapshot.fields,
+    currentLocationKey: snapshot.currentLocationKey,
+    targetLocationKey: snapshot.targetLocationKey,
+    hasTargetLocation: snapshot.hasTargetLocation,
+    faulted: snapshot.faulted,
+    message: snapshot.message,
+  });
+}
+
+/** 稳定序列化普通 JSON 值，保证对象键顺序不会影响内容签名。 */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return '[' + value.map((item) => stableStringify(item)).join(',') + ']';
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return '{' + Object.keys(record)
+      .sort()
+      .map((key) => JSON.stringify(key) + ':' + stableStringify(record[key]))
+      .join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+
+/** 判断两条快照是否是同一时序点的重复内容；新序号/新源时间仍需刷新在线时间。 */
+function isDuplicateSnapshot(next: DeviceTelemetrySnapshot, current: DeviceTelemetrySnapshot): boolean {
+  if (createSnapshotContentSignature(next) !== createSnapshotContentSignature(current)) return false;
+  if (next.sequence !== null && current.sequence !== null) return next.sequence === current.sequence;
+  if (next.sourceTimestamp !== null && current.sourceTimestamp !== null) return next.sourceTimestamp === current.sourceTimestamp;
+  return next.sequence === null
+    && current.sequence === null
+    && next.sourceTimestamp === null
+    && current.sourceTimestamp === null;
+}
+
+/** 判断快照是否缺少业务时序字段，只能依赖 receivedAt 维护在线状态。 */
+function isUntimedSnapshot(snapshot: DeviceTelemetrySnapshot): boolean {
+  return snapshot.sequence === null && snapshot.sourceTimestamp === null;
+}
+
+/** 判断新快照是否严格晚于当前快照，同毫秒无时序快照允许按内容推进两帧。 */
+function isNewerSnapshot(next: DeviceTelemetrySnapshot, current: DeviceTelemetrySnapshot): boolean {
+  if (next.sequence !== null && current.sequence !== null) return next.sequence > current.sequence;
+  if (next.sourceTimestamp !== null && current.sourceTimestamp !== null) return next.sourceTimestamp > current.sourceTimestamp;
+  if (next.sequence === null && current.sequence === null && next.sourceTimestamp === null && current.sourceTimestamp === null) {
+    return next.receivedAt >= current.receivedAt;
+  }
+  return next.receivedAt > current.receivedAt;
 }

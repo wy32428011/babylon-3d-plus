@@ -42,12 +42,26 @@ import type {
 } from '../../editor/model/modelParameters';
 import type { Vector3Data } from '../../editor/model/math';
 import type { SceneDocument, SceneEnvironmentSettings } from '../../editor/model/SceneDocument';
+import type { TelemetryBindingComponent } from '../../editor/model/telemetryBinding';
 import {
   consumeCadReferenceParseResult,
   parseCadReferenceDxf,
   type CadReferenceParseResult,
 } from '../../editor/cad/cadReference';
 import { ExternalModelScriptRuntime } from './ExternalModelScriptRuntime';
+import { GenericTelemetryMotionRuntime } from './telemetry/GenericTelemetryMotionRuntime';
+import {
+  captureModelTelemetryPreviewBaseline,
+  restoreModelTelemetryPreviewBaseline,
+  type ModelTelemetryPreviewBaseline,
+} from './telemetry/telemetryPreviewBaseline';
+import {
+  collectSpecializedTelemetryConflictKeys,
+  resolveSpecializedTelemetryBinding,
+  resolveSpecializedTelemetrySnapshot,
+  type ResolvedSpecializedTelemetryBinding,
+  type SpecializedTelemetryDeviceType,
+} from './telemetry/specializedTelemetryBinding';
 import {
   deviceTelemetryStore,
   readIntegerField,
@@ -56,6 +70,7 @@ import {
   type DeviceTelemetrySnapshot,
   type StackerTelemetrySnapshot,
 } from '../mqtt/deviceTelemetry';
+import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticStatus } from '../mqtt/telemetryRuntimeDiagnostics';
 import { resolveRelativeEditorAssetUrl, resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
@@ -105,6 +120,7 @@ type ModelRuntimeEntry = {
   assetRevision: string | null;
   assetSignature: string;
   assetCode: string;
+  telemetryBinding: TelemetryBindingComponent | null;
   stackerCapable: boolean;
   conveyorCapable: boolean;
   root: TransformNode;
@@ -121,6 +137,13 @@ type ModelRuntimeEntry = {
   stackerTelemetry: StackerModelTelemetryState;
   conveyorTelemetry: ConveyorModelTelemetryState;
   stackerTelemetryReady: boolean;
+  telemetryPreviewBaseline: ModelTelemetryPreviewBaseline | null;
+};
+
+type SpecializedTelemetryRuntimeEntry = {
+  entityId: string;
+  model: ModelRuntimeEntry;
+  binding: ResolvedSpecializedTelemetryBinding;
 };
 
 type ModelParameterRuntimeTarget = AbstractMesh | TransformNode | Material;
@@ -258,9 +281,11 @@ export class SceneRuntime {
   private readonly entityStates = new Map<string, EntityRuntimeState>();
   private readonly modelHighlightLayer: HighlightLayer;
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
+  private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
   private readonly reportedMissingTargets = new Set<string>();
   private readonly reportedFaults = new Map<string, string>();
   private readonly reportedStatuses = new Map<string, string>();
+  private telemetryPreviewActive = false;
   private environment: EnvironmentRuntimeEntry | null = null;
   private modelLoadSequence = 0;
   private environmentLoadSequence = 0;
@@ -270,7 +295,35 @@ export class SceneRuntime {
     private readonly pushLog: (message: string) => void = () => undefined,
   ) {
     this.modelHighlightLayer = new HighlightLayer('EditorModelHighlightLayer', scene);
+    this.genericTelemetryMotionRuntime = new GenericTelemetryMotionRuntime(scene, { pushLog: this.pushLog });
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
+  }
+
+  /** 开始 MQTT 运行预览；该方法幂等，并在真正驱动前清空上一次预览残留运行态。 */
+  beginTelemetryPreview(): void {
+    if (this.telemetryPreviewActive) return;
+    this.telemetryPreviewActive = true;
+    this.genericTelemetryMotionRuntime.beginPreview();
+    this.clearTelemetryPreviewRuntimeState();
+  }
+
+  /** 结束 MQTT 运行预览；该方法幂等，按驱动关闭、运行态清理、模型恢复的顺序回到编辑态。 */
+  endTelemetryPreview(): void {
+    const hadPreviewState = this.telemetryPreviewActive || [...this.models.values()].some((model) => model.telemetryPreviewBaseline);
+    if (!hadPreviewState) return;
+
+    this.telemetryPreviewActive = false;
+    this.genericTelemetryMotionRuntime.endPreview();
+    this.disposeAllTelemetryRuntimeCargo();
+    for (const model of this.models.values()) {
+      if (model.telemetryPreviewBaseline) {
+        restoreModelTelemetryPreviewBaseline(model.telemetryPreviewBaseline);
+        model.telemetryPreviewBaseline = null;
+      }
+      this.resetStackerTelemetryState(model);
+      this.resetConveyorTelemetryState(model);
+    }
+    this.clearTelemetryPreviewRuntimeState();
   }
 
   /** 根据实体 ID 获取当前运行时中可被 Gizmo 绑定的 Babylon 节点。 */
@@ -566,6 +619,7 @@ export class SceneRuntime {
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
     }
+    this.endTelemetryPreview();
     for (const [entityId, mesh] of this.meshes.entries()) {
       this.disposeMesh(entityId, mesh);
     }
@@ -578,6 +632,7 @@ export class SceneRuntime {
     for (const [entityId, model] of this.models.entries()) {
       this.disposeModel(entityId, model);
     }
+    this.genericTelemetryMotionRuntime.dispose();
     for (const cargo of this.stackerCargoMeshes.values()) {
       this.disposeStackerCargo(cargo);
     }
@@ -798,6 +853,7 @@ export class SceneRuntime {
         this.resetConveyorTelemetryState(current);
       }
       current.assetCode = modelAsset.assetCode;
+      current.telemetryBinding = entity.components.telemetryBinding ?? null;
       current.assetRevision = modelAsset.assetRevision ?? null;
       current.assetSignature = assetSignature;
       current.stackerCapable = this.isStackerModelAsset(modelAsset);
@@ -823,6 +879,7 @@ export class SceneRuntime {
       assetRevision: modelAsset.assetRevision ?? null,
       assetSignature,
       assetCode: modelAsset.assetCode,
+      telemetryBinding: entity.components.telemetryBinding ?? null,
       stackerCapable: this.isStackerModelAsset(modelAsset),
       conveyorCapable: this.isConveyorModelAsset(modelAsset),
       root,
@@ -839,6 +896,7 @@ export class SceneRuntime {
       stackerTelemetry: this.createStackerTelemetryState(root),
       conveyorTelemetry: this.createConveyorTelemetryState(),
       stackerTelemetryReady: false,
+      telemetryPreviewBaseline: null,
     };
     this.models.set(entity.id, pending);
     this.applyModelInteractivity(pending, entity.id);
@@ -913,61 +971,222 @@ export class SceneRuntime {
 
   /** 每帧把最新 MQTT 设备遥测分发到对应设备运行时。 */
   private applyDeviceTelemetryFrame(): void {
+    if (!this.telemetryPreviewActive) return;
+    this.clearInactiveSpecializedTelemetryDiagnostics();
+    this.captureReadyTelemetryPreviewBaselines();
     this.applyStackerTelemetryFrame();
     this.applyConveyorTelemetryFrame();
+    const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
+    this.genericTelemetryMotionRuntime.applyFrame(deltaSeconds);
   }
 
-  /** 每帧把最新 MQTT stacker 遥测应用到匹配的模型实例。 */
+  /** 为已加载且 ready 的模型捕获本次预览基线，异步 GLB 后续 ready 时会在首个驱动帧前补捕获。 */
+  private captureReadyTelemetryPreviewBaselines(): void {
+    for (const model of this.models.values()) {
+      if (model.telemetryPreviewBaseline || !model.container || !model.stackerTelemetryReady) continue;
+      model.telemetryPreviewBaseline = captureModelTelemetryPreviewBaseline({ root: model.root, contentRoot: model.contentRoot });
+    }
+  }
+
+  /** 清空 SceneRuntime 级别的预览诊断、metadata 和已上报状态，不影响模型注册或编译绑定。 */
+  private clearTelemetryPreviewRuntimeState(): void {
+    telemetryRuntimeDiagnosticsStore.clear();
+    this.reportedMissingTargets.clear();
+    this.reportedFaults.clear();
+    this.reportedStatuses.clear();
+    for (const model of this.models.values()) {
+      this.clearSpecializedTelemetryDiagnosticsForModel(model);
+    }
+  }
+
+  /** 清理所有专用 Stacker/Conveyor 运行时货物，保证结束预览不污染编辑态场景。 */
+  private disposeAllTelemetryRuntimeCargo(): void {
+    for (const cargo of this.stackerCargoMeshes.values()) {
+      this.disposeStackerCargo(cargo);
+    }
+    this.stackerCargoMeshes.clear();
+    for (const cargo of this.conveyorCargoMeshes.values()) {
+      this.disposeConveyorCargo(cargo);
+    }
+    this.conveyorCargoMeshes.clear();
+  }
+
+  /** 清除模型 root/contentRoot 上的遥测运行态 metadata，避免预览状态泄漏到编辑态 Inspector。 */
+  private clearSpecializedTelemetryDiagnosticsForModel(model: ModelRuntimeEntry): void {
+    for (const node of [model.root, model.contentRoot]) {
+      if (!node.metadata || typeof node.metadata !== 'object') continue;
+      const metadata = { ...(node.metadata as Record<string, unknown>) };
+      delete metadata.telemetryRuntime;
+      delete metadata.telemetry;
+      delete metadata.stackerTelemetry;
+      delete metadata.conveyorTelemetry;
+      node.metadata = metadata;
+    }
+  }
+
+  /** 每帧把最新 MQTT stacker 遥测应用到完整主键匹配且无冲突的模型实例。 */
   private applyStackerTelemetryFrame(): void {
-    const snapshots = deviceTelemetryStore.getSnapshotsByDeviceType('stacker') as StackerTelemetrySnapshot[];
-    if (snapshots.length === 0) return;
-
-    const snapshotAssetCodes = new Set(snapshots.map((snapshot) => snapshot.assetCode));
-    const telemetryModels = [...this.models.values()].filter(
-      (model) => model.container && model.stackerTelemetryReady && snapshotAssetCodes.has(model.assetCode),
-    );
-    if (telemetryModels.length === 0) return;
-
+    const candidates = this.collectSpecializedTelemetryModels('stacker');
+    const conflictKeys = collectSpecializedTelemetryConflictKeys(candidates.map((candidate) => candidate.binding));
     const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
-    for (const model of telemetryModels) {
-      const snapshot = this.resolveStackerTelemetrySnapshot(model);
-      if (!snapshot) continue;
+    const nowMs = Date.now();
 
-      this.applyStackerTelemetryToModel(model, snapshot, deltaSeconds);
+    for (const candidate of candidates) {
+      const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
+      if (!snapshot) continue;
+      this.applyStackerTelemetryToModel(candidate.model, snapshot as StackerTelemetrySnapshot, deltaSeconds);
     }
   }
 
-  /** 按模型资产编号精确匹配 Stacker 遥测，避免现场编号配置错误时误驱动唯一模型。 */
-  private resolveStackerTelemetrySnapshot(model: ModelRuntimeEntry): StackerTelemetrySnapshot | null {
-    return deviceTelemetryStore.getSnapshot(model.assetCode, 'stacker') as StackerTelemetrySnapshot | null;
-  }
-
-  /** 每帧把最新 MQTT conveyor 遥测应用到匹配的输送线模型实例。 */
+  /** 每帧把最新 MQTT conveyor 遥测应用到完整主键匹配且无冲突的模型实例。 */
   private applyConveyorTelemetryFrame(): void {
-    const snapshots = deviceTelemetryStore.getSnapshotsByDeviceType('conveyor');
-    if (snapshots.length === 0) return;
-
-    const snapshotAssetCodes = new Set(snapshots.map((snapshot) => snapshot.assetCode));
-    const telemetryModels = [...this.models.values()].filter((model) => {
-      return model.container
-        && model.stackerTelemetryReady
-        && snapshotAssetCodes.has(model.assetCode)
-        && this.isConveyorRuntimeModel(model);
-    });
-    if (telemetryModels.length === 0) return;
-
+    const candidates = this.collectSpecializedTelemetryModels('conveyor');
+    const conflictKeys = collectSpecializedTelemetryConflictKeys(candidates.map((candidate) => candidate.binding));
     const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
-    for (const model of telemetryModels) {
-      const snapshot = this.resolveConveyorTelemetrySnapshot(model);
-      if (!snapshot) continue;
+    const nowMs = Date.now();
 
-      this.applyConveyorTelemetryToModel(model, snapshot, deltaSeconds);
+    for (const candidate of candidates) {
+      const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
+      if (!snapshot) continue;
+      this.applyConveyorTelemetryToModel(candidate.model, snapshot, deltaSeconds);
     }
   }
 
-  /** 按模型资产编号精确匹配 Conveyor 遥测，避免不同线体编号被唯一兜底误绑。 */
-  private resolveConveyorTelemetrySnapshot(model: ModelRuntimeEntry): DeviceTelemetrySnapshot | null {
-    return deviceTelemetryStore.getSnapshot(model.assetCode, 'conveyor');
+  /** 收集最终选择当前专用类型的模型，并把实例绑定归一成完整遥测主键。 */
+  private collectSpecializedTelemetryModels(
+    deviceType: SpecializedTelemetryDeviceType,
+  ): SpecializedTelemetryRuntimeEntry[] {
+    const candidates: SpecializedTelemetryRuntimeEntry[] = [];
+    for (const [entityId, model] of this.models.entries()) {
+      if (!model.container || !model.stackerTelemetryReady) continue;
+      if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) continue;
+
+      const binding = resolveSpecializedTelemetryBinding({
+        modelAssetCode: model.assetCode,
+        deviceType,
+        binding: model.telemetryBinding,
+      });
+      if (!binding) continue;
+      candidates.push({ entityId, model, binding });
+    }
+    return candidates;
+  }
+
+  /** 为同时命中多种专用能力的模型选择唯一驱动类型，实例绑定优先、无绑定时 Stacker 优先。 */
+  private resolveSpecializedTelemetryDeviceType(model: ModelRuntimeEntry): SpecializedTelemetryDeviceType | null {
+    if (model.telemetryBinding?.enabled === false) return null;
+    const configuredDeviceType = model.telemetryBinding?.deviceType.trim().toLowerCase();
+    if (configuredDeviceType) {
+      if (configuredDeviceType === 'stacker' && model.stackerCapable) return 'stacker';
+      if (configuredDeviceType === 'conveyor' && this.isConveyorRuntimeModel(model)) return 'conveyor';
+      return null;
+    }
+    if (model.stackerCapable) return 'stacker';
+    if (this.isConveyorRuntimeModel(model)) return 'conveyor';
+    return null;
+  }
+
+  /** 仅在模型没有任何有效专用绑定时清理诊断，避免另一专用类型遍历覆盖有效状态。 */
+  private clearInactiveSpecializedTelemetryDiagnostics(): void {
+    for (const [entityId, model] of this.models.entries()) {
+      if (!model.container || !model.stackerTelemetryReady) continue;
+      const isSpecialized = model.stackerCapable || this.isConveyorRuntimeModel(model);
+      if (!isSpecialized || this.resolveSpecializedTelemetryDeviceType(model)) continue;
+      this.clearSpecializedTelemetryDiagnostics(entityId, model);
+    }
+  }
+
+  /** 解析当前帧专用快照，并统一处理冲突、离线、断流和诊断状态。 */
+  private resolveSpecializedTelemetryFrameSnapshot(
+    candidate: SpecializedTelemetryRuntimeEntry,
+    conflictKeys: ReadonlySet<string>,
+    nowMs: number,
+  ): DeviceTelemetrySnapshot | null {
+    const { entityId, model, binding } = candidate;
+    const snapshot = resolveSpecializedTelemetrySnapshot(deviceTelemetryStore, binding);
+    const conflictReportKey = `specialized-conflict:${binding.key}`;
+
+    if (conflictKeys.has(binding.key)) {
+      const errors = ['绑定冲突：同一 sourceId/deviceType/assetCode 匹配多个专用模型，已停止驱动。'];
+      this.writeSpecializedTelemetryDiagnostics(entityId, model, binding, {
+        online: false,
+        stale: false,
+        faulted: snapshot?.faulted ?? false,
+        conflict: true,
+        lastReceivedAt: snapshot?.receivedAt ?? null,
+        errors,
+      }, snapshot ?? undefined);
+      if (this.reportedStatuses.get(conflictReportKey) !== 'conflict') {
+        this.reportedStatuses.set(conflictReportKey, 'conflict');
+        this.pushLog(
+          `专用遥测绑定冲突，已停止驱动：sourceId=${binding.sourceId}，deviceType=${binding.deviceType}，assetCode=${binding.assetCode}`,
+        );
+      }
+      return null;
+    }
+
+    this.reportedStatuses.delete(conflictReportKey);
+    if (!snapshot) {
+      this.writeSpecializedTelemetryDiagnostics(entityId, model, binding, {
+        online: false,
+        stale: false,
+        faulted: false,
+        conflict: false,
+        lastReceivedAt: null,
+        errors: [],
+      });
+      return null;
+    }
+
+    const stale = nowMs - snapshot.receivedAt > binding.staleAfterMs;
+    this.writeSpecializedTelemetryDiagnostics(entityId, model, binding, {
+      online: !stale && !snapshot.faulted,
+      stale,
+      faulted: snapshot.faulted,
+      conflict: false,
+      lastReceivedAt: snapshot.receivedAt,
+      errors: [],
+    }, snapshot);
+    return stale ? null : snapshot;
+  }
+
+  /** 把专用驱动诊断写入 Babylon metadata 和只读外部 store，不进入场景文档或撤销历史。 */
+  private writeSpecializedTelemetryDiagnostics(
+    entityId: string,
+    model: ModelRuntimeEntry,
+    binding: ResolvedSpecializedTelemetryBinding,
+    status: TelemetryRuntimeDiagnosticStatus,
+    snapshot?: DeviceTelemetrySnapshot,
+  ): void {
+    const runtimeMetadata = { ...status, errors: [...status.errors] };
+    for (const node of [model.root, model.contentRoot]) {
+      node.metadata = { ...(node.metadata ?? {}), telemetryRuntime: runtimeMetadata };
+    }
+    telemetryRuntimeDiagnosticsStore.upsert(entityId, {
+      ...runtimeMetadata,
+      sourceId: snapshot?.sourceId ?? binding.sourceId,
+      deviceType: snapshot?.deviceType ?? binding.deviceType,
+      assetCode: snapshot?.assetCode ?? binding.assetCode,
+      topic: snapshot?.topic ?? null,
+      sequence: snapshot?.sequence ?? null,
+      sourceTimestamp: snapshot?.sourceTimestamp ?? null,
+      fields: snapshot?.fields ?? {},
+      message: snapshot?.message ?? '',
+      nodeTargets: [],
+      boneTargets: [],
+      animationTargets: [],
+    });
+  }
+
+  /** 清理禁用或类型错配的专用绑定诊断，避免 Inspector 展示过期状态。 */
+  private clearSpecializedTelemetryDiagnostics(entityId: string, model: ModelRuntimeEntry): void {
+    telemetryRuntimeDiagnosticsStore.delete(entityId);
+    for (const node of [model.root, model.contentRoot]) {
+      if (!node.metadata || typeof node.metadata !== 'object') continue;
+      const metadata = { ...(node.metadata as Record<string, unknown>) };
+      delete metadata.telemetryRuntime;
+      node.metadata = metadata;
+    }
   }
 
   /** 对单台 stacker 应用根节点、载货台和前后叉的遥测驱动。 */
@@ -1867,7 +2086,7 @@ export class SceneRuntime {
 
   /** 对故障和目标位缺失做一次性 Console 提示，避免每帧刷屏。 */
   private reportStackerRuntimeState(snapshot: StackerTelemetrySnapshot, targetLocator: LocatorRuntimeEntry | null): void {
-    const deviceKey = `${snapshot.deviceType}:${snapshot.assetCode}`;
+    const deviceKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}`;
     const mode = readIntegerField(snapshot.fields, 'mode');
     const frontCommand = readIntegerField(snapshot.fields, 'front_command');
     const backCommand = readIntegerField(snapshot.fields, 'back_command');
@@ -1901,7 +2120,7 @@ export class SceneRuntime {
 
   /** 对输送线状态和故障做节流日志，实时字段仍完整写入 metadata。 */
   private reportConveyorRuntimeState(snapshot: DeviceTelemetrySnapshot): void {
-    const deviceKey = `${snapshot.deviceType}:${snapshot.assetCode}`;
+    const deviceKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}`;
     const mode = readIntegerField(snapshot.fields, 'mode');
     const task = readIntegerField(snapshot.fields, 'task');
     const movementX = readIntegerField(snapshot.fields, 'movement_x');
@@ -2501,6 +2720,8 @@ export class SceneRuntime {
 
   /** 释放导入模型的容器、根节点与所有子资源。 */
   private disposeModel(entityId: string, model: ModelRuntimeEntry): void {
+    this.genericTelemetryMotionRuntime.disposeModel(entityId);
+    model.telemetryPreviewBaseline = null;
     this.applyModelSelection(model, false);
     model.externalScriptRuntime?.dispose();
     this.disposeStackerCargoForAssetCode(model.assetCode);
@@ -2750,6 +2971,7 @@ export class SceneRuntime {
       this.resetStackerTelemetryState(model);
       this.resetConveyorTelemetryState(model);
       model.stackerTelemetryReady = true;
+      this.syncGenericTelemetryMotion(entity, model);
       return;
     }
 
@@ -2780,6 +3002,7 @@ export class SceneRuntime {
         this.resetStackerTelemetryState(current);
         this.resetConveyorTelemetryState(current);
         current.stackerTelemetryReady = true;
+        this.syncGenericTelemetryMotion(entity, current);
       });
       return;
     }
@@ -2790,6 +3013,37 @@ export class SceneRuntime {
     this.resetStackerTelemetryState(model);
     this.resetConveyorTelemetryState(model);
     model.stackerTelemetryReady = true;
+    this.syncGenericTelemetryMotion(entity, model);
+  }
+
+  /** 同步通用遥测运动引擎，专用 Stacker/Conveyor 模型默认跳过避免双重驱动。 */
+  private syncGenericTelemetryMotion(entity: Entity, model: ModelRuntimeEntry): void {
+    const modelAsset = entity.components.modelAsset;
+    if (!modelAsset || !model.container) return;
+
+    this.genericTelemetryMotionRuntime.syncModel({
+      entityId: entity.id,
+      root: model.root,
+      contentRoot: model.contentRoot,
+      modelAsset,
+      binding: entity.components.telemetryBinding ?? null,
+      externalDataDrivenConfigs: model.externalScriptRuntime?.getDataDrivenConfigs() ?? [],
+      specializedDriver: model.stackerCapable || this.isConveyorRuntimeModel(model),
+      loadToken: model.loadToken,
+      baselineRevision: this.createGenericTelemetryBaselineRevision(entity, model),
+      animationGroups: model.container?.animationGroups ?? [],
+    });
+  }
+
+  /** 生成通用遥测基线签名，参数、脚本、资产或实体 Transform 变化时重建运行态基线。 */
+  private createGenericTelemetryBaselineRevision(entity: Entity, model: ModelRuntimeEntry): string {
+    return JSON.stringify({
+      transform: entity.components.transform,
+      parameterSignature: model.parameterSignature,
+      externalScriptSignature: model.externalScriptSignature,
+      assetSignature: model.assetSignature,
+      loadToken: model.loadToken,
+    });
   }
 
   /** 模型完成归一化和外置脚本初始化后，重新建立 Stacker 遥测基线。 */

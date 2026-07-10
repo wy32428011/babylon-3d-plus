@@ -1,0 +1,550 @@
+{
+  "version": 1,
+  "units": {
+    "length": "meter"
+  },
+  "scene": {
+    "id": "scene_generic_mqtt_motion_demo",
+    "name": "Generic MQTT Motion Demo",
+    "entityIds": [
+      "entity_generic_mqtt_gen_a",
+      "entity_generic_mqtt_gen_b",
+      "entity_generic_mqtt_ground",
+      "entity_generic_mqtt_light"
+    ],
+    "entities": {
+      "entity_generic_mqtt_gen_a": {
+        "id": "entity_generic_mqtt_gen_a",
+        "name": "Generic MQTT Motion Demo - GEN-A",
+        "visible": true,
+        "locked": false,
+        "parentId": null,
+        "childrenIds": [],
+        "components": {
+          "transform": {
+            "position": {
+              "x": -3,
+              "y": 0,
+              "z": 0
+            },
+            "rotation": {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            }
+          },
+          "modelAsset": {
+            "assetCode": "GEN-A",
+            "sourcePath": "F:\\3d-babylon-editor\\examples\\model-packages\\GenericMqttMotionDemo\\GenericMqttMotionDemo.gltf",
+            "sourceUrl": "editor-asset://local/F%3A%5C3d-babylon-editor%5Cexamples%5Cmodel-packages%5CGenericMqttMotionDemo%5CGenericMqttMotionDemo.gltf",
+            "lengthUnit": "meter",
+            "unitScaleToMeters": 1,
+            "parameterConfig": {
+              "schema": "babylon-editor.model-parameters",
+              "version": 1,
+              "parameters": [
+                {
+                  "key": "bodyColor",
+                  "label": "主体颜色",
+                  "type": "color",
+                  "defaultValue": "#2f86ff"
+                },
+                {
+                  "key": "cabinetHeight",
+                  "label": "主体高度",
+                  "type": "number",
+                  "defaultValue": 1.2,
+                  "min": 0.6,
+                  "max": 2.2,
+                  "step": 0.1,
+                  "unit": "m"
+                },
+                {
+                  "key": "showAccentPanel",
+                  "label": "显示侧边面板",
+                  "type": "boolean",
+                  "defaultValue": true
+                },
+                {
+                  "key": "screenTexture",
+                  "label": "屏幕贴图",
+                  "type": "texture",
+                  "defaultValue": "textures/screen-grid.png",
+                  "allowedExtensions": [
+                    ".png"
+                  ],
+                  "options": [
+                    {
+                      "value": "textures/screen-grid.png",
+                      "label": "蓝色网格"
+                    },
+                    {
+                      "value": "textures/screen-stripes.png",
+                      "label": "黄色斜纹"
+                    }
+                  ]
+                }
+              ],
+              "bindings": [
+                {
+                  "target": {
+                    "kind": "material",
+                    "name": "BodyMaterial"
+                  },
+                  "property": "baseColor",
+                  "value": {
+                    "param": "bodyColor"
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "mesh",
+                    "name": "Body"
+                  },
+                  "property": "scaling",
+                  "value": {
+                    "vector3": [
+                      1,
+                      {
+                        "param": "cabinetHeight"
+                      },
+                      1
+                    ]
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "mesh",
+                    "name": "AccentPanel"
+                  },
+                  "property": "visible",
+                  "value": {
+                    "param": "showAccentPanel"
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "material",
+                    "name": "ScreenMaterial"
+                  },
+                  "property": "baseTexture",
+                  "value": {
+                    "param": "screenTexture"
+                  }
+                }
+              ]
+            },
+            "parameterValues": {
+              "bodyColor": "#2f86ff",
+              "cabinetHeight": 1.2,
+              "showAccentPanel": true,
+              "screenTexture": "textures/screen-grid.png"
+            },
+            "dataDrivenConfig": {
+              "device": {
+                "device": "Generic MQTT Motion Demo",
+                "devType": "generic-machine",
+                "defaultAssetCode": "GEN",
+                "interpolationMs": 250
+              },
+              "motion": {
+                "position_x": {
+                  "channel": "position_x",
+                  "fields": [
+                    "position_x"
+                  ],
+                  "mode": "absolute",
+                  "target": {
+                    "kind": "root"
+                  },
+                  "property": "position",
+                  "axis": "x",
+                  "space": "local",
+                  "scale": 1,
+                  "offset": 0,
+                  "invert": false,
+                  "min": -3,
+                  "max": 3,
+                  "smoothing": {
+                    "kind": "linear",
+                    "durationMs": 250
+                  }
+                },
+                "joint_angle_deg": {
+                  "channel": "joint_angle_deg",
+                  "fields": [
+                    "joint_angle_deg"
+                  ],
+                  "mode": "absolute",
+                  "target": {
+                    "kind": "node",
+                    "selector": "AccentPanel"
+                  },
+                  "property": "rotation",
+                  "axis": "z",
+                  "space": "local",
+                  "scale": 1,
+                  "offset": 0,
+                  "invert": false,
+                  "min": -60,
+                  "max": 60,
+                  "smoothing": {
+                    "kind": "linear",
+                    "durationMs": 250
+                  }
+                },
+                "operation_state": {
+                  "channel": "operation_state",
+                  "fields": [
+                    "operation_state"
+                  ],
+                  "mode": "state",
+                  "target": {
+                    "kind": "animation",
+                    "selector": "DoorPulse"
+                  },
+                  "scale": 1,
+                  "offset": 0,
+                  "invert": false,
+                  "actionMap": {
+                    "forward": "play",
+                    "reverse": "reverse",
+                    "fault": "play",
+                    "recovery": "play"
+                  },
+                  "animation": {
+                    "loop": false,
+                    "speed": 1
+                  }
+                }
+              },
+              "fixedNodes": []
+            }
+          },
+          "telemetryBinding": {
+            "enabled": true,
+            "sourceId": "default",
+            "deviceType": "generic-machine",
+            "assetCode": "GEN-A",
+            "expectedIntervalMs": 250,
+            "staleAfterMs": 2000,
+            "channelOverrides": {}
+          }
+        }
+      },
+      "entity_generic_mqtt_gen_b": {
+        "id": "entity_generic_mqtt_gen_b",
+        "name": "Generic MQTT Motion Demo - GEN-B",
+        "visible": true,
+        "locked": false,
+        "parentId": null,
+        "childrenIds": [],
+        "components": {
+          "transform": {
+            "position": {
+              "x": 3,
+              "y": 0,
+              "z": 0
+            },
+            "rotation": {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            }
+          },
+          "modelAsset": {
+            "assetCode": "GEN-B",
+            "sourcePath": "F:\\3d-babylon-editor\\examples\\model-packages\\GenericMqttMotionDemo\\GenericMqttMotionDemo.gltf",
+            "sourceUrl": "editor-asset://local/F%3A%5C3d-babylon-editor%5Cexamples%5Cmodel-packages%5CGenericMqttMotionDemo%5CGenericMqttMotionDemo.gltf",
+            "lengthUnit": "meter",
+            "unitScaleToMeters": 1,
+            "parameterConfig": {
+              "schema": "babylon-editor.model-parameters",
+              "version": 1,
+              "parameters": [
+                {
+                  "key": "bodyColor",
+                  "label": "主体颜色",
+                  "type": "color",
+                  "defaultValue": "#2f86ff"
+                },
+                {
+                  "key": "cabinetHeight",
+                  "label": "主体高度",
+                  "type": "number",
+                  "defaultValue": 1.2,
+                  "min": 0.6,
+                  "max": 2.2,
+                  "step": 0.1,
+                  "unit": "m"
+                },
+                {
+                  "key": "showAccentPanel",
+                  "label": "显示侧边面板",
+                  "type": "boolean",
+                  "defaultValue": true
+                },
+                {
+                  "key": "screenTexture",
+                  "label": "屏幕贴图",
+                  "type": "texture",
+                  "defaultValue": "textures/screen-grid.png",
+                  "allowedExtensions": [
+                    ".png"
+                  ],
+                  "options": [
+                    {
+                      "value": "textures/screen-grid.png",
+                      "label": "蓝色网格"
+                    },
+                    {
+                      "value": "textures/screen-stripes.png",
+                      "label": "黄色斜纹"
+                    }
+                  ]
+                }
+              ],
+              "bindings": [
+                {
+                  "target": {
+                    "kind": "material",
+                    "name": "BodyMaterial"
+                  },
+                  "property": "baseColor",
+                  "value": {
+                    "param": "bodyColor"
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "mesh",
+                    "name": "Body"
+                  },
+                  "property": "scaling",
+                  "value": {
+                    "vector3": [
+                      1,
+                      {
+                        "param": "cabinetHeight"
+                      },
+                      1
+                    ]
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "mesh",
+                    "name": "AccentPanel"
+                  },
+                  "property": "visible",
+                  "value": {
+                    "param": "showAccentPanel"
+                  }
+                },
+                {
+                  "target": {
+                    "kind": "material",
+                    "name": "ScreenMaterial"
+                  },
+                  "property": "baseTexture",
+                  "value": {
+                    "param": "screenTexture"
+                  }
+                }
+              ]
+            },
+            "parameterValues": {
+              "bodyColor": "#ef476f",
+              "cabinetHeight": 1.55,
+              "showAccentPanel": true,
+              "screenTexture": "textures/screen-stripes.png"
+            },
+            "dataDrivenConfig": {
+              "device": {
+                "device": "Generic MQTT Motion Demo",
+                "devType": "generic-machine",
+                "defaultAssetCode": "GEN",
+                "interpolationMs": 250
+              },
+              "motion": {
+                "position_x": {
+                  "channel": "position_x",
+                  "fields": [
+                    "position_x"
+                  ],
+                  "mode": "absolute",
+                  "target": {
+                    "kind": "root"
+                  },
+                  "property": "position",
+                  "axis": "x",
+                  "space": "local",
+                  "scale": 1,
+                  "offset": 0,
+                  "invert": false,
+                  "min": -3,
+                  "max": 3,
+                  "smoothing": {
+                    "kind": "linear",
+                    "durationMs": 250
+                  }
+                },
+                "joint_angle_deg": {
+                  "channel": "joint_angle_deg",
+                  "fields": [
+                    "joint_angle_deg"
+                  ],
+                  "mode": "absolute",
+                  "target": {
+                    "kind": "node",
+                    "selector": "AccentPanel"
+                  },
+                  "property": "rotation",
+                  "axis": "z",
+                  "space": "local",
+                  "scale": 1,
+                  "offset": 0,
+                  "invert": false,
+                  "min": -60,
+                  "max": 60,
+                  "smoothing": {
+                    "kind": "linear",
+                    "durationMs": 250
+                  }
+                },
+                "operation_state": {
+                  "channel": "operation_state",
+                  "fields": [
+                    "operation_state"
+                  ],
+                  "mode": "state",
+                  "target": {
+                    "kind": "animation",
+                    "selector": "DoorPulse"
+                  },
+                  "scale": 1,
+                  "offset": 0,
+                  "invert": false,
+                  "actionMap": {
+                    "forward": "play",
+                    "reverse": "reverse",
+                    "fault": "play",
+                    "recovery": "play"
+                  },
+                  "animation": {
+                    "loop": false,
+                    "speed": 1
+                  }
+                }
+              },
+              "fixedNodes": []
+            }
+          },
+          "telemetryBinding": {
+            "enabled": true,
+            "sourceId": "default",
+            "deviceType": "generic-machine",
+            "assetCode": "GEN-B",
+            "expectedIntervalMs": 250,
+            "staleAfterMs": 2000,
+            "channelOverrides": {}
+          }
+        }
+      },
+      "entity_generic_mqtt_ground": {
+        "id": "entity_generic_mqtt_ground",
+        "name": "通用 MQTT 演示地面",
+        "visible": true,
+        "locked": false,
+        "parentId": null,
+        "childrenIds": [],
+        "components": {
+          "transform": {
+            "position": {
+              "x": 0,
+              "y": -0.02,
+              "z": 0
+            },
+            "rotation": {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "scale": {
+              "x": 5,
+              "y": 1,
+              "z": 3
+            }
+          },
+          "meshRenderer": {
+            "meshKind": "plane",
+            "materialColor": "#2b3344"
+          }
+        }
+      },
+      "entity_generic_mqtt_light": {
+        "id": "entity_generic_mqtt_light",
+        "name": "通用 MQTT 演示灯光",
+        "visible": true,
+        "locked": false,
+        "parentId": null,
+        "childrenIds": [],
+        "components": {
+          "transform": {
+            "position": {
+              "x": 0,
+              "y": 3.2,
+              "z": -2.4
+            },
+            "rotation": {
+              "x": 0.6,
+              "y": 0,
+              "z": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            }
+          },
+          "light": {
+            "lightKind": "point",
+            "intensity": 1.2
+          }
+        }
+      }
+    },
+    "selectedEntityId": "entity_generic_mqtt_gen_a",
+    "mqttConfig": {
+      "enabled": true,
+      "ip": "127.0.0.1",
+      "address": "ws://127.0.0.1:8083/mqtt",
+      "topic": "dt/factory/logistics/generic-machine/+/twindatadriven/joint",
+      "subscriptions": [
+        {
+          "topic": "dt/factory/logistics/generic-machine/+/twindatadriven/joint",
+          "qos": 0,
+          "adapter": {
+            "kind": "epv",
+            "sourceId": "default",
+            "deviceType": "generic-machine"
+          }
+        }
+      ],
+      "simulatorEnabled": true,
+      "simulatorAssetCode": "GEN-A,GEN-B",
+      "simulatorScenario": "generic",
+      "simulatorIntervalMs": 250
+    }
+  }
+}

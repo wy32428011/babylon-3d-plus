@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
+import { disposeAllMqttIpcClients, registerMqttIpc } from './ipc/mqttIpc.js';
 import { registerProjectIpc } from './ipc/projectIpc.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -169,6 +170,7 @@ app.whenReady().then(() => {
   registerEditorAssetProtocol();
   registerProjectIpc();
   registerAssetIpc();
+  registerMqttIpc();
   createMainWindow();
 
   app.on('activate', () => {
@@ -182,4 +184,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('will-quit', () => {
+  disposeAllMqttIpcClients();
 });

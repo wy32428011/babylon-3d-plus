@@ -27,12 +27,14 @@ function isKeyboardEditableTarget(target: EventTarget | null): boolean {
 export function EditorLayout() {
   const [isConsoleDialogOpen, setConsoleDialogOpen] = useState(false);
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
+  const [runtimePreviewError, setRuntimePreviewError] = useState<string | null>(null);
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
   const gridSettings = useEditorStore((state) => state.gridSettings);
   const cadImportProgress = useEditorStore((state) => state.cadImportProgress);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
+  const runtimeMode = useEditorStore((state) => state.runtimeMode);
   const setTransformTool = useEditorStore((state) => state.setTransformTool);
   const setTransformSpace = useEditorStore((state) => state.setTransformSpace);
   const setSnapEnabled = useEditorStore((state) => state.setSnapEnabled);
@@ -51,8 +53,12 @@ export function EditorLayout() {
   const saveScene = useEditorStore((state) => state.saveScene);
   const loadScene = useEditorStore((state) => state.loadScene);
   const updateMqttConfig = useEditorStore((state) => state.updateMqttConfig);
+  const startRuntimePreview = useEditorStore((state) => state.startRuntimePreview);
+  const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
+  const pushLog = useEditorStore((state) => state.pushLog);
   const undo = useEditorStore((state) => state.undo);
   const redo = useEditorStore((state) => state.redo);
+  const isRuntimePreview = runtimeMode === 'preview';
   const canDelete = useEditorStore((state) => {
     const selectedEntityId = state.scene.selectedEntityId;
     const selectedEntity = selectedEntityId ? state.scene.entities[selectedEntityId] : null;
@@ -71,6 +77,19 @@ export function EditorLayout() {
 
       const key = event.key.toLowerCase();
       const isCommandKey = event.ctrlKey || event.metaKey;
+
+      if (isRuntimePreview) {
+        if (key === 'f') {
+          event.preventDefault();
+          requestSceneFocusForSelection();
+          return;
+        }
+
+        if (isCommandKey || event.key === 'Delete' || event.key === 'Backspace' || key === 'h' || TOOL_SHORTCUTS[key] || key === 'g') {
+          event.preventDefault();
+        }
+        return;
+      }
 
       if (isCommandKey) {
         if (key === 'c') {
@@ -145,7 +164,46 @@ export function EditorLayout() {
     requestSceneFocusForSelection,
     setTransformTool,
     ungroupSelectedEntities,
+    isRuntimePreview,
   ]);
+
+  /** 运行按钮先校验 MQTT/模拟器配置，失败时保持编辑态并打开配置弹窗。 */
+  function handleStartRuntimePreview(): void {
+    if (cadImportProgress?.active) {
+      const message = '请等待 CAD 导入完成。';
+      setRuntimePreviewError(message);
+      pushLog(`运行预览已阻止：${message}`);
+      return;
+    }
+
+    const readiness = startRuntimePreview();
+
+    if (!readiness.ok) {
+      setRuntimePreviewError(readiness.message);
+      if (readiness.code !== 'cad-import-active') setMqttConfigDialogOpen(true);
+      return;
+    }
+
+    setRuntimePreviewError(null);
+    setMqttConfigDialogOpen(false);
+  }
+
+  /** 停止按钮可在预览态随时回到编辑态。 */
+  function handleStopRuntimePreview(): void {
+    stopRuntimePreview();
+  }
+
+  /** 关闭 MQTT 弹窗时清除本次运行预检错误。 */
+  function handleCloseMqttConfig(): void {
+    setRuntimePreviewError(null);
+    setMqttConfigDialogOpen(false);
+  }
+
+  /** 保存 MQTT 配置后清除旧预检错误，配置本身不会在编辑态建立连接。 */
+  function handleSaveMqttConfig(config: typeof mqttConfig): void {
+    updateMqttConfig(config);
+    setRuntimePreviewError(null);
+  }
 
   return (
     <div className={styles.editorShell}>
@@ -169,27 +227,32 @@ export function EditorLayout() {
         mqttConfig={mqttConfig}
         mqttConfigDialogOpen={isMqttConfigDialogOpen}
         onOpenMqttConfig={() => setMqttConfigDialogOpen(true)}
-        onCloseMqttConfig={() => setMqttConfigDialogOpen(false)}
-        onSaveMqttConfig={updateMqttConfig}
+        onCloseMqttConfig={handleCloseMqttConfig}
+        onSaveMqttConfig={handleSaveMqttConfig}
+        runtimeMode={runtimeMode}
+        runtimePreviewError={runtimePreviewError}
+        readOnly={isRuntimePreview}
+        onStartRuntimePreview={handleStartRuntimePreview}
+        onStopRuntimePreview={handleStopRuntimePreview}
         cadImportProgress={cadImportProgress}
-        canDelete={canDelete}
-        canUndo={canUndo}
-        canRedo={canRedo}
+        canDelete={!isRuntimePreview && canDelete}
+        canUndo={!isRuntimePreview && canUndo}
+        canRedo={!isRuntimePreview && canRedo}
       />
       <div className={styles.workspace}>
         <aside className={styles.leftColumn}>
-          <HierarchyPanel />
+          <HierarchyPanel readOnly={isRuntimePreview} />
         </aside>
         <main className={styles.centerColumn}>
           <SceneViewPanel />
         </main>
         <aside className={styles.rightColumn}>
-          <InspectorPanel />
+          <InspectorPanel readOnly={isRuntimePreview} />
         </aside>
       </div>
       <div className={styles.bottomBar}>
         <div className={styles.bottomWorkspace}>
-          <ProjectPanel />
+          <ProjectPanel readOnly={isRuntimePreview} />
           <ConsolePanel
             isOpen={isConsoleDialogOpen}
             onClose={() => setConsoleDialogOpen(false)}

@@ -66,8 +66,10 @@ type RecentWorkspacesResult = {
 };
 
 type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
+type ModelAssetLibraryKind = 'model' | 'environment';
 type ModelParameterConfig = import('./editor/model/modelParameters').ModelParameterConfig;
 type ModelScriptAsset = import('./editor/model/components').ModelScriptAsset;
+type ModelDataDrivenConfig = import('./editor/model/telemetryBinding').ModelDataDrivenConfig;
 
 type AssetEntry = {
   id: string;
@@ -89,6 +91,17 @@ type AssetEntry = {
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
   parameterConfig?: ModelParameterConfig;
+  dataDrivenConfig?: ModelDataDrivenConfig;
+  libraryKind?: ModelAssetLibraryKind;
+};
+
+type ProjectModelAssetEntry = AssetEntry & {
+  kind: 'model';
+  libraryKind: ModelAssetLibraryKind;
+};
+
+type ImportModelFolderRequest = {
+  libraryKind: ModelAssetLibraryKind;
 };
 
 type ImportModelFolderSkippedEntry = {
@@ -100,7 +113,8 @@ type ImportModelFolderResult = {
   canceled: boolean;
   rootPath: string | null;
   projectRoot: string | null;
-  assets: AssetEntry[];
+  importedAssets: ProjectModelAssetEntry[];
+  projectAssets: ProjectModelAssetEntry[];
   skipped: ImportModelFolderSkippedEntry[];
 };
 
@@ -123,13 +137,56 @@ type ImportCadFileResult = {
 
 type ProjectListAssetsResult = {
   projectRoot: string | null;
-  assets: AssetEntry[];
+  assets: ProjectModelAssetEntry[];
 };
 
 type SelectProjectDirectoryResult = {
   canceled: boolean;
   projectRoot: string | null;
 };
+
+type MqttIpcAdapterConfig =
+  | { kind: 'epv'; sourceId?: string; deviceType?: string }
+  | {
+      kind: 'json-path';
+      sourceId?: string;
+      deviceTypePath?: string;
+      assetCodePath?: string;
+      timestampPath?: string;
+      sequencePath?: string;
+      fields: Record<string, string>;
+    };
+
+type MqttIpcSubscriptionConfig = {
+  topic: string;
+  qos: 0 | 1 | 2;
+  adapter?: MqttIpcAdapterConfig;
+};
+
+type MqttIpcConfigureRequest = {
+  enabled: boolean;
+  address: string;
+  subscriptions: MqttIpcSubscriptionConfig[];
+};
+
+type MqttIpcStatus = {
+  state: 'disabled' | 'connecting' | 'connected' | 'disconnected' | 'error';
+  address?: string;
+  subscriptions: MqttIpcSubscriptionConfig[];
+  lastError?: string;
+};
+
+type MqttIpcEvent =
+  | { type: 'status'; status: MqttIpcStatus }
+  | { type: 'log'; message: string; receivedAt: number }
+  | {
+      type: 'message';
+      sourceId: string;
+      subscription: MqttIpcSubscriptionConfig;
+      topic: string;
+      payloadText: string;
+      receivedAt: number;
+    };
 
 interface Window {
   editorApi: {
@@ -145,7 +202,11 @@ interface Window {
     removeRecentWorkspaceItem: (request: RemoveRecentWorkspaceItemRequest) => Promise<void>;
     selectProjectDirectory: () => Promise<SelectProjectDirectoryResult>;
     importCadFile: () => Promise<ImportCadFileResult>;
-    importModelFolder: () => Promise<ImportModelFolderResult>;
+    importModelFolder: (request: ImportModelFolderRequest) => Promise<ImportModelFolderResult>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
+    mqttConfigure?: (request: MqttIpcConfigureRequest) => Promise<MqttIpcStatus>;
+    mqttDisconnect?: () => Promise<MqttIpcStatus>;
+    mqttGetStatus?: () => Promise<MqttIpcStatus>;
+    onMqttEvent?: (handler: (event: MqttIpcEvent) => void) => () => void;
   };
 }

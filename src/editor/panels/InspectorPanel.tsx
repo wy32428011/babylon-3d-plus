@@ -4,6 +4,7 @@ import type { Vector3Data } from '../model/math';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import { useEditorStore } from '../store/editorStore';
 import { ModelParametersInspector } from './ModelParametersInspector';
+import { TelemetryBindingInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
 
 type TransformField = 'position' | 'rotation' | 'scale';
@@ -54,7 +55,11 @@ function getTransformInputStep(field: TransformField): string {
   return field === 'rotation' ? '1' : '0.1';
 }
 
-export function InspectorPanel() {
+type InspectorPanelProps = {
+  readOnly?: boolean;
+};
+
+export function InspectorPanel(props: InspectorPanelProps) {
   const scene = useEditorStore((state) => state.scene);
   const renameSelectedEntity = useEditorStore((state) => state.renameSelectedEntity);
   const updateSelectedTransform = useEditorStore((state) => state.updateSelectedTransform);
@@ -63,6 +68,8 @@ export function InspectorPanel() {
   const updateSelectedCadReference = useEditorStore((state) => state.updateSelectedCadReference);
   const updateSelectedLight = useEditorStore((state) => state.updateSelectedLight);
   const updateSelectedModelAssetCode = useEditorStore((state) => state.updateSelectedModelAssetCode);
+  const updateSelectedTelemetryBinding = useEditorStore((state) => state.updateSelectedTelemetryBinding);
+  const restoreSelectedTelemetryBindingDefault = useEditorStore((state) => state.restoreSelectedTelemetryBindingDefault);
   const selectedEntity = scene.selectedEntityId ? scene.entities[scene.selectedEntityId] : null;
   const [nameDraft, setNameDraft] = useState('');
 
@@ -124,12 +131,12 @@ export function InspectorPanel() {
   }
 
   if (!selectedEntity) {
-    return <SceneSettingsPanel />;
+    return <SceneSettingsPanel readOnly={props.readOnly} />;
   }
 
   const parentEntity = selectedEntity.parentId ? scene.entities[selectedEntity.parentId] : null;
   const isFolder = selectedEntity.isFolder === true;
-  const isLocked = selectedEntity.locked === true || parentEntity?.locked === true;
+  const isLocked = selectedEntity.locked === true || parentEntity?.locked === true || props.readOnly === true;
 
   if (isFolder) {
     return (
@@ -319,6 +326,15 @@ export function InspectorPanel() {
               <p className="muted">换算到米：×{modelAsset.unitScaleToMeters}</p>
             </div>
           </fieldset>
+          <TelemetryBindingInspector
+            entityId={selectedEntity.id}
+            binding={selectedEntity.components.telemetryBinding}
+            defaultChannels={modelAsset.dataDrivenConfig?.motion ?? {}}
+            disabled={isLocked}
+            modelAssetCode={modelAsset.assetCode}
+            onChange={updateSelectedTelemetryBinding}
+            onRestoreDefault={restoreSelectedTelemetryBindingDefault}
+          />
           <ModelParametersInspector modelAsset={modelAsset} disabled={isLocked} compact={isCompactModelInspector} />
         </>
       ) : null}

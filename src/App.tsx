@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import genericMqttDemoSceneContent from '../examples/scenes/generic-mqtt-motion-demo.scene.json?raw';
 import stackerMqttDemoSceneContent from '../examples/scenes/stacker-mqtt-demo.scene.json?raw';
 import { HomePage } from './editor/home/HomePage';
 import { EditorLayout } from './editor/layout/EditorLayout';
@@ -7,6 +8,10 @@ import { useEditorStore } from './editor/store/editorStore';
 type AppView = 'home' | 'editor';
 
 const DEMO_SCENES: Record<string, { label: string; content: string }> = {
+  'mqtt-generic': {
+    label: '通用 MQTT 无 Broker 运动演示场景',
+    content: genericMqttDemoSceneContent,
+  },
   'stacker-mqtt': {
     label: 'Stacker MQTT 模拟演示场景',
     content: stackerMqttDemoSceneContent,

@@ -18,6 +18,11 @@ import type { EntityComponents, LightKind, MeshKind } from '../model/components'
 import type { Vector3Data } from '../model/math';
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
 import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit } from '../model/sceneUnits';
+import {
+  createDefaultTelemetryBinding,
+  normalizeModelDataDrivenConfig,
+  normalizeTelemetryBindingComponent,
+} from '../model/telemetryBinding';
 
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
 const MESH_KINDS: readonly MeshKind[] = ['cube', 'sphere', 'plane'];
@@ -148,6 +153,7 @@ function normalizeMqttConfig(value: unknown): MqttConfig {
     simulatorIntervalMs: config.simulatorIntervalMs === undefined
       ? DEFAULT_MQTT_CONFIG.simulatorIntervalMs
       : assertFiniteNumber(config.simulatorIntervalMs),
+    subscriptions: Array.isArray(config.subscriptions) ? config.subscriptions : [],
   });
 }
 
@@ -266,6 +272,14 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
 
   if ('modelAsset' in components && components.modelAsset !== undefined) {
     normalized.modelAsset = normalizeModelAsset(components.modelAsset, entityId);
+  }
+
+  if ('telemetryBinding' in components && components.telemetryBinding !== undefined) {
+    const telemetryBinding = normalizeTelemetryBindingComponent(components.telemetryBinding);
+    if (!telemetryBinding) throwUnsupportedSceneFileError();
+    normalized.telemetryBinding = telemetryBinding;
+  } else if (normalized.modelAsset?.dataDrivenConfig?.device.devType) {
+    normalized.telemetryBinding = createDefaultTelemetryBinding(normalized.modelAsset.dataDrivenConfig.device.devType);
   }
 
   if ('camera' in components && components.camera !== undefined) {
@@ -438,6 +452,8 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
   const scriptAssets = normalizeModelScriptAssets(modelAsset.scriptAssets);
   const parameterScriptMetadata = normalizeOptionalJsonArray(modelAsset.parameterScriptMetadata);
   const animationScriptMetadata = normalizeOptionalJsonArray(modelAsset.animationScriptMetadata);
+  const dataDrivenConfig = modelAsset.dataDrivenConfig === undefined ? null : normalizeModelDataDrivenConfig(modelAsset.dataDrivenConfig);
+  if ('dataDrivenConfig' in modelAsset && !dataDrivenConfig) throwUnsupportedSceneFileError();
 
   return {
     assetCode,
@@ -450,6 +466,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     ...(parameterScriptMetadata.length ? { parameterScriptMetadata } : {}),
     ...(animationScriptMetadata.length ? { animationScriptMetadata } : {}),
     ...(parameterConfig ? { parameterConfig, parameterValues } : {}),
+    ...(dataDrivenConfig ? { dataDrivenConfig } : {}),
   };
 }
 
@@ -587,6 +604,14 @@ function assertPlainObject(value: unknown): PlainObject {
   }
 
   return value as PlainObject;
+}
+
+function assertArray(value: unknown): unknown[] {
+  if (!Array.isArray(value)) {
+    throwUnsupportedSceneFileError();
+  }
+
+  return value;
 }
 
 function assertString(value: unknown): string {

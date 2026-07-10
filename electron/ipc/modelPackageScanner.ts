@@ -14,6 +14,7 @@ type ModelPackageMetadata = ModelLengthUnitInfo & {
   parameterConfig?: unknown;
   parameterScriptMetadata?: unknown[];
   animationScriptMetadata?: unknown[];
+  dataDrivenConfig?: unknown;
   defaultAssetCode?: string;
 };
 
@@ -373,6 +374,16 @@ function extractJsonArrayMetadata(metadata: unknown, key: 'parameterScripts' | '
   return metadata[key].map((item) => JSON.parse(JSON.stringify(item)) as unknown);
 }
 
+/** 从 meta.json 读取 dataDriven 并深拷贝为纯 JSON，运行时脚本 fallback 不在主进程执行。 */
+function extractDataDrivenConfigFromMetadata(metadata: unknown): unknown | undefined {
+  if (!isPlainObject(metadata) || !('dataDriven' in metadata)) return undefined;
+  try {
+    return JSON.parse(JSON.stringify(metadata.dataDriven)) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 function readFieldConfiguration(field: Record<string, unknown>): Record<string, unknown> {
   return isPlainObject(field.configuration) ? field.configuration : {};
 }
@@ -514,6 +525,7 @@ async function readModelPackageMetadata(
       parameterConfig: extractModelParameterConfigFromMetadata(parsed) ?? extractModelParameterConfigFromParameterScripts(parsed),
       parameterScriptMetadata: extractJsonArrayMetadata(parsed, 'parameterScripts'),
       animationScriptMetadata: extractJsonArrayMetadata(parsed, 'animationScripts'),
+      dataDrivenConfig: extractDataDrivenConfigFromMetadata(parsed),
       ...unitInfo,
     };
   } catch (error) {
@@ -597,6 +609,7 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
       lengthUnit: metadata.lengthUnit,
       unitScaleToMeters: metadata.unitScaleToMeters,
       parameterConfig: metadata.parameterConfig,
+      dataDrivenConfig: metadata.dataDrivenConfig,
     },
   };
 }

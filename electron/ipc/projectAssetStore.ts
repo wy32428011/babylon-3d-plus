@@ -5,7 +5,9 @@ import path from 'node:path';
 import type {
   AssetEntry,
   ImportModelFolderSkippedEntry,
+  ModelAssetLibraryKind,
   ProjectAssetIndex,
+  ProjectModelAssetEntry,
   ProjectListAssetsResult,
   RecentProjectEntry,
   RecentSceneEntry,
@@ -24,6 +26,7 @@ const PROJECT_METADATA_DIRECTORY = '.babylon-editor';
 const PROJECT_ASSET_INDEX_FILE = 'asset-index.json';
 const PROJECT_ASSETS_DIRECTORY = 'Assets';
 const PROJECT_MODELS_DIRECTORY = 'Models';
+const PROJECT_ENVIRONMENTS_DIRECTORY = 'Environments';
 const RECENT_PROJECT_FILE = 'recent-project.json';
 const RECENT_WORKSPACES_FILE = 'recent-workspaces.json';
 const MAX_RECENT_WORKSPACE_ITEMS = 12;
@@ -51,7 +54,8 @@ type RecentWorkspaceIndex = {
 };
 
 type ImportModelPackagesIntoProjectResult = {
-  assets: AssetEntry[];
+  importedAssets: ProjectModelAssetEntry[];
+  projectAssets: ProjectModelAssetEntry[];
   skipped: ImportModelFolderSkippedEntry[];
 };
 
@@ -300,7 +304,7 @@ async function loadRecentProjectRoot(): Promise<string | null> {
 
     setCurrentProjectRoot(project.projectRoot);
     await ensureProjectDirectories(project.projectRoot);
-    authorizeAssetRoot(getProjectModelsRoot(project.projectRoot));
+    authorizeProjectAssetRoots(project.projectRoot);
     return project.projectRoot;
   }
 
@@ -318,6 +322,24 @@ function assertString(value: unknown): string {
   }
 
   return value;
+}
+
+/** 校验项目资产库分类，避免 v2 索引写入未知目录类型。 */
+function isModelAssetLibraryKind(value: unknown): value is ModelAssetLibraryKind {
+  return value === 'model' || value === 'environment';
+}
+
+/** 读取索引分类：v1 缺省归普通模型，v2 必须显式合法。 */
+function normalizeIndexedLibraryKind(asset: Record<string, unknown>, version: 1 | 2): ModelAssetLibraryKind {
+  if (version === 1 && asset.libraryKind === undefined) {
+    return 'model';
+  }
+
+  if (!isModelAssetLibraryKind(asset.libraryKind)) {
+    throw new Error(PROJECT_ASSET_INDEX_ERROR);
+  }
+
+  return asset.libraryKind;
 }
 
 function normalizeOptionalPath(value: unknown): string | undefined {
@@ -372,12 +394,14 @@ function createScriptAssetsFromPaths(scriptPaths: string[] | undefined): NonNull
   }));
 }
 
-function normalizeIndexedAsset(value: unknown): AssetEntry | null {
+/** 归一化项目索引中的模型资产，并补齐 sourceUrl、缩略图与脚本授权路径。 */
+function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAssetEntry | null {
   const asset = isPlainObject(value) ? value : null;
   if (!asset) throw new Error(PROJECT_ASSET_INDEX_ERROR);
 
   if (asset.kind !== 'model') return null;
 
+  const libraryKind = normalizeIndexedLibraryKind(asset, version);
   const modelPath = normalizeFilePath(assertString(asset.path));
   const name = assertString(asset.name);
   const assetRevision = normalizeOptionalTrimmedString(asset.assetRevision);
@@ -396,6 +420,7 @@ function normalizeIndexedAsset(value: unknown): AssetEntry | null {
     sourceUrl: encodeAssetUrl(modelPath),
     assetRevision,
     kind: 'model',
+    libraryKind,
     packagePath,
     metadataPath,
     thumbnailPath,
@@ -409,17 +434,23 @@ function normalizeIndexedAsset(value: unknown): AssetEntry | null {
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     parameterConfig: isPlainObject(asset.parameterConfig) ? asset.parameterConfig : undefined,
+    dataDrivenConfig: isPlainObject(asset.dataDrivenConfig) ? asset.dataDrivenConfig : undefined,
   };
 }
 
+/** 读取兼容 v1/v2 索引；纯读取只返回内存结构，不主动改写磁盘文件。 */
 function normalizeProjectAssetIndex(value: unknown): ProjectAssetIndex {
-  if (!isPlainObject(value) || value.version !== 1 || !Array.isArray(value.assets)) {
+  if (!isPlainObject(value) || (value.version !== 1 && value.version !== 2) || !Array.isArray(value.assets)) {
     throw new Error(PROJECT_ASSET_INDEX_ERROR);
   }
 
+  const version = value.version;
+
   return {
-    version: 1,
-    assets: value.assets.map(normalizeIndexedAsset).filter((asset): asset is AssetEntry => asset !== null),
+    version: 2,
+    assets: value.assets
+      .map((asset) => normalizeIndexedAsset(asset, version))
+      .filter((asset): asset is ProjectModelAssetEntry => asset !== null),
   };
 }
 
@@ -501,7 +532,7 @@ export async function openRecentProject(projectRoot: string): Promise<ProjectLis
 
   setCurrentProjectRoot(normalizedProjectRoot);
   await ensureProjectDirectories(normalizedProjectRoot);
-  authorizeAssetRoot(getProjectModelsRoot(normalizedProjectRoot));
+  authorizeProjectAssetRoots(normalizedProjectRoot);
   await persistCurrentProjectRoot(normalizedProjectRoot);
   await rememberRecentProjectRoot(normalizedProjectRoot);
 
@@ -512,23 +543,42 @@ export function getProjectModelsRoot(projectRoot: string): string {
   return path.join(normalizeFilePath(projectRoot), PROJECT_ASSETS_DIRECTORY, PROJECT_MODELS_DIRECTORY);
 }
 
+/** 返回项目环境模型目录 Assets/Environments。 */
+export function getProjectEnvironmentsRoot(projectRoot: string): string {
+  return path.join(normalizeFilePath(projectRoot), PROJECT_ASSETS_DIRECTORY, PROJECT_ENVIRONMENTS_DIRECTORY);
+}
+
+/** 根据资产库分类选择实际复制目标目录。 */
+function getProjectAssetLibraryRoot(projectRoot: string, libraryKind: ModelAssetLibraryKind): string {
+  return libraryKind === 'environment' ? getProjectEnvironmentsRoot(projectRoot) : getProjectModelsRoot(projectRoot);
+}
+
+/** 授权普通模型与环境模型两个项目资产目录。 */
+function authorizeProjectAssetRoots(projectRoot: string): void {
+  authorizeAssetRoot(getProjectModelsRoot(projectRoot));
+  authorizeAssetRoot(getProjectEnvironmentsRoot(projectRoot));
+}
+
 export function getProjectAssetIndexPath(projectRoot: string): string {
   return path.join(normalizeFilePath(projectRoot), PROJECT_METADATA_DIRECTORY, PROJECT_ASSET_INDEX_FILE);
 }
 
+/** 确保项目元数据、普通模型与环境模型目录都已创建。 */
 export async function ensureProjectDirectories(projectRoot: string): Promise<void> {
   const normalizedProjectRoot = normalizeFilePath(projectRoot);
   await fs.mkdir(path.join(normalizedProjectRoot, PROJECT_METADATA_DIRECTORY), { recursive: true });
   await fs.mkdir(getProjectModelsRoot(normalizedProjectRoot), { recursive: true });
+  await fs.mkdir(getProjectEnvironmentsRoot(normalizedProjectRoot), { recursive: true });
 }
 
+/** 读取项目资产索引，兼容 v1 并返回 v2 内存结构，不在读取时写回。 */
 export async function readProjectAssetIndex(projectRoot: string): Promise<ProjectAssetIndex> {
   try {
     const content = await fs.readFile(getProjectAssetIndexPath(projectRoot), 'utf-8');
     return normalizeProjectAssetIndex(JSON.parse(content) as unknown);
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {
-      return { version: 1, assets: [] };
+      return { version: 2, assets: [] };
     }
 
     if (error instanceof SyntaxError) {
@@ -539,9 +589,11 @@ export async function readProjectAssetIndex(projectRoot: string): Promise<Projec
   }
 }
 
+/** 写入 v2 项目资产索引，调用方需传入已分类的项目模型资产。 */
 export async function writeProjectAssetIndex(projectRoot: string, index: ProjectAssetIndex): Promise<void> {
+  const normalizedIndex = normalizeProjectAssetIndex(index);
   await ensureProjectDirectories(projectRoot);
-  await fs.writeFile(getProjectAssetIndexPath(projectRoot), `${JSON.stringify(index, null, 2)}\n`, 'utf-8');
+  await fs.writeFile(getProjectAssetIndexPath(projectRoot), `${JSON.stringify(normalizedIndex, null, 2)}\n`, 'utf-8');
 }
 
 export function toSafePackageDirectoryName(name: string): string {
@@ -581,7 +633,7 @@ export async function selectCurrentProjectRootWithDialog(): Promise<string | nul
   const selectedProjectRoot = normalizeFilePath(projectRoot);
   setCurrentProjectRoot(selectedProjectRoot);
   await ensureProjectDirectories(selectedProjectRoot);
-  authorizeAssetRoot(getProjectModelsRoot(selectedProjectRoot));
+  authorizeProjectAssetRoots(selectedProjectRoot);
   await persistCurrentProjectRoot(selectedProjectRoot);
   await rememberRecentProjectRoot(selectedProjectRoot);
 
@@ -596,7 +648,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   }
 
   await ensureProjectDirectories(projectRoot);
-  authorizeAssetRoot(getProjectModelsRoot(projectRoot));
+  authorizeProjectAssetRoots(projectRoot);
 
   const index = await readProjectAssetIndex(projectRoot);
   for (const asset of index.assets) {
@@ -613,8 +665,10 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   return { projectRoot, assets: index.assets };
 }
 
+/** 将扫描到的模型包复制进指定项目资产库，并只替换目标库中的同名记录。 */
 export async function importModelPackagesIntoProject(
   scannedAssets: AssetEntry[],
+  libraryKind: ModelAssetLibraryKind,
 ): Promise<ImportModelPackagesIntoProjectResult> {
   const projectRoot = await loadRecentProjectRoot();
 
@@ -623,10 +677,11 @@ export async function importModelPackagesIntoProject(
   }
 
   await ensureProjectDirectories(projectRoot);
-  authorizeAssetRoot(getProjectModelsRoot(projectRoot));
+  authorizeProjectAssetRoots(projectRoot);
 
-  const importedAssets: AssetEntry[] = [];
+  const importedAssets: ProjectModelAssetEntry[] = [];
   const skipped: ImportModelFolderSkippedEntry[] = [];
+  const targetLibraryRoot = getProjectAssetLibraryRoot(projectRoot, libraryKind);
 
   for (const scannedAsset of scannedAssets) {
     if (!scannedAsset.packagePath) {
@@ -636,16 +691,18 @@ export async function importModelPackagesIntoProject(
 
     const sourcePackagePath = normalizeFilePath(scannedAsset.packagePath);
     const packageDirectoryName = toSafePackageDirectoryName(path.basename(sourcePackagePath));
-    const targetPackagePath = path.join(getProjectModelsRoot(projectRoot), packageDirectoryName);
+    const targetPackagePath = path.join(targetLibraryRoot, packageDirectoryName);
 
     try {
       await copyDirectory(sourcePackagePath, targetPackagePath);
       const copiedPackage = await scanModelPackage(targetPackagePath);
 
       if (copiedPackage.asset) {
-        const importedAsset: AssetEntry = {
+        const importedAsset: ProjectModelAssetEntry = {
           ...copiedPackage.asset,
           assetRevision: createProjectAssetRevision(),
+          kind: 'model',
+          libraryKind,
         };
         importedAssets.push(importedAsset);
         authorizeAssetFile(importedAsset.path);
@@ -671,15 +728,17 @@ export async function importModelPackagesIntoProject(
   const importedIds = new Set(importedAssets.map((asset) => asset.id));
   const importedPackagePaths = new Set(importedAssets.map((asset) => asset.packagePath).filter(Boolean));
   const preservedAssets = currentIndex.assets.filter(
-    (asset) => !importedIds.has(asset.id) && (!asset.packagePath || !importedPackagePaths.has(asset.packagePath)),
+    (asset) => asset.libraryKind !== libraryKind
+      || (!importedIds.has(asset.id) && (!asset.packagePath || !importedPackagePaths.has(asset.packagePath))),
   );
+  const projectAssets = [...preservedAssets, ...importedAssets];
 
   await writeProjectAssetIndex(projectRoot, {
-    version: 1,
-    assets: [...preservedAssets, ...importedAssets],
+    version: 2,
+    assets: projectAssets,
   });
 
-  return { assets: importedAssets, skipped };
+  return { importedAssets, projectAssets, skipped };
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

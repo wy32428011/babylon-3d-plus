@@ -1,6 +1,7 @@
 import type { Vector3Data } from './math';
 import type { ModelParameterConfig, ModelParameterValues } from './modelParameters';
 import type { ModelSourceLengthUnit } from './sceneUnits';
+import type { ModelDataDrivenConfig, TelemetryBindingComponent } from './telemetryBinding';
 
 export type TransformComponent = {
   position: Vector3Data;
@@ -69,6 +70,7 @@ export type ModelAssetComponent = {
   animationScriptMetadata?: unknown[];
   parameterConfig?: ModelParameterConfig;
   parameterValues?: ModelParameterValues;
+  dataDrivenConfig?: ModelDataDrivenConfig;
 };
 
 export type CameraComponent = {
@@ -90,6 +92,7 @@ export type EntityComponents = {
   locator?: LocatorComponent;
   cadReference?: CadReferenceComponent;
   modelAsset?: ModelAssetComponent;
+  telemetryBinding?: TelemetryBindingComponent;
   camera?: CameraComponent;
   light?: LightComponent;
 };

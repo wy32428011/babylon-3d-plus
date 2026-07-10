@@ -1,4 +1,5 @@
 import type { MqttConfig, StackerSimulationScenario } from '../../editor/model/SceneDocument';
+import { DEFAULT_TELEMETRY_SOURCE_ID } from './deviceTelemetry';
 import {
   parseStackerTelemetryMessage,
   stackerTelemetryStore,
@@ -50,6 +51,7 @@ export class StackerTelemetrySimulator {
   private timerId: number | null = null;
   private startMs = 0;
   private tick = 0;
+  private readonly sourceId = DEFAULT_TELEMETRY_SOURCE_ID;
 
   constructor(private readonly pushLog: StackerTelemetrySimulatorLog) {}
 
@@ -65,9 +67,9 @@ export class StackerTelemetrySimulator {
     if (signature === this.configSignature) return;
 
     this.configSignature = signature;
-    this.stop(false);
+    this.stop(true);
 
-    if (!config.enabled || !config.simulatorEnabled) return;
+    if (!config.enabled || !config.simulatorEnabled || config.simulatorScenario === 'generic') return;
 
     this.start(config);
   }
@@ -100,7 +102,7 @@ export class StackerTelemetrySimulator {
       this.pushLog('Stacker 本地模拟已停止。');
     }
     if (clearStore) {
-      stackerTelemetryStore.clear();
+      stackerTelemetryStore.clearSource(this.sourceId);
     }
   }
 

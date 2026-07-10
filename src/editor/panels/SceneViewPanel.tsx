@@ -10,6 +10,8 @@ import {
   MODEL_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
 import { useEditorStore } from '../store/editorStore';
+import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
+import type { SceneDocument } from '../model/SceneDocument';
 
 const CLICK_SELECTION_TOLERANCE_PX = 4;
 
@@ -31,9 +33,13 @@ export function SceneViewPanel() {
   const gizmoRef = useRef<TransformGizmoController | null>(null);
   const mqttTelemetryClientRef = useRef<MqttStackerTelemetryClient | null>(null);
   const clickSnapshotRef = useRef<PointerClickSnapshot | null>(null);
+  const sceneDocumentRef = useRef<SceneDocument | null>(null);
+  const selectedEntityIdRef = useRef<string | null>(null);
+  const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
   const [viewportError, setViewportError] = useState<string | null>(null);
   const sceneDocument = useEditorStore((state) => state.scene);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
+  const runtimeMode = useEditorStore((state) => state.runtimeMode);
   const selectedEntityId = useEditorStore((state) => state.scene.selectedEntityId);
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
@@ -53,6 +59,13 @@ export function SceneViewPanel() {
   const consumeCameraPoseSaveRequest = useEditorStore((state) => state.consumeCameraPoseSaveRequest);
   const consumeCameraResetRequest = useEditorStore((state) => state.consumeCameraResetRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
+  const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
+  const isRuntimePreview = runtimeMode === 'preview';
+
+  useEffect(() => {
+    sceneDocumentRef.current = sceneDocument;
+    selectedEntityIdRef.current = selectedEntityId;
+  }, [sceneDocument, selectedEntityId]);
 
   /** 记录左键按下位置，用于区分单击选中和拖拽旋转视角。 */
   function handleCanvasPointerDown(event: PointerEvent<HTMLCanvasElement>): void {
@@ -94,6 +107,8 @@ export function SceneViewPanel() {
 
   /** 仅当拖拽数据是模型资产或内置资源时允许浏览器在 Scene 画布触发 drop。 */
   function handleCanvasDragOver(event: DragEvent<HTMLCanvasElement>): void {
+    if (isRuntimePreview) return;
+
     const hasSupportedPayload =
       event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE) ||
       event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE);
@@ -105,6 +120,12 @@ export function SceneViewPanel() {
 
   /** 在鼠标释放位置把模型资产或内置资源投射到地面平面并创建场景实体。 */
   function handleCanvasDrop(event: DragEvent<HTMLCanvasElement>): void {
+    if (isRuntimePreview) {
+      event.preventDefault();
+      clickSnapshotRef.current = null;
+      return;
+    }
+
     const placementPosition = runtimeRef.current?.getGroundPointAtCanvasPoint(
       event.clientX,
       event.clientY,
@@ -113,7 +134,7 @@ export function SceneViewPanel() {
 
     const rawModelPayload = event.dataTransfer.getData(MODEL_ASSET_DRAG_MIME_TYPE);
     const modelAsset = decodeModelAssetDragPayload(rawModelPayload);
-    if (modelAsset) {
+    if (modelAsset?.libraryKind === 'model') {
       event.preventDefault();
       clickSnapshotRef.current = null;
       importModelAsset(modelAsset, placementPosition);
@@ -164,6 +185,7 @@ export function SceneViewPanel() {
       runtime?.dispose();
       viewport?.dispose();
       setViewportError(`Scene View 渲染引擎初始化失败：${getErrorMessage(error)}`);
+      stopRuntimePreview();
       return;
     }
 
@@ -191,33 +213,68 @@ export function SceneViewPanel() {
       gizmoRef.current = null;
       mqttTelemetryClientRef.current = null;
     };
-  }, [previewEntityTransform, commitEntityTransform, pushLog]);
+  }, [previewEntityTransform, commitEntityTransform, pushLog, stopRuntimePreview]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
     const gizmo = gizmoRef.current;
     if (!runtime || !gizmo) return;
+    if (isRuntimePreview) return;
 
     runtime.sync(sceneDocument);
     const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityId);
     gizmo.attachToTarget(selectedTarget, selectedEntityId);
-  }, [sceneDocument, selectedEntityId]);
+  }, [sceneDocument, selectedEntityId, isRuntimePreview]);
 
   useEffect(() => {
+    const runtime = runtimeRef.current;
+    const gizmo = gizmoRef.current;
+    const client = mqttTelemetryClientRef.current;
+    if (!runtime || !gizmo || !client) return;
+    if (runtimeModeRef.current === runtimeMode) return;
+    runtimeModeRef.current = runtimeMode;
+
+    if (!isRuntimePreview) {
+      const currentSceneDocument = sceneDocumentRef.current;
+      if (!currentSceneDocument) return;
+      client.dispose();
+      runtime.endTelemetryPreview();
+      runtime.sync(currentSceneDocument);
+      const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityIdRef.current);
+      gizmo.attachToTarget(selectedTarget, selectedEntityIdRef.current);
+      return;
+    }
+
+    try {
+      const currentSceneDocument = sceneDocumentRef.current;
+      if (!currentSceneDocument) return;
+      gizmo.attachToTarget(null, null);
+      runtime.sync(currentSceneDocument);
+      runtime.beginTelemetryPreview();
+      client.updateConfig(mqttConfig);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      pushLog(`运行预览初始化失败：${message}`);
+      stopRuntimePreview();
+    }
+  }, [runtimeMode, isRuntimePreview, mqttConfig, pushLog, stopRuntimePreview]);
+
+  useEffect(() => {
+    if (!isRuntimePreview) return;
     mqttTelemetryClientRef.current?.updateConfig(mqttConfig);
-  }, [mqttConfig]);
+  }, [mqttConfig, isRuntimePreview]);
 
   useEffect(() => {
-    gizmoRef.current?.setTool(transformTool);
-  }, [transformTool]);
+    if (!isRuntimePreview) gizmoRef.current?.setTool(transformTool);
+  }, [transformTool, isRuntimePreview]);
 
   useEffect(() => {
-    gizmoRef.current?.setTransformSpace(transformSpace);
-  }, [transformSpace]);
+    if (!isRuntimePreview) gizmoRef.current?.setTransformSpace(transformSpace);
+  }, [transformSpace, isRuntimePreview]);
 
   useEffect(() => {
-    gizmoRef.current?.setSnapSettings(snapSettings);
-  }, [snapSettings]);
+    if (!isRuntimePreview) gizmoRef.current?.setSnapSettings(snapSettings);
+  }, [snapSettings, isRuntimePreview]);
 
   useEffect(() => {
     viewportRef.current?.setGridSettings(gridSettings);
@@ -265,9 +322,9 @@ export function SceneViewPanel() {
   }, [sceneFocusRequest, consumeSceneFocusRequest]);
 
   return (
-    <section className="scene-panel">
+    <section className={isRuntimePreview ? 'scene-panel scene-panel-preview' : 'scene-panel'}>
       <h2>Scene</h2>
-      <div className="scene-viewport">
+      <div className={isRuntimePreview ? 'scene-viewport scene-viewport-preview' : 'scene-viewport'}>
         <canvas
           ref={canvasRef}
           className="scene-canvas"
@@ -277,6 +334,9 @@ export function SceneViewPanel() {
           onPointerUp={handleCanvasPointerUp}
           onPointerCancel={handleCanvasPointerCancel}
         />
+        {isRuntimePreview ? (
+          <span aria-live="polite" className="scene-preview-badge" role="status">运行预览</span>
+        ) : null}
         {viewportError ? (
           <div className="scene-error" role="alert">
             <strong>Scene View 无法启动</strong>

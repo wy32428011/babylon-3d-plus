@@ -1,10 +1,14 @@
 import type {
   ImportCadFileResult,
+  ImportModelFolderRequest,
   ImportModelFolderResult,
   ListModelPackageVariantsRequest,
   LoadSceneFileRequest,
   LoadSceneResult,
   ModelPackageVariant,
+  MqttIpcConfigureRequest,
+  MqttIpcEvent,
+  MqttIpcStatus,
   OpenRecentProjectRequest,
   ProjectListAssetsResult,
   ReadTextFileRequest,
@@ -13,6 +17,8 @@ import type {
   SaveSceneRequest,
   SelectProjectDirectoryResult,
 } from './types.js';
+
+import type { IpcRendererEvent } from 'electron';
 
 const { contextBridge, ipcRenderer } = require('electron');
 
@@ -29,7 +35,16 @@ contextBridge.exposeInMainWorld('editorApi', {
   removeRecentWorkspaceItem: (request: RemoveRecentWorkspaceItemRequest): Promise<void> => ipcRenderer.invoke('project:removeRecentWorkspaceItem', request),
   selectProjectDirectory: (): Promise<SelectProjectDirectoryResult> => ipcRenderer.invoke('project:selectDirectory'),
   importCadFile: (): Promise<ImportCadFileResult> => ipcRenderer.invoke('assets:importCadFile'),
-  importModelFolder: (): Promise<ImportModelFolderResult> => ipcRenderer.invoke('assets:importModelFolder'),
+  /** 透传模型文件夹导入请求，renderer 指定普通模型或环境模型库。 */
+  importModelFolder: (request: ImportModelFolderRequest): Promise<ImportModelFolderResult> => ipcRenderer.invoke('assets:importModelFolder', request),
   listModelPackageVariants: (request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> =>
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
+  mqttConfigure: (request: MqttIpcConfigureRequest): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:configure', request),
+  mqttDisconnect: (): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:disconnect'),
+  mqttGetStatus: (): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:getStatus'),
+  onMqttEvent: (handler: (event: MqttIpcEvent) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: MqttIpcEvent) => handler(payload);
+    ipcRenderer.on('mqtt:event', listener);
+    return () => ipcRenderer.removeListener('mqtt:event', listener);
+  },
 });

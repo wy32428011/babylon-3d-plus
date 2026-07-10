@@ -304,6 +304,17 @@ function extractJsonArrayMetadata(metadata, key) {
         return undefined;
     return metadata[key].map((item) => JSON.parse(JSON.stringify(item)));
 }
+/** 从 meta.json 读取 dataDriven 并深拷贝为纯 JSON，运行时脚本 fallback 不在主进程执行。 */
+function extractDataDrivenConfigFromMetadata(metadata) {
+    if (!isPlainObject(metadata) || !('dataDriven' in metadata))
+        return undefined;
+    try {
+        return JSON.parse(JSON.stringify(metadata.dataDriven));
+    }
+    catch {
+        return undefined;
+    }
+}
 function readFieldConfiguration(field) {
     return isPlainObject(field.configuration) ? field.configuration : {};
 }
@@ -431,6 +442,7 @@ async function readModelPackageMetadata(packagePath, modelFilePath) {
             parameterConfig: extractModelParameterConfigFromMetadata(parsed) ?? extractModelParameterConfigFromParameterScripts(parsed),
             parameterScriptMetadata: extractJsonArrayMetadata(parsed, 'parameterScripts'),
             animationScriptMetadata: extractJsonArrayMetadata(parsed, 'animationScripts'),
+            dataDrivenConfig: extractDataDrivenConfigFromMetadata(parsed),
             ...unitInfo,
         };
     }
@@ -508,6 +520,7 @@ export async function scanModelPackage(packagePath) {
             lengthUnit: metadata.lengthUnit,
             unitScaleToMeters: metadata.unitScaleToMeters,
             parameterConfig: metadata.parameterConfig,
+            dataDrivenConfig: metadata.dataDrivenConfig,
         },
     };
 }

@@ -20,6 +20,7 @@ import {
   updateMeshRendererCommand,
   updateModelAssetCodeCommand,
   updateModelParameterValuesCommand,
+  updateTelemetryBindingCommand,
   updateTransformCommand,
 } from '../commands/entityCommands';
 import {
@@ -74,6 +75,13 @@ import {
   type ModelParameterValues,
 } from '../model/modelParameters';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, type ModelLengthUnitInfo } from '../model/sceneUnits';
+import {
+  isMqttConfigEqual,
+  validateRuntimePreviewConfig,
+  type RuntimePreviewReadiness,
+} from '../model/mqttConfigUtils';
+import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
+import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent } from '../model/telemetryBinding';
 import { deserializeScene, serializeScene } from '../project/SceneSerializer';
 import {
   createCadReferenceComponentMetadata,
@@ -160,6 +168,7 @@ const ENTITY_ARRAY_DIRECTION_VECTORS: Record<EntityArrayDirection, Vector3Data> 
 
 type EditorState = {
   scene: SceneDocument;
+  runtimeMode: EditorRuntimeMode;
   history: CommandHistory;
   hierarchySelectionIds: string[];
   entityClipboard: EntityClipboard | null;
@@ -173,6 +182,8 @@ type EditorState = {
   transformSpace: TransformSpace;
   snapSettings: TransformSnapSettings;
   gridSettings: EditorGridSettings;
+  startRuntimePreview: () => RuntimePreviewReadiness;
+  stopRuntimePreview: () => void;
   setTransformTool: (tool: TransformTool) => void;
   setTransformSpace: (space: TransformSpace) => void;
   setSnapEnabled: (enabled: boolean) => void;
@@ -221,6 +232,8 @@ type EditorState = {
   updateSelectedCadReference: (patch: Partial<Pick<CadReferenceComponent, 'lineColor' | 'opacity'>>) => void;
   updateSelectedLight: (patch: Partial<LightComponent>) => void;
   updateSelectedModelAssetCode: (assetCode: string) => void;
+  updateSelectedTelemetryBinding: (binding: import('../model/telemetryBinding').TelemetryBindingComponent | null) => void;
+  restoreSelectedTelemetryBindingDefault: () => void;
   updateSelectedModelParameterValue: (key: string, value: ModelParameterValue) => void;
   previewSelectedModelParameterValue: (key: string, value: ModelParameterValue) => void;
   commitSelectedModelParameterValues: (before: ModelParameterValues, after: ModelParameterValues) => void;
@@ -238,6 +251,20 @@ type EditorState = {
   loadSceneFromContent: (content: string, sourceName: string) => boolean;
   pushLog: (message: string) => void;
 };
+
+/** 判断当前 store 是否处于运行预览只读模式。 */
+function isRuntimePreviewState(state: EditorState): boolean {
+  return state.runtimeMode === 'preview';
+}
+
+/** 在运行预览中拦截会修改场景文档或历史记录的入口。 */
+function guardRuntimePreviewMutation(state: EditorState, actionLabel: string): EditorState {
+  if (!isRuntimePreviewState(state)) return state;
+  return {
+    ...state,
+    logs: prependLog(state.logs, `运行预览只读：已阻止${actionLabel}。`),
+  };
+}
 
 function createLog(message: string): EditorLog {
   return { id: crypto.randomUUID(), message };
@@ -576,6 +603,7 @@ function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: Asset
     ...(asset.scriptAssets?.length ? { scriptAssets: cloneJsonValue(asset.scriptAssets) } : {}),
     ...(asset.parameterScriptMetadata?.length ? { parameterScriptMetadata: cloneJsonValue(asset.parameterScriptMetadata) } : {}),
     ...(asset.animationScriptMetadata?.length ? { animationScriptMetadata: cloneJsonValue(asset.animationScriptMetadata) } : {}),
+    ...(asset.dataDrivenConfig ? { dataDrivenConfig: cloneJsonValue(asset.dataDrivenConfig) } : {}),
     ...(parameterConfig
       ? {
           parameterConfig,
@@ -602,6 +630,7 @@ function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetCompone
     areJsonValuesEqual(left.scriptAssets, right.scriptAssets) &&
     areJsonValuesEqual(left.parameterScriptMetadata, right.parameterScriptMetadata) &&
     areJsonValuesEqual(left.animationScriptMetadata, right.animationScriptMetadata) &&
+    areJsonValuesEqual(left.dataDrivenConfig, right.dataDrivenConfig) &&
     areJsonValuesEqual(left.parameterConfig, right.parameterConfig) &&
     areModelParameterValuesEqual(left.parameterValues ?? {}, right.parameterValues ?? {})
   );
@@ -973,6 +1002,7 @@ function ungroupFoldersInScene(scene: SceneDocument, folderIds: string[]): Scene
 
 export const useEditorStore = create<EditorState>((set, get) => ({
   scene: createEmptySceneDocument(),
+  runtimeMode: 'edit',
   history: createCommandHistory(),
   hierarchySelectionIds: [],
   entityClipboard: null,
@@ -986,8 +1016,48 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   transformSpace: 'local',
   snapSettings: DEFAULT_SNAP_SETTINGS,
   gridSettings: DEFAULT_EDITOR_GRID_SETTINGS,
+  startRuntimePreview: () => {
+    const currentState = get();
+    if (currentState.cadImportProgress?.active) {
+      const readiness: RuntimePreviewReadiness = {
+        ok: false,
+        code: 'cad-import-active',
+        message: '请等待 CAD 导入完成。',
+      };
+      set((state) => ({ logs: prependLog(state.logs, `运行预览已阻止：${readiness.message}`) }));
+      return readiness;
+    }
+
+    const readiness = validateRuntimePreviewConfig(currentState.scene.mqttConfig, {
+      electronMqttAvailable: typeof window !== 'undefined' && typeof window.editorApi?.mqttConfigure === 'function',
+    });
+    if (!readiness.ok) {
+      set((state) => ({ logs: prependLog(state.logs, `运行预览预检失败：${readiness.message}`) }));
+      return readiness;
+    }
+
+    set((state) => {
+      if (state.runtimeMode === 'preview') return state;
+      return {
+        runtimeMode: 'preview',
+        cameraPoseSaveRequest: null,
+        logs: prependLog(state.logs, '已进入运行预览模式。'),
+      };
+    });
+    return readiness;
+  },
+  stopRuntimePreview: () => {
+    set((state) => {
+      if (state.runtimeMode === 'edit') return state;
+      return {
+        runtimeMode: 'edit',
+        logs: prependLog(state.logs, '已停止运行预览模式。'),
+      };
+    });
+  },
   setTransformTool: (tool) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换变换工具');
       if (state.transformTool === tool) return state;
 
       return {
@@ -998,6 +1068,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   setTransformSpace: (space) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换坐标空间');
       if (state.transformSpace === space) return state;
 
       return {
@@ -1008,6 +1079,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   setSnapEnabled: (enabled) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换吸附');
       if (state.snapSettings.enabled === enabled) return state;
 
       return {
@@ -1021,6 +1093,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   updateSnapSetting: (key, value) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改吸附参数');
       const nextValue = sanitizePositiveNumber(value, DEFAULT_SNAP_SETTINGS[key]);
       if (state.snapSettings[key] === nextValue) return state;
 
@@ -1064,6 +1137,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!nextName) return;
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '重命名场景');
       if (state.scene.name === nextName) return state;
 
       const command = updateSceneDocumentCommand('重命名场景', (scene) => ({
@@ -1079,10 +1153,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
   resetSceneToBlank: () => {
-    set((state) => createLoadedSceneState(state, createEmptySceneDocument(), '场景已初始化。'));
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '清空场景');
+      return createLoadedSceneState(state, createEmptySceneDocument(), '场景已初始化。');
+    });
   },
   setCameraViewDistance: (viewDistance) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改相机距离');
       const nextViewDistance = sanitizeSceneViewDistance(viewDistance);
       if (state.scene.sceneSettings.camera.viewDistance === nextViewDistance) return state;
 
@@ -1102,6 +1180,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   updateSensitivitySetting: (key, value) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改相机灵敏度');
       const nextValue = sanitizeSceneSensitivityValue(value);
       if (state.scene.sceneSettings.sensitivity[key] === nextValue) return state;
 
@@ -1121,6 +1200,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   updateEnvironmentConfig: (environment) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改环境模型');
       const nextEnvironment = sanitizeSceneEnvironment(environment);
       if (isSceneEnvironmentEqual(state.scene.sceneSettings.environment, nextEnvironment)) return state;
 
@@ -1141,6 +1221,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   setEnvironmentActiveVariant: (sourceUrl) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换环境效果');
       const environment = state.scene.sceneSettings.environment;
       if (!environment || environment.activeVariantUrl === sourceUrl) return state;
 
@@ -1168,14 +1249,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
   requestCameraPoseSave: () => {
-    set((state) => ({
-      cameraPoseSaveRequest: { id: createId('camera_pose_save') },
-      logs: prependLog(state.logs, '准备保存当前视角。'),
-    }));
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '保存当前视角');
+      return {
+        cameraPoseSaveRequest: { id: createId('camera_pose_save') },
+        logs: prependLog(state.logs, '准备保存当前视角。'),
+      };
+    });
   },
   consumeCameraPoseSaveRequest: (requestId, pose) => {
     set((state) => {
       if (state.cameraPoseSaveRequest?.id !== requestId) return state;
+      if (isRuntimePreviewState(state)) {
+        return {
+          cameraPoseSaveRequest: null,
+          logs: prependLog(state.logs, '运行预览只读：已取消待保存的相机位姿。'),
+        };
+      }
 
       return {
         cameraPoseSaveRequest: null,
@@ -1214,6 +1304,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const command = createEntityCommand(entity);
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建网格');
       const result = executeCommand(state.scene, state.history, command);
       return {
         ...result,
@@ -1227,6 +1318,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const command = createEntityCommand(entity);
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建定位器');
       const result = executeCommand(state.scene, state.history, command);
       return {
         ...result,
@@ -1240,6 +1332,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const command = createEntityCommand(entity);
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建灯光');
       const result = executeCommand(state.scene, state.history, command);
       return {
         ...result,
@@ -1250,6 +1343,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   createFolder: () => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '新建文件夹');
       const folder = createFolderEntity(createNextFolderName(state.scene));
       const command = createFolderCommand(folder);
       const result = executeCommand(state.scene, state.history, command);
@@ -1281,10 +1375,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       asset.animationScriptMetadata,
       asset.defaultAssetCode,
       asset.assetRevision,
+      asset.dataDrivenConfig,
     );
     const command = createEntityCommand(entity);
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '导入模型');
       const result = executeCommand(state.scene, state.history, command);
       return {
         ...result,
@@ -1297,6 +1393,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     let refreshedCount = 0;
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '刷新模型实例');
       const refreshResult = refreshSceneModelAssetsFromImportedAssets(state.scene, assets);
       refreshedCount = refreshResult.refreshedCount;
       if (refreshedCount === 0) return state;
@@ -1314,6 +1411,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     return refreshedCount;
   },
   importCadReference: async () => {
+    if (get().runtimeMode === 'preview') {
+      set((state) => guardRuntimePreviewMutation(state, '导入 CAD'));
+      return;
+    }
+
     if (get().cadImportProgress?.active) {
       set((state) => ({ logs: prependLog(state.logs, 'CAD 正在导入，请等待当前任务完成。') }));
       return;
@@ -1410,13 +1512,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
   loadSceneAsset: async (asset) => {
+    if (get().runtimeMode === 'preview') {
+      set((state) => guardRuntimePreviewMutation(state, '加载资产场景'));
+      return;
+    }
+
     if (asset.kind !== 'scene') return;
 
     try {
       const result = await window.editorApi.readTextFile({ filePath: asset.path });
       const scene = deserializeScene(result.content);
 
-      set((state) => createLoadedSceneState(state, scene, `场景已加载：${asset.name}`));
+      set((state) => {
+        if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '加载资产场景');
+        return createLoadedSceneState(state, scene, `场景已加载：${asset.name}`);
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set((state) => ({ logs: prependLog(state.logs, `加载资产场景失败：${message}`) }));
@@ -1447,6 +1557,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   moveEntitiesToFolder: (entityIds, folderId) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '拖放移动对象');
       const targetFolder = folderId ? state.scene.entities[folderId] : null;
       if (folderId && !targetFolder?.isFolder) return state;
 
@@ -1468,6 +1579,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   toggleEntityVisible: (entityId) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换显隐');
       const entity = state.scene.entities[entityId];
       if (!entity) return state;
 
@@ -1485,6 +1597,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   toggleEntityLocked: (entityId) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换锁定');
       const entity = state.scene.entities[entityId];
       if (!entity) return state;
 
@@ -1502,6 +1615,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   hideSelectedEntities: () => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '隐藏对象');
       const targetIds = getUnlockedSelectionIds(state);
       const changingIds = targetIds.filter((entityId) => state.scene.entities[entityId]?.visible !== false);
       if (changingIds.length === 0) return state;
@@ -1518,6 +1632,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   lockSelectedEntities: () => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '锁定对象');
       const targetIds = getUnlockedSelectionIds(state);
       const changingIds = targetIds.filter((entityId) => state.scene.entities[entityId]?.locked !== true);
       if (changingIds.length === 0) return state;
@@ -1534,6 +1649,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   copySelectedEntities: () => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '复制对象');
       const copyingIds = getActiveHierarchySelectionIds(state).filter((entityId) => {
         const entity = state.scene.entities[entityId];
         return Boolean(entity && !entity.isFolder);
@@ -1560,6 +1676,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   pasteEntityClipboard: (targetFolderId) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '粘贴对象');
       const clipboard = state.entityClipboard;
       if (!clipboard || clipboard.entities.length === 0) return state;
 
@@ -1598,6 +1715,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   arraySelectedEntities: (copyCount, direction, spacingMeters) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '阵列对象');
       const sourceIds = getSelectedRuntimeEntityIds(state);
       if (sourceIds.length === 0) return state;
 
@@ -1657,6 +1775,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   groupSelectedEntities: () => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '群组对象');
       const groupingIds = getSelectedRuntimeEntityIds(state);
       if (groupingIds.length === 0) return state;
 
@@ -1672,6 +1791,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   ungroupSelectedEntities: () => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '解组对象');
       const selectionIds = getUnlockedSelectionIds(state);
       const folderIds = selectionIds.flatMap((entityId) => {
         const entity = state.scene.entities[entityId];
@@ -1745,6 +1865,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!nextName) return;
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '重命名对象');
       const entity = getSelectedEntity(state);
       if (!entity || isEntityEffectivelyLocked(state.scene, entity) || entity.name === nextName) return state;
 
@@ -1759,6 +1880,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   deleteSelectedEntity: () => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '删除对象');
       const deletingIds = getUnlockedSelectionIds(state);
       if (deletingIds.length === 0) return state;
 
@@ -1774,6 +1896,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   updateSelectedTransform: (field, axis, value) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改变换');
       const entity = getSelectedEntity(state);
       if (!isRuntimeEntityEditable(state.scene, entity)) return state;
 
@@ -1800,6 +1923,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!isColorLike(materialColor)) return;
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改材质颜色');
       const entity = getSelectedEntity(state);
       const meshRenderer = entity?.components.meshRenderer;
       if (!isRuntimeEntityEditable(state.scene, entity) || !meshRenderer || meshRenderer.materialColor === materialColor) return state;
@@ -1817,6 +1941,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   updateSelectedLocator: (patch) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改定位器');
       const entity = getSelectedEntity(state);
       const locator = entity?.components.locator;
       if (!isRuntimeEntityEditable(state.scene, entity) || !locator) return state;
@@ -1842,6 +1967,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   updateSelectedCadReference: (patch) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改 CAD 参考图');
       const entity = getSelectedEntity(state);
       const cadReference = entity?.components.cadReference;
       if (!isRuntimeEntityEditable(state.scene, entity) || !cadReference) return state;
@@ -1861,6 +1987,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   updateSelectedLight: (patch) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改灯光');
       const entity = getSelectedEntity(state);
       const light = entity?.components.light;
       if (!isRuntimeEntityEditable(state.scene, entity) || !light) return state;
@@ -1885,6 +2012,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   updateSelectedModelAssetCode: (assetCode) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改资产编号');
       const entity = getSelectedEntity(state);
       const modelAsset = entity?.components.modelAsset;
       if (!isRuntimeEntityEditable(state.scene, entity) || !modelAsset) return state;
@@ -1902,8 +2030,36 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
+  updateSelectedTelemetryBinding: (binding) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改遥测绑定');
+      const entity = getSelectedEntity(state);
+      if (!entity?.components.modelAsset) return state;
+      const before = entity.components.telemetryBinding ?? null;
+      const after = binding ? normalizeTelemetryBindingComponent(binding) : null;
+      if (JSON.stringify(before) === JSON.stringify(after)) return state;
+      const command = updateTelemetryBindingCommand(entity.id, before, after);
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, command.label) };
+    });
+  },
+  restoreSelectedTelemetryBindingDefault: () => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '恢复遥测绑定');
+      const entity = getSelectedEntity(state);
+      const devType = entity?.components.modelAsset?.dataDrivenConfig?.device.devType;
+      if (!entity || !devType) return state;
+      const before = entity.components.telemetryBinding ?? null;
+      const after = createDefaultTelemetryBinding(devType);
+      if (JSON.stringify(before) === JSON.stringify(after)) return state;
+      const command = updateTelemetryBindingCommand(entity.id, before, after);
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, '已恢复模型默认数据驱动绑定') };
+    });
+  },
   updateSelectedModelParameterValue: (key, value) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改模型参数');
       const entity = getSelectedEntity(state);
       const modelAsset = entity?.components.modelAsset;
       if (!isRuntimeEntityEditable(state.scene, entity) || !modelAsset?.parameterConfig) return state;
@@ -1928,6 +2084,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   previewSelectedModelParameterValue: (key, value) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '预览模型参数');
       const entity = getSelectedEntity(state);
       const modelAsset = entity?.components.modelAsset;
       if (!isRuntimeEntityEditable(state.scene, entity) || !modelAsset?.parameterConfig) return state;
@@ -1965,6 +2122,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (areModelParameterValuesEqual(before, after)) return;
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '提交模型参数');
       const entity = getSelectedEntity(state);
       const modelAsset = entity?.components.modelAsset;
       if (!isRuntimeEntityEditable(state.scene, entity) || !modelAsset?.parameterConfig) return state;
@@ -1986,6 +2144,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!isFiniteTransform(transform)) return;
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '预览变换');
       const entity = state.scene.entities[entityId];
       if (!isRuntimeEntityEditable(state.scene, entity)) return state;
 
@@ -2013,6 +2172,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (areTransformsEqual(before, after)) return;
 
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '提交变换');
       const entity = state.scene.entities[entityId];
       if (!isRuntimeEntityEditable(state.scene, entity)) return state;
 
@@ -2039,17 +2199,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   updateMqttConfig: (config) => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '保存 MQTT 配置');
       const mqttConfig = sanitizeMqttConfig(config);
-      if (
-        state.scene.mqttConfig.enabled === mqttConfig.enabled &&
-        state.scene.mqttConfig.ip === mqttConfig.ip &&
-        state.scene.mqttConfig.address === mqttConfig.address &&
-        state.scene.mqttConfig.topic === mqttConfig.topic &&
-        state.scene.mqttConfig.simulatorEnabled === mqttConfig.simulatorEnabled &&
-        state.scene.mqttConfig.simulatorAssetCode === mqttConfig.simulatorAssetCode &&
-        state.scene.mqttConfig.simulatorScenario === mqttConfig.simulatorScenario &&
-        state.scene.mqttConfig.simulatorIntervalMs === mqttConfig.simulatorIntervalMs
-      ) {
+      if (isMqttConfigEqual(state.scene.mqttConfig, mqttConfig)) {
         return state;
       }
 
@@ -2070,6 +2222,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   undo: () => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '撤销');
       const result = undoCommand(state.scene, state.history);
       if (result.history === state.history) return state;
 
@@ -2082,6 +2235,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   redo: () => {
     set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '重做');
       const result = redoCommand(state.scene, state.history);
       if (result.history === state.history) return state;
 
@@ -2093,9 +2247,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
   newScene: () => {
-    set((state) => createLoadedSceneState(state, createEmptySceneDocument(), '已新建空白场景。'));
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '新建场景');
+      return createLoadedSceneState(state, createEmptySceneDocument(), '已新建空白场景。');
+    });
   },
   saveScene: async () => {
+    if (get().runtimeMode === 'preview') {
+      set((state) => guardRuntimePreviewMutation(state, '保存场景'));
+      return;
+    }
+
     const sceneSnapshot = get().scene;
 
     try {
@@ -2117,6 +2279,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
   loadScene: async () => {
+    if (get().runtimeMode === 'preview') {
+      set((state) => guardRuntimePreviewMutation(state, '加载场景'));
+      return false;
+    }
+
     try {
       const result = await window.editorApi.loadScene();
 
@@ -2136,6 +2303,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
   loadSceneFromFile: async (filePath) => {
+    if (get().runtimeMode === 'preview') {
+      set((state) => guardRuntimePreviewMutation(state, '加载最近场景'));
+      return false;
+    }
+
     try {
       if (!window.editorApi?.loadSceneFile) {
         throw new Error('按路径加载场景需要 Electron 桌面环境。');
@@ -2158,6 +2330,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
   loadSceneFromContent: (content, sourceName) => {
+    if (get().runtimeMode === 'preview') {
+      set((state) => guardRuntimePreviewMutation(state, '加载内置场景'));
+      return false;
+    }
+
     try {
       const scene = deserializeScene(content);
       set((state) => createLoadedSceneState(state, scene, `场景已加载：${sourceName || scene.name}`));

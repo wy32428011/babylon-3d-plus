@@ -57,6 +57,8 @@ export type ModelScriptAsset = {
     sourceUrl: string;
     name: string;
 };
+/** 模型资产库分类：普通模型与环境模型分别落到不同项目目录。 */
+export type ModelAssetLibraryKind = 'model' | 'environment';
 export type AssetEntry = {
     id: string;
     name: string;
@@ -66,6 +68,8 @@ export type AssetEntry = {
     thumbnailPath?: string;
     thumbnailUrl?: string;
     kind: 'folder' | 'model' | 'texture' | 'scene' | 'unknown';
+    /** 扫描阶段可为空，写入项目索引后必须具备资产库分类。 */
+    libraryKind?: ModelAssetLibraryKind;
     packagePath?: string;
     metadataPath?: string;
     scriptPaths?: string[];
@@ -77,6 +81,12 @@ export type AssetEntry = {
     lengthUnit?: ModelSourceLengthUnit;
     unitScaleToMeters?: number;
     parameterConfig?: unknown;
+    dataDrivenConfig?: unknown;
+};
+/** 项目索引中的模型资产，必须是模型且带有明确资产库分类。 */
+export type ProjectModelAssetEntry = AssetEntry & {
+    kind: 'model';
+    libraryKind: ModelAssetLibraryKind;
 };
 export type ModelPackageVariant = {
     name: string;
@@ -90,11 +100,17 @@ export type ImportModelFolderSkippedEntry = {
     packagePath: string;
     reason: string;
 };
+/** 导入模型文件夹时由 renderer 指定目标资产库。 */
+export type ImportModelFolderRequest = {
+    libraryKind: ModelAssetLibraryKind;
+};
+/** 导入模型文件夹返回本次导入、项目完整资产与跳过项。 */
 export type ImportModelFolderResult = {
     canceled: boolean;
     rootPath: string | null;
     projectRoot: string | null;
-    assets: AssetEntry[];
+    importedAssets: ProjectModelAssetEntry[];
+    projectAssets: ProjectModelAssetEntry[];
     skipped: ImportModelFolderSkippedEntry[];
 };
 export type ImportCadFileResult = {
@@ -104,14 +120,58 @@ export type ImportCadFileResult = {
     fileSizeBytes: number;
 };
 export type ProjectAssetIndex = {
-    version: 1;
-    assets: AssetEntry[];
+    version: 2;
+    assets: ProjectModelAssetEntry[];
 };
 export type ProjectListAssetsResult = {
     projectRoot: string | null;
-    assets: AssetEntry[];
+    assets: ProjectModelAssetEntry[];
 };
 export type SelectProjectDirectoryResult = {
     canceled: boolean;
     projectRoot: string | null;
+};
+export type MqttIpcAdapterConfig = {
+    kind: 'epv';
+    sourceId?: string;
+    deviceType?: string;
+} | {
+    kind: 'json-path';
+    sourceId?: string;
+    deviceTypePath?: string;
+    assetCodePath?: string;
+    timestampPath?: string;
+    sequencePath?: string;
+    fields: Record<string, string>;
+};
+export type MqttIpcSubscriptionConfig = {
+    topic: string;
+    qos: 0 | 1 | 2;
+    adapter?: MqttIpcAdapterConfig;
+};
+export type MqttIpcConfigureRequest = {
+    enabled: boolean;
+    address: string;
+    subscriptions: MqttIpcSubscriptionConfig[];
+};
+export type MqttIpcStatus = {
+    state: 'disabled' | 'connecting' | 'connected' | 'disconnected' | 'error';
+    address?: string;
+    subscriptions: MqttIpcSubscriptionConfig[];
+    lastError?: string;
+};
+export type MqttIpcEvent = {
+    type: 'status';
+    status: MqttIpcStatus;
+} | {
+    type: 'log';
+    message: string;
+    receivedAt: number;
+} | {
+    type: 'message';
+    sourceId: string;
+    subscription: MqttIpcSubscriptionConfig;
+    topic: string;
+    payloadText: string;
+    receivedAt: number;
 };

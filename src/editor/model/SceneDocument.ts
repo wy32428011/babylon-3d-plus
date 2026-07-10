@@ -7,6 +7,10 @@ import { createDefaultModelParameterValues } from './modelParameters';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, type ModelLengthUnitInfo } from './sceneUnits';
 import { vector3 } from './math';
 import type { ModelScriptAsset } from './components';
+import {
+  createDefaultTelemetryBinding,
+  normalizeModelDataDrivenConfig,
+} from './telemetryBinding';
 
 export const MODEL_ASSET_CODE_MAX_LENGTH = 128;
 
@@ -25,7 +29,7 @@ export const SCENE_SENSITIVITY_MIN = 1;
 export const SCENE_SENSITIVITY_MAX = 20;
 export const SCENE_SENSITIVITY_DEFAULT = 10;
 
-export const STACKER_SIMULATION_SCENARIOS = ['cycle', 'target', 'movement', 'fault'] as const;
+export const STACKER_SIMULATION_SCENARIOS = ['cycle', 'target', 'movement', 'fault', 'generic'] as const;
 
 export type StackerSimulationScenario = (typeof STACKER_SIMULATION_SCENARIOS)[number];
 
@@ -66,11 +70,30 @@ export type SceneSettings = {
   environment: SceneEnvironmentSettings | null;
 };
 
+export type MqttAdapterConfig =
+  | { kind: 'epv'; sourceId?: string; deviceType?: string }
+  | {
+      kind: 'json-path';
+      sourceId?: string;
+      deviceTypePath?: string;
+      assetCodePath?: string;
+      timestampPath?: string;
+      sequencePath?: string;
+      fields: Record<string, string>;
+    };
+
+export type MqttSubscriptionConfig = {
+  topic: string;
+  qos: 0 | 1;
+  adapter: MqttAdapterConfig;
+};
+
 export type MqttConfig = {
   enabled: boolean;
   ip: string;
   address: string;
   topic: string;
+  subscriptions: MqttSubscriptionConfig[];
   simulatorEnabled: boolean;
   simulatorAssetCode: string;
   simulatorScenario: StackerSimulationScenario;
@@ -82,6 +105,7 @@ export const DEFAULT_MQTT_CONFIG: MqttConfig = {
   ip: '',
   address: '',
   topic: DEFAULT_STACKER_MQTT_TOPIC,
+  subscriptions: [{ topic: DEFAULT_STACKER_MQTT_TOPIC, qos: 0, adapter: { kind: 'epv' } }],
   simulatorEnabled: false,
   simulatorAssetCode: DEFAULT_STACKER_SIMULATOR_ASSET_CODE,
   simulatorScenario: 'cycle',
@@ -200,21 +224,75 @@ export function createMqttAddressFromIp(ip: string): string {
   return normalizedIp ? `ws://${normalizedIp}:${DEFAULT_MQTT_WS_PORT}${DEFAULT_MQTT_WS_PATH}` : '';
 }
 
+/** 判断 JSON Path 适配器路径是否只包含安全点号和数组索引。 */
+function isSafeJsonPath(value: string): boolean {
+  return /^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*|\[[0-9]+\])*$/.test(value);
+}
+
+/** 清理 MQTT 适配器配置，避免保存凭据或任意表达式。 */
+function sanitizeMqttAdapterConfig(adapter: unknown): MqttAdapterConfig {
+  if (typeof adapter !== 'object' || adapter === null || Object.getPrototypeOf(adapter) !== Object.prototype) return { kind: 'epv' };
+  const source = adapter as Record<string, unknown>;
+  if (source.kind !== 'json-path') {
+    const sourceId = typeof source.sourceId === 'string' ? source.sourceId.trim().slice(0, 128) : '';
+    const deviceType = typeof source.deviceType === 'string' ? source.deviceType.trim().slice(0, 128) : '';
+    return { kind: 'epv', ...(sourceId ? { sourceId } : {}), ...(deviceType ? { deviceType } : {}) };
+  }
+
+  const fields: Record<string, string> = {};
+  if (typeof source.fields === 'object' && source.fields !== null && Object.getPrototypeOf(source.fields) === Object.prototype) {
+    for (const [key, value] of Object.entries(source.fields).slice(0, 128)) {
+      const field = key.trim().slice(0, 128);
+      const path = typeof value === 'string' ? value.trim().slice(0, 256) : '';
+      if (field && path && isSafeJsonPath(path)) fields[field] = path;
+    }
+  }
+
+  const pickPath = (value: unknown) => typeof value === 'string' && isSafeJsonPath(value.trim()) ? value.trim().slice(0, 256) : undefined;
+  const sourceId = typeof source.sourceId === 'string' ? source.sourceId.trim().slice(0, 128) : '';
+  return {
+    kind: 'json-path',
+    ...(sourceId ? { sourceId } : {}),
+    ...(pickPath(source.deviceTypePath) ? { deviceTypePath: pickPath(source.deviceTypePath) } : {}),
+    ...(pickPath(source.assetCodePath) ? { assetCodePath: pickPath(source.assetCodePath) } : {}),
+    ...(pickPath(source.timestampPath) ? { timestampPath: pickPath(source.timestampPath) } : {}),
+    ...(pickPath(source.sequencePath) ? { sequencePath: pickPath(source.sequencePath) } : {}),
+    fields,
+  };
+}
+
+/** 清理单条 MQTT 订阅配置，非法 topic 会被过滤。 */
+function sanitizeMqttSubscriptionConfig(value: unknown): MqttSubscriptionConfig | null {
+  if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) return null;
+  const source = value as Record<string, unknown>;
+  const topic = typeof source.topic === 'string' ? source.topic.trim() : '';
+  if (!topic) return null;
+  return { topic, qos: source.qos === 1 ? 1 : 0, adapter: sanitizeMqttAdapterConfig(source.adapter) };
+}
+
+/** 从 legacy topic 字符串生成 EPV 订阅，兼容逗号分隔旧场景。 */
+function createSubscriptionsFromLegacyTopic(topic: string): MqttSubscriptionConfig[] {
+  return topic.split(',').map((item) => item.trim()).filter(Boolean).slice(0, 32).map((item) => ({ topic: item, qos: 0, adapter: { kind: 'epv' } }));
+}
+
 /** 归一化场景 MQTT 配置，地址为空但 IP 存在时自动补齐默认 WebSocket 地址。 */
-export function sanitizeMqttConfig(config: MqttConfig): MqttConfig {
+export function sanitizeMqttConfig(config: Omit<MqttConfig, 'subscriptions'> & { subscriptions?: unknown }): MqttConfig {
   const ip = config.ip.trim();
   const address = config.address.trim() || createMqttAddressFromIp(ip);
-  const topic = config.topic.trim() || DEFAULT_STACKER_MQTT_TOPIC;
+  const legacyTopic = config.topic.trim() || DEFAULT_STACKER_MQTT_TOPIC;
+  const rawSubscriptions = Array.isArray(config.subscriptions) ? config.subscriptions : [];
+  const subscriptions = rawSubscriptions.map(sanitizeMqttSubscriptionConfig).filter((item): item is MqttSubscriptionConfig => Boolean(item));
+  const normalizedSubscriptions = subscriptions.length ? subscriptions : createSubscriptionsFromLegacyTopic(legacyTopic);
+  const topic = normalizedSubscriptions.map((item) => item.topic).join(',') || DEFAULT_STACKER_MQTT_TOPIC;
   const simulatorAssetCode = config.simulatorAssetCode.trim() || DEFAULT_STACKER_SIMULATOR_ASSET_CODE;
-  const simulatorIntervalMs = Number.isFinite(config.simulatorIntervalMs)
-    ? Math.max(100, Math.trunc(config.simulatorIntervalMs))
-    : DEFAULT_STACKER_SIMULATOR_INTERVAL_MS;
+  const simulatorIntervalMs = Number.isFinite(config.simulatorIntervalMs) ? Math.max(100, Math.trunc(config.simulatorIntervalMs)) : DEFAULT_STACKER_SIMULATOR_INTERVAL_MS;
 
   return {
     enabled: config.enabled,
     ip,
     address,
     topic,
+    subscriptions: normalizedSubscriptions,
     simulatorEnabled: config.simulatorEnabled,
     simulatorAssetCode,
     simulatorScenario: normalizeStackerSimulationScenario(config.simulatorScenario),
@@ -432,10 +510,15 @@ export function createModelEntity(
   animationScriptMetadata?: unknown[],
   defaultAssetCodePrefix?: string,
   assetRevision?: string,
+  dataDrivenConfig?: unknown,
 ): Entity {
   const id = createId('entity');
   const trimmedName = displayName.trim();
-  const assetCode = createModelAssetCode(defaultAssetCodePrefix, id);
+  const normalizedDataDrivenConfig = normalizeModelDataDrivenConfig(dataDrivenConfig);
+  const assetCode = createModelAssetCode(normalizedDataDrivenConfig?.device.defaultAssetCode ?? defaultAssetCodePrefix, id);
+  const telemetryBinding = normalizedDataDrivenConfig?.device.devType
+    ? createDefaultTelemetryBinding(normalizedDataDrivenConfig.device.devType)
+    : null;
 
   return {
     id,
@@ -466,7 +549,9 @@ export function createModelEntity(
               parameterValues: createDefaultModelParameterValues(parameterConfig),
             }
           : {}),
+        ...(normalizedDataDrivenConfig ? { dataDrivenConfig: normalizedDataDrivenConfig } : {}),
       },
+      ...(telemetryBinding ? { telemetryBinding } : {}),
     },
   };
 }

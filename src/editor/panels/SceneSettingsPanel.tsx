@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState, type DragEvent, type KeyboardEvent, type 
 import {
   decodeModelAssetDragPayload,
   ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE,
-  MODEL_ASSET_DRAG_MIME_TYPE,
-  type AssetEntry,
+  type ProjectModelAssetEntry,
 } from '../assets/AssetDatabase';
 import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
 import {
@@ -23,7 +22,7 @@ import { useEditorStore, type SceneSensitivitySettingKey } from '../store/editor
 import { ResourceCard } from '../ui/ResourceCard';
 
 const ENVIRONMENT_LIBRARY: ProjectLibrary = {
-  key: 'model',
+  key: 'environment',
   label: '环境模型',
   searchLabel: '环境模型',
   searchPlaceholder: '',
@@ -45,23 +44,21 @@ function parseFiniteNumber(rawValue: string): number | null {
 
 /** 判断拖拽事件是否包含可用于环境属性的模型资产载荷。 */
 function hasEnvironmentAssetDragPayload(event: DragEvent<HTMLElement>): boolean {
-  return (
-    event.dataTransfer.types.includes(ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE) ||
-    event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE)
-  );
+  return event.dataTransfer.types.includes(ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE);
 }
 
-/** 读取环境属性 drop 使用的模型资产，环境库专用载荷优先于普通模型库载荷。 */
-function readEnvironmentAssetFromDrop(event: DragEvent<HTMLElement>): AssetEntry | null {
+/** 读取环境属性 drop 使用的环境模型资产，并严格校验环境分库。 */
+function readEnvironmentAssetFromDrop(event: DragEvent<HTMLElement>): ProjectModelAssetEntry | null {
   const rawEnvironmentPayload = event.dataTransfer.getData(ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE);
   const environmentAsset = decodeModelAssetDragPayload(rawEnvironmentPayload);
-  if (environmentAsset) return environmentAsset;
-
-  const rawModelPayload = event.dataTransfer.getData(MODEL_ASSET_DRAG_MIME_TYPE);
-  return decodeModelAssetDragPayload(rawModelPayload);
+  return environmentAsset?.libraryKind === 'environment' ? environmentAsset : null;
 }
 
-export function SceneSettingsPanel() {
+type SceneSettingsPanelProps = {
+  readOnly?: boolean;
+};
+
+export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const scene = useEditorStore((state) => state.scene);
   const renameScene = useEditorStore((state) => state.renameScene);
   const resetSceneToBlank = useEditorStore((state) => state.resetSceneToBlank);
@@ -73,7 +70,7 @@ export function SceneSettingsPanel() {
   const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
   const setEnvironmentActiveVariant = useEditorStore((state) => state.setEnvironmentActiveVariant);
   const [sceneNameDraft, setSceneNameDraft] = useState(scene.name);
-  const [modelAssets, setModelAssets] = useState<AssetEntry[]>([]);
+  const [environmentAssets, setEnvironmentAssets] = useState<ProjectModelAssetEntry[]>([]);
   const [environmentDialogOpen, setEnvironmentDialogOpen] = useState(false);
   const [environmentStatus, setEnvironmentStatus] = useState<string | null>(null);
   const [environmentDropActive, setEnvironmentDropActive] = useState(false);
@@ -81,7 +78,7 @@ export function SceneSettingsPanel() {
   const environment = scene.sceneSettings.environment;
   const presetVariant = environment?.variants[0] ?? null;
   const customVariants = environment?.variants.slice(1) ?? [];
-  const modelItems = useMemo(() => createModelLibraryItems(modelAssets), [modelAssets]);
+  const environmentItems = useMemo(() => createModelLibraryItems(environmentAssets), [environmentAssets]);
 
   useEffect(() => {
     setSceneNameDraft(scene.name);
@@ -94,19 +91,19 @@ export function SceneSettingsPanel() {
 
     async function loadProjectModels(): Promise<void> {
       if (!window.editorApi?.listProjectAssets) {
-        setEnvironmentStatus('当前环境未提供项目模型库。');
+        setEnvironmentStatus('当前环境未提供项目环境模型库。');
         return;
       }
 
-      setEnvironmentStatus('正在加载项目模型库...');
+      setEnvironmentStatus('正在加载项目环境模型库...');
 
       try {
         const result = await window.editorApi.listProjectAssets();
         if (!mounted) return;
 
-        const assets = result.assets.filter((asset) => asset.kind === 'model');
-        setModelAssets(assets);
-        setEnvironmentStatus(assets.length > 0 ? null : '项目模型库为空，请先在底部模型库导入模型文件夹。');
+        const assets = result.assets.filter((asset) => asset.kind === 'model' && asset.libraryKind === 'environment');
+        setEnvironmentAssets(assets);
+        setEnvironmentStatus(assets.length > 0 ? null : '环境库为空，请先在底部环境库导入环境模型文件夹。');
       } catch (error) {
         if (!mounted) return;
         const message = error instanceof Error ? error.message : String(error);
@@ -122,6 +119,7 @@ export function SceneSettingsPanel() {
   }, [environmentDialogOpen]);
 
   function commitSceneName(): void {
+    if (props.readOnly) return;
     renameScene(sceneNameDraft);
   }
 
@@ -131,23 +129,29 @@ export function SceneSettingsPanel() {
   }
 
   function handleResetScene(): void {
+    if (props.readOnly) return;
     if (!window.confirm('确定要初始化场景吗？未保存内容将丢失。')) return;
     resetSceneToBlank();
   }
 
   function handleViewDistanceChange(rawValue: string): void {
+    if (props.readOnly) return;
     const nextValue = parseFiniteNumber(rawValue);
     if (nextValue === null) return;
     setCameraViewDistance(nextValue);
   }
 
   function handleSensitivityChange(key: SceneSensitivitySettingKey, rawValue: string): void {
+    if (props.readOnly) return;
     const nextValue = parseFiniteNumber(rawValue);
     if (nextValue === null) return;
     updateSensitivitySetting(key, nextValue);
   }
 
-  async function handleSelectEnvironmentAsset(asset: AssetEntry): Promise<void> {
+  async function handleSelectEnvironmentAsset(asset: ProjectModelAssetEntry): Promise<void> {
+    if (props.readOnly) return;
+    if (asset.libraryKind !== 'environment') return;
+
     try {
       const environmentConfig = await loadEnvironmentFromAsset(asset);
       if (!environmentConfig) {
@@ -164,8 +168,9 @@ export function SceneSettingsPanel() {
     }
   }
 
-  /** 允许模型库和环境库模型卡片在环境预览区触发 drop。 */
+  /** 仅允许环境库模型卡片在环境预览区触发 drop。 */
   function handleEnvironmentDragOver(event: DragEvent<HTMLButtonElement>): void {
+    if (props.readOnly) return;
     if (!hasEnvironmentAssetDragPayload(event)) return;
 
     event.preventDefault();
@@ -183,6 +188,7 @@ export function SceneSettingsPanel() {
 
   /** 在环境预览区释放模型卡片时应用为场景环境，不创建场景实体。 */
   function handleEnvironmentDrop(event: DragEvent<HTMLButtonElement>): void {
+    if (props.readOnly) return;
     const asset = readEnvironmentAssetFromDrop(event);
     if (!asset) return;
 
@@ -199,6 +205,7 @@ export function SceneSettingsPanel() {
       <button
         className={active ? 'scene-effect-card active' : 'scene-effect-card'}
         key={variant.sourceUrl}
+        disabled={props.readOnly}
         onClick={() => setEnvironmentActiveVariant(variant.sourceUrl)}
         title={variant.sourcePath}
         type="button"
@@ -218,6 +225,7 @@ export function SceneSettingsPanel() {
           <span>场景名称</span>
           <input
             type="text"
+            disabled={props.readOnly}
             value={sceneNameDraft}
             onBlur={commitSceneName}
             onChange={(event) => setSceneNameDraft(event.target.value)}
@@ -225,8 +233,8 @@ export function SceneSettingsPanel() {
           />
         </label>
         <div className="scene-settings-button-row">
-          <button type="button" onClick={handleResetScene}>场景初始化</button>
-          <button type="button" onClick={() => void importCadReference()}>导入CAD</button>
+          <button type="button" disabled={props.readOnly} onClick={handleResetScene}>场景初始化</button>
+          <button type="button" disabled={props.readOnly} onClick={() => void importCadReference()}>导入CAD</button>
         </div>
       </fieldset>
 
@@ -234,7 +242,7 @@ export function SceneSettingsPanel() {
         <legend>相机</legend>
         <div className="scene-settings-button-row">
           <button type="button" onClick={requestCameraReset}>复位视角</button>
-          <button type="button" onClick={requestCameraPoseSave}>保存当前视角</button>
+          <button type="button" disabled={props.readOnly} onClick={requestCameraPoseSave}>保存当前视角</button>
         </div>
         <label className="scene-slider-row">
           <span>可视距离</span>
@@ -243,6 +251,7 @@ export function SceneSettingsPanel() {
             max={SCENE_VIEW_DISTANCE_MAX}
             step="100"
             type="range"
+            disabled={props.readOnly}
             value={scene.sceneSettings.camera.viewDistance}
             onChange={(event) => handleViewDistanceChange(event.target.value)}
           />
@@ -251,6 +260,7 @@ export function SceneSettingsPanel() {
             max={SCENE_VIEW_DISTANCE_MAX}
             step="100"
             type="number"
+            disabled={props.readOnly}
             value={scene.sceneSettings.camera.viewDistance}
             onChange={(event) => handleViewDistanceChange(event.target.value)}
           />
@@ -267,6 +277,7 @@ export function SceneSettingsPanel() {
               max={SCENE_SENSITIVITY_MAX}
               step="1"
               type="range"
+              disabled={props.readOnly}
               value={scene.sceneSettings.sensitivity[row.key]}
               onChange={(event) => handleSensitivityChange(row.key, event.target.value)}
             />
@@ -275,6 +286,7 @@ export function SceneSettingsPanel() {
               max={SCENE_SENSITIVITY_MAX}
               step="1"
               type="number"
+              disabled={props.readOnly}
               value={scene.sceneSettings.sensitivity[row.key]}
               onChange={(event) => handleSensitivityChange(row.key, event.target.value)}
             />
@@ -293,6 +305,7 @@ export function SceneSettingsPanel() {
             onDragOver={handleEnvironmentDragOver}
             onDrop={handleEnvironmentDrop}
             onClick={() => setEnvironmentDialogOpen(true)}
+            disabled={props.readOnly}
             title="选择或拖入环境模型"
             type="button"
           >
@@ -304,7 +317,7 @@ export function SceneSettingsPanel() {
           </button>
         </label>
         {environment ? (
-          <button className="environment-clear-button" type="button" onClick={() => updateEnvironmentConfig(null)}>
+          <button className="environment-clear-button" type="button" disabled={props.readOnly} onClick={() => updateEnvironmentConfig(null)}>
             清除环境模型
           </button>
         ) : null}
@@ -337,18 +350,21 @@ export function SceneSettingsPanel() {
               <button type="button" onClick={() => setEnvironmentDialogOpen(false)}>关闭</button>
             </div>
             <div className="environment-dialog-list">
-              {modelItems.map((item) => {
+              {environmentItems.map((item) => {
                 if (!isImportedProjectLibraryItem(item)) return null;
+                if (item.asset.kind !== 'model' || item.asset.libraryKind !== 'environment') return null;
+                const environmentAsset = item.asset as ProjectModelAssetEntry;
 
                 return (
                   <ResourceCard
                     className="environment-resource-card"
+                    disabled={props.readOnly}
                     draggable={false}
                     item={item}
                     key={item.id}
                     library={ENVIRONMENT_LIBRARY}
-                    onClick={() => void handleSelectEnvironmentAsset(item.asset)}
-                    title={`选择环境模型：${item.name}，${getModelUnitTitle(item.asset)}`}
+                    onClick={() => void handleSelectEnvironmentAsset(environmentAsset)}
+                    title={`选择环境模型：${item.name}，${getModelUnitTitle(environmentAsset)}`}
                   />
                 );
               })}

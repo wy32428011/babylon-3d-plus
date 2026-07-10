@@ -7,13 +7,15 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "dev:electron": "node scripts/dev-electron.mjs",
+    "demo:mqtt:generic:scene": "node scripts/create-generic-mqtt-motion-demo.mjs",
     "demo:stacker:scene": "node scripts/create-stacker-mqtt-demo-scene.mjs",
     "demo:stacker:mqtt": "node scripts/simulate-stacker-mqtt.mjs",
     "wait:renderer": "node scripts/wait-for-vite-renderer.mjs",
     "build": "tsc -b && vite build && npm run build:electron",
     "build:electron": "tsc -p tsconfig.node.json",
     "typecheck": "tsc -b",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "test:telemetry": "node scripts/telemetry-test.mjs"
   },
   "engines": {
     "node": ">=22.12.0"

@@ -114,30 +114,6 @@
           }
         },
         {
-          "key": "aisleWidth",
-          "label": "巷道宽度",
-          "type": "number",
-          "defaultValue": 1.2,
-          "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 100,
-            "step": 0.1
-          }
-        },
-        {
-          "key": "aisleHeight",
-          "label": "巷道高度",
-          "type": "number",
-          "defaultValue": 1,
-          "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 100,
-            "step": 0.1
-          }
-        },
-        {
           "key": "doubleDeepEnabled",
           "label": "启用双深货位",
           "type": "boolean",
@@ -168,19 +144,6 @@
             "min": -100,
             "max": 100,
             "step": 0.05
-          }
-        },
-        {
-          "key": "shelfStyle",
-          "label": "货架样式",
-          "type": "string",
-          "defaultValue": "beam",
-          "configuration": {
-            "type": "string",
-            "options": [
-              "beam",
-              "plate"
-            ]
           }
         }
       ],
@@ -283,28 +246,6 @@
             "step": 0.01
           }
         },
-        "aisleWidth": {
-          "type": "number",
-          "value": 1.2,
-          "label": "巷道宽度",
-          "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 100,
-            "step": 0.1
-          }
-        },
-        "aisleHeight": {
-          "type": "number",
-          "value": 1,
-          "label": "巷道高度",
-          "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 100,
-            "step": 0.1
-          }
-        },
         "doubleDeepEnabled": {
           "type": "boolean",
           "value": false,
@@ -333,18 +274,6 @@
             "min": -100,
             "max": 100,
             "step": 0.05
-          }
-        },
-        "shelfStyle": {
-          "type": "string",
-          "value": "beam",
-          "label": "货架样式",
-          "configuration": {
-            "type": "string",
-            "options": [
-              "beam",
-              "plate"
-            ]
           }
         }
       }
@@ -418,24 +347,6 @@
         "step": 0.01
       },
       {
-        "key": "aisleWidth",
-        "label": "巷道宽度",
-        "type": "number",
-        "defaultValue": 1.2,
-        "min": 0,
-        "max": 100,
-        "step": 0.1
-      },
-      {
-        "key": "aisleHeight",
-        "label": "巷道高度",
-        "type": "number",
-        "defaultValue": 1,
-        "min": 0,
-        "max": 100,
-        "step": 0.1
-      },
-      {
         "key": "doubleDeepEnabled",
         "label": "启用双深货位",
         "type": "boolean",
@@ -458,22 +369,6 @@
         "min": -100,
         "max": 100,
         "step": 0.05
-      },
-      {
-        "key": "shelfStyle",
-        "label": "货架样式",
-        "type": "enum",
-        "defaultValue": "beam",
-        "options": [
-          {
-            "value": "beam",
-            "label": "beam"
-          },
-          {
-            "value": "plate",
-            "label": "plate"
-          }
-        ]
       }
     ],
     "bindings": []

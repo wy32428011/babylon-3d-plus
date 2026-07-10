@@ -4,8 +4,10 @@ import path from 'node:path';
 import type {
   AssetEntry,
   ImportCadFileResult,
+  ImportModelFolderRequest,
   ImportModelFolderResult,
   ListModelPackageVariantsRequest,
+  ModelAssetLibraryKind,
   ModelPackageVariant,
 } from '../types.js';
 import { authorizeAssetFile, authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl } from './assetRegistry.js';
@@ -34,6 +36,17 @@ function getAssetKind(filePath: string, isDirectory: boolean): AssetEntry['kind'
   }
 
   return 'unknown';
+}
+
+/** 校验导入请求中的目标资产库分类，避免未知分类落错目录。 */
+function normalizeImportModelLibraryKind(request: ImportModelFolderRequest | undefined): ModelAssetLibraryKind {
+  const libraryKind = request?.libraryKind;
+
+  if (libraryKind === 'model' || libraryKind === 'environment') {
+    return libraryKind;
+  }
+
+  throw new Error('请选择有效的模型资产库分类。');
 }
 
 export function registerAssetIpc(): void {
@@ -102,33 +115,36 @@ export function registerAssetIpc(): void {
     };
   });
 
-  ipcMain.handle('assets:importModelFolder', async (): Promise<ImportModelFolderResult> => {
+  /** 导入模型文件夹：根据请求分类选择普通模型或环境模型资产库。 */
+  ipcMain.handle('assets:importModelFolder', async (_event, request?: ImportModelFolderRequest): Promise<ImportModelFolderResult> => {
+    const libraryKind = normalizeImportModelLibraryKind(request);
     const projectRoot = await ensureCurrentProjectRootWithDialog();
 
     if (!projectRoot) {
-      return { canceled: true, rootPath: null, projectRoot: null, assets: [], skipped: [] };
+      return { canceled: true, rootPath: null, projectRoot: null, importedAssets: [], projectAssets: [], skipped: [] };
     }
 
     const result = await dialog.showOpenDialog({
-      title: '选择模型文件夹',
+      title: libraryKind === 'environment' ? '选择环境模型文件夹' : '选择模型文件夹',
       properties: ['openDirectory'],
     });
 
     const [rootPath] = result.filePaths;
 
     if (result.canceled || !rootPath) {
-      return { canceled: true, rootPath: null, projectRoot, assets: [], skipped: [] };
+      return { canceled: true, rootPath: null, projectRoot, importedAssets: [], projectAssets: [], skipped: [] };
     }
 
     authorizeAssetRoot(rootPath);
     const { assets: scannedAssets, skipped: scanSkipped } = await scanModelFolder(rootPath);
-    const { assets, skipped: copySkipped } = await importModelPackagesIntoProject(scannedAssets);
+    const { importedAssets, projectAssets, skipped: copySkipped } = await importModelPackagesIntoProject(scannedAssets, libraryKind);
 
     return {
       canceled: false,
       rootPath,
       projectRoot: getCurrentProjectRoot(),
-      assets,
+      importedAssets,
+      projectAssets,
       skipped: [...scanSkipped, ...copySkipped],
     };
   });

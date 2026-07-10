@@ -236,8 +236,10 @@ select {
 .mqtt-config-dialog {
   display: grid;
   gap: 12px;
-  width: min(520px, calc(100vw - 32px));
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
   padding: 16px;
+  overflow: auto;
   border: 1px solid #4a4a4a;
   border-radius: 4px;
   color: #e2e2e2;
@@ -308,6 +310,183 @@ select {
   background: #2f86ff;
 }
 
+.mqtt-config-dialog-row textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 72px;
+  padding: 7px 8px;
+  border: 1px solid #555555;
+  border-radius: 3px;
+  color: #e2e2e2;
+  background: #1e1e1e;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.mqtt-subscription-list {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #414141;
+  border-radius: 4px;
+  background: #222222;
+}
+
+.mqtt-subscription-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.mqtt-subscription-item {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #383838;
+  border-radius: 3px;
+  background: #292929;
+}
+
+.mqtt-subscription-item > button {
+  justify-self: end;
+}
+
+.mqtt-config-dialog-error {
+  margin: 0;
+  color: #ff9c9c;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mqtt-runtime-status {
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid #42545a;
+  border-radius: 3px;
+  color: #b8e8ee;
+  background: #1d3034;
+  font-size: 12px;
+}
+
+.mqtt-runtime-status-error {
+  border-color: #754545;
+  color: #ffb0b0;
+  background: #3b2323;
+}
+
+.mqtt-runtime-status-connected,
+.mqtt-runtime-status-simulating {
+  border-color: #3f6f52;
+  color: #b8f2c9;
+  background: #20352a;
+}
+
+.toolbar-icon-button[aria-label="运行"] {
+  border-color: #3f8f57;
+  color: #d8ffe2;
+  background: #1d3a27;
+}
+
+.toolbar-icon-button[aria-label="停止"] {
+  border-color: #8f4b4b;
+  color: #ffd6d6;
+  background: #3a1f1f;
+}
+
+.toolbar input:disabled,
+.toolbar select:disabled,
+.panel input:disabled,
+.panel select:disabled,
+.panel textarea:disabled,
+.panel [aria-disabled="true"] {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.mqtt-preview-result {
+  max-height: 220px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid #385e67;
+  border-radius: 3px;
+  color: #c6edf2;
+  background: #17282c;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.telemetry-runtime-diagnostics {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  margin-top: 4px;
+  padding: 7px;
+  border: 1px solid #3c555a;
+  border-radius: 3px;
+  background: #1d2a2d;
+}
+
+.telemetry-runtime-diagnostics > strong {
+  color: #b9edf3;
+  font-size: 12px;
+}
+
+.telemetry-runtime-diagnostics p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.telemetry-runtime-fields-wrap {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  color: #9fb7bb;
+  font-size: 11px;
+}
+
+.telemetry-runtime-fields {
+  max-height: 140px;
+  margin: 0;
+  padding: 5px 6px;
+  overflow: auto;
+  border: 1px solid #34464a;
+  border-radius: 3px;
+  color: #c9e4e8;
+  background: #172023;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  line-height: 15px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.telemetry-runtime-error {
+  color: #ffadad;
+}
+
+.telemetry-channel-editor {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin-top: 5px;
+  padding: 6px;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  background: #222222;
+}
+
+.telemetry-channel-editor > strong {
+  color: #dfeff1;
+  font-size: 11px;
+}
+
 .panel,
 .scene-panel {
   height: 100%;
@@ -343,6 +522,26 @@ select {
   min-height: 0;
   overflow: hidden;
   background: #151515;
+}
+
+.scene-viewport-preview {
+  border: 2px solid #f7d774;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 56%), 0 0 0 1px rgb(247 215 116 / 28%);
+}
+
+.scene-preview-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  padding: 4px 9px;
+  border: 1px solid #f7d774;
+  border-radius: 999px;
+  color: #1e1e1e;
+  background: #f7d774;
+  font-size: 12px;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .scene-error {
