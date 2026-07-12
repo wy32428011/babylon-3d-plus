@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>YZJ 方向箭头真实运行时视觉验证</title>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #071016; color: #eaf7ff; font-family: "Microsoft YaHei", Arial, sans-serif; }
+      #renderCanvas { width: 100%; height: 100%; display: block; }
+      #status { position: fixed; left: 16px; top: 16px; max-width: 1180px; padding: 12px 14px; border: 1px solid rgba(87, 218, 255, 0.48); border-radius: 10px; background: rgba(4, 10, 15, 0.88); box-shadow: 0 12px 30px rgba(0, 0, 0, 0.36); font-size: 13px; line-height: 1.55; }
+      .ok { color: #80f0b0; }
+      .error { color: #ff8f8f; }
+    </style>
+  </head>
+  <body data-validation-status="loading">
+    <canvas id="renderCanvas"></canvas>
+    <div id="status">正在通过真实 SceneRuntime 加载 YZJ 方向箭头案例...</div>
+    <script type="module">
+      import { ArcRotateCamera, Color3, DirectionalLight, Engine, HemisphericLight, MeshBuilder, Scene, StandardMaterial, Vector3 } from "@babylonjs/core";
+      import "@babylonjs/loaders/glTF/index.js";
+      import { createEmptySceneDocument, createModelEntity } from "/src/editor/model/SceneDocument.ts";
+      import { DIRECTION_ARROW_GLOW_IMAGE_REFERENCE } from "/src/assets/imageAssets.ts";
+
+      import { SceneRuntime } from "/src/runtime/babylon/SceneRuntime.ts";
+
+      const canvas = document.querySelector("#renderCanvas");
+      const status = document.querySelector("#status");
+      const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+      const scene = new Scene(engine);
+      scene.clearColor.set(0.025, 0.045, 0.06, 1);
+      const camera = new ArcRotateCamera("camera", Math.PI * 0.24, Math.PI * 0.24, 7.3, new Vector3(0, 0.72, 0.1), scene);
+      camera.attachControl(canvas, true);
+      const hemi = new HemisphericLight("hemi", new Vector3(0.2, 1, 0.2), scene);
+      hemi.intensity = 0.86;
+      const keyLight = new DirectionalLight("keyLight", new Vector3(-0.35, -1, -0.25), scene);
+      keyLight.intensity = 0.72;
+
+      const groundMaterial = new StandardMaterial("directionArrowGroundMaterial", scene);
+      groundMaterial.diffuseColor = new Color3(0.045, 0.07, 0.08);
+      groundMaterial.specularColor = new Color3(0.01, 0.02, 0.02);
+      const ground = MeshBuilder.CreateGround("directionArrowGround", { width: 9, height: 7 }, scene);
+      ground.position.y = -0.015;
+      ground.material = groundMaterial;
+
+      engine.runRenderLoop(() => scene.render());
+      window.addEventListener("resize", () => engine.resize());
+
+      const metadata = await fetch("./yzj-assets/meta.json").then((response) => response.json());
+
+      const yawByOutfeed = { left: 0, right: Math.PI, front: Math.PI / 2, rear: -Math.PI / 2 };
+      const defaultValues = {
+        chainLength: 2.5, platformLength: 1.022, platformPosition: 0, chainWidth: 1.45, chainHeight: 0.803,
+        rollerWidth: 0.062, rollerPosition: 0, rollerDensity: 5, infeedSide: "left", outfeedSide: "front",
+        showDirectionArrow: true, directionArrowImage: DIRECTION_ARROW_GLOW_IMAGE_REFERENCE, showFrontSupport: true, showRearSupport: true,
+      };
+      const cases = [
+        { label: "left", position: { x: -2.0, y: 0, z: -1.35 }, rotationY: Math.PI / 4, values: { ...defaultValues, outfeedSide: "left", platformPosition: -0.12, chainWidth: 1.15 } },
+        { label: "right", position: { x: 2.0, y: 0, z: -1.35 }, rotationY: 0, values: { ...defaultValues, outfeedSide: "right", platformPosition: 0.22, chainWidth: 1.72 } },
+        { label: "front", position: { x: -2.0, y: 0, z: 1.35 }, rotationY: 0, values: { ...defaultValues, outfeedSide: "front", platformLength: 1.38, platformPosition: 0.04, chainWidth: 1.36 } },
+        { label: "rear", position: { x: 2.0, y: 0, z: 1.35 }, rotationY: Math.PI / 4, values: { ...defaultValues, outfeedSide: "rear", platformLength: 0.82, platformPosition: -0.18, chainWidth: 1.64 } },
+        { label: "hidden", position: { x: 20, y: 0, z: 20 }, rotationY: 0, values: { ...defaultValues, outfeedSide: "front", showDirectionArrow: false } },
+      ];
+
+      /** 等待指定毫秒，用于模型加载、纹理回调和呼吸动画采样。 */
+      function delay(ms) {
+        return new Promise((resolve) => window.setTimeout(resolve, ms));
+      }
+
+      /** 创建带 metadata.modelParameters 与脚本资产的 YZJ 模型实体。 */
+      function createYzjEntity(testCase) {
+        const entity = createModelEntity(
+          "./yzj-assets/YZJ.glb",
+          "./yzj-assets/YZJ.glb",
+          "YZJ arrow " + testCase.label,
+          { lengthUnit: "centimeter", unitScaleToMeters: 0.01 },
+          testCase.position,
+          metadata.modelParameters,
+          [{ path: "./yzj-assets/yzj.model.ts", sourceUrl: "./yzj-assets/yzj.model.txt", name: "yzj.model.ts" }],
+          metadata.parameterScripts ?? [],
+          metadata.animationScripts ?? [],
+          "YZJ",
+        );
+        entity.components.transform.rotation.y = testCase.rotationY;
+        entity.components.modelAsset.parameterValues = { ...entity.components.modelAsset.parameterValues, ...testCase.values };
+        entity.components.modelAsset.parameterConfig = metadata.modelParameters;
+        entity.components.modelAsset.parameterScriptMetadata = metadata.parameterScripts ?? [];
+        entity.components.modelAsset.animationScriptMetadata = metadata.animationScripts ?? [];
+        return entity;
+      }
+
+      /** 构建只包含本页验证实体的场景文档。 */
+      function createValidationDocument() {
+        const documentModel = createEmptySceneDocument("YZJ direction arrow validation");
+        for (const testCase of cases) {
+          const entity = createYzjEntity(testCase);
+          documentModel.entityIds.push(entity.id);
+          documentModel.entities[entity.id] = entity;
+        }
+        return documentModel;
+      }
+
+      /** 读取当前场景中的方向箭头 Mesh。 */
+      function findArrowMeshes() {
+        return scene.meshes.filter((mesh) => mesh.metadata?.directionArrowVisual);
+      }
+
+      /** 等待真实运行时生成所有显示态方向箭头。 */
+      async function waitForArrowMeshes(expectedCount) {
+        const deadline = performance.now() + 8000;
+        while (performance.now() < deadline) {
+          const arrows = findArrowMeshes();
+          if (arrows.length >= expectedCount && arrows.every((mesh) => mesh.parent?.name === "Ban.4")) return arrows;
+          await delay(100);
+        }
+        return findArrowMeshes();
+      }
+
+      /** 对方向箭头材质、纹理、父级、旋转和动画变化做快照。 */
+      async function inspectArrows() {
+        const arrows = await waitForArrowMeshes(4);
+        const before = new Map(arrows.map((mesh) => [mesh.uniqueId, { alpha: mesh.material?.alpha ?? null, sx: mesh.scaling.x, sz: mesh.scaling.z }]));
+        await delay(720);
+        const allArrows = findArrowMeshes();
+        return allArrows.map((mesh) => {
+          const material = mesh.material;
+          const texture = material?.diffuseTexture ?? material?.emissiveTexture ?? null;
+          const previous = before.get(mesh.uniqueId);
+          const animated = previous ? Math.abs((material?.alpha ?? 0) - (previous.alpha ?? 0)) > 0.001 || Math.abs(mesh.scaling.x - previous.sx) > 0.001 || Math.abs(mesh.scaling.z - previous.sz) > 0.001 : false;
+          return {
+            name: mesh.name,
+            parent: mesh.parent?.name ?? null,
+            isPickable: mesh.isPickable,
+            yaw: mesh.rotation.y,
+            alpha: material?.alpha ?? null,
+            textureName: texture?.name ?? null,
+            hasTexture: Boolean(texture),
+            animated,
+          };
+        });
+      }
+
+      try {
+        const runtime = new SceneRuntime(scene, (message) => console.log("[SceneRuntime]", message));
+        const documentModel = createValidationDocument();
+        runtime.sync(documentModel);
+        const arrowReports = await inspectArrows();
+        const failures = [];
+        for (const testCase of cases.filter((item) => item.values.showDirectionArrow)) {
+          const matched = arrowReports.find((item) => Math.abs((((item.yaw - yawByOutfeed[testCase.values.outfeedSide]) + Math.PI) % (Math.PI * 2)) - Math.PI) < 0.001);
+          if (!matched) failures.push(testCase.label + ":yaw");
+        }
+        if (arrowReports.length !== 4) failures.push("arrow-count=" + arrowReports.length);
+        if (arrowReports.some((item) => item.parent !== "Ban.4")) failures.push("parent");
+        if (arrowReports.some((item) => item.isPickable !== false)) failures.push("pickable");
+        if (arrowReports.some((item) => !item.hasTexture)) failures.push("texture");
+        if (arrowReports.some((item) => !item.animated)) failures.push("breathing");
+        const hiddenHasArrow = arrowReports.length > 4;
+        if (hiddenHasArrow) failures.push("show-false");
+
+        const report = { arrowReports, hiddenHasArrow, failures };
+        window.__YZJ_DIRECTION_ARROW_READY__ = failures.length === 0;
+        window.__YZJ_DIRECTION_ARROW_REPORT__ = report;
+        document.body.dataset.validationStatus = failures.length ? "fail" : "pass";
+        status.innerHTML = "<span class=\"" + (failures.length ? "error" : "ok") + "\">" + (failures.length ? "失败" : "通过") + "</span> SceneRuntime 已生成 4 个显示态方向箭头，show=false 案例不生成箭头。<br />" + arrowReports.map((item) => item.name + ": parent=" + item.parent + ", yaw=" + item.yaw.toFixed(3) + ", alpha=" + Number(item.alpha).toFixed(3) + ", animated=" + item.animated).join(" / ") + (failures.length ? "<br />" + failures.join("<br />") : "");
+      } catch (error) {
+        console.error(error);
+        window.__YZJ_DIRECTION_ARROW_READY__ = false;
+        window.__YZJ_DIRECTION_ARROW_REPORT__ = { error: error instanceof Error ? error.message : String(error) };
+        document.body.dataset.validationStatus = "fail";
+        status.innerHTML = "<span class=\"error\">失败</span>：" + (error instanceof Error ? error.message : String(error));
+      }
+    </script>
+  </body>
+</html>

@@ -228,6 +228,18 @@ export function InspectorPanel(props: InspectorPanelProps) {
               onChange={(event) => updateSelectedLocator({ assetId: event.target.value })}
             />
           </label>
+          <label className="inspector-row">
+            <span>库位排深</span>
+            <select
+              disabled={isLocked}
+              value={locator.storageDepth}
+              onChange={(event) => updateSelectedLocator({ storageDepth: event.target.value === 'far' ? 'far' : 'near' })}
+            >
+              <option value="near">近排（一段货叉）</option>
+              <option value="far">远排（二段货叉）</option>
+            </select>
+          </label>
+          <p className="muted">库位号建议使用“排-列-层”，例如 1-1-1、1-2-1。</p>
           {locatorDimensionFields.map(({ key, label }) => (
             <label className="number-row" key={key}>
               <span>{label}</span>

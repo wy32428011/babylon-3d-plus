@@ -1,5 +1,11 @@
 // 此文件由模型包参数脚本和运行脚本合并而成，供编辑器以单个 TS 文件读取。
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
+import { Mesh } from "@babylonjs/core/Meshes/mesh";
+import { MeshBuilder } from "@babylonjs/core/Meshes/meshBuilder";
+import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
+import { Texture } from "@babylonjs/core/Materials/Textures/texture";
+import { Color3 } from "@babylonjs/core/Maths/math.color";
+import { Constants } from "@babylonjs/core/Engines/constants";
 import { visibleAsBoolean, visibleAsNumber, visibleAsString } from "babylonjs-editor-tools";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 
@@ -37,9 +43,6 @@ export const dataDriven = {
 	}
 } as const;
 
-// 此文件按模型参数化说明生成，用于 一体式顶升移载 的静态参数配置。
-// 静态参数只描述设备几何语义；运行时按 YZJ.glb 的 ZT.2 / GT.3 / Ban.4 三个真实子结构执行。
-
 /**
  * 管理 一体式顶升移载 在 Babylon.js Editor Inspector 中展示的静态参数。
  */
@@ -54,13 +57,16 @@ export class ParametricModelParamsComponent {
 	public deviceName: string = "一体式顶升移载";
 
 	@visibleAsString("参数说明")
-	public description: string = "支持链条机长宽高、顶升模块独立长度、辊筒宽度位置密度和前后支架显示隐藏参数化。";
+	public description: string = "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。";
 
 	@visibleAsNumber("链条机长度", { step: 0.1 })
 	public chainLength: number = 1.828;
 
 	@visibleAsNumber("顶升模块长度", { step: 0.1 })
 	public platformLength: number = 1.022;
+
+	@visibleAsNumber("顶升位置偏移", { step: 0.05 })
+	public platformPosition: number = 0;
 
 	@visibleAsNumber("链条机宽度", { step: 0.1 })
 	public chainWidth: number = 1.194;
@@ -76,6 +82,18 @@ export class ParametricModelParamsComponent {
 
 	@visibleAsNumber("辊筒密度", { step: 1 })
 	public rollerDensity: number = 1;
+
+	@visibleAsString("入料侧")
+	public infeedSide: string = "left";
+
+	@visibleAsString("出料侧")
+	public outfeedSide: string = "front";
+
+	@visibleAsBoolean("显示方向箭头")
+	public showDirectionArrow: boolean = true;
+
+	@visibleAsString("方向箭头贴图")
+	public directionArrowImage: string = "editor-image://builtin/direction-arrow-glow";
 
 	@visibleAsBoolean("显示前支架")
 	public showFrontSupport: boolean = true;
@@ -99,6 +117,7 @@ export class ParametricModelParamsComponent {
 
 type ValueMap = Record<string, unknown>;
 type AxisName = "x" | "y" | "z";
+type TransferSide = "left" | "right" | "front" | "rear";
 
 interface NodeSnapshot {
 	position: Vector3;
@@ -113,14 +132,19 @@ const DEFAULT_VALUES: ValueMap = {
 	"modelKey": "yzj",
 	"deviceType": "输送",
 	"deviceName": "一体式顶升移载",
-	"description": "支持链条机长宽高、顶升模块独立长度、辊筒宽度位置密度和前后支架显示隐藏参数化。",
+	"description": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
 	"chainLength": 1.828,
 	"platformLength": 1.022,
+	"platformPosition": 0,
 	"chainWidth": 1.194,
 	"chainHeight": 0.803,
 	"rollerWidth": 0.062,
 	"rollerPosition": 0,
 	"rollerDensity": 1,
+	"infeedSide": "left",
+	"outfeedSide": "front",
+	"showDirectionArrow": true,
+	"directionArrowImage": "editor-image://builtin/direction-arrow-glow",
 	"showFrontSupport": true,
 	"showRearSupport": true
 };
@@ -135,7 +159,14 @@ const PLATFORM_NODE_NAME = "Ban.4";
 export class ParametricModelRuntimeComponent {
 	private readonly snapshots = new Map<any, NodeSnapshot>();
 	private readonly generatedNodes: any[] = [];
+	private readonly flowMetadataSnapshots = new Map<any, unknown>();
 	private readonly startupValues: ValueMap;
+	private directionArrowMesh: any | null = null;
+	private directionArrowMaterial: any | null = null;
+	private directionArrowTexture: any | null = null;
+	private directionArrowObserver: any | null = null;
+	private directionArrowTextureUrl = "";
+	private directionArrowFailedTextureUrl = "";
 	private lastSignature = "";
 
 	/**
@@ -156,19 +187,43 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 每帧检测参数签名变化，变化后恢复基线再重新应用。
+	 * 每帧检测参数签名变化，并刷新运行态方向箭头。
 	 */
 	public onUpdate(): void {
 		this.applyIfNeeded(false);
+		this.updateDirectionArrowVisual(this.readParamValues());
 	}
 
 	/**
-	 * 停止脚本时清理生成节点，并恢复模型导入时的基础状态。
+	 * 停止脚本时清理生成节点、箭头资源，并恢复模型导入时的基础状态。
 	 */
 	public onStop(): void {
+		this.disposeDirectionArrowResources();
 		this.disposeGeneratedNodes();
 		this.restoreBaseNodes();
+		this.restoreFlowMetadata();
 		this.lastSignature = "";
+	}
+
+	/**
+	 * dispose 生命周期同样释放方向箭头，兼容编辑器卸载脚本实例。
+	 */
+	public dispose(): void {
+		this.onStop();
+	}
+
+	/**
+	 * onDispose 生命周期同样释放方向箭头，避免预览停止后遗留 observer。
+	 */
+	public onDispose(): void {
+		this.onStop();
+	}
+
+	/**
+	 * onUnload 生命周期同样释放方向箭头，兼容外置脚本热卸载。
+	 */
+	public onUnload(): void {
+		this.onStop();
 	}
 
 	/**
@@ -178,6 +233,7 @@ export class ParametricModelRuntimeComponent {
 		const values = this.readParamValues();
 		const signature = JSON.stringify(values);
 		if (!force && signature === this.lastSignature) { return; }
+		this.disposeDirectionArrowResources();
 		this.disposeGeneratedNodes();
 		this.restoreBaseNodes();
 		this.applyYZJParameters(values);
@@ -241,10 +297,10 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 从模型 metadata 和启动缓存中读取 Inspector 参数。
+	 * 从模型 metadata、启动缓存和外置脚本实例注入中读取 Inspector 参数。
 	 */
 	private readParamValues(): ValueMap {
-		return { ...DEFAULT_VALUES, ...this.startupValues, ...this.readParamValuesFromMetadata() };
+		return { ...DEFAULT_VALUES, ...this.filterKnownValues(this.startupValues), ...this.readParamValuesFromMetadata(), ...this.readInjectedParameterValues() };
 	}
 
 	/**
@@ -254,8 +310,8 @@ export class ParametricModelRuntimeComponent {
 		const scripts = Array.isArray(this.node.metadata?.scripts) ? this.node.metadata.scripts : [];
 		for (const script of scripts) {
 			const scriptName = String(script?.className ?? script?.name ?? script?.scriptFilename ?? "");
-			const values = { ...this.readFieldDefaults(script), ...this.normalizeValueMap(script?.values), ...this.normalizeValueMap(script?.properties), ...this.normalizeValueMap(script?.config) };
-			if (scriptName.includes("ParametricModelParamsComponent") || Object.keys(values).some((key) => key in DEFAULT_VALUES)) { return values; }
+			const values = this.filterKnownValues({ ...this.readFieldDefaults(script), ...this.normalizeValueMap(script?.values), ...this.normalizeValueMap(script?.properties), ...this.normalizeValueMap(script?.config) });
+			if (scriptName.includes("ParametricModelParamsComponent") || Object.keys(values).length > 0) { return values; }
 		}
 		return {};
 	}
@@ -298,6 +354,27 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
+	 * 只读取 DEFAULT_VALUES 已声明的运行时字段，避免 metadata 中的无关键覆盖参数契约。
+	 */
+	private filterKnownValues(source: ValueMap): ValueMap {
+		return Object.keys(DEFAULT_VALUES).reduce((result: ValueMap, key) => {
+			if (key in source) { result[key] = source[key]; }
+			return result;
+		}, {});
+	}
+
+	/**
+	 * 读取 ExternalModelScriptRuntime 注入到实例上的当前参数值，优先级高于 metadata 快照。
+	 */
+	private readInjectedParameterValues(): ValueMap {
+		const instance = this as unknown as ValueMap;
+		return Object.keys(DEFAULT_VALUES).reduce((result: ValueMap, key) => {
+			if (instance[key] !== undefined) { result[key] = instance[key]; }
+			return result;
+		}, {});
+	}
+
+	/**
 	 * 按 YZJ.glb 的真实结构应用参数，避免旧模板对整机根节点做二次缩放。
 	 */
 	private applyYZJParameters(values: ValueMap): void {
@@ -308,9 +385,12 @@ export class ParametricModelRuntimeComponent {
 		const heightOffset = this.readPositiveNumber(values, "chainHeight", Number(DEFAULT_VALUES.chainHeight)) - Number(DEFAULT_VALUES.chainHeight);
 
 		this.applyBodyParameters(lengthRatio, widthRatio, heightRatio);
-		this.applyPlatformParameters(platformLengthRatio, widthRatio, heightOffset);
-		this.applyRollerParameters(values, lengthRatio, heightOffset);
+		const platformPosition = this.resolvePlatformPosition(values, platformLengthRatio);
+		this.applyPlatformParameters(platformLengthRatio, widthRatio, heightOffset, platformPosition);
+		this.applyRollerParameters(values, platformLengthRatio, heightOffset, platformPosition);
 		this.applySupportVisibility(values);
+		this.applyFlowDirection(values);
+		this.updateDirectionArrowVisual(values);
 	}
 
 	/**
@@ -324,7 +404,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 主体长度采用端部保护的顶点分段拉伸：两端支腿和端头只平移，中间链条/侧梁承担长度变化。
+	 * 主体长度采用端部保护的顶点分段拉伸：画面左侧保护段固定，右侧单向伸长。
 	 */
 	private stretchBodyLength(body: any, lengthRatio: number): void {
 		if (Math.abs(lengthRatio - 1) < 0.0001) { return; }
@@ -338,12 +418,11 @@ export class ParametricModelRuntimeComponent {
 		const middleEnd = bounds.max - capLength;
 		const middleLength = middleEnd - middleStart;
 		if (middleLength <= 0) { return; }
-
 		const requestedLength = sourceLength * lengthRatio;
 		const targetLength = Math.max(requestedLength, capLength * 2 + Math.min(0.08, sourceLength * 0.08));
 		const extension = targetLength - sourceLength;
 		const middleScale = (middleLength + extension) / middleLength;
-		meshes.forEach((mesh) => this.stretchMeshVerticesByLocalX(mesh, middleStart, middleEnd, middleLength, middleScale, extension));
+		meshes.forEach((mesh) => this.stretchMeshVerticesByLocalX(mesh, middleStart, middleEnd, middleScale, extension));
 	}
 
 	/**
@@ -356,63 +435,78 @@ export class ParametricModelRuntimeComponent {
 	/**
 	 * 将 mesh 的局部 X 顶点映射到端部保护后的目标位置。
 	 */
-	private stretchMeshVerticesByLocalX(mesh: any, middleStart: number, middleEnd: number, middleLength: number, middleScale: number, extension: number): void {
+	private stretchMeshVerticesByLocalX(mesh: any, middleStart: number, middleEnd: number, middleScale: number, extension: number): void {
 		const positions = this.rememberSnapshot(mesh).vertexPositions;
 		if (!positions || typeof mesh.setVerticesData !== "function") { return; }
 		const nextPositions = positions.slice();
 		for (let index = 0; index < nextPositions.length; index += 3) {
 			const x = positions[index];
-			nextPositions[index] = this.mapVisualLeftAnchoredLengthX(x, middleStart, middleEnd, middleLength, middleScale, extension);
+			nextPositions[index] = this.mapVisualLeftAnchoredLengthX(x, middleStart, middleEnd, middleScale, extension);
 		}
 		mesh.setVerticesData("position", nextPositions, true);
 		this.refreshMeshBounds(mesh);
 	}
 
 	/**
-	 * 视觉左端保持原位，中段线性伸缩，视觉右端整体延长。
-	 * YZJ 的导入朝向中，屏幕左端对应主体局部 X 最大端，因此这里固定 middleEnd 侧。
+	 * YZJ 导入朝向中，主体局部 X 最大端对应画面左侧；固定该端，长度差全部由另一端承担。
 	 */
-	private mapVisualLeftAnchoredLengthX(x: number, middleStart: number, middleEnd: number, middleLength: number, middleScale: number, extension: number): number {
+	private mapVisualLeftAnchoredLengthX(x: number, middleStart: number, middleEnd: number, middleScale: number, extension: number): number {
 		if (x >= middleEnd) { return x; }
 		if (x <= middleStart) { return x - extension; }
-		return middleEnd - (middleEnd - x) / middleLength * middleLength * middleScale;
+		return middleEnd + (x - middleEnd) * middleScale;
 	}
 
 	/**
-	 * 顶升平台 Ban.4 使用独立 platformLength 控制红框内模块长度，并随链条机宽度和高度同步变化。
-	 * 平台网格导入朝向与主体不同，视觉左侧对应平台局部 X 最小端。
+	 * 将顶升组件局部 X 偏移限制在当前主体有效长度内，避免平台移动到设备外部。
 	 */
-	private applyPlatformParameters(platformLengthRatio: number, widthRatio: number, heightOffset: number): void {
+	private resolvePlatformPosition(values: ValueMap, platformLengthRatio: number): number {
+		const requestedPosition = this.readNumber(values, "platformPosition", Number(DEFAULT_VALUES.platformPosition));
+		const body = this.findNodeByName(BODY_NODE_NAME);
+		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
+		if (!body || !platform) { return requestedPosition; }
+		const bodyBounds = this.getCurrentNodeBoundsInParent(body);
+		const platformBounds = this.getNodeBoundsInParent(platform);
+		if (!bodyBounds || !platformBounds) { return requestedPosition; }
+		const platformCenter = (platformBounds.minimum.x + platformBounds.maximum.x) / 2;
+		const platformHalfLength = (platformBounds.maximum.x - platformBounds.minimum.x) * platformLengthRatio / 2;
+		const minimumPosition = bodyBounds.minimum.x + platformHalfLength - platformCenter;
+		const maximumPosition = bodyBounds.maximum.x - platformHalfLength - platformCenter;
+		if (minimumPosition > maximumPosition) { return 0; }
+		return this.clamp(requestedPosition, Math.min(minimumPosition, 0), Math.max(maximumPosition, 0));
+	}
+
+	/**
+	 * 顶升平台 Ban.4 使用独立 platformLength 控制长度，按中心缩放并随链条机宽度、高度和顶升位置同步变化。
+	 */
+	private applyPlatformParameters(platformLengthRatio: number, widthRatio: number, heightOffset: number, platformPosition: number): void {
 		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
 		if (!platform) { return; }
-		this.scaleNodeWithAxisAnchors(platform, platformLengthRatio, 1, widthRatio, { x: "min", z: "center" });
+		this.scaleNodeWithAxisAnchors(platform, platformLengthRatio, 1, widthRatio, { x: "center", z: "center" });
 		this.offsetNodeAxis(platform, "y", heightOffset);
+		this.addNodeAxisOffset(platform, "x", platformPosition);
 	}
 
 	/**
-	 * 辊筒 GT.3 按链条机长度伸缩，按辊筒宽度调整单根厚度，并按密度沿设备局部宽度方向生成多根。
-	 * 辊筒模板的视觉左侧同样对应局部 X 最小端，避免主体左端固定时上部辊筒反向漂移。
+	 * 辊筒 GT.3 与 Ban.4 共用顶升模块长度和位置，按辊筒宽度调整单根厚度，并按密度生成多根。
 	 */
-	private applyRollerParameters(values: ValueMap, lengthRatio: number, heightOffset: number): void {
+	private applyRollerParameters(values: ValueMap, platformLengthRatio: number, heightOffset: number, platformPosition: number): void {
 		const roller = this.findNodeByName(ROLLER_NODE_NAME);
 		if (!roller) { return; }
-
 		const rollerWidth = this.readPositiveNumber(values, "rollerWidth", Number(DEFAULT_VALUES.rollerWidth));
-		const widthRatio = rollerWidth / Number(DEFAULT_VALUES.rollerWidth);
+		const rollerWidthRatio = rollerWidth / Number(DEFAULT_VALUES.rollerWidth);
 		const density = this.clamp(Math.round(this.readNumber(values, "rollerDensity", 1)), 1, 80);
 		const rollerPosition = this.readNumber(values, "rollerPosition", 0);
 		const targetWidth = this.readPositiveNumber(values, "chainWidth", Number(DEFAULT_VALUES.chainWidth));
 		const centers = this.createRollerCenters(targetWidth, rollerWidth, density);
 		const baseCenterZ = this.getNodeCenterInParentAxis(roller, "z") ?? -targetWidth / 2 + rollerWidth / 2;
-
-		this.scaleNodeWithAxisAnchors(roller, lengthRatio, 1, widthRatio, { x: "min", z: "center" });
+		this.scaleNodeWithAxisAnchors(roller, platformLengthRatio, 1, rollerWidthRatio, { x: "center", z: "center" });
 		const rollerNodes = [roller];
 		for (let index = 1; index < centers.length; index += 1) {
 			const clone = this.cloneSingleNode(roller, "roller", index);
 			if (!clone) { continue; }
 			rollerNodes.push(clone);
 		}
-		rollerNodes.forEach((node, index) => this.placeRollerNode(node, rollerPosition, heightOffset, centers[index] ?? baseCenterZ, baseCenterZ));
+		rollerNodes.forEach((node, index) => this.placeRollerNode(node, platformPosition + rollerPosition, heightOffset, centers[index] ?? baseCenterZ, baseCenterZ));
 	}
 
 	/**
@@ -447,7 +541,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 前后支架显示仅作用于明确命名的支架节点；当前 YZJ.glb 支架并入 ZT.2 时保持主体可见，避免误隐藏整机。
+	 * 根据支架显示参数切换前后支架节点。
 	 */
 	private applySupportVisibility(values: ValueMap): void {
 		const frontSupportNodes = this.findNodes(/front|qian|前|zj01|support.?front|front.?support/i);
@@ -461,7 +555,323 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 对节点应用缩放，并对指定轴做中心补偿，防止长宽变化时模型整体漂移。
+	 * 写入入料/出料侧物流 metadata，供运行时和 Inspector 理解模型局部方向。
+	 */
+	private applyFlowDirection(values: ValueMap): void {
+		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
+		const roller = this.findNodeByName(ROLLER_NODE_NAME);
+		if (!platform) { return; }
+		const infeedSide = this.readTransferSide(values, "infeedSide", "left");
+		const outfeedSide = this.readTransferSide(values, "outfeedSide", "front");
+		const logisticsFlow = {
+			infeedSide,
+			outfeedSide,
+			coordinateSpace: "model-local",
+			sideAxes: { left: "x+", right: "x-", front: "z-", rear: "z+" },
+		};
+		[this.node, platform, roller].filter(Boolean).forEach((target) => this.writeFlowMetadata(target, logisticsFlow));
+	}
+
+	/**
+	 * 写入单个节点的物流方向 metadata，并保存旧值以便停止时恢复。
+	 */
+	private writeFlowMetadata(target: any, logisticsFlow: unknown): void {
+		if (!target) { return; }
+		if (!this.flowMetadataSnapshots.has(target)) {
+			this.flowMetadataSnapshots.set(target, target.metadata?.logisticsFlow);
+		}
+		target.metadata = { ...(target.metadata ?? {}), logisticsFlow };
+	}
+
+	/**
+	 * 恢复脚本写入前的 logisticsFlow metadata。
+	 */
+	private restoreFlowMetadata(): void {
+		this.flowMetadataSnapshots.forEach((logisticsFlow, target) => {
+			const metadata = { ...(target.metadata ?? {}) };
+			if (logisticsFlow === undefined) { delete metadata.logisticsFlow; }
+			else { metadata.logisticsFlow = logisticsFlow; }
+			target.metadata = metadata;
+		});
+		this.flowMetadataSnapshots.clear();
+	}
+
+	/**
+	 * 读取并校验入料/出料侧参数。
+	 */
+	private readTransferSide(values: ValueMap, key: string, fallback: TransferSide): TransferSide {
+		const value = String(values[key] ?? "").toLowerCase();
+		return value === "left" || value === "right" || value === "front" || value === "rear" ? value : fallback;
+	}
+
+	/**
+	 * 刷新发光方向箭头；编辑态按出料侧显示，运行态按 runtimeTelemetry.movement_x 判定显示或隐藏。
+	 */
+	private updateDirectionArrowVisual(values: ValueMap): void {
+		const targetSide = this.resolveDirectionArrowSide(values);
+		if (!targetSide) {
+			this.setDirectionArrowVisible(false);
+			return;
+		}
+		const arrow = this.ensureDirectionArrow(values);
+		if (!arrow) { return; }
+		arrow.rotation = new Vector3(Math.PI / 2, this.getDirectionArrowYaw(targetSide), 0);
+		this.setDirectionArrowVisible(true);
+	}
+
+	/**
+	 * 创建或复用 Ban.4 顶面上的单个双面 Plane，贴图 URL 优先使用实例上已解析的 directionArrowImage 字符串。
+	 */
+	private ensureDirectionArrow(values: ValueMap): any | null {
+		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
+		const scene = this.node.getScene?.();
+		const textureUrl = this.readDirectionArrowTextureUrl(values);
+		if (!platform || !scene || !textureUrl) {
+			this.setDirectionArrowVisible(false);
+			return null;
+		}
+		if (this.directionArrowFailedTextureUrl === textureUrl) {
+			this.setDirectionArrowVisible(false);
+			return null;
+		}
+		if (this.directionArrowMesh && this.directionArrowTextureUrl === textureUrl) {
+			this.placeDirectionArrowOnPlatform(platform, this.directionArrowMesh);
+			return this.directionArrowMesh;
+		}
+		this.disposeDirectionArrowResources();
+		const bounds = this.getCurrentNodeBoundsInNodeLocal(platform);
+		if (!bounds) { return null; }
+		const shortSide = Math.min(bounds.maximum.x - bounds.minimum.x, bounds.maximum.z - bounds.minimum.z);
+		const size = Math.max(0.01, shortSide * 0.56);
+		const arrow = MeshBuilder.CreatePlane("YZJ_DirectionArrow_Glow", { size, sideOrientation: Mesh.DOUBLESIDE }, scene);
+		arrow.parent = platform;
+		arrow.isPickable = false;
+		arrow.metadata = { generatedByParametricRuntime: true, directionArrowVisual: true };
+		// 箭头固定在更高渲染组并最后绘制，避免透明平台或诊断材质覆盖发光效果。
+		arrow.renderingGroupId = 2;
+		arrow.alphaIndex = Number.MAX_SAFE_INTEGER;
+		const material = new StandardMaterial("YZJ_DirectionArrow_Glow_Material", scene);
+		material.backFaceCulling = false;
+		material.diffuseColor = Color3.White();
+		material.emissiveColor = Color3.White();
+		material.alpha = 0.92;
+		material.useAlphaFromDiffuseTexture = true;
+		material.disableDepthWrite = true;
+		material.depthFunction = Constants.ALWAYS;
+		const texture = new Texture(textureUrl, scene, true, false, Texture.TRILINEAR_SAMPLINGMODE, undefined, () => {
+			this.directionArrowFailedTextureUrl = textureUrl;
+			this.setDirectionArrowVisible(false);
+			console.warn(`[YZJ] 方向箭头贴图加载失败: ${textureUrl}`);
+		});
+		material.diffuseTexture = texture;
+		material.emissiveTexture = texture;
+		material.opacityTexture = texture;
+		arrow.material = material;
+		this.directionArrowMesh = arrow;
+		this.directionArrowMaterial = material;
+		this.directionArrowTexture = texture;
+		this.directionArrowTextureUrl = textureUrl;
+		this.directionArrowFailedTextureUrl = "";
+		this.placeDirectionArrowOnPlatform(platform, arrow);
+		this.startDirectionArrowBreathing(scene);
+		return arrow;
+	}
+
+	/**
+	 * 将箭头放到 Ban.4 当前局部顶面中心，并按较短边约 1.2% 上浮以避免遮挡和深度闪烁。
+	 */
+	private placeDirectionArrowOnPlatform(platform: any, arrow: any): void {
+		const bounds = this.getCurrentNodeBoundsInNodeLocal(platform);
+		if (!bounds || !arrow.position) { return; }
+		const shortSide = Math.min(bounds.maximum.x - bounds.minimum.x, bounds.maximum.z - bounds.minimum.z);
+		arrow.position = new Vector3((bounds.minimum.x + bounds.maximum.x) / 2, bounds.maximum.y + Math.max(0.002, shortSide * 0.012), (bounds.minimum.z + bounds.maximum.z) / 2);
+	}
+
+	/**
+	 * 启动透明度与缩放呼吸动画；重复创建前会先移除旧 observer。
+	 */
+	private startDirectionArrowBreathing(scene: any): void {
+		if (this.directionArrowObserver) {
+			scene.onBeforeRenderObservable?.remove?.(this.directionArrowObserver);
+			this.directionArrowObserver = null;
+		}
+		this.directionArrowObserver = scene.onBeforeRenderObservable?.add?.(() => {
+			if (!this.directionArrowMesh || !this.directionArrowMaterial) { return; }
+			const timeMs = (typeof performance !== "undefined" ? performance.now() : Date.now()) % 1800;
+			const wave = (Math.sin(timeMs / 1800 * Math.PI * 2) + 1) / 2;
+			this.directionArrowMaterial.alpha = 0.55 + wave * 0.37;
+			const scale = 1 + wave * 0.03;
+			this.directionArrowMesh.scaling = new Vector3(scale, scale, scale);
+		});
+	}
+
+	/**
+	 * 根据编辑/运行模式解析箭头方向；运行态无数据、停止或故障时隐藏。
+	 */
+	private resolveDirectionArrowSide(values: ValueMap): TransferSide | null {
+		if (!this.readBoolean(values, "showDirectionArrow", true)) { return null; }
+		const outfeedSide = this.readTransferSide(values, "outfeedSide", "front");
+		if (!this.isRuntimePreviewMode()) { return outfeedSide; }
+		const telemetry = this.readRuntimeTelemetry();
+		if (!telemetry || this.hasRuntimeFault(telemetry)) { return null; }
+		const movement = this.readRuntimeMovementX(telemetry);
+		if (movement === null || movement === 0) { return null; }
+		if (movement === 2 || movement < 0) { return this.getOppositeTransferSide(outfeedSide); }
+		return movement > 0 ? outfeedSide : null;
+	}
+
+	/**
+	 * 判断当前是否为运行预览；runtimeMode 回到 edit 或未注入时恢复编辑态。
+	 */
+	private isRuntimePreviewMode(): boolean {
+		const mode = String((this as unknown as ValueMap).runtimeMode ?? "edit").toLowerCase();
+		return mode !== "" && mode !== "edit" && mode !== "editing" && mode !== "design";
+	}
+
+	/**
+	 * 读取运行时代理直接注入实例属性的 telemetry，兼容 JSON 字符串。
+	 */
+	private readRuntimeTelemetry(): Record<string, unknown> | null {
+		const source = (this as unknown as ValueMap).runtimeTelemetry;
+		if (!source) { return null; }
+		if (typeof source === "string") {
+			try {
+				const parsed = JSON.parse(source);
+				return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : null;
+			} catch {
+				return null;
+			}
+		}
+		return typeof source === "object" ? source as Record<string, unknown> : null;
+	}
+
+	/**
+	 * 读取运行方向字段；优先使用 ExternalModelScriptRuntime 注入的 fields.movement_x，不再把 rotation 当作方向。
+	 */
+	private readRuntimeMovementX(telemetry: Record<string, unknown>): number | null {
+		const fields = this.readRuntimeTelemetryFields(telemetry);
+		const raw = fields?.movement_x ?? fields?.movementX ?? telemetry.movement_x ?? telemetry.movementX;
+		const value = Number(raw);
+		return Number.isFinite(value) ? value : null;
+	}
+
+	/**
+	 * 同时检查顶层和 fields 内的常见故障键，兼容顶层 faulted 合同。
+	 */
+	private hasRuntimeFault(telemetry: Record<string, unknown>): boolean {
+		const keys = ["fault", "alarm", "error", "emergencyStop", "isFaulted", "faulted", "isEmergencyStop", "eStop"];
+		const fields = this.readRuntimeTelemetryFields(telemetry);
+		return keys.some((key) => this.isTruthyFaultValue(telemetry[key]) || this.isTruthyFaultValue(fields?.[key]));
+	}
+
+	/**
+	 * 读取遥测 fields 对象，避免运行时外层状态与字段值混淆。
+	 */
+	private readRuntimeTelemetryFields(telemetry: Record<string, unknown>): Record<string, unknown> | null {
+		const fields = telemetry.fields;
+		return fields && typeof fields === "object" ? fields as Record<string, unknown> : null;
+	}
+
+	/**
+	 * 将常见布尔、数值和字符串形式转换为故障真值。
+	 */
+	private isTruthyFaultValue(value: unknown): boolean {
+		if (typeof value === "boolean") { return value; }
+		if (typeof value === "number") { return value !== 0; }
+		if (typeof value === "string") {
+			const normalized = value.trim().toLowerCase();
+			if (!normalized || normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") { return false; }
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 读取方向箭头贴图 URL；实例属性优先，可接收运行时已解析后的真实 URL。
+	 */
+	private readDirectionArrowTextureUrl(values: ValueMap): string {
+		const injected = (this as unknown as ValueMap).directionArrowImage;
+		const value = injected !== undefined ? injected : values.directionArrowImage;
+		return typeof value === "string" ? value.trim() : "";
+	}
+
+	/**
+	 * 根据输送侧返回贴图 yaw；PNG 基准朝模型局部 X+。
+	 */
+	private getDirectionArrowYaw(side: TransferSide): number {
+		if (side === "right") { return Math.PI; }
+		if (side === "front") { return Math.PI / 2; }
+		if (side === "rear") { return -Math.PI / 2; }
+		return 0;
+	}
+
+	/**
+	 * 返回出料侧的相反方向，用于 movement_x=2 或负值反向显示。
+	 */
+	private getOppositeTransferSide(side: TransferSide): TransferSide {
+		if (side === "left") { return "right"; }
+		if (side === "right") { return "left"; }
+		if (side === "front") { return "rear"; }
+		return "front";
+	}
+
+	/**
+	 * 批量切换箭头 Mesh 可见性，加载失败或运行态停止时仅隐藏不抛错。
+	 */
+	private setDirectionArrowVisible(visible: boolean): void {
+		if (!this.directionArrowMesh) { return; }
+		this.directionArrowMesh.isVisible = visible;
+		if (typeof this.directionArrowMesh.setEnabled === "function") { this.directionArrowMesh.setEnabled(visible); }
+	}
+
+	/**
+	 * 完整释放方向箭头 observer、Mesh、Material、Texture，供参数刷新和生命周期结束调用。
+	 */
+	private disposeDirectionArrowResources(): void {
+		const scene = this.node.getScene?.();
+		if (this.directionArrowObserver) {
+			scene?.onBeforeRenderObservable?.remove?.(this.directionArrowObserver);
+			this.directionArrowObserver = null;
+		}
+		if (this.directionArrowMesh && typeof this.directionArrowMesh.dispose === "function") { this.directionArrowMesh.dispose(false, true); }
+		else {
+			if (this.directionArrowMaterial && typeof this.directionArrowMaterial.dispose === "function") { this.directionArrowMaterial.dispose(); }
+			if (this.directionArrowTexture && typeof this.directionArrowTexture.dispose === "function") { this.directionArrowTexture.dispose(); }
+		}
+		this.directionArrowMesh = null;
+		this.directionArrowMaterial = null;
+		this.directionArrowTexture = null;
+		this.directionArrowTextureUrl = "";
+	}
+
+	/**
+	 * 读取节点当前几何在自身局部坐标系下的包围盒，用于在 Ban.4 顶面定位箭头。
+	 */
+	private getCurrentNodeBoundsInNodeLocal(node: any): { minimum: Vector3; maximum: Vector3 } | null {
+		const nodeWorldMatrix = node?.computeWorldMatrix?.(true) ?? node?.getWorldMatrix?.();
+		const inverseNodeWorldMatrix = nodeWorldMatrix?.clone?.();
+		if (!inverseNodeWorldMatrix?.invert) { return null; }
+		inverseNodeWorldMatrix.invert();
+		let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+		let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+		this.getMeshesForNodes([node]).forEach((mesh) => {
+			if (mesh?.metadata?.directionArrowVisual === true) { return; }
+			const positions = this.readVertexPositions(mesh);
+			const worldMatrix = mesh.computeWorldMatrix?.(true);
+			if (!positions || !worldMatrix) { return; }
+			for (let index = 0; index < positions.length; index += 3) {
+				const world = Vector3.TransformCoordinates(new Vector3(positions[index], positions[index + 1], positions[index + 2]), worldMatrix);
+				const local = Vector3.TransformCoordinates(world, inverseNodeWorldMatrix);
+				minimum = Vector3.Minimize(minimum, local);
+				maximum = Vector3.Maximize(maximum, local);
+			}
+		});
+		if (!Number.isFinite(minimum.x) || !Number.isFinite(maximum.x)) { return null; }
+		return { minimum, maximum };
+	}
+
+	/**
+	 * 将节点按指定轴缩放，并让给定轴尽量保持中心不漂移。
 	 */
 	private scaleNodeKeepingCenter(target: any, xScale: number, yScale: number, zScale: number, centeredAxes: AxisName[]): void {
 		const snapshot = this.rememberSnapshot(target);
@@ -478,7 +888,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 对节点应用缩放，并允许指定单轴锚点；长度用最小端锚定，宽度继续按中心补偿。
+	 * 按轴锚点缩放节点，支持 min/max/center 三种锚点。
 	 */
 	private scaleNodeWithAxisAnchors(target: any, xScale: number, yScale: number, zScale: number, anchors: Partial<Record<AxisName, "min" | "max" | "center">>): void {
 		const snapshot = this.rememberSnapshot(target);
@@ -486,7 +896,6 @@ export class ParametricModelRuntimeComponent {
 		const bounds = this.getNodeBoundsInParent(target);
 		target.scaling = new Vector3(snapshot.scaling.x * xScale, snapshot.scaling.y * yScale, snapshot.scaling.z * zScale);
 		if (!bounds) { return; }
-
 		let nextPosition = snapshot.position.clone();
 		const scaleByAxis: Record<AxisName, number> = { x: xScale, y: yScale, z: zScale };
 		(["x", "y", "z"] as AxisName[]).forEach((axis) => {
@@ -502,7 +911,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 按节点基础位置沿单个局部轴偏移，兼容父级旋转后的设备局部方向。
+	 * 将节点指定轴设置为基础位置加 offset。
 	 */
 	private offsetNodeAxis(node: any, axis: AxisName, offset: number): void {
 		const snapshot = this.rememberSnapshot(node);
@@ -511,20 +920,35 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 克隆单个节点并记录为运行时生成节点。
+	 * 在节点当前指定轴位置上累加 offset。
+	 */
+	private addNodeAxisOffset(node: any, axis: AxisName, offset: number): void {
+		if (!node.position) { return; }
+		node.position = this.withVectorAxis(node.position.clone(), axis, this.getVectorAxis(node.position, axis) + offset);
+	}
+
+	/**
+	 * 克隆单根辊筒并写入运动继承 metadata；方向箭头不会使用该方法。
 	 */
 	private cloneSingleNode(source: any, reason: string, index: number): any | null {
 		if (typeof source.clone !== "function") { return null; }
 		const clone = source.clone(`${String(source.name ?? "node")}_${reason}_${index}`, source.parent, false);
 		if (!clone) { return null; }
-		clone.metadata = { ...(clone.metadata ?? {}), generatedByParametricRuntime: true, sourceNodeName: source.name, reason };
+		clone.metadata = {
+			...(clone.metadata ?? {}),
+			generatedByParametricRuntime: true,
+			sourceNodeName: source.name,
+			// Conveyor/MQTT 运行时据此让参数化克隆继承源节点的升降和旋转声明。
+			motionSourceNodeName: source.name,
+			reason,
+		};
 		if (typeof clone.setEnabled === "function") { clone.setEnabled(true); }
 		this.generatedNodes.push(clone);
 		return clone;
 	}
 
 	/**
-	 * 清理本脚本生成的所有克隆节点。
+	 * 释放参数化生成的辊筒克隆。
 	 */
 	private disposeGeneratedNodes(): void {
 		while (this.generatedNodes.length > 0) {
@@ -534,7 +958,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 获取当前模型根节点及其子树内的节点。
+	 * 返回当前模型根节点及所有子级 transform/mesh。
 	 */
 	private getModelNodes(): any[] {
 		const scene = this.node.getScene?.();
@@ -543,14 +967,14 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 按精确节点名查找模型子树内的节点。
+	 * 按精确名称查找子节点。
 	 */
 	private findNodeByName(name: string): any | null {
 		return this.getModelNodes().find((candidate) => candidate !== this.node && String(candidate.name ?? "") === name) ?? null;
 	}
 
 	/**
-	 * 按名称正则查找模型子树内的节点。
+	 * 按名称正则查找子节点。
 	 */
 	private findNodes(pattern: RegExp): any[] {
 		return this.getModelNodes().filter((candidate) => candidate !== this.node && pattern.test(String(candidate.name ?? "")));
@@ -569,7 +993,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 读取一组 mesh 的原始本地顶点包围范围，用于长度分段拉伸的基线快照。
+	 * 读取一组 mesh 的原始局部顶点单轴范围。
 	 */
 	private getLocalVertexBounds(meshes: any[], axis: AxisName): { min: number; max: number } | null {
 		let min = Number.POSITIVE_INFINITY;
@@ -610,11 +1034,36 @@ export class ParametricModelRuntimeComponent {
 		const inverseParentWorldMatrix = parentWorldMatrix?.clone?.();
 		if (!inverseParentWorldMatrix?.invert) { return null; }
 		inverseParentWorldMatrix.invert();
-
 		let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
 		let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
 		this.getMeshesForNodes([node]).forEach((mesh) => {
 			const positions = this.rememberSnapshot(mesh).vertexPositions;
+			const worldMatrix = mesh.computeWorldMatrix?.(true);
+			if (!positions || !worldMatrix) { return; }
+			for (let index = 0; index < positions.length; index += 3) {
+				const world = Vector3.TransformCoordinates(new Vector3(positions[index], positions[index + 1], positions[index + 2]), worldMatrix);
+				const local = Vector3.TransformCoordinates(world, inverseParentWorldMatrix);
+				minimum = Vector3.Minimize(minimum, local);
+				maximum = Vector3.Maximize(maximum, local);
+			}
+		});
+		if (!Number.isFinite(minimum.x) || !Number.isFinite(maximum.x)) { return null; }
+		return { minimum, maximum };
+	}
+
+	/**
+	 * 读取节点当前变形后的包围盒，并换算到父节点局部坐标系，供位置约束使用。
+	 */
+	private getCurrentNodeBoundsInParent(node: any): { minimum: Vector3; maximum: Vector3 } | null {
+		const parent = node?.parent;
+		const parentWorldMatrix = parent?.computeWorldMatrix?.(true) ?? parent?.getWorldMatrix?.();
+		const inverseParentWorldMatrix = parentWorldMatrix?.clone?.();
+		if (!inverseParentWorldMatrix?.invert) { return null; }
+		inverseParentWorldMatrix.invert();
+		let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+		let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+		this.getMeshesForNodes([node]).forEach((mesh) => {
+			const positions = this.readVertexPositions(mesh);
 			const worldMatrix = mesh.computeWorldMatrix?.(true);
 			if (!positions || !worldMatrix) { return; }
 			for (let index = 0; index < positions.length; index += 3) {

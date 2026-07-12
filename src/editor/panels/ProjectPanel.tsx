@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
   ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE,
+  IMAGE_ASSET_DRAG_MIME_TYPE,
   encodeBuiltInAssetDragPayload,
+  encodeImageAssetDragPayload,
   encodeModelAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
   type AssetEntry,
@@ -15,6 +17,7 @@ import {
   PROJECT_LIBRARIES,
   createModelLibraryItems,
   getModelUnitTitle,
+  isBuiltInImageProjectLibraryItem,
   isBuiltInProjectLibraryItem,
   isImportedProjectLibraryItem,
   type ProjectLibraryItem,
@@ -250,6 +253,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
       return;
     }
 
+    if (isBuiltInImageProjectLibraryItem(item)) return;
+
     if (isImportedProjectLibraryItem(item)) {
       if (activeLibrary.key === 'environment') {
         if (item.asset.kind !== 'model' || item.asset.libraryKind !== 'environment') return;
@@ -271,6 +276,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
     if (isBuiltInProjectLibraryItem(item)) {
       event.dataTransfer.effectAllowed = 'copy';
       event.dataTransfer.setData(BUILT_IN_ASSET_DRAG_MIME_TYPE, encodeBuiltInAssetDragPayload(item.builtIn));
+      event.dataTransfer.setData('text/plain', item.name);
+      return;
+    }
+
+    if (isBuiltInImageProjectLibraryItem(item)) {
+      event.dataTransfer.effectAllowed = 'copy';
+      event.dataTransfer.setData(IMAGE_ASSET_DRAG_MIME_TYPE, encodeImageAssetDragPayload(item.imageAsset));
       event.dataTransfer.setData('text/plain', item.name);
       return;
     }
@@ -365,9 +377,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
         ) : null}
         {activeItems.map((item) => {
           const isBuiltInItem = isBuiltInProjectLibraryItem(item);
+          const isBuiltInImage = isBuiltInImageProjectLibraryItem(item);
           const isImportedModel = isImportedProjectLibraryItem(item);
           const isEnvironmentLibrary = activeLibrary.key === 'environment';
-          const isActionableItem = (!isEnvironmentLibrary && isBuiltInItem) || isImportedModel;
+          const isActionableItem = (!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isImportedModel;
 
           return (
             <ResourceCard
@@ -389,11 +402,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
               title={
                 isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`
-                  : isImportedModel
-                    ? isEnvironmentLibrary
-                      ? `点击应用或拖拽到环境属性：${item.name}，${getModelUnitTitle(item.asset)}`
-                      : `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`
-                    : '占位资源，功能后续接入'
+                  : isBuiltInImage
+                    ? `拖拽到模型 texture 属性：${item.name}`
+                    : isImportedModel
+                      ? isEnvironmentLibrary
+                        ? `点击应用或拖拽到环境属性：${item.name}，${getModelUnitTitle(item.asset)}`
+                        : `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`
+                      : '占位资源，功能后续接入'
               }
             />
           );

@@ -3,62 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>YZJ 顶升模块独立长度验证</title>
+    <link rel="icon" href="data:," />
+    <title>YZJ 顶升组件独立长度与中心验证</title>
     <style>
-      html,
-      body {
-        margin: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: #0e1114;
-        color: #eef4f8;
-        font-family: "Microsoft YaHei", Arial, sans-serif;
-      }
-
-      #renderCanvas {
-        width: 100%;
-        height: 100%;
-        display: block;
-      }
-
-      #status {
-        position: fixed;
-        left: 16px;
-        top: 16px;
-        max-width: 1080px;
-        padding: 12px 14px;
-        border: 1px solid rgba(238, 84, 84, 0.62);
-        background: rgba(8, 14, 18, 0.84);
-        font-size: 13px;
-        line-height: 1.6;
-      }
-
-      .ok {
-        color: #8ee5b0;
-      }
-
-      .error {
-        color: #ff9c9c;
-      }
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #0e1114; color: #eef4f8; font-family: "Microsoft YaHei", Arial, sans-serif; }
+      #renderCanvas { width: 100%; height: 100%; display: block; }
+      #status { position: fixed; left: 16px; top: 16px; max-width: 1120px; padding: 12px 14px; border: 1px solid rgba(238, 84, 84, 0.62); background: rgba(8, 14, 18, 0.86); font-size: 13px; line-height: 1.6; }
+      .ok { color: #8ee5b0; }
+      .error { color: #ff9c9c; }
     </style>
   </head>
-  <body>
+  <body data-validation-status="loading">
     <canvas id="renderCanvas"></canvas>
-    <div id="status">YZJ 顶升模块独立长度验证加载中...</div>
+    <div id="status">YZJ 顶升组件独立长度验证加载中...</div>
     <script type="module">
-      import {
-        ArcRotateCamera,
-        Color3,
-        Engine,
-        HemisphericLight,
-        MeshBuilder,
-        Scene,
-        SceneLoader,
-        StandardMaterial,
-        TransformNode,
-        Vector3,
-      } from "@babylonjs/core";
+      import { ArcRotateCamera, Color3, Engine, HemisphericLight, MeshBuilder, Scene, SceneLoader, StandardMaterial, TransformNode, Vector3 } from "@babylonjs/core";
       import "@babylonjs/loaders/glTF/index.js";
       import { ExternalModelScriptRuntime } from "/src/runtime/babylon/ExternalModelScriptRuntime.ts";
 
@@ -67,72 +26,68 @@
       const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
       const scene = new Scene(engine);
       scene.clearColor.set(0.05, 0.06, 0.07, 1);
-
-      const camera = new ArcRotateCamera("camera", -Math.PI / 2, Math.PI * 0.34, 6.2, new Vector3(-0.15, 0.58, 0), scene);
+      const camera = new ArcRotateCamera("camera", -Math.PI / 2, Math.PI * 0.34, 6.5, new Vector3(0, 0.58, 0), scene);
       camera.attachControl(canvas, true);
-      camera.lowerRadiusLimit = 2;
-      camera.upperRadiusLimit = 14;
-
       const light = new HemisphericLight("light", new Vector3(0.25, 1, 0.35), scene);
-      light.intensity = 0.96;
+      light.intensity = 0.98;
 
       const groundMaterial = new StandardMaterial("groundMaterial", scene);
       groundMaterial.diffuseColor = new Color3(0.11, 0.15, 0.17);
       groundMaterial.specularColor = Color3.Black();
-      const ground = MeshBuilder.CreateGround("ground", { width: 6.4, height: 4.8 }, scene);
+      const ground = MeshBuilder.CreateGround("ground", { width: 7, height: 5 }, scene);
       ground.material = groundMaterial;
       ground.position.y = -0.012;
 
       const platformMaterial = new StandardMaterial("platformLengthMarkerMaterial", scene);
-      platformMaterial.diffuseColor = new Color3(1, 0.08, 0.08);
-      platformMaterial.emissiveColor = new Color3(0.55, 0.02, 0.02);
-      platformMaterial.alpha = 0.22;
+      platformMaterial.diffuseColor = new Color3(0.1, 0.58, 1);
+      platformMaterial.emissiveColor = new Color3(0.02, 0.12, 0.25);
+      platformMaterial.alpha = 0.68;
+      const rollerMaterial = new StandardMaterial("rollerLengthMarkerMaterial", scene);
+      rollerMaterial.diffuseColor = new Color3(0.95, 0.13, 0.75);
+      rollerMaterial.emissiveColor = new Color3(0.25, 0.02, 0.17);
 
       const metadata = await fetch("./yzj-assets/meta.json").then((response) => response.json());
       const defaultValues = {
-        chainLength: 1.828,
-        platformLength: 1.022,
-        chainWidth: 1.194,
-        chainHeight: 0.803,
-        rollerWidth: 0.062,
-        rollerPosition: 0,
-        rollerDensity: 1,
-        showFrontSupport: true,
-        showRearSupport: true,
+        chainLength: 1.828, platformLength: 1.022, platformPosition: 0, chainWidth: 1.194, chainHeight: 0.803,
+        rollerWidth: 0.062, rollerPosition: 0, rollerDensity: 4, infeedSide: "left", outfeedSide: "front",
+        showFrontSupport: true, showRearSupport: true,
       };
-
       const cases = [
-        { label: "默认", z: -1.34, values: { ...defaultValues } },
-        { label: "只加长整机", z: 0, values: { ...defaultValues, chainLength: 3.1, rollerDensity: 4 } },
-        { label: "只加长顶升模块", z: 1.34, values: { ...defaultValues, platformLength: 1.55 } },
+        { label: "默认", z: -1.45, values: { ...defaultValues } },
+        { label: "只加长整机", z: 0, values: { ...defaultValues, chainLength: 3.1 } },
+        { label: "顶升长度 1.55m", z: 1.45, values: { ...defaultValues, platformLength: 1.55 } },
       ];
 
+      /** 同步当前参数值。 */
       function syncModelScriptMetadata(target, values) {
         const scripts = (metadata.parameterScripts ?? []).map((script) => {
           const clonedScript = structuredClone(script);
           clonedScript.values = clonedScript.values ?? {};
-          for (const [key, value] of Object.entries(values)) {
-            const previousValue = typeof clonedScript.values[key] === "object" && clonedScript.values[key] !== null
-              ? clonedScript.values[key]
-              : {};
-            clonedScript.values[key] = { ...previousValue, value };
-          }
+          for (const [key, value] of Object.entries(values)) clonedScript.values[key] = { ...(clonedScript.values[key] ?? {}), value };
           return clonedScript;
         });
         target.metadata = { ...(target.metadata ?? {}), scripts };
       }
 
+      /** 挂载模型顶层节点。 */
       function parentTopLevelModelNodes(container, contentRoot) {
         const importedNodes = new Set([...container.meshes, ...container.transformNodes]);
-        for (const node of importedNodes) {
-          if (!node.parent || !importedNodes.has(node.parent)) {
-            node.parent = contentRoot;
-          }
-        }
+        for (const node of importedNodes) if (!node.parent || !importedNodes.has(node.parent)) node.parent = contentRoot;
       }
 
-      function getWorldBounds(root) {
-        const meshes = root.getChildMeshes(false);
+      /** 查找原始节点。 */
+      function findNode(root, name) {
+        return [root, ...root.getDescendants(false)].find((node) => node.name === name);
+      }
+
+      /** 查找全部辊筒根节点。 */
+      function findRollers(root) {
+        return [root, ...root.getDescendants(false)].filter((node) => node.name === "GT.3" || node.metadata?.sourceNodeName === "GT.3");
+      }
+
+      /** 计算包围盒。 */
+      function getBounds(nodes) {
+        const meshes = [...new Set(nodes.flatMap((node) => node.getChildMeshes?.(false) ?? []))].filter((mesh) => mesh.isEnabled());
         let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
         let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
         for (const mesh of meshes) {
@@ -142,113 +97,73 @@
           minimum = Vector3.Minimize(minimum, box.minimumWorld);
           maximum = Vector3.Maximize(maximum, box.maximumWorld);
         }
-        return { minimum, maximum };
+        return { minimum, maximum, center: minimum.add(maximum).scale(0.5), size: maximum.subtract(minimum) };
       }
 
+      /** 归一模型底部中心。 */
       function normalizeModelContentOrigin(root) {
-        root.computeWorldMatrix(true);
-        const bounds = getWorldBounds(root);
+        const bounds = getBounds([root]);
         const bottomCenter = new Vector3((bounds.minimum.x + bounds.maximum.x) / 2, bounds.minimum.y, (bounds.minimum.z + bounds.maximum.z) / 2);
         const localBottomCenter = Vector3.TransformCoordinates(bottomCenter, root.getWorldMatrix().clone().invert());
-        for (const child of root.getChildren()) {
-          if (child instanceof TransformNode) {
-            child.position.subtractInPlace(localBottomCenter);
-          }
-        }
+        for (const child of root.getChildren()) if (child instanceof TransformNode) child.position.subtractInPlace(localBottomCenter);
       }
 
-      function findDescendant(root, name) {
-        return [root, ...root.getDescendants(false)].find((node) => node.name === name);
-      }
-
-      function lengthX(bounds) {
-        return bounds.maximum.x - bounds.minimum.x;
-      }
-
-      function drawPlatformMarker(root) {
-        const platform = findDescendant(root, "Ban.4");
-        if (!platform) {
-          throw new Error("未找到 Ban.4 顶升平台节点");
-        }
-        const bounds = getWorldBounds(platform);
-        const marker = MeshBuilder.CreateBox(`platform_marker_${root.name}`, {
-          width: Math.max(0.01, bounds.maximum.x - bounds.minimum.x),
-          height: Math.max(0.01, bounds.maximum.y - bounds.minimum.y + 0.045),
-          depth: Math.max(0.01, bounds.maximum.z - bounds.minimum.z),
-        }, scene);
-        marker.position = new Vector3(
-          (bounds.minimum.x + bounds.maximum.x) / 2,
-          (bounds.minimum.y + bounds.maximum.y) / 2,
-          (bounds.minimum.z + bounds.maximum.z) / 2,
-        );
-        marker.material = platformMaterial;
-        return bounds;
-      }
-
-      async function createYZJCase(testCase) {
+      /** 创建单个顶升长度案例。 */
+      async function createCase(testCase) {
         const root = new TransformNode(`${testCase.label}_root`, scene);
         root.position.z = testCase.z;
-
         const contentRoot = new TransformNode(`${testCase.label}_contentRoot`, scene);
         contentRoot.parent = root;
-        contentRoot.scaling = new Vector3(0.01, 0.01, 0.01);
-
+        contentRoot.scaling.setAll(0.01);
         const container = await SceneLoader.LoadAssetContainerAsync("./yzj-assets/", "YZJ.glb", scene);
         container.addAllToScene();
         parentTopLevelModelNodes(container, contentRoot);
         normalizeModelContentOrigin(root);
         syncModelScriptMetadata(contentRoot, testCase.values);
-
-        const modelAsset = {
-          sourcePath: "./yzj-assets/YZJ.glb",
-          sourceUrl: "./yzj-assets/YZJ.glb",
-          lengthUnit: "meter",
-          unitScaleToMeters: 1,
-          scriptAssets: [
-            {
-              path: "./yzj-assets/yzj.model.ts",
-              sourceUrl: "./yzj-assets/yzj.model.txt",
-              name: "yzj.model.ts",
-            },
-          ],
-          parameterScriptMetadata: metadata.parameterScripts ?? [],
-          animationScriptMetadata: metadata.animationScripts ?? [],
-          parameterValues: testCase.values,
-        };
-
-        const runtime = new ExternalModelScriptRuntime(contentRoot, modelAsset);
+        const runtime = new ExternalModelScriptRuntime(contentRoot, {
+          sourcePath: "./yzj-assets/YZJ.glb", sourceUrl: "./yzj-assets/YZJ.glb", lengthUnit: "meter", unitScaleToMeters: 1, parameterConfig: metadata.modelParameters,
+          scriptAssets: [{ path: "./yzj-assets/yzj.model.ts", sourceUrl: "./yzj-assets/yzj.model.txt", name: "yzj.model.ts" }],
+          parameterScriptMetadata: metadata.parameterScripts ?? [], animationScriptMetadata: metadata.animationScripts ?? [], parameterValues: testCase.values,
+        });
         runtime.updateParameterValues(testCase.values);
         await runtime.start();
         runtime.update();
-        return root;
+        const platform = findNode(root, "Ban.4");
+        const rollers = findRollers(root);
+        platform.getChildMeshes(false).forEach((mesh) => { mesh.material = platformMaterial; });
+        rollers.forEach((node) => node.getChildMeshes?.(false).forEach((mesh) => { mesh.material = rollerMaterial; }));
+        return { platform: getBounds([platform]), roller: getBounds(rollers) };
       }
 
       try {
-        const roots = [];
-        for (const testCase of cases) {
-          roots.push(await createYZJCase(testCase));
-        }
+        const results = [];
+        for (const testCase of cases) results.push(await createCase(testCase));
+        const [base, chainOnly, platformOnly] = results;
+        const chainPlatformLengthDelta = Math.abs(chainOnly.platform.size.x - base.platform.size.x);
+        const chainRollerLengthDelta = Math.abs(chainOnly.roller.size.x - base.roller.size.x);
+        const chainPlatformCenterDelta = Math.abs(chainOnly.platform.center.x - base.platform.center.x);
+        const chainRollerCenterDelta = Math.abs(chainOnly.roller.center.x - base.roller.center.x);
+        const platformGrowth = platformOnly.platform.size.x - base.platform.size.x;
+        const rollerGrowth = platformOnly.roller.size.x - base.roller.size.x;
+        const platformRatio = platformOnly.platform.size.x / base.platform.size.x;
+        const rollerRatio = platformOnly.roller.size.x / base.roller.size.x;
+        const platformCenterDelta = Math.abs(platformOnly.platform.center.x - base.platform.center.x);
+        const rollerCenterDelta = Math.abs(platformOnly.roller.center.x - base.roller.center.x);
+        const isValid = chainPlatformLengthDelta < 0.008 && chainRollerLengthDelta < 0.008
+          && chainPlatformCenterDelta < 0.008 && chainRollerCenterDelta < 0.008
+          && platformGrowth > 0.45 && rollerGrowth > 0.45
+          && platformCenterDelta < 0.008 && rollerCenterDelta < 0.008
+          && Math.abs(platformRatio - rollerRatio) < 0.012;
 
-        const defaultBounds = getWorldBounds(roots[0]);
-        const chainOnlyBounds = getWorldBounds(roots[1]);
-        const platformBounds = roots.map((root) => drawPlatformMarker(root));
-        const defaultPlatformLength = lengthX(platformBounds[0]);
-        const chainOnlyPlatformLength = lengthX(platformBounds[1]);
-        const platformOnlyLength = lengthX(platformBounds[2]);
-        const chainOnlyPlatformDelta = Math.abs(chainOnlyPlatformLength - defaultPlatformLength);
-        const chainOnlyBodyGrowth = chainOnlyBounds.maximum.x - defaultBounds.maximum.x;
-        const platformOnlyGrowth = platformOnlyLength - defaultPlatformLength;
-        const isValid = chainOnlyPlatformDelta < 0.01 && chainOnlyBodyGrowth > 0.2 && platformOnlyGrowth > 0.2;
-
-        status.innerHTML = `<span class="${isValid ? "ok" : "error"}">${isValid ? "完成" : "异常"}</span>：整机加长时红框模块长度差=${chainOnlyPlatformDelta.toFixed(5)}，整机右侧延长=${chainOnlyBodyGrowth.toFixed(4)}；单独设置 platformLength 后红框模块增长=${platformOnlyGrowth.toFixed(4)}`;
-        engine.runRenderLoop(() => scene.render());
+        status.innerHTML = `<span class="${isValid ? "ok" : "error"}">${isValid ? "通过" : "异常"}</span>：整机加长时 Ban.4 长度/中心差=${chainPlatformLengthDelta.toFixed(5)}/${chainPlatformCenterDelta.toFixed(5)}，GT.3=${chainRollerLengthDelta.toFixed(5)}/${chainRollerCenterDelta.toFixed(5)}，platformLength 令 Ban.4/GT.3 增长=${platformGrowth.toFixed(4)}/${rollerGrowth.toFixed(4)}，倍率=${platformRatio.toFixed(4)}/${rollerRatio.toFixed(4)}，中心差=${platformCenterDelta.toFixed(5)}/${rollerCenterDelta.toFixed(5)}`;
+        document.body.dataset.validationStatus = isValid ? "pass" : "fail";
         window.__YZJ_PLATFORM_LENGTH_READY__ = isValid;
-        window.__YZJ_CHAIN_ONLY_PLATFORM_DELTA__ = chainOnlyPlatformDelta;
-        window.__YZJ_CHAIN_ONLY_BODY_GROWTH__ = chainOnlyBodyGrowth;
-        window.__YZJ_PLATFORM_ONLY_GROWTH__ = platformOnlyGrowth;
+        window.__YZJ_PLATFORM_LENGTH_REPORT__ = { chainPlatformLengthDelta, chainRollerLengthDelta, chainPlatformCenterDelta, chainRollerCenterDelta, platformGrowth, rollerGrowth, platformRatio, rollerRatio, platformCenterDelta, rollerCenterDelta };
+        engine.runRenderLoop(() => scene.render());
       } catch (error) {
         console.error(error);
         status.innerHTML = `<span class="error">失败</span>：${error instanceof Error ? error.message : String(error)}`;
+        document.body.dataset.validationStatus = "fail";
         window.__YZJ_PLATFORM_LENGTH_READY__ = false;
       }
 

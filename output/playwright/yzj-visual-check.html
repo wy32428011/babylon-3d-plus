@@ -3,7 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>YZJ 一体式顶升移载参数化视觉验证</title>
+    <link rel="icon" href="data:," />
+    <title>YZJ 一体式顶升移载参数矩阵视觉验证</title>
     <style>
       html,
       body {
@@ -11,8 +12,8 @@
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #0f1316;
-        color: #eef4f8;
+        background: #0d1216;
+        color: #eef5f8;
         font-family: "Microsoft YaHei", Arial, sans-serif;
       }
 
@@ -24,28 +25,29 @@
 
       #status {
         position: fixed;
-        left: 16px;
-        top: 16px;
-        max-width: 860px;
-        padding: 12px 14px;
-        border: 1px solid rgba(153, 190, 206, 0.36);
-        background: rgba(8, 14, 18, 0.8);
-        font-size: 13px;
-        line-height: 1.6;
+        left: 14px;
+        top: 14px;
+        max-width: 1160px;
+        padding: 11px 13px;
+        border: 1px solid rgba(142, 183, 204, 0.46);
+        background: rgba(8, 13, 17, 0.88);
+        font-size: 12px;
+        line-height: 1.55;
       }
 
-      .ok {
-        color: #8ee5b0;
-      }
-
-      .error {
-        color: #ff9c9c;
+      .ok { color: #83ecad; }
+      .error { color: #ff9696; }
+      .legend {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin: 0 4px 0 10px;
       }
     </style>
   </head>
-  <body>
+  <body data-validation-status="loading">
     <canvas id="renderCanvas"></canvas>
-    <div id="status">YZJ 一体式顶升移载视觉验证加载中...</div>
+    <div id="status">YZJ 参数矩阵加载中...</div>
     <script type="module">
       import {
         ArcRotateCamera,
@@ -66,43 +68,66 @@
       const status = document.querySelector("#status");
       const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
       const scene = new Scene(engine);
-      scene.clearColor.set(0.055, 0.07, 0.08, 1);
+      scene.clearColor.set(0.05, 0.066, 0.078, 1);
 
-      const camera = new ArcRotateCamera("camera", Math.PI * 0.18, Math.PI * 0.34, 7.4, new Vector3(0, 0.75, 0), scene);
+      const camera = new ArcRotateCamera("camera", Math.PI * 0.23, Math.PI * 0.31, 14.5, new Vector3(0, 0.65, 0.25), scene);
       camera.attachControl(canvas, true);
-      camera.lowerRadiusLimit = 2;
-      camera.upperRadiusLimit = 16;
+      camera.lowerRadiusLimit = 5;
+      camera.upperRadiusLimit = 28;
 
-      const light = new HemisphericLight("light", new Vector3(0.3, 1, 0.35), scene);
-      light.intensity = 0.95;
+      const light = new HemisphericLight("light", new Vector3(0.25, 1, 0.35), scene);
+      light.intensity = 1.02;
 
       const groundMaterial = new StandardMaterial("groundMaterial", scene);
-      groundMaterial.diffuseColor = new Color3(0.12, 0.16, 0.18);
+      groundMaterial.diffuseColor = new Color3(0.11, 0.15, 0.17);
       groundMaterial.specularColor = Color3.Black();
-      const ground = MeshBuilder.CreateGround("ground", { width: 9, height: 5.2 }, scene);
+      const ground = MeshBuilder.CreateGround("ground", { width: 19, height: 12 }, scene);
       ground.material = groundMaterial;
       ground.position.y = -0.012;
+
+      const platformMaterial = new StandardMaterial("platformDiagnosticMaterial", scene);
+      platformMaterial.diffuseColor = new Color3(0.05, 0.58, 1);
+      platformMaterial.emissiveColor = new Color3(0.01, 0.12, 0.25);
+      platformMaterial.alpha = 0.72;
+
+      const rollerMaterial = new StandardMaterial("rollerDiagnosticMaterial", scene);
+      rollerMaterial.diffuseColor = new Color3(0.92, 0.16, 0.76);
+      rollerMaterial.emissiveColor = new Color3(0.25, 0.02, 0.17);
 
       const metadata = await fetch("./yzj-assets/meta.json").then((response) => response.json());
       const defaultValues = {
         chainLength: 1.828,
         platformLength: 1.022,
+        platformPosition: 0,
         chainWidth: 1.194,
         chainHeight: 0.803,
         rollerWidth: 0.062,
         rollerPosition: 0,
         rollerDensity: 1,
+        infeedSide: "left",
+        outfeedSide: "front",
+        showDirectionArrow: true,
+        directionArrowImage: "editor-image://builtin/direction-arrow-glow",
         showFrontSupport: true,
         showRearSupport: true,
       };
 
       const cases = [
-        { label: "默认值", x: -3.05, z: -1.3, rotationY: 0, values: { ...defaultValues } },
-        { label: "旋转45° 长宽高", x: 0, z: -1.1, rotationY: Math.PI / 4, values: { ...defaultValues, chainLength: 2.8, chainWidth: 1.65, chainHeight: 1.18 } },
-        { label: "辊筒密度/位置", x: 2.75, z: -1.2, rotationY: 0, values: { ...defaultValues, rollerDensity: 5, rollerPosition: 0.28, rollerWidth: 0.1 } },
-        { label: "旋转90° 组合", x: -0.2, z: 1.35, rotationY: Math.PI / 2, values: { ...defaultValues, chainLength: 2.5, chainWidth: 1.55, chainHeight: 1.1, rollerDensity: 4, rollerPosition: -0.18, rollerWidth: 0.09 } },
+        { id: "default", label: "默认", x: -6.2, z: -2.45, values: { ...defaultValues } },
+        { id: "length", label: "右侧加长 3.1m（左侧固定）", x: -2.1, z: -2.45, values: { ...defaultValues, chainLength: 3.1, rollerDensity: 4 } },
+        { id: "widthBase", label: "宽度基准", x: 2.1, z: -2.45, values: { ...defaultValues, rollerDensity: 5 } },
+        { id: "width", label: "加宽 1.8m", x: 6.2, z: -2.45, values: { ...defaultValues, chainWidth: 1.8, rollerDensity: 5 } },
+        { id: "platformNegative", label: "顶升偏移 -0.20", x: -4.2, z: 2.3, values: { ...defaultValues, chainLength: 3.1, platformPosition: -0.2, rollerDensity: 4, infeedSide: "left", outfeedSide: "rear" } },
+        { id: "platformPositive", label: "顶升偏移 +0.35", x: 0, z: 2.3, values: { ...defaultValues, chainLength: 3.1, platformPosition: 0.35, rollerDensity: 4, infeedSide: "right", outfeedSide: "front" } },
+        { id: "rotated", label: "旋转45° 后入右出", x: 4.7, z: 2.3, rotationY: Math.PI / 4, values: { ...defaultValues, chainLength: 2.6, chainWidth: 1.6, platformPosition: 0.2, rollerDensity: 5, infeedSide: "rear", outfeedSide: "right" } },
+        { id: "rotatedDefault", label: "旋转45° 单向基准", x: 0, z: 19, hidden: true, rotationY: Math.PI / 4, values: { ...defaultValues, chainWidth: 1.6, platformPosition: 0.2, rollerDensity: 5, infeedSide: "rear", outfeedSide: "right" } },
+        { id: "rotatedReference", label: "旋转局部轴基准", x: 0, z: 16, hidden: true, rotationY: 0, values: { ...defaultValues, chainLength: 2.6, chainWidth: 1.6, platformPosition: 0.2, rollerDensity: 5, infeedSide: "rear", outfeedSide: "right" } },
+        { id: "clampedLeftRequest", label: "顶升固定端边界请求 -0.35", x: 0, z: 22, hidden: true, values: { ...defaultValues, chainLength: 3.1, platformPosition: -0.35, rollerDensity: 4 } },
+        { id: "clamped", label: "顶升越界约束", x: 0, z: 10, hidden: true, values: { ...defaultValues, chainLength: 2.5, platformPosition: 99, rollerDensity: 4 } },
+        { id: "clampedNegative", label: "顶升负向越界约束", x: 0, z: 13, hidden: true, values: { ...defaultValues, chainLength: 2.5, platformPosition: -99, rollerDensity: 4 } },
       ];
 
+      /** 将测试参数写入模型脚本元数据，确保运行时读取到当前矩阵用例。 */
       function syncModelScriptMetadata(target, values) {
         const scripts = (metadata.parameterScripts ?? []).map((script) => {
           const clonedScript = structuredClone(script);
@@ -118,47 +143,107 @@
         target.metadata = { ...(target.metadata ?? {}), scripts };
       }
 
+      /** 把 GLB 顶层节点统一挂到内容根节点下，保留模型自身层级。 */
       function parentTopLevelModelNodes(container, contentRoot) {
         const importedNodes = new Set([...container.meshes, ...container.transformNodes]);
         for (const node of importedNodes) {
-          if (!node.parent || !importedNodes.has(node.parent)) {
-            node.parent = contentRoot;
-          }
+          if (!node.parent || !importedNodes.has(node.parent)) node.parent = contentRoot;
         }
       }
 
-      function normalizeModelContentOrigin(root) {
-        root.computeWorldMatrix(true);
-        const childMeshes = root.getChildMeshes(false);
-        if (childMeshes.length === 0) return;
+      /** 按名称查找根节点及其所有后代中的第一个目标节点。 */
+      function findDescendant(root, name) {
+        return [root, ...root.getDescendants(false)].find((node) => node.name === name) ?? null;
+      }
 
+      /** 查找原始 GT.3 及参数化复制出的辊筒节点。 */
+      function findRollerNodes(root) {
+        return [root, ...root.getDescendants(false)].filter((node) => (
+          node.name === "GT.3" || node.metadata?.sourceNodeName === "GT.3" || node.metadata?.motionSourceNodeName === "GT.3"
+        ));
+      }
+
+
+      /** 等待当前实例的方向箭头贴图完成加载，避免只验证 Plane 而漏掉贴图解析错误。 */
+      async function waitForDirectionArrowTextures(root, timeoutMs = 8000) {
+        const deadline = performance.now() + timeoutMs;
+        while (performance.now() < deadline) {
+          scene.render();
+          const arrows = [root, ...root.getDescendants(false)].filter((node) => node.metadata?.directionArrowVisual === true);
+          const textures = arrows.map((node) => node.material?.diffuseTexture ?? node.material?.emissiveTexture ?? null);
+          if (arrows.length === 1 && textures.every((texture) => texture?.isReady?.())) return;
+          await new Promise((resolve) => setTimeout(resolve, 40));
+        }
+      }
+      /** 计算节点集合在指定坐标根下的精确包围盒。 */
+      function getNodesBounds(nodes, coordinateRoot = null) {
+        const meshes = [...new Set(nodes.filter(Boolean).flatMap((node) => {
+          const own = typeof node.getBoundingInfo === "function" ? [node] : [];
+          return [...own, ...(node.getChildMeshes?.(false) ?? [])];
+        }))].filter((mesh) => mesh.isEnabled() && mesh.metadata?.directionArrowVisual !== true);
+        if (meshes.length === 0) return null;
+
+        coordinateRoot?.computeWorldMatrix(true);
+        const inverseCoordinateWorld = coordinateRoot?.getWorldMatrix().clone().invert() ?? null;
         let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
         let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
-        for (const mesh of childMeshes) {
-          mesh.computeWorldMatrix(true);
-          const box = mesh.getBoundingInfo().boundingBox;
-          minimum = Vector3.Minimize(minimum, box.minimumWorld);
-          maximum = Vector3.Maximize(maximum, box.maximumWorld);
-        }
+        for (const mesh of meshes) {
+          const positions = mesh.getVerticesData?.("position");
+          const worldMatrix = mesh.computeWorldMatrix(true);
+          mesh.refreshBoundingInfo?.();
+          if (positions?.length) {
+            for (let index = 0; index < positions.length; index += 3) {
+              const world = Vector3.TransformCoordinates(new Vector3(positions[index], positions[index + 1], positions[index + 2]), worldMatrix);
+              const point = inverseCoordinateWorld ? Vector3.TransformCoordinates(world, inverseCoordinateWorld) : world;
+              minimum = Vector3.Minimize(minimum, point);
+              maximum = Vector3.Maximize(maximum, point);
+            }
+            continue;
+          }
 
-        const bottomCenter = new Vector3((minimum.x + maximum.x) / 2, minimum.y, (minimum.z + maximum.z) / 2);
+          const box = mesh.getBoundingInfo().boundingBox;
+          for (const corner of box.vectorsWorld) {
+            const point = inverseCoordinateWorld ? Vector3.TransformCoordinates(corner, inverseCoordinateWorld) : corner;
+            minimum = Vector3.Minimize(minimum, point);
+            maximum = Vector3.Maximize(maximum, point);
+          }
+        }
+        return { minimum, maximum, center: minimum.add(maximum).scale(0.5), size: maximum.subtract(minimum) };
+      }
+
+      /** 将模型底面中心归零，便于不同参数用例在同一基准下比较。 */
+      function normalizeModelContentOrigin(root) {
+        root.computeWorldMatrix(true);
+        const bounds = getNodesBounds([root]);
+        if (!bounds) return;
+        const bottomCenter = new Vector3((bounds.minimum.x + bounds.maximum.x) / 2, bounds.minimum.y, (bounds.minimum.z + bounds.maximum.z) / 2);
         const localBottomCenter = Vector3.TransformCoordinates(bottomCenter, root.getWorldMatrix().clone().invert());
         for (const child of root.getChildren()) {
-          if (child instanceof TransformNode) {
-            child.position.subtractInPlace(localBottomCenter);
-          }
+          if (child instanceof TransformNode) child.position.subtractInPlace(localBottomCenter);
         }
       }
 
+      /** 高亮 Ban.4 顶升平台与 GT.3 辊筒，辅助截图识别解耦关系。 */
+      function paintLiftComponent(root) {
+        const platform = findDescendant(root, "Ban.4");
+        platform?.getChildMeshes(false).filter((mesh) => mesh.metadata?.directionArrowVisual !== true).forEach((mesh) => { mesh.material = platformMaterial; });
+        findRollerNodes(root).forEach((node) => node.getChildMeshes?.(false).forEach((mesh) => { mesh.material = rollerMaterial; }));
+      }
+
+      /** 统一三位小数输出，避免报告噪声。 */
+      function round(value) {
+        return Number(value.toFixed(3));
+      }
+
+      /** 创建单个 YZJ 测试实例并返回几何与元数据报告。 */
       async function createYZJCase(testCase) {
         const root = new TransformNode(`${testCase.label}_root`, scene);
-        root.position.x = testCase.x;
-        root.position.z = testCase.z;
+        root.position.set(testCase.x, 0, testCase.z);
         root.rotation.y = testCase.rotationY ?? 0;
 
         const contentRoot = new TransformNode(`${testCase.label}_contentRoot`, scene);
         contentRoot.parent = root;
-        contentRoot.scaling = new Vector3(0.01, 0.01, 0.01);
+        contentRoot.scaling.setAll(0.01);
 
         const container = await SceneLoader.LoadAssetContainerAsync("./yzj-assets/", "YZJ.glb", scene);
         container.addAllToScene();
@@ -170,14 +255,9 @@
           sourcePath: "./yzj-assets/YZJ.glb",
           sourceUrl: "./yzj-assets/YZJ.glb",
           lengthUnit: "meter",
+          parameterConfig: metadata.modelParameters,
           unitScaleToMeters: 1,
-          scriptAssets: [
-            {
-              path: "./yzj-assets/yzj.model.ts",
-              sourceUrl: "./yzj-assets/yzj.model.txt",
-              name: "yzj.model.ts",
-            },
-          ],
+          scriptAssets: [{ path: "./yzj-assets/yzj.model.ts", sourceUrl: "./yzj-assets/yzj.model.txt", name: "yzj.model.ts" }],
           parameterScriptMetadata: metadata.parameterScripts ?? [],
           animationScriptMetadata: metadata.animationScripts ?? [],
           parameterValues: testCase.values,
@@ -187,18 +267,160 @@
         runtime.updateParameterValues(testCase.values);
         await runtime.start();
         runtime.update();
+        await waitForDirectionArrowTextures(root);
+        paintLiftComponent(root);
+
+        const body = findDescendant(root, "ZT.2");
+        const platform = findDescendant(root, "Ban.4");
+        const rollers = findRollerNodes(root);
+        const bodyBounds = getNodesBounds([body], root);
+        const platformBounds = getNodesBounds([platform], root);
+        const rollerBounds = getNodesBounds(rollers, root);
+        const visualMarkerCount = [root, ...root.getDescendants(false)].filter((node) => node.metadata?.logisticsFlowMarker).length;
+        const directionArrows = [root, ...root.getDescendants(false)].filter((node) => node.metadata?.directionArrowVisual === true);
+        const directionArrowParentNames = directionArrows.map((node) => node.parent?.name ?? null);
+        const directionArrowHasMotionAlias = directionArrows.some((node) => node.metadata?.motionSourceNodeName !== undefined);
+        const directionArrowTextures = directionArrows.map((node) => node.material?.diffuseTexture ?? node.material?.emissiveTexture ?? null);
+        const directionArrowTexturesReady = directionArrowTextures.length === 1 && directionArrowTextures.every((texture) => texture?.isReady?.());
+        const directionArrowTextureNames = directionArrowTextures.map((texture) => texture?.name ?? null);
+
+        if (!bodyBounds || !platformBounds || !rollerBounds) throw new Error(`${testCase.label}: 关键节点包围盒缺失`);
+        const report = {
+          id: testCase.id,
+          label: testCase.label,
+          rotationY: testCase.rotationY ?? 0,
+          values: testCase.values,
+          logisticsFlow: contentRoot.metadata?.logisticsFlow ?? null,
+          visualMarkerCount,
+          directionArrowCount: directionArrows.length,
+          directionArrowParentNames,
+          directionArrowHasMotionAlias,
+          directionArrowTexturesReady,
+          directionArrowTextureNames,
+          body: {
+            minX: round(bodyBounds.minimum.x),
+            maxX: round(bodyBounds.maximum.x),
+            centerX: round(bodyBounds.center.x),
+            centerZ: round(bodyBounds.center.z),
+            sizeX: round(bodyBounds.size.x),
+            sizeZ: round(bodyBounds.size.z),
+          },
+          platform: {
+            minX: round(platformBounds.minimum.x),
+            maxX: round(platformBounds.maximum.x),
+            centerX: round(platformBounds.center.x),
+            centerZ: round(platformBounds.center.z),
+            sizeX: round(platformBounds.size.x),
+            sizeZ: round(platformBounds.size.z),
+          },
+          roller: {
+            centerX: round(rollerBounds.center.x),
+            centerZ: round(rollerBounds.center.z),
+            sizeX: round(rollerBounds.size.x),
+            sizeZ: round(rollerBounds.size.z),
+            count: rollers.length,
+          },
+        };
+        if (testCase.hidden) root.setEnabled(false);
+        return report;
       }
 
       try {
-        for (const testCase of cases) {
-          await createYZJCase(testCase);
+        const reports = [];
+        for (const testCase of cases) reports.push(await createYZJCase(testCase));
+        const byId = Object.fromEntries(reports.map((item) => [item.id, item]));
+        const failures = [];
+
+        const expectedExtension = byId.length.values.chainLength - byId.default.values.chainLength;
+        const fixedSideDrift = Math.abs(byId.length.body.minX - byId.default.body.minX);
+        const extensionSideGrowth = byId.length.body.maxX - byId.default.body.maxX;
+        const bodyCenterShift = byId.length.body.centerX - byId.default.body.centerX;
+        if (fixedSideDrift > 0.015 || Math.abs(extensionSideGrowth - expectedExtension) > 0.02) failures.push(`单向伸长异常：左侧漂移 ${round(fixedSideDrift)}，右侧增长 ${round(extensionSideGrowth)}，期望 ${round(expectedExtension)}`);
+        if (Math.abs(bodyCenterShift - expectedExtension / 2) > 0.015) failures.push(`主体中心未按单向伸长右移：${round(bodyCenterShift)}`);
+        if (Math.abs(byId.length.platform.centerX - byId.default.platform.centerX) > 0.008 || Math.abs(byId.length.platform.sizeX - byId.default.platform.sizeX) > 0.008) failures.push("整机加长污染 Ban.4");
+        if (Math.abs(byId.length.roller.centerX - byId.default.roller.centerX) > 0.008 || Math.abs(byId.length.roller.sizeX - byId.default.roller.sizeX) > 0.008) failures.push("整机加长污染 GT.3");
+        if (byId.width.platform.sizeZ <= byId.widthBase.platform.sizeZ + 0.45) failures.push("chainWidth 未带动 Ban.4 变宽");
+        if (byId.width.roller.sizeZ <= byId.widthBase.roller.sizeZ + 0.45) failures.push("chainWidth 未带动辊筒阵列变宽");
+
+        const expectedPlatformShift = byId.platformPositive.values.platformPosition - byId.platformNegative.values.platformPosition;
+        const platformShift = byId.platformPositive.platform.centerX - byId.platformNegative.platform.centerX;
+        const rollerShift = byId.platformPositive.roller.centerX - byId.platformNegative.roller.centerX;
+        const platformNegativeAppliedOffset = byId.platformNegative.platform.centerX - byId.length.platform.centerX;
+        const platformPositiveAppliedOffset = byId.platformPositive.platform.centerX - byId.length.platform.centerX;
+        if (Math.abs(platformShift - expectedPlatformShift) > 0.02 || Math.abs(rollerShift - platformShift) > 0.012
+          || Math.abs(platformNegativeAppliedOffset - byId.platformNegative.values.platformPosition) > 0.012
+          || Math.abs(platformPositiveAppliedOffset - byId.platformPositive.values.platformPosition) > 0.012) {
+          failures.push(`顶升组件位置不同步：请求差 ${round(expectedPlatformShift)}, platform=${round(platformShift)}, roller=${round(rollerShift)}`);
         }
-        status.innerHTML = `<span class="ok">完成</span>：${cases.map((item) => item.label).join(" / ")}`;
+
+        const expectedLeftBoundaryOffset = byId.clampedLeftRequest.body.minX - byId.length.platform.minX;
+        const clampedLeftAppliedOffset = byId.clampedLeftRequest.platform.centerX - byId.length.platform.centerX;
+        const clampedLeftRollerOffset = byId.clampedLeftRequest.roller.centerX - byId.length.roller.centerX;
+        if (Math.abs(byId.clampedLeftRequest.platform.minX - byId.clampedLeftRequest.body.minX) > 0.01
+          || Math.abs(clampedLeftAppliedOffset - expectedLeftBoundaryOffset) > 0.012
+          || Math.abs(clampedLeftRollerOffset - clampedLeftAppliedOffset) > 0.012) {
+          failures.push(`固定端边界约束异常：请求=${round(byId.clampedLeftRequest.values.platformPosition)}, 实际=${round(clampedLeftAppliedOffset)}, 辊筒=${round(clampedLeftRollerOffset)}`);
+        }
+        if (byId.clamped.platform.minX < byId.clamped.body.minX - 0.01 || byId.clamped.platform.maxX > byId.clamped.body.maxX + 0.01) failures.push("platformPosition 越界约束失败");
+        if (byId.clampedNegative.platform.minX < byId.clampedNegative.body.minX - 0.01 || byId.clampedNegative.platform.maxX > byId.clampedNegative.body.maxX + 0.01) failures.push("platformPosition 负向越界约束失败");
+        const defaultRollerPlatformOffset = byId.default.roller.centerX - byId.default.platform.centerX;
+        const clampedRollerPlatformOffset = byId.clamped.roller.centerX - byId.clamped.platform.centerX;
+        if (Math.abs(defaultRollerPlatformOffset - clampedRollerPlatformOffset) > 0.012) failures.push("越界约束时 Ban.4 与 GT.3 不同步");
+
+        const rotatedLocalAxisDiffs = [];
+        for (const componentName of ["body", "platform", "roller"]) {
+          for (const metricName of ["centerX", "centerZ", "sizeX", "sizeZ"]) {
+            const difference = Math.abs(byId.rotated[componentName][metricName] - byId.rotatedReference[componentName][metricName]);
+            rotatedLocalAxisDiffs.push({ componentName, metricName, difference });
+            if (difference > 0.012) failures.push(`旋转后未沿模型局部轴保持 ${componentName}.${metricName}：${round(difference)}`);
+          }
+        }
+        const maximumRotatedLocalAxisDifference = Math.max(...rotatedLocalAxisDiffs.map((item) => item.difference));
+
+        const expectedRotatedExtension = byId.rotated.values.chainLength - byId.rotatedDefault.values.chainLength;
+        const rotatedFixedSideDrift = Math.abs(byId.rotated.body.minX - byId.rotatedDefault.body.minX);
+        const rotatedExtensionSideGrowth = byId.rotated.body.maxX - byId.rotatedDefault.body.maxX;
+        const rotatedBodyCenterShift = byId.rotated.body.centerX - byId.rotatedDefault.body.centerX;
+        if (rotatedFixedSideDrift > 0.015 || Math.abs(rotatedExtensionSideGrowth - expectedRotatedExtension) > 0.02 || Math.abs(rotatedBodyCenterShift - expectedRotatedExtension / 2) > 0.015) {
+          failures.push(`旋转后单向伸长异常：左侧漂移=${round(rotatedFixedSideDrift)}，右侧增长=${round(rotatedExtensionSideGrowth)}，中心右移=${round(rotatedBodyCenterShift)}`);
+        }
+        if (Math.abs(byId.rotated.platform.centerX - byId.rotatedDefault.platform.centerX) > 0.012 || Math.abs(byId.rotated.platform.sizeX - byId.rotatedDefault.platform.sizeX) > 0.012) failures.push("旋转后整机加长污染 Ban.4");
+        if (Math.abs(byId.rotated.roller.centerX - byId.rotatedDefault.roller.centerX) > 0.012 || Math.abs(byId.rotated.roller.sizeX - byId.rotatedDefault.roller.sizeX) > 0.012) failures.push("旋转后整机加长污染 GT.3");
+
+        for (const report of reports) {
+          if (report.logisticsFlow?.infeedSide !== report.values.infeedSide || report.logisticsFlow?.outfeedSide !== report.values.outfeedSide) failures.push(`${report.label}: logisticsFlow 不一致`);
+          if (report.visualMarkerCount !== 0) failures.push(`${report.label}: 出现旧物流方向标记节点`);
+          if (report.directionArrowCount !== 1) failures.push(`${report.label}: 方向箭头数量=${report.directionArrowCount}`);
+          if (report.directionArrowParentNames.some((name) => name !== "Ban.4")) failures.push(`${report.label}: 方向箭头未挂到 Ban.4`);
+          if (report.directionArrowHasMotionAlias) failures.push(`${report.label}: 方向箭头错误写入 motionSourceNodeName`);
+          if (!report.directionArrowTexturesReady) failures.push(`${report.label}: 方向箭头贴图未通过逻辑引用解析或未就绪：${report.directionArrowTextureNames.join(",")}`);
+        }
+
+        const lines = [
+          `单向长度：左侧固定漂移 ${round(fixedSideDrift)}，右侧增长 ${round(extensionSideGrowth)}（期望 ${round(expectedExtension)}），主体中心右移=${round(bodyCenterShift)}`,
+          `整机加长：平台 Δcenter/Δlength=${round(byId.length.platform.centerX - byId.default.platform.centerX)}/${round(byId.length.platform.sizeX - byId.default.platform.sizeX)}，辊筒 ${round(byId.length.roller.centerX - byId.default.roller.centerX)}/${round(byId.length.roller.sizeX - byId.default.roller.sizeX)}`,
+          `加宽：平台 Z=${byId.widthBase.platform.sizeZ}→${byId.width.platform.sizeZ}，辊筒阵列 Z=${byId.widthBase.roller.sizeZ}→${byId.width.roller.sizeZ}`,
+          `位置：请求差=${round(expectedPlatformShift)}，平台实际差=${round(platformShift)}，辊筒实际差=${round(rollerShift)}`,
+          `固定端边界：请求=${byId.clampedLeftRequest.values.platformPosition}，实际偏移 ${round(clampedLeftAppliedOffset)}，平台最小值/主体最小值 ${byId.clampedLeftRequest.platform.minX}/${byId.clampedLeftRequest.body.minX}`,
+          `越界约束：主体 ${byId.clamped.body.minX}..${byId.clamped.body.maxX}，正向平台 ${byId.clamped.platform.minX}..${byId.clamped.platform.maxX}，负向平台 ${byId.clampedNegative.platform.minX}..${byId.clampedNegative.platform.maxX}，组件中心差=${round(clampedRollerPlatformOffset - defaultRollerPlatformOffset)}`,
+          `旋转局部轴：0°/45° 同参数最大局部几何差=${round(maximumRotatedLocalAxisDifference)}`,
+          `旋转单向：左侧固定漂移 ${round(rotatedFixedSideDrift)}，右侧增长 ${round(rotatedExtensionSideGrowth)}（期望 ${round(expectedRotatedExtension)}）`,
+          `进出侧与箭头：${reports.map((item) => `${item.label}[入=${item.values.infeedSide}, 出=${item.values.outfeedSide}, 箭头=${item.directionArrowCount}]`).join(" / ")}`,
+        ];
+        status.innerHTML = `
+          <span class="${failures.length ? "error" : "ok"}">${failures.length ? "失败" : "通过"}</span>
+          <span class="legend" style="background:#0e94ff"></span>Ban.4
+          <span class="legend" style="background:#eb29c2"></span>GT.3
+          <br />${lines.join("<br />")}${failures.length ? `<br />${failures.join("<br />")}` : ""}
+        `;
+        document.body.dataset.validationStatus = failures.length ? "fail" : "pass";
+        window.__YZJ_REPORT__ = reports;
+        window.__YZJ_VISUAL_READY__ = failures.length === 0;
         engine.runRenderLoop(() => scene.render());
-        window.__YZJ_VISUAL_READY__ = true;
       } catch (error) {
         console.error(error);
         status.innerHTML = `<span class="error">失败</span>：${error instanceof Error ? error.message : String(error)}`;
+        document.body.dataset.validationStatus = "fail";
         window.__YZJ_VISUAL_READY__ = false;
       }
 

@@ -1,75 +1,400 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import ts from "typescript";
 
 const files = {
   sourceScript: "F:/3d-models/models/YZJ/yzj.model.ts",
   assetScript: "F:/3d-models/models/Assets/Models/YZJ/yzj.model.ts",
+  fixtureScript: "F:/3d-babylon-editor/output/playwright/yzj-assets/yzj.model.ts",
+  fixtureScriptText: "F:/3d-babylon-editor/output/playwright/yzj-assets/yzj.model.txt",
   sourceMeta: "F:/3d-models/models/YZJ/meta.json",
   assetMeta: "F:/3d-models/models/Assets/Models/YZJ/meta.json",
+  fixtureMeta: "F:/3d-babylon-editor/output/playwright/yzj-assets/meta.json",
+  sceneRuntime: "F:/3d-babylon-editor/src/runtime/babylon/SceneRuntime.ts",
+  externalScriptRuntime: "F:/3d-babylon-editor/src/runtime/babylon/ExternalModelScriptRuntime.ts",
+  modelTextureAssetUrl: "F:/3d-babylon-editor/src/runtime/assets/modelTextureAssetUrl.ts",
+  imageAssets: "F:/3d-babylon-editor/src/assets/imageAssets.ts",
+  textureReferences: "F:/3d-babylon-editor/src/editor/model/textureReferences.ts",
+  assetDatabase: "F:/3d-babylon-editor/src/editor/assets/AssetDatabase.ts",
+  projectPanel: "F:/3d-babylon-editor/src/editor/panels/ProjectPanel.tsx",
+  modelParametersInspector: "F:/3d-babylon-editor/src/editor/panels/ModelParametersInspector.tsx",
+  modelParameters: "F:/3d-babylon-editor/src/editor/model/modelParameters.ts",
+  directionArrowPng: "F:/3d-babylon-editor/src/assets/images/direction-arrow-glow.png",
+  sourceGlb: "F:/3d-models/models/YZJ/YZJ.glb",
+  assetGlb: "F:/3d-models/models/Assets/Models/YZJ/YZJ.glb",
+  fixtureGlb: "F:/3d-babylon-editor/output/playwright/yzj-assets/YZJ.glb",
 };
 
+const EXPECTED_GLB_HASH = "5c400bb95afa24a035662e30ba21bca76cf5f7723fa6aceabe23aaee3c951ccb";
+const DIRECTION_ARROW_REFERENCE = "editor-image://builtin/direction-arrow-glow";
+const IMAGE_ASSET_DRAG_MIME_TYPE = "application/x-babylon-editor-image-asset";
+const EXPECTED_PARAMETER_KEYS = [
+  "chainLength", "platformLength", "platformPosition", "chainWidth", "chainHeight", "rollerWidth", "rollerPosition", "rollerDensity",
+  "infeedSide", "outfeedSide", "showDirectionArrow", "directionArrowImage", "showFrontSupport", "showRearSupport",
+];
+const NUMBER_PARAMETER_KEYS = ["chainLength", "platformLength", "platformPosition", "chainWidth", "chainHeight", "rollerWidth", "rollerPosition", "rollerDensity"];
+const BOOLEAN_PARAMETER_KEYS = ["showDirectionArrow", "showFrontSupport", "showRearSupport"];
+const SIDE_PARAMETER_KEYS = ["infeedSide", "outfeedSide"];
+
+/** 计算文件 SHA256，用于验证源包、项目副本和视觉夹具完全一致。 */
 function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function findField(meta, key) {
-  return meta.parameterScripts?.[0]?.fields?.find((field) => field.key === key);
-}
-
-function findValue(meta, key) {
-  return meta.parameterScripts?.[0]?.values?.[key];
-}
-
+/** 返回模型参数定义，缺失时返回 undefined。 */
 function findModelParameter(meta, key) {
   return meta.modelParameters?.parameters?.find((field) => field.key === key);
 }
 
+/** 返回参数脚本字段定义，缺失时返回 undefined。 */
+function findScriptParameterField(meta, key) {
+  return meta.parameterScripts?.flatMap((script) => script.fields ?? []).find((field) => field.key === key);
+}
+
+/** 返回参数脚本 values 中保存的参数定义，缺失时返回 undefined。 */
+function findScriptParameterValue(meta, key) {
+  for (const script of meta.parameterScripts ?? []) {
+    const value = script.values?.[key];
+    if (value) return value;
+  }
+  return undefined;
+}
+
+/** 使用 JSON 序列化比较多份参数契约。 */
+function isSameJsonValue(values) {
+  return new Set(values.map((item) => JSON.stringify(item))).size === 1;
+}
+
+/** 校验 number 参数在 fields、values 和 modelParameters 中保持一致。 */
+function validateNumberParameterContract(meta, key) {
+  const field = findScriptParameterField(meta, key);
+  const value = findScriptParameterValue(meta, key);
+  const modelParameter = findModelParameter(meta, key);
+  if (!field || !value || !modelParameter) return ["number parameter contract missing: " + key];
+  const contracts = [
+    { source: "parameterScripts.fields", type: field.type, defaultValue: field.defaultValue, min: field.configuration?.min, max: field.configuration?.max, step: field.configuration?.step },
+    { source: "parameterScripts.values", type: value.type, defaultValue: value.value, min: value.configuration?.min, max: value.configuration?.max, step: value.configuration?.step },
+    { source: "modelParameters.parameters", type: modelParameter.type, defaultValue: modelParameter.defaultValue, min: modelParameter.min, max: modelParameter.max, step: modelParameter.step },
+  ];
+  return ["type", "defaultValue", "min", "max", "step"].flatMap((property) => {
+    const values = contracts.map((contract) => contract[property]);
+    if (isSameJsonValue(values)) return [];
+    return ["number parameter contract mismatch: " + key + "." + property + " => " + contracts.map((contract) => contract.source + "=" + contract[property]).join(", ")];
+  });
+}
+
+/** 校验 boolean 参数在三套契约中使用同一类型和默认值。 */
+function validateBooleanParameterContract(meta, key) {
+  const field = findScriptParameterField(meta, key);
+  const value = findScriptParameterValue(meta, key);
+  const modelParameter = findModelParameter(meta, key);
+  if (!field || !value || !modelParameter) return ["boolean parameter contract missing: " + key];
+  const failures = [];
+  if (field.type !== "boolean" || value.type !== "boolean" || modelParameter.type !== "boolean") failures.push("boolean parameter type mismatch: " + key);
+  if (field.configuration?.type !== "boolean" || value.configuration?.type !== "boolean") failures.push("boolean parameter configuration mismatch: " + key);
+  if (!isSameJsonValue([field.defaultValue, value.value, modelParameter.defaultValue])) failures.push("boolean parameter default mismatch: " + key);
+  return failures;
+}
+
+/** 校验入料侧和出料侧枚举的默认值及四侧选项。 */
+function validateSideParameterContract(meta, key) {
+  const field = findScriptParameterField(meta, key);
+  const value = findScriptParameterValue(meta, key);
+  const modelParameter = findModelParameter(meta, key);
+  if (!field || !value || !modelParameter) return ["side parameter contract missing: " + key];
+  const failures = [];
+  if (field.type !== "string" || value.type !== "string" || modelParameter.type !== "enum") failures.push("side parameter type mismatch: " + key);
+  if (field.configuration?.type !== "string" || value.configuration?.type !== "string") failures.push("side parameter configuration mismatch: " + key);
+  if (!isSameJsonValue([field.defaultValue, value.value, modelParameter.defaultValue])) failures.push("side parameter default mismatch: " + key);
+  if (!isSameJsonValue([field.configuration?.options, value.configuration?.options, modelParameter.options])) failures.push("side parameter options mismatch: " + key);
+  return failures;
+}
+
+/** 校验方向箭头贴图在脚本字段中保持 string，在模型参数中使用 texture。 */
+function validateDirectionArrowTextureContract(meta) {
+  const field = findScriptParameterField(meta, "directionArrowImage");
+  const value = findScriptParameterValue(meta, "directionArrowImage");
+  const modelParameter = findModelParameter(meta, "directionArrowImage");
+  if (!field || !value || !modelParameter) return ["direction arrow texture contract missing"];
+
+  const failures = [];
+  if (field.type !== "string" || value.type !== "string" || modelParameter.type !== "texture") failures.push("direction arrow texture type mismatch");
+  if (field.configuration?.type !== "string" || value.configuration?.type !== "string") failures.push("direction arrow texture script configuration mismatch");
+  if (!isSameJsonValue([field.defaultValue, value.value, modelParameter.defaultValue])) failures.push("direction arrow texture default mismatch");
+  if (modelParameter.defaultValue !== DIRECTION_ARROW_REFERENCE) failures.push("direction arrow texture logical reference mismatch");
+  return failures;
+}
+
+/** 把 TypeScript 转译诊断转换为稳定单行文本。 */
+function formatDiagnostic(diagnostic) {
+  return ts.flattenDiagnosticMessageText(diagnostic.messageText, " ");
+}
+
+
+/** 在 TypeScript AST 中查找指定名称的方法声明。 */
+function findMethodDeclaration(sourceFile, methodName) {
+  let matchedMethod;
+  const visit = (node) => {
+    if (!matchedMethod && ts.isMethodDeclaration(node) && node.name?.getText(sourceFile) === methodName) {
+      matchedMethod = node;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return matchedMethod;
+}
+
+/** 判断方法体内是否真实调用指定的 this 方法，并可约束参数文本。 */
+function hasThisMethodCall(sourceFile, method, calledMethodName, expectedArguments) {
+  let matched = false;
+  const visit = (node) => {
+    if (matched) return;
+    if (ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.expression.kind === ts.SyntaxKind.ThisKeyword
+      && node.expression.name.text === calledMethodName) {
+      const actualArguments = node.arguments.map((argument) => argument.getText(sourceFile));
+      if (!expectedArguments || JSON.stringify(actualArguments) === JSON.stringify(expectedArguments)) matched = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(method);
+  return matched;
+}
+
+/** 检查主体方法没有把 lengthRatio 重新接入节点整体缩放路径。 */
+function hasForbiddenBodyLengthScale(sourceFile, method) {
+  let matched = false;
+  const visit = (node) => {
+    if (matched) return;
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const methodName = node.expression.name.text;
+      const argumentsText = node.arguments.map((argument) => argument.getText(sourceFile));
+      if (/^scale/i.test(methodName) && argumentsText[0] === "body" && argumentsText.slice(1).includes("lengthRatio")) matched = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(method);
+  return matched;
+}
+
+/** 编译不依赖外部状态的数值方法，以真实执行结果验证锚点语义。 */
+function compilePureNumberMethod(sourceFile, method) {
+  if (!method?.body) return undefined;
+  const parameterNames = method.parameters.map((parameter) => parameter.name.getText(sourceFile));
+  if (parameterNames.some((name) => !/^[A-Za-z_$][\w$]*$/.test(name))) return undefined;
+  const bodyText = method.body.statements.map((statement) => statement.getText(sourceFile)).join("\n");
+  return Function(...parameterNames, `"use strict";\n${bodyText}`);
+}
+
+/** 用 AST 调用链与数值样例共同验证“固定左侧、只向右侧承担长度差”的实现。 */
+function validateSingleDirectionContract(sourceFile) {
+  const contractFailures = [];
+  const applyBodyMethod = findMethodDeclaration(sourceFile, "applyBodyParameters");
+  const stretchMeshMethod = findMethodDeclaration(sourceFile, "stretchMeshVerticesByLocalX");
+  const mapperMethod = findMethodDeclaration(sourceFile, "mapVisualLeftAnchoredLengthX");
+
+  if (!applyBodyMethod) contractFailures.push("single-direction contract missing applyBodyParameters method");
+  else {
+    if (!hasThisMethodCall(sourceFile, applyBodyMethod, "stretchBodyLength", ["body", "lengthRatio"])) {
+      contractFailures.push("applyBodyParameters does not route chainLength through stretchBodyLength");
+    }
+    if (hasForbiddenBodyLengthScale(sourceFile, applyBodyMethod)) {
+      contractFailures.push("applyBodyParameters routes lengthRatio into whole-node scaling");
+    }
+  }
+  if (!stretchMeshMethod || !hasThisMethodCall(sourceFile, stretchMeshMethod, "mapVisualLeftAnchoredLengthX")) {
+    contractFailures.push("stretchMeshVerticesByLocalX does not use the left-anchored mapper");
+  }
+
+  const mapper = compilePureNumberMethod(sourceFile, mapperMethod);
+  if (!mapper) {
+    contractFailures.push("left-anchored mapper cannot be compiled for semantic validation");
+    return contractFailures;
+  }
+
+  const epsilon = 1e-9;
+  const middleStart = -1;
+  const middleEnd = 1;
+  const extension = 2;
+  const middleScale = 2;
+  const sourceMinimum = -1.25;
+  const sourceMaximum = 1.25;
+  const targetMinimum = mapper(sourceMinimum, middleStart, middleEnd, middleScale, extension);
+  const targetMaximum = mapper(sourceMaximum, middleStart, middleEnd, middleScale, extension);
+  const targetInterior = mapper(0, middleStart, middleEnd, middleScale, extension);
+
+  if (Math.abs(targetMaximum - sourceMaximum) > epsilon) {
+    contractFailures.push("left-anchored mapper moves the fixed visual-left endpoint");
+  }
+  if (Math.abs((sourceMinimum - targetMinimum) - extension) > epsilon) {
+    contractFailures.push("left-anchored mapper does not place the full extension on one side");
+  }
+  if (Math.abs((targetMaximum - targetMinimum) - ((sourceMaximum - sourceMinimum) + extension)) > epsilon) {
+    contractFailures.push("left-anchored mapper does not produce the requested target length");
+  }
+  if (Math.abs(targetInterior - (-1)) > epsilon) {
+    contractFailures.push("left-anchored mapper middle segment is not continuous");
+  }
+  return contractFailures;
+}
+
+/** 读取 PNG IHDR，确认内置方向箭头是 512x512 RGBA 资产。 */
+function readPngHeader(path) {
+  const buffer = readFileSync(path);
+  const signature = buffer.subarray(0, 8).toString("hex");
+  return {
+    signature,
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20),
+    bitDepth: buffer[24],
+    colorType: buffer[25],
+  };
+}
+
 const scriptText = readFileSync(files.sourceScript, "utf8");
+const sceneRuntimeText = readFileSync(files.sceneRuntime, "utf8");
+const externalScriptRuntimeText = readFileSync(files.externalScriptRuntime, "utf8");
+const modelTextureAssetUrlText = readFileSync(files.modelTextureAssetUrl, "utf8");
+const imageAssetsText = readFileSync(files.imageAssets, "utf8");
+const textureReferencesText = readFileSync(files.textureReferences, "utf8");
+const assetDatabaseText = readFileSync(files.assetDatabase, "utf8");
+const projectPanelText = readFileSync(files.projectPanel, "utf8");
+const modelParametersInspectorText = readFileSync(files.modelParametersInspector, "utf8");
+const modelParametersText = readFileSync(files.modelParameters, "utf8");
 const sourceMeta = JSON.parse(readFileSync(files.sourceMeta, "utf8"));
 const assetMeta = JSON.parse(readFileSync(files.assetMeta, "utf8"));
-const forbiddenTokens = ["applyDimensionScale", "applyForkParameters", "applyShelfArray", "cloneTemplate", "forkGap"];
-const forbiddenLengthTokens = ["mapProtectedLengthX", "mapLeftAnchoredLengthX", "extension / 2"];
-const hasVisualLeftAnchoredBodyMap =
-  scriptText.includes("mapVisualLeftAnchoredLengthX") &&
-  scriptText.includes("if (x >= middleEnd) { return x; }") &&
-  scriptText.includes("if (x <= middleStart) { return x - extension; }");
-const hasIndependentPlatformLength =
-  scriptText.includes('const platformLengthRatio = this.ratio(values, "platformLength");') &&
-  scriptText.includes("this.applyPlatformParameters(platformLengthRatio, widthRatio, heightOffset);") &&
-  scriptText.includes('this.scaleNodeWithAxisAnchors(platform, platformLengthRatio, 1, widthRatio, { x: "min", z: "center" });');
-const hasRollerChainLength =
-  scriptText.includes("this.applyRollerParameters(values, lengthRatio, heightOffset);") &&
-  scriptText.includes('this.scaleNodeWithAxisAnchors(roller, lengthRatio, 1, widthRatio, { x: "min", z: "center" });');
+const fixtureMeta = JSON.parse(readFileSync(files.fixtureMeta, "utf8"));
+const allMeta = [sourceMeta, assetMeta, fixtureMeta];
+const sourceFile = ts.createSourceFile(files.sourceScript, scriptText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const transpileResult = ts.transpileModule(scriptText, {
+  compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext, experimentalDecorators: true, useDefineForClassFields: false },
+  reportDiagnostics: true,
+});
+const transpileErrors = (transpileResult.diagnostics ?? [])
+  .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)
+  .map(formatDiagnostic);
+
+const parameterKeys = sourceMeta.modelParameters?.parameters?.map((item) => item.key) ?? [];
+const failures = [];
+const scriptHashes = [files.sourceScript, files.assetScript, files.fixtureScript, files.fixtureScriptText].map(sha256);
+const metaHashes = [files.sourceMeta, files.assetMeta, files.fixtureMeta].map(sha256);
+const glbHashes = [files.sourceGlb, files.assetGlb, files.fixtureGlb].map(sha256);
+const directionArrowPngHash = sha256(files.directionArrowPng);
+const pngHeader = readPngHeader(files.directionArrowPng);
+
+if (new Set(scriptHashes).size !== 1) failures.push("script copies are not byte-identical");
+if (new Set(metaHashes).size !== 1) failures.push("meta.json copies are not byte-identical");
+if (new Set(glbHashes).size !== 1 || glbHashes[0] !== EXPECTED_GLB_HASH) failures.push("YZJ.glb hash changed or copies differ");
+if (transpileErrors.length > 0) failures.push("TypeScript transpile errors: " + transpileErrors.join(" | "));
+if (JSON.stringify(parameterKeys) !== JSON.stringify(EXPECTED_PARAMETER_KEYS)) failures.push("parameter order mismatch: " + parameterKeys.join(","));
+for (const key of NUMBER_PARAMETER_KEYS) failures.push(...validateNumberParameterContract(sourceMeta, key));
+for (const key of BOOLEAN_PARAMETER_KEYS) failures.push(...validateBooleanParameterContract(sourceMeta, key));
+for (const key of SIDE_PARAMETER_KEYS) failures.push(...validateSideParameterContract(sourceMeta, key));
+failures.push(...validateDirectionArrowTextureContract(sourceMeta));
+failures.push(...validateSingleDirectionContract(sourceFile));
+
+for (const meta of allMeta) {
+  failures.push(...validateBooleanParameterContract(meta, "showDirectionArrow"));
+  failures.push(...validateDirectionArrowTextureContract(meta));
+}
+
+const requiredScriptTokens = [
+  "mapVisualLeftAnchoredLengthX",
+  "if (x >= middleEnd) { return x; }",
+  "if (x <= middleStart) { return x - extension; }",
+  "return middleEnd + (x - middleEnd) * middleScale;",
+  "resolvePlatformPosition",
+  "this.applyRollerParameters(values, platformLengthRatio, heightOffset, platformPosition)",
+  "this.scaleNodeWithAxisAnchors(roller, platformLengthRatio",
+  'this.addNodeAxisOffset(platform, "x", platformPosition)',
+  "metadata?.logisticsFlow",
+  "motionSourceNodeName",
+  "showDirectionArrow",
+  "directionArrowImage",
+  DIRECTION_ARROW_REFERENCE,
+  "MeshBuilder.CreatePlane",
+  "Mesh.DOUBLESIDE",
+  "arrow.parent = platform",
+  "arrow.isPickable = false",
+  "arrow.renderingGroupId = 2",
+  "arrow.alphaIndex = Number.MAX_SAFE_INTEGER",
+  "directionArrowVisual: true",
+  "material.useAlphaFromDiffuseTexture = true",
+  "material.disableDepthWrite = true",
+  "material.depthFunction = Constants.ALWAYS",
+  "onBeforeRenderObservable",
+  "% 1800",
+  "0.55 + wave * 0.37",
+  "1 + wave * 0.03",
+  "movement === 2 || movement < 0",
+  "telemetry.fields",
+  "mesh?.metadata?.directionArrowVisual === true",
+  "disposeDirectionArrowResources",
+  "this.directionArrowMesh.dispose(false, true)",
+];
+for (const token of requiredScriptTokens) {
+  if (!scriptText.includes(token)) failures.push("script missing required implementation token: " + token);
+}
+if (scriptText.includes("mapSymmetricLengthX")) failures.push("legacy symmetric length mapper remains");
+if (scriptText.includes("this.applyRollerParameters(values, lengthRatio")) failures.push("roller is still driven by chainLength");
+if (/readRuntimeMovementX[\s\S]*?telemetry\.rotation/.test(scriptText)) failures.push("direction arrow incorrectly falls back to rotation when movement_x is absent");
+
+const arrowMetadataMatch = scriptText.match(/arrow\.metadata\s*=\s*\{([^}]*)\}/);
+if (!arrowMetadataMatch) {
+  failures.push("direction arrow metadata assignment missing");
+} else {
+  const arrowMetadataKeys = [...arrowMetadataMatch[1].matchAll(/([A-Za-z_$][\w$]*)\s*:/g)].map((match) => match[1]).sort();
+  if (JSON.stringify(arrowMetadataKeys) !== JSON.stringify(["directionArrowVisual", "generatedByParametricRuntime"])) {
+    failures.push("direction arrow metadata contains unexpected keys: " + arrowMetadataKeys.join(","));
+  }
+}
+
+for (const token of ["findConfiguredConveyorMotionNodes", "readParametricMotionSourceNodeName", "node.metadata.motionSourceNodeName"]) {
+  if (!sceneRuntimeText.includes(token)) failures.push("SceneRuntime missing parametric roller motion support: " + token);
+}
+for (const token of ["updateRuntimeContext", "runtimeMode", "runtimeTelemetry", "resolveModelTextureAssetUrl", "this.callLifecycle(instance, 'onUpdate')"]) {
+  if (!externalScriptRuntimeText.includes(token)) failures.push("ExternalModelScriptRuntime missing context/texture token: " + token);
+}
+for (const token of ["updateAllExternalScriptRuntimeContexts('runtime', null)", "updateAllExternalScriptRuntimeContexts('edit', null)", "snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null"]) {
+  if (!sceneRuntimeText.includes(token)) failures.push("SceneRuntime missing runtime context lifecycle token: " + token);
+}
+for (const token of ["resolveBuiltInImageSourceUrl", "resolveRelativeEditorAssetUrl", "assetRevision="]) {
+  if (!modelTextureAssetUrlText.includes(token)) failures.push("shared model texture resolver missing token: " + token);
+}
+if (!imageAssetsText.includes(DIRECTION_ARROW_REFERENCE) || !imageAssetsText.includes("direction-arrow-glow.png")) failures.push("built-in direction arrow image registration missing");
+if (!textureReferencesText.includes("isRegisteredEditorImageReference") || !textureReferencesText.includes("isModelPackageRelativeTexturePath")) failures.push("texture reference whitelist missing");
+if (!assetDatabaseText.includes(IMAGE_ASSET_DRAG_MIME_TYPE) || !assetDatabaseText.includes("findBuiltInImageAssetByReference")) failures.push("image drag payload contract missing or not registry-validated");
+if (!projectPanelText.includes("encodeImageAssetDragPayload") || !projectPanelText.includes("isBuiltInImageProjectLibraryItem")) failures.push("Project image card drag wiring missing");
+if (!modelParametersInspectorText.includes("decodeImageAssetDragPayload") || !modelParametersInspectorText.includes("updateSelectedModelParameterValue(definition.key, payload.reference)")) failures.push("Inspector texture drop wiring missing");
+if (!modelParametersText.includes("isAllowedTextureReference")) failures.push("texture parameter sanitizer does not use shared whitelist");
+if (pngHeader.signature !== "89504e470d0a1a0a" || pngHeader.width !== 512 || pngHeader.height !== 512 || pngHeader.bitDepth !== 8 || pngHeader.colorType !== 6) {
+  failures.push("direction arrow PNG must be 512x512 8-bit RGBA");
+}
+
+for (const key of ["platformPosition", "infeedSide", "outfeedSide", "showDirectionArrow", "directionArrowImage"]) {
+  if (!findModelParameter(sourceMeta, key)) failures.push("source meta missing key: " + key);
+  if (!findModelParameter(assetMeta, key)) failures.push("asset meta missing key: " + key);
+  if (!findModelParameter(fixtureMeta, key)) failures.push("fixture meta missing key: " + key);
+}
 
 const result = {
-  scriptHashEqual: sha256(files.sourceScript) === sha256(files.assetScript),
-  metaHashEqual: sha256(files.sourceMeta) === sha256(files.assetMeta),
-  sourceScriptHash: sha256(files.sourceScript),
-  sourceMetaHash: sha256(files.sourceMeta),
-  forbiddenTokensPresent: forbiddenTokens.filter((token) => scriptText.includes(token)),
-  forbiddenLengthTokensPresent: forbiddenLengthTokens.filter((token) => scriptText.includes(token)),
-  leftAnchoredLengthRuntime: hasVisualLeftAnchoredBodyMap && hasRollerChainLength,
-  independentPlatformLengthRuntime: hasIndependentPlatformLength,
-  sourcePlatformLength: {
-    field: findField(sourceMeta, "platformLength")?.configuration,
-    value: findValue(sourceMeta, "platformLength")?.configuration,
-    modelParameter: findModelParameter(sourceMeta, "platformLength"),
-  },
-  assetPlatformLength: {
-    field: findField(assetMeta, "platformLength")?.configuration,
-    value: findValue(assetMeta, "platformLength")?.configuration,
-    modelParameter: findModelParameter(assetMeta, "platformLength"),
-  },
-  sourceRollerWidth: {
-    field: findField(sourceMeta, "rollerWidth")?.configuration,
-    value: findValue(sourceMeta, "rollerWidth")?.configuration,
-    modelParameter: findModelParameter(sourceMeta, "rollerWidth"),
-  },
-  assetRollerWidth: {
-    field: findField(assetMeta, "rollerWidth")?.configuration,
-    value: findValue(assetMeta, "rollerWidth")?.configuration,
-    modelParameter: findModelParameter(assetMeta, "rollerWidth"),
-  },
+  ok: failures.length === 0,
+  failures,
+  transpileErrors,
+  hashes: { script: scriptHashes[0], meta: metaHashes[0], glb: glbHashes[0], directionArrowPng: directionArrowPngHash },
+  parameterKeys,
+  platformPosition: findModelParameter(sourceMeta, "platformPosition"),
+  infeedSide: findModelParameter(sourceMeta, "infeedSide"),
+  outfeedSide: findModelParameter(sourceMeta, "outfeedSide"),
+  showDirectionArrow: findModelParameter(sourceMeta, "showDirectionArrow"),
+  directionArrowImage: findModelParameter(sourceMeta, "directionArrowImage"),
+  directionVisualsEnabled: scriptText.includes("directionArrowVisual: true")
+    && scriptText.includes("runtimeTelemetry")
+    && allMeta.every((meta) => findModelParameter(meta, "directionArrowImage")?.defaultValue === DIRECTION_ARROW_REFERENCE),
+  pngHeader,
 };
 
 console.log(JSON.stringify(result, null, 2));
+if (!result.ok) process.exitCode = 1;

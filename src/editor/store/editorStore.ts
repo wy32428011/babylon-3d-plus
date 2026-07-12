@@ -382,6 +382,7 @@ function cloneMeshRenderer(meshRenderer: MeshRendererComponent): MeshRendererCom
 function cloneLocator(locator: LocatorComponent): LocatorComponent {
   return {
     assetId: locator.assetId,
+    storageDepth: locator.storageDepth,
     length: locator.length,
     width: locator.width,
     height: locator.height,
@@ -486,6 +487,7 @@ function sanitizeModelAssetCode(value: string | undefined, fallback: string): st
 function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): boolean {
   return (
     left.assetId === right.assetId &&
+    left.storageDepth === right.storageDepth &&
     left.length === right.length &&
     left.width === right.width &&
     left.height === right.height
@@ -1949,6 +1951,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const before = cloneLocator(locator);
       const after: LocatorComponent = {
         assetId: sanitizeLocatorAssetId(patch.assetId, before.assetId),
+        storageDepth: patch.storageDepth === 'far' ? 'far' : (patch.storageDepth === 'near' ? 'near' : before.storageDepth),
         length: sanitizeLocatorDimension(patch.length, before.length),
         width: sanitizeLocatorDimension(patch.width, before.width),
         height: sanitizeLocatorDimension(patch.height, before.height),

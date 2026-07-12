@@ -14,7 +14,7 @@ import {
   type SceneEnvironmentVariant,
   type SceneSettings,
 } from '../model/SceneDocument';
-import type { EntityComponents, LightKind, MeshKind } from '../model/components';
+import type { EntityComponents, LightKind, LocatorStorageDepth, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
 import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit } from '../model/sceneUnits';
@@ -332,10 +332,16 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
 
   return {
     assetId: assertString(locator.assetId).trim().slice(0, LOCATOR_ASSET_ID_MAX_LENGTH),
+    storageDepth: normalizeLocatorStorageDepth(locator.storageDepth),
     length: normalizeLocatorDimension(locator.length),
     width: normalizeLocatorDimension(locator.width),
     height: normalizeLocatorDimension(locator.height),
   };
+}
+
+/** 兼容旧场景缺少库位深度字段，默认按近排处理。 */
+function normalizeLocatorStorageDepth(value: unknown): LocatorStorageDepth {
+  return value === 'far' ? 'far' : 'near';
 }
 
 function normalizeLocatorDimension(value: unknown): number {

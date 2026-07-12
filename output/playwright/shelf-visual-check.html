@@ -43,7 +43,7 @@
       }
     </style>
   </head>
-  <body>
+  <body data-validation-status="loading">
     <canvas id="renderCanvas"></canvas>
     <div id="status">Shelf 多穿货架参数化视觉验证加载中...</div>
     <script type="module">
@@ -68,7 +68,7 @@
       const scene = new Scene(engine);
       scene.clearColor.set(0.067, 0.079, 0.091, 1);
 
-      const camera = new ArcRotateCamera("camera", Math.PI * 0.22, Math.PI * 0.32, 35, new Vector3(1, 5.5, 0), scene);
+      const camera = new ArcRotateCamera("camera", Math.PI * 0.2, Math.PI * 0.3, 48, new Vector3(0, 5.2, 0), scene);
       camera.attachControl(canvas, true);
       camera.lowerRadiusLimit = 8;
       camera.upperRadiusLimit = 80;
@@ -79,7 +79,7 @@
       const groundMaterial = new StandardMaterial("groundMaterial", scene);
       groundMaterial.diffuseColor = new Color3(0.13, 0.16, 0.17);
       groundMaterial.specularColor = Color3.Black();
-      const ground = MeshBuilder.CreateGround("ground", { width: 46, height: 30 }, scene);
+      const ground = MeshBuilder.CreateGround("ground", { width: 60, height: 38 }, scene);
       ground.material = groundMaterial;
       ground.position.y = -0.02;
 
@@ -89,27 +89,25 @@
         columnCount: 1,
         cellWidth: 0.801,
         cellHeight: 4.525,
+        supportLegHeight: 0.904,
         cellDepth: 1.183,
         postWidth: 0.08,
-        aisleWidth: 1.2,
-        aisleHeight: 1,
         doubleDeepEnabled: false,
         deepSlotGap: 0.2,
         deepSlotLift: 0,
-        shelfStyle: "beam",
       };
 
       const cases = [
-        { label: "默认 1层1列", x: -12, z: -5.4, rotationY: 0, values: { ...defaultValues } },
-        { label: "3层4列", x: 2.5, z: -5.4, rotationY: 0, values: { ...defaultValues, layerCount: 3, columnCount: 4 } },
-        { label: "2层3列 双深", x: -12, z: 6.2, rotationY: 0, values: { ...defaultValues, layerCount: 2, columnCount: 3, doubleDeepEnabled: true, deepSlotGap: 0.2 } },
-        {
-          label: "旋转组合",
-          x: 5,
-          z: 6.2,
-          rotationY: Math.PI / 4,
-          values: { ...defaultValues, layerCount: 3, columnCount: 4, cellWidth: 1.25, cellHeight: 3.4, cellDepth: 1.6, doubleDeepEnabled: true, deepSlotGap: 0.3 },
-        },
+        { id: "default", label: "默认", x: -14, z: -8, rotationY: 0, values: { ...defaultValues } },
+        { id: "width", label: "宽度 1.25", x: -7, z: -8, rotationY: 0, values: { ...defaultValues, cellWidth: 1.25 } },
+        { id: "depth", label: "深度 1.8", x: 0, z: -8, rotationY: 0, values: { ...defaultValues, cellDepth: 1.8 } },
+        { id: "post", label: "立柱 0.16", x: 7, z: -8, rotationY: 0, values: { ...defaultValues, postWidth: 0.16 } },
+        { id: "height", label: "货架高 6.8", x: 14, z: -8, rotationY: 0, values: { ...defaultValues, cellHeight: 6.8 } },
+        { id: "columns", label: "4列", x: -14, z: 5, rotationY: 0, values: { ...defaultValues, columnCount: 4 } },
+        { id: "layers", label: "3层", x: -7, z: 5, rotationY: 0, values: { ...defaultValues, layerCount: 3 } },
+        { id: "doubleGap", label: "双深间隔 0.4", x: 0, z: 5, rotationY: 0, values: { ...defaultValues, doubleDeepEnabled: true, deepSlotGap: 0.4 } },
+        { id: "deepLift", label: "双深提升 0.35", x: 7, z: 5, rotationY: 0, values: { ...defaultValues, doubleDeepEnabled: true, deepSlotLift: 0.35 } },
+        { id: "rotation", label: "旋转组合", x: 14, z: 5, rotationY: Math.PI / 4, values: { ...defaultValues, layerCount: 2, columnCount: 3, cellWidth: 1.25, cellHeight: 5.2, supportLegHeight: 1.2, cellDepth: 1.6, doubleDeepEnabled: true, deepSlotGap: 0.3, deepSlotLift: 0.2 } },
       ];
 
       function syncModelScriptMetadata(target, values) {
@@ -173,7 +171,7 @@
         const size = maximum.subtract(minimum);
         return {
           meshCount: meshes.length,
-          generatedCount: meshes.filter((mesh) => mesh.metadata?.generatedByParametricRuntime).length,
+          generatedCount: scene.transformNodes.filter((node) => node.isDescendantOf?.(root) && node.metadata?.generatedByParametricRuntime).length,
           size: {
             x: Number(size.x.toFixed(3)),
             y: Number(size.y.toFixed(3)),
@@ -218,22 +216,34 @@
         runtime.updateParameterValues(testCase.values);
         await runtime.start();
         runtime.update();
-        return { label: testCase.label, ...getRootBounds(root) };
+        return { id: testCase.id, label: testCase.label, ...getRootBounds(root) };
       }
 
       try {
         const reports = [];
-        for (const testCase of cases) {
-          reports.push(await createShelfCase(testCase));
-        }
-        const summary = reports.map((item) => `${item.label}: mesh=${item.meshCount}, cloneMesh=${item.generatedCount}, size=${item.size.x}/${item.size.y}/${item.size.z}`).join("<br />");
-        status.innerHTML = `<span class="ok">完成</span><br />${summary}`;
+        for (const testCase of cases) reports.push(await createShelfCase(testCase));
+        const byId = Object.fromEntries(reports.map((item) => [item.id, item]));
+        const failures = reports.filter((item) => item.meshCount <= 0 || item.size.x <= 0 || item.size.y <= 0 || item.size.z <= 0).map((item) => `${item.label}: 空模型`);
+        const near = (value, expected, tolerance = 0.05) => Math.abs(value - expected) <= tolerance;
+        if (!near(byId.default.size.x, 0.801) || !near(byId.default.size.y, 4.525) || !near(byId.default.size.z, 1.183)) failures.push("默认尺寸异常");
+        if (byId.width.size.x <= byId.default.size.x + 0.35) failures.push("宽度参数未明显生效");
+        if (byId.depth.size.z <= byId.default.size.z + 0.5) failures.push("深度参数未明显生效");
+        if (!near(byId.post.size.y, byId.default.size.y) || !near(byId.post.size.z, byId.default.size.z, 0.12)) failures.push("立柱宽度污染整体高度或深度");
+        if (!near(byId.height.size.y, 6.8)) failures.push("货架高度参数异常");
+        if (byId.columns.size.x <= 2.4) failures.push("列数参数未生成连续多列");
+        if (!near(byId.layers.size.y, 11.767, 0.06)) failures.push("层数高度未按独立底腿语义计算");
+        if (byId.doubleGap.size.z <= 2.6) failures.push("双深间隔参数未生效");
+        if (byId.deepLift.size.y <= byId.default.size.y + 0.25) failures.push("深位提升参数未生效");
+        const summary = reports.map((item) => `${item.label}: node=${item.generatedCount}, mesh=${item.meshCount}, size=${item.size.x}/${item.size.y}/${item.size.z}`).join("<br />");
+        status.innerHTML = `<span class="${failures.length ? "error" : "ok"}">${failures.length ? "失败" : "通过"}</span><br />${summary}${failures.length ? `<br />${failures.join("<br />")}` : ""}`;
+        document.body.dataset.validationStatus = failures.length ? "fail" : "pass";
         engine.runRenderLoop(() => scene.render());
         window.__SHELF_REPORT__ = reports;
-        window.__SHELF_VISUAL_READY__ = true;
+        window.__SHELF_VISUAL_READY__ = failures.length === 0;
       } catch (error) {
         console.error(error);
         status.innerHTML = `<span class="error">失败</span>：${error instanceof Error ? error.message : String(error)}`;
+        document.body.dataset.validationStatus = "fail";
         window.__SHELF_VISUAL_READY__ = false;
       }
 

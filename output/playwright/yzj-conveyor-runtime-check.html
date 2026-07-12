@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>YZJ Conveyor/MQTT 参数化克隆联动验证</title>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #0b1116; color: #eef7fb; font-family: "Microsoft YaHei", Arial, sans-serif; }
+      #renderCanvas { width: 100%; height: 100%; display: block; }
+      #status { position: fixed; left: 14px; top: 14px; max-width: 980px; padding: 12px 14px; border: 1px solid rgba(142, 198, 225, 0.48); background: rgba(6, 12, 17, 0.9); font-size: 13px; line-height: 1.6; }
+      .ok { color: #83ecad; }
+      .error { color: #ff9696; }
+      .legend { display: inline-block; width: 10px; height: 10px; margin: 0 5px 0 11px; }
+    </style>
+  </head>
+  <body data-validation-status="loading">
+    <canvas id="renderCanvas"></canvas>
+    <div id="status">YZJ Conveyor/MQTT 运行态联动加载中...</div>
+    <script type="module">
+      import {
+        ArcRotateCamera,
+        Engine,
+        HemisphericLight,
+        Quaternion,
+        Scene,
+        TransformNode,
+        Vector3,
+      } from "@babylonjs/core";
+      import "@babylonjs/loaders/glTF/index.js";
+      import { DIRECTION_ARROW_GLOW_IMAGE_REFERENCE } from "/src/assets/imageAssets.ts";
+      import { createEmptySceneDocument, createModelEntity } from "/src/editor/model/SceneDocument.ts";
+      import { createDefaultTelemetryBinding } from "/src/editor/model/telemetryBinding.ts";
+      import { SceneRuntime } from "/src/runtime/babylon/SceneRuntime.ts";
+      import { deviceTelemetryStore } from "/src/runtime/mqtt/deviceTelemetry.ts";
+
+      const canvas = document.querySelector("#renderCanvas");
+      const status = document.querySelector("#status");
+      const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+      const scene = new Scene(engine);
+      scene.clearColor.set(0.045, 0.065, 0.082, 1);
+
+      const camera = new ArcRotateCamera("camera", Math.PI * 0.23, Math.PI * 0.21, 5.8, new Vector3(0, 0.55, 0), scene);
+      camera.attachControl(canvas, true);
+      camera.lowerRadiusLimit = 2;
+      camera.upperRadiusLimit = 14;
+
+      const light = new HemisphericLight("light", new Vector3(0.25, 1, 0.35), scene);
+      light.intensity = 1.05;
+
+
+      const metadata = await fetch("./yzj-assets/meta.json").then((response) => response.json());
+      const parameterValues = {
+        chainLength: 2.6,
+        platformLength: 1.022,
+        platformPosition: 0.2,
+        chainWidth: 1.6,
+        chainHeight: 0.803,
+        rollerWidth: 0.062,
+        rollerPosition: 0,
+        rollerDensity: 5,
+        infeedSide: "rear",
+        outfeedSide: "right",
+        showDirectionArrow: true,
+        directionArrowImage: DIRECTION_ARROW_GLOW_IMAGE_REFERENCE,
+        showFrontSupport: true,
+        showRearSupport: true,
+      };
+
+      const sceneDocument = createEmptySceneDocument("YZJ Conveyor Runtime Check");
+      const entity = createModelEntity(
+        "./yzj-assets/YZJ.glb",
+        "./yzj-assets/YZJ.glb",
+        "一体式顶升移载",
+        { lengthUnit: "centimeter", unitScaleToMeters: 0.01 },
+        { x: 0, y: 0, z: 0 },
+        metadata.modelParameters,
+        [{ path: "./yzj-assets/yzj.model.ts", sourceUrl: "./yzj-assets/yzj.model.txt", name: "yzj.model.ts" }],
+        metadata.parameterScripts ?? [],
+        metadata.animationScripts ?? [],
+      );
+      entity.components.transform.rotation.y = Math.PI / 4;
+      entity.components.modelAsset.assetCode = "YZJ01";
+      entity.components.modelAsset.parameterValues = parameterValues;
+      entity.components.telemetryBinding = { ...createDefaultTelemetryBinding("conveyor"), assetCode: "YZJ01" };
+      sceneDocument.entityIds.push(entity.id);
+      sceneDocument.entities[entity.id] = entity;
+
+      const logs = [];
+      const runtime = new SceneRuntime(scene, (message) => logs.push(message));
+      let liveTelemetryTimer = null;
+      runtime.sync(sceneDocument);
+
+      /** 等待 SceneRuntime 完成模型加载、GT.3 克隆和 Conveyor 运动配置解析。 */
+      async function waitForRollers(expectedCount, timeoutMs = 12000) {
+        const deadline = performance.now() + timeoutMs;
+        while (performance.now() < deadline) {
+          scene.render();
+          const root = scene.getTransformNodeByName(`${entity.id}_modelRoot`);
+          const rollers = root ? findRollerNodes(root) : [];
+          const modelEntry = runtime["models"]?.get(entity.id) ?? null;
+          const motionConfigs = modelEntry ? runtime["readConveyorMotionConfigs"](modelEntry) : [];
+          if (root && rollers.length === expectedCount && modelEntry?.stackerTelemetryReady && motionConfigs.length >= 2) {
+            return { root, rollers, modelEntry, motionConfigs };
+          }
+          await wait(40);
+        }
+        throw new Error(`等待 YZJ Conveyor 运行时就绪超时，期望 ${expectedCount} 根 GT.3 且至少 2 个 motion 配置`);
+      }
+
+      /** 查找原始 GT.3 与所有参数化克隆。 */
+      function findRollerNodes(root) {
+        return [root, ...root.getDescendants(false)].filter((node) => (
+          node instanceof TransformNode && (node.name === "GT.3" || node.metadata?.motionSourceNodeName === "GT.3" || node.metadata?.sourceNodeName === "GT.3")
+        ));
+      }
+
+      /** 读取节点局部旋转，统一 rotationQuaternion 与 Euler 两类 GLB 节点。 */
+      function readLocalRotation(node) {
+        return (node.rotationQuaternion?.clone() ?? Quaternion.FromEulerVector(node.rotation)).normalize();
+      }
+
+      /** 计算两个四元数之间的角距离。 */
+      function quaternionDistance(left, right) {
+        const dot = Math.min(1, Math.max(-1, Math.abs(Quaternion.Dot(left, right))));
+        return 2 * Math.acos(dot);
+      }
+
+      /** 采集节点在 Conveyor 运行前的局部姿态基线。 */
+      function captureBaselines(nodes) {
+        return new Map(nodes.map((node) => [node, { position: node.position.clone(), rotation: readLocalRotation(node) }]));
+      }
+
+      /** 在真实 SceneRuntime onBeforeRender 链路中推进指定时长。 */
+      function renderFor(durationMs) {
+        return new Promise((resolve) => {
+          const deadline = performance.now() + durationMs;
+          const renderFrame = () => {
+            scene.render();
+            if (performance.now() < deadline) return;
+            engine.stopRenderLoop(renderFrame);
+            resolve();
+          };
+          engine.runRenderLoop(renderFrame);
+        });
+      }
+
+      /** 写入一帧与真实 MQTT 解析结果相同的 Conveyor 标准快照，可显式模拟故障。 */
+      function publishTelemetry(sequence, movementX, movementY = movementX, options = {}) {
+        const faulted = options.faulted === true;
+        deviceTelemetryStore.upsert({
+          sourceId: "default",
+          topic: "dt/factory/logistics/conveyor/YZJ01/twindatadriven/joint",
+          deviceType: "conveyor",
+          assetCode: "YZJ01",
+          payloadDeviceCode: "YZJ01",
+          sourceTimestamp: Date.now(),
+          sequence,
+          receivedAt: Date.now(),
+          fields: {
+            movement_x: movementX,
+            movement_y: movementY,
+            rotation: movementX === 0 ? 0 : 180,
+            normal: !faulted,
+            errorCode: faulted ? 1 : 0,
+            ...(options.fields ?? {}),
+          },
+          currentLocationKey: null,
+          targetLocationKey: null,
+          hasTargetLocation: false,
+          faulted,
+          message: faulted ? "fault" : "",
+        });
+      }
+
+      /** 返回运行态顶升平台；保留模型原材质，避免诊断着色干扰发光箭头的视觉验收。 */
+      function findLiftPlatform(root) {
+        return [root, ...root.getDescendants(false)].find((node) => node.name === "Ban.4");
+      }
+
+      /** 根据当前模型包围盒调整相机视角。 */
+      function frameModel(root) {
+        const meshes = root.getChildMeshes(false).filter((mesh) => mesh.isEnabled() && mesh.metadata?.directionArrowVisual !== true);
+        let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+        let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+        for (const mesh of meshes) {
+          mesh.computeWorldMatrix(true);
+          const box = mesh.getBoundingInfo().boundingBox;
+          minimum = Vector3.Minimize(minimum, box.minimumWorld);
+          maximum = Vector3.Maximize(maximum, box.maximumWorld);
+        }
+        const center = minimum.add(maximum).scale(0.5);
+        camera.setTarget(center);
+        camera.radius = Math.max(4.2, maximum.subtract(minimum).length() * 1.45);
+      }
+
+      /** 等待指定毫秒数。 */
+      function wait(milliseconds) {
+        return new Promise((resolve) => setTimeout(resolve, milliseconds));
+      }
+
+      /** 把角度归一到 -PI..PI，用于比较四方向局部 yaw。 */
+      function normalizeAngle(value) {
+        return ((value + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+      }
+
+      /** 计算两个角度的最短差。 */
+      function angleDistance(left, right) {
+        return Math.abs(normalizeAngle(left - right));
+      }
+
+      /** 查找当前模型脚本生成的唯一方向箭头 Mesh。 */
+      function findDirectionArrow() {
+        return scene.meshes.find((mesh) => mesh.metadata?.directionArrowVisual === true) ?? null;
+      }
+
+      /** 读取方向箭头的可见性、材质、父级、局部 yaw 和世界高度。 */
+      function captureDirectionArrowState() {
+        const arrow = findDirectionArrow();
+        if (!arrow) return { exists: false, visible: false };
+        arrow.computeWorldMatrix(true);
+        const material = arrow.material;
+        const texture = material?.diffuseTexture ?? material?.emissiveTexture ?? null;
+        return {
+          exists: true,
+          visible: arrow.isVisible && arrow.isEnabled(),
+          visibility: arrow.visibility,
+          materialName: material?.name ?? null,
+          renderingGroupId: arrow.renderingGroupId,
+          alphaIndex: arrow.alphaIndex,
+          depthFunction: material?.depthFunction ?? null,
+          disableDepthWrite: material?.disableDepthWrite ?? null,
+          parent: arrow.parent?.name ?? null,
+          yaw: arrow.rotation.y,
+          alpha: material?.alpha ?? null,
+          scaleX: arrow.scaling.x,
+          worldX: arrow.getAbsolutePosition().x,
+          worldY: arrow.getAbsolutePosition().y,
+          worldZ: arrow.getAbsolutePosition().z,
+          textureReady: Boolean(texture?.isReady?.()),
+          metadataKeys: Object.keys(arrow.metadata ?? {}).sort(),
+          hasMotionSourceNodeName: arrow.metadata?.motionSourceNodeName !== undefined,
+        };
+      }
+
+      /** 在真实渲染循环中等待方向箭头达到指定状态。 */
+      async function waitForDirectionArrow(predicate, timeoutMs = 8000) {
+        const deadline = performance.now() + timeoutMs;
+        let state = captureDirectionArrowState();
+        while (performance.now() < deadline) {
+          scene.render();
+          state = captureDirectionArrowState();
+          if (predicate(state)) return state;
+          await wait(40);
+        }
+        return state;
+      }
+      /** 在超过半个呼吸周期的窗口内持续采样，避免两个时刻恰好落在相同相位而误判。 */
+      async function measureDirectionArrowBreathing(durationMs = 1100, sampleIntervalMs = 80) {
+        const deadline = performance.now() + durationMs;
+        const states = [];
+        while (performance.now() < deadline) {
+          scene.render();
+          const state = captureDirectionArrowState();
+          if (state.exists && state.visible) states.push(state);
+          await wait(sampleIntervalMs);
+        }
+        const alphaValues = states.map((state) => state.alpha).filter(Number.isFinite);
+        const scaleValues = states.map((state) => state.scaleX).filter(Number.isFinite);
+        const alphaRange = alphaValues.length > 1 ? Math.max(...alphaValues) - Math.min(...alphaValues) : 0;
+        const scaleRange = scaleValues.length > 1 ? Math.max(...scaleValues) - Math.min(...scaleValues) : 0;
+        return {
+          changed: alphaRange > 0.02 || scaleRange > 0.002,
+          alphaRange,
+          scaleRange,
+          sampleCount: states.length,
+          finalState: states.at(-1) ?? captureDirectionArrowState(),
+        };
+      }
+
+      try {
+        deviceTelemetryStore.clear();
+        const { root, rollers, modelEntry, motionConfigs } = await waitForRollers(5);
+        const editArrowBefore = await waitForDirectionArrow((state) => state.exists && state.visible && state.textureReady);
+        const platform = findLiftPlatform(root);
+        if (!platform) throw new Error("未找到 Ban.4 顶升平台");
+        frameModel(root);
+
+        const failures = [];
+        if (!editArrowBefore.exists || !editArrowBefore.visible) failures.push("编辑态方向箭头未显示");
+        if (!editArrowBefore.textureReady) failures.push("编辑态方向箭头贴图未就绪");
+        if (editArrowBefore.parent !== "Ban.4") failures.push(`方向箭头父级错误：${editArrowBefore.parent}`);
+        if (angleDistance(editArrowBefore.yaw, Math.PI) > 0.001) failures.push(`编辑态方向错误：${editArrowBefore.yaw}`);
+        if (JSON.stringify(editArrowBefore.metadataKeys) !== JSON.stringify(["directionArrowVisual", "generatedByParametricRuntime"])) failures.push("方向箭头 metadata 含额外字段");
+        if (editArrowBefore.hasMotionSourceNodeName) failures.push("方向箭头错误写入 motionSourceNodeName");
+        if (editArrowBefore.renderingGroupId !== 2 || editArrowBefore.alphaIndex !== Number.MAX_SAFE_INTEGER) failures.push("方向箭头未固定为最后绘制层级");
+
+        const breathingMeasurement = await measureDirectionArrowBreathing();
+        const editArrowAfter = breathingMeasurement.finalState;
+        const breathingChanged = breathingMeasurement.changed;
+        if (!breathingChanged) failures.push(`编辑态方向箭头未检测到呼吸变化：alphaRange=${breathingMeasurement.alphaRange.toFixed(4)}, scaleRange=${breathingMeasurement.scaleRange.toFixed(4)}`);
+
+        const controlledNodes = [platform, ...rollers];
+        const baselines = captureBaselines(controlledNodes);
+        platform.computeWorldMatrix(true);
+        const platformWorldYBaseline = platform.getAbsolutePosition().y;
+
+        runtime.beginTelemetryPreview();
+        await renderFor(80);
+        const runtimeNoDataState = captureDirectionArrowState();
+        if (runtimeNoDataState.visible) failures.push("运行态无数据时方向箭头未隐藏");
+
+        publishTelemetry(1, 1, 1);
+        await renderFor(720);
+        const forwardArrowState = captureDirectionArrowState();
+        if (!forwardArrowState.visible || angleDistance(forwardArrowState.yaw, Math.PI) > 0.001) failures.push("movement_x=1 未按 outfeedSide 显示");
+
+        const originalRoller = rollers.find((node) => node.name === "GT.3");
+        if (!originalRoller) throw new Error("未找到原始 GT.3");
+        const originalBaseline = baselines.get(originalRoller);
+        const originalLift = originalRoller.position.y - originalBaseline.position.y;
+        const originalRotation = quaternionDistance(originalBaseline.rotation, readLocalRotation(originalRoller));
+        const liftDiffs = controlledNodes.map((node) => Math.abs((node.position.y - baselines.get(node).position.y) - originalLift));
+        const rotationDiffs = rollers.map((node) => quaternionDistance(readLocalRotation(node), readLocalRotation(originalRoller)));
+        platform.computeWorldMatrix(true);
+        const platformWorldLift = platform.getAbsolutePosition().y - platformWorldYBaseline;
+        const arrowWorldLift = (forwardArrowState.worldY ?? editArrowBefore.worldY) - editArrowBefore.worldY;
+        const directionArrowFollowDifference = Math.abs(arrowWorldLift - platformWorldLift);
+
+        if (originalLift < 0.06) failures.push(`原始 GT.3 升降量过小：${originalLift.toFixed(4)}`);
+        if (originalRotation < 0.5) failures.push(`原始 GT.3 旋转量过小：${originalRotation.toFixed(4)}`);
+        if (Math.max(...liftDiffs) > 0.004) failures.push(`Ban.4/GT.3 克隆升降不同步：${Math.max(...liftDiffs).toFixed(5)}`);
+        if (Math.max(...rotationDiffs) > 0.004) failures.push(`GT.3 克隆旋转不同步：${Math.max(...rotationDiffs).toFixed(5)}`);
+        if (directionArrowFollowDifference > 0.003) failures.push(`方向箭头未跟随 Ban.4 顶升：${directionArrowFollowDifference.toFixed(5)}`);
+
+        publishTelemetry(2, 2, 1);
+        await renderFor(180);
+        const reverseArrowState = captureDirectionArrowState();
+        if (!reverseArrowState.visible || angleDistance(reverseArrowState.yaw, 0) > 0.001) failures.push("movement_x=2 未显示反向箭头");
+
+        publishTelemetry(3, 0, 0);
+        await renderFor(120);
+        const stoppedArrowState = captureDirectionArrowState();
+        if (stoppedArrowState.visible) failures.push("movement_x=0 时方向箭头未隐藏");
+
+        publishTelemetry(4, 1, 0, { faulted: true });
+        await renderFor(120);
+        const faultArrowState = captureDirectionArrowState();
+        if (faultArrowState.visible) failures.push("故障状态方向箭头未隐藏");
+
+        deviceTelemetryStore.clear();
+        await renderFor(120);
+        const clearedArrowState = captureDirectionArrowState();
+        if (clearedArrowState.visible) failures.push("清空遥测后方向箭头未隐藏");
+
+        runtime.endTelemetryPreview();
+        deviceTelemetryStore.clear();
+        scene.render();
+        await wait(40);
+        scene.render();
+        const restoredEditArrowState = captureDirectionArrowState();
+        if (!restoredEditArrowState.visible || angleDistance(restoredEditArrowState.yaw, Math.PI) > 0.001) failures.push("停止预览后未恢复编辑态方向箭头");
+
+        const restorePositionDiff = Math.max(...controlledNodes.map((node) => node.position.subtract(baselines.get(node).position).length()));
+        const restoreRotationDiff = Math.max(...controlledNodes.map((node) => quaternionDistance(readLocalRotation(node), baselines.get(node).rotation)));
+        if (restorePositionDiff > 0.0005) failures.push(`停止预览后位置未恢复：${restorePositionDiff.toFixed(6)}`);
+        if (restoreRotationDiff > 0.0005) failures.push(`停止预览后旋转未恢复：${restoreRotationDiff.toFixed(6)}`);
+
+        // 再进入稳定正向运行态供截图观察，箭头、Ban.4 与 5 根 GT.3 同步抬升。
+        runtime.beginTelemetryPreview();
+        publishTelemetry(5, 1, 1);
+        await renderFor(680);
+        const screenshotArrowState = captureDirectionArrowState();
+        if (!screenshotArrowState.visible || angleDistance(screenshotArrowState.yaw, Math.PI) > 0.001) failures.push("截图运行态方向箭头不可见");
+
+        const arrowStates = {
+          editBefore: editArrowBefore,
+          editAfter: editArrowAfter,
+          runtimeNoData: runtimeNoDataState,
+          forward: forwardArrowState,
+          reverse: reverseArrowState,
+          stopped: stoppedArrowState,
+          faulted: faultArrowState,
+          cleared: clearedArrowState,
+          restoredEdit: restoredEditArrowState,
+          screenshot: screenshotArrowState,
+        };
+        const report = {
+          rollerCount: rollers.length,
+          motionConfigCount: motionConfigs.length,
+          telemetryReady: modelEntry.stackerTelemetryReady,
+          conveyorCapable: modelEntry.conveyorCapable,
+          originalLift,
+          originalRotation,
+          maximumLiftDifference: Math.max(...liftDiffs),
+          maximumRotationDifference: Math.max(...rotationDiffs),
+          directionArrowFollowDifference,
+          breathingChanged,
+          breathingAlphaRange: breathingMeasurement.alphaRange,
+          breathingScaleRange: breathingMeasurement.scaleRange,
+          breathingSampleCount: breathingMeasurement.sampleCount,
+          restorePositionDifference: restorePositionDiff,
+          restoreRotationDifference: restoreRotationDiff,
+          arrowStates,
+          parameterValues,
+          failures,
+          logs,
+        };
+        status.innerHTML = `
+          <span class="${failures.length ? "error" : "ok"}">${failures.length ? "失败" : "通过"}</span>
+          Ban.4 + 原始 GT.3 + 4 个参数化克隆
+          <br />真实 SceneRuntime/Conveyor 快照：motion=${motionConfigs.length}，ready=${modelEntry.stackerTelemetryReady}，辊筒=${rollers.length}，升降=${originalLift.toFixed(3)}m，旋转=${(originalRotation * 180 / Math.PI).toFixed(1)}°
+          <br />方向箭头：编辑态呼吸=${breathingChanged}（alphaRange=${breathingMeasurement.alphaRange.toFixed(3)}，scaleRange=${breathingMeasurement.scaleRange.toFixed(3)}），正向 yaw=${Number(forwardArrowState.yaw).toFixed(3)}，反向 yaw=${Number(reverseArrowState.yaw).toFixed(3)}，停止/故障/无数据均隐藏，跟随差=${directionArrowFollowDifference.toFixed(5)}m
+          <br />克隆最大升降差=${Math.max(...liftDiffs).toFixed(5)}m，最大旋转差=${(Math.max(...rotationDiffs) * 180 / Math.PI).toFixed(4)}°
+          <br />停止预览恢复差：位置=${restorePositionDiff.toFixed(6)}m，旋转=${(restoreRotationDiff * 180 / Math.PI).toFixed(5)}°，编辑态箭头恢复=${restoredEditArrowState.visible}
+          ${failures.length ? `<br />${failures.join("<br />")}` : ""}
+        `;
+        document.body.dataset.validationStatus = failures.length ? "fail" : "pass";
+        window.__YZJ_CONVEYOR_RUNTIME_REPORT__ = report;
+        window.__YZJ_CONVEYOR_RUNTIME_READY__ = failures.length === 0;
+        window.__YZJ_CONVEYOR_RUNTIME_LIVE_STATE__ = () => captureDirectionArrowState();
+        let liveSequence = 5;
+        liveTelemetryTimer = window.setInterval(() => publishTelemetry(++liveSequence, 1, 1), 200);
+        engine.runRenderLoop(() => scene.render());
+      } catch (error) {
+        if (liveTelemetryTimer !== null) window.clearInterval(liveTelemetryTimer);
+        console.error(error);
+        status.innerHTML = `<span class="error">失败</span>：${error instanceof Error ? error.message : String(error)}`;
+        document.body.dataset.validationStatus = "fail";
+        window.__YZJ_CONVEYOR_RUNTIME_READY__ = false;
+        window.__YZJ_CONVEYOR_RUNTIME_REPORT__ = { error: error instanceof Error ? error.message : String(error) };
+      }
+
+      window.addEventListener("resize", () => engine.resize());
+      window.addEventListener("beforeunload", () => {
+        if (liveTelemetryTimer !== null) window.clearInterval(liveTelemetryTimer);
+        runtime.dispose();
+        deviceTelemetryStore.clear();
+      });
+    </script>
+  </body>
+</html>

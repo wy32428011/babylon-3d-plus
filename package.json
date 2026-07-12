@@ -13,6 +13,7 @@
     "wait:renderer": "node scripts/wait-for-vite-renderer.mjs",
     "build": "tsc -b && vite build && npm run build:electron",
     "build:electron": "tsc -p tsconfig.node.json",
+    "build:yzj:visual": "node scripts/build-yzj-direction-arrow-visual.mjs",
     "typecheck": "tsc -b",
     "preview": "vite preview --host 127.0.0.1",
     "test:telemetry": "node scripts/telemetry-test.mjs"

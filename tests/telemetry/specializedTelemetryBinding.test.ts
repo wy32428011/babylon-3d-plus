@@ -119,3 +119,51 @@ function createSnapshot(overrides: Partial<DeviceTelemetrySnapshot> = {}): Devic
     ...overrides,
   };
 }
+
+test('SceneRuntime 按 Locator near/far 决定一段或两段货叉，并在目标缺失时禁止伸出', () => {
+  const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
+  assert.match(source, /resolveStackerStorageForkReach\(targetLocator\.storageDepth, reach\.stageOne, reach\.stageTwo\)/);
+  assert.match(source, /snapshot\.hasTargetLocation[\s\S]*resolveTargetLocatorForkReach\(targetLocator, reach\) \?\? 0/);
+  assert.match(source, /targetStorageDepth: targetLocator\?\.storageDepth \?\? null/);
+  assert.match(source, /distanceX !== null && targetTravelOffset === null/);
+  assert.match(source, /distanceY !== null && targetLiftOffset === null/);
+});
+
+test('Stacker 库位演示脚本不发送货叉距离，由 to_x to_y to_z 和 Locator 参数决定段数', () => {
+  const publisher = readFileSync('scripts/publish-stacker-full-demo.mjs', 'utf8');
+  const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
+  const sequence = JSON.parse(readFileSync('examples/mqtt/stacker-full-demo-sequence.json', 'utf8')) as {
+    locations: Array<{ assetId: string; storageDepth: string }>;
+  };
+  assert.doesNotMatch(publisher, /point\(assetCode, 'front_distance_z'/);
+  assert.doesNotMatch(publisher, /point\(assetCode, 'back_distance_z'/);
+  assert.doesNotMatch(publisher, /point\(assetCode, 'distance_x'/);
+  assert.doesNotMatch(publisher, /point\(assetCode, 'distance_y'/);
+  assert.match(publisher, /point\(assetCode, 'to_x'/);
+  assert.equal(packageJson.scripts['demo:stacker:mqtt'], 'node scripts/publish-stacker-full-demo.mjs');
+  assert.equal(packageJson.scripts['demo:stacker:mqtt:legacy'], 'node scripts/simulate-stacker-mqtt.mjs');
+  assert.deepEqual(sequence.locations.map((location) => [location.assetId, location.storageDepth]), [
+    ['1-1-1', 'near'],
+    ['1-2-1', 'far'],
+    ['2-1-1', 'near'],
+    ['2-2-1', 'far'],
+  ]);
+});
+
+test('Locator 库位资产编号重复时从目标索引移除并输出冲突日志', () => {
+  const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
+  assert.match(source, /this\.locatorTargets\.delete\(assetId\)/);
+  assert.match(source, /库位资产编号冲突，已停止目标绑定/);
+});
+
+test('SceneRuntime 在任何 Stacker 遥测运动前捕获未运动的货叉世界锚点', () => {
+  const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
+  assert.match(
+    source,
+    /private captureReadyTelemetryPreviewBaselines[\s\S]*resolveSpecializedTelemetryDeviceType\(model\) === 'stacker'[\s\S]*getStackerTargetReferencePosition\(model\)/,
+  );
+  assert.match(
+    source,
+    /captureReadyTelemetryPreviewBaselines\(\);[\s\S]*applyStackerTelemetryFrame\(\);/,
+  );
+});

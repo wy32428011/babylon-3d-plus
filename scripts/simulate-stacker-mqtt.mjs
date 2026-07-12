@@ -48,7 +48,7 @@ function printHelp() {
   console.log(`Stacker MQTT 模拟器
 
 用法：
-  npm run demo:stacker:mqtt
+  npm run demo:stacker:mqtt:legacy
   node scripts/simulate-stacker-mqtt.mjs --broker ws://127.0.0.1:8083/mqtt --asset DDJ2
   node scripts/simulate-stacker-mqtt.mjs --once --stdout
 

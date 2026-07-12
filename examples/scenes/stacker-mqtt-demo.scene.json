@@ -9,8 +9,9 @@
     "entityIds": [
       "entity_stacker_ddj2",
       "entity_locator_1_1_1",
+      "entity_locator_1_2_1",
       "entity_locator_2_1_1",
-      "entity_locator_3_2_1",
+      "entity_locator_2_2_1",
       "entity_floor_reference",
       "entity_demo_light"
     ],
@@ -441,7 +442,7 @@
       },
       "entity_locator_1_1_1": {
         "id": "entity_locator_1_1_1",
-        "name": "目标位 1-1-1",
+        "name": "近排库位 1-1-1",
         "visible": true,
         "locked": false,
         "parentId": null,
@@ -449,7 +450,7 @@
         "components": {
           "transform": {
             "position": {
-              "x": 0,
+              "x": 0.9,
               "y": 1.2,
               "z": 4
             },
@@ -466,6 +467,41 @@
           },
           "locator": {
             "assetId": "1-1-1",
+            "storageDepth": "near",
+            "length": 1.1,
+            "width": 1.1,
+            "height": 1.1
+          }
+        }
+      },
+      "entity_locator_1_2_1": {
+        "id": "entity_locator_1_2_1",
+        "name": "远排库位 1-2-1",
+        "visible": true,
+        "locked": false,
+        "parentId": null,
+        "childrenIds": [],
+        "components": {
+          "transform": {
+            "position": {
+              "x": 1.9,
+              "y": 1.2,
+              "z": 4
+            },
+            "rotation": {
+              "x": 0,
+              "y": 0,
+              "z": 0
+            },
+            "scale": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            }
+          },
+          "locator": {
+            "assetId": "1-2-1",
+            "storageDepth": "far",
             "length": 1.1,
             "width": 1.1,
             "height": 1.1
@@ -474,7 +510,7 @@
       },
       "entity_locator_2_1_1": {
         "id": "entity_locator_2_1_1",
-        "name": "目标位 2-1-1",
+        "name": "近排库位 2-1-1",
         "visible": true,
         "locked": false,
         "parentId": null,
@@ -482,9 +518,9 @@
         "components": {
           "transform": {
             "position": {
-              "x": 0,
-              "y": 1.2,
-              "z": 7
+              "x": 0.9,
+              "y": 2.2,
+              "z": 8
             },
             "rotation": {
               "x": 0,
@@ -499,15 +535,16 @@
           },
           "locator": {
             "assetId": "2-1-1",
+            "storageDepth": "near",
             "length": 1.1,
             "width": 1.1,
             "height": 1.1
           }
         }
       },
-      "entity_locator_3_2_1": {
-        "id": "entity_locator_3_2_1",
-        "name": "目标位 3-2-1",
+      "entity_locator_2_2_1": {
+        "id": "entity_locator_2_2_1",
+        "name": "远排库位 2-2-1",
         "visible": true,
         "locked": false,
         "parentId": null,
@@ -515,9 +552,9 @@
         "components": {
           "transform": {
             "position": {
-              "x": 0,
+              "x": 1.9,
               "y": 2.2,
-              "z": 10
+              "z": 8
             },
             "rotation": {
               "x": 0,
@@ -531,7 +568,8 @@
             }
           },
           "locator": {
-            "assetId": "3-2-1",
+            "assetId": "2-2-1",
+            "storageDepth": "far",
             "length": 1.1,
             "width": 1.1,
             "height": 1.1
@@ -607,7 +645,7 @@
       "ip": "127.0.0.1",
       "address": "ws://127.0.0.1:8083/mqtt",
       "topic": "dt/factory/logistics/stacker/+/twindatadriven/joint",
-      "simulatorEnabled": true,
+      "simulatorEnabled": false,
       "simulatorAssetCode": "DDJ2",
       "simulatorScenario": "cycle",
       "simulatorIntervalMs": 500

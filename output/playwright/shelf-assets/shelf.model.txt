@@ -18,7 +18,7 @@ export class ParametricModelParamsComponent {
 	public deviceName: string = "多穿货架";
 
 	@visibleAsString("参数说明")
-	public description: string = "Shelf.glb 专用参数化：层数沿 Y 复制，宽度仅拉伸 node1/node3/node25/node35 对应横梁和层板并保留端部搭接量，四根立柱和连接件跟随这些节点的宽深新端点移动，侧面三角斜撑随深度和层高同步适配。";
+	public description: string = "Shelf.glb 专用参数化：底部支架腿高度独立于货架高度；底部深向支撑和下方黄色横梁只保留一次，每增加一层只新增一组上方黄色框架和一组两侧三角支架；宽度、深度、列数和双深仍按模型局部轴适配。";
 
 	@visibleAsNumber("层数", { step: 1 })
 	public layerCount: number = 1;
@@ -29,8 +29,11 @@ export class ParametricModelParamsComponent {
 	@visibleAsNumber("货格宽度", { step: 0.1 })
 	public cellWidth: number = 0.801;
 
-	@visibleAsNumber("货格高度", { step: 0.1 })
+	@visibleAsNumber("货架高度", { step: 0.1 })
 	public cellHeight: number = 4.525;
+
+	@visibleAsNumber("底部支架腿高度", { step: 0.05 })
+	public supportLegHeight: number = 0.904;
 
 	@visibleAsNumber("货格深度", { step: 0.1 })
 	public cellDepth: number = 1.183;
@@ -94,11 +97,12 @@ const DEFAULT_VALUES: ValueMap = {
 	modelKey: "shelf",
 	deviceType: "多穿库",
 	deviceName: "多穿货架",
-	description: "Shelf.glb 专用参数化：层数沿 Y 复制，宽度仅拉伸 node1/node3/node25/node35 对应横梁和层板并保留端部搭接量，四根立柱和连接件跟随这些节点的宽深新端点移动，侧面三角斜撑随深度和层高同步适配。",
+	description: "Shelf.glb 专用参数化：底部支架腿高度独立于货架高度；底部深向支撑和下方黄色横梁只保留一次，每增加一层只新增一组上方黄色框架和一组两侧三角支架；宽度、深度、列数和双深仍按模型局部轴适配。",
 	layerCount: 1,
 	columnCount: 1,
 	cellWidth: 0.801,
 	cellHeight: 4.525,
+	supportLegHeight: 0.904,
 	cellDepth: 1.183,
 	postWidth: 0.08,
 	doubleDeepEnabled: false,
@@ -113,6 +117,10 @@ const ENDPOINT_ANCHOR_NODE_NAMES = WIDTH_STRETCH_NODE_NAMES;
 const SIDE_TRIANGLE_BRACE_NODE_NAMES = ["Box008", "Box007", "node15", "node21"];
 const DEPTH_BEAM_NODE_NAMES = ["Box020", "Box005", "Box006", "Box022", "node13", "node17", "node19", "node23"];
 const DEPTH_STRETCH_NODE_NAMES = DEPTH_BEAM_NODE_NAMES;
+const BASE_DEPTH_SUPPORT_NODE_NAMES = ["Box005", "Box006", "node17", "node19"];
+const LOWER_CROSSBEAM_NODE_NAMES = ["Box032", "Box031", "node25", "node35"];
+const UPPER_LAYER_FRAME_NODE_NAMES = ["Box023", "Box021", "Box020", "Box022", "node1", "node3", "node13", "node23"];
+const REPEATABLE_LAYER_NODE_NAMES = [...UPPER_LAYER_FRAME_NODE_NAMES, ...SIDE_TRIANGLE_BRACE_NODE_NAMES];
 const SHELF_PART_NODE_NAMES = [
 	...POST_NODE_NAMES,
 	...FOOT_NODE_NAMES,
@@ -125,7 +133,6 @@ const MIN_DIMENSION = 0.001;
 const MAX_LAYER_COUNT = 20;
 const MAX_COLUMN_COUNT = 100;
 const MAX_GENERATED_NODES = 5000;
-const MAX_TRIANGLE_BRACE_MODULES_PER_LAYER = 20;
 
 /** 根据 Inspector 参数对 Shelf.glb 执行部件级静态参数化调整。 */
 export class ParametricModelRuntimeComponent {
@@ -218,6 +225,7 @@ export class ParametricModelRuntimeComponent {
 			columnCount: this.readNumber({ columnCount: this.readRuntimeValue("columnCount", mergedValues.columnCount) }, "columnCount", Number(DEFAULT_VALUES.columnCount)),
 			cellWidth: this.readNumber({ cellWidth: this.readRuntimeValue("cellWidth", mergedValues.cellWidth) }, "cellWidth", Number(DEFAULT_VALUES.cellWidth)),
 			cellHeight: this.readNumber({ cellHeight: this.readRuntimeValue("cellHeight", mergedValues.cellHeight) }, "cellHeight", Number(DEFAULT_VALUES.cellHeight)),
+			supportLegHeight: this.readNumber({ supportLegHeight: this.readRuntimeValue("supportLegHeight", mergedValues.supportLegHeight) }, "supportLegHeight", Number(DEFAULT_VALUES.supportLegHeight)),
 			cellDepth: this.readNumber({ cellDepth: this.readRuntimeValue("cellDepth", mergedValues.cellDepth) }, "cellDepth", Number(DEFAULT_VALUES.cellDepth)),
 			postWidth: this.readNumber({ postWidth: this.readRuntimeValue("postWidth", mergedValues.postWidth) }, "postWidth", Number(DEFAULT_VALUES.postWidth)),
 			doubleDeepEnabled: this.readBoolean({ doubleDeepEnabled: this.readRuntimeValue("doubleDeepEnabled", mergedValues.doubleDeepEnabled) }, "doubleDeepEnabled", Boolean(DEFAULT_VALUES.doubleDeepEnabled)),
@@ -289,7 +297,7 @@ export class ParametricModelRuntimeComponent {
 		}, {});
 	}
 
-	/** 读取 Shelf 部件并按宽、高、深、层数和列数生成目标形态。 */
+	/** 读取 Shelf 部件并按宽、高、深、底腿、层数和列数生成目标形态。 */
 	private applyShelfParameters(values: ValueMap): void {
 		const parts = this.getShelfParts();
 		const bounds = this.getNodesWorldBounds(parts.map((part) => part.node));
@@ -298,38 +306,55 @@ export class ParametricModelRuntimeComponent {
 		}
 
 		const targetWidth = this.readPositiveNumber(values, "cellWidth", bounds.size.x);
-		const targetLayerHeight = this.readPositiveNumber(values, "cellHeight", bounds.size.y);
+		const targetHeight = this.readPositiveNumber(values, "cellHeight", bounds.size.y);
+		const targetSupportLegHeight = this.readPositiveNumber(values, "supportLegHeight", Number(DEFAULT_VALUES.supportLegHeight));
 		const targetDepth = this.readPositiveNumber(values, "cellDepth", bounds.size.z);
 		const postWidth = this.readPositiveNumber(values, "postWidth", Number(DEFAULT_VALUES.postWidth));
 		const layers = this.clamp(Math.round(this.readNumber(values, "layerCount", 1)), 1, MAX_LAYER_COUNT);
 		const columns = this.clamp(Math.round(this.readNumber(values, "columnCount", 1)), 1, MAX_COLUMN_COUNT);
-		const heightRatio = this.createSafeRatio(targetLayerHeight, bounds.size.y);
-		const triangleBraceModuleCount = this.getTriangleBraceModuleCount(targetLayerHeight, bounds.size.y);
-		const triangleBraceModuleHeight = targetLayerHeight / triangleBraceModuleCount;
-		const triangleBraceHeightRatio = this.createSafeRatio(triangleBraceModuleHeight, bounds.size.y);
+		const sourceSupportLegHeight = this.getSourceSupportLegHeight(parts, bounds.minimum.y);
+		const supportLegDelta = targetSupportLegHeight - sourceSupportLegHeight;
+		const supportLegHeightRatio = this.createSafeRatio(targetSupportLegHeight, sourceSupportLegHeight);
+		const targetLayerSpan = Math.max(MIN_DIMENSION, targetHeight - Number(DEFAULT_VALUES.supportLegHeight));
+		const targetSingleLayerHeight = targetSupportLegHeight + targetLayerSpan;
 
-		this.applySingleLayerDimensions(parts, bounds, targetWidth, targetDepth, heightRatio, triangleBraceHeightRatio);
+		this.applySingleLayerDimensions(parts, bounds, targetWidth, targetDepth, supportLegDelta, supportLegHeightRatio, targetSingleLayerHeight);
 		this.applyPostCrossSection(parts, postWidth);
-		this.applyPostTotalHeight(parts, bounds, targetLayerHeight * layers);
+		this.applyPostTotalHeight(parts, bounds, targetSupportLegHeight + targetLayerSpan * layers);
 		const columnLayout = this.createColumnLayout(parts, targetWidth);
-		this.cloneShelfGrid(parts, values, layers, columns, targetLayerHeight, columnLayout, targetDepth, triangleBraceModuleCount, triangleBraceModuleHeight);
+		this.cloneShelfGrid(parts, values, layers, columns, targetLayerSpan, columnLayout, targetDepth);
 	}
 
-	/** 对原始一层 Shelf 应用宽度、高度和深度的基础变形。 */
-	private applySingleLayerDimensions(parts: ShelfPart[], bounds: { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 }, targetWidth: number, targetDepth: number, heightRatio: number, triangleBraceHeightRatio: number): void {
+	/** 对原始第一层应用宽深尺寸、底腿高度和上方框架高度，贴地支撑保持原位。 */
+	private applySingleLayerDimensions(parts: ShelfPart[], bounds: { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 }, targetWidth: number, targetDepth: number, supportLegDelta: number, supportLegHeightRatio: number, targetSingleLayerHeight: number): void {
 		this.applyShelfWidthLayout(parts, bounds, targetWidth);
 		this.applyShelfDepthLayout(parts, bounds, targetDepth);
 
-		parts.filter((part) => this.isLayerPart(part)).forEach((part) => {
+		parts.filter((part) => this.isLowerCrossbeamPart(part)).forEach((part) => {
+			this.moveNodeWorldAxisBy(part.node, "y", supportLegDelta);
+		});
+		parts.filter((part) => this.isSideTriangleBracePart(part)).forEach((part) => {
 			const nodeBounds = this.getNodesWorldAxisBounds([part.node], "y");
-			if (nodeBounds && part.node.position) {
-				if (this.isSideTriangleBracePart(part)) {
-					this.fitNodeWorldAxisToBounds(part.node, "y", "z", this.createHeightScaledBounds(nodeBounds, bounds.minimum.y, triangleBraceHeightRatio));
-				} else {
-					this.moveNodeWorldAxisBy(part.node, "y", bounds.minimum.y + (nodeBounds.center - bounds.minimum.y) * heightRatio - nodeBounds.center);
-				}
+			if (nodeBounds) {
+				this.fitNodeWorldAxisToBounds(part.node, "y", "z", this.createHeightScaledBounds(nodeBounds, bounds.minimum.y, supportLegHeightRatio));
 			}
 		});
+		const upperFrameDelta = targetSingleLayerHeight - bounds.size.y;
+		parts.filter((part) => this.isUpperLayerFramePart(part)).forEach((part) => {
+			this.moveNodeWorldAxisBy(part.node, "y", upperFrameDelta);
+		});
+	}
+
+	/** 读取原始下方黄色横梁中心相对模型底部的高度，作为底腿参数的稳定基准。 */
+	private getSourceSupportLegHeight(parts: ShelfPart[], sourceMinimum: number): number {
+		const lowerCrossbeamBounds = this.getNodesWorldAxisBounds(
+			parts.filter((part) => this.isLowerCrossbeamPart(part)).map((part) => part.node),
+			"y"
+		);
+		if (!lowerCrossbeamBounds) {
+			return Number(DEFAULT_VALUES.supportLegHeight);
+		}
+		return Math.max(MIN_DIMENSION, lowerCrossbeamBounds.center - sourceMinimum);
 	}
 
 	/** 以四个跨宽节点的新左右端点作为锚点，让连接件随端点移动而不是按整体比例漂移。 */
@@ -442,7 +467,7 @@ export class ParametricModelRuntimeComponent {
 		return { minimum: center - size / 2, maximum: center + size / 2, center, size };
 	}
 
-	/** 侧面三角斜撑需要端点随层高变化，不能只移动中心，否则多层后斜撑会落在错误高度。 */
+	/** 侧面三角斜撑以模型底部为锚点随底腿高度缩放，保证下端贴近底部支撑、上端跟随黄色横梁。 */
 	private createHeightScaledBounds(nodeBounds: AxisBounds, sourceMinimum: number, heightRatio: number): AxisBounds {
 		const minimum = sourceMinimum + (nodeBounds.minimum - sourceMinimum) * heightRatio;
 		const maximum = sourceMinimum + (nodeBounds.maximum - sourceMinimum) * heightRatio;
@@ -500,8 +525,8 @@ export class ParametricModelRuntimeComponent {
 		return minimums.length > 0 ? Math.min(...minimums) : null;
 	}
 
-	/** 按层、列、深位的一次性组合偏移复制 Shelf，避免把运行态克隆再次当作语义源。 */
-	private cloneShelfGrid(parts: ShelfPart[], values: ValueMap, layers: number, columns: number, spacingY: number, columnLayout: ShelfColumnLayout, targetDepth: number, triangleBraceModuleCount: number, triangleBraceModuleHeight: number): any[] {
+	/** 按层、列、深位组合复制 Shelf；第一层保留完整基座，后续层只复制上方框架和一组三角支架。 */
+	private cloneShelfGrid(parts: ShelfPart[], values: ValueMap, layers: number, columns: number, spacingY: number, columnLayout: ShelfColumnLayout, targetDepth: number): any[] {
 		const clones: any[] = [];
 		const depthCount = this.readBoolean(values, "doubleDeepEnabled", false) ? 2 : 1;
 		const deepOffsetZ = targetDepth + this.readNumber(values, "deepSlotGap", 0);
@@ -516,43 +541,18 @@ export class ParametricModelRuntimeComponent {
 						if (this.generatedNodes.length >= MAX_GENERATED_NODES || !this.shouldClonePartForGridCell(part, column, layer, columnLayout)) {
 							return;
 						}
-						if (this.isSideTriangleBracePart(part)) {
-							cloneIndex = this.cloneTriangleBraceModules(part, offset, depth, column, layer, triangleBraceModuleCount, triangleBraceModuleHeight, cloneIndex, clones);
-							return;
-						}
 						if (depth === 0 && column === 0 && layer === 0) {
 							return;
 						}
-						cloneIndex = this.clonePartWithIndex(part.node, offset, `shelf_grid_d${depth}_c${column}_l${layer}`, cloneIndex, clones);
+						const reason = this.isSideTriangleBracePart(part)
+							? `shelf_brace_d${depth}_c${column}_l${layer}`
+							: `shelf_grid_d${depth}_c${column}_l${layer}`;
+						cloneIndex = this.clonePartWithIndex(part.node, offset, reason, cloneIndex, clones);
 					});
 				}
 			}
 		}
 		return clones;
-	}
-
-	/** 计算每层三角支架模块数量，层高成倍增加时同步增加支架数量而不是只拉长单个支架。 */
-	private getTriangleBraceModuleCount(targetLayerHeight: number, sourceLayerHeight: number): number {
-		const ratio = sourceLayerHeight > MIN_DIMENSION ? targetLayerHeight / sourceLayerHeight : 1;
-		// 支架模块高度不应超过原始层高；只要目标层高超过基准层高，就向上取整增加一组支架。
-		const moduleCount = ratio <= 1 + MIN_DIMENSION ? 1 : Math.ceil(ratio - MIN_DIMENSION);
-		return this.clamp(moduleCount, 1, MAX_TRIANGLE_BRACE_MODULES_PER_LAYER);
-	}
-
-	/** 在单个货格内复制侧面三角支架模块；原始第一个模块保留，其余模块按层内高度间距补齐。 */
-	private cloneTriangleBraceModules(part: ShelfPart, baseOffset: Vector3, depth: number, column: number, layer: number, moduleCount: number, moduleHeight: number, cloneIndex: number, clones: any[]): number {
-		let nextIndex = cloneIndex;
-		for (let module = 0; module < moduleCount; module += 1) {
-			if (depth === 0 && column === 0 && layer === 0 && module === 0) {
-				continue;
-			}
-			if (this.generatedNodes.length >= MAX_GENERATED_NODES) {
-				return nextIndex;
-			}
-			const moduleOffset = baseOffset.add(this.createWorldAxisVector("y", module * moduleHeight));
-			nextIndex = this.clonePartWithIndex(part.node, moduleOffset, `shelf_brace_d${depth}_c${column}_l${layer}_m${module}`, nextIndex, clones);
-		}
-		return nextIndex;
 	}
 
 	/** 克隆单个部件并维护全局生成序号。 */
@@ -574,9 +574,9 @@ export class ParametricModelRuntimeComponent {
 		return offset;
 	}
 
-	/** 判断某个原始部件是否应该出现在指定层列深位中，新增层不复制立柱/底脚，新增列复用起始侧支撑。 */
+	/** 判断部件是否进入指定层列深位：后续层只允许上方框架和三角支架，新增列继续复用起始侧支撑。 */
 	private shouldClonePartForGridCell(part: ShelfPart, column: number, layer: number, columnLayout: ShelfColumnLayout): boolean {
-		if (layer > 0 && !this.isLayerPart(part)) {
+		if (layer > 0 && !this.isRepeatableLayerPart(part)) {
 			return false;
 		}
 		return column <= 0 || !this.isColumnStartSupportPart(part, columnLayout);
@@ -629,9 +629,24 @@ export class ParametricModelRuntimeComponent {
 		return this.isPostPart(part) || this.isFootPart(part);
 	}
 
-	/** 判断节点是否为需要参与层复制的横梁、深度梁、层板或斜撑。 */
-	private isLayerPart(part: ShelfPart): boolean {
-		return !this.isPostPart(part) && !this.isFootPart(part);
+	/** 判断节点是否为贴地深向支撑；该组只属于第一层基座，不随层数复制。 */
+	private isBaseDepthSupportPart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, BASE_DEPTH_SUPPORT_NODE_NAMES);
+	}
+
+	/** 判断节点是否为下方黄色横梁；底腿高度只移动该组，不随层数重复。 */
+	private isLowerCrossbeamPart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, LOWER_CROSSBEAM_NODE_NAMES);
+	}
+
+	/** 判断节点是否为每层顶部的黄色横梁和两侧深向支架。 */
+	private isUpperLayerFramePart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, UPPER_LAYER_FRAME_NODE_NAMES);
+	}
+
+	/** 判断节点是否为后续层允许重复的上方黄色框架或两侧三角支架。 */
+	private isRepeatableLayerPart(part: ShelfPart): boolean {
+		return !this.isBaseDepthSupportPart(part) && this.matchesAnyBaseName(part.baseName, REPEATABLE_LAYER_NODE_NAMES);
 	}
 
 	/** 判断节点是否为宽度变化时唯一允许沿 X 拉伸的横梁或层板。 */
@@ -644,7 +659,7 @@ export class ParametricModelRuntimeComponent {
 		return this.matchesAnyBaseName(part.baseName, DEPTH_STRETCH_NODE_NAMES);
 	}
 
-	/** 判断节点是否为侧面三角斜撑，斜撑同时参与深度拉伸和层高端点适配。 */
+	/** 判断节点是否为侧面三角斜撑，斜撑参与深度拉伸、底腿高度适配和逐层复制。 */
 	private isSideTriangleBracePart(part: ShelfPart): boolean {
 		return this.matchesAnyBaseName(part.baseName, SIDE_TRIANGLE_BRACE_NODE_NAMES);
 	}

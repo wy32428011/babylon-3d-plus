@@ -1,6 +1,7 @@
 import type { ModelParameterConfig } from '../model/modelParameters';
 import { normalizeModelParameterConfig } from '../model/modelParameters';
 import type { ModelScriptAsset } from '../model/components';
+import { findBuiltInImageAssetByReference, type BuiltInImageAsset } from '../../assets/imageAssets';
 import { normalizeModelDataDrivenConfig, type ModelDataDrivenConfig } from '../model/telemetryBinding';
 
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
@@ -38,6 +39,10 @@ export type ProjectModelAssetEntry = AssetEntry & {
 export const MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-model-asset';
 export const ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-environment-model-asset';
 export const BUILT_IN_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-built-in-asset';
+export const IMAGE_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-image-asset';
+
+/** 图片库拖拽载荷，只允许传递已登记内置图片的稳定引用和缩略图 URL。 */
+export type ImageAssetDragPayload = Pick<BuiltInImageAsset, 'id' | 'name' | 'reference' | 'sourceUrl'>;
 
 export type BuiltInAssetDragPayload =
   | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
@@ -100,6 +105,16 @@ export function encodeBuiltInAssetDragPayload(payload: BuiltInAssetDragPayload):
   return JSON.stringify(payload);
 }
 
+/** 编码图片资产拖拽载荷，保持 DataTransfer 中只有必要的内置图片字段。 */
+export function encodeImageAssetDragPayload(asset: ImageAssetDragPayload): string {
+  return JSON.stringify({
+    id: asset.id,
+    name: asset.name,
+    reference: asset.reference,
+    sourceUrl: asset.sourceUrl,
+  });
+}
+
 /** 解码项目模型拖拽载荷；缺少 libraryKind 的旧载荷会被拒绝，防止静默跨库。 */
 export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAssetEntry | null {
   try {
@@ -153,6 +168,31 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (dataDrivenConfig) asset.dataDrivenConfig = dataDrivenConfig;
 
     return asset;
+  } catch {
+    return null;
+  }
+}
+
+/** 解码图片资产拖拽载荷，并回查内置登记表，拒绝伪造引用或构建 URL。 */
+export function decodeImageAssetDragPayload(rawPayload: string): ImageAssetDragPayload | null {
+  try {
+    const payload: unknown = JSON.parse(rawPayload);
+    if (!isRecord(payload)) return null;
+    if (typeof payload.id !== 'string' || !payload.id.trim()) return null;
+    if (typeof payload.name !== 'string' || !payload.name.trim()) return null;
+    if (typeof payload.reference !== 'string' || !payload.reference.trim()) return null;
+    if (typeof payload.sourceUrl !== 'string' || !payload.sourceUrl.trim()) return null;
+
+    const registeredAsset = findBuiltInImageAssetByReference(payload.reference.trim());
+    if (!registeredAsset) return null;
+    if (payload.id !== registeredAsset.id || payload.name !== registeredAsset.name || payload.sourceUrl !== registeredAsset.sourceUrl) return null;
+
+    return {
+      id: registeredAsset.id,
+      name: registeredAsset.name,
+      reference: registeredAsset.reference,
+      sourceUrl: registeredAsset.sourceUrl,
+    };
   } catch {
     return null;
   }

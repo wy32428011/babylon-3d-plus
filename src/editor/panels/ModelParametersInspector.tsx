@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
+import { resolveBuiltInImageSourceUrl } from '../../assets/imageAssets';
+import { decodeImageAssetDragPayload, IMAGE_ASSET_DRAG_MIME_TYPE } from '../assets/AssetDatabase';
 import type { ModelAssetComponent } from '../model/components';
 import type {
   ModelParameterDefinition,
@@ -46,6 +48,11 @@ function getVectorAxisValue(value: ModelParameterValue | undefined, axis: keyof 
 
 function getContinuousDraftKey(parameterKey: string, axis?: keyof Vector3Data): string {
   return axis ? `${parameterKey}.${axis}` : parameterKey;
+}
+
+/** 解析 texture 参数当前值的可预览缩略图，仅内置图片有稳定编辑器缩略图。 */
+function getTexturePreviewUrl(value: ModelParameterValue | undefined): string | null {
+  return typeof value === 'string' ? resolveBuiltInImageSourceUrl(value) : null;
 }
 
 export function ModelParametersInspector({ modelAsset, disabled = false, compact = false }: ModelParametersInspectorProps) {
@@ -236,34 +243,73 @@ export function ModelParametersInspector({ modelAsset, disabled = false, compact
     );
   }
 
+  /** 接收图片库拖拽载荷并提交 texture 参数，禁用态或非法载荷不会写入历史。 */
+  function handleTextureDrop(event: DragEvent<HTMLDivElement>, definition: ModelParameterDefinition & { type: 'texture' }): void {
+    if (disabled) return;
+
+    const rawPayload = event.dataTransfer.getData(IMAGE_ASSET_DRAG_MIME_TYPE);
+    const payload = rawPayload ? decodeImageAssetDragPayload(rawPayload) : null;
+    if (!payload) return;
+
+    event.preventDefault();
+    updateSelectedModelParameterValue(definition.key, payload.reference);
+  }
+
+  /** 渲染 texture 参数的缩略图拖放区，同时保留原有 select 或文本输入编辑能力。 */
   function renderTextureParameter(definition: ModelParameterDefinition & { type: 'texture' }) {
-    if (definition.options?.length) {
-      return (
-        <label className="inspector-row" key={definition.key}>
-          <span>{definition.label}</span>
-          <select
-            disabled={disabled}
-            value={formatValue(values[definition.key])}
-            onChange={(event) => updateSelectedModelParameterValue(definition.key, event.target.value)}
-          >
-            {definition.options.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
-      );
-    }
+    const currentValue = values[definition.key];
+    const previewUrl = getTexturePreviewUrl(currentValue);
+    const displayValue = formatValue(currentValue);
+    const dropZoneClassName = disabled
+      ? 'texture-drop-zone texture-drop-zone-disabled'
+      : 'texture-drop-zone';
+
+    const control = definition.options?.length ? (
+      <select
+        disabled={disabled}
+        value={displayValue}
+        onChange={(event) => updateSelectedModelParameterValue(definition.key, event.target.value)}
+      >
+        {definition.options.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    ) : (
+      <input
+        type="text"
+        disabled={disabled}
+        value={displayValue}
+        onChange={(event) => updateSelectedModelParameterValue(definition.key, event.target.value)}
+      />
+    );
 
     return (
-      <label className="inspector-row" key={definition.key}>
-        <span>{definition.label}</span>
-        <input
-          type="text"
-          disabled={disabled}
-          value={formatValue(values[definition.key])}
-          onChange={(event) => updateSelectedModelParameterValue(definition.key, event.target.value)}
-        />
-      </label>
+      <div className="texture-parameter-row" key={definition.key}>
+        <span className="texture-parameter-label">{definition.label}</span>
+        <div
+          aria-disabled={disabled}
+          className={dropZoneClassName}
+          onDragOver={(event) => {
+            if (disabled || !event.dataTransfer.types.includes(IMAGE_ASSET_DRAG_MIME_TYPE)) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+          }}
+          onDrop={(event) => handleTextureDrop(event, definition)}
+          title={disabled ? '当前状态不可修改贴图' : '可从图片库拖入内置图片'}
+        >
+          <span className="texture-preview-box" aria-hidden="true">
+            {previewUrl ? (
+              <img alt="" src={previewUrl} />
+            ) : (
+              <span className="texture-preview-placeholder">Texture</span>
+            )}
+          </span>
+          <span className="texture-control-stack">
+            {control}
+            <span className="texture-reference-hint">拖入图片库内置图片，或填写模型包相对图片路径</span>
+          </span>
+        </div>
+      </div>
     );
   }
 

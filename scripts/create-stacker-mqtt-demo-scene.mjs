@@ -315,7 +315,7 @@ function readLengthUnitInfo(metadata) {
 }
 
 /** 创建一个虚拟定位线框实体，用于 to_x/to_y/to_z 查找目标位。 */
-function createLocatorEntity(id, name, assetId, position, size = { length: 1.1, width: 1.1, height: 1.1 }) {
+function createLocatorEntity(id, name, assetId, storageDepth, position, size = { length: 1.1, width: 1.1, height: 1.1 }) {
   return {
     id,
     name,
@@ -327,6 +327,7 @@ function createLocatorEntity(id, name, assetId, position, size = { length: 1.1, 
       transform: transform(position),
       locator: {
         assetId,
+        storageDepth,
         length: size.length,
         width: size.width,
         height: size.height,
@@ -335,15 +336,16 @@ function createLocatorEntity(id, name, assetId, position, size = { length: 1.1, 
   };
 }
 
-/** 创建完整演示场景，包含真实 Stacker 模型、目标位和本地模拟配置。 */
+/** 创建近排/远排库位演示场景，包含真实 Stacker、库位参数和外部 MQTT 配置。 */
 function createSceneDocument() {
   const metadata = readStackerMetadata();
   const unitInfo = readLengthUnitInfo(metadata);
   const entityIds = [
     'entity_stacker_ddj2',
     'entity_locator_1_1_1',
+    'entity_locator_1_2_1',
     'entity_locator_2_1_1',
-    'entity_locator_3_2_1',
+    'entity_locator_2_2_1',
     'entity_floor_reference',
     'entity_demo_light',
   ];
@@ -381,9 +383,10 @@ function createSceneDocument() {
             },
           },
         },
-        entity_locator_1_1_1: createLocatorEntity('entity_locator_1_1_1', '目标位 1-1-1', '1-1-1', vector3(0, 1.2, 4)),
-        entity_locator_2_1_1: createLocatorEntity('entity_locator_2_1_1', '目标位 2-1-1', '2-1-1', vector3(0, 1.2, 7)),
-        entity_locator_3_2_1: createLocatorEntity('entity_locator_3_2_1', '目标位 3-2-1', '3-2-1', vector3(0, 2.2, 10)),
+        entity_locator_1_1_1: createLocatorEntity('entity_locator_1_1_1', '近排库位 1-1-1', '1-1-1', 'near', vector3(0.9, 1.2, 4)),
+        entity_locator_1_2_1: createLocatorEntity('entity_locator_1_2_1', '远排库位 1-2-1', '1-2-1', 'far', vector3(1.9, 1.2, 4)),
+        entity_locator_2_1_1: createLocatorEntity('entity_locator_2_1_1', '近排库位 2-1-1', '2-1-1', 'near', vector3(0.9, 2.2, 8)),
+        entity_locator_2_2_1: createLocatorEntity('entity_locator_2_2_1', '远排库位 2-2-1', '2-2-1', 'far', vector3(1.9, 2.2, 8)),
         entity_floor_reference: {
           id: 'entity_floor_reference',
           name: '运动参考地面',
@@ -421,7 +424,7 @@ function createSceneDocument() {
         ip: '127.0.0.1',
         address: MQTT_ADDRESS,
         topic: MQTT_TOPIC,
-        simulatorEnabled: true,
+        simulatorEnabled: false,
         simulatorAssetCode: STACKER_ASSET_CODE,
         simulatorScenario: 'cycle',
         simulatorIntervalMs: STACKER_SIMULATOR_INTERVAL_MS,
@@ -446,7 +449,7 @@ function main() {
   console.log(`模型来源：${STACKER_MODEL_FILE_PATH}`);
   console.log(`模型脚本：${STACKER_SCRIPT_FILE_PATH}`);
   console.log(`模型单位：${modelAsset.lengthUnit} / ${modelAsset.unitScaleToMeters}`);
-  console.log(`场景默认启用本地模拟：${STACKER_ASSET_CODE} / cycle / ${STACKER_SIMULATOR_INTERVAL_MS}ms`);
+  console.log('场景默认关闭本地模拟，请运行 MQTT 库位任务脚本驱动近排/远排动作。');
 }
 
 main();

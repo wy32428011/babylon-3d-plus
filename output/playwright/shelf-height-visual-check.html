@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Shelf 高度与三角支架视觉验证</title>
+    <title>Shelf 底腿高度与层结构视觉校验</title>
     <style>
       html,
       body {
@@ -11,7 +11,7 @@
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #111417;
+        background: #0e1217;
         color: #edf3f7;
         font-family: "Microsoft YaHei", Arial, sans-serif;
       }
@@ -24,28 +24,29 @@
 
       #status {
         position: fixed;
-        left: 16px;
-        top: 16px;
-        max-width: 980px;
+        left: 14px;
+        top: 14px;
+        max-width: 1080px;
         padding: 12px 14px;
-        border: 1px solid rgba(166, 190, 205, 0.38);
-        background: rgba(11, 15, 19, 0.82);
+        border: 1px solid #536374;
+        background: rgba(11, 15, 19, 0.91);
         font-size: 13px;
         line-height: 1.55;
       }
 
-      .ok {
-        color: #88e6ae;
-      }
-
-      .error {
-        color: #ff9b9b;
+      .ok { color: #82efad; }
+      .error { color: #ff9696; }
+      .swatch {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin: 0 4px 0 10px;
       }
     </style>
   </head>
-  <body>
+  <body data-validation-status="loading">
     <canvas id="renderCanvas"></canvas>
-    <div id="status">Shelf 高度与三角支架视觉验证加载中...</div>
+    <div id="status">Shelf 底腿高度与层结构视觉校验加载中...</div>
     <script type="module">
       import {
         ArcRotateCamera,
@@ -66,27 +67,40 @@
       const status = document.querySelector("#status");
       const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
       const scene = new Scene(engine);
-      scene.clearColor.set(0.067, 0.079, 0.091, 1);
+      scene.clearColor.set(0.055, 0.07, 0.085, 1);
 
-      const camera = new ArcRotateCamera("camera", Math.PI * 0.18, Math.PI * 0.28, 54, new Vector3(0, 7, 0), scene);
+      const camera = new ArcRotateCamera("camera", Math.PI * 0.19, Math.PI * 0.3, 31, new Vector3(0, 4.8, 1.8), scene);
       camera.attachControl(canvas, true);
       camera.lowerRadiusLimit = 8;
-      camera.upperRadiusLimit = 90;
+      camera.upperRadiusLimit = 80;
 
-      const light = new HemisphericLight("light", new Vector3(0.2, 1, 0.4), scene);
-      light.intensity = 0.95;
+      const light = new HemisphericLight("light", new Vector3(0.2, 1, 0.35), scene);
+      light.intensity = 1.05;
 
       const groundMaterial = new StandardMaterial("groundMaterial", scene);
-      groundMaterial.diffuseColor = new Color3(0.13, 0.16, 0.17);
+      groundMaterial.diffuseColor = new Color3(0.11, 0.14, 0.16);
       groundMaterial.specularColor = Color3.Black();
-      const ground = MeshBuilder.CreateGround("ground", { width: 58, height: 34 }, scene);
+      const ground = MeshBuilder.CreateGround("ground", { width: 42, height: 30 }, scene);
       ground.material = groundMaterial;
       ground.position.y = -0.02;
 
-      const braceMaterial = new StandardMaterial("braceHighlightMaterial", scene);
-      braceMaterial.diffuseColor = new Color3(1, 0.22, 0.06);
-      braceMaterial.emissiveColor = new Color3(0.28, 0.04, 0.02);
-      braceMaterial.specularColor = Color3.Black();
+      /** 创建用于区分 Shelf 结构分组的诊断材质。 */
+      function createDiagnosticMaterial(name, color) {
+        const material = new StandardMaterial(name, scene);
+        material.diffuseColor = color;
+        material.emissiveColor = color.scale(0.22);
+        material.specularColor = Color3.Black();
+        return material;
+      }
+
+      const semanticGroups = {
+        post: { names: ["Box004", "Box001", "Box002", "Box003"], material: createDiagnosticMaterial("post", new Color3(0.08, 0.35, 1)) },
+        foot: { names: ["Jiao001", "Jiao002", "Jiao003", "Jiao004"], material: createDiagnosticMaterial("foot", new Color3(0.92, 0.92, 0.92)) },
+        baseDepth: { names: ["Box005", "Box006"], material: createDiagnosticMaterial("baseDepth", new Color3(0, 0.8, 0.82)) },
+        lower: { names: ["Box032", "Box031"], material: createDiagnosticMaterial("lower", new Color3(1, 0.85, 0)) },
+        brace: { names: ["Box008", "Box007"], material: createDiagnosticMaterial("brace", new Color3(1, 0.05, 0.72)) },
+        upper: { names: ["Box023", "Box021", "Box020", "Box022"], material: createDiagnosticMaterial("upper", new Color3(1, 0.38, 0)) },
+      };
 
       const metadata = await fetch("./shelf-assets/meta.json").then((response) => response.json());
       const defaultValues = {
@@ -94,32 +108,30 @@
         columnCount: 1,
         cellWidth: 0.801,
         cellHeight: 4.525,
+        supportLegHeight: 0.904,
         cellDepth: 1.183,
         postWidth: 0.08,
-        aisleWidth: 1.2,
-        aisleHeight: 1,
         doubleDeepEnabled: false,
         deepSlotGap: 0.2,
         deepSlotLift: 0,
-        shelfStyle: "beam",
       };
 
-      const braceNames = ["Box008", "Box007", "node15", "node21"];
       const cases = [
-        { label: "默认高 4.525", x: -18, z: -5.4, rotationY: 0, values: { ...defaultValues } },
-        { label: "单层高 5.5", x: -9, z: -5.4, rotationY: 0, values: { ...defaultValues, cellHeight: 5.5 } },
-        { label: "单层高 6.8", x: 0, z: -5.4, rotationY: 0, values: { ...defaultValues, cellHeight: 6.8 } },
-        { label: "单层高 9.05", x: 9, z: -5.4, rotationY: 0, values: { ...defaultValues, cellHeight: 9.05 } },
-        { label: "单层高 13.575", x: 18, z: -5.4, rotationY: 0, values: { ...defaultValues, cellHeight: 13.575 } },
-        { label: "2层高 6.8 双深", x: -13, z: 8, rotationY: 0, values: { ...defaultValues, layerCount: 2, columnCount: 2, cellHeight: 6.8, doubleDeepEnabled: true } },
-        { label: "旋转高 6.8", x: 8, z: 8, rotationY: Math.PI / 4, values: { ...defaultValues, layerCount: 2, columnCount: 3, cellHeight: 6.8 } },
+        { label: "默认底腿 0.904 / 1层", x: -14, z: -5, values: { ...defaultValues } },
+        { label: "低底腿 0.45 / 1层", x: -7, z: -5, values: { ...defaultValues, supportLegHeight: 0.45 } },
+        { label: "高底腿 1.40 / 1层", x: 0, z: -5, values: { ...defaultValues, supportLegHeight: 1.4 } },
+        { label: "默认底腿 / 2层", x: 8, z: -5, values: { ...defaultValues, layerCount: 2 } },
+        { label: "高底腿 1.40 / 2层", x: -8, z: 8, values: { ...defaultValues, layerCount: 2, supportLegHeight: 1.4 } },
+        { label: "默认底腿 / 3层", x: 2, z: 8, values: { ...defaultValues, layerCount: 3 } },
       ];
 
-      function matchesBraceName(node) {
+      /** 判断节点名或运行态来源名是否匹配指定 Shelf 语义节点。 */
+      function matchesSemanticName(node, names) {
         const rawName = String(node?.metadata?.sourceNodeName ?? node?.name ?? "");
-        return braceNames.some((name) => new RegExp(`^${name}(?:\\.|_|$)`, "i").test(rawName));
+        return names.some((name) => new RegExp(`^${name}(?:\.|_|$)`, "i").test(rawName));
       }
 
+      /** 把当前参数值同步到参数脚本 metadata，模拟编辑器保存后的模型实例。 */
       function syncModelScriptMetadata(target, values) {
         const scripts = (metadata.parameterScripts ?? []).map((script) => {
           const clonedScript = structuredClone(script);
@@ -135,6 +147,7 @@
         target.metadata = { ...(target.metadata ?? {}), scripts };
       }
 
+      /** 将 GLB 顶层节点统一挂载到本次案例的内容根节点。 */
       function parentTopLevelModelNodes(container, contentRoot) {
         const allImportedNodes = new Set([...container.meshes, ...container.transformNodes]);
         for (const node of allImportedNodes) {
@@ -144,11 +157,10 @@
         }
       }
 
+      /** 把模型底部中心归一到案例根节点原点，保证高度断言以地面为零点。 */
       function normalizeModelContentOrigin(root) {
         root.computeWorldMatrix(true);
         const childMeshes = root.getChildMeshes(false);
-        if (childMeshes.length === 0) return;
-
         let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
         let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
         for (const mesh of childMeshes) {
@@ -167,25 +179,16 @@
         }
       }
 
-      function highlightAndCountBraces(root) {
-        const braceRoots = new Set();
-        const candidates = [...scene.transformNodes, ...scene.meshes]
-          .filter((node) => node === root || node.isDescendantOf?.(root));
-        for (const node of candidates) {
-          if (!matchesBraceName(node)) continue;
-          braceRoots.add(node);
-          if (node.material !== undefined) node.material = braceMaterial;
-          if (typeof node.getChildMeshes === "function") {
-            node.getChildMeshes(false).forEach((mesh) => {
-              mesh.material = braceMaterial;
-            });
-          }
-        }
-        return braceRoots.size;
+      /** 收集指定案例内匹配某一语义分组的 TransformNode。 */
+      function getSemanticRoots(root, names) {
+        return scene.transformNodes.filter((node) => node.isDescendantOf?.(root) && matchesSemanticName(node, names));
       }
 
-      function getRootBounds(root) {
-        const meshes = root.getChildMeshes(false).filter((mesh) => mesh.isEnabled());
+      /** 计算一组语义节点对应可见 mesh 的世界包围盒。 */
+      function getNodesBounds(nodes) {
+        const meshes = [...new Set(nodes.flatMap((node) => node.getChildMeshes?.(false) ?? []))].filter((mesh) => mesh.isEnabled());
+        if (meshes.length === 0) return null;
+
         let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
         let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
         for (const mesh of meshes) {
@@ -195,25 +198,37 @@
           minimum = Vector3.Minimize(minimum, box.minimumWorld);
           maximum = Vector3.Maximize(maximum, box.maximumWorld);
         }
-        const size = maximum.subtract(minimum);
         return {
-          meshCount: meshes.length,
-          size: {
-            x: Number(size.x.toFixed(3)),
-            y: Number(size.y.toFixed(3)),
-            z: Number(size.z.toFixed(3)),
-          },
+          minimum,
+          maximum,
+          center: minimum.add(maximum).scale(0.5),
+          size: maximum.subtract(minimum),
         };
       }
 
+      /** 为案例中的各结构分组应用诊断颜色，便于截图识别层复制边界。 */
+      function paintSemanticGroups(root) {
+        for (const group of Object.values(semanticGroups)) {
+          for (const node of getSemanticRoots(root, group.names)) {
+            node.getChildMeshes?.(false).forEach((mesh) => {
+              mesh.material = group.material;
+            });
+          }
+        }
+      }
+
+      /** 将视觉报告数值收敛到毫米级显示。 */
+      function roundMetric(value) {
+        return Number(value.toFixed(3));
+      }
+
+      /** 创建单个 Shelf 视觉案例，执行参数脚本并返回结构数量和尺寸断言结果。 */
       async function createShelfCase(testCase) {
         const root = new TransformNode(`${testCase.label}_root`, scene);
-        root.position.x = testCase.x;
-        root.position.z = testCase.z ?? 0;
-        root.rotation.y = testCase.rotationY ?? 0;
+        root.position.set(testCase.x, 0, testCase.z);
         const contentRoot = new TransformNode(`${testCase.label}_contentRoot`, scene);
         contentRoot.parent = root;
-        contentRoot.scaling = new Vector3(0.001, 0.001, 0.001);
+        contentRoot.scaling.setAll(0.001);
 
         const container = await SceneLoader.LoadAssetContainerAsync("./shelf-assets/", "Shelf.glb", scene);
         container.addAllToScene();
@@ -242,7 +257,56 @@
         runtime.updateParameterValues(testCase.values);
         await runtime.start();
         runtime.update();
-        return { label: testCase.label, braceCount: highlightAndCountBraces(root), ...getRootBounds(root) };
+        paintSemanticGroups(root);
+
+        const counts = {};
+        const boundsByGroup = {};
+        for (const [key, group] of Object.entries(semanticGroups)) {
+          const semanticRoots = getSemanticRoots(root, group.names);
+          counts[key] = semanticRoots.length;
+          boundsByGroup[key] = getNodesBounds(semanticRoots);
+        }
+
+        const fullBounds = getNodesBounds([root]);
+        const layers = testCase.values.layerCount;
+        const expectedHeight = testCase.values.supportLegHeight
+          + (testCase.values.cellHeight - defaultValues.supportLegHeight) * layers;
+        const expectedCounts = {
+          post: 4,
+          foot: 4,
+          baseDepth: 2,
+          lower: 2,
+          upper: 4 * layers,
+          brace: 2 * layers,
+        };
+        const errors = [];
+
+        for (const [key, expected] of Object.entries(expectedCounts)) {
+          if (counts[key] !== expected) {
+            errors.push(`${key}=${counts[key]}!=${expected}`);
+          }
+        }
+        if (!fullBounds || Math.abs(fullBounds.size.y - expectedHeight) > 0.035) {
+          errors.push(`height=${roundMetric(fullBounds?.size.y ?? 0)}!=${roundMetric(expectedHeight)}`);
+        }
+
+        const lowerCenter = boundsByGroup.lower?.center.y ?? Number.NaN;
+        if (!Number.isFinite(lowerCenter) || Math.abs(lowerCenter - testCase.values.supportLegHeight) > 0.025) {
+          errors.push(`leg=${roundMetric(lowerCenter)}!=${testCase.values.supportLegHeight}`);
+        }
+
+        return {
+          label: testCase.label,
+          counts,
+          size: {
+            x: roundMetric(fullBounds.size.x),
+            y: roundMetric(fullBounds.size.y),
+            z: roundMetric(fullBounds.size.z),
+          },
+          lowerCenter: roundMetric(lowerCenter),
+          expectedHeight: roundMetric(expectedHeight),
+          errors,
+        };
       }
 
       try {
@@ -250,16 +314,28 @@
         for (const testCase of cases) {
           reports.push(await createShelfCase(testCase));
         }
-        const summary = reports
-          .map((item) => `${item.label}: brace=${item.braceCount}, mesh=${item.meshCount}, size=${item.size.x}/${item.size.y}/${item.size.z}`)
-          .join("<br />");
-        status.innerHTML = `<span class="ok">完成</span><br />${summary}`;
-        engine.runRenderLoop(() => scene.render());
+
+        const failures = reports.flatMap((item) => item.errors.map((error) => `${item.label}: ${error}`));
+        const lines = reports.map((item) => (
+          `${item.label}: lowerY=${item.lowerCenter}, upper=${item.counts.upper}, brace=${item.counts.brace}, `
+          + `base=${item.counts.lower}/${item.counts.baseDepth}, size=${item.size.x}/${item.size.y}/${item.size.z}`
+        ));
+        status.innerHTML = `
+          <span class="${failures.length ? "error" : "ok"}">${failures.length ? "失败" : "通过"}</span>
+          <span class="swatch" style="background:#00d5d8"></span>贴地支撑
+          <span class="swatch" style="background:#ffe000"></span>下横梁
+          <span class="swatch" style="background:#ff3bd5"></span>三角支架
+          <span class="swatch" style="background:#ff6100"></span>上方框架
+          <br />${lines.join("<br />")}${failures.length ? `<br />${failures.join("<br />")}` : ""}
+        `;
+        document.body.dataset.validationStatus = failures.length ? "fail" : "pass";
         window.__SHELF_HEIGHT_REPORT__ = reports;
-        window.__SHELF_HEIGHT_READY__ = true;
+        window.__SHELF_HEIGHT_READY__ = failures.length === 0;
+        engine.runRenderLoop(() => scene.render());
       } catch (error) {
         console.error(error);
         status.innerHTML = `<span class="error">失败</span>：${error instanceof Error ? error.message : String(error)}`;
+        document.body.dataset.validationStatus = "fail";
         window.__SHELF_HEIGHT_READY__ = false;
       }
 

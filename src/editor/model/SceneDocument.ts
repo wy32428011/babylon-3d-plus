@@ -428,6 +428,7 @@ export function createLocatorEntity(position: Vector3Data = vector3()): Entity {
       },
       locator: {
         assetId,
+        storageDepth: 'near',
         length: 1,
         width: 1,
         height: 1,

@@ -36,7 +36,7 @@
           "key": "description",
           "label": "参数说明",
           "type": "string",
-          "defaultValue": "Shelf.glb 专用参数化：层数沿 Y 复制，宽度仅拉伸 node1/node3/node25/node35 对应横梁和层板并保留端部搭接量，四根立柱和连接件跟随这些节点的宽深新端点移动，侧面三角斜撑随深度和层高同步适配。",
+          "defaultValue": "Shelf.glb 专用参数化：底部支架腿高度独立于货架高度；底部深向支撑和下方黄色横梁只保留一次，每增加一层只新增一组上方黄色框架和一组两侧三角支架；宽度、深度、列数和双深仍按模型局部轴适配。",
           "configuration": {
             "type": "string"
           }
@@ -79,7 +79,7 @@
         },
         {
           "key": "cellHeight",
-          "label": "货格高度",
+          "label": "货架高度",
           "type": "number",
           "defaultValue": 4.525,
           "configuration": {
@@ -87,6 +87,18 @@
             "min": 0.1,
             "max": 100,
             "step": 0.1
+          }
+        },
+        {
+          "key": "supportLegHeight",
+          "label": "底部支架腿高度",
+          "type": "number",
+          "defaultValue": 0.904,
+          "configuration": {
+            "type": "number",
+            "min": 0.4,
+            "max": 5,
+            "step": 0.05
           }
         },
         {
@@ -174,7 +186,7 @@
         },
         "description": {
           "type": "string",
-          "value": "Shelf.glb 专用参数化：层数沿 Y 复制，宽度仅拉伸 node1/node3/node25/node35 对应横梁和层板并保留端部搭接量，四根立柱和连接件跟随这些节点的宽深新端点移动，侧面三角斜撑随深度和层高同步适配。",
+          "value": "Shelf.glb 专用参数化：底部支架腿高度独立于货架高度；底部深向支撑和下方黄色横梁只保留一次，每增加一层只新增一组上方黄色框架和一组两侧三角支架；宽度、深度、列数和双深仍按模型局部轴适配。",
           "label": "参数说明",
           "configuration": {
             "type": "string"
@@ -216,12 +228,23 @@
         "cellHeight": {
           "type": "number",
           "value": 4.525,
-          "label": "货格高度",
+          "label": "货架高度",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
             "step": 0.1
+          }
+        },
+        "supportLegHeight": {
+          "type": "number",
+          "value": 0.904,
+          "label": "底部支架腿高度",
+          "configuration": {
+            "type": "number",
+            "min": 0.4,
+            "max": 5,
+            "step": 0.05
           }
         },
         "cellDepth": {
@@ -321,12 +344,21 @@
       },
       {
         "key": "cellHeight",
-        "label": "货格高度",
+        "label": "货架高度",
         "type": "number",
         "defaultValue": 4.525,
         "min": 0.1,
         "max": 100,
         "step": 0.1
+      },
+      {
+        "key": "supportLegHeight",
+        "label": "底部支架腿高度",
+        "type": "number",
+        "defaultValue": 0.904,
+        "min": 0.4,
+        "max": 5,
+        "step": 0.05
       },
       {
         "key": "cellDepth",

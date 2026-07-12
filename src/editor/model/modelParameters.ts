@@ -1,4 +1,5 @@
 import type { Vector3Data } from './math';
+import { isAllowedTextureReference } from './textureReferences';
 
 export type ModelParameterType = 'number' | 'color' | 'boolean' | 'enum' | 'vector3' | 'texture';
 
@@ -131,8 +132,6 @@ export type ModelParameterConfig = {
 
 const MODEL_PARAMETER_SCHEMA = 'babylon-editor.model-parameters';
 const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
-const SAFE_TEXTURE_EXTENSION_PATTERN = /\.(png|jpe?g|webp)$/i;
-const FORBIDDEN_TEXTURE_PREFIX_PATTERN = /^(?:[a-z]+:|\/|\\)/i;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
@@ -161,14 +160,9 @@ function clampNumber(value: number, min: number | undefined, max: number | undef
   return nextValue;
 }
 
+/** 判断纹理参数是否为允许的内置图片引用或模型包相对图片路径。 */
 function isSafeTexturePath(value: string, allowedExtensions?: string[]): boolean {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.includes('..') || trimmed.includes('\\') || FORBIDDEN_TEXTURE_PREFIX_PATTERN.test(trimmed)) return false;
-
-  const extensions = allowedExtensions?.length ? allowedExtensions : ['.png', '.jpg', '.jpeg', '.webp'];
-  if (!extensions.some((extension) => trimmed.toLowerCase().endsWith(extension.toLowerCase()))) return false;
-
-  return SAFE_TEXTURE_EXTENSION_PATTERN.test(trimmed);
+  return isAllowedTextureReference(value, allowedExtensions);
 }
 
 export function sanitizeModelParameterValue(

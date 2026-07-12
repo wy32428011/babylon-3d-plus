@@ -3,62 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>YZJ 左端固定长度验证</title>
+    <link rel="icon" href="data:," />
+    <title>YZJ 左侧固定、右侧单向伸长与顶升不漂移验证</title>
     <style>
-      html,
-      body {
-        margin: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: #0e1114;
-        color: #eef4f8;
-        font-family: "Microsoft YaHei", Arial, sans-serif;
-      }
-
-      #renderCanvas {
-        width: 100%;
-        height: 100%;
-        display: block;
-      }
-
-      #status {
-        position: fixed;
-        left: 16px;
-        top: 16px;
-        max-width: 860px;
-        padding: 12px 14px;
-        border: 1px solid rgba(90, 219, 228, 0.5);
-        background: rgba(8, 14, 18, 0.82);
-        font-size: 13px;
-        line-height: 1.6;
-      }
-
-      .ok {
-        color: #8ee5b0;
-      }
-
-      .error {
-        color: #ff9c9c;
-      }
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #0e1114; color: #eef4f8; font-family: "Microsoft YaHei", Arial, sans-serif; }
+      #renderCanvas { width: 100%; height: 100%; display: block; }
+      #status { position: fixed; left: 16px; top: 16px; max-width: 1080px; padding: 12px 14px; border: 1px solid rgba(90, 219, 228, 0.5); background: rgba(8, 14, 18, 0.85); font-size: 13px; line-height: 1.6; }
+      .ok { color: #8ee5b0; }
+      .error { color: #ff9c9c; }
     </style>
   </head>
-  <body>
+  <body data-validation-status="loading">
     <canvas id="renderCanvas"></canvas>
-    <div id="status">YZJ 左端固定长度验证加载中...</div>
+    <div id="status">YZJ 左侧固定、右侧单向伸长验证加载中...</div>
     <script type="module">
-      import {
-        ArcRotateCamera,
-        Color3,
-        Engine,
-        HemisphericLight,
-        MeshBuilder,
-        Scene,
-        SceneLoader,
-        StandardMaterial,
-        TransformNode,
-        Vector3,
-      } from "@babylonjs/core";
+      import { ArcRotateCamera, Color3, Engine, HemisphericLight, MeshBuilder, Scene, SceneLoader, StandardMaterial, TransformNode, Vector3 } from "@babylonjs/core";
       import "@babylonjs/loaders/glTF/index.js";
       import { ExternalModelScriptRuntime } from "/src/runtime/babylon/ExternalModelScriptRuntime.ts";
 
@@ -67,71 +26,64 @@
       const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
       const scene = new Scene(engine);
       scene.clearColor.set(0.05, 0.06, 0.07, 1);
-
-      const camera = new ArcRotateCamera("camera", -Math.PI / 2, Math.PI * 0.43, 5.4, new Vector3(0, 0.55, 0), scene);
+      const camera = new ArcRotateCamera("camera", -Math.PI / 2, Math.PI * 0.42, 6.3, new Vector3(0, 0.55, 0), scene);
       camera.attachControl(canvas, true);
-      camera.lowerRadiusLimit = 2;
-      camera.upperRadiusLimit = 12;
-
       const light = new HemisphericLight("light", new Vector3(0.2, 1, 0.4), scene);
-      light.intensity = 0.95;
+      light.intensity = 0.98;
 
       const groundMaterial = new StandardMaterial("groundMaterial", scene);
       groundMaterial.diffuseColor = new Color3(0.11, 0.15, 0.17);
       groundMaterial.specularColor = Color3.Black();
-      const ground = MeshBuilder.CreateGround("ground", { width: 5.2, height: 3.2 }, scene);
+      const ground = MeshBuilder.CreateGround("ground", { width: 7, height: 4.5 }, scene);
       ground.material = groundMaterial;
       ground.position.y = -0.012;
 
-      const markerMaterial = new StandardMaterial("leftAnchorMaterial", scene);
+      const markerMaterial = new StandardMaterial("leftAnchorMarkerMaterial", scene);
       markerMaterial.diffuseColor = new Color3(0.05, 0.9, 0.95);
       markerMaterial.emissiveColor = new Color3(0.02, 0.45, 0.5);
-      markerMaterial.alpha = 0.85;
+      markerMaterial.alpha = 0.2;
 
       const metadata = await fetch("./yzj-assets/meta.json").then((response) => response.json());
       const defaultValues = {
-        chainLength: 1.828,
-        platformLength: 1.022,
-        chainWidth: 1.194,
-        chainHeight: 0.803,
-        rollerWidth: 0.062,
-        rollerPosition: 0,
-        rollerDensity: 1,
-        showFrontSupport: true,
-        showRearSupport: true,
+        chainLength: 1.828, platformLength: 1.022, platformPosition: 0, chainWidth: 1.194, chainHeight: 0.803,
+        rollerWidth: 0.062, rollerPosition: 0, rollerDensity: 4, infeedSide: "left", outfeedSide: "front",
+        showFrontSupport: true, showRearSupport: true,
       };
-
       const cases = [
-        { label: "默认长度", z: -0.78, values: { ...defaultValues } },
-        { label: "加长到 3.1m", z: 0.78, values: { ...defaultValues, chainLength: 3.1, rollerDensity: 4 } },
+        { label: "默认长度", z: -1.05, values: { ...defaultValues } },
+        { label: "右侧加长到 3.1m（左侧固定）", z: 1.05, values: { ...defaultValues, chainLength: 3.1 } },
       ];
 
+      /** 同步参数值到脚本 metadata。 */
       function syncModelScriptMetadata(target, values) {
         const scripts = (metadata.parameterScripts ?? []).map((script) => {
           const clonedScript = structuredClone(script);
           clonedScript.values = clonedScript.values ?? {};
-          for (const [key, value] of Object.entries(values)) {
-            const previousValue = typeof clonedScript.values[key] === "object" && clonedScript.values[key] !== null
-              ? clonedScript.values[key]
-              : {};
-            clonedScript.values[key] = { ...previousValue, value };
-          }
+          for (const [key, value] of Object.entries(values)) clonedScript.values[key] = { ...(clonedScript.values[key] ?? {}), value };
           return clonedScript;
         });
         target.metadata = { ...(target.metadata ?? {}), scripts };
       }
 
+      /** 挂载 GLB 顶层节点。 */
       function parentTopLevelModelNodes(container, contentRoot) {
         const importedNodes = new Set([...container.meshes, ...container.transformNodes]);
-        for (const node of importedNodes) {
-          if (!node.parent || !importedNodes.has(node.parent)) {
-            node.parent = contentRoot;
-          }
-        }
+        for (const node of importedNodes) if (!node.parent || !importedNodes.has(node.parent)) node.parent = contentRoot;
       }
 
-      function getWorldBounds(root) {
-        const meshes = root.getChildMeshes(false);
+      /** 查找指定节点。 */
+      function findNode(root, name) {
+        return [root, ...root.getDescendants(false)].find((node) => node.name === name);
+      }
+
+      /** 查找原始辊筒和克隆辊筒。 */
+      function findRollers(root) {
+        return [root, ...root.getDescendants(false)].filter((node) => node.name === "GT.3" || node.metadata?.sourceNodeName === "GT.3");
+      }
+
+      /** 计算节点集合包围盒。 */
+      function getBounds(nodes) {
+        const meshes = [...new Set(nodes.flatMap((node) => node.getChildMeshes?.(false) ?? []))].filter((mesh) => mesh.isEnabled());
         let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
         let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
         for (const mesh of meshes) {
@@ -141,84 +93,76 @@
           minimum = Vector3.Minimize(minimum, box.minimumWorld);
           maximum = Vector3.Maximize(maximum, box.maximumWorld);
         }
-        return { minimum, maximum };
+        return { minimum, maximum, center: minimum.add(maximum).scale(0.5), size: maximum.subtract(minimum) };
       }
 
+      /** 将模型底部中心归零。 */
       function normalizeModelContentOrigin(root) {
-        root.computeWorldMatrix(true);
-        const bounds = getWorldBounds(root);
+        const bounds = getBounds([root]);
         const bottomCenter = new Vector3((bounds.minimum.x + bounds.maximum.x) / 2, bounds.minimum.y, (bounds.minimum.z + bounds.maximum.z) / 2);
         const localBottomCenter = Vector3.TransformCoordinates(bottomCenter, root.getWorldMatrix().clone().invert());
-        for (const child of root.getChildren()) {
-          if (child instanceof TransformNode) {
-            child.position.subtractInPlace(localBottomCenter);
-          }
-        }
+        for (const child of root.getChildren()) if (child instanceof TransformNode) child.position.subtractInPlace(localBottomCenter);
       }
 
-      async function createYZJCase(testCase) {
+      /** 创建单个长度案例。 */
+      async function createCase(testCase) {
         const root = new TransformNode(`${testCase.label}_root`, scene);
         root.position.z = testCase.z;
-
         const contentRoot = new TransformNode(`${testCase.label}_contentRoot`, scene);
         contentRoot.parent = root;
-        contentRoot.scaling = new Vector3(0.01, 0.01, 0.01);
-
+        contentRoot.scaling.setAll(0.01);
         const container = await SceneLoader.LoadAssetContainerAsync("./yzj-assets/", "YZJ.glb", scene);
         container.addAllToScene();
         parentTopLevelModelNodes(container, contentRoot);
         normalizeModelContentOrigin(root);
         syncModelScriptMetadata(contentRoot, testCase.values);
-
-        const modelAsset = {
-          sourcePath: "./yzj-assets/YZJ.glb",
-          sourceUrl: "./yzj-assets/YZJ.glb",
-          lengthUnit: "meter",
-          unitScaleToMeters: 1,
-          scriptAssets: [
-            {
-              path: "./yzj-assets/yzj.model.ts",
-              sourceUrl: "./yzj-assets/yzj.model.txt",
-              name: "yzj.model.ts",
-            },
-          ],
-          parameterScriptMetadata: metadata.parameterScripts ?? [],
-          animationScriptMetadata: metadata.animationScripts ?? [],
-          parameterValues: testCase.values,
-        };
-
-        const runtime = new ExternalModelScriptRuntime(contentRoot, modelAsset);
+        const runtime = new ExternalModelScriptRuntime(contentRoot, {
+          sourcePath: "./yzj-assets/YZJ.glb", sourceUrl: "./yzj-assets/YZJ.glb", lengthUnit: "meter", unitScaleToMeters: 1, parameterConfig: metadata.modelParameters,
+          scriptAssets: [{ path: "./yzj-assets/yzj.model.ts", sourceUrl: "./yzj-assets/yzj.model.txt", name: "yzj.model.ts" }],
+          parameterScriptMetadata: metadata.parameterScripts ?? [], animationScriptMetadata: metadata.animationScripts ?? [], parameterValues: testCase.values,
+        });
         runtime.updateParameterValues(testCase.values);
         await runtime.start();
         runtime.update();
-        return root;
+        return {
+          root,
+          body: getBounds([findNode(root, "ZT.2")]),
+          platform: getBounds([findNode(root, "Ban.4")]),
+          roller: getBounds(findRollers(root)),
+        };
       }
 
       try {
-        const roots = [];
-        for (const testCase of cases) {
-          roots.push(await createYZJCase(testCase));
+        const [base, long] = await Promise.all(cases.map(createCase));
+        const expectedExtension = cases[1].values.chainLength - cases[0].values.chainLength;
+        const fixedSideDrift = Math.abs(long.body.minimum.x - base.body.minimum.x);
+        const extensionSideGrowth = long.body.maximum.x - base.body.maximum.x;
+        const bodyCenterShift = long.body.center.x - base.body.center.x;
+        const platformCenterDelta = Math.abs(long.platform.center.x - base.platform.center.x);
+        const platformLengthDelta = Math.abs(long.platform.size.x - base.platform.size.x);
+        const rollerCenterDelta = Math.abs(long.roller.center.x - base.roller.center.x);
+        const rollerLengthDelta = Math.abs(long.roller.size.x - base.roller.size.x);
+        const isValid = fixedSideDrift < 0.015
+          && Math.abs(extensionSideGrowth - expectedExtension) < 0.02
+          && Math.abs(bodyCenterShift - expectedExtension / 2) < 0.015
+          && platformCenterDelta < 0.008 && platformLengthDelta < 0.008
+          && rollerCenterDelta < 0.008 && rollerLengthDelta < 0.008;
+        for (const x of [base.body.minimum.x, base.body.maximum.x]) {
+          const marker = MeshBuilder.CreateBox(`base_${x}`, { width: 0.014, height: 1.2, depth: 2.8 }, scene);
+          marker.position.set(x, 0.6, 0);
+          marker.material = markerMaterial;
         }
 
-        const defaultBounds = getWorldBounds(roots[0]);
-        const extendedBounds = getWorldBounds(roots[1]);
-        const anchorX = defaultBounds.minimum.x;
-        const delta = Math.abs(defaultBounds.minimum.x - extendedBounds.minimum.x);
-        const rightExtension = extendedBounds.maximum.x - defaultBounds.maximum.x;
-        const isValid = delta < 0.005 && rightExtension > 0.2;
-        const marker = MeshBuilder.CreateBox("leftAnchorMarker", { width: 0.018, height: 1.35, depth: 2.2 }, scene);
-        marker.position = new Vector3(anchorX, 0.66, 0);
-        marker.material = markerMaterial;
-
-        status.innerHTML = `<span class="${isValid ? "ok" : "error"}">${isValid ? "完成" : "异常"}</span>：左侧基准线固定，默认 minX=${defaultBounds.minimum.x.toFixed(4)}，加长 minX=${extendedBounds.minimum.x.toFixed(4)}，左差值=${delta.toFixed(5)}；右侧延长 ${rightExtension.toFixed(4)}`;
+        status.innerHTML = `<span class="${isValid ? "ok" : "error"}">${isValid ? "通过" : "异常"}</span>：左侧固定漂移=${fixedSideDrift.toFixed(5)}，右侧增长=${extensionSideGrowth.toFixed(4)}（期望=${expectedExtension.toFixed(4)}），主体中心右移=${bodyCenterShift.toFixed(4)}，Ban.4 中心/长度差=${platformCenterDelta.toFixed(5)}/${platformLengthDelta.toFixed(5)}，GT.3 中心/长度差=${rollerCenterDelta.toFixed(5)}/${rollerLengthDelta.toFixed(5)}`;
+        document.body.dataset.validationStatus = isValid ? "pass" : "fail";
+        window.__YZJ_LEFT_ANCHORED_READY__ = isValid;
+        window.__YZJ_LEFT_ANCHORED_REPORT__ = { expectedExtension, fixedSideDrift, extensionSideGrowth, bodyCenterShift, platformCenterDelta, platformLengthDelta, rollerCenterDelta, rollerLengthDelta };
         engine.runRenderLoop(() => scene.render());
-        window.__YZJ_LEFT_ANCHOR_READY__ = isValid;
-        window.__YZJ_LEFT_ANCHOR_DELTA__ = delta;
-        window.__YZJ_RIGHT_EXTENSION__ = rightExtension;
       } catch (error) {
         console.error(error);
         status.innerHTML = `<span class="error">失败</span>：${error instanceof Error ? error.message : String(error)}`;
-        window.__YZJ_LEFT_ANCHOR_READY__ = false;
+        document.body.dataset.validationStatus = "fail";
+        window.__YZJ_LEFT_ANCHORED_READY__ = false;
       }
 
       window.addEventListener("resize", () => engine.resize());

@@ -2,7 +2,8 @@ import * as BabylonCore from '@babylonjs/core';
 import type { TransformNode } from '@babylonjs/core';
 import type * as TypeScriptModule from 'typescript';
 import type { ModelAssetComponent, ModelScriptAsset } from '../../editor/model/components';
-import type { ModelParameterValues } from '../../editor/model/modelParameters';
+import type { ModelParameterDefinition, ModelParameterValue, ModelParameterValues } from '../../editor/model/modelParameters';
+import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 
 type ExternalModelScriptInstance = {
@@ -10,6 +11,23 @@ type ExternalModelScriptInstance = {
   onUpdate?: () => void;
   onStop?: () => void;
   [key: string]: unknown;
+};
+
+/** 外置模型脚本运行模式，编辑态只响应参数，运行态可读取遥测快照。 */
+export type ExternalModelScriptRuntimeMode = 'edit' | 'runtime';
+
+/** 注入到外置模型脚本实例的只读遥测快照，避免脚本直接依赖 MQTT store。 */
+export type ExternalModelScriptTelemetrySnapshot = {
+  deviceType: string;
+  assetCode: string;
+  faulted: boolean;
+  fields: Record<string, unknown>;
+};
+
+/** 外置模型脚本运行时上下文，SceneRuntime 负责按预览生命周期更新。 */
+export type ExternalModelScriptRuntimeContext = {
+  mode: ExternalModelScriptRuntimeMode;
+  telemetry: ExternalModelScriptTelemetrySnapshot | null;
 };
 
 type ExternalModelScriptClass = new (node: TransformNode) => ExternalModelScriptInstance;
@@ -42,6 +60,7 @@ export class ExternalModelScriptRuntime {
   private readonly dataDrivenConfigs: unknown[] = [];
   private parameterValues: ModelParameterValues = {};
   private assetCode: string;
+  private runtimeContext: ExternalModelScriptRuntimeContext = { mode: 'edit', telemetry: null };
   private disposed = false;
   private started = false;
 
@@ -81,6 +100,25 @@ export class ExternalModelScriptRuntime {
     this.assetCode = assetCode;
     for (const instance of this.instances) {
       this.assignParameterValues(instance);
+    }
+  }
+
+  /** 更新脚本运行时上下文，固定注入 runtimeMode 与 runtimeTelemetry 给所有实例。 */
+  updateRuntimeContext(context: ExternalModelScriptRuntimeContext): void {
+    this.runtimeContext = {
+      mode: context.mode,
+      telemetry: context.telemetry
+        ? {
+            deviceType: context.telemetry.deviceType,
+            assetCode: context.telemetry.assetCode,
+            faulted: context.telemetry.faulted,
+            fields: { ...context.telemetry.fields },
+          }
+        : null,
+    };
+    for (const instance of this.instances) {
+      this.assignParameterValues(instance);
+      this.callLifecycle(instance, 'onUpdate');
     }
   }
 
@@ -149,12 +187,30 @@ export class ExternalModelScriptRuntime {
     return [...names];
   }
 
-  /** 把当前参数值写到脚本实例属性上，兼容现有模型脚本的读取方式。 */
+  /** 把当前参数值和运行上下文写到脚本实例属性上，兼容现有模型脚本的读取方式。 */
   private assignParameterValues(instance: ExternalModelScriptInstance): void {
-    instance.assetCode = this.assetCode;
     for (const [key, value] of Object.entries(this.parameterValues)) {
-      instance[key] = value;
+      instance[key] = this.resolveParameterInjectionValue(key, value);
     }
+    instance.assetCode = this.assetCode;
+    instance.runtimeMode = this.runtimeContext.mode;
+    instance.runtimeTelemetry = this.runtimeContext.telemetry;
+  }
+
+  /** 解析单个参数的脚本注入值，贴图参数会转换为 Babylon 可直接读取的真实 URL。 */
+  private resolveParameterInjectionValue(key: string, value: ModelParameterValue): ModelParameterValue {
+    const definition = this.findParameterDefinition(key);
+    if (definition?.type !== 'texture' || typeof value !== 'string') return value;
+
+    return resolveModelTextureAssetUrl(value, {
+      sourceUrl: this.modelAsset.sourceUrl,
+      assetRevision: this.modelAsset.assetRevision,
+    }) ?? value;
+  }
+
+  /** 按参数 key 查找模型包声明，用于区分普通字符串和贴图逻辑引用。 */
+  private findParameterDefinition(key: string): ModelParameterDefinition | null {
+    return this.modelAsset.parameterConfig?.parameters.find((definition) => definition.key === key) ?? null;
   }
 
   /** 调用脚本生命周期，避免单个脚本异常中断编辑器运行时。 */

@@ -1,3 +1,5 @@
+import type { BuiltInImageAsset } from '../../assets/imageAssets';
+import { BUILT_IN_IMAGE_ASSETS } from '../../assets/imageAssets';
 import type { LightKind, MeshKind } from '../model/components';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/sceneUnits';
 import type { AssetEntry, BuiltInAssetDragPayload } from './AssetDatabase';
@@ -23,7 +25,12 @@ export type ImportedProjectLibraryItem = ProjectLibraryItemBase & {
 
 export type PlaceholderProjectLibraryItem = ProjectLibraryItemBase;
 
-export type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | PlaceholderProjectLibraryItem;
+/** 图片库内置图片卡片，保存可拖拽的内置图片资产元数据。 */
+export type BuiltInImageProjectLibraryItem = ProjectLibraryItemBase & {
+  imageAsset: BuiltInImageAsset;
+};
+
+export type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | BuiltInImageProjectLibraryItem | PlaceholderProjectLibraryItem;
 
 export type ProjectLibrary = {
   key: ProjectLibraryKey;
@@ -126,14 +133,21 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     label: '图片库',
     searchLabel: '图片名称',
     searchPlaceholder: '请输入图片名称...',
-    items: [
-      { id: 'image-bg', name: '背景图片', icon: 'panel' },
-      { id: 'image-icon', name: '图标贴图', icon: 'cube' },
-      { id: 'image-mask', name: '遮罩图片', icon: 'ring' },
-      { id: 'image-texture', name: '材质贴图', icon: 'marker' },
-    ],
+    items: createImageLibraryItems(),
   },
 ];
+
+/** 将内置图片资产转成 Project 图片库卡片展示数据。 */
+export function createImageLibraryItems(): BuiltInImageProjectLibraryItem[] {
+  return BUILT_IN_IMAGE_ASSETS.map((asset) => ({
+    id: asset.id,
+    name: asset.name,
+    icon: 'panel',
+    subtitle: '内置图片',
+    thumbnailUrl: asset.sourceUrl,
+    imageAsset: asset,
+  }));
+}
 
 /** 将项目模型资产转成 Project 资源库卡片展示数据。 */
 export function createModelLibraryItems(modelAssets: AssetEntry[]): ImportedProjectLibraryItem[] {
@@ -155,6 +169,11 @@ export function isBuiltInProjectLibraryItem(item: ProjectLibraryItem): item is B
 /** 判断资源库卡片是否对应项目内导入模型。 */
 export function isImportedProjectLibraryItem(item: ProjectLibraryItem): item is ImportedProjectLibraryItem {
   return 'asset' in item;
+}
+
+/** 判断资源库卡片是否对应可拖拽的内置图片。 */
+export function isBuiltInImageProjectLibraryItem(item: ProjectLibraryItem): item is BuiltInImageProjectLibraryItem {
+  return 'imageAsset' in item;
 }
 
 /** 生成人类可读的模型单位提示，用于卡片标题和无障碍说明。 */

@@ -48,7 +48,12 @@ import {
   parseCadReferenceDxf,
   type CadReferenceParseResult,
 } from '../../editor/cad/cadReference';
-import { ExternalModelScriptRuntime } from './ExternalModelScriptRuntime';
+import {
+  ExternalModelScriptRuntime,
+  type ExternalModelScriptRuntimeMode,
+  type ExternalModelScriptTelemetrySnapshot,
+} from './ExternalModelScriptRuntime';
+import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
 import { GenericTelemetryMotionRuntime } from './telemetry/GenericTelemetryMotionRuntime';
 import {
   captureModelTelemetryPreviewBaseline,
@@ -62,6 +67,7 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from './telemetry/specializedTelemetryBinding';
+import { resolveStackerStorageForkReach, resolveStackerStorageTargetOffsets } from './telemetry/stackerStorageLocation';
 import {
   deviceTelemetryStore,
   readIntegerField,
@@ -71,7 +77,7 @@ import {
   type StackerTelemetrySnapshot,
 } from '../mqtt/deviceTelemetry';
 import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticStatus } from '../mqtt/telemetryRuntimeDiagnostics';
-import { resolveRelativeEditorAssetUrl, resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
+import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
 const SELECTED_EMISSIVE_COLOR = '#332400';
@@ -152,6 +158,8 @@ type ModelParameterBaselineValue = boolean | number | string | Vector3Data | Tex
 type LocatorRuntimeEntry = {
   root: TransformNode;
   box: Mesh;
+  assetId: string;
+  storageDepth: LocatorComponent['storageDepth'];
 };
 
 type StackerTravelConstraint = {
@@ -200,6 +208,8 @@ type StackerModelTelemetryState = {
   rootPosition: Vector3 | null;
   /** 基于固定轨道和行走机构基线计算的轨道约束，防止遥测把机体推出轨道。 */
   travelConstraint: StackerTravelConstraint | null;
+  /** 货叉未伸出时用于对齐库位的世界坐标锚点。 */
+  targetReferencePosition: Vector3 | null;
   liftOffset: number;
   frontForkOffset: number;
   backForkOffset: number;
@@ -283,6 +293,7 @@ export class SceneRuntime {
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
   private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
   private readonly reportedMissingTargets = new Set<string>();
+  private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private readonly reportedFaults = new Map<string, string>();
   private readonly reportedStatuses = new Map<string, string>();
   private telemetryPreviewActive = false;
@@ -305,6 +316,7 @@ export class SceneRuntime {
     this.telemetryPreviewActive = true;
     this.genericTelemetryMotionRuntime.beginPreview();
     this.clearTelemetryPreviewRuntimeState();
+    this.updateAllExternalScriptRuntimeContexts('runtime', null);
   }
 
   /** 结束 MQTT 运行预览；该方法幂等，按驱动关闭、运行态清理、模型恢复的顺序回到编辑态。 */
@@ -324,6 +336,7 @@ export class SceneRuntime {
       this.resetConveyorTelemetryState(model);
     }
     this.clearTelemetryPreviewRuntimeState();
+    this.updateAllExternalScriptRuntimeContexts('edit', null);
   }
 
   /** 根据实体 ID 获取当前运行时中可被 Gizmo 绑定的 Babylon 节点。 */
@@ -647,6 +660,7 @@ export class SceneRuntime {
     this.meshes.clear();
     this.locators.clear();
     this.locatorTargets.clear();
+    this.reportedDuplicateLocatorTargets.clear();
     this.cadReferences.clear();
     this.models.clear();
     this.stackerCargoMeshes.clear();
@@ -681,14 +695,31 @@ export class SceneRuntime {
   /** 重建虚拟定位线框资产编号索引，供 to_x/to_y/to_z 快速查找目标位。 */
   private rebuildLocatorTargetIndex(document: SceneDocument): void {
     this.locatorTargets.clear();
+    const duplicateAssetIds = new Set<string>();
 
     for (const entityId of document.entityIds) {
       const entity = document.entities[entityId];
       const assetId = entity?.components.locator?.assetId.trim();
       const locator = this.locators.get(entityId);
-      if (!assetId || !locator) continue;
+      if (!assetId || !locator || duplicateAssetIds.has(assetId)) continue;
 
+      locator.assetId = assetId;
+      locator.storageDepth = entity.components.locator?.storageDepth ?? 'near';
+      if (this.locatorTargets.has(assetId)) {
+        this.locatorTargets.delete(assetId);
+        duplicateAssetIds.add(assetId);
+        continue;
+      }
       this.locatorTargets.set(assetId, locator);
+    }
+
+    for (const assetId of duplicateAssetIds) {
+      if (this.reportedDuplicateLocatorTargets.has(assetId)) continue;
+      this.reportedDuplicateLocatorTargets.add(assetId);
+      this.pushLog(`库位资产编号冲突，已停止目标绑定：${assetId}`);
+    }
+    for (const assetId of [...this.reportedDuplicateLocatorTargets]) {
+      if (!duplicateAssetIds.has(assetId)) this.reportedDuplicateLocatorTargets.delete(assetId);
     }
   }
 
@@ -745,8 +776,17 @@ export class SceneRuntime {
     }
 
     this.applyTransform(runtimeLocator.root, entity.components.transform);
+    runtimeLocator.assetId = locator.assetId;
+    runtimeLocator.storageDepth = locator.storageDepth;
+    const locatorMetadata = {
+      assetId: locator.assetId,
+      storageDepth: locator.storageDepth,
+      forkStage: locator.storageDepth === 'far' ? 2 : 1,
+    };
+    runtimeLocator.root.metadata = { ...(runtimeLocator.root.metadata ?? {}), storageLocation: locatorMetadata };
+    runtimeLocator.box.metadata = { ...(runtimeLocator.box.metadata ?? {}), storageLocation: locatorMetadata };
     this.applyLocatorDimensions(runtimeLocator.box, locator);
-    this.applyLocatorStyle(runtimeLocator.box, selected);
+    this.applyLocatorStyle(runtimeLocator.box, locator.storageDepth, selected);
     this.applyMeshInteractivity(runtimeLocator.box, entity.id);
   }
 
@@ -985,6 +1025,9 @@ export class SceneRuntime {
     for (const model of this.models.values()) {
       if (model.telemetryPreviewBaseline || !model.container || !model.stackerTelemetryReady) continue;
       model.telemetryPreviewBaseline = captureModelTelemetryPreviewBaseline({ root: model.root, contentRoot: model.contentRoot });
+      if (this.resolveSpecializedTelemetryDeviceType(model) === 'stacker') {
+        this.getStackerTargetReferencePosition(model);
+      }
     }
   }
 
@@ -997,6 +1040,35 @@ export class SceneRuntime {
     for (const model of this.models.values()) {
       this.clearSpecializedTelemetryDiagnosticsForModel(model);
     }
+  }
+
+  /** 批量同步外置脚本运行上下文，预览开始和结束时用于清空或恢复模式。 */
+  private updateAllExternalScriptRuntimeContexts(
+    mode: ExternalModelScriptRuntimeMode,
+    telemetry: ExternalModelScriptTelemetrySnapshot | null,
+  ): void {
+    for (const model of this.models.values()) {
+      this.updateModelExternalScriptRuntimeContext(model, mode, telemetry);
+    }
+  }
+
+  /** 同步单个模型的外置脚本上下文，未启用脚本的模型会被安全跳过。 */
+  private updateModelExternalScriptRuntimeContext(
+    model: ModelRuntimeEntry,
+    mode: ExternalModelScriptRuntimeMode,
+    telemetry: ExternalModelScriptTelemetrySnapshot | null,
+  ): void {
+    model.externalScriptRuntime?.updateRuntimeContext({ mode, telemetry });
+  }
+
+  /** 从设备遥测快照提取外置脚本可消费的最小上下文，避免泄漏可变 store 对象。 */
+  private createExternalScriptTelemetrySnapshot(snapshot: DeviceTelemetrySnapshot): ExternalModelScriptTelemetrySnapshot {
+    return {
+      deviceType: snapshot.deviceType,
+      assetCode: snapshot.assetCode,
+      faulted: snapshot.faulted,
+      fields: { ...snapshot.fields },
+    };
   }
 
   /** 清理所有专用 Stacker/Conveyor 运行时货物，保证结束预览不污染编辑态场景。 */
@@ -1033,6 +1105,11 @@ export class SceneRuntime {
 
     for (const candidate of candidates) {
       const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
+      this.updateModelExternalScriptRuntimeContext(
+        candidate.model,
+        'runtime',
+        snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
+      );
       if (!snapshot) continue;
       this.applyStackerTelemetryToModel(candidate.model, snapshot as StackerTelemetrySnapshot, deltaSeconds);
     }
@@ -1047,6 +1124,11 @@ export class SceneRuntime {
 
     for (const candidate of candidates) {
       const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
+      this.updateModelExternalScriptRuntimeContext(
+        candidate.model,
+        'runtime',
+        snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
+      );
       if (!snapshot) continue;
       this.applyConveyorTelemetryToModel(candidate.model, snapshot, deltaSeconds);
     }
@@ -1200,9 +1282,10 @@ export class SceneRuntime {
     this.writeDeviceTelemetryMetadata(model, snapshot);
 
     const targetPosition = targetLocator?.root.getAbsolutePosition() ?? null;
-    this.applyStackerRootMotion(model, snapshot, targetPosition, deltaSeconds);
-    this.applyStackerLiftMotion(model, snapshot, targetPosition, deltaSeconds);
-    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds);
+    const targetOffsets = targetPosition ? this.resolveStackerTargetMotionOffsets(model, targetPosition) : null;
+    this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds);
+    this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds);
+    this.applyStackerForkMotion(model, snapshot, targetLocator, deltaSeconds);
     this.applyStackerNodeMotionOffsets(model);
     this.applyStackerCargoMotion(model, snapshot, targetLocator);
     this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
@@ -1279,11 +1362,41 @@ export class SceneRuntime {
     model.conveyorTelemetry.cargoCode = activeContainerCode;
   }
 
+  /** 按货叉初始世界锚点把 Locator 绝对坐标换算成运行时偏移。 */
+  private resolveStackerTargetMotionOffsets(model: ModelRuntimeEntry, targetPosition: Vector3) {
+    const referencePosition = this.getStackerTargetReferencePosition(model);
+    const travelAxis = this.getHorizontalModelAxis(model.root, 'z');
+    return resolveStackerStorageTargetOffsets({
+      targetTravelCoordinate: Vector3.Dot(targetPosition, travelAxis),
+      targetLiftCoordinate: targetPosition.y,
+      referenceTravelCoordinate: Vector3.Dot(referencePosition, travelAxis),
+      referenceLiftCoordinate: referencePosition.y,
+    });
+  }
+
+  /** 读取并缓存前后一段货叉的初始世界中心，缺失货叉时回退到载货台。 */
+  private getStackerTargetReferencePosition(model: ModelRuntimeEntry): Vector3 {
+    const state = model.stackerTelemetry;
+    if (state.targetReferencePosition) return state.targetReferencePosition;
+
+    const forkGroups = this.findStackerForkNodeGroups(model);
+    const forkNodes = this.uniqueTransformNodes([
+      ...forkGroups.frontStageOneNodes,
+      ...forkGroups.backStageOneNodes,
+    ]);
+    const bounds = this.getNodesWorldBounds(forkNodes)
+      ?? this.getNodesWorldBounds(this.findStackerPlatformNodes(model));
+    state.targetReferencePosition = bounds
+      ? bounds.minimum.add(bounds.maximum).scale(0.5)
+      : state.rootBasePosition.clone();
+    return state.targetReferencePosition;
+  }
+
   /** 根据 distance_x 校准行走机构虚拟位置，并在有目标位或 movement_x 时沿轨道推进。 */
   private applyStackerRootMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
-    targetPosition: Vector3 | null,
+    targetTravelOffset: number | null,
     deltaSeconds: number,
   ): void {
     const state = model.stackerTelemetry;
@@ -1291,7 +1404,7 @@ export class SceneRuntime {
     state.rootPosition ??= state.rootBasePosition.clone();
 
     const distanceX = readNumberField(snapshot.fields, 'distance_x');
-    if (distanceX !== null) {
+    if (distanceX !== null && targetTravelOffset === null) {
       const calibratedPosition = state.rootBasePosition.add(travelAxis.scale(distanceX));
       state.rootPosition = this.lerpVector(
         state.rootPosition,
@@ -1301,10 +1414,10 @@ export class SceneRuntime {
     }
 
     if (!snapshot.faulted) {
-      if (targetPosition) {
+      if (targetTravelOffset !== null) {
         const rootTargetPosition = this.constrainStackerTravelPosition(
           model,
-          this.projectPointOntoAxis(state.rootBasePosition, travelAxis, targetPosition),
+          state.rootBasePosition.add(travelAxis.scale(targetTravelOffset)),
           travelAxis,
         );
         state.rootPosition = this.moveVectorTowards(
@@ -1328,18 +1441,17 @@ export class SceneRuntime {
   private applyStackerLiftMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
-    targetPosition: Vector3 | null,
+    targetLiftOffset: number | null,
     deltaSeconds: number,
   ): void {
     const state = model.stackerTelemetry;
     const distanceY = readNumberField(snapshot.fields, 'distance_y');
-    if (distanceY !== null) {
+    if (distanceY !== null && targetLiftOffset === null) {
       state.liftOffset = this.lerpNumber(state.liftOffset, distanceY, this.getCalibrationAlpha(deltaSeconds));
     }
 
     if (!snapshot.faulted) {
-      if (targetPosition) {
-        const targetLiftOffset = Math.max(0, targetPosition.y - state.rootBasePosition.y);
+      if (targetLiftOffset !== null) {
         state.liftOffset = this.moveNumberTowards(
           state.liftOffset,
           targetLiftOffset,
@@ -1358,9 +1470,10 @@ export class SceneRuntime {
   private applyStackerForkMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
-    targetPosition: Vector3 | null,
+    targetLocator: LocatorRuntimeEntry | null,
     deltaSeconds: number,
   ): void {
+    const targetPosition = targetLocator?.root.getAbsolutePosition() ?? null;
     const frontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
     const backMovement = readIntegerField(snapshot.fields, 'back_movement_z');
     const frontDistance = readNumberField(snapshot.fields, 'front_distance_z', 'ront_distance_z');
@@ -1368,6 +1481,9 @@ export class SceneRuntime {
     const frontForkSpeed = this.readSpeed(snapshot, 'front_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const backForkSpeed = this.readSpeed(snapshot, 'back_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const reach = this.readStackerForkReachConfig(model);
+    const targetForkReach = snapshot.hasTargetLocation
+      ? this.resolveTargetLocatorForkReach(targetLocator, reach) ?? 0
+      : null;
     const state = model.stackerTelemetry;
     const frontCommand = readIntegerField(snapshot.fields, 'front_command');
     const backCommand = readIntegerField(snapshot.fields, 'back_command');
@@ -1381,11 +1497,12 @@ export class SceneRuntime {
         'front',
         frontDistance,
         targetPosition,
+        this.resolveTargetLocatorForkDistance(targetForkReach, frontMovement, frontCommand, frontContainerCode),
         this.shouldUseForkTargetProjection(frontMovement, frontCommand, frontContainerCode),
       ),
       frontMovement,
       frontForkSpeed,
-      reach.total,
+      targetForkReach ?? reach.total,
       deltaSeconds,
       snapshot.faulted,
       (direction) => {
@@ -1400,11 +1517,12 @@ export class SceneRuntime {
         'back',
         backDistance,
         targetPosition,
+        this.resolveTargetLocatorForkDistance(targetForkReach, backMovement, backCommand, backContainerCode),
         this.shouldUseForkTargetProjection(backMovement, backCommand, backContainerCode),
       ),
       backMovement,
       backForkSpeed,
-      reach.total,
+      targetForkReach ?? reach.total,
       deltaSeconds,
       snapshot.faulted,
       (direction) => {
@@ -1497,6 +1615,7 @@ export class SceneRuntime {
     side: StackerForkSide,
     encodedDistance: number | null,
     targetPosition: Vector3 | null,
+    targetForkDistance: number | null,
     useTargetProjection: boolean,
   ): number | null {
     if (encodedDistance !== null) return encodedDistance;
@@ -1510,7 +1629,31 @@ export class SceneRuntime {
     const forkCenter = forkBounds.minimum.add(forkBounds.maximum).scale(0.5);
     const forkAxis = this.getModelAxis(model.root, 'x');
     const projectedDistance = Math.abs(Vector3.Dot(targetPosition.subtract(forkCenter), forkAxis));
-    return Number.isFinite(projectedDistance) ? projectedDistance : null;
+    const resolvedDistance = targetForkDistance ?? projectedDistance;
+    return Number.isFinite(resolvedDistance) ? resolvedDistance : null;
+  }
+
+  /** 按目标库位近排/远排决定货叉最大行程；近排只允许一段，远排允许两段。 */
+  private resolveTargetLocatorForkReach(
+    targetLocator: LocatorRuntimeEntry | null,
+    reach: StackerForkReachConfig,
+  ): number | null {
+    if (!targetLocator) return null;
+    return resolveStackerStorageForkReach(targetLocator.storageDepth, reach.stageOne, reach.stageTwo);
+  }
+
+  /** 根据货叉动作把目标库位行程转换成伸出或归零目标。 */
+  private resolveTargetLocatorForkDistance(
+    targetForkReach: number | null,
+    movement: number | null,
+    command: number | null,
+    containerCode: string | null,
+  ): number | null {
+    if (targetForkReach === null) return null;
+    if (movement === 2 || movement === 4) return 0;
+    if (movement === 1 || movement === 3) return targetForkReach;
+    if ((command !== null && command > 0 && command !== 8) || Boolean(containerCode)) return targetForkReach;
+    return null;
   }
 
   /** 只有有命令、动作或叉上货物的一侧才用目标 locator 估算行程，避免无编码器时两侧同时被目标牵引。 */
@@ -1870,11 +2013,39 @@ export class SceneRuntime {
 
   /** 查找输送线 motion 声明的节点，优先精确名称，失败后按 fallbackPattern 或通用名称兜底。 */
   private findConveyorMotionNodes(model: ModelRuntimeEntry, config: ConveyorMotionConfig): TransformNode[] {
-    const configuredNodes = config.nodes.length > 0 ? this.findModelNodesByName(model, config.nodes) : [];
+    const configuredNodes = config.nodes.length > 0
+      ? this.findConfiguredConveyorMotionNodes(model, config.nodes)
+      : [];
     if (configuredNodes.length > 0) return this.filterTopLevelMotionNodes(configuredNodes);
 
     const fallbackPattern = this.createConveyorFallbackPattern(config.fallbackPattern);
     return fallbackPattern ? this.filterTopLevelMotionNodes(this.findModelNodes(model, fallbackPattern)) : [];
+  }
+
+  /**
+   * 按 motion.nodes 收集原始节点及其参数化运行时克隆。
+   * 参数脚本通过 metadata.motionSourceNodeName 声明克隆继承哪个源节点的遥测动作，
+   * 同时兼容旧脚本已经写入的 metadata.sourceNodeName。
+   */
+  private findConfiguredConveyorMotionNodes(model: ModelRuntimeEntry, names: string[]): TransformNode[] {
+    const nameSet = new Set(names);
+    return this.getModelTransformNodes(model).filter((node) => {
+      if (nameSet.has(String(node.name ?? ''))) return true;
+      const sourceNodeName = this.readParametricMotionSourceNodeName(node);
+      return sourceNodeName !== null && nameSet.has(sourceNodeName);
+    });
+  }
+
+  /** 读取参数化克隆继承的源运动节点名，普通场景节点不会进入该兼容链路。 */
+  private readParametricMotionSourceNodeName(node: TransformNode): string | null {
+    if (!this.isPlainRecord(node.metadata) || node.metadata.generatedByParametricRuntime !== true) return null;
+    const sourceNodeName = typeof node.metadata.motionSourceNodeName === 'string'
+      ? node.metadata.motionSourceNodeName
+      : typeof node.metadata.sourceNodeName === 'string'
+        ? node.metadata.sourceNodeName
+        : '';
+    const normalizedName = sourceNodeName.trim();
+    return normalizedName || null;
   }
 
   /** 创建模型脚本显式声明的兜底正则；未声明或非法时跳过，避免猜中静态结构。 */
@@ -2063,6 +2234,7 @@ export class SceneRuntime {
       currentLocationKey: snapshot.currentLocationKey,
       targetLocationKey: snapshot.targetLocationKey,
       targetFound: Boolean(targetLocator),
+      targetStorageDepth: targetLocator?.storageDepth ?? null,
       hasTargetLocation: snapshot.hasTargetLocation,
       faulted: snapshot.faulted,
       message: snapshot.message,
@@ -2150,6 +2322,7 @@ export class SceneRuntime {
       rootBasePosition: root.position.clone(),
       rootPosition: null,
       travelConstraint: null,
+      targetReferencePosition: null,
       liftOffset: 0,
       frontForkOffset: 0,
       backForkOffset: 0,
@@ -2678,7 +2851,7 @@ export class SceneRuntime {
     box.edgesWidth = 2;
     box.edgesColor = this.color4FromHex(LOCATOR_EDGE_COLOR, 1);
 
-    return { root, box };
+    return { root, box, assetId: '', storageDepth: 'near' };
   }
 
   /** 根据组件类型创建对应 Babylon Light。 */
@@ -2885,8 +3058,9 @@ export class SceneRuntime {
   }
 
   /** 根据选中状态更新 locator 边线和极低透明交互面的颜色。 */
-  private applyLocatorStyle(box: Mesh, selected: boolean): void {
-    const color = selected ? SELECTED_MATERIAL_COLOR : LOCATOR_EDGE_COLOR;
+  private applyLocatorStyle(box: Mesh, storageDepth: LocatorComponent['storageDepth'], selected: boolean): void {
+    const storageColor = storageDepth === 'far' ? '#ff8a3d' : LOCATOR_EDGE_COLOR;
+    const color = selected ? SELECTED_MATERIAL_COLOR : storageColor;
     const color3 = Color3.FromHexString(color);
 
     box.edgesWidth = selected ? 4 : 2;
@@ -2985,11 +3159,13 @@ export class SceneRuntime {
       animationScripts: modelAsset.animationScriptMetadata ?? [],
     });
 
+    const runtimeMode = this.telemetryPreviewActive ? 'runtime' : 'edit';
     if (!model.externalScriptRuntime || model.externalScriptSignature !== signature) {
       model.stackerTelemetryReady = false;
       model.externalScriptRuntime?.dispose();
       model.externalScriptRuntime = new ExternalModelScriptRuntime(model.contentRoot, modelAsset);
       model.externalScriptSignature = signature;
+      this.updateModelExternalScriptRuntimeContext(model, runtimeMode, null);
       model.externalScriptRuntime.updateAssetCode(modelAsset.assetCode);
       model.externalScriptRuntime.updateParameterValues(modelAsset.parameterValues);
 
@@ -2998,6 +3174,7 @@ export class SceneRuntime {
       void runtime.start().then(() => {
         const current = [...this.models.values()].find((entry) => entry.externalScriptRuntime === runtime);
         if (!current || current.loadToken !== loadToken) return;
+        this.updateModelExternalScriptRuntimeContext(current, this.telemetryPreviewActive ? 'runtime' : 'edit', null);
         runtime.update();
         this.resetStackerTelemetryState(current);
         this.resetConveyorTelemetryState(current);
@@ -3009,6 +3186,7 @@ export class SceneRuntime {
 
     model.externalScriptRuntime.updateAssetCode(modelAsset.assetCode);
     model.externalScriptRuntime.updateParameterValues(modelAsset.parameterValues);
+    this.updateModelExternalScriptRuntimeContext(model, runtimeMode, null);
     model.externalScriptRuntime.update();
     this.resetStackerTelemetryState(model);
     this.resetConveyorTelemetryState(model);
@@ -3051,6 +3229,7 @@ export class SceneRuntime {
     model.stackerTelemetry.rootBasePosition = model.root.position.clone();
     model.stackerTelemetry.rootPosition = null;
     model.stackerTelemetry.travelConstraint = null;
+    model.stackerTelemetry.targetReferencePosition = null;
     model.stackerTelemetry.liftOffset = 0;
     model.stackerTelemetry.frontForkOffset = 0;
     model.stackerTelemetry.backForkOffset = 0;
@@ -3393,8 +3572,12 @@ export class SceneRuntime {
     return null;
   }
 
-  private loadOrReuseTexture(relativePath: string, modelAsset: ModelAssetComponent, model: ModelRuntimeEntry): Texture | null {
-    const textureUrl = this.resolveModelRelativeAssetUrl(modelAsset, relativePath);
+  /** 使用共享贴图解析器加载或复用 Babylon 纹理，保证材质绑定和外置脚本参数语义一致。 */
+  private loadOrReuseTexture(reference: string, modelAsset: ModelAssetComponent, model: ModelRuntimeEntry): Texture | null {
+    const textureUrl = resolveModelTextureAssetUrl(reference, {
+      sourceUrl: modelAsset.sourceUrl,
+      assetRevision: modelAsset.assetRevision,
+    });
     if (!textureUrl) return null;
 
     const existing = model.textureCache.get(textureUrl);
@@ -3403,11 +3586,6 @@ export class SceneRuntime {
     const texture = new Texture(textureUrl, this.scene);
     model.textureCache.set(textureUrl, texture);
     return texture;
-  }
-
-  private resolveModelRelativeAssetUrl(modelAsset: ModelAssetComponent, relativePath: string): string | null {
-    const editorAssetUrl = resolveRelativeEditorAssetUrl(modelAsset.sourceUrl, relativePath, /\.(png|jpe?g|webp)$/i);
-    return editorAssetUrl ? this.resolveVersionedRuntimeAssetUrl(editorAssetUrl, modelAsset.assetRevision) : null;
   }
 
   /** 用模型源 URL 和导入版本生成加载签名，同路径覆盖时也能触发重新载入。 */

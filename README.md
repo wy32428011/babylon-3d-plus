@@ -103,6 +103,10 @@ npm run dev:electron
 
 当前项目已经导入的模型副本位于 `F:\3d-models\models\Assets\Models\YZJ`。调试或发布 YZJ 脚本时需要同步源模型包与该副本；视觉验证建议覆盖默认值、旋转 45° 后调整 `chainLength/chainWidth/chainHeight`、`platformLength` 独立变化、`rollerDensity + rollerPosition`、旋转 90° 的多参数组合，确认底部支腿不漂移、顶升平台和辊筒随高度上移、辊筒密度沿设备宽度方向增加。
 
+YZJ 新增 `showDirectionArrow` 与 `directionArrowImage` 参数。`directionArrowImage` 是 `texture` 类型，默认保存稳定逻辑引用 `editor-image://builtin/direction-arrow-glow`；Project 图片库内置透明青蓝发光方向箭头，可直接拖入 Inspector 的 texture 属性，开发和生产运行时再解析为真实 PNG URL。拖放 MIME 为 `application/x-babylon-editor-image-asset`，解码后必须回查内置图片登记表，防止伪造引用或外部 URL 进入场景。
+
+箭头由 YZJ 参数脚本在 `Ban.4` 顶面创建，不写入 GLB、不进入 Hierarchy、不参与拾取。编辑态按 `outfeedSide`；MQTT 运行态中 `movement_x = 1` 或正值指向出料侧，`movement_x = 2` 或负值反向，`0`、无数据和故障时隐藏，停止预览后恢复编辑态。Plane 使用透明自发光贴图、呼吸 alpha/缩放、禁用深度写入并固定最后绘制层级，完整验证记录见 `docs/yzj-parameter-visual-validation.md`。
+
 ## 导入模型资产编号说明
 
 `modelAsset.assetCode` 是导入模型的场景实例级资产编号，用于后续动画数据按模型实例识别。模型包扫描会从同包 `*.model.ts` 的 `dataDriven.device.defaultAssetCode` 只读提取默认前缀；导入实例时会生成 `默认前缀-实体短ID`，例如 `YZJ01-A1B2C3D4`。如果脚本未声明默认前缀，则使用 `MODEL-实体短ID` 兜底。
@@ -296,6 +300,7 @@ npm run build
 - 编辑属性：在 Inspector 中修改名称、Transform、材质颜色或灯光属性；Transform 的 position 按米输入，rotation 按角度输入但内部保存和运行时仍使用 Babylon 弧度；选中 `虚拟定位线框` 时，可编辑资产编号、长(X)、宽(Z)、高(Y)，场景线框会实时更新并支持撤销/重做；选中基础 Mesh/默认模型或导入模型时，右侧属性面板会采用紧凑布局，基础 Mesh 可编辑材质颜色，导入模型可在 `Model Asset` 区域编辑模型实例资产编号，选中带 `modelParameters` 的导入模型时，还可在“模型参数”中编辑尺寸、颜色、显隐、规格、向量偏移或贴图等参数，场景外观会实时更新。
 - 删除实体：点击顶部工具栏 `删除`，或使用 Delete/Backspace 快捷键。
 - 浏览资源库外观：底部图库区域会根据窗口高度在约 `300px` 到 `460px` 之间自适应，在 Project 面板中点击 `模型库`、`POI库`、`主题库`、`组合库`、`环境库`、`图表库`、`图片库` 页签，可切换不同资源库展示；小窗口下页签通过内部横向滚动访问，资源卡片按可用宽度自动换行，超过可见高度后通过纵向滚动访问；模型库和环境库卡片有封面图时显示模型包封面，没有封面图时显示类型占位图标；模型库点击 `导入模型文件夹` 导入普通模型并复制到项目 `Assets/Models`，环境库点击 `导入环境模型文件夹` 导入环境模型并复制到项目 `Assets/Environments`，两者严格分库；同名包重新导入只覆盖当前入口对应的目标库；导入模型 `scale = 1` 表示不额外缩放，源单位到米的换算会自动生效。
+- 图片库贴图拖放：图片库当前内置透明发光方向箭头；选中带 `texture` 模型参数的导入模型后，可把图片卡片拖入 Inspector 参数区。属性保存 `editor-image://` 逻辑引用并进入撤销/重做历史，运行时统一解析为构建后的真实图片 URL。
 - 放置模型：模型库中已导入的真实模型卡片支持点击或拖拽；点击会把模型导入到原点，拖拽到 Scene View 后释放会按鼠标位置投射到地面平面并在对应世界坐标创建模型。
 - 资源库功能边界：模型库当前支持内置基础资源创建与真实模型文件夹导入；同名模型包再次导入会覆盖项目目录中对应模型包，其余资源库仍为样式占位。导入模型文件夹依赖 Electron preload 暴露的本地文件 API，需要使用 `npm run dev:electron` 启动桌面编辑器，普通 Vite 浏览器页面不具备该能力；Electron 主窗口通过 CommonJS preload 产物 `dist-electron/preload.cjs` 注入 `window.editorApi`。
 
@@ -352,15 +357,17 @@ npm run build
 
 - glTF/GLB 导入属于 MVP 级能力：支持导入、选择、基础 Transform、参数化外观绑定、保存和加载，不承诺完整材质编辑、动画、骨骼、蒙皮或嵌套资源管理。
 - CAD/DXF 导入属于布局参考层能力：首版只承诺常见二维线稿实体 `LINE`、`ARC`、`CIRCLE`、`LWPOLYLINE`、`POLYLINE`；不承诺 HATCH 填充、DIMENSION 标注、完整 TEXT/MTEXT 字体、Paper Space、多布局、3D Solid 或可编辑 CAD 图元。DXF 文件不再按文件大小、图元数量、折线数量或采样点数量做硬性拦截；复杂图纸会尽量完整导入，但超大图纸解析和生成线稿可能需要较长时间。
-- 参数化模型依赖模型包中稳定的节点、网格或材质名称；安全 DSL 只支持 JSON AST 中的白名单运算和白名单属性绑定，不执行任意 JavaScript/TypeScript。贴图参数只允许模型包内 `.png`、`.jpg`、`.jpeg`、`.webp` 相对路径，不支持绝对路径、网络 URL、`data:`、反斜杠路径或 `../` 路径逃逸。重新导入模型包后，场景实例会使用新的 `modelParameters` 与 `.model.ts` 脚本元数据清洗参数：同名且仍合法的实例值会保留，新增参数使用新默认值，删除或非法参数会移除。
-- Project 资源库当前只有模型库和环境库接入项目目录持久化；模型库普通模型复制到 `Assets/Models`，只能拖入 Scene 创建实体；环境库环境模型复制到 `Assets/Environments`，只能点击应用或拖入环境属性区，不会在 Scene View 创建实体；POI、主题、组合、图表、图片仍为占位展示，暂未接入真实搜索过滤、资源加载、拖拽或导入。
+- 参数化模型依赖模型包中稳定的节点、网格或材质名称；安全 DSL 只支持 JSON AST 中的白名单运算和白名单属性绑定，不执行任意 JavaScript/TypeScript。贴图参数允许编辑器登记过的内置 `editor-image://` 逻辑引用，或模型包内 `.png`、`.jpg`、`.jpeg`、`.webp` 相对路径；仍不支持绝对路径、网络 URL、`data:`、反斜杠路径、未登记逻辑引用或 `../` 路径逃逸。重新导入模型包后，场景实例会使用新的 `modelParameters` 与 `.model.ts` 脚本元数据清洗参数：同名且仍合法的实例值会保留，新增参数使用新默认值，删除或非法参数会移除。
+- Project 资源库中模型库和环境库已接入项目目录持久化；模型库普通模型复制到 `Assets/Models`，环境模型复制到 `Assets/Environments`。图片库已接入内置方向箭头和 texture 参数拖放，但尚未开放用户图片导入、项目级图片索引和真实搜索过滤；POI、主题、组合、图表仍为占位。
 - 首页最近项目和最近场景依赖 Electron preload 的本地文件 IPC；普通 Vite 浏览器页面会显示降级提示，并仅保留进入空白编辑器、新建场景等不依赖本地文件授权的基础入口。
 - 主布局自适应当前只包含随窗口尺寸自动调整与底部 Console 弹窗入口，不包含拖拽分隔条、其它面板折叠或用户自定义布局保存；小于约 `1024×640` 的窗口会继续尽量收缩，但不保证所有内容舒适可读。
-- 纹理、图片、图表、POI、主题与组合资源目前只作为资源库占位分类展示，暂未建立真实数据模型。
+- 图片库当前只登记内置方向箭头资源；用户图片导入、项目级图片持久化与更多图片类型仍待扩展。图表、POI、主题与组合资源仍为占位分类。
 - 灯光编辑支持类型与强度，暂未提供颜色、阴影、范围、衰减等高级参数。
 - 当前 Hierarchy 文件夹仅用于场景对象组织分组；文件夹显隐和锁定会作用到组内对象，但不提供文件夹嵌套、文件夹 Transform 继承或批量 Transform 父子联动。
 
 ## 最近完成
+
+- 2026-07-12：完成 YZJ 一体式顶升移载方向箭头全链路：图片库内置透明发光箭头、Inspector texture 拖放、逻辑引用到开发/生产 URL 解析、`Ban.4` 顶面呼吸显示，以及 MQTT `movement_x` 正向/反向/停止/故障/无数据/恢复编辑态联动；开发与生产视觉页均通过，详见 `docs/yzj-parameter-visual-validation.md`。
 
 - 2026-07-10：新增编辑器 MQTT 运行预览文档语义；保存/启用 MQTT 配置不再表示自动连接，只有点击 Toolbar “运行”并通过预检后才连接 broker 或启动本地模拟。运行态保持相机、选择、Hierarchy 搜索/展开、网格、诊断和 Console 可用，同时冻结 Gizmo、Inspector 修改、Hierarchy 变更、资源导入、保存加载、undo/redo 与 MQTT 配置；停止会断开 transport、清理运行时快照/货物/诊断和本次遥测触发动画，恢复运行前姿态且不回写 SceneDocument/history。
 - 2026-07-10：模型库与环境库改为严格分库：普通模型导入复制到 `Assets/Models`，环境模型导入复制到 `Assets/Environments`，`.babylon-editor/asset-index.json` 升级为 v2；v1 旧条目默认归模型库且不移动旧文件，同名包重导只覆盖当前入口对应的目标库。模型库卡片只能拖入 Scene，环境库卡片只能点击应用或拖入环境属性区；`sceneSettings.environment` 与模型包 `meta.json` 格式保持不变。

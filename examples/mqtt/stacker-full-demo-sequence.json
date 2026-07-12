@@ -1,0 +1,31 @@
+{
+  "schema": "babylon-editor.stacker-location-demo",
+  "version": 2,
+  "description": "按目标库位近排/远排参数决定一段或二段货叉。MQTT 不发送货叉距离，由场景 Locator 参数决定。",
+  "assetCode": "DDJ2",
+  "topic": "dt/factory/logistics/stacker/DDJ2/twindatadriven/joint",
+  "home": { "distance_x": 0, "distance_y": 0 },
+  "locations": [
+    { "assetId": "1-1-1", "row": 1, "column": 1, "level": 1, "storageDepth": "near", "distance_x": 4, "distance_y": 1.2 },
+    { "assetId": "1-2-1", "row": 1, "column": 2, "level": 1, "storageDepth": "far", "distance_x": 4, "distance_y": 1.2 },
+    { "assetId": "2-1-1", "row": 2, "column": 1, "level": 1, "storageDepth": "near", "distance_x": 8, "distance_y": 2.2 },
+    { "assetId": "2-2-1", "row": 2, "column": 2, "level": 1, "storageDepth": "far", "distance_x": 8, "distance_y": 2.2 }
+  ],
+  "tasks": [
+    { "locationAssetId": "1-1-1", "side": "front" },
+    { "locationAssetId": "1-2-1", "side": "front" },
+    { "locationAssetId": "2-1-1", "side": "front" },
+    { "locationAssetId": "2-2-1", "side": "front" }
+  ],
+  "timing": {
+    "travelMs": 5000,
+    "travelHoldMs": 1000,
+    "liftMs": 4000,
+    "liftHoldMs": 1000,
+    "forkExtendMs": 4500,
+    "forkHoldMs": 1500,
+    "forkRetractMs": 4500,
+    "taskCompleteHoldMs": 1000,
+    "returnHomeMs": 5000
+  }
+}

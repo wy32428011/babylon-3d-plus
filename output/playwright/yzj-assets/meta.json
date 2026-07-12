@@ -36,7 +36,7 @@
           "key": "description",
           "label": "参数说明",
           "type": "string",
-          "defaultValue": "支持链条机长宽高、顶升模块独立长度、辊筒宽度位置密度和前后支架显示隐藏参数化。",
+          "defaultValue": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
           "configuration": {
             "type": "string"
           }
@@ -63,6 +63,18 @@
             "min": 0.1,
             "max": 100,
             "step": 0.1
+          }
+        },
+        {
+          "key": "platformPosition",
+          "label": "顶升位置偏移",
+          "type": "number",
+          "defaultValue": 0,
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 0.05
           }
         },
         {
@@ -126,6 +138,78 @@
           }
         },
         {
+          "key": "infeedSide",
+          "label": "入料侧",
+          "type": "string",
+          "defaultValue": "left",
+          "configuration": {
+            "type": "string",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          }
+        },
+        {
+          "key": "outfeedSide",
+          "label": "出料侧",
+          "type": "string",
+          "defaultValue": "front",
+          "configuration": {
+            "type": "string",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          }
+        },
+        {
+          "key": "showDirectionArrow",
+          "label": "显示方向箭头",
+          "type": "boolean",
+          "defaultValue": true,
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        {
+          "key": "directionArrowImage",
+          "label": "方向箭头贴图",
+          "type": "string",
+          "defaultValue": "editor-image://builtin/direction-arrow-glow",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
           "key": "showFrontSupport",
           "label": "显示前支架",
           "type": "boolean",
@@ -171,7 +255,7 @@
         },
         "description": {
           "type": "string",
-          "value": "支持链条机长宽高、顶升模块独立长度、辊筒宽度位置密度和前后支架显示隐藏参数化。",
+          "value": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
           "label": "参数说明",
           "configuration": {
             "type": "string"
@@ -183,9 +267,9 @@
           "label": "链条机长度",
           "configuration": {
             "type": "number",
-            "min": 0.01,
+            "min": 0.1,
             "max": 100,
-            "step": 0.01
+            "step": 0.1
           }
         },
         "platformLength": {
@@ -197,6 +281,17 @@
             "min": 0.1,
             "max": 100,
             "step": 0.1
+          }
+        },
+        "platformPosition": {
+          "type": "number",
+          "value": 0,
+          "label": "顶升位置偏移",
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 0.05
           }
         },
         "chainWidth": {
@@ -254,6 +349,74 @@
             "step": 1
           }
         },
+        "infeedSide": {
+          "type": "string",
+          "value": "left",
+          "label": "入料侧",
+          "configuration": {
+            "type": "string",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          }
+        },
+        "outfeedSide": {
+          "type": "string",
+          "value": "front",
+          "label": "出料侧",
+          "configuration": {
+            "type": "string",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          }
+        },
+        "showDirectionArrow": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示方向箭头",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "directionArrowImage": {
+          "type": "string",
+          "value": "editor-image://builtin/direction-arrow-glow",
+          "label": "方向箭头贴图",
+          "configuration": {
+            "type": "string"
+          }
+        },
         "showFrontSupport": {
           "type": "boolean",
           "value": true,
@@ -305,6 +468,15 @@
         "step": 0.1
       },
       {
+        "key": "platformPosition",
+        "label": "顶升位置偏移",
+        "type": "number",
+        "defaultValue": 0,
+        "min": -100,
+        "max": 100,
+        "step": 0.05
+      },
+      {
         "key": "chainWidth",
         "label": "链条机宽度",
         "type": "number",
@@ -348,6 +520,68 @@
         "min": 1,
         "max": 100,
         "step": 1
+      },
+      {
+        "key": "infeedSide",
+        "label": "入料侧",
+        "type": "enum",
+        "defaultValue": "left",
+        "options": [
+          {
+            "value": "left",
+            "label": "左侧（局部 X+）"
+          },
+          {
+            "value": "right",
+            "label": "右侧（局部 X-）"
+          },
+          {
+            "value": "front",
+            "label": "前侧（局部 Z-）"
+          },
+          {
+            "value": "rear",
+            "label": "后侧（局部 Z+）"
+          }
+        ]
+      },
+      {
+        "key": "outfeedSide",
+        "label": "出料侧",
+        "type": "enum",
+        "defaultValue": "front",
+        "options": [
+          {
+            "value": "left",
+            "label": "左侧（局部 X+）"
+          },
+          {
+            "value": "right",
+            "label": "右侧（局部 X-）"
+          },
+          {
+            "value": "front",
+            "label": "前侧（局部 Z-）"
+          },
+          {
+            "value": "rear",
+            "label": "后侧（局部 Z+）"
+          }
+        ]
+      },
+      {
+        "key": "showDirectionArrow",
+        "label": "显示方向箭头",
+        "type": "boolean",
+        "defaultValue": true,
+        "description": "控制一体式顶升移载顶面是否显示发光方向箭头。"
+      },
+      {
+        "key": "directionArrowImage",
+        "label": "方向箭头贴图",
+        "type": "texture",
+        "defaultValue": "editor-image://builtin/direction-arrow-glow",
+        "description": "方向箭头使用的发光贴图，运行时可由图片库解析为实际 URL。"
       },
       {
         "key": "showFrontSupport",

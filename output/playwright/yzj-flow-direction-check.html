@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>YZJ 入料侧、出料侧与方向箭头验证</title>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #071016; color: #eef8ff; font-family: "Microsoft YaHei", Arial, sans-serif; }
+      #renderCanvas { width: 100%; height: 100%; display: block; }
+      #status { position: fixed; left: 14px; top: 14px; max-width: 1180px; padding: 11px 13px; border: 1px solid rgba(80, 217, 255, 0.48); background: rgba(6, 13, 18, 0.9); font-size: 13px; line-height: 1.55; }
+      .ok { color: #83ecad; }
+      .error { color: #ff9696; }
+    </style>
+  </head>
+  <body data-validation-status="loading">
+    <canvas id="renderCanvas"></canvas>
+    <div id="status">YZJ 入料/出料侧与方向箭头验证加载中...</div>
+    <script type="module">
+      import { ArcRotateCamera, Color3, Engine, HemisphericLight, MeshBuilder, Scene, SceneLoader, StandardMaterial, TransformNode, Vector3 } from "@babylonjs/core";
+      import "@babylonjs/loaders/glTF/index.js";
+      import { DIRECTION_ARROW_GLOW_IMAGE_REFERENCE } from "/src/assets/imageAssets.ts";
+      import { ExternalModelScriptRuntime } from "/src/runtime/babylon/ExternalModelScriptRuntime.ts";
+
+      const canvas = document.querySelector("#renderCanvas");
+      const status = document.querySelector("#status");
+      const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+      const scene = new Scene(engine);
+      scene.clearColor.set(0.03, 0.055, 0.072, 1);
+      const camera = new ArcRotateCamera("camera", Math.PI * 0.23, Math.PI * 0.28, 11.6, new Vector3(0, 0.7, 0.15), scene);
+      camera.attachControl(canvas, true);
+      const light = new HemisphericLight("light", new Vector3(0.25, 1, 0.35), scene);
+      light.intensity = 1.05;
+
+      const groundMaterial = new StandardMaterial("groundMaterial", scene);
+      groundMaterial.diffuseColor = new Color3(0.045, 0.075, 0.09);
+      groundMaterial.specularColor = Color3.Black();
+      const ground = MeshBuilder.CreateGround("ground", { width: 12, height: 8.5 }, scene);
+      ground.material = groundMaterial;
+      ground.position.y = -0.012;
+
+      const metadata = await fetch("./yzj-assets/meta.json").then((response) => response.json());
+      const yawBySide = { left: 0, right: Math.PI, front: Math.PI / 2, rear: -Math.PI / 2 };
+      const defaultValues = {
+        chainLength: 2.5, platformLength: 1.022, platformPosition: 0, chainWidth: 1.45, chainHeight: 0.803,
+        rollerWidth: 0.062, rollerPosition: 0, rollerDensity: 5, infeedSide: "left", outfeedSide: "front",
+        showDirectionArrow: true, directionArrowImage: DIRECTION_ARROW_GLOW_IMAGE_REFERENCE,
+        showFrontSupport: true, showRearSupport: true,
+      };
+      const cases = [
+        { label: "左入→前出", x: -3.1, z: -1.8, rotationY: 0, values: { ...defaultValues, infeedSide: "left", outfeedSide: "front" } },
+        { label: "右入→后出", x: 2.8, z: -1.8, rotationY: 0, values: { ...defaultValues, infeedSide: "right", outfeedSide: "rear" } },
+        { label: "前入→右出", x: -3.1, z: 2.2, rotationY: 0, values: { ...defaultValues, infeedSide: "front", outfeedSide: "right" } },
+        { label: "旋转45° 后入→左出", x: 2.8, z: 2.2, rotationY: Math.PI / 4, values: { ...defaultValues, infeedSide: "rear", outfeedSide: "left" } },
+        { label: "清理探针", x: 0, z: 9, rotationY: 0, cleanupProbe: true, values: { ...defaultValues, infeedSide: "left", outfeedSide: "rear" } },
+      ];
+
+      /** 等待指定毫秒，为外置脚本和纹理加载保留稳定执行窗口。 */
+      function delay(ms) {
+        return new Promise((resolve) => window.setTimeout(resolve, ms));
+      }
+
+      /** 同步参数值到脚本 metadata，并保留 modelParameters 供 texture URL 解析。 */
+      function syncModelScriptMetadata(target, values) {
+        const scripts = (metadata.parameterScripts ?? []).map((script) => {
+          const clonedScript = structuredClone(script);
+          clonedScript.values = clonedScript.values ?? {};
+          for (const [key, value] of Object.entries(values)) clonedScript.values[key] = { ...(clonedScript.values[key] ?? {}), value };
+          return clonedScript;
+        });
+        target.metadata = { ...(target.metadata ?? {}), modelParameters: metadata.modelParameters, scripts };
+      }
+
+      /** 将导入模型顶层节点统一挂到内容根节点。 */
+      function parentTopLevelModelNodes(container, contentRoot) {
+        const importedNodes = new Set([...container.meshes, ...container.transformNodes]);
+        for (const node of importedNodes) if (!node.parent || !importedNodes.has(node.parent)) node.parent = contentRoot;
+      }
+
+      /** 计算模型世界包围盒。 */
+      function getBounds(root) {
+        const meshes = root.getChildMeshes(false).filter((mesh) => mesh.isEnabled() && !mesh.metadata?.directionArrowVisual);
+        let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+        let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+        for (const mesh of meshes) {
+          mesh.computeWorldMatrix(true);
+          const box = mesh.getBoundingInfo().boundingBox;
+          minimum = Vector3.Minimize(minimum, box.minimumWorld);
+          maximum = Vector3.Maximize(maximum, box.maximumWorld);
+        }
+        return { minimum, maximum };
+      }
+
+      /** 将模型底面中心归零，便于四个方向案例对比。 */
+      function normalizeModelContentOrigin(root) {
+        const bounds = getBounds(root);
+        const bottomCenter = new Vector3((bounds.minimum.x + bounds.maximum.x) / 2, bounds.minimum.y, (bounds.minimum.z + bounds.maximum.z) / 2);
+        const localBottomCenter = Vector3.TransformCoordinates(bottomCenter, root.getWorldMatrix().clone().invert());
+        for (const child of root.getChildren()) if (child instanceof TransformNode) child.position.subtractInPlace(localBottomCenter);
+      }
+
+      /** 查找参数脚本生成的方向箭头，不把辊筒运动克隆误认为箭头。 */
+      function findDirectionArrows(root) {
+        return [root, ...root.getDescendants(false)].filter((node) => node.metadata?.directionArrowVisual === true);
+      }
+
+      /** 读取 metadata 自有键，验证箭头不会写入 motionSourceNodeName。 */
+      function readMetadataKeys(node) {
+        return Object.keys(node?.metadata ?? {}).sort();
+      }
+
+      /** 创建单个入料/出料方向案例并执行编辑态箭头断言。 */
+      async function createCase(testCase) {
+        const root = new TransformNode(testCase.label + "_root", scene);
+        root.position.set(testCase.x, 0, testCase.z);
+        root.rotation.y = testCase.rotationY;
+        const contentRoot = new TransformNode(testCase.label + "_contentRoot", scene);
+        contentRoot.parent = root;
+        contentRoot.scaling.setAll(0.01);
+        const container = await SceneLoader.LoadAssetContainerAsync("./yzj-assets/", "YZJ.glb", scene);
+        container.addAllToScene();
+        parentTopLevelModelNodes(container, contentRoot);
+        normalizeModelContentOrigin(root);
+        syncModelScriptMetadata(contentRoot, testCase.values);
+
+        const runtime = new ExternalModelScriptRuntime(contentRoot, {
+          sourcePath: "./yzj-assets/YZJ.glb", sourceUrl: "./yzj-assets/YZJ.glb", lengthUnit: "meter", unitScaleToMeters: 1,
+          scriptAssets: [{ path: "./yzj-assets/yzj.model.ts", sourceUrl: "./yzj-assets/yzj.model.txt", name: "yzj.model.ts" }],
+          parameterConfig: metadata.modelParameters,
+          parameterScriptMetadata: metadata.parameterScripts ?? [], animationScriptMetadata: metadata.animationScripts ?? [], parameterValues: testCase.values,
+        });
+        runtime.updateParameterValues(testCase.values);
+        await runtime.start();
+        runtime.update();
+        await delay(120);
+
+        const modelNodes = [root, ...root.getDescendants(false)];
+        const platform = modelNodes.find((node) => node.name === "Ban.4") ?? null;
+        const roller = modelNodes.find((node) => node.name === "GT.3") ?? null;
+        const flow = contentRoot.metadata?.logisticsFlow;
+        const arrows = findDirectionArrows(root);
+        const arrow = arrows[0] ?? null;
+        const errors = [];
+        if (flow?.infeedSide !== testCase.values.infeedSide || flow?.outfeedSide !== testCase.values.outfeedSide) errors.push("metadata");
+        if (platform?.metadata?.logisticsFlow?.outfeedSide !== testCase.values.outfeedSide) errors.push("platform-metadata");
+        if (roller?.metadata?.logisticsFlow?.outfeedSide !== testCase.values.outfeedSide) errors.push("roller-metadata");
+        if (arrows.length !== 1) errors.push("arrow-count=" + arrows.length);
+        if (arrow?.parent !== platform) errors.push("arrow-parent");
+        if (Math.abs((arrow?.rotation?.y ?? Number.NaN) - yawBySide[testCase.values.outfeedSide]) > 0.001) errors.push("arrow-yaw");
+        if (JSON.stringify(readMetadataKeys(arrow)) !== JSON.stringify(["directionArrowVisual", "generatedByParametricRuntime"])) errors.push("arrow-metadata");
+        if (arrow?.metadata?.motionSourceNodeName !== undefined) errors.push("arrow-motion-source");
+
+        let cleanup = null;
+        if (testCase.cleanupProbe) {
+          runtime.dispose();
+          await delay(30);
+          const remainingDirectionArrows = findDirectionArrows(root).length;
+          const metadataRestored = [contentRoot, platform, roller].filter(Boolean).every((node) => node.metadata?.logisticsFlow === undefined);
+          cleanup = { remainingDirectionArrows, metadataRestored };
+          if (remainingDirectionArrows !== 0) errors.push("cleanup-arrow");
+          if (!metadataRestored) errors.push("cleanup-metadata");
+          root.setEnabled(false);
+        }
+
+        return { label: testCase.label, flow, arrowCount: arrows.length, yaw: arrow?.rotation?.y ?? null, cleanup, errors };
+      }
+
+      try {
+        const reports = [];
+        for (const testCase of cases) reports.push(await createCase(testCase));
+        const failures = reports.flatMap((item) => item.errors.map((error) => item.label + ":" + error));
+        const summaries = reports.map((item) => item.cleanup
+          ? item.label + ": arrow=" + item.arrowCount + "→" + item.cleanup.remainingDirectionArrows + ", metadata=" + (item.cleanup.metadataRestored ? "restored" : "dirty")
+          : item.label + ": " + item.flow.infeedSide + "→" + item.flow.outfeedSide + ", yaw=" + Number(item.yaw).toFixed(3));
+        status.innerHTML = "<span class=\"" + (failures.length ? "error" : "ok") + "\">" + (failures.length ? "失败" : "通过") + "</span> 入/出侧业务 metadata 与 Ban.4 顶面发光箭头保持一致，箭头不参与 GT.3 运动克隆。<br />" + summaries.join(" / ") + (failures.length ? "<br />" + failures.join("<br />") : "");
+        document.body.dataset.validationStatus = failures.length ? "fail" : "pass";
+        window.__YZJ_FLOW_READY__ = failures.length === 0;
+        window.__YZJ_FLOW_REPORT__ = reports;
+        engine.runRenderLoop(() => scene.render());
+      } catch (error) {
+        console.error(error);
+        status.innerHTML = "<span class=\"error\">失败</span>：" + (error instanceof Error ? error.message : String(error));
+        document.body.dataset.validationStatus = "fail";
+        window.__YZJ_FLOW_READY__ = false;
+      }
+
+      window.addEventListener("resize", () => engine.resize());
+    </script>
+  </body>
+</html>
