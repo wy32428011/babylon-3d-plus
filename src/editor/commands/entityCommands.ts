@@ -5,6 +5,7 @@ import type {
   LocatorComponent,
   MeshRendererComponent,
   ModelAssetComponent,
+  ModelGeneratorComponent,
   TransformComponent,
 } from '../model/components';
 import type { TelemetryBindingComponent } from '../model/telemetryBinding';
@@ -217,6 +218,20 @@ export function updateModelParameterValuesCommand(
     label: '更新模型参数',
     execute: (scene) => updateModelParameterValues(scene, entityId, after),
     undo: (scene) => updateModelParameterValues(scene, entityId, before),
+  };
+}
+
+/** 更新模型生成器完整配置，所有 Inspector 编辑都通过同一条可撤销命令提交。 */
+export function updateModelGeneratorCommand(
+  entityId: string,
+  before: ModelGeneratorComponent,
+  after: ModelGeneratorComponent,
+  label = '更新模型生成器',
+): Command {
+  return {
+    label,
+    execute: (scene) => updateModelGenerator(scene, entityId, after),
+    undo: (scene) => updateModelGenerator(scene, entityId, before),
   };
 }
 
@@ -448,6 +463,30 @@ export function updateTelemetryBindingCommand(
     label: '更新数据驱动绑定',
     execute: (scene) => updateTelemetryBinding(scene, entityId, after),
     undo: (scene) => updateTelemetryBinding(scene, entityId, before),
+  };
+}
+
+/** 将模型生成器组件替换为已校验的不可变快照。 */
+function updateModelGenerator(
+  scene: SceneDocument,
+  entityId: string,
+  modelGenerator: ModelGeneratorComponent,
+): SceneDocument {
+  const entity = scene.entities[entityId];
+  if (!entity?.components.modelGenerator) return scene;
+
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [entityId]: {
+        ...entity,
+        components: {
+          ...entity.components,
+          modelGenerator,
+        },
+      },
+    },
   };
 }
 

@@ -1,0 +1,1541 @@
+diff --git a/src/editor/model/components.ts b/src/editor/model/components.ts
+index 0e09145..7ed574d 100644
+--- a/src/editor/model/components.ts
++++ b/src/editor/model/components.ts
+@@ -27,6 +27,9 @@ export type LocatorComponent = {
+ };
+ 
+ export type CadReferenceOriginMode = 'center';
++export type CadReferenceImportMode = 'exact' | 'large-preview';
++/** CAD 单位判定来源：DXF 明确声明、MEASUREMENT 推断、毫米兜底或旧场景兼容。 */
++export type CadReferenceUnitDetection = 'insunits' | 'measurement' | 'fallback' | 'legacy';
+ 
+ export type CadReferenceLayerStat = {
+   name: string;
+@@ -45,6 +48,11 @@ export type CadReferenceBounds = {
+ export type CadReferenceComponent = {
+   sourcePath: string;
+   sourceUrl: string;
++  sourceFileSizeBytes: number;
++  importMode: CadReferenceImportMode;
++  sourceUnitCode: number | null;
++  sourceUnitName: string;
++  unitDetection: CadReferenceUnitDetection;
+   unitScaleToMeters: number;
+   originMode: CadReferenceOriginMode;
+   lineColor: string;
+@@ -61,8 +69,8 @@ export type ModelScriptAsset = {
+   name: string;
+ };
+ 
+-export type ModelAssetComponent = {
+-  assetCode: string;
++/** 可复用的模型资产模板，不包含实例级 assetCode。 */
++export type ModelAssetTemplate = {
+   sourcePath: string;
+   sourceUrl: string;
+   assetRevision?: string;
+@@ -76,6 +84,56 @@ export type ModelAssetComponent = {
+   dataDrivenConfig?: ModelDataDrivenConfig;
+ };
+ 
++/** 运行时模型资产组件，在模板基础上追加实例级资产编号。 */
++export type ModelAssetComponent = ModelAssetTemplate & {
++  assetCode: string;
++};
++
++/** 模型生成器的导入模型目标，保存资产索引信息和完整模型模板。 */
++export type ModelGeneratorModelTarget = {
++  kind: 'model';
++  assetId: string;
++  displayName: string;
++  packagePath?: string;
++  thumbnailUrl?: string;
++  modelAsset: ModelAssetTemplate;
++};
++
++/** 模型生成器的内置 Mesh 目标，保存创建基础几何体所需字段。 */
++export type ModelGeneratorMeshTarget = {
++  kind: 'mesh';
++  meshKind: MeshKind;
++  displayName: string;
++  materialColor: string;
++};
++
++/** 模型生成器可生成的目标类型集合。 */
++export type ModelGeneratorTarget = ModelGeneratorModelTarget | ModelGeneratorMeshTarget;
++
++/** 模型生成器规则，根据属性名和值选择一个生成目标。 */
++export type ModelGeneratorRule = {
++  id: string;
++  attributeName: string;
++  attributeValue: string;
++  target: ModelGeneratorTarget | null;
++};
++
++/** 模型生成器绑定，将外部设备身份绑定到生成出的资产编号。 */
++export type ModelGeneratorBinding = {
++  id: string;
++  sourceId: string;
++  deviceType: string;
++  assetCode: string;
++};
++
++/** 模型生成器组件，保存默认目标、规则、元数据 TTL 和设备绑定。 */
++export type ModelGeneratorComponent = {
++  defaultTarget: ModelGeneratorTarget | null;
++  rules: ModelGeneratorRule[];
++  metadataTtlSeconds: number;
++  bindings: ModelGeneratorBinding[];
++};
++
+ export type CameraComponent = {
+   fov: number;
+   near: number;
+@@ -95,6 +153,7 @@ export type EntityComponents = {
+   locator?: LocatorComponent;
+   cadReference?: CadReferenceComponent;
+   modelAsset?: ModelAssetComponent;
++  modelGenerator?: ModelGeneratorComponent;
+   telemetryBinding?: TelemetryBindingComponent;
+   camera?: CameraComponent;
+   light?: LightComponent;
+diff --git a/src/editor/project/SceneSerializer.ts b/src/editor/project/SceneSerializer.ts
+index b17e894..46bc1bd 100644
+--- a/src/editor/project/SceneSerializer.ts
++++ b/src/editor/project/SceneSerializer.ts
+@@ -1,4 +1,5 @@
+ import type { Entity } from '../model/Entity';
++import { createLegacyCadReferenceUnitInfo, normalizeCadReferenceUnitInfo } from '../cad/cadUnits';
+ import {
+   AUTHORIZED_LOCAL_ASSET_URL_PREFIX,
+   createDefaultSceneSettings,
+@@ -15,6 +16,14 @@ import {
+   type SceneSettings,
+ } from '../model/SceneDocument';
+ import type { EntityComponents, LightKind, LocatorStorageDepth, MeshKind } from '../model/components';
++import {
++  MODEL_GENERATOR_MAX_BINDINGS,
++  MODEL_GENERATOR_MAX_RULES,
++  MODEL_GENERATOR_TTL_MAX_SECONDS,
++  MODEL_GENERATOR_TTL_MIN_SECONDS,
++  sanitizeModelGeneratorComponent,
++  sanitizeModelGeneratorTarget,
++} from '../model/modelGenerator';
+ import type { Vector3Data } from '../model/math';
+ import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
+ import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit } from '../model/sceneUnits';
+@@ -201,8 +210,17 @@ function normalizeSceneEnvironmentSettings(value: unknown): SceneEnvironmentSett
+     throwUnsupportedSceneFileError();
+   }
+ 
++  let unitInfo;
++  try {
++    unitInfo = normalizeModelLengthUnitInfo(environment.lengthUnit, environment.unitScaleToMeters);
++  } catch {
++    throwUnsupportedSceneFileError();
++  }
++
+   return {
+     packagePath: assertString(environment.packagePath),
++    lengthUnit: unitInfo.lengthUnit,
++    unitScaleToMeters: unitInfo.unitScaleToMeters,
+     ...(environment.thumbnailUrl === undefined ? {} : { thumbnailUrl: assertString(environment.thumbnailUrl) }),
+     activeVariantUrl,
+     variants,
+@@ -274,6 +292,10 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
+     normalized.modelAsset = normalizeModelAsset(components.modelAsset, entityId);
+   }
+ 
++  if ('modelGenerator' in components && components.modelGenerator !== undefined) {
++    normalized.modelGenerator = normalizeModelGenerator(components.modelGenerator);
++  }
++
+   if ('telemetryBinding' in components && components.telemetryBinding !== undefined) {
+     const telemetryBinding = normalizeTelemetryBindingComponent(components.telemetryBinding);
+     if (!telemetryBinding) throwUnsupportedSceneFileError();
+@@ -365,10 +387,34 @@ function normalizeCadReference(value: unknown): EntityComponents['cadReference']
+     throwUnsupportedSceneFileError();
+   }
+ 
++  const unitScaleToMeters = assertPositiveFiniteNumber(cadReference.unitScaleToMeters);
++  const hasUnitAuditFields = cadReference.sourceUnitCode !== undefined
++    || cadReference.sourceUnitName !== undefined
++    || cadReference.unitDetection !== undefined;
++  let unitInfo;
++
++  try {
++    unitInfo = hasUnitAuditFields
++      ? normalizeCadReferenceUnitInfo(
++          cadReference.sourceUnitCode,
++          cadReference.sourceUnitName,
++          cadReference.unitDetection,
++          unitScaleToMeters,
++        )
++      : createLegacyCadReferenceUnitInfo(unitScaleToMeters);
++  } catch {
++    throwUnsupportedSceneFileError();
++  }
++
+   return {
+     sourcePath,
+     sourceUrl,
+-    unitScaleToMeters: assertPositiveFiniteNumber(cadReference.unitScaleToMeters),
++    sourceFileSizeBytes: normalizeNonNegativeInteger(cadReference.sourceFileSizeBytes ?? 0),
++    importMode: cadReference.importMode === 'large-preview' ? 'large-preview' : 'exact',
++    sourceUnitCode: unitInfo.sourceUnitCode,
++    sourceUnitName: unitInfo.sourceUnitName,
++    unitDetection: unitInfo.unitDetection,
++    unitScaleToMeters: unitInfo.unitScaleToMeters,
+     originMode: 'center',
+     lineColor: assertColorString(cadReference.lineColor),
+     opacity: normalizeOpacity(cadReference.opacity),
+@@ -538,6 +584,50 @@ function normalizeJsonValue(value: unknown, depth: number, seen: { count: number
+   );
+ }
+ 
++/** 校验并清理模型生成器组件，旧场景缺失该字段时不会进入此分支。 */
++function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerator'] {
++  const modelGenerator = assertPlainObject(value);
++  const metadataTtlSeconds = assertFiniteNumber(modelGenerator.metadataTtlSeconds);
++  if (metadataTtlSeconds < MODEL_GENERATOR_TTL_MIN_SECONDS || metadataTtlSeconds > MODEL_GENERATOR_TTL_MAX_SECONDS) {
++    throwUnsupportedSceneFileError();
++  }
++
++  const rules = assertArray(modelGenerator.rules);
++  const bindings = assertArray(modelGenerator.bindings);
++  if (rules.length > MODEL_GENERATOR_MAX_RULES || bindings.length > MODEL_GENERATOR_MAX_BINDINGS) {
++    throwUnsupportedSceneFileError();
++  }
++
++  const rawDefaultTarget = modelGenerator.defaultTarget;
++  if (rawDefaultTarget !== undefined && rawDefaultTarget !== null && !sanitizeModelGeneratorTarget(rawDefaultTarget)) {
++    throwUnsupportedSceneFileError();
++  }
++  for (const ruleValue of rules) {
++    const rule = assertPlainObject(ruleValue);
++    if (rule.target !== undefined && rule.target !== null && !sanitizeModelGeneratorTarget(rule.target)) {
++      throwUnsupportedSceneFileError();
++    }
++  }
++
++  const normalized = sanitizeModelGeneratorComponent({
++    defaultTarget: rawDefaultTarget,
++    rules,
++    metadataTtlSeconds,
++    bindings,
++  });
++  if (!normalized || normalized.rules.length !== rules.length || normalized.bindings.length !== bindings.length) {
++    throwUnsupportedSceneFileError();
++  }
++
++  const ruleIds = normalized.rules.map((rule) => rule.id);
++  const bindingIds = normalized.bindings.map((binding) => binding.id);
++  if (new Set(ruleIds).size !== ruleIds.length || new Set(bindingIds).size !== bindingIds.length) {
++    throwUnsupportedSceneFileError();
++  }
++
++  return normalized;
++}
++
+ function normalizeCamera(value: unknown): EntityComponents['camera'] {
+   const camera = assertPlainObject(value);
+ 
+@@ -599,6 +689,7 @@ function hasRuntimeComponent(components: EntityComponents): boolean {
+     components.locator ||
+     components.cadReference ||
+     components.modelAsset ||
++    components.modelGenerator ||
+     components.camera ||
+     components.light,
+   );
+diff --git a/src/runtime/babylon/SceneRuntime.ts b/src/runtime/babylon/SceneRuntime.ts
+index 1ba6758..9584a5a 100644
+--- a/src/runtime/babylon/SceneRuntime.ts
++++ b/src/runtime/babylon/SceneRuntime.ts
+@@ -31,7 +31,10 @@ import type {
+   CadReferenceComponent,
+   LightComponent,
+   LocatorComponent,
++  MeshKind,
+   ModelAssetComponent,
++  ModelGeneratorComponent,
++  ModelGeneratorTarget,
+   TransformComponent,
+ } from '../../editor/model/components';
+ import type {
+@@ -40,19 +43,35 @@ import type {
+   ModelParameterValue,
+   ModelParameterValues,
+ } from '../../editor/model/modelParameters';
++import {
++  BUILT_IN_BOX_SIZE_METERS,
++  BUILT_IN_PLANE_SIZE_METERS,
++  BUILT_IN_SPHERE_DIAMETER_METERS,
++  getBuiltInMeshGroundOffsetMeters,
++} from '../../editor/model/builtInMeshGeometry';
+ import type { Vector3Data } from '../../editor/model/math';
+-import type { SceneDocument, SceneEnvironmentSettings } from '../../editor/model/SceneDocument';
++import { createModelAssetCode, type SceneDocument, type SceneEnvironmentSettings } from '../../editor/model/SceneDocument';
+ import type { TelemetryBindingComponent } from '../../editor/model/telemetryBinding';
+ import {
++  createModelGeneratorTargetSignature,
++  createRuntimeModelAssetFromTarget,
++} from '../../editor/model/modelGenerator';
++import {
++  CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET,
+   consumeCadReferenceParseResult,
+   parseCadReferenceDxf,
+   type CadReferenceParseResult,
+ } from '../../editor/cad/cadReference';
++import { createCadReferenceDxfWorkerTask } from '../../editor/cad/cadReferenceWorkerClient';
+ import {
+   ExternalModelScriptRuntime,
+   type ExternalModelScriptRuntimeMode,
+   type ExternalModelScriptTelemetrySnapshot,
+ } from './ExternalModelScriptRuntime';
++import {
++  calculateEnvironmentOriginLeftOffset,
++  ENVIRONMENT_FALLBACK_LEFT_OFFSET_METERS,
++} from './environmentPlacement';
+ import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
+ import { GenericTelemetryMotionRuntime } from './telemetry/GenericTelemetryMotionRuntime';
+ import {
+@@ -83,6 +102,8 @@ const SELECTED_MATERIAL_COLOR = '#f7d774';
+ const SELECTED_EMISSIVE_COLOR = '#332400';
+ const FALLBACK_MATERIAL_COLOR = '#8ab4f8';
+ const LOCATOR_EDGE_COLOR = '#19c7d4';
++const MODEL_GENERATOR_MARKER_COLOR = '#19c7d4';
++const MODEL_GENERATOR_MARKER_ALPHA = 0.65;
+ const LOCATOR_SURFACE_ALPHA = 0.025;
+ const SELECTED_LOCATOR_SURFACE_ALPHA = 0.08;
+ const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
+@@ -134,6 +155,7 @@ type ModelRuntimeEntry = {
+   container: AssetContainer | null;
+   meshes: AbstractMesh[];
+   highlighted: boolean;
++  highlightedMeshes: Set<Mesh>;
+   loadToken: number;
+   parameterSignature: string;
+   parameterBaseline: Map<string, ModelParameterBaselineValue>;
+@@ -152,6 +174,46 @@ type SpecializedTelemetryRuntimeEntry = {
+   binding: ResolvedSpecializedTelemetryBinding;
+ };
+ 
++type ModelGeneratorMarkerRuntimeEntry = {
++  mesh: Mesh;
++  material: StandardMaterial;
++};
++
++type ModelGeneratorMeshOutputRuntimeEntry = {
++  kind: 'mesh';
++  target: Extract<ModelGeneratorTarget, { kind: 'mesh' }>;
++  mesh: Mesh;
++  material: StandardMaterial;
++};
++
++type ModelGeneratorModelOutputRuntimeEntry = {
++  kind: 'model';
++  model: ModelRuntimeEntry;
++};
++
++type ModelGeneratorOutputRuntimeEntry = ModelGeneratorMeshOutputRuntimeEntry | ModelGeneratorModelOutputRuntimeEntry;
++
++type ModelGeneratorRuntimeEntry = {
++  entityId: string;
++  entityName: string;
++  root: TransformNode;
++  marker: ModelGeneratorMarkerRuntimeEntry;
++  component: ModelGeneratorComponent;
++  selected: boolean;
++  output: ModelGeneratorOutputRuntimeEntry | null;
++  activeTargetSignature: string | null;
++  loadToken: number;
++  failedTargetSignatures: Set<string>;
++  reportedLoadFailureKeys: Set<string>;
++  activeSnapshot: DeviceTelemetrySnapshot | null;
++};
++
++type ResolvedModelGeneratorTarget = {
++  target: ModelGeneratorTarget | null;
++  role: 'default' | 'conditional';
++  snapshot: DeviceTelemetrySnapshot | null;
++};
++
+ type ModelParameterRuntimeTarget = AbstractMesh | TransformNode | Material;
+ type ModelParameterBaselineValue = boolean | number | string | Vector3Data | Texture | null;
+ 
+@@ -260,10 +322,12 @@ type CadReferenceRuntimeEntry = {
+   loadToken: number;
+   lineColor: string;
+   opacity: number;
++  cancelLoad: (() => void) | null;
+ };
+ 
+ type EnvironmentRuntimeEntry = {
+   sourceUrl: string;
++  unitScaleToMeters: number;
+   root: TransformNode;
+   container: AssetContainer | null;
+   loadToken: number;
+@@ -285,6 +349,7 @@ export class SceneRuntime {
+   private readonly locatorTargets = new Map<string, LocatorRuntimeEntry>();
+   private readonly cadReferences = new Map<string, CadReferenceRuntimeEntry>();
+   private readonly models = new Map<string, ModelRuntimeEntry>();
++  private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
+   private readonly stackerCargoMeshes = new Map<string, StackerCargoRuntimeEntry>();
+   private readonly conveyorCargoMeshes = new Map<string, ConveyorCargoRuntimeEntry>();
+   private readonly lights = new Map<string, Light>();
+@@ -317,11 +382,17 @@ export class SceneRuntime {
+     this.genericTelemetryMotionRuntime.beginPreview();
+     this.clearTelemetryPreviewRuntimeState();
+     this.updateAllExternalScriptRuntimeContexts('runtime', null);
++    this.clearModelGeneratorLoadFailureCache();
++    this.syncAllModelGeneratorTargets();
+   }
+ 
+   /** 结束 MQTT 运行预览；该方法幂等，按驱动关闭、运行态清理、模型恢复的顺序回到编辑态。 */
+   endTelemetryPreview(): void {
+-    const hadPreviewState = this.telemetryPreviewActive || [...this.models.values()].some((model) => model.telemetryPreviewBaseline);
++    const hadPreviewState = this.telemetryPreviewActive
++      || [...this.models.values()].some((model) => model.telemetryPreviewBaseline)
++      || [...this.modelGenerators.values()].some((generator) => (
++        generator.output?.kind === 'model' && generator.output.model.telemetryPreviewBaseline !== null
++      ));
+     if (!hadPreviewState) return;
+ 
+     this.telemetryPreviewActive = false;
+@@ -335,8 +406,20 @@ export class SceneRuntime {
+       this.resetStackerTelemetryState(model);
+       this.resetConveyorTelemetryState(model);
+     }
++    for (const generator of this.modelGenerators.values()) {
++      if (generator.output?.kind !== 'model') continue;
++      const model = generator.output.model;
++      if (model.telemetryPreviewBaseline) {
++        restoreModelTelemetryPreviewBaseline(model.telemetryPreviewBaseline);
++        model.telemetryPreviewBaseline = null;
++      }
++      this.resetStackerTelemetryState(model);
++      this.resetConveyorTelemetryState(model);
++    }
+     this.clearTelemetryPreviewRuntimeState();
+     this.updateAllExternalScriptRuntimeContexts('edit', null);
++    this.clearModelGeneratorLoadFailureCache();
++    this.syncAllModelGeneratorTargets();
+   }
+ 
+   /** 根据实体 ID 获取当前运行时中可被 Gizmo 绑定的 Babylon 节点。 */
+@@ -349,6 +432,7 @@ export class SceneRuntime {
+       this.locators.get(entityId)?.root ??
+       this.cadReferences.get(entityId)?.root ??
+       this.models.get(entityId)?.root ??
++      this.modelGenerators.get(entityId)?.root ??
+       null
+     );
+   }
+@@ -384,27 +468,58 @@ export class SceneRuntime {
+     return { x: hitPoint.x, y: 0, z: hitPoint.z };
+   }
+ 
+-  /** 汇总多个实体的世界包围盒，供 Scene View 执行右键菜单的场景聚焦。 */
+-  getEntitiesWorldBounds(entityIds: string[]): { center: Vector3Data; radiusMeters: number } | null {
++  /** 汇总多个实体的世界包围盒，供场景聚焦和模型阵列读取中心、尺寸与几何就绪状态。 */
++  getEntitiesWorldBounds(entityIds: string[]): {
++    center: Vector3Data;
++    sizeMeters: Vector3Data;
++    radiusMeters: number;
++    geometryReady: boolean;
++  } | null {
+     let mergedBounds: RuntimeWorldBounds | null = null;
++    let geometryReady = true;
+ 
+     for (const entityId of entityIds) {
+       const bounds = this.getEntityWorldBounds(entityId);
+-      if (!bounds) continue;
++      if (!bounds) {
++        geometryReady = false;
++        continue;
++      }
++      if (!this.isEntityWorldBoundsReady(entityId)) geometryReady = false;
+       mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+     }
+ 
+     if (!mergedBounds) return null;
+ 
+     const center = mergedBounds.minimum.add(mergedBounds.maximum).scale(0.5);
+-    const radiusMeters = Math.max(0.5, mergedBounds.maximum.subtract(mergedBounds.minimum).length() / 2);
++    const size = mergedBounds.maximum.subtract(mergedBounds.minimum);
++    const radiusMeters = Math.max(0.5, size.length() / 2);
+ 
+     return {
+       center: { x: center.x, y: center.y, z: center.z },
++      sizeMeters: { x: size.x, y: size.y, z: size.z },
+       radiusMeters,
++      geometryReady,
+     };
+   }
+ 
++  /** 判断实体的真实几何是否已就绪，避免模型加载或外置脚本初始化中的临时包围盒参与正式阵列。 */
++  private isEntityWorldBoundsReady(entityId: string): boolean {
++    const model = this.models.get(entityId);
++    if (model) return model.container !== null && model.stackerTelemetryReady;
++
++    const modelGenerator = this.modelGenerators.get(entityId);
++    if (modelGenerator?.output?.kind === 'model') {
++      return modelGenerator.output.model.container !== null && modelGenerator.output.model.stackerTelemetryReady;
++    }
++    if (modelGenerator?.output?.kind === 'mesh') return true;
++    if (modelGenerator) return !this.telemetryPreviewActive;
++
++    const cadReference = this.cadReferences.get(entityId);
++    if (cadReference) return cadReference.lineMeshes.length > 0 && cadReference.cancelLoad === null;
++
++    return this.meshes.has(entityId) || this.locators.has(entityId) || this.lights.has(entityId);
++  }
++
+   /** 将浏览器客户端坐标转换为 Babylon 画布内拾取坐标，并过滤画布外输入。 */
+   private getCanvasPickPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): { x: number; y: number } | null {
+     const rect = canvas.getBoundingClientRect();
+@@ -432,6 +547,9 @@ export class SceneRuntime {
+     const model = this.models.get(entityId);
+     if (model) return this.getModelWorldBounds(model);
+ 
++    const modelGenerator = this.modelGenerators.get(entityId);
++    if (modelGenerator) return this.getModelGeneratorWorldBounds(modelGenerator);
++
+     const light = this.lights.get(entityId);
+     if (light) return this.getLightWorldBounds(light);
+ 
+@@ -466,6 +584,24 @@ export class SceneRuntime {
+     return this.createPointWorldBounds(model.root.getAbsolutePosition());
+   }
+ 
++  /** 模型生成器优先使用当前派生输出包围盒，无输出时回退稳定根节点位置。 */
++  private getModelGeneratorWorldBounds(modelGenerator: ModelGeneratorRuntimeEntry): RuntimeWorldBounds | null {
++    if (modelGenerator.output?.kind === 'model') {
++      return this.getModelWorldBounds(modelGenerator.output.model);
++    }
++    if (modelGenerator.output?.kind === 'mesh') {
++      return this.getMeshWorldBounds(modelGenerator.output.mesh);
++    }
++
++    if (!this.telemetryPreviewActive) {
++      const markerBounds = this.getMeshWorldBounds(modelGenerator.marker.mesh);
++      if (markerBounds) return markerBounds;
++    }
++
++    modelGenerator.root.computeWorldMatrix(true);
++    return this.createPointWorldBounds(modelGenerator.root.getAbsolutePosition());
++  }
++
+   /** CAD 参考层优先按所有线稿 Mesh 合并包围盒，加载中则回退到根节点位置。 */
+   private getCadReferenceWorldBounds(cadReference: CadReferenceRuntimeEntry): RuntimeWorldBounds | null {
+     let mergedBounds: RuntimeWorldBounds | null = null;
+@@ -537,6 +673,9 @@ export class SceneRuntime {
+     const modelIds = new Set(
+       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.modelAsset)),
+     );
++    const modelGeneratorIds = new Set(
++      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.modelGenerator)),
++    );
+     const lightIds = new Set(
+       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.light)),
+     );
+@@ -565,6 +704,12 @@ export class SceneRuntime {
+       }
+     }
+ 
++    for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
++      if (!modelGeneratorIds.has(entityId)) {
++        this.disposeModelGenerator(entityId, modelGenerator);
++      }
++    }
++
+     for (const [entityId, light] of this.lights.entries()) {
+       if (!lightIds.has(entityId)) {
+         this.disposeLight(entityId, light);
+@@ -591,13 +736,15 @@ export class SceneRuntime {
+       return;
+     }
+ 
+-    if (this.environment?.sourceUrl === sourceUrl) return;
++    const unitScaleToMeters = environment?.unitScaleToMeters ?? 1;
++    if (this.environment?.sourceUrl === sourceUrl && this.environment.unitScaleToMeters === unitScaleToMeters) return;
+ 
+     this.disposeEnvironment();
+ 
+     const root = new TransformNode('EnvironmentRoot', this.scene);
++    this.applyModelUnitScale(root, unitScaleToMeters);
+     const loadToken = ++this.environmentLoadSequence;
+-    this.environment = { sourceUrl, root, container: null, loadToken };
++    this.environment = { sourceUrl, unitScaleToMeters, root, container: null, loadToken };
+ 
+     const { rootUrl, fileName } = this.splitAssetUrl(resolveRuntimeAssetUrl(sourceUrl));
+ 
+@@ -612,6 +759,7 @@ export class SceneRuntime {
+         container.addAllToScene();
+         activeEnvironment.container = container;
+         this.parentTopLevelEnvironmentNodes(activeEnvironment);
++        this.positionEnvironmentLeftOfOrigin(activeEnvironment);
+ 
+         for (const mesh of container.meshes) {
+           mesh.isPickable = false;
+@@ -645,6 +793,9 @@ export class SceneRuntime {
+     for (const [entityId, model] of this.models.entries()) {
+       this.disposeModel(entityId, model);
+     }
++    for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
++      this.disposeModelGenerator(entityId, modelGenerator);
++    }
+     this.genericTelemetryMotionRuntime.dispose();
+     for (const cargo of this.stackerCargoMeshes.values()) {
+       this.disposeStackerCargo(cargo);
+@@ -663,6 +814,7 @@ export class SceneRuntime {
+     this.reportedDuplicateLocatorTargets.clear();
+     this.cadReferences.clear();
+     this.models.clear();
++    this.modelGenerators.clear();
+     this.stackerCargoMeshes.clear();
+     this.conveyorCargoMeshes.clear();
+     this.lights.clear();
+@@ -687,6 +839,10 @@ export class SceneRuntime {
+       this.syncModelEntity(entity, selected);
+     }
+ 
++    if (entity.components.modelGenerator) {
++      this.syncModelGeneratorEntity(entity, selected);
++    }
++
+     if (entity.components.light) {
+       this.syncLightEntity(entity);
+     }
+@@ -824,20 +980,21 @@ export class SceneRuntime {
+       loadToken,
+       lineColor: cadReference.lineColor,
+       opacity: cadReference.opacity,
++      cancelLoad: null,
+     };
+     this.cadReferences.set(entity.id, pending);
+     this.applyCadReferenceInteractivity(pending, entity.id);
+ 
+     const cachedGeometry = consumeCadReferenceParseResult(cadReference.sourceUrl, cadReference.unitScaleToMeters);
+     if (cachedGeometry) {
+-      void Promise.resolve().then(() => {
++      void Promise.resolve().then(async () => {
+         const activeEntry = this.cadReferences.get(entity.id);
+         if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.sourceUrl !== cadReference.sourceUrl) {
+           return;
+         }
+ 
+         try {
+-          this.applyCadReferenceGeometry(entity.id, activeEntry, cachedGeometry);
++          await this.applyCadReferenceGeometry(entity.id, activeEntry, cachedGeometry);
+         } catch (error) {
+           console.warn('CAD 参考图加载失败', error);
+           if (this.cadReferences.get(entity.id)?.loadToken === loadToken) {
+@@ -848,24 +1005,42 @@ export class SceneRuntime {
+       return;
+     }
+ 
+-    void fetch(resolveRuntimeAssetUrl(cadReference.sourceUrl))
+-      .then((response) => {
+-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+-        return response.text();
+-      })
+-      .then((content) => {
++    const shouldUseLargeDxfWorker = cadReference.importMode === 'large-preview' || (
++      cadReference.polylineCount >= CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET.maxPolylines * 0.5
++      || cadReference.pointCount >= CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET.maxPoints * 0.5
++    );
++    let geometryPromise: Promise<CadReferenceParseResult>;
++    if (shouldUseLargeDxfWorker) {
++      const workerTask = createCadReferenceDxfWorkerTask(cadReference.sourceUrl, undefined, cadReference.unitScaleToMeters);
++      pending.cancelLoad = workerTask.cancel;
++      geometryPromise = workerTask.promise;
++    } else {
++      const abortController = new AbortController();
++      pending.cancelLoad = () => abortController.abort();
++      geometryPromise = fetch(resolveRuntimeAssetUrl(cadReference.sourceUrl), { signal: abortController.signal })
++        .then(async (response) => {
++          if (!response.ok) throw new Error(`HTTP ${response.status}`);
++          const content = await response.text();
++          return parseCadReferenceDxf(content, { unitScaleToMeters: cadReference.unitScaleToMeters });
++        });
++    }
++
++    void geometryPromise
++      .then(async (geometry) => {
+         const activeEntry = this.cadReferences.get(entity.id);
+         if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.sourceUrl !== cadReference.sourceUrl) {
+           return;
+         }
+ 
+-        const geometry = parseCadReferenceDxf(content, { unitScaleToMeters: cadReference.unitScaleToMeters });
+-        this.applyCadReferenceGeometry(entity.id, activeEntry, geometry);
++        activeEntry.cancelLoad = null;
++        await this.applyCadReferenceGeometry(entity.id, activeEntry, geometry);
+       })
+       .catch((error) => {
+-        console.warn('CAD 参考图加载失败。', error);
+         const activeEntry = this.cadReferences.get(entity.id);
+-        if (activeEntry?.loadToken === loadToken) {
++        if (!activeEntry || activeEntry.loadToken !== loadToken) return;
++        activeEntry.cancelLoad = null;
++        console.warn('CAD 参考图加载失败。', error);
++        if (activeEntry.loadToken === loadToken) {
+           this.disposeCadReference(entity.id, activeEntry);
+         }
+       });
+@@ -927,6 +1102,7 @@ export class SceneRuntime {
+       container: null,
+       meshes: [],
+       highlighted: false,
++      highlightedMeshes: new Set(),
+       loadToken,
+       parameterSignature: '',
+       parameterBaseline: new Map(),
+@@ -973,6 +1149,300 @@ export class SceneRuntime {
+       });
+   }
+ 
++  /** 同步模型生成器稳定根节点；编辑态只保留青色线框，运行态再按有效信号解析输出。 */
++  private syncModelGeneratorEntity(entity: Entity, selected: boolean): void {
++    const component = entity.components.modelGenerator;
++    if (!component) return;
++
++    let runtimeEntry = this.modelGenerators.get(entity.id);
++    if (!runtimeEntry) {
++      const root = new TransformNode(`${entity.id}_modelGeneratorRoot`, this.scene);
++      runtimeEntry = {
++        entityId: entity.id,
++        entityName: entity.name,
++        root,
++        marker: this.createModelGeneratorMarker(entity.id, root),
++        component,
++        selected,
++        output: null,
++        activeTargetSignature: null,
++        loadToken: 0,
++        failedTargetSignatures: new Set(),
++        reportedLoadFailureKeys: new Set(),
++        activeSnapshot: null,
++      };
++      this.modelGenerators.set(entity.id, runtimeEntry);
++    }
++
++    runtimeEntry.entityName = entity.name;
++    runtimeEntry.component = component;
++    runtimeEntry.selected = selected;
++    this.applyTransform(runtimeEntry.root, entity.components.transform);
++    this.syncModelGeneratorResolvedTarget(runtimeEntry, this.resolveModelGeneratorTarget(runtimeEntry));
++    this.applyModelGeneratorPresentation(runtimeEntry);
++  }
++
++  /** 重新解析全部生成器目标；MQTT 预览每帧调用，编辑态切换时也复用。 */
++  private syncAllModelGeneratorTargets(): void {
++    for (const runtimeEntry of this.modelGenerators.values()) {
++      this.syncModelGeneratorResolvedTarget(runtimeEntry, this.resolveModelGeneratorTarget(runtimeEntry));
++      this.applyModelGeneratorPresentation(runtimeEntry);
++    }
++  }
++
++  /** 在编辑态与运行态切换时允许失败目标重新尝试，同时保留已上报日志避免重复刷屏。 */
++  private clearModelGeneratorLoadFailureCache(): void {
++    for (const runtimeEntry of this.modelGenerators.values()) {
++      runtimeEntry.failedTargetSignatures.clear();
++    }
++  }
++
++  /** 按完整绑定、TTL、最新接收时间和规则顺序解析信号命中目标；未命中时明确返回空输出。 */
++  private resolveModelGeneratorTarget(runtimeEntry: ModelGeneratorRuntimeEntry): ResolvedModelGeneratorTarget {
++    const defaultResolution: ResolvedModelGeneratorTarget = {
++      target: null,
++      role: 'default',
++      snapshot: null,
++    };
++    if (!this.telemetryPreviewActive) return defaultResolution;
++
++    const ttlMs = runtimeEntry.component.metadataTtlSeconds * 1000;
++    const nowMs = Date.now();
++    let latestSnapshot: DeviceTelemetrySnapshot | null = null;
++
++    for (const binding of runtimeEntry.component.bindings) {
++      const sourceId = binding.sourceId.trim();
++      const deviceType = binding.deviceType.trim().toLowerCase();
++      const assetCode = binding.assetCode.trim();
++      if (!sourceId || !deviceType || !assetCode) continue;
++
++      const snapshot = deviceTelemetryStore.getSnapshot(assetCode, deviceType, sourceId);
++      if (!snapshot || !Number.isFinite(snapshot.receivedAt)) continue;
++      if (nowMs - snapshot.receivedAt > ttlMs) continue;
++      if (!latestSnapshot || snapshot.receivedAt > latestSnapshot.receivedAt) {
++        latestSnapshot = snapshot;
++      }
++    }
++
++    if (!latestSnapshot) return defaultResolution;
++
++    for (const rule of runtimeEntry.component.rules) {
++      const attributeName = rule.attributeName.trim();
++      if (!attributeName) continue;
++
++      const fieldValue = latestSnapshot.fields[attributeName];
++      if (typeof fieldValue !== 'string' && typeof fieldValue !== 'number' && typeof fieldValue !== 'boolean') continue;
++      if (String(fieldValue).trim() !== rule.attributeValue.trim()) continue;
++
++      // 命中规则但规则目标和共享模板都为空时，继续检查后续规则，避免空目标提前阻断可用规则。
++      const candidateTarget = rule.target ?? runtimeEntry.component.defaultTarget;
++      if (!candidateTarget) continue;
++
++      return {
++        target: candidateTarget,
++        role: rule.target ? 'conditional' : 'default',
++        snapshot: latestSnapshot,
++      };
++    }
++
++    return {
++      target: null,
++      role: 'default',
++      snapshot: null,
++    };
++  }
++
++  /** 对解析结果去重，同一目标签名不会重复销毁和加载。 */
++  private syncModelGeneratorResolvedTarget(
++    runtimeEntry: ModelGeneratorRuntimeEntry,
++    resolution: ResolvedModelGeneratorTarget,
++  ): void {
++    runtimeEntry.activeSnapshot = resolution.snapshot;
++    const target = resolution.target;
++    if (!target) {
++      if (runtimeEntry.activeTargetSignature !== null || runtimeEntry.output) {
++        runtimeEntry.loadToken += 1;
++        this.disposeModelGeneratorOutput(runtimeEntry);
++        runtimeEntry.activeTargetSignature = null;
++      }
++      return;
++    }
++
++    const targetSignature = createModelGeneratorTargetSignature(target);
++    if (runtimeEntry.failedTargetSignatures.has(targetSignature)) {
++      if (resolution.role === 'conditional') {
++        this.syncModelGeneratorResolvedTarget(runtimeEntry, {
++          target: runtimeEntry.component.defaultTarget,
++          role: 'default',
++          snapshot: resolution.snapshot,
++        });
++        return;
++      }
++
++      if (runtimeEntry.activeTargetSignature !== targetSignature || runtimeEntry.output) {
++        runtimeEntry.loadToken += 1;
++        this.disposeModelGeneratorOutput(runtimeEntry);
++        runtimeEntry.activeTargetSignature = targetSignature;
++      }
++      return;
++    }
++
++    if (runtimeEntry.activeTargetSignature === targetSignature) {
++      return;
++    }
++
++    runtimeEntry.loadToken += 1;
++    this.disposeModelGeneratorOutput(runtimeEntry);
++    runtimeEntry.activeTargetSignature = targetSignature;
++
++    if (target.kind === 'mesh') {
++      runtimeEntry.output = this.createModelGeneratorMeshOutput(runtimeEntry, target);
++      return;
++    }
++
++    this.loadModelGeneratorModelOutput(runtimeEntry, target, targetSignature, resolution);
++  }
++
++  /** 异步加载生成器导入模型输出；过期 token 的容器会立即丢弃。 */
++  private loadModelGeneratorModelOutput(
++    runtimeEntry: ModelGeneratorRuntimeEntry,
++    target: Extract<ModelGeneratorTarget, { kind: 'model' }>,
++    targetSignature: string,
++    resolution: ResolvedModelGeneratorTarget,
++  ): void {
++    const modelAsset = createRuntimeModelAssetFromTarget(
++      target,
++      createModelAssetCode('GEN', runtimeEntry.entityId),
++    );
++    if (!modelAsset) {
++      this.handleModelGeneratorLoadFailure(runtimeEntry, targetSignature, resolution, new Error('目标模型快照无效'));
++      return;
++    }
++
++    const modelRoot = new TransformNode(`${runtimeEntry.entityId}_generatedModelRoot`, this.scene);
++    const contentRoot = new TransformNode(`${runtimeEntry.entityId}_generatedModelContentRoot`, this.scene);
++    modelRoot.parent = runtimeEntry.root;
++    contentRoot.parent = modelRoot;
++    this.applyModelUnitScale(contentRoot, modelAsset.unitScaleToMeters);
++
++    const modelLoadToken = ++this.modelLoadSequence;
++    const model: ModelRuntimeEntry = {
++      sourceUrl: modelAsset.sourceUrl,
++      assetRevision: modelAsset.assetRevision ?? null,
++      assetSignature: this.createModelAssetSignature(modelAsset),
++      assetCode: modelAsset.assetCode,
++      telemetryBinding: null,
++      stackerCapable: this.isStackerModelAsset(modelAsset),
++      conveyorCapable: this.isConveyorModelAsset(modelAsset),
++      root: modelRoot,
++      contentRoot,
++      container: null,
++      meshes: [],
++      highlighted: false,
++      highlightedMeshes: new Set(),
++      loadToken: modelLoadToken,
++      parameterSignature: '',
++      parameterBaseline: new Map(),
++      textureCache: new Map(),
++      externalScriptRuntime: null,
++      externalScriptSignature: '',
++      stackerTelemetry: this.createStackerTelemetryState(modelRoot),
++      conveyorTelemetry: this.createConveyorTelemetryState(),
++      stackerTelemetryReady: false,
++      telemetryPreviewBaseline: null,
++    };
++    runtimeEntry.output = { kind: 'model', model };
++    const generatorLoadToken = runtimeEntry.loadToken;
++    this.applyModelGeneratorPresentation(runtimeEntry);
++
++    const { rootUrl, fileName } = this.splitAssetUrl(
++      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
++    );
++
++    void SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene)
++      .then((container) => {
++        const activeEntry = this.modelGenerators.get(runtimeEntry.entityId);
++        const activeOutput = activeEntry?.output;
++        if (
++          !activeEntry
++          || activeEntry.loadToken !== generatorLoadToken
++          || activeEntry.activeTargetSignature !== targetSignature
++          || activeOutput?.kind !== 'model'
++          || activeOutput.model !== model
++        ) {
++          container.dispose();
++          return;
++        }
++
++        container.addAllToScene();
++        model.container = container;
++        model.meshes = container.meshes;
++        this.parentTopLevelModelNodes(model);
++        this.normalizeModelContentOrigin(model);
++        for (const mesh of model.meshes) {
++          mesh.metadata = { ...(mesh.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.entityId };
++        }
++        this.applyModelAssetParameters(modelAsset, model);
++        this.syncModelGeneratorExternalScripts(activeEntry, modelAsset, model);
++        this.applyModelGeneratorPresentation(activeEntry);
++      })
++      .catch((error) => {
++        const activeEntry = this.modelGenerators.get(runtimeEntry.entityId);
++        const activeOutput = activeEntry?.output;
++        if (
++          !activeEntry
++          || activeEntry.loadToken !== generatorLoadToken
++          || activeEntry.activeTargetSignature !== targetSignature
++          || activeOutput?.kind !== 'model'
++          || activeOutput.model !== model
++        ) return;
++
++        this.disposeModelGeneratorOutput(activeEntry);
++        this.handleModelGeneratorLoadFailure(activeEntry, targetSignature, resolution, error);
++      });
++  }
++
++  /** 记录一次模型加载失败；规则覆盖模型失败时在同一有效信号下回退共享生成模板。 */
++  private handleModelGeneratorLoadFailure(
++    runtimeEntry: ModelGeneratorRuntimeEntry,
++    targetSignature: string,
++    resolution: ResolvedModelGeneratorTarget,
++    error: unknown,
++  ): void {
++    runtimeEntry.failedTargetSignatures.add(targetSignature);
++    runtimeEntry.activeTargetSignature = targetSignature;
++    const failureKey = `${resolution.role}:${targetSignature}`;
++    if (!runtimeEntry.reportedLoadFailureKeys.has(failureKey)) {
++      runtimeEntry.reportedLoadFailureKeys.add(failureKey);
++      const message = error instanceof Error ? error.message : String(error);
++      const targetLabel = resolution.role === 'conditional' ? '规则覆盖模型' : '共享生成模板';
++      const fallbackLabel = resolution.role === 'conditional' ? '，已回退共享生成模板' : '';
++      this.pushLog(`模型生成器“${runtimeEntry.entityName}”${targetLabel}加载失败${fallbackLabel}：${message}`);
++    }
++
++    if (resolution.role === 'conditional') {
++      this.syncModelGeneratorResolvedTarget(runtimeEntry, {
++        target: runtimeEntry.component.defaultTarget,
++        role: 'default',
++        snapshot: resolution.snapshot,
++      });
++    }
++    this.applyModelGeneratorPresentation(runtimeEntry);
++  }
++
++  /** 将当前 MQTT 快照作为只读运行上下文注入生成模型脚本。 */
++  private updateModelGeneratorOutputRuntimeContext(runtimeEntry: ModelGeneratorRuntimeEntry): void {
++    if (runtimeEntry.output?.kind !== 'model') return;
++    const telemetry = this.telemetryPreviewActive && runtimeEntry.activeSnapshot
++      ? this.createExternalScriptTelemetrySnapshot(runtimeEntry.activeSnapshot)
++      : null;
++    this.updateModelExternalScriptRuntimeContext(
++      runtimeEntry.output.model,
++      this.telemetryPreviewActive ? 'runtime' : 'edit',
++      telemetry,
++    );
++  }
++
+   /** 同步灯光类型、位置/方向和强度。 */
+   private syncLightEntity(entity: Entity): void {
+     const lightComponent = entity.components.light;
+@@ -1012,6 +1482,7 @@ export class SceneRuntime {
+   /** 每帧把最新 MQTT 设备遥测分发到对应设备运行时。 */
+   private applyDeviceTelemetryFrame(): void {
+     if (!this.telemetryPreviewActive) return;
++    this.syncAllModelGeneratorTargets();
+     this.clearInactiveSpecializedTelemetryDiagnostics();
+     this.captureReadyTelemetryPreviewBaselines();
+     this.applyStackerTelemetryFrame();
+@@ -1029,6 +1500,12 @@ export class SceneRuntime {
+         this.getStackerTargetReferencePosition(model);
+       }
+     }
++    for (const generator of this.modelGenerators.values()) {
++      if (generator.output?.kind !== 'model') continue;
++      const model = generator.output.model;
++      if (model.telemetryPreviewBaseline || !model.container || !model.stackerTelemetryReady) continue;
++      model.telemetryPreviewBaseline = captureModelTelemetryPreviewBaseline({ root: model.root, contentRoot: model.contentRoot });
++    }
+   }
+ 
+   /** 清空 SceneRuntime 级别的预览诊断、metadata 和已上报状态，不影响模型注册或编译绑定。 */
+@@ -1040,6 +1517,11 @@ export class SceneRuntime {
+     for (const model of this.models.values()) {
+       this.clearSpecializedTelemetryDiagnosticsForModel(model);
+     }
++    for (const generator of this.modelGenerators.values()) {
++      if (generator.output?.kind === 'model') {
++        this.clearSpecializedTelemetryDiagnosticsForModel(generator.output.model);
++      }
++    }
+   }
+ 
+   /** 批量同步外置脚本运行上下文，预览开始和结束时用于清空或恢复模式。 */
+@@ -1050,6 +1532,10 @@ export class SceneRuntime {
+     for (const model of this.models.values()) {
+       this.updateModelExternalScriptRuntimeContext(model, mode, telemetry);
+     }
++    for (const modelGenerator of this.modelGenerators.values()) {
++      if (modelGenerator.output?.kind !== 'model') continue;
++      this.updateModelExternalScriptRuntimeContext(modelGenerator.output.model, mode, telemetry);
++    }
+   }
+ 
+   /** 同步单个模型的外置脚本上下文，未启用脚本的模型会被安全跳过。 */
+@@ -2812,22 +3298,90 @@ export class SceneRuntime {
+     return [...new Set(nodes)];
+   }
+ 
++  /** 创建编辑态空生成器的青色线框标记；标记只属于 Babylon 运行时。 */
++  private createModelGeneratorMarker(entityId: string, root: TransformNode): ModelGeneratorMarkerRuntimeEntry {
++    const mesh = MeshBuilder.CreateBox(`${entityId}_modelGeneratorMarker`, { size: 0.8 }, this.scene);
++    const material = new StandardMaterial(`${entityId}_modelGeneratorMarkerMaterial`, this.scene);
++    material.disableLighting = true;
++    material.wireframe = true;
++    material.alpha = MODEL_GENERATOR_MARKER_ALPHA;
++    material.diffuseColor = Color3.FromHexString(MODEL_GENERATOR_MARKER_COLOR);
++    material.emissiveColor = Color3.FromHexString(MODEL_GENERATOR_MARKER_COLOR);
++
++    mesh.parent = root;
++    mesh.position.y = 0.4;
++    mesh.material = material;
++    mesh.metadata = { ...(mesh.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
++    return { mesh, material };
++  }
++
++  /** 创建内置基础网格生成输出，并挂到生成器稳定根节点下。 */
++  private createModelGeneratorMeshOutput(
++    runtimeEntry: ModelGeneratorRuntimeEntry,
++    target: Extract<ModelGeneratorTarget, { kind: 'mesh' }>,
++  ): ModelGeneratorMeshOutputRuntimeEntry {
++    const mesh = this.createModelGeneratorMesh(runtimeEntry.entityId, target.meshKind);
++    const material = new StandardMaterial(
++      `${runtimeEntry.entityId}_generated_${target.meshKind}_material`,
++      this.scene,
++    );
++    mesh.parent = runtimeEntry.root;
++    mesh.position.y = getBuiltInMeshGroundOffsetMeters(target.meshKind);
++    mesh.material = material;
++    mesh.metadata = {
++      ...(mesh.metadata ?? {}),
++      editorMeshKind: target.meshKind,
++      [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.entityId,
++    };
++
++    return {
++      kind: 'mesh',
++      target,
++      mesh,
++      material,
++    };
++  }
++
++  /** 按内置类型创建生成器输出 Mesh，几何语义与模型库基础网格保持一致。 */
++  private createModelGeneratorMesh(entityId: string, meshKind: MeshKind): Mesh {
++    if (meshKind === 'sphere') {
++      return MeshBuilder.CreateSphere(`${entityId}_generatedSphere`, { diameter: BUILT_IN_SPHERE_DIAMETER_METERS }, this.scene);
++    }
++    if (meshKind === 'plane') {
++      return MeshBuilder.CreateGround(
++        `${entityId}_generatedPlane`,
++        { width: BUILT_IN_PLANE_SIZE_METERS, height: BUILT_IN_PLANE_SIZE_METERS },
++        this.scene,
++      );
++    }
++    return MeshBuilder.CreateBox(
++      `${entityId}_generatedCube`,
++      { size: BUILT_IN_BOX_SIZE_METERS },
++      this.scene,
++    );
++  }
++
++  /** 按集中米制基准创建内置 Mesh，避免普通实体与模型生成器出现尺寸差异。 */
+   private createMesh(entity: Entity): Mesh {
+     const meshKind = entity.components.meshRenderer?.meshKind ?? 'cube';
+ 
+     if (meshKind === 'sphere') {
+-      const mesh = MeshBuilder.CreateSphere(entity.id, { diameter: 1 }, this.scene);
++      const mesh = MeshBuilder.CreateSphere(entity.id, { diameter: BUILT_IN_SPHERE_DIAMETER_METERS }, this.scene);
+       mesh.metadata = { ...(mesh.metadata ?? {}), editorMeshKind: meshKind, editorEntityId: entity.id };
+       return mesh;
+     }
+ 
+     if (meshKind === 'plane') {
+-      const mesh = MeshBuilder.CreateGround(entity.id, { width: 2, height: 2 }, this.scene);
++      const mesh = MeshBuilder.CreateGround(
++        entity.id,
++        { width: BUILT_IN_PLANE_SIZE_METERS, height: BUILT_IN_PLANE_SIZE_METERS },
++        this.scene,
++      );
+       mesh.metadata = { ...(mesh.metadata ?? {}), editorMeshKind: meshKind, editorEntityId: entity.id };
+       return mesh;
+     }
+ 
+-    const mesh = MeshBuilder.CreateBox(entity.id, { size: 1 }, this.scene);
++    const mesh = MeshBuilder.CreateBox(entity.id, { size: BUILT_IN_BOX_SIZE_METERS }, this.scene);
+     mesh.metadata = { ...(mesh.metadata ?? {}), editorMeshKind: meshKind, editorEntityId: entity.id };
+     return mesh;
+   }
+@@ -2884,6 +3438,8 @@ export class SceneRuntime {
+ 
+   /** 释放 CAD 参考图的所有线稿 Mesh 与根节点。 */
+   private disposeCadReference(entityId: string, cadReference: CadReferenceRuntimeEntry): void {
++    cadReference.cancelLoad?.();
++    cadReference.cancelLoad = null;
+     for (const lineMesh of cadReference.lineMeshes) {
+       lineMesh.dispose();
+     }
+@@ -2908,6 +3464,44 @@ export class SceneRuntime {
+     this.models.delete(entityId);
+   }
+ 
++  /** 释放生成器当前派生输出；稳定根节点和空状态标记保持不变。 */
++  private disposeModelGeneratorOutput(runtimeEntry: ModelGeneratorRuntimeEntry): void {
++    const output = runtimeEntry.output;
++    if (!output) return;
++
++    if (output.kind === 'mesh') {
++      output.material.dispose();
++      output.mesh.dispose();
++    } else {
++      const model = output.model;
++      model.telemetryPreviewBaseline = null;
++      this.applyModelSelection(model, false);
++      model.externalScriptRuntime?.dispose();
++      this.disposeStackerCargoForAssetCode(model.assetCode);
++      this.disposeConveyorCargoForAssetCode(model.assetCode);
++      for (const texture of model.textureCache.values()) {
++        texture.dispose();
++      }
++      model.container?.dispose();
++      model.contentRoot.dispose();
++      model.root.dispose();
++    }
++
++    runtimeEntry.output = null;
++  }
++
++  /** 释放模型生成器根节点、派生模型、脚本、材质和线框标记。 */
++  private disposeModelGenerator(entityId: string, runtimeEntry: ModelGeneratorRuntimeEntry): void {
++    runtimeEntry.loadToken += 1;
++    this.disposeModelGeneratorOutput(runtimeEntry);
++    runtimeEntry.marker.material.dispose();
++    runtimeEntry.marker.mesh.dispose();
++    runtimeEntry.root.dispose();
++    runtimeEntry.failedTargetSignatures.clear();
++    runtimeEntry.reportedLoadFailureKeys.clear();
++    this.modelGenerators.delete(entityId);
++  }
++
+   /** 释放当前环境底座模型，切换场景或切换效果时避免 Babylon 资源残留。 */
+   private disposeEnvironment(): void {
+     if (!this.environment) return;
+@@ -2944,7 +3538,12 @@ export class SceneRuntime {
+     const entityId = metadata?.[EDITOR_ENTITY_ID_METADATA_KEY];
+ 
+     return typeof entityId === 'string'
+-      && (this.meshes.has(entityId) || this.locators.has(entityId) || this.models.has(entityId))
++      && (
++        this.meshes.has(entityId)
++        || this.locators.has(entityId)
++        || this.models.has(entityId)
++        || this.modelGenerators.has(entityId)
++      )
+       ? entityId
+       : null;
+   }
+@@ -2993,34 +3592,123 @@ export class SceneRuntime {
+     }
+   }
+ 
+-  /** 根据解析后的 CAD 几何批量创建 Babylon 线稿层。 */
+-  private applyCadReferenceGeometry(
++  /** 统一应用生成器显隐、锁定、选中、高亮和空状态标记。 */
++  private applyModelGeneratorPresentation(runtimeEntry: ModelGeneratorRuntimeEntry): void {
++    const visible = this.isEntityVisible(runtimeEntry.entityId);
++    const pickable = visible && this.isEntityScenePickable(runtimeEntry.entityId);
++    const showMarker = visible && !this.telemetryPreviewActive && runtimeEntry.output === null;
++
++    runtimeEntry.root.setEnabled(visible);
++    runtimeEntry.marker.mesh.isVisible = showMarker;
++    runtimeEntry.marker.mesh.isPickable = showMarker && pickable;
++    runtimeEntry.marker.material.alpha = runtimeEntry.selected ? 1 : MODEL_GENERATOR_MARKER_ALPHA;
++    runtimeEntry.marker.material.diffuseColor = Color3.FromHexString(MODEL_GENERATOR_MARKER_COLOR);
++    runtimeEntry.marker.material.emissiveColor = Color3.FromHexString(MODEL_GENERATOR_MARKER_COLOR);
++
++    if (runtimeEntry.output?.kind === 'mesh') {
++      runtimeEntry.output.mesh.isVisible = visible;
++      runtimeEntry.output.mesh.isPickable = pickable;
++      runtimeEntry.output.material.diffuseColor = runtimeEntry.selected
++        ? Color3.FromHexString(SELECTED_MATERIAL_COLOR)
++        : this.readColor(runtimeEntry.output.target.materialColor);
++      runtimeEntry.output.material.emissiveColor = runtimeEntry.selected
++        ? Color3.FromHexString(SELECTED_EMISSIVE_COLOR)
++        : Color3.Black();
++      return;
++    }
++
++    if (runtimeEntry.output?.kind === 'model') {
++      this.applyModelSelection(runtimeEntry.output.model, runtimeEntry.selected);
++      for (const mesh of runtimeEntry.output.model.meshes) {
++        mesh.isPickable = pickable;
++      }
++      this.updateModelGeneratorOutputRuntimeContext(runtimeEntry);
++    }
++  }
++
++  /** 根据解析后的 CAD 几何分批创建 Babylon 线稿，避免大图纸一次性占满渲染线程。 */
++  private async applyCadReferenceGeometry(
+     entityId: string,
+     cadReference: CadReferenceRuntimeEntry,
+     geometry: CadReferenceParseResult,
+-  ): void {
++  ): Promise<void> {
++    const maxBatchPointCount = 60_000;
++    const maxBatchPolylineCount = 4_000;
++
+     for (const layer of geometry.layers) {
+-      if (layer.polylines.length === 0) continue;
+-
+-      const lineMesh = MeshBuilder.CreateLineSystem(
+-        `${entityId}_cadLayer_${this.sanitizeBabylonName(layer.name)}`,
+-        {
+-          lines: layer.polylines.map((polyline) =>
+-            polyline.map((point) => new Vector3(point.x, point.y, point.z)),
+-          ),
+-        },
+-        this.scene,
+-      );
+-      lineMesh.parent = cadReference.root;
+-      lineMesh.isPickable = false;
+-      lineMesh.metadata = { ...(lineMesh.metadata ?? {}), cadReferenceLayer: layer.name };
+-      cadReference.lineMeshes.push(lineMesh);
++      let batch: typeof layer.polylines = [];
++      let batchPointCount = 0;
++      let batchIndex = 0;
++
++      for (const polyline of layer.polylines) {
++        const exceedsBatchBudget = batch.length > 0 && (
++          batch.length >= maxBatchPolylineCount || batchPointCount + polyline.length > maxBatchPointCount
++        );
++        if (exceedsBatchBudget) {
++          if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
++          this.createCadReferenceLineBatch(entityId, cadReference, layer.name, batchIndex, batch);
++          batch = [];
++          batchPointCount = 0;
++          batchIndex += 1;
++          await this.waitForCadReferenceRenderFrame();
++        }
++
++        batch.push(polyline);
++        batchPointCount += polyline.length;
++      }
++
++      if (batch.length > 0) {
++        if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
++        this.createCadReferenceLineBatch(entityId, cadReference, layer.name, batchIndex, batch);
++        await this.waitForCadReferenceRenderFrame();
++      }
+     }
+ 
++    if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
+     this.applyCadReferenceLineMeshStyle(cadReference);
+     this.applyCadReferenceInteractivity(cadReference, entityId);
+   }
+ 
++  /** 判断当前 CAD 分批任务是否仍属于场景中的有效加载记录。 */
++  private isActiveCadReferenceLoad(entityId: string, cadReference: CadReferenceRuntimeEntry): boolean {
++    const activeEntry = this.cadReferences.get(entityId);
++    return activeEntry === cadReference && activeEntry.loadToken === cadReference.loadToken;
++  }
++
++  /** 创建单个受控大小的 CAD LineSystem，并挂接到参考图根节点。 */
++  private createCadReferenceLineBatch(
++    entityId: string,
++    cadReference: CadReferenceRuntimeEntry,
++    layerName: string,
++    batchIndex: number,
++    polylines: CadReferenceParseResult['layers'][number]['polylines'],
++  ): void {
++    const lineMesh = MeshBuilder.CreateLineSystem(
++      `${entityId}_cadLayer_${this.sanitizeBabylonName(layerName)}_${batchIndex}`,
++      {
++        lines: polylines.map((polyline) =>
++          polyline.map((point) => new Vector3(point.x, point.y, point.z)),
++        ),
++      },
++      this.scene,
++    );
++    lineMesh.parent = cadReference.root;
++    lineMesh.isPickable = false;
++    lineMesh.metadata = { ...(lineMesh.metadata ?? {}), cadReferenceLayer: layerName };
++    cadReference.lineMeshes.push(lineMesh);
++  }
++
++  /** 在 CAD 批次之间让出一帧，使编辑器输入、进度和重绘保持响应。 */
++  private waitForCadReferenceRenderFrame(): Promise<void> {
++    return new Promise((resolve) => {
++      if (typeof requestAnimationFrame === 'function') {
++        requestAnimationFrame(() => resolve());
++        return;
++      }
++      setTimeout(resolve, 0);
++    });
++  }
++
+   /** CAD 参考图永远不参与鼠标拾取，只响应 Hierarchy 显隐。 */
+   private applyCadReferenceInteractivity(cadReference: CadReferenceRuntimeEntry, entityId: string): void {
+     const visible = this.isEntityVisible(entityId);
+@@ -3100,15 +3788,21 @@ export class SceneRuntime {
+     target.scaling = new Vector3(transform.scale.x, transform.scale.y, transform.scale.z);
+   }
+ 
+-  /** 将导入模型源单位换算到米，避免污染可被 Gizmo 写回的实体根 Transform。 */
++  /** 将模型或环境源单位换算到米，避免污染可被 Gizmo 写回的实体根 Transform。 */
+   private applyModelUnitScale(target: TransformNode, unitScaleToMeters: number): void {
+     target.scaling = new Vector3(unitScaleToMeters, unitScaleToMeters, unitScaleToMeters);
+   }
+ 
+-  /** 根据参数配置把声明式绑定应用到模型节点、网格和材质。 */
++  /** 根据实体模型资产把声明式参数绑定应用到模型节点、网格和材质。 */
+   private applyModelParameters(entity: Entity, model: ModelRuntimeEntry): void {
+     const modelAsset = entity.components.modelAsset;
+-    if (!modelAsset?.parameterConfig || !modelAsset.parameterValues || !model.container) return;
++    if (!modelAsset) return;
++    this.applyModelAssetParameters(modelAsset, model);
++  }
++
++  /** 应用完整模型资产快照中的默认参数，普通模型和生成模型共用同一逻辑。 */
++  private applyModelAssetParameters(modelAsset: ModelAssetComponent, model: ModelRuntimeEntry): void {
++    if (!modelAsset.parameterConfig || !modelAsset.parameterValues || !model.container) return;
+ 
+     const signature = JSON.stringify({ config: modelAsset.parameterConfig, values: modelAsset.parameterValues });
+     if (model.parameterSignature === signature) return;
+@@ -3130,11 +3824,47 @@ export class SceneRuntime {
+     model.parameterSignature = signature;
+   }
+ 
+-  /** 同步模型包外置脚本的元数据、参数值和生命周期。 */
++  /** 同步普通模型包外置脚本，并在脚本就绪后接回既有遥测运动链。 */
+   private syncExternalModelScripts(entity: Entity, model: ModelRuntimeEntry): void {
+     const modelAsset = entity.components.modelAsset;
+-    if (!modelAsset || !model.container) return;
++    if (!modelAsset) return;
++    this.syncModelAssetExternalScripts(modelAsset, model, (current) => {
++      this.syncGenericTelemetryMotion(entity, current);
++    });
++  }
++
++  /** 同步生成模型外置脚本；只注入生成器快照，不注册独立遥测运动实体。 */
++  private syncModelGeneratorExternalScripts(
++    runtimeEntry: ModelGeneratorRuntimeEntry,
++    modelAsset: ModelAssetComponent,
++    model: ModelRuntimeEntry,
++  ): void {
++    this.syncModelAssetExternalScripts(modelAsset, model, (current) => {
++      const activeEntry = this.modelGenerators.get(runtimeEntry.entityId);
++      if (activeEntry?.output?.kind !== 'model' || activeEntry.output.model !== current) return;
++      this.refreshModelGeneratorModelMeshes(activeEntry);
++      this.applyModelGeneratorPresentation(activeEntry);
++    });
++  }
++
++  /** 收集模型脚本在稳定根节点下创建的额外 Mesh，并补齐生成器拾取元数据。 */
++  private refreshModelGeneratorModelMeshes(runtimeEntry: ModelGeneratorRuntimeEntry): void {
++    if (runtimeEntry.output?.kind !== 'model') return;
++    const model = runtimeEntry.output.model;
++    model.meshes = [...new Set([...(model.container?.meshes ?? []), ...model.root.getChildMeshes(false)])]
++      .filter((mesh) => !mesh.isDisposed());
++    for (const mesh of model.meshes) {
++      mesh.metadata = { ...(mesh.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.entityId };
++    }
++  }
+ 
++  /** 同步模型资产脚本生命周期，普通模型和生成模型共享同一份受控实现。 */
++  private syncModelAssetExternalScripts(
++    modelAsset: ModelAssetComponent,
++    model: ModelRuntimeEntry,
++    onReady: (current: ModelRuntimeEntry) => void,
++  ): void {
++    if (!model.container) return;
+     this.syncModelScriptMetadata(model.contentRoot, modelAsset);
+ 
+     const scriptAssets = modelAsset.scriptAssets ?? [];
+@@ -3145,7 +3875,7 @@ export class SceneRuntime {
+       this.resetStackerTelemetryState(model);
+       this.resetConveyorTelemetryState(model);
+       model.stackerTelemetryReady = true;
+-      this.syncGenericTelemetryMotion(entity, model);
++      onReady(model);
+       return;
+     }
+ 
+@@ -3172,14 +3902,14 @@ export class SceneRuntime {
+       const runtime = model.externalScriptRuntime;
+       const loadToken = model.loadToken;
+       void runtime.start().then(() => {
+-        const current = [...this.models.values()].find((entry) => entry.externalScriptRuntime === runtime);
++        const current = this.findActiveModelRuntimeEntry(runtime);
+         if (!current || current.loadToken !== loadToken) return;
+         this.updateModelExternalScriptRuntimeContext(current, this.telemetryPreviewActive ? 'runtime' : 'edit', null);
+         runtime.update();
+         this.resetStackerTelemetryState(current);
+         this.resetConveyorTelemetryState(current);
+         current.stackerTelemetryReady = true;
+-        this.syncGenericTelemetryMotion(entity, current);
++        onReady(current);
+       });
+       return;
+     }
+@@ -3191,7 +3921,20 @@ export class SceneRuntime {
+     this.resetStackerTelemetryState(model);
+     this.resetConveyorTelemetryState(model);
+     model.stackerTelemetryReady = true;
+-    this.syncGenericTelemetryMotion(entity, model);
++    onReady(model);
++  }
++
++  /** 在普通模型和生成器派生模型中查找仍处于活动状态的脚本宿主。 */
++  private findActiveModelRuntimeEntry(runtime: ExternalModelScriptRuntime): ModelRuntimeEntry | null {
++    for (const model of this.models.values()) {
++      if (model.externalScriptRuntime === runtime) return model;
++    }
++    for (const modelGenerator of this.modelGenerators.values()) {
++      if (modelGenerator.output?.kind === 'model' && modelGenerator.output.model.externalScriptRuntime === runtime) {
++        return modelGenerator.output.model;
++      }
++    }
++    return null;
+   }
+ 
+   /** 同步通用遥测运动引擎，专用 Stacker/Conveyor 模型默认跳过避免双重驱动。 */
+@@ -3607,16 +4350,26 @@ export class SceneRuntime {
+ 
+   /** 根据选中状态给导入模型添加或移除 HighlightLayer 高亮，不破坏原始材质。 */
+   private applyModelSelection(model: ModelRuntimeEntry, selected: boolean): void {
+-    if (model.highlighted === selected) return;
+-
+-    for (const mesh of model.meshes) {
+-      if (!(mesh instanceof Mesh)) continue;
++    const currentMeshes = new Set(
++      model.meshes.filter((mesh): mesh is Mesh => mesh instanceof Mesh && !mesh.isDisposed()),
++    );
+ 
+-      if (selected) {
++    if (selected) {
++      for (const mesh of currentMeshes) {
++        if (model.highlightedMeshes.has(mesh)) continue;
+         this.modelHighlightLayer.addMesh(mesh, Color3.FromHexString(SELECTED_MATERIAL_COLOR));
+-      } else {
++        model.highlightedMeshes.add(mesh);
++      }
++      for (const mesh of [...model.highlightedMeshes]) {
++        if (currentMeshes.has(mesh)) continue;
++        this.modelHighlightLayer.removeMesh(mesh);
++        model.highlightedMeshes.delete(mesh);
++      }
++    } else {
++      for (const mesh of model.highlightedMeshes) {
+         this.modelHighlightLayer.removeMesh(mesh);
+       }
++      model.highlightedMeshes.clear();
+     }
+ 
+     model.highlighted = selected;
+@@ -3647,6 +4400,38 @@ export class SceneRuntime {
+     }
+   }
+ 
++  /**
++   * 根据有效环境网格的世界包围盒放置根节点，使整个 GLB 位于世界原点左侧并落到地面。
++   * 环境模型仍保持不可选中，也不会写入场景实体层级。
++   */
++  private positionEnvironmentLeftOfOrigin(environment: EnvironmentRuntimeEntry): void {
++    let mergedBounds: RuntimeWorldBounds | null = null;
++
++    for (const mesh of environment.container?.meshes ?? []) {
++      if (mesh.getTotalVertices() <= 0) continue;
++
++      const bounds = this.getMeshWorldBounds(mesh);
++      if (!bounds) continue;
++      mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
++    }
++
++    if (!mergedBounds) {
++      environment.root.position.copyFromFloats(-ENVIRONMENT_FALLBACK_LEFT_OFFSET_METERS, 0, 0);
++      environment.root.computeWorldMatrix(true);
++      return;
++    }
++
++    const offset = calculateEnvironmentOriginLeftOffset(mergedBounds.minimum, mergedBounds.maximum);
++    if (!offset) {
++      environment.root.position.copyFromFloats(-ENVIRONMENT_FALLBACK_LEFT_OFFSET_METERS, 0, 0);
++      environment.root.computeWorldMatrix(true);
++      return;
++    }
++
++    environment.root.position.copyFromFloats(offset.x, offset.y, offset.z);
++    environment.root.computeWorldMatrix(true);
++  }
++
+   /** 将导入模型内容的底部中心归一到实体根节点，避免源模型巨大坐标偏移影响场景放置。 */
+   private normalizeModelContentOrigin(model: ModelRuntimeEntry): void {
+     model.root.computeWorldMatrix(true);

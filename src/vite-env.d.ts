@@ -101,7 +101,7 @@ type ProjectModelAssetEntry = AssetEntry & {
 };
 
 type ImportModelFolderRequest = {
-  libraryKind: ModelAssetLibraryKind;
+  libraryKind: 'model';
 };
 
 type ImportModelFolderSkippedEntry = {
@@ -116,6 +116,14 @@ type ImportModelFolderResult = {
   importedAssets: ProjectModelAssetEntry[];
   projectAssets: ProjectModelAssetEntry[];
   skipped: ImportModelFolderSkippedEntry[];
+};
+
+type ImportEnvironmentModelFileResult = {
+  canceled: boolean;
+  filePath: string | null;
+  projectRoot: string | null;
+  importedAsset: ProjectModelAssetEntry | null;
+  projectAssets: ProjectModelAssetEntry[];
 };
 
 type ModelPackageVariant = {
@@ -203,6 +211,7 @@ interface Window {
     selectProjectDirectory: () => Promise<SelectProjectDirectoryResult>;
     importCadFile: () => Promise<ImportCadFileResult>;
     importModelFolder: (request: ImportModelFolderRequest) => Promise<ImportModelFolderResult>;
+    importEnvironmentModelFile: () => Promise<ImportEnvironmentModelFileResult>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
     mqttConfigure?: (request: MqttIpcConfigureRequest) => Promise<MqttIpcStatus>;
     mqttDisconnect?: () => Promise<MqttIpcStatus>;

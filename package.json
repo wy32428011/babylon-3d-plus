@@ -16,7 +16,11 @@
     "build:yzj:visual": "node scripts/build-yzj-direction-arrow-visual.mjs",
     "typecheck": "tsc -b",
     "preview": "vite preview --host 127.0.0.1",
-    "test:telemetry": "node scripts/telemetry-test.mjs"
+    "test:telemetry": "node scripts/telemetry-test.mjs",
+    "smoke:units": "node scripts/smoke-meter-unit-contract.mjs",
+    "pack:win": "npm run build && electron-builder --win dir --x64",
+    "dist:win": "npm run build && electron-builder --win nsis --x64",
+    "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs"
   },
   "engines": {
     "node": ">=22.12.0"
@@ -38,8 +42,47 @@
     "concurrently": "^10.0.3",
     "cross-env": "^10.1.0",
     "electron": "^42.4.0",
+    "electron-builder": "^26.15.3",
     "typescript": "^6.0.3",
     "vite": "^8.0.16",
     "wait-on": "^9.0.10"
+  },
+  "description": "面向工业场景搭建、模型参数化与 MQTT 运行预览的 Babylon.js 桌面编辑器。",
+  "build": {
+    "appId": "com.babylon3d.editor",
+    "productName": "Babylon 3D Editor",
+    "copyright": "Copyright © 2026 Babylon 3D Editor",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Babylon-3D-Editor-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Babylon 3D Editor",
+      "uninstallDisplayName": "Babylon 3D Editor",
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

@@ -36,7 +36,7 @@
           "key": "description",
           "label": "参数说明",
           "type": "string",
-          "defaultValue": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
+          "defaultValue": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度、入/出料侧定位及 MQTT 前/后端独立定位。",
           "configuration": {
             "type": "string"
           }
@@ -192,6 +192,60 @@
           }
         },
         {
+          "key": "frontSide",
+          "label": "MQTT 前端方向",
+          "type": "string",
+          "defaultValue": "right",
+          "configuration": {
+            "type": "string",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          }
+        },
+        {
+          "key": "backSide",
+          "label": "MQTT 后端方向",
+          "type": "string",
+          "defaultValue": "left",
+          "configuration": {
+            "type": "string",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          }
+        },
+        {
           "key": "showDirectionArrow",
           "label": "显示方向箭头",
           "type": "boolean",
@@ -255,7 +309,7 @@
         },
         "description": {
           "type": "string",
-          "value": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
+          "value": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度、入/出料侧定位及 MQTT 前/后端独立定位。",
           "label": "参数说明",
           "configuration": {
             "type": "string"
@@ -379,6 +433,58 @@
           "type": "string",
           "value": "front",
           "label": "出料侧",
+          "configuration": {
+            "type": "string",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          }
+        },
+        "frontSide": {
+          "type": "string",
+          "value": "right",
+          "label": "MQTT 前端方向",
+          "configuration": {
+            "type": "string",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          }
+        },
+        "backSide": {
+          "type": "string",
+          "value": "left",
+          "label": "MQTT 后端方向",
           "configuration": {
             "type": "string",
             "options": [
@@ -550,6 +656,54 @@
         "label": "出料侧",
         "type": "enum",
         "defaultValue": "front",
+        "options": [
+          {
+            "value": "left",
+            "label": "左侧（局部 X+）"
+          },
+          {
+            "value": "right",
+            "label": "右侧（局部 X-）"
+          },
+          {
+            "value": "front",
+            "label": "前侧（局部 Z-）"
+          },
+          {
+            "value": "rear",
+            "label": "后侧（局部 Z+）"
+          }
+        ]
+      },
+      {
+        "key": "frontSide",
+        "label": "MQTT 前端方向",
+        "type": "enum",
+        "defaultValue": "right",
+        "options": [
+          {
+            "value": "left",
+            "label": "左侧（局部 X+）"
+          },
+          {
+            "value": "right",
+            "label": "右侧（局部 X-）"
+          },
+          {
+            "value": "front",
+            "label": "前侧（局部 Z-）"
+          },
+          {
+            "value": "rear",
+            "label": "后侧（局部 Z+）"
+          }
+        ]
+      },
+      {
+        "key": "backSide",
+        "label": "MQTT 后端方向",
+        "type": "enum",
+        "defaultValue": "left",
         "options": [
           {
             "value": "left",

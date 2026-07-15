@@ -3,8 +3,14 @@ import type { CadReferenceComponent, LightKind, MeshKind } from './components';
 import type { Entity } from './Entity';
 import type { Vector3Data } from './math';
 import type { ModelParameterConfig } from './modelParameters';
+import { createDefaultModelGeneratorComponent } from './modelGenerator';
 import { createDefaultModelParameterValues } from './modelParameters';
-import { DEFAULT_MODEL_LENGTH_UNIT_INFO, type ModelLengthUnitInfo } from './sceneUnits';
+import {
+  DEFAULT_MODEL_LENGTH_UNIT_INFO,
+  normalizeModelLengthUnitInfo,
+  type ModelLengthUnitInfo,
+  type ModelSourceLengthUnit,
+} from './sceneUnits';
 import { vector3 } from './math';
 import type { ModelScriptAsset } from './components';
 import {
@@ -59,10 +65,16 @@ export type SceneEnvironmentVariant = {
 
 export type SceneEnvironmentSettings = {
   packagePath: string;
+  lengthUnit: ModelSourceLengthUnit;
+  unitScaleToMeters: number;
   thumbnailUrl?: string;
   activeVariantUrl: string;
   variants: SceneEnvironmentVariant[];
 };
+
+/** 环境配置输入兼容旧场景缺失单位字段，归一化后始终返回完整米制信息。 */
+export type SceneEnvironmentSettingsInput = Omit<SceneEnvironmentSettings, 'lengthUnit' | 'unitScaleToMeters'> &
+  Partial<Pick<SceneEnvironmentSettings, 'lengthUnit' | 'unitScaleToMeters'>>;
 
 export type SceneSettings = {
   camera: SceneCameraSettings;
@@ -161,7 +173,7 @@ function isValidCameraPose(pose: SceneCameraPose | null): pose is SceneCameraPos
 
 /** 归一化环境模型设置，非法 URL 或空变体会回退为未启用环境模型。 */
 export function sanitizeSceneEnvironment(
-  environment: SceneEnvironmentSettings | null | undefined,
+  environment: SceneEnvironmentSettingsInput | null | undefined,
 ): SceneEnvironmentSettings | null {
   if (!environment) return null;
 
@@ -179,9 +191,18 @@ export function sanitizeSceneEnvironment(
   const activeVariantUrl = environment.activeVariantUrl.trim();
   const activeVariant = variants.find((variant) => variant.sourceUrl === activeVariantUrl) ?? variants[0];
   const thumbnailUrl = environment.thumbnailUrl?.trim();
+  let unitInfo: ModelLengthUnitInfo;
+
+  try {
+    unitInfo = normalizeModelLengthUnitInfo(environment.lengthUnit, environment.unitScaleToMeters);
+  } catch {
+    return null;
+  }
 
   return {
     packagePath,
+    lengthUnit: unitInfo.lengthUnit,
+    unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
     activeVariantUrl: activeVariant.sourceUrl,
     variants,
@@ -494,6 +515,28 @@ export function createLightEntity(lightKind: LightKind, position?: Vector3Data):
         lightKind,
         intensity: 0.8,
       },
+    },
+  };
+}
+
+/** 创建一个模型生成器实体，默认只保存空配置，不直接生成运行时模型。 */
+export function createModelGeneratorEntity(position: Vector3Data = vector3()): Entity {
+  const id = createId('entity');
+
+  return {
+    id,
+    name: '模型生成器',
+    visible: true,
+    locked: false,
+    parentId: null,
+    childrenIds: [],
+    components: {
+      transform: {
+        position: vector3(position.x, position.y, position.z),
+        rotation: vector3(),
+        scale: vector3(1, 1, 1),
+      },
+      modelGenerator: createDefaultModelGeneratorComponent(),
     },
   };
 }

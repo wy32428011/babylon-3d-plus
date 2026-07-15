@@ -27,6 +27,14 @@ export declare function copyDirectory(source: string, target: string): Promise<v
 export declare function ensureCurrentProjectRootWithDialog(): Promise<string | null>;
 export declare function selectCurrentProjectRootWithDialog(): Promise<string | null>;
 export declare function listProjectAssets(): Promise<ProjectListAssetsResult>;
+/**
+ * 将用户选择的单个环境 GLB 保存为项目内独立单文件包，并写入环境分库索引。
+ * 旧环境模型包仍保留原有索引结构；只有同目标包或同资产路径的环境记录会被替换。
+ */
+export declare function importEnvironmentModelFileIntoProject(sourceFilePath: string): Promise<{
+    importedAsset: ProjectModelAssetEntry;
+    projectAssets: ProjectModelAssetEntry[];
+}>;
 /** 将扫描到的模型包复制进指定项目资产库，并只替换目标库中的同名记录。 */
 export declare function importModelPackagesIntoProject(scannedAssets: AssetEntry[], libraryKind: ModelAssetLibraryKind): Promise<ImportModelPackagesIntoProjectResult>;
 export {};

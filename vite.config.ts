@@ -61,6 +61,7 @@ function editorLocalAssetDevServerPlugin(): Plugin {
 }
 
 export default defineConfig({
+  base: './',
   cacheDir: process.env.VITE_CACHE_DIR || 'node_modules/.vite',
   plugins: [react(), editorLocalAssetDevServerPlugin()],
   server: {

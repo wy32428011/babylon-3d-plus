@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, normalizeModelLengthUnit } from '../modelUnits.js';
 import { authorizeAssetFile, authorizeAssetRoot, encodeAssetUrl, normalizeFilePath, } from './assetRegistry.js';
-import { scanModelPackage } from './modelPackageScanner.js';
+import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
 const PROJECT_METADATA_DIRECTORY = '.babylon-editor';
 const PROJECT_ASSET_INDEX_FILE = 'asset-index.json';
 const PROJECT_ASSETS_DIRECTORY = 'Assets';
@@ -486,6 +486,49 @@ export async function copyDirectory(source, target) {
     await fs.rm(normalizedTarget, { recursive: true, force: true });
     await fs.cp(normalizedSource, normalizedTarget, { recursive: true });
 }
+/** 比较两个本地路径是否指向同一位置；Windows 下忽略盘符和目录名大小写。 */
+function isSameLocalPath(left, right) {
+    const normalizedLeft = normalizeFilePath(left);
+    const normalizedRight = normalizeFilePath(right);
+    return process.platform === 'win32'
+        ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+        : normalizedLeft === normalizedRight;
+}
+/**
+ * 在正式环境包旁创建已校验的暂存副本。
+ * 返回 null 表示源文件已经位于正式目标中，此时只更新索引版本，不移动文件。
+ */
+async function prepareEnvironmentPackageWithGlb(sourceFilePath, targetPackagePath) {
+    const normalizedSourceFilePath = normalizeFilePath(sourceFilePath);
+    const normalizedTargetPackagePath = normalizeFilePath(targetPackagePath);
+    const targetFilePath = path.join(normalizedTargetPackagePath, path.basename(normalizedSourceFilePath));
+    if (!(await validateGlbModelFile(normalizedSourceFilePath))) {
+        throw new Error('环境 GLB 文件结构无效或已损坏。');
+    }
+    if (isSameLocalPath(normalizedSourceFilePath, targetFilePath)) {
+        await fs.mkdir(normalizedTargetPackagePath, { recursive: true });
+        return null;
+    }
+    const stagingPackagePath = `${normalizedTargetPackagePath}.import-${randomUUID()}`;
+    const stagedFilePath = path.join(stagingPackagePath, path.basename(normalizedSourceFilePath));
+    await fs.rm(stagingPackagePath, { recursive: true, force: true });
+    try {
+        await fs.mkdir(stagingPackagePath, { recursive: true });
+        await fs.copyFile(normalizedSourceFilePath, stagedFilePath);
+        if (!(await validateGlbModelFile(stagedFilePath))) {
+            throw new Error('项目内环境 GLB 暂存副本校验失败。');
+        }
+        const stagedPackage = await scanModelPackage(stagingPackagePath);
+        if (!stagedPackage.asset) {
+            throw new Error(stagedPackage.skipped?.reason ?? '项目内环境 GLB 暂存扫描失败。');
+        }
+        return stagingPackagePath;
+    }
+    catch (error) {
+        await fs.rm(stagingPackagePath, { recursive: true, force: true });
+        throw error;
+    }
+}
 export async function ensureCurrentProjectRootWithDialog() {
     const recentProjectRoot = await loadRecentProjectRoot();
     if (recentProjectRoot)
@@ -527,6 +570,124 @@ export async function listProjectAssets() {
         }
     }
     return { projectRoot, assets: index.assets };
+}
+/**
+ * 将用户选择的单个环境 GLB 保存为项目内独立单文件包，并写入环境分库索引。
+ * 旧环境模型包仍保留原有索引结构；只有同目标包或同资产路径的环境记录会被替换。
+ */
+export async function importEnvironmentModelFileIntoProject(sourceFilePath) {
+    const projectRoot = await loadRecentProjectRoot();
+    if (!projectRoot) {
+        throw new Error('导入环境模型前需要先选择项目目录。');
+    }
+    const normalizedSourceFilePath = normalizeFilePath(sourceFilePath);
+    if (path.extname(normalizedSourceFilePath).toLowerCase() !== '.glb') {
+        throw new Error('环境模型仅支持直接导入 .glb 文件。');
+    }
+    if (!(await isFilePath(normalizedSourceFilePath))) {
+        throw new Error('请选择有效的环境 GLB 文件。');
+    }
+    await ensureProjectDirectories(projectRoot);
+    authorizeProjectAssetRoots(projectRoot);
+    const packageDirectoryName = toSafePackageDirectoryName(path.parse(normalizedSourceFilePath).name);
+    const targetPackagePath = path.join(getProjectEnvironmentsRoot(projectRoot), packageDirectoryName);
+    const currentIndex = await readProjectAssetIndex(projectRoot);
+    const stagingPackagePath = await prepareEnvironmentPackageWithGlb(normalizedSourceFilePath, targetPackagePath);
+    const backupPackagePath = stagingPackagePath ? `${targetPackagePath}.backup-${randomUUID()}` : null;
+    let previousPackageMoved = false;
+    let stagedPackagePromoted = false;
+    let indexWriteStarted = false;
+    let importCommitted = false;
+    try {
+        if (stagingPackagePath && backupPackagePath) {
+            await fs.rm(backupPackagePath, { recursive: true, force: true });
+            if (await pathExists(targetPackagePath)) {
+                await fs.rename(targetPackagePath, backupPackagePath);
+                previousPackageMoved = true;
+            }
+            await fs.rename(stagingPackagePath, targetPackagePath);
+            stagedPackagePromoted = true;
+        }
+        const copiedPackage = await scanModelPackage(targetPackagePath);
+        if (!copiedPackage.asset) {
+            throw new Error(copiedPackage.skipped?.reason ?? '项目内环境 GLB 扫描失败。');
+        }
+        const importedAsset = {
+            ...copiedPackage.asset,
+            assetRevision: createProjectAssetRevision(),
+            kind: 'model',
+            libraryKind: 'environment',
+            // 单文件环境 GLB 按项目统一米制登记，避免历史目录中的单位元数据影响直接导入语义。
+            lengthUnit: DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit,
+            unitScaleToMeters: DEFAULT_MODEL_LENGTH_UNIT_INFO.unitScaleToMeters,
+        };
+        authorizeAssetFile(importedAsset.path);
+        const projectAssets = [
+            ...currentIndex.assets.filter((asset) => asset.libraryKind !== 'environment'
+                || (asset.id !== importedAsset.id && asset.packagePath !== importedAsset.packagePath)),
+            importedAsset,
+        ];
+        indexWriteStarted = true;
+        await writeProjectAssetIndex(projectRoot, {
+            version: 2,
+            assets: projectAssets,
+        });
+        importCommitted = true;
+        if (previousPackageMoved && backupPackagePath) {
+            try {
+                await fs.rm(backupPackagePath, { recursive: true, force: true });
+            }
+            catch {
+                // 索引和正式包已经提交成功；备份清理失败不应把一次成功导入误报为失败。
+            }
+        }
+        return { importedAsset, projectAssets };
+    }
+    catch (error) {
+        const rollbackErrors = [];
+        if (stagedPackagePromoted && await pathExists(targetPackagePath)) {
+            try {
+                await fs.rm(targetPackagePath, { recursive: true, force: true });
+            }
+            catch (rollbackError) {
+                rollbackErrors.push(`移除失败的新环境包：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+            }
+        }
+        if (previousPackageMoved && backupPackagePath && await pathExists(backupPackagePath)) {
+            try {
+                await fs.rename(backupPackagePath, targetPackagePath);
+            }
+            catch (rollbackError) {
+                rollbackErrors.push(`恢复旧环境包：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+            }
+        }
+        if (indexWriteStarted) {
+            try {
+                await writeProjectAssetIndex(projectRoot, currentIndex);
+            }
+            catch (rollbackError) {
+                rollbackErrors.push(`恢复旧资产索引：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+            }
+        }
+        if (rollbackErrors.length > 0) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`${message}；环境导入回滚不完整：${rollbackErrors.join('；')}`);
+        }
+        throw error;
+    }
+    finally {
+        if (stagingPackagePath) {
+            await fs.rm(stagingPackagePath, { recursive: true, force: true });
+        }
+        if (importCommitted && backupPackagePath) {
+            try {
+                await fs.rm(backupPackagePath, { recursive: true, force: true });
+            }
+            catch {
+                // 已提交导入只保留孤立备份，不破坏正式包和索引的一致性。
+            }
+        }
+    }
 }
 /** 将扫描到的模型包复制进指定项目资产库，并只替换目标库中的同名记录。 */
 export async function importModelPackagesIntoProject(scannedAssets, libraryKind) {

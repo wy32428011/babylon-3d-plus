@@ -27,6 +27,9 @@ export type LocatorComponent = {
 };
 
 export type CadReferenceOriginMode = 'center';
+export type CadReferenceImportMode = 'exact' | 'large-preview';
+/** CAD 单位判定来源：DXF 明确声明、MEASUREMENT 推断、毫米兜底或旧场景兼容。 */
+export type CadReferenceUnitDetection = 'insunits' | 'measurement' | 'fallback' | 'legacy';
 
 export type CadReferenceLayerStat = {
   name: string;
@@ -45,6 +48,11 @@ export type CadReferenceBounds = {
 export type CadReferenceComponent = {
   sourcePath: string;
   sourceUrl: string;
+  sourceFileSizeBytes: number;
+  importMode: CadReferenceImportMode;
+  sourceUnitCode: number | null;
+  sourceUnitName: string;
+  unitDetection: CadReferenceUnitDetection;
   unitScaleToMeters: number;
   originMode: CadReferenceOriginMode;
   lineColor: string;
@@ -61,8 +69,8 @@ export type ModelScriptAsset = {
   name: string;
 };
 
-export type ModelAssetComponent = {
-  assetCode: string;
+/** 可复用的模型资产模板，不包含实例级 assetCode。 */
+export type ModelAssetTemplate = {
   sourcePath: string;
   sourceUrl: string;
   assetRevision?: string;
@@ -74,6 +82,65 @@ export type ModelAssetComponent = {
   parameterConfig?: ModelParameterConfig;
   parameterValues?: ModelParameterValues;
   dataDrivenConfig?: ModelDataDrivenConfig;
+};
+
+/** 运行时模型资产组件，在模板基础上追加实例级资产编号。 */
+export type ModelAssetComponent = ModelAssetTemplate & {
+  assetCode: string;
+};
+
+/** 模型生成器的导入模型目标，保存资产索引信息和完整模型模板。 */
+export type ModelGeneratorModelTarget = {
+  kind: 'model';
+  assetId: string;
+  displayName: string;
+  packagePath?: string;
+  thumbnailUrl?: string;
+  modelAsset: ModelAssetTemplate;
+};
+
+/** 模型生成器的内置 Mesh 目标，保存创建基础几何体所需字段。 */
+export type ModelGeneratorMeshTarget = {
+  kind: 'mesh';
+  meshKind: MeshKind;
+  displayName: string;
+  materialColor: string;
+};
+
+/** 模型生成器可生成的目标类型集合。 */
+export type ModelGeneratorTarget = ModelGeneratorModelTarget | ModelGeneratorMeshTarget;
+
+/** 模型生成器规则，根据属性名和值选择一个生成目标。 */
+export type ModelGeneratorRule = {
+  id: string;
+  attributeName: string;
+  attributeValue: string;
+  target: ModelGeneratorTarget | null;
+};
+
+/** 模型生成器绑定，将外部设备身份绑定到生成出的资产编号。 */
+export type ModelGeneratorBinding = {
+  id: string;
+  sourceId: string;
+  deviceType: string;
+  assetCode: string;
+};
+
+/** 模型生成器仓储流配置，通过稳定绑定 ID 引用入库输送机、堆垛机和出库输送机。 */
+export type ModelGeneratorWarehouseFlow = {
+  enabled: boolean;
+  inboundBindingId: string;
+  stackerBindingId: string;
+  outboundBindingId: string;
+};
+
+/** 模型生成器组件，保存默认目标、规则、元数据 TTL、设备绑定和可选仓储流。 */
+export type ModelGeneratorComponent = {
+  defaultTarget: ModelGeneratorTarget | null;
+  rules: ModelGeneratorRule[];
+  metadataTtlSeconds: number;
+  bindings: ModelGeneratorBinding[];
+  warehouseFlow?: ModelGeneratorWarehouseFlow;
 };
 
 export type CameraComponent = {
@@ -95,6 +162,7 @@ export type EntityComponents = {
   locator?: LocatorComponent;
   cadReference?: CadReferenceComponent;
   modelAsset?: ModelAssetComponent;
+  modelGenerator?: ModelGeneratorComponent;
   telemetryBinding?: TelemetryBindingComponent;
   camera?: CameraComponent;
   light?: LightComponent;

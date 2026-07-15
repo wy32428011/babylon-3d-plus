@@ -1,4 +1,5 @@
 import type { Entity } from '../model/Entity';
+import { createLegacyCadReferenceUnitInfo, normalizeCadReferenceUnitInfo } from '../cad/cadUnits';
 import {
   AUTHORIZED_LOCAL_ASSET_URL_PREFIX,
   createDefaultSceneSettings,
@@ -15,6 +16,14 @@ import {
   type SceneSettings,
 } from '../model/SceneDocument';
 import type { EntityComponents, LightKind, LocatorStorageDepth, MeshKind } from '../model/components';
+import {
+  MODEL_GENERATOR_MAX_BINDINGS,
+  MODEL_GENERATOR_MAX_RULES,
+  MODEL_GENERATOR_TTL_MAX_SECONDS,
+  MODEL_GENERATOR_TTL_MIN_SECONDS,
+  sanitizeModelGeneratorComponent,
+  sanitizeModelGeneratorTarget,
+} from '../model/modelGenerator';
 import type { Vector3Data } from '../model/math';
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
 import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit } from '../model/sceneUnits';
@@ -201,8 +210,17 @@ function normalizeSceneEnvironmentSettings(value: unknown): SceneEnvironmentSett
     throwUnsupportedSceneFileError();
   }
 
+  let unitInfo;
+  try {
+    unitInfo = normalizeModelLengthUnitInfo(environment.lengthUnit, environment.unitScaleToMeters);
+  } catch {
+    throwUnsupportedSceneFileError();
+  }
+
   return {
     packagePath: assertString(environment.packagePath),
+    lengthUnit: unitInfo.lengthUnit,
+    unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(environment.thumbnailUrl === undefined ? {} : { thumbnailUrl: assertString(environment.thumbnailUrl) }),
     activeVariantUrl,
     variants,
@@ -272,6 +290,10 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
 
   if ('modelAsset' in components && components.modelAsset !== undefined) {
     normalized.modelAsset = normalizeModelAsset(components.modelAsset, entityId);
+  }
+
+  if ('modelGenerator' in components && components.modelGenerator !== undefined) {
+    normalized.modelGenerator = normalizeModelGenerator(components.modelGenerator);
   }
 
   if ('telemetryBinding' in components && components.telemetryBinding !== undefined) {
@@ -365,10 +387,34 @@ function normalizeCadReference(value: unknown): EntityComponents['cadReference']
     throwUnsupportedSceneFileError();
   }
 
+  const unitScaleToMeters = assertPositiveFiniteNumber(cadReference.unitScaleToMeters);
+  const hasUnitAuditFields = cadReference.sourceUnitCode !== undefined
+    || cadReference.sourceUnitName !== undefined
+    || cadReference.unitDetection !== undefined;
+  let unitInfo;
+
+  try {
+    unitInfo = hasUnitAuditFields
+      ? normalizeCadReferenceUnitInfo(
+          cadReference.sourceUnitCode,
+          cadReference.sourceUnitName,
+          cadReference.unitDetection,
+          unitScaleToMeters,
+        )
+      : createLegacyCadReferenceUnitInfo(unitScaleToMeters);
+  } catch {
+    throwUnsupportedSceneFileError();
+  }
+
   return {
     sourcePath,
     sourceUrl,
-    unitScaleToMeters: assertPositiveFiniteNumber(cadReference.unitScaleToMeters),
+    sourceFileSizeBytes: normalizeNonNegativeInteger(cadReference.sourceFileSizeBytes ?? 0),
+    importMode: cadReference.importMode === 'large-preview' ? 'large-preview' : 'exact',
+    sourceUnitCode: unitInfo.sourceUnitCode,
+    sourceUnitName: unitInfo.sourceUnitName,
+    unitDetection: unitInfo.unitDetection,
+    unitScaleToMeters: unitInfo.unitScaleToMeters,
     originMode: 'center',
     lineColor: assertColorString(cadReference.lineColor),
     opacity: normalizeOpacity(cadReference.opacity),
@@ -538,6 +584,51 @@ function normalizeJsonValue(value: unknown, depth: number, seen: { count: number
   );
 }
 
+/** 校验并清理模型生成器组件，旧场景缺失该字段时不会进入此分支。 */
+function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerator'] {
+  const modelGenerator = assertPlainObject(value);
+  const metadataTtlSeconds = assertFiniteNumber(modelGenerator.metadataTtlSeconds);
+  if (metadataTtlSeconds < MODEL_GENERATOR_TTL_MIN_SECONDS || metadataTtlSeconds > MODEL_GENERATOR_TTL_MAX_SECONDS) {
+    throwUnsupportedSceneFileError();
+  }
+
+  const rules = assertArray(modelGenerator.rules);
+  const bindings = assertArray(modelGenerator.bindings);
+  if (rules.length > MODEL_GENERATOR_MAX_RULES || bindings.length > MODEL_GENERATOR_MAX_BINDINGS) {
+    throwUnsupportedSceneFileError();
+  }
+
+  const rawDefaultTarget = modelGenerator.defaultTarget;
+  if (rawDefaultTarget !== undefined && rawDefaultTarget !== null && !sanitizeModelGeneratorTarget(rawDefaultTarget)) {
+    throwUnsupportedSceneFileError();
+  }
+  for (const ruleValue of rules) {
+    const rule = assertPlainObject(ruleValue);
+    if (rule.target !== undefined && rule.target !== null && !sanitizeModelGeneratorTarget(rule.target)) {
+      throwUnsupportedSceneFileError();
+    }
+  }
+
+  const normalized = sanitizeModelGeneratorComponent({
+    defaultTarget: rawDefaultTarget,
+    rules,
+    metadataTtlSeconds,
+    bindings,
+    ...(modelGenerator.warehouseFlow === undefined ? {} : { warehouseFlow: modelGenerator.warehouseFlow }),
+  });
+  if (!normalized || normalized.rules.length !== rules.length || normalized.bindings.length !== bindings.length) {
+    throwUnsupportedSceneFileError();
+  }
+
+  const ruleIds = normalized.rules.map((rule) => rule.id);
+  const bindingIds = normalized.bindings.map((binding) => binding.id);
+  if (new Set(ruleIds).size !== ruleIds.length || new Set(bindingIds).size !== bindingIds.length) {
+    throwUnsupportedSceneFileError();
+  }
+
+  return normalized;
+}
+
 function normalizeCamera(value: unknown): EntityComponents['camera'] {
   const camera = assertPlainObject(value);
 
@@ -599,6 +690,7 @@ function hasRuntimeComponent(components: EntityComponents): boolean {
     components.locator ||
     components.cadReference ||
     components.modelAsset ||
+    components.modelGenerator ||
     components.camera ||
     components.light,
   );

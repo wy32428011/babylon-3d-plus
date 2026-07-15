@@ -1,0 +1,1754 @@
+
+===DDJ2===
+{
+  "id": "entity_stacker_ddj2",
+  "name": "Stacker DDJ2",
+  "isFolder": false,
+  "visible": true,
+  "locked": false,
+  "parentId": null,
+  "childrenIds": [],
+  "components": {
+    "transform": {
+      "position": {
+        "x": 17.291959762573242,
+        "y": 0,
+        "z": 6.475890159606934
+      },
+      "rotation": {
+        "x": 0,
+        "y": -1.5707963267948963,
+        "z": 0
+      },
+      "scale": {
+        "x": 1,
+        "y": 1,
+        "z": 1
+      }
+    },
+    "modelAsset": {
+      "assetCode": "DDJ2",
+      "sourcePath": "F:\\3d-models\\models\\Stacker\\Stacker.glb",
+      "sourceUrl": "editor-asset://local/F%3A%5C3d-models%5Cmodels%5CStacker%5CStacker.glb",
+      "lengthUnit": "millimeter",
+      "unitScaleToMeters": 0.001,
+      "scriptAssets": [
+        {
+          "path": "F:\\3d-models\\models\\Stacker\\stacker.model.ts",
+          "sourceUrl": "editor-asset://local/F%3A%5C3d-models%5Cmodels%5CStacker%5Cstacker.model.ts",
+          "name": "stacker.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "Stacker.glb",
+          "scriptFilename": "stacker.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "stacker",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "堆垛机",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "叉式堆垛机",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "bodyLength",
+              "label": "主体长度",
+              "type": "number",
+              "defaultValue": 23.012,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "bodyWidth",
+              "label": "主体宽度",
+              "type": "number",
+              "defaultValue": 0.452,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "bodyHeight",
+              "label": "主体高度",
+              "type": "number",
+              "defaultValue": 7.837,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "platformLength",
+              "label": "载货台长度",
+              "type": "number",
+              "defaultValue": 1.279,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "platformHeight",
+              "label": "载货台高度",
+              "type": "number",
+              "defaultValue": 1.695,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "forkLength",
+              "label": "货叉长度",
+              "type": "number",
+              "defaultValue": 0.941,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "forkStageOneReach",
+              "label": "货叉第一段行程",
+              "type": "number",
+              "defaultValue": 0.8,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 10,
+                "step": 0.05
+              }
+            },
+            {
+              "key": "forkStageTwoReach",
+              "label": "货叉第二段行程",
+              "type": "number",
+              "defaultValue": 0.8,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 10,
+                "step": 0.05
+              }
+            },
+            {
+              "key": "forkGap",
+              "label": "货叉间距",
+              "type": "number",
+              "defaultValue": 0.6,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 50,
+                "step": 0.05
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "stacker",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "堆垛机",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "叉式堆垛机",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "bodyLength": {
+              "type": "number",
+              "value": 23.012,
+              "label": "主体长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "bodyWidth": {
+              "type": "number",
+              "value": 0.452,
+              "label": "主体宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "bodyHeight": {
+              "type": "number",
+              "value": 7.837,
+              "label": "主体高度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "platformLength": {
+              "type": "number",
+              "value": 1.279,
+              "label": "载货台长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "platformHeight": {
+              "type": "number",
+              "value": 1.695,
+              "label": "载货台高度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "forkLength": {
+              "type": "number",
+              "value": 0.941,
+              "label": "货叉长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "forkStageOneReach": {
+              "type": "number",
+              "value": 0.8,
+              "label": "货叉第一段行程",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 10,
+                "step": 0.05
+              }
+            },
+            "forkStageTwoReach": {
+              "type": "number",
+              "value": 0.8,
+              "label": "货叉第二段行程",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 10,
+                "step": 0.05
+              }
+            },
+            "forkGap": {
+              "type": "number",
+              "value": 0.6,
+              "label": "货叉间距",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 50,
+                "step": 0.05
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "Stacker.glb",
+          "scriptFilename": "stacker.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "bodyLength",
+            "label": "主体长度",
+            "type": "number",
+            "defaultValue": 23.012,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "bodyWidth",
+            "label": "主体宽度",
+            "type": "number",
+            "defaultValue": 0.452,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "bodyHeight",
+            "label": "主体高度",
+            "type": "number",
+            "defaultValue": 7.837,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "platformLength",
+            "label": "载货台长度",
+            "type": "number",
+            "defaultValue": 1.279,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "platformHeight",
+            "label": "载货台高度",
+            "type": "number",
+            "defaultValue": 1.695,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "forkLength",
+            "label": "货叉长度",
+            "type": "number",
+            "defaultValue": 0.941,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "forkStageOneReach",
+            "label": "货叉第一段行程",
+            "type": "number",
+            "defaultValue": 0.8,
+            "min": 0,
+            "max": 10,
+            "step": 0.05
+          },
+          {
+            "key": "forkStageTwoReach",
+            "label": "货叉第二段行程",
+            "type": "number",
+            "defaultValue": 0.8,
+            "min": 0,
+            "max": 10,
+            "step": 0.05
+          },
+          {
+            "key": "forkGap",
+            "label": "货叉间距",
+            "type": "number",
+            "defaultValue": 0.6,
+            "min": 0,
+            "max": 50,
+            "step": 0.05
+          }
+        ],
+        "bindings": []
+      },
+      "parameterValues": {
+        "bodyLength": 58,
+        "bodyWidth": 0.452,
+        "bodyHeight": 9.4,
+        "platformLength": 1.279,
+        "platformHeight": 1.695,
+        "forkLength": 0.6,
+        "forkStageOneReach": 0.8,
+        "forkStageTwoReach": 0.8,
+        "forkGap": 0.6
+      }
+    }
+  }
+}
+
+===1004===
+{
+  "id": "entity_8bc04e8f-602d-48f0-8d59-18b0b8ebfeeb",
+  "name": "一体式顶升移载 副本",
+  "isFolder": false,
+  "visible": true,
+  "locked": false,
+  "parentId": null,
+  "childrenIds": [],
+  "components": {
+    "transform": {
+      "position": {
+        "x": 25.54476547241211,
+        "y": 0,
+        "z": 3.716153144836426
+      },
+      "rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "scale": {
+        "x": 1,
+        "y": 1,
+        "z": 1
+      }
+    },
+    "modelAsset": {
+      "assetCode": "1004",
+      "sourcePath": "F:\\3d-models\\models\\Assets\\Models\\YZJ\\YZJ.glb",
+      "sourceUrl": "editor-asset://local/F%3A%5C3d-models%5Cmodels%5CAssets%5CModels%5CYZJ%5CYZJ.glb",
+      "assetRevision": "mrkw5h4v-097fd151-8be2-40be-853e-28fa5b2a576d",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "scriptAssets": [
+        {
+          "path": "F:\\3d-models\\models\\Assets\\Models\\YZJ\\yzj.model.ts",
+          "sourceUrl": "editor-asset://local/F%3A%5C3d-models%5Cmodels%5CAssets%5CModels%5CYZJ%5Cyzj.model.ts",
+          "name": "yzj.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "YZJ.glb",
+          "scriptFilename": "yzj.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "yzj",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "输送",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "一体式顶升移载",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "chainLength",
+              "label": "链条机长度",
+              "type": "number",
+              "defaultValue": 1.828,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "platformLength",
+              "label": "顶升模块长度",
+              "type": "number",
+              "defaultValue": 1.022,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "platformPosition",
+              "label": "顶升位置偏移",
+              "type": "number",
+              "defaultValue": 0,
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 0.05
+              }
+            },
+            {
+              "key": "chainWidth",
+              "label": "链条机宽度",
+              "type": "number",
+              "defaultValue": 1.194,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "chainHeight",
+              "label": "链条机高度",
+              "type": "number",
+              "defaultValue": 0.803,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "rollerWidth",
+              "label": "辊筒宽度",
+              "type": "number",
+              "defaultValue": 0.062,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01
+              }
+            },
+            {
+              "key": "rollerPosition",
+              "label": "辊筒位置",
+              "type": "number",
+              "defaultValue": 0,
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "rollerDensity",
+              "label": "辊筒密度",
+              "type": "number",
+              "defaultValue": 1,
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            {
+              "key": "infeedSide",
+              "label": "入料侧",
+              "type": "string",
+              "defaultValue": "left",
+              "configuration": {
+                "type": "string",
+                "options": [
+                  {
+                    "value": "left",
+                    "label": "左侧（局部 X+）"
+                  },
+                  {
+                    "value": "right",
+                    "label": "右侧（局部 X-）"
+                  },
+                  {
+                    "value": "front",
+                    "label": "前侧（局部 Z-）"
+                  },
+                  {
+                    "value": "rear",
+                    "label": "后侧（局部 Z+）"
+                  }
+                ]
+              }
+            },
+            {
+              "key": "outfeedSide",
+              "label": "出料侧",
+              "type": "string",
+              "defaultValue": "front",
+              "configuration": {
+                "type": "string",
+                "options": [
+                  {
+                    "value": "left",
+                    "label": "左侧（局部 X+）"
+                  },
+                  {
+                    "value": "right",
+                    "label": "右侧（局部 X-）"
+                  },
+                  {
+                    "value": "front",
+                    "label": "前侧（局部 Z-）"
+                  },
+                  {
+                    "value": "rear",
+                    "label": "后侧（局部 Z+）"
+                  }
+                ]
+              }
+            },
+            {
+              "key": "showDirectionArrow",
+              "label": "显示方向箭头",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "directionArrowImage",
+              "label": "方向箭头贴图",
+              "type": "string",
+              "defaultValue": "editor-image://builtin/direction-arrow-glow",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "showFrontSupport",
+              "label": "显示前支架",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "showRearSupport",
+              "label": "显示后支架",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "yzj",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "输送",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "一体式顶升移载",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "chainLength": {
+              "type": "number",
+              "value": 1.828,
+              "label": "链条机长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "platformLength": {
+              "type": "number",
+              "value": 1.022,
+              "label": "顶升模块长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "platformPosition": {
+              "type": "number",
+              "value": 0,
+              "label": "顶升位置偏移",
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 0.05
+              }
+            },
+            "chainWidth": {
+              "type": "number",
+              "value": 1.194,
+              "label": "链条机宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "chainHeight": {
+              "type": "number",
+              "value": 0.803,
+              "label": "链条机高度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "rollerWidth": {
+              "type": "number",
+              "value": 0.062,
+              "label": "辊筒宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01
+              }
+            },
+            "rollerPosition": {
+              "type": "number",
+              "value": 0,
+              "label": "辊筒位置",
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "rollerDensity": {
+              "type": "number",
+              "value": 1,
+              "label": "辊筒密度",
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            "infeedSide": {
+              "type": "string",
+              "value": "left",
+              "label": "入料侧",
+              "configuration": {
+                "type": "string",
+                "options": [
+                  {
+                    "value": "left",
+                    "label": "左侧（局部 X+）"
+                  },
+                  {
+                    "value": "right",
+                    "label": "右侧（局部 X-）"
+                  },
+                  {
+                    "value": "front",
+                    "label": "前侧（局部 Z-）"
+                  },
+                  {
+                    "value": "rear",
+                    "label": "后侧（局部 Z+）"
+                  }
+                ]
+              }
+            },
+            "outfeedSide": {
+              "type": "string",
+              "value": "front",
+              "label": "出料侧",
+              "configuration": {
+                "type": "string",
+                "options": [
+                  {
+                    "value": "left",
+                    "label": "左侧（局部 X+）"
+                  },
+                  {
+                    "value": "right",
+                    "label": "右侧（局部 X-）"
+                  },
+                  {
+                    "value": "front",
+                    "label": "前侧（局部 Z-）"
+                  },
+                  {
+                    "value": "rear",
+                    "label": "后侧（局部 Z+）"
+                  }
+                ]
+              }
+            },
+            "showDirectionArrow": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示方向箭头",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "directionArrowImage": {
+              "type": "string",
+              "value": "editor-image://builtin/direction-arrow-glow",
+              "label": "方向箭头贴图",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "showFrontSupport": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示前支架",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "showRearSupport": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示后支架",
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "YZJ.glb",
+          "scriptFilename": "yzj.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "chainLength",
+            "label": "链条机长度",
+            "type": "number",
+            "defaultValue": 1.828,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "platformLength",
+            "label": "顶升模块长度",
+            "type": "number",
+            "defaultValue": 1.022,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "platformPosition",
+            "label": "顶升位置偏移",
+            "type": "number",
+            "defaultValue": 0,
+            "min": -100,
+            "max": 100,
+            "step": 0.05
+          },
+          {
+            "key": "chainWidth",
+            "label": "链条机宽度",
+            "type": "number",
+            "defaultValue": 1.194,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "chainHeight",
+            "label": "链条机高度",
+            "type": "number",
+            "defaultValue": 0.803,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "rollerWidth",
+            "label": "辊筒宽度",
+            "type": "number",
+            "defaultValue": 0.062,
+            "min": 0.01,
+            "max": 100,
+            "step": 0.01
+          },
+          {
+            "key": "rollerPosition",
+            "label": "辊筒位置",
+            "type": "number",
+            "defaultValue": 0,
+            "min": -100,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "rollerDensity",
+            "label": "辊筒密度",
+            "type": "number",
+            "defaultValue": 1,
+            "min": 1,
+            "max": 100,
+            "step": 1
+          },
+          {
+            "key": "infeedSide",
+            "label": "入料侧",
+            "type": "enum",
+            "defaultValue": "left",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          },
+          {
+            "key": "outfeedSide",
+            "label": "出料侧",
+            "type": "enum",
+            "defaultValue": "front",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          },
+          {
+            "key": "showDirectionArrow",
+            "label": "显示方向箭头",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "directionArrowImage",
+            "label": "方向箭头贴图",
+            "type": "texture",
+            "defaultValue": "editor-image://builtin/direction-arrow-glow"
+          },
+          {
+            "key": "showFrontSupport",
+            "label": "显示前支架",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "showRearSupport",
+            "label": "显示后支架",
+            "type": "boolean",
+            "defaultValue": true
+          }
+        ],
+        "bindings": []
+      },
+      "parameterValues": {
+        "chainLength": 4.1,
+        "platformLength": 1.022,
+        "platformPosition": 0,
+        "chainWidth": 1.194,
+        "chainHeight": 0.803,
+        "rollerWidth": 0.062,
+        "rollerPosition": 0,
+        "rollerDensity": 1,
+        "infeedSide": "right",
+        "outfeedSide": "left",
+        "showDirectionArrow": true,
+        "directionArrowImage": "editor-image://builtin/direction-arrow-glow",
+        "showFrontSupport": true,
+        "showRearSupport": true
+      }
+    }
+  }
+}
+
+===1005===
+{
+  "id": "entity_57af9831-f7c5-4964-b74d-fafd536895c2",
+  "name": "一体式顶升移载",
+  "isFolder": false,
+  "visible": true,
+  "locked": false,
+  "parentId": null,
+  "childrenIds": [],
+  "components": {
+    "transform": {
+      "position": {
+        "x": 25.55368995666504,
+        "y": 0,
+        "z": 5.183948516845703
+      },
+      "rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "scale": {
+        "x": 1,
+        "y": 1,
+        "z": 1
+      }
+    },
+    "modelAsset": {
+      "assetCode": "1005",
+      "sourcePath": "F:\\3d-models\\models\\Assets\\Models\\YZJ\\YZJ.glb",
+      "sourceUrl": "editor-asset://local/F%3A%5C3d-models%5Cmodels%5CAssets%5CModels%5CYZJ%5CYZJ.glb",
+      "assetRevision": "mrkw5h4v-097fd151-8be2-40be-853e-28fa5b2a576d",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "scriptAssets": [
+        {
+          "path": "F:\\3d-models\\models\\Assets\\Models\\YZJ\\yzj.model.ts",
+          "sourceUrl": "editor-asset://local/F%3A%5C3d-models%5Cmodels%5CAssets%5CModels%5CYZJ%5Cyzj.model.ts",
+          "name": "yzj.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "YZJ.glb",
+          "scriptFilename": "yzj.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "yzj",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "输送",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "一体式顶升移载",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "chainLength",
+              "label": "链条机长度",
+              "type": "number",
+              "defaultValue": 1.828,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "platformLength",
+              "label": "顶升模块长度",
+              "type": "number",
+              "defaultValue": 1.022,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "platformPosition",
+              "label": "顶升位置偏移",
+              "type": "number",
+              "defaultValue": 0,
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 0.05
+              }
+            },
+            {
+              "key": "chainWidth",
+              "label": "链条机宽度",
+              "type": "number",
+              "defaultValue": 1.194,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "chainHeight",
+              "label": "链条机高度",
+              "type": "number",
+              "defaultValue": 0.803,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "rollerWidth",
+              "label": "辊筒宽度",
+              "type": "number",
+              "defaultValue": 0.062,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01
+              }
+            },
+            {
+              "key": "rollerPosition",
+              "label": "辊筒位置",
+              "type": "number",
+              "defaultValue": 0,
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "rollerDensity",
+              "label": "辊筒密度",
+              "type": "number",
+              "defaultValue": 1,
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            {
+              "key": "infeedSide",
+              "label": "入料侧",
+              "type": "string",
+              "defaultValue": "left",
+              "configuration": {
+                "type": "string",
+                "options": [
+                  {
+                    "value": "left",
+                    "label": "左侧（局部 X+）"
+                  },
+                  {
+                    "value": "right",
+                    "label": "右侧（局部 X-）"
+                  },
+                  {
+                    "value": "front",
+                    "label": "前侧（局部 Z-）"
+                  },
+                  {
+                    "value": "rear",
+                    "label": "后侧（局部 Z+）"
+                  }
+                ]
+              }
+            },
+            {
+              "key": "outfeedSide",
+              "label": "出料侧",
+              "type": "string",
+              "defaultValue": "front",
+              "configuration": {
+                "type": "string",
+                "options": [
+                  {
+                    "value": "left",
+                    "label": "左侧（局部 X+）"
+                  },
+                  {
+                    "value": "right",
+                    "label": "右侧（局部 X-）"
+                  },
+                  {
+                    "value": "front",
+                    "label": "前侧（局部 Z-）"
+                  },
+                  {
+                    "value": "rear",
+                    "label": "后侧（局部 Z+）"
+                  }
+                ]
+              }
+            },
+            {
+              "key": "showDirectionArrow",
+              "label": "显示方向箭头",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "directionArrowImage",
+              "label": "方向箭头贴图",
+              "type": "string",
+              "defaultValue": "editor-image://builtin/direction-arrow-glow",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "showFrontSupport",
+              "label": "显示前支架",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "showRearSupport",
+              "label": "显示后支架",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "yzj",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "输送",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "一体式顶升移载",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "chainLength": {
+              "type": "number",
+              "value": 1.828,
+              "label": "链条机长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "platformLength": {
+              "type": "number",
+              "value": 1.022,
+              "label": "顶升模块长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "platformPosition": {
+              "type": "number",
+              "value": 0,
+              "label": "顶升位置偏移",
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 0.05
+              }
+            },
+            "chainWidth": {
+              "type": "number",
+              "value": 1.194,
+              "label": "链条机宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "chainHeight": {
+              "type": "number",
+              "value": 0.803,
+              "label": "链条机高度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "rollerWidth": {
+              "type": "number",
+              "value": 0.062,
+              "label": "辊筒宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01
+              }
+            },
+            "rollerPosition": {
+              "type": "number",
+              "value": 0,
+              "label": "辊筒位置",
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "rollerDensity": {
+              "type": "number",
+              "value": 1,
+              "label": "辊筒密度",
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            "infeedSide": {
+              "type": "string",
+              "value": "left",
+              "label": "入料侧",
+              "configuration": {
+                "type": "string",
+                "options": [
+                  {
+                    "value": "left",
+                    "label": "左侧（局部 X+）"
+                  },
+                  {
+                    "value": "right",
+                    "label": "右侧（局部 X-）"
+                  },
+                  {
+                    "value": "front",
+                    "label": "前侧（局部 Z-）"
+                  },
+                  {
+                    "value": "rear",
+                    "label": "后侧（局部 Z+）"
+                  }
+                ]
+              }
+            },
+            "outfeedSide": {
+              "type": "string",
+              "value": "front",
+              "label": "出料侧",
+              "configuration": {
+                "type": "string",
+                "options": [
+                  {
+                    "value": "left",
+                    "label": "左侧（局部 X+）"
+                  },
+                  {
+                    "value": "right",
+                    "label": "右侧（局部 X-）"
+                  },
+                  {
+                    "value": "front",
+                    "label": "前侧（局部 Z-）"
+                  },
+                  {
+                    "value": "rear",
+                    "label": "后侧（局部 Z+）"
+                  }
+                ]
+              }
+            },
+            "showDirectionArrow": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示方向箭头",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "directionArrowImage": {
+              "type": "string",
+              "value": "editor-image://builtin/direction-arrow-glow",
+              "label": "方向箭头贴图",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "showFrontSupport": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示前支架",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "showRearSupport": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示后支架",
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "YZJ.glb",
+          "scriptFilename": "yzj.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "chainLength",
+            "label": "链条机长度",
+            "type": "number",
+            "defaultValue": 1.828,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "platformLength",
+            "label": "顶升模块长度",
+            "type": "number",
+            "defaultValue": 1.022,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "platformPosition",
+            "label": "顶升位置偏移",
+            "type": "number",
+            "defaultValue": 0,
+            "min": -100,
+            "max": 100,
+            "step": 0.05
+          },
+          {
+            "key": "chainWidth",
+            "label": "链条机宽度",
+            "type": "number",
+            "defaultValue": 1.194,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "chainHeight",
+            "label": "链条机高度",
+            "type": "number",
+            "defaultValue": 0.803,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "rollerWidth",
+            "label": "辊筒宽度",
+            "type": "number",
+            "defaultValue": 0.062,
+            "min": 0.01,
+            "max": 100,
+            "step": 0.01
+          },
+          {
+            "key": "rollerPosition",
+            "label": "辊筒位置",
+            "type": "number",
+            "defaultValue": 0,
+            "min": -100,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "rollerDensity",
+            "label": "辊筒密度",
+            "type": "number",
+            "defaultValue": 1,
+            "min": 1,
+            "max": 100,
+            "step": 1
+          },
+          {
+            "key": "infeedSide",
+            "label": "入料侧",
+            "type": "enum",
+            "defaultValue": "left",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          },
+          {
+            "key": "outfeedSide",
+            "label": "出料侧",
+            "type": "enum",
+            "defaultValue": "front",
+            "options": [
+              {
+                "value": "left",
+                "label": "左侧（局部 X+）"
+              },
+              {
+                "value": "right",
+                "label": "右侧（局部 X-）"
+              },
+              {
+                "value": "front",
+                "label": "前侧（局部 Z-）"
+              },
+              {
+                "value": "rear",
+                "label": "后侧（局部 Z+）"
+              }
+            ]
+          },
+          {
+            "key": "showDirectionArrow",
+            "label": "显示方向箭头",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "directionArrowImage",
+            "label": "方向箭头贴图",
+            "type": "texture",
+            "defaultValue": "editor-image://builtin/direction-arrow-glow"
+          },
+          {
+            "key": "showFrontSupport",
+            "label": "显示前支架",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "showRearSupport",
+            "label": "显示后支架",
+            "type": "boolean",
+            "defaultValue": true
+          }
+        ],
+        "bindings": []
+      },
+      "parameterValues": {
+        "chainLength": 4.1,
+        "platformLength": 1.022,
+        "platformPosition": 0,
+        "chainWidth": 1.194,
+        "chainHeight": 0.803,
+        "rollerWidth": 0.062,
+        "rollerPosition": 0,
+        "rollerDensity": 1,
+        "infeedSide": "left",
+        "outfeedSide": "right",
+        "showDirectionArrow": true,
+        "directionArrowImage": "editor-image://builtin/direction-arrow-glow",
+        "showFrontSupport": true,
+        "showRearSupport": true
+      }
+    }
+  }
+}

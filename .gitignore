@@ -4,3 +4,5 @@ dist
 .claude
 .omc
 .playwright-mcp
+.playwright-cli
+release/

@@ -1,5 +1,6 @@
 import type { BuiltInImageAsset } from '../../assets/imageAssets';
 import { BUILT_IN_IMAGE_ASSETS } from '../../assets/imageAssets';
+import { formatBuiltInMeshBaseDimensionsMeters } from '../model/builtInMeshGeometry';
 import type { LightKind, MeshKind } from '../model/components';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/sceneUnits';
 import type { AssetEntry, BuiltInAssetDragPayload } from './AssetDatabase';
@@ -41,14 +42,21 @@ export type ProjectLibrary = {
 };
 
 export type BuiltInProjectLibraryAction =
+  | { kind: 'model-generator' }
   | { kind: 'mesh'; meshKind: MeshKind }
   | { kind: 'locator'; locatorKind: 'box-wire' }
   | { kind: 'light'; lightKind: LightKind };
 
 export const BUILT_IN_MODEL_LIBRARY_ITEMS: BuiltInProjectLibraryItem[] = [
-  { id: 'builtin-cube', name: '立方体', icon: 'cube', subtitle: '基础对象', builtIn: { kind: 'mesh', meshKind: 'cube' } },
-  { id: 'builtin-sphere', name: '球体', icon: 'ring', subtitle: '基础对象', builtIn: { kind: 'mesh', meshKind: 'sphere' } },
-  { id: 'builtin-plane', name: '地面', icon: 'panel', subtitle: '基础对象', builtIn: { kind: 'mesh', meshKind: 'plane' } },
+  {
+    id: 'builtin-cube',
+    name: '立方体',
+    icon: 'cube',
+    subtitle: formatBuiltInMeshBaseDimensionsMeters('cube'),
+    builtIn: { kind: 'mesh', meshKind: 'cube' },
+  },
+  { id: 'builtin-sphere', name: '球体', icon: 'ring', subtitle: formatBuiltInMeshBaseDimensionsMeters('sphere'), builtIn: { kind: 'mesh', meshKind: 'sphere' } },
+  { id: 'builtin-plane', name: '地面', icon: 'panel', subtitle: formatBuiltInMeshBaseDimensionsMeters('plane'), builtIn: { kind: 'mesh', meshKind: 'plane' } },
   { id: 'builtin-box-wire-locator', name: '虚拟定位线框', icon: 'cube', subtitle: '基础对象', builtIn: { kind: 'locator', locatorKind: 'box-wire' } },
   { id: 'builtin-hemispheric-light', name: '半球光', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'hemispheric' } },
   { id: 'builtin-directional-light', name: '方向光', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'directional' } },
@@ -65,7 +73,6 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
       { id: 'model-trigger', name: '事件触发器', icon: 'cube' },
       { id: 'model-sender', name: '发送器', icon: 'cube' },
       { id: 'model-receiver', name: '回收器', icon: 'cube' },
-      { id: 'model-generator', name: '模型产生器', icon: 'ring' },
     ],
   },
   {
@@ -74,6 +81,7 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     searchLabel: 'POI名称',
     searchPlaceholder: '请输入POI名称...',
     items: [
+      { id: 'poi-model-generator', name: '模型生成器', icon: 'ring', subtitle: '内置POI', builtIn: { kind: 'model-generator' } },
       { id: 'poi-chart-marker', name: '图表立标', icon: 'marker' },
       { id: 'poi-panel', name: '图表面板', icon: 'panel' },
       { id: 'poi-alarm', name: '报警管理器', icon: 'cube' },

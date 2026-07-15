@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent, type PointerEvent } from 'react';
 import { createBabylonViewport, type BabylonViewport } from '../../runtime/babylon/createEngine';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
@@ -9,7 +9,8 @@ import {
   decodeModelAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
-import { useEditorStore } from '../store/editorStore';
+import { useEditorStore, type EntityArrayDirection } from '../store/editorStore';
+import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
 import type { SceneDocument } from '../model/SceneDocument';
 
@@ -24,6 +25,13 @@ type PointerClickSnapshot = {
 /** 将未知异常转换成可展示的简短消息。 */
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 从带正负号的阵列方向读取唯一世界坐标轴。 */
+function getEntityArrayAxis(direction: EntityArrayDirection): 'x' | 'y' | 'z' {
+  const axis = direction.replace('-', '');
+  if (axis === 'y' || axis === 'z') return axis;
+  return 'x';
 }
 
 export function SceneViewPanel() {
@@ -45,6 +53,7 @@ export function SceneViewPanel() {
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
   const gridSettings = useEditorStore((state) => state.gridSettings);
+  const entityArrayRequest = useEditorStore((state) => state.entityArrayRequest);
   const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
   const cameraPoseSaveRequest = useEditorStore((state) => state.cameraPoseSaveRequest);
   const cameraResetRequest = useEditorStore((state) => state.cameraResetRequest);
@@ -52,15 +61,31 @@ export function SceneViewPanel() {
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
+  const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
+  const resolveEntityArrayRequest = useEditorStore((state) => state.resolveEntityArrayRequest);
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
   const consumeCameraPoseSaveRequest = useEditorStore((state) => state.consumeCameraPoseSaveRequest);
   const consumeCameraResetRequest = useEditorStore((state) => state.consumeCameraResetRequest);
+  const setSelectedModelMeasurement = useEditorStore((state) => state.setSelectedModelMeasurement);
   const pushLog = useEditorStore((state) => state.pushLog);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
   const isRuntimePreview = runtimeMode === 'preview';
+
+  /** 把当前普通导入模型的运行时尺寸发布到临时 Inspector 状态。 */
+  const publishSelectedModelMeasurement = useCallback((runtime: SceneRuntime, entityId: string | null): void => {
+    const currentScene = sceneDocumentRef.current;
+    const selectedEntity = entityId && currentScene ? currentScene.entities[entityId] : null;
+    if (!entityId || !selectedEntity?.components.modelAsset) {
+      setSelectedModelMeasurement(null);
+      return;
+    }
+
+    const measurement = runtime.getModelMeasurement(entityId) ?? { status: 'unavailable', sizeMeters: null };
+    setSelectedModelMeasurement({ entityId, ...measurement });
+  }, [setSelectedModelMeasurement]);
 
   useEffect(() => {
     sceneDocumentRef.current = sceneDocument;
@@ -148,8 +173,17 @@ export function SceneViewPanel() {
     event.preventDefault();
     clickSnapshotRef.current = null;
 
+    if (builtInAsset.kind === 'model-generator') {
+      createModelGenerator(placementPosition);
+      return;
+    }
+
     if (builtInAsset.kind === 'mesh') {
-      createMesh(builtInAsset.meshKind, placementPosition);
+      const groundOffsetMeters = getBuiltInMeshGroundOffsetMeters(builtInAsset.meshKind);
+      createMesh(builtInAsset.meshKind, {
+        ...placementPosition,
+        y: placementPosition.y + groundOffsetMeters,
+      });
       return;
     }
 
@@ -171,7 +205,11 @@ export function SceneViewPanel() {
 
     try {
       viewport = createBabylonViewport(canvasRef.current);
-      runtime = new SceneRuntime(viewport.scene, pushLog);
+      runtime = new SceneRuntime(viewport.scene, pushLog, (entityId) => {
+        const currentRuntime = runtimeRef.current;
+        if (!currentRuntime || selectedEntityIdRef.current !== entityId) return;
+        publishSelectedModelMeasurement(currentRuntime, entityId);
+      });
       gizmo = new TransformGizmoController(viewport.scene, {
         previewTransform: previewEntityTransform,
         commitTransform: commitEntityTransform,
@@ -212,8 +250,16 @@ export function SceneViewPanel() {
       runtimeRef.current = null;
       gizmoRef.current = null;
       mqttTelemetryClientRef.current = null;
+      setSelectedModelMeasurement(null);
     };
-  }, [previewEntityTransform, commitEntityTransform, pushLog, stopRuntimePreview]);
+  }, [
+    previewEntityTransform,
+    commitEntityTransform,
+    publishSelectedModelMeasurement,
+    pushLog,
+    setSelectedModelMeasurement,
+    stopRuntimePreview,
+  ]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -224,7 +270,8 @@ export function SceneViewPanel() {
     runtime.sync(sceneDocument);
     const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityId);
     gizmo.attachToTarget(selectedTarget, selectedEntityId);
-  }, [sceneDocument, selectedEntityId, isRuntimePreview]);
+    publishSelectedModelMeasurement(runtime, selectedEntityId);
+  }, [sceneDocument, selectedEntityId, isRuntimePreview, publishSelectedModelMeasurement]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -242,6 +289,7 @@ export function SceneViewPanel() {
       runtime.sync(currentSceneDocument);
       const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityIdRef.current);
       gizmo.attachToTarget(selectedTarget, selectedEntityIdRef.current);
+      publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
       return;
     }
 
@@ -252,12 +300,13 @@ export function SceneViewPanel() {
       runtime.sync(currentSceneDocument);
       runtime.beginTelemetryPreview();
       client.updateConfig(mqttConfig);
+      publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
     } catch (error) {
       const message = getErrorMessage(error);
       pushLog(`运行预览初始化失败：${message}`);
       stopRuntimePreview();
     }
-  }, [runtimeMode, isRuntimePreview, mqttConfig, pushLog, stopRuntimePreview]);
+  }, [runtimeMode, isRuntimePreview, mqttConfig, publishSelectedModelMeasurement, pushLog, stopRuntimePreview]);
 
   useEffect(() => {
     if (!isRuntimePreview) return;
@@ -310,6 +359,21 @@ export function SceneViewPanel() {
   }, [cameraResetRequest, consumeCameraResetRequest, sceneDocument.sceneSettings.camera.savedPose]);
 
   useEffect(() => {
+    if (!entityArrayRequest) return;
+
+    const runtime = runtimeRef.current;
+    if (!runtime) {
+      resolveEntityArrayRequest(entityArrayRequest.id, null);
+      return;
+    }
+
+    const bounds = runtime.getEntitiesWorldBounds(entityArrayRequest.sourceIds);
+    const axis = getEntityArrayAxis(entityArrayRequest.direction);
+    const selectionSpanMeters = bounds?.geometryReady ? bounds.sizeMeters[axis] : null;
+    resolveEntityArrayRequest(entityArrayRequest.id, selectionSpanMeters);
+  }, [entityArrayRequest, resolveEntityArrayRequest]);
+
+  useEffect(() => {
     if (!sceneFocusRequest) return;
 
     const runtime = runtimeRef.current;
@@ -347,3 +411,4 @@ export function SceneViewPanel() {
     </section>
   );
 }
+

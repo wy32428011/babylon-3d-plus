@@ -45,6 +45,7 @@ export const IMAGE_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-image-as
 export type ImageAssetDragPayload = Pick<BuiltInImageAsset, 'id' | 'name' | 'reference' | 'sourceUrl'>;
 
 export type BuiltInAssetDragPayload =
+  | { kind: 'model-generator' }
   | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
   | { kind: 'locator'; locatorKind: 'box-wire' }
   | { kind: 'light'; lightKind: 'hemispheric' | 'directional' | 'point' };
@@ -202,6 +203,10 @@ export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetD
   try {
     const payload: unknown = JSON.parse(rawPayload);
     if (!isRecord(payload)) return null;
+
+    if (payload.kind === 'model-generator') {
+      return { kind: 'model-generator' };
+    }
 
     if (payload.kind === 'mesh') {
       const meshKind = payload.meshKind;

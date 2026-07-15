@@ -57,7 +57,7 @@ export class ParametricModelParamsComponent {
 	public deviceName: string = "一体式顶升移载";
 
 	@visibleAsString("参数说明")
-	public description: string = "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。";
+	public description: string = "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度、入/出料侧定位及 MQTT 前/后端独立定位。";
 
 	@visibleAsNumber("链条机长度", { step: 0.1 })
 	public chainLength: number = 1.828;
@@ -88,6 +88,12 @@ export class ParametricModelParamsComponent {
 
 	@visibleAsString("出料侧")
 	public outfeedSide: string = "front";
+
+	@visibleAsString("MQTT 前端方向")
+	public frontSide: string = "right";
+
+	@visibleAsString("MQTT 后端方向")
+	public backSide: string = "left";
 
 	@visibleAsBoolean("显示方向箭头")
 	public showDirectionArrow: boolean = true;
@@ -132,7 +138,7 @@ const DEFAULT_VALUES: ValueMap = {
 	"modelKey": "yzj",
 	"deviceType": "输送",
 	"deviceName": "一体式顶升移载",
-	"description": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度及入料/出料侧定位。",
+	"description": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度、入/出料侧定位及 MQTT 前/后端独立定位。",
 	"chainLength": 1.828,
 	"platformLength": 1.022,
 	"platformPosition": 0,
@@ -143,6 +149,8 @@ const DEFAULT_VALUES: ValueMap = {
 	"rollerDensity": 1,
 	"infeedSide": "left",
 	"outfeedSide": "front",
+	"frontSide": "right",
+	"backSide": "left",
 	"showDirectionArrow": true,
 	"directionArrowImage": "editor-image://builtin/direction-arrow-glow",
 	"showFrontSupport": true,
@@ -563,9 +571,13 @@ export class ParametricModelRuntimeComponent {
 		if (!platform) { return; }
 		const infeedSide = this.readTransferSide(values, "infeedSide", "left");
 		const outfeedSide = this.readTransferSide(values, "outfeedSide", "front");
+		const frontSide = this.readTransferSide(values, "frontSide", "right");
+		const backSide = this.readTransferSide(values, "backSide", "left");
 		const logisticsFlow = {
 			infeedSide,
 			outfeedSide,
+			frontSide,
+			backSide,
 			coordinateSpace: "model-local",
 			sideAxes: { left: "x+", right: "x-", front: "z-", rear: "z+" },
 		};

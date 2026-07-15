@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   AssetEntry,
   ImportCadFileResult,
+  ImportEnvironmentModelFileResult,
   ImportModelFolderRequest,
   ImportModelFolderResult,
   ListModelPackageVariantsRequest,
@@ -35,8 +36,10 @@ contextBridge.exposeInMainWorld('editorApi', {
   removeRecentWorkspaceItem: (request: RemoveRecentWorkspaceItemRequest): Promise<void> => ipcRenderer.invoke('project:removeRecentWorkspaceItem', request),
   selectProjectDirectory: (): Promise<SelectProjectDirectoryResult> => ipcRenderer.invoke('project:selectDirectory'),
   importCadFile: (): Promise<ImportCadFileResult> => ipcRenderer.invoke('assets:importCadFile'),
-  /** 透传模型文件夹导入请求，renderer 指定普通模型或环境模型库。 */
+  /** 透传普通模型文件夹导入请求。 */
   importModelFolder: (request: ImportModelFolderRequest): Promise<ImportModelFolderResult> => ipcRenderer.invoke('assets:importModelFolder', request),
+  /** 透传环境模型单 GLB 文件导入请求。 */
+  importEnvironmentModelFile: (): Promise<ImportEnvironmentModelFileResult> => ipcRenderer.invoke('assets:importEnvironmentModelFile'),
   listModelPackageVariants: (request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> =>
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
   mqttConfigure: (request: MqttIpcConfigureRequest): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:configure', request),

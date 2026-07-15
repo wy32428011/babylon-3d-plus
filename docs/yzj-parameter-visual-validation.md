@@ -9,6 +9,7 @@
 - `chainWidth` 同步带动 `Ban.4` 和辊筒阵列变宽。
 - `platformPosition` 沿模型局部 X 移动完整顶升组件，并做主体边界约束。
 - `infeedSide/outfeedSide` 按模型局部坐标标识入料侧与出料侧。
+- `frontSide/backSide` 独立标识 MQTT 前端与后端，使前后光电不再依赖入/出料方向猜测。
 - GLB 本体不写入箭头；方向箭头由参数脚本运行时创建，不进入编辑器 Hierarchy，也不参与拾取和 Gizmo。
 
 ## 模型包与文件一致性
@@ -24,8 +25,8 @@
 
 | 资源 | SHA256 |
 | --- | --- |
-| 四份 `yzj.model.ts/.txt` | `46c195540b239c2428078d6e42fbaafd02cb7fcba52326eb511c1a145d7e018b` |
-| 三份 `meta.json` | `53052e4ef9dd8e3cec0d4fc9892a658505f8f5da7db049a7e80311bdd395b8c8` |
+| 四份 `yzj.model.ts/.txt` | `ceb2e07d2921ac9e6e70d12b521024ced93414e1b8a6181fd6338a4dc104adc9` |
+| 三份 `meta.json` | `28436aa9f10121342943a0f7dcae4d88cbba731dcf568b459abfcc613188d166` |
 | `YZJ.glb` | `5c400bb95afa24a035662e30ba21bca76cf5f7723fa6aceabe23aaee3c951ccb` |
 | 内置方向箭头 PNG | `ae0e1b104306dc67c9222ebe3501866dade42e681a0b750ea94bb5540083d3f8` |
 
@@ -45,10 +46,21 @@
 | `rollerDensity` | 沿局部 Z 生成辊筒阵列；克隆通过 `motionSourceNodeName = "GT.3"` 继承运行态运动。 |
 | `infeedSide` | 入料侧：`left/right/front/rear`。 |
 | `outfeedSide` | 出料侧：`left/right/front/rear`。 |
+| `frontSide` | MQTT 前端方向，默认 `right`（局部 X-）；对应 `front_signalBits/front_has_goods`。 |
+| `backSide` | MQTT 后端方向，默认 `left`（局部 X+）；对应 `back_signalBits/back_has_goods`。 |
 | `showDirectionArrow` | 控制运行时是否创建并显示方向箭头。 |
 | `directionArrowImage` | `texture` 参数；默认保存内置图片逻辑引用。 |
 
-局部侧映射为：`left = X+`、`right = X-`、`front = Z-`、`rear = Z+`。归一化结果写入模型内容根、`Ban.4` 和 `GT.3` 的 `metadata.logisticsFlow`。
+局部侧映射为：`left = X+`、`right = X-`、`front = Z-`、`rear = Z+`。`infeedSide/outfeedSide/frontSide/backSide` 的归一化结果写入模型内容根、`Ban.4` 和 `GT.3` 的 `metadata.logisticsFlow`。
+
+## MQTT 前后端映射合同
+
+- 入料/出料描述物流角色；前端/后端描述 PLC/MQTT 光电的物理端点，两套参数不得互相覆盖。
+- 当前 1004 与 1005 的物理映射均为 `frontSide = right`、`backSide = left`：1004 的入料/出料是 `right → left`，1005 的入料/出料是 `left → right`。
+- `SceneRuntime` 发现显式前后端后，入库货物按 MQTT 前端 → 后端插值，出库货物按 MQTT 后端 → 前端插值；输送进度跨度也取前后端真实世界距离。
+- 老模型包没有 `frontSide/backSide` 时继续使用既有 `infeedSide → outfeedSide` 路径，不改变旧场景。
+- 新模型包只提供一端、使用非法值或把两端配置到同一侧时，端点解析返回失败，仓储流不会按名称、唯一模型或相反方向做猜测。
+- 新参数属于模型包 schema；已保存场景需要重新导入/刷新 YZJ 模型包后，Inspector 才会合并并显示两个 enum 字段。
 
 ## 图片库与 Inspector 拖放合同
 
@@ -161,6 +173,18 @@ npm run build:yzj:visual
 - `movement_x = 1` 正向可见；`movement_x = 2` 反向可见；停止、故障、无数据均隐藏。
 - 停止预览后位置恢复差 `0`，旋转恢复差约 `2.98e-8rad`，编辑态箭头恢复。
 - 进入最终连续正向状态 `8s` 后，箭头仍保持可见、贴图就绪、父级为 `Ban.4`。
+
+## 2026-07-15 MQTT 前后端增量验证
+
+本次不修改 GLB 几何、方向箭头材质或浏览器视觉布局，验证集中在参数契约和运行时锚点：
+
+- 三份 `yzj.model.ts` 与浏览器加载镜像 `yzj.model.txt` 的 SHA-256 均为 `ceb2e07d2921ac9e6e70d12b521024ced93414e1b8a6181fd6338a4dc104adc9`。
+- 三份 `meta.json` SHA-256 均为 `28436aa9f10121342943a0f7dcae4d88cbba731dcf568b459abfcc613188d166`。
+- `parameterScripts.fields`、`parameterScripts.values`、`modelParameters.parameters` 均包含默认 `frontSide = right`、`backSide = left`，四向 options 完全一致。
+- 当前项目资产索引 YZJ 条目已刷新为 `assetRevision = mrlma85i-6b59c380-1357-427b-97b8-e76004155311`，脚本 metadata 与参数 schema 和资产副本一致。
+- YZJ 外置脚本 `typescript.transpileModule` diagnostics 为 `0`；更新后的 `validate-yzj-static.mjs` 覆盖新参数与 `.txt` 浏览器入口；仓库 `npm run typecheck` 通过。
+- 运行时保留旧包 fallback，同时对显式前后端缺失、非法或重合配置 fail-closed。
+- 静态校验器直接执行端点纯逻辑样例：新包入库 `front → back`、出库 `back → front`，旧包 `infeed → outfeed`，partial/invalid/same-side 均返回失败。
 
 ## 最终视觉产物
 

@@ -340,9 +340,9 @@ function parseJsonPathTelemetryMessage(
   });
 }
 
-/** 创建统一快照，并补齐 Stacker 位置和故障兼容语义。 */
+/** 创建统一快照，并补齐设备类型相关的兼容和派生语义。 */
 function createSnapshot(input: Omit<DeviceTelemetrySnapshot, 'receivedAt' | 'currentLocationKey' | 'targetLocationKey' | 'hasTargetLocation' | 'faulted' | 'message'>): DeviceTelemetrySnapshot {
-  normalizeStackerCompatibleFields(input.deviceType, input.fields);
+  normalizeDeviceCompatibleFields(input.deviceType, input.fields);
   const stackerLocation = createStackerLocationState(input.deviceType, input.fields);
   const normal = readBooleanField(input.fields, 'normal');
   const errorCode = readIntegerField(input.fields, 'errorCode') ?? 0;
@@ -359,6 +359,12 @@ function createSnapshot(input: Omit<DeviceTelemetrySnapshot, 'receivedAt' | 'cur
   };
 }
 
+/** 统一补齐各设备类型的兼容字段，保持原始点位优先且只追加缺失派生值。 */
+function normalizeDeviceCompatibleFields(deviceType: string, fields: DeviceTelemetryFields): void {
+  normalizeStackerCompatibleFields(deviceType, fields);
+  normalizeConveyorCompatibleFields(deviceType, fields);
+}
+
 /** 将 Stacker 历史拼写和正式字段做兼容归一。 */
 function normalizeStackerCompatibleFields(deviceType: string, fields: DeviceTelemetryFields): void {
   if (deviceType !== 'stacker') return;
@@ -367,6 +373,31 @@ function normalizeStackerCompatibleFields(deviceType: string, fields: DeviceTele
   if (frontDistanceZ !== null && fields.front_distance_z === undefined) {
     fields.front_distance_z = frontDistanceZ;
   }
+}
+
+/** 按输送机协议把光电位掩码归一为可直接用于规则和状态机的布尔字段。 */
+function normalizeConveyorCompatibleFields(deviceType: string, fields: DeviceTelemetryFields): void {
+  if (deviceType !== 'conveyor') return;
+
+  const signalBits = readIntegerField(fields, 'signalBits');
+  const frontSignal = readBooleanField(fields, 'front_signalBits');
+  const backSignal = readBooleanField(fields, 'back_signalBits');
+  setDerivedBooleanField(fields, 'front_has_goods', frontSignal ?? readSignalBit(signalBits, 0));
+  setDerivedBooleanField(fields, 'back_has_goods', backSignal ?? readSignalBit(signalBits, 3));
+  setDerivedBooleanField(fields, 'lift_at_low', readSignalBit(signalBits, 4));
+  setDerivedBooleanField(fields, 'lift_at_high', readSignalBit(signalBits, 5));
+}
+
+/** 读取整数位掩码中的单个位；字段缺失时保持 null，避免把未知误判为 false。 */
+function readSignalBit(signalBits: number | null, bitIndex: number): boolean | null {
+  if (signalBits === null) return null;
+  return (signalBits & (1 << bitIndex)) !== 0;
+}
+
+/** 只在上游没有显式提供字段时写入派生布尔值。 */
+function setDerivedBooleanField(fields: DeviceTelemetryFields, key: string, value: boolean | null): void {
+  if (fields[key] !== undefined || value === null) return;
+  fields[key] = value;
 }
 
 /** 生成 Stacker 当前位和目标位状态；非 Stacker 设备没有 locator 语义。 */

@@ -30,11 +30,11 @@ const DIRECTION_ARROW_REFERENCE = "editor-image://builtin/direction-arrow-glow";
 const IMAGE_ASSET_DRAG_MIME_TYPE = "application/x-babylon-editor-image-asset";
 const EXPECTED_PARAMETER_KEYS = [
   "chainLength", "platformLength", "platformPosition", "chainWidth", "chainHeight", "rollerWidth", "rollerPosition", "rollerDensity",
-  "infeedSide", "outfeedSide", "showDirectionArrow", "directionArrowImage", "showFrontSupport", "showRearSupport",
+  "infeedSide", "outfeedSide", "frontSide", "backSide", "showDirectionArrow", "directionArrowImage", "showFrontSupport", "showRearSupport",
 ];
 const NUMBER_PARAMETER_KEYS = ["chainLength", "platformLength", "platformPosition", "chainWidth", "chainHeight", "rollerWidth", "rollerPosition", "rollerDensity"];
 const BOOLEAN_PARAMETER_KEYS = ["showDirectionArrow", "showFrontSupport", "showRearSupport"];
-const SIDE_PARAMETER_KEYS = ["infeedSide", "outfeedSide"];
+const SIDE_PARAMETER_KEYS = ["infeedSide", "outfeedSide", "frontSide", "backSide"];
 
 /** 计算文件 SHA256，用于验证源包、项目副本和视觉夹具完全一致。 */
 function sha256(path) {
@@ -96,7 +96,7 @@ function validateBooleanParameterContract(meta, key) {
   return failures;
 }
 
-/** 校验入料侧和出料侧枚举的默认值及四侧选项。 */
+/** 校验入/出料侧与 MQTT 前/后端枚举的默认值及四侧选项。 */
 function validateSideParameterContract(meta, key) {
   const field = findScriptParameterField(meta, key);
   const value = findScriptParameterValue(meta, key);
@@ -240,6 +240,50 @@ function validateSingleDirectionContract(sourceFile) {
   return contractFailures;
 }
 
+/** 直接执行纯端点方法，验证新包前后端路径、旧包 fallback 与非法配置 fail-closed。 */
+function validateMqttEndpointMappingContract(sceneRuntimeSourceFile) {
+  const failures = [];
+  const createSidesMethod = findMethodDeclaration(sceneRuntimeSourceFile, "createWarehouseConveyorSides");
+  const resolvePathMethod = findMethodDeclaration(sceneRuntimeSourceFile, "resolveWarehouseConveyorPath");
+  const createSides = compilePureNumberMethod(sceneRuntimeSourceFile, createSidesMethod);
+  const resolvePath = compilePureNumberMethod(sceneRuntimeSourceFile, resolvePathMethod);
+  if (!createSides || !resolvePath) return ["MQTT endpoint mapping methods cannot be compiled"];
+
+  const sideContext = {
+    isWarehouseTransferSide(value) {
+      return value === "left" || value === "right" || value === "front" || value === "rear";
+    },
+  };
+  const legacySides = createSides.call(sideContext, "left", "right", null, null);
+  const explicitSides = createSides.call(sideContext, "left", "right", "right", "left");
+  const partialSides = createSides.call(sideContext, "left", "right", "right", null);
+  const duplicateSides = createSides.call(sideContext, "left", "right", "left", "left");
+  const invalidSides = createSides.call(sideContext, "left", "right", "north", "left");
+  if (!legacySides || legacySides.hasExplicitMqttEndpoints !== false || legacySides.mqttFront !== null || legacySides.mqttBack !== null) {
+    failures.push("legacy YZJ package does not preserve infeed/outfeed fallback");
+  }
+  if (!explicitSides || explicitSides.hasExplicitMqttEndpoints !== true || explicitSides.mqttFront !== "right" || explicitSides.mqttBack !== "left") {
+    failures.push("explicit MQTT endpoint mapping is not preserved");
+  }
+  if (partialSides !== null || duplicateSides !== null || invalidSides !== null) {
+    failures.push("partial, duplicate, or invalid MQTT endpoint mapping does not fail closed");
+  }
+
+  const infeed = { id: "infeed" };
+  const outfeed = { id: "outfeed" };
+  const mqttFront = { id: "front" };
+  const mqttBack = { id: "back" };
+  const explicitAnchors = { infeed, outfeed, mqttFront, mqttBack, hasExplicitMqttEndpoints: true };
+  const legacyAnchors = { infeed, outfeed, mqttFront: null, mqttBack: null, hasExplicitMqttEndpoints: false };
+  const inboundPath = resolvePath(explicitAnchors, "front-to-back");
+  const outboundPath = resolvePath(explicitAnchors, "back-to-front");
+  const legacyPath = resolvePath(legacyAnchors, "back-to-front");
+  if (inboundPath.start !== mqttFront || inboundPath.end !== mqttBack) failures.push("inbound path is not MQTT front to back");
+  if (outboundPath.start !== mqttBack || outboundPath.end !== mqttFront) failures.push("outbound path is not MQTT back to front");
+  if (legacyPath.start !== infeed || legacyPath.end !== outfeed) failures.push("legacy path no longer uses infeed to outfeed");
+  return failures;
+}
+
 /** 读取 PNG IHDR，确认内置方向箭头是 512x512 RGBA 资产。 */
 function readPngHeader(path) {
   const buffer = readFileSync(path);
@@ -268,6 +312,7 @@ const assetMeta = JSON.parse(readFileSync(files.assetMeta, "utf8"));
 const fixtureMeta = JSON.parse(readFileSync(files.fixtureMeta, "utf8"));
 const allMeta = [sourceMeta, assetMeta, fixtureMeta];
 const sourceFile = ts.createSourceFile(files.sourceScript, scriptText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const sceneRuntimeSourceFile = ts.createSourceFile(files.sceneRuntime, sceneRuntimeText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const transpileResult = ts.transpileModule(scriptText, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext, experimentalDecorators: true, useDefineForClassFields: false },
   reportDiagnostics: true,
@@ -294,6 +339,7 @@ for (const key of BOOLEAN_PARAMETER_KEYS) failures.push(...validateBooleanParame
 for (const key of SIDE_PARAMETER_KEYS) failures.push(...validateSideParameterContract(sourceMeta, key));
 failures.push(...validateDirectionArrowTextureContract(sourceMeta));
 failures.push(...validateSingleDirectionContract(sourceFile));
+failures.push(...validateMqttEndpointMappingContract(sceneRuntimeSourceFile));
 
 for (const meta of allMeta) {
   failures.push(...validateBooleanParameterContract(meta, "showDirectionArrow"));
@@ -311,6 +357,8 @@ const requiredScriptTokens = [
   'this.addNodeAxisOffset(platform, "x", platformPosition)',
   "metadata?.logisticsFlow",
   "motionSourceNodeName",
+  "frontSide",
+  "backSide",
   "showDirectionArrow",
   "directionArrowImage",
   DIRECTION_ARROW_REFERENCE,
@@ -373,7 +421,7 @@ if (pngHeader.signature !== "89504e470d0a1a0a" || pngHeader.width !== 512 || png
   failures.push("direction arrow PNG must be 512x512 8-bit RGBA");
 }
 
-for (const key of ["platformPosition", "infeedSide", "outfeedSide", "showDirectionArrow", "directionArrowImage"]) {
+for (const key of ["platformPosition", "infeedSide", "outfeedSide", "frontSide", "backSide", "showDirectionArrow", "directionArrowImage"]) {
   if (!findModelParameter(sourceMeta, key)) failures.push("source meta missing key: " + key);
   if (!findModelParameter(assetMeta, key)) failures.push("asset meta missing key: " + key);
   if (!findModelParameter(fixtureMeta, key)) failures.push("fixture meta missing key: " + key);
@@ -388,6 +436,8 @@ const result = {
   platformPosition: findModelParameter(sourceMeta, "platformPosition"),
   infeedSide: findModelParameter(sourceMeta, "infeedSide"),
   outfeedSide: findModelParameter(sourceMeta, "outfeedSide"),
+  frontSide: findModelParameter(sourceMeta, "frontSide"),
+  backSide: findModelParameter(sourceMeta, "backSide"),
   showDirectionArrow: findModelParameter(sourceMeta, "showDirectionArrow"),
   directionArrowImage: findModelParameter(sourceMeta, "directionArrowImage"),
   directionVisualsEnabled: scriptText.includes("directionArrowVisual: true")

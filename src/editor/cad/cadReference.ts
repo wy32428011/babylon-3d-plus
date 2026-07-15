@@ -6,12 +6,20 @@ import type {
   CadReferenceLayerStat,
 } from '../model/components';
 import type { Vector3Data } from '../model/math';
+import { createLegacyCadReferenceUnitInfo, resolveDxfUnitInfo } from './cadUnits';
+export { CAD_REFERENCE_FALLBACK_UNIT_SCALE_TO_METERS } from './cadUnits';
 
 export const CAD_REFERENCE_DEFAULT_LINE_COLOR = '#35d6ff';
 export const CAD_REFERENCE_DEFAULT_OPACITY = 0.58;
 export const CAD_REFERENCE_GRID_Y_OFFSET_METERS = 0.01;
-export const CAD_REFERENCE_FALLBACK_UNIT_SCALE_TO_METERS = 0.001;
 export const CAD_REFERENCE_MAX_INSERT_DEPTH = 64;
+export const CAD_REFERENCE_MAX_INSERT_ARRAY_INSTANCES = 4_096;
+export const CAD_REFERENCE_MAX_ABSOLUTE_COORDINATE = 1e15;
+export const CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES = 64 * 1024 * 1024;
+export const CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET = {
+  maxPolylines: 200_000,
+  maxPoints: 800_000,
+} as const satisfies CadReferenceGeometryBudget;
 
 const SUPPORTED_DXF_ENTITY_TYPES = new Set(['LINE', 'ARC', 'CIRCLE', 'LWPOLYLINE', 'POLYLINE']);
 const CAD_REFERENCE_ARC_SEGMENT_RADIANS = (5 / 180) * Math.PI;
@@ -31,16 +39,26 @@ export type CadReferenceGeometryLayer = {
 };
 
 export type CadReferenceParseResult = {
+  sourceUnitCode: number | null;
+  sourceUnitName: string;
+  unitDetection: CadReferenceComponent['unitDetection'];
   unitScaleToMeters: number;
   layerStats: CadReferenceLayerStat[];
   bounds: CadReferenceBounds;
   polylineCount: number;
   pointCount: number;
   layers: CadReferenceGeometryLayer[];
+  budgetLimited: boolean;
 };
 
-type CadReferenceParseOptions = {
+export type CadReferenceGeometryBudget = {
+  maxPolylines: number;
+  maxPoints: number;
+};
+
+export type CadReferenceParseOptions = {
   unitScaleToMeters?: number;
+  geometryBudget?: CadReferenceGeometryBudget;
 };
 
 type CadReferenceParseResultCacheEntry = {
@@ -125,12 +143,22 @@ const cadReferenceParseResultCache = new Map<string, CadReferenceParseResultCach
 
 /** 解析 DXF 文本并转换为贴近 Babylon 网格层的米制线稿数据。 */
 export function parseCadReferenceDxf(content: string, options: CadReferenceParseOptions = {}): CadReferenceParseResult {
-  const parsed = parseDxfContent(content);
-  const unitScaleToMeters = options.unitScaleToMeters ?? resolveDxfUnitScaleToMeters(parsed.header);
+  return convertParsedCadReferenceDxf(parseDxfContent(content), options);
+}
+
+/** 将已解析的 DXF 结构转换为 CAD 参考层几何，供精确解析和大文件预扫描路径复用。 */
+export function convertParsedCadReferenceDxf(parsed: ParsedDXF, options: CadReferenceParseOptions = {}): CadReferenceParseResult {
+  const detectedUnitInfo = resolveDxfUnitInfo(parsed.header);
+  const unitInfo = options.unitScaleToMeters === undefined || options.unitScaleToMeters === detectedUnitInfo.unitScaleToMeters
+    ? detectedUnitInfo
+    : createLegacyCadReferenceUnitInfo(options.unitScaleToMeters);
+  const unitScaleToMeters = unitInfo.unitScaleToMeters;
+  const geometryBudget = normalizeCadReferenceGeometryBudget(options.geometryBudget);
   const rawLayerMap = new Map<string, CadRawLayer>();
   let originalBounds: Bounds2D | null = null;
   let polylineCount = 0;
   let pointCount = 0;
+  let budgetLimited = false;
 
   traverseDxfEntities(parsed, (entity, traversal) => {
     if (!isSupportedDxfEntity(entity)) return;
@@ -138,8 +166,25 @@ export function parseCadReferenceDxf(content: string, options: CadReferenceParse
     const rawPoints = convertDxfEntityToPolyline(entity, traversal.blockBasePoint);
     if (rawPoints.length < 2) return;
 
-    const points = transformCadPolyline(rawPoints, traversal.transforms);
+    let points = transformCadPolyline(rawPoints, traversal.transforms);
     if (points.length < 2) return;
+
+    if (geometryBudget) {
+      if (polylineCount >= geometryBudget.maxPolylines) {
+        budgetLimited = true;
+        return false;
+      }
+
+      const remainingPointCount = geometryBudget.maxPoints - pointCount;
+      if (remainingPointCount < 2) {
+        budgetLimited = true;
+        return false;
+      }
+      if (points.length > remainingPointCount) {
+        points = sampleCadPolyline(points, remainingPointCount);
+        budgetLimited = true;
+      }
+    }
 
     const layerName = traversal.layerOverride ?? readDxfEntityLayerName(entity);
     const layer = readOrCreateRawLayer(rawLayerMap, layerName);
@@ -154,6 +199,8 @@ export function parseCadReferenceDxf(content: string, options: CadReferenceParse
     for (const point of points) {
       originalBounds = expandBounds2D(originalBounds, point);
     }
+  }, () => {
+    budgetLimited = true;
   });
 
   if (!originalBounds || rawLayerMap.size === 0) {
@@ -198,13 +245,40 @@ export function parseCadReferenceDxf(content: string, options: CadReferenceParse
   }));
 
   return {
+    sourceUnitCode: unitInfo.sourceUnitCode,
+    sourceUnitName: unitInfo.sourceUnitName,
+    unitDetection: unitInfo.unitDetection,
     unitScaleToMeters,
     layerStats,
     bounds: transformedBounds,
     polylineCount,
     pointCount,
     layers,
+    budgetLimited,
   };
+}
+
+/** 规整 CAD 几何预算，保证大文件后台解析始终有确定上限。 */
+function normalizeCadReferenceGeometryBudget(budget: CadReferenceGeometryBudget | undefined): CadReferenceGeometryBudget | null {
+  if (!budget) return null;
+
+  return {
+    maxPolylines: Math.max(1, Math.floor(readFiniteNumber(budget.maxPolylines, 1))),
+    maxPoints: Math.max(2, Math.floor(readFiniteNumber(budget.maxPoints, 2))),
+  };
+}
+
+/** 按固定数量均匀抽样超长折线，并始终保留首尾点。 */
+function sampleCadPolyline(points: CadReferencePoint2D[], maxPointCount: number): CadReferencePoint2D[] {
+  if (points.length <= maxPointCount) return points;
+  if (maxPointCount <= 2) return [points[0], points[points.length - 1]];
+
+  const sampled: CadReferencePoint2D[] = [];
+  for (let index = 0; index < maxPointCount; index += 1) {
+    const sourceIndex = Math.round((index * (points.length - 1)) / (maxPointCount - 1));
+    sampled.push(points[sourceIndex]);
+  }
+  return sampled;
 }
 
 /** 暂存刚导入的 CAD 几何，供同一轮 runtime 同步复用，避免大文件马上二次解析。 */
@@ -237,8 +311,14 @@ export function consumeCadReferenceParseResult(
 /** 根据解析结果生成可写入 SceneDocument 的 CAD 参考组件元数据。 */
 export function createCadReferenceComponentMetadata(
   result: CadReferenceParseResult,
+  source: Pick<CadReferenceComponent, 'sourceFileSizeBytes' | 'importMode'> = { sourceFileSizeBytes: 0, importMode: 'exact' },
 ): Omit<CadReferenceComponent, 'sourcePath' | 'sourceUrl'> {
   return {
+    sourceFileSizeBytes: source.sourceFileSizeBytes,
+    importMode: source.importMode,
+    sourceUnitCode: result.sourceUnitCode,
+    sourceUnitName: result.sourceUnitName,
+    unitDetection: result.unitDetection,
     unitScaleToMeters: result.unitScaleToMeters,
     originMode: 'center',
     lineColor: CAD_REFERENCE_DEFAULT_LINE_COLOR,
@@ -279,7 +359,8 @@ function parseDxfContent(content: string): ParsedDXF {
 /** 用显式栈迭代展开 INSERT 块引用，避免复杂图纸递归展开时栈溢出。 */
 function traverseDxfEntities(
   parsed: ParsedDXF,
-  visitEntity: (entity: DxfEntityRecord, traversal: CadInsertTraversalItem) => void,
+  visitEntity: (entity: DxfEntityRecord, traversal: CadInsertTraversalItem) => boolean | void,
+  onTraversalLimited: () => void = () => undefined,
 ): void {
   const blocksByName = createBlocksByName(parsed.blocks);
   const stack: CadInsertTraversalItem[] = [{
@@ -297,11 +378,13 @@ function traverseDxfEntities(
 
     for (const entity of item.entities) {
       if (entity.type === 'INSERT') {
-        pushInsertTraversalItems(entity as DxfInsertEntityRecord, item, blocksByName, stack);
+        if (pushInsertTraversalItems(entity as DxfInsertEntityRecord, item, blocksByName, stack)) {
+          onTraversalLimited();
+        }
         continue;
       }
 
-      visitEntity(entity, item);
+      if (visitEntity(entity, item) === false) return;
     }
   }
 }
@@ -328,11 +411,11 @@ function pushInsertTraversalItems(
   parent: CadInsertTraversalItem,
   blocksByName: Map<string, DxfBlock>,
   stack: CadInsertTraversalItem[],
-): void {
+): boolean {
   const blockName = typeof insert.block === 'string' ? insert.block : '';
   const block = blockName ? blocksByName.get(blockName) : undefined;
   if (!block || parent.depth >= CAD_REFERENCE_MAX_INSERT_DEPTH || parent.blockPath.includes(blockName)) {
-    return;
+    return false;
   }
 
   const rowCount = readPositiveInteger(insert.rowCount, 1);
@@ -348,8 +431,13 @@ function pushInsertTraversalItems(
   const childEntities = normalizeDxfEntityArray(block.entities);
   const childBlockPath = [...parent.blockPath, blockName];
 
+  const totalInstanceCount = rowCount * columnCount;
+  let pushedInstanceCount = 0;
   for (let rowIndex = rowCount - 1; rowIndex >= 0; rowIndex -= 1) {
     for (let columnIndex = columnCount - 1; columnIndex >= 0; columnIndex -= 1) {
+      if (pushedInstanceCount >= CAD_REFERENCE_MAX_INSERT_ARRAY_INSTANCES) {
+        return totalInstanceCount > pushedInstanceCount;
+      }
       const transform: DxfTransform = {
         x: insertX + rowVec.x * rowIndex + colVec.x * columnIndex,
         y: insertY + rowVec.y * rowIndex + colVec.y * columnIndex,
@@ -370,8 +458,11 @@ function pushInsertTraversalItems(
         depth: parent.depth + 1,
         blockPath: childBlockPath,
       });
+      pushedInstanceCount += 1;
     }
   }
+
+  return totalInstanceCount > pushedInstanceCount;
 }
 
 /** 计算 INSERT 矩形阵列在局部坐标系中的行列偏移。 */
@@ -676,7 +767,9 @@ function mapDxfPointToBabylon(
 
 /** 判断二维点是否可安全传给 Babylon LineSystem。 */
 function isFinitePoint2D(point: CadReferencePoint2D): boolean {
-  return Number.isFinite(point.x) && Number.isFinite(point.y);
+  return Number.isFinite(point.x) && Number.isFinite(point.y)
+    && Math.abs(point.x) <= CAD_REFERENCE_MAX_ABSOLUTE_COORDINATE
+    && Math.abs(point.y) <= CAD_REFERENCE_MAX_ABSOLUTE_COORDINATE;
 }
 
 /** 扩展原始 DXF 二维包围盒。 */
@@ -731,38 +824,7 @@ function expandCadReferenceBounds(bounds: CadReferenceBounds | null, point: Vect
   };
 }
 
-/** 根据 DXF $INSUNITS 推导米制缩放，未知或无单位时按毫米图纸处理。 */
-function resolveDxfUnitScaleToMeters(header: unknown): number {
-  const insUnits = readHeaderNumber(header, '$INSUNITS') ?? readHeaderNumber(header, 'INSUNITS');
-
-  switch (insUnits) {
-    case 1: return 0.0254;
-    case 2: return 0.3048;
-    case 4: return 0.001;
-    case 5: return 0.01;
-    case 6: return 1;
-    case 7: return 1000;
-    default: return CAD_REFERENCE_FALLBACK_UNIT_SCALE_TO_METERS;
-  }
-}
-
-/** 从 DXF header 兼容读取不同解析器可能输出的字段名。 */
-function readHeaderNumber(header: unknown, key: string): number | null {
-  if (!isRecord(header)) return null;
-
-  const directValue = header[key];
-  if (typeof directValue === 'number' && Number.isFinite(directValue)) return directValue;
-
-  const normalizedKey = key.replace(/^\$/, '').toLowerCase();
-  for (const [entryKey, value] of Object.entries(header)) {
-    if (entryKey.replace(/^\$/, '').toLowerCase() !== normalizedKey) continue;
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-  }
-
-  return null;
-}
-
-/** 判断值是否为普通记录，避免访问未知对象时报错。 */
+/** 判断未知值是否为可安全读取的普通对象。 */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }

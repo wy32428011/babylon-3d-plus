@@ -19,6 +19,7 @@ import {
   updateLocatorCommand,
   updateMeshRendererCommand,
   updateModelAssetCodeCommand,
+  updateModelGeneratorCommand,
   updateModelParameterValuesCommand,
   updateTelemetryBindingCommand,
   updateTransformCommand,
@@ -39,9 +40,13 @@ import type {
   MeshKind,
   MeshRendererComponent,
   ModelAssetComponent,
+  ModelAssetTemplate,
+  ModelGeneratorComponent,
+  ModelGeneratorTarget,
   TransformComponent,
 } from '../model/components';
 import type { Entity } from '../model/Entity';
+import { createArrayAssetNumber, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
 import {
   MODEL_ASSET_CODE_MAX_LENGTH,
   createEmptySceneDocument,
@@ -51,6 +56,7 @@ import {
   createLocatorEntity,
   createMeshEntity,
   createModelEntity,
+  createModelGeneratorEntity,
   createModelAssetCode,
   extractModelAssetCodePrefix,
   sanitizeMqttConfig,
@@ -74,21 +80,29 @@ import {
   type ModelParameterValue,
   type ModelParameterValues,
 } from '../model/modelParameters';
-import { DEFAULT_MODEL_LENGTH_UNIT_INFO, type ModelLengthUnitInfo } from '../model/sceneUnits';
+import { createModelLengthUnitInfo, type ModelLengthUnitInfo } from '../model/sceneUnits';
+import type { ModelMeasurementResult } from '../../runtime/babylon/modelMeasurement';
 import {
   isMqttConfigEqual,
   validateRuntimePreviewConfig,
   type RuntimePreviewReadiness,
 } from '../model/mqttConfigUtils';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
+import {
+  cloneModelGeneratorComponent,
+  createModelGeneratorTargetFromAsset,
+  sanitizeModelGeneratorComponent,
+} from '../model/modelGenerator';
 import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent } from '../model/telemetryBinding';
 import { deserializeScene, serializeScene } from '../project/SceneSerializer';
 import {
+  CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES,
   createCadReferenceComponentMetadata,
-  parseCadReferenceDxf,
   rememberCadReferenceParseResult,
   sanitizeCadReferenceDisplayPatch,
 } from '../cad/cadReference';
+import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
+import { parseCadReferenceDxfForImport } from '../cad/cadReferenceWorkerClient';
 
 type EditorLog = {
   id: string;
@@ -111,6 +125,15 @@ type EntityClipboard = {
 
 export type EntityArrayDirection = 'x' | '-x' | 'y' | '-y' | 'z' | '-z';
 
+type EntityArrayRequest = {
+  id: string;
+  sourceIds: string[];
+  copyCount: number;
+  direction: EntityArrayDirection;
+  spacingMeters: number;
+  assetNumberRule: string;
+};
+
 export type SceneFocusRequest = {
   id: string;
   entityIds: string[];
@@ -130,6 +153,9 @@ export type CameraPoseSaveRequest = {
 export type CameraResetRequest = {
   id: string;
 };
+
+/** 当前 Inspector 选中模型的运行时米制测量快照；该状态不进入场景持久化或撤销历史。 */
+export type SelectedModelMeasurement = ModelMeasurementResult & { entityId: string };
 
 type TransformField = 'position' | 'rotation' | 'scale';
 export type TransformTool = 'translate' | 'rotate' | 'scale';
@@ -156,6 +182,20 @@ const LOCATOR_ASSET_ID_MAX_LENGTH = 128;
 const CLIPBOARD_PASTE_OFFSET_METERS = 0.35;
 const ARRAY_COPY_COUNT_MAX = 100;
 
+/** 比较两份模型测量快照，避免相同运行时结果触发无意义的 React 重渲染。 */
+function areSelectedModelMeasurementsEqual(
+  left: SelectedModelMeasurement | null,
+  right: SelectedModelMeasurement | null,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.entityId !== right.entityId || left.status !== right.status) return false;
+  if (left.status !== 'ready' || right.status !== 'ready') return true;
+
+  return Math.abs(left.sizeMeters.x - right.sizeMeters.x) <= 1e-6
+    && Math.abs(left.sizeMeters.y - right.sizeMeters.y) <= 1e-6
+    && Math.abs(left.sizeMeters.z - right.sizeMeters.z) <= 1e-6;
+}
+
 /** 模型阵列方向到世界坐标单位偏移的映射，负方向通过向量符号表达。 */
 const ENTITY_ARRAY_DIRECTION_VECTORS: Record<EntityArrayDirection, Vector3Data> = {
   x: { x: 1, y: 0, z: 0 },
@@ -172,10 +212,12 @@ type EditorState = {
   history: CommandHistory;
   hierarchySelectionIds: string[];
   entityClipboard: EntityClipboard | null;
+  entityArrayRequest: EntityArrayRequest | null;
   sceneFocusRequest: SceneFocusRequest | null;
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
   cameraResetRequest: CameraResetRequest | null;
+  selectedModelMeasurement: SelectedModelMeasurement | null;
   cadImportProgress: CadImportProgress | null;
   logs: EditorLog[];
   transformTool: TransformTool;
@@ -200,9 +242,11 @@ type EditorState = {
   consumeCameraPoseSaveRequest: (requestId: string, pose: SceneCameraPose) => void;
   requestCameraReset: () => void;
   consumeCameraResetRequest: (requestId: string) => void;
+  setSelectedModelMeasurement: (measurement: SelectedModelMeasurement | null) => void;
   createMesh: (meshKind: MeshKind, placementPosition?: Vector3Data) => void;
   createLocator: (placementPosition?: Vector3Data) => void;
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
+  createModelGenerator: (placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
   refreshModelInstancesFromAssets: (assets: AssetEntry[]) => number;
@@ -217,7 +261,8 @@ type EditorState = {
   lockSelectedEntities: () => void;
   copySelectedEntities: () => void;
   pasteEntityClipboard: (targetFolderId?: string | null) => void;
-  arraySelectedEntities: (copyCount: number, direction: EntityArrayDirection, spacingMeters: number) => void;
+  requestEntityArray: (copyCount: number, direction: EntityArrayDirection, spacingMeters: number, assetNumberRule: string) => void;
+  resolveEntityArrayRequest: (requestId: string, selectionSpanMeters: number | null) => void;
   groupSelectedEntities: () => void;
   ungroupSelectedEntities: () => void;
   requestSceneFocusForSelection: () => void;
@@ -232,6 +277,7 @@ type EditorState = {
   updateSelectedCadReference: (patch: Partial<Pick<CadReferenceComponent, 'lineColor' | 'opacity'>>) => void;
   updateSelectedLight: (patch: Partial<LightComponent>) => void;
   updateSelectedModelAssetCode: (assetCode: string) => void;
+  updateSelectedModelGenerator: (component: ModelGeneratorComponent, label?: string) => void;
   updateSelectedTelemetryBinding: (binding: import('../model/telemetryBinding').TelemetryBindingComponent | null) => void;
   restoreSelectedTelemetryBindingDefault: () => void;
   updateSelectedModelParameterValue: (key: string, value: ModelParameterValue) => void;
@@ -281,10 +327,12 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     history: createCommandHistory(),
     hierarchySelectionIds: [],
     entityClipboard: null,
+    entityArrayRequest: null,
     sceneFocusRequest: null,
     projectAssetFocusRequest: null,
     cameraPoseSaveRequest: null,
     cameraResetRequest: null,
+    selectedModelMeasurement: null,
     logs: prependLog(state.logs, message),
   };
 }
@@ -468,6 +516,12 @@ function sanitizePositiveNumber(value: number, fallback: number): number {
   return value;
 }
 
+/** 清洗允许 0 的非负数值，非法值使用回退值，负数收敛到 0。 */
+function sanitizeNonNegativeNumber(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, value);
+}
+
 function sanitizeLocatorDimension(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.max(LOCATOR_MIN_DIMENSION, value);
@@ -574,7 +628,7 @@ function createImportedAssetIndexes(assets: AssetEntry[]): {
 
 /** 按 sourcePath/sourceUrl 精确匹配模型实例，必要时按唯一包目录兜底。 */
 function findImportedAssetForModelAsset(
-  modelAsset: ModelAssetComponent,
+  modelAsset: ModelAssetTemplate,
   indexes: ReturnType<typeof createImportedAssetIndexes>,
 ): AssetEntry | null {
   const pathMatch = indexes.byPath.get(normalizeAssetMatchPath(modelAsset.sourcePath));
@@ -590,10 +644,7 @@ function findImportedAssetForModelAsset(
 /** 根据新导入的资产快照生成场景实例的新 modelAsset，同时保留现场资产编号。 */
 function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: AssetEntry): ModelAssetComponent {
   const parameterConfig = normalizeModelParameterConfig(asset.parameterConfig) ?? undefined;
-  const unitInfo: ModelLengthUnitInfo = {
-    lengthUnit: asset.lengthUnit ?? DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit,
-    unitScaleToMeters: asset.unitScaleToMeters ?? DEFAULT_MODEL_LENGTH_UNIT_INFO.unitScaleToMeters,
-  };
+  const unitInfo: ModelLengthUnitInfo = createModelLengthUnitInfo(asset.lengthUnit);
 
   return {
     assetCode: modelAsset.assetCode,
@@ -638,7 +689,46 @@ function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetCompone
   );
 }
 
-/** 批量刷新当前场景内引用本轮导入模型包的实例，并返回刷新数量。 */
+/** 使用本轮导入资产刷新单个生成目标；内置 Mesh 和未匹配目标保持原值。 */
+function refreshModelGeneratorTargetFromImportedAssets(
+  target: ModelGeneratorTarget | null,
+  indexes: ReturnType<typeof createImportedAssetIndexes>,
+): { target: ModelGeneratorTarget | null; refreshedCount: number } {
+  if (!target || target.kind !== 'model') return { target, refreshedCount: 0 };
+
+  const importedAsset = findImportedAssetForModelAsset(target.modelAsset, indexes);
+  if (!importedAsset) return { target, refreshedCount: 0 };
+
+  const refreshedTarget = createModelGeneratorTargetFromAsset(importedAsset);
+  if (!refreshedTarget || areJsonValuesEqual(target, refreshedTarget)) return { target, refreshedCount: 0 };
+  return { target: refreshedTarget, refreshedCount: 1 };
+}
+
+/** 刷新模型生成器的默认目标和每条规则目标，生成器绑定及规则文本保持不变。 */
+function refreshModelGeneratorFromImportedAssets(
+  modelGenerator: ModelGeneratorComponent,
+  indexes: ReturnType<typeof createImportedAssetIndexes>,
+): { modelGenerator: ModelGeneratorComponent; refreshedCount: number } {
+  const defaultResult = refreshModelGeneratorTargetFromImportedAssets(modelGenerator.defaultTarget, indexes);
+  let refreshedCount = defaultResult.refreshedCount;
+  const rules = modelGenerator.rules.map((rule) => {
+    const result = refreshModelGeneratorTargetFromImportedAssets(rule.target, indexes);
+    refreshedCount += result.refreshedCount;
+    return result.target === rule.target ? rule : { ...rule, target: result.target };
+  });
+
+  if (refreshedCount === 0) return { modelGenerator, refreshedCount };
+  return {
+    modelGenerator: {
+      ...modelGenerator,
+      defaultTarget: defaultResult.target,
+      rules,
+    },
+    refreshedCount,
+  };
+}
+
+/** 批量刷新场景中的普通模型实例和模型生成器目标，并返回刷新引用数量。 */
 function refreshSceneModelAssetsFromImportedAssets(
   scene: SceneDocument,
   assets: AssetEntry[],
@@ -649,23 +739,34 @@ function refreshSceneModelAssetsFromImportedAssets(
 
   for (const entityId of scene.entityIds) {
     const entity = scene.entities[entityId];
-    const modelAsset = entity?.components.modelAsset;
-    if (!entity || !modelAsset) continue;
+    if (!entity) continue;
 
-    const importedAsset = findImportedAssetForModelAsset(modelAsset, indexes);
-    if (!importedAsset) continue;
+    let components = entity.components;
+    let entityChanged = false;
+    const modelAsset = entity.components.modelAsset;
+    if (modelAsset) {
+      const importedAsset = findImportedAssetForModelAsset(modelAsset, indexes);
+      if (importedAsset) {
+        const refreshedModelAsset = createRefreshedModelAsset(modelAsset, importedAsset);
+        if (!areModelAssetsEqual(modelAsset, refreshedModelAsset)) {
+          refreshedCount += 1;
+          components = { ...components, modelAsset: refreshedModelAsset };
+          entityChanged = true;
+        }
+      }
+    }
 
-    const refreshedModelAsset = createRefreshedModelAsset(modelAsset, importedAsset);
-    if (areModelAssetsEqual(modelAsset, refreshedModelAsset)) continue;
+    const modelGenerator = entity.components.modelGenerator;
+    if (modelGenerator) {
+      const generatorResult = refreshModelGeneratorFromImportedAssets(modelGenerator, indexes);
+      if (generatorResult.refreshedCount > 0) {
+        refreshedCount += generatorResult.refreshedCount;
+        components = { ...components, modelGenerator: generatorResult.modelGenerator };
+        entityChanged = true;
+      }
+    }
 
-    refreshedCount += 1;
-    entities[entityId] = {
-      ...entity,
-      components: {
-        ...entity.components,
-        modelAsset: refreshedModelAsset,
-      },
-    };
+    if (entityChanged) entities[entityId] = { ...entity, components };
   }
 
   if (refreshedCount === 0) return { scene, refreshedCount };
@@ -735,6 +836,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     ...(entity.components.locator ? { locator: cloneLocator(entity.components.locator) } : {}),
     ...(entity.components.cadReference ? { cadReference: cloneCadReference(entity.components.cadReference) } : {}),
     ...(entity.components.modelAsset ? { modelAsset: cloneModelAsset(entity.components.modelAsset) } : {}),
+    ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
     ...(entity.components.camera ? { camera: { ...entity.components.camera } } : {}),
     ...(entity.components.light ? { light: cloneLight(entity.components.light) } : {}),
   };
@@ -762,12 +864,35 @@ function createUniqueEntityName(existingNames: Set<string>, baseName: string): s
   return fallbackName;
 }
 
+/** 阵列副本资产编号覆盖目标，避免混合组件实体同时改写两套业务编号。 */
+type EntityAssetNumberOverride = {
+  kind: 'modelAsset' | 'locator';
+  value: string;
+};
+
+/** 读取实体当前资产编号目标；导入模型优先于定位线框。 */
+function getEntityAssetNumberTarget(entity: Entity): EntityAssetNumberOverride | null {
+  if (entity.components.modelAsset) {
+    return { kind: 'modelAsset', value: entity.components.modelAsset.assetCode };
+  }
+  if (entity.components.locator) {
+    return { kind: 'locator', value: entity.components.locator.assetId };
+  }
+  return null;
+}
+
+/** 判断实体是否携带阵列可管理的资产编号字段。 */
+function hasEntityAssetNumber(entity: Entity): boolean {
+  return getEntityAssetNumberTarget(entity) !== null;
+}
+
 /** 创建普通实体副本，复制所有业务组件并按偏移调整 Transform 位置。 */
 function createDuplicatedRuntimeEntity(
   source: Entity,
   parentId: string | null,
   offset: Vector3Data,
   existingNames: Set<string>,
+  assetNumberOverride?: EntityAssetNumberOverride,
 ): Entity {
   const id = createId('entity');
   const components = cloneEntityComponents(source);
@@ -782,7 +907,16 @@ function createDuplicatedRuntimeEntity(
   if (components.modelAsset) {
     components.modelAsset = {
       ...components.modelAsset,
-      assetCode: createModelAssetCode(extractModelAssetCodePrefix(components.modelAsset.assetCode), id),
+      assetCode:
+        assetNumberOverride?.kind === 'modelAsset'
+          ? assetNumberOverride.value
+          : createModelAssetCode(extractModelAssetCodePrefix(components.modelAsset.assetCode), id),
+    };
+  }
+  if (components.locator && assetNumberOverride?.kind === 'locator') {
+    components.locator = {
+      ...components.locator,
+      assetId: assetNumberOverride.value,
     };
   }
 
@@ -1008,10 +1142,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   history: createCommandHistory(),
   hierarchySelectionIds: [],
   entityClipboard: null,
+  entityArrayRequest: null,
   sceneFocusRequest: null,
   projectAssetFocusRequest: null,
   cameraPoseSaveRequest: null,
   cameraResetRequest: null,
+  selectedModelMeasurement: null,
   cadImportProgress: null,
   logs: [{ id: 'log_boot', message: '编辑器已启动。' }],
   transformTool: 'translate',
@@ -1301,6 +1437,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
+  setSelectedModelMeasurement: (measurement) => {
+    set((state) => {
+      if (measurement && state.scene.selectedEntityId !== measurement.entityId) return state;
+      if (areSelectedModelMeasurementsEqual(state.selectedModelMeasurement, measurement)) return state;
+      return { selectedModelMeasurement: measurement };
+    });
+  },
   createMesh: (meshKind, placementPosition) => {
     const entity = createMeshEntity(meshKind, sanitizeVector3(placementPosition));
     const command = createEntityCommand(entity);
@@ -1343,6 +1486,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
+  createModelGenerator: (placementPosition) => {
+    const entity = createModelGeneratorEntity(sanitizeVector3(placementPosition));
+    const command = createEntityCommand(entity);
+
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建模型生成器');
+      const result = executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        hierarchySelectionIds: [entity.id],
+        logs: prependLog(state.logs, command.label),
+      };
+    });
+  },
   createFolder: () => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '新建文件夹');
@@ -1361,10 +1518,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (asset.kind !== 'model') return;
 
     const displayName = asset.displayName?.trim() || asset.name.replace(/\.(gltf|glb)$/i, '');
-    const unitInfo: ModelLengthUnitInfo = {
-      lengthUnit: asset.lengthUnit ?? DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit,
-      unitScaleToMeters: asset.unitScaleToMeters ?? DEFAULT_MODEL_LENGTH_UNIT_INFO.unitScaleToMeters,
-    };
+    const unitInfo: ModelLengthUnitInfo = createModelLengthUnitInfo(asset.lengthUnit);
     const entity = createModelEntity(
       asset.path,
       asset.sourceUrl,
@@ -1444,38 +1598,41 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         return;
       }
 
+      const sourceUrl = result.sourceUrl;
       const displayName = result.filePath.split(/[\\/]/).pop()?.replace(/\.dxf$/i, '') || 'CAD参考图';
       set({
         cadImportProgress: createCadImportProgress(importProgressId, 14, '准备读取 CAD', `正在打开 ${displayName}...`, displayName),
       });
 
-      const response = await fetch(result.sourceUrl);
-      if (!response.ok) {
-        throw new Error(`读取 CAD 文件失败：HTTP ${response.status}`);
-      }
-
-      const content = await readCadResponseText(response, result.fileSizeBytes, (percent, detail) => {
-        set({
-          cadImportProgress: createCadImportProgress(importProgressId, percent, '读取 CAD 文件', detail, displayName),
-        });
+      const parseResult = await parseCadReferenceDxfForImport({
+        sourceUrl,
+        fileSizeBytes: result.fileSizeBytes,
+        readSmallFileText: async (onProgress) => {
+          const response = await fetch(sourceUrl);
+          if (!response.ok) {
+            throw new Error(`读取 CAD 文件失败：HTTP ${response.status}`);
+          }
+          return readCadResponseText(response, result.fileSizeBytes, onProgress);
+        },
+        onProgress: ({ percent, detail }) => {
+          set({
+            cadImportProgress: createCadImportProgress(importProgressId, percent, '解析 CAD 图元', detail, displayName),
+          });
+        },
       });
-
-      set({
-        cadImportProgress: createCadImportProgress(importProgressId, 76, '解析 CAD 图元', '正在折线化 LINE、ARC、CIRCLE 与 POLYLINE...', displayName),
-      });
-      await waitForNextFrame();
-
-      const parseResult = parseCadReferenceDxf(content);
-      rememberCadReferenceParseResult(result.sourceUrl, parseResult);
+      rememberCadReferenceParseResult(sourceUrl, parseResult);
       set({
         cadImportProgress: createCadImportProgress(importProgressId, 92, '创建参考层', '正在写入场景并同步到网格层...', displayName),
       });
 
       const entity = createCadReferenceEntity(
         result.filePath,
-        result.sourceUrl,
+        sourceUrl,
         displayName,
-        createCadReferenceComponentMetadata(parseResult),
+        createCadReferenceComponentMetadata(parseResult, {
+          sourceFileSizeBytes: result.fileSizeBytes,
+          importMode: result.fileSizeBytes >= CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES ? 'large-preview' : 'exact',
+        }),
       );
       const command = createEntityCommand(entity);
 
@@ -1487,7 +1644,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           hierarchySelectionIds: [entity.id],
           logs: prependLog(
             state.logs,
-            `导入CAD参考图：${displayName}，${parseResult.polylineCount} 条折线，${parseResult.pointCount} 个点`,
+            parseResult.budgetLimited
+              ? `导入CAD参考图：${displayName}，${formatCadReferenceUnitSummary(parseResult)}，已按大文件预算截取 ${parseResult.polylineCount} 条折线，${parseResult.pointCount} 个点`
+              : `导入CAD参考图：${displayName}，${formatCadReferenceUnitSummary(parseResult)}，${parseResult.polylineCount} 条折线，${parseResult.pointCount} 个点`
           ),
         };
       });
@@ -1541,6 +1700,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         selectedEntityId: entityId && state.scene.entities[entityId] ? entityId : null,
       },
       hierarchySelectionIds: entityId && state.scene.entities[entityId] ? [entityId] : [],
+      selectedModelMeasurement: null,
     }));
   },
   selectHierarchyEntities: (entityIds, primaryEntityId) => {
@@ -1554,6 +1714,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           selectedEntityId,
         },
         hierarchySelectionIds,
+        selectedModelMeasurement: null,
       };
     });
   },
@@ -1715,37 +1876,146 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  arraySelectedEntities: (copyCount, direction, spacingMeters) => {
+  requestEntityArray: (copyCount, direction, spacingMeters, assetNumberRule) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '阵列对象');
       const sourceIds = getSelectedRuntimeEntityIds(state);
       if (sourceIds.length === 0) return state;
 
+      const normalizedAssetNumberRule = assetNumberRule.trim();
+      const ruleError = getArrayAssetNumberRuleError(normalizedAssetNumberRule);
+      if (ruleError) {
+        return {
+          entityArrayRequest: null,
+          logs: prependLog(state.logs, `模型阵列失败：${ruleError}`),
+        };
+      }
+
+      const assetNumberedSourceCount = sourceIds.reduce((count, sourceId) => {
+        const source = state.scene.entities[sourceId];
+        return source && hasEntityAssetNumber(source) ? count + 1 : count;
+      }, 0);
+      if (normalizedAssetNumberRule && assetNumberedSourceCount !== 1) {
+        return {
+          entityArrayRequest: null,
+          logs: prependLog(state.logs, '模型阵列失败：自定义资产编号规则仅支持一个带资产编号的源对象。'),
+        };
+      }
+
       const normalizedCopyCount = Math.min(
         ARRAY_COPY_COUNT_MAX,
         Math.max(1, Math.floor(Number.isFinite(copyCount) ? copyCount : 3)),
       );
-      const spacing = sanitizePositiveNumber(spacingMeters, 1);
-      const directionVector = ENTITY_ARRAY_DIRECTION_VECTORS[direction] ?? ENTITY_ARRAY_DIRECTION_VECTORS.x;
+      const normalizedDirection = ENTITY_ARRAY_DIRECTION_VECTORS[direction] ? direction : 'x';
+      const spacing = sanitizeNonNegativeNumber(spacingMeters, 1);
+
+      return {
+        entityArrayRequest: {
+          id: createId('entity_array'),
+          sourceIds,
+          copyCount: normalizedCopyCount,
+          direction: normalizedDirection,
+          spacingMeters: spacing,
+          assetNumberRule: normalizedAssetNumberRule,
+        },
+      };
+    });
+  },
+  resolveEntityArrayRequest: (requestId, selectionSpanMeters) => {
+    set((state) => {
+      const request = state.entityArrayRequest;
+      if (!request || request.id !== requestId) return state;
+      if (!Number.isFinite(selectionSpanMeters) || selectionSpanMeters === null || selectionSpanMeters < 0) {
+        return {
+          entityArrayRequest: null,
+          logs: prependLog(state.logs, '模型阵列失败：模型几何尚未加载完成，请稍后重试。'),
+        };
+      }
+
+      const sourceIds = request.sourceIds.filter((sourceId) => {
+        const source = state.scene.entities[sourceId];
+        return Boolean(source && !source.isFolder && !isEntityEffectivelyLocked(state.scene, source));
+      });
+      if (sourceIds.length === 0 || sourceIds.length !== request.sourceIds.length) {
+        return {
+          entityArrayRequest: null,
+          logs: prependLog(state.logs, '模型阵列已取消：原选区在解析期间已失效、被锁定或发生变化。'),
+        };
+      }
+
+      const ruleError = getArrayAssetNumberRuleError(request.assetNumberRule);
+      if (ruleError) {
+        return {
+          entityArrayRequest: null,
+          logs: prependLog(state.logs, `模型阵列失败：${ruleError}`),
+        };
+      }
+      const assetNumberedSourceCount = sourceIds.reduce((count, sourceId) => {
+        const source = state.scene.entities[sourceId];
+        return source && hasEntityAssetNumber(source) ? count + 1 : count;
+      }, 0);
+      if (request.assetNumberRule && assetNumberedSourceCount !== 1) {
+        return {
+          entityArrayRequest: null,
+          logs: prependLog(state.logs, '模型阵列已取消：自定义资产编号规则仅支持一个带资产编号的源对象。'),
+        };
+      }
+
+      // 阵列完成后继续选中原始对象，避免切换到副本造成原模型被移动的误解。
+      const primarySourceId =
+        state.scene.selectedEntityId && sourceIds.includes(state.scene.selectedEntityId)
+          ? state.scene.selectedEntityId
+          : sourceIds[0] ?? null;
+      const directionVector = ENTITY_ARRAY_DIRECTION_VECTORS[request.direction] ?? ENTITY_ARRAY_DIRECTION_VECTORS.x;
+      const arrayStepMeters = selectionSpanMeters + request.spacingMeters;
+      const maximumOffsetMeters = arrayStepMeters * request.copyCount;
+      if (!Number.isFinite(arrayStepMeters) || !Number.isFinite(maximumOffsetMeters)) {
+        return {
+          entityArrayRequest: null,
+          logs: prependLog(state.logs, '模型阵列失败：净间距或副本数量过大。'),
+        };
+      }
       const existingNames = new Set(Object.values(state.scene.entities).map((entity) => entity.name));
       const duplicatedEntities: Entity[] = [];
 
-      for (let copyIndex = 1; copyIndex <= normalizedCopyCount; copyIndex += 1) {
-        // 间距只表示相邻副本的绝对距离，方向正负由单位向量承载。
+      for (let copyIndex = 1; copyIndex <= request.copyCount; copyIndex += 1) {
+        // 阵列步长由选区在目标世界轴上的尺寸与用户输入的边缘净间距共同组成。
         const offset = {
-          x: directionVector.x * spacing * copyIndex,
-          y: directionVector.y * spacing * copyIndex,
-          z: directionVector.z * spacing * copyIndex,
+          x: directionVector.x * arrayStepMeters * copyIndex,
+          y: directionVector.y * arrayStepMeters * copyIndex,
+          z: directionVector.z * arrayStepMeters * copyIndex,
         };
 
         for (const sourceId of sourceIds) {
           const source = state.scene.entities[sourceId];
           if (!source || source.isFolder) continue;
-          duplicatedEntities.push(createDuplicatedRuntimeEntity(source, source.parentId, offset, existingNames));
+
+          const sourceAssetNumberTarget = getEntityAssetNumberTarget(source);
+          let assetNumberOverride: EntityAssetNumberOverride | undefined;
+          if (sourceAssetNumberTarget !== null) {
+            const assetNumberResult = createArrayAssetNumber(
+              sourceAssetNumberTarget.value,
+              copyIndex,
+              request.assetNumberRule,
+            );
+            if (!assetNumberResult.ok) {
+              return {
+                entityArrayRequest: null,
+                logs: prependLog(state.logs, `模型阵列失败：${assetNumberResult.error}`),
+              };
+            }
+            assetNumberOverride = { kind: sourceAssetNumberTarget.kind, value: assetNumberResult.value };
+          }
+
+          duplicatedEntities.push(
+            createDuplicatedRuntimeEntity(source, source.parentId, offset, existingNames, assetNumberOverride),
+          );
         }
       }
 
-      if (duplicatedEntities.length === 0) return state;
+      if (duplicatedEntities.length === 0) {
+        return { entityArrayRequest: null };
+      }
 
       const command = updateSceneDocumentCommand('模型阵列', (scene) => {
         let nextScene = scene;
@@ -1762,7 +2032,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
         return {
           ...nextScene,
-          selectedEntityId: duplicatedEntities[0]?.id ?? nextScene.selectedEntityId,
+          selectedEntityId: primarySourceId,
         };
       });
       const result = executeCommand(state.scene, state.history, command);
@@ -1770,8 +2040,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       return {
         ...result,
-        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, duplicatedIds),
-        logs: prependLog(state.logs, `${command.label}: ${duplicatedIds.length} 个对象`),
+        entityArrayRequest: null,
+        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, sourceIds),
+        logs: prependLog(
+          state.logs,
+          `${command.label}: ${duplicatedIds.length} 个对象，净间距 ${request.spacingMeters} m`,
+        ),
       };
     });
   },
@@ -2031,6 +2305,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...result,
         logs: prependLog(state.logs, `${command.label}: ${after}`),
       };
+    });
+  },
+  updateSelectedModelGenerator: (component, label = '更新模型生成器') => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
+      const entity = getSelectedEntity(state);
+      const current = entity?.components.modelGenerator;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !current) return state;
+
+      const normalized = sanitizeModelGeneratorComponent(component);
+      if (!normalized) return state;
+      const before = cloneModelGeneratorComponent(current);
+      const after = cloneModelGeneratorComponent(normalized);
+      if (areJsonValuesEqual(before, after)) return state;
+
+      const command = updateModelGeneratorCommand(entity.id, before, after, label);
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
     });
   },
   updateSelectedTelemetryBinding: (binding) => {

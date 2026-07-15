@@ -28,18 +28,25 @@ const MODEL_UNIT_SCALE_TO_METERS: Record<ModelSourceLengthUnit, number> = {
   millimeter: 0.001,
 };
 
-export function normalizeModelLengthUnitInfo(lengthUnit: unknown, unitScaleToMeters: unknown): ModelLengthUnitInfo {
-  if (lengthUnit === undefined && unitScaleToMeters === undefined) return DEFAULT_MODEL_LENGTH_UNIT_INFO;
+/** 根据受支持的源单位生成标准米制换算信息，调用方不应直接信任外部换算系数。 */
+export function createModelLengthUnitInfo(lengthUnit: unknown = DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit): ModelLengthUnitInfo {
   if (lengthUnit !== 'meter' && lengthUnit !== 'centimeter' && lengthUnit !== 'millimeter') {
     throw new Error('模型单位不受支持。');
   }
 
-  const expectedScale = MODEL_UNIT_SCALE_TO_METERS[lengthUnit];
-  if (unitScaleToMeters !== expectedScale) {
+  return { lengthUnit, unitScaleToMeters: MODEL_UNIT_SCALE_TO_METERS[lengthUnit] };
+}
+
+/** 严格校验持久化模型单位与换算系数，防止同一场景字段互相矛盾。 */
+export function normalizeModelLengthUnitInfo(lengthUnit: unknown, unitScaleToMeters: unknown): ModelLengthUnitInfo {
+  if (lengthUnit === undefined && unitScaleToMeters === undefined) return DEFAULT_MODEL_LENGTH_UNIT_INFO;
+
+  const unitInfo = createModelLengthUnitInfo(lengthUnit);
+  if (unitScaleToMeters !== unitInfo.unitScaleToMeters) {
     throw new Error('模型单位换算系数不匹配。');
   }
 
-  return { lengthUnit, unitScaleToMeters: expectedScale };
+  return unitInfo;
 }
 
 export function formatModelLengthUnit(lengthUnit: ModelSourceLengthUnit): string {

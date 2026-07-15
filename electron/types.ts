@@ -120,9 +120,9 @@ export type ImportModelFolderSkippedEntry = {
   reason: string;
 };
 
-/** 导入模型文件夹时由 renderer 指定目标资产库。 */
+/** 普通模型文件夹入口固定写入模型库；环境模型使用独立的单 GLB 导入 API。 */
 export type ImportModelFolderRequest = {
-  libraryKind: ModelAssetLibraryKind;
+  libraryKind: 'model';
 };
 
 /** 导入模型文件夹返回本次导入、项目完整资产与跳过项。 */
@@ -133,6 +133,15 @@ export type ImportModelFolderResult = {
   importedAssets: ProjectModelAssetEntry[];
   projectAssets: ProjectModelAssetEntry[];
   skipped: ImportModelFolderSkippedEntry[];
+};
+
+/** 直接导入单个环境 GLB 后返回项目内资产和完整项目资源快照。 */
+export type ImportEnvironmentModelFileResult = {
+  canceled: boolean;
+  filePath: string | null;
+  projectRoot: string | null;
+  importedAsset: ProjectModelAssetEntry | null;
+  projectAssets: ProjectModelAssetEntry[];
 };
 
 export type ImportCadFileResult = {

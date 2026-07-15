@@ -1026,7 +1026,7 @@ select {
 .hierarchy-array-dialog {
   display: grid;
   gap: 10px;
-  width: 260px;
+  width: 340px;
   padding: 14px;
   border: 1px solid #4a4a4a;
   color: #e2e2e2;
@@ -1042,7 +1042,7 @@ select {
 
 .hierarchy-array-dialog-row {
   display: grid;
-  grid-template-columns: 78px minmax(0, 1fr);
+  grid-template-columns: 96px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   font-size: 12px;
@@ -1055,6 +1055,25 @@ select {
   border: 1px solid #555555;
   color: #e2e2e2;
   background: #1e1e1e;
+}
+
+.hierarchy-array-dialog-row input[aria-invalid='true'] {
+  border-color: #d85c5c;
+}
+
+.hierarchy-array-dialog-hint,
+.hierarchy-array-dialog-error {
+  margin: -4px 0 0 104px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.hierarchy-array-dialog-hint {
+  color: #a9a9a9;
+}
+
+.hierarchy-array-dialog-error {
+  color: #ff8f8f;
 }
 
 .hierarchy-array-dialog-actions {
@@ -1149,7 +1168,17 @@ select {
   grid-template-columns: 84px minmax(0, 1fr);
   align-items: start;
   gap: 8px;
+  border-radius: 3px;
   font-size: 12px;
+}
+
+.environment-preview-row-drop-active {
+  outline: 1px solid #20dce9;
+  outline-offset: 4px;
+}
+
+.environment-preview-row-drop-active > span {
+  color: #dffcff;
 }
 
 .environment-preview-button {
@@ -1491,6 +1520,12 @@ select {
   gap: 2px;
   min-width: 0;
 }
+/* 原生模型测量保持紧凑纵向排列，避免三轴尺寸在窄 Inspector 中被截断。 */
+.inspector-panel-compact-model .model-measurement {
+  display: grid;
+  gap: 2px;
+  padding-top: 2px;
+}
 
 .inspector-panel-compact-model .muted {
   margin: 0;
@@ -1506,7 +1541,23 @@ select {
 }
 
 .inspector-panel-compact-model .model-parameters-fieldset {
+  --model-parameter-label-width: clamp(88px, 28%, 120px);
+
   gap: 4px;
+}
+
+/* 仅放宽模型参数标签，避免影响 Transform、遥测绑定和模型生成器的紧凑布局。 */
+.inspector-panel-compact-model .model-parameters-fieldset > .inspector-row,
+.inspector-panel-compact-model .model-parameters-fieldset > .number-row {
+  grid-template-columns: var(--model-parameter-label-width) minmax(0, 1fr);
+}
+
+.inspector-panel-compact-model .model-parameters-fieldset > .inspector-row > span,
+.inspector-panel-compact-model .model-parameters-fieldset > .number-row > span {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .inspector-panel-compact-model .model-parameter-vector {
@@ -2368,9 +2419,17 @@ select {
   line-height: 14px;
 }
 
-.inspector-panel-compact-model .texture-parameter-row {
-  grid-template-columns: 52px minmax(0, 1fr);
+.inspector-panel-compact-model .model-parameters-fieldset > .texture-parameter-row {
+  grid-template-columns: var(--model-parameter-label-width, 88px) minmax(0, 1fr);
   gap: 6px;
+}
+
+/* 模型贴图参数标签允许换行，确保长中文名称在紧凑 Inspector 中完整显示。 */
+.inspector-panel-compact-model .model-parameters-fieldset > .texture-parameter-row > .texture-parameter-label {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .inspector-panel-compact-model .texture-drop-zone {
@@ -2390,3 +2449,172 @@ select {
   padding: 0 6px;
   font-size: 12px;
 }
+
+.model-generator-fieldset {
+  gap: 6px;
+}
+
+.model-generator-section-header,
+.model-generator-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  color: #e5e5e5;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.model-generator-section-header {
+  margin-top: 2px;
+  padding: 4px 6px;
+  border: 1px solid #3f3f3f;
+  background: #303030;
+}
+
+.model-generator-section-header button,
+.model-generator-card-header button,
+.model-generator-clear-button {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid #555;
+  color: #d7d7d7;
+  background: #282828;
+}
+
+.model-generator-section-header button:hover:not(:disabled),
+.model-generator-card-header button:hover:not(:disabled),
+.model-generator-clear-button:hover:not(:disabled) {
+  border-color: #4ea1d3;
+  color: #ffffff;
+  background: #344956;
+}
+
+.model-generator-section-header button:disabled,
+.model-generator-card-header button:disabled,
+.model-generator-clear-button:disabled {
+  opacity: 0.45;
+}
+
+.model-generator-rule-card,
+.model-generator-binding-card {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid #444;
+  background: #292929;
+}
+
+.model-generator-inline-actions {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.model-generator-target-row {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model-generator-target-label {
+  color: #c8c8c8;
+  font-size: 11px;
+}
+
+.model-generator-target-slot {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 4px 5px;
+  border: 1px dashed #52778b;
+  border-radius: 3px;
+  background: rgb(28 42 50 / 72%);
+  transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.model-generator-target-slot-active {
+  border-color: #27c5d3;
+  background: rgb(25 75 82 / 72%);
+  box-shadow: inset 0 0 0 1px rgb(39 197 211 / 25%);
+}
+
+.model-generator-target-preview {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  overflow: hidden;
+  border: 1px solid #42616f;
+  border-radius: 2px;
+  color: #8fb8c7;
+  background: #1d262b;
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.model-generator-target-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.model-generator-target-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.model-generator-target-text strong,
+.model-generator-target-text small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-generator-target-text strong {
+  color: #e5e5e5;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.model-generator-target-text small,
+.model-generator-target-empty {
+  color: #8298a2;
+  font-size: 10px;
+}
+
+.model-generator-target-empty {
+  grid-column: 1 / -1;
+  padding: 4px 2px;
+  text-align: center;
+}
+
+.model-generator-clear-button {
+  min-width: 20px;
+  height: 20px;
+  padding: 0;
+}
+
+.inspector-panel-compact-model .model-generator-rule-card .inspector-row,
+.inspector-panel-compact-model .model-generator-binding-card .inspector-row {
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+
+.inspector-panel-compact-model .model-generator-ttl-row {
+  grid-template-columns: 104px minmax(0, 1fr);
+}
+
+.model-generator-empty-hint,
+.model-generator-unit-hint {
+  padding: 0 2px;
+}
+

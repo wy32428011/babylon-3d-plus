@@ -14,8 +14,10 @@ contextBridge.exposeInMainWorld('editorApi', {
     removeRecentWorkspaceItem: (request) => ipcRenderer.invoke('project:removeRecentWorkspaceItem', request),
     selectProjectDirectory: () => ipcRenderer.invoke('project:selectDirectory'),
     importCadFile: () => ipcRenderer.invoke('assets:importCadFile'),
-    /** 透传模型文件夹导入请求，renderer 指定普通模型或环境模型库。 */
+    /** 透传普通模型文件夹导入请求。 */
     importModelFolder: (request) => ipcRenderer.invoke('assets:importModelFolder', request),
+    /** 透传环境模型单 GLB 文件导入请求。 */
+    importEnvironmentModelFile: () => ipcRenderer.invoke('assets:importEnvironmentModelFile'),
     listModelPackageVariants: (request) => ipcRenderer.invoke('assets:listModelPackageVariants', request),
     mqttConfigure: (request) => ipcRenderer.invoke('mqtt:configure', request),
     mqttDisconnect: () => ipcRenderer.invoke('mqtt:disconnect'),

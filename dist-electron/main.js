@@ -1,6 +1,7 @@
 import { app, BrowserWindow, protocol } from 'electron';
-import { promises as fs } from 'node:fs';
+import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
@@ -138,10 +139,12 @@ function registerEditorAssetProtocol() {
         if (!isAuthorizedAssetFile(filePath)) {
             return new Response('Forbidden', { status: 403 });
         }
-        const content = await fs.readFile(filePath);
-        return new Response(content, {
+        const stat = await fs.stat(filePath);
+        const body = Readable.toWeb(createReadStream(filePath));
+        return new Response(body, {
             headers: {
                 'Cache-Control': 'no-store',
+                'Content-Length': String(stat.size),
             },
         });
     });

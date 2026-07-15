@@ -18,6 +18,7 @@ import {
   SCENE_VIEW_DISTANCE_MIN,
   type SceneEnvironmentVariant,
 } from '../model/SceneDocument';
+import { formatModelLengthUnit } from '../model/sceneUnits';
 import { useEditorStore, type SceneSensitivitySettingKey } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
 
@@ -103,7 +104,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
 
         const assets = result.assets.filter((asset) => asset.kind === 'model' && asset.libraryKind === 'environment');
         setEnvironmentAssets(assets);
-        setEnvironmentStatus(assets.length > 0 ? null : '环境库为空，请先在底部环境库导入环境模型文件夹。');
+        setEnvironmentStatus(assets.length > 0 ? null : '环境库为空，请先在底部环境库导入环境 GLB 文件。');
       } catch (error) {
         if (!mounted) return;
         const message = error instanceof Error ? error.message : String(error);
@@ -168,8 +169,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
     }
   }
 
-  /** 仅允许环境库模型卡片在环境预览区触发 drop。 */
-  function handleEnvironmentDragOver(event: DragEvent<HTMLButtonElement>): void {
+  /** 仅允许环境库模型卡片在整条环境模型属性行触发 drop。 */
+  function handleEnvironmentDragOver(event: DragEvent<HTMLLabelElement>): void {
     if (props.readOnly) return;
     if (!hasEnvironmentAssetDragPayload(event)) return;
 
@@ -178,23 +179,25 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
     setEnvironmentDropActive(true);
   }
 
-  /** 拖拽离开环境预览区时移除高亮，避免悬停态残留。 */
-  function handleEnvironmentDragLeave(event: DragEvent<HTMLButtonElement>): void {
+  /** 拖拽离开环境模型属性行时移除高亮，避免子元素切换造成悬停态残留。 */
+  function handleEnvironmentDragLeave(event: DragEvent<HTMLLabelElement>): void {
     const relatedTarget = event.relatedTarget;
     if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
 
     setEnvironmentDropActive(false);
   }
 
-  /** 在环境预览区释放模型卡片时应用为场景环境，不创建场景实体。 */
-  function handleEnvironmentDrop(event: DragEvent<HTMLButtonElement>): void {
+  /** 在环境模型属性行释放卡片时应用为场景环境，不创建场景实体。 */
+  function handleEnvironmentDrop(event: DragEvent<HTMLLabelElement>): void {
     if (props.readOnly) return;
-    const asset = readEnvironmentAssetFromDrop(event);
-    if (!asset) return;
+    if (!hasEnvironmentAssetDragPayload(event)) return;
 
     event.preventDefault();
     event.stopPropagation();
     setEnvironmentDropActive(false);
+
+    const asset = readEnvironmentAssetFromDrop(event);
+    if (!asset) return;
     void handleSelectEnvironmentAsset(asset);
   }
 
@@ -296,14 +299,16 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
 
       <fieldset className="transform-fieldset">
         <legend>环境属性</legend>
-        <label className="environment-preview-row">
+        <label
+          className={environmentDropActive ? 'environment-preview-row environment-preview-row-drop-active' : 'environment-preview-row'}
+          onDragEnter={handleEnvironmentDragOver}
+          onDragLeave={handleEnvironmentDragLeave}
+          onDragOver={handleEnvironmentDragOver}
+          onDrop={handleEnvironmentDrop}
+        >
           <span>环境模型</span>
           <button
             className={environmentDropActive ? 'environment-preview-button environment-preview-button-drop-active' : 'environment-preview-button'}
-            onDragEnter={handleEnvironmentDragOver}
-            onDragLeave={handleEnvironmentDragLeave}
-            onDragOver={handleEnvironmentDragOver}
-            onDrop={handleEnvironmentDrop}
             onClick={() => setEnvironmentDialogOpen(true)}
             disabled={props.readOnly}
             title="选择或拖入环境模型"
@@ -316,6 +321,11 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             )}
           </button>
         </label>
+        {environment ? (
+          <p className="muted">
+            源单位：{formatModelLengthUnit(environment.lengthUnit)} → m（×{environment.unitScaleToMeters}）
+          </p>
+        ) : null}
         {environment ? (
           <button className="environment-clear-button" type="button" disabled={props.readOnly} onClick={() => updateEnvironmentConfig(null)}>
             清除环境模型

@@ -39,13 +39,20 @@ type ProjectPanelProps = {
   readOnly?: boolean;
 };
 
+/** 归一化项目资产路径，供同包重导时跨 Windows 分隔符和大小写比较。 */
+function normalizeProjectAssetPathForMatch(value: string | undefined): string {
+  return (value ?? '').trim().replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase();
+}
+
 export function ProjectPanel(props: ProjectPanelProps) {
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const refreshModelInstancesFromAssets = useEditorStore((state) => state.refreshModelInstancesFromAssets);
   const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
+  const currentEnvironmentPackagePath = useEditorStore((state) => state.scene.sceneSettings.environment?.packagePath);
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
+  const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
   const projectAssetFocusRequest = useEditorStore((state) => state.projectAssetFocusRequest);
   const consumeProjectAssetFocusRequest = useEditorStore((state) => state.consumeProjectAssetFocusRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
@@ -164,13 +171,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   async function handleImportModelFolder(): Promise<void> {
     if (props.readOnly) return;
-    if (!activeImportLibraryKey) return;
+    if (activeImportLibraryKey !== 'model') return;
 
-    const libraryKind = activeImportLibraryKey;
-    const assetKindLabel = libraryKind === 'environment' ? '环境模型' : '模型';
+    const libraryKind = 'model';
+    const assetKindLabel = '模型';
 
     if (!window.editorApi?.importModelFolder) {
-      const statusMessage = `导入${assetKindLabel}文件夹需要 Electron 桌面环境，请使用 npm run dev:electron 启动编辑器。`;
+      const statusMessage = '导入模型文件夹需要 Electron 桌面环境，请使用 npm run dev:electron 启动编辑器。';
       setLibraryStatus(libraryKind, { message: statusMessage, kind: 'error' });
       pushLog(statusMessage);
       return;
@@ -180,7 +187,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     setLibraryStatus(libraryKind, { message: `正在扫描${assetKindLabel}文件夹...`, kind: 'info' });
 
     try {
-      const result = await window.editorApi.importModelFolder({ libraryKind });
+      const result = await window.editorApi.importModelFolder({ libraryKind: 'model' });
 
       if (result.canceled) {
         setLibraryStatus(libraryKind, null);
@@ -214,6 +221,85 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
   }
 
+  /** 当前场景正在使用同一环境包时，用新 assetRevision 自动重建环境配置并触发运行时重载。 */
+  async function refreshCurrentEnvironmentAfterImport(asset: ProjectModelAssetEntry): Promise<boolean> {
+    const currentPackageKey = normalizeProjectAssetPathForMatch(currentEnvironmentPackagePath);
+    const importedPackageKey = normalizeProjectAssetPathForMatch(asset.packagePath);
+    if (!currentPackageKey || currentPackageKey !== importedPackageKey) return false;
+
+    try {
+      const environmentConfig = await loadEnvironmentFromAsset(asset);
+      if (!environmentConfig) {
+        pushLog('环境 GLB 已重导，但当前场景环境配置无效，未自动刷新。');
+        return false;
+      }
+
+      updateEnvironmentConfig(environmentConfig);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`环境 GLB 已重导，但当前场景自动刷新失败：${message}`);
+      return false;
+    }
+  }
+
+  /** 直接选择单个 GLB 导入环境库，主进程负责复制为项目内独立环境包。 */
+  async function handleImportEnvironmentModelFile(): Promise<void> {
+    if (props.readOnly) return;
+    if (activeImportLibraryKey !== 'environment') return;
+
+    const libraryKind = 'environment';
+    if (!window.editorApi?.importEnvironmentModelFile) {
+      const statusMessage = '导入环境 GLB 需要 Electron 桌面环境，请使用 npm run dev:electron 启动编辑器。';
+      setLibraryStatus(libraryKind, { message: statusMessage, kind: 'error' });
+      pushLog(statusMessage);
+      return;
+    }
+
+    setImportingLibraryKey(libraryKind);
+    setLibraryStatus(libraryKind, { message: '正在导入环境 GLB...', kind: 'info' });
+
+    try {
+      const result = await window.editorApi.importEnvironmentModelFile();
+      if (result.canceled) {
+        setLibraryStatus(libraryKind, null);
+        return;
+      }
+
+      if (!result.importedAsset) {
+        throw new Error('主进程未返回有效的环境资产。');
+      }
+
+      setProjectAssets(result.projectAssets);
+      setProjectRoot(result.projectRoot);
+      const refreshedCurrentEnvironment = await refreshCurrentEnvironmentAfterImport(result.importedAsset);
+      const displayName = result.importedAsset.displayName?.trim()
+        || result.importedAsset.name.replace(/\.glb$/i, '');
+      const projectSuffix = result.projectRoot ? `，已写入项目：${result.projectRoot}` : '';
+      const refreshSuffix = refreshedCurrentEnvironment ? '，已刷新当前场景环境模型' : '';
+      const message = `环境 GLB 已导入：${displayName}${projectSuffix}${refreshSuffix}。`;
+      setLibraryStatus(libraryKind, { message, kind: 'info' });
+      pushLog(message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const statusMessage = `导入环境 GLB 失败：${message}`;
+      setLibraryStatus(libraryKind, { message: statusMessage, kind: 'error' });
+      pushLog(statusMessage);
+    } finally {
+      setImportingLibraryKey(null);
+    }
+  }
+
+  /** 根据当前资源库选择普通模型文件夹或环境 GLB 的专用导入入口。 */
+  function handleImportActiveLibrary(): void {
+    if (activeImportLibraryKey === 'environment') {
+      void handleImportEnvironmentModelFile();
+      return;
+    }
+
+    void handleImportModelFolder();
+  }
+
   /** 从环境库把项目模型应用为场景环境，不创建 Hierarchy 实体。 */
   async function handleEnvironmentAssetApply(asset: AssetEntry): Promise<void> {
     if (props.readOnly) return;
@@ -239,6 +325,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
     if (props.readOnly) return;
 
     if (isBuiltInProjectLibraryItem(item)) {
+      if (item.builtIn.kind === 'model-generator') {
+        createModelGenerator();
+        return;
+      }
+
       if (item.builtIn.kind === 'mesh') {
         createMesh(item.builtIn.meshKind);
         return;
@@ -322,7 +413,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
     ? '加载项目中...'
     : isImportingModelFolder
       ? '导入中...'
-      : `导入${importTargetLabel}文件夹`;
+      : activeLibrary.key === 'environment'
+        ? '导入环境 GLB'
+        : `导入${importTargetLabel}文件夹`;
 
   return (
     <section className="panel project-library" aria-label="Project 资源库">
@@ -360,7 +453,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
           <button
             className="library-import-button"
             disabled={isModelImportButtonDisabled}
-            onClick={() => void handleImportModelFolder()}
+            onClick={handleImportActiveLibrary}
             type="button"
           >
             {modelImportButtonLabel}
@@ -373,7 +466,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
           <p className="library-empty-state">尚未导入普通模型包</p>
         ) : null}
         {activeLibrary.key === 'environment' && environmentAssets.length === 0 ? (
-          <p className="library-empty-state">请先导入环境模型文件夹</p>
+          <p className="library-empty-state">请先导入环境 GLB 文件</p>
         ) : null}
         {activeItems.map((item) => {
           const isBuiltInItem = isBuiltInProjectLibraryItem(item);

@@ -7,201 +7,53 @@ const MODEL_THUMBNAIL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 function isPlainObject(value) {
     return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
 }
-function identityMatrix() {
-    return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-}
-function multiplyMatrix(left, right) {
-    const result = new Array(16).fill(0);
-    for (let row = 0; row < 4; row += 1) {
-        for (let column = 0; column < 4; column += 1) {
-            for (let index = 0; index < 4; index += 1) {
-                result[row * 4 + column] += left[row * 4 + index] * right[index * 4 + column];
-            }
-        }
-    }
-    return result;
-}
-function transformPoint(matrix, point) {
-    const [x, y, z] = point;
-    return [
-        x * matrix[0] + y * matrix[4] + z * matrix[8] + matrix[12],
-        x * matrix[1] + y * matrix[5] + z * matrix[9] + matrix[13],
-        x * matrix[2] + y * matrix[6] + z * matrix[10] + matrix[14],
-    ];
-}
-function matrixFromNode(node) {
-    if (Array.isArray(node.matrix) && node.matrix.length === 16 && node.matrix.every((value) => typeof value === 'number')) {
-        return node.matrix;
-    }
-    const translation = Array.isArray(node.translation) && node.translation.length === 3 ? node.translation : [0, 0, 0];
-    const scale = Array.isArray(node.scale) && node.scale.length === 3 ? node.scale : [1, 1, 1];
-    const rotation = Array.isArray(node.rotation) && node.rotation.length === 4 ? node.rotation : [0, 0, 0, 1];
-    const [x, y, z, w] = rotation;
-    const x2 = x + x;
-    const y2 = y + y;
-    const z2 = z + z;
-    const xx = x * x2;
-    const xy = x * y2;
-    const xz = x * z2;
-    const yy = y * y2;
-    const yz = y * z2;
-    const zz = z * z2;
-    const wx = w * x2;
-    const wy = w * y2;
-    const wz = w * z2;
-    return [
-        (1 - (yy + zz)) * scale[0], (xy + wz) * scale[0], (xz - wy) * scale[0], 0,
-        (xy - wz) * scale[1], (1 - (xx + zz)) * scale[1], (yz + wx) * scale[1], 0,
-        (xz + wy) * scale[2], (yz - wx) * scale[2], (1 - (xx + yy)) * scale[2], 0,
-        translation[0], translation[1], translation[2], 1,
-    ];
-}
-function expandBounds(bounds, point) {
-    for (let index = 0; index < 3; index += 1) {
-        bounds.min[index] = Math.min(bounds.min[index], point[index]);
-        bounds.max[index] = Math.max(bounds.max[index], point[index]);
-        bounds.size[index] = bounds.max[index] - bounds.min[index];
-    }
-}
 async function readGlbJson(modelFilePath) {
     if (path.extname(modelFilePath).toLowerCase() !== '.glb')
         return null;
     const buffer = await fs.readFile(modelFilePath);
-    if (buffer.toString('utf-8', 0, 4) !== 'glTF')
+    if (buffer.length < 20 || buffer.toString('utf-8', 0, 4) !== 'glTF')
+        return null;
+    const version = buffer.readUInt32LE(4);
+    const declaredLength = buffer.readUInt32LE(8);
+    if (version !== 2 || declaredLength !== buffer.length)
         return null;
     let offset = 12;
+    let isFirstChunk = true;
+    let gltf = null;
     while (offset + 8 <= buffer.length) {
         const chunkLength = buffer.readUInt32LE(offset);
         const chunkType = buffer.readUInt32LE(offset + 4);
-        offset += 8;
+        const chunkDataOffset = offset + 8;
+        const chunkEnd = chunkDataOffset + chunkLength;
+        if (chunkLength === 0 || chunkLength % 4 !== 0 || chunkEnd > buffer.length)
+            return null;
+        if (isFirstChunk && chunkType !== 0x4e4f534a)
+            return null;
         if (chunkType === 0x4e4f534a) {
-            const parsed = JSON.parse(buffer.toString('utf-8', offset, offset + chunkLength));
-            return isPlainObject(parsed) ? parsed : null;
+            if (gltf)
+                return null;
+            const jsonText = buffer
+                .toString('utf-8', chunkDataOffset, chunkEnd)
+                .replace(/\u0000+$/g, '')
+                .trimEnd();
+            const parsed = JSON.parse(jsonText);
+            gltf = isPlainObject(parsed) ? parsed : null;
+            if (!gltf)
+                return null;
         }
-        offset += chunkLength;
+        isFirstChunk = false;
+        offset = chunkEnd;
     }
-    return null;
+    return offset === buffer.length ? gltf : null;
 }
-function getArrayItem(collection, index) {
-    if (!Array.isArray(collection) || typeof index !== 'number')
-        return null;
-    const item = collection[index];
-    return isPlainObject(item) ? item : null;
-}
-function collectMeshBounds(gltf, meshIndex, worldMatrix, bounds) {
-    const mesh = getArrayItem(gltf.meshes, meshIndex);
-    if (!mesh || !Array.isArray(mesh.primitives))
-        return;
-    for (const primitive of mesh.primitives) {
-        if (!isPlainObject(primitive) || !isPlainObject(primitive.attributes))
-            continue;
-        const accessor = getArrayItem(gltf.accessors, primitive.attributes.POSITION);
-        if (!accessor || !Array.isArray(accessor.min) || !Array.isArray(accessor.max))
-            continue;
-        if (accessor.min.length !== 3 || accessor.max.length !== 3)
-            continue;
-        if (!accessor.min.every((value) => typeof value === 'number') || !accessor.max.every((value) => typeof value === 'number'))
-            continue;
-        const min = accessor.min;
-        const max = accessor.max;
-        for (const x of [min[0], max[0]]) {
-            for (const y of [min[1], max[1]]) {
-                for (const z of [min[2], max[2]]) {
-                    expandBounds(bounds, transformPoint(worldMatrix, [x, y, z]));
-                }
-            }
-        }
+/** 校验 GLB 头、版本、声明长度、JSON 首块和分块边界，拒绝仅伪装扩展名的损坏文件。 */
+export async function validateGlbModelFile(modelFilePath) {
+    try {
+        return (await readGlbJson(modelFilePath)) !== null;
     }
-}
-function traverseNodeBounds(gltf, nodeIndex, parentMatrix, bounds) {
-    const node = getArrayItem(gltf.nodes, nodeIndex);
-    if (!node)
-        return;
-    const worldMatrix = multiplyMatrix(parentMatrix, matrixFromNode(node));
-    collectMeshBounds(gltf, node.mesh, worldMatrix, bounds);
-    if (!Array.isArray(node.children))
-        return;
-    for (const childNodeIndex of node.children) {
-        traverseNodeBounds(gltf, childNodeIndex, worldMatrix, bounds);
+    catch {
+        return false;
     }
-}
-async function readModelBounds(modelFilePath) {
-    const gltf = await readGlbJson(modelFilePath);
-    if (!gltf)
-        return null;
-    const bounds = {
-        min: [Infinity, Infinity, Infinity],
-        max: [-Infinity, -Infinity, -Infinity],
-        size: [0, 0, 0],
-    };
-    const sceneIndex = typeof gltf.scene === 'number' ? gltf.scene : 0;
-    const scene = getArrayItem(gltf.scenes, sceneIndex);
-    if (!scene || !Array.isArray(scene.nodes))
-        return null;
-    for (const nodeIndex of scene.nodes) {
-        traverseNodeBounds(gltf, nodeIndex, identityMatrix(), bounds);
-    }
-    return bounds.min.every(Number.isFinite) && bounds.max.every(Number.isFinite) ? bounds : null;
-}
-function isDimensionKey(key) {
-    const normalizedKey = key.toLowerCase();
-    return (normalizedKey.includes('length') ||
-        normalizedKey.includes('width') ||
-        normalizedKey.includes('height') ||
-        normalizedKey.includes('depth') ||
-        normalizedKey.includes('gap') ||
-        normalizedKey.includes('track') ||
-        normalizedKey.includes('aisle') ||
-        normalizedKey.includes('post') ||
-        key.includes('长') ||
-        key.includes('宽') ||
-        key.includes('高') ||
-        key.includes('深') ||
-        key.includes('距'));
-}
-function collectNumericMetadataValues(metadata) {
-    if (!isPlainObject(metadata) || !Array.isArray(metadata.parameterScripts))
-        return [];
-    const values = [];
-    for (const script of metadata.parameterScripts) {
-        if (!isPlainObject(script))
-            continue;
-        if (Array.isArray(script.fields)) {
-            for (const field of script.fields) {
-                if (!isPlainObject(field))
-                    continue;
-                const key = typeof field.key === 'string' ? field.key : '';
-                const label = typeof field.label === 'string' ? field.label : '';
-                if ((isDimensionKey(key) || isDimensionKey(label)) && typeof field.defaultValue === 'number' && field.defaultValue > 0) {
-                    values.push(field.defaultValue);
-                }
-            }
-        }
-        if (isPlainObject(script.values)) {
-            for (const [key, value] of Object.entries(script.values)) {
-                if (!isDimensionKey(key) || !isPlainObject(value) || typeof value.value !== 'number' || value.value <= 0)
-                    continue;
-                values.push(value.value);
-            }
-        }
-    }
-    return values;
-}
-function inferUnitFromBounds(metadata, bounds) {
-    if (!bounds)
-        return DEFAULT_MODEL_LENGTH_UNIT_INFO;
-    const metadataValues = collectNumericMetadataValues(metadata);
-    const metadataMax = metadataValues.length > 0 ? Math.max(...metadataValues) : NaN;
-    const boundsMax = Math.max(...bounds.size);
-    if (!Number.isFinite(metadataMax) || !Number.isFinite(boundsMax) || metadataMax <= 0 || boundsMax <= 0) {
-        return DEFAULT_MODEL_LENGTH_UNIT_INFO;
-    }
-    const ratio = boundsMax / metadataMax;
-    if (ratio > 800 && ratio < 1200)
-        return { lengthUnit: 'millimeter', unitScaleToMeters: 0.001 };
-    if (ratio > 80 && ratio < 120)
-        return { lengthUnit: 'centimeter', unitScaleToMeters: 0.01 };
-    return DEFAULT_MODEL_LENGTH_UNIT_INFO;
 }
 function isModelFile(fileName) {
     return MODEL_EXTENSIONS.has(path.extname(fileName).toLowerCase());
@@ -422,17 +274,16 @@ function extractModelParameterConfigFromParameterScripts(metadata) {
         ? { schema: 'babylon-editor.model-parameters', version: 1, parameters, bindings: [] }
         : undefined;
 }
-async function readModelPackageMetadata(packagePath, modelFilePath) {
+async function readModelPackageMetadata(packagePath) {
     const metadataPath = path.join(packagePath, 'meta.json');
     try {
         const content = await fs.readFile(metadataPath, 'utf-8');
         const parsed = JSON.parse(content);
-        const hasExplicitLengthUnit = isPlainObject(parsed) && 'lengthUnit' in parsed;
-        const unitInfo = hasExplicitLengthUnit
-            ? normalizeModelLengthUnit(parsed.lengthUnit)
-            : inferUnitFromBounds(parsed, await readModelBounds(modelFilePath));
+        const lengthUnitValue = isPlainObject(parsed) ? parsed.lengthUnit : undefined;
+        // 模型包单位只来自 meta.lengthUnit；缺失或空值按米兜底，避免参数脚本尺寸被误当作源模型单位。
+        const unitInfo = normalizeModelLengthUnit(lengthUnitValue);
         if (!unitInfo) {
-            throw new Error(`模型单位不受支持：${isPlainObject(parsed) ? String(parsed.lengthUnit) : 'unknown'}`);
+            throw new Error(`模型单位不受支持：${String(lengthUnitValue)}`);
         }
         const thumbnail = await resolveModelThumbnail(packagePath, parsed);
         return {
@@ -495,7 +346,7 @@ export async function scanModelPackage(packagePath) {
         };
     }
     const scriptPaths = findModelScripts(packagePath, fileNames);
-    const metadata = await readModelPackageMetadata(packagePath, modelFilePath);
+    const metadata = await readModelPackageMetadata(packagePath);
     const defaultAssetCode = await readDefaultAssetCodeFromScripts(scriptPaths);
     const scriptAssets = createModelScriptAssets(scriptPaths);
     const modelFileName = path.basename(modelFilePath);
@@ -549,11 +400,30 @@ export async function listModelPackageVariants(packagePath) {
         };
     });
 }
+/**
+ * 扫描用户选择的模型目录。
+ * 所选目录根部存在模型文件时，优先把该目录视为完整模型包，避免 GLTF 的纹理等资源子目录被误判为独立模型包。
+ */
 export async function scanModelFolder(rootPath) {
     const entries = await fs.readdir(rootPath, { withFileTypes: true });
-    const packageDirectories = entries.filter((entry) => entry.isDirectory());
     const assets = [];
     const skipped = [];
+    const hasRootModelFile = entries.some((entry) => entry.isFile() && isModelFile(entry.name));
+    if (hasRootModelFile) {
+        try {
+            const rootPackageResult = await scanModelPackage(rootPath);
+            if (rootPackageResult.asset) {
+                return { assets: [rootPackageResult.asset], skipped };
+            }
+            if (rootPackageResult.skipped)
+                skipped.push(rootPackageResult.skipped);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            skipped.push({ packagePath: rootPath, reason: `扫描失败：${message}` });
+        }
+    }
+    const packageDirectories = entries.filter((entry) => entry.isDirectory());
     for (const entry of packageDirectories) {
         const packagePath = path.join(rootPath, entry.name);
         try {

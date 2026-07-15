@@ -4,15 +4,20 @@ import path from 'node:path';
 import type {
   AssetEntry,
   ImportCadFileResult,
+  ImportEnvironmentModelFileResult,
   ImportModelFolderRequest,
   ImportModelFolderResult,
   ListModelPackageVariantsRequest,
-  ModelAssetLibraryKind,
   ModelPackageVariant,
 } from '../types.js';
 import { authorizeAssetFile, authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl } from './assetRegistry.js';
 import { listModelPackageVariants, scanModelFolder } from './modelPackageScanner.js';
-import { ensureCurrentProjectRootWithDialog, getCurrentProjectRoot, importModelPackagesIntoProject } from './projectAssetStore.js';
+import {
+  ensureCurrentProjectRootWithDialog,
+  getCurrentProjectRoot,
+  importEnvironmentModelFileIntoProject,
+  importModelPackagesIntoProject,
+} from './projectAssetStore.js';
 
 function getAssetKind(filePath: string, isDirectory: boolean): AssetEntry['kind'] {
   if (isDirectory) {
@@ -38,13 +43,12 @@ function getAssetKind(filePath: string, isDirectory: boolean): AssetEntry['kind'
   return 'unknown';
 }
 
-/** 校验导入请求中的目标资产库分类，避免未知分类落错目录。 */
-function normalizeImportModelLibraryKind(request: ImportModelFolderRequest | undefined): ModelAssetLibraryKind {
-  const libraryKind = request?.libraryKind;
+/** 普通模型文件夹入口只允许写入模型库，环境模型必须改走单 GLB 文件入口。 */
+function normalizeImportModelLibraryKind(request: ImportModelFolderRequest | undefined): 'model' {
+  const libraryKind = (request as { libraryKind?: unknown } | undefined)?.libraryKind;
 
-  if (libraryKind === 'model' || libraryKind === 'environment') {
-    return libraryKind;
-  }
+  if (libraryKind === 'model') return libraryKind;
+  if (libraryKind === 'environment') throw new Error('环境模型请直接选择 GLB 文件导入。');
 
   throw new Error('请选择有效的模型资产库分类。');
 }
@@ -115,7 +119,45 @@ export function registerAssetIpc(): void {
     };
   });
 
-  /** 导入模型文件夹：根据请求分类选择普通模型或环境模型资产库。 */
+  /** 导入单个环境 GLB：用户选择文件，项目内仍保存为独立单文件环境包。 */
+  ipcMain.handle('assets:importEnvironmentModelFile', async (): Promise<ImportEnvironmentModelFileResult> => {
+    const projectRoot = await ensureCurrentProjectRootWithDialog();
+
+    if (!projectRoot) {
+      return { canceled: true, filePath: null, projectRoot: null, importedAsset: null, projectAssets: [] };
+    }
+
+    const result = await dialog.showOpenDialog({
+      title: '选择环境 GLB 模型',
+      properties: ['openFile'],
+      filters: [{ name: 'GLB 环境模型', extensions: ['glb'] }],
+    });
+    const [filePath] = result.filePaths;
+
+    if (result.canceled || !filePath) {
+      return { canceled: true, filePath: null, projectRoot, importedAsset: null, projectAssets: [] };
+    }
+
+    if (path.extname(filePath).toLowerCase() !== '.glb') {
+      throw new Error('环境模型仅支持直接导入 .glb 文件。');
+    }
+
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) {
+      throw new Error('请选择有效的环境 GLB 文件。');
+    }
+
+    const { importedAsset, projectAssets } = await importEnvironmentModelFileIntoProject(filePath);
+    return {
+      canceled: false,
+      filePath,
+      projectRoot: getCurrentProjectRoot(),
+      importedAsset,
+      projectAssets,
+    };
+  });
+
+  /** 导入普通模型文件夹；环境模型文件夹请求会在边界处被拒绝。 */
   ipcMain.handle('assets:importModelFolder', async (_event, request?: ImportModelFolderRequest): Promise<ImportModelFolderResult> => {
     const libraryKind = normalizeImportModelLibraryKind(request);
     const projectRoot = await ensureCurrentProjectRootWithDialog();
@@ -125,7 +167,7 @@ export function registerAssetIpc(): void {
     }
 
     const result = await dialog.showOpenDialog({
-      title: libraryKind === 'environment' ? '选择环境模型文件夹' : '选择模型文件夹',
+      title: '选择模型文件夹',
       properties: ['openDirectory'],
     });
 

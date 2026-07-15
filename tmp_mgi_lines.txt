@@ -1,0 +1,372 @@
+
+---------- SRC\EDITOR\PANELS\MODELGENERATORINSPECTOR.TSX
+[1]import { useState, type DragEvent, type ReactElement } from 'react';
+[2]import {
+[3]  BUILT_IN_ASSET_DRAG_MIME_TYPE,
+[4]  decodeBuiltInAssetDragPayload,
+[5]  decodeModelAssetDragPayload,
+[6]  MODEL_ASSET_DRAG_MIME_TYPE,
+[7]} from '../assets/AssetDatabase';
+[8]import type {
+[9]  ModelGeneratorBinding,
+[10]  ModelGeneratorComponent,
+[11]  ModelGeneratorRule,
+[12]  ModelGeneratorTarget,
+[13]} from '../model/components';
+[14]import {
+[15]  MODEL_GENERATOR_MAX_BINDINGS,
+[16]  MODEL_GENERATOR_MAX_RULES,
+[17]  MODEL_GENERATOR_TTL_MAX_SECONDS,
+[18]  MODEL_GENERATOR_TTL_MIN_SECONDS,
+[19]  createMeshModelGeneratorTarget,
+[20]  createModelGeneratorTargetFromAsset,
+[21]  sanitizeModelGeneratorMetadataTtlSeconds,
+[22]} from '../model/modelGenerator';
+[23]import { useEditorStore } from '../store/editorStore';
+[24]import { createId } from '../../shared/ids';
+[25]
+[26]type ModelGeneratorInspectorProps = {
+[27]  component: ModelGeneratorComponent;
+[28]  disabled?: boolean;
+[29]};
+[30]
+[31]type ModelGeneratorRulePatch = Partial<Omit<ModelGeneratorRule, 'id'>>;
+[32]type ModelGeneratorBindingPatch = Partial<Omit<ModelGeneratorBinding, 'id'>>;
+[33]
+[34]const BUILT_IN_MODEL_NAMES = {
+[35]  cube: '立方�?,
+[36]  sphere: '球体',
+[37]  plane: '地面',
+[38]} as const;
+[39]
+[40]/** 判断拖拽事件是否包含模型库可用于生成槽位的载荷�?*/
+[41]function hasModelGeneratorTargetPayload(event: DragEvent<HTMLElement>): boolean {
+[42]  return event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE)
+[43]    || event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE);
+[44]}
+[45]
+[46]/** 从模型库拖拽数据读取合法目标，只接受普通模型和内置基础网格�?*/
+[47]function readModelGeneratorTargetFromDrop(event: DragEvent<HTMLElement>): ModelGeneratorTarget | null {
+[48]  const modelPayload = event.dataTransfer.getData(MODEL_ASSET_DRAG_MIME_TYPE);
+[49]  const modelAsset = modelPayload ? decodeModelAssetDragPayload(modelPayload) : null;
+[50]  if (modelAsset?.libraryKind === 'model') {
+[51]    return createModelGeneratorTargetFromAsset(modelAsset);
+[52]  }
+[53]
+[54]  const builtInPayload = event.dataTransfer.getData(BUILT_IN_ASSET_DRAG_MIME_TYPE);
+[55]  const builtInAsset = builtInPayload ? decodeBuiltInAssetDragPayload(builtInPayload) : null;
+[56]  if (builtInAsset?.kind !== 'mesh') return null;
+[57]
+[58]  return createMeshModelGeneratorTarget(
+[59]    builtInAsset.meshKind,
+[60]    BUILT_IN_MODEL_NAMES[builtInAsset.meshKind],
+[61]  );
+[62]}
+[63]
+[64]/** 渲染并编辑模型生成器默认目标、条件规则、TTL �?MQTT 绑定�?*/
+[65]export function ModelGeneratorInspector({ component, disabled = false }: ModelGeneratorInspectorProps) {
+[66]  const updateSelectedModelGenerator = useEditorStore((state) => state.updateSelectedModelGenerator);
+[67]  const [activeDropZone, setActiveDropZone] = useState<string | null>(null);
+[68]
+[69]  /** 提交完整不可变组件，�?Store 统一校验并写入撤销历史�?*/
+[70]  function commitComponent(nextComponent: ModelGeneratorComponent, label: string): void {
+[71]    if (disabled) return;
+[72]    updateSelectedModelGenerator(nextComponent, label);
+[73]  }
+[74]
+[75]  /** 更新指定规则，不改变列表顺序和稳�?ID�?*/
+[76]  function updateRule(index: number, patch: ModelGeneratorRulePatch, label: string): void {
+[77]    const rules = component.rules.map((rule, ruleIndex) => (
+[78]      ruleIndex === index ? { ...rule, ...patch } : rule
+[79]    ));
+[80]    commitComponent({ ...component, rules }, label);
+[81]  }
+[82]
+[83]  /** 更新指定 MQTT 绑定，不改变其他绑定�?*/
+[84]  function updateBinding(index: number, patch: ModelGeneratorBindingPatch): void {
+[85]    const bindings = component.bindings.map((binding, bindingIndex) => (
+[86]      bindingIndex === index ? { ...binding, ...patch } : binding
+[87]    ));
+[88]    commitComponent({ ...component, bindings }, '更新自动绑定事件');
+[89]  }
+[90]
+[91]  /** 新增一条空生成规则，目标由后续模型库拖放补齐�?*/
+[92]  function addRule(): void {
+[93]    if (component.rules.length >= MODEL_GENERATOR_MAX_RULES) return;
+[94]    const rule: ModelGeneratorRule = {
+[95]      id: createId('model_generator_rule'),
+[96]      attributeName: '',
+[97]      attributeValue: '',
+[98]      target: null,
+[99]    };
+[100]    commitComponent({ ...component, rules: [...component.rules, rule] }, '添加生成规则');
+[101]  }
+[102]
+[103]  /** 删除指定生成规则�?*/
+[104]  function removeRule(index: number): void {
+[105]    commitComponent(
+[106]      { ...component, rules: component.rules.filter((_, ruleIndex) => ruleIndex !== index) },
+[107]      '删除生成规则',
+[108]    );
+[109]  }
+[110]
+[111]  /** 调整规则优先级，运行时始终按当前列表顺序取首条命中�?*/
+[112]  function moveRule(index: number, offset: -1 | 1): void {
+[113]    const targetIndex = index + offset;
+[114]    if (targetIndex < 0 || targetIndex >= component.rules.length) return;
+[115]    const rules = [...component.rules];
+[116]    [rules[index], rules[targetIndex]] = [rules[targetIndex], rules[index]];
+[117]    commitComponent({ ...component, rules }, '调整生成规则顺序');
+[118]  }
+[119]
+[120]  /** 新增一�?MQTT 精确绑定，sourceId 默认使用现有遥测默认源�?*/
+[121]  function addBinding(): void {
+[122]    if (component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS) return;
+[123]    const binding: ModelGeneratorBinding = {
+[124]      id: createId('model_generator_binding'),
+[125]      sourceId: 'default',
+[126]      deviceType: '',
+[127]      assetCode: '',
+[128]    };
+[129]    commitComponent({ ...component, bindings: [...component.bindings, binding] }, '添加自动绑定事件');
+[130]  }
+[131]
+[132]  /** 删除指定 MQTT 绑定�?*/
+[133]  function removeBinding(index: number): void {
+[134]    commitComponent(
+[135]      { ...component, bindings: component.bindings.filter((_, bindingIndex) => bindingIndex !== index) },
+[136]      '删除自动绑定事件',
+[137]    );
+[138]  }
+[139]
+[140]  /** 接收模型库拖放并更新对应默认槽位或规则槽位�?*/
+[141]  function handleTargetDrop(
+[142]    event: DragEvent<HTMLDivElement>,
+[143]    dropZoneId: string,
+[144]    onTargetChange: (target: ModelGeneratorTarget | null) => void,
+[145]  ): void {
+[146]    if (disabled || !hasModelGeneratorTargetPayload(event)) return;
+[147]    event.preventDefault();
+[148]    event.stopPropagation();
+[149]    setActiveDropZone(null);
+[150]
+[151]    const target = readModelGeneratorTargetFromDrop(event);
+[152]    if (target) onTargetChange(target);
+[153]  }
+[154]
+[155]  /** 拖拽离开槽位整体时移除高亮，子节点之间移动不会误清理�?*/
+[156]  function handleTargetDragLeave(event: DragEvent<HTMLDivElement>, dropZoneId: string): void {
+[157]    const relatedTarget = event.relatedTarget;
+[158]    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
+[159]    if (activeDropZone === dropZoneId) setActiveDropZone(null);
+[160]  }
+[161]
+[162]  /** 渲染可接收模型库卡片的模型目标槽位�?*/
+[163]  function renderTargetSlot(
+[164]    dropZoneId: string,
+[165]    label: string,
+[166]    target: ModelGeneratorTarget | null,
+[167]    onTargetChange: (target: ModelGeneratorTarget | null) => void,
+[168]  ): ReactElement {
+[169]    const className = activeDropZone === dropZoneId
+[170]      ? 'model-generator-target-slot model-generator-target-slot-active'
+[171]      : 'model-generator-target-slot';
+[172]    const title = target?.kind === 'model' ? target.modelAsset.sourcePath : target?.displayName;
+[173]
+[174]    return (
+[175]      <div className="model-generator-target-row">
+[176]        <span className="model-generator-target-label">{label}</span>
+[177]        <div
+[178]          className={className}
+[179]          onDragEnter={(event) => {
+[180]            if (disabled || !hasModelGeneratorTargetPayload(event)) return;
+[181]            event.preventDefault();
+[182]            setActiveDropZone(dropZoneId);
+[183]          }}
+[184]          onDragLeave={(event) => handleTargetDragLeave(event, dropZoneId)}
+[185]          onDragOver={(event) => {
+[186]            if (disabled || !hasModelGeneratorTargetPayload(event)) return;
+[187]            event.preventDefault();
+[188]            event.dataTransfer.dropEffect = 'copy';
+[189]            setActiveDropZone(dropZoneId);
+[190]          }}
+[191]          onDrop={(event) => handleTargetDrop(event, dropZoneId, onTargetChange)}
+[192]          title={title || '从模型库拖入普通模型或内置基础网格'}
+[193]        >
+[194]          {target ? (
+[195]            <>
+[196]              <span className="model-generator-target-preview" aria-hidden="true">
+[197]                {target.kind === 'model' && target.thumbnailUrl ? (
+[198]                  <img alt="" src={target.thumbnailUrl} />
+[199]                ) : (
+[200]                  <span>{target.kind === 'mesh' ? 'Mesh' : 'Model'}</span>
+[201]                )}
+[202]              </span>
+[203]              <span className="model-generator-target-text">
+[204]                <strong>{target.displayName}</strong>
+[205]                <small>{target.kind === 'mesh' ? '内置基础网格' : '项目模型'}</small>
+[206]              </span>
+[207]              <button
+[208]                aria-label={'清空' + label}
+[209]                className="model-generator-clear-button"
+[210]                disabled={disabled}
+[211]                onClick={() => onTargetChange(null)}
+[212]                type="button"
+[213]              >
+[214]                ×
+[215]              </button>
+[216]            </>
+[217]          ) : (
+[218]            <span className="model-generator-target-empty">从模型库拖入模型</span>
+[219]          )}
+[220]        </div>
+[221]      </div>
+[222]    );
+[223]  }
+[224]
+[225]  return (
+[226]    <fieldset className="transform-fieldset model-generator-fieldset">
+[227]      <legend>模型生成�?/legend>
+[228]
+[229]      {renderTargetSlot(
+[230]        'default-target',
+[231]        '共享生成模板',
+[232]        component.defaultTarget,
+[233]        (target) => commitComponent({ ...component, defaultTarget: target }, '更新共享生成模板'),
+[234]      )}
+[235]      <p className="muted model-generator-unit-hint">模板仅保存配置，编辑态不会显示，只有规则命中才生成�?/p>
+[236]
+[237]      <div className="model-generator-section-header">
+[238]        <span>生成规则</span>
+[239]        <button
+[240]          disabled={disabled || component.rules.length >= MODEL_GENERATOR_MAX_RULES}
+[241]          onClick={addRule}
+[242]          title="添加生成规则"
+[243]          type="button"
+[244]        >
+[245]          +
+[246]        </button>
+[247]      </div>
+[248]
+[249]      {component.rules.length === 0 ? (
+[250]        <p className="muted model-generator-empty-hint">暂无生成规则时运行态不生成�?/p>
+[251]      ) : null}
+[252]
+[253]      {component.rules.map((rule, index) => (
+[254]        <div className="model-generator-rule-card" key={rule.id}>
+[255]          <div className="model-generator-card-header">
+[256]            <span>规则 {index + 1}</span>
+[257]            <span className="model-generator-inline-actions">
+[258]              <button disabled={disabled || index === 0} onClick={() => moveRule(index, -1)} title="上移规则" type="button">�?/button>
+[259]              <button disabled={disabled || index === component.rules.length - 1} onClick={() => moveRule(index, 1)} title="下移规则" type="button">�?/button>
+[260]              <button disabled={disabled} onClick={() => removeRule(index)} title="删除规则" type="button">�?/button>
+[261]            </span>
+[262]          </div>
+[263]          <label className="inspector-row">
+[264]            <span>类型属性名</span>
+[265]            <input
+[266]              disabled={disabled}
+[267]              maxLength={256}
+[268]              type="text"
+[269]              value={rule.attributeName}
+[270]              onChange={(event) => updateRule(index, { attributeName: event.target.value }, '更新规则属性名')}
+[271]            />
+[272]          </label>
+[273]          <label className="inspector-row">
+[274]            <span>类型属性�?/span>
+[275]            <input
+[276]              disabled={disabled}
+[277]              maxLength={256}
+[278]              type="text"
+[279]              value={rule.attributeValue}
+[280]              onChange={(event) => updateRule(index, { attributeValue: event.target.value }, '更新规则属性�?)}
+[281]            />
+[282]          </label>
+[283]          {renderTargetSlot(
+[284]            'rule-target-' + rule.id,
+[285]            '规则覆盖模型（可选）',
+[286]            rule.target,
+[287]            (target) => updateRule(index, { target }, '更新规则覆盖模型'),
+[288]          )}
+[289]        </div>
+[290]      ))}
+[291]
+[292]      <label className="number-row model-generator-ttl-row">
+[293]        <span>元数据销毁时�?/span>
+[294]        <input
+[295]          disabled={disabled}
+[296]          min={MODEL_GENERATOR_TTL_MIN_SECONDS}
+[297]          max={MODEL_GENERATOR_TTL_MAX_SECONDS}
+[298]          step="1"
+[299]          type="number"
+[300]          value={component.metadataTtlSeconds}
+[301]          onChange={(event) => {
+[302]            if (event.target.value === '') return;
+[303]            const value = Number(event.target.value);
+[304]            if (!Number.isFinite(value)) return;
+[305]            commitComponent(
+[306]              { ...component, metadataTtlSeconds: sanitizeModelGeneratorMetadataTtlSeconds(value) },
+[307]              '更新元数据销毁时�?,
+[308]            );
+[309]          }}
+[310]        />
+[311]      </label>
+[312]      <p className="muted model-generator-unit-hint">单位：秒；TTL 超时销毁输出，不回退共享生成模板�?/p>
+[313]
+[314]      <div className="model-generator-section-header">
+[315]        <span>自动绑定事件</span>
+[316]        <button
+[317]          disabled={disabled || component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS}
+[318]          onClick={addBinding}
+[319]          title="添加 MQTT 绑定"
+[320]          type="button"
+[321]        >
+[322]          +
+[323]        </button>
+[324]      </div>
+[325]
+[326]      {component.bindings.length === 0 ? (
+[327]        <p className="muted model-generator-empty-hint">暂无 MQTT 绑定，运行态不会触发条件规则�?/p>
+[328]      ) : null}
+[329]
+[330]      {component.bindings.map((binding, index) => (
+[331]        <div className="model-generator-binding-card" key={binding.id}>
+[332]          <div className="model-generator-card-header">
+[333]            <span>绑定 {index + 1}</span>
+[334]            <button disabled={disabled} onClick={() => removeBinding(index)} title="删除绑定" type="button">�?/button>
+[335]          </div>
+[336]          <label className="inspector-row">
+[337]            <span>sourceId</span>
+[338]            <input
+[339]              disabled={disabled}
+[340]              maxLength={256}
+[341]              type="text"
+[342]              value={binding.sourceId}
+[343]              onChange={(event) => updateBinding(index, { sourceId: event.target.value })}
+[344]            />
+[345]          </label>
+[346]          <label className="inspector-row">
+[347]            <span>deviceType</span>
+[348]            <input
+[349]              disabled={disabled}
+[350]              maxLength={256}
+[351]              type="text"
+[352]              value={binding.deviceType}
+[353]              onChange={(event) => updateBinding(index, { deviceType: event.target.value })}
+[354]            />
+[355]          </label>
+[356]          <label className="inspector-row">
+[357]            <span>assetCode</span>
+[358]            <input
+[359]              disabled={disabled}
+[360]              maxLength={128}
+[361]              type="text"
+[362]              value={binding.assetCode}
+[363]              onChange={(event) => updateBinding(index, { assetCode: event.target.value })}
+[364]            />
+[365]          </label>
+[366]        </div>
+[367]      ))}
+[368]    </fieldset>
+[369]  );
+[370]}

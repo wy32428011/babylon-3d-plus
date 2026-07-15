@@ -1,8 +1,11 @@
 import { useEffect, useState, type KeyboardEvent } from 'react';
-import type { LightKind } from '../model/components';
+import { getBuiltInMeshMeterDescription } from '../model/builtInMeshGeometry';
+import type { LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
+import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import { useEditorStore } from '../store/editorStore';
+import { ModelGeneratorInspector } from './ModelGeneratorInspector';
 import { ModelParametersInspector } from './ModelParametersInspector';
 import { TelemetryBindingInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
@@ -21,9 +24,11 @@ const locatorDimensionFields: Array<{ key: LocatorDimensionField; label: string 
   { key: 'height', label: '高(Y)' },
 ];
 
-function getTransformLegend(field: TransformField): string {
+/** 根据 Transform 字段和基础网格类型生成单位明确的 Inspector 标题。 */
+function getTransformLegend(field: TransformField, meshKind?: MeshKind): string {
   if (field === 'position') return `${field} (${SCENE_LENGTH_UNIT_SYMBOL})`;
   if (field === 'rotation') return `${field} (deg)`;
+  if (field === 'scale' && meshKind === 'cube') return `size (${SCENE_LENGTH_UNIT_SYMBOL})`;
 
   return field;
 }
@@ -45,6 +50,13 @@ function formatRotationDegrees(value: number): number {
   return Number(value.toFixed(3));
 }
 
+const MODEL_MEASUREMENT_FORMATTER = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 6 });
+
+/** 格式化 Inspector 中的模型实际米制尺寸，保留最多 6 位小数。 */
+function formatModelMeasurementMeters(value: number): string {
+  return MODEL_MEASUREMENT_FORMATTER.format(Number.isFinite(value) ? Math.max(0, value) : 0);
+}
+
 /** 根据 Transform 字段返回 Inspector 输入框显示值，rotation 单独从弧度转为角度。 */
 function getTransformInputValue(field: TransformField, value: number): number {
   return field === 'rotation' ? formatRotationDegrees(radiansToDegrees(value)) : value;
@@ -61,6 +73,7 @@ type InspectorPanelProps = {
 
 export function InspectorPanel(props: InspectorPanelProps) {
   const scene = useEditorStore((state) => state.scene);
+  const selectedModelMeasurement = useEditorStore((state) => state.selectedModelMeasurement);
   const renameSelectedEntity = useEditorStore((state) => state.renameSelectedEntity);
   const updateSelectedTransform = useEditorStore((state) => state.updateSelectedTransform);
   const updateSelectedMaterialColor = useEditorStore((state) => state.updateSelectedMaterialColor);
@@ -71,6 +84,9 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const updateSelectedTelemetryBinding = useEditorStore((state) => state.updateSelectedTelemetryBinding);
   const restoreSelectedTelemetryBindingDefault = useEditorStore((state) => state.restoreSelectedTelemetryBindingDefault);
   const selectedEntity = scene.selectedEntityId ? scene.entities[scene.selectedEntityId] : null;
+  const modelMeasurement = selectedEntity && selectedModelMeasurement?.entityId === selectedEntity.id
+    ? selectedModelMeasurement
+    : null;
   const [nameDraft, setNameDraft] = useState('');
 
   useEffect(() => {
@@ -168,13 +184,14 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const cadReference = selectedEntity.components.cadReference;
   const light = selectedEntity.components.light;
   const modelAsset = selectedEntity.components.modelAsset;
-  const isCompactModelInspector = Boolean(modelAsset || meshRenderer);
+  const modelGenerator = selectedEntity.components.modelGenerator;
+  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || modelGenerator);
 
   return (
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
-      <h2>Inspector</h2>
+      <h2>{modelGenerator ? '模型生成器' : 'Inspector'}</h2>
       <label className="inspector-row">
-        <span>名称</span>
+        <span>{modelGenerator ? 'POI名称' : '名称'}</span>
         <input
           type="text"
           disabled={isLocked}
@@ -186,7 +203,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
       </label>
       {fields.map((field) => (
         <fieldset className="transform-fieldset transform-axis-fieldset" key={field}>
-          <legend>{getTransformLegend(field)}</legend>
+          <legend>{getTransformLegend(field, meshRenderer?.meshKind)}</legend>
           {axes.map((axis) => (
             <label className="number-row" key={`${field}-${axis}`}>
               <span>{axis.toUpperCase()}</span>
@@ -201,6 +218,9 @@ export function InspectorPanel(props: InspectorPanelProps) {
           ))}
         </fieldset>
       ))}
+      {modelGenerator ? (
+        <ModelGeneratorInspector component={modelGenerator} disabled={isLocked} />
+      ) : null}
       {meshRenderer ? (
         <fieldset className="transform-fieldset">
           <legend>Mesh Renderer</legend>
@@ -213,6 +233,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
               onChange={(event) => updateSelectedMaterialColor(event.target.value)}
             />
           </label>
+          <p className="muted">{getBuiltInMeshMeterDescription(meshRenderer.meshKind)}</p>
         </fieldset>
       ) : null}
       {locator ? (
@@ -281,7 +302,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
               onChange={(event) => handleCadReferenceOpacityChange(event.target.value)}
             />
           </label>
-          <p className="muted">换算到米：×{cadReference.unitScaleToMeters}</p>
+          <p className="muted">源单位：{formatCadReferenceUnitSummary(cadReference)}</p>
           <p className="muted">
             尺寸：X {formatCadReferenceMeters(cadReference.bounds.size.x)} / Z {formatCadReferenceMeters(cadReference.bounds.size.z)}
           </p>
@@ -336,6 +357,20 @@ export function InspectorPanel(props: InspectorPanelProps) {
               <p className="muted asset-path" title={modelAsset.sourcePath}>{modelAsset.sourcePath}</p>
               <p className="muted">源单位：{formatModelLengthUnit(modelAsset.lengthUnit)}</p>
               <p className="muted">换算到米：×{modelAsset.unitScaleToMeters}</p>
+              <div aria-live="polite" className="model-measurement">
+                <p className="muted">实际尺寸 (m)</p>
+                {modelMeasurement?.status === 'ready' ? (
+                  <>
+                    <p className="muted">X：{formatModelMeasurementMeters(modelMeasurement.sizeMeters.x)}</p>
+                    <p className="muted">Y：{formatModelMeasurementMeters(modelMeasurement.sizeMeters.y)}</p>
+                    <p className="muted">Z：{formatModelMeasurementMeters(modelMeasurement.sizeMeters.z)}</p>
+                  </>
+                ) : modelMeasurement?.status === 'unavailable' ? (
+                  <p className="muted">暂无可测量几何。</p>
+                ) : (
+                  <p className="muted">正在计算模型几何尺寸…</p>
+                )}
+              </div>
             </div>
           </fieldset>
           <TelemetryBindingInspector

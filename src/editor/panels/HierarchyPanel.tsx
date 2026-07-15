@@ -8,6 +8,7 @@ import {
   type MouseEvent,
 } from 'react';
 import type { Entity } from '../model/Entity';
+import { ARRAY_ASSET_NUMBER_MAX_LENGTH, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
 import { useEditorStore, type EntityArrayDirection } from '../store/editorStore';
 
 const HIERARCHY_DRAG_MIME_TYPE = 'application/x-babylon-editor-hierarchy-entities';
@@ -33,6 +34,7 @@ type ArrayDialogState = {
   copyCount: number;
   direction: EntityArrayDirection;
   spacingMeters: number;
+  assetNumberRule: string;
 };
 
 /** 判断实体名称是否命中当前搜索关键字。 */
@@ -131,7 +133,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const lockSelectedEntities = useEditorStore((state) => state.lockSelectedEntities);
   const copySelectedEntities = useEditorStore((state) => state.copySelectedEntities);
   const pasteEntityClipboard = useEditorStore((state) => state.pasteEntityClipboard);
-  const arraySelectedEntities = useEditorStore((state) => state.arraySelectedEntities);
+  const requestEntityArray = useEditorStore((state) => state.requestEntityArray);
   const groupSelectedEntities = useEditorStore((state) => state.groupSelectedEntities);
   const ungroupSelectedEntities = useEditorStore((state) => state.ungroupSelectedEntities);
   const requestSceneFocusForSelection = useEditorStore((state) => state.requestSceneFocusForSelection);
@@ -167,6 +169,19 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const canLibraryFocus = Boolean(contextEntity?.components.modelAsset);
   const canPaste = !props.readOnly && Boolean(entityClipboard && entityClipboard.entities.length > 0);
   const canUngroup = !props.readOnly && activeSelectionEntities.some((entity) => entity.isFolder || Boolean(entity.parentId));
+  const arraySourceEntities = activeSelectionEntities.filter(
+    (entity) => !entity.isFolder && !isEntityEffectivelyLocked(entities, entity),
+  );
+  const assetNumberedArraySourceCount = arraySourceEntities.filter(
+    (entity) => Boolean(entity.components.modelAsset || entity.components.locator),
+  ).length;
+  const canEditAssetNumberRule = !props.readOnly && assetNumberedArraySourceCount === 1;
+  const assetNumberRuleError = arrayDialog
+    ? getArrayAssetNumberRuleError(arrayDialog.assetNumberRule)
+    : null;
+  const hasUnavailableAssetNumberRule = Boolean(
+    arrayDialog?.assetNumberRule.trim() && assetNumberedArraySourceCount !== 1,
+  );
 
   /** 执行菜单动作后统一收起菜单，保持右键菜单只响应一次命令。 */
   function runContextMenuAction(action: () => void): void {
@@ -181,10 +196,10 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     return contextEntity.parentId;
   }
 
-  /** 打开模型阵列弹窗，弹窗确认后统一调用 store 的可撤销阵列命令。 */
+  /** 打开模型阵列弹窗，确认后由 SceneRuntime 解析选区包围盒再执行可撤销阵列命令。 */
   function openArrayDialog(): void {
     if (props.readOnly) return;
-    setArrayDialog({ copyCount: 3, direction: 'x', spacingMeters: 1 });
+    setArrayDialog({ copyCount: 3, direction: 'x', spacingMeters: 1, assetNumberRule: '' });
     setContextMenu(null);
   }
 
@@ -221,7 +236,12 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   function submitArrayDialog(): void {
     if (props.readOnly) return;
     if (!arrayDialog) return;
-    arraySelectedEntities(arrayDialog.copyCount, arrayDialog.direction, arrayDialog.spacingMeters);
+    requestEntityArray(
+      arrayDialog.copyCount,
+      arrayDialog.direction,
+      arrayDialog.spacingMeters,
+      arrayDialog.assetNumberRule,
+    );
     setArrayDialog(null);
   }
 
@@ -642,9 +662,9 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
               </select>
             </label>
             <label className="hierarchy-array-dialog-row">
-              <span>阵列间距(m)</span>
+              <span>阵列净间距(m)</span>
               <input
-                min={0.01}
+                min={0}
                 onChange={(event) => setArrayDialog({ ...arrayDialog, spacingMeters: Number(event.target.value) })}
                 disabled={props.readOnly}
                 step={0.1}
@@ -652,9 +672,41 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
                 value={arrayDialog.spacingMeters}
               />
             </label>
+            <label className="hierarchy-array-dialog-row">
+              <span>资产编号规则</span>
+              <input
+                aria-describedby="hierarchy-array-number-rule-help"
+                aria-invalid={Boolean(assetNumberRuleError)}
+                disabled={!canEditAssetNumberRule}
+                maxLength={ARRAY_ASSET_NUMBER_MAX_LENGTH}
+                onChange={(event) => setArrayDialog({ ...arrayDialog, assetNumberRule: event.target.value })}
+                placeholder="${1}-1-1"
+                type="text"
+                value={arrayDialog.assetNumberRule}
+              />
+            </label>
+            {assetNumberedArraySourceCount === 1 ? (
+              <p className="hierarchy-array-dialog-hint" id="hierarchy-array-number-rule-help">
+                可选；原对象编号不变，第一个副本从占位符数字 +1 开始。
+              </p>
+            ) : (
+              <p className="hierarchy-array-dialog-hint" id="hierarchy-array-number-rule-help">
+                {assetNumberedArraySourceCount === 0
+                  ? '当前选区没有资产编号字段，将只执行空间阵列。'
+                  : '多个带编号对象将按各自原编号递增，不能使用同一自定义规则。'}
+              </p>
+            )}
+            {assetNumberRuleError ? <p className="hierarchy-array-dialog-error">{assetNumberRuleError}</p> : null}
             <div className="hierarchy-array-dialog-actions">
               <button onClick={() => setArrayDialog(null)} type="button">取消</button>
-              <button className="primary" disabled={props.readOnly} onClick={submitArrayDialog} type="button">确认</button>
+              <button
+                className="primary"
+                disabled={Boolean(props.readOnly || assetNumberRuleError || hasUnavailableAssetNumberRule)}
+                onClick={submitArrayDialog}
+                type="button"
+              >
+                确认
+              </button>
             </div>
           </div>
         </div>

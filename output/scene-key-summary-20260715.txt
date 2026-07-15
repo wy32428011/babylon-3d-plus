@@ -1,0 +1,652 @@
+DEVICES
+{
+  "id": "entity_stacker_ddj2",
+  "name": "Stacker DDJ2",
+  "parentId": null,
+  "componentKeys": [
+    "transform",
+    "modelAsset"
+  ],
+  "transform": {
+    "position": {
+      "x": 17.291959762573242,
+      "y": 0,
+      "z": 6.475890159606934
+    },
+    "rotation": {
+      "x": 0,
+      "y": -1.5707963267948963,
+      "z": 0
+    },
+    "scale": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    }
+  },
+  "modelAsset": {
+    "assetCode": "DDJ2",
+    "sourcePath": "F:\\3d-models\\models\\Stacker\\Stacker.glb"
+  }
+}
+{
+  "id": "entity_57af9831-f7c5-4964-b74d-fafd536895c2",
+  "name": "一体式顶升移载",
+  "parentId": null,
+  "componentKeys": [
+    "transform",
+    "modelAsset"
+  ],
+  "transform": {
+    "position": {
+      "x": 25.55368995666504,
+      "y": 0,
+      "z": 5.183948516845703
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "scale": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    }
+  },
+  "modelAsset": {
+    "assetCode": "1005",
+    "sourcePath": "F:\\3d-models\\models\\Assets\\Models\\YZJ\\YZJ.glb"
+  }
+}
+{
+  "id": "entity_8bc04e8f-602d-48f0-8d59-18b0b8ebfeeb",
+  "name": "一体式顶升移载 副本",
+  "parentId": null,
+  "componentKeys": [
+    "transform",
+    "modelAsset"
+  ],
+  "transform": {
+    "position": {
+      "x": 25.54476547241211,
+      "y": 0,
+      "z": 3.716153144836426
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "scale": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    }
+  },
+  "modelAsset": {
+    "assetCode": "1004",
+    "sourcePath": "F:\\3d-models\\models\\Assets\\Models\\YZJ\\YZJ.glb"
+  }
+}
+GENERATORS 0
+LOCATORS 294
+unique 294 duplicates []
+nearest DDJ2 [
+  {
+    "d": 1.5830407481405595,
+    "id": "entity_86257a02-f200-40d7-a4b2-a48884a1a5d2",
+    "name": "虚拟定位线框 副本 6",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 17.30301260948181,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-7-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 1.9270653132619893,
+    "id": "entity_ec5d81ce-3f88-4832-912c-080152c8f95f",
+    "name": "虚拟定位线框 副本 7",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 16.193012595176697,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-8-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 1.9397565214438706,
+    "id": "entity_45d7f1ad-3134-4c3d-a87e-f231ad56ff29",
+    "name": "虚拟定位线框 副本 5",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 18.413012623786926,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-6-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 2.5020189536976245,
+    "id": "entity_5aab1f11-99b8-490c-b50b-049a7c10d6f4",
+    "name": "虚拟定位线框 副本 42 副本 6",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 17.30301260948181,
+      "y": 2.0938772439956663,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-7-2",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 2.7175988475851884,
+    "id": "entity_38f1f69a-37f9-48a5-8773-1339c0a0b9ec",
+    "name": "虚拟定位线框 副本 8",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 15.083012580871582,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-9-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 2.732702244293414,
+    "id": "entity_f8123a2a-d4c0-4b24-ac79-d6ca0004f95c",
+    "name": "虚拟定位线框 副本 42 副本 7",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 16.193012595176697,
+      "y": 2.0938772439956663,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-8-2",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 2.735597334808129,
+    "id": "entity_7c6faadb-e0b4-4b91-934d-4968018ae537",
+    "name": "虚拟定位线框 副本 4",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 19.52301263809204,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-5-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 2.7416666823070885,
+    "id": "entity_ce4df23b-dc70-4cbd-8cfb-8f4501dc6a07",
+    "name": "虚拟定位线框 副本 42 副本 5",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 18.413012623786926,
+      "y": 2.0938772439956663,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-6-2",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  }
+]
+nearest 1005 [
+  {
+    "d": 1.7794711519799862,
+    "id": "entity_2f9d0e9f-9230-49cd-a348-6ef7142ca297",
+    "name": "虚拟定位线框",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 23.9630126953125,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-1-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 2.6307030267815694,
+    "id": "entity_470671e6-149e-4767-b857-c9b6859f4086",
+    "name": "虚拟定位线框 副本 42",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 23.9630126953125,
+      "y": 2.0938772439956663,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-1-2",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 2.81601157280978,
+    "id": "entity_80cdbfff-e949-4b6c-ac4f-2c9a3424969d",
+    "name": "虚拟定位线框 副本",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 22.853012681007385,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-2-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 3.418186948162336,
+    "id": "entity_09391851-058f-40c5-864a-26fed2fbf44b",
+    "name": "虚拟定位线框 副本 42 副本",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 22.853012681007385,
+      "y": 2.0938772439956663,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-2-2",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 3.748957088245536,
+    "id": "entity_815d882a-9fcb-4541-aec8-feef167b9b9c",
+    "name": "虚拟定位线框 副本 43",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 23.9630126953125,
+      "y": 3.3938772439956666,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-1-3",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 3.8932666026337004,
+    "id": "entity_e0b1a940-e6cc-46cf-9be3-d11632562120",
+    "name": "虚拟定位线框 副本 2",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 21.74301266670227,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-3-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 4.33798142538394,
+    "id": "entity_1834e72d-9d9d-4d0a-8ff5-0334d46018de",
+    "name": "虚拟定位线框 副本 43 副本",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 22.853012681007385,
+      "y": 3.3938772439956666,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-2-3",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 4.348747598282945,
+    "id": "entity_f25d1f5e-a7a6-4a13-8bcd-135e3fd9c5e6",
+    "name": "虚拟定位线框 副本 42 副本 2",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 21.74301266670227,
+      "y": 2.0938772439956663,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-3-2",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  }
+]
+nearest 1004 [
+  {
+    "d": 2.250514493633464,
+    "id": "entity_2f9d0e9f-9230-49cd-a348-6ef7142ca297",
+    "name": "虚拟定位线框",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 23.9630126953125,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-1-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 2.969662661051423,
+    "id": "entity_470671e6-149e-4767-b857-c9b6859f4086",
+    "name": "虚拟定位线框 副本 42",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 23.9630126953125,
+      "y": 2.0938772439956663,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-1-2",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 3.1318375960811062,
+    "id": "entity_80cdbfff-e949-4b6c-ac4f-2c9a3424969d",
+    "name": "虚拟定位线框 副本",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 22.853012681007385,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-2-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 3.6827282770543657,
+    "id": "entity_09391851-058f-40c5-864a-26fed2fbf44b",
+    "name": "虚拟定位线框 副本 42 副本",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 22.853012681007385,
+      "y": 2.0938772439956663,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-2-2",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 3.994117819347816,
+    "id": "entity_815d882a-9fcb-4541-aec8-feef167b9b9c",
+    "name": "虚拟定位线框 副本 43",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 23.9630126953125,
+      "y": 3.3938772439956666,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-1-3",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 4.125069458071535,
+    "id": "entity_e0b1a940-e6cc-46cf-9be3-d11632562120",
+    "name": "虚拟定位线框 副本 2",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 21.74301266670227,
+      "y": 0.7938772439956665,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-3-1",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 4.549348128798735,
+    "id": "entity_1834e72d-9d9d-4d0a-8ff5-0334d46018de",
+    "name": "虚拟定位线框 副本 43 副本",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 22.853012681007385,
+      "y": 3.3938772439956666,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-2-3",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  },
+  {
+    "d": 4.557442140971548,
+    "id": "entity_f25d1f5e-a7a6-4a13-8bcd-135e3fd9c5e6",
+    "name": "虚拟定位线框 副本 42 副本 2",
+    "parentId": "folder_b8edefeb-79ff-4683-9f22-9e820a1b41de",
+    "position": {
+      "x": 21.74301266670227,
+      "y": 2.0938772439956663,
+      "z": 5.106344699859619
+    },
+    "rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "locator": {
+      "assetId": "1-3-2",
+      "storageDepth": "near",
+      "length": 1.11,
+      "width": 1.01,
+      "height": 1
+    }
+  }
+]
