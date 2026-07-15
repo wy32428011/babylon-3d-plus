@@ -2454,6 +2454,14 @@ select {
   gap: 6px;
 }
 
+/* 强调模型生成器 POI 仅是全场景配置标记，避免误认为 Transform 是货物生成点。 */
+.model-generator-global-note {
+  margin: 0;
+  color: #facc15;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
 .model-generator-section-header,
 .model-generator-card-header {
   display: flex;
@@ -2617,4 +2625,3 @@ select {
 .model-generator-unit-hint {
   padding: 0 2px;
 }
-

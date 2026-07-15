@@ -69,7 +69,7 @@ function readModelGeneratorTargetFromDrop(event: DragEvent<HTMLElement>): ModelG
   );
 }
 
-/** 渲染并编辑模型生成器默认目标、条件规则、TTL 和 MQTT 绑定。 */
+/** 渲染并编辑全局模型生成器的共享模板、条件规则、仓储 TTL 和设备绑定。 */
 export function ModelGeneratorInspector({ component, disabled = false }: ModelGeneratorInspectorProps) {
   const updateSelectedModelGenerator = useEditorStore((state) => state.updateSelectedModelGenerator);
   const [activeDropZone, setActiveDropZone] = useState<string | null>(null);
@@ -88,12 +88,12 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     commitComponent({ ...component, rules }, label);
   }
 
-  /** 更新指定 MQTT 绑定，不改变其他绑定。 */
+  /** 更新指定仓储设备 MQTT 绑定，不改变其他绑定。 */
   function updateBinding(index: number, patch: ModelGeneratorBindingPatch): void {
     const bindings = component.bindings.map((binding, bindingIndex) => (
       bindingIndex === index ? { ...binding, ...patch } : binding
     ));
-    commitComponent({ ...component, bindings }, '更新自动绑定事件');
+    commitComponent({ ...component, bindings }, '更新仓储设备绑定');
   }
 
   /** 新增一条空生成规则，目标由后续模型库拖放补齐。 */
@@ -125,7 +125,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     commitComponent({ ...component, rules }, '调整生成规则顺序');
   }
 
-  /** 新增一条 MQTT 精确绑定，sourceId 默认使用现有遥测默认源。 */
+  /** 新增一条仓储设备精确绑定，sourceId 默认使用现有遥测默认源。 */
   function addBinding(): void {
     if (component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS) return;
     const binding: ModelGeneratorBinding = {
@@ -134,10 +134,10 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
       deviceType: '',
       assetCode: '',
     };
-    commitComponent({ ...component, bindings: [...component.bindings, binding] }, '添加自动绑定事件');
+    commitComponent({ ...component, bindings: [...component.bindings, binding] }, '添加仓储设备绑定');
   }
 
-  /** 删除指定 MQTT 绑定，并清空仓储流中对该稳定 ID 的引用。 */
+  /** 删除指定仓储设备绑定，并清空仓储流中对该稳定 ID 的引用。 */
   function removeBinding(index: number): void {
     const removedBindingId = component.bindings[index]?.id ?? '';
     const warehouseFlow = component.warehouseFlow;
@@ -155,7 +155,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
         bindings: component.bindings.filter((_, bindingIndex) => bindingIndex !== index),
         ...(nextWarehouseFlow ? { warehouseFlow: nextWarehouseFlow } : {}),
       },
-      '删除自动绑定事件',
+      '删除仓储设备绑定',
     );
   }
 
@@ -288,7 +288,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
         component.defaultTarget,
         (target) => commitComponent({ ...component, defaultTarget: target }, '更新共享生成模板'),
       )}
-      <p className="muted model-generator-unit-hint">模板仅保存配置，编辑态不会显示，只有规则命中才生成。</p>
+      <p className="muted model-generator-unit-hint">模板仅保存配置，编辑态不会显示；未命中规则时运行态使用共享模板。</p>
 
       <div className="model-generator-section-header">
         <span>生成规则</span>
@@ -304,7 +304,9 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
 
       {component.rules.length === 0 ? (
         <p className="muted model-generator-empty-hint">
-          {component.warehouseFlow?.enabled ? '仓储流会在入库输送机前端有货时使用共享模板。' : '暂无生成规则时运行态不生成。'}
+          {component.warehouseFlow?.enabled
+            ? '暂无生成规则；仓储流在入库输送机前端有货时直接使用共享模板。'
+            : '暂无生成规则；普通设备有货时直接使用共享模板，模板为空时回退默认 Box。'}
         </p>
       ) : null}
 
@@ -367,10 +369,10 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
           }}
         />
       </label>
-      <p className="muted model-generator-unit-hint">单位：秒；TTL 超时销毁输出，不回退共享生成模板。</p>
+      <p className="muted model-generator-unit-hint">单位：秒；用于 warehouseFlow 三条严格绑定快照的有效期判断。</p>
 
       <div className="model-generator-section-header">
-        <span>自动绑定事件</span>
+        <span>仓储设备绑定</span>
         <button
           disabled={disabled || component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS}
           onClick={addBinding}
@@ -382,7 +384,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
       </div>
 
       {component.bindings.length === 0 ? (
-        <p className="muted model-generator-empty-hint">暂无 MQTT 绑定，运行态不会触发条件规则。</p>
+        <p className="muted model-generator-empty-hint">暂无仓储设备绑定；普通设备模板规则仍按各自遥测快照工作。</p>
       ) : null}
 
       {component.bindings.map((binding, index) => (

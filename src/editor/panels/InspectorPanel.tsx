@@ -219,6 +219,14 @@ export function InspectorPanel(props: InspectorPanelProps) {
         </fieldset>
       ))}
       {modelGenerator ? (
+        <fieldset className="transform-fieldset" aria-label="模型生成器标记提示">
+          <legend>重要提示</legend>
+          <p className="muted model-generator-global-note">
+            注意：此标记位置仅用于编辑模型生成器配置，不影响任何自动生成模型的位置。
+          </p>
+        </fieldset>
+      ) : null}
+      {modelGenerator ? (
         <ModelGeneratorInspector component={modelGenerator} disabled={isLocked} />
       ) : null}
       {meshRenderer ? (

@@ -52,11 +52,13 @@ import {
 } from '../../editor/model/builtInMeshGeometry';
 import type { Vector3Data } from '../../editor/model/math';
 import { createModelAssetCode, type SceneDocument, type SceneEnvironmentSettings } from '../../editor/model/SceneDocument';
+import { createId } from '../../shared/ids';
 import type { TelemetryBindingComponent } from '../../editor/model/telemetryBinding';
 import {
   createModelGeneratorTargetSignature,
   createRuntimeModelAssetFromTarget,
 } from '../../editor/model/modelGenerator';
+import { resolveModelGeneratorTargetFromSnapshot } from './modelGeneratorRuntime';
 import {
   CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET,
   consumeCadReferenceParseResult,
@@ -203,6 +205,24 @@ type ModelGeneratorModelOutputRuntimeEntry = {
 
 type ModelGeneratorOutputRuntimeEntry = ModelGeneratorMeshOutputRuntimeEntry | ModelGeneratorModelOutputRuntimeEntry;
 
+/** 可复用生成输出宿主，统一承载仓储货物和普通设备货物的异步模型生命周期。 */
+type GeneratedOutputOwnerRuntimeEntry = {
+  entityId: string;
+  entityName: string;
+  editorEntityId: string | null;
+  runtimeAssetCode: string;
+  root: TransformNode;
+  component: ModelGeneratorComponent;
+  output: ModelGeneratorOutputRuntimeEntry | null;
+  activeTargetSignature: string | null;
+  loadToken: number;
+  failedTargetSignatures: Set<string>;
+  reportedLoadFailureKeys: Set<string>;
+  activeSnapshot: DeviceTelemetrySnapshot | null;
+  metadata: Record<string, unknown>;
+  onTerminalLoadFailure?: () => void;
+};
+
 /** 已从生成器脱离并由仓储流独立管理的货物实例。 */
 type WarehouseCargoRuntimeEntry = {
   cargoCode: string;
@@ -243,24 +263,14 @@ type WarehouseStackerActivity = WarehouseStackerFrame & {
   snapshot: DeviceTelemetrySnapshot;
 };
 
-type ModelGeneratorRuntimeEntry = {
-  entityId: string;
-  entityName: string;
-  root: TransformNode;
+type ModelGeneratorRuntimeEntry = GeneratedOutputOwnerRuntimeEntry & {
+  markerRoot: TransformNode;
   marker: ModelGeneratorMarkerRuntimeEntry;
-  component: ModelGeneratorComponent;
-  baseTransform: TransformComponent;
   selected: boolean;
-  output: ModelGeneratorOutputRuntimeEntry | null;
-  activeTargetSignature: string | null;
-  loadToken: number;
-  failedTargetSignatures: Set<string>;
-  reportedLoadFailureKeys: Set<string>;
-  activeSnapshot: DeviceTelemetrySnapshot | null;
   warehouseCoordinator: WarehouseFlowCoordinator;
   warehouseActiveResolution: ResolvedModelGeneratorTarget | null;
   warehouseCargos: Map<string, WarehouseCargoRuntimeEntry>;
-  warehouseConfigSignature: string;
+  runtimeConfigSignature: string;
   reportedWarehouseIssues: Set<string>;
 };
 
@@ -312,11 +322,23 @@ type StackerForkNodeGroups = {
   backStageTwoNodes: TransformNode[];
 };
 
-type StackerCargoRuntimeEntry = {
-  assetCode: string;
-  containerCode: string;
+type GeneratedCargoKind = 'stacker' | 'conveyor';
+
+type GeneratedCargoFallbackRuntimeEntry = {
   mesh: Mesh;
   material: StandardMaterial;
+};
+
+/** 普通自动货物共享字段；root 始终表示货物底部支撑点。 */
+type GeneratedCargoRuntimeEntry = {
+  assetCode: string;
+  containerCode: string;
+  root: TransformNode;
+  outputOwner: GeneratedOutputOwnerRuntimeEntry | null;
+  fallback: GeneratedCargoFallbackRuntimeEntry | null;
+};
+
+type StackerCargoRuntimeEntry = GeneratedCargoRuntimeEntry & {
   placedLocatorKey: string | null;
 };
 
@@ -351,12 +373,7 @@ type ConveyorModelTelemetryState = {
   nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;
 };
 
-type ConveyorCargoRuntimeEntry = {
-  assetCode: string;
-  containerCode: string;
-  mesh: Mesh;
-  material: StandardMaterial;
-};
+type ConveyorCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
 type ConveyorMotionConfig = {
   key: string;
@@ -406,6 +423,7 @@ export class SceneRuntime {
   private readonly cadReferences = new Map<string, CadReferenceRuntimeEntry>();
   private readonly models = new Map<string, ModelRuntimeEntry>();
   private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
+  private readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
   private readonly stackerCargoMeshes = new Map<string, StackerCargoRuntimeEntry>();
   private readonly conveyorCargoMeshes = new Map<string, ConveyorCargoRuntimeEntry>();
   private readonly lights = new Map<string, Light>();
@@ -419,6 +437,8 @@ export class SceneRuntime {
   private readonly reportedStatuses = new Map<string, string>();
   private telemetryPreviewActive = false;
   private environment: EnvironmentRuntimeEntry | null = null;
+  private activeModelGeneratorEntityId: string | null = null;
+  private reportedModelGeneratorConflictSignature = '';
   private modelLoadSequence = 0;
   private environmentLoadSequence = 0;
 
@@ -440,15 +460,15 @@ export class SceneRuntime {
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('runtime', null);
     this.clearModelGeneratorLoadFailureCache();
-    this.syncAllModelGeneratorTargets();
+    this.syncAllModelGeneratorPresentations();
   }
 
   /** 结束 MQTT 运行预览；该方法幂等，按驱动关闭、运行态清理、模型恢复的顺序回到编辑态。 */
   endTelemetryPreview(): void {
     const hadPreviewState = this.telemetryPreviewActive
       || [...this.models.values()].some((model) => model.telemetryPreviewBaseline)
-      || [...this.modelGenerators.values()].some((generator) => (
-        generator.output?.kind === 'model' && generator.output.model.telemetryPreviewBaseline !== null
+      || [...this.generatedOutputOwners.values()].some((owner) => (
+        owner.output?.kind === 'model' && owner.output.model.telemetryPreviewBaseline !== null
       ));
     if (!hadPreviewState) return;
 
@@ -464,9 +484,9 @@ export class SceneRuntime {
       this.resetStackerTelemetryState(model);
       this.resetConveyorTelemetryState(model);
     }
-    for (const generator of this.modelGenerators.values()) {
-      if (generator.output?.kind !== 'model') continue;
-      const model = generator.output.model;
+    for (const owner of this.generatedOutputOwners.values()) {
+      if (owner.output?.kind !== 'model') continue;
+      const model = owner.output.model;
       if (model.telemetryPreviewBaseline) {
         restoreModelTelemetryPreviewBaseline(model.telemetryPreviewBaseline);
         model.telemetryPreviewBaseline = null;
@@ -477,7 +497,7 @@ export class SceneRuntime {
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('edit', null);
     this.clearModelGeneratorLoadFailureCache();
-    this.syncAllModelGeneratorTargets();
+    this.syncAllModelGeneratorPresentations();
   }
 
   /** 根据实体 ID 获取当前运行时中可被 Gizmo 绑定的 Babylon 节点。 */
@@ -490,7 +510,7 @@ export class SceneRuntime {
       this.locators.get(entityId)?.root ??
       this.cadReferences.get(entityId)?.root ??
       this.models.get(entityId)?.root ??
-      this.modelGenerators.get(entityId)?.root ??
+      this.modelGenerators.get(entityId)?.markerRoot ??
       null
     );
   }
@@ -581,11 +601,7 @@ export class SceneRuntime {
     if (model) return model.container !== null && model.stackerTelemetryReady;
 
     const modelGenerator = this.modelGenerators.get(entityId);
-    if (modelGenerator?.output?.kind === 'model') {
-      return modelGenerator.output.model.container !== null && modelGenerator.output.model.stackerTelemetryReady;
-    }
-    if (modelGenerator?.output?.kind === 'mesh') return true;
-    if (modelGenerator) return !this.telemetryPreviewActive;
+    if (modelGenerator) return true;
 
     const cadReference = this.cadReferences.get(entityId);
     if (cadReference) return cadReference.lineMeshes.length > 0 && cadReference.cancelLoad === null;
@@ -657,22 +673,13 @@ export class SceneRuntime {
     return this.createPointWorldBounds(model.root.getAbsolutePosition());
   }
 
-  /** 模型生成器优先使用当前派生输出包围盒，无输出时回退稳定根节点位置。 */
+  /** 模型生成器包围盒始终只描述编辑态配置标记，不包含任何运行时自动货物。 */
   private getModelGeneratorWorldBounds(modelGenerator: ModelGeneratorRuntimeEntry): RuntimeWorldBounds | null {
-    if (modelGenerator.output?.kind === 'model') {
-      return this.getModelWorldBounds(modelGenerator.output.model);
-    }
-    if (modelGenerator.output?.kind === 'mesh') {
-      return this.getMeshWorldBounds(modelGenerator.output.mesh);
-    }
+    const markerBounds = this.getMeshWorldBounds(modelGenerator.marker.mesh);
+    if (markerBounds) return markerBounds;
 
-    if (!this.telemetryPreviewActive) {
-      const markerBounds = this.getMeshWorldBounds(modelGenerator.marker.mesh);
-      if (markerBounds) return markerBounds;
-    }
-
-    modelGenerator.root.computeWorldMatrix(true);
-    return this.createPointWorldBounds(modelGenerator.root.getAbsolutePosition());
+    modelGenerator.markerRoot.computeWorldMatrix(true);
+    return this.createPointWorldBounds(modelGenerator.markerRoot.getAbsolutePosition());
   }
 
   /** CAD 参考层优先按所有线稿 Mesh 合并包围盒，加载中则回退到根节点位置。 */
@@ -746,9 +753,18 @@ export class SceneRuntime {
     const modelIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.modelAsset)),
     );
-    const modelGeneratorIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.modelGenerator)),
+    const modelGeneratorEntityIds = document.entityIds.filter(
+      (entityId) => Boolean(document.entities[entityId]?.components.modelGenerator),
     );
+    const modelGeneratorIds = new Set(modelGeneratorEntityIds);
+    const nextActiveModelGeneratorEntityId = modelGeneratorEntityIds[0] ?? null;
+    if (this.activeModelGeneratorEntityId !== nextActiveModelGeneratorEntityId) {
+      this.disposeAllTelemetryRuntimeCargo();
+      this.resetAllWarehouseFlows();
+      this.activeModelGeneratorEntityId = nextActiveModelGeneratorEntityId;
+    }
+    this.reportModelGeneratorConflicts(modelGeneratorEntityIds);
+
     const lightIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.light)),
     );
@@ -799,6 +815,25 @@ export class SceneRuntime {
     }
 
     this.rebuildLocatorTargetIndex(document);
+  }
+
+  /** 多个生成器只启用场景顺序中的第一个，并对同一冲突集合仅记录一次诊断。 */
+  private reportModelGeneratorConflicts(entityIds: string[]): void {
+    if (entityIds.length <= 1) {
+      this.reportedModelGeneratorConflictSignature = '';
+      return;
+    }
+
+    const signature = entityIds.join('|');
+    if (this.reportedModelGeneratorConflictSignature === signature) return;
+    this.reportedModelGeneratorConflictSignature = signature;
+    this.pushLog(`场景存在 ${entityIds.length} 个模型生成器，仅启用 Hierarchy 中第一个作为全局自动模型管理器。`);
+  }
+
+  /** 读取当前场景唯一生效的全局模型生成器运行时条目。 */
+  private getActiveModelGenerator(): ModelGeneratorRuntimeEntry | null {
+    if (!this.activeModelGeneratorEntityId) return null;
+    return this.modelGenerators.get(this.activeModelGeneratorEntityId) ?? null;
   }
 
   /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
@@ -888,10 +923,13 @@ export class SceneRuntime {
     this.cadReferences.clear();
     this.models.clear();
     this.modelGenerators.clear();
+    this.generatedOutputOwners.clear();
     this.stackerCargoMeshes.clear();
     this.conveyorCargoMeshes.clear();
     this.lights.clear();
     this.entityStates.clear();
+    this.activeModelGeneratorEntityId = null;
+    this.reportedModelGeneratorConflictSignature = '';
   }
 
   /** 按组件类型同步单个实体的运行时表现。 */
@@ -1222,21 +1260,24 @@ export class SceneRuntime {
       });
   }
 
-  /** 同步模型生成器稳定根节点；编辑态只保留青色线框，运行态再按有效信号解析输出。 */
+  /** 同步模型生成器配置标记；实体 Transform 只影响 markerRoot，不影响任何自动货物。 */
   private syncModelGeneratorEntity(entity: Entity, selected: boolean): void {
     const component = entity.components.modelGenerator;
     if (!component) return;
 
     let runtimeEntry = this.modelGenerators.get(entity.id);
     if (!runtimeEntry) {
-      const root = new TransformNode(`${entity.id}_modelGeneratorRoot`, this.scene);
+      const markerRoot = new TransformNode(`${entity.id}_modelGeneratorMarkerRoot`, this.scene);
+      const root = new TransformNode(`${entity.id}_modelGeneratorOutputRoot`, this.scene);
       runtimeEntry = {
         entityId: entity.id,
         entityName: entity.name,
+        editorEntityId: null,
+        runtimeAssetCode: createModelAssetCode('GEN', entity.id),
         root,
-        marker: this.createModelGeneratorMarker(entity.id, root),
+        markerRoot,
+        marker: this.createModelGeneratorMarker(entity.id, markerRoot),
         component,
-        baseTransform: this.cloneTransformComponent(entity.components.transform),
         selected,
         output: null,
         activeTargetSignature: null,
@@ -1244,105 +1285,49 @@ export class SceneRuntime {
         failedTargetSignatures: new Set(),
         reportedLoadFailureKeys: new Set(),
         activeSnapshot: null,
+        metadata: { modelGeneratorCargo: true, generatorEntityId: entity.id },
         warehouseCoordinator: new WarehouseFlowCoordinator(),
         warehouseActiveResolution: null,
         warehouseCargos: new Map(),
-        warehouseConfigSignature: '',
+        runtimeConfigSignature: '',
         reportedWarehouseIssues: new Set(),
       };
       this.modelGenerators.set(entity.id, runtimeEntry);
+      this.generatedOutputOwners.set(runtimeEntry.entityId, runtimeEntry);
     }
 
-    const warehouseConfigSignature = this.createWarehouseFlowConfigSignature(component);
-    if (runtimeEntry.warehouseConfigSignature && runtimeEntry.warehouseConfigSignature !== warehouseConfigSignature) {
+    const runtimeConfigSignature = this.createModelGeneratorRuntimeConfigSignature(component);
+    if (runtimeEntry.runtimeConfigSignature && runtimeEntry.runtimeConfigSignature !== runtimeConfigSignature) {
+      if (runtimeEntry.entityId === this.activeModelGeneratorEntityId) {
+        this.disposeAllTelemetryRuntimeCargo();
+      }
       this.resetModelGeneratorWarehouseFlow(runtimeEntry);
     }
     runtimeEntry.entityName = entity.name;
     runtimeEntry.component = component;
-    runtimeEntry.baseTransform = this.cloneTransformComponent(entity.components.transform);
-    runtimeEntry.warehouseConfigSignature = warehouseConfigSignature;
+    runtimeEntry.runtimeConfigSignature = runtimeConfigSignature;
     runtimeEntry.selected = selected;
-    this.applyTransform(runtimeEntry.root, entity.components.transform);
-    this.syncModelGeneratorResolvedTarget(runtimeEntry, this.resolveModelGeneratorTarget(runtimeEntry));
+    this.applyTransform(runtimeEntry.markerRoot, entity.components.transform);
     this.applyModelGeneratorPresentation(runtimeEntry);
   }
 
-  /** 重新解析全部生成器目标；MQTT 预览每帧调用，编辑态切换时也复用。 */
-  private syncAllModelGeneratorTargets(): void {
+  /** 在编辑态与运行态切换时允许全部生成输出重新尝试失败目标。 */
+  private clearModelGeneratorLoadFailureCache(): void {
+    for (const owner of this.generatedOutputOwners.values()) {
+      owner.failedTargetSignatures.clear();
+    }
+  }
+
+  /** 在编辑态与预览态切换时批量刷新所有模型生成器配置标记。 */
+  private syncAllModelGeneratorPresentations(): void {
     for (const runtimeEntry of this.modelGenerators.values()) {
-      this.syncModelGeneratorResolvedTarget(runtimeEntry, this.resolveModelGeneratorTarget(runtimeEntry));
       this.applyModelGeneratorPresentation(runtimeEntry);
     }
   }
 
-  /** 在编辑态与运行态切换时允许失败目标重新尝试，同时保留已上报日志避免重复刷屏。 */
-  private clearModelGeneratorLoadFailureCache(): void {
-    for (const runtimeEntry of this.modelGenerators.values()) {
-      runtimeEntry.failedTargetSignatures.clear();
-    }
-  }
-
-  /** 按完整绑定、TTL、最新接收时间和规则顺序解析信号命中目标；未命中时明确返回空输出。 */
-  private resolveModelGeneratorTarget(runtimeEntry: ModelGeneratorRuntimeEntry): ResolvedModelGeneratorTarget {
-    const defaultResolution: ResolvedModelGeneratorTarget = {
-      target: null,
-      role: 'default',
-      snapshot: null,
-    };
-    if (!this.telemetryPreviewActive) return defaultResolution;
-    if (runtimeEntry.component.warehouseFlow?.enabled) {
-      return runtimeEntry.warehouseActiveResolution ?? defaultResolution;
-    }
-
-    const ttlMs = runtimeEntry.component.metadataTtlSeconds * 1000;
-    const nowMs = Date.now();
-    let latestSnapshot: DeviceTelemetrySnapshot | null = null;
-
-    for (const binding of runtimeEntry.component.bindings) {
-      const sourceId = binding.sourceId.trim();
-      const deviceType = binding.deviceType.trim().toLowerCase();
-      const assetCode = binding.assetCode.trim();
-      if (!sourceId || !deviceType || !assetCode) continue;
-
-      const snapshot = deviceTelemetryStore.getSnapshot(assetCode, deviceType, sourceId);
-      if (!snapshot || !Number.isFinite(snapshot.receivedAt)) continue;
-      if (nowMs - snapshot.receivedAt > ttlMs) continue;
-      if (!latestSnapshot || snapshot.receivedAt > latestSnapshot.receivedAt) {
-        latestSnapshot = snapshot;
-      }
-    }
-
-    if (!latestSnapshot) return defaultResolution;
-
-    for (const rule of runtimeEntry.component.rules) {
-      const attributeName = rule.attributeName.trim();
-      if (!attributeName) continue;
-
-      const fieldValue = latestSnapshot.fields[attributeName];
-      if (typeof fieldValue !== 'string' && typeof fieldValue !== 'number' && typeof fieldValue !== 'boolean') continue;
-      if (String(fieldValue).trim() !== rule.attributeValue.trim()) continue;
-
-      // 命中规则但规则目标和共享模板都为空时，继续检查后续规则，避免空目标提前阻断可用规则。
-      const candidateTarget = rule.target ?? runtimeEntry.component.defaultTarget;
-      if (!candidateTarget) continue;
-
-      return {
-        target: candidateTarget,
-        role: rule.target ? 'conditional' : 'default',
-        snapshot: latestSnapshot,
-      };
-    }
-
-    return {
-      target: null,
-      role: 'default',
-      snapshot: null,
-    };
-  }
-
   /** 对解析结果去重，同一目标签名不会重复销毁和加载。 */
   private syncModelGeneratorResolvedTarget(
-    runtimeEntry: ModelGeneratorRuntimeEntry,
+    runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
     resolution: ResolvedModelGeneratorTarget,
   ): void {
     runtimeEntry.activeSnapshot = resolution.snapshot;
@@ -1372,10 +1357,12 @@ export class SceneRuntime {
         this.disposeModelGeneratorOutput(runtimeEntry);
         runtimeEntry.activeTargetSignature = targetSignature;
       }
+      runtimeEntry.onTerminalLoadFailure?.();
       return;
     }
 
     if (runtimeEntry.activeTargetSignature === targetSignature) {
+      this.applyGeneratedOutputPresentation(runtimeEntry);
       return;
     }
 
@@ -1385,6 +1372,7 @@ export class SceneRuntime {
 
     if (target.kind === 'mesh') {
       runtimeEntry.output = this.createModelGeneratorMeshOutput(runtimeEntry, target);
+      this.applyGeneratedOutputPresentation(runtimeEntry);
       return;
     }
 
@@ -1393,14 +1381,14 @@ export class SceneRuntime {
 
   /** 异步加载生成器导入模型输出；过期 token 的容器会立即丢弃。 */
   private loadModelGeneratorModelOutput(
-    runtimeEntry: ModelGeneratorRuntimeEntry,
+    runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
     target: Extract<ModelGeneratorTarget, { kind: 'model' }>,
     targetSignature: string,
     resolution: ResolvedModelGeneratorTarget,
   ): void {
     const modelAsset = createRuntimeModelAssetFromTarget(
       target,
-      createModelAssetCode('GEN', runtimeEntry.entityId),
+      runtimeEntry.runtimeAssetCode,
     );
     if (!modelAsset) {
       this.handleModelGeneratorLoadFailure(runtimeEntry, targetSignature, resolution, new Error('目标模型快照无效'));
@@ -1441,7 +1429,7 @@ export class SceneRuntime {
     };
     runtimeEntry.output = { kind: 'model', model };
     const generatorLoadToken = runtimeEntry.loadToken;
-    this.applyModelGeneratorPresentation(runtimeEntry);
+    this.applyGeneratedOutputPresentation(runtimeEntry);
 
     const { rootUrl, fileName } = this.splitAssetUrl(
       this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
@@ -1449,7 +1437,7 @@ export class SceneRuntime {
 
     void SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene)
       .then((container) => {
-        const activeEntry = this.modelGenerators.get(runtimeEntry.entityId);
+        const activeEntry = this.generatedOutputOwners.get(runtimeEntry.entityId);
         const activeOutput = activeEntry?.output;
         if (
           !activeEntry
@@ -1468,14 +1456,19 @@ export class SceneRuntime {
         this.parentTopLevelModelNodes(model);
         this.normalizeModelContentOrigin(model);
         for (const mesh of model.meshes) {
-          mesh.metadata = { ...(mesh.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.entityId };
+          mesh.metadata = {
+            ...(mesh.metadata ?? {}),
+            ...activeEntry.metadata,
+            ...(activeEntry.editorEntityId ? { [EDITOR_ENTITY_ID_METADATA_KEY]: activeEntry.editorEntityId } : {}),
+          };
+          if (!activeEntry.editorEntityId) mesh.isPickable = false;
         }
         this.applyModelAssetParameters(modelAsset, model);
         this.syncModelGeneratorExternalScripts(activeEntry, modelAsset, model);
-        this.applyModelGeneratorPresentation(activeEntry);
+        this.applyGeneratedOutputPresentation(activeEntry);
       })
       .catch((error) => {
-        const activeEntry = this.modelGenerators.get(runtimeEntry.entityId);
+        const activeEntry = this.generatedOutputOwners.get(runtimeEntry.entityId);
         const activeOutput = activeEntry?.output;
         if (
           !activeEntry
@@ -1492,7 +1485,7 @@ export class SceneRuntime {
 
   /** 记录一次模型加载失败；规则覆盖模型失败时在同一有效信号下回退共享生成模板。 */
   private handleModelGeneratorLoadFailure(
-    runtimeEntry: ModelGeneratorRuntimeEntry,
+    runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
     targetSignature: string,
     resolution: ResolvedModelGeneratorTarget,
     error: unknown,
@@ -1514,12 +1507,15 @@ export class SceneRuntime {
         role: 'default',
         snapshot: resolution.snapshot,
       });
+      return;
     }
-    this.applyModelGeneratorPresentation(runtimeEntry);
+
+    runtimeEntry.onTerminalLoadFailure?.();
+    this.applyGeneratedOutputPresentation(runtimeEntry);
   }
 
   /** 将当前 MQTT 快照作为只读运行上下文注入生成模型脚本。 */
-  private updateModelGeneratorOutputRuntimeContext(runtimeEntry: ModelGeneratorRuntimeEntry): void {
+  private updateModelGeneratorOutputRuntimeContext(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     if (runtimeEntry.output?.kind !== 'model') return;
     const telemetry = this.telemetryPreviewActive && runtimeEntry.activeSnapshot
       ? this.createExternalScriptTelemetrySnapshot(runtimeEntry.activeSnapshot)
@@ -1576,7 +1572,6 @@ export class SceneRuntime {
     this.applyStackerTelemetryFrame();
     this.applyConveyorTelemetryFrame();
     this.updateWarehouseFlowFrames(deltaSeconds);
-    this.syncAllModelGeneratorTargets();
     this.applyWarehouseFlowVisuals();
     this.genericTelemetryMotionRuntime.applyFrame(deltaSeconds);
   }
@@ -1590,9 +1585,9 @@ export class SceneRuntime {
         this.getStackerTargetReferencePosition(model);
       }
     }
-    for (const generator of this.modelGenerators.values()) {
-      if (generator.output?.kind !== 'model') continue;
-      const model = generator.output.model;
+    for (const owner of this.generatedOutputOwners.values()) {
+      if (owner.output?.kind !== 'model') continue;
+      const model = owner.output.model;
       if (model.telemetryPreviewBaseline || !model.container || !model.stackerTelemetryReady) continue;
       model.telemetryPreviewBaseline = captureModelTelemetryPreviewBaseline({ root: model.root, contentRoot: model.contentRoot });
     }
@@ -1607,9 +1602,9 @@ export class SceneRuntime {
     for (const model of this.models.values()) {
       this.clearSpecializedTelemetryDiagnosticsForModel(model);
     }
-    for (const generator of this.modelGenerators.values()) {
-      if (generator.output?.kind === 'model') {
-        this.clearSpecializedTelemetryDiagnosticsForModel(generator.output.model);
+    for (const owner of this.generatedOutputOwners.values()) {
+      if (owner.output?.kind === 'model') {
+        this.clearSpecializedTelemetryDiagnosticsForModel(owner.output.model);
       }
     }
   }
@@ -1622,9 +1617,9 @@ export class SceneRuntime {
     for (const model of this.models.values()) {
       this.updateModelExternalScriptRuntimeContext(model, mode, telemetry);
     }
-    for (const modelGenerator of this.modelGenerators.values()) {
-      if (modelGenerator.output?.kind !== 'model') continue;
-      this.updateModelExternalScriptRuntimeContext(modelGenerator.output.model, mode, telemetry);
+    for (const owner of this.generatedOutputOwners.values()) {
+      if (owner.output?.kind !== 'model') continue;
+      this.updateModelExternalScriptRuntimeContext(owner.output.model, mode, telemetry);
     }
   }
 
@@ -1883,78 +1878,88 @@ export class SceneRuntime {
     this.applyConveyorCargoMotion(model, snapshot, deltaSeconds);
   }
 
-  /** 每帧读取三台严格绑定设备，推进仓储协调器并处理一次性货物生命周期事件。 */
+  /** 每帧读取全局生成器三台严格绑定设备，推进仓储协调器并处理货物生命周期事件。 */
   private updateWarehouseFlowFrames(deltaSeconds: number): void {
+    const runtimeEntry = this.getActiveModelGenerator();
+    if (!runtimeEntry?.component.warehouseFlow?.enabled) return;
+
     const nowMs = Date.now();
-    for (const runtimeEntry of this.modelGenerators.values()) {
-      if (!runtimeEntry.component.warehouseFlow?.enabled) continue;
-      const bindings = this.resolveWarehouseFlowBindings(runtimeEntry);
-      if (!bindings) continue;
+    const bindings = this.resolveWarehouseFlowBindings(runtimeEntry);
+    if (!bindings) return;
 
-      const ttlMs = runtimeEntry.component.metadataTtlSeconds * 1000;
-      const inboundSnapshot = this.resolveWarehouseBindingSnapshot(bindings.inbound, nowMs, ttlMs);
-      const stackerSnapshot = this.resolveWarehouseBindingSnapshot(bindings.stacker, nowMs, ttlMs);
-      const outboundSnapshot = this.resolveWarehouseBindingSnapshot(bindings.outbound, nowMs, ttlMs);
-      const inboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.inbound, 'conveyor');
-      const stackerModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.stacker, 'stacker');
-      const outboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.outbound, 'conveyor');
-      const inboundAnchors = inboundModel ? this.resolveWarehouseConveyorAnchors(inboundModel) : null;
-      const outboundAnchors = outboundModel ? this.resolveWarehouseConveyorAnchors(outboundModel) : null;
-      const inboundFrame = this.createWarehouseConveyorFrame(inboundSnapshot, inboundAnchors);
-      const flowState = runtimeEntry.warehouseCoordinator.getState();
-      const stackerActivity = this.createWarehouseStackerActivity(runtimeEntry, stackerSnapshot);
-      const outboundFrame = this.createWarehouseConveyorFrame(outboundSnapshot, outboundAnchors);
-      const pendingResolution = flowState.inbound
-        ? runtimeEntry.warehouseActiveResolution
-        : this.resolveWarehouseCargoTarget(runtimeEntry, inboundSnapshot);
-      const update = runtimeEntry.warehouseCoordinator.update({
-        nowMs,
-        deltaSeconds,
-        ttlMs,
-        canStartInbound: Boolean(pendingResolution?.target),
-        inbound: inboundFrame,
-        stacker: stackerActivity,
-        outbound: outboundFrame,
-        storedCargos: [...runtimeEntry.warehouseCargos.values()].map((cargo) => ({
-          cargoCode: cargo.cargoCode,
-          locatorKey: cargo.locatorKey,
-        })),
-      });
+    const ttlMs = runtimeEntry.component.metadataTtlSeconds * 1000;
+    const inboundSnapshot = this.resolveWarehouseBindingSnapshot(bindings.inbound, nowMs, ttlMs);
+    const stackerSnapshot = this.resolveWarehouseBindingSnapshot(bindings.stacker, nowMs, ttlMs);
+    const outboundSnapshot = this.resolveWarehouseBindingSnapshot(bindings.outbound, nowMs, ttlMs);
+    const inboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.inbound, 'conveyor');
+    const stackerModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.stacker, 'stacker');
+    const outboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.outbound, 'conveyor');
+    const inboundAnchors = inboundModel ? this.resolveWarehouseConveyorAnchors(inboundModel) : null;
+    const outboundAnchors = outboundModel ? this.resolveWarehouseConveyorAnchors(outboundModel) : null;
+    const inboundFrame = this.createWarehouseConveyorFrame(inboundSnapshot, inboundAnchors);
+    const flowState = runtimeEntry.warehouseCoordinator.getState();
+    const stackerActivity = this.createWarehouseStackerActivity(runtimeEntry, stackerSnapshot);
+    const outboundFrame = this.createWarehouseConveyorFrame(outboundSnapshot, outboundAnchors);
+    const pendingResolution = flowState.inbound
+      ? runtimeEntry.warehouseActiveResolution
+      : this.resolveWarehouseCargoTarget(runtimeEntry, inboundSnapshot);
+    const update = runtimeEntry.warehouseCoordinator.update({
+      nowMs,
+      deltaSeconds,
+      ttlMs,
+      canStartInbound: Boolean(pendingResolution?.target),
+      inbound: inboundFrame,
+      stacker: stackerActivity,
+      outbound: outboundFrame,
+      storedCargos: [...runtimeEntry.warehouseCargos.values()].map((cargo) => ({
+        cargoCode: cargo.cargoCode,
+        locatorKey: cargo.locatorKey,
+      })),
+    });
 
-      if (update.events.startInboundCargoCode && pendingResolution?.target) {
-        runtimeEntry.warehouseActiveResolution = pendingResolution;
-        this.clearWarehouseIssue(runtimeEntry, 'target-missing');
-      }
-      if (update.events.cancelInboundCargoCode) {
+    if (update.events.startInboundCargoCode && pendingResolution?.target) {
+      runtimeEntry.warehouseActiveResolution = pendingResolution;
+      runtimeEntry.metadata = {
+        ...runtimeEntry.metadata,
+        containerCode: update.events.startInboundCargoCode,
+      };
+      this.clearWarehouseIssue(runtimeEntry, 'target-missing');
+    }
+    if (update.events.cancelInboundCargoCode) {
+      runtimeEntry.warehouseActiveResolution = null;
+      this.resetGeneratedOutputRoot(runtimeEntry.root);
+    }
+    if (update.events.storeInboundCargo) {
+      const stored = this.storeWarehouseInboundCargo(
+        runtimeEntry,
+        update.events.storeInboundCargo.cargoCode,
+        update.events.storeInboundCargo.locatorKey,
+      );
+      if (stored) {
+        runtimeEntry.warehouseCoordinator.acknowledgeInboundStored(update.events.storeInboundCargo.cargoCode);
         runtimeEntry.warehouseActiveResolution = null;
-        this.applyTransform(runtimeEntry.root, runtimeEntry.baseTransform);
       }
-      if (update.events.storeInboundCargo) {
-        const stored = this.storeWarehouseInboundCargo(
-          runtimeEntry,
-          update.events.storeInboundCargo.cargoCode,
-          update.events.storeInboundCargo.locatorKey,
-        );
-        if (stored) {
-          runtimeEntry.warehouseCoordinator.acknowledgeInboundStored(update.events.storeInboundCargo.cargoCode);
-          runtimeEntry.warehouseActiveResolution = null;
-        }
+    }
+    if (update.events.completeOutboundCargoCode) {
+      const cargo = runtimeEntry.warehouseCargos.get(update.events.completeOutboundCargoCode);
+      if (cargo) {
+        this.disposeWarehouseCargo(cargo);
+        runtimeEntry.warehouseCargos.delete(update.events.completeOutboundCargoCode);
       }
-      if (update.events.completeOutboundCargoCode) {
-        const cargo = runtimeEntry.warehouseCargos.get(update.events.completeOutboundCargoCode);
-        if (cargo) {
-          this.disposeWarehouseCargo(cargo);
-          runtimeEntry.warehouseCargos.delete(update.events.completeOutboundCargoCode);
-        }
-        runtimeEntry.warehouseCoordinator.acknowledgeOutboundCompleted(update.events.completeOutboundCargoCode);
-      }
-      if (update.events.conflictMessage) {
-        this.reportWarehouseIssue(runtimeEntry, 'cargo-conflict:' + update.events.conflictMessage, update.events.conflictMessage);
-      }
+      runtimeEntry.warehouseCoordinator.acknowledgeOutboundCompleted(update.events.completeOutboundCargoCode);
+    }
+    if (update.events.conflictMessage) {
+      this.reportWarehouseIssue(runtimeEntry, 'cargo-conflict:' + update.events.conflictMessage, update.events.conflictMessage);
+    }
 
-      if (!pendingResolution?.target && inboundFrame?.frontHasGoods) {
-        this.reportWarehouseIssue(runtimeEntry, 'target-missing', '1004 前端有货，但模型生成器没有可用共享模板或规则目标。');
-      }
+    this.syncModelGeneratorResolvedTarget(runtimeEntry, runtimeEntry.warehouseActiveResolution ?? {
+      target: null,
+      role: 'default',
+      snapshot: null,
+    });
+
+    if (!pendingResolution?.target && inboundFrame?.frontHasGoods) {
+      this.reportWarehouseIssue(runtimeEntry, 'target-missing', '1004 前端有货，但模型生成器没有可用共享模板或规则目标。');
     }
   }
 
@@ -2153,63 +2158,51 @@ export class SceneRuntime {
     return command !== null && ((command >= 1 && command <= 7) || command === 10 || command === 11);
   }
 
-  /** 仓储入库触发时按规则优先选择货物模板，未命中规则时使用共享模板。 */
+  /** 仓储入库触发时复用全局单快照规则解析，位置仍由仓储状态机决定。 */
   private resolveWarehouseCargoTarget(
     runtimeEntry: ModelGeneratorRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot | null,
   ): ResolvedModelGeneratorTarget | null {
-    if (!snapshot) return null;
-    for (const rule of runtimeEntry.component.rules) {
-      const attributeName = rule.attributeName.trim();
-      const fieldValue = attributeName ? snapshot.fields[attributeName] : undefined;
-      if (typeof fieldValue !== 'string' && typeof fieldValue !== 'number' && typeof fieldValue !== 'boolean') continue;
-      if (String(fieldValue).trim() !== rule.attributeValue.trim()) continue;
-      const target = rule.target ?? runtimeEntry.component.defaultTarget;
-      if (!target) continue;
-      return { target, role: rule.target ? 'conditional' : 'default', snapshot };
-    }
-    return runtimeEntry.component.defaultTarget
-      ? { target: runtimeEntry.component.defaultTarget, role: 'default', snapshot }
-      : null;
+    return snapshot ? resolveModelGeneratorTargetFromSnapshot(runtimeEntry.component, snapshot) : null;
   }
 
-  /** 根据协调器阶段把活动生成器输出和已入库实例放到真实设备/库位世界锚点。 */
+  /** 根据协调器阶段把全局生成器活动输出和已入库实例放到真实设备/库位世界锚点。 */
   private applyWarehouseFlowVisuals(): void {
-    for (const runtimeEntry of this.modelGenerators.values()) {
-      if (!runtimeEntry.component.warehouseFlow?.enabled) continue;
-      const bindings = this.resolveWarehouseFlowBindings(runtimeEntry);
-      if (!bindings) continue;
-      const inboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.inbound, 'conveyor');
-      const stackerModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.stacker, 'stacker');
-      const outboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.outbound, 'conveyor');
-      const inboundAnchors = inboundModel ? this.resolveWarehouseConveyorAnchors(inboundModel) : null;
-      const outboundAnchors = outboundModel ? this.resolveWarehouseConveyorAnchors(outboundModel) : null;
-      const ttlMs = runtimeEntry.component.metadataTtlSeconds * 1000;
-      const stackerSnapshot = this.resolveWarehouseBindingSnapshot(bindings.stacker, Date.now(), ttlMs);
-      const state = runtimeEntry.warehouseCoordinator.getState();
-      const stackerActivity = this.createWarehouseStackerActivity(runtimeEntry, stackerSnapshot);
+    const runtimeEntry = this.getActiveModelGenerator();
+    if (!runtimeEntry?.component.warehouseFlow?.enabled) return;
 
-      if (state.inbound && runtimeEntry.output) {
-        const pose = this.resolveWarehouseInboundPose(
-          state.inbound,
-          inboundAnchors,
-          stackerModel,
-          stackerActivity,
-        );
-        if (pose) this.setWarehouseRootPose(runtimeEntry.root, pose.position, pose.rotation);
-      }
+    const bindings = this.resolveWarehouseFlowBindings(runtimeEntry);
+    if (!bindings) return;
+    const inboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.inbound, 'conveyor');
+    const stackerModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.stacker, 'stacker');
+    const outboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.outbound, 'conveyor');
+    const inboundAnchors = inboundModel ? this.resolveWarehouseConveyorAnchors(inboundModel) : null;
+    const outboundAnchors = outboundModel ? this.resolveWarehouseConveyorAnchors(outboundModel) : null;
+    const ttlMs = runtimeEntry.component.metadataTtlSeconds * 1000;
+    const stackerSnapshot = this.resolveWarehouseBindingSnapshot(bindings.stacker, Date.now(), ttlMs);
+    const state = runtimeEntry.warehouseCoordinator.getState();
+    const stackerActivity = this.createWarehouseStackerActivity(runtimeEntry, stackerSnapshot);
 
-      if (state.outbound) {
-        const cargo = runtimeEntry.warehouseCargos.get(state.outbound.cargoCode);
-        if (!cargo) continue;
-        const pose = this.resolveWarehouseOutboundPose(
-          state.outbound,
-          outboundAnchors,
-          stackerModel,
-          stackerActivity,
-        );
-        if (pose) this.setWarehouseRootPose(cargo.root, pose.position, pose.rotation);
-      }
+    if (state.inbound && runtimeEntry.output) {
+      const pose = this.resolveWarehouseInboundPose(
+        state.inbound,
+        inboundAnchors,
+        stackerModel,
+        stackerActivity,
+      );
+      if (pose) this.setWarehouseRootPose(runtimeEntry.root, pose.position, pose.rotation);
+    }
+
+    if (state.outbound) {
+      const cargo = runtimeEntry.warehouseCargos.get(state.outbound.cargoCode);
+      if (!cargo) return;
+      const pose = this.resolveWarehouseOutboundPose(
+        state.outbound,
+        outboundAnchors,
+        stackerModel,
+        stackerActivity,
+      );
+      if (pose) this.setWarehouseRootPose(cargo.root, pose.position, pose.rotation);
     }
   }
 
@@ -2501,6 +2494,15 @@ export class SceneRuntime {
     root.computeWorldMatrix(true);
   }
 
+  /** 将自动货物输出根节点恢复到无位姿基线，避免继承 POI 配置标记 Transform。 */
+  private resetGeneratedOutputRoot(root: TransformNode): void {
+    root.position.copyFromFloats(0, 0, 0);
+    root.scaling.copyFromFloats(1, 1, 1);
+    root.rotation.copyFromFloats(0, 0, 0);
+    root.rotationQuaternion = Quaternion.Identity();
+    root.computeWorldMatrix(true);
+  }
+
   /** 根据模型脚本 dataDriven.motion 配置驱动 Conveyor 节点。 */
   private applyConveyorMotion(
     model: ModelRuntimeEntry,
@@ -2557,9 +2559,12 @@ export class SceneRuntime {
     }
 
     const cargo = this.getOrCreateConveyorCargo(model.assetCode, activeContainerCode);
-    cargo.mesh.position.copyFrom(this.getConveyorCargoPosition(model));
-    cargo.mesh.rotationQuaternion = this.getNodeWorldRotation(model.root);
-    cargo.mesh.setEnabled(true);
+    this.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot);
+    this.setGeneratedCargoRootPose(
+      cargo,
+      this.getConveyorCargoPosition(model),
+      this.getNodeWorldRotation(model.root),
+    );
     model.conveyorTelemetry.cargoCode = activeContainerCode;
   }
 
@@ -2940,8 +2945,9 @@ export class SceneRuntime {
     if (!activeContainerCode) return;
 
     const cargo = this.getOrCreateStackerCargo(model.assetCode, activeContainerCode);
+    this.syncGeneratedCargoVisual(cargo, 'stacker', snapshot);
     const forkPosition = this.getStackerForkCargoPosition(model, side);
-    const targetPosition = targetLocator?.root.getAbsolutePosition() ?? null;
+    const targetPosition = targetLocator ? this.getWarehouseLocatorSupportPosition(targetLocator) : null;
     const reach = this.readStackerForkReachConfig(model);
     const placingProgress = this.getStackerCargoPlacingProgress(command, side === 'front'
       ? model.stackerTelemetry.frontForkOffset
@@ -2950,11 +2956,10 @@ export class SceneRuntime {
       ? this.lerpVector(forkPosition, targetPosition, placingProgress)
       : forkPosition;
 
-    cargo.mesh.position.copyFrom(nextPosition);
-    cargo.mesh.rotationQuaternion = targetLocator && placingProgress >= 1
+    const nextRotation = targetLocator && placingProgress >= 1
       ? this.getNodeWorldRotation(targetLocator.root)
       : this.getNodeWorldRotation(model.root);
-    cargo.mesh.setEnabled(true);
+    this.setGeneratedCargoRootPose(cargo, nextPosition, nextRotation);
     if (targetPosition && placingProgress >= 1 && snapshot.targetLocationKey) {
       cargo.placedLocatorKey = snapshot.targetLocationKey;
       this.setStackerForkCargoCode(model, side, null);
@@ -2998,43 +3003,181 @@ export class SceneRuntime {
     return command === 3 || command === 4 || command === 5;
   }
 
-  /** 创建或复用某个条码的运行时托盘盒。 */
+  /** 根据货物类型读取旧版 Box 回退尺寸和材质，保证无模板场景行为不变。 */
+  private getGeneratedCargoFallbackSpec(kind: GeneratedCargoKind): {
+    size: Vector3;
+    color: string;
+    emissiveColor: string;
+  } {
+    return kind === 'stacker'
+      ? { size: STACKER_CARGO_SIZE, color: STACKER_CARGO_COLOR, emissiveColor: STACKER_CARGO_EMISSIVE_COLOR }
+      : { size: CONVEYOR_CARGO_SIZE, color: CONVEYOR_CARGO_COLOR, emissiveColor: CONVEYOR_CARGO_EMISSIVE_COLOR };
+  }
+
+  /** 为普通自动货物创建旧版 Box 回退；root 表示底部支撑点，Mesh 局部上移半高。 */
+  private ensureGeneratedCargoFallback(cargo: GeneratedCargoRuntimeEntry, kind: GeneratedCargoKind): void {
+    if (cargo.fallback) return;
+    const spec = this.getGeneratedCargoFallbackSpec(kind);
+    const mesh = MeshBuilder.CreateBox(
+      `${kind}_cargo_${this.sanitizeBabylonName(cargo.assetCode)}_${this.sanitizeBabylonName(cargo.containerCode)}`,
+      { width: spec.size.x, height: spec.size.y, depth: spec.size.z },
+      this.scene,
+    );
+    const material = new StandardMaterial(`${mesh.name}_mat`, this.scene);
+    material.diffuseColor = Color3.FromHexString(spec.color);
+    material.emissiveColor = Color3.FromHexString(spec.emissiveColor);
+    mesh.parent = cargo.root;
+    mesh.position.y = spec.size.y / 2;
+    mesh.material = material;
+    mesh.isPickable = false;
+    mesh.metadata = {
+      ...(mesh.metadata ?? {}),
+      generatedCargo: true,
+      cargoKind: kind,
+      sourceAssetCode: cargo.assetCode,
+      containerCode: cargo.containerCode,
+      fallback: true,
+    };
+    cargo.fallback = { mesh, material };
+  }
+
+  /** 释放普通货物的旧版 Box 回退，不影响已加载生成模板。 */
+  private disposeGeneratedCargoFallback(cargo: GeneratedCargoRuntimeEntry): void {
+    if (!cargo.fallback) return;
+    cargo.fallback.material.dispose();
+    cargo.fallback.mesh.dispose();
+    cargo.fallback = null;
+  }
+
+  /** 为普通货物按需创建共享生成输出宿主，并登记异步加载查找表。 */
+  private ensureGeneratedCargoOutputOwner(
+    cargo: GeneratedCargoRuntimeEntry,
+    kind: GeneratedCargoKind,
+    component: ModelGeneratorComponent,
+    snapshot: DeviceTelemetrySnapshot,
+  ): GeneratedOutputOwnerRuntimeEntry {
+    if (cargo.outputOwner) {
+      cargo.outputOwner.component = component;
+      cargo.outputOwner.activeSnapshot = snapshot;
+      return cargo.outputOwner;
+    }
+
+    const runtimeId = createId(`runtime_${kind}_cargo`);
+    const owner: GeneratedOutputOwnerRuntimeEntry = {
+      entityId: runtimeId,
+      entityName: `${kind === 'stacker' ? '堆垛机' : '输送机'} ${cargo.assetCode} 货物 ${cargo.containerCode}`,
+      editorEntityId: null,
+      runtimeAssetCode: cargo.containerCode,
+      root: cargo.root,
+      component,
+      output: null,
+      activeTargetSignature: null,
+      loadToken: 0,
+      failedTargetSignatures: new Set(),
+      reportedLoadFailureKeys: new Set(),
+      activeSnapshot: snapshot,
+      metadata: {
+        generatedCargo: true,
+        cargoKind: kind,
+        sourceAssetCode: cargo.assetCode,
+        containerCode: cargo.containerCode,
+      },
+      onTerminalLoadFailure: () => {
+        if (cargo.outputOwner === owner) this.ensureGeneratedCargoFallback(cargo, kind);
+      },
+    };
+    cargo.outputOwner = owner;
+    this.generatedOutputOwners.set(owner.entityId, owner);
+    return owner;
+  }
+
+  /** 根据全局生成器规则同步普通货物外观；无可用模板时回退旧版 Box。 */
+  private syncGeneratedCargoVisual(
+    cargo: GeneratedCargoRuntimeEntry,
+    kind: GeneratedCargoKind,
+    snapshot: DeviceTelemetrySnapshot,
+  ): void {
+    const component = this.getActiveModelGenerator()?.component ?? null;
+    const resolution = component ? resolveModelGeneratorTargetFromSnapshot(component, snapshot) : null;
+    if (!component || !resolution) {
+      this.disposeGeneratedCargoOutputOwner(cargo);
+      this.ensureGeneratedCargoFallback(cargo, kind);
+      return;
+    }
+
+    const owner = this.ensureGeneratedCargoOutputOwner(cargo, kind, component, snapshot);
+    owner.component = component;
+    owner.activeSnapshot = snapshot;
+    const targetSignature = createModelGeneratorTargetSignature(resolution.target);
+    if (!owner.failedTargetSignatures.has(targetSignature)) {
+      this.disposeGeneratedCargoFallback(cargo);
+    }
+    this.syncModelGeneratorResolvedTarget(owner, resolution);
+    if (owner.output) this.disposeGeneratedCargoFallback(cargo);
+  }
+
+  /** 注销普通货物生成输出宿主并释放当前输出，但保留货物支撑点根节点。 */
+  private disposeGeneratedCargoOutputOwner(cargo: GeneratedCargoRuntimeEntry): void {
+    const owner = cargo.outputOwner;
+    if (!owner) return;
+    owner.loadToken += 1;
+    this.disposeModelGeneratorOutput(owner);
+    owner.failedTargetSignatures.clear();
+    owner.reportedLoadFailureKeys.clear();
+    this.generatedOutputOwners.delete(owner.entityId);
+    cargo.outputOwner = null;
+  }
+
+  /** 释放普通自动货物的模板、Box 回退和支撑点根节点。 */
+  private disposeGeneratedCargo(cargo: GeneratedCargoRuntimeEntry): void {
+    this.disposeGeneratedCargoFallback(cargo);
+    this.disposeGeneratedCargoOutputOwner(cargo);
+    cargo.root.dispose();
+  }
+
+  /** 设置普通自动货物世界支撑点和朝向；root 无父级，不受 POI Transform 影响。 */
+  private setGeneratedCargoRootPose(cargo: GeneratedCargoRuntimeEntry, position: Vector3, rotation: Quaternion): void {
+    cargo.root.position.copyFrom(position);
+    cargo.root.rotationQuaternion = rotation.clone();
+    cargo.root.computeWorldMatrix(true);
+    cargo.outputOwner && this.applyGeneratedOutputPresentation(cargo.outputOwner);
+  }
+
+  /** 创建或复用某个条码的堆垛机运行时货物。 */
   private getOrCreateStackerCargo(assetCode: string, containerCode: string): StackerCargoRuntimeEntry {
     const key = this.getStackerCargoKey(assetCode, containerCode);
     const existing = this.stackerCargoMeshes.get(key);
     if (existing) return existing;
 
-    const mesh = MeshBuilder.CreateBox(`stacker_cargo_${this.sanitizeBabylonName(assetCode)}_${this.sanitizeBabylonName(containerCode)}`, {
-      width: STACKER_CARGO_SIZE.x,
-      height: STACKER_CARGO_SIZE.y,
-      depth: STACKER_CARGO_SIZE.z,
-    }, this.scene);
-    const material = new StandardMaterial(`${mesh.name}_mat`, this.scene);
-    material.diffuseColor = Color3.FromHexString(STACKER_CARGO_COLOR);
-    material.emissiveColor = Color3.FromHexString(STACKER_CARGO_EMISSIVE_COLOR);
-    mesh.material = material;
-    mesh.isPickable = false;
-    mesh.metadata = { ...(mesh.metadata ?? {}), stackerCargo: true, assetCode, containerCode };
-
+    const root = new TransformNode(
+      `stacker_cargo_root_${this.sanitizeBabylonName(assetCode)}_${this.sanitizeBabylonName(containerCode)}`,
+      this.scene,
+    );
     const entry: StackerCargoRuntimeEntry = {
       assetCode,
       containerCode,
-      mesh,
-      material,
+      root,
+      outputOwner: null,
+      fallback: null,
       placedLocatorKey: null,
     };
     this.stackerCargoMeshes.set(key, entry);
     return entry;
   }
 
-  /** 基于叉节点的世界包围盒计算托盘中心位置，保证货物真实跟随前叉或后叉。 */
+  /** 基于叉节点世界包围盒计算货物底部支撑点，默认 Box 启用前后保持同一中心位置。 */
   private getStackerForkCargoPosition(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 {
     const forkGroups = this.findStackerForkNodeGroups(model);
     const nodes = side === 'front' ? forkGroups.frontNodes : forkGroups.backNodes;
     const bounds = this.getNodesWorldBounds(nodes);
     if (!bounds) return model.root.getAbsolutePosition();
 
-    return bounds.minimum.add(bounds.maximum).scale(0.5).add(this.getModelAxis(model.root, 'y').scale(STACKER_CARGO_SIZE.y * 0.75));
+    const upAxis = this.getModelAxis(model.root, 'y');
+    const legacyCenter = bounds.minimum
+      .add(bounds.maximum)
+      .scale(0.5)
+      .add(upAxis.scale(STACKER_CARGO_SIZE.y * 0.75));
+    return legacyCenter.subtract(upAxis.scale(STACKER_CARGO_SIZE.y / 2));
   }
 
   /** 放货中逐步进入目标框，放货完成时完全落入目标框。 */
@@ -3318,35 +3461,28 @@ export class SceneRuntime {
     return ((((value + halfLoop) % loop) + loop) % loop) - halfLoop;
   }
 
-  /** 创建或复用输送线运行时货物，占位物不写入场景文档。 */
+  /** 创建或复用输送线运行时货物；可视模板不写入场景文档。 */
   private getOrCreateConveyorCargo(assetCode: string, containerCode: string): ConveyorCargoRuntimeEntry {
     const key = this.getConveyorCargoKey(assetCode, containerCode);
     const existing = this.conveyorCargoMeshes.get(key);
     if (existing) return existing;
 
-    const mesh = MeshBuilder.CreateBox(`conveyor_cargo_${this.sanitizeBabylonName(assetCode)}_${this.sanitizeBabylonName(containerCode)}`, {
-      width: CONVEYOR_CARGO_SIZE.x,
-      height: CONVEYOR_CARGO_SIZE.y,
-      depth: CONVEYOR_CARGO_SIZE.z,
-    }, this.scene);
-    const material = new StandardMaterial(`${mesh.name}_mat`, this.scene);
-    material.diffuseColor = Color3.FromHexString(CONVEYOR_CARGO_COLOR);
-    material.emissiveColor = Color3.FromHexString(CONVEYOR_CARGO_EMISSIVE_COLOR);
-    mesh.material = material;
-    mesh.isPickable = false;
-    mesh.metadata = { ...(mesh.metadata ?? {}), conveyorCargo: true, assetCode, containerCode };
-
+    const root = new TransformNode(
+      `conveyor_cargo_root_${this.sanitizeBabylonName(assetCode)}_${this.sanitizeBabylonName(containerCode)}`,
+      this.scene,
+    );
     const entry: ConveyorCargoRuntimeEntry = {
       assetCode,
       containerCode,
-      mesh,
-      material,
+      root,
+      outputOwner: null,
+      fallback: null,
     };
     this.conveyorCargoMeshes.set(key, entry);
     return entry;
   }
 
-  /** 基于输送线几何包围盒计算货物位置，并沿输送方向加入短循环偏移。 */
+  /** 基于输送线几何包围盒计算货物底部支撑点，并沿输送方向加入短循环偏移。 */
   private getConveyorCargoPosition(model: ModelRuntimeEntry): Vector3 {
     const configuredNodes = this.readConveyorMotionConfigs(model).flatMap((config) => this.findConveyorMotionNodes(model, config));
     const conveyorNodes = configuredNodes.length > 0
@@ -3356,11 +3492,12 @@ export class SceneRuntime {
     const center = bounds
       ? bounds.minimum.add(bounds.maximum).scale(0.5)
       : model.root.getAbsolutePosition();
-    const verticalOffset = this.getModelAxis(model.root, 'y').scale(CONVEYOR_CARGO_SIZE.y * 0.75);
+    const upAxis = this.getModelAxis(model.root, 'y');
+    const legacyCenter = center.add(upAxis.scale(CONVEYOR_CARGO_SIZE.y * 0.75));
     const travelAxis = this.getHorizontalModelAxis(model.root, this.readConveyorCargoTravelAxis(model));
 
-    return center
-      .add(verticalOffset)
+    return legacyCenter
+      .subtract(upAxis.scale(CONVEYOR_CARGO_SIZE.y / 2))
       .add(travelAxis.scale(model.conveyorTelemetry.cargoTravelOffset));
   }
 
@@ -3375,9 +3512,9 @@ export class SceneRuntime {
     return 'x';
   }
 
-  /** 生成输送线运行时货物的唯一键。 */
+  /** 生成输送线运行时货物的无歧义唯一键，允许设备编号和条码包含任意分隔符。 */
   private getConveyorCargoKey(assetCode: string, containerCode: string): string {
-    return `${assetCode}:${containerCode}`;
+    return JSON.stringify([assetCode, containerCode]);
   }
 
   /** 删除指定输送线实例生成的运行时货物，不影响其他设备。 */
@@ -3389,15 +3526,14 @@ export class SceneRuntime {
     }
   }
 
-  /** 释放单个输送线运行时货物及其材质。 */
+  /** 释放单个输送线运行时货物的模板、回退 Box 和支撑点根节点。 */
   private disposeConveyorCargo(cargo: ConveyorCargoRuntimeEntry): void {
-    cargo.material.dispose();
-    cargo.mesh.dispose();
+    this.disposeGeneratedCargo(cargo);
   }
 
-  /** 生成堆垛机运行时货物的唯一键。 */
+  /** 生成堆垛机运行时货物的无歧义唯一键，允许设备编号和条码包含任意分隔符。 */
   private getStackerCargoKey(assetCode: string, containerCode: string): string {
-    return `${assetCode}:${containerCode}`;
+    return JSON.stringify([assetCode, containerCode]);
   }
 
   /** 写入通用设备 telemetry metadata，供脚本、调试面板和现场排查读取。 */
@@ -4037,7 +4173,7 @@ export class SceneRuntime {
 
   /** 创建内置基础网格生成输出，并挂到生成器稳定根节点下。 */
   private createModelGeneratorMeshOutput(
-    runtimeEntry: ModelGeneratorRuntimeEntry,
+    runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
     target: Extract<ModelGeneratorTarget, { kind: 'mesh' }>,
   ): ModelGeneratorMeshOutputRuntimeEntry {
     const mesh = this.createModelGeneratorMesh(runtimeEntry.entityId, target.meshKind);
@@ -4051,8 +4187,10 @@ export class SceneRuntime {
     mesh.metadata = {
       ...(mesh.metadata ?? {}),
       editorMeshKind: target.meshKind,
-      [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.entityId,
+      ...runtimeEntry.metadata,
+      ...(runtimeEntry.editorEntityId ? { [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.editorEntityId } : {}),
     };
+    mesh.isPickable = runtimeEntry.editorEntityId !== null;
 
     return {
       kind: 'mesh',
@@ -4173,8 +4311,6 @@ export class SceneRuntime {
     model.telemetryPreviewBaseline = null;
     this.applyModelSelection(model, false);
     model.externalScriptRuntime?.dispose();
-    this.disposeStackerCargoForAssetCode(model.assetCode);
-    this.disposeConveyorCargoForAssetCode(model.assetCode);
     for (const texture of model.textureCache.values()) {
       texture.dispose();
     }
@@ -4213,9 +4349,11 @@ export class SceneRuntime {
       `${runtimeEntry.entityId}_warehouseCargo_${this.sanitizeBabylonName(cargoCode)}`,
       this.scene,
     );
-    cargoRoot.position.copyFrom(runtimeEntry.root.position);
-    cargoRoot.scaling.copyFrom(runtimeEntry.root.scaling);
-    cargoRoot.rotationQuaternion = this.getNodeWorldRotation(runtimeEntry.root);
+    this.setWarehouseRootPose(
+      cargoRoot,
+      this.getWarehouseLocatorSupportPosition(locator),
+      this.getNodeWorldRotation(locator.root),
+    );
     const outputNode = output.kind === 'model' ? output.model.root : output.mesh;
     outputNode.parent = cargoRoot;
     if (output.kind === 'model') {
@@ -4232,7 +4370,7 @@ export class SceneRuntime {
     runtimeEntry.activeTargetSignature = null;
     runtimeEntry.activeSnapshot = null;
     runtimeEntry.loadToken += 1;
-    this.applyTransform(runtimeEntry.root, runtimeEntry.baseTransform);
+    this.resetGeneratedOutputRoot(runtimeEntry.root);
     this.pushLog(`仓储流“${runtimeEntry.entityName}”已将货物 ${cargoCode} 放入库位 ${locatorKey}。`);
     return true;
   }
@@ -4249,16 +4387,19 @@ export class SceneRuntime {
     }
   }
 
-  /** 重置单个生成器的仓储协调器、已存实例和运行时诊断。 */
+  /** 重置单个生成器的仓储协调器、活动输出、已存实例和运行时诊断。 */
   private resetModelGeneratorWarehouseFlow(runtimeEntry: ModelGeneratorRuntimeEntry): void {
     for (const cargo of runtimeEntry.warehouseCargos.values()) {
       this.disposeWarehouseCargo(cargo);
     }
     runtimeEntry.warehouseCargos.clear();
+    this.disposeModelGeneratorOutput(runtimeEntry);
+    runtimeEntry.activeTargetSignature = null;
+    runtimeEntry.activeSnapshot = null;
     runtimeEntry.warehouseCoordinator.reset();
     runtimeEntry.warehouseActiveResolution = null;
     runtimeEntry.reportedWarehouseIssues.clear();
-    this.applyTransform(runtimeEntry.root, runtimeEntry.baseTransform);
+    this.resetGeneratedOutputRoot(runtimeEntry.root);
   }
 
   /** 释放已脱离生成器的仓储货物根节点和完整派生输出。 */
@@ -4275,19 +4416,19 @@ export class SceneRuntime {
       binding: model.telemetryBinding,
     });
     if (!resolved) return false;
-    for (const runtimeEntry of this.modelGenerators.values()) {
-      const warehouseFlow = runtimeEntry.component.warehouseFlow;
-      if (!warehouseFlow?.enabled) continue;
-      const bindingIds = deviceType === 'stacker'
-        ? [warehouseFlow.stackerBindingId]
-        : [warehouseFlow.inboundBindingId, warehouseFlow.outboundBindingId];
-      for (const bindingId of bindingIds) {
-        const binding = runtimeEntry.component.bindings.find((item) => item.id === bindingId);
-        if (!binding?.sourceId.trim() || !binding.deviceType.trim() || !binding.assetCode.trim()) continue;
-        if (binding.sourceId.trim() === resolved.sourceId
-          && binding.deviceType.trim().toLowerCase() === resolved.deviceType
-          && binding.assetCode.trim() === resolved.assetCode) return true;
-      }
+    const runtimeEntry = this.getActiveModelGenerator();
+    const warehouseFlow = runtimeEntry?.component.warehouseFlow;
+    if (!runtimeEntry || !warehouseFlow?.enabled) return false;
+
+    const bindingIds = deviceType === 'stacker'
+      ? [warehouseFlow.stackerBindingId]
+      : [warehouseFlow.inboundBindingId, warehouseFlow.outboundBindingId];
+    for (const bindingId of bindingIds) {
+      const binding = runtimeEntry.component.bindings.find((item) => item.id === bindingId);
+      if (!binding?.sourceId.trim() || !binding.deviceType.trim() || !binding.assetCode.trim()) continue;
+      if (binding.sourceId.trim() === resolved.sourceId
+        && binding.deviceType.trim().toLowerCase() === resolved.deviceType
+        && binding.assetCode.trim() === resolved.assetCode) return true;
     }
     return false;
   }
@@ -4304,22 +4445,19 @@ export class SceneRuntime {
     runtimeEntry.reportedWarehouseIssues.delete(key);
   }
 
-  /** 为仓储配置生成稳定签名，便于后续场景热更新时识别绑定变化。 */
-  private createWarehouseFlowConfigSignature(component: ModelGeneratorComponent): string {
-    return JSON.stringify({ warehouseFlow: component.warehouseFlow ?? null, bindings: component.bindings });
-  }
-
-  /** 深拷贝场景 Transform，避免运行态移动生成器时污染场景对象引用。 */
-  private cloneTransformComponent(transform: TransformComponent): TransformComponent {
-    return {
-      position: { ...transform.position },
-      rotation: { ...transform.rotation },
-      scale: { ...transform.scale },
-    };
+  /** 为模型生成器完整运行时配置生成稳定签名，配置变化时统一释放旧自动货物。 */
+  private createModelGeneratorRuntimeConfigSignature(component: ModelGeneratorComponent): string {
+    return JSON.stringify({
+      defaultTarget: component.defaultTarget,
+      rules: component.rules,
+      metadataTtlSeconds: component.metadataTtlSeconds,
+      bindings: component.bindings,
+      warehouseFlow: component.warehouseFlow ?? null,
+    });
   }
 
   /** 释放生成器当前派生输出；稳定根节点和空状态标记保持不变。 */
-  private disposeModelGeneratorOutput(runtimeEntry: ModelGeneratorRuntimeEntry): void {
+  private disposeModelGeneratorOutput(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     const output = runtimeEntry.output;
     if (!output) return;
     this.disposeModelGeneratorOutputValue(output);
@@ -4338,8 +4476,6 @@ export class SceneRuntime {
     model.telemetryPreviewBaseline = null;
     this.applyModelSelection(model, false);
     model.externalScriptRuntime?.dispose();
-    this.disposeStackerCargoForAssetCode(model.assetCode);
-    this.disposeConveyorCargoForAssetCode(model.assetCode);
     for (const texture of model.textureCache.values()) {
       texture.dispose();
     }
@@ -4348,16 +4484,17 @@ export class SceneRuntime {
     model.root.dispose();
   }
 
-  /** 释放模型生成器根节点、派生模型、脚本、材质和线框标记。 */
+  /** 释放模型生成器配置标记、独立输出根节点、仓储货物和异步资源。 */
   private disposeModelGenerator(entityId: string, runtimeEntry: ModelGeneratorRuntimeEntry): void {
     runtimeEntry.loadToken += 1;
     this.resetModelGeneratorWarehouseFlow(runtimeEntry);
-    this.disposeModelGeneratorOutput(runtimeEntry);
     runtimeEntry.marker.material.dispose();
     runtimeEntry.marker.mesh.dispose();
+    runtimeEntry.markerRoot.dispose();
     runtimeEntry.root.dispose();
     runtimeEntry.failedTargetSignatures.clear();
     runtimeEntry.reportedLoadFailureKeys.clear();
+    this.generatedOutputOwners.delete(runtimeEntry.entityId);
     this.modelGenerators.delete(entityId);
   }
 
@@ -4379,10 +4516,9 @@ export class SceneRuntime {
     }
   }
 
-  /** 释放单个运行时托盘盒及其材质。 */
+  /** 释放单个堆垛机运行时货物的模板、回退 Box 和支撑点根节点。 */
   private disposeStackerCargo(cargo: StackerCargoRuntimeEntry): void {
-    cargo.material.dispose();
-    cargo.mesh.dispose();
+    this.disposeGeneratedCargo(cargo);
   }
 
   /** 释放灯光资源。 */
@@ -4451,35 +4587,35 @@ export class SceneRuntime {
     }
   }
 
-  /** 统一应用生成器显隐、锁定、选中、高亮和空状态标记。 */
+  /** 仅同步模型生成器配置标记；自动货物不继承实体显隐、锁定或选中状态。 */
   private applyModelGeneratorPresentation(runtimeEntry: ModelGeneratorRuntimeEntry): void {
     const visible = this.isEntityVisible(runtimeEntry.entityId);
     const pickable = visible && this.isEntityScenePickable(runtimeEntry.entityId);
-    const showMarker = visible && !this.telemetryPreviewActive && runtimeEntry.output === null;
+    const showMarker = visible && !this.telemetryPreviewActive;
 
-    runtimeEntry.root.setEnabled(visible);
+    runtimeEntry.markerRoot.setEnabled(visible);
     runtimeEntry.marker.mesh.isVisible = showMarker;
     runtimeEntry.marker.mesh.isPickable = showMarker && pickable;
     runtimeEntry.marker.material.alpha = runtimeEntry.selected ? 1 : MODEL_GENERATOR_MARKER_ALPHA;
     runtimeEntry.marker.material.diffuseColor = Color3.FromHexString(MODEL_GENERATOR_MARKER_COLOR);
     runtimeEntry.marker.material.emissiveColor = Color3.FromHexString(MODEL_GENERATOR_MARKER_COLOR);
+  }
 
+  /** 统一同步生成输出可视状态；运行时自动货物始终不可拾取。 */
+  private applyGeneratedOutputPresentation(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     if (runtimeEntry.output?.kind === 'mesh') {
-      runtimeEntry.output.mesh.isVisible = visible;
-      runtimeEntry.output.mesh.isPickable = pickable;
-      runtimeEntry.output.material.diffuseColor = runtimeEntry.selected
-        ? Color3.FromHexString(SELECTED_MATERIAL_COLOR)
-        : this.readColor(runtimeEntry.output.target.materialColor);
-      runtimeEntry.output.material.emissiveColor = runtimeEntry.selected
-        ? Color3.FromHexString(SELECTED_EMISSIVE_COLOR)
-        : Color3.Black();
+      runtimeEntry.output.mesh.isVisible = true;
+      runtimeEntry.output.mesh.isPickable = false;
+      runtimeEntry.output.material.diffuseColor = this.readColor(runtimeEntry.output.target.materialColor);
+      runtimeEntry.output.material.emissiveColor = Color3.Black();
       return;
     }
 
     if (runtimeEntry.output?.kind === 'model') {
-      this.applyModelSelection(runtimeEntry.output.model, runtimeEntry.selected);
+      runtimeEntry.output.model.root.setEnabled(true);
+      this.applyModelSelection(runtimeEntry.output.model, false);
       for (const mesh of runtimeEntry.output.model.meshes) {
-        mesh.isPickable = pickable;
+        mesh.isPickable = false;
       }
       this.updateModelGeneratorOutputRuntimeContext(runtimeEntry);
     }
@@ -4696,26 +4832,31 @@ export class SceneRuntime {
 
   /** 同步生成模型外置脚本；只注入生成器快照，不注册独立遥测运动实体。 */
   private syncModelGeneratorExternalScripts(
-    runtimeEntry: ModelGeneratorRuntimeEntry,
+    runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
     modelAsset: ModelAssetComponent,
     model: ModelRuntimeEntry,
   ): void {
     this.syncModelAssetExternalScripts(modelAsset, model, (current) => {
-      const activeEntry = this.modelGenerators.get(runtimeEntry.entityId);
+      const activeEntry = this.generatedOutputOwners.get(runtimeEntry.entityId);
       if (activeEntry?.output?.kind !== 'model' || activeEntry.output.model !== current) return;
       this.refreshModelGeneratorModelMeshes(activeEntry);
-      this.applyModelGeneratorPresentation(activeEntry);
+      this.applyGeneratedOutputPresentation(activeEntry);
     });
   }
 
   /** 收集模型脚本在稳定根节点下创建的额外 Mesh，并补齐生成器拾取元数据。 */
-  private refreshModelGeneratorModelMeshes(runtimeEntry: ModelGeneratorRuntimeEntry): void {
+  private refreshModelGeneratorModelMeshes(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     if (runtimeEntry.output?.kind !== 'model') return;
     const model = runtimeEntry.output.model;
     model.meshes = [...new Set([...(model.container?.meshes ?? []), ...model.root.getChildMeshes(false)])]
       .filter((mesh) => !mesh.isDisposed());
     for (const mesh of model.meshes) {
-      mesh.metadata = { ...(mesh.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.entityId };
+      mesh.metadata = {
+        ...(mesh.metadata ?? {}),
+        ...runtimeEntry.metadata,
+        ...(runtimeEntry.editorEntityId ? { [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.editorEntityId } : {}),
+      };
+      if (!runtimeEntry.editorEntityId) mesh.isPickable = false;
     }
   }
 
@@ -4790,9 +4931,9 @@ export class SceneRuntime {
     for (const model of this.models.values()) {
       if (model.externalScriptRuntime === runtime) return model;
     }
-    for (const modelGenerator of this.modelGenerators.values()) {
-      if (modelGenerator.output?.kind === 'model' && modelGenerator.output.model.externalScriptRuntime === runtime) {
-        return modelGenerator.output.model;
+    for (const owner of this.generatedOutputOwners.values()) {
+      if (owner.output?.kind === 'model' && owner.output.model.externalScriptRuntime === runtime) {
+        return owner.output.model;
       }
     }
     return null;
