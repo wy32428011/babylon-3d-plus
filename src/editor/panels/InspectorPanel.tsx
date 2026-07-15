@@ -6,6 +6,7 @@ import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
+import { PoiEffectInspector } from './PoiEffectInspector';
 import { ModelParametersInspector } from './ModelParametersInspector';
 import { TelemetryBindingInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
@@ -185,13 +186,14 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const light = selectedEntity.components.light;
   const modelAsset = selectedEntity.components.modelAsset;
   const modelGenerator = selectedEntity.components.modelGenerator;
-  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || modelGenerator);
+  const poiEffect = selectedEntity.components.poiEffect;
+  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || modelGenerator || poiEffect);
 
   return (
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
-      <h2>{modelGenerator ? '模型生成器' : 'Inspector'}</h2>
+      <h2>{modelGenerator ? '模型生成器' : poiEffect ? 'EFF 特效' : 'Inspector'}</h2>
       <label className="inspector-row">
-        <span>{modelGenerator ? 'POI名称' : '名称'}</span>
+        <span>{modelGenerator || poiEffect ? 'POI名称' : '名称'}</span>
         <input
           type="text"
           disabled={isLocked}
@@ -228,6 +230,9 @@ export function InspectorPanel(props: InspectorPanelProps) {
       ) : null}
       {modelGenerator ? (
         <ModelGeneratorInspector component={modelGenerator} disabled={isLocked} />
+      ) : null}
+      {poiEffect ? (
+        <PoiEffectInspector component={poiEffect} disabled={isLocked} />
       ) : null}
       {meshRenderer ? (
         <fieldset className="transform-fieldset">

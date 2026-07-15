@@ -78,6 +78,7 @@ import {
 import { measureModelSizeMeters, type ModelMeasurementResult } from './modelMeasurement';
 import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
 import { GenericTelemetryMotionRuntime } from './telemetry/GenericTelemetryMotionRuntime';
+import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
 import {
   captureModelTelemetryPreviewBaseline,
   restoreModelTelemetryPreviewBaseline,
@@ -174,6 +175,8 @@ type ModelRuntimeEntry = {
   textureCache: Map<string, Texture>;
   externalScriptRuntime: ExternalModelScriptRuntime | null;
   externalScriptSignature: string;
+  externalScriptStarting: boolean;
+  measurementReady: boolean;
   stackerTelemetry: StackerModelTelemetryState;
   conveyorTelemetry: ConveyorModelTelemetryState;
   stackerTelemetryReady: boolean;
@@ -431,6 +434,7 @@ export class SceneRuntime {
   private readonly modelHighlightLayer: HighlightLayer;
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
   private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
+  private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly reportedMissingTargets = new Set<string>();
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private readonly reportedFaults = new Map<string, string>();
@@ -449,6 +453,7 @@ export class SceneRuntime {
   ) {
     this.modelHighlightLayer = new HighlightLayer('EditorModelHighlightLayer', scene);
     this.genericTelemetryMotionRuntime = new GenericTelemetryMotionRuntime(scene, { pushLog: this.pushLog });
+    this.poiEffectRuntime = new PoiEffectRuntime(scene);
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
   }
 
@@ -511,6 +516,7 @@ export class SceneRuntime {
       this.cadReferences.get(entityId)?.root ??
       this.models.get(entityId)?.root ??
       this.modelGenerators.get(entityId)?.markerRoot ??
+      this.poiEffectRuntime.getGizmoTarget(entityId) ??
       null
     );
   }
@@ -550,10 +556,10 @@ export class SceneRuntime {
    * 读取普通导入模型沿实体自身 X/Y/Z 轴的实际米制尺寸。
    * 加载与脚本初始化完成前返回 loading；没有有效可见几何时返回 unavailable。
    */
-  getModelMeasurement(entityId: string): ModelMeasurementResult | null {
+  getModelMeasurement(entityId: string): ModelMeasurementResult {
     const model = this.models.get(entityId);
-    if (!model) return null;
-    if (!model.container || !model.stackerTelemetryReady) return { status: 'loading', sizeMeters: null };
+    if (!model) return { status: 'unavailable', sizeMeters: null };
+    if (!model.container || !model.measurementReady) return { status: 'loading', sizeMeters: null };
 
     const sizeMeters = measureModelSizeMeters(model.root, model.contentRoot);
     return sizeMeters
@@ -606,7 +612,7 @@ export class SceneRuntime {
     const cadReference = this.cadReferences.get(entityId);
     if (cadReference) return cadReference.lineMeshes.length > 0 && cadReference.cancelLoad === null;
 
-    return this.meshes.has(entityId) || this.locators.has(entityId) || this.lights.has(entityId);
+    return this.meshes.has(entityId) || this.locators.has(entityId) || this.lights.has(entityId) || this.poiEffectRuntime.has(entityId);
   }
 
   /** 将浏览器客户端坐标转换为 Babylon 画布内拾取坐标，并过滤画布外输入。 */
@@ -641,6 +647,17 @@ export class SceneRuntime {
 
     const light = this.lights.get(entityId);
     if (light) return this.getLightWorldBounds(light);
+
+    const poiEffectMeshes = this.poiEffectRuntime.getWorldBoundsMeshes(entityId);
+    if (poiEffectMeshes.length > 0) {
+      let mergedBounds: RuntimeWorldBounds | null = null;
+      for (const mesh of poiEffectMeshes) {
+        const bounds = this.getMeshWorldBounds(mesh);
+        if (!bounds) continue;
+        mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+      }
+      if (mergedBounds) return mergedBounds;
+    }
 
     return null;
   }
@@ -768,6 +785,10 @@ export class SceneRuntime {
     const lightIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.light)),
     );
+    const poiEffectIds = new Set(
+      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.poiEffect)),
+    );
+    this.poiEffectRuntime.disposeMissing(poiEffectIds);
 
     for (const [entityId, mesh] of this.meshes.entries()) {
       if (!primitiveMeshIds.has(entityId)) {
@@ -905,6 +926,7 @@ export class SceneRuntime {
       this.disposeModelGenerator(entityId, modelGenerator);
     }
     this.genericTelemetryMotionRuntime.dispose();
+    this.poiEffectRuntime.dispose();
     for (const cargo of this.stackerCargoMeshes.values()) {
       this.disposeStackerCargo(cargo);
     }
@@ -952,6 +974,15 @@ export class SceneRuntime {
 
     if (entity.components.modelGenerator) {
       this.syncModelGeneratorEntity(entity, selected);
+    }
+
+    if (entity.components.poiEffect) {
+      this.poiEffectRuntime.sync(
+        entity,
+        selected,
+        this.isEntityVisible(entity.id),
+        this.isEntityScenePickable(entity.id),
+      );
     }
 
     if (entity.components.light) {
@@ -1220,6 +1251,8 @@ export class SceneRuntime {
       textureCache: new Map(),
       externalScriptRuntime: null,
       externalScriptSignature: '',
+      externalScriptStarting: false,
+      measurementReady: false,
       stackerTelemetry: this.createStackerTelemetryState(root),
       conveyorTelemetry: this.createConveyorTelemetryState(),
       stackerTelemetryReady: false,
@@ -1422,6 +1455,8 @@ export class SceneRuntime {
       textureCache: new Map(),
       externalScriptRuntime: null,
       externalScriptSignature: '',
+      externalScriptStarting: false,
+      measurementReady: false,
       stackerTelemetry: this.createStackerTelemetryState(modelRoot),
       conveyorTelemetry: this.createConveyorTelemetryState(),
       stackerTelemetryReady: false,
@@ -4538,6 +4573,7 @@ export class SceneRuntime {
         || this.locators.has(entityId)
         || this.models.has(entityId)
         || this.modelGenerators.has(entityId)
+        || this.poiEffectRuntime.has(entityId)
       )
       ? entityId
       : null;
@@ -4864,7 +4900,7 @@ export class SceneRuntime {
   private syncModelAssetExternalScripts(
     modelAsset: ModelAssetComponent,
     model: ModelRuntimeEntry,
-    onReady: (current: ModelRuntimeEntry) => void,
+    onSettled: (current: ModelRuntimeEntry) => void,
   ): void {
     if (!model.container) return;
     this.syncModelScriptMetadata(model.contentRoot, modelAsset);
@@ -4874,10 +4910,12 @@ export class SceneRuntime {
       model.externalScriptRuntime?.dispose();
       model.externalScriptRuntime = null;
       model.externalScriptSignature = '';
+      model.externalScriptStarting = false;
+      model.measurementReady = true;
       this.resetStackerTelemetryState(model);
       this.resetConveyorTelemetryState(model);
       model.stackerTelemetryReady = true;
-      onReady(model);
+      onSettled(model);
       return;
     }
 
@@ -4893,6 +4931,8 @@ export class SceneRuntime {
 
     const runtimeMode = this.telemetryPreviewActive ? 'runtime' : 'edit';
     if (!model.externalScriptRuntime || model.externalScriptSignature !== signature) {
+      model.externalScriptStarting = true;
+      model.measurementReady = false;
       model.stackerTelemetryReady = false;
       model.externalScriptRuntime?.dispose();
       model.externalScriptRuntime = new ExternalModelScriptRuntime(model.contentRoot, modelAsset);
@@ -4903,27 +4943,45 @@ export class SceneRuntime {
 
       const runtime = model.externalScriptRuntime;
       const loadToken = model.loadToken;
-      void runtime.start().then(() => {
-        const current = this.findActiveModelRuntimeEntry(runtime);
-        if (!current || current.loadToken !== loadToken) return;
-        this.updateModelExternalScriptRuntimeContext(current, this.telemetryPreviewActive ? 'runtime' : 'edit', null);
-        runtime.update();
-        this.resetStackerTelemetryState(current);
-        this.resetConveyorTelemetryState(current);
-        current.stackerTelemetryReady = true;
-        onReady(current);
-      });
+      void runtime.start()
+        .then(() => {
+          const current = this.findActiveModelRuntimeEntry(runtime);
+          if (!current || current.loadToken !== loadToken) return;
+          this.updateModelExternalScriptRuntimeContext(current, this.telemetryPreviewActive ? 'runtime' : 'edit', null);
+          runtime.update();
+          this.resetStackerTelemetryState(current);
+          this.resetConveyorTelemetryState(current);
+          current.externalScriptStarting = false;
+          current.measurementReady = true;
+          current.stackerTelemetryReady = true;
+          onSettled(current);
+        })
+        .catch((error) => {
+          const current = this.findActiveModelRuntimeEntry(runtime);
+          if (!current || current.loadToken !== loadToken) return;
+          current.externalScriptStarting = false;
+          current.measurementReady = true;
+          this.resetStackerTelemetryState(current);
+          this.resetConveyorTelemetryState(current);
+          current.stackerTelemetryReady = true;
+          const message = error instanceof Error ? error.message : String(error);
+          this.pushLog(`模型脚本初始化失败，已回退基础几何与测量：${message}`);
+          onSettled(current);
+        });
       return;
     }
 
     model.externalScriptRuntime.updateAssetCode(modelAsset.assetCode);
     model.externalScriptRuntime.updateParameterValues(modelAsset.parameterValues);
     this.updateModelExternalScriptRuntimeContext(model, runtimeMode, null);
+    if (model.externalScriptStarting) return;
+
     model.externalScriptRuntime.update();
     this.resetStackerTelemetryState(model);
     this.resetConveyorTelemetryState(model);
+    model.measurementReady = true;
     model.stackerTelemetryReady = true;
-    onReady(model);
+    onSettled(model);
   }
 
   /** 在普通模型和生成器派生模型中查找仍处于活动状态的脚本宿主。 */

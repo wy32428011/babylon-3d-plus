@@ -6,6 +6,7 @@ import type {
   MeshRendererComponent,
   ModelAssetComponent,
   ModelGeneratorComponent,
+  PoiEffectComponent,
   TransformComponent,
 } from '../model/components';
 import type { TelemetryBindingComponent } from '../model/telemetryBinding';
@@ -186,6 +187,20 @@ export function updateLightCommand(entityId: string, before: LightComponent, aft
     label: '更新灯光',
     execute: (scene) => updateLight(scene, entityId, after),
     undo: (scene) => updateLight(scene, entityId, before),
+  };
+}
+
+/** 使用单条可撤销命令替换 POI EFF 配置。 */
+export function updatePoiEffectCommand(
+  entityId: string,
+  before: PoiEffectComponent,
+  after: PoiEffectComponent,
+  label = '更新 EFF 特效',
+): Command {
+  return {
+    label,
+    execute: (scene) => updatePoiEffect(scene, entityId, after),
+    undo: (scene) => updatePoiEffect(scene, entityId, before),
   };
 }
 
@@ -381,6 +396,26 @@ function updateLight(scene: SceneDocument, entityId: string, light: LightCompone
         components: {
           ...entity.components,
           light,
+        },
+      },
+    },
+  };
+}
+
+/** 将实体的 POI EFF 组件替换为已校验快照。 */
+function updatePoiEffect(scene: SceneDocument, entityId: string, poiEffect: PoiEffectComponent): SceneDocument {
+  const entity = scene.entities[entityId];
+  if (!entity?.components.poiEffect) return scene;
+
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [entityId]: {
+        ...entity,
+        components: {
+          ...entity.components,
+          poiEffect,
         },
       },
     },

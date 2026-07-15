@@ -156,6 +156,35 @@ export type LightComponent = {
   intensity: number;
 };
 
+/** POI 库内置 EFF 的稳定类型集合。 */
+export type PoiEffectKind =
+  | 'alarm-pulse'
+  | 'warning-beacon'
+  | 'locator-beam'
+  | 'radar-scan'
+  | 'fire'
+  | 'smoke'
+  | 'sparks'
+  | 'steam-leak'
+  | 'gas-leak'
+  | 'water-jet'
+  | 'pipeline-flow-particles'
+  | 'pipeline-flow-arrows'
+  | 'cargo-target-frame'
+  | 'conveyor-direction'
+  | 'evacuation-route';
+
+/** EFF 实体只持久化可编辑参数，Babylon 运行时资源不进入场景文件。 */
+export type PoiEffectComponent = {
+  effectKind: PoiEffectKind;
+  enabled: boolean;
+  primaryColor: string;
+  secondaryColor: string;
+  intensity: number;
+  speed: number;
+  density: number;
+};
+
 export type EntityComponents = {
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
@@ -166,4 +195,5 @@ export type EntityComponents = {
   telemetryBinding?: TelemetryBindingComponent;
   camera?: CameraComponent;
   light?: LightComponent;
+  poiEffect?: PoiEffectComponent;
 };

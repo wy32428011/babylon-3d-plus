@@ -15,7 +15,7 @@ import {
   type SceneEnvironmentVariant,
   type SceneSettings,
 } from '../model/SceneDocument';
-import type { EntityComponents, LightKind, LocatorStorageDepth, MeshKind } from '../model/components';
+import type { EntityComponents, LightKind, LocatorStorageDepth, MeshKind, PoiEffectComponent } from '../model/components';
 import {
   MODEL_GENERATOR_MAX_BINDINGS,
   MODEL_GENERATOR_MAX_RULES,
@@ -25,6 +25,7 @@ import {
   sanitizeModelGeneratorTarget,
 } from '../model/modelGenerator';
 import type { Vector3Data } from '../model/math';
+import { isPoiEffectHexColor, isPoiEffectKind, sanitizePoiEffectComponent } from '../model/poiEffect';
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
 import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit } from '../model/sceneUnits';
 import {
@@ -312,6 +313,10 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
     normalized.light = normalizeLight(components.light);
   }
 
+  if ('poiEffect' in components && components.poiEffect !== undefined) {
+    normalized.poiEffect = normalizePoiEffect(components.poiEffect);
+  }
+
   return normalized;
 }
 
@@ -347,6 +352,25 @@ function normalizeMeshRenderer(value: unknown): EntityComponents['meshRenderer']
     meshKind: meshKind as MeshKind,
     materialColor: assertString(meshRenderer.materialColor),
   };
+}
+
+/** 严格读取 POI EFF 配置，再通过共享边界约束数值范围。 */
+function normalizePoiEffect(value: unknown): PoiEffectComponent {
+  const poiEffect = assertPlainObject(value);
+  if (!isPoiEffectKind(poiEffect.effectKind)) throwUnsupportedSceneFileError();
+  if (!isPoiEffectHexColor(poiEffect.primaryColor) || !isPoiEffectHexColor(poiEffect.secondaryColor)) {
+    throwUnsupportedSceneFileError();
+  }
+
+  return sanitizePoiEffectComponent({
+    effectKind: poiEffect.effectKind,
+    enabled: assertOptionalBoolean(poiEffect.enabled, true),
+    primaryColor: poiEffect.primaryColor,
+    secondaryColor: poiEffect.secondaryColor,
+    intensity: assertFiniteNumber(poiEffect.intensity),
+    speed: assertFiniteNumber(poiEffect.speed),
+    density: assertFiniteNumber(poiEffect.density),
+  });
 }
 
 function normalizeLocator(value: unknown): EntityComponents['locator'] {
@@ -691,6 +715,7 @@ function hasRuntimeComponent(components: EntityComponents): boolean {
     components.cadReference ||
     components.modelAsset ||
     components.modelGenerator ||
+    components.poiEffect ||
     components.camera ||
     components.light,
   );

@@ -17,7 +17,8 @@
     "typecheck": "tsc -b",
     "preview": "vite preview --host 127.0.0.1",
     "test:telemetry": "node scripts/telemetry-test.mjs",
-    "smoke:units": "node scripts/smoke-meter-unit-contract.mjs",
+    "smoke:units": "node scripts/smoke-meter-unit-contract.mjs && npm run smoke:model-measurement",
+    "smoke:model-measurement": "node scripts/smoke-model-measurement.mjs",
     "pack:win": "npm run build && electron-builder --win dir --x64",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs"

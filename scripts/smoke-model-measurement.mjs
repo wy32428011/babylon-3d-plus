@@ -1,6 +1,25 @@
 import assert from 'node:assert/strict';
-import { MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
+import { Mesh, MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
 import { createServer } from 'vite';
+
+const SSR_MODULE_LOAD_TIMEOUT_MS = 60_000;
+
+/** 在限定时间内加载测量模块，避免 Vite SSR 异常时 smoke 无限等待。 */
+async function loadMeasurementModule(server) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      server.ssrLoadModule('/src/runtime/babylon/modelMeasurement.ts'),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Vite SSR 模型测量模块加载超时（${SSR_MODULE_LOAD_TIMEOUT_MS}ms）。`));
+        }, SSR_MODULE_LOAD_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
 
 /** 比较米制尺寸，允许 Babylon 世界矩阵计算产生极小浮点误差。 */
 function assertClose(actual, expected, message) {
@@ -23,11 +42,11 @@ try {
   server = await createServer({
     configFile: false,
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: { port: 24679, clientPort: 24679 } },
+    server: { middlewareMode: true, hmr: false },
     optimizeDeps: { noDiscovery: true },
   });
 
-  const measurementModule = await server.ssrLoadModule('/src/runtime/babylon/modelMeasurement.ts');
+  const measurementModule = await loadMeasurementModule(server);
   const { measureModelSizeMeters } = measurementModule;
 
   const root = new TransformNode('entityRoot', scene);
@@ -42,6 +61,13 @@ try {
     measureModelSizeMeters(root, contentRoot),
     { x: 0.18, y: 0.18, z: 0.32 },
     '厘米源模型必须按米测量',
+  );
+
+  root.position.copyFromFloats(120, -35, 80);
+  assertSize(
+    measureModelSizeMeters(root, contentRoot),
+    { x: 0.18, y: 0.18, z: 0.32 },
+    '模型平移不应改变自身轴向尺寸',
   );
 
   root.rotation.copyFromFloats(0.35, Math.PI / 3, -0.2);
@@ -70,24 +96,38 @@ try {
   hidden.parent = contentRoot;
   hidden.position.copyFromFloats(5000, 5000, 5000);
   hidden.isVisible = false;
+  const disabled = MeshBuilder.CreateBox('disabled-helper', { size: 1000 }, scene);
+  disabled.parent = contentRoot;
+  disabled.position.copyFromFloats(-5000, -5000, -5000);
+  disabled.setEnabled(false);
+  const zeroVisibility = MeshBuilder.CreateBox('zero-visibility-helper', { size: 1000 }, scene);
+  zeroVisibility.parent = contentRoot;
+  zeroVisibility.visibility = 0;
+  const empty = new Mesh('empty-helper', scene);
+  empty.parent = contentRoot;
   assertSize(
     measureModelSizeMeters(root, contentRoot),
     { x: 0.36, y: 0.27, z: 0.64 },
-    '不可见辅助网格不得污染模型尺寸',
+    '隐藏、禁用、完全透明或无顶点辅助网格不得污染模型尺寸',
   );
 
   box.dispose();
   hidden.dispose();
+  disabled.dispose();
+  zeroVisibility.dispose();
+  empty.dispose();
   assert.equal(measureModelSizeMeters(root, contentRoot), null, '无有效网格时必须返回 null');
 
   console.log(JSON.stringify({
     ok: true,
     modelMeasurement: {
       sourceUnitScale: 0.01,
+      translationInvariant: true,
       rotationInvariant: true,
       transformScaleApplied: true,
       parameterScaleApplied: true,
       hiddenMeshesIgnored: true,
+      disabledAndEmptyMeshesIgnored: true,
     },
   }, null, 2));
 } finally {

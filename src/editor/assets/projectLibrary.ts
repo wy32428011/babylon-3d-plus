@@ -2,6 +2,7 @@ import type { BuiltInImageAsset } from '../../assets/imageAssets';
 import { BUILT_IN_IMAGE_ASSETS } from '../../assets/imageAssets';
 import { formatBuiltInMeshBaseDimensionsMeters } from '../model/builtInMeshGeometry';
 import type { LightKind, MeshKind } from '../model/components';
+import { POI_EFFECT_DEFINITIONS } from '../model/poiEffect';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/sceneUnits';
 import type { AssetEntry, BuiltInAssetDragPayload } from './AssetDatabase';
 
@@ -43,6 +44,7 @@ export type ProjectLibrary = {
 
 export type BuiltInProjectLibraryAction =
   | { kind: 'model-generator' }
+  | { kind: 'poi-effect'; effectKind: (typeof POI_EFFECT_DEFINITIONS)[number]['kind'] }
   | { kind: 'mesh'; meshKind: MeshKind }
   | { kind: 'locator'; locatorKind: 'box-wire' }
   | { kind: 'light'; lightKind: LightKind };
@@ -82,6 +84,7 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     searchPlaceholder: '请输入POI名称...',
     items: [
       { id: 'poi-model-generator', name: '模型生成器', icon: 'ring', subtitle: '内置POI', builtIn: { kind: 'model-generator' } },
+      ...createPoiEffectLibraryItems(),
       { id: 'poi-chart-marker', name: '图表立标', icon: 'marker' },
       { id: 'poi-panel', name: '图表面板', icon: 'panel' },
       { id: 'poi-alarm', name: '报警管理器', icon: 'cube' },
@@ -144,6 +147,18 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     items: createImageLibraryItems(),
   },
 ];
+
+/** 将 15 个 EFF 预设转成 POI 库可点击、可拖拽的内置资源卡片。 */
+export function createPoiEffectLibraryItems(): BuiltInProjectLibraryItem[] {
+  return POI_EFFECT_DEFINITIONS.map((definition) => ({
+    id: `poi-eff-${definition.kind}`,
+    name: definition.name,
+    icon: definition.icon,
+    subtitle: `EFF · ${definition.subtitle}`,
+    hasStatusBadge: true,
+    builtIn: { kind: 'poi-effect', effectKind: definition.kind },
+  }));
+}
 
 /** 将内置图片资产转成 Project 图片库卡片展示数据。 */
 export function createImageLibraryItems(): BuiltInImageProjectLibraryItem[] {

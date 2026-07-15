@@ -4,8 +4,59 @@ import os from 'node:os';
 import path from 'node:path';
 import { createServer } from 'vite';
 
+const DXF_RENEW_PACKAGE_ID = '@linkiez/dxf-renew';
+const DXF_RENEW_SMOKE_MODULE_ID = '\0dxf-renew-smoke-adapter';
+const DXF_RENEW_BROWSER_BUNDLE_PATH = path.resolve('node_modules/@linkiez/dxf-renew/dist/dxf.js');
 
-/** 生成只含 JSON 块的最小 GLB，scanner 只读取 accessor min/max 即可验证单位解析边界。 */
+const SSR_MODULE_LOAD_TIMEOUT_MS = 300_000;
+
+/**
+ * 为 Node SSR smoke 适配 dxf-renew 发布包中的无扩展名 ESM 引用。
+ * 编辑器正式构建仍使用原依赖；这里只加载依赖自带浏览器 bundle，避免测试进程卡在 SSR 解析阶段。
+ */
+function createDxfRenewSmokeAdapterPlugin() {
+  return {
+    name: 'dxf-renew-smoke-adapter',
+    enforce: 'pre',
+    resolveId(source) {
+      return source === DXF_RENEW_PACKAGE_ID ? DXF_RENEW_SMOKE_MODULE_ID : null;
+    },
+    load(id) {
+      if (id !== DXF_RENEW_SMOKE_MODULE_ID) return null;
+
+      return `
+        import { readFileSync } from 'node:fs';
+        import vm from 'node:vm';
+        const context = { console };
+        vm.runInNewContext(
+          readFileSync(${JSON.stringify(DXF_RENEW_BROWSER_BUNDLE_PATH)}, 'utf8') + ';globalThis.__dxfRenew=dxf;',
+          context,
+        );
+        if (!context.__dxfRenew?.parseString) throw new Error('dxf-renew smoke adapter 初始化失败。');
+        export const parseString = context.__dxfRenew.parseString;
+      `;
+    },
+  };
+}
+
+/** 在限定时间内加载 Vite SSR 模块，超时时报告具体模块并由外层 finally 回收 server。 */
+async function loadSsrModuleWithTimeout(server, modulePath) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      server.ssrLoadModule(modulePath),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Vite SSR 模块加载超时（${SSR_MODULE_LOAD_TIMEOUT_MS}ms）：${modulePath}`));
+        }, SSR_MODULE_LOAD_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+/** 生成只含 JSON 块的最小 GLB，仅用于验证模型包扫描边界，不参与几何单位推断。 */
 function createMinimalGlbJson({ maxSize = 1 } = {}) {
   return {
     asset: { version: '2.0' },
@@ -79,18 +130,20 @@ try {
   server = await createServer({
     configFile: false,
     root: process.cwd(),
+    plugins: [createDxfRenewSmokeAdapterPlugin()],
     server: { middlewareMode: true, hmr: false },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] },
+    optimizeDeps: { noDiscovery: true },
+    ssr: { noExternal: [DXF_RENEW_PACKAGE_ID] },
   });
 
-  const cadReference = await server.ssrLoadModule('/src/editor/cad/cadReference.ts');
-  const largeCadReference = await server.ssrLoadModule('/src/editor/cad/cadReferenceLargeDxf.ts');
-  const environmentAssets = await server.ssrLoadModule('/src/editor/assets/environmentAssets.ts');
-  const sceneDocumentModule = await server.ssrLoadModule('/src/editor/model/SceneDocument.ts');
-  const sceneSerializer = await server.ssrLoadModule('/src/editor/project/SceneSerializer.ts');
-  const builtInGeometry = await server.ssrLoadModule('/src/editor/model/builtInMeshGeometry.ts');
-  const sceneUnits = await server.ssrLoadModule('/src/editor/model/sceneUnits.ts');
-  const modelPackageScanner = await server.ssrLoadModule('/electron/ipc/modelPackageScanner.ts');
+  const cadReference = await loadSsrModuleWithTimeout(server, '/src/editor/cad/cadReference.ts');
+  const largeCadReference = await loadSsrModuleWithTimeout(server, '/src/editor/cad/cadReferenceLargeDxf.ts');
+  const environmentAssets = await loadSsrModuleWithTimeout(server, '/src/editor/assets/environmentAssets.ts');
+  const sceneDocumentModule = await loadSsrModuleWithTimeout(server, '/src/editor/model/SceneDocument.ts');
+  const sceneSerializer = await loadSsrModuleWithTimeout(server, '/src/editor/project/SceneSerializer.ts');
+  const builtInGeometry = await loadSsrModuleWithTimeout(server, '/src/editor/model/builtInMeshGeometry.ts');
+  const sceneUnits = await loadSsrModuleWithTimeout(server, '/src/editor/model/sceneUnits.ts');
+  const modelPackageScanner = await loadSsrModuleWithTimeout(server, '/electron/ipc/modelPackageScanner.ts');
 
   const expectedInsUnits = new Map([
     [1, 0.0254], [2, 0.3048], [3, 1609.344], [4, 0.001], [5, 0.01], [6, 1],
@@ -208,6 +261,20 @@ try {
   assert.equal(serializedEnvironment.scene.sceneSettings.environment.lengthUnit, 'centimeter');
   assertClose(serializedEnvironment.scene.sceneSettings.environment.unitScaleToMeters, 0.01, '新场景必须保存环境单位');
 
+  const editorStateSnapshot = {
+    scene: normalizedLegacyScene,
+    selectedModelMeasurement: {
+      entityId: 'model_measurement_smoke',
+      status: 'ready',
+      sizeMeters: { x: 0.18, y: 0.18, z: 0.32 },
+    },
+  };
+  assert.ok(JSON.stringify(editorStateSnapshot).includes('selectedModelMeasurement'), '测试前置必须包含临时测量快照');
+  const serializedMeasurementScene = sceneSerializer.serializeScene(editorStateSnapshot.scene);
+  const parsedMeasurementScene = JSON.parse(serializedMeasurementScene);
+  assert.equal('selectedModelMeasurement' in parsedMeasurementScene.scene, false, '临时测量快照不得进入场景 JSON');
+  assert.equal(serializedMeasurementScene.includes('selectedModelMeasurement'), false, '序列化文本不得包含临时测量字段');
+
   assert.deepEqual(builtInGeometry.getBuiltInMeshBaseDimensionsMeters('cube'), { x: 1, y: 1, z: 1 });
   assert.deepEqual(builtInGeometry.getBuiltInMeshBaseDimensionsMeters('sphere'), { x: 1, y: 1, z: 1 });
   assert.deepEqual(builtInGeometry.getBuiltInMeshBaseDimensionsMeters('plane'), { x: 2, y: 0, z: 2 });
@@ -227,6 +294,7 @@ try {
       lengthUnit: environment.lengthUnit,
       unitScaleToMeters: environment.unitScaleToMeters,
       legacyLengthUnit: normalizedLegacyScene.sceneSettings.environment.lengthUnit,
+      transientMeasurementExcludedFromScene: true,
     },
     builtIn: ['cube', 'sphere', 'plane'],
     modelPackages: {

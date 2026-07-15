@@ -20,6 +20,7 @@ import {
   updateMeshRendererCommand,
   updateModelAssetCodeCommand,
   updateModelGeneratorCommand,
+  updatePoiEffectCommand,
   updateModelParameterValuesCommand,
   updateTelemetryBindingCommand,
   updateTransformCommand,
@@ -43,6 +44,8 @@ import type {
   ModelAssetTemplate,
   ModelGeneratorComponent,
   ModelGeneratorTarget,
+  PoiEffectComponent,
+  PoiEffectKind,
   TransformComponent,
 } from '../model/components';
 import type { Entity } from '../model/Entity';
@@ -57,6 +60,7 @@ import {
   createMeshEntity,
   createModelEntity,
   createModelGeneratorEntity,
+  createPoiEffectEntity,
   createModelAssetCode,
   extractModelAssetCodePrefix,
   sanitizeMqttConfig,
@@ -94,6 +98,7 @@ import {
   sanitizeModelGeneratorComponent,
 } from '../model/modelGenerator';
 import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent } from '../model/telemetryBinding';
+import { sanitizePoiEffectComponent } from '../model/poiEffect';
 import { deserializeScene, serializeScene } from '../project/SceneSerializer';
 import {
   CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES,
@@ -247,6 +252,7 @@ type EditorState = {
   createLocator: (placementPosition?: Vector3Data) => void;
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
   createModelGenerator: (placementPosition?: Vector3Data) => void;
+  createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
   refreshModelInstancesFromAssets: (assets: AssetEntry[]) => number;
@@ -278,6 +284,7 @@ type EditorState = {
   updateSelectedLight: (patch: Partial<LightComponent>) => void;
   updateSelectedModelAssetCode: (assetCode: string) => void;
   updateSelectedModelGenerator: (component: ModelGeneratorComponent, label?: string) => void;
+  updateSelectedPoiEffect: (component: PoiEffectComponent, label?: string) => void;
   updateSelectedTelemetryBinding: (binding: import('../model/telemetryBinding').TelemetryBindingComponent | null) => void;
   restoreSelectedTelemetryBindingDefault: () => void;
   updateSelectedModelParameterValue: (key: string, value: ModelParameterValue) => void;
@@ -837,6 +844,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     ...(entity.components.cadReference ? { cadReference: cloneCadReference(entity.components.cadReference) } : {}),
     ...(entity.components.modelAsset ? { modelAsset: cloneModelAsset(entity.components.modelAsset) } : {}),
     ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
+    ...(entity.components.poiEffect ? { poiEffect: { ...entity.components.poiEffect } } : {}),
     ...(entity.components.camera ? { camera: { ...entity.components.camera } } : {}),
     ...(entity.components.light ? { light: cloneLight(entity.components.light) } : {}),
   };
@@ -1551,6 +1559,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       const entity = createModelGeneratorEntity(sanitizeVector3(placementPosition));
       const command = createEntityCommand(entity);
+      const result = executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        hierarchySelectionIds: [entity.id],
+        logs: prependLog(state.logs, command.label),
+      };
+    });
+  },
+  /** 创建可撤销的 POI 内置 EFF 实体，并把新实体设为当前选择。 */
+  createPoiEffect: (effectKind, placementPosition) => {
+    const entity = createPoiEffectEntity(effectKind, sanitizeVector3(placementPosition));
+    const command = createEntityCommand(entity);
+
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建 EFF 特效');
       const result = executeCommand(state.scene, state.history, command);
       return {
         ...result,
@@ -2430,6 +2453,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const command = updateModelGeneratorCommand(entity.id, before, after, label);
       const result = executeCommand(state.scene, state.history, command);
       return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
+    });
+  },
+  /** 更新选中 EFF 的完整配置快照，并通过命令历史支持撤销和重做。 */
+  updateSelectedPoiEffect: (component, label = '更新 EFF 特效') => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
+      const entity = getSelectedEntity(state);
+      const current = entity?.components.poiEffect;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !current) return state;
+
+      const before = { ...current };
+      const after = sanitizePoiEffectComponent(component);
+      if (areJsonValuesEqual(before, after)) return state;
+
+      const command = updatePoiEffectCommand(entity.id, before, after, label);
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, `${command.label}: ${entity.name}`) };
     });
   },
   updateSelectedTelemetryBinding: (binding) => {

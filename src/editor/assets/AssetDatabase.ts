@@ -1,8 +1,9 @@
 import type { ModelParameterConfig } from '../model/modelParameters';
 import { normalizeModelParameterConfig } from '../model/modelParameters';
-import type { ModelScriptAsset } from '../model/components';
+import type { ModelScriptAsset, PoiEffectKind } from '../model/components';
 import { findBuiltInImageAssetByReference, type BuiltInImageAsset } from '../../assets/imageAssets';
 import { normalizeModelDataDrivenConfig, type ModelDataDrivenConfig } from '../model/telemetryBinding';
+import { isPoiEffectKind } from '../model/poiEffect';
 
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
 export type ModelAssetLibraryKind = 'model' | 'environment';
@@ -46,6 +47,7 @@ export type ImageAssetDragPayload = Pick<BuiltInImageAsset, 'id' | 'name' | 'ref
 
 export type BuiltInAssetDragPayload =
   | { kind: 'model-generator' }
+  | { kind: 'poi-effect'; effectKind: PoiEffectKind }
   | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
   | { kind: 'locator'; locatorKind: 'box-wire' }
   | { kind: 'light'; lightKind: 'hemispheric' | 'directional' | 'point' };
@@ -206,6 +208,12 @@ export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetD
 
     if (payload.kind === 'model-generator') {
       return { kind: 'model-generator' };
+    }
+
+    if (payload.kind === 'poi-effect') {
+      return isPoiEffectKind(payload.effectKind)
+        ? { kind: 'poi-effect', effectKind: payload.effectKind }
+        : null;
     }
 
     if (payload.kind === 'mesh') {

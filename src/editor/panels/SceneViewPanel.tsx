@@ -62,6 +62,7 @@ export function SceneViewPanel() {
   const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
   const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
+  const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
@@ -83,7 +84,7 @@ export function SceneViewPanel() {
       return;
     }
 
-    const measurement = runtime.getModelMeasurement(entityId) ?? { status: 'unavailable', sizeMeters: null };
+    const measurement = runtime.getModelMeasurement(entityId);
     setSelectedModelMeasurement({ entityId, ...measurement });
   }, [setSelectedModelMeasurement]);
 
@@ -175,6 +176,11 @@ export function SceneViewPanel() {
 
     if (builtInAsset.kind === 'model-generator') {
       createModelGenerator(placementPosition);
+      return;
+    }
+
+    if (builtInAsset.kind === 'poi-effect') {
+      createPoiEffect(builtInAsset.effectKind, placementPosition);
       return;
     }
 
