@@ -12,19 +12,50 @@ import {
 import { useEditorStore, type EntityArrayDirection } from '../store/editorStore';
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
-import type { SceneDocument } from '../model/SceneDocument';
+import type { SceneCameraPose, SceneDocument } from '../model/SceneDocument';
 
 const CLICK_SELECTION_TOLERANCE_PX = 4;
+const CAMERA_POSE_CHANGE_EPSILON = 1e-6;
 
 type PointerClickSnapshot = {
+  pointerId: number;
   button: number;
   clientX: number;
   clientY: number;
+  cameraPose: SceneCameraPose | null;
+  cameraDragged: boolean;
 };
 
 /** 将未知异常转换成可展示的简短消息。 */
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 判断指针交互前后相机是否发生有效位姿变化，让真实视角拖拽优先于模型拾取。 */
+function hasCameraPoseChanged(before: SceneCameraPose | null, after: SceneCameraPose | null): boolean {
+  if (!before || !after) return false;
+
+  return (
+    Math.abs(after.alpha - before.alpha) > CAMERA_POSE_CHANGE_EPSILON ||
+    Math.abs(after.beta - before.beta) > CAMERA_POSE_CHANGE_EPSILON ||
+    Math.abs(after.radius - before.radius) > CAMERA_POSE_CHANGE_EPSILON ||
+    Math.abs(after.target.x - before.target.x) > CAMERA_POSE_CHANGE_EPSILON ||
+    Math.abs(after.target.y - before.target.y) > CAMERA_POSE_CHANGE_EPSILON ||
+    Math.abs(after.target.z - before.target.z) > CAMERA_POSE_CHANGE_EPSILON
+  );
+}
+
+/** 判断 Babylon 相机是否已经累计本帧用户输入，覆盖位姿尚未刷新到 alpha/beta 的快速拖拽。 */
+function hasPendingCameraInput(viewport: BabylonViewport | null): boolean {
+  const movement = viewport?.camera.movement;
+  if (!movement) return false;
+
+  return (
+    movement.activeInput ||
+    Math.abs(movement.zoomAccumulatedPixels) > CAMERA_POSE_CHANGE_EPSILON ||
+    movement.panAccumulatedPixels.lengthSquared() > CAMERA_POSE_CHANGE_EPSILON ||
+    movement.rotationAccumulatedPixels.lengthSquared() > CAMERA_POSE_CHANGE_EPSILON
+  );
 }
 
 /** 从带正负号的阵列方向读取唯一世界坐标轴。 */
@@ -101,19 +132,44 @@ export function SceneViewPanel() {
     }
 
     clickSnapshotRef.current = {
+      pointerId: event.pointerId,
       button: event.button,
       clientX: event.clientX,
       clientY: event.clientY,
+      cameraPose: viewportRef.current?.getCameraPose() ?? null,
+      cameraDragged: false,
     };
   }
 
-  /** 左键短距离释放时执行对象拾取，空白区域会清空当前选择。 */
+  /** 在本次左键会话中锁存真实相机输入，避免快速微拖拽尚未刷新位姿时仍被当作模型点击。 */
+  function handleCanvasPointerMove(event: PointerEvent<HTMLCanvasElement>): void {
+    const snapshot = clickSnapshotRef.current;
+    if (!snapshot || snapshot.pointerId !== event.pointerId || (event.buttons & 1) === 0) return;
+    if (event.movementX === 0 && event.movementY === 0) return;
+
+    const pointerId = event.pointerId;
+    queueMicrotask(() => {
+      const currentSnapshot = clickSnapshotRef.current;
+      if (!currentSnapshot || currentSnapshot.pointerId !== pointerId) return;
+
+      const viewport = viewportRef.current;
+      const currentCameraPose = viewport?.getCameraPose() ?? null;
+      if (hasPendingCameraInput(viewport) || hasCameraPoseChanged(currentSnapshot.cameraPose, currentCameraPose)) {
+        currentSnapshot.cameraDragged = true;
+      }
+    });
+  }
+
+  /** 左键释放时先让视角拖拽优先，只有未驱动相机的短距离交互才执行对象拾取。 */
   function handleCanvasPointerUp(event: PointerEvent<HTMLCanvasElement>): void {
     const snapshot = clickSnapshotRef.current;
     clickSnapshotRef.current = null;
 
-    if (!snapshot || snapshot.button !== event.button) return;
+    if (!snapshot || snapshot.pointerId !== event.pointerId || snapshot.button !== event.button) return;
     if (gizmoRef.current?.isPointerUsingGizmo()) return;
+
+    const currentCameraPose = viewportRef.current?.getCameraPose() ?? null;
+    if (snapshot.cameraDragged || hasCameraPoseChanged(snapshot.cameraPose, currentCameraPose)) return;
 
     const movedDistance = Math.hypot(event.clientX - snapshot.clientX, event.clientY - snapshot.clientY);
     if (movedDistance > CLICK_SELECTION_TOLERANCE_PX) return;
@@ -401,6 +457,7 @@ export function SceneViewPanel() {
           onDragOver={handleCanvasDragOver}
           onDrop={handleCanvasDrop}
           onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
           onPointerUp={handleCanvasPointerUp}
           onPointerCancel={handleCanvasPointerCancel}
         />
