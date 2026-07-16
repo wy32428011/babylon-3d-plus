@@ -42,6 +42,7 @@ const TOOLBAR_ICONS = {
   scale: '⛶',
   local: '⌖',
   global: '◎',
+  topView: '俯',
   delete: '⌫',
   undo: '↶',
   redo: '↷',
@@ -109,6 +110,7 @@ type ToolbarProps = {
   onUpdateSnapSetting: (key: TransformSnapSettingKey, value: number) => void;
   onSetGridVisible: (visible: boolean) => void;
   onSetGridCellSize: (cellSizeMeters: EditorGridCellSize) => void;
+  onSetTopView: () => void;
   onDeleteSelectedEntity: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -405,6 +407,11 @@ export function Toolbar(props: ToolbarProps) {
           onClick={() => props.onSetTransformSpace('global')}
         />
       </div>
+      <ToolbarIconButton
+        icon={TOOLBAR_ICONS.topView}
+        label="切换为俯视视角"
+        onClick={props.onSetTopView}
+      />
       <label className="toolbar-checkbox">
         <input
           type="checkbox"
