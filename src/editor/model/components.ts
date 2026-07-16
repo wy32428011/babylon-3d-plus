@@ -170,6 +170,7 @@ export type PoiEffectKind =
   | 'water-jet'
   | 'pipeline-flow-particles'
   | 'pipeline-flow-arrows'
+  | 'moving-double-arrow'
   | 'cargo-target-frame'
   | 'conveyor-direction'
   | 'evacuation-route';

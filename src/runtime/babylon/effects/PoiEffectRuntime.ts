@@ -172,7 +172,7 @@ export class PoiEffectRuntime {
     return { meshes: [], materials: [], particleSystems: [], textures: [] };
   }
 
-  /** 按类型创建 15 种可区分效果。 */
+  /** 按类型创建 16 种可区分效果。 */
   private createEffect(id: string, component: PoiEffectComponent, root: TransformNode): PoiResources {
     const resources = this.emptyResources();
     const kind = component.effectKind;
@@ -227,6 +227,12 @@ export class PoiEffectRuntime {
     } else if (kind === 'pipeline-flow-arrows') {
       const count = this.scaleRepeatedCount(5, component.density, 2, 10);
       for (let i = 0; i < count; i += 1) this.addArrow(resources, root, `${id}_pipe_arrow_${i}`, primary, 0.4, i, count);
+    } else if (kind === 'moving-double-arrow') {
+      const count = this.scaleRepeatedCount(3, component.density, 1, 6);
+      this.addBox(resources, root, `${id}_double_arrow_guide`, secondary, 3.2, 0.015, 0.035, null, 0.14).position.y = 0.045;
+      for (let i = 0; i < count; i += 1) {
+        this.addMovingDoubleArrowGroup(resources, root, `${id}_double_arrow_${i}`, primary, secondary, i, count, intensity);
+      }
     } else if (kind === 'cargo-target-frame') {
       const frame = this.addBox(resources, root, `${id}_cargo_frame`, primary, 1.25, 1, 1.25, null, 0.18);
       frame.position.y = 0.5;
@@ -338,6 +344,117 @@ export class PoiEffectRuntime {
     head.metadata = { effectRole: 'flow', flowIndex: index, flowCount: count, arrowPart: 'head' };
   }
 
+  /** 创建一个成组移动的 `>>`，并把同材质折线段预合并为有限数量的动画 Mesh。 */
+  private addMovingDoubleArrowGroup(
+    resources: PoiResources,
+    root: TransformNode,
+    name: string,
+    primaryColor: string,
+    secondaryColor: string,
+    groupIndex: number,
+    groupCount: number,
+    intensity: number,
+  ): void {
+    const sizeScale = 0.9 + Math.min(3, Math.max(0.1, intensity)) * 0.08;
+    const trailingOffset = -0.2;
+    const leadingOffset = 0.2;
+
+    this.addMovingDoubleArrowMesh(
+      resources,
+      root,
+      `${name}_glow`,
+      secondaryColor,
+      [trailingOffset, leadingOffset],
+      0.48,
+      0.09,
+      0.14,
+      sizeScale * 1.18,
+      0.14,
+      groupIndex,
+      groupCount,
+      0.105,
+    );
+    this.addMovingDoubleArrowMesh(
+      resources,
+      root,
+      `${name}_trailing`,
+      secondaryColor,
+      [trailingOffset],
+      0.42,
+      0.065,
+      0.1,
+      sizeScale,
+      0.86,
+      groupIndex,
+      groupCount,
+      0.12,
+    );
+    this.addMovingDoubleArrowMesh(
+      resources,
+      root,
+      `${name}_leading`,
+      primaryColor,
+      [leadingOffset],
+      0.42,
+      0.065,
+      0.1,
+      sizeScale,
+      0.86,
+      groupIndex,
+      groupCount,
+      0.12,
+    );
+  }
+
+  /** 创建并登记一块移动双箭头合并几何；每个偏移对应一枚朝本地 +X 的 `>`。 */
+  private addMovingDoubleArrowMesh(
+    resources: PoiResources,
+    root: TransformNode,
+    name: string,
+    color: string,
+    chevronOffsets: readonly number[],
+    segmentLength: number,
+    segmentHeight: number,
+    segmentDepth: number,
+    scale: number,
+    alpha: number,
+    groupIndex: number,
+    groupCount: number,
+    baseY: number,
+  ): Mesh {
+    const segments: Mesh[] = [];
+
+    for (let chevronIndex = 0; chevronIndex < chevronOffsets.length; chevronIndex += 1) {
+      const chevronOffset = chevronOffsets[chevronIndex];
+      const upper = MeshBuilder.CreateBox(`${name}_${chevronIndex}_upper`, { width: segmentLength, height: segmentHeight, depth: segmentDepth }, this.scene);
+      const lower = MeshBuilder.CreateBox(`${name}_${chevronIndex}_lower`, { width: segmentLength, height: segmentHeight, depth: segmentDepth }, this.scene);
+      // 上下折线段在本地 +X 端汇合，确保箭头朝向与运动方向一致。
+      upper.position.set(chevronOffset, 0, 0.115);
+      upper.rotation.y = Math.PI / 4;
+      lower.position.set(chevronOffset, 0, -0.115);
+      lower.rotation.y = -Math.PI / 4;
+      upper.scaling.set(scale, 1, scale);
+      lower.scaling.set(scale, 1, scale);
+      upper.computeWorldMatrix(true);
+      lower.computeWorldMatrix(true);
+      segments.push(upper, lower);
+    }
+
+    const merged = Mesh.MergeMeshes(segments, true, true);
+    if (!merged) {
+      for (const segment of segments) {
+        if (!segment.isDisposed()) segment.dispose(false, false);
+      }
+      throw new Error(`移动双箭头几何合并失败：${name}`);
+    }
+
+    merged.name = name;
+    const mesh = this.registerMesh(resources, root, merged, color, alpha, 'double-arrow-flow', groupIndex, groupCount);
+    mesh.position.y = baseY;
+    mesh.metadata = { ...(mesh.metadata ?? {}), baseY };
+    return mesh;
+  }
+
   /** 注册 Mesh、材质、父子关系和动画元数据。 */
   private registerMesh(resources: PoiResources, root: TransformNode, mesh: Mesh, color: string, alpha: number, role: string | null, index = 0, count = 1): Mesh {
     const material = this.createMaterial(`${mesh.name}_mat`, color, alpha);
@@ -447,6 +564,14 @@ export class PoiEffectRuntime {
       const offset = mesh.metadata?.arrowPart === 'head' ? 0.32 : 0;
       mesh.position.x = -1 + phase * 2 + offset;
       this.setAlpha(mesh, 0.35 + phase * 0.55);
+    } else if (role === 'double-arrow-flow') {
+      const index = typeof mesh.metadata?.flowIndex === 'number' ? mesh.metadata.flowIndex : 0;
+      const count = typeof mesh.metadata?.flowCount === 'number' ? mesh.metadata.flowCount : 1;
+      const baseY = typeof mesh.metadata?.baseY === 'number' ? mesh.metadata.baseY : 0.12;
+      const phase = (time * 0.58 + index / count) % 1;
+      const edgeFade = Math.pow(Math.sin(Math.PI * phase), 0.7);
+      mesh.position.set(-1.45 + phase * 2.9, baseY, 0);
+      this.setAlpha(mesh, baseAlpha * (0.24 + edgeFade * 0.76));
     }
   }
 

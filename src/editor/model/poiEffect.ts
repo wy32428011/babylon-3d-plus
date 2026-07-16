@@ -14,6 +14,7 @@ export const POI_EFFECT_KINDS = [
   'water-jet',
   'pipeline-flow-particles',
   'pipeline-flow-arrows',
+  'moving-double-arrow',
   'cargo-target-frame',
   'conveyor-direction',
   'evacuation-route',
@@ -35,7 +36,7 @@ export type PoiEffectDefinition = {
   defaults: Omit<PoiEffectComponent, 'effectKind'>;
 };
 
-/** 15 个工业数字孪生 EFF 的唯一预设登记表。 */
+/** 16 个工业数字孪生 EFF 的唯一预设登记表。 */
 export const POI_EFFECT_DEFINITIONS: readonly PoiEffectDefinition[] = [
   createDefinition('alarm-pulse', '报警脉冲光圈', '告警定位', 'ring', '#ff3b30', '#ffb3ad', 1.3, 1.2, 1),
   createDefinition('warning-beacon', '旋转警示灯', '设备告警', 'marker', '#ff3b30', '#ffb000', 1.4, 1.2, 1),
@@ -49,6 +50,7 @@ export const POI_EFFECT_DEFINITIONS: readonly PoiEffectDefinition[] = [
   createDefinition('water-jet', '水流喷射', '漏水消防', 'marker', '#22a7ff', '#b9efff', 1, 1.4, 1.1),
   createDefinition('pipeline-flow-particles', '管线流动粒子', '介质流向', 'ring', '#2ed6ff', '#a9f6ff', 1.2, 1, 1),
   createDefinition('pipeline-flow-arrows', '管线流动箭头', '方向标识', 'panel', '#2ed6ff', '#4f8cff', 1.2, 1, 1),
+  createDefinition('moving-double-arrow', '移动双箭头', '动态方向', 'panel', '#29e6ff', '#9ff8ff', 1.3, 1.2, 1),
   createDefinition('cargo-target-frame', '货物目标定位框', '仓储定位', 'cube', '#ffc928', '#fff2a1', 1.2, 0.8, 0.8),
   createDefinition('conveyor-direction', '输送方向箭头', '输送流向', 'panel', '#39d8ff', '#bdf7ff', 1.1, 1, 1),
   createDefinition('evacuation-route', '疏散路线', '安全引导', 'person', '#36e36d', '#d4ffdf', 1.2, 1, 1),

@@ -4,7 +4,7 @@
 
 ## 1. 目标
 
-在 Project 面板的 `POI库` 内置 15 个工业数字孪生 EFF 特效。用户可点击卡片在原点创建，也可拖入 Scene View 按地面落点创建；创建后作为标准场景实体参与 Hierarchy、选择、Transform、显隐、锁定、复制、粘贴、阵列、撤销/重做、保存和加载。
+在 Project 面板的 `POI库` 内置 16 个工业数字孪生 EFF 特效。用户可点击卡片在原点创建，也可拖入 Scene View 按地面落点创建；创建后作为标准场景实体参与 Hierarchy、选择、Transform、显隐、锁定、复制、粘贴、阵列、撤销/重做、保存和加载。
 
 ## 2. 内置特效
 
@@ -20,15 +20,16 @@
 10. 水流喷射 `water-jet`
 11. 管线流动粒子 `pipeline-flow-particles`
 12. 管线流动箭头 `pipeline-flow-arrows`
-13. 货物目标定位框 `cargo-target-frame`
-14. 输送方向箭头 `conveyor-direction`
-15. 疏散路线 `evacuation-route`
+13. 移动双箭头 `moving-double-arrow`
+14. 货物目标定位框 `cargo-target-frame`
+15. 输送方向箭头 `conveyor-direction`
+16. 疏散路线 `evacuation-route`
 
 ## 3. 数据模型
 
 所有特效共用 `PoiEffectComponent`，只保存可序列化配置：
 
-- `effectKind`：15 个稳定类型之一。
+- `effectKind`：16 个稳定类型之一。
 - `enabled`：是否播放并显示特效。
 - `primaryColor`：主颜色。
 - `secondaryColor`：辅助颜色。
@@ -46,7 +47,7 @@
 
 ## 4. 编辑器交互
 
-- POI 库中的 15 张卡片均可点击或拖拽创建。
+- POI 库中的 16 张卡片均可点击或拖拽创建。
 - 特效实体显示在 Hierarchy 中，名称使用中文预设名称。
 - Scene View 使用透明拾取壳选中特效，内部视觉节点不可独立拾取。
 - Inspector 提供特效类型、启用状态、主/辅颜色、强度、速度和密度。
@@ -72,6 +73,7 @@
 - 同步过程不得每帧重建资源；逐帧仅更新旋转、位移、缩放、透明度等轻量属性。
 - 隐藏或禁用实体不执行对应动画更新。
 - 流动粒子和箭头使用有限数量的重复几何体，不创建无限轨迹。
+- 移动双箭头把每组 8 段 Box 预合并为 3 个动画 Mesh，默认 9 个、最大 18 个动画 Mesh，控制 draw call 与逐帧属性更新量。
 - 不新增独立 GlowLayer，避免与现有网格 GlowLayer 叠加产生高成本后处理。
 
 ## 7. 兼容和失败处理
@@ -83,9 +85,9 @@
 
 ## 8. 验收标准
 
-- POI 库显示并可创建全部 15 个特效。
+- POI 库显示并可创建全部 16 个特效。
 - 点击和拖拽创建位置正确。
-- 15 个效果在 Scene View 中具有可区分的动态视觉表现。
+- 16 个效果在 Scene View 中具有可区分的动态视觉表现。
 - Inspector 参数修改实时更新。
 - 选择、Gizmo、显隐、锁定、复制、阵列、删除、撤销和重做不报错。
 - 保存后重新加载，类型和参数保持一致。

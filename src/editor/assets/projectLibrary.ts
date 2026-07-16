@@ -148,7 +148,7 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
   },
 ];
 
-/** 将 15 个 EFF 预设转成 POI 库可点击、可拖拽的内置资源卡片。 */
+/** 将全部 EFF 预设转成 POI 库可点击、可拖拽的内置资源卡片。 */
 export function createPoiEffectLibraryItems(): BuiltInProjectLibraryItem[] {
   return POI_EFFECT_DEFINITIONS.map((definition) => ({
     id: `poi-eff-${definition.kind}`,
