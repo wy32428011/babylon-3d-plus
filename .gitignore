@@ -6,3 +6,4 @@ dist
 .playwright-mcp
 .playwright-cli
 release/
+CLAUDE.md
