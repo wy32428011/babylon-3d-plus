@@ -72,6 +72,18 @@
 
 编辑器运行时新增独立模型测量工具：汇总 `contentRoot` 下未销毁、自身启用、可见且有顶点的 Mesh 世界包围盒角点，再投影到实体根自身 X/Y/Z 轴。测量自然包含内容根单位缩放、参数脚本造成的几何变化和用户 `Transform.scale`；实体平移或旋转不会改变轴向跨度。无有效几何时返回 `unavailable`。
 
+#### 参数化脚本米制契约
+
+模型包的源单位声明与参数脚本完全解耦，但所有长度类参数的运行时输入统一为米。脚本不得把 `contentRoot.scaling`、GLB 局部坐标或 `unitScaleToMeters` 当作 Inspector 参数单位；应遵循以下边界：
+
+1. 基线尺寸在实体根局部米空间计算：仅汇总未销毁、自身启用、可见、`visibility > 0` 且有顶点的 Mesh，先刷新局部包围盒，再强制重算世界矩阵后读取角点；空 glTF 根 Mesh、隐藏/禁用 helper 和占位 Mesh 不参与。
+2. 参数产生的米制位移先映射到实体根世界方向，再通过目标父节点世界矩阵逆变换回父级局部坐标，兼容 cm/mm 源单位、嵌套旋转和用户非均匀 `Transform.scale`。
+3. 若脚本直接缩放整个 `contentRoot`，必须在缩放前后读取底部中心并回补 position，避免源 GLB 大坐标归一化补偿被比例放大后导致整机漂移。Box 按三轴同比缩放基线 position，属于该锚点规则的等价实现。
+4. 模型基线和模板查询排除 `generatedByParametricRuntime` 节点；对当前正在移动或缩放的生成 clone，则允许测量其自身真实子树，避免中心缺失回退为 0。
+5. 参数反复切换必须先恢复保存的节点/顶点基线，再重新应用目标值，不允许累计乘法或位置漂移。全量 smoke 会注入超大隐藏/禁用 helper Mesh，确保归一化、参数倍率和最终测量都忽略无效几何。
+
+当前外部模型清单为 `多穿小车、辊道机、链条机、box、GD_有电机_Optimized(1)、HCTS、LED、RGV、Shelf、Stacker、WLTS、YZJ`。源包与 `Assets/Models` 副本必须逐字节同步；Shelf、Stacker、YZJ 还需同步浏览器可视夹具。
+
 `SceneRuntime.getModelMeasurement(entityId)` 统一返回 `loading | ready | unavailable`。模型加载、单位/Transform 同步和参数脚本完成后，通过可选失效通知刷新 `SceneViewPanel` 中的 Zustand 临时快照；不轮询。该快照仅供 Inspector 展示，不进入 `SceneDocument`、场景 JSON、撤销历史或剪贴板，切换选择/场景时清空。
 
 ### 3. 环境模型
@@ -137,5 +149,5 @@ unitScaleToMeters: number;
 - 普通 CAD 与大文件 CAD 得到一致的单位结果。
 - Inspector/日志能辨识模型或 CAD 的源单位与换算到米的结果。
 - 所有普通导入模型在 Inspector 显示只读实际尺寸；参数变化会刷新，旋转不改变数值，非均匀 scale 按实体轴生效。
-- 测量状态不进入序列化场景；`npm run smoke:units` 同时覆盖单位导入和模型测量。
+- 测量状态不进入序列化场景；`npm run smoke:units` 同时覆盖单位导入、模型测量和 12 个外部模型参数脚本的默认/自定义/旋转/非均匀缩放回归。
 - `npm run typecheck`、单位 smoke、`npm run build`、`git diff --check` 通过。

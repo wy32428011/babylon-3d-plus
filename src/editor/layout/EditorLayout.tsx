@@ -245,20 +245,18 @@ export function EditorLayout() {
         </aside>
         <main className={styles.centerColumn}>
           <SceneViewPanel />
+          <div className={styles.bottomWorkspace}>
+            <ProjectPanel readOnly={isRuntimePreview} />
+            <ConsolePanel
+              isOpen={isConsoleDialogOpen}
+              onClose={() => setConsoleDialogOpen(false)}
+              onOpen={() => setConsoleDialogOpen(true)}
+            />
+          </div>
         </main>
         <aside className={styles.rightColumn}>
           <InspectorPanel readOnly={isRuntimePreview} />
         </aside>
-      </div>
-      <div className={styles.bottomBar}>
-        <div className={styles.bottomWorkspace}>
-          <ProjectPanel readOnly={isRuntimePreview} />
-          <ConsolePanel
-            isOpen={isConsoleDialogOpen}
-            onClose={() => setConsoleDialogOpen(false)}
-            onOpen={() => setConsoleDialogOpen(true)}
-          />
-        </div>
       </div>
     </div>
   );

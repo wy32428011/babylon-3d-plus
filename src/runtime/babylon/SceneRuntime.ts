@@ -75,7 +75,7 @@ import {
   calculateEnvironmentOriginLeftOffset,
   ENVIRONMENT_FALLBACK_LEFT_OFFSET_METERS,
 } from './environmentPlacement';
-import { measureModelSizeMeters, type ModelMeasurementResult } from './modelMeasurement';
+import { isMeasurableModelMesh, measureModelSizeMeters, type ModelMeasurementResult } from './modelMeasurement';
 import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
 import { GenericTelemetryMotionRuntime } from './telemetry/GenericTelemetryMotionRuntime';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
@@ -5496,7 +5496,7 @@ export class SceneRuntime {
   private normalizeModelContentOrigin(model: ModelRuntimeEntry): void {
     model.root.computeWorldMatrix(true);
 
-    const childMeshes = model.root.getChildMeshes(false);
+    const childMeshes = model.root.getChildMeshes(false).filter(isMeasurableModelMesh);
     if (childMeshes.length === 0) return;
 
     let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);

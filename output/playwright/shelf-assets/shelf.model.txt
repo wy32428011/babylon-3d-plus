@@ -2,6 +2,7 @@
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { visibleAsBoolean, visibleAsNumber, visibleAsString } from "babylonjs-editor-tools";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+// 参数长度统一使用米；contentRoot 的基础 scaling 已由编辑器包含源单位换算。
 
 // 此文件按模型参数化说明生成，用于 多穿货架 的静态参数配置。
 // 当前版本按 Shelf.glb 的真实节点结构做部件级变形，避免根节点整体拉伸。
@@ -26,28 +27,28 @@ export class ParametricModelParamsComponent {
 	@visibleAsNumber("列数", { step: 1 })
 	public columnCount: number = 1;
 
-	@visibleAsNumber("货格宽度", { step: 0.1 })
+	@visibleAsNumber("单元宽度 (m)", { step: 0.1 })
 	public cellWidth: number = 0.801;
 
-	@visibleAsNumber("货架高度", { step: 0.1 })
+	@visibleAsNumber("单元高度 (m)", { step: 0.1 })
 	public cellHeight: number = 4.525;
 
-	@visibleAsNumber("底部支架腿高度", { step: 0.05 })
+	@visibleAsNumber("支撑脚高度 (m)", { step: 0.05 })
 	public supportLegHeight: number = 0.904;
 
-	@visibleAsNumber("货格深度", { step: 0.1 })
+	@visibleAsNumber("单元深度 (m)", { step: 0.1 })
 	public cellDepth: number = 1.183;
 
-	@visibleAsNumber("立柱宽度", { step: 0.01 })
+	@visibleAsNumber("立柱宽度 (m)", { step: 0.01 })
 	public postWidth: number = 0.08;
 
 	@visibleAsBoolean("启用双深货位")
 	public doubleDeepEnabled: boolean = false;
 
-	@visibleAsNumber("深位间隔", { step: 0.05 })
+	@visibleAsNumber("深位间隔 (m)", { step: 0.05 })
 	public deepSlotGap: number = 0.2;
 
-	@visibleAsNumber("深位提升", { step: 0.05 })
+	@visibleAsNumber("深位提升 (m)", { step: 0.05 })
 	public deepSlotLift: number = 0;
 
 	/** 创建 多穿货架 参数配置组件。 */
@@ -300,7 +301,7 @@ export class ParametricModelRuntimeComponent {
 	/** 读取 Shelf 部件并按宽、高、深、底腿、层数和列数生成目标形态。 */
 	private applyShelfParameters(values: ValueMap): void {
 		const parts = this.getShelfParts();
-		const bounds = this.getNodesWorldBounds(parts.map((part) => part.node));
+		const bounds = this.getNodesMeterBounds(parts.map((part) => part.node));
 		if (!bounds || parts.length === 0) {
 			return;
 		}
@@ -331,23 +332,23 @@ export class ParametricModelRuntimeComponent {
 		this.applyShelfDepthLayout(parts, bounds, targetDepth);
 
 		parts.filter((part) => this.isLowerCrossbeamPart(part)).forEach((part) => {
-			this.moveNodeWorldAxisBy(part.node, "y", supportLegDelta);
+			this.moveNodeMeterAxisBy(part.node, "y", supportLegDelta);
 		});
 		parts.filter((part) => this.isSideTriangleBracePart(part)).forEach((part) => {
-			const nodeBounds = this.getNodesWorldAxisBounds([part.node], "y");
+			const nodeBounds = this.getNodesMeterAxisBounds([part.node], "y");
 			if (nodeBounds) {
-				this.fitNodeWorldAxisToBounds(part.node, "y", "z", this.createHeightScaledBounds(nodeBounds, bounds.minimum.y, supportLegHeightRatio));
+				this.fitNodeMeterAxisToBounds(part.node, "y", "z", this.createHeightScaledBounds(nodeBounds, bounds.minimum.y, supportLegHeightRatio));
 			}
 		});
 		const upperFrameDelta = targetSingleLayerHeight - bounds.size.y;
 		parts.filter((part) => this.isUpperLayerFramePart(part)).forEach((part) => {
-			this.moveNodeWorldAxisBy(part.node, "y", upperFrameDelta);
+			this.moveNodeMeterAxisBy(part.node, "y", upperFrameDelta);
 		});
 	}
 
 	/** 读取原始下方黄色横梁中心相对模型底部的高度，作为底腿参数的稳定基准。 */
 	private getSourceSupportLegHeight(parts: ShelfPart[], sourceMinimum: number): number {
-		const lowerCrossbeamBounds = this.getNodesWorldAxisBounds(
+		const lowerCrossbeamBounds = this.getNodesMeterAxisBounds(
 			parts.filter((part) => this.isLowerCrossbeamPart(part)).map((part) => part.node),
 			"y"
 		);
@@ -371,21 +372,21 @@ export class ParametricModelRuntimeComponent {
 
 	/** 拉伸指定跨宽节点，并在缩放后重新贴回目标端点区间。 */
 	private applyWidthStretchPart(part: ShelfPart, layout: ShelfAxisLayout): void {
-		const nodeBounds = this.getNodesWorldAxisBounds([part.node], "x");
+		const nodeBounds = this.getNodesMeterAxisBounds([part.node], "x");
 		if (!nodeBounds) {
 			return;
 		}
 
-		this.fitNodeWorldAxisToBounds(part.node, "x", "x", this.createEndpointAnchoredBounds(nodeBounds, layout));
+		this.fitNodeMeterAxisToBounds(part.node, "x", "x", this.createEndpointAnchoredBounds(nodeBounds, layout));
 	}
 
 	/** 非跨宽连接件保持相对最近端点的原始偏移，随跨宽节点端点一起外移或内收。 */
 	private moveConnectedPartWithWidthEndpoint(part: ShelfPart, layout: ShelfAxisLayout): void {
-		const nodeBounds = this.getNodesWorldAxisBounds([part.node], "x");
+		const nodeBounds = this.getNodesMeterAxisBounds([part.node], "x");
 		if (!nodeBounds || !part.node.position) {
 			return;
 		}
-		this.moveNodeWorldAxisBy(part.node, "x", this.getEndpointConnectedCenter(nodeBounds, layout) - nodeBounds.center);
+		this.moveNodeMeterAxisBy(part.node, "x", this.getEndpointConnectedCenter(nodeBounds, layout) - nodeBounds.center);
 	}
 
 	/** 以四个跨宽节点的新前后端点作为锚点，让立柱和层板随深度边界移动。 */
@@ -403,36 +404,36 @@ export class ParametricModelRuntimeComponent {
 
 	/** 拉伸深度梁或侧撑，并在缩放后重新贴回目标前后端点区间。 */
 	private applyDepthStretchPart(part: ShelfPart, layout: ShelfAxisLayout): void {
-		const nodeBounds = this.getNodesWorldAxisBounds([part.node], "z");
+		const nodeBounds = this.getNodesMeterAxisBounds([part.node], "z");
 		if (!nodeBounds) {
 			return;
 		}
 
-		this.fitNodeWorldAxisToBounds(part.node, "z", "y", this.createEndpointAnchoredBounds(nodeBounds, layout));
+		this.fitNodeMeterAxisToBounds(part.node, "z", "y", this.createEndpointAnchoredBounds(nodeBounds, layout));
 	}
 
 	/** 侧面三角斜撑独立适配深度端点，避免与普通水平深度梁混用分类。 */
 	private applySideTriangleBraceDepthPart(part: ShelfPart, layout: ShelfAxisLayout): void {
-		const nodeBounds = this.getNodesWorldAxisBounds([part.node], "z");
+		const nodeBounds = this.getNodesMeterAxisBounds([part.node], "z");
 		if (!nodeBounds) {
 			return;
 		}
 
-		this.fitNodeWorldAxisToBounds(part.node, "z", "y", this.createEndpointAnchoredBounds(nodeBounds, layout));
+		this.fitNodeMeterAxisToBounds(part.node, "z", "y", this.createEndpointAnchoredBounds(nodeBounds, layout));
 	}
 
 	/** 非深度拉伸部件保持相对最近前后端点的原始偏移，随新深度边界移动。 */
 	private moveConnectedPartWithDepthEndpoint(part: ShelfPart, layout: ShelfAxisLayout): void {
-		const nodeBounds = this.getNodesWorldAxisBounds([part.node], "z");
+		const nodeBounds = this.getNodesMeterAxisBounds([part.node], "z");
 		if (!nodeBounds || !part.node.position) {
 			return;
 		}
-		this.moveNodeWorldAxisBy(part.node, "z", this.getEndpointConnectedCenter(nodeBounds, layout) - nodeBounds.center);
+		this.moveNodeMeterAxisBy(part.node, "z", this.getEndpointConnectedCenter(nodeBounds, layout) - nodeBounds.center);
 	}
 
 	/** 计算通用端点布局，保留跨宽节点之外的固定外沿余量。 */
 	private createShelfAxisLayout(nodes: any[], axis: "x" | "z", bounds: { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 }, targetSize: number): ShelfAxisLayout {
-		const source = this.getNodesWorldAxisBounds(nodes, axis) ?? {
+		const source = this.getNodesMeterAxisBounds(nodes, axis) ?? {
 			minimum: bounds.minimum[axis],
 			maximum: bounds.maximum[axis],
 			center: bounds.center[axis],
@@ -513,14 +514,14 @@ export class ParametricModelRuntimeComponent {
 			center: (postMinimum + targetMaximum) / 2,
 			size: Math.max(MIN_DIMENSION, targetMaximum - postMinimum)
 		};
-		parts.filter((part) => this.isPostPart(part)).forEach((part) => this.fitNodeWorldAxisToBounds(part.node, "y", "z", targetBounds));
+		parts.filter((part) => this.isPostPart(part)).forEach((part) => this.fitNodeMeterAxisToBounds(part.node, "y", "z", targetBounds));
 	}
 
 	/** 汇总全部立柱当前世界 Y 轴投影最低点，作为高度拉伸时不变的底端锚点。 */
 	private getPostMinimumY(parts: ShelfPart[]): number | null {
 		const minimums = parts
 			.filter((part) => this.isPostPart(part))
-			.map((part) => this.getNodesWorldAxisBounds([part.node], "y")?.minimum)
+			.map((part) => this.getNodesMeterAxisBounds([part.node], "y")?.minimum)
 			.filter((minimum): minimum is number => typeof minimum === "number" && Number.isFinite(minimum));
 		return minimums.length > 0 ? Math.min(...minimums) : null;
 	}
@@ -568,9 +569,9 @@ export class ParametricModelRuntimeComponent {
 	/** 生成单元格组合偏移；参数单位为米，方向始终取模型当前局部 X/Y/Z 对应的世界方向。 */
 	private createShelfGridOffset(column: number, layer: number, depth: number, spacingX: number, spacingY: number, deepOffsetZ: number, deepOffsetY: number): Vector3 {
 		const offset = Vector3.Zero();
-		offset.addInPlace(this.createWorldAxisVector("x", column * spacingX));
-		offset.addInPlace(this.createWorldAxisVector("y", layer * spacingY + depth * deepOffsetY));
-		offset.addInPlace(this.createWorldAxisVector("z", depth * deepOffsetZ));
+		offset.addInPlace(this.createMeterAxisVector("x", column * spacingX));
+		offset.addInPlace(this.createMeterAxisVector("y", layer * spacingY + depth * deepOffsetY));
+		offset.addInPlace(this.createMeterAxisVector("z", depth * deepOffsetZ));
 		return offset;
 	}
 
@@ -586,7 +587,7 @@ export class ParametricModelRuntimeComponent {
 	private createColumnLayout(parts: ShelfPart[], fallback: number): ShelfColumnLayout {
 		const supportCenters = parts
 			.filter((part) => this.isSupportPart(part))
-			.map((part) => this.getNodesWorldAxisBounds([part.node], "x")?.center)
+			.map((part) => this.getNodesMeterAxisBounds([part.node], "x")?.center)
 			.filter((center): center is number => typeof center === "number" && Number.isFinite(center));
 		const spacing = this.getColumnCenterSpacingFromCenters(supportCenters, fallback);
 		return {
@@ -610,7 +611,7 @@ export class ParametricModelRuntimeComponent {
 		if (columnLayout.startCenter === null || !this.isSupportPart(part)) {
 			return false;
 		}
-		const center = this.getNodesWorldAxisBounds([part.node], "x")?.center;
+		const center = this.getNodesMeterAxisBounds([part.node], "x")?.center;
 		return center !== undefined && Math.abs(center - columnLayout.startCenter) <= columnLayout.tolerance;
 	}
 
@@ -718,12 +719,12 @@ export class ParametricModelRuntimeComponent {
 		return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	}
 
-	/** 将节点指定世界轴缩放并居中到目标包围盒。 */
-	private fitNodeWorldAxisToBounds(target: any, worldAxis: "x" | "y" | "z", localScaleAxis: "x" | "y" | "z", targetBounds: AxisBounds): void {
+	/** 将节点在实体根米空间的指定轴缩放并居中到目标包围盒。 */
+	private fitNodeMeterAxisToBounds(target: any, meterAxis: "x" | "y" | "z", localScaleAxis: "x" | "y" | "z", targetBounds: AxisBounds): void {
 		if (!target.scaling || !target.position) {
 			return;
 		}
-		const nodeBounds = this.getNodesWorldAxisBounds([target], worldAxis);
+		const nodeBounds = this.getNodesMeterAxisBounds([target], meterAxis);
 		if (!nodeBounds || nodeBounds.size <= MIN_DIMENSION) {
 			return;
 		}
@@ -734,18 +735,18 @@ export class ParametricModelRuntimeComponent {
 			return;
 		}
 		target.scaling[localScaleAxis] = snapshot.scaling[localScaleAxis] * scaleFactor;
-		const fittedBounds = this.getNodesWorldAxisBounds([target], worldAxis);
+		const fittedBounds = this.getNodesMeterAxisBounds([target], meterAxis);
 		if (fittedBounds) {
-			this.moveNodeWorldAxisBy(target, worldAxis, targetBounds.center - fittedBounds.center);
+			this.moveNodeMeterAxisBy(target, meterAxis, targetBounds.center - fittedBounds.center);
 		}
 	}
 
-	/** 按模型参数轴移动节点，写入前转换为父节点本地位移，兼容 GLB __root__ 坐标转换。 */
-	private moveNodeWorldAxisBy(target: any, worldAxis: "x" | "y" | "z", worldDelta: number): void {
-		if (!target.position || !Number.isFinite(worldDelta) || Math.abs(worldDelta) <= MIN_DIMENSION) {
+	/** 按实体根米空间轴移动节点，写入前转换为父节点本地位移。 */
+	private moveNodeMeterAxisBy(target: any, meterAxis: "x" | "y" | "z", meterDelta: number): void {
+		if (!target.position || !Number.isFinite(meterDelta) || Math.abs(meterDelta) <= MIN_DIMENSION) {
 			return;
 		}
-		const localDelta = this.worldVectorToParentLocal(target, this.createWorldAxisVector(worldAxis, worldDelta));
+		const localDelta = this.meterVectorToParentLocal(target, this.createMeterAxisVector(meterAxis, meterDelta));
 		if (typeof target.position.addInPlace === "function") {
 			target.position.addInPlace(localDelta);
 			return;
@@ -755,17 +756,14 @@ export class ParametricModelRuntimeComponent {
 		}
 	}
 
-	/** 生成指定模型参数轴上的世界位移向量，保证模型旋转后仍沿自身 X/Y/Z 变形。 */
-	private createWorldAxisVector(axis: "x" | "y" | "z", value: number): Vector3 {
-		return this.getParametricWorldAxis(axis).scale(value);
+	/** 创建实体根米空间指定轴上的位移向量。 */
+	private createMeterAxisVector(axis: "x" | "y" | "z", value: number): Vector3 {
+		return this.createLocalAxis(axis).scale(value);
 	}
 
-	/** 读取模型根节点当前局部轴对应的世界方向，忽略缩放长度只保留方向。 */
-	private getParametricWorldAxis(axis: "x" | "y" | "z"): Vector3 {
-		const localAxis = this.createLocalAxis(axis);
-		const worldMatrix = this.node.computeWorldMatrix?.(true) ?? this.node.getWorldMatrix?.();
-		const worldAxis = worldMatrix ? Vector3.TransformNormal(localAxis, worldMatrix) : localAxis;
-		return this.normalizeDirection(worldAxis, localAxis);
+	/** 返回实体根米空间的参数轴。 */
+	private getParametricMeterAxis(axis: "x" | "y" | "z"): Vector3 {
+		return this.createLocalAxis(axis);
 	}
 
 	/** 创建模型局部参数轴单位向量。 */
@@ -779,29 +777,19 @@ export class ParametricModelRuntimeComponent {
 		return new Vector3(0, 0, 1);
 	}
 
-	/** 将方向向量归一化，零长度或异常值时使用兜底方向。 */
-	private normalizeDirection(direction: Vector3, fallback: Vector3): Vector3 {
-		const length = direction.length?.() ?? 0;
-		if (!Number.isFinite(length) || length <= 0.000001) {
-			return fallback.clone?.() ?? fallback;
+	/** 将实体根米空间位移转换到目标父节点本地坐标。 */
+	private meterVectorToParentLocal(target: any, meterVector: Vector3): Vector3 {
+		const entityRoot = this.node.parent;
+		const targetParent = target?.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const targetParentWorldMatrix = targetParent?.computeWorldMatrix?.(true) ?? targetParent?.getWorldMatrix?.();
+		const inverseTargetParentWorldMatrix = targetParentWorldMatrix?.clone?.();
+		if (!entityRootWorldMatrix || !inverseTargetParentWorldMatrix?.invert) {
+			return meterVector.clone?.() ?? meterVector;
 		}
-		return direction.scale(1 / length);
-	}
-
-	/** 将世界位移向量转换到目标父节点本地坐标，避免直接写 position 造成方向反转。 */
-	private worldVectorToParentLocal(target: any, worldVector: Vector3): Vector3 {
-		const parent = target?.parent;
-		if (!parent || typeof parent.getWorldMatrix !== "function") {
-			return worldVector.clone?.() ?? worldVector;
-		}
-		parent.computeWorldMatrix?.(true);
-		const parentMatrix = parent.getWorldMatrix?.();
-		if (!parentMatrix || typeof parentMatrix.clone !== "function") {
-			return worldVector.clone?.() ?? worldVector;
-		}
-		const inverseParentMatrix = parentMatrix.clone();
-		inverseParentMatrix.invert?.();
-		return Vector3.TransformNormal(worldVector, inverseParentMatrix);
+		inverseTargetParentWorldMatrix.invert();
+		const worldVector = Vector3.TransformNormal(meterVector, entityRootWorldMatrix);
+		return Vector3.TransformNormal(worldVector, inverseTargetParentWorldMatrix);
 	}
 
 	/** 克隆单个节点并应用偏移，克隆失败时直接跳过。 */
@@ -818,7 +806,7 @@ export class ParametricModelRuntimeComponent {
 		const sourcePosition = source.position?.clone?.() ?? snapshot.position.clone();
 		const sourceScaling = source.scaling?.clone?.() ?? snapshot.scaling.clone();
 		if (clone.position) {
-			clone.position = sourcePosition.add(this.worldVectorToParentLocal(source, offset));
+			clone.position = sourcePosition.add(this.meterVectorToParentLocal(source, offset));
 		}
 		if (clone.scaling) {
 			clone.scaling = sourceScaling;
@@ -854,11 +842,11 @@ export class ParametricModelRuntimeComponent {
 		return node?.metadata?.generatedByParametricRuntime === true && (node.metadata.sourceNodeName !== undefined || node.metadata.reason !== undefined);
 	}
 
-	/** 合并一组节点和子 mesh 在模型参数轴上的投影包围盒。 */
-	private getNodesWorldBounds(nodes: any[]): { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 } | null {
-		const xBounds = this.getNodesWorldAxisBounds(nodes, "x");
-		const yBounds = this.getNodesWorldAxisBounds(nodes, "y");
-		const zBounds = this.getNodesWorldAxisBounds(nodes, "z");
+	/** 合并一组节点和子 mesh 在实体根米空间中的包围盒。 */
+	private getNodesMeterBounds(nodes: any[]): { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 } | null {
+		const xBounds = this.getNodesMeterAxisBounds(nodes, "x");
+		const yBounds = this.getNodesMeterAxisBounds(nodes, "y");
+		const zBounds = this.getNodesMeterAxisBounds(nodes, "z");
 		if (!xBounds || !yBounds || !zBounds) {
 			return null;
 		}
@@ -869,14 +857,13 @@ export class ParametricModelRuntimeComponent {
 		return { minimum, maximum, center, size };
 	}
 
-	/** 读取一组节点当前包围盒在模型参数轴投影上的最小值、最大值、中心点和尺寸。 */
-	private getNodesWorldAxisBounds(nodes: any[], axis: "x" | "y" | "z"): AxisBounds | null {
-		const axisDirection = this.getParametricWorldAxis(axis);
+	/** 读取一组节点在实体根米空间单轴上的最小值、最大值、中心点和尺寸。 */
+	private getNodesMeterAxisBounds(nodes: any[], axis: "x" | "y" | "z"): AxisBounds | null {
 		let minimum = Number.POSITIVE_INFINITY;
 		let maximum = Number.NEGATIVE_INFINITY;
 		nodes.forEach((node) => {
 			this.getBoundsMeshes(node).forEach((mesh) => {
-				const bounds = this.getMeshProjectedBounds(mesh, axisDirection);
+				const bounds = this.getMeshMeterAxisBounds(mesh, axis);
 				if (!bounds) {
 					return;
 				}
@@ -891,36 +878,59 @@ export class ParametricModelRuntimeComponent {
 		return { minimum, maximum, center: (minimum + maximum) / 2, size };
 	}
 
-	/** 收集可用于包围盒计算的真实 mesh。 */
+	/** 收集可用于包围盒计算的真实 mesh；基线排除生成节点，生成节点自测时允许自身子树参与。 */
 	private getBoundsMeshes(target: any): any[] {
 		const meshes: any[] = [];
-		if (this.isBoundsMesh(target)) {
+		const includeGenerated = this.isGeneratedParametricNode(target);
+		if (this.isBoundsMesh(target, includeGenerated)) {
 			meshes.push(target);
 		}
 		if (typeof target?.getChildMeshes === "function") {
-			meshes.push(...target.getChildMeshes(false).filter((child: any) => this.isBoundsMesh(child)));
+			meshes.push(...target.getChildMeshes(false).filter((child: any) => this.isBoundsMesh(child, includeGenerated)));
 		}
 		return [...new Set(meshes)];
 	}
 
-	/** 判断节点是否可以提供 Babylon 世界包围盒。 */
-	private isBoundsMesh(node: any): boolean {
-		return typeof node?.getBoundingInfo === "function" && !node.metadata?.generatedByParametricRuntime;
+	/** 判断节点是否为当前参数脚本生成的节点或其后代。 */
+	private isGeneratedParametricNode(node: any): boolean {
+		let current = node;
+		while (current && current !== this.node) {
+			if (current.metadata?.generatedByParametricRuntime) { return true; }
+			current = current.parent;
+		}
+		return false;
 	}
 
-	/** 获取单个 mesh 沿指定模型参数轴的世界投影范围。 */
-	private getMeshProjectedBounds(mesh: any, axisDirection: Vector3): AxisBounds | null {
-		mesh.computeWorldMatrix?.(true);
+	/** 判断节点是否为有顶点且符合当前测量上下文的 Babylon mesh。 */
+	private isBoundsMesh(node: any, includeGenerated: boolean): boolean {
+		return typeof node?.getBoundingInfo === "function"
+			&& !node.isDisposed?.()
+			&& node.isEnabled?.(false) !== false
+			&& node.isVisible !== false
+			&& Number(node.visibility ?? 1) > 0
+			&& Number(node.getTotalVertices?.() ?? 0) > 0
+			&& (includeGenerated || !this.isGeneratedParametricNode(node));
+	}
+
+	/** 将单个 mesh 的包围盒角点转换到实体根米空间后读取单轴范围。 */
+	private getMeshMeterAxisBounds(mesh: any, axis: "x" | "y" | "z"): AxisBounds | null {
 		mesh.refreshBoundingInfo?.();
-		const box = mesh.getBoundingInfo?.().boundingBox;
-		const corners = Array.isArray(box?.vectorsWorld) ? box.vectorsWorld : [];
-		if (corners.length === 0) {
+		mesh.computeWorldMatrix?.(true);
+		const corners = Array.isArray(mesh.getBoundingInfo?.().boundingBox?.vectorsWorld)
+			? mesh.getBoundingInfo().boundingBox.vectorsWorld
+			: [];
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const inverseEntityRootWorldMatrix = entityRootWorldMatrix?.clone?.();
+		if (corners.length === 0 || !inverseEntityRootWorldMatrix?.invert) {
 			return null;
 		}
+		inverseEntityRootWorldMatrix.invert();
 		let minimum = Number.POSITIVE_INFINITY;
 		let maximum = Number.NEGATIVE_INFINITY;
 		corners.forEach((corner: Vector3) => {
-			const value = Vector3.Dot(corner, axisDirection);
+			const meterPoint = Vector3.TransformCoordinates(corner, inverseEntityRootWorldMatrix);
+			const value = meterPoint[axis];
 			minimum = Math.min(minimum, value);
 			maximum = Math.max(maximum, value);
 		});

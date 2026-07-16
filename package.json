@@ -10,6 +10,7 @@
     "demo:mqtt:generic:scene": "node scripts/create-generic-mqtt-motion-demo.mjs",
     "demo:stacker:scene": "node scripts/create-stacker-mqtt-demo-scene.mjs",
     "demo:stacker:mqtt": "node scripts/simulate-stacker-mqtt.mjs",
+    "refresh:model-assets": "node scripts/refresh-model-asset-index.mjs",
     "wait:renderer": "node scripts/wait-for-vite-renderer.mjs",
     "build": "tsc -b && vite build && npm run build:electron",
     "build:electron": "tsc -p tsconfig.node.json",
@@ -17,8 +18,9 @@
     "typecheck": "tsc -b",
     "preview": "vite preview --host 127.0.0.1",
     "test:telemetry": "node scripts/telemetry-test.mjs",
-    "smoke:units": "node scripts/smoke-meter-unit-contract.mjs && npm run smoke:model-measurement",
+    "smoke:units": "node scripts/smoke-meter-unit-contract.mjs && npm run smoke:model-measurement && npm run smoke:model-parameters",
     "smoke:model-measurement": "node scripts/smoke-model-measurement.mjs",
+    "smoke:model-parameters": "node scripts/smoke-model-parameter-meters.mjs",
     "pack:win": "npm run build && electron-builder --win dir --x64",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs"

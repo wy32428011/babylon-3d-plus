@@ -8,6 +8,7 @@ import { Color3 } from "@babylonjs/core/Maths/math.color";
 import { Constants } from "@babylonjs/core/Engines/constants";
 import { visibleAsBoolean, visibleAsNumber, visibleAsString } from "babylonjs-editor-tools";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+// 参数长度统一使用米；contentRoot 的基础 scaling 已由编辑器包含源单位换算。
 
 /**
  * 声明一体式顶升移载的数据驱动运动语义，编辑器导入时会静态解析该对象。
@@ -59,25 +60,25 @@ export class ParametricModelParamsComponent {
 	@visibleAsString("参数说明")
 	public description: string = "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度、入/出料侧定位及 MQTT 前/后端独立定位。";
 
-	@visibleAsNumber("链条机长度", { step: 0.1 })
+	@visibleAsNumber("链条机长度 (m)", { step: 0.1 })
 	public chainLength: number = 1.828;
 
-	@visibleAsNumber("顶升模块长度", { step: 0.1 })
+	@visibleAsNumber("顶升模块长度 (m)", { step: 0.1 })
 	public platformLength: number = 1.022;
 
-	@visibleAsNumber("顶升位置偏移", { step: 0.05 })
+	@visibleAsNumber("顶升位置偏移 (m)", { step: 0.05 })
 	public platformPosition: number = 0;
 
-	@visibleAsNumber("链条机宽度", { step: 0.1 })
+	@visibleAsNumber("链条机宽度 (m)", { step: 0.1 })
 	public chainWidth: number = 1.194;
 
-	@visibleAsNumber("链条机高度", { step: 0.1 })
+	@visibleAsNumber("链条机高度 (m)", { step: 0.1 })
 	public chainHeight: number = 0.803;
 
-	@visibleAsNumber("辊筒宽度", { step: 0.01 })
+	@visibleAsNumber("辊筒宽度 (m)", { step: 0.01 })
 	public rollerWidth: number = 0.062;
 
-	@visibleAsNumber("辊筒位置", { step: 0.1 })
+	@visibleAsNumber("辊筒位置 (m)", { step: 0.1 })
 	public rollerPosition: number = 0;
 
 	@visibleAsNumber("辊筒密度", { step: 1 })
@@ -465,15 +466,15 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 将顶升组件局部 X 偏移限制在当前主体有效长度内，避免平台移动到设备外部。
+	 * 将顶升组件米制偏移限制在当前主体有效长度内，避免平台移动到设备外部。
 	 */
 	private resolvePlatformPosition(values: ValueMap, platformLengthRatio: number): number {
 		const requestedPosition = this.readNumber(values, "platformPosition", Number(DEFAULT_VALUES.platformPosition));
 		const body = this.findNodeByName(BODY_NODE_NAME);
 		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
 		if (!body || !platform) { return requestedPosition; }
-		const bodyBounds = this.getCurrentNodeBoundsInParent(body);
-		const platformBounds = this.getNodeBoundsInParent(platform);
+		const bodyBounds = this.getCurrentNodeMeterBounds(body);
+		const platformBounds = this.getNodeMeterBounds(platform);
 		if (!bodyBounds || !platformBounds) { return requestedPosition; }
 		const platformCenter = (platformBounds.minimum.x + platformBounds.maximum.x) / 2;
 		const platformHalfLength = (platformBounds.maximum.x - platformBounds.minimum.x) * platformLengthRatio / 2;
@@ -505,8 +506,11 @@ export class ParametricModelRuntimeComponent {
 		const density = this.clamp(Math.round(this.readNumber(values, "rollerDensity", 1)), 1, 80);
 		const rollerPosition = this.readNumber(values, "rollerPosition", 0);
 		const targetWidth = this.readPositiveNumber(values, "chainWidth", Number(DEFAULT_VALUES.chainWidth));
-		const centers = this.createRollerCenters(targetWidth, rollerWidth, density);
-		const baseCenterZ = this.getNodeCenterInParentAxis(roller, "z") ?? -targetWidth / 2 + rollerWidth / 2;
+		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
+		const platformBounds = platform ? this.getCurrentNodeMeterBounds(platform) : null;
+		const distributionCenterZ = platformBounds ? (platformBounds.minimum.z + platformBounds.maximum.z) / 2 : 0;
+		const centers = this.createRollerCenters(targetWidth, rollerWidth, density, distributionCenterZ);
+		const baseCenterZ = this.getNodeMeterCenterAxis(roller, "z") ?? distributionCenterZ - targetWidth / 2 + rollerWidth / 2;
 		this.scaleNodeWithAxisAnchors(roller, platformLengthRatio, 1, rollerWidthRatio, { x: "center", z: "center" });
 		const rollerNodes = [roller];
 		for (let index = 1; index < centers.length; index += 1) {
@@ -518,12 +522,12 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 根据目标链条机宽度和辊筒厚度生成辊筒中心线位置，密度为 1 时保持原模型单根辊筒语义。
+	 * 根据目标链条机宽度和辊筒厚度，围绕当前顶升平台米制中心生成辊筒中心线；密度为 1 时保持原模型单根辊筒语义。
 	 */
-	private createRollerCenters(chainWidth: number, rollerWidth: number, density: number): number[] {
+	private createRollerCenters(chainWidth: number, rollerWidth: number, density: number, centerMeters: number): number[] {
 		if (density <= 1) { return [this.getDefaultRollerCenterZ()]; }
 		const usableWidth = Math.max(0, chainWidth - rollerWidth);
-		const start = -usableWidth / 2;
+		const start = centerMeters - usableWidth / 2;
 		const step = density > 1 ? usableWidth / (density - 1) : 0;
 		return Array.from({ length: density }, (_, index) => start + step * index);
 	}
@@ -533,19 +537,16 @@ export class ParametricModelRuntimeComponent {
 	 */
 	private getDefaultRollerCenterZ(): number {
 		const roller = this.findNodeByName(ROLLER_NODE_NAME);
-		return roller ? (this.getNodeCenterInParentAxis(roller, "z") ?? -0.424) : -0.424;
+		return roller ? (this.getNodeMeterCenterAxis(roller, "z") ?? -0.424) : -0.424;
 	}
 
 	/**
-	 * 将辊筒放到目标局部位置；辊筒位置沿设备长度方向，密度分布沿设备宽度方向。
+	 * 将辊筒按实体根米空间偏移放到目标位置；辊筒位置沿设备长度方向，密度分布沿设备宽度方向。
 	 */
-	private placeRollerNode(node: any, xOffset: number, yOffset: number, targetCenterZ: number, baseCenterZ: number): void {
+	private placeRollerNode(node: any, xOffsetMeters: number, yOffsetMeters: number, targetCenterZMeters: number, baseCenterZMeters: number): void {
 		if (!node.position) { return; }
-		let nextPosition = node.position.clone();
-		nextPosition = this.withVectorAxis(nextPosition, "x", this.getVectorAxis(nextPosition, "x") + xOffset);
-		nextPosition = this.withVectorAxis(nextPosition, "y", this.getVectorAxis(nextPosition, "y") + yOffset);
-		nextPosition = this.withVectorAxis(nextPosition, "z", this.getVectorAxis(nextPosition, "z") + targetCenterZ - baseCenterZ);
-		node.position = nextPosition;
+		const meterOffset = new Vector3(xOffsetMeters, yOffsetMeters, targetCenterZMeters - baseCenterZMeters);
+		node.position = node.position.add(this.meterOffsetToParentLocal(node, meterOffset));
 	}
 
 	/**
@@ -923,25 +924,40 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 将节点指定轴设置为基础位置加 offset。
+	 * 将节点指定轴设置为基础位置加米制 offset。
 	 */
-	private offsetNodeAxis(node: any, axis: AxisName, offset: number): void {
+	private offsetNodeAxis(node: any, axis: AxisName, offsetMeters: number): void {
 		const snapshot = this.rememberSnapshot(node);
 		if (!node.position) { return; }
-		node.position = this.withVectorAxis(node.position.clone(), axis, this.getVectorAxis(snapshot.position, axis) + offset);
+		const meterOffset = this.withVectorAxis(Vector3.Zero(), axis, offsetMeters);
+		node.position = snapshot.position.add(this.meterOffsetToParentLocal(node, meterOffset));
 	}
 
 	/**
-	 * 在节点当前指定轴位置上累加 offset。
+	 * 在节点当前指定轴位置上累加米制 offset。
 	 */
-	private addNodeAxisOffset(node: any, axis: AxisName, offset: number): void {
+	private addNodeAxisOffset(node: any, axis: AxisName, offsetMeters: number): void {
 		if (!node.position) { return; }
-		node.position = this.withVectorAxis(node.position.clone(), axis, this.getVectorAxis(node.position, axis) + offset);
+		const meterOffset = this.withVectorAxis(Vector3.Zero(), axis, offsetMeters);
+		node.position = node.position.add(this.meterOffsetToParentLocal(node, meterOffset));
 	}
 
 	/**
 	 * 克隆单根辊筒并写入运动继承 metadata；方向箭头不会使用该方法。
 	 */
+	/** 将实体根米空间位移转换为目标父节点本地位移，兼容厘米源模型与用户非均匀缩放。 */
+	private meterOffsetToParentLocal(target: any, meterOffset: Vector3): Vector3 {
+		const entityRoot = this.node.parent;
+		const targetParent = target?.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const targetParentWorldMatrix = targetParent?.computeWorldMatrix?.(true) ?? targetParent?.getWorldMatrix?.();
+		const inverseTargetParentWorldMatrix = targetParentWorldMatrix?.clone?.();
+		if (!entityRootWorldMatrix || !inverseTargetParentWorldMatrix?.invert) { return meterOffset.clone?.() ?? meterOffset; }
+		inverseTargetParentWorldMatrix.invert();
+		const worldOffset = Vector3.TransformNormal(meterOffset, entityRootWorldMatrix);
+		return Vector3.TransformNormal(worldOffset, inverseTargetParentWorldMatrix);
+	}
+
 	private cloneSingleNode(source: any, reason: string, index: number): any | null {
 		if (typeof source.clone !== "function") { return null; }
 		const clone = source.clone(`${String(source.name ?? "node")}_${reason}_${index}`, source.parent, false);
@@ -1026,12 +1042,59 @@ export class ParametricModelRuntimeComponent {
 	 * 判断节点是否具备可读取 position 顶点数据。
 	 */
 	private isEditableMesh(node: any): boolean {
-		return typeof node?.getVerticesData === "function" && !!node.getVerticesData("position");
+		const positions = node?.getVerticesData?.("position");
+		return !node?.isDisposed?.()
+			&& node?.isEnabled?.(false) !== false
+			&& node?.isVisible !== false
+			&& Number(node?.visibility ?? 1) > 0
+			&& !!positions
+			&& positions.length > 0;
 	}
 
 	/**
 	 * 读取节点基线包围盒中心在父节点局部坐标系中的位置。
 	 */
+	/** 读取节点基线几何在实体根米空间中的包围盒。 */
+	private getNodeMeterBounds(node: any): { minimum: Vector3; maximum: Vector3 } | null {
+		return this.getNodeBoundsInMeterSpace(node, false);
+	}
+
+	/** 读取节点当前变形几何在实体根米空间中的包围盒。 */
+	private getCurrentNodeMeterBounds(node: any): { minimum: Vector3; maximum: Vector3 } | null {
+		return this.getNodeBoundsInMeterSpace(node, true);
+	}
+
+	/** 读取节点基线中心在实体根米空间指定轴上的坐标。 */
+	private getNodeMeterCenterAxis(node: any, axis: AxisName): number | null {
+		const bounds = this.getNodeMeterBounds(node);
+		if (!bounds) { return null; }
+		return (this.getVectorAxis(bounds.minimum, axis) + this.getVectorAxis(bounds.maximum, axis)) / 2;
+	}
+
+	/** 把节点顶点从世界坐标转换到实体根局部米空间后合并包围盒。 */
+	private getNodeBoundsInMeterSpace(node: any, current: boolean): { minimum: Vector3; maximum: Vector3 } | null {
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const inverseEntityRootWorldMatrix = entityRootWorldMatrix?.clone?.();
+		if (!inverseEntityRootWorldMatrix?.invert) { return null; }
+		inverseEntityRootWorldMatrix.invert();
+		let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+		let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+		this.getMeshesForNodes([node]).forEach((mesh) => {
+			const positions = current ? this.readVertexPositions(mesh) : this.rememberSnapshot(mesh).vertexPositions;
+			const worldMatrix = mesh.computeWorldMatrix?.(true);
+			if (!positions || !worldMatrix) { return; }
+			for (let index = 0; index < positions.length; index += 3) {
+				const world = Vector3.TransformCoordinates(new Vector3(positions[index], positions[index + 1], positions[index + 2]), worldMatrix);
+				const meterPoint = Vector3.TransformCoordinates(world, inverseEntityRootWorldMatrix);
+				minimum = Vector3.Minimize(minimum, meterPoint);
+				maximum = Vector3.Maximize(maximum, meterPoint);
+			}
+		});
+		if (!Number.isFinite(minimum.x) || !Number.isFinite(maximum.x)) { return null; }
+		return { minimum, maximum };
+	}
+
 	private getNodeCenterInParent(node: any): Vector3 | null {
 		const bounds = this.getNodeBoundsInParent(node);
 		return bounds ? bounds.minimum.add(bounds.maximum).scale(0.5) : null;

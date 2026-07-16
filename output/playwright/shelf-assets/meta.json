@@ -67,63 +67,73 @@
         },
         {
           "key": "cellWidth",
-          "label": "货格宽度",
+          "label": "单元宽度 (m)",
           "type": "number",
           "defaultValue": 0.801,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "cellHeight",
-          "label": "货架高度",
+          "label": "单元高度 (m)",
           "type": "number",
           "defaultValue": 4.525,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "supportLegHeight",
-          "label": "底部支架腿高度",
+          "label": "支撑脚高度 (m)",
           "type": "number",
           "defaultValue": 0.904,
           "configuration": {
             "type": "number",
             "min": 0.4,
             "max": 5,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "cellDepth",
-          "label": "货格深度",
+          "label": "单元深度 (m)",
           "type": "number",
           "defaultValue": 1.183,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "postWidth",
-          "label": "立柱宽度",
+          "label": "立柱宽度 (m)",
           "type": "number",
           "defaultValue": 0.08,
           "configuration": {
             "type": "number",
             "min": 0.01,
             "max": 10,
-            "step": 0.01
-          }
+            "step": 0.01,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "doubleDeepEnabled",
@@ -136,27 +146,31 @@
         },
         {
           "key": "deepSlotGap",
-          "label": "深位间隔",
+          "label": "深位间隔 (m)",
           "type": "number",
           "defaultValue": 0.2,
           "configuration": {
             "type": "number",
             "min": 0,
             "max": 100,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "deepSlotLift",
-          "label": "深位提升",
+          "label": "深位提升 (m)",
           "type": "number",
           "defaultValue": 0,
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         }
       ],
       "values": {
@@ -217,57 +231,67 @@
         "cellWidth": {
           "type": "number",
           "value": 0.801,
-          "label": "货格宽度",
+          "label": "单元宽度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "cellHeight": {
           "type": "number",
           "value": 4.525,
-          "label": "货架高度",
+          "label": "单元高度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "supportLegHeight": {
           "type": "number",
           "value": 0.904,
-          "label": "底部支架腿高度",
+          "label": "支撑脚高度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.4,
             "max": 5,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "cellDepth": {
           "type": "number",
           "value": 1.183,
-          "label": "货格深度",
+          "label": "单元深度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "postWidth": {
           "type": "number",
           "value": 0.08,
-          "label": "立柱宽度",
+          "label": "立柱宽度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.01,
             "max": 10,
-            "step": 0.01
-          }
+            "step": 0.01,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "doubleDeepEnabled": {
           "type": "boolean",
@@ -280,24 +304,28 @@
         "deepSlotGap": {
           "type": "number",
           "value": 0.2,
-          "label": "深位间隔",
+          "label": "深位间隔 (m)",
           "configuration": {
             "type": "number",
             "min": 0,
             "max": 100,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "deepSlotLift": {
           "type": "number",
           "value": 0,
-          "label": "深位提升",
+          "label": "深位提升 (m)",
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         }
       }
     }
@@ -335,48 +363,53 @@
       },
       {
         "key": "cellWidth",
-        "label": "货格宽度",
+        "label": "单元宽度 (m)",
         "type": "number",
         "defaultValue": 0.801,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "cellHeight",
-        "label": "货架高度",
+        "label": "单元高度 (m)",
         "type": "number",
         "defaultValue": 4.525,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "supportLegHeight",
-        "label": "底部支架腿高度",
+        "label": "支撑脚高度 (m)",
         "type": "number",
         "defaultValue": 0.904,
         "min": 0.4,
         "max": 5,
-        "step": 0.05
+        "step": 0.05,
+        "unit": "m"
       },
       {
         "key": "cellDepth",
-        "label": "货格深度",
+        "label": "单元深度 (m)",
         "type": "number",
         "defaultValue": 1.183,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "postWidth",
-        "label": "立柱宽度",
+        "label": "立柱宽度 (m)",
         "type": "number",
         "defaultValue": 0.08,
         "min": 0.01,
         "max": 10,
-        "step": 0.01
+        "step": 0.01,
+        "unit": "m"
       },
       {
         "key": "doubleDeepEnabled",
@@ -386,23 +419,26 @@
       },
       {
         "key": "deepSlotGap",
-        "label": "深位间隔",
+        "label": "深位间隔 (m)",
         "type": "number",
         "defaultValue": 0.2,
         "min": 0,
         "max": 100,
-        "step": 0.05
+        "step": 0.05,
+        "unit": "m"
       },
       {
         "key": "deepSlotLift",
-        "label": "深位提升",
+        "label": "深位提升 (m)",
         "type": "number",
         "defaultValue": 0,
         "min": -100,
         "max": 100,
-        "step": 0.05
+        "step": 0.05,
+        "unit": "m"
       }
     ],
     "bindings": []
-  }
+  },
+  "lengthUnit": "millimeter"
 }

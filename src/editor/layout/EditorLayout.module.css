@@ -1,6 +1,7 @@
 .editorShell {
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr) clamp(300px, 38vh, 460px);
+  /* 主壳只保留 Toolbar 与工作区两行，左右栏可贯通到底部。 */
+  grid-template-rows: 48px minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
   min-width: 0;
@@ -20,8 +21,7 @@
 
 .leftColumn,
 .rightColumn,
-.centerColumn,
-.bottomBar {
+.centerColumn {
   min-width: 0;
   min-height: 0;
   border-color: #111;
@@ -37,18 +37,23 @@
 
 .centerColumn {
   display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  /* 中列独立承载 Scene 与底部资源区，底部高度沿用既有自适应范围。 */
+  grid-template-rows: minmax(0, 1fr) clamp(300px, 38vh, 460px);
+  min-width: 0;
+  min-height: 0;
 }
 
-.bottomBar {
-  overflow: hidden;
-}
 
 .bottomWorkspace {
+  /* Project 与 Console 只占中列宽度，并与 Scene 之间保持清晰边界。 */
   display: grid;
   grid-template-rows: minmax(0, 1fr) 30px;
   width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  border-top: 1px solid #111;
 }
