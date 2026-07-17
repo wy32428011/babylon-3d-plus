@@ -43,87 +43,101 @@
         },
         {
           "key": "chainLength",
-          "label": "链条机长度",
+          "label": "链条机长度 (m)",
           "type": "number",
           "defaultValue": 1.828,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "platformLength",
-          "label": "顶升模块长度",
+          "label": "顶升模块长度 (m)",
           "type": "number",
           "defaultValue": 1.022,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "platformPosition",
-          "label": "顶升位置偏移",
+          "label": "顶升位置偏移 (m)",
           "type": "number",
           "defaultValue": 0,
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "chainWidth",
-          "label": "链条机宽度",
+          "label": "链条机宽度 (m)",
           "type": "number",
           "defaultValue": 1.194,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "chainHeight",
-          "label": "链条机高度",
+          "label": "链条机高度 (m)",
           "type": "number",
           "defaultValue": 0.803,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "rollerWidth",
-          "label": "辊筒宽度",
+          "label": "辊筒宽度 (m)",
           "type": "number",
           "defaultValue": 0.062,
           "configuration": {
             "type": "number",
             "min": 0.01,
             "max": 100,
-            "step": 0.01
-          }
+            "step": 0.01,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "rollerPosition",
-          "label": "辊筒位置",
+          "label": "辊筒位置 (m)",
           "type": "number",
           "defaultValue": 0,
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "rollerDensity",
@@ -318,79 +332,93 @@
         "chainLength": {
           "type": "number",
           "value": 1.828,
-          "label": "链条机长度",
+          "label": "链条机长度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "platformLength": {
           "type": "number",
           "value": 1.022,
-          "label": "顶升模块长度",
+          "label": "顶升模块长度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "platformPosition": {
           "type": "number",
           "value": 0,
-          "label": "顶升位置偏移",
+          "label": "顶升位置偏移 (m)",
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "chainWidth": {
           "type": "number",
           "value": 1.194,
-          "label": "链条机宽度",
+          "label": "链条机宽度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "chainHeight": {
           "type": "number",
           "value": 0.803,
-          "label": "链条机高度",
+          "label": "链条机高度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "rollerWidth": {
           "type": "number",
           "value": 0.062,
-          "label": "辊筒宽度",
+          "label": "辊筒宽度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.01,
             "max": 100,
-            "step": 0.01
-          }
+            "step": 0.01,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "rollerPosition": {
           "type": "number",
           "value": 0,
-          "label": "辊筒位置",
+          "label": "辊筒位置 (m)",
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "rollerDensity": {
           "type": "number",
@@ -557,66 +585,73 @@
     "parameters": [
       {
         "key": "chainLength",
-        "label": "链条机长度",
+        "label": "链条机长度 (m)",
         "type": "number",
         "defaultValue": 1.828,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "platformLength",
-        "label": "顶升模块长度",
+        "label": "顶升模块长度 (m)",
         "type": "number",
         "defaultValue": 1.022,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "platformPosition",
-        "label": "顶升位置偏移",
+        "label": "顶升位置偏移 (m)",
         "type": "number",
         "defaultValue": 0,
         "min": -100,
         "max": 100,
-        "step": 0.05
+        "step": 0.05,
+        "unit": "m"
       },
       {
         "key": "chainWidth",
-        "label": "链条机宽度",
+        "label": "链条机宽度 (m)",
         "type": "number",
         "defaultValue": 1.194,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "chainHeight",
-        "label": "链条机高度",
+        "label": "链条机高度 (m)",
         "type": "number",
         "defaultValue": 0.803,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "rollerWidth",
-        "label": "辊筒宽度",
+        "label": "辊筒宽度 (m)",
         "type": "number",
         "defaultValue": 0.062,
         "min": 0.01,
         "max": 100,
-        "step": 0.01
+        "step": 0.01,
+        "unit": "m"
       },
       {
         "key": "rollerPosition",
-        "label": "辊筒位置",
+        "label": "辊筒位置 (m)",
         "type": "number",
         "defaultValue": 0,
         "min": -100,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "rollerDensity",
@@ -751,5 +786,6 @@
       }
     ],
     "bindings": []
-  }
+  },
+  "lengthUnit": "centimeter"
 }

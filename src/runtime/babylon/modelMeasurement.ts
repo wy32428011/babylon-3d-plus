@@ -16,7 +16,7 @@ const LOCAL_MODEL_AXES = [
 const AXIS_LENGTH_EPSILON = 1e-12;
 
 /** 判断单个模型网格是否应参与实际尺寸测量。 */
-function isMeasurableModelMesh(mesh: AbstractMesh): boolean {
+export function isMeasurableModelMesh(mesh: AbstractMesh): boolean {
   return !mesh.isDisposed()
     && mesh.isEnabled(false)
     && mesh.isVisible

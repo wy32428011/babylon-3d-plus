@@ -159,6 +159,10 @@ export type CameraResetRequest = {
   id: string;
 };
 
+export type CameraTopViewRequest = {
+  id: string;
+};
+
 /** 当前 Inspector 选中模型的运行时米制测量快照；该状态不进入场景持久化或撤销历史。 */
 export type SelectedModelMeasurement = ModelMeasurementResult & { entityId: string };
 
@@ -222,6 +226,7 @@ type EditorState = {
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
   cameraResetRequest: CameraResetRequest | null;
+  cameraTopViewRequest: CameraTopViewRequest | null;
   selectedModelMeasurement: SelectedModelMeasurement | null;
   cadImportProgress: CadImportProgress | null;
   logs: EditorLog[];
@@ -247,6 +252,8 @@ type EditorState = {
   consumeCameraPoseSaveRequest: (requestId: string, pose: SceneCameraPose) => void;
   requestCameraReset: () => void;
   consumeCameraResetRequest: (requestId: string) => void;
+  requestCameraTopView: () => void;
+  consumeCameraTopViewRequest: (requestId: string) => void;
   setSelectedModelMeasurement: (measurement: SelectedModelMeasurement | null) => void;
   createMesh: (meshKind: MeshKind, placementPosition?: Vector3Data) => void;
   createLocator: (placementPosition?: Vector3Data) => void;
@@ -339,6 +346,7 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     projectAssetFocusRequest: null,
     cameraPoseSaveRequest: null,
     cameraResetRequest: null,
+    cameraTopViewRequest: null,
     selectedModelMeasurement: null,
     logs: prependLog(state.logs, message),
   };
@@ -1201,6 +1209,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   projectAssetFocusRequest: null,
   cameraPoseSaveRequest: null,
   cameraResetRequest: null,
+  cameraTopViewRequest: null,
   selectedModelMeasurement: null,
   cadImportProgress: null,
   logs: [{ id: 'log_boot', message: '编辑器已启动。' }],
@@ -1488,6 +1497,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return {
         cameraResetRequest: null,
         logs: prependLog(state.logs, '视角已复位。'),
+      };
+    });
+  },
+  /** 发出一次临时俯视请求，不修改场景文档、已保存视角或撤销历史。 */
+  requestCameraTopView: () => {
+    set((state) => ({
+      cameraTopViewRequest: { id: createId('camera_top_view') },
+      logs: prependLog(state.logs, '准备切换为俯视视角。'),
+    }));
+  },
+  /** Scene View 完成俯视切换后消费请求，避免 React 后续渲染重复执行。 */
+  consumeCameraTopViewRequest: (requestId) => {
+    set((state) => {
+      if (state.cameraTopViewRequest?.id !== requestId) return state;
+
+      return {
+        cameraTopViewRequest: null,
+        logs: prependLog(state.logs, '已切换为俯视视角。'),
       };
     });
   },

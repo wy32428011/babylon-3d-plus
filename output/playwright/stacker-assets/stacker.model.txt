@@ -2,6 +2,8 @@
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { visibleAsBoolean, visibleAsNumber, visibleAsString } from "babylonjs-editor-tools";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Color3 } from "@babylonjs/core/Maths/math.color";
+// 参数长度统一使用米；contentRoot 的基础 scaling 已由编辑器包含源单位换算。
 
 // 此文件按模型参数化说明生成，用于 叉式堆垛机 的静态参数配置。
 // 静态参数和数据驱动运动语义由模型包声明，场景级连接仍由编辑器属性面板配置。
@@ -25,6 +27,8 @@ export const dataDriven = {
 			valueMode: "action",
 			actionMap: {"0": 0, "1": 1, "2": -1},
 			speed: 0.8,
+			// 默认原位沿模型局部 Z 轴回贴左端缓冲头，单位为米。
+			initialOffset: -0.562846,
 			nodes: [
 				"dingbuhuagui2.3",
 				"dingbuhuagui1.4",
@@ -59,8 +63,11 @@ export const dataDriven = {
 			actionMap: {"0": 0, "1": 1, "2": -1, "3": 1, "4": -1},
 			speed: 0.25,
 			nodes: ["huocha.9", "huocha2.10"],
+			stageTwoNodes: ["huocha.9_stage2", "huocha2.10_stage2"],
 			fallbackPattern: "fork|叉|huocha|cha\d*",
-			limits: { min: 0, max: 0.8 }
+			stageOneReach: 0.8,
+			stageTwoReach: 0.8,
+			limits: { min: 0, max: 1.6 }
 		}
 	},
 	fixedNodes: ["guidaoshang.1", "guidaoxia.2"],
@@ -69,7 +76,9 @@ export const dataDriven = {
 		travelRange: 2.8,
 		liftBase: 0.35,
 		liftRange: 2.1,
-		forkRange: 0.75,
+		forkRange: 1.6,
+		forkStageOneReach: 0.8,
+		forkStageTwoReach: 0.8,
 		forkSideRange: 0.18
 	}
 } as const;
@@ -89,27 +98,36 @@ export class ParametricModelParamsComponent {
 	public deviceName: string = "叉式堆垛机";
 
 	@visibleAsString("参数说明")
-	public description: string = "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。";
+	public description: string = "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。";
 
-	@visibleAsNumber("主体长度", { step: 0.1 })
+	@visibleAsString("模型外观颜色")
+	public appearanceColor: string = "#ffffff";
+
+	@visibleAsNumber("主体长度 (m)", { step: 0.1 })
 	public bodyLength: number = 23.012;
 
-	@visibleAsNumber("主体宽度", { step: 0.1 })
+	@visibleAsNumber("主体宽度 (m)", { step: 0.1 })
 	public bodyWidth: number = 0.452;
 
-	@visibleAsNumber("主体高度", { step: 0.1 })
+	@visibleAsNumber("主体高度 (m)", { step: 0.1 })
 	public bodyHeight: number = 7.837;
 
-	@visibleAsNumber("载货台长度", { step: 0.1 })
+	@visibleAsNumber("载货台长度 (m)", { step: 0.1 })
 	public platformLength: number = 1.279;
 
-	@visibleAsNumber("载货台高度", { step: 0.1 })
+	@visibleAsNumber("载货台高度 (m)", { step: 0.1 })
 	public platformHeight: number = 1.695;
 
-	@visibleAsNumber("货叉长度", { step: 0.1 })
+	@visibleAsNumber("货叉长度 (m)", { step: 0.1 })
 	public forkLength: number = 0.941;
 
-	@visibleAsNumber("货叉间距", { step: 0.05 })
+	@visibleAsNumber("货叉第一段行程 (m)", { step: 0.05 })
+	public forkStageOneReach: number = 0.8;
+
+	@visibleAsNumber("货叉第二段行程 (m)", { step: 0.05 })
+	public forkStageTwoReach: number = 0.8;
+
+	@visibleAsNumber("货叉间距 (m)", { step: 0.05 })
 	public forkGap: number = 0.6;
 
 	/**
@@ -134,25 +152,35 @@ type ValueMap = Record<string, unknown>;
 type ParametricAxisName = "x" | "y" | "z";
 
 interface NodeSnapshot {
-	position: Vector3;
-	scaling: Vector3;
-	rotation?: Vector3;
-	rotationQuaternion?: any;
-	enabled?: boolean;
-	vertexPositions?: number[];
+        position: Vector3;
+        scaling: Vector3;
+        rotation?: Vector3;
+        rotationQuaternion?: any;
+        enabled?: boolean;
+        vertexPositions?: number[];
+        material?: any;
+}
+
+interface ForkVisualAnchor {
+        node: any;
+        bottom: number;
+        center: Vector3;
 }
 
 const DEFAULT_VALUES: ValueMap = {
 	"modelKey": "stacker",
 	"deviceType": "堆垛机",
 	"deviceName": "叉式堆垛机",
-	"description": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+	"description": "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。",
+	"appearanceColor": "#ffffff",
 	"bodyLength": 23.012,
 	"bodyWidth": 0.452,
 	"bodyHeight": 7.837,
 	"platformLength": 1.279,
 	"platformHeight": 1.695,
 	"forkLength": 0.941,
+	"forkStageOneReach": 0.8,
+	"forkStageTwoReach": 0.8,
 	"forkGap": 0.6
 };
 
@@ -162,6 +190,7 @@ const DEFAULT_VALUES: ValueMap = {
 export class ParametricModelRuntimeComponent {
 	private readonly snapshots = new Map<any, NodeSnapshot>();
 	private readonly generatedNodes: any[] = [];
+	private readonly appearanceMaterials = new Map<any, any>();
 	private readonly startupValues: ValueMap;
 	private lastSignature = "";
 
@@ -195,6 +224,7 @@ export class ParametricModelRuntimeComponent {
 	public onStop(): void {
 		this.disposeGeneratedNodes();
 		this.restoreBaseNodes();
+		this.disposeAppearanceMaterials();
 		this.lastSignature = "";
 	}
 
@@ -219,7 +249,68 @@ export class ParametricModelRuntimeComponent {
 		this.applyShelfArray(values);
 		this.applyDoubleDeep(values);
 		this.applyRouteParameters(values);
+		this.applyStackerInitialTravelDocking();
+		this.applyAppearanceColor(values);
 		this.lastSignature = signature;
+	}
+
+	/**
+	 * 将 Stacker 行走机构的默认原位回贴到下轨左端缓冲头，消除导入后的初始空隙。
+	 */
+	private applyStackerInitialTravelDocking(): void {
+		const initialOffset = Number(dataDriven.motion.travel.initialOffset ?? 0);
+		if (!Number.isFinite(initialOffset) || Math.abs(initialOffset) < 0.000001) { return; }
+		const worldOffset = this.getParametricMeterAxis("z").scale(initialOffset);
+		this.findStackerTravelNodes().forEach((node) => this.translateNodeByCurrentMeterDelta(node, worldOffset));
+	}
+
+	/**
+	 * 为当前 Stacker 实例的全部有效 Mesh 应用外观乘色，保留原贴图和其它材质属性。
+	 */
+	private applyAppearanceColor(values: ValueMap): void {
+		const color = this.readColor(values, "appearanceColor", String(DEFAULT_VALUES.appearanceColor ?? "#ffffff"));
+		this.getModelNodes().forEach((target) => {
+			if (target.isDisposed?.() || typeof target.getTotalVertices !== "function" || target.getTotalVertices() <= 0 || !("material" in target)) { return; }
+			const baseMaterial = this.snapshots.get(target)?.material ?? target.material;
+			const appearanceMaterial = this.getOrCreateAppearanceMaterial(baseMaterial);
+			if (!appearanceMaterial) { return; }
+			this.setMaterialColor(appearanceMaterial, color);
+			target.material = appearanceMaterial;
+		});
+	}
+
+	/**
+	 * 按原材质为当前脚本实例懒创建专属克隆，避免多个 Stacker 实例互相串色。
+	 */
+	private getOrCreateAppearanceMaterial(baseMaterial: any): any | null {
+		if (!baseMaterial || typeof baseMaterial.clone !== "function") { return null; }
+		const cachedMaterial = this.appearanceMaterials.get(baseMaterial);
+		if (cachedMaterial) { return cachedMaterial; }
+		const materialName = String(baseMaterial.name ?? "material");
+		const clonedMaterial = baseMaterial.clone(`${materialName}_stacker_appearance_${this.appearanceMaterials.size}`);
+		if (!clonedMaterial) { return null; }
+		this.appearanceMaterials.set(baseMaterial, clonedMaterial);
+		return clonedMaterial;
+	}
+
+	/**
+	 * 兼容 PBRMaterial 和 StandardMaterial 的主颜色字段，颜色对象按值复制避免共享引用。
+	 */
+	private setMaterialColor(material: any, color: Color3): void {
+		if (material.albedoColor?.copyFrom) { material.albedoColor.copyFrom(color); }
+		else if ("albedoColor" in material) { material.albedoColor = color.clone(); }
+		if (material.diffuseColor?.copyFrom) { material.diffuseColor.copyFrom(color); }
+		else if ("diffuseColor" in material) { material.diffuseColor = color.clone(); }
+	}
+
+	/**
+	 * 释放当前 Stacker 实例创建的颜色材质，不强制释放原模型共享贴图。
+	 */
+	private disposeAppearanceMaterials(): void {
+		this.appearanceMaterials.forEach((material) => {
+			if (typeof material?.dispose === "function") { material.dispose(false, false); }
+		});
+		this.appearanceMaterials.clear();
 	}
 
 	/**
@@ -241,6 +332,7 @@ export class ParametricModelRuntimeComponent {
 				rotationQuaternion: target.rotationQuaternion?.clone?.(),
 				enabled: typeof target.isEnabled === "function" ? target.isEnabled() : undefined,
 				vertexPositions: this.readVertexPositions(target),
+				material: "material" in target ? target.material : undefined,
 			});
 		}
 		return this.snapshots.get(target) ?? { position: Vector3.Zero(), scaling: new Vector3(1, 1, 1) };
@@ -256,6 +348,7 @@ export class ParametricModelRuntimeComponent {
 			if (target.rotation && snapshot.rotation) { target.rotation = snapshot.rotation.clone(); }
 			if (snapshot.rotationQuaternion && target.rotationQuaternion !== undefined) { target.rotationQuaternion = snapshot.rotationQuaternion.clone(); }
 			if (snapshot.vertexPositions) { this.restoreVertexPositions(target, snapshot.vertexPositions); }
+			if ("material" in target) { target.material = snapshot.material ?? null; }
 			if (snapshot.enabled !== undefined && typeof target.setEnabled === "function") { target.setEnabled(snapshot.enabled); }
 		});
 	}
@@ -337,13 +430,13 @@ export class ParametricModelRuntimeComponent {
 
 	/**
 	 * 按 Stacker 的实际坐标系应用主体长宽高，只处理主体结构节点。
-	 * GLB 的长度主方向是世界 Z 轴，宽度主方向是世界 X 轴；载货台和货叉字段由各自方法单独处理，避免整机二次缩放变形。
+	 * GLB 的长度主方向是米空间 Z 轴，宽度主方向是米空间 X 轴；载货台和货叉字段由各自方法单独处理，避免整机二次缩放变形。
 	 */
 	private applyDimensionScale(values: ValueMap): void {
 		const bodyWidthNodes = this.findStackerBodyWidthNodes();
-		const xScale = this.ratioForNodesByWorldAxis(bodyWidthNodes, values, "bodyWidth", "x");
+		const xScale = this.ratioForNodesByMeterAxis(bodyWidthNodes, values, "bodyWidth", "x");
 		this.applyAnchoredBodyLength(values);
-		this.scaleNodesByWorldAxes(bodyWidthNodes, xScale, 1, 1);
+		this.scaleNodesByMeterAxes(bodyWidthNodes, xScale, 1, 1);
 		this.applyStackerBodyHeight(values);
 	}
 
@@ -353,8 +446,8 @@ export class ParametricModelRuntimeComponent {
 	private applyStackerBodyHeight(values: ValueMap): void {
 		if (!("bodyHeight" in values)) { return; }
 		const mastMeshes = this.getMeshesForNodes(this.findStackerMastStretchNodes());
-		const heightAxis = this.getParametricWorldAxis("y");
-		const mastBounds = this.getProjectedBounds(mastMeshes, heightAxis);
+		const heightAxis = this.getParametricMeterAxis("y");
+		const mastBounds = this.getMeterProjectedBounds(mastMeshes, heightAxis);
 		if (!mastBounds) { return; }
 		const mastHeight = mastBounds.max - mastBounds.min;
 		if (mastHeight <= 0) { return; }
@@ -364,7 +457,7 @@ export class ParametricModelRuntimeComponent {
 		const clampedScale = Math.max(1 / mastHeight, heightScale);
 		const extension = mastHeight * (clampedScale - 1);
 		this.stretchMeshesFromAxisMin(mastMeshes, heightAxis, clampedScale);
-		this.offsetNodesByWorldDelta(this.findStackerTopLiftNodes(), heightAxis.scale(extension));
+		this.offsetNodesByMeterDelta(this.findStackerTopLiftNodes(), heightAxis.scale(extension));
 	}
 
 	/**
@@ -373,17 +466,17 @@ export class ParametricModelRuntimeComponent {
 	private applyAnchoredBodyLength(values: ValueMap): void {
 		if (!("bodyLength" in values)) { return; }
 		const railMeshes = this.getMeshesForNodes(this.findStackerLengthNodes());
-		const lengthScale = this.ratioForMeshesByWorldAxis(railMeshes, values, "bodyLength", "z");
-		this.stretchMeshesByWorldZ(railMeshes, lengthScale);
+		const lengthScale = this.ratioForMeshesByMeterAxis(railMeshes, values, "bodyLength", "z");
+		this.stretchMeshesByMeterZ(railMeshes, lengthScale);
 	}
 
 	/**
-	 * 按世界 Z 轴分段拉伸 mesh，保护两端端部结构不被缩放。
+	 * 按米空间 Z 轴分段拉伸 mesh，保护两端端部结构不被缩放。
 	 */
-	private stretchMeshesByWorldZ(meshes: any[], lengthScale: number): void {
+	private stretchMeshesByMeterZ(meshes: any[], lengthScale: number): void {
 		if (meshes.length === 0 || Math.abs(lengthScale - 1) < 0.0001) { return; }
-		const lengthAxis = this.getParametricWorldAxis("z");
-		const bounds = this.getProjectedBounds(meshes, lengthAxis);
+		const lengthAxis = this.getParametricMeterAxis("z");
+		const bounds = this.getMeterProjectedBounds(meshes, lengthAxis);
 		if (!bounds) { return; }
 		const sourceLength = bounds.max - bounds.min;
 		if (sourceLength <= 0) { return; }
@@ -404,7 +497,7 @@ export class ParametricModelRuntimeComponent {
 	 * 计算长度端部保护区大小，避免红框端头随长度参数变形。
 	 */
 	private getProtectedEndLength(sourceLength: number): number {
-		return Math.min(sourceLength * 0.2, Math.max(400, sourceLength * 0.04));
+		return Math.min(sourceLength * 0.2, Math.max(0.4, sourceLength * 0.04));
 	}
 
 	/**
@@ -414,16 +507,20 @@ export class ParametricModelRuntimeComponent {
 		const positions = this.getBaseVertexPositions(mesh);
 		const worldMatrix = mesh.computeWorldMatrix?.(true);
 		const inverseWorldMatrix = worldMatrix?.clone?.();
-		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert) { return; }
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert || !meterSpace) { return; }
 		inverseWorldMatrix.invert();
 		const nextPositions = positions.slice();
 		for (let index = 0; index < nextPositions.length; index += 3) {
 			const local = new Vector3(positions[index], positions[index + 1], positions[index + 2]);
 			const world = Vector3.TransformCoordinates(local, worldMatrix);
-			const sourceAxisValue = this.projectWorldPoint(world, axis);
+			const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+			const sourceAxisValue = this.projectMeterPoint(meterPoint, axis);
 			const nextAxisValue = this.mapAnchoredAxisValue(sourceAxisValue, sourceMiddleStart, sourceMiddleEnd, sourceMiddleLength, middleScale, extension);
 			if (Math.abs(nextAxisValue - sourceAxisValue) < 0.0001) { continue; }
-			const nextLocal = Vector3.TransformCoordinates(world.add(axis.scale(nextAxisValue - sourceAxisValue)), inverseWorldMatrix);
+			const nextMeterPoint = meterPoint.add(axis.scale(nextAxisValue - sourceAxisValue));
+			const nextWorld = Vector3.TransformCoordinates(nextMeterPoint, meterSpace.entityRootWorldMatrix);
+			const nextLocal = Vector3.TransformCoordinates(nextWorld, inverseWorldMatrix);
 			nextPositions[index] = nextLocal.x;
 			nextPositions[index + 1] = nextLocal.y;
 			nextPositions[index + 2] = nextLocal.z;
@@ -432,7 +529,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 根据顶点原始世界 Z 坐标计算锚定拉伸后的世界 Z 坐标。
+	 * 根据顶点原始米空间 Z 坐标计算锚定拉伸后的米空间 Z 坐标。
 	 */
 	private mapAnchoredAxisValue(axisValue: number, sourceMiddleStart: number, sourceMiddleEnd: number, sourceMiddleLength: number, middleScale: number, extension: number): number {
 		if (axisValue <= sourceMiddleStart) { return axisValue; }
@@ -465,7 +562,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 计算一组 mesh 的世界 Z 包围范围。
+	 * 计算一组 mesh 的米空间 Z 包围范围。
 	 */
 	/**
 	 * 对指定节点应用相对基础缩放。
@@ -477,16 +574,16 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 对一组节点按世界坐标轴应用缩放，避免 GLB 节点局部旋转导致长宽高语义反向。
+	 * 对一组节点按实体根米空间轴应用缩放，避免 GLB 节点局部旋转导致长宽高语义反向。
 	 */
-	private scaleNodesByWorldAxes(nodes: any[], worldXScale: number, worldYScale: number, worldZScale: number): void {
-		nodes.forEach((node) => this.scaleNodeByWorldAxes(node, worldXScale, worldYScale, worldZScale));
+	private scaleNodesByMeterAxes(nodes: any[], worldXScale: number, worldYScale: number, worldZScale: number): void {
+		nodes.forEach((node) => this.scaleNodeByMeterAxes(node, worldXScale, worldYScale, worldZScale));
 	}
 
 	/**
-	 * 将世界坐标轴倍率转换成目标节点的局部缩放倍率。
+	 * 将实体根米空间轴倍率转换成目标节点的局部缩放倍率。
 	 */
-	private scaleNodeByWorldAxes(target: any, worldXScale: number, worldYScale: number, worldZScale: number): void {
+	private scaleNodeByMeterAxes(target: any, worldXScale: number, worldYScale: number, worldZScale: number): void {
 		const snapshot = this.rememberSnapshot(target);
 		if (!target.scaling) { return; }
 		const localScale = this.getLocalScaleForParametricAxes(target, worldXScale, worldYScale, worldZScale);
@@ -494,21 +591,21 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 根据节点原始旋转计算局部 X/Y/Z 分别应该承接哪个世界轴倍率。
+	 * 根据节点原始旋转计算局部 X/Y/Z 分别应该承接哪个米空间轴倍率。
 	 */
 	private getLocalScaleForParametricAxes(target: any, worldXScale: number, worldYScale: number, worldZScale: number): Vector3 {
-		const parametricX = this.getParametricWorldAxis("x");
-		const parametricY = this.getParametricWorldAxis("y");
-		const parametricZ = this.getParametricWorldAxis("z");
+		const parametricX = this.getParametricMeterAxis("x");
+		const parametricY = this.getParametricMeterAxis("y");
+		const parametricZ = this.getParametricMeterAxis("z");
 		return new Vector3(
-			this.pickParametricScale(this.getNodeWorldAxis(target, "x"), parametricX, parametricY, parametricZ, worldXScale, worldYScale, worldZScale),
-			this.pickParametricScale(this.getNodeWorldAxis(target, "y"), parametricX, parametricY, parametricZ, worldXScale, worldYScale, worldZScale),
-			this.pickParametricScale(this.getNodeWorldAxis(target, "z"), parametricX, parametricY, parametricZ, worldXScale, worldYScale, worldZScale),
+			this.pickParametricScale(this.getNodeMeterAxis(target, "x"), parametricX, parametricY, parametricZ, worldXScale, worldYScale, worldZScale),
+			this.pickParametricScale(this.getNodeMeterAxis(target, "y"), parametricX, parametricY, parametricZ, worldXScale, worldYScale, worldZScale),
+			this.pickParametricScale(this.getNodeMeterAxis(target, "z"), parametricX, parametricY, parametricZ, worldXScale, worldYScale, worldZScale),
 		);
 	}
 
 	/**
-	 * 按节点局部轴与模型参数轴的世界方向夹角选择缩放倍率。
+	 * 按节点局部轴与模型参数轴的米空间方向夹角选择缩放倍率。
 	 */
 	private pickParametricScale(axis: Vector3, parametricX: Vector3, parametricY: Vector3, parametricZ: Vector3, worldXScale: number, worldYScale: number, worldZScale: number): number {
 		const x = Math.abs(Vector3.Dot(axis, parametricX));
@@ -557,33 +654,123 @@ export class ParametricModelRuntimeComponent {
 	/**
 	 * 应用货叉长度和货叉间距参数，找不到货叉节点时跳过。
 	 */
-	private applyForkParameters(values: ValueMap): void {
-		const forkNodes = this.findStackerForkNodes();
-		if ("forkLength" in values) { this.scaleNodesByWorldAxes(forkNodes, this.ratioForNodesByWorldAxis(forkNodes, values, "forkLength", "x"), 1, 1); }
-		if ("forkGap" in values) { this.applyForkGap(values, forkNodes); }
+        private applyForkParameters(values: ValueMap): void {
+                const forkNodes = this.findStackerForkNodes();
+                const primaryForkNodes = forkNodes.slice(0, 2);
+                const verticalAxis = this.getParametricMeterAxis("y");
+                const forkAnchors = this.captureForkVisualAnchors(primaryForkNodes, verticalAxis);
+                if ("forkLength" in values) { this.scaleNodesByMeterAxes(forkNodes, this.ratioForNodesByMeterAxis(forkNodes, values, "forkLength", "x"), 1, 1); }
+                if ("forkGap" in values) { this.applyForkGap(values, forkNodes, verticalAxis, forkAnchors); }
+                this.restoreForkBottomAnchors(forkAnchors, verticalAxis);
+                this.createForkStageTwoNodes(values, forkNodes);
+        }
+
+        /**
+         * 记录货叉在原始 GLB 中的视觉底面和中心线，后续缩放或调距都以此作为贴合基准。
+         */
+        private captureForkVisualAnchors(forkNodes: any[], verticalAxis: Vector3): ForkVisualAnchor[] {
+                return forkNodes
+                        .map((node) => {
+                                const bottom = this.getForkProjectedBottom(node, verticalAxis);
+                                const center = this.getNodeMeterCenter(node);
+                                return bottom === null || !center ? null : { node, bottom, center };
+                        })
+                        .filter((anchor): anchor is ForkVisualAnchor => !!anchor);
+        }
+
+        /**
+         * 按原始底面投影把货叉贴回支撑平面，避免缩放 pivot 或间距轴计算带来悬浮。
+         */
+        private restoreForkBottomAnchors(anchors: ForkVisualAnchor[], verticalAxis: Vector3): void {
+                anchors.forEach((anchor) => {
+                        const currentBottom = this.getForkProjectedBottom(anchor.node, verticalAxis);
+                        if (currentBottom === null) { return; }
+                        const delta = anchor.bottom - currentBottom;
+                        if (Math.abs(delta) < 0.0001) { return; }
+                        this.translateNodeByCurrentMeterDelta(anchor.node, verticalAxis.scale(delta));
+                });
+        }
+
+        /**
+         * 读取单根货叉沿模型竖直轴的最低投影值，用作视觉贴合底面。
+         */
+        private getForkProjectedBottom(node: any, verticalAxis: Vector3): number | null {
+                const bounds = this.getMeterProjectedBounds(this.getMeshesForNodes([node]), verticalAxis);
+                return bounds ? bounds.min : null;
+        }
+
+	/**
+	 * 为每侧货叉创建第二段伸缩可视节点；节点只存在运行时，不写回 GLB 本体。
+	 */
+	private createForkStageTwoNodes(values: ValueMap, forkNodes: any[]): void {
+		const stageTwoReach = this.readNumber(values, "forkStageTwoReach", Number(DEFAULT_VALUES.forkStageTwoReach ?? 0));
+		if (stageTwoReach <= 0) { return; }
+		forkNodes.slice(0, 2).forEach((source, index) => this.cloneForkStageTwoNode(source, index === 0 ? "front" : "back"));
+	}
+
+	/**
+	 * 克隆当前货叉作为第二段，初始收纳时隐藏，伸出第二段时由运行时启用。
+	 */
+	private cloneForkStageTwoNode(source: any, side: "front" | "back"): void {
+		if (typeof source?.clone !== "function") { return; }
+		const sourceName = String(source.name ?? "fork");
+		const clone = source.clone(sourceName + "_stage2", source.parent, false);
+		if (!clone) { return; }
+		if (clone.position && source.position?.clone) { clone.position = source.position.clone(); }
+		if (clone.scaling && source.scaling?.clone) { clone.scaling = source.scaling.clone(); }
+		if (clone.rotation && source.rotation?.clone) { clone.rotation = source.rotation.clone(); }
+		if (clone.rotationQuaternion !== undefined && source.rotationQuaternion?.clone) { clone.rotationQuaternion = source.rotationQuaternion.clone(); }
+		clone.metadata = {
+			...(clone.metadata ?? {}),
+			generatedByParametricRuntime: true,
+			sourceNodeName: sourceName,
+			reason: "fork-stage-two",
+			stackerForkStage: 2,
+			stackerForkSide: side,
+		};
+		if (typeof clone.setEnabled === "function") { clone.setEnabled(false); }
+		this.generatedNodes.push(clone);
 	}
 
 	/**
 	 * 将货叉间距解释为两根货叉世界中心线之间的目标距离，而不是在原始位置上继续追加偏移。
 	 */
-	private applyForkGap(values: ValueMap, forkNodes: any[]): void {
-		if (forkNodes.length < 2) { return; }
-		const [firstFork, secondFork] = forkNodes.slice(0, 2);
-		const firstCenter = this.getNodeWorldCenter(firstFork);
-		const secondCenter = this.getNodeWorldCenter(secondFork);
-		if (!firstCenter || !secondCenter) { return; }
-		const axis = this.normalizeDirection(secondCenter.subtract(firstCenter), this.getParametricWorldAxis("x"));
-		const firstAxisValue = this.projectWorldPoint(firstCenter, axis);
-		const secondAxisValue = this.projectWorldPoint(secondCenter, axis);
-		const centerAxisValue = (firstAxisValue + secondAxisValue) * 0.5;
-		const direction = secondAxisValue >= firstAxisValue ? 1 : -1;
-		const targetGap = Math.max(0, this.readNumber(values, "forkGap", Number(DEFAULT_VALUES.forkGap ?? 0)));
-		const firstTarget = centerAxisValue - direction * targetGap * 0.5;
-		const secondTarget = centerAxisValue + direction * targetGap * 0.5;
+        private applyForkGap(values: ValueMap, forkNodes: any[], verticalAxis: Vector3, anchors: ForkVisualAnchor[]): void {
+                if (forkNodes.length < 2) { return; }
+                const [firstFork, secondFork] = forkNodes.slice(0, 2);
+                const firstAnchorCenter = anchors.find((anchor) => anchor.node === firstFork)?.center ?? this.getNodeMeterCenter(firstFork);
+                const secondAnchorCenter = anchors.find((anchor) => anchor.node === secondFork)?.center ?? this.getNodeMeterCenter(secondFork);
+                const firstCurrentCenter = this.getNodeMeterCenter(firstFork);
+                const secondCurrentCenter = this.getNodeMeterCenter(secondFork);
+                if (!firstAnchorCenter || !secondAnchorCenter || !firstCurrentCenter || !secondCurrentCenter) { return; }
+                const axis = this.getForkGapAxis(firstAnchorCenter, secondAnchorCenter, verticalAxis);
+                const firstAxisValue = this.projectMeterPoint(firstCurrentCenter, axis);
+                const secondAxisValue = this.projectMeterPoint(secondCurrentCenter, axis);
+                const centerAxisValue = (firstAxisValue + secondAxisValue) * 0.5;
+                const direction = secondAxisValue >= firstAxisValue ? 1 : -1;
+                const targetGap = Math.max(0, this.readNumber(values, "forkGap", Number(DEFAULT_VALUES.forkGap ?? 0)));
+                const firstTarget = centerAxisValue - direction * targetGap * 0.5;
+                const secondTarget = centerAxisValue + direction * targetGap * 0.5;
 
-		this.offsetNodeByWorldDelta(firstFork, axis.scale(firstTarget - firstAxisValue));
-		this.offsetNodeByWorldDelta(secondFork, axis.scale(secondTarget - secondAxisValue));
-	}
+                this.offsetNodeByMeterDelta(firstFork, axis.scale(firstTarget - firstAxisValue));
+                this.offsetNodeByMeterDelta(secondFork, axis.scale(secondTarget - secondAxisValue));
+        }
+
+        /**
+         * 计算货叉左右间距轴，并剔除模型竖直轴分量，保证 forkGap 只改变左右中心距。
+         */
+        private getForkGapAxis(firstCenter: Vector3, secondCenter: Vector3, verticalAxis: Vector3): Vector3 {
+                const fallbackAxis = this.removeAxisComponent(this.getParametricMeterAxis("x"), verticalAxis);
+                const horizontalDelta = this.removeAxisComponent(secondCenter.subtract(firstCenter), verticalAxis);
+                return this.normalizeDirection(horizontalDelta, this.normalizeDirection(fallbackAxis, this.getParametricMeterAxis("x")));
+        }
+
+        /**
+         * 从方向向量中移除指定轴向的投影分量，用于把左右调距限制在水平平面内。
+         */
+        private removeAxisComponent(direction: Vector3, axis: Vector3): Vector3 {
+                return direction.subtract(axis.scale(Vector3.Dot(direction, axis)));
+        }
 
 	/**
 	 * 应用载货台或货仓类参数，找不到目标节点时跳过。
@@ -591,8 +778,8 @@ export class ParametricModelRuntimeComponent {
 	private applyPlatformParameters(values: ValueMap): void {
 		const platformNodes = this.findStackerPlatformNodes();
 		if ("platformLength" in values) {
-			const lengthScale = this.ratioForNodesByWorldAxis(platformNodes, values, "platformLength", "x");
-			this.scaleNodesByWorldAxes(platformNodes, lengthScale, 1, 1);
+			const lengthScale = this.ratioForNodesByMeterAxis(platformNodes, values, "platformLength", "x");
+			this.scaleNodesByMeterAxes(platformNodes, lengthScale, 1, 1);
 		}
 		if ("platformHeight" in values) { this.applyStackerPlatformHeight(values, platformNodes); }
 	}
@@ -602,8 +789,8 @@ export class ParametricModelRuntimeComponent {
 	 */
 	private applyStackerPlatformHeight(values: ValueMap, platformNodes: any[]): void {
 		const platformMeshes = this.getStackerPlatformMeshes(platformNodes);
-		const heightAxis = this.getParametricWorldAxis("y");
-		const platformBounds = this.getProjectedBounds(platformMeshes, heightAxis);
+		const heightAxis = this.getParametricMeterAxis("y");
+		const platformBounds = this.getMeterProjectedBounds(platformMeshes, heightAxis);
 		if (!platformBounds) { return; }
 		const profile = this.getPlatformHeightProfile(platformMeshes, platformBounds, heightAxis);
 		if (!profile) { return; }
@@ -652,9 +839,11 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 收集 mesh 顶点的世界 Y 坐标层级，用于识别载货台高度保护区。
+	 * 收集 mesh 顶点的米空间 Y 坐标层级，用于识别载货台高度保护区。
 	 */
 	private collectProjectedValues(meshes: any[], axis: Vector3): number[] {
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!meterSpace) { return []; }
 		const values: number[] = [];
 		meshes.forEach((mesh) => {
 			const positions = this.getBaseVertexPositions(mesh);
@@ -662,14 +851,15 @@ export class ParametricModelRuntimeComponent {
 			if (!positions || !worldMatrix) { return; }
 			for (let index = 0; index < positions.length; index += 3) {
 				const world = Vector3.TransformCoordinates(new Vector3(positions[index], positions[index + 1], positions[index + 2]), worldMatrix);
-				values.push(this.projectWorldPoint(world, axis));
+				const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+				values.push(this.projectMeterPoint(meterPoint, axis));
 			}
 		});
 		return values;
 	}
 
 	/**
-	 * 合并相近的世界 Y 坐标层级，避免浮点误差影响最大拉伸段识别。
+	 * 合并相近的米空间 Y 坐标层级，避免浮点误差影响最大拉伸段识别。
 	 */
 	private collectProjectedLevels(meshes: any[], axis: Vector3): number[] {
 		const sortedValues = this.collectProjectedValues(meshes, axis).sort((a, b) => a - b);
@@ -699,13 +889,14 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 分段映射单个 mesh 的世界 Y 坐标：底部保护区不动，中间段拉伸，顶部保护区整体上移。
+	 * 分段映射单个 mesh 的米空间 Y 坐标：底部保护区不动，中间段拉伸，顶部保护区整体上移。
 	 */
 	private stretchMeshBetweenAxisBand(mesh: any, axis: Vector3, bottomY: number, topY: number, middleScale: number, extension: number): void {
 		const positions = this.getBaseVertexPositions(mesh);
 		const worldMatrix = mesh.computeWorldMatrix?.(true);
 		const inverseWorldMatrix = worldMatrix?.clone?.();
-		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert) { return; }
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert || !meterSpace) { return; }
 		inverseWorldMatrix.invert();
 		const sourceMiddleHeight = topY - bottomY;
 		if (sourceMiddleHeight <= 0) { return; }
@@ -713,10 +904,13 @@ export class ParametricModelRuntimeComponent {
 		for (let index = 0; index < nextPositions.length; index += 3) {
 			const local = new Vector3(positions[index], positions[index + 1], positions[index + 2]);
 			const world = Vector3.TransformCoordinates(local, worldMatrix);
-			const sourceAxisValue = this.projectWorldPoint(world, axis);
+			const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+			const sourceAxisValue = this.projectMeterPoint(meterPoint, axis);
 			const nextAxisValue = this.mapPlatformAxisValue(sourceAxisValue, bottomY, topY, sourceMiddleHeight, middleScale, extension);
 			if (Math.abs(nextAxisValue - sourceAxisValue) < 0.0001) { continue; }
-			const nextLocal = Vector3.TransformCoordinates(world.add(axis.scale(nextAxisValue - sourceAxisValue)), inverseWorldMatrix);
+			const nextMeterPoint = meterPoint.add(axis.scale(nextAxisValue - sourceAxisValue));
+			const nextWorld = Vector3.TransformCoordinates(nextMeterPoint, meterSpace.entityRootWorldMatrix);
+			const nextLocal = Vector3.TransformCoordinates(nextWorld, inverseWorldMatrix);
 			nextPositions[index] = nextLocal.x;
 			nextPositions[index + 1] = nextLocal.y;
 			nextPositions[index + 2] = nextLocal.z;
@@ -725,7 +919,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 计算载货台分段高度映射后的世界 Y 坐标，X/Z 坐标始终保持原值。
+	 * 计算载货台分段高度映射后的米空间 Y 坐标，X/Z 坐标始终保持原值。
 	 */
 	private mapPlatformAxisValue(axisValue: number, bottomY: number, topY: number, sourceMiddleHeight: number, middleScale: number, extension: number): number {
 		if (axisValue <= bottomY) { return axisValue; }
@@ -734,11 +928,11 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 以世界 Y 最低点为锚点拉伸 mesh，底部保持原位，顶部向上或向下变化。
+	 * 以米空间 Y 最低点为锚点拉伸 mesh，底部保持原位，顶部向上或向下变化。
 	 */
 	private stretchMeshesFromAxisMin(meshes: any[], axis: Vector3, heightScale: number): void {
 		if (meshes.length === 0 || Math.abs(heightScale - 1) < 0.0001) { return; }
-		const bounds = this.getProjectedBounds(meshes, axis);
+		const bounds = this.getMeterProjectedBounds(meshes, axis);
 		if (!bounds) { return; }
 		const sourceHeight = bounds.max - bounds.min;
 		if (sourceHeight <= 0) { return; }
@@ -747,30 +941,34 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 以指定世界 Y 锚点向上拉伸 mesh，锚点以下顶点保持原位。
+	 * 以指定米空间 Y 锚点向上拉伸 mesh，锚点以下顶点保持原位。
 	 */
 	private stretchMeshesAboveAxisAnchor(meshes: any[], axis: Vector3, anchorY: number, heightScale: number): void {
 		meshes.forEach((mesh) => this.stretchMeshAboveAxisAnchor(mesh, axis, anchorY, heightScale));
 	}
 
 	/**
-	 * 拉伸单个 mesh 的世界 Y 坐标，保持锚点及锚点以下顶点不动。
+	 * 拉伸单个 mesh 的米空间 Y 坐标，保持锚点及锚点以下顶点不动。
 	 */
 	private stretchMeshAboveAxisAnchor(mesh: any, axis: Vector3, anchorY: number, heightScale: number): void {
 		const positions = this.getBaseVertexPositions(mesh);
 		const worldMatrix = mesh.computeWorldMatrix?.(true);
 		const inverseWorldMatrix = worldMatrix?.clone?.();
-		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert) { return; }
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert || !meterSpace) { return; }
 		inverseWorldMatrix.invert();
 		const nextPositions = positions.slice();
 		for (let index = 0; index < nextPositions.length; index += 3) {
 			const local = new Vector3(positions[index], positions[index + 1], positions[index + 2]);
 			const world = Vector3.TransformCoordinates(local, worldMatrix);
-			const sourceAxisValue = this.projectWorldPoint(world, axis);
+			const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+			const sourceAxisValue = this.projectMeterPoint(meterPoint, axis);
 			if (sourceAxisValue <= anchorY) { continue; }
 			const nextAxisValue = anchorY + (sourceAxisValue - anchorY) * heightScale;
 			if (Math.abs(nextAxisValue - sourceAxisValue) < 0.0001) { continue; }
-			const nextLocal = Vector3.TransformCoordinates(world.add(axis.scale(nextAxisValue - sourceAxisValue)), inverseWorldMatrix);
+			const nextMeterPoint = meterPoint.add(axis.scale(nextAxisValue - sourceAxisValue));
+			const nextWorld = Vector3.TransformCoordinates(nextMeterPoint, meterSpace.entityRootWorldMatrix);
+			const nextLocal = Vector3.TransformCoordinates(nextWorld, inverseWorldMatrix);
 			nextPositions[index] = nextLocal.x;
 			nextPositions[index + 1] = nextLocal.y;
 			nextPositions[index + 2] = nextLocal.z;
@@ -779,9 +977,11 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 计算一组 mesh 的世界 Y 包围范围。
+	 * 计算一组 mesh 的米空间 Y 包围范围。
 	 */
-	private getWorldYBounds(meshes: any[]): { min: number; max: number } | null {
+	private getMeterYBounds(meshes: any[]): { min: number; max: number } | null {
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!meterSpace) { return null; }
 		let min = Number.POSITIVE_INFINITY;
 		let max = Number.NEGATIVE_INFINITY;
 		meshes.forEach((mesh) => {
@@ -790,8 +990,9 @@ export class ParametricModelRuntimeComponent {
 			if (!positions || !worldMatrix) { return; }
 			for (let index = 0; index < positions.length; index += 3) {
 				const world = Vector3.TransformCoordinates(new Vector3(positions[index], positions[index + 1], positions[index + 2]), worldMatrix);
-				min = Math.min(min, world.y);
-				max = Math.max(max, world.y);
+				const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+				min = Math.min(min, meterPoint.y);
+				max = Math.max(max, meterPoint.y);
 			}
 		});
 		return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null;
@@ -879,7 +1080,7 @@ export class ParametricModelRuntimeComponent {
 		const snapshot = this.rememberSnapshot(source);
 		const clone = source.clone(String(source.name ?? "node") + "_" + reason + "_" + index, source.parent, false);
 		if (!clone) { return; }
-		if (clone.position) { clone.position = snapshot.position.add(offset); }
+		if (clone.position) { clone.position = snapshot.position.add(this.meterDeltaToParentLocalDelta(source, offset)); }
 		if (clone.scaling) { clone.scaling = snapshot.scaling.clone(); }
 		clone.metadata = { ...(clone.metadata ?? {}), generatedByParametricRuntime: true, sourceNodeName: source.name, reason };
 		if (typeof clone.setEnabled === "function") { clone.setEnabled(true); }
@@ -918,6 +1119,17 @@ export class ParametricModelRuntimeComponent {
 	 */
 	private findNodes(pattern: RegExp): any[] {
 		return this.getModelNodes().filter((candidate) => candidate !== this.node && pattern.test(String(candidate.name ?? "")));
+	}
+
+	/**
+	 * 查找 Stacker 的整组行走机构节点，固定上下轨不参与默认原位回贴。
+	 */
+	private findStackerTravelNodes(): any[] {
+		const configuredNames = [...dataDriven.motion.travel.nodes, ...dataDriven.motion.fork.stageTwoNodes];
+		const namedNodes = this.findNodesByName(configuredNames);
+		return namedNodes.length > 0
+			? namedNodes
+			: this.findNodes(/dingbuhuagui|dingbu|dibu|lizhu|dianji|caozuotai|xiang|huocha/i);
 	}
 
 	/**
@@ -1036,7 +1248,14 @@ export class ParametricModelRuntimeComponent {
 	 * 判断节点是否具备可编辑 position 顶点数据。
 	 */
 	private isEditableMesh(node: any): boolean {
-		return typeof node?.getVerticesData === "function" && typeof node?.setVerticesData === "function" && !!node.getVerticesData("position");
+		const positions = node?.getVerticesData?.("position");
+		return !node?.isDisposed?.()
+			&& node?.isEnabled?.(false) !== false
+			&& node?.isVisible !== false
+			&& Number(node?.visibility ?? 1) > 0
+			&& typeof node?.setVerticesData === "function"
+			&& !!positions
+			&& positions.length > 0;
 	}
 
 	/**
@@ -1054,40 +1273,52 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 按世界坐标偏移节点，专用于顶轨随主体高度抬升；会把世界位移换算到父节点本地坐标，兼容 GLB __root__ 的缩放和翻转。
+	 * 按米空间偏移节点，专用于顶轨随主体高度抬升；会把米空间位移换算到父节点本地坐标，兼容 GLB __root__ 的缩放和翻转。
 	 */
-	private offsetNodesByWorldDelta(nodes: any[], worldOffset: Vector3): void {
-		nodes.forEach((node) => this.offsetNodeByWorldDelta(node, worldOffset));
+	private offsetNodesByMeterDelta(nodes: any[], meterOffset: Vector3): void {
+		nodes.forEach((node) => this.offsetNodeByMeterDelta(node, meterOffset));
 	}
 
 	/**
-	 * 对单个节点应用相对基础位置的世界坐标偏移。
+	 * 对单个节点应用相对基础位置的米空间偏移。
 	 */
-	private offsetNodeByWorldDelta(node: any, worldOffset: Vector3): void {
+	private offsetNodeByMeterDelta(node: any, meterOffset: Vector3): void {
 		const snapshot = this.rememberSnapshot(node);
 		if (!node.position) { return; }
-		const localOffset = this.worldDeltaToParentLocalDelta(node, worldOffset);
+		const localOffset = this.meterDeltaToParentLocalDelta(node, meterOffset);
 		node.position = snapshot.position.add(localOffset);
 	}
 
+        /**
+         * 在节点当前姿态基础上追加米空间位移，用于锚点回贴，避免覆盖前面已经计算好的调距位移。
+         */
+	private translateNodeByCurrentMeterDelta(node: any, meterOffset: Vector3): void {
+		if (!node.position) { return; }
+		const localOffset = this.meterDeltaToParentLocalDelta(node, meterOffset);
+		node.position = node.position.add(localOffset);
+		if (typeof node.computeWorldMatrix === "function") { node.computeWorldMatrix(true); }
+	}
+
 	/**
-	 * 将世界坐标位移转换为节点父级坐标系中的位移，避免父级缩放导致顶轨只移动千分之一。
+	 * 将米空间位移转换为节点父级坐标系中的位移，避免父级缩放导致顶轨只移动千分之一。
 	 */
-	private worldDeltaToParentLocalDelta(node: any, worldOffset: Vector3): Vector3 {
+	private meterDeltaToParentLocalDelta(node: any, meterOffset: Vector3): Vector3 {
+		const meterSpace = this.getMeterSpaceMatrices();
 		const parent = node?.parent;
 		const parentWorldMatrix = parent?.computeWorldMatrix?.(true) ?? parent?.getWorldMatrix?.();
 		const inverseParentWorldMatrix = parentWorldMatrix?.clone?.();
-		if (!inverseParentWorldMatrix?.invert) { return worldOffset; }
+		if (!meterSpace || !inverseParentWorldMatrix?.invert) { return meterOffset.clone?.() ?? meterOffset; }
 		inverseParentWorldMatrix.invert();
+		const worldOffset = Vector3.TransformNormal(meterOffset, meterSpace.entityRootWorldMatrix);
 		return Vector3.TransformNormal(worldOffset, inverseParentWorldMatrix);
 	}
 
 	/**
 	 * 对单个节点应用相对基础位置的偏移。
 	 */
-	private offsetNode(node: any, offset: Vector3): void {
+	private offsetNode(node: any, offsetMeters: Vector3): void {
 		const snapshot = this.rememberSnapshot(node);
-		if (node.position) { node.position = snapshot.position.add(offset); }
+		if (node.position) { node.position = snapshot.position.add(this.meterDeltaToParentLocalDelta(node, offsetMeters)); }
 	}
 
 	/**
@@ -1109,17 +1340,17 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 将属性面板输入的目标米值换算为一组节点的世界轴缩放倍率。
+	 * 将属性面板输入的目标米值换算为一组节点的米空间轴缩放倍率。
 	 */
-	private ratioForNodesByWorldAxis(nodes: any[], values: ValueMap, key: string, axis: ParametricAxisName): number {
-		return this.ratioForMeshesByWorldAxis(this.getMeshesForNodes(nodes), values, key, axis);
+	private ratioForNodesByMeterAxis(nodes: any[], values: ValueMap, key: string, axis: ParametricAxisName): number {
+		return this.ratioForMeshesByMeterAxis(this.getMeshesForNodes(nodes), values, key, axis);
 	}
 
 	/**
-	 * 将属性面板输入的目标米值换算为一组 mesh 的世界轴缩放倍率。
+	 * 将属性面板输入的目标米值换算为一组 mesh 的米空间轴缩放倍率。
 	 */
-	private ratioForMeshesByWorldAxis(meshes: any[], values: ValueMap, key: string, axis: ParametricAxisName): number {
-		const bounds = this.getWorldAxisBounds(meshes, axis);
+	private ratioForMeshesByMeterAxis(meshes: any[], values: ValueMap, key: string, axis: ParametricAxisName): number {
+		const bounds = this.getMeterAxisBounds(meshes, axis);
 		const baselineMeters = bounds ? Math.max(0, bounds.max - bounds.min) : 0;
 		const fallbackMeters = baselineMeters > 0 ? baselineMeters : this.readPositiveNumber(DEFAULT_VALUES, key, 1);
 		const targetMeters = this.readPositiveNumber(values, key, fallbackMeters);
@@ -1127,28 +1358,38 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 读取模型当前参数轴的世界方向；模型根节点旋转后，长宽高仍沿模型自身局部轴变化。
+	 * 读取模型当前参数轴的米空间方向；模型根节点旋转后，长宽高仍沿模型自身局部轴变化。
 	 */
-	private getParametricWorldAxis(axis: ParametricAxisName): Vector3 {
-		const localAxis = this.createLocalAxis(axis);
-		const worldMatrix = this.node.computeWorldMatrix?.(true) ?? this.node.getWorldMatrix?.();
-		const worldAxis = worldMatrix ? Vector3.TransformNormal(localAxis, worldMatrix) : localAxis;
-		return this.normalizeDirection(worldAxis, localAxis);
+	private getParametricMeterAxis(axis: ParametricAxisName): Vector3 {
+		return this.createLocalAxis(axis);
 	}
 
 	/**
 	 * 读取任意节点局部轴在当前世界空间中的方向，父级旋转和源模型单位缩放都会参与计算。
 	 */
-	private getNodeWorldAxis(node: any, axis: ParametricAxisName): Vector3 {
+	private getNodeMeterAxis(node: any, axis: ParametricAxisName): Vector3 {
+		const meterSpace = this.getMeterSpaceMatrices();
 		const localAxis = this.createLocalAxis(axis);
-		const worldMatrix = node?.computeWorldMatrix?.(true) ?? node?.getWorldMatrix?.();
-		const worldAxis = worldMatrix ? Vector3.TransformNormal(localAxis, worldMatrix) : localAxis;
-		return this.normalizeDirection(worldAxis, this.getParametricWorldAxis(axis));
+		const nodeWorldMatrix = node?.computeWorldMatrix?.(true) ?? node?.getWorldMatrix?.();
+		if (!meterSpace || !nodeWorldMatrix) { return localAxis; }
+		const worldAxis = Vector3.TransformNormal(localAxis, nodeWorldMatrix);
+		const meterAxis = Vector3.TransformNormal(worldAxis, meterSpace.inverseEntityRootWorldMatrix);
+		return this.normalizeDirection(meterAxis, this.getParametricMeterAxis(axis));
 	}
 
 	/**
 	 * 创建模型局部参数轴的单位向量。
 	 */
+	/** 读取实体根世界矩阵及其逆矩阵，实体根局部坐标即脚本使用的米空间。 */
+	private getMeterSpaceMatrices(): { entityRootWorldMatrix: any; inverseEntityRootWorldMatrix: any } | null {
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const inverseEntityRootWorldMatrix = entityRootWorldMatrix?.clone?.();
+		if (!entityRootWorldMatrix || !inverseEntityRootWorldMatrix?.invert) { return null; }
+		inverseEntityRootWorldMatrix.invert();
+		return { entityRootWorldMatrix, inverseEntityRootWorldMatrix };
+	}
+
 	private createLocalAxis(axis: ParametricAxisName): Vector3 {
 		if (axis === "x") { return new Vector3(1, 0, 0); }
 		if (axis === "y") { return new Vector3(0, 1, 0); }
@@ -1165,16 +1406,18 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 把世界坐标投影到指定世界方向上，返回一维参数坐标。
+	 * 把世界坐标投影到指定米空间方向上，返回一维参数坐标。
 	 */
-	private projectWorldPoint(point: Vector3, axis: Vector3): number {
+	private projectMeterPoint(point: Vector3, axis: Vector3): number {
 		return Vector3.Dot(point, axis);
 	}
 
 	/**
-	 * 按任意世界方向读取 mesh 基线投影范围，避免模型旋转后仍读取固定 world X/Y/Z。
+	 * 按任意米空间方向读取 mesh 基线投影范围，避免模型旋转后仍读取固定 world X/Y/Z。
 	 */
-	private getProjectedBounds(meshes: any[], axis: Vector3): { min: number; max: number } | null {
+	private getMeterProjectedBounds(meshes: any[], axis: Vector3): { min: number; max: number } | null {
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!meterSpace) { return null; }
 		let min = Number.POSITIVE_INFINITY;
 		let max = Number.NEGATIVE_INFINITY;
 		meshes.forEach((mesh) => {
@@ -1183,7 +1426,8 @@ export class ParametricModelRuntimeComponent {
 			if (!positions || !worldMatrix) { return; }
 			for (let index = 0; index < positions.length; index += 3) {
 				const world = Vector3.TransformCoordinates(new Vector3(positions[index], positions[index + 1], positions[index + 2]), worldMatrix);
-				const value = this.projectWorldPoint(world, axis);
+				const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+				const value = this.projectMeterPoint(meterPoint, axis);
 				min = Math.min(min, value);
 				max = Math.max(max, value);
 			}
@@ -1192,19 +1436,21 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 按指定世界轴读取 mesh 基线包围范围。
+	 * 按指定米空间轴读取 mesh 基线包围范围。
 	 */
-	private getWorldAxisBounds(meshes: any[], axis: ParametricAxisName): { min: number; max: number } | null {
-		return this.getProjectedBounds(meshes, this.getParametricWorldAxis(axis));
+	private getMeterAxisBounds(meshes: any[], axis: ParametricAxisName): { min: number; max: number } | null {
+		return this.getMeterProjectedBounds(meshes, this.getParametricMeterAxis(axis));
 	}
 
 	/**
-	 * 计算一组 mesh 的世界 X 包围范围。
+	 * 计算一组 mesh 的米空间 X 包围范围。
 	 */
 	/**
-	 * 读取节点子树原始顶点的世界包围中心，用于把尺寸参数转换成稳定的世界坐标目标。
+	 * 读取节点子树原始顶点的米空间包围中心，用于把尺寸参数转换成稳定的世界坐标目标。
 	 */
-	private getNodeWorldCenter(node: any): Vector3 | null {
+	private getNodeMeterCenter(node: any): Vector3 | null {
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!meterSpace) { return null; }
 		const meshes = this.getMeshesForNodes([node]);
 		let min = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
 		let max = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
@@ -1214,8 +1460,9 @@ export class ParametricModelRuntimeComponent {
 			if (!positions || !worldMatrix) { return; }
 			for (let index = 0; index < positions.length; index += 3) {
 				const world = Vector3.TransformCoordinates(new Vector3(positions[index], positions[index + 1], positions[index + 2]), worldMatrix);
-				min = Vector3.Minimize(min, world);
-				max = Vector3.Maximize(max, world);
+				const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+				min = Vector3.Minimize(min, meterPoint);
+				max = Vector3.Maximize(max, meterPoint);
 			}
 		});
 		if (!Number.isFinite(min.x) || !Number.isFinite(max.x)) { return null; }
@@ -1223,7 +1470,7 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 根据两根货叉基线中心的最大差值选择间距方向，避免把局部轴误当成世界轴。
+	 * 根据两根货叉基线中心的最大差值选择间距方向，避免把局部轴误当成米空间轴。
 	 */
 	/**
 	 * 读取数值字段，无法转换时使用默认值。
@@ -1239,6 +1486,16 @@ export class ParametricModelRuntimeComponent {
 	private readPositiveNumber(values: ValueMap, key: string, fallback: number): number {
 		const value = this.readNumber(values, key, fallback);
 		return value > 0 ? value : fallback;
+	}
+
+	/**
+	 * 读取十六进制颜色字段，非法值回退默认白色，避免参数错误中断模型更新。
+	 */
+	private readColor(values: ValueMap, key: string, fallback: string): Color3 {
+		const rawValue = typeof values[key] === "string" ? String(values[key]).trim() : "";
+		const normalizedValue = /^#[0-9a-fA-F]{6}$/.test(rawValue) ? rawValue : fallback;
+		try { return Color3.FromHexString(normalizedValue); }
+		catch { return Color3.White(); }
 	}
 
 	/**

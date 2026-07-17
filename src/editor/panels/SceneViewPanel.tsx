@@ -88,6 +88,7 @@ export function SceneViewPanel() {
   const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
   const cameraPoseSaveRequest = useEditorStore((state) => state.cameraPoseSaveRequest);
   const cameraResetRequest = useEditorStore((state) => state.cameraResetRequest);
+  const cameraTopViewRequest = useEditorStore((state) => state.cameraTopViewRequest);
   const selectEntity = useEditorStore((state) => state.selectEntity);
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
@@ -101,6 +102,7 @@ export function SceneViewPanel() {
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
   const consumeCameraPoseSaveRequest = useEditorStore((state) => state.consumeCameraPoseSaveRequest);
   const consumeCameraResetRequest = useEditorStore((state) => state.consumeCameraResetRequest);
+  const consumeCameraTopViewRequest = useEditorStore((state) => state.consumeCameraTopViewRequest);
   const setSelectedModelMeasurement = useEditorStore((state) => state.setSelectedModelMeasurement);
   const pushLog = useEditorStore((state) => state.pushLog);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
@@ -419,6 +421,17 @@ export function SceneViewPanel() {
     viewport.applyCameraPose(sceneDocument.sceneSettings.camera.savedPose);
     consumeCameraResetRequest(cameraResetRequest.id);
   }, [cameraResetRequest, consumeCameraResetRequest, sceneDocument.sceneSettings.camera.savedPose]);
+
+  /** 消费 Toolbar 的临时俯视请求，并在 Babylon 视口完成切换后清理请求。 */
+  useEffect(() => {
+    if (!cameraTopViewRequest) return;
+
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    viewport.setTopView();
+    consumeCameraTopViewRequest(cameraTopViewRequest.id);
+  }, [cameraTopViewRequest, consumeCameraTopViewRequest]);
 
   useEffect(() => {
     if (!entityArrayRequest) return;

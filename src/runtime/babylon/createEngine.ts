@@ -49,6 +49,7 @@ export type BabylonViewport = {
   setSensitivity: (settings: SceneSensitivitySettings) => void;
   getCameraPose: () => SceneCameraPose;
   applyCameraPose: (pose: SceneCameraPose | null) => void;
+  setTopView: () => void;
   setGridSettings: (settings: EditorGridSettings) => void;
   dispose: () => void;
 };
@@ -72,6 +73,8 @@ const EDITOR_CAMERA_MIN_Z_METERS = 0.02;
 const EDITOR_CAMERA_DEFAULT_ALPHA = Math.PI / 4;
 const EDITOR_CAMERA_DEFAULT_BETA = Math.PI * 0.43;
 const EDITOR_CAMERA_DEFAULT_RADIUS = 28;
+const EDITOR_CAMERA_TOP_VIEW_ALPHA = -Math.PI / 2;
+const EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK = 0.01;
 const EDITOR_CAMERA_DEFAULT_TARGET = Vector3.Zero();
 const GRID_VERTEX_SHADER = `
 precision highp float;
@@ -334,6 +337,26 @@ function applySavedCameraPose(camera: ArcRotateCamera, pose: SceneCameraPose | n
   camera.setTarget(target);
 }
 
+/** 清除相机仍在衰减的旋转、平移和缩放输入，避免程序切换视角后继续漂移。 */
+function clearCameraMovement(camera: ArcRotateCamera): void {
+  camera.inertialAlphaOffset = 0;
+  camera.inertialBetaOffset = 0;
+  camera.inertialRadiusOffset = 0;
+  camera.inertialPanningX = 0;
+  camera.inertialPanningY = 0;
+  camera.movement.activeInput = false;
+  camera.movement.resetRotationVelocity();
+  camera.movement.resetPanVelocity();
+  camera.movement.resetZoomVelocity();
+}
+
+/** 保留当前观察中心和距离，将 ArcRotateCamera 切换到稳定的世界 Y 轴俯视方向。 */
+function applyTopCameraView(camera: ArcRotateCamera): void {
+  clearCameraMovement(camera);
+  camera.alpha = EDITOR_CAMERA_TOP_VIEW_ALPHA;
+  camera.beta = Math.max(camera.lowerBetaLimit ?? EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK, EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK);
+}
+
 export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewport {
   assertWebGLSupported();
 
@@ -391,6 +414,10 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewpor
     getCameraPose: () => readCameraPose(camera),
     applyCameraPose: (pose) => {
       applySavedCameraPose(camera, pose);
+    },
+    /** 保留当前取景范围，把编辑器相机切换为适合 CAD 底图建模的俯视视角。 */
+    setTopView: () => {
+      applyTopCameraView(camera);
     },
     setGridSettings: editorGround.setSettings,
     dispose: () => {

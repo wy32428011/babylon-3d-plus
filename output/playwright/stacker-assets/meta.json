@@ -36,94 +36,145 @@
           "key": "description",
           "label": "参数说明",
           "type": "string",
-          "defaultValue": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+          "defaultValue": "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "appearanceColor",
+          "label": "模型外观颜色",
+          "type": "string",
+          "defaultValue": "#ffffff",
           "configuration": {
             "type": "string"
           }
         },
         {
           "key": "bodyLength",
-          "label": "主体长度",
+          "label": "主体长度 (m)",
           "type": "number",
           "defaultValue": 23.012,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "bodyWidth",
-          "label": "主体宽度",
+          "label": "主体宽度 (m)",
           "type": "number",
           "defaultValue": 0.452,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "bodyHeight",
-          "label": "主体高度",
+          "label": "主体高度 (m)",
           "type": "number",
           "defaultValue": 7.837,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "platformLength",
-          "label": "载货台长度",
+          "label": "载货台长度 (m)",
           "type": "number",
           "defaultValue": 1.279,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "platformHeight",
-          "label": "载货台高度",
+          "label": "载货台高度 (m)",
           "type": "number",
           "defaultValue": 1.695,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "forkLength",
-          "label": "货叉长度",
+          "label": "货叉长度 (m)",
           "type": "number",
           "defaultValue": 0.941,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "forkStageOneReach",
+          "label": "货叉第一段行程 (m)",
+          "type": "number",
+          "defaultValue": 0.8,
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "forkStageTwoReach",
+          "label": "货叉第二段行程 (m)",
+          "type": "number",
+          "defaultValue": 0.8,
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         {
           "key": "forkGap",
-          "label": "货叉间距",
+          "label": "货叉间距 (m)",
           "type": "number",
           "defaultValue": 0.6,
           "configuration": {
             "type": "number",
             "min": 0,
             "max": 50,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         }
       ],
       "values": {
@@ -153,8 +204,16 @@
         },
         "description": {
           "type": "string",
-          "value": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+          "value": "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。",
           "label": "参数说明",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "appearanceColor": {
+          "type": "string",
+          "value": "#ffffff",
+          "label": "模型外观颜色",
           "configuration": {
             "type": "string"
           }
@@ -162,79 +221,119 @@
         "bodyLength": {
           "type": "number",
           "value": 23.012,
-          "label": "主体长度",
+          "label": "主体长度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "bodyWidth": {
           "type": "number",
           "value": 0.452,
-          "label": "主体宽度",
+          "label": "主体宽度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "bodyHeight": {
           "type": "number",
           "value": 7.837,
-          "label": "主体高度",
+          "label": "主体高度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "platformLength": {
           "type": "number",
           "value": 1.279,
-          "label": "载货台长度",
+          "label": "载货台长度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "platformHeight": {
           "type": "number",
           "value": 1.695,
-          "label": "载货台高度",
+          "label": "载货台高度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "forkLength": {
           "type": "number",
           "value": 0.941,
-          "label": "货叉长度",
+          "label": "货叉长度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1
-          }
+            "step": 0.1,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "forkStageOneReach": {
+          "type": "number",
+          "value": 0.8,
+          "label": "货叉第一段行程 (m)",
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "forkStageTwoReach": {
+          "type": "number",
+          "value": 0.8,
+          "label": "货叉第二段行程 (m)",
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         },
         "forkGap": {
           "type": "number",
           "value": 0.6,
-          "label": "货叉间距",
+          "label": "货叉间距 (m)",
           "configuration": {
             "type": "number",
             "min": 0,
             "max": 50,
-            "step": 0.05
-          }
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
         }
       }
     }
@@ -253,69 +352,103 @@
     "version": 1,
     "parameters": [
       {
+        "key": "appearanceColor",
+        "label": "模型外观颜色",
+        "type": "color",
+        "defaultValue": "#ffffff"
+      },
+      {
         "key": "bodyLength",
-        "label": "主体长度",
+        "label": "主体长度 (m)",
         "type": "number",
         "defaultValue": 23.012,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "bodyWidth",
-        "label": "主体宽度",
+        "label": "主体宽度 (m)",
         "type": "number",
         "defaultValue": 0.452,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "bodyHeight",
-        "label": "主体高度",
+        "label": "主体高度 (m)",
         "type": "number",
         "defaultValue": 7.837,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "platformLength",
-        "label": "载货台长度",
+        "label": "载货台长度 (m)",
         "type": "number",
         "defaultValue": 1.279,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "platformHeight",
-        "label": "载货台高度",
+        "label": "载货台高度 (m)",
         "type": "number",
         "defaultValue": 1.695,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
       },
       {
         "key": "forkLength",
-        "label": "货叉长度",
+        "label": "货叉长度 (m)",
         "type": "number",
         "defaultValue": 0.941,
         "min": 0.1,
         "max": 100,
-        "step": 0.1
+        "step": 0.1,
+        "unit": "m"
+      },
+      {
+        "key": "forkStageOneReach",
+        "label": "货叉第一段行程 (m)",
+        "type": "number",
+        "defaultValue": 0.8,
+        "min": 0,
+        "max": 10,
+        "step": 0.05,
+        "unit": "m"
+      },
+      {
+        "key": "forkStageTwoReach",
+        "label": "货叉第二段行程 (m)",
+        "type": "number",
+        "defaultValue": 0.8,
+        "min": 0,
+        "max": 10,
+        "step": 0.05,
+        "unit": "m"
       },
       {
         "key": "forkGap",
-        "label": "货叉间距",
+        "label": "货叉间距 (m)",
         "type": "number",
         "defaultValue": 0.6,
         "min": 0,
         "max": 50,
-        "step": 0.05
+        "step": 0.05,
+        "unit": "m"
       }
     ],
     "bindings": []
-  }
+  },
+  "lengthUnit": "millimeter"
 }

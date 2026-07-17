@@ -11,8 +11,8 @@ Babylon Electron Unity-like Editor 是一个基于 Electron、Vite、React、Typ
 - Electron 桌面窗口：通过 Electron 主进程启动独立桌面应用窗口。
 - 首页启动台：进入五面板编辑器前会先显示首页，聚焦最近项目、最近场景、新建场景、打开项目目录和打开场景文件等项目相关入口；最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
-- Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到底部 Project 区域的最小化入口，点击后以弹窗查看完整日志，让 Scene 视口保持最大可用高度，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
-- Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑；左键拖拽旋转或移动视角时以真实相机输入和位姿变化优先，即使从模型表面开始轻微拖拽也不会触发模型拾取，纯单击仍正常选中模型。
+- Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部，中间列独立承载 Scene、Project 与 Console；Project/Console 只与 Scene 画布同宽，在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到 Project 区域最小化入口，点击后以弹窗查看完整日志，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
+- Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑；左键拖拽旋转或移动视角时以真实相机输入和位姿变化优先，即使从模型表面开始轻微拖拽也不会触发模型拾取，纯单击仍正常选中模型；Toolbar 新增“俯”视角按钮，可保留当前观察中心与缩放距离切换为稳定俯视视角，方便依据地面 CAD 图纸定位并搭建场景。
 - 米制场景单位：编辑器约定 `1 scene unit = 1 m`，Inspector 中 position、位置吸附步长与地面网格均按米解释；普通导入模型的实际 X/Y/Z 尺寸由编辑器运行时原生测量，不依赖参数化脚本。
 - 编辑器地面辅助层：Scene View 显示固定大范围的科技蓝地面网格，默认每小格表示 `5 m`，可在 Toolbar 中切换显示/隐藏并选择 `1 m`、`2 m`、`5 m`、`10 m` 四档格子大小；网格不会随相机视野重定位或被局部范围裁掉，网格线自身带有微弱低强度呼吸光晕效果，辅助层不参与选中、保存、加载或撤销/重做。
 - CAD/DXF 网格参考层：Toolbar 支持导入 `.dxf` CAD 图纸，导入过程中会显示读取、解析和创建参考层进度；`LINE`、`ARC`、`CIRCLE`、`LWPOLYLINE`、`POLYLINE` 会在解析阶段统一换算为米，并转为贴近 `y = 0` 网格层的半透明线稿。单位优先读取 `$INSUNITS` 0–24，未声明单位时参考 `$MEASUREMENT`，仍无法判断时明确按毫米兜底；参考图默认锁定、不可拾取，Inspector 会显示源单位、判定来源和换算系数，并随场景保存/加载恢复。
@@ -29,7 +29,7 @@ Babylon Electron Unity-like Editor 是一个基于 Electron、Vite、React、Typ
 - W/E/R 与批量操作快捷键：在非输入控件聚焦时，可用 W/E/R 快速切换移动、旋转、缩放工具；F 场景聚焦、H 隐藏对象、Ctrl+C 复制、Ctrl+V 粘贴、Ctrl+K 锁定、Ctrl+G 群组、Shift+G 解组、Delete/Backspace 删除当前 Hierarchy 选区。
 - 撤销/重做：通过命令历史支持基础编辑操作、实体创建、实体删除、实体重命名、材质编辑、灯光编辑与 Gizmo 拖拽的撤销与重做；Hierarchy 批量隐藏、锁定、删除、粘贴、模型阵列、群组和解组均作为单条命令进入历史。
 - JSON 场景保存/加载：支持将当前场景保存为 JSON 文件，并从 JSON 场景文件加载；保存、文件选择加载和首页最近场景加载成功后都会更新最近场景列表。
-- Project 资源库外观：底部 Project 面板已切换为资源库浏览器样式，并将图库区域加高到约 `300px` 至 `460px` 自适应，包含模型库、POI库、主题库、组合库、环境库、图表库、图片库七个页签，以及筛选占位行和可换行资源卡片；模型库卡片使用深色直角卡、上方缩略图、下方两行居中文字和单行省略标题，模型库内置立方体、球体、地面、虚拟定位线框、半球光、方向光、点光源七类基础资源，并支持导入普通模型文件夹展示项目内模型卡片；POI 库保留可点击或拖入 Scene 任意位置的“模型生成器”，重复创建入口会选中已有生成器而不是新建副本；环境库使用独立的单 GLB 文件导入入口，支持点击应用或拖入右侧“环境模型”整条属性行；所有导入模型进入场景后统一以米为操作单位。
+- Project 资源库外观：底部 Project 面板已切换为资源库浏览器样式，位于中间列 Scene 画布下方且与 Scene 同宽，并将图库区域加高到约 `300px` 至 `460px` 自适应，包含模型库、POI库、主题库、组合库、环境库、图表库、图片库七个页签，以及筛选占位行和可换行资源卡片；模型库卡片使用深色直角卡、上方缩略图、下方两行居中文字和单行省略标题，模型库内置立方体、球体、地面、虚拟定位线框、半球光、方向光、点光源七类基础资源，并支持导入普通模型文件夹展示项目内模型卡片；POI 库保留可点击或拖入 Scene 任意位置的“模型生成器”，重复创建入口会选中已有生成器而不是新建副本；环境库使用独立的单 GLB 文件导入入口，支持点击应用或拖入右侧“环境模型”整条属性行；所有导入模型进入场景后统一以米为操作单位。
 - POI 模型生成器：生成器保存共享生成模板、按顺序匹配的条件规则、MQTT 精确绑定和元数据 TTL；一个场景只有 `entityIds` 中第一个生成器生效，编辑态 Transform 只控制青色可拾取配置标记，不作为任何货物生成点。运行预览中该全局生成器统一管理普通 Conveyor、普通 Stacker 与 `warehouseFlow` 的模板/规则；货物实际位置来自输送面、货叉、locator 或仓储状态机。派生 Mesh/模型不进入 Hierarchy，也不写入场景文件或撤销历史。
 - POI 内置 EFF 特效：POI 库内置报警脉冲光圈、旋转警示灯、定位光柱、雷达扫描圈、火焰、烟雾、火花飞溅、蒸汽泄漏、气体泄漏、水流喷射、管线流动粒子、管线流动箭头、移动双箭头、货物目标定位框、输送方向箭头和疏散路线 16 种实时特效；支持点击或拖拽创建、Hierarchy 管理、Transform、显隐、锁定、复制、阵列、撤销/重做、保存重载和 Inspector 参数实时编辑。
 - 模型与环境导入：普通模型与环境模型严格分库。模型库点击 `导入模型文件夹`，将有效模型包复制到项目 `Assets/Models`；扫描支持目录本身为单模型包或包含多个一级模型包，并读取 `meta.json`、单位、缩略图和脚本。普通模型单位只接受 `meta.json.lengthUnit`：显式合法值按标准系数换算，缺失或空值按 `meter / 1`，显式非法值拒绝导入；参数脚本和几何包围盒都不参与源单位推断。环境库点击 `导入环境 GLB`，单文件保存到 `Assets/Environments/<安全化文件 stem>/<原文件名>.glb`，同名重导采用暂存、备份和失败回滚。普通模型、模型生成器输出和环境模型都保留 `lengthUnit + unitScaleToMeters`，运行时只在各自内容根节点应用一次源单位到米的基准缩放；直接导入且符合 glTF 约定的环境 GLB 登记为 `meter / 1`。
@@ -37,7 +37,7 @@ Babylon Electron Unity-like Editor 是一个基于 Electron、Vite、React、Typ
 - MQTT 配置入口：Toolbar 提供 MQTT 配置按钮，可在弹窗中填写 MQTT IP/域名、MQTT over WebSocket 地址、topic 与本地模拟参数；只填写 IP 时会自动生成 `ws://<IP>:8083/mqtt`。保存或启用配置只保存场景配置，不会自动连接 broker，也不会自动启动本地模拟。
 - MQTT 运行预览：Toolbar 的“运行/停止”是唯一运行入口；点击“运行”并通过预检后才会连接 broker 或启动本地模拟，连接状态 badge 显示 disabled/simulating/connecting/connected/disconnected/error，无效配置会自动打开 MQTT 配置弹窗。运行态允许相机、选择、Hierarchy 搜索/展开、网格、诊断和 Console，只读阻止 Gizmo、Inspector 修改、Hierarchy 变更、资源创建/导入、保存加载、undo/redo 与 MQTT 配置。
 - 通用 MQTT 数据驱动框架：详见 `docs/mqtt-data-driven-guide.md`，覆盖只读可视化边界、EPV `data[].e/p/v`、JSON Path、多订阅/QoS、`sourceId + deviceType + assetCode` 绑定、`dataDriven` 默认配置与 `telemetryBinding` 实例覆盖、Transform/Joint/Animation 示例，以及 stale/fault/conflict 和 Electron `wss://` 安全注意事项。
-- 外置参数化脚本：模型包内的 `*.model.ts` 会随模型包复制到项目目录并作为受控 `editor-asset://` 资产授权；导入模型加载完成后，renderer 会以本地可信脚本方式转译并运行同包脚本，兼容 `ParametricModelRuntimeComponent`、`export default class`、`onStart/onUpdate/onStop` 生命周期以及 `babylonjs-editor-tools` 的 `visibleAs*` 装饰器写法。参数脚本只负责模型特有参数化和附加运行逻辑，不负责判断源单位或提供基础米制测量。
+- 外置参数化脚本：模型包内的 `*.model.ts` 会随模型包复制到项目目录并作为受控 `editor-asset://` 资产授权；导入模型加载完成后，renderer 会以本地可信脚本方式转译并运行同包脚本，兼容 `ParametricModelRuntimeComponent`、`export default class`、`onStart/onUpdate/onStop` 生命周期以及 `babylonjs-editor-tools` 的 `visibleAs*` 装饰器写法。所有长度类参数统一以米输入；脚本在实体根米空间读取未销毁、自身启用、可见且有顶点的有效 Mesh，把米制位移转换回目标父节点局部坐标，并在整机根缩放时保持底部中心锚点。参数脚本只负责模型特有参数化和附加运行逻辑，不负责判断源单位或提供基础米制测量。
 - 参数化模型：模型包 `meta.json.modelParameters` 可声明 number、color、boolean、enum、vector3、texture 参数，以及绑定到模型节点、网格或材质的安全 JSON DSL；选中带参数配置的导入模型后，Inspector 会以紧凑布局显示“模型参数”区域，参数标签使用自适应宽度并在必要时换行，确保长中文名称完整显示；修改参数会通过场景文档实时驱动 Babylon 模型外观变化，并支持随场景保存/加载与撤销/重做。参数变化完成后，编辑器会重新测量实际尺寸；没有参数脚本的模型仍正常显示米制尺寸。
 - 模型库拖拽放置：模型库中已导入的真实模型卡片可直接拖拽到 Scene View，释放鼠标时会按当前鼠标射线与 `y = 0` 地面平面的交点创建模型实体；点击模型卡片仍保留原点快捷导入行为。
 - Assets 目录能力：模型库已重新接入本地模型文件夹扫描、项目目录复制与 glTF/GLB 导入入口；其余资源类型的真实分类、搜索、扫描与导入会在后续资源库功能中继续补齐。
@@ -89,10 +89,12 @@ npm run dev:electron
 - 编辑器原生测量会把内容根单位缩放、参数脚本几何变化和用户 `Transform.scale` 一并计入，默认在 `Model Asset` 中显示约 `X=0.18 m、Y=0.18 m、Z=0.32 m`；即使删除参数脚本，只要保留 `lengthUnit: "centimeter"`，基础实际尺寸仍可测量。
 - Inspector 暴露 `长度 (m)`、`宽度 (m)`、`高度 (m)`，默认分别为 `0.32 m`、`0.18 m`、`0.18 m`，输入范围 `0.01–100 m`，步长 `0.01 m`。
 - 轴向契约为 X=宽、Y=高、Z=长；脚本从单位换算后的缩放与归一化位置基线绝对重算，参数反复修改不会累计误差，并同步补偿 GLB 的微小底部中心偏移，使极端尺寸下模型底面仍严格锚定实体原点地面。
-- 源包和 `Assets/Models/box` 中的 `box.model.ts`、`meta.json` 必须保持 SHA-256 一致；修改源脚本后应同步资产副本或在编辑器中重新导入模型包。
+- 源包和 `Assets/Models/box` 中的 `box.model.ts`、`meta.json` 必须保持 SHA-256 一致；修改源脚本后应同步资产副本或在编辑器中重新导入模型包。 全量回归由 `npm run smoke:model-parameters` 校验，并随 `npm run smoke:units` 一并执行。
 - 当前项目 `.babylon-editor/asset-index.json` 的 Box 条目已重新扫描并生成新 `assetRevision`，模型库会按 `Box 纸箱`、`centimeter / 0.01` 和三个米制参数读取该资产。
 
 ## Stacker 堆垛机参数化说明
+
+`appearanceColor` 在 Inspector 中显示为“模型外观颜色”，使用 `#RRGGBB` 格式，默认值为 `#ffffff`。默认白色只作为现有 PBR 贴图的乘色，因此旧场景与未配置实例保持原外观；非法颜色会回退白色，不会中断模型参数更新。运行脚本为每个 Stacker 实例按原材质懒克隆并复用专属材质，颜色反复修改不会持续创建新材质，多个实例也不会互相串色；脚本停止时会先恢复原材质，再释放克隆材质且不强制销毁共享贴图。当前 `Stacker.glb` 已验证为 13 个独立 `PBRMaterial`；若未来模型改用 `MultiMaterial`，需要同步扩展 `subMaterials` 处理与回归验证。
 
 `F:\3d-models\models\Stacker` 模型包中的 `forkGap` 表示两根货叉中心线之间的目标间距，不是基于原始位置的额外偏移量；脚本会读取两根货叉的基线世界中心，围绕中心对称设置目标间距，并把世界位移转换回父级本地坐标，避免 GLB 源单位、父节点缩放或局部轴向导致二次外扩。
 
@@ -102,7 +104,7 @@ npm run dev:electron
 
 Stacker 默认原位会把 `dataDriven.motion.travel.nodes` 声明的整组行走机构沿模型局部 Z 轴向左回贴 `0.562846 m`，使操作台前缘与下轨左端黄色缓冲头贴合；固定上下轨保持不动，模型旋转或毫米单位缩放后仍沿自身轨道方向生效，MQTT `distance_x = 0` 继续以该贴合姿态作为运行基线。
 
-当前项目已经导入的模型副本位于 `F:\3d-models\models\Assets\Models\Stacker`。调试或发布 Stacker 脚本时需要同步源模型包与该副本；视觉验证建议覆盖默认值、`forkGap = 0 / 0.6 / 1.2`、`forkLength = 0.5 / 0.941 / 2.0`，以及 `bodyHeight = 12 + platformHeight = 3 + forkGap = 1.2 + forkLength = 2` 的组合场景，确认两叉中心不漂移、货叉长度不污染间距、立柱和载货台参数互不牵连。
+当前项目已经导入的模型副本位于 `F:\3d-models\models\Assets\Models\Stacker`。调试或发布 Stacker 脚本时需要让源模型包、该副本以及 `output/playwright/stacker-assets` 中的 TS/TXT/meta 保持 SHA-256 一致，并用 `BABYLON_MODEL_FILTER=Stacker` 定向刷新资产索引，避免无关模型的 `assetRevision` 变化；视觉验证建议覆盖默认颜色、自定义颜色、颜色恢复，以及 `forkGap = 0 / 0.6 / 1.2`、`forkLength = 0.5 / 0.941 / 2.0`、`bodyHeight = 12 + platformHeight = 3 + forkGap = 1.2 + forkLength = 2` 的组合场景，确认颜色不串实例、两叉中心不漂移、货叉长度不污染间距、立柱和载货台参数互不牵连。
 
 `forkLength` 仍表示货叉自身静态几何长度，用于 Inspector 参数化建模；`forkStageOneReach` 和 `forkStageTwoReach` 表示运行时伸缩行程，默认各 `0.8m`。脚本会在运行时为 `huocha.9`、`huocha2.10` 克隆第二段可视节点，GLB 本体不变。遥测驱动时优先读取 `front_distance_z/back_distance_z`，近位距离小于等于第一段行程时只移动第一段；远位距离超过第一段行程时，第一段先到达 `forkStageOneReach`，第二段继续补足剩余距离。没有编码器距离时，运行时会尝试用目标定位框沿模型局部 X 轴的投影距离估算伸出量；仍无目标时按 `movement_z` 连续伸缩并限制在两段总行程内。
 
@@ -341,6 +343,21 @@ npm run demo:stacker:mqtt
 node scripts/sync-model-parameters-from-scripts.mjs --write
 ```
 
+修改 `F:\3d-models\models` 的模型脚本或元数据并同步到 `Assets/Models` 后，可刷新当前项目资产索引与 `assetRevision`：
+
+```bash
+npm run refresh:model-assets
+```
+
+只刷新单个模型时可设置 `BABYLON_MODEL_FILTER`，例如 PowerShell 中执行：
+
+```powershell
+$env:BABYLON_MODEL_FILTER='Stacker'
+npm run refresh:model-assets
+```
+
+可通过 `BABYLON_MODEL_ROOT` 指向其它模型项目根目录。
+
 
 执行 TypeScript 类型检查：
 
@@ -348,7 +365,7 @@ node scripts/sync-model-parameters-from-scripts.mjs --write
 npm run typecheck
 ```
 
-执行米制导入与模型实际尺寸 smoke：
+执行米制导入、编辑器原生实际尺寸与 12 个外部模型参数脚本 smoke：
 
 ```bash
 npm run smoke:units
@@ -376,6 +393,7 @@ npm run build
 - 开启吸附：勾选 `吸附`，并调整位置、旋转、缩放步长；其中位置步长单位为 `m`。
 - 控制网格：在 Toolbar 中勾选或取消 `网格` 控制 Scene View 固定大范围地面辅助网格显示，并通过 `格子` 下拉选择 `1 m`、`2 m`、`5 m`、`10 m` 四档格子大小。
 - 导入 CAD 参考图：点击 Toolbar 的 `导入CAD参考图` 选择 `.dxf` 文件；小于 `64 MB` 的普通图纸保持精确解析，达到 `64 MB` 的大图纸自动切换 Web Worker 轻量扫描，并限制在最多 `200000` 条折线 / `800000` 个点。单位优先读取 `$INSUNITS` 0–24；unitless/缺失时参考 `$MEASUREMENT`，仍未知时按毫米兜底并在日志/Inspector 明确提示。所有坐标换算为米后按包围盒中心归零，并贴到网格层上方约 `0.01 m`。
+- 切换 CAD 俯视：点击 Toolbar 的 `俯` 图标按钮，Scene View 会保留当前观察中心和缩放距离，从世界 Y 轴上方向下观察 XZ 地面；切换前的旋转、平移和缩放惯性会被清除，避免视角继续漂移。该操作不会覆盖已保存视角，也不会写入场景文件或撤销历史；运行预览中仍可使用。
 - 调整视野：在 Toolbar 中通过 `视野` 下拉选择 `近景`、`标准`、`远景`、`全景`，用于快速调整 Scene View 默认相机观察距离和可视范围；也可使用鼠标滚轮靠近或远离模型，近距离缩放会保留最小观察距离，便于查看模型细节且避免画面变黑。
 - 查看 Console：点击底部 Project 区域最下方的 `Console` 最小化入口可弹出日志窗口，点击关闭按钮或按 Escape 可收起弹窗。
 - 编辑属性：在 Inspector 中修改名称、Transform、材质颜色或灯光属性；position 按米输入，rotation 按角度输入但内部仍使用 Babylon 弧度，通用 scale 保持无量纲。内置 Box 的 `size (m)` 直接对应实际边长，Sphere/Plane 显示其米制基准说明；导入模型、环境模型和 CAD 均展示源单位到米的换算信息。
@@ -444,13 +462,17 @@ npm run build
 - 参数化模型依赖模型包中稳定的节点、网格或材质名称；安全 DSL 只支持 JSON AST 中的白名单运算和白名单属性绑定，不执行任意 JavaScript/TypeScript。贴图参数允许编辑器登记过的内置 `editor-image://` 逻辑引用，或模型包内 `.png`、`.jpg`、`.jpeg`、`.webp` 相对路径；仍不支持绝对路径、网络 URL、`data:`、反斜杠路径、未登记逻辑引用或 `../` 路径逃逸。重新导入模型包后，场景实例会使用新的 `modelParameters` 与 `.model.ts` 脚本元数据清洗参数：同名且仍合法的实例值会保留，新增参数使用新默认值，删除或非法参数会移除。
 - Project 资源库中模型库和环境库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库直接选择的单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/` 独立包。POI 库已接入模型生成器和 16 种内置 EFF，其它图表立标、图表面板、报警管理器、手动漫游卡片以及主题、组合、图表仍为占位；图片库已接入内置方向箭头和 texture 参数拖放，但尚未开放用户图片导入、项目级图片索引和真实搜索过滤。
 - 首页最近项目和最近场景依赖 Electron preload 的本地文件 IPC；普通 Vite 浏览器页面会显示降级提示，并仅保留进入空白编辑器、新建场景等不依赖本地文件授权的基础入口。
-- 主布局自适应当前只包含随窗口尺寸自动调整与底部 Console 弹窗入口，不包含拖拽分隔条、其它面板折叠或用户自定义布局保存；小于约 `1024×640` 的窗口会继续尽量收缩，但不保证所有内容舒适可读。
+- 主布局自适应当前只包含随窗口尺寸自动调整、左右面板贯通到底部、Project/Console 限定为中间 Scene 同宽以及底部 Console 弹窗入口，不包含拖拽分隔条、其它面板折叠或用户自定义布局保存；小于约 `1024×640` 的窗口会继续尽量收缩，但不保证所有内容舒适可读。
 - 图片库当前只登记内置方向箭头资源；用户图片导入、项目级图片持久化与更多图片类型仍待扩展。POI 库的模型生成器与 16 种内置 EFF 可用，图表立标、图表面板、报警管理器、手动漫游以及图表、主题、组合仍为占位分类。
 - 灯光编辑支持类型与强度，暂未提供颜色、阴影、范围、衰减等高级参数。
 - 当前 Hierarchy 文件夹仅用于场景对象组织分组；文件夹显隐和锁定会作用到组内对象，但不提供文件夹嵌套、文件夹 Transform 继承或批量 Transform 父子联动。
 
 ## 最近完成
 
+- 2026-07-16：Stacker 参数化脚本新增 `appearanceColor`“模型外观颜色”参数，默认 `#ffffff` 保留原 PBR 贴图外观；每个实例按原材质懒克隆并复用专属材质，反复换色不累计材质、多个实例不串色，停止时恢复原材质并释放克隆。源包、`Assets/Models/Stacker`、可视夹具、演示场景和定向刷新后的资产索引已同步，`smoke:model-parameters` 覆盖颜色类型、默认/自定义/非法颜色、材质复用、停止恢复和共享原材质的双实例隔离。
+- 2026-07-16：Toolbar 新增“俯”视角按钮；点击后通过 Zustand 临时请求驱动 Babylon ArcRotateCamera 保留当前 target/radius 切换到稳定俯视，并清除旋转、平移和缩放惯性。该操作不修改场景文档、已保存视角或撤销历史，运行预览中仍可使用，便于结合底层 CAD/DXF 图纸搭建场景。
+- 2026-07-16：完成全部 12 个外部模型参数化脚本的米制适配：`多穿小车/辊道机/链条机/box/GD/HCTS/LED/RGV/Shelf/Stacker/WLTS/YZJ` 的长度字段与元数据统一使用 `m`；通用脚本改为在实体根米空间测量，过滤无顶点 glTF 占位 Mesh，根缩放后保持底部中心锚点，并区分模型基线与生成克隆的包围盒上下文。源包、`Assets/Models` 副本、Shelf/Stacker/YZJ 可视夹具和资产索引同步刷新；`smoke:model-parameters` 已接入 `smoke:units`。
+- 2026-07-16：调整编辑器主布局边界：Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部；Project 模型库和 Console 入口移动到中间列，仅占 Scene 画布同宽，并保留 Project 高度 `clamp(300px, 38vh, 460px)` 与 Console 30px 最小化入口。
 - 2026-07-16：修复 Scene View 从模型表面轻微拖拽视角时仍触发模型选中的冲突；点击快照现在锁存 Babylon 已累计的相机输入，并以 alpha、beta、radius 或 target 的位姿变化兜底，只要本次会话驱动过相机，就优先按视角拖拽处理，模型拾取、Gizmo、F 聚焦、运行预览和纯单击选择语义保持不变。
 - 2026-07-16：POI 库新增“移动双箭头”作为第 16 种 EFF；多组无贴图发光 `>>` 沿实体本地 `+X` 循环移动并在两端渐隐，Rotation 控制业务方向，Speed、Density、Intensity 分别控制速度、组数与亮度/线段尺度；每组折线预合并为 3 个动画 Mesh，默认 9 个、最大 18 个，避免逐段 draw call 膨胀。
 - 2026-07-15：普通导入模型的米制实际尺寸改为编辑器原生能力：Inspector 的 `Model Asset` 区固定显示 X/Y/Z，测量汇总 `contentRoot` 下有效 Mesh 并投影到实体自身轴，包含源单位、参数化几何和用户 scale，旋转/平移不造成数值跳变；测量快照不持久化。模型包单位同时与参数脚本彻底解耦，只接受显式 `meta.json.lengthUnit`，缺失按 `meter / 1`、非法值拒绝，不再按参数或包围盒猜测。
