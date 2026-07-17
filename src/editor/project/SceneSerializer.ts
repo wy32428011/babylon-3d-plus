@@ -382,6 +382,9 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
     length: normalizeLocatorDimension(locator.length),
     width: normalizeLocatorDimension(locator.width),
     height: normalizeLocatorDimension(locator.height),
+    columns: normalizeLocatorInt(locator.columns, 1, 1, 50),
+    layers: normalizeLocatorInt(locator.layers, 1, 1, 50),
+    startColumn: normalizeLocatorInt(locator.startColumn, 1, 1, 999),
   };
 }
 
@@ -392,6 +395,11 @@ function normalizeLocatorStorageDepth(value: unknown): LocatorStorageDepth {
 
 function normalizeLocatorDimension(value: unknown): number {
   return Math.max(LOCATOR_MIN_DIMENSION, assertFiniteNumber(value));
+}
+
+function normalizeLocatorInt(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function normalizeCadReference(value: unknown): EntityComponents['cadReference'] {

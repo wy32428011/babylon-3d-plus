@@ -449,6 +449,9 @@ function cloneLocator(locator: LocatorComponent): LocatorComponent {
     length: locator.length,
     width: locator.width,
     height: locator.height,
+    columns: locator.columns,
+    layers: locator.layers,
+    startColumn: locator.startColumn,
   };
 }
 
@@ -553,13 +556,21 @@ function sanitizeModelAssetCode(value: string | undefined, fallback: string): st
   return normalizedAssetCode || fallback;
 }
 
+function sanitizeLocatorInt(value: number | undefined, fallback: number, min: number, max: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
 function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): boolean {
   return (
     left.assetId === right.assetId &&
     left.storageDepth === right.storageDepth &&
     left.length === right.length &&
     left.width === right.width &&
-    left.height === right.height
+    left.height === right.height &&
+    left.columns === right.columns &&
+    left.layers === right.layers &&
+    left.startColumn === right.startColumn
   );
 }
 
@@ -2386,6 +2397,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         length: sanitizeLocatorDimension(patch.length, before.length),
         width: sanitizeLocatorDimension(patch.width, before.width),
         height: sanitizeLocatorDimension(patch.height, before.height),
+        columns: sanitizeLocatorInt(patch.columns, before.columns, 1, 50),
+        layers: sanitizeLocatorInt(patch.layers, before.layers, 1, 50),
+        startColumn: sanitizeLocatorInt(patch.startColumn, before.startColumn, 1, 999),
       };
 
       if (areLocatorsEqual(before, after)) return state;

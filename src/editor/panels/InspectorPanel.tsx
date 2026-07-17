@@ -6,24 +6,18 @@ import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
+import { LocatorInspector } from './LocatorInspector';
 import { PoiEffectInspector } from './PoiEffectInspector';
 import { ModelParametersInspector } from './ModelParametersInspector';
 import { TelemetryBindingInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
 
 type TransformField = 'position' | 'rotation' | 'scale';
-type LocatorDimensionField = 'length' | 'width' | 'height';
-
 const axes: Array<keyof Vector3Data> = ['x', 'y', 'z'];
 const fields: TransformField[] = ['position', 'rotation', 'scale'];
 const lightKinds: LightKind[] = ['hemispheric', 'directional', 'point'];
 const RADIANS_TO_DEGREES = 180 / Math.PI;
 const DEGREES_TO_RADIANS = Math.PI / 180;
-const locatorDimensionFields: Array<{ key: LocatorDimensionField; label: string }> = [
-  { key: 'length', label: '长(X)' },
-  { key: 'width', label: '宽(Z)' },
-  { key: 'height', label: '高(Y)' },
-];
 
 /** 根据 Transform 字段和基础网格类型生成单位明确的 Inspector 标题。 */
 function getTransformLegend(field: TransformField, meshKind?: MeshKind): string {
@@ -78,7 +72,6 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const renameSelectedEntity = useEditorStore((state) => state.renameSelectedEntity);
   const updateSelectedTransform = useEditorStore((state) => state.updateSelectedTransform);
   const updateSelectedMaterialColor = useEditorStore((state) => state.updateSelectedMaterialColor);
-  const updateSelectedLocator = useEditorStore((state) => state.updateSelectedLocator);
   const updateSelectedCadReference = useEditorStore((state) => state.updateSelectedCadReference);
   const updateSelectedLight = useEditorStore((state) => state.updateSelectedLight);
   const updateSelectedModelAssetCode = useEditorStore((state) => state.updateSelectedModelAssetCode);
@@ -120,17 +113,6 @@ export function InspectorPanel(props: InspectorPanelProps) {
     if (!Number.isFinite(intensity)) return;
 
     updateSelectedLight({ intensity });
-  }
-
-  function handleLocatorDimensionChange(field: LocatorDimensionField, rawValue: string) {
-    if (rawValue === '') return;
-
-    const nextValue = Number(rawValue);
-    if (!Number.isFinite(nextValue)) return;
-
-    if (field === 'length') updateSelectedLocator({ length: nextValue });
-    if (field === 'width') updateSelectedLocator({ width: nextValue });
-    if (field === 'height') updateSelectedLocator({ height: nextValue });
   }
 
   function handleCadReferenceOpacityChange(rawValue: string) {
@@ -187,7 +169,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const modelAsset = selectedEntity.components.modelAsset;
   const modelGenerator = selectedEntity.components.modelGenerator;
   const poiEffect = selectedEntity.components.poiEffect;
-  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || modelGenerator || poiEffect);
+  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || modelGenerator || poiEffect || locator);
 
   return (
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
@@ -250,45 +232,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         </fieldset>
       ) : null}
       {locator ? (
-        <fieldset className="transform-fieldset">
-          <legend>虚拟定位线框</legend>
-          <label className="inspector-row">
-            <span>资产编号</span>
-            <input
-              maxLength={128}
-              type="text"
-              disabled={isLocked}
-              value={locator.assetId}
-              onChange={(event) => updateSelectedLocator({ assetId: event.target.value })}
-            />
-          </label>
-          <label className="inspector-row">
-            <span>库位排深</span>
-            <select
-              disabled={isLocked}
-              value={locator.storageDepth}
-              onChange={(event) => updateSelectedLocator({ storageDepth: event.target.value === 'far' ? 'far' : 'near' })}
-            >
-              <option value="near">近排（一段货叉）</option>
-              <option value="far">远排（二段货叉）</option>
-            </select>
-          </label>
-          <p className="muted">库位号建议使用“排-列-层”，例如 1-1-1、1-2-1。</p>
-          {locatorDimensionFields.map(({ key, label }) => (
-            <label className="number-row" key={key}>
-              <span>{label}</span>
-              <input
-                type="number"
-                disabled={isLocked}
-                min="0.01"
-                step="0.1"
-                value={locator[key]}
-                onChange={(event) => handleLocatorDimensionChange(key, event.target.value)}
-              />
-            </label>
-          ))}
-          <p className="muted">单位：{SCENE_LENGTH_UNIT_SYMBOL}</p>
-        </fieldset>
+        <LocatorInspector component={locator} disabled={isLocked} />
       ) : null}
       {cadReference ? (
         <fieldset className="transform-fieldset">

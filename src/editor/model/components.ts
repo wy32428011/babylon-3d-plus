@@ -24,6 +24,9 @@ export type LocatorComponent = {
   length: number;
   width: number;
   height: number;
+  columns: number;
+  layers: number;
+  startColumn: number;
 };
 
 export type CadReferenceOriginMode = 'center';

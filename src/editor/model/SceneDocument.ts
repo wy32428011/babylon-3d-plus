@@ -454,6 +454,9 @@ export function createLocatorEntity(position: Vector3Data = vector3()): Entity {
         length: 1,
         width: 1,
         height: 1,
+        columns: 1,
+        layers: 1,
+        startColumn: 1,
       },
     },
   };

@@ -288,9 +288,11 @@ type ModelParameterBaselineValue = boolean | number | string | Vector3Data | Tex
 
 type LocatorRuntimeEntry = {
   root: TransformNode;
-  box: Mesh;
+  boxes: Mesh[];
+  material: StandardMaterial;
   assetId: string;
   storageDepth: LocatorComponent['storageDepth'];
+  signature: string;
 };
 
 type StackerTravelConstraint = {
@@ -634,7 +636,7 @@ export class SceneRuntime {
     if (primitiveMesh) return this.getMeshWorldBounds(primitiveMesh);
 
     const locator = this.locators.get(entityId);
-    if (locator) return this.getMeshWorldBounds(locator.box);
+    if (locator && locator.boxes.length > 0) return this.getMeshWorldBounds(locator.boxes[0]);
 
     const cadReference = this.cadReferences.get(entityId);
     if (cadReference) return this.getCadReferenceWorldBounds(cadReference);
@@ -1067,25 +1069,42 @@ export class SceneRuntime {
     const locator = entity.components.locator;
     if (!locator) return;
 
+    const signature = this.createLocatorSignature(locator);
+
     let runtimeLocator = this.locators.get(entity.id);
     if (!runtimeLocator) {
-      runtimeLocator = this.createLocator(entity.id);
+      runtimeLocator = this.createLocator(entity.id, locator);
+      runtimeLocator.signature = signature;
       this.locators.set(entity.id, runtimeLocator);
     }
 
     this.applyTransform(runtimeLocator.root, entity.components.transform);
     runtimeLocator.assetId = locator.assetId;
     runtimeLocator.storageDepth = locator.storageDepth;
+
     const locatorMetadata = {
       assetId: locator.assetId,
       storageDepth: locator.storageDepth,
       forkStage: locator.storageDepth === 'far' ? 2 : 1,
     };
     runtimeLocator.root.metadata = { ...(runtimeLocator.root.metadata ?? {}), storageLocation: locatorMetadata };
-    runtimeLocator.box.metadata = { ...(runtimeLocator.box.metadata ?? {}), storageLocation: locatorMetadata };
-    this.applyLocatorDimensions(runtimeLocator.box, locator);
-    this.applyLocatorStyle(runtimeLocator.box, locator.storageDepth, selected);
-    this.applyMeshInteractivity(runtimeLocator.box, entity.id);
+
+    if (runtimeLocator.signature !== signature) {
+      // Rebuild grid
+      for (const box of runtimeLocator.boxes) {
+        box.dispose(false, false);
+      }
+      runtimeLocator.boxes = this.createLocatorBoxes(entity.id, locator, runtimeLocator.root, runtimeLocator.material);
+      runtimeLocator.signature = signature;
+    }
+
+    for (const box of runtimeLocator.boxes) {
+      box.metadata = { ...(box.metadata ?? {}), storageLocation: locatorMetadata };
+    }
+    this.applyLocatorStyle(runtimeLocator, locator.storageDepth, selected);
+    for (const box of runtimeLocator.boxes) {
+      this.applyMeshInteractivity(box, entity.id);
+    }
   }
 
   /** 同步 CAD/DXF 网格参考层，线稿不可拾取，只作为建模布局底图。 */
@@ -2517,7 +2536,7 @@ export class SceneRuntime {
 
   /** 使用 locator 盒体底面作为生成模型原点，保证模型落在定位框内部而不是悬在中心高度。 */
   private getWarehouseLocatorSupportPosition(locator: LocatorRuntimeEntry): Vector3 {
-    const bounds = this.getMeshWorldBounds(locator.box);
+    const bounds = locator.boxes.length > 0 ? this.getMeshWorldBounds(locator.boxes[0]) : null;
     const position = locator.root.getAbsolutePosition();
     return new Vector3(position.x, bounds?.minimum.y ?? position.y, position.z);
   }
@@ -4279,10 +4298,9 @@ export class SceneRuntime {
     return mesh;
   }
 
-  /** 创建虚拟定位线框：根节点交给 Gizmo，子级透明盒负责拾取和边线显示。 */
-  private createLocator(entityId: string): LocatorRuntimeEntry {
+  /** 创建虚拟定位线框：根节点交给 Gizmo，子级透明盒网格负责拾取和边线显示。 */
+  private createLocator(entityId: string, locator: LocatorComponent): LocatorRuntimeEntry {
     const root = new TransformNode(`${entityId}_locatorRoot`, this.scene);
-    const box = MeshBuilder.CreateBox(`${entityId}_locatorBox`, { size: 1 }, this.scene);
     const material = new StandardMaterial(`${entityId}_locatorMat`, this.scene);
 
     material.disableLighting = true;
@@ -4290,15 +4308,42 @@ export class SceneRuntime {
     material.diffuseColor = Color3.FromHexString(LOCATOR_EDGE_COLOR);
     material.emissiveColor = Color3.FromHexString(LOCATOR_EDGE_COLOR);
 
-    box.parent = root;
-    box.isPickable = true;
-    box.material = material;
-    box.metadata = { ...(box.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
-    box.enableEdgesRendering();
-    box.edgesWidth = 2;
-    box.edgesColor = this.color4FromHex(LOCATOR_EDGE_COLOR, 1);
+    const boxes = this.createLocatorBoxes(entityId, locator, root, material);
 
-    return { root, box, assetId: '', storageDepth: 'near' };
+    return { root, boxes, material, assetId: '', storageDepth: 'near', signature: '' };
+  }
+
+  private createLocatorBoxes(entityId: string, locator: LocatorComponent, root: TransformNode, material: StandardMaterial): Mesh[] {
+    const boxes: Mesh[] = [];
+    const { length, height, width, columns, layers } = locator;
+    const startX = length / 2;
+    const startY = height / 2;
+
+    for (let layer = 0; layer < layers; layer += 1) {
+      for (let col = 0; col < columns; col += 1) {
+        const box = MeshBuilder.CreateBox(`${entityId}_locatorBox_${col}_${layer}`, { width: length, height, depth: width }, this.scene);
+        box.parent = root;
+        box.position.set(startX + col * length, startY + layer * height, 0);
+        box.isPickable = true;
+        box.material = material;
+        box.metadata = { ...(box.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
+        box.enableEdgesRendering();
+        box.edgesWidth = 2;
+        box.edgesColor = this.color4FromHex(LOCATOR_EDGE_COLOR, 1);
+        boxes.push(box);
+      }
+    }
+    return boxes;
+  }
+
+  private createLocatorSignature(locator: LocatorComponent): string {
+    return [
+      locator.length.toFixed(3),
+      locator.height.toFixed(3),
+      locator.width.toFixed(3),
+      String(locator.columns),
+      String(locator.layers),
+    ].join('|');
   }
 
   /** 根据组件类型创建对应 Babylon Light。 */
@@ -4321,11 +4366,13 @@ export class SceneRuntime {
     this.meshes.delete(entityId);
   }
 
-  /** 释放虚拟定位线框的根节点、拾取盒和材质。 */
+  /** 释放虚拟定位线框的根节点、网格盒和材质。 */
   private disposeLocator(entityId: string, locator: LocatorRuntimeEntry): void {
-    locator.box.material?.dispose();
-    locator.box.dispose();
-    locator.root.dispose();
+    for (const box of locator.boxes) {
+      box.dispose(false, false);
+    }
+    locator.material.dispose();
+    locator.root.dispose(false, true);
     this.locators.delete(entityId);
   }
 
@@ -4772,23 +4819,19 @@ export class SceneRuntime {
   }
 
   /** 将 locator 的业务尺寸映射到子级盒体，保持根节点 Transform 不被尺寸污染。 */
-  private applyLocatorDimensions(box: Mesh, locator: LocatorComponent): void {
-    box.scaling = new Vector3(locator.length, locator.height, locator.width);
-  }
-
-  /** 根据选中状态更新 locator 边线和极低透明交互面的颜色。 */
-  private applyLocatorStyle(box: Mesh, storageDepth: LocatorComponent['storageDepth'], selected: boolean): void {
+  /** 根据选中状态和排深更新全部 locator 盒子边线和表面颜色。 */
+  private applyLocatorStyle(entry: LocatorRuntimeEntry, storageDepth: LocatorComponent['storageDepth'], selected: boolean): void {
     const storageColor = storageDepth === 'far' ? '#ff8a3d' : LOCATOR_EDGE_COLOR;
     const color = selected ? SELECTED_MATERIAL_COLOR : storageColor;
     const color3 = Color3.FromHexString(color);
 
-    box.edgesWidth = selected ? 4 : 2;
-    box.edgesColor = this.color4FromHex(color, 1);
+    entry.material.alpha = selected ? SELECTED_LOCATOR_SURFACE_ALPHA : LOCATOR_SURFACE_ALPHA;
+    entry.material.diffuseColor = color3;
+    entry.material.emissiveColor = color3;
 
-    if (box.material instanceof StandardMaterial) {
-      box.material.alpha = selected ? SELECTED_LOCATOR_SURFACE_ALPHA : LOCATOR_SURFACE_ALPHA;
-      box.material.diffuseColor = color3;
-      box.material.emissiveColor = color3;
+    for (const box of entry.boxes) {
+      box.edgesWidth = selected ? 4 : 2;
+      box.edgesColor = this.color4FromHex(color, 1);
     }
   }
 
