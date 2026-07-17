@@ -10,6 +10,7 @@ const MODEL_ROOT = path.resolve(
 const COPIED_MODEL_ROOT = path.join(MODEL_ROOT, 'Assets', 'Models');
 const INDEX_PATH = path.join(MODEL_ROOT, '.babylon-editor', 'asset-index.json');
 const SSR_MODULE_LOAD_TIMEOUT_MS = 60_000;
+const MODEL_FILTER = process.env.BABYLON_MODEL_FILTER?.trim();
 
 /** 在限定时间内加载 Electron 扫描模块，避免 Vite SSR 异常时命令无限等待。 */
 async function loadScannerModule(server) {
@@ -50,8 +51,9 @@ try {
   assert.ok(Array.isArray(index.assets), '资产索引缺少 assets 数组。');
 
   const packageEntries = (await fs.readdir(COPIED_MODEL_ROOT, { withFileTypes: true }))
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() && (!MODEL_FILTER || entry.name === MODEL_FILTER))
     .sort((left, right) => left.name.localeCompare(right.name, 'zh-Hans-CN'));
+  if (MODEL_FILTER) assert.equal(packageEntries.length, 1, `未找到模型资产过滤项：${MODEL_FILTER}`);
   const refreshed = [];
 
   for (const packageEntry of packageEntries) {

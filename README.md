@@ -94,6 +94,8 @@ npm run dev:electron
 
 ## Stacker 堆垛机参数化说明
 
+`appearanceColor` 在 Inspector 中显示为“模型外观颜色”，使用 `#RRGGBB` 格式，默认值为 `#ffffff`。默认白色只作为现有 PBR 贴图的乘色，因此旧场景与未配置实例保持原外观；非法颜色会回退白色，不会中断模型参数更新。运行脚本为每个 Stacker 实例按原材质懒克隆并复用专属材质，颜色反复修改不会持续创建新材质，多个实例也不会互相串色；脚本停止时会先恢复原材质，再释放克隆材质且不强制销毁共享贴图。当前 `Stacker.glb` 已验证为 13 个独立 `PBRMaterial`；若未来模型改用 `MultiMaterial`，需要同步扩展 `subMaterials` 处理与回归验证。
+
 `F:\3d-models\models\Stacker` 模型包中的 `forkGap` 表示两根货叉中心线之间的目标间距，不是基于原始位置的额外偏移量；脚本会读取两根货叉的基线世界中心，围绕中心对称设置目标间距，并把世界位移转换回父级本地坐标，避免 GLB 源单位、父节点缩放或局部轴向导致二次外扩。
 
 模型实体被旋转后，Stacker 脚本会从模型内容根节点的当前世界矩阵读取局部 X/Y/Z 参数轴：主体长度沿模型局部 Z 轴、主体和载货台高度沿模型局部 Y 轴、宽度和货叉长度沿模型局部 X 轴生效；货叉间距沿两根货叉基线中心连线投影计算，避免旋转 45° 或 90° 后仍按全局坐标轴变形。
@@ -102,7 +104,7 @@ npm run dev:electron
 
 Stacker 默认原位会把 `dataDriven.motion.travel.nodes` 声明的整组行走机构沿模型局部 Z 轴向左回贴 `0.562846 m`，使操作台前缘与下轨左端黄色缓冲头贴合；固定上下轨保持不动，模型旋转或毫米单位缩放后仍沿自身轨道方向生效，MQTT `distance_x = 0` 继续以该贴合姿态作为运行基线。
 
-当前项目已经导入的模型副本位于 `F:\3d-models\models\Assets\Models\Stacker`。调试或发布 Stacker 脚本时需要同步源模型包与该副本；视觉验证建议覆盖默认值、`forkGap = 0 / 0.6 / 1.2`、`forkLength = 0.5 / 0.941 / 2.0`，以及 `bodyHeight = 12 + platformHeight = 3 + forkGap = 1.2 + forkLength = 2` 的组合场景，确认两叉中心不漂移、货叉长度不污染间距、立柱和载货台参数互不牵连。
+当前项目已经导入的模型副本位于 `F:\3d-models\models\Assets\Models\Stacker`。调试或发布 Stacker 脚本时需要让源模型包、该副本以及 `output/playwright/stacker-assets` 中的 TS/TXT/meta 保持 SHA-256 一致，并用 `BABYLON_MODEL_FILTER=Stacker` 定向刷新资产索引，避免无关模型的 `assetRevision` 变化；视觉验证建议覆盖默认颜色、自定义颜色、颜色恢复，以及 `forkGap = 0 / 0.6 / 1.2`、`forkLength = 0.5 / 0.941 / 2.0`、`bodyHeight = 12 + platformHeight = 3 + forkGap = 1.2 + forkLength = 2` 的组合场景，确认颜色不串实例、两叉中心不漂移、货叉长度不污染间距、立柱和载货台参数互不牵连。
 
 `forkLength` 仍表示货叉自身静态几何长度，用于 Inspector 参数化建模；`forkStageOneReach` 和 `forkStageTwoReach` 表示运行时伸缩行程，默认各 `0.8m`。脚本会在运行时为 `huocha.9`、`huocha2.10` 克隆第二段可视节点，GLB 本体不变。遥测驱动时优先读取 `front_distance_z/back_distance_z`，近位距离小于等于第一段行程时只移动第一段；远位距离超过第一段行程时，第一段先到达 `forkStageOneReach`，第二段继续补足剩余距离。没有编码器距离时，运行时会尝试用目标定位框沿模型局部 X 轴的投影距离估算伸出量；仍无目标时按 `movement_z` 连续伸缩并限制在两段总行程内。
 
@@ -347,6 +349,13 @@ node scripts/sync-model-parameters-from-scripts.mjs --write
 npm run refresh:model-assets
 ```
 
+只刷新单个模型时可设置 `BABYLON_MODEL_FILTER`，例如 PowerShell 中执行：
+
+```powershell
+$env:BABYLON_MODEL_FILTER='Stacker'
+npm run refresh:model-assets
+```
+
 可通过 `BABYLON_MODEL_ROOT` 指向其它模型项目根目录。
 
 
@@ -460,6 +469,7 @@ npm run build
 
 ## 最近完成
 
+- 2026-07-16：Stacker 参数化脚本新增 `appearanceColor`“模型外观颜色”参数，默认 `#ffffff` 保留原 PBR 贴图外观；每个实例按原材质懒克隆并复用专属材质，反复换色不累计材质、多个实例不串色，停止时恢复原材质并释放克隆。源包、`Assets/Models/Stacker`、可视夹具、演示场景和定向刷新后的资产索引已同步，`smoke:model-parameters` 覆盖颜色类型、默认/自定义/非法颜色、材质复用、停止恢复和共享原材质的双实例隔离。
 - 2026-07-16：Toolbar 新增“俯”视角按钮；点击后通过 Zustand 临时请求驱动 Babylon ArcRotateCamera 保留当前 target/radius 切换到稳定俯视，并清除旋转、平移和缩放惯性。该操作不修改场景文档、已保存视角或撤销历史，运行预览中仍可使用，便于结合底层 CAD/DXF 图纸搭建场景。
 - 2026-07-16：完成全部 12 个外部模型参数化脚本的米制适配：`多穿小车/辊道机/链条机/box/GD/HCTS/LED/RGV/Shelf/Stacker/WLTS/YZJ` 的长度字段与元数据统一使用 `m`；通用脚本改为在实体根米空间测量，过滤无顶点 glTF 占位 Mesh，根缩放后保持底部中心锚点，并区分模型基线与生成克隆的包围盒上下文。源包、`Assets/Models` 副本、Shelf/Stacker/YZJ 可视夹具和资产索引同步刷新；`smoke:model-parameters` 已接入 `smoke:units`。
 - 2026-07-16：调整编辑器主布局边界：Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部；Project 模型库和 Console 入口移动到中间列，仅占 Scene 画布同宽，并保留 Project 高度 `clamp(300px, 38vh, 460px)` 与 Console 30px 最小化入口。

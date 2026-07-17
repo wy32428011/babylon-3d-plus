@@ -103,6 +103,8 @@ const MODEL_SPECS = [
     script: 'stacker.model.ts',
     lengthUnit: 'millimeter',
     linearKeys: ['bodyLength', 'bodyWidth', 'bodyHeight', 'platformLength', 'platformHeight', 'forkLength', 'forkStageOneReach', 'forkStageTwoReach', 'forkGap'],
+    colorKey: 'appearanceColor',
+    defaultColor: '#ffffff',
     customValues: {
       bodyLength: 25,
       bodyWidth: 0.6,
@@ -113,6 +115,7 @@ const MODEL_SPECS = [
       forkStageOneReach: 1,
       forkStageTwoReach: 1,
       forkGap: 0.8,
+      appearanceColor: '#3366ff',
     },
   },
   {
@@ -225,6 +228,45 @@ function isActiveModelGeometry(mesh) {
     && mesh.isVisible
     && mesh.visibility > 0
     && mesh.getTotalVertices() > 0;
+}
+
+/** 收集模型当前有效 Mesh 使用的材质引用和颜色，验证实例隔离与生命周期。 */
+function collectMaterialSnapshot(contentRoot) {
+  const materials = new Set();
+  const colors = [];
+  for (const mesh of contentRoot.getChildMeshes(false)) {
+    if (!isActiveModelGeometry(mesh) || !mesh.material) continue;
+    const candidates = Array.isArray(mesh.material.subMaterials)
+      ? mesh.material.subMaterials.filter(Boolean)
+      : [mesh.material];
+    for (const material of candidates) {
+      materials.add(material);
+      const color = material.albedoColor ?? material.diffuseColor;
+      colors.push({
+        meshName: mesh.name,
+        materialName: material.name,
+        color: color?.toHexString?.().toLowerCase() ?? null,
+      });
+    }
+  }
+  return { materials, colors };
+}
+
+/** 校验所有有效模型材质都使用指定颜色。 */
+function assertMaterialColor(snapshot, expectedColor, message) {
+  assert.ok(snapshot.colors.length > 0, `${message}: 未找到有效材质`);
+  const normalizedExpected = expectedColor.toLowerCase();
+  for (const entry of snapshot.colors) {
+    assert.equal(entry.color, normalizedExpected, `${message}: ${entry.meshName}/${entry.materialName}`);
+  }
+}
+
+/** 按引用比较两组材质，确保参数更新复用克隆并在停止时恢复原材质。 */
+function assertMaterialSetEqual(actual, expected, message) {
+  assert.equal(actual.size, expected.size, `${message}: 材质数量不同`);
+  for (const material of expected) {
+    assert.ok(actual.has(material), `${message}: 材质引用不一致`);
+  }
 }
 
 /** 注入超大隐藏/禁用辅助几何，验证它们不会污染归一化或参数脚本基线。 */
@@ -397,6 +439,16 @@ function assertMetadataContract(spec, metadata) {
     assert.equal(field.unit, 'm', `${spec.name}.${key} parameterScripts.unit 必须为 m`);
     assert.match(field.label, /\(m\)$/, `${spec.name}.${key} 脚本字段标签必须显式标记 (m)`);
   }
+
+  if (spec.colorKey) {
+    const parameter = parameterMap.get(spec.colorKey);
+    const field = fieldMap.get(spec.colorKey);
+    assert.ok(parameter, `${spec.name}.${spec.colorKey} 缺少 modelParameters 定义`);
+    assert.ok(field, `${spec.name}.${spec.colorKey} 缺少 parameterScripts 字段`);
+    assert.equal(parameter.type, 'color', `${spec.name}.${spec.colorKey} 必须使用 color 参数类型`);
+    assert.equal(parameter.defaultValue, spec.defaultColor, `${spec.name}.${spec.colorKey} modelParameters 默认值错误`);
+    assert.equal(field.defaultValue, spec.defaultColor, `${spec.name}.${spec.colorKey} parameterScripts 默认值错误`);
+  }
 }
 
 /** 创建并运行一个模型参数化场景，返回默认、自定义及重复自定义尺寸。 */
@@ -421,6 +473,7 @@ async function runModelScenario({ spec, metadata, glbPath, scriptPath, rootTrans
     normalizeModelContentOrigin(root);
 
     const baselineSize = measureModelSizeMeters(root, contentRoot);
+    const baselineMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
     const scriptText = await fs.readFile(scriptPath, 'utf8');
     const defaults = {
       ...createDefaultParameterValues(metadata),
@@ -452,12 +505,21 @@ async function runModelScenario({ spec, metadata, glbPath, scriptPath, rootTrans
     await runtime.start();
     runtime.update();
     const defaultSize = measureModelSizeMeters(root, contentRoot);
+    const defaultMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
 
     updateRuntimeValues(runtime, contentRoot, metadata, customValues, assetCode);
     const customSizeFirst = measureModelSizeMeters(root, contentRoot);
+    const customMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
     updateRuntimeValues(runtime, contentRoot, metadata, defaults, assetCode);
+    const resetMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
+    let invalidMaterialSnapshot = null;
+    if (spec.colorKey) {
+      updateRuntimeValues(runtime, contentRoot, metadata, { ...customValues, [spec.colorKey]: 'invalid-color' }, assetCode);
+      invalidMaterialSnapshot = collectMaterialSnapshot(contentRoot);
+    }
     updateRuntimeValues(runtime, contentRoot, metadata, customValues, assetCode);
     const customSizeSecond = measureModelSizeMeters(root, contentRoot);
+    const repeatedMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
 
     assert.ok(defaultSize, `${spec.name} 默认参数后不可测量`);
     assert.ok(customSizeFirst, `${spec.name} 自定义参数后不可测量`);
@@ -467,9 +529,127 @@ async function runModelScenario({ spec, metadata, glbPath, scriptPath, rootTrans
       assert.ok(hasMeaningfulSizeDifference(defaultSize, customSizeFirst), `${spec.name} 自定义参数未产生可观察尺寸变化`);
     }
     assertVectorClose(customSizeSecond, customSizeFirst, `${spec.name} 重复参数更新不得累计漂移`, 1e-5);
-    return { baselineSize, defaultSize, customSize: customSizeFirst, generatedBounds: collectGeneratedMeterBounds(root, contentRoot), zExtremes: collectMeterZExtremes(root, contentRoot), contentRootScaling: { x: contentRoot.scaling.x, y: contentRoot.scaling.y, z: contentRoot.scaling.z }, contentRootPosition: { x: contentRoot.position.x, y: contentRoot.position.y, z: contentRoot.position.z } };
+    const scenarioResult = { baselineSize, defaultSize, customSize: customSizeFirst, generatedBounds: collectGeneratedMeterBounds(root, contentRoot), zExtremes: collectMeterZExtremes(root, contentRoot), contentRootScaling: { x: contentRoot.scaling.x, y: contentRoot.scaling.y, z: contentRoot.scaling.z }, contentRootPosition: { x: contentRoot.position.x, y: contentRoot.position.y, z: contentRoot.position.z } };
+    if (spec.colorKey) {
+      assert.ok(baselineMaterialSnapshot && defaultMaterialSnapshot && customMaterialSnapshot && resetMaterialSnapshot && invalidMaterialSnapshot && repeatedMaterialSnapshot);
+      assertMaterialColor(defaultMaterialSnapshot, spec.defaultColor, `${spec.name} 默认外观颜色`);
+      assertMaterialColor(customMaterialSnapshot, customValues[spec.colorKey], `${spec.name} 自定义外观颜色`);
+      assertMaterialColor(resetMaterialSnapshot, spec.defaultColor, `${spec.name} 恢复默认外观颜色`);
+      assertMaterialColor(invalidMaterialSnapshot, spec.defaultColor, `${spec.name} 非法颜色必须回退默认值`);
+      assertMaterialColor(repeatedMaterialSnapshot, customValues[spec.colorKey], `${spec.name} 重复自定义外观颜色`);
+      assertMaterialSetEqual(customMaterialSnapshot.materials, defaultMaterialSnapshot.materials, `${spec.name} 自定义颜色必须复用克隆材质`);
+      assertMaterialSetEqual(resetMaterialSnapshot.materials, defaultMaterialSnapshot.materials, `${spec.name} 恢复默认颜色必须复用克隆材质`);
+      assertMaterialSetEqual(invalidMaterialSnapshot.materials, defaultMaterialSnapshot.materials, `${spec.name} 非法颜色必须复用克隆材质`);
+      assertMaterialSetEqual(repeatedMaterialSnapshot.materials, defaultMaterialSnapshot.materials, `${spec.name} 重复颜色必须复用克隆材质`);
+      for (const material of defaultMaterialSnapshot.materials) {
+        assert.ok(!baselineMaterialSnapshot.materials.has(material), `${spec.name} 必须使用实例专属克隆材质`);
+      }
+      const appearanceMaterials = [...defaultMaterialSnapshot.materials];
+      const disposedAppearanceMaterials = new Set();
+      for (const material of appearanceMaterials) {
+        material.onDisposeObservable?.add(() => disposedAppearanceMaterials.add(material));
+      }
+      runtime.dispose();
+      runtime = undefined;
+      const restoredMaterialSnapshot = collectMaterialSnapshot(contentRoot);
+      assertMaterialSetEqual(restoredMaterialSnapshot.materials, baselineMaterialSnapshot.materials, `${spec.name} 停止后必须恢复原材质`);
+      for (const material of appearanceMaterials) {
+        assert.ok(disposedAppearanceMaterials.has(material), `${spec.name} 停止后必须释放克隆材质`);
+      }
+    }
+    return scenarioResult;
   } finally {
     runtime?.dispose();
+    scene.dispose();
+  }
+}
+
+/** 加载一个 Stacker 模型内容根，供同场景双实例颜色隔离验证复用。 */
+async function loadColorIsolationModel(scene, spec, glbBytes, index) {
+  const root = new TransformNode(`${spec.name}_color_entity_${index}`, scene);
+  const contentRoot = new TransformNode(`${spec.name}_color_content_${index}`, scene);
+  contentRoot.parent = root;
+  const unitScale = getUnitScaleToMeters(spec.lengthUnit);
+  contentRoot.scaling.copyFromFloats(unitScale, unitScale, unitScale);
+  const container = await LoadAssetContainerAsync(glbBytes, scene, { pluginExtension: '.glb', name: `${spec.name}-color-${index}` });
+  container.addAllToScene();
+  parentTopLevelModelNodes(container, contentRoot);
+  normalizeModelContentOrigin(root);
+  return { root, contentRoot };
+}
+
+/** 启动一个指定颜色的 Stacker 脚本实例。 */
+async function startColorIsolationRuntime({ spec, metadata, scriptPath, scriptText, contentRoot, color, index, ExternalModelScriptRuntime }) {
+  const values = { ...createDefaultParameterValues(metadata), [spec.colorKey]: color };
+  const assetCode = `SMOKE-${spec.name}-COLOR-${index}`;
+  const modelAsset = {
+    sourcePath: scriptPath,
+    sourceUrl: 'data:application/octet-stream,',
+    assetCode,
+    lengthUnit: spec.lengthUnit,
+    unitScaleToMeters: getUnitScaleToMeters(spec.lengthUnit),
+    scriptAssets: [{
+      path: scriptPath,
+      sourceUrl: `data:text/plain;base64,${Buffer.from(scriptText).toString('base64')}`,
+      name: spec.script,
+    }],
+    parameterScriptMetadata: metadata.parameterScripts,
+    animationScriptMetadata: metadata.animationScripts,
+    parameterConfig: metadata.modelParameters,
+    parameterValues: values,
+  };
+  syncScriptMetadata(contentRoot, metadata, values, assetCode);
+  const runtime = new ExternalModelScriptRuntime(contentRoot, modelAsset);
+  runtime.updateAssetCode(assetCode);
+  runtime.updateParameterValues(values);
+  await runtime.start();
+  runtime.update();
+  return { runtime, values, assetCode };
+}
+
+/** 验证两个共享同一组原材质的 Stacker 实例仍使用独立颜色克隆。 */
+async function assertStackerColorIsolation({ spec, metadata, glbPath, scriptPath, ExternalModelScriptRuntime, engine }) {
+  const scene = new Scene(engine);
+  let leftRuntime;
+  let rightRuntime;
+  try {
+    const [glbBytes, scriptText] = await Promise.all([
+      fs.readFile(glbPath).then((value) => new Uint8Array(value)),
+      fs.readFile(scriptPath, 'utf8'),
+    ]);
+    const left = await loadColorIsolationModel(scene, spec, glbBytes, 'left');
+    const right = await loadColorIsolationModel(scene, spec, glbBytes, 'right');
+    const leftMeshes = left.contentRoot.getChildMeshes(false).filter(isActiveModelGeometry).sort((a, b) => a.name.localeCompare(b.name));
+    const rightMeshes = right.contentRoot.getChildMeshes(false).filter(isActiveModelGeometry).sort((a, b) => a.name.localeCompare(b.name));
+    assert.equal(rightMeshes.length, leftMeshes.length, `${spec.name} 双实例 Mesh 数量必须一致`);
+    rightMeshes.forEach((mesh, index) => { mesh.material = leftMeshes[index].material; });
+
+    const leftState = await startColorIsolationRuntime({ spec, metadata, scriptPath, scriptText, contentRoot: left.contentRoot, color: '#3366ff', index: 'left', ExternalModelScriptRuntime });
+    leftRuntime = leftState.runtime;
+    const rightState = await startColorIsolationRuntime({ spec, metadata, scriptPath, scriptText, contentRoot: right.contentRoot, color: '#ff6633', index: 'right', ExternalModelScriptRuntime });
+    rightRuntime = rightState.runtime;
+
+    const leftSnapshot = collectMaterialSnapshot(left.contentRoot);
+    const rightSnapshot = collectMaterialSnapshot(right.contentRoot);
+    assertMaterialColor(leftSnapshot, '#3366ff', `${spec.name} 左实例颜色`);
+    assertMaterialColor(rightSnapshot, '#ff6633', `${spec.name} 右实例颜色`);
+    for (const material of leftSnapshot.materials) {
+      assert.ok(!rightSnapshot.materials.has(material), `${spec.name} 双实例不得共享颜色克隆材质`);
+    }
+
+    updateRuntimeValues(leftRuntime, left.contentRoot, metadata, { ...leftState.values, [spec.colorKey]: '#22cc88' }, leftState.assetCode);
+    assertMaterialColor(collectMaterialSnapshot(left.contentRoot), '#22cc88', `${spec.name} 左实例二次换色`);
+    const rightBeforeLeftStop = collectMaterialSnapshot(right.contentRoot);
+    assertMaterialColor(rightBeforeLeftStop, '#ff6633', `${spec.name} 左实例换色不得影响右实例`);
+
+    leftRuntime.dispose();
+    leftRuntime = undefined;
+    const rightAfterLeftStop = collectMaterialSnapshot(right.contentRoot);
+    assertMaterialColor(rightAfterLeftStop, '#ff6633', `${spec.name} 停止左实例不得影响右实例`);
+    assertMaterialSetEqual(rightAfterLeftStop.materials, rightBeforeLeftStop.materials, `${spec.name} 右实例材质必须保持稳定`);
+  } finally {
+    leftRuntime?.dispose();
+    rightRuntime?.dispose();
     scene.dispose();
   }
 }
@@ -630,14 +810,18 @@ try {
     assertTransformScalePreserved(unitScenario.customSize, scaledScenario.customSize, `${spec.name} 自定义参数必须保留用户 Transform.scale`);
     assertVectorClose(transformedScenario.defaultSize, scaledScenario.defaultSize, `${spec.name} 默认参数旋转后尺寸应保持不变`);
     assertVectorClose(transformedScenario.customSize, scaledScenario.customSize, `${spec.name} 自定义参数旋转后尺寸应保持不变`);
+    if (spec.colorKey) {
+      await assertStackerColorIsolation({ spec, metadata, glbPath, scriptPath, ExternalModelScriptRuntime, engine });
+    }
     summaries.push({ name: spec.name, lengthUnit: spec.lengthUnit, defaultSize: unitScenario.defaultSize, customSize: unitScenario.customSize });
   }
 
-  for (const fixture of [
+  const fixtureSpecs = [
     { name: 'Shelf', base: 'shelf' },
     { name: 'Stacker', base: 'stacker' },
     { name: 'YZJ', base: 'yzj' },
-  ]) {
+  ];
+  for (const fixture of fixtureSpecs.filter((fixture) => !MODEL_FILTER || fixture.name === MODEL_FILTER)) {
     const spec = MODEL_SPECS.find((item) => item.name === fixture.name);
     const sourcePackage = path.join(MODEL_ROOT, fixture.name);
     const fixturePackage = path.join(process.cwd(), 'output', 'playwright', `${fixture.base}-assets`);

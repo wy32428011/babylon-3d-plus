@@ -36,7 +36,16 @@
           "key": "description",
           "label": "参数说明",
           "type": "string",
-          "defaultValue": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+          "defaultValue": "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "appearanceColor",
+          "label": "模型外观颜色",
+          "type": "string",
+          "defaultValue": "#ffffff",
           "configuration": {
             "type": "string"
           }
@@ -195,8 +204,16 @@
         },
         "description": {
           "type": "string",
-          "value": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+          "value": "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。",
           "label": "参数说明",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "appearanceColor": {
+          "type": "string",
+          "value": "#ffffff",
+          "label": "模型外观颜色",
           "configuration": {
             "type": "string"
           }
@@ -334,6 +351,12 @@
     "schema": "babylon-editor.model-parameters",
     "version": 1,
     "parameters": [
+      {
+        "key": "appearanceColor",
+        "label": "模型外观颜色",
+        "type": "color",
+        "defaultValue": "#ffffff"
+      },
       {
         "key": "bodyLength",
         "label": "主体长度 (m)",

@@ -2,6 +2,7 @@
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { visibleAsBoolean, visibleAsNumber, visibleAsString } from "babylonjs-editor-tools";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Color3 } from "@babylonjs/core/Maths/math.color";
 // 参数长度统一使用米；contentRoot 的基础 scaling 已由编辑器包含源单位换算。
 
 // 此文件按模型参数化说明生成，用于 叉式堆垛机 的静态参数配置。
@@ -97,7 +98,10 @@ export class ParametricModelParamsComponent {
 	public deviceName: string = "叉式堆垛机";
 
 	@visibleAsString("参数说明")
-	public description: string = "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。";
+	public description: string = "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。";
+
+	@visibleAsString("模型外观颜色")
+	public appearanceColor: string = "#ffffff";
 
 	@visibleAsNumber("主体长度 (m)", { step: 0.1 })
 	public bodyLength: number = 23.012;
@@ -154,6 +158,7 @@ interface NodeSnapshot {
         rotationQuaternion?: any;
         enabled?: boolean;
         vertexPositions?: number[];
+        material?: any;
 }
 
 interface ForkVisualAnchor {
@@ -166,7 +171,8 @@ const DEFAULT_VALUES: ValueMap = {
 	"modelKey": "stacker",
 	"deviceType": "堆垛机",
 	"deviceName": "叉式堆垛机",
-	"description": "支持堆垛机主体尺寸、载货台尺寸、货叉长度和货叉间距参数化。",
+	"description": "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。",
+	"appearanceColor": "#ffffff",
 	"bodyLength": 23.012,
 	"bodyWidth": 0.452,
 	"bodyHeight": 7.837,
@@ -184,6 +190,7 @@ const DEFAULT_VALUES: ValueMap = {
 export class ParametricModelRuntimeComponent {
 	private readonly snapshots = new Map<any, NodeSnapshot>();
 	private readonly generatedNodes: any[] = [];
+	private readonly appearanceMaterials = new Map<any, any>();
 	private readonly startupValues: ValueMap;
 	private lastSignature = "";
 
@@ -217,6 +224,7 @@ export class ParametricModelRuntimeComponent {
 	public onStop(): void {
 		this.disposeGeneratedNodes();
 		this.restoreBaseNodes();
+		this.disposeAppearanceMaterials();
 		this.lastSignature = "";
 	}
 
@@ -242,6 +250,7 @@ export class ParametricModelRuntimeComponent {
 		this.applyDoubleDeep(values);
 		this.applyRouteParameters(values);
 		this.applyStackerInitialTravelDocking();
+		this.applyAppearanceColor(values);
 		this.lastSignature = signature;
 	}
 
@@ -253,6 +262,55 @@ export class ParametricModelRuntimeComponent {
 		if (!Number.isFinite(initialOffset) || Math.abs(initialOffset) < 0.000001) { return; }
 		const worldOffset = this.getParametricMeterAxis("z").scale(initialOffset);
 		this.findStackerTravelNodes().forEach((node) => this.translateNodeByCurrentMeterDelta(node, worldOffset));
+	}
+
+	/**
+	 * 为当前 Stacker 实例的全部有效 Mesh 应用外观乘色，保留原贴图和其它材质属性。
+	 */
+	private applyAppearanceColor(values: ValueMap): void {
+		const color = this.readColor(values, "appearanceColor", String(DEFAULT_VALUES.appearanceColor ?? "#ffffff"));
+		this.getModelNodes().forEach((target) => {
+			if (target.isDisposed?.() || typeof target.getTotalVertices !== "function" || target.getTotalVertices() <= 0 || !("material" in target)) { return; }
+			const baseMaterial = this.snapshots.get(target)?.material ?? target.material;
+			const appearanceMaterial = this.getOrCreateAppearanceMaterial(baseMaterial);
+			if (!appearanceMaterial) { return; }
+			this.setMaterialColor(appearanceMaterial, color);
+			target.material = appearanceMaterial;
+		});
+	}
+
+	/**
+	 * 按原材质为当前脚本实例懒创建专属克隆，避免多个 Stacker 实例互相串色。
+	 */
+	private getOrCreateAppearanceMaterial(baseMaterial: any): any | null {
+		if (!baseMaterial || typeof baseMaterial.clone !== "function") { return null; }
+		const cachedMaterial = this.appearanceMaterials.get(baseMaterial);
+		if (cachedMaterial) { return cachedMaterial; }
+		const materialName = String(baseMaterial.name ?? "material");
+		const clonedMaterial = baseMaterial.clone(`${materialName}_stacker_appearance_${this.appearanceMaterials.size}`);
+		if (!clonedMaterial) { return null; }
+		this.appearanceMaterials.set(baseMaterial, clonedMaterial);
+		return clonedMaterial;
+	}
+
+	/**
+	 * 兼容 PBRMaterial 和 StandardMaterial 的主颜色字段，颜色对象按值复制避免共享引用。
+	 */
+	private setMaterialColor(material: any, color: Color3): void {
+		if (material.albedoColor?.copyFrom) { material.albedoColor.copyFrom(color); }
+		else if ("albedoColor" in material) { material.albedoColor = color.clone(); }
+		if (material.diffuseColor?.copyFrom) { material.diffuseColor.copyFrom(color); }
+		else if ("diffuseColor" in material) { material.diffuseColor = color.clone(); }
+	}
+
+	/**
+	 * 释放当前 Stacker 实例创建的颜色材质，不强制释放原模型共享贴图。
+	 */
+	private disposeAppearanceMaterials(): void {
+		this.appearanceMaterials.forEach((material) => {
+			if (typeof material?.dispose === "function") { material.dispose(false, false); }
+		});
+		this.appearanceMaterials.clear();
 	}
 
 	/**
@@ -274,6 +332,7 @@ export class ParametricModelRuntimeComponent {
 				rotationQuaternion: target.rotationQuaternion?.clone?.(),
 				enabled: typeof target.isEnabled === "function" ? target.isEnabled() : undefined,
 				vertexPositions: this.readVertexPositions(target),
+				material: "material" in target ? target.material : undefined,
 			});
 		}
 		return this.snapshots.get(target) ?? { position: Vector3.Zero(), scaling: new Vector3(1, 1, 1) };
@@ -289,6 +348,7 @@ export class ParametricModelRuntimeComponent {
 			if (target.rotation && snapshot.rotation) { target.rotation = snapshot.rotation.clone(); }
 			if (snapshot.rotationQuaternion && target.rotationQuaternion !== undefined) { target.rotationQuaternion = snapshot.rotationQuaternion.clone(); }
 			if (snapshot.vertexPositions) { this.restoreVertexPositions(target, snapshot.vertexPositions); }
+			if ("material" in target) { target.material = snapshot.material ?? null; }
 			if (snapshot.enabled !== undefined && typeof target.setEnabled === "function") { target.setEnabled(snapshot.enabled); }
 		});
 	}
@@ -1426,6 +1486,16 @@ export class ParametricModelRuntimeComponent {
 	private readPositiveNumber(values: ValueMap, key: string, fallback: number): number {
 		const value = this.readNumber(values, key, fallback);
 		return value > 0 ? value : fallback;
+	}
+
+	/**
+	 * 读取十六进制颜色字段，非法值回退默认白色，避免参数错误中断模型更新。
+	 */
+	private readColor(values: ValueMap, key: string, fallback: string): Color3 {
+		const rawValue = typeof values[key] === "string" ? String(values[key]).trim() : "";
+		const normalizedValue = /^#[0-9a-fA-F]{6}$/.test(rawValue) ? rawValue : fallback;
+		try { return Color3.FromHexString(normalizedValue); }
+		catch { return Color3.White(); }
 	}
 
 	/**
