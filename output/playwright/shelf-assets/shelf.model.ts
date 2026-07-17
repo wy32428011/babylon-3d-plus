@@ -1,7 +1,9 @@
 // 此文件由模型包参数脚本和运行脚本合并而成，供编辑器以单个 TS 文件读取。
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { visibleAsBoolean, visibleAsNumber, visibleAsString } from "babylonjs-editor-tools";
-import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Matrix, Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Mesh } from "@babylonjs/core/Meshes/mesh";
+import { VertexData } from "@babylonjs/core/Meshes/mesh.vertexData";
 // 参数长度统一使用米；contentRoot 的基础 scaling 已由编辑器包含源单位换算。
 
 // 此文件按模型参数化说明生成，用于 多穿货架 的静态参数配置。
@@ -68,6 +70,9 @@ interface NodeSnapshot {
 	rotation?: Vector3;
 	rotationQuaternion?: any;
 	enabled?: boolean;
+	visibility?: number;
+	isVisible?: boolean;
+	isPickable?: boolean;
 }
 
 interface AxisBounds {
@@ -92,6 +97,15 @@ interface ShelfColumnLayout {
 	spacing: number;
 	startCenter: number | null;
 	tolerance: number;
+}
+
+interface DenseShelfGridPlan {
+	part: ShelfPart;
+	depth: number;
+	column: number;
+	layer: number;
+	offset: Vector3;
+	reason: string;
 }
 
 const DEFAULT_VALUES: ValueMap = {
@@ -131,14 +145,16 @@ const SHELF_PART_NODE_NAMES = [
 ];
 
 const MIN_DIMENSION = 0.001;
-const MAX_LAYER_COUNT = 20;
+const MAX_LAYER_COUNT = 100;
 const MAX_COLUMN_COUNT = 100;
 const MAX_GENERATED_NODES = 5000;
+const MAX_DENSE_THIN_INSTANCES = 250000;
 
 /** 根据 Inspector 参数对 Shelf.glb 执行部件级静态参数化调整。 */
 export class ParametricModelRuntimeComponent {
 	private readonly snapshots = new Map<any, NodeSnapshot>();
 	private readonly generatedNodes: any[] = [];
+	private readonly denseHiddenNodes = new Set<any>();
 	private lastSignature = "";
 
 	/** 创建 Shelf.glb 静态参数化运行组件。 */
@@ -189,7 +205,10 @@ export class ParametricModelRuntimeComponent {
 				scaling: target.scaling?.clone?.() ?? new Vector3(1, 1, 1),
 				rotation: target.rotation?.clone?.(),
 				rotationQuaternion: target.rotationQuaternion?.clone?.(),
-				enabled: typeof target.isEnabled === "function" ? target.isEnabled() : undefined
+				enabled: typeof target.isEnabled === "function" ? target.isEnabled() : undefined,
+				visibility: typeof target.visibility === "number" ? target.visibility : undefined,
+				isVisible: typeof target.isVisible === "boolean" ? target.isVisible : undefined,
+				isPickable: typeof target.isPickable === "boolean" ? target.isPickable : undefined
 			});
 		}
 		return this.snapshots.get(target) ?? { position: Vector3.Zero(), scaling: new Vector3(1, 1, 1) };
@@ -210,10 +229,20 @@ export class ParametricModelRuntimeComponent {
 			if (target.rotationQuaternion !== undefined) {
 				target.rotationQuaternion = snapshot.rotationQuaternion?.clone?.() ?? null;
 			}
+			if (snapshot.visibility !== undefined) {
+				target.visibility = snapshot.visibility;
+			}
+			if (snapshot.isVisible !== undefined) {
+				target.isVisible = snapshot.isVisible;
+			}
+			if (snapshot.isPickable !== undefined) {
+				target.isPickable = snapshot.isPickable;
+			}
 			if (snapshot.enabled !== undefined && typeof target.setEnabled === "function") {
 				target.setEnabled(snapshot.enabled);
 			}
 		});
+		this.denseHiddenNodes.clear();
 	}
 
 	/** 从模型 metadata 和运行实例属性中读取参数值，缺失时使用脚本内置默认值。 */
@@ -526,34 +555,163 @@ export class ParametricModelRuntimeComponent {
 		return minimums.length > 0 ? Math.min(...minimums) : null;
 	}
 
-	/** 按层、列、深位组合复制 Shelf；第一层保留完整基座，后续层只复制上方框架和一组三角支架。 */
+	/** 按层、列、深位组合复制 Shelf；低密度保留逐节点 clone，高密度切换为 thin-instance 批次避免节点爆炸。 */
 	private cloneShelfGrid(parts: ShelfPart[], values: ValueMap, layers: number, columns: number, spacingY: number, columnLayout: ShelfColumnLayout, targetDepth: number): any[] {
+		const partMeshes = this.createPartRenderableMeshMap(parts);
+		const plan = this.createShelfGridPlan(parts, values, layers, columns, spacingY, columnLayout, targetDepth);
+		const estimatedGeneratedNodes = plan.reduce((count, item) => count + (partMeshes.get(item.part)?.length ?? 0), 0);
+		if (estimatedGeneratedNodes > MAX_GENERATED_NODES) {
+			return this.createDenseShelfGridBatches(parts, plan, partMeshes);
+		}
+
 		const clones: any[] = [];
+		let cloneIndex = 1;
+		plan.forEach((item) => {
+			cloneIndex = this.clonePartWithIndex(item.part.node, item.offset, item.reason, cloneIndex, clones);
+		});
+		return clones;
+	}
+
+	/** 生成完整层/列/深位复制计划；高低密度共用，避免两条路径的结构规则漂移。 */
+	private createShelfGridPlan(parts: ShelfPart[], values: ValueMap, layers: number, columns: number, spacingY: number, columnLayout: ShelfColumnLayout, targetDepth: number): DenseShelfGridPlan[] {
+		const plan: DenseShelfGridPlan[] = [];
 		const depthCount = this.readBoolean(values, "doubleDeepEnabled", false) ? 2 : 1;
 		const deepOffsetZ = targetDepth + this.readNumber(values, "deepSlotGap", 0);
 		const deepOffsetY = this.readNumber(values, "deepSlotLift", 0);
-		let cloneIndex = 1;
 
 		for (let depth = 0; depth < depthCount; depth += 1) {
 			for (let column = 0; column < columns; column += 1) {
 				for (let layer = 0; layer < layers; layer += 1) {
+					if (depth === 0 && column === 0 && layer === 0) {
+						continue;
+					}
 					const offset = this.createShelfGridOffset(column, layer, depth, columnLayout.spacing, spacingY, deepOffsetZ, deepOffsetY);
 					parts.forEach((part) => {
-						if (this.generatedNodes.length >= MAX_GENERATED_NODES || !this.shouldClonePartForGridCell(part, column, layer, columnLayout)) {
-							return;
-						}
-						if (depth === 0 && column === 0 && layer === 0) {
+						if (!this.shouldClonePartForGridCell(part, column, layer, columnLayout)) {
 							return;
 						}
 						const reason = this.isSideTriangleBracePart(part)
 							? `shelf_brace_d${depth}_c${column}_l${layer}`
 							: `shelf_grid_d${depth}_c${column}_l${layer}`;
-						cloneIndex = this.clonePartWithIndex(part.node, offset, reason, cloneIndex, clones);
+						plan.push({ part, depth, column, layer, offset, reason });
 					});
 				}
 			}
 		}
-		return clones;
+		return plan;
+	}
+
+	/** 为高密度 Shelf 创建每个可渲染叶 Mesh 一个批次，重复单元使用 thin-instance 矩阵表示。 */
+	private createDenseShelfGridBatches(parts: ShelfPart[], plan: DenseShelfGridPlan[], partMeshes: Map<ShelfPart, any[]>): any[] {
+		const batches: any[] = [];
+		const sourcePlans = new Map<any, DenseShelfGridPlan[]>();
+		parts.forEach((part) => {
+			(partMeshes.get(part) ?? []).forEach((mesh) => {
+				if (!sourcePlans.has(mesh)) {
+					sourcePlans.set(mesh, [{ part, depth: 0, column: 0, layer: 0, offset: Vector3.Zero(), reason: "shelf_dense_base" }]);
+				}
+			});
+		});
+		plan.forEach((item) => {
+			(partMeshes.get(item.part) ?? []).forEach((mesh) => {
+				const entries = sourcePlans.get(mesh) ?? [];
+				entries.push(item);
+				sourcePlans.set(mesh, entries);
+			});
+		});
+
+		let totalInstances = 0;
+		let batchIndex = 1;
+		for (const [sourceMesh, entries] of sourcePlans.entries()) {
+			totalInstances += entries.length;
+			if (totalInstances > MAX_DENSE_THIN_INSTANCES) {
+				throw new Error(`Shelf 高密度 thin-instance 数量 ${totalInstances} 超过安全上限 ${MAX_DENSE_THIN_INSTANCES}，请降低层/列/双深参数。`);
+			}
+			const batch = this.createDenseBatchMesh(sourceMesh, entries, batchIndex);
+			if (batch) {
+				batches.push(batch);
+				batchIndex += 1;
+			}
+		}
+		this.node.metadata = {
+			...(this.node.metadata ?? {}),
+			shelfDenseBatch: { enabled: true, batchCount: batches.length, thinInstanceCount: totalInstances }
+		};
+		return batches;
+	}
+
+	/** 创建单个源叶 Mesh 的高密度批次 Mesh，并把源 Mesh 相对参数根的基准变换烘焙进独立几何。 */
+	private createDenseBatchMesh(sourceMesh: any, entries: DenseShelfGridPlan[], batchIndex: number): any | null {
+		const geometrySource = sourceMesh?.isAnInstance === true ? sourceMesh.sourceMesh : sourceMesh;
+		if (!geometrySource || typeof geometrySource.getTotalVertices !== "function" || geometrySource.getTotalVertices() <= 0) {
+			return null;
+		}
+		const scene = this.node.getScene?.();
+		if (!scene) {
+			return null;
+		}
+
+		const vertexData = VertexData.ExtractFromMesh(geometrySource, true, true);
+		const sourceWorld = sourceMesh.computeWorldMatrix?.(true) ?? geometrySource.computeWorldMatrix?.(true);
+		const rootWorld = this.node.computeWorldMatrix?.(true);
+		const inverseRootWorld = rootWorld?.clone?.();
+		if (!sourceWorld || !inverseRootWorld?.invert) {
+			return null;
+		}
+		inverseRootWorld.invert();
+		vertexData.transform(sourceWorld.multiply(inverseRootWorld));
+
+		const batch = new Mesh(`${String(sourceMesh.name ?? "shelf")}_dense_batch_${batchIndex}`, scene);
+		batch.parent = this.node;
+		batch.material = sourceMesh.material ?? geometrySource.material ?? null;
+		batch.metadata = {
+			...(sourceMesh.metadata ?? {}),
+			generatedByParametricRuntime: true,
+			sourceNodeName: sourceMesh.name,
+			reason: "shelf_dense_thin_instance_batch",
+			denseShelfBatch: true,
+			denseShelfSourceName: sourceMesh.name,
+			denseShelfThinInstanceCount: entries.length
+		};
+		batch.doNotSerialize = true;
+		batch.isPickable = sourceMesh.isPickable !== false;
+		batch.thinInstanceEnablePicking = true;
+		vertexData.applyToMesh(batch, true);
+		const matrices = new Float32Array(entries.length * 16);
+		entries.forEach((entry, index) => {
+			const localOffset = this.meterVectorToNodeLocal(this.node, entry.offset);
+			Matrix.Translation(localOffset.x, localOffset.y, localOffset.z).copyToArray(matrices, index * 16);
+		});
+		batch.thinInstanceSetBuffer("matrix", matrices, 16, true);
+		// Thin-instance 矩阵不会自动扩大 Mesh 包围盒；强制刷新后，相机、拾取和视觉验收才能看到 100 列/100 层完整空间。
+		batch.thinInstanceRefreshBoundingInfo?.(true);
+		this.hideDenseSourceMesh(sourceMesh);
+		this.generatedNodes.push(batch);
+		return batch;
+	}
+
+	/** 预先缓存每个 Shelf 部件的可渲染叶 Mesh，避免 100x100 格子循环中重复遍历子树。 */
+	private createPartRenderableMeshMap(parts: ShelfPart[]): Map<ShelfPart, any[]> {
+		const result = new Map<ShelfPart, any[]>();
+		parts.forEach((part) => result.set(part, this.collectRenderableLeafMeshes(part.node)));
+		return result;
+	}
+
+	/** 收集节点子树内实际参与渲染的叶 Mesh，兼容共享路径中的 InstancedMesh。 */
+	private collectRenderableLeafMeshes(node: any): any[] {
+		const meshes = typeof node.getChildMeshes === "function" ? node.getChildMeshes(false) : [];
+		const candidates = (node?.getTotalVertices?.() > 0 ? [node] : []).concat(meshes);
+		return [...new Set(candidates.filter((mesh: any) => (
+			mesh && !mesh.isDisposed?.() && mesh.getTotalVertices?.() > 0
+		)))];
+	}
+
+	/** 隐藏高密度批次已覆盖的原始叶 Mesh；恢复由基础快照统一处理，避免污染同源 Shelf。 */
+	private hideDenseSourceMesh(sourceMesh: any): void {
+		this.rememberSnapshot(sourceMesh);
+		this.denseHiddenNodes.add(sourceMesh);
+		sourceMesh.isVisible = false;
+		sourceMesh.isPickable = false;
 	}
 
 	/** 克隆单个部件并维护全局生成序号。 */
@@ -790,6 +948,11 @@ export class ParametricModelRuntimeComponent {
 		inverseTargetParentWorldMatrix.invert();
 		const worldVector = Vector3.TransformNormal(meterVector, entityRootWorldMatrix);
 		return Vector3.TransformNormal(worldVector, inverseTargetParentWorldMatrix);
+	}
+
+	/** 将实体根米空间位移转换到指定节点本地坐标，供 high-density thin instance 矩阵使用。 */
+	private meterVectorToNodeLocal(parentNode: any, meterVector: Vector3): Vector3 {
+		return this.meterVectorToParentLocal({ parent: parentNode }, meterVector);
 	}
 
 	/** 克隆单个节点并应用偏移，克隆失败时直接跳过。 */
