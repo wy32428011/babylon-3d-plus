@@ -34,6 +34,7 @@ export function EditorLayout() {
   const gridSettings = useEditorStore((state) => state.gridSettings);
   const cadImportProgress = useEditorStore((state) => state.cadImportProgress);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
+  const fetchConfig = useEditorStore((state) => state.scene.fetchConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
   const setTransformTool = useEditorStore((state) => state.setTransformTool);
   const setTransformSpace = useEditorStore((state) => state.setTransformSpace);
@@ -54,6 +55,7 @@ export function EditorLayout() {
   const saveScene = useEditorStore((state) => state.saveScene);
   const loadScene = useEditorStore((state) => state.loadScene);
   const updateMqttConfig = useEditorStore((state) => state.updateMqttConfig);
+  const updateFetchConfig = useEditorStore((state) => state.updateFetchConfig);
   const startRuntimePreview = useEditorStore((state) => state.startRuntimePreview);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
   const pushLog = useEditorStore((state) => state.pushLog);
@@ -206,6 +208,10 @@ export function EditorLayout() {
     setRuntimePreviewError(null);
   }
 
+  function handleSaveFetchConfig(config: typeof fetchConfig): void {
+    updateFetchConfig(config);
+  }
+
   return (
     <div className={styles.editorShell}>
       <Toolbar
@@ -231,6 +237,8 @@ export function EditorLayout() {
         onOpenMqttConfig={() => setMqttConfigDialogOpen(true)}
         onCloseMqttConfig={handleCloseMqttConfig}
         onSaveMqttConfig={handleSaveMqttConfig}
+        fetchConfig={fetchConfig}
+        onSaveFetchConfig={handleSaveFetchConfig}
         runtimeMode={runtimeMode}
         runtimePreviewError={runtimePreviewError}
         readOnly={isRuntimePreview}

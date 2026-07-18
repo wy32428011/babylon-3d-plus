@@ -120,6 +120,7 @@ import {
   resolveModelAssetSharedInstancingPolicy,
   SharedModelAssetCache,
 } from './SharedModelAssetCache';
+import { ModelGeneratorFetchRuntime } from './ModelGeneratorFetchRuntime';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
 const SELECTED_EMISSIVE_COLOR = '#332400';
@@ -315,7 +316,7 @@ type ResolvedModelGeneratorTarget = {
 type ModelParameterRuntimeTarget = AbstractMesh | TransformNode | Material;
 type ModelParameterBaselineValue = boolean | number | string | Vector3Data | Texture | null;
 
-type LocatorRuntimeEntry = {
+export type LocatorRuntimeEntry = {
   root: TransformNode;
   boxes: Mesh[];
   material: StandardMaterial;
@@ -468,6 +469,7 @@ export class SceneRuntime {
   private readonly modelSelectionOutlineLayer: SelectionOutlineLayer;
   private readonly assetLoadScheduler = new AssetLoadScheduler();
   private readonly sharedModelAssetCache = new SharedModelAssetCache();
+  private readonly fetchRuntimes = new Map<string, ModelGeneratorFetchRuntime>();
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
   private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
   private readonly poiEffectRuntime: PoiEffectRuntime;
@@ -494,6 +496,22 @@ export class SceneRuntime {
     this.genericTelemetryMotionRuntime = new GenericTelemetryMotionRuntime(scene, { pushLog: this.pushLog });
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
+  }
+
+  /** 处理 fetch 数据源模式的外部事件。 */
+  async handleFetchGeneratorEvent(fetchConfig: { url: string; apiKey: string }): Promise<void> {
+    for (const [entityId, fetchRuntime] of this.fetchRuntimes) {
+      const runtimeEntry = this.generatedOutputOwners.get(entityId);
+      if (!runtimeEntry) continue;
+      await fetchRuntime.handleEvent(
+        fetchConfig,
+        runtimeEntry.component,
+        (assetId) => {
+          const assetIdTrimmed = assetId.trim();
+          return this.locatorTargets.get(assetIdTrimmed) ?? null;
+        },
+      );
+    }
   }
 
   /** 开始 MQTT 运行预览；该方法幂等，并在真正驱动前清空上一次预览残留运行态。 */
@@ -1534,6 +1552,13 @@ export class SceneRuntime {
       };
       this.modelGenerators.set(entity.id, runtimeEntry);
       this.generatedOutputOwners.set(runtimeEntry.entityId, runtimeEntry);
+    }
+
+    if (component.dataSource === 'fetch' && !this.fetchRuntimes.has(entity.id)) {
+      this.fetchRuntimes.set(entity.id, new ModelGeneratorFetchRuntime(this.scene, entity.id, this.pushLog));
+    } else if (component.dataSource !== 'fetch' && this.fetchRuntimes.has(entity.id)) {
+      this.fetchRuntimes.get(entity.id)?.dispose();
+      this.fetchRuntimes.delete(entity.id);
     }
 
     const runtimeConfigSignature = this.createModelGeneratorRuntimeConfigSignature(component);
@@ -4761,6 +4786,8 @@ export class SceneRuntime {
     runtimeEntry.reportedLoadFailureKeys.clear();
     this.generatedOutputOwners.delete(runtimeEntry.entityId);
     this.modelGenerators.delete(entityId);
+    this.fetchRuntimes.get(entityId)?.dispose();
+    this.fetchRuntimes.delete(entityId);
   }
 
   /** 释放当前环境底座模型，切换场景或切换效果时避免 Babylon 资源残留。 */

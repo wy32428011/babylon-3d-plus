@@ -63,11 +63,13 @@ import {
   createPoiEffectEntity,
   createModelAssetCode,
   extractModelAssetCodePrefix,
+  sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneEnvironment,
   sanitizeSceneSensitivityValue,
   sanitizeSceneViewDistance,
   type SceneCameraPose,
+  type FetchConfig,
   type MqttConfig,
   type SceneEnvironmentSettings,
   type SceneSensitivitySettings,
@@ -302,6 +304,7 @@ type EditorState = {
   previewSelectedTransform: (transform: TransformComponent) => void;
   commitSelectedTransform: (before: TransformComponent, after: TransformComponent) => void;
   updateMqttConfig: (config: MqttConfig) => void;
+  updateFetchConfig: (config: FetchConfig) => void;
   undo: () => void;
   redo: () => void;
   newScene: () => void;
@@ -2711,6 +2714,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           state.logs,
           `MQTT 配置已保存：${mqttConfig.simulatorEnabled ? `本地模拟 ${mqttConfig.simulatorAssetCode}/${mqttConfig.simulatorScenario}` : mqttConfig.address || '未设置地址'}，Topic ${mqttConfig.topic}，${mqttConfig.enabled ? '已启用' : '未启用'}`,
         ),
+      };
+    });
+  },
+  updateFetchConfig: (config) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '保存 Fetch 配置');
+      const fetchConfig = sanitizeFetchConfig(config);
+      const command = updateSceneDocumentCommand('更新 Fetch 配置', (scene) => ({
+        ...scene,
+        fetchConfig,
+      }));
+      const result = executeCommand(state.scene, state.history, command);
+
+      return {
+        ...result,
+        logs: prependLog(state.logs, `Fetch 配置已保存：${fetchConfig.url || '未设置地址'}`),
       };
     });
   },

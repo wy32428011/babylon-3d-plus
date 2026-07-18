@@ -282,6 +282,24 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     <fieldset className="transform-fieldset model-generator-fieldset">
       <legend>模型生成器</legend>
 
+      <label className="inspector-row">
+        <span>数据源</span>
+        <select
+          disabled={disabled}
+          value={component.dataSource}
+          onChange={(event) => {
+            const dataSource = event.target.value === 'fetch' ? 'fetch' : 'mqtt';
+            commitComponent({ ...component, dataSource }, '切换数据源');
+          }}
+        >
+          <option value="mqtt">MQTT</option>
+          <option value="fetch">Fetch</option>
+        </select>
+      </label>
+      {component.dataSource === 'fetch' && (
+        <p className="muted">fetch 模式下由外部事件驱动，绑定的资产编号用于匹配虚拟定位线框。基础 URL 和 API Key 在工具栏中配置。</p>
+      )}
+
       {renderTargetSlot(
         'default-target',
         '共享生成模板',
@@ -349,6 +367,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
         </div>
       ))}
 
+      {component.dataSource !== 'fetch' && (
       <label className="number-row model-generator-ttl-row">
         <span>元数据销毁时长</span>
         <input
@@ -369,14 +388,17 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
           }}
         />
       </label>
-      <p className="muted model-generator-unit-hint">单位：秒；用于 warehouseFlow 三条严格绑定快照的有效期判断。</p>
+      )}
+      {component.dataSource !== 'fetch' && (
+        <p className="muted model-generator-unit-hint">单位：秒；用于 warehouseFlow 三条严格绑定快照的有效期判断。</p>
+      )}
 
       <div className="model-generator-section-header">
         <span>仓储设备绑定</span>
         <button
           disabled={disabled || component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS}
           onClick={addBinding}
-          title="添加 MQTT 绑定"
+          title={component.dataSource === 'fetch' ? '添加定位线框绑定' : '添加 MQTT 绑定'}
           type="button"
         >
           +
@@ -384,7 +406,11 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
       </div>
 
       {component.bindings.length === 0 ? (
-        <p className="muted model-generator-empty-hint">暂无仓储设备绑定；普通设备模板规则仍按各自遥测快照工作。</p>
+        <p className="muted model-generator-empty-hint">
+          {component.dataSource === 'fetch'
+            ? '暂无定位线框绑定；资产编号用于匹配虚拟定位线框的 assetId。'
+            : '暂无仓储设备绑定；普通设备模板规则仍按各自遥测快照工作。'}
+        </p>
       ) : null}
 
       {component.bindings.map((binding, index) => (
@@ -393,6 +419,8 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
             <span>绑定 {index + 1}</span>
             <button disabled={disabled} onClick={() => removeBinding(index)} title="删除绑定" type="button">−</button>
           </div>
+          {component.dataSource !== 'fetch' ? (
+            <>
           <label className="inspector-row">
             <span>sourceId</span>
             <input
@@ -413,8 +441,10 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
               onChange={(event) => updateBinding(index, { deviceType: event.target.value })}
             />
           </label>
+            </>
+          ) : null}
           <label className="inspector-row">
-            <span>assetCode</span>
+            <span>{component.dataSource === 'fetch' ? '定位线框编号' : 'assetCode'}</span>
             <input
               disabled={disabled}
               maxLength={128}
@@ -426,6 +456,8 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
         </div>
       ))}
 
+      {component.dataSource !== 'fetch' && (
+        <>
       <div className="model-generator-section-header">
         <span>仓储入库/出库流转</span>
       </div>
@@ -470,6 +502,8 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
           </p>
         </>
       ) : null}
+        </>
+      )}
     </fieldset>
   );
 }

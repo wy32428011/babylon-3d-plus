@@ -196,6 +196,7 @@ export function createDefaultModelGeneratorComponent(): ModelGeneratorComponent 
     rules: [],
     metadataTtlSeconds: MODEL_GENERATOR_DEFAULT_TTL_SECONDS,
     bindings: [],
+    dataSource: 'mqtt',
   };
 }
 
@@ -326,6 +327,7 @@ export function sanitizeModelGeneratorComponent(value: unknown): ModelGeneratorC
     rules,
     metadataTtlSeconds: sanitizeModelGeneratorMetadataTtlSeconds(value.metadataTtlSeconds),
     bindings,
+    dataSource: value.dataSource === 'fetch' ? 'fetch' : 'mqtt',
     ...(value.warehouseFlow === undefined
       ? {}
       : { warehouseFlow: sanitizeModelGeneratorWarehouseFlow(value.warehouseFlow) }),

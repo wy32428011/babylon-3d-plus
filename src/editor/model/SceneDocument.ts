@@ -83,6 +83,16 @@ export type SceneSettings = {
   environment: SceneEnvironmentSettings | null;
 };
 
+export type FetchConfig = {
+  url: string;
+  apiKey: string;
+};
+
+export const DEFAULT_FETCH_CONFIG: FetchConfig = {
+  url: '',
+  apiKey: '',
+};
+
 export type MqttAdapterConfig =
   | { kind: 'epv'; sourceId?: string; deviceType?: string }
   | {
@@ -298,6 +308,14 @@ function createSubscriptionsFromLegacyTopic(topic: string): MqttSubscriptionConf
 }
 
 /** 归一化场景 MQTT 配置，地址为空但 IP 存在时自动补齐默认 WebSocket 地址。 */
+export function sanitizeFetchConfig(config: unknown): FetchConfig {
+  if (typeof config !== 'object' || config === null) return { ...DEFAULT_FETCH_CONFIG };
+  const obj = config as Record<string, unknown>;
+  const url = typeof obj.url === 'string' ? obj.url.trim().slice(0, 2048) : '';
+  const apiKey = typeof obj.apiKey === 'string' ? obj.apiKey.trim().slice(0, 256) : '';
+  return { url, apiKey };
+}
+
 export function sanitizeMqttConfig(config: Omit<MqttConfig, 'subscriptions'> & { subscriptions?: unknown }): MqttConfig {
   const ip = config.ip.trim();
   const address = config.address.trim() || createMqttAddressFromIp(ip);
@@ -367,6 +385,7 @@ export type SceneDocument = {
   selectedEntityId: string | null;
   mqttConfig: MqttConfig;
   sceneSettings: SceneSettings;
+  fetchConfig: FetchConfig;
 };
 
 export function createEmptySceneDocument(name = 'Untitled Scene'): SceneDocument {
@@ -378,6 +397,7 @@ export function createEmptySceneDocument(name = 'Untitled Scene'): SceneDocument
     selectedEntityId: null,
     mqttConfig: DEFAULT_MQTT_CONFIG,
     sceneSettings: createDefaultSceneSettings(),
+    fetchConfig: DEFAULT_FETCH_CONFIG,
   };
 }
 

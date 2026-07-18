@@ -7,6 +7,7 @@ import {
   MODEL_ASSET_CODE_MAX_LENGTH,
   createModelAssetCode,
   normalizeStackerSimulationScenario,
+  sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneSettings,
   type MqttConfig,
@@ -142,6 +143,7 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     entities,
     selectedEntityId: null,
     mqttConfig: normalizeMqttConfig(scene.mqttConfig),
+    fetchConfig: sanitizeFetchConfig(scene.fetchConfig),
     sceneSettings: normalizeSceneSettings(scene.sceneSettings),
   };
 }
@@ -653,6 +655,7 @@ function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerat
     rules,
     metadataTtlSeconds,
     bindings,
+    dataSource: modelGenerator.dataSource,
     ...(modelGenerator.warehouseFlow === undefined ? {} : { warehouseFlow: modelGenerator.warehouseFlow }),
   });
   if (!normalized || normalized.rules.length !== rules.length || normalized.bindings.length !== bindings.length) {

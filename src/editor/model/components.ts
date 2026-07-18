@@ -139,6 +139,9 @@ export type ModelGeneratorWarehouseFlow = {
   outboundBindingId: string;
 };
 
+/** 模型生成器的数据源类型：mqtt 走遥测驱动，fetch 走 HTTP 接口驱动。 */
+export type ModelGeneratorDataSource = 'mqtt' | 'fetch';
+
 /** 模型生成器组件，保存默认目标、规则、元数据 TTL、设备绑定和可选仓储流。 */
 export type ModelGeneratorComponent = {
   defaultTarget: ModelGeneratorTarget | null;
@@ -146,6 +149,7 @@ export type ModelGeneratorComponent = {
   metadataTtlSeconds: number;
   bindings: ModelGeneratorBinding[];
   warehouseFlow?: ModelGeneratorWarehouseFlow;
+  dataSource: ModelGeneratorDataSource;
 };
 
 export type CameraComponent = {
