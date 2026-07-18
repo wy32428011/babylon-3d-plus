@@ -40,6 +40,15 @@ type EditorGroundGridResources = {
   lineGlowLayer: GlowLayer;
 };
 
+export type BabylonViewportRuntimeStatus =
+  | { type: 'context-lost'; message: string }
+  | { type: 'context-restored'; message: string }
+  | { type: 'render-error'; message: string; error: unknown }
+  | { type: 'render-recovered'; message: string };
+
+/** 接收 Babylon 视口运行状态变化，供 React 面板同步错误遮罩与恢复提示。 */
+export type BabylonViewportRuntimeStatusCallback = (status: BabylonViewportRuntimeStatus) => void;
+
 export type BabylonViewport = {
   engine: Engine;
   scene: Scene;
@@ -357,12 +366,15 @@ function applyTopCameraView(camera: ArcRotateCamera): void {
   camera.beta = Math.max(camera.lowerBetaLimit ?? EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK, EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK);
 }
 
-export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewport {
+export function createBabylonViewport(
+  canvas: HTMLCanvasElement,
+  onRuntimeStatus?: BabylonViewportRuntimeStatusCallback,
+): BabylonViewport {
   assertWebGLSupported();
 
   let engine: Engine;
   try {
-    engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    engine = new Engine(canvas, true, { preserveDrawingBuffer: false, stencil: true });
   } catch (error) {
     throw new Error(`Babylon Engine 创建失败：${getErrorMessage(error)}`);
   }
@@ -389,9 +401,51 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewpor
   light.intensity = 0.8;
 
   const editorGround = createEditorGround(scene, DEFAULT_EDITOR_GRID_SETTINGS);
+  let disposed = false;
+  let contextLost = false;
+  let renderFailed = false;
+
+  /** 在 Babylon 已确认 WebGL 上下文丢失后暂停绘制，并把恢复等待状态上报给外层面板。 */
+  const contextLostObserver = engine.onContextLostObservable.add(() => {
+    contextLost = true;
+    onRuntimeStatus?.({
+      type: 'context-lost',
+      message: 'Scene View WebGL 上下文已丢失，正在自动恢复。',
+    });
+  });
+
+  /** 在 Babylon 完成上下文资源恢复后继续绘制，并通知外层面板清除错误遮罩。 */
+  const contextRestoredObserver = engine.onContextRestoredObservable.add(() => {
+    contextLost = false;
+    renderFailed = false;
+    onRuntimeStatus?.({
+      type: 'context-restored',
+      message: 'Scene View WebGL 上下文已恢复。',
+    });
+  });
 
   engine.runRenderLoop(() => {
-    scene.render();
+    if (disposed || contextLost) return;
+
+    try {
+      scene.render();
+      if (renderFailed) {
+        renderFailed = false;
+        onRuntimeStatus?.({
+          type: 'render-recovered',
+          message: 'Scene View 渲染循环已恢复。',
+        });
+      }
+    } catch (error) {
+      if (renderFailed) return;
+
+      renderFailed = true;
+      onRuntimeStatus?.({
+        type: 'render-error',
+        message: `Scene View 渲染循环异常：${getErrorMessage(error)}`,
+        error,
+      });
+    }
   });
 
   return {
@@ -421,6 +475,9 @@ export function createBabylonViewport(canvas: HTMLCanvasElement): BabylonViewpor
     },
     setGridSettings: editorGround.setSettings,
     dispose: () => {
+      disposed = true;
+      engine.onContextLostObservable.remove(contextLostObserver);
+      engine.onContextRestoredObservable.remove(contextRestoredObserver);
       editorGround.dispose();
       engine.dispose();
     },

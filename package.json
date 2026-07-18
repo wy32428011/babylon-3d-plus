@@ -21,6 +21,8 @@
     "smoke:units": "node scripts/smoke-meter-unit-contract.mjs && npm run smoke:model-measurement && npm run smoke:model-parameters",
     "smoke:model-measurement": "node scripts/smoke-model-measurement.mjs",
     "smoke:model-parameters": "node scripts/smoke-model-parameter-meters.mjs",
+    "smoke:shelf-instancing": "node scripts/smoke-shelf-shared-instancing.mjs",
+    "smoke:scene-capacity": "node scripts/smoke-static-model-instancing-policy.mjs && node scripts/smoke-asset-load-scheduler.mjs && node scripts/smoke-scene-capacity.mjs",
     "pack:win": "npm run build && electron-builder --win dir --x64",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs"
@@ -46,6 +48,7 @@
     "cross-env": "^10.1.0",
     "electron": "^42.4.0",
     "electron-builder": "^26.15.3",
+    "playwright": "^1.61.1",
     "typescript": "^6.0.3",
     "vite": "^8.0.16",
     "wait-on": "^9.0.10"

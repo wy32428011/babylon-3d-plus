@@ -49,7 +49,7 @@
           "configuration": {
             "type": "number",
             "min": 1,
-            "max": 20,
+            "max": 100,
             "step": 1
           }
         },
@@ -349,7 +349,7 @@
         "type": "number",
         "defaultValue": 1,
         "min": 1,
-        "max": 20,
+        "max": 100,
         "step": 1
       },
       {

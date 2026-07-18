@@ -13,6 +13,7 @@ Babylon Electron Unity-like Editor 是一个基于 Electron、Vite、React、Typ
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
 - Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部，中间列独立承载 Scene、Project 与 Console；Project/Console 只与 Scene 画布同宽，在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到 Project 区域最小化入口，点击后以弹窗查看完整日志，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
 - Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑；左键拖拽旋转或移动视角时以真实相机输入和位姿变化优先，即使从模型表面开始轻微拖拽也不会触发模型拾取，纯单击仍正常选中模型；Toolbar 新增“俯”视角按钮，可保留当前观察中心与缩放距离切换为稳定俯视视角，方便依据地面 CAD 图纸定位并搭建场景。
+- 大场景无损容量优化：不降低抗锯齿、纹理、材质、光照或几何质量；同一 `sourceUrl + assetRevision` 的普通静态模型会复用单份源 `AssetContainer`，每个实体继续保留独立 Transform、显隐、锁定、拾取和选择语义。带外置脚本、参数配置或脚本元数据的动态模型默认继续独占容器，Shelf 保留经过验证的脚本化共享特例。模型与环境加载统一限制为最多 4 个并发任务，SceneRuntime 只完整同步真正变化的实体；WebGL 上下文丢失或渲染循环异常会显示可读遮罩，Babylon 完成恢复后自动清除。详见 `docs/scene-capacity-performance.md`。
 - 米制场景单位：编辑器约定 `1 scene unit = 1 m`，Inspector 中 position、位置吸附步长与地面网格均按米解释；普通导入模型的实际 X/Y/Z 尺寸由编辑器运行时原生测量，不依赖参数化脚本。
 - 编辑器地面辅助层：Scene View 显示固定大范围的科技蓝地面网格，默认每小格表示 `5 m`，可在 Toolbar 中切换显示/隐藏并选择 `1 m`、`2 m`、`5 m`、`10 m` 四档格子大小；网格不会随相机视野重定位或被局部范围裁掉，网格线自身带有微弱低强度呼吸光晕效果，辅助层不参与选中、保存、加载或撤销/重做。
 - CAD/DXF 网格参考层：Toolbar 支持导入 `.dxf` CAD 图纸，导入过程中会显示读取、解析和创建参考层进度；`LINE`、`ARC`、`CIRCLE`、`LWPOLYLINE`、`POLYLINE` 会在解析阶段统一换算为米，并转为贴近 `y = 0` 网格层的半透明线稿。单位优先读取 `$INSUNITS` 0–24，未声明单位时参考 `$MEASUREMENT`，仍无法判断时明确按毫米兜底；参考图默认锁定、不可拾取，Inspector 会显示源单位、判定来源和换算系数，并随场景保存/加载恢复。
@@ -371,6 +372,18 @@ npm run typecheck
 npm run smoke:units
 ```
 
+执行大场景容量定向 smoke，验证静态模型共享、100 实体单源加载、选择增量同步和 4 并发加载预算：
+
+```bash
+npm run smoke:scene-capacity
+```
+
+执行 Shelf 脚本化共享、选择隔离与高密度 thin instance 回归：
+
+```bash
+npm run smoke:shelf-instancing
+```
+
 执行完整构建检查：
 
 ```bash
@@ -427,7 +440,7 @@ npm run build
 - React renderer：负责编辑器界面、面板布局、用户交互与状态展示，并通过入口错误边界将启动期异常转换为可见错误页。
 - editor model：定义 SceneDocument、Entity、Transform、MeshRenderer、ModelAsset、Light 等编辑器核心数据结构，是保存/加载与 UI 编辑的统一数据来源。
 - commands：封装可撤销编辑操作，并维护撤销/重做命令历史。
-- runtime/babylon：负责将编辑器场景文档同步到 Babylon.js 运行时场景，包括 Mesh 创建、模型导入、灯光同步、Transform 同步与选中高亮。
+- runtime/babylon：负责将编辑器场景文档增量同步到 Babylon.js 运行时场景，包括 Mesh 创建、模型导入、灯光同步、Transform 同步与选中高亮；安全静态模型和 Shelf 通过共享源容器实例化，资产加载由固定并发调度器控制，Scene View 统一处理 WebGL 上下文与渲染循环恢复。
 - panels：按编辑器区域拆分 UI，包括 Hierarchy、Scene、Inspector、Project、Console 等面板。
 
 ## 场景文件说明
@@ -458,6 +471,7 @@ npm run build
 ## 当前限制
 
 - glTF/GLB 导入属于 MVP 级能力：支持导入、选择、基础 Transform、参数化外观绑定、保存和加载，不承诺完整材质编辑、动画、骨骼、蒙皮或嵌套资源管理。
+- 大场景共享只对明确安全的重复资产生效：普通模型仅在没有外置脚本、参数配置、参数脚本元数据和动画脚本元数据时共享源几何/材质；Shelf 使用独立验证过的脚本化共享路径。Stacker `appearanceColor`、YZJ 顶点修改等动态模型继续独占容器，因此不同资产、动态脚本和高面数贴图本身仍受 GPU 能力限制；本轮不会用降分辨率、LOD 或纹理降采样换取容量。
 - CAD/DXF 导入属于布局参考层能力：只承诺常见二维线稿实体 `LINE`、`ARC`、`CIRCLE`、`LWPOLYLINE`、`POLYLINE`；不承诺 HATCH、DIMENSION、完整 TEXT/MTEXT、Paper Space、多布局、3D Solid 或可编辑 CAD 图元。普通图纸保持精确解析，`64 MB` 及以上图纸使用后台轻量扫描和固定预览预算。DXF 合法 `$INSUNITS` 0–24 会换算为米；无单位图纸只能依据 `$MEASUREMENT` 或毫米 fallback，建议源 CAD 明确写入单位。超过 `±1e15` 的异常原始坐标会被过滤。
 - 参数化模型依赖模型包中稳定的节点、网格或材质名称；安全 DSL 只支持 JSON AST 中的白名单运算和白名单属性绑定，不执行任意 JavaScript/TypeScript。贴图参数允许编辑器登记过的内置 `editor-image://` 逻辑引用，或模型包内 `.png`、`.jpg`、`.jpeg`、`.webp` 相对路径；仍不支持绝对路径、网络 URL、`data:`、反斜杠路径、未登记逻辑引用或 `../` 路径逃逸。重新导入模型包后，场景实例会使用新的 `modelParameters` 与 `.model.ts` 脚本元数据清洗参数：同名且仍合法的实例值会保留，新增参数使用新默认值，删除或非法参数会移除。
 - Project 资源库中模型库和环境库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库直接选择的单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/` 独立包。POI 库已接入模型生成器和 16 种内置 EFF，其它图表立标、图表面板、报警管理器、手动漫游卡片以及主题、组合、图表仍为占位；图片库已接入内置方向箭头和 texture 参数拖放，但尚未开放用户图片导入、项目级图片索引和真实搜索过滤。
@@ -469,6 +483,7 @@ npm run build
 
 ## 最近完成
 
+- 2026-07-17：完成 Scene View 大场景无损容量与稳定性优化：普通无脚本/无参数静态模型按 `sourceUrl + assetRevision + instancingMode` 复用单份源 `AssetContainer`，100 个同源实体 smoke 仅加载 1 次源资源、每实体保持 18 个独立实例 Mesh；SceneRuntime 改为实体引用驱动的增量同步，选择变化不再重跑全部模型参数/脚本/子 Mesh 收集；模型和环境加载统一限制为最多 4 并发；关闭无功能依赖的 `preserveDrawingBuffer`，保留抗锯齿与 stencil，并增加 WebGL context lost/restored 和 render error/recovered 可见恢复。既有 Shelf smoke 保持 `loadCount=1`、低密度 88/128 Mesh、高密度 121608 thin instances 与单次源释放。
 - 2026-07-16：Stacker 参数化脚本新增 `appearanceColor`“模型外观颜色”参数，默认 `#ffffff` 保留原 PBR 贴图外观；每个实例按原材质懒克隆并复用专属材质，反复换色不累计材质、多个实例不串色，停止时恢复原材质并释放克隆。源包、`Assets/Models/Stacker`、可视夹具、演示场景和定向刷新后的资产索引已同步，`smoke:model-parameters` 覆盖颜色类型、默认/自定义/非法颜色、材质复用、停止恢复和共享原材质的双实例隔离。
 - 2026-07-16：Toolbar 新增“俯”视角按钮；点击后通过 Zustand 临时请求驱动 Babylon ArcRotateCamera 保留当前 target/radius 切换到稳定俯视，并清除旋转、平移和缩放惯性。该操作不修改场景文档、已保存视角或撤销历史，运行预览中仍可使用，便于结合底层 CAD/DXF 图纸搭建场景。
 - 2026-07-16：完成全部 12 个外部模型参数化脚本的米制适配：`多穿小车/辊道机/链条机/box/GD/HCTS/LED/RGV/Shelf/Stacker/WLTS/YZJ` 的长度字段与元数据统一使用 `m`；通用脚本改为在实体根米空间测量，过滤无顶点 glTF 占位 Mesh，根缩放后保持底部中心锚点，并区分模型基线与生成克隆的包围盒上下文。源包、`Assets/Models` 副本、Shelf/Stacker/YZJ 可视夹具和资产索引同步刷新；`smoke:model-parameters` 已接入 `smoke:units`。
@@ -577,6 +592,8 @@ npm run build
 - 动画、物理、粒子、Terrain：补充完整 3D 编辑器常见运行时与内容创作能力。
 - 构建导出与插件系统：支持项目打包导出，并提供可扩展的编辑器插件机制。
 ## Shelf 多穿货架参数化修复记录
+- 2026-07-17：Shelf `layerCount` 与 `columnCount` 均支持 `1..100`。当层/列/双深组合会超过逐节点生成阈值时，参数脚本自动切换为高密度 `dense batch + thin instance` 渲染：每个可渲染源叶 Mesh 只创建一个批次 Mesh，重复货格通过一次性矩阵缓冲提交，场景节点保持批次级；低密度路径继续保留原 `cloneSingleNode` 行为。100 层 × 100 列 × 双深 smoke 统计为 `denseBatch=18`、`thinInstances=121608`、`mesh=36`，低密度 88/128 回归保持不变。视觉页 `output/playwright/shelf-visual-check.html?dense=1` 会自动取景并显示 effective layers/columns、mesh/node、thin instance 与 FPS 采样。
+- 2026-07-17：Shelf 普通场景实体与模型生成器输出改为共享源 `AssetContainer` + `InstancedMesh`：同一资源签名只加载一次 GLB，实体继续保留独立根节点、参数值、外置脚本、拾取 metadata、显隐/锁定和 Gizmo。参数脚本无需修改，其层/列/双深生成节点的子 Mesh 会继续保持实例化；实例选择改用单个共享 `SelectionOutlineLayer`，普通模型仍保留 `HighlightLayer`。动态修改 `layerCount`/`columnCount` 后，运行时会在 `clearSelection()` 与 `addSelection()` 之间按 source mesh 补齐公开 `instancedBuffers` 容器，避免 Babylon 重新注册 `instanceSelectionId` 时写入空实例缓冲。新增引用计数回收与 `npm run smoke:shelf-instancing` 定向验证，详细边界见 `docs/shelf-shared-instancing.md`。
 - 2026-07-10：精简 Shelf 参数元数据，移除 `aisleWidth`、`aisleHeight`、`shelfStyle` 这 3 个无模型语义参数；剩余 9 个参数均会产生可见模型效果。`postWidth` 继续按 0.08 兼容基准，仅调整立柱横截面；立柱底端保持锚定，列布局统一支撑容差，旧场景刷新时按新参数集兼容。GLB 未修改，Sandbox 仅用于结构校验。
 
 - 2026-07-01：补齐 Shelf 高度变化时侧面三角支架的数量联动。`cellHeight` 按 `ceil(目标层高 / 原始层高)` 计算每层三角支架模块数，保证单个支架模块高度不超过原始层高；默认高度保持 4 个侧撑节点，5.5m/6.8m/9.05m 会自动变为 8 个，13.575m 会变为 12 个。多层、多列、双深和旋转组合都会在各自货格内按模块高度重复生成支架，而不是只把单个支架拉长。

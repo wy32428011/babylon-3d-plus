@@ -49,6 +49,7 @@
     <script type="module">
       import {
         ArcRotateCamera,
+        Camera,
         Color3,
         Engine,
         HemisphericLight,
@@ -68,10 +69,10 @@
       const scene = new Scene(engine);
       scene.clearColor.set(0.067, 0.079, 0.091, 1);
 
-      const camera = new ArcRotateCamera("camera", Math.PI * 0.2, Math.PI * 0.3, 48, new Vector3(0, 5.2, 0), scene);
+      const camera = new ArcRotateCamera("camera", Math.PI * 0.22, Math.PI * 0.28, 48, new Vector3(0, 5.2, 0), scene);
       camera.attachControl(canvas, true);
-      camera.lowerRadiusLimit = 8;
-      camera.upperRadiusLimit = 80;
+      camera.lowerRadiusLimit = 4;
+      camera.upperRadiusLimit = 1200;
 
       const light = new HemisphericLight("light", new Vector3(0.25, 1, 0.35), scene);
       light.intensity = 0.92;
@@ -97,7 +98,18 @@
         deepSlotLift: 0,
       };
 
-      const cases = [
+      const query = new URLSearchParams(window.location.search);
+      const denseOnly = query.get("dense") === "1";
+      const visualView = query.get("view") === "detail" ? "detail" : "overview";
+      const denseCase = {
+        id: "dense100x100",
+        label: "100层×100列 高密度",
+        x: 0,
+        z: 0,
+        rotationY: 0,
+        values: { ...defaultValues, layerCount: 100, columnCount: 100, doubleDeepEnabled: true },
+      };
+      const matrixCases = [
         { id: "default", label: "默认", x: -14, z: -8, rotationY: 0, values: { ...defaultValues } },
         { id: "width", label: "宽度 1.25", x: -7, z: -8, rotationY: 0, values: { ...defaultValues, cellWidth: 1.25 } },
         { id: "depth", label: "深度 1.8", x: 0, z: -8, rotationY: 0, values: { ...defaultValues, cellDepth: 1.8 } },
@@ -108,7 +120,9 @@
         { id: "doubleGap", label: "双深间隔 0.4", x: 0, z: 5, rotationY: 0, values: { ...defaultValues, doubleDeepEnabled: true, deepSlotGap: 0.4 } },
         { id: "deepLift", label: "双深提升 0.35", x: 7, z: 5, rotationY: 0, values: { ...defaultValues, doubleDeepEnabled: true, deepSlotLift: 0.35 } },
         { id: "rotation", label: "旋转组合", x: 14, z: 5, rotationY: Math.PI / 4, values: { ...defaultValues, layerCount: 2, columnCount: 3, cellWidth: 1.25, cellHeight: 5.2, supportLegHeight: 1.2, cellDepth: 1.6, doubleDeepEnabled: true, deepSlotGap: 0.3, deepSlotLift: 0.2 } },
+        { ...denseCase, x: 42, z: 0 },
       ];
+      const cases = denseOnly ? [denseCase] : matrixCases;
 
       function syncModelScriptMetadata(target, values) {
         const scripts = (metadata.parameterScripts ?? []).map((script) => {
@@ -161,23 +175,141 @@
         const meshes = root.getChildMeshes(false).filter((mesh) => mesh.isEnabled());
         let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
         let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+        let thinInstanceCount = 0;
+        let denseBatchCount = 0;
         for (const mesh of meshes) {
           mesh.computeWorldMatrix(true);
-          mesh.refreshBoundingInfo();
+          if (mesh.metadata?.denseShelfBatch === true) {
+            mesh.thinInstanceRefreshBoundingInfo?.(true);
+          } else {
+            mesh.refreshBoundingInfo();
+          }
           const box = mesh.getBoundingInfo().boundingBox;
           minimum = Vector3.Minimize(minimum, box.minimumWorld);
           maximum = Vector3.Maximize(maximum, box.maximumWorld);
+          thinInstanceCount += Number(mesh.thinInstanceCount) || Number(mesh.metadata?.denseShelfThinInstanceCount) || 0;
+          if (mesh.metadata?.denseShelfBatch === true) denseBatchCount += 1;
         }
         const size = maximum.subtract(minimum);
+        const denseMetadata = root.getChildren().find((node) => node.metadata?.shelfDenseBatch)?.metadata?.shelfDenseBatch ?? null;
         return {
           meshCount: meshes.length,
+          nodeCount: scene.transformNodes.filter((node) => node.isDescendantOf?.(root)).length + meshes.length,
           generatedCount: scene.transformNodes.filter((node) => node.isDescendantOf?.(root) && node.metadata?.generatedByParametricRuntime).length,
+          denseBatchCount,
+          thinInstanceCount,
+          denseMetadata,
+          minimum,
+          maximum,
           size: {
             x: Number(size.x.toFixed(3)),
             y: Number(size.y.toFixed(3)),
             z: Number(size.z.toFixed(3)),
           },
         };
+      }
+
+      function frameReports(reports) {
+        const minimum = reports.reduce((result, item) => Vector3.Minimize(result, item.minimum), new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY));
+        const maximum = reports.reduce((result, item) => Vector3.Maximize(result, item.maximum), new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY));
+        const center = minimum.add(maximum).scale(0.5);
+        const size = maximum.subtract(minimum);
+        ground.scaling.x = Math.max(1, size.x / 60 + 0.5);
+        ground.scaling.z = Math.max(1, size.z / 38 + 0.5);
+
+        if (denseOnly && visualView === "overview") {
+          // 正交前视只使用 X/Y 尺寸和视口比例取景，避免 100 层顶部/底部被横屏裁切。
+          const aspect = engine.getRenderWidth() / Math.max(1, engine.getRenderHeight());
+          const halfHeight = Math.max(size.y / 2, size.x / Math.max(0.001, aspect) / 2) * 1.08;
+          camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+          camera.setTarget(center);
+          camera.alpha = -Math.PI / 2;
+          camera.beta = Math.PI / 2;
+          camera.radius = Math.max(800, size.z * 20, size.y * 2);
+          camera.orthoTop = halfHeight;
+          camera.orthoBottom = -halfHeight;
+          camera.orthoLeft = -halfHeight * aspect;
+          camera.orthoRight = halfHeight * aspect;
+          return {
+            view: visualView,
+            mode: "orthographic-front",
+            alpha: Number(camera.alpha.toFixed(4)),
+            beta: Number(camera.beta.toFixed(4)),
+            radius: Number(camera.radius.toFixed(3)),
+            target: vectorToStats(center),
+            ortho: {
+              top: Number(camera.orthoTop.toFixed(3)),
+              bottom: Number(camera.orthoBottom.toFixed(3)),
+              left: Number(camera.orthoLeft.toFixed(3)),
+              right: Number(camera.orthoRight.toFixed(3)),
+            },
+            bounds: { minimum: vectorToStats(minimum), maximum: vectorToStats(maximum), size: vectorToStats(size) },
+          };
+        }
+
+        if (denseOnly && visualView === "detail") {
+          // 透视细节视图聚焦约 12 列 × 12 层区域，并保留斜视角展示双深 Z 方向。
+          const detailColumns = 12;
+          const detailLayers = 12;
+          const denseReport = reports.find((item) => item.id === "dense100x100") ?? reports[0];
+          const detailCenter = new Vector3(
+            denseReport.minimum.x + Math.min(size.x, defaultValues.cellWidth * detailColumns) / 2,
+            denseReport.minimum.y + Math.min(size.y, defaultValues.cellHeight * detailLayers) / 2,
+            center.z,
+          );
+          camera.mode = Camera.PERSPECTIVE_CAMERA;
+          camera.setTarget(detailCenter);
+          camera.alpha = -Math.PI * 0.36;
+          camera.beta = Math.PI * 0.34;
+          camera.radius = 52;
+          camera.fov = 0.62;
+          return {
+            view: visualView,
+            mode: "perspective-detail-12x12",
+            alpha: Number(camera.alpha.toFixed(4)),
+            beta: Number(camera.beta.toFixed(4)),
+            radius: Number(camera.radius.toFixed(3)),
+            fov: Number(camera.fov.toFixed(4)),
+            target: vectorToStats(detailCenter),
+            detailRegion: { columns: detailColumns, layers: detailLayers },
+            bounds: { minimum: vectorToStats(minimum), maximum: vectorToStats(maximum), size: vectorToStats(size) },
+          };
+        }
+
+        const radius = Math.max(size.x, size.y, size.z, 1) * 1.18;
+        camera.mode = Camera.PERSPECTIVE_CAMERA;
+        camera.setTarget(center);
+        camera.radius = Math.min(camera.upperRadiusLimit, Math.max(camera.lowerRadiusLimit, radius));
+        camera.alpha = denseOnly ? Math.PI * 0.18 : Math.PI * 0.2;
+        camera.beta = denseOnly ? Math.PI * 0.34 : Math.PI * 0.3;
+        return {
+          view: visualView,
+          mode: "perspective-default",
+          alpha: Number(camera.alpha.toFixed(4)),
+          beta: Number(camera.beta.toFixed(4)),
+          radius: Number(camera.radius.toFixed(3)),
+          target: vectorToStats(center),
+          bounds: { minimum: vectorToStats(minimum), maximum: vectorToStats(maximum), size: vectorToStats(size) },
+        };
+      }
+
+      function vectorToStats(vector) {
+        return { x: Number(vector.x.toFixed(3)), y: Number(vector.y.toFixed(3)), z: Number(vector.z.toFixed(3)) };
+      }
+
+      async function sampleFps(frameCount = 45) {
+        return await new Promise((resolve) => {
+          let frames = 0;
+          const startedAt = performance.now();
+          const observer = scene.onAfterRenderObservable.add(() => {
+            frames += 1;
+            if (frames >= frameCount) {
+              scene.onAfterRenderObservable.remove(observer);
+              const elapsedSeconds = Math.max(0.001, (performance.now() - startedAt) / 1000);
+              resolve(Number((frames / elapsedSeconds).toFixed(1)));
+            }
+          });
+        });
       }
 
       async function createShelfCase(testCase) {
@@ -216,7 +348,16 @@
         runtime.updateParameterValues(testCase.values);
         await runtime.start();
         runtime.update();
-        return { id: testCase.id, label: testCase.label, ...getRootBounds(root) };
+        const bounds = getRootBounds(root);
+        // 输出有效参数，便于 Playwright 视觉验收直接校验 100x100 高密度用例。
+        return {
+          id: testCase.id,
+          label: testCase.label,
+          effectiveLayerCount: Number(testCase.values.layerCount),
+          effectiveColumnCount: Number(testCase.values.columnCount),
+          effectiveDoubleDeepEnabled: Boolean(testCase.values.doubleDeepEnabled),
+          ...bounds,
+        };
       }
 
       try {
@@ -225,20 +366,30 @@
         const byId = Object.fromEntries(reports.map((item) => [item.id, item]));
         const failures = reports.filter((item) => item.meshCount <= 0 || item.size.x <= 0 || item.size.y <= 0 || item.size.z <= 0).map((item) => `${item.label}: 空模型`);
         const near = (value, expected, tolerance = 0.05) => Math.abs(value - expected) <= tolerance;
-        if (!near(byId.default.size.x, 0.801) || !near(byId.default.size.y, 4.525) || !near(byId.default.size.z, 1.183)) failures.push("默认尺寸异常");
-        if (byId.width.size.x <= byId.default.size.x + 0.35) failures.push("宽度参数未明显生效");
-        if (byId.depth.size.z <= byId.default.size.z + 0.5) failures.push("深度参数未明显生效");
-        if (!near(byId.post.size.y, byId.default.size.y) || !near(byId.post.size.z, byId.default.size.z, 0.12)) failures.push("立柱宽度污染整体高度或深度");
-        if (!near(byId.height.size.y, 6.8)) failures.push("货架高度参数异常");
-        if (byId.columns.size.x <= 2.4) failures.push("列数参数未生成连续多列");
-        if (!near(byId.layers.size.y, 11.767, 0.06)) failures.push("层数高度未按独立底腿语义计算");
-        if (byId.doubleGap.size.z <= 2.6) failures.push("双深间隔参数未生效");
-        if (byId.deepLift.size.y <= byId.default.size.y + 0.25) failures.push("深位提升参数未生效");
-        const summary = reports.map((item) => `${item.label}: node=${item.generatedCount}, mesh=${item.meshCount}, size=${item.size.x}/${item.size.y}/${item.size.z}`).join("<br />");
-        status.innerHTML = `<span class="${failures.length ? "error" : "ok"}">${failures.length ? "失败" : "通过"}</span><br />${summary}${failures.length ? `<br />${failures.join("<br />")}` : ""}`;
-        document.body.dataset.validationStatus = failures.length ? "fail" : "pass";
+        if (!denseOnly) {
+          if (!near(byId.default.size.x, 0.801) || !near(byId.default.size.y, 4.525) || !near(byId.default.size.z, 1.183)) failures.push("默认尺寸异常");
+          if (byId.width.size.x <= byId.default.size.x + 0.35) failures.push("宽度参数未明显生效");
+          if (byId.depth.size.z <= byId.default.size.z + 0.5) failures.push("深度参数未明显生效");
+          if (!near(byId.post.size.y, byId.default.size.y) || !near(byId.post.size.z, byId.default.size.z, 0.12)) failures.push("立柱宽度污染整体高度或深度");
+          if (!near(byId.height.size.y, 6.8)) failures.push("货架高度参数异常");
+          if (byId.columns.size.x <= 2.4) failures.push("列数参数未生成连续多列");
+          if (!near(byId.layers.size.y, 11.767, 0.06)) failures.push("层数高度未按独立底腿语义计算");
+          if (byId.doubleGap.size.z <= 2.6) failures.push("双深间隔参数未生效");
+          if (byId.deepLift.size.y <= byId.default.size.y + 0.25) failures.push("深位提升参数未生效");
+        }
+        if (byId.dense100x100) {
+          if (byId.dense100x100.denseBatchCount <= 0) failures.push("100x100 未启用高密度批次");
+          if (byId.dense100x100.thinInstanceCount < 10000) failures.push("100x100 thin instance 数不足");
+          if (byId.dense100x100.meshCount >= 200) failures.push("100x100 Mesh 数未保持批次级");
+        }
+        const cameraStats = frameReports(reports);
         engine.runRenderLoop(() => scene.render());
-        window.__SHELF_REPORT__ = reports;
+        const sampledFps = await sampleFps();
+        const summary = reports.map((item) => `${item.label}: view=${visualView}, camera=${cameraStats.mode}, effective=layers=${item.effectiveLayerCount}, columns=${item.effectiveColumnCount}, doubleDeep=${item.effectiveDoubleDeepEnabled}, node=${item.nodeCount}, generated=${item.generatedCount}, mesh=${item.meshCount}, denseBatch=${item.denseBatchCount}, thin=${item.thinInstanceCount}, size=${item.size.x}/${item.size.y}/${item.size.z}`).join("<br />");
+        status.innerHTML = `<span class="${failures.length ? "error" : "ok"}">${failures.length ? "失败" : "通过"}</span> | FPS采样=${sampledFps}<br />${summary}${failures.length ? `<br />${failures.join("<br />")}` : ""}`;
+        document.body.dataset.validationStatus = failures.length ? "fail" : "pass";
+        window.__SHELF_REPORT__ = reports.map(({ minimum, maximum, ...item }) => item);
+        window.__SHELF_VISUAL_STATS__ = { view: visualView, camera: cameraStats, fps: sampledFps, reports: window.__SHELF_REPORT__ };
         window.__SHELF_VISUAL_READY__ = failures.length === 0;
       } catch (error) {
         console.error(error);

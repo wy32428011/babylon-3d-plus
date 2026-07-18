@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent, type PointerEvent } from 'react';
-import { createBabylonViewport, type BabylonViewport } from '../../runtime/babylon/createEngine';
+import {
+  createBabylonViewport,
+  type BabylonViewport,
+  type BabylonViewportRuntimeStatus,
+} from '../../runtime/babylon/createEngine';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import { TransformGizmoController } from '../../runtime/babylon/TransformGizmoController';
@@ -267,8 +271,30 @@ export function SceneViewPanel() {
     let gizmo: TransformGizmoController | null = null;
     let mqttTelemetryClient: MqttStackerTelemetryClient | null = null;
 
+    /** 处理 Babylon 运行状态回调，让渲染异常复用现有 scene-error 遮罩并在恢复时写入 Console。 */
+    const handleRuntimeStatus = (status: BabylonViewportRuntimeStatus): void => {
+      switch (status.type) {
+        case 'context-lost':
+          setViewportError(status.message);
+          pushLog(status.message);
+          break;
+        case 'context-restored':
+        case 'render-recovered':
+          setViewportError(null);
+          pushLog(status.message);
+          break;
+        case 'render-error':
+          console.error('Scene View 渲染循环异常。', status.error);
+          setViewportError(status.message);
+          pushLog(status.message);
+          break;
+      }
+    };
+
+    setViewportError(null);
+
     try {
-      viewport = createBabylonViewport(canvasRef.current);
+      viewport = createBabylonViewport(canvasRef.current, handleRuntimeStatus);
       runtime = new SceneRuntime(viewport.scene, pushLog, (entityId) => {
         const currentRuntime = runtimeRef.current;
         if (!currentRuntime || selectedEntityIdRef.current !== entityId) return;
@@ -279,7 +305,6 @@ export function SceneViewPanel() {
         commitTransform: commitEntityTransform,
       });
       mqttTelemetryClient = new MqttStackerTelemetryClient(pushLog);
-      setViewportError(null);
     } catch (error) {
       console.error('Scene View 渲染引擎初始化失败。', error);
       mqttTelemetryClient?.dispose();
@@ -479,7 +504,7 @@ export function SceneViewPanel() {
         ) : null}
         {viewportError ? (
           <div className="scene-error" role="alert">
-            <strong>Scene View 无法启动</strong>
+            <strong>Scene View 暂时不可用</strong>
             <p>{viewportError}</p>
           </div>
         ) : null}
@@ -487,4 +512,3 @@ export function SceneViewPanel() {
     </section>
   );
 }
-

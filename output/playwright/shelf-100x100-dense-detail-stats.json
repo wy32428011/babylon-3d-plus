@@ -1,0 +1,109 @@
+{
+  "capturedAt": "2026-07-17T12:01:24.127Z",
+  "validationStatus": "pass",
+  "visualReady": true,
+  "stats": {
+    "view": "detail",
+    "camera": {
+      "view": "detail",
+      "mode": "perspective-detail-12x12",
+      "alpha": -1.131,
+      "beta": 1.0681,
+      "radius": 52,
+      "fov": 0.62,
+      "target": {
+        "x": 4.405,
+        "y": 27.15,
+        "z": 0.692
+      },
+      "detailRegion": {
+        "columns": 12,
+        "layers": 12
+      },
+      "bounds": {
+        "minimum": {
+          "x": -0.401,
+          "y": 0,
+          "z": -0.591
+        },
+        "maximum": {
+          "x": 63.994,
+          "y": 363.004,
+          "z": 1.974
+        },
+        "size": {
+          "x": 64.394,
+          "y": 363.004,
+          "z": 2.566
+        }
+      }
+    },
+    "fps": 58.4,
+    "reports": [
+      {
+        "id": "dense100x100",
+        "label": "100层×100列 高密度",
+        "effectiveLayerCount": 100,
+        "effectiveColumnCount": 100,
+        "effectiveDoubleDeepEnabled": true,
+        "meshCount": 37,
+        "nodeCount": 56,
+        "generatedCount": 0,
+        "denseBatchCount": 18,
+        "thinInstanceCount": 121608,
+        "denseMetadata": {
+          "enabled": true,
+          "batchCount": 18,
+          "thinInstanceCount": 121608
+        },
+        "size": {
+          "x": 64.394,
+          "y": 363.004,
+          "z": 2.566
+        }
+      }
+    ]
+  },
+  "report": [
+    {
+      "id": "dense100x100",
+      "label": "100层×100列 高密度",
+      "effectiveLayerCount": 100,
+      "effectiveColumnCount": 100,
+      "effectiveDoubleDeepEnabled": true,
+      "meshCount": 37,
+      "nodeCount": 56,
+      "generatedCount": 0,
+      "denseBatchCount": 18,
+      "thinInstanceCount": 121608,
+      "denseMetadata": {
+        "enabled": true,
+        "batchCount": 18,
+        "thinInstanceCount": 121608
+      },
+      "size": {
+        "x": 64.394,
+        "y": 363.004,
+        "z": 2.566
+      }
+    }
+  ],
+  "statusText": "通过 | FPS采样=58.4100层×100列 高密度: view=detail, camera=perspective-detail-12x12, effective=layers=100, columns=100, doubleDeep=true, node=56, generated=0, mesh=37, denseBatch=18, thin=121608, size=64.394/363.004/2.566",
+  "viewport": {
+    "width": 1920,
+    "height": 1080,
+    "devicePixelRatio": 1
+  },
+  "canvas": {
+    "x": 0,
+    "y": 0,
+    "width": 1920,
+    "height": 1080
+  },
+  "messages": [
+    "[debug] [vite] connecting...",
+    "[debug] [vite] connected.",
+    "[log] BJS - [20:01:19]: Babylon.js v9.12.0 - WebGL2 - Parallel shader compilation",
+    "[error] Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ]
+}
