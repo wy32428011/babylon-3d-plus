@@ -452,6 +452,8 @@ function cloneLocator(locator: LocatorComponent): LocatorComponent {
     columns: locator.columns,
     layers: locator.layers,
     startColumn: locator.startColumn,
+    columnGap: locator.columnGap,
+    layerGap: locator.layerGap,
   };
 }
 
@@ -545,6 +547,11 @@ function sanitizeLocatorDimension(value: number | undefined, fallback: number): 
   return Math.max(LOCATOR_MIN_DIMENSION, value);
 }
 
+function sanitizeLocatorGap(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(10, value));
+}
+
 function sanitizeLocatorAssetId(value: string | undefined, fallback: string): string {
   if (value === undefined) return fallback;
   return value.trim().slice(0, LOCATOR_ASSET_ID_MAX_LENGTH);
@@ -570,7 +577,9 @@ function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): bool
     left.height === right.height &&
     left.columns === right.columns &&
     left.layers === right.layers &&
-    left.startColumn === right.startColumn
+    left.startColumn === right.startColumn &&
+    left.columnGap === right.columnGap &&
+    left.layerGap === right.layerGap
   );
 }
 
@@ -2397,9 +2406,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         length: sanitizeLocatorDimension(patch.length, before.length),
         width: sanitizeLocatorDimension(patch.width, before.width),
         height: sanitizeLocatorDimension(patch.height, before.height),
-        columns: sanitizeLocatorInt(patch.columns, before.columns, 1, 50),
-        layers: sanitizeLocatorInt(patch.layers, before.layers, 1, 50),
+        columns: sanitizeLocatorInt(patch.columns, before.columns, 1, 100),
+        layers: sanitizeLocatorInt(patch.layers, before.layers, 1, 100),
         startColumn: sanitizeLocatorInt(patch.startColumn, before.startColumn, 1, 999),
+        columnGap: sanitizeLocatorGap(patch.columnGap, before.columnGap),
+        layerGap: sanitizeLocatorGap(patch.layerGap, before.layerGap),
       };
 
       if (areLocatorsEqual(before, after)) return state;

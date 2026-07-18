@@ -930,10 +930,11 @@ export class SceneRuntime {
     }
 
     const locator = this.locators.get(entity.id);
-    const locatorComponent = entity.components.locator;
-    if (locator && locatorComponent) {
-      this.applyLocatorStyle(locator.box, locatorComponent.storageDepth, selected);
-      this.applyMeshInteractivity(locator.box, entity.id);
+    if (locator && entity.components.locator) {
+      this.applyLocatorStyle(locator, locator.storageDepth, selected);
+      for (const box of locator.boxes) {
+        this.applyMeshInteractivity(box, entity.id);
+      }
     }
 
     const cadReference = this.cadReferences.get(entity.id);
@@ -4497,15 +4498,13 @@ export class SceneRuntime {
 
   private createLocatorBoxes(entityId: string, locator: LocatorComponent, root: TransformNode, material: StandardMaterial): Mesh[] {
     const boxes: Mesh[] = [];
-    const { length, height, width, columns, layers } = locator;
-    const startX = length / 2;
-    const startY = height / 2;
+    const { length, height, width, columns, layers, columnGap, layerGap } = locator;
 
     for (let layer = 0; layer < layers; layer += 1) {
       for (let col = 0; col < columns; col += 1) {
         const box = MeshBuilder.CreateBox(`${entityId}_locatorBox_${col}_${layer}`, { width: length, height, depth: width }, this.scene);
         box.parent = root;
-        box.position.set(startX + col * length, startY + layer * height, 0);
+        box.position.set(col * (length + columnGap), height / 2 + layer * (height + layerGap), 0);
         box.isPickable = true;
         box.material = material;
         box.metadata = { ...(box.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
@@ -4525,6 +4524,8 @@ export class SceneRuntime {
       locator.width.toFixed(3),
       String(locator.columns),
       String(locator.layers),
+      locator.columnGap.toFixed(3),
+      locator.layerGap.toFixed(3),
     ].join('|');
   }
 

@@ -7,7 +7,7 @@ type LocatorInspectorProps = {
   disabled?: boolean;
 };
 
-type LocatorDimensionField = 'length' | 'width' | 'height' | 'columns' | 'layers' | 'startColumn';
+type LocatorDimensionField = 'length' | 'width' | 'height' | 'columns' | 'layers' | 'startColumn' | 'columnGap' | 'layerGap';
 
 type LocatorDimensionConfig = {
   key: LocatorDimensionField;
@@ -21,8 +21,10 @@ const locatorDimensionFields: readonly LocatorDimensionConfig[] = [
   { key: 'length', label: '长(m)', min: 0.01, max: Infinity, step: 0.1 },
   { key: 'width', label: '宽(m)', min: 0.01, max: Infinity, step: 0.1 },
   { key: 'height', label: '高(m)', min: 0.01, max: Infinity, step: 0.1 },
-  { key: 'columns', label: '列数 (X)', min: 1, max: 50, step: 1 },
-  { key: 'layers', label: '层数 (Y)', min: 1, max: 50, step: 1 },
+  { key: 'columns', label: '列数 (X)', min: 1, max: 100, step: 1 },
+  { key: 'layers', label: '层数 (Y)', min: 1, max: 100, step: 1 },
+  { key: 'columnGap', label: '列间隔(m)', min: 0, max: 10, step: 0.1 },
+  { key: 'layerGap', label: '层间隔(m)', min: 0, max: 10, step: 0.1 },
   { key: 'startColumn', label: '起始列', min: 1, max: 999, step: 1 },
 ];
 
@@ -74,7 +76,6 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
           />
         </label>
       ))}
-      <p className="muted">单位：{SCENE_LENGTH_UNIT_SYMBOL}</p>
     </fieldset>
   );
 }
