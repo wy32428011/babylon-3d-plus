@@ -132,6 +132,62 @@ export class SharedModelAssetCache {
   }
 }
 
+/** 模型共享实例的最终准入模式；shared-instance 复用源容器，owned-container 独占容器和脚本生命周期。 */
+export type ModelAssetSharedInstancingMode = 'shared-instance' | 'owned-container';
+
+/** 模型共享策略判定原因，用于 smoke 和后续接入方精确解释准入边界。 */
+export type ModelAssetSharedInstancingReason =
+  | 'shelf-resource'
+  | 'plain-static-model'
+  | 'script-assets'
+  | 'parameter-config'
+  | 'parameter-script-metadata'
+  | 'animation-script-metadata';
+
+/** 模型共享策略快照结果，只表达准入结论，不触碰运行时场景或外部资源。 */
+export type ModelAssetSharedInstancingPolicy = {
+  mode: ModelAssetSharedInstancingMode;
+  reason: ModelAssetSharedInstancingReason;
+};
+
+/**
+ * 基于 ModelAssetComponent 快照判定模型是否可安全进入共享实例路径。
+ * Shelf 是历史验证过的特例，允许携带参数脚本继续共享；其它带脚本或参数元数据的模型必须独占容器。
+ */
+export function resolveModelAssetSharedInstancingPolicy(
+  modelAsset: ModelAssetComponent,
+): ModelAssetSharedInstancingPolicy {
+  if (isShelfInstancingCandidate(modelAsset)) {
+    return { mode: 'shared-instance', reason: 'shelf-resource' };
+  }
+
+  const blockingReason = findOwnedContainerReason(modelAsset);
+  if (blockingReason) {
+    return { mode: 'owned-container', reason: blockingReason };
+  }
+
+  return { mode: 'shared-instance', reason: 'plain-static-model' };
+}
+
+/** 判断模型策略是否允许共享实例，便于调用方不重复理解 reason 枚举。 */
+export function shouldUseSharedModelInstantiation(modelAsset: ModelAssetComponent): boolean {
+  return resolveModelAssetSharedInstancingPolicy(modelAsset).mode === 'shared-instance';
+}
+
+/** 找出普通模型必须独占容器的第一个动态能力字段；只读取资产组件快照。 */
+function findOwnedContainerReason(modelAsset: ModelAssetComponent): ModelAssetSharedInstancingReason | null {
+  if (hasArrayEntries(modelAsset.scriptAssets)) return 'script-assets';
+  if (modelAsset.parameterConfig != null) return 'parameter-config';
+  if (hasArrayEntries(modelAsset.parameterScriptMetadata)) return 'parameter-script-metadata';
+  if (hasArrayEntries(modelAsset.animationScriptMetadata)) return 'animation-script-metadata';
+  return null;
+}
+
+/** 判断快照数组字段是否真实携带条目；空数组等同于未启用该动态能力。 */
+function hasArrayEntries(value: readonly unknown[] | undefined | null): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
 /** 判断模型资产是否为允许共享几何和材质的 Shelf 模型。 */
 export function isShelfInstancingCandidate(modelAsset: ModelAssetComponent): boolean {
   const resourceIdentifiers = [

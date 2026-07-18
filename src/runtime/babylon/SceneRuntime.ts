@@ -36,6 +36,7 @@ import type {
   LightComponent,
   LocatorComponent,
   MeshKind,
+  MeshRendererComponent,
   ModelAssetComponent,
   ModelGeneratorBinding,
   ModelGeneratorComponent,
@@ -114,7 +115,11 @@ import {
 } from '../mqtt/deviceTelemetry';
 import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticStatus } from '../mqtt/telemetryRuntimeDiagnostics';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
-import { SharedModelAssetCache, isShelfInstancingCandidate } from './SharedModelAssetCache';
+import { AssetLoadScheduler } from './AssetLoadScheduler';
+import {
+  resolveModelAssetSharedInstancingPolicy,
+  SharedModelAssetCache,
+} from './SharedModelAssetCache';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
 const SELECTED_EMISSIVE_COLOR = '#332400';
@@ -455,8 +460,11 @@ export class SceneRuntime {
   private readonly conveyorCargoMeshes = new Map<string, ConveyorCargoRuntimeEntry>();
   private readonly lights = new Map<string, Light>();
   private readonly entityStates = new Map<string, EntityRuntimeState>();
+  private readonly syncedEntities = new Map<string, Entity>();
+  private selectedEntityIds = new Set<string>();
   private readonly modelHighlightLayer: HighlightLayer;
   private readonly modelSelectionOutlineLayer: SelectionOutlineLayer;
+  private readonly assetLoadScheduler = new AssetLoadScheduler();
   private readonly sharedModelAssetCache = new SharedModelAssetCache();
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
   private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
@@ -777,8 +785,11 @@ export class SceneRuntime {
     return Number.isFinite(vector.x) && Number.isFinite(vector.y) && Number.isFinite(vector.z);
   }
 
-  /** 将编辑器文档同步到 Babylon 运行时场景。 */
+  /** 将编辑器文档增量同步到 Babylon 运行时场景，未变化实体只刷新必要的展示状态。 */
   sync(document: SceneDocument): void {
+    const previousEntityStates = new Map(this.entityStates);
+    const previousSelectedEntityIds = this.selectedEntityIds;
+
     this.entityStates.clear();
     for (const entityId of document.entityIds) {
       const entity = document.entities[entityId];
@@ -855,17 +866,101 @@ export class SceneRuntime {
       }
     }
 
+    for (const entityId of [...this.syncedEntities.keys()]) {
+      if (!document.entities[entityId]) this.syncedEntities.delete(entityId);
+    }
+
     const selectedEntityIds = this.resolveSelectedEntityIds(document);
 
     for (const entityId of document.entityIds) {
       const entity = document.entities[entityId];
       if (!entity) continue;
 
-      this.syncEntity(entity, selectedEntityIds.has(entityId));
+      const selected = selectedEntityIds.has(entityId);
+      const previousEntity = this.syncedEntities.get(entityId);
+      const previousState = previousEntityStates.get(entityId);
+      const nextState = this.entityStates.get(entityId);
+      const entityChanged = previousEntity !== entity;
+      const presentationChanged = previousSelectedEntityIds.has(entityId) !== selected
+        || !this.areEntityRuntimeStatesEqual(previousState, nextState);
+
+      if (entityChanged || !this.hasCompleteRuntimeEntity(entity)) {
+        this.syncEntity(entity, selected);
+      } else if (presentationChanged) {
+        this.syncEntityPresentation(entity, selected);
+      }
+
+      this.syncedEntities.set(entityId, entity);
     }
 
+    this.selectedEntityIds = selectedEntityIds;
     this.rebuildLocatorTargetIndex(document);
     this.rebuildSharedModelSelectionOutline();
+  }
+
+  /** 判断实体已有的 Babylon 对象是否覆盖其全部运行时组件；缺失时回退完整同步。 */
+  private hasCompleteRuntimeEntity(entity: Entity): boolean {
+    if (entity.components.meshRenderer && !this.meshes.has(entity.id)) return false;
+    if (entity.components.locator && !this.locators.has(entity.id)) return false;
+    if (entity.components.cadReference && !this.cadReferences.has(entity.id)) return false;
+    if (entity.components.modelAsset && !this.models.has(entity.id)) return false;
+    if (entity.components.modelGenerator && !this.modelGenerators.has(entity.id)) return false;
+    if (entity.components.poiEffect && !this.poiEffectRuntime.has(entity.id)) return false;
+    if (entity.components.light && !this.lights.has(entity.id)) return false;
+    return true;
+  }
+
+  /** 比较实体有效显隐和锁定状态，避免未变化实体重复进入完整同步链。 */
+  private areEntityRuntimeStatesEqual(
+    previous: EntityRuntimeState | undefined,
+    next: EntityRuntimeState | undefined,
+  ): boolean {
+    return previous?.visible === next?.visible && previous?.locked === next?.locked;
+  }
+
+  /** 仅刷新选择、显隐和锁定相关表现，不重复执行模型加载、参数或外置脚本。 */
+  private syncEntityPresentation(entity: Entity, selected: boolean): void {
+    const primitiveMesh = this.meshes.get(entity.id);
+    const meshRenderer = entity.components.meshRenderer;
+    if (primitiveMesh && meshRenderer) {
+      this.applyMeshInteractivity(primitiveMesh, entity.id);
+      this.applyPrimitiveMeshAppearance(primitiveMesh, meshRenderer, selected);
+    }
+
+    const locator = this.locators.get(entity.id);
+    const locatorComponent = entity.components.locator;
+    if (locator && locatorComponent) {
+      this.applyLocatorStyle(locator.box, locatorComponent.storageDepth, selected);
+      this.applyMeshInteractivity(locator.box, entity.id);
+    }
+
+    const cadReference = this.cadReferences.get(entity.id);
+    if (cadReference) {
+      this.applyCadReferenceInteractivity(cadReference, entity.id);
+    }
+
+    const model = this.models.get(entity.id);
+    if (model) {
+      this.applyModelSelection(model, selected);
+      this.applyModelInteractivity(model, entity.id);
+    }
+
+    const modelGenerator = this.modelGenerators.get(entity.id);
+    if (modelGenerator) {
+      modelGenerator.selected = selected;
+      this.applyModelGeneratorPresentation(modelGenerator);
+    }
+
+    if (entity.components.poiEffect) {
+      this.poiEffectRuntime.sync(
+        entity,
+        selected,
+        this.isEntityVisible(entity.id),
+        this.isEntityScenePickable(entity.id),
+      );
+    }
+
+    this.lights.get(entity.id)?.setEnabled(this.isEntityVisible(entity.id));
   }
 
   /** 多个生成器只启用场景顺序中的第一个，并对同一冲突集合仅记录一次诊断。 */
@@ -907,7 +1002,7 @@ export class SceneRuntime {
 
     const { rootUrl, fileName } = this.splitAssetUrl(resolveRuntimeAssetUrl(sourceUrl));
 
-    void SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene)
+    void this.loadAssetContainer(rootUrl, fileName)
       .then((container) => {
         const activeEnvironment = this.environment;
         if (!activeEnvironment || activeEnvironment.loadToken !== loadToken || activeEnvironment.sourceUrl !== sourceUrl) {
@@ -926,16 +1021,16 @@ export class SceneRuntime {
       })
       .catch((error) => {
         const activeEnvironment = this.environment;
-        if (activeEnvironment?.loadToken === loadToken) {
-          this.disposeEnvironment();
-        }
+        if (!activeEnvironment || activeEnvironment.loadToken !== loadToken) return;
 
+        this.disposeEnvironment();
         const message = error instanceof Error ? error.message : String(error);
         this.pushLog(`环境模型加载失败：${message}`);
       });
   }
 
   dispose(): void {
+    this.assetLoadScheduler.dispose();
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
     }
@@ -982,6 +1077,8 @@ export class SceneRuntime {
     this.conveyorCargoMeshes.clear();
     this.lights.clear();
     this.entityStates.clear();
+    this.syncedEntities.clear();
+    this.selectedEntityIds.clear();
     this.activeModelGeneratorEntityId = null;
     this.reportedModelGeneratorConflictSignature = '';
     this.sharedModelSelectionOutlineSignature = '';
@@ -1089,7 +1186,12 @@ export class SceneRuntime {
     this.applyTransform(mesh, entity.components.transform);
     this.applyMeshInteractivity(mesh, entity.id);
 
-    const material = mesh.material instanceof StandardMaterial ? mesh.material : new StandardMaterial(`${entity.id}_mat`, this.scene);
+    this.applyPrimitiveMeshAppearance(mesh, meshRenderer, selected);
+  }
+
+  /** 根据实体材质与选择状态刷新基础 Mesh 外观，不重建几何。 */
+  private applyPrimitiveMeshAppearance(mesh: Mesh, meshRenderer: MeshRendererComponent, selected: boolean): void {
+    const material = mesh.material instanceof StandardMaterial ? mesh.material : new StandardMaterial(`${mesh.name}_mat`, this.scene);
     material.diffuseColor = selected ? Color3.FromHexString(SELECTED_MATERIAL_COLOR) : this.readColor(meshRenderer.materialColor);
     material.emissiveColor = selected ? Color3.FromHexString(SELECTED_EMISSIVE_COLOR) : Color3.Black();
     mesh.material = material;
@@ -1313,12 +1415,13 @@ export class SceneRuntime {
           }
         }
 
-        this.refreshModelEntityMeshes(entity, activeEntry);
+        const latestEntity = this.syncedEntities.get(entity.id) ?? entity;
+        this.refreshModelEntityMeshes(latestEntity, activeEntry);
         this.normalizeModelContentOrigin(activeEntry);
-        this.applyModelParameters(entity, activeEntry);
-        this.syncExternalModelScripts(entity, activeEntry);
+        this.applyModelParameters(latestEntity, activeEntry);
+        this.syncExternalModelScripts(latestEntity, activeEntry);
         this.applyModelSelection(activeEntry, activeEntry.highlighted);
-        this.applyModelInteractivity(activeEntry, entity.id);
+        this.applyModelInteractivity(activeEntry, latestEntity.id);
         this.rebuildSharedModelSelectionOutline();
       })
       .catch((error) => {
@@ -1331,7 +1434,7 @@ export class SceneRuntime {
       });
   }
 
-  /** 按模型能力选择独占容器或 Shelf 共享实例加载路径。 */
+  /** 按模型资产能力选择独占容器或安全共享实例加载路径。 */
   private async loadModelRuntimeAssets(
     modelAsset: ModelAssetComponent,
     assetSignature: string,
@@ -1340,10 +1443,11 @@ export class SceneRuntime {
       this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
     );
 
-    if (isShelfInstancingCandidate(modelAsset)) {
+    const instancingPolicy = resolveModelAssetSharedInstancingPolicy(modelAsset);
+    if (instancingPolicy.mode === 'shared-instance') {
       const sharedInstance = await this.sharedModelAssetCache.instantiate(
         assetSignature,
-        () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene),
+        () => this.loadAssetContainer(rootUrl, fileName),
         (sourceName) => sourceName,
       );
       return {
@@ -1357,7 +1461,7 @@ export class SceneRuntime {
       };
     }
 
-    const container = await SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene);
+    const container = await this.loadAssetContainer(rootUrl, fileName);
     try {
       container.addAllToScene();
       return {
@@ -5486,12 +5590,12 @@ export class SceneRuntime {
     return texture;
   }
 
-  /** 用模型源 URL 和导入版本生成加载签名，同路径覆盖时也能触发重新载入。 */
+  /** 用模型源 URL、导入版本和实例化策略生成加载签名，同路径覆盖或策略变化时都能重新载入。 */
   private createModelAssetSignature(modelAsset: ModelAssetComponent): string {
     return JSON.stringify({
       sourceUrl: modelAsset.sourceUrl,
       assetRevision: modelAsset.assetRevision ?? null,
-      sharedInstancing: isShelfInstancingCandidate(modelAsset),
+      instancingMode: resolveModelAssetSharedInstancingPolicy(modelAsset).mode,
     });
   }
 
@@ -5540,7 +5644,7 @@ export class SceneRuntime {
     model.highlighted = selected;
   }
 
-  /** 重建全部 Shelf 共享实例的选择描边，确保单个实例选中不会污染同源货架。 */
+  /** 重建全部共享模型实例的选择描边，确保单个实例选中不会污染同源模型。 */
   private rebuildSharedModelSelectionOutline(): void {
     const selectedGroups = [...this.models.values()]
       .filter((model) => model.assetHandle?.kind === 'shared-instance' && model.highlighted)
@@ -5670,6 +5774,11 @@ export class SceneRuntime {
         child.position.subtractInPlace(localBottomCenter);
       }
     }
+  }
+
+  /** 通过统一并发调度器加载 Babylon 资产容器，限制批量模型解析和 GPU 上传峰值。 */
+  private loadAssetContainer(rootUrl: string, fileName: string): Promise<AssetContainer> {
+    return this.assetLoadScheduler.run(() => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene));
   }
 
   /** 把完整资源 URL 拆成 Babylon SceneLoader 需要的 rootUrl 和 fileName。 */

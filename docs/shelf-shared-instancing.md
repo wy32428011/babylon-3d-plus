@@ -1,4 +1,4 @@
-# Shelf 共享实例渲染
+# Shelf 与静态模型共享实例渲染
 
 ## 目标
 
@@ -11,7 +11,7 @@
 
 ## 实现边界
 
-本轮仅对明确识别为 Shelf 的模型启用共享实例；普通场景实体和模型生成器 Shelf 输出共用同一加载函数。Stacker、Conveyor 和其它导入模型继续使用独占容器，避免破坏 Stacker `appearanceColor` 等每实例材质隔离逻辑。
+共享实例框架现在包含两条准入路径：明确识别为 Shelf 的模型继续使用经过验证的脚本化共享；没有外置脚本、参数配置、参数脚本元数据和动画脚本元数据的普通静态模型使用通用静态共享。普通场景实体和模型生成器输出共用同一加载函数。Stacker `appearanceColor`、YZJ 顶点修改以及其它动态脚本模型继续使用独占容器，避免破坏每实例材质和几何隔离。
 
 Shelf 识别依据为稳定资源信息：
 
@@ -29,7 +29,7 @@ Shelf 识别依据为稳定资源信息：
 `SharedModelAssetCache` 使用现有模型资产签名作为缓存键：
 
 ```text
-sourceUrl + assetRevision + sharedInstancing 策略标记
+sourceUrl + assetRevision + instancingMode 策略标记
 ```
 
 源 `AssetContainer` 不调用 `addAllToScene()`，只保留一份未进入场景的模板资源。每个 Shelf 实体通过以下方式创建层级：
@@ -69,7 +69,7 @@ container.instantiateModelsToScene(
 
 ## 选择显示
 
-普通导入模型继续使用 `HighlightLayer`。Shelf 的 `InstancedMesh` 使用单个共享 `SelectionOutlineLayer`，通过实例选择 ID 区分同源实例，避免选中一个 Shelf 时其它 Shelf 同时高亮。
+独占容器模型继续使用 `HighlightLayer`。Shelf 与普通静态共享模型的 `InstancedMesh` 使用单个共享 `SelectionOutlineLayer`，通过实例选择 ID 区分同源实例，避免选中一个实体时其它同源模型同时高亮。
 
 选择描边按当前选中 Mesh 的 `uniqueId` 生成签名；实体仅移动但选择和 Mesh 拓扑未变化时，不重复重建实例选择缓冲。签名变化时仍执行 `clearSelection()` 后重新 `addSelection()`，避免描边层累积已释放 Mesh 引用。由于 Babylon 清理实例选择缓冲后，已有 source mesh 的部分实例公开 `instancedBuffers` 容器可能为空，运行时会在重新添加选择前按去重后的 `sourceMesh` 检查：只有当 `sourceMesh.instancedBuffers` 仍存在时，才补齐 `sourceMesh.instances` 中所有实例的公开 `instancedBuffers` 容器；若 source mesh 尚未注册实例缓冲，则交由 Babylon `registerInstancedBuffer` 原生初始化。该策略不访问 Babylon 私有字段，也不改参数化脚本。
 
