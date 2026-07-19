@@ -307,7 +307,6 @@ function createSubscriptionsFromLegacyTopic(topic: string): MqttSubscriptionConf
   return topic.split(',').map((item) => item.trim()).filter(Boolean).slice(0, 32).map((item) => ({ topic: item, qos: 0, adapter: { kind: 'epv' } }));
 }
 
-/** 归一化场景 MQTT 配置，地址为空但 IP 存在时自动补齐默认 WebSocket 地址。 */
 export function sanitizeFetchConfig(config: unknown): FetchConfig {
   if (typeof config !== 'object' || config === null) return { ...DEFAULT_FETCH_CONFIG };
   const obj = config as Record<string, unknown>;
@@ -316,6 +315,7 @@ export function sanitizeFetchConfig(config: unknown): FetchConfig {
   return { url, apiKey };
 }
 
+/** 归一化场景 MQTT 配置，地址为空但 IP 存在时自动补齐默认 WebSocket 地址。 */
 export function sanitizeMqttConfig(config: Omit<MqttConfig, 'subscriptions'> & { subscriptions?: unknown }): MqttConfig {
   const ip = config.ip.trim();
   const address = config.address.trim() || createMqttAddressFromIp(ip);
@@ -479,6 +479,8 @@ export function createLocatorEntity(position: Vector3Data = vector3()): Entity {
         startColumn: 1,
         columnGap: 0,
         layerGap: 0,
+        deviceAssetCode: '',
+        rowNumber: 1,
       },
     },
   };

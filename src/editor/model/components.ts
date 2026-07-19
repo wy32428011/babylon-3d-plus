@@ -29,6 +29,8 @@ export type LocatorComponent = {
   startColumn: number;
   columnGap: number;
   layerGap: number;
+  deviceAssetCode: string;
+  rowNumber: number;
 };
 
 export type CadReferenceOriginMode = 'center';

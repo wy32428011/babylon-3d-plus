@@ -389,6 +389,8 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
     startColumn: normalizeLocatorInt(locator.startColumn, 1, 1, 999),
     columnGap: normalizeLocatorGap(locator.columnGap),
     layerGap: normalizeLocatorGap(locator.layerGap),
+    deviceAssetCode: assertString(locator.deviceAssetCode).trim().slice(0, 128),
+    rowNumber: normalizeLocatorInt(locator.rowNumber, 1, 1, 99),
   };
 }
 

@@ -323,6 +323,11 @@ export type LocatorRuntimeEntry = {
   assetId: string;
   storageDepth: LocatorComponent['storageDepth'];
   signature: string;
+  columns: number;
+  layers: number;
+  startColumn: number;
+  deviceAssetCode: string;
+  rowNumber: number;
 };
 
 type StackerTravelConstraint = {
@@ -455,6 +460,7 @@ export class SceneRuntime {
   private readonly meshes = new Map<string, Mesh>();
   private readonly locators = new Map<string, LocatorRuntimeEntry>();
   private readonly locatorTargets = new Map<string, LocatorRuntimeEntry>();
+  private readonly locatorDeviceIndex = new Map<string, Map<number, LocatorRuntimeEntry[]>>();
   private readonly cadReferences = new Map<string, CadReferenceRuntimeEntry>();
   private readonly models = new Map<string, ModelRuntimeEntry>();
   private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
@@ -1141,25 +1147,41 @@ export class SceneRuntime {
     }
   }
 
-  /** 重建虚拟定位线框资产编号索引，供 to_x/to_y/to_z 快速查找目标位。 */
+  /** 重建虚拟定位线框资产编号索引与设备绑定索引，供 to_x/to_y/to_z 快速查找目标位。 */
   private rebuildLocatorTargetIndex(document: SceneDocument): void {
     this.locatorTargets.clear();
+    this.locatorDeviceIndex.clear();
     const duplicateAssetIds = new Set<string>();
 
     for (const entityId of document.entityIds) {
       const entity = document.entities[entityId];
-      const assetId = entity?.components.locator?.assetId.trim();
+      const locatorComponent = entity?.components.locator;
+      const assetId = locatorComponent?.assetId.trim();
       const locator = this.locators.get(entityId);
       if (!assetId || !locator || duplicateAssetIds.has(assetId)) continue;
 
       locator.assetId = assetId;
-      locator.storageDepth = entity.components.locator?.storageDepth ?? 'near';
+      locator.storageDepth = locatorComponent?.storageDepth ?? 'near';
       if (this.locatorTargets.has(assetId)) {
         this.locatorTargets.delete(assetId);
         duplicateAssetIds.add(assetId);
         continue;
       }
       this.locatorTargets.set(assetId, locator);
+
+      // 构建设备绑定索引
+      const deviceCode = locatorComponent?.deviceAssetCode?.trim();
+      if (deviceCode) {
+        const rowNumber = locatorComponent?.rowNumber ?? 1;
+        let rowMap = this.locatorDeviceIndex.get(deviceCode);
+        if (!rowMap) {
+          rowMap = new Map();
+          this.locatorDeviceIndex.set(deviceCode, rowMap);
+        }
+        const list = rowMap.get(rowNumber) ?? [];
+        list.push(locator);
+        rowMap.set(rowNumber, list);
+      }
     }
 
     for (const assetId of duplicateAssetIds) {
@@ -1170,6 +1192,36 @@ export class SceneRuntime {
     for (const assetId of [...this.reportedDuplicateLocatorTargets]) {
       if (!duplicateAssetIds.has(assetId)) this.reportedDuplicateLocatorTargets.delete(assetId);
     }
+  }
+
+  /** 按设备编号 + 排号 + 列/层范围查找目标 Locator，支持多 Locator 绑定同一设备。 */
+  private findLocatorByDevice(
+    deviceAssetCode: string,
+    toX: number,
+    toY: number,
+    toZ: number,
+  ): LocatorRuntimeEntry | null {
+    const rowMap = this.locatorDeviceIndex.get(deviceAssetCode);
+    if (!rowMap) return null;
+    const list = rowMap.get(toZ);
+    if (!list?.length) return null;
+    for (const locator of list) {
+      if (toX >= locator.startColumn && toX < locator.startColumn + locator.columns && toY >= 1 && toY <= locator.layers) {
+        return locator;
+      }
+    }
+    return null;
+  }
+
+  /** 在 Locator 的 boxes 网格中根据列/层定位具体 box 的世界矩阵。 */
+  private getLocatorBoxWorldMatrix(locator: LocatorRuntimeEntry, toX: number, toY: number): Matrix | null {
+    const columnIndex = toX - locator.startColumn;
+    const layerIndex = toY - 1;
+    const boxIndex = layerIndex * locator.columns + columnIndex;
+    const box = locator.boxes[boxIndex];
+    if (!box) return null;
+    box.computeWorldMatrix(true);
+    return box.getWorldMatrix();
   }
 
   /** 将文件夹选中转换为子实体选中集合，用于在场景中高亮整组对象。 */
@@ -1235,6 +1287,11 @@ export class SceneRuntime {
     this.applyTransform(runtimeLocator.root, entity.components.transform);
     runtimeLocator.assetId = locator.assetId;
     runtimeLocator.storageDepth = locator.storageDepth;
+    runtimeLocator.deviceAssetCode = locator.deviceAssetCode;
+    runtimeLocator.rowNumber = locator.rowNumber;
+    runtimeLocator.columns = locator.columns;
+    runtimeLocator.layers = locator.layers;
+    runtimeLocator.startColumn = locator.startColumn;
 
     const locatorMetadata = {
       assetId: locator.assetId,
@@ -2110,7 +2167,14 @@ export class SceneRuntime {
     snapshot: StackerTelemetrySnapshot,
     deltaSeconds: number,
   ): void {
-    const targetLocator = snapshot.targetLocationKey ? this.locatorTargets.get(snapshot.targetLocationKey) ?? null : null;
+    const toX = readIntegerField(snapshot.fields, 'to_x');
+    const toY = readIntegerField(snapshot.fields, 'to_y');
+    const toZ = readIntegerField(snapshot.fields, 'to_z');
+    const targetLocator = (snapshot.assetCode && toX !== null && toY !== null && toZ !== null)
+      ? this.findLocatorByDevice(snapshot.assetCode, toX, toY, toZ)
+      : snapshot.targetLocationKey
+        ? this.locatorTargets.get(snapshot.targetLocationKey) ?? null
+        : null;
     this.reportStackerRuntimeState(snapshot, targetLocator);
     this.writeDeviceTelemetryMetadata(model, snapshot);
 
@@ -4518,7 +4582,7 @@ export class SceneRuntime {
 
     const boxes = this.createLocatorBoxes(entityId, locator, root, material);
 
-    return { root, boxes, material, assetId: '', storageDepth: 'near', signature: '' };
+    return { root, boxes, material, assetId: '', storageDepth: 'near', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber };
   }
 
   private createLocatorBoxes(entityId: string, locator: LocatorComponent, root: TransformNode, material: StandardMaterial): Mesh[] {

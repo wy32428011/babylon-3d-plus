@@ -457,6 +457,8 @@ function cloneLocator(locator: LocatorComponent): LocatorComponent {
     startColumn: locator.startColumn,
     columnGap: locator.columnGap,
     layerGap: locator.layerGap,
+    deviceAssetCode: locator.deviceAssetCode,
+    rowNumber: locator.rowNumber,
   };
 }
 
@@ -582,7 +584,9 @@ function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): bool
     left.layers === right.layers &&
     left.startColumn === right.startColumn &&
     left.columnGap === right.columnGap &&
-    left.layerGap === right.layerGap
+    left.layerGap === right.layerGap &&
+    left.deviceAssetCode === right.deviceAssetCode &&
+    left.rowNumber === right.rowNumber
   );
 }
 
@@ -2414,6 +2418,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         startColumn: sanitizeLocatorInt(patch.startColumn, before.startColumn, 1, 999),
         columnGap: sanitizeLocatorGap(patch.columnGap, before.columnGap),
         layerGap: sanitizeLocatorGap(patch.layerGap, before.layerGap),
+        deviceAssetCode: patch.deviceAssetCode !== undefined ? patch.deviceAssetCode.trim().slice(0, 128) : before.deviceAssetCode,
+        rowNumber: sanitizeLocatorInt(patch.rowNumber, before.rowNumber, 1, 99),
       };
 
       if (areLocatorsEqual(before, after)) return state;

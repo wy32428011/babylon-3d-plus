@@ -192,13 +192,13 @@ export class ModelGeneratorFetchRuntime {
     }
   }
 
-  /** 获取 locator box 的世界矩阵，根据 column/layer 索引 */
+  /** 获取 locator box 的世界矩阵，根据 column/layer 索引（0-based）。 */
   private getLocatorBoxWorldMatrix(
     locator: LocatorRuntimeEntry,
     column: number,
     layer: number,
-    columns: number,
   ): Matrix | null {
+    const columns = locator.columns;
     const boxIndex = layer * columns + column;
     const box = locator.boxes[boxIndex];
     if (!box) return null;
@@ -230,12 +230,7 @@ export class ModelGeneratorFetchRuntime {
         continue;
       }
 
-      const columns = locator.boxes.length > 0
-        ? Math.max(1, locator.boxes.length / Math.max(1, Math.ceil(locator.boxes.length / locator.boxes.length)))
-        : 1;
-
-      // 尝试从 locator 的 component 获取实际 columns
-      const worldMatrix = this.getLocatorBoxWorldMatrix(locator, instance.column, instance.layer, Math.max(1, columns));
+      const worldMatrix = this.getLocatorBoxWorldMatrix(locator, instance.column, instance.layer);
       if (worldMatrix) {
         worldMatrix.copyToArray(matrices, index * 16);
       } else {

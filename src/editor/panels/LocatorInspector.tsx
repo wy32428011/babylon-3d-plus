@@ -52,6 +52,34 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
         />
       </label>
       <label className="inspector-row">
+        <span>关联设备</span>
+        <input
+          maxLength={128}
+          type="text"
+          disabled={disabled}
+          value={component.deviceAssetCode}
+          onChange={(event) => updateSelectedLocator({ deviceAssetCode: event.target.value })}
+          placeholder="堆垛机资产编号"
+        />
+      </label>
+      <label className="inspector-row">
+        <span>排号 ({'to_z'})</span>
+        <input
+          type="number"
+          disabled={disabled}
+          min={1}
+          max={99}
+          step={1}
+          value={component.rowNumber}
+          onChange={(event) => {
+            const value = Number(event.target.value);
+            if (Number.isFinite(value) && value >= 1 && value <= 99) {
+              updateSelectedLocator({ rowNumber: Math.round(value) });
+            }
+          }}
+        />
+      </label>
+      <label className="inspector-row">
         <span>库位排深</span>
         <select
           disabled={disabled}
