@@ -1,8 +1,10 @@
 import {
+  CreateBox,
+  CreatePlane,
+  CreateSphere,
   Matrix,
   Mesh,
   Scene,
-  type AssetContainer,
   VertexData,
 } from '@babylonjs/core';
 import type { ModelGeneratorComponent, ModelGeneratorRule, ModelGeneratorTarget } from '../../editor/model/components';
@@ -28,14 +30,18 @@ type ContainerInfo = {
 type CargoInstance = {
   cargoCode: string;
   targetSignature: string;
+  target: ModelGeneratorTarget;
   locatorAssetId: string;
   column: number;
   layer: number;
 };
 
+type GetLocatorByAssetId = (assetId: string) => LocatorRuntimeEntry | null;
+type GetLocatorBoxWorldMatrix = (locator: LocatorRuntimeEntry, column: number, layer: number) => Matrix | null;
+type LoadModelTemplate = (target: ModelGeneratorTarget) => Promise<{ meshes: Mesh[]; dispose: () => void } | null>;
+
 type ThinInstanceBatch = {
   mesh: Mesh;
-  sourceContainer: AssetContainer;
   instances: CargoInstance[];
 };
 
@@ -65,7 +71,9 @@ export class ModelGeneratorFetchRuntime {
   async handleEvent(
     fetchConfig: FetchConfig,
     component: ModelGeneratorComponent,
-    getLocatorByAssetId: (assetId: string) => LocatorRuntimeEntry | null,
+    getLocatorByAssetId: GetLocatorByAssetId,
+    getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
+    loadModelTemplate: LoadModelTemplate,
   ): Promise<void> {
     if (this.disposed || !fetchConfig.url) return;
 
@@ -84,7 +92,7 @@ export class ModelGeneratorFetchRuntime {
         return;
       }
 
-      const data: { records: ContainerInfo[] } = await response.json();
+      const data: { records: ContainerInfo[] } = (await response.json())?.data;
       if (!data?.records?.length) {
         this.clearAllBatches();
         return;
@@ -93,7 +101,7 @@ export class ModelGeneratorFetchRuntime {
       const nextInstances: CargoInstance[] = [];
 
       for (const record of data.records) {
-        if (record.isEmpty) continue;
+        // if (record.isEmpty) continue; // TODO: 测试原因 暂时忽略
 
         const target = this.matchRule(component.rules, record.containerType) ?? component.defaultTarget;
         if (!target) continue;
@@ -105,6 +113,7 @@ export class ModelGeneratorFetchRuntime {
           nextInstances.push({
             cargoCode,
             targetSignature,
+            target,
             locatorAssetId: binding.assetCode,
             column: record.column,
             layer: record.layer,
@@ -112,7 +121,7 @@ export class ModelGeneratorFetchRuntime {
         }
       }
 
-      await this.syncBatches(nextInstances, getLocatorByAssetId);
+      await this.syncBatches(nextInstances, getLocatorByAssetId, getLocatorBoxWorldMatrix, loadModelTemplate);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.onPushLog(`Fetch 处理异常：${message}`);
@@ -133,7 +142,9 @@ export class ModelGeneratorFetchRuntime {
   /** 同步 thinInstance 批次：按 targetSignature 分组，增删改矩阵 */
   private async syncBatches(
     instances: CargoInstance[],
-    getLocatorByAssetId: (assetId: string) => LocatorRuntimeEntry | null,
+    getLocatorByAssetId: GetLocatorByAssetId,
+    getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
+    loadModelTemplate: LoadModelTemplate,
   ): Promise<void> {
     const groups = new Map<string, CargoInstance[]>();
     for (const instance of instances) {
@@ -142,6 +153,7 @@ export class ModelGeneratorFetchRuntime {
       else groups.set(instance.targetSignature, [instance]);
     }
 
+    // TODO: 应该根据入参的排号进行 有目标的清理，每次的请求并不是全量的更新
     for (const signature of [...this.batches.keys()]) {
       if (!groups.has(signature)) {
         this.disposeBatch(signature);
@@ -151,66 +163,112 @@ export class ModelGeneratorFetchRuntime {
     for (const [signature, group] of groups) {
       const existing = this.batches.get(signature);
       if (existing) {
-        this.updateBatchMatrices(existing, group, getLocatorByAssetId);
+        this.updateBatchMatrices(existing, group, getLocatorByAssetId, getLocatorBoxWorldMatrix);
       } else {
-        await this.createBatch(signature, group, getLocatorByAssetId);
+        await this.createBatch(signature, group, getLocatorByAssetId, getLocatorBoxWorldMatrix, loadModelTemplate);
       }
     }
   }
 
-  /** 创建新的 thinInstance batch */
+  /** 创建新的 thinInstance batch：通过 loadModelTemplate 走完整资产加载管线获取模板几何。 */
   private async createBatch(
     signature: string,
     instances: CargoInstance[],
-    getLocatorByAssetId: (assetId: string) => LocatorRuntimeEntry | null,
+    getLocatorByAssetId: GetLocatorByAssetId,
+    getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
+    loadModelTemplate: LoadModelTemplate,
   ): Promise<void> {
-    // 使用第一个 locator box 作为临时模板（后续从 target model 加载真实几何）
-    const firstLocator = getLocatorByAssetId(instances[0].locatorAssetId);
-    if (!firstLocator || firstLocator.boxes.length === 0) return;
+    const target = instances[0].target;
+
+    const template = await this.loadTemplateMesh(target, loadModelTemplate);
+    if (!template) {
+      this.onPushLog(`创建 thinInstance batch 失败：无法获取目标模型几何 (${target.kind})`);
+      return;
+    }
 
     try {
-      const sourceMesh = firstLocator.boxes[0];
-      const vertexData = VertexData.ExtractFromMesh(sourceMesh, true, true);
-      if (!vertexData) return;
+      // 顶点抽取时烘焙各 mesh 的世界矩阵（含单位换算 scaleNode 与 GLB 节点 TRS），
+      // thinInstance 矩阵只负责把模型放到库位上
+      const vertexData = this.extractMergedVertexData(template.meshes);
+      if (!vertexData) {
+        template.dispose();
+        this.onPushLog(`创建 thinInstance batch 失败：目标模型无顶点数据 (${target.kind})`);
+        return;
+      }
+
+      const material = template.meshes.find((mesh) => mesh.getTotalVertices() > 0 && mesh.material)?.material ?? null;
+      const clonedMaterial = material ? material.clone(`${material.name}_fetch_batch`) : null;
+
+      template.dispose();
 
       const batchMesh = new Mesh(`fetch_batch_${this.generatorEntityId}_${signature.slice(0, 8)}`, this.scene);
       vertexData.applyToMesh(batchMesh);
-      batchMesh.material = sourceMesh.material;
+      batchMesh.material = clonedMaterial;
       batchMesh.doNotSerialize = true;
-      batchMesh.parent = firstLocator.root;
+      // thinInstance 矩阵是世界矩阵，Babylon 渲染时会再乘 mesh 自身世界矩阵，
+      // 因此 batchMesh 必须保持单位变换，不能挂到 locator.root 下（否则双重变换）
 
       const batch: ThinInstanceBatch = {
         mesh: batchMesh,
-        sourceContainer: null as unknown as AssetContainer,
         instances: [...instances],
       };
       this.batches.set(signature, batch);
-      this.updateBatchMatrices(batch, instances, getLocatorByAssetId);
+      this.updateBatchMatrices(batch, instances, getLocatorByAssetId, getLocatorBoxWorldMatrix);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.onPushLog(`创建 thinInstance batch 失败：${message}`);
     }
   }
 
-  /** 获取 locator box 的世界矩阵，根据 column/layer 索引（0-based）。 */
-  private getLocatorBoxWorldMatrix(
-    locator: LocatorRuntimeEntry,
-    column: number,
-    layer: number,
-  ): Matrix | null {
-    const columns = locator.columns;
-    const boxIndex = layer * columns + column;
-    const box = locator.boxes[boxIndex];
-    if (!box) return null;
-    box.computeWorldMatrix(true);
-    return box.getWorldMatrix();
+  /** 根据 target 类型加载模板 mesh：model target 走资产加载管线，mesh target 创建内置几何体。 */
+  private async loadTemplateMesh(
+    target: ModelGeneratorTarget,
+    loadModelTemplate: LoadModelTemplate,
+  ): Promise<{ meshes: Mesh[]; dispose: () => void } | null> {
+    if (target.kind === 'model') {
+      return loadModelTemplate(target);
+    }
+
+    const meshOpts = { updatable: false };
+    let mesh: Mesh;
+    switch (target.meshKind) {
+      case 'cube':
+        mesh = CreateBox('fetch_batch_source', { size: 1, ...meshOpts }, this.scene);
+        break;
+      case 'sphere':
+        mesh = CreateSphere('fetch_batch_source', { diameter: 1, ...meshOpts }, this.scene);
+        break;
+      case 'plane':
+        mesh = CreatePlane('fetch_batch_source', { size: 1, ...meshOpts }, this.scene);
+        break;
+      default:
+        return null;
+    }
+    mesh.doNotSerialize = true;
+    return { meshes: [mesh], dispose: () => mesh.dispose() };
+  }
+
+  /** 抽取所有有几何的 mesh 的顶点数据，烘焙各自世界矩阵后合并；无几何返回 null */
+  private extractMergedVertexData(meshes: Mesh[]): VertexData | null {
+    const vertexDatas: VertexData[] = [];
+    for (const mesh of meshes) {
+      if (mesh.getTotalVertices() === 0) continue;
+      mesh.computeWorldMatrix(true);
+      const vertexData = VertexData.ExtractFromMesh(mesh, true, true);
+      vertexData.transform(mesh.getWorldMatrix());
+      vertexDatas.push(vertexData);
+    }
+    if (vertexDatas.length === 0) return null;
+    if (vertexDatas.length === 1) return vertexDatas[0];
+    return vertexDatas[0].merge(vertexDatas.slice(1), true);
   }
 
   /** 更新 thinInstance 矩阵 buffer */
   private updateBatchMatrices(
     batch: ThinInstanceBatch,
     instances: CargoInstance[],
-    getLocatorByAssetId: (assetId: string) => LocatorRuntimeEntry | null,
+    getLocatorByAssetId: GetLocatorByAssetId,
+    getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
   ): void {
     batch.instances = instances;
 
@@ -230,7 +288,7 @@ export class ModelGeneratorFetchRuntime {
         continue;
       }
 
-      const worldMatrix = this.getLocatorBoxWorldMatrix(locator, instance.column, instance.layer);
+      const worldMatrix = getLocatorBoxWorldMatrix(locator, instance.column, instance.layer);
       if (worldMatrix) {
         worldMatrix.copyToArray(matrices, index * 16);
       } else {
@@ -257,7 +315,6 @@ export class ModelGeneratorFetchRuntime {
     const batch = this.batches.get(signature);
     if (!batch) return;
     batch.mesh.dispose();
-    try { batch.sourceContainer?.dispose?.(); } catch { /* empty */ }
     this.batches.delete(signature);
   }
 

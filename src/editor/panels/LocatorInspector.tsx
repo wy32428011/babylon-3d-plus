@@ -7,7 +7,7 @@ type LocatorInspectorProps = {
   disabled?: boolean;
 };
 
-type LocatorDimensionField = 'length' | 'width' | 'height' | 'columns' | 'layers' | 'startColumn' | 'columnGap' | 'layerGap';
+type LocatorDimensionField = 'length' | 'width' | 'height' | 'columns' | 'layers' | 'columnGap' | 'layerGap';
 
 type LocatorDimensionConfig = {
   key: LocatorDimensionField;
@@ -25,7 +25,6 @@ const locatorDimensionFields: readonly LocatorDimensionConfig[] = [
   { key: 'layers', label: '层数 (Y)', min: 1, max: 100, step: 1 },
   { key: 'columnGap', label: '列间隔(m)', min: 0, max: 10, step: 0.1 },
   { key: 'layerGap', label: '层间隔(m)', min: 0, max: 10, step: 0.1 },
-  { key: 'startColumn', label: '起始列', min: 1, max: 999, step: 1 },
 ];
 
 export function LocatorInspector({ component, disabled = false }: LocatorInspectorProps) {
@@ -80,15 +79,21 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
         />
       </label>
       <label className="inspector-row">
-        <span>库位排深</span>
-        <select
+        <span>起始列</span>
+        <input
+          type="number"
           disabled={disabled}
-          value={component.storageDepth}
-          onChange={(event) => updateSelectedLocator({ storageDepth: event.target.value === 'far' ? 'far' : 'near' })}
-        >
-          <option value="near">近排（一段货叉）</option>
-          <option value="far">远排（二段货叉）</option>
-        </select>
+          min={1}
+          max={999}
+          step={1}
+          value={component.startColumn}
+          onChange={(event) => {
+            const value = Number(event.target.value);
+            if (Number.isFinite(value) && value >= 1 && value <= 999) {
+              updateSelectedLocator({ startColumn: Math.round(value) });
+            }
+          }}
+        />
       </label>
       {locatorDimensionFields.map(({ key, label, min, max, step }) => (
         <label className="inspector-row" key={key}>

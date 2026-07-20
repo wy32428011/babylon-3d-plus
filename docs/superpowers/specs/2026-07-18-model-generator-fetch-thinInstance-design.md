@@ -81,7 +81,7 @@ interface ContainerInfo {
   containerCode: string[];  // 货物条码列表
   containerType: string;    // 货物类型（用于规则匹配）
   isEmpty: boolean;         // 空库位跳过渲染
-  locType: string;          // 库位排深（对应 storageDepth）
+  locType: string;          // 库位类型（信息性字段，不再映射 storageDepth）
   row: string;              // 排标识
   column: number;           // 列号 → locator boxes column 索引
   layer: number;            // 层号 → locator boxes layer 索引
@@ -99,7 +99,7 @@ interface ContainerInfo {
 | `containerType` | 生成器规则 `attributeValue` 匹配 |
 | `column` | locator box 列索引 |
 | `layer` | locator box 层索引 |
-| `locType` / `stackingRow` | storageDepth 判定（near/far） |
+| `locType` / `stackingRow` | 库位类型（信息性） |
 | `isEmpty` | 为 true 时跳过该库位 |
 | `containerCode[0]` | 仓储 cargo 唯一标识 |
 

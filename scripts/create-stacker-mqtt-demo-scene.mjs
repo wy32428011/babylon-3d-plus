@@ -106,7 +106,7 @@ function readLengthUnitInfo(metadata) {
 }
 
 /** 创建一个虚拟定位线框实体，用于 to_x/to_y/to_z 查找目标位。 */
-function createLocatorEntity(id, name, assetId, storageDepth, position, size = { length: 1.1, width: 1.1, height: 1.1 }) {
+function createLocatorEntity(id, name, assetId, position, size = { length: 1.1, width: 1.1, height: 1.1 }) {
   return {
     id,
     name,
@@ -118,7 +118,6 @@ function createLocatorEntity(id, name, assetId, storageDepth, position, size = {
       transform: transform(position),
       locator: {
         assetId,
-        storageDepth,
         length: size.length,
         width: size.width,
         height: size.height,
@@ -127,7 +126,7 @@ function createLocatorEntity(id, name, assetId, storageDepth, position, size = {
   };
 }
 
-/** 创建近排/远排库位演示场景，包含真实 Stacker、库位参数和外部 MQTT 配置。 */
+/** 创建库位演示场景，包含真实 Stacker、库位参数和外部 MQTT 配置。 */
 function createSceneDocument() {
   const metadata = readStackerMetadata();
   const unitInfo = readLengthUnitInfo(metadata);
@@ -174,10 +173,10 @@ function createSceneDocument() {
             },
           },
         },
-        entity_locator_1_1_1: createLocatorEntity('entity_locator_1_1_1', '近排库位 1-1-1', '1-1-1', 'near', vector3(0.9, 1.2, 4)),
-        entity_locator_1_2_1: createLocatorEntity('entity_locator_1_2_1', '远排库位 1-2-1', '1-2-1', 'far', vector3(1.9, 1.2, 4)),
-        entity_locator_2_1_1: createLocatorEntity('entity_locator_2_1_1', '近排库位 2-1-1', '2-1-1', 'near', vector3(0.9, 2.2, 8)),
-        entity_locator_2_2_1: createLocatorEntity('entity_locator_2_2_1', '远排库位 2-2-1', '2-2-1', 'far', vector3(1.9, 2.2, 8)),
+        entity_locator_1_1_1: createLocatorEntity('entity_locator_1_1_1', '库位 1-1-1', '1-1-1', vector3(0.9, 1.2, 4)),
+        entity_locator_1_2_1: createLocatorEntity('entity_locator_1_2_1', '库位 1-2-1', '1-2-1', vector3(1.9, 1.2, 4)),
+        entity_locator_2_1_1: createLocatorEntity('entity_locator_2_1_1', '库位 2-1-1', '2-1-1', vector3(0.9, 2.2, 8)),
+        entity_locator_2_2_1: createLocatorEntity('entity_locator_2_2_1', '库位 2-2-1', '2-2-1', vector3(1.9, 2.2, 8)),
         entity_floor_reference: {
           id: 'entity_floor_reference',
           name: '运动参考地面',

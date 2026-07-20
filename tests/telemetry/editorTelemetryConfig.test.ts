@@ -164,28 +164,6 @@ test('SceneSerializer roundtrip 保存新字段并兼容旧场景缺省字段', 
   assert.equal(legacyLoaded.entities[entity.id].components.telemetryBinding?.deviceType, 'stacker');
 });
 
-test('Locator 库位深度 roundtrip 保存 far，旧场景缺失字段默认 near', () => {
-  const locator = createLocatorEntity();
-  locator.components.locator!.assetId = '1-2-1';
-  locator.components.locator!.storageDepth = 'far';
-  const scene = {
-    id: 'scene_locator_depth',
-    name: '库位深度',
-    entityIds: [locator.id],
-    entities: { [locator.id]: locator },
-    selectedEntityId: locator.id,
-    mqttConfig: createBaseMqttConfig(),
-  };
-
-  const loaded = deserializeScene(serializeScene(scene as never));
-  assert.equal(loaded.entities[locator.id].components.locator?.storageDepth, 'far');
-
-  const legacyLocator = JSON.parse(serializeScene(scene as never));
-  delete legacyLocator.scene.entities[locator.id].components.locator.storageDepth;
-  const legacyLoaded = deserializeScene(JSON.stringify(legacyLocator));
-  assert.equal(legacyLoaded.entities[locator.id].components.locator?.storageDepth, 'near');
-});
-
 function createBaseMqttConfig() {
   return {
     enabled: false,

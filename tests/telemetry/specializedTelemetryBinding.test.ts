@@ -120,11 +120,10 @@ function createSnapshot(overrides: Partial<DeviceTelemetrySnapshot> = {}): Devic
   };
 }
 
-test('SceneRuntime 按 Locator near/far 决定一段或两段货叉，并在目标缺失时禁止伸出', () => {
+test('SceneRuntime 按投影距离自动判断一段或两段货叉，并在目标缺失时禁止伸出', () => {
   const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
-  assert.match(source, /resolveStackerStorageForkReach\(targetLocator\.storageDepth, reach\.stageOne, reach\.stageTwo\)/);
-  assert.match(source, /snapshot\.hasTargetLocation[\s\S]*resolveTargetLocatorForkReach\(targetLocator, reach\) \?\? 0/);
-  assert.match(source, /targetStorageDepth: targetLocator\?\.storageDepth \?\? null/);
+  assert.match(source, /projectedDistance > reach\.stageOne \+ 0\.001/);
+  assert.match(source, /snapshot\.hasTargetLocation[\s\S]*resolveTargetLocatorForkReach\(model, targetPosition, reach\) \?\? 0/);
   assert.match(source, /distanceX !== null && targetTravelOffset === null/);
   assert.match(source, /distanceY !== null && targetLiftOffset === null/);
 });
@@ -133,7 +132,7 @@ test('Stacker 库位演示脚本不发送货叉距离，由 to_x to_y to_z 和 L
   const publisher = readFileSync('scripts/publish-stacker-full-demo.mjs', 'utf8');
   const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
   const sequence = JSON.parse(readFileSync('examples/mqtt/stacker-full-demo-sequence.json', 'utf8')) as {
-    locations: Array<{ assetId: string; storageDepth: string }>;
+    locations: Array<{ assetId: string }>;
   };
   assert.doesNotMatch(publisher, /point\(assetCode, 'front_distance_z'/);
   assert.doesNotMatch(publisher, /point\(assetCode, 'back_distance_z'/);
@@ -142,11 +141,11 @@ test('Stacker 库位演示脚本不发送货叉距离，由 to_x to_y to_z 和 L
   assert.match(publisher, /point\(assetCode, 'to_x'/);
   assert.equal(packageJson.scripts['demo:stacker:mqtt'], 'node scripts/publish-stacker-full-demo.mjs');
   assert.equal(packageJson.scripts['demo:stacker:mqtt:legacy'], 'node scripts/simulate-stacker-mqtt.mjs');
-  assert.deepEqual(sequence.locations.map((location) => [location.assetId, location.storageDepth]), [
-    ['1-1-1', 'near'],
-    ['1-2-1', 'far'],
-    ['2-1-1', 'near'],
-    ['2-2-1', 'far'],
+  assert.deepEqual(sequence.locations.map((location) => location.assetId), [
+    '1-1-1',
+    '1-2-1',
+    '2-1-1',
+    '2-2-1',
   ]);
 });
 

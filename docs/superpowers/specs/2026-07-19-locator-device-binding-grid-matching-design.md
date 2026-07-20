@@ -20,7 +20,6 @@
 
 ## 非目标
 
-- 不改变 `storageDepth`（near/far）的现有语义和货叉行程逻辑。
 - 不修改 `assetId` 的序列化格式（保留字段但降级为展示用途）。
 - 不改变 Locator box 的视觉渲染或 `createLocatorBoxes` 的生成顺序。
 - 不影响 MQTT 模式下的仓储流转逻辑。
@@ -51,7 +50,6 @@ export type LocatorRuntimeEntry = {
   boxes: Mesh[];
   material: StandardMaterial;
   assetId: string;
-  storageDepth: LocatorComponent['storageDepth'];
   signature: string;
   columns: number;          // 新增：列数
   layers: number;           // 新增：层数

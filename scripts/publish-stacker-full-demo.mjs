@@ -59,7 +59,7 @@ function printHelpAndExit() {
 
 规则：
   MQTT 发送目标库位号 to_x/to_y/to_z 和动作编码，不发送 distance_x/distance_y/front_distance_z/back_distance_z。
-  场景虚拟定位框 storageDepth=near 时只用一段货叉，storageDepth=far 时使用两段货叉。
+  场景虚拟定位框按货叉到目标的投影距离自动判断货叉段数。
 
 参数：
   --broker <url>       MQTT over WebSocket 地址，默认 ${DEFAULT_BROKER}
@@ -112,7 +112,6 @@ function validateLocation(location, index) {
   if (parts[0] !== location.row || parts[1] !== location.column || parts[2] !== location.level) {
     throw new Error(`库位 ${location.assetId} 的 row/column/level 与资产编号不一致`);
   }
-  if (location.storageDepth !== 'near' && location.storageDepth !== 'far') throw new Error(`库位 ${location.assetId} 缺少 near/far`);
   if (!Number.isFinite(location.distance_x) || !Number.isFinite(location.distance_y)) throw new Error(`库位 ${location.assetId} 缺少有效距离`);
 }
 
@@ -152,13 +151,13 @@ function createTimeline(sequence, tasks) {
   for (const task of tasks) {
     const location = sequence.locationMap.get(task.locationAssetId);
     const target = { distanceX: location.distance_x, distanceY: location.distance_y };
-    const prefix = `${location.storageDepth === 'far' ? '远排' : '近排'}库位 ${location.assetId}`;
+    const prefix = `库位 ${location.assetId}`;
     timeline.push(
       step(`${prefix}：Stacker 行走`, sequence.timing.travelMs, current, { ...current, distanceX: target.distanceX }, location, task),
       step(`${prefix}：行走到位`, sequence.timing.travelHoldMs, { ...current, distanceX: target.distanceX }, { ...current, distanceX: target.distanceX }, location, task),
       step(`${prefix}：载货台升降`, sequence.timing.liftMs, { ...current, distanceX: target.distanceX }, target, location, task),
       step(`${prefix}：载货台到位`, sequence.timing.liftHoldMs, target, target, location, task),
-      step(`${prefix}：${location.storageDepth === 'far' ? '二段货叉' : '一段货叉'}叉出`, sequence.timing.forkExtendMs, target, target, location, task, 'extend'),
+      step(`${prefix}：货叉叉出`, sequence.timing.forkExtendMs, target, target, location, task, 'extend'),
       step(`${prefix}：货叉保持`, sequence.timing.forkHoldMs, target, target, location, task, 'hold'),
       step(`${prefix}：货叉收回`, sequence.timing.forkRetractMs, target, target, location, task, 'retract'),
       step(`${prefix}：任务完成`, sequence.timing.taskCompleteHoldMs, target, target, location, task),

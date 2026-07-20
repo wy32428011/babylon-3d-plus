@@ -16,11 +16,8 @@ export type MeshRendererComponent = {
   materialColor: string;
 };
 
-export type LocatorStorageDepth = 'near' | 'far';
-
 export type LocatorComponent = {
   assetId: string;
-  storageDepth: LocatorStorageDepth;
   length: number;
   width: number;
   height: number;

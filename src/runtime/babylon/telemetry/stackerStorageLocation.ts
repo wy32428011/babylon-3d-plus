@@ -1,19 +1,3 @@
-import type { LocatorStorageDepth } from '../../../editor/model/components';
-
-/**
- * 根据库位排深返回货叉允许的总行程。
- * 近排只允许第一段，远排允许第一段与第二段；非法行程统一按 0 防御。
- */
-export function resolveStackerStorageForkReach(
-  storageDepth: LocatorStorageDepth,
-  stageOneReach: number,
-  stageTwoReach: number,
-): number {
-  const stageOne = Number.isFinite(stageOneReach) ? Math.max(0, stageOneReach) : 0;
-  const stageTwo = Number.isFinite(stageTwoReach) ? Math.max(0, stageTwoReach) : 0;
-  return storageDepth === 'far' ? stageOne + stageTwo : stageOne;
-}
-
 export type StackerStorageTargetOffsetInput = {
   targetTravelCoordinate: number;
   targetLiftCoordinate: number;
