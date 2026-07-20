@@ -12,7 +12,8 @@
     "demo:stacker:mqtt": "node scripts/simulate-stacker-mqtt.mjs",
     "refresh:model-assets": "node scripts/refresh-model-asset-index.mjs",
     "wait:renderer": "node scripts/wait-for-vite-renderer.mjs",
-    "build": "tsc -b && vite build && npm run build:electron",
+    "build": "tsc -b && vite build && npm run build:viewer && npm run build:electron",
+    "build:viewer": "vite build --config vite.viewer.config.ts",
     "build:electron": "tsc -p tsconfig.node.json",
     "build:yzj:visual": "node scripts/build-yzj-direction-arrow-visual.mjs",
     "typecheck": "tsc -b",
@@ -34,12 +35,14 @@
     "@babylonjs/core": "^9.12.0",
     "@babylonjs/loaders": "^9.12.0",
     "@linkiez/dxf-renew": "^7.4.5",
+    "archiver": "^8.0.0",
     "mqtt": "^5.15.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@types/archiver": "^8.0.0",
     "@types/node": "^25.9.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -67,6 +70,15 @@
       "dist/**/*",
       "dist-electron/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-viewer-template",
+        "to": "export-viewer",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "win": {
       "icon": "build/icon.ico",

@@ -113,6 +113,7 @@ async function main() {
 
   try {
     await runChecked(npmCommand, ['run', 'wait:renderer'], env);
+    await runChecked(npmCommand, ['run', 'build:viewer'], env);
     await runChecked(npmCommand, ['run', 'build:electron'], env);
   } catch (error) {
     console.error(`[dev-electron] 启动失败：${error instanceof Error ? error.message : String(error)}`);

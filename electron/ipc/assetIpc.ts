@@ -10,7 +10,7 @@ import type {
   ListModelPackageVariantsRequest,
   ModelPackageVariant,
 } from '../types.js';
-import { authorizeAssetFile, authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl } from './assetRegistry.js';
+import { authorizeAssetFile, authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { listModelPackageVariants, scanModelFolder } from './modelPackageScanner.js';
 import {
   ensureCurrentProjectRootWithDialog,
@@ -191,17 +191,20 @@ export function registerAssetIpc(): void {
     };
   });
 
+  /** 只允许枚举已由用户选择或项目加载授权过的模型包目录。 */
   ipcMain.handle(
     'assets:listModelPackageVariants',
     async (_event, request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> => {
       const packagePath = path.resolve(request.packagePath);
+      if (!isPathInsideAuthorizedAssetRoot(packagePath)) {
+        throw new Error('模型包目录未经过当前会话授权，拒绝枚举。');
+      }
       const stat = await fs.stat(packagePath);
 
       if (!stat.isDirectory()) {
         throw new Error('请选择有效的模型包目录。');
       }
 
-      authorizeAssetRoot(packagePath);
       return listModelPackageVariants(packagePath);
     },
   );

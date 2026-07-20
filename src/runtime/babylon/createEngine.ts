@@ -49,6 +49,12 @@ export type BabylonViewportRuntimeStatus =
 /** 接收 Babylon 视口运行状态变化，供 React 面板同步错误遮罩与恢复提示。 */
 export type BabylonViewportRuntimeStatusCallback = (status: BabylonViewportRuntimeStatus) => void;
 
+/** 创建 Babylon 视口时可覆盖的交互选项；缺省值保持编辑器现有行为。 */
+export type BabylonViewportOptions = {
+  showGrid?: boolean;
+  allowCameraControl?: boolean;
+};
+
 export type BabylonViewport = {
   engine: Engine;
   scene: Scene;
@@ -369,6 +375,7 @@ function applyTopCameraView(camera: ArcRotateCamera): void {
 export function createBabylonViewport(
   canvas: HTMLCanvasElement,
   onRuntimeStatus?: BabylonViewportRuntimeStatusCallback,
+  options: BabylonViewportOptions = {},
 ): BabylonViewport {
   assertWebGLSupported();
 
@@ -390,7 +397,9 @@ export function createBabylonViewport(
     EDITOR_CAMERA_DEFAULT_TARGET.clone(),
     scene,
   );
-  camera.attachControl(canvas, true);
+  if (options.allowCameraControl ?? true) {
+    camera.attachControl(canvas, true);
+  }
   camera.minZ = EDITOR_CAMERA_MIN_Z_METERS;
   camera.lowerRadiusLimit = EDITOR_CAMERA_MIN_RADIUS_METERS;
   camera.maxZ = SCENE_VIEW_DISTANCE_DEFAULT;
@@ -400,7 +409,10 @@ export function createBabylonViewport(
   const light = new HemisphericLight('EditorLight', new Vector3(0, 1, 0), scene);
   light.intensity = 0.8;
 
-  const editorGround = createEditorGround(scene, DEFAULT_EDITOR_GRID_SETTINGS);
+  const editorGround = createEditorGround(scene, {
+    ...DEFAULT_EDITOR_GRID_SETTINGS,
+    visible: options.showGrid ?? DEFAULT_EDITOR_GRID_SETTINGS.visible,
+  });
   let disposed = false;
   let contextLost = false;
   let renderFailed = false;

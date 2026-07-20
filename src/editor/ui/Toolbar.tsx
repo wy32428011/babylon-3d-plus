@@ -24,6 +24,13 @@ import type {
   TransformTool,
 } from '../store/editorStore';
 import { SCENE_LENGTH_UNIT_SYMBOL } from '../model/sceneUnits';
+import {
+  createDeploymentToolbarDetail,
+  getDeploymentStageLabel,
+  type DeploymentExportStatus,
+  type DeploymentExportViewProgress,
+} from '../deployment/deploymentExport';
+import { ToolbarTaskProgress } from '../deployment/ToolbarTaskProgress';
 
 const TRANSFORM_TOOL_LABELS: Record<TransformTool, string> = {
   translate: '移动',
@@ -48,6 +55,7 @@ const TOOLBAR_ICONS = {
   redo: '↷',
   save: '💾',
   load: '📂',
+  deployment: '📦',
   cad: '▧',
   mqtt: 'MQ',
 } as const;
@@ -116,6 +124,10 @@ type ToolbarProps = {
   onRedo: () => void;
   onSaveScene: () => void;
   onLoadScene: () => void;
+  onOpenDeploymentExport: () => void;
+  deploymentExportStatus: DeploymentExportStatus;
+  deploymentExportProgress: DeploymentExportViewProgress | null;
+  deploymentExportBusy: boolean;
   onImportCadReference: () => void;
   mqttConfig: MqttConfig;
   mqttConfigDialogOpen: boolean;
@@ -165,6 +177,7 @@ export function Toolbar(props: ToolbarProps) {
   const [previewPayload, setPreviewPayload] = useState('');
   const [previewResult, setPreviewResult] = useState<MqttPreviewResult | null>(null);
   const isPreview = props.runtimeMode === 'preview';
+  const deploymentExportProgress = props.deploymentExportProgress;
   const [previewError, setPreviewError] = useState('');
   const mqttRuntimeStatus = useSyncExternalStore(
     mqttRuntimeStatusStore.subscribe,
@@ -479,7 +492,7 @@ export function Toolbar(props: ToolbarProps) {
       <ToolbarIconButton disabled={!props.canUndo} icon={TOOLBAR_ICONS.undo} label="撤销" onClick={props.onUndo} />
       <ToolbarIconButton disabled={!props.canRedo} icon={TOOLBAR_ICONS.redo} label="重做" onClick={props.onRedo} />
       <ToolbarIconButton
-        disabled={isPreview || Boolean(props.cadImportProgress?.active)}
+        disabled={isPreview || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy}
         icon="▶"
         label="运行"
         onClick={props.onStartRuntimePreview}
@@ -493,7 +506,7 @@ export function Toolbar(props: ToolbarProps) {
         {isPreview ? MQTT_STATUS_LABELS[mqttRuntimeStatus.state] : '编辑中'}
       </span>
       <ToolbarIconButton
-        disabled={props.readOnly || Boolean(props.cadImportProgress?.active)}
+        disabled={props.readOnly || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy}
         icon={TOOLBAR_ICONS.cad}
         label="导入CAD参考图"
         onClick={props.onImportCadReference}
@@ -506,22 +519,27 @@ export function Toolbar(props: ToolbarProps) {
         onClick={props.onOpenMqttConfig}
       />
       {props.cadImportProgress ? (
-        <div className="cad-import-progress" role="status" aria-live="polite">
-          <div className="cad-import-progress-header">
-            <strong>{props.cadImportProgress.label}</strong>
-            <span>{props.cadImportProgress.percent}%</span>
-          </div>
-          <div className="cad-import-progress-track" aria-hidden="true">
-            <div
-              className="cad-import-progress-fill"
-              style={{ width: `${props.cadImportProgress.percent}%` }}
-            />
-          </div>
-          <p title={props.cadImportProgress.detail}>{props.cadImportProgress.detail}</p>
-        </div>
+        <ToolbarTaskProgress
+          detail={props.cadImportProgress.detail}
+          label={props.cadImportProgress.label}
+          percent={props.cadImportProgress.percent}
+        />
       ) : null}
       <ToolbarIconButton disabled={props.readOnly} icon={TOOLBAR_ICONS.save} label="保存场景" onClick={props.onSaveScene} />
       <ToolbarIconButton disabled={props.readOnly} icon={TOOLBAR_ICONS.load} label="加载场景" onClick={props.onLoadScene} />
+      <ToolbarIconButton
+        disabled={isPreview || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy}
+        icon={TOOLBAR_ICONS.deployment}
+        label="导出部署工程"
+        onClick={props.onOpenDeploymentExport}
+      />
+      {props.deploymentExportBusy && deploymentExportProgress ? (
+        <ToolbarTaskProgress
+          detail={createDeploymentToolbarDetail(deploymentExportProgress)}
+          label={getDeploymentStageLabel(deploymentExportProgress.stage, props.deploymentExportStatus)}
+          percent={deploymentExportProgress.percent}
+        />
+      ) : null}
       {props.mqttConfigDialogOpen ? (
         <div
           className="mqtt-config-dialog-backdrop"
