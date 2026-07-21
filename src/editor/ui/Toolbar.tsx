@@ -31,6 +31,7 @@ import {
   type DeploymentExportViewProgress,
 } from '../deployment/deploymentExport';
 import { ToolbarTaskProgress } from '../deployment/ToolbarTaskProgress';
+import { APPLICATION_NAME, BrandLogo } from './BrandLogo';
 
 const TRANSFORM_TOOL_LABELS: Record<TransformTool, string> = {
   translate: '移动',
@@ -382,7 +383,10 @@ export function Toolbar(props: ToolbarProps) {
 
   return (
     <header className="toolbar">
-      <strong className="toolbar-title">Babylon Unity-like Editor</strong>
+      <strong aria-label={APPLICATION_NAME} className="toolbar-title">
+        <BrandLogo className="toolbar-brand-logo" surface="dark" />
+        <span className="toolbar-product-name">3D EDITOR</span>
+      </strong>
       <ToolbarIconButton
         active={props.transformTool === 'translate'}
         disabled={props.readOnly}

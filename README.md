@@ -1,6 +1,12 @@
-# Babylon Electron Unity-like Editor
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="src/assets/branding/zending-logo-on-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="src/assets/branding/zending-logo-on-light.png">
+  <img alt="ZENDING" src="src/assets/branding/zending-logo-on-light.png" width="520">
+</picture>
 
-Babylon Electron Unity-like Editor 是一个基于 Electron、Vite、React、TypeScript 与 Babylon.js 的桌面 3D 编辑器原型项目。
+# ZENDING 3D EDITOR
+
+ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babylon.js 的桌面 3D 编辑器原型项目。
 
 ## 当前目标
 
@@ -636,13 +642,13 @@ npm run smoke:packaged:win
 安装包默认输出到：
 
 ```text
-release/Babylon-3D-Editor-Setup-0.1.0-x64.exe
+release/ZENDING-3D-EDITOR-Setup-0.1.0-x64.exe
 ```
 
 免安装验证程序默认输出到：
 
 ```text
-release/win-unpacked/Babylon 3D Editor.exe
+release/win-unpacked/ZENDING 3D EDITOR.exe
 ```
 
 ### 安装与数据目录

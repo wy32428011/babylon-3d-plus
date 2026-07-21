@@ -1,5 +1,6 @@
 {
-  "name": "babylon-electron-unity-editor",
+  "name": "zending-3d-editor",
+  "productName": "ZENDING 3D EDITOR",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -59,8 +60,7 @@
   "description": "面向工业场景搭建、模型参数化与 MQTT 运行预览的 Babylon.js 桌面编辑器。",
   "build": {
     "appId": "com.babylon3d.editor",
-    "productName": "Babylon 3D Editor",
-    "copyright": "Copyright © 2026 Babylon 3D Editor",
+    "copyright": "Copyright © 2026 ZENDING 3D EDITOR",
     "asar": true,
     "directories": {
       "output": "release",
@@ -69,6 +69,7 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "build/icon.ico",
       "package.json"
     ],
     "extraResources": [
@@ -90,7 +91,7 @@
           ]
         }
       ],
-      "artifactName": "Babylon-3D-Editor-Setup-${version}-${arch}.${ext}"
+      "artifactName": "ZENDING-3D-EDITOR-Setup-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -98,8 +99,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Babylon 3D Editor",
-      "uninstallDisplayName": "Babylon 3D Editor",
+      "shortcutName": "ZENDING 3D EDITOR",
+      "uninstallDisplayName": "ZENDING 3D EDITOR",
       "deleteAppDataOnUninstall": false
     }
   }

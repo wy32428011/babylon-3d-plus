@@ -993,7 +993,7 @@ function assertNoLocalMachinePaths(value: unknown, location = '$', seen = { coun
 
 /** 生成部署包内 README，说明运行方式与安全边界。 */
 function createDeploymentReadme(exportName: string): string {
-  return `# ${exportName}\n\n此目录是 Babylon 3D Editor 导出的只读 Web 部署工程。\n\n## 使用方式\n\n1. 将整个目录部署到支持静态文件的 HTTP/HTTPS 服务器。\n2. 不要直接双击 index.html；浏览器需要通过 HTTP/HTTPS 加载模型、脚本和 Worker。\n3. 页面、资源路径和 MQTT 配置位于 runtime-config.json，修改后刷新页面即可生效。\n4. MQTT 是否启用取自安全清理后的场景配置；本地模拟器默认关闭，地址必须使用 ws:// 或 wss://，且配置中不得包含账号、密码或长期 Token。\n\n## 目录说明\n\n- index.html / assets：只读 Web Viewer。\n- runtime-config.json：部署期可修改配置。\n- project/scene.json：已移除本机路径的运行时场景。\n- project/asset-manifest.json：资源 URL、相对路径、大小和 SHA-256。\n- project/assets：模型、环境、CAD、脚本与贴图资源。\n\n带 .model.ts 外置脚本的工程需要部署站点 CSP 允许可信脚本运行链路所需的 unsafe-eval。\n`;
+  return `# ${exportName}\n\n此目录是 ZENDING 3D EDITOR 导出的只读 Web 部署工程。\n\n## 使用方式\n\n1. 将整个目录部署到支持静态文件的 HTTP/HTTPS 服务器。\n2. 不要直接双击 index.html；浏览器需要通过 HTTP/HTTPS 加载模型、脚本和 Worker。\n3. 页面、资源路径和 MQTT 配置位于 runtime-config.json，修改后刷新页面即可生效。\n4. MQTT 是否启用取自安全清理后的场景配置；本地模拟器默认关闭，地址必须使用 ws:// 或 wss://，且配置中不得包含账号、密码或长期 Token。\n\n## 目录说明\n\n- index.html / assets：只读 Web Viewer。\n- runtime-config.json：部署期可修改配置。\n- project/scene.json：已移除本机路径的运行时场景。\n- project/asset-manifest.json：资源 URL、相对路径、大小和 SHA-256。\n- project/assets：模型、环境、CAD、脚本与贴图资源。\n\n带 .model.ts 外置脚本的工程需要部署站点 CSP 允许可信脚本运行链路所需的 unsafe-eval。\n`;
 }
 
 /** 读取长度受限的字符串字段。 */
