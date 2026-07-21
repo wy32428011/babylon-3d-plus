@@ -208,3 +208,62 @@ export type MqttIpcEvent =
       payloadText: string;
       receivedAt: number;
     };
+/** Web 部署工程的输出形式。 */
+export type DeploymentExportFormat = 'directory' | 'zip';
+
+/** Web 部署工程导出的执行阶段。 */
+export type DeploymentExportPhase =
+  | 'preflight'
+  | 'copy-template'
+  | 'copy-assets'
+  | 'write-metadata'
+  | 'archive'
+  | 'publish';
+
+/** renderer 发起 Web 部署工程导出的请求。 */
+export type DeploymentExportRequest = {
+  requestId: string;
+  suggestedName: string;
+  format: DeploymentExportFormat;
+  sceneContent: string;
+};
+
+/** 主进程向当前 renderer 广播的 Web 部署工程导出进度。 */
+export type DeploymentExportProgress = {
+  requestId: string;
+  phase: DeploymentExportPhase;
+  detail: string;
+  percent: number;
+  completedFiles: number;
+  totalFiles: number;
+  copiedBytes: number;
+  totalBytes: number;
+};
+
+/** Web 部署工程导出结果；取消时 outputPath 为 null。 */
+export type DeploymentExportResult = {
+  requestId: string;
+  canceled: boolean;
+  format: DeploymentExportFormat;
+  outputPath: string | null;
+  fileCount: number;
+  totalBytes: number;
+  externalAssetCount: number;
+  warnings: string[];
+};
+
+/** 取消当前 Web 部署工程导出的请求。 */
+export type DeploymentExportCancelRequest = {
+  requestId: string;
+};
+
+/** 在文件管理器中定位已完成导出结果的请求。 */
+export type DeploymentExportRevealRequest = {
+  requestId: string;
+};
+
+/** 兼容按动作在前命名的取消请求类型。 */
+export type CancelDeploymentExportRequest = DeploymentExportCancelRequest;
+
+/** 兼容按动作在前命名的定位请求类型。 */
+export type RevealDeploymentExportRequest = DeploymentExportRevealRequest;

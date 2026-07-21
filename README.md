@@ -1,6 +1,12 @@
-# Babylon Electron Unity-like Editor
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="src/assets/branding/zending-logo-on-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="src/assets/branding/zending-logo-on-light.png">
+  <img alt="ZENDING" src="src/assets/branding/zending-logo-on-light.png" width="520">
+</picture>
 
-Babylon Electron Unity-like Editor 是一个基于 Electron、Vite、React、TypeScript 与 Babylon.js 的桌面 3D 编辑器原型项目。
+# ZENDING 3D EDITOR
+
+ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babylon.js 的桌面 3D 编辑器原型项目。
 
 ## 当前目标
 
@@ -590,7 +596,7 @@ npm run build
 - Play Mode 后续增强：已具备 MQTT 运行预览的编辑/运行隔离入口；后续补充通用脚本 Play Mode、暂停/单步、运行态调试和更多运行时能力。
 - 脚本组件：为实体挂载脚本逻辑与自定义组件。
 - 动画、物理、粒子、Terrain：补充完整 3D 编辑器常见运行时与内容创作能力。
-- 构建导出与插件系统：支持项目打包导出，并提供可扩展的编辑器插件机制。
+- 插件系统：后续提供可扩展的编辑器插件机制。
 ## Shelf 多穿货架参数化修复记录
 - 2026-07-17：Shelf `layerCount` 与 `columnCount` 均支持 `1..100`。当层/列/双深组合会超过逐节点生成阈值时，参数脚本自动切换为高密度 `dense batch + thin instance` 渲染：每个可渲染源叶 Mesh 只创建一个批次 Mesh，重复货格通过一次性矩阵缓冲提交，场景节点保持批次级；低密度路径继续保留原 `cloneSingleNode` 行为。100 层 × 100 列 × 双深 smoke 统计为 `denseBatch=18`、`thinInstances=121608`、`mesh=36`，低密度 88/128 回归保持不变。视觉页 `output/playwright/shelf-visual-check.html?dense=1` 会自动取景并显示 effective layers/columns、mesh/node、thin instance 与 FPS 采样。
 - 2026-07-17：Shelf 普通场景实体与模型生成器输出改为共享源 `AssetContainer` + `InstancedMesh`：同一资源签名只加载一次 GLB，实体继续保留独立根节点、参数值、外置脚本、拾取 metadata、显隐/锁定和 Gizmo。参数脚本无需修改，其层/列/双深生成节点的子 Mesh 会继续保持实例化；实例选择改用单个共享 `SelectionOutlineLayer`，普通模型仍保留 `HighlightLayer`。动态修改 `layerCount`/`columnCount` 后，运行时会在 `clearSelection()` 与 `addSelection()` 之间按 source mesh 补齐公开 `instancedBuffers` 容器，避免 Babylon 重新注册 `instanceSelectionId` 时写入空实例缓冲。新增引用计数回收与 `npm run smoke:shelf-instancing` 定向验证，详细边界见 `docs/shelf-shared-instancing.md`。
@@ -602,6 +608,13 @@ npm run build
 - 旋转语义：宽、高、深的包围盒读取和克隆偏移改为模型局部 X/Y/Z 在世界空间中的投影方向，模型整体旋转后仍沿货架自身方向参数化。
 - 验证组合：默认 1 层 1 列、3 层 4 列、2 层 3 列双深、旋转后的多层多列双深组合。源包 `F:\3d-models\models\Shelf\shelf.model.ts` 与资产副本 `F:\3d-models\models\Assets\Models\Shelf\shelf.model.ts` 必须保持同步。
 
+## 场景 Web 部署导出
+
+Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，自动收集普通模型、模型生成器目标、环境、DXF、模型脚本与贴图，输出可部署目录或 ZIP。导出结果使用独立只读 Web Viewer，不包含编辑器界面和 Electron 运行环境。
+
+部署包通过根目录 `runtime-config.json` 外置页面、资源和 MQTT 配置；修改 JSON 后刷新页面即可生效。真实 MQTT 仅支持 `ws://` / `wss://`，静态 JSON 不应保存用户名、密码或长期 Token。部署包必须通过 HTTP/HTTPS 静态服务器访问，不支持直接双击 `index.html`。
+
+完整目录结构、配置字段、CSP、外部资源、安全边界和部署说明见 [场景 Web 部署导出](docs/scene-web-export.md)。
 ## Windows 安装包构建与安装
 
 项目使用 Electron + electron-builder 生成 Windows x64 NSIS 安装包。生产构建使用相对资源路径，因此安装后由 `file://` 加载 renderer 时，React 页面、Babylon.js 分块、CAD Worker、样式和图片仍可正常读取。
@@ -629,13 +642,13 @@ npm run smoke:packaged:win
 安装包默认输出到：
 
 ```text
-release/Babylon-3D-Editor-Setup-0.1.0-x64.exe
+release/ZENDING-3D-EDITOR-Setup-0.1.0-x64.exe
 ```
 
 免安装验证程序默认输出到：
 
 ```text
-release/win-unpacked/Babylon 3D Editor.exe
+release/win-unpacked/ZENDING 3D EDITOR.exe
 ```
 
 ### 安装与数据目录

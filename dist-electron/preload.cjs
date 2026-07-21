@@ -19,6 +19,18 @@ contextBridge.exposeInMainWorld('editorApi', {
     /** 透传环境模型单 GLB 文件导入请求。 */
     importEnvironmentModelFile: () => ipcRenderer.invoke('assets:importEnvironmentModelFile'),
     listModelPackageVariants: (request) => ipcRenderer.invoke('assets:listModelPackageVariants', request),
+    /** 发起当前场景的 Web 部署工程导出。 */
+    exportWebProject: (request) => ipcRenderer.invoke('deployment-export:start', request),
+    /** 取消当前窗口中 requestId 对应的导出任务。 */
+    cancelWebProjectExport: (request) => ipcRenderer.invoke('deployment-export:cancel', request),
+    /** 订阅当前窗口的 Web 部署工程导出进度。 */
+    onWebProjectExportProgress: (handler) => {
+        const listener = (_event, payload) => handler(payload);
+        ipcRenderer.on('deployment-export:progress', listener);
+        return () => ipcRenderer.removeListener('deployment-export:progress', listener);
+    },
+    /** 在文件管理器中定位已经成功发布的导出结果。 */
+    revealWebProjectExport: (request) => ipcRenderer.invoke('deployment-export:reveal', request),
     mqttConfigure: (request) => ipcRenderer.invoke('mqtt:configure', request),
     mqttDisconnect: () => ipcRenderer.invoke('mqtt:disconnect'),
     mqttGetStatus: () => ipcRenderer.invoke('mqtt:getStatus'),

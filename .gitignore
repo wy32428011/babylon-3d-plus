@@ -10,3 +10,4 @@ release/
 CLAUDE.md
 *.tsbuildinfo
 temp.log
+dist-viewer-template/

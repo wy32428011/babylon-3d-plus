@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   AssetEntry,
+  DeploymentExportCancelRequest,
+  DeploymentExportProgress,
+  DeploymentExportRequest,
+  DeploymentExportResult,
+  DeploymentExportRevealRequest,
   ImportCadFileResult,
   ImportEnvironmentModelFileResult,
   ImportModelFolderRequest,
@@ -42,6 +47,21 @@ contextBridge.exposeInMainWorld('editorApi', {
   importEnvironmentModelFile: (): Promise<ImportEnvironmentModelFileResult> => ipcRenderer.invoke('assets:importEnvironmentModelFile'),
   listModelPackageVariants: (request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> =>
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
+  /** 发起当前场景的 Web 部署工程导出。 */
+  exportWebProject: (request: DeploymentExportRequest): Promise<DeploymentExportResult> =>
+    ipcRenderer.invoke('deployment-export:start', request),
+  /** 取消当前窗口中 requestId 对应的导出任务。 */
+  cancelWebProjectExport: (request: DeploymentExportCancelRequest): Promise<boolean> =>
+    ipcRenderer.invoke('deployment-export:cancel', request),
+  /** 订阅当前窗口的 Web 部署工程导出进度。 */
+  onWebProjectExportProgress: (handler: (progress: DeploymentExportProgress) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: DeploymentExportProgress) => handler(payload);
+    ipcRenderer.on('deployment-export:progress', listener);
+    return () => ipcRenderer.removeListener('deployment-export:progress', listener);
+  },
+  /** 在文件管理器中定位已经成功发布的导出结果。 */
+  revealWebProjectExport: (request: DeploymentExportRevealRequest): Promise<void> =>
+    ipcRenderer.invoke('deployment-export:reveal', request),
   mqttConfigure: (request: MqttIpcConfigureRequest): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:configure', request),
   mqttDisconnect: (): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:disconnect'),
   mqttGetStatus: (): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:getStatus'),

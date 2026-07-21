@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { APPLICATION_NAME, BrandLogo } from '../ui/BrandLogo';
 
 type HomePageProps = {
   onEnterBlankEditor: () => void;
@@ -191,11 +192,11 @@ export function HomePage({
     <main className="home-page" aria-label="编辑器首页">
       <header className="home-topbar">
         <div className="home-brand">
-          <span className="home-brand-mark" aria-hidden="true" />
-          <div>
-            <h1>Babylon Scene Editor</h1>
-            <p>项目启动台</p>
-          </div>
+          <h1 aria-label={APPLICATION_NAME}>
+            <BrandLogo className="home-brand-logo" surface="dark" />
+            <span className="home-brand-product">3D EDITOR</span>
+          </h1>
+          <p>项目启动台</p>
         </div>
         <div className="home-actions" aria-label="首页操作">
           <button onClick={onNewScene} type="button">新建场景</button>

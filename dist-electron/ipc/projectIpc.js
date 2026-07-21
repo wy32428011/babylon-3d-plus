@@ -132,46 +132,82 @@ function validateRemoveRecentWorkspaceItemRequest(request) {
         path: normalizeFilePath(candidate.path),
     };
 }
+/** 从用户明确保存或打开的场景中登记模型、生成器、环境、脚本和 CAD 文件授权。 */
 function authorizeModelAssetsFromSceneContent(content) {
     try {
         const parsed = JSON.parse(content);
         if (!isPlainObject(parsed) || parsed.version !== 1 || !isPlainObject(parsed.scene))
             return;
-        if (!isPlainObject(parsed.scene.entities))
-            return;
-        for (const entity of Object.values(parsed.scene.entities)) {
-            if (!isPlainObject(entity) || !isPlainObject(entity.components))
-                continue;
-            const modelAsset = entity.components.modelAsset;
-            if (isPlainObject(modelAsset) && typeof modelAsset.sourcePath === 'string') {
-                const sourcePath = normalizeFilePath(modelAsset.sourcePath);
-                const extension = sourcePath.toLowerCase();
-                if (extension.endsWith('.gltf') || extension.endsWith('.glb')) {
-                    authorizeAssetFile(sourcePath);
-                }
-                if (Array.isArray(modelAsset.scriptAssets)) {
-                    for (const scriptAsset of modelAsset.scriptAssets) {
-                        if (!isPlainObject(scriptAsset) || typeof scriptAsset.path !== 'string')
-                            continue;
-                        const scriptPath = normalizeFilePath(scriptAsset.path);
-                        if (scriptPath.toLowerCase().endsWith('.model.ts')) {
-                            authorizeAssetFile(scriptPath);
-                        }
-                    }
-                }
+        if (isPlainObject(parsed.scene.entities)) {
+            for (const entity of Object.values(parsed.scene.entities)) {
+                if (!isPlainObject(entity) || !isPlainObject(entity.components))
+                    continue;
+                authorizeSceneModelAsset(entity.components.modelAsset);
+                authorizeSceneModelGenerator(entity.components.modelGenerator);
+                const cadReference = entity.components.cadReference;
+                if (!isPlainObject(cadReference) || typeof cadReference.sourcePath !== 'string')
+                    continue;
+                const cadPath = normalizeFilePath(cadReference.sourcePath);
+                if (cadPath.toLowerCase().endsWith('.dxf'))
+                    authorizeAssetFile(cadPath);
             }
-            const cadReference = entity.components.cadReference;
-            if (!isPlainObject(cadReference) || typeof cadReference.sourcePath !== 'string')
-                continue;
-            const cadPath = normalizeFilePath(cadReference.sourcePath);
-            if (cadPath.toLowerCase().endsWith('.dxf')) {
-                authorizeAssetFile(cadPath);
+        }
+        if (isPlainObject(parsed.scene.sceneSettings) && isPlainObject(parsed.scene.sceneSettings.environment)) {
+            const variants = parsed.scene.sceneSettings.environment.variants;
+            if (Array.isArray(variants)) {
+                for (const variant of variants) {
+                    if (!isPlainObject(variant) || typeof variant.sourcePath !== 'string')
+                        continue;
+                    authorizeSceneModelFile(variant.sourcePath);
+                }
             }
         }
     }
     catch {
-        // 场景内容的完整格式校验由 renderer 的 SceneSerializer 负责；这里失败时只是不额外授权模型文件。
+        // 场景内容的完整格式校验由 renderer 的 SceneSerializer 负责；这里失败时只是不额外授权资源文件。
     }
+}
+/** 登记普通模型资产及其外置 .model.ts 脚本。 */
+function authorizeSceneModelAsset(value) {
+    const modelAsset = value;
+    if (!isPlainObject(modelAsset))
+        return;
+    if (typeof modelAsset.sourcePath === 'string')
+        authorizeSceneModelFile(modelAsset.sourcePath);
+    if (!Array.isArray(modelAsset.scriptAssets))
+        return;
+    for (const scriptAsset of modelAsset.scriptAssets) {
+        if (!isPlainObject(scriptAsset) || typeof scriptAsset.path !== 'string')
+            continue;
+        const scriptPath = normalizeFilePath(scriptAsset.path);
+        if (scriptPath.toLowerCase().endsWith('.model.ts'))
+            authorizeAssetFile(scriptPath);
+    }
+}
+/** 登记模型生成器默认目标和全部规则目标中的模型资产。 */
+function authorizeSceneModelGenerator(value) {
+    if (!isPlainObject(value))
+        return;
+    authorizeSceneModelGeneratorTarget(value.defaultTarget);
+    if (!Array.isArray(value.rules))
+        return;
+    for (const rule of value.rules) {
+        if (isPlainObject(rule))
+            authorizeSceneModelGeneratorTarget(rule.target);
+    }
+}
+/** 登记单个模型生成器 model 目标；基础 mesh 目标无需本地文件授权。 */
+function authorizeSceneModelGeneratorTarget(value) {
+    if (!isPlainObject(value) || value.kind !== 'model')
+        return;
+    authorizeSceneModelAsset(value.modelAsset);
+}
+/** 按模型/环境允许的扩展名登记单个本地文件。 */
+function authorizeSceneModelFile(value) {
+    const sourcePath = normalizeFilePath(value);
+    const extension = sourcePath.toLowerCase();
+    if (extension.endsWith('.gltf') || extension.endsWith('.glb'))
+        authorizeAssetFile(sourcePath);
 }
 function isPlainObject(value) {
     return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;

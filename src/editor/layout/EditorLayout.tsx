@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { DeploymentExportDialog } from '../deployment/DeploymentExportDialog';
+import { useDeploymentExport } from '../deployment/useDeploymentExport';
 import { ConsolePanel } from '../panels/ConsolePanel';
 import { HierarchyPanel } from '../panels/HierarchyPanel';
 import { InspectorPanel } from '../panels/InspectorPanel';
@@ -27,6 +29,8 @@ function isKeyboardEditableTarget(target: EventTarget | null): boolean {
 export function EditorLayout() {
   const [isConsoleDialogOpen, setConsoleDialogOpen] = useState(false);
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
+  const [isDeploymentExportDialogOpen, setDeploymentExportDialogOpen] = useState(false);
+  const deploymentExport = useDeploymentExport();
   const [runtimePreviewError, setRuntimePreviewError] = useState<string | null>(null);
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
@@ -172,6 +176,13 @@ export function EditorLayout() {
 
   /** 运行按钮先校验 MQTT/模拟器配置，失败时保持编辑态并打开配置弹窗。 */
   function handleStartRuntimePreview(): void {
+    if (deploymentExport.isBusy) {
+      const message = '请等待部署工程导出完成。';
+      setRuntimePreviewError(message);
+      pushLog(`运行预览已阻止：${message}`);
+      return;
+    }
+
     if (cadImportProgress?.active) {
       const message = '请等待 CAD 导入完成。';
       setRuntimePreviewError(message);
@@ -231,6 +242,10 @@ export function EditorLayout() {
         onRedo={redo}
         onSaveScene={() => void saveScene()}
         onLoadScene={() => void loadScene()}
+        onOpenDeploymentExport={() => setDeploymentExportDialogOpen(true)}
+        deploymentExportStatus={deploymentExport.state.status}
+        deploymentExportProgress={deploymentExport.state.progress}
+        deploymentExportBusy={deploymentExport.isBusy}
         onImportCadReference={() => void importCadReference()}
         mqttConfig={mqttConfig}
         mqttConfigDialogOpen={isMqttConfigDialogOpen}
@@ -248,6 +263,11 @@ export function EditorLayout() {
         canDelete={!isRuntimePreview && canDelete}
         canUndo={!isRuntimePreview && canUndo}
         canRedo={!isRuntimePreview && canRedo}
+      />
+      <DeploymentExportDialog
+        controller={deploymentExport}
+        onClose={() => setDeploymentExportDialogOpen(false)}
+        open={isDeploymentExportDialogOpen}
       />
       <div className={styles.workspace}>
         <aside className={styles.leftColumn}>

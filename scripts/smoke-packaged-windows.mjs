@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
-const defaultExecutablePath = path.join(projectRoot, 'release', 'win-unpacked', 'Babylon 3D Editor.exe');
+const defaultExecutablePath = path.join(projectRoot, 'release', 'win-unpacked', 'ZENDING 3D EDITOR.exe');
 const executablePath = path.resolve(process.argv[2] ?? defaultExecutablePath);
 const STARTUP_TIMEOUT_MS = 30000;
 const POLL_INTERVAL_MS = 300;

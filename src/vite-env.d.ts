@@ -196,6 +196,59 @@ type MqttIpcEvent =
       receivedAt: number;
     };
 
+/** Web 部署工程的输出形式。 */
+type DeploymentExportFormat = 'directory' | 'zip';
+
+/** Web 部署工程导出的执行阶段。 */
+type DeploymentExportPhase =
+  | 'preflight'
+  | 'copy-template'
+  | 'copy-assets'
+  | 'write-metadata'
+  | 'archive'
+  | 'publish';
+
+/** renderer 发起 Web 部署工程导出的请求。 */
+type DeploymentExportRequest = {
+  requestId: string;
+  suggestedName: string;
+  format: DeploymentExportFormat;
+  sceneContent: string;
+};
+
+/** 主进程向当前 renderer 广播的 Web 部署工程导出进度。 */
+type DeploymentExportProgress = {
+  requestId: string;
+  phase: DeploymentExportPhase;
+  detail: string;
+  percent: number;
+  completedFiles: number;
+  totalFiles: number;
+  copiedBytes: number;
+  totalBytes: number;
+};
+
+/** Web 部署工程导出结果；取消时 outputPath 为 null。 */
+type DeploymentExportResult = {
+  requestId: string;
+  canceled: boolean;
+  format: DeploymentExportFormat;
+  outputPath: string | null;
+  fileCount: number;
+  totalBytes: number;
+  externalAssetCount: number;
+  warnings: string[];
+};
+
+/** 取消当前 Web 部署工程导出的请求。 */
+type DeploymentExportCancelRequest = {
+  requestId: string;
+};
+
+/** 在文件管理器中定位已完成导出结果的请求。 */
+type DeploymentExportRevealRequest = {
+  requestId: string;
+};
 interface Window {
   editorApi: {
     version: string;
@@ -213,6 +266,10 @@ interface Window {
     importModelFolder: (request: ImportModelFolderRequest) => Promise<ImportModelFolderResult>;
     importEnvironmentModelFile: () => Promise<ImportEnvironmentModelFileResult>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
+    exportWebProject: (request: DeploymentExportRequest) => Promise<DeploymentExportResult>;
+    cancelWebProjectExport: (request: DeploymentExportCancelRequest) => Promise<boolean>;
+    onWebProjectExportProgress: (handler: (progress: DeploymentExportProgress) => void) => () => void;
+    revealWebProjectExport: (request: DeploymentExportRevealRequest) => Promise<void>;
     mqttConfigure?: (request: MqttIpcConfigureRequest) => Promise<MqttIpcStatus>;
     mqttDisconnect?: () => Promise<MqttIpcStatus>;
     mqttGetStatus?: () => Promise<MqttIpcStatus>;

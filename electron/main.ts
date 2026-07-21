@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
+import { disposeAllDeploymentExportTasks, registerDeploymentExportIpc } from './ipc/deploymentExportIpc.js';
 import { disposeAllMqttIpcClients, registerMqttIpc } from './ipc/mqttIpc.js';
 import { registerProjectIpc } from './ipc/projectIpc.js';
 
@@ -135,6 +136,7 @@ function createMainWindow(): void {
     minWidth: 1180,
     minHeight: 720,
     backgroundColor: '#1e1e1e',
+    icon: path.join(__dirname, '../build/icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -174,6 +176,7 @@ app.whenReady().then(() => {
   registerProjectIpc();
   registerAssetIpc();
   registerMqttIpc();
+  registerDeploymentExportIpc();
   createMainWindow();
 
   app.on('activate', () => {
@@ -190,5 +193,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  disposeAllDeploymentExportTasks();
   disposeAllMqttIpcClients();
 });

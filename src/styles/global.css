@@ -122,8 +122,26 @@ select {
 }
 
 .toolbar-title {
+  display: inline-flex;
+  align-items: flex-end;
   flex: 0 0 auto;
+  gap: 8px;
   margin-right: 4px;
+}
+
+.toolbar-brand-logo {
+  display: block;
+  width: 118px;
+  height: auto;
+}
+
+.toolbar-product-name {
+  padding-bottom: 2px;
+  color: #aebcc7;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  line-height: 1;
 }
 
 .toolbar-button.active {
@@ -172,7 +190,7 @@ select {
   width: 72px;
 }
 
-.cad-import-progress {
+.toolbar-task-progress {
   display: grid;
   flex: 0 0 238px;
   gap: 3px;
@@ -186,7 +204,7 @@ select {
   font-size: 11px;
 }
 
-.cad-import-progress-header {
+.toolbar-task-progress-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -195,30 +213,30 @@ select {
   line-height: 13px;
 }
 
-.cad-import-progress-header strong,
-.cad-import-progress-header span,
-.cad-import-progress p {
+.toolbar-task-progress-header strong,
+.toolbar-task-progress-header span,
+.toolbar-task-progress p {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.cad-import-progress-track {
+.toolbar-task-progress-track {
   height: 5px;
   overflow: hidden;
   border-radius: 999px;
   background: #172528;
 }
 
-.cad-import-progress-fill {
+.toolbar-task-progress-fill {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, #28c8d4, #78ec9b);
   transition: width 160ms ease-out;
 }
 
-.cad-import-progress p {
+.toolbar-task-progress p {
   margin: 0;
   color: #9fd2d8;
   line-height: 13px;
@@ -2023,20 +2041,17 @@ select {
 }
 
 .home-brand {
-  display: flex;
-  align-items: center;
+  display: grid;
+  align-content: center;
   min-width: 0;
-  gap: 12px;
+  gap: 2px;
 }
 
-.home-brand-mark {
+.home-brand-logo {
   display: block;
   flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
-  border: 2px solid #20dce9;
-  border-radius: 4px;
-  box-shadow: inset 0 0 0 5px #252526;
+  width: 178px;
+  height: auto;
 }
 
 .home-brand h1,
@@ -2049,12 +2064,23 @@ select {
 }
 
 .home-brand h1 {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
   overflow: hidden;
   color: #f0f0f0;
-  font-size: 20px;
-  line-height: 24px;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.home-brand-product {
+  padding-bottom: 2px;
+  color: #b7c6d1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  line-height: 1;
 }
 
 .home-brand p {
@@ -2707,4 +2733,368 @@ select {
 .model-generator-empty-hint,
 .model-generator-unit-hint {
   padding: 0 2px;
+}
+
+
+.toolbar-task-progress-success {
+  border-color: #3f7650;
+  color: #d9ffe4;
+  background: #203529;
+}
+
+.toolbar-task-progress-error {
+  border-color: #754545;
+  color: #ffd0d0;
+  background: #3b2323;
+}
+
+.toolbar-task-progress-canceled {
+  border-color: #686868;
+  color: #d0d0d0;
+  background: #303030;
+}
+
+.deployment-export-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  padding: 16px;
+  place-items: center;
+  background: rgb(0 0 0 / 58%);
+}
+
+.deployment-export-dialog {
+  display: grid;
+  gap: 12px;
+  width: min(680px, 100%);
+  max-height: calc(100vh - 32px);
+  padding: 18px;
+  overflow: auto;
+  border: 1px solid #505050;
+  border-radius: 6px;
+  color: #e2e2e2;
+  background: #252526;
+  box-shadow: 0 22px 54px rgb(0 0 0 / 58%);
+}
+
+.deployment-export-dialog button {
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid #555555;
+  border-radius: 3px;
+  color: #e0e0e0;
+  background: #3c3c3c;
+  cursor: pointer;
+}
+
+.deployment-export-dialog button:disabled,
+.deployment-export-dialog input:disabled,
+.deployment-export-dialog fieldset:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.deployment-export-dialog button:focus-visible,
+.deployment-export-dialog input:focus-visible {
+  outline: 2px solid #69a9ff;
+  outline-offset: 2px;
+}
+
+.deployment-export-dialog-header,
+.deployment-export-section-heading,
+.deployment-export-progress-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.deployment-export-dialog-header h2,
+.deployment-export-dialog-header p,
+.deployment-export-dialog-section h3,
+.deployment-export-progress-message,
+.deployment-export-current-file,
+.deployment-export-resource-detail {
+  margin: 0;
+}
+
+.deployment-export-dialog-header h2 {
+  color: #ffffff;
+  font-size: 17px;
+}
+
+.deployment-export-dialog-header p {
+  margin-top: 4px;
+  color: #9f9f9f;
+  font-size: 12px;
+}
+
+.deployment-export-dialog .deployment-export-dialog-close {
+  min-width: 32px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.deployment-export-dialog-section {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid #414141;
+  border-radius: 4px;
+  background: #202020;
+}
+
+.deployment-export-dialog-section h3 {
+  color: #eeeeee;
+  font-size: 13px;
+}
+
+.deployment-export-section-heading > span {
+  color: #9eabb0;
+  font-size: 11px;
+  text-align: right;
+}
+
+.deployment-export-dialog-field {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.deployment-export-dialog-field input {
+  width: 100%;
+  height: 30px;
+  min-width: 0;
+  padding: 0 9px;
+  border: 1px solid #555555;
+  border-radius: 3px;
+  color: #eeeeee;
+  background: #181818;
+}
+
+.deployment-export-dialog-field input[aria-invalid="true"] {
+  border-color: #c85b5b;
+}
+
+.deployment-export-output-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.deployment-export-output-options legend {
+  grid-column: 1 / -1;
+  margin-bottom: 2px;
+  color: #d7d7d7;
+  font-size: 12px;
+}
+
+.deployment-export-output-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid #464646;
+  border-radius: 4px;
+  background: #292929;
+  cursor: pointer;
+}
+
+.deployment-export-output-option.selected {
+  border-color: #2f86ff;
+  background: #20354e;
+}
+
+.deployment-export-output-option input {
+  margin: 2px 0 0;
+}
+
+.deployment-export-output-option span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.deployment-export-output-option strong {
+  color: #f1f1f1;
+  font-size: 12px;
+}
+
+.deployment-export-output-option small {
+  color: #a8a8a8;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: normal;
+}
+
+.deployment-export-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.deployment-export-summary-grid > div {
+  display: grid;
+  gap: 2px;
+  padding: 10px;
+  border: 1px solid #3e5358;
+  border-radius: 4px;
+  background: #1b2b2f;
+  text-align: center;
+}
+
+.deployment-export-summary-grid strong {
+  color: #bfeef3;
+  font-size: 20px;
+}
+
+.deployment-export-summary-grid span,
+.deployment-export-resource-detail {
+  color: #9eb7bb;
+  font-size: 11px;
+}
+
+.deployment-export-progress-heading {
+  align-items: center;
+  font-size: 12px;
+}
+
+.deployment-export-progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #121c1f;
+}
+
+.deployment-export-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2f86ff, #55d3d9);
+  transition: width 160ms ease-out;
+}
+
+.deployment-export-status-success .deployment-export-progress-fill {
+  background: linear-gradient(90deg, #3cad62, #79e39a);
+}
+
+.deployment-export-status-error .deployment-export-progress-fill {
+  background: #cc5d5d;
+}
+
+.deployment-export-status-canceled .deployment-export-progress-fill {
+  background: #777777;
+}
+
+.deployment-export-progress-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.deployment-export-progress-metrics > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid #383838;
+  background: #292929;
+  font-size: 11px;
+}
+
+.deployment-export-progress-metrics dt {
+  color: #9f9f9f;
+}
+
+.deployment-export-progress-metrics dd {
+  margin: 0;
+  color: #e6e6e6;
+}
+
+.deployment-export-progress-message,
+.deployment-export-current-file {
+  color: #b9c8cb;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.deployment-export-current-file,
+.deployment-export-result output {
+  padding: 7px 8px;
+  border: 1px solid #3d4e52;
+  color: #bfeef3;
+  background: #172428;
+  font-family: Consolas, monospace;
+}
+
+.deployment-export-warnings {
+  border-color: #6d5d33;
+  background: #312b1d;
+}
+
+.deployment-export-warnings ul {
+  display: grid;
+  gap: 5px;
+  max-height: 120px;
+  margin: 0;
+  padding-left: 20px;
+  overflow: auto;
+  color: #f0d89b;
+  font-size: 11px;
+  white-space: normal;
+}
+
+.deployment-export-result output {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.deployment-export-error {
+  margin: 0;
+  color: #ffabab;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.deployment-export-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.deployment-export-dialog .deployment-export-primary-button {
+  border-color: #1f74d6;
+  color: #ffffff;
+  background: #2f86ff;
+}
+
+.deployment-export-dialog .deployment-export-danger-button {
+  border-color: #8f4b4b;
+  color: #ffd6d6;
+  background: #3a1f1f;
+}
+
+@media (max-width: 560px) {
+  .deployment-export-output-options,
+  .deployment-export-summary-grid,
+  .deployment-export-progress-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .deployment-export-dialog-field {
+    grid-template-columns: 1fr;
+  }
 }
