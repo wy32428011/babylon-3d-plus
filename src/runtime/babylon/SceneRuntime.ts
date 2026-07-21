@@ -96,7 +96,7 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from './telemetry/specializedTelemetryBinding';
-import { resolveStackerStorageTargetOffsets } from './telemetry/stackerStorageLocation';
+import { resolveLocatorBoxIndex, resolveStackerStorageTargetOffsets, type StackerStorageTargetOffsets } from './telemetry/stackerStorageLocation';
 import {
   WarehouseFlowCoordinator,
   type WarehouseConveyorFrame,
@@ -480,6 +480,8 @@ export class SceneRuntime {
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly reportedMissingTargets = new Set<string>();
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
+  private readonly reportedInvalidStackerBoxTargets = new Set<string>();
+  private readonly lastReportedStackerTargetSignatures = new Map<string, string>();
   private readonly reportedFaults = new Map<string, string>();
   private readonly reportedStatuses = new Map<string, string>();
   private telemetryPreviewActive = false;
@@ -590,6 +592,9 @@ export class SceneRuntime {
     this.telemetryPreviewActive = false;
     this.genericTelemetryMotionRuntime.endPreview();
     this.disposeAllTelemetryRuntimeCargo();
+    for (const fetchRuntime of this.fetchRuntimes.values()) {
+      fetchRuntime.clearAllBatches();
+    }
     this.resetAllWarehouseFlows();
     for (const model of this.models.values()) {
       if (model.telemetryPreviewBaseline) {
@@ -1261,13 +1266,62 @@ export class SceneRuntime {
 
   /** 在 Locator 的 boxes 网格中根据列/层定位具体 box 的世界矩阵。 */
   private getLocatorBoxWorldMatrix(locator: LocatorRuntimeEntry, toX: number, toY: number): Matrix | null {
-    const columnIndex = toX - locator.startColumn;
-    const layerIndex = toY - 1;
-    const boxIndex = layerIndex * locator.columns + columnIndex;
-    const box = locator.boxes[boxIndex];
+    const boxIndex = resolveLocatorBoxIndex({
+      startColumn: locator.startColumn,
+      columns: locator.columns,
+      layers: locator.layers,
+      toX,
+      toY,
+    });
+    const box = boxIndex === null ? null : locator.boxes[boxIndex];
     if (!box) return null;
     box.computeWorldMatrix(true);
     return box.getWorldMatrix();
+  }
+
+  /** 解析堆垛机运动目标：设备网格匹配路径精确到格口支撑位，assetId 直查保持定位框根节点语义。 */
+  private resolveStackerTargetPosition(
+    locator: LocatorRuntimeEntry,
+    assetCode: string,
+    toX: number | null,
+    toY: number | null,
+    toZ: number | null,
+  ): Vector3 {
+    const rootPosition = locator.root.getAbsolutePosition();
+    if (!assetCode || toX === null || toY === null || toZ === null) return rootPosition;
+    return this.resolveLocatorBoxSupportPosition(locator, toX, toY) ?? rootPosition;
+  }
+
+  /** 解析目标格口的支撑位世界坐标：水平取 box 中心、高度取 box 底面，越界时返回 null 由调用方回退。 */
+  private resolveLocatorBoxSupportPosition(
+    locator: LocatorRuntimeEntry,
+    toX: number,
+    toY: number,
+  ): Vector3 | null {
+    const boxIndex = resolveLocatorBoxIndex({
+      startColumn: locator.startColumn,
+      columns: locator.columns,
+      layers: locator.layers,
+      toX,
+      toY,
+    });
+    const box = boxIndex === null ? null : locator.boxes[boxIndex];
+    if (!box) {
+      const reportKey = `${locator.assetId}:${toX}:${toY}`;
+      if (!this.reportedInvalidStackerBoxTargets.has(reportKey)) {
+        this.reportedInvalidStackerBoxTargets.add(reportKey);
+        this.pushLog(`库位 ${locator.assetId} 不存在格口 列${toX} 层${toY}，已回退定位框根节点。`);
+      }
+      return null;
+    }
+
+    const bounds = this.getMeshWorldBounds(box);
+    if (!bounds) return null;
+    return new Vector3(
+      (bounds.minimum.x + bounds.maximum.x) / 2,
+      bounds.minimum.y,
+      (bounds.minimum.z + bounds.maximum.z) / 2,
+    );
   }
 
   /** 将文件夹选中转换为子实体选中集合，用于在场景中高亮整组对象。 */
@@ -1959,6 +2013,8 @@ export class SceneRuntime {
     this.reportedMissingTargets.clear();
     this.reportedFaults.clear();
     this.reportedStatuses.clear();
+    this.reportedInvalidStackerBoxTargets.clear();
+    this.lastReportedStackerTargetSignatures.clear();
     for (const model of this.models.values()) {
       this.clearSpecializedTelemetryDiagnosticsForModel(model);
     }
@@ -2219,13 +2275,16 @@ export class SceneRuntime {
     this.reportStackerRuntimeState(snapshot, targetLocator);
     this.writeDeviceTelemetryMetadata(model, snapshot);
 
-    const targetPosition = targetLocator?.root.getAbsolutePosition() ?? null;
+    const targetPosition = targetLocator
+      ? this.resolveStackerTargetPosition(targetLocator, snapshot.assetCode, toX, toY, toZ)
+      : null;
     const targetOffsets = targetPosition ? this.resolveStackerTargetMotionOffsets(model, targetPosition) : null;
+    this.reportStackerTargetProjection(model, targetLocator, targetPosition, targetOffsets, toX, toY);
     this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds);
     this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds);
-    this.applyStackerForkMotion(model, snapshot, targetLocator, deltaSeconds);
+    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds);
     this.applyStackerNodeMotionOffsets(model);
-    this.applyStackerCargoMotion(model, snapshot, targetLocator);
+    this.applyStackerCargoMotion(model, snapshot, targetLocator, targetPosition);
     this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
   }
 
@@ -2947,6 +3006,35 @@ export class SceneRuntime {
     });
   }
 
+  /** 目标位变化时在 Console 打印一次行走/升降/货叉投影距离，便于联调核对格口级目标。 */
+  private reportStackerTargetProjection(
+    model: ModelRuntimeEntry,
+    targetLocator: LocatorRuntimeEntry | null,
+    targetPosition: Vector3 | null,
+    targetOffsets: StackerStorageTargetOffsets | null,
+    toX: number | null,
+    toY: number | null,
+  ): void {
+    const signature = targetLocator && targetPosition
+      ? `${targetLocator.assetId}:${toX}:${toY}:${targetPosition.x.toFixed(3)}:${targetPosition.y.toFixed(3)}:${targetPosition.z.toFixed(3)}`
+      : 'none';
+    if (this.lastReportedStackerTargetSignatures.get(model.assetCode) === signature) return;
+    this.lastReportedStackerTargetSignatures.set(model.assetCode, signature);
+    if (!targetLocator || !targetPosition || !targetOffsets) return;
+
+    const forkAxis = this.getModelAxis(model.root, 'x');
+    const referencePosition = this.getStackerTargetReferencePosition(model);
+    const forkProjection = Math.abs(Vector3.Dot(targetPosition.subtract(referencePosition), forkAxis));
+    const reach = this.readStackerForkReachConfig(model);
+    const stageLabel = forkProjection > reach.stageOne + 0.001 ? '两段' : '一段';
+    this.pushLog(
+      `堆垛机 ${model.assetCode} 目标 ${targetLocator.assetId}（列${toX} 层${toY}）：` +
+      `box 支撑位 (${targetPosition.x.toFixed(3)}, ${targetPosition.y.toFixed(3)}, ${targetPosition.z.toFixed(3)})，` +
+      `行走投影偏移 ${targetOffsets.travelOffset.toFixed(3)}m，升降投影偏移 ${targetOffsets.liftOffset.toFixed(3)}m，` +
+      `货叉投影距离 ${forkProjection.toFixed(3)}m（一段行程 ${reach.stageOne}m，判定${stageLabel}）。`,
+    );
+  }
+
   /** 读取并缓存前后一段货叉的初始世界中心，缺失货叉时回退到载货台。 */
   private getStackerTargetReferencePosition(model: ModelRuntimeEntry): Vector3 {
     const state = model.stackerTelemetry;
@@ -3043,10 +3131,9 @@ export class SceneRuntime {
   private applyStackerForkMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
-    targetLocator: LocatorRuntimeEntry | null,
+    targetPosition: Vector3 | null,
     deltaSeconds: number,
   ): void {
-    const targetPosition = targetLocator?.root.getAbsolutePosition() ?? null;
     const frontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
     const backMovement = readIntegerField(snapshot.fields, 'back_movement_z');
     const frontDistance = readNumberField(snapshot.fields, 'front_distance_z', 'ront_distance_z');
@@ -3292,6 +3379,7 @@ export class SceneRuntime {
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
     targetLocator: LocatorRuntimeEntry | null,
+    targetPosition: Vector3 | null,
   ): void {
     if (this.isWarehouseFlowManagedModel(model, 'stacker')) {
       this.disposeStackerCargoForAssetCode(model.assetCode);
@@ -3301,8 +3389,8 @@ export class SceneRuntime {
     const frontContainerCode = this.readContainerCode(snapshot, 'front_containerCode');
     const backContainerCode = this.readContainerCode(snapshot, 'back_containerCode');
 
-    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, 'front', frontContainerCode);
-    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, 'back', backContainerCode);
+    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'front', frontContainerCode);
+    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'back', backContainerCode);
   }
 
   /** 让指定货叉上的托盘在叉尖和目标 locator 之间运动，放货完成后留在 locator 内。 */
@@ -3310,6 +3398,7 @@ export class SceneRuntime {
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
     targetLocator: LocatorRuntimeEntry | null,
+    targetPosition: Vector3 | null,
     side: StackerForkSide,
     containerCode: string | null,
   ): void {
@@ -3320,20 +3409,22 @@ export class SceneRuntime {
     const cargo = this.getOrCreateStackerCargo(model.assetCode, activeContainerCode);
     this.syncGeneratedCargoVisual(cargo, 'stacker', snapshot);
     const forkPosition = this.getStackerForkCargoPosition(model, side);
-    const targetPosition = targetLocator ? this.getWarehouseLocatorSupportPosition(targetLocator) : null;
+    const supportPosition = targetLocator
+      ? targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator)
+      : null;
     const reach = this.readStackerForkReachConfig(model);
     const placingProgress = this.getStackerCargoPlacingProgress(command, side === 'front'
       ? model.stackerTelemetry.frontForkOffset
       : model.stackerTelemetry.backForkOffset, reach);
-    const nextPosition = targetPosition && placingProgress > 0
-      ? this.lerpVector(forkPosition, targetPosition, placingProgress)
+    const nextPosition = supportPosition && placingProgress > 0
+      ? this.lerpVector(forkPosition, supportPosition, placingProgress)
       : forkPosition;
 
     const nextRotation = targetLocator && placingProgress >= 1
       ? this.getNodeWorldRotation(targetLocator.root)
       : this.getNodeWorldRotation(model.root);
     this.setGeneratedCargoRootPose(cargo, nextPosition, nextRotation);
-    if (targetPosition && placingProgress >= 1 && snapshot.targetLocationKey) {
+    if (supportPosition && placingProgress >= 1 && snapshot.targetLocationKey) {
       cargo.placedLocatorKey = snapshot.targetLocationKey;
       this.setStackerForkCargoCode(model, side, null);
     }

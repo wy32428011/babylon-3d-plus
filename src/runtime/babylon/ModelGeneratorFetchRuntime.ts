@@ -305,7 +305,8 @@ export class ModelGeneratorFetchRuntime {
     batch.mesh.thinInstanceRefreshBoundingInfo?.(true);
   }
 
-  private clearAllBatches(): void {
+  /** 清空全部 thinInstance batch；退出运行预览回编辑态时调用，runtime 本身保留复用 */
+  clearAllBatches(): void {
     for (const signature of [...this.batches.keys()]) {
       this.disposeBatch(signature);
     }

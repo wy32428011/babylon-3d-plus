@@ -32,6 +32,7 @@ writeFileSync(
         typeRoots: [join(projectRoot, 'node_modules/@types')],
       },
       include: [
+        normalizedProjectRoot + '/src/vite-env.d.ts',
         normalizedProjectRoot + '/src/runtime/mqtt/deviceTelemetry.ts',
         normalizedProjectRoot + '/src/runtime/mqtt/MqttStackerTelemetryConfig.ts',
         normalizedProjectRoot + '/src/runtime/mqtt/GenericTelemetrySimulator.ts',
