@@ -16,7 +16,7 @@ import {
   type SceneEnvironmentVariant,
   type SceneSettings,
 } from '../model/SceneDocument';
-import type { EntityComponents, LightKind, MeshKind, PoiEffectComponent } from '../model/components';
+import type { EntityComponents, LightKind, LocatorStorageDepth, MeshKind, PoiEffectComponent } from '../model/components';
 import {
   MODEL_GENERATOR_MAX_BINDINGS,
   MODEL_GENERATOR_MAX_RULES,
@@ -380,6 +380,7 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
 
   return {
     assetId: assertString(locator.assetId).trim().slice(0, LOCATOR_ASSET_ID_MAX_LENGTH),
+    storageDepth: normalizeLocatorStorageDepth(locator.storageDepth),
     length: normalizeLocatorDimension(locator.length),
     width: normalizeLocatorDimension(locator.width),
     height: normalizeLocatorDimension(locator.height),
@@ -394,6 +395,10 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
 }
 function normalizeLocatorDimension(value: unknown): number {
   return Math.max(LOCATOR_MIN_DIMENSION, assertFiniteNumber(value));
+}
+
+function normalizeLocatorStorageDepth(value: unknown): LocatorStorageDepth {
+  return value === 'far' ? 'far' : 'near';
 }
 
 function normalizeLocatorGap(value: unknown): number {

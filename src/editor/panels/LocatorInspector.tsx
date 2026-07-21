@@ -79,6 +79,17 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
         />
       </label>
       <label className="inspector-row">
+        <span>库位排深</span>
+        <select
+          disabled={disabled}
+          value={component.storageDepth}
+          onChange={(event) => updateSelectedLocator({ storageDepth: event.target.value === 'far' ? 'far' : 'near' })}
+        >
+          <option value="near">近排（一段货叉）</option>
+          <option value="far">远排（二段货叉）</option>
+        </select>
+      </label>
+      <label className="inspector-row">
         <span>起始列</span>
         <input
           type="number"

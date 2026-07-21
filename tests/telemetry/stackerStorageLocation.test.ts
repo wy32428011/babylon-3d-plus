@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { resolveLocatorBoxIndex, resolveStackerStorageTargetOffsets } from '../../src/runtime/babylon/telemetry/stackerStorageLocation';
+import { resolveLocatorBoxIndex, resolveStackerStorageForkReach, resolveStackerStorageTargetOffsets } from '../../src/runtime/babylon/telemetry/stackerStorageLocation';
+
+test('近排库位只允许一段货叉行程，远排允许一段+二段', () => {
+  assert.equal(resolveStackerStorageForkReach('near', 0.8, 0.8), 0.8);
+  assert.equal(resolveStackerStorageForkReach('far', 0.8, 0.8), 1.6);
+});
+
+test('非法货叉行程参数防御为 0', () => {
+  assert.equal(resolveStackerStorageForkReach('near', -1, Infinity), 0);
+  assert.equal(resolveStackerStorageForkReach('far', NaN, 0.8), 0.8);
+});
 
 test('目标库位世界坐标必须相对货叉初始锚点换算行走与升降偏移', () => {
   assert.equal(typeof resolveStackerStorageTargetOffsets, 'function');

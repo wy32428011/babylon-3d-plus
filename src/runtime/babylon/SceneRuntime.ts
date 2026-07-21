@@ -35,6 +35,7 @@ import type {
   CadReferenceComponent,
   LightComponent,
   LocatorComponent,
+  LocatorStorageDepth,
   MeshKind,
   MeshRendererComponent,
   ModelAssetComponent,
@@ -96,7 +97,7 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from './telemetry/specializedTelemetryBinding';
-import { resolveLocatorBoxIndex, resolveStackerStorageTargetOffsets, type StackerStorageTargetOffsets } from './telemetry/stackerStorageLocation';
+import { resolveLocatorBoxIndex, resolveStackerStorageForkReach, resolveStackerStorageTargetOffsets, type StackerStorageTargetOffsets } from './telemetry/stackerStorageLocation';
 import {
   WarehouseFlowCoordinator,
   type WarehouseConveyorFrame,
@@ -327,6 +328,7 @@ export type LocatorRuntimeEntry = {
   startColumn: number;
   deviceAssetCode: string;
   rowNumber: number;
+  storageDepth: LocatorStorageDepth;
 };
 
 type StackerTravelConstraint = {
@@ -1391,6 +1393,7 @@ export class SceneRuntime {
     runtimeLocator.columns = locator.columns;
     runtimeLocator.layers = locator.layers;
     runtimeLocator.startColumn = locator.startColumn;
+    runtimeLocator.storageDepth = locator.storageDepth;
 
     const locatorMetadata = { assetId: locator.assetId };
     runtimeLocator.root.metadata = { ...(runtimeLocator.root.metadata ?? {}), storageLocation: locatorMetadata };
@@ -2282,7 +2285,7 @@ export class SceneRuntime {
     this.reportStackerTargetProjection(model, targetLocator, targetPosition, targetOffsets, toX, toY);
     this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds);
     this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds);
-    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds);
+    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds, targetLocator);
     this.applyStackerNodeMotionOffsets(model);
     this.applyStackerCargoMotion(model, snapshot, targetLocator, targetPosition);
     this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
@@ -3081,11 +3084,17 @@ export class SceneRuntime {
           state.rootBasePosition.add(travelAxis.scale(targetTravelOffset)),
           travelAxis,
         );
-        state.rootPosition = this.moveVectorTowards(
-          state.rootPosition,
-          rootTargetPosition,
-          STACKER_TARGET_SPEED_METERS_PER_SECOND * deltaSeconds,
-        );
+        const forkMoving = (readIntegerField(snapshot.fields, 'front_movement_z') ?? 0) !== 0
+          || (readIntegerField(snapshot.fields, 'back_movement_z') ?? 0) !== 0;
+        if (forkMoving) {
+          state.rootPosition = rootTargetPosition;
+        } else {
+          state.rootPosition = this.moveVectorTowards(
+            state.rootPosition,
+            rootTargetPosition,
+            STACKER_TARGET_SPEED_METERS_PER_SECOND * deltaSeconds,
+          );
+        }
       } else {
         const direction = this.readTravelDirection(readIntegerField(snapshot.fields, 'movement_x'));
         const speed = this.readSpeed(snapshot, 'rpm_x', STACKER_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND);
@@ -3113,11 +3122,17 @@ export class SceneRuntime {
 
     if (!snapshot.faulted) {
       if (targetLiftOffset !== null) {
-        state.liftOffset = this.moveNumberTowards(
-          state.liftOffset,
-          targetLiftOffset,
-          STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND * deltaSeconds,
-        );
+        const forkMoving = (readIntegerField(snapshot.fields, 'front_movement_z') ?? 0) !== 0
+          || (readIntegerField(snapshot.fields, 'back_movement_z') ?? 0) !== 0;
+        if (forkMoving) {
+          state.liftOffset = targetLiftOffset;
+        } else {
+          state.liftOffset = this.moveNumberTowards(
+            state.liftOffset,
+            targetLiftOffset,
+            STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND * deltaSeconds,
+          );
+        }
       } else {
         const direction = this.readLiftDirection(readIntegerField(snapshot.fields, 'movement_y'));
         const speed = this.readSpeed(snapshot, 'rpm_y', STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND);
@@ -3133,32 +3148,25 @@ export class SceneRuntime {
     snapshot: StackerTelemetrySnapshot,
     targetPosition: Vector3 | null,
     deltaSeconds: number,
+    targetLocator: LocatorRuntimeEntry | null,
   ): void {
     const frontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
     const backMovement = readIntegerField(snapshot.fields, 'back_movement_z');
-    const frontDistance = readNumberField(snapshot.fields, 'front_distance_z', 'ront_distance_z');
-    const backDistance = readNumberField(snapshot.fields, 'back_distance_z');
     const frontForkSpeed = this.readSpeed(snapshot, 'front_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const backForkSpeed = this.readSpeed(snapshot, 'back_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const reach = this.readStackerForkReachConfig(model);
-    const targetForkReach = snapshot.hasTargetLocation && targetPosition
-      ? this.resolveTargetLocatorForkReach(model, targetPosition, reach) ?? 0
+    const targetForkReach = snapshot.hasTargetLocation && targetLocator
+      ? resolveStackerStorageForkReach(targetLocator.storageDepth, reach.stageOne, reach.stageTwo)
       : null;
     const state = model.stackerTelemetry;
-    const frontCommand = readIntegerField(snapshot.fields, 'front_command');
-    const backCommand = readIntegerField(snapshot.fields, 'back_command');
-    const frontContainerCode = this.readContainerCode(snapshot, 'front_containerCode');
-    const backContainerCode = this.readContainerCode(snapshot, 'back_containerCode');
 
     state.frontForkOffset = this.updateForkOffset(
       state.frontForkOffset,
       this.resolveForkCalibrationDistance(
         model,
         'front',
-        frontDistance,
         targetPosition,
-        this.resolveTargetLocatorForkDistance(targetForkReach, frontMovement, frontCommand, frontContainerCode),
-        this.shouldUseForkTargetProjection(frontMovement, frontCommand, frontContainerCode),
+        this.resolveTargetLocatorForkDistance(targetForkReach, frontMovement),
       ),
       frontMovement,
       frontForkSpeed,
@@ -3175,10 +3183,8 @@ export class SceneRuntime {
       this.resolveForkCalibrationDistance(
         model,
         'back',
-        backDistance,
         targetPosition,
-        this.resolveTargetLocatorForkDistance(targetForkReach, backMovement, backCommand, backContainerCode),
-        this.shouldUseForkTargetProjection(backMovement, backCommand, backContainerCode),
+        this.resolveTargetLocatorForkDistance(targetForkReach, backMovement),
       ),
       backMovement,
       backForkSpeed,
@@ -3210,7 +3216,7 @@ export class SceneRuntime {
     if (movementDirection === 1 || movementDirection === -1) rememberDirection(movementDirection);
 
     if (distance !== null) {
-      const calibrationDirection = movementDirection || Math.sign(nextOffset) || lastDirection || 1;
+      const calibrationDirection = Math.sign(distance) || Math.sign(nextOffset) || lastDirection || 1;
       nextOffset = this.lerpNumber(
         nextOffset,
         this.clampNumber(Math.abs(distance), 0, maxReach) * calibrationDirection,
@@ -3269,64 +3275,38 @@ export class SceneRuntime {
     return this.clampNumber(offset, -reach, reach);
   }
 
-  /** 编码器优先；缺少编码器时按目标定位框在模型局部 X 轴上的投影估算伸出距离。 */
+  /** 按目标定位框在模型局部 X 轴上的投影计算伸出距离，符号表示方向。 */
   private resolveForkCalibrationDistance(
     model: ModelRuntimeEntry,
     side: StackerForkSide,
-    encodedDistance: number | null,
     targetPosition: Vector3 | null,
     targetForkDistance: number | null,
-    useTargetProjection: boolean,
   ): number | null {
-    if (encodedDistance !== null) return encodedDistance;
-    if (!targetPosition || !useTargetProjection) return null;
+    if (!targetPosition) return null;
 
     const forkGroups = this.findStackerForkNodeGroups(model);
-    const stageOneNodes = side === 'front' ? forkGroups.frontStageOneNodes : forkGroups.backStageOneNodes;
-    const forkBounds = this.getNodesWorldBounds(stageOneNodes);
+    const candidateNodes = side === 'front'
+      ? [forkGroups.frontStageOneNodes, forkGroups.frontStageTwoNodes, forkGroups.frontNodes]
+      : [forkGroups.backStageOneNodes, forkGroups.backStageTwoNodes, forkGroups.backNodes];
+    const forkBounds = this.getNodesWorldBounds(candidateNodes.find((n) => n.length > 0) ?? []);
     if (!forkBounds) return null;
 
     const forkCenter = forkBounds.minimum.add(forkBounds.maximum).scale(0.5);
     const forkAxis = this.getModelAxis(model.root, 'x');
-    const projectedDistance = Math.abs(Vector3.Dot(targetPosition.subtract(forkCenter), forkAxis));
-    const resolvedDistance = targetForkDistance ?? projectedDistance;
-    return Number.isFinite(resolvedDistance) ? resolvedDistance : null;
-  }
-
-  /** 根据货叉参考中心到目标位在货叉轴上的投影距离，自动判断是否启用第二段行程。 */
-  private resolveTargetLocatorForkReach(
-    model: ModelRuntimeEntry,
-    targetPosition: Vector3,
-    reach: StackerForkReachConfig,
-  ): number | null {
-    const referencePosition = this.getStackerTargetReferencePosition(model);
-    const forkAxis = this.getModelAxis(model.root, 'x');
-    const projectedDistance = Math.abs(Vector3.Dot(targetPosition.subtract(referencePosition), forkAxis));
+    const projectedDistance = Vector3.Dot(targetPosition.subtract(forkCenter), forkAxis);
     if (!Number.isFinite(projectedDistance)) return null;
-    return projectedDistance > reach.stageOne + 0.001
-      ? reach.stageOne + reach.stageTwo
-      : reach.stageOne;
+
+    if (targetForkDistance !== null) return Math.sign(projectedDistance) * targetForkDistance;
+    return projectedDistance;
   }
 
-  /** 根据货叉动作把目标库位行程转换成伸出或归零目标。 */
-  private resolveTargetLocatorForkDistance(
-    targetForkReach: number | null,
-    movement: number | null,
-    command: number | null,
-    containerCode: string | null,
-  ): number | null {
+  /** 根据 MQTT 动作信号或目标库位返回货叉伸出/归零距离。 */
+  private resolveTargetLocatorForkDistance(targetForkReach: number | null, movement: number | null): number | null {
     if (targetForkReach === null) return null;
     if (movement === 2 || movement === 4) return 0;
     if (movement === 1 || movement === 3) return targetForkReach;
-    if ((command !== null && command > 0 && command !== 8) || Boolean(containerCode)) return targetForkReach;
+    if (targetForkReach > 0) return targetForkReach;
     return null;
-  }
-
-  /** 只有有命令、动作或叉上货物的一侧才用目标 locator 估算行程，避免无编码器时两侧同时被目标牵引。 */
-  private shouldUseForkTargetProjection(movement: number | null, command: number | null, containerCode: string | null): boolean {
-    return movement !== null && movement !== 0
-      || command !== null && command > 0 && command !== 8
-      || Boolean(containerCode);
   }
 
   /** 从 Stacker 脚本 metadata 或当前参数值读取正数参数。 */
@@ -3629,10 +3609,12 @@ export class SceneRuntime {
     return entry;
   }
 
-  /** 基于叉节点世界包围盒计算货物底部支撑点，默认 Box 启用前后保持同一中心位置。 */
+  /** 货物跟随最远段叉节点包围盒中心，确保始终定位在货叉实际伸出位置而非全部叉节点几何中心。 */
   private getStackerForkCargoPosition(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 {
     const forkGroups = this.findStackerForkNodeGroups(model);
-    const nodes = side === 'front' ? forkGroups.frontNodes : forkGroups.backNodes;
+    const stageTwoNodes = side === 'front' ? forkGroups.frontStageTwoNodes : forkGroups.backStageTwoNodes;
+    const allNodes = side === 'front' ? forkGroups.frontNodes : forkGroups.backNodes;
+    const nodes = stageTwoNodes.length > 0 ? stageTwoNodes : allNodes;
     const bounds = this.getNodesWorldBounds(nodes);
     if (!bounds) return model.root.getAbsolutePosition();
 
@@ -4198,9 +4180,10 @@ export class SceneRuntime {
     this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(stageTwoNodes), forkAxis.scale(offset.totalOffset));
   }
 
-  /** 第二段收纳时隐藏克隆件，避免与第一段重叠产生闪烁。 */
+  /** 第二段收纳时隐藏克隆件，避免与第一段重叠产生闪烁；非 _stage2 标记的节点不参与显隐切换。 */
   private setStackerForkStageTwoNodesEnabled(nodes: TransformNode[], enabled: boolean): void {
     for (const node of nodes) {
+      if (!this.isStackerForkStageTwoNode(node)) continue;
       node.setEnabled(enabled);
     }
   }
@@ -4302,6 +4285,20 @@ export class SceneRuntime {
     const exactFrontStageTwoNodes = this.findModelNodesByName(model, ['huocha.9_stage2']);
     const exactBackStageTwoNodes = this.findModelNodesByName(model, ['huocha2.10_stage2']);
     if (exactFrontStageOneNodes.length > 0 || exactBackStageOneNodes.length > 0) {
+      const hasStageTwoClones = exactFrontStageTwoNodes.length > 0 || exactBackStageTwoNodes.length > 0;
+      if (!hasStageTwoClones) {
+        // 无 _stage2 克隆件：huocha.9 两段都参与得 totalOffset，huocha2.10 只参与一段得 stageOneOffset
+        const frontMainNodes = exactFrontStageOneNodes;
+        const frontAuxNodes = exactBackStageOneNodes;
+        return {
+          frontNodes: this.uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
+          backNodes: this.uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
+          frontStageOneNodes: frontAuxNodes,
+          frontStageTwoNodes: frontMainNodes,
+          backStageOneNodes: [],
+          backStageTwoNodes: [],
+        };
+      }
       return {
         frontNodes: this.uniqueTransformNodes([...exactFrontStageOneNodes, ...exactFrontStageTwoNodes]),
         backNodes: this.uniqueTransformNodes([...exactBackStageOneNodes, ...exactBackStageTwoNodes]),
@@ -4719,7 +4716,7 @@ export class SceneRuntime {
 
     const boxes = this.createLocatorBoxes(entityId, locator, root, material);
 
-    return { root, boxes, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber };
+    return { root, boxes, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
   }
 
   private createLocatorBoxes(entityId: string, locator: LocatorComponent, root: TransformNode, material: StandardMaterial): Mesh[] {

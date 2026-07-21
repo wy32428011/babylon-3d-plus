@@ -120,10 +120,10 @@ function createSnapshot(overrides: Partial<DeviceTelemetrySnapshot> = {}): Devic
   };
 }
 
-test('SceneRuntime 按投影距离自动判断一段或两段货叉，并在目标缺失时禁止伸出', () => {
+test('SceneRuntime 按 Locator storageDepth 属性判断一段或两段货叉，并在目标缺失时禁止伸出', () => {
   const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
-  assert.match(source, /projectedDistance > reach\.stageOne \+ 0\.001/);
-  assert.match(source, /snapshot\.hasTargetLocation[\s\S]*resolveTargetLocatorForkReach\(model, targetPosition, reach\) \?\? 0/);
+  assert.match(source, /resolveStackerStorageForkReach\(targetLocator\.storageDepth/);
+  assert.match(source, /snapshot\.hasTargetLocation[\s\S]*resolveStackerStorageForkReach\(targetLocator\.storageDepth/);
   assert.match(source, /distanceX !== null && targetTravelOffset === null/);
   assert.match(source, /distanceY !== null && targetLiftOffset === null/);
 });
