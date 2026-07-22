@@ -51,6 +51,14 @@ import type {
 import type { Entity } from '../model/Entity';
 import { createArrayAssetNumber, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
 import {
+  createModelArrayIdentity,
+  ENTITY_NAME_MAX_LENGTH,
+  getEntityArrayIdentifierError,
+  getEntityArrayParameterError,
+  MODEL_ARRAY_COPY_COUNT_MAX,
+  normalizeModelArrayDirection,
+} from '../model/modelArray';
+import {
   MODEL_ASSET_CODE_MAX_LENGTH,
   createEmptySceneDocument,
   createCadReferenceEntity,
@@ -139,6 +147,19 @@ type EntityArrayRequest = {
   assetNumberRule: string;
 };
 
+export type ResolvedEntityArrayInput = {
+  sourceIds: string[];
+  copyCount: number;
+  directionVector: Vector3Data;
+  selectionSpanMeters: number;
+  spacingMeters: number;
+  assetNumberRule: string;
+};
+
+export type EntityArrayCommitResult =
+  | { ok: true; duplicatedIds: string[] }
+  | { ok: false; error: string };
+
 export type SceneFocusRequest = {
   id: string;
   entityIds: string[];
@@ -189,7 +210,6 @@ const DEFAULT_SNAP_SETTINGS: TransformSnapSettings = {
 const LOCATOR_MIN_DIMENSION = 0.01;
 const LOCATOR_ASSET_ID_MAX_LENGTH = 128;
 const CLIPBOARD_PASTE_OFFSET_METERS = 0.35;
-const ARRAY_COPY_COUNT_MAX = 100;
 
 /** 比较两份模型测量快照，避免相同运行时结果触发无意义的 React 重渲染。 */
 function areSelectedModelMeasurementsEqual(
@@ -276,6 +296,7 @@ type EditorState = {
   pasteEntityClipboard: (targetFolderId?: string | null) => void;
   requestEntityArray: (copyCount: number, direction: EntityArrayDirection, spacingMeters: number, assetNumberRule: string) => void;
   resolveEntityArrayRequest: (requestId: string, selectionSpanMeters: number | null) => void;
+  commitResolvedEntityArray: (input: ResolvedEntityArrayInput) => EntityArrayCommitResult;
   groupSelectedEntities: () => void;
   ungroupSelectedEntities: () => void;
   requestSceneFocusForSelection: () => void;
@@ -568,7 +589,7 @@ function areCadReferencesEqual(left: CadReferenceComponent, right: CadReferenceC
 }
 
 function sanitizeEntityName(name: string): string {
-  return name.trim().slice(0, 80);
+  return name.trim().slice(0, ENTITY_NAME_MAX_LENGTH);
 }
 
 function sanitizeSceneName(name: string): string {
@@ -948,13 +969,18 @@ function filterDuplicatedModelGenerators(
   return { entities: filteredEntities, skippedCount, existingGenerator };
 }
 
+type EntityDuplicateOverrides = {
+  name?: string;
+  assetNumber?: EntityAssetNumberOverride;
+};
+
 /** 创建普通实体副本，复制所有业务组件并按偏移调整 Transform 位置。 */
 function createDuplicatedRuntimeEntity(
   source: Entity,
   parentId: string | null,
   offset: Vector3Data,
   existingNames: Set<string>,
-  assetNumberOverride?: EntityAssetNumberOverride,
+  overrides: EntityDuplicateOverrides = {},
 ): Entity {
   const id = createId('entity');
   const components = cloneEntityComponents(source);
@@ -970,22 +996,25 @@ function createDuplicatedRuntimeEntity(
     components.modelAsset = {
       ...components.modelAsset,
       assetCode:
-        assetNumberOverride?.kind === 'modelAsset'
-          ? assetNumberOverride.value
+        overrides.assetNumber?.kind === 'modelAsset'
+          ? overrides.assetNumber.value
           : createModelAssetCode(extractModelAssetCodePrefix(components.modelAsset.assetCode), id),
     };
   }
-  if (components.locator && assetNumberOverride?.kind === 'locator') {
+  if (components.locator && overrides.assetNumber?.kind === 'locator') {
     components.locator = {
       ...components.locator,
-      assetId: assetNumberOverride.value,
+      assetId: overrides.assetNumber.value,
     };
   }
+
+  const name = overrides.name ?? createUniqueEntityName(existingNames, source.name);
+  if (overrides.name) existingNames.add(overrides.name);
 
   return {
     ...source,
     id,
-    name: createUniqueEntityName(existingNames, source.name),
+    name,
     parentId,
     childrenIds: [],
     components,
@@ -1127,6 +1156,141 @@ function insertDuplicatedEntitiesInScene(
     entities,
     selectedEntityId: duplicatedEntities[0]?.id ?? scene.selectedEntityId,
   };
+}
+
+
+type PreparedResolvedEntityArray =
+  | {
+      ok: true;
+      sourceIds: string[];
+      copyCount: number;
+      spacingMeters: number;
+      primarySourceId: string | null;
+      duplicatedEntities: Entity[];
+    }
+  | { ok: false; error: string };
+
+/** 基于已解析的轴向跨度与世界方向创建正式阵列副本，但不直接写入场景。 */
+function prepareResolvedEntityArray(
+  state: EditorState,
+  input: ResolvedEntityArrayInput,
+): PreparedResolvedEntityArray {
+  const parameterError = getEntityArrayParameterError(input.copyCount, input.spacingMeters);
+  if (parameterError) return { ok: false, error: parameterError };
+
+  const direction = normalizeModelArrayDirection(input.directionVector);
+  if (!direction) return { ok: false, error: '阵列方向无效。' };
+  if (!Number.isFinite(input.selectionSpanMeters) || input.selectionSpanMeters < 0) {
+    return { ok: false, error: '模型轴向尺寸无效。' };
+  }
+
+  const requestedSourceIds = [...new Set(input.sourceIds)];
+  const sourceIds = requestedSourceIds.filter((sourceId) => {
+    const source = state.scene.entities[sourceId];
+    return Boolean(
+      source
+      && !source.isFolder
+      && !source.components.modelGenerator
+      && !isEntityEffectivelyLocked(state.scene, source),
+    );
+  });
+  if (sourceIds.length === 0 || sourceIds.length !== requestedSourceIds.length) {
+    return { ok: false, error: '原选区已失效、被锁定或包含不支持阵列的模型生成器。' };
+  }
+
+  const copyCount = input.copyCount;
+  const spacingMeters = input.spacingMeters;
+  const assetNumberRule = input.assetNumberRule.trim();
+  const identifierError = getEntityArrayIdentifierError(
+    state.scene,
+    sourceIds,
+    copyCount,
+    assetNumberRule,
+  );
+  if (identifierError) return { ok: false, error: identifierError };
+
+  const arrayStepMeters = input.selectionSpanMeters + spacingMeters;
+  const maximumOffsetMeters = arrayStepMeters * copyCount;
+  if (!Number.isFinite(arrayStepMeters) || !Number.isFinite(maximumOffsetMeters)) {
+    return { ok: false, error: '净间距或副本数量过大。' };
+  }
+
+  const existingNames = new Set(Object.values(state.scene.entities).map((entity) => entity.name));
+  const duplicatedEntities: Entity[] = [];
+
+  for (let copyIndex = 1; copyIndex <= copyCount; copyIndex += 1) {
+    const offset = {
+      x: direction.x * arrayStepMeters * copyIndex,
+      y: direction.y * arrayStepMeters * copyIndex,
+      z: direction.z * arrayStepMeters * copyIndex,
+    };
+
+    for (const sourceId of sourceIds) {
+      const source = state.scene.entities[sourceId];
+      if (!source || source.isFolder) continue;
+
+      const overrides: EntityDuplicateOverrides = {};
+      const assetNumberTarget = getEntityAssetNumberTarget(source);
+      if (source.components.modelAsset) {
+        const identity = createModelArrayIdentity(
+          source.components.modelAsset.assetCode,
+          copyIndex,
+          assetNumberRule,
+        );
+        if (!identity.ok) return identity;
+        overrides.name = identity.name;
+        overrides.assetNumber = { kind: 'modelAsset', value: identity.assetCode };
+      } else if (assetNumberTarget) {
+        const assetNumberResult = createArrayAssetNumber(
+          assetNumberTarget.value,
+          copyIndex,
+          assetNumberRule,
+        );
+        if (!assetNumberResult.ok) return assetNumberResult;
+        overrides.assetNumber = { kind: assetNumberTarget.kind, value: assetNumberResult.value };
+      }
+
+      duplicatedEntities.push(
+        createDuplicatedRuntimeEntity(source, source.parentId, offset, existingNames, overrides),
+      );
+    }
+  }
+
+  const primarySourceId =
+    state.scene.selectedEntityId && sourceIds.includes(state.scene.selectedEntityId)
+      ? state.scene.selectedEntityId
+      : sourceIds[0] ?? null;
+
+  return {
+    ok: true,
+    sourceIds,
+    copyCount,
+    spacingMeters,
+    primarySourceId,
+    duplicatedEntities,
+  };
+}
+
+/** 用一条命令插入按父文件夹分组的阵列副本，并保持原始主对象选中。 */
+function createResolvedEntityArrayCommand(prepared: Extract<PreparedResolvedEntityArray, { ok: true }>) {
+  return updateSceneDocumentCommand('模型阵列', (scene) => {
+    let nextScene = scene;
+    const groupedByParent = new Map<string | null, Entity[]>();
+    for (const entity of prepared.duplicatedEntities) {
+      const list = groupedByParent.get(entity.parentId) ?? [];
+      list.push(entity);
+      groupedByParent.set(entity.parentId, list);
+    }
+
+    for (const [parentId, entities] of groupedByParent.entries()) {
+      nextScene = insertDuplicatedEntitiesInScene(nextScene, entities, parentId);
+    }
+
+    return {
+      ...nextScene,
+      selectedEntityId: prepared.primarySourceId,
+    };
+  });
 }
 
 /** 新建分组文件夹，并把选中的普通实体作为一个可撤销操作移入该分组。 */
@@ -2049,7 +2213,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const normalizedCopyCount = Math.min(
-        ARRAY_COPY_COUNT_MAX,
+        MODEL_ARRAY_COPY_COUNT_MAX,
         Math.max(1, Math.floor(Number.isFinite(copyCount) ? copyCount : 3)),
       );
       const normalizedDirection = ENTITY_ARRAY_DIRECTION_VECTORS[direction] ? direction : 'x';
@@ -2081,130 +2245,68 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         };
       }
 
-      const sourceIds = request.sourceIds.filter((sourceId) => {
-        const source = state.scene.entities[sourceId];
-        return Boolean(source && !source.isFolder && !isEntityEffectivelyLocked(state.scene, source));
+      const prepared = prepareResolvedEntityArray(state, {
+        sourceIds: request.sourceIds,
+        copyCount: request.copyCount,
+        directionVector: ENTITY_ARRAY_DIRECTION_VECTORS[request.direction] ?? ENTITY_ARRAY_DIRECTION_VECTORS.x,
+        selectionSpanMeters,
+        spacingMeters: request.spacingMeters,
+        assetNumberRule: request.assetNumberRule,
       });
-      if (sourceIds.length === 0 || sourceIds.length !== request.sourceIds.length) {
+      if (!prepared.ok) {
         return {
           entityArrayRequest: null,
-          logs: prependLog(state.logs, '模型阵列已取消：原选区在解析期间已失效、被锁定或发生变化。'),
+          logs: prependLog(state.logs, `模型阵列失败：${prepared.error}`),
         };
       }
 
-      const ruleError = getArrayAssetNumberRuleError(request.assetNumberRule);
-      if (ruleError) {
-        return {
-          entityArrayRequest: null,
-          logs: prependLog(state.logs, `模型阵列失败：${ruleError}`),
-        };
-      }
-      const assetNumberedSourceCount = sourceIds.reduce((count, sourceId) => {
-        const source = state.scene.entities[sourceId];
-        return source && hasEntityAssetNumber(source) ? count + 1 : count;
-      }, 0);
-      if (request.assetNumberRule && assetNumberedSourceCount !== 1) {
-        return {
-          entityArrayRequest: null,
-          logs: prependLog(state.logs, '模型阵列已取消：自定义资产编号规则仅支持一个带资产编号的源对象。'),
-        };
-      }
-
-      // 阵列完成后继续选中原始对象，避免切换到副本造成原模型被移动的误解。
-      const primarySourceId =
-        state.scene.selectedEntityId && sourceIds.includes(state.scene.selectedEntityId)
-          ? state.scene.selectedEntityId
-          : sourceIds[0] ?? null;
-      const directionVector = ENTITY_ARRAY_DIRECTION_VECTORS[request.direction] ?? ENTITY_ARRAY_DIRECTION_VECTORS.x;
-      const arrayStepMeters = selectionSpanMeters + request.spacingMeters;
-      const maximumOffsetMeters = arrayStepMeters * request.copyCount;
-      if (!Number.isFinite(arrayStepMeters) || !Number.isFinite(maximumOffsetMeters)) {
-        return {
-          entityArrayRequest: null,
-          logs: prependLog(state.logs, '模型阵列失败：净间距或副本数量过大。'),
-        };
-      }
-      const existingNames = new Set(Object.values(state.scene.entities).map((entity) => entity.name));
-      const candidateEntities: Entity[] = [];
-
-      for (let copyIndex = 1; copyIndex <= request.copyCount; copyIndex += 1) {
-        // 阵列步长由选区在目标世界轴上的尺寸与用户输入的边缘净间距共同组成。
-        const offset = {
-          x: directionVector.x * arrayStepMeters * copyIndex,
-          y: directionVector.y * arrayStepMeters * copyIndex,
-          z: directionVector.z * arrayStepMeters * copyIndex,
-        };
-
-        for (const sourceId of sourceIds) {
-          const source = state.scene.entities[sourceId];
-          if (!source || source.isFolder) continue;
-
-          const sourceAssetNumberTarget = getEntityAssetNumberTarget(source);
-          let assetNumberOverride: EntityAssetNumberOverride | undefined;
-          if (sourceAssetNumberTarget !== null) {
-            const assetNumberResult = createArrayAssetNumber(
-              sourceAssetNumberTarget.value,
-              copyIndex,
-              request.assetNumberRule,
-            );
-            if (!assetNumberResult.ok) {
-              return {
-                entityArrayRequest: null,
-                logs: prependLog(state.logs, `模型阵列失败：${assetNumberResult.error}`),
-              };
-            }
-            assetNumberOverride = { kind: sourceAssetNumberTarget.kind, value: assetNumberResult.value };
-          }
-
-          candidateEntities.push(
-            createDuplicatedRuntimeEntity(source, source.parentId, offset, existingNames, assetNumberOverride),
-          );
-        }
-      }
-
-      const generatorFilter = filterDuplicatedModelGenerators(state.scene, candidateEntities);
-      const duplicatedEntities = generatorFilter.entities;
-      if (duplicatedEntities.length === 0) {
-        return {
-          entityArrayRequest: null,
-          logs: prependLog(state.logs, '模型阵列已拦截：场景只允许一个模型生成器，未创建第二个。'),
-        };
-      }
-
-      const command = updateSceneDocumentCommand('模型阵列', (scene) => {
-        let nextScene = scene;
-        const groupedByParent = new Map<string | null, Entity[]>();
-        for (const entity of duplicatedEntities) {
-          const list = groupedByParent.get(entity.parentId) ?? [];
-          list.push(entity);
-          groupedByParent.set(entity.parentId, list);
-        }
-
-        for (const [parentId, entities] of groupedByParent.entries()) {
-          nextScene = insertDuplicatedEntitiesInScene(nextScene, entities, parentId);
-        }
-
-        return {
-          ...nextScene,
-          selectedEntityId: primarySourceId,
-        };
-      });
+      const command = createResolvedEntityArrayCommand(prepared);
       const result = executeCommand(state.scene, state.history, command);
-      const duplicatedIds = duplicatedEntities.map((entity) => entity.id);
-
-      const skippedGeneratorMessage =
-        generatorFilter.skippedCount > 0 ? '；已拦截重复模型生成器，场景只允许一个' : '';
+      const duplicatedIds = prepared.duplicatedEntities.map((entity) => entity.id);
 
       return {
         ...result,
         entityArrayRequest: null,
-        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, sourceIds),
+        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, prepared.sourceIds),
         logs: prependLog(
           state.logs,
-          `${command.label}: ${duplicatedIds.length} 个对象，净间距 ${request.spacingMeters} m${skippedGeneratorMessage}`,
+          `${command.label}: ${duplicatedIds.length} 个对象，净间距 ${prepared.spacingMeters} m`,
         ),
       };
     });
+  },
+  commitResolvedEntityArray: (input) => {
+    let commitResult: EntityArrayCommitResult = { ok: false, error: '模型阵列未执行。' };
+
+    set((state) => {
+      if (isRuntimePreviewState(state)) {
+        const error = '运行预览期间不能创建模型阵列。';
+        commitResult = { ok: false, error };
+        return { logs: prependLog(state.logs, `模型阵列失败：${error}`) };
+      }
+
+      const prepared = prepareResolvedEntityArray(state, input);
+      if (!prepared.ok) {
+        commitResult = { ok: false, error: prepared.error };
+        return { logs: prependLog(state.logs, `模型阵列失败：${prepared.error}`) };
+      }
+
+      const command = createResolvedEntityArrayCommand(prepared);
+      const result = executeCommand(state.scene, state.history, command);
+      const duplicatedIds = prepared.duplicatedEntities.map((entity) => entity.id);
+      commitResult = { ok: true, duplicatedIds };
+
+      return {
+        ...result,
+        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, prepared.sourceIds),
+        logs: prependLog(
+          state.logs,
+          `${command.label}: ${duplicatedIds.length} 个对象，净间距 ${prepared.spacingMeters} m`,
+        ),
+      };
+    });
+
+    return commitResult;
   },
   groupSelectedEntities: () => {
     set((state) => {

@@ -36,16 +36,18 @@ function getNormalizedModelAxes(root: TransformNode): [Vector3, Vector3, Vector3
   return axes.map((axis) => axis.normalize()) as [Vector3, Vector3, Vector3];
 }
 
-/**
- * 按模型实体自身 X/Y/Z 轴测量内容根下的实际尺寸，单位为米。
- * 世界投影已经包含源单位换算、参数化脚本调整和用户 Transform.scale，平移与旋转不会改变轴向跨度。
- */
-export function measureModelSizeMeters(root: TransformNode, contentRoot: TransformNode): Vector3Data | null {
-  const axes = getNormalizedModelAxes(root);
-  if (!axes) return null;
+/** 将外部世界方向归一化，拒绝 NaN、Infinity 和零向量。 */
+function normalizeWorldAxis(direction: Vector3Data): Vector3 | null {
+  const axis = new Vector3(direction.x, direction.y, direction.z);
+  const lengthSquared = axis.lengthSquared();
+  if (!Number.isFinite(lengthSquared) || lengthSquared <= AXIS_LENGTH_EPSILON) return null;
+  return axis.normalize();
+}
 
-  const minimum = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
-  const maximum = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+/** 按一组世界坐标单位轴测量模型可见几何的投影跨度。 */
+function measureModelSpansAlongAxes(contentRoot: TransformNode, axes: readonly Vector3[]): number[] | null {
+  const minimum = axes.map(() => Number.POSITIVE_INFINITY);
+  const maximum = axes.map(() => Number.NEGATIVE_INFINITY);
   let measuredPointCount = 0;
 
   for (const mesh of contentRoot.getChildMeshes(false)) {
@@ -65,13 +67,38 @@ export function measureModelSizeMeters(root: TransformNode, contentRoot: Transfo
     }
   }
 
-  if (measuredPointCount === 0 || minimum.some((value) => !Number.isFinite(value)) || maximum.some((value) => !Number.isFinite(value))) {
+  if (
+    measuredPointCount === 0
+    || minimum.some((value) => !Number.isFinite(value))
+    || maximum.some((value) => !Number.isFinite(value))
+  ) {
     return null;
   }
 
-  return {
-    x: Math.max(0, maximum[0] - minimum[0]),
-    y: Math.max(0, maximum[1] - minimum[1]),
-    z: Math.max(0, maximum[2] - minimum[2]),
-  };
+  return minimum.map((value, index) => Math.max(0, maximum[index] - value));
+}
+
+/**
+ * 按模型实体自身 X/Y/Z 轴测量内容根下的实际尺寸，单位为米。
+ * 世界投影已经包含源单位换算、参数化脚本调整和用户 Transform.scale，平移与旋转不会改变轴向跨度。
+ */
+export function measureModelSizeMeters(root: TransformNode, contentRoot: TransformNode): Vector3Data | null {
+  const axes = getNormalizedModelAxes(root);
+  if (!axes) return null;
+
+  const spans = measureModelSpansAlongAxes(contentRoot, axes);
+  if (!spans) return null;
+
+  return { x: spans[0], y: spans[1], z: spans[2] };
+}
+
+/** 测量模型有效可见几何沿任意世界方向的投影跨度，供局部/世界轴阵列使用。 */
+export function measureModelSpanMetersAlongWorldDirection(
+  contentRoot: TransformNode,
+  worldDirection: Vector3Data,
+): number | null {
+  const axis = normalizeWorldAxis(worldDirection);
+  if (!axis) return null;
+
+  return measureModelSpansAlongAxes(contentRoot, [axis])?.[0] ?? null;
 }

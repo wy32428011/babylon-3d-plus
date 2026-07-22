@@ -56,6 +56,7 @@ import {
   getBuiltInMeshGroundOffsetMeters,
 } from '../../editor/model/builtInMeshGeometry';
 import type { Vector3Data } from '../../editor/model/math';
+import { MODEL_ARRAY_COPY_COUNT_MAX, MODEL_ARRAY_MIN_SPAN_METERS } from '../../editor/model/modelArray';
 import { createModelAssetCode, type SceneDocument, type SceneEnvironmentSettings } from '../../editor/model/SceneDocument';
 import { createId } from '../../shared/ids';
 import type { TelemetryBindingComponent } from '../../editor/model/telemetryBinding';
@@ -80,7 +81,12 @@ import {
   calculateEnvironmentOriginLeftOffset,
   ENVIRONMENT_FALLBACK_LEFT_OFFSET_METERS,
 } from './environmentPlacement';
-import { isMeasurableModelMesh, measureModelSizeMeters, type ModelMeasurementResult } from './modelMeasurement';
+import {
+  isMeasurableModelMesh,
+  measureModelSizeMeters,
+  measureModelSpanMetersAlongWorldDirection,
+  type ModelMeasurementResult,
+} from './modelMeasurement';
 import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
 import { GenericTelemetryMotionRuntime } from './telemetry/GenericTelemetryMotionRuntime';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
@@ -183,6 +189,11 @@ type LoadedModelRuntimeAssets =
     handle: ModelRuntimeAssetHandle;
     rootNodes: Node[];
   };
+
+type ModelArrayPreviewEntry = {
+  sourceEntityId: string;
+  clones: TransformNode[];
+};
 
 type ModelRuntimeEntry = {
   sourceUrl: string;
@@ -478,6 +489,7 @@ export class SceneRuntime {
   private activeModelGeneratorEntityId: string | null = null;
   private reportedModelGeneratorConflictSignature = '';
   private sharedModelSelectionOutlineSignature = '';
+  private modelArrayPreview: ModelArrayPreviewEntry | null = null;
   private modelLoadSequence = 0;
   private environmentLoadSequence = 0;
 
@@ -497,6 +509,7 @@ export class SceneRuntime {
   /** 开始 MQTT 运行预览；该方法幂等，并在真正驱动前清空上一次预览残留运行态。 */
   beginTelemetryPreview(): void {
     if (this.telemetryPreviewActive) return;
+    this.clearModelArrayPreview();
     this.telemetryPreviewActive = true;
     this.genericTelemetryMotionRuntime.beginPreview();
     this.clearTelemetryPreviewRuntimeState();
@@ -602,6 +615,99 @@ export class SceneRuntime {
     return sizeMeters
       ? { status: 'ready', sizeMeters }
       : { status: 'unavailable', sizeMeters: null };
+  }
+
+  /** 读取普通导入模型沿指定世界方向的有效几何跨度，供 Shift+Gizmo 阵列使用。 */
+  getModelArrayGeometry(entityId: string, worldDirection: Vector3Data): {
+    direction: Vector3Data;
+    spanMeters: number;
+  } | null {
+    const model = this.models.get(entityId);
+    if (!model?.assetHandle || !model.measurementReady) return null;
+
+    const direction = new Vector3(worldDirection.x, worldDirection.y, worldDirection.z);
+    const lengthSquared = direction.lengthSquared();
+    if (!Number.isFinite(lengthSquared) || lengthSquared <= MODEL_ARRAY_MIN_SPAN_METERS ** 2) return null;
+    direction.normalize();
+
+    const normalizedDirection = { x: direction.x, y: direction.y, z: direction.z };
+    const spanMeters = measureModelSpanMetersAlongWorldDirection(model.contentRoot, normalizedDirection);
+    if (!Number.isFinite(spanMeters) || spanMeters === null || spanMeters <= MODEL_ARRAY_MIN_SPAN_METERS) return null;
+
+    return { direction: normalizedDirection, spanMeters };
+  }
+
+  /**
+   * 更新 Shift 阵列的临时模型克隆。
+   * 克隆只复用当前已加载的可视层级，不进入实体映射、选择、脚本、MQTT 或持久化状态。
+   */
+  updateModelArrayPreview(
+    entityId: string,
+    worldDirection: Vector3Data,
+    copyCount: number,
+    spacingMeters: number,
+  ): boolean {
+    const model = this.models.get(entityId);
+    const geometry = this.getModelArrayGeometry(entityId, worldDirection);
+    if (!model || !geometry) {
+      this.clearModelArrayPreview();
+      return false;
+    }
+
+    const normalizedCopyCount = Math.min(
+      MODEL_ARRAY_COPY_COUNT_MAX,
+      Math.max(0, Math.floor(Number.isFinite(copyCount) ? copyCount : 0)),
+    );
+    if (normalizedCopyCount === 0) {
+      this.clearModelArrayPreview();
+      return true;
+    }
+
+    const normalizedSpacingMeters = Number.isFinite(spacingMeters) ? Math.max(0, spacingMeters) : 0;
+    if (this.modelArrayPreview?.sourceEntityId !== entityId) {
+      this.clearModelArrayPreview();
+    }
+    this.modelArrayPreview ??= { sourceEntityId: entityId, clones: [] };
+
+    while (this.modelArrayPreview.clones.length < normalizedCopyCount) {
+      const cloneIndex = this.modelArrayPreview.clones.length + 1;
+      const clonedNode = model.root.clone(`__modelArrayPreview_${entityId}_${cloneIndex}`, null, false);
+      if (!clonedNode) {
+        this.clearModelArrayPreview();
+        return false;
+      }
+
+      this.prepareModelArrayPreviewClone(clonedNode);
+      this.modelArrayPreview.clones.push(clonedNode);
+    }
+
+    while (this.modelArrayPreview.clones.length > normalizedCopyCount) {
+      this.modelArrayPreview.clones.pop()?.dispose(false, false);
+    }
+
+    const arrayStepMeters = geometry.spanMeters + normalizedSpacingMeters;
+    for (let index = 0; index < this.modelArrayPreview.clones.length; index += 1) {
+      const clone = this.modelArrayPreview.clones[index];
+      const offsetMultiplier = arrayStepMeters * (index + 1);
+      clone.position.copyFromFloats(
+        model.root.position.x + geometry.direction.x * offsetMultiplier,
+        model.root.position.y + geometry.direction.y * offsetMultiplier,
+        model.root.position.z + geometry.direction.z * offsetMultiplier,
+      );
+      clone.computeWorldMatrix(true);
+    }
+
+    return true;
+  }
+
+  /** 清除当前全部临时阵列克隆，不释放源模型共享的材质、纹理或几何资源。 */
+  clearModelArrayPreview(): void {
+    if (!this.modelArrayPreview) return;
+
+    for (const clone of this.modelArrayPreview.clones) {
+      clone.dispose(false, false);
+    }
+    this.modelArrayPreview = null;
   }
 
   /** 汇总多个实体的世界包围盒，供场景聚焦和模型阵列读取中心、尺寸与几何就绪状态。 */
@@ -1030,6 +1136,7 @@ export class SceneRuntime {
   }
 
   dispose(): void {
+    this.clearModelArrayPreview();
     this.assetLoadScheduler.dispose();
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
@@ -4496,6 +4603,18 @@ export class SceneRuntime {
     return new HemisphericLight(entityId, new Vector3(0, 1, 0), this.scene);
   }
 
+  /** 清理临时阵列克隆的实体 metadata 与拾取能力，避免它们进入编辑器交互链路。 */
+  private prepareModelArrayPreviewClone(root: TransformNode): void {
+    const nodes: Node[] = [root, ...root.getDescendants(false)];
+    for (const node of nodes) {
+      node.metadata = null;
+      if (node instanceof AbstractMesh) {
+        node.isPickable = false;
+        node.actionManager = null;
+      }
+    }
+  }
+
   /** 释放实体对应的 Mesh 与材质资源。 */
   private disposeMesh(entityId: string, mesh: Mesh): void {
     mesh.material?.dispose();
@@ -4524,6 +4643,7 @@ export class SceneRuntime {
 
   /** 释放导入模型的容器、根节点与所有子资源。 */
   private disposeModel(entityId: string, model: ModelRuntimeEntry): void {
+    if (this.modelArrayPreview?.sourceEntityId === entityId) this.clearModelArrayPreview();
     this.genericTelemetryMotionRuntime.disposeModel(entityId);
     model.telemetryPreviewBaseline = null;
     this.applyModelSelection(model, false);

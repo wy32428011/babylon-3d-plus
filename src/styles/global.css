@@ -1101,13 +1101,13 @@ select {
   margin-top: 2px;
 }
 
-.panel .hierarchy-array-dialog-actions button {
+.hierarchy-array-dialog-actions button {
   min-width: 58px;
   height: 26px;
   padding: 0 10px;
 }
 
-.panel .hierarchy-array-dialog-actions .primary {
+.hierarchy-array-dialog-actions .primary {
   border-color: #1f74d6;
   color: #ffffff;
   background: #2f86ff;
