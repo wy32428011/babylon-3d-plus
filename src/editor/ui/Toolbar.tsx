@@ -35,9 +35,9 @@ import { ToolbarTaskProgress } from '../deployment/ToolbarTaskProgress';
 import { APPLICATION_NAME, BrandLogo } from './BrandLogo';
 
 const TRANSFORM_TOOL_LABELS: Record<TransformTool, string> = {
-  translate: '移动',
-  rotate: '旋转',
-  scale: '缩放',
+  translate: '移动 (E)',
+  rotate: '旋转 (R)',
+  scale: '缩放 (T)',
 };
 
 const TRANSFORM_SPACE_LABELS: Record<TransformSpace, string> = {

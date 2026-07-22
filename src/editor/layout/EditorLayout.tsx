@@ -11,9 +11,9 @@ import { Toolbar } from '../ui/Toolbar';
 import styles from './EditorLayout.module.css';
 
 const TOOL_SHORTCUTS: Record<string, TransformTool> = {
-  w: 'translate',
-  e: 'rotate',
-  r: 'scale',
+  e: 'translate',
+  r: 'rotate',
+  t: 'scale',
 };
 
 /** 判断当前快捷键事件是否来自可输入控件，避免干扰 Inspector 数值编辑。 */
