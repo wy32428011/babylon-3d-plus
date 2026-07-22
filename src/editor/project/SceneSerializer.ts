@@ -7,6 +7,7 @@ import {
   MODEL_ASSET_CODE_MAX_LENGTH,
   createModelAssetCode,
   normalizeStackerSimulationScenario,
+  sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneSettings,
   type MqttConfig,
@@ -22,6 +23,7 @@ import {
   MODEL_GENERATOR_TTL_MAX_SECONDS,
   MODEL_GENERATOR_TTL_MIN_SECONDS,
   sanitizeModelGeneratorComponent,
+  sanitizeModelGeneratorFetchBinding,
   sanitizeModelGeneratorTarget,
 } from '../model/modelGenerator';
 import type { Vector3Data } from '../model/math';
@@ -142,6 +144,7 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     entities,
     selectedEntityId: null,
     mqttConfig: normalizeMqttConfig(scene.mqttConfig),
+    fetchConfig: sanitizeFetchConfig(scene.fetchConfig),
     sceneSettings: normalizeSceneSettings(scene.sceneSettings),
   };
 }
@@ -382,16 +385,31 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
     length: normalizeLocatorDimension(locator.length),
     width: normalizeLocatorDimension(locator.width),
     height: normalizeLocatorDimension(locator.height),
+    columns: normalizeLocatorInt(locator.columns, 1, 1, 100),
+    layers: normalizeLocatorInt(locator.layers, 1, 1, 100),
+    startColumn: normalizeLocatorInt(locator.startColumn, 1, 1, 999),
+    columnGap: normalizeLocatorGap(locator.columnGap),
+    layerGap: normalizeLocatorGap(locator.layerGap),
+    deviceAssetCode: assertString(locator.deviceAssetCode).trim().slice(0, 128),
+    rowNumber: normalizeLocatorInt(locator.rowNumber, 1, 1, 99),
   };
 }
+function normalizeLocatorDimension(value: unknown): number {
+  return Math.max(LOCATOR_MIN_DIMENSION, assertFiniteNumber(value));
+}
 
-/** 兼容旧场景缺少库位深度字段，默认按近排处理。 */
 function normalizeLocatorStorageDepth(value: unknown): LocatorStorageDepth {
   return value === 'far' ? 'far' : 'near';
 }
 
-function normalizeLocatorDimension(value: unknown): number {
-  return Math.max(LOCATOR_MIN_DIMENSION, assertFiniteNumber(value));
+function normalizeLocatorGap(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.max(0, value);
+}
+
+function normalizeLocatorInt(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function normalizeCadReference(value: unknown): EntityComponents['cadReference'] {
@@ -618,7 +636,10 @@ function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerat
 
   const rules = assertArray(modelGenerator.rules);
   const bindings = assertArray(modelGenerator.bindings);
-  if (rules.length > MODEL_GENERATOR_MAX_RULES || bindings.length > MODEL_GENERATOR_MAX_BINDINGS) {
+  const fetchBindings = Array.isArray(modelGenerator.fetchBindings) ? modelGenerator.fetchBindings : [];
+  if (rules.length > MODEL_GENERATOR_MAX_RULES
+    || bindings.length > MODEL_GENERATOR_MAX_BINDINGS
+    || fetchBindings.length > MODEL_GENERATOR_MAX_BINDINGS) {
     throwUnsupportedSceneFileError();
   }
 
@@ -638,15 +659,23 @@ function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerat
     rules,
     metadataTtlSeconds,
     bindings,
+    fetchBindings,
+    dataSource: modelGenerator.dataSource,
     ...(modelGenerator.warehouseFlow === undefined ? {} : { warehouseFlow: modelGenerator.warehouseFlow }),
   });
-  if (!normalized || normalized.rules.length !== rules.length || normalized.bindings.length !== bindings.length) {
+  if (!normalized
+    || normalized.rules.length !== rules.length
+    || normalized.bindings.length !== bindings.length
+    || normalized.fetchBindings.length !== fetchBindings.filter((b: unknown) => sanitizeModelGeneratorFetchBinding(b)).length) {
     throwUnsupportedSceneFileError();
   }
 
   const ruleIds = normalized.rules.map((rule) => rule.id);
   const bindingIds = normalized.bindings.map((binding) => binding.id);
-  if (new Set(ruleIds).size !== ruleIds.length || new Set(bindingIds).size !== bindingIds.length) {
+  const fetchBindingIds = normalized.fetchBindings.map((b) => b.id);
+  if (new Set(ruleIds).size !== ruleIds.length
+    || new Set(bindingIds).size !== bindingIds.length
+    || new Set(fetchBindingIds).size !== fetchBindingIds.length) {
     throwUnsupportedSceneFileError();
   }
 

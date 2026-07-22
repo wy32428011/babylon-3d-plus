@@ -596,6 +596,7 @@ export function SceneViewPanel() {
       runtime.beginTelemetryPreview();
       client.updateConfig(mqttConfig);
       publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
+      void runtime.handleFetchGeneratorEvent(currentSceneDocument.fetchConfig);
     } catch (error) {
       const message = getErrorMessage(error);
       pushLog(`运行预览初始化失败：${message}`);

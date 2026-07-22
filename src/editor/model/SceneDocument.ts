@@ -83,6 +83,16 @@ export type SceneSettings = {
   environment: SceneEnvironmentSettings | null;
 };
 
+export type FetchConfig = {
+  url: string;
+  apiKey: string;
+};
+
+export const DEFAULT_FETCH_CONFIG: FetchConfig = {
+  url: '',
+  apiKey: '',
+};
+
 export type MqttAdapterConfig =
   | { kind: 'epv'; sourceId?: string; deviceType?: string }
   | {
@@ -297,6 +307,14 @@ function createSubscriptionsFromLegacyTopic(topic: string): MqttSubscriptionConf
   return topic.split(',').map((item) => item.trim()).filter(Boolean).slice(0, 32).map((item) => ({ topic: item, qos: 0, adapter: { kind: 'epv' } }));
 }
 
+export function sanitizeFetchConfig(config: unknown): FetchConfig {
+  if (typeof config !== 'object' || config === null) return { ...DEFAULT_FETCH_CONFIG };
+  const obj = config as Record<string, unknown>;
+  const url = typeof obj.url === 'string' ? obj.url.trim().slice(0, 2048) : '';
+  const apiKey = typeof obj.apiKey === 'string' ? obj.apiKey.trim().slice(0, 256) : '';
+  return { url, apiKey };
+}
+
 /** 归一化场景 MQTT 配置，地址为空但 IP 存在时自动补齐默认 WebSocket 地址。 */
 export function sanitizeMqttConfig(config: Omit<MqttConfig, 'subscriptions'> & { subscriptions?: unknown }): MqttConfig {
   const ip = config.ip.trim();
@@ -367,6 +385,7 @@ export type SceneDocument = {
   selectedEntityId: string | null;
   mqttConfig: MqttConfig;
   sceneSettings: SceneSettings;
+  fetchConfig: FetchConfig;
 };
 
 export function createEmptySceneDocument(name = 'Untitled Scene'): SceneDocument {
@@ -378,6 +397,7 @@ export function createEmptySceneDocument(name = 'Untitled Scene'): SceneDocument
     selectedEntityId: null,
     mqttConfig: DEFAULT_MQTT_CONFIG,
     sceneSettings: createDefaultSceneSettings(),
+    fetchConfig: DEFAULT_FETCH_CONFIG,
   };
 }
 
@@ -454,6 +474,13 @@ export function createLocatorEntity(position: Vector3Data = vector3()): Entity {
         length: 1,
         width: 1,
         height: 1,
+        columns: 1,
+        layers: 1,
+        startColumn: 1,
+        columnGap: 0,
+        layerGap: 0,
+        deviceAssetCode: '',
+        rowNumber: 1,
       },
     },
   };

@@ -1,9 +1,13 @@
 node_modules
 dist
+dist-electron
 .idea/
 .claude
 .omc
 .playwright-mcp
 .playwright-cli
 release/
+CLAUDE.md
+*.tsbuildinfo
+temp.log
 dist-viewer-template/

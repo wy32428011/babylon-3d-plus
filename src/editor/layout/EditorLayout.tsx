@@ -11,9 +11,9 @@ import { Toolbar } from '../ui/Toolbar';
 import styles from './EditorLayout.module.css';
 
 const TOOL_SHORTCUTS: Record<string, TransformTool> = {
-  w: 'translate',
-  e: 'rotate',
-  r: 'scale',
+  e: 'translate',
+  r: 'rotate',
+  t: 'scale',
 };
 
 /** 判断当前快捷键事件是否来自可输入控件，避免干扰 Inspector 数值编辑。 */
@@ -38,6 +38,7 @@ export function EditorLayout() {
   const gridSettings = useEditorStore((state) => state.gridSettings);
   const cadImportProgress = useEditorStore((state) => state.cadImportProgress);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
+  const fetchConfig = useEditorStore((state) => state.scene.fetchConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
   const setTransformTool = useEditorStore((state) => state.setTransformTool);
   const setTransformSpace = useEditorStore((state) => state.setTransformSpace);
@@ -58,6 +59,7 @@ export function EditorLayout() {
   const saveScene = useEditorStore((state) => state.saveScene);
   const loadScene = useEditorStore((state) => state.loadScene);
   const updateMqttConfig = useEditorStore((state) => state.updateMqttConfig);
+  const updateFetchConfig = useEditorStore((state) => state.updateFetchConfig);
   const startRuntimePreview = useEditorStore((state) => state.startRuntimePreview);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
   const pushLog = useEditorStore((state) => state.pushLog);
@@ -224,6 +226,10 @@ export function EditorLayout() {
     setRuntimePreviewError(null);
   }
 
+  function handleSaveFetchConfig(config: typeof fetchConfig): void {
+    updateFetchConfig(config);
+  }
+
   return (
     <div className={styles.editorShell}>
       <Toolbar
@@ -253,6 +259,8 @@ export function EditorLayout() {
         onOpenMqttConfig={() => setMqttConfigDialogOpen(true)}
         onCloseMqttConfig={handleCloseMqttConfig}
         onSaveMqttConfig={handleSaveMqttConfig}
+        fetchConfig={fetchConfig}
+        onSaveFetchConfig={handleSaveFetchConfig}
         runtimeMode={runtimeMode}
         runtimePreviewError={runtimePreviewError}
         readOnly={isRuntimePreview}

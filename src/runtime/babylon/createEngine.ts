@@ -1,5 +1,6 @@
 import {
   ArcRotateCamera,
+  Axis,
   Color3,
   Engine,
   GlowLayer,
@@ -8,6 +9,7 @@ import {
   MeshBuilder,
   Scene,
   ShaderMaterial,
+  TmpVectors,
   Vector3,
 } from '@babylonjs/core';
 import { SCENE_LENGTH_UNIT_SYMBOL } from '../../editor/model/sceneUnits';
@@ -372,6 +374,70 @@ function applyTopCameraView(camera: ArcRotateCamera): void {
   camera.beta = Math.max(camera.lowerBetaLimit ?? EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK, EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK);
 }
 
+const CAMERA_FLY_KEY_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyC']);
+/** 键盘平移速度：每秒移动距离占相机半径的比例，视野越远移动越快。 */
+const CAMERA_FLY_SPEED_PER_RADIUS_SECOND = 0.6;
+
+/** WASD 前后/左右平移 + Space 升 C 降；焦点在输入控件上时不接管按键，返回清理函数。 */
+function createCameraFlyKeyControls(camera: ArcRotateCamera, engine: Engine, scene: Scene): () => void {
+  const pressedKeys = new Set<string>();
+
+  const handleKeyDown = (event: KeyboardEvent): void => {
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (!CAMERA_FLY_KEY_CODES.has(event.code)) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && !(active instanceof HTMLCanvasElement)) return;
+    event.stopPropagation();
+    pressedKeys.add(event.code);
+    if (event.code === 'Space') event.preventDefault();
+  };
+  const handleKeyUp = (event: KeyboardEvent): void => {
+    if (!CAMERA_FLY_KEY_CODES.has(event.code)) return;
+    event.stopPropagation();
+    pressedKeys.delete(event.code);
+  };
+  const handleWindowBlur = (): void => {
+    pressedKeys.clear();
+  };
+
+  window.addEventListener('keydown', handleKeyDown, true);
+  window.addEventListener('keyup', handleKeyUp, true);
+  window.addEventListener('blur', handleWindowBlur, true);
+
+  const observer = scene.onBeforeRenderObservable.add(() => {
+    if (pressedKeys.size === 0) return;
+
+    // 相机无 roll，right 向量始终水平，俯视时也不会退化
+    const rightFlat = TmpVectors.Vector3[0];
+    camera.getDirectionToRef(Axis.X, rightFlat);
+    rightFlat.y = 0;
+    if (rightFlat.lengthSquared() < 1e-10) return;
+    rightFlat.normalize();
+    const forwardFlat = TmpVectors.Vector3[1];
+    Vector3.CrossToRef(rightFlat, Axis.Y, forwardFlat);
+
+    const move = TmpVectors.Vector3[2].setAll(0);
+    if (pressedKeys.has('KeyW')) move.addInPlace(forwardFlat);
+    if (pressedKeys.has('KeyS')) move.subtractInPlace(forwardFlat);
+    if (pressedKeys.has('KeyD')) move.addInPlace(rightFlat);
+    if (pressedKeys.has('KeyA')) move.subtractInPlace(rightFlat);
+    if (pressedKeys.has('Space')) move.y += 1;
+    if (pressedKeys.has('KeyC')) move.y -= 1;
+    if (move.lengthSquared() === 0) return;
+
+    const deltaSeconds = engine.getDeltaTime() / 1000;
+    move.normalize().scaleInPlace(camera.radius * CAMERA_FLY_SPEED_PER_RADIUS_SECOND * deltaSeconds);
+    camera.target.addInPlace(move);
+  });
+
+  return () => {
+    window.removeEventListener('keydown', handleKeyDown, true);
+    window.removeEventListener('keyup', handleKeyUp, true);
+    window.removeEventListener('blur', handleWindowBlur, true);
+    scene.onBeforeRenderObservable.remove(observer);
+  };
+}
+
 export function createBabylonViewport(
   canvas: HTMLCanvasElement,
   onRuntimeStatus?: BabylonViewportRuntimeStatusCallback,
@@ -413,6 +479,7 @@ export function createBabylonViewport(
     ...DEFAULT_EDITOR_GRID_SETTINGS,
     visible: options.showGrid ?? DEFAULT_EDITOR_GRID_SETTINGS.visible,
   });
+  const disposeFlyControls = createCameraFlyKeyControls(camera, engine, scene);
   let disposed = false;
   let contextLost = false;
   let renderFailed = false;
@@ -488,6 +555,7 @@ export function createBabylonViewport(
     setGridSettings: editorGround.setSettings,
     dispose: () => {
       disposed = true;
+      disposeFlyControls();
       engine.onContextLostObservable.remove(contextLostObserver);
       engine.onContextRestoredObservable.remove(contextRestoredObserver);
       editorGround.dispose();

@@ -24,6 +24,13 @@ export type LocatorComponent = {
   length: number;
   width: number;
   height: number;
+  columns: number;
+  layers: number;
+  startColumn: number;
+  columnGap: number;
+  layerGap: number;
+  deviceAssetCode: string;
+  rowNumber: number;
 };
 
 export type CadReferenceOriginMode = 'center';
@@ -118,11 +125,17 @@ export type ModelGeneratorRule = {
   target: ModelGeneratorTarget | null;
 };
 
-/** 模型生成器绑定，将外部设备身份绑定到生成出的资产编号。 */
+/** 模型生成器 MQTT 设备绑定，将外部设备身份绑定到生成出的资产编号。 */
 export type ModelGeneratorBinding = {
   id: string;
   sourceId: string;
   deviceType: string;
+  assetCode: string;
+};
+
+/** 模型生成器 fetch 定位线框绑定，通过资产编号匹配虚拟定位线框。 */
+export type ModelGeneratorFetchBinding = {
+  id: string;
   assetCode: string;
 };
 
@@ -134,13 +147,18 @@ export type ModelGeneratorWarehouseFlow = {
   outboundBindingId: string;
 };
 
+/** 模型生成器的数据源类型：mqtt 走遥测驱动，fetch 走 HTTP 接口驱动。 */
+export type ModelGeneratorDataSource = 'mqtt' | 'fetch';
+
 /** 模型生成器组件，保存默认目标、规则、元数据 TTL、设备绑定和可选仓储流。 */
 export type ModelGeneratorComponent = {
   defaultTarget: ModelGeneratorTarget | null;
   rules: ModelGeneratorRule[];
   metadataTtlSeconds: number;
   bindings: ModelGeneratorBinding[];
+  fetchBindings: ModelGeneratorFetchBinding[];
   warehouseFlow?: ModelGeneratorWarehouseFlow;
+  dataSource: ModelGeneratorDataSource;
 };
 
 export type CameraComponent = {

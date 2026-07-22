@@ -8,6 +8,7 @@ import {
   STACKER_SIMULATION_SCENARIOS,
   createMqttAddressFromIp,
   sanitizeMqttConfig,
+  type FetchConfig,
   type MqttConfig,
   type MqttSubscriptionConfig,
   type StackerSimulationScenario,
@@ -34,9 +35,9 @@ import { ToolbarTaskProgress } from '../deployment/ToolbarTaskProgress';
 import { APPLICATION_NAME, BrandLogo } from './BrandLogo';
 
 const TRANSFORM_TOOL_LABELS: Record<TransformTool, string> = {
-  translate: '移动',
-  rotate: '旋转',
-  scale: '缩放',
+  translate: '移动 (E)',
+  rotate: '旋转 (R)',
+  scale: '缩放 (T)',
 };
 
 const TRANSFORM_SPACE_LABELS: Record<TransformSpace, string> = {
@@ -59,6 +60,7 @@ const TOOLBAR_ICONS = {
   deployment: '📦',
   cad: '▧',
   mqtt: 'MQ',
+  fetch: '⤓',
 } as const;
 
 const STACKER_SIMULATION_SCENARIO_LABELS: Record<StackerSimulationScenario, string> = {
@@ -135,6 +137,8 @@ type ToolbarProps = {
   onOpenMqttConfig: () => void;
   onCloseMqttConfig: () => void;
   onSaveMqttConfig: (config: MqttConfig) => void;
+  fetchConfig: FetchConfig;
+  onSaveFetchConfig: (config: FetchConfig) => void;
   cadImportProgress: CadImportProgress | null;
   canDelete: boolean;
   canUndo: boolean;
@@ -177,6 +181,8 @@ export function Toolbar(props: ToolbarProps) {
   const [previewTopic, setPreviewTopic] = useState(props.mqttConfig.topic);
   const [previewPayload, setPreviewPayload] = useState('');
   const [previewResult, setPreviewResult] = useState<MqttPreviewResult | null>(null);
+  const [fetchConfigDialogOpen, setFetchConfigDialogOpen] = useState(false);
+  const [fetchDraft, setFetchDraft] = useState<FetchConfig>(props.fetchConfig);
   const isPreview = props.runtimeMode === 'preview';
   const deploymentExportProgress = props.deploymentExportProgress;
   const [previewError, setPreviewError] = useState('');
@@ -522,6 +528,15 @@ export function Toolbar(props: ToolbarProps) {
         label="配置 MQTT 与本地模拟"
         onClick={props.onOpenMqttConfig}
       />
+      <ToolbarIconButton
+        disabled={props.readOnly}
+        icon={TOOLBAR_ICONS.fetch}
+        label="配置 Fetch 请求"
+        onClick={() => {
+          setFetchDraft(props.fetchConfig);
+          setFetchConfigDialogOpen(true);
+        }}
+      />
       {props.cadImportProgress ? (
         <ToolbarTaskProgress
           detail={props.cadImportProgress.detail}
@@ -721,6 +736,52 @@ export function Toolbar(props: ToolbarProps) {
             <div className="mqtt-config-dialog-actions">
               <button type="button" onClick={props.onCloseMqttConfig}>取消</button>
               <button className="mqtt-config-dialog-primary" type="submit">保存</button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+      {fetchConfigDialogOpen ? (
+        <div
+          className="fetch-config-dialog-backdrop"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) setFetchConfigDialogOpen(false); }}
+        >
+          <form
+            aria-label="Fetch 请求配置"
+            aria-modal="true"
+            className="fetch-config-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+            role="dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              props.onSaveFetchConfig(fetchDraft);
+              setFetchConfigDialogOpen(false);
+            }}
+          >
+            <h3>Fetch 配置</h3>
+            <p className="muted">配置 fetch 数据源的基础请求地址和 API Key。</p>
+            <label className="fetch-config-dialog-row">
+              <span>请求地址</span>
+              <input
+                type="text"
+                value={fetchDraft.url}
+                maxLength={2048}
+                placeholder="https://api.example.com/cargo"
+                onChange={(event) => setFetchDraft({ ...fetchDraft, url: event.target.value })}
+              />
+            </label>
+            <label className="fetch-config-dialog-row">
+              <span>API Key</span>
+              <input
+                type="text"
+                value={fetchDraft.apiKey}
+                maxLength={256}
+                placeholder="sk-..."
+                onChange={(event) => setFetchDraft({ ...fetchDraft, apiKey: event.target.value })}
+              />
+            </label>
+            <div className="fetch-config-dialog-actions">
+              <button type="button" onClick={() => setFetchConfigDialogOpen(false)}>取消</button>
+              <button className="fetch-config-dialog-primary" type="submit">保存</button>
             </div>
           </form>
         </div>
