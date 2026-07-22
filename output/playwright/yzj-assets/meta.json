@@ -6,135 +6,94 @@
       "className": "ParametricModelParamsComponent",
       "fields": [
         {
-          "key": "modelKey",
-          "label": "模型标识",
-          "type": "string",
-          "defaultValue": "yzj",
-          "configuration": {
-            "type": "string"
-          }
-        },
-        {
-          "key": "deviceType",
-          "label": "设备类型",
-          "type": "string",
-          "defaultValue": "输送",
-          "configuration": {
-            "type": "string"
-          }
-        },
-        {
-          "key": "deviceName",
-          "label": "设备名称",
-          "type": "string",
-          "defaultValue": "一体式顶升移载",
-          "configuration": {
-            "type": "string"
-          }
-        },
-        {
-          "key": "description",
-          "label": "参数说明",
-          "type": "string",
-          "defaultValue": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度、入/出料侧定位及 MQTT 前/后端独立定位。",
-          "configuration": {
-            "type": "string"
-          }
-        },
-        {
-          "key": "chainLength",
-          "label": "链条机长度 (m)",
+          "key": "length",
+          "label": "长度",
           "type": "number",
-          "defaultValue": 1.828,
+          "defaultValue": 1.8276,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1,
+            "step": 0.0001,
             "unit": "m"
           },
           "unit": "m"
         },
         {
-          "key": "platformLength",
-          "label": "顶升模块长度 (m)",
+          "key": "width",
+          "label": "宽度",
           "type": "number",
-          "defaultValue": 1.022,
+          "defaultValue": 1.0621,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1,
+            "step": 0.0001,
             "unit": "m"
           },
           "unit": "m"
         },
         {
-          "key": "platformPosition",
-          "label": "顶升位置偏移 (m)",
+          "key": "height",
+          "label": "高度",
           "type": "number",
-          "defaultValue": 0,
+          "defaultValue": 0.6478692,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 1e-07,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "bodyColor",
+          "label": "主体颜色",
+          "type": "string",
+          "defaultValue": "#387368",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "rollerFramePosition",
+          "label": "辊筒框架位置",
+          "type": "number",
+          "defaultValue": 0.1576491,
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.05,
+            "step": 1e-07,
             "unit": "m"
           },
           "unit": "m"
         },
         {
-          "key": "chainWidth",
-          "label": "链条机宽度 (m)",
+          "key": "rollerFrameLength",
+          "label": "辊筒框架长度",
           "type": "number",
-          "defaultValue": 1.194,
+          "defaultValue": 1.021932,
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1,
+            "step": 1e-06,
             "unit": "m"
           },
           "unit": "m"
         },
         {
-          "key": "chainHeight",
-          "label": "链条机高度 (m)",
+          "key": "motorPosition",
+          "label": "电机位置",
           "type": "number",
-          "defaultValue": 0.803,
-          "configuration": {
-            "type": "number",
-            "min": 0.1,
-            "max": 100,
-            "step": 0.1,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
-        {
-          "key": "rollerWidth",
-          "label": "辊筒宽度 (m)",
-          "type": "number",
-          "defaultValue": 0.062,
-          "configuration": {
-            "type": "number",
-            "min": 0.01,
-            "max": 100,
-            "step": 0.01,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
-        {
-          "key": "rollerPosition",
-          "label": "辊筒位置 (m)",
-          "type": "number",
-          "defaultValue": 0,
+          "defaultValue": 0.1814833,
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.1,
+            "step": 1e-07,
             "unit": "m"
           },
           "unit": "m"
@@ -143,125 +102,44 @@
           "key": "rollerDensity",
           "label": "辊筒密度",
           "type": "number",
-          "defaultValue": 1,
+          "defaultValue": 0.6,
           "configuration": {
             "type": "number",
-            "min": 1,
+            "min": 0.1,
             "max": 100,
-            "step": 1
+            "step": 0.1
           }
         },
         {
-          "key": "infeedSide",
-          "label": "入料侧",
-          "type": "string",
-          "defaultValue": "left",
+          "key": "showLegA",
+          "label": "显示腿A",
+          "type": "boolean",
+          "defaultValue": true,
           "configuration": {
-            "type": "string",
-            "options": [
-              {
-                "value": "left",
-                "label": "左侧（局部 X+）"
-              },
-              {
-                "value": "right",
-                "label": "右侧（局部 X-）"
-              },
-              {
-                "value": "front",
-                "label": "前侧（局部 Z-）"
-              },
-              {
-                "value": "rear",
-                "label": "后侧（局部 Z+）"
-              }
-            ]
+            "type": "boolean"
           }
         },
         {
-          "key": "outfeedSide",
-          "label": "出料侧",
-          "type": "string",
-          "defaultValue": "front",
+          "key": "showLegB",
+          "label": "显示腿B",
+          "type": "boolean",
+          "defaultValue": true,
           "configuration": {
-            "type": "string",
-            "options": [
-              {
-                "value": "left",
-                "label": "左侧（局部 X+）"
-              },
-              {
-                "value": "right",
-                "label": "右侧（局部 X-）"
-              },
-              {
-                "value": "front",
-                "label": "前侧（局部 Z-）"
-              },
-              {
-                "value": "rear",
-                "label": "后侧（局部 Z+）"
-              }
-            ]
+            "type": "boolean"
           }
         },
         {
-          "key": "frontSide",
-          "label": "MQTT 前端方向",
-          "type": "string",
-          "defaultValue": "right",
+          "key": "showMotor",
+          "label": "显示电机",
+          "type": "boolean",
+          "defaultValue": true,
           "configuration": {
-            "type": "string",
-            "options": [
-              {
-                "value": "left",
-                "label": "左侧（局部 X+）"
-              },
-              {
-                "value": "right",
-                "label": "右侧（局部 X-）"
-              },
-              {
-                "value": "front",
-                "label": "前侧（局部 Z-）"
-              },
-              {
-                "value": "rear",
-                "label": "后侧（局部 Z+）"
-              }
-            ]
+            "type": "boolean"
           }
         },
         {
-          "key": "backSide",
-          "label": "MQTT 后端方向",
-          "type": "string",
-          "defaultValue": "left",
-          "configuration": {
-            "type": "string",
-            "options": [
-              {
-                "value": "left",
-                "label": "左侧（局部 X+）"
-              },
-              {
-                "value": "right",
-                "label": "右侧（局部 X-）"
-              },
-              {
-                "value": "front",
-                "label": "前侧（局部 Z-）"
-              },
-              {
-                "value": "rear",
-                "label": "后侧（局部 Z+）"
-              }
-            ]
-          }
-        },
-        {
-          "key": "showDirectionArrow",
-          "label": "显示方向箭头",
+          "key": "rollerSkin",
+          "label": "辊轮皮",
           "type": "boolean",
           "defaultValue": true,
           "configuration": {
@@ -270,275 +148,140 @@
         },
         {
           "key": "directionArrowImage",
-          "label": "方向箭头贴图",
+          "label": "方向箭头贴图（运行兼容）",
           "type": "string",
           "defaultValue": "editor-image://builtin/direction-arrow-glow",
           "configuration": {
             "type": "string"
           }
-        },
-        {
-          "key": "showFrontSupport",
-          "label": "显示前支架",
-          "type": "boolean",
-          "defaultValue": true,
-          "configuration": {
-            "type": "boolean"
-          }
-        },
-        {
-          "key": "showRearSupport",
-          "label": "显示后支架",
-          "type": "boolean",
-          "defaultValue": true,
-          "configuration": {
-            "type": "boolean"
-          }
         }
       ],
       "values": {
-        "modelKey": {
-          "type": "string",
-          "value": "yzj",
-          "label": "模型标识",
-          "configuration": {
-            "type": "string"
-          }
-        },
-        "deviceType": {
-          "type": "string",
-          "value": "输送",
-          "label": "设备类型",
-          "configuration": {
-            "type": "string"
-          }
-        },
-        "deviceName": {
-          "type": "string",
-          "value": "一体式顶升移载",
-          "label": "设备名称",
-          "configuration": {
-            "type": "string"
-          }
-        },
-        "description": {
-          "type": "string",
-          "value": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度、入/出料侧定位及 MQTT 前/后端独立定位。",
-          "label": "参数说明",
-          "configuration": {
-            "type": "string"
-          }
-        },
-        "chainLength": {
+        "length": {
           "type": "number",
-          "value": 1.828,
-          "label": "链条机长度 (m)",
+          "value": 1.8276,
+          "label": "长度",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1,
+            "step": 0.0001,
             "unit": "m"
           },
           "unit": "m"
         },
-        "platformLength": {
+        "width": {
           "type": "number",
-          "value": 1.022,
-          "label": "顶升模块长度 (m)",
+          "value": 1.0621,
+          "label": "宽度",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1,
+            "step": 0.0001,
             "unit": "m"
           },
           "unit": "m"
         },
-        "platformPosition": {
+        "height": {
           "type": "number",
-          "value": 0,
-          "label": "顶升位置偏移 (m)",
+          "value": 0.6478692,
+          "label": "高度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 1e-07,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "bodyColor": {
+          "type": "string",
+          "value": "#387368",
+          "label": "主体颜色",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "rollerFramePosition": {
+          "type": "number",
+          "value": 0.1576491,
+          "label": "辊筒框架位置",
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.05,
+            "step": 1e-07,
             "unit": "m"
           },
           "unit": "m"
         },
-        "chainWidth": {
+        "rollerFrameLength": {
           "type": "number",
-          "value": 1.194,
-          "label": "链条机宽度 (m)",
+          "value": 1.021932,
+          "label": "辊筒框架长度",
           "configuration": {
             "type": "number",
             "min": 0.1,
             "max": 100,
-            "step": 0.1,
+            "step": 1e-06,
             "unit": "m"
           },
           "unit": "m"
         },
-        "chainHeight": {
+        "motorPosition": {
           "type": "number",
-          "value": 0.803,
-          "label": "链条机高度 (m)",
-          "configuration": {
-            "type": "number",
-            "min": 0.1,
-            "max": 100,
-            "step": 0.1,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
-        "rollerWidth": {
-          "type": "number",
-          "value": 0.062,
-          "label": "辊筒宽度 (m)",
-          "configuration": {
-            "type": "number",
-            "min": 0.01,
-            "max": 100,
-            "step": 0.01,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
-        "rollerPosition": {
-          "type": "number",
-          "value": 0,
-          "label": "辊筒位置 (m)",
+          "value": 0.1814833,
+          "label": "电机位置",
           "configuration": {
             "type": "number",
             "min": -100,
             "max": 100,
-            "step": 0.1,
+            "step": 1e-07,
             "unit": "m"
           },
           "unit": "m"
         },
         "rollerDensity": {
           "type": "number",
-          "value": 1,
+          "value": 0.6,
           "label": "辊筒密度",
           "configuration": {
             "type": "number",
-            "min": 1,
+            "min": 0.1,
             "max": 100,
-            "step": 1
+            "step": 0.1
           }
         },
-        "infeedSide": {
-          "type": "string",
-          "value": "left",
-          "label": "入料侧",
-          "configuration": {
-            "type": "string",
-            "options": [
-              {
-                "value": "left",
-                "label": "左侧（局部 X+）"
-              },
-              {
-                "value": "right",
-                "label": "右侧（局部 X-）"
-              },
-              {
-                "value": "front",
-                "label": "前侧（局部 Z-）"
-              },
-              {
-                "value": "rear",
-                "label": "后侧（局部 Z+）"
-              }
-            ]
-          }
-        },
-        "outfeedSide": {
-          "type": "string",
-          "value": "front",
-          "label": "出料侧",
-          "configuration": {
-            "type": "string",
-            "options": [
-              {
-                "value": "left",
-                "label": "左侧（局部 X+）"
-              },
-              {
-                "value": "right",
-                "label": "右侧（局部 X-）"
-              },
-              {
-                "value": "front",
-                "label": "前侧（局部 Z-）"
-              },
-              {
-                "value": "rear",
-                "label": "后侧（局部 Z+）"
-              }
-            ]
-          }
-        },
-        "frontSide": {
-          "type": "string",
-          "value": "right",
-          "label": "MQTT 前端方向",
-          "configuration": {
-            "type": "string",
-            "options": [
-              {
-                "value": "left",
-                "label": "左侧（局部 X+）"
-              },
-              {
-                "value": "right",
-                "label": "右侧（局部 X-）"
-              },
-              {
-                "value": "front",
-                "label": "前侧（局部 Z-）"
-              },
-              {
-                "value": "rear",
-                "label": "后侧（局部 Z+）"
-              }
-            ]
-          }
-        },
-        "backSide": {
-          "type": "string",
-          "value": "left",
-          "label": "MQTT 后端方向",
-          "configuration": {
-            "type": "string",
-            "options": [
-              {
-                "value": "left",
-                "label": "左侧（局部 X+）"
-              },
-              {
-                "value": "right",
-                "label": "右侧（局部 X-）"
-              },
-              {
-                "value": "front",
-                "label": "前侧（局部 Z-）"
-              },
-              {
-                "value": "rear",
-                "label": "后侧（局部 Z+）"
-              }
-            ]
-          }
-        },
-        "showDirectionArrow": {
+        "showLegA": {
           "type": "boolean",
           "value": true,
-          "label": "显示方向箭头",
+          "label": "显示腿A",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "showLegB": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示腿B",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "showMotor": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示电机",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "rollerSkin": {
+          "type": "boolean",
+          "value": true,
+          "label": "辊轮皮",
           "configuration": {
             "type": "boolean"
           }
@@ -546,25 +289,9 @@
         "directionArrowImage": {
           "type": "string",
           "value": "editor-image://builtin/direction-arrow-glow",
-          "label": "方向箭头贴图",
+          "label": "方向箭头贴图（运行兼容）",
           "configuration": {
             "type": "string"
-          }
-        },
-        "showFrontSupport": {
-          "type": "boolean",
-          "value": true,
-          "label": "显示前支架",
-          "configuration": {
-            "type": "boolean"
-          }
-        },
-        "showRearSupport": {
-          "type": "boolean",
-          "value": true,
-          "label": "显示后支架",
-          "configuration": {
-            "type": "boolean"
           }
         }
       }
@@ -584,205 +311,110 @@
     "version": 1,
     "parameters": [
       {
-        "key": "chainLength",
-        "label": "链条机长度 (m)",
+        "key": "length",
+        "label": "长度",
         "type": "number",
-        "defaultValue": 1.828,
+        "defaultValue": 1.8276,
         "min": 0.1,
         "max": 100,
-        "step": 0.1,
+        "step": 0.0001,
         "unit": "m"
       },
       {
-        "key": "platformLength",
-        "label": "顶升模块长度 (m)",
+        "key": "width",
+        "label": "宽度",
         "type": "number",
-        "defaultValue": 1.022,
+        "defaultValue": 1.0621,
         "min": 0.1,
         "max": 100,
-        "step": 0.1,
+        "step": 0.0001,
         "unit": "m"
       },
       {
-        "key": "platformPosition",
-        "label": "顶升位置偏移 (m)",
+        "key": "height",
+        "label": "高度",
         "type": "number",
-        "defaultValue": 0,
+        "defaultValue": 0.6478692,
+        "min": 0.1,
+        "max": 100,
+        "step": 1e-07,
+        "unit": "m"
+      },
+      {
+        "key": "bodyColor",
+        "label": "主体颜色",
+        "type": "color",
+        "defaultValue": "#387368"
+      },
+      {
+        "key": "rollerFramePosition",
+        "label": "辊筒框架位置",
+        "type": "number",
+        "defaultValue": 0.1576491,
         "min": -100,
         "max": 100,
-        "step": 0.05,
+        "step": 1e-07,
         "unit": "m"
       },
       {
-        "key": "chainWidth",
-        "label": "链条机宽度 (m)",
+        "key": "rollerFrameLength",
+        "label": "辊筒框架长度",
         "type": "number",
-        "defaultValue": 1.194,
+        "defaultValue": 1.021932,
         "min": 0.1,
         "max": 100,
-        "step": 0.1,
+        "step": 1e-06,
         "unit": "m"
       },
       {
-        "key": "chainHeight",
-        "label": "链条机高度 (m)",
+        "key": "motorPosition",
+        "label": "电机位置",
         "type": "number",
-        "defaultValue": 0.803,
-        "min": 0.1,
-        "max": 100,
-        "step": 0.1,
-        "unit": "m"
-      },
-      {
-        "key": "rollerWidth",
-        "label": "辊筒宽度 (m)",
-        "type": "number",
-        "defaultValue": 0.062,
-        "min": 0.01,
-        "max": 100,
-        "step": 0.01,
-        "unit": "m"
-      },
-      {
-        "key": "rollerPosition",
-        "label": "辊筒位置 (m)",
-        "type": "number",
-        "defaultValue": 0,
+        "defaultValue": 0.1814833,
         "min": -100,
         "max": 100,
-        "step": 0.1,
+        "step": 1e-07,
         "unit": "m"
       },
       {
         "key": "rollerDensity",
         "label": "辊筒密度",
         "type": "number",
-        "defaultValue": 1,
-        "min": 1,
+        "defaultValue": 0.6,
+        "min": 0.1,
         "max": 100,
-        "step": 1
+        "step": 0.1
       },
       {
-        "key": "infeedSide",
-        "label": "入料侧",
-        "type": "enum",
-        "defaultValue": "left",
-        "options": [
-          {
-            "value": "left",
-            "label": "左侧（局部 X+）"
-          },
-          {
-            "value": "right",
-            "label": "右侧（局部 X-）"
-          },
-          {
-            "value": "front",
-            "label": "前侧（局部 Z-）"
-          },
-          {
-            "value": "rear",
-            "label": "后侧（局部 Z+）"
-          }
-        ]
-      },
-      {
-        "key": "outfeedSide",
-        "label": "出料侧",
-        "type": "enum",
-        "defaultValue": "front",
-        "options": [
-          {
-            "value": "left",
-            "label": "左侧（局部 X+）"
-          },
-          {
-            "value": "right",
-            "label": "右侧（局部 X-）"
-          },
-          {
-            "value": "front",
-            "label": "前侧（局部 Z-）"
-          },
-          {
-            "value": "rear",
-            "label": "后侧（局部 Z+）"
-          }
-        ]
-      },
-      {
-        "key": "frontSide",
-        "label": "MQTT 前端方向",
-        "type": "enum",
-        "defaultValue": "right",
-        "options": [
-          {
-            "value": "left",
-            "label": "左侧（局部 X+）"
-          },
-          {
-            "value": "right",
-            "label": "右侧（局部 X-）"
-          },
-          {
-            "value": "front",
-            "label": "前侧（局部 Z-）"
-          },
-          {
-            "value": "rear",
-            "label": "后侧（局部 Z+）"
-          }
-        ]
-      },
-      {
-        "key": "backSide",
-        "label": "MQTT 后端方向",
-        "type": "enum",
-        "defaultValue": "left",
-        "options": [
-          {
-            "value": "left",
-            "label": "左侧（局部 X+）"
-          },
-          {
-            "value": "right",
-            "label": "右侧（局部 X-）"
-          },
-          {
-            "value": "front",
-            "label": "前侧（局部 Z-）"
-          },
-          {
-            "value": "rear",
-            "label": "后侧（局部 Z+）"
-          }
-        ]
-      },
-      {
-        "key": "showDirectionArrow",
-        "label": "显示方向箭头",
+        "key": "showLegA",
+        "label": "显示腿A",
         "type": "boolean",
-        "defaultValue": true,
-        "description": "控制一体式顶升移载顶面是否显示发光方向箭头。"
+        "defaultValue": true
+      },
+      {
+        "key": "showLegB",
+        "label": "显示腿B",
+        "type": "boolean",
+        "defaultValue": true
+      },
+      {
+        "key": "showMotor",
+        "label": "显示电机",
+        "type": "boolean",
+        "defaultValue": true
+      },
+      {
+        "key": "rollerSkin",
+        "label": "辊轮皮",
+        "type": "boolean",
+        "defaultValue": true
       },
       {
         "key": "directionArrowImage",
-        "label": "方向箭头贴图",
+        "label": "方向箭头贴图（运行兼容）",
         "type": "texture",
         "defaultValue": "editor-image://builtin/direction-arrow-glow",
-        "description": "方向箭头使用的发光贴图，运行时可由图片库解析为实际 URL。"
-      },
-      {
-        "key": "showFrontSupport",
-        "label": "显示前支架",
-        "type": "boolean",
-        "defaultValue": true
-      },
-      {
-        "key": "showRearSupport",
-        "label": "显示后支架",
-        "type": "boolean",
-        "defaultValue": true
+        "description": "保留既有 MQTT 运行方向箭头的贴图解析能力。"
       }
     ],
     "bindings": []

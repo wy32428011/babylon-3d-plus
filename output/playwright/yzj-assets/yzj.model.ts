@@ -48,65 +48,41 @@ export const dataDriven = {
  * 管理 一体式顶升移载 在 Babylon.js Editor Inspector 中展示的静态参数。
  */
 export class ParametricModelParamsComponent {
-	@visibleAsString("模型标识")
-	public modelKey: string = "yzj";
+	@visibleAsNumber("长度", { step: 0.0001 })
+	public length: number = 1.8276;
 
-	@visibleAsString("设备类型")
-	public deviceType: string = "输送";
+	@visibleAsNumber("宽度", { step: 0.0001 })
+	public width: number = 1.0621;
 
-	@visibleAsString("设备名称")
-	public deviceName: string = "一体式顶升移载";
+	@visibleAsNumber("高度", { step: 0.0000001 })
+	public height: number = 0.6478692;
 
-	@visibleAsString("参数说明")
-	public description: string = "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度、入/出料侧定位及 MQTT 前/后端独立定位。";
+	@visibleAsString("主体颜色")
+	public bodyColor: string = "#387368";
 
-	@visibleAsNumber("链条机长度 (m)", { step: 0.1 })
-	public chainLength: number = 1.828;
+	@visibleAsNumber("辊筒框架位置", { step: 0.0000001 })
+	public rollerFramePosition: number = 0.1576491;
 
-	@visibleAsNumber("顶升模块长度 (m)", { step: 0.1 })
-	public platformLength: number = 1.022;
+	@visibleAsNumber("辊筒框架长度", { step: 0.000001 })
+	public rollerFrameLength: number = 1.021932;
 
-	@visibleAsNumber("顶升位置偏移 (m)", { step: 0.05 })
-	public platformPosition: number = 0;
+	@visibleAsNumber("电机位置", { step: 0.0000001 })
+	public motorPosition: number = 0.1814833;
 
-	@visibleAsNumber("链条机宽度 (m)", { step: 0.1 })
-	public chainWidth: number = 1.194;
+	@visibleAsNumber("辊筒密度", { step: 0.1 })
+	public rollerDensity: number = 0.6;
 
-	@visibleAsNumber("链条机高度 (m)", { step: 0.1 })
-	public chainHeight: number = 0.803;
+	@visibleAsBoolean("显示腿A")
+	public showLegA: boolean = true;
 
-	@visibleAsNumber("辊筒宽度 (m)", { step: 0.01 })
-	public rollerWidth: number = 0.062;
+	@visibleAsBoolean("显示腿B")
+	public showLegB: boolean = true;
 
-	@visibleAsNumber("辊筒位置 (m)", { step: 0.1 })
-	public rollerPosition: number = 0;
+	@visibleAsBoolean("显示电机")
+	public showMotor: boolean = true;
 
-	@visibleAsNumber("辊筒密度", { step: 1 })
-	public rollerDensity: number = 1;
-
-	@visibleAsString("入料侧")
-	public infeedSide: string = "left";
-
-	@visibleAsString("出料侧")
-	public outfeedSide: string = "front";
-
-	@visibleAsString("MQTT 前端方向")
-	public frontSide: string = "right";
-
-	@visibleAsString("MQTT 后端方向")
-	public backSide: string = "left";
-
-	@visibleAsBoolean("显示方向箭头")
-	public showDirectionArrow: boolean = true;
-
-	@visibleAsString("方向箭头贴图")
-	public directionArrowImage: string = "editor-image://builtin/direction-arrow-glow";
-
-	@visibleAsBoolean("显示前支架")
-	public showFrontSupport: boolean = true;
-
-	@visibleAsBoolean("显示后支架")
-	public showRearSupport: boolean = true;
+	@visibleAsBoolean("辊轮皮")
+	public rollerSkin: boolean = true;
 
 	/**
 	 * 创建 一体式顶升移载 参数配置组件。
@@ -133,13 +109,43 @@ interface NodeSnapshot {
 	rotationQuaternion?: any;
 	enabled?: boolean;
 	vertexPositions?: number[];
+	material?: any;
+}
+
+interface MeshComponentSnapshot {
+	vertexIndices: number[];
+	minimum: Vector3;
+	maximum: Vector3;
+	center: Vector3;
+	size: Vector3;
+	faceCount: number;
+}
+
+interface ResolvedDimension {
+	value: number;
+	baseline: number;
+	ratio: number;
+	usesLegacyValue: boolean;
 }
 
 const DEFAULT_VALUES: ValueMap = {
+	"length": 1.8276,
+	"width": 1.0621,
+	"height": 0.6478692,
+	"bodyColor": "#387368",
+	"rollerFramePosition": 0.1576491,
+	"rollerFrameLength": 1.021932,
+	"motorPosition": 0.1814833,
+	"rollerDensity": 0.6,
+	"showLegA": true,
+	"showLegB": true,
+	"showMotor": true,
+	"rollerSkin": true,
+	// 以下字段保留旧场景、物流方向和运行态箭头兼容，不再作为主参数面板字段展示。
 	"modelKey": "yzj",
 	"deviceType": "输送",
 	"deviceName": "一体式顶升移载",
-	"description": "支持主体左侧固定并向画面右侧单向伸长、顶升组件独立长宽与位置、辊筒密度、入/出料侧定位及 MQTT 前/后端独立定位。",
+	"description": "支持图片参数中的整机尺寸、主体颜色、辊筒框架、电机、腿 A/B 与辊轮皮控制。",
 	"chainLength": 1.828,
 	"platformLength": 1.022,
 	"platformPosition": 0,
@@ -147,7 +153,6 @@ const DEFAULT_VALUES: ValueMap = {
 	"chainHeight": 0.803,
 	"rollerWidth": 0.062,
 	"rollerPosition": 0,
-	"rollerDensity": 1,
 	"infeedSide": "left",
 	"outfeedSide": "front",
 	"frontSide": "right",
@@ -161,13 +166,16 @@ const DEFAULT_VALUES: ValueMap = {
 const BODY_NODE_NAME = "ZT.2";
 const ROLLER_NODE_NAME = "GT.3";
 const PLATFORM_NODE_NAME = "Ban.4";
+const PARAMETER_EPSILON = 0.0000001;
 
 /**
  * 根据 Inspector 参数对 一体式顶升移载 执行静态参数化调整。
  */
 export class ParametricModelRuntimeComponent {
 	private readonly snapshots = new Map<any, NodeSnapshot>();
+	private readonly meshComponents = new Map<any, MeshComponentSnapshot[]>();
 	private readonly generatedNodes: any[] = [];
+	private readonly generatedMaterials: any[] = [];
 	private readonly flowMetadataSnapshots = new Map<any, unknown>();
 	private readonly startupValues: ValueMap;
 	private directionArrowMesh: any | null = null;
@@ -210,6 +218,7 @@ export class ParametricModelRuntimeComponent {
 		this.disposeDirectionArrowResources();
 		this.disposeGeneratedNodes();
 		this.restoreBaseNodes();
+		this.disposeGeneratedMaterials();
 		this.restoreFlowMetadata();
 		this.lastSignature = "";
 	}
@@ -245,6 +254,7 @@ export class ParametricModelRuntimeComponent {
 		this.disposeDirectionArrowResources();
 		this.disposeGeneratedNodes();
 		this.restoreBaseNodes();
+		this.disposeGeneratedMaterials();
 		this.applyYZJParameters(values);
 		this.lastSignature = signature;
 	}
@@ -268,6 +278,7 @@ export class ParametricModelRuntimeComponent {
 				rotationQuaternion: target.rotationQuaternion?.clone?.(),
 				enabled: typeof target.isEnabled === "function" ? target.isEnabled() : undefined,
 				vertexPositions: this.readVertexPositions(target),
+				material: "material" in target ? target.material : undefined,
 			});
 		}
 		return this.snapshots.get(target) ?? { position: Vector3.Zero(), scaling: new Vector3(1, 1, 1) };
@@ -283,6 +294,7 @@ export class ParametricModelRuntimeComponent {
 			if (target.rotation && snapshot.rotation) { target.rotation = snapshot.rotation.clone(); }
 			if (snapshot.rotationQuaternion && target.rotationQuaternion !== undefined) { target.rotationQuaternion = snapshot.rotationQuaternion.clone(); }
 			if (snapshot.vertexPositions) { this.restoreVertexPositions(target, snapshot.vertexPositions); }
+			if (snapshot.material !== undefined && "material" in target) { target.material = snapshot.material; }
 			if (snapshot.enabled !== undefined && typeof target.setEnabled === "function") { target.setEnabled(snapshot.enabled); }
 		});
 	}
@@ -387,17 +399,19 @@ export class ParametricModelRuntimeComponent {
 	 * 按 YZJ.glb 的真实结构应用参数，避免旧模板对整机根节点做二次缩放。
 	 */
 	private applyYZJParameters(values: ValueMap): void {
-		const lengthRatio = this.ratio(values, "chainLength");
-		const platformLengthRatio = this.ratio(values, "platformLength");
-		const widthRatio = this.ratio(values, "chainWidth");
-		const heightRatio = this.ratio(values, "chainHeight");
-		const heightOffset = this.readPositiveNumber(values, "chainHeight", Number(DEFAULT_VALUES.chainHeight)) - Number(DEFAULT_VALUES.chainHeight);
+		const length = this.resolveDimensionParameter(values, "length", 1.8276, "chainLength", 1.828);
+		const width = this.resolveDimensionParameter(values, "width", 1.0621, "chainWidth", 1.194);
+		const height = this.resolveDimensionParameter(values, "height", 0.6478692, "chainHeight", 0.803);
+		const frameLength = this.resolveDimensionParameter(values, "rollerFrameLength", 1.021932, "platformLength", 1.022);
+		const heightOffset = height.value - height.baseline;
 
-		this.applyBodyParameters(lengthRatio, widthRatio, heightRatio);
-		const platformPosition = this.resolvePlatformPosition(values, platformLengthRatio);
-		this.applyPlatformParameters(platformLengthRatio, widthRatio, heightOffset, platformPosition);
-		this.applyRollerParameters(values, platformLengthRatio, heightOffset, platformPosition);
+		this.applyBodyParameters(length.ratio, width.ratio, height.ratio);
+		const framePosition = this.resolvePlatformPosition(values, frameLength.ratio);
+		this.applyPlatformParameters(frameLength.ratio, width.ratio, heightOffset, framePosition);
+		this.applyRollerParameters(values, frameLength.ratio, heightOffset, framePosition, width.value);
+		this.applyMotorParameters(values, width.ratio);
 		this.applySupportVisibility(values);
+		this.applyBodyColor(values);
 		this.applyFlowDirection(values);
 		this.updateDirectionArrowVisual(values);
 	}
@@ -469,7 +483,7 @@ export class ParametricModelRuntimeComponent {
 	 * 将顶升组件米制偏移限制在当前主体有效长度内，避免平台移动到设备外部。
 	 */
 	private resolvePlatformPosition(values: ValueMap, platformLengthRatio: number): number {
-		const requestedPosition = this.readNumber(values, "platformPosition", Number(DEFAULT_VALUES.platformPosition));
+		const requestedPosition = this.resolveRollerFrameOffset(values);
 		const body = this.findNodeByName(BODY_NODE_NAME);
 		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
 		if (!body || !platform) { return requestedPosition; }
@@ -498,20 +512,20 @@ export class ParametricModelRuntimeComponent {
 	/**
 	 * 辊筒 GT.3 与 Ban.4 共用顶升模块长度和位置，按辊筒宽度调整单根厚度，并按密度生成多根。
 	 */
-	private applyRollerParameters(values: ValueMap, platformLengthRatio: number, heightOffset: number, platformPosition: number): void {
+	private applyRollerParameters(values: ValueMap, platformLengthRatio: number, heightOffset: number, platformPosition: number, targetWidth: number): void {
 		const roller = this.findNodeByName(ROLLER_NODE_NAME);
 		if (!roller) { return; }
 		const rollerWidth = this.readPositiveNumber(values, "rollerWidth", Number(DEFAULT_VALUES.rollerWidth));
 		const rollerWidthRatio = rollerWidth / Number(DEFAULT_VALUES.rollerWidth);
-		const density = this.clamp(Math.round(this.readNumber(values, "rollerDensity", 1)), 1, 80);
+		const density = this.clamp(Math.max(1, Math.round(this.readNumber(values, "rollerDensity", 0.6))), 1, 80);
 		const rollerPosition = this.readNumber(values, "rollerPosition", 0);
-		const targetWidth = this.readPositiveNumber(values, "chainWidth", Number(DEFAULT_VALUES.chainWidth));
 		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
 		const platformBounds = platform ? this.getCurrentNodeMeterBounds(platform) : null;
 		const distributionCenterZ = platformBounds ? (platformBounds.minimum.z + platformBounds.maximum.z) / 2 : 0;
 		const centers = this.createRollerCenters(targetWidth, rollerWidth, density, distributionCenterZ);
 		const baseCenterZ = this.getNodeMeterCenterAxis(roller, "z") ?? distributionCenterZ - targetWidth / 2 + rollerWidth / 2;
 		this.scaleNodeWithAxisAnchors(roller, platformLengthRatio, 1, rollerWidthRatio, { x: "center", z: "center" });
+		this.applyRollerSkin(roller, this.readBoolean(values, "rollerSkin", true));
 		const rollerNodes = [roller];
 		for (let index = 1; index < centers.length; index += 1) {
 			const clone = this.cloneSingleNode(roller, "roller", index);
@@ -553,14 +567,66 @@ export class ParametricModelRuntimeComponent {
 	 * 根据支架显示参数切换前后支架节点。
 	 */
 	private applySupportVisibility(values: ValueMap): void {
-		const frontSupportNodes = this.findNodes(/front|qian|前|zj01|support.?front|front.?support/i);
-		const rearSupportNodes = this.findNodes(/rear|back|hou|后|zj02|support.?rear|rear.?support/i);
-		if (frontSupportNodes.length > 0 && "showFrontSupport" in values) {
-			this.setNodesEnabled(frontSupportNodes, this.readBoolean(values, "showFrontSupport", true));
+		const showLegA = this.readBoolean(values, "showLegA", true) && this.readBoolean(values, "showFrontSupport", true);
+		const showLegB = this.readBoolean(values, "showLegB", true) && this.readBoolean(values, "showRearSupport", true);
+		const body = this.findNodeByName(BODY_NODE_NAME);
+		let handledByMeshComponents = false;
+		if (body) {
+			this.getMeshesForNodes([body]).forEach((mesh) => {
+				handledByMeshComponents = this.setMeshComponentsVisible(mesh, (component) => this.isLegAComponent(component), showLegA) || handledByMeshComponents;
+				handledByMeshComponents = this.setMeshComponentsVisible(mesh, (component) => this.isLegBComponent(component), showLegB) || handledByMeshComponents;
+			});
 		}
-		if (rearSupportNodes.length > 0 && "showRearSupport" in values) {
-			this.setNodesEnabled(rearSupportNodes, this.readBoolean(values, "showRearSupport", true));
-		}
+		if (handledByMeshComponents) { return; }
+
+		// 兼容未来拆分出腿部子节点的模型包。
+		const legANodes = this.findNodes(/front|qian|前|zj01|leg.?a|support.?a|support.?front|front.?support/i);
+		const legBNodes = this.findNodes(/rear|back|hou|后|zj02|leg.?b|support.?b|support.?rear|rear.?support/i);
+		this.setNodesEnabled(legANodes, showLegA);
+		this.setNodesEnabled(legBNodes, showLegB);
+	}
+
+	/**
+	 * 在 ZT.2 单体网格中移动或隐藏电机组件；图片参数以当前 GLB 基线为绝对位置。
+	 */
+	private applyMotorParameters(values: ValueMap, widthRatio: number): void {
+		const body = this.findNodeByName(BODY_NODE_NAME);
+		if (!body) { return; }
+		const requestedPosition = this.readNumber(values, "motorPosition", Number(DEFAULT_VALUES.motorPosition));
+		const positionOffset = requestedPosition - Number(DEFAULT_VALUES.motorPosition);
+		const localOffset = positionOffset / Math.max(Math.abs(widthRatio), 0.0001);
+		const showMotor = this.readBoolean(values, "showMotor", true);
+		this.getMeshesForNodes([body]).forEach((mesh) => {
+			this.updateMeshComponents(mesh, (component) => this.isMotorComponent(component), new Vector3(0, 0, localOffset), showMotor);
+		});
+	}
+
+	/**
+	 * 使用参数色对 ZT.2 材质做实例级着色，避免修改共享材质或原始 GLB。
+	 */
+	private applyBodyColor(values: ValueMap): void {
+		const body = this.findNodeByName(BODY_NODE_NAME);
+		if (!body) { return; }
+		const color = this.readColor3(values, "bodyColor", String(DEFAULT_VALUES.bodyColor));
+		this.getMeshesForNodes([body]).forEach((mesh, index) => {
+			const originalMaterial = this.rememberSnapshot(mesh).material ?? mesh.material;
+			const material = originalMaterial?.clone?.(`${String(originalMaterial?.name ?? "YZJBodyMaterial")}_parametric_${index}`);
+			if (!material) { return; }
+			if ("albedoColor" in material) { material.albedoColor = color.clone(); }
+			if ("diffuseColor" in material) { material.diffuseColor = color.clone(); }
+			if ("baseColor" in material) { material.baseColor = color.clone(); }
+			mesh.material = material;
+			this.generatedMaterials.push(material);
+		});
+	}
+
+	/**
+	 * 辊轮皮对应 GT.3 中的长圆柱连通组件，关闭时只保留两端轴头。
+	 */
+	private applyRollerSkin(roller: any, visible: boolean): void {
+		this.getMeshesForNodes([roller]).forEach((mesh) => {
+			this.setMeshComponentsVisible(mesh, (component) => this.isRollerSkinComponent(component), visible);
+		});
 	}
 
 	/**
@@ -1180,6 +1246,212 @@ export class ParametricModelRuntimeComponent {
 	private refreshMeshBounds(mesh: any): void {
 		if (typeof mesh.refreshBoundingInfo === "function") { mesh.refreshBoundingInfo(true); }
 		if (typeof mesh.computeWorldMatrix === "function") { mesh.computeWorldMatrix(true); }
+	}
+
+	/**
+	 * 优先使用图片参数；图片参数保持默认而旧字段被显式修改时，继续执行旧场景语义。
+	 */
+	private resolveDimensionParameter(values: ValueMap, key: string, baseline: number, legacyKey: string, legacyBaseline: number): ResolvedDimension {
+		const value = this.readPositiveNumber(values, key, baseline);
+		const legacyValue = this.readPositiveNumber(values, legacyKey, legacyBaseline);
+		const valueChanged = Math.abs(value - baseline) > PARAMETER_EPSILON;
+		const legacyChanged = Math.abs(legacyValue - legacyBaseline) > PARAMETER_EPSILON;
+		const usesLegacyValue = !valueChanged && legacyChanged;
+		const resolvedValue = usesLegacyValue ? legacyValue : value;
+		const resolvedBaseline = usesLegacyValue ? legacyBaseline : baseline;
+		return {
+			value: resolvedValue,
+			baseline: resolvedBaseline,
+			ratio: resolvedValue / resolvedBaseline,
+			usesLegacyValue,
+		};
+	}
+
+	/**
+	 * 将图片中的绝对辊筒框架位置转换为当前 GLB 基线偏移；旧 platformPosition 仍按偏移解释。
+	 */
+	private resolveRollerFrameOffset(values: ValueMap): number {
+		const baseline = Number(DEFAULT_VALUES.rollerFramePosition);
+		const absolutePosition = this.readNumber(values, "rollerFramePosition", baseline);
+		const legacyOffset = this.readNumber(values, "platformPosition", 0);
+		if (Math.abs(absolutePosition - baseline) <= PARAMETER_EPSILON && Math.abs(legacyOffset) > PARAMETER_EPSILON) { return legacyOffset; }
+		return absolutePosition - baseline;
+	}
+
+	/**
+	 * 读取十六进制颜色参数，非法值回退到脚本默认色。
+	 */
+	private readColor3(values: ValueMap, key: string, fallback: string): Color3 {
+		const candidate = typeof values[key] === "string" ? String(values[key]).trim() : fallback;
+		const normalized = /^#[0-9a-f]{6}$/i.test(candidate) ? candidate : fallback;
+		return Color3.FromHexString(normalized);
+	}
+
+	/**
+	 * 读取并缓存单 Mesh 内按三角形连通性焊接后的组件，供腿、电机和辊轮皮参数化。
+	 */
+	private getMeshComponents(mesh: any): MeshComponentSnapshot[] {
+		const cached = this.meshComponents.get(mesh);
+		if (cached) { return cached; }
+		const positions = this.rememberSnapshot(mesh).vertexPositions;
+		const rawIndices = typeof mesh.getIndices === "function" ? mesh.getIndices() : null;
+		if (!positions || !rawIndices || rawIndices.length < 3) {
+			this.meshComponents.set(mesh, []);
+			return [];
+		}
+
+		const indices = Array.from(rawIndices as ArrayLike<number>);
+		const coordinateKeys: string[] = [];
+		const vertexIndicesByKey = new Map<string, number[]>();
+		for (let vertexIndex = 0; vertexIndex < positions.length / 3; vertexIndex += 1) {
+			const offset = vertexIndex * 3;
+			const key = `${positions[offset].toFixed(5)},${positions[offset + 1].toFixed(5)},${positions[offset + 2].toFixed(5)}`;
+			coordinateKeys[vertexIndex] = key;
+			const existing = vertexIndicesByKey.get(key) ?? [];
+			existing.push(vertexIndex);
+			vertexIndicesByKey.set(key, existing);
+		}
+
+		const parents = new Map<string, string>();
+		const findRoot = (key: string): string => {
+			const parent = parents.get(key);
+			if (!parent) { parents.set(key, key); return key; }
+			if (parent === key) { return key; }
+			const root = findRoot(parent);
+			parents.set(key, root);
+			return root;
+		};
+		const union = (left: string, right: string): void => {
+			const leftRoot = findRoot(left);
+			const rightRoot = findRoot(right);
+			if (leftRoot !== rightRoot) { parents.set(rightRoot, leftRoot); }
+		};
+
+		for (let index = 0; index + 2 < indices.length; index += 3) {
+			const first = coordinateKeys[indices[index]];
+			const second = coordinateKeys[indices[index + 1]];
+			const third = coordinateKeys[indices[index + 2]];
+			if (!first || !second || !third) { continue; }
+			union(first, second);
+			union(second, third);
+		}
+
+		const verticesByRoot = new Map<string, Set<number>>();
+		vertexIndicesByKey.forEach((vertexIndices, key) => {
+			const root = findRoot(key);
+			const target = verticesByRoot.get(root) ?? new Set<number>();
+			vertexIndices.forEach((vertexIndex) => target.add(vertexIndex));
+			verticesByRoot.set(root, target);
+		});
+		const facesByRoot = new Map<string, number>();
+		for (let index = 0; index + 2 < indices.length; index += 3) {
+			const key = coordinateKeys[indices[index]];
+			if (!key) { continue; }
+			const root = findRoot(key);
+			facesByRoot.set(root, (facesByRoot.get(root) ?? 0) + 1);
+		}
+
+		const components = [...verticesByRoot.entries()].map(([root, vertexSet]) => {
+			let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+			let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+			const vertexIndices = [...vertexSet];
+			vertexIndices.forEach((vertexIndex) => {
+				const offset = vertexIndex * 3;
+				const point = new Vector3(positions[offset], positions[offset + 1], positions[offset + 2]);
+				minimum = Vector3.Minimize(minimum, point);
+				maximum = Vector3.Maximize(maximum, point);
+			});
+			return {
+				vertexIndices,
+				minimum,
+				maximum,
+				center: minimum.add(maximum).scale(0.5),
+				size: maximum.subtract(minimum),
+				faceCount: facesByRoot.get(root) ?? 0,
+			};
+		}).sort((left, right) => right.faceCount - left.faceCount);
+		this.meshComponents.set(mesh, components);
+		return components;
+	}
+
+	/**
+	 * 对匹配的连通组件应用局部位移，并在关闭显示时把三角形收拢为退化面。
+	 */
+	private updateMeshComponents(mesh: any, predicate: (component: MeshComponentSnapshot) => boolean, translation: Vector3, visible: boolean): boolean {
+		const components = this.getMeshComponents(mesh).filter(predicate);
+		if (components.length === 0) { return false; }
+		const positions = this.readVertexPositions(mesh);
+		if (!positions || typeof mesh.setVerticesData !== "function") { return true; }
+		let changed = false;
+		components.forEach((component) => {
+			if (Math.abs(translation.x) > PARAMETER_EPSILON || Math.abs(translation.y) > PARAMETER_EPSILON || Math.abs(translation.z) > PARAMETER_EPSILON) {
+				component.vertexIndices.forEach((vertexIndex) => {
+					const offset = vertexIndex * 3;
+					positions[offset] += translation.x;
+					positions[offset + 1] += translation.y;
+					positions[offset + 2] += translation.z;
+				});
+				changed = true;
+			}
+			if (!visible) {
+				let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+				let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+				component.vertexIndices.forEach((vertexIndex) => {
+					const offset = vertexIndex * 3;
+					const point = new Vector3(positions[offset], positions[offset + 1], positions[offset + 2]);
+					minimum = Vector3.Minimize(minimum, point);
+					maximum = Vector3.Maximize(maximum, point);
+				});
+				const center = minimum.add(maximum).scale(0.5);
+				component.vertexIndices.forEach((vertexIndex) => {
+					const offset = vertexIndex * 3;
+					positions[offset] = center.x;
+					positions[offset + 1] = center.y;
+					positions[offset + 2] = center.z;
+				});
+				changed = true;
+			}
+		});
+		if (changed) {
+			mesh.setVerticesData("position", positions, true);
+			this.refreshMeshBounds(mesh);
+		}
+		return true;
+	}
+
+	private setMeshComponentsVisible(mesh: any, predicate: (component: MeshComponentSnapshot) => boolean, visible: boolean): boolean {
+		return this.updateMeshComponents(mesh, predicate, Vector3.Zero(), visible);
+	}
+
+	/** 腿 A 是 ZT.2 局部 X 负端、结构顶面以下的整组支撑组件。 */
+	private isLegAComponent(component: MeshComponentSnapshot): boolean {
+		return component.center.x < -1.2 && component.maximum.y <= 0.675;
+	}
+
+	/** 腿 B 是 ZT.2 局部 X 正端、结构顶面以下的整组支撑组件。 */
+	private isLegBComponent(component: MeshComponentSnapshot): boolean {
+		return component.center.x > -0.15 && component.maximum.y <= 0.675;
+	}
+
+	/** 电机由 ZT.2 中四个相邻、尺寸稳定的连通组件组成。 */
+	private isMotorComponent(component: MeshComponentSnapshot): boolean {
+		return component.center.x >= -0.68 && component.center.x <= -0.52
+			&& component.center.y >= 0.42 && component.center.y <= 0.62
+			&& component.minimum.z >= -0.12 && component.maximum.z <= 0.36
+			&& component.size.x <= 0.15 && component.size.y <= 0.14 && component.size.z <= 0.3;
+	}
+
+	/** GT.3 最长的圆柱连通组件即图片参数中的辊轮皮。 */
+	private isRollerSkinComponent(component: MeshComponentSnapshot): boolean {
+		return component.size.x > 0.8 && component.size.y < 0.08 && component.size.z < 0.08;
+	}
+
+	/** 释放主体颜色生成的实例材质，但保留原 GLB 共享纹理。 */
+	private disposeGeneratedMaterials(): void {
+		while (this.generatedMaterials.length > 0) {
+			const material = this.generatedMaterials.pop();
+			if (material && typeof material.dispose === "function") { material.dispose(false, false); }
+		}
 	}
 
 	/**

@@ -1,40 +1,45 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import ts from "typescript";
 
+const projectRoot = path.resolve(process.cwd());
+const modelRoot = path.resolve(process.env.BABYLON_MODEL_ROOT ?? "C:/Users/WY/Desktop/models");
+const sourcePackage = path.join(modelRoot, "YZJ");
+const assetPackage = path.join(modelRoot, "Assets", "Models", "YZJ");
+const fixturePackage = path.join(projectRoot, "output", "playwright", "yzj-assets");
 const files = {
-  sourceScript: "F:/3d-models/models/YZJ/yzj.model.ts",
-  assetScript: "F:/3d-models/models/Assets/Models/YZJ/yzj.model.ts",
-  fixtureScript: "F:/3d-babylon-editor/output/playwright/yzj-assets/yzj.model.ts",
-  fixtureScriptText: "F:/3d-babylon-editor/output/playwright/yzj-assets/yzj.model.txt",
-  sourceMeta: "F:/3d-models/models/YZJ/meta.json",
-  assetMeta: "F:/3d-models/models/Assets/Models/YZJ/meta.json",
-  fixtureMeta: "F:/3d-babylon-editor/output/playwright/yzj-assets/meta.json",
-  sceneRuntime: "F:/3d-babylon-editor/src/runtime/babylon/SceneRuntime.ts",
-  externalScriptRuntime: "F:/3d-babylon-editor/src/runtime/babylon/ExternalModelScriptRuntime.ts",
-  modelTextureAssetUrl: "F:/3d-babylon-editor/src/runtime/assets/modelTextureAssetUrl.ts",
-  imageAssets: "F:/3d-babylon-editor/src/assets/imageAssets.ts",
-  textureReferences: "F:/3d-babylon-editor/src/editor/model/textureReferences.ts",
-  assetDatabase: "F:/3d-babylon-editor/src/editor/assets/AssetDatabase.ts",
-  projectPanel: "F:/3d-babylon-editor/src/editor/panels/ProjectPanel.tsx",
-  modelParametersInspector: "F:/3d-babylon-editor/src/editor/panels/ModelParametersInspector.tsx",
-  modelParameters: "F:/3d-babylon-editor/src/editor/model/modelParameters.ts",
-  directionArrowPng: "F:/3d-babylon-editor/src/assets/images/direction-arrow-glow.png",
-  sourceGlb: "F:/3d-models/models/YZJ/YZJ.glb",
-  assetGlb: "F:/3d-models/models/Assets/Models/YZJ/YZJ.glb",
-  fixtureGlb: "F:/3d-babylon-editor/output/playwright/yzj-assets/YZJ.glb",
+  sourceScript: path.join(sourcePackage, "yzj.model.ts"),
+  assetScript: path.join(assetPackage, "yzj.model.ts"),
+  fixtureScript: path.join(fixturePackage, "yzj.model.ts"),
+  fixtureScriptText: path.join(fixturePackage, "yzj.model.txt"),
+  sourceMeta: path.join(sourcePackage, "meta.json"),
+  assetMeta: path.join(assetPackage, "meta.json"),
+  fixtureMeta: path.join(fixturePackage, "meta.json"),
+  sceneRuntime: path.join(projectRoot, "src", "runtime", "babylon", "SceneRuntime.ts"),
+  externalScriptRuntime: path.join(projectRoot, "src", "runtime", "babylon", "ExternalModelScriptRuntime.ts"),
+  modelTextureAssetUrl: path.join(projectRoot, "src", "runtime", "assets", "modelTextureAssetUrl.ts"),
+  imageAssets: path.join(projectRoot, "src", "assets", "imageAssets.ts"),
+  textureReferences: path.join(projectRoot, "src", "editor", "model", "textureReferences.ts"),
+  assetDatabase: path.join(projectRoot, "src", "editor", "assets", "AssetDatabase.ts"),
+  projectPanel: path.join(projectRoot, "src", "editor", "panels", "ProjectPanel.tsx"),
+  modelParametersInspector: path.join(projectRoot, "src", "editor", "panels", "ModelParametersInspector.tsx"),
+  modelParameters: path.join(projectRoot, "src", "editor", "model", "modelParameters.ts"),
+  directionArrowPng: path.join(projectRoot, "src", "assets", "images", "direction-arrow-glow.png"),
+  sourceGlb: path.join(sourcePackage, "YZJ.glb"),
+  assetGlb: path.join(assetPackage, "YZJ.glb"),
+  fixtureGlb: path.join(fixturePackage, "YZJ.glb"),
 };
 
 const EXPECTED_GLB_HASH = "5c400bb95afa24a035662e30ba21bca76cf5f7723fa6aceabe23aaee3c951ccb";
 const DIRECTION_ARROW_REFERENCE = "editor-image://builtin/direction-arrow-glow";
 const IMAGE_ASSET_DRAG_MIME_TYPE = "application/x-babylon-editor-image-asset";
 const EXPECTED_PARAMETER_KEYS = [
-  "chainLength", "platformLength", "platformPosition", "chainWidth", "chainHeight", "rollerWidth", "rollerPosition", "rollerDensity",
-  "infeedSide", "outfeedSide", "frontSide", "backSide", "showDirectionArrow", "directionArrowImage", "showFrontSupport", "showRearSupport",
+  "length", "width", "height", "bodyColor", "rollerFramePosition", "rollerFrameLength", "motorPosition", "rollerDensity",
+  "showLegA", "showLegB", "showMotor", "rollerSkin", "directionArrowImage",
 ];
-const NUMBER_PARAMETER_KEYS = ["chainLength", "platformLength", "platformPosition", "chainWidth", "chainHeight", "rollerWidth", "rollerPosition", "rollerDensity"];
-const BOOLEAN_PARAMETER_KEYS = ["showDirectionArrow", "showFrontSupport", "showRearSupport"];
-const SIDE_PARAMETER_KEYS = ["infeedSide", "outfeedSide", "frontSide", "backSide"];
+const NUMBER_PARAMETER_KEYS = ["length", "width", "height", "rollerFramePosition", "rollerFrameLength", "motorPosition", "rollerDensity"];
+const BOOLEAN_PARAMETER_KEYS = ["showLegA", "showLegB", "showMotor", "rollerSkin"];
 
 /** 计算文件 SHA256，用于验证源包、项目副本和视觉夹具完全一致。 */
 function sha256(path) {
@@ -336,13 +341,13 @@ if (transpileErrors.length > 0) failures.push("TypeScript transpile errors: " + 
 if (JSON.stringify(parameterKeys) !== JSON.stringify(EXPECTED_PARAMETER_KEYS)) failures.push("parameter order mismatch: " + parameterKeys.join(","));
 for (const key of NUMBER_PARAMETER_KEYS) failures.push(...validateNumberParameterContract(sourceMeta, key));
 for (const key of BOOLEAN_PARAMETER_KEYS) failures.push(...validateBooleanParameterContract(sourceMeta, key));
-for (const key of SIDE_PARAMETER_KEYS) failures.push(...validateSideParameterContract(sourceMeta, key));
 failures.push(...validateDirectionArrowTextureContract(sourceMeta));
 failures.push(...validateSingleDirectionContract(sourceFile));
 failures.push(...validateMqttEndpointMappingContract(sceneRuntimeSourceFile));
 
 for (const meta of allMeta) {
-  failures.push(...validateBooleanParameterContract(meta, "showDirectionArrow"));
+  for (const key of NUMBER_PARAMETER_KEYS) failures.push(...validateNumberParameterContract(meta, key));
+  for (const key of BOOLEAN_PARAMETER_KEYS) failures.push(...validateBooleanParameterContract(meta, key));
   failures.push(...validateDirectionArrowTextureContract(meta));
 }
 
@@ -352,7 +357,15 @@ const requiredScriptTokens = [
   "if (x <= middleStart) { return x - extension; }",
   "return middleEnd + (x - middleEnd) * middleScale;",
   "resolvePlatformPosition",
-  "this.applyRollerParameters(values, platformLengthRatio, heightOffset, platformPosition)",
+  "this.applyRollerParameters(values, frameLength.ratio, heightOffset, framePosition, width.value)",
+  "resolveDimensionParameter",
+  "resolveRollerFrameOffset",
+  "getMeshComponents",
+  "isLegAComponent",
+  "isLegBComponent",
+  "isMotorComponent",
+  "isRollerSkinComponent",
+  "applyBodyColor",
   "this.scaleNodeWithAxisAnchors(roller, platformLengthRatio",
   'this.addNodeAxisOffset(platform, "x", platformPosition)',
   "metadata?.logisticsFlow",
@@ -421,7 +434,7 @@ if (pngHeader.signature !== "89504e470d0a1a0a" || pngHeader.width !== 512 || png
   failures.push("direction arrow PNG must be 512x512 8-bit RGBA");
 }
 
-for (const key of ["platformPosition", "infeedSide", "outfeedSide", "frontSide", "backSide", "showDirectionArrow", "directionArrowImage"]) {
+for (const key of EXPECTED_PARAMETER_KEYS) {
   if (!findModelParameter(sourceMeta, key)) failures.push("source meta missing key: " + key);
   if (!findModelParameter(assetMeta, key)) failures.push("asset meta missing key: " + key);
   if (!findModelParameter(fixtureMeta, key)) failures.push("fixture meta missing key: " + key);
@@ -433,12 +446,7 @@ const result = {
   transpileErrors,
   hashes: { script: scriptHashes[0], meta: metaHashes[0], glb: glbHashes[0], directionArrowPng: directionArrowPngHash },
   parameterKeys,
-  platformPosition: findModelParameter(sourceMeta, "platformPosition"),
-  infeedSide: findModelParameter(sourceMeta, "infeedSide"),
-  outfeedSide: findModelParameter(sourceMeta, "outfeedSide"),
-  frontSide: findModelParameter(sourceMeta, "frontSide"),
-  backSide: findModelParameter(sourceMeta, "backSide"),
-  showDirectionArrow: findModelParameter(sourceMeta, "showDirectionArrow"),
+  imageParameters: Object.fromEntries(EXPECTED_PARAMETER_KEYS.map((key) => [key, findModelParameter(sourceMeta, key)])),
   directionArrowImage: findModelParameter(sourceMeta, "directionArrowImage"),
   directionVisualsEnabled: scriptText.includes("directionArrowVisual: true")
     && scriptText.includes("runtimeTelemetry")

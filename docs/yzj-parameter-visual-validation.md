@@ -2,56 +2,52 @@
 
 ## 目标与边界
 
-本轮交付同时覆盖 YZJ 一体式顶升移载的参数化几何、图片库贴图拖放、编辑态方向展示和 MQTT 运行态方向联动：
+2026-07-21 按用户参考图片重设 YZJ 一体式顶升移载的主参数，同时保留既有 MQTT、方向箭头和旧场景兼容：
 
-- `chainLength` 继续保持画面左侧固定，只向画面右侧单向伸长。
-- 整机长度变化不拉伸、不平移 `Ban.4 + GT.3` 顶升组件。
-- `chainWidth` 同步带动 `Ban.4` 和辊筒阵列变宽。
-- `platformPosition` 沿模型局部 X 移动完整顶升组件，并做主体边界约束。
-- `infeedSide/outfeedSide` 按模型局部坐标标识入料侧与出料侧。
-- `frontSide/backSide` 独立标识 MQTT 前端与后端，使前后光电不再依赖入/出料方向猜测。
-- GLB 本体不写入箭头；方向箭头由参数脚本运行时创建，不进入编辑器 Hierarchy，也不参与拾取和 Gizmo。
+- 主参数默认值：`length = 1.8276`、`width = 1.0621`、`height = 0.6478692`、`bodyColor = #387368`。
+- 辊筒框架：`rollerFramePosition = 0.1576491`、`rollerFrameLength = 1.021932`。
+- 电机与辊筒：`motorPosition = 0.1814833`、`rollerDensity = 0.6`。
+- 布尔参数：`showLegA/showLegB/showMotor/rollerSkin = true`。
+- `directionArrowImage` 继续作为运行兼容 texture 参数保留在面板末尾，避免 MQTT 方向箭头失去内置图片解析。
+- `YZJ.glb` 不修改；腿 A/B、电机和辊轮皮均从单体 Mesh 的三角形连通组件中识别。
 
 ## 模型包与文件一致性
 
-- 源模型包：`F:\3d-models\models\YZJ`
-- 项目资产副本：`F:\3d-models\models\Assets\Models\YZJ`
-- 浏览器视觉夹具：`F:\3d-babylon-editor\output\playwright\yzj-assets`
+- 源模型包：`C:\Users\WY\Desktop\models\YZJ`
+- 项目资产副本：`C:\Users\WY\Desktop\models\Assets\Models\YZJ`
+- 浏览器视觉夹具：`C:\temp\babylon-3d-plus\output\playwright\yzj-assets`
 - 原始模型：`YZJ.glb`
 - 参数脚本：`yzj.model.ts`
 - 参数元数据：`meta.json`
 
-最终指纹：
+当前指纹：
 
 | 资源 | SHA256 |
 | --- | --- |
-| 四份 `yzj.model.ts/.txt` | `ceb2e07d2921ac9e6e70d12b521024ced93414e1b8a6181fd6338a4dc104adc9` |
-| 三份 `meta.json` | `28436aa9f10121342943a0f7dcae4d88cbba731dcf568b459abfcc613188d166` |
-| `YZJ.glb` | `5c400bb95afa24a035662e30ba21bca76cf5f7723fa6aceabe23aaee3c951ccb` |
+| 三份 `yzj.model.ts` 与浏览器 `yzj.model.txt` | `fa8dbe410026779a84bcf9963b638525c686240e3f991578625df5f71b3c0648` |
+| 三份 `meta.json` | `fc88072b2da050c5065ba7d60ecc1ee475e8779cd2be7411a7af20ae785071a7` |
+| 三份 `YZJ.glb` | `5c400bb95afa24a035662e30ba21bca76cf5f7723fa6aceabe23aaee3c951ccb` |
 | 内置方向箭头 PNG | `ae0e1b104306dc67c9222ebe3501866dade42e681a0b750ea94bb5540083d3f8` |
 
-四份脚本保持字节一致，三份元数据保持字节一致，GLB 未修改。
+资产索引 YZJ 当前版本为 `mru9cyds-ae49ec3a-ccb7-44f6-aa96-7468887bb4f8`，模型源单位继续为 `centimeter`，`unitScaleToMeters = 0.01`。
 
-## 参数语义
+## 图片参数语义
 
-| 参数 | 语义 |
-| --- | --- |
-| `chainLength` | 只改变 `ZT.2` 主体局部 X 长度；左侧固定，增量全部向右侧单向伸长。 |
-| `platformLength` | 同倍率改变 `Ban.4` 与 `GT.3` 自身长度，不受整机 `chainLength` 污染。 |
-| `platformPosition` | 沿模型局部 X 移动 `Ban.4`、原始 `GT.3` 和全部辊筒克隆，越界自动约束。 |
-| `chainWidth` | 改变主体局部 Z 宽度，并同步改变 `Ban.4` 宽度和辊筒阵列覆盖宽度。 |
-| `chainHeight` | 改变主体高度并同步上移平台和辊筒。 |
-| `rollerWidth` | 改变单根辊筒厚度。 |
-| `rollerPosition` | 辊筒相对平台的局部 X 微调。 |
-| `rollerDensity` | 沿局部 Z 生成辊筒阵列；克隆通过 `motionSourceNodeName = "GT.3"` 继承运行态运动。 |
-| `infeedSide` | 入料侧：`left/right/front/rear`。 |
-| `outfeedSide` | 出料侧：`left/right/front/rear`。 |
-| `frontSide` | MQTT 前端方向，默认 `right`（局部 X-）；对应 `front_signalBits/front_has_goods`。 |
-| `backSide` | MQTT 后端方向，默认 `left`（局部 X+）；对应 `back_signalBits/back_has_goods`。 |
-| `showDirectionArrow` | 控制运行时是否创建并显示方向箭头。 |
-| `directionArrowImage` | `texture` 参数；默认保存内置图片逻辑引用。 |
+| 参数 | 默认值 | 语义 |
+| --- | --- | --- |
+| `length` | `1.8276m` | 改变 `ZT.2` 局部 X 长度，保留画面左侧对接端，只向右侧承担长度差。 |
+| `width` | `1.0621m` | 以图片宽度为基线缩放主体、框架和辊筒阵列的局部 Z 宽度。 |
+| `height` | `0.6478692m` | 以图片结构高度为基线改变主体高度，并同步上移框架和辊筒。 |
+| `bodyColor` | `#387368` | 克隆 `ZT.2` 实例材质并着色，不污染共享材质或原始 GLB。 |
+| `rollerFramePosition` | `0.1576491m` | 图片中的绝对基线位置；脚本换算为 `Ban.4 + GT.3` 相对 GLB 的局部 X 偏移。 |
+| `rollerFrameLength` | `1.021932m` | 同倍率改变 `Ban.4` 与 `GT.3`，保持框架中心与整机长度解耦。 |
+| `motorPosition` | `0.1814833m` | 只沿主体局部 Z 移动电机连通组件。 |
+| `rollerDensity` | `0.6` | 默认四舍五入为 1 根；整数 `N` 沿局部 Z 生成 `N` 根辊筒。 |
+| `showLegA/showLegB` | `true` | 分别控制 `ZT.2` 局部 X 两端的整组支腿连通组件。 |
+| `showMotor` | `true` | 控制四个电机连通组件显隐。 |
+| `rollerSkin` | `true` | 控制 `GT.3` 的长圆柱皮层，关闭时保留两端轴头。 |
 
-局部侧映射为：`left = X+`、`right = X-`、`front = Z-`、`rear = Z+`。`infeedSide/outfeedSide/frontSide/backSide` 的归一化结果写入模型内容根、`Ban.4` 和 `GT.3` 的 `metadata.logisticsFlow`。
+旧字段 `chainLength/chainWidth/chainHeight/platformLength/platformPosition/rollerWidth/rollerPosition/showFrontSupport/showRearSupport` 仍由运行脚本读取：图片参数保持默认而旧字段被显式修改时，继续执行旧场景语义。`infeedSide/outfeedSide/frontSide/backSide/showDirectionArrow` 继续使用脚本内默认值或旧场景保存值，不从运行合同中删除。
 
 ## MQTT 前后端映射合同
 
@@ -128,6 +124,46 @@ npm run build:yzj:visual
 - `output/playwright/yzj-direction-arrow-check.html`
 - `output/playwright/yzj-conveyor-runtime-check.html`
 - `assets/direction-arrow-glow-BtV93S9t.png`，大小 `28407` 字节。
+
+## 2026-07-21 图片参数与真实编辑器验证
+
+### 静态与资产索引
+
+以下检查退出码均为 `0`：
+
+```powershell
+node output/playwright/validate-yzj-static.mjs
+$env:BABYLON_MODEL_ROOT='C:\Users\WY\Desktop\models'
+$env:BABYLON_MODEL_FILTER='YZJ'
+npm run refresh:model-assets
+```
+
+静态报告：`ok = true`、`failures = []`、`transpileErrors = []`；三份脚本、三份元数据和三份 GLB 的哈希一致，GLB 哈希保持不变。
+
+### 浏览器场景矩阵
+
+`output/playwright/yzj-reference-parameters-check.html` 通过，报告 `ok = true`、`failures = []`：
+
+- 默认主体色为 `#387368`；改色案例为 `#B35F43`。
+- `length = 2.5`、`width = 1.4`、`height = 0.8` 均使对应主体尺寸增大。
+- 框架长度从 `1.0219m` 增至 `1.35m`，位置增量与 `0.32 - 0.1576491` 一致。
+- 电机位置增加 `0.20m` 后，电机连通组件中心增量为 `0.20m`。
+- 腿 A、腿 B、电机和辊轮皮关闭后的目标组件展开量均为 `0`。
+- `rollerDensity = 0.6` 保持 `1` 根，`rollerDensity = 3` 生成 `3` 根。
+- 旧 `yzj-visual-check.html` 几何/MQTT/箭头矩阵继续为 `pass`，无浏览器控制台错误。
+
+视觉截图：`output/playwright/yzj-reference-parameters-verified.png`。
+
+### 真实 Electron Inspector
+
+编辑器从最近项目 `C:\Users\WY\Desktop\models` 加载 `12` 个资产，点击 YZJ 卡片后，Inspector 显示图片参数及精确默认值。真实控件联动验证中：
+
+- `长度`：`1.8276 → 2.3`；
+- `主体颜色`：`#387368 → #b35f43`；
+- `显示电机`：`true → false`；
+- Electron renderer 无 `console.error` 或 `pageerror`。
+
+Inspector 截图：`output/playwright/yzj-electron-reference-parameters.png`。
 
 ## 2026-07-12 最终验证结果
 
