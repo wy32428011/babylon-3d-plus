@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
   ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE,
@@ -35,6 +35,33 @@ type ImportableProjectLibraryKey = Extract<ProjectLibraryKey, ModelAssetLibraryK
 
 type ModelFolderStatusMap = Record<ImportableProjectLibraryKey, ModelFolderStatus | null>;
 
+type DataPlatformModelSyncProgress = {
+  runId: string;
+  phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+type DataPlatformModelSyncApi = {
+  onDataPlatformModelSyncProgress?: (listener: (progress: DataPlatformModelSyncProgress) => void) => () => void;
+  retryDataPlatformModelSync?: () => Promise<boolean>;
+};
+
+const DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS: Record<DataPlatformModelSyncProgress['phase'], string> = {
+  querying: '查询模型',
+  downloading: '下载模型',
+  validating: '校验模型',
+  promoting: '写入资源库',
+  completed: '同步完成',
+  failed: '同步失败',
+};
+
+function getDataPlatformModelSyncApi(): DataPlatformModelSyncApi {
+  return (window.editorApi ?? {}) as DataPlatformModelSyncApi;
+}
+
 type ProjectPanelProps = {
   readOnly?: boolean;
 };
@@ -58,6 +85,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const consumeProjectAssetFocusRequest = useEditorStore((state) => state.consumeProjectAssetFocusRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
   const resourceCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const projectAssetsLoadRequestRef = useRef(0);
+  const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
   const [projectAssets, setProjectAssets] = useState<ProjectModelAssetEntry[]>([]);
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
@@ -65,6 +94,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const [importingLibraryKey, setImportingLibraryKey] = useState<ImportableProjectLibraryKey | null>(null);
   const [isLoadingProjectAssets, setIsLoadingProjectAssets] = useState(false);
   const [modelFolderStatuses, setModelFolderStatuses] = useState<ModelFolderStatusMap>({ model: null, environment: null });
+  const [modelSyncProgress, setModelSyncProgress] = useState<DataPlatformModelSyncProgress | null>(null);
+  const [isRetryingModelSync, setIsRetryingModelSync] = useState(false);
 
   const modelAssets = useMemo(
     () => projectAssets.filter((asset) => asset.libraryKind === 'model'),
@@ -82,7 +113,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   const activeItems = useMemo(() => {
     if (activeLibrary.key === 'model') {
-      return [...BUILT_IN_MODEL_LIBRARY_ITEMS, ...createModelLibraryItems(modelAssets)];
+      return [...createModelLibraryItems(modelAssets), ...BUILT_IN_MODEL_LIBRARY_ITEMS];
     }
 
     if (activeLibrary.key === 'environment') {
@@ -102,39 +133,74 @@ export function ProjectPanel(props: ProjectPanelProps) {
     setModelFolderStatuses((current) => ({ ...current, [libraryKind]: status }));
   }
 
-  useEffect(() => {
-    let isMounted = true;
+  const loadProjectAssets = useCallback(async (): Promise<void> => {
+    if (!window.editorApi?.listProjectAssets) return;
 
-    async function loadProjectAssets(): Promise<void> {
-      if (!window.editorApi?.listProjectAssets) return;
+    const requestId = projectAssetsLoadRequestRef.current + 1;
+    projectAssetsLoadRequestRef.current = requestId;
+    setIsLoadingProjectAssets(true);
 
-      setIsLoadingProjectAssets(true);
+    try {
+      const result = await window.editorApi.listProjectAssets();
+      if (requestId !== projectAssetsLoadRequestRef.current) return;
 
-      try {
-        const result = await window.editorApi.listProjectAssets();
-        if (!isMounted) return;
+      setProjectRoot(result.projectRoot);
+      setProjectAssets(result.assets);
 
-        setProjectRoot(result.projectRoot);
-        setProjectAssets(result.assets);
-
-        if (result.assets.length > 0) {
-          pushLog(`已加载项目资源库：${result.assets.length} 个资产。`);
-        }
-      } catch (error) {
-        if (!isMounted) return;
-        const message = error instanceof Error ? error.message : String(error);
-        pushLog(`加载项目资源库失败：${message}`);
-      } finally {
-        if (isMounted) setIsLoadingProjectAssets(false);
+      if (result.assets.length > 0) {
+        pushLog(`已加载项目资源库：${result.assets.length} 个资产。`);
+      }
+    } catch (error) {
+      if (requestId !== projectAssetsLoadRequestRef.current) return;
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`加载项目资源库失败：${message}`);
+    } finally {
+      if (requestId === projectAssetsLoadRequestRef.current) {
+        setIsLoadingProjectAssets(false);
       }
     }
+  }, [pushLog]);
 
+  useEffect(() => {
     void loadProjectAssets();
+    return () => {
+      projectAssetsLoadRequestRef.current += 1;
+    };
+  }, [loadProjectAssets]);
+
+  useEffect(() => {
+    const dataPlatformModelSyncApi = getDataPlatformModelSyncApi();
+    if (!dataPlatformModelSyncApi.onDataPlatformModelSyncProgress) return undefined;
+
+    const clearCompletedDismissTimer = () => {
+      if (modelSyncCompletedDismissTimerRef.current === null) return;
+      window.clearTimeout(modelSyncCompletedDismissTimerRef.current);
+      modelSyncCompletedDismissTimerRef.current = null;
+    };
+    const unsubscribe = dataPlatformModelSyncApi.onDataPlatformModelSyncProgress((progress) => {
+      clearCompletedDismissTimer();
+      setModelSyncProgress(progress);
+      const phaseLabel = DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS[progress.phase];
+      const countLabel = progress.total > 0 ? `（${progress.completed}/${progress.total}）` : '';
+      const detail = progress.error || progress.message;
+      pushLog(`数据中台模型同步：${phaseLabel}${countLabel}${detail ? `：${detail}` : ''}`);
+
+      if (progress.phase === 'completed') {
+        void loadProjectAssets();
+        modelSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
+          modelSyncCompletedDismissTimerRef.current = null;
+          setModelSyncProgress((current) =>
+            current?.runId === progress.runId && current.phase === 'completed' ? null : current,
+          );
+        }, 2200);
+      }
+    });
 
     return () => {
-      isMounted = false;
+      clearCompletedDismissTimer();
+      unsubscribe();
     };
-  }, [pushLog]);
+  }, [loadProjectAssets, pushLog]);
 
   useEffect(() => {
     if (!projectAssetFocusRequest) return;
@@ -169,6 +235,39 @@ export function ProjectPanel(props: ProjectPanelProps) {
       window.clearTimeout(timeoutId);
     };
   }, [activeLibraryKey, focusedAssetId, activeItems]);
+
+  function handleDismissDataPlatformModelSyncFailure(): void {
+    if (modelSyncProgress?.phase !== 'failed') return;
+    setIsRetryingModelSync(false);
+    setModelSyncProgress(null);
+  }
+
+  async function handleRetryDataPlatformModelSync(): Promise<void> {
+    if (!modelSyncProgress || modelSyncProgress.phase !== 'failed') return;
+
+    const dataPlatformModelSyncApi = getDataPlatformModelSyncApi();
+    if (!dataPlatformModelSyncApi.retryDataPlatformModelSync) {
+      pushLog('重试数据中台模型同步需要 Electron 桌面环境。');
+      return;
+    }
+
+    setIsRetryingModelSync(true);
+    try {
+      const retryStarted = await dataPlatformModelSyncApi.retryDataPlatformModelSync();
+      setModelSyncProgress({
+        ...modelSyncProgress,
+        phase: retryStarted ? 'querying' : 'failed',
+        message: retryStarted ? '已提交重试，正在重新查询模型...' : '当前没有可重试的模型同步任务。',
+        error: retryStarted ? null : '当前没有可重试的模型同步任务。',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setModelSyncProgress({ ...modelSyncProgress, error: message });
+      pushLog(`重试数据中台模型同步失败：${message}`);
+    } finally {
+      setIsRetryingModelSync(false);
+    }
+  }
 
   async function handleImportModelFolder(): Promise<void> {
     if (props.readOnly) return;
@@ -422,6 +521,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
       : activeLibrary.key === 'environment'
         ? '导入环境 GLB'
         : `导入${importTargetLabel}文件夹`;
+  const modelSyncPhaseLabel = modelSyncProgress
+    ? DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS[modelSyncProgress.phase]
+    : null;
+  const modelSyncCountLabel = modelSyncProgress
+    ? `${modelSyncProgress.completed}/${modelSyncProgress.total}`
+    : null;
+  const modelSyncMessage = modelSyncProgress?.error || modelSyncProgress?.message || '等待模型同步进度...';
 
   return (
     <section className="panel project-library" aria-label="Project 资源库">
@@ -513,6 +619,35 @@ export function ProjectPanel(props: ProjectPanelProps) {
           );
         })}
       </div>
+
+      {modelSyncProgress ? (
+        <div className={`library-sync-status library-sync-status-${modelSyncProgress.phase}`} role="status" aria-live="polite">
+          <div className="library-sync-status-heading">
+            <strong>{modelSyncPhaseLabel}</strong>
+            {modelSyncCountLabel ? <span>{modelSyncCountLabel}</span> : null}
+          </div>
+          <p>{modelSyncMessage}</p>
+          {modelSyncProgress.phase === 'failed' ? (
+            <div className="library-sync-status-actions">
+              <button
+                disabled={isRetryingModelSync}
+                onClick={() => void handleRetryDataPlatformModelSync()}
+                type="button"
+              >
+                {isRetryingModelSync ? '重试中...' : '重试同步'}
+              </button>
+              <button
+                aria-label="关闭同步失败提示"
+                className="library-sync-status-close-button"
+                onClick={handleDismissDataPlatformModelSyncFailure}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {supportsProjectModelImport && modelFolderStatus ? (
         <p className={`library-status library-status-${modelFolderStatus.kind}`}>{modelFolderStatus.message}</p>

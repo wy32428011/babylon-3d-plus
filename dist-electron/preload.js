@@ -7,6 +7,24 @@ contextBridge.exposeInMainWorld('editorApi', {
     readTextFile: (request) => ipcRenderer.invoke('file:readText', request),
     scanAssets: () => ipcRenderer.invoke('assets:scan'),
     getRecentWorkspaces: () => ipcRenderer.invoke('project:getRecentWorkspaces'),
+    getDataPlatformConfig: () => ipcRenderer.invoke('data-platform:getConfig'),
+    saveDataPlatformConfig: (request) => ipcRenderer.invoke('data-platform:saveConfig', request),
+    listDataPlatformProjects: (request) => ipcRenderer.invoke('data-platform:listProjects', request),
+    openDataPlatformProject: (request) => ipcRenderer.invoke('data-platform:openProject', request),
+    retryDataPlatformModelSync: () => ipcRenderer.invoke('data-platform:retryModelSync'),
+    onDataPlatformModelSyncProgress: (handler) => {
+        let active = true;
+        const listener = (_event, payload) => handler(payload);
+        ipcRenderer.on('data-platform:modelSyncProgress', listener);
+        void ipcRenderer.invoke('data-platform:getModelSyncProgress').then((payload) => {
+            if (active && payload)
+                handler(payload);
+        }).catch(() => undefined);
+        return () => {
+            active = false;
+            ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
+        };
+    },
     listProjectAssets: () => ipcRenderer.invoke('project:listAssets'),
     openRecentProject: (request) => ipcRenderer.invoke('project:openRecent', request),
     removeRecentWorkspaceItem: (request) => ipcRenderer.invoke('project:removeRecentWorkspaceItem', request),

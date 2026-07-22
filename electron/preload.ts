@@ -5,6 +5,11 @@ import type {
   DeploymentExportProgress,
   DeploymentExportRequest,
   DeploymentExportResult,
+  DataPlatformConfig,
+  DataPlatformModelSyncProgress,
+  DataPlatformProjectListRequest,
+  DataPlatformProjectListResult,
+  DataPlatformProjectOpenResult,
   DeploymentExportRevealRequest,
   ImportCadFileResult,
   ImportEnvironmentModelFileResult,
@@ -17,12 +22,14 @@ import type {
   MqttIpcConfigureRequest,
   MqttIpcEvent,
   MqttIpcStatus,
+  OpenDataPlatformProjectRequest,
   OpenRecentProjectRequest,
   ProjectListAssetsResult,
   ReadTextFileRequest,
   ReadTextFileResult,
   RecentWorkspacesResult,
   RemoveRecentWorkspaceItemRequest,
+  SaveDataPlatformConfigRequest,
   SaveSceneRequest,
   SaveSceneResult,
   SelectProjectDirectoryResult,
@@ -36,6 +43,26 @@ contextBridge.exposeInMainWorld('editorApi', {
   readTextFile: (request: ReadTextFileRequest): Promise<ReadTextFileResult> => ipcRenderer.invoke('file:readText', request),
   scanAssets: (): Promise<AssetEntry[]> => ipcRenderer.invoke('assets:scan'),
   getRecentWorkspaces: (): Promise<RecentWorkspacesResult> => ipcRenderer.invoke('project:getRecentWorkspaces'),
+  getDataPlatformConfig: (): Promise<DataPlatformConfig> => ipcRenderer.invoke('data-platform:getConfig'),
+  saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> =>
+    ipcRenderer.invoke('data-platform:saveConfig', request),
+  listDataPlatformProjects: (request?: DataPlatformProjectListRequest): Promise<DataPlatformProjectListResult> =>
+    ipcRenderer.invoke('data-platform:listProjects', request),
+  openDataPlatformProject: (request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectOpenResult> =>
+    ipcRenderer.invoke('data-platform:openProject', request),
+  retryDataPlatformModelSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryModelSync'),
+  onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void): (() => void) => {
+    let active = true;
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformModelSyncProgress) => handler(payload);
+    ipcRenderer.on('data-platform:modelSyncProgress', listener);
+    void ipcRenderer.invoke('data-platform:getModelSyncProgress').then((payload: DataPlatformModelSyncProgress | null) => {
+      if (active && payload) handler(payload);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
+    };
+  },
   listProjectAssets: (): Promise<ProjectListAssetsResult> => ipcRenderer.invoke('project:listAssets'),
   openRecentProject: (request: OpenRecentProjectRequest): Promise<ProjectListAssetsResult> => ipcRenderer.invoke('project:openRecent', request),
   removeRecentWorkspaceItem: (request: RemoveRecentWorkspaceItemRequest): Promise<void> => ipcRenderer.invoke('project:removeRecentWorkspaceItem', request),

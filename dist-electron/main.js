@@ -5,6 +5,8 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
+import { registerDataPlatformIpc } from './ipc/dataPlatformIpc.js';
+import { disposeDataPlatformProjectTasks } from './ipc/dataPlatformProjectService.js';
 import { disposeAllDeploymentExportTasks, registerDeploymentExportIpc } from './ipc/deploymentExportIpc.js';
 import { disposeAllMqttIpcClients, registerMqttIpc } from './ipc/mqttIpc.js';
 import { registerProjectIpc } from './ipc/projectIpc.js';
@@ -154,6 +156,7 @@ function registerEditorAssetProtocol() {
 app.whenReady().then(() => {
     registerEditorAssetProtocol();
     registerProjectIpc();
+    registerDataPlatformIpc();
     registerAssetIpc();
     registerMqttIpc();
     registerDeploymentExportIpc();
@@ -169,7 +172,23 @@ app.on('window-all-closed', () => {
         app.quit();
     }
 });
-app.on('will-quit', () => {
+let quitCleanupStarted = false;
+let quitCleanupCompleted = false;
+app.on('before-quit', (event) => {
+    if (quitCleanupCompleted)
+        return;
+    event.preventDefault();
+    if (quitCleanupStarted)
+        return;
+    quitCleanupStarted = true;
     disposeAllDeploymentExportTasks();
     disposeAllMqttIpcClients();
+    void disposeDataPlatformProjectTasks()
+        .catch((error) => {
+        console.error('[electron] 数据中台任务退出清理失败。', error);
+    })
+        .finally(() => {
+        quitCleanupCompleted = true;
+        app.quit();
+    });
 });

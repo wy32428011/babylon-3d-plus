@@ -15,7 +15,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 ## 当前功能
 
 - Electron 桌面窗口：通过 Electron 主进程启动独立桌面应用窗口。
-- 首页启动台：进入五面板编辑器前会先显示首页，聚焦最近项目、最近场景、新建场景、打开项目目录和打开场景文件等项目相关入口；最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
+- 首页启动台：进入五面板编辑器前会先显示首页；左侧“最近项目”通过 Electron 主进程从可配置的数据中台 `POST /api/v1/projects/query` 拉取业务项目列表，支持按项目名称进行服务端搜索，并可直接打开当前格式 Editor 工程；右侧继续显示本地最近场景，并保留新建场景、打开项目目录和打开场景文件等入口。本地最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
 - Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部，中间列独立承载 Scene、Project 与 Console；Project/Console 只与 Scene 画布同宽，在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到 Project 区域最小化入口，点击后以弹窗查看完整日志，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
 - Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑；左键拖拽旋转或移动视角时以真实相机输入和位姿变化优先，即使从模型表面开始轻微拖拽也不会触发模型拾取，纯单击仍正常选中模型；Toolbar 新增“俯”视角按钮，可保留当前观察中心与缩放距离切换为稳定俯视视角，方便依据地面 CAD 图纸定位并搭建场景。
@@ -390,7 +390,11 @@ npm run build
 
 ## 基础操作
 
-- 首页进入编辑：启动后在首页点击 `新建场景` 可重置为空白场景并进入编辑器；点击 `打开场景文件` 可选择 `.scene.json`；点击最近项目会进入编辑器并让 Project 面板加载该项目资源；点击最近场景会直接加载对应场景。
+- 首页进入编辑：启动后在首页点击 `新建场景` 可重置为空白场景并进入编辑器；点击 `打开场景文件` 可选择 `.scene.json`；点击 `打开项目目录` 可进入编辑器并让 Project 面板加载本地项目资源；点击最近场景会直接加载对应场景。左侧数据中台项目卡片提供 `打开`：有可用工程包时下载并加载唯一场景，没有工程包或属于旧格式时创建当前格式本地项目并进入空白场景。
+- 数据中台配置：点击首页顶部 `数据中台配置`，填写 HTTP/HTTPS 服务根地址并选择 `保存并刷新`；本地联调可使用 `http://127.0.0.1:8086`。地址持久化到 Electron `userData/data-platform-config.json`，主进程随后请求 `<服务地址>/api/v1/projects/query`；留空保存可清除配置。左侧项目列表顶部可输入项目名称后按 Enter 或点击 `搜索`，搜索词通过请求体 `projectName` 字段交给数据中台筛选，点击 `清除` 会恢复默认列表。renderer 打开项目时只提交列表中的 `projectId`，工程包地址由主进程最近一次可信列表缓存解析；项目、Editor 工程和模型等业务主键始终按十进制字符串传递，避免 19 位 ID 被 JavaScript `number` 截断。
+- 数据中台工程包：只接受当前 ZENDING 3D EDITOR 目录结构，即 `.babylon-editor/`、`Assets/Models/`、`Assets/Environments/` 和恰好一个 `.scene.json`；ZIP 根目录和单层包装目录均可。旧 `project.bjseditor` 不迁移，统一按无可用工程包处理。主进程限制 ZIP 压缩体积、文件数、单文件及总展开大小，并拒绝 Zip Slip、绝对路径、盘符路径、加密条目和符号链接。
+- 数据中台模型同步：打开项目后后台分页读取 `POST /api/v1/models/query`、`POST /api/v1/env-models/query` 和 `POST /api/v1/combo-models/query`。普通模型写入 `Assets/Models/Model-<id>-<名称>/`，环境模型写入 `Assets/Environments/Env-<id>-<名称>/`，组合模型写入 `Assets/Models/ComboModels/Combo-<id>-<名称>/`。普通模型脚本为可选资源：优先使用 `scriptFiles` 权威列表，仅在列表没有有效项时读取旧 `scriptFileName/scriptFileUrl` 兼容字段；接口提供可识别的 `*.ts` 文件名或 URL 时才下载，不要求文件名以 `.model.ts` 结尾，旧字段中以换行拼接的多脚本也会拆分处理；未提供脚本或返回非 TS 条目时直接跳过，不阻断模型同步。同步层会保留这些 TS 文件，编辑器现有外置脚本执行仍遵循 `.model.ts` 运行约定。所有数据中台项目共享同一模型库；下载和校验全部完成后才原子替换模型目录与 `.babylon-editor/asset-index.json`。同步成功后 Project 模型库会自动刷新并优先展示同步模型；失败时保留旧库，失败提示支持关闭，也可在 Project 面板重试。
+- 数据中台存储位置：开发态固定使用 `app.getAppPath()`，安装态固定使用可执行文件所在目录，不自动回退到 `userData`。该目录必须可写；安装在受保护目录时会明确阻止打开。应用升级、重装或卸载可能覆盖安装目录内的场景与模型数据，生产部署应选择可写且有备份策略的安装位置。
 - 创建基础对象与常用灯光：在模型库中点击或拖拽 `立方体`、`球体`、`地面`、`虚拟定位线框`、`半球光`、`方向光`、`点光源` 内置资源卡片；Box/立方体卡片明确标注默认尺寸 `1 m × 1 m × 1 m`，拖拽到 Scene View 后会按鼠标释放位置投射到地面平面，并把 Box 中心抬高 `0.5 m` 使底面落地；其它对象保持原有创建路径。
 - 创建 POI 模型生成器：在 `POI库` 点击“模型生成器”可在原点创建青色配置标记，拖入 Scene View 可按地面落点放置标记；一个场景只保留一个有效生成器，重复点击/拖入会选中已有生成器。随后把模型库普通模型或内置立方体、球体、地面拖入 Inspector 的共享生成模板或规则覆盖模型槽位。
 - 选择对象：点击 Hierarchy 项，或在 Scene View 中单击对象；Hierarchy 中可使用 Ctrl/Cmd 多选、Shift 连续多选。
@@ -473,7 +477,7 @@ npm run build
 - CAD/DXF 导入属于布局参考层能力：只承诺常见二维线稿实体 `LINE`、`ARC`、`CIRCLE`、`LWPOLYLINE`、`POLYLINE`；不承诺 HATCH、DIMENSION、完整 TEXT/MTEXT、Paper Space、多布局、3D Solid 或可编辑 CAD 图元。普通图纸保持精确解析，`64 MB` 及以上图纸使用后台轻量扫描和固定预览预算。DXF 合法 `$INSUNITS` 0–24 会换算为米；无单位图纸只能依据 `$MEASUREMENT` 或毫米 fallback，建议源 CAD 明确写入单位。超过 `±1e15` 的异常原始坐标会被过滤。
 - 参数化模型依赖模型包中稳定的节点、网格或材质名称；安全 DSL 只支持 JSON AST 中的白名单运算和白名单属性绑定，不执行任意 JavaScript/TypeScript。贴图参数允许编辑器登记过的内置 `editor-image://` 逻辑引用，或模型包内 `.png`、`.jpg`、`.jpeg`、`.webp` 相对路径；仍不支持绝对路径、网络 URL、`data:`、反斜杠路径、未登记逻辑引用或 `../` 路径逃逸。重新导入模型包后，场景实例会使用新的 `modelParameters` 与 `.model.ts` 脚本元数据清洗参数：同名且仍合法的实例值会保留，新增参数使用新默认值，删除或非法参数会移除。
 - Project 资源库中模型库和环境库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库直接选择的单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/` 独立包。POI 库已接入模型生成器和 16 种内置 EFF，其它图表立标、图表面板、报警管理器、手动漫游卡片以及主题、组合、图表仍为占位；图片库已接入内置方向箭头和 texture 参数拖放，但尚未开放用户图片导入、项目级图片索引和真实搜索过滤。
-- 首页最近项目和最近场景依赖 Electron preload 的本地文件 IPC；普通 Vite 浏览器页面会显示降级提示，并仅保留进入空白编辑器、新建场景等不依赖本地文件授权的基础入口。
+- 首页数据中台配置、远程项目列表、项目打开和最近场景都依赖 Electron preload IPC；普通 Vite 浏览器页面会显示降级提示，并仅保留进入空白编辑器、新建场景等不依赖桌面权限的基础入口。当前不包含身份令牌配置或数据中台项目详情交互。
 - 主布局自适应当前只包含随窗口尺寸自动调整、左右面板贯通到底部、Project/Console 限定为中间 Scene 同宽以及底部 Console 弹窗入口，不包含拖拽分隔条、其它面板折叠或用户自定义布局保存；小于约 `1024×640` 的窗口会继续尽量收缩，但不保证所有内容舒适可读。
 - 图片库当前只登记内置方向箭头资源；用户图片导入、项目级图片持久化与更多图片类型仍待扩展。POI 库的模型生成器与 16 种内置 EFF 可用，图表立标、图表面板、报警管理器、手动漫游以及图表、主题、组合仍为占位分类。
 - 灯光编辑支持类型与强度，暂未提供颜色、阴影、范围、衰减等高级参数。
@@ -481,6 +485,7 @@ npm run build
 
 ## 最近完成
 
+- 2026-07-22：首页启动台新增数据中台地址配置弹窗，配置持久化到 Electron `userData/data-platform-config.json`；左侧“最近项目”由主进程通过 `POST /api/v1/projects/query` 拉取、校验并按更新时间展示业务项目，支持 `projectName` 搜索，并新增可信项目 ID 打开流程。当前格式工程包会安全下载、展开并加载唯一场景；无包、旧 `project.bjseditor` 或结构不兼容时进入空白场景；进入编辑器后后台全量同步普通、环境和组合模型。已使用 `http://127.0.0.1:8086` 完成真实联调：19 位业务 ID 无损保留，10 个普通模型共 25 个文件同步成功，Shelf 双 TS 脚本不再被旧换行拼接字段重复下载。
 - 2026-07-21：按参考图片重做 YZJ 一体式移载机参数契约，新增精确长宽高、主体颜色、辊筒框架位置/长度、电机位置、腿 A/B、电机与辊轮皮控制；通过连通组件处理单体 GLB，保留旧场景、MQTT 与方向箭头兼容，并完成静态、浏览器视觉矩阵和真实 Electron Inspector 联动验证。
 
 - 2026-07-17：完成 Scene View 大场景无损容量与稳定性优化：普通无脚本/无参数静态模型按 `sourceUrl + assetRevision + instancingMode` 复用单份源 `AssetContainer`，100 个同源实体 smoke 仅加载 1 次源资源、每实体保持 18 个独立实例 Mesh；SceneRuntime 改为实体引用驱动的增量同步，选择变化不再重跑全部模型参数/脚本/子 Mesh 收集；模型和环境加载统一限制为最多 4 并发；关闭无功能依赖的 `preserveDrawingBuffer`，保留抗锯齿与 stencil，并增加 WebGL context lost/restored 和 render error/recovered 可见恢复。既有 Shelf smoke 保持 `loadCount=1`、低密度 88/128 Mesh、高密度 121608 thin instances 与单次源释放。
@@ -648,7 +653,8 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 ### 安装与数据目录
 
 - 安装器允许用户选择安装目录，并创建桌面快捷方式和开始菜单快捷方式。
-- 最近项目与最近场景记录写入 Electron 的 `userData` 目录，不写入只读安装目录。
+- 最近项目与最近场景记录写入 Electron 的 `userData` 目录，不写入只读安装目录；数据中台服务地址单独保存在同目录的 `data-platform-config.json`。
+- 数据中台下载的工程场景与共享模型库例外：按产品约定写入开发应用根目录或安装版 EXE 所在目录；目录不可写时不会静默改写到 `userData`。
 - 模型库、环境模型库、场景 JSON、CAD 文件和模型脚本仍保存在用户选择的项目目录中；安装或升级程序不会删除项目数据。
 - 卸载默认保留 `userData`，便于重新安装后继续访问最近项目记录。
 

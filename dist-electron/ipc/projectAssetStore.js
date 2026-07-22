@@ -409,6 +409,18 @@ export async function removeRecentWorkspaceItem(kind, itemPath) {
             : index.scenes,
     });
 }
+export async function activateProjectRoot(projectRoot, lastScenePath) {
+    const normalizedProjectRoot = normalizeFilePath(projectRoot);
+    if (!(await isDirectoryPath(normalizedProjectRoot))) {
+        throw new Error('项目路径不存在或不是目录。');
+    }
+    setCurrentProjectRoot(normalizedProjectRoot);
+    await ensureProjectDirectories(normalizedProjectRoot);
+    authorizeProjectAssetRoots(normalizedProjectRoot);
+    await persistCurrentProjectRoot(normalizedProjectRoot);
+    await rememberRecentProjectRoot(normalizedProjectRoot, lastScenePath);
+    return listProjectAssets();
+}
 export async function openRecentProject(projectRoot) {
     const normalizedProjectRoot = normalizeFilePath(projectRoot);
     const index = await readRecentWorkspaceIndex();
@@ -416,15 +428,7 @@ export async function openRecentProject(projectRoot) {
     if (!isKnownRecentProject) {
         throw new Error('只能打开最近记录中的项目目录。');
     }
-    if (!(await isDirectoryPath(normalizedProjectRoot))) {
-        throw new Error('最近项目路径不存在或不是目录。');
-    }
-    setCurrentProjectRoot(normalizedProjectRoot);
-    await ensureProjectDirectories(normalizedProjectRoot);
-    authorizeProjectAssetRoots(normalizedProjectRoot);
-    await persistCurrentProjectRoot(normalizedProjectRoot);
-    await rememberRecentProjectRoot(normalizedProjectRoot);
-    return listProjectAssets();
+    return activateProjectRoot(normalizedProjectRoot);
 }
 export function getProjectModelsRoot(projectRoot) {
     return path.join(normalizeFilePath(projectRoot), PROJECT_ASSETS_DIRECTORY, PROJECT_MODELS_DIRECTORY);

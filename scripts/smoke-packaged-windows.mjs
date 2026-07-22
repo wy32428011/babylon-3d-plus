@@ -99,6 +99,14 @@ function inspectRenderer(webSocketDebuggerUrl) {
                 importCadFileAvailable: typeof api?.importCadFile === 'function',
                 importModelFolderAvailable: typeof api?.importModelFolder === 'function',
                 mqttConfigureAvailable: typeof api?.mqttConfigure === 'function',
+                getDataPlatformConfigAvailable: typeof api?.getDataPlatformConfig === 'function',
+                saveDataPlatformConfigAvailable: typeof api?.saveDataPlatformConfig === 'function',
+                listDataPlatformProjectsAvailable: typeof api?.listDataPlatformProjects === 'function',
+                openDataPlatformProjectAvailable: typeof api?.openDataPlatformProject === 'function',
+                retryDataPlatformModelSyncAvailable: typeof api?.retryDataPlatformModelSync === 'function',
+                dataPlatformModelSyncListenerAvailable: typeof api?.onDataPlatformModelSyncProgress === 'function',
+                dataPlatformModelSyncListenerRoundTripAvailable: false,
+                dataPlatformConfigRoundTripAvailable: false,
                 ipcRoundTripAvailable: false,
                 ipcError: null
               };
@@ -110,6 +118,20 @@ function inspectRenderer(webSocketDebuggerUrl) {
                     api.mqttGetStatus()
                   ]);
                   result.ipcRoundTripAvailable = Boolean(recentWorkspaces && projectAssets && mqttStatus);
+                  if (result.dataPlatformModelSyncListenerAvailable) {
+                    const unsubscribe = api.onDataPlatformModelSyncProgress(() => undefined);
+                    result.dataPlatformModelSyncListenerRoundTripAvailable = typeof unsubscribe === 'function';
+                    unsubscribe();
+                  }
+                  if (result.getDataPlatformConfigAvailable && result.saveDataPlatformConfigAvailable) {
+                    await api.getDataPlatformConfig();
+                    const savedDataPlatformConfig = await api.saveDataPlatformConfig({
+                      baseUrl: 'http://127.0.0.1:65535/platform/'
+                    });
+                    const reloadedDataPlatformConfig = await api.getDataPlatformConfig();
+                    result.dataPlatformConfigRoundTripAvailable = savedDataPlatformConfig?.baseUrl === 'http://127.0.0.1:65535/platform'
+                      && reloadedDataPlatformConfig?.baseUrl === savedDataPlatformConfig.baseUrl;
+                  }
                 } catch (error) {
                   result.ipcError = error instanceof Error ? error.message : String(error);
                 }
@@ -216,6 +238,14 @@ async function runPackagedSmoke() {
       && renderer.importCadFileAvailable
       && renderer.importModelFolderAvailable
       && renderer.mqttConfigureAvailable
+      && renderer.getDataPlatformConfigAvailable
+      && renderer.saveDataPlatformConfigAvailable
+      && renderer.listDataPlatformProjectsAvailable
+      && renderer.openDataPlatformProjectAvailable
+      && renderer.retryDataPlatformModelSyncAvailable
+      && renderer.dataPlatformModelSyncListenerAvailable
+      && renderer.dataPlatformModelSyncListenerRoundTripAvailable
+      && renderer.dataPlatformConfigRoundTripAvailable
       && renderer.ipcRoundTripAvailable;
 
     if (!valid) {

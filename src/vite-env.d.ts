@@ -65,6 +65,72 @@ type RecentWorkspacesResult = {
   scenes: RecentSceneEntry[];
 };
 
+type DataPlatformConfig = {
+  baseUrl: string;
+};
+
+type SaveDataPlatformConfigRequest = {
+  baseUrl: string;
+};
+
+type DataPlatformProjectEntry = {
+  id: string;
+  projectName: string;
+  sceneCount: number;
+  screenCount: number;
+  modelCount: number;
+  envModelCount: number;
+  comboModelCount: number;
+  poiCount: number;
+  chartCount: number;
+  themeCount: number;
+  latestEditorProjectId: string | null;
+  latestEditorProjectVersionId: string | null;
+  latestEditorProjectVersionNumber: number | null;
+  latestEditorProjectName: string | null;
+  latestEditorProjectPackageUrl: string | null;
+  latestEditorProjectPackageFileName: string | null;
+  updatedAt: string | null;
+};
+
+type OpenDataPlatformProjectRequest = {
+  projectId: string;
+};
+
+type DataPlatformProjectOpenResult = {
+  projectRoot: string;
+  sceneFilePath: string | null;
+  source: 'package' | 'generated';
+  warning: string | null;
+  modelSyncStarted: boolean;
+};
+
+type DataPlatformModelSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+type DataPlatformModelSyncProgress = {
+  runId: string;
+  phase: DataPlatformModelSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+type DataPlatformProjectListRequest = {
+  projectName: string;
+};
+
+type DataPlatformProjectListResult = {
+  records: DataPlatformProjectEntry[];
+  total: number;
+};
+
 type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
 type ModelAssetLibraryKind = 'model' | 'environment';
 type ModelParameterConfig = import('./editor/model/modelParameters').ModelParameterConfig;
@@ -258,6 +324,12 @@ interface Window {
     readTextFile: (request: ReadTextFileRequest) => Promise<ReadTextFileResult>;
     scanAssets: () => Promise<AssetEntry[]>;
     getRecentWorkspaces: () => Promise<RecentWorkspacesResult>;
+    getDataPlatformConfig: () => Promise<DataPlatformConfig>;
+    saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest) => Promise<DataPlatformConfig>;
+    listDataPlatformProjects: (request?: DataPlatformProjectListRequest) => Promise<DataPlatformProjectListResult>;
+    openDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectOpenResult>;
+    retryDataPlatformModelSync: () => Promise<boolean>;
+    onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
     listProjectAssets: () => Promise<ProjectListAssetsResult>;
     openRecentProject: (request: OpenRecentProjectRequest) => Promise<ProjectListAssetsResult>;
     removeRecentWorkspaceItem: (request: RemoveRecentWorkspaceItemRequest) => Promise<void>;
