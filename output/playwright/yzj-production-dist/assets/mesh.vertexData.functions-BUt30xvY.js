@@ -1,0 +1,1 @@
+import{t as e}from"./mesh.vertexData.functions-CbSYyJs2.js";export{e as OptimizeIndices};

@@ -1,0 +1,1 @@
+import{t as e}from"./clipPlaneFragment-F6cElb9_.js";export{e as clipPlaneFragmentWGSL};

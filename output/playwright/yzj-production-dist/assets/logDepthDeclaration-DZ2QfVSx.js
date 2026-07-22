@@ -1,0 +1,1 @@
+import{t as e}from"./logDepthDeclaration-DYYUVTrx.js";export{e as logDepthDeclarationWGSL};

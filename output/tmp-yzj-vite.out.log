@@ -1,0 +1,28 @@
+
+> zending-3d-editor@0.1.0 dev
+> vite --host 127.0.0.1 --port 41789 --strictPort
+
+
+  [32m[1mVITE[22m v8.0.16[39m  [2mready in [0m[1m900[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://127.0.0.1:[1m41789[22m/[39m
+[2m[32m  ➜[39m[22m[2m  press [22m[1mh + enter[22m[2m to show help[22m
+[2m13:38:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [optimizer] scanning dependencies...
+[2m13:38:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [optimizer] bundling dependencies...
+[2m13:41:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/tmp-yzj-component-inspector.html[22m
+[2m13:42:34[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/tmp-yzj-component-inspector.html[22m
+[2m14:07:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-reference-parameters-check.html[22m
+[2m14:08:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-reference-parameters-check.html[22m
+[2m14:09:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-reference-parameters-check.html[22m
+[2m14:35:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/image-library-texture-drop-check.html[22m
+[2m14:35:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/yzj-conveyor-runtime-check.html[22m
+[2m14:35:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/yzj-direction-arrow-check.html[22m
+[2m14:36:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/yzj-conveyor-runtime-check.html[22m
+[2m14:36:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/image-library-texture-drop-check.html[22m
+[2m14:36:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/yzj-direction-arrow-check.html[22m
+[2m14:37:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/image-library-texture-drop-check.html[22m
+[2m14:37:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/yzj-conveyor-runtime-check.html[22m
+[2m14:37:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/yzj-direction-arrow-check.html[22m
+[2m14:37:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2moutput/playwright/yzj-production-dist/output/playwright/yzj-reference-parameters-check.html[22m
+[2m15:01:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2mdist-viewer-template/index.html[22m
+[2m15:01:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2mdist-viewer-template/index.html[22m

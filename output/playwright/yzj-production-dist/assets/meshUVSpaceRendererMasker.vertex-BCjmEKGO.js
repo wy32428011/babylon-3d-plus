@@ -1,0 +1,1 @@
+import{t as e}from"./shaderStore-D-XQlhUT.js";var t=`meshUVSpaceRendererMaskerVertexShader`,n=`attribute vec2 uv;varying vec2 vUV;void main(void) {gl_Position=vec4(vec2(uv.x,uv.y)*2.0-1.0,0.,1.0);vUV=uv;}`;e.ShadersStore[t]||(e.ShadersStore[t]=n);var r={name:t,shader:n};export{r as t};

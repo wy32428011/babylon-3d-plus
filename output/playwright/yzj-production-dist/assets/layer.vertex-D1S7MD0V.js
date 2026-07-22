@@ -1,0 +1,1 @@
+import{t as e}from"./layer.vertex-BcW4T4Gq.js";export{e as layerVertexShaderWGSL};

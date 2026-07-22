@@ -1,0 +1,1 @@
+import{t as e}from"./color.vertex-BTHE--wo.js";export{e as colorVertexShader};

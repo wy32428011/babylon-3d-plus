@@ -1,0 +1,423 @@
+{
+  "parameterScripts": [
+    {
+      "modelFilename": "YZJ.glb",
+      "scriptFilename": "yzj.model.ts",
+      "className": "ParametricModelParamsComponent",
+      "fields": [
+        {
+          "key": "length",
+          "label": "长度",
+          "type": "number",
+          "defaultValue": 1.8276,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.0001,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "width",
+          "label": "宽度",
+          "type": "number",
+          "defaultValue": 1.0621,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.0001,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "height",
+          "label": "高度",
+          "type": "number",
+          "defaultValue": 0.6478692,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 1e-07,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "bodyColor",
+          "label": "主体颜色",
+          "type": "string",
+          "defaultValue": "#387368",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        {
+          "key": "rollerFramePosition",
+          "label": "辊筒框架位置",
+          "type": "number",
+          "defaultValue": 0.1576491,
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 1e-07,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "rollerFrameLength",
+          "label": "辊筒框架长度",
+          "type": "number",
+          "defaultValue": 1.021932,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 1e-06,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "motorPosition",
+          "label": "电机位置",
+          "type": "number",
+          "defaultValue": 0.1814833,
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 1e-07,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "rollerDensity",
+          "label": "辊筒密度",
+          "type": "number",
+          "defaultValue": 0.6,
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        {
+          "key": "showLegA",
+          "label": "显示腿A",
+          "type": "boolean",
+          "defaultValue": true,
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        {
+          "key": "showLegB",
+          "label": "显示腿B",
+          "type": "boolean",
+          "defaultValue": true,
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        {
+          "key": "showMotor",
+          "label": "显示电机",
+          "type": "boolean",
+          "defaultValue": true,
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        {
+          "key": "rollerSkin",
+          "label": "辊轮皮",
+          "type": "boolean",
+          "defaultValue": true,
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        {
+          "key": "directionArrowImage",
+          "label": "方向箭头贴图（运行兼容）",
+          "type": "string",
+          "defaultValue": "editor-image://builtin/direction-arrow-glow",
+          "configuration": {
+            "type": "string"
+          }
+        }
+      ],
+      "values": {
+        "length": {
+          "type": "number",
+          "value": 1.8276,
+          "label": "长度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.0001,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "width": {
+          "type": "number",
+          "value": 1.0621,
+          "label": "宽度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.0001,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "height": {
+          "type": "number",
+          "value": 0.6478692,
+          "label": "高度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 1e-07,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "bodyColor": {
+          "type": "string",
+          "value": "#387368",
+          "label": "主体颜色",
+          "configuration": {
+            "type": "string"
+          }
+        },
+        "rollerFramePosition": {
+          "type": "number",
+          "value": 0.1576491,
+          "label": "辊筒框架位置",
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 1e-07,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "rollerFrameLength": {
+          "type": "number",
+          "value": 1.021932,
+          "label": "辊筒框架长度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 1e-06,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "motorPosition": {
+          "type": "number",
+          "value": 0.1814833,
+          "label": "电机位置",
+          "configuration": {
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "step": 1e-07,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "rollerDensity": {
+          "type": "number",
+          "value": 0.6,
+          "label": "辊筒密度",
+          "configuration": {
+            "type": "number",
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          }
+        },
+        "showLegA": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示腿A",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "showLegB": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示腿B",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "showMotor": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示电机",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "rollerSkin": {
+          "type": "boolean",
+          "value": true,
+          "label": "辊轮皮",
+          "configuration": {
+            "type": "boolean"
+          }
+        },
+        "directionArrowImage": {
+          "type": "string",
+          "value": "editor-image://builtin/direction-arrow-glow",
+          "label": "方向箭头贴图（运行兼容）",
+          "configuration": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "animationScripts": [
+    {
+      "modelFilename": "YZJ.glb",
+      "scriptFilename": "yzj.model.ts",
+      "className": "ParametricModelRuntimeComponent",
+      "fields": [],
+      "values": {}
+    }
+  ],
+  "modelParameters": {
+    "schema": "babylon-editor.model-parameters",
+    "version": 1,
+    "parameters": [
+      {
+        "key": "length",
+        "label": "长度",
+        "type": "number",
+        "defaultValue": 1.8276,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.0001,
+        "unit": "m"
+      },
+      {
+        "key": "width",
+        "label": "宽度",
+        "type": "number",
+        "defaultValue": 1.0621,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.0001,
+        "unit": "m"
+      },
+      {
+        "key": "height",
+        "label": "高度",
+        "type": "number",
+        "defaultValue": 0.6478692,
+        "min": 0.1,
+        "max": 100,
+        "step": 1e-07,
+        "unit": "m"
+      },
+      {
+        "key": "bodyColor",
+        "label": "主体颜色",
+        "type": "color",
+        "defaultValue": "#387368"
+      },
+      {
+        "key": "rollerFramePosition",
+        "label": "辊筒框架位置",
+        "type": "number",
+        "defaultValue": 0.1576491,
+        "min": -100,
+        "max": 100,
+        "step": 1e-07,
+        "unit": "m"
+      },
+      {
+        "key": "rollerFrameLength",
+        "label": "辊筒框架长度",
+        "type": "number",
+        "defaultValue": 1.021932,
+        "min": 0.1,
+        "max": 100,
+        "step": 1e-06,
+        "unit": "m"
+      },
+      {
+        "key": "motorPosition",
+        "label": "电机位置",
+        "type": "number",
+        "defaultValue": 0.1814833,
+        "min": -100,
+        "max": 100,
+        "step": 1e-07,
+        "unit": "m"
+      },
+      {
+        "key": "rollerDensity",
+        "label": "辊筒密度",
+        "type": "number",
+        "defaultValue": 0.6,
+        "min": 0.1,
+        "max": 100,
+        "step": 0.1
+      },
+      {
+        "key": "showLegA",
+        "label": "显示腿A",
+        "type": "boolean",
+        "defaultValue": true
+      },
+      {
+        "key": "showLegB",
+        "label": "显示腿B",
+        "type": "boolean",
+        "defaultValue": true
+      },
+      {
+        "key": "showMotor",
+        "label": "显示电机",
+        "type": "boolean",
+        "defaultValue": true
+      },
+      {
+        "key": "rollerSkin",
+        "label": "辊轮皮",
+        "type": "boolean",
+        "defaultValue": true
+      },
+      {
+        "key": "directionArrowImage",
+        "label": "方向箭头贴图（运行兼容）",
+        "type": "texture",
+        "defaultValue": "editor-image://builtin/direction-arrow-glow",
+        "description": "保留既有 MQTT 运行方向箭头的贴图解析能力。"
+      }
+    ],
+    "bindings": []
+  },
+  "lengthUnit": "centimeter"
+}

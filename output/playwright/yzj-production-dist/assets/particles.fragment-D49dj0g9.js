@@ -1,0 +1,1 @@
+import{t as e}from"./particles.fragment-PNe4LO6A.js";export{e as particlesPixelShaderWGSL};
