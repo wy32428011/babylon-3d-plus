@@ -125,11 +125,17 @@ export type ModelGeneratorRule = {
   target: ModelGeneratorTarget | null;
 };
 
-/** 模型生成器绑定，将外部设备身份绑定到生成出的资产编号。 */
+/** 模型生成器 MQTT 设备绑定，将外部设备身份绑定到生成出的资产编号。 */
 export type ModelGeneratorBinding = {
   id: string;
   sourceId: string;
   deviceType: string;
+  assetCode: string;
+};
+
+/** 模型生成器 fetch 定位线框绑定，通过资产编号匹配虚拟定位线框。 */
+export type ModelGeneratorFetchBinding = {
+  id: string;
   assetCode: string;
 };
 
@@ -150,6 +156,7 @@ export type ModelGeneratorComponent = {
   rules: ModelGeneratorRule[];
   metadataTtlSeconds: number;
   bindings: ModelGeneratorBinding[];
+  fetchBindings: ModelGeneratorFetchBinding[];
   warehouseFlow?: ModelGeneratorWarehouseFlow;
   dataSource: ModelGeneratorDataSource;
 };

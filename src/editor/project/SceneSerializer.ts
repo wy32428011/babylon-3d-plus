@@ -23,6 +23,7 @@ import {
   MODEL_GENERATOR_TTL_MAX_SECONDS,
   MODEL_GENERATOR_TTL_MIN_SECONDS,
   sanitizeModelGeneratorComponent,
+  sanitizeModelGeneratorFetchBinding,
   sanitizeModelGeneratorTarget,
 } from '../model/modelGenerator';
 import type { Vector3Data } from '../model/math';
@@ -635,7 +636,10 @@ function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerat
 
   const rules = assertArray(modelGenerator.rules);
   const bindings = assertArray(modelGenerator.bindings);
-  if (rules.length > MODEL_GENERATOR_MAX_RULES || bindings.length > MODEL_GENERATOR_MAX_BINDINGS) {
+  const fetchBindings = Array.isArray(modelGenerator.fetchBindings) ? modelGenerator.fetchBindings : [];
+  if (rules.length > MODEL_GENERATOR_MAX_RULES
+    || bindings.length > MODEL_GENERATOR_MAX_BINDINGS
+    || fetchBindings.length > MODEL_GENERATOR_MAX_BINDINGS) {
     throwUnsupportedSceneFileError();
   }
 
@@ -655,16 +659,23 @@ function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerat
     rules,
     metadataTtlSeconds,
     bindings,
+    fetchBindings,
     dataSource: modelGenerator.dataSource,
     ...(modelGenerator.warehouseFlow === undefined ? {} : { warehouseFlow: modelGenerator.warehouseFlow }),
   });
-  if (!normalized || normalized.rules.length !== rules.length || normalized.bindings.length !== bindings.length) {
+  if (!normalized
+    || normalized.rules.length !== rules.length
+    || normalized.bindings.length !== bindings.length
+    || normalized.fetchBindings.length !== fetchBindings.filter((b: unknown) => sanitizeModelGeneratorFetchBinding(b)).length) {
     throwUnsupportedSceneFileError();
   }
 
   const ruleIds = normalized.rules.map((rule) => rule.id);
   const bindingIds = normalized.bindings.map((binding) => binding.id);
-  if (new Set(ruleIds).size !== ruleIds.length || new Set(bindingIds).size !== bindingIds.length) {
+  const fetchBindingIds = normalized.fetchBindings.map((b) => b.id);
+  if (new Set(ruleIds).size !== ruleIds.length
+    || new Set(bindingIds).size !== bindingIds.length
+    || new Set(fetchBindingIds).size !== fetchBindingIds.length) {
     throwUnsupportedSceneFileError();
   }
 

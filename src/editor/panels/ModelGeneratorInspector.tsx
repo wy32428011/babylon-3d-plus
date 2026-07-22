@@ -8,6 +8,7 @@ import {
 import type {
   ModelGeneratorBinding,
   ModelGeneratorComponent,
+  ModelGeneratorFetchBinding,
   ModelGeneratorRule,
   ModelGeneratorTarget,
   ModelGeneratorWarehouseFlow,
@@ -31,6 +32,7 @@ type ModelGeneratorInspectorProps = {
 
 type ModelGeneratorRulePatch = Partial<Omit<ModelGeneratorRule, 'id'>>;
 type ModelGeneratorBindingPatch = Partial<Omit<ModelGeneratorBinding, 'id'>>;
+type ModelGeneratorFetchBindingPatch = Partial<Omit<ModelGeneratorFetchBinding, 'id'>>;
 
 const EMPTY_WAREHOUSE_FLOW: ModelGeneratorWarehouseFlow = {
   enabled: true,
@@ -88,12 +90,20 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     commitComponent({ ...component, rules }, label);
   }
 
-  /** 更新指定仓储设备 MQTT 绑定，不改变其他绑定。 */
+  /** 更新指定 MQTT 设备绑定，不改变其他绑定。 */
   function updateBinding(index: number, patch: ModelGeneratorBindingPatch): void {
     const bindings = component.bindings.map((binding, bindingIndex) => (
       bindingIndex === index ? { ...binding, ...patch } : binding
     ));
     commitComponent({ ...component, bindings }, '更新仓储设备绑定');
+  }
+
+  /** 更新指定 fetch 定位线框绑定。 */
+  function updateFetchBinding(index: number, patch: ModelGeneratorFetchBindingPatch): void {
+    const fetchBindings = component.fetchBindings.map((b, i) => (
+      i === index ? { ...b, ...patch } : b
+    ));
+    commitComponent({ ...component, fetchBindings }, '更新定位线框绑定');
   }
 
   /** 新增一条空生成规则，目标由后续模型库拖放补齐。 */
@@ -125,7 +135,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     commitComponent({ ...component, rules }, '调整生成规则顺序');
   }
 
-  /** 新增一条仓储设备精确绑定，sourceId 默认使用现有遥测默认源。 */
+  /** 新增一条 MQTT 设备绑定，sourceId 默认使用现有遥测默认源。 */
   function addBinding(): void {
     if (component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS) return;
     const binding: ModelGeneratorBinding = {
@@ -134,10 +144,10 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
       deviceType: '',
       assetCode: '',
     };
-    commitComponent({ ...component, bindings: [...component.bindings, binding] }, '添加仓储设备绑定');
+    commitComponent({ ...component, bindings: [...component.bindings, binding] }, '添加 MQTT 设备绑定');
   }
 
-  /** 删除指定仓储设备绑定，并清空仓储流中对该稳定 ID 的引用。 */
+  /** 删除指定 MQTT 设备绑定，并清空仓储流中对该稳定 ID 的引用。 */
   function removeBinding(index: number): void {
     const removedBindingId = component.bindings[index]?.id ?? '';
     const warehouseFlow = component.warehouseFlow;
@@ -155,7 +165,25 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
         bindings: component.bindings.filter((_, bindingIndex) => bindingIndex !== index),
         ...(nextWarehouseFlow ? { warehouseFlow: nextWarehouseFlow } : {}),
       },
-      '删除仓储设备绑定',
+      '删除 MQTT 设备绑定',
+    );
+  }
+
+  /** 新增一条 fetch 定位线框绑定。 */
+  function addFetchBinding(): void {
+    if (component.fetchBindings.length >= MODEL_GENERATOR_MAX_BINDINGS) return;
+    const binding: ModelGeneratorFetchBinding = {
+      id: createId('model_generator_binding'),
+      assetCode: '',
+    };
+    commitComponent({ ...component, fetchBindings: [...component.fetchBindings, binding] }, '添加定位线框绑定');
+  }
+
+  /** 删除指定 fetch 定位线框绑定。 */
+  function removeFetchBinding(index: number): void {
+    commitComponent(
+      { ...component, fetchBindings: component.fetchBindings.filter((_, i) => i !== index) },
+      '删除定位线框绑定',
     );
   }
 
@@ -393,68 +421,97 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
         <p className="muted model-generator-unit-hint">单位：秒；用于 warehouseFlow 三条严格绑定快照的有效期判断。</p>
       )}
 
-      <div className="model-generator-section-header">
-        <span>仓储设备绑定</span>
-        <button
-          disabled={disabled || component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS}
-          onClick={addBinding}
-          title={component.dataSource === 'fetch' ? '添加定位线框绑定' : '添加 MQTT 绑定'}
-          type="button"
-        >
-          +
-        </button>
-      </div>
-
-      {component.bindings.length === 0 ? (
-        <p className="muted model-generator-empty-hint">
-          {component.dataSource === 'fetch'
-            ? '暂无定位线框绑定；资产编号用于匹配虚拟定位线框的 assetId。'
-            : '暂无仓储设备绑定；普通设备模板规则仍按各自遥测快照工作。'}
-        </p>
-      ) : null}
-
-      {component.bindings.map((binding, index) => (
-        <div className="model-generator-binding-card" key={binding.id}>
-          <div className="model-generator-card-header">
-            <span>绑定 {index + 1}</span>
-            <button disabled={disabled} onClick={() => removeBinding(index)} title="删除绑定" type="button">−</button>
+      {component.dataSource === 'fetch' ? (
+        <>
+          <div className="model-generator-section-header">
+            <span>定位线框绑定</span>
+            <button
+              disabled={disabled || component.fetchBindings.length >= MODEL_GENERATOR_MAX_BINDINGS}
+              onClick={addFetchBinding}
+              title="添加定位线框绑定"
+              type="button"
+            >
+              +
+            </button>
           </div>
-          {component.dataSource !== 'fetch' ? (
-            <>
-          <label className="inspector-row">
-            <span>sourceId</span>
-            <input
-              disabled={disabled}
-              maxLength={256}
-              type="text"
-              value={binding.sourceId}
-              onChange={(event) => updateBinding(index, { sourceId: event.target.value })}
-            />
-          </label>
-          <label className="inspector-row">
-            <span>deviceType</span>
-            <input
-              disabled={disabled}
-              maxLength={256}
-              type="text"
-              value={binding.deviceType}
-              onChange={(event) => updateBinding(index, { deviceType: event.target.value })}
-            />
-          </label>
-            </>
+          {component.fetchBindings.length === 0 ? (
+            <p className="muted model-generator-empty-hint">暂无定位线框绑定；资产编号用于匹配虚拟定位线框的 assetId。</p>
           ) : null}
-          <label className="inspector-row">
-            <span>{component.dataSource === 'fetch' ? '定位线框编号' : 'assetCode'}</span>
-            <input
-              disabled={disabled}
-              maxLength={128}
-              type="text"
-              value={binding.assetCode}
-              onChange={(event) => updateBinding(index, { assetCode: event.target.value })}
-            />
-          </label>
-        </div>
-      ))}
+          {component.fetchBindings.map((binding, index) => (
+            <div className="model-generator-binding-card" key={binding.id}>
+              <div className="model-generator-card-header">
+                <span>绑定 {index + 1}</span>
+                <button disabled={disabled} onClick={() => removeFetchBinding(index)} title="删除绑定" type="button">−</button>
+              </div>
+              <label className="inspector-row">
+                <span>定位线框编号</span>
+                <input
+                  disabled={disabled}
+                  maxLength={128}
+                  type="text"
+                  value={binding.assetCode}
+                  onChange={(event) => updateFetchBinding(index, { assetCode: event.target.value })}
+                />
+              </label>
+            </div>
+          ))}
+        </>
+      ) : (
+        <>
+          <div className="model-generator-section-header">
+            <span>MQTT 设备绑定</span>
+            <button
+              disabled={disabled || component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS}
+              onClick={addBinding}
+              title="添加 MQTT 绑定"
+              type="button"
+            >
+              +
+            </button>
+          </div>
+          {component.bindings.length === 0 ? (
+            <p className="muted model-generator-empty-hint">暂无 MQTT 设备绑定；普通设备模板规则仍按各自遥测快照工作。</p>
+          ) : null}
+          {component.bindings.map((binding, index) => (
+            <div className="model-generator-binding-card" key={binding.id}>
+              <div className="model-generator-card-header">
+                <span>绑定 {index + 1}</span>
+                <button disabled={disabled} onClick={() => removeBinding(index)} title="删除绑定" type="button">−</button>
+              </div>
+              <label className="inspector-row">
+                <span>sourceId</span>
+                <input
+                  disabled={disabled}
+                  maxLength={256}
+                  type="text"
+                  value={binding.sourceId}
+                  onChange={(event) => updateBinding(index, { sourceId: event.target.value })}
+                />
+              </label>
+              <label className="inspector-row">
+                <span>deviceType</span>
+                <input
+                  disabled={disabled}
+                  maxLength={256}
+                  type="text"
+                  value={binding.deviceType}
+                  onChange={(event) => updateBinding(index, { deviceType: event.target.value })}
+                />
+              </label>
+              <label className="inspector-row">
+                <span>assetCode</span>
+                <input
+                  disabled={disabled}
+                  maxLength={128}
+                  type="text"
+                  value={binding.assetCode}
+                  onChange={(event) => updateBinding(index, { assetCode: event.target.value })}
+                />
+              </label>
+            </div>
+          ))}
+        </>
+      )}
 
       {component.dataSource !== 'fetch' && (
         <>

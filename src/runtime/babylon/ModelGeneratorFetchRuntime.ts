@@ -108,7 +108,7 @@ export class ModelGeneratorFetchRuntime {
 
         const targetSignature = createModelGeneratorTargetSignature(target);
 
-        for (const binding of component.bindings) {
+        for (const binding of component.fetchBindings) {
           const cargoCode = record.containerCode[0] ?? `${record.containerType}_${record.column}_${record.layer}`;
           nextInstances.push({
             cargoCode,
