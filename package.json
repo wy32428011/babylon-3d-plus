@@ -27,7 +27,8 @@
     "smoke:scene-capacity": "node scripts/smoke-static-model-instancing-policy.mjs && node scripts/smoke-asset-load-scheduler.mjs && node scripts/smoke-scene-capacity.mjs",
     "pack:win": "npm run build && electron-builder --win dir --x64",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
-    "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs"
+    "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs",
+    "smoke:data-platform": "node scripts/smoke-data-platform-project.mjs"
   },
   "engines": {
     "node": ">=22.12.0"
@@ -40,6 +41,7 @@
     "mqtt": "^5.15.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "unzipper": "^0.12.5",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

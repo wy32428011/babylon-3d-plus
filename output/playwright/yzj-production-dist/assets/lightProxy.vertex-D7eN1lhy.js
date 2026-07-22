@@ -1,0 +1,1 @@
+import{t as e}from"./lightProxy.vertex-CveTSR7E.js";export{e as lightProxyVertexShader};

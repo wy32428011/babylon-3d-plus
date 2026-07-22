@@ -1,0 +1,1 @@
+var e={};function t(t,n){e[t]=n}function n(t){return e[t]}function r(t){for(let n in e)if(t instanceof e[n]&&!n.includes(`Abstract`))return n;return`Unknown`}export{r as n,t as r,n as t};

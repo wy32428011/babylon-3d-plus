@@ -1,0 +1,1 @@
+import{t as e}from"./perfCounter-BaBz3zl-.js";var t=class{constructor(){this._gpuTimeInFrameId=-1,this.counter=new e}_addDuration(e,t){e<this._gpuTimeInFrameId||(this._gpuTimeInFrameId===e?this.counter.addCount(t,!1):(this.counter._fetchResult(),this.counter.fetchNewFrame(),this.counter.addCount(t,!1),this._gpuTimeInFrameId=e))}};export{t};

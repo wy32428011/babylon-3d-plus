@@ -8,6 +8,7 @@ const visualEntries = [
   path.resolve(workspaceRoot, 'output/playwright/image-library-texture-drop-check.html'),
   path.resolve(workspaceRoot, 'output/playwright/yzj-direction-arrow-check.html'),
   path.resolve(workspaceRoot, 'output/playwright/yzj-conveyor-runtime-check.html'),
+  path.resolve(workspaceRoot, 'output/playwright/yzj-reference-parameters-check.html'),
 ];
 
 /** 递归查找目录中的文件，供生产产物检查 hash PNG。 */

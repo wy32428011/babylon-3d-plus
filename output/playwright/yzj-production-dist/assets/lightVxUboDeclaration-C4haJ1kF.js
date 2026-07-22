@@ -1,0 +1,1 @@
+import{t as e}from"./lightVxUboDeclaration-CMPrkkNu.js";export{e as lightVxUboDeclaration};

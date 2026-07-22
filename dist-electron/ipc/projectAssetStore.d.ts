@@ -11,6 +11,7 @@ export declare function rememberRecentProjectRoot(projectRoot: string, lastScene
 export declare function rememberRecentSceneFile(filePath: string, projectRoot?: string | null): Promise<void>;
 export declare function assertRecentSceneFile(filePath: string): Promise<string>;
 export declare function removeRecentWorkspaceItem(kind: 'project' | 'scene', itemPath: string): Promise<void>;
+export declare function activateProjectRoot(projectRoot: string, lastScenePath?: string): Promise<ProjectListAssetsResult>;
 export declare function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult>;
 export declare function getProjectModelsRoot(projectRoot: string): string;
 /** 返回项目环境模型目录 Assets/Environments。 */

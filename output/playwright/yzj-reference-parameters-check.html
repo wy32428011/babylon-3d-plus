@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>YZJ 图片参数视觉验证</title>
+  <style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0b1115;color:#eef5f8;font-family:"Microsoft YaHei",Arial,sans-serif}
+    #renderCanvas{width:100%;height:100%;display:block}
+    #status{position:fixed;left:14px;top:14px;right:14px;max-height:128px;overflow:auto;padding:10px 12px;border:1px solid rgba(126,172,193,.55);background:rgba(5,11,15,.9);font-size:12px;line-height:1.55;white-space:pre-wrap}
+    .ok{color:#79efaa}.error{color:#ff9696}
+  </style>
+</head>
+<body data-validation-status="loading">
+  <canvas id="renderCanvas"></canvas>
+  <div id="status">YZJ 图片参数验证加载中...</div>
+  <script type="module">
+    import {
+      ArcRotateCamera, Color3, DynamicTexture, Engine, HemisphericLight, Mesh, MeshBuilder,
+      Scene, SceneLoader, StandardMaterial, TransformNode, Vector3,
+    } from "@babylonjs/core";
+    import "@babylonjs/loaders/glTF/index.js";
+    import { ExternalModelScriptRuntime } from "/src/runtime/babylon/ExternalModelScriptRuntime.ts";
+
+    const canvas=document.querySelector("#renderCanvas");
+    const status=document.querySelector("#status");
+    const engine=new Engine(canvas,true,{preserveDrawingBuffer:true,stencil:true});
+    const scene=new Scene(engine);scene.clearColor.set(.045,.065,.075,1);
+    const camera=new ArcRotateCamera("camera",Math.PI*.24,Math.PI*.31,15.5,new Vector3(0,.75,.25),scene);camera.attachControl(canvas,true);
+    camera.lowerRadiusLimit=7;camera.upperRadiusLimit=28;
+    const light=new HemisphericLight("light",new Vector3(.25,1,.35),scene);light.intensity=1.12;
+    const ground=MeshBuilder.CreateGround("ground",{width:19,height:12},scene);const groundMaterial=new StandardMaterial("groundMaterial",scene);groundMaterial.diffuseColor=new Color3(.1,.14,.16);groundMaterial.specularColor=Color3.Black();ground.material=groundMaterial;ground.position.y=-.012;
+
+    const metadata=await fetch("./yzj-assets/meta.json").then((response)=>response.json());
+    const defaults={
+      length:1.8276,width:1.0621,height:.6478692,bodyColor:"#387368",
+      rollerFramePosition:.1576491,rollerFrameLength:1.021932,motorPosition:.1814833,
+      rollerDensity:.6,showLegA:true,showLegB:true,showMotor:true,rollerSkin:true,
+      showDirectionArrow:false,directionArrowImage:"editor-image://builtin/direction-arrow-glow",
+      infeedSide:"left",outfeedSide:"front",frontSide:"right",backSide:"left",
+    };
+    const cases=[
+      {id:"default",label:"图片默认参数",x:-6,z:-2.35,values:{...defaults}},
+      {id:"resized",label:"长宽高 / 橙色 / 密度3",x:-2,z:-2.35,values:{...defaults,length:2.5,width:1.4,height:.8,bodyColor:"#b35f43",rollerDensity:3}},
+      {id:"frameAdjusted",label:"框架位置 / 长度",x:2,z:-2.35,values:{...defaults,rollerFramePosition:.32,rollerFrameLength:1.35}},
+      {id:"motorShift",label:"电机位置 +0.20m",x:6,z:-2.35,values:{...defaults,motorPosition:.3814833}},
+      {id:"frameBase",label:"框架长度基准",x:0,z:20,hidden:true,values:{...defaults,rollerFrameLength:1.35}},
+      {id:"noLegA",label:"关闭腿A",x:-5.4,z:2.45,values:{...defaults,showLegA:false}},
+      {id:"noLegB",label:"关闭腿B",x:-1.8,z:2.45,values:{...defaults,showLegB:false}},
+      {id:"noMotor",label:"关闭电机",x:1.8,z:2.45,values:{...defaults,showMotor:false}},
+      {id:"noSkin",label:"关闭辊轮皮",x:5.4,z:2.45,values:{...defaults,rollerSkin:false}},
+    ];
+
+    function syncModelScriptMetadata(target,values){
+      const scripts=(metadata.parameterScripts??[]).map((script)=>{const cloned=structuredClone(script);cloned.values=cloned.values??{};for(const [key,value] of Object.entries(values)){const previous=typeof cloned.values[key]==="object"&&cloned.values[key]!==null?cloned.values[key]:{};cloned.values[key]={...previous,value};}return cloned;});
+      target.metadata={...(target.metadata??{}),scripts};
+    }
+    function parentTopLevelModelNodes(container,contentRoot){const imported=new Set([...container.meshes,...container.transformNodes]);for(const node of imported){if(!node.parent||!imported.has(node.parent))node.parent=contentRoot;}}
+    function findDescendant(root,name){return [root,...root.getDescendants(false)].find((node)=>node.name===name)??null;}
+    function findRollerNodes(root){return [root,...root.getDescendants(false)].filter((node)=>node.name==="GT.3"||node.metadata?.sourceNodeName==="GT.3"||node.metadata?.motionSourceNodeName==="GT.3");}
+    function getNodesBounds(nodes,coordinateRoot=null){
+      const inverse=coordinateRoot?.getWorldMatrix?.().clone?.();if(inverse?.invert)inverse.invert();let minimum=new Vector3(Number.POSITIVE_INFINITY,Number.POSITIVE_INFINITY,Number.POSITIVE_INFINITY);let maximum=new Vector3(Number.NEGATIVE_INFINITY,Number.NEGATIVE_INFINITY,Number.NEGATIVE_INFINITY);
+      for(const node of nodes.filter(Boolean)){for(const mesh of node.getChildMeshes?.(false)??[]){const positions=mesh.getVerticesData("position");const world=mesh.computeWorldMatrix(true);if(!positions||!world)continue;for(let index=0;index<positions.length;index+=3){let point=Vector3.TransformCoordinates(new Vector3(positions[index],positions[index+1],positions[index+2]),world);if(inverse)point=Vector3.TransformCoordinates(point,inverse);minimum=Vector3.Minimize(minimum,point);maximum=Vector3.Maximize(maximum,point);}}}
+      return Number.isFinite(minimum.x)?{minimum,maximum,center:minimum.add(maximum).scale(.5),size:maximum.subtract(minimum)}:null;
+    }
+    function normalizeModelContentOrigin(root){root.computeWorldMatrix(true);const bounds=getNodesBounds([root]);if(!bounds)return;const bottomCenter=new Vector3((bounds.minimum.x+bounds.maximum.x)/2,bounds.minimum.y,(bounds.minimum.z+bounds.maximum.z)/2);const local=Vector3.TransformCoordinates(bottomCenter,root.getWorldMatrix().clone().invert());for(const child of root.getChildren()){if(child instanceof TransformNode)child.position.subtractInPlace(local);}}
+    function addLabel(root,text){const plane=MeshBuilder.CreatePlane(`${root.name}_label`,{width:2.5,height:.38},scene);plane.parent=root;plane.position.set(0,1.25,0);plane.billboardMode=Mesh.BILLBOARDMODE_ALL;const texture=new DynamicTexture(`${root.name}_labelTexture`,{width:640,height:96},scene,true);texture.hasAlpha=true;texture.drawText(text,null,66,"bold 42px Microsoft YaHei","#f3fbff","rgba(5,10,14,.82)",true);const material=new StandardMaterial(`${root.name}_labelMaterial`,scene);material.diffuseTexture=texture;material.emissiveColor=Color3.White();material.backFaceCulling=false;plane.material=material;}
+    function readMeshComponents(mesh){
+      const positions=Array.from(mesh.getVerticesData("position")??[]),indices=Array.from(mesh.getIndices()??[]);const keys=[];const verticesByKey=new Map();for(let vertex=0;vertex<positions.length/3;vertex++){const offset=vertex*3,key=`${positions[offset].toFixed(5)},${positions[offset+1].toFixed(5)},${positions[offset+2].toFixed(5)}`;keys[vertex]=key;const list=verticesByKey.get(key)??[];list.push(vertex);verticesByKey.set(key,list);}const parents=new Map();const find=(key)=>{const parent=parents.get(key);if(!parent){parents.set(key,key);return key;}if(parent===key)return key;const root=find(parent);parents.set(key,root);return root;};const union=(a,b)=>{a=find(a);b=find(b);if(a!==b)parents.set(b,a);};for(let i=0;i+2<indices.length;i+=3){union(keys[indices[i]],keys[indices[i+1]]);union(keys[indices[i+1]],keys[indices[i+2]]);}const verticesByRoot=new Map(),facesByRoot=new Map();for(const [key,list] of verticesByKey){const root=find(key),set=verticesByRoot.get(root)??new Set();list.forEach((value)=>set.add(value));verticesByRoot.set(root,set);}for(let i=0;i+2<indices.length;i+=3){const root=find(keys[indices[i]]);facesByRoot.set(root,(facesByRoot.get(root)??0)+1);}return [...verticesByRoot.entries()].map(([root,set])=>{let minimum=new Vector3(Number.POSITIVE_INFINITY,Number.POSITIVE_INFINITY,Number.POSITIVE_INFINITY),maximum=new Vector3(Number.NEGATIVE_INFINITY,Number.NEGATIVE_INFINITY,Number.NEGATIVE_INFINITY);for(const vertex of set){const offset=vertex*3,point=new Vector3(positions[offset],positions[offset+1],positions[offset+2]);minimum=Vector3.Minimize(minimum,point);maximum=Vector3.Maximize(maximum,point);}return{minimum,maximum,center:minimum.add(maximum).scale(.5),size:maximum.subtract(minimum),faceCount:facesByRoot.get(root)??0};}).sort((left,right)=>right.faceCount-left.faceCount);
+    }
+    const isLegA=(component)=>component.center.x<-1.2&&component.maximum.y<=.675;
+    const isLegB=(component)=>component.center.x>-.15&&component.maximum.y<=.675;
+    const isMotor=(component)=>component.center.x>=-.68&&component.center.x<=-.52&&component.center.y>=.42&&component.center.y<=.62&&component.size.x<=.15&&component.size.y<=.14&&component.size.z<=.3;
+    const spread=(components)=>components.reduce((sum,component)=>sum+component.size.length(),0);
+    const centerZ=(components)=>components.reduce((sum,component)=>sum+component.center.z,0)/Math.max(1,components.length);
+    const round=(value)=>Number(value.toFixed(4));
+
+    async function createCase(testCase){
+      const root=new TransformNode(`${testCase.id}_root`,scene);root.position.set(testCase.x,0,testCase.z);const contentRoot=new TransformNode(`${testCase.id}_contentRoot`,scene);contentRoot.parent=root;contentRoot.scaling.setAll(.01);
+      const container=await SceneLoader.LoadAssetContainerAsync("./yzj-assets/","YZJ.glb",scene);container.addAllToScene();parentTopLevelModelNodes(container,contentRoot);normalizeModelContentOrigin(root);syncModelScriptMetadata(contentRoot,testCase.values);
+      const modelAsset={sourcePath:"./yzj-assets/YZJ.glb",sourceUrl:"./yzj-assets/YZJ.glb",lengthUnit:"meter",parameterConfig:metadata.modelParameters,unitScaleToMeters:1,scriptAssets:[{path:"./yzj-assets/yzj.model.ts",sourceUrl:"./yzj-assets/yzj.model.txt",name:"yzj.model.ts"}],parameterScriptMetadata:metadata.parameterScripts??[],animationScriptMetadata:metadata.animationScripts??[],parameterValues:testCase.values};
+      const runtime=new ExternalModelScriptRuntime(contentRoot,modelAsset);runtime.updateParameterValues(testCase.values);await runtime.start();runtime.update();if(!testCase.hidden)addLabel(root,testCase.label);
+      const body=findDescendant(root,"ZT.2"),platform=findDescendant(root,"Ban.4"),rollers=findRollerNodes(root);const bodyMesh=body?.getChildMeshes(false)?.[0],rollerMesh=rollers[0]?.getChildMeshes(false)?.[0];
+      if(!body||!platform||!bodyMesh||!rollerMesh)throw new Error(`${testCase.id}: 关键节点缺失`);
+      const bodyComponents=readMeshComponents(bodyMesh),rollerComponents=readMeshComponents(rollerMesh);const bodyBounds=getNodesBounds([body],root),platformBounds=getNodesBounds([platform],root),rollerBounds=getNodesBounds(rollers,root);if(!bodyBounds||!platformBounds||!rollerBounds)throw new Error(`${testCase.id}: 包围盒缺失`);
+      const albedo=bodyMesh.material?.albedoColor?.toHexString?.()??bodyMesh.material?.diffuseColor?.toHexString?.()??"";
+      return {id:testCase.id,values:testCase.values,bodyBounds,platformBounds,rollerBounds,rollerCount:rollers.length,bodyColor:albedo.toUpperCase(),legASpread:spread(bodyComponents.filter(isLegA)),legBSpread:spread(bodyComponents.filter(isLegB)),motorSpread:spread(bodyComponents.filter(isMotor)),motorCenterZ:centerZ(bodyComponents.filter(isMotor)),rollerSkinSpread:rollerComponents[0]?.size.length()??0};
+    }
+
+    const reports=[];const failures=[];
+    try{
+      for(const testCase of cases)reports.push(await createCase(testCase));
+      const byId=Object.fromEntries(reports.map((report)=>[report.id,report]));
+      if(byId.default.bodyColor!=="#387368")failures.push(`主体默认色错误: ${byId.default.bodyColor}`);
+      if(byId.resized.bodyColor!=="#B35F43")failures.push(`主体改色错误: ${byId.resized.bodyColor}`);
+      if(byId.resized.bodyBounds.size.x<=byId.default.bodyBounds.size.x+.5)failures.push("长度参数未增大主体");
+      if(byId.resized.bodyBounds.size.z<=byId.default.bodyBounds.size.z+.25)failures.push("宽度参数未增大主体");
+      if(byId.resized.bodyBounds.size.y<=byId.default.bodyBounds.size.y+.12)failures.push("高度参数未增大主体");
+      const expectedFrameShift=.32-.1576491,actualFrameShift=byId.frameAdjusted.platformBounds.center.x-byId.frameBase.platformBounds.center.x;
+      if(Math.abs(actualFrameShift-expectedFrameShift)>.025)failures.push(`辊筒框架位置偏差: ${actualFrameShift}`);
+      if(byId.frameAdjusted.platformBounds.size.x<=byId.default.platformBounds.size.x+.25)failures.push("辊筒框架长度未生效");
+      const motorShift=byId.motorShift.motorCenterZ-byId.default.motorCenterZ;if(Math.abs(motorShift-.2)>.02)failures.push(`电机位置偏差: ${motorShift}`);
+      if(byId.default.legASpread<1||byId.noLegA.legASpread>.0001)failures.push(`腿A显隐失败: ${byId.default.legASpread}/${byId.noLegA.legASpread}`);
+      if(byId.default.legBSpread<1||byId.noLegB.legBSpread>.0001)failures.push(`腿B显隐失败: ${byId.default.legBSpread}/${byId.noLegB.legBSpread}`);
+      if(byId.default.motorSpread<.3||byId.noMotor.motorSpread>.0001)failures.push(`电机显隐失败: ${byId.default.motorSpread}/${byId.noMotor.motorSpread}`);
+      if(byId.default.rollerSkinSpread<.8||byId.noSkin.rollerSkinSpread>.0001)failures.push(`辊轮皮显隐失败: ${byId.default.rollerSkinSpread}/${byId.noSkin.rollerSkinSpread}`);
+      if(byId.default.rollerCount!==1||byId.resized.rollerCount!==3)failures.push(`辊筒密度数量错误: ${byId.default.rollerCount}/${byId.resized.rollerCount}`);
+      window.__yzjReferenceParameterReport={ok:failures.length===0,failures,reports:reports.map((report)=>({id:report.id,bodyColor:report.bodyColor,bodySize:{x:round(report.bodyBounds.size.x),y:round(report.bodyBounds.size.y),z:round(report.bodyBounds.size.z)},platformCenterX:round(report.platformBounds.center.x),platformLength:round(report.platformBounds.size.x),rollerCount:report.rollerCount,legASpread:round(report.legASpread),legBSpread:round(report.legBSpread),motorSpread:round(report.motorSpread),motorCenterZ:round(report.motorCenterZ),rollerSkinSpread:round(report.rollerSkinSpread)}))};
+      document.body.dataset.validationStatus=failures.length===0?"pass":"failed";
+      status.innerHTML=failures.length
+        ? `<span class="error">失败</span>\n${failures.join("\n")}`
+        : `<span class="ok">通过</span>\n默认参数：1.8276 × 1.0621 × 0.6478692m，主体色 #387368，框架位置/长度与电机位置已验证。\n腿A、腿B、电机、辊轮皮显隐均通过；辊筒密度 0.6 保持 1 根，密度 3 生成 3 根。`;
+    }catch(error){failures.push(error instanceof Error?error.stack??error.message:String(error));document.body.dataset.validationStatus="failed";status.innerHTML=`<span class="error">失败</span>\n${failures.join("\n")}`;}
+    engine.runRenderLoop(()=>scene.render());addEventListener("resize",()=>engine.resize());
+  </script>
+</body>
+</html>

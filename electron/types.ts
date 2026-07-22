@@ -63,6 +63,72 @@ export type RecentWorkspacesResult = {
   scenes: RecentSceneEntry[];
 };
 
+export type DataPlatformConfig = {
+  baseUrl: string;
+};
+
+export type SaveDataPlatformConfigRequest = {
+  baseUrl: string;
+};
+
+export type DataPlatformProjectEntry = {
+  id: string;
+  projectName: string;
+  sceneCount: number;
+  screenCount: number;
+  modelCount: number;
+  envModelCount: number;
+  comboModelCount: number;
+  poiCount: number;
+  chartCount: number;
+  themeCount: number;
+  latestEditorProjectId: string | null;
+  latestEditorProjectVersionId: string | null;
+  latestEditorProjectVersionNumber: number | null;
+  latestEditorProjectName: string | null;
+  latestEditorProjectPackageUrl: string | null;
+  latestEditorProjectPackageFileName: string | null;
+  updatedAt: string | null;
+};
+
+export type OpenDataPlatformProjectRequest = {
+  projectId: string;
+};
+
+export type DataPlatformProjectOpenResult = {
+  projectRoot: string;
+  sceneFilePath: string | null;
+  source: 'package' | 'generated';
+  warning: string | null;
+  modelSyncStarted: boolean;
+};
+
+export type DataPlatformModelSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+export type DataPlatformModelSyncProgress = {
+  runId: string;
+  phase: DataPlatformModelSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+export type DataPlatformProjectListRequest = {
+  projectName: string;
+};
+
+export type DataPlatformProjectListResult = {
+  records: DataPlatformProjectEntry[];
+  total: number;
+};
+
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
 
 export type ModelScriptAsset = {
