@@ -29,6 +29,7 @@ import {
   TransformNode,
   type Node,
   Vector3,
+  VertexData,
 } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
 import type {
@@ -4959,7 +4960,7 @@ export class SceneRuntime {
     }
   }
 
-  /** 根据解析后的 CAD 几何分批创建 Babylon 线稿，避免大图纸一次性占满渲染线程。 */
+  /** 根据解析后的紧凑 CAD 几何分批创建 Babylon 线稿，避免大图纸制造海量 Vector3 临时对象。 */
   private async applyCadReferenceGeometry(
     entityId: string,
     cadReference: CadReferenceRuntimeEntry,
@@ -4969,30 +4970,70 @@ export class SceneRuntime {
     const maxBatchPolylineCount = 4_000;
 
     for (const layer of geometry.layers) {
-      let batch: typeof layer.polylines = [];
-      let batchPointCount = 0;
+      let polylineIndex = 0;
+      let pointOffset = 0;
       let batchIndex = 0;
 
-      for (const polyline of layer.polylines) {
-        const exceedsBatchBudget = batch.length > 0 && (
-          batch.length >= maxBatchPolylineCount || batchPointCount + polyline.length > maxBatchPointCount
-        );
-        if (exceedsBatchBudget) {
-          if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
-          this.createCadReferenceLineBatch(entityId, cadReference, layer.name, batchIndex, batch);
-          batch = [];
-          batchPointCount = 0;
-          batchIndex += 1;
-          await this.waitForCadReferenceRenderFrame();
+      while (polylineIndex < layer.polylinePointCounts.length) {
+        const currentPointCount = layer.polylinePointCounts[polylineIndex];
+        if (currentPointCount > maxBatchPointCount) {
+          let remainingPointCount = currentPointCount;
+          let chunkPointOffset = pointOffset;
+          while (remainingPointCount > 1) {
+            if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
+            const chunkPointCount = Math.min(maxBatchPointCount, remainingPointCount);
+            this.createCadReferenceLineBatch(
+              entityId,
+              cadReference,
+              layer.name,
+              batchIndex,
+              layer.positions.slice(chunkPointOffset * 3, (chunkPointOffset + chunkPointCount) * 3),
+              new Uint32Array([chunkPointCount]),
+            );
+            batchIndex += 1;
+            await this.waitForCadReferenceRenderFrame();
+
+            if (chunkPointCount === remainingPointCount) break;
+            chunkPointOffset += chunkPointCount - 1;
+            remainingPointCount -= chunkPointCount - 1;
+          }
+
+          pointOffset += currentPointCount;
+          polylineIndex += 1;
+          continue;
         }
 
-        batch.push(polyline);
-        batchPointCount += polyline.length;
-      }
+        const batchPointOffset = pointOffset;
+        const batchPolylineIndex = polylineIndex;
+        let batchPointCount = 0;
+        let batchPolylineCount = 0;
 
-      if (batch.length > 0) {
+        while (polylineIndex < layer.polylinePointCounts.length) {
+          const polylinePointCount = layer.polylinePointCounts[polylineIndex];
+          if (polylinePointCount > maxBatchPointCount) break;
+          const exceedsBatchBudget = batchPolylineCount > 0 && (
+            batchPolylineCount >= maxBatchPolylineCount
+            || batchPointCount + polylinePointCount > maxBatchPointCount
+          );
+          if (exceedsBatchBudget) break;
+
+          batchPointCount += polylinePointCount;
+          batchPolylineCount += 1;
+          pointOffset += polylinePointCount;
+          polylineIndex += 1;
+        }
+
+        if (batchPolylineCount === 0) continue;
         if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
-        this.createCadReferenceLineBatch(entityId, cadReference, layer.name, batchIndex, batch);
+        this.createCadReferenceLineBatch(
+          entityId,
+          cadReference,
+          layer.name,
+          batchIndex,
+          layer.positions.slice(batchPointOffset * 3, (batchPointOffset + batchPointCount) * 3),
+          layer.polylinePointCounts.slice(batchPolylineIndex, batchPolylineIndex + batchPolylineCount),
+        );
+        batchIndex += 1;
         await this.waitForCadReferenceRenderFrame();
       }
     }
@@ -5008,23 +5049,45 @@ export class SceneRuntime {
     return activeEntry === cadReference && activeEntry.loadToken === cadReference.loadToken;
   }
 
-  /** 创建单个受控大小的 CAD LineSystem，并挂接到参考图根节点。 */
+  /** 从紧凑点数组直接创建单个受控大小的 CAD LinesMesh，避免二次对象化和通用 Builder 拷贝。 */
   private createCadReferenceLineBatch(
     entityId: string,
     cadReference: CadReferenceRuntimeEntry,
     layerName: string,
     batchIndex: number,
-    polylines: CadReferenceParseResult['layers'][number]['polylines'],
+    positions: Float32Array,
+    polylinePointCounts: Uint32Array,
   ): void {
-    const lineMesh = MeshBuilder.CreateLineSystem(
+    let segmentCount = 0;
+    for (const pointCount of polylinePointCounts) {
+      segmentCount += Math.max(0, pointCount - 1);
+    }
+
+    const indices = new Uint16Array(segmentCount * 2);
+    let vertexOffset = 0;
+    let indexOffset = 0;
+    for (const pointCount of polylinePointCounts) {
+      for (let pointIndex = 1; pointIndex < pointCount; pointIndex += 1) {
+        indices[indexOffset] = vertexOffset + pointIndex - 1;
+        indices[indexOffset + 1] = vertexOffset + pointIndex;
+        indexOffset += 2;
+      }
+      vertexOffset += pointCount;
+    }
+
+    const lineMesh = new LinesMesh(
       `${entityId}_cadLayer_${this.sanitizeBabylonName(layerName)}_${batchIndex}`,
-      {
-        lines: polylines.map((polyline) =>
-          polyline.map((point) => new Vector3(point.x, point.y, point.z)),
-        ),
-      },
       this.scene,
+      null,
+      null,
+      undefined,
+      false,
+      true,
     );
+    const vertexData = new VertexData();
+    vertexData.positions = positions;
+    vertexData.indices = indices;
+    vertexData.applyToMesh(lineMesh, false);
     lineMesh.parent = cadReference.root;
     lineMesh.isPickable = false;
     lineMesh.metadata = { ...(lineMesh.metadata ?? {}), cadReferenceLayer: layerName };

@@ -521,13 +521,20 @@ export function SceneViewPanel() {
     gizmoRef.current = gizmo;
     mqttTelemetryClientRef.current = mqttTelemetryClient;
 
+    const canvas = canvasRef.current;
+    // Project 内容会改变中列 auto 行高；元素自身尺寸变化不会触发 window.resize。
     const resize = () => initializedViewport.engine.resize();
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(resize);
+    if (canvas) resizeObserver?.observe(canvas);
     const cancelActiveGizmoDrag = () => initializedGizmo.cancelActiveDrag();
     window.addEventListener('resize', resize);
     window.addEventListener('blur', cancelActiveGizmoDrag);
     resize();
 
     return () => {
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
       window.removeEventListener('blur', cancelActiveGizmoDrag);
       initializedMqttTelemetryClient?.dispose();

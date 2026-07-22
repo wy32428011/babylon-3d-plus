@@ -426,6 +426,77 @@ async function expectOpenFailure(window, projectId, expectedText) {
   assert.ok(message?.includes(expectedText));
 }
 
+async function inspectResourceStrip(window, exerciseHorizontalScroll = false) {
+  return window.evaluate((shouldExerciseHorizontalScroll) => {
+    const list = document.querySelector('.project-library .resource-card-list');
+    if (!(list instanceof HTMLElement)) throw new Error('未找到资源卡片列表');
+
+    const cards = [...list.querySelectorAll('.resource-card')].filter((node) => node instanceof HTMLElement);
+    const style = window.getComputedStyle(list);
+    const listRect = list.getBoundingClientRect();
+    const cardRects = cards.map((card) => card.getBoundingClientRect());
+    const cardTops = cardRects.map((rect) => rect.top);
+    const originalScrollLeft = list.scrollLeft;
+    const originalScrollTop = list.scrollTop;
+    let maximumScrollLeft = 0;
+    let focusedScrollLeft = 0;
+    let lastCardInsideViewport = cards.length === 0;
+
+    list.scrollLeft = 0;
+    if (shouldExerciseHorizontalScroll && cards.length > 0) {
+      list.scrollLeft = list.scrollWidth;
+      maximumScrollLeft = list.scrollLeft;
+      list.scrollLeft = 0;
+      cards.at(-1)?.scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'center' });
+      focusedScrollLeft = list.scrollLeft;
+      const lastCardRect = cards.at(-1)?.getBoundingClientRect();
+      lastCardInsideViewport = Boolean(
+        lastCardRect && lastCardRect.left >= listRect.left - 1 && lastCardRect.right <= listRect.right + 1,
+      );
+    }
+
+    list.scrollTop = 100;
+    const attemptedScrollTop = list.scrollTop;
+    list.scrollLeft = originalScrollLeft;
+    list.scrollTop = originalScrollTop;
+
+    const listClientBottom = listRect.top + list.clientHeight;
+    const topSpread = cardTops.length > 0 ? Math.max(...cardTops) - Math.min(...cardTops) : 0;
+    const cardsFullyVisible = cardRects.every(
+      (rect) => rect.top >= listRect.top - 1 && rect.bottom <= listClientBottom + 1,
+    );
+    const maxCardBottom = cardRects.length > 0 ? Math.max(...cardRects.map((rect) => rect.bottom)) : listRect.top;
+    const panel = list.closest('.project-library');
+    const bottomWorkspace = panel?.parentElement;
+    const scenePanel = document.querySelector('.scene-panel');
+
+    return {
+      bottomWorkspaceHeight: bottomWorkspace?.getBoundingClientRect().height ?? 0,
+      cardBottomGap: listClientBottom - maxCardBottom,
+      cardCount: cards.length,
+      cardHeights: cardRects.map((rect) => rect.height),
+      cardsFullyVisible,
+      clientHeight: list.clientHeight,
+      clientWidth: list.clientWidth,
+      flexWrap: style.flexWrap,
+      focusedScrollLeft,
+      height: style.height,
+      lastCardInsideViewport,
+      listHeight: listRect.height,
+      maximumScrollLeft,
+      minHeight: style.minHeight,
+      panelHeight: panel?.getBoundingClientRect().height ?? 0,
+      scenePanelHeight: scenePanel?.getBoundingClientRect().height ?? 0,
+      overflowX: style.overflowX,
+      overflowY: style.overflowY,
+      scrollHeight: list.scrollHeight,
+      scrollWidth: list.scrollWidth,
+      attemptedScrollTop,
+      topSpread,
+    };
+  }, exerciseHorizontalScroll);
+}
+
 async function run() {
   const fixtureRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-fixtures-'));
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-storage-'));
@@ -566,6 +637,58 @@ async function run() {
     assert.ok(visibleModelCards.names.includes('无脚本普通模型'));
     assert.ok(visibleModelCards.names.includes('全局组合模型'));
 
+    const libraryTabs = launched.window.locator('.project-library .library-tab');
+    const libraryTabCount = await libraryTabs.count();
+    assert.ok(libraryTabCount >= 2, '资源库页签数量不足，无法验证共享布局');
+    for (let index = 0; index < libraryTabCount; index += 1) {
+      await libraryTabs.nth(index).click();
+      const tabLayout = await inspectResourceStrip(launched.window);
+      assert.equal(tabLayout.flexWrap, 'nowrap');
+      assert.equal(tabLayout.overflowX, 'auto');
+      assert.equal(tabLayout.overflowY, 'hidden');
+      assert.equal(tabLayout.height, '190px');
+      assert.equal(tabLayout.minHeight, '190px');
+      assert.ok(tabLayout.scrollHeight <= tabLayout.clientHeight + 1, '资源库仍存在纵向溢出');
+      assert.equal(tabLayout.attemptedScrollTop, 0, '资源库仍可纵向滚动');
+    }
+
+    await launched.window.getByRole('button', { name: '模型库', exact: true }).click();
+    const layoutAt1440 = await inspectResourceStrip(launched.window, true);
+    assert.ok(layoutAt1440.cardCount >= 4);
+    assert.ok(layoutAt1440.cardHeights.every((height) => Math.abs(height - 160) <= 1));
+    assert.ok(layoutAt1440.topSpread <= 1, '模型卡片发生换行');
+    assert.equal(layoutAt1440.cardsFullyVisible, true, '1440×900 下模型卡片未完整显示');
+    assert.ok(layoutAt1440.cardBottomGap >= 0 && layoutAt1440.cardBottomGap <= 12, '横向滚动条未紧贴模型卡片');
+    assert.ok(layoutAt1440.bottomWorkspaceHeight <= 330, '正常状态底部资源区仍然过高');
+    assert.ok(layoutAt1440.scenePanelHeight >= 240, '正常状态 Scene 区域高度不足');
+    assert.ok(layoutAt1440.scrollWidth > layoutAt1440.clientWidth, '模型卡片数量不足以触发横向滚动');
+    assert.ok(layoutAt1440.maximumScrollLeft > 0, '横向滚动条无法滚动');
+    assert.ok(layoutAt1440.focusedScrollLeft > 0, '卡片聚焦未触发横向滚动');
+    assert.equal(layoutAt1440.lastCardInsideViewport, true);
+
+    const visualOutputRoot = path.join(workspaceRoot, 'output', 'data-platform-visual');
+    await mkdir(visualOutputRoot, { recursive: true });
+    await launched.window.screenshot({
+      path: path.join(visualOutputRoot, '07-horizontal-resource-library.png'),
+    });
+
+    await launched.app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.setSize(1180, 720);
+    });
+    await launched.window.waitForTimeout(150);
+    const layoutAt1180 = await inspectResourceStrip(launched.window, true);
+    assert.ok(layoutAt1180.topSpread <= 1, '1180×720 下模型卡片发生换行');
+    assert.equal(layoutAt1180.cardsFullyVisible, true, '1180×720 下模型卡片未完整显示');
+    assert.ok(layoutAt1180.cardBottomGap >= 0 && layoutAt1180.cardBottomGap <= 12);
+    assert.ok(layoutAt1180.bottomWorkspaceHeight <= 330, '1180×720 下正常资源区仍然过高');
+    assert.ok(layoutAt1180.scenePanelHeight >= 180, '1180×720 下 Scene 区域高度不足');
+    assert.ok(layoutAt1180.scrollWidth > layoutAt1180.clientWidth);
+    assert.ok(layoutAt1180.maximumScrollLeft > 0);
+    assert.ok(layoutAt1180.focusedScrollLeft > 0);
+    assert.equal(layoutAt1180.lastCardInsideViewport, true);
+    assert.ok(layoutAt1180.scrollHeight <= layoutAt1180.clientHeight + 1);
+    assert.equal(layoutAt1180.attemptedScrollTop, 0);
+
     const beforeRetryFailureIndex = await readFile(path.join(storageRoot, '.babylon-editor', 'asset-index.json'), 'utf8');
     mock.failNextModelDownload();
     const noPackage = await openAndWaitForSync(launched.window, '2');
@@ -576,9 +699,42 @@ async function run() {
     assert.match(noPackage.finalProgress.error, /injected model download failure|HTTP 500/);
     const failedSyncStatus = launched.window.locator('.library-sync-status-failed');
     await failedSyncStatus.waitFor({ state: 'visible' });
+    const failureLayout = await inspectResourceStrip(launched.window);
+    assert.equal(failureLayout.cardsFullyVisible, true, '同步失败提示展开时模型卡片被裁切');
+    assert.ok(failureLayout.topSpread <= 1);
+    assert.ok(failureLayout.scrollHeight <= failureLayout.clientHeight + 1);
+    assert.ok(
+      failureLayout.bottomWorkspaceHeight >= layoutAt1180.bottomWorkspaceHeight + 50,
+      '同步失败提示出现后底部资源区未按内容增高',
+    );
+    assert.ok(failureLayout.bottomWorkspaceHeight <= 430, '同步失败状态底部资源区高度异常');
+    const failureStatusFit = await launched.window.evaluate(() => {
+      const panel = document.querySelector('.project-library')?.getBoundingClientRect();
+      const status = document.querySelector('.library-sync-status-failed')?.getBoundingClientRect();
+      const closeButton = document.querySelector('.library-sync-status-close-button')?.getBoundingClientRect();
+      return {
+        closeButtonInsidePanel: Boolean(
+          panel && closeButton && closeButton.left >= panel.left && closeButton.right <= panel.right
+            && closeButton.top >= panel.top && closeButton.bottom <= panel.bottom,
+        ),
+        statusInsidePanel: Boolean(
+          panel && status && status.left >= panel.left && status.right <= panel.right
+            && status.top >= panel.top && status.bottom <= panel.bottom,
+        ),
+        pageCanScrollY: document.documentElement.scrollHeight > document.documentElement.clientHeight,
+      };
+    });
+    assert.equal(failureStatusFit.statusInsidePanel, true, '同步失败提示超出 Project 面板');
+    assert.equal(failureStatusFit.closeButtonInsidePanel, true, '关闭按钮超出 Project 面板');
+    assert.equal(failureStatusFit.pageCanScrollY, false);
     await failedSyncStatus.getByRole('button', { name: '关闭同步失败提示' }).click();
     await failedSyncStatus.waitFor({ state: 'detached' });
     assert.equal(await launched.window.locator('.library-sync-status-failed').count(), 0);
+    const restoredCompactLayout = await inspectResourceStrip(launched.window);
+    assert.ok(
+      Math.abs(restoredCompactLayout.bottomWorkspaceHeight - layoutAt1180.bottomWorkspaceHeight) <= 1,
+      '同步提示关闭后底部资源区未恢复紧凑高度',
+    );
     assert.equal(await readFile(path.join(storageRoot, '.babylon-editor', 'asset-index.json'), 'utf8'), beforeRetryFailureIndex);
     const retried = await retryAndWaitForSync(launched.window);
     assert.equal(retried.finalProgress.phase, 'completed', retried.finalProgress.error ?? retried.finalProgress.message);
@@ -638,6 +794,12 @@ async function run() {
         'normal-environment-combo-sync',
         'optional-any-ts-script-download',
         'synced-model-cards-visible-first',
+        'single-row-horizontal-resource-library',
+        'compact-content-sized-resource-workspace',
+        '1180x720-complete-resource-cards',
+        'horizontal-card-focus-scroll',
+        'sync-status-auto-expand-and-collapse',
+        'sync-failure-layout-fit',
         'sync-failure-dismiss-button',
         'max-four-concurrent-downloads',
         'progress-phases',

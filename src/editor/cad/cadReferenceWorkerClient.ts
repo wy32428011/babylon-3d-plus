@@ -99,7 +99,7 @@ export function createCadReferenceDxfWorkerTask(
   };
   onProgress({
     percent: 18,
-    detail: 'CAD 文件较大，已切换后台解析（预算 ' + request.geometryBudget.maxPolylines + ' 条折线 / ' + request.geometryBudget.maxPoints + ' 个点）。',
+    detail: 'CAD 文件较大，已切换后台完整解析（安全上限 ' + request.geometryBudget.maxPolylines + ' 条折线 / ' + request.geometryBudget.maxPoints + ' 个点）。',
   });
   worker.postMessage(request);
 

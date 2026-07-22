@@ -97,6 +97,12 @@ export function EditorLayout() {
       }
 
       if (isCommandKey) {
+        if (key === 'z' && !event.shiftKey) {
+          event.preventDefault();
+          undo();
+          return;
+        }
+
         if (key === 'c') {
           event.preventDefault();
           copySelectedEntities();
@@ -168,6 +174,7 @@ export function EditorLayout() {
     pasteEntityClipboard,
     requestSceneFocusForSelection,
     setTransformTool,
+    undo,
     ungroupSelectedEntities,
     isRuntimePreview,
   ]);
