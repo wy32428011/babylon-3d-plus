@@ -572,8 +572,14 @@ export function ProjectPanel(props: ProjectPanelProps) {
           type="text"
           value={libraryFilterText}
         />
-        {supportsProjectModelImport && projectRoot ? (
-          <span className="library-project-root" title={projectRoot}>当前项目：{projectRoot}</span>
+        {supportsProjectModelImport ? (
+          modelFolderStatus ? (
+            <span className={`library-project-root library-status-${modelFolderStatus.kind}`} title={modelFolderStatus.message}>
+              {modelFolderStatus.message}
+            </span>
+          ) : projectRoot ? (
+            <span className="library-project-root" title={projectRoot}>当前项目：{projectRoot}</span>
+          ) : null
         ) : null}
         {supportsProjectModelImport ? (
           <button
@@ -666,9 +672,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
         </div>
       ) : null}
 
-      {supportsProjectModelImport && modelFolderStatus ? (
-        <p className={`library-status library-status-${modelFolderStatus.kind}`}>{modelFolderStatus.message}</p>
-      ) : null}
     </section>
   );
 }

@@ -1975,14 +1975,6 @@ select {
   white-space: nowrap;
 }
 
-.project-library .library-status {
-  margin: 0;
-  padding: 0 14px 8px;
-  color: #9fb7bb;
-  font-size: 12px;
-}
-
-
 .project-library .library-sync-status {
   display: grid;
   gap: 6px;
