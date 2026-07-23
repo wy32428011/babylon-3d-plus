@@ -88,6 +88,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const projectAssetsLoadRequestRef = useRef(0);
   const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
+  const [libraryFilterText, setLibraryFilterText] = useState('');
   const [projectAssets, setProjectAssets] = useState<ProjectModelAssetEntry[]>([]);
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
@@ -122,6 +123,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
     return activeLibrary.items;
   }, [activeLibrary, environmentAssets, modelAssets]);
+
+  const normalizedLibraryFilter = libraryFilterText.trim().toLowerCase();
+  const filteredItems = useMemo(() => {
+    if (!normalizedLibraryFilter) return activeItems;
+    return activeItems.filter((item) => item.name.toLowerCase().includes(normalizedLibraryFilter));
+  }, [activeItems, normalizedLibraryFilter]);
 
   const activeImportLibraryKey: ImportableProjectLibraryKey | null =
     activeLibrary.key === 'model' || activeLibrary.key === 'environment' ? activeLibrary.key : null;
@@ -217,6 +224,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
 
     setActiveLibraryKey('model');
+    setLibraryFilterText('');
     setFocusedAssetId(matchedAsset.id);
     pushLog(`库聚焦到模型卡片：${matchedAsset.displayName ?? matchedAsset.name}`);
     consumeProjectAssetFocusRequest(projectAssetFocusRequest.id);
@@ -234,7 +242,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [activeLibraryKey, focusedAssetId, activeItems]);
+  }, [activeLibraryKey, focusedAssetId, filteredItems]);
 
   function handleDismissDataPlatformModelSyncFailure(): void {
     if (modelSyncProgress?.phase !== 'failed') return;
@@ -540,7 +548,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
               aria-pressed={isActive}
               className={isActive ? 'library-tab active' : 'library-tab'}
               key={library.key}
-              onClick={() => setActiveLibraryKey(library.key)}
+              onClick={() => {
+                setActiveLibraryKey(library.key);
+                setLibraryFilterText('');
+              }}
               type="button"
             >
               {library.label}
@@ -549,18 +560,21 @@ export function ProjectPanel(props: ProjectPanelProps) {
         })}
       </nav>
 
-      <div className="library-filter-row" aria-label={`${activeLibrary.label}筛选占位`}>
+      <div className="library-filter-row" aria-label={`${activeLibrary.label}筛选`}>
         <label className="library-filter-label" htmlFor="project-library-search">
           {activeLibrary.searchLabel}
         </label>
         <input
           className="library-filter-input"
           id="project-library-search"
+          onChange={(event) => setLibraryFilterText(event.target.value)}
           placeholder={activeLibrary.searchPlaceholder}
-          readOnly
           type="text"
-          value=""
+          value={libraryFilterText}
         />
+        {supportsProjectModelImport && projectRoot ? (
+          <span className="library-project-root" title={projectRoot}>当前项目：{projectRoot}</span>
+        ) : null}
         {supportsProjectModelImport ? (
           <button
             className="library-import-button"
@@ -580,7 +594,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
         {activeLibrary.key === 'environment' && environmentAssets.length === 0 ? (
           <p className="library-empty-state">请先导入环境 GLB 文件</p>
         ) : null}
-        {activeItems.map((item) => {
+        {filteredItems.length === 0 && normalizedLibraryFilter ? (
+          <p className="library-empty-state">未找到名称匹配“{libraryFilterText.trim()}”的资源</p>
+        ) : null}
+        {filteredItems.map((item) => {
           const isBuiltInItem = isBuiltInProjectLibraryItem(item);
           const isBuiltInImage = isBuiltInImageProjectLibraryItem(item);
           const isImportedModel = isImportedProjectLibraryItem(item);
@@ -651,9 +668,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
       {supportsProjectModelImport && modelFolderStatus ? (
         <p className={`library-status library-status-${modelFolderStatus.kind}`}>{modelFolderStatus.message}</p>
-      ) : null}
-      {supportsProjectModelImport && projectRoot ? (
-        <p className="library-status library-status-info">当前项目：{projectRoot}</p>
       ) : null}
     </section>
   );

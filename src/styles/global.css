@@ -1801,6 +1801,16 @@ select {
   font-style: italic;
 }
 
+.project-library .library-project-root {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #9fb7bb;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .project-library .library-import-button {
   flex: 0 0 auto;
   height: 28px;
