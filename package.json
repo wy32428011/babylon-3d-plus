@@ -32,6 +32,7 @@
     "pack:win": "npm run build && electron-builder --win dir --x64",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs",
+    "smoke:installer:gpu": "npm run dist:win && npm run smoke:packaged:win",
     "smoke:data-platform": "node scripts/smoke-data-platform-project.mjs"
   },
   "engines": {
@@ -66,6 +67,8 @@
   "description": "面向工业场景搭建、模型参数化与 MQTT 运行预览的 Babylon.js 桌面编辑器。",
   "build": {
     "appId": "com.babylon3d.editor",
+    "electronDist": "node_modules/electron/dist",
+    "afterPack": "scripts/after-pack-clean-electron-dist.mjs",
     "copyright": "Copyright © 2026 ZENDING 3D EDITOR",
     "asar": true,
     "directories": {

@@ -487,6 +487,7 @@ npm run build
 
 ## 最近完成
 
+- 2026-07-23：Windows NSIS 安装包补齐 GPU/WebGL 安装态回归：`smoke-packaged-windows.mjs` 现在会进入生产 Scene View，检查实际 WebGL renderer、`powerPreference: high-performance` 与 `failIfMajorPerformanceCaveat: true`；新增 `npm run smoke:installer:gpu` 串联完整构建、NSIS 产物生成和安装包同源 EXE 验证；Windows 打包改为复用已安装的 Electron runtime，并在 `afterPack` 清理默认入口文件，避免端点安全软件导致解压目录重命名失败。
 - 2026-07-23：固化编辑器 GPU/WebGL 硬件加速契约：Electron 在 ready 前请求高性能 GPU，BrowserWindow 明确启用 WebGL；Scene View 使用 `powerPreference: high-performance`、`failIfMajorPerformanceCaveat: true` 并拒绝 SwiftShader/WARP/llvmpipe 等软件 renderer，初始化失败通过现有 Scene 错误遮罩呈现；新增 `npm run smoke:gpu` 验证 Electron GPU compositing、WebGL 状态、上下文属性和实际 renderer。独立 Web Viewer 兼容策略不变。
 - 2026-07-23：Shift+Gizmo 单轴阵列从普通导入模型扩展到全部可阵列实体：新增内置 Mesh、虚拟定位线框、已解锁 CAD 参考层和 POI 特效的世界/局部正负轴投影测量与不可拾取临时预览；POI 纯粒子效果使用半透明范围代理，不复制粒子系统。文件夹、灯光和全局唯一模型生成器继续排除。阵列名称统一改为按源对象名称末尾数字递增，例如 `测试 1001 → 测试 1002/1003`，纯字符串追加序号且不再添加“副本”；导入模型和定位线框的资产编号继续独立递增。确认、取消、生命周期清理、单条撤销/重做和场景持久化格式保持不变。
 - 2026-07-22：新增普通导入模型 Shift+Gizmo 单轴阵列：局部/世界 X/Y/Z 拖动按可见几何投影跨度生成零间距临时克隆，原模型保持原位，松开后共享阵列弹框可实时调整副本数量、净间距和编号规则；确认时名称与 `modelAsset.assetCode` 从源资产编号同步递增并原子检查冲突，整组副本以一条命令撤销/重做，取消、失焦、选择/模式/场景变化会清理预览且不修改场景格式。
@@ -621,7 +622,7 @@ Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，自动收集
 完整目录结构、配置字段、CSP、外部资源、安全边界和部署说明见 [场景 Web 部署导出](docs/scene-web-export.md)。
 ## Windows 安装包构建与安装
 
-项目使用 Electron + electron-builder 生成 Windows x64 NSIS 安装包。生产构建使用相对资源路径，因此安装后由 `file://` 加载 renderer 时，React 页面、Babylon.js 分块、CAD Worker、样式和图片仍可正常读取。
+项目使用 Electron + electron-builder 生成 Windows x64 NSIS 安装包。生产构建使用相对资源路径，因此安装后由 `file://` 加载 renderer 时，React 页面、Babylon.js 分块、CAD Worker、样式和图片仍可正常读取。GPU 启动开关和 Scene View 硬件 WebGL 校验位于打入 `app.asar` 的生产代码中，开发态、免安装目录和 NSIS 安装后的程序使用同一套硬件加速策略。
 
 ### 构建环境
 
@@ -629,6 +630,7 @@ Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，自动收集
 - Node.js `>= 22.12.0`
 - npm 10+
 - 首次构建执行 `npm install`
+- Windows 打包通过 electron-builder `electronDist` 复用 `node_modules/electron/dist`，避免端点安全软件锁住临时解压目录；`afterPack` 会移除运行时不需要的 Electron 默认入口文件。
 
 ### 构建命令
 
@@ -639,8 +641,11 @@ npm run pack:win
 # 生成 Windows NSIS 安装程序
 npm run dist:win
 
-# 验证免安装目录中的生产程序、React 根节点和 Electron preload API
+# 验证免安装目录中的生产程序、React 根节点、Electron preload API 和硬件 WebGL
 npm run smoke:packaged:win
+
+# 重新生成 NSIS 安装程序，并验证安装包同源生产 EXE 的 GPU/WebGL
+npm run smoke:installer:gpu
 ```
 
 安装包默认输出到：
@@ -671,6 +676,7 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 - `window.editorApi` preload 桥接存在；
 - 场景保存、模型文件夹导入和 MQTT 配置等关键 IPC 方法可调用；
 - 通过本地模拟数据中台打开项目并等待模型同步完成，确认安装态工作区位于本次临时 `userData/data-platform-workspace`，不会写入程序目录；
+- 进入 Scene View，确认生产 EXE 创建 WebGL 上下文、请求 `high-performance` GPU、设置 `failIfMajorPerformanceCaveat=true`，并拒绝 SwiftShader/WARP/llvmpipe 等软件 renderer；
 - 验证结束后只关闭本次启动的进程树，并清理临时用户数据目录。
 
 当前安装包未配置商业代码签名证书。首次运行时 Windows SmartScreen 可能显示“未知发布者”，这不影响本地功能；正式对外分发时应使用受信任的 Windows 代码签名证书签署安装程序和主程序。

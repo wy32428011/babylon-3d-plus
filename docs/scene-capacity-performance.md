@@ -77,9 +77,12 @@ Engine 保留 antialias 和 stencil，同时把没有项目功能依赖的 `pres
 npm run smoke:scene-capacity
 npm run smoke:shelf-instancing
 npm run smoke:gpu
+npm run smoke:installer:gpu
 ```
 
 `smoke:gpu` 会先执行完整构建，再真实启动 Electron 验证硬件 GPU、GPU compositing、WebGL 2、上下文性能属性和 renderer，并使用 `--disable-gpu` 反向确认 Scene View 会阻断软件回退。
+
+`smoke:installer:gpu` 会重新生成 Windows NSIS 安装程序，并启动该安装包同源的 `win-unpacked` 生产 EXE，确认打入 `app.asar` 的安装态代码仍使用硬件 WebGL；验证过程使用独立临时 `userData`，不会写入安装目录。
 
 `smoke:scene-capacity` 覆盖：
 

@@ -165,7 +165,7 @@ function inspectRenderer(webSocketDebuggerUrl, dataPlatformBaseUrl) {
     const timeout = setTimeout(() => {
       socket.close();
       reject(new Error('读取 Electron renderer 状态超时。'));
-    }, 30000);
+    }, 45000);
 
     socket.addEventListener('open', () => {
       socket.send(JSON.stringify({
@@ -205,7 +205,16 @@ function inspectRenderer(webSocketDebuggerUrl, dataPlatformBaseUrl) {
                 dataPlatformModelSyncCompleted: false,
                 dataPlatformModelSyncError: null,
                 ipcRoundTripAvailable: false,
-                ipcError: null
+                ipcError: null,
+                hardwareWebGlAvailable: false,
+                webGlContextType: null,
+                webGlVersion: null,
+                webGlVendor: null,
+                webGlRenderer: null,
+                webGlPowerPreference: null,
+                webGlFailIfMajorPerformanceCaveat: null,
+                webGlSoftwareRenderer: null,
+                webGlError: null
               };
               if (result.readyState === 'complete' && result.rootChildCount > 0 && result.editorApiAvailable) {
                 try {
@@ -259,6 +268,61 @@ function inspectRenderer(webSocketDebuggerUrl, dataPlatformBaseUrl) {
                   }
                 } catch (error) {
                   result.ipcError = error instanceof Error ? error.message : String(error);
+                }
+
+                try {
+                  const enterEditorButton = Array.from(document.querySelectorAll('button'))
+                    .find((button) => button.textContent?.includes('进入空白编辑器'));
+                  if (!enterEditorButton) throw new Error('未找到进入空白编辑器按钮');
+                  enterEditorButton.click();
+
+                  const viewportDeadline = Date.now() + 10000;
+                  let canvas = null;
+                  while (Date.now() < viewportDeadline) {
+                    const sceneError = document.querySelector('.scene-error');
+                    if (sceneError) throw new Error(sceneError.textContent?.trim() || 'Scene View 初始化失败');
+                    const candidateCanvas = document.querySelector('canvas.scene-canvas');
+                    const drawingBufferReady = candidateCanvas
+                      && candidateCanvas.width > 0
+                      && candidateCanvas.height > 0
+                      && (candidateCanvas.width !== 300 || candidateCanvas.height !== 150);
+                    if (drawingBufferReady) {
+                      canvas = candidateCanvas;
+                      await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+                      const initializedError = document.querySelector('.scene-error');
+                      if (initializedError) throw new Error(initializedError.textContent?.trim() || 'Scene View 初始化失败');
+                      break;
+                    }
+                    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+                  }
+                  if (!canvas) throw new Error('等待安装态 Scene View canvas 超时');
+
+                  const gl = canvas.getContext('webgl2') ?? canvas.getContext('webgl');
+                  if (!gl) throw new Error('安装态 Scene View 未创建 WebGL 上下文');
+                  const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                  const renderer = debugInfo
+                    ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)
+                    : gl.getParameter(gl.RENDERER);
+                  const vendor = debugInfo
+                    ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL)
+                    : gl.getParameter(gl.VENDOR);
+                  const contextAttributes = gl.getContextAttributes();
+                  const softwareRenderer =
+                    /swiftshader|llvmpipe|lavapipe|softpipe|software (?:adapter|rasterizer|renderer)|microsoft basic render driver|(?:direct3d|d3d)\\s*warp/i
+                      .test(String(renderer ?? ''));
+
+                  result.hardwareWebGlAvailable = !softwareRenderer;
+                  result.webGlContextType = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext
+                    ? 'webgl2'
+                    : 'webgl';
+                  result.webGlVersion = gl.getParameter(gl.VERSION);
+                  result.webGlVendor = vendor;
+                  result.webGlRenderer = renderer;
+                  result.webGlPowerPreference = contextAttributes?.powerPreference ?? null;
+                  result.webGlFailIfMajorPerformanceCaveat = contextAttributes?.failIfMajorPerformanceCaveat ?? null;
+                  result.webGlSoftwareRenderer = softwareRenderer;
+                } catch (error) {
+                  result.webGlError = error instanceof Error ? error.message : String(error);
                 }
                 resolve(result);
               } else if (Date.now() >= deadline) {
@@ -323,7 +387,7 @@ function terminateProcessTree(processId) {
   });
 }
 
-/** 启动已打包程序并验证生产 renderer 与关键桌面 API。 */
+/** 启动已打包程序并验证生产 renderer、关键桌面 API 与硬件加速 WebGL。 */
 async function runPackagedSmoke() {
   if (!existsSync(executablePath)) {
     throw new Error(`未找到待验证程序：${executablePath}`);
@@ -380,7 +444,16 @@ async function runPackagedSmoke() {
       && existsSync(path.join(expectedDataPlatformRoot, '.babylon-editor', 'asset-index.json'))
       && existsSync(path.join(expectedDataPlatformRoot, 'Assets', 'Models'))
       && existsSync(path.join(expectedDataPlatformRoot, 'Assets', 'Environments'))
-      && renderer.ipcRoundTripAvailable;
+      && renderer.ipcRoundTripAvailable
+      && renderer.hardwareWebGlAvailable
+      && renderer.webGlPowerPreference === 'high-performance'
+      && renderer.webGlFailIfMajorPerformanceCaveat === true
+      && renderer.webGlSoftwareRenderer === false
+      && typeof renderer.webGlVersion === 'string'
+      && renderer.webGlVersion.includes('WebGL')
+      && typeof renderer.webGlRenderer === 'string'
+      && renderer.webGlRenderer.length > 0
+      && renderer.webGlError === null;
 
     if (!valid) {
       throw new Error(`安装态功能桥接未完整就绪：${JSON.stringify(renderer)}`);
