@@ -37,6 +37,7 @@ import {
 } from './dataPlatformTransfer.js';
 
 const PROJECT_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+const DATA_PLATFORM_WORKSPACE_DIRECTORY = 'data-platform-workspace';
 const TEST_STORAGE_ROOT_ENV = 'ZENDING_EDITOR_STORAGE_ROOT';
 const TEST_STORAGE_OVERRIDE_GUARD_ENV = 'ZENDING_ALLOW_STORAGE_ROOT_OVERRIDE';
 const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
@@ -61,12 +62,14 @@ type PromotionItem = {
   stagedMoved: boolean;
 };
 
-/** 返回数据中台项目固定使用的编辑器数据根目录。 */
+/** 返回数据中台项目工作区；安装态与只读程序目录分离，开发态保持仓库根目录行为。 */
 export function getDataPlatformEditorRoot(): string {
   const override = process.env[TEST_STORAGE_ROOT_ENV]?.trim();
   const overrideEnabled = process.env[TEST_STORAGE_OVERRIDE_GUARD_ENV] === '1';
   if (override && overrideEnabled) return path.resolve(override);
-  return app.isPackaged ? path.dirname(app.getPath('exe')) : app.getAppPath();
+  return app.isPackaged
+    ? path.join(app.getPath('userData'), DATA_PLATFORM_WORKSPACE_DIRECTORY)
+    : app.getAppPath();
 }
 
 /** 从可信项目缓存打开工程，renderer 只允许提交项目 ID。 */
@@ -120,7 +123,7 @@ async function openDataPlatformProjectInternal(
   signal: AbortSignal,
 ): Promise<DataPlatformProjectOpenResult> {
   const editorRoot = getDataPlatformEditorRoot();
-  await assertWritableEditorRoot(editorRoot);
+  await ensureWritableEditorRoot(editorRoot);
   await ensureProjectDirectories(editorRoot);
 
   let source: DataPlatformProjectOpenResult['source'] = 'generated';
@@ -193,15 +196,18 @@ async function openDataPlatformProjectInternal(
   };
 }
 
-async function assertWritableEditorRoot(editorRoot: string): Promise<void> {
+async function ensureWritableEditorRoot(editorRoot: string): Promise<void> {
   let stat;
   try {
+    await fs.mkdir(editorRoot, { recursive: true }).catch((error) => {
+      if (!isNodeError(error) || error.code !== 'EEXIST') throw error;
+    });
     stat = await fs.stat(editorRoot);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`编辑器数据目录不可用：${editorRoot}（${message}）`);
+    throw new Error(`数据中台工作目录无法创建或访问：${editorRoot}（${message}）`);
   }
-  if (!stat.isDirectory()) throw new Error(`编辑器数据根路径不是目录：${editorRoot}`);
+  if (!stat.isDirectory()) throw new Error(`数据中台工作路径不是目录：${editorRoot}`);
 
   const probePath = path.join(editorRoot, `.zending-write-probe-${randomUUID()}`);
   assertPathInside(editorRoot, probePath, '写权限探测路径');
@@ -212,7 +218,7 @@ async function assertWritableEditorRoot(editorRoot: string): Promise<void> {
     await handle.sync();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`当前编辑器所在目录不可写：${editorRoot}。请调整安装目录权限后重试。（${message}）`);
+    throw new Error(`数据中台工作目录不可写：${editorRoot}。请检查当前用户对该目录的读写权限后重试。（${message}）`);
   } finally {
     if (handle) await handle.close().catch(() => undefined);
     await fs.rm(probePath, { force: true }).catch(() => undefined);
