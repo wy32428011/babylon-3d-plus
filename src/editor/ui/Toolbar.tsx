@@ -404,6 +404,7 @@ export function Toolbar(props: ToolbarProps) {
         <BrandLogo className="toolbar-brand-logo" surface="dark" />
         <span className="toolbar-product-name">3D EDITOR</span>
       </strong>
+      <div className="toolbar-scroll">
       <ToolbarIconButton
         active={props.transformTool === 'translate'}
         disabled={props.readOnly}
@@ -579,6 +580,7 @@ export function Toolbar(props: ToolbarProps) {
           percent={deploymentExportProgress.percent}
         />
       ) : null}
+      </div>
       {props.mqttConfigDialogOpen ? (
         <div
           className="mqtt-config-dialog-backdrop"

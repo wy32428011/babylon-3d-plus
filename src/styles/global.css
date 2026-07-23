@@ -123,12 +123,21 @@ select {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
   padding: 0 12px;
   border-bottom: 1px solid #111;
   background: #2d2d30;
   white-space: nowrap;
+}
+
+/* 按钮滚动区：logo 固定在区外，横向滚轴只覆盖按钮区域。 */
+.toolbar-scroll {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .toolbar button,
@@ -162,19 +171,11 @@ select {
 }
 
 .toolbar-title {
-  position: sticky;
-  left: 0;
-  z-index: 1;
   display: inline-flex;
   align-items: flex-end;
-  align-self: stretch;
   flex: 0 0 auto;
   gap: 8px;
-  /* 负 margin + 等值内边距：让底色覆盖工具栏 12px 左 padding 区，钉住时滑过的按钮不会从左侧露出 */
-  margin: 0 4px 0 -12px;
-  padding: 0 8px 0 12px;
-  /* 钉住时需要不透明底色遮住从下方滑过的按钮，与工具栏底色一致 */
-  background: #2d2d30;
+  margin-right: 4px;
 }
 
 .toolbar-brand-logo {
