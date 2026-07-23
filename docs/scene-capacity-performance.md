@@ -2,6 +2,8 @@
 
 日期：2026-07-17
 
+更新：2026-07-23
+
 ## 目标
 
 本轮优化只减少重复工作和资源峰值，不通过降低画质换取性能。以下视觉项保持不变：
@@ -10,6 +12,17 @@
 - stencil、GlowLayer、HighlightLayer、SelectionOutlineLayer 保留；
 - 模型纹理、PBR 材质、几何精度和相机可视距离不做自动降级；
 - 场景 JSON、模型包 `meta.json` 和米制单位契约不变。
+
+## 硬件加速 WebGL 前置条件
+
+Electron 主进程会在 `app ready` 前请求高性能 GPU，主窗口明确开启 WebGL。编辑器 Scene View 创建 Babylon Engine 时使用 `powerPreference: high-performance` 与 `failIfMajorPerformanceCaveat: true`，并检查实际 renderer：
+
+- Intel / NVIDIA / AMD 等 ANGLE 硬件后端正常进入编辑器；
+- SwiftShader、WARP、llvmpipe 等软件 renderer 会被拒绝，不再静默占用 CPU 模拟 WebGL；
+- 硬件 WebGL 不可用时，Scene View 显示可读初始化错误，首页及项目管理仍可使用；
+- 导出的独立 Web Viewer 保持既有兼容策略，不强制拒绝软件回退。
+
+该策略不绕过 Chromium GPU 驱动黑名单；命中黑名单时应更新显卡驱动或调整系统图形首选项，而不是强制运行不稳定驱动。
 
 ## 静态同源模型共享
 
@@ -63,9 +76,10 @@ Engine 保留 antialias 和 stencil，同时把没有项目功能依赖的 `pres
 ```powershell
 npm run smoke:scene-capacity
 npm run smoke:shelf-instancing
-npm run typecheck
-npm run build
+npm run smoke:gpu
 ```
+
+`smoke:gpu` 会先执行完整构建，再真实启动 Electron 验证硬件 GPU、GPU compositing、WebGL 2、上下文性能属性和 renderer，并使用 `--disable-gpu` 反向确认 Scene View 会阻断软件回退。
 
 `smoke:scene-capacity` 覆盖：
 

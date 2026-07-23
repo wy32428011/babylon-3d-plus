@@ -410,7 +410,9 @@ export function SceneViewPanel() {
     setViewportError(null);
 
     try {
-      viewport = createBabylonViewport(canvasRef.current, handleRuntimeStatus);
+      viewport = createBabylonViewport(canvasRef.current, handleRuntimeStatus, {
+        requireHardwareAcceleration: true,
+      });
       runtime = new SceneRuntime(viewport.scene, pushLog, (entityId) => {
         const currentRuntime = runtimeRef.current;
         if (!currentRuntime || selectedEntityIdRef.current !== entityId) return;

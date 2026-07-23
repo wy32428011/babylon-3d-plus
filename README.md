@@ -17,6 +17,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - Electron 桌面窗口：通过 Electron 主进程启动独立桌面应用窗口。
 - 首页启动台：进入五面板编辑器前会先显示首页；左侧“最近项目”通过 Electron 主进程从可配置的数据中台 `POST /api/v1/projects/query` 拉取业务项目列表，支持按项目名称进行服务端搜索，并可直接打开当前格式 Editor 工程；右侧继续显示本地最近场景，并保留新建场景、打开项目目录和打开场景文件等入口。本地最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
+- GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU，主窗口明确启用 WebGL；编辑器 Scene View 使用 `high-performance` 上下文并拒绝 SwiftShader、WARP 等软件 renderer，避免静默退回 CPU 模拟渲染。
 - Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部，中间列独立承载 Scene、Project 与 Console；Project/Console 只与 Scene 画布同宽，在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到 Project 区域最小化入口，点击后以弹窗查看完整日志，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
 - Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑；左键拖拽旋转或移动视角时以真实相机输入和位姿变化优先，即使从模型表面开始轻微拖拽也不会触发模型拾取，纯单击仍正常选中模型；Toolbar 新增“俯”视角按钮，可保留当前观察中心与缩放距离切换为稳定俯视视角，方便依据地面 CAD 图纸定位并搭建场景。
 - 大场景无损容量优化：不降低抗锯齿、纹理、材质、光照或几何质量；同一 `sourceUrl + assetRevision` 的普通静态模型会复用单份源 `AssetContainer`，每个实体继续保留独立 Transform、显隐、锁定、拾取和选择语义。带外置脚本、参数配置或脚本元数据的动态模型默认继续独占容器，Shelf 保留经过验证的脚本化共享特例。模型与环境加载统一限制为最多 4 个并发任务，SceneRuntime 只完整同步真正变化的实体；WebGL 上下文丢失或渲染循环异常会显示可读遮罩，Babylon 完成恢复后自动清除。详见 `docs/scene-capacity-performance.md`。
@@ -65,7 +66,7 @@ npm run dev:electron
 
 运行环境要求：Node.js `>=22.12.0`。
 
-若 Electron 窗口只显示标题栏或菜单栏，优先查看启动终端中的 `[electron]` 日志；渲染入口异常会显示“编辑器启动失败”，WebGL/Babylon 初始化异常会显示在 Scene 面板内，不再静默白屏。
+若 Electron 窗口只显示标题栏或菜单栏，优先查看启动终端中的 `[electron]` 日志；渲染入口异常会显示“编辑器启动失败”，WebGL/Babylon 初始化异常会显示在 Scene 面板内，不再静默白屏。若提示“硬件加速 WebGL 创建失败”，请先更新显卡驱动，并在 Windows“图形设置”中将 `ZENDING 3D EDITOR` 设为“高性能”；编辑器不会退回 SwiftShader/WARP 软件渲染。
 
 开发脚本会自动从 `5173` 开始向后选择可用本地端口，最多扫描 300 个端口以避开 Windows 保留端口段或已有本地服务，并先执行 `npm run wait:renderer`，依次预热 Vite 根页面、React 入口、布局、Scene View、Babylon runtime 与编辑器 store 等首屏模块，全部成功返回后再启动 Electron，避免端口占用或 Vite 首次依赖预构建、模块转换尚未完成时打开空窗口。
 
@@ -486,6 +487,7 @@ npm run build
 
 ## 最近完成
 
+- 2026-07-23：固化编辑器 GPU/WebGL 硬件加速契约：Electron 在 ready 前请求高性能 GPU，BrowserWindow 明确启用 WebGL；Scene View 使用 `powerPreference: high-performance`、`failIfMajorPerformanceCaveat: true` 并拒绝 SwiftShader/WARP/llvmpipe 等软件 renderer，初始化失败通过现有 Scene 错误遮罩呈现；新增 `npm run smoke:gpu` 验证 Electron GPU compositing、WebGL 状态、上下文属性和实际 renderer。独立 Web Viewer 兼容策略不变。
 - 2026-07-23：Shift+Gizmo 单轴阵列从普通导入模型扩展到全部可阵列实体：新增内置 Mesh、虚拟定位线框、已解锁 CAD 参考层和 POI 特效的世界/局部正负轴投影测量与不可拾取临时预览；POI 纯粒子效果使用半透明范围代理，不复制粒子系统。文件夹、灯光和全局唯一模型生成器继续排除。阵列名称统一改为按源对象名称末尾数字递增，例如 `测试 1001 → 测试 1002/1003`，纯字符串追加序号且不再添加“副本”；导入模型和定位线框的资产编号继续独立递增。确认、取消、生命周期清理、单条撤销/重做和场景持久化格式保持不变。
 - 2026-07-22：新增普通导入模型 Shift+Gizmo 单轴阵列：局部/世界 X/Y/Z 拖动按可见几何投影跨度生成零间距临时克隆，原模型保持原位，松开后共享阵列弹框可实时调整副本数量、净间距和编号规则；确认时名称与 `modelAsset.assetCode` 从源资产编号同步递增并原子检查冲突，整组副本以一条命令撤销/重做，取消、失焦、选择/模式/场景变化会清理预览且不修改场景格式。
 - 2026-07-22：首页启动台新增数据中台地址配置弹窗，配置持久化到 Electron `userData/data-platform-config.json`；左侧“最近项目”由主进程通过 `POST /api/v1/projects/query` 拉取、校验并按更新时间展示业务项目，支持 `projectName` 搜索，并新增可信项目 ID 打开流程。当前格式工程包会安全下载、展开并加载唯一场景；无包、旧 `project.bjseditor` 或结构不兼容时进入空白场景；进入编辑器后后台全量同步普通、环境和组合模型。已使用 `http://127.0.0.1:8086` 完成真实联调：19 位业务 ID 无损保留，10 个普通模型共 25 个文件同步成功，Shelf 双 TS 脚本不再被旧换行拼接字段重复下载。

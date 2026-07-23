@@ -5054,16 +5054,21 @@ export class SceneRuntime {
     if (this.entityArrayPreview?.sourceEntityId === entityId) this.clearEntityArrayPreview();
   }
 
-  /** 清理临时阵列克隆的实体 metadata 与拾取能力，避免它们进入编辑器交互链路。 */
+  /** 清理临时阵列克隆的交互状态，并恢复共享矩阵实例的公开缓冲容器。 */
   private prepareEntityArrayPreviewClone(root: TransformNode): void {
     const nodes: Node[] = [root, ...root.getDescendants(false)];
+    const previewMeshes: AbstractMesh[] = [];
     for (const node of nodes) {
       node.metadata = null;
       if (node instanceof AbstractMesh) {
+        previewMeshes.push(node);
         node.isPickable = false;
         node.actionManager = null;
       }
     }
+
+    // 递归 clone 不会继承 InstancedMesh.instancedBuffers；源 Mesh 已注册选择缓冲时必须在首帧前补齐。
+    repairInstancedMeshBufferContainers(previewMeshes);
   }
 
   /** 释放实体对应的 Mesh 与材质资源。 */

@@ -279,13 +279,16 @@ function createSceneRuntimeDocument(entities, selectedEntityId = null) {
   };
 }
 
-/** 等待 SceneRuntime 为实体创建可渲染 Mesh；真实脚本 smoke 不依赖测量状态作为加载信号。 */
-async function waitForSceneRuntimeEntityMeshes(scene, entityId) {
+/** 等待真实 Shelf 脚本完成，并返回实体当前启用的可渲染 Mesh。 */
+async function waitForSceneRuntimeEntityMeshes(scene, runtime, entityId) {
   for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const meshes = scene.meshes.filter((mesh) => (
-      mesh.metadata?.editorEntityId === entityId && !mesh.isDisposed() && mesh.getTotalVertices() > 0
+      mesh.metadata?.editorEntityId === entityId
+      && !mesh.isDisposed()
+      && mesh.isEnabled(false)
+      && mesh.getTotalVertices() > 0
     ));
-    if (meshes.length > 0) return meshes;
+    if (runtime.getModelMeasurement(entityId).status === 'ready' && meshes.length > 0) return meshes;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.fail(`${entityId} SceneRuntime 加载可渲染 Mesh 超时`);
@@ -386,7 +389,7 @@ function runSelectionBufferMatrixStress({
 }
 
 /** 通过真实 SceneRuntime.sync 验证共享加载、选择、锁定和删除生命周期。 */
-async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes }) {
+async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, metadata, values }) {
   const integrationEngine = new NullEngine();
   const integrationScene = new Scene(integrationEngine);
   const originalLoadAssetContainerAsync = SceneLoader.LoadAssetContainerAsync;
@@ -410,22 +413,33 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes }) {
     return container;
   };
 
+  const camera = new FreeCamera('SceneRuntimeShelfArrayCamera', new Vector3(0, 5, -20), integrationScene);
+  camera.setTarget(Vector3.Zero());
+  integrationScene.activeCamera = camera;
   const runtime = new SceneRuntime(integrationScene);
   try {
     const modelAsset = {
       sourcePath: GLB_PATH,
       sourceUrl: 'smoke://Assets/Models/Shelf/Shelf.glb',
-      assetRevision: 'scene-runtime-integration',
       assetCode: 'SHELF',
       lengthUnit: 'millimeter',
       unitScaleToMeters: 0.001,
+      scriptAssets: [{
+        path: SCRIPT_PATH,
+        sourceUrl: `data:text/plain;charset=utf-8,${encodeURIComponent(scriptText)}`,
+        name: 'shelf.model.ts',
+      }],
+      parameterScriptMetadata: metadata.parameterScripts ?? [],
+      animationScriptMetadata: metadata.animationScripts ?? [],
+      parameterConfig: metadata.modelParameters,
+      parameterValues: { ...values },
     };
     const left = createSceneRuntimeShelfEntity('RUNTIME-SHELF-LEFT', 0, modelAsset);
     const right = createSceneRuntimeShelfEntity('RUNTIME-SHELF-RIGHT', 10, modelAsset);
     runtime.sync(createSceneRuntimeDocument([left, right], left.id));
     const [leftMeshes, rightMeshes] = await Promise.all([
-      waitForSceneRuntimeEntityMeshes(integrationScene, left.id),
-      waitForSceneRuntimeEntityMeshes(integrationScene, right.id),
+      waitForSceneRuntimeEntityMeshes(integrationScene, runtime, left.id),
+      waitForSceneRuntimeEntityMeshes(integrationScene, runtime, right.id),
     ]);
 
     assert.equal(loadCount, 1, 'SceneRuntime 两个 Shelf 必须只加载一次源容器');
@@ -433,6 +447,36 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes }) {
     assert.ok(rightMeshes.length > 0 && rightMeshes.every((mesh) => mesh.isAnInstance), 'SceneRuntime 右 Shelf 必须使用实例 Mesh');
     assertInstancedMeshesHaveSelectionId(leftMeshes, 'SceneRuntime 选中 Shelf 的 InstancedMesh 必须具有实例选择 ID');
     assert.ok(rightMeshes.every((mesh) => Number(mesh.instancedBuffers?.instanceSelectionId ?? 0) === 0), 'SceneRuntime 未选 Shelf 不得继承选择 ID');
+
+    assert.equal(
+      runtime.updateEntityArrayPreview(left.id, { x: 1, y: 0, z: 0 }, 3, 0.2),
+      true,
+      '已选中 Shelf 必须能够创建阵列预览',
+    );
+    const previewClones = [...(runtime.entityArrayPreview?.clones ?? [])];
+    const previewMeshes = previewClones.flatMap((clone) => (
+      clone.getChildMeshes(false).filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0)
+    ));
+    assert.equal(previewClones.length, 3, 'Shelf 阵列预览必须创建请求数量的临时克隆');
+    assert.ok(previewMeshes.length > 0 && previewMeshes.some((mesh) => mesh.isAnInstance), 'Shelf 阵列预览必须保留矩阵实例渲染');
+    assert.deepEqual(
+      previewMeshes
+        .filter((mesh) => mesh.isAnInstance && mesh.sourceMesh?.instancedBuffers && !mesh.instancedBuffers)
+        .map(describeMeshSelectionState),
+      [],
+      '已选中 Shelf 的阵列预览实例必须补齐实例选择缓冲容器',
+    );
+    assert.doesNotThrow(() => integrationScene.render(), '已选中 Shelf 创建阵列预览后不得因 instanceSelectionId 空引用中断渲染');
+
+    assert.equal(
+      runtime.updateEntityArrayPreview(left.id, { x: -1, y: 0, z: 0 }, 1, 0.5),
+      true,
+      '更新 Shelf 阵列方向、数量和间距必须复用预览池',
+    );
+    assert.equal(runtime.entityArrayPreview?.clones.length, 1, '减少 Shelf 阵列数量必须回收多余预览克隆');
+    assert.doesNotThrow(() => integrationScene.render(), '更新 Shelf 阵列预览后仍必须保持可渲染');
+    runtime.clearEntityArrayPreview();
+    assert.equal(runtime.entityArrayPreview, null, '取消 Shelf 阵列预览必须释放临时克隆');
 
     const lockedRight = createSceneRuntimeShelfEntity(right.id, 10, modelAsset, { locked: true });
     runtime.sync(createSceneRuntimeDocument([left, lockedRight], left.id));
@@ -446,7 +490,12 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes }) {
     runtime.sync(createSceneRuntimeDocument([]));
     assert.ok(rightMeshes.every((mesh) => mesh.isDisposed()), '删除最后一个 Shelf 必须释放其全部实例');
     assert.equal(sourceDisposeCount, 1, '删除最后一个 SceneRuntime Shelf 必须释放共享源一次');
-    return { loadCount, sourceDisposeCount, meshesPerShelf: leftMeshes.length };
+    return {
+      loadCount,
+      sourceDisposeCount,
+      meshesPerShelf: leftMeshes.length,
+      arrayPreviewMeshes: previewMeshes.length,
+    };
   } finally {
     runtime.dispose();
     SceneLoader.LoadAssetContainerAsync = originalLoadAssetContainerAsync;
@@ -702,7 +751,13 @@ try {
   cache.dispose();
   assert.equal(sourceDisposeCount, 1, '缓存重复释放不得重复销毁共享源容器');
 
-  const sceneRuntime = await withStageTimeout('SceneRuntime 集成验证', () => runSceneRuntimeIntegration({ SceneRuntime, glbBytes }));
+  const sceneRuntime = await withStageTimeout('SceneRuntime 集成验证', () => runSceneRuntimeIntegration({
+    SceneRuntime,
+    glbBytes,
+    scriptText,
+    metadata,
+    values,
+  }));
   console.log(JSON.stringify({
     loadCount,
     sourceDisposeCount,

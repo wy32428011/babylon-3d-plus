@@ -14,7 +14,11 @@ import { registerProjectIpc } from './ipc/projectIpc.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const HIGH_PERFORMANCE_GPU_SWITCH = 'force_high_performance_gpu';
 const FAILURE_PAGE_BACKGROUND = '#1e1e1e';
+
+// 必须在 app ready 前请求高性能 GPU；驱动黑名单仍由 Chromium 保留，避免强行启用不稳定驱动。
+app.commandLine.appendSwitch(HIGH_PERFORMANCE_GPU_SWITCH);
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -143,6 +147,7 @@ function createMainWindow(): void {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      webgl: true,
     },
   });
 
