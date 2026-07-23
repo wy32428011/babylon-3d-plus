@@ -132,6 +132,7 @@ import {
   repairInstancedMeshBufferContainers,
 } from './instancedSelectionBuffers';
 import { ModelGeneratorFetchRuntime } from './ModelGeneratorFetchRuntime';
+import { EntityArrayThinInstanceBatch } from './EntityArrayThinInstanceBatch';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
 const SELECTED_EMISSIVE_COLOR = '#332400';
@@ -197,7 +198,7 @@ type LoadedModelRuntimeAssets =
   };
 
 type EntityArrayPreviewKind = 'mesh' | 'locator' | 'cad-reference' | 'model' | 'poi';
-type EntityArrayPreviewStrategy = 'clone-hierarchy' | 'poi-static';
+type EntityArrayPreviewStrategy = 'clone-hierarchy' | 'matrix-instances' | 'poi-static';
 
 type EntityArrayPreviewSource = {
   kind: EntityArrayPreviewKind;
@@ -206,13 +207,19 @@ type EntityArrayPreviewSource = {
   previewMeshes: readonly AbstractMesh[];
   geometryReady: boolean;
   strategy: EntityArrayPreviewStrategy;
+  /** 阵列副本预览需把源几何根局部矩阵组合到当前逻辑实体 Transform。 */
+  modelArraySourceRoot?: TransformNode;
+  modelArrayBaseTransform?: TransformComponent;
 };
 
 type EntityArrayPreviewEntry = {
   sourceEntityId: string;
   sourceRoot: TransformNode;
   sourceKind: EntityArrayPreviewKind;
+  sourceStrategy: EntityArrayPreviewStrategy;
+  activeStrategy: EntityArrayPreviewStrategy;
   clones: TransformNode[];
+  matrixPreview: EntityArrayThinInstanceBatch | null;
   poiBoundsMaterial: StandardMaterial | null;
   placementSignature: string;
 };
@@ -221,6 +228,7 @@ type ModelRuntimeEntry = {
   sourceUrl: string;
   assetRevision: string | null;
   assetSignature: string;
+  entitySnapshot: Entity | null;
   assetCode: string;
   telemetryBinding: TelemetryBindingComponent | null;
   stackerCapable: boolean;
@@ -229,9 +237,13 @@ type ModelRuntimeEntry = {
   contentRoot: TransformNode;
   assetHandle: ModelRuntimeAssetHandle | null;
   meshes: AbstractMesh[];
+  modelArrayBatch: EntityArrayThinInstanceBatch | null;
+  modelArraySourceSignature: string;
+  modelArrayFailureSignature: string;
   highlighted: boolean;
   highlightedMeshes: Set<Mesh>;
   loadToken: number;
+  cancelLoad: (() => void) | null;
   parameterSignature: string;
   parameterBaseline: Map<string, ModelParameterBaselineValue>;
   textureCache: Map<string, Texture>;
@@ -243,6 +255,17 @@ type ModelRuntimeEntry = {
   conveyorTelemetry: ConveyorModelTelemetryState;
   stackerTelemetryReady: boolean;
   telemetryPreviewBaseline: ModelTelemetryPreviewBaseline | null;
+};
+
+/** 同一源模型下，一个独立参数组合只保留一个隐藏脚本宿主和一个 thinInstance 批次。 */
+type ModelArrayParameterVariantRuntimeEntry = {
+  key: string;
+  sourceEntityId: string;
+  renderSignature: string;
+  representativeEntityId: string;
+  entities: Entity[];
+  sourceLayerMasks: Map<number, number>;
+  model: ModelRuntimeEntry;
 };
 
 type SpecializedTelemetryRuntimeEntry = {
@@ -496,6 +519,16 @@ export class SceneRuntime {
   private readonly locatorDeviceIndex = new Map<string, Map<number, LocatorRuntimeEntry[]>>();
   private readonly cadReferences = new Map<string, CadReferenceRuntimeEntry>();
   private readonly models = new Map<string, ModelRuntimeEntry>();
+  /** 阵列副本保留完整 Scene Entity；相同参数组合共享一个脚本宿主，而不是逐实体加载模型。 */
+  private readonly modelArrayInstanceEntities = new Map<string, Entity>();
+  private readonly modelArrayParameterVariants = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
+  private readonly modelArrayParameterVariantByEntityId = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
+  private readonly modelArrayJsonSignatureCache = new WeakMap<object, string>();
+  private readonly modelArrayTransientJsonSignatureCache = new WeakMap<object, string>();
+  private readonly modelArrayCanonicalSignatureIds = new Map<string, number>();
+  private modelArrayCanonicalSignatureSequence = 0;
+  private readonly modelArrayBatchByMeshUniqueId = new Map<number, EntityArrayThinInstanceBatch>();
+  private modelArrayGizmoProxy: { entityId: string; node: TransformNode } | null = null;
   private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
   private readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
   private readonly stackerCargoMeshes = new Map<string, StackerCargoRuntimeEntry>();
@@ -661,6 +694,9 @@ export class SceneRuntime {
     if (!entityId) return null;
     if (!this.isEntityTransformEditable(entityId)) return null;
 
+    const modelArrayInstance = this.modelArrayInstanceEntities.get(entityId);
+    if (modelArrayInstance) return this.getOrCreateModelArrayGizmoProxy(modelArrayInstance);
+
     return (
       this.meshes.get(entityId) ??
       this.locators.get(entityId)?.root ??
@@ -672,18 +708,27 @@ export class SceneRuntime {
     );
   }
 
-  /** 在画布客户端坐标位置拾取可编辑 Mesh，并返回对应实体 ID。 */
+  /** 在画布客户端坐标位置拾取可编辑 Mesh，并把 thinInstanceIndex 还原为具体阵列实体 ID。 */
   pickEntityIdAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): string | null {
     const point = this.getCanvasPickPoint(clientX, clientY, canvas);
     if (!point) return null;
 
-    const picked = this.scene.pick(point.x, point.y, (mesh) => {
+    const picks = this.scene.multiPick(point.x, point.y, (mesh) => {
+      const batch = this.modelArrayBatchByMeshUniqueId.get(mesh.uniqueId);
+      if (batch) return batch.hasPickableEntities();
       const entityId = this.readEntityIdFromMesh(mesh);
       return entityId !== null && this.isEntityScenePickable(entityId);
-    });
+    }) ?? [];
+    picks.sort((left, right) => left.distance - right.distance);
 
-    const entityId = this.readEntityIdFromMesh(picked?.pickedMesh ?? null);
-    return entityId && this.isEntityScenePickable(entityId) ? entityId : null;
+    for (const picked of picks) {
+      const entityId = this.readEntityIdFromMesh(
+        picked.pickedMesh ?? null,
+        typeof picked.thinInstanceIndex === 'number' ? picked.thinInstanceIndex : null,
+      );
+      if (entityId && this.isEntityScenePickable(entityId)) return entityId;
+    }
+    return null;
   }
 
   /** 将画布客户端坐标投射到世界 y=0 地面平面，用于拖拽释放时按鼠标位置放置模型。 */
@@ -709,12 +754,24 @@ export class SceneRuntime {
    */
   getModelMeasurement(entityId: string): ModelMeasurementResult {
     const model = this.models.get(entityId);
-    if (!model) return { status: 'unavailable', sizeMeters: null };
-    if (!model.assetHandle || !model.measurementReady) return { status: 'loading', sizeMeters: null };
+    if (model) {
+      if (!model.assetHandle || !model.measurementReady) return { status: 'loading', sizeMeters: null };
+      const sizeMeters = measureModelSizeMeters(model.root, model.contentRoot);
+      return sizeMeters
+        ? { status: 'ready', sizeMeters }
+        : { status: 'unavailable', sizeMeters: null };
+    }
 
-    const sizeMeters = measureModelSizeMeters(model.root, model.contentRoot);
-    return sizeMeters
-      ? { status: 'ready', sizeMeters }
+    const instanceEntity = this.modelArrayInstanceEntities.get(entityId);
+    const sourceModel = instanceEntity ? this.resolveModelArrayRenderModel(instanceEntity) : null;
+    if (!instanceEntity || !sourceModel) return { status: 'unavailable', sizeMeters: null };
+    if (!sourceModel.assetHandle || !sourceModel.measurementReady) return { status: 'loading', sizeMeters: null };
+
+    const points = this.getModelArrayInstanceWorldPoints(instanceEntity, sourceModel);
+    const axes = this.getTransformWorldAxes(instanceEntity.components.transform);
+    const spans = points && axes ? this.measureWorldPointsAlongAxes(points, axes) : null;
+    return spans
+      ? { status: 'ready', sizeMeters: { x: spans[0], y: spans[1], z: spans[2] } }
       : { status: 'unavailable', sizeMeters: null };
   }
 
@@ -723,15 +780,26 @@ export class SceneRuntime {
     direction: Vector3Data;
     spanMeters: number;
   } | null {
-    const source = this.resolveEntityArrayPreviewSource(entityId);
-    if (!source?.geometryReady || source.root.isDisposed()) return null;
-
     const direction = new Vector3(worldDirection.x, worldDirection.y, worldDirection.z);
     const lengthSquared = direction.lengthSquared();
     if (!Number.isFinite(lengthSquared) || lengthSquared <= MODEL_ARRAY_MIN_SPAN_METERS ** 2) return null;
     direction.normalize();
-
     const normalizedDirection = { x: direction.x, y: direction.y, z: direction.z };
+
+    const instanceEntity = this.modelArrayInstanceEntities.get(entityId);
+    const sourceModel = instanceEntity ? this.resolveModelArrayRenderModel(instanceEntity) : null;
+    if (instanceEntity && sourceModel) {
+      if (!sourceModel.assetHandle || !sourceModel.measurementReady) return null;
+      const points = this.getModelArrayInstanceWorldPoints(instanceEntity, sourceModel);
+      const spanMeters = points
+        ? this.measureWorldPointsAlongAxes(points, [direction])?.[0] ?? null
+        : null;
+      if (!Number.isFinite(spanMeters) || spanMeters === null || spanMeters <= MODEL_ARRAY_MIN_SPAN_METERS) return null;
+      return { direction: normalizedDirection, spanMeters };
+    }
+
+    const source = this.resolveEntityArrayPreviewSource(entityId);
+    if (!source?.geometryReady || source.root.isDisposed()) return null;
     const spanMeters = measureEntityMeshesSpanMetersAlongWorldDirection(
       source.geometryMeshes,
       normalizedDirection,
@@ -742,7 +810,7 @@ export class SceneRuntime {
   }
 
   /**
-   * 更新 Shift 阵列的临时实体克隆。
+   * 更新 Shift 阵列的临时预览；模型使用隔离 Geometry 承载 thinInstance 矩阵，避免同几何批次互相覆盖。
    * 临时对象不进入实体映射、选择、脚本、MQTT、持久化或命令历史。
    */
   updateEntityArrayPreview(
@@ -774,6 +842,7 @@ export class SceneRuntime {
         this.entityArrayPreview.sourceEntityId !== entityId
         || this.entityArrayPreview.sourceRoot !== source.root
         || this.entityArrayPreview.sourceKind !== source.kind
+        || this.entityArrayPreview.sourceStrategy !== source.strategy
       )
     ) {
       this.clearEntityArrayPreview();
@@ -782,25 +851,15 @@ export class SceneRuntime {
       sourceEntityId: entityId,
       sourceRoot: source.root,
       sourceKind: source.kind,
+      sourceStrategy: source.strategy,
+      activeStrategy: source.strategy,
       clones: [],
+      matrixPreview: null,
       poiBoundsMaterial: null,
       placementSignature: '',
     };
 
-    while (this.entityArrayPreview.clones.length < normalizedCopyCount) {
-      const cloneIndex = this.entityArrayPreview.clones.length + 1;
-      const clonedNode = this.createEntityArrayPreviewClone(source, this.entityArrayPreview, entityId, cloneIndex);
-      if (!clonedNode) {
-        this.clearEntityArrayPreview();
-        return false;
-      }
-      this.entityArrayPreview.clones.push(clonedNode);
-    }
-
-    while (this.entityArrayPreview.clones.length > normalizedCopyCount) {
-      this.entityArrayPreview.clones.pop()?.dispose(false, false);
-    }
-
+    const preview = this.entityArrayPreview;
     const arrayStepMeters = geometry.spanMeters + normalizedSpacingMeters;
     const placementSignature = [
       normalizedCopyCount,
@@ -812,12 +871,74 @@ export class SceneRuntime {
       source.root.position.x,
       source.root.position.y,
       source.root.position.z,
+      source.root.rotation.x,
+      source.root.rotation.y,
+      source.root.rotation.z,
+      source.root.scaling.x,
+      source.root.scaling.y,
+      source.root.scaling.z,
     ].join('|');
-    if (this.entityArrayPreview.placementSignature === placementSignature) return true;
-    this.entityArrayPreview.placementSignature = placementSignature;
+    if (preview.placementSignature === placementSignature) return true;
 
-    for (let index = 0; index < this.entityArrayPreview.clones.length; index += 1) {
-      const clone = this.entityArrayPreview.clones[index];
+    if (preview.activeStrategy === 'matrix-instances') {
+      preview.matrixPreview ??= EntityArrayThinInstanceBatch.create(entityId, source.previewMeshes);
+      let matrixUpdated = false;
+      if (preview.matrixPreview && source.modelArraySourceRoot && source.modelArrayBaseTransform) {
+        const previewInstances = Array.from({ length: normalizedCopyCount }, (_, index) => {
+          const offsetMultiplier = arrayStepMeters * (index + 1);
+          return {
+            entityId: `__modelArrayPreview_${index}`,
+            transform: {
+              position: {
+                x: source.modelArrayBaseTransform!.position.x + geometry.direction.x * offsetMultiplier,
+                y: source.modelArrayBaseTransform!.position.y + geometry.direction.y * offsetMultiplier,
+                z: source.modelArrayBaseTransform!.position.z + geometry.direction.z * offsetMultiplier,
+              },
+              rotation: { ...source.modelArrayBaseTransform!.rotation },
+              scale: { ...source.modelArrayBaseTransform!.scale },
+            },
+            pickable: false,
+          };
+        });
+        source.modelArraySourceRoot.computeWorldMatrix(true);
+        matrixUpdated = preview.matrixPreview.updateEntityTransforms(
+          source.modelArraySourceRoot.getWorldMatrix().clone(),
+          previewInstances,
+        );
+      } else {
+        matrixUpdated = preview.matrixPreview?.update(normalizedCopyCount, geometry.direction, arrayStepMeters) ?? false;
+      }
+      if (matrixUpdated) {
+        preview.placementSignature = placementSignature;
+        return true;
+      }
+
+      preview.matrixPreview?.dispose();
+      preview.matrixPreview = null;
+      if (source.kind === 'model') {
+        // 模型阵列禁止退回逐副本节点克隆；矩阵批次不可用时直接阻止本次预览。
+        this.clearEntityArrayPreview();
+        return false;
+      }
+      preview.activeStrategy = 'clone-hierarchy';
+    }
+
+    while (preview.clones.length < normalizedCopyCount) {
+      const cloneIndex = preview.clones.length + 1;
+      const clonedNode = this.createEntityArrayPreviewClone(source, preview, entityId, cloneIndex);
+      if (!clonedNode) {
+        this.clearEntityArrayPreview();
+        return false;
+      }
+      preview.clones.push(clonedNode);
+    }
+
+    while (preview.clones.length > normalizedCopyCount) {
+      preview.clones.pop()?.dispose(false, false);
+    }
+
+    for (let index = 0; index < preview.clones.length; index += 1) {
+      const clone = preview.clones[index];
       const offsetMultiplier = arrayStepMeters * (index + 1);
       clone.position.copyFromFloats(
         source.root.position.x + geometry.direction.x * offsetMultiplier,
@@ -826,17 +947,19 @@ export class SceneRuntime {
       );
       clone.computeWorldMatrix(true);
     }
+    preview.placementSignature = placementSignature;
 
     return true;
   }
 
-  /** 清除当前全部临时阵列克隆，不释放源实体共享的材质、纹理或几何资源。 */
+  /** 清除当前全部临时阵列批次或克隆，不释放源实体的材质、纹理或几何资源。 */
   clearEntityArrayPreview(): void {
     if (!this.entityArrayPreview) return;
 
     for (const clone of this.entityArrayPreview.clones) {
       clone.dispose(false, false);
     }
+    this.entityArrayPreview.matrixPreview?.dispose();
     this.entityArrayPreview.poiBoundsMaterial?.dispose(false, false);
     this.entityArrayPreview = null;
   }
@@ -880,6 +1003,12 @@ export class SceneRuntime {
     const model = this.models.get(entityId);
     if (model) return model.assetHandle !== null && model.stackerTelemetryReady;
 
+    const modelArrayInstance = this.modelArrayInstanceEntities.get(entityId);
+    if (modelArrayInstance) {
+      const renderModel = this.resolveModelArrayRenderModel(modelArrayInstance);
+      return Boolean(renderModel?.assetHandle && renderModel.measurementReady);
+    }
+
     const modelGenerator = this.modelGenerators.get(entityId);
     if (modelGenerator) return true;
 
@@ -912,6 +1041,12 @@ export class SceneRuntime {
 
     const cadReference = this.cadReferences.get(entityId);
     if (cadReference) return this.getCadReferenceWorldBounds(cadReference);
+
+    const modelArrayInstance = this.modelArrayInstanceEntities.get(entityId);
+    const modelArrayRenderModel = modelArrayInstance ? this.resolveModelArrayRenderModel(modelArrayInstance) : null;
+    if (modelArrayInstance && modelArrayRenderModel) {
+      return this.getModelArrayInstanceWorldBounds(modelArrayInstance, modelArrayRenderModel);
+    }
 
     const model = this.models.get(entityId);
     if (model) return this.getModelWorldBounds(model);
@@ -962,6 +1097,94 @@ export class SceneRuntime {
 
     model.root.computeWorldMatrix(true);
     return this.createPointWorldBounds(model.root.getAbsolutePosition());
+  }
+
+  /** 按实体参数组合返回真正提供几何的源模型或隐藏参数脚本宿主。 */
+  private resolveModelArrayRenderModel(entity: Entity): ModelRuntimeEntry | null {
+    const variant = this.modelArrayParameterVariantByEntityId.get(entity.id);
+    if (variant) return variant.model;
+
+    const sourceEntityId = entity.components.modelArrayInstance?.sourceEntityId;
+    return sourceEntityId ? this.models.get(sourceEntityId) ?? null : null;
+  }
+
+  /** 将源模型有效网格的世界包围盒角点转换到一个独立矩阵实例的世界空间。 */
+  private getModelArrayInstanceWorldPoints(entity: Entity, sourceModel: ModelRuntimeEntry): Vector3[] | null {
+    sourceModel.root.computeWorldMatrix(true);
+    const inverseSourceRoot = sourceModel.root.getWorldMatrix().clone();
+    const determinant = inverseSourceRoot.determinant();
+    if (!Number.isFinite(determinant) || Math.abs(determinant) <= 1e-12) return null;
+    inverseSourceRoot.invert();
+
+    const targetWorldMatrix = this.createEntityTransformMatrix(entity.components.transform);
+    const points: Vector3[] = [];
+    for (const mesh of sourceModel.meshes) {
+      if (!isMeasurableModelMesh(mesh)) continue;
+      mesh.computeWorldMatrix(true);
+      for (const worldCorner of mesh.getBoundingInfo().boundingBox.vectorsWorld) {
+        const sourceLocalCorner = Vector3.TransformCoordinates(worldCorner, inverseSourceRoot);
+        const targetWorldCorner = Vector3.TransformCoordinates(sourceLocalCorner, targetWorldMatrix);
+        if (this.isFiniteVector3(targetWorldCorner)) points.push(targetWorldCorner);
+      }
+    }
+    return points.length > 0 ? points : null;
+  }
+
+  /** 计算单个独立矩阵实例的世界轴对齐包围盒。 */
+  private getModelArrayInstanceWorldBounds(entity: Entity, sourceModel: ModelRuntimeEntry): RuntimeWorldBounds | null {
+    const points = this.getModelArrayInstanceWorldPoints(entity, sourceModel);
+    if (!points) return this.createPointWorldBounds(
+      new Vector3(
+        entity.components.transform.position.x,
+        entity.components.transform.position.y,
+        entity.components.transform.position.z,
+      ),
+    );
+
+    let minimum = points[0].clone();
+    let maximum = points[0].clone();
+    for (let index = 1; index < points.length; index += 1) {
+      minimum = Vector3.Minimize(minimum, points[index]);
+      maximum = Vector3.Maximize(maximum, points[index]);
+    }
+    return { minimum, maximum };
+  }
+
+  /** 从实体 Transform 构造与无父节点 TransformNode 一致的世界矩阵。 */
+  private createEntityTransformMatrix(transform: TransformComponent): Matrix {
+    return Matrix.Compose(
+      new Vector3(transform.scale.x, transform.scale.y, transform.scale.z),
+      Quaternion.RotationYawPitchRoll(transform.rotation.y, transform.rotation.x, transform.rotation.z),
+      new Vector3(transform.position.x, transform.position.y, transform.position.z),
+    );
+  }
+
+  /** 读取实体局部 X/Y/Z 轴在世界空间的单位方向。 */
+  private getTransformWorldAxes(transform: TransformComponent): [Vector3, Vector3, Vector3] | null {
+    const matrix = this.createEntityTransformMatrix(transform);
+    const axes = [Vector3.Right(), Vector3.Up(), Vector3.Forward()]
+      .map((axis) => Vector3.TransformNormal(axis, matrix));
+    if (axes.some((axis) => !Number.isFinite(axis.lengthSquared()) || axis.lengthSquared() <= 1e-12)) {
+      return null;
+    }
+    return axes.map((axis) => axis.normalize()) as [Vector3, Vector3, Vector3];
+  }
+
+  /** 测量显式世界点集沿一组单位方向的投影跨度。 */
+  private measureWorldPointsAlongAxes(points: readonly Vector3[], axes: readonly Vector3[]): number[] | null {
+    if (points.length === 0 || axes.length === 0) return null;
+    const minimum = axes.map(() => Number.POSITIVE_INFINITY);
+    const maximum = axes.map(() => Number.NEGATIVE_INFINITY);
+
+    for (const point of points) {
+      for (let axisIndex = 0; axisIndex < axes.length; axisIndex += 1) {
+        const projection = Vector3.Dot(point, axes[axisIndex]);
+        if (!Number.isFinite(projection)) return null;
+        minimum[axisIndex] = Math.min(minimum[axisIndex], projection);
+        maximum[axisIndex] = Math.max(maximum[axisIndex], projection);
+      }
+    }
+    return minimum.map((value, index) => Math.max(0, maximum[index] - value));
   }
 
   /** 模型生成器包围盒始终只描述编辑态配置标记，不包含任何运行时自动货物。 */
@@ -1026,6 +1249,7 @@ export class SceneRuntime {
   sync(document: SceneDocument): void {
     const previousEntityStates = new Map(this.entityStates);
     const previousSelectedEntityIds = this.selectedEntityIds;
+    const dirtyModelArraySourceIds = new Set<string>();
 
     this.entityStates.clear();
     for (const entityId of document.entityIds) {
@@ -1044,8 +1268,17 @@ export class SceneRuntime {
     const cadReferenceIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.cadReference)),
     );
+    const modelArrayInstanceIds = new Set(
+      document.entityIds.filter((entityId) => Boolean(
+        document.entities[entityId]?.components.modelAsset
+        && document.entities[entityId]?.components.modelArrayInstance,
+      )),
+    );
     const modelIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.modelAsset)),
+      document.entityIds.filter((entityId) => Boolean(
+        document.entities[entityId]?.components.modelAsset
+        && !document.entities[entityId]?.components.modelArrayInstance,
+      )),
     );
     const modelGeneratorEntityIds = document.entityIds.filter(
       (entityId) => Boolean(document.entities[entityId]?.components.modelGenerator),
@@ -1095,6 +1328,20 @@ export class SceneRuntime {
       }
     }
 
+    for (const entityId of [...this.modelArrayInstanceEntities.keys()]) {
+      if (modelArrayInstanceIds.has(entityId)) continue;
+      const previousSourceId = this.modelArrayInstanceEntities.get(entityId)?.components.modelArrayInstance?.sourceEntityId;
+      if (previousSourceId) dirtyModelArraySourceIds.add(previousSourceId);
+      this.modelArrayInstanceEntities.delete(entityId);
+    }
+    if (
+      this.modelArrayGizmoProxy
+      && !modelArrayInstanceIds.has(this.modelArrayGizmoProxy.entityId)
+    ) {
+      this.modelArrayGizmoProxy.node.dispose(false, false);
+      this.modelArrayGizmoProxy = null;
+    }
+
     for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
       if (!modelGeneratorIds.has(entityId)) {
         this.disposeModelGenerator(entityId, modelGenerator);
@@ -1122,8 +1369,17 @@ export class SceneRuntime {
       const previousState = previousEntityStates.get(entityId);
       const nextState = this.entityStates.get(entityId);
       const entityChanged = previousEntity !== entity;
-      const presentationChanged = previousSelectedEntityIds.has(entityId) !== selected
-        || !this.areEntityRuntimeStatesEqual(previousState, nextState);
+      const runtimeStateChanged = !this.areEntityRuntimeStatesEqual(previousState, nextState);
+      const presentationChanged = previousSelectedEntityIds.has(entityId) !== selected || runtimeStateChanged;
+      if (entityChanged || runtimeStateChanged) {
+        const previousSourceId = previousEntity?.components.modelArrayInstance?.sourceEntityId;
+        const nextSourceId = entity.components.modelArrayInstance?.sourceEntityId;
+        if (previousSourceId) dirtyModelArraySourceIds.add(previousSourceId);
+        if (nextSourceId) dirtyModelArraySourceIds.add(nextSourceId);
+        if (entity.components.modelAsset && !entity.components.modelArrayInstance) {
+          dirtyModelArraySourceIds.add(entity.id);
+        }
+      }
 
       if (entityChanged || !this.hasCompleteRuntimeEntity(entity)) {
         this.syncEntity(entity, selected);
@@ -1134,6 +1390,7 @@ export class SceneRuntime {
       this.syncedEntities.set(entityId, entity);
     }
 
+    this.syncAllModelArrayBatches(document, dirtyModelArraySourceIds);
     this.selectedEntityIds = selectedEntityIds;
     this.rebuildLocatorTargetIndex(document);
     this.rebuildSharedModelSelectionOutline();
@@ -1144,7 +1401,10 @@ export class SceneRuntime {
     if (entity.components.meshRenderer && !this.meshes.has(entity.id)) return false;
     if (entity.components.locator && !this.locators.has(entity.id)) return false;
     if (entity.components.cadReference && !this.cadReferences.has(entity.id)) return false;
-    if (entity.components.modelAsset && !this.models.has(entity.id)) return false;
+    if (entity.components.modelAsset) {
+      if (entity.components.modelArrayInstance && !this.modelArrayInstanceEntities.has(entity.id)) return false;
+      if (!entity.components.modelArrayInstance && !this.models.has(entity.id)) return false;
+    }
     if (entity.components.modelGenerator && !this.modelGenerators.has(entity.id)) return false;
     if (entity.components.poiEffect && !this.poiEffectRuntime.has(entity.id)) return false;
     if (entity.components.light && !this.lights.has(entity.id)) return false;
@@ -1182,10 +1442,18 @@ export class SceneRuntime {
       this.applyCadReferenceInteractivity(cadReference, entity.id);
     }
 
-    const model = this.models.get(entity.id);
-    if (model) {
-      this.applyModelSelection(model, selected);
-      this.applyModelInteractivity(model, entity.id);
+    if (entity.components.modelArrayInstance) {
+      this.modelArrayInstanceEntities.set(entity.id, entity);
+      if (this.modelArrayGizmoProxy?.entityId === entity.id) {
+        this.applyTransform(this.modelArrayGizmoProxy.node, entity.components.transform);
+        this.modelArrayGizmoProxy.node.computeWorldMatrix(true);
+      }
+    } else {
+      const model = this.models.get(entity.id);
+      if (model) {
+        this.applyModelSelection(model, selected);
+        this.applyModelInteractivity(model, entity.id);
+      }
     }
 
     const modelGenerator = this.modelGenerators.get(entity.id);
@@ -1274,6 +1542,8 @@ export class SceneRuntime {
 
   dispose(): void {
     this.clearEntityArrayPreview();
+    this.modelArrayGizmoProxy?.node.dispose(false, false);
+    this.modelArrayGizmoProxy = null;
     this.assetLoadScheduler.dispose();
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
@@ -1290,6 +1560,9 @@ export class SceneRuntime {
     }
     for (const [entityId, model] of this.models.entries()) {
       this.disposeModel(entityId, model);
+    }
+    for (const variant of [...this.modelArrayParameterVariants.values()]) {
+      this.disposeModelArrayParameterVariant(variant);
     }
     for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
       this.disposeModelGenerator(entityId, modelGenerator);
@@ -1315,6 +1588,12 @@ export class SceneRuntime {
     this.reportedDuplicateLocatorTargets.clear();
     this.cadReferences.clear();
     this.models.clear();
+    this.modelArrayInstanceEntities.clear();
+    this.modelArrayParameterVariants.clear();
+    this.modelArrayParameterVariantByEntityId.clear();
+    this.modelArrayCanonicalSignatureIds.clear();
+    this.modelArrayCanonicalSignatureSequence = 0;
+    this.modelArrayBatchByMeshUniqueId.clear();
     this.modelGenerators.clear();
     this.generatedOutputOwners.clear();
     this.stackerCargoMeshes.clear();
@@ -1344,7 +1623,8 @@ export class SceneRuntime {
     }
 
     if (entity.components.modelAsset) {
-      this.syncModelEntity(entity, selected);
+      if (entity.components.modelArrayInstance) this.syncModelArrayInstanceEntity(entity);
+      else this.syncModelEntity(entity, selected);
     }
 
     if (entity.components.modelGenerator) {
@@ -1681,6 +1961,15 @@ export class SceneRuntime {
       });
   }
 
+  /** 记录独立矩阵实例实体；其几何由 sourceEntityId 对应源模型的批次统一提交。 */
+  private syncModelArrayInstanceEntity(entity: Entity): void {
+    this.modelArrayInstanceEntities.set(entity.id, entity);
+    if (this.modelArrayGizmoProxy?.entityId === entity.id) {
+      this.applyTransform(this.modelArrayGizmoProxy.node, entity.components.transform);
+      this.modelArrayGizmoProxy.node.computeWorldMatrix(true);
+    }
+  }
+
   /** 同步 glTF/GLB 模型资源，并通过加载 token 避免异步过期结果污染当前场景。 */
   private syncModelEntity(entity: Entity, selected: boolean): void {
     const modelAsset = entity.components.modelAsset;
@@ -1694,6 +1983,7 @@ export class SceneRuntime {
 
     const current = this.models.get(entity.id);
     if (current) {
+      current.entitySnapshot = entity;
       this.applyTransform(current.root, entity.components.transform);
       if (current.assetCode !== modelAsset.assetCode) {
         this.disposeStackerCargoForAssetCode(current.assetCode);
@@ -1724,10 +2014,12 @@ export class SceneRuntime {
     this.applyModelUnitScale(contentRoot, modelAsset.unitScaleToMeters);
 
     const loadToken = ++this.modelLoadSequence;
+    const loadAbortController = new AbortController();
     const pending: ModelRuntimeEntry = {
       sourceUrl: modelAsset.sourceUrl,
       assetRevision: modelAsset.assetRevision ?? null,
       assetSignature,
+      entitySnapshot: entity,
       assetCode: modelAsset.assetCode,
       telemetryBinding: entity.components.telemetryBinding ?? null,
       stackerCapable: this.isStackerModelAsset(modelAsset),
@@ -1736,9 +2028,13 @@ export class SceneRuntime {
       contentRoot,
       assetHandle: null,
       meshes: [],
+      modelArrayBatch: null,
+      modelArraySourceSignature: '',
+      modelArrayFailureSignature: '',
       highlighted: false,
       highlightedMeshes: new Set(),
       loadToken,
+      cancelLoad: () => loadAbortController.abort(),
       parameterSignature: '',
       parameterBaseline: new Map(),
       textureCache: new Map(),
@@ -1755,7 +2051,7 @@ export class SceneRuntime {
     this.applyModelSelection(pending, selected);
     this.applyModelInteractivity(pending, entity.id);
 
-    void this.loadModelRuntimeAssets(modelAsset, assetSignature)
+    void this.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal)
       .then((loadedAssets) => {
         const activeEntry = this.models.get(entity.id);
         if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.assetSignature !== assetSignature) {
@@ -1763,6 +2059,7 @@ export class SceneRuntime {
           return;
         }
 
+        activeEntry.cancelLoad = null;
         activeEntry.assetHandle = loadedAssets.handle;
         if (loadedAssets.kind === 'owned-container') {
           activeEntry.meshes = loadedAssets.meshes;
@@ -1773,7 +2070,7 @@ export class SceneRuntime {
           }
         }
 
-        const latestEntity = this.syncedEntities.get(entity.id) ?? entity;
+        const latestEntity = activeEntry.entitySnapshot ?? entity;
         this.refreshModelEntityMeshes(latestEntity, activeEntry);
         this.normalizeModelContentOrigin(activeEntry);
         this.applyModelParameters(latestEntity, activeEntry);
@@ -1796,6 +2093,7 @@ export class SceneRuntime {
   private async loadModelRuntimeAssets(
     modelAsset: ModelAssetComponent,
     assetSignature: string,
+    loadSignal?: AbortSignal,
   ): Promise<LoadedModelRuntimeAssets> {
     const { rootUrl, fileName } = this.splitAssetUrl(
       this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
@@ -1819,7 +2117,7 @@ export class SceneRuntime {
       };
     }
 
-    const container = await this.loadAssetContainer(rootUrl, fileName);
+    const container = await this.loadAssetContainer(rootUrl, fileName, loadSignal);
     try {
       container.addAllToScene();
       return {
@@ -1991,6 +2289,7 @@ export class SceneRuntime {
       sourceUrl: modelAsset.sourceUrl,
       assetRevision: modelAsset.assetRevision ?? null,
       assetSignature: this.createModelAssetSignature(modelAsset),
+      entitySnapshot: null,
       assetCode: modelAsset.assetCode,
       telemetryBinding: null,
       stackerCapable: this.isStackerModelAsset(modelAsset),
@@ -1999,9 +2298,13 @@ export class SceneRuntime {
       contentRoot,
       assetHandle: null,
       meshes: [],
+      modelArrayBatch: null,
+      modelArraySourceSignature: '',
+      modelArrayFailureSignature: '',
       highlighted: false,
       highlightedMeshes: new Set(),
       loadToken: modelLoadToken,
+      cancelLoad: null,
       parameterSignature: '',
       parameterBaseline: new Map(),
       textureCache: new Map(),
@@ -2186,6 +2489,9 @@ export class SceneRuntime {
     for (const model of this.models.values()) {
       this.clearSpecializedTelemetryDiagnosticsForModel(model);
     }
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      this.clearSpecializedTelemetryDiagnosticsForModel(variant.model);
+    }
     for (const owner of this.generatedOutputOwners.values()) {
       if (owner.output?.kind === 'model') {
         this.clearSpecializedTelemetryDiagnosticsForModel(owner.output.model);
@@ -2200,6 +2506,9 @@ export class SceneRuntime {
   ): void {
     for (const model of this.models.values()) {
       this.updateModelExternalScriptRuntimeContext(model, mode, telemetry);
+    }
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      this.updateModelExternalScriptRuntimeContext(variant.model, mode, telemetry);
     }
     for (const owner of this.generatedOutputOwners.values()) {
       if (owner.output?.kind !== 'model') continue;
@@ -4968,6 +5277,22 @@ export class SceneRuntime {
       };
     }
 
+    const modelArrayInstance = this.modelArrayInstanceEntities.get(entityId);
+    const modelArraySource = modelArrayInstance ? this.resolveModelArrayRenderModel(modelArrayInstance) : null;
+    if (modelArrayInstance && modelArraySource) {
+      const meshes = modelArraySource.contentRoot.getChildMeshes(false);
+      return {
+        kind: 'model',
+        root: this.getOrCreateModelArrayGizmoProxy(modelArrayInstance),
+        geometryMeshes: meshes,
+        previewMeshes: meshes,
+        geometryReady: Boolean(modelArraySource.assetHandle && modelArraySource.measurementReady),
+        strategy: 'matrix-instances',
+        modelArraySourceRoot: modelArraySource.root,
+        modelArrayBaseTransform: modelArrayInstance.components.transform,
+      };
+    }
+
     const model = this.models.get(entityId);
     if (model) {
       const meshes = model.contentRoot.getChildMeshes(false);
@@ -4977,7 +5302,7 @@ export class SceneRuntime {
         geometryMeshes: meshes,
         previewMeshes: meshes,
         geometryReady: Boolean(model.assetHandle && model.measurementReady),
-        strategy: 'clone-hierarchy',
+        strategy: 'matrix-instances',
       };
     }
 
@@ -5004,7 +5329,7 @@ export class SceneRuntime {
     cloneIndex: number,
   ): TransformNode | null {
     const cloneName = `__entityArrayPreview_${entityId}_${cloneIndex}`;
-    if (source.strategy === 'clone-hierarchy') {
+    if (source.strategy !== 'poi-static') {
       const clone = source.root.clone(cloneName, null, false);
       if (!clone) return null;
       this.prepareEntityArrayPreviewClone(clone);
@@ -5107,11 +5432,15 @@ export class SceneRuntime {
     this.clearEntityArrayPreviewIfSource(entityId);
     this.genericTelemetryMotionRuntime.disposeModel(entityId);
     model.telemetryPreviewBaseline = null;
+    model.cancelLoad?.();
+    model.cancelLoad = null;
     this.applyModelSelection(model, false);
     model.externalScriptRuntime?.dispose();
     for (const texture of model.textureCache.values()) {
       texture.dispose();
     }
+    this.disposeModelArrayParameterVariantsForSource(entityId);
+    this.disposeModelArrayBatch(model);
     model.assetHandle?.dispose();
     model.contentRoot.dispose();
     model.root.dispose();
@@ -5327,9 +5656,16 @@ export class SceneRuntime {
     this.lights.delete(entityId);
   }
 
-  /** 从 Mesh 元数据中读取编辑器实体 ID。 */
-  private readEntityIdFromMesh(mesh: AbstractMesh | null): string | null {
-    const metadata = mesh?.metadata as EditorMeshMetadata | null | undefined;
+  /** 从普通 Mesh 元数据或矩阵批次 thinInstanceIndex 中读取编辑器实体 ID。 */
+  private readEntityIdFromMesh(mesh: AbstractMesh | null, thinInstanceIndex: number | null = null): string | null {
+    if (!mesh) return null;
+
+    const modelArrayBatch = this.modelArrayBatchByMeshUniqueId.get(mesh.uniqueId);
+    if (modelArrayBatch && thinInstanceIndex !== null) {
+      return modelArrayBatch.getEntityIdForThinInstance(mesh, thinInstanceIndex);
+    }
+
+    const metadata = mesh.metadata as EditorMeshMetadata | null | undefined;
     const entityId = metadata?.[EDITOR_ENTITY_ID_METADATA_KEY];
 
     return typeof entityId === 'string'
@@ -5337,6 +5673,7 @@ export class SceneRuntime {
         this.meshes.has(entityId)
         || this.locators.has(entityId)
         || this.models.has(entityId)
+        || this.modelArrayInstanceEntities.has(entityId)
         || this.modelGenerators.has(entityId)
         || this.poiEffectRuntime.has(entityId)
       )
@@ -5642,6 +5979,21 @@ export class SceneRuntime {
     target.scaling = new Vector3(transform.scale.x, transform.scale.y, transform.scale.z);
   }
 
+  /** 为当前选中的矩阵实例复用一个无几何 TransformNode，Gizmo 拖动仍回写该逻辑实体。 */
+  private getOrCreateModelArrayGizmoProxy(entity: Entity): TransformNode {
+    if (!this.modelArrayGizmoProxy || this.modelArrayGizmoProxy.node.isDisposed()) {
+      this.modelArrayGizmoProxy = {
+        entityId: entity.id,
+        node: new TransformNode('__modelArrayInstanceGizmoProxy', this.scene),
+      };
+    }
+
+    this.modelArrayGizmoProxy.entityId = entity.id;
+    this.applyTransform(this.modelArrayGizmoProxy.node, entity.components.transform);
+    this.modelArrayGizmoProxy.node.computeWorldMatrix(true);
+    return this.modelArrayGizmoProxy.node;
+  }
+
   /** 将模型或环境源单位换算到米，避免污染可被 Gizmo 写回的实体根 Transform。 */
   private applyModelUnitScale(target: TransformNode, unitScaleToMeters: number): void {
     target.scaling = new Vector3(unitScaleToMeters, unitScaleToMeters, unitScaleToMeters);
@@ -5683,12 +6035,14 @@ export class SceneRuntime {
     const modelAsset = entity.components.modelAsset;
     if (!modelAsset) return;
     this.syncModelAssetExternalScripts(modelAsset, model, (current) => {
-      this.refreshModelEntityMeshes(entity, current);
-      this.applyModelInteractivity(current, entity.id);
+      const latestEntity = current.entitySnapshot ?? entity;
+      this.refreshModelEntityMeshes(latestEntity, current);
+      this.syncModelArrayBatch(latestEntity, current);
+      this.applyModelInteractivity(current, latestEntity.id);
       this.applyModelSelection(current, current.highlighted);
       this.rebuildSharedModelSelectionOutline();
-      this.syncGenericTelemetryMotion(entity, current);
-      this.onModelMeasurementChanged(entity.id);
+      this.syncGenericTelemetryMotion(latestEntity, current);
+      this.onModelMeasurementChanged(latestEntity.id);
     });
   }
 
@@ -5734,6 +6088,546 @@ export class SceneRuntime {
     for (const mesh of model.meshes) {
       mesh.metadata = { ...(mesh.metadata ?? {}), ...metadata };
     }
+  }
+
+  /** 在文档实体完成同步后，按源模型统一刷新全部独立逻辑实例的矩阵批次。 */
+  private syncAllModelArrayBatches(document: SceneDocument, sourceEntityIds: ReadonlySet<string>): void {
+    for (const sourceEntityId of sourceEntityIds) {
+      const model = this.models.get(sourceEntityId);
+      if (!model) continue;
+      const sourceEntity = document.entities[sourceEntityId];
+      if (!sourceEntity?.components.modelAsset || sourceEntity.components.modelArrayInstance) {
+        this.disposeModelArrayBatch(model);
+        this.disposeModelArrayParameterVariantsForSource(sourceEntityId);
+        continue;
+      }
+      this.syncModelArrayBatch(sourceEntity, model);
+    }
+  }
+
+  /**
+   * 将引用同一源模型的 N 个独立 Scene Entity 一次性提交为 thinInstance 矩阵。
+   * 每个实体继续拥有独立名称、资产编号、Transform、显隐、锁定、删除和选择语义。
+   */
+  private syncModelArrayBatch(entity: Entity, model: ModelRuntimeEntry): void {
+    const modelAsset = entity.components.modelAsset;
+    if (!modelAsset) return;
+
+    const instanceEntities = [...this.modelArrayInstanceEntities.values()]
+      .filter((instanceEntity) => (
+        instanceEntity.components.modelArrayInstance?.sourceEntityId === entity.id
+      ));
+    const legacyItems = entity.components.modelArray?.items ?? [];
+    if (instanceEntities.length === 0 && legacyItems.length === 0) {
+      this.disposeModelArrayBatch(model);
+      this.disposeModelArrayParameterVariantsForSource(entity.id);
+      model.modelArrayFailureSignature = '';
+      return;
+    }
+
+    const sourceRenderSignature = this.createModelArrayRenderSignature(modelAsset);
+    const groups = new Map<string, Entity[]>();
+    for (const instanceEntity of instanceEntities) {
+      const instanceModelAsset = instanceEntity.components.modelAsset;
+      const renderSignature = instanceModelAsset
+        ? this.createModelArrayRenderSignature(instanceModelAsset)
+        : sourceRenderSignature;
+      const group = groups.get(renderSignature) ?? [];
+      group.push(instanceEntity);
+      groups.set(renderSignature, group);
+    }
+
+    for (const [entityId, variant] of this.modelArrayParameterVariantByEntityId) {
+      if (variant.sourceEntityId === entity.id) this.modelArrayParameterVariantByEntityId.delete(entityId);
+    }
+
+    const baseInstances = groups.get(sourceRenderSignature) ?? [];
+    groups.delete(sourceRenderSignature);
+    const activeVariantKeys = new Set<string>();
+    for (const [renderSignature, entities] of groups) {
+      const key = this.createModelArrayParameterVariantKey(entity.id, renderSignature);
+      this.rekeyReusableModelArrayParameterVariant(entity.id, key, renderSignature, entities, activeVariantKeys);
+      activeVariantKeys.add(key);
+      const variant = this.syncModelArrayParameterVariant(entity, key, renderSignature, entities);
+      if (!variant) continue;
+      for (const instanceEntity of entities) {
+        this.modelArrayParameterVariantByEntityId.set(instanceEntity.id, variant);
+      }
+    }
+    this.disposeMissingModelArrayParameterVariants(entity.id, activeVariantKeys);
+
+    this.syncModelArrayBatchForEntities(entity, model, baseInstances, legacyItems, {
+      sourceEntityId: entity.id,
+      namePrefix: '__modelArrayThinInstance',
+      renderSignature: sourceRenderSignature,
+    });
+  }
+
+  /** 资产编号只代表逻辑设备身份；其它会影响参数脚本输出的字段共同决定共享分组。 */
+  private createModelArrayRenderSignature(modelAsset: ModelAssetComponent): string {
+    return JSON.stringify({
+      sourcePath: modelAsset.sourcePath,
+      sourceUrl: modelAsset.sourceUrl,
+      assetRevision: modelAsset.assetRevision ?? null,
+      lengthUnit: modelAsset.lengthUnit,
+      unitScaleToMeters: modelAsset.unitScaleToMeters,
+      instancingMode: resolveModelAssetSharedInstancingPolicy(modelAsset).mode,
+      scripts: (modelAsset.scriptAssets ?? []).map((script) => ({
+        path: script.path,
+        name: script.name,
+        source: this.createModelArrayCanonicalStringSignature(script.sourceUrl),
+      })),
+      parameterScripts: this.createModelArrayJsonSignature(modelAsset.parameterScriptMetadata),
+      animationScripts: this.createModelArrayJsonSignature(modelAsset.animationScriptMetadata),
+      parameterConfig: this.createModelArrayJsonSignature(modelAsset.parameterConfig),
+      parameterValues: this.createModelArrayTransientJsonSignature(modelAsset.parameterValues),
+      dataDrivenConfig: this.createModelArrayJsonSignature(modelAsset.dataDrivenConfig),
+    });
+  }
+
+  /** 参数值可能随滑块持续变化，不进入长期驻留缓存，避免编辑会话内无界增长。 */
+  private createModelArrayTransientJsonSignature(value: unknown): string {
+    if (value === undefined) return '-';
+    if (value !== null && typeof value === 'object') {
+      const cached = this.modelArrayTransientJsonSignatureCache.get(value);
+      if (cached) return cached;
+      const signature = this.serializeModelArrayJsonValue(value);
+      this.modelArrayTransientJsonSignatureCache.set(value, signature);
+      return signature;
+    }
+    return this.serializeModelArrayJsonValue(value);
+  }
+
+  /** 对不可变 JSON 快照缓存精确的场景内编号，既避免大字符串重复拼接，也不存在哈希碰撞。 */
+  private createModelArrayJsonSignature(value: unknown): string {
+    if (value === undefined) return '-';
+    if (value !== null && typeof value === 'object') {
+      const cached = this.modelArrayJsonSignatureCache.get(value);
+      if (cached) return cached;
+      const signature = this.createModelArrayCanonicalStringSignature(this.serializeModelArrayJsonValue(value));
+      this.modelArrayJsonSignatureCache.set(value, signature);
+      return signature;
+    }
+    return this.createModelArrayCanonicalStringSignature(this.serializeModelArrayJsonValue(value));
+  }
+
+  private serializeModelArrayJsonValue(value: unknown): string {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+    if (Array.isArray(value)) return `[${value.map((item) => this.serializeModelArrayJsonValue(item)).join(',')}]`;
+
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .filter((key) => record[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${this.serializeModelArrayJsonValue(record[key])}`)
+      .join(',')}}`;
+  }
+
+  private createModelArrayCanonicalStringSignature(value: string): string {
+    const existingId = this.modelArrayCanonicalSignatureIds.get(value);
+    if (existingId !== undefined) return `s${existingId}`;
+    const nextId = ++this.modelArrayCanonicalSignatureSequence;
+    this.modelArrayCanonicalSignatureIds.set(value, nextId);
+    return `s${nextId}`;
+  }
+
+  private createModelArrayParameterVariantKey(sourceEntityId: string, renderSignature: string): string {
+    return `${sourceEntityId}\u0000${renderSignature}`;
+  }
+
+  /** 单实体或整组连续调参时复用已就绪宿主，避免每次滑块变化都重新加载并启动脚本。 */
+  private rekeyReusableModelArrayParameterVariant(
+    sourceEntityId: string,
+    nextKey: string,
+    nextRenderSignature: string,
+    entities: readonly Entity[],
+    reservedKeys: ReadonlySet<string>,
+  ): void {
+    if (this.modelArrayParameterVariants.has(nextKey)) return;
+    const entityIds = new Set(entities.map((entity) => entity.id));
+    const reusable = [...this.modelArrayParameterVariants.values()].find((variant) => (
+      variant.sourceEntityId === sourceEntityId
+      && !reservedKeys.has(variant.key)
+      && variant.model.assetHandle !== null
+      && !variant.model.externalScriptStarting
+      && variant.entities.length === entityIds.size
+      && variant.entities.every((entity) => entityIds.has(entity.id))
+    ));
+    if (!reusable) return;
+
+    this.modelArrayParameterVariants.delete(reusable.key);
+    reusable.key = nextKey;
+    reusable.renderSignature = nextRenderSignature;
+    this.modelArrayParameterVariants.set(nextKey, reusable);
+  }
+
+  /** 为一个不同参数组合创建或刷新唯一脚本宿主；组内所有逻辑实体继续共享一个矩阵批次。 */
+  private syncModelArrayParameterVariant(
+    sourceEntity: Entity,
+    key: string,
+    renderSignature: string,
+    entities: Entity[],
+  ): ModelArrayParameterVariantRuntimeEntry | null {
+    const representative = entities[0];
+    const modelAsset = representative?.components.modelAsset;
+    if (!representative || !modelAsset) return null;
+
+    const assetSignature = this.createModelAssetSignature(modelAsset);
+    let variant = this.modelArrayParameterVariants.get(key);
+    if (variant && variant.model.assetSignature !== assetSignature) {
+      this.disposeModelArrayParameterVariant(variant);
+      variant = undefined;
+    }
+
+    if (!variant) {
+      variant = this.createModelArrayParameterVariant(
+        sourceEntity,
+        key,
+        renderSignature,
+        representative,
+        entities,
+        modelAsset,
+        assetSignature,
+      );
+      return variant;
+    }
+
+    variant.representativeEntityId = representative.id;
+    variant.entities = entities;
+    const model = variant.model;
+    model.entitySnapshot = representative;
+    model.assetCode = modelAsset.assetCode;
+    model.assetRevision = modelAsset.assetRevision ?? null;
+    model.assetSignature = assetSignature;
+    model.stackerCapable = this.isStackerModelAsset(modelAsset);
+    model.conveyorCapable = this.isConveyorModelAsset(modelAsset);
+    this.applyTransform(model.root, representative.components.transform);
+    this.applyModelUnitScale(model.contentRoot, modelAsset.unitScaleToMeters);
+    if (!model.assetHandle) return variant;
+
+    this.restoreModelArrayParameterVariantHost(variant);
+    this.applyModelAssetParameters(modelAsset, model);
+    this.syncModelArrayParameterVariantExternalScripts(variant, modelAsset);
+    return variant;
+  }
+
+  private createModelArrayParameterVariant(
+    sourceEntity: Entity,
+    key: string,
+    renderSignature: string,
+    representative: Entity,
+    entities: Entity[],
+    modelAsset: ModelAssetComponent,
+    assetSignature: string,
+  ): ModelArrayParameterVariantRuntimeEntry {
+    const variantSequence = ++this.modelLoadSequence;
+    const root = new TransformNode(`__modelArrayParameterVariant_${sourceEntity.id}_${variantSequence}`, this.scene);
+    const contentRoot = new TransformNode(`__modelArrayParameterVariantContent_${sourceEntity.id}_${variantSequence}`, this.scene);
+    contentRoot.parent = root;
+    this.applyTransform(root, representative.components.transform);
+    this.applyModelUnitScale(contentRoot, modelAsset.unitScaleToMeters);
+
+    const loadAbortController = new AbortController();
+    const model: ModelRuntimeEntry = {
+      sourceUrl: modelAsset.sourceUrl,
+      assetRevision: modelAsset.assetRevision ?? null,
+      assetSignature,
+      entitySnapshot: representative,
+      assetCode: modelAsset.assetCode,
+      telemetryBinding: null,
+      stackerCapable: this.isStackerModelAsset(modelAsset),
+      conveyorCapable: this.isConveyorModelAsset(modelAsset),
+      root,
+      contentRoot,
+      assetHandle: null,
+      meshes: [],
+      modelArrayBatch: null,
+      modelArraySourceSignature: '',
+      modelArrayFailureSignature: '',
+      highlighted: false,
+      highlightedMeshes: new Set(),
+      loadToken: variantSequence,
+      cancelLoad: () => loadAbortController.abort(),
+      parameterSignature: '',
+      parameterBaseline: new Map(),
+      textureCache: new Map(),
+      externalScriptRuntime: null,
+      externalScriptSignature: '',
+      externalScriptStarting: false,
+      measurementReady: false,
+      stackerTelemetry: this.createStackerTelemetryState(root),
+      conveyorTelemetry: this.createConveyorTelemetryState(),
+      stackerTelemetryReady: false,
+      telemetryPreviewBaseline: null,
+    };
+    const variant: ModelArrayParameterVariantRuntimeEntry = {
+      key,
+      sourceEntityId: sourceEntity.id,
+      renderSignature,
+      representativeEntityId: representative.id,
+      entities,
+      sourceLayerMasks: new Map(),
+      model,
+    };
+    this.modelArrayParameterVariants.set(key, variant);
+
+    void this.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal)
+      .then((loadedAssets) => {
+        const activeVariant = this.modelArrayParameterVariants.get(key);
+        if (!activeVariant || activeVariant.model !== model || model.loadToken !== variantSequence) {
+          loadedAssets.handle.dispose();
+          return;
+        }
+
+        model.cancelLoad = null;
+        model.assetHandle = loadedAssets.handle;
+        if (loadedAssets.kind === 'owned-container') {
+          model.meshes = loadedAssets.meshes;
+          this.parentTopLevelModelNodes(model, loadedAssets.transformNodes);
+        } else {
+          for (const rootNode of loadedAssets.rootNodes) rootNode.parent = model.contentRoot;
+        }
+
+        const latestEntity = activeVariant.entities.find((item) => item.id === activeVariant.representativeEntityId)
+          ?? activeVariant.entities[0]
+          ?? representative;
+        const latestModelAsset = latestEntity.components.modelAsset ?? modelAsset;
+        model.entitySnapshot = latestEntity;
+        this.refreshModelMeshes(model, {
+          modelArrayParameterVariant: true,
+          modelArraySourceEntityId: sourceEntity.id,
+        });
+        this.normalizeModelContentOrigin(model);
+        this.applyModelAssetParameters(latestModelAsset, model);
+        this.syncModelArrayParameterVariantExternalScripts(activeVariant, latestModelAsset);
+      })
+      .catch((error) => {
+        const activeVariant = this.modelArrayParameterVariants.get(key);
+        if (!activeVariant || activeVariant.model !== model || model.loadToken !== variantSequence) return;
+        this.disposeModelArrayParameterVariant(activeVariant);
+        const message = error instanceof Error ? error.message : String(error);
+        this.pushLog(`模型“${representative.name}”阵列参数脚本宿主加载失败：${message}`);
+      });
+
+    return variant;
+  }
+
+  /** 参数脚本完成后刷新脚本生成 Mesh，并只把最终静态外观提交给该参数组的 thinInstance 批次。 */
+  private syncModelArrayParameterVariantExternalScripts(
+    variant: ModelArrayParameterVariantRuntimeEntry,
+    modelAsset: ModelAssetComponent,
+  ): void {
+    this.syncModelAssetExternalScripts(modelAsset, variant.model, (current) => {
+      const activeVariant = this.modelArrayParameterVariants.get(variant.key);
+      if (!activeVariant || activeVariant.model !== current) return;
+
+      this.refreshModelMeshes(current, {
+        modelArrayParameterVariant: true,
+        modelArraySourceEntityId: activeVariant.sourceEntityId,
+      });
+      this.hideModelArrayParameterVariantHost(activeVariant);
+      const representative = activeVariant.entities.find((entity) => entity.id === activeVariant.representativeEntityId)
+        ?? activeVariant.entities[0];
+      if (representative) {
+        this.syncModelArrayBatchForEntities(representative, current, activeVariant.entities, [], {
+          sourceEntityId: activeVariant.sourceEntityId,
+          namePrefix: '__modelArrayParameterVariantThinInstance',
+          variantKey: activeVariant.key,
+          renderSignature: activeVariant.renderSignature,
+          resolveLayerMask: (mesh) => activeVariant.sourceLayerMasks.get(mesh.uniqueId) ?? mesh.layerMask,
+        });
+      }
+      for (const instanceEntity of activeVariant.entities) this.onModelMeasurementChanged(instanceEntity.id);
+      this.rebuildSharedModelSelectionOutline();
+    });
+  }
+
+  /** 脚本宿主继续保持可执行，但 layerMask=0，场景只显示其批次 Mesh。 */
+  private hideModelArrayParameterVariantHost(variant: ModelArrayParameterVariantRuntimeEntry): void {
+    const activeMeshIds = new Set<number>();
+    for (const mesh of variant.model.meshes) {
+      if (mesh.isDisposed()) continue;
+      activeMeshIds.add(mesh.uniqueId);
+      variant.sourceLayerMasks.set(mesh.uniqueId, mesh.layerMask);
+      mesh.layerMask = 0;
+      mesh.isPickable = false;
+    }
+    for (const meshId of variant.sourceLayerMasks.keys()) {
+      if (!activeMeshIds.has(meshId)) variant.sourceLayerMasks.delete(meshId);
+    }
+  }
+
+  /** 参数更新前恢复宿主原渲染层，让脚本基于正常节点状态运行；提交完成后会再次隐藏。 */
+  private restoreModelArrayParameterVariantHost(variant: ModelArrayParameterVariantRuntimeEntry): void {
+    for (const mesh of variant.model.meshes) {
+      const layerMask = variant.sourceLayerMasks.get(mesh.uniqueId);
+      if (layerMask !== undefined) mesh.layerMask = layerMask;
+    }
+  }
+
+  /** 基础源和参数变体共用的矩阵批次提交路径。 */
+  private syncModelArrayBatchForEntities(
+    entity: Entity,
+    model: ModelRuntimeEntry,
+    instanceEntities: readonly Entity[],
+    legacyItems: ReadonlyArray<NonNullable<Entity['components']['modelArray']>['items'][number]>,
+    options: {
+      sourceEntityId: string;
+      namePrefix: string;
+      renderSignature: string;
+      variantKey?: string;
+      resolveLayerMask?: (mesh: AbstractMesh) => number;
+    },
+  ): void {
+    const totalInstanceCount = instanceEntities.length + legacyItems.length;
+    if (totalInstanceCount === 0) {
+      this.disposeModelArrayBatch(model);
+      model.modelArrayFailureSignature = '';
+      return;
+    }
+    if (!model.assetHandle || !model.measurementReady) return;
+
+    const sourceMeshes = model.meshes.filter((mesh) => (
+      !mesh.isDisposed() && mesh.getTotalVertices() > 0
+    ));
+    // 批次 Geometry 与脚本宿主隔离；参数或脚本输入变化时必须重建，才能复制最新顶点数据。
+    const sourceSignature = `${options.renderSignature}|${sourceMeshes
+      .map((mesh) => `${mesh.uniqueId}:${mesh.geometry?.uniqueId ?? 0}:${mesh instanceof Mesh ? mesh.thinInstanceCount : 0}`)
+      .join('|')}`;
+    const failureSignature = `${options.variantKey ?? 'base'}:${sourceSignature}:${totalInstanceCount}`;
+
+    if (sourceMeshes.length === 0) {
+      this.disposeModelArrayBatch(model);
+      this.reportModelArrayBatchFailure(entity, model, failureSignature, '参数脚本执行后没有可渲染 Mesh');
+      return;
+    }
+
+    if (!model.modelArrayBatch || model.modelArraySourceSignature !== sourceSignature) {
+      this.disposeModelArrayBatch(model);
+      model.modelArrayBatch = EntityArrayThinInstanceBatch.create(options.sourceEntityId, sourceMeshes, {
+        interactive: true,
+        metadata: {
+          modelArraySourceEntityId: options.sourceEntityId,
+          ...(options.variantKey ? { modelArrayParameterVariant: true } : {}),
+        },
+        namePrefix: options.namePrefix,
+        resolveLayerMask: options.resolveLayerMask,
+      });
+      model.modelArraySourceSignature = model.modelArrayBatch ? sourceSignature : '';
+      if (model.modelArrayBatch) {
+        for (const mesh of model.modelArrayBatch.meshes) {
+          this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, model.modelArrayBatch);
+        }
+      }
+    }
+
+    const visibleInstances = instanceEntities
+      .filter((instanceEntity) => this.isEntityVisible(instanceEntity.id))
+      .map((instanceEntity) => ({
+        entityId: instanceEntity.id,
+        transform: instanceEntity.components.transform,
+        pickable: this.isEntityScenePickable(instanceEntity.id),
+      }));
+    // 兼容尚未经过反序列化迁移的内存场景；旧隐藏项继续映射回源实体。
+    for (const item of legacyItems) {
+      if (!this.isEntityVisible(entity.id)) continue;
+      visibleInstances.push({
+        entityId: entity.id,
+        transform: {
+          ...entity.components.transform,
+          position: {
+            x: entity.components.transform.position.x + item.offset.x,
+            y: entity.components.transform.position.y + item.offset.y,
+            z: entity.components.transform.position.z + item.offset.z,
+          },
+        },
+        pickable: this.isEntityScenePickable(entity.id),
+      });
+    }
+
+    model.root.computeWorldMatrix(true);
+    if (!model.modelArrayBatch?.updateEntityTransforms(model.root.getWorldMatrix().clone(), visibleInstances)) {
+      this.disposeModelArrayBatch(model);
+      this.reportModelArrayBatchFailure(
+        entity,
+        model,
+        failureSignature,
+        '矩阵数量超过保护上限、Transform 非法或参数脚本输出 Mesh 不支持批量实例',
+      );
+      return;
+    }
+
+    // 正负 determinant 混合时批次会按需增加一个方向载体 Mesh，必须同步加入拾取映射。
+    for (const mesh of model.modelArrayBatch.meshes) {
+      this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, model.modelArrayBatch);
+    }
+    model.modelArrayFailureSignature = '';
+  }
+
+  private disposeMissingModelArrayParameterVariants(sourceEntityId: string, activeKeys: ReadonlySet<string>): void {
+    for (const variant of [...this.modelArrayParameterVariants.values()]) {
+      if (variant.sourceEntityId === sourceEntityId && !activeKeys.has(variant.key)) {
+        this.disposeModelArrayParameterVariant(variant);
+      }
+    }
+  }
+
+  private disposeModelArrayParameterVariantsForSource(sourceEntityId: string): void {
+    for (const variant of [...this.modelArrayParameterVariants.values()]) {
+      if (variant.sourceEntityId === sourceEntityId) this.disposeModelArrayParameterVariant(variant);
+    }
+  }
+
+  private disposeModelArrayParameterVariant(variant: ModelArrayParameterVariantRuntimeEntry): void {
+    if (this.modelArrayParameterVariants.get(variant.key) !== variant) return;
+    this.modelArrayParameterVariants.delete(variant.key);
+    for (const entity of variant.entities) {
+      if (this.modelArrayParameterVariantByEntityId.get(entity.id) === variant) {
+        this.modelArrayParameterVariantByEntityId.delete(entity.id);
+      }
+    }
+
+    const model = variant.model;
+    model.cancelLoad?.();
+    model.cancelLoad = null;
+    model.externalScriptRuntime?.dispose();
+    model.externalScriptRuntime = null;
+    for (const texture of model.textureCache.values()) texture.dispose();
+    model.textureCache.clear();
+    this.disposeModelArrayBatch(model);
+    model.assetHandle?.dispose();
+    model.assetHandle = null;
+    model.contentRoot.dispose();
+    model.root.dispose();
+    for (const entity of variant.entities) this.onModelMeasurementChanged(entity.id);
+  }
+
+  /** 同一失败形态只记录一次，避免场景同步循环刷屏。 */
+  private reportModelArrayBatchFailure(
+    entity: Entity,
+    model: ModelRuntimeEntry,
+    failureSignature: string,
+    reason: string,
+  ): void {
+    if (model.modelArrayFailureSignature === failureSignature) return;
+    model.modelArrayFailureSignature = failureSignature;
+    this.pushLog(`模型“${entity.name}”矩阵阵列创建失败：${reason}。`);
+  }
+
+  /** 释放正式矩阵阵列批次的隔离 Geometry，但保留源模型几何、材质和纹理。 */
+  private disposeModelArrayBatch(model: ModelRuntimeEntry): void {
+    if (!model.modelArrayBatch) {
+      model.modelArraySourceSignature = '';
+      return;
+    }
+
+    for (const mesh of model.modelArrayBatch.meshes) {
+      this.modelHighlightLayer.removeMesh(mesh);
+      this.modelArrayBatchByMeshUniqueId.delete(mesh.uniqueId);
+    }
+    model.modelArrayBatch.dispose();
+    model.modelArrayBatch = null;
+    model.modelArraySourceSignature = '';
   }
 
   /** 同步模型资产脚本生命周期，普通模型和生成模型共享同一份受控实现。 */
@@ -5828,6 +6722,9 @@ export class SceneRuntime {
   private findActiveModelRuntimeEntry(runtime: ExternalModelScriptRuntime): ModelRuntimeEntry | null {
     for (const model of this.models.values()) {
       if (model.externalScriptRuntime === runtime) return model;
+    }
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      if (variant.model.externalScriptRuntime === runtime) return variant.model;
     }
     for (const owner of this.generatedOutputOwners.values()) {
       if (owner.output?.kind === 'model' && owner.output.model.externalScriptRuntime === runtime) {
@@ -6285,22 +7182,58 @@ export class SceneRuntime {
     model.highlighted = selected;
   }
 
-  /** 重建全部共享模型实例的选择描边，确保单个实例选中不会污染同源模型。 */
+  /** 重建共享模型和矩阵阵列的选择描边，并只标记实际选中的 thinInstance。 */
   private rebuildSharedModelSelectionOutline(): void {
-    const selectedGroups = [...this.models.values()]
+    const selectedSourceGroups = [...this.models.values()]
       .filter((model) => model.assetHandle?.kind === 'shared-instance' && model.highlighted)
       .map((model) => model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0))
       .filter((meshes) => meshes.length > 0);
-    const signature = selectedGroups
-      .map((meshes) => meshes.map((mesh) => mesh.uniqueId).join(','))
-      .join('|');
+    const arrayBatches = new Set<EntityArrayThinInstanceBatch>();
+    for (const model of this.models.values()) {
+      if (model.modelArrayBatch) arrayBatches.add(model.modelArrayBatch);
+    }
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      if (variant.model.modelArrayBatch) arrayBatches.add(variant.model.modelArrayBatch);
+    }
+    const selectedArrayGroups = [...arrayBatches]
+      .map((batch) => {
+        const visibleEntityIds = [...batch.getEntityIds()];
+        const selectedEntityIds = new Set(
+          visibleEntityIds.filter((entityId) => this.selectedEntityIds.has(entityId)),
+        );
+        const meshes = batch.meshes.filter((mesh) => (
+          !mesh.isDisposed() && mesh.thinInstanceCount > 0 && mesh.getTotalVertices() > 0
+        ));
+        return selectedEntityIds.size > 0 && meshes.length > 0
+          ? { batch, meshes, selectedEntityIds, visibleEntityIds }
+          : null;
+      })
+      .filter((group): group is NonNullable<typeof group> => group !== null);
+
+    const signature = [
+      ...selectedSourceGroups.map((meshes) => `source:${meshes.map((mesh) => mesh.uniqueId).join(',')}`),
+      ...selectedArrayGroups.map(({ meshes, selectedEntityIds, visibleEntityIds }) => (
+        `array:${meshes.map((mesh) => `${mesh.uniqueId}:${mesh.thinInstanceCount}`).join(',')}:${visibleEntityIds.join(',')}:${[...selectedEntityIds].sort().join(',')}`
+      )),
+    ].join('|');
     if (signature === this.sharedModelSelectionOutlineSignature) return;
 
     this.sharedModelSelectionOutlineSignature = signature;
     this.modelSelectionOutlineLayer.clearSelection();
-    prepareInstancedMeshesForSelectionOutline(selectedGroups.flat());
-    for (const meshes of selectedGroups) {
+    prepareInstancedMeshesForSelectionOutline([
+      ...selectedSourceGroups.flat(),
+      ...selectedArrayGroups.flatMap((group) => group.meshes),
+    ]);
+
+    let nextSelectionId = 1;
+    for (const meshes of selectedSourceGroups) {
       this.modelSelectionOutlineLayer.addSelection(meshes);
+      nextSelectionId += 1;
+    }
+    for (const group of selectedArrayGroups) {
+      this.modelSelectionOutlineLayer.addSelection(group.meshes);
+      group.batch.setSelectionMask(group.selectedEntityIds, nextSelectionId);
+      nextSelectionId += 1;
     }
   }
 
@@ -6396,8 +7329,11 @@ export class SceneRuntime {
   }
 
   /** 通过统一并发调度器加载 Babylon 资产容器，限制批量模型解析和 GPU 上传峰值。 */
-  private loadAssetContainer(rootUrl: string, fileName: string): Promise<AssetContainer> {
-    return this.assetLoadScheduler.run(() => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene));
+  private loadAssetContainer(rootUrl: string, fileName: string, loadSignal?: AbortSignal): Promise<AssetContainer> {
+    return this.assetLoadScheduler.run(
+      () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene),
+      loadSignal,
+    );
   }
 
   /** 把完整资源 URL 拆成 Babylon SceneLoader 需要的 rootUrl 和 fileName。 */

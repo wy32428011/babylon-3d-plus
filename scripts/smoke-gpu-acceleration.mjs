@@ -54,6 +54,7 @@ await withEditor([], async (launched) => {
     const mainProcess = await launched.evaluate(async ({ app }) => ({
       hardwareAccelerationEnabled: app.isHardwareAccelerationEnabled(),
       forceHighPerformanceGpu: app.commandLine.hasSwitch('force_high_performance_gpu'),
+      softwareRasterizerDisabled: app.commandLine.hasSwitch('disable-software-rasterizer'),
       featureStatus: app.getGPUFeatureStatus(),
       gpuInfo: await app.getGPUInfo('complete'),
     }));
@@ -79,6 +80,7 @@ await withEditor([], async (launched) => {
 
     assert.equal(mainProcess.hardwareAccelerationEnabled, true, 'Electron 硬件加速未启用');
     assert.equal(mainProcess.forceHighPerformanceGpu, true, 'Electron 未请求高性能 GPU');
+    assert.equal(mainProcess.softwareRasterizerDisabled, true, 'Electron 未禁用软件 3D rasterizer');
     assert.equal(
       isEnabledFeature(mainProcess.featureStatus.webgl),
       true,

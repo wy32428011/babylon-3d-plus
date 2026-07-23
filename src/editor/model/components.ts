@@ -96,6 +96,31 @@ export type ModelAssetComponent = ModelAssetTemplate & {
   assetCode: string;
 };
 
+/**
+ * 旧版模型矩阵阵列中的隐藏逻辑项。
+ * 仅用于兼容已有场景文件；新阵列会创建真实 Scene Entity，并使用 modelArrayInstance 关联渲染源。
+ */
+export type ModelArrayItem = {
+  id: string;
+  name: string;
+  assetCode: string;
+  /** 相对源模型的世界坐标偏移。 */
+  offset: Vector3Data;
+};
+
+/** 旧版挂载在源模型实体上的隐藏矩阵阵列，反序列化时会迁移为独立实体。 */
+export type ModelArrayComponent = {
+  items: ModelArrayItem[];
+};
+
+/**
+ * 独立模型实体的矩阵实例关联。
+ * 实体仍保留名称、资产编号、Transform、显隐和锁定等完整编辑语义，Babylon 运行时只复用 sourceEntityId 的模型几何。
+ */
+export type ModelArrayInstanceComponent = {
+  sourceEntityId: string;
+};
+
 /** 模型生成器的导入模型目标，保存资产索引信息和完整模型模板。 */
 export type ModelGeneratorModelTarget = {
   kind: 'model';
@@ -210,6 +235,9 @@ export type EntityComponents = {
   locator?: LocatorComponent;
   cadReference?: CadReferenceComponent;
   modelAsset?: ModelAssetComponent;
+  /** @deprecated 仅用于加载旧版隐藏阵列项。 */
+  modelArray?: ModelArrayComponent;
+  modelArrayInstance?: ModelArrayInstanceComponent;
   modelGenerator?: ModelGeneratorComponent;
   telemetryBinding?: TelemetryBindingComponent;
   camera?: CameraComponent;

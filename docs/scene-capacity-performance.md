@@ -15,7 +15,7 @@
 
 ## 硬件加速 WebGL 前置条件
 
-Electron 主进程会在 `app ready` 前请求高性能 GPU，主窗口明确开启 WebGL。编辑器 Scene View 创建 Babylon Engine 时使用 `powerPreference: high-performance` 与 `failIfMajorPerformanceCaveat: true`，并检查实际 renderer：
+Electron 主进程会在 `app ready` 前请求高性能 GPU、禁用 Chromium 软件 3D rasterizer，主窗口明确开启 WebGL。编辑器 Scene View 创建 Babylon Engine 时使用 `powerPreference: high-performance` 与 `failIfMajorPerformanceCaveat: true`，并检查实际 renderer：
 
 - Intel / NVIDIA / AMD 等 ANGLE 硬件后端正常进入编辑器；
 - SwiftShader、WARP、llvmpipe 等软件 renderer 会被拒绝，不再静默占用 CPU 模拟 WebGL；
@@ -35,6 +35,33 @@ Electron 主进程会在 `app ready` 前请求高性能 GPU，主窗口明确开
 共享模型只复用源几何、材质和纹理；每个实体仍拥有独立的 `root`、`contentRoot`、实例节点、动画组、Transform、metadata、拾取、显隐、锁定和释放句柄。删除一个实体不会影响其它实例，最后一个引用归还后才释放源容器。
 
 动态模型默认独占是有意的安全边界。例如 Stacker `appearanceColor` 会克隆并修改实例材质，YZJ/Stacker 参数脚本会修改顶点或生成额外 Mesh，强制共享可能造成实例串色或几何互相污染。
+
+## 模型阵列：独立实体与矩阵批次
+
+模型阵列同时保留编辑语义和渲染性能：
+
+- 阵列数量为 N 时，`SceneDocument` 和 Hierarchy 中真实增加 N 个模型实体；每个实体有独立 ID、名称、`modelAsset.assetCode`、Transform、显隐、锁定、删除和选择状态。
+- 阵列实体通过 `modelArrayInstance.sourceEntityId` 直接引用一个源模型；默认相同参数的 N 个实体只复用源模型，不会逐实体加载模型、创建完整节点树或启动脚本运行时。
+- 每个阵列实体自己的 `modelAsset.parameterValues` 都参与渲染分组。与源模型参数不同的组合会创建一个 `layerMask=0` 的隐藏脚本宿主，完整执行声明式参数绑定和外置参数脚本；相同参数组合只共享一个宿主，连续调参且组成员不变时复用已有宿主。宿主本身不参与显示或拾取，该组全部逻辑模型仍由 thinInstance 渲染。
+- 每个参数组合的每个可渲染 Mesh 只创建一个批次 Mesh。全部逻辑实体 Transform 先组合为连续 `Float32Array`，再通过一次 `thinInstanceSetBuffer("matrix", ...)` 注册或通过 `thinInstanceBufferUpdated("matrix")` 刷新。
+- 源模型自身已有 thinInstance 时，会先展开源矩阵，再与每个逻辑实体根矩阵组合；例如同一参数组合下，88 个源 Mesh × 1000 个逻辑模型仍只有 88 个批次 Mesh 和 88,000 个 thinInstance；只有实际出现不同参数组合时才增加对应组合的固定批次数。
+- 拾取使用 Babylon 返回的 `thinInstanceIndex` 反查逻辑实体；选择描边使用逐实例 `instanceSelectionId` 缓冲，只标记目标模型，不会整组高亮。
+- 隐藏实体会从有效矩阵缓冲中移除；锁定实体保持显示但不作为可编辑拾取结果。移动单个实体会复用原批次与同长度矩阵缓冲，不影响其它实体。
+- 删除阵列源时，编辑器会提升第一个未删除实例为新源并重绑其余实例，避免产生悬空引用。旧版 `modelArray.items` 会在加载时迁移成相同数量的独立实体。
+
+矩阵计算只处理数值 TypedArray；Babylon Mesh、材质、骨骼和 GPU Buffer 仍由渲染主线程管理，避免把不可转移的引擎对象错误放入 Worker。若后续实测矩阵组合本身成为瓶颈，可只把纯数值矩阵填充下沉到 Worker，并通过 transferable 返回 `Float32Array`。
+
+## 场景打开：编辑态自动 thinInstance 合批
+
+Scene View 在编辑态会构造一层只存在于内存中的实体覆盖，不修改原始 `SceneDocument`，也不会把优化关系写入场景文件：
+
+- 完全相同的模型模板忽略实例级 `modelAsset.assetCode` 后分组；每组只保留一个真实模型和脚本宿主，其余实体临时映射到 `modelArrayInstance`，复用既有拾取、Gizmo、测量、显隐、锁定、选择描边和 thinInstance 矩阵批次。
+- 无外置脚本模型默认允许合批；带脚本模型仅允许经过编辑态行为核对的 `shelf.model.ts`、`yzj.model.ts` 和 `chain-conveyor.model.ts`。其它脚本继续走逐实体路径，避免把依赖 `assetCode` 或私有运行状态的视觉错误合并。
+- 模板签名包含资源版本、单位、脚本元数据、参数配置和 `parameterValues`，因此不同尺寸、材质或显隐参数会进入不同批次，不会共用已变形几何。
+- 模型模板签名和派生实体使用不可变对象缓存；单个 Transform 变化时复用其余逻辑实体，避免 Gizmo 拖动期间反复序列化整份脚本元数据。
+- 进入运行预览时 Scene View 始终同步原始文档，恢复每个设备独立的脚本实例、`assetCode`、参数和 MQTT 遥测状态；退出预览后再回到编辑态覆盖层。
+
+2026-07-23 使用指定的 `Untitled Scene.scene.json`（SHA-256 `f9d9fa6dc156dd0f96b5ba76f794ee2454efde415b7965b91cae92244a459b54`）和仓库内真实 YZJ/链条机 GLB、脚本进行 NullEngine 初始化回归：29,893,835 字节场景包含 1,840 个实体，其中 1,821 个模型被归并为 4 个参数变体源和 1,817 个逻辑 thinInstance 实体；实际只加载 4 次模型源，生成 135 个批次 Mesh、38,027 个 thinInstance，最终有效渲染 Mesh 为 270。最终一次运行中反序列化约 612 ms、编辑态分组约 572 ms、真实脚本与矩阵批次从 `sync()` 到就绪约 2.40 s，脚本警告和运行时日志均为 0。该数据用于验证初始化数量级和完整性，不等同于最终 Electron 窗口的 GPU 上传或首帧时间。
 
 ## 增量场景同步
 
@@ -77,18 +104,24 @@ Engine 保留 antialias 和 stencil，同时把没有项目功能依赖的 `pres
 npm run smoke:scene-capacity
 npm run smoke:shelf-instancing
 npm run smoke:gpu
+npm run smoke:packaged:gpu
 npm run smoke:installer:gpu
 ```
 
 `smoke:gpu` 会先执行完整构建，再真实启动 Electron 验证硬件 GPU、GPU compositing、WebGL 2、上下文性能属性和 renderer，并使用 `--disable-gpu` 反向确认 Scene View 会阻断软件回退。
 
-`smoke:installer:gpu` 会重新生成 Windows NSIS 安装程序，并启动该安装包同源的 `win-unpacked` 生产 EXE，确认打入 `app.asar` 的安装态代码仍使用硬件 WebGL；验证过程使用独立临时 `userData`，不会写入安装目录。
+`smoke:packaged:gpu` 会通过 Playwright Electron 直接启动生产 EXE，同时检查主进程 GPU feature、活动显卡、启动开关以及 Scene View 的实际 WebGL renderer。默认验证 `release/win-unpacked`；也可执行 `npm run smoke:packaged:gpu -- "C:\Program Files\ZENDING 3D EDITOR\ZENDING 3D EDITOR.exe"` 检查指定安装目录。脚本会核对应用版本，旧安装程序会以明确的版本不匹配错误失败。
+
+`smoke:installer:gpu` 会重新生成 Windows NSIS 安装程序，再调用上述生产 EXE 验证；验证过程使用独立临时 `userData`，不会写入安装目录。
 
 `smoke:scene-capacity` 覆盖：
 
 - 静态/动态共享准入矩阵；
 - 加载调度器最大并发 4、FIFO 与 dispose；
-- 100 个同源静态实体只加载一次源容器；
-- 有效 Mesh 使用 `InstancedMesh`；
+- 100 个同源静态实体在编辑态只保留 1 个真实模型和 99 个 thinInstance，切换原始运行文档后恢复 100 个独立运行实体；
+- 未知外置脚本明确回退，已核对参数化脚本允许按完整参数模板分组；
+- 1000 个模型阵列实体仍只加载一个源模型，每个源 Mesh 只增加一个批次 Mesh；
+- `thinInstanceIndex`、单实体移动/隐藏/锁定/删除和选择缓冲保持独立实体语义；
+- 运行预览中的普通静态共享模型继续使用 `InstancedMesh`；
 - 选择变化不重新收集未修改模型子 Mesh；
 - 删除最后一个实例时源容器只释放一次。

@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   FreeCamera,
   LoadAssetContainerAsync,
+  Matrix,
   MeshBuilder,
   NullEngine,
   Scene,
@@ -156,6 +157,14 @@ function assertDenseShelfSpaceExpanded({ denseBounds, baselineBounds, values }) 
   assert.ok(denseBounds.size.y > baselineBounds.size.y + layerSpacing * 80, `100层必须沿 Y 轴展开，当前 Y=${denseBounds.size.y.toFixed(3)}，基线 Y=${baselineBounds.size.y.toFixed(3)}`);
   assert.ok(denseBounds.size.z > baselineBounds.size.z + deepSpacing * 0.45, `双深必须沿 Z 轴展开，当前 Z=${denseBounds.size.z.toFixed(3)}，基线 Z=${baselineBounds.size.z.toFixed(3)}`);
 }
+/** 直接从当前连续缓冲读取 thinInstance，避免 Babylon 公共矩阵缓存返回更新前快照。 */
+function readThinInstanceFinalWorldMatrix(batch, thinInstanceIndex) {
+  const matrixOffset = thinInstanceIndex * 16;
+  if (!batch?.matrixBuffer || matrixOffset + 16 > batch.matrixBuffer.length) return null;
+  batch.mesh.computeWorldMatrix(true);
+  return Matrix.FromArray(batch.matrixBuffer, matrixOffset).multiply(batch.mesh.getWorldMatrix());
+}
+
 /** 汇总高密度批次的 thin instance 数量，兼容 Babylon 公开统计方法和脚本 metadata。 */
 function countDenseThinInstances(meshes) {
   return meshes.reduce((sum, mesh) => (
@@ -262,6 +271,8 @@ function createSceneRuntimeShelfEntity(id, x, modelAsset, options = {}) {
         scale: { x: 1, y: 1, z: 1 },
       },
       modelAsset: { ...modelAsset, assetCode: id },
+      ...(options.modelArray ? { modelArray: options.modelArray } : {}),
+      ...(options.modelArrayInstance ? { modelArrayInstance: options.modelArrayInstance } : {}),
     },
   };
 }
@@ -292,6 +303,28 @@ async function waitForSceneRuntimeEntityMeshes(scene, runtime, entityId) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.fail(`${entityId} SceneRuntime 加载可渲染 Mesh 超时`);
+}
+
+/** 等待阵列实体自己的参数脚本宿主完成，并返回其参数变体运行时。 */
+async function waitForSceneRuntimeModelArrayParameterVariant(runtime, entityId) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const variant = runtime.modelArrayParameterVariantByEntityId?.get(entityId);
+    if (
+      variant?.model?.measurementReady
+      && variant.model.modelArrayBatch
+      && runtime.getModelMeasurement(entityId).status === 'ready'
+    ) {
+      return variant;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`${entityId} 阵列参数脚本宿主初始化超时`);
+}
+
+/** 判断两个米制尺寸是否存在可观察差异。 */
+function hasMeasurementDifference(left, right, tolerance = 1e-4) {
+  if (!left || !right) return false;
+  return ['x', 'y', 'z'].some((axis) => Math.abs(left[axis] - right[axis]) > tolerance);
 }
 
 /** 等待选中 Shelf 参数更新后产生更多可渲染实例 Mesh。 */
@@ -454,32 +487,263 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       '已选中 Shelf 必须能够创建阵列预览',
     );
     const previewClones = [...(runtime.entityArrayPreview?.clones ?? [])];
-    const previewMeshes = previewClones.flatMap((clone) => (
-      clone.getChildMeshes(false).filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0)
-    ));
-    assert.equal(previewClones.length, 3, 'Shelf 阵列预览必须创建请求数量的临时克隆');
-    assert.ok(previewMeshes.length > 0 && previewMeshes.some((mesh) => mesh.isAnInstance), 'Shelf 阵列预览必须保留矩阵实例渲染');
-    assert.deepEqual(
-      previewMeshes
-        .filter((mesh) => mesh.isAnInstance && mesh.sourceMesh?.instancedBuffers && !mesh.instancedBuffers)
-        .map(describeMeshSelectionState),
-      [],
-      '已选中 Shelf 的阵列预览实例必须补齐实例选择缓冲容器',
+    const previewMeshes = [...(runtime.entityArrayPreview?.matrixPreview?.meshes ?? [])];
+    assert.equal(previewClones.length, 0, 'Shelf 阵列预览不得按副本递归克隆完整节点树');
+    assert.equal(previewMeshes.length, leftMeshes.length, 'Shelf 每个可渲染源 Mesh 只应创建一个矩阵批次');
+    assert.ok(previewMeshes.every((mesh) => !mesh.isAnInstance && mesh.thinInstanceCount === 3), 'Shelf 矩阵批次必须按请求数量写入 thinInstance');
+    assert.equal(
+      previewMeshes.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
+      leftMeshes.length * 3,
+      'Shelf 预览节点数量必须与副本数解耦，仅矩阵实例数随副本数增长',
     );
-    assert.doesNotThrow(() => integrationScene.render(), '已选中 Shelf 创建阵列预览后不得因 instanceSelectionId 空引用中断渲染');
+    assert.ok(previewMeshes.every((mesh) => !mesh.isPickable && mesh.metadata === null), 'Shelf 矩阵批次不得参与拾取或保留实体 metadata');
+    assert.doesNotThrow(() => integrationScene.render(), '已选中 Shelf 创建矩阵阵列预览后必须保持可渲染');
+
+    assert.equal(
+      runtime.updateEntityArrayPreview(left.id, { x: 1, y: 0, z: 0 }, 1000, 0.2),
+      true,
+      'Shelf 最大阵列数量必须继续复用固定矩阵批次',
+    );
+    assert.deepEqual(runtime.entityArrayPreview?.matrixPreview?.meshes, previewMeshes, '1000 个副本不得增加 Shelf 批次 Mesh 数量');
+    assert.ok(previewMeshes.every((mesh) => mesh.thinInstanceCount === 1000), 'Shelf 每个批次必须写入 1000 个矩阵实例');
+    assert.equal(
+      previewMeshes.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
+      leftMeshes.length * 1000,
+      'Shelf 最大阵列只增加矩阵数量，不增加场景 Mesh 节点数量',
+    );
+    assert.doesNotThrow(() => integrationScene.render(), 'Shelf 1000 副本矩阵预览必须保持可渲染');
 
     assert.equal(
       runtime.updateEntityArrayPreview(left.id, { x: -1, y: 0, z: 0 }, 1, 0.5),
       true,
-      '更新 Shelf 阵列方向、数量和间距必须复用预览池',
+      '更新 Shelf 阵列方向、数量和间距必须复用矩阵批次',
     );
-    assert.equal(runtime.entityArrayPreview?.clones.length, 1, '减少 Shelf 阵列数量必须回收多余预览克隆');
-    assert.doesNotThrow(() => integrationScene.render(), '更新 Shelf 阵列预览后仍必须保持可渲染');
+    assert.deepEqual(
+      runtime.entityArrayPreview?.matrixPreview?.meshes,
+      previewMeshes,
+      '减少 Shelf 阵列数量不得重建矩阵批次 Mesh',
+    );
+    assert.ok(previewMeshes.every((mesh) => mesh.thinInstanceCount === 1), '减少 Shelf 阵列数量必须收缩有效矩阵实例数');
+    assert.doesNotThrow(() => integrationScene.render(), '更新 Shelf 矩阵阵列预览后仍必须保持可渲染');
     runtime.clearEntityArrayPreview();
-    assert.equal(runtime.entityArrayPreview, null, '取消 Shelf 阵列预览必须释放临时克隆');
+    assert.equal(runtime.entityArrayPreview, null, '取消 Shelf 阵列预览必须释放矩阵批次');
+    assert.ok(previewMeshes.every((mesh) => mesh.isDisposed()), '取消 Shelf 阵列预览必须释放全部矩阵批次 Mesh');
+
+    let persistentEntities = Array.from({ length: 1000 }, (_, index) => (
+      createSceneRuntimeShelfEntity(`shelf-array-${index + 1}`, (index + 1) * 2, modelAsset, {
+        modelArrayInstance: { sourceEntityId: left.id },
+      })
+    ));
+    const meshCountBeforePersistentArray = integrationScene.meshes.length;
+    runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], left.id));
+    const persistentBatch = runtime.models.get(left.id)?.modelArrayBatch;
+    const persistentMeshes = [...(persistentBatch?.meshes ?? [])];
+    assert.equal(loadCount, 1, '正式 Shelf 阵列不得触发任何额外模型加载');
+    assert.equal(runtime.models.size, 2, '1000 个 Shelf 阵列实体不得创建逐副本 ModelRuntimeEntry');
+    assert.equal(runtime.modelArrayInstanceEntities.size, 1000, 'SceneRuntime 必须保留 1000 个独立 Shelf 逻辑实体');
+    assert.equal(persistentMeshes.length, leftMeshes.length, '正式 Shelf 阵列每个源 Mesh 只应创建一个批次 Mesh');
+    assert.equal(
+      integrationScene.meshes.length,
+      meshCountBeforePersistentArray + leftMeshes.length,
+      '正式 Shelf 阵列 Mesh 数量只能增加固定批次数量',
+    );
+    assert.ok(
+      persistentMeshes.every((mesh) => !mesh.isAnInstance && mesh.thinInstanceCount === 1000),
+      '正式 Shelf 阵列必须一次写入全部 1000 个 thinInstance',
+    );
+    assert.equal(
+      persistentMeshes.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
+      leftMeshes.length * 1000,
+      '正式 Shelf 阵列矩阵总数必须覆盖全部源 Mesh 与独立逻辑实体组合',
+    );
+    assert.ok(
+      persistentMeshes.every((mesh) => mesh.metadata?.modelArraySourceEntityId === left.id && mesh.isPickable),
+      '正式 Shelf 矩阵批次必须记录源模型并支持实例拾取',
+    );
+    assert.equal(
+      runtime.readEntityIdFromMesh(persistentMeshes[0], 0),
+      persistentEntities[0].id,
+      'Shelf thinInstanceIndex 必须映射到具体逻辑实体',
+    );
+    assert.doesNotThrow(() => integrationScene.render(), '正式 Shelf 1000 阵列必须保持可渲染');
+
+    let persistentMatrixUpdateCount = 0;
+    const originalPersistentMatrixUpdate = persistentBatch.updateEntityTransforms.bind(persistentBatch);
+    persistentBatch.updateEntityTransforms = (...args) => {
+      persistentMatrixUpdateCount += 1;
+      return originalPersistentMatrixUpdate(...args);
+    };
+    runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[10].id));
+    assert.equal(persistentMatrixUpdateCount, 0, '仅切换选择不得重新组合 1000 个 Shelf 矩阵');
+
+    const persistentMatrixBuffer = persistentBatch?.batches?.[0]?.matrixBuffer;
+    const firstPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 0)?.getTranslation().x;
+    const lastPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1000 - 1)?.getTranslation().x;
+    persistentEntities = [
+      createSceneRuntimeShelfEntity(persistentEntities[0].id, 7, modelAsset, {
+        modelArrayInstance: { sourceEntityId: left.id },
+      }),
+      ...persistentEntities.slice(1),
+    ];
+    runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[0].id));
+    assert.equal(runtime.models.get(left.id)?.modelArrayBatch, persistentBatch, '移动单个 Shelf 实体必须复用正式矩阵批次');
+    assert.equal(persistentMatrixUpdateCount, 1, '移动一个 Shelf 实体只允许触发一次整批矩阵刷新');
+    assert.equal(persistentBatch?.batches?.[0]?.matrixBuffer, persistentMatrixBuffer, '移动 Shelf 实体必须复用原 Float32Array');
+    const updatedFirstPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 0)?.getTranslation().x;
+    const updatedLastPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1000 - 1)?.getTranslation().x;
+    assert.ok(
+      Math.abs((updatedFirstPersistentX ?? Number.NaN) - ((firstPersistentX ?? Number.NaN) + 5)) <= 1e-6,
+      '移动单个 Shelf 实体必须只让自己的最终世界矩阵平移 5m',
+    );
+    assert.ok(
+      Math.abs((updatedLastPersistentX ?? Number.NaN) - lastPersistentX) <= 1e-6,
+      '移动单个 Shelf 实体不得影响最后一个实例',
+    );
+
+    const baseMeasurement = runtime.getModelMeasurement(persistentEntities[2].id).sizeMeters;
+    const firstVariantAsset = {
+      ...modelAsset,
+      parameterValues: {
+        ...values,
+        layerCount: values.layerCount + 1,
+        columnCount: values.columnCount + 2,
+      },
+    };
+    const secondVariantAsset = {
+      ...modelAsset,
+      parameterValues: {
+        ...values,
+        layerCount: values.layerCount + 2,
+        columnCount: values.columnCount + 1,
+      },
+    };
+    persistentEntities = persistentEntities.map((entity, index) => {
+      if (index > 1) return entity;
+      return createSceneRuntimeShelfEntity(
+        entity.id,
+        entity.components.transform.position.x,
+        index === 0 ? firstVariantAsset : secondVariantAsset,
+        { modelArrayInstance: { sourceEntityId: left.id } },
+      );
+    });
+    runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[0].id));
+    const [firstParameterVariant, secondParameterVariant] = await Promise.all([
+      waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[0].id),
+      waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[1].id),
+    ]);
+    assert.notEqual(firstParameterVariant, secondParameterVariant, '不同参数值的阵列模型必须使用不同脚本宿主');
+    assert.equal(runtime.modelArrayParameterVariants.size, 2, '两个不同参数组合只应创建两个脚本宿主');
+    assert.equal(
+      runtime.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
+      998,
+      '修改两个阵列实体参数后，基础批次必须保留其余 998 个模型',
+    );
+    assert.deepEqual(
+      firstParameterVariant.model.modelArrayBatch.getEntityIds(),
+      [persistentEntities[0].id],
+      '第一个参数变体批次必须只映射第一个逻辑模型',
+    );
+    assert.deepEqual(
+      secondParameterVariant.model.modelArrayBatch.getEntityIds(),
+      [persistentEntities[1].id],
+      '第二个参数变体批次必须只映射第二个逻辑模型',
+    );
+    assert.equal(
+      runtime.readEntityIdFromMesh(firstParameterVariant.model.modelArrayBatch.meshes[0], 0),
+      persistentEntities[0].id,
+      '参数变体 thinInstance 拾取必须映射回自己的逻辑模型',
+    );
+    assert.ok(
+      firstParameterVariant.model.meshes.every((mesh) => mesh.layerMask === 0 && mesh.isPickable === false),
+      '参数脚本宿主必须隐藏且不可拾取，只显示 thinInstance 批次',
+    );
+    assert.ok(
+      firstParameterVariant.model.modelArrayBatch.meshes.every((mesh) => mesh.layerMask !== 0 && mesh.thinInstanceCount > 0),
+      '参数脚本输出必须继续通过可见 thinInstance 批次渲染',
+    );
+    assert.ok(
+      hasMeasurementDifference(runtime.getModelMeasurement(persistentEntities[0].id).sizeMeters, baseMeasurement),
+      '第一个阵列模型修改层列参数后必须产生独立尺寸变化',
+    );
+    assert.ok(
+      hasMeasurementDifference(runtime.getModelMeasurement(persistentEntities[1].id).sizeMeters, baseMeasurement),
+      '第二个阵列模型修改层列参数后必须产生独立尺寸变化',
+    );
+    assert.equal(loadCount, 1, '阵列参数变体必须复用已加载源容器，不得按模型重复加载 GLB');
+
+    const firstVariantModel = firstParameterVariant.model;
+    const adjustedFirstVariantAsset = {
+      ...firstVariantAsset,
+      parameterValues: {
+        ...firstVariantAsset.parameterValues,
+        columnCount: firstVariantAsset.parameterValues.columnCount + 1,
+      },
+    };
+    persistentEntities = persistentEntities.map((entity, index) => (
+      index === 0
+        ? createSceneRuntimeShelfEntity(
+          entity.id,
+          entity.components.transform.position.x,
+          adjustedFirstVariantAsset,
+          { modelArrayInstance: { sourceEntityId: left.id } },
+        )
+        : entity
+    ));
+    runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[0].id));
+    const adjustedFirstVariant = await waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[0].id);
+    assert.equal(adjustedFirstVariant, firstParameterVariant, '单个阵列模型连续调参必须复用同一个脚本宿主');
+    assert.equal(adjustedFirstVariant.model, firstVariantModel, '连续调参不得重新创建模型运行时或重复加载资源');
+    assert.equal(loadCount, 1, '连续调参不得增加 GLB 加载次数');
+
+    const sharedVariantEntities = persistentEntities.map((entity, index) => (
+      index <= 1
+        ? createSceneRuntimeShelfEntity(
+          entity.id,
+          entity.components.transform.position.x,
+          firstVariantAsset,
+          { modelArrayInstance: { sourceEntityId: left.id } },
+        )
+        : entity
+    ));
+    persistentEntities = sharedVariantEntities;
+    runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[1].id));
+    const sharedFirstVariant = await waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[0].id);
+    const sharedSecondVariant = await waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[1].id);
+    assert.equal(sharedFirstVariant, sharedSecondVariant, '相同参数值的两个阵列模型必须合并复用一个脚本宿主');
+    assert.equal(runtime.modelArrayParameterVariants.size, 1, '参数组合合并后必须释放不再使用的脚本宿主');
+    assert.deepEqual(
+      sharedFirstVariant.model.modelArrayBatch.getEntityIds(),
+      [persistentEntities[0].id, persistentEntities[1].id],
+      '相同参数组必须一次提交两个逻辑模型的 thinInstance 矩阵',
+    );
+    const sharedVariantMesh = sharedFirstVariant.model.modelArrayBatch.meshes[0];
+    assert.equal(
+      runtime.readEntityIdFromMesh(sharedVariantMesh, sharedVariantMesh.thinInstanceCount - 1),
+      persistentEntities[1].id,
+      '合并参数组最后一个 thinInstance 必须映射到第二个逻辑模型',
+    );
+
+    persistentEntities = persistentEntities.map((entity, index) => (
+      index <= 1
+        ? createSceneRuntimeShelfEntity(
+          entity.id,
+          entity.components.transform.position.x,
+          modelAsset,
+          { modelArrayInstance: { sourceEntityId: left.id } },
+        )
+        : entity
+    ));
+    runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[0].id));
+    assert.equal(runtime.modelArrayParameterVariants.size, 0, '恢复默认参数后必须释放全部额外脚本宿主');
+    assert.equal(
+      runtime.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
+      1000,
+      '恢复默认参数后全部 1000 个逻辑模型必须重新合并到基础 thinInstance 批次',
+    );
 
     const lockedRight = createSceneRuntimeShelfEntity(right.id, 10, modelAsset, { locked: true });
     runtime.sync(createSceneRuntimeDocument([left, lockedRight], left.id));
+    assert.ok(persistentMeshes.every((mesh) => mesh.isDisposed()), '移除 Shelf 逻辑阵列项必须释放正式矩阵批次');
     assert.ok(rightMeshes.every((mesh) => mesh.isPickable === false), '锁定 Shelf 必须禁用全部实例拾取');
     assert.ok(leftMeshes.every((mesh) => mesh.isPickable === true), '未锁定 Shelf 必须保持实例拾取');
 
@@ -495,6 +759,10 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       sourceDisposeCount,
       meshesPerShelf: leftMeshes.length,
       arrayPreviewMeshes: previewMeshes.length,
+      arrayPreviewThinInstancesAtMax: leftMeshes.length * 1000,
+      persistentArrayMeshes: persistentMeshes.length,
+      persistentArrayThinInstances: leftMeshes.length * 1000,
+      independentParameterVariants: true,
     };
   } finally {
     runtime.dispose();

@@ -3,7 +3,9 @@ import type { Vector3Data } from './math';
 import type { SceneDocument } from './SceneDocument';
 import { createArrayAssetNumber, type ArrayAssetNumberResult } from './arrayAssetNumbering';
 
-export const MODEL_ARRAY_COPY_COUNT_MAX = 100;
+export const MODEL_ARRAY_COPY_COUNT_MAX = 1000;
+/** 单个源模型可关联的矩阵阵列实体上限；同时作为旧版隐藏阵列项迁移保护。 */
+export const MODEL_ARRAY_ITEM_COUNT_MAX = 100_000;
 export const MODEL_ARRAY_MIN_SPAN_METERS = 1e-6;
 export const ENTITY_NAME_MAX_LENGTH = 80;
 
@@ -196,13 +198,19 @@ export function getEntityArrayIdentifierError(
     return '自定义资产编号规则仅支持一个带资产编号的源对象。';
   }
 
-  const occupiedNames = new Set(Object.values(scene.entities).map((entity) => entity.name));
-  const occupiedAssetNumbers = new Set(
-    Object.values(scene.entities)
-      .map(getArrayAssetNumberTarget)
-      .map((target) => target?.value.trim() ?? '')
-      .filter(Boolean),
-  );
+  const occupiedNames = new Set<string>();
+  const occupiedAssetNumbers = new Set<string>();
+  for (const entity of Object.values(scene.entities)) {
+    occupiedNames.add(entity.name);
+    const assetNumber = getArrayAssetNumberTarget(entity)?.value.trim();
+    if (assetNumber) occupiedAssetNumbers.add(assetNumber);
+
+    for (const item of entity.components.modelArray?.items ?? []) {
+      occupiedNames.add(item.name);
+      const itemAssetCode = item.assetCode.trim();
+      if (itemAssetCode) occupiedAssetNumbers.add(itemAssetCode);
+    }
+  }
 
   for (let copyIndex = 1; copyIndex <= normalizedCopyCount; copyIndex += 1) {
     for (const source of sources) {

@@ -34,6 +34,7 @@ import {
   type EditorGridSettings,
 } from '../../runtime/babylon/createEngine';
 import type { AssetEntry } from '../assets/AssetDatabase';
+import { createImportedAssetIndexes, findImportedAssetForModelAsset } from '../assets/modelAssetRelink';
 import { createId } from '../../shared/ids';
 import type {
   CadReferenceComponent,
@@ -59,6 +60,7 @@ import {
   getEntityArrayIdentifierError,
   getEntityArrayParameterError,
   MODEL_ARRAY_COPY_COUNT_MAX,
+  MODEL_ARRAY_ITEM_COUNT_MAX,
   normalizeModelArrayDirection,
 } from '../model/modelArray';
 import {
@@ -136,9 +138,14 @@ export type CadImportProgress = {
   fileName: string | null;
 };
 
+type EntityClipboardEntry = {
+  root: Entity;
+  children: Entity[];
+};
+
 type EntityClipboard = {
   id: string;
-  entities: Entity[];
+  entries: EntityClipboardEntry[];
 };
 
 export type EntityArrayDirection = 'x' | '-x' | 'y' | '-y' | 'z' | '-z';
@@ -162,7 +169,7 @@ export type ResolvedEntityArrayInput = {
 };
 
 export type EntityArrayCommitResult =
-  | { ok: true; duplicatedIds: string[] }
+  | { ok: true; duplicatedIds: string[]; modelArrayItemIds: string[]; createdCount: number }
   | { ok: false; error: string };
 
 export type SceneFocusRequest = {
@@ -637,72 +644,6 @@ function isSceneEnvironmentEqual(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-/** 归一化导入资产匹配路径，避免 Windows 分隔符和大小写差异影响同包识别。 */
-function normalizeAssetMatchPath(value: string | undefined): string {
-  return (value ?? '').trim().replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase();
-}
-
-/** 获取模型包目录匹配键，优先使用扫描得到的 packagePath。 */
-function getAssetPackageMatchPath(asset: AssetEntry): string {
-  return normalizeAssetMatchPath(asset.packagePath ?? getDirectoryPath(asset.path));
-}
-
-/** 从模型文件路径中取出所在目录，用于重新导入后文件名变化时的兜底匹配。 */
-function getDirectoryPath(filePath: string | undefined): string {
-  const normalizedPath = (filePath ?? '').trim().replace(/\\/g, '/');
-  const separatorIndex = normalizedPath.lastIndexOf('/');
-  return separatorIndex > 0 ? normalizedPath.slice(0, separatorIndex) : '';
-}
-
-/** 为本轮导入的模型资产建立精确路径、URL 和唯一包目录三类索引。 */
-function createImportedAssetIndexes(assets: AssetEntry[]): {
-  byPath: Map<string, AssetEntry>;
-  bySourceUrl: Map<string, AssetEntry>;
-  uniqueByPackagePath: Map<string, AssetEntry>;
-} {
-  const modelAssets = assets.filter((asset) => asset.kind === 'model');
-  const byPath = new Map<string, AssetEntry>();
-  const bySourceUrl = new Map<string, AssetEntry>();
-  const packageAssetLists = new Map<string, AssetEntry[]>();
-
-  for (const asset of modelAssets) {
-    const pathKey = normalizeAssetMatchPath(asset.path);
-    if (pathKey) byPath.set(pathKey, asset);
-
-    const sourceUrlKey = asset.sourceUrl.trim();
-    if (sourceUrlKey) bySourceUrl.set(sourceUrlKey, asset);
-
-    const packageKey = getAssetPackageMatchPath(asset);
-    if (!packageKey) continue;
-
-    const packageAssets = packageAssetLists.get(packageKey) ?? [];
-    packageAssets.push(asset);
-    packageAssetLists.set(packageKey, packageAssets);
-  }
-
-  const uniqueByPackagePath = new Map<string, AssetEntry>();
-  for (const [packageKey, packageAssets] of packageAssetLists.entries()) {
-    if (packageAssets.length === 1) uniqueByPackagePath.set(packageKey, packageAssets[0]);
-  }
-
-  return { byPath, bySourceUrl, uniqueByPackagePath };
-}
-
-/** 按 sourcePath/sourceUrl 精确匹配模型实例，必要时按唯一包目录兜底。 */
-function findImportedAssetForModelAsset(
-  modelAsset: ModelAssetTemplate,
-  indexes: ReturnType<typeof createImportedAssetIndexes>,
-): AssetEntry | null {
-  const pathMatch = indexes.byPath.get(normalizeAssetMatchPath(modelAsset.sourcePath));
-  if (pathMatch) return pathMatch;
-
-  const sourceUrlMatch = indexes.bySourceUrl.get(modelAsset.sourceUrl.trim());
-  if (sourceUrlMatch) return sourceUrlMatch;
-
-  const packageMatch = indexes.uniqueByPackagePath.get(normalizeAssetMatchPath(getDirectoryPath(modelAsset.sourcePath)));
-  return packageMatch ?? null;
-}
-
 /** 根据新导入的资产快照生成场景实例的新 modelAsset，同时保留现场资产编号。 */
 function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: AssetEntry): ModelAssetComponent {
   const parameterConfig = normalizeModelParameterConfig(asset.parameterConfig) ?? undefined;
@@ -898,6 +839,19 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     ...(entity.components.locator ? { locator: cloneLocator(entity.components.locator) } : {}),
     ...(entity.components.cadReference ? { cadReference: cloneCadReference(entity.components.cadReference) } : {}),
     ...(entity.components.modelAsset ? { modelAsset: cloneModelAsset(entity.components.modelAsset) } : {}),
+    ...(entity.components.modelArray
+      ? {
+          modelArray: {
+            items: entity.components.modelArray.items.map((item) => ({
+              ...item,
+              offset: cloneVector3(item.offset),
+            })),
+          },
+        }
+      : {}),
+    ...(entity.components.modelArrayInstance
+      ? { modelArrayInstance: { ...entity.components.modelArrayInstance } }
+      : {}),
     ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
     ...(entity.components.poiEffect ? { poiEffect: { ...entity.components.poiEffect } } : {}),
     ...(entity.components.camera ? { camera: { ...entity.components.camera } } : {}),
@@ -964,35 +918,81 @@ function isModelGeneratorEntity(entity: Entity | null | undefined): boolean {
   return Boolean(entity?.components.modelGenerator);
 }
 
+/** 创建与场景实体隔离的剪贴板快照，并按目标父级归一化层级字段。 */
+function cloneEntityForClipboard(entity: Entity, parentId: string | null, childrenIds: string[]): Entity {
+  return {
+    ...entity,
+    parentId,
+    childrenIds: [...childrenIds],
+    components: cloneEntityComponents(entity),
+  };
+}
+
+type EntityClipboardSnapshot = {
+  entries: EntityClipboardEntry[];
+  folderCount: number;
+  entityCount: number;
+  skippedModelGeneratorCount: number;
+};
+
 /**
- * 过滤会产生第二个模型生成器的副本，只允许在当前场景没有生成器时引入一个。
- * 普通实体原样保留，返回值中的 skippedCount 用于写入中文操作日志。
+ * 把 Hierarchy 选区转换为剪贴板根条目。
+ * 选中文件夹时包含其全部直属实体；同时选中父文件夹与子实体时只保留父级条目。
  */
-function filterDuplicatedModelGenerators(
-  scene: SceneDocument,
-  entities: Entity[],
-): { entities: Entity[]; skippedCount: number; existingGenerator: Entity | null } {
-  const existingGenerator = findExistingModelGeneratorEntity(scene);
-  let hasAllowedGenerator = existingGenerator !== null;
-  let skippedCount = 0;
-  const filteredEntities: Entity[] = [];
+function createEntityClipboardSnapshot(scene: SceneDocument, selectedIds: string[]): EntityClipboardSnapshot {
+  const selectedIdSet = new Set(selectedIds);
+  const entries: EntityClipboardEntry[] = [];
+  let folderCount = 0;
+  let entityCount = 0;
+  let skippedModelGeneratorCount = 0;
 
-  for (const entity of entities) {
-    if (!isModelGeneratorEntity(entity)) {
-      filteredEntities.push(entity);
+  for (const entityId of selectedIds) {
+    const entity = scene.entities[entityId];
+    if (!entity) continue;
+
+    const selectedParent = entity.parentId ? scene.entities[entity.parentId] : null;
+    if (!entity.isFolder && selectedParent?.isFolder && selectedIdSet.has(selectedParent.id)) continue;
+
+    if (entity.isFolder) {
+      const children: Entity[] = [];
+      for (const childId of entity.childrenIds) {
+        const child = scene.entities[childId];
+        if (!child || child.isFolder) continue;
+        if (isModelGeneratorEntity(child)) {
+          skippedModelGeneratorCount += 1;
+          continue;
+        }
+
+        children.push(cloneEntityForClipboard(child, entity.id, []));
+      }
+
+      entries.push({
+        root: cloneEntityForClipboard(entity, null, children.map((child) => child.id)),
+        children,
+      });
+      folderCount += 1;
+      entityCount += children.length;
       continue;
     }
 
-    if (hasAllowedGenerator) {
-      skippedCount += 1;
+    if (isModelGeneratorEntity(entity)) {
+      skippedModelGeneratorCount += 1;
       continue;
     }
 
-    hasAllowedGenerator = true;
-    filteredEntities.push(entity);
+    entries.push({ root: cloneEntityForClipboard(entity, null, []), children: [] });
+    entityCount += 1;
   }
 
-  return { entities: filteredEntities, skippedCount, existingGenerator };
+  return { entries, folderCount, entityCount, skippedModelGeneratorCount };
+}
+
+/** 生成人类可读的文件夹/实体数量摘要，用于复制与粘贴日志。 */
+function formatEntityClipboardCount(folderCount: number, entityCount: number): string {
+  const parts: string[] = [];
+  if (folderCount > 0) parts.push(`${folderCount} 个文件夹`);
+  if (entityCount > 0) parts.push(`${entityCount} 个对象`);
+  return parts.join('、') || '0 个对象';
 }
 
 type EntityDuplicateOverrides = {
@@ -1045,6 +1045,132 @@ function createDuplicatedRuntimeEntity(
     childrenIds: [],
     components,
   };
+}
+
+/**
+ * 创建模型阵列的轻量 Scene Entity。
+ * 只复制实例级 Transform、资产编号和关联字段；大型模型模板元数据保持只读共享，避免 1000 级阵列重复 JSON 深拷贝。
+ */
+function createModelArrayInstanceEntity(
+  source: Entity,
+  sourceEntityId: string,
+  offset: Vector3Data,
+  name: string,
+  assetCode: string,
+  existingNames: Set<string>,
+): Entity {
+  const modelAsset = source.components.modelAsset;
+  if (!modelAsset) throw new Error('模型阵列源缺少 modelAsset。');
+
+  const components: Entity['components'] = {
+    ...source.components,
+    transform: {
+      ...source.components.transform,
+      position: {
+        x: source.components.transform.position.x + offset.x,
+        y: source.components.transform.position.y + offset.y,
+        z: source.components.transform.position.z + offset.z,
+      },
+    },
+    modelAsset: { ...modelAsset, assetCode },
+    modelArrayInstance: { sourceEntityId },
+  };
+  delete components.modelArray;
+  existingNames.add(name);
+
+  return {
+    ...source,
+    id: createId('entity'),
+    name,
+    parentId: source.parentId,
+    childrenIds: [],
+    components,
+  };
+}
+
+type PreparedEntityClipboardPaste = {
+  entities: Entity[];
+  rootEntityIds: string[];
+  folderCount: number;
+  entityCount: number;
+  skippedModelGeneratorCount: number;
+};
+
+/** 为一次粘贴生成全新的文件夹和实体 ID，并重建文件夹直属关系。 */
+function prepareEntityClipboardPaste(
+  scene: SceneDocument,
+  clipboard: EntityClipboard,
+  parentId: string | null,
+): PreparedEntityClipboardPaste {
+  const existingNames = new Set(Object.values(scene.entities).map((entity) => entity.name));
+  const entities: Entity[] = [];
+  const rootEntityIds: string[] = [];
+  const duplicatedIdBySourceId = new Map<string, string>();
+  let folderCount = 0;
+  let entityCount = 0;
+  let skippedModelGeneratorCount = 0;
+  const pasteOffset = { x: CLIPBOARD_PASTE_OFFSET_METERS, y: 0, z: CLIPBOARD_PASTE_OFFSET_METERS };
+
+  for (const entry of clipboard.entries) {
+    if (entry.root.isFolder) {
+      const folderId = createId('folder');
+      const folderName = createUniqueEntityName(existingNames, entry.root.name);
+      const children: Entity[] = [];
+
+      for (const child of entry.children) {
+        if (isModelGeneratorEntity(child)) {
+          skippedModelGeneratorCount += 1;
+          continue;
+        }
+        const duplicatedChild = createDuplicatedRuntimeEntity(child, folderId, pasteOffset, existingNames);
+        duplicatedIdBySourceId.set(child.id, duplicatedChild.id);
+        children.push(duplicatedChild);
+      }
+
+      const folder: Entity = {
+        ...entry.root,
+        id: folderId,
+        name: folderName,
+        isFolder: true,
+        parentId: null,
+        childrenIds: children.map((child) => child.id),
+        components: cloneEntityComponents(entry.root),
+      };
+
+      entities.push(folder, ...children);
+      rootEntityIds.push(folder.id);
+      folderCount += 1;
+      entityCount += children.length;
+      continue;
+    }
+
+    if (isModelGeneratorEntity(entry.root)) {
+      skippedModelGeneratorCount += 1;
+      continue;
+    }
+
+    const duplicatedEntity = createDuplicatedRuntimeEntity(entry.root, parentId, pasteOffset, existingNames);
+    duplicatedIdBySourceId.set(entry.root.id, duplicatedEntity.id);
+    entities.push(duplicatedEntity);
+    rootEntityIds.push(duplicatedEntity.id);
+    entityCount += 1;
+  }
+
+  for (let index = 0; index < entities.length; index += 1) {
+    const entity = entities[index];
+    const sourceEntityId = entity.components.modelArrayInstance?.sourceEntityId;
+    const duplicatedSourceId = sourceEntityId ? duplicatedIdBySourceId.get(sourceEntityId) : null;
+    if (!duplicatedSourceId) continue;
+    entities[index] = {
+      ...entity,
+      components: {
+        ...entity.components,
+        modelArrayInstance: { sourceEntityId: duplicatedSourceId },
+      },
+    };
+  }
+
+  return { entities, rootEntityIds, folderCount, entityCount, skippedModelGeneratorCount };
 }
 
 /** 返回当前 Hierarchy 主选区，兼容只有 Scene 单选但没有多选数组的情况。 */
@@ -1132,22 +1258,54 @@ function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[]): Scene
   const deletingIds = new Set(entityIds.filter((entityId) => Boolean(scene.entities[entityId])));
   if (deletingIds.size === 0) return scene;
 
+  // 删除阵列源时提升第一个未删除实例为新源，避免其余独立模型因悬空引用一起消失。
+  const promotedSources = new Map<string, string>();
+  for (const deletingId of deletingIds) {
+    const deletingEntity = scene.entities[deletingId];
+    if (!deletingEntity?.components.modelAsset || deletingEntity.components.modelArrayInstance) continue;
+    const promoted = scene.entityIds.find((entityId) => (
+      !deletingIds.has(entityId)
+      && scene.entities[entityId]?.components.modelArrayInstance?.sourceEntityId === deletingId
+    ));
+    if (promoted) promotedSources.set(deletingId, promoted);
+  }
+
   const entities: Record<string, Entity> = {};
   for (const [entityId, entity] of Object.entries(scene.entities)) {
     if (deletingIds.has(entityId)) continue;
 
     const parentId = entity.parentId && deletingIds.has(entity.parentId) ? null : entity.parentId;
     const childrenIds = entity.childrenIds.filter((childId) => !deletingIds.has(childId));
+    const promotedSourceId = entity.components.modelArrayInstance
+      ? promotedSources.get(entity.components.modelArrayInstance.sourceEntityId)
+      : undefined;
+    let components = entity.components;
+    if (promotedSources.get(entity.components.modelArrayInstance?.sourceEntityId ?? '') === entityId) {
+      components = { ...entity.components };
+      delete components.modelArrayInstance;
+      delete components.modelArray;
+    } else if (promotedSourceId) {
+      components = {
+        ...entity.components,
+        modelArrayInstance: { sourceEntityId: promotedSourceId },
+      };
+    }
+
     entities[entityId] =
-      parentId === entity.parentId && childrenIds.length === entity.childrenIds.length
+      parentId === entity.parentId
+      && childrenIds.length === entity.childrenIds.length
+      && components === entity.components
         ? entity
-        : { ...entity, parentId, childrenIds };
+        : { ...entity, parentId, childrenIds, components };
   }
 
+  const selectedReplacement = scene.selectedEntityId
+    ? promotedSources.get(scene.selectedEntityId) ?? null
+    : null;
   const selectedEntityId =
     scene.selectedEntityId && !deletingIds.has(scene.selectedEntityId) && entities[scene.selectedEntityId]
       ? scene.selectedEntityId
-      : null;
+      : selectedReplacement;
 
   return {
     ...scene,
@@ -1184,6 +1342,60 @@ function insertDuplicatedEntitiesInScene(
   };
 }
 
+/** 插入带完整父子关系的剪贴板副本，并把独立实体挂到已有目标文件夹。 */
+function insertClipboardEntitiesInScene(
+  scene: SceneDocument,
+  duplicatedEntities: Entity[],
+  rootEntityIds: string[],
+): SceneDocument {
+  const duplicatedIdSet = new Set(duplicatedEntities.map((entity) => entity.id));
+  const entities: Record<string, Entity> = { ...scene.entities };
+  const existingParentAdditions = new Map<string, string[]>();
+
+  for (const entity of duplicatedEntities) {
+    entities[entity.id] = entity;
+    if (!entity.parentId || duplicatedIdSet.has(entity.parentId)) continue;
+
+    const additions = existingParentAdditions.get(entity.parentId) ?? [];
+    additions.push(entity.id);
+    existingParentAdditions.set(entity.parentId, additions);
+  }
+
+  for (const [parentId, childIds] of existingParentAdditions.entries()) {
+    const parent = entities[parentId];
+    if (!parent?.isFolder) continue;
+    entities[parentId] = {
+      ...parent,
+      childrenIds: [...parent.childrenIds, ...childIds.filter((childId) => !parent.childrenIds.includes(childId))],
+    };
+  }
+
+  return {
+    ...scene,
+    entityIds: [...scene.entityIds, ...duplicatedEntities.map((entity) => entity.id)],
+    entities,
+    selectedEntityId: rootEntityIds[0] ?? scene.selectedEntityId,
+  };
+}
+
+/** 返回模型矩阵实例最终引用的独立源实体，避免对已有阵列副本再次阵列时形成引用链。 */
+function resolveModelArraySourceEntityId(scene: SceneDocument, source: Entity): string {
+  const referencedSourceId = source.components.modelArrayInstance?.sourceEntityId;
+  const referencedSource = referencedSourceId ? scene.entities[referencedSourceId] : null;
+  return referencedSource?.components.modelAsset && !referencedSource.components.modelArrayInstance
+    ? referencedSource.id
+    : source.id;
+}
+
+/** 统计一个源模型已经拥有的独立矩阵实例，并兼容尚未迁移的旧版隐藏阵列项。 */
+function countModelArrayInstances(scene: SceneDocument, sourceEntityId: string): number {
+  const source = scene.entities[sourceEntityId];
+  let count = source?.components.modelArray?.items.length ?? 0;
+  for (const entity of Object.values(scene.entities)) {
+    if (entity.components.modelArrayInstance?.sourceEntityId === sourceEntityId) count += 1;
+  }
+  return count;
+}
 
 type PreparedResolvedEntityArray =
   | {
@@ -1196,7 +1408,7 @@ type PreparedResolvedEntityArray =
     }
   | { ok: false; error: string };
 
-/** 基于已解析的轴向跨度与世界方向创建正式阵列副本，但不直接写入场景。 */
+/** 基于已解析的轴向跨度与世界方向创建正式阵列实体，但不直接写入场景。 */
 function prepareResolvedEntityArray(
   state: EditorState,
   input: ResolvedEntityArrayInput,
@@ -1241,6 +1453,24 @@ function prepareResolvedEntityArray(
     return { ok: false, error: '净间距或副本数量过大。' };
   }
 
+  const modelSourceSelectionCounts = new Map<string, number>();
+  for (const sourceId of sourceIds) {
+    const source = state.scene.entities[sourceId];
+    if (!source?.components.modelAsset) continue;
+    const modelSourceId = resolveModelArraySourceEntityId(state.scene, source);
+    modelSourceSelectionCounts.set(modelSourceId, (modelSourceSelectionCounts.get(modelSourceId) ?? 0) + 1);
+  }
+  for (const [modelSourceId, selectedSourceCount] of modelSourceSelectionCounts) {
+    const modelSource = state.scene.entities[modelSourceId];
+    const nextInstanceCount = countModelArrayInstances(state.scene, modelSourceId) + copyCount * selectedSourceCount;
+    if (nextInstanceCount > MODEL_ARRAY_ITEM_COUNT_MAX) {
+      return {
+        ok: false,
+        error: `模型“${modelSource?.name ?? modelSourceId}”的阵列实例总数不能超过 ${MODEL_ARRAY_ITEM_COUNT_MAX}。`,
+      };
+    }
+  }
+
   const existingNames = new Set(Object.values(state.scene.entities).map((entity) => entity.name));
   const duplicatedEntities: Entity[] = [];
 
@@ -1255,8 +1485,6 @@ function prepareResolvedEntityArray(
       const source = state.scene.entities[sourceId];
       if (!source || source.isFolder) continue;
 
-      const overrides: EntityDuplicateOverrides = {};
-      const assetNumberTarget = getEntityAssetNumberTarget(source);
       if (source.components.modelAsset) {
         const identity = createModelArrayIdentity(
           source.name,
@@ -1265,22 +1493,32 @@ function prepareResolvedEntityArray(
           assetNumberRule,
         );
         if (!identity.ok) return identity;
-        overrides.name = identity.name;
-        overrides.assetNumber = { kind: 'modelAsset', value: identity.assetCode };
-      } else {
-        const nameResult = createEntityArrayName(source.name, copyIndex);
-        if (!nameResult.ok) return nameResult;
-        overrides.name = nameResult.name;
 
-        if (assetNumberTarget) {
-          const assetNumberResult = createArrayAssetNumber(
-            assetNumberTarget.value,
-            copyIndex,
-            assetNumberRule,
-          );
-          if (!assetNumberResult.ok) return assetNumberResult;
-          overrides.assetNumber = { kind: assetNumberTarget.kind, value: assetNumberResult.value };
-        }
+        duplicatedEntities.push(createModelArrayInstanceEntity(
+          source,
+          resolveModelArraySourceEntityId(state.scene, source),
+          offset,
+          identity.name,
+          identity.assetCode,
+          existingNames,
+        ));
+        continue;
+      }
+
+      const overrides: EntityDuplicateOverrides = {};
+      const nameResult = createEntityArrayName(source.name, copyIndex);
+      if (!nameResult.ok) return nameResult;
+      overrides.name = nameResult.name;
+
+      const assetNumberTarget = getEntityAssetNumberTarget(source);
+      if (assetNumberTarget) {
+        const assetNumberResult = createArrayAssetNumber(
+          assetNumberTarget.value,
+          copyIndex,
+          assetNumberRule,
+        );
+        if (!assetNumberResult.ok) return assetNumberResult;
+        overrides.assetNumber = { kind: assetNumberTarget.kind, value: assetNumberResult.value };
       }
 
       duplicatedEntities.push(
@@ -1304,7 +1542,7 @@ function prepareResolvedEntityArray(
   };
 }
 
-/** 用一条命令插入按父文件夹分组的阵列副本，并保持原始主对象选中。 */
+/** 用一条命令插入全部阵列实体，并保持原始主对象选中。 */
 function createResolvedEntityArrayCommand(prepared: Extract<PreparedResolvedEntityArray, { ok: true }>) {
   return updateSceneDocumentCommand('模型阵列', (scene) => {
     let nextScene = scene;
@@ -1326,7 +1564,6 @@ function createResolvedEntityArrayCommand(prepared: Extract<PreparedResolvedEnti
   });
 }
 
-/** 新建分组文件夹，并把选中的普通实体作为一个可撤销操作移入该分组。 */
 function groupEntitiesInScene(scene: SceneDocument, entityIds: string[]): SceneDocument {
   const groupingIds = [...new Set(entityIds)].filter((entityId) => {
     const entity = scene.entities[entityId];
@@ -2124,38 +2361,26 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   copySelectedEntities: () => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '复制对象');
-      const selectedIds = getActiveHierarchySelectionIds(state).filter((entityId) => {
-        const entity = state.scene.entities[entityId];
-        return Boolean(entity && !entity.isFolder);
-      });
-      const skippedModelGeneratorCount = selectedIds.reduce((count, entityId) => {
-        return count + (isModelGeneratorEntity(state.scene.entities[entityId]) ? 1 : 0);
-      }, 0);
-      const copyingIds = selectedIds.filter((entityId) => !isModelGeneratorEntity(state.scene.entities[entityId]));
-      if (copyingIds.length === 0) {
-        return skippedModelGeneratorCount > 0
+
+      const snapshot = createEntityClipboardSnapshot(state.scene, getActiveHierarchySelectionIds(state));
+      if (snapshot.entries.length === 0) {
+        return snapshot.skippedModelGeneratorCount > 0
           ? { entityClipboard: null, logs: prependLog(state.logs, '复制已跳过模型生成器：场景只允许一个模型生成器，剪贴板已清空。') }
           : state;
       }
 
-      const entities = copyingIds
-        .map((entityId) => state.scene.entities[entityId])
-        .filter((entity): entity is Entity => Boolean(entity))
-        .map((entity) => ({
-          ...entity,
-          childrenIds: [],
-          components: cloneEntityComponents(entity),
-        }));
-
       const skippedGeneratorMessage =
-        skippedModelGeneratorCount > 0 ? '；已跳过模型生成器，场景只允许一个' : '';
+        snapshot.skippedModelGeneratorCount > 0 ? '；已跳过模型生成器，场景只允许一个' : '';
 
       return {
         entityClipboard: {
           id: createId('clipboard'),
-          entities,
+          entries: snapshot.entries,
         },
-        logs: prependLog(state.logs, `复制对象: ${entities.length} 个对象${skippedGeneratorMessage}`),
+        logs: prependLog(
+          state.logs,
+          `复制对象: ${formatEntityClipboardCount(snapshot.folderCount, snapshot.entityCount)}${skippedGeneratorMessage}`,
+        ),
       };
     });
   },
@@ -2163,8 +2388,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '粘贴对象');
       const clipboard = state.entityClipboard;
-      if (!clipboard || clipboard.entities.length === 0) return state;
+      if (!clipboard || clipboard.entries.length === 0) return state;
 
+      const containsFolder = clipboard.entries.some((entry) => entry.root.isFolder);
       const selectedEntity = getSelectedEntity(state);
       const inferredTargetFolderId =
         targetFolderId === undefined
@@ -2172,23 +2398,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             ? selectedEntity.id
             : selectedEntity?.parentId ?? null
           : targetFolderId;
-      const parentId = resolvePasteParentId(state.scene, inferredTargetFolderId);
+      const parentId = containsFolder ? null : resolvePasteParentId(state.scene, inferredTargetFolderId);
       const parentFolder = parentId ? state.scene.entities[parentId] : null;
       if (parentFolder && isEntityEffectivelyLocked(state.scene, parentFolder)) return state;
 
-      const existingNames = new Set(Object.values(state.scene.entities).map((entity) => entity.name));
-      const candidateEntities = clipboard.entities.map((entity) =>
-        createDuplicatedRuntimeEntity(
-          entity,
-          parentId,
-          { x: CLIPBOARD_PASTE_OFFSET_METERS, y: 0, z: CLIPBOARD_PASTE_OFFSET_METERS },
-          existingNames,
-        ),
-      );
-      const generatorFilter = filterDuplicatedModelGenerators(state.scene, candidateEntities);
-      const duplicatedEntities = generatorFilter.entities;
-      if (duplicatedEntities.length === 0) {
-        const existingGeneratorId = generatorFilter.existingGenerator?.id ?? state.scene.selectedEntityId;
+      const prepared = prepareEntityClipboardPaste(state.scene, clipboard, parentId);
+      if (prepared.entities.length === 0) {
+        const existingGeneratorId = findExistingModelGeneratorEntity(state.scene)?.id ?? state.scene.selectedEntityId;
         return {
           scene: {
             ...state.scene,
@@ -2201,18 +2417,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const command = updateSceneDocumentCommand('粘贴对象', (scene) =>
-        insertDuplicatedEntitiesInScene(scene, duplicatedEntities, parentId),
+        insertClipboardEntitiesInScene(scene, prepared.entities, prepared.rootEntityIds),
       );
       const result = executeCommand(state.scene, state.history, command);
-      const pastedIds = duplicatedEntities.map((entity) => entity.id);
-
       const skippedGeneratorMessage =
-        generatorFilter.skippedCount > 0 ? '；已拦截重复模型生成器，场景只允许一个' : '';
+        prepared.skippedModelGeneratorCount > 0 ? '；已跳过模型生成器，场景只允许一个' : '';
 
       return {
         ...result,
-        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, pastedIds),
-        logs: prependLog(state.logs, `${command.label}: ${pastedIds.length} 个对象${skippedGeneratorMessage}`),
+        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, prepared.rootEntityIds),
+        logs: prependLog(
+          state.logs,
+          `${command.label}: ${formatEntityClipboardCount(prepared.folderCount, prepared.entityCount)}${skippedGeneratorMessage}`,
+        ),
       };
     });
   },
@@ -2300,7 +2517,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       const command = createResolvedEntityArrayCommand(prepared);
       const result = executeCommand(state.scene, state.history, command);
-      const duplicatedIds = prepared.duplicatedEntities.map((entity) => entity.id);
+      const modelArrayItemIds = prepared.duplicatedEntities
+        .filter((entity) => Boolean(entity.components.modelArrayInstance))
+        .map((entity) => entity.id);
+      const duplicatedIds = prepared.duplicatedEntities
+        .filter((entity) => !entity.components.modelArrayInstance)
+        .map((entity) => entity.id);
+      const createdCount = prepared.duplicatedEntities.length;
 
       return {
         ...result,
@@ -2308,7 +2531,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         hierarchySelectionIds: sanitizeHierarchySelection(result.scene, prepared.sourceIds),
         logs: prependLog(
           state.logs,
-          `${command.label}: ${duplicatedIds.length} 个对象，净间距 ${prepared.spacingMeters} m`,
+          `${command.label}: ${createdCount} 个对象，净间距 ${prepared.spacingMeters} m`,
         ),
       };
     });
@@ -2331,15 +2554,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       const command = createResolvedEntityArrayCommand(prepared);
       const result = executeCommand(state.scene, state.history, command);
-      const duplicatedIds = prepared.duplicatedEntities.map((entity) => entity.id);
-      commitResult = { ok: true, duplicatedIds };
+      const modelArrayItemIds = prepared.duplicatedEntities
+        .filter((entity) => Boolean(entity.components.modelArrayInstance))
+        .map((entity) => entity.id);
+      const duplicatedIds = prepared.duplicatedEntities
+        .filter((entity) => !entity.components.modelArrayInstance)
+        .map((entity) => entity.id);
+      const createdCount = prepared.duplicatedEntities.length;
+      commitResult = { ok: true, duplicatedIds, modelArrayItemIds, createdCount };
 
       return {
         ...result,
         hierarchySelectionIds: sanitizeHierarchySelection(result.scene, prepared.sourceIds),
         logs: prependLog(
           state.logs,
-          `${command.label}: ${duplicatedIds.length} 个对象，净间距 ${prepared.spacingMeters} m`,
+          `${command.label}: ${createdCount} 个对象，净间距 ${prepared.spacingMeters} m`,
         ),
       };
     });

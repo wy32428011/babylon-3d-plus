@@ -17,7 +17,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - Electron 桌面窗口：通过 Electron 主进程启动独立桌面应用窗口。
 - 首页启动台：进入五面板编辑器前会先显示首页；左侧“最近项目”通过 Electron 主进程从可配置的数据中台 `POST /api/v1/projects/query` 拉取业务项目列表，支持按项目名称进行服务端搜索，并可直接打开当前格式 Editor 工程；右侧继续显示本地最近场景，并保留新建场景、打开项目目录和打开场景文件等入口。本地最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
-- GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU，主窗口明确启用 WebGL；编辑器 Scene View 使用 `high-performance` 上下文并拒绝 SwiftShader、WARP 等软件 renderer，避免静默退回 CPU 模拟渲染。
+- GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU、禁用软件 3D rasterizer，并在主窗口明确启用 WebGL；编辑器 Scene View 使用 `high-performance` 上下文并拒绝 SwiftShader、WARP 等软件 renderer，避免静默退回 CPU 模拟渲染。
 - Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部，中间列独立承载 Scene、Project 与 Console；Project/Console 只与 Scene 画布同宽，在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到 Project 区域最小化入口，点击后以弹窗查看完整日志，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
 - Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑；左键拖拽旋转或移动视角时以真实相机输入和位姿变化优先，即使从模型表面开始轻微拖拽也不会触发模型拾取，纯单击仍正常选中模型；Toolbar 新增“俯”视角按钮，可保留当前观察中心与缩放距离切换为稳定俯视视角，方便依据地面 CAD 图纸定位并搭建场景。
 - 大场景无损容量优化：不降低抗锯齿、纹理、材质、光照或几何质量；同一 `sourceUrl + assetRevision` 的普通静态模型会复用单份源 `AssetContainer`，每个实体继续保留独立 Transform、显隐、锁定、拾取和选择语义。带外置脚本、参数配置或脚本元数据的动态模型默认继续独占容器，Shelf 保留经过验证的脚本化共享特例。模型与环境加载统一限制为最多 4 个并发任务，SceneRuntime 只完整同步真正变化的实体；WebGL 上下文丢失或渲染循环异常会显示可读遮罩，Babylon 完成恢复后自动清除。详见 `docs/scene-capacity-performance.md`。
@@ -27,21 +27,21 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - 创建基础对象：支持创建米制 Cube、Sphere、Plane；基准尺寸分别为 `1 m × 1 m × 1 m`、直径 `1 m`、`2 m × 2 m`，有体积对象拖入 Scene View 时会以底面落地。
 - 创建基础灯光：支持创建 Hemispheric、Directional、Point 三类灯光实体。
 - Hierarchy 选择与分组：支持在层级面板中选择场景对象，并与 Scene View 高亮状态同步；选中文件夹时会在 Scene View 高亮该文件夹下的所有可显示模型；左侧 Hierarchy 提供搜索、新建文件夹、单选/多选拖入文件夹分组、拖回根层级，以及实体/文件夹级显示隐藏、锁定解锁控制。
-- Hierarchy 右键菜单：左侧模型树单选或多选后可打开深色上下文菜单，支持场景聚焦、库聚焦、隐藏、复制、粘贴、模型阵列、锁定、重命名、删除、群组和解组；右键未选中对象会切换为单选，右键当前多选对象会保留多选集合。
+- Hierarchy 右键菜单：左侧模型树单选或多选后可打开深色上下文菜单，支持场景聚焦、库聚焦、隐藏、复制、粘贴、模型阵列、锁定、重命名、删除、群组和解组；右键未选中对象会切换为单选，右键当前多选对象会保留多选集合。复制文件夹时会连同全部直属对象生成完整文件夹副本，空文件夹同样支持复制，粘贴和撤销/重做均按整个文件夹处理。
 - Scene View 点击选中：支持在 Scene 画布单击对象完成选中，单击空白区域会清空当前选择。
 - Inspector 实体编辑：支持编辑选中实体名称、position、rotation、scale 等 Transform 数据；其中 position 按米、rotation 在 UI 中按角度、内部仍按弧度保存。内置 Box 以 1 米基准映射为 `size (m)`；Sphere/Plane 明确显示米制基准尺寸，但通用 scale 仍保持无量纲缩放比例。普通导入模型的 `Model Asset` 区域固定显示只读“实际尺寸 (m)”及 X/Y/Z，加载中或无有效可见几何时显示明确状态。
 - Inspector 材质编辑：支持编辑基础 Mesh 的材质颜色。
 - Inspector 灯光编辑：支持编辑灯光类型与强度。
 - Transform Gizmo：Scene View 中支持移动、旋转、缩放三种可视化操控模式，普通拖拽结束后写入撤销/重做历史；编辑模式下选中单个未锁定可阵列实体并使用移动工具时，可按住 `Shift` 拖动 X/Y/Z 单轴箭头进入模型阵列。可阵列实体包括导入模型、内置 Mesh、虚拟定位线框、已解锁 CAD 参考层和 POI 特效；文件夹、灯光和全局唯一模型生成器明确排除。
 - Gizmo 坐标与吸附：支持局部/全局坐标空间切换，并可配置位置、旋转角度、缩放三类基础吸附步长；Shift 阵列沿当前可见局部/世界轴计算方向，阵列手势期间临时忽略位置吸附，普通移动吸附不受影响。
-- W/E/R 与批量操作快捷键：在非输入控件聚焦时，可用 W/E/R 快速切换移动、旋转、缩放工具；F 场景聚焦、H 隐藏对象、Ctrl+C 复制、Ctrl+V 粘贴、Ctrl+K 锁定、Ctrl+G 群组、Shift+G 解组、Delete/Backspace 删除当前 Hierarchy 选区。
+- W/E/R 与批量操作快捷键：在非输入控件聚焦时，可用 W/E/R 快速切换移动、旋转、缩放工具；F 场景聚焦、H 隐藏对象、Ctrl+C 复制、Ctrl+V 粘贴、Ctrl+K 锁定、Ctrl+G 群组、Shift+G 解组、Delete/Backspace 删除当前 Hierarchy 选区；文件夹选区执行 Ctrl+C/Ctrl+V 时会整体复制文件夹及其全部直属对象。
 - 撤销/重做：通过命令历史支持基础编辑操作、实体创建、实体删除、实体重命名、材质编辑、灯光编辑与 Gizmo 拖拽的撤销与重做；Hierarchy 批量隐藏、锁定、删除、粘贴、模型阵列、群组和解组均作为单条命令进入历史，Shift 拖拽阵列确认后同样以一条“模型阵列”命令整体撤销/重做。
 - JSON 场景保存/加载：支持将当前场景保存为 JSON 文件，并从 JSON 场景文件加载；保存、文件选择加载和首页最近场景加载成功后都会更新最近场景列表。
 - Project 资源库外观：底部 Project 面板已切换为资源库浏览器样式，位于中间列 Scene 画布下方且与 Scene 同宽，并将图库区域加高到约 `300px` 至 `460px` 自适应，包含模型库、POI库、主题库、组合库、环境库、图表库、图片库七个页签，以及筛选占位行和可换行资源卡片；模型库卡片使用深色直角卡、上方缩略图、下方两行居中文字和单行省略标题，模型库内置立方体、球体、地面、虚拟定位线框、半球光、方向光、点光源七类基础资源，并支持导入普通模型文件夹展示项目内模型卡片；POI 库保留可点击或拖入 Scene 任意位置的“模型生成器”，重复创建入口会选中已有生成器而不是新建副本；环境库使用独立的单 GLB 文件导入入口，支持点击应用或拖入右侧“环境模型”整条属性行；所有导入模型进入场景后统一以米为操作单位。
 - POI 模型生成器：生成器保存共享生成模板、按顺序匹配的条件规则、MQTT 精确绑定和元数据 TTL；一个场景只有 `entityIds` 中第一个生成器生效，编辑态 Transform 只控制青色可拾取配置标记，不作为任何货物生成点。运行预览中该全局生成器统一管理普通 Conveyor、普通 Stacker 与 `warehouseFlow` 的模板/规则；货物实际位置来自输送面、货叉、locator 或仓储状态机。派生 Mesh/模型不进入 Hierarchy，也不写入场景文件或撤销历史。
 - POI 内置 EFF 特效：POI 库内置报警脉冲光圈、旋转警示灯、定位光柱、雷达扫描圈、火焰、烟雾、火花飞溅、蒸汽泄漏、气体泄漏、水流喷射、管线流动粒子、管线流动箭头、移动双箭头、货物目标定位框、输送方向箭头和疏散路线 16 种实时特效；支持点击或拖拽创建、Hierarchy 管理、Transform、显隐、锁定、复制、阵列、撤销/重做、保存重载和 Inspector 参数实时编辑。
-- 模型与环境导入：普通模型与环境模型严格分库。模型库点击 `导入模型文件夹`，将有效模型包复制到项目 `Assets/Models`；扫描支持目录本身为单模型包或包含多个一级模型包，并读取 `meta.json`、单位、缩略图和脚本。普通模型单位只接受 `meta.json.lengthUnit`：显式合法值按标准系数换算，缺失或空值按 `meter / 1`，显式非法值拒绝导入；参数脚本和几何包围盒都不参与源单位推断。环境库点击 `导入环境 GLB`，单文件保存到 `Assets/Environments/<安全化文件 stem>/<原文件名>.glb`，同名重导采用暂存、备份和失败回滚。普通模型、模型生成器输出和环境模型都保留 `lengthUnit + unitScaleToMeters`，运行时只在各自内容根节点应用一次源单位到米的基准缩放；直接导入且符合 glTF 约定的环境 GLB 登记为 `meter / 1`。
-- 导入模型资产编号：每个导入模型实例都会生成并保存 `modelAsset.assetCode`，Inspector 的 `Model Asset` 区域可编辑该编号；复制、粘贴会按新实体 ID 重新生成编号。所有阵列副本名称统一按源对象名称递增：末尾有数字时递增并保留前导零，例如 `测试 1001 → 测试 1002`、`DEV009 → DEV010`；只有字符串时直接追加 `1、2、3…`，不添加“副本”。阵列弹框只在单个导入模型或虚拟定位线框源对象上启用一次性资产编号规则，该规则仅影响 `modelAsset.assetCode` 或 `locator.assetId`；内置 Mesh、CAD 和 POI 不新增编号字段。原对象编号、粘贴语义和场景格式不变。
+- 模型与环境导入：普通模型与环境模型严格分库。模型库点击 `导入模型文件夹`，将有效模型包复制到项目 `Assets/Models`；扫描支持目录本身为单模型包或包含多个一级模型包，并读取 `meta.json`、单位、缩略图和脚本。普通模型单位只接受 `meta.json.lengthUnit`：显式合法值按标准系数换算，缺失或空值按 `meter / 1`，显式非法值拒绝导入；参数脚本和几何包围盒都不参与源单位推断。环境库点击 `导入环境 GLB`，单文件保存到 `Assets/Environments/<安全化文件 stem>/<原文件名>.glb`，同名重导采用暂存、备份和失败回滚。普通模型、模型生成器输出和环境模型都保留 `lengthUnit + unitScaleToMeters`，运行时只在各自内容根节点应用一次源单位到米的基准缩放；直接导入且符合 glTF 约定的环境 GLB 登记为 `meter / 1`。 从其他电脑打开场景后，重新导入同名模型包会按唯一的“包目录名 + 主模型文件名”自动替换旧电脑的绝对资源路径并刷新已有实例。
+- 导入模型资产编号：每个导入模型实例都会生成并保存 `modelAsset.assetCode`，Inspector 的 `Model Asset` 区域可编辑该编号；复制、粘贴会按新实体 ID 重新生成编号。所有阵列副本名称统一按源对象名称递增：末尾有数字时递增并保留前导零，例如 `测试 1001 → 测试 1002`、`DEV009 → DEV010`；只有字符串时直接追加 `1、2、3…`，不添加“副本”。导入模型阵列会创建与阵列数量一致的独立 Scene Entity，并通过 `components.modelArrayInstance.sourceEntityId` 关联共享渲染源；Hierarchy 中可逐个选择、移动、旋转、缩放、显隐、锁定和删除。Babylon 运行时不会逐实体加载或克隆模型，而是按参数组合运行脚本：相同 `parameterValues` 共享一个源或隐藏脚本宿主，不同参数组合分别执行参数化脚本；所有阵列实体仍按该组合的可渲染 Mesh 创建固定数量批次 Mesh，一次提交连续 `Float32Array` thinInstance 矩阵，并通过 `thinInstanceIndex` 映射回具体逻辑实体。旧版 `components.modelArray.items` 场景加载时会自动迁移为独立实体。虚拟定位线框仍把编号写入 `locator.assetId`，内置 Mesh、CAD 和 POI 继续沿用实体复制语义。场景文件版本保持 `1`，新增字段为可选字段。
 - MQTT 配置入口：Toolbar 提供 MQTT 配置按钮，可在弹窗中填写 MQTT IP/域名、MQTT over WebSocket 地址、topic 与本地模拟参数；只填写 IP 时会自动生成 `ws://<IP>:8083/mqtt`。保存或启用配置只保存场景配置，不会自动连接 broker，也不会自动启动本地模拟。
 - MQTT 运行预览：Toolbar 的“运行/停止”是唯一运行入口；点击“运行”并通过预检后才会连接 broker 或启动本地模拟，连接状态 badge 显示 disabled/simulating/connecting/connected/disconnected/error，无效配置会自动打开 MQTT 配置弹窗。运行态允许相机、选择、Hierarchy 搜索/展开、网格、诊断和 Console，只读阻止 Gizmo、Inspector 修改、Hierarchy 变更、资源创建/导入、保存加载、undo/redo 与 MQTT 配置。
 - 通用 MQTT 数据驱动框架：详见 `docs/mqtt-data-driven-guide.md`，覆盖只读可视化边界、EPV `data[].e/p/v`、JSON Path、多订阅/QoS、`sourceId + deviceType + assetCode` 绑定、`dataDriven` 默认配置与 `telemetryBinding` 实例覆盖、Transform/Joint/Animation 示例，以及 stale/fault/conflict 和 Electron `wss://` 安全注意事项。
@@ -134,7 +134,7 @@ Inspector 的主参数按参考图片设置为：`长度 = 1.8276m`、`宽度 = 
 
 `defaultAssetCode` 只作为模型库导入时的编号前缀，不是完整实例编号；同类模型多次导入或复制粘贴时，会用新实体 ID 重新生成 `assetCode`，避免不同实例共享同一个动画识别编号。旧场景文件缺少 `modelAsset.assetCode` 时，加载阶段会自动补齐编号。
 
-模型阵列副本名称始终根据源对象名称生成，与资产编号规则相互独立：名称末尾有数字时按副本序号递增并保留位宽，例如 `测试 1001` 依次生成 `测试 1002`、`测试 1003`；只有字符串时依次追加 `1`、`2`，不会添加“副本”。阵列弹窗支持为本次阵列填写一次性资产编号规则，规则只写入新副本，原对象不变；导入模型写入 `modelAsset.assetCode`，虚拟定位线框写入 `locator.assetId`，内置 Mesh、CAD 和 POI 等无编号对象不新增字段并禁用编号规则。规则中的 `${1}-1-1` 会按副本序号生成 `2-1-1`、`3-1-1`，`${001}` 会生成 `002`、`003` 并保留前导零；规则为空时，若原编号末尾有数字则递增末尾数字，否则追加序号。多选多个带编号对象时禁用自定义规则，但每个对象仍按自己的原编号默认递增。名称或编号冲突都会明确阻止提交；撤销/重做与保存/加载保持这些名称和编号，且不改变粘贴语义或场景文件格式。
+模型阵列副本名称始终根据源对象名称生成，与资产编号规则相互独立：名称末尾有数字时按副本序号递增并保留位宽，例如 `测试 1001` 依次生成 `测试 1002`、`测试 1003`；只有字符串时依次追加 `1`、`2`，不会添加“副本”。阵列弹窗支持为本次阵列填写一次性资产编号规则，规则只写入本次阵列结果，原对象不变。导入模型的每个阵列结果都是具有稳定 ID、名称、资产编号和完整 Transform 的独立 Scene Entity，`components.modelArrayInstance.sourceEntityId` 只负责声明其共享几何源；Hierarchy、保存/加载和撤销/重做均按真实实体处理。SceneRuntime 默认只使用源模型；当阵列实体的 `parameterValues` 不同时，每个不同参数组合创建一个隐藏脚本宿主并完整执行参数化脚本，相同组合共享宿主，连续调参会复用已有宿主，不会按实体数量创建加载任务和完整节点树。宿主本身不显示，全部阵列实体仍按参数组合通过固定批次 Mesh 和单次 `thinInstanceSetBuffer("matrix", ...)` 或原缓冲更新提交矩阵。单个阵列实体移动、显隐、锁定、删除、拾取和选择描边只影响对应矩阵；删除源模型时会提升第一个未删除实例为新源并重绑其余实例。旧版 `components.modelArray.items[]` 会在反序列化时迁移为相同数量的独立实体。虚拟定位线框仍写入 `locator.assetId`，内置 Mesh、CAD 和 POI 等无编号对象不新增字段并继续创建普通实体副本。规则中的 `${1}-1-1` 会按副本序号生成 `2-1-1`、`3-1-1`，`${001}` 会生成 `002`、`003` 并保留前导零；规则为空时，若原编号末尾有数字则递增末尾数字，否则追加序号。多选多个带编号对象时禁用自定义规则，但每个对象仍按自己的原编号默认递增。场景内已有实体和旧版矩阵项都会参与名称/编号冲突校验；场景文件版本继续为 `1`。
 
 运行时会把当前实例编号写入模型内容根节点 `metadata.assetCode` 与 `metadata.modelAsset.assetCode`，并注入外置模型脚本实例的 `assetCode` 属性；模型脚本中已声明的 `dataDriven.device.assetCodeField = "assetCode"` 可直接读取该实例编号。
 
@@ -487,9 +487,10 @@ npm run build
 
 ## 最近完成
 
-- 2026-07-23：Windows NSIS 安装包补齐 GPU/WebGL 安装态回归：`smoke-packaged-windows.mjs` 现在会进入生产 Scene View，检查实际 WebGL renderer、`powerPreference: high-performance` 与 `failIfMajorPerformanceCaveat: true`；新增 `npm run smoke:installer:gpu` 串联完整构建、NSIS 产物生成和安装包同源 EXE 验证；Windows 打包改为复用已安装的 Electron runtime，并在 `afterPack` 清理默认入口文件，避免端点安全软件导致解压目录重命名失败。
+- 2026-07-23：修复 thinInstance 模型阵列中每个逻辑模型的参数化脚本失效：运行时按完整模型参数快照分组，相同参数组合共享一个隐藏脚本宿主，不同组合独立执行声明式参数绑定和外置参数脚本；脚本输出继续一次性提交为 thinInstance，宿主不显示、不拾取。连续调参复用原宿主，恢复相同参数后自动合并批次，源 GLB 仍通过资产缓存复用。
+- 2026-07-23：Windows NSIS 安装包补齐 GPU/WebGL 安装态回归：新增 `smoke-packaged-gpu.mjs` 直接校验生产主进程 GPU feature、活动显卡、启动开关和 Scene View 实际 renderer，并通过版本核对阻断旧安装程序；`npm run smoke:installer:gpu` 串联完整构建、NSIS 产物生成和生产 EXE 验证。Windows 打包继续复用已安装的 Electron runtime，并在 `afterPack` 清理默认入口文件，避免端点安全软件导致解压目录重命名失败。
 - 2026-07-23：固化编辑器 GPU/WebGL 硬件加速契约：Electron 在 ready 前请求高性能 GPU，BrowserWindow 明确启用 WebGL；Scene View 使用 `powerPreference: high-performance`、`failIfMajorPerformanceCaveat: true` 并拒绝 SwiftShader/WARP/llvmpipe 等软件 renderer，初始化失败通过现有 Scene 错误遮罩呈现；新增 `npm run smoke:gpu` 验证 Electron GPU compositing、WebGL 状态、上下文属性和实际 renderer。独立 Web Viewer 兼容策略不变。
-- 2026-07-23：Shift+Gizmo 单轴阵列从普通导入模型扩展到全部可阵列实体：新增内置 Mesh、虚拟定位线框、已解锁 CAD 参考层和 POI 特效的世界/局部正负轴投影测量与不可拾取临时预览；POI 纯粒子效果使用半透明范围代理，不复制粒子系统。文件夹、灯光和全局唯一模型生成器继续排除。阵列名称统一改为按源对象名称末尾数字递增，例如 `测试 1001 → 测试 1002/1003`，纯字符串追加序号且不再添加“副本”；导入模型和定位线框的资产编号继续独立递增。确认、取消、生命周期清理、单条撤销/重做和场景持久化格式保持不变。
+- 2026-07-23：Shift+Gizmo 单轴阵列从普通导入模型扩展到全部可阵列实体：新增内置 Mesh、虚拟定位线框、已解锁 CAD 参考层和 POI 特效的世界/局部正负轴投影测量与不可拾取临时预览；POI 纯粒子效果使用半透明范围代理，不复制粒子系统。文件夹、灯光和全局唯一模型生成器继续排除。阵列名称统一改为按源对象名称末尾数字递增，例如 `测试 1001 → 测试 1002/1003`，纯字符串追加序号且不再添加“副本”；导入模型和定位线框的资产编号继续独立递增。导入模型的临时预览与正式结果统一改为固定批次 Mesh + thinInstance 矩阵，正式阵列项持久化在源实体 `components.modelArray` 中，不再按数量创建模型实体、脚本和加载任务；非模型阵列保持普通实体复制。确认、取消、生命周期清理和单条撤销/重做语义保持不变，场景版本仍为 `1`。
 - 2026-07-22：新增普通导入模型 Shift+Gizmo 单轴阵列：局部/世界 X/Y/Z 拖动按可见几何投影跨度生成零间距临时克隆，原模型保持原位，松开后共享阵列弹框可实时调整副本数量、净间距和编号规则；确认时名称与 `modelAsset.assetCode` 从源资产编号同步递增并原子检查冲突，整组副本以一条命令撤销/重做，取消、失焦、选择/模式/场景变化会清理预览且不修改场景格式。
 - 2026-07-22：首页启动台新增数据中台地址配置弹窗，配置持久化到 Electron `userData/data-platform-config.json`；左侧“最近项目”由主进程通过 `POST /api/v1/projects/query` 拉取、校验并按更新时间展示业务项目，支持 `projectName` 搜索，并新增可信项目 ID 打开流程。当前格式工程包会安全下载、展开并加载唯一场景；无包、旧 `project.bjseditor` 或结构不兼容时进入空白场景；进入编辑器后后台全量同步普通、环境和组合模型。已使用 `http://127.0.0.1:8086` 完成真实联调：19 位业务 ID 无损保留，10 个普通模型共 25 个文件同步成功，Shelf 双 TS 脚本不再被旧换行拼接字段重复下载。
 - 2026-07-21：按参考图片重做 YZJ 一体式移载机参数契约，新增精确长宽高、主体颜色、辊筒框架位置/长度、电机位置、腿 A/B、电机与辊轮皮控制；通过连通组件处理单体 GLB，保留旧场景、MQTT 与方向箭头兼容，并完成静态、浏览器视觉矩阵和真实 Electron Inspector 联动验证。
@@ -622,7 +623,7 @@ Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，自动收集
 完整目录结构、配置字段、CSP、外部资源、安全边界和部署说明见 [场景 Web 部署导出](docs/scene-web-export.md)。
 ## Windows 安装包构建与安装
 
-项目使用 Electron + electron-builder 生成 Windows x64 NSIS 安装包。生产构建使用相对资源路径，因此安装后由 `file://` 加载 renderer 时，React 页面、Babylon.js 分块、CAD Worker、样式和图片仍可正常读取。GPU 启动开关和 Scene View 硬件 WebGL 校验位于打入 `app.asar` 的生产代码中，开发态、免安装目录和 NSIS 安装后的程序使用同一套硬件加速策略。
+项目使用 Electron + electron-builder 生成 Windows x64 NSIS 安装包。生产构建使用相对资源路径，因此安装后由 `file://` 加载 renderer 时，React 页面、Babylon.js 分块、CAD Worker、样式和图片仍可正常读取。GPU 启动开关、软件 3D rasterizer 禁用和 Scene View 硬件 WebGL 校验位于打入 `app.asar` 的生产代码中，开发态、免安装目录和 NSIS 安装后的程序使用同一套硬件加速策略。
 
 ### 构建环境
 
@@ -644,6 +645,9 @@ npm run dist:win
 # 验证免安装目录中的生产程序、React 根节点、Electron preload API 和硬件 WebGL
 npm run smoke:packaged:win
 
+# 专门验证生产 EXE 的主进程 GPU feature、活动显卡和 Scene View renderer
+npm run smoke:packaged:gpu
+
 # 重新生成 NSIS 安装程序，并验证安装包同源生产 EXE 的 GPU/WebGL
 npm run smoke:installer:gpu
 ```
@@ -651,7 +655,7 @@ npm run smoke:installer:gpu
 安装包默认输出到：
 
 ```text
-release/ZENDING-3D-EDITOR-Setup-0.1.0-x64.exe
+release/ZENDING-3D-EDITOR-Setup-0.1.1-x64.exe
 ```
 
 免安装验证程序默认输出到：
@@ -662,7 +666,7 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 
 ### 安装与数据目录
 
-- 安装器允许用户选择安装目录，并创建桌面快捷方式和开始菜单快捷方式。
+- 安装器允许用户选择安装目录，并创建桌面快捷方式和开始菜单快捷方式。若旧版使用“为所有用户安装”并位于 `C:\Program Files\ZENDING 3D EDITOR`，升级时应选择相同安装模式和目录，或先卸载旧版，避免保留两个同名快捷方式继续启动旧 EXE。
 - 最近项目与最近场景记录写入 Electron 的 `userData` 目录，不写入只读安装目录；数据中台服务地址单独保存在同目录的 `data-platform-config.json`。
 - 数据中台下载的工程场景与共享模型库：开发态写入应用根目录，安装态统一写入 `userData/data-platform-workspace`；安装、升级程序不会覆盖该工作区，也不会放宽安装目录 ACL。
 - 模型库、环境模型库、场景 JSON、CAD 文件和模型脚本仍保存在用户选择的项目目录中；安装或升级程序不会删除项目数据。

@@ -27,6 +27,7 @@ import {
   sanitizeModelGeneratorTarget,
 } from '../model/modelGenerator';
 import type { Vector3Data } from '../model/math';
+import { ENTITY_NAME_MAX_LENGTH, MODEL_ARRAY_ITEM_COUNT_MAX } from '../model/modelArray';
 import { isPoiEffectHexColor, isPoiEffectKind, sanitizePoiEffectComponent } from '../model/poiEffect';
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
 import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit } from '../model/sceneUnits';
@@ -131,7 +132,9 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     entities[entityId] = normalizedEntity;
   }
 
-  validateEntityHierarchy(entityIds, entities);
+  const migratedScene = migrateLegacyModelArrays(entityIds, entities);
+  validateEntityHierarchy(migratedScene.entityIds, migratedScene.entities);
+  validateModelArrayInstanceReferences(migratedScene.entityIds, migratedScene.entities);
 
   if ('selectedEntityId' in scene && scene.selectedEntityId !== null && typeof scene.selectedEntityId !== 'string') {
     throwUnsupportedSceneFileError();
@@ -140,8 +143,8 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
   return {
     id,
     name,
-    entityIds,
-    entities,
+    entityIds: migratedScene.entityIds,
+    entities: migratedScene.entities,
     selectedEntityId: null,
     mqttConfig: normalizeMqttConfig(scene.mqttConfig),
     fetchConfig: sanitizeFetchConfig(scene.fetchConfig),
@@ -296,6 +299,16 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
     normalized.modelAsset = normalizeModelAsset(components.modelAsset, entityId);
   }
 
+  if ('modelArray' in components && components.modelArray !== undefined) {
+    if (!normalized.modelAsset) throwUnsupportedSceneFileError();
+    normalized.modelArray = normalizeModelArray(components.modelArray);
+  }
+
+  if ('modelArrayInstance' in components && components.modelArrayInstance !== undefined) {
+    if (!normalized.modelAsset) throwUnsupportedSceneFileError();
+    normalized.modelArrayInstance = normalizeModelArrayInstance(components.modelArrayInstance);
+  }
+
   if ('modelGenerator' in components && components.modelGenerator !== undefined) {
     normalized.modelGenerator = normalizeModelGenerator(components.modelGenerator);
   }
@@ -341,6 +354,157 @@ function normalizeVector3(value: unknown): Vector3Data {
     y: assertFiniteNumber(vector.y),
     z: assertFiniteNumber(vector.z),
   };
+}
+
+/** 严格恢复源模型上的矩阵阵列逻辑项，Babylon 运行时资源不会进入场景文件。 */
+function normalizeModelArray(value: unknown): NonNullable<EntityComponents['modelArray']> {
+  const modelArray = assertPlainObject(value);
+  const items = assertArray(modelArray.items);
+  if (items.length > MODEL_ARRAY_ITEM_COUNT_MAX) throwUnsupportedSceneFileError();
+
+  const normalizedItems = items.map((item) => {
+    const source = assertPlainObject(item);
+    const id = assertString(source.id).trim();
+    const name = assertString(source.name).trim();
+    const assetCode = assertString(source.assetCode).trim();
+    if (
+      !id
+      || id.length > 128
+      || !name
+      || name.length > ENTITY_NAME_MAX_LENGTH
+      || !assetCode
+      || assetCode.length > MODEL_ASSET_CODE_MAX_LENGTH
+    ) {
+      throwUnsupportedSceneFileError();
+    }
+
+    return {
+      id,
+      name,
+      assetCode,
+      offset: normalizeVector3(source.offset),
+    };
+  });
+
+  if (new Set(normalizedItems.map((item) => item.id)).size !== normalizedItems.length) {
+    throwUnsupportedSceneFileError();
+  }
+
+  return { items: normalizedItems };
+}
+
+/** 恢复独立阵列模型与其共享渲染源之间的稳定引用。 */
+function normalizeModelArrayInstance(value: unknown): NonNullable<EntityComponents['modelArrayInstance']> {
+  const modelArrayInstance = assertPlainObject(value);
+  const sourceEntityId = assertString(modelArrayInstance.sourceEntityId).trim();
+  if (!sourceEntityId || sourceEntityId.length > 128) throwUnsupportedSceneFileError();
+  return { sourceEntityId };
+}
+
+/** 深拷贝已经通过 JSON 边界校验的组件快照，避免迁移出的实体共享可变嵌套引用。 */
+function cloneNormalizedComponents(components: EntityComponents): EntityComponents {
+  return JSON.parse(JSON.stringify(components)) as EntityComponents;
+}
+
+/**
+ * 把旧版源实体上的隐藏 modelArray.items 转换为真实 Scene Entity。
+ * 新实体保留完整模型组件和独立 Transform，仅通过 modelArrayInstance 共享 Babylon 渲染源。
+ */
+function migrateLegacyModelArrays(
+  entityIds: string[],
+  entities: Record<string, Entity>,
+): { entityIds: string[]; entities: Record<string, Entity> } {
+  if (!entityIds.some((entityId) => (entities[entityId]?.components.modelArray?.items.length ?? 0) > 0)) {
+    return { entityIds, entities };
+  }
+
+  const migratedEntities: Record<string, Entity> = { ...entities };
+  const migratedEntityIds: string[] = [];
+  const parentAdditions = new Map<string, string[]>();
+
+  for (const entityId of entityIds) {
+    const source = migratedEntities[entityId];
+    if (!source) throwUnsupportedSceneFileError();
+    migratedEntityIds.push(entityId);
+
+    const legacyItems = source.components.modelArray?.items ?? [];
+    if (legacyItems.length === 0) continue;
+    if (!source.components.modelAsset || source.components.modelArrayInstance) throwUnsupportedSceneFileError();
+
+    const sourceComponents = cloneNormalizedComponents(source.components);
+    delete sourceComponents.modelArray;
+    migratedEntities[entityId] = { ...source, components: sourceComponents };
+
+    for (const item of legacyItems) {
+      if (migratedEntities[item.id]) throwUnsupportedSceneFileError();
+
+      const components = cloneNormalizedComponents(sourceComponents);
+      components.transform = {
+        ...components.transform,
+        position: {
+          x: components.transform.position.x + item.offset.x,
+          y: components.transform.position.y + item.offset.y,
+          z: components.transform.position.z + item.offset.z,
+        },
+      };
+      components.modelAsset = {
+        ...components.modelAsset!,
+        assetCode: item.assetCode,
+      };
+      components.modelArrayInstance = { sourceEntityId: source.id };
+
+      migratedEntities[item.id] = {
+        ...source,
+        id: item.id,
+        name: item.name,
+        parentId: source.parentId,
+        childrenIds: [],
+        components,
+      };
+      migratedEntityIds.push(item.id);
+
+      if (source.parentId) {
+        const additions = parentAdditions.get(source.parentId) ?? [];
+        additions.push(item.id);
+        parentAdditions.set(source.parentId, additions);
+      }
+    }
+  }
+
+  for (const [parentId, additions] of parentAdditions) {
+    const parent = migratedEntities[parentId];
+    if (!parent?.isFolder) throwUnsupportedSceneFileError();
+    migratedEntities[parentId] = {
+      ...parent,
+      childrenIds: [...parent.childrenIds, ...additions.filter((entityId) => !parent.childrenIds.includes(entityId))],
+    };
+  }
+
+  return { entityIds: migratedEntityIds, entities: migratedEntities };
+}
+
+/** 阵列实例必须直接引用一个仍存在的非实例源模型，禁止悬空、自引用和链式引用。 */
+function validateModelArrayInstanceReferences(entityIds: string[], entities: Record<string, Entity>): void {
+  const instanceCounts = new Map<string, number>();
+  for (const entityId of entityIds) {
+    const entity = entities[entityId];
+    const instance = entity?.components.modelArrayInstance;
+    if (!instance) continue;
+
+    const source = entities[instance.sourceEntityId];
+    if (
+      !entity.components.modelAsset
+      || instance.sourceEntityId === entity.id
+      || !source?.components.modelAsset
+      || source.components.modelArrayInstance
+    ) {
+      throwUnsupportedSceneFileError();
+    }
+
+    const nextCount = (instanceCounts.get(instance.sourceEntityId) ?? 0) + 1;
+    if (nextCount > MODEL_ARRAY_ITEM_COUNT_MAX) throwUnsupportedSceneFileError();
+    instanceCounts.set(instance.sourceEntityId, nextCount);
+  }
 }
 
 function normalizeMeshRenderer(value: unknown): EntityComponents['meshRenderer'] {

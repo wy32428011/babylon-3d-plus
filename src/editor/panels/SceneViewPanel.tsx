@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent } from 'react';
 import {
   createBabylonViewport,
   type BabylonViewport,
@@ -31,6 +31,10 @@ import {
   isShiftEntityArraySupported,
   MODEL_ARRAY_MIN_SPAN_METERS,
 } from '../model/modelArray';
+import {
+  createEditModeModelThinInstancePlan,
+  type EditModeModelThinInstancePlan,
+} from '../model/editModeModelThinInstances';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 
 const CLICK_SELECTION_TOLERANCE_PX = 4;
@@ -149,6 +153,8 @@ export function SceneViewPanel() {
   const mqttTelemetryClientRef = useRef<MqttStackerTelemetryClient | null>(null);
   const clickSnapshotRef = useRef<PointerClickSnapshot | null>(null);
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
+  const editRuntimeSceneDocumentRef = useRef<SceneDocument | null>(null);
+  const editModeThinInstancePlanRef = useRef<EditModeModelThinInstancePlan | null>(null);
   const selectedEntityIdRef = useRef<string | null>(null);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
   const entityArrayDialogRef = useRef<EntityArrayDialogState | null>(null);
@@ -187,6 +193,19 @@ export function SceneViewPanel() {
   const pushLog = useEditorStore((state) => state.pushLog);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
   const isRuntimePreview = runtimeMode === 'preview';
+  const editModeThinInstancePlan = useMemo(
+    () => createEditModeModelThinInstancePlan(
+      sceneDocument,
+      editModeThinInstancePlanRef.current ?? undefined,
+    ),
+    [sceneDocument.entityIds, sceneDocument.entities],
+  );
+  const editRuntimeSceneDocument = useMemo(
+    () => editModeThinInstancePlan.entities === sceneDocument.entities
+      ? sceneDocument
+      : { ...sceneDocument, entities: editModeThinInstancePlan.entities },
+    [editModeThinInstancePlan.entities, sceneDocument],
+  );
 
   /** 把当前普通导入模型的运行时尺寸发布到临时 Inspector 状态。 */
   const publishSelectedModelMeasurement = useCallback((runtime: SceneRuntime, entityId: string | null): void => {
@@ -210,10 +229,12 @@ export function SceneViewPanel() {
   }, []);
 
   useEffect(() => {
+    editModeThinInstancePlanRef.current = editModeThinInstancePlan;
     sceneDocumentRef.current = sceneDocument;
+    editRuntimeSceneDocumentRef.current = editRuntimeSceneDocument;
     selectedEntityIdRef.current = selectedEntityId;
     entityArrayDialogRef.current = entityArrayDialog;
-  }, [sceneDocument, selectedEntityId, entityArrayDialog]);
+  }, [editModeThinInstancePlan, editRuntimeSceneDocument, sceneDocument, selectedEntityId, entityArrayDialog]);
 
 
   /** 源对象、单选状态或编辑模式失效时取消弹框，避免临时克隆悬挂。 */
@@ -568,13 +589,13 @@ export function SceneViewPanel() {
     const runtime = runtimeRef.current;
     const gizmo = gizmoRef.current;
     if (!runtime || !gizmo) return;
-    if (isRuntimePreview) return;
+    if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
 
-    runtime.sync(sceneDocument);
+    runtime.sync(editRuntimeSceneDocument);
     const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityId);
     gizmo.attachToTarget(selectedTarget, selectedEntityId);
     publishSelectedModelMeasurement(runtime, selectedEntityId);
-  }, [sceneDocument, selectedEntityId, isRuntimePreview, publishSelectedModelMeasurement]);
+  }, [editRuntimeSceneDocument, selectedEntityId, isRuntimePreview, publishSelectedModelMeasurement]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -589,7 +610,7 @@ export function SceneViewPanel() {
       if (!currentSceneDocument) return;
       client.dispose();
       runtime.endTelemetryPreview();
-      runtime.sync(currentSceneDocument);
+      runtime.sync(editRuntimeSceneDocumentRef.current ?? currentSceneDocument);
       const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityIdRef.current);
       gizmo.attachToTarget(selectedTarget, selectedEntityIdRef.current);
       publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);

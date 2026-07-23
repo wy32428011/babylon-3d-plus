@@ -157,14 +157,13 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   );
   const activeSelectionEntities = activeSelectionIds.map((entityId) => entities[entityId]).filter((entity): entity is Entity => Boolean(entity));
   const hasSelection = activeSelectionIds.length > 0;
-  const hasRuntimeSelection = activeSelectionEntities.some((entity) => !entity.isFolder);
   const canMutateSelection = !props.readOnly && activeSelectionEntities.some((entity) => !isEntityEffectivelyLocked(entities, entity));
   const canMutateRuntimeSelection = activeSelectionEntities.some(
     (entity) => !props.readOnly && !entity.isFolder && !isEntityEffectivelyLocked(entities, entity),
   );
   const canRenameSelection = activeSelectionIds.length === 1 && canMutateSelection;
   const canLibraryFocus = Boolean(contextEntity?.components.modelAsset);
-  const canPaste = !props.readOnly && Boolean(entityClipboard && entityClipboard.entities.length > 0);
+  const canPaste = !props.readOnly && Boolean(entityClipboard && entityClipboard.entries.length > 0);
   const canUngroup = !props.readOnly && activeSelectionEntities.some((entity) => entity.isFolder || Boolean(entity.parentId));
   const arraySourceEntities = activeSelectionEntities.filter(
     (entity) => !entity.isFolder && !isEntityEffectivelyLocked(entities, entity),
@@ -535,7 +534,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
           </button>
           <button
             className="hierarchy-context-menu-item"
-            disabled={props.readOnly || !hasRuntimeSelection}
+            disabled={props.readOnly || !hasSelection}
             onClick={() => runContextMenuAction(copySelectedEntities)}
             role="menuitem"
             type="button"

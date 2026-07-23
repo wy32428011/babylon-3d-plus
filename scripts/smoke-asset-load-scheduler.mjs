@@ -81,6 +81,94 @@ async function verifyDefaultConcurrencyAndFifo(AssetLoadScheduler, defaultConcur
   scheduler.dispose();
 }
 
+/** 断言排队任务可取消，且取消后不会阻塞后续 FIFO 任务。 */
+async function verifyQueuedAbortSkipsTaskAndPreservesFifo(AssetLoadScheduler) {
+  const scheduler = new AssetLoadScheduler(1);
+  const activeGate = createDeferred();
+  const startedOrder = [];
+  const canceledController = new AbortController();
+
+  const activeTask = scheduler.run(async () => {
+    startedOrder.push('active');
+    await activeGate.promise;
+    return 'active-finished';
+  });
+  const canceledTask = scheduler.run(async () => {
+    startedOrder.push('canceled');
+    return 'must-not-run';
+  }, canceledController.signal);
+  const nextTask = scheduler.run(async () => {
+    startedOrder.push('next');
+    return 'next-finished';
+  });
+  const lastTask = scheduler.run(async () => {
+    startedOrder.push('last');
+    return 'last-finished';
+  });
+
+  await waitForCondition('活动任务启动', () => startedOrder.length === 1);
+  canceledController.abort();
+  await assert.rejects(
+    canceledTask,
+    (error) => error instanceof Error && error.name === 'AbortError' && /资产加载任务已取消/.test(error.message),
+    '排队任务收到 abort 后必须立即以 AbortError 拒绝',
+  );
+  assert.deepEqual(startedOrder, ['active'], '已取消的排队任务不得启动');
+
+  activeGate.resolve();
+  assert.equal(await activeTask, 'active-finished', '活动任务应正常结束');
+  assert.equal(await nextTask, 'next-finished', '取消后最早的有效排队任务应先补位');
+  assert.equal(await lastTask, 'last-finished', '后续有效任务应继续执行');
+  assert.deepEqual(startedOrder, ['active', 'next', 'last'], '取消任务后剩余任务仍须保持 FIFO 顺序');
+  scheduler.dispose();
+}
+
+/** 断言 signal 在任务启动后取消时，调度器不会强行终止底层加载。 */
+async function verifyActiveAbortDoesNotForceStop(AssetLoadScheduler) {
+  const scheduler = new AssetLoadScheduler(1);
+  const activeGate = createDeferred();
+  const activeController = new AbortController();
+  let started = false;
+  let settled = false;
+
+  const activeTask = scheduler.run(async () => {
+    started = true;
+    await activeGate.promise;
+    return 'finished-after-abort';
+  }, activeController.signal);
+  void activeTask.finally(() => {
+    settled = true;
+  });
+
+  await waitForCondition('带 signal 的任务启动', () => started);
+  activeController.abort();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(settled, false, '已经启动的任务不应因 signal 取消而被调度器强行结算');
+
+  activeGate.resolve();
+  assert.equal(await activeTask, 'finished-after-abort', '已启动任务应由底层任务自行完成');
+  scheduler.dispose();
+}
+
+/** 断言预先取消的 signal 会直接拒绝，任务不会进入调度队列。 */
+async function verifyPreAbortedSignalRejectsImmediately(AssetLoadScheduler) {
+  const scheduler = new AssetLoadScheduler(1);
+  const controller = new AbortController();
+  let started = false;
+  controller.abort();
+
+  await assert.rejects(
+    scheduler.run(async () => {
+      started = true;
+      return 'must-not-run';
+    }, controller.signal),
+    (error) => error instanceof Error && error.name === 'AbortError',
+    '预先取消的 signal 必须直接拒绝',
+  );
+  assert.equal(started, false, '预先取消的任务不得启动');
+  scheduler.dispose();
+}
+
 /** 断言 dispose 会拒绝尚未开始的排队任务，但不会取消活动任务。 */
 async function verifyDisposeRejectsQueuedTasks(AssetLoadScheduler) {
   const scheduler = new AssetLoadScheduler(1);
@@ -117,8 +205,11 @@ async function main() {
       '/src/runtime/babylon/AssetLoadScheduler.ts',
     );
     await verifyDefaultConcurrencyAndFifo(AssetLoadScheduler, DEFAULT_ASSET_LOAD_CONCURRENCY);
+    await verifyQueuedAbortSkipsTaskAndPreservesFifo(AssetLoadScheduler);
+    await verifyActiveAbortDoesNotForceStop(AssetLoadScheduler);
+    await verifyPreAbortedSignalRejectsImmediately(AssetLoadScheduler);
     await verifyDisposeRejectsQueuedTasks(AssetLoadScheduler);
-    console.log('[AssetLoadSchedulerSmoke] 通过：默认并发<=4、FIFO 启动、dispose 拒绝排队任务。');
+    console.log('[AssetLoadSchedulerSmoke] 通过：默认并发<=4、FIFO、排队取消、运行中任务保留与 dispose 行为均符合预期。');
   } finally {
     await server.close();
   }

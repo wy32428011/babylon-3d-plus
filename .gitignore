@@ -13,4 +13,4 @@ temp.log
 dist-viewer-template/
 output/
 .babylon-editor
-Assets
+/Assets/

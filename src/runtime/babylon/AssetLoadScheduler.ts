@@ -6,6 +6,8 @@ type QueuedAssetLoadTask<T> = {
   task: () => Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
+  signal: AbortSignal | null;
+  abortListener: (() => void) | null;
 };
 
 /**
@@ -28,15 +30,31 @@ export class AssetLoadScheduler {
 
   /**
    * 提交一个异步资产加载任务。
-   * 任务会在并发窗口可用时按 FIFO 顺序启动；调度器释放后会直接拒绝新任务。
+   * 任务会在并发窗口可用时按 FIFO 顺序启动；调度器释放或排队期间 signal 取消后会直接拒绝。
    */
-  run<T>(task: () => Promise<T>): Promise<T> {
+  run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     if (this.disposed) {
       return Promise.reject(this.createDisposedError());
     }
+    if (signal?.aborted) {
+      return Promise.reject(this.createCanceledError());
+    }
 
     return new Promise<T>((resolve, reject) => {
-      this.queue.push({ task, resolve, reject } as QueuedAssetLoadTask<unknown>);
+      const queuedTask: QueuedAssetLoadTask<T> = {
+        task,
+        resolve,
+        reject,
+        signal: signal ?? null,
+        abortListener: null,
+      };
+
+      if (signal) {
+        queuedTask.abortListener = () => this.cancelQueuedTask(queuedTask);
+        signal.addEventListener('abort', queuedTask.abortListener, { once: true });
+      }
+
+      this.queue.push(queuedTask as QueuedAssetLoadTask<unknown>);
       this.drainQueue();
     });
   }
@@ -52,8 +70,20 @@ export class AssetLoadScheduler {
     const error = this.createDisposedError();
     while (this.queue.length > 0) {
       const queuedTask = this.queue.shift();
-      queuedTask?.reject(error);
+      if (!queuedTask) continue;
+      this.detachAbortListener(queuedTask);
+      queuedTask.reject(error);
     }
+  }
+
+  /** 取消尚未启动的单个排队任务，并立即释放其队列位置。 */
+  private cancelQueuedTask<T>(queuedTask: QueuedAssetLoadTask<T>): void {
+    const queueIndex = this.queue.indexOf(queuedTask as QueuedAssetLoadTask<unknown>);
+    if (queueIndex < 0) return;
+
+    this.queue.splice(queueIndex, 1);
+    this.detachAbortListener(queuedTask);
+    queuedTask.reject(this.createCanceledError());
   }
 
   /** 在并发窗口允许时按提交顺序启动排队任务。 */
@@ -61,6 +91,7 @@ export class AssetLoadScheduler {
     while (!this.disposed && this.activeCount < this.maxConcurrency && this.queue.length > 0) {
       const queuedTask = this.queue.shift();
       if (!queuedTask) return;
+      this.detachAbortListener(queuedTask);
       this.startTask(queuedTask);
     }
   }
@@ -78,8 +109,23 @@ export class AssetLoadScheduler {
       });
   }
 
+  /** 移除排队任务的取消监听，避免任务完成后继续持有调度器和回调。 */
+  private detachAbortListener<T>(queuedTask: QueuedAssetLoadTask<T>): void {
+    if (queuedTask.signal && queuedTask.abortListener) {
+      queuedTask.signal.removeEventListener('abort', queuedTask.abortListener);
+    }
+    queuedTask.abortListener = null;
+  }
+
   /** 创建统一的释放态错误，便于调用方识别调度器生命周期问题。 */
   private createDisposedError(): Error {
     return new Error('资产加载调度器已释放，无法接受新的加载任务。');
+  }
+
+  /** 创建统一的排队取消错误；已运行任务仍由底层加载器决定是否可中止。 */
+  private createCanceledError(): Error {
+    const error = new Error('资产加载任务已取消。');
+    error.name = 'AbortError';
+    return error;
   }
 }
