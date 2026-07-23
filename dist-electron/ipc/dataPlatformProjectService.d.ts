@@ -1,5 +1,5 @@
 import type { DataPlatformModelSyncProgress, DataPlatformProjectEntry, DataPlatformProjectOpenResult } from '../types.js';
-/** 返回数据中台项目固定使用的编辑器数据根目录。 */
+/** 返回数据中台项目工作区；安装态与只读程序目录分离，开发态保持仓库根目录行为。 */
 export declare function getDataPlatformEditorRoot(): string;
 /** 从可信项目缓存打开工程，renderer 只允许提交项目 ID。 */
 export declare function openDataPlatformProject(project: DataPlatformProjectEntry, baseUrl: string): Promise<DataPlatformProjectOpenResult>;

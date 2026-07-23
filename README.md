@@ -394,7 +394,7 @@ npm run build
 - 数据中台配置：点击首页顶部 `数据中台配置`，填写 HTTP/HTTPS 服务根地址并选择 `保存并刷新`；本地联调可使用 `http://127.0.0.1:8086`。地址持久化到 Electron `userData/data-platform-config.json`，主进程随后请求 `<服务地址>/api/v1/projects/query`；留空保存可清除配置。左侧项目列表顶部可输入项目名称后按 Enter 或点击 `搜索`，搜索词通过请求体 `projectName` 字段交给数据中台筛选，点击 `清除` 会恢复默认列表。renderer 打开项目时只提交列表中的 `projectId`，工程包地址由主进程最近一次可信列表缓存解析；项目、Editor 工程和模型等业务主键始终按十进制字符串传递，避免 19 位 ID 被 JavaScript `number` 截断。
 - 数据中台工程包：只接受当前 ZENDING 3D EDITOR 目录结构，即 `.babylon-editor/`、`Assets/Models/`、`Assets/Environments/` 和恰好一个 `.scene.json`；ZIP 根目录和单层包装目录均可。旧 `project.bjseditor` 不迁移，统一按无可用工程包处理。主进程限制 ZIP 压缩体积、文件数、单文件及总展开大小，并拒绝 Zip Slip、绝对路径、盘符路径、加密条目和符号链接。
 - 数据中台模型同步：打开项目后后台分页读取 `POST /api/v1/models/query`、`POST /api/v1/env-models/query` 和 `POST /api/v1/combo-models/query`。普通模型写入 `Assets/Models/Model-<id>-<名称>/`，环境模型写入 `Assets/Environments/Env-<id>-<名称>/`，组合模型写入 `Assets/Models/ComboModels/Combo-<id>-<名称>/`。普通模型脚本为可选资源：优先使用 `scriptFiles` 权威列表，仅在列表没有有效项时读取旧 `scriptFileName/scriptFileUrl` 兼容字段；接口提供可识别的 `*.ts` 文件名或 URL 时才下载，不要求文件名以 `.model.ts` 结尾，旧字段中以换行拼接的多脚本也会拆分处理；未提供脚本或返回非 TS 条目时直接跳过，不阻断模型同步。同步层会保留这些 TS 文件，编辑器现有外置脚本执行仍遵循 `.model.ts` 运行约定。所有数据中台项目共享同一模型库；下载和校验全部完成后才原子替换模型目录与 `.babylon-editor/asset-index.json`。同步成功后 Project 模型库会自动刷新并优先展示同步模型；失败时保留旧库，失败提示支持关闭，也可在 Project 面板重试。
-- 数据中台存储位置：开发态固定使用 `app.getAppPath()`，安装态固定使用可执行文件所在目录，不自动回退到 `userData`。该目录必须可写；安装在受保护目录时会明确阻止打开。应用升级、重装或卸载可能覆盖安装目录内的场景与模型数据，生产部署应选择可写且有备份策略的安装位置。
+- 数据中台存储位置：开发态继续使用 `app.getAppPath()`；安装态改用 Electron `userData/data-platform-workspace`（Windows 通常位于 `%APPDATA%/zending-3d-editor/data-platform-workspace`），不再向 EXE 所在目录或 `Program Files` 写入项目、场景和共享模型。首次打开会自动创建工作区，无需以管理员身份运行；测试环境仍可通过受保护的 `ZENDING_EDITOR_STORAGE_ROOT` 覆盖路径。 旧版本若已在自定义可写安装目录生成数据，不会自动删除，可继续通过“打开项目目录”访问或手动复制到新工作区。
 - 创建基础对象与常用灯光：在模型库中点击或拖拽 `立方体`、`球体`、`地面`、`虚拟定位线框`、`半球光`、`方向光`、`点光源` 内置资源卡片；Box/立方体卡片明确标注默认尺寸 `1 m × 1 m × 1 m`，拖拽到 Scene View 后会按鼠标释放位置投射到地面平面，并把 Box 中心抬高 `0.5 m` 使底面落地；其它对象保持原有创建路径。
 - 创建 POI 模型生成器：在 `POI库` 点击“模型生成器”可在原点创建青色配置标记，拖入 Scene View 可按地面落点放置标记；一个场景只保留一个有效生成器，重复点击/拖入会选中已有生成器。随后把模型库普通模型或内置立方体、球体、地面拖入 Inspector 的共享生成模板或规则覆盖模型槽位。
 - 选择对象：点击 Hierarchy 项，或在 Scene View 中单击对象；Hierarchy 中可使用 Ctrl/Cmd 多选、Shift 连续多选。
@@ -657,9 +657,9 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 
 - 安装器允许用户选择安装目录，并创建桌面快捷方式和开始菜单快捷方式。
 - 最近项目与最近场景记录写入 Electron 的 `userData` 目录，不写入只读安装目录；数据中台服务地址单独保存在同目录的 `data-platform-config.json`。
-- 数据中台下载的工程场景与共享模型库例外：按产品约定写入开发应用根目录或安装版 EXE 所在目录；目录不可写时不会静默改写到 `userData`。
+- 数据中台下载的工程场景与共享模型库：开发态写入应用根目录，安装态统一写入 `userData/data-platform-workspace`；安装、升级程序不会覆盖该工作区，也不会放宽安装目录 ACL。
 - 模型库、环境模型库、场景 JSON、CAD 文件和模型脚本仍保存在用户选择的项目目录中；安装或升级程序不会删除项目数据。
-- 卸载默认保留 `userData`，便于重新安装后继续访问最近项目记录。
+- 卸载默认保留 `userData`，包括最近项目记录、数据中台配置以及 `data-platform-workspace` 中的场景和共享模型，便于重新安装后继续使用。
 
 ### 安装态功能验证范围
 
@@ -668,6 +668,7 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 - renderer 页面完成加载且 React 根节点已渲染；
 - `window.editorApi` preload 桥接存在；
 - 场景保存、模型文件夹导入和 MQTT 配置等关键 IPC 方法可调用；
+- 通过本地模拟数据中台打开项目并等待模型同步完成，确认安装态工作区位于本次临时 `userData/data-platform-workspace`，不会写入程序目录；
 - 验证结束后只关闭本次启动的进程树，并清理临时用户数据目录。
 
 当前安装包未配置商业代码签名证书。首次运行时 Windows SmartScreen 可能显示“未知发布者”，这不影响本地功能；正式对外分发时应使用受信任的 Windows 代码签名证书签署安装程序和主程序。

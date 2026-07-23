@@ -8,7 +8,6 @@ import {
   DirectionalLight,
   HemisphericLight,
   HighlightLayer,
-  InstancedMesh,
   LinesMesh,
   Light,
   Material,
@@ -128,6 +127,10 @@ import {
   resolveModelAssetSharedInstancingPolicy,
   SharedModelAssetCache,
 } from './SharedModelAssetCache';
+import {
+  prepareInstancedMeshesForSelectionOutline,
+  repairInstancedMeshBufferContainers,
+} from './instancedSelectionBuffers';
 import { ModelGeneratorFetchRuntime } from './ModelGeneratorFetchRuntime';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
@@ -5722,6 +5725,7 @@ export class SceneRuntime {
   private refreshModelMeshes(model: ModelRuntimeEntry, metadata: Record<string, unknown>): void {
     model.meshes = [...new Set(model.root.getChildMeshes(false))]
       .filter((mesh) => !mesh.isDisposed());
+    repairInstancedMeshBufferContainers(model.meshes);
     for (const mesh of model.meshes) {
       mesh.metadata = { ...(mesh.metadata ?? {}), ...metadata };
     }
@@ -6289,31 +6293,9 @@ export class SceneRuntime {
 
     this.sharedModelSelectionOutlineSignature = signature;
     this.modelSelectionOutlineLayer.clearSelection();
-    this.prepareSharedModelSelectionMeshes(selectedGroups.flat());
+    prepareInstancedMeshesForSelectionOutline(selectedGroups.flat());
     for (const meshes of selectedGroups) {
       this.modelSelectionOutlineLayer.addSelection(meshes);
-    }
-  }
-
-  /**
-   * 在 clearSelection 之后、addSelection 之前补齐公开 instancedBuffers 容器。
-   * 若 sourceMesh 仍有 instancedBuffers，说明 Babylon 已保留其它实例缓冲注册；此时必须确保同源全部实例都有公开容器，避免重新写 instanceSelectionId 时命中 null。
-   * 若 sourceMesh.instancedBuffers 不存在，则不提前创建，让 registerInstancedBuffer 原生初始化 source 与 source.instances。
-   */
-  private prepareSharedModelSelectionMeshes(meshes: AbstractMesh[]): void {
-    const preparedSources = new Set<Mesh>();
-    for (const mesh of meshes) {
-      if (!(mesh instanceof InstancedMesh)) continue;
-
-      const sourceMesh = mesh.sourceMesh;
-      if (!sourceMesh.instancedBuffers || preparedSources.has(sourceMesh)) continue;
-
-      for (const instance of sourceMesh.instances) {
-        if (!instance.instancedBuffers) {
-          instance.instancedBuffers = {};
-        }
-      }
-      preparedSources.add(sourceMesh);
     }
   }
 

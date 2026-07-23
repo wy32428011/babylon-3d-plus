@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,8 @@ const defaultExecutablePath = path.join(projectRoot, 'release', 'win-unpacked', 
 const executablePath = path.resolve(process.argv[2] ?? defaultExecutablePath);
 const STARTUP_TIMEOUT_MS = 30000;
 const POLL_INTERVAL_MS = 300;
+const DATA_PLATFORM_WORKSPACE_DIRECTORY = 'data-platform-workspace';
+const PACKAGED_SMOKE_PROJECT_ID = '9000000000000000001';
 
 /** 暂停指定毫秒数，供启动状态轮询复用。 */
 function delay(milliseconds) {
@@ -21,7 +24,7 @@ function delay(milliseconds) {
 /** 向操作系统申请一个当前可用的本地调试端口。 */
 function reserveAvailablePort() {
   return new Promise((resolve, reject) => {
-    const server = createServer();
+    const server = createNetServer();
     server.unref();
     server.once('error', reject);
     server.listen(0, '127.0.0.1', () => {
@@ -31,6 +34,94 @@ function reserveAvailablePort() {
         if (error) reject(error);
         else if (port) resolve(port);
         else reject(new Error('无法分配 Chromium 调试端口。'));
+      });
+    });
+  });
+}
+
+/** 启动最小数据中台服务，验证安装态默认工作区可实际打开项目并同步空模型库。 */
+function startDataPlatformMockServer() {
+  return new Promise((resolve, reject) => {
+    const server = createHttpServer(async (request, response) => {
+      try {
+        const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+        for await (const _chunk of request) {
+          // 消费请求体，避免客户端连接在响应前保持等待。
+        }
+
+        const sendJson = (payload, status = 200) => {
+          response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+          response.end(JSON.stringify(payload));
+        };
+
+        if (request.method === 'POST' && url.pathname === '/platform/api/v1/projects/query') {
+          sendJson({
+            success: true,
+            data: {
+              records: [{
+                id: PACKAGED_SMOKE_PROJECT_ID,
+                projectName: '安装态存储验证项目',
+                sceneCount: 0,
+                screenCount: 0,
+                modelCount: 0,
+                envModelCount: 0,
+                comboModelCount: 0,
+                poiCount: 0,
+                chartCount: 0,
+                themeCount: 0,
+                latestEditorProjectId: null,
+                latestEditorProjectVersionId: null,
+                latestEditorProjectVersionNumber: null,
+                latestEditorProjectName: null,
+                latestEditorProjectPackageUrl: null,
+                latestEditorProjectPackageFileName: null,
+                updatedAt: '2026-07-23T00:00:00Z',
+              }],
+              total: 1,
+              pageNum: 1,
+              pageSize: 12,
+            },
+          });
+          return;
+        }
+
+        if (
+          request.method === 'POST'
+          && [
+            '/platform/api/v1/models/query',
+            '/platform/api/v1/env-models/query',
+            '/platform/api/v1/combo-models/query',
+          ].includes(url.pathname)
+        ) {
+          sendJson({ success: true, data: { records: [], total: 0, pageNum: 1, pageSize: 100 } });
+          return;
+        }
+
+        sendJson({ success: false, message: `未处理的安装态烟测请求：${request.method} ${url.pathname}` }, 404);
+      } catch (error) {
+        response.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+        response.end(JSON.stringify({ success: false, message: error instanceof Error ? error.message : String(error) }));
+      }
+    });
+
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : null;
+      if (!port) {
+        server.close();
+        reject(new Error('无法启动安装态数据中台模拟服务。'));
+        return;
+      }
+      server.off('error', reject);
+      resolve({
+        baseUrl: `http://127.0.0.1:${port}/platform`,
+        close: () => new Promise((resolveClose, rejectClose) => {
+          server.close((error) => {
+            if (error) rejectClose(error);
+            else resolveClose();
+          });
+        }),
       });
     });
   });
@@ -68,13 +159,13 @@ async function waitForRendererTarget(port, childState) {
 }
 
 /** 通过 DevTools 协议检查页面、React 根节点与 preload API 均已就绪。 */
-function inspectRenderer(webSocketDebuggerUrl) {
+function inspectRenderer(webSocketDebuggerUrl, dataPlatformBaseUrl) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(webSocketDebuggerUrl);
     const timeout = setTimeout(() => {
       socket.close();
       reject(new Error('读取 Electron renderer 状态超时。'));
-    }, 10000);
+    }, 30000);
 
     socket.addEventListener('open', () => {
       socket.send(JSON.stringify({
@@ -84,7 +175,8 @@ function inspectRenderer(webSocketDebuggerUrl) {
           returnByValue: true,
           awaitPromise: true,
           expression: `new Promise((resolve) => {
-            const deadline = Date.now() + 15000;
+            const deadline = Date.now() + 25000;
+            const dataPlatformBaseUrl = ${JSON.stringify(dataPlatformBaseUrl)};
             // 检查页面渲染、preload 方法与不弹窗 IPC 往返是否全部可用。
             const inspect = async () => {
               const root = document.getElementById('root');
@@ -107,6 +199,11 @@ function inspectRenderer(webSocketDebuggerUrl) {
                 dataPlatformModelSyncListenerAvailable: typeof api?.onDataPlatformModelSyncProgress === 'function',
                 dataPlatformModelSyncListenerRoundTripAvailable: false,
                 dataPlatformConfigRoundTripAvailable: false,
+                dataPlatformProjectListCount: 0,
+                dataPlatformProjectOpened: false,
+                dataPlatformProjectRoot: null,
+                dataPlatformModelSyncCompleted: false,
+                dataPlatformModelSyncError: null,
                 ipcRoundTripAvailable: false,
                 ipcError: null
               };
@@ -126,11 +223,39 @@ function inspectRenderer(webSocketDebuggerUrl) {
                   if (result.getDataPlatformConfigAvailable && result.saveDataPlatformConfigAvailable) {
                     await api.getDataPlatformConfig();
                     const savedDataPlatformConfig = await api.saveDataPlatformConfig({
-                      baseUrl: 'http://127.0.0.1:65535/platform/'
+                      baseUrl: dataPlatformBaseUrl
                     });
                     const reloadedDataPlatformConfig = await api.getDataPlatformConfig();
-                    result.dataPlatformConfigRoundTripAvailable = savedDataPlatformConfig?.baseUrl === 'http://127.0.0.1:65535/platform'
+                    result.dataPlatformConfigRoundTripAvailable = savedDataPlatformConfig?.baseUrl === dataPlatformBaseUrl
                       && reloadedDataPlatformConfig?.baseUrl === savedDataPlatformConfig.baseUrl;
+
+                    const projectList = await api.listDataPlatformProjects({ projectName: '' });
+                    result.dataPlatformProjectListCount = projectList?.records?.length ?? 0;
+                    const project = projectList?.records?.[0];
+                    if (project && result.openDataPlatformProjectAvailable) {
+                      const openResult = await api.openDataPlatformProject({ projectId: project.id });
+                      result.dataPlatformProjectOpened = Boolean(openResult?.projectRoot);
+                      result.dataPlatformProjectRoot = openResult?.projectRoot ?? null;
+
+                      if (openResult?.modelSyncStarted && result.dataPlatformModelSyncListenerAvailable) {
+                        const finalProgress = await new Promise((resolveProgress, rejectProgress) => {
+                          const progressTimeout = setTimeout(() => {
+                            unsubscribe();
+                            rejectProgress(new Error('等待安装态模型同步完成超时'));
+                          }, 15000);
+                          const unsubscribe = api.onDataPlatformModelSyncProgress((progress) => {
+                            if (progress.phase !== 'completed' && progress.phase !== 'failed') return;
+                            clearTimeout(progressTimeout);
+                            unsubscribe();
+                            resolveProgress(progress);
+                          });
+                        });
+                        result.dataPlatformModelSyncCompleted = finalProgress?.phase === 'completed';
+                        result.dataPlatformModelSyncError = finalProgress?.error ?? null;
+                      } else {
+                        result.dataPlatformModelSyncCompleted = true;
+                      }
+                    }
                   }
                 } catch (error) {
                   result.ipcError = error instanceof Error ? error.message : String(error);
@@ -170,13 +295,13 @@ function inspectRenderer(webSocketDebuggerUrl) {
 }
 
 /** 在 Electron 初始导航切换执行上下文时自动重连 DevTools。 */
-async function inspectRendererWithRetry(port, childState) {
+async function inspectRendererWithRetry(port, childState, dataPlatformBaseUrl) {
   let lastError = null;
 
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     const target = await waitForRendererTarget(port, childState);
     try {
-      return await inspectRenderer(target.webSocketDebuggerUrl);
+      return await inspectRenderer(target.webSocketDebuggerUrl, dataPlatformBaseUrl);
     } catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
@@ -205,7 +330,9 @@ async function runPackagedSmoke() {
   }
 
   const debugPort = await reserveAvailablePort();
+  const mock = await startDataPlatformMockServer();
   const temporaryUserData = mkdtempSync(path.join(tmpdir(), 'babylon-editor-smoke-'));
+  const expectedDataPlatformRoot = path.join(temporaryUserData, DATA_PLATFORM_WORKSPACE_DIRECTORY);
   const output = [];
   const child = spawn(executablePath, [
     `--remote-debugging-port=${debugPort}`,
@@ -229,7 +356,7 @@ async function runPackagedSmoke() {
   });
 
   try {
-    const renderer = await inspectRendererWithRetry(debugPort, childState);
+    const renderer = await inspectRendererWithRetry(debugPort, childState, mock.baseUrl);
     const valid = renderer
       && renderer.readyState === 'complete'
       && renderer.rootChildCount > 0
@@ -246,6 +373,13 @@ async function runPackagedSmoke() {
       && renderer.dataPlatformModelSyncListenerAvailable
       && renderer.dataPlatformModelSyncListenerRoundTripAvailable
       && renderer.dataPlatformConfigRoundTripAvailable
+      && renderer.dataPlatformProjectListCount === 1
+      && renderer.dataPlatformProjectOpened
+      && renderer.dataPlatformModelSyncCompleted
+      && path.resolve(renderer.dataPlatformProjectRoot) === path.resolve(expectedDataPlatformRoot)
+      && existsSync(path.join(expectedDataPlatformRoot, '.babylon-editor', 'asset-index.json'))
+      && existsSync(path.join(expectedDataPlatformRoot, 'Assets', 'Models'))
+      && existsSync(path.join(expectedDataPlatformRoot, 'Assets', 'Environments'))
       && renderer.ipcRoundTripAvailable;
 
     if (!valid) {
@@ -255,6 +389,7 @@ async function runPackagedSmoke() {
     console.log(JSON.stringify({
       status: 'PASS',
       executablePath,
+      expectedDataPlatformRoot,
       renderer,
     }, null, 2));
   } catch (error) {
@@ -263,6 +398,7 @@ async function runPackagedSmoke() {
     throw error;
   } finally {
     terminateProcessTree(child.pid);
+    await mock.close().catch(() => undefined);
     rmSync(temporaryUserData, { recursive: true, force: true });
   }
 }

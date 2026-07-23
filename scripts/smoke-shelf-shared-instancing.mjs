@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
+  FreeCamera,
   LoadAssetContainerAsync,
+  MeshBuilder,
   NullEngine,
   Scene,
   SceneLoader,
@@ -336,16 +338,50 @@ function assertSourceInstanceBuffersComplete(meshes, message) {
   assert.deepEqual(missing, [], message);
 }
 
-/** 复刻 SceneRuntime 的公开容器修复，避免测试触碰 Babylon 私有字段。 */
-function prepareSelectionInstancedBuffers(meshes) {
-  const sourceMeshes = new Set(meshes.filter((mesh) => mesh.isAnInstance).map((mesh) => mesh.sourceMesh));
-  for (const sourceMesh of sourceMeshes) {
-    if (!sourceMesh.instancedBuffers) continue;
-    for (const instance of sourceMesh.instances) {
-      if (!instance.instancedBuffers) {
-        instance.instancedBuffers = {};
+/**
+ * 压测共享矩阵实例在选择描边注册后新增/重建时的空缓冲恢复。
+ * 复刻截图中的 instanceSelectionId 渲染异常，但不依赖私有 Babylon 字段。
+ */
+function runSelectionBufferMatrixStress({
+  prepareInstancedMeshesForSelectionOutline,
+  repairInstancedMeshBufferContainers,
+}) {
+  const stressEngine = new NullEngine();
+  const stressScene = new Scene(stressEngine);
+  const camera = new FreeCamera('SelectionMatrixStressCamera', new Vector3(0, 0, -10), stressScene);
+  camera.setTarget(Vector3.Zero());
+  stressScene.activeCamera = camera;
+  const source = MeshBuilder.CreateBox('SelectionMatrixStressSource', { size: 1 }, stressScene);
+  const instances = Array.from({ length: 256 }, (_, index) => source.createInstance(`SelectionMatrixStress_${index}`));
+  const selectionLayer = new SelectionOutlineLayer('SelectionMatrixStressLayer', stressScene);
+
+  try {
+    prepareInstancedMeshesForSelectionOutline([instances[0]]);
+    selectionLayer.addSelection([instances[0]]);
+
+    for (let index = 1; index < instances.length; index += 1) {
+      if (index % 7 === 0) {
+        // 模拟参数脚本 clone/重建期间公开容器短暂为空；source 此时已经注册 instanceSelectionId。
+        instances[index].instancedBuffers = null;
       }
     }
+    repairInstancedMeshBufferContainers(instances.slice(1));
+    assert.doesNotThrow(() => stressScene.render(), '新增矩阵实例不得因 instanceSelectionId 空缓冲中断渲染循环');
+
+    selectionLayer.clearSelection();
+    instances[128].instancedBuffers = null;
+    prepareInstancedMeshesForSelectionOutline([instances[128]]);
+    selectionLayer.addSelection([instances[128]]);
+    assert.doesNotThrow(() => stressScene.render(), '重建选择描边后矩阵实例必须继续可渲染');
+    assert.ok(instances.every((instance) => instance.isAnInstance), '压力样例必须保持 Babylon InstancedMesh 矩阵渲染');
+    assert.ok(instances.every((instance) => instance.instancedBuffers), '同源全部实例都必须恢复公开缓冲容器');
+
+    return instances.length;
+  } finally {
+    selectionLayer.dispose();
+    source.dispose(false, false);
+    stressScene.dispose();
+    stressEngine.dispose();
   }
 }
 
@@ -444,9 +480,11 @@ try {
   const [
     { SharedModelAssetCache, isShelfInstancingCandidate },
     { ExternalModelScriptRuntime },
-  ] = await withStageTimeout('加载共享缓存和脚本运行时模块', () => Promise.all([
+    { prepareInstancedMeshesForSelectionOutline, repairInstancedMeshBufferContainers },
+  ] = await withStageTimeout('加载共享缓存、脚本运行时和实例缓冲保护模块', () => Promise.all([
     loadSsrModuleWithTimeout(server, '/src/runtime/babylon/SharedModelAssetCache.ts'),
     loadSsrModuleWithTimeout(server, '/src/runtime/babylon/ExternalModelScriptRuntime.ts'),
+    loadSsrModuleWithTimeout(server, '/src/runtime/babylon/instancedSelectionBuffers.ts'),
   ]));
   const { SceneRuntime } = await withStageTimeout('加载 SceneRuntime 模块', () => loadSsrModuleWithTimeout(server, '/src/runtime/babylon/SceneRuntime.ts'));
 
@@ -483,6 +521,11 @@ try {
     sourceUrl: 'editor-asset://Assets/Models/Stacker/Stacker.glb',
     scriptAssets: [{ path: 'stacker.model.ts', sourceUrl: 'data:text/plain,', name: 'stacker.model.ts' }],
   }), false, 'Stacker 不得误入 Shelf 共享实例路径');
+
+  const selectionBufferStressInstances = withSyncStage('矩阵实例选择缓冲压力回归', () => runSelectionBufferMatrixStress({
+    prepareInstancedMeshesForSelectionOutline,
+    repairInstancedMeshBufferContainers,
+  }));
 
   const cache = new SharedModelAssetCache();
   let loadCount = 0;
@@ -570,7 +613,7 @@ try {
   assert.ok(updatedSelectedLeftMeshes.length > leftMeshes.length, '左 Shelf 保持选中修改层列后必须生成更多 Mesh');
   assert.ok(updatedSelectedLeftMeshes.every((mesh) => mesh.isAnInstance), '左 Shelf 保持选中修改层列后新增 Mesh 必须仍为实例');
   selectionLayer.clearSelection();
-  prepareSelectionInstancedBuffers(updatedSelectedLeftMeshes);
+  prepareInstancedMeshesForSelectionOutline(updatedSelectedLeftMeshes);
   selectionLayer.addSelection(updatedSelectedLeftMeshes);
   assertInstancedMeshesHaveSelectionId(updatedSelectedLeftMeshes, '保持选中修改 layerCount/columnCount 后重建描边必须继续写入实例选择 ID');
   assert.ok(rightMeshes.every((mesh) => Number(mesh.instancedBuffers?.instanceSelectionId ?? 0) === 0), '保持选中改参不得污染未选 Shelf 选择 ID');
@@ -669,6 +712,7 @@ try {
     denseThinInstances,
     denseRenderableMeshes: denseRenderableMeshes.length,
     generatedRoots: generatedRoots.length,
+    selectionBufferStressInstances,
     sceneRuntime,
   }, null, 2));
 } finally {

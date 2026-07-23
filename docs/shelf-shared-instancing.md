@@ -71,7 +71,7 @@ container.instantiateModelsToScene(
 
 独占容器模型继续使用 `HighlightLayer`。Shelf 与普通静态共享模型的 `InstancedMesh` 使用单个共享 `SelectionOutlineLayer`，通过实例选择 ID 区分同源实例，避免选中一个实体时其它同源模型同时高亮。
 
-选择描边按当前选中 Mesh 的 `uniqueId` 生成签名；实体仅移动但选择和 Mesh 拓扑未变化时，不重复重建实例选择缓冲。签名变化时仍执行 `clearSelection()` 后重新 `addSelection()`，避免描边层累积已释放 Mesh 引用。由于 Babylon 清理实例选择缓冲后，已有 source mesh 的部分实例公开 `instancedBuffers` 容器可能为空，运行时会在重新添加选择前按去重后的 `sourceMesh` 检查：只有当 `sourceMesh.instancedBuffers` 仍存在时，才补齐 `sourceMesh.instances` 中所有实例的公开 `instancedBuffers` 容器；若 source mesh 尚未注册实例缓冲，则交由 Babylon `registerInstancedBuffer` 原生初始化。该策略不访问 Babylon 私有字段，也不改参数化脚本。
+选择描边按当前选中 Mesh 的 `uniqueId` 生成签名；实体仅移动但选择和 Mesh 拓扑未变化时，不重复重建实例选择缓冲。签名变化时仍执行 `clearSelection()` 后重新 `addSelection()`，避免描边层累积已释放 Mesh 引用。由于 Babylon 清理实例选择缓冲后，已有 source mesh 的部分实例公开 `instancedBuffers` 容器可能为空，运行时会在重新添加选择前同时补齐当前选中实例、共享 source mesh 和 `sourceMesh.instances` 的公开容器；参数脚本或异步加载刷新 Mesh 后还会修复已经注册实例缓冲但容器暂时为空的新实例。这样可避免主渲染阶段读取 `instanceSelectionId` 时命中 `null`，且不扫描私有字段、不逐帧遍历场景，也不改参数化脚本。
 
 ## 生命周期
 
@@ -111,6 +111,7 @@ npm run smoke:shelf-instancing
 - 两个 Shelf 共享同一组源 Mesh，但 Transform 和拾取 metadata 相互隔离。
 - SelectionOutlineLayer 只给被选实例写入选择 ID；SceneRuntime 锁定实体后会禁用该实例全部拾取。
 - 保持左侧 Shelf 选中时修改 `layerCount`/`columnCount`，随后清理并重建描边不再触发 Babylon `instanceSelectionId` 空容器写入错误。
+- 256 个同源矩阵实例在选择缓冲已注册后模拟脚本重建产生空容器，修复后连续渲染与重新选择均不得抛出 `instanceSelectionId` 异常。
 - 重建前后左侧真实 `InstancedMesh` 均具有 `instanceSelectionId > 0`，右侧同源未选 Shelf 保持 `0/undefined`。
 - 每个相关 `sourceMesh.instances` 都具备公开 `instancedBuffers` 容器。
 - 删除一个实例不释放共享源；删除最后一个实例时只释放一次。

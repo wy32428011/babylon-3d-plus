@@ -1,4 +1,4527 @@
 {
   "version": 2,
-  "assets": []
+  "assets": [
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\box\\box.glb",
+      "name": "box.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\box\\box.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5Cbox%5Cbox.glb",
+      "assetRevision": "mrx1cntx-20f08d7f-8777-42f6-b325-aa7379382f4b",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\box",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\box\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\box\\box.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\box\\box.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5Cbox%5Cbox.model.ts",
+          "name": "box.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "box.glb",
+          "scriptFilename": "box.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "box",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "货物",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "Box 纸箱",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "长度、宽度和高度均以米为单位，修改后实时调整纸箱尺寸。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "length",
+              "label": "长度 (m)",
+              "type": "number",
+              "defaultValue": 0.32,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "width",
+              "label": "宽度 (m)",
+              "type": "number",
+              "defaultValue": 0.18,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "height",
+              "label": "高度 (m)",
+              "type": "number",
+              "defaultValue": 0.18,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "box",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "货物",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "Box 纸箱",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "长度、宽度和高度均以米为单位，修改后实时调整纸箱尺寸。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "length": {
+              "type": "number",
+              "value": 0.32,
+              "label": "长度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "width": {
+              "type": "number",
+              "value": 0.18,
+              "label": "宽度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "height": {
+              "type": "number",
+              "value": 0.18,
+              "label": "高度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "box.glb",
+          "scriptFilename": "box.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "displayName": "Box 纸箱",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "length",
+            "label": "长度 (m)",
+            "type": "number",
+            "defaultValue": 0.32,
+            "min": 0.01,
+            "max": 100,
+            "step": 0.01,
+            "unit": "m"
+          },
+          {
+            "key": "width",
+            "label": "宽度 (m)",
+            "type": "number",
+            "defaultValue": 0.18,
+            "min": 0.01,
+            "max": 100,
+            "step": 0.01,
+            "unit": "m"
+          },
+          {
+            "key": "height",
+            "label": "高度 (m)",
+            "type": "number",
+            "defaultValue": 0.18,
+            "min": 0.01,
+            "max": 100,
+            "step": 0.01,
+            "unit": "m"
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\GD_有电机_Optimized(1)\\GD_有电机_Optimized(1).glb",
+      "name": "GD_有电机_Optimized(1).glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\GD_有电机_Optimized(1)\\GD_有电机_Optimized(1).glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CGD_%E6%9C%89%E7%94%B5%E6%9C%BA_Optimized(1)%5CGD_%E6%9C%89%E7%94%B5%E6%9C%BA_Optimized(1).glb",
+      "assetRevision": "mrx1cnvt-40f1a433-175e-4656-9035-4706dd3edaea",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\GD_有电机_Optimized(1)",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\GD_有电机_Optimized(1)\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\GD_有电机_Optimized(1)\\gd-motor-optimized.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\GD_有电机_Optimized(1)\\gd-motor-optimized.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CGD_%E6%9C%89%E7%94%B5%E6%9C%BA_Optimized(1)%5Cgd-motor-optimized.model.ts",
+          "name": "gd-motor-optimized.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "GD_有电机_Optimized(1).glb",
+          "scriptFilename": "gd-motor-optimized.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "gd-motor-optimized",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "输送",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "有电机辊道",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "支持宽度、深度、高度、克隆间距、主体颜色与部件显隐参数化。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "width",
+              "label": "宽度",
+              "type": "number",
+              "defaultValue": 2.2,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "depth",
+              "label": "深度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "height",
+              "label": "高度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "cloneSpacing",
+              "label": "克隆间距",
+              "type": "number",
+              "defaultValue": 0.05,
+              "configuration": {
+                "type": "number",
+                "min": 0.001,
+                "max": 10,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "mainColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#000000",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "hasMotor",
+              "label": "是否有电机",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "hasStopPlate",
+              "label": "是否有阻挡板",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "hasRollerSkin",
+              "label": "是否有辊轮皮",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "hasLeftChain",
+              "label": "是否有左链条",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "hasRightChain",
+              "label": "是否有右链条",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "hasFrontSupport",
+              "label": "是否有前支架",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "hasRearSupport",
+              "label": "是否有后支架",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "gd-motor-optimized",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "输送",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "有电机辊道",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "支持宽度、深度、高度、克隆间距、主体颜色与部件显隐参数化。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "width": {
+              "type": "number",
+              "value": 2.2,
+              "label": "宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "depth": {
+              "type": "number",
+              "value": 1.6,
+              "label": "深度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "height": {
+              "type": "number",
+              "value": 1.6,
+              "label": "高度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "cloneSpacing": {
+              "type": "number",
+              "value": 0.05,
+              "label": "克隆间距",
+              "configuration": {
+                "type": "number",
+                "min": 0.001,
+                "max": 10,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "mainColor": {
+              "type": "string",
+              "value": "#000000",
+              "label": "主体颜色",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "hasMotor": {
+              "type": "boolean",
+              "value": true,
+              "label": "是否有电机",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "hasStopPlate": {
+              "type": "boolean",
+              "value": true,
+              "label": "是否有阻挡板",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "hasRollerSkin": {
+              "type": "boolean",
+              "value": true,
+              "label": "是否有辊轮皮",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "hasLeftChain": {
+              "type": "boolean",
+              "value": true,
+              "label": "是否有左链条",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "hasRightChain": {
+              "type": "boolean",
+              "value": true,
+              "label": "是否有右链条",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "hasFrontSupport": {
+              "type": "boolean",
+              "value": true,
+              "label": "是否有前支架",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "hasRearSupport": {
+              "type": "boolean",
+              "value": true,
+              "label": "是否有后支架",
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "GD_有电机_Optimized(1).glb",
+          "scriptFilename": "gd-motor-optimized.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "defaultAssetCode": "MotorConveyor01",
+      "displayName": "有电机辊道",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "width",
+            "label": "宽度",
+            "type": "number",
+            "defaultValue": 2.2,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "depth",
+            "label": "深度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "height",
+            "label": "高度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "cloneSpacing",
+            "label": "克隆间距",
+            "type": "number",
+            "defaultValue": 0.05,
+            "min": 0.001,
+            "max": 10,
+            "step": 0.01,
+            "unit": "m"
+          },
+          {
+            "key": "mainColor",
+            "label": "主体颜色",
+            "type": "color",
+            "defaultValue": "#000000"
+          },
+          {
+            "key": "hasMotor",
+            "label": "是否有电机",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "hasStopPlate",
+            "label": "是否有阻挡板",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "hasRollerSkin",
+            "label": "是否有辊轮皮",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "hasLeftChain",
+            "label": "是否有左链条",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "hasRightChain",
+            "label": "是否有右链条",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "hasFrontSupport",
+            "label": "是否有前支架",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "hasRearSupport",
+            "label": "是否有后支架",
+            "type": "boolean",
+            "defaultValue": true
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\HCTS\\HCTS.glb",
+      "name": "HCTS.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\HCTS\\HCTS.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CHCTS%5CHCTS.glb",
+      "assetRevision": "mrx1cnxn-533f3d8f-038f-4b8a-906d-41ba226b69a6",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\HCTS",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\HCTS\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\HCTS\\hcts.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\HCTS\\hcts.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CHCTS%5Chcts.model.ts",
+          "name": "hcts.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "HCTS.glb",
+          "scriptFilename": "hcts.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "hcts",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "多穿库",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "换层提升机",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "支持宽度、深度、高度、滚子间距与主体颜色参数化。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "width",
+              "label": "宽度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "depth",
+              "label": "深度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "height",
+              "label": "高度",
+              "type": "number",
+              "defaultValue": 4.1,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "rollerSpacing",
+              "label": "滚子间距",
+              "type": "number",
+              "defaultValue": 0.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 50,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "mainColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#000000",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "hcts",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "多穿库",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "换层提升机",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "支持宽度、深度、高度、滚子间距与主体颜色参数化。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "width": {
+              "type": "number",
+              "value": 1.6,
+              "label": "宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "depth": {
+              "type": "number",
+              "value": 1.6,
+              "label": "深度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "height": {
+              "type": "number",
+              "value": 4.1,
+              "label": "高度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "rollerSpacing": {
+              "type": "number",
+              "value": 0.6,
+              "label": "滚子间距",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 50,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "mainColor": {
+              "type": "string",
+              "value": "#000000",
+              "label": "主体颜色",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "HCTS.glb",
+          "scriptFilename": "hcts.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "defaultAssetCode": "HCTS01",
+      "displayName": "换层提升机",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "width",
+            "label": "宽度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "depth",
+            "label": "深度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "height",
+            "label": "高度",
+            "type": "number",
+            "defaultValue": 4.1,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "rollerSpacing",
+            "label": "滚子间距",
+            "type": "number",
+            "defaultValue": 0.6,
+            "min": 0.01,
+            "max": 50,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "mainColor",
+            "label": "主体颜色",
+            "type": "color",
+            "defaultValue": "#000000"
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\LED\\LED.glb",
+      "name": "LED.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\LED\\LED.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CLED%5CLED.glb",
+      "assetRevision": "mrx1co09-c6451e18-c3cb-473b-92a8-9347614224d1",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\LED",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\LED\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\LED\\led.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\LED\\led.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CLED%5Cled.model.ts",
+          "name": "led.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "LED.glb",
+          "scriptFilename": "led.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "length",
+              "label": "长度 (m)",
+              "type": "number",
+              "defaultValue": 1.201,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "height",
+              "label": "高度 (m)",
+              "type": "number",
+              "defaultValue": 1.726,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "runningColor",
+              "label": "展示字运行颜色",
+              "type": "string",
+              "defaultValue": "#2ecc71",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          ],
+          "values": {
+            "length": {
+              "type": "number",
+              "value": 1.201,
+              "label": "长度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "height": {
+              "type": "number",
+              "value": 1.726,
+              "label": "高度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "runningColor": {
+              "type": "string",
+              "value": "#2ecc71",
+              "label": "展示字运行颜色",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "LED.glb",
+          "scriptFilename": "led.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "displayName": "LED",
+      "lengthUnit": "meter",
+      "unitScaleToMeters": 1,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "length",
+            "label": "长度 (m)",
+            "type": "number",
+            "defaultValue": 1.201,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "height",
+            "label": "高度 (m)",
+            "type": "number",
+            "defaultValue": 1.726,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "runningColor",
+            "label": "展示字运行颜色",
+            "type": "color",
+            "defaultValue": "#2ecc71"
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\MultiwearingWarehouse\\EQ_DCKHJ05.glb",
+      "name": "EQ_DCKHJ05.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\MultiwearingWarehouse\\EQ_DCKHJ05.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CMultiwearingWarehouse%5CEQ_DCKHJ05.glb",
+      "assetRevision": "mrx1co24-76f737ad-359d-4d7b-93cb-d5d549088a2a",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\MultiwearingWarehouse",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\MultiwearingWarehouse\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\MultiwearingWarehouse\\multiwearing-warehouse.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\MultiwearingWarehouse\\multiwearing-warehouse.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CMultiwearingWarehouse%5Cmultiwearing-warehouse.model.ts",
+          "name": "multiwearing-warehouse.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "EQ_DCKHJ05.glb",
+          "scriptFilename": "multiwearing-warehouse.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "multiwearing-warehouse",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "多穿库",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "多穿库",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "支持货格尺寸、暂存台、货格数量、过道与颜色等参数化（业务逻辑待补全）。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "baseHeight",
+              "label": "底层高度",
+              "type": "number",
+              "defaultValue": 0.1,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 10,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "slotLength",
+              "label": "货格长度",
+              "type": "number",
+              "defaultValue": 2,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "slotWidth",
+              "label": "货格宽度",
+              "type": "number",
+              "defaultValue": 1,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "slotHeight",
+              "label": "货格高度",
+              "type": "number",
+              "defaultValue": 1.2,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "showBufferStationSurface",
+              "label": "显示暂存台台面",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "frontLiftToShelfDistance",
+              "label": "前提升机到货架距",
+              "type": "number",
+              "defaultValue": 0.1,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 50,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "bufferStationLength",
+              "label": "暂存台长度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "bufferStationWidth",
+              "label": "暂存台宽度",
+              "type": "number",
+              "defaultValue": 2,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "bufferStationRollerDensity",
+              "label": "暂存台辊筒密度",
+              "type": "number",
+              "defaultValue": 0.2,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 10,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "partitionStyle",
+              "label": "隔板式",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "beamDensity",
+              "label": "货梁密度",
+              "type": "number",
+              "defaultValue": 0.1,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 10,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "slotCountHeight",
+              "label": "高度方向货格个数",
+              "type": "number",
+              "defaultValue": 4,
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            {
+              "key": "slotCountLength",
+              "label": "长度方向货格个数",
+              "type": "number",
+              "defaultValue": 3,
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            {
+              "key": "aisleWidth",
+              "label": "过道宽度",
+              "type": "number",
+              "defaultValue": 1.2,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "mainColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#bfbfbf",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "shelfColor",
+              "label": "货架颜色",
+              "type": "string",
+              "defaultValue": "#ffffff",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "multiwearing-warehouse",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "多穿库",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "多穿库",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "支持货格尺寸、暂存台、货格数量、过道与颜色等参数化（业务逻辑待补全）。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "baseHeight": {
+              "type": "number",
+              "value": 0.1,
+              "label": "底层高度",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 10,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "slotLength": {
+              "type": "number",
+              "value": 2,
+              "label": "货格长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "slotWidth": {
+              "type": "number",
+              "value": 1,
+              "label": "货格宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "slotHeight": {
+              "type": "number",
+              "value": 1.2,
+              "label": "货格高度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "showBufferStationSurface": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示暂存台台面",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "frontLiftToShelfDistance": {
+              "type": "number",
+              "value": 0.1,
+              "label": "前提升机到货架距",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 50,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "bufferStationLength": {
+              "type": "number",
+              "value": 1.6,
+              "label": "暂存台长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "bufferStationWidth": {
+              "type": "number",
+              "value": 2,
+              "label": "暂存台宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "bufferStationRollerDensity": {
+              "type": "number",
+              "value": 0.2,
+              "label": "暂存台辊筒密度",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 10,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "partitionStyle": {
+              "type": "boolean",
+              "value": true,
+              "label": "隔板式",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "beamDensity": {
+              "type": "number",
+              "value": 0.1,
+              "label": "货梁密度",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 10,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "slotCountHeight": {
+              "type": "number",
+              "value": 4,
+              "label": "高度方向货格个数",
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            "slotCountLength": {
+              "type": "number",
+              "value": 3,
+              "label": "长度方向货格个数",
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            "aisleWidth": {
+              "type": "number",
+              "value": 1.2,
+              "label": "过道宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "mainColor": {
+              "type": "string",
+              "value": "#bfbfbf",
+              "label": "主体颜色",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "shelfColor": {
+              "type": "string",
+              "value": "#ffffff",
+              "label": "货架颜色",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "EQ_DCKHJ05.glb",
+          "scriptFilename": "multiwearing-warehouse.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "defaultAssetCode": "EQ_DCKHJ05",
+      "displayName": "多穿库",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "baseHeight",
+            "label": "底层高度",
+            "type": "number",
+            "defaultValue": 0.1,
+            "min": 0,
+            "max": 10,
+            "step": 0.01,
+            "unit": "m"
+          },
+          {
+            "key": "slotLength",
+            "label": "货格长度",
+            "type": "number",
+            "defaultValue": 2,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "slotWidth",
+            "label": "货格宽度",
+            "type": "number",
+            "defaultValue": 1,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "slotHeight",
+            "label": "货格高度",
+            "type": "number",
+            "defaultValue": 1.2,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "showBufferStationSurface",
+            "label": "显示暂存台台面",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "frontLiftToShelfDistance",
+            "label": "前提升机到货架距",
+            "type": "number",
+            "defaultValue": 0.1,
+            "min": 0,
+            "max": 50,
+            "step": 0.01,
+            "unit": "m"
+          },
+          {
+            "key": "bufferStationLength",
+            "label": "暂存台长度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "bufferStationWidth",
+            "label": "暂存台宽度",
+            "type": "number",
+            "defaultValue": 2,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "bufferStationRollerDensity",
+            "label": "暂存台辊筒密度",
+            "type": "number",
+            "defaultValue": 0.2,
+            "min": 0.01,
+            "max": 10,
+            "step": 0.01,
+            "unit": "m"
+          },
+          {
+            "key": "partitionStyle",
+            "label": "隔板式",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "beamDensity",
+            "label": "货梁密度",
+            "type": "number",
+            "defaultValue": 0.1,
+            "min": 0.01,
+            "max": 10,
+            "step": 0.01,
+            "unit": "m"
+          },
+          {
+            "key": "slotCountHeight",
+            "label": "高度方向货格个数",
+            "type": "number",
+            "defaultValue": 4,
+            "min": 1,
+            "max": 100,
+            "step": 1
+          },
+          {
+            "key": "slotCountLength",
+            "label": "长度方向货格个数",
+            "type": "number",
+            "defaultValue": 3,
+            "min": 1,
+            "max": 100,
+            "step": 1
+          },
+          {
+            "key": "aisleWidth",
+            "label": "过道宽度",
+            "type": "number",
+            "defaultValue": 1.2,
+            "min": 0,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "mainColor",
+            "label": "主体颜色",
+            "type": "color",
+            "defaultValue": "#bfbfbf"
+          },
+          {
+            "key": "shelfColor",
+            "label": "货架颜色",
+            "type": "color",
+            "defaultValue": "#ffffff"
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Shelf\\Shelf.glb",
+      "name": "Shelf.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Shelf\\Shelf.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CShelf%5CShelf.glb",
+      "assetRevision": "mrx1co43-bef95736-6de1-4b4a-b728-a52d64e2717b",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Shelf",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Shelf\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Shelf\\shelf.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Shelf\\shelf.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CShelf%5Cshelf.model.ts",
+          "name": "shelf.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "Shelf.glb",
+          "scriptFilename": "shelf.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "shelf",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "多穿库",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "多穿货架",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "Shelf.glb 专用参数化：底部支架腿高度独立于货架高度；底部深向支撑和下方黄色横梁只保留一次，每增加一层只新增一组上方黄色框架和一组两侧三角支架；宽度、深度、列数和双深仍按模型局部轴适配。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "layerCount",
+              "label": "层数",
+              "type": "number",
+              "defaultValue": 1,
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 20,
+                "step": 1
+              }
+            },
+            {
+              "key": "columnCount",
+              "label": "列数",
+              "type": "number",
+              "defaultValue": 1,
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            {
+              "key": "cellWidth",
+              "label": "单元宽度 (m)",
+              "type": "number",
+              "defaultValue": 0.801,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "cellHeight",
+              "label": "单元高度 (m)",
+              "type": "number",
+              "defaultValue": 4.525,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "supportLegHeight",
+              "label": "支撑脚高度 (m)",
+              "type": "number",
+              "defaultValue": 0.05,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 5,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "postExtension",
+              "label": "立柱延长 (m)",
+              "type": "number",
+              "defaultValue": 0,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "cellDepth",
+              "label": "单元深度 (m)",
+              "type": "number",
+              "defaultValue": 1.183,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "doubleDeepEnabled",
+              "label": "对侧货架",
+              "type": "boolean",
+              "defaultValue": false,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "deepSlotGap",
+              "label": "对侧货架间隔 (m)",
+              "type": "number",
+              "defaultValue": 0.2,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "bodyColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#ff0000",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "beamColor",
+              "label": "横梁颜色",
+              "type": "string",
+              "defaultValue": "#00ff00",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "shelf",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "多穿库",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "多穿货架",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "Shelf.glb 专用参数化：底部支架腿高度独立于货架高度；底部深向支撑和下方黄色横梁只保留一次，每增加一层只新增一组上方黄色框架和一组两侧三角支架；宽度、深度、列数和双深仍按模型局部轴适配。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "layerCount": {
+              "type": "number",
+              "value": 1,
+              "label": "层数",
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 20,
+                "step": 1
+              }
+            },
+            "columnCount": {
+              "type": "number",
+              "value": 1,
+              "label": "列数",
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            "cellWidth": {
+              "type": "number",
+              "value": 0.801,
+              "label": "单元宽度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "cellHeight": {
+              "type": "number",
+              "value": 4.525,
+              "label": "单元高度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "supportLegHeight": {
+              "type": "number",
+              "value": 0.05,
+              "label": "支撑脚高度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 5,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "postExtension": {
+              "type": "number",
+              "value": 0,
+              "label": "立柱延长 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "cellDepth": {
+              "type": "number",
+              "value": 1.183,
+              "label": "单元深度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "doubleDeepEnabled": {
+              "type": "boolean",
+              "value": false,
+              "label": "对侧货架",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "deepSlotGap": {
+              "type": "number",
+              "value": 0.2,
+              "label": "对侧货架间隔 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "bodyColor": {
+              "type": "string",
+              "value": "#ff0000",
+              "label": "主体颜色",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "beamColor": {
+              "type": "string",
+              "value": "#00ff00",
+              "label": "横梁颜色",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "Shelf.glb",
+          "scriptFilename": "shelf.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "displayName": "多穿货架",
+      "lengthUnit": "millimeter",
+      "unitScaleToMeters": 0.001,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "layerCount",
+            "label": "层数",
+            "type": "number",
+            "defaultValue": 1,
+            "min": 1,
+            "max": 20,
+            "step": 1
+          },
+          {
+            "key": "columnCount",
+            "label": "列数",
+            "type": "number",
+            "defaultValue": 1,
+            "min": 1,
+            "max": 100,
+            "step": 1
+          },
+          {
+            "key": "cellWidth",
+            "label": "单元宽度 (m)",
+            "type": "number",
+            "defaultValue": 0.801,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "cellHeight",
+            "label": "单元高度 (m)",
+            "type": "number",
+            "defaultValue": 4.525,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "supportLegHeight",
+            "label": "支撑脚高度 (m)",
+            "type": "number",
+            "defaultValue": 0.05,
+            "min": 0,
+            "max": 5,
+            "step": 0.05,
+            "unit": "m"
+          },
+          {
+            "key": "postExtension",
+            "label": "立柱延长 (m)",
+            "type": "number",
+            "defaultValue": 0,
+            "min": 0,
+            "max": 100,
+            "step": 0.05,
+            "unit": "m"
+          },
+          {
+            "key": "cellDepth",
+            "label": "单元深度 (m)",
+            "type": "number",
+            "defaultValue": 1.183,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "doubleDeepEnabled",
+            "label": "对侧货架",
+            "type": "boolean",
+            "defaultValue": false
+          },
+          {
+            "key": "deepSlotGap",
+            "label": "对侧货架间隔 (m)",
+            "type": "number",
+            "defaultValue": 0.2,
+            "min": 0,
+            "max": 100,
+            "step": 0.05,
+            "unit": "m"
+          },
+          {
+            "key": "bodyColor",
+            "label": "主体颜色",
+            "type": "color",
+            "defaultValue": "#ff0000"
+          },
+          {
+            "key": "beamColor",
+            "label": "横梁颜色",
+            "type": "color",
+            "defaultValue": "#00ff00"
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\shelf-instance\\Shelf.glb",
+      "name": "Shelf.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\shelf-instance\\Shelf.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5Cshelf-instance%5CShelf.glb",
+      "assetRevision": "mrx1co5q-e2f5f9e6-1d57-4e54-81bb-5cacd59c2909",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\shelf-instance",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\shelf-instance\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\shelf-instance\\shelf.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\shelf-instance\\shelf.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5Cshelf-instance%5Cshelf.model.ts",
+          "name": "shelf.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "Shelf.glb",
+          "scriptFilename": "shelf.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "shelf",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "多穿库",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "多穿货架",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "Shelf.glb 专用参数化：底部支架腿高度独立于货架高度；底部深向支撑和下方黄色横梁只保留一次，每增加一层只新增一组上方黄色框架和一组两侧三角支架；宽度、深度、列数和双深仍按模型局部轴适配。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "layerCount",
+              "label": "层数",
+              "type": "number",
+              "defaultValue": 1,
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 20,
+                "step": 1
+              }
+            },
+            {
+              "key": "columnCount",
+              "label": "列数",
+              "type": "number",
+              "defaultValue": 1,
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            {
+              "key": "cellWidth",
+              "label": "单元宽度 (m)",
+              "type": "number",
+              "defaultValue": 0.801,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "cellHeight",
+              "label": "单元高度 (m)",
+              "type": "number",
+              "defaultValue": 4.525,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "supportLegHeight",
+              "label": "支撑脚高度 (m)",
+              "type": "number",
+              "defaultValue": 0.05,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 5,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "postExtension",
+              "label": "立柱延长 (m)",
+              "type": "number",
+              "defaultValue": 0,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "cellDepth",
+              "label": "单元深度 (m)",
+              "type": "number",
+              "defaultValue": 1.183,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "doubleDeepEnabled",
+              "label": "对侧货架",
+              "type": "boolean",
+              "defaultValue": false,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "deepSlotGap",
+              "label": "对侧货架间隔 (m)",
+              "type": "number",
+              "defaultValue": 0.2,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "bodyColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#ff0000",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "beamColor",
+              "label": "横梁颜色",
+              "type": "string",
+              "defaultValue": "#00ff00",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "shelf",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "多穿库",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "多穿货架",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "Shelf.glb 专用参数化：底部支架腿高度独立于货架高度；底部深向支撑和下方黄色横梁只保留一次，每增加一层只新增一组上方黄色框架和一组两侧三角支架；宽度、深度、列数和双深仍按模型局部轴适配。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "layerCount": {
+              "type": "number",
+              "value": 1,
+              "label": "层数",
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 20,
+                "step": 1
+              }
+            },
+            "columnCount": {
+              "type": "number",
+              "value": 1,
+              "label": "列数",
+              "configuration": {
+                "type": "number",
+                "min": 1,
+                "max": 100,
+                "step": 1
+              }
+            },
+            "cellWidth": {
+              "type": "number",
+              "value": 0.801,
+              "label": "单元宽度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "cellHeight": {
+              "type": "number",
+              "value": 4.525,
+              "label": "单元高度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "supportLegHeight": {
+              "type": "number",
+              "value": 0.05,
+              "label": "支撑脚高度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 5,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "postExtension": {
+              "type": "number",
+              "value": 0,
+              "label": "立柱延长 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "cellDepth": {
+              "type": "number",
+              "value": 1.183,
+              "label": "单元深度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "doubleDeepEnabled": {
+              "type": "boolean",
+              "value": false,
+              "label": "对侧货架",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "deepSlotGap": {
+              "type": "number",
+              "value": 0.2,
+              "label": "对侧货架间隔 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.05,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "bodyColor": {
+              "type": "string",
+              "value": "#ff0000",
+              "label": "主体颜色",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "beamColor": {
+              "type": "string",
+              "value": "#00ff00",
+              "label": "横梁颜色",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "Shelf.glb",
+          "scriptFilename": "shelf.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "displayName": "多穿货架",
+      "lengthUnit": "millimeter",
+      "unitScaleToMeters": 0.001,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "layerCount",
+            "label": "层数",
+            "type": "number",
+            "defaultValue": 1,
+            "min": 1,
+            "max": 20,
+            "step": 1
+          },
+          {
+            "key": "columnCount",
+            "label": "列数",
+            "type": "number",
+            "defaultValue": 1,
+            "min": 1,
+            "max": 100,
+            "step": 1
+          },
+          {
+            "key": "cellWidth",
+            "label": "单元宽度 (m)",
+            "type": "number",
+            "defaultValue": 0.801,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "cellHeight",
+            "label": "单元高度 (m)",
+            "type": "number",
+            "defaultValue": 4.525,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "supportLegHeight",
+            "label": "支撑脚高度 (m)",
+            "type": "number",
+            "defaultValue": 0.05,
+            "min": 0,
+            "max": 5,
+            "step": 0.05,
+            "unit": "m"
+          },
+          {
+            "key": "postExtension",
+            "label": "立柱延长 (m)",
+            "type": "number",
+            "defaultValue": 0,
+            "min": 0,
+            "max": 100,
+            "step": 0.05,
+            "unit": "m"
+          },
+          {
+            "key": "cellDepth",
+            "label": "单元深度 (m)",
+            "type": "number",
+            "defaultValue": 1.183,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "doubleDeepEnabled",
+            "label": "对侧货架",
+            "type": "boolean",
+            "defaultValue": false
+          },
+          {
+            "key": "deepSlotGap",
+            "label": "对侧货架间隔 (m)",
+            "type": "number",
+            "defaultValue": 0.2,
+            "min": 0,
+            "max": 100,
+            "step": 0.05,
+            "unit": "m"
+          },
+          {
+            "key": "bodyColor",
+            "label": "主体颜色",
+            "type": "color",
+            "defaultValue": "#ff0000"
+          },
+          {
+            "key": "beamColor",
+            "label": "横梁颜色",
+            "type": "color",
+            "defaultValue": "#00ff00"
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Stacker\\Stacker.glb",
+      "name": "Stacker.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Stacker\\Stacker.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CStacker%5CStacker.glb",
+      "assetRevision": "mrx1co7t-924c3339-9a03-493d-97c1-4557142746ca",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Stacker",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Stacker\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Stacker\\stacker.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\Stacker\\stacker.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CStacker%5Cstacker.model.ts",
+          "name": "stacker.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "Stacker.glb",
+          "scriptFilename": "stacker.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "stacker",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "堆垛机",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "叉式堆垛机",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "支持堆垛机主体尺寸、货箱尺寸、顶底轨显示和模型外观颜色参数化。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "appearanceColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#ffffff",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "bodyLength",
+              "label": "主体长度 (m)",
+              "type": "number",
+              "defaultValue": 23.012,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "bodyHeight",
+              "label": "主体高度 (m)",
+              "type": "number",
+              "defaultValue": 7.837,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "platformLength",
+              "label": "货箱深度 (m)",
+              "type": "number",
+              "defaultValue": 1.279,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "platformHeight",
+              "label": "货箱高度 (m)",
+              "type": "number",
+              "defaultValue": 1.695,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "platformwidth",
+              "label": "货箱宽度",
+              "type": "number",
+              "defaultValue": 1.695,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "showTopTrack",
+              "label": "显示顶轨",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "showBottomTrack",
+              "label": "显示底轨",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "stacker",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "堆垛机",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "叉式堆垛机",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "支持堆垛机主体尺寸、货箱尺寸、顶底轨显示和模型外观颜色参数化。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "appearanceColor": {
+              "type": "string",
+              "value": "#ffffff",
+              "label": "模型外观颜色",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "bodyLength": {
+              "type": "number",
+              "value": 23.012,
+              "label": "主体长度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "bodyHeight": {
+              "type": "number",
+              "value": 7.837,
+              "label": "主体高度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "platformLength": {
+              "type": "number",
+              "value": 1.279,
+              "label": "货箱深度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "platformHeight": {
+              "type": "number",
+              "value": 1.695,
+              "label": "货箱高度 (m)",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "platformwidth": {
+              "type": "number",
+              "value": 1.695,
+              "label": "货箱宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "showTopTrack": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示顶轨",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "showBottomTrack": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示底轨",
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "Stacker.glb",
+          "scriptFilename": "stacker.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "defaultAssetCode": "Stacker01",
+      "displayName": "叉式堆垛机",
+      "lengthUnit": "millimeter",
+      "unitScaleToMeters": 0.001,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "appearanceColor",
+            "label": "模型外观颜色",
+            "type": "color",
+            "defaultValue": "#ffffff"
+          },
+          {
+            "key": "bodyLength",
+            "label": "主体长度 (m)",
+            "type": "number",
+            "defaultValue": 23.012,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "bodyHeight",
+            "label": "主体高度 (m)",
+            "type": "number",
+            "defaultValue": 7.837,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "platformLength",
+            "label": "货箱深度 (m)",
+            "type": "number",
+            "defaultValue": 1.279,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "platformHeight",
+            "label": "货箱高度 (m)",
+            "type": "number",
+            "defaultValue": 1.695,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "platformwidth",
+            "label": "货箱宽度",
+            "type": "number",
+            "defaultValue": 1.695,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "showTopTrack",
+            "label": "显示顶轨",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "showBottomTrack",
+            "label": "显示底轨",
+            "type": "boolean",
+            "defaultValue": true
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\WLTS\\WLTS.glb",
+      "name": "WLTS.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\WLTS\\WLTS.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CWLTS%5CWLTS.glb",
+      "assetRevision": "mrx1coar-78da969c-d461-449a-854a-4c6c014082d3",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\WLTS",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\WLTS\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\WLTS\\wlts.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\WLTS\\wlts.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CWLTS%5Cwlts.model.ts",
+          "name": "wlts.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "WLTS.glb",
+          "scriptFilename": "wlts.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "wlts",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "输送",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "弯道输送机",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "支持宽度、深度、高度、滚筒密度与主体颜色参数化。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "width",
+              "label": "宽度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "depth",
+              "label": "深度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "height",
+              "label": "高度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "rollerDensity",
+              "label": "滚筒密度",
+              "type": "number",
+              "defaultValue": 0.2,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 50,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "mainColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#000000",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "wlts",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "输送",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "弯道输送机",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "支持宽度、深度、高度、滚筒密度与主体颜色参数化。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "width": {
+              "type": "number",
+              "value": 1.6,
+              "label": "宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "depth": {
+              "type": "number",
+              "value": 1.6,
+              "label": "深度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "height": {
+              "type": "number",
+              "value": 1.6,
+              "label": "高度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "rollerDensity": {
+              "type": "number",
+              "value": 0.2,
+              "label": "滚筒密度",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 50,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "mainColor": {
+              "type": "string",
+              "value": "#000000",
+              "label": "主体颜色",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "WLTS.glb",
+          "scriptFilename": "wlts.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "defaultAssetCode": "WLTS01",
+      "displayName": "弯道输送机",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "width",
+            "label": "宽度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "depth",
+            "label": "深度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "height",
+            "label": "高度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "rollerDensity",
+            "label": "滚筒密度",
+            "type": "number",
+            "defaultValue": 0.2,
+            "min": 0.01,
+            "max": 50,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "mainColor",
+            "label": "主体颜色",
+            "type": "color",
+            "defaultValue": "#000000"
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\YZJ\\YZJ.glb",
+      "name": "YZJ.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\YZJ\\YZJ.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CYZJ%5CYZJ.glb",
+      "assetRevision": "mrx1cocv-4e7d6e18-51e1-440b-a1f1-d67594fe2dcd",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\YZJ",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\YZJ\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\YZJ\\yzj.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\YZJ\\yzj.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5CYZJ%5Cyzj.model.ts",
+          "name": "yzj.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "YZJ.glb",
+          "scriptFilename": "yzj.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "length",
+              "label": "长度",
+              "type": "number",
+              "defaultValue": 1.8276,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.0001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "width",
+              "label": "宽度",
+              "type": "number",
+              "defaultValue": 1.0621,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.0001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "height",
+              "label": "高度",
+              "type": "number",
+              "defaultValue": 0.6478692,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 1e-7,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "bodyColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#387368",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "rollerFramePosition",
+              "label": "辊筒框架位置",
+              "type": "number",
+              "defaultValue": 0.1576491,
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 1e-7,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "rollerFrameLength",
+              "label": "辊筒框架长度",
+              "type": "number",
+              "defaultValue": 1.021932,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.000001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "motorPosition",
+              "label": "电机位置",
+              "type": "number",
+              "defaultValue": 0.1814833,
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 1e-7,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "rollerDensity",
+              "label": "辊筒密度",
+              "type": "number",
+              "defaultValue": 0.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            {
+              "key": "showLegA",
+              "label": "显示腿A",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "showLegB",
+              "label": "显示腿B",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "showMotor",
+              "label": "显示电机",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "rollerSkin",
+              "label": "辊轮皮",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "directionArrowImage",
+              "label": "方向箭头贴图（运行兼容）",
+              "type": "string",
+              "defaultValue": "editor-image://builtin/direction-arrow-glow",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          ],
+          "values": {
+            "length": {
+              "type": "number",
+              "value": 1.8276,
+              "label": "长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.0001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "width": {
+              "type": "number",
+              "value": 1.0621,
+              "label": "宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.0001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "height": {
+              "type": "number",
+              "value": 0.6478692,
+              "label": "高度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 1e-7,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "bodyColor": {
+              "type": "string",
+              "value": "#387368",
+              "label": "主体颜色",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "rollerFramePosition": {
+              "type": "number",
+              "value": 0.1576491,
+              "label": "辊筒框架位置",
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 1e-7,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "rollerFrameLength": {
+              "type": "number",
+              "value": 1.021932,
+              "label": "辊筒框架长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.000001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "motorPosition": {
+              "type": "number",
+              "value": 0.1814833,
+              "label": "电机位置",
+              "configuration": {
+                "type": "number",
+                "min": -100,
+                "max": 100,
+                "step": 1e-7,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "rollerDensity": {
+              "type": "number",
+              "value": 0.6,
+              "label": "辊筒密度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1
+              }
+            },
+            "showLegA": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示腿A",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "showLegB": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示腿B",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "showMotor": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示电机",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "rollerSkin": {
+              "type": "boolean",
+              "value": true,
+              "label": "辊轮皮",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "directionArrowImage": {
+              "type": "string",
+              "value": "editor-image://builtin/direction-arrow-glow",
+              "label": "方向箭头贴图（运行兼容）",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "YZJ.glb",
+          "scriptFilename": "yzj.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "defaultAssetCode": "YZJ01",
+      "displayName": "YZJ",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "length",
+            "label": "长度",
+            "type": "number",
+            "defaultValue": 1.8276,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.0001,
+            "unit": "m"
+          },
+          {
+            "key": "width",
+            "label": "宽度",
+            "type": "number",
+            "defaultValue": 1.0621,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.0001,
+            "unit": "m"
+          },
+          {
+            "key": "height",
+            "label": "高度",
+            "type": "number",
+            "defaultValue": 0.6478692,
+            "min": 0.1,
+            "max": 100,
+            "step": 1e-7,
+            "unit": "m"
+          },
+          {
+            "key": "bodyColor",
+            "label": "主体颜色",
+            "type": "color",
+            "defaultValue": "#387368"
+          },
+          {
+            "key": "rollerFramePosition",
+            "label": "辊筒框架位置",
+            "type": "number",
+            "defaultValue": 0.1576491,
+            "min": -100,
+            "max": 100,
+            "step": 1e-7,
+            "unit": "m"
+          },
+          {
+            "key": "rollerFrameLength",
+            "label": "辊筒框架长度",
+            "type": "number",
+            "defaultValue": 1.021932,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.000001,
+            "unit": "m"
+          },
+          {
+            "key": "motorPosition",
+            "label": "电机位置",
+            "type": "number",
+            "defaultValue": 0.1814833,
+            "min": -100,
+            "max": 100,
+            "step": 1e-7,
+            "unit": "m"
+          },
+          {
+            "key": "rollerDensity",
+            "label": "辊筒密度",
+            "type": "number",
+            "defaultValue": 0.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1
+          },
+          {
+            "key": "showLegA",
+            "label": "显示腿A",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "showLegB",
+            "label": "显示腿B",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "showMotor",
+            "label": "显示电机",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "rollerSkin",
+            "label": "辊轮皮",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "directionArrowImage",
+            "label": "方向箭头贴图（运行兼容）",
+            "type": "texture",
+            "defaultValue": "editor-image://builtin/direction-arrow-glow",
+            "description": "保留既有 MQTT 运行方向箭头的贴图解析能力。"
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\多穿小车\\多穿小车.glb",
+      "name": "多穿小车.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\多穿小车\\多穿小车.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5C%E5%A4%9A%E7%A9%BF%E5%B0%8F%E8%BD%A6%5C%E5%A4%9A%E7%A9%BF%E5%B0%8F%E8%BD%A6.glb",
+      "assetRevision": "mrx1coeq-82854cb8-71be-4cdb-a75a-8520f025554e",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\多穿小车",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\多穿小车\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\多穿小车\\multi-shuttle.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\多穿小车\\multi-shuttle.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5C%E5%A4%9A%E7%A9%BF%E5%B0%8F%E8%BD%A6%5Cmulti-shuttle.model.ts",
+          "name": "multi-shuttle.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "多穿小车.glb",
+          "scriptFilename": "multi-shuttle.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "multi-shuttle",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "多穿库",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "穿梭车",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "支持小车长度、小车宽度、载货板宽度与主体颜色参数化。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "vehicleLength",
+              "label": "小车长度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "vehicleWidth",
+              "label": "小车宽度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "cargoPlateWidth",
+              "label": "载货板宽度",
+              "type": "number",
+              "defaultValue": 1.6,
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "mainColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#000000",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "multi-shuttle",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "多穿库",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "穿梭车",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "支持小车长度、小车宽度、载货板宽度与主体颜色参数化。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "vehicleLength": {
+              "type": "number",
+              "value": 1.6,
+              "label": "小车长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "vehicleWidth": {
+              "type": "number",
+              "value": 1.6,
+              "label": "小车宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "cargoPlateWidth": {
+              "type": "number",
+              "value": 1.6,
+              "label": "载货板宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.1,
+                "max": 100,
+                "step": 0.1,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "mainColor": {
+              "type": "string",
+              "value": "#000000",
+              "label": "主体颜色",
+              "configuration": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "多穿小车.glb",
+          "scriptFilename": "multi-shuttle.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "defaultAssetCode": "Shuttle01",
+      "displayName": "穿梭车",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "vehicleLength",
+            "label": "小车长度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "vehicleWidth",
+            "label": "小车宽度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "cargoPlateWidth",
+            "label": "载货板宽度",
+            "type": "number",
+            "defaultValue": 1.6,
+            "min": 0.1,
+            "max": 100,
+            "step": 0.1,
+            "unit": "m"
+          },
+          {
+            "key": "mainColor",
+            "label": "主体颜色",
+            "type": "color",
+            "defaultValue": "#000000"
+          }
+        ],
+        "bindings": []
+      }
+    },
+    {
+      "id": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\链条机\\链条机.glb",
+      "name": "链条机.glb",
+      "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\链条机\\链条机.glb",
+      "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5C%E9%93%BE%E6%9D%A1%E6%9C%BA%5C%E9%93%BE%E6%9D%A1%E6%9C%BA.glb",
+      "assetRevision": "mrx1coge-39db7e1f-a088-486f-99e5-c1dcc5069fe6",
+      "kind": "model",
+      "libraryKind": "model",
+      "packagePath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\链条机",
+      "metadataPath": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\链条机\\meta.json",
+      "scriptPaths": [
+        "C:\\temp\\babylon-3d-plus\\Assets\\Models\\链条机\\chain-conveyor.model.ts"
+      ],
+      "scriptAssets": [
+        {
+          "path": "C:\\temp\\babylon-3d-plus\\Assets\\Models\\链条机\\chain-conveyor.model.ts",
+          "sourceUrl": "editor-asset://local/C%3A%5Ctemp%5Cbabylon-3d-plus%5CAssets%5CModels%5C%E9%93%BE%E6%9D%A1%E6%9C%BA%5Cchain-conveyor.model.ts",
+          "name": "chain-conveyor.model.ts"
+        }
+      ],
+      "parameterScriptMetadata": [
+        {
+          "modelFilename": "链条机.glb",
+          "scriptFilename": "chain-conveyor.model.ts",
+          "className": "ParametricModelParamsComponent",
+          "fields": [
+            {
+              "key": "modelKey",
+              "label": "模型标识",
+              "type": "string",
+              "defaultValue": "chain-conveyor",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceType",
+              "label": "设备类型",
+              "type": "string",
+              "defaultValue": "输送",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "deviceName",
+              "label": "设备名称",
+              "type": "string",
+              "defaultValue": "链条输送机",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "description",
+              "label": "参数说明",
+              "type": "string",
+              "defaultValue": "链条机长宽高度、电机距离、主体颜色与腿/挡板/电机显隐参数化。",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "length",
+              "label": "长度",
+              "type": "number",
+              "defaultValue": 1.483953,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "width",
+              "label": "宽度",
+              "type": "number",
+              "defaultValue": 1.06219,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "heightA",
+              "label": "高度A",
+              "type": "number",
+              "defaultValue": 0.6478691,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "heightB",
+              "label": "高度B",
+              "type": "number",
+              "defaultValue": 0.6478692,
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "motorDistance",
+              "label": "电机距离",
+              "type": "number",
+              "defaultValue": 0.59,
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            {
+              "key": "mainColor",
+              "label": "主体颜色",
+              "type": "string",
+              "defaultValue": "#000000",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            {
+              "key": "showLegA",
+              "label": "显示腿A",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "showLegB",
+              "label": "显示腿B",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "showPlateA",
+              "label": "显示挡板A",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "showPlateB",
+              "label": "显示挡板B",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            {
+              "key": "hasMotor",
+              "label": "显示电机",
+              "type": "boolean",
+              "defaultValue": true,
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          ],
+          "values": {
+            "modelKey": {
+              "type": "string",
+              "value": "chain-conveyor",
+              "label": "模型标识",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceType": {
+              "type": "string",
+              "value": "输送",
+              "label": "设备类型",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "deviceName": {
+              "type": "string",
+              "value": "链条输送机",
+              "label": "设备名称",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "description": {
+              "type": "string",
+              "value": "链条机长宽高度、电机距离、主体颜色与腿/挡板/电机显隐参数化。",
+              "label": "参数说明",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "length": {
+              "type": "number",
+              "value": 1.483953,
+              "label": "长度",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "width": {
+              "type": "number",
+              "value": 1.06219,
+              "label": "宽度",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "heightA": {
+              "type": "number",
+              "value": 0.6478691,
+              "label": "高度A",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "heightB": {
+              "type": "number",
+              "value": 0.6478692,
+              "label": "高度B",
+              "configuration": {
+                "type": "number",
+                "min": 0.01,
+                "max": 100,
+                "step": 0.001,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "motorDistance": {
+              "type": "number",
+              "value": 0.59,
+              "label": "电机距离",
+              "configuration": {
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "step": 0.01,
+                "unit": "m"
+              },
+              "unit": "m"
+            },
+            "mainColor": {
+              "type": "string",
+              "value": "#000000",
+              "label": "主体颜色",
+              "configuration": {
+                "type": "string"
+              }
+            },
+            "showLegA": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示腿A",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "showLegB": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示腿B",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "showPlateA": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示挡板A",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "showPlateB": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示挡板B",
+              "configuration": {
+                "type": "boolean"
+              }
+            },
+            "hasMotor": {
+              "type": "boolean",
+              "value": true,
+              "label": "显示电机",
+              "configuration": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      ],
+      "animationScriptMetadata": [
+        {
+          "modelFilename": "链条机.glb",
+          "scriptFilename": "chain-conveyor.model.ts",
+          "className": "ParametricModelRuntimeComponent",
+          "fields": [],
+          "values": {}
+        }
+      ],
+      "defaultAssetCode": "ChainConveyor01",
+      "displayName": "链条输送机",
+      "lengthUnit": "centimeter",
+      "unitScaleToMeters": 0.01,
+      "parameterConfig": {
+        "schema": "babylon-editor.model-parameters",
+        "version": 1,
+        "parameters": [
+          {
+            "key": "length",
+            "label": "长度",
+            "type": "number",
+            "defaultValue": 1.483953,
+            "min": 0.01,
+            "max": 100,
+            "step": 0.001,
+            "unit": "m"
+          },
+          {
+            "key": "width",
+            "label": "宽度",
+            "type": "number",
+            "defaultValue": 1.06219,
+            "min": 0.01,
+            "max": 100,
+            "step": 0.001,
+            "unit": "m"
+          },
+          {
+            "key": "heightA",
+            "label": "高度A",
+            "type": "number",
+            "defaultValue": 0.6478691,
+            "min": 0.01,
+            "max": 100,
+            "step": 0.001,
+            "unit": "m"
+          },
+          {
+            "key": "heightB",
+            "label": "高度B",
+            "type": "number",
+            "defaultValue": 0.6478692,
+            "min": 0.01,
+            "max": 100,
+            "step": 0.001,
+            "unit": "m"
+          },
+          {
+            "key": "motorDistance",
+            "label": "电机距离",
+            "type": "number",
+            "defaultValue": 0.59,
+            "min": 0,
+            "max": 100,
+            "step": 0.01,
+            "unit": "m"
+          },
+          {
+            "key": "mainColor",
+            "label": "主体颜色",
+            "type": "color",
+            "defaultValue": "#000000"
+          },
+          {
+            "key": "showLegA",
+            "label": "显示腿A",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "showLegB",
+            "label": "显示腿B",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "showPlateA",
+            "label": "显示挡板A",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "showPlateB",
+            "label": "显示挡板B",
+            "type": "boolean",
+            "defaultValue": true
+          },
+          {
+            "key": "hasMotor",
+            "label": "显示电机",
+            "type": "boolean",
+            "defaultValue": true
+          }
+        ],
+        "bindings": []
+      }
+    }
+  ]
 }
