@@ -1,12 +1,14 @@
 import {
   ArcRotateCamera,
   Axis,
+  Camera,
   Color3,
   Engine,
   GlowLayer,
   HemisphericLight,
   Mesh,
   MeshBuilder,
+  type Observer,
   Scene,
   ShaderMaterial,
   TmpVectors,
@@ -23,6 +25,11 @@ import {
 } from '../../editor/model/SceneDocument';
 
 export type EditorGridCellSize = 1 | 2 | 5 | 10;
+
+/** 编辑器视口的持久朝向状态：俯视是可持续的模式而非一次性事件。 */
+export type CameraOrientation = 'orbit' | 'top';
+/** 编辑器视口的投影方式，与朝向状态正交组合。 */
+export type CameraProjection = 'perspective' | 'orthographic';
 
 export type EditorGridSettings = {
   visible: boolean;
@@ -66,7 +73,8 @@ export type BabylonViewport = {
   setSensitivity: (settings: SceneSensitivitySettings) => void;
   getCameraPose: () => SceneCameraPose;
   applyCameraPose: (pose: SceneCameraPose | null) => void;
-  setTopView: () => void;
+  setCameraOrientation: (orientation: CameraOrientation) => void;
+  setCameraProjection: (projection: CameraProjection) => void;
   setGridSettings: (settings: EditorGridSettings) => void;
   dispose: () => void;
 };
@@ -91,7 +99,7 @@ const EDITOR_CAMERA_DEFAULT_ALPHA = Math.PI / 4;
 const EDITOR_CAMERA_DEFAULT_BETA = Math.PI * 0.43;
 const EDITOR_CAMERA_DEFAULT_RADIUS = 28;
 const EDITOR_CAMERA_TOP_VIEW_ALPHA = -Math.PI / 2;
-const EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK = 0.01;
+const EDITOR_CAMERA_TOP_VIEW_BETA = 0.01;
 const EDITOR_CAMERA_DEFAULT_TARGET = Vector3.Zero();
 const GRID_VERTEX_SHADER = `
 precision highp float;
@@ -367,19 +375,95 @@ function clearCameraMovement(camera: ArcRotateCamera): void {
   camera.movement.resetZoomVelocity();
 }
 
-/** 保留当前观察中心和距离，将 ArcRotateCamera 切换到稳定的世界 Y 轴俯视方向。 */
-function applyTopCameraView(camera: ArcRotateCamera): void {
+/** 进入俯视时缓存的轨道位姿与角度限制，退出俯视时原样恢复。 */
+type TopViewLockState = {
+  alpha: number;
+  beta: number;
+  lowerAlphaLimit: number | null;
+  upperAlphaLimit: number | null;
+  lowerBetaLimit: number | null;
+  upperBetaLimit: number | null;
+};
+
+/**
+ * 进入俯视状态：缓存当前轨道位姿，切换到世界 Y 轴俯视方向并锁定旋转输入，
+ * 俯视期间只允许平移和缩放，直到显式退出。
+ */
+function enterTopCameraView(camera: ArcRotateCamera): TopViewLockState {
+  const lock: TopViewLockState = {
+    alpha: camera.alpha,
+    beta: camera.beta,
+    lowerAlphaLimit: camera.lowerAlphaLimit,
+    upperAlphaLimit: camera.upperAlphaLimit,
+    lowerBetaLimit: camera.lowerBetaLimit,
+    upperBetaLimit: camera.upperBetaLimit,
+  };
   clearCameraMovement(camera);
   camera.alpha = EDITOR_CAMERA_TOP_VIEW_ALPHA;
-  camera.beta = Math.max(camera.lowerBetaLimit ?? EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK, EDITOR_CAMERA_TOP_VIEW_BETA_FALLBACK);
+  camera.beta = EDITOR_CAMERA_TOP_VIEW_BETA;
+  camera.lowerAlphaLimit = EDITOR_CAMERA_TOP_VIEW_ALPHA;
+  camera.upperAlphaLimit = EDITOR_CAMERA_TOP_VIEW_ALPHA;
+  camera.lowerBetaLimit = EDITOR_CAMERA_TOP_VIEW_BETA;
+  camera.upperBetaLimit = EDITOR_CAMERA_TOP_VIEW_BETA;
+  return lock;
+}
+
+/** 退出俯视状态：先解除角度锁定再恢复进入前的轨道位姿，避免恢复值被钳制。 */
+function exitTopCameraView(camera: ArcRotateCamera, lock: TopViewLockState): void {
+  camera.lowerAlphaLimit = lock.lowerAlphaLimit;
+  camera.upperAlphaLimit = lock.upperAlphaLimit;
+  camera.lowerBetaLimit = lock.lowerBetaLimit;
+  camera.upperBetaLimit = lock.upperBetaLimit;
+  clearCameraMovement(camera);
+  camera.alpha = lock.alpha;
+  camera.beta = lock.beta;
+}
+
+/**
+ * 把 ArcRotateCamera 的 radius 同步为正交投影边界，使正交模式下滚轮缩放
+ * 保持与透视模式一致的取景范围和手感；宽高比跟随画布实时尺寸。
+ */
+function syncOrthographicBounds(camera: ArcRotateCamera, engine: Engine): void {
+  const renderHeight = engine.getRenderHeight();
+  const renderWidth = engine.getRenderWidth();
+  if (renderHeight <= 0 || renderWidth <= 0) return;
+
+  const halfHeight = Math.tan(camera.fov / 2) * camera.radius;
+  const halfWidth = halfHeight * (renderWidth / renderHeight);
+  camera.orthoTop = halfHeight;
+  camera.orthoBottom = -halfHeight;
+  camera.orthoRight = halfWidth;
+  camera.orthoLeft = -halfWidth;
 }
 
 const CAMERA_FLY_KEY_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyC']);
 /** 键盘平移速度：每秒移动距离占相机半径的比例，视野越远移动越快。 */
 const CAMERA_FLY_SPEED_PER_RADIUS_SECOND = 0.6;
 
-/** WASD 前后/左右平移 + Space 升 C 降；焦点在输入控件上时不接管按键，返回清理函数。 */
-function createCameraFlyKeyControls(camera: ArcRotateCamera, engine: Engine, scene: Scene): () => void {
+/**
+ * 重映射相机鼠标键位：右键旋转、中键平移（Babylon 默认为左键旋转、右键平移）。
+ * 左键的旋转映射被移除，左键仅用于拾取与 Gizmo；ctrl+左键平移保留，触摸与滚轮缩放不受影响。
+ */
+function remapEditorCameraMouseButtons(camera: ArcRotateCamera): void {
+  const input = camera.movement.input;
+  input.setInteraction('pointer', { button: 2 }, 'rotate');
+  input.setInteraction('pointer', { button: 1 }, 'pan');
+  for (const entry of input.getEntries('pointer', 'rotate', { button: 0 })) {
+    input.inputMap.splice(input.inputMap.indexOf(entry), 1);
+  }
+}
+
+/**
+ * WASD 移动 + Space 升 C 降；焦点在输入控件上时不接管按键，返回清理函数。
+ * W/S 沿视线方向移动（Unity 飞行模式），仰视升高、俯视降低；
+ * forceHorizontalMove 返回 true 时（俯视 2D 模式）W/S 退化为水平移动，避免相机扎向地面。
+ */
+function createCameraFlyKeyControls(
+  camera: ArcRotateCamera,
+  engine: Engine,
+  scene: Scene,
+  forceHorizontalMove: () => boolean,
+): () => void {
   const pressedKeys = new Set<string>();
 
   const handleKeyDown = (event: KeyboardEvent): void => {
@@ -407,20 +491,35 @@ function createCameraFlyKeyControls(camera: ArcRotateCamera, engine: Engine, sce
   const observer = scene.onBeforeRenderObservable.add(() => {
     if (pressedKeys.size === 0) return;
 
-    // 相机无 roll，right 向量始终水平，俯视时也不会退化
-    const rightFlat = TmpVectors.Vector3[0];
-    camera.getDirectionToRef(Axis.X, rightFlat);
-    rightFlat.y = 0;
-    if (rightFlat.lengthSquared() < 1e-10) return;
-    rightFlat.normalize();
-    const forwardFlat = TmpVectors.Vector3[1];
-    Vector3.CrossToRef(rightFlat, Axis.Y, forwardFlat);
+    const move = TmpVectors.Vector3[0].setAll(0);
 
-    const move = TmpVectors.Vector3[2].setAll(0);
-    if (pressedKeys.has('KeyW')) move.addInPlace(forwardFlat);
-    if (pressedKeys.has('KeyS')) move.subtractInPlace(forwardFlat);
-    if (pressedKeys.has('KeyD')) move.addInPlace(rightFlat);
-    if (pressedKeys.has('KeyA')) move.subtractInPlace(rightFlat);
+    if (pressedKeys.has('KeyW') || pressedKeys.has('KeyS')) {
+      const forward = TmpVectors.Vector3[1];
+      if (forceHorizontalMove()) {
+        // 俯视 2D 模式：沿屏幕上方水平移动（俯视时屏幕上方的水平投影即水平前方）
+        camera.getDirectionToRef(Axis.Y, forward);
+        forward.y = 0;
+        if (forward.lengthSquared() < 1e-10) return;
+        forward.normalize();
+      } else {
+        camera.getDirectionToRef(Axis.Z, forward);
+      }
+      if (pressedKeys.has('KeyW')) move.addInPlace(forward);
+      else move.subtractInPlace(forward);
+    }
+
+    if (pressedKeys.has('KeyA') || pressedKeys.has('KeyD')) {
+      // 相机无 roll，right 向量始终水平；极点退化时跳过平移
+      const rightFlat = TmpVectors.Vector3[2];
+      camera.getDirectionToRef(Axis.X, rightFlat);
+      rightFlat.y = 0;
+      if (rightFlat.lengthSquared() >= 1e-10) {
+        rightFlat.normalize();
+        if (pressedKeys.has('KeyD')) move.addInPlace(rightFlat);
+        else move.subtractInPlace(rightFlat);
+      }
+    }
+
     if (pressedKeys.has('Space')) move.y += 1;
     if (pressedKeys.has('KeyC')) move.y -= 1;
     if (move.lengthSquared() === 0) return;
@@ -465,6 +564,7 @@ export function createBabylonViewport(
   );
   if (options.allowCameraControl ?? true) {
     camera.attachControl(canvas, true);
+    remapEditorCameraMouseButtons(camera);
   }
   camera.minZ = EDITOR_CAMERA_MIN_Z_METERS;
   camera.lowerRadiusLimit = EDITOR_CAMERA_MIN_RADIUS_METERS;
@@ -479,7 +579,9 @@ export function createBabylonViewport(
     ...DEFAULT_EDITOR_GRID_SETTINGS,
     visible: options.showGrid ?? DEFAULT_EDITOR_GRID_SETTINGS.visible,
   });
-  const disposeFlyControls = createCameraFlyKeyControls(camera, engine, scene);
+  let topViewLock: TopViewLockState | null = null;
+  let orthoBoundsObserver: Observer<Scene> | null = null;
+  const disposeFlyControls = createCameraFlyKeyControls(camera, engine, scene, () => topViewLock !== null);
   let disposed = false;
   let contextLost = false;
   let renderFailed = false;
@@ -548,14 +650,41 @@ export function createBabylonViewport(
     applyCameraPose: (pose) => {
       applySavedCameraPose(camera, pose);
     },
-    /** 保留当前取景范围，把编辑器相机切换为适合 CAD 底图建模的俯视视角。 */
-    setTopView: () => {
-      applyTopCameraView(camera);
+    /** 切换轨道/俯视朝向；俯视是持久状态，旋转输入被锁定，退出时恢复进入前的位姿。 */
+    setCameraOrientation: (orientation) => {
+      if (orientation === 'top') {
+        topViewLock ??= enterTopCameraView(camera);
+        return;
+      }
+      if (topViewLock) {
+        exitTopCameraView(camera, topViewLock);
+        topViewLock = null;
+      }
+    },
+    /** 切换透视/正交投影；正交下把 radius 实时映射为投影边界，保持缩放取景一致。 */
+    setCameraProjection: (projection) => {
+      if (projection === 'orthographic') {
+        syncOrthographicBounds(camera, engine);
+        camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+        orthoBoundsObserver ??= scene.onBeforeRenderObservable.add(() => {
+          syncOrthographicBounds(camera, engine);
+        });
+        return;
+      }
+      camera.mode = Camera.PERSPECTIVE_CAMERA;
+      if (orthoBoundsObserver) {
+        scene.onBeforeRenderObservable.remove(orthoBoundsObserver);
+        orthoBoundsObserver = null;
+      }
     },
     setGridSettings: editorGround.setSettings,
     dispose: () => {
       disposed = true;
       disposeFlyControls();
+      if (orthoBoundsObserver) {
+        scene.onBeforeRenderObservable.remove(orthoBoundsObserver);
+        orthoBoundsObserver = null;
+      }
       engine.onContextLostObservable.remove(contextLostObserver);
       engine.onContextRestoredObservable.remove(contextRestoredObserver);
       editorGround.dispose();

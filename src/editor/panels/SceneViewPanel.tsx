@@ -92,7 +92,8 @@ export function SceneViewPanel() {
   const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
   const cameraPoseSaveRequest = useEditorStore((state) => state.cameraPoseSaveRequest);
   const cameraResetRequest = useEditorStore((state) => state.cameraResetRequest);
-  const cameraTopViewRequest = useEditorStore((state) => state.cameraTopViewRequest);
+  const cameraOrientation = useEditorStore((state) => state.cameraOrientation);
+  const cameraProjection = useEditorStore((state) => state.cameraProjection);
   const selectEntity = useEditorStore((state) => state.selectEntity);
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
@@ -106,7 +107,6 @@ export function SceneViewPanel() {
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
   const consumeCameraPoseSaveRequest = useEditorStore((state) => state.consumeCameraPoseSaveRequest);
   const consumeCameraResetRequest = useEditorStore((state) => state.consumeCameraResetRequest);
-  const consumeCameraTopViewRequest = useEditorStore((state) => state.consumeCameraTopViewRequest);
   const setSelectedModelMeasurement = useEditorStore((state) => state.setSelectedModelMeasurement);
   const pushLog = useEditorStore((state) => state.pushLog);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
@@ -429,6 +429,19 @@ export function SceneViewPanel() {
     runtime.syncEnvironment(sceneDocument.sceneSettings.environment);
   }, [sceneDocument.sceneSettings]);
 
+  /**
+   * 把持久的视图状态同步到 Babylon 视口，状态驱动天然幂等。
+   * 注意声明顺序必须先于 cameraResetRequest 的消费 effect：复位视角会同时把
+   * orientation 置回 'orbit'，需要先退出俯视的角度锁定再应用保存的位姿。
+   */
+  useEffect(() => {
+    viewportRef.current?.setCameraOrientation(cameraOrientation);
+  }, [cameraOrientation]);
+
+  useEffect(() => {
+    viewportRef.current?.setCameraProjection(cameraProjection);
+  }, [cameraProjection]);
+
   useEffect(() => {
     if (!cameraPoseSaveRequest) return;
 
@@ -447,17 +460,6 @@ export function SceneViewPanel() {
     viewport.applyCameraPose(sceneDocument.sceneSettings.camera.savedPose);
     consumeCameraResetRequest(cameraResetRequest.id);
   }, [cameraResetRequest, consumeCameraResetRequest, sceneDocument.sceneSettings.camera.savedPose]);
-
-  /** 消费 Toolbar 的临时俯视请求，并在 Babylon 视口完成切换后清理请求。 */
-  useEffect(() => {
-    if (!cameraTopViewRequest) return;
-
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-
-    viewport.setTopView();
-    consumeCameraTopViewRequest(cameraTopViewRequest.id);
-  }, [cameraTopViewRequest, consumeCameraTopViewRequest]);
 
   useEffect(() => {
     if (!entityArrayRequest) return;

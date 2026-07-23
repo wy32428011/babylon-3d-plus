@@ -1,5 +1,7 @@
 import { useEffect, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type {
+  CameraOrientation,
+  CameraProjection,
   EditorGridCellSize,
   EditorGridSettings,
 } from '../../runtime/babylon/createEngine';
@@ -52,6 +54,7 @@ const TOOLBAR_ICONS = {
   local: '⌖',
   global: '◎',
   topView: '俯',
+  orthographic: '正',
   delete: '⌫',
   undo: '↶',
   redo: '↷',
@@ -121,7 +124,10 @@ type ToolbarProps = {
   onUpdateSnapSetting: (key: TransformSnapSettingKey, value: number) => void;
   onSetGridVisible: (visible: boolean) => void;
   onSetGridCellSize: (cellSizeMeters: EditorGridCellSize) => void;
-  onSetTopView: () => void;
+  cameraOrientation: CameraOrientation;
+  cameraProjection: CameraProjection;
+  onSetCameraOrientation: (orientation: CameraOrientation) => void;
+  onSetCameraProjection: (projection: CameraProjection) => void;
   onDeleteSelectedEntity: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -164,7 +170,12 @@ function ToolbarIconButton(props: ToolbarIconButtonProps) {
       aria-label={props.label}
       className={props.active ? 'toolbar-button toolbar-icon-button active' : 'toolbar-button toolbar-icon-button'}
       disabled={props.disabled}
-      onClick={props.onClick}
+      onClick={(event) => {
+        props.onClick();
+        // 操作完成后把焦点交还画布，WASD/鼠标机位控制立即可用；
+        // 弹窗类按钮打开后由弹窗自管焦点，弹窗关闭后焦点自然落回 body 而非按钮。
+        event.currentTarget.blur();
+      }}
       title={props.label}
       type="button"
     >
@@ -430,11 +441,20 @@ export function Toolbar(props: ToolbarProps) {
           onClick={() => props.onSetTransformSpace('global')}
         />
       </div>
-      <ToolbarIconButton
-        icon={TOOLBAR_ICONS.topView}
-        label="切换为俯视视角"
-        onClick={props.onSetTopView}
-      />
+      <div className="toolbar-segment" aria-label="视图模式">
+        <ToolbarIconButton
+          active={props.cameraOrientation === 'top'}
+          icon={TOOLBAR_ICONS.topView}
+          label={props.cameraOrientation === 'top' ? '退出俯视视角' : '进入俯视视角'}
+          onClick={() => props.onSetCameraOrientation(props.cameraOrientation === 'top' ? 'orbit' : 'top')}
+        />
+        <ToolbarIconButton
+          active={props.cameraProjection === 'orthographic'}
+          icon={TOOLBAR_ICONS.orthographic}
+          label={props.cameraProjection === 'orthographic' ? '切换为透视投影' : '切换为正交投影'}
+          onClick={() => props.onSetCameraProjection(props.cameraProjection === 'orthographic' ? 'perspective' : 'orthographic')}
+        />
+      </div>
       <label className="toolbar-checkbox">
         <input
           type="checkbox"

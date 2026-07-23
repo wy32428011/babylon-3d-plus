@@ -54,7 +54,10 @@ export function EditorLayout() {
   const groupSelectedEntities = useEditorStore((state) => state.groupSelectedEntities);
   const ungroupSelectedEntities = useEditorStore((state) => state.ungroupSelectedEntities);
   const requestSceneFocusForSelection = useEditorStore((state) => state.requestSceneFocusForSelection);
-  const requestCameraTopView = useEditorStore((state) => state.requestCameraTopView);
+  const cameraOrientation = useEditorStore((state) => state.cameraOrientation);
+  const cameraProjection = useEditorStore((state) => state.cameraProjection);
+  const setCameraOrientation = useEditorStore((state) => state.setCameraOrientation);
+  const setCameraProjection = useEditorStore((state) => state.setCameraProjection);
   const importCadReference = useEditorStore((state) => state.importCadReference);
   const saveScene = useEditorStore((state) => state.saveScene);
   const loadScene = useEditorStore((state) => state.loadScene);
@@ -236,7 +239,10 @@ export function EditorLayout() {
         onUpdateSnapSetting={updateSnapSetting}
         onSetGridVisible={setGridVisible}
         onSetGridCellSize={setGridCellSize}
-        onSetTopView={requestCameraTopView}
+        cameraOrientation={cameraOrientation}
+        cameraProjection={cameraProjection}
+        onSetCameraOrientation={setCameraOrientation}
+        onSetCameraProjection={setCameraProjection}
         onDeleteSelectedEntity={deleteSelectedEntity}
         onUndo={undo}
         onRedo={redo}

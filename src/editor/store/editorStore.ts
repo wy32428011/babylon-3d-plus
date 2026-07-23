@@ -28,6 +28,8 @@ import {
 import {
   DEFAULT_EDITOR_GRID_SETTINGS,
   EDITOR_GRID_CELL_SIZES,
+  type CameraOrientation,
+  type CameraProjection,
   type EditorGridCellSize,
   type EditorGridSettings,
 } from '../../runtime/babylon/createEngine';
@@ -161,10 +163,6 @@ export type CameraResetRequest = {
   id: string;
 };
 
-export type CameraTopViewRequest = {
-  id: string;
-};
-
 /** 当前 Inspector 选中模型的运行时米制测量快照；该状态不进入场景持久化或撤销历史。 */
 export type SelectedModelMeasurement = ModelMeasurementResult & { entityId: string };
 
@@ -228,7 +226,8 @@ type EditorState = {
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
   cameraResetRequest: CameraResetRequest | null;
-  cameraTopViewRequest: CameraTopViewRequest | null;
+  cameraOrientation: CameraOrientation;
+  cameraProjection: CameraProjection;
   selectedModelMeasurement: SelectedModelMeasurement | null;
   cadImportProgress: CadImportProgress | null;
   logs: EditorLog[];
@@ -254,8 +253,8 @@ type EditorState = {
   consumeCameraPoseSaveRequest: (requestId: string, pose: SceneCameraPose) => void;
   requestCameraReset: () => void;
   consumeCameraResetRequest: (requestId: string) => void;
-  requestCameraTopView: () => void;
-  consumeCameraTopViewRequest: (requestId: string) => void;
+  setCameraOrientation: (orientation: CameraOrientation) => void;
+  setCameraProjection: (projection: CameraProjection) => void;
   setSelectedModelMeasurement: (measurement: SelectedModelMeasurement | null) => void;
   createMesh: (meshKind: MeshKind, placementPosition?: Vector3Data) => void;
   createLocator: (placementPosition?: Vector3Data) => void;
@@ -349,7 +348,6 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     projectAssetFocusRequest: null,
     cameraPoseSaveRequest: null,
     cameraResetRequest: null,
-    cameraTopViewRequest: null,
     selectedModelMeasurement: null,
     logs: prependLog(state.logs, message),
   };
@@ -1236,7 +1234,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   projectAssetFocusRequest: null,
   cameraPoseSaveRequest: null,
   cameraResetRequest: null,
-  cameraTopViewRequest: null,
+  cameraOrientation: 'orbit',
+  cameraProjection: 'perspective',
   selectedModelMeasurement: null,
   cadImportProgress: null,
   logs: [{ id: 'log_boot', message: '编辑器已启动。' }],
@@ -1514,6 +1513,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   requestCameraReset: () => {
     set((state) => ({
       cameraResetRequest: { id: createId('camera_reset') },
+      // 复位会写入任意 alpha/beta，必须先退出俯视的角度锁定，否则位姿被钳制在俯视方向
+      cameraOrientation: 'orbit',
       logs: prependLog(state.logs, '准备复位视角。'),
     }));
   },
@@ -1527,21 +1528,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  /** 发出一次临时俯视请求，不修改场景文档、已保存视角或撤销历史。 */
-  requestCameraTopView: () => {
-    set((state) => ({
-      cameraTopViewRequest: { id: createId('camera_top_view') },
-      logs: prependLog(state.logs, '准备切换为俯视视角。'),
-    }));
-  },
-  /** Scene View 完成俯视切换后消费请求，避免 React 后续渲染重复执行。 */
-  consumeCameraTopViewRequest: (requestId) => {
+  /** 切换编辑器视口朝向（轨道/俯视），属于持久的编辑器会话状态，不修改场景文档或撤销历史。 */
+  setCameraOrientation: (orientation) => {
     set((state) => {
-      if (state.cameraTopViewRequest?.id !== requestId) return state;
-
+      if (state.cameraOrientation === orientation) return state;
       return {
-        cameraTopViewRequest: null,
-        logs: prependLog(state.logs, '已切换为俯视视角。'),
+        cameraOrientation: orientation,
+        logs: prependLog(state.logs, orientation === 'top' ? '已进入俯视视角。' : '已退出俯视视角。'),
+      };
+    });
+  },
+  /** 切换编辑器视口投影（透视/正交），与朝向状态正交组合。 */
+  setCameraProjection: (projection) => {
+    set((state) => {
+      if (state.cameraProjection === projection) return state;
+      return {
+        cameraProjection: projection,
+        logs: prependLog(state.logs, projection === 'orthographic' ? '已切换为正交投影。' : '已切换为透视投影。'),
       };
     });
   },
