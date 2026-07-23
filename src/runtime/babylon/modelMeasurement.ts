@@ -24,6 +24,21 @@ export function isMeasurableModelMesh(mesh: AbstractMesh): boolean {
     && mesh.getTotalVertices() > 0;
 }
 
+/**
+ * 判断显式实体网格是否可用于阵列投影测量。
+ * POI 粒子范围代理虽然不直接渲染，但必须参与效果占用范围计算。
+ */
+export function isMeasurableEntityArrayMesh(mesh: AbstractMesh): boolean {
+  const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
+  const isEffectBoundsProxy = metadata?.effectBoundsProxy === true;
+
+  return !mesh.isDisposed()
+    && mesh.isEnabled(false)
+    && mesh.isVisible
+    && (mesh.visibility > 0 || isEffectBoundsProxy)
+    && mesh.getTotalVertices() > 0;
+}
+
 /** 读取实体根节点三个自身轴在世界空间中的单位方向。 */
 function getNormalizedModelAxes(root: TransformNode): [Vector3, Vector3, Vector3] | null {
   root.computeWorldMatrix(true);
@@ -44,14 +59,18 @@ function normalizeWorldAxis(direction: Vector3Data): Vector3 | null {
   return axis.normalize();
 }
 
-/** 按一组世界坐标单位轴测量模型可见几何的投影跨度。 */
-function measureModelSpansAlongAxes(contentRoot: TransformNode, axes: readonly Vector3[]): number[] | null {
+/** 按一组世界坐标单位轴测量显式 Mesh 集合的投影跨度。 */
+function measureMeshSpansAlongAxes(
+  meshes: readonly AbstractMesh[],
+  axes: readonly Vector3[],
+  isMeasurable: (mesh: AbstractMesh) => boolean,
+): number[] | null {
   const minimum = axes.map(() => Number.POSITIVE_INFINITY);
   const maximum = axes.map(() => Number.NEGATIVE_INFINITY);
   let measuredPointCount = 0;
 
-  for (const mesh of contentRoot.getChildMeshes(false)) {
-    if (!isMeasurableModelMesh(mesh)) continue;
+  for (const mesh of meshes) {
+    if (!isMeasurable(mesh)) continue;
 
     mesh.computeWorldMatrix(true);
     for (const corner of mesh.getBoundingInfo().boundingBox.vectorsWorld) {
@@ -78,6 +97,11 @@ function measureModelSpansAlongAxes(contentRoot: TransformNode, axes: readonly V
   return minimum.map((value, index) => Math.max(0, maximum[index] - value));
 }
 
+/** 按一组世界坐标单位轴测量模型可见几何的投影跨度。 */
+function measureModelSpansAlongAxes(contentRoot: TransformNode, axes: readonly Vector3[]): number[] | null {
+  return measureMeshSpansAlongAxes(contentRoot.getChildMeshes(false), axes, isMeasurableModelMesh);
+}
+
 /**
  * 按模型实体自身 X/Y/Z 轴测量内容根下的实际尺寸，单位为米。
  * 世界投影已经包含源单位换算、参数化脚本调整和用户 Transform.scale，平移与旋转不会改变轴向跨度。
@@ -101,4 +125,15 @@ export function measureModelSpanMetersAlongWorldDirection(
   if (!axis) return null;
 
   return measureModelSpansAlongAxes(contentRoot, [axis])?.[0] ?? null;
+}
+
+/** 测量显式实体 Mesh 集合沿任意世界方向的投影跨度，供通用 Shift 阵列使用。 */
+export function measureEntityMeshesSpanMetersAlongWorldDirection(
+  meshes: readonly AbstractMesh[],
+  worldDirection: Vector3Data,
+): number | null {
+  const axis = normalizeWorldAxis(worldDirection);
+  if (!axis) return null;
+
+  return measureMeshSpansAlongAxes(meshes, [axis], isMeasurableEntityArrayMesh)?.[0] ?? null;
 }

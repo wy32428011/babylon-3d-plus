@@ -8,7 +8,7 @@ import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTeleme
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import {
   TransformGizmoController,
-  type ModelArrayDragUpdate,
+  type EntityArrayDragUpdate,
 } from '../../runtime/babylon/TransformGizmoController';
 import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
@@ -27,6 +27,8 @@ import type { Vector3Data } from '../model/math';
 import {
   getEntityArrayIdentifierError,
   getEntityArrayParameterError,
+  getShiftEntityArrayIdentityBehavior,
+  isShiftEntityArraySupported,
   MODEL_ARRAY_MIN_SPAN_METERS,
 } from '../model/modelArray';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
@@ -44,8 +46,9 @@ type PointerClickSnapshot = {
 };
 
 
-type ModelArrayDialogState = {
+type EntityArrayDialogState = {
   sourceEntityId: string;
+  sourceSceneDocument: SceneDocument;
   direction: Vector3Data;
   spanMeters: number;
   directionLabel: string;
@@ -94,7 +97,7 @@ function getEntityArrayAxis(direction: EntityArrayDirection): 'x' | 'y' | 'z' {
 
 
 /** 将 Shift 拖拽结果映射为弹框兼容的方向值与可读标签。 */
-function describeModelArrayDrag(update: ModelArrayDragUpdate): {
+function describeEntityArrayDrag(update: EntityArrayDragUpdate): {
   direction: EntityArrayDirection;
   label: string;
 } {
@@ -109,24 +112,25 @@ function describeModelArrayDrag(update: ModelArrayDragUpdate): {
   };
 }
 
-/** 校验 Shift 阵列弹框中的数量、间距、源模型和同步名称/编号。 */
-function getModelArrayDialogError(
+/** 校验 Shift 阵列弹框中的数量、间距、源对象和名称/编号规则。 */
+function getEntityArrayDialogError(
   scene: SceneDocument,
-  dialog: ModelArrayDialogState,
+  dialog: EntityArrayDialogState,
 ): string | null {
   const parameterError = getEntityArrayParameterError(
     dialog.value.copyCount,
     dialog.value.spacingMeters,
   );
   if (parameterError) return parameterError;
+  if (scene !== dialog.sourceSceneDocument) return '阵列源场景已切换，请重新开始 Shift 拖拽。';
   if (!Number.isFinite(dialog.spanMeters) || dialog.spanMeters <= MODEL_ARRAY_MIN_SPAN_METERS) {
-    return '源模型在当前轴上的尺寸无效。';
+    return '源对象在当前轴上的尺寸无效。';
   }
 
   const source = scene.entities[dialog.sourceEntityId];
   const parent = source?.parentId ? scene.entities[source.parentId] : null;
-  if (!source?.components.modelAsset || source.locked || parent?.locked) {
-    return '源模型已失效、被锁定或不再是普通导入模型。';
+  if (!isShiftEntityArraySupported(source) || source?.locked || parent?.locked) {
+    return '源对象已失效、被锁定或不再支持 Shift 阵列。';
   }
 
   return getEntityArrayIdentifierError(
@@ -147,9 +151,9 @@ export function SceneViewPanel() {
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
   const selectedEntityIdRef = useRef<string | null>(null);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
-  const modelArrayDialogRef = useRef<ModelArrayDialogState | null>(null);
+  const entityArrayDialogRef = useRef<EntityArrayDialogState | null>(null);
   const [viewportError, setViewportError] = useState<string | null>(null);
-  const [modelArrayDialog, setModelArrayDialog] = useState<ModelArrayDialogState | null>(null);
+  const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
   const sceneDocument = useEditorStore((state) => state.scene);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
@@ -199,43 +203,44 @@ export function SceneViewPanel() {
 
 
   /** 清除 Shift 阵列弹框和全部 Babylon 临时克隆。 */
-  const closeModelArrayDialog = useCallback((): void => {
-    modelArrayDialogRef.current = null;
-    setModelArrayDialog(null);
-    runtimeRef.current?.clearModelArrayPreview();
+  const closeEntityArrayDialog = useCallback((): void => {
+    entityArrayDialogRef.current = null;
+    setEntityArrayDialog(null);
+    runtimeRef.current?.clearEntityArrayPreview();
   }, []);
 
   useEffect(() => {
     sceneDocumentRef.current = sceneDocument;
     selectedEntityIdRef.current = selectedEntityId;
-    modelArrayDialogRef.current = modelArrayDialog;
-  }, [sceneDocument, selectedEntityId, modelArrayDialog]);
+    entityArrayDialogRef.current = entityArrayDialog;
+  }, [sceneDocument, selectedEntityId, entityArrayDialog]);
 
 
-  /** 源模型、单选状态或编辑模式失效时取消弹框，避免临时克隆悬挂。 */
+  /** 源对象、单选状态或编辑模式失效时取消弹框，避免临时克隆悬挂。 */
   useEffect(() => {
-    if (!modelArrayDialog) return;
+    if (!entityArrayDialog) return;
 
-    const source = sceneDocument.entities[modelArrayDialog.sourceEntityId];
+    const source = sceneDocument.entities[entityArrayDialog.sourceEntityId];
     const parent = source?.parentId ? sceneDocument.entities[source.parentId] : null;
     const activeSelectionIds = hierarchySelectionIds.length > 0
       ? hierarchySelectionIds.filter((entityId) => Boolean(sceneDocument.entities[entityId]))
       : selectedEntityId
         ? [selectedEntityId]
         : [];
-    const sourceInvalid = !source?.components.modelAsset
-      || source.locked
+    const sourceInvalid = sceneDocument !== entityArrayDialog.sourceSceneDocument
+      || !isShiftEntityArraySupported(source)
+      || source?.locked
       || parent?.locked
-      || selectedEntityId !== modelArrayDialog.sourceEntityId
+      || selectedEntityId !== entityArrayDialog.sourceEntityId
       || activeSelectionIds.length !== 1
-      || activeSelectionIds[0] !== modelArrayDialog.sourceEntityId;
+      || activeSelectionIds[0] !== entityArrayDialog.sourceEntityId;
 
-    if (isRuntimePreview || sourceInvalid) closeModelArrayDialog();
+    if (isRuntimePreview || sourceInvalid) closeEntityArrayDialog();
   }, [
-    closeModelArrayDialog,
+    closeEntityArrayDialog,
     hierarchySelectionIds,
     isRuntimePreview,
-    modelArrayDialog,
+    entityArrayDialog,
     sceneDocument,
     selectedEntityId,
   ]);
@@ -414,7 +419,7 @@ export function SceneViewPanel() {
       gizmo = new TransformGizmoController(viewport.scene, {
         previewTransform: previewEntityTransform,
         commitTransform: commitEntityTransform,
-        beginModelArrayDrag: (context) => {
+        beginEntityArrayDrag: (context) => {
           const currentScene = sceneDocumentRef.current;
           const currentState = useEditorStore.getState();
           const source = currentScene?.entities[context.entityId];
@@ -429,59 +434,60 @@ export function SceneViewPanel() {
             pushLog('模型阵列已阻止：运行预览期间不能使用 Shift 拖拽阵列。');
             return null;
           }
-          if (modelArrayDialogRef.current) {
+          if (entityArrayDialogRef.current) {
             pushLog('模型阵列已阻止：请先完成或取消当前阵列弹框。');
             return null;
           }
           if (activeSelectionIds.length !== 1 || activeSelectionIds[0] !== context.entityId) {
-            pushLog('模型阵列已阻止：Shift 拖拽仅支持单个选中的导入模型。');
+            pushLog('模型阵列已阻止：Shift 拖拽仅支持单个选中的场景对象。');
             return null;
           }
-          if (!source?.components.modelAsset || source.locked || parent?.locked) {
-            pushLog('模型阵列已阻止：请选择一个未锁定的普通导入模型。');
+          if (!isShiftEntityArraySupported(source) || source?.locked || parent?.locked) {
+            pushLog('模型阵列已阻止：请选择一个未锁定且支持阵列的场景对象。');
             return null;
           }
 
           const currentRuntime = runtimeRef.current ?? runtime;
           if (!currentRuntime) return null;
-          const geometry = currentRuntime.getModelArrayGeometry(context.entityId, context.positiveDirection);
+          const geometry = currentRuntime.getEntityArrayGeometry(context.entityId, context.positiveDirection);
           if (!geometry) {
-            pushLog('模型阵列已阻止：模型几何尚未加载完成或当前轴尺寸无效。');
+            pushLog('模型阵列已阻止：对象几何尚未加载完成或当前轴尺寸无效。');
             return null;
           }
 
-          currentRuntime.clearModelArrayPreview();
+          currentRuntime.clearEntityArrayPreview();
           return { spanMeters: geometry.spanMeters };
         },
-        previewModelArrayDrag: (update) => {
+        previewEntityArrayDrag: (update) => {
           const currentRuntime = runtimeRef.current ?? runtime;
           if (!currentRuntime) return;
           if (update.copyCount === 0) {
-            currentRuntime.clearModelArrayPreview();
+            currentRuntime.clearEntityArrayPreview();
             return;
           }
-          currentRuntime.updateModelArrayPreview(
+          currentRuntime.updateEntityArrayPreview(
             update.entityId,
             update.direction,
             update.copyCount,
             0,
           );
         },
-        completeModelArrayDrag: (update) => {
+        completeEntityArrayDrag: (update) => {
           const currentRuntime = runtimeRef.current ?? runtime;
           if (!currentRuntime || update.copyCount === 0) {
-            currentRuntime?.clearModelArrayPreview();
+            currentRuntime?.clearEntityArrayPreview();
             return;
           }
-          if (!currentRuntime.updateModelArrayPreview(update.entityId, update.direction, update.copyCount, 0)) {
-            currentRuntime.clearModelArrayPreview();
-            pushLog('模型阵列失败：无法创建模型临时预览。');
+          if (!currentRuntime.updateEntityArrayPreview(update.entityId, update.direction, update.copyCount, 0)) {
+            currentRuntime.clearEntityArrayPreview();
+            pushLog('模型阵列失败：无法创建阵列临时预览。');
             return;
           }
 
-          const description = describeModelArrayDrag(update);
-          const dialog: ModelArrayDialogState = {
+          const description = describeEntityArrayDrag(update);
+          const dialog: EntityArrayDialogState = {
             sourceEntityId: update.entityId,
+            sourceSceneDocument: sceneDocumentRef.current ?? useEditorStore.getState().scene,
             direction: update.direction,
             spanMeters: update.spanMeters,
             directionLabel: description.label,
@@ -493,11 +499,11 @@ export function SceneViewPanel() {
             },
             commitError: null,
           };
-          modelArrayDialogRef.current = dialog;
-          setModelArrayDialog(dialog);
+          entityArrayDialogRef.current = dialog;
+          setEntityArrayDialog(dialog);
         },
-        cancelModelArrayDrag: () => {
-          (runtimeRef.current ?? runtime)?.clearModelArrayPreview();
+        cancelEntityArrayDrag: () => {
+          (runtimeRef.current ?? runtime)?.clearEntityArrayPreview();
         },
       });
       mqttTelemetryClient = new MqttStackerTelemetryClient(pushLog);
@@ -694,25 +700,30 @@ export function SceneViewPanel() {
     consumeSceneFocusRequest(sceneFocusRequest.id);
   }, [sceneFocusRequest, consumeSceneFocusRequest]);
 
-  const modelArrayDialogValidationError = modelArrayDialog
-    ? modelArrayDialog.commitError ?? getModelArrayDialogError(sceneDocument, modelArrayDialog)
+  const entityArrayDialogValidationError = entityArrayDialog
+    ? entityArrayDialog.commitError ?? getEntityArrayDialogError(sceneDocument, entityArrayDialog)
     : null;
+  const entityArraySource = entityArrayDialog
+    ? sceneDocument.entities[entityArrayDialog.sourceEntityId]
+    : null;
+  const entityArrayIdentityBehavior = getShiftEntityArrayIdentityBehavior(entityArraySource);
+  const entityArrayAssetNumberedSourceCount = entityArrayIdentityBehavior === 'asset-number' ? 1 : 0;
 
   /** 修改弹框参数时同步刷新临时 Babylon 阵列，不写入场景或命令历史。 */
-  function handleModelArrayDialogChange(value: EntityArrayDialogValue): void {
-    if (!modelArrayDialog) return;
+  function handleEntityArrayDialogChange(value: EntityArrayDialogValue): void {
+    if (!entityArrayDialog) return;
 
-    const nextDialog = { ...modelArrayDialog, value, commitError: null };
-    modelArrayDialogRef.current = nextDialog;
-    setModelArrayDialog(nextDialog);
+    const nextDialog = { ...entityArrayDialog, value, commitError: null };
+    entityArrayDialogRef.current = nextDialog;
+    setEntityArrayDialog(nextDialog);
 
     const runtime = runtimeRef.current;
     if (!runtime) return;
     if (getEntityArrayParameterError(value.copyCount, value.spacingMeters)) {
-      runtime.clearModelArrayPreview();
+      runtime.clearEntityArrayPreview();
       return;
     }
-    runtime.updateModelArrayPreview(
+    runtime.updateEntityArrayPreview(
       nextDialog.sourceEntityId,
       nextDialog.direction,
       value.copyCount,
@@ -721,25 +732,25 @@ export function SceneViewPanel() {
   }
 
   /** 原子校验并提交正式阵列；失败时保留弹框和临时预览。 */
-  function handleConfirmModelArrayDialog(): void {
-    const dialog = modelArrayDialogRef.current;
+  function handleConfirmEntityArrayDialog(): void {
+    const dialog = entityArrayDialogRef.current;
     if (!dialog) return;
 
-    const validationError = getModelArrayDialogError(sceneDocumentRef.current ?? sceneDocument, dialog);
+    const validationError = getEntityArrayDialogError(sceneDocumentRef.current ?? sceneDocument, dialog);
     if (validationError) {
       const nextDialog = { ...dialog, commitError: validationError };
-      modelArrayDialogRef.current = nextDialog;
-      setModelArrayDialog(nextDialog);
+      entityArrayDialogRef.current = nextDialog;
+      setEntityArrayDialog(nextDialog);
       return;
     }
 
     const runtime = runtimeRef.current;
-    const geometry = runtime?.getModelArrayGeometry(dialog.sourceEntityId, dialog.direction);
+    const geometry = runtime?.getEntityArrayGeometry(dialog.sourceEntityId, dialog.direction);
     if (!geometry) {
-      const error = '模型几何尚未加载完成或当前轴尺寸无效。';
+      const error = '对象几何尚未加载完成或当前轴尺寸无效。';
       const nextDialog = { ...dialog, commitError: error };
-      modelArrayDialogRef.current = nextDialog;
-      setModelArrayDialog(nextDialog);
+      entityArrayDialogRef.current = nextDialog;
+      setEntityArrayDialog(nextDialog);
       return;
     }
 
@@ -753,12 +764,12 @@ export function SceneViewPanel() {
     });
     if (!result.ok) {
       const nextDialog = { ...dialog, commitError: result.error };
-      modelArrayDialogRef.current = nextDialog;
-      setModelArrayDialog(nextDialog);
+      entityArrayDialogRef.current = nextDialog;
+      setEntityArrayDialog(nextDialog);
       return;
     }
 
-    closeModelArrayDialog();
+    closeEntityArrayDialog();
   }
 
   return (
@@ -785,16 +796,15 @@ export function SceneViewPanel() {
           </div>
         ) : null}
       </div>
-      {modelArrayDialog ? (
+      {entityArrayDialog ? (
         <EntityArrayDialog
-          assetNumberedSourceCount={1}
-          directionLabel={modelArrayDialog.directionLabel}
-          onCancel={closeModelArrayDialog}
-          onChange={handleModelArrayDialogChange}
-          onConfirm={handleConfirmModelArrayDialog}
-          synchronizeModelIdentity
-          validationError={modelArrayDialogValidationError}
-          value={modelArrayDialog.value}
+          assetNumberedSourceCount={entityArrayAssetNumberedSourceCount}
+          directionLabel={entityArrayDialog.directionLabel}
+          onCancel={closeEntityArrayDialog}
+          onChange={handleEntityArrayDialogChange}
+          onConfirm={handleConfirmEntityArrayDialog}
+          validationError={entityArrayDialogValidationError}
+          value={entityArrayDialog.value}
         />
       ) : null}
     </section>

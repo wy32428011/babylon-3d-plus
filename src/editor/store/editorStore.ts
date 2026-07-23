@@ -53,6 +53,7 @@ import type {
 import type { Entity } from '../model/Entity';
 import { createArrayAssetNumber, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
 import {
+  createEntityArrayName,
   createModelArrayIdentity,
   ENTITY_NAME_MAX_LENGTH,
   getEntityArrayIdentifierError,
@@ -904,7 +905,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
   };
 }
 
-/** 生成不会和当前场景重名的副本名称，便于粘贴与阵列后快速识别对象。 */
+/** 生成不会和当前场景重名的普通复制/粘贴名称；阵列会显式覆盖为数字递增名称。 */
 function createUniqueEntityName(existingNames: Set<string>, baseName: string): string {
   const trimmedBaseName = sanitizeEntityName(baseName) || '对象';
   const firstCandidate = `${trimmedBaseName} 副本`;
@@ -1206,7 +1207,7 @@ function prepareResolvedEntityArray(
   const direction = normalizeModelArrayDirection(input.directionVector);
   if (!direction) return { ok: false, error: '阵列方向无效。' };
   if (!Number.isFinite(input.selectionSpanMeters) || input.selectionSpanMeters < 0) {
-    return { ok: false, error: '模型轴向尺寸无效。' };
+    return { ok: false, error: '对象轴向尺寸无效。' };
   }
 
   const requestedSourceIds = [...new Set(input.sourceIds)];
@@ -1258,6 +1259,7 @@ function prepareResolvedEntityArray(
       const assetNumberTarget = getEntityAssetNumberTarget(source);
       if (source.components.modelAsset) {
         const identity = createModelArrayIdentity(
+          source.name,
           source.components.modelAsset.assetCode,
           copyIndex,
           assetNumberRule,
@@ -1265,14 +1267,20 @@ function prepareResolvedEntityArray(
         if (!identity.ok) return identity;
         overrides.name = identity.name;
         overrides.assetNumber = { kind: 'modelAsset', value: identity.assetCode };
-      } else if (assetNumberTarget) {
-        const assetNumberResult = createArrayAssetNumber(
-          assetNumberTarget.value,
-          copyIndex,
-          assetNumberRule,
-        );
-        if (!assetNumberResult.ok) return assetNumberResult;
-        overrides.assetNumber = { kind: assetNumberTarget.kind, value: assetNumberResult.value };
+      } else {
+        const nameResult = createEntityArrayName(source.name, copyIndex);
+        if (!nameResult.ok) return nameResult;
+        overrides.name = nameResult.name;
+
+        if (assetNumberTarget) {
+          const assetNumberResult = createArrayAssetNumber(
+            assetNumberTarget.value,
+            copyIndex,
+            assetNumberRule,
+          );
+          if (!assetNumberResult.ok) return assetNumberResult;
+          overrides.assetNumber = { kind: assetNumberTarget.kind, value: assetNumberResult.value };
+        }
       }
 
       duplicatedEntities.push(
@@ -2271,7 +2279,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!Number.isFinite(selectionSpanMeters) || selectionSpanMeters === null || selectionSpanMeters < 0) {
         return {
           entityArrayRequest: null,
-          logs: prependLog(state.logs, '模型阵列失败：模型几何尚未加载完成，请稍后重试。'),
+          logs: prependLog(state.logs, '模型阵列失败：选区几何尚未加载完成，请稍后重试。'),
         };
       }
 

@@ -624,7 +624,6 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
           onChange={setArrayDialog}
           onConfirm={submitArrayDialog}
           readOnly={props.readOnly}
-          synchronizeModelIdentity={assetNumberedArraySourceCount === 1 && arraySourceEntities.some((entity) => Boolean(entity.components.modelAsset))}
           validationError={arrayValidationError}
           value={arrayDialog}
         />

@@ -22,6 +22,9 @@ const MAX_THUMBNAIL_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_SYNC_DOWNLOAD_BYTES = 8 * 1024 * 1024 * 1024;
 const THUMBNAIL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
+// Windows 杀毒或索引进程可能短暂持有模型文件且不共享删除权限，只对这类占用错误做有限退避。
+const WINDOWS_RENAME_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1_200, 1_600];
+const WINDOWS_RENAME_RETRY_ERROR_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
 const MIME_THUMBNAIL_EXTENSIONS = {
     'image/png': '.png',
     'image/jpeg': '.jpg',
@@ -552,10 +555,10 @@ async function promoteModelLibrary(options) {
             await fs.mkdir(path.dirname(state.item.target), { recursive: true });
             if (await pathExists(state.item.target)) {
                 await fs.mkdir(path.dirname(state.item.backup), { recursive: true });
-                await fs.rename(state.item.target, state.item.backup);
+                await renamePathWithWindowsRetry(state.item.target, state.item.backup);
                 state.previousMoved = true;
             }
-            await fs.rename(state.item.staged, state.item.target);
+            await renamePathWithWindowsRetry(state.item.staged, state.item.target);
             state.stagedMoved = true;
         }
     }
@@ -567,7 +570,7 @@ async function promoteModelLibrary(options) {
                     await fs.rm(state.item.target, { recursive: state.item.type === 'directory', force: true });
                 }
                 if (state.previousMoved && await pathExists(state.item.backup)) {
-                    await fs.rename(state.item.backup, state.item.target);
+                    await renamePathWithWindowsRetry(state.item.backup, state.item.target);
                 }
             }
             catch (rollbackError) {
@@ -731,6 +734,27 @@ function toFiniteNumber(value) {
             ? Number(value)
             : Number.NaN;
     return Number.isFinite(normalized) ? normalized : null;
+}
+async function renamePathWithWindowsRetry(sourcePath, targetPath) {
+    let retryIndex = 0;
+    while (true) {
+        try {
+            await fs.rename(sourcePath, targetPath);
+            return;
+        }
+        catch (error) {
+            const retryDelayMs = WINDOWS_RENAME_RETRY_DELAYS_MS[retryIndex];
+            if (process.platform !== 'win32'
+                || retryDelayMs === undefined
+                || !isNodeError(error)
+                || typeof error.code !== 'string'
+                || !WINDOWS_RENAME_RETRY_ERROR_CODES.has(error.code)) {
+                throw error;
+            }
+            retryIndex += 1;
+            await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        }
+    }
 }
 async function pathExists(targetPath) {
     try {

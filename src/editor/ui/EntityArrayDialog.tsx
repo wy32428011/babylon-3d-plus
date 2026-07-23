@@ -15,7 +15,6 @@ type EntityArrayDialogProps = {
   assetNumberedSourceCount: number;
   validationError?: string | null;
   directionLabel?: string;
-  synchronizeModelIdentity?: boolean;
   readOnly?: boolean;
   onChange: (value: EntityArrayDialogValue) => void;
   onCancel: () => void;
@@ -121,9 +120,7 @@ export function EntityArrayDialog(props: EntityArrayDialogProps) {
         </label>
         {props.assetNumberedSourceCount === 1 ? (
           <p className="hierarchy-array-dialog-hint" id="hierarchy-array-number-rule-help">
-            {props.synchronizeModelIdentity
-              ? '可选；生成值会同时作为模型名称和资产编号，第一个副本从数字 +1 开始。'
-              : '可选；原对象编号不变，第一个副本从数字 +1 开始。'}
+            可选；规则只影响新副本资产编号。名称末尾数字递增，无数字时追加序号，不添加“副本”。
           </p>
         ) : (
           <p className="hierarchy-array-dialog-hint" id="hierarchy-array-number-rule-help">

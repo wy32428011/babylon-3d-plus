@@ -86,7 +86,7 @@ import {
 import {
   isMeasurableModelMesh,
   measureModelSizeMeters,
-  measureModelSpanMetersAlongWorldDirection,
+  measureEntityMeshesSpanMetersAlongWorldDirection,
   type ModelMeasurementResult,
 } from './modelMeasurement';
 import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
@@ -193,9 +193,25 @@ type LoadedModelRuntimeAssets =
     rootNodes: Node[];
   };
 
-type ModelArrayPreviewEntry = {
+type EntityArrayPreviewKind = 'mesh' | 'locator' | 'cad-reference' | 'model' | 'poi';
+type EntityArrayPreviewStrategy = 'clone-hierarchy' | 'poi-static';
+
+type EntityArrayPreviewSource = {
+  kind: EntityArrayPreviewKind;
+  root: TransformNode;
+  geometryMeshes: readonly AbstractMesh[];
+  previewMeshes: readonly AbstractMesh[];
+  geometryReady: boolean;
+  strategy: EntityArrayPreviewStrategy;
+};
+
+type EntityArrayPreviewEntry = {
   sourceEntityId: string;
+  sourceRoot: TransformNode;
+  sourceKind: EntityArrayPreviewKind;
   clones: TransformNode[];
+  poiBoundsMaterial: StandardMaterial | null;
+  placementSignature: string;
 };
 
 type ModelRuntimeEntry = {
@@ -448,6 +464,7 @@ type CadReferenceRuntimeEntry = {
   loadToken: number;
   lineColor: string;
   opacity: number;
+  geometryReady: boolean;
   cancelLoad: (() => void) | null;
 };
 
@@ -503,7 +520,7 @@ export class SceneRuntime {
   private activeModelGeneratorEntityId: string | null = null;
   private reportedModelGeneratorConflictSignature = '';
   private sharedModelSelectionOutlineSignature = '';
-  private modelArrayPreview: ModelArrayPreviewEntry | null = null;
+  private entityArrayPreview: EntityArrayPreviewEntry | null = null;
   private modelLoadSequence = 0;
   private environmentLoadSequence = 0;
 
@@ -587,7 +604,7 @@ export class SceneRuntime {
   /** 开始 MQTT 运行预览；该方法幂等，并在真正驱动前清空上一次预览残留运行态。 */
   beginTelemetryPreview(): void {
     if (this.telemetryPreviewActive) return;
-    this.clearModelArrayPreview();
+    this.clearEntityArrayPreview();
     this.telemetryPreviewActive = true;
     this.genericTelemetryMotionRuntime.beginPreview();
     this.clearTelemetryPreviewRuntimeState();
@@ -698,13 +715,13 @@ export class SceneRuntime {
       : { status: 'unavailable', sizeMeters: null };
   }
 
-  /** 读取普通导入模型沿指定世界方向的有效几何跨度，供 Shift+Gizmo 阵列使用。 */
-  getModelArrayGeometry(entityId: string, worldDirection: Vector3Data): {
+  /** 读取支持实体沿指定世界方向的有效几何跨度，供 Shift+Gizmo 阵列使用。 */
+  getEntityArrayGeometry(entityId: string, worldDirection: Vector3Data): {
     direction: Vector3Data;
     spanMeters: number;
   } | null {
-    const model = this.models.get(entityId);
-    if (!model?.assetHandle || !model.measurementReady) return null;
+    const source = this.resolveEntityArrayPreviewSource(entityId);
+    if (!source?.geometryReady || source.root.isDisposed()) return null;
 
     const direction = new Vector3(worldDirection.x, worldDirection.y, worldDirection.z);
     const lengthSquared = direction.lengthSquared();
@@ -712,26 +729,29 @@ export class SceneRuntime {
     direction.normalize();
 
     const normalizedDirection = { x: direction.x, y: direction.y, z: direction.z };
-    const spanMeters = measureModelSpanMetersAlongWorldDirection(model.contentRoot, normalizedDirection);
+    const spanMeters = measureEntityMeshesSpanMetersAlongWorldDirection(
+      source.geometryMeshes,
+      normalizedDirection,
+    );
     if (!Number.isFinite(spanMeters) || spanMeters === null || spanMeters <= MODEL_ARRAY_MIN_SPAN_METERS) return null;
 
     return { direction: normalizedDirection, spanMeters };
   }
 
   /**
-   * 更新 Shift 阵列的临时模型克隆。
-   * 克隆只复用当前已加载的可视层级，不进入实体映射、选择、脚本、MQTT 或持久化状态。
+   * 更新 Shift 阵列的临时实体克隆。
+   * 临时对象不进入实体映射、选择、脚本、MQTT、持久化或命令历史。
    */
-  updateModelArrayPreview(
+  updateEntityArrayPreview(
     entityId: string,
     worldDirection: Vector3Data,
     copyCount: number,
     spacingMeters: number,
   ): boolean {
-    const model = this.models.get(entityId);
-    const geometry = this.getModelArrayGeometry(entityId, worldDirection);
-    if (!model || !geometry) {
-      this.clearModelArrayPreview();
+    const source = this.resolveEntityArrayPreviewSource(entityId);
+    const geometry = this.getEntityArrayGeometry(entityId, worldDirection);
+    if (!source || !geometry) {
+      this.clearEntityArrayPreview();
       return false;
     }
 
@@ -740,40 +760,66 @@ export class SceneRuntime {
       Math.max(0, Math.floor(Number.isFinite(copyCount) ? copyCount : 0)),
     );
     if (normalizedCopyCount === 0) {
-      this.clearModelArrayPreview();
+      this.clearEntityArrayPreview();
       return true;
     }
 
     const normalizedSpacingMeters = Number.isFinite(spacingMeters) ? Math.max(0, spacingMeters) : 0;
-    if (this.modelArrayPreview?.sourceEntityId !== entityId) {
-      this.clearModelArrayPreview();
+    if (
+      this.entityArrayPreview
+      && (
+        this.entityArrayPreview.sourceEntityId !== entityId
+        || this.entityArrayPreview.sourceRoot !== source.root
+        || this.entityArrayPreview.sourceKind !== source.kind
+      )
+    ) {
+      this.clearEntityArrayPreview();
     }
-    this.modelArrayPreview ??= { sourceEntityId: entityId, clones: [] };
+    this.entityArrayPreview ??= {
+      sourceEntityId: entityId,
+      sourceRoot: source.root,
+      sourceKind: source.kind,
+      clones: [],
+      poiBoundsMaterial: null,
+      placementSignature: '',
+    };
 
-    while (this.modelArrayPreview.clones.length < normalizedCopyCount) {
-      const cloneIndex = this.modelArrayPreview.clones.length + 1;
-      const clonedNode = model.root.clone(`__modelArrayPreview_${entityId}_${cloneIndex}`, null, false);
+    while (this.entityArrayPreview.clones.length < normalizedCopyCount) {
+      const cloneIndex = this.entityArrayPreview.clones.length + 1;
+      const clonedNode = this.createEntityArrayPreviewClone(source, this.entityArrayPreview, entityId, cloneIndex);
       if (!clonedNode) {
-        this.clearModelArrayPreview();
+        this.clearEntityArrayPreview();
         return false;
       }
-
-      this.prepareModelArrayPreviewClone(clonedNode);
-      this.modelArrayPreview.clones.push(clonedNode);
+      this.entityArrayPreview.clones.push(clonedNode);
     }
 
-    while (this.modelArrayPreview.clones.length > normalizedCopyCount) {
-      this.modelArrayPreview.clones.pop()?.dispose(false, false);
+    while (this.entityArrayPreview.clones.length > normalizedCopyCount) {
+      this.entityArrayPreview.clones.pop()?.dispose(false, false);
     }
 
     const arrayStepMeters = geometry.spanMeters + normalizedSpacingMeters;
-    for (let index = 0; index < this.modelArrayPreview.clones.length; index += 1) {
-      const clone = this.modelArrayPreview.clones[index];
+    const placementSignature = [
+      normalizedCopyCount,
+      geometry.direction.x,
+      geometry.direction.y,
+      geometry.direction.z,
+      geometry.spanMeters,
+      normalizedSpacingMeters,
+      source.root.position.x,
+      source.root.position.y,
+      source.root.position.z,
+    ].join('|');
+    if (this.entityArrayPreview.placementSignature === placementSignature) return true;
+    this.entityArrayPreview.placementSignature = placementSignature;
+
+    for (let index = 0; index < this.entityArrayPreview.clones.length; index += 1) {
+      const clone = this.entityArrayPreview.clones[index];
       const offsetMultiplier = arrayStepMeters * (index + 1);
       clone.position.copyFromFloats(
-        model.root.position.x + geometry.direction.x * offsetMultiplier,
-        model.root.position.y + geometry.direction.y * offsetMultiplier,
-        model.root.position.z + geometry.direction.z * offsetMultiplier,
+        source.root.position.x + geometry.direction.x * offsetMultiplier,
+        source.root.position.y + geometry.direction.y * offsetMultiplier,
+        source.root.position.z + geometry.direction.z * offsetMultiplier,
       );
       clone.computeWorldMatrix(true);
     }
@@ -781,14 +827,15 @@ export class SceneRuntime {
     return true;
   }
 
-  /** 清除当前全部临时阵列克隆，不释放源模型共享的材质、纹理或几何资源。 */
-  clearModelArrayPreview(): void {
-    if (!this.modelArrayPreview) return;
+  /** 清除当前全部临时阵列克隆，不释放源实体共享的材质、纹理或几何资源。 */
+  clearEntityArrayPreview(): void {
+    if (!this.entityArrayPreview) return;
 
-    for (const clone of this.modelArrayPreview.clones) {
+    for (const clone of this.entityArrayPreview.clones) {
       clone.dispose(false, false);
     }
-    this.modelArrayPreview = null;
+    this.entityArrayPreview.poiBoundsMaterial?.dispose(false, false);
+    this.entityArrayPreview = null;
   }
 
   /** 汇总多个实体的世界包围盒，供场景聚焦和模型阵列读取中心、尺寸与几何就绪状态。 */
@@ -834,7 +881,7 @@ export class SceneRuntime {
     if (modelGenerator) return true;
 
     const cadReference = this.cadReferences.get(entityId);
-    if (cadReference) return cadReference.lineMeshes.length > 0 && cadReference.cancelLoad === null;
+    if (cadReference) return cadReference.geometryReady && cadReference.lineMeshes.length > 0;
 
     return this.meshes.has(entityId) || this.locators.has(entityId) || this.lights.has(entityId) || this.poiEffectRuntime.has(entityId);
   }
@@ -1015,6 +1062,10 @@ export class SceneRuntime {
     const poiEffectIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.poiEffect)),
     );
+    const previewSourceId = this.entityArrayPreview?.sourceEntityId;
+    if (previewSourceId && this.poiEffectRuntime.has(previewSourceId) && !poiEffectIds.has(previewSourceId)) {
+      this.clearEntityArrayPreview();
+    }
     this.poiEffectRuntime.disposeMissing(poiEffectIds);
 
     for (const [entityId, mesh] of this.meshes.entries()) {
@@ -1107,6 +1158,7 @@ export class SceneRuntime {
 
   /** 仅刷新选择、显隐和锁定相关表现，不重复执行模型加载、参数或外置脚本。 */
   private syncEntityPresentation(entity: Entity, selected: boolean): void {
+    this.clearEntityArrayPreviewIfSource(entity.id);
     const primitiveMesh = this.meshes.get(entity.id);
     const meshRenderer = entity.components.meshRenderer;
     if (primitiveMesh && meshRenderer) {
@@ -1218,7 +1270,7 @@ export class SceneRuntime {
   }
 
   dispose(): void {
-    this.clearModelArrayPreview();
+    this.clearEntityArrayPreview();
     this.assetLoadScheduler.dispose();
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
@@ -1275,6 +1327,7 @@ export class SceneRuntime {
 
   /** 按组件类型同步单个实体的运行时表现。 */
   private syncEntity(entity: Entity, selected: boolean): void {
+    this.clearEntityArrayPreviewIfSource(entity.id);
     if (entity.components.meshRenderer) {
       this.syncPrimitiveMeshEntity(entity, selected);
     }
@@ -1558,6 +1611,7 @@ export class SceneRuntime {
       loadToken,
       lineColor: cadReference.lineColor,
       opacity: cadReference.opacity,
+      geometryReady: false,
       cancelLoad: null,
     };
     this.cadReferences.set(entity.id, pending);
@@ -4873,8 +4927,132 @@ export class SceneRuntime {
     return new HemisphericLight(entityId, new Vector3(0, 1, 0), this.scene);
   }
 
+  /** 按实体运行时类型解析阵列测量和预览所需的稳定根节点与真实几何。 */
+  private resolveEntityArrayPreviewSource(entityId: string): EntityArrayPreviewSource | null {
+    const primitiveMesh = this.meshes.get(entityId);
+    if (primitiveMesh) {
+      return {
+        kind: 'mesh',
+        root: primitiveMesh,
+        geometryMeshes: [primitiveMesh],
+        previewMeshes: [primitiveMesh],
+        geometryReady: !primitiveMesh.isDisposed(),
+        strategy: 'clone-hierarchy',
+      };
+    }
+
+    const locator = this.locators.get(entityId);
+    if (locator) {
+      return {
+        kind: 'locator',
+        root: locator.root,
+        geometryMeshes: locator.boxes,
+        previewMeshes: locator.boxes,
+        geometryReady: locator.boxes.length > 0,
+        strategy: 'clone-hierarchy',
+      };
+    }
+
+    const cadReference = this.cadReferences.get(entityId);
+    if (cadReference) {
+      return {
+        kind: 'cad-reference',
+        root: cadReference.root,
+        geometryMeshes: cadReference.lineMeshes,
+        previewMeshes: cadReference.lineMeshes,
+        geometryReady: cadReference.geometryReady && cadReference.lineMeshes.length > 0,
+        strategy: 'clone-hierarchy',
+      };
+    }
+
+    const model = this.models.get(entityId);
+    if (model) {
+      const meshes = model.contentRoot.getChildMeshes(false);
+      return {
+        kind: 'model',
+        root: model.root,
+        geometryMeshes: meshes,
+        previewMeshes: meshes,
+        geometryReady: Boolean(model.assetHandle && model.measurementReady),
+        strategy: 'clone-hierarchy',
+      };
+    }
+
+    const poi = this.poiEffectRuntime.getEntityArraySource(entityId);
+    if (poi) {
+      return {
+        kind: 'poi',
+        root: poi.root,
+        geometryMeshes: poi.geometryMeshes,
+        previewMeshes: poi.previewMeshes,
+        geometryReady: poi.geometryMeshes.length > 0,
+        strategy: 'poi-static',
+      };
+    }
+
+    return null;
+  }
+
+  /** 创建单个临时阵列副本；POI 只复制静态视觉 Mesh 或粒子范围代理。 */
+  private createEntityArrayPreviewClone(
+    source: EntityArrayPreviewSource,
+    preview: EntityArrayPreviewEntry,
+    entityId: string,
+    cloneIndex: number,
+  ): TransformNode | null {
+    const cloneName = `__entityArrayPreview_${entityId}_${cloneIndex}`;
+    if (source.strategy === 'clone-hierarchy') {
+      const clone = source.root.clone(cloneName, null, false);
+      if (!clone) return null;
+      this.prepareEntityArrayPreviewClone(clone);
+      return clone;
+    }
+
+    const cloneRoot = source.root.clone(cloneName, null, true);
+    if (!cloneRoot) return null;
+
+    for (let meshIndex = 0; meshIndex < source.previewMeshes.length; meshIndex += 1) {
+      const sourceMesh = source.previewMeshes[meshIndex];
+      const cloneMesh = sourceMesh.clone(`${cloneName}_mesh_${meshIndex}`, cloneRoot, true);
+      if (!cloneMesh) {
+        cloneRoot.dispose(false, false);
+        return null;
+      }
+
+      const metadata = sourceMesh.metadata as Record<string, unknown> | null | undefined;
+      if (metadata?.effectBoundsProxy === true) {
+        cloneMesh.isVisible = true;
+        cloneMesh.visibility = 1;
+        cloneMesh.material = this.getOrCreatePoiArrayBoundsMaterial(preview);
+      }
+    }
+
+    this.prepareEntityArrayPreviewClone(cloneRoot);
+    return cloneRoot;
+  }
+
+  /** 复用一个轻量半透明材质显示纯粒子 POI 的效果范围代理。 */
+  private getOrCreatePoiArrayBoundsMaterial(preview: EntityArrayPreviewEntry): StandardMaterial {
+    if (preview.poiBoundsMaterial) return preview.poiBoundsMaterial;
+
+    const material = new StandardMaterial('__entityArrayPoiBoundsMaterial', this.scene);
+    const color = Color3.FromHexString('#55C8FF');
+    material.disableLighting = true;
+    material.alpha = 0.18;
+    material.diffuseColor = color;
+    material.emissiveColor = color;
+    material.backFaceCulling = false;
+    preview.poiBoundsMaterial = material;
+    return material;
+  }
+
+  /** 当前源实体被删除、重建或锁定时立即释放其临时阵列预览。 */
+  private clearEntityArrayPreviewIfSource(entityId: string): void {
+    if (this.entityArrayPreview?.sourceEntityId === entityId) this.clearEntityArrayPreview();
+  }
+
   /** 清理临时阵列克隆的实体 metadata 与拾取能力，避免它们进入编辑器交互链路。 */
-  private prepareModelArrayPreviewClone(root: TransformNode): void {
+  private prepareEntityArrayPreviewClone(root: TransformNode): void {
     const nodes: Node[] = [root, ...root.getDescendants(false)];
     for (const node of nodes) {
       node.metadata = null;
@@ -4887,6 +5065,7 @@ export class SceneRuntime {
 
   /** 释放实体对应的 Mesh 与材质资源。 */
   private disposeMesh(entityId: string, mesh: Mesh): void {
+    this.clearEntityArrayPreviewIfSource(entityId);
     mesh.material?.dispose();
     mesh.dispose();
     this.meshes.delete(entityId);
@@ -4894,6 +5073,7 @@ export class SceneRuntime {
 
   /** 释放虚拟定位线框的根节点、网格盒和材质。 */
   private disposeLocator(entityId: string, locator: LocatorRuntimeEntry): void {
+    this.clearEntityArrayPreviewIfSource(entityId);
     for (const box of locator.boxes) {
       box.dispose(false, false);
     }
@@ -4904,6 +5084,7 @@ export class SceneRuntime {
 
   /** 释放 CAD 参考图的所有线稿 Mesh 与根节点。 */
   private disposeCadReference(entityId: string, cadReference: CadReferenceRuntimeEntry): void {
+    this.clearEntityArrayPreviewIfSource(entityId);
     cadReference.cancelLoad?.();
     cadReference.cancelLoad = null;
     for (const lineMesh of cadReference.lineMeshes) {
@@ -4915,7 +5096,7 @@ export class SceneRuntime {
 
   /** 释放导入模型的容器、根节点与所有子资源。 */
   private disposeModel(entityId: string, model: ModelRuntimeEntry): void {
-    if (this.modelArrayPreview?.sourceEntityId === entityId) this.clearModelArrayPreview();
+    this.clearEntityArrayPreviewIfSource(entityId);
     this.genericTelemetryMotionRuntime.disposeModel(entityId);
     model.telemetryPreviewBaseline = null;
     this.applyModelSelection(model, false);
@@ -5312,6 +5493,7 @@ export class SceneRuntime {
     }
 
     if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
+    cadReference.geometryReady = cadReference.lineMeshes.length > 0;
     this.applyCadReferenceLineMeshStyle(cadReference);
     this.applyCadReferenceInteractivity(cadReference, entityId);
   }
