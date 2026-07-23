@@ -1184,13 +1184,13 @@ select {
   margin-top: 2px;
 }
 
-.panel .hierarchy-array-dialog-actions button {
+.hierarchy-array-dialog-actions button {
   min-width: 58px;
   height: 26px;
   padding: 0 10px;
 }
 
-.panel .hierarchy-array-dialog-actions .primary {
+.hierarchy-array-dialog-actions .primary {
   border-color: #1f74d6;
   color: #ffffff;
   background: #2f86ff;
@@ -1668,7 +1668,10 @@ select {
 
 .project-library {
   display: grid;
-  grid-template-rows: 32px 42px minmax(0, 1fr) auto;
+  grid-template-rows: 32px 42px 190px;
+  grid-auto-rows: auto;
+  align-content: start;
+  height: auto;
   gap: 0;
   padding: 0;
   overflow: hidden;
@@ -1776,13 +1779,16 @@ select {
   display: flex;
   align-items: flex-start;
   align-content: flex-start;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 14px 18px;
+  width: 100%;
+  height: 190px;
   min-width: 0;
+  min-height: 190px;
   padding: 6px 14px 8px;
-  /* 资源卡片按宽度自动换行，禁用横向滚动，超出高度后走纵向滚动。 */
-  overflow-x: hidden;
-  overflow-y: auto;
+  /* 所有资源库保持单行排列，卡片超出宽度后仅使用横向滚动。 */
+  overflow-x: auto;
+  overflow-y: hidden;
   background: #262626;
 }
 

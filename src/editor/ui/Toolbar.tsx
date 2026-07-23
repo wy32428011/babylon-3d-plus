@@ -519,7 +519,7 @@ export function Toolbar(props: ToolbarProps) {
         />
       </label>
       <ToolbarIconButton disabled={!props.canDelete} icon={TOOLBAR_ICONS.delete} label="删除" onClick={props.onDeleteSelectedEntity} />
-      <ToolbarIconButton disabled={!props.canUndo} icon={TOOLBAR_ICONS.undo} label="撤销" onClick={props.onUndo} />
+      <ToolbarIconButton disabled={!props.canUndo} icon={TOOLBAR_ICONS.undo} label="撤销 (Ctrl+Z)" onClick={props.onUndo} />
       <ToolbarIconButton disabled={!props.canRedo} icon={TOOLBAR_ICONS.redo} label="重做" onClick={props.onRedo} />
       <ToolbarIconButton
         disabled={isPreview || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy}

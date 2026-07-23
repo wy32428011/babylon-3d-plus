@@ -18,6 +18,9 @@ type ScannedDxfEntity = Record<string, unknown> & {
   type: string;
   layer?: string;
   vertices?: ScannedDxfVertex[];
+  controlPoints?: ScannedDxfVertex[];
+  knots?: number[];
+  weights?: number[];
 };
 
 /** 轻量扫描出的 DXF 顶点记录，兼容 LWPOLYLINE 与 POLYLINE。 */
@@ -28,14 +31,11 @@ type ScannedDxfVertex = {
 };
 
 /** 轻量扫描出的 DXF 块记录，用于后续 INSERT 展开。 */
-const CAD_REFERENCE_MAX_SCANNED_GEOMETRY_PER_BLOCK = 128;
-
 type ScannedDxfBlock = Record<string, unknown> & {
   name: string;
   x: number;
   y: number;
   entities: ScannedDxfEntity[];
-  scanLimited: boolean;
 };
 
 /** 大 DXF 扫描产物，结构上兼容现有 CAD 转换层需要的 ParsedDXF 子集。 */
@@ -43,7 +43,6 @@ type ScannedDxfDocument = {
   header: Record<string, number>;
   blocks: ScannedDxfBlock[];
   entities: ScannedDxfEntity[];
-  scanLimited: boolean;
 };
 
 /** 按 group-pair 顺序读取 DXF 文本，避免 split 产生数千万行数组。 */
@@ -109,15 +108,13 @@ export function parseLargeCadReferenceDxf(
   options: Omit<CadReferenceParseOptions, 'geometryBudget'> = {},
 ): CadReferenceParseResult {
   const parsed = scanLargeDxfDocument(content);
-  const result = convertParsedCadReferenceDxf(parsed as unknown as ParsedDXF, { ...options, geometryBudget: budget });
-  result.budgetLimited = result.budgetLimited || parsed.scanLimited;
-  return result;
+  return convertParsedCadReferenceDxf(parsed as unknown as ParsedDXF, { ...options, geometryBudget: budget });
 }
 
 /** 扫描 DXF 文档的 HEADER、BLOCKS 与 ENTITIES 三个关键区段。 */
 function scanLargeDxfDocument(content: string): ScannedDxfDocument {
   const reader = new DxfGroupReader(content);
-  const document: ScannedDxfDocument = { header: {}, blocks: [], entities: [], scanLimited: false };
+  const document: ScannedDxfDocument = { header: {}, blocks: [], entities: [] };
 
   for (let group = reader.next(); group; group = reader.next()) {
     if (group.code !== 0 || group.value !== 'SECTION') continue;
@@ -127,9 +124,7 @@ function scanLargeDxfDocument(content: string): ScannedDxfDocument {
     if (sectionName.value === 'HEADER') {
       scanHeaderSection(reader, document.header);
     } else if (sectionName.value === 'BLOCKS') {
-      const blocks = scanBlocksSection(reader);
-      document.blocks.push(...blocks);
-      document.scanLimited = document.scanLimited || blocks.some((block) => block.scanLimited);
+      document.blocks.push(...scanBlocksSection(reader));
     } else if (sectionName.value === 'ENTITIES') {
       document.entities.push(...scanEntitiesSection(reader));
     } else {
@@ -172,21 +167,13 @@ function scanBlocksSection(reader: DxfGroupReader): ScannedDxfBlock[] {
 
 /** 读取单个 BLOCK，直到 ENDBLK 结束。 */
 function readBlockRecord(reader: DxfGroupReader): ScannedDxfBlock {
-  const block: ScannedDxfBlock = { name: '', x: 0, y: 0, entities: [], scanLimited: false };
-  let scannedGeometryCount = 0;
+  const block: ScannedDxfBlock = { name: '', x: 0, y: 0, entities: [] };
 
   for (let group = reader.next(); group; group = reader.next()) {
     if (group.code === 0 && group.value === 'ENDBLK') return block;
     if (group.code === 0) {
       const entity = readEntityAfterType(reader, group.value);
-      if (entity?.type === 'INSERT') {
-        block.entities.push(entity);
-      } else if (entity && scannedGeometryCount < CAD_REFERENCE_MAX_SCANNED_GEOMETRY_PER_BLOCK) {
-        block.entities.push(entity);
-        scannedGeometryCount += 1;
-      } else if (entity) {
-        block.scanLimited = true;
-      }
+      if (entity) block.entities.push(entity);
       continue;
     }
 
@@ -315,6 +302,8 @@ function applyEntityGroup(entity: ScannedDxfEntity, group: DxfGroupPair, current
 
   if (entity.type === 'LINE') applyLineGroup(entity, group);
   if (entity.type === 'ARC' || entity.type === 'CIRCLE') applyArcCircleGroup(entity, group);
+  if (entity.type === 'ELLIPSE') applyEllipseGroup(entity, group);
+  if (entity.type === 'SPLINE') return applySplineGroup(entity, group, currentVertex);
   if (entity.type === 'LWPOLYLINE') return applyLightweightPolylineGroup(entity, group, currentVertex);
   if (entity.type === 'INSERT') applyInsertGroup(entity, group);
 
@@ -338,6 +327,40 @@ function applyArcCircleGroup(entity: ScannedDxfEntity, group: DxfGroupPair): voi
   if (group.code === 40) entity.r = readDxfNumber(group.value, 0);
   if (group.code === 50) entity.startAngle = degreesToRadians(readDxfNumber(group.value, 0));
   if (group.code === 51) entity.endAngle = degreesToRadians(readDxfNumber(group.value, 0));
+}
+
+/** 应用 ELLIPSE 中心、长轴向量、轴比和参数范围。 */
+function applyEllipseGroup(entity: ScannedDxfEntity, group: DxfGroupPair): void {
+  if (group.code === 10) entity.x = readDxfNumber(group.value, Number.NaN);
+  if (group.code === 20) entity.y = readDxfNumber(group.value, Number.NaN);
+  if (group.code === 11) entity.majorX = readDxfNumber(group.value, Number.NaN);
+  if (group.code === 21) entity.majorY = readDxfNumber(group.value, Number.NaN);
+  if (group.code === 40) entity.axisRatio = readDxfNumber(group.value, 0);
+  if (group.code === 41) entity.startAngle = readDxfNumber(group.value, 0);
+  if (group.code === 42) entity.endAngle = readDxfNumber(group.value, Math.PI * 2);
+}
+
+/** 应用 SPLINE 控制点、节点向量、权重和次数。 */
+function applySplineGroup(
+  entity: ScannedDxfEntity,
+  group: DxfGroupPair,
+  currentControlPoint: ScannedDxfVertex | null,
+): ScannedDxfVertex | null {
+  if (!entity.controlPoints) entity.controlPoints = [];
+  if (!entity.knots) entity.knots = [];
+  if (group.code === 10) {
+    const controlPoint: ScannedDxfVertex = { x: readDxfNumber(group.value, Number.NaN), y: Number.NaN };
+    entity.controlPoints.push(controlPoint);
+    return controlPoint;
+  }
+  if (group.code === 20 && currentControlPoint) currentControlPoint.y = readDxfNumber(group.value, Number.NaN);
+  if (group.code === 40) entity.knots.push(readDxfNumber(group.value, Number.NaN));
+  if (group.code === 41) {
+    if (!entity.weights) entity.weights = [];
+    entity.weights.push(readDxfNumber(group.value, 1));
+  }
+  if (group.code === 71) entity.degree = readDxfInteger(group.value, 1);
+  return currentControlPoint;
 }
 
 /** 应用 LWPOLYLINE 顶点、bulge 和闭合字段。 */
@@ -379,7 +402,13 @@ function readOrCreatePointRecord(entity: ScannedDxfEntity, key: 'start' | 'end')
 
 /** 判断实体类型是否属于大文件预扫描支持范围。 */
 function isSupportedScannedEntityType(type: string): boolean {
-  return type === 'LINE' || type === 'ARC' || type === 'CIRCLE' || type === 'LWPOLYLINE' || type === 'INSERT';
+  return type === 'LINE'
+    || type === 'ARC'
+    || type === 'CIRCLE'
+    || type === 'ELLIPSE'
+    || type === 'SPLINE'
+    || type === 'LWPOLYLINE'
+    || type === 'INSERT';
 }
 
 /** 判断字符串是否可转为有限数字。 */

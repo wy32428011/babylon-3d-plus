@@ -37,8 +37,8 @@
 
 .centerColumn {
   display: grid;
-  /* 中列独立承载 Scene 与底部资源区，底部高度沿用既有自适应范围。 */
-  grid-template-rows: minmax(0, 1fr) clamp(300px, 38vh, 460px);
+  /* Scene 占用剩余空间，底部资源区由实际内容高度决定。 */
+  grid-template-rows: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
 }
@@ -47,9 +47,9 @@
 .bottomWorkspace {
   /* Project 与 Console 只占中列宽度，并与 Scene 之间保持清晰边界。 */
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 30px;
+  grid-template-rows: auto 30px;
   width: 100%;
-  height: 100%;
+  height: auto;
   min-width: 0;
   min-height: 0;
   max-width: 100%;

@@ -6,17 +6,30 @@ import {
 } from '../../runtime/babylon/createEngine';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
-import { TransformGizmoController } from '../../runtime/babylon/TransformGizmoController';
+import {
+  TransformGizmoController,
+  type ModelArrayDragUpdate,
+} from '../../runtime/babylon/TransformGizmoController';
 import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
   decodeBuiltInAssetDragPayload,
   decodeModelAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
-import { useEditorStore, type EntityArrayDirection } from '../store/editorStore';
+import {
+  useEditorStore,
+  type EntityArrayDirection,
+} from '../store/editorStore';
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
 import type { SceneCameraPose, SceneDocument } from '../model/SceneDocument';
+import type { Vector3Data } from '../model/math';
+import {
+  getEntityArrayIdentifierError,
+  getEntityArrayParameterError,
+  MODEL_ARRAY_MIN_SPAN_METERS,
+} from '../model/modelArray';
+import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 
 const CLICK_SELECTION_TOLERANCE_PX = 4;
 const CAMERA_POSE_CHANGE_EPSILON = 1e-6;
@@ -28,6 +41,16 @@ type PointerClickSnapshot = {
   clientY: number;
   cameraPose: SceneCameraPose | null;
   cameraDragged: boolean;
+};
+
+
+type ModelArrayDialogState = {
+  sourceEntityId: string;
+  direction: Vector3Data;
+  spanMeters: number;
+  directionLabel: string;
+  value: EntityArrayDialogValue;
+  commitError: string | null;
 };
 
 /** 将未知异常转换成可展示的简短消息。 */
@@ -69,6 +92,51 @@ function getEntityArrayAxis(direction: EntityArrayDirection): 'x' | 'y' | 'z' {
   return 'x';
 }
 
+
+/** 将 Shift 拖拽结果映射为弹框兼容的方向值与可读标签。 */
+function describeModelArrayDrag(update: ModelArrayDragUpdate): {
+  direction: EntityArrayDirection;
+  label: string;
+} {
+  const dot = update.direction.x * update.positiveDirection.x
+    + update.direction.y * update.positiveDirection.y
+    + update.direction.z * update.positiveDirection.z;
+  const negative = dot < 0;
+  const direction = `${negative ? '-' : ''}${update.axis}` as EntityArrayDirection;
+  return {
+    direction,
+    label: `${negative ? '-' : '+'}${update.axis.toUpperCase()}（${update.space === 'local' ? '局部' : '世界'}）`,
+  };
+}
+
+/** 校验 Shift 阵列弹框中的数量、间距、源模型和同步名称/编号。 */
+function getModelArrayDialogError(
+  scene: SceneDocument,
+  dialog: ModelArrayDialogState,
+): string | null {
+  const parameterError = getEntityArrayParameterError(
+    dialog.value.copyCount,
+    dialog.value.spacingMeters,
+  );
+  if (parameterError) return parameterError;
+  if (!Number.isFinite(dialog.spanMeters) || dialog.spanMeters <= MODEL_ARRAY_MIN_SPAN_METERS) {
+    return '源模型在当前轴上的尺寸无效。';
+  }
+
+  const source = scene.entities[dialog.sourceEntityId];
+  const parent = source?.parentId ? scene.entities[source.parentId] : null;
+  if (!source?.components.modelAsset || source.locked || parent?.locked) {
+    return '源模型已失效、被锁定或不再是普通导入模型。';
+  }
+
+  return getEntityArrayIdentifierError(
+    scene,
+    [dialog.sourceEntityId],
+    dialog.value.copyCount,
+    dialog.value.assetNumberRule,
+  );
+}
+
 export function SceneViewPanel() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<BabylonViewport | null>(null);
@@ -79,11 +147,14 @@ export function SceneViewPanel() {
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
   const selectedEntityIdRef = useRef<string | null>(null);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
+  const modelArrayDialogRef = useRef<ModelArrayDialogState | null>(null);
   const [viewportError, setViewportError] = useState<string | null>(null);
+  const [modelArrayDialog, setModelArrayDialog] = useState<ModelArrayDialogState | null>(null);
   const sceneDocument = useEditorStore((state) => state.scene);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
   const selectedEntityId = useEditorStore((state) => state.scene.selectedEntityId);
+  const hierarchySelectionIds = useEditorStore((state) => state.hierarchySelectionIds);
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
@@ -104,6 +175,7 @@ export function SceneViewPanel() {
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
   const resolveEntityArrayRequest = useEditorStore((state) => state.resolveEntityArrayRequest);
+  const commitResolvedEntityArray = useEditorStore((state) => state.commitResolvedEntityArray);
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
   const consumeCameraPoseSaveRequest = useEditorStore((state) => state.consumeCameraPoseSaveRequest);
   const consumeCameraResetRequest = useEditorStore((state) => state.consumeCameraResetRequest);
@@ -125,10 +197,48 @@ export function SceneViewPanel() {
     setSelectedModelMeasurement({ entityId, ...measurement });
   }, [setSelectedModelMeasurement]);
 
+
+  /** 清除 Shift 阵列弹框和全部 Babylon 临时克隆。 */
+  const closeModelArrayDialog = useCallback((): void => {
+    modelArrayDialogRef.current = null;
+    setModelArrayDialog(null);
+    runtimeRef.current?.clearModelArrayPreview();
+  }, []);
+
   useEffect(() => {
     sceneDocumentRef.current = sceneDocument;
     selectedEntityIdRef.current = selectedEntityId;
-  }, [sceneDocument, selectedEntityId]);
+    modelArrayDialogRef.current = modelArrayDialog;
+  }, [sceneDocument, selectedEntityId, modelArrayDialog]);
+
+
+  /** 源模型、单选状态或编辑模式失效时取消弹框，避免临时克隆悬挂。 */
+  useEffect(() => {
+    if (!modelArrayDialog) return;
+
+    const source = sceneDocument.entities[modelArrayDialog.sourceEntityId];
+    const parent = source?.parentId ? sceneDocument.entities[source.parentId] : null;
+    const activeSelectionIds = hierarchySelectionIds.length > 0
+      ? hierarchySelectionIds.filter((entityId) => Boolean(sceneDocument.entities[entityId]))
+      : selectedEntityId
+        ? [selectedEntityId]
+        : [];
+    const sourceInvalid = !source?.components.modelAsset
+      || source.locked
+      || parent?.locked
+      || selectedEntityId !== modelArrayDialog.sourceEntityId
+      || activeSelectionIds.length !== 1
+      || activeSelectionIds[0] !== modelArrayDialog.sourceEntityId;
+
+    if (isRuntimePreview || sourceInvalid) closeModelArrayDialog();
+  }, [
+    closeModelArrayDialog,
+    hierarchySelectionIds,
+    isRuntimePreview,
+    modelArrayDialog,
+    sceneDocument,
+    selectedEntityId,
+  ]);
 
   /** 记录左键按下位置，用于区分单击选中和拖拽旋转视角。 */
   function handleCanvasPointerDown(event: PointerEvent<HTMLCanvasElement>): void {
@@ -188,9 +298,10 @@ export function SceneViewPanel() {
     selectEntity(pickedEntityId ?? null);
   }
 
-  /** 指针流程被浏览器取消时丢弃待判定的点击快照。 */
+  /** 指针流程被浏览器取消时丢弃点击快照，并取消尚未完成的 Shift 阵列拖拽。 */
   function handleCanvasPointerCancel(): void {
     clickSnapshotRef.current = null;
+    gizmoRef.current?.cancelActiveDrag();
   }
 
   /** 仅当拖拽数据是模型资产或内置资源时允许浏览器在 Scene 画布触发 drop。 */
@@ -303,6 +414,91 @@ export function SceneViewPanel() {
       gizmo = new TransformGizmoController(viewport.scene, {
         previewTransform: previewEntityTransform,
         commitTransform: commitEntityTransform,
+        beginModelArrayDrag: (context) => {
+          const currentScene = sceneDocumentRef.current;
+          const currentState = useEditorStore.getState();
+          const source = currentScene?.entities[context.entityId];
+          const parent = source?.parentId && currentScene ? currentScene.entities[source.parentId] : null;
+          const activeSelectionIds = currentState.hierarchySelectionIds.length > 0
+            ? currentState.hierarchySelectionIds.filter((entityId) => Boolean(currentScene?.entities[entityId]))
+            : currentState.scene.selectedEntityId
+              ? [currentState.scene.selectedEntityId]
+              : [];
+
+          if (runtimeModeRef.current !== 'edit') {
+            pushLog('模型阵列已阻止：运行预览期间不能使用 Shift 拖拽阵列。');
+            return null;
+          }
+          if (modelArrayDialogRef.current) {
+            pushLog('模型阵列已阻止：请先完成或取消当前阵列弹框。');
+            return null;
+          }
+          if (activeSelectionIds.length !== 1 || activeSelectionIds[0] !== context.entityId) {
+            pushLog('模型阵列已阻止：Shift 拖拽仅支持单个选中的导入模型。');
+            return null;
+          }
+          if (!source?.components.modelAsset || source.locked || parent?.locked) {
+            pushLog('模型阵列已阻止：请选择一个未锁定的普通导入模型。');
+            return null;
+          }
+
+          const currentRuntime = runtimeRef.current ?? runtime;
+          if (!currentRuntime) return null;
+          const geometry = currentRuntime.getModelArrayGeometry(context.entityId, context.positiveDirection);
+          if (!geometry) {
+            pushLog('模型阵列已阻止：模型几何尚未加载完成或当前轴尺寸无效。');
+            return null;
+          }
+
+          currentRuntime.clearModelArrayPreview();
+          return { spanMeters: geometry.spanMeters };
+        },
+        previewModelArrayDrag: (update) => {
+          const currentRuntime = runtimeRef.current ?? runtime;
+          if (!currentRuntime) return;
+          if (update.copyCount === 0) {
+            currentRuntime.clearModelArrayPreview();
+            return;
+          }
+          currentRuntime.updateModelArrayPreview(
+            update.entityId,
+            update.direction,
+            update.copyCount,
+            0,
+          );
+        },
+        completeModelArrayDrag: (update) => {
+          const currentRuntime = runtimeRef.current ?? runtime;
+          if (!currentRuntime || update.copyCount === 0) {
+            currentRuntime?.clearModelArrayPreview();
+            return;
+          }
+          if (!currentRuntime.updateModelArrayPreview(update.entityId, update.direction, update.copyCount, 0)) {
+            currentRuntime.clearModelArrayPreview();
+            pushLog('模型阵列失败：无法创建模型临时预览。');
+            return;
+          }
+
+          const description = describeModelArrayDrag(update);
+          const dialog: ModelArrayDialogState = {
+            sourceEntityId: update.entityId,
+            direction: update.direction,
+            spanMeters: update.spanMeters,
+            directionLabel: description.label,
+            value: {
+              copyCount: update.copyCount,
+              direction: description.direction,
+              spacingMeters: 0,
+              assetNumberRule: '',
+            },
+            commitError: null,
+          };
+          modelArrayDialogRef.current = dialog;
+          setModelArrayDialog(dialog);
+        },
+        cancelModelArrayDrag: () => {
+          (runtimeRef.current ?? runtime)?.clearModelArrayPreview();
+        },
       });
       mqttTelemetryClient = new MqttStackerTelemetryClient(pushLog);
     } catch (error) {
@@ -325,12 +521,22 @@ export function SceneViewPanel() {
     gizmoRef.current = gizmo;
     mqttTelemetryClientRef.current = mqttTelemetryClient;
 
+    const canvas = canvasRef.current;
+    // Project 内容会改变中列 auto 行高；元素自身尺寸变化不会触发 window.resize。
     const resize = () => initializedViewport.engine.resize();
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(resize);
+    if (canvas) resizeObserver?.observe(canvas);
+    const cancelActiveGizmoDrag = () => initializedGizmo.cancelActiveDrag();
     window.addEventListener('resize', resize);
+    window.addEventListener('blur', cancelActiveGizmoDrag);
     resize();
 
     return () => {
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
+      window.removeEventListener('blur', cancelActiveGizmoDrag);
       initializedMqttTelemetryClient?.dispose();
       initializedGizmo.dispose();
       initializedRuntime.dispose();
@@ -488,6 +694,73 @@ export function SceneViewPanel() {
     consumeSceneFocusRequest(sceneFocusRequest.id);
   }, [sceneFocusRequest, consumeSceneFocusRequest]);
 
+  const modelArrayDialogValidationError = modelArrayDialog
+    ? modelArrayDialog.commitError ?? getModelArrayDialogError(sceneDocument, modelArrayDialog)
+    : null;
+
+  /** 修改弹框参数时同步刷新临时 Babylon 阵列，不写入场景或命令历史。 */
+  function handleModelArrayDialogChange(value: EntityArrayDialogValue): void {
+    if (!modelArrayDialog) return;
+
+    const nextDialog = { ...modelArrayDialog, value, commitError: null };
+    modelArrayDialogRef.current = nextDialog;
+    setModelArrayDialog(nextDialog);
+
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+    if (getEntityArrayParameterError(value.copyCount, value.spacingMeters)) {
+      runtime.clearModelArrayPreview();
+      return;
+    }
+    runtime.updateModelArrayPreview(
+      nextDialog.sourceEntityId,
+      nextDialog.direction,
+      value.copyCount,
+      value.spacingMeters,
+    );
+  }
+
+  /** 原子校验并提交正式阵列；失败时保留弹框和临时预览。 */
+  function handleConfirmModelArrayDialog(): void {
+    const dialog = modelArrayDialogRef.current;
+    if (!dialog) return;
+
+    const validationError = getModelArrayDialogError(sceneDocumentRef.current ?? sceneDocument, dialog);
+    if (validationError) {
+      const nextDialog = { ...dialog, commitError: validationError };
+      modelArrayDialogRef.current = nextDialog;
+      setModelArrayDialog(nextDialog);
+      return;
+    }
+
+    const runtime = runtimeRef.current;
+    const geometry = runtime?.getModelArrayGeometry(dialog.sourceEntityId, dialog.direction);
+    if (!geometry) {
+      const error = '模型几何尚未加载完成或当前轴尺寸无效。';
+      const nextDialog = { ...dialog, commitError: error };
+      modelArrayDialogRef.current = nextDialog;
+      setModelArrayDialog(nextDialog);
+      return;
+    }
+
+    const result = commitResolvedEntityArray({
+      sourceIds: [dialog.sourceEntityId],
+      copyCount: dialog.value.copyCount,
+      directionVector: geometry.direction,
+      selectionSpanMeters: geometry.spanMeters,
+      spacingMeters: dialog.value.spacingMeters,
+      assetNumberRule: dialog.value.assetNumberRule,
+    });
+    if (!result.ok) {
+      const nextDialog = { ...dialog, commitError: result.error };
+      modelArrayDialogRef.current = nextDialog;
+      setModelArrayDialog(nextDialog);
+      return;
+    }
+
+    closeModelArrayDialog();
+  }
+
   return (
     <section className={isRuntimePreview ? 'scene-panel scene-panel-preview' : 'scene-panel'}>
       <h2>Scene</h2>
@@ -500,7 +773,7 @@ export function SceneViewPanel() {
           onPointerDown={handleCanvasPointerDown}
           onPointerMove={handleCanvasPointerMove}
           onPointerUp={handleCanvasPointerUp}
-          onPointerCancel={handleCanvasPointerCancel}
+          onPointerCancelCapture={handleCanvasPointerCancel}
         />
         {isRuntimePreview ? (
           <span aria-live="polite" className="scene-preview-badge" role="status">运行预览</span>
@@ -512,6 +785,18 @@ export function SceneViewPanel() {
           </div>
         ) : null}
       </div>
+      {modelArrayDialog ? (
+        <EntityArrayDialog
+          assetNumberedSourceCount={1}
+          directionLabel={modelArrayDialog.directionLabel}
+          onCancel={closeModelArrayDialog}
+          onChange={handleModelArrayDialogChange}
+          onConfirm={handleConfirmModelArrayDialog}
+          synchronizeModelIdentity
+          validationError={modelArrayDialogValidationError}
+          value={modelArrayDialog.value}
+        />
+      ) : null}
     </section>
   );
 }

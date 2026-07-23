@@ -5,7 +5,6 @@ import type {
   CadReferenceComponent,
   CadReferenceLayerStat,
 } from '../model/components';
-import type { Vector3Data } from '../model/math';
 import { createLegacyCadReferenceUnitInfo, resolveDxfUnitInfo } from './cadUnits';
 export { CAD_REFERENCE_FALLBACK_UNIT_SCALE_TO_METERS } from './cadUnits';
 
@@ -17,13 +16,24 @@ export const CAD_REFERENCE_MAX_INSERT_ARRAY_INSTANCES = 4_096;
 export const CAD_REFERENCE_MAX_ABSOLUTE_COORDINATE = 1e15;
 export const CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES = 64 * 1024 * 1024;
 export const CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET = {
-  maxPolylines: 200_000,
-  maxPoints: 800_000,
+  maxPolylines: 1_000_000,
+  maxPoints: 8_000_000,
 } as const satisfies CadReferenceGeometryBudget;
 
-const SUPPORTED_DXF_ENTITY_TYPES = new Set(['LINE', 'ARC', 'CIRCLE', 'LWPOLYLINE', 'POLYLINE']);
+const SUPPORTED_DXF_ENTITY_TYPES = new Set([
+  'LINE',
+  'ARC',
+  'CIRCLE',
+  'ELLIPSE',
+  'SPLINE',
+  'LWPOLYLINE',
+  'POLYLINE',
+]);
 const CAD_REFERENCE_ARC_SEGMENT_RADIANS = (5 / 180) * Math.PI;
 const CAD_REFERENCE_CIRCLE_SEGMENT_COUNT = 72;
+const CAD_REFERENCE_SPLINE_MIN_SEGMENT_COUNT = 8;
+const CAD_REFERENCE_SPLINE_MAX_SEGMENT_COUNT = 96;
+const CAD_REFERENCE_SPLINE_SEGMENTS_PER_CONTROL_POINT = 3;
 
 type CadReferencePoint2D = {
   x: number;
@@ -32,7 +42,8 @@ type CadReferencePoint2D = {
 
 export type CadReferenceGeometryLayer = {
   name: string;
-  polylines: Vector3Data[][];
+  positions: Float32Array;
+  polylinePointCounts: Uint32Array;
   entityCount: number;
   polylineCount: number;
   pointCount: number;
@@ -116,6 +127,24 @@ type DxfPolylineEntityRecord = DxfEntityRecord & {
   polyfaceMesh?: unknown;
 };
 
+type DxfEllipseEntityRecord = DxfEntityRecord & {
+  x?: unknown;
+  y?: unknown;
+  majorX?: unknown;
+  majorY?: unknown;
+  axisRatio?: unknown;
+  startAngle?: unknown;
+  endAngle?: unknown;
+};
+
+type DxfSplineEntityRecord = DxfEntityRecord & {
+  controlPoints?: unknown;
+  knots?: unknown;
+  weights?: unknown;
+  degree?: unknown;
+  closed?: unknown;
+};
+
 type DxfVertexRecord = {
   x?: unknown;
   y?: unknown;
@@ -123,7 +152,8 @@ type DxfVertexRecord = {
 };
 
 type CadRawLayer = {
-  polylines: CadReferencePoint2D[][];
+  coordinates: number[];
+  polylinePointCounts: number[];
   entityCount: number;
   polylineCount: number;
   pointCount: number;
@@ -188,7 +218,7 @@ export function convertParsedCadReferenceDxf(parsed: ParsedDXF, options: CadRefe
 
     const layerName = traversal.layerOverride ?? readDxfEntityLayerName(entity);
     const layer = readOrCreateRawLayer(rawLayerMap, layerName);
-    layer.polylines.push(points);
+    layer.polylinePointCounts.push(points.length);
     layer.entityCount += 1;
     layer.polylineCount += 1;
     layer.pointCount += points.length;
@@ -197,6 +227,7 @@ export function convertParsedCadReferenceDxf(parsed: ParsedDXF, options: CadRefe
     pointCount += points.length;
 
     for (const point of points) {
+      layer.coordinates.push(point.x, point.y);
       originalBounds = expandBounds2D(originalBounds, point);
     }
   }, () => {
@@ -213,28 +244,26 @@ export function convertParsedCadReferenceDxf(parsed: ParsedDXF, options: CadRefe
     y: (resolvedOriginalBounds.minY + resolvedOriginalBounds.maxY) / 2,
   };
   const layers: CadReferenceGeometryLayer[] = [];
-  let transformedBounds: CadReferenceBounds | null = null;
+  const transformedBounds = createCadReferenceBounds(resolvedOriginalBounds, unitScaleToMeters);
 
   for (const [layerName, rawLayer] of rawLayerMap.entries()) {
-    const polylines = rawLayer.polylines.map((polyline) =>
-      polyline.map((point) => {
-        const transformed = mapDxfPointToBabylon(point, originalCenter, unitScaleToMeters);
-        transformedBounds = expandCadReferenceBounds(transformedBounds, transformed);
-        return transformed;
-      }),
-    );
+    const positions = new Float32Array(rawLayer.pointCount * 3);
+    let positionOffset = 0;
+    for (let coordinateOffset = 0; coordinateOffset < rawLayer.coordinates.length; coordinateOffset += 2) {
+      positions[positionOffset] = (rawLayer.coordinates[coordinateOffset] - originalCenter.x) * unitScaleToMeters;
+      positions[positionOffset + 1] = CAD_REFERENCE_GRID_Y_OFFSET_METERS;
+      positions[positionOffset + 2] = (rawLayer.coordinates[coordinateOffset + 1] - originalCenter.y) * unitScaleToMeters;
+      positionOffset += 3;
+    }
 
     layers.push({
       name: layerName,
-      polylines,
+      positions,
+      polylinePointCounts: Uint32Array.from(rawLayer.polylinePointCounts),
       entityCount: rawLayer.entityCount,
       polylineCount: rawLayer.polylineCount,
       pointCount: rawLayer.pointCount,
     });
-  }
-
-  if (!transformedBounds) {
-    throw new Error('CAD 图纸转换后没有可显示点。');
   }
 
   const layerStats = layers.map(({ name, entityCount, polylineCount: layerPolylineCount, pointCount: layerPointCount }) => ({
@@ -502,7 +531,8 @@ function readOrCreateRawLayer(rawLayerMap: Map<string, CadRawLayer>, layerName: 
   if (existing) return existing;
 
   const created: CadRawLayer = {
-    polylines: [],
+    coordinates: [],
+    polylinePointCounts: [],
     entityCount: 0,
     polylineCount: 0,
     pointCount: 0,
@@ -520,6 +550,10 @@ function convertDxfEntityToPolyline(entity: DxfEntityRecord, blockBasePoint: Cad
       return convertDxfArcToPolyline(entity as DxfPositionalEntityRecord, blockBasePoint);
     case 'CIRCLE':
       return convertDxfCircleToPolyline(entity as DxfPositionalEntityRecord, blockBasePoint);
+    case 'ELLIPSE':
+      return convertDxfEllipseToPolyline(entity as DxfEllipseEntityRecord, blockBasePoint);
+    case 'SPLINE':
+      return convertDxfSplineToPolyline(entity as DxfSplineEntityRecord, blockBasePoint);
     case 'LWPOLYLINE':
     case 'POLYLINE':
       return convertDxfPolylineToPolyline(entity as DxfPolylineEntityRecord, blockBasePoint);
@@ -578,6 +612,132 @@ function convertDxfCircleToPolyline(entity: DxfPositionalEntityRecord, blockBase
   }
 
   return applyEntityExtrusion(points, entity);
+}
+
+/** 将 ELLIPSE 按长轴向量和轴比采样为折线。 */
+function convertDxfEllipseToPolyline(entity: DxfEllipseEntityRecord, blockBasePoint: CadReferencePoint2D): CadReferencePoint2D[] {
+  const center = readPositionalCenter(entity, blockBasePoint);
+  const majorX = readFiniteNumber(entity.majorX, Number.NaN);
+  const majorY = readFiniteNumber(entity.majorY, Number.NaN);
+  const axisRatio = Math.abs(readFiniteNumber(entity.axisRatio, 0));
+  const radiusX = Math.hypot(majorX, majorY);
+  const radiusY = radiusX * axisRatio;
+  const startAngle = readFiniteNumber(entity.startAngle, 0);
+  let endAngle = readFiniteNumber(entity.endAngle, Math.PI * 2);
+  if (!center || !Number.isFinite(radiusX) || radiusX <= 0 || radiusY <= 0) return [];
+
+  while (endAngle < startAngle) endAngle += Math.PI * 2;
+  const sweep = endAngle - startAngle;
+  const segments = Math.max(1, Math.ceil(Math.abs(sweep) / CAD_REFERENCE_ARC_SEGMENT_RADIANS));
+  const rotation = Math.atan2(majorY, majorX);
+  const cosRotation = Math.cos(rotation);
+  const sinRotation = Math.sin(rotation);
+  const points: CadReferencePoint2D[] = [];
+
+  for (let index = 0; index <= segments; index += 1) {
+    const angle = startAngle + (sweep * index) / segments;
+    const localX = Math.cos(angle) * radiusX;
+    const localY = Math.sin(angle) * radiusY;
+    points.push({
+      x: center.x + localX * cosRotation - localY * sinRotation,
+      y: center.y + localX * sinRotation + localY * cosRotation,
+    });
+  }
+
+  return applyEntityExtrusion(points, entity);
+}
+
+/** 将 SPLINE 通过有界 de Boor 采样转换为折线，避免复杂曲线造成无界点数。 */
+function convertDxfSplineToPolyline(entity: DxfSplineEntityRecord, blockBasePoint: CadReferencePoint2D): CadReferencePoint2D[] {
+  if (!Array.isArray(entity.controlPoints)) return [];
+
+  const controlPoints = entity.controlPoints
+    .filter(isRecord)
+    .map((point) => readPoint2D(point, blockBasePoint))
+    .filter((point): point is CadReferencePoint2D => Boolean(point));
+  if (controlPoints.length < 2) return [];
+
+  const degree = Math.max(1, Math.floor(readFiniteNumber(entity.degree, 1)));
+  const knots = Array.isArray(entity.knots)
+    ? entity.knots.map((value) => readFiniteNumber(value, Number.NaN)).filter(Number.isFinite)
+    : [];
+  const weights = Array.isArray(entity.weights)
+    ? entity.weights.map((value) => readFiniteNumber(value, 1))
+    : undefined;
+  if (degree >= controlPoints.length || knots.length < controlPoints.length + degree + 1) {
+    return applyEntityExtrusion(controlPoints, entity);
+  }
+
+  const start = knots[degree];
+  const end = knots[knots.length - degree - 1];
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return applyEntityExtrusion(controlPoints, entity);
+  }
+
+  const segmentCount = Math.min(
+    CAD_REFERENCE_SPLINE_MAX_SEGMENT_COUNT,
+    Math.max(CAD_REFERENCE_SPLINE_MIN_SEGMENT_COUNT, (controlPoints.length - 1) * CAD_REFERENCE_SPLINE_SEGMENTS_PER_CONTROL_POINT),
+  );
+  const points: CadReferencePoint2D[] = [];
+  for (let index = 0; index <= segmentCount; index += 1) {
+    const parameter = index === segmentCount ? end : start + ((end - start) * index) / segmentCount;
+    const point = evaluateDxfSplinePoint(controlPoints, degree, knots, weights, parameter);
+    if (point && isFinitePoint2D(point)) points.push(point);
+  }
+
+  if (entity.closed && points.length > 1) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    if (first.x !== last.x || first.y !== last.y) points.push({ ...first });
+  }
+
+  return applyEntityExtrusion(points, entity);
+}
+
+/** 使用齐次坐标 de Boor 算法计算一个有理/非有理 B-Spline 点。 */
+function evaluateDxfSplinePoint(
+  controlPoints: CadReferencePoint2D[],
+  degree: number,
+  knots: number[],
+  weights: number[] | undefined,
+  parameter: number,
+): CadReferencePoint2D | null {
+  const lastControlPointIndex = controlPoints.length - 1;
+  let span = lastControlPointIndex;
+  if (parameter < knots[knots.length - degree - 1]) {
+    span = degree;
+    while (span < lastControlPointIndex && !(parameter >= knots[span] && parameter < knots[span + 1])) {
+      span += 1;
+    }
+  }
+
+  const values: Array<{ x: number; y: number; weight: number }> = [];
+  for (let index = 0; index <= degree; index += 1) {
+    const controlPointIndex = span - degree + index;
+    const controlPoint = controlPoints[controlPointIndex];
+    if (!controlPoint) return null;
+    const weight = Math.max(Number.EPSILON, readFiniteNumber(weights?.[controlPointIndex], 1));
+    values.push({ x: controlPoint.x * weight, y: controlPoint.y * weight, weight });
+  }
+
+  for (let level = 1; level <= degree; level += 1) {
+    for (let index = degree; index >= level; index -= 1) {
+      const knotIndex = span - degree + index;
+      const denominator = knots[knotIndex + degree - level + 1] - knots[knotIndex];
+      const alpha = denominator === 0 ? 0 : (parameter - knots[knotIndex]) / denominator;
+      const previous = values[index - 1];
+      const current = values[index];
+      values[index] = {
+        x: previous.x + (current.x - previous.x) * alpha,
+        y: previous.y + (current.y - previous.y) * alpha,
+        weight: previous.weight + (current.weight - previous.weight) * alpha,
+      };
+    }
+  }
+
+  const result = values[degree];
+  if (!result || !Number.isFinite(result.weight) || Math.abs(result.weight) <= Number.EPSILON) return null;
+  return { x: result.x / result.weight, y: result.y / result.weight };
 }
 
 /** 将 LWPOLYLINE/POLYLINE 转为折线，并支持 bulge 圆弧段。 */
@@ -752,16 +912,15 @@ function transformCadPoint(point: CadReferencePoint2D, transforms: DxfTransform[
   return { x, y };
 }
 
-/** 将 DXF 平面坐标映射到 Babylon 米制地面坐标。 */
-function mapDxfPointToBabylon(
-  point: CadReferencePoint2D,
-  center: CadReferencePoint2D,
-  unitScaleToMeters: number,
-): Vector3Data {
+/** 根据原始二维包围盒创建与 DXF 同向的 Babylon 米制地面包围盒。 */
+function createCadReferenceBounds(bounds: Bounds2D, unitScaleToMeters: number): CadReferenceBounds {
+  const halfSizeX = ((bounds.maxX - bounds.minX) * unitScaleToMeters) / 2;
+  const halfSizeZ = ((bounds.maxY - bounds.minY) * unitScaleToMeters) / 2;
   return {
-    x: (point.x - center.x) * unitScaleToMeters,
-    y: CAD_REFERENCE_GRID_Y_OFFSET_METERS,
-    z: -(point.y - center.y) * unitScaleToMeters,
+    min: { x: -halfSizeX, y: CAD_REFERENCE_GRID_Y_OFFSET_METERS, z: -halfSizeZ },
+    max: { x: halfSizeX, y: CAD_REFERENCE_GRID_Y_OFFSET_METERS, z: halfSizeZ },
+    size: { x: halfSizeX * 2, y: 0, z: halfSizeZ * 2 },
+    center: { x: 0, y: CAD_REFERENCE_GRID_Y_OFFSET_METERS, z: 0 },
   };
 }
 
@@ -788,39 +947,6 @@ function expandBounds2D(bounds: Bounds2D | null, point: CadReferencePoint2D): Bo
     minY: Math.min(bounds.minY, point.y),
     maxX: Math.max(bounds.maxX, point.x),
     maxY: Math.max(bounds.maxY, point.y),
-  };
-}
-
-/** 扩展转换后的三维包围盒，并同步 size 与 center 便于 Inspector 展示。 */
-function expandCadReferenceBounds(bounds: CadReferenceBounds | null, point: Vector3Data): CadReferenceBounds {
-  const min = bounds
-    ? {
-        x: Math.min(bounds.min.x, point.x),
-        y: Math.min(bounds.min.y, point.y),
-        z: Math.min(bounds.min.z, point.z),
-      }
-    : { ...point };
-  const max = bounds
-    ? {
-        x: Math.max(bounds.max.x, point.x),
-        y: Math.max(bounds.max.y, point.y),
-        z: Math.max(bounds.max.z, point.z),
-      }
-    : { ...point };
-
-  return {
-    min,
-    max,
-    size: {
-      x: max.x - min.x,
-      y: max.y - min.y,
-      z: max.z - min.z,
-    },
-    center: {
-      x: (min.x + max.x) / 2,
-      y: (min.y + max.y) / 2,
-      z: (min.z + max.z) / 2,
-    },
   };
 }
 
