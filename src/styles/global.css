@@ -154,7 +154,8 @@ select {
   padding: 3px 8px;
 }
 
-.toolbar-icon-button {
+/* 提高特异度以压过 .toolbar button 的 padding，图标才能在 32px 按钮内真正居中。 */
+.toolbar .toolbar-icon-button {
   display: inline-grid;
   place-items: center;
   width: 32px;
