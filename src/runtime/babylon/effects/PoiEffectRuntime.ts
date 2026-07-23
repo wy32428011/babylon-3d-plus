@@ -126,6 +126,44 @@ export class PoiEffectRuntime {
     return visualMeshes.length > 0 ? [...visualMeshes, entry.pickMesh] : [entry.pickMesh];
   }
 
+  /**
+   * 返回 POI 阵列测量与轻量预览所需的稳定根节点和 Mesh。
+   * 有可见静态几何时只克隆静态几何；纯粒子效果改用范围代理，避免复制粒子系统。
+   */
+  getEntityArraySource(id: string | null): {
+    root: TransformNode;
+    geometryMeshes: readonly Mesh[];
+    previewMeshes: readonly Mesh[];
+  } | null {
+    if (!id) return null;
+    const entry = this.entries.get(id);
+    if (!entry) return null;
+
+    const visibleMeshes = entry.resources.meshes.filter((mesh) => (
+      !mesh.isDisposed()
+      && mesh.isVisible
+      && mesh.visibility > 0
+      && mesh.getTotalVertices() > 0
+    ));
+    const effectBoundsMeshes = entry.resources.meshes.filter((mesh) => {
+      const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
+      return !mesh.isDisposed()
+        && mesh.isVisible
+        && metadata?.effectBoundsProxy === true
+        && mesh.getTotalVertices() > 0;
+    });
+    const geometryMeshes = visibleMeshes.length > 0 || effectBoundsMeshes.length > 0
+      ? [...visibleMeshes, ...effectBoundsMeshes]
+      : [entry.pickMesh];
+    const previewMeshes = visibleMeshes.length > 0
+      ? visibleMeshes
+      : effectBoundsMeshes.length > 0
+        ? effectBoundsMeshes
+        : [entry.pickMesh];
+
+    return { root: entry.root, geometryMeshes, previewMeshes };
+  }
+
   /** 判断实体运行时资源是否存在。 */
   has(id: string): boolean {
     return this.entries.has(id);

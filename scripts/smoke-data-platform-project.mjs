@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -17,6 +18,83 @@ const GLOBAL_MODEL_ID = '2058110298388180993';
 const PLAIN_MODEL_ID = '2071961332827041794';
 const ENVIRONMENT_MODEL_ID = '2058110298000000001';
 const COMBO_MODEL_ID = '2058110298000000002';
+
+async function holdWindowsFileWithoutDeleteSharing(filePath) {
+  if (process.platform !== 'win32') {
+    return {
+      completion: Promise.resolve(),
+      release: () => undefined,
+    };
+  }
+
+  const powershellPath = path.join(
+    process.env.SystemRoot || 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
+  const escapedPath = filePath.replace(/'/g, "''");
+  const command = `$stream = [System.IO.File]::Open('${escapedPath}', [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read); try { [Console]::Out.WriteLine('LOCKED'); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null } finally { $stream.Dispose() }`;
+  const child = spawn(powershellPath, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  await new Promise((resolve, reject) => {
+    let stdout = '';
+    const timeout = setTimeout(() => {
+      cleanup();
+      child.kill();
+      reject(new Error(`等待 Windows 文件锁就绪超时：${filePath}`));
+    }, 5000);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      child.stdout.off('data', onData);
+      child.off('error', onError);
+      child.off('exit', onExit);
+    };
+    const onData = (chunk) => {
+      stdout += chunk;
+      if (!stdout.includes('LOCKED')) return;
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code) => {
+      cleanup();
+      reject(new Error(`Windows 文件锁进程提前退出（${code}）：${stderr.trim()}`));
+    };
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', onData);
+    child.once('error', onError);
+    child.once('exit', onExit);
+  });
+
+  let released = false;
+  return {
+    completion: new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Windows 文件锁进程失败（${code}）：${stderr.trim()}`));
+      });
+    }),
+    release: () => {
+      if (released) return;
+      released = true;
+      child.stdin.end('RELEASE\n');
+    },
+  };
+}
 
 function createMinimalGlb() {
   const jsonSource = JSON.stringify({ asset: { version: '2.0', generator: 'data-platform-smoke' }, scenes: [{ nodes: [] }], scene: 0 });
@@ -401,6 +479,9 @@ async function retryAndWaitForSync(window) {
       }, 20000);
       const unsubscribe = window.editorApi.onDataPlatformModelSyncProgress((progress) => {
         events.push(progress);
+        if (progress.phase === 'promoting' && typeof window.__releaseDataPlatformSmokeFileLock === 'function') {
+          void window.__releaseDataPlatformSmokeFileLock();
+        }
         if (progress.phase === 'completed' || progress.phase === 'failed') {
           window.clearTimeout(timeout);
           unsubscribe();
@@ -736,7 +817,26 @@ async function run() {
       '同步提示关闭后底部资源区未恢复紧凑高度',
     );
     assert.equal(await readFile(path.join(storageRoot, '.babylon-editor', 'asset-index.json'), 'utf8'), beforeRetryFailureIndex);
-    const retried = await retryAndWaitForSync(launched.window);
+    const lockedModelPath = path.join(
+      storageRoot,
+      'Assets',
+      'Models',
+      `Model-${GLOBAL_MODEL_ID}-全局普通模型`,
+      'global.glb',
+    );
+    await stat(lockedModelPath);
+    const modelFileLock = await holdWindowsFileWithoutDeleteSharing(lockedModelPath);
+    await launched.window.exposeFunction('__releaseDataPlatformSmokeFileLock', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      modelFileLock.release();
+    });
+    let retried;
+    try {
+      retried = await retryAndWaitForSync(launched.window);
+    } finally {
+      modelFileLock.release();
+      await modelFileLock.completion;
+    }
     assert.equal(retried.finalProgress.phase, 'completed', retried.finalProgress.error ?? retried.finalProgress.message);
 
     const oldPackage = await openAndWaitForSync(launched.window, '3');
@@ -804,6 +904,7 @@ async function run() {
         'max-four-concurrent-downloads',
         'progress-phases',
         'sync-failure-preserves-old-library-and-retry',
+        'windows-transient-model-directory-lock-retry',
         'zip-slip-rejection',
         'symlink-rejection',
         'corrupt-and-http-failure-preserve-index',

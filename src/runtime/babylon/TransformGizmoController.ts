@@ -24,14 +24,14 @@ import type { TransformSnapSettings, TransformSpace, TransformTool } from '../..
 
 export type TransformGizmoAxis = 'x' | 'y' | 'z';
 
-export type ModelArrayDragContext = {
+export type EntityArrayDragContext = {
   entityId: string;
   axis: TransformGizmoAxis;
   space: TransformSpace;
   positiveDirection: Vector3Data;
 };
 
-export type ModelArrayDragUpdate = ModelArrayDragContext & {
+export type EntityArrayDragUpdate = EntityArrayDragContext & {
   direction: Vector3Data;
   copyCount: number;
   spanMeters: number;
@@ -40,10 +40,10 @@ export type ModelArrayDragUpdate = ModelArrayDragContext & {
 type DragCallbacks = {
   previewTransform: (entityId: string, transform: TransformComponent) => void;
   commitTransform: (entityId: string, before: TransformComponent, after: TransformComponent) => void;
-  beginModelArrayDrag: (context: ModelArrayDragContext) => { spanMeters: number } | null;
-  previewModelArrayDrag: (update: ModelArrayDragUpdate) => void;
-  completeModelArrayDrag: (update: ModelArrayDragUpdate) => void;
-  cancelModelArrayDrag: () => void;
+  beginEntityArrayDrag: (context: EntityArrayDragContext) => { spanMeters: number } | null;
+  previewEntityArrayDrag: (update: EntityArrayDragUpdate) => void;
+  completeEntityArrayDrag: (update: EntityArrayDragUpdate) => void;
+  cancelEntityArrayDrag: () => void;
 };
 
 type DragObservableGroup = {
@@ -59,8 +59,8 @@ type DragObserverBinding = {
 type GizmoTarget = AbstractMesh | TransformNode;
 type PositionAxisGizmo = IPositionGizmo['xGizmo'];
 
-type ModelArrayDragSession = {
-  context: ModelArrayDragContext;
+type EntityArrayDragSession = {
+  context: EntityArrayDragContext;
   sourceTarget: GizmoTarget;
   proxyTarget: TransformNode;
   startPosition: Vector3;
@@ -111,7 +111,7 @@ export class TransformGizmoController {
   private attachedEntityId: string | null = null;
   private dragStartTransform: TransformComponent | null = null;
   private activeTransformDrag = false;
-  private modelArrayDragSession: ModelArrayDragSession | null = null;
+  private entityArrayDragSession: EntityArrayDragSession | null = null;
   private currentTool: TransformTool = 'translate';
   private transformSpace: TransformSpace = 'local';
   private positionSnapDistance = 0;
@@ -158,7 +158,7 @@ export class TransformGizmoController {
     const scaleStep = settings.enabled ? settings.scale : 0;
     this.positionSnapDistance = positionStep;
 
-    if (positionGizmo && !this.modelArrayDragSession) positionGizmo.snapDistance = positionStep;
+    if (positionGizmo && !this.entityArrayDragSession) positionGizmo.snapDistance = positionStep;
     if (rotationGizmo) rotationGizmo.snapDistance = rotationStep;
     if (scaleGizmo) {
       scaleGizmo.snapDistance = scaleStep;
@@ -188,8 +188,8 @@ export class TransformGizmoController {
 
   /** 取消当前 Gizmo 指针会话；普通 Transform 回滚，Shift 阵列只清理代理和临时预览。 */
   cancelActiveDrag(): void {
-    if (this.modelArrayDragSession) {
-      this.cancelActiveModelArrayDrag();
+    if (this.entityArrayDragSession) {
+      this.cancelActiveEntityArrayDrag();
       return;
     }
 
@@ -197,14 +197,14 @@ export class TransformGizmoController {
   }
 
   /** 主动取消尚未结束的 Shift 阵列拖拽，不打开参数弹框。 */
-  cancelActiveModelArrayDrag(): void {
-    const session = this.modelArrayDragSession;
+  cancelActiveEntityArrayDrag(): void {
+    const session = this.entityArrayDragSession;
     if (!session) return;
 
-    this.modelArrayDragSession = null;
+    this.entityArrayDragSession = null;
     this.gizmoManager.gizmos.positionGizmo?.releaseDrag();
-    this.restoreSourceAfterModelArrayDrag(session);
-    this.callbacks.cancelModelArrayDrag();
+    this.restoreSourceAfterEntityArrayDrag(session);
+    this.callbacks.cancelEntityArrayDrag();
     this.blockCanvasSelectionBriefly();
   }
 
@@ -229,7 +229,7 @@ export class TransformGizmoController {
 
   /** 拖拽结束时提交一条完整 Transform 命令。 */
   commitActiveDrag(): void {
-    if (this.modelArrayDragSession || !this.activeTransformDrag) return;
+    if (this.entityArrayDragSession || !this.activeTransformDrag) return;
     this.activeTransformDrag = false;
     if (!this.attachedTarget || !this.attachedEntityId || !this.dragStartTransform) return;
 
@@ -289,18 +289,18 @@ export class TransformGizmoController {
         return;
       }
 
-      this.beginModelArrayDrag(axis, event);
+      this.beginEntityArrayDrag(axis, event);
     });
     this.addDragObserver(observables.onDragObservable, (event) => {
-      if (this.modelArrayDragSession) {
-        this.previewActiveModelArrayDrag(event);
+      if (this.entityArrayDragSession) {
+        this.previewActiveEntityArrayDrag(event);
         return;
       }
       this.previewAttachedTransform();
     });
     this.addDragObserver(observables.onDragEndObservable, () => {
-      if (this.modelArrayDragSession) {
-        this.completeActiveModelArrayDrag();
+      if (this.entityArrayDragSession) {
+        this.completeActiveEntityArrayDrag();
         return;
       }
       this.commitActiveDrag();
@@ -323,7 +323,7 @@ export class TransformGizmoController {
   }
 
   /** 初始化 Shift 阵列会话，并在第一帧移动前把 Gizmo 改绑到代理节点。 */
-  private beginModelArrayDrag(axis: TransformGizmoAxis, event: DragStartEndEvent): void {
+  private beginEntityArrayDrag(axis: TransformGizmoAxis, event: DragStartEndEvent): void {
     if (!this.attachedTarget || !this.attachedEntityId) return;
 
     const positiveDirection = this.getWorldAxisDirection(this.attachedTarget, axis);
@@ -332,20 +332,20 @@ export class TransformGizmoController {
       return;
     }
 
-    const context: ModelArrayDragContext = {
+    const context: EntityArrayDragContext = {
       entityId: this.attachedEntityId,
       axis,
       space: this.transformSpace,
       positiveDirection: vector3Data(positiveDirection),
     };
-    const geometry = this.callbacks.beginModelArrayDrag(context);
+    const geometry = this.callbacks.beginEntityArrayDrag(context);
     if (!geometry || !Number.isFinite(geometry.spanMeters) || geometry.spanMeters <= MODEL_ARRAY_MIN_SPAN_METERS) {
       this.gizmoManager.gizmos.positionGizmo?.releaseDrag();
       return;
     }
 
-    const proxyTarget = this.createModelArrayProxy(this.attachedTarget);
-    this.modelArrayDragSession = {
+    const proxyTarget = this.createEntityArrayProxy(this.attachedTarget);
+    this.entityArrayDragSession = {
       context,
       sourceTarget: this.attachedTarget,
       proxyTarget,
@@ -367,8 +367,8 @@ export class TransformGizmoController {
   }
 
   /** 根据累计世界位移更新离散副本数量、代理位置和 Babylon 临时克隆。 */
-  private previewActiveModelArrayDrag(event: DragEvent): void {
-    const session = this.modelArrayDragSession;
+  private previewActiveEntityArrayDrag(event: DragEvent): void {
+    const session = this.entityArrayDragSession;
     if (!session) return;
 
     const projectedDelta = Vector3.Dot(event.delta, session.positiveDirection);
@@ -385,21 +385,21 @@ export class TransformGizmoController {
 
     if (signedCopyCount === session.signedCopyCount) return;
     session.signedCopyCount = signedCopyCount;
-    this.callbacks.previewModelArrayDrag(this.createModelArrayDragUpdate(session));
+    this.callbacks.previewEntityArrayDrag(this.createEntityArrayDragUpdate(session));
   }
 
   /** 鼠标松开后恢复源 Gizmo；有有效副本时交由 SceneView 打开参数弹框。 */
-  private completeActiveModelArrayDrag(): void {
-    const session = this.modelArrayDragSession;
+  private completeActiveEntityArrayDrag(): void {
+    const session = this.entityArrayDragSession;
     if (!session) return;
 
-    this.modelArrayDragSession = null;
-    const update = this.createModelArrayDragUpdate(session);
-    this.restoreSourceAfterModelArrayDrag(session);
+    this.entityArrayDragSession = null;
+    const update = this.createEntityArrayDragUpdate(session);
+    this.restoreSourceAfterEntityArrayDrag(session);
     this.blockCanvasSelectionBriefly();
 
-    if (update.copyCount > 0) this.callbacks.completeModelArrayDrag(update);
-    else this.callbacks.cancelModelArrayDrag();
+    if (update.copyCount > 0) this.callbacks.completeEntityArrayDrag(update);
+    else this.callbacks.cancelEntityArrayDrag();
   }
 
   /** 取消普通 Transform 拖动并恢复 before 快照，不写入命令历史。 */
@@ -431,8 +431,8 @@ export class TransformGizmoController {
     scaleGizmo?.releaseDrag();
   }
 
-  /** 将代理节点释放并把 Gizmo 恢复到原始模型根节点。 */
-  private restoreSourceAfterModelArrayDrag(session: ModelArrayDragSession): void {
+  /** 将代理节点释放并把 Gizmo 恢复到原始源实体根节点。 */
+  private restoreSourceAfterEntityArrayDrag(session: EntityArrayDragSession): void {
     const positionGizmo = this.gizmoManager.gizmos.positionGizmo;
     if (positionGizmo) positionGizmo.snapDistance = this.positionSnapDistance;
     this.attachGizmo(session.sourceTarget);
@@ -441,7 +441,7 @@ export class TransformGizmoController {
   }
 
   /** 从阵列会话生成带正负方向和绝对副本数量的回调数据。 */
-  private createModelArrayDragUpdate(session: ModelArrayDragSession): ModelArrayDragUpdate {
+  private createEntityArrayDragUpdate(session: EntityArrayDragSession): EntityArrayDragUpdate {
     const copyCount = Math.abs(session.signedCopyCount);
     const direction = session.signedCopyCount < 0
       ? negateVector3Data(session.context.positiveDirection)
@@ -455,9 +455,9 @@ export class TransformGizmoController {
     };
   }
 
-  /** 创建只承载 Gizmo 位姿的不可见代理，不挂接任何模型几何。 */
-  private createModelArrayProxy(source: GizmoTarget): TransformNode {
-    const proxy = new TransformNode('__modelArrayGizmoProxy', this.scene);
+  /** 创建只承载 Gizmo 位姿的不可见代理，不挂接任何实体几何。 */
+  private createEntityArrayProxy(source: GizmoTarget): TransformNode {
+    const proxy = new TransformNode('__entityArrayGizmoProxy', this.scene);
     proxy.position.copyFrom(source.position);
     proxy.rotation.copyFrom(source.rotation);
     proxy.scaling.copyFrom(source.scaling);
