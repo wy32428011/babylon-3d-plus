@@ -1,4 +1,4 @@
-import { app, ipcMain, net } from 'electron';
+import { app, dialog, ipcMain, net } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
@@ -8,12 +8,15 @@ import type {
   DataPlatformProjectListRequest,
   DataPlatformProjectListResult,
   DataPlatformProjectOpenResult,
+  DataPlatformWorkspaceSelectionResult,
   OpenDataPlatformProjectRequest,
   SaveDataPlatformConfigRequest,
 } from '../types.js';
 import {
   clearDataPlatformProjectServiceRetryContext,
+  ensureWritableEditorRoot,
   getCurrentDataPlatformModelSyncProgress,
+  getDataPlatformEditorRoot,
   openDataPlatformProject,
   retryLatestDataPlatformModelSync,
 } from './dataPlatformProjectService.js';
@@ -28,9 +31,20 @@ let registered = false;
 const trustedProjectsById = new Map<string, DataPlatformProjectEntry>();
 let trustedProjectsBaseUrl = '';
 
-type PersistedDataPlatformConfig = {
+type PersistedDataPlatformConfigV1 = {
   version: 1;
   baseUrl: string;
+};
+
+type PersistedDataPlatformConfigV2 = {
+  version: 2;
+  baseUrl: string;
+  workspaceRoot: string | null;
+};
+
+type StoredDataPlatformConfig = {
+  baseUrl: string;
+  customWorkspaceRoot: string | null;
 };
 
 /** 注册数据中台配置与项目列表 IPC，重复调用时保持幂等。 */
@@ -52,6 +66,17 @@ export function registerDataPlatformIpc(): void {
       return config;
     },
   );
+
+  ipcMain.handle(
+    'data-platform:selectWorkspace',
+    async (): Promise<DataPlatformWorkspaceSelectionResult> => selectDataPlatformWorkspace(),
+  );
+
+  ipcMain.handle('data-platform:resetWorkspace', async (): Promise<DataPlatformConfig> => {
+    const config = await resetDataPlatformWorkspace();
+    clearDataPlatformProjectServiceRetryContext();
+    return config;
+  });
 
   ipcMain.handle(
     'data-platform:listProjects',
@@ -84,7 +109,7 @@ export function registerDataPlatformIpc(): void {
       if (config.baseUrl !== trustedProjectsBaseUrl) {
         throw new Error('数据中台地址已变化，请刷新项目列表后再打开。');
       }
-      return openDataPlatformProject(project, config.baseUrl);
+      return openDataPlatformProject(project, config.baseUrl, config.workspaceRoot);
     },
   );
 
@@ -130,22 +155,36 @@ export function normalizeDataPlatformBaseUrl(value: unknown): string {
   return `${parsed.origin}${normalizedPath === '/' ? '' : normalizedPath}`;
 }
 
-/** 读取 userData 中持久化的数据中台配置。 */
-async function readDataPlatformConfig(): Promise<DataPlatformConfig> {
+/** 读取配置文件并兼容仅包含服务地址的 v1 格式。 */
+async function readStoredDataPlatformConfig(): Promise<StoredDataPlatformConfig> {
   try {
     const content = await fs.readFile(getDataPlatformConfigPath(), 'utf-8');
     const parsed = JSON.parse(content) as unknown;
 
-    if (!isPlainObject(parsed) || parsed.version !== 1) {
+    if (!isPlainObject(parsed)) {
       throw new Error('数据中台配置文件版本或结构不正确。');
     }
 
+    if (parsed.version === 1) {
+      const legacy = parsed as PersistedDataPlatformConfigV1;
+      return {
+        baseUrl: normalizeDataPlatformBaseUrl(legacy.baseUrl),
+        customWorkspaceRoot: null,
+      };
+    }
+
+    if (parsed.version !== 2) {
+      throw new Error('数据中台配置文件版本或结构不正确。');
+    }
+
+    const current = parsed as PersistedDataPlatformConfigV2;
     return {
-      baseUrl: normalizeDataPlatformBaseUrl(parsed.baseUrl),
+      baseUrl: normalizeDataPlatformBaseUrl(current.baseUrl),
+      customWorkspaceRoot: normalizePersistedWorkspaceRoot(current.workspaceRoot),
     };
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {
-      return { baseUrl: '' };
+      return { baseUrl: '', customWorkspaceRoot: null };
     }
 
     if (error instanceof SyntaxError) {
@@ -156,20 +195,78 @@ async function readDataPlatformConfig(): Promise<DataPlatformConfig> {
   }
 }
 
-/** 写入经过校验的数据中台配置。 */
-async function saveDataPlatformConfig(request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> {
-  const config: DataPlatformConfig = {
-    baseUrl: normalizeDataPlatformBaseUrl(request.baseUrl),
+/** 将内部配置转换为 renderer 可直接展示的有效工作区。 */
+function toDataPlatformConfig(stored: StoredDataPlatformConfig): DataPlatformConfig {
+  return {
+    baseUrl: stored.baseUrl,
+    workspaceRoot: getDataPlatformEditorRoot(stored.customWorkspaceRoot),
+    usesDefaultWorkspace: stored.customWorkspaceRoot === null,
   };
-  const persisted: PersistedDataPlatformConfig = {
-    version: 1,
-    baseUrl: config.baseUrl,
+}
+
+/** 读取 userData 中持久化的数据中台配置。 */
+async function readDataPlatformConfig(): Promise<DataPlatformConfig> {
+  return toDataPlatformConfig(await readStoredDataPlatformConfig());
+}
+
+/** 统一写入 v2 配置，避免修改服务地址时覆盖已经选择的工作区。 */
+async function writeStoredDataPlatformConfig(stored: StoredDataPlatformConfig): Promise<DataPlatformConfig> {
+  const persisted: PersistedDataPlatformConfigV2 = {
+    version: 2,
+    baseUrl: stored.baseUrl,
+    workspaceRoot: stored.customWorkspaceRoot,
   };
   const configPath = getDataPlatformConfigPath();
 
   await fs.mkdir(path.dirname(configPath), { recursive: true });
   await fs.writeFile(configPath, `${JSON.stringify(persisted, null, 2)}\n`, 'utf-8');
-  return config;
+  return toDataPlatformConfig(stored);
+}
+
+/** 写入经过校验的数据中台服务地址，并保留工作区配置。 */
+async function saveDataPlatformConfig(request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> {
+  const stored = await readStoredDataPlatformConfig();
+  return writeStoredDataPlatformConfig({
+    ...stored,
+    baseUrl: normalizeDataPlatformBaseUrl(request.baseUrl),
+  });
+}
+
+/** 由主进程选择并验证工作区，renderer 无法直接提交任意文件系统路径。 */
+async function selectDataPlatformWorkspace(): Promise<DataPlatformWorkspaceSelectionResult> {
+  const stored = await readStoredDataPlatformConfig();
+  const currentConfig = toDataPlatformConfig(stored);
+  const result = await dialog.showOpenDialog({
+    title: '选择数据中台工作区',
+    defaultPath: currentConfig.workspaceRoot,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  const [selectedPath] = result.filePaths;
+
+  if (result.canceled || !selectedPath) {
+    return { canceled: true, config: currentConfig };
+  }
+
+  const workspaceRoot = path.resolve(selectedPath);
+  await ensureWritableEditorRoot(workspaceRoot);
+
+  const config = await writeStoredDataPlatformConfig({
+    ...stored,
+    customWorkspaceRoot: workspaceRoot,
+  });
+  clearDataPlatformProjectServiceRetryContext();
+  return { canceled: false, config };
+}
+
+/** 清除自定义路径并恢复当前运行环境的默认工作区。 */
+async function resetDataPlatformWorkspace(): Promise<DataPlatformConfig> {
+  const stored = await readStoredDataPlatformConfig();
+  const defaultWorkspaceRoot = getDataPlatformEditorRoot(null);
+  await ensureWritableEditorRoot(defaultWorkspaceRoot);
+  return writeStoredDataPlatformConfig({
+    ...stored,
+    customWorkspaceRoot: null,
+  });
 }
 
 /** 通过 Electron 网络栈查询数据中台业务项目列表。 */
@@ -332,6 +429,14 @@ function validateProjectListRequest(value: unknown): DataPlatformProjectListRequ
 
 function getDataPlatformConfigPath(): string {
   return path.join(app.getPath('userData'), DATA_PLATFORM_CONFIG_FILE);
+}
+
+function normalizePersistedWorkspaceRoot(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string' || !value.trim() || !path.isAbsolute(value.trim())) {
+    throw new Error('数据中台配置中的工作区路径无效。');
+  }
+  return path.normalize(value.trim());
 }
 
 function readResponseMessage(responseText: string): string {

@@ -3,8 +3,17 @@ import type { ModelAssetComponent } from './components';
 import type { SceneDocument } from './SceneDocument';
 
 const EDIT_MODE_THIN_INSTANCE_MODEL_FILES_BY_SCRIPT = new Map<string, ReadonlySet<string>>([
+  ['box.model.ts', new Set(['box.glb', 'box.gltf'])],
   ['chain-conveyor.model.ts', new Set(['链条机.glb', '链条机.gltf'])],
+  ['gd-motor-optimized.model.ts', new Set([
+    'gd_有电机_optimized(1).glb',
+    'gd_有电机_optimized(1).gltf',
+    'gd_有电机_optimized.glb',
+    'gd_有电机_optimized.gltf',
+  ])],
+  ['hcts.model.ts', new Set(['hcts.glb', 'hcts.gltf'])],
   ['shelf.model.ts', new Set(['shelf.glb', 'shelf.gltf'])],
+  ['wlts.model.ts', new Set(['wlts.glb', 'wlts.gltf'])],
   ['yzj.model.ts', new Set(['yzj.glb', 'yzj.gltf'])],
 ]);
 
@@ -38,13 +47,13 @@ export function resolveEditModeModelThinInstanceReason(
 
 /**
  * 为 Scene View 构造只存在于内存中的编辑态实体覆盖层。
- * 原 SceneDocument 不会被修改或保存；重复模型只临时追加 modelArrayInstance，直接复用现有 thinInstance 运行时。
+ * 原 SceneDocument 不会被修改或保存；重复模型临时追加 modelArrayInstance，已有多阵列源也会改指向统一渲染源。
  */
 export function createEditModeModelThinInstancePlan(
   scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
   previousPlan?: EditModeModelThinInstancePlan,
 ): EditModeModelThinInstancePlan {
-  const protectedSourceIds = collectProtectedModelArraySourceIds(scene);
+  const referencedSourceIds = collectReferencedModelArraySourceIds(scene);
   const groups = new Map<string, Entity[]>();
 
   for (const entityId of scene.entityIds) {
@@ -75,11 +84,13 @@ export function createEditModeModelThinInstancePlan(
   for (const group of groups.values()) {
     if (group.length < 2) continue;
 
-    const source = chooseGroupSource(scene.entities, group, protectedSourceIds);
+    const source = chooseGroupSource(scene.entities, group, referencedSourceIds);
     let convertedInGroup = 0;
 
     for (const entity of group) {
-      if (entity.id === source.id || protectedSourceIds.has(entity.id)) continue;
+      // 反序列化通常会先迁移旧 modelArray.items；若调用方仍传入旧内存结构，
+      // 必须保留该真实源，否则挂在源上的隐藏阵列项会随源降级而丢失。
+      if (entity.id === source.id || entity.components.modelArray) continue;
       sourceEntityIdByEntityId.set(entity.id, source.id);
       convertedInGroup += 1;
     }
@@ -90,8 +101,13 @@ export function createEditModeModelThinInstancePlan(
     sourceEntityIds.push(source.id);
   }
 
+  const desiredSourceEntityIdByEntityId = collectRemappedModelArraySources(
+    scene,
+    sourceEntityIdByEntityId,
+  );
+
   return {
-    entities: materializeThinInstanceEntities(scene, sourceEntityIdByEntityId, previousPlan),
+    entities: materializeThinInstanceEntities(scene, desiredSourceEntityIdByEntityId, previousPlan),
     groupCount,
     sourceEntityIds,
     thinInstanceEntityCount,
@@ -100,7 +116,7 @@ export function createEditModeModelThinInstancePlan(
 
 /**
  * 在上一次覆盖层上只替换真正变化的实体。
- * Gizmo 每帧通常只产生一个新实体对象，因此无需重新复制 1817 个稳定派生实体。
+ * Gizmo 每帧通常只产生一个新实体对象，因此无需重新复制大批稳定派生实体。
  */
 function materializeThinInstanceEntities(
   scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
@@ -145,8 +161,8 @@ function materializeThinInstanceEntities(
   return entities;
 }
 
-/** 已有持久化阵列的源模型不能被降级为另一组的逻辑实例，否则其原有实例会失去直接源。 */
-function collectProtectedModelArraySourceIds(
+/** 收集已有阵列源；同模板分组时优先选择其中一个，减少重映射并保持源选择稳定。 */
+function collectReferencedModelArraySourceIds(
   scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
 ): Set<string> {
   const sourceIds = new Set<string>();
@@ -159,14 +175,36 @@ function collectProtectedModelArraySourceIds(
   return sourceIds;
 }
 
+/**
+ * 把被合并阵列源的已有实例临时改指向统一源。
+ * 仅修改编辑态派生实体，保存场景和运行预览继续使用原始 sourceEntityId。
+ */
+function collectRemappedModelArraySources(
+  scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
+  sourceEntityIdByEntityId: ReadonlyMap<string, string>,
+): Map<string, string> {
+  const desiredSourceEntityIdByEntityId = new Map(sourceEntityIdByEntityId);
+
+  for (const entityId of scene.entityIds) {
+    const currentSourceEntityId = scene.entities[entityId]?.components.modelArrayInstance?.sourceEntityId;
+    if (!currentSourceEntityId) continue;
+    const remappedSourceEntityId = sourceEntityIdByEntityId.get(currentSourceEntityId);
+    if (remappedSourceEntityId && remappedSourceEntityId !== currentSourceEntityId) {
+      desiredSourceEntityIdByEntityId.set(entityId, remappedSourceEntityId);
+    }
+  }
+
+  return desiredSourceEntityIdByEntityId;
+}
+
 /** 优先选择已有阵列源，其次选择当前有效可见实体，避免隐藏源节点连带关闭整个批次。 */
 function chooseGroupSource(
   entities: SceneDocument['entities'],
   group: readonly Entity[],
-  protectedSourceIds: ReadonlySet<string>,
+  referencedSourceIds: ReadonlySet<string>,
 ): Entity {
-  const protectedSources = group.filter((entity) => protectedSourceIds.has(entity.id));
-  const candidates = protectedSources.length > 0 ? protectedSources : group;
+  const referencedSources = group.filter((entity) => referencedSourceIds.has(entity.id));
+  const candidates = referencedSources.length > 0 ? referencedSources : group;
   return candidates.find((entity) => isEffectivelyVisible(entities, entity)) ?? candidates[0];
 }
 
@@ -190,6 +228,8 @@ function getCachedModelAssetGroupKey(modelAsset: ModelAssetComponent): string | 
 
 /** 同一个不可变实体和源 ID 始终返回同一个派生对象，保持 SceneRuntime 增量同步命中。 */
 function getOrCreateThinInstanceEntity(entity: Entity, sourceEntityId: string): Entity {
+  if (entity.components.modelArrayInstance?.sourceEntityId === sourceEntityId) return entity;
+
   const cachedBySource = thinInstanceEntityCache.get(entity) ?? new Map<string, Entity>();
   const cached = cachedBySource.get(sourceEntityId);
   if (cached) return cached;

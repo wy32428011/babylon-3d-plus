@@ -38,6 +38,8 @@ const EMPTY_RECENT_WORKSPACES: RecentWorkspacesResult = {
 
 const EMPTY_DATA_PLATFORM_CONFIG: DataPlatformConfig = {
   baseUrl: '',
+  workspaceRoot: '',
+  usesDefaultWorkspace: true,
 };
 
 /** 格式化最近更新时间，缺失时显示占位，失败时保留原始字符串便于排查。 */
@@ -131,6 +133,8 @@ export function HomePage({
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [status, setStatus] = useState<HomeStatus | null>(null);
   const isOpeningDataPlatformProject = busyActionId?.startsWith('data-platform-project:') ?? false;
+  const isChangingDataPlatformWorkspace = busyActionId === 'select-data-platform-workspace'
+    || busyActionId === 'reset-data-platform-workspace';
 
   useEffect(() => {
     let isMounted = true;
@@ -233,6 +237,57 @@ export function HomePage({
     } catch (error) {
       const message = getHomeErrorMessage(error);
       setStatus({ kind: 'error', message: `打开项目目录失败：${message}` });
+    } finally {
+      setBusyActionId(null);
+    }
+  }
+
+  /** 由主进程选择并持久化数据中台工作区，取消时保留当前路径。 */
+  async function handleSelectDataPlatformWorkspace(): Promise<void> {
+    if (!window.editorApi?.selectDataPlatformWorkspace) {
+      setStatus({ kind: 'error', message: '修改数据中台工作区需要 Electron 桌面环境。' });
+      return;
+    }
+
+    setBusyActionId('select-data-platform-workspace');
+    setStatus({ kind: 'info', message: '正在选择数据中台工作区...' });
+
+    try {
+      const result = await window.editorApi.selectDataPlatformWorkspace();
+      if (result.canceled) {
+        setStatus({ kind: 'info', message: '已取消修改数据中台工作区。' });
+        return;
+      }
+
+      setDataPlatformConfig(result.config);
+      setConfigDraft(result.config.baseUrl);
+      setStatus({ kind: 'info', message: `数据中台工作区已修改：${result.config.workspaceRoot}` });
+    } catch (error) {
+      const message = getHomeErrorMessage(error);
+      setStatus({ kind: 'error', message: `修改数据中台工作区失败：${message}` });
+    } finally {
+      setBusyActionId(null);
+    }
+  }
+
+  /** 清除自定义路径并恢复当前运行环境的默认数据中台工作区。 */
+  async function handleResetDataPlatformWorkspace(): Promise<void> {
+    if (!window.editorApi?.resetDataPlatformWorkspace) {
+      setStatus({ kind: 'error', message: '恢复默认数据中台工作区需要 Electron 桌面环境。' });
+      return;
+    }
+
+    setBusyActionId('reset-data-platform-workspace');
+    setStatus({ kind: 'info', message: '正在恢复默认数据中台工作区...' });
+
+    try {
+      const config = await window.editorApi.resetDataPlatformWorkspace();
+      setDataPlatformConfig(config);
+      setConfigDraft(config.baseUrl);
+      setStatus({ kind: 'info', message: `已恢复默认数据中台工作区：${config.workspaceRoot}` });
+    } catch (error) {
+      const message = getHomeErrorMessage(error);
+      setStatus({ kind: 'error', message: `恢复默认数据中台工作区失败：${message}` });
     } finally {
       setBusyActionId(null);
     }
@@ -349,7 +404,7 @@ export function HomePage({
 
   /** 打开数据中台项目；已有场景文件时加载场景，否则进入项目编辑器并等待模型同步。 */
   async function handleOpenDataPlatformProject(project: DataPlatformProjectEntry): Promise<void> {
-    if (isOpeningDataPlatformProject) return;
+    if (isOpeningDataPlatformProject || isChangingDataPlatformWorkspace) return;
 
     const actionId = `data-platform-project:${project.id}`;
     setBusyActionId(actionId);
@@ -480,6 +535,45 @@ export function HomePage({
         </div>
       </header>
 
+      <section className="home-workspace-bar" aria-label="数据中台工作区">
+        <div className="home-workspace-summary">
+          <div className="home-workspace-heading">
+            <strong>数据中台工作区</strong>
+            <span className={dataPlatformConfig.usesDefaultWorkspace ? 'home-workspace-badge' : 'home-workspace-badge home-workspace-badge-custom'}>
+              {dataPlatformConfig.usesDefaultWorkspace ? '默认' : '自定义'}
+            </span>
+          </div>
+          <span
+            className="home-workspace-path"
+            title={dataPlatformConfig.workspaceRoot || undefined}
+          >
+            {isLoadingDataPlatformConfig ? '正在读取工作区...' : dataPlatformConfig.workspaceRoot || '工作区不可用'}
+          </span>
+          <small>修改仅影响后续打开和同步的数据中台项目，不会迁移或删除旧工作区内容。</small>
+        </div>
+        <div className="home-workspace-actions">
+          <button
+            disabled={isLoadingDataPlatformConfig || isOpeningDataPlatformProject || isChangingDataPlatformWorkspace}
+            onClick={() => void handleSelectDataPlatformWorkspace()}
+            type="button"
+          >
+            {busyActionId === 'select-data-platform-workspace' ? '选择中...' : '修改'}
+          </button>
+          <button
+            disabled={
+              isLoadingDataPlatformConfig
+              || dataPlatformConfig.usesDefaultWorkspace
+              || isOpeningDataPlatformProject
+              || isChangingDataPlatformWorkspace
+            }
+            onClick={() => void handleResetDataPlatformWorkspace()}
+            type="button"
+          >
+            {busyActionId === 'reset-data-platform-workspace' ? '恢复中...' : '恢复默认'}
+          </button>
+        </div>
+      </section>
+
       <section className="home-content">
         <section className="home-panel home-recent-panel home-data-platform-panel" aria-label="数据中台最近项目">
           <div className="home-panel-header">
@@ -601,7 +695,7 @@ export function HomePage({
                   </dl>
                   <div className="home-recent-actions">
                     <button
-                      disabled={isOpeningDataPlatformProject}
+                      disabled={isOpeningDataPlatformProject || isChangingDataPlatformWorkspace}
                       onClick={() => void handleOpenDataPlatformProject(project)}
                       type="button"
                     >

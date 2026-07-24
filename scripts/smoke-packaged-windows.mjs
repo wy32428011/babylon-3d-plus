@@ -193,12 +193,18 @@ function inspectRenderer(webSocketDebuggerUrl, dataPlatformBaseUrl) {
                 mqttConfigureAvailable: typeof api?.mqttConfigure === 'function',
                 getDataPlatformConfigAvailable: typeof api?.getDataPlatformConfig === 'function',
                 saveDataPlatformConfigAvailable: typeof api?.saveDataPlatformConfig === 'function',
+                selectDataPlatformWorkspaceAvailable: typeof api?.selectDataPlatformWorkspace === 'function',
+                resetDataPlatformWorkspaceAvailable: typeof api?.resetDataPlatformWorkspace === 'function',
                 listDataPlatformProjectsAvailable: typeof api?.listDataPlatformProjects === 'function',
                 openDataPlatformProjectAvailable: typeof api?.openDataPlatformProject === 'function',
                 retryDataPlatformModelSyncAvailable: typeof api?.retryDataPlatformModelSync === 'function',
                 dataPlatformModelSyncListenerAvailable: typeof api?.onDataPlatformModelSyncProgress === 'function',
                 dataPlatformModelSyncListenerRoundTripAvailable: false,
                 dataPlatformConfigRoundTripAvailable: false,
+                dataPlatformWorkspaceRoot: null,
+                dataPlatformUsesDefaultWorkspace: null,
+                homeWorkspaceRoot: null,
+                homeWorkspaceBadge: null,
                 dataPlatformProjectListCount: 0,
                 dataPlatformProjectOpened: false,
                 dataPlatformProjectRoot: null,
@@ -236,7 +242,13 @@ function inspectRenderer(webSocketDebuggerUrl, dataPlatformBaseUrl) {
                     });
                     const reloadedDataPlatformConfig = await api.getDataPlatformConfig();
                     result.dataPlatformConfigRoundTripAvailable = savedDataPlatformConfig?.baseUrl === dataPlatformBaseUrl
-                      && reloadedDataPlatformConfig?.baseUrl === savedDataPlatformConfig.baseUrl;
+                      && reloadedDataPlatformConfig?.baseUrl === savedDataPlatformConfig.baseUrl
+                      && reloadedDataPlatformConfig?.workspaceRoot === savedDataPlatformConfig.workspaceRoot
+                      && reloadedDataPlatformConfig?.usesDefaultWorkspace === savedDataPlatformConfig.usesDefaultWorkspace;
+                    result.dataPlatformWorkspaceRoot = reloadedDataPlatformConfig?.workspaceRoot ?? null;
+                    result.dataPlatformUsesDefaultWorkspace = reloadedDataPlatformConfig?.usesDefaultWorkspace ?? null;
+                    result.homeWorkspaceRoot = document.querySelector('.home-workspace-path')?.getAttribute('title') ?? null;
+                    result.homeWorkspaceBadge = document.querySelector('.home-workspace-badge')?.textContent?.trim() ?? null;
 
                     const projectList = await api.listDataPlatformProjects({ projectName: '' });
                     result.dataPlatformProjectListCount = projectList?.records?.length ?? 0;
@@ -431,12 +443,18 @@ async function runPackagedSmoke() {
       && renderer.mqttConfigureAvailable
       && renderer.getDataPlatformConfigAvailable
       && renderer.saveDataPlatformConfigAvailable
+      && renderer.selectDataPlatformWorkspaceAvailable
+      && renderer.resetDataPlatformWorkspaceAvailable
       && renderer.listDataPlatformProjectsAvailable
       && renderer.openDataPlatformProjectAvailable
       && renderer.retryDataPlatformModelSyncAvailable
       && renderer.dataPlatformModelSyncListenerAvailable
       && renderer.dataPlatformModelSyncListenerRoundTripAvailable
       && renderer.dataPlatformConfigRoundTripAvailable
+      && path.resolve(renderer.dataPlatformWorkspaceRoot) === path.resolve(expectedDataPlatformRoot)
+      && renderer.dataPlatformUsesDefaultWorkspace === true
+      && path.resolve(renderer.homeWorkspaceRoot) === path.resolve(expectedDataPlatformRoot)
+      && renderer.homeWorkspaceBadge === '默认'
       && renderer.dataPlatformProjectListCount === 1
       && renderer.dataPlatformProjectOpened
       && renderer.dataPlatformModelSyncCompleted
