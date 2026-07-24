@@ -89,7 +89,7 @@ try {
     return scene;
   }
 
-  // 文件夹复制：包含全部直属实体，父子同时选中不重复，模型生成器按唯一约束跳过。
+  // 文件夹复制：包含全部直属实体，父子同时选中不重复，模型生成器允许多实例随文件夹复制。
   const sourceFolder = createFolderEntity('输送线组');
   sourceFolder.locked = true;
   const sourceModel = createImportedModel('输送机模型', 'conveyor', { x: 1, y: 2, z: 3 }, 'CONVEYOR-001');
@@ -109,9 +109,8 @@ try {
   useEditorStore.getState().copySelectedEntities();
   let state = useEditorStore.getState();
   assert.equal(state.entityClipboard.entries.length, 1, '父文件夹与子模型同时选中不得生成重复根条目');
-  assert.equal(state.entityClipboard.entries[0].children.length, 2, '文件夹剪贴板必须包含两个可复制直属实体');
-  assert.match(state.logs[0].message, /1 个文件夹、2 个对象/, '复制日志必须包含文件夹和对象数量');
-  assert.match(state.logs[0].message, /已跳过模型生成器/, '复制日志必须说明模型生成器被跳过');
+  assert.equal(state.entityClipboard.entries[0].children.length, 3, '文件夹剪贴板必须包含全部三个直属实体');
+  assert.match(state.logs[0].message, /1 个文件夹、3 个对象/, '复制日志必须包含文件夹和对象数量');
 
   useEditorStore.getState().pasteEntityClipboard();
   state = useEditorStore.getState();
@@ -124,7 +123,7 @@ try {
   assert.equal(duplicatedFolder.parentId, null, '复制文件夹必须粘贴为根级文件夹');
   assert.equal(duplicatedFolder.name, '输送线组 副本', '复制文件夹必须使用现有副本命名规则');
   assert.equal(duplicatedFolder.locked, true, '文件夹锁定状态必须保留');
-  assert.equal(duplicatedFolder.childrenIds.length, 2, '新文件夹必须登记全部可复制子实体');
+  assert.equal(duplicatedFolder.childrenIds.length, 3, '新文件夹必须登记全部直属子实体');
   assert.deepEqual(sourceFolder.childrenIds, [sourceModel.id, sourceMesh.id, sourceGenerator.id], '原文件夹内容不得改变');
 
   const duplicatedChildren = duplicatedFolder.childrenIds.map((entityId) => state.scene.entities[entityId]);
@@ -153,8 +152,12 @@ try {
   assert.notEqual(duplicatedModel.components, sourceModel.components, '复制模型不得共享组件对象');
   assert.equal(
     Object.values(state.scene.entities).filter((entity) => entity.components.modelGenerator).length,
-    1,
-    '文件夹复制不得产生第二个模型生成器',
+    2,
+    '文件夹复制必须连同模型生成器一起复制（允许多实例）',
+  );
+  assert.ok(
+    duplicatedChildren.some((entity) => entity.components.modelGenerator),
+    '模型生成器副本必须归入新文件夹',
   );
 
   useEditorStore.getState().undo();
@@ -165,7 +168,7 @@ try {
 
   useEditorStore.getState().redo();
   state = useEditorStore.getState();
-  assert.equal(state.scene.entities[duplicatedFolderId]?.childrenIds.length, 2, '重做必须恢复同一个完整文件夹副本');
+  assert.equal(state.scene.entities[duplicatedFolderId]?.childrenIds.length, 3, '重做必须恢复同一个完整文件夹副本');
   assert.equal(state.history.undoStack.length, 1);
 
   // 空文件夹也必须可以复制和粘贴。
@@ -239,7 +242,7 @@ try {
       emptyFolderCopied: true,
       duplicateChildSelectionRemoved: true,
       mixedRootsPasteAtSceneRoot: true,
-      modelGeneratorSkipped: true,
+      modelGeneratorCopied: true,
       entityOnlyTargetFolderPreserved: true,
       undoRedoAtomic: true,
     },

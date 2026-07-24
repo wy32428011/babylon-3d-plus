@@ -40,8 +40,8 @@
           },
           "modelAsset": {
             "assetCode": "GEN-A",
-            "sourcePath": "F:\\3d-babylon-editor\\examples\\model-packages\\GenericMqttMotionDemo\\GenericMqttMotionDemo.gltf",
-            "sourceUrl": "editor-asset://local/F%3A%5C3d-babylon-editor%5Cexamples%5Cmodel-packages%5CGenericMqttMotionDemo%5CGenericMqttMotionDemo.gltf",
+            "sourcePath": "C:\\Projects\\babylon-3d-plus\\examples\\model-packages\\GenericMqttMotionDemo\\GenericMqttMotionDemo.gltf",
+            "sourceUrl": "editor-asset://local/C%3A%5CProjects%5Cbabylon-3d-plus%5Cexamples%5Cmodel-packages%5CGenericMqttMotionDemo%5CGenericMqttMotionDemo.gltf",
             "lengthUnit": "meter",
             "unitScaleToMeters": 1,
             "parameterConfig": {
@@ -264,8 +264,8 @@
           },
           "modelAsset": {
             "assetCode": "GEN-B",
-            "sourcePath": "F:\\3d-babylon-editor\\examples\\model-packages\\GenericMqttMotionDemo\\GenericMqttMotionDemo.gltf",
-            "sourceUrl": "editor-asset://local/F%3A%5C3d-babylon-editor%5Cexamples%5Cmodel-packages%5CGenericMqttMotionDemo%5CGenericMqttMotionDemo.gltf",
+            "sourcePath": "C:\\Projects\\babylon-3d-plus\\examples\\model-packages\\GenericMqttMotionDemo\\GenericMqttMotionDemo.gltf",
+            "sourceUrl": "editor-asset://local/C%3A%5CProjects%5Cbabylon-3d-plus%5Cexamples%5Cmodel-packages%5CGenericMqttMotionDemo%5CGenericMqttMotionDemo.gltf",
             "lengthUnit": "meter",
             "unitScaleToMeters": 1,
             "parameterConfig": {
