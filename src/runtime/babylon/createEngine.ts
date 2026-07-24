@@ -64,6 +64,8 @@ export type BabylonViewportOptions = {
   allowCameraControl?: boolean;
   /** 编辑器模式设为 true 时拒绝 SwiftShader、WARP 等软件 WebGL 回退。 */
   requireHardwareAcceleration?: boolean;
+  /** 可选日志回调，用于向编辑器控制台输出诊断信息。 */
+  onLog?: (message: string) => void;
 };
 
 export type BabylonViewport = {
@@ -191,6 +193,22 @@ function assertWebGLSupported(): void {
   if (Engine.isSupported()) return;
 
   throw new Error('当前 Electron 渲染进程不支持 WebGL，无法创建 Babylon Scene View。');
+}
+
+/** 在离屏画布上探测硬件加速 WebGL 是否可用，不可用时返回 false 而非抛错。 */
+function probeHardwareAccelerationAvailable(): boolean {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  const gl =
+    canvas.getContext('webgl2', { failIfMajorPerformanceCaveat: true }) ??
+    canvas.getContext('webgl', { failIfMajorPerformanceCaveat: true });
+  if (gl) {
+    const ext = gl.getExtension('WEBGL_lose_context');
+    if (ext) ext.loseContext();
+    return true;
+  }
+  return false;
 }
 
 /** 限制编辑器相机距离，避免滚轮缩放过近时穿过模型或被近裁剪面裁空。 */
@@ -579,25 +597,26 @@ export function createBabylonViewport(
 ): BabylonViewport {
   assertWebGLSupported();
 
-  const requireHardwareAcceleration = options.requireHardwareAcceleration ?? false;
+  const requestedHardwareAcceleration = options.requireHardwareAcceleration ?? false;
+  const useHardwareAcceleration = requestedHardwareAcceleration && probeHardwareAccelerationAvailable();
+  if (requestedHardwareAcceleration) {
+    const logMsg = useHardwareAcceleration
+      ? '硬件加速 WebGL 已启用。'
+      : '硬件加速 WebGL 不可用，已降级为软件渲染。建议更新显卡驱动或配置"高性能"图形模式。';
+    console.info('[Babylon] ' + logMsg);
+    options.onLog?.('[Babylon] ' + logMsg);
+  }
   let engine: Engine;
   try {
-    const candidate = new Engine(canvas, true, {
+    engine = new Engine(canvas, true, {
       preserveDrawingBuffer: false,
       stencil: true,
       powerPreference: 'high-performance',
-      failIfMajorPerformanceCaveat: requireHardwareAcceleration,
+      failIfMajorPerformanceCaveat: useHardwareAcceleration,
     });
-    try {
-      if (requireHardwareAcceleration) assertHardwareAcceleratedWebGL(candidate);
-      engine = candidate;
-    } catch (error) {
-      candidate.dispose();
-      throw error;
-    }
+    if (useHardwareAcceleration) assertHardwareAcceleratedWebGL(engine);
   } catch (error) {
-    const mode = requireHardwareAcceleration ? '硬件加速 WebGL' : 'WebGL';
-    throw new Error('Babylon Engine ' + mode + ' 创建失败：' + getErrorMessage(error));
+    throw new Error('Babylon Engine 创建失败：' + getErrorMessage(error));
   }
 
   const scene = new Scene(engine);

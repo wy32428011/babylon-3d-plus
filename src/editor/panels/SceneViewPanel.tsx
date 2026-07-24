@@ -515,6 +515,7 @@ export function SceneViewPanel() {
     try {
       viewport = createBabylonViewport(canvasRef.current, handleRuntimeStatus, {
         requireHardwareAcceleration: true,
+        onLog: pushLog,
       });
       runtime = new SceneRuntime(viewport.scene, pushLog, (entityId) => {
         const currentRuntime = runtimeRef.current;

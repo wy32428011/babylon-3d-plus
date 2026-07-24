@@ -125,8 +125,36 @@ export class TransformGizmoController {
     this.gizmoManager = new GizmoManager(scene, 1, this.utilityLayer);
     this.gizmoManager.usePointerToAttachGizmos = false;
     this.createManagedGizmos();
+    this.disableGizmoCameraDetach();
     this.bindGizmoDragObservables();
     this.setTool('translate');
+  }
+
+  /**
+   * 禁止 Gizmo 拖拽时 detach 相机控制。拖拽结束 PointerDragBehavior 会以旧签名重新
+   * attachControl，触发 _panningMouseButton setter 篡改自定义按键映射（中键平移失效）。
+   * Gizmo 上的指针事件已被 UtilityLayer 的 skipOnPointerObservable 隔离，无需 detach。
+   */
+  private disableGizmoCameraDetach(): void {
+    const { positionGizmo, rotationGizmo, scaleGizmo } = this.gizmoManager.gizmos;
+    const gizmos = [
+      positionGizmo?.xGizmo,
+      positionGizmo?.yGizmo,
+      positionGizmo?.zGizmo,
+      positionGizmo?.xPlaneGizmo,
+      positionGizmo?.yPlaneGizmo,
+      positionGizmo?.zPlaneGizmo,
+      rotationGizmo?.xGizmo,
+      rotationGizmo?.yGizmo,
+      rotationGizmo?.zGizmo,
+      scaleGizmo?.xGizmo,
+      scaleGizmo?.yGizmo,
+      scaleGizmo?.zGizmo,
+      scaleGizmo?.uniformScaleGizmo,
+    ];
+    for (const gizmo of gizmos) {
+      if (gizmo) gizmo.dragBehavior.detachCameraControls = false;
+    }
   }
 
   /** 切换当前可见的 Babylon Transform Gizmo 类型。 */
