@@ -67,6 +67,13 @@ type RecentWorkspacesResult = {
 
 type DataPlatformConfig = {
   baseUrl: string;
+  workspaceRoot: string;
+  usesDefaultWorkspace: boolean;
+};
+
+type DataPlatformWorkspaceSelectionResult = {
+  canceled: boolean;
+  config: DataPlatformConfig;
 };
 
 type SaveDataPlatformConfigRequest = {
@@ -326,6 +333,8 @@ interface Window {
     getRecentWorkspaces: () => Promise<RecentWorkspacesResult>;
     getDataPlatformConfig: () => Promise<DataPlatformConfig>;
     saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest) => Promise<DataPlatformConfig>;
+    selectDataPlatformWorkspace: () => Promise<DataPlatformWorkspaceSelectionResult>;
+    resetDataPlatformWorkspace: () => Promise<DataPlatformConfig>;
     listDataPlatformProjects: (request?: DataPlatformProjectListRequest) => Promise<DataPlatformProjectListResult>;
     openDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectOpenResult>;
     retryDataPlatformModelSync: () => Promise<boolean>;

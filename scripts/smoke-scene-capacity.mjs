@@ -49,6 +49,18 @@ function createStaticEntity(index, modelAsset) {
   };
 }
 
+/** 创建引用指定源的独立逻辑模型，覆盖多阵列源合并后的 sourceId 重映射。 */
+function createStaticArrayInstance(index, modelAsset, sourceEntityId) {
+  const entity = createStaticEntity(index, modelAsset);
+  return {
+    ...entity,
+    components: {
+      ...entity.components,
+      modelArrayInstance: { sourceEntityId },
+    },
+  };
+}
+
 /** 使用稳定 entities/entityIds 引用创建最小 SceneRuntime 文档，便于验证选择专用增量路径。 */
 function createDocument(entities, entityIds, selectedEntityId = null) {
   return {
@@ -103,11 +115,124 @@ function collectEntityMeshes(scene, entityId) {
   ));
 }
 
+/** 验证多个已有阵列源只在编辑态统一到一个源，原始场景引用保持不变。 */
+function verifyReferencedSourceCoalescing(createEditModeModelThinInstancePlan, modelAsset) {
+  const primarySource = createStaticEntity(1_000, modelAsset);
+  const secondarySource = createStaticEntity(1_001, modelAsset);
+  const primaryInstance = createStaticArrayInstance(1_002, modelAsset, primarySource.id);
+  const secondaryInstance = createStaticArrayInstance(1_003, modelAsset, secondarySource.id);
+  const entityList = [primarySource, secondarySource, primaryInstance, secondaryInstance];
+  const entities = Object.fromEntries(entityList.map((entity) => [entity.id, entity]));
+  const entityIds = entityList.map((entity) => entity.id);
+  const plan = createEditModeModelThinInstancePlan(createDocument(entities, entityIds));
+
+  assert.equal(plan.groupCount, 1, '同模板的多个已有阵列源必须形成一个编辑态分组');
+  assert.equal(plan.sourceEntityIds.length, 1, '多个已有阵列源必须只保留一个真实渲染源');
+  assert.equal(plan.sourceEntityIds[0], primarySource.id, '必须稳定复用场景顺序中的首个可见阵列源');
+  assert.equal(plan.thinInstanceEntityCount, 1, '第二个阵列源本身必须转换为逻辑实例');
+  assert.equal(
+    plan.entities[secondarySource.id].components.modelArrayInstance?.sourceEntityId,
+    primarySource.id,
+    '被合并阵列源必须改指向统一源',
+  );
+  assert.equal(
+    plan.entities[secondaryInstance.id].components.modelArrayInstance?.sourceEntityId,
+    primarySource.id,
+    '原来引用第二阵列源的实例必须临时重映射到统一源',
+  );
+  assert.equal(
+    plan.entities[primaryInstance.id],
+    primaryInstance,
+    '已经引用统一源的实例必须复用原实体对象',
+  );
+  assert.equal(
+    secondaryInstance.components.modelArrayInstance.sourceEntityId,
+    secondarySource.id,
+    '编辑态覆盖不得修改原始 SceneDocument 的 sourceEntityId',
+  );
+
+  const divergentSecondarySource = {
+    ...secondarySource,
+    components: {
+      ...secondarySource.components,
+      modelAsset: {
+        ...secondarySource.components.modelAsset,
+        parameterValues: { variant: 2 },
+      },
+    },
+  };
+  const divergentEntities = {
+    ...entities,
+    [secondarySource.id]: divergentSecondarySource,
+  };
+  const divergentPlan = createEditModeModelThinInstancePlan(
+    createDocument(divergentEntities, entityIds),
+    plan,
+  );
+  assert.equal(
+    divergentPlan.entities[secondarySource.id],
+    divergentSecondarySource,
+    '参数模板分组变化后，原阵列源必须恢复为独立真实模型',
+  );
+  assert.equal(
+    divergentPlan.entities[secondaryInstance.id],
+    secondaryInstance,
+    '参数模板分组变化后，已有实例必须恢复原始 sourceEntityId',
+  );
+
+  const legacySource = {
+    ...secondarySource,
+    components: {
+      ...secondarySource.components,
+      modelArray: {
+        items: [{
+          id: 'legacy-hidden-item',
+          name: 'Legacy Hidden Item',
+          assetCode: 'LEGACY-HIDDEN-ITEM',
+          offset: { x: 2, y: 0, z: 0 },
+        }],
+      },
+    },
+  };
+  const legacyInstance = createStaticArrayInstance(1_004, modelAsset, legacySource.id);
+  const legacyEntityList = [primarySource, legacySource, legacyInstance];
+  const legacyEntities = Object.fromEntries(legacyEntityList.map((entity) => [entity.id, entity]));
+  const legacyPlan = createEditModeModelThinInstancePlan(
+    createDocument(legacyEntities, legacyEntityList.map((entity) => entity.id)),
+  );
+  assert.equal(legacyPlan.groupCount, 1, '旧阵列源仍可作为统一源承载其它重复模型');
+  assert.equal(
+    legacyPlan.entities[legacySource.id],
+    legacySource,
+    '仍含 modelArray.items 的旧阵列源不得降级为逻辑实例',
+  );
+  assert.equal(
+    legacyPlan.entities[legacyInstance.id],
+    legacyInstance,
+    '旧阵列源的已有实例必须继续引用原源，避免隐藏阵列项丢失',
+  );
+  assert.equal(
+    legacyPlan.entities[primarySource.id].components.modelArrayInstance?.sourceEntityId,
+    legacySource.id,
+    '普通重复源可以安全合并到保留的旧阵列源',
+  );
+
+  return {
+    sourceCountBefore: 2,
+    sourceCountAfter: 1,
+    remappedInstanceCount: 2,
+    divergentSourceRestored: true,
+    legacySourcePreserved: true,
+  };
+}
+
 /** 运行静态共享实例、增量选择和引用计数的 SceneRuntime 集成 smoke。 */
 async function run() {
   const glbBytes = new Uint8Array(await fs.readFile(FIXTURE_GLB_PATH));
   const server = await createServer({
+    appType: 'custom',
     configFile: false,
+    logLevel: 'error',
     root: process.cwd(),
     server: { middlewareMode: true, hmr: false },
     optimizeDeps: { noDiscovery: true },
@@ -180,19 +305,37 @@ async function run() {
       null,
       '仅伪装成已核对脚本文件名但模型包或真实脚本路径不匹配时必须回退',
     );
-    assert.equal(
-      resolveEditModeModelThinInstanceReason({
-        ...modelAsset,
-        sourcePath: 'F:/YZJ/YZJ.glb',
-        sourceUrl: 'smoke://YZJ/YZJ.glb',
-        scriptAssets: [{ name: 'yzj.model.ts', path: 'F:/YZJ/yzj.model.ts', sourceUrl: 'smoke://YZJ/yzj.model.ts' }],
-      }),
-      'verified-parametric-script',
-      '已核对编辑态行为的参数化脚本必须允许按参数变体分组',
-    );
+    for (const [modelFileName, scriptFileName] of [
+      ['box.glb', 'box.model.ts'],
+      ['链条机.glb', 'chain-conveyor.model.ts'],
+      ['GD_有电机_Optimized(1).glb', 'gd-motor-optimized.model.ts'],
+      ['HCTS.glb', 'hcts.model.ts'],
+      ['Shelf.glb', 'shelf.model.ts'],
+      ['WLTS.glb', 'wlts.model.ts'],
+      ['YZJ.glb', 'yzj.model.ts'],
+    ]) {
+      assert.equal(
+        resolveEditModeModelThinInstanceReason({
+          ...modelAsset,
+          sourcePath: `F:/Verified/${modelFileName}`,
+          sourceUrl: `smoke://Verified/${modelFileName}`,
+          scriptAssets: [{
+            name: scriptFileName,
+            path: `F:/Verified/${scriptFileName}`,
+            sourceUrl: `smoke://Verified/${scriptFileName}`,
+          }],
+        }),
+        'verified-parametric-script',
+        `已核对脚本 ${scriptFileName} 必须允许编辑态按参数变体分组`,
+      );
+    }
     assert.equal(editPlan.groupCount, 1, '100 个同模板静态模型必须形成一个编辑态分组');
     assert.equal(editPlan.thinInstanceEntityCount, EDIT_THIN_INSTANCE_ENTITY_COUNT, '分组必须只保留一个真实模型源');
     assert.equal(editPlan.sourceEntityIds.length, 1, '编辑态分组必须选择一个稳定源实体');
+    const referencedSourceCoalescing = verifyReferencedSourceCoalescing(
+      createEditModeModelThinInstancePlan,
+      modelAsset,
+    );
 
     const movedEntityId = entityIds.at(-1);
     const movedEntity = entities[movedEntityId];
@@ -287,6 +430,7 @@ async function run() {
       sourceDisposeCount,
       renderableMeshesPerEntity: firstMeshes.length,
       selectionSync: 'incremental',
+      referencedSourceCoalescing,
       runtimeExpansion: 'isolated',
     }, null, 2));
   } finally {

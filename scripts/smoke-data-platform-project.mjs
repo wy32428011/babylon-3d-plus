@@ -418,14 +418,19 @@ async function startMockServer(fixtures) {
   };
 }
 
-async function launchEditor(storageRoot, userDataRoot) {
+async function launchEditor(storageRoot, userDataRoot, options = {}) {
   const env = {
     ...process.env,
     OPEN_DEVTOOLS: 'false',
     VITE_DEV_SERVER_URL: '',
-    ZENDING_ALLOW_STORAGE_ROOT_OVERRIDE: '1',
-    ZENDING_EDITOR_STORAGE_ROOT: storageRoot,
   };
+  if (options.useStorageOverride !== false && storageRoot) {
+    env.ZENDING_ALLOW_STORAGE_ROOT_OVERRIDE = '1';
+    env.ZENDING_EDITOR_STORAGE_ROOT = storageRoot;
+  } else {
+    delete env.ZENDING_ALLOW_STORAGE_ROOT_OVERRIDE;
+    delete env.ZENDING_EDITOR_STORAGE_ROOT;
+  }
   const app = await electron.launch({
     args: [workspaceRoot, `--user-data-dir=${userDataRoot}`],
     cwd: workspaceRoot,
@@ -435,6 +440,25 @@ async function launchEditor(storageRoot, userDataRoot) {
   await window.waitForLoadState('domcontentloaded');
   await window.locator('#root').waitFor({ state: 'attached' });
   return { app, window };
+}
+
+async function writeDataPlatformConfig(userDataRoot, config) {
+  await mkdir(userDataRoot, { recursive: true });
+  await writeFile(
+    path.join(userDataRoot, 'data-platform-config.json'),
+    `${JSON.stringify(config, null, 2)}\n`,
+    'utf8',
+  );
+}
+
+async function mockNextWorkspaceDialog(app, result) {
+  await app.evaluate(({ dialog }, dialogResult) => {
+    const original = dialog.showOpenDialog;
+    dialog.showOpenDialog = async () => {
+      dialog.showOpenDialog = original;
+      return dialogResult;
+    };
+  }, result);
 }
 
 async function configureAndList(window, baseUrl) {
@@ -581,24 +605,77 @@ async function inspectResourceStrip(window, exerciseHorizontalScroll = false) {
 async function run() {
   const fixtureRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-fixtures-'));
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-storage-'));
+  const alternateStorageRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-storage-alternate-'));
   const userDataRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-userdata-'));
+  const legacyUserDataRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-userdata-v1-'));
   const unwritableUserDataRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-userdata-unwritable-'));
   const unwritableRoot = path.join(fixtureRoot, 'not-a-directory');
   let mock;
   let launched;
+  let legacyLaunched;
   let unwritableLaunched;
 
   try {
     const fixtures = await createFixtures(fixtureRoot);
     await writeFile(unwritableRoot, 'file blocks directory usage', 'utf8');
     mock = await startMockServer(fixtures);
-    launched = await launchEditor(storageRoot, userDataRoot);
+
+    await writeDataPlatformConfig(legacyUserDataRoot, { version: 1, baseUrl: mock.baseUrl });
+    legacyLaunched = await launchEditor(null, legacyUserDataRoot, { useStorageOverride: false });
+    const legacyConfig = await legacyLaunched.window.evaluate(() => window.editorApi.getDataPlatformConfig());
+    assert.equal(legacyConfig.baseUrl, mock.baseUrl);
+    assert.equal(legacyConfig.workspaceRoot, workspaceRoot);
+    assert.equal(legacyConfig.usesDefaultWorkspace, true);
+    await legacyLaunched.app.close();
+    legacyLaunched = null;
+
+    await writeDataPlatformConfig(userDataRoot, { version: 2, baseUrl: '', workspaceRoot: storageRoot });
+    launched = await launchEditor(null, userDataRoot, { useStorageOverride: false });
 
     const configured = await configureAndList(launched.window, `${mock.baseUrl}/`);
     assert.equal(configured.saved.baseUrl, mock.baseUrl);
+    assert.equal(configured.saved.workspaceRoot, storageRoot);
+    assert.equal(configured.saved.usesDefaultWorkspace, false);
     assert.equal(configured.list.records.length, 8);
     assert.deepEqual(configured.list.records.map((item) => item.id), ['8', '7', '6', '5', '4', '3', '2', VALID_PROJECT_ID]);
     assert.ok(configured.list.records.every((item) => typeof item.id === 'string'));
+    assert.equal(await launched.window.locator('.home-workspace-path').getAttribute('title'), storageRoot);
+    assert.equal((await launched.window.locator('.home-workspace-badge').textContent())?.trim(), '自定义');
+    assert.equal(await launched.window.evaluate(() => typeof window.editorApi.selectDataPlatformWorkspace), 'function');
+    assert.equal(await launched.window.evaluate(() => typeof window.editorApi.resetDataPlatformWorkspace), 'function');
+
+    const workspacePath = launched.window.locator('.home-workspace-path');
+    const workspaceBadge = launched.window.locator('.home-workspace-badge');
+    const modifyWorkspaceButton = launched.window.getByRole('button', { name: '修改', exact: true });
+
+    await mockNextWorkspaceDialog(launched.app, { canceled: true, filePaths: [] });
+    await modifyWorkspaceButton.click();
+    await launched.window.locator('.home-status').filter({ hasText: '已取消修改数据中台工作区' }).waitFor({ state: 'visible' });
+    assert.equal(await workspacePath.getAttribute('title'), storageRoot);
+
+    await mockNextWorkspaceDialog(launched.app, { canceled: false, filePaths: [alternateStorageRoot] });
+    await modifyWorkspaceButton.click();
+    await launched.window.locator('.home-status').filter({ hasText: alternateStorageRoot }).waitFor({ state: 'visible' });
+    assert.equal(await workspacePath.getAttribute('title'), alternateStorageRoot);
+    assert.equal((await workspaceBadge.textContent())?.trim(), '自定义');
+
+    await launched.window.getByRole('button', { name: '恢复默认', exact: true }).click();
+    await launched.window.locator('.home-status').filter({ hasText: '已恢复默认数据中台工作区' }).waitFor({ state: 'visible' });
+    assert.equal(await workspacePath.getAttribute('title'), workspaceRoot);
+    assert.equal((await workspaceBadge.textContent())?.trim(), '默认');
+
+    await mockNextWorkspaceDialog(launched.app, { canceled: false, filePaths: [unwritableRoot] });
+    await modifyWorkspaceButton.click();
+    await launched.window.locator('.home-status-error').filter({ hasText: '不是目录' }).waitFor({ state: 'visible' });
+    assert.equal(await workspacePath.getAttribute('title'), workspaceRoot);
+
+    await mockNextWorkspaceDialog(launched.app, { canceled: false, filePaths: [storageRoot] });
+    await modifyWorkspaceButton.click();
+    await launched.window.locator('.home-status').filter({ hasText: storageRoot }).waitFor({ state: 'visible' });
+    assert.equal(await workspacePath.getAttribute('title'), storageRoot);
+    const reloadedConfig = await launched.window.evaluate(() => window.editorApi.getDataPlatformConfig());
+    assert.equal(reloadedConfig.baseUrl, mock.baseUrl);
+    assert.equal(reloadedConfig.workspaceRoot, storageRoot);
 
     const searched = await launched.window.evaluate(() => window.editorApi.listDataPlatformProjects({ projectName: '旧' }));
     assert.deepEqual(searched.records.map((item) => item.id), ['3']);
@@ -612,15 +689,18 @@ async function run() {
     await launched.window.getByRole('button', { name: '数据中台配置' }).click();
     const minWindowLayout = await launched.window.evaluate(() => {
       const dialog = document.querySelector('.home-config-dialog')?.getBoundingClientRect();
+      const workspaceBar = document.querySelector('.home-workspace-bar')?.getBoundingClientRect();
       return {
         innerWidth: window.innerWidth,
         innerHeight: window.innerHeight,
         canScrollX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
         dialogInsideViewport: Boolean(dialog && dialog.left >= 0 && dialog.top >= 0 && dialog.right <= window.innerWidth && dialog.bottom <= window.innerHeight),
+        workspaceBarInsideViewport: Boolean(workspaceBar && workspaceBar.left >= 0 && workspaceBar.right <= window.innerWidth),
       };
     });
     assert.equal(minWindowLayout.canScrollX, false);
     assert.equal(minWindowLayout.dialogInsideViewport, true);
+    assert.equal(minWindowLayout.workspaceBarInsideViewport, true);
     await launched.window.getByRole('dialog').getByRole('button', { name: '取消' }).click();
     await launched.app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.setSize(1440, 900);
@@ -873,7 +953,8 @@ async function run() {
     await launched.app.close();
     launched = null;
 
-    unwritableLaunched = await launchEditor(unwritableRoot, unwritableUserDataRoot);
+    await writeDataPlatformConfig(unwritableUserDataRoot, { version: 2, baseUrl: '', workspaceRoot: unwritableRoot });
+    unwritableLaunched = await launchEditor(null, unwritableUserDataRoot, { useStorageOverride: false });
     await configureAndList(unwritableLaunched.window, mock.baseUrl);
     await expectOpenFailure(unwritableLaunched.window, '2', '不是目录');
 
@@ -882,6 +963,10 @@ async function run() {
       storageRoot,
       requests: mock.requests.length,
       verified: [
+        'v1-config-default-workspace-compatibility',
+        'v2-custom-workspace-persistence',
+        'workspace-dialog-cancel-select-reset-and-file-rejection',
+        'home-workspace-bar-responsive-layout',
         'server-side-project-search-and-trusted-cache',
         'lossless-string-business-identifiers',
         'structured-script-list-overrides-legacy-fields',
@@ -913,11 +998,14 @@ async function run() {
     }, null, 2));
   } finally {
     if (unwritableLaunched) await unwritableLaunched.app.close().catch(() => undefined);
+    if (legacyLaunched) await legacyLaunched.app.close().catch(() => undefined);
     if (launched) await launched.app.close().catch(() => undefined);
     if (mock) await mock.close().catch(() => undefined);
     await rm(fixtureRoot, { recursive: true, force: true });
     await rm(storageRoot, { recursive: true, force: true });
+    await rm(alternateStorageRoot, { recursive: true, force: true });
     await rm(userDataRoot, { recursive: true, force: true });
+    await rm(legacyUserDataRoot, { recursive: true, force: true });
     await rm(unwritableUserDataRoot, { recursive: true, force: true });
   }
 }

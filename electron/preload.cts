@@ -8,6 +8,7 @@ import type {
   DataPlatformProjectListRequest,
   DataPlatformProjectListResult,
   DataPlatformProjectOpenResult,
+  DataPlatformWorkspaceSelectionResult,
   DeploymentExportRevealRequest,
   ImportCadFileResult,
   ImportEnvironmentModelFileResult,
@@ -46,6 +47,10 @@ contextBridge.exposeInMainWorld('editorApi', {
   getDataPlatformConfig: (): Promise<DataPlatformConfig> => ipcRenderer.invoke('data-platform:getConfig'),
   saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> =>
     ipcRenderer.invoke('data-platform:saveConfig', request),
+  selectDataPlatformWorkspace: (): Promise<DataPlatformWorkspaceSelectionResult> =>
+    ipcRenderer.invoke('data-platform:selectWorkspace'),
+  resetDataPlatformWorkspace: (): Promise<DataPlatformConfig> =>
+    ipcRenderer.invoke('data-platform:resetWorkspace'),
   listDataPlatformProjects: (request?: DataPlatformProjectListRequest): Promise<DataPlatformProjectListResult> =>
     ipcRenderer.invoke('data-platform:listProjects', request),
   openDataPlatformProject: (request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectOpenResult> =>

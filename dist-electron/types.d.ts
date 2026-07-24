@@ -53,6 +53,12 @@ export type RecentWorkspacesResult = {
 };
 export type DataPlatformConfig = {
     baseUrl: string;
+    workspaceRoot: string;
+    usesDefaultWorkspace: boolean;
+};
+export type DataPlatformWorkspaceSelectionResult = {
+    canceled: boolean;
+    config: DataPlatformConfig;
 };
 export type SaveDataPlatformConfigRequest = {
     baseUrl: string;

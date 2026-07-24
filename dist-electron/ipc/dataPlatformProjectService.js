@@ -18,24 +18,28 @@ const SCENE_PATH_ARRAY_KEYS = new Set(['scriptPaths']);
 let dataPlatformProjectServiceShuttingDown = false;
 const openTaskControllers = new Set();
 const openTasks = new Set();
-/** 返回数据中台项目工作区；安装态与只读程序目录分离，开发态保持仓库根目录行为。 */
-export function getDataPlatformEditorRoot() {
+/**
+ * 返回数据中台项目工作区。测试覆盖优先于用户配置；未配置时安装态使用 userData，开发态保持仓库根目录行为。
+ */
+export function getDataPlatformEditorRoot(customWorkspaceRoot = null) {
     const override = process.env[TEST_STORAGE_ROOT_ENV]?.trim();
     const overrideEnabled = process.env[TEST_STORAGE_OVERRIDE_GUARD_ENV] === '1';
     if (override && overrideEnabled)
         return path.resolve(override);
+    if (customWorkspaceRoot)
+        return path.resolve(customWorkspaceRoot);
     return app.isPackaged
         ? path.join(app.getPath('userData'), DATA_PLATFORM_WORKSPACE_DIRECTORY)
         : app.getAppPath();
 }
 /** 从可信项目缓存打开工程，renderer 只允许提交项目 ID。 */
-export async function openDataPlatformProject(project, baseUrl) {
+export async function openDataPlatformProject(project, baseUrl, editorRoot) {
     if (dataPlatformProjectServiceShuttingDown) {
         throw new Error('应用正在退出，无法打开数据中台项目。');
     }
     const controller = new AbortController();
     openTaskControllers.add(controller);
-    const task = openDataPlatformProjectInternal(project, baseUrl, controller.signal);
+    const task = openDataPlatformProjectInternal(project, baseUrl, editorRoot, controller.signal);
     openTasks.add(task);
     try {
         return await task;
@@ -65,8 +69,7 @@ export async function disposeDataPlatformProjectTasks() {
     await Promise.allSettled([...openTasks]);
     await disposeDataPlatformModelSync();
 }
-async function openDataPlatformProjectInternal(project, baseUrl, signal) {
-    const editorRoot = getDataPlatformEditorRoot();
+async function openDataPlatformProjectInternal(project, baseUrl, editorRoot, signal) {
     await ensureWritableEditorRoot(editorRoot);
     await ensureProjectDirectories(editorRoot);
     let source = 'generated';
@@ -138,7 +141,8 @@ async function openDataPlatformProjectInternal(project, baseUrl, signal) {
         modelSyncStarted,
     };
 }
-async function ensureWritableEditorRoot(editorRoot) {
+export async function ensureWritableEditorRoot(editorRoot) {
+    assertWorkspaceOutsideInstallation(editorRoot);
     let stat;
     try {
         await fs.mkdir(editorRoot, { recursive: true }).catch((error) => {
@@ -153,6 +157,7 @@ async function ensureWritableEditorRoot(editorRoot) {
     }
     if (!stat.isDirectory())
         throw new Error(`数据中台工作路径不是目录：${editorRoot}`);
+    await assertWorkspaceRealPathOutsideInstallation(editorRoot);
     const probePath = path.join(editorRoot, `.zending-write-probe-${randomUUID()}`);
     assertPathInside(editorRoot, probePath, '写权限探测路径');
     let handle = null;
@@ -510,6 +515,30 @@ async function pathExists(targetPath) {
 }
 function isPlainObject(value) {
     return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
+}
+/** 安装态不允许把业务数据目录放在可执行文件目录内。 */
+function assertWorkspaceOutsideInstallation(editorRoot) {
+    if (!app.isPackaged)
+        return;
+    if (isPathInsideOrEqual(path.dirname(app.getPath('exe')), editorRoot)) {
+        throw new Error(`数据中台工作区不能位于应用安装目录中：${editorRoot}`);
+    }
+}
+/** 对真实路径重复校验，避免通过目录符号链接绕过安装目录保护。 */
+async function assertWorkspaceRealPathOutsideInstallation(editorRoot) {
+    if (!app.isPackaged)
+        return;
+    const [installRoot, workspaceRoot] = await Promise.all([
+        fs.realpath(path.dirname(app.getPath('exe'))),
+        fs.realpath(editorRoot),
+    ]);
+    if (isPathInsideOrEqual(installRoot, workspaceRoot)) {
+        throw new Error(`数据中台工作区不能位于应用安装目录中：${editorRoot}`);
+    }
+}
+function isPathInsideOrEqual(parentPath, candidatePath) {
+    const relative = path.relative(path.resolve(parentPath), path.resolve(candidatePath));
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 function isNodeError(error) {
     return error instanceof Error && 'code' in error;

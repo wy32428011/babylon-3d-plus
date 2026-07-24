@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('editorApi', {
     getRecentWorkspaces: () => ipcRenderer.invoke('project:getRecentWorkspaces'),
     getDataPlatformConfig: () => ipcRenderer.invoke('data-platform:getConfig'),
     saveDataPlatformConfig: (request) => ipcRenderer.invoke('data-platform:saveConfig', request),
+    selectDataPlatformWorkspace: () => ipcRenderer.invoke('data-platform:selectWorkspace'),
+    resetDataPlatformWorkspace: () => ipcRenderer.invoke('data-platform:resetWorkspace'),
     listDataPlatformProjects: (request) => ipcRenderer.invoke('data-platform:listProjects', request),
     openDataPlatformProject: (request) => ipcRenderer.invoke('data-platform:openProject', request),
     retryDataPlatformModelSync: () => ipcRenderer.invoke('data-platform:retryModelSync'),
