@@ -1,9 +1,0 @@
-export declare function normalizeFilePath(filePath: string): string;
-export declare function authorizeAssetRoot(rootPath: string): void;
-export declare function authorizeAssetFile(filePath: string): void;
-export declare function authorizeSceneFile(filePath: string): void;
-export declare function isPathInsideAuthorizedAssetRoot(filePath: string): boolean;
-export declare function isAuthorizedAssetFile(filePath: string): boolean;
-export declare function isAuthorizedSceneFile(filePath: string): boolean;
-export declare function encodeAssetUrl(filePath: string): string;
-export declare function decodeAssetUrl(url: string): string;
