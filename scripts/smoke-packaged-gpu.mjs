@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -22,6 +23,11 @@ const SOFTWARE_RENDERER_PATTERN =
 /** 判断 Electron GPU feature 状态是否为硬件启用。 */
 function isEnabledFeature(status) {
   return typeof status === 'string' && status.startsWith('enabled');
+}
+
+/** 计算 canvas 截图摘要，用于确认创建 Mesh 后真实画面发生变化。 */
+function hashImage(image) {
+  return createHash('sha256').update(image).digest('hex');
 }
 
 /** 为每次生产 EXE 验证创建隔离 userData，避免污染真实安装数据。 */
@@ -55,17 +61,33 @@ try {
   await canvas.waitFor({ state: 'visible', timeout: 30_000 });
   await mainWindow.waitForTimeout(1_000);
 
+  const gridToggle = mainWindow.getByLabel('网格', { exact: true });
+  if (await gridToggle.isChecked()) await gridToggle.uncheck();
+  await mainWindow.waitForTimeout(250);
+  const emptySceneImageHash = hashImage(await canvas.screenshot());
+
+  await mainWindow.getByRole('button', { name: /立方体/ }).click();
+  const cubeHierarchyEntry = mainWindow.locator('.entity-tree-name', { hasText: /^Cube$/ });
+  await cubeHierarchyEntry.waitFor({ state: 'visible', timeout: 10_000 });
+  await mainWindow.waitForTimeout(250);
+  const renderedPrimitiveName = (await cubeHierarchyEntry.textContent())?.trim() ?? null;
+  const renderedSceneImageHash = hashImage(await canvas.screenshot());
+
   const mainProcess = await launched.evaluate(async ({ app }) => ({
     isPackaged: app.isPackaged,
     version: app.getVersion(),
     hardwareAccelerationEnabled: app.isHardwareAccelerationEnabled(),
     forceHighPerformanceGpu: app.commandLine.hasSwitch('force_high_performance_gpu'),
     softwareRasterizerDisabled: app.commandLine.hasSwitch('disable-software-rasterizer'),
+    gpuSandboxDisabled: app.commandLine.hasSwitch('disable-gpu-sandbox'),
+    gpuBlocklistIgnored: app.commandLine.hasSwitch('ignore-gpu-blocklist'),
+    angleBackend: app.commandLine.hasSwitch('use-angle') ? app.commandLine.getSwitchValue('use-angle') : null,
     featureStatus: app.getGPUFeatureStatus(),
     gpuInfo: await app.getGPUInfo('complete'),
   }));
 
-  const renderer = await canvas.evaluate((target) => {
+  const renderer = await canvas.evaluate(async (target) => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const gl = target.getContext('webgl2') ?? target.getContext('webgl');
     if (!gl) return { supported: false };
 
@@ -76,6 +98,7 @@ try {
       vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
       renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
       attributes: gl.getContextAttributes(),
+      contextLost: gl.isContextLost(),
       drawingBuffer: [gl.drawingBufferWidth, gl.drawingBufferHeight],
       cssSize: [target.clientWidth, target.clientHeight],
     };
@@ -93,6 +116,15 @@ try {
   assert.equal(mainProcess.hardwareAccelerationEnabled, true, '生产 EXE 未启用 Electron 硬件加速');
   assert.equal(mainProcess.forceHighPerformanceGpu, true, '生产 EXE 未请求高性能 GPU');
   assert.equal(mainProcess.softwareRasterizerDisabled, true, '生产 EXE 未禁用软件 3D rasterizer');
+  assert.equal(mainProcess.gpuSandboxDisabled, true, 'Windows 生产 EXE 未关闭 GPU sandbox');
+  assert.equal(mainProcess.gpuBlocklistIgnored, false, '生产 EXE 不应绕过 Chromium GPU blocklist');
+  assert.equal(mainProcess.angleBackend, null, '生产 EXE 不应固定 ANGLE 后端');
+  assert.equal(renderedPrimitiveName, 'Cube', '生产 Scene View 未创建并渲染立方体 Mesh');
+  assert.notEqual(
+    renderedSceneImageHash,
+    emptySceneImageHash,
+    '生产 Scene View 创建立方体后 canvas 像素输出未发生变化',
+  );
   assert.equal(
     isEnabledFeature(mainProcess.featureStatus.webgl),
     true,
@@ -104,6 +136,7 @@ try {
     `生产 EXE GPU compositing 状态异常：${mainProcess.featureStatus.gpu_compositing}`,
   );
   assert.equal(renderer.supported, true, '生产 Scene View 未创建 WebGL 上下文');
+  assert.equal(renderer.contextLost, false, '生产 Scene View 渲染立方体后 WebGL 上下文已丢失');
   assert.equal(renderer.attributes?.powerPreference, 'high-performance', '生产 WebGL 未请求 high-performance GPU');
   assert.equal(renderer.attributes?.failIfMajorPerformanceCaveat, true, '生产 WebGL 仍允许重大性能降级');
   assert.equal(
@@ -121,6 +154,11 @@ try {
   console.log(JSON.stringify({
     status: 'PASS',
     executablePath,
+    renderedPrimitiveName,
+    canvasImageHashes: {
+      empty: emptySceneImageHash,
+      rendered: renderedSceneImageHash,
+    },
     version: mainProcess.version,
     activeGpu,
     featureStatus: mainProcess.featureStatus,

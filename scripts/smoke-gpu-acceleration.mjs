@@ -55,6 +55,7 @@ await withEditor([], async (launched) => {
       hardwareAccelerationEnabled: app.isHardwareAccelerationEnabled(),
       forceHighPerformanceGpu: app.commandLine.hasSwitch('force_high_performance_gpu'),
       softwareRasterizerDisabled: app.commandLine.hasSwitch('disable-software-rasterizer'),
+      gpuSandboxDisabled: app.commandLine.hasSwitch('disable-gpu-sandbox'),
       featureStatus: app.getGPUFeatureStatus(),
       gpuInfo: await app.getGPUInfo('complete'),
     }));
@@ -81,6 +82,7 @@ await withEditor([], async (launched) => {
     assert.equal(mainProcess.hardwareAccelerationEnabled, true, 'Electron 硬件加速未启用');
     assert.equal(mainProcess.forceHighPerformanceGpu, true, 'Electron 未请求高性能 GPU');
     assert.equal(mainProcess.softwareRasterizerDisabled, true, 'Electron 未禁用软件 3D rasterizer');
+    assert.equal(mainProcess.gpuSandboxDisabled, false, '开发态不应关闭 GPU sandbox');
     assert.equal(
       isEnabledFeature(mainProcess.featureStatus.webgl),
       true,

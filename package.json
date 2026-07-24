@@ -1,7 +1,7 @@
 {
   "name": "zending-3d-editor",
   "productName": "ZENDING 3D EDITOR",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",

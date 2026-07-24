@@ -15,11 +15,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const HIGH_PERFORMANCE_GPU_SWITCH = 'force_high_performance_gpu';
+const DISABLE_GPU_SANDBOX_SWITCH = 'disable-gpu-sandbox';
 const FAILURE_PAGE_BACKGROUND = '#1e1e1e';
 
 // 必须在 app ready 前请求高性能 GPU。保留 SwiftShader 软件回退，由渲染进程探测后降级并输出日志。
 // 驱动黑名单仍由 Chromium 保留，避免强行启用不稳定驱动。
 app.commandLine.appendSwitch(HIGH_PERFORMANCE_GPU_SWITCH);
+
+// 企业 Windows 安装态需要兼容现有 GPU 子进程环境；仅关闭 GPU sandbox，不改变 renderer sandbox。
+if (process.platform === 'win32' && app.isPackaged) {
+  app.commandLine.appendSwitch(DISABLE_GPU_SANDBOX_SWITCH);
+  console.warn('[electron] Windows 安装态已按企业部署策略关闭 GPU sandbox。');
+}
 
 protocol.registerSchemesAsPrivileged([
   {

@@ -2,7 +2,7 @@
 
 日期：2026-07-17
 
-更新：2026-07-23
+更新：2026-07-24
 
 ## 目标
 
@@ -15,14 +15,16 @@
 
 ## 硬件加速 WebGL 前置条件
 
-Electron 主进程会在 `app ready` 前请求高性能 GPU、禁用 Chromium 软件 3D rasterizer，主窗口明确开启 WebGL。编辑器 Scene View 创建 Babylon Engine 时使用 `powerPreference: high-performance` 与 `failIfMajorPerformanceCaveat: true`，并检查实际 renderer：
+Electron 主进程会在 `app ready` 前请求高性能 GPU、禁用 Chromium 软件 3D rasterizer，主窗口明确开启 WebGL。Windows 正式打包版还会按企业部署策略关闭 GPU sandbox，开发态继续保留该 sandbox。编辑器 Scene View 创建 Babylon Engine 时使用 `powerPreference: high-performance` 与 `failIfMajorPerformanceCaveat: true`，并检查实际 renderer：
 
 - Intel / NVIDIA / AMD 等 ANGLE 硬件后端正常进入编辑器；
 - SwiftShader、WARP、llvmpipe 等软件 renderer 会被拒绝，不再静默占用 CPU 模拟 WebGL；
 - 硬件 WebGL 不可用时，Scene View 显示可读初始化错误，首页及项目管理仍可使用；
 - 导出的独立 Web Viewer 保持既有兼容策略，不强制拒绝软件回退。
 
-该策略不绕过 Chromium GPU 驱动黑名单；命中黑名单时应更新显卡驱动或调整系统图形首选项，而不是强制运行不稳定驱动。
+该策略不绕过 Chromium GPU 驱动黑名单，也不固定 `use-angle` 后端；命中黑名单时应更新显卡驱动或调整系统图形首选项，而不是强制运行不稳定驱动。`disable-gpu-sandbox` 只在 Windows 正式打包版生效，不会关闭 renderer sandbox，但会降低 GPU 进程隔离强度；这是已确认的企业部署取舍。
+
+场景 JSON、GLB/GLTF 文件读取、格式解析和部分纹理解码仍由 CPU 或 Worker 完成；解析后的几何、材质和纹理上传到 WebGL 后，模型绘制、Shader、纹理采样和画面合成由 GPU 执行。
 
 ## 静态同源模型共享
 
@@ -110,7 +112,7 @@ npm run smoke:installer:gpu
 
 `smoke:gpu` 会先执行完整构建，再真实启动 Electron 验证硬件 GPU、GPU compositing、WebGL 2、上下文性能属性和 renderer，并使用 `--disable-gpu` 反向确认 Scene View 会阻断软件回退。
 
-`smoke:packaged:gpu` 会通过 Playwright Electron 直接启动生产 EXE，同时检查主进程 GPU feature、活动显卡、启动开关以及 Scene View 的实际 WebGL renderer。默认验证 `release/win-unpacked`；也可执行 `npm run smoke:packaged:gpu -- "C:\Program Files\ZENDING 3D EDITOR\ZENDING 3D EDITOR.exe"` 检查指定安装目录。脚本会核对应用版本，旧安装程序会以明确的版本不匹配错误失败。
+`smoke:packaged:gpu` 会通过 Playwright Electron 直接启动生产 EXE，同时检查主进程 GPU feature、活动显卡、三个选定启动开关，以及未启用 `ignore-gpu-blocklist`/`use-angle`。脚本会进入 Scene View 创建内置立方体，并确认硬件 WebGL renderer 与上下文在模型 Mesh 渲染后仍有效。默认验证 `release/win-unpacked`；也可执行 `npm run smoke:packaged:gpu -- "C:\Program Files\ZENDING 3D EDITOR\ZENDING 3D EDITOR.exe"` 检查指定安装目录。脚本会核对应用版本，旧安装程序会以明确的版本不匹配错误失败。
 
 `smoke:installer:gpu` 会重新生成 Windows NSIS 安装程序，再调用上述生产 EXE 验证；验证过程使用独立临时 `userData`，不会写入安装目录。
 
