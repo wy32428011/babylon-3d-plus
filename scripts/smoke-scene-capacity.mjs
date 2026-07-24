@@ -107,6 +107,7 @@ function collectEntityMeshes(scene, entityId) {
 async function run() {
   const glbBytes = new Uint8Array(await fs.readFile(FIXTURE_GLB_PATH));
   const server = await createServer({
+    appType: 'custom',
     configFile: false,
     root: process.cwd(),
     server: { middlewareMode: true, hmr: false },
@@ -263,10 +264,31 @@ async function run() {
     firstContentRoot.getChildMeshes = () => {
       throw new Error('选择变化不应重新收集未修改模型的全部子 Mesh');
     };
+    const performanceBeforeSelection = runtime.getPerformanceMetrics();
+    const selectionOnlyEntityIds = new Proxy(entityIds, {
+      get(target, property, receiver) {
+        if (property === 'length' || property === Symbol.iterator || /^\d+$/.test(String(property))) {
+          throw new Error('选择专用同步不得读取或迭代 entityIds');
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
     assert.doesNotThrow(
-      () => runtime.sync(createDocument(entities, entityIds, entityIds[0])),
-      '仅改变选择时必须走展示层增量同步',
+      () => runtime.syncSelection(createDocument(entities, selectionOnlyEntityIds, entityIds[0])),
+      '仅改变选择时必须走不扫描 entityIds 的专用同步',
     );
+    const performanceAfterSelection = runtime.getPerformanceMetrics();
+    assert.equal(
+      performanceAfterSelection.fullSyncCount,
+      performanceBeforeSelection.fullSyncCount,
+      '选择专用同步不得增加完整 sync 次数',
+    );
+    assert.equal(
+      performanceAfterSelection.selectionSyncCount,
+      performanceBeforeSelection.selectionSyncCount + 1,
+      '选择专用同步必须单独计数',
+    );
+    assert.equal(performanceAfterSelection.lastSelectionChangedEntityCount, 1, '单选只应刷新一个目标实体');
     firstContentRoot.getChildMeshes = originalGetChildMeshes;
 
     const remainingIds = entityIds.slice(1);

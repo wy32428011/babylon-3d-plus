@@ -189,7 +189,11 @@ function getEntityArrayDialogError(
   );
 }
 
-export function SceneViewPanel() {
+type SceneViewPanelProps = {
+  performanceHudVisible: boolean;
+};
+
+export function SceneViewPanel(props: SceneViewPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<BabylonViewport | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
@@ -943,7 +947,7 @@ export function SceneViewPanel() {
           onPointerUp={handleCanvasPointerUp}
           onPointerCancelCapture={handleCanvasPointerCancel}
         />
-        {performanceSnapshot ? (
+        {performanceSnapshot && props.performanceHudVisible ? (
           <div className={performanceHudExpanded ? 'scene-performance-hud expanded' : 'scene-performance-hud'}>
             <button
               aria-expanded={performanceHudExpanded}

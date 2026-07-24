@@ -839,11 +839,26 @@ select {
 }
 
 .hierarchy-panel .entity-list {
+  position: relative;
   display: block;
   min-height: 0;
   overflow: auto;
+  overflow-anchor: none;
   border-top: 1px solid #3a3a3a;
   background: #2f2f2f;
+}
+
+.hierarchy-virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.hierarchy-virtual-window {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  width: 100%;
 }
 
 .entity-tree-row {
@@ -852,6 +867,7 @@ select {
   display: grid;
   grid-template-columns: 22px 22px calc(var(--entity-depth) * 16px) 18px 18px minmax(0, 1fr) auto;
   align-items: center;
+  height: 24px;
   min-height: 24px;
   border-bottom: 1px solid #3d3d3d;
   color: #cfcfcf;

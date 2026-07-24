@@ -30,6 +30,7 @@ export function EditorLayout() {
   const [isConsoleDialogOpen, setConsoleDialogOpen] = useState(false);
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
   const [isDeploymentExportDialogOpen, setDeploymentExportDialogOpen] = useState(false);
+  const [performanceHudVisible, setPerformanceHudVisible] = useState(true);
   const deploymentExport = useDeploymentExport();
   const [runtimePreviewError, setRuntimePreviewError] = useState<string | null>(null);
   const transformTool = useEditorStore((state) => state.transformTool);
@@ -240,6 +241,8 @@ export function EditorLayout() {
         transformSpace={transformSpace}
         snapSettings={snapSettings}
         gridSettings={gridSettings}
+        performanceHudVisible={performanceHudVisible}
+        onSetPerformanceHudVisible={setPerformanceHudVisible}
         onSetTransformTool={setTransformTool}
         onSetTransformSpace={setTransformSpace}
         onSetSnapEnabled={setSnapEnabled}
@@ -287,7 +290,7 @@ export function EditorLayout() {
           <HierarchyPanel readOnly={isRuntimePreview} />
         </aside>
         <main className={styles.centerColumn}>
-          <SceneViewPanel />
+          <SceneViewPanel performanceHudVisible={performanceHudVisible} />
           <div className={styles.bottomWorkspace}>
             <ProjectPanel readOnly={isRuntimePreview} />
             <ConsolePanel

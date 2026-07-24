@@ -512,6 +512,21 @@ type RuntimeWorldBounds = {
   maximum: Vector3;
 };
 
+export type SceneRuntimePerformanceMetrics = {
+  fullSyncCount: number;
+  selectionSyncCount: number;
+  lastFullSyncDurationMs: number;
+  maxFullSyncDurationMs: number;
+  lastSelectionSyncDurationMs: number;
+  maxSelectionSyncDurationMs: number;
+  lastSelectionChangedEntityCount: number;
+};
+
+/** 浏览器和 Node smoke 共用的高精度计时入口。 */
+function readRuntimeTimestampMs(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now();
+}
+
 export class SceneRuntime {
   private readonly meshes = new Map<string, Mesh>();
   private readonly locators = new Map<string, LocatorRuntimeEntry>();
@@ -555,7 +570,14 @@ export class SceneRuntime {
   private environment: EnvironmentRuntimeEntry | null = null;
   private activeModelGeneratorEntityId: string | null = null;
   private reportedModelGeneratorConflictSignature = '';
-  private sharedModelSelectionOutlineSignature = '';
+  private outlinedModelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
+  private fullSyncCount = 0;
+  private selectionSyncCount = 0;
+  private lastFullSyncDurationMs = 0;
+  private maxFullSyncDurationMs = 0;
+  private lastSelectionSyncDurationMs = 0;
+  private maxSelectionSyncDurationMs = 0;
+  private lastSelectionChangedEntityCount = 0;
   private entityArrayPreview: EntityArrayPreviewEntry | null = null;
   private modelLoadSequence = 0;
   private environmentLoadSequence = 0;
@@ -1245,8 +1267,71 @@ export class SceneRuntime {
     return Number.isFinite(vector.x) && Number.isFinite(vector.y) && Number.isFinite(vector.z);
   }
 
-  /** 将编辑器文档增量同步到 Babylon 运行时场景，未变化实体只刷新必要的展示状态。 */
+  /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
   sync(document: SceneDocument): void {
+    const startedAt = readRuntimeTimestampMs();
+    try {
+      this.syncDocument(document);
+    } finally {
+      const durationMs = Math.max(0, readRuntimeTimestampMs() - startedAt);
+      this.fullSyncCount += 1;
+      this.lastFullSyncDurationMs = durationMs;
+      this.maxFullSyncDurationMs = Math.max(this.maxFullSyncDurationMs, durationMs);
+    }
+  }
+
+  /**
+   * 只同步选区变化。普通单选只访问旧/新目标实体以及对应共享模型或矩阵批次，
+   * 不重新扫描 entityIds、加载模型、执行参数脚本或重建 Locator 索引。
+   */
+  syncSelection(document: SceneDocument): void {
+    const startedAt = readRuntimeTimestampMs();
+    let changedEntityCount = 0;
+    try {
+      const nextSelectedEntityIds = this.resolveSelectedEntityIds(document);
+      const changedEntityIds = new Set<string>();
+      for (const entityId of this.selectedEntityIds) {
+        if (!nextSelectedEntityIds.has(entityId)) changedEntityIds.add(entityId);
+      }
+      for (const entityId of nextSelectedEntityIds) {
+        if (!this.selectedEntityIds.has(entityId)) changedEntityIds.add(entityId);
+      }
+
+      changedEntityCount = changedEntityIds.size;
+      if (changedEntityCount === 0) return;
+
+      for (const entityId of changedEntityIds) {
+        const entity = document.entities[entityId] ?? this.syncedEntities.get(entityId);
+        if (!entity) continue;
+        this.syncEntityPresentation(entity, nextSelectedEntityIds.has(entityId));
+      }
+
+      this.selectedEntityIds = nextSelectedEntityIds;
+      this.rebuildSharedModelSelectionOutline();
+    } finally {
+      const durationMs = Math.max(0, readRuntimeTimestampMs() - startedAt);
+      this.selectionSyncCount += 1;
+      this.lastSelectionSyncDurationMs = durationMs;
+      this.maxSelectionSyncDurationMs = Math.max(this.maxSelectionSyncDurationMs, durationMs);
+      this.lastSelectionChangedEntityCount = changedEntityCount;
+    }
+  }
+
+  /** 返回 Scene View HUD 使用的低频运行时同步指标快照。 */
+  getPerformanceMetrics(): SceneRuntimePerformanceMetrics {
+    return {
+      fullSyncCount: this.fullSyncCount,
+      selectionSyncCount: this.selectionSyncCount,
+      lastFullSyncDurationMs: this.lastFullSyncDurationMs,
+      maxFullSyncDurationMs: this.maxFullSyncDurationMs,
+      lastSelectionSyncDurationMs: this.lastSelectionSyncDurationMs,
+      maxSelectionSyncDurationMs: this.maxSelectionSyncDurationMs,
+      lastSelectionChangedEntityCount: this.lastSelectionChangedEntityCount,
+    };
+  }
+
+  /** 完整同步文档内容；调用方负责统计耗时。 */
+  private syncDocument(document: SceneDocument): void {
     const previousEntityStates = new Map(this.entityStates);
     const previousSelectedEntityIds = this.selectedEntityIds;
     const dirtyModelArraySourceIds = new Set<string>();
@@ -1604,7 +1689,7 @@ export class SceneRuntime {
     this.selectedEntityIds.clear();
     this.activeModelGeneratorEntityId = null;
     this.reportedModelGeneratorConflictSignature = '';
-    this.sharedModelSelectionOutlineSignature = '';
+    this.outlinedModelArrayBatches.clear();
   }
 
   /** 按组件类型同步单个实体的运行时表现。 */
@@ -6621,11 +6706,13 @@ export class SceneRuntime {
       return;
     }
 
-    for (const mesh of model.modelArrayBatch.meshes) {
+    const modelArrayBatch = model.modelArrayBatch;
+    this.outlinedModelArrayBatches.delete(modelArrayBatch);
+    for (const mesh of modelArrayBatch.meshes) {
       this.modelHighlightLayer.removeMesh(mesh);
       this.modelArrayBatchByMeshUniqueId.delete(mesh.uniqueId);
     }
-    model.modelArrayBatch.dispose();
+    modelArrayBatch.dispose();
     model.modelArrayBatch = null;
     model.modelArraySourceSignature = '';
   }
@@ -7182,43 +7269,55 @@ export class SceneRuntime {
     model.highlighted = selected;
   }
 
-  /** 重建共享模型和矩阵阵列的选择描边，并只标记实际选中的 thinInstance。 */
+  /** 根据逻辑实体直接定位所属矩阵批次，避免选择变化扫描全部源模型和参数变体。 */
+  private resolveModelArrayBatchForEntityId(entityId: string): EntityArrayThinInstanceBatch | null {
+    const parameterVariant = this.modelArrayParameterVariantByEntityId.get(entityId);
+    if (parameterVariant?.model.modelArrayBatch) return parameterVariant.model.modelArrayBatch;
+
+    const instanceEntity = this.modelArrayInstanceEntities.get(entityId);
+    const sourceEntityId = instanceEntity?.components.modelArrayInstance?.sourceEntityId;
+    return sourceEntityId ? this.models.get(sourceEntityId)?.modelArrayBatch ?? null : null;
+  }
+
+  /**
+   * 只从当前选区推导共享模型和矩阵阵列描边。普通单选为 O(1)，文件夹整组选中为 O(selected)，
+   * 不再展开全部可见实体 ID 或拼接全场景 signature；批次内部再按差量刷新实例选择缓冲。
+   */
   private rebuildSharedModelSelectionOutline(): void {
-    const selectedSourceGroups = [...this.models.values()]
-      .filter((model) => model.assetHandle?.kind === 'shared-instance' && model.highlighted)
-      .map((model) => model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0))
-      .filter((meshes) => meshes.length > 0);
-    const arrayBatches = new Set<EntityArrayThinInstanceBatch>();
-    for (const model of this.models.values()) {
-      if (model.modelArrayBatch) arrayBatches.add(model.modelArrayBatch);
+    const selectedSourceGroups: AbstractMesh[][] = [];
+    const selectedArrayEntityIdsByBatch = new Map<EntityArrayThinInstanceBatch, Set<string>>();
+
+    for (const entityId of this.selectedEntityIds) {
+      const model = this.models.get(entityId);
+      if (model?.assetHandle?.kind === 'shared-instance' && model.highlighted) {
+        const meshes = model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
+        if (meshes.length > 0) selectedSourceGroups.push(meshes);
+      }
+
+      const batch = this.resolveModelArrayBatchForEntityId(entityId);
+      if (!batch) continue;
+      const selectedEntityIds = selectedArrayEntityIdsByBatch.get(batch) ?? new Set<string>();
+      selectedEntityIds.add(entityId);
+      selectedArrayEntityIdsByBatch.set(batch, selectedEntityIds);
     }
-    for (const variant of this.modelArrayParameterVariants.values()) {
-      if (variant.model.modelArrayBatch) arrayBatches.add(variant.model.modelArrayBatch);
-    }
-    const selectedArrayGroups = [...arrayBatches]
-      .map((batch) => {
-        const visibleEntityIds = [...batch.getEntityIds()];
-        const selectedEntityIds = new Set(
-          visibleEntityIds.filter((entityId) => this.selectedEntityIds.has(entityId)),
-        );
+
+    const selectedArrayGroups = [...selectedArrayEntityIdsByBatch.entries()]
+      .map(([batch, selectedEntityIds]) => {
         const meshes = batch.meshes.filter((mesh) => (
           !mesh.isDisposed() && mesh.thinInstanceCount > 0 && mesh.getTotalVertices() > 0
         ));
-        return selectedEntityIds.size > 0 && meshes.length > 0
-          ? { batch, meshes, selectedEntityIds, visibleEntityIds }
-          : null;
+        return meshes.length > 0 ? { batch, meshes, selectedEntityIds } : null;
       })
       .filter((group): group is NonNullable<typeof group> => group !== null);
+    const nextOutlinedModelArrayBatches = new Set(selectedArrayGroups.map((group) => group.batch));
 
-    const signature = [
-      ...selectedSourceGroups.map((meshes) => `source:${meshes.map((mesh) => mesh.uniqueId).join(',')}`),
-      ...selectedArrayGroups.map(({ meshes, selectedEntityIds, visibleEntityIds }) => (
-        `array:${meshes.map((mesh) => `${mesh.uniqueId}:${mesh.thinInstanceCount}`).join(',')}:${visibleEntityIds.join(',')}:${[...selectedEntityIds].sort().join(',')}`
-      )),
-    ].join('|');
-    if (signature === this.sharedModelSelectionOutlineSignature) return;
+    for (const previousBatch of this.outlinedModelArrayBatches) {
+      if (nextOutlinedModelArrayBatches.has(previousBatch)) continue;
+      if (previousBatch.meshes.some((mesh) => !mesh.isDisposed())) {
+        previousBatch.setSelectionMask(new Set(), 0);
+      }
+    }
 
-    this.sharedModelSelectionOutlineSignature = signature;
     this.modelSelectionOutlineLayer.clearSelection();
     prepareInstancedMeshesForSelectionOutline([
       ...selectedSourceGroups.flat(),
@@ -7235,7 +7334,10 @@ export class SceneRuntime {
       group.batch.setSelectionMask(group.selectedEntityIds, nextSelectionId);
       nextSelectionId += 1;
     }
+
+    this.outlinedModelArrayBatches = nextOutlinedModelArrayBatches;
   }
+
 
   /** 仅把 glTF 顶层节点挂到模型内容节点，保留模型内部层级、骨骼和动画关系。 */
   private parentTopLevelModelNodes(model: ModelRuntimeEntry, transformNodes: TransformNode[]): void {

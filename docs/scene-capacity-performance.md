@@ -67,17 +67,38 @@ Scene View 在编辑态会构造一层只存在于内存中的实体覆盖，不
 
 ## 增量场景同步
 
-每次 `SceneDocument` 变化时仍会完整计算实体存在性和父级显隐/锁定状态，但只有新增、删除、实体对象发生变化或运行时对象缺失的实体才执行完整 `syncEntity`。
+实体表或顺序变化时，`SceneRuntime.sync()` 仍会完整计算实体存在性和父级显隐/锁定状态，但只有新增、删除、实体对象发生变化或运行时对象缺失的实体才执行完整 `syncEntity`。
 
-仅选择变化、父文件夹显隐或锁定变化时，运行时只刷新：
+纯 `selectedEntityId` 变化不会再进入完整 `sync()`，而是调用 `SceneRuntime.syncSelection()`：
 
-- 基础 Mesh 选择颜色和拾取；
-- locator 边线与交互面；
-- CAD 显示；
-- 模型 Highlight/SelectionOutline 与拾取；
-- 模型生成器标记、POI 展示和灯光启用状态。
+- 普通单选只访问旧目标和新目标，不迭代 `document.entityIds`；
+- 文件夹选中按实际子实体数量处理，复杂度为 `O(selected)`；
+- 基础 Mesh、locator、CAD、模型、模型生成器、POI 和灯光只刷新选区相关表现；
+- Gizmo attachment 与 Inspector 模型尺寸仍在同一选择 effect 中更新。
 
-模型加载、参数绑定、外置脚本、子 Mesh 收集和遥测基线不会因无关实体或纯选择变化被重复执行。
+共享模型与模型阵列的 SelectionOutline 只从当前选区推导，不再扫描全部模型批次、展开全部可见 ID 或拼接全场景 signature。`EntityArrayThinInstanceBatch` 在矩阵提交时建立逻辑实体到连续实例区间的索引；切换单选时只清零旧区间并写入新区间，复用既有 `Float32Array`，不会扫描整个 thinInstance 缓冲。模型加载、参数绑定、外置脚本、子 Mesh 收集和遥测基线不会因纯选择变化被重复执行。
+
+## Hierarchy 大列表虚拟化
+
+Hierarchy 使用固定 `24px` 行高和上下各 `20` 行 overscan：
+
+- DOM 只包含当前可视窗口及缓冲行，总滚动高度仍为 `rows.length × 24px`；
+- 10,000 行、480px 视口最多渲染 61 行；50,000 行、720px 视口最多渲染 71 行；
+- 选区查询使用 `Set.has()`，Shift 范围多选继续使用完整 rows 的绝对索引；
+- 搜索、文件夹折叠、Ctrl/Cmd 多选、拖放、右键菜单和行内重命名语义不变；
+- 主要选中项或正在重命名项位于视口外时，以最小滚动距离移动到可见区域。
+
+## Scene View 性能 HUD 与报告
+
+Scene View 左上角显示低频性能摘要，点击后展开详细 HUD。Toolbar 的“性能”复选框控制整个 HUD 的显示与隐藏；隐藏只改变 HUD 可见性，不停止采样，也不清空最近一分钟历史，再次勾选后会恢复先前的摘要/详情展开状态。Babylon Instrumentation 每帧写入内部计数器，但 React 最多每秒更新一次，避免监控本身制造高频状态渲染。指标包括：
+
+- FPS、CPU frame time、render time、active mesh evaluation time；
+- GPU frame time（驱动/WebGL timer query 不支持时显示 `N/A`）；
+- Draw Call、active/total Mesh、总顶点和 thinInstance 数；
+- 最近一次完整同步、选择同步、选择变化实体数和编辑态 thinInstance 分组耗时；
+- 浏览器 Long Task 次数与持续时间。
+
+“复制最近一分钟报告”会输出 renderer、60 个有界采样和摘要 JSON，便于在 Intel、NVIDIA、AMD 设备上对比。GPU 使用率低不等于 GPU 未启用：如果 GPU frame time 较低而 CPU frame time、完整同步、分组、Long Task 或 Draw Call 偏高，瓶颈在主线程、场景遍历或提交阶段；如果 GPU frame time 接近或超过 frame time，则应继续检查材质、像素填充、阴影和后处理。
 
 ## 加载峰值控制
 
@@ -103,6 +124,7 @@ Engine 保留 antialias 和 stencil，同时把没有项目功能依赖的 `pres
 ## 验证
 
 ```powershell
+npm run smoke:editor-performance
 npm run smoke:scene-capacity
 npm run smoke:shelf-instancing
 npm run smoke:gpu
@@ -116,6 +138,15 @@ npm run smoke:installer:gpu
 
 `smoke:installer:gpu` 会重新生成 Windows NSIS 安装程序，再调用上述生产 EXE 验证；验证过程使用独立临时 `userData`，不会写入安装目录。
 
+`smoke:editor-performance` 覆盖：
+
+- 10,000 / 50,000 个同模板逻辑模型的编辑态分组数量级、实体完整性和派生引用复用；
+- 10,000 个 thinInstance 的矩阵提交、单选区间差量更新和选择缓冲复用；
+- 10,000 / 50,000 行 Hierarchy 的总高度、overscan 边界和最大渲染行数；
+- Scene View 内容/选区 effect 分离、HUD 1 Hz 更新、Toolbar 显示/隐藏恢复和最近一分钟有界报告。
+
+毫秒值只作为当次环境观测输出，不设 CI 硬阈值；真实 GPU 首帧、驱动调度和显存行为仍需通过 Electron/安装态验收。
+
 `smoke:scene-capacity` 覆盖：
 
 - 静态/动态共享准入矩阵；
@@ -125,5 +156,5 @@ npm run smoke:installer:gpu
 - 1000 个模型阵列实体仍只加载一个源模型，每个源 Mesh 只增加一个批次 Mesh；
 - `thinInstanceIndex`、单实体移动/隐藏/锁定/删除和选择缓冲保持独立实体语义；
 - 运行预览中的普通静态共享模型继续使用 `InstancedMesh`；
-- 选择变化不重新收集未修改模型子 Mesh；
+- 选择变化走 `syncSelection()`，不读取 `entityIds`、不增加完整同步次数且不重新收集未修改模型子 Mesh；
 - 删除最后一个实例时源容器只释放一次。

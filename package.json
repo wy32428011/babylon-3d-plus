@@ -1,7 +1,7 @@
 {
   "name": "zending-3d-editor",
   "productName": "ZENDING 3D EDITOR",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",
@@ -28,14 +28,15 @@
     "smoke:hierarchy-clipboard": "node scripts/smoke-hierarchy-clipboard.mjs",
     "smoke:model-parameters": "node scripts/smoke-model-parameter-meters.mjs",
     "smoke:shelf-instancing": "node scripts/smoke-shelf-shared-instancing.mjs",
-    "smoke:scene-capacity": "node scripts/smoke-static-model-instancing-policy.mjs && node scripts/smoke-asset-load-scheduler.mjs && node scripts/smoke-scene-capacity.mjs",
+    "smoke:scene-capacity": "node scripts/smoke-static-model-instancing-policy.mjs && node scripts/smoke-asset-load-scheduler.mjs && node scripts/smoke-scene-capacity.mjs && npm run smoke:editor-performance",
     "smoke:gpu": "npm run build && node scripts/smoke-gpu-acceleration.mjs",
     "pack:win": "npm run build && electron-builder --win dir --x64",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs",
     "smoke:packaged:gpu": "node scripts/smoke-packaged-gpu.mjs",
     "smoke:installer:gpu": "npm run dist:win && npm run smoke:packaged:gpu",
-    "smoke:data-platform": "node scripts/smoke-data-platform-project.mjs"
+    "smoke:data-platform": "node scripts/smoke-data-platform-project.mjs",
+    "smoke:editor-performance": "node scripts/smoke-editor-large-scene-performance.mjs && node scripts/smoke-hierarchy-virtualization.mjs"
   },
   "engines": {
     "node": ">=22.12.0"

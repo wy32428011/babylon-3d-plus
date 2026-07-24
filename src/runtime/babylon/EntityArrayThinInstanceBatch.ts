@@ -22,6 +22,8 @@ type EntityArrayMatrixBatch = {
   matrixBuffer: Float32Array | null;
   selectionBuffer: Float32Array | null;
   entityIndexBuffer: Uint32Array | null;
+  entityInstanceRangeStarts: Int32Array | null;
+  entityInstanceRangeCounts: Uint32Array | null;
   orientation: EntityArrayMatrixOrientation;
   /** 隐藏参数脚本宿主时，批次仍使用宿主隐藏前的渲染层。 */
   layerMask: number | null;
@@ -74,7 +76,12 @@ export class EntityArrayThinInstanceBatch {
   private readonly batchByMeshUniqueId = new Map<number, EntityArrayMatrixBatch>();
   private readonly batches: EntityArrayMatrixBatch[];
   private entityIds: string[] = [];
+  private readonly entityIndexById = new Map<string, number>();
   private pickableEntityIds = new Set<string>();
+  private selectedEntityIds = new Set<string>();
+  private selectionId = 0;
+  private entityLayoutRevision = 0;
+  private selectionLayoutRevision = -1;
 
   private constructor(
     private readonly sources: EntityArrayMatrixSource[],
@@ -246,11 +253,15 @@ export class EntityArrayThinInstanceBatch {
 
       if (positiveBatch && positiveBuffer) {
         positiveBatch.entityIndexBuffer = null;
+        positiveBatch.entityInstanceRangeStarts = null;
+        positiveBatch.entityInstanceRangeCounts = null;
         commitMatrixBuffer(positiveBatch, positiveBuffer, plan.positiveCount, this.interactive);
         applyBatchInteractionState(positiveBatch, true, this.interactive);
       }
       if (negativeBatch && negativeBuffer) {
         negativeBatch.entityIndexBuffer = null;
+        negativeBatch.entityInstanceRangeStarts = null;
+        negativeBatch.entityInstanceRangeCounts = null;
         commitMatrixBuffer(negativeBatch, negativeBuffer, plan.negativeCount, this.interactive);
         applyBatchInteractionState(negativeBatch, true, this.interactive);
       }
@@ -258,7 +269,12 @@ export class EntityArrayThinInstanceBatch {
     }
 
     this.entityIds = [];
+    this.entityIndexById.clear();
     this.pickableEntityIds.clear();
+    this.selectedEntityIds.clear();
+    this.selectionId = 0;
+    this.entityLayoutRevision += 1;
+    this.selectionLayoutRevision = -1;
     return true;
   }
 
@@ -354,6 +370,10 @@ export class EntityArrayThinInstanceBatch {
       const negativeEntityIndexes = negativeBatch
         ? acquireEntityIndexBuffer(negativeBatch.entityIndexBuffer, plan.negativeCount)
         : null;
+      const positiveEntityRangeStarts = positiveBatch ? createEntityRangeStarts(instances.length) : null;
+      const positiveEntityRangeCounts = positiveBatch ? new Uint32Array(instances.length) : null;
+      const negativeEntityRangeStarts = negativeBatch ? createEntityRangeStarts(instances.length) : null;
+      const negativeEntityRangeCounts = negativeBatch ? new Uint32Array(instances.length) : null;
       let positiveMatrixOffset = 0;
       let negativeMatrixOffset = 0;
       let positiveInstanceIndex = 0;
@@ -367,6 +387,12 @@ export class EntityArrayThinInstanceBatch {
           if (orientation > 0) {
             scratchWorldMatrix.copyToArray(positiveBuffer!, positiveMatrixOffset);
             positiveEntityIndexes![positiveInstanceIndex] = entityIndex;
+            appendEntityInstanceRange(
+              positiveEntityRangeStarts!,
+              positiveEntityRangeCounts!,
+              entityIndex,
+              positiveInstanceIndex,
+            );
             positiveMatrixOffset += 16;
             positiveInstanceIndex += 1;
             continue;
@@ -375,18 +401,40 @@ export class EntityArrayThinInstanceBatch {
           scratchWorldMatrix.copyToArray(negativeBuffer!, negativeMatrixOffset);
           applyNegativeOrientationCarrierToBuffer(negativeBuffer!, negativeMatrixOffset);
           negativeEntityIndexes![negativeInstanceIndex] = entityIndex;
+          appendEntityInstanceRange(
+            negativeEntityRangeStarts!,
+            negativeEntityRangeCounts!,
+            entityIndex,
+            negativeInstanceIndex,
+          );
           negativeMatrixOffset += 16;
           negativeInstanceIndex += 1;
         }
       }
 
-      if (positiveBatch && positiveBuffer && positiveEntityIndexes) {
+      if (
+        positiveBatch
+        && positiveBuffer
+        && positiveEntityIndexes
+        && positiveEntityRangeStarts
+        && positiveEntityRangeCounts
+      ) {
         positiveBatch.entityIndexBuffer = positiveEntityIndexes;
+        positiveBatch.entityInstanceRangeStarts = positiveEntityRangeStarts;
+        positiveBatch.entityInstanceRangeCounts = positiveEntityRangeCounts;
         commitMatrixBuffer(positiveBatch, positiveBuffer, plan.positiveCount, true);
         applyBatchInteractionState(positiveBatch, true, hasPickableEntity);
       }
-      if (negativeBatch && negativeBuffer && negativeEntityIndexes) {
+      if (
+        negativeBatch
+        && negativeBuffer
+        && negativeEntityIndexes
+        && negativeEntityRangeStarts
+        && negativeEntityRangeCounts
+      ) {
         negativeBatch.entityIndexBuffer = negativeEntityIndexes;
+        negativeBatch.entityInstanceRangeStarts = negativeEntityRangeStarts;
+        negativeBatch.entityInstanceRangeCounts = negativeEntityRangeCounts;
         commitMatrixBuffer(negativeBatch, negativeBuffer, plan.negativeCount, true);
         applyBatchInteractionState(negativeBatch, true, hasPickableEntity);
       }
@@ -394,9 +442,14 @@ export class EntityArrayThinInstanceBatch {
     }
 
     this.entityIds = instances.map((instance) => instance.entityId);
+    this.entityIndexById.clear();
+    for (let entityIndex = 0; entityIndex < this.entityIds.length; entityIndex += 1) {
+      this.entityIndexById.set(this.entityIds[entityIndex], entityIndex);
+    }
     this.pickableEntityIds = new Set(
       instances.filter((instance) => instance.pickable).map((instance) => instance.entityId),
     );
+    this.entityLayoutRevision += 1;
     return true;
   }
 
@@ -444,6 +497,8 @@ export class EntityArrayThinInstanceBatch {
       if (activeBatches.has(batch)) continue;
       batch.mesh.thinInstanceCount = 0;
       batch.entityIndexBuffer = null;
+      batch.entityInstanceRangeStarts = null;
+      batch.entityInstanceRangeCounts = null;
       applyBatchInteractionState(batch, false, false);
     }
   }
@@ -474,29 +529,86 @@ export class EntityArrayThinInstanceBatch {
     return this.pickableEntityIds.size > 0;
   }
 
-  /** 给 SelectionOutlineLayer 覆盖逐 thinInstance 的选择 ID，只描边指定逻辑实体。 */
+  /**
+   * 给 SelectionOutlineLayer 覆盖逐 thinInstance 的选择 ID。
+   * 布局未变化时只改写前后选区涉及的连续实例区间，不再为一次单选扫描整个批次。
+   */
   setSelectionMask(selectedEntityIds: ReadonlySet<string>, selectionId: number): void {
-    const selectedEntityIndexes = new Set<number>();
-    for (let entityIndex = 0; entityIndex < this.entityIds.length; entityIndex += 1) {
-      if (selectedEntityIds.has(this.entityIds[entityIndex])) selectedEntityIndexes.add(entityIndex);
+    const nextSelectedEntityIds = new Set(selectedEntityIds);
+    const changedEntityIds = new Set<string>();
+    for (const entityId of this.selectedEntityIds) {
+      if (!nextSelectedEntityIds.has(entityId)) changedEntityIds.add(entityId);
     }
+    for (const entityId of nextSelectedEntityIds) {
+      if (!this.selectedEntityIds.has(entityId)) changedEntityIds.add(entityId);
+    }
+
+    const nextSelectionId = Number.isFinite(selectionId) ? selectionId : 0;
+    const layoutChanged = this.selectionLayoutRevision !== this.entityLayoutRevision;
+    const selectionIdChanged = this.selectionId !== nextSelectionId;
+    if (!layoutChanged && !selectionIdChanged && changedEntityIds.size === 0) return;
 
     for (const batch of this.batches) {
       const instanceCount = batch.mesh.thinInstanceCount;
-      if (instanceCount <= 0 || !batch.entityIndexBuffer) continue;
+      if (instanceCount <= 0) continue;
 
-      const selectionBuffer = acquireFloatBuffer(batch.selectionBuffer, instanceCount);
-      selectionBuffer.fill(0);
-      for (let instanceIndex = 0; instanceIndex < instanceCount; instanceIndex += 1) {
-        if (selectedEntityIndexes.has(batch.entityIndexBuffer[instanceIndex])) {
-          selectionBuffer[instanceIndex] = selectionId;
+      const previousSelectionBuffer = batch.selectionBuffer;
+      const selectionBuffer = acquireFloatBuffer(previousSelectionBuffer, instanceCount);
+      const bufferReplaced = selectionBuffer !== previousSelectionBuffer;
+      const rangeStarts = batch.entityInstanceRangeStarts;
+      const rangeCounts = batch.entityInstanceRangeCounts;
+
+      if (layoutChanged || bufferReplaced) {
+        selectionBuffer.fill(0);
+        if (rangeStarts && rangeCounts) {
+          for (const entityId of nextSelectedEntityIds) {
+            writeSelectionRange(
+              selectionBuffer,
+              this.entityIndexById.get(entityId),
+              rangeStarts,
+              rangeCounts,
+              nextSelectionId,
+            );
+          }
         }
+      } else if (rangeStarts && rangeCounts) {
+        for (const entityId of changedEntityIds) {
+          writeSelectionRange(
+            selectionBuffer,
+            this.entityIndexById.get(entityId),
+            rangeStarts,
+            rangeCounts,
+            nextSelectedEntityIds.has(entityId) ? nextSelectionId : 0,
+          );
+        }
+        if (selectionIdChanged) {
+          for (const entityId of nextSelectedEntityIds) {
+            writeSelectionRange(
+              selectionBuffer,
+              this.entityIndexById.get(entityId),
+              rangeStarts,
+              rangeCounts,
+              nextSelectionId,
+            );
+          }
+        }
+      } else {
+        selectionBuffer.fill(0);
       }
 
-      batch.mesh.thinInstanceSetBuffer(INSTANCE_SELECTION_ID_BUFFER, selectionBuffer, 1, false);
+      if (bufferReplaced) {
+        batch.mesh.thinInstanceSetBuffer(INSTANCE_SELECTION_ID_BUFFER, selectionBuffer, 1, false);
+      } else {
+        batch.mesh.thinInstanceBufferUpdated(INSTANCE_SELECTION_ID_BUFFER);
+      }
       batch.selectionBuffer = selectionBuffer;
     }
+
+    this.selectedEntityIds = nextSelectedEntityIds;
+    this.selectionId = nextSelectionId;
+    this.selectionLayoutRevision = this.entityLayoutRevision;
   }
+
 
   /** 同步整体显隐和拾取状态，主要供临时预览及兼容调用使用。 */
   setInteractionState(visible: boolean, pickable: boolean): void {
@@ -514,7 +626,12 @@ export class EntityArrayThinInstanceBatch {
     this.previewOffsets.length = 0;
     this.batchByMeshUniqueId.clear();
     this.entityIds = [];
+    this.entityIndexById.clear();
     this.pickableEntityIds.clear();
+    this.selectedEntityIds.clear();
+    this.selectionId = 0;
+    this.entityLayoutRevision = 0;
+    this.selectionLayoutRevision = -1;
   }
 }
 
@@ -587,6 +704,8 @@ function createMatrixBatch(
     matrixBuffer: null,
     selectionBuffer: null,
     entityIndexBuffer: null,
+    entityInstanceRangeStarts: null,
+    entityInstanceRangeCounts: null,
     orientation,
     layerMask: source.layerMask,
   };
@@ -714,6 +833,39 @@ function applyNegativeOrientationCarrierToBuffer(buffer: Float32Array, offset: n
 
 function acquireEntityIndexBuffer(current: Uint32Array | null, length: number): Uint32Array {
   return current?.length === length ? current : new Uint32Array(length);
+}
+
+/** 使用 -1 标记当前方向批次中没有实例的逻辑实体。 */
+function createEntityRangeStarts(entityCount: number): Int32Array {
+  const starts = new Int32Array(entityCount);
+  starts.fill(-1);
+  return starts;
+}
+
+/** 以实体索引记录方向批次内的连续实例区间，避免为每个 Mesh 创建字符串 Map。 */
+function appendEntityInstanceRange(
+  starts: Int32Array,
+  counts: Uint32Array,
+  entityIndex: number,
+  instanceIndex: number,
+): void {
+  if (starts[entityIndex] < 0) starts[entityIndex] = instanceIndex;
+  counts[entityIndex] += 1;
+}
+
+/** 只改写目标逻辑实体对应的实例选择区间。 */
+function writeSelectionRange(
+  buffer: Float32Array,
+  entityIndex: number | undefined,
+  starts: Int32Array,
+  counts: Uint32Array,
+  selectionId: number,
+): void {
+  if (entityIndex === undefined) return;
+  const start = starts[entityIndex];
+  const count = counts[entityIndex];
+  if (start < 0 || count <= 0) return;
+  buffer.fill(selectionId, start, start + count);
 }
 
 function createTransformMatrix(transform: TransformComponent): Matrix {

@@ -34,6 +34,7 @@ let editorStoreSnapshot;
 
 try {
   server = await createServer({
+    appType: 'custom',
     configFile: false,
     root: process.cwd(),
     server: { middlewareMode: true, hmr: false },
