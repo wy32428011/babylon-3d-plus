@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
   Matrix,
+  Mesh,
   MeshBuilder,
   NullEngine,
+  PBRMaterial,
   Scene,
+  TransformNode,
+  VertexData,
 } from '@babylonjs/core';
 import { createServer } from 'vite';
 
@@ -160,6 +164,132 @@ function verifyThinInstanceSelectionDelta(EntityArrayThinInstanceBatch) {
   }
 }
 
+/** 验证同材质静态 Geometry 合并不丢顶点/法线，透明材质继续保留独立批次。 */
+function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
+  const engine = new NullEngine({ renderWidth: 64, renderHeight: 64 });
+  const scene = new Scene(engine);
+  const root = new TransformNode('static-merge-root', scene);
+  root.position.set(3, 2, -4);
+  root.rotation.set(0.2, -0.35, 0.1);
+
+  function createTriangle(name, x, material, mirrored = false) {
+    const mesh = new Mesh(name, scene);
+    const vertexData = new VertexData();
+    vertexData.positions = [0, 0, 0, 1, 0, 0, 0, 1, 0];
+    vertexData.normals = [0, 0, 1, 0, 0, 1, 0, 0, 1];
+    vertexData.tangents = [
+      Math.SQRT1_2, Math.SQRT1_2, 0, 1,
+      Math.SQRT1_2, Math.SQRT1_2, 0, 1,
+      Math.SQRT1_2, Math.SQRT1_2, 0, 1,
+    ];
+    vertexData.uvs = [0, 0, 1, 0, 0, 1];
+    vertexData.applyToMesh(mesh, false);
+    mesh.parent = root;
+    mesh.position.x = x;
+    mesh.scaling.set(mirrored ? -2 : 2, 1.5, 0.5);
+    mesh.material = material;
+    return mesh;
+  }
+
+  const opaqueA = new PBRMaterial('shared_chain_0', scene);
+  opaqueA.albedoColor.set(0.2, 0.4, 0.6);
+  opaqueA.metallic = 0.25;
+  opaqueA.roughness = 0.7;
+  const opaqueB = opaqueA.clone('shared_chain_1');
+  const distinctOpaque = opaqueA.clone('shared_chain_2');
+  distinctOpaque.baseWeight = 0.5;
+  const transparentA = new PBRMaterial('transparent_chain_0', scene);
+  transparentA.alpha = 0.5;
+  const transparentB = transparentA.clone('transparent_chain_1');
+  const sourceMeshes = [
+    createTriangle('opaque-a', 0, opaqueA),
+    createTriangle('opaque-b', 2, opaqueB, true),
+    createTriangle('opaque-distinct', 4, distinctOpaque),
+    createTriangle('transparent-a', 6, transparentA),
+    createTriangle('transparent-b', 8, transparentB),
+  ];
+  root.computeWorldMatrix(true);
+  const sourceVertexCount = sourceMeshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0);
+  const batch = EntityArrayThinInstanceBatch.create('static-merge-source', sourceMeshes, {
+    interactive: true,
+    mergeStaticMeshesByMaterial: true,
+    sourceRootWorldMatrix: root.getWorldMatrix().clone(),
+  });
+  assert.ok(batch, '静态材质合并批次必须创建成功');
+
+  try {
+    assert.equal(batch.meshes.length, 4, '两个等价不透明材质应合并，视觉属性不同和透明 Mesh 必须保持独立');
+    assert.equal(
+      batch.meshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0),
+      sourceVertexCount,
+      '材质合并不得减少任何顶点',
+    );
+    const mergedOpaque = batch.meshes.find((mesh) => mesh.material?.alpha === 1 && mesh.getTotalVertices() === 6);
+    assert.ok(mergedOpaque, '必须生成包含两个无索引三角形的单一不透明载体');
+    const normals = mergedOpaque.getVerticesData('normal');
+    assert.ok(normals && normals.length === 18, '合并载体必须保留全部法线');
+    for (let offset = 0; offset < normals.length; offset += 3) {
+      const length = Math.hypot(normals[offset], normals[offset + 1], normals[offset + 2]);
+      assert.ok(Math.abs(length - 1) <= 1e-5, '非均匀缩放后的法线必须保持单位长度');
+    }
+    const tangents = mergedOpaque.getVerticesData('tangent');
+    assert.ok(tangents && tangents.length === 24, '合并载体必须保留全部切线和 handedness');
+    const tangentRows = Array.from({ length: tangents.length / 4 }, (_, index) => tangents.slice(index * 4, index * 4 + 4));
+    assert.ok(
+      tangentRows.some(([x, y, , w]) => Math.abs(x - 0.8) <= 1e-5 && Math.abs(y - 0.6) <= 1e-5 && w === 1),
+      '非均匀正缩放必须按线性模型矩阵变换切线',
+    );
+    assert.ok(
+      tangentRows.some(([x, y, , w]) => Math.abs(x + 0.8) <= 1e-5 && Math.abs(y - 0.6) <= 1e-5 && w === -1),
+      '镜像缩放必须同时变换切线方向并翻转 handedness',
+    );
+
+    const instances = [
+      {
+        entityId: 'static-merge-source',
+        transform: {
+          position: { x: 3, y: 2, z: -4 },
+          rotation: { x: 0.2, y: -0.35, z: 0.1 },
+          scale: { x: 1, y: 1, z: 1 },
+        },
+        pickable: true,
+      },
+      {
+        entityId: 'static-merge-copy',
+        transform: {
+          position: { x: 13, y: 2, z: -4 },
+          rotation: { x: 0.2, y: -0.35, z: 0.1 },
+          scale: { x: 1, y: 1, z: 1 },
+        },
+        pickable: true,
+      },
+    ];
+    assert.equal(batch.updateEntityTransforms(root.getWorldMatrix().clone(), instances), true);
+    assert.ok(batch.meshes.every((mesh) => mesh.thinInstanceCount === 2), '每个合并载体必须只提交两个逻辑实体矩阵');
+    assert.equal(batch.getEntityIdForThinInstance(mergedOpaque, 0), 'static-merge-source');
+    assert.equal(batch.getEntityIdForThinInstance(mergedOpaque, 1), 'static-merge-copy');
+
+    return {
+      sourceMeshCount: sourceMeshes.length,
+      batchMeshCount: batch.meshes.length,
+      sourceVertexCount,
+      batchVertexCount: batch.meshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0),
+      visuallyDistinctOpaqueFallbackMeshes: 1,
+      transparentFallbackMeshes: 2,
+    };
+  } finally {
+    batch.dispose();
+    root.dispose();
+    opaqueA.dispose();
+    opaqueB.dispose();
+    distinctOpaque.dispose();
+    transparentA.dispose();
+    transparentB.dispose();
+    scene.dispose();
+    engine.dispose();
+  }
+}
+
 /** 构造性能摘要夹具，验证报告聚合字段不会因空 GPU 计数或 Long Task 丢失。 */
 function verifyPerformanceSummary(summarizeScenePerformance) {
   const runtime = {
@@ -280,6 +410,7 @@ try {
     verifyEditModePlan(planModule.createEditModeModelThinInstancePlan, entityCount)
   ));
   const batchResult = verifyThinInstanceSelectionDelta(batchModule.EntityArrayThinInstanceBatch);
+  const staticMaterialMerge = verifyStaticMaterialMerge(batchModule.EntityArrayThinInstanceBatch);
   const performanceSummary = verifyPerformanceSummary(performanceModule.summarizeScenePerformance);
   const wiring = await verifySceneViewWiring();
 
@@ -287,6 +418,7 @@ try {
     ok: true,
     planResults,
     batchResult,
+    staticMaterialMerge,
     performanceSummary,
     wiring,
     timingPolicy: 'observational-no-hard-ci-threshold',

@@ -541,29 +541,44 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     assert.equal(loadCount, 1, '正式 Shelf 阵列不得触发任何额外模型加载');
     assert.equal(runtime.models.size, 2, '1000 个 Shelf 阵列实体不得创建逐副本 ModelRuntimeEntry');
     assert.equal(runtime.modelArrayInstanceEntities.size, 1000, 'SceneRuntime 必须保留 1000 个独立 Shelf 逻辑实体');
-    assert.equal(persistentMeshes.length, leftMeshes.length, '正式 Shelf 阵列每个源 Mesh 只应创建一个批次 Mesh');
+    assert.ok(
+      persistentMeshes.length > 0 && persistentMeshes.length < leftMeshes.length,
+      '正式 Shelf 阵列必须把同材质静态叶 Mesh 合并成更少的批次 Mesh',
+    );
+    assert.equal(
+      persistentMeshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0),
+      leftMeshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0),
+      '静态材质合并不得减少 Shelf 顶点数据',
+    );
+    const suspendedSourceMeshCount = runtime.models.get(left.id)?.modelArraySuspendedMeshes.size ?? 0;
     assert.equal(
       integrationScene.meshes.length,
-      meshCountBeforePersistentArray + leftMeshes.length,
-      '正式 Shelf 阵列 Mesh 数量只能增加固定批次数量',
+      meshCountBeforePersistentArray - suspendedSourceMeshCount + persistentMeshes.length,
+      '正式 Shelf 阵列必须用固定批次替换源宿主 Mesh，不能重复保留两套场景节点',
     );
     assert.ok(
-      persistentMeshes.every((mesh) => !mesh.isAnInstance && mesh.thinInstanceCount === 1000),
-      '正式 Shelf 阵列必须一次写入全部 1000 个 thinInstance',
+      leftMeshes.every((mesh) => !integrationScene.meshes.includes(mesh)),
+      '源 Shelf 的脚本宿主 Mesh 必须移出 scene.meshes，避免每帧重复遍历',
+    );
+    assert.equal(runtime.models.get(left.id)?.root.isEnabled(), false, '源 Shelf 脚本宿主根节点必须暂停渲染');
+    assert.ok(
+      persistentMeshes.every((mesh) => !mesh.isAnInstance && mesh.thinInstanceCount === 1001),
+      '正式 Shelf 阵列必须把源实体和 1000 个逻辑副本一次写入 thinInstance',
     );
     assert.equal(
       persistentMeshes.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
-      leftMeshes.length * 1000,
-      '正式 Shelf 阵列矩阵总数必须覆盖全部源 Mesh 与独立逻辑实体组合',
+      persistentMeshes.length * 1001,
+      '正式 Shelf 阵列矩阵总数必须覆盖每个合并载体、源实体和全部独立逻辑实体',
     );
     assert.ok(
       persistentMeshes.every((mesh) => mesh.metadata?.modelArraySourceEntityId === left.id && mesh.isPickable),
       '正式 Shelf 矩阵批次必须记录源模型并支持实例拾取',
     );
+    assert.equal(runtime.readEntityIdFromMesh(persistentMeshes[0], 0), left.id, '第一个 thinInstance 必须映射源实体');
     assert.equal(
-      runtime.readEntityIdFromMesh(persistentMeshes[0], 0),
+      runtime.readEntityIdFromMesh(persistentMeshes[0], 1),
       persistentEntities[0].id,
-      'Shelf thinInstanceIndex 必须映射到具体逻辑实体',
+      '后续 Shelf thinInstanceIndex 必须映射到具体逻辑实体',
     );
     assert.doesNotThrow(() => integrationScene.render(), '正式 Shelf 1000 阵列必须保持可渲染');
 
@@ -577,8 +592,8 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     assert.equal(persistentMatrixUpdateCount, 0, '仅切换选择不得重新组合 1000 个 Shelf 矩阵');
 
     const persistentMatrixBuffer = persistentBatch?.batches?.[0]?.matrixBuffer;
-    const firstPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 0)?.getTranslation().x;
-    const lastPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1000 - 1)?.getTranslation().x;
+    const firstPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1)?.getTranslation().x;
+    const lastPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1000)?.getTranslation().x;
     persistentEntities = [
       createSceneRuntimeShelfEntity(persistentEntities[0].id, 7, modelAsset, {
         modelArrayInstance: { sourceEntityId: left.id },
@@ -589,8 +604,8 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     assert.equal(runtime.models.get(left.id)?.modelArrayBatch, persistentBatch, '移动单个 Shelf 实体必须复用正式矩阵批次');
     assert.equal(persistentMatrixUpdateCount, 1, '移动一个 Shelf 实体只允许触发一次整批矩阵刷新');
     assert.equal(persistentBatch?.batches?.[0]?.matrixBuffer, persistentMatrixBuffer, '移动 Shelf 实体必须复用原 Float32Array');
-    const updatedFirstPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 0)?.getTranslation().x;
-    const updatedLastPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1000 - 1)?.getTranslation().x;
+    const updatedFirstPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1)?.getTranslation().x;
+    const updatedLastPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1000)?.getTranslation().x;
     assert.ok(
       Math.abs((updatedFirstPersistentX ?? Number.NaN) - ((firstPersistentX ?? Number.NaN) + 5)) <= 1e-6,
       '移动单个 Shelf 实体必须只让自己的最终世界矩阵平移 5m',
@@ -635,8 +650,8 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     assert.equal(runtime.modelArrayParameterVariants.size, 2, '两个不同参数组合只应创建两个脚本宿主');
     assert.equal(
       runtime.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
-      998,
-      '修改两个阵列实体参数后，基础批次必须保留其余 998 个模型',
+      999,
+      '修改两个阵列实体参数后，基础批次必须保留源实体和其余 998 个模型',
     );
     assert.deepEqual(
       firstParameterVariant.model.modelArrayBatch.getEntityIds(),
@@ -654,9 +669,14 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       '参数变体 thinInstance 拾取必须映射回自己的逻辑模型',
     );
     assert.ok(
-      firstParameterVariant.model.meshes.every((mesh) => mesh.layerMask === 0 && mesh.isPickable === false),
-      '参数脚本宿主必须隐藏且不可拾取，只显示 thinInstance 批次',
+      firstParameterVariant.model.meshes.every((mesh) => (
+        mesh.layerMask === 0
+        && mesh.isPickable === false
+        && !integrationScene.meshes.includes(mesh)
+      )),
+      '参数脚本宿主必须移出场景且不可拾取，只显示 thinInstance 批次',
     );
+    assert.equal(firstParameterVariant.model.root.isEnabled(), false, '参数脚本宿主根节点必须暂停渲染');
     assert.ok(
       firstParameterVariant.model.modelArrayBatch.meshes.every((mesh) => mesh.layerMask !== 0 && mesh.thinInstanceCount > 0),
       '参数脚本输出必须继续通过可见 thinInstance 批次渲染',
@@ -737,8 +757,8 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     assert.equal(runtime.modelArrayParameterVariants.size, 0, '恢复默认参数后必须释放全部额外脚本宿主');
     assert.equal(
       runtime.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
-      1000,
-      '恢复默认参数后全部 1000 个逻辑模型必须重新合并到基础 thinInstance 批次',
+      1001,
+      '恢复默认参数后源实体和全部 1000 个逻辑模型必须重新合并到基础 thinInstance 批次',
     );
 
     const lockedRight = createSceneRuntimeShelfEntity(right.id, 10, modelAsset, { locked: true });

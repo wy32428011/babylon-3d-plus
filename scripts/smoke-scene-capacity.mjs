@@ -13,6 +13,7 @@ import { createServer } from 'vite';
 const FIXTURE_GLB_PATH = path.join(process.cwd(), 'output', 'playwright', 'shelf-assets', 'Shelf.glb');
 const STATIC_ENTITY_COUNT = 100;
 const EDIT_THIN_INSTANCE_ENTITY_COUNT = STATIC_ENTITY_COUNT - 1;
+const EDIT_BATCH_ENTITY_COUNT = STATIC_ENTITY_COUNT;
 const WAIT_ATTEMPTS = 1_000;
 const WAIT_INTERVAL_MS = 20;
 
@@ -372,7 +373,7 @@ async function run() {
     const editBatch = await waitForEditThinInstanceBatch(
       runtime,
       editPlan.sourceEntityIds[0],
-      EDIT_THIN_INSTANCE_ENTITY_COUNT,
+      EDIT_BATCH_ENTITY_COUNT,
     );
     assert.equal(loadCount, 1, '编辑态 100 个同源模型必须只加载一次 AssetContainer');
     assert.equal(runtime.models.size, 1, '编辑态重复模型不得创建逐实体 ModelRuntimeEntry');
@@ -382,8 +383,8 @@ async function run() {
       '编辑态覆盖层必须保留每个逻辑实体的独立 ID 与 Transform',
     );
     assert.ok(
-      editBatch.meshes.every((mesh) => !mesh.isAnInstance && mesh.thinInstanceCount === EDIT_THIN_INSTANCE_ENTITY_COUNT),
-      '编辑态重复模型必须按源 Mesh 创建固定批次并一次提交 thinInstance 矩阵',
+      editBatch.meshes.every((mesh) => !mesh.isAnInstance && mesh.thinInstanceCount === EDIT_BATCH_ENTITY_COUNT),
+      '编辑态重复模型必须按源 Mesh 创建固定批次并同时提交源实体与全部逻辑实例矩阵',
     );
     const editBatchMeshCount = editBatch.meshes.length;
 
@@ -446,6 +447,7 @@ async function run() {
       ok: true,
       entityCount: STATIC_ENTITY_COUNT,
       editThinInstanceEntityCount: EDIT_THIN_INSTANCE_ENTITY_COUNT,
+      editBatchEntityCount: EDIT_BATCH_ENTITY_COUNT,
       editThinInstanceMeshCount: editBatchMeshCount,
       sourceLoadCount: loadCount,
       sourceDisposeCount,

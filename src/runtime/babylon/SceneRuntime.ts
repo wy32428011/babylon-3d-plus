@@ -237,6 +237,8 @@ type ModelRuntimeEntry = {
   contentRoot: TransformNode;
   assetHandle: ModelRuntimeAssetHandle | null;
   meshes: AbstractMesh[];
+  /** 因模型阵列批次而从 scene.meshes 暂时移除的脚本宿主 Mesh。 */
+  modelArraySuspendedMeshes: Set<AbstractMesh>;
   modelArrayBatch: EntityArrayThinInstanceBatch | null;
   modelArraySourceSignature: string;
   modelArrayFailureSignature: string;
@@ -718,6 +720,10 @@ export class SceneRuntime {
 
     const modelArrayInstance = this.modelArrayInstanceEntities.get(entityId);
     if (modelArrayInstance) return this.getOrCreateModelArrayGizmoProxy(modelArrayInstance);
+    const sourceModel = this.models.get(entityId);
+    if (sourceModel?.modelArrayBatch && sourceModel.entitySnapshot) {
+      return this.getOrCreateModelArrayGizmoProxy(sourceModel.entitySnapshot);
+    }
 
     return (
       this.meshes.get(entityId) ??
@@ -2069,6 +2075,8 @@ export class SceneRuntime {
     const current = this.models.get(entity.id);
     if (current) {
       current.entitySnapshot = entity;
+      // 脚本宿主可能因上一帧矩阵批次而禁用；参数与脚本更新前先恢复节点计算。
+      current.root.setEnabled(true);
       this.applyTransform(current.root, entity.components.transform);
       if (current.assetCode !== modelAsset.assetCode) {
         this.disposeStackerCargoForAssetCode(current.assetCode);
@@ -2113,6 +2121,7 @@ export class SceneRuntime {
       contentRoot,
       assetHandle: null,
       meshes: [],
+      modelArraySuspendedMeshes: new Set(),
       modelArrayBatch: null,
       modelArraySourceSignature: '',
       modelArrayFailureSignature: '',
@@ -2383,6 +2392,7 @@ export class SceneRuntime {
       contentRoot,
       assetHandle: null,
       meshes: [],
+      modelArraySuspendedMeshes: new Set(),
       modelArrayBatch: null,
       modelArraySourceSignature: '',
       modelArrayFailureSignature: '',
@@ -5529,6 +5539,7 @@ export class SceneRuntime {
     model.assetHandle?.dispose();
     model.contentRoot.dispose();
     model.root.dispose();
+    model.modelArraySuspendedMeshes.clear();
     this.models.delete(entityId);
     this.onModelMeasurementChanged(entityId);
   }
@@ -5801,13 +5812,40 @@ export class SceneRuntime {
 
   /** 将显隐和锁定状态应用到导入模型的根节点与子 Mesh。 */
   private applyModelInteractivity(model: ModelRuntimeEntry, entityId: string): void {
+    if (model.modelArrayBatch) {
+      this.suspendModelArrayHost(model);
+      return;
+    }
+
+    this.restoreModelArrayHostMeshes(model);
     const visible = this.isEntityVisible(entityId);
     const pickable = visible && this.isEntityScenePickable(entityId);
-
     model.root.setEnabled(visible);
     for (const mesh of model.meshes) {
       mesh.isPickable = pickable;
     }
+  }
+
+  /**
+   * 阵列批次已经承载源实体本身和全部逻辑实例时，脚本宿主只保留节点与几何引用。
+   * 将其从 scene.meshes 移除，避免 Babylon 每帧重复遍历同一套隐藏叶 Mesh。
+   */
+  private suspendModelArrayHost(model: ModelRuntimeEntry): void {
+    model.root.setEnabled(false);
+    for (const mesh of model.meshes) {
+      if (mesh.isDisposed()) continue;
+      if (this.scene.removeMesh(mesh) >= 0) model.modelArraySuspendedMeshes.add(mesh);
+      mesh.isPickable = false;
+    }
+  }
+
+  /** 阵列取消或降级时，只把本运行时主动移除的宿主 Mesh 放回场景。 */
+  private restoreModelArrayHostMeshes(model: ModelRuntimeEntry): void {
+    if (model.modelArraySuspendedMeshes.size === 0) return;
+    for (const mesh of model.modelArraySuspendedMeshes) {
+      if (!mesh.isDisposed() && !this.scene.meshes.includes(mesh)) this.scene.addMesh(mesh);
+    }
+    model.modelArraySuspendedMeshes.clear();
   }
 
   /** 仅同步模型生成器配置标记；自动货物不继承实体显隐、锁定或选中状态。 */
@@ -6207,6 +6245,7 @@ export class SceneRuntime {
       this.disposeModelArrayBatch(model);
       this.disposeModelArrayParameterVariantsForSource(entity.id);
       model.modelArrayFailureSignature = '';
+      this.applyModelInteractivity(model, entity.id);
       return;
     }
 
@@ -6241,7 +6280,8 @@ export class SceneRuntime {
     }
     this.disposeMissingModelArrayParameterVariants(entity.id, activeVariantKeys);
 
-    this.syncModelArrayBatchForEntities(entity, model, baseInstances, legacyItems, {
+    // 源实体也由同一批次承载，才能安全移除完整脚本宿主，而不是保留成千上万个源叶 Mesh。
+    this.syncModelArrayBatchForEntities(entity, model, [entity, ...baseInstances], legacyItems, {
       sourceEntityId: entity.id,
       namePrefix: '__modelArrayThinInstance',
       renderSignature: sourceRenderSignature,
@@ -6426,6 +6466,7 @@ export class SceneRuntime {
       contentRoot,
       assetHandle: null,
       meshes: [],
+      modelArraySuspendedMeshes: new Set(),
       modelArrayBatch: null,
       modelArraySourceSignature: '',
       modelArrayFailureSignature: '',
@@ -6527,7 +6568,7 @@ export class SceneRuntime {
     });
   }
 
-  /** 脚本宿主继续保持可执行，但 layerMask=0，场景只显示其批次 Mesh。 */
+  /** 先保存脚本宿主的原渲染层；批次创建期间仍需读取完整世界矩阵和视觉状态。 */
   private hideModelArrayParameterVariantHost(variant: ModelArrayParameterVariantRuntimeEntry): void {
     const activeMeshIds = new Set<number>();
     for (const mesh of variant.model.meshes) {
@@ -6542,8 +6583,9 @@ export class SceneRuntime {
     }
   }
 
-  /** 参数更新前恢复宿主原渲染层，让脚本基于正常节点状态运行；提交完成后会再次隐藏。 */
+  /** 参数更新前恢复宿主节点与原渲染层；Mesh 无需重新加入场景，脚本通过稳定节点引用直接更新。 */
   private restoreModelArrayParameterVariantHost(variant: ModelArrayParameterVariantRuntimeEntry): void {
+    variant.model.root.setEnabled(true);
     for (const mesh of variant.model.meshes) {
       const layerMask = variant.sourceLayerMasks.get(mesh.uniqueId);
       if (layerMask !== undefined) mesh.layerMask = layerMask;
@@ -6568,6 +6610,8 @@ export class SceneRuntime {
     if (totalInstanceCount === 0) {
       this.disposeModelArrayBatch(model);
       model.modelArrayFailureSignature = '';
+      if (options.variantKey) this.suspendModelArrayHost(model);
+      else this.applyModelInteractivity(model, entity.id);
       return;
     }
     if (!model.assetHandle || !model.measurementReady) return;
@@ -6583,14 +6627,19 @@ export class SceneRuntime {
 
     if (sourceMeshes.length === 0) {
       this.disposeModelArrayBatch(model);
+      if (options.variantKey) this.suspendModelArrayHost(model);
+      else this.applyModelInteractivity(model, entity.id);
       this.reportModelArrayBatchFailure(entity, model, failureSignature, '参数脚本执行后没有可渲染 Mesh');
       return;
     }
 
     if (!model.modelArrayBatch || model.modelArraySourceSignature !== sourceSignature) {
       this.disposeModelArrayBatch(model);
+      model.root.computeWorldMatrix(true);
       model.modelArrayBatch = EntityArrayThinInstanceBatch.create(options.sourceEntityId, sourceMeshes, {
         interactive: true,
+        mergeStaticMeshesByMaterial: true,
+        sourceRootWorldMatrix: model.root.getWorldMatrix().clone(),
         metadata: {
           modelArraySourceEntityId: options.sourceEntityId,
           ...(options.variantKey ? { modelArrayParameterVariant: true } : {}),
@@ -6603,6 +6652,11 @@ export class SceneRuntime {
         for (const mesh of model.modelArrayBatch.meshes) {
           this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, model.modelArrayBatch);
         }
+      } else {
+        if (options.variantKey) this.suspendModelArrayHost(model);
+        else this.applyModelInteractivity(model, entity.id);
+        this.reportModelArrayBatchFailure(entity, model, failureSignature, '参数脚本输出 Mesh 不支持批量实例');
+        return;
       }
     }
 
@@ -6633,6 +6687,8 @@ export class SceneRuntime {
     model.root.computeWorldMatrix(true);
     if (!model.modelArrayBatch?.updateEntityTransforms(model.root.getWorldMatrix().clone(), visibleInstances)) {
       this.disposeModelArrayBatch(model);
+      if (options.variantKey) this.suspendModelArrayHost(model);
+      else this.applyModelInteractivity(model, entity.id);
       this.reportModelArrayBatchFailure(
         entity,
         model,
@@ -6647,6 +6703,7 @@ export class SceneRuntime {
       this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, model.modelArrayBatch);
     }
     model.modelArrayFailureSignature = '';
+    this.suspendModelArrayHost(model);
   }
 
   private disposeMissingModelArrayParameterVariants(sourceEntityId: string, activeKeys: ReadonlySet<string>): void {
@@ -6684,6 +6741,7 @@ export class SceneRuntime {
     model.assetHandle = null;
     model.contentRoot.dispose();
     model.root.dispose();
+    model.modelArraySuspendedMeshes.clear();
     for (const entity of variant.entities) this.onModelMeasurementChanged(entity.id);
   }
 
@@ -7235,7 +7293,7 @@ export class SceneRuntime {
 
   /** 根据模型资源类型应用普通 Mesh 高亮或记录共享实例描边状态。 */
   private applyModelSelection(model: ModelRuntimeEntry, selected: boolean): void {
-    if (model.assetHandle?.kind === 'shared-instance') {
+    if (model.modelArrayBatch || model.assetHandle?.kind === 'shared-instance') {
       for (const mesh of model.highlightedMeshes) {
         this.modelHighlightLayer.removeMesh(mesh);
       }
@@ -7274,6 +7332,9 @@ export class SceneRuntime {
     const parameterVariant = this.modelArrayParameterVariantByEntityId.get(entityId);
     if (parameterVariant?.model.modelArrayBatch) return parameterVariant.model.modelArrayBatch;
 
+    const sourceBatch = this.models.get(entityId)?.modelArrayBatch;
+    if (sourceBatch) return sourceBatch;
+
     const instanceEntity = this.modelArrayInstanceEntities.get(entityId);
     const sourceEntityId = instanceEntity?.components.modelArrayInstance?.sourceEntityId;
     return sourceEntityId ? this.models.get(sourceEntityId)?.modelArrayBatch ?? null : null;
@@ -7289,7 +7350,7 @@ export class SceneRuntime {
 
     for (const entityId of this.selectedEntityIds) {
       const model = this.models.get(entityId);
-      if (model?.assetHandle?.kind === 'shared-instance' && model.highlighted) {
+      if (model?.assetHandle?.kind === 'shared-instance' && !model.modelArrayBatch && model.highlighted) {
         const meshes = model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
         if (meshes.length > 0) selectedSourceGroups.push(meshes);
       }

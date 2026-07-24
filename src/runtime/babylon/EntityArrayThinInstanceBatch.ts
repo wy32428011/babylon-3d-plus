@@ -1,10 +1,15 @@
 import {
   AbstractMesh,
   type InstancedMesh,
+  type Material,
   Matrix,
+  PBRMaterial,
   Mesh,
   Quaternion,
+  StandardMaterial,
   Vector3,
+  VertexBuffer,
+  VertexData,
 } from '@babylonjs/core';
 import type { TransformComponent } from '../../editor/model/components';
 import type { Vector3Data } from '../../editor/model/math';
@@ -12,6 +17,26 @@ import type { Vector3Data } from '../../editor/model/math';
 const ENTITY_ARRAY_MATRIX_INSTANCE_LIMIT = 1_000_000;
 const ENTITY_ARRAY_MATRIX_DETERMINANT_EPSILON = 1e-12;
 const INSTANCE_SELECTION_ID_BUFFER = 'instanceSelectionId';
+/** 单个合并载体的静态顶点预算，避免把高密度内部 thinInstance 意外展开成超大 Geometry。 */
+const STATIC_MERGE_MAX_VERTICES = 1_000_000;
+const STATIC_MERGE_MAX_INDICES = 3_000_000;
+const STATIC_MERGE_VERTEX_KINDS = new Set([
+  VertexBuffer.PositionKind,
+  VertexBuffer.NormalKind,
+  VertexBuffer.TangentKind,
+  VertexBuffer.UVKind,
+  VertexBuffer.UV2Kind,
+  VertexBuffer.UV3Kind,
+  VertexBuffer.UV4Kind,
+  VertexBuffer.UV5Kind,
+  VertexBuffer.UV6Kind,
+  VertexBuffer.ColorKind,
+  INSTANCE_SELECTION_ID_BUFFER,
+  VertexBuffer.MatricesIndicesKind,
+  VertexBuffer.MatricesWeightsKind,
+  VertexBuffer.MatricesIndicesExtraKind,
+  VertexBuffer.MatricesWeightsExtraKind,
+]);
 
 type EntityArrayMatrixOrientation = 1 | -1;
 
@@ -34,6 +59,10 @@ type EntityArrayMatrixCandidate = {
   sourceMesh: AbstractMesh;
   batchSource: Mesh;
   layerMask: number | null;
+  /** 已烘焙到源模型根节点局部空间的静态合并 Geometry。 */
+  rootLocalVertexData: VertexData | null;
+  rootLocalGeometryBaked: boolean;
+  sourceRootWorldMatrix: Matrix | null;
 };
 
 type EntityArrayMatrixSource = EntityArrayMatrixCandidate & {
@@ -55,6 +84,10 @@ export type EntityArrayThinInstanceBatchOptions = {
   namePrefix?: string;
   /** 可覆盖批次 Mesh 的渲染层，避免隐藏脚本宿主后把 layerMask=0 传播到正式实例。 */
   resolveLayerMask?: (sourceMesh: AbstractMesh) => number;
+  /** 正式静态模型阵列可按材质合并叶 Mesh；预览和动态模型默认保持逐 Mesh 路径。 */
+  mergeStaticMeshesByMaterial?: boolean;
+  /** 合并 Geometry 使用的源模型根世界矩阵，顶点会烘焙到该根节点局部空间。 */
+  sourceRootWorldMatrix?: Matrix;
 };
 
 /** 一个可独立编辑、但与同组实体共享静态外观资源的矩阵实例。 */
@@ -99,7 +132,7 @@ export class EntityArrayThinInstanceBatch {
     sourceMeshes: readonly AbstractMesh[],
     options: EntityArrayThinInstanceBatchOptions = {},
   ): EntityArrayThinInstanceBatch | null {
-    const candidates: EntityArrayMatrixCandidate[] = [];
+    let candidates: EntityArrayMatrixCandidate[] = [];
 
     for (let meshIndex = 0; meshIndex < sourceMeshes.length; meshIndex += 1) {
       const sourceMesh = sourceMeshes[meshIndex];
@@ -112,10 +145,17 @@ export class EntityArrayThinInstanceBatch {
         sourceMesh,
         batchSource,
         layerMask: options.resolveLayerMask?.(sourceMesh) ?? null,
+        rootLocalVertexData: null,
+        rootLocalGeometryBaked: false,
+        sourceRootWorldMatrix: null,
       });
     }
 
     if (candidates.length === 0) return null;
+
+    if (options.mergeStaticMeshesByMaterial && options.sourceRootWorldMatrix) {
+      candidates = mergeStaticCandidatesByMaterial(candidates, options.sourceRootWorldMatrix);
+    }
 
     const interactive = options.interactive === true;
     const sources: EntityArrayMatrixSource[] = [];
@@ -186,7 +226,9 @@ export class EntityArrayThinInstanceBatch {
     }> = [];
     let totalInstanceCount = 0;
     for (const source of this.sources) {
-      const sourceWorldMatrices = captureSourceWorldMatrices(source.sourceMesh);
+      const sourceWorldMatrices = source.rootLocalGeometryBaked && source.sourceRootWorldMatrix
+        ? [source.sourceRootWorldMatrix.clone()]
+        : captureSourceWorldMatrices(source.sourceMesh);
       const sourceMatrices = captureMatrixOrientations(sourceWorldMatrices);
       if (!sourceMatrices) return false;
 
@@ -318,9 +360,10 @@ export class EntityArrayThinInstanceBatch {
     }> = [];
     let totalInstanceCount = 0;
     for (const source of this.sources) {
-      const sourceWorldMatrices = captureSourceWorldMatrices(source.sourceMesh);
-      if (sourceWorldMatrices.length === 0) return false;
-      const sourceRelativeMatrices = sourceWorldMatrices.map((matrix) => matrix.multiply(inverseSourceRoot));
+      const sourceRelativeMatrices = source.rootLocalGeometryBaked
+        ? [Matrix.Identity()]
+        : captureSourceWorldMatrices(source.sourceMesh).map((matrix) => matrix.multiply(inverseSourceRoot));
+      if (sourceRelativeMatrices.length === 0) return false;
       const sourceMatrices = captureMatrixOrientations(sourceRelativeMatrices);
       if (!sourceMatrices) return false;
 
@@ -635,7 +678,515 @@ export class EntityArrayThinInstanceBatch {
   }
 }
 
+/**
+ * 把同材质静态叶 Mesh 合并为源根局部 Geometry。
+ * 透明、骨骼、Morph、动态顶点动画、复杂 SubMesh 和已有内部 thinInstance 保持原批次路径。
+ */
+function mergeStaticCandidatesByMaterial(
+  candidates: readonly EntityArrayMatrixCandidate[],
+  sourceRootWorldMatrix: Matrix,
+): EntityArrayMatrixCandidate[] {
+  if (!isFiniteMatrix(sourceRootWorldMatrix)) return [...candidates];
+  const rootDeterminant = sourceRootWorldMatrix.determinant();
+  if (!Number.isFinite(rootDeterminant) || Math.abs(rootDeterminant) <= ENTITY_ARRAY_MATRIX_DETERMINANT_EPSILON) {
+    return [...candidates];
+  }
+
+  const inverseSourceRoot = sourceRootWorldMatrix.clone();
+  inverseSourceRoot.invert();
+  const grouped = new Map<string, EntityArrayMatrixCandidate[]>();
+  const output: EntityArrayMatrixCandidate[] = [];
+  const materialSignatureCache = new Map<Material, string | null>();
+
+  for (const candidate of candidates) {
+    const key = createStaticMergeKey(candidate, materialSignatureCache);
+    if (!key) {
+      output.push(candidate);
+      continue;
+    }
+    const group = grouped.get(key) ?? [];
+    group.push(candidate);
+    grouped.set(key, group);
+  }
+
+  for (const group of grouped.values()) {
+    let chunk: EntityArrayMatrixCandidate[] = [];
+    let chunkVertices = 0;
+    let chunkIndices = 0;
+    const flush = (): void => {
+      if (chunk.length < 2) {
+        output.push(...chunk);
+      } else {
+        const merged = createMergedStaticCandidate(chunk, sourceRootWorldMatrix, inverseSourceRoot);
+        if (merged) output.push(merged);
+        else output.push(...chunk);
+      }
+      chunk = [];
+      chunkVertices = 0;
+      chunkIndices = 0;
+    };
+
+    for (const candidate of group) {
+      const vertexCount = candidate.batchSource.getTotalVertices();
+      const indexCount = candidate.batchSource.getTotalIndices();
+      if (vertexCount > STATIC_MERGE_MAX_VERTICES || indexCount > STATIC_MERGE_MAX_INDICES) {
+        flush();
+        output.push(candidate);
+        continue;
+      }
+      if (
+        chunk.length > 0
+        && (
+          chunkVertices + vertexCount > STATIC_MERGE_MAX_VERTICES
+          || chunkIndices + indexCount > STATIC_MERGE_MAX_INDICES
+        )
+      ) {
+        flush();
+      }
+      chunk.push(candidate);
+      chunkVertices += vertexCount;
+      chunkIndices += indexCount;
+    }
+    flush();
+  }
+
+  return output.sort((left, right) => left.meshIndex - right.meshIndex);
+}
+
+/** 返回只有视觉状态完全兼容时才相同的静态合并键。 */
+function createStaticMergeKey(
+  candidate: EntityArrayMatrixCandidate,
+  materialSignatureCache: Map<Material, string | null>,
+): string | null {
+  const { sourceMesh, batchSource } = candidate;
+  if (getSourceMatrixCount(sourceMesh) !== 1) return null;
+  if (batchSource.getClassName() !== 'Mesh' || batchSource.subMeshes.length !== 1) return null;
+  if (!batchSource.geometry) return null;
+  const totalVertices = batchSource.getTotalVertices();
+  const totalIndices = batchSource.getTotalIndices();
+  const subMesh = batchSource.subMeshes[0];
+  if (
+    subMesh.verticesStart !== 0
+    || subMesh.verticesCount !== totalVertices
+    || (totalIndices > 0 && (subMesh.indexStart !== 0 || subMesh.indexCount !== totalIndices))
+  ) {
+    return null;
+  }
+  if (totalIndices <= 0 && totalVertices % 3 !== 0) return null;
+  const vertexKinds = batchSource.getVerticesDataKinds().slice().sort();
+  if (vertexKinds.some((kind) => !STATIC_MERGE_VERTEX_KINDS.has(kind))) return null;
+  if (sourceMesh.skeleton || sourceMesh.morphTargetManager || sourceMesh.bakedVertexAnimationManager) return null;
+  if (sourceMesh.billboardMode !== 0 || sourceMesh.infiniteDistance) return null;
+
+  const material = sourceMesh.material;
+  try {
+    if (material?.needAlphaBlendingForMesh(sourceMesh)) return null;
+  } catch {
+    return null;
+  }
+  const materialSignature = material
+    ? getMaterialAppearanceSignature(material, materialSignatureCache)
+    : 'none';
+  if (!materialSignature) return null;
+
+  return [
+    materialSignature,
+    candidate.layerMask ?? sourceMesh.layerMask,
+    sourceMesh.renderingGroupId,
+    sourceMesh.alphaIndex,
+    sourceMesh.visibility,
+    sourceMesh.isVisible ? 1 : 0,
+    sourceMesh.isEnabled(false) ? 1 : 0,
+    sourceMesh.receiveShadows ? 1 : 0,
+    sourceMesh.hasVertexAlpha ? 1 : 0,
+    sourceMesh.useVertexColors ? 1 : 0,
+    sourceMesh.applyFog ? 1 : 0,
+    batchSource.sideOrientation,
+    batchSource.overrideRenderingFillMode ?? -1,
+    material?.sideOrientation ?? -1,
+    batchSource.getTotalIndices() > 0 ? 'indexed' : 'unindexed',
+    vertexKinds.join(','),
+  ].join('|');
+}
+
+/** 仅对无动态绑定的标准/PBR 材质生成有界视觉签名，避免序列化 GLB 内嵌纹理拖慢场景加载。 */
+function getMaterialAppearanceSignature(
+  material: Material,
+  cache: Map<Material, string | null>,
+): string | null {
+  if (cache.has(material)) return cache.get(material) ?? null;
+  if ((material.animations?.length ?? 0) > 0 || material.onBindObservable.hasObservers() || material.stencil.enabled) {
+    cache.set(material, null);
+    return null;
+  }
+  const textures = material.getActiveTextures();
+  if (textures.some((texture) => (
+    texture.isRenderTarget
+    || (texture.animations?.length ?? 0) > 0
+    || !['Texture', 'CubeTexture'].includes(texture.getClassName())
+  ))) {
+    cache.set(material, null);
+    return null;
+  }
+
+  const materialBase = material as Material & {
+    textureRepetitionMode?: number;
+    textureRepetitionHexTilingParams?: unknown;
+  };
+  const base = [
+    normalizeMaterialAppearanceName(material.name),
+    material.alpha,
+    material.backFaceCulling,
+    material.cullBackFaces,
+    material.sideOrientation,
+    material.alphaMode,
+    material.needDepthPrePass,
+    material.disableDepthWrite,
+    material.disableColorWrite,
+    material.forceDepthWrite,
+    material.depthFunction,
+    material.separateCullingPass,
+    material.fogEnabled,
+    material.pointSize,
+    material.zOffset,
+    material.zOffsetUnits,
+    material.pointsCloud,
+    material.fillMode,
+    materialBase.textureRepetitionMode ?? null,
+    materialBase.textureRepetitionHexTilingParams ?? null,
+    ...textures.map(createTextureAppearanceSignature),
+  ];
+  let signature: string | null = null;
+
+  if (material instanceof PBRMaterial) {
+    if (
+      material.clearCoat.isEnabled
+      || material.anisotropy.isEnabled
+      || material.sheen.isEnabled
+      || material.iridescence.isEnabled
+      || material.detailMap.isEnabled
+      || material.subSurface.isRefractionEnabled
+      || material.subSurface.isTranslucencyEnabled
+      || material.subSurface.isScatteringEnabled
+    ) {
+      cache.set(material, null);
+      return null;
+    }
+    signature = JSON.stringify([
+      'PBRMaterial',
+      ...base,
+      material.albedoColor.asArray(),
+      material.ambientColor.asArray(),
+      material.reflectivityColor.asArray(),
+      material.reflectionColor.asArray(),
+      material.emissiveColor.asArray(),
+      material.metallicReflectanceColor.asArray(),
+      material.metallic,
+      material.roughness,
+      material.microSurface,
+      material.indexOfRefraction,
+      material.directIntensity,
+      material.emissiveIntensity,
+      material.environmentIntensity,
+      material.specularIntensity,
+      material.metallicF0Factor,
+      material.baseWeight,
+      material.ambientTextureStrength,
+      material.ambientTextureImpactOnAnalyticalLights,
+      material.transparencyMode,
+      material.disableBumpMap,
+      material.disableLighting,
+      material.maxSimultaneousLights,
+      material.twoSidedLighting,
+      material.invertNormalMapX,
+      material.invertNormalMapY,
+      material.forceNormalForward,
+      material.unlit,
+      material.useAlphaFromAlbedoTexture,
+      material.forceAlphaTest,
+      material.alphaCutOff,
+      material.useSpecularOverAlpha,
+      material.useRoughnessFromMetallicTextureAlpha,
+      material.useRoughnessFromMetallicTextureGreen,
+      material.useMetallnessFromMetallicTextureBlue,
+      material.useAmbientOcclusionFromMetallicTextureRed,
+      material.useOnlyMetallicFromMetallicReflectanceTexture,
+      material.useLightmapAsShadowmap,
+      material.useMicroSurfaceFromReflectivityMapAlpha,
+      material.useAmbientInGrayScale,
+      material.useAutoMicroSurfaceFromReflectivityMap,
+      material.usePhysicalLightFalloff,
+      material.useGLTFLightFalloff,
+      material.useRadianceOverAlpha,
+      material.useObjectSpaceNormalMap,
+      material.useParallax,
+      material.useParallaxOcclusion,
+      material.parallaxScaleBias,
+      material.forceIrradianceInFragment,
+      material.useAlphaFresnel,
+      material.useLinearAlphaFresnel,
+      material.enableSpecularAntiAliasing,
+      material.useHorizonOcclusion,
+      material.useRadianceOcclusion,
+      material.applyDecalMapAfterDetailMap,
+    ]);
+  } else if (material instanceof StandardMaterial) {
+    if (
+      material.detailMap.isEnabled
+      || material.diffuseFresnelParameters
+      || material.opacityFresnelParameters
+      || material.reflectionFresnelParameters
+      || material.refractionFresnelParameters
+      || material.emissiveFresnelParameters
+    ) {
+      cache.set(material, null);
+      return null;
+    }
+    signature = JSON.stringify([
+      'StandardMaterial',
+      ...base,
+      material.diffuseColor.asArray(),
+      material.ambientColor.asArray(),
+      material.specularColor.asArray(),
+      material.emissiveColor.asArray(),
+      material.specularPower,
+      material.roughness,
+      material.indexOfRefraction,
+      material.invertRefractionY,
+      material.disableLighting,
+      material.maxSimultaneousLights,
+      material.twoSidedLighting,
+      material.invertNormalMapX,
+      material.invertNormalMapY,
+      material.useAlphaFromDiffuseTexture,
+      material.alphaCutOff,
+      material.useEmissiveAsIllumination,
+      material.linkEmissiveWithDiffuse,
+      material.useSpecularOverAlpha,
+      material.useReflectionOverAlpha,
+      material.useObjectSpaceNormalMap,
+      material.useParallax,
+      material.useParallaxOcclusion,
+      material.parallaxScaleBias,
+      material.useLightmapAsShadowmap,
+      material.useReflectionFresnelFromSpecular,
+      material.useGlossinessFromSpecularMapAlpha,
+      material.applyDecalMapAfterDetailMap,
+    ]);
+  }
+
+  cache.set(material, signature);
+  return signature;
+}
+
+/** 使用 URL、采样、UV 和纹理视觉状态生成有界签名，不依赖运行时 texture uniqueId。 */
+function createTextureAppearanceSignature(
+  texture: ReturnType<Material['getActiveTextures']>[number],
+): string {
+  const sampledTexture = texture as typeof texture & {
+    url?: string | null;
+    uOffset?: number;
+    vOffset?: number;
+    uScale?: number;
+    vScale?: number;
+    uAng?: number;
+    vAng?: number;
+    wAng?: number;
+    uRotationCenter?: number;
+    vRotationCenter?: number;
+    wRotationCenter?: number;
+    homogeneousRotationInUVTransform?: boolean;
+    wrapR?: number;
+    anisotropicFilteringLevel?: number;
+    invertZ?: boolean;
+    lodLevelInAlpha?: boolean;
+    lodGenerationOffset?: number;
+    lodGenerationScale?: number;
+    linearSpecularLOD?: boolean;
+    invertY?: boolean;
+    samplingMode?: number;
+    noMipmap?: boolean;
+    optimizeUVAllocation?: boolean;
+    isBlocking?: boolean;
+    is3D?: boolean;
+    is2DArray?: boolean;
+    _useSRGBBuffer?: boolean;
+  };
+  return JSON.stringify([
+    texture.getClassName(),
+    texture.name,
+    sampledTexture.url ?? null,
+    texture.coordinatesIndex,
+    texture.coordinatesMode,
+    texture.level,
+    sampledTexture.uOffset ?? 0,
+    sampledTexture.vOffset ?? 0,
+    sampledTexture.uScale ?? 1,
+    sampledTexture.vScale ?? 1,
+    sampledTexture.uAng ?? 0,
+    sampledTexture.vAng ?? 0,
+    sampledTexture.wAng ?? 0,
+    sampledTexture.uRotationCenter ?? 0.5,
+    sampledTexture.vRotationCenter ?? 0.5,
+    sampledTexture.wRotationCenter ?? 0.5,
+    sampledTexture.homogeneousRotationInUVTransform ?? false,
+    texture.wrapU,
+    texture.wrapV,
+    sampledTexture.wrapR ?? 1,
+    texture.hasAlpha,
+    texture.getAlphaFromRGB,
+    texture.gammaSpace,
+    texture.isCube,
+    sampledTexture.is3D ?? false,
+    sampledTexture.is2DArray ?? false,
+    sampledTexture.anisotropicFilteringLevel ?? 0,
+    sampledTexture.invertZ ?? false,
+    sampledTexture.lodLevelInAlpha ?? false,
+    sampledTexture.lodGenerationOffset ?? 0,
+    sampledTexture.lodGenerationScale ?? 0,
+    sampledTexture.linearSpecularLOD ?? false,
+    sampledTexture.invertY ?? false,
+    sampledTexture.samplingMode ?? null,
+    sampledTexture.noMipmap ?? false,
+    sampledTexture.optimizeUVAllocation ?? true,
+    sampledTexture.isBlocking ?? true,
+    sampledTexture._useSRGBBuffer ?? false,
+  ]);
+}
+
+/** GLB 导入和参数脚本会给等价克隆追加运行时序号；只移除这些已知非视觉后缀。 */
+function normalizeMaterialAppearanceName(name: string): string {
+  return name
+    .replace(/_(?:chain|gd|hcts|wlts)_\d+$/i, '')
+    .replace(/_parametric_\d+$/i, '');
+}
+
+/** 提取独立 VertexData，应用正确的世界到源根局部变换，再合并为单材质 Geometry。 */
+function createMergedStaticCandidate(
+  candidates: readonly EntityArrayMatrixCandidate[],
+  sourceRootWorldMatrix: Matrix,
+  inverseSourceRoot: Matrix,
+): EntityArrayMatrixCandidate | null {
+  const vertexDatas: VertexData[] = [];
+  try {
+    for (const candidate of candidates) {
+      const vertexData = VertexData.ExtractFromMesh(candidate.batchSource, true, true);
+      if (!vertexData.positions || vertexData.positions.length === 0) return null;
+      candidate.sourceMesh.computeWorldMatrix(true);
+      const rootLocalMatrix = candidate.sourceMesh.getWorldMatrix().multiply(inverseSourceRoot);
+      if (!transformVertexDataPreservingNormals(vertexData, rootLocalMatrix)) return null;
+      vertexDatas.push(vertexData);
+    }
+
+    const merged = vertexDatas[0];
+    if (!merged) return null;
+    if (vertexDatas.length > 1) merged.merge(vertexDatas.slice(1), true, false, false, false);
+    const representative = candidates[0];
+    return {
+      ...representative,
+      meshIndex: Math.min(...candidates.map((candidate) => candidate.meshIndex)),
+      rootLocalVertexData: merged,
+      rootLocalGeometryBaked: true,
+      sourceRootWorldMatrix: sourceRootWorldMatrix.clone(),
+    };
+  } catch (error) {
+    console.warn('合并模型阵列静态 Geometry 失败，已回退逐 Mesh 批次。', error);
+    return null;
+  }
+}
+
+/** VertexData.transform 对非均匀缩放直接变换法线；这里用逆转置矩阵恢复正确光照。 */
+function transformVertexDataPreservingNormals(vertexData: VertexData, matrix: Matrix): boolean {
+  const determinant = matrix.determinant();
+  if (!Number.isFinite(determinant) || Math.abs(determinant) <= ENTITY_ARRAY_MATRIX_DETERMINANT_EPSILON) return false;
+
+  const sourceNormals = vertexData.normals ? Float32Array.from(vertexData.normals) : null;
+  const sourceTangents = vertexData.tangents ? Float32Array.from(vertexData.tangents) : null;
+  vertexData.transform(matrix);
+
+  const normalMatrix = matrix.clone();
+  normalMatrix.invert();
+  normalMatrix.transpose();
+  const transformed = new Vector3();
+
+  if (sourceNormals && vertexData.normals) {
+    for (let offset = 0; offset < sourceNormals.length; offset += 3) {
+      Vector3.TransformNormalFromFloatsToRef(
+        sourceNormals[offset],
+        sourceNormals[offset + 1],
+        sourceNormals[offset + 2],
+        normalMatrix,
+        transformed,
+      );
+      transformed.normalize();
+      vertexData.normals[offset] = transformed.x;
+      vertexData.normals[offset + 1] = transformed.y;
+      vertexData.normals[offset + 2] = transformed.z;
+    }
+  }
+
+  if (sourceTangents && vertexData.tangents) {
+    const handedness = determinant < 0 ? -1 : 1;
+    for (let offset = 0; offset < sourceTangents.length; offset += 4) {
+      // 切线是表面方向，必须走线性模型矩阵；只有法线使用逆转置矩阵。
+      Vector3.TransformNormalFromFloatsToRef(
+        sourceTangents[offset],
+        sourceTangents[offset + 1],
+        sourceTangents[offset + 2],
+        matrix,
+        transformed,
+      );
+      transformed.normalize();
+      vertexData.tangents[offset] = transformed.x;
+      vertexData.tangents[offset + 1] = transformed.y;
+      vertexData.tangents[offset + 2] = transformed.z;
+      vertexData.tangents[offset + 3] = sourceTangents[offset + 3] * handedness;
+    }
+  }
+  if (determinant < 0 && !vertexData.indices && !flipUnindexedTriangleFaces(vertexData)) return false;
+  return true;
+}
+
 /** 为普通 Mesh 或 InstancedMesh 找到可克隆的几何源。 */
+/** 反射变换下无索引三角形没有 index buffer 可翻面，必须交换每个三角形的后两个顶点。 */
+function flipUnindexedTriangleFaces(vertexData: VertexData): boolean {
+  const vertexCount = (vertexData.positions?.length ?? 0) / 3;
+  if (!Number.isInteger(vertexCount) || vertexCount % 3 !== 0) return false;
+  for (let vertex = 0; vertex < vertexCount; vertex += 3) {
+    swapVertexAttribute(vertexData.positions, 3, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.normals, 3, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.tangents, 4, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.colors, 4, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.uvs, 2, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.uvs2, 2, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.uvs3, 2, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.uvs4, 2, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.uvs5, 2, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.uvs6, 2, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.matricesIndices, 4, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.matricesWeights, 4, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.matricesIndicesExtra, 4, vertex + 1, vertex + 2);
+    swapVertexAttribute(vertexData.matricesWeightsExtra, 4, vertex + 1, vertex + 2);
+  }
+  return true;
+}
+
+function swapVertexAttribute(
+  values: { length: number; [index: number]: number } | null | undefined,
+  stride: number,
+  leftVertex: number,
+  rightVertex: number,
+): void {
+  if (!values) return;
+  const leftOffset = leftVertex * stride;
+  const rightOffset = rightVertex * stride;
+  for (let component = 0; component < stride; component += 1) {
+    const value = values[leftOffset + component];
+    values[leftOffset + component] = values[rightOffset + component];
+    values[rightOffset + component] = value;
+  }
+}
+
 function resolveBatchSourceMesh(mesh: AbstractMesh): Mesh | null {
   if (mesh instanceof Mesh) return mesh;
   if (!mesh.isAnInstance) return null;
@@ -689,14 +1240,26 @@ function createMatrixBatch(
   interactive: boolean,
   secondary: boolean,
 ): EntityArrayMatrixBatch {
-  const batchMesh = source.batchSource.clone(
-    `${source.namePrefix}_${source.entityId}_${source.meshIndex}${secondary ? '_negativeOrientation' : ''}`,
-    null,
-    true,
-  );
-  // Babylon 将 thinInstance 的 world0-world3 顶点缓冲挂在 Geometry 上；若批次继续共享源 Geometry，
-  // 同一几何的多个辊筒/克隆批次会互相覆盖矩阵缓冲，最终全部叠到最后一个位置。
-  batchMesh.makeGeometryUnique();
+  const batchName = `${source.namePrefix}_${source.entityId}_${source.meshIndex}${secondary ? '_negativeOrientation' : ''}`;
+  let batchMesh: Mesh;
+  if (source.rootLocalGeometryBaked) {
+    if (secondary && source.batches[0]) {
+      batchMesh = source.batches[0].mesh.clone(batchName, null, true);
+      batchMesh.makeGeometryUnique();
+    } else {
+      const rootLocalVertexData = source.rootLocalVertexData;
+      if (!rootLocalVertexData) throw new Error('静态合并 Geometry 已释放，无法重复创建主批次。');
+      batchMesh = new Mesh(batchName, source.batchSource.getScene());
+      rootLocalVertexData.applyToMesh(batchMesh, false);
+      // GPU Geometry 已创建后释放大数组引用；负方向批次后续直接克隆主批次。
+      source.rootLocalVertexData = null;
+    }
+  } else {
+    batchMesh = source.batchSource.clone(batchName, null, true);
+    // Babylon 将 thinInstance 的 world0-world3 顶点缓冲挂在 Geometry 上；若批次继续共享源 Geometry，
+    // 同一几何的多个辊筒/克隆批次会互相覆盖矩阵缓冲，最终全部叠到最后一个位置。
+    batchMesh.makeGeometryUnique();
+  }
   const batch: EntityArrayMatrixBatch = {
     mesh: batchMesh,
     sourceMesh: source.sourceMesh,
