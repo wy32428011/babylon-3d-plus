@@ -155,6 +155,10 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const [viewportHeight, setViewportHeight] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
 
+  const folderIds = useMemo(
+    () => entityIds.filter((entityId) => entities[entityId]?.isFolder === true),
+    [entityIds, entities],
+  );
   const rows = useMemo(
     () => buildHierarchyRows(entityIds, entities, searchText, collapsedFolderIds),
     [entityIds, entities, searchText, collapsedFolderIds],
@@ -409,6 +413,16 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     });
   }
 
+  /** 展开当前场景中的全部文件夹。 */
+  function expandAllFolders(): void {
+    setCollapsedFolderIds(new Set<string>());
+  }
+
+  /** 收缩当前场景中的全部文件夹。 */
+  function collapseAllFolders(): void {
+    setCollapsedFolderIds(new Set(folderIds));
+  }
+
   /** 开始拖拽时携带当前多选中的普通实体，文件夹自身不参与分组移动。 */
   function handleRowDragStart(event: DragEvent<HTMLDivElement>, entity: Entity): void {
     if (entity.isFolder) {
@@ -478,6 +492,28 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
             onChange={(event) => setSearchText(event.target.value)}
           />
         </label>
+        <div aria-label="模型树展开控制" className="hierarchy-tree-actions" role="group">
+          <button
+            aria-label="全部展开"
+            className="hierarchy-tree-action-button"
+            disabled={folderIds.length === 0}
+            onClick={expandAllFolders}
+            title="全部展开"
+            type="button"
+          >
+            <span aria-hidden="true">⊞</span>
+          </button>
+          <button
+            aria-label="全部收缩"
+            className="hierarchy-tree-action-button"
+            disabled={folderIds.length === 0}
+            onClick={collapseAllFolders}
+            title="全部收缩"
+            type="button"
+          >
+            <span aria-hidden="true">⊟</span>
+          </button>
+        </div>
         <button className="hierarchy-new-folder-button" disabled={props.readOnly} onClick={createFolder} type="button">
           + 新建
         </button>

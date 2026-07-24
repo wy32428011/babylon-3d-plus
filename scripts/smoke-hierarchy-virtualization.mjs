@@ -127,6 +127,10 @@ try {
   assert.match(panelSource, /getHierarchyScrollTopForIndex\(/, '组件必须把视口外目标行滚动到可见位置');
   assert.match(panelSource, /new ResizeObserver\(/, '组件必须响应面板视口尺寸变化');
   assert.match(panelSource, /onScroll=\{handleListScroll\}/, '组件必须根据列表滚动更新虚拟窗口');
+  assert.match(panelSource, /aria-label="全部展开"/, 'Hierarchy 工具栏必须提供全部展开按钮');
+  assert.match(panelSource, /aria-label="全部收缩"/, 'Hierarchy 工具栏必须提供全部收缩按钮');
+  assert.match(panelSource, /setCollapsedFolderIds\(new Set<string>\(\)\)/, '全部展开必须清空文件夹收缩集合');
+  assert.match(panelSource, /setCollapsedFolderIds\(new Set\(folderIds\)\)/, '全部收缩必须覆盖当前全部文件夹');
 
   assert.match(cssSource, /\.hierarchy-virtual-spacer\s*\{[^}]*position:\s*relative;/s, 'CSS 必须提供总高度占位层');
   assert.match(cssSource, /\.hierarchy-virtual-window\s*\{[^}]*position:\s*absolute;/s, 'CSS 必须让窗口行脱离总高度布局');
@@ -143,6 +147,7 @@ try {
       absoluteShiftRangeIndex: true,
       selectedAndRenamingAutoScroll: true,
       fixedTotalHeight: true,
+      expandAndCollapseAll: true,
     },
   }, null, 2));
 } finally {

@@ -26,7 +26,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - CAD/DXF 网格参考层：Toolbar 支持导入 `.dxf` CAD 图纸，导入过程中会显示读取、解析和创建参考层进度；`LINE`、`ARC`、`CIRCLE`、`ELLIPSE`、`SPLINE`、`LWPOLYLINE`、`POLYLINE` 会在解析阶段统一换算为米，并按 DXF 正 Y → Babylon 正 Z 的同向规则转为贴近 `y = 0` 网格层的半透明线稿，避免俯视图上下镜像。超过 64 MB 的图纸在 Worker 中分块读取并完整扫描块定义/嵌套 INSERT，曲线采用有界采样，几何以 TypedArray 紧凑缓冲区零拷贝回传并分批创建 LinesMesh；默认安全上限为 100 万条折线 / 800 万个点，不再按旧的“每块 128 个图元 / 全图 80 万点”预览策略截断常规大图。单位优先读取 `$INSUNITS` 0–24，未声明单位时参考 `$MEASUREMENT`，仍无法判断时明确按毫米兜底；参考图默认锁定、不可拾取，Inspector 会显示源单位、判定来源和换算系数，并随场景保存/加载恢复。
 - 创建基础对象：支持创建米制 Cube、Sphere、Plane；基准尺寸分别为 `1 m × 1 m × 1 m`、直径 `1 m`、`2 m × 2 m`，有体积对象拖入 Scene View 时会以底面落地。
 - 创建基础灯光：支持创建 Hemispheric、Directional、Point 三类灯光实体。
-- Hierarchy 选择与分组：支持在层级面板中选择场景对象，并与 Scene View 高亮状态同步；选中文件夹时会在 Scene View 高亮该文件夹下的所有可显示模型；左侧 Hierarchy 提供搜索、新建文件夹、单选/多选拖入文件夹分组、拖回根层级，以及实体/文件夹级显示隐藏、锁定解锁控制。
+- Hierarchy 选择与分组：支持在层级面板中选择场景对象，并与 Scene View 高亮状态同步；选中文件夹时会在 Scene View 高亮该文件夹下的所有可显示模型；左侧 Hierarchy 提供搜索、全部展开、全部收缩、新建文件夹、单选/多选拖入文件夹分组、拖回根层级，以及实体/文件夹级显示隐藏、锁定解锁控制。
 - Hierarchy 右键菜单：左侧模型树单选或多选后可打开深色上下文菜单，支持场景聚焦、库聚焦、隐藏、复制、粘贴、模型阵列、锁定、重命名、删除、群组和解组；右键未选中对象会切换为单选，右键当前多选对象会保留多选集合。复制文件夹时会连同全部直属对象生成完整文件夹副本，空文件夹同样支持复制，粘贴和撤销/重做均按整个文件夹处理。
 - Scene View 点击选中：支持在 Scene 画布单击对象完成选中，单击空白区域会清空当前选择。
 - Inspector 实体编辑：支持编辑选中实体名称、position、rotation、scale 等 Transform 数据；其中 position 按米、rotation 在 UI 中按角度、内部仍按弧度保存。内置 Box 以 1 米基准映射为 `size (m)`；Sphere/Plane 明确显示米制基准尺寸，但通用 scale 仍保持无量纲缩放比例。普通导入模型的 `Model Asset` 区域固定显示只读“实际尺寸 (m)”及 X/Y/Z，加载中或无有效可见几何时显示明确状态。
