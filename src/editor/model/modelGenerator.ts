@@ -2,13 +2,11 @@ import type {
   MeshKind,
   ModelAssetComponent,
   ModelAssetTemplate,
-  ModelGeneratorBinding,
   ModelGeneratorComponent,
   ModelGeneratorFetchBinding,
   ModelGeneratorModelTarget,
   ModelGeneratorRule,
   ModelGeneratorTarget,
-  ModelGeneratorWarehouseFlow,
   ModelScriptAsset,
 } from './components';
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from './modelParameters';
@@ -196,7 +194,6 @@ export function createDefaultModelGeneratorComponent(): ModelGeneratorComponent 
     defaultTarget: null,
     rules: [],
     metadataTtlSeconds: MODEL_GENERATOR_DEFAULT_TTL_SECONDS,
-    bindings: [],
     fetchBindings: [],
     dataSource: 'mqtt',
   };
@@ -289,20 +286,6 @@ export function sanitizeModelGeneratorRule(value: unknown): ModelGeneratorRule |
   };
 }
 
-/** 清理生成绑定，缺少 id 的绑定会被过滤，其余字段按字符串契约保存。 */
-export function sanitizeModelGeneratorBinding(value: unknown): ModelGeneratorBinding | null {
-  if (!isPlainObject(value)) return null;
-  const id = sanitizeId(value.id);
-  if (!id) return null;
-
-  return {
-    id,
-    sourceId: sanitizeText(value.sourceId),
-    deviceType: sanitizeText(value.deviceType).toLowerCase(),
-    assetCode: sanitizeText(value.assetCode, 128),
-  };
-}
-
 /** 清理 fetch 定位线框绑定，只保留 id 和 assetCode。 */
 export function sanitizeModelGeneratorFetchBinding(value: unknown): ModelGeneratorFetchBinding | null {
   if (!isPlainObject(value)) return null;
@@ -315,25 +298,11 @@ export function sanitizeModelGeneratorFetchBinding(value: unknown): ModelGenerat
   };
 }
 
-/** 清理仓储流绑定引用；空引用允许在 Inspector 中作为待配置草稿保存。 */
-export function sanitizeModelGeneratorWarehouseFlow(value: unknown): ModelGeneratorWarehouseFlow | undefined {
-  if (!isPlainObject(value)) return undefined;
-  return {
-    enabled: value.enabled === true,
-    inboundBindingId: sanitizeId(value.inboundBindingId),
-    stackerBindingId: sanitizeId(value.stackerBindingId),
-    outboundBindingId: sanitizeId(value.outboundBindingId),
-  };
-}
-
 /** 清理完整模型生成器组件，限制规则和绑定数量并过滤非法目标。 */
 export function sanitizeModelGeneratorComponent(value: unknown): ModelGeneratorComponent | null {
   if (!isPlainObject(value)) return null;
   const rules = Array.isArray(value.rules)
     ? value.rules.slice(0, MODEL_GENERATOR_MAX_RULES).map(sanitizeModelGeneratorRule).filter((rule): rule is ModelGeneratorRule => Boolean(rule))
-    : [];
-  const bindings = Array.isArray(value.bindings)
-    ? value.bindings.slice(0, MODEL_GENERATOR_MAX_BINDINGS).map(sanitizeModelGeneratorBinding).filter((binding): binding is ModelGeneratorBinding => Boolean(binding))
     : [];
   const fetchBindings = Array.isArray(value.fetchBindings)
     ? value.fetchBindings.slice(0, MODEL_GENERATOR_MAX_BINDINGS).map(sanitizeModelGeneratorFetchBinding).filter((b): b is ModelGeneratorFetchBinding => Boolean(b))
@@ -343,12 +312,8 @@ export function sanitizeModelGeneratorComponent(value: unknown): ModelGeneratorC
     defaultTarget: sanitizeModelGeneratorTarget(value.defaultTarget),
     rules,
     metadataTtlSeconds: sanitizeModelGeneratorMetadataTtlSeconds(value.metadataTtlSeconds),
-    bindings,
     fetchBindings,
     dataSource: value.dataSource === 'fetch' ? 'fetch' : 'mqtt',
-    ...(value.warehouseFlow === undefined
-      ? {}
-      : { warehouseFlow: sanitizeModelGeneratorWarehouseFlow(value.warehouseFlow) }),
   };
 }
 

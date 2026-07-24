@@ -39,7 +39,6 @@ import type {
   MeshKind,
   MeshRendererComponent,
   ModelAssetComponent,
-  ModelGeneratorBinding,
   ModelGeneratorComponent,
   ModelGeneratorTarget,
   TransformComponent,
@@ -104,13 +103,6 @@ import {
   type SpecializedTelemetryDeviceType,
 } from './telemetry/specializedTelemetryBinding';
 import { resolveLocatorBoxIndex, resolveStackerStorageForkReach, resolveStackerStorageTargetOffsets, type StackerStorageTargetOffsets } from './telemetry/stackerStorageLocation';
-import {
-  WarehouseFlowCoordinator,
-  type WarehouseConveyorFrame,
-  type WarehouseInboundState,
-  type WarehouseOutboundState,
-  type WarehouseStackerFrame,
-} from './warehouse/WarehouseFlowCoordinator';
 import {
   deviceTelemetryStore,
   readBooleanField,
@@ -311,55 +303,11 @@ type GeneratedOutputOwnerRuntimeEntry = {
   onTerminalLoadFailure?: () => void;
 };
 
-/** 已从生成器脱离并由仓储流独立管理的货物实例。 */
-type WarehouseCargoRuntimeEntry = {
-  cargoCode: string;
-  locatorKey: string;
-  root: TransformNode;
-  output: ModelGeneratorOutputRuntimeEntry;
-};
-
-/** 仓储流三设备的完整绑定集合。 */
-type ResolvedWarehouseFlowBindings = {
-  inbound: ModelGeneratorBinding;
-  stacker: ModelGeneratorBinding;
-  outbound: ModelGeneratorBinding;
-};
-
-/** 输送机入/出料与 MQTT 前/后端的世界锚点和当前平台朝向。 */
-type WarehouseConveyorAnchors = {
-  infeed: Vector3;
-  outfeed: Vector3;
-  mqttFront: Vector3 | null;
-  mqttBack: Vector3 | null;
-  hasExplicitMqttEndpoints: boolean;
-  spanMeters: number;
-  rotation: Quaternion;
-};
-
-/** YZJ 模型局部方向参数；MQTT 前后端缺失时继续兼容旧入/出料路径。 */
-type WarehouseConveyorSides = {
-  infeed: 'left' | 'right' | 'front' | 'rear';
-  outfeed: 'left' | 'right' | 'front' | 'rear';
-  mqttFront: 'left' | 'right' | 'front' | 'rear' | null;
-  mqttBack: 'left' | 'right' | 'front' | 'rear' | null;
-  hasExplicitMqttEndpoints: boolean;
-};
-
-/** 仓储流当前选中的堆垛机货叉侧和作业字段。 */
-type WarehouseStackerActivity = WarehouseStackerFrame & {
-  snapshot: DeviceTelemetrySnapshot;
-};
-
 type ModelGeneratorRuntimeEntry = GeneratedOutputOwnerRuntimeEntry & {
   markerRoot: TransformNode;
   marker: ModelGeneratorMarkerRuntimeEntry;
   selected: boolean;
-  warehouseCoordinator: WarehouseFlowCoordinator;
-  warehouseActiveResolution: ResolvedModelGeneratorTarget | null;
-  warehouseCargos: Map<string, WarehouseCargoRuntimeEntry>;
   runtimeConfigSignature: string;
-  reportedWarehouseIssues: Set<string>;
 };
 
 type ResolvedModelGeneratorTarget = {
@@ -431,6 +379,8 @@ type GeneratedCargoRuntimeEntry = {
   root: TransformNode;
   outputOwner: GeneratedOutputOwnerRuntimeEntry | null;
   fallback: GeneratedCargoFallbackRuntimeEntry | null;
+  /** 货箱模板来源生成器实体 ID；null 表示内置几何体回退。 */
+  generatorEntityId: string | null;
 };
 
 type StackerCargoRuntimeEntry = GeneratedCargoRuntimeEntry & {
@@ -553,8 +503,9 @@ export class SceneRuntime {
   private readonly reportedStatuses = new Map<string, string>();
   private telemetryPreviewActive = false;
   private environment: EnvironmentRuntimeEntry | null = null;
-  private activeModelGeneratorEntityId: string | null = null;
-  private reportedModelGeneratorConflictSignature = '';
+  private cargoHandoffBlockedAssetCodes = new Set<string>();
+  private cargoHandoffBlockedSignature = '';
+  private readonly reportedCargoHandoffIssues = new Set<string>();
   private sharedModelSelectionOutlineSignature = '';
   private entityArrayPreview: EntityArrayPreviewEntry | null = null;
   private modelLoadSequence = 0;
@@ -664,7 +615,6 @@ export class SceneRuntime {
     for (const fetchRuntime of this.fetchRuntimes.values()) {
       fetchRuntime.clearAllBatches();
     }
-    this.resetAllWarehouseFlows();
     for (const model of this.models.values()) {
       if (model.telemetryPreviewBaseline) {
         restoreModelTelemetryPreviewBaseline(model.telemetryPreviewBaseline);
@@ -1280,17 +1230,9 @@ export class SceneRuntime {
         && !document.entities[entityId]?.components.modelArrayInstance,
       )),
     );
-    const modelGeneratorEntityIds = document.entityIds.filter(
-      (entityId) => Boolean(document.entities[entityId]?.components.modelGenerator),
+    const modelGeneratorIds = new Set(
+      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.modelGenerator)),
     );
-    const modelGeneratorIds = new Set(modelGeneratorEntityIds);
-    const nextActiveModelGeneratorEntityId = modelGeneratorEntityIds[0] ?? null;
-    if (this.activeModelGeneratorEntityId !== nextActiveModelGeneratorEntityId) {
-      this.disposeAllTelemetryRuntimeCargo();
-      this.resetAllWarehouseFlows();
-      this.activeModelGeneratorEntityId = nextActiveModelGeneratorEntityId;
-    }
-    this.reportModelGeneratorConflicts(modelGeneratorEntityIds);
 
     const lightIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.light)),
@@ -1393,6 +1335,7 @@ export class SceneRuntime {
     this.syncAllModelArrayBatches(document, dirtyModelArraySourceIds);
     this.selectedEntityIds = selectedEntityIds;
     this.rebuildLocatorTargetIndex(document);
+    this.rebuildCargoHandoffGraph(document);
     this.rebuildSharedModelSelectionOutline();
   }
 
@@ -1474,23 +1417,171 @@ export class SceneRuntime {
     this.lights.get(entity.id)?.setEnabled(this.isEntityVisible(entity.id));
   }
 
-  /** 多个生成器只启用场景顺序中的第一个，并对同一冲突集合仅记录一次诊断。 */
-  private reportModelGeneratorConflicts(entityIds: string[]): void {
-    if (entityIds.length <= 1) {
-      this.reportedModelGeneratorConflictSignature = '';
-      return;
+  /** 依据设备侧 upstreamAssetCode 构建前置设备图，检测环并输出一次性诊断。 */
+  private rebuildCargoHandoffGraph(document: SceneDocument): void {
+    const upstreamByAssetCode = new Map<string, string>();
+    const knownAssetCodes = new Set<string>();
+    for (const entityId of document.entityIds) {
+      const entity = document.entities[entityId];
+      const modelAsset = entity?.components.modelAsset;
+      if (!entity || entity.isFolder || !modelAsset) continue;
+      const binding = entity.components.telemetryBinding;
+      const assetCode = (binding?.assetCode ?? modelAsset.assetCode).trim();
+      if (!assetCode) continue;
+      knownAssetCodes.add(assetCode);
+      const upstreamAssetCode = binding?.upstreamAssetCode?.trim();
+      if (upstreamAssetCode) upstreamByAssetCode.set(assetCode, upstreamAssetCode);
     }
 
-    const signature = entityIds.join('|');
-    if (this.reportedModelGeneratorConflictSignature === signature) return;
-    this.reportedModelGeneratorConflictSignature = signature;
-    this.pushLog(`场景存在 ${entityIds.length} 个模型生成器，仅启用 Hierarchy 中第一个作为全局自动模型管理器。`);
+    for (const [assetCode, upstreamAssetCode] of upstreamByAssetCode) {
+      if (upstreamAssetCode === assetCode) {
+        this.reportCargoHandoffIssue(`upstream-self:${assetCode}`, `设备 ${assetCode} 的前置设备不能是自身，已按入口设备处理。`);
+        continue;
+      }
+      if (!knownAssetCodes.has(upstreamAssetCode)) {
+        this.reportCargoHandoffIssue(
+          `upstream-missing:${assetCode}:${upstreamAssetCode}`,
+          `设备 ${assetCode} 的前置设备 ${upstreamAssetCode} 在场景中不存在，已按入口设备处理。`,
+        );
+      }
+    }
+
+    const blocked = new Set<string>();
+    for (const start of upstreamByAssetCode.keys()) {
+      const visited = new Set<string>([start]);
+      let cursor = upstreamByAssetCode.get(start);
+      while (cursor && upstreamByAssetCode.has(cursor)) {
+        if (visited.has(cursor)) {
+          for (const code of visited) blocked.add(code);
+          blocked.add(cursor);
+          break;
+        }
+        visited.add(cursor);
+        cursor = upstreamByAssetCode.get(cursor);
+      }
+    }
+
+    const signature = [...blocked].sort().join('|');
+    if (signature !== this.cargoHandoffBlockedSignature) {
+      this.cargoHandoffBlockedSignature = signature;
+      if (blocked.size > 0) {
+        this.pushLog(`检测到前置设备环（${[...blocked].join('、')}），相关设备已停止货箱驱动。`);
+      }
+    }
+    this.cargoHandoffBlockedAssetCodes = blocked;
   }
 
-  /** 读取当前场景唯一生效的全局模型生成器运行时条目。 */
-  private getActiveModelGenerator(): ModelGeneratorRuntimeEntry | null {
-    if (!this.activeModelGeneratorEntityId) return null;
-    return this.modelGenerators.get(this.activeModelGeneratorEntityId) ?? null;
+  /** 判断设备是否处于前置设备环上，环上设备停止全部货箱驱动。 */
+  private isCargoHandoffBlocked(model: ModelRuntimeEntry, deviceType: SpecializedTelemetryDeviceType): boolean {
+    if (this.cargoHandoffBlockedAssetCodes.size === 0) return false;
+    const resolved = resolveSpecializedTelemetryBinding({
+      modelAssetCode: model.assetCode,
+      deviceType,
+      binding: model.telemetryBinding,
+    });
+    return resolved ? this.cargoHandoffBlockedAssetCodes.has(resolved.assetCode) : false;
+  }
+
+  /** 货箱交接问题按稳定 key 只写一次 Console。 */
+  private reportCargoHandoffIssue(key: string, message: string): void {
+    if (this.reportedCargoHandoffIssues.has(key)) return;
+    this.reportedCargoHandoffIssues.add(key);
+    this.pushLog(message);
+  }
+
+  /** 读取设备绑定的模型生成器运行时条目；绑定失效时回退内置几何体并提示一次。 */
+  private resolveCargoGeneratorForModel(model: ModelRuntimeEntry): ModelGeneratorRuntimeEntry | null {
+    const generatorId = model.telemetryBinding?.cargoGeneratorId?.trim();
+    if (!generatorId) return null;
+    const generator = this.modelGenerators.get(generatorId) ?? null;
+    if (!generator) {
+      this.reportCargoHandoffIssue(
+        `cargo-generator-missing:${model.assetCode}:${generatorId}`,
+        `设备 ${model.assetCode} 绑定的模型生成器已被删除，货箱回退内置几何体。`,
+      );
+    }
+    return generator;
+  }
+
+  /** 释放指定生成器提供模板的全部运行时货箱。 */
+  private disposeTelemetryCargoForGenerator(generatorEntityId: string): void {
+    for (const [key, cargo] of this.conveyorCargoMeshes.entries()) {
+      if (cargo.generatorEntityId !== generatorEntityId) continue;
+      this.disposeConveyorCargo(cargo);
+      this.conveyorCargoMeshes.delete(key);
+    }
+    for (const [key, cargo] of this.stackerCargoMeshes.entries()) {
+      if (cargo.generatorEntityId !== generatorEntityId) continue;
+      this.disposeStackerCargo(cargo);
+      this.stackerCargoMeshes.delete(key);
+    }
+  }
+
+  /** 按有效资产编号查找唯一设备模型，供前置设备解析使用。 */
+  private findModelByEffectiveAssetCode(assetCode: string): ModelRuntimeEntry | null {
+    const matches = [...this.models.values()].filter((model) => {
+      const bindingAssetCode = model.telemetryBinding?.assetCode?.trim();
+      return (bindingAssetCode || model.assetCode) === assetCode;
+    });
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  /** 从前置设备当前持有货物继承条码，保证同一货物在链路中条码连续。 */
+  private resolveUpstreamCargoCode(model: ModelRuntimeEntry): string | null {
+    const upstreamAssetCode = model.telemetryBinding?.upstreamAssetCode?.trim();
+    if (!upstreamAssetCode) return null;
+    const upstreamModel = this.findModelByEffectiveAssetCode(upstreamAssetCode);
+    if (!upstreamModel) return null;
+
+    const binding = resolveSpecializedTelemetryBinding({
+      modelAssetCode: upstreamModel.assetCode,
+      deviceType: upstreamModel.stackerCapable ? 'stacker' : 'conveyor',
+      binding: upstreamModel.telemetryBinding,
+    });
+    if (!binding) return null;
+    const snapshot = resolveSpecializedTelemetrySnapshot(deviceTelemetryStore, binding);
+    if (!snapshot || Date.now() - snapshot.receivedAt > binding.staleAfterMs) return null;
+
+    const conveyorCode = upstreamModel.conveyorTelemetry.cargoCode;
+    if (conveyorCode && conveyorCode !== CONVEYOR_ANONYMOUS_CARGO_CODE) return conveyorCode;
+    const forkCodes = [upstreamModel.stackerTelemetry.frontCargoCode, upstreamModel.stackerTelemetry.backCargoCode]
+      .filter((code): code is string => Boolean(code));
+    return forkCodes.length === 1 ? forkCodes[0] : null;
+  }
+
+  /**
+   * 设备生成新货箱后清理其他设备上的同码货箱：仅当原持有设备已不再上报该条码时销毁，
+   * 已入库（placedLocatorKey）的货物不受交接影响。
+   */
+  private disposeHandedOffCargo(spawningModel: ModelRuntimeEntry, containerCode: string): void {
+    if (containerCode === CONVEYOR_ANONYMOUS_CARGO_CODE) return;
+    const isOwnerStillReporting = (ownerAssetCode: string): boolean => {
+      const owner = findModelByAssetCode(ownerAssetCode);
+      if (!owner) return false;
+      if (owner.conveyorTelemetry.cargoCode === containerCode) return true;
+      return owner.stackerTelemetry.frontCargoCode === containerCode
+        || owner.stackerTelemetry.backCargoCode === containerCode;
+    };
+    const findModelByAssetCode = (assetCode: string): ModelRuntimeEntry | null => {
+      for (const candidate of this.models.values()) {
+        if (candidate.assetCode === assetCode) return candidate;
+      }
+      return null;
+    };
+
+    for (const [key, cargo] of this.conveyorCargoMeshes.entries()) {
+      if (cargo.containerCode !== containerCode || cargo.assetCode === spawningModel.assetCode) continue;
+      if (isOwnerStillReporting(cargo.assetCode)) continue;
+      this.disposeConveyorCargo(cargo);
+      this.conveyorCargoMeshes.delete(key);
+    }
+    for (const [key, cargo] of this.stackerCargoMeshes.entries()) {
+      if (cargo.containerCode !== containerCode || cargo.assetCode === spawningModel.assetCode) continue;
+      if (cargo.placedLocatorKey) continue;
+      if (isOwnerStillReporting(cargo.assetCode)) continue;
+      this.disposeStackerCargo(cargo);
+      this.stackerCargoMeshes.delete(key);
+    }
   }
 
   /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
@@ -1602,8 +1693,9 @@ export class SceneRuntime {
     this.entityStates.clear();
     this.syncedEntities.clear();
     this.selectedEntityIds.clear();
-    this.activeModelGeneratorEntityId = null;
-    this.reportedModelGeneratorConflictSignature = '';
+    this.cargoHandoffBlockedAssetCodes = new Set<string>();
+    this.cargoHandoffBlockedSignature = '';
+    this.reportedCargoHandoffIssues.clear();
     this.sharedModelSelectionOutlineSignature = '';
   }
 
@@ -2162,11 +2254,7 @@ export class SceneRuntime {
         reportedLoadFailureKeys: new Set(),
         activeSnapshot: null,
         metadata: { modelGeneratorCargo: true, generatorEntityId: entity.id },
-        warehouseCoordinator: new WarehouseFlowCoordinator(),
-        warehouseActiveResolution: null,
-        warehouseCargos: new Map(),
         runtimeConfigSignature: '',
-        reportedWarehouseIssues: new Set(),
       };
       this.modelGenerators.set(entity.id, runtimeEntry);
       this.generatedOutputOwners.set(runtimeEntry.entityId, runtimeEntry);
@@ -2181,10 +2269,10 @@ export class SceneRuntime {
 
     const runtimeConfigSignature = this.createModelGeneratorRuntimeConfigSignature(component);
     if (runtimeEntry.runtimeConfigSignature && runtimeEntry.runtimeConfigSignature !== runtimeConfigSignature) {
-      if (runtimeEntry.entityId === this.activeModelGeneratorEntityId) {
-        this.disposeAllTelemetryRuntimeCargo();
-      }
-      this.resetModelGeneratorWarehouseFlow(runtimeEntry);
+      this.disposeTelemetryCargoForGenerator(entity.id);
+      this.disposeModelGeneratorOutput(runtimeEntry);
+      runtimeEntry.activeTargetSignature = null;
+      runtimeEntry.activeSnapshot = null;
     }
     runtimeEntry.entityName = entity.name;
     runtimeEntry.component = component;
@@ -2456,8 +2544,6 @@ export class SceneRuntime {
     const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
     this.applyStackerTelemetryFrame();
     this.applyConveyorTelemetryFrame();
-    this.updateWarehouseFlowFrames(deltaSeconds);
-    this.applyWarehouseFlowVisuals();
     this.genericTelemetryMotionRuntime.applyFrame(deltaSeconds);
   }
 
@@ -2781,629 +2867,11 @@ export class SceneRuntime {
     this.applyConveyorCargoMotion(model, snapshot, deltaSeconds);
   }
 
-  /** 每帧读取全局生成器三台严格绑定设备，推进仓储协调器并处理货物生命周期事件。 */
-  private updateWarehouseFlowFrames(deltaSeconds: number): void {
-    const runtimeEntry = this.getActiveModelGenerator();
-    if (!runtimeEntry?.component.warehouseFlow?.enabled) return;
-
-    const nowMs = Date.now();
-    const bindings = this.resolveWarehouseFlowBindings(runtimeEntry);
-    if (!bindings) return;
-
-    const ttlMs = runtimeEntry.component.metadataTtlSeconds * 1000;
-    const inboundSnapshot = this.resolveWarehouseBindingSnapshot(bindings.inbound, nowMs, ttlMs);
-    const stackerSnapshot = this.resolveWarehouseBindingSnapshot(bindings.stacker, nowMs, ttlMs);
-    const outboundSnapshot = this.resolveWarehouseBindingSnapshot(bindings.outbound, nowMs, ttlMs);
-    const inboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.inbound, 'conveyor');
-    const stackerModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.stacker, 'stacker');
-    const outboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.outbound, 'conveyor');
-    const inboundAnchors = inboundModel ? this.resolveWarehouseConveyorAnchors(inboundModel) : null;
-    const outboundAnchors = outboundModel ? this.resolveWarehouseConveyorAnchors(outboundModel) : null;
-    const inboundFrame = this.createWarehouseConveyorFrame(inboundSnapshot, inboundAnchors);
-    const flowState = runtimeEntry.warehouseCoordinator.getState();
-    const stackerActivity = this.createWarehouseStackerActivity(runtimeEntry, stackerSnapshot);
-    const outboundFrame = this.createWarehouseConveyorFrame(outboundSnapshot, outboundAnchors);
-    const pendingResolution = flowState.inbound
-      ? runtimeEntry.warehouseActiveResolution
-      : this.resolveWarehouseCargoTarget(runtimeEntry, inboundSnapshot);
-    const update = runtimeEntry.warehouseCoordinator.update({
-      nowMs,
-      deltaSeconds,
-      ttlMs,
-      canStartInbound: Boolean(pendingResolution?.target),
-      inbound: inboundFrame,
-      stacker: stackerActivity,
-      outbound: outboundFrame,
-      storedCargos: [...runtimeEntry.warehouseCargos.values()].map((cargo) => ({
-        cargoCode: cargo.cargoCode,
-        locatorKey: cargo.locatorKey,
-      })),
-    });
-
-    if (update.events.startInboundCargoCode && pendingResolution?.target) {
-      runtimeEntry.warehouseActiveResolution = pendingResolution;
-      runtimeEntry.metadata = {
-        ...runtimeEntry.metadata,
-        containerCode: update.events.startInboundCargoCode,
-      };
-      this.clearWarehouseIssue(runtimeEntry, 'target-missing');
-    }
-    if (update.events.cancelInboundCargoCode) {
-      runtimeEntry.warehouseActiveResolution = null;
-      this.resetGeneratedOutputRoot(runtimeEntry.root);
-    }
-    if (update.events.storeInboundCargo) {
-      const stored = this.storeWarehouseInboundCargo(
-        runtimeEntry,
-        update.events.storeInboundCargo.cargoCode,
-        update.events.storeInboundCargo.locatorKey,
-      );
-      if (stored) {
-        runtimeEntry.warehouseCoordinator.acknowledgeInboundStored(update.events.storeInboundCargo.cargoCode);
-        runtimeEntry.warehouseActiveResolution = null;
-      }
-    }
-    if (update.events.completeOutboundCargoCode) {
-      const cargo = runtimeEntry.warehouseCargos.get(update.events.completeOutboundCargoCode);
-      if (cargo) {
-        this.disposeWarehouseCargo(cargo);
-        runtimeEntry.warehouseCargos.delete(update.events.completeOutboundCargoCode);
-      }
-      runtimeEntry.warehouseCoordinator.acknowledgeOutboundCompleted(update.events.completeOutboundCargoCode);
-    }
-    if (update.events.conflictMessage) {
-      this.reportWarehouseIssue(runtimeEntry, 'cargo-conflict:' + update.events.conflictMessage, update.events.conflictMessage);
-    }
-
-    this.syncModelGeneratorResolvedTarget(runtimeEntry, runtimeEntry.warehouseActiveResolution ?? {
-      target: null,
-      role: 'default',
-      snapshot: null,
-    });
-
-    if (!pendingResolution?.target && inboundFrame?.frontHasGoods) {
-      this.reportWarehouseIssue(runtimeEntry, 'target-missing', '1004 前端有货，但模型生成器没有可用共享模板或规则目标。');
-    }
-  }
-
-  /** 从仓储流配置中解析三条稳定绑定，并严格检查设备类型和完整主键。 */
-  private resolveWarehouseFlowBindings(runtimeEntry: ModelGeneratorRuntimeEntry): ResolvedWarehouseFlowBindings | null {
-    const warehouseFlow = runtimeEntry.component.warehouseFlow;
-    if (!warehouseFlow?.enabled) return null;
-    const byId = new Map(runtimeEntry.component.bindings.map((binding) => [binding.id, binding]));
-    const inbound = byId.get(warehouseFlow.inboundBindingId);
-    const stacker = byId.get(warehouseFlow.stackerBindingId);
-    const outbound = byId.get(warehouseFlow.outboundBindingId);
-    const bindings = [inbound, stacker, outbound];
-    if (bindings.some((binding) => !binding?.sourceId.trim() || !binding.deviceType.trim() || !binding.assetCode.trim())) {
-      this.reportWarehouseIssue(runtimeEntry, 'binding-missing', '仓储流绑定缺失 sourceId、deviceType 或 assetCode，已停止驱动。');
-      return null;
-    }
-    if (inbound!.deviceType.trim().toLowerCase() !== 'conveyor'
-      || stacker!.deviceType.trim().toLowerCase() !== 'stacker'
-      || outbound!.deviceType.trim().toLowerCase() !== 'conveyor') {
-      this.reportWarehouseIssue(runtimeEntry, 'binding-type', '仓储流设备类型必须依次为 conveyor、stacker、conveyor。');
-      return null;
-    }
-    this.clearWarehouseIssue(runtimeEntry, 'binding-missing');
-    this.clearWarehouseIssue(runtimeEntry, 'binding-type');
-    return { inbound: inbound!, stacker: stacker!, outbound: outbound! };
-  }
-
-  /** 按完整主键读取未超时快照；stale 时返回 null，使协调器保持当前位置。 */
-  private resolveWarehouseBindingSnapshot(
-    binding: ModelGeneratorBinding,
-    nowMs: number,
-    ttlMs: number,
-  ): DeviceTelemetrySnapshot | null {
-    const snapshot = deviceTelemetryStore.getSnapshot(
-      binding.assetCode.trim(),
-      binding.deviceType.trim().toLowerCase(),
-      binding.sourceId.trim(),
-    );
-    if (!snapshot || nowMs - snapshot.receivedAt > ttlMs) return null;
-    return snapshot;
-  }
-
-  /** 查找与仓储绑定完整主键一致的唯一设备模型，绝不按名称或唯一数量猜测。 */
-  private findModelByWarehouseBinding(
-    runtimeEntry: ModelGeneratorRuntimeEntry,
-    binding: ModelGeneratorBinding,
-    deviceType: SpecializedTelemetryDeviceType,
-  ): ModelRuntimeEntry | null {
-    const matches = [...this.models.values()].filter((model) => {
-      if (!model.assetHandle || !model.stackerTelemetryReady) return false;
-      const resolved = resolveSpecializedTelemetryBinding({
-        modelAssetCode: model.assetCode,
-        deviceType,
-        binding: model.telemetryBinding,
-      });
-      return resolved?.sourceId === binding.sourceId.trim()
-        && resolved.deviceType === binding.deviceType.trim().toLowerCase()
-        && resolved.assetCode === binding.assetCode.trim();
-    });
-    const missingIssueKey = 'model-missing:' + binding.id;
-    const conflictIssueKey = 'model-conflict:' + binding.id;
-    if (matches.length === 1) {
-      this.clearWarehouseIssue(runtimeEntry, missingIssueKey);
-      this.clearWarehouseIssue(runtimeEntry, conflictIssueKey);
-      return matches[0];
-    }
-    if (matches.length > 1) {
-      this.clearWarehouseIssue(runtimeEntry, missingIssueKey);
-      this.reportWarehouseIssue(
-        runtimeEntry,
-        conflictIssueKey,
-        `仓储流绑定 ${binding.deviceType}/${binding.assetCode} 命中多个模型，已停止驱动。`,
-      );
-      return null;
-    }
-    this.clearWarehouseIssue(runtimeEntry, conflictIssueKey);
-    this.reportWarehouseIssue(
-      runtimeEntry,
-      missingIssueKey,
-      `仓储流绑定 ${binding.deviceType}/${binding.assetCode} 未找到严格匹配的场景模型，已停止驱动。`,
-    );
-    return null;
-  }
-
-  /** 把 Conveyor 快照转换为协调器需要的前后光电、方向和实际跨度。 */
-  private createWarehouseConveyorFrame(
-    snapshot: DeviceTelemetrySnapshot | null,
-    anchors: WarehouseConveyorAnchors | null,
-  ): WarehouseConveyorFrame | null {
-    if (!snapshot || !anchors) return null;
-    return {
-      containerCode: this.readContainerCode(snapshot, 'containerCode'),
-      frontHasGoods: readBooleanField(snapshot.fields, 'front_has_goods') === true,
-      backHasGoods: readBooleanField(snapshot.fields, 'back_has_goods') === true,
-      movementX: readIntegerField(snapshot.fields, 'movement_x') ?? 0,
-      movementY: readIntegerField(snapshot.fields, 'movement_y') ?? 0,
-      liftAtLow: readBooleanField(snapshot.fields, 'lift_at_low'),
-      liftAtHigh: readBooleanField(snapshot.fields, 'lift_at_high'),
-      faulted: snapshot.faulted,
-      receivedAt: snapshot.receivedAt,
-      spanMeters: anchors.spanMeters,
-    };
-  }
-
-  /** 从 DDJ2 前后叉状态中解析唯一活动侧；双叉同时活跃且无法消歧时冻结仓储流。 */
-  private createWarehouseStackerActivity(
-    runtimeEntry: ModelGeneratorRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot | null,
-  ): WarehouseStackerActivity | null {
-    if (!snapshot) return null;
-
-    const candidates = (['front', 'back'] as const).map((side): WarehouseStackerActivity | null => {
-      const command = readIntegerField(snapshot.fields, `${side}_command`);
-      const movementZ = readIntegerField(snapshot.fields, `${side}_movement_z`);
-      const containerCode = this.readContainerCode(snapshot, `${side}_containerCode`);
-      const active = Boolean(containerCode)
-        || this.isWarehouseStackerCommandActive(command)
-        || (movementZ !== null && movementZ !== 0);
-      if (!active) return null;
-      return {
-        snapshot,
-        side,
-        command,
-        movementZ,
-        containerCode,
-        targetLocationKey: snapshot.targetLocationKey,
-        faulted: snapshot.faulted,
-        receivedAt: snapshot.receivedAt,
-      };
-    }).filter((candidate): candidate is WarehouseStackerActivity => Boolean(candidate));
-
-    const issueKey = 'stacker-side-conflict';
-    if (candidates.length === 0) {
-      this.clearWarehouseIssue(runtimeEntry, issueKey);
-      return null;
-    }
-    if (candidates.length === 1) {
-      this.clearWarehouseIssue(runtimeEntry, issueKey);
-      return candidates[0];
-    }
-
-    const chooseFork = readIntegerField(snapshot.fields, 'to_choose_fork')
-      ?? readIntegerField(snapshot.fields, 'choose_fork');
-    const chosenSide = chooseFork === 1 ? 'front' : (chooseFork === 2 ? 'back' : null);
-    if (chosenSide) {
-      const chosen = candidates.find((candidate) => candidate.side === chosenSide);
-      if (chosen) {
-        this.clearWarehouseIssue(runtimeEntry, issueKey);
-        return chosen;
-      }
-    }
-
-    const state = runtimeEntry.warehouseCoordinator.getState();
-    const expectedCargoCodes = new Set(
-      [state.outbound?.cargoCode, state.inbound?.cargoCode].filter((value): value is string => Boolean(value)),
-    );
-    const expectedMatches = candidates.filter((candidate) => (
-      Boolean(candidate.containerCode) && expectedCargoCodes.has(candidate.containerCode!)
-    ));
-    if (expectedMatches.length === 1) {
-      this.clearWarehouseIssue(runtimeEntry, issueKey);
-      return expectedMatches[0];
-    }
-
-    const storedMatches = candidates.filter((candidate) => (
-      Boolean(candidate.containerCode) && runtimeEntry.warehouseCargos.has(candidate.containerCode!)
-    ));
-    if (storedMatches.length === 1) {
-      this.clearWarehouseIssue(runtimeEntry, issueKey);
-      return storedMatches[0];
-    }
-
-    const cargoCommandCandidates = candidates.filter((candidate) => this.isWarehouseStackerCargoCommand(candidate.command));
-    if (cargoCommandCandidates.length === 1) {
-      this.clearWarehouseIssue(runtimeEntry, issueKey);
-      return cargoCommandCandidates[0];
-    }
-
-    const commandedCandidates = candidates.filter((candidate) => this.isWarehouseStackerCommandActive(candidate.command));
-    if (commandedCandidates.length === 1) {
-      this.clearWarehouseIssue(runtimeEntry, issueKey);
-      return commandedCandidates[0];
-    }
-
-    this.reportWarehouseIssue(runtimeEntry, issueKey, 'DDJ2 前后叉同时存在活动证据且无法唯一匹配条码，已冻结货物接管。');
-    return null;
-  }
-
-  /** 判断命令是否直接承载取货、搬运或放货阶段，用于双叉消歧时优先选择真实作业侧。 */
-  private isWarehouseStackerCargoCommand(command: number | null): boolean {
-    return command !== null && command >= 1 && command <= 5;
-  }
-
-  /** 仓储流程只把 1..7、10、11 视为活动命令，急停和未知状态不接管货物。 */
-  private isWarehouseStackerCommandActive(command: number | null): boolean {
-    return command !== null && ((command >= 1 && command <= 7) || command === 10 || command === 11);
-  }
-
-  /** 仓储入库触发时复用全局单快照规则解析，位置仍由仓储状态机决定。 */
-  private resolveWarehouseCargoTarget(
-    runtimeEntry: ModelGeneratorRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot | null,
-  ): ResolvedModelGeneratorTarget | null {
-    return snapshot ? resolveModelGeneratorTargetFromSnapshot(runtimeEntry.component, snapshot) : null;
-  }
-
-  /** 根据协调器阶段把全局生成器活动输出和已入库实例放到真实设备/库位世界锚点。 */
-  private applyWarehouseFlowVisuals(): void {
-    const runtimeEntry = this.getActiveModelGenerator();
-    if (!runtimeEntry?.component.warehouseFlow?.enabled) return;
-
-    const bindings = this.resolveWarehouseFlowBindings(runtimeEntry);
-    if (!bindings) return;
-    const inboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.inbound, 'conveyor');
-    const stackerModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.stacker, 'stacker');
-    const outboundModel = this.findModelByWarehouseBinding(runtimeEntry, bindings.outbound, 'conveyor');
-    const inboundAnchors = inboundModel ? this.resolveWarehouseConveyorAnchors(inboundModel) : null;
-    const outboundAnchors = outboundModel ? this.resolveWarehouseConveyorAnchors(outboundModel) : null;
-    const ttlMs = runtimeEntry.component.metadataTtlSeconds * 1000;
-    const stackerSnapshot = this.resolveWarehouseBindingSnapshot(bindings.stacker, Date.now(), ttlMs);
-    const state = runtimeEntry.warehouseCoordinator.getState();
-    const stackerActivity = this.createWarehouseStackerActivity(runtimeEntry, stackerSnapshot);
-
-    if (state.inbound && runtimeEntry.output) {
-      const pose = this.resolveWarehouseInboundPose(
-        state.inbound,
-        inboundAnchors,
-        stackerModel,
-        stackerActivity,
-      );
-      if (pose) this.setWarehouseRootPose(runtimeEntry.root, pose.position, pose.rotation);
-    }
-
-    if (state.outbound) {
-      const cargo = runtimeEntry.warehouseCargos.get(state.outbound.cargoCode);
-      if (!cargo) return;
-      const pose = this.resolveWarehouseOutboundPose(
-        state.outbound,
-        outboundAnchors,
-        stackerModel,
-        stackerActivity,
-      );
-      if (pose) this.setWarehouseRootPose(cargo.root, pose.position, pose.rotation);
-    }
-  }
-
-  /** 解析入库货物在 1004、DDJ2 货叉和目标库位之间的世界姿态。 */
-  private resolveWarehouseInboundPose(
-    state: WarehouseInboundState,
-    inboundAnchors: WarehouseConveyorAnchors | null,
-    stackerModel: ModelRuntimeEntry | null,
-    stackerActivity: WarehouseStackerActivity | null,
-  ): { position: Vector3; rotation: Quaternion } | null {
-    if (state.phase === 'inbound-front'
-      || state.phase === 'inbound-transfer'
-      || state.phase === 'inbound-back'
-      || state.phase === 'inbound-lifting') {
-      if (!inboundAnchors) return null;
-      const conveyorPath = this.resolveWarehouseConveyorPath(inboundAnchors, 'front-to-back');
-      return {
-        position: this.lerpVector(conveyorPath.start, conveyorPath.end, state.progress),
-        rotation: inboundAnchors.rotation,
-      };
-    }
-    if (!stackerModel || !stackerActivity || !state.stackerSide) return null;
-    const forkPosition = this.getWarehouseStackerForkSupportPosition(stackerModel, state.stackerSide);
-    const stackerRotation = this.getNodeWorldRotation(stackerModel.root);
-    if (state.phase === 'inbound-pickup') {
-      const retracting = stackerActivity.movementZ === 2 || stackerActivity.movementZ === 4;
-      const picked = stackerActivity.command === 2 || retracting;
-      if (!picked && inboundAnchors) {
-        const conveyorPath = this.resolveWarehouseConveyorPath(inboundAnchors, 'front-to-back');
-        return { position: conveyorPath.end, rotation: inboundAnchors.rotation };
-      }
-      return { position: forkPosition, rotation: stackerRotation };
-    }
-    if (state.phase === 'inbound-carrying') {
-      return { position: forkPosition, rotation: stackerRotation };
-    }
-
-    const locator = state.targetLocationKey ? this.locatorTargets.get(state.targetLocationKey) ?? null : null;
-    if (!locator) return { position: forkPosition, rotation: stackerRotation };
-    const reach = this.readStackerForkReachConfig(stackerModel);
-    const forkOffset = state.stackerSide === 'front'
-      ? stackerModel.stackerTelemetry.frontForkOffset
-      : stackerModel.stackerTelemetry.backForkOffset;
-    const placingProgress = this.getStackerCargoPlacingProgress(stackerActivity.command, forkOffset, reach);
-    const locatorPosition = this.getWarehouseLocatorSupportPosition(locator);
-    return {
-      position: this.lerpVector(forkPosition, locatorPosition, placingProgress),
-      rotation: placingProgress >= 1 ? this.getNodeWorldRotation(locator.root) : stackerRotation,
-    };
-  }
-
-  /** 解析出库货物从库位、DDJ2 到 1005 前端的世界姿态。 */
-  private resolveWarehouseOutboundPose(
-    state: WarehouseOutboundState,
-    outboundAnchors: WarehouseConveyorAnchors | null,
-    stackerModel: ModelRuntimeEntry | null,
-    stackerActivity: WarehouseStackerActivity | null,
-  ): { position: Vector3; rotation: Quaternion } | null {
-    if (state.phase === 'outbound-transfer' || state.phase === 'outbound-front') {
-      if (!outboundAnchors) return null;
-      const conveyorPath = this.resolveWarehouseConveyorPath(outboundAnchors, 'back-to-front');
-      return {
-        position: this.lerpVector(conveyorPath.start, conveyorPath.end, state.progress),
-        rotation: outboundAnchors.rotation,
-      };
-    }
-    if (state.phase === 'outbound-lowering') {
-      if (!outboundAnchors) return null;
-      const conveyorPath = this.resolveWarehouseConveyorPath(outboundAnchors, 'back-to-front');
-      return { position: conveyorPath.start, rotation: outboundAnchors.rotation };
-    }
-    if (!stackerModel || !state.stackerSide) return null;
-    const forkPosition = this.getWarehouseStackerForkSupportPosition(stackerModel, state.stackerSide);
-    const stackerRotation = this.getNodeWorldRotation(stackerModel.root);
-    if (state.phase === 'outbound-carrying') {
-      return { position: forkPosition, rotation: stackerRotation };
-    }
-    if (state.phase === 'outbound-handoff') {
-      if (!outboundAnchors) return { position: forkPosition, rotation: stackerRotation };
-      const conveyorPath = this.resolveWarehouseConveyorPath(outboundAnchors, 'back-to-front');
-      return {
-        position: this.lerpVector(forkPosition, conveyorPath.start, state.progress),
-        rotation: state.progress >= 1 ? outboundAnchors.rotation : stackerRotation,
-      };
-    }
-
-    const locator = this.locatorTargets.get(state.sourceLocatorKey) ?? null;
-    if (!locator) return { position: forkPosition, rotation: stackerRotation };
-    const locatorPosition = this.getWarehouseLocatorSupportPosition(locator);
-    const retracting = stackerActivity?.movementZ === 2 || stackerActivity?.movementZ === 4;
-    const picked = stackerActivity?.command === 2 || retracting;
-    return picked
-      ? { position: forkPosition, rotation: stackerRotation }
-      : { position: locatorPosition, rotation: this.getNodeWorldRotation(locator.root) };
-  }
-
-  /** 从 YZJ 物流方向 metadata 和真实几何计算入/出料、MQTT 前/后端锚点。 */
-  private resolveWarehouseConveyorAnchors(model: ModelRuntimeEntry): WarehouseConveyorAnchors | null {
-    const sides = this.readWarehouseConveyorFlowSides(model);
-    const pathBounds = this.getModelWorldBounds(model);
-    if (!sides || !pathBounds) return null;
-    const supportNodes = this.findModelNodesByName(model, ['Ban.4', 'GT.3']);
-    const supportBounds = this.getNodesWorldBounds(supportNodes) ?? pathBounds;
-    const pathCenter = pathBounds.minimum.add(pathBounds.maximum).scale(0.5);
-    pathCenter.y = supportBounds.maximum.y + 0.01;
-    const infeed = this.createWarehouseConveyorSideAnchor(model.root, pathBounds, pathCenter, sides.infeed);
-    const outfeed = this.createWarehouseConveyorSideAnchor(model.root, pathBounds, pathCenter, sides.outfeed);
-    const mqttFront = sides.mqttFront
-      ? this.createWarehouseConveyorSideAnchor(model.root, pathBounds, pathCenter, sides.mqttFront)
-      : null;
-    const mqttBack = sides.mqttBack
-      ? this.createWarehouseConveyorSideAnchor(model.root, pathBounds, pathCenter, sides.mqttBack)
-      : null;
-    const spanMeters = sides.hasExplicitMqttEndpoints && mqttFront && mqttBack
-      ? Vector3.Distance(mqttFront, mqttBack)
-      : Vector3.Distance(infeed, outfeed);
-    if (!Number.isFinite(spanMeters) || spanMeters <= 0.05) return null;
-    return {
-      infeed,
-      outfeed,
-      mqttFront,
-      mqttBack,
-      hasExplicitMqttEndpoints: sides.hasExplicitMqttEndpoints,
-      spanMeters,
-      rotation: this.getNodeWorldRotation(model.root),
-    };
-  }
-
-  /** 读取全部物流 metadata 后再回退脚本参数，避免旧节点提前掩盖新 MQTT 前后端。 */
-  private readWarehouseConveyorFlowSides(model: ModelRuntimeEntry): WarehouseConveyorSides | null {
-    let metadataInfeed: WarehouseConveyorSides['infeed'] | null = null;
-    let metadataOutfeed: WarehouseConveyorSides['outfeed'] | null = null;
-    let metadataMqttFront: WarehouseConveyorSides['infeed'] | null = null;
-    let metadataMqttBack: WarehouseConveyorSides['outfeed'] | null = null;
-    let hasExplicitMetadataEndpoints = false;
-
-    for (const node of this.getModelTransformNodes(model)) {
-      const metadata = this.isPlainRecord(node.metadata) ? node.metadata : {};
-      const logisticsFlow = this.isPlainRecord(metadata.logisticsFlow) ? metadata.logisticsFlow : null;
-      if (!logisticsFlow) continue;
-
-      const hasInfeed = Object.hasOwn(logisticsFlow, 'infeedSide');
-      const hasOutfeed = Object.hasOwn(logisticsFlow, 'outfeedSide');
-      if (hasInfeed || hasOutfeed) {
-        const infeed = logisticsFlow.infeedSide;
-        const outfeed = logisticsFlow.outfeedSide;
-        if (!this.isWarehouseTransferSide(infeed) || !this.isWarehouseTransferSide(outfeed)) return null;
-        if ((metadataInfeed !== null && metadataInfeed !== infeed)
-          || (metadataOutfeed !== null && metadataOutfeed !== outfeed)) {
-          return null;
-        }
-        metadataInfeed = infeed;
-        metadataOutfeed = outfeed;
-      }
-
-      const hasMqttFront = Object.hasOwn(logisticsFlow, 'frontSide');
-      const hasMqttBack = Object.hasOwn(logisticsFlow, 'backSide');
-      if (hasMqttFront || hasMqttBack) {
-        const mqttFront = logisticsFlow.frontSide;
-        const mqttBack = logisticsFlow.backSide;
-        if (!hasMqttFront
-          || !hasMqttBack
-          || !this.isWarehouseTransferSide(mqttFront)
-          || !this.isWarehouseTransferSide(mqttBack)
-          || mqttFront === mqttBack) {
-          return null;
-        }
-        if (hasExplicitMetadataEndpoints
-          && (metadataMqttFront !== mqttFront || metadataMqttBack !== mqttBack)) {
-          return null;
-        }
-        metadataMqttFront = mqttFront;
-        metadataMqttBack = mqttBack;
-        hasExplicitMetadataEndpoints = true;
-      }
-    }
-
-    const parameterInfeed = this.readModelScriptString(model, 'infeedSide');
-    const parameterOutfeed = this.readModelScriptString(model, 'outfeedSide');
-    const infeed = metadataInfeed ?? parameterInfeed;
-    const outfeed = metadataOutfeed ?? parameterOutfeed;
-    if (!this.isWarehouseTransferSide(infeed) || !this.isWarehouseTransferSide(outfeed)) return null;
-    if (hasExplicitMetadataEndpoints) {
-      return this.createWarehouseConveyorSides(infeed, outfeed, metadataMqttFront, metadataMqttBack);
-    }
-
-    const parameterMqttFront = this.readModelScriptString(model, 'frontSide');
-    const parameterMqttBack = this.readModelScriptString(model, 'backSide');
-    return this.createWarehouseConveyorSides(infeed, outfeed, parameterMqttFront, parameterMqttBack);
-  }
-
-  /** 校验四向参数并区分旧包缺失映射与新包错误映射，错误映射必须 fail-closed。 */
-  private createWarehouseConveyorSides(
-    infeed: WarehouseConveyorSides['infeed'],
-    outfeed: WarehouseConveyorSides['outfeed'],
-    mqttFront: unknown,
-    mqttBack: unknown,
-  ): WarehouseConveyorSides | null {
-    const hasAnyMqttEndpoint = mqttFront !== null && mqttFront !== undefined && mqttFront !== ''
-      || mqttBack !== null && mqttBack !== undefined && mqttBack !== '';
-    if (!hasAnyMqttEndpoint) {
-      return { infeed, outfeed, mqttFront: null, mqttBack: null, hasExplicitMqttEndpoints: false };
-    }
-    if (!this.isWarehouseTransferSide(mqttFront)
-      || !this.isWarehouseTransferSide(mqttBack)
-      || mqttFront === mqttBack) {
-      return null;
-    }
-    return { infeed, outfeed, mqttFront, mqttBack, hasExplicitMqttEndpoints: true };
-  }
-
-  /** 按仓储角色选择空间路径：入库前到后，出库后到前；旧包保持入料到出料。 */
-  private resolveWarehouseConveyorPath(
-    anchors: WarehouseConveyorAnchors,
-    direction: 'front-to-back' | 'back-to-front',
-  ): { start: Vector3; end: Vector3 } {
-    if (!anchors.hasExplicitMqttEndpoints || !anchors.mqttFront || !anchors.mqttBack) {
-      return { start: anchors.infeed, end: anchors.outfeed };
-    }
-    return direction === 'front-to-back'
-      ? { start: anchors.mqttFront, end: anchors.mqttBack }
-      : { start: anchors.mqttBack, end: anchors.mqttFront };
-  }
-
-  /** 按模型局部方向把世界包围盒投影端点转换为货物支撑点。 */
-  private createWarehouseConveyorSideAnchor(
-    root: TransformNode,
-    bounds: RuntimeWorldBounds,
-    center: Vector3,
-    side: string,
-  ): Vector3 {
-    const direction = this.getWarehouseTransferSideDirection(root, side);
-    const projectedBounds = this.projectWorldBoundsOntoAxis(bounds, direction);
-    const centerProjection = Vector3.Dot(center, direction);
-    const span = Math.max(0, projectedBounds.max - projectedBounds.min);
-    const margin = Math.min(0.18, span * 0.08);
-    return center.add(direction.scale(projectedBounds.max - centerProjection - margin));
-  }
-
-  /** 将 YZJ left/right/front/rear 映射为模型旋转后的世界方向。 */
-  private getWarehouseTransferSideDirection(root: TransformNode, side: string): Vector3 {
-    if (side === 'right') return this.getModelAxis(root, 'x').scale(-1);
-    if (side === 'front') return this.getModelAxis(root, 'z').scale(-1);
-    if (side === 'rear') return this.getModelAxis(root, 'z');
-    return this.getModelAxis(root, 'x');
-  }
-
-  /** 判断字符串是否为 YZJ 支持的四向物流侧。 */
-  private isWarehouseTransferSide(value: unknown): value is 'left' | 'right' | 'front' | 'rear' {
-    return value === 'left' || value === 'right' || value === 'front' || value === 'rear';
-  }
-
-  /** 从模型脚本参数 metadata 中读取字符串值。 */
-  private readModelScriptString(model: ModelRuntimeEntry, key: string): string | null {
-    const scripts = Array.isArray(model.contentRoot.metadata?.scripts) ? model.contentRoot.metadata.scripts : [];
-    for (const script of scripts) {
-      if (!this.isPlainRecord(script)) continue;
-      const values = this.isPlainRecord(script.values) ? script.values : {};
-      const raw = values[key];
-      if (typeof raw === 'string' && raw.trim()) return raw.trim();
-      if (this.isPlainRecord(raw) && typeof raw.value === 'string' && raw.value.trim()) return raw.value.trim();
-    }
-    return null;
-  }
-
-  /** 读取指定货叉整组节点的顶面支撑点，使任意生成模型以底面贴合货叉。 */
-  private getWarehouseStackerForkSupportPosition(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 {
-    const groups = this.findStackerForkNodeGroups(model);
-    const bounds = this.getNodesWorldBounds(side === 'front' ? groups.frontNodes : groups.backNodes);
-    if (!bounds) return model.root.getAbsolutePosition();
-    return new Vector3(
-      (bounds.minimum.x + bounds.maximum.x) / 2,
-      bounds.maximum.y + 0.01,
-      (bounds.minimum.z + bounds.maximum.z) / 2,
-    );
-  }
-
   /** 使用 locator 盒体底面作为生成模型原点，保证模型落在定位框内部而不是悬在中心高度。 */
   private getWarehouseLocatorSupportPosition(locator: LocatorRuntimeEntry): Vector3 {
     const bounds = locator.boxes.length > 0 ? this.getMeshWorldBounds(locator.boxes[0]) : null;
     const position = locator.root.getAbsolutePosition();
     return new Vector3(position.x, bounds?.minimum.y ?? position.y, position.z);
-  }
-
-  /** 设置仓储货物根节点世界姿态；根节点无父级，因此可直接写入。 */
-  private setWarehouseRootPose(root: TransformNode, position: Vector3, rotation: Quaternion): void {
-    root.position.copyFrom(position);
-    root.rotationQuaternion = rotation.clone();
-    root.computeWorldMatrix(true);
-  }
-
-  /** 将自动货物输出根节点恢复到无位姿基线，避免继承 POI 配置标记 Transform。 */
-  private resetGeneratedOutputRoot(root: TransformNode): void {
-    root.position.copyFromFloats(0, 0, 0);
-    root.scaling.copyFromFloats(1, 1, 1);
-    root.rotation.copyFromFloats(0, 0, 0);
-    root.rotationQuaternion = Quaternion.Identity();
-    root.computeWorldMatrix(true);
   }
 
   /** 根据模型脚本 dataDriven.motion 配置驱动 Conveyor 节点。 */
@@ -3435,7 +2903,7 @@ export class SceneRuntime {
     snapshot: DeviceTelemetrySnapshot,
     deltaSeconds: number,
   ): void {
-    if (this.isWarehouseFlowManagedModel(model, 'conveyor')) {
+    if (this.isCargoHandoffBlocked(model, 'conveyor')) {
       this.disposeConveyorCargoForAssetCode(model.assetCode);
       model.conveyorTelemetry.cargoCode = null;
       model.conveyorTelemetry.cargoTravelOffset = 0;
@@ -3444,7 +2912,9 @@ export class SceneRuntime {
 
     const containerCode = this.readContainerCode(snapshot, 'containerCode');
     const containerQuantity = readNumberField(snapshot.fields, 'container_quantity') ?? 0;
-    const activeContainerCode = containerCode ?? (containerQuantity > 0 ? CONVEYOR_ANONYMOUS_CARGO_CODE : null);
+    const activeContainerCode = containerCode ?? (containerQuantity > 0
+      ? this.resolveUpstreamCargoCode(model) ?? CONVEYOR_ANONYMOUS_CARGO_CODE
+      : null);
     if (!activeContainerCode) {
       this.disposeConveyorCargoForAssetCode(model.assetCode);
       model.conveyorTelemetry.cargoCode = null;
@@ -3462,13 +2932,14 @@ export class SceneRuntime {
     }
 
     const cargo = this.getOrCreateConveyorCargo(model.assetCode, activeContainerCode);
-    this.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot);
+    this.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.resolveCargoGeneratorForModel(model));
     this.setGeneratedCargoRootPose(
       cargo,
       this.getConveyorCargoPosition(model),
       this.getNodeWorldRotation(model.root),
     );
     model.conveyorTelemetry.cargoCode = activeContainerCode;
+    this.disposeHandedOffCargo(model, activeContainerCode);
   }
 
   /** 按货叉初始世界锚点把 Locator 绝对坐标换算成运行时偏移。 */
@@ -3835,7 +3306,7 @@ export class SceneRuntime {
     targetLocator: LocatorRuntimeEntry | null,
     targetPosition: Vector3 | null,
   ): void {
-    if (this.isWarehouseFlowManagedModel(model, 'stacker')) {
+    if (this.isCargoHandoffBlocked(model, 'stacker')) {
       this.disposeStackerCargoForAssetCode(model.assetCode);
       return;
     }
@@ -3861,7 +3332,8 @@ export class SceneRuntime {
     if (!activeContainerCode) return;
 
     const cargo = this.getOrCreateStackerCargo(model.assetCode, activeContainerCode);
-    this.syncGeneratedCargoVisual(cargo, 'stacker', snapshot);
+    cargo.placedLocatorKey = null;
+    this.syncGeneratedCargoVisual(cargo, 'stacker', snapshot, this.resolveCargoGeneratorForModel(model));
     const forkPosition = this.getStackerForkCargoPosition(model, side);
     const supportPosition = targetLocator
       ? targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator)
@@ -3882,6 +3354,7 @@ export class SceneRuntime {
       cargo.placedLocatorKey = snapshot.targetLocationKey;
       this.setStackerForkCargoCode(model, side, null);
     }
+    this.disposeHandedOffCargo(model, activeContainerCode);
   }
 
   /** 读取托盘条码，空字符串表示当前叉没有可视化货物。 */
@@ -4009,13 +3482,15 @@ export class SceneRuntime {
     return owner;
   }
 
-  /** 根据全局生成器规则同步普通货物外观；无可用模板时回退旧版 Box。 */
+  /** 根据设备绑定的生成器规则同步普通货物外观；无可用模板时回退旧版 Box。 */
   private syncGeneratedCargoVisual(
     cargo: GeneratedCargoRuntimeEntry,
     kind: GeneratedCargoKind,
     snapshot: DeviceTelemetrySnapshot,
+    generator: ModelGeneratorRuntimeEntry | null,
   ): void {
-    const component = this.getActiveModelGenerator()?.component ?? null;
+    cargo.generatorEntityId = generator?.entityId ?? null;
+    const component = generator?.component ?? null;
     const resolution = component ? resolveModelGeneratorTargetFromSnapshot(component, snapshot) : null;
     if (!component || !resolution) {
       this.disposeGeneratedCargoOutputOwner(cargo);
@@ -4077,6 +3552,7 @@ export class SceneRuntime {
       root,
       outputOwner: null,
       fallback: null,
+      generatorEntityId: null,
       placedLocatorKey: null,
     };
     this.stackerCargoMeshes.set(key, entry);
@@ -4397,6 +3873,7 @@ export class SceneRuntime {
       root,
       outputOwner: null,
       fallback: null,
+      generatorEntityId: null,
     };
     this.conveyorCargoMeshes.set(key, entry);
     return entry;
@@ -5448,138 +4925,12 @@ export class SceneRuntime {
     this.onModelMeasurementChanged(entityId);
   }
 
-  /** 将当前生成器输出脱离稳定根节点并登记为可长期驻留库位的仓储货物。 */
-  private storeWarehouseInboundCargo(
-    runtimeEntry: ModelGeneratorRuntimeEntry,
-    cargoCode: string,
-    locatorKey: string,
-  ): boolean {
-    const output = runtimeEntry.output;
-    if (!output || !this.isModelGeneratorOutputReady(output)) return false;
-    const locatorIssueKey = 'locator-missing:' + locatorKey;
-    const locator = this.locatorTargets.get(locatorKey) ?? null;
-    if (!locator) {
-      this.reportWarehouseIssue(runtimeEntry, locatorIssueKey, `目标库位 ${locatorKey} 不存在或编号不唯一，货物保持在 DDJ2。`);
-      return false;
-    }
-    this.clearWarehouseIssue(runtimeEntry, locatorIssueKey);
-    if (runtimeEntry.warehouseCargos.has(cargoCode)) {
-      this.reportWarehouseIssue(runtimeEntry, 'stored-duplicate:' + cargoCode, `货物 ${cargoCode} 已存在，拒绝重复入库。`);
-      return false;
-    }
-    if ([...runtimeEntry.warehouseCargos.values()].some((cargo) => cargo.locatorKey === locatorKey)) {
-      this.reportWarehouseIssue(runtimeEntry, 'locator-occupied:' + locatorKey, `库位 ${locatorKey} 已有运行时货物，拒绝覆盖。`);
-      return false;
-    }
-
-    const cargoRoot = new TransformNode(
-      `${runtimeEntry.entityId}_warehouseCargo_${this.sanitizeBabylonName(cargoCode)}`,
-      this.scene,
-    );
-    this.setWarehouseRootPose(
-      cargoRoot,
-      this.getWarehouseLocatorSupportPosition(locator),
-      this.getNodeWorldRotation(locator.root),
-    );
-    const outputNode = output.kind === 'model' ? output.model.root : output.mesh;
-    outputNode.parent = cargoRoot;
-    if (output.kind === 'model') {
-      this.applyModelSelection(output.model, false);
-      output.model.meshes.forEach((mesh) => {
-        mesh.isPickable = false;
-      });
-    } else {
-      output.mesh.isPickable = false;
-    }
-
-    runtimeEntry.warehouseCargos.set(cargoCode, { cargoCode, locatorKey, root: cargoRoot, output });
-    runtimeEntry.output = null;
-    runtimeEntry.activeTargetSignature = null;
-    runtimeEntry.activeSnapshot = null;
-    runtimeEntry.loadToken += 1;
-    this.resetGeneratedOutputRoot(runtimeEntry.root);
-    this.pushLog(`仓储流“${runtimeEntry.entityName}”已将货物 ${cargoCode} 放入库位 ${locatorKey}。`);
-    return true;
-  }
-
-  /** 判断生成器输出是否已经具备可脱离的完整资源。 */
-  private isModelGeneratorOutputReady(output: ModelGeneratorOutputRuntimeEntry): boolean {
-    return output.kind === 'mesh' || Boolean(output.model.assetHandle && output.model.stackerTelemetryReady);
-  }
-
-  /** 停止预览时统一释放所有仓储货物并恢复生成器基础 Transform。 */
-  private resetAllWarehouseFlows(): void {
-    for (const runtimeEntry of this.modelGenerators.values()) {
-      this.resetModelGeneratorWarehouseFlow(runtimeEntry);
-    }
-  }
-
-  /** 重置单个生成器的仓储协调器、活动输出、已存实例和运行时诊断。 */
-  private resetModelGeneratorWarehouseFlow(runtimeEntry: ModelGeneratorRuntimeEntry): void {
-    for (const cargo of runtimeEntry.warehouseCargos.values()) {
-      this.disposeWarehouseCargo(cargo);
-    }
-    runtimeEntry.warehouseCargos.clear();
-    this.disposeModelGeneratorOutput(runtimeEntry);
-    runtimeEntry.activeTargetSignature = null;
-    runtimeEntry.activeSnapshot = null;
-    runtimeEntry.warehouseCoordinator.reset();
-    runtimeEntry.warehouseActiveResolution = null;
-    runtimeEntry.reportedWarehouseIssues.clear();
-    this.resetGeneratedOutputRoot(runtimeEntry.root);
-  }
-
-  /** 释放已脱离生成器的仓储货物根节点和完整派生输出。 */
-  private disposeWarehouseCargo(cargo: WarehouseCargoRuntimeEntry): void {
-    this.disposeModelGeneratorOutputValue(cargo.output);
-    cargo.root.dispose();
-  }
-
-  /** 判断当前专用模型是否由任一有效仓储流绑定托管，用于关闭旧默认 Box 货物。 */
-  private isWarehouseFlowManagedModel(model: ModelRuntimeEntry, deviceType: SpecializedTelemetryDeviceType): boolean {
-    const resolved = resolveSpecializedTelemetryBinding({
-      modelAssetCode: model.assetCode,
-      deviceType,
-      binding: model.telemetryBinding,
-    });
-    if (!resolved) return false;
-    const runtimeEntry = this.getActiveModelGenerator();
-    const warehouseFlow = runtimeEntry?.component.warehouseFlow;
-    if (!runtimeEntry || !warehouseFlow?.enabled) return false;
-
-    const bindingIds = deviceType === 'stacker'
-      ? [warehouseFlow.stackerBindingId]
-      : [warehouseFlow.inboundBindingId, warehouseFlow.outboundBindingId];
-    for (const bindingId of bindingIds) {
-      const binding = runtimeEntry.component.bindings.find((item) => item.id === bindingId);
-      if (!binding?.sourceId.trim() || !binding.deviceType.trim() || !binding.assetCode.trim()) continue;
-      if (binding.sourceId.trim() === resolved.sourceId
-        && binding.deviceType.trim().toLowerCase() === resolved.deviceType
-        && binding.assetCode.trim() === resolved.assetCode) return true;
-    }
-    return false;
-  }
-
-  /** 同一仓储问题只写一次 Console，恢复后可按稳定 key 解除去重。 */
-  private reportWarehouseIssue(runtimeEntry: ModelGeneratorRuntimeEntry, key: string, message: string): void {
-    if (runtimeEntry.reportedWarehouseIssues.has(key)) return;
-    runtimeEntry.reportedWarehouseIssues.add(key);
-    this.pushLog(`仓储流“${runtimeEntry.entityName}”：${message}`);
-  }
-
-  /** 解除已恢复问题的去重 key。 */
-  private clearWarehouseIssue(runtimeEntry: ModelGeneratorRuntimeEntry, key: string): void {
-    runtimeEntry.reportedWarehouseIssues.delete(key);
-  }
-
   /** 为模型生成器完整运行时配置生成稳定签名，配置变化时统一释放旧自动货物。 */
   private createModelGeneratorRuntimeConfigSignature(component: ModelGeneratorComponent): string {
     return JSON.stringify({
       defaultTarget: component.defaultTarget,
       rules: component.rules,
       metadataTtlSeconds: component.metadataTtlSeconds,
-      bindings: component.bindings,
-      warehouseFlow: component.warehouseFlow ?? null,
     });
   }
 
@@ -5591,7 +4942,7 @@ export class SceneRuntime {
     runtimeEntry.output = null;
   }
 
-  /** 释放任意生成器派生输出，供当前输出和已脱离仓储实例共用。 */
+  /** 释放任意生成器派生输出。 */
   private disposeModelGeneratorOutputValue(output: ModelGeneratorOutputRuntimeEntry): void {
     if (output.kind === 'mesh') {
       output.material.dispose();
@@ -5611,10 +4962,11 @@ export class SceneRuntime {
     model.root.dispose();
   }
 
-  /** 释放模型生成器配置标记、独立输出根节点、仓储货物和异步资源。 */
+  /** 释放模型生成器配置标记、独立输出根节点、以其为模板的货物和异步资源。 */
   private disposeModelGenerator(entityId: string, runtimeEntry: ModelGeneratorRuntimeEntry): void {
     runtimeEntry.loadToken += 1;
-    this.resetModelGeneratorWarehouseFlow(runtimeEntry);
+    this.disposeTelemetryCargoForGenerator(entityId);
+    this.disposeModelGeneratorOutput(runtimeEntry);
     runtimeEntry.marker.material.dispose();
     runtimeEntry.marker.mesh.dispose();
     runtimeEntry.markerRoot.dispose();

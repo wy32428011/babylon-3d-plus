@@ -281,7 +281,7 @@ function createSceneDocument() {
   };
 
   return {
-    version: 1,
+    version: 2,
     units: { length: 'meter' },
     scene: {
       id: 'scene_generic_mqtt_motion_demo',

@@ -144,7 +144,7 @@ function createSceneDocument() {
   const animationScriptMetadata = readJsonArrayMetadata(metadata, 'animationScripts');
 
   return {
-    version: 1,
+    version: 2,
     units: { length: 'meter' },
     scene: {
       id: 'scene_stacker_mqtt_demo',

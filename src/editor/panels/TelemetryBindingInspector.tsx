@@ -3,6 +3,7 @@ import type { TelemetryBindingComponent, TelemetryMotionChannel, TelemetryTarget
 import { normalizeTelemetryBindingComponent, normalizeTelemetryMotionChannel } from '../model/telemetryBinding';
 import { deviceTelemetryStore } from '../../runtime/mqtt/deviceTelemetry';
 import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticSnapshot } from '../../runtime/mqtt/telemetryRuntimeDiagnostics';
+import { useEditorStore } from '../store/editorStore';
 
 type Props = {
   entityId: string;
@@ -132,6 +133,7 @@ function TelemetryTargetSelector(props: {
 
 /** 独立数据驱动 Inspector，负责编辑实体级 telemetryBinding 覆盖。 */
 export function TelemetryBindingInspector(props: Props) {
+  const scene = useEditorStore((state) => state.scene);
   const binding = props.binding;
   if (!binding) {
     return (
@@ -152,6 +154,57 @@ export function TelemetryBindingInspector(props: Props) {
     if (next) props.onChange(next);
   }
 
+  const generatorOptions = scene.entityIds
+    .map((entityId) => scene.entities[entityId])
+    .filter((entity) => entity?.components.modelGenerator)
+    .map((entity) => ({ id: entity.id, name: entity.name }));
+  const cargoGeneratorMissing = Boolean(
+    activeBinding.cargoGeneratorId && !generatorOptions.some((option) => option.id === activeBinding.cargoGeneratorId),
+  );
+
+  const selfAssetCode = activeBinding.assetCode ?? props.modelAssetCode;
+  const deviceAssetCodeByEntityId = new Map<string, string>();
+  for (const entityId of scene.entityIds) {
+    if (entityId === props.entityId) continue;
+    const entity = scene.entities[entityId];
+    if (!entity || entity.isFolder) continue;
+    const assetCode = entity.components.telemetryBinding?.assetCode ?? entity.components.modelAsset?.assetCode;
+    if (assetCode && (entity.components.telemetryBinding || entity.components.modelAsset)) {
+      deviceAssetCodeByEntityId.set(entityId, assetCode);
+    }
+  }
+  const upstreamAssetCode = activeBinding.upstreamAssetCode ?? '';
+  const upstreamListId = `upstream-asset-${props.entityId}`.replace(/[^A-Za-z0-9_-]/g, '-');
+  const upstreamExists = upstreamAssetCode !== '' && [...deviceAssetCodeByEntityId.values()].includes(upstreamAssetCode);
+  const upstreamWarnings: string[] = [];
+  if (upstreamAssetCode && upstreamAssetCode === selfAssetCode) {
+    upstreamWarnings.push('前置设备不能与自身相同。');
+  }
+  if (upstreamAssetCode && !upstreamExists) {
+    upstreamWarnings.push(`场景中未找到资产编号为「${upstreamAssetCode}」的设备，运行时将按入口设备处理。`);
+  }
+  if (upstreamAssetCode && upstreamExists) {
+    const upstreamByAssetCode = new Map<string, string>();
+    for (const entityId of scene.entityIds) {
+      const entity = scene.entities[entityId];
+      if (!entity || entity.isFolder) continue;
+      const assetCode = entity.components.telemetryBinding?.assetCode ?? entity.components.modelAsset?.assetCode;
+      if (assetCode && !upstreamByAssetCode.has(assetCode)) {
+        upstreamByAssetCode.set(assetCode, entity.components.telemetryBinding?.upstreamAssetCode ?? '');
+      }
+    }
+    const visited = new Set<string>([selfAssetCode]);
+    let cursor: string | undefined = upstreamAssetCode;
+    while (cursor) {
+      if (visited.has(cursor)) {
+        upstreamWarnings.push('检测到前置设备环，运行时相关设备将停止货箱驱动。');
+        break;
+      }
+      visited.add(cursor);
+      cursor = upstreamByAssetCode.get(cursor) || undefined;
+    }
+  }
+
   return (
     <fieldset className="transform-fieldset telemetry-binding-inspector">
       <legend>数据驱动</legend>
@@ -162,6 +215,34 @@ export function TelemetryBindingInspector(props: Props) {
       <label className="inspector-row"><span>sourceId</span><input disabled={props.disabled} value={binding.sourceId} onChange={(event) => commit({ sourceId: event.target.value })} /></label>
       <label className="inspector-row"><span>deviceType</span><input disabled={props.disabled} value={binding.deviceType} onChange={(event) => commit({ deviceType: event.target.value })} /></label>
       <label className="inspector-row"><span>assetCode 覆盖</span><input disabled={props.disabled} value={binding.assetCode ?? ''} onChange={(event) => commit({ assetCode: event.target.value || undefined })} /></label>
+      <label className="inspector-row">
+        <span>货箱生成器</span>
+        <select
+          disabled={props.disabled}
+          value={cargoGeneratorMissing ? '' : (activeBinding.cargoGeneratorId ?? '')}
+          onChange={(event) => commit({ cargoGeneratorId: event.target.value || undefined })}
+        >
+          <option value="">未绑定（内置立方体）</option>
+          {generatorOptions.map((option) => (
+            <option key={option.id} value={option.id}>{option.name}</option>
+          ))}
+        </select>
+      </label>
+      {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退内置立方体。</p> : null}
+      <label className="inspector-row">
+        <span>前置设备资产编号</span>
+        <input
+          disabled={props.disabled}
+          list={upstreamListId}
+          placeholder="留空表示入口设备"
+          value={upstreamAssetCode}
+          onChange={(event) => commit({ upstreamAssetCode: event.target.value || undefined })}
+        />
+        <datalist id={upstreamListId}>
+          {[...deviceAssetCodeByEntityId.values()].map((assetCode) => <option key={assetCode} value={assetCode} />)}
+        </datalist>
+      </label>
+      {upstreamWarnings.map((warning) => <p className="telemetry-runtime-error" key={warning}>{warning}</p>)}
       <label className="number-row"><span>expected(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.expectedIntervalMs} onChange={(event) => commit({ expectedIntervalMs: Number(event.target.value) })} /></label>
       <label className="number-row"><span>stale(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.staleAfterMs} onChange={(event) => commit({ staleAfterMs: Number(event.target.value) })} /></label>
       <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>

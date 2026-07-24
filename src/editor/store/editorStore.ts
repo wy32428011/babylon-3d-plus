@@ -903,19 +903,16 @@ function hasEntityAssetNumber(entity: Entity): boolean {
   return getEntityAssetNumberTarget(entity) !== null;
 }
 
-/** 查找场景中已经存在的模型生成器实体，场景级生成器只能保留一个。 */
-function findExistingModelGeneratorEntity(scene: SceneDocument): Entity | null {
-  for (const entityId of scene.entityIds) {
-    const entity = scene.entities[entityId];
-    if (entity?.components.modelGenerator) return entity;
+/** 生成不重复的模型生成器名称：模型生成器、模型生成器 2、… */
+function createNextModelGeneratorName(scene: SceneDocument): string {
+  const existingNames = new Set(Object.values(scene.entities).map((entity) => entity.name));
+  const baseName = '模型生成器';
+  if (!existingNames.has(baseName)) return baseName;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${baseName} ${index}`;
+    if (!existingNames.has(candidate)) return candidate;
   }
-
-  return null;
-}
-
-/** 判断实体是否是模型生成器，供复制、粘贴和阵列入口统一拦截。 */
-function isModelGeneratorEntity(entity: Entity | null | undefined): boolean {
-  return Boolean(entity?.components.modelGenerator);
+  return `${baseName} ${Date.now()}`;
 }
 
 /** 创建与场景实体隔离的剪贴板快照，并按目标父级归一化层级字段。 */
@@ -932,7 +929,6 @@ type EntityClipboardSnapshot = {
   entries: EntityClipboardEntry[];
   folderCount: number;
   entityCount: number;
-  skippedModelGeneratorCount: number;
 };
 
 /**
@@ -944,7 +940,6 @@ function createEntityClipboardSnapshot(scene: SceneDocument, selectedIds: string
   const entries: EntityClipboardEntry[] = [];
   let folderCount = 0;
   let entityCount = 0;
-  let skippedModelGeneratorCount = 0;
 
   for (const entityId of selectedIds) {
     const entity = scene.entities[entityId];
@@ -958,11 +953,6 @@ function createEntityClipboardSnapshot(scene: SceneDocument, selectedIds: string
       for (const childId of entity.childrenIds) {
         const child = scene.entities[childId];
         if (!child || child.isFolder) continue;
-        if (isModelGeneratorEntity(child)) {
-          skippedModelGeneratorCount += 1;
-          continue;
-        }
-
         children.push(cloneEntityForClipboard(child, entity.id, []));
       }
 
@@ -975,16 +965,11 @@ function createEntityClipboardSnapshot(scene: SceneDocument, selectedIds: string
       continue;
     }
 
-    if (isModelGeneratorEntity(entity)) {
-      skippedModelGeneratorCount += 1;
-      continue;
-    }
-
     entries.push({ root: cloneEntityForClipboard(entity, null, []), children: [] });
     entityCount += 1;
   }
 
-  return { entries, folderCount, entityCount, skippedModelGeneratorCount };
+  return { entries, folderCount, entityCount };
 }
 
 /** 生成人类可读的文件夹/实体数量摘要，用于复制与粘贴日志。 */
@@ -1093,7 +1078,6 @@ type PreparedEntityClipboardPaste = {
   rootEntityIds: string[];
   folderCount: number;
   entityCount: number;
-  skippedModelGeneratorCount: number;
 };
 
 /** 为一次粘贴生成全新的文件夹和实体 ID，并重建文件夹直属关系。 */
@@ -1108,7 +1092,6 @@ function prepareEntityClipboardPaste(
   const duplicatedIdBySourceId = new Map<string, string>();
   let folderCount = 0;
   let entityCount = 0;
-  let skippedModelGeneratorCount = 0;
   const pasteOffset = { x: CLIPBOARD_PASTE_OFFSET_METERS, y: 0, z: CLIPBOARD_PASTE_OFFSET_METERS };
 
   for (const entry of clipboard.entries) {
@@ -1118,10 +1101,6 @@ function prepareEntityClipboardPaste(
       const children: Entity[] = [];
 
       for (const child of entry.children) {
-        if (isModelGeneratorEntity(child)) {
-          skippedModelGeneratorCount += 1;
-          continue;
-        }
         const duplicatedChild = createDuplicatedRuntimeEntity(child, folderId, pasteOffset, existingNames);
         duplicatedIdBySourceId.set(child.id, duplicatedChild.id);
         children.push(duplicatedChild);
@@ -1141,11 +1120,6 @@ function prepareEntityClipboardPaste(
       rootEntityIds.push(folder.id);
       folderCount += 1;
       entityCount += children.length;
-      continue;
-    }
-
-    if (isModelGeneratorEntity(entry.root)) {
-      skippedModelGeneratorCount += 1;
       continue;
     }
 
@@ -1170,7 +1144,7 @@ function prepareEntityClipboardPaste(
     };
   }
 
-  return { entities, rootEntityIds, folderCount, entityCount, skippedModelGeneratorCount };
+  return { entities, rootEntityIds, folderCount, entityCount };
 }
 
 /** 返回当前 Hierarchy 主选区，兼容只有 Scene 单选但没有多选数组的情况。 */
@@ -1288,6 +1262,14 @@ function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[]): Scene
       components = {
         ...entity.components,
         modelArrayInstance: { sourceEntityId: promotedSourceId },
+      };
+    }
+
+    const telemetryBinding = components.telemetryBinding;
+    if (telemetryBinding?.cargoGeneratorId && deletingIds.has(telemetryBinding.cargoGeneratorId)) {
+      components = {
+        ...components,
+        telemetryBinding: { ...telemetryBinding, cargoGeneratorId: undefined },
       };
     }
 
@@ -2010,20 +1992,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建模型生成器');
 
-      const existingGenerator = findExistingModelGeneratorEntity(state.scene);
-      if (existingGenerator) {
-        return {
-          scene: {
-            ...state.scene,
-            selectedEntityId: existingGenerator.id,
-          },
-          hierarchySelectionIds: [existingGenerator.id],
-          selectedModelMeasurement: null,
-          logs: prependLog(state.logs, '场景已存在模型生成器，已选中现有生成器，未新建第二个。'),
-        };
-      }
-
-      const entity = createModelGeneratorEntity(sanitizeVector3(placementPosition));
+      const baseEntity = createModelGeneratorEntity(sanitizeVector3(placementPosition));
+      const entity = { ...baseEntity, name: createNextModelGeneratorName(state.scene) };
       const command = createEntityCommand(entity);
       const result = executeCommand(state.scene, state.history, command);
       return {
@@ -2361,16 +2331,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   copySelectedEntities: () => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '复制对象');
-
       const snapshot = createEntityClipboardSnapshot(state.scene, getActiveHierarchySelectionIds(state));
-      if (snapshot.entries.length === 0) {
-        return snapshot.skippedModelGeneratorCount > 0
-          ? { entityClipboard: null, logs: prependLog(state.logs, '复制已跳过模型生成器：场景只允许一个模型生成器，剪贴板已清空。') }
-          : state;
-      }
-
-      const skippedGeneratorMessage =
-        snapshot.skippedModelGeneratorCount > 0 ? '；已跳过模型生成器，场景只允许一个' : '';
+      if (snapshot.entries.length === 0) return state;
 
       return {
         entityClipboard: {
@@ -2379,7 +2341,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         },
         logs: prependLog(
           state.logs,
-          `复制对象: ${formatEntityClipboardCount(snapshot.folderCount, snapshot.entityCount)}${skippedGeneratorMessage}`,
+          `复制对象: ${formatEntityClipboardCount(snapshot.folderCount, snapshot.entityCount)}`,
         ),
       };
     });
@@ -2403,32 +2365,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (parentFolder && isEntityEffectivelyLocked(state.scene, parentFolder)) return state;
 
       const prepared = prepareEntityClipboardPaste(state.scene, clipboard, parentId);
-      if (prepared.entities.length === 0) {
-        const existingGeneratorId = findExistingModelGeneratorEntity(state.scene)?.id ?? state.scene.selectedEntityId;
-        return {
-          scene: {
-            ...state.scene,
-            selectedEntityId: existingGeneratorId ?? null,
-          },
-          hierarchySelectionIds: existingGeneratorId ? [existingGeneratorId] : [],
-          selectedModelMeasurement: null,
-          logs: prependLog(state.logs, '粘贴已拦截：场景只允许一个模型生成器，未创建第二个。'),
-        };
-      }
 
       const command = updateSceneDocumentCommand('粘贴对象', (scene) =>
         insertClipboardEntitiesInScene(scene, prepared.entities, prepared.rootEntityIds),
       );
       const result = executeCommand(state.scene, state.history, command);
-      const skippedGeneratorMessage =
-        prepared.skippedModelGeneratorCount > 0 ? '；已跳过模型生成器，场景只允许一个' : '';
 
       return {
         ...result,
         hierarchySelectionIds: sanitizeHierarchySelection(result.scene, prepared.rootEntityIds),
         logs: prependLog(
           state.logs,
-          `${command.label}: ${formatEntityClipboardCount(prepared.folderCount, prepared.entityCount)}${skippedGeneratorMessage}`,
+          `${command.label}: ${formatEntityClipboardCount(prepared.folderCount, prepared.entityCount)}`,
         ),
       };
     });
@@ -2436,16 +2384,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   requestEntityArray: (copyCount, direction, spacingMeters, assetNumberRule) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '阵列对象');
-      const selectedRuntimeIds = getSelectedRuntimeEntityIds(state);
-      const skippedModelGeneratorCount = selectedRuntimeIds.reduce((count, sourceId) => {
-        return count + (isModelGeneratorEntity(state.scene.entities[sourceId]) ? 1 : 0);
-      }, 0);
-      const sourceIds = selectedRuntimeIds.filter((sourceId) => !isModelGeneratorEntity(state.scene.entities[sourceId]));
-      if (sourceIds.length === 0) {
-        return skippedModelGeneratorCount > 0
-          ? { entityArrayRequest: null, logs: prependLog(state.logs, '模型阵列已拦截：场景只允许一个模型生成器，未创建第二个。') }
-          : state;
-      }
+      const sourceIds = getSelectedRuntimeEntityIds(state);
+      if (sourceIds.length === 0) return state;
 
       const normalizedAssetNumberRule = assetNumberRule.trim();
       const ruleError = getArrayAssetNumberRuleError(normalizedAssetNumberRule);
@@ -2483,9 +2423,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           spacingMeters: spacing,
           assetNumberRule: normalizedAssetNumberRule,
         },
-        ...(skippedModelGeneratorCount > 0
-          ? { logs: prependLog(state.logs, '模型阵列已跳过模型生成器：场景只允许一个模型生成器，普通对象继续阵列。') }
-          : {}),
       };
     });
   },

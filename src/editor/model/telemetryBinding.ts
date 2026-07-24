@@ -47,6 +47,10 @@ export type TelemetryBindingComponent = {
   expectedIntervalMs: number;
   staleAfterMs: number;
   channelOverrides: Record<string, TelemetryMotionChannel>;
+  /** 货箱模板来源：场景内模型生成器实体 ID；缺省回退内置立方体。 */
+  cargoGeneratorId?: string;
+  /** 前置设备资产编号；缺省表示入口设备，货物从系统外进入。 */
+  upstreamAssetCode?: string;
 };
 
 type PlainObject = Record<string, unknown>;
@@ -278,6 +282,8 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
   const deviceType = normalizeTelemetryDeviceType(value.deviceType);
   if (!deviceType) return null;
   const assetCode = normalizeOptionalString(value.assetCode);
+  const cargoGeneratorId = normalizeOptionalString(value.cargoGeneratorId);
+  const upstreamAssetCode = normalizeOptionalString(value.upstreamAssetCode);
   return {
     enabled: typeof value.enabled === 'boolean' ? value.enabled : true,
     sourceId: normalizeString(value.sourceId, 'default'),
@@ -286,5 +292,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     expectedIntervalMs,
     staleAfterMs: Math.max(createTelemetryStaleAfterMs(expectedIntervalMs), staleAfterMs),
     channelOverrides: normalizeMotionRecord(value.channelOverrides),
+    ...(cargoGeneratorId ? { cargoGeneratorId } : {}),
+    ...(upstreamAssetCode ? { upstreamAssetCode } : {}),
   };
 }

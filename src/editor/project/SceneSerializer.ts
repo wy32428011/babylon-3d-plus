@@ -36,6 +36,7 @@ import {
   normalizeModelDataDrivenConfig,
   normalizeTelemetryBindingComponent,
 } from '../model/telemetryBinding';
+import { logLegacySceneMigrationSummary, migrateLegacySceneV1ToV2 } from './sceneMigration';
 
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
 const MESH_KINDS: readonly MeshKind[] = ['cube', 'sphere', 'plane'];
@@ -60,14 +61,18 @@ const DEFAULT_SCENE_FILE_UNITS: SceneFileUnits = { length: SCENE_LENGTH_UNIT };
 type PlainObject = Record<string, unknown>;
 
 export function serializeScene(scene: SceneDocument): string {
-  return JSON.stringify({ version: 1, units: { length: SCENE_LENGTH_UNIT }, scene }, null, 2);
+  return JSON.stringify({ version: 2, units: { length: SCENE_LENGTH_UNIT }, scene }, null, 2);
 }
 
 export function deserializeScene(content: string): SceneDocument {
   try {
     const parsed = JSON.parse(content) as unknown;
     const sceneFile = assertSceneFileDocument(parsed);
-    return normalizeSceneDocument(sceneFile.scene);
+    const rawScene = assertPlainObject(sceneFile.scene);
+    if (sceneFile.version === 1) {
+      logLegacySceneMigrationSummary(migrateLegacySceneV1ToV2(rawScene));
+    }
+    return normalizeSceneDocument(rawScene);
   } catch (error) {
     if (error instanceof Error && error.message === UNSUPPORTED_SCENE_FILE_ERROR) {
       throw error;
@@ -83,13 +88,13 @@ function assertSceneFileDocument(value: unknown): SceneFileDocument {
   const hasLegacyShape = keys.length === 2 && keys.includes('version') && keys.includes('scene');
   const hasUnitsShape = keys.length === 3 && keys.includes('version') && keys.includes('units') && keys.includes('scene');
 
-  if ((!hasLegacyShape && !hasUnitsShape) || document.version !== 1) {
+  if ((!hasLegacyShape && !hasUnitsShape) || (document.version !== 1 && document.version !== 2)) {
     throwUnsupportedSceneFileError();
   }
 
   const units = hasUnitsShape ? normalizeSceneFileUnits(document.units) : DEFAULT_SCENE_FILE_UNITS;
 
-  return { version: 1, units, scene: document.scene };
+  return { version: document.version, units, scene: document.scene };
 }
 
 function normalizeSceneFileUnits(value: unknown): SceneFileUnits {
@@ -799,11 +804,8 @@ function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerat
   }
 
   const rules = assertArray(modelGenerator.rules);
-  const bindings = assertArray(modelGenerator.bindings);
   const fetchBindings = Array.isArray(modelGenerator.fetchBindings) ? modelGenerator.fetchBindings : [];
-  if (rules.length > MODEL_GENERATOR_MAX_RULES
-    || bindings.length > MODEL_GENERATOR_MAX_BINDINGS
-    || fetchBindings.length > MODEL_GENERATOR_MAX_BINDINGS) {
+  if (rules.length > MODEL_GENERATOR_MAX_RULES || fetchBindings.length > MODEL_GENERATOR_MAX_BINDINGS) {
     throwUnsupportedSceneFileError();
   }
 
@@ -822,24 +824,18 @@ function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerat
     defaultTarget: rawDefaultTarget,
     rules,
     metadataTtlSeconds,
-    bindings,
     fetchBindings,
     dataSource: modelGenerator.dataSource,
-    ...(modelGenerator.warehouseFlow === undefined ? {} : { warehouseFlow: modelGenerator.warehouseFlow }),
   });
   if (!normalized
     || normalized.rules.length !== rules.length
-    || normalized.bindings.length !== bindings.length
     || normalized.fetchBindings.length !== fetchBindings.filter((b: unknown) => sanitizeModelGeneratorFetchBinding(b)).length) {
     throwUnsupportedSceneFileError();
   }
 
   const ruleIds = normalized.rules.map((rule) => rule.id);
-  const bindingIds = normalized.bindings.map((binding) => binding.id);
   const fetchBindingIds = normalized.fetchBindings.map((b) => b.id);
-  if (new Set(ruleIds).size !== ruleIds.length
-    || new Set(bindingIds).size !== bindingIds.length
-    || new Set(fetchBindingIds).size !== fetchBindingIds.length) {
+  if (new Set(ruleIds).size !== ruleIds.length || new Set(fetchBindingIds).size !== fetchBindingIds.length) {
     throwUnsupportedSceneFileError();
   }
 

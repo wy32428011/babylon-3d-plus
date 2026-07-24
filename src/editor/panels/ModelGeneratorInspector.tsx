@@ -6,12 +6,10 @@ import {
   MODEL_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
 import type {
-  ModelGeneratorBinding,
   ModelGeneratorComponent,
   ModelGeneratorFetchBinding,
   ModelGeneratorRule,
   ModelGeneratorTarget,
-  ModelGeneratorWarehouseFlow,
 } from '../model/components';
 import {
   MODEL_GENERATOR_MAX_BINDINGS,
@@ -31,15 +29,7 @@ type ModelGeneratorInspectorProps = {
 };
 
 type ModelGeneratorRulePatch = Partial<Omit<ModelGeneratorRule, 'id'>>;
-type ModelGeneratorBindingPatch = Partial<Omit<ModelGeneratorBinding, 'id'>>;
 type ModelGeneratorFetchBindingPatch = Partial<Omit<ModelGeneratorFetchBinding, 'id'>>;
-
-const EMPTY_WAREHOUSE_FLOW: ModelGeneratorWarehouseFlow = {
-  enabled: true,
-  inboundBindingId: '',
-  stackerBindingId: '',
-  outboundBindingId: '',
-};
 
 const BUILT_IN_MODEL_NAMES = {
   cube: '立方体',
@@ -71,7 +61,7 @@ function readModelGeneratorTargetFromDrop(event: DragEvent<HTMLElement>): ModelG
   );
 }
 
-/** 渲染并编辑全局模型生成器的共享模板、条件规则、仓储 TTL 和设备绑定。 */
+/** 渲染并编辑模型生成器的共享模板、条件规则与元数据 TTL；设备侧绑定在遥测绑定面板配置。 */
 export function ModelGeneratorInspector({ component, disabled = false }: ModelGeneratorInspectorProps) {
   const updateSelectedModelGenerator = useEditorStore((state) => state.updateSelectedModelGenerator);
   const [activeDropZone, setActiveDropZone] = useState<string | null>(null);
@@ -88,14 +78,6 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
       ruleIndex === index ? { ...rule, ...patch } : rule
     ));
     commitComponent({ ...component, rules }, label);
-  }
-
-  /** 更新指定 MQTT 设备绑定，不改变其他绑定。 */
-  function updateBinding(index: number, patch: ModelGeneratorBindingPatch): void {
-    const bindings = component.bindings.map((binding, bindingIndex) => (
-      bindingIndex === index ? { ...binding, ...patch } : binding
-    ));
-    commitComponent({ ...component, bindings }, '更新仓储设备绑定');
   }
 
   /** 更新指定 fetch 定位线框绑定。 */
@@ -135,40 +117,6 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     commitComponent({ ...component, rules }, '调整生成规则顺序');
   }
 
-  /** 新增一条 MQTT 设备绑定，sourceId 默认使用现有遥测默认源。 */
-  function addBinding(): void {
-    if (component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS) return;
-    const binding: ModelGeneratorBinding = {
-      id: createId('model_generator_binding'),
-      sourceId: 'default',
-      deviceType: '',
-      assetCode: '',
-    };
-    commitComponent({ ...component, bindings: [...component.bindings, binding] }, '添加 MQTT 设备绑定');
-  }
-
-  /** 删除指定 MQTT 设备绑定，并清空仓储流中对该稳定 ID 的引用。 */
-  function removeBinding(index: number): void {
-    const removedBindingId = component.bindings[index]?.id ?? '';
-    const warehouseFlow = component.warehouseFlow;
-    const nextWarehouseFlow = warehouseFlow
-      ? {
-          ...warehouseFlow,
-          inboundBindingId: warehouseFlow.inboundBindingId === removedBindingId ? '' : warehouseFlow.inboundBindingId,
-          stackerBindingId: warehouseFlow.stackerBindingId === removedBindingId ? '' : warehouseFlow.stackerBindingId,
-          outboundBindingId: warehouseFlow.outboundBindingId === removedBindingId ? '' : warehouseFlow.outboundBindingId,
-        }
-      : undefined;
-    commitComponent(
-      {
-        ...component,
-        bindings: component.bindings.filter((_, bindingIndex) => bindingIndex !== index),
-        ...(nextWarehouseFlow ? { warehouseFlow: nextWarehouseFlow } : {}),
-      },
-      '删除 MQTT 设备绑定',
-    );
-  }
-
   /** 新增一条 fetch 定位线框绑定。 */
   function addFetchBinding(): void {
     if (component.fetchBindings.length >= MODEL_GENERATOR_MAX_BINDINGS) return;
@@ -184,40 +132,6 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     commitComponent(
       { ...component, fetchBindings: component.fetchBindings.filter((_, i) => i !== index) },
       '删除定位线框绑定',
-    );
-  }
-
-  /** 更新仓储流声明式配置，不在 Inspector 中重复保存设备资产编号。 */
-  function updateWarehouseFlow(patch: Partial<ModelGeneratorWarehouseFlow>): void {
-    const current = component.warehouseFlow ?? EMPTY_WAREHOUSE_FLOW;
-    commitComponent({ ...component, warehouseFlow: { ...current, ...patch } }, '更新仓储流配置');
-  }
-
-  /** 渲染仓储流使用的绑定选择器，缺失引用保持为空并提示用户修复。 */
-  function renderWarehouseBindingSelect(
-    label: string,
-    value: string,
-    expectedDeviceType: 'conveyor' | 'stacker',
-    onChange: (bindingId: string) => void,
-  ): ReactElement {
-    const options = component.bindings.filter((binding) => {
-      const deviceType = binding.deviceType.trim().toLowerCase();
-      return !deviceType || deviceType === expectedDeviceType;
-    });
-    const selectedExists = component.bindings.some((binding) => binding.id === value);
-
-    return (
-      <label className="inspector-row">
-        <span>{label}</span>
-        <select disabled={disabled} value={selectedExists ? value : ''} onChange={(event) => onChange(event.target.value)}>
-          <option value="">未配置</option>
-          {options.map((binding) => (
-            <option key={binding.id} value={binding.id}>
-              {(binding.deviceType || expectedDeviceType) + ' / ' + (binding.assetCode || '未填资产编号')}
-            </option>
-          ))}
-        </select>
-      </label>
     );
   }
 
@@ -324,8 +238,10 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
           <option value="fetch">Fetch</option>
         </select>
       </label>
-      {component.dataSource === 'fetch' && (
+      {component.dataSource === 'fetch' ? (
         <p className="muted">fetch 模式下由外部事件驱动，绑定的资产编号用于匹配虚拟定位线框。基础 URL 和 API Key 在工具栏中配置。</p>
+      ) : (
+        <p className="muted">MQTT 模式下本生成器仅作为货箱模板库；在设备的遥测绑定面板中选择本生成器作为货箱来源。</p>
       )}
 
       {renderTargetSlot(
@@ -350,9 +266,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
 
       {component.rules.length === 0 ? (
         <p className="muted model-generator-empty-hint">
-          {component.warehouseFlow?.enabled
-            ? '暂无生成规则；仓储流在入库输送机前端有货时直接使用共享模板。'
-            : '暂无生成规则；普通设备有货时直接使用共享模板，模板为空时回退默认 Box。'}
+          暂无生成规则；设备有货时直接使用共享模板，模板为空时回退默认 Box。
         </p>
       ) : null}
 
@@ -418,10 +332,10 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
       </label>
       )}
       {component.dataSource !== 'fetch' && (
-        <p className="muted model-generator-unit-hint">单位：秒；用于 warehouseFlow 三条严格绑定快照的有效期判断。</p>
+        <p className="muted model-generator-unit-hint">单位：秒；遥测元数据超过该时长未刷新时销毁对应货箱。</p>
       )}
 
-      {component.dataSource === 'fetch' ? (
+      {component.dataSource === 'fetch' && (
         <>
           <div className="model-generator-section-header">
             <span>定位线框绑定</span>
@@ -455,110 +369,6 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
               </label>
             </div>
           ))}
-        </>
-      ) : (
-        <>
-          <div className="model-generator-section-header">
-            <span>MQTT 设备绑定</span>
-            <button
-              disabled={disabled || component.bindings.length >= MODEL_GENERATOR_MAX_BINDINGS}
-              onClick={addBinding}
-              title="添加 MQTT 绑定"
-              type="button"
-            >
-              +
-            </button>
-          </div>
-          {component.bindings.length === 0 ? (
-            <p className="muted model-generator-empty-hint">暂无 MQTT 设备绑定；普通设备模板规则仍按各自遥测快照工作。</p>
-          ) : null}
-          {component.bindings.map((binding, index) => (
-            <div className="model-generator-binding-card" key={binding.id}>
-              <div className="model-generator-card-header">
-                <span>绑定 {index + 1}</span>
-                <button disabled={disabled} onClick={() => removeBinding(index)} title="删除绑定" type="button">−</button>
-              </div>
-              <label className="inspector-row">
-                <span>sourceId</span>
-                <input
-                  disabled={disabled}
-                  maxLength={256}
-                  type="text"
-                  value={binding.sourceId}
-                  onChange={(event) => updateBinding(index, { sourceId: event.target.value })}
-                />
-              </label>
-              <label className="inspector-row">
-                <span>deviceType</span>
-                <input
-                  disabled={disabled}
-                  maxLength={256}
-                  type="text"
-                  value={binding.deviceType}
-                  onChange={(event) => updateBinding(index, { deviceType: event.target.value })}
-                />
-              </label>
-              <label className="inspector-row">
-                <span>assetCode</span>
-                <input
-                  disabled={disabled}
-                  maxLength={128}
-                  type="text"
-                  value={binding.assetCode}
-                  onChange={(event) => updateBinding(index, { assetCode: event.target.value })}
-                />
-              </label>
-            </div>
-          ))}
-        </>
-      )}
-
-      {component.dataSource !== 'fetch' && (
-        <>
-      <div className="model-generator-section-header">
-        <span>仓储入库/出库流转</span>
-      </div>
-      <label className="toggle-row">
-        <input
-          checked={component.warehouseFlow?.enabled === true}
-          disabled={disabled}
-          type="checkbox"
-          onChange={(event) => {
-            if (event.target.checked) {
-              updateWarehouseFlow({ enabled: true });
-              return;
-            }
-            const { warehouseFlow: _warehouseFlow, ...componentWithoutWarehouseFlow } = component;
-            commitComponent(componentWithoutWarehouseFlow, '关闭仓储流配置');
-          }}
-        />
-        <span>启用同一货物跨设备接力</span>
-      </label>
-      {component.warehouseFlow?.enabled ? (
-        <>
-          {renderWarehouseBindingSelect(
-            '入库输送机',
-            component.warehouseFlow.inboundBindingId,
-            'conveyor',
-            (bindingId) => updateWarehouseFlow({ inboundBindingId: bindingId }),
-          )}
-          {renderWarehouseBindingSelect(
-            '堆垛机',
-            component.warehouseFlow.stackerBindingId,
-            'stacker',
-            (bindingId) => updateWarehouseFlow({ stackerBindingId: bindingId }),
-          )}
-          {renderWarehouseBindingSelect(
-            '出库输送机',
-            component.warehouseFlow.outboundBindingId,
-            'conveyor',
-            (bindingId) => updateWarehouseFlow({ outboundBindingId: bindingId }),
-          )}
-          <p className="muted model-generator-unit-hint">
-            入库前端有货时生成模板；完成入库后实例保留在库位，出库时复用同一实例。
-          </p>
-        </>
-      ) : null}
         </>
       )}
     </fieldset>
