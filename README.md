@@ -17,7 +17,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - Electron 桌面窗口：通过 Electron 主进程启动独立桌面应用窗口。
 - 首页启动台：进入五面板编辑器前会先显示首页；左侧“最近项目”通过 Electron 主进程从可配置的数据中台 `POST /api/v1/projects/query` 拉取业务项目列表，支持按项目名称进行服务端搜索，并可直接打开当前格式 Editor 工程；右侧继续显示本地最近场景，并保留新建场景、打开项目目录和打开场景文件等入口。本地最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
-- GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU、禁用软件 3D rasterizer，并在主窗口明确启用 WebGL；编辑器 Scene View 使用 `high-performance` 上下文并拒绝 SwiftShader、WARP 等软件 renderer，避免静默退回 CPU 模拟渲染。
+- GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU、禁用软件 3D rasterizer，并在主窗口明确启用 WebGL；Windows 正式打包版按企业部署策略额外关闭 GPU sandbox。编辑器 Scene View 使用 `high-performance` 上下文并拒绝 SwiftShader、WARP 等软件 renderer，避免静默退回 CPU 模拟渲染。模型文件读取与格式解析仍由 CPU/Worker 执行，几何和纹理上传后由 GPU 完成绘制、Shader、纹理采样与画面合成。
 - Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部，中间列独立承载 Scene、Project 与 Console；Project/Console 只与 Scene 画布同宽，在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到 Project 区域最小化入口，点击后以弹窗查看完整日志，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
 - Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑；左键拖拽旋转或移动视角时以真实相机输入和位姿变化优先，即使从模型表面开始轻微拖拽也不会触发模型拾取，纯单击仍正常选中模型；Toolbar 新增“俯”视角按钮，可保留当前观察中心与缩放距离切换为稳定俯视视角，方便依据地面 CAD 图纸定位并搭建场景。
 - 大场景无损容量优化：不降低抗锯齿、纹理、材质、光照或几何质量；同一 `sourceUrl + assetRevision` 的普通静态模型会复用单份源 `AssetContainer`，每个实体继续保留独立 Transform、显隐、锁定、拾取和选择语义。带外置脚本、参数配置或脚本元数据的动态模型默认继续独占容器，Shelf 保留经过验证的脚本化共享特例。模型与环境加载统一限制为最多 4 个并发任务，SceneRuntime 只完整同步真正变化的实体；WebGL 上下文丢失或渲染循环异常会显示可读遮罩，Babylon 完成恢复后自动清除。详见 `docs/scene-capacity-performance.md`。
@@ -487,6 +487,7 @@ npm run build
 
 ## 最近完成
 
+- 2026-07-24：Windows 正式打包版新增 `disable-gpu-sandbox`，与既有高性能 GPU 请求、软件 rasterizer 禁用和 Scene View 硬件 WebGL 严格校验共同固化到 `app.asar`；开发态继续保留 GPU sandbox，不绕过 Chromium GPU blocklist，也不固定 ANGLE 后端。生产 GPU smoke 新增开关策略检查，并在 Scene View 创建内置立方体后确认硬件 WebGL 上下文未丢失。该企业部署策略降低 GPU 进程隔离强度，使用方已明确接受相应安全风险。
 - 2026-07-23：修复 thinInstance 模型阵列中每个逻辑模型的参数化脚本失效：运行时按完整模型参数快照分组，相同参数组合共享一个隐藏脚本宿主，不同组合独立执行声明式参数绑定和外置参数脚本；脚本输出继续一次性提交为 thinInstance，宿主不显示、不拾取。连续调参复用原宿主，恢复相同参数后自动合并批次，源 GLB 仍通过资产缓存复用。
 - 2026-07-23：Windows NSIS 安装包补齐 GPU/WebGL 安装态回归：新增 `smoke-packaged-gpu.mjs` 直接校验生产主进程 GPU feature、活动显卡、启动开关和 Scene View 实际 renderer，并通过版本核对阻断旧安装程序；`npm run smoke:installer:gpu` 串联完整构建、NSIS 产物生成和生产 EXE 验证。Windows 打包继续复用已安装的 Electron runtime，并在 `afterPack` 清理默认入口文件，避免端点安全软件导致解压目录重命名失败。
 - 2026-07-23：固化编辑器 GPU/WebGL 硬件加速契约：Electron 在 ready 前请求高性能 GPU，BrowserWindow 明确启用 WebGL；Scene View 使用 `powerPreference: high-performance`、`failIfMajorPerformanceCaveat: true` 并拒绝 SwiftShader/WARP/llvmpipe 等软件 renderer，初始化失败通过现有 Scene 错误遮罩呈现；新增 `npm run smoke:gpu` 验证 Electron GPU compositing、WebGL 状态、上下文属性和实际 renderer。独立 Web Viewer 兼容策略不变。
@@ -623,7 +624,7 @@ Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，自动收集
 完整目录结构、配置字段、CSP、外部资源、安全边界和部署说明见 [场景 Web 部署导出](docs/scene-web-export.md)。
 ## Windows 安装包构建与安装
 
-项目使用 Electron + electron-builder 生成 Windows x64 NSIS 安装包。生产构建使用相对资源路径，因此安装后由 `file://` 加载 renderer 时，React 页面、Babylon.js 分块、CAD Worker、样式和图片仍可正常读取。GPU 启动开关、软件 3D rasterizer 禁用和 Scene View 硬件 WebGL 校验位于打入 `app.asar` 的生产代码中，开发态、免安装目录和 NSIS 安装后的程序使用同一套硬件加速策略。
+项目使用 Electron + electron-builder 生成 Windows x64 NSIS 安装包。生产构建使用相对资源路径，因此安装后由 `file://` 加载 renderer 时，React 页面、Babylon.js 分块、CAD Worker、样式和图片仍可正常读取。GPU 启动开关、软件 3D rasterizer 禁用和 Scene View 硬件 WebGL 校验位于打入 `app.asar` 的生产代码中；Windows 免安装目录和 NSIS 安装后的程序还会按企业部署策略关闭 GPU sandbox，开发态继续保留该 sandbox。正式包不绕过 Chromium GPU blocklist，也不固定 `use-angle` 后端。
 
 ### 构建环境
 
@@ -655,7 +656,7 @@ npm run smoke:installer:gpu
 安装包默认输出到：
 
 ```text
-release/ZENDING-3D-EDITOR-Setup-0.1.1-x64.exe
+release/ZENDING-3D-EDITOR-Setup-0.1.2-x64.exe
 ```
 
 免安装验证程序默认输出到：
