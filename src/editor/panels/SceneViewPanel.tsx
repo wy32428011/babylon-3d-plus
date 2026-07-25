@@ -9,6 +9,7 @@ import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import {
   ScenePerformanceMonitor,
   type EditModeThinInstancePlanPerformanceMetrics,
+  type SceneFocusPerformanceMetrics,
   type ScenePerformanceSnapshot,
 } from '../../runtime/babylon/ScenePerformanceMonitor';
 import {
@@ -200,6 +201,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const gizmoRef = useRef<TransformGizmoController | null>(null);
   const mqttTelemetryClientRef = useRef<MqttStackerTelemetryClient | null>(null);
   const performanceMonitorRef = useRef<ScenePerformanceMonitor | null>(null);
+  const sceneFocusPerformanceRef = useRef<SceneFocusPerformanceMetrics | null>(null);
   const clickSnapshotRef = useRef<PointerClickSnapshot | null>(null);
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
   const editRuntimeSceneDocumentRef = useRef<SceneDocument | null>(null);
@@ -641,6 +643,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       performanceMonitor = new ScenePerformanceMonitor(viewport.engine, viewport.scene, {
         getRuntimeMetrics: () => runtimeRef.current?.getPerformanceMetrics() ?? initializedRuntime.getPerformanceMetrics(),
         getEditThinInstancePlanMetrics: () => editModeThinInstancePlanPerformanceRef.current,
+        getSceneFocusMetrics: () => sceneFocusPerformanceRef.current,
       });
       performanceMonitorRef.current = performanceMonitor;
       performanceMonitor.start(setPerformanceSnapshot);
@@ -841,7 +844,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!runtime || !viewport) return;
 
     const bounds = runtime.getEntitiesWorldBounds(sceneFocusRequest.entityIds);
-    if (bounds) viewport.focusOnBounds(bounds);
+    if (bounds) {
+      viewport.focusOnBounds(bounds);
+      sceneFocusPerformanceRef.current = {
+        ...bounds,
+        focusedAt: new Date().toISOString(),
+      };
+    }
     consumeSceneFocusRequest(sceneFocusRequest.id);
   }, [sceneFocusRequest, consumeSceneFocusRequest]);
 
@@ -970,6 +979,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
                   <div><dt>Meshes</dt><dd>{performanceSnapshot.activeMeshes} / {performanceSnapshot.totalMeshes}</dd></div>
                   <div><dt>Vertices</dt><dd>{performanceSnapshot.totalVertices.toLocaleString()}</dd></div>
                   <div><dt>Thin instances</dt><dd>{performanceSnapshot.thinInstances.toLocaleString()}</dd></div>
+                  <div><dt>Active thin</dt><dd>{performanceSnapshot.activeThinInstances.toLocaleString()}</dd></div>
+                  <div><dt>GPU vertex calls</dt><dd>{performanceSnapshot.estimatedActiveVertexInvocations.toLocaleString()}</dd></div>
+                  <div><dt>GPU triangle calls</dt><dd>{performanceSnapshot.estimatedActiveTriangleInvocations.toLocaleString()}</dd></div>
+                  <div><dt>双面顶点</dt><dd>{performanceSnapshot.gpuMaterialTotals.doubleSidedVertexInvocations.toLocaleString()}</dd></div>
+                  <div><dt>Alpha test / blend</dt><dd>{performanceSnapshot.gpuMaterialTotals.alphaTestedVertexInvocations.toLocaleString()} / {performanceSnapshot.gpuMaterialTotals.alphaBlendedVertexInvocations.toLocaleString()}</dd></div>
+                  <div><dt>原模型 / 代理</dt><dd>{performanceSnapshot.runtime.modelArrayDetailedEntityCount.toLocaleString()} / {performanceSnapshot.runtime.modelArrayProxyEntityCount.toLocaleString()}</dd></div>
                   <div><dt>完整同步</dt><dd>{formatPerformanceMetric(performanceSnapshot.runtime.lastFullSyncDurationMs)} ms</dd></div>
                   <div><dt>选择同步</dt><dd>{formatPerformanceMetric(performanceSnapshot.runtime.lastSelectionSyncDurationMs)} ms / {performanceSnapshot.runtime.lastSelectionChangedEntityCount} 个</dd></div>
                   <div><dt>编辑态分组</dt><dd>{formatPerformanceMetric(performanceSnapshot.editThinInstancePlan.lastDurationMs)} ms / {performanceSnapshot.editThinInstancePlan.entityCount.toLocaleString()} 个</dd></div>

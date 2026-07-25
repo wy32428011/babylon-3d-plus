@@ -197,6 +197,7 @@ function inspectRenderer(webSocketDebuggerUrl, dataPlatformBaseUrl) {
                 resetDataPlatformWorkspaceAvailable: typeof api?.resetDataPlatformWorkspace === 'function',
                 listDataPlatformProjectsAvailable: typeof api?.listDataPlatformProjects === 'function',
                 openDataPlatformProjectAvailable: typeof api?.openDataPlatformProject === 'function',
+                syncDataPlatformModelsAvailable: typeof api?.syncDataPlatformModels === 'function',
                 retryDataPlatformModelSyncAvailable: typeof api?.retryDataPlatformModelSync === 'function',
                 dataPlatformModelSyncListenerAvailable: typeof api?.onDataPlatformModelSyncProgress === 'function',
                 dataPlatformModelSyncListenerRoundTripAvailable: false,
@@ -447,6 +448,7 @@ async function runPackagedSmoke() {
       && renderer.resetDataPlatformWorkspaceAvailable
       && renderer.listDataPlatformProjectsAvailable
       && renderer.openDataPlatformProjectAvailable
+      && renderer.syncDataPlatformModelsAvailable
       && renderer.retryDataPlatformModelSyncAvailable
       && renderer.dataPlatformModelSyncListenerAvailable
       && renderer.dataPlatformModelSyncListenerRoundTripAvailable

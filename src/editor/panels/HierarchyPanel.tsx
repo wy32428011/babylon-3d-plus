@@ -10,11 +10,13 @@ import {
   type MouseEvent,
   type UIEvent,
 } from 'react';
+import { buildHierarchyRows, type HierarchyRow } from '../hierarchy/hierarchyRows';
 import {
   calculateHierarchyVirtualWindow,
   getHierarchyScrollTopForIndex,
 } from '../hierarchy/hierarchyVirtualization';
 import type { Entity } from '../model/Entity';
+import { getTopLevelHierarchyEntityIds, isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { getEntityArrayIdentifierError } from '../model/modelArray';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 import { useEditorStore } from '../store/editorStore';
@@ -22,11 +24,6 @@ import { useEditorStore } from '../store/editorStore';
 const HIERARCHY_DRAG_MIME_TYPE = 'application/x-babylon-editor-hierarchy-entities';
 const CONTEXT_MENU_WIDTH = 188;
 const CONTEXT_MENU_HEIGHT = 342;
-
-type HierarchyRow = {
-  entity: Entity;
-  depth: number;
-};
 
 type HierarchyDragPayload = {
   ids: string[];
@@ -39,46 +36,6 @@ type HierarchyContextMenuState = {
 };
 
 type ArrayDialogState = EntityArrayDialogValue;
-
-/** 判断实体名称是否命中当前搜索关键字。 */
-function matchesSearch(entity: Entity, query: string): boolean {
-  return entity.name.toLocaleLowerCase().includes(query);
-}
-
-/** 将场景实体整理为 Hierarchy 可渲染的根层级与文件夹子项。 */
-function buildHierarchyRows(
-  entityIds: string[],
-  entities: Record<string, Entity>,
-  searchText: string,
-  collapsedFolderIds: Set<string>,
-): HierarchyRow[] {
-  const query = searchText.trim().toLocaleLowerCase();
-  const rows: HierarchyRow[] = [];
-
-  for (const entityId of entityIds) {
-    const entity = entities[entityId];
-    if (!entity || entity.parentId !== null) continue;
-
-    if (!entity.isFolder) {
-      if (!query || matchesSearch(entity, query)) rows.push({ entity, depth: 0 });
-      continue;
-    }
-
-    const children = entity.childrenIds.map((childId) => entities[childId]).filter((child): child is Entity => Boolean(child));
-    const folderMatches = !query || matchesSearch(entity, query);
-    const visibleChildren = folderMatches ? children : children.filter((child) => matchesSearch(child, query));
-
-    if (folderMatches || visibleChildren.length > 0) {
-      rows.push({ entity, depth: 0 });
-      if (!query && collapsedFolderIds.has(entity.id)) continue;
-      for (const child of visibleChildren) {
-        rows.push({ entity: child, depth: 1 });
-      }
-    }
-  }
-
-  return rows;
-}
 
 /** 从拖拽数据中读取 Hierarchy 实体 ID 列表。 */
 function readHierarchyDragPayload(event: DragEvent<HTMLElement>): HierarchyDragPayload | null {
@@ -105,15 +62,6 @@ function getContextMenuPosition(clientX: number, clientY: number): { x: number; 
   const y = Math.min(clientY, Math.max(8, viewportHeight - CONTEXT_MENU_HEIGHT - 8));
 
   return { x, y };
-}
-
-/** 判断实体是否被自身或直属父文件夹锁定，用于菜单禁用态展示。 */
-function isEntityEffectivelyLocked(entities: Record<string, Entity>, entity: Entity | null | undefined): boolean {
-  if (!entity) return false;
-  if (entity.locked) return true;
-  if (!entity.parentId) return false;
-
-  return entities[entity.parentId]?.locked === true;
 }
 
 type HierarchyPanelProps = {
@@ -194,7 +142,10 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const canRenameSelection = activeSelectionIds.length === 1 && canMutateSelection;
   const canLibraryFocus = Boolean(contextEntity?.components.modelAsset);
   const canPaste = !props.readOnly && Boolean(entityClipboard && entityClipboard.entries.length > 0);
-  const canUngroup = !props.readOnly && activeSelectionEntities.some((entity) => entity.isFolder || Boolean(entity.parentId));
+  const canUngroup = !props.readOnly && activeSelectionEntities.some((entity) => (
+    (entity.isFolder || Boolean(entity.parentId))
+    && !isEntityEffectivelyLocked(entities, entity)
+  ));
   const arraySourceEntities = activeSelectionEntities.filter(
     (entity) => !entity.isFolder && !isEntityEffectivelyLocked(entities, entity),
   );
@@ -423,18 +374,13 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     setCollapsedFolderIds(new Set(folderIds));
   }
 
-  /** 开始拖拽时携带当前多选中的普通实体，文件夹自身不参与分组移动。 */
+  /** 开始拖拽时携带互不重叠的最高层选区；文件夹会连同完整子树移动。 */
   function handleRowDragStart(event: DragEvent<HTMLDivElement>, entity: Entity): void {
-    if (entity.isFolder) {
-      event.preventDefault();
-      return;
-    }
-
-    const ids = (hierarchySelectionIdSet.has(entity.id) ? hierarchySelectionIds : [entity.id])
-      .filter((entityId) => {
-        const selectedEntity = entities[entityId];
-        return Boolean(selectedEntity && !selectedEntity.isFolder);
-      });
+    const selectedIds = hierarchySelectionIdSet.has(entity.id) ? hierarchySelectionIds : [entity.id];
+    const ids = getTopLevelHierarchyEntityIds(entities, selectedIds).filter((entityId) => {
+      const selectedEntity = entities[entityId];
+      return Boolean(selectedEntity && !isEntityEffectivelyLocked(entities, selectedEntity));
+    });
 
     if (ids.length === 0) {
       event.preventDefault();
@@ -453,6 +399,14 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
 
     event.preventDefault();
     event.stopPropagation();
+    if (folderId) {
+      setCollapsedFolderIds((current) => {
+        if (!current.has(folderId)) return current;
+        const next = new Set(current);
+        next.delete(folderId);
+        return next;
+      });
+    }
     moveEntitiesToFolder(payload.ids, folderId);
   }
 
@@ -474,6 +428,20 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   function handleLockedClick(event: MouseEvent<HTMLButtonElement>, entityId: string): void {
     event.stopPropagation();
     toggleEntityLocked(entityId);
+  }
+
+  /** 在当前可编辑文件夹内创建子文件夹，并先展开父级确保新项可见。 */
+  function handleCreateFolder(): void {
+    const selectedEntity = selectedEntityId ? entities[selectedEntityId] : null;
+    if (selectedEntity?.isFolder && !isEntityEffectivelyLocked(entities, selectedEntity)) {
+      setCollapsedFolderIds((current) => {
+        if (!current.has(selectedEntity.id)) return current;
+        const next = new Set(current);
+        next.delete(selectedEntity.id);
+        return next;
+      });
+    }
+    createFolder();
   }
 
   return (
@@ -514,7 +482,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
             <span aria-hidden="true">⊟</span>
           </button>
         </div>
-        <button className="hierarchy-new-folder-button" disabled={props.readOnly} onClick={createFolder} type="button">
+        <button className="hierarchy-new-folder-button" disabled={props.readOnly} onClick={handleCreateFolder} type="button">
           + 新建
         </button>
       </div>
@@ -554,7 +522,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
                 return (
                   <div
                     className={rowClassName}
-                    draggable={!props.readOnly && !isFolder}
+                    draggable={!props.readOnly && !isEntityEffectivelyLocked(entities, entity)}
                     key={entity.id}
                     onClick={(event) => handleRowClick(event, row, rowIndex)}
                     onContextMenu={(event) => handleRowContextMenu(event, row, rowIndex)}

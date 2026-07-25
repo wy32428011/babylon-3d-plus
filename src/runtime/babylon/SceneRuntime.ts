@@ -31,6 +31,7 @@ import {
   VertexData,
 } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
+import { collectEntitySubtreeIds, createEntityHierarchyStateMap } from '../../editor/model/entityHierarchy';
 import type {
   CadReferenceComponent,
   LightComponent,
@@ -522,6 +523,17 @@ export type SceneRuntimePerformanceMetrics = {
   lastSelectionSyncDurationMs: number;
   maxSelectionSyncDurationMs: number;
   lastSelectionChangedEntityCount: number;
+  modelRuntimeCount: number;
+  modelArrayInstanceEntityCount: number;
+  modelArrayParameterVariantCount: number;
+  modelArrayBatchCount: number;
+  modelArrayBatchEntityCount: number;
+  modelArrayBatchMeshCount: number;
+  modelArrayScreenSpaceProxyBatchCount: number;
+  modelArraySolidProxyEntityCount: number;
+  modelArrayFrameProxyEntityCount: number;
+  modelArrayProxyEntityCount: number;
+  modelArrayDetailedEntityCount: number;
 };
 
 /** 浏览器和 Node smoke 共用的高精度计时入口。 */
@@ -998,17 +1010,40 @@ export class SceneRuntime {
     sizeMeters: Vector3Data;
     radiusMeters: number;
     geometryReady: boolean;
+    requestedEntityCount: number;
+    resolvedEntityCount: number;
+    geometryReadyEntityCount: number;
+    missingEntityCount: number;
+    notReadyEntityCount: number;
+    missingEntityIds: string[];
+    notReadyEntityIds: string[];
   } | null {
     let mergedBounds: RuntimeWorldBounds | null = null;
     let geometryReady = true;
+    let resolvedEntityCount = 0;
+    let geometryReadyEntityCount = 0;
+    let missingEntityCount = 0;
+    let notReadyEntityCount = 0;
+    const missingEntityIds: string[] = [];
+    const notReadyEntityIds: string[] = [];
+    const uniqueEntityIds = [...new Set(entityIds)];
 
-    for (const entityId of entityIds) {
+    for (const entityId of uniqueEntityIds) {
       const bounds = this.getEntityWorldBounds(entityId);
       if (!bounds) {
         geometryReady = false;
+        missingEntityCount += 1;
+        if (missingEntityIds.length < 32) missingEntityIds.push(entityId);
         continue;
       }
-      if (!this.isEntityWorldBoundsReady(entityId)) geometryReady = false;
+      resolvedEntityCount += 1;
+      if (this.isEntityWorldBoundsReady(entityId)) {
+        geometryReadyEntityCount += 1;
+      } else {
+        geometryReady = false;
+        notReadyEntityCount += 1;
+        if (notReadyEntityIds.length < 32) notReadyEntityIds.push(entityId);
+      }
       mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
     }
 
@@ -1023,18 +1058,32 @@ export class SceneRuntime {
       sizeMeters: { x: size.x, y: size.y, z: size.z },
       radiusMeters,
       geometryReady,
+      requestedEntityCount: uniqueEntityIds.length,
+      resolvedEntityCount,
+      geometryReadyEntityCount,
+      missingEntityCount,
+      notReadyEntityCount,
+      missingEntityIds,
+      notReadyEntityIds,
     };
   }
 
   /** 判断实体的真实几何是否已就绪，避免模型加载或外置脚本初始化中的临时包围盒参与正式阵列。 */
   private isEntityWorldBoundsReady(entityId: string): boolean {
     const model = this.models.get(entityId);
-    if (model) return model.assetHandle !== null && model.stackerTelemetryReady;
+    if (model) {
+      if (!model.assetHandle || !model.stackerTelemetryReady) return false;
+      return !model.modelArrayBatch || model.modelArrayBatch.hasEntityId(entityId);
+    }
 
     const modelArrayInstance = this.modelArrayInstanceEntities.get(entityId);
     if (modelArrayInstance) {
       const renderModel = this.resolveModelArrayRenderModel(modelArrayInstance);
-      return Boolean(renderModel?.assetHandle && renderModel.measurementReady);
+      return Boolean(
+        renderModel?.assetHandle
+        && renderModel.measurementReady
+        && renderModel.modelArrayBatch?.hasEntityId(entityId),
+      );
     }
 
     const modelGenerator = this.modelGenerators.get(entityId);
@@ -1325,6 +1374,27 @@ export class SceneRuntime {
 
   /** 返回 Scene View HUD 使用的低频运行时同步指标快照。 */
   getPerformanceMetrics(): SceneRuntimePerformanceMetrics {
+    const modelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
+    for (const model of this.models.values()) {
+      if (model.modelArrayBatch) modelArrayBatches.add(model.modelArrayBatch);
+    }
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      if (variant.model.modelArrayBatch) modelArrayBatches.add(variant.model.modelArrayBatch);
+    }
+
+    let modelArrayBatchEntityCount = 0;
+    let modelArrayBatchMeshCount = 0;
+    for (const batch of modelArrayBatches) {
+      modelArrayBatchEntityCount += batch.getEntityIds().length;
+      modelArrayBatchMeshCount += batch.meshes.length;
+    }
+    // 保留旧报告字段作为发布防回归守卫；正式路径已删除代理 API，所有实体均为原模型 Geometry。
+    const modelArrayScreenSpaceProxyBatchCount = 0;
+    const modelArraySolidProxyEntityCount = 0;
+    const modelArrayFrameProxyEntityCount = 0;
+    const modelArrayProxyEntityCount = 0;
+    const modelArrayDetailedEntityCount = modelArrayBatchEntityCount;
+
     return {
       fullSyncCount: this.fullSyncCount,
       selectionSyncCount: this.selectionSyncCount,
@@ -1333,6 +1403,17 @@ export class SceneRuntime {
       lastSelectionSyncDurationMs: this.lastSelectionSyncDurationMs,
       maxSelectionSyncDurationMs: this.maxSelectionSyncDurationMs,
       lastSelectionChangedEntityCount: this.lastSelectionChangedEntityCount,
+      modelRuntimeCount: this.models.size,
+      modelArrayInstanceEntityCount: this.modelArrayInstanceEntities.size,
+      modelArrayParameterVariantCount: this.modelArrayParameterVariants.size,
+      modelArrayBatchCount: modelArrayBatches.size,
+      modelArrayBatchEntityCount,
+      modelArrayBatchMeshCount,
+      modelArrayScreenSpaceProxyBatchCount,
+      modelArraySolidProxyEntityCount,
+      modelArrayFrameProxyEntityCount,
+      modelArrayProxyEntityCount,
+      modelArrayDetailedEntityCount,
     };
   }
 
@@ -1343,12 +1424,8 @@ export class SceneRuntime {
     const dirtyModelArraySourceIds = new Set<string>();
 
     this.entityStates.clear();
-    for (const entityId of document.entityIds) {
-      const entity = document.entities[entityId];
-      if (!entity) continue;
-
-      this.entityStates.set(entityId, this.resolveEntityRuntimeState(document, entity));
-    }
+    const hierarchyStates = createEntityHierarchyStateMap(document.entityIds, document.entities);
+    for (const [entityId, state] of hierarchyStates) this.entityStates.set(entityId, state);
 
     const primitiveMeshIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.meshRenderer)),
@@ -1861,19 +1938,16 @@ export class SceneRuntime {
     );
   }
 
-  /** 将文件夹选中转换为子实体选中集合，用于在场景中高亮整组对象。 */
+  /** 将文件夹选中递归转换为全部普通后代，用于在场景中高亮整棵分组子树。 */
   private resolveSelectedEntityIds(document: SceneDocument): Set<string> {
     const selectedEntityId = document.selectedEntityId;
     const selectedEntity = selectedEntityId ? document.entities[selectedEntityId] : null;
     if (!selectedEntity) return new Set();
-
     if (!selectedEntity.isFolder) return new Set([selectedEntity.id]);
 
     return new Set(
-      selectedEntity.childrenIds.filter((childId) => {
-        const childEntity = document.entities[childId];
-        return Boolean(childEntity && !childEntity.isFolder);
-      }),
+      collectEntitySubtreeIds(document.entities, selectedEntity.id, false)
+        .filter((entityId) => document.entities[entityId] && !document.entities[entityId].isFolder),
     );
   }
 
@@ -5782,16 +5856,6 @@ export class SceneRuntime {
     return this.entityStates.get(entityId)?.visible !== false;
   }
 
-  /** 合并实体自身与直属分组文件夹的显示/锁定状态。 */
-  private resolveEntityRuntimeState(document: SceneDocument, entity: Entity): EntityRuntimeState {
-    const parentEntity = entity.parentId ? document.entities[entity.parentId] : null;
-
-    return {
-      visible: entity.visible !== false && parentEntity?.visible !== false,
-      locked: entity.locked === true || parentEntity?.locked === true,
-    };
-  }
-
   /** 判断实体是否允许被 Scene View 鼠标拾取。 */
   private isEntityScenePickable(entityId: string): boolean {
     const state = this.entityStates.get(entityId);
@@ -6620,7 +6684,8 @@ export class SceneRuntime {
       !mesh.isDisposed() && mesh.getTotalVertices() > 0
     ));
     // 批次 Geometry 与脚本宿主隔离；参数或脚本输入变化时必须重建，才能复制最新顶点数据。
-    const sourceSignature = `${options.renderSignature}|${sourceMeshes
+    // representation 标记确保旧的代理批次不会在开发热更新或缓存复用时继续存活。
+    const sourceSignature = `${options.renderSignature}|representation:original-geometry|${sourceMeshes
       .map((mesh) => `${mesh.uniqueId}:${mesh.geometry?.uniqueId ?? 0}:${mesh instanceof Mesh ? mesh.thinInstanceCount : 0}`)
       .join('|')}`;
     const failureSignature = `${options.variantKey ?? 'base'}:${sourceSignature}:${totalInstanceCount}`;
@@ -7362,38 +7427,50 @@ export class SceneRuntime {
       selectedArrayEntityIdsByBatch.set(batch, selectedEntityIds);
     }
 
-    const selectedArrayGroups = [...selectedArrayEntityIdsByBatch.entries()]
-      .map(([batch, selectedEntityIds]) => {
-        const meshes = batch.meshes.filter((mesh) => (
-          !mesh.isDisposed() && mesh.thinInstanceCount > 0 && mesh.getTotalVertices() > 0
-        ));
-        return meshes.length > 0 ? { batch, meshes, selectedEntityIds } : null;
-      })
-      .filter((group): group is NonNullable<typeof group> => group !== null);
-    const nextOutlinedModelArrayBatches = new Set(selectedArrayGroups.map((group) => group.batch));
-
     for (const previousBatch of this.outlinedModelArrayBatches) {
-      if (nextOutlinedModelArrayBatches.has(previousBatch)) continue;
+      if (selectedArrayEntityIdsByBatch.has(previousBatch)) continue;
       if (previousBatch.meshes.some((mesh) => !mesh.isDisposed())) {
         previousBatch.setSelectionMask(new Set(), 0);
       }
     }
 
+    // 先写入批次维护的权威选择缓冲，再把当前活动的原模型 Mesh 交给 SelectionOutlineLayer。
+    // 这样只高亮目标逻辑实体，不会因共享 Geometry 或 thinInstance 批次而整类高亮。
+    let nextArraySelectionId = selectedSourceGroups.length + 1;
+    const selectedArrayGroups = [...selectedArrayEntityIdsByBatch.entries()]
+      .map(([batch, selectedEntityIds]) => {
+        const selectionId = nextArraySelectionId;
+        nextArraySelectionId += 1;
+        batch.setSelectionMask(selectedEntityIds, selectionId);
+        const meshes = batch.meshes.filter((mesh) => (
+          !mesh.isDisposed() && mesh.thinInstanceCount > 0 && mesh.getTotalVertices() > 0
+        ));
+        return meshes.length > 0 ? { batch, meshes, selectedEntityIds, selectionId } : null;
+      })
+      .filter((group): group is NonNullable<typeof group> => group !== null);
+    const nextOutlinedModelArrayBatches = new Set(selectedArrayGroups.map((group) => group.batch));
+
     this.modelSelectionOutlineLayer.clearSelection();
+    if (selectedSourceGroups.length === 0 && selectedArrayGroups.length === 0) {
+      // SelectionOutlineLayer 会为遮挡正确的描边延迟启用全场景 DepthRenderer，
+      // 但 clearSelection() 不会释放它；空选区继续保留会让所有模型永久多绘制一遍。
+      this.scene.disableDepthRenderer();
+      this.outlinedModelArrayBatches = nextOutlinedModelArrayBatches;
+      return;
+    }
+
     prepareInstancedMeshesForSelectionOutline([
       ...selectedSourceGroups.flat(),
       ...selectedArrayGroups.flatMap((group) => group.meshes),
     ]);
 
-    let nextSelectionId = 1;
     for (const meshes of selectedSourceGroups) {
       this.modelSelectionOutlineLayer.addSelection(meshes);
-      nextSelectionId += 1;
     }
     for (const group of selectedArrayGroups) {
       this.modelSelectionOutlineLayer.addSelection(group.meshes);
-      group.batch.setSelectionMask(group.selectedEntityIds, nextSelectionId);
-      nextSelectionId += 1;
+      // addSelection() 会临时把整个 thinInstance 批次改为选中；再次绑定权威缓冲只保留目标实体。
+      group.batch.setSelectionMask(group.selectedEntityIds, group.selectionId);
     }
 
     this.outlinedModelArrayBatches = nextOutlinedModelArrayBatches;

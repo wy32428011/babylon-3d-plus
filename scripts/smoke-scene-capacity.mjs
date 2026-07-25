@@ -92,19 +92,27 @@ async function waitForAllEntityMeshes(scene, entityIds) {
 
 /** 等待编辑态自动分组完成脚本/参数初始化，并一次提交全部逻辑实体矩阵。 */
 async function waitForEditThinInstanceBatch(runtime, sourceEntityId, expectedEntityCount) {
+  let lastObserved = null;
   for (let attempt = 0; attempt < WAIT_ATTEMPTS; attempt += 1) {
     const sourceModel = runtime.models.get(sourceEntityId);
     const batch = sourceModel?.modelArrayBatch;
+    const activeMeshes = batch?.meshes.filter((mesh) => mesh.thinInstanceCount > 0) ?? [];
+    lastObserved = {
+      measurementReady: sourceModel?.measurementReady ?? false,
+      batchMeshCount: batch?.meshes.length ?? 0,
+      activeBatchMeshCount: activeMeshes.length,
+      thinInstanceCounts: batch?.meshes.map((mesh) => mesh.thinInstanceCount) ?? [],
+    };
     if (
       sourceModel?.measurementReady
-      && batch?.meshes.length > 0
-      && batch.meshes.every((mesh) => mesh.thinInstanceCount === expectedEntityCount)
+      && activeMeshes.length > 0
+      && activeMeshes.every((mesh) => mesh.thinInstanceCount === expectedEntityCount)
     ) {
       return batch;
     }
     await new Promise((resolve) => setTimeout(resolve, WAIT_INTERVAL_MS));
   }
-  assert.fail(`等待编辑态 ${expectedEntityCount} 个 thinInstance 完成批量提交超时`);
+  assert.fail(`等待编辑态 ${expectedEntityCount} 个 thinInstance 完成批量提交超时：${JSON.stringify(lastObserved)}`);
 }
 
 /** 收集指定实体的有效渲染 Mesh。 */

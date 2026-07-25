@@ -52,6 +52,12 @@ import type {
   TransformComponent,
 } from '../model/components';
 import type { Entity } from '../model/Entity';
+import {
+  collectEntitySubtreeIds,
+  getTopLevelHierarchyEntityIds,
+  isEntityAncestorOf,
+  isEntityEffectivelyLocked,
+} from '../model/entityHierarchy';
 import { createArrayAssetNumber, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
 import {
   createEntityArrayName,
@@ -139,8 +145,8 @@ export type CadImportProgress = {
 };
 
 type EntityClipboardEntry = {
-  root: Entity;
-  children: Entity[];
+  rootId: string;
+  entities: Entity[];
 };
 
 type EntityClipboard = {
@@ -380,6 +386,19 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     selectedModelMeasurement: null,
     logs: prependLog(state.logs, message),
   };
+}
+
+/** 本地场景成功加载后异步同步共享模型库；同步失败不影响已经打开的场景。 */
+async function syncDataPlatformModelsAfterLocalSceneLoad(pushLog: (message: string) => void): Promise<void> {
+  if (!window.editorApi?.syncDataPlatformModels) return;
+
+  try {
+    const started = await window.editorApi.syncDataPlatformModels();
+    if (started) pushLog('本地场景已加载，正在同步数据中台全部模型。');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`本地场景已加载，但启动数据中台模型同步失败：${message}`);
+  }
 }
 
 /** 归一化导入进度，避免 UI 收到越界百分比后产生异常宽度。 */
@@ -789,18 +808,9 @@ function getSelectedEntity(state: EditorState) {
   return state.scene.entities[selectedId] ?? null;
 }
 
-/** 文件夹锁定会向子对象继承，用于统一拦截 Inspector、快捷键和 Gizmo 写回。 */
-function isEntityEffectivelyLocked(scene: SceneDocument, entity: Entity | null | undefined): boolean {
-  if (!entity) return false;
-  if (entity.locked) return true;
-  if (!entity.parentId) return false;
-
-  return scene.entities[entity.parentId]?.locked === true;
-}
-
 /** 判断普通实体是否允许编辑，文件夹不参与 Transform 类编辑。 */
 function isRuntimeEntityEditable(scene: SceneDocument, entity: Entity | null | undefined): entity is Entity {
-  return Boolean(entity && !entity.isFolder && !isEntityEffectivelyLocked(scene, entity));
+  return Boolean(entity && !entity.isFolder && !isEntityEffectivelyLocked(scene.entities, entity));
 }
 
 /** 过滤 Hierarchy 多选 ID，避免 UI 状态引用已经不存在的实体。 */
@@ -918,7 +928,7 @@ function isModelGeneratorEntity(entity: Entity | null | undefined): boolean {
   return Boolean(entity?.components.modelGenerator);
 }
 
-/** 创建与场景实体隔离的剪贴板快照，并按目标父级归一化层级字段。 */
+/** 创建与场景实体隔离的剪贴板快照，并按当前子树归一化层级字段。 */
 function cloneEntityForClipboard(entity: Entity, parentId: string | null, childrenIds: string[]): Entity {
   return {
     ...entity,
@@ -936,52 +946,42 @@ type EntityClipboardSnapshot = {
 };
 
 /**
- * 把 Hierarchy 选区转换为剪贴板根条目。
- * 选中文件夹时包含其全部直属实体；同时选中父文件夹与子实体时只保留父级条目。
+ * 把 Hierarchy 选区转换为互不重叠的完整子树快照。
+ * 祖先与任意深度后代同时选中时只保留最高层根条目，空文件夹继续保留。
  */
 function createEntityClipboardSnapshot(scene: SceneDocument, selectedIds: string[]): EntityClipboardSnapshot {
-  const selectedIdSet = new Set(selectedIds);
+  const rootIds = getTopLevelHierarchyEntityIds(scene.entities, selectedIds);
   const entries: EntityClipboardEntry[] = [];
   let folderCount = 0;
   let entityCount = 0;
   let skippedModelGeneratorCount = 0;
 
-  for (const entityId of selectedIds) {
-    const entity = scene.entities[entityId];
-    if (!entity) continue;
-
-    const selectedParent = entity.parentId ? scene.entities[entity.parentId] : null;
-    if (!entity.isFolder && selectedParent?.isFolder && selectedIdSet.has(selectedParent.id)) continue;
-
-    if (entity.isFolder) {
-      const children: Entity[] = [];
-      for (const childId of entity.childrenIds) {
-        const child = scene.entities[childId];
-        if (!child || child.isFolder) continue;
-        if (isModelGeneratorEntity(child)) {
-          skippedModelGeneratorCount += 1;
-          continue;
-        }
-
-        children.push(cloneEntityForClipboard(child, entity.id, []));
-      }
-
-      entries.push({
-        root: cloneEntityForClipboard(entity, null, children.map((child) => child.id)),
-        children,
-      });
-      folderCount += 1;
-      entityCount += children.length;
-      continue;
-    }
-
-    if (isModelGeneratorEntity(entity)) {
+  for (const rootId of rootIds) {
+    const subtreeIds = collectEntitySubtreeIds(scene.entities, rootId);
+    const includedIds = subtreeIds.filter((entityId) => {
+      const entity = scene.entities[entityId];
+      if (!isModelGeneratorEntity(entity)) return Boolean(entity);
       skippedModelGeneratorCount += 1;
-      continue;
-    }
+      return false;
+    });
+    if (!includedIds.includes(rootId)) continue;
 
-    entries.push({ root: cloneEntityForClipboard(entity, null, []), children: [] });
-    entityCount += 1;
+    const includedIdSet = new Set(includedIds);
+    const snapshotEntities = includedIds.flatMap((entityId) => {
+      const entity = scene.entities[entityId];
+      if (!entity) return [];
+      const parentId = entityId === rootId || !entity.parentId || !includedIdSet.has(entity.parentId)
+        ? null
+        : entity.parentId;
+      const childrenIds = entity.isFolder
+        ? entity.childrenIds.filter((childId) => includedIdSet.has(childId))
+        : [];
+      return [cloneEntityForClipboard(entity, parentId, childrenIds)];
+    });
+
+    entries.push({ rootId, entities: snapshotEntities });
+    folderCount += snapshotEntities.filter((entity) => entity.isFolder).length;
+    entityCount += snapshotEntities.filter((entity) => !entity.isFolder).length;
   }
 
   return { entries, folderCount, entityCount, skippedModelGeneratorCount };
@@ -996,6 +996,7 @@ function formatEntityClipboardCount(folderCount: number, entityCount: number): s
 }
 
 type EntityDuplicateOverrides = {
+  id?: string;
   name?: string;
   assetNumber?: EntityAssetNumberOverride;
 };
@@ -1008,7 +1009,7 @@ function createDuplicatedRuntimeEntity(
   existingNames: Set<string>,
   overrides: EntityDuplicateOverrides = {},
 ): Entity {
-  const id = createId('entity');
+  const id = overrides.id ?? createId('entity');
   const components = cloneEntityComponents(source);
   components.transform = {
     ...components.transform,
@@ -1096,7 +1097,7 @@ type PreparedEntityClipboardPaste = {
   skippedModelGeneratorCount: number;
 };
 
-/** 为一次粘贴生成全新的文件夹和实体 ID，并重建文件夹直属关系。 */
+/** 为一次粘贴生成全新的子树 ID，并在两阶段处理中重建任意深度父子关系。 */
 function prepareEntityClipboardPaste(
   scene: SceneDocument,
   clipboard: EntityClipboard,
@@ -1112,48 +1113,58 @@ function prepareEntityClipboardPaste(
   const pasteOffset = { x: CLIPBOARD_PASTE_OFFSET_METERS, y: 0, z: CLIPBOARD_PASTE_OFFSET_METERS };
 
   for (const entry of clipboard.entries) {
-    if (entry.root.isFolder) {
-      const folderId = createId('folder');
-      const folderName = createUniqueEntityName(existingNames, entry.root.name);
-      const children: Entity[] = [];
-
-      for (const child of entry.children) {
-        if (isModelGeneratorEntity(child)) {
-          skippedModelGeneratorCount += 1;
-          continue;
-        }
-        const duplicatedChild = createDuplicatedRuntimeEntity(child, folderId, pasteOffset, existingNames);
-        duplicatedIdBySourceId.set(child.id, duplicatedChild.id);
-        children.push(duplicatedChild);
-      }
-
-      const folder: Entity = {
-        ...entry.root,
-        id: folderId,
-        name: folderName,
-        isFolder: true,
-        parentId: null,
-        childrenIds: children.map((child) => child.id),
-        components: cloneEntityComponents(entry.root),
-      };
-
-      entities.push(folder, ...children);
-      rootEntityIds.push(folder.id);
-      folderCount += 1;
-      entityCount += children.length;
-      continue;
-    }
-
-    if (isModelGeneratorEntity(entry.root)) {
+    const sourceById = new Map(entry.entities.map((entity) => [entity.id, entity]));
+    const copyableSources = entry.entities.filter((entity) => {
+      if (!isModelGeneratorEntity(entity)) return true;
       skippedModelGeneratorCount += 1;
-      continue;
+      return false;
+    });
+    const copyableIdSet = new Set(copyableSources.map((entity) => entity.id));
+    if (!copyableIdSet.has(entry.rootId)) continue;
+
+    for (const source of copyableSources) {
+      duplicatedIdBySourceId.set(source.id, createId(source.isFolder ? 'folder' : 'entity'));
     }
 
-    const duplicatedEntity = createDuplicatedRuntimeEntity(entry.root, parentId, pasteOffset, existingNames);
-    duplicatedIdBySourceId.set(entry.root.id, duplicatedEntity.id);
-    entities.push(duplicatedEntity);
-    rootEntityIds.push(duplicatedEntity.id);
-    entityCount += 1;
+    for (const source of copyableSources) {
+      const duplicatedId = duplicatedIdBySourceId.get(source.id);
+      if (!duplicatedId) continue;
+      const duplicatedParentId = source.id === entry.rootId
+        ? parentId
+        : source.parentId && copyableIdSet.has(source.parentId)
+          ? duplicatedIdBySourceId.get(source.parentId) ?? parentId
+          : parentId;
+
+      if (source.isFolder) {
+        const folder: Entity = {
+          ...source,
+          id: duplicatedId,
+          name: createUniqueEntityName(existingNames, source.name),
+          isFolder: true,
+          parentId: duplicatedParentId,
+          childrenIds: source.childrenIds.flatMap((childId) => {
+            if (!copyableIdSet.has(childId) || !sourceById.has(childId)) return [];
+            const duplicatedChildId = duplicatedIdBySourceId.get(childId);
+            return duplicatedChildId ? [duplicatedChildId] : [];
+          }),
+          components: cloneEntityComponents(source),
+        };
+        entities.push(folder);
+        folderCount += 1;
+      } else {
+        entities.push(createDuplicatedRuntimeEntity(
+          source,
+          duplicatedParentId,
+          pasteOffset,
+          existingNames,
+          { id: duplicatedId },
+        ));
+        entityCount += 1;
+      }
+    }
+
+    const duplicatedRootId = duplicatedIdBySourceId.get(entry.rootId);
+    if (duplicatedRootId) rootEntityIds.push(duplicatedRootId);
   }
 
   for (let index = 0; index < entities.length; index += 1) {
@@ -1188,7 +1199,7 @@ function getActiveHierarchySelectionIds(state: EditorState): string[] {
 function getUnlockedSelectionIds(state: EditorState, entityIds = getActiveHierarchySelectionIds(state)): string[] {
   return entityIds.filter((entityId) => {
     const entity = state.scene.entities[entityId];
-    return Boolean(entity && !isEntityEffectivelyLocked(state.scene, entity));
+    return Boolean(entity && !isEntityEffectivelyLocked(state.scene.entities, entity));
   });
 }
 
@@ -1207,23 +1218,23 @@ function resolvePasteParentId(scene: SceneDocument, targetFolderId: string | nul
   return targetFolder?.isFolder ? targetFolder.id : null;
 }
 
-/** 从选区展开 Scene View 聚焦目标，选中文件夹时聚焦其直属普通子对象。 */
+/** 从选区展开 Scene View 聚焦目标，文件夹会递归解析全部普通后代。 */
 function resolveSceneFocusEntityIds(scene: SceneDocument, entityIds: string[]): string[] {
   const resolvedIds: string[] = [];
 
-  for (const entityId of entityIds) {
+  for (const entityId of getTopLevelHierarchyEntityIds(scene.entities, entityIds)) {
     const entity = scene.entities[entityId];
     if (!entity) continue;
-
-    if (entity.isFolder) {
-      for (const childId of entity.childrenIds) {
-        const childEntity = scene.entities[childId];
-        if (childEntity && !childEntity.isFolder) resolvedIds.push(childId);
-      }
+    if (!entity.isFolder) {
+      resolvedIds.push(entityId);
       continue;
     }
 
-    resolvedIds.push(entityId);
+    for (const descendantId of collectEntitySubtreeIds(scene.entities, entityId, false)) {
+      if (scene.entities[descendantId] && !scene.entities[descendantId].isFolder) {
+        resolvedIds.push(descendantId);
+      }
+    }
   }
 
   return [...new Set(resolvedIds)];
@@ -1253,7 +1264,59 @@ function setEntitiesLockedInScene(scene: SceneDocument, entityIds: string[], loc
   return { ...scene, entities };
 }
 
-/** 批量删除实体，删除文件夹时会把未删除的子对象释放回根层级。 */
+/** 沿被移除文件夹向上查找最近仍存在的父文件夹。 */
+function resolveNearestSurvivingParentId(
+  scene: SceneDocument,
+  parentId: string | null,
+  removedIds: ReadonlySet<string>,
+): string | null {
+  const visited = new Set<string>();
+  let currentId = parentId;
+
+  while (currentId && removedIds.has(currentId) && !visited.has(currentId)) {
+    visited.add(currentId);
+    currentId = scene.entities[currentId]?.parentId ?? null;
+  }
+
+  return currentId && scene.entities[currentId]?.isFolder ? currentId : null;
+}
+
+/** 在移除文件夹容器时按原顺序展开其内容，供删除和解组共同保持层级顺序。 */
+function collectPromotedChildrenIds(
+  scene: SceneDocument,
+  childIds: readonly string[],
+  removedIds: ReadonlySet<string>,
+  targetParentId: string,
+): string[] {
+  const result: string[] = [];
+  const visited = new Set<string>();
+  const stack = [...childIds].reverse();
+
+  while (stack.length > 0) {
+    const childId = stack.pop();
+    if (!childId || visited.has(childId)) continue;
+    const child = scene.entities[childId];
+    if (!child) continue;
+    visited.add(childId);
+
+    if (removedIds.has(childId)) {
+      if (child.isFolder) {
+        for (let index = child.childrenIds.length - 1; index >= 0; index -= 1) {
+          stack.push(child.childrenIds[index]);
+        }
+      }
+      continue;
+    }
+
+    if (resolveNearestSurvivingParentId(scene, child.parentId, removedIds) === targetParentId) {
+      result.push(childId);
+    }
+  }
+
+  return result;
+}
+
+/** 批量删除实体；文件夹保持非级联语义，未删除内容提升到最近仍存在的父级。 */
 function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[]): SceneDocument {
   const deletingIds = new Set(entityIds.filter((entityId) => Boolean(scene.entities[entityId])));
   if (deletingIds.size === 0) return scene;
@@ -1274,8 +1337,10 @@ function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[]): Scene
   for (const [entityId, entity] of Object.entries(scene.entities)) {
     if (deletingIds.has(entityId)) continue;
 
-    const parentId = entity.parentId && deletingIds.has(entity.parentId) ? null : entity.parentId;
-    const childrenIds = entity.childrenIds.filter((childId) => !deletingIds.has(childId));
+    const parentId = resolveNearestSurvivingParentId(scene, entity.parentId, deletingIds);
+    const childrenIds = entity.isFolder
+      ? collectPromotedChildrenIds(scene, entity.childrenIds, deletingIds, entityId)
+      : [];
     const promotedSourceId = entity.components.modelArrayInstance
       ? promotedSources.get(entity.components.modelArrayInstance.sourceEntityId)
       : undefined;
@@ -1294,6 +1359,7 @@ function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[]): Scene
     entities[entityId] =
       parentId === entity.parentId
       && childrenIds.length === entity.childrenIds.length
+      && childrenIds.every((childId, index) => childId === entity.childrenIds[index])
       && components === entity.components
         ? entity
         : { ...entity, parentId, childrenIds, components };
@@ -1429,7 +1495,7 @@ function prepareResolvedEntityArray(
       source
       && !source.isFolder
       && !source.components.modelGenerator
-      && !isEntityEffectivelyLocked(state.scene, source),
+      && !isEntityEffectivelyLocked(state.scene.entities, source),
     );
   });
   if (sourceIds.length === 0 || sourceIds.length !== requestedSourceIds.length) {
@@ -1565,32 +1631,50 @@ function createResolvedEntityArrayCommand(prepared: Extract<PreparedResolvedEnti
 }
 
 function groupEntitiesInScene(scene: SceneDocument, entityIds: string[]): SceneDocument {
-  const groupingIds = [...new Set(entityIds)].filter((entityId) => {
+  const groupingIdSet = new Set(entityIds.filter((entityId) => {
     const entity = scene.entities[entityId];
     return Boolean(entity && !entity.isFolder);
-  });
-  if (groupingIds.length === 0) return scene;
+  }));
+  if (groupingIdSet.size === 0) return scene;
 
-  const folder = createFolderEntity(`群组 ${groupingIds.length}`);
-  const movingIdSet = new Set(groupingIds);
+  const firstGroupingEntity = scene.entityIds
+    .map((entityId) => scene.entities[entityId])
+    .find((entity) => Boolean(entity && groupingIdSet.has(entity.id)));
+  const commonParentId = firstGroupingEntity
+    && [...groupingIdSet].every((entityId) => scene.entities[entityId]?.parentId === firstGroupingEntity.parentId)
+      ? firstGroupingEntity.parentId
+      : null;
+  const orderedGroupingIds = commonParentId
+    ? scene.entities[commonParentId]?.childrenIds.filter((entityId) => groupingIdSet.has(entityId)) ?? []
+    : scene.entityIds.filter((entityId) => groupingIdSet.has(entityId));
+  if (orderedGroupingIds.length === 0) return scene;
+
+  const folder = {
+    ...createFolderEntity(`群组 ${orderedGroupingIds.length}`),
+    parentId: commonParentId,
+    childrenIds: orderedGroupingIds,
+  };
   const entities: Record<string, Entity> = {
     ...scene.entities,
-    [folder.id]: {
-      ...folder,
-      childrenIds: groupingIds,
-    },
+    [folder.id]: folder,
   };
 
-  for (const entityId of groupingIds) {
+  for (const entityId of orderedGroupingIds) {
     const entity = entities[entityId];
-    if (!entity) continue;
-    entities[entityId] = { ...entity, parentId: folder.id };
+    if (entity) entities[entityId] = { ...entity, parentId: folder.id };
   }
 
-  for (const [entityId, entity] of Object.entries(entities)) {
-    if (!entity.isFolder || entityId === folder.id) continue;
-    const childrenIds = entity.childrenIds.filter((childId) => !movingIdSet.has(childId));
-    if (childrenIds.length !== entity.childrenIds.length) {
+  for (const [entityId, entity] of Object.entries(scene.entities)) {
+    if (!entity.isFolder) continue;
+    const firstGroupedIndex = entity.childrenIds.findIndex((childId) => groupingIdSet.has(childId));
+    const childrenIds = entity.childrenIds.filter((childId) => !groupingIdSet.has(childId));
+    if (entityId === commonParentId) {
+      childrenIds.splice(firstGroupedIndex >= 0 ? firstGroupedIndex : childrenIds.length, 0, folder.id);
+    }
+    if (
+      childrenIds.length !== entity.childrenIds.length
+      || childrenIds.some((childId, index) => childId !== entity.childrenIds[index])
+    ) {
       entities[entityId] = { ...entity, childrenIds };
     }
   }
@@ -1603,30 +1687,34 @@ function groupEntitiesInScene(scene: SceneDocument, entityIds: string[]): SceneD
   };
 }
 
-/** 解组文件夹：子对象回到根层级，原文件夹从场景中移除。 */
+/** 解组文件夹：只移除文件夹容器，直属内容按原顺序提升到原父级。 */
 function ungroupFoldersInScene(scene: SceneDocument, folderIds: string[]): SceneDocument {
-  const ungroupingIds = [...new Set(folderIds)].filter((folderId) => scene.entities[folderId]?.isFolder);
-  if (ungroupingIds.length === 0) return scene;
+  const ungroupingIds = new Set(
+    folderIds.filter((folderId) => scene.entities[folderId]?.isFolder),
+  );
+  if (ungroupingIds.size === 0) return scene;
 
-  const ungroupingIdSet = new Set(ungroupingIds);
   const entities: Record<string, Entity> = {};
+  let selectedEntityId: string | null = null;
 
   for (const [entityId, entity] of Object.entries(scene.entities)) {
-    if (ungroupingIdSet.has(entityId)) continue;
-    const parentId = entity.parentId && ungroupingIdSet.has(entity.parentId) ? null : entity.parentId;
-    const childrenIds = entity.childrenIds.filter((childId) => !ungroupingIdSet.has(childId));
+    if (ungroupingIds.has(entityId)) continue;
+    const parentId = resolveNearestSurvivingParentId(scene, entity.parentId, ungroupingIds);
+    const childrenIds = entity.isFolder
+      ? collectPromotedChildrenIds(scene, entity.childrenIds, ungroupingIds, entityId)
+      : [];
+    if (selectedEntityId === null && parentId !== entity.parentId) selectedEntityId = entityId;
     entities[entityId] =
-      parentId === entity.parentId && childrenIds.length === entity.childrenIds.length
+      parentId === entity.parentId
+      && childrenIds.length === entity.childrenIds.length
+      && childrenIds.every((childId, index) => childId === entity.childrenIds[index])
         ? entity
         : { ...entity, parentId, childrenIds };
   }
 
-  const releasedChildIds = ungroupingIds.flatMap((folderId) => scene.entities[folderId]?.childrenIds ?? []);
-  const selectedEntityId = releasedChildIds.find((entityId) => Boolean(entities[entityId])) ?? null;
-
   return {
     ...scene,
-    entityIds: scene.entityIds.filter((entityId) => !ungroupingIdSet.has(entityId)),
+    entityIds: scene.entityIds.filter((entityId) => !ungroupingIds.has(entityId)),
     entities,
     selectedEntityId,
   };
@@ -2051,8 +2139,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   createFolder: () => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '新建文件夹');
+      const selectedEntity = getSelectedEntity(state);
+      const parentId = selectedEntity?.isFolder
+        && !isEntityEffectivelyLocked(state.scene.entities, selectedEntity)
+          ? selectedEntity.id
+          : null;
       const folder = createFolderEntity(createNextFolderName(state.scene));
-      const command = createFolderCommand(folder);
+      const command = createFolderCommand(folder, parentId);
       const result = executeCommand(state.scene, state.history, command);
 
       return {
@@ -2271,12 +2364,28 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '拖放移动对象');
       const targetFolder = folderId ? state.scene.entities[folderId] : null;
       if (folderId && !targetFolder?.isFolder) return state;
+      if (targetFolder && isEntityEffectivelyLocked(state.scene.entities, targetFolder)) return state;
 
-      const movableIds = [...new Set(entityIds)].filter((entityId) => {
+      const movableIds = getTopLevelHierarchyEntityIds(state.scene.entities, entityIds).filter((entityId) => {
         const entity = state.scene.entities[entityId];
-        return Boolean(entity && !entity.isFolder);
+        return Boolean(
+          entity
+          && entity.parentId !== folderId
+          && !isEntityEffectivelyLocked(state.scene.entities, entity)
+        );
       });
-      if (movableIds.length === 0) return state;
+      if (
+        movableIds.length === 0
+        || (
+          folderId
+          && movableIds.some((entityId) => (
+            entityId === folderId
+            || isEntityAncestorOf(state.scene.entities, entityId, folderId)
+          ))
+        )
+      ) {
+        return state;
+      }
 
       const command = moveEntitiesToFolderCommand(movableIds, folderId);
       const result = executeCommand(state.scene, state.history, command);
@@ -2284,7 +2393,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return {
         ...result,
         hierarchySelectionIds: sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds),
-        logs: prependLog(state.logs, `${command.label}: ${movableIds.length} 个对象`),
+        logs: prependLog(state.logs, `${command.label}: ${movableIds.length} 个项目`),
       };
     });
   },
@@ -2390,7 +2499,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const clipboard = state.entityClipboard;
       if (!clipboard || clipboard.entries.length === 0) return state;
 
-      const containsFolder = clipboard.entries.some((entry) => entry.root.isFolder);
       const selectedEntity = getSelectedEntity(state);
       const inferredTargetFolderId =
         targetFolderId === undefined
@@ -2398,9 +2506,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             ? selectedEntity.id
             : selectedEntity?.parentId ?? null
           : targetFolderId;
-      const parentId = containsFolder ? null : resolvePasteParentId(state.scene, inferredTargetFolderId);
+      const parentId = resolvePasteParentId(state.scene, inferredTargetFolderId);
       const parentFolder = parentId ? state.scene.entities[parentId] : null;
-      if (parentFolder && isEntityEffectivelyLocked(state.scene, parentFolder)) return state;
+      if (parentFolder && isEntityEffectivelyLocked(state.scene.entities, parentFolder)) return state;
 
       const prepared = prepareEntityClipboardPaste(state.scene, clipboard, parentId);
       if (prepared.entities.length === 0) {
@@ -2603,7 +2711,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       });
       const ungroupingIds = [...new Set(folderIds)].filter((folderId) => {
         const folder = state.scene.entities[folderId];
-        return Boolean(folder?.isFolder && !isEntityEffectivelyLocked(state.scene, folder));
+        return Boolean(folder?.isFolder && !isEntityEffectivelyLocked(state.scene.entities, folder));
       });
       if (ungroupingIds.length === 0) return state;
 
@@ -2669,7 +2777,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '重命名对象');
       const entity = getSelectedEntity(state);
-      if (!entity || isEntityEffectivelyLocked(state.scene, entity) || entity.name === nextName) return state;
+      if (!entity || isEntityEffectivelyLocked(state.scene.entities, entity) || entity.name === nextName) return state;
 
       const command = renameEntityCommand(entity.id, entity.name, nextName);
       const result = executeCommand(state.scene, state.history, command);
@@ -3156,6 +3264,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const scene = deserializeScene(result.content);
 
       set((state) => createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`));
+      void syncDataPlatformModelsAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3183,6 +3292,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       const scene = deserializeScene(result.content);
       set((state) => createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`));
+      void syncDataPlatformModelsAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

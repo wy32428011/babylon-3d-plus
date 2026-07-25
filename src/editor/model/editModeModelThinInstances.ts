@@ -1,4 +1,5 @@
 import type { Entity } from './Entity';
+import { createEntityHierarchyStateMap, type EntityHierarchyState } from './entityHierarchy';
 import type { ModelAssetComponent } from './components';
 import type { SceneDocument } from './SceneDocument';
 
@@ -54,6 +55,7 @@ export function createEditModeModelThinInstancePlan(
   previousPlan?: EditModeModelThinInstancePlan,
 ): EditModeModelThinInstancePlan {
   const referencedSourceIds = collectReferencedModelArraySourceIds(scene);
+  const hierarchyStateByEntityId = createEntityHierarchyStateMap(scene.entityIds, scene.entities);
   const groups = new Map<string, Entity[]>();
 
   for (const entityId of scene.entityIds) {
@@ -84,7 +86,7 @@ export function createEditModeModelThinInstancePlan(
   for (const group of groups.values()) {
     if (group.length < 2) continue;
 
-    const source = chooseGroupSource(scene.entities, group, referencedSourceIds);
+    const source = chooseGroupSource(group, referencedSourceIds, hierarchyStateByEntityId);
     let convertedInGroup = 0;
 
     for (const entity of group) {
@@ -199,19 +201,13 @@ function collectRemappedModelArraySources(
 
 /** 优先选择已有阵列源，其次选择当前有效可见实体，避免隐藏源节点连带关闭整个批次。 */
 function chooseGroupSource(
-  entities: SceneDocument['entities'],
   group: readonly Entity[],
   referencedSourceIds: ReadonlySet<string>,
+  hierarchyStateByEntityId: ReadonlyMap<string, EntityHierarchyState>,
 ): Entity {
   const referencedSources = group.filter((entity) => referencedSourceIds.has(entity.id));
   const candidates = referencedSources.length > 0 ? referencedSources : group;
-  return candidates.find((entity) => isEffectivelyVisible(entities, entity)) ?? candidates[0];
-}
-
-/** SceneRuntime 当前只合并直属文件夹显隐，这里保持相同规则。 */
-function isEffectivelyVisible(entities: SceneDocument['entities'], entity: Entity): boolean {
-  const parent = entity.parentId ? entities[entity.parentId] : null;
-  return entity.visible !== false && parent?.visible !== false;
+  return candidates.find((entity) => hierarchyStateByEntityId.get(entity.id)?.visible !== false) ?? candidates[0];
 }
 
 /** 缓存完整分组键；Transform、显隐、锁定和选择变化不会让模型资产对象失效。 */

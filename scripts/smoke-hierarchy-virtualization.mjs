@@ -78,6 +78,8 @@ try {
     optimizeDeps: { noDiscovery: true },
   });
   const module = await loadVirtualizationModule(server);
+  const { buildHierarchyRows } = await server.ssrLoadModule('/src/editor/hierarchy/hierarchyRows.ts');
+  const { getTopLevelHierarchyEntityIds } = await server.ssrLoadModule('/src/editor/model/entityHierarchy.ts');
   const {
     HIERARCHY_OVERSCAN_ROWS,
     HIERARCHY_ROW_HEIGHT,
@@ -92,6 +94,84 @@ try {
     verifyLargeListWindow(module, 10_000, 480),
     verifyLargeListWindow(module, 50_000, 720),
   ];
+
+  /** 创建只包含层级字段的轻量实体夹具。 */
+  function createHierarchyEntity(id, name, parentId, childrenIds = [], isFolder = false) {
+    return {
+      id,
+      name,
+      ...(isFolder ? { isFolder: true } : {}),
+      visible: true,
+      locked: false,
+      parentId,
+      childrenIds,
+      components: {
+        transform: {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        },
+      },
+    };
+  }
+
+  const hierarchyEntities = {
+    root: createHierarchyEntity('root', '根目录', null, ['child', 'empty'], true),
+    child: createHierarchyEntity('child', '二级目录', 'root', ['grandchild'], true),
+    grandchild: createHierarchyEntity('grandchild', '三级目录', 'child', ['leaf'], true),
+    leaf: createHierarchyEntity('leaf', '目标模型', 'grandchild'),
+    empty: createHierarchyEntity('empty', '空目录', 'root', [], true),
+  };
+  const hierarchyEntityIds = ['root', 'child', 'grandchild', 'leaf', 'empty'];
+  assert.deepEqual(
+    buildHierarchyRows(hierarchyEntityIds, hierarchyEntities, '', new Set()).map((row) => [row.entity.id, row.depth]),
+    [['root', 0], ['child', 1], ['grandchild', 2], ['leaf', 3], ['empty', 1]],
+    '无搜索时必须按任意深度 DFS 顺序构建行',
+  );
+  assert.deepEqual(
+    buildHierarchyRows(hierarchyEntityIds, hierarchyEntities, '', new Set(['child'])).map((row) => row.entity.id),
+    ['root', 'child', 'empty'],
+    '任意层级文件夹折叠必须隐藏完整后代子树',
+  );
+  assert.deepEqual(
+    buildHierarchyRows(hierarchyEntityIds, hierarchyEntities, '目标模型', new Set(['root', 'child'])).map((row) => row.entity.id),
+    ['root', 'child', 'grandchild', 'leaf'],
+    '搜索后必须忽略折叠并显示命中项的完整祖先路径',
+  );
+  assert.deepEqual(
+    buildHierarchyRows(hierarchyEntityIds, hierarchyEntities, '二级目录', new Set()).map((row) => row.entity.id),
+    ['root', 'child', 'grandchild', 'leaf'],
+    '文件夹自身命中时必须展示完整子树但不带无关兄弟项',
+  );
+  assert.deepEqual(
+    buildHierarchyRows(hierarchyEntityIds, hierarchyEntities, '不存在', new Set()),
+    [],
+    '无匹配搜索不得保留空祖先行',
+  );
+
+  const deepEntityIds = [];
+  const deepEntities = {};
+  const deepLevelCount = 5_000;
+  for (let index = 0; index < deepLevelCount; index += 1) {
+    const entityId = `deep-${index}`;
+    const childId = index + 1 < deepLevelCount ? `deep-${index + 1}` : null;
+    deepEntityIds.push(entityId);
+    deepEntities[entityId] = createHierarchyEntity(
+      entityId,
+      `深层 ${index}`,
+      index === 0 ? null : `deep-${index - 1}`,
+      childId ? [childId] : [],
+      Boolean(childId),
+    );
+  }
+  const deepRows = buildHierarchyRows(deepEntityIds, deepEntities, '', new Set());
+  assert.equal(deepRows.length, deepLevelCount, '迭代构建必须支持 5000 层而不发生调用栈溢出');
+  assert.equal(deepRows.at(-1).depth, deepLevelCount - 1);
+  assert.deepEqual(
+    getTopLevelHierarchyEntityIds(deepEntities, deepEntityIds),
+    ['deep-0'],
+    '全选深层链时必须在线性复杂度内归一为最高层根实体',
+  );
 
   const emptyWindow = calculateHierarchyVirtualWindow(0, 100, 480);
   assert.deepEqual(
@@ -135,6 +215,8 @@ try {
   assert.match(cssSource, /\.hierarchy-virtual-spacer\s*\{[^}]*position:\s*relative;/s, 'CSS 必须提供总高度占位层');
   assert.match(cssSource, /\.hierarchy-virtual-window\s*\{[^}]*position:\s*absolute;/s, 'CSS 必须让窗口行脱离总高度布局');
   assert.match(cssSource, /\.entity-tree-row\s*\{[^}]*height:\s*24px;/s, 'Hierarchy 行高必须固定为 24px');
+  assert.match(cssSource, /min\(calc\(var\(--entity-depth\) \* 16px\), 160px\)/, '深层缩进必须限制最大宽度');
+  assert.match(panelSource, /draggable=\{!props\.readOnly && !isEntityEffectivelyLocked\(entities, entity\)\}/, '文件夹和普通实体都必须允许拖拽');
 
   console.log(JSON.stringify({
     ok: true,
@@ -148,6 +230,11 @@ try {
       selectedAndRenamingAutoScroll: true,
       fixedTotalHeight: true,
       expandAndCollapseAll: true,
+      recursiveHierarchyRows: true,
+      deepHierarchyStackSafe: true,
+      deepSelectionNormalization: true,
+      indentationClamped: true,
+      folderDraggingEnabled: true,
     },
   }, null, 2));
 } finally {

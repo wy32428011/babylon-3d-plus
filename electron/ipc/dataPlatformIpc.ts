@@ -19,6 +19,7 @@ import {
   getDataPlatformEditorRoot,
   openDataPlatformProject,
   retryLatestDataPlatformModelSync,
+  syncDataPlatformModelsForWorkspace,
 } from './dataPlatformProjectService.js';
 
 const DATA_PLATFORM_CONFIG_FILE = 'data-platform-config.json';
@@ -112,6 +113,12 @@ export function registerDataPlatformIpc(): void {
       return openDataPlatformProject(project, config.baseUrl, config.workspaceRoot);
     },
   );
+
+  ipcMain.handle('data-platform:syncModels', async (): Promise<boolean> => {
+    const config = await readDataPlatformConfig();
+    if (!config.baseUrl) return false;
+    return syncDataPlatformModelsForWorkspace(config.baseUrl, config.workspaceRoot);
+  });
 
   ipcMain.handle('data-platform:retryModelSync', async (): Promise<boolean> => {
     return retryLatestDataPlatformModelSync();

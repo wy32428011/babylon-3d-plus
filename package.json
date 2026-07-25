@@ -1,7 +1,7 @@
 {
   "name": "zending-3d-editor",
   "productName": "ZENDING 3D EDITOR",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",
@@ -36,7 +36,8 @@
     "smoke:packaged:gpu": "node scripts/smoke-packaged-gpu.mjs",
     "smoke:installer:gpu": "npm run dist:win && npm run smoke:packaged:gpu",
     "smoke:data-platform": "node scripts/smoke-data-platform-project.mjs",
-    "smoke:editor-performance": "node scripts/smoke-editor-large-scene-performance.mjs && node scripts/smoke-hierarchy-virtualization.mjs"
+    "smoke:editor-performance": "node scripts/smoke-editor-large-scene-performance.mjs && node scripts/smoke-hierarchy-virtualization.mjs",
+    "smoke:reimport-performance": "npm run build && node scripts/smoke-real-scene-reimport-performance.mjs"
   },
   "engines": {
     "node": ">=22.12.0"

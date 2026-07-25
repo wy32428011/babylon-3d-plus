@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld('editorApi', {
     ipcRenderer.invoke('data-platform:listProjects', request),
   openDataPlatformProject: (request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectOpenResult> =>
     ipcRenderer.invoke('data-platform:openProject', request),
+  syncDataPlatformModels: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncModels'),
   retryDataPlatformModelSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryModelSync'),
   onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void): (() => void) => {
     let active = true;

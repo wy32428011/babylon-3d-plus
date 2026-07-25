@@ -337,6 +337,7 @@ interface Window {
     resetDataPlatformWorkspace: () => Promise<DataPlatformConfig>;
     listDataPlatformProjects: (request?: DataPlatformProjectListRequest) => Promise<DataPlatformProjectListResult>;
     openDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectOpenResult>;
+    syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
     listProjectAssets: () => Promise<ProjectListAssetsResult>;

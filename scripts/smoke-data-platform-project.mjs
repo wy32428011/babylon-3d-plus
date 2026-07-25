@@ -192,7 +192,63 @@ async function createSceneFixture() {
   return `${JSON.stringify(source, null, 2)}\n`;
 }
 
-async function createFixtures(root) {
+async function createLocalSceneFixture(storageRoot) {
+  const source = JSON.parse(await createSceneFixture());
+  const entityId = 'entity_data_platform_smoke';
+  const entity = source.scene.entities[entityId];
+  const staleModelPackagePath = path.join(
+    storageRoot,
+    'Assets',
+    'Models',
+    `Model-${GLOBAL_MODEL_ID}-同步前模型名称`,
+  );
+  const staleModelPath = path.join(staleModelPackagePath, 'stale-global.glb');
+  const staleScriptPath = path.join(staleModelPackagePath, 'stale-runtime.model.ts');
+  entity.components.modelAsset.sourcePath = staleModelPath;
+  entity.components.modelAsset.sourceUrl = `editor-asset://local/${encodeURIComponent(staleModelPath)}`;
+  entity.components.modelAsset.assetRevision = 'stale-local-model-revision';
+  entity.components.modelAsset.scriptAssets = [{
+    path: staleScriptPath,
+    sourceUrl: `editor-asset://local/${encodeURIComponent(staleScriptPath)}`,
+    name: 'stale-runtime.model.ts',
+  }];
+
+  const staleEnvironmentPackagePath = path.join(
+    storageRoot,
+    'Assets',
+    'Environments',
+    `Env-${ENVIRONMENT_MODEL_ID}-同步前环境名称`,
+  );
+  const staleEnvironmentPath = path.join(staleEnvironmentPackagePath, 'stale-environment.glb');
+  const staleEnvironmentUrl = `editor-asset://local/${encodeURIComponent(staleEnvironmentPath)}`;
+
+  source.scene.id = 'scene_local_data_platform_sync';
+  source.scene.name = '本地场景模型同步';
+  source.scene.entityIds = [entityId];
+  source.scene.entities = { [entityId]: entity };
+  source.scene.selectedEntityId = null;
+  source.scene.sceneSettings = {
+    camera: { savedPose: null, viewDistance: 5000 },
+    sensitivity: { zoom: 10, pan: 10, rotate: 10 },
+    environment: {
+      packagePath: staleEnvironmentPackagePath,
+      lengthUnit: 'meter',
+      unitScaleToMeters: 1,
+      activeVariantUrl: `${staleEnvironmentUrl}?assetRevision=stale-local-environment-revision`,
+      variants: [{
+        name: '同步前环境',
+        sourcePath: staleEnvironmentPath,
+        sourceUrl: `${staleEnvironmentUrl}?assetRevision=stale-local-environment-revision`,
+      }],
+    },
+  };
+  return `${JSON.stringify(source, null, 2)}\n`;
+}
+
+async function createFixtures(root, storageRoot) {
+  const localScenePath = path.join(root, 'local.scene.json');
+  await writeFile(localScenePath, await createLocalSceneFixture(storageRoot), 'utf8');
+
   const currentRoot = path.join(root, 'current');
   await mkdir(path.join(currentRoot, '.babylon-editor'), { recursive: true });
   await mkdir(path.join(currentRoot, 'Assets', 'Models', 'PackageModel'), { recursive: true });
@@ -253,6 +309,7 @@ async function createFixtures(root) {
       ['corrupt.zip', await readFile(corruptZip)],
       ['symlink.zip', await readFile(symlinkZip)],
     ]),
+    localScenePath,
     modelFiles,
   };
 }
@@ -616,7 +673,7 @@ async function run() {
   let unwritableLaunched;
 
   try {
-    const fixtures = await createFixtures(fixtureRoot);
+    const fixtures = await createFixtures(fixtureRoot, storageRoot);
     await writeFile(unwritableRoot, 'file blocks directory usage', 'utf8');
     mock = await startMockServer(fixtures);
 
@@ -631,6 +688,8 @@ async function run() {
 
     await writeDataPlatformConfig(userDataRoot, { version: 2, baseUrl: '', workspaceRoot: storageRoot });
     launched = await launchEditor(null, userDataRoot, { useStorageOverride: false });
+    assert.equal(await launched.window.evaluate(() => typeof window.editorApi.syncDataPlatformModels), 'function');
+    assert.equal(await launched.window.evaluate(() => window.editorApi.syncDataPlatformModels()), false);
 
     const configured = await configureAndList(launched.window, `${mock.baseUrl}/`);
     assert.equal(configured.saved.baseUrl, mock.baseUrl);
@@ -705,6 +764,72 @@ async function run() {
     await launched.app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.setSize(1440, 900);
     });
+
+    const modelQueryCountBeforeLocalScene = mock.requests.filter(
+      (item) => item.path === '/platform/api/v1/models/query',
+    ).length;
+    await launched.window.evaluate(() => {
+      window.__localSceneModelSyncEvents = [];
+      window.__localSceneModelSyncUnsubscribe?.();
+      window.__localSceneModelSyncUnsubscribe = window.editorApi.onDataPlatformModelSyncProgress((progress) => {
+        window.__localSceneModelSyncEvents.push(progress);
+      });
+    });
+    await mockNextWorkspaceDialog(launched.app, { canceled: false, filePaths: [fixtures.localScenePath] });
+    await launched.window.getByRole('button', { name: '打开场景文件', exact: true }).click();
+    await launched.window.locator('.project-library').waitFor({ state: 'visible', timeout: 20000 });
+    await launched.window.waitForFunction(() => (window.__localSceneModelSyncEvents ?? []).some(
+      (progress) => progress.phase === 'completed' || progress.phase === 'failed',
+    ), undefined, { timeout: 20000 });
+    const localSceneModelSyncProgress = await launched.window.evaluate(() => {
+      const events = window.__localSceneModelSyncEvents ?? [];
+      const finalProgress = [...events].reverse().find(
+        (progress) => progress.phase === 'completed' || progress.phase === 'failed',
+      ) ?? null;
+      window.__localSceneModelSyncUnsubscribe?.();
+      delete window.__localSceneModelSyncUnsubscribe;
+      delete window.__localSceneModelSyncEvents;
+      return finalProgress;
+    });
+    assert.equal(
+      localSceneModelSyncProgress?.phase,
+      'completed',
+      localSceneModelSyncProgress?.error ?? localSceneModelSyncProgress?.message,
+    );
+    assert.ok(
+      mock.requests.filter((item) => item.path === '/platform/api/v1/models/query').length
+        > modelQueryCountBeforeLocalScene,
+      '打开本地场景后未查询数据中台模型',
+    );
+    await launched.window.locator('.resource-card-name', { hasText: '全局普通模型' }).waitFor({ state: 'visible' });
+    const localSceneAssets = await launched.window.evaluate(() => window.editorApi.listProjectAssets());
+    assert.equal(localSceneAssets.projectRoot, storageRoot);
+    assert.equal(localSceneAssets.assets.length, 4);
+    assert.equal(localSceneAssets.assets.filter((item) => item.libraryKind === 'model').length, 3);
+    assert.equal(localSceneAssets.assets.filter((item) => item.libraryKind === 'environment').length, 1);
+
+    const refreshedSceneModelPath = path.join(
+      storageRoot,
+      'Assets',
+      'Models',
+      `Model-${GLOBAL_MODEL_ID}-全局普通模型`,
+      'global.glb',
+    );
+    await launched.window.locator('.entity-tree-row', { hasText: '数据中台工程包模型' }).click();
+    await launched.window.waitForFunction((expectedPath) => (
+      document.querySelector('.model-asset-meta .asset-path')?.getAttribute('title') === expectedPath
+    ), refreshedSceneModelPath, { timeout: 20000 });
+
+    await launched.window.locator('.console-dock-button').click();
+    await launched.window.locator('.console-log').filter({ hasText: '已刷新 1 个场景模型实例。' }).waitFor({
+      state: 'visible',
+      timeout: 20000,
+    });
+    await launched.window.locator('.console-log').filter({ hasText: '环境模型已更新。' }).waitFor({
+      state: 'visible',
+      timeout: 20000,
+    });
+    await launched.window.getByRole('button', { name: '关闭 Console' }).click();
 
     const valid = await openAndWaitForSync(launched.window, VALID_PROJECT_ID);
     assert.equal(valid.openResult.source, 'package');
@@ -978,6 +1103,9 @@ async function run() {
         'incompatible-package-fallback',
         'normal-environment-combo-sync',
         'optional-any-ts-script-download',
+        'local-scene-opens-and-syncs-model-library',
+        'synced-models-refresh-active-scene-models',
+        'synced-environment-refreshes-active-scene',
         'synced-model-cards-visible-first',
         'single-row-horizontal-resource-library',
         'compact-content-sized-resource-workspace',

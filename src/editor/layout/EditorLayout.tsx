@@ -6,6 +6,7 @@ import { HierarchyPanel } from '../panels/HierarchyPanel';
 import { InspectorPanel } from '../panels/InspectorPanel';
 import { ProjectPanel } from '../panels/ProjectPanel';
 import { SceneViewPanel } from '../panels/SceneViewPanel';
+import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { useEditorStore, type TransformTool } from '../store/editorStore';
 import { Toolbar } from '../ui/Toolbar';
 import styles from './EditorLayout.module.css';
@@ -73,10 +74,7 @@ export function EditorLayout() {
   const canDelete = useEditorStore((state) => {
     const selectedEntityId = state.scene.selectedEntityId;
     const selectedEntity = selectedEntityId ? state.scene.entities[selectedEntityId] : null;
-    const parentEntity = selectedEntity?.parentId ? state.scene.entities[selectedEntity.parentId] : null;
-    const isLocked = selectedEntity?.locked === true || parentEntity?.locked === true;
-
-    return Boolean(selectedEntity && !isLocked);
+    return Boolean(selectedEntity && !isEntityEffectivelyLocked(state.scene.entities, selectedEntity));
   });
   const canUndo = useEditorStore((state) => state.history.undoStack.length > 0);
   const canRedo = useEditorStore((state) => state.history.redoStack.length > 0);

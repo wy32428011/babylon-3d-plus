@@ -1,23 +1,30 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
+  FreeCamera,
   Matrix,
   Mesh,
   MeshBuilder,
   NullEngine,
   PBRMaterial,
   Scene,
+  SelectionOutlineLayer,
   TransformNode,
+  Vector3,
   VertexData,
 } from '@babylonjs/core';
 import { createServer } from 'vite';
 
 const LARGE_PLAN_COUNTS = [10_000, 50_000];
 const BATCH_ENTITY_COUNT = 10_000;
+const BATCH_SOURCE_VERTEX_COUNT = 31_998;
+const BATCH_EXPECTED_MAX_INSTANCES_PER_PARTITION = Math.floor(32_000_000 / BATCH_SOURCE_VERTEX_COUNT);
 const EDITOR_LAYOUT_PATH = 'src/editor/layout/EditorLayout.tsx';
 const SCENE_VIEW_PANEL_PATH = 'src/editor/panels/SceneViewPanel.tsx';
 const TOOLBAR_PATH = 'src/editor/ui/Toolbar.tsx';
 const PERFORMANCE_MONITOR_PATH = 'src/runtime/babylon/ScenePerformanceMonitor.ts';
+const ENTITY_ARRAY_BATCH_PATH = 'src/runtime/babylon/EntityArrayThinInstanceBatch.ts';
+const SCENE_RUNTIME_PATH = 'src/runtime/babylon/SceneRuntime.ts';
 
 /** 创建同一静态模板下的独立逻辑模型，保持真实 SceneDocument 不可变引用语义。 */
 function createLargeStaticModelScene(entityCount) {
@@ -53,6 +60,23 @@ function createLargeStaticModelScene(entityCount) {
   return { entityIds, entities };
 }
 
+/** 创建约 32k 顶点的无索引静态源，使动态 GPU 顶点预算把 10k 实例稳定拆成 10 个空间分片。 */
+function createPartitionBudgetSourceMesh(scene) {
+  const mesh = new Mesh('large-selection-source', scene);
+  const positions = new Float32Array(BATCH_SOURCE_VERTEX_COUNT * 3);
+  const normals = new Float32Array(BATCH_SOURCE_VERTEX_COUNT * 3);
+  for (let vertex = 0; vertex < BATCH_SOURCE_VERTEX_COUNT; vertex += 3) {
+    const offset = vertex * 3;
+    positions.set([-0.5, -0.5, 0, 0.5, -0.5, 0, 0, 0.5, 0], offset);
+    normals.set([0, 0, 1, 0, 0, 1, 0, 0, 1], offset);
+  }
+  const vertexData = new VertexData();
+  vertexData.positions = positions;
+  vertexData.normals = normals;
+  vertexData.applyToMesh(mesh, false);
+  return mesh;
+}
+
 /** 只断言数量级和引用复用，不使用易受 CI 环境影响的硬毫秒阈值。 */
 function verifyEditModePlan(createEditModeModelThinInstancePlan, entityCount) {
   const scene = createLargeStaticModelScene(entityCount);
@@ -84,13 +108,14 @@ function verifyEditModePlan(createEditModeModelThinInstancePlan, entityCount) {
   };
 }
 
-/** 验证 10k thinInstance 的单选切换只读取目标区间，不重新扫描全部 entityIds。 */
+/** 验证高顶点 10k thinInstance 的动态空间分片、拾取映射和单选差量更新。 */
 function verifyThinInstanceSelectionDelta(EntityArrayThinInstanceBatch) {
   const engine = new NullEngine({ renderWidth: 64, renderHeight: 64 });
   const scene = new Scene(engine);
-  const sourceMesh = MeshBuilder.CreateBox('large-selection-source', { size: 1 }, scene);
+  const sourceMesh = createPartitionBudgetSourceMesh(scene);
   const batch = EntityArrayThinInstanceBatch.create('large-selection-source', [sourceMesh], { interactive: true });
   assert.ok(batch, '必须创建 10k 逻辑模型的矩阵批次');
+  let selectionLayer = null;
 
   try {
     const instances = Array.from({ length: BATCH_ENTITY_COUNT }, (_, index) => ({
@@ -105,17 +130,70 @@ function verifyThinInstanceSelectionDelta(EntityArrayThinInstanceBatch) {
     const updateStartedAt = performance.now();
     assert.equal(batch.updateEntityTransforms(Matrix.Identity(), instances), true, '10k 逻辑模型矩阵必须一次提交成功');
     const transformUpdateDurationMs = performance.now() - updateStartedAt;
-    assert.equal(batch.meshes.length, 1, '单源 Mesh 不得因 10k 逻辑模型增加批次 Mesh 数');
-    assert.equal(batch.meshes[0].thinInstanceCount, BATCH_ENTITY_COUNT, '批次实例数必须等于 10k');
+    const activeBatches = batch.batches.filter((entry) => entry.mesh.thinInstanceCount > 0);
+    const totalThinInstanceCount = activeBatches.reduce((total, entry) => total + entry.mesh.thinInstanceCount, 0);
+    assert.equal(
+      activeBatches.length,
+      Math.ceil(BATCH_ENTITY_COUNT / BATCH_EXPECTED_MAX_INSTANCES_PER_PARTITION),
+      '高顶点 10k 实例必须按动态 GPU 顶点预算拆成固定数量空间分片',
+    );
+    assert.ok(
+      activeBatches.every((entry) => entry.mesh.thinInstanceCount <= BATCH_EXPECTED_MAX_INSTANCES_PER_PARTITION),
+      '单个空间分片不得超过动态 GPU 顶点预算',
+    );
+    assert.equal(totalThinInstanceCount, BATCH_ENTITY_COUNT, '空间分片不得减少任何逻辑实例');
+    const partitionBoundsSizes = activeBatches.map((entry) => {
+      const bounds = entry.mesh.getBoundingInfo().boundingBox;
+      return {
+        x: bounds.maximumWorld.x - bounds.minimumWorld.x,
+        z: bounds.maximumWorld.z - bounds.minimumWorld.z,
+      };
+    });
+    const maxPartitionBoundsXMeters = Math.max(...partitionBoundsSizes.map((bounds) => bounds.x));
+    const maxPartitionBoundsZMeters = Math.max(...partitionBoundsSizes.map((bounds) => bounds.z));
+    assert.ok(
+      maxPartitionBoundsXMeters < 100,
+      `平衡空间分片 X 包围盒必须显著小于完整 200 米场景跨度，实际 ${maxPartitionBoundsXMeters}`,
+    );
+    assert.ok(
+      maxPartitionBoundsZMeters < 30,
+      `平衡空间分片 Z 包围盒必须显著小于完整 50 米场景跨度，实际 ${maxPartitionBoundsZMeters}`,
+    );
 
     batch.setSelectionMask(new Set([instances[0].entityId]), 1);
-    const internalBatch = batch.batches[0];
-    assert.ok(internalBatch.entityInstanceRangeStarts instanceof Int32Array, '选择区间起点必须使用有界 TypedArray');
-    assert.ok(internalBatch.entityInstanceRangeCounts instanceof Uint32Array, '选择区间数量必须使用有界 TypedArray');
-    assert.equal(batch.entityIndexById.size, BATCH_ENTITY_COUNT, '实体 ID 到索引只应保留一份共享 Map');
-    const firstSelectionBuffer = internalBatch.selectionBuffer;
-    assert.ok(firstSelectionBuffer, '首次选择必须注册实例选择缓冲');
-    assert.equal(firstSelectionBuffer[0], 1, '首个逻辑模型必须写入选择 ID');
+    const firstEntityBatch = activeBatches.find((entry) => (entry.entityInstanceRangeStarts?.[0] ?? -1) >= 0);
+    assert.ok(firstEntityBatch, '首个逻辑实体必须存在于某个空间分片');
+    const firstEntityStart = firstEntityBatch.entityInstanceRangeStarts[0];
+    assert.equal(batch.getEntityIdForThinInstance(firstEntityBatch.mesh, firstEntityStart), instances[0].entityId);
+    const initialSelectionBuffers = new Map(activeBatches.map((entry) => [entry, entry.selectionBuffer]));
+    assert.ok([...initialSelectionBuffers.values()].every((buffer) => buffer instanceof Float32Array), '每个活动分片必须注册选择缓冲');
+    assert.equal(firstEntityBatch.selectionBuffer[firstEntityStart], 1, '首个逻辑模型必须写入选择 ID');
+
+    selectionLayer = new SelectionOutlineLayer('large-selection-outline', scene);
+    selectionLayer.addSelection(activeBatches.map((entry) => entry.mesh));
+    assert.ok(
+      activeBatches.every((entry) => (
+        entry.mesh._userThinInstanceBuffersStorage.data.instanceSelectionId.every((value) => value === 1)
+      )),
+      '回归前提：Babylon SelectionOutlineLayer 必须先把每个活动分片覆盖为整批选中',
+    );
+    batch.setSelectionMask(new Set([instances[0].entityId]), 1);
+    assert.ok(
+      activeBatches.every((entry) => (
+        entry.mesh._userThinInstanceBuffersStorage.data.instanceSelectionId === entry.selectionBuffer
+      )),
+      '逻辑选区未变化时也必须重新绑定批次权威选择数组',
+    );
+    assert.equal(
+      activeBatches.reduce(
+        (count, entry) => count + entry.mesh._userThinInstanceBuffersStorage.data.instanceSelectionId
+          .subarray(0, entry.mesh.thinInstanceCount)
+          .reduce((total, value) => total + (value === 1 ? 1 : 0), 0),
+        0,
+      ),
+      1,
+      '选择一个逻辑实体时，实际绑定到 Mesh 的缓冲只能高亮该实体',
+    );
 
     const originalEntityIds = batch.entityIds;
     batch.entityIds = new Proxy(originalEntityIds, {
@@ -130,34 +208,377 @@ function verifyThinInstanceSelectionDelta(EntityArrayThinInstanceBatch) {
     const selectionStartedAt = performance.now();
     assert.doesNotThrow(
       () => batch.setSelectionMask(new Set([instances.at(-1).entityId]), 1),
-      '切换单选必须只访问前后目标区间',
+      '跨空间分片切换单选必须只访问前后目标区间',
     );
     const selectionUpdateDurationMs = performance.now() - selectionStartedAt;
     batch.entityIds = originalEntityIds;
 
-    assert.equal(internalBatch.selectionBuffer, firstSelectionBuffer, '同数量批次必须复用选择 Float32Array');
-    assert.equal(firstSelectionBuffer[0], 0, '旧选区必须差量清零');
-    assert.equal(firstSelectionBuffer.at(-1), 1, '新选区必须只写入目标实例');
+    const lastEntityIndex = instances.length - 1;
+    const lastEntityBatch = activeBatches.find((entry) => (
+      (entry.entityInstanceRangeStarts?.[lastEntityIndex] ?? -1) >= 0
+    ));
+    assert.ok(lastEntityBatch, '最后一个逻辑实体必须存在于某个空间分片');
+    const lastEntityStart = lastEntityBatch.entityInstanceRangeStarts[lastEntityIndex];
+    assert.equal(batch.getEntityIdForThinInstance(lastEntityBatch.mesh, lastEntityStart), instances.at(-1).entityId);
+    assert.ok(
+      activeBatches.every((entry) => entry.selectionBuffer === initialSelectionBuffers.get(entry)),
+      '同布局选择切换必须复用每个分片的 Float32Array',
+    );
+    assert.equal(firstEntityBatch.selectionBuffer[firstEntityStart], 0, '旧分片选区必须差量清零');
+    assert.equal(lastEntityBatch.selectionBuffer[lastEntityStart], 1, '新分片选区必须只写入目标实例');
+    assert.ok(
+      activeBatches.every((entry) => (
+        entry.mesh._userThinInstanceBuffersStorage.data.instanceSelectionId === entry.selectionBuffer
+      )),
+      '跨分片切换单选后，Mesh 实际缓冲必须继续引用批次权威数组',
+    );
     assert.equal(
-      firstSelectionBuffer.reduce((count, value) => count + (value === 1 ? 1 : 0), 0),
+      activeBatches.reduce(
+        (count, entry) => count + entry.selectionBuffer.reduce((total, value) => total + (value === 1 ? 1 : 0), 0),
+        0,
+      ),
       1,
-      '单选缓冲中只能保留一个选中逻辑模型',
+      '所有空间分片合计只能保留一个选中逻辑模型',
     );
 
     batch.setSelectionMask(new Set([instances.at(-1).entityId]), 7);
-    assert.equal(firstSelectionBuffer.at(-1), 7, 'SelectionOutline ID 变化必须更新当前目标区间');
+    assert.equal(lastEntityBatch.selectionBuffer[lastEntityStart], 7, 'SelectionOutline ID 变化必须更新当前目标区间');
     batch.setSelectionMask(new Set(), 0);
-    assert.ok(firstSelectionBuffer.every((value) => value === 0), '清空选择必须只清理之前选中的区间');
+    assert.ok(
+      activeBatches.every((entry) => entry.selectionBuffer.every((value) => value === 0)),
+      '清空选择必须只清理之前选中的分片区间',
+    );
+
+    const batchCountBeforeRepeatedUpdate = batch.batches.length;
+    const activeBatchObjects = [...activeBatches];
+    const matrixBuffers = new Map(activeBatches.map((entry) => [entry, entry.matrixBuffer]));
+    const entityIndexBuffers = new Map(activeBatches.map((entry) => [entry, entry.entityIndexBuffer]));
+    const repeatedUpdateStartedAt = performance.now();
+    assert.equal(
+      batch.updateEntityTransforms(Matrix.Identity(), instances),
+      true,
+      '相同 10k 空间布局的第二次矩阵提交必须成功',
+    );
+    const repeatedTransformUpdateDurationMs = performance.now() - repeatedUpdateStartedAt;
+    const repeatedActiveBatches = batch.batches.filter((entry) => entry.mesh.thinInstanceCount > 0);
+    assert.equal(batch.batches.length, batchCountBeforeRepeatedUpdate, '相同空间布局不得继续创建新批次 Mesh');
+    assert.deepEqual(repeatedActiveBatches, activeBatchObjects, '相同空间布局必须复用原有分片 Mesh');
+    assert.equal(
+      repeatedActiveBatches.reduce((total, entry) => total + entry.mesh.thinInstanceCount, 0),
+      BATCH_ENTITY_COUNT,
+      '重复更新后所有空间分片的实例总数仍必须等于 10k',
+    );
+    assert.ok(
+      repeatedActiveBatches.every((entry) => entry.matrixBuffer === matrixBuffers.get(entry)),
+      '相同空间布局必须复用每个分片的矩阵 Float32Array',
+    );
+    assert.ok(
+      repeatedActiveBatches.every((entry) => entry.entityIndexBuffer === entityIndexBuffers.get(entry)),
+      '相同空间布局必须复用每个分片的实体索引 Uint32Array',
+    );
+    batch.setSelectionMask(new Set([instances[0].entityId]), 9);
+    assert.ok(
+      repeatedActiveBatches.every((entry) => entry.selectionBuffer === initialSelectionBuffers.get(entry)),
+      '重复 Transform 后必须继续复用每个分片的选择 Float32Array',
+    );
 
     return {
       entityCount: BATCH_ENTITY_COUNT,
-      batchMeshCount: batch.meshes.length,
-      thinInstanceCount: batch.meshes[0].thinInstanceCount,
+      batchMeshCount: activeBatches.length,
+      thinInstanceCount: totalThinInstanceCount,
+      maxPartitionThinInstances: Math.max(...activeBatches.map((entry) => entry.mesh.thinInstanceCount)),
+      maxPartitionBoundsXMeters,
+      maxPartitionBoundsZMeters,
       transformUpdateDurationMs,
+      repeatedTransformUpdateDurationMs,
       selectionUpdateDurationMs,
+      matrixBufferReused: true,
+      entityIndexBufferReused: true,
       selectionBufferReused: true,
     };
   } finally {
+    selectionLayer?.dispose();
+    batch.dispose();
+    scene.dispose();
+    engine.dispose();
+  }
+}
+
+/** 验证相机移动时只提交视锥内实例，并完整保留逻辑实体、拾取和选择映射。 */
+function verifyThinInstanceFrustumCompaction(EntityArrayThinInstanceBatch) {
+  const engine = new NullEngine({ renderWidth: 640, renderHeight: 480 });
+  const scene = new Scene(engine);
+  const camera = new FreeCamera('frustum-camera', new Vector3(0, 0, -10), scene);
+  camera.setTarget(Vector3.Zero());
+  camera.minZ = 0.1;
+  camera.maxZ = 2_000;
+  scene.activeCamera = camera;
+  const sourceMesh = MeshBuilder.CreateBox('frustum-source', { size: 1 }, scene);
+  const batch = EntityArrayThinInstanceBatch.create('frustum-source', [sourceMesh], { interactive: true });
+  assert.ok(batch, '必须创建相机视锥压缩批次');
+
+  try {
+    const instances = [
+      ...Array.from({ length: 10 }, (_, index) => ({
+        entityId: `NEAR-${index}`,
+        transform: {
+          position: { x: (index % 5) - 2, y: Math.floor(index / 5) - 0.5, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        },
+        pickable: true,
+      })),
+      ...Array.from({ length: 90 }, (_, index) => ({
+        entityId: `FAR-${index}`,
+        transform: {
+          position: { x: 1_000 + (index % 10), y: Math.floor(index / 10), z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        },
+        pickable: true,
+      })),
+    ];
+    assert.equal(batch.updateEntityTransforms(Matrix.Identity(), instances), true);
+    scene.render();
+    const firstMesh = batch.meshes[0];
+    const nearVisibleCount = firstMesh.thinInstanceCount;
+    assert.equal(nearVisibleCount, 10, '默认相机只能向 GPU 提交近处 10 个实例');
+    const nearIds = Array.from({ length: nearVisibleCount }, (_, index) => (
+      batch.getEntityIdForThinInstance(firstMesh, index)
+    ));
+    assert.ok(nearIds.every((entityId) => entityId?.startsWith('NEAR-')), '近处视锥映射不得混入远处实体');
+
+    batch.setSelectionMask(new Set(['NEAR-0']), 3);
+    assert.ok(firstMesh.thinInstanceCount > 0);
+    assert.ok(batch.batches[0].selectionBuffer.includes(3), '可见选中实体必须保留 SelectionOutline ID');
+
+    camera.position.x = 1_004;
+    camera.setTarget(new Vector3(1_004, 0, 0));
+    scene.render();
+    const farVisibleCount = firstMesh.thinInstanceCount;
+    assert.ok(farVisibleCount > 0 && farVisibleCount <= 90, '相机移到远处分组后必须只提交远处可见实例');
+    const farIds = Array.from({ length: farVisibleCount }, (_, index) => (
+      batch.getEntityIdForThinInstance(firstMesh, index)
+    ));
+    assert.ok(farIds.every((entityId) => entityId?.startsWith('FAR-')), '远处视锥映射不得混入近处实体');
+    assert.ok(batch.batches[0].selectionBuffer.every((value) => value === 0), '离开视锥的选中实体不得污染可见选择缓冲');
+
+    camera.position.x = 0;
+    camera.setTarget(Vector3.Zero());
+    scene.render();
+    assert.equal(firstMesh.thinInstanceCount, 10, '返回近处相机后必须从完整源矩阵恢复 10 个实例');
+    assert.ok(batch.batches[0].selectionBuffer.includes(3), '选中实体重新进入视锥后必须恢复 SelectionOutline ID');
+
+    // 长条模型的包围球会错误覆盖视锥；OBB 必须在不误裁中心实体的前提下剔除右侧实体。
+    const elongatedSource = MeshBuilder.CreateBox(
+      'frustum-elongated-source',
+      { width: 1, height: 100, depth: 1 },
+      scene,
+    );
+    const elongatedBatch = EntityArrayThinInstanceBatch.create(
+      'frustum-elongated-source',
+      [elongatedSource],
+      { interactive: true },
+    );
+    assert.ok(elongatedBatch, '必须创建长条模型 OBB 裁剪批次');
+    try {
+      assert.equal(elongatedBatch.updateEntityTransforms(Matrix.Identity(), [
+        {
+          entityId: 'ELONGATED-VISIBLE',
+          transform: {
+            position: { x: 0, y: 0, z: 0 },
+            rotation: { x: 0, y: 0, z: 0 },
+            scale: { x: 1, y: 1, z: 1 },
+          },
+          pickable: true,
+        },
+        {
+          entityId: 'ELONGATED-OUTSIDE',
+          transform: {
+            position: { x: 20, y: 0, z: 0 },
+            rotation: { x: 0, y: 0, z: 0 },
+            scale: { x: 1, y: 1, z: 1 },
+          },
+          pickable: true,
+        },
+      ]), true);
+      scene.render();
+      assert.equal(elongatedBatch.meshes[0].thinInstanceCount, 1, '长条模型 OBB 必须剔除包围球假相交的视锥外实例');
+      assert.equal(
+        elongatedBatch.getEntityIdForThinInstance(elongatedBatch.meshes[0], 0),
+        'ELONGATED-VISIBLE',
+        'OBB 裁剪不得误删真实可见的长条实例',
+      );
+    } finally {
+      elongatedBatch.dispose();
+      elongatedSource.dispose(false, false);
+    }
+
+    return {
+      sourceInstanceCount: instances.length,
+      nearVisibleCount,
+      farVisibleCount,
+      cameraRecullingPreservesSelection: true,
+      elongatedSphereFalsePositiveRemoved: true,
+    };
+  } finally {
+    batch.dispose();
+    scene.dispose();
+    engine.dispose();
+  }
+}
+
+
+/** 验证极远景、中景和近景始终提交参数化后的原模型 Geometry，不创建任何替代载体。 */
+function verifyOriginalGeometryAtAllDistances(EntityArrayThinInstanceBatch) {
+  const engine = new NullEngine({ renderWidth: 640, renderHeight: 480 });
+  const scene = new Scene(engine);
+  const camera = new FreeCamera('original-geometry-camera', new Vector3(0, 0, -2_000), scene);
+  camera.setTarget(Vector3.Zero());
+  camera.minZ = 0.1;
+  camera.maxZ = 5_000;
+  scene.activeCamera = camera;
+
+  const root = new TransformNode('original-parameter-root', scene);
+  const mainPart = MeshBuilder.CreateBox('original-main-part', { width: 2, height: 2, depth: 2 }, scene);
+  mainPart.parent = root;
+  mainPart.position.x = -1;
+  const generatedPart = MeshBuilder.CreateBox(
+    'original-parameter-script-part',
+    { width: 1, height: 3, depth: 1.5 },
+    scene,
+  );
+  generatedPart.parent = root;
+  generatedPart.position.x = 2;
+  root.computeWorldMatrix(true);
+  mainPart.computeWorldMatrix(true);
+  generatedPart.computeWorldMatrix(true);
+  const sourceGeometry = mainPart.geometry;
+  const sourceMeshes = new Set([mainPart, generatedPart]);
+  const batch = EntityArrayThinInstanceBatch.create('original-source', [mainPart, generatedPart], {
+    interactive: true,
+    sourceRootWorldMatrix: root.getWorldMatrix().clone(),
+  });
+  assert.ok(batch, '必须为参数化模型创建原 Geometry 矩阵批次');
+  let selectionLayer = null;
+
+  try {
+    const instances = Array.from({ length: 100 }, (_, index) => ({
+      entityId: `ORIGINAL-${String(index).padStart(3, '0')}`,
+      transform: {
+        position: { x: (index % 10) * 2 - 9, y: Math.floor(index / 10) * 2 - 9, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      pickable: true,
+    }));
+    assert.equal(batch.updateEntityTransforms(Matrix.Identity(), instances), true);
+
+    const assertOriginalRepresentation = (phase) => {
+      scene.render();
+      assert.equal(batch.getEntityIds().length, instances.length, `${phase} 必须保留全部原模型逻辑实体`);
+      assert.ok(
+        batch.batches.every((entry) => sourceMeshes.has(entry.sourceMesh)),
+        `${phase} 每个批次都必须绑定真实参数化源 Mesh`,
+      );
+      assert.ok(
+        batch.meshes.every((mesh) => (
+          !/screenSpaceProxy|proxy_(?:solid|frame)/i.test(mesh.name)
+          && mesh.metadata?.modelArrayScreenSpaceProxy !== true
+        )),
+        `${phase} 不得创建 box、框架或其它替代 Geometry 载体`,
+      );
+      const representedEntityIds = new Set();
+      for (const entry of batch.batches) {
+        const sourceEntityIndexes = entry.sourceEntityIndexBuffer;
+        if (!sourceEntityIndexes) continue;
+        for (const entityIndex of sourceEntityIndexes) {
+          const entityId = batch.getEntityIds()[entityIndex];
+          if (entityId) representedEntityIds.add(entityId);
+        }
+      }
+      assert.equal(representedEntityIds.size, instances.length, `${phase} 原模型批次不得漏掉逻辑实体`);
+      assert.ok(
+        instances.every((instance) => representedEntityIds.has(instance.entityId)),
+        `${phase} 所有逻辑实体都必须保留原模型矩阵`,
+      );
+    };
+
+    assertOriginalRepresentation('极远景');
+    camera.position.z = -100;
+    camera.setTarget(Vector3.Zero());
+    assertOriginalRepresentation('中景');
+    camera.position.z = -35;
+    camera.setTarget(Vector3.Zero());
+    assertOriginalRepresentation('近景');
+
+    const selectedEntityId = instances[37].entityId;
+    batch.setSelectionMask(new Set([selectedEntityId]), 9);
+    const selectedActiveMeshes = batch.meshes.filter((mesh) => mesh.thinInstanceCount > 0);
+    selectionLayer = new SelectionOutlineLayer('original-selection-outline', scene);
+    selectionLayer.addSelection(selectedActiveMeshes);
+    batch.setSelectionMask(new Set([selectedEntityId]), 9);
+    const selectedEntries = batch.batches.flatMap((entry) => (
+      Array.from({ length: entry.mesh.thinInstanceCount }, (_, thinInstanceIndex) => ({
+        entry,
+        thinInstanceIndex,
+        selectionId: entry.selectionBuffer?.[thinInstanceIndex] ?? 0,
+      }))
+    )).filter(({ selectionId }) => selectionId === 9);
+    assert.ok(selectedEntries.length > 0, '选中实体的全部原模型部件必须写入 SelectionOutline ID');
+    assert.ok(
+      selectedEntries.every(({ entry, thinInstanceIndex }) => (
+        batch.getEntityIdForThinInstance(entry.mesh, thinInstanceIndex) === selectedEntityId
+      )),
+      '共享原 Geometry 时只能高亮目标逻辑实体，不能高亮同类型全部模型',
+    );
+
+    const readEntitySourceZ = (entityId) => batch.batches.flatMap((entry) => {
+      const entityIndexes = entry.sourceEntityIndexBuffer;
+      const matrices = entry.sourceMatrixBuffer;
+      if (!entityIndexes || !matrices) return [];
+      const values = [];
+      for (let sourceIndex = 0; sourceIndex < entityIndexes.length; sourceIndex += 1) {
+        if (batch.getEntityIds()[entityIndexes[sourceIndex]] !== entityId) continue;
+        values.push(matrices[sourceIndex * 16 + 14]);
+      }
+      return values;
+    });
+    const movedEntityId = instances[0].entityId;
+    const sourceZBefore = readEntitySourceZ(movedEntityId);
+    const movedInstances = instances.map((instance, index) => (
+      index === 0
+        ? {
+          ...instance,
+          transform: {
+            ...instance.transform,
+            position: { ...instance.transform.position, z: 25 },
+          },
+        }
+        : instance
+    ));
+    assert.equal(batch.updateEntityTransforms(Matrix.Identity(), movedInstances), true, 'Transform 更新后原模型矩阵必须刷新');
+    const sourceZAfter = readEntitySourceZ(movedEntityId);
+    assert.equal(sourceZBefore.length, 2, '移动前必须保留参数化模型两个真实部件');
+    assert.equal(sourceZAfter.length, 2, '移动后必须继续保留参数化模型两个真实部件');
+    assert.ok(sourceZAfter.every((value, index) => Math.abs(value - sourceZBefore[index] - 25) < 1e-6));
+    assert.equal(mainPart.geometry, sourceGeometry, '矩阵批次不得销毁或替换参数脚本源 Geometry');
+    assert.equal(mainPart.isDisposed(), false, '参数脚本源 Mesh 必须继续保留以支持后续重建');
+    assertOriginalRepresentation('Transform 更新后');
+
+    return {
+      entityCount: instances.length,
+      proxyEntityCount: 0,
+      detailedEntityCount: instances.length,
+      farUsesOriginalGeometry: true,
+      mediumUsesOriginalGeometry: true,
+      nearUsesOriginalGeometry: true,
+      singleEntitySelectionOnly: true,
+      parameterPartsPreserved: true,
+      sourceGeometryPreserved: true,
+    };
+  } finally {
+    selectionLayer?.dispose();
     batch.dispose();
     scene.dispose();
     engine.dispose();
@@ -290,6 +711,83 @@ function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
   }
 }
 
+/** 验证脚本生成的同 Geometry 叶 Mesh 只保留一份顶点，同时逐叶矩阵和逻辑实体映射完整。 */
+function verifyRepeatedStaticGeometryMatrixAggregation(EntityArrayThinInstanceBatch) {
+  const engine = new NullEngine({ renderWidth: 64, renderHeight: 64 });
+  const scene = new Scene(engine);
+  const root = new TransformNode('repeated-geometry-root', scene);
+  const source = MeshBuilder.CreateBox('repeated-geometry-source', { size: 1 }, scene);
+  source.parent = root;
+  const material = new PBRMaterial('repeated-geometry-material', scene);
+  source.material = material;
+  const leaves = [source];
+  for (let index = 1; index < 4; index += 1) {
+    const instance = source.createInstance(`repeated-geometry-leaf-${index}`);
+    instance.parent = root;
+    instance.position.x = index * 10;
+    leaves.push(instance);
+  }
+  root.computeWorldMatrix(true);
+  const batch = EntityArrayThinInstanceBatch.create('repeated-geometry-entity', leaves, {
+    interactive: true,
+    mergeStaticMeshesByMaterial: true,
+    sourceRootWorldMatrix: root.getWorldMatrix().clone(),
+  });
+  assert.ok(batch, '重复 Geometry 矩阵聚合批次必须创建成功');
+
+  try {
+    assert.equal(batch.sources.length, 1, '四个同 Geometry 叶 Mesh 必须聚合为一个 Geometry 源');
+    assert.equal(batch.sources[0].sourceMeshes.length, 4, '聚合源必须保留四个叶 Mesh 的相对矩阵');
+    assert.equal(batch.meshes.length, 1, '小规模重复 Geometry 不得增加额外 Draw Call');
+    assert.equal(batch.meshes[0].getTotalVertices(), source.getTotalVertices(), 'GPU 只应保留一份源 Geometry 顶点');
+
+    const logicalEntities = [
+      {
+        entityId: 'REPEATED-A',
+        transform: {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        },
+        pickable: true,
+      },
+      {
+        entityId: 'REPEATED-B',
+        transform: {
+          position: { x: 100, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        },
+        pickable: true,
+      },
+    ];
+    assert.equal(batch.updateEntityTransforms(root.getWorldMatrix().clone(), logicalEntities), true);
+    assert.equal(batch.meshes[0].thinInstanceCount, 8, '四个叶矩阵乘两个逻辑实体必须产生八个完整实例');
+    const positions = batch.meshes[0].thinInstanceGetWorldMatrices()
+      .slice(0, batch.meshes[0].thinInstanceCount)
+      .map((matrix) => matrix.getTranslation().x);
+    assert.deepEqual(positions, [0, 10, 20, 30, 100, 110, 120, 130], '叶矩阵与逻辑实体 Transform 必须正确组合');
+    assert.deepEqual(
+      Array.from({ length: 8 }, (_, index) => batch.getEntityIdForThinInstance(batch.meshes[0], index)),
+      ['REPEATED-A', 'REPEATED-A', 'REPEATED-A', 'REPEATED-A', 'REPEATED-B', 'REPEATED-B', 'REPEATED-B', 'REPEATED-B'],
+      '拾取映射必须把每个叶实例还原到所属逻辑模型',
+    );
+    return {
+      sourceLeafCount: leaves.length,
+      geometrySourceCount: batch.sources.length,
+      logicalEntityCount: logicalEntities.length,
+      thinInstanceCount: batch.meshes[0].thinInstanceCount,
+      geometryStoredOnce: true,
+    };
+  } finally {
+    batch.dispose();
+    root.dispose();
+    material.dispose();
+    scene.dispose();
+    engine.dispose();
+  }
+}
+
 /** 构造性能摘要夹具，验证报告聚合字段不会因空 GPU 计数或 Long Task 丢失。 */
 function verifyPerformanceSummary(summarizeScenePerformance) {
   const runtime = {
@@ -321,6 +819,13 @@ function verifyPerformanceSummary(summarizeScenePerformance) {
     totalMeshes: 100,
     totalVertices: 1_000,
     thinInstances: 10_000,
+    activeThinInstances: 8_000 + index * 1_000,
+    estimatedActiveVertexInvocations: 1_000_000 + index * 500_000,
+    estimatedActiveTriangleInvocations: 500_000 + index * 250_000,
+    frustumVisibleThinInstances: 4_000 + index * 500,
+    estimatedFrustumVisibleVertexInvocations: 500_000 + index * 250_000,
+    estimatedFrustumVisibleTriangleInvocations: 250_000 + index * 125_000,
+    topActiveGpuWorkloads: [],
     runtime,
     editThinInstancePlan,
     ...snapshot,
@@ -331,6 +836,9 @@ function verifyPerformanceSummary(summarizeScenePerformance) {
   assert.equal(summary.p95FrameTimeMs, 22);
   assert.equal(summary.maximumGpuFrameTimeMs, 7);
   assert.equal(summary.maximumDrawCalls, 140);
+  assert.equal(summary.maximumActiveThinInstances, 10_000);
+  assert.equal(summary.maximumEstimatedActiveVertexInvocations, 2_000_000);
+  assert.equal(summary.maximumEstimatedActiveTriangleInvocations, 1_000_000);
   assert.equal(summary.longTaskCount, 3);
   assert.equal(summary.longTaskDurationMs, 135);
   return summary;
@@ -338,11 +846,13 @@ function verifyPerformanceSummary(summarizeScenePerformance) {
 
 /** 静态约束 React 调用链：选区 effect 不得重新依赖或调用完整 sync。 */
 async function verifySceneViewWiring() {
-  const [layoutSource, panelSource, toolbarSource, monitorSource] = await Promise.all([
+  const [layoutSource, panelSource, toolbarSource, monitorSource, batchSource, runtimeSource] = await Promise.all([
     readFile(EDITOR_LAYOUT_PATH, 'utf8'),
     readFile(SCENE_VIEW_PANEL_PATH, 'utf8'),
     readFile(TOOLBAR_PATH, 'utf8'),
     readFile(PERFORMANCE_MONITOR_PATH, 'utf8'),
+    readFile(ENTITY_ARRAY_BATCH_PATH, 'utf8'),
+    readFile(SCENE_RUNTIME_PATH, 'utf8'),
   ]);
   const fullSyncStart = panelSource.indexOf('/** 文档内容变化才进入完整 SceneRuntime 同步');
   const selectionSyncStart = panelSource.indexOf('/** 单选/文件夹选区变化只刷新目标表现');
@@ -380,6 +890,27 @@ async function verifySceneViewWiring() {
   assert.doesNotMatch(panelSource, /隐藏性能监控|显示性能监控/, '显隐入口不得继续留在 Scene View HUD 内');
   assert.match(monitorSource, /const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;/, 'React 性能 HUD 最多每秒更新一次');
   assert.match(monitorSource, /const MAX_HISTORY_SAMPLES = 60;/, '性能报告必须保持最近一分钟有界历史');
+  assert.match(monitorSource, /estimatedActiveVertexInvocations/, '性能报告必须估算 Active Mesh 的 GPU 顶点调用量');
+  assert.match(monitorSource, /frustumVisibleThinInstances/, '性能报告必须估算批次内真正进入视锥的 thinInstance 数量');
+  assert.match(panelSource, /GPU vertex calls/, '展开 HUD 必须显示 GPU 顶点调用估算');
+  assert.match(panelSource, /原模型 \/ 代理/, '展开 HUD 必须明确显示原模型与代理数量');
+  assert.doesNotMatch(batchSource, /ScreenSpaceProxy|getScreenSpaceProxyMetrics/, '矩阵批次不得保留代理 API');
+  assert.match(runtimeSource, /const modelArrayProxyEntityCount = 0;/, 'SceneRuntime 报告必须把代理实体数固定为 0');
+  assert.match(
+    runtimeSource,
+    /const modelArrayDetailedEntityCount = modelArrayBatchEntityCount;/,
+    'SceneRuntime 必须把全部矩阵实体计入原模型 Geometry',
+  );
+  assert.doesNotMatch(
+    batchSource,
+    /screenSpaceProxyPixelThreshold|screenSpaceFrameProxyPixelThreshold|createScreenSpaceProxy|MeshBuilder\.CreateBox/,
+    '矩阵批次不得保留方块、框架或其它屏幕空间代理实现',
+  );
+  assert.doesNotMatch(
+    runtimeSource,
+    /shouldEnableEntityArrayScreenSpaceProxy|MODEL_ARRAY_SCREEN_SPACE_PROXY|screenSpaceProxyPixelThreshold/,
+    'SceneRuntime 正式路径不得启用或传入任何屏幕空间代理参数',
+  );
 
   return {
     contentAndSelectionEffectsSeparated: true,
@@ -388,6 +919,8 @@ async function verifySceneViewWiring() {
     hudCanHideAndShowFromToolbar: true,
     hudSampleIntervalMs: 1_000,
     reportHistorySamples: 60,
+    originalGeometryOnly: true,
+    proxyEntityCountInvariant: 0,
   };
 }
 
@@ -410,7 +943,12 @@ try {
     verifyEditModePlan(planModule.createEditModeModelThinInstancePlan, entityCount)
   ));
   const batchResult = verifyThinInstanceSelectionDelta(batchModule.EntityArrayThinInstanceBatch);
+  const frustumCompaction = verifyThinInstanceFrustumCompaction(batchModule.EntityArrayThinInstanceBatch);
+  const originalGeometry = verifyOriginalGeometryAtAllDistances(batchModule.EntityArrayThinInstanceBatch);
   const staticMaterialMerge = verifyStaticMaterialMerge(batchModule.EntityArrayThinInstanceBatch);
+  const repeatedStaticGeometry = verifyRepeatedStaticGeometryMatrixAggregation(
+    batchModule.EntityArrayThinInstanceBatch,
+  );
   const performanceSummary = verifyPerformanceSummary(performanceModule.summarizeScenePerformance);
   const wiring = await verifySceneViewWiring();
 
@@ -418,7 +956,10 @@ try {
     ok: true,
     planResults,
     batchResult,
+    frustumCompaction,
+    originalGeometry,
     staticMaterialMerge,
+    repeatedStaticGeometry,
     performanceSummary,
     wiring,
     timingPolicy: 'observational-no-hard-ci-threshold',

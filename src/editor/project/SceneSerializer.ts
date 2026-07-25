@@ -877,27 +877,53 @@ function validateEntityHierarchy(entityIds: string[], entities: Record<string, E
     const entity = entities[entityId];
     if (!entity) throwUnsupportedSceneFileError();
 
-    if (entity.isFolder && entity.parentId !== null) {
-      throwUnsupportedSceneFileError();
-    }
-
     if (!entity.isFolder && entity.childrenIds.length > 0) {
       throwUnsupportedSceneFileError();
     }
 
     if (entity.parentId !== null) {
       const parent = entities[entity.parentId];
-      if (!parent?.isFolder || !parent.childrenIds.includes(entityId)) {
+      if (
+        entity.parentId === entityId
+        || !parent?.isFolder
+        || !parent.childrenIds.includes(entityId)
+      ) {
         throwUnsupportedSceneFileError();
       }
     }
 
     for (const childId of entity.childrenIds) {
       const child = entities[childId];
-      if (!entity.isFolder || !entityIdSet.has(childId) || !child || child.isFolder || child.parentId !== entityId) {
+      if (
+        !entity.isFolder
+        || childId === entityId
+        || !entityIdSet.has(childId)
+        || !child
+        || child.parentId !== entityId
+      ) {
         throwUnsupportedSceneFileError();
       }
     }
+  }
+
+  // 复用父级链做三色标记；每个实体只访问一次，同时拒绝任意深度的文件夹循环。
+  const visitState = new Map<string, 'visiting' | 'visited'>();
+  for (const entityId of entityIds) {
+    if (visitState.get(entityId) === 'visited') continue;
+
+    const path: string[] = [];
+    let currentId: string | null = entityId;
+    while (currentId) {
+      const state = visitState.get(currentId);
+      if (state === 'visiting') throwUnsupportedSceneFileError();
+      if (state === 'visited') break;
+
+      visitState.set(currentId, 'visiting');
+      path.push(currentId);
+      currentId = entities[currentId]?.parentId ?? null;
+    }
+
+    for (const pathEntityId of path) visitState.set(pathEntityId, 'visited');
   }
 }
 

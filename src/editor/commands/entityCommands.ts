@@ -11,6 +11,7 @@ import type {
 } from '../model/components';
 import type { TelemetryBindingComponent } from '../model/telemetryBinding';
 import type { Entity } from '../model/Entity';
+import { getTopLevelHierarchyEntityIds, isEntityAncestorOf } from '../model/entityHierarchy';
 import type { ModelParameterValues } from '../model/modelParameters';
 import type { SceneDocument } from '../model/SceneDocument';
 
@@ -44,12 +45,38 @@ export function createEntityCommand(entity: Entity): Command {
   };
 }
 
-/** 创建一个仅用于 Hierarchy 分组的文件夹命令。 */
-export function createFolderCommand(folder: Entity): Command {
-  const command = createEntityCommand(folder);
+/** 创建一个仅用于 Hierarchy 分组的文件夹命令，可直接挂到任意可用父文件夹。 */
+export function createFolderCommand(folder: Entity, parentId: string | null = folder.parentId): Command {
+  let previousScene: SceneDocument | null = null;
+
   return {
-    ...command,
     label: `新建文件夹 ${folder.name}`,
+    execute: (scene) => {
+      const parent = parentId ? scene.entities[parentId] : null;
+      const resolvedParentId = parent?.isFolder ? parent.id : null;
+      const entities: Record<string, Entity> = {
+        ...scene.entities,
+        [folder.id]: { ...folder, parentId: resolvedParentId },
+      };
+
+      if (resolvedParentId && parent) {
+        entities[resolvedParentId] = {
+          ...parent,
+          childrenIds: parent.childrenIds.includes(folder.id)
+            ? parent.childrenIds
+            : [...parent.childrenIds, folder.id],
+        };
+      }
+
+      previousScene = scene;
+      return {
+        ...scene,
+        entityIds: scene.entityIds.includes(folder.id) ? scene.entityIds : [...scene.entityIds, folder.id],
+        entities,
+        selectedEntityId: folder.id,
+      };
+    },
+    undo: (scene) => previousScene ?? scene,
   };
 }
 
@@ -67,12 +94,18 @@ export function deleteEntityCommand(entityId: string): Command {
       const { [entityId]: _removed, ...entities } = scene.entities;
       const normalizedEntities = Object.fromEntries(
         Object.entries(entities).map(([id, currentEntity]) => {
-          const parentId = currentEntity.parentId === entityId ? null : currentEntity.parentId;
-          const childrenIds = currentEntity.childrenIds.filter((childId) => childId !== entityId);
+          const parentId = currentEntity.parentId === entityId ? entity.parentId : currentEntity.parentId;
+          const childrenIds = currentEntity.isFolder
+            ? currentEntity.childrenIds.flatMap((childId) => (
+                childId === entityId ? entity.childrenIds : [childId]
+              ))
+            : [];
 
           return [
             id,
-            parentId === currentEntity.parentId && childrenIds.length === currentEntity.childrenIds.length
+            parentId === currentEntity.parentId
+            && childrenIds.length === currentEntity.childrenIds.length
+            && childrenIds.every((childId, index) => childId === currentEntity.childrenIds[index])
               ? currentEntity
               : { ...currentEntity, parentId, childrenIds },
           ];
@@ -116,7 +149,7 @@ export function updateSceneDocumentCommand(
   };
 }
 
-/** 批量移动实体到文件夹或根层级，文件夹本身不允许被拖入其他文件夹。 */
+/** 批量移动实体或完整文件夹子树到目标文件夹/根层级，并拒绝形成层级循环。 */
 export function moveEntitiesToFolderCommand(entityIds: string[], targetFolderId: string | null): Command {
   let previousScene: SceneDocument | null = null;
 
@@ -254,39 +287,50 @@ function moveEntitiesToFolder(scene: SceneDocument, entityIds: string[], targetF
   const targetFolder = targetFolderId ? scene.entities[targetFolderId] : null;
   if (targetFolderId && !targetFolder?.isFolder) return scene;
 
-  const movingIds = [...new Set(entityIds)].filter((id) => {
-    const entity = scene.entities[id];
-    return Boolean(entity && !entity.isFolder);
-  });
+  const topLevelMovingIds = getTopLevelHierarchyEntityIds(scene.entities, entityIds);
+  if (topLevelMovingIds.length === 0) return scene;
+  if (
+    targetFolderId
+    && topLevelMovingIds.some((entityId) => (
+      entityId === targetFolderId
+      || isEntityAncestorOf(scene.entities, entityId, targetFolderId)
+    ))
+  ) {
+    return scene;
+  }
+
+  const movingIds = topLevelMovingIds.filter((entityId) => scene.entities[entityId]?.parentId !== targetFolderId);
   if (movingIds.length === 0) return scene;
 
   const movingIdSet = new Set(movingIds);
   const entities: Record<string, Entity> = { ...scene.entities };
 
-  for (const entityId of movingIds) {
-    const entity = entities[entityId];
-    if (!entity) continue;
-    entities[entityId] = { ...entity, parentId: targetFolderId };
-  }
-
   for (const [entityId, entity] of Object.entries(entities)) {
     if (!entity.isFolder) continue;
-
     const childrenIds = entity.childrenIds.filter((childId) => !movingIdSet.has(childId));
-    const nextChildrenIds =
-      entityId === targetFolderId
-        ? [...childrenIds, ...movingIds.filter((movingId) => !childrenIds.includes(movingId))]
-        : childrenIds;
-
-    if (nextChildrenIds.length !== entity.childrenIds.length || nextChildrenIds.some((childId, index) => childId !== entity.childrenIds[index])) {
-      entities[entityId] = { ...entity, childrenIds: nextChildrenIds };
+    if (childrenIds.length !== entity.childrenIds.length) {
+      entities[entityId] = { ...entity, childrenIds };
     }
   }
 
-  return {
-    ...scene,
-    entities,
-  };
+  for (const entityId of movingIds) {
+    const entity = entities[entityId];
+    if (entity) entities[entityId] = { ...entity, parentId: targetFolderId };
+  }
+
+  if (targetFolderId) {
+    const currentTarget = entities[targetFolderId];
+    if (!currentTarget?.isFolder) return scene;
+    entities[targetFolderId] = {
+      ...currentTarget,
+      childrenIds: [
+        ...currentTarget.childrenIds,
+        ...movingIds.filter((entityId) => !currentTarget.childrenIds.includes(entityId)),
+      ],
+    };
+  }
+
+  return { ...scene, entities };
 }
 
 export function updateModelAssetCodeCommand(entityId: string, before: string, after: string): Command {

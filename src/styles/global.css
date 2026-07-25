@@ -896,7 +896,7 @@ select {
   --entity-depth: 0;
 
   display: grid;
-  grid-template-columns: 22px 22px calc(var(--entity-depth) * 16px) 18px 18px minmax(0, 1fr) auto;
+  grid-template-columns: 22px 22px min(calc(var(--entity-depth) * 16px), 160px) 18px 18px minmax(0, 1fr) auto;
   align-items: center;
   height: 24px;
   min-height: 24px;

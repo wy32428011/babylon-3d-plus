@@ -98,7 +98,7 @@ export class ParametricModelParamsComponent {
 	public deviceName: string = "叉式堆垛机";
 
 	@visibleAsString("参数说明")
-	public description: string = "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。";
+	public description: string = "支持堆垛机主体尺寸、货箱尺寸、顶底轨显示和模型外观颜色参数化。";
 
 	@visibleAsString("模型外观颜色")
 	public appearanceColor: string = "#ffffff";
@@ -106,29 +106,23 @@ export class ParametricModelParamsComponent {
 	@visibleAsNumber("主体长度 (m)", { step: 0.1 })
 	public bodyLength: number = 23.012;
 
-	@visibleAsNumber("主体宽度 (m)", { step: 0.1 })
-	public bodyWidth: number = 0.452;
-
 	@visibleAsNumber("主体高度 (m)", { step: 0.1 })
 	public bodyHeight: number = 7.837;
 
-	@visibleAsNumber("载货台长度 (m)", { step: 0.1 })
+	@visibleAsNumber("货箱深度 (m)", { step: 0.1 })
 	public platformLength: number = 1.279;
 
-	@visibleAsNumber("载货台高度 (m)", { step: 0.1 })
+	@visibleAsNumber("货箱高度 (m)", { step: 0.1 })
 	public platformHeight: number = 1.695;
 
-	@visibleAsNumber("货叉长度 (m)", { step: 0.1 })
-	public forkLength: number = 0.941;
+	@visibleAsNumber("货箱宽度", { step: 0.1 })
+	public platformwidth: number = 1.695;
 
-	@visibleAsNumber("货叉第一段行程 (m)", { step: 0.05 })
-	public forkStageOneReach: number = 0.8;
+	@visibleAsBoolean("显示顶轨")
+	public showTopTrack: boolean = true;
 
-	@visibleAsNumber("货叉第二段行程 (m)", { step: 0.05 })
-	public forkStageTwoReach: number = 0.8;
-
-	@visibleAsNumber("货叉间距 (m)", { step: 0.05 })
-	public forkGap: number = 0.6;
+	@visibleAsBoolean("显示底轨")
+	public showBottomTrack: boolean = true;
 
 	/**
 	 * 创建 叉式堆垛机 参数配置组件。
@@ -161,27 +155,30 @@ interface NodeSnapshot {
         material?: any;
 }
 
-interface ForkVisualAnchor {
-        node: any;
-        bottom: number;
-        center: Vector3;
+interface PlatformAxisStretchMapping {
+	axis: Vector3;
+	bottomProtectTop: number;
+	topProtectBottom: number;
+	middleScale: number;
+	extension: number;
 }
+
+/** 货箱宽度分段拉伸时，左右保护区各占有效宽度的比例（中间段承担剩余拉伸）。 */
+const PLATFORM_WIDTH_SIDE_PROTECT_RATIO = 0.48;
 
 const DEFAULT_VALUES: ValueMap = {
 	"modelKey": "stacker",
 	"deviceType": "堆垛机",
 	"deviceName": "叉式堆垛机",
-	"description": "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。",
+	"description": "支持堆垛机主体尺寸、货箱尺寸、顶底轨显示和模型外观颜色参数化。",
 	"appearanceColor": "#ffffff",
 	"bodyLength": 23.012,
-	"bodyWidth": 0.452,
 	"bodyHeight": 7.837,
 	"platformLength": 1.279,
 	"platformHeight": 1.695,
-	"forkLength": 0.941,
-	"forkStageOneReach": 0.8,
-	"forkStageTwoReach": 0.8,
-	"forkGap": 0.6
+	"platformwidth": 1.695,
+	"showTopTrack": true,
+	"showBottomTrack": true
 };
 
 /**
@@ -239,10 +236,10 @@ export class ParametricModelRuntimeComponent {
 		this.restoreBaseNodes();
 		this.applyDimensionScale(values);
 		this.applySupportVisibility(values);
+		this.applyTrackVisibility(values);
 		this.applyModelVisibility(values);
 		this.applyPositionOffsets(values);
 		this.applyAngleParameters(values);
-		this.applyForkParameters(values);
 		this.applyPlatformParameters(values);
 		this.applyRollerDensity(values);
 		this.applyCountArray(values);
@@ -265,11 +262,13 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 为当前 Stacker 实例的全部有效 Mesh 应用外观乘色，保留原贴图和其它材质属性。
+	 * 为当前 Stacker 实例的有效 Mesh 应用外观乘色，顶轨/底轨与立柱保留 GLB 原色。
 	 */
 	private applyAppearanceColor(values: ValueMap): void {
 		const color = this.readColor(values, "appearanceColor", String(DEFAULT_VALUES.appearanceColor ?? "#ffffff"));
+		const excludedNodes = this.findStackerAppearanceColorExcludedNodes();
 		this.getModelNodes().forEach((target) => {
+			if (this.isNodeOrDescendantOfAny(target, excludedNodes)) { return; }
 			if (target.isDisposed?.() || typeof target.getTotalVertices !== "function" || target.getTotalVertices() <= 0 || !("material" in target)) { return; }
 			const baseMaterial = this.snapshots.get(target)?.material ?? target.material;
 			const appearanceMaterial = this.getOrCreateAppearanceMaterial(baseMaterial);
@@ -277,6 +276,14 @@ export class ParametricModelRuntimeComponent {
 			this.setMaterialColor(appearanceMaterial, color);
 			target.material = appearanceMaterial;
 		});
+	}
+
+	/**
+	 * 不参与外观乘色的节点：顶轨、底轨与两根立柱。
+	 */
+	private findStackerAppearanceColorExcludedNodes(): any[] {
+		const namedNodes = this.findNodesByName(["guidaoshang.1", "guidaoxia.2", "lizhu1.11", "lizhu2.12","huocha2.10","huocha.9"]);
+		return namedNodes.length > 0 ? namedNodes : this.findNodes(/guidaoshang|guidaoxia|lizhu1|lizhu2|huocha2|huocha/i);
 	}
 
 	/**
@@ -372,10 +379,35 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 从模型 metadata 中读取参数脚本保存的 values，缺失时使用本脚本内置默认值。
+	 * 从模型 metadata 与参数组件实例读取当前值，保证 Inspector 实时修改能反映到运行脚本。
 	 */
 	private readParamValues(): ValueMap {
-		return { ...DEFAULT_VALUES, ...this.startupValues, ...this.readParamValuesFromMetadata() };
+		return {
+			...DEFAULT_VALUES,
+			...this.startupValues,
+			...this.readParamValuesFromMetadata(),
+			...this.readParamValuesFromScriptInstances(),
+		};
+	}
+
+	/**
+	 * 读取参数组件实例上的当前字段，编辑器改值时 metadata 可能尚未同步。
+	 */
+	private readParamValuesFromScriptInstances(): ValueMap {
+		const result: ValueMap = {};
+		const scripts = Array.isArray(this.node.metadata?.scripts) ? this.node.metadata.scripts : [];
+		for (const script of scripts) {
+			const className = String(script?.className ?? script?.name ?? "");
+			if (!className.includes("ParametricModelParamsComponent")) { continue; }
+			const instance = script?.instance ?? script?.attachedScript ?? script?.behavior;
+			if (!instance || typeof instance !== "object") { continue; }
+			Object.keys(DEFAULT_VALUES).forEach((key) => {
+				if (key in instance && (instance as Record<string, unknown>)[key] !== undefined) {
+					result[key] = (instance as Record<string, unknown>)[key];
+				}
+			});
+		}
+		return result;
 	}
 
 	/**
@@ -429,14 +461,11 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 按 Stacker 的实际坐标系应用主体长宽高，只处理主体结构节点。
-	 * GLB 的长度主方向是米空间 Z 轴，宽度主方向是米空间 X 轴；载货台和货叉字段由各自方法单独处理，避免整机二次缩放变形。
+	 * 按 Stacker 的实际坐标系应用主体长度和高度，只处理主体结构节点。
+	 * GLB 的长度主方向是米空间 Z 轴；货箱和货叉字段由各自方法单独处理，避免整机二次缩放变形。
 	 */
 	private applyDimensionScale(values: ValueMap): void {
-		const bodyWidthNodes = this.findStackerBodyWidthNodes();
-		const xScale = this.ratioForNodesByMeterAxis(bodyWidthNodes, values, "bodyWidth", "x");
 		this.applyAnchoredBodyLength(values);
-		this.scaleNodesByMeterAxes(bodyWidthNodes, xScale, 1, 1);
 		this.applyStackerBodyHeight(values);
 	}
 
@@ -617,11 +646,32 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
+	 * 货叉深度随货箱深度联动：目标深度 = platformLength - platformLength × 10%。
+	 */
+	private ratioForForkLengthFromPlatform(values: ValueMap, forkNodes: any[]): number {
+		const meshes = this.getMeshesForNodes(forkNodes);
+		const bounds = this.getMeterAxisBounds(meshes, "x");
+		const baselineMeters = bounds ? Math.max(0, bounds.max - bounds.min) : 0;
+		if (baselineMeters <= 0) { return 1; }
+		const platformLength = this.readPositiveNumber(values, "platformLength", Number(DEFAULT_VALUES.platformLength ?? 1.279));
+		const targetForkLength = platformLength - platformLength * 0.1;
+		return targetForkLength / baselineMeters;
+	}
+
+	/**
 	 * 根据前后支架开关隐藏或显示可识别的支架节点。
 	 */
 	private applySupportVisibility(values: ValueMap): void {
 		if ("showFrontSupport" in values) { this.setNodesEnabled(this.findNodes(/front|qian|前|zj01|support.?front|front.?support|jiao001/i), this.readBoolean(values, "showFrontSupport", true)); }
 		if ("showRearSupport" in values) { this.setNodesEnabled(this.findNodes(/rear|back|hou|后|zj02|support.?rear|rear.?support|jiao004/i), this.readBoolean(values, "showRearSupport", true)); }
+	}
+
+	/**
+	 * 根据顶轨/底轨显示开关控制 guidaoshang.1、guidaoxia.2 可见性。
+	 */
+	private applyTrackVisibility(values: ValueMap): void {
+		if ("showTopTrack" in values) { this.setNodesEnabled(this.findStackerTopTrackNodes(), this.readBoolean(values, "showTopTrack", true)); }
+		if ("showBottomTrack" in values) { this.setNodesEnabled(this.findStackerBottomTrackNodes(), this.readBoolean(values, "showBottomTrack", true)); }
 	}
 
 	/**
@@ -652,154 +702,168 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 应用货叉长度和货叉间距参数，找不到货叉节点时跳过。
-	 */
-        private applyForkParameters(values: ValueMap): void {
-                const forkNodes = this.findStackerForkNodes();
-                const primaryForkNodes = forkNodes.slice(0, 2);
-                const verticalAxis = this.getParametricMeterAxis("y");
-                const forkAnchors = this.captureForkVisualAnchors(primaryForkNodes, verticalAxis);
-                if ("forkLength" in values) { this.scaleNodesByMeterAxes(forkNodes, this.ratioForNodesByMeterAxis(forkNodes, values, "forkLength", "x"), 1, 1); }
-                if ("forkGap" in values) { this.applyForkGap(values, forkNodes, verticalAxis, forkAnchors); }
-                this.restoreForkBottomAnchors(forkAnchors, verticalAxis);
-                this.createForkStageTwoNodes(values, forkNodes);
-        }
-
-        /**
-         * 记录货叉在原始 GLB 中的视觉底面和中心线，后续缩放或调距都以此作为贴合基准。
-         */
-        private captureForkVisualAnchors(forkNodes: any[], verticalAxis: Vector3): ForkVisualAnchor[] {
-                return forkNodes
-                        .map((node) => {
-                                const bottom = this.getForkProjectedBottom(node, verticalAxis);
-                                const center = this.getNodeMeterCenter(node);
-                                return bottom === null || !center ? null : { node, bottom, center };
-                        })
-                        .filter((anchor): anchor is ForkVisualAnchor => !!anchor);
-        }
-
-        /**
-         * 按原始底面投影把货叉贴回支撑平面，避免缩放 pivot 或间距轴计算带来悬浮。
-         */
-        private restoreForkBottomAnchors(anchors: ForkVisualAnchor[], verticalAxis: Vector3): void {
-                anchors.forEach((anchor) => {
-                        const currentBottom = this.getForkProjectedBottom(anchor.node, verticalAxis);
-                        if (currentBottom === null) { return; }
-                        const delta = anchor.bottom - currentBottom;
-                        if (Math.abs(delta) < 0.0001) { return; }
-                        this.translateNodeByCurrentMeterDelta(anchor.node, verticalAxis.scale(delta));
-                });
-        }
-
-        /**
-         * 读取单根货叉沿模型竖直轴的最低投影值，用作视觉贴合底面。
-         */
-        private getForkProjectedBottom(node: any, verticalAxis: Vector3): number | null {
-                const bounds = this.getMeterProjectedBounds(this.getMeshesForNodes([node]), verticalAxis);
-                return bounds ? bounds.min : null;
-        }
-
-	/**
-	 * 为每侧货叉创建第二段伸缩可视节点；节点只存在运行时，不写回 GLB 本体。
-	 */
-	private createForkStageTwoNodes(values: ValueMap, forkNodes: any[]): void {
-		const stageTwoReach = this.readNumber(values, "forkStageTwoReach", Number(DEFAULT_VALUES.forkStageTwoReach ?? 0));
-		if (stageTwoReach <= 0) { return; }
-		forkNodes.slice(0, 2).forEach((source, index) => this.cloneForkStageTwoNode(source, index === 0 ? "front" : "back"));
-	}
-
-	/**
-	 * 克隆当前货叉作为第二段，初始收纳时隐藏，伸出第二段时由运行时启用。
-	 */
-	private cloneForkStageTwoNode(source: any, side: "front" | "back"): void {
-		if (typeof source?.clone !== "function") { return; }
-		const sourceName = String(source.name ?? "fork");
-		const clone = source.clone(sourceName + "_stage2", source.parent, false);
-		if (!clone) { return; }
-		if (clone.position && source.position?.clone) { clone.position = source.position.clone(); }
-		if (clone.scaling && source.scaling?.clone) { clone.scaling = source.scaling.clone(); }
-		if (clone.rotation && source.rotation?.clone) { clone.rotation = source.rotation.clone(); }
-		if (clone.rotationQuaternion !== undefined && source.rotationQuaternion?.clone) { clone.rotationQuaternion = source.rotationQuaternion.clone(); }
-		clone.metadata = {
-			...(clone.metadata ?? {}),
-			generatedByParametricRuntime: true,
-			sourceNodeName: sourceName,
-			reason: "fork-stage-two",
-			stackerForkStage: 2,
-			stackerForkSide: side,
-		};
-		if (typeof clone.setEnabled === "function") { clone.setEnabled(false); }
-		this.generatedNodes.push(clone);
-	}
-
-	/**
-	 * 将货叉间距解释为两根货叉世界中心线之间的目标距离，而不是在原始位置上继续追加偏移。
-	 */
-        private applyForkGap(values: ValueMap, forkNodes: any[], verticalAxis: Vector3, anchors: ForkVisualAnchor[]): void {
-                if (forkNodes.length < 2) { return; }
-                const [firstFork, secondFork] = forkNodes.slice(0, 2);
-                const firstAnchorCenter = anchors.find((anchor) => anchor.node === firstFork)?.center ?? this.getNodeMeterCenter(firstFork);
-                const secondAnchorCenter = anchors.find((anchor) => anchor.node === secondFork)?.center ?? this.getNodeMeterCenter(secondFork);
-                const firstCurrentCenter = this.getNodeMeterCenter(firstFork);
-                const secondCurrentCenter = this.getNodeMeterCenter(secondFork);
-                if (!firstAnchorCenter || !secondAnchorCenter || !firstCurrentCenter || !secondCurrentCenter) { return; }
-                const axis = this.getForkGapAxis(firstAnchorCenter, secondAnchorCenter, verticalAxis);
-                const firstAxisValue = this.projectMeterPoint(firstCurrentCenter, axis);
-                const secondAxisValue = this.projectMeterPoint(secondCurrentCenter, axis);
-                const centerAxisValue = (firstAxisValue + secondAxisValue) * 0.5;
-                const direction = secondAxisValue >= firstAxisValue ? 1 : -1;
-                const targetGap = Math.max(0, this.readNumber(values, "forkGap", Number(DEFAULT_VALUES.forkGap ?? 0)));
-                const firstTarget = centerAxisValue - direction * targetGap * 0.5;
-                const secondTarget = centerAxisValue + direction * targetGap * 0.5;
-
-                this.offsetNodeByMeterDelta(firstFork, axis.scale(firstTarget - firstAxisValue));
-                this.offsetNodeByMeterDelta(secondFork, axis.scale(secondTarget - secondAxisValue));
-        }
-
-        /**
-         * 计算货叉左右间距轴，并剔除模型竖直轴分量，保证 forkGap 只改变左右中心距。
-         */
-        private getForkGapAxis(firstCenter: Vector3, secondCenter: Vector3, verticalAxis: Vector3): Vector3 {
-                const fallbackAxis = this.removeAxisComponent(this.getParametricMeterAxis("x"), verticalAxis);
-                const horizontalDelta = this.removeAxisComponent(secondCenter.subtract(firstCenter), verticalAxis);
-                return this.normalizeDirection(horizontalDelta, this.normalizeDirection(fallbackAxis, this.getParametricMeterAxis("x")));
-        }
-
-        /**
-         * 从方向向量中移除指定轴向的投影分量，用于把左右调距限制在水平平面内。
-         */
-        private removeAxisComponent(direction: Vector3, axis: Vector3): Vector3 {
-                return direction.subtract(axis.scale(Vector3.Dot(direction, axis)));
-        }
-
-	/**
-	 * 应用载货台或货仓类参数，找不到目标节点时跳过。
+	 * 应用货箱深度、宽度、高度参数，找不到目标节点时跳过。
 	 */
 	private applyPlatformParameters(values: ValueMap): void {
 		const platformNodes = this.findStackerPlatformNodes();
 		if ("platformLength" in values) {
 			const lengthScale = this.ratioForNodesByMeterAxis(platformNodes, values, "platformLength", "x");
-			this.scaleNodesByMeterAxes(platformNodes, lengthScale, 1, 1);
+			if (Math.abs(lengthScale - 1) >= 0.0001) {
+				this.scaleNodesByMeterAxes(platformNodes, lengthScale, 1, 1);
+			}
+			const forkNodes = this.findStackerForkNodes();
+			const forkLengthScale = this.ratioForForkLengthFromPlatform(values, forkNodes);
+			if (forkNodes.length > 0 && Math.abs(forkLengthScale - 1) >= 0.0001) {
+				this.scaleNodesByMeterAxes(forkNodes, forkLengthScale, 1, 1);
+			}
 		}
-		if ("platformHeight" in values) { this.applyStackerPlatformHeight(values, platformNodes); }
+		if ("platformHeight" in values || "platformwidth" in values) {
+			this.applyStackerPlatformCrossSection(values, platformNodes);
+		}
 	}
 
 	/**
-	 * 应用载货台高度：只调整载货台自身，避免影响主体立柱和顶部横杆高度。
+	 * 在同一顶点 pass 中应用货箱高度/宽度分段拉伸，避免多轴先后写顶点互相覆盖。
 	 */
-	private applyStackerPlatformHeight(values: ValueMap, platformNodes: any[]): void {
+	private applyStackerPlatformCrossSection(values: ValueMap, platformNodes: any[]): void {
 		const platformMeshes = this.getStackerPlatformMeshes(platformNodes);
+		if (platformMeshes.length === 0) { return; }
+		const widthAxis = this.getParametricMeterAxis("z");
 		const heightAxis = this.getParametricMeterAxis("y");
-		const platformBounds = this.getMeterProjectedBounds(platformMeshes, heightAxis);
-		if (!platformBounds) { return; }
-		const profile = this.getPlatformHeightProfile(platformMeshes, platformBounds, heightAxis);
-		if (!profile) { return; }
-		const sourceHeight = platformBounds.max - profile.bodyBottomY;
-		if (sourceHeight <= 0) { return; }
-		const targetHeight = this.readPositiveNumber(values, "platformHeight", sourceHeight);
-		const heightScale = targetHeight / sourceHeight;
-		if (Math.abs(heightScale - 1) < 0.0001) { return; }
-		this.stretchPlatformMeshesByHeight(platformMeshes, platformBounds, profile, heightAxis, heightScale);
+		const mappings: PlatformAxisStretchMapping[] = [];
+		let widthMapping: PlatformAxisStretchMapping | null = null;
+		if ("platformwidth" in values) {
+			widthMapping = this.buildPlatformAxisStretchMapping(platformMeshes, widthAxis, values, "platformwidth");
+			if (widthMapping) { mappings.push(widthMapping); }
+		}
+		if ("platformHeight" in values) {
+			const heightMapping = this.buildPlatformAxisStretchMapping(platformMeshes, heightAxis, values, "platformHeight");
+			if (heightMapping) { mappings.push(heightMapping); }
+		}
+		if (mappings.length === 0) { return; }
+		platformMeshes.forEach((mesh) => this.stretchPlatformMeshByAxisMappings(mesh, mappings));
+		if (widthMapping && Math.abs(widthMapping.extension) >= 0.0001) {
+			this.offsetPlatformWidthFollowNodes(widthMapping, widthAxis);
+			this.stretchMeshesByPlatformWidth(widthMapping, this.findStackerPlatformWidthStretchNodes());
+		}
+	}
+
+	/**
+	 * 构建单轴分段拉伸参数：锚点侧不动，中间段拉伸，对侧整体平移。
+	 */
+	private buildPlatformAxisStretchMapping(meshes: any[], axis: Vector3, values: ValueMap, valueKey: string): PlatformAxisStretchMapping | null {
+		const bounds = this.getMeterProjectedBounds(meshes, axis);
+		if (!bounds) { return null; }
+		const profile = valueKey === "platformwidth"
+			? this.getPlatformWidthProfile(meshes, bounds, axis)
+			: this.getPlatformHeightProfile(meshes, bounds, axis);
+		if (!profile) { return null; }
+		const sourceSpan = bounds.max - profile.bodyBottomY;
+		if (sourceSpan <= 0) { return null; }
+		const targetSpan = this.readPositiveNumber(values, valueKey, sourceSpan);
+		const axisScale = targetSpan / sourceSpan;
+		if (Math.abs(axisScale - 1) < 0.0001) { return null; }
+		const sourceMiddle = profile.topProtectBottomY - profile.bottomProtectTopY;
+		if (sourceMiddle <= 0) { return null; }
+		const targetSpanClamped = Math.max(0.001, sourceSpan * axisScale);
+		const requestedExtension = targetSpanClamped - sourceSpan;
+		const targetMiddle = Math.max(0.001, sourceMiddle + requestedExtension);
+		const middleScale = targetMiddle / sourceMiddle;
+		const extension = targetMiddle - sourceMiddle;
+		return {
+			axis,
+			bottomProtectTop: profile.bottomProtectTopY,
+			topProtectBottom: profile.topProtectBottomY,
+			middleScale,
+			extension,
+		};
+	}
+
+	/**
+	 * 对指定节点下 mesh 应用货箱宽度分段拉伸。
+	 */
+	private stretchMeshesByPlatformWidth(widthMapping: PlatformAxisStretchMapping, nodes: any[]): void {
+		const meshes = this.getMeshesForNodes(nodes);
+		meshes.forEach((mesh) => this.stretchPlatformMeshByAxisMappings(mesh, [widthMapping]));
+	}
+
+	/**
+	 * 货箱宽度联动 mesh：货叉与连接立柱的顶/底横梁，复用同一套分段拉伸规则。
+	 */
+	private findStackerPlatformWidthStretchNodes(): any[] {
+		const namedNodes = this.findNodesByName(["huocha.9", "huocha2.10", "dingbu.5", "dibu.6"]);
+		return namedNodes.length > 0 ? namedNodes : this.findNodes(/huocha|dingbu\.5|dibu\.6/i);
+	}
+
+	/**
+	 * 对单个 mesh 依次应用多轴分段拉伸映射，基于 GLB 原始顶点坐标计算。
+	 */
+	private stretchPlatformMeshByAxisMappings(mesh: any, mappings: PlatformAxisStretchMapping[]): void {
+		const positions = this.getBaseVertexPositions(mesh);
+		const worldMatrix = mesh.computeWorldMatrix?.(true);
+		const inverseWorldMatrix = worldMatrix?.clone?.();
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert || !meterSpace) { return; }
+		inverseWorldMatrix.invert();
+		const nextPositions = positions.slice();
+		for (let index = 0; index < nextPositions.length; index += 3) {
+			const local = new Vector3(positions[index], positions[index + 1], positions[index + 2]);
+			let meterPoint = Vector3.TransformCoordinates(local, worldMatrix);
+			meterPoint = Vector3.TransformCoordinates(meterPoint, meterSpace.inverseEntityRootWorldMatrix);
+			mappings.forEach((mapping) => {
+				const sourceAxisValue = this.projectMeterPoint(meterPoint, mapping.axis);
+				const sourceMiddleLength = mapping.topProtectBottom - mapping.bottomProtectTop;
+				if (sourceMiddleLength <= 0) { return; }
+				const nextAxisValue = this.mapPlatformAxisValue(sourceAxisValue, mapping.bottomProtectTop, mapping.topProtectBottom, sourceMiddleLength, mapping.middleScale, mapping.extension);
+				if (Math.abs(nextAxisValue - sourceAxisValue) < 0.0001) { return; }
+				meterPoint = meterPoint.add(mapping.axis.scale(nextAxisValue - sourceAxisValue));
+			});
+			const nextWorld = Vector3.TransformCoordinates(meterPoint, meterSpace.entityRootWorldMatrix);
+			const nextLocal = Vector3.TransformCoordinates(nextWorld, inverseWorldMatrix);
+			nextPositions[index] = nextLocal.x;
+			nextPositions[index + 1] = nextLocal.y;
+			nextPositions[index + 2] = nextLocal.z;
+		}
+		this.writeVertexPositions(mesh, nextPositions);
+	}
+
+	/**
+	 * 货箱宽度拉伸后，平移右侧关联节点；使用累加位移避免覆盖主体高度带来的 Y 抬升。
+	 */
+	private offsetPlatformWidthFollowNodes(widthMapping: PlatformAxisStretchMapping, widthAxis: Vector3): void {
+		this.findStackerPlatformWidthFollowNodes().forEach((node) => this.translateNodeByCurrentMeterDelta(node, widthAxis.scale(widthMapping.extension)));
+	}
+
+	/**
+	 * 查找随货箱宽度整体平移的节点。
+	 */
+	private findStackerPlatformWidthFollowNodes(): any[] {
+		const namedNodes = this.findNodesByName(["lizhu1.11", "dianji.7", "dingbuhuagui1.4"]);
+		return namedNodes.length > 0 ? namedNodes : this.findNodes(/lizhu1|dianji|dingbuhuagui1/i);
+	}
+
+	/**
+	 * 货箱宽度专用 profile：左右固定比例保护区，中间段承担宽度变化。
+	 */
+	private getPlatformWidthProfile(meshes: any[], bounds: { min: number; max: number }, axis: Vector3): { bodyBottomY: number; bottomProtectTopY: number; topProtectBottomY: number } | null {
+		const sourceSpan = bounds.max - bounds.min;
+		if (sourceSpan <= 0) { return null; }
+		const sideProtectRatio = Math.min(0.49, Math.max(0, PLATFORM_WIDTH_SIDE_PROTECT_RATIO));
+		const levels = this.collectProjectedLevels(meshes, axis);
+		if (levels.length < 2) {
+			return {
+				bodyBottomY: bounds.min,
+				bottomProtectTopY: bounds.min + sourceSpan * sideProtectRatio,
+				topProtectBottomY: bounds.max - sourceSpan * sideProtectRatio,
+			};
+		}
+		const bodyBottomY = this.findPlatformBodyBottomY(levels, bounds);
+		const effectiveSpan = bounds.max - bodyBottomY;
+		if (effectiveSpan <= 0) { return null; }
+		const bottomProtectTopY = bodyBottomY + effectiveSpan * sideProtectRatio;
+		const topProtectBottomY = bounds.max - effectiveSpan * sideProtectRatio;
+		if (bottomProtectTopY < bodyBottomY) { return null; }
+		return topProtectBottomY > bottomProtectTopY ? { bodyBottomY, bottomProtectTopY, topProtectBottomY } : null;
 	}
 
 	/**
@@ -809,7 +873,13 @@ export class ParametricModelRuntimeComponent {
 		const sourceHeight = bounds.max - bounds.min;
 		if (sourceHeight <= 0) { return null; }
 		const levels = this.collectProjectedLevels(meshes, axis);
-		if (levels.length < 2) { return null; }
+		if (levels.length < 2) {
+			return {
+				bodyBottomY: bounds.min,
+				bottomProtectTopY: bounds.min + sourceHeight * 0.25,
+				topProtectBottomY: bounds.max - sourceHeight * 0.25,
+			};
+		}
 		const bodyBottomY = this.findPlatformBodyBottomY(levels, bounds);
 		let bottomProtectTopY = levels[0];
 		let topProtectBottomY = levels[levels.length - 1];
@@ -834,7 +904,7 @@ export class ParametricModelRuntimeComponent {
 	 * 从载货台底部层级中识别主体底部，最低附件不参与高度倍率计算。
 	 */
 	private findPlatformBodyBottomY(levels: number[], bounds: { min: number; max: number }): number {
-		const minLift = Math.max(1, (bounds.max - bounds.min) * 0.05);
+		const minLift = Math.max((bounds.max - bounds.min) * 0.05, 0.001);
 		return levels.find((level) => level > bounds.min + minLift) ?? bounds.min;
 	}
 
@@ -862,11 +932,14 @@ export class ParametricModelRuntimeComponent {
 	 * 合并相近的米空间 Y 坐标层级，避免浮点误差影响最大拉伸段识别。
 	 */
 	private collectProjectedLevels(meshes: any[], axis: Vector3): number[] {
+		const bounds = this.getMeterProjectedBounds(meshes, axis);
+		const span = bounds ? Math.max(bounds.max - bounds.min, 0.001) : 1;
+		const mergeEpsilon = Math.max(0.001, span * 0.01);
 		const sortedValues = this.collectProjectedValues(meshes, axis).sort((a, b) => a - b);
 		const levels: number[] = [];
 		sortedValues.forEach((value) => {
 			const last = levels[levels.length - 1];
-			if (last === undefined || Math.abs(value - last) > 1) {
+			if (last === undefined || Math.abs(value - last) > mergeEpsilon) {
 				levels.push(value);
 			}
 		});
@@ -1133,19 +1206,26 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 查找 Stacker 的主体宽度节点，长轨端头不参与宽度缩放，避免红框端部变形。
-	 */
-	private findStackerBodyWidthNodes(): any[] {
-		const lengthNodes = new Set(this.findStackerLengthNodes());
-		return this.findNodes(/huagui|dingbu|dibu|lizhu|滑轨|顶部|底部|立柱/i).filter((node) => !lengthNodes.has(node));
-	}
-
-	/**
 	 * 查找 Stacker 的长轨节点，长度参数只拉伸这些节点，避免操作台、立柱和货叉随轨道长度变形。
 	 */
 	private findStackerLengthNodes(): any[] {
-		const namedNodes = this.findNodesByName(["guidaoshang.1", "guidaoxia.2"]);
-		return namedNodes.length > 0 ? namedNodes : this.findNodes(/guidao|轨道|导轨/i);
+		return this.uniqueNodes([...this.findStackerTopTrackNodes(), ...this.findStackerBottomTrackNodes()]);
+	}
+
+	/**
+	 * 查找 Stacker 顶轨节点。
+	 */
+	private findStackerTopTrackNodes(): any[] {
+		const namedNodes = this.findNodesByName(["guidaoshang.1"]);
+		return namedNodes.length > 0 ? namedNodes : this.findNodes(/guidaoshang|顶轨|上轨|top.*track|upper.*rail/i);
+	}
+
+	/**
+	 * 查找 Stacker 底轨节点。
+	 */
+	private findStackerBottomTrackNodes(): any[] {
+		const namedNodes = this.findNodesByName(["guidaoxia.2"]);
+		return namedNodes.length > 0 ? namedNodes : this.findNodes(/guidaoxia|底轨|下轨|bottom.*track|lower.*rail/i);
 	}
 
 	/**
@@ -1210,7 +1290,9 @@ export class ParametricModelRuntimeComponent {
 		];
 		const directMeshes = this.getDirectMeshesForNodes(platformNodes).filter((mesh) => !this.isNodeOrDescendantOfAny(mesh, excludedNodes));
 		if (directMeshes.length > 0) { return [...new Set(directMeshes)]; }
-		return this.getMeshesForNodes(platformNodes).filter((mesh) => !this.isNodeOrDescendantOfAny(mesh, excludedNodes));
+		const descendantMeshes = this.getMeshesForNodes(platformNodes).filter((mesh) => !this.isNodeOrDescendantOfAny(mesh, excludedNodes));
+		if (descendantMeshes.length > 0) { return [...new Set(descendantMeshes)]; }
+		return this.getDirectMeshesForNodes(platformNodes);
 	}
 
 	/**
@@ -1382,7 +1464,7 @@ export class ParametricModelRuntimeComponent {
 	 */
 	/** 读取实体根世界矩阵及其逆矩阵，实体根局部坐标即脚本使用的米空间。 */
 	private getMeterSpaceMatrices(): { entityRootWorldMatrix: any; inverseEntityRootWorldMatrix: any } | null {
-		const entityRoot = this.node.parent;
+		const entityRoot = this.node.parent ?? this.node;
 		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
 		const inverseEntityRootWorldMatrix = entityRootWorldMatrix?.clone?.();
 		if (!entityRootWorldMatrix || !inverseEntityRootWorldMatrix?.invert) { return null; }

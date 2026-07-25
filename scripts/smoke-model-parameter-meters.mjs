@@ -17,19 +17,73 @@ import { createServer } from 'vite';
 const MODEL_ROOT = path.resolve(
   process.env.BABYLON_MODEL_ROOT ?? path.join(process.cwd(), '..', '3d-models', 'models'),
 );
-const ASSET_MODEL_ROOT = path.join(MODEL_ROOT, 'Assets', 'Models');
-const ASSET_INDEX_PATH = path.join(MODEL_ROOT, '.babylon-editor', 'asset-index.json');
+const ASSET_MODEL_ROOT = path.resolve(
+  process.env.BABYLON_ASSET_MODEL_ROOT ?? path.join(MODEL_ROOT, 'Assets', 'Models'),
+);
+const ASSET_INDEX_PATH = path.resolve(
+  process.env.BABYLON_ASSET_INDEX_PATH ?? path.join(MODEL_ROOT, '.babylon-editor', 'asset-index.json'),
+);
+const REQUIRE_LABEL_UNIT_SUFFIX = process.env.BABYLON_REQUIRE_LABEL_UNIT_SUFFIX !== '0';
 const NON_UNIFORM_SCALE = { x: 2, y: 3, z: 4 };
 const SSR_MODULE_LOAD_TIMEOUT_MS = 60_000;
 const MAX_REASONABLE_MODEL_SIZE_METERS = Number(process.env.BABYLON_MAX_REASONABLE_MODEL_SIZE_METERS ?? 100);
+
+/** NullEngine 在 Node 中没有浏览器 OffscreenCanvas；提供只记录 API 调用的 2D 上下文以覆盖动态纹理脚本生命周期。 */
+function installOffscreenCanvasSmokePolyfill() {
+  if (typeof globalThis.OffscreenCanvas !== 'undefined') return;
+
+  class SmokeOffscreenCanvas {
+    constructor(width, height) {
+      this.width = width;
+      this.height = height;
+      const contextState = {
+        canvas: this,
+        measureText: (text) => ({ width: String(text).length * 8 }),
+        createImageData: (imageWidth, imageHeight) => ({
+          width: imageWidth,
+          height: imageHeight,
+          data: new Uint8ClampedArray(Math.max(0, imageWidth * imageHeight * 4)),
+        }),
+        getImageData: (x, y, imageWidth, imageHeight) => ({
+          width: imageWidth,
+          height: imageHeight,
+          data: new Uint8ClampedArray(Math.max(0, imageWidth * imageHeight * 4)),
+        }),
+      };
+      this.context = new Proxy(contextState, {
+        get(target, property) {
+          if (property in target) return target[property];
+          return () => undefined;
+        },
+        set(target, property, value) {
+          target[property] = value;
+          return true;
+        },
+      });
+    }
+
+    getContext(type) {
+      return type === '2d' ? this.context : null;
+    }
+
+    remove() {}
+  }
+
+  Object.defineProperty(globalThis, 'OffscreenCanvas', {
+    configurable: true,
+    value: SmokeOffscreenCanvas,
+  });
+}
+
+installOffscreenCanvasSmokePolyfill();
 
 const MODEL_SPECS = [
   {
     name: '多穿小车',
     script: 'multi-shuttle.model.ts',
     lengthUnit: 'centimeter',
-    linearKeys: ['vehicleLength', 'forkGap'],
-    customValues: { vehicleLength: 1.2, forkGap: 0.8, count: 2 },
+    linearKeys: ['vehicleLength', 'vehicleWidth', 'cargoPlateWidth'],
+    customValues: { vehicleLength: 2, vehicleWidth: 1.8, cargoPlateWidth: 1.9 },
   },
   {
     name: '辊道机',
@@ -41,9 +95,9 @@ const MODEL_SPECS = [
   {
     name: '链条机',
     script: 'chain-conveyor.model.ts',
-    lengthUnit: 'meter',
-    linearKeys: ['chainLength', 'chainWidth', 'chainPosition'],
-    customValues: { chainLength: 2.2, chainWidth: 1.5, chainPosition: 0.3 },
+    lengthUnit: 'centimeter',
+    linearKeys: ['length', 'width', 'heightA', 'heightB', 'motorDistance'],
+    customValues: { length: 2.2, width: 1.5, heightA: 0.8, heightB: 1, motorDistance: 0.7 },
   },
   {
     name: 'box',
@@ -56,65 +110,60 @@ const MODEL_SPECS = [
     name: 'GD_有电机_Optimized(1)',
     script: 'gd-motor-optimized.model.ts',
     lengthUnit: 'centimeter',
-    linearKeys: ['length', 'width', 'height', 'rollerWidth'],
-    customValues: { length: 4, width: 1.5, height: 1.3, rollerWidth: 4 },
+    linearKeys: ['width', 'depth', 'height', 'cloneSpacing'],
+    customValues: { width: 4, depth: 1.5, height: 1.3, cloneSpacing: 0.1 },
   },
   {
     name: 'HCTS',
     script: 'hcts.model.ts',
     lengthUnit: 'centimeter',
-    linearKeys: ['bodyLength', 'bodyWidth', 'bodyHeight'],
-    customValues: { bodyLength: 2.5, bodyWidth: 1.9, bodyHeight: 6 },
+    linearKeys: ['width', 'depth', 'height', 'rollerSpacing'],
+    customValues: { width: 2.5, depth: 1.9, height: 6, rollerSpacing: 0.5 },
   },
   {
     name: 'LED',
     script: 'led.model.ts',
     lengthUnit: 'meter',
-    linearKeys: ['length', 'width', 'height'],
-    customValues: { length: 1.5, width: 0.1, height: 2 },
+    linearKeys: ['length', 'height'],
+    customValues: { length: 1.5, height: 2 },
   },
   {
     name: 'RGV',
     script: 'rgv.model.ts',
-    lengthUnit: 'meter',
-    linearKeys: ['trackWidth'],
-    customValues: { trackWidth: 0.35, workMode: 'dual' },
+    lengthUnit: 'centimeter',
+    linearKeys: ['carLength', 'carWidth', 'trackLength', 'trackHeight'],
+    customValues: { carLength: 3, carWidth: 1.3, trackLength: 10, trackHeight: 0.2 },
   },
   {
     name: 'Shelf',
     script: 'shelf.model.ts',
     lengthUnit: 'millimeter',
-    linearKeys: ['cellWidth', 'cellHeight', 'supportLegHeight', 'cellDepth', 'postWidth', 'deepSlotGap', 'deepSlotLift'],
+    linearKeys: ['cellWidth', 'cellHeight', 'supportLegHeight', 'postExtension', 'cellDepth', 'deepSlotGap'],
     customValues: {
       layerCount: 2,
       columnCount: 2,
       cellWidth: 1.2,
       cellHeight: 5,
       supportLegHeight: 1,
+      postExtension: 0.2,
       cellDepth: 1.5,
-      postWidth: 0.1,
       doubleDeepEnabled: true,
       deepSlotGap: 0.3,
-      deepSlotLift: 0.15,
     },
   },
   {
     name: 'Stacker',
     script: 'stacker.model.ts',
     lengthUnit: 'millimeter',
-    linearKeys: ['bodyLength', 'bodyWidth', 'bodyHeight', 'platformLength', 'platformHeight', 'forkLength', 'forkStageOneReach', 'forkStageTwoReach', 'forkGap'],
+    linearKeys: ['bodyLength', 'bodyHeight', 'platformLength', 'platformHeight', 'platformwidth'],
     colorKey: 'appearanceColor',
     defaultColor: '#ffffff',
     customValues: {
       bodyLength: 25,
-      bodyWidth: 0.6,
       bodyHeight: 9,
       platformLength: 1.5,
       platformHeight: 1.8,
-      forkLength: 1.1,
-      forkStageOneReach: 1,
-      forkStageTwoReach: 1,
-      forkGap: 0.8,
+      platformwidth: 2,
       appearanceColor: '#3366ff',
     },
   },
@@ -122,24 +171,22 @@ const MODEL_SPECS = [
     name: 'WLTS',
     script: 'wlts.model.ts',
     lengthUnit: 'centimeter',
-    linearKeys: ['radius', 'height', 'width', 'frontSupportHeight', 'rearSupportHeight'],
-    customValues: { radius: 1.6, height: 6, width: 1.4, frontSupportHeight: 1.2, rearSupportHeight: 1.2 },
+    linearKeys: ['width', 'depth', 'height', 'rollerDensity'],
+    customValues: { width: 1.8, depth: 2, height: 2, rollerDensity: 0.3 },
   },
   {
     name: 'YZJ',
     script: 'yzj.model.ts',
     lengthUnit: 'centimeter',
-    linearKeys: ['chainLength', 'platformLength', 'platformPosition', 'chainWidth', 'chainHeight', 'rollerWidth', 'rollerPosition'],
+    linearKeys: ['length', 'width', 'height', 'rollerFramePosition', 'rollerFrameLength', 'motorPosition'],
     customValues: {
-      chainLength: 2.4,
-      platformLength: 1.3,
-      platformPosition: 0.25,
-      chainWidth: 1.5,
-      chainHeight: 1,
-      rollerWidth: 0.08,
-      rollerPosition: 0.15,
+      length: 2.4,
+      width: 1.5,
+      height: 1,
+      rollerFramePosition: 0.2,
+      rollerFrameLength: 1.3,
+      motorPosition: 0.3,
       rollerDensity: 4,
-      showDirectionArrow: false,
     },
   },
 ];
@@ -150,12 +197,19 @@ const ACTIVE_MODEL_SPECS = MODEL_FILTER
   : MODEL_SPECS;
 if (MODEL_FILTER) assert.equal(ACTIVE_MODEL_SPECS.length, 1, `未找到模型过滤项：${MODEL_FILTER}`);
 
-/** 确认外部模型项目可用；清洁环境应显式设置 BABYLON_MODEL_ROOT。 */
+/** 确认真实源包、编辑器资产副本与资产索引都可用。 */
 async function assertModelRootAvailable() {
-  try {
-    await fs.access(MODEL_ROOT);
-  } catch {
-    throw new Error(`缺少外部模型根：${MODEL_ROOT}。请拉取相邻 3d-models 项目，或设置 BABYLON_MODEL_ROOT 后重试。`);
+  const requiredPaths = [
+    [MODEL_ROOT, '外部模型根'],
+    [ASSET_MODEL_ROOT, '编辑器模型资产副本'],
+    [ASSET_INDEX_PATH, '编辑器资产索引'],
+  ];
+  for (const [requiredPath, label] of requiredPaths) {
+    try {
+      await fs.access(requiredPath);
+    } catch {
+      throw new Error(`缺少${label}：${requiredPath}。请设置对应 BABYLON_MODEL_ROOT / BABYLON_ASSET_MODEL_ROOT / BABYLON_ASSET_INDEX_PATH 后重试。`);
+    }
   }
 }
 
@@ -245,6 +299,7 @@ function collectMaterialSnapshot(contentRoot) {
       colors.push({
         meshName: mesh.name,
         materialName: material.name,
+        material,
         color: color?.toHexString?.().toLowerCase() ?? null,
       });
     }
@@ -252,12 +307,35 @@ function collectMaterialSnapshot(contentRoot) {
   return { materials, colors };
 }
 
-/** 校验所有有效模型材质都使用指定颜色。 */
-function assertMaterialColor(snapshot, expectedColor, message) {
-  assert.ok(snapshot.colors.length > 0, `${message}: 未找到有效材质`);
+/** 返回当前快照中实际使用指定颜色的材质集合。 */
+function getMaterialsWithColor(snapshot, expectedColor) {
   const normalizedExpected = expectedColor.toLowerCase();
+  return new Set(
+    snapshot.colors
+      .filter((entry) => entry.color === normalizedExpected)
+      .map((entry) => entry.material),
+  );
+}
+
+/** 参数化外观允许保留轨道/立柱等排除材质，但至少一个主体材质必须使用目标颜色。 */
+function assertMaterialColorPresent(snapshot, expectedColor, message) {
+  assert.ok(snapshot.colors.length > 0, `${message}: 未找到有效材质`);
+  const matchingMaterials = getMaterialsWithColor(snapshot, expectedColor);
+  assert.ok(matchingMaterials.size > 0, `${message}: 没有主体材质使用 ${expectedColor}`);
+  return matchingMaterials;
+}
+
+/** 排除材质必须保持脚本启动前颜色，不能出现目标色和基线色之外的串色。 */
+function assertMaterialColorsAllowed(snapshot, expectedColor, baselineSnapshot, message) {
+  const allowedColors = new Set([
+    expectedColor.toLowerCase(),
+    ...baselineSnapshot.colors.map((entry) => entry.color),
+  ]);
   for (const entry of snapshot.colors) {
-    assert.equal(entry.color, normalizedExpected, `${message}: ${entry.meshName}/${entry.materialName}`);
+    assert.ok(
+      allowedColors.has(entry.color),
+      `${message}: ${entry.meshName}/${entry.materialName} 出现非目标/基线颜色 ${entry.color}`,
+    );
   }
 }
 
@@ -435,9 +513,13 @@ function assertMetadataContract(spec, metadata) {
     assert.ok(parameter, `${spec.name}.${key} 缺少 modelParameters 定义`);
     assert.ok(field, `${spec.name}.${key} 缺少 parameterScripts 字段`);
     assert.equal(parameter.unit, 'm', `${spec.name}.${key} modelParameters.unit 必须为 m`);
-    assert.match(parameter.label, /\(m\)$/, `${spec.name}.${key} Inspector 标签必须显式标记 (m)`);
+    assert.ok(typeof parameter.label === 'string' && parameter.label.trim(), `${spec.name}.${key} Inspector 标签不能为空`);
     assert.equal(field.unit, 'm', `${spec.name}.${key} parameterScripts.unit 必须为 m`);
-    assert.match(field.label, /\(m\)$/, `${spec.name}.${key} 脚本字段标签必须显式标记 (m)`);
+    assert.ok(typeof field.label === 'string' && field.label.trim(), `${spec.name}.${key} 脚本字段标签不能为空`);
+    if (REQUIRE_LABEL_UNIT_SUFFIX) {
+      assert.match(parameter.label, /\(m\)$/, `${spec.name}.${key} Inspector 标签必须显式标记 (m)`);
+      assert.match(field.label, /\(m\)$/, `${spec.name}.${key} 脚本字段标签必须显式标记 (m)`);
+    }
   }
 
   if (spec.colorKey) {
@@ -532,19 +614,23 @@ async function runModelScenario({ spec, metadata, glbPath, scriptPath, rootTrans
     const scenarioResult = { baselineSize, defaultSize, customSize: customSizeFirst, generatedBounds: collectGeneratedMeterBounds(root, contentRoot), zExtremes: collectMeterZExtremes(root, contentRoot), contentRootScaling: { x: contentRoot.scaling.x, y: contentRoot.scaling.y, z: contentRoot.scaling.z }, contentRootPosition: { x: contentRoot.position.x, y: contentRoot.position.y, z: contentRoot.position.z } };
     if (spec.colorKey) {
       assert.ok(baselineMaterialSnapshot && defaultMaterialSnapshot && customMaterialSnapshot && resetMaterialSnapshot && invalidMaterialSnapshot && repeatedMaterialSnapshot);
-      assertMaterialColor(defaultMaterialSnapshot, spec.defaultColor, `${spec.name} 默认外观颜色`);
-      assertMaterialColor(customMaterialSnapshot, customValues[spec.colorKey], `${spec.name} 自定义外观颜色`);
-      assertMaterialColor(resetMaterialSnapshot, spec.defaultColor, `${spec.name} 恢复默认外观颜色`);
-      assertMaterialColor(invalidMaterialSnapshot, spec.defaultColor, `${spec.name} 非法颜色必须回退默认值`);
-      assertMaterialColor(repeatedMaterialSnapshot, customValues[spec.colorKey], `${spec.name} 重复自定义外观颜色`);
+      assertMaterialColorPresent(defaultMaterialSnapshot, spec.defaultColor, `${spec.name} 默认外观颜色`);
+      assertMaterialColorPresent(customMaterialSnapshot, customValues[spec.colorKey], `${spec.name} 自定义外观颜色`);
+      assertMaterialColorPresent(resetMaterialSnapshot, spec.defaultColor, `${spec.name} 恢复默认外观颜色`);
+      assertMaterialColorPresent(invalidMaterialSnapshot, spec.defaultColor, `${spec.name} 非法颜色必须回退默认值`);
+      assertMaterialColorPresent(repeatedMaterialSnapshot, customValues[spec.colorKey], `${spec.name} 重复自定义外观颜色`);
+      assertMaterialColorsAllowed(defaultMaterialSnapshot, spec.defaultColor, baselineMaterialSnapshot, `${spec.name} 默认外观颜色`);
+      assertMaterialColorsAllowed(customMaterialSnapshot, customValues[spec.colorKey], baselineMaterialSnapshot, `${spec.name} 自定义外观颜色`);
+      assertMaterialColorsAllowed(resetMaterialSnapshot, spec.defaultColor, baselineMaterialSnapshot, `${spec.name} 恢复默认外观颜色`);
+      assertMaterialColorsAllowed(invalidMaterialSnapshot, spec.defaultColor, baselineMaterialSnapshot, `${spec.name} 非法颜色回退`);
+      assertMaterialColorsAllowed(repeatedMaterialSnapshot, customValues[spec.colorKey], baselineMaterialSnapshot, `${spec.name} 重复自定义外观颜色`);
       assertMaterialSetEqual(customMaterialSnapshot.materials, defaultMaterialSnapshot.materials, `${spec.name} 自定义颜色必须复用克隆材质`);
       assertMaterialSetEqual(resetMaterialSnapshot.materials, defaultMaterialSnapshot.materials, `${spec.name} 恢复默认颜色必须复用克隆材质`);
       assertMaterialSetEqual(invalidMaterialSnapshot.materials, defaultMaterialSnapshot.materials, `${spec.name} 非法颜色必须复用克隆材质`);
       assertMaterialSetEqual(repeatedMaterialSnapshot.materials, defaultMaterialSnapshot.materials, `${spec.name} 重复颜色必须复用克隆材质`);
-      for (const material of defaultMaterialSnapshot.materials) {
-        assert.ok(!baselineMaterialSnapshot.materials.has(material), `${spec.name} 必须使用实例专属克隆材质`);
-      }
-      const appearanceMaterials = [...defaultMaterialSnapshot.materials];
+      const appearanceMaterials = [...defaultMaterialSnapshot.materials]
+        .filter((material) => !baselineMaterialSnapshot.materials.has(material));
+      assert.ok(appearanceMaterials.length > 0, `${spec.name} 主体必须使用实例专属克隆材质`);
       const disposedAppearanceMaterials = new Set();
       for (const material of appearanceMaterials) {
         material.onDisposeObservable?.add(() => disposedAppearanceMaterials.add(material));
@@ -631,21 +717,21 @@ async function assertStackerColorIsolation({ spec, metadata, glbPath, scriptPath
 
     const leftSnapshot = collectMaterialSnapshot(left.contentRoot);
     const rightSnapshot = collectMaterialSnapshot(right.contentRoot);
-    assertMaterialColor(leftSnapshot, '#3366ff', `${spec.name} 左实例颜色`);
-    assertMaterialColor(rightSnapshot, '#ff6633', `${spec.name} 右实例颜色`);
-    for (const material of leftSnapshot.materials) {
-      assert.ok(!rightSnapshot.materials.has(material), `${spec.name} 双实例不得共享颜色克隆材质`);
+    const leftTintedMaterials = assertMaterialColorPresent(leftSnapshot, '#3366ff', `${spec.name} 左实例颜色`);
+    const rightTintedMaterials = assertMaterialColorPresent(rightSnapshot, '#ff6633', `${spec.name} 右实例颜色`);
+    for (const material of leftTintedMaterials) {
+      assert.ok(!rightTintedMaterials.has(material), `${spec.name} 双实例不得共享主体颜色克隆材质`);
     }
 
     updateRuntimeValues(leftRuntime, left.contentRoot, metadata, { ...leftState.values, [spec.colorKey]: '#22cc88' }, leftState.assetCode);
-    assertMaterialColor(collectMaterialSnapshot(left.contentRoot), '#22cc88', `${spec.name} 左实例二次换色`);
+    assertMaterialColorPresent(collectMaterialSnapshot(left.contentRoot), '#22cc88', `${spec.name} 左实例二次换色`);
     const rightBeforeLeftStop = collectMaterialSnapshot(right.contentRoot);
-    assertMaterialColor(rightBeforeLeftStop, '#ff6633', `${spec.name} 左实例换色不得影响右实例`);
+    assertMaterialColorPresent(rightBeforeLeftStop, '#ff6633', `${spec.name} 左实例换色不得影响右实例`);
 
     leftRuntime.dispose();
     leftRuntime = undefined;
     const rightAfterLeftStop = collectMaterialSnapshot(right.contentRoot);
-    assertMaterialColor(rightAfterLeftStop, '#ff6633', `${spec.name} 停止左实例不得影响右实例`);
+    assertMaterialColorPresent(rightAfterLeftStop, '#ff6633', `${spec.name} 停止左实例不得影响右实例`);
     assertMaterialSetEqual(rightAfterLeftStop.materials, rightBeforeLeftStop.materials, `${spec.name} 右实例材质必须保持稳定`);
   } finally {
     leftRuntime?.dispose();
@@ -831,7 +917,14 @@ try {
   }
 
   await assertAssetIndexContract();
-  console.log(JSON.stringify({ ok: true, modelRoot: MODEL_ROOT, models: summaries }, null, 2));
+  console.log(JSON.stringify({
+    ok: true,
+    modelRoot: MODEL_ROOT,
+    assetModelRoot: ASSET_MODEL_ROOT,
+    assetIndexPath: ASSET_INDEX_PATH,
+    requireLabelUnitSuffix: REQUIRE_LABEL_UNIT_SUFFIX,
+    models: summaries,
+  }, null, 2));
 } finally {
   engine.dispose();
   await server?.close();

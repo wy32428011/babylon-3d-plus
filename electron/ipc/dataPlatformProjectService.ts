@@ -98,6 +98,17 @@ export async function openDataPlatformProject(
   }
 }
 
+/** 本地场景加载后激活共享工作区，并启动或复用数据中台全量模型同步。 */
+export async function syncDataPlatformModelsForWorkspace(
+  baseUrl: string,
+  editorRoot: string,
+): Promise<boolean> {
+  if (dataPlatformProjectServiceShuttingDown) return false;
+  await ensureWritableEditorRoot(editorRoot);
+  await activateProjectRoot(editorRoot);
+  return startDataPlatformModelSync(baseUrl, editorRoot);
+}
+
 /** 暴露模型同步重试给 IPC。 */
 export function retryLatestDataPlatformModelSync(): boolean {
   return retryDataPlatformModelSync();

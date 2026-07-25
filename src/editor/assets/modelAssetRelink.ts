@@ -5,6 +5,7 @@ export type ImportedAssetIndexes = {
   byPath: Map<string, AssetEntry>;
   bySourceUrl: Map<string, AssetEntry>;
   uniqueByPackagePath: Map<string, AssetEntry>;
+  uniqueByDataPlatformPackage: Map<string, AssetEntry>;
   uniqueByPortablePackage: Map<string, AssetEntry>;
 };
 
@@ -42,6 +43,13 @@ function getPortablePackageMatchKey(modelPath: string | undefined, packagePath?:
   return modelFileName && packageDirectoryName ? `${packageDirectoryName}/${modelFileName}` : '';
 }
 
+/** 提取数据中台生成目录中的稳定“资源类型 + 业务 ID”，模型改名或主文件改名后仍可重新关联。 */
+function getDataPlatformPackageMatchKey(modelPath: string | undefined, packagePath?: string): string {
+  const packageDirectoryName = getPathBaseName(packagePath ?? getDirectoryPath(modelPath));
+  const match = /^(model|env|combo)-(\d+)(?:-|$)/i.exec(packageDirectoryName);
+  return match ? `${match[1].toLowerCase()}:${match[2]}` : '';
+}
+
 /** 只保留候选资产唯一的匹配键，歧义键不参与自动重新关联。 */
 function createUniqueAssetIndex(candidateLists: Map<string, AssetEntry[]>): Map<string, AssetEntry> {
   const uniqueAssets = new Map<string, AssetEntry>();
@@ -57,6 +65,7 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
   const byPath = new Map<string, AssetEntry>();
   const bySourceUrl = new Map<string, AssetEntry>();
   const packageAssetLists = new Map<string, AssetEntry[]>();
+  const dataPlatformPackageAssetLists = new Map<string, AssetEntry[]>();
   const portablePackageAssetLists = new Map<string, AssetEntry[]>();
 
   for (const asset of modelAssets) {
@@ -73,6 +82,13 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
       packageAssetLists.set(packageKey, packageAssets);
     }
 
+    const dataPlatformPackageKey = getDataPlatformPackageMatchKey(asset.path, asset.packagePath);
+    if (dataPlatformPackageKey) {
+      const packageAssets = dataPlatformPackageAssetLists.get(dataPlatformPackageKey) ?? [];
+      packageAssets.push(asset);
+      dataPlatformPackageAssetLists.set(dataPlatformPackageKey, packageAssets);
+    }
+
     const portablePackageKey = getPortablePackageMatchKey(asset.path, asset.packagePath);
     if (portablePackageKey) {
       const packageAssets = portablePackageAssetLists.get(portablePackageKey) ?? [];
@@ -85,12 +101,27 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
     byPath,
     bySourceUrl,
     uniqueByPackagePath: createUniqueAssetIndex(packageAssetLists),
+    uniqueByDataPlatformPackage: createUniqueAssetIndex(dataPlatformPackageAssetLists),
     uniqueByPortablePackage: createUniqueAssetIndex(portablePackageAssetLists),
   };
 }
 
+/** 按完整目录或数据中台稳定业务 ID 查找唯一模型包，供普通模型和场景环境共同复用。 */
+export function findImportedAssetForPackagePath(
+  packagePath: string | undefined,
+  indexes: ImportedAssetIndexes,
+): AssetEntry | null {
+  const packageMatch = indexes.uniqueByPackagePath.get(normalizeAssetMatchPath(packagePath));
+  if (packageMatch) return packageMatch;
+
+  const dataPlatformPackageKey = getDataPlatformPackageMatchKey(undefined, packagePath);
+  return dataPlatformPackageKey
+    ? indexes.uniqueByDataPlatformPackage.get(dataPlatformPackageKey) ?? null
+    : null;
+}
+
 /**
- * 优先按本机精确路径/URL 匹配；跨电脑打开场景时，再按唯一的“包目录名 + 主模型文件名”重新关联。
+ * 优先按本机精确路径/URL 匹配；数据中台资源允许按稳定业务 ID 关联，其他跨电脑场景再按唯一包标识关联。
  */
 export function findImportedAssetForModelAsset(
   modelAsset: ModelAssetTemplate,
@@ -102,7 +133,7 @@ export function findImportedAssetForModelAsset(
   const sourceUrlMatch = indexes.bySourceUrl.get(modelAsset.sourceUrl.trim());
   if (sourceUrlMatch) return sourceUrlMatch;
 
-  const packageMatch = indexes.uniqueByPackagePath.get(normalizeAssetMatchPath(getDirectoryPath(modelAsset.sourcePath)));
+  const packageMatch = findImportedAssetForPackagePath(getDirectoryPath(modelAsset.sourcePath), indexes);
   if (packageMatch) return packageMatch;
 
   const portablePackageMatch = indexes.uniqueByPortablePackage.get(getPortablePackageMatchKey(modelAsset.sourcePath));

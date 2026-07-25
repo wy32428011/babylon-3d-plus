@@ -4,6 +4,7 @@ import type { LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
+import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
 import { LocatorInspector } from './LocatorInspector';
@@ -133,9 +134,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
     return <SceneSettingsPanel readOnly={props.readOnly} />;
   }
 
-  const parentEntity = selectedEntity.parentId ? scene.entities[selectedEntity.parentId] : null;
   const isFolder = selectedEntity.isFolder === true;
-  const isLocked = selectedEntity.locked === true || parentEntity?.locked === true || props.readOnly === true;
+  const isLocked = isEntityEffectivelyLocked(scene.entities, selectedEntity) || props.readOnly === true;
 
   if (isFolder) {
     return (
@@ -154,7 +154,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         </label>
         <fieldset className="transform-fieldset">
           <legend>文件夹</legend>
-          <p className="muted">包含对象：{selectedEntity.childrenIds.length}</p>
+          <p className="muted">直属项目：{selectedEntity.childrenIds.length}</p>
           <p className="muted">仅用于 Hierarchy 分组，不参与场景变换。</p>
         </fieldset>
       </section>
