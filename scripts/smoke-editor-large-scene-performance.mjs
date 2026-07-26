@@ -282,6 +282,92 @@ function verifyThinInstanceSelectionDelta(EntityArrayThinInstanceBatch) {
       '重复 Transform 后必须继续复用每个分片的选择 Float32Array',
     );
 
+    const groupCamera = new FreeCamera(
+      'large-group-preview-camera',
+      new Vector3(100, 50, -500),
+      scene,
+    );
+    groupCamera.setTarget(new Vector3(100, 0, 25));
+    groupCamera.fov = 1.5;
+    groupCamera.minZ = 0.1;
+    groupCamera.maxZ = 5_000;
+    scene.activeCamera = groupCamera;
+    scene.render();
+
+    const readEntityTranslation = (entityId) => {
+      const entityIndex = batch.getEntityIds().indexOf(entityId);
+      for (const entry of batch.batches) {
+        const sourceEntityIndexes = entry.sourceEntityIndexBuffer;
+        const sourceMatrices = entry.sourceMatrixBuffer;
+        if (!sourceEntityIndexes || !sourceMatrices) continue;
+        for (let sourceIndex = 0; sourceIndex < sourceEntityIndexes.length; sourceIndex += 1) {
+          if (sourceEntityIndexes[sourceIndex] !== entityIndex) continue;
+          const offset = sourceIndex * 16;
+          return {
+            x: sourceMatrices[offset + 12],
+            y: sourceMatrices[offset + 13],
+            z: sourceMatrices[offset + 14],
+          };
+        }
+      }
+      return null;
+    };
+    const groupBaselineFirst = readEntityTranslation(instances[0].entityId);
+    const groupBaselineLast = readEntityTranslation(instances.at(-1).entityId);
+    const groupBatchObjects = [...batch.batches];
+    const groupMatrixBuffers = new Map(batch.batches.map((entry) => [entry, entry.matrixBuffer]));
+    const groupSourceMatrixBuffers = new Map(batch.batches.map((entry) => [entry, entry.sourceMatrixBuffer]));
+    const groupSelectionBuffers = new Map(batch.batches.map((entry) => [entry, entry.selectionBuffer]));
+    const groupEntityIndexBuffers = new Map(batch.batches.map((entry) => [entry, entry.entityIndexBuffer]));
+    const groupSourceEntityIndexBuffers = new Map(batch.batches.map((entry) => [entry, entry.sourceEntityIndexBuffer]));
+    const groupVisibleSourceIndexBuffers = new Map(batch.batches.map((entry) => [entry, entry.visibleSourceIndexBuffer]));
+    const groupRangeStartBuffers = new Map(batch.batches.map((entry) => [entry, entry.entityInstanceRangeStarts]));
+    const groupRangeCountBuffers = new Map(batch.batches.map((entry) => [entry, entry.entityInstanceRangeCounts]));
+    const groupGeometries = new Map(batch.batches.map((entry) => [entry, entry.mesh.geometry]));
+    const groupEntityIds = new Set(instances.map((instance) => instance.entityId));
+    const groupPreviewStartedAt = performance.now();
+    assert.equal(batch.beginEntityTranslationPreview(groupEntityIds), true, '10k 逻辑模型必须建立单次组移动矩阵基线');
+    assert.ok(
+      batch.translationPreviewSession.batches.every((entry) => entry.sourceInstanceIndexSet instanceof Set),
+      '10k 预览必须在会话开始时缓存目标 source index 集合，拖动帧不得重复构建',
+    );
+    assert.equal(
+      batch.updateEntityTranslationPreview({ x: 7, y: -3, z: 11 }),
+      true,
+      '10k 逻辑模型必须按同一绝对 delta 完成运行时预览',
+    );
+    const groupTranslationPreviewDurationMs = performance.now() - groupPreviewStartedAt;
+    assert.deepEqual(
+      readEntityTranslation(instances[0].entityId),
+      { x: groupBaselineFirst.x + 7, y: groupBaselineFirst.y - 3, z: groupBaselineFirst.z + 11 },
+      '10k 组移动必须更新首个逻辑实体',
+    );
+    assert.deepEqual(
+      readEntityTranslation(instances.at(-1).entityId),
+      { x: groupBaselineLast.x + 7, y: groupBaselineLast.y - 3, z: groupBaselineLast.z + 11 },
+      '10k 组移动必须更新最后一个逻辑实体',
+    );
+    assert.deepEqual(batch.batches, groupBatchObjects, '10k 组移动不得创建或替换空间批次');
+    assert.ok(batch.batches.every((entry) => entry.matrixBuffer === groupMatrixBuffers.get(entry)), '10k 组移动必须复用矩阵缓冲');
+    assert.ok(batch.batches.every((entry) => entry.sourceMatrixBuffer === groupSourceMatrixBuffers.get(entry)), '10k 组移动必须复用完整源矩阵缓冲');
+    assert.ok(batch.batches.every((entry) => entry.selectionBuffer === groupSelectionBuffers.get(entry)), '10k 组移动必须复用选择缓冲');
+    assert.ok(batch.batches.every((entry) => entry.entityIndexBuffer === groupEntityIndexBuffers.get(entry)), '10k 组移动必须复用实体索引缓冲');
+    assert.ok(batch.batches.every((entry) => entry.sourceEntityIndexBuffer === groupSourceEntityIndexBuffers.get(entry)), '10k 组移动必须复用完整实体索引缓冲');
+    assert.ok(batch.batches.every((entry) => entry.visibleSourceIndexBuffer === groupVisibleSourceIndexBuffers.get(entry)), '10k 组移动必须复用可见索引缓冲');
+    assert.ok(batch.batches.every((entry) => entry.entityInstanceRangeStarts === groupRangeStartBuffers.get(entry)), '10k 稳定可见布局不得重建范围起点缓冲');
+    assert.ok(batch.batches.every((entry) => entry.entityInstanceRangeCounts === groupRangeCountBuffers.get(entry)), '10k 稳定可见布局不得重建范围计数缓冲');
+    assert.ok(batch.batches.every((entry) => entry.mesh.geometry === groupGeometries.get(entry)), '10k 组移动不得替换原 Geometry');
+    assert.equal(
+      batch.updateEntityTranslationPreview({ x: 8, y: -2, z: 10 }),
+      true,
+      '10k 第二帧组移动必须继续按绝对 delta 更新',
+    );
+    assert.ok(batch.batches.every((entry) => entry.entityInstanceRangeStarts === groupRangeStartBuffers.get(entry)), '10k 连续拖动帧必须持续复用范围起点缓冲');
+    assert.ok(batch.batches.every((entry) => entry.entityInstanceRangeCounts === groupRangeCountBuffers.get(entry)), '10k 连续拖动帧必须持续复用范围计数缓冲');
+    batch.endEntityTranslationPreview(true);
+    assert.deepEqual(readEntityTranslation(instances[0].entityId), groupBaselineFirst, '取消 10k 预览必须恢复首实体基线');
+    assert.deepEqual(readEntityTranslation(instances.at(-1).entityId), groupBaselineLast, '取消 10k 预览必须恢复末实体基线');
+
     return {
       entityCount: BATCH_ENTITY_COUNT,
       batchMeshCount: activeBatches.length,
@@ -295,6 +381,10 @@ function verifyThinInstanceSelectionDelta(EntityArrayThinInstanceBatch) {
       matrixBufferReused: true,
       entityIndexBufferReused: true,
       selectionBufferReused: true,
+      groupTranslationPreviewEntityCount: BATCH_ENTITY_COUNT,
+      groupTranslationPreviewDurationMs,
+      groupTranslationBuffersReused: true,
+      groupTranslationGeometryPreserved: true,
     };
   } finally {
     selectionLayer?.dispose();
@@ -896,13 +986,23 @@ async function verifySceneViewWiring() {
   const fullSyncBlock = panelSource.slice(fullSyncStart, selectionSyncStart);
   const fullSyncDependencies = fullSyncBlock.slice(fullSyncBlock.lastIndexOf('}, ['));
   assert.match(fullSyncBlock, /runtime\.sync\(editRuntimeSceneDocument\)/, '内容 effect 必须保留完整同步');
+  assert.match(fullSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '内容 effect 只能取消过期的文件夹组拖动');
+  assert.doesNotMatch(fullSyncBlock, /gizmo\.cancelActiveDrag\(\)/, '普通实体预览写入文档时不得被内容 effect 打断');
   assert.doesNotMatch(fullSyncDependencies, /selectedEntityId[,\]]/, '完整同步依赖不得包含纯选择字段');
 
   const selectionEffectStart = panelSource.indexOf('  useEffect(() => {', selectionSyncStart);
   const selectionSyncEnd = panelSource.indexOf('  useEffect(() => {', selectionEffectStart + 20);
   const selectionSyncBlock = panelSource.slice(selectionSyncStart, selectionSyncEnd);
   assert.match(selectionSyncBlock, /runtime\.syncSelection\(editRuntimeSceneDocument\)/, '选区 effect 必须调用专用同步');
+  assert.match(selectionSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '选区 effect 只能主动取消文件夹组预览');
+  assert.doesNotMatch(selectionSyncBlock, /gizmo\.cancelActiveDrag\(\)/, '普通实体拖动不得因预览文档引用变化被选区 effect 打断');
   assert.doesNotMatch(selectionSyncBlock, /runtime\.sync\(/, '选区 effect 不得回退完整同步');
+  const selectionSyncDependencies = selectionSyncBlock.slice(selectionSyncBlock.lastIndexOf('}, ['));
+  assert.match(
+    selectionSyncDependencies,
+    /hierarchySelectionIds/,
+    '纯 Hierarchy 多选范围变化必须显式取消拖动并重新绑定组 Gizmo',
+  );
   assert.match(
     panelSource,
     /\}, \[sceneDocument\.entityIds, sceneDocument\.entities\]\);/,
@@ -947,6 +1047,30 @@ async function verifySceneViewWiring() {
     'SceneRuntime 正式路径不得启用或传入任何屏幕空间代理参数',
   );
 
+  const groupCallbacksStart = panelSource.indexOf('        beginGroupTranslation:');
+  const groupCallbacksEnd = panelSource.indexOf('      });', groupCallbacksStart);
+  assert.ok(groupCallbacksStart >= 0 && groupCallbacksEnd > groupCallbacksStart, 'SceneView 必须接入文件夹组 Gizmo 生命周期');
+  const groupCallbacksBlock = panelSource.slice(groupCallbacksStart, groupCallbacksEnd);
+  assert.match(groupCallbacksBlock, /beginFolderGroupTranslation/, '组拖动开始必须只建立运行时会话');
+  assert.match(groupCallbacksBlock, /updateFolderGroupTranslation/, '组拖动过程必须只更新运行时绝对 delta');
+  assert.match(groupCallbacksBlock, /commitFolderGroupTranslation/, '组拖动结束必须调用 Store 原子提交');
+  assert.doesNotMatch(groupCallbacksBlock, /runtime\.sync\(|createEditModeModelThinInstancePlan/, '拖动帧不得触发完整场景同步或 thinInstance 规划');
+  assert.match(
+    runtimeSource,
+    /onBeforeActiveMeshesEvaluationObservable\.add\(\(\) => \{\s*this\.flushGroupTranslationPreview\(\)/,
+    'SceneRuntime 必须把同帧拖动事件合并到 active-mesh 评估前的一次更新',
+  );
+  assert.match(batchSource, /beginEntityTranslationPreview/, 'thinInstance 批次必须提供可逆组平移预览入口');
+  assert.match(batchSource, /sourceInstanceIndexSet: new Set\(sourceInstanceIndexes\)/, '10k 拖动帧必须复用会话级 source index 集合');
+  const translationBoundsStart = batchSource.indexOf('  private refreshTranslationPreviewBatch(');
+  const translationBoundsEnd = batchSource.indexOf('  private syncTranslationPreviewMeshBounds(', translationBoundsStart);
+  const translationBoundsBlock = batchSource.slice(translationBoundsStart, translationBoundsEnd);
+  assert.doesNotMatch(
+    translationBoundsBlock,
+    /Vector3\.(?:Minimize|Maximize)|this\.cullingCenter\.(?:add|subtract)\(/,
+    '10k 拖动包围盒循环不得为每个实例分配临时 Vector3',
+  );
+
   return {
     contentAndSelectionEffectsSeparated: true,
     selectionUsesDedicatedRuntimePath: true,
@@ -956,6 +1080,8 @@ async function verifySceneViewWiring() {
     reportHistorySamples: 60,
     originalGeometryOnly: true,
     proxyEntityCountInvariant: 0,
+    folderGroupDragAvoidsFullSync: true,
+    folderGroupPreviewCoalescedPerFrame: true,
   };
 }
 

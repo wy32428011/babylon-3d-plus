@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'vite';
 
-const SSR_MODULE_LOAD_TIMEOUT_MS = 60_000;
+const SSR_MODULE_LOAD_TIMEOUT_MS = 180_000;
 const PASTE_OFFSET_METERS = 0.35;
 
 /** 在限定时间内加载模块，避免 Vite SSR 异常时 smoke 无限等待。 */

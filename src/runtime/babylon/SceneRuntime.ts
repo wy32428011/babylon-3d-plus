@@ -31,7 +31,7 @@ import {
   VertexData,
 } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
-import { collectEntitySubtreeIds, createEntityHierarchyStateMap } from '../../editor/model/entityHierarchy';
+import { collectFolderRuntimeEntityIds, createEntityHierarchyStateMap } from '../../editor/model/entityHierarchy';
 import type {
   CadReferenceComponent,
   LightComponent,
@@ -134,6 +134,10 @@ import {
 } from './instancedSelectionBuffers';
 import { ModelGeneratorFetchRuntime } from './ModelGeneratorFetchRuntime';
 import { EntityArrayThinInstanceBatch } from './EntityArrayThinInstanceBatch';
+import {
+  EntityGroupTranslationPreview,
+  type EntityGroupTranslationTarget,
+} from './EntityGroupTranslationPreview';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
 const SELECTED_EMISSIVE_COLOR = '#332400';
@@ -572,6 +576,7 @@ export class SceneRuntime {
   private modelArrayCanonicalSignatureSequence = 0;
   private readonly modelArrayBatchByMeshUniqueId = new Map<number, EntityArrayThinInstanceBatch>();
   private modelArrayGizmoProxy: { entityId: string; node: TransformNode } | null = null;
+  private folderGroupGizmoProxy: { folderId: string; entityIds: string[]; node: TransformNode } | null = null;
   private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
   private readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
   private readonly stackerCargoMeshes = new Map<string, StackerCargoRuntimeEntry>();
@@ -586,6 +591,7 @@ export class SceneRuntime {
   private readonly sharedModelAssetCache = new SharedModelAssetCache();
   private readonly fetchRuntimes = new Map<string, ModelGeneratorFetchRuntime>();
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
+  private readonly groupTranslationPreviewObserver: Nullable<Observer<Scene>>;
   private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly reportedMissingTargets = new Set<string>();
@@ -607,6 +613,8 @@ export class SceneRuntime {
   private maxSelectionSyncDurationMs = 0;
   private lastSelectionChangedEntityCount = 0;
   private entityArrayPreview: EntityArrayPreviewEntry | null = null;
+  private groupTranslationPreview: EntityGroupTranslationPreview | null = null;
+  private pendingGroupTranslationDelta: Vector3Data | null = null;
   private modelLoadSequence = 0;
   private environmentLoadSequence = 0;
 
@@ -624,6 +632,9 @@ export class SceneRuntime {
       afterModelMutation: (entityId) => this.refreshModelArrayRuntimeRepresentationByEntityId(entityId),
     });
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
+    this.groupTranslationPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
+      this.flushGroupTranslationPreview();
+    });
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
   }
 
@@ -695,6 +706,7 @@ export class SceneRuntime {
   beginTelemetryPreview(): void {
     if (this.telemetryPreviewActive) return;
     this.clearEntityArrayPreview();
+    this.clearFolderGroupGizmoTarget();
     this.telemetryPreviewActive = true;
     this.genericTelemetryMotionRuntime.beginPreview();
     this.clearTelemetryPreviewRuntimeState();
@@ -764,6 +776,193 @@ export class SceneRuntime {
       this.poiEffectRuntime.getGizmoTarget(entityId) ??
       null
     );
+  }
+
+  /** 在全部文件夹成员世界包围盒中心创建或更新不可见移动代理。 */
+  getFolderGroupGizmoTarget(folderId: string, entityIds: readonly string[]): TransformNode | null {
+    const uniqueEntityIds = [...new Set(entityIds)].filter((entityId) => Boolean(entityId));
+    const bounds = uniqueEntityIds.length > 0 ? this.getEntitiesWorldBounds(uniqueEntityIds) : null;
+    if (!bounds) {
+      if (this.folderGroupGizmoProxy?.folderId === folderId) {
+        this.folderGroupGizmoProxy.node.setEnabled(false);
+      }
+      return null;
+    }
+
+    let proxy = this.folderGroupGizmoProxy;
+    if (!proxy) {
+      proxy = {
+        folderId,
+        entityIds: uniqueEntityIds,
+        node: new TransformNode('__folderGroupTranslateGizmoProxy', this.scene),
+      };
+      this.folderGroupGizmoProxy = proxy;
+    }
+    proxy.folderId = folderId;
+    proxy.entityIds = uniqueEntityIds;
+    proxy.node.setEnabled(true);
+    proxy.node.position.copyFromFloats(bounds.center.x, bounds.center.y, bounds.center.z);
+    proxy.node.rotationQuaternion = null;
+    proxy.node.rotation.copyFromFloats(0, 0, 0);
+    proxy.node.scaling.copyFromFloats(1, 1, 1);
+    proxy.node.computeWorldMatrix(true);
+    return proxy.node;
+  }
+
+  /** 隐藏文件夹组代理并取消任何尚未提交的运行时预览。 */
+  clearFolderGroupGizmoTarget(): void {
+    this.cancelFolderGroupTranslation();
+    this.folderGroupGizmoProxy?.node.setEnabled(false);
+  }
+
+  /** 建立文件夹组运行时平移会话；未加载成员会在后续批次就绪时自动接回。 */
+  beginFolderGroupTranslation(
+    entityIds: readonly string[],
+    beforePositions: Readonly<Record<string, Vector3Data>>,
+  ): boolean {
+    if (this.telemetryPreviewActive) return false;
+    this.cancelFolderGroupTranslation();
+
+    const validEntityIds = [...new Set(entityIds)].filter((entityId) => {
+      const position = beforePositions[entityId];
+      return Boolean(
+        position
+        && Number.isFinite(position.x)
+        && Number.isFinite(position.y)
+        && Number.isFinite(position.z),
+      );
+    });
+    if (validEntityIds.length === 0) return false;
+
+    const baselines = Object.fromEntries(validEntityIds.map((entityId) => {
+      const position = beforePositions[entityId];
+      return [entityId, { x: position.x, y: position.y, z: position.z }];
+    }));
+    this.groupTranslationPreview = new EntityGroupTranslationPreview(
+      validEntityIds,
+      baselines,
+      (entityId) => this.resolveGroupTranslationTarget(entityId),
+    );
+    this.pendingGroupTranslationDelta = null;
+    this.groupTranslationPreview.refresh();
+    return true;
+  }
+
+  /** 记录最新绝对 delta，并在下一次 active-mesh 评估前合并为一次运行时更新。 */
+  updateFolderGroupTranslation(delta: Vector3Data): boolean {
+    if (
+      !this.groupTranslationPreview
+      || !Number.isFinite(delta.x)
+      || !Number.isFinite(delta.y)
+      || !Number.isFinite(delta.z)
+    ) return false;
+
+    this.pendingGroupTranslationDelta = { x: delta.x, y: delta.y, z: delta.z };
+    return true;
+  }
+
+  /** 取消整组预览并恢复节点、灯光与 thinInstance 矩阵基线。 */
+  cancelFolderGroupTranslation(): void {
+    const preview = this.groupTranslationPreview;
+    if (!preview) return;
+
+    this.pendingGroupTranslationDelta = null;
+    this.groupTranslationPreview = null;
+    preview.cancel();
+    this.refreshFolderGroupGizmoProxyPosition();
+  }
+
+  /** 完成整组预览并保留当前画面，等待场景文档同步权威位置。 */
+  finishFolderGroupTranslation(): void {
+    const preview = this.groupTranslationPreview;
+    if (!preview) return;
+
+    this.flushGroupTranslationPreview();
+    this.groupTranslationPreview = null;
+    this.pendingGroupTranslationDelta = null;
+    preview.finish();
+  }
+
+  /** 把同一渲染帧内最后一次拖拽 delta 应用到轻量预览会话。 */
+  private flushGroupTranslationPreview(): void {
+    const preview = this.groupTranslationPreview;
+    const delta = this.pendingGroupTranslationDelta;
+    if (!preview || !delta) return;
+
+    this.pendingGroupTranslationDelta = null;
+    preview.update(delta);
+  }
+
+  /** 异步模型或批次就绪后重新解析目标，并保持上一帧已应用的绝对位移。 */
+  private refreshGroupTranslationPreviewTargets(): void {
+    const preview = this.groupTranslationPreview;
+    preview?.refresh();
+    // 活动拖动期间代理位置由 PointerDragBehavior 权威控制；异步几何只接入预览目标，
+    // 否则包围盒中心变化会被误算进相对 drag delta。
+    if (!preview) this.refreshFolderGroupGizmoProxyPosition();
+  }
+
+  /** 运行时基线恢复后把组代理放回当前成员世界包围盒中心。 */
+  private refreshFolderGroupGizmoProxyPosition(): void {
+    const proxy = this.folderGroupGizmoProxy;
+    if (!proxy || proxy.node.isDisposed()) return;
+
+    const bounds = this.getEntitiesWorldBounds(proxy.entityIds);
+    if (!bounds) {
+      proxy.node.setEnabled(false);
+      return;
+    }
+    proxy.node.setEnabled(true);
+    proxy.node.position.copyFromFloats(bounds.center.x, bounds.center.y, bounds.center.z);
+    proxy.node.computeWorldMatrix(true);
+  }
+
+  /** 将逻辑实体解析为普通位置目标或共享 thinInstance 批次目标。 */
+  private resolveGroupTranslationTarget(entityId: string): EntityGroupTranslationTarget | null {
+    const batch = this.resolveModelArrayBatchForEntityId(entityId);
+    if (batch) return { kind: 'batch', batch };
+
+    const node = (
+      this.meshes.get(entityId)
+      ?? this.locators.get(entityId)?.root
+      ?? this.cadReferences.get(entityId)?.root
+      ?? this.models.get(entityId)?.root
+      ?? this.modelGenerators.get(entityId)?.markerRoot
+      ?? this.poiEffectRuntime.getGizmoTarget(entityId)
+      ?? null
+    );
+    if (node && !node.isDisposed()) {
+      return {
+        kind: 'position',
+        identity: node,
+        setPosition: (position) => {
+          if (node.isDisposed()) return;
+          node.position.copyFromFloats(position.x, position.y, position.z);
+          node.computeWorldMatrix(true);
+        },
+      };
+    }
+
+    const light = this.lights.get(entityId);
+    if (!light || light.isDisposed()) return null;
+    return {
+      kind: 'position',
+      identity: light,
+      setPosition: (position) => this.applyGroupTranslationLightPosition(light, position),
+    };
+  }
+
+  /** 灯光预览复用正式同步语义：半球光位置字段表示方向，其余灯光表示世界位置。 */
+  private applyGroupTranslationLightPosition(light: Light, position: Vector3Data): void {
+    const vector = new Vector3(position.x, position.y, position.z);
+    if (light instanceof HemisphericLight) {
+      if (vector.lengthSquared() <= 1e-12) vector.copyFromFloats(0, 1, 0);
+      light.direction.copyFrom(vector);
+      return;
+    }
+    if (light instanceof DirectionalLight || light instanceof PointLight) {
+      light.position.copyFrom(vector);
+    }
   }
 
   /** 在画布客户端坐标位置拾取可编辑 Mesh，并把 thinInstanceIndex 还原为具体阵列实体 ID。 */
@@ -1132,7 +1331,15 @@ export class SceneRuntime {
     if (primitiveMesh) return this.getMeshWorldBounds(primitiveMesh);
 
     const locator = this.locators.get(entityId);
-    if (locator && locator.boxes.length > 0) return this.getMeshWorldBounds(locator.boxes[0]);
+    if (locator) {
+      let mergedBounds: RuntimeWorldBounds | null = null;
+      for (const box of locator.boxes) {
+        const bounds = this.getMeshWorldBounds(box);
+        if (!bounds) continue;
+        mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+      }
+      if (mergedBounds) return mergedBounds;
+    }
 
     const cadReference = this.cadReferences.get(entityId);
     if (cadReference) return this.getCadReferenceWorldBounds(cadReference);
@@ -1355,6 +1562,7 @@ export class SceneRuntime {
 
   /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
   sync(document: SceneDocument): void {
+    this.cancelFolderGroupTranslation();
     const startedAt = readRuntimeTimestampMs();
     try {
       this.syncDocument(document);
@@ -1371,6 +1579,7 @@ export class SceneRuntime {
    * 不重新扫描 entityIds、加载模型、执行参数脚本或重建 Locator 索引。
    */
   syncSelection(document: SceneDocument): void {
+    this.cancelFolderGroupTranslation();
     const startedAt = readRuntimeTimestampMs();
     let changedEntityCount = 0;
     try {
@@ -1741,11 +1950,17 @@ export class SceneRuntime {
 
   dispose(): void {
     this.clearEntityArrayPreview();
+    this.cancelFolderGroupTranslation();
+    this.folderGroupGizmoProxy?.node.dispose(false, false);
+    this.folderGroupGizmoProxy = null;
     this.modelArrayGizmoProxy?.node.dispose(false, false);
     this.modelArrayGizmoProxy = null;
     this.assetLoadScheduler.dispose();
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
+    }
+    if (this.groupTranslationPreviewObserver) {
+      this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.groupTranslationPreviewObserver);
     }
     this.endTelemetryPreview();
     for (const [entityId, mesh] of this.meshes.entries()) {
@@ -1976,10 +2191,7 @@ export class SceneRuntime {
     if (!selectedEntity) return new Set();
     if (!selectedEntity.isFolder) return new Set([selectedEntity.id]);
 
-    return new Set(
-      collectEntitySubtreeIds(document.entities, selectedEntity.id, false)
-        .filter((entityId) => document.entities[entityId] && !document.entities[entityId].isFolder),
-    );
+    return new Set(collectFolderRuntimeEntityIds(document.entities, selectedEntity.id));
   }
 
   /** 同步基础几何体 Mesh 类型、Transform 与选中材质状态。 */
@@ -2278,6 +2490,7 @@ export class SceneRuntime {
         this.applyModelSelection(activeEntry, activeEntry.highlighted);
         this.applyModelInteractivity(activeEntry, latestEntity.id);
         this.rebuildSharedModelSelectionOutline();
+        this.refreshGroupTranslationPreviewTargets();
       })
       .catch((error) => {
         const activeEntry = this.models.get(entity.id);
@@ -6073,6 +6286,7 @@ export class SceneRuntime {
     cadReference.geometryReady = cadReference.lineMeshes.length > 0;
     this.applyCadReferenceLineMeshStyle(cadReference);
     this.applyCadReferenceInteractivity(cadReference, entityId);
+    this.refreshGroupTranslationPreviewTargets();
   }
 
   /** 判断当前 CAD 分批任务是否仍属于场景中的有效加载记录。 */
@@ -6275,6 +6489,7 @@ export class SceneRuntime {
       this.rebuildSharedModelSelectionOutline();
       this.syncGenericTelemetryMotion(latestEntity, current);
       this.onModelMeasurementChanged(latestEntity.id);
+      this.refreshGroupTranslationPreviewTargets();
     });
   }
 
@@ -6924,6 +7139,7 @@ export class SceneRuntime {
     }
     model.modelArrayFailureSignature = '';
     this.suspendModelArrayHost(model);
+    this.refreshGroupTranslationPreviewTargets();
   }
 
   private disposeMissingModelArrayParameterVariants(sourceEntityId: string, activeKeys: ReadonlySet<string>): void {
@@ -6997,6 +7213,7 @@ export class SceneRuntime {
     modelArrayBatch.dispose();
     model.modelArrayBatch = null;
     model.modelArraySourceSignature = '';
+    this.refreshGroupTranslationPreviewTargets();
   }
 
   /** 同步模型资产脚本生命周期，普通模型和生成模型共享同一份受控实现。 */

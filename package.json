@@ -39,7 +39,9 @@
     "smoke:installer:gpu": "npm run dist:win && npm run smoke:packaged:gpu",
     "smoke:data-platform": "node scripts/smoke-data-platform-project.mjs",
     "smoke:editor-performance": "node scripts/smoke-editor-large-scene-performance.mjs && node scripts/smoke-hierarchy-virtualization.mjs",
-    "smoke:reimport-performance": "npm run build && node scripts/smoke-real-scene-reimport-performance.mjs"
+    "smoke:reimport-performance": "npm run build && node scripts/smoke-real-scene-reimport-performance.mjs",
+    "smoke:folder-group-move": "node scripts/smoke-folder-group-move.mjs",
+    "smoke:folder-group-runtime": "node scripts/smoke-folder-group-runtime.mjs"
   },
   "engines": {
     "node": ">=22.12.0"

@@ -31,6 +31,10 @@ import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
 import type { SceneCameraPose, SceneDocument } from '../model/SceneDocument';
 import type { Vector3Data } from '../model/math';
 import {
+  resolveFolderGroupMoveSelection,
+  type FolderGroupMoveReadySelection,
+} from '../model/entityHierarchy';
+import {
   getEntityArrayIdentifierError,
   getEntityArrayParameterError,
   getShiftEntityArrayIdentityBehavior,
@@ -65,6 +69,10 @@ type EntityArrayDialogState = {
   directionLabel: string;
   value: EntityArrayDialogValue;
   commitError: string | null;
+};
+
+type FolderGroupTranslationSession = FolderGroupMoveReadySelection & {
+  sourceSceneDocument: SceneDocument;
 };
 
 /** 将未知异常转换成可展示的简短消息。 */
@@ -218,6 +226,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const selectedEntityIdRef = useRef<string | null>(null);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
   const entityArrayDialogRef = useRef<EntityArrayDialogState | null>(null);
+  const folderGroupTranslationRef = useRef<FolderGroupTranslationSession | null>(null);
+  const folderGroupStatusLogSignatureRef = useRef('');
   const [viewportError, setViewportError] = useState<string | null>(null);
   const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
   const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
@@ -246,6 +256,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
+  const commitFolderGroupTranslation = useEditorStore((state) => state.commitFolderGroupTranslation);
   const resolveEntityArrayRequest = useEditorStore((state) => state.resolveEntityArrayRequest);
   const commitResolvedEntityArray = useEditorStore((state) => state.commitResolvedEntityArray);
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
@@ -274,6 +285,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       : { ...sceneDocument, entities: editModeThinInstancePlan.entities },
     [editModeThinInstancePlan.entities, sceneDocument],
   );
+  const folderGroupMoveSelection = useMemo(
+    () => resolveFolderGroupMoveSelection(sceneDocument, hierarchySelectionIds),
+    [hierarchySelectionIds, sceneDocument],
+  );
 
   /** 把当前普通导入模型的运行时尺寸发布到临时 Inspector 状态。 */
   const publishSelectedModelMeasurement = useCallback((runtime: SceneRuntime, entityId: string | null): void => {
@@ -295,6 +310,48 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     setEntityArrayDialog(null);
     runtimeRef.current?.clearEntityArrayPreview();
   }, []);
+
+  /** 根据当前 Store 选区绑定普通实体或文件夹组代理 Gizmo。 */
+  const attachCurrentSelectionGizmo = useCallback((
+    runtime: SceneRuntime,
+    gizmo: TransformGizmoController,
+  ): void => {
+    const state = useEditorStore.getState();
+    const folderSelection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
+    if (folderSelection.status === 'ready') {
+      const target = runtime.getFolderGroupGizmoTarget(folderSelection.folderId, folderSelection.entityIds);
+      gizmo.attachToGroupTarget(target, target ? folderSelection.folderId : null);
+      return;
+    }
+
+    const target = runtime.getGizmoTargetByEntityId(state.scene.selectedEntityId);
+    gizmo.attachToTarget(target, state.scene.selectedEntityId);
+    runtime.clearFolderGroupGizmoTarget();
+  }, []);
+
+  /** 空文件夹或锁定成员只提示一次，不创建可误导用户的组 Gizmo。 */
+  useEffect(() => {
+    if (isRuntimePreview || folderGroupMoveSelection.status === 'ready' || folderGroupMoveSelection.status === 'unavailable') {
+      folderGroupStatusLogSignatureRef.current = '';
+      return;
+    }
+
+    const folderId = folderGroupMoveSelection.folderId;
+    const folderName = folderId ? sceneDocument.entities[folderId]?.name ?? folderId : '当前文件夹';
+    const signature = folderGroupMoveSelection.status === 'blocked'
+      ? `blocked:${folderId}:${folderGroupMoveSelection.lockedEntityIds.join('|')}`
+      : `empty:${folderId}`;
+    if (folderGroupStatusLogSignatureRef.current === signature) return;
+    folderGroupStatusLogSignatureRef.current = signature;
+
+    if (folderGroupMoveSelection.status === 'blocked') {
+      pushLog(
+        `文件夹“${folderName}”整组移动已阻止：文件夹自身或后代中有 ${folderGroupMoveSelection.lockedEntityIds.length} 个锁定对象。`,
+      );
+      return;
+    }
+    pushLog(`文件夹“${folderName}”为空，无法显示整组移动 Gizmo。`);
+  }, [folderGroupMoveSelection, isRuntimePreview, pushLog, sceneDocument.entities]);
 
   useEffect(() => {
     editModeThinInstancePlanRef.current = editModeThinInstancePlan;
@@ -617,6 +674,63 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         cancelEntityArrayDrag: () => {
           (runtimeRef.current ?? runtime)?.clearEntityArrayPreview();
         },
+        beginGroupTranslation: (folderId) => {
+          const state = useEditorStore.getState();
+          const currentRuntime = runtimeRef.current ?? runtime;
+          const selection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
+          if (!currentRuntime) return false;
+          if (runtimeModeRef.current !== 'edit') {
+            pushLog('文件夹整组移动已阻止：运行预览期间不能编辑场景位置。');
+            return false;
+          }
+          if (entityArrayDialogRef.current) {
+            pushLog('文件夹整组移动已阻止：请先完成或取消当前阵列弹框。');
+            return false;
+          }
+          if (selection.status !== 'ready' || selection.folderId !== folderId) {
+            pushLog('文件夹整组移动已阻止：当前选区、成员或锁定状态已经变化。');
+            return false;
+          }
+
+          currentRuntime.clearEntityArrayPreview();
+          if (!currentRuntime.beginFolderGroupTranslation(selection.entityIds, selection.beforePositions)) {
+            pushLog('文件夹整组移动已阻止：没有可用于运行时预览的有效成员。');
+            return false;
+          }
+          folderGroupTranslationRef.current = {
+            ...selection,
+            sourceSceneDocument: state.scene,
+          };
+          return true;
+        },
+        previewGroupTranslation: (folderId, delta) => {
+          const session = folderGroupTranslationRef.current;
+          if (!session || session.folderId !== folderId) return;
+          (runtimeRef.current ?? runtime)?.updateFolderGroupTranslation(delta);
+        },
+        commitGroupTranslation: (folderId, delta) => {
+          const currentRuntime = runtimeRef.current ?? runtime;
+          const session = folderGroupTranslationRef.current;
+          folderGroupTranslationRef.current = null;
+          if (!currentRuntime || !session || session.folderId !== folderId) {
+            currentRuntime?.cancelFolderGroupTranslation();
+            return;
+          }
+
+          const committed = commitFolderGroupTranslation({
+            sourceSceneDocument: session.sourceSceneDocument,
+            folderId: session.folderId,
+            entityIds: session.entityIds,
+            beforePositions: session.beforePositions,
+            delta,
+          });
+          if (committed) currentRuntime.finishFolderGroupTranslation();
+          else currentRuntime.cancelFolderGroupTranslation();
+        },
+        cancelGroupTranslation: () => {
+          folderGroupTranslationRef.current = null;
+          (runtimeRef.current ?? runtime)?.cancelFolderGroupTranslation();
+        },
       });
       mqttTelemetryClient = new MqttStackerTelemetryClient(pushLog);
     } catch (error) {
@@ -685,6 +799,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   }, [
     previewEntityTransform,
     commitEntityTransform,
+    commitFolderGroupTranslation,
     publishSelectedModelMeasurement,
     pushLog,
     setSelectedModelMeasurement,
@@ -698,14 +813,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!runtime || !gizmo) return;
     if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
 
+    gizmo.cancelActiveGroupDrag();
     runtime.sync(editRuntimeSceneDocument);
-    const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityIdRef.current);
-    gizmo.attachToTarget(selectedTarget, selectedEntityIdRef.current);
+    attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
   }, [
     editRuntimeSceneDocument.entityIds,
     editRuntimeSceneDocument.entities,
     isRuntimePreview,
+    attachCurrentSelectionGizmo,
     publishSelectedModelMeasurement,
   ]);
 
@@ -716,11 +832,18 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!runtime || !gizmo) return;
     if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
 
+    gizmo.cancelActiveGroupDrag();
     runtime.syncSelection(editRuntimeSceneDocument);
-    const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityId);
-    gizmo.attachToTarget(selectedTarget, selectedEntityId);
+    attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedModelMeasurement(runtime, selectedEntityId);
-  }, [editRuntimeSceneDocument, selectedEntityId, isRuntimePreview, publishSelectedModelMeasurement]);
+  }, [
+    attachCurrentSelectionGizmo,
+    editRuntimeSceneDocument,
+    hierarchySelectionIds,
+    selectedEntityId,
+    isRuntimePreview,
+    publishSelectedModelMeasurement,
+  ]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -734,10 +857,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const currentSceneDocument = sceneDocumentRef.current;
       if (!currentSceneDocument) return;
       client.dispose();
+      gizmo.cancelActiveDrag();
       runtime.endTelemetryPreview();
       runtime.sync(editRuntimeSceneDocumentRef.current ?? currentSceneDocument);
-      const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityIdRef.current);
-      gizmo.attachToTarget(selectedTarget, selectedEntityIdRef.current);
+      attachCurrentSelectionGizmo(runtime, gizmo);
       publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
       return;
     }
@@ -745,7 +868,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     try {
       const currentSceneDocument = sceneDocumentRef.current;
       if (!currentSceneDocument) return;
+      gizmo.cancelActiveDrag();
       gizmo.attachToTarget(null, null);
+      runtime.clearFolderGroupGizmoTarget();
       runtime.sync(currentSceneDocument);
       runtime.beginTelemetryPreview();
       client.updateConfig(mqttConfig);
@@ -756,7 +881,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       pushLog(`运行预览初始化失败：${message}`);
       stopRuntimePreview();
     }
-  }, [runtimeMode, isRuntimePreview, mqttConfig, publishSelectedModelMeasurement, pushLog, stopRuntimePreview]);
+  }, [attachCurrentSelectionGizmo, runtimeMode, isRuntimePreview, mqttConfig, publishSelectedModelMeasurement, pushLog, stopRuntimePreview]);
 
   useEffect(() => {
     if (!isRuntimePreview) return;

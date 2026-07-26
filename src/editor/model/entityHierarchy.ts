@@ -1,8 +1,24 @@
 import type { Entity } from './Entity';
+import type { Vector3Data } from './math';
+import type { SceneDocument } from './SceneDocument';
 
 export type EntityHierarchyState = {
   visible: boolean;
   locked: boolean;
+};
+
+export type FolderGroupMoveReadySelection = {
+  status: 'ready';
+  folderId: string;
+  entityIds: string[];
+  beforePositions: Record<string, Vector3Data>;
+};
+
+export type FolderGroupMoveSelection = FolderGroupMoveReadySelection | {
+  status: 'unavailable' | 'empty' | 'blocked';
+  folderId: string | null;
+  entityIds: string[];
+  lockedEntityIds: string[];
 };
 
 /** 返回选区中没有已选祖先的最高层实体，保持输入顺序并移除重复项。 */
@@ -46,6 +62,65 @@ export function getTopLevelHierarchyEntityIds(
   }
 
   return uniqueIds.filter((entityId) => !hasSelectedAncestor(entityId));
+}
+
+/** 返回当前严格单选且作为主选中的文件夹 ID；多选、普通对象或失效选区返回 null。 */
+export function resolveSingleSelectedFolderId(
+  scene: SceneDocument,
+  hierarchySelectionIds: readonly string[],
+): string | null {
+  const selectionIds = [...new Set(hierarchySelectionIds)]
+    .filter((entityId) => Boolean(scene.entities[entityId]));
+  const folderId = selectionIds.length === 1 ? selectionIds[0] : null;
+  return folderId
+    && scene.selectedEntityId === folderId
+    && scene.entities[folderId]?.isFolder === true
+    ? folderId
+    : null;
+}
+
+/** 递归返回文件夹中的全部普通后代，文件夹节点自身不参与运行时 Transform。 */
+export function collectFolderRuntimeEntityIds(
+  entities: Record<string, Entity>,
+  folderId: string,
+): string[] {
+  const folder = entities[folderId];
+  if (!folder?.isFolder) return [];
+
+  return collectEntitySubtreeIds(entities, folderId, false).filter((entityId) => (
+    entities[entityId] && !entities[entityId].isFolder
+  ));
+}
+
+/** 解析单文件夹整组移动会话，并在任一成员锁定时原子阻止。 */
+export function resolveFolderGroupMoveSelection(
+  scene: SceneDocument,
+  hierarchySelectionIds: readonly string[],
+): FolderGroupMoveSelection {
+  const folderId = resolveSingleSelectedFolderId(scene, hierarchySelectionIds);
+  if (!folderId) {
+    return { status: 'unavailable', folderId: null, entityIds: [], lockedEntityIds: [] };
+  }
+
+  const descendantIds = collectEntitySubtreeIds(scene.entities, folderId, false);
+  const entityIds = descendantIds.filter((entityId) => (
+    scene.entities[entityId] && !scene.entities[entityId].isFolder
+  ));
+  const lockedEntityIds = [folderId, ...descendantIds].filter((entityId) => (
+    isEntityEffectivelyLocked(scene.entities, scene.entities[entityId])
+  ));
+  if (lockedEntityIds.length > 0) {
+    return { status: 'blocked', folderId, entityIds, lockedEntityIds };
+  }
+  if (entityIds.length === 0) {
+    return { status: 'empty', folderId, entityIds, lockedEntityIds: [] };
+  }
+
+  const beforePositions = Object.fromEntries(entityIds.map((entityId) => {
+    const position = scene.entities[entityId].components.transform.position;
+    return [entityId, { x: position.x, y: position.y, z: position.z }];
+  }));
+  return { status: 'ready', folderId, entityIds, beforePositions };
 }
 
 /** 判断 ancestorId 是否位于 entityId 的父级链上。 */

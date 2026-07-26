@@ -7,6 +7,7 @@ import {
   type CommandHistory,
 } from '../commands/CommandHistory';
 import {
+  commitFolderGroupTranslation as commitFolderGroupTranslationState,
   createEntityCommand,
   createFolderCommand,
   moveEntitiesToFolderCommand,
@@ -24,6 +25,7 @@ import {
   updateModelParameterValuesCommand,
   updateTelemetryBindingCommand,
   updateTransformCommand,
+  type FolderGroupTranslationInput,
 } from '../commands/entityCommands';
 import {
   DEFAULT_EDITOR_GRID_SETTINGS,
@@ -57,6 +59,7 @@ import {
   getTopLevelHierarchyEntityIds,
   isEntityAncestorOf,
   isEntityEffectivelyLocked,
+  resolveSingleSelectedFolderId,
 } from '../model/entityHierarchy';
 import { createArrayAssetNumber, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
 import {
@@ -335,6 +338,7 @@ type EditorState = {
   commitSelectedModelParameterValues: (before: ModelParameterValues, after: ModelParameterValues) => void;
   previewEntityTransform: (entityId: string, transform: TransformComponent) => void;
   commitEntityTransform: (entityId: string, before: TransformComponent, after: TransformComponent) => void;
+  commitFolderGroupTranslation: (input: FolderGroupTranslationInput) => boolean;
   previewSelectedTransform: (transform: TransformComponent) => void;
   commitSelectedTransform: (before: TransformComponent, after: TransformComponent) => void;
   updateMqttConfig: (config: MqttConfig) => void;
@@ -816,6 +820,17 @@ function isRuntimeEntityEditable(scene: SceneDocument, entity: Entity | null | u
 /** 过滤 Hierarchy 多选 ID，避免 UI 状态引用已经不存在的实体。 */
 function sanitizeHierarchySelection(scene: SceneDocument, entityIds: string[]): string[] {
   return [...new Set(entityIds)].filter((entityId) => Boolean(scene.entities[entityId]));
+}
+
+/** 单文件夹成为主选区时统一归一到世界坐标移动，其他选区保持当前工具状态。 */
+function resolveSelectionTransformMode(
+  state: Pick<EditorState, 'transformTool' | 'transformSpace'>,
+  scene: SceneDocument,
+  hierarchySelectionIds: readonly string[],
+): Pick<EditorState, 'transformTool' | 'transformSpace'> {
+  return resolveSingleSelectedFolderId(scene, hierarchySelectionIds)
+    ? { transformTool: 'translate', transformSpace: 'global' }
+    : { transformTool: state.transformTool, transformSpace: state.transformSpace };
 }
 
 /** 根据当前场景生成不重名的新建文件夹名称。 */
@@ -1782,10 +1797,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setTransformTool: (tool) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换变换工具');
-      if (state.transformTool === tool) return state;
+      const folderId = resolveSingleSelectedFolderId(state.scene, state.hierarchySelectionIds);
+      if (folderId && tool !== 'translate') {
+        return {
+          transformTool: 'translate',
+          transformSpace: 'global',
+          logs: prependLog(state.logs, '文件夹整组仅支持移动工具，已保持世界坐标平移。'),
+        };
+      }
+      if (state.transformTool === tool && (!folderId || state.transformSpace === 'global')) return state;
 
       return {
         transformTool: tool,
+        transformSpace: folderId ? 'global' : state.transformSpace,
         logs: prependLog(state.logs, `切换工具：${tool}`),
       };
     });
@@ -1793,6 +1817,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setTransformSpace: (space) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换坐标空间');
+      const folderId = resolveSingleSelectedFolderId(state.scene, state.hierarchySelectionIds);
+      if (folderId && space !== 'global') {
+        return {
+          transformTool: 'translate',
+          transformSpace: 'global',
+          logs: prependLog(state.logs, '文件夹整组仅支持世界坐标平移，已忽略局部坐标切换。'),
+        };
+      }
       if (state.transformSpace === space) return state;
 
       return {
@@ -2148,9 +2180,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const command = createFolderCommand(folder, parentId);
       const result = executeCommand(state.scene, state.history, command);
 
+      const hierarchySelectionIds = [folder.id];
       return {
         ...result,
-        hierarchySelectionIds: [folder.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -2335,27 +2369,35 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
   selectEntity: (entityId) => {
-    set((state) => ({
-      scene: {
+    set((state) => {
+      const selectedEntityId = entityId && state.scene.entities[entityId] ? entityId : null;
+      const scene = {
         ...state.scene,
-        selectedEntityId: entityId && state.scene.entities[entityId] ? entityId : null,
-      },
-      hierarchySelectionIds: entityId && state.scene.entities[entityId] ? [entityId] : [],
-      selectedModelMeasurement: null,
-    }));
+        selectedEntityId,
+      };
+      const hierarchySelectionIds = selectedEntityId ? [selectedEntityId] : [];
+      return {
+        scene,
+        hierarchySelectionIds,
+        selectedModelMeasurement: null,
+        ...resolveSelectionTransformMode(state, scene, hierarchySelectionIds),
+      };
+    });
   },
   selectHierarchyEntities: (entityIds, primaryEntityId) => {
     set((state) => {
       const hierarchySelectionIds = sanitizeHierarchySelection(state.scene, entityIds);
       const selectedEntityId = primaryEntityId && state.scene.entities[primaryEntityId] ? primaryEntityId : hierarchySelectionIds[0] ?? null;
 
+      const scene = {
+        ...state.scene,
+        selectedEntityId,
+      };
       return {
-        scene: {
-          ...state.scene,
-          selectedEntityId,
-        },
+        scene,
         hierarchySelectionIds,
         selectedModelMeasurement: null,
+        ...resolveSelectionTransformMode(state, scene, hierarchySelectionIds),
       };
     });
   },
@@ -2531,9 +2573,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const skippedGeneratorMessage =
         prepared.skippedModelGeneratorCount > 0 ? '；已跳过模型生成器，场景只允许一个' : '';
 
+      const hierarchySelectionIds = sanitizeHierarchySelection(result.scene, prepared.rootEntityIds);
       return {
         ...result,
-        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, prepared.rootEntityIds),
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(
           state.logs,
           `${command.label}: ${formatEntityClipboardCount(prepared.folderCount, prepared.entityCount)}${skippedGeneratorMessage}`,
@@ -2692,9 +2736,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const command = updateSceneDocumentCommand('群组对象', (scene) => groupEntitiesInScene(scene, groupingIds));
       const result = executeCommand(state.scene, state.history, command);
 
+      const hierarchySelectionIds = result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [];
       return {
         ...result,
-        hierarchySelectionIds: result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, `${command.label}: ${groupingIds.length} 个对象`),
       };
     });
@@ -2718,9 +2764,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const command = updateSceneDocumentCommand('解组对象', (scene) => ungroupFoldersInScene(scene, ungroupingIds));
       const result = executeCommand(state.scene, state.history, command);
 
+      const hierarchySelectionIds = result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [];
       return {
         ...result,
-        hierarchySelectionIds: result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, `${command.label}: ${ungroupingIds.length} 个分组`),
       };
     });
@@ -3138,6 +3186,34 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
+  commitFolderGroupTranslation: (input) => {
+    let committed = false;
+    set((state) => {
+      if (isRuntimePreviewState(state)) {
+        return guardRuntimePreviewMutation(state, '移动文件夹对象');
+      }
+
+      const result = commitFolderGroupTranslationState(
+        state.scene,
+        state.history,
+        state.hierarchySelectionIds,
+        input,
+      );
+      committed = result.committed;
+      if (!result.committed) {
+        return { logs: prependLog(state.logs, result.message) };
+      }
+
+      return {
+        scene: result.scene,
+        history: result.history,
+        hierarchySelectionIds: state.hierarchySelectionIds,
+        selectedModelMeasurement: null,
+        logs: prependLog(state.logs, result.message),
+      };
+    });
+    return committed;
+  },
   previewSelectedTransform: (transform) => {
     const selectedId = get().scene.selectedEntityId;
     if (!selectedId) return;
@@ -3195,9 +3271,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const result = undoCommand(state.scene, state.history);
       if (result.history === state.history) return state;
 
+      const hierarchySelectionIds = result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [];
       return {
         ...result,
-        hierarchySelectionIds: result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, 'Undo'),
       };
     });
@@ -3208,9 +3286,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const result = redoCommand(state.scene, state.history);
       if (result.history === state.history) return state;
 
+      const hierarchySelectionIds = result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [];
       return {
         ...result,
-        hierarchySelectionIds: result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, 'Redo'),
       };
     });

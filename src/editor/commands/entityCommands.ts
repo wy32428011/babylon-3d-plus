@@ -1,4 +1,5 @@
 import type { Command } from './Command';
+import { executeCommand, type CommandHistory } from './CommandHistory';
 import type {
   CadReferenceComponent,
   LightComponent,
@@ -11,8 +12,13 @@ import type {
 } from '../model/components';
 import type { TelemetryBindingComponent } from '../model/telemetryBinding';
 import type { Entity } from '../model/Entity';
-import { getTopLevelHierarchyEntityIds, isEntityAncestorOf } from '../model/entityHierarchy';
+import {
+  getTopLevelHierarchyEntityIds,
+  isEntityAncestorOf,
+  resolveFolderGroupMoveSelection,
+} from '../model/entityHierarchy';
 import type { ModelParameterValues } from '../model/modelParameters';
+import type { Vector3Data } from '../model/math';
 import type { SceneDocument } from '../model/SceneDocument';
 
 export function createEntityCommand(entity: Entity): Command {
@@ -203,6 +209,96 @@ export function updateTransformCommand(
   };
 }
 
+export type FolderGroupTranslationInput = {
+  sourceSceneDocument: SceneDocument;
+  folderId: string;
+  entityIds: string[];
+  beforePositions: Record<string, Vector3Data>;
+  delta: Vector3Data;
+};
+
+export type FolderGroupTranslationResult = {
+  committed: boolean;
+  scene: SceneDocument;
+  history: CommandHistory;
+  message: string;
+};
+
+/** 在写入历史前重新校验场景、文件夹成员、锁定状态与拖拽基线。 */
+export function commitFolderGroupTranslation(
+  scene: SceneDocument,
+  history: CommandHistory,
+  hierarchySelectionIds: readonly string[],
+  input: FolderGroupTranslationInput,
+): FolderGroupTranslationResult {
+  if (scene !== input.sourceSceneDocument) {
+    return { committed: false, scene, history, message: '场景已变化，已取消文件夹整组移动。' };
+  }
+  if (![input.delta.x, input.delta.y, input.delta.z].every(Number.isFinite)) {
+    return { committed: false, scene, history, message: '文件夹整组移动失败：位移无效。' };
+  }
+
+  const selection = resolveFolderGroupMoveSelection(scene, hierarchySelectionIds);
+  if (selection.status !== 'ready') {
+    const message = selection.status === 'blocked'
+      ? '文件夹整组移动已阻止：文件夹内包含锁定对象。'
+      : selection.status === 'empty'
+        ? '文件夹整组移动已取消：文件夹内没有可移动对象。'
+        : '文件夹整组移动已取消：当前不再是单文件夹选区。';
+    return { committed: false, scene, history, message };
+  }
+  if (selection.folderId !== input.folderId || !areStringArraysEqual(selection.entityIds, input.entityIds)) {
+    return { committed: false, scene, history, message: '文件夹成员已变化，已取消整组移动。' };
+  }
+  if (!selection.entityIds.every((entityId) => (
+    areVector3DataEqual(selection.beforePositions[entityId], input.beforePositions[entityId])
+  ))) {
+    return { committed: false, scene, history, message: '对象位置已变化，已取消过期的整组移动。' };
+  }
+  if (input.delta.x === 0 && input.delta.y === 0 && input.delta.z === 0) {
+    return { committed: false, scene, history, message: '文件夹位置未变化。' };
+  }
+
+  const translation = resolveTranslatedEntityPositions(
+    selection.entityIds,
+    selection.beforePositions,
+    input.delta,
+  );
+  if (!translation.ok) {
+    return {
+      committed: false,
+      scene,
+      history,
+      message: `文件夹整组移动失败：${translation.error}。`,
+    };
+  }
+  if (!translation.changed) {
+    return { committed: false, scene, history, message: '文件夹位置未变化。' };
+  }
+
+  const result = executeCommand(
+    scene,
+    history,
+    createEntityPositionsCommand(selection.entityIds, selection.beforePositions, translation.afterPositions),
+  );
+  return {
+    committed: true,
+    ...result,
+    message: `移动文件夹对象：${selection.entityIds.length} 个对象`,
+  };
+}
+
+/** 把同一世界位移原子写入多个实体位置，整组只占用一条撤销历史。 */
+export function translateEntityPositionsCommand(
+  entityIds: readonly string[],
+  beforePositions: Readonly<Record<string, Vector3Data>>,
+  delta: Vector3Data,
+): Command {
+  const translation = resolveTranslatedEntityPositions(entityIds, beforePositions, delta);
+  if (!translation.ok) throw new Error(`文件夹整组移动数值无效：${translation.error}。`);
+  return createEntityPositionsCommand(entityIds, beforePositions, translation.afterPositions);
+}
+
 export function updateMeshRendererCommand(
   entityId: string,
   before: MeshRendererComponent,
@@ -339,6 +435,107 @@ export function updateModelAssetCodeCommand(entityId: string, before: string, af
     execute: (scene) => updateModelAssetCode(scene, entityId, after),
     undo: (scene) => updateModelAssetCode(scene, entityId, before),
   };
+}
+
+type TranslatedEntityPositionsResult = {
+  ok: true;
+  afterPositions: Record<string, Vector3Data>;
+  changed: boolean;
+} | {
+  ok: false;
+  error: string;
+};
+
+/** 预先计算整组目标位置，任何缺失、溢出或不可表示位移都会原子失败。 */
+function resolveTranslatedEntityPositions(
+  entityIds: readonly string[],
+  beforePositions: Readonly<Record<string, Vector3Data>>,
+  delta: Vector3Data,
+): TranslatedEntityPositionsResult {
+  if (![delta.x, delta.y, delta.z].every(Number.isFinite)) {
+    return { ok: false, error: '位移不是有限数值' };
+  }
+
+  const afterPositions: Record<string, Vector3Data> = {};
+  let changed = false;
+  for (const entityId of [...new Set(entityIds)]) {
+    const before = beforePositions[entityId];
+    if (!before || ![before.x, before.y, before.z].every(Number.isFinite)) {
+      return { ok: false, error: `对象 ${entityId} 的位置基线无效` };
+    }
+
+    const after = {
+      x: before.x + delta.x,
+      y: before.y + delta.y,
+      z: before.z + delta.z,
+    };
+    if (![after.x, after.y, after.z].every(Number.isFinite)) {
+      return { ok: false, error: `对象 ${entityId} 的目标位置超出有效数值范围` };
+    }
+    if (
+      (delta.x !== 0 && after.x === before.x)
+      || (delta.y !== 0 && after.y === before.y)
+      || (delta.z !== 0 && after.z === before.z)
+    ) {
+      return { ok: false, error: `对象 ${entityId} 的位移小于当前坐标可表示精度` };
+    }
+
+    afterPositions[entityId] = after;
+    changed = changed || !areVector3DataEqual(before, after);
+  }
+  return { ok: true, afterPositions, changed };
+}
+
+function createEntityPositionsCommand(
+  entityIds: readonly string[],
+  beforePositions: Readonly<Record<string, Vector3Data>>,
+  afterPositions: Readonly<Record<string, Vector3Data>>,
+): Command {
+  const uniqueEntityIds = [...new Set(entityIds)];
+  return {
+    label: '移动文件夹对象',
+    execute: (scene) => updateEntityPositions(scene, uniqueEntityIds, afterPositions),
+    undo: (scene) => updateEntityPositions(scene, uniqueEntityIds, beforePositions),
+  };
+}
+
+function areStringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function areVector3DataEqual(left: Vector3Data | undefined, right: Vector3Data | undefined): boolean {
+  return Boolean(left && right && left.x === right.x && left.y === right.y && left.z === right.z);
+}
+
+function updateEntityPositions(
+  scene: SceneDocument,
+  entityIds: readonly string[],
+  positions: Readonly<Record<string, Vector3Data>>,
+): SceneDocument {
+  let changed = false;
+  const entities: Record<string, Entity> = { ...scene.entities };
+
+  for (const entityId of entityIds) {
+    const entity = scene.entities[entityId];
+    const position = positions[entityId];
+    if (!entity || entity.isFolder || !position) continue;
+    const current = entity.components.transform.position;
+    if (current.x === position.x && current.y === position.y && current.z === position.z) continue;
+
+    changed = true;
+    entities[entityId] = {
+      ...entity,
+      components: {
+        ...entity.components,
+        transform: {
+          ...entity.components.transform,
+          position: { x: position.x, y: position.y, z: position.z },
+        },
+      },
+    };
+  }
+
+  return changed ? { ...scene, entities } : scene;
 }
 
 function updateEntityName(scene: SceneDocument, entityId: string, name: string): SceneDocument {
