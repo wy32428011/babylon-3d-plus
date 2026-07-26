@@ -12,6 +12,7 @@ import {
   type ProjectModelAssetEntry,
 } from '../assets/AssetDatabase';
 import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
+import { createImportedAssetIndexes, findImportedAssetForPackagePath } from '../assets/modelAssetRelink';
 import {
   BUILT_IN_MODEL_LIBRARY_ITEMS,
   PROJECT_LIBRARIES,
@@ -66,11 +67,6 @@ type ProjectPanelProps = {
   readOnly?: boolean;
 };
 
-/** 归一化项目资产路径，供同包重导时跨 Windows 分隔符和大小写比较。 */
-function normalizeProjectAssetPathForMatch(value: string | undefined): string {
-  return (value ?? '').trim().replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase();
-}
-
 export function ProjectPanel(props: ProjectPanelProps) {
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const refreshModelInstancesFromAssets = useEditorStore((state) => state.refreshModelInstancesFromAssets);
@@ -87,6 +83,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const resourceCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const projectAssetsLoadRequestRef = useRef(0);
   const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
+  const lastSceneRefreshModelSyncRunIdRef = useRef<string | null>(null);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
   const [libraryFilterText, setLibraryFilterText] = useState('');
   const [projectAssets, setProjectAssets] = useState<ProjectModelAssetEntry[]>([]);
@@ -140,8 +137,37 @@ export function ProjectPanel(props: ProjectPanelProps) {
     setModelFolderStatuses((current) => ({ ...current, [libraryKind]: status }));
   }
 
-  const loadProjectAssets = useCallback(async (): Promise<void> => {
-    if (!window.editorApi?.listProjectAssets) return;
+  /** 当前场景引用同一环境包或同一数据中台环境 ID 时，用新版本配置触发 Babylon 重载。 */
+  const refreshCurrentEnvironmentFromAssets = useCallback(async (
+    assets: ProjectModelAssetEntry[],
+  ): Promise<boolean> => {
+    if (!currentEnvironmentPackagePath) return false;
+
+    const environmentAssets = assets.filter((asset) => asset.libraryKind === 'environment');
+    const matchedAsset = findImportedAssetForPackagePath(
+      currentEnvironmentPackagePath,
+      createImportedAssetIndexes(environmentAssets),
+    );
+    if (!matchedAsset || matchedAsset.libraryKind !== 'environment') return false;
+
+    try {
+      const environmentConfig = await loadEnvironmentFromAsset(matchedAsset);
+      if (!environmentConfig) {
+        pushLog('环境模型资源已更新，但当前场景环境配置无效，未自动刷新。');
+        return false;
+      }
+
+      updateEnvironmentConfig(environmentConfig);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`环境模型资源已更新，但当前场景自动刷新失败：${message}`);
+      return false;
+    }
+  }, [currentEnvironmentPackagePath, pushLog, updateEnvironmentConfig]);
+
+  const loadProjectAssets = useCallback(async (refreshSceneAssets = false): Promise<boolean> => {
+    if (!window.editorApi?.listProjectAssets) return false;
 
     const requestId = projectAssetsLoadRequestRef.current + 1;
     projectAssetsLoadRequestRef.current = requestId;
@@ -149,7 +175,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
     try {
       const result = await window.editorApi.listProjectAssets();
-      if (requestId !== projectAssetsLoadRequestRef.current) return;
+      if (requestId !== projectAssetsLoadRequestRef.current) return false;
 
       setProjectRoot(result.projectRoot);
       setProjectAssets(result.assets);
@@ -157,16 +183,23 @@ export function ProjectPanel(props: ProjectPanelProps) {
       if (result.assets.length > 0) {
         pushLog(`已加载项目资源库：${result.assets.length} 个资产。`);
       }
+
+      if (refreshSceneAssets) {
+        refreshModelInstancesFromAssets(result.assets.filter((asset) => asset.libraryKind === 'model'));
+        await refreshCurrentEnvironmentFromAssets(result.assets);
+      }
+      return true;
     } catch (error) {
-      if (requestId !== projectAssetsLoadRequestRef.current) return;
+      if (requestId !== projectAssetsLoadRequestRef.current) return false;
       const message = error instanceof Error ? error.message : String(error);
       pushLog(`加载项目资源库失败：${message}`);
+      return false;
     } finally {
       if (requestId === projectAssetsLoadRequestRef.current) {
         setIsLoadingProjectAssets(false);
       }
     }
-  }, [pushLog]);
+  }, [pushLog, refreshCurrentEnvironmentFromAssets, refreshModelInstancesFromAssets]);
 
   useEffect(() => {
     void loadProjectAssets();
@@ -193,7 +226,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
       pushLog(`数据中台模型同步：${phaseLabel}${countLabel}${detail ? `：${detail}` : ''}`);
 
       if (progress.phase === 'completed') {
-        void loadProjectAssets();
+        const shouldRefreshSceneAssets = lastSceneRefreshModelSyncRunIdRef.current !== progress.runId;
+        if (shouldRefreshSceneAssets) {
+          lastSceneRefreshModelSyncRunIdRef.current = progress.runId;
+          void loadProjectAssets(true).then((loaded) => {
+            if (!loaded && lastSceneRefreshModelSyncRunIdRef.current === progress.runId) {
+              lastSceneRefreshModelSyncRunIdRef.current = null;
+            }
+          });
+        }
         modelSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
           modelSyncCompletedDismissTimerRef.current = null;
           setModelSyncProgress((current) =>
@@ -329,28 +370,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
   }
 
-  /** 当前场景正在使用同一环境包时，用新 assetRevision 自动重建环境配置并触发运行时重载。 */
-  async function refreshCurrentEnvironmentAfterImport(asset: ProjectModelAssetEntry): Promise<boolean> {
-    const currentPackageKey = normalizeProjectAssetPathForMatch(currentEnvironmentPackagePath);
-    const importedPackageKey = normalizeProjectAssetPathForMatch(asset.packagePath);
-    if (!currentPackageKey || currentPackageKey !== importedPackageKey) return false;
-
-    try {
-      const environmentConfig = await loadEnvironmentFromAsset(asset);
-      if (!environmentConfig) {
-        pushLog('环境 GLB 已重导，但当前场景环境配置无效，未自动刷新。');
-        return false;
-      }
-
-      updateEnvironmentConfig(environmentConfig);
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      pushLog(`环境 GLB 已重导，但当前场景自动刷新失败：${message}`);
-      return false;
-    }
-  }
-
   /** 直接选择单个 GLB 导入环境库，主进程负责复制为项目内独立环境包。 */
   async function handleImportEnvironmentModelFile(): Promise<void> {
     if (props.readOnly) return;
@@ -380,7 +399,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
       setProjectAssets(result.projectAssets);
       setProjectRoot(result.projectRoot);
-      const refreshedCurrentEnvironment = await refreshCurrentEnvironmentAfterImport(result.importedAsset);
+      const refreshedCurrentEnvironment = await refreshCurrentEnvironmentFromAssets([result.importedAsset]);
       const displayName = result.importedAsset.displayName?.trim()
         || result.importedAsset.name.replace(/\.glb$/i, '');
       const projectSuffix = result.projectRoot ? `，已写入项目：${result.projectRoot}` : '';

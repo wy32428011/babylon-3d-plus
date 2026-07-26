@@ -44,6 +44,10 @@ type DragCallbacks = {
   previewEntityArrayDrag: (update: EntityArrayDragUpdate) => void;
   completeEntityArrayDrag: (update: EntityArrayDragUpdate) => void;
   cancelEntityArrayDrag: () => void;
+  beginGroupTranslation?: (folderId: string) => boolean;
+  previewGroupTranslation?: (folderId: string, delta: Vector3Data) => void;
+  commitGroupTranslation?: (folderId: string, delta: Vector3Data) => void;
+  cancelGroupTranslation?: (folderId: string) => void;
 };
 
 type DragObservableGroup = {
@@ -109,6 +113,7 @@ export class TransformGizmoController {
   private readonly dragObserverBindings: DragObserverBinding[] = [];
   private attachedTarget: GizmoTarget | null = null;
   private attachedEntityId: string | null = null;
+  private attachedGroupId: string | null = null;
   private dragStartTransform: TransformComponent | null = null;
   private activeTransformDrag = false;
   private entityArrayDragSession: EntityArrayDragSession | null = null;
@@ -159,18 +164,22 @@ export class TransformGizmoController {
 
   /** 切换当前可见的 Babylon Transform Gizmo 类型。 */
   setTool(tool: TransformTool): void {
-    if (this.currentTool !== tool) this.cancelActiveDrag();
-    this.currentTool = tool;
-    this.gizmoManager.positionGizmoEnabled = tool === 'translate';
-    this.gizmoManager.rotationGizmoEnabled = tool === 'rotate';
-    this.gizmoManager.scaleGizmoEnabled = tool === 'scale';
+    if (this.attachedGroupId && tool !== 'translate') this.cancelActiveDrag();
+    const resolvedTool = this.attachedGroupId ? 'translate' : tool;
+    if (this.currentTool !== resolvedTool) this.cancelActiveDrag();
+    this.currentTool = resolvedTool;
+    this.gizmoManager.positionGizmoEnabled = resolvedTool === 'translate';
+    this.gizmoManager.rotationGizmoEnabled = resolvedTool === 'rotate';
+    this.gizmoManager.scaleGizmoEnabled = resolvedTool === 'scale';
   }
 
   /** 将 Gizmo 轴向切换为世界坐标或对象局部坐标。 */
   setTransformSpace(space: TransformSpace): void {
-    if (this.transformSpace !== space) this.cancelActiveDrag();
-    this.transformSpace = space;
-    const mode = space === 'global' ? GizmoCoordinatesMode.World : GizmoCoordinatesMode.Local;
+    if (this.attachedGroupId && space !== 'global') this.cancelActiveDrag();
+    const resolvedSpace = this.attachedGroupId ? 'global' : space;
+    if (this.transformSpace !== resolvedSpace) this.cancelActiveDrag();
+    this.transformSpace = resolvedSpace;
+    const mode = resolvedSpace === 'global' ? GizmoCoordinatesMode.World : GizmoCoordinatesMode.Local;
     const { positionGizmo, rotationGizmo, scaleGizmo } = this.gizmoManager.gizmos;
 
     if (positionGizmo) positionGizmo.coordinatesMode = mode;
@@ -197,11 +206,40 @@ export class TransformGizmoController {
   /** 将 Gizmo 绑定到指定实体的运行时节点，拖拽提交始终回写该实体。 */
   attachToTarget(target: GizmoTarget | null, entityId: string | null): void {
     const nextEntityId = target ? entityId : null;
-    if (this.attachedTarget === target && this.attachedEntityId === nextEntityId) return;
+    if (
+      this.attachedTarget === target
+      && this.attachedEntityId === nextEntityId
+      && this.attachedGroupId === null
+    ) return;
 
     this.cancelActiveDrag();
     this.attachedTarget = target;
     this.attachedEntityId = nextEntityId;
+    this.attachedGroupId = null;
+    this.attachGizmo(target);
+    this.dragStartTransform = target ? this.readFiniteTransform(target) : null;
+  }
+
+  /** 将移动 Gizmo 绑定到文件夹整组的不可见中心代理。 */
+  attachToGroupTarget(target: TransformNode | null, folderId: string | null): void {
+    const nextGroupId = target ? folderId : null;
+    if (
+      this.attachedTarget === target
+      && this.attachedGroupId === nextGroupId
+      && this.attachedEntityId === null
+    ) return;
+
+    this.cancelActiveDrag();
+    this.attachedTarget = target;
+    this.attachedEntityId = null;
+    this.attachedGroupId = nextGroupId;
+    this.currentTool = 'translate';
+    this.gizmoManager.positionGizmoEnabled = true;
+    this.gizmoManager.rotationGizmoEnabled = false;
+    this.gizmoManager.scaleGizmoEnabled = false;
+    this.transformSpace = 'global';
+    const positionGizmo = this.gizmoManager.gizmos.positionGizmo;
+    if (positionGizmo) positionGizmo.coordinatesMode = GizmoCoordinatesMode.World;
     this.attachGizmo(target);
     this.dragStartTransform = target ? this.readFiniteTransform(target) : null;
   }
@@ -224,6 +262,12 @@ export class TransformGizmoController {
     this.cancelActiveTransformDrag();
   }
 
+  /** 仅取消文件夹组拖动，普通实体 Transform 与 Shift 阵列会话保持不变。 */
+  cancelActiveGroupDrag(): void {
+    if (!this.attachedGroupId) return;
+    this.cancelActiveDrag();
+  }
+
   /** 主动取消尚未结束的 Shift 阵列拖拽，不打开参数弹框。 */
   cancelActiveEntityArrayDrag(): void {
     const session = this.entityArrayDragSession;
@@ -239,6 +283,11 @@ export class TransformGizmoController {
   /** 记录拖拽开始时的 Transform 快照，后续 Undo/Redo 使用这一份 before。 */
   beginDragSnapshot(): void {
     if (!this.attachedTarget) return;
+    if (this.attachedGroupId && this.callbacks.beginGroupTranslation?.(this.attachedGroupId) !== true) {
+      this.activeTransformDrag = false;
+      this.releaseAllGizmoDrags();
+      return;
+    }
 
     this.blockCanvasSelectionBriefly();
     this.dragStartTransform = this.readFiniteTransform(this.attachedTarget);
@@ -247,25 +296,50 @@ export class TransformGizmoController {
 
   /** 拖拽过程中预览 Transform，但不写入命令历史。 */
   previewAttachedTransform(): void {
-    if (!this.activeTransformDrag || !this.attachedTarget || !this.attachedEntityId) return;
+    if (!this.activeTransformDrag || !this.attachedTarget || !this.dragStartTransform) return;
 
     const transform = transformFromTarget(this.attachedTarget);
     if (!isFiniteTransform(transform)) return;
-
-    this.callbacks.previewTransform(this.attachedEntityId, transform);
+    if (this.attachedGroupId) {
+      this.callbacks.previewGroupTranslation?.(
+        this.attachedGroupId,
+        {
+          x: transform.position.x - this.dragStartTransform.position.x,
+          y: transform.position.y - this.dragStartTransform.position.y,
+          z: transform.position.z - this.dragStartTransform.position.z,
+        },
+      );
+      return;
+    }
+    if (this.attachedEntityId) this.callbacks.previewTransform(this.attachedEntityId, transform);
   }
 
   /** 拖拽结束时提交一条完整 Transform 命令。 */
   commitActiveDrag(): void {
     if (this.entityArrayDragSession || !this.activeTransformDrag) return;
     this.activeTransformDrag = false;
-    if (!this.attachedTarget || !this.attachedEntityId || !this.dragStartTransform) return;
+    if (
+      !this.attachedTarget
+      || (!this.attachedEntityId && !this.attachedGroupId)
+      || !this.dragStartTransform
+    ) return;
 
     const after = transformFromTarget(this.attachedTarget);
     if (!isFiniteTransform(after)) return;
 
     this.blockCanvasSelectionBriefly();
-    this.callbacks.commitTransform(this.attachedEntityId, this.dragStartTransform, after);
+    if (this.attachedGroupId) {
+      this.callbacks.commitGroupTranslation?.(
+        this.attachedGroupId,
+        {
+          x: after.position.x - this.dragStartTransform.position.x,
+          y: after.position.y - this.dragStartTransform.position.y,
+          z: after.position.z - this.dragStartTransform.position.z,
+        },
+      );
+    } else if (this.attachedEntityId) {
+      this.callbacks.commitTransform(this.attachedEntityId, this.dragStartTransform, after);
+    }
     this.dragStartTransform = after;
   }
 
@@ -279,6 +353,7 @@ export class TransformGizmoController {
     this.utilityLayer.dispose();
     this.attachedTarget = null;
     this.attachedEntityId = null;
+    this.attachedGroupId = null;
     this.dragStartTransform = null;
     this.activeTransformDrag = false;
   }
@@ -312,7 +387,7 @@ export class TransformGizmoController {
 
     this.addDragObserver(observables.onDragStartObservable, (event) => {
       const shiftKey = event.pointerInfo?.event.shiftKey === true;
-      if (!shiftKey || this.currentTool !== 'translate') {
+      if (this.attachedGroupId || !shiftKey || this.currentTool !== 'translate') {
         this.beginDragSnapshot();
         return;
       }
@@ -440,13 +515,17 @@ export class TransformGizmoController {
     this.activeTransformDrag = false;
     this.releaseAllGizmoDrags();
 
-    if (!target || target.isDisposed() || !entityId || !before) return;
+    if (!target || target.isDisposed() || !before) return;
     target.position.copyFromFloats(before.position.x, before.position.y, before.position.z);
     target.rotationQuaternion = null;
     target.rotation.copyFromFloats(before.rotation.x, before.rotation.y, before.rotation.z);
     target.scaling.copyFromFloats(before.scale.x, before.scale.y, before.scale.z);
     target.computeWorldMatrix(true);
-    this.callbacks.previewTransform(entityId, before);
+    if (this.attachedGroupId) {
+      this.callbacks.cancelGroupTranslation?.(this.attachedGroupId);
+    } else if (entityId) {
+      this.callbacks.previewTransform(entityId, before);
+    }
     this.dragStartTransform = this.readFiniteTransform(target);
     this.blockCanvasSelectionBriefly();
   }

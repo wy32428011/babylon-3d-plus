@@ -118,6 +118,8 @@ type ToolbarProps = {
   transformSpace: TransformSpace;
   snapSettings: TransformSnapSettings;
   gridSettings: EditorGridSettings;
+  performanceHudVisible: boolean;
+  onSetPerformanceHudVisible: (visible: boolean) => void;
   onSetTransformTool: (tool: TransformTool) => void;
   onSetTransformSpace: (space: TransformSpace) => void;
   onSetSnapEnabled: (enabled: boolean) => void;
@@ -472,6 +474,15 @@ export function Toolbar(props: ToolbarProps) {
           onChange={(event) => props.onSetGridVisible(event.target.checked)}
         />
         网格
+      </label>
+      <label className="toolbar-checkbox" title="显示或隐藏 Scene View 性能监控">
+        <input
+          aria-label="性能监控"
+          type="checkbox"
+          checked={props.performanceHudVisible}
+          onChange={(event) => props.onSetPerformanceHudVisible(event.target.checked)}
+        />
+        性能
       </label>
       <label className="toolbar-select">
         <span>格子</span>

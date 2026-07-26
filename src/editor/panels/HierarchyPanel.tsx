@@ -1,13 +1,22 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type DragEvent,
   type KeyboardEvent,
   type MouseEvent,
+  type UIEvent,
 } from 'react';
+import { buildHierarchyRows, type HierarchyRow } from '../hierarchy/hierarchyRows';
+import {
+  calculateHierarchyVirtualWindow,
+  getHierarchyScrollTopForIndex,
+} from '../hierarchy/hierarchyVirtualization';
 import type { Entity } from '../model/Entity';
+import { getTopLevelHierarchyEntityIds, isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { getEntityArrayIdentifierError } from '../model/modelArray';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 import { useEditorStore } from '../store/editorStore';
@@ -15,11 +24,6 @@ import { useEditorStore } from '../store/editorStore';
 const HIERARCHY_DRAG_MIME_TYPE = 'application/x-babylon-editor-hierarchy-entities';
 const CONTEXT_MENU_WIDTH = 188;
 const CONTEXT_MENU_HEIGHT = 342;
-
-type HierarchyRow = {
-  entity: Entity;
-  depth: number;
-};
 
 type HierarchyDragPayload = {
   ids: string[];
@@ -32,46 +36,6 @@ type HierarchyContextMenuState = {
 };
 
 type ArrayDialogState = EntityArrayDialogValue;
-
-/** 判断实体名称是否命中当前搜索关键字。 */
-function matchesSearch(entity: Entity, query: string): boolean {
-  return entity.name.toLocaleLowerCase().includes(query);
-}
-
-/** 将场景实体整理为 Hierarchy 可渲染的根层级与文件夹子项。 */
-function buildHierarchyRows(
-  entityIds: string[],
-  entities: Record<string, Entity>,
-  searchText: string,
-  collapsedFolderIds: Set<string>,
-): HierarchyRow[] {
-  const query = searchText.trim().toLocaleLowerCase();
-  const rows: HierarchyRow[] = [];
-
-  for (const entityId of entityIds) {
-    const entity = entities[entityId];
-    if (!entity || entity.parentId !== null) continue;
-
-    if (!entity.isFolder) {
-      if (!query || matchesSearch(entity, query)) rows.push({ entity, depth: 0 });
-      continue;
-    }
-
-    const children = entity.childrenIds.map((childId) => entities[childId]).filter((child): child is Entity => Boolean(child));
-    const folderMatches = !query || matchesSearch(entity, query);
-    const visibleChildren = folderMatches ? children : children.filter((child) => matchesSearch(child, query));
-
-    if (folderMatches || visibleChildren.length > 0) {
-      rows.push({ entity, depth: 0 });
-      if (!query && collapsedFolderIds.has(entity.id)) continue;
-      for (const child of visibleChildren) {
-        rows.push({ entity: child, depth: 1 });
-      }
-    }
-  }
-
-  return rows;
-}
 
 /** 从拖拽数据中读取 Hierarchy 实体 ID 列表。 */
 function readHierarchyDragPayload(event: DragEvent<HTMLElement>): HierarchyDragPayload | null {
@@ -98,15 +62,6 @@ function getContextMenuPosition(clientX: number, clientY: number): { x: number; 
   const y = Math.min(clientY, Math.max(8, viewportHeight - CONTEXT_MENU_HEIGHT - 8));
 
   return { x, y };
-}
-
-/** 判断实体是否被自身或直属父文件夹锁定，用于菜单禁用态展示。 */
-function isEntityEffectivelyLocked(entities: Record<string, Entity>, entity: Entity | null | undefined): boolean {
-  if (!entity) return false;
-  if (entity.locked) return true;
-  if (!entity.parentId) return false;
-
-  return entities[entity.parentId]?.locked === true;
 }
 
 type HierarchyPanelProps = {
@@ -144,10 +99,33 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const [renamingEntityId, setRenamingEntityId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [arrayDialog, setArrayDialog] = useState<ArrayDialogState | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
 
+  const folderIds = useMemo(
+    () => entityIds.filter((entityId) => entities[entityId]?.isFolder === true),
+    [entityIds, entities],
+  );
   const rows = useMemo(
     () => buildHierarchyRows(entityIds, entities, searchText, collapsedFolderIds),
     [entityIds, entities, searchText, collapsedFolderIds],
+  );
+  const hierarchySelectionIdSet = useMemo(() => new Set(hierarchySelectionIds), [hierarchySelectionIds]);
+  const rowIndexByEntityId = useMemo(() => {
+    const indexByEntityId = new Map<string, number>();
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      indexByEntityId.set(rows[rowIndex].entity.id, rowIndex);
+    }
+    return indexByEntityId;
+  }, [rows]);
+  const virtualWindow = useMemo(
+    () => calculateHierarchyVirtualWindow(rows.length, scrollTop, viewportHeight),
+    [rows.length, scrollTop, viewportHeight],
+  );
+  const virtualRows = useMemo(
+    () => rows.slice(virtualWindow.startIndex, virtualWindow.endIndex),
+    [rows, virtualWindow.endIndex, virtualWindow.startIndex],
   );
 
   const contextEntity = contextMenu ? entities[contextMenu.entityId] ?? null : null;
@@ -164,7 +142,10 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const canRenameSelection = activeSelectionIds.length === 1 && canMutateSelection;
   const canLibraryFocus = Boolean(contextEntity?.components.modelAsset);
   const canPaste = !props.readOnly && Boolean(entityClipboard && entityClipboard.entries.length > 0);
-  const canUngroup = !props.readOnly && activeSelectionEntities.some((entity) => entity.isFolder || Boolean(entity.parentId));
+  const canUngroup = !props.readOnly && activeSelectionEntities.some((entity) => (
+    (entity.isFolder || Boolean(entity.parentId))
+    && !isEntityEffectivelyLocked(entities, entity)
+  ));
   const arraySourceEntities = activeSelectionEntities.filter(
     (entity) => !entity.isFolder && !isEntityEffectivelyLocked(entities, entity),
   );
@@ -242,6 +223,57 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     setArrayDialog(null);
   }
 
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const observedList = list;
+
+    /** 同步面板可用高度；布局拖拽和窗口缩放都可能改变虚拟视口。 */
+    function updateViewportSize(): void {
+      setViewportHeight((current) => (current === observedList.clientHeight ? current : observedList.clientHeight));
+      setScrollTop((current) => (current === observedList.scrollTop ? current : observedList.scrollTop));
+    }
+
+    updateViewportSize();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateViewportSize);
+      return () => window.removeEventListener('resize', updateViewportSize);
+    }
+
+    const resizeObserver = new ResizeObserver(updateViewportSize);
+    resizeObserver.observe(observedList);
+    return () => resizeObserver.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list || Math.abs(list.scrollTop - virtualWindow.scrollTop) < 0.5) return;
+
+    // 搜索或折叠导致总行数缩小时，将原滚动位置收回新的合法范围。
+    list.scrollTop = virtualWindow.scrollTop;
+    setScrollTop(virtualWindow.scrollTop);
+  }, [virtualWindow.scrollTop, virtualWindow.totalHeight]);
+
+  useLayoutEffect(() => {
+    const targetEntityId = renamingEntityId ?? selectedEntityId;
+    if (!targetEntityId || viewportHeight <= 0) return;
+
+    const targetRowIndex = rowIndexByEntityId.get(targetEntityId);
+    const list = listRef.current;
+    if (targetRowIndex === undefined || !list) return;
+
+    const nextScrollTop = getHierarchyScrollTopForIndex(
+      targetRowIndex,
+      rows.length,
+      list.scrollTop,
+      viewportHeight,
+    );
+    if (Math.abs(nextScrollTop - list.scrollTop) < 0.5) return;
+
+    list.scrollTop = nextScrollTop;
+    setScrollTop(nextScrollTop);
+  }, [renamingEntityId, rowIndexByEntityId, rows.length, selectedEntityId, viewportHeight]);
+
   useEffect(() => {
     if (!contextMenu) return;
 
@@ -269,6 +301,12 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     };
   }, [contextMenu]);
 
+  /** 滚动时只更新虚拟窗口，不改变选区或树结构。 */
+  function handleListScroll(event: UIEvent<HTMLDivElement>): void {
+    const nextScrollTop = event.currentTarget.scrollTop;
+    setScrollTop((current) => (current === nextScrollTop ? current : nextScrollTop));
+  }
+
   /** 根据普通点击、Ctrl/Cmd 点击与 Shift 点击更新 Hierarchy 多选。 */
   function handleRowClick(event: MouseEvent<HTMLDivElement>, row: HierarchyRow, rowIndex: number): void {
     const entityId = row.entity.id;
@@ -282,10 +320,11 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     }
 
     if (event.ctrlKey || event.metaKey) {
-      const nextIds = hierarchySelectionIds.includes(entityId)
+      const nextIds = hierarchySelectionIdSet.has(entityId)
         ? hierarchySelectionIds.filter((selectedId) => selectedId !== entityId)
         : [...hierarchySelectionIds, entityId];
-      selectHierarchyEntities(nextIds, nextIds.includes(entityId) ? entityId : nextIds[0] ?? null);
+      const nextSelectionIdSet = new Set(nextIds);
+      selectHierarchyEntities(nextIds, nextSelectionIdSet.has(entityId) ? entityId : nextIds[0] ?? null);
       setLastClickedIndex(rowIndex);
       return;
     }
@@ -300,7 +339,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     event.stopPropagation();
 
     const entityId = row.entity.id;
-    if (!hierarchySelectionIds.includes(entityId)) {
+    if (!hierarchySelectionIdSet.has(entityId)) {
       selectHierarchyEntities([entityId], entityId);
       setLastClickedIndex(rowIndex);
     }
@@ -325,18 +364,23 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     });
   }
 
-  /** 开始拖拽时携带当前多选中的普通实体，文件夹自身不参与分组移动。 */
-  function handleRowDragStart(event: DragEvent<HTMLDivElement>, entity: Entity): void {
-    if (entity.isFolder) {
-      event.preventDefault();
-      return;
-    }
+  /** 展开当前场景中的全部文件夹。 */
+  function expandAllFolders(): void {
+    setCollapsedFolderIds(new Set<string>());
+  }
 
-    const ids = (hierarchySelectionIds.includes(entity.id) ? hierarchySelectionIds : [entity.id])
-      .filter((entityId) => {
-        const selectedEntity = entities[entityId];
-        return Boolean(selectedEntity && !selectedEntity.isFolder);
-      });
+  /** 收缩当前场景中的全部文件夹。 */
+  function collapseAllFolders(): void {
+    setCollapsedFolderIds(new Set(folderIds));
+  }
+
+  /** 开始拖拽时携带互不重叠的最高层选区；文件夹会连同完整子树移动。 */
+  function handleRowDragStart(event: DragEvent<HTMLDivElement>, entity: Entity): void {
+    const selectedIds = hierarchySelectionIdSet.has(entity.id) ? hierarchySelectionIds : [entity.id];
+    const ids = getTopLevelHierarchyEntityIds(entities, selectedIds).filter((entityId) => {
+      const selectedEntity = entities[entityId];
+      return Boolean(selectedEntity && !isEntityEffectivelyLocked(entities, selectedEntity));
+    });
 
     if (ids.length === 0) {
       event.preventDefault();
@@ -355,6 +399,14 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
 
     event.preventDefault();
     event.stopPropagation();
+    if (folderId) {
+      setCollapsedFolderIds((current) => {
+        if (!current.has(folderId)) return current;
+        const next = new Set(current);
+        next.delete(folderId);
+        return next;
+      });
+    }
     moveEntitiesToFolder(payload.ids, folderId);
   }
 
@@ -378,6 +430,20 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     toggleEntityLocked(entityId);
   }
 
+  /** 在当前可编辑文件夹内创建子文件夹，并先展开父级确保新项可见。 */
+  function handleCreateFolder(): void {
+    const selectedEntity = selectedEntityId ? entities[selectedEntityId] : null;
+    if (selectedEntity?.isFolder && !isEntityEffectivelyLocked(entities, selectedEntity)) {
+      setCollapsedFolderIds((current) => {
+        if (!current.has(selectedEntity.id)) return current;
+        const next = new Set(current);
+        next.delete(selectedEntity.id);
+        return next;
+      });
+    }
+    createFolder();
+  }
+
   return (
     <section className="panel hierarchy-panel">
       <div className="hierarchy-scene-title">{sceneName}</div>
@@ -394,7 +460,29 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
             onChange={(event) => setSearchText(event.target.value)}
           />
         </label>
-        <button className="hierarchy-new-folder-button" disabled={props.readOnly} onClick={createFolder} type="button">
+        <div aria-label="模型树展开控制" className="hierarchy-tree-actions" role="group">
+          <button
+            aria-label="全部展开"
+            className="hierarchy-tree-action-button"
+            disabled={folderIds.length === 0}
+            onClick={expandAllFolders}
+            title="全部展开"
+            type="button"
+          >
+            <span aria-hidden="true">⊞</span>
+          </button>
+          <button
+            aria-label="全部收缩"
+            className="hierarchy-tree-action-button"
+            disabled={folderIds.length === 0}
+            onClick={collapseAllFolders}
+            title="全部收缩"
+            type="button"
+          >
+            <span aria-hidden="true">⊟</span>
+          </button>
+        </div>
+        <button className="hierarchy-new-folder-button" disabled={props.readOnly} onClick={handleCreateFolder} type="button">
           + 新建
         </button>
       </div>
@@ -403,92 +491,113 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
         className="entity-list"
         onDragOver={props.readOnly ? undefined : handleDragOver}
         onDrop={props.readOnly ? undefined : (event) => handleDrop(event, null)}
+        onScroll={handleListScroll}
+        ref={listRef}
       >
         {rows.length === 0 && entityIds.length > 0 ? <p className="muted">没有匹配对象。</p> : null}
-        {rows.map((row, rowIndex) => {
-          const entity = row.entity;
-          const isFolder = entity.isFolder === true;
-          const isSelected = hierarchySelectionIds.includes(entity.id);
-          const isPrimarySelected = entity.id === selectedEntityId;
-          const isVisible = entity.visible !== false;
-          const isLocked = entity.locked === true;
-          const isCollapsed = isFolder && collapsedFolderIds.has(entity.id) && !searchText.trim();
-          const rowClassName = [
-            'entity-tree-row',
-            isSelected ? 'selected' : '',
-            isPrimarySelected ? 'primary-selected' : '',
-            isFolder ? 'folder' : '',
-            !isVisible ? 'hidden' : '',
-            isLocked ? 'locked' : '',
-          ].filter(Boolean).join(' ');
-
-          return (
+        {rows.length > 0 ? (
+          <div className="hierarchy-virtual-spacer" style={{ height: virtualWindow.totalHeight }}>
             <div
-              className={rowClassName}
-              draggable={!props.readOnly && !isFolder}
-              key={entity.id}
-              onClick={(event) => handleRowClick(event, row, rowIndex)}
-              onContextMenu={(event) => handleRowContextMenu(event, row, rowIndex)}
-              onDragOver={!props.readOnly && isFolder ? handleDragOver : undefined}
-              onDragStart={props.readOnly ? undefined : (event) => handleRowDragStart(event, entity)}
-              onDrop={!props.readOnly && isFolder ? (event) => handleDrop(event, entity.id) : undefined}
-              style={{ '--entity-depth': row.depth } as CSSProperties}
-              title={entity.name}
+              className="hierarchy-virtual-window"
+              style={{ transform: `translateY(${virtualWindow.offsetTop}px)` }}
             >
-              <button
-                aria-label={isVisible ? `隐藏 ${entity.name}` : `显示 ${entity.name}`}
-                className="entity-state-button"
-                disabled={props.readOnly}
-                onClick={(event) => handleVisibleClick(event, entity.id)}
-                title={isVisible ? '隐藏' : '显示'}
-                type="button"
-              >
-                <span className={isVisible ? 'entity-eye-icon' : 'entity-eye-icon entity-eye-icon-hidden'} aria-hidden="true" />
-              </button>
-              <button
-                aria-label={isLocked ? `解锁 ${entity.name}` : `锁定 ${entity.name}`}
-                className="entity-state-button"
-                disabled={props.readOnly}
-                onClick={(event) => handleLockedClick(event, entity.id)}
-                title={isLocked ? '解锁' : '锁定'}
-                type="button"
-              >
-                <span className={isLocked ? 'entity-lock-icon locked' : 'entity-lock-icon'} aria-hidden="true" />
-              </button>
-              <span className="entity-tree-indent" aria-hidden="true" />
-              <button
-                aria-label={isFolder ? (isCollapsed ? `展开 ${entity.name}` : `折叠 ${entity.name}`) : undefined}
-                className={isFolder ? 'entity-tree-toggle' : 'entity-tree-toggle entity-tree-toggle-placeholder'}
-                disabled={!isFolder}
-                onClick={isFolder ? (event) => handleFolderToggle(event, entity.id) : undefined}
-                tabIndex={isFolder ? 0 : -1}
-                title={isFolder ? (isCollapsed ? '展开' : '折叠') : undefined}
-                type="button"
-              >
-                {isFolder ? (isCollapsed ? '▶' : '▼') : ''}
-              </button>
-              <span className={isFolder ? 'entity-type-icon entity-type-folder' : 'entity-type-icon entity-type-object'} aria-hidden="true">
-                {isFolder ? '▦' : '◎'}
-              </span>
-              {renamingEntityId === entity.id ? (
-                <input
-                  autoFocus
-                  className="entity-tree-rename-input"
-                  disabled={props.readOnly}
-                  onBlur={commitRename}
-                  onChange={(event) => setRenameDraft(event.target.value)}
-                  onClick={(event) => event.stopPropagation()}
-                  onKeyDown={handleRenameKeyDown}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  value={renameDraft}
-                />
-              ) : (
-                <span className="entity-tree-name">{entity.name}</span>
-              )}
-              {isFolder ? <span className="entity-folder-count">{entity.childrenIds.length}</span> : null}
+              {virtualRows.map((row, virtualRowIndex) => {
+                const rowIndex = virtualWindow.startIndex + virtualRowIndex;
+                const entity = row.entity;
+                const isFolder = entity.isFolder === true;
+                const isSelected = hierarchySelectionIdSet.has(entity.id);
+                const isPrimarySelected = entity.id === selectedEntityId;
+                const isVisible = entity.visible !== false;
+                const isLocked = entity.locked === true;
+                const isCollapsed = isFolder && collapsedFolderIds.has(entity.id) && !searchText.trim();
+                const rowClassName = [
+                  'entity-tree-row',
+                  isSelected ? 'selected' : '',
+                  isPrimarySelected ? 'primary-selected' : '',
+                  isFolder ? 'folder' : '',
+                  !isVisible ? 'hidden' : '',
+                  isLocked ? 'locked' : '',
+                ].filter(Boolean).join(' ');
+
+                return (
+                  <div
+                    className={rowClassName}
+                    draggable={!props.readOnly && !isEntityEffectivelyLocked(entities, entity)}
+                    key={entity.id}
+                    onClick={(event) => handleRowClick(event, row, rowIndex)}
+                    onContextMenu={(event) => handleRowContextMenu(event, row, rowIndex)}
+                    onDragOver={!props.readOnly && isFolder ? handleDragOver : undefined}
+                    onDragStart={props.readOnly ? undefined : (event) => handleRowDragStart(event, entity)}
+                    onDrop={!props.readOnly && isFolder ? (event) => handleDrop(event, entity.id) : undefined}
+                    style={{ '--entity-depth': row.depth } as CSSProperties}
+                    title={entity.name}
+                  >
+                    <button
+                      aria-label={isVisible ? `隐藏 ${entity.name}` : `显示 ${entity.name}`}
+                      className="entity-state-button"
+                      disabled={props.readOnly}
+                      onClick={(event) => handleVisibleClick(event, entity.id)}
+                      title={isVisible ? '隐藏' : '显示'}
+                      type="button"
+                    >
+                      <span
+                        className={isVisible ? 'entity-eye-icon' : 'entity-eye-icon entity-eye-icon-hidden'}
+                        aria-hidden="true"
+                      />
+                    </button>
+                    <button
+                      aria-label={isLocked ? `解锁 ${entity.name}` : `锁定 ${entity.name}`}
+                      className="entity-state-button"
+                      disabled={props.readOnly}
+                      onClick={(event) => handleLockedClick(event, entity.id)}
+                      title={isLocked ? '解锁' : '锁定'}
+                      type="button"
+                    >
+                      <span
+                        className={isLocked ? 'entity-lock-icon locked' : 'entity-lock-icon'}
+                        aria-hidden="true"
+                      />
+                    </button>
+                    <span className="entity-tree-indent" aria-hidden="true" />
+                    <button
+                      aria-label={isFolder ? (isCollapsed ? `展开 ${entity.name}` : `折叠 ${entity.name}`) : undefined}
+                      className={isFolder ? 'entity-tree-toggle' : 'entity-tree-toggle entity-tree-toggle-placeholder'}
+                      disabled={!isFolder}
+                      onClick={isFolder ? (event) => handleFolderToggle(event, entity.id) : undefined}
+                      tabIndex={isFolder ? 0 : -1}
+                      title={isFolder ? (isCollapsed ? '展开' : '折叠') : undefined}
+                      type="button"
+                    >
+                      {isFolder ? (isCollapsed ? '▶' : '▼') : ''}
+                    </button>
+                    <span
+                      className={isFolder ? 'entity-type-icon entity-type-folder' : 'entity-type-icon entity-type-object'}
+                      aria-hidden="true"
+                    >
+                      {isFolder ? '▦' : '◎'}
+                    </span>
+                    {renamingEntityId === entity.id ? (
+                      <input
+                        autoFocus
+                        className="entity-tree-rename-input"
+                        disabled={props.readOnly}
+                        onBlur={commitRename}
+                        onChange={(event) => setRenameDraft(event.target.value)}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={handleRenameKeyDown}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        value={renameDraft}
+                      />
+                    ) : (
+                      <span className="entity-tree-name">{entity.name}</span>
+                    )}
+                    {isFolder ? <span className="entity-folder-count">{entity.childrenIds.length}</span> : null}
+                  </div>
+                );
+              })}
             </div>
-          );
-        })}
+          </div>
+        ) : null}
       </div>
       {contextMenu && contextEntity ? (
         <div

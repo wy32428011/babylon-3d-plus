@@ -44,7 +44,7 @@ export const dataDriven = {
 	}
 } as const;
 
-/**
+/**zhi
  * 管理 一体式顶升移载 在 Babylon.js Editor Inspector 中展示的静态参数。
  */
 export class ParametricModelParamsComponent {
@@ -61,13 +61,13 @@ export class ParametricModelParamsComponent {
 	public bodyColor: string = "#387368";
 
 	@visibleAsNumber("辊筒框架位置", { step: 0.0000001 })
-	public rollerFramePosition: number = 0.1576491;
+	public rollerFramePosition: number = 1;
 
 	@visibleAsNumber("辊筒框架长度", { step: 0.000001 })
 	public rollerFrameLength: number = 1.021932;
 
 	@visibleAsNumber("电机位置", { step: 0.0000001 })
-	public motorPosition: number = 0.1814833;
+	public motorPosition: number = 0;
 
 	@visibleAsNumber("辊筒密度", { step: 0.1 })
 	public rollerDensity: number = 0.6;
@@ -133,9 +133,9 @@ const DEFAULT_VALUES: ValueMap = {
 	"width": 1.0621,
 	"height": 0.6478692,
 	"bodyColor": "#387368",
-	"rollerFramePosition": 0.1576491,
+	"rollerFramePosition": 0,
 	"rollerFrameLength": 1.021932,
-	"motorPosition": 0.1814833,
+	"motorPosition": 0,
 	"rollerDensity": 0.6,
 	"showLegA": true,
 	"showLegB": true,
@@ -402,13 +402,14 @@ export class ParametricModelRuntimeComponent {
 		const length = this.resolveDimensionParameter(values, "length", 1.8276, "chainLength", 1.828);
 		const width = this.resolveDimensionParameter(values, "width", 1.0621, "chainWidth", 1.194);
 		const height = this.resolveDimensionParameter(values, "height", 0.6478692, "chainHeight", 0.803);
-		const frameLength = this.resolveDimensionParameter(values, "rollerFrameLength", 1.021932, "platformLength", 1.022);
-		const heightOffset = height.value - height.baseline;
+		const frameLengthRaw = this.resolveDimensionParameter(values, "rollerFrameLength", 1.021932, "platformLength", 1.022);
+		// 拉伸实际目标：参数值 + 0.12m。
+		const frameLengthValue = frameLengthRaw.value - 0.12;
+		const frameLengthRatio = frameLengthValue / frameLengthRaw.baseline;
 
-		this.applyBodyParameters(length.ratio, width.ratio, height.ratio);
-		const framePosition = this.resolvePlatformPosition(values, frameLength.ratio);
-		this.applyPlatformParameters(frameLength.ratio, width.ratio, heightOffset, framePosition);
-		this.applyRollerParameters(values, frameLength.ratio, heightOffset, framePosition, width.value);
+		const heightLift = this.applyBodyParameters(length.ratio, width.ratio, height.ratio);
+		const framePosition = this.applyPlatformParameters(values, frameLengthRatio, width.ratio, heightLift);
+		this.applyRollerParameters(values, frameLengthRatio, heightLift, framePosition, width.value);
 		this.applyMotorParameters(values, width.ratio);
 		this.applySupportVisibility(values);
 		this.applyBodyColor(values);
@@ -417,17 +418,18 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 链条机主体 ZT.2 承担长、宽、高变化，底面保持在原始基准高度。
+	 * 链条机主体 ZT.2：长度/宽度顶点拉伸；高度拉立柱后非腿部件上移。返回高度上移量供 Ban.4/辊筒同步。
 	 */
-	private applyBodyParameters(lengthRatio: number, widthRatio: number, heightRatio: number): void {
+	private applyBodyParameters(lengthRatio: number, widthRatio: number, heightRatio: number): number {
 		const body = this.findNodeByName(BODY_NODE_NAME);
-		if (!body) { return; }
+		if (!body) { return 0; }
 		this.stretchBodyLength(body, lengthRatio);
-		this.scaleNodeKeepingCenter(body, 1, heightRatio, widthRatio, ["z"]);
+		this.stretchBodyWidth(body, widthRatio);
+		return this.stretchBodyHeight(body, heightRatio);
 	}
 
 	/**
-	 * 主体长度采用端部保护的顶点分段拉伸：画面左侧保护段固定，右侧单向伸长。
+	 * 主体长度分段拉伸：电机仓整段（含台面下电机盒）固定，仅仓外台面单向伸长。
 	 */
 	private stretchBodyLength(body: any, lengthRatio: number): void {
 		if (Math.abs(lengthRatio - 1) < 0.0001) { return; }
@@ -436,16 +438,161 @@ export class ParametricModelRuntimeComponent {
 		if (!bounds) { return; }
 		const sourceLength = bounds.max - bounds.min;
 		if (sourceLength <= 0) { return; }
-		const capLength = this.getProtectedBodyEndLength(sourceLength);
-		const middleStart = bounds.min + capLength;
-		const middleEnd = bounds.max - capLength;
+		const otherCapLength = this.getProtectedBodyEndLength(sourceLength);
+		const middleStart = this.getMotorBayProtectEndX(meshes, bounds, sourceLength);
+		const middleEnd = bounds.max - otherCapLength;
 		const middleLength = middleEnd - middleStart;
 		if (middleLength <= 0) { return; }
 		const requestedLength = sourceLength * lengthRatio;
-		const targetLength = Math.max(requestedLength, capLength * 2 + Math.min(0.08, sourceLength * 0.08));
+		const protectedSpan = (middleStart - bounds.min) + otherCapLength;
+		const targetLength = Math.max(requestedLength, protectedSpan + Math.min(0.08, sourceLength * 0.08));
 		const extension = targetLength - sourceLength;
 		const middleScale = (middleLength + extension) / middleLength;
 		meshes.forEach((mesh) => this.stretchMeshVerticesByLocalX(mesh, middleStart, middleEnd, middleScale, extension));
+	}
+
+	/**
+	 * 高度：四根立柱脚底锚定向上/向下拉；腿显隐中偏上的横梁等随台移动，最下方脚件不动；其余非腿零件同步。
+	 * @returns Y 位移（局部，可正可负），供 Ban.4/辊筒同步。
+	 */
+	private stretchBodyHeight(body: any, heightRatio: number): number {
+		if (Math.abs(heightRatio - 1) < 0.0001) { return 0; }
+		const meshes = this.getMeshesForNodes([body]);
+		let heightLift = 0;
+		meshes.forEach((mesh) => {
+			const components = this.getMeshComponents(mesh);
+			const legComponents = components.filter((component) => this.isLegAComponent(component) || this.isLegBComponent(component));
+			const pillars = [
+				...this.pickLegPillarsToStretch(components.filter((component) => this.isLegAComponent(component))),
+				...this.pickLegPillarsToStretch(components.filter((component) => this.isLegBComponent(component))),
+			];
+			if (pillars.length === 0) { return; }
+			const baseline = this.rememberSnapshot(mesh).vertexPositions;
+			if (!baseline || typeof mesh.setVerticesData !== "function") { return; }
+			const current = this.readVertexPositions(mesh) ?? baseline;
+			const nextPositions = current.slice();
+			// 有符号位移：变高为正、变矮为负（不能用 Math.max 夹到 0）。
+			const meshLift = Math.max(...pillars.map((pillar) => pillar.size.y)) * (heightRatio - 1);
+			const pillarVertices = new Set<number>();
+			pillars.forEach((pillar) => {
+				const bottomY = pillar.minimum.y;
+				pillar.vertexIndices.forEach((vertexIndex) => {
+					pillarVertices.add(vertexIndex);
+					const offset = vertexIndex * 3;
+					const y = baseline[offset + 1];
+					nextPositions[offset + 1] = bottomY + (y - bottomY) * heightRatio;
+				});
+			});
+			if (Math.abs(meshLift) > Math.abs(heightLift)) {
+				heightLift = meshLift;
+			}
+
+			const pillarBottom = Math.min(...pillars.map((pillar) => pillar.minimum.y));
+			const pillarTop = Math.max(...pillars.map((pillar) => pillar.maximum.y));
+			const upperLegMinCenterY = pillarBottom + (pillarTop - pillarBottom) * 0.45;
+			const pillarSet = new Set(pillars);
+			const lowerLegVertices = new Set<number>();
+			legComponents.forEach((component) => {
+				if (pillarSet.has(component)) { return; }
+				if (component.center.y < upperLegMinCenterY) {
+					component.vertexIndices.forEach((vertexIndex) => lowerLegVertices.add(vertexIndex));
+				}
+			});
+
+			for (let index = 0; index < nextPositions.length; index += 3) {
+				const vertexIndex = index / 3;
+				if (pillarVertices.has(vertexIndex) || lowerLegVertices.has(vertexIndex)) { continue; }
+				nextPositions[index + 1] = baseline[index + 1] + meshLift;
+			}
+			mesh.setVerticesData("position", nextPositions, true);
+			this.refreshMeshBounds(mesh);
+		});
+		return heightLift;
+	}
+
+	/**
+	 * 单侧腿组件中选取需要拉高的立柱：优先竖直细长件，取最高的两根（不足则有几根取几根）。
+	 */
+	private pickLegPillarsToStretch(components: MeshComponentSnapshot[]): MeshComponentSnapshot[] {
+		if (components.length === 0) { return []; }
+		const columns = components.filter((component) => (
+			component.size.y >= component.size.x
+			&& component.size.y >= component.size.z
+			&& component.size.y >= 0.08
+		));
+		const pool = columns.length > 0 ? columns : components;
+		const ranked = [...pool].sort((left, right) => right.size.y - left.size.y);
+		const tallest = ranked[0]?.size.y ?? 0;
+		const nearTallest = ranked.filter((component) => component.size.y >= tallest * 0.75);
+		if (nearTallest.length >= 2) { return nearTallest.slice(0, 2); }
+		return ranked.slice(0, Math.min(2, ranked.length));
+	}
+
+	/**
+	 * 主体宽度拉伸（局部 Z）：连接左右的横跨件向「非电机端」单向拉长；有电机的一端位置不变。
+	 */
+	private stretchBodyWidth(body: any, widthRatio: number): void {
+		if (Math.abs(widthRatio - 1) < 0.0001) { return; }
+		const meshes = this.getMeshesForNodes([body]);
+		const bounds = this.getLocalVertexBounds(meshes, "z");
+		if (!bounds) { return; }
+		const sourceWidth = bounds.max - bounds.min;
+		if (sourceWidth <= 0) { return; }
+		const capLength = this.getProtectedBodyEndLength(sourceWidth);
+		const minMiddle = Math.min(0.12, sourceWidth * 0.12);
+		const motorRange = this.getMotorAssemblyZRange(meshes);
+		const widthMid = (bounds.min + bounds.max) / 2;
+		// 有电机的一端锚定，往另一端拉伸。
+		const anchorMinSide = !motorRange || motorRange.center <= widthMid;
+		let middleStart = bounds.min + capLength;
+		let middleEnd = bounds.max - capLength;
+		if (motorRange) {
+			if (anchorMinSide) {
+				middleStart = Math.max(middleStart, motorRange.max + 0.02);
+			} else {
+				middleEnd = Math.min(middleEnd, motorRange.min - 0.02);
+			}
+		}
+		if (middleEnd - middleStart < minMiddle) {
+			if (anchorMinSide) {
+				middleStart = Math.min(middleStart, middleEnd - minMiddle);
+				middleStart = Math.max(middleStart, bounds.min + Math.min(capLength, sourceWidth * 0.08));
+			} else {
+				middleEnd = Math.max(middleEnd, middleStart + minMiddle);
+				middleEnd = Math.min(middleEnd, bounds.max - Math.min(capLength, sourceWidth * 0.08));
+			}
+		}
+		const middleLength = middleEnd - middleStart;
+		if (middleLength <= 0) { return; }
+		const requestedWidth = sourceWidth * widthRatio;
+		const protectedSpan = sourceWidth - middleLength;
+		const targetWidth = Math.max(requestedWidth, protectedSpan + minMiddle);
+		const extension = targetWidth - sourceWidth;
+		const middleScale = (middleLength + extension) / middleLength;
+		meshes.forEach((mesh) => this.stretchMeshVerticesByLocalZ(
+			mesh,
+			sourceWidth,
+			middleStart,
+			middleEnd,
+			middleScale,
+			extension,
+			anchorMinSide,
+		));
+	}
+
+	/** 电机装配局部 Z 范围，用于判定锚定端。 */
+	private getMotorAssemblyZRange(meshes: any[]): { min: number; max: number; center: number } | null {
+		let motorMinZ = Number.POSITIVE_INFINITY;
+		let motorMaxZ = Number.NEGATIVE_INFINITY;
+		meshes.forEach((mesh) => {
+			this.getMeshComponents(mesh).forEach((component) => {
+				if (!this.isMotorComponent(component)) { return; }
+				motorMinZ = Math.min(motorMinZ, component.minimum.z);
+				motorMaxZ = Math.max(motorMaxZ, component.maximum.z);
+			});
+		});
+		if (!Number.isFinite(motorMinZ) || !Number.isFinite(motorMaxZ)) { return null; }
+		return { min: motorMinZ, max: motorMaxZ, center: (motorMinZ + motorMaxZ) / 2 };
 	}
 
 	/**
@@ -453,6 +600,33 @@ export class ParametricModelRuntimeComponent {
 	 */
 	private getProtectedBodyEndLength(sourceLength: number): number {
 		return Math.min(sourceLength * 0.22, Math.max(0.28, sourceLength * 0.18));
+	}
+
+	/**
+	 * 电机仓保护截止 X：覆盖电机本体 + 台面下电机盒，该段整列（含上方台面）不参与拉伸。
+	 */
+	private getMotorBayProtectEndX(meshes: any[], bounds: { min: number; max: number }, sourceLength: number): number {
+		const legCap = this.getProtectedBodyEndLength(sourceLength);
+		let protectEnd = bounds.min + legCap;
+		let motorMaxX = Number.NEGATIVE_INFINITY;
+		meshes.forEach((mesh) => {
+			this.getMeshComponents(mesh).forEach((component) => {
+				if (this.isMotorComponent(component)) {
+					motorMaxX = Math.max(motorMaxX, component.maximum.x);
+				}
+				if (this.isMotorHousingComponent(component)) {
+					protectEnd = Math.max(protectEnd, component.maximum.x + 0.02);
+				}
+			});
+		});
+		if (Number.isFinite(motorMaxX)) {
+			// 电机盒比电机本体更宽，仅按电机外包会把仓体拉长。
+			protectEnd = Math.max(protectEnd, motorMaxX + 0.18, bounds.min + sourceLength * 0.42);
+		} else {
+			protectEnd = Math.max(protectEnd, bounds.min + Math.min(sourceLength * 0.45, Math.max(0.7, sourceLength * 0.38)));
+		}
+		const maxProtect = bounds.max - legCap - Math.min(0.08, sourceLength * 0.08);
+		return Math.min(protectEnd, maxProtect);
 	}
 
 	/**
@@ -464,67 +638,355 @@ export class ParametricModelRuntimeComponent {
 		const nextPositions = positions.slice();
 		for (let index = 0; index < nextPositions.length; index += 3) {
 			const x = positions[index];
-			nextPositions[index] = this.mapVisualLeftAnchoredLengthX(x, middleStart, middleEnd, middleScale, extension);
+			nextPositions[index] = this.mapMotorBayAnchoredLengthX(x, middleStart, middleEnd, middleScale, extension);
 		}
 		mesh.setVerticesData("position", nextPositions, true);
 		this.refreshMeshBounds(mesh);
 	}
 
 	/**
-	 * YZJ 导入朝向中，主体局部 X 最大端对应画面左侧；固定该端，长度差全部由另一端承担。
+	 * 固定电机仓侧（局部 X ≤ middleStart），仓外台面中间段拉伸，另一端整体平移。
 	 */
-	private mapVisualLeftAnchoredLengthX(x: number, middleStart: number, middleEnd: number, middleScale: number, extension: number): number {
-		if (x >= middleEnd) { return x; }
-		if (x <= middleStart) { return x - extension; }
-		return middleEnd + (x - middleEnd) * middleScale;
+	private mapMotorBayAnchoredLengthX(x: number, middleStart: number, middleEnd: number, middleScale: number, extension: number): number {
+		if (x <= middleStart) { return x; }
+		if (x >= middleEnd) { return x + extension; }
+		return middleStart + (x - middleStart) * middleScale;
 	}
 
 	/**
-	 * 将顶升组件米制偏移限制在当前主体有效长度内，避免平台移动到设备外部。
+	 * 横跨左右的连通组件：Z 向跨度达到整机宽度 40% 以上（横梁、端框等连接两侧的结构）。
 	 */
-	private resolvePlatformPosition(values: ValueMap, platformLengthRatio: number): number {
-		const requestedPosition = this.resolveRollerFrameOffset(values);
+	private isWidthSpanningComponent(component: MeshComponentSnapshot, sourceWidth: number): boolean {
+		return component.size.z >= sourceWidth * 0.4;
+	}
+
+	/**
+	 * 仅横跨左右的组件做宽度分段拉伸；电机保持基线位置；其余非横跨件刚体平移。
+	 */
+	private stretchMeshVerticesByLocalZ(
+		mesh: any,
+		sourceWidth: number,
+		middleStart: number,
+		middleEnd: number,
+		middleScale: number,
+		extension: number,
+		anchorMinSide: boolean,
+	): void {
+		const baseline = this.rememberSnapshot(mesh).vertexPositions;
+		if (!baseline || typeof mesh.setVerticesData !== "function") { return; }
+		const current = this.readVertexPositions(mesh) ?? baseline;
+		const nextPositions = current.slice();
+		const components = this.getMeshComponents(mesh);
+		const spanningVertices = new Set<number>();
+		const motorVertices = new Set<number>();
+		const rigidDeltaByVertex = new Map<number, number>();
+
+		components.forEach((component) => {
+			if (this.isMotorComponent(component)) {
+				component.vertexIndices.forEach((vertexIndex) => motorVertices.add(vertexIndex));
+			}
+		});
+
+		components.forEach((component) => {
+			if (this.isMotorComponent(component)) { return; }
+			if (this.isWidthSpanningComponent(component, sourceWidth)) {
+				component.vertexIndices.forEach((vertexIndex) => spanningVertices.add(vertexIndex));
+				return;
+			}
+			const mappedCenter = this.mapMotorSideAnchoredWidthZ(
+				component.center.z,
+				middleStart,
+				middleEnd,
+				middleScale,
+				extension,
+				anchorMinSide,
+			);
+			const delta = mappedCenter - component.center.z;
+			component.vertexIndices.forEach((vertexIndex) => {
+				if (!motorVertices.has(vertexIndex) && !spanningVertices.has(vertexIndex)) {
+					rigidDeltaByVertex.set(vertexIndex, delta);
+				}
+			});
+		});
+
+		for (let index = 0; index < nextPositions.length; index += 3) {
+			const vertexIndex = index / 3;
+			const baselineZ = baseline[index + 2];
+			if (motorVertices.has(vertexIndex)) {
+				nextPositions[index + 2] = baselineZ;
+				continue;
+			}
+			if (spanningVertices.has(vertexIndex)) {
+				nextPositions[index + 2] = this.mapMotorSideAnchoredWidthZ(
+					baselineZ,
+					middleStart,
+					middleEnd,
+					middleScale,
+					extension,
+					anchorMinSide,
+				);
+				continue;
+			}
+			const rigidDelta = rigidDeltaByVertex.get(vertexIndex);
+			if (rigidDelta !== undefined) {
+				nextPositions[index + 2] = baselineZ + rigidDelta;
+				continue;
+			}
+			// 未归类顶点：两端随锚定规则平移，中间不拉（避免误拉非连接件）。
+			const inMiddle = baselineZ > middleStart && baselineZ < middleEnd;
+			nextPositions[index + 2] = inMiddle
+				? baselineZ
+				: this.mapMotorSideAnchoredWidthZ(
+					baselineZ,
+					middleStart,
+					middleEnd,
+					middleScale,
+					extension,
+					anchorMinSide,
+				);
+		}
+		mesh.setVerticesData("position", nextPositions, true);
+		this.refreshMeshBounds(mesh);
+	}
+
+	/**
+	 * 有电机端锚定不动，连接段按比例拉长，另一端整体平移。
+	 */
+	private mapMotorSideAnchoredWidthZ(
+		z: number,
+		middleStart: number,
+		middleEnd: number,
+		middleScale: number,
+		extension: number,
+		anchorMinSide: boolean,
+	): number {
+		if (anchorMinSide) {
+			if (z <= middleStart) { return z; }
+			if (z >= middleEnd) { return z + extension; }
+			return middleStart + (z - middleStart) * middleScale;
+		}
+		if (z >= middleEnd) { return z; }
+		if (z <= middleStart) { return z - extension; }
+		return middleEnd + (z - middleEnd) * middleScale;
+	}
+
+	/**
+	 * 辊筒框架位置：相对主体 length 拉伸后物流最左侧（米空间 +X / maximum.x）的偏移；
+	 * 0 = Ban.4 的 +X 缘贴齐主体最左侧，再内缩 0.2m。
+	 */
+	private resolvePlatformPosition(values: ValueMap): number {
+		const leftInset = 0.06;
+		const requestedFromLeft = this.resolveRollerFrameOffset(values);
 		const body = this.findNodeByName(BODY_NODE_NAME);
 		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
-		if (!body || !platform) { return requestedPosition; }
+		if (!body || !platform) { return requestedFromLeft + leftInset; }
 		const bodyBounds = this.getCurrentNodeMeterBounds(body);
-		const platformBounds = this.getNodeMeterBounds(platform);
-		if (!bodyBounds || !platformBounds) { return requestedPosition; }
-		const platformCenter = (platformBounds.minimum.x + platformBounds.maximum.x) / 2;
-		const platformHalfLength = (platformBounds.maximum.x - platformBounds.minimum.x) * platformLengthRatio / 2;
-		const minimumPosition = bodyBounds.minimum.x + platformHalfLength - platformCenter;
-		const maximumPosition = bodyBounds.maximum.x - platformHalfLength - platformCenter;
-		if (minimumPosition > maximumPosition) { return 0; }
-		return this.clamp(requestedPosition, Math.min(minimumPosition, 0), Math.max(maximumPosition, 0));
+		const platformBounds = this.getCurrentNodeMeterBounds(platform);
+		if (!bodyBounds || !platformBounds) { return requestedFromLeft + leftInset; }
+		const platformLength = platformBounds.maximum.x - platformBounds.minimum.x;
+		const bodyLength = bodyBounds.maximum.x - bodyBounds.minimum.x;
+		const maxFromLeft = Math.max(0, bodyLength - platformLength - leftInset);
+		const fromLeft = this.clamp(requestedFromLeft, 0, maxFromLeft);
+		// 物流左侧 = x+：让平台 maximum.x 对齐「主体 maximum.x - 内缩 - fromLeft」。
+		return (bodyBounds.maximum.x - leftInset - fromLeft) - platformBounds.maximum.x;
 	}
 
 	/**
-	 * 顶升平台 Ban.4 使用独立 platformLength 控制长度，按中心缩放并随链条机宽度、高度和顶升位置同步变化。
+	 * 顶升平台 Ban.4：先长度/宽度拉伸，再按「距主体最左侧」定位；返回米制 X 偏移供 GT.3 共用。
 	 */
-	private applyPlatformParameters(platformLengthRatio: number, widthRatio: number, heightOffset: number, platformPosition: number): void {
+	private applyPlatformParameters(values: ValueMap, platformLengthRatio: number, widthRatio: number, heightOffset: number): number {
 		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
-		if (!platform) { return; }
-		this.scaleNodeWithAxisAnchors(platform, platformLengthRatio, 1, widthRatio, { x: "center", z: "center" });
+		if (!platform) { return this.resolveRollerFrameOffset(values); }
+		this.stretchPlatformLength(platform, platformLengthRatio);
+		this.stretchPlatformWidth(platform, widthRatio);
 		this.offsetNodeAxis(platform, "y", heightOffset);
+		const platformPosition = this.resolvePlatformPosition(values);
 		this.addNodeAxisOffset(platform, "x", platformPosition);
+		return platformPosition;
 	}
 
 	/**
-	 * 辊筒 GT.3 与 Ban.4 共用顶升模块长度和位置，按辊筒宽度调整单根厚度，并按密度生成多根。
+	 * Ban.4 长度：局部 X 最小端（左侧）固定，中间拉伸，最右侧整体 +extension 位移。
 	 */
-	private applyRollerParameters(values: ValueMap, platformLengthRatio: number, heightOffset: number, platformPosition: number, targetWidth: number): void {
+	private stretchPlatformLength(platform: any, lengthRatio: number): void {
+		if (Math.abs(lengthRatio - 1) < 0.0001) { return; }
+		const meshes = this.getMeshesForNodes([platform]);
+		const bounds = this.getLocalVertexBounds(meshes, "x");
+		if (!bounds) { return; }
+		const sourceLength = bounds.max - bounds.min;
+		if (sourceLength <= 0) { return; }
+		const capLength = Math.min(this.getProtectedBodyEndLength(sourceLength) * 0.5, sourceLength * 0.12);
+		const minMiddle = Math.min(0.08, sourceLength * 0.1);
+		let middleStart = bounds.min + capLength;
+		let middleEnd = bounds.max - capLength;
+		if (middleEnd - middleStart < minMiddle) {
+			const mid = (bounds.min + bounds.max) / 2;
+			middleStart = mid - minMiddle / 2;
+			middleEnd = mid + minMiddle / 2;
+		}
+		const middleLength = middleEnd - middleStart;
+		if (middleLength <= 0) { return; }
+		const targetLength = Math.max(sourceLength * lengthRatio, (middleStart - bounds.min) + (bounds.max - middleEnd) + minMiddle);
+		const extension = targetLength - sourceLength;
+		const middleScale = (middleLength + extension) / middleLength;
+		meshes.forEach((mesh) => this.stretchMeshVerticesByLocalX(mesh, middleStart, middleEnd, middleScale, extension));
+	}
+
+	/**
+	 * Ban.4 宽度分段拉伸：锚定端与主体一致；目标宽度对齐主体「横跨连接件」当前跨度
+	 * （不对齐主体外包，避免穿出立柱；不按自身倍率，避免基线略短时接不上）。
+	 */
+	private stretchPlatformWidth(platform: any, widthRatio: number): void {
+		if (Math.abs(widthRatio - 1) < 0.0001) { return; }
+		const meshes = this.getMeshesForNodes([platform]);
+		const bounds = this.getLocalVertexBounds(meshes, "z");
+		if (!bounds) { return; }
+		const sourceWidth = bounds.max - bounds.min;
+		if (sourceWidth <= 0) { return; }
+		const capLength = Math.min(this.getProtectedBodyEndLength(sourceWidth) * 0.5, sourceWidth * 0.12);
+		const minMiddle = Math.min(0.12, sourceWidth * 0.12);
+		const anchorMinSide = this.resolveWidthAnchorMinSide();
+		let middleStart = bounds.min + capLength;
+		let middleEnd = bounds.max - capLength;
+		if (middleEnd - middleStart < minMiddle) {
+			const mid = (bounds.min + bounds.max) / 2;
+			middleStart = mid - minMiddle / 2;
+			middleEnd = mid + minMiddle / 2;
+		}
+		const middleLength = middleEnd - middleStart;
+		if (middleLength <= 0) { return; }
+		const protectedSpan = sourceWidth - middleLength;
+		const fallbackTarget = Math.max(sourceWidth * widthRatio, protectedSpan + minMiddle);
+		const spanningBounds = this.getBodyWidthSpanningLocalZBounds(true);
+		const spanningWidth = spanningBounds ? spanningBounds.max - spanningBounds.min : 0;
+		// 横跨件宽度作目标；略留缝避免扎进立柱内侧。
+		const targetWidth = spanningWidth > sourceWidth * 0.5
+			? Math.max(spanningWidth - 0.18, protectedSpan + minMiddle)
+			: fallbackTarget;
+		const extension = targetWidth - sourceWidth;
+		const middleScale = (middleLength + extension) / middleLength;
+		meshes.forEach((mesh) => this.stretchMeshAllVerticesByLocalZ(
+			mesh,
+			middleStart,
+			middleEnd,
+			middleScale,
+			extension,
+			anchorMinSide,
+		));
+	}
+
+	/**
+	 * 主体中「连接左右」的横跨组件在局部 Z 上的包围（current=true 为拉伸后）。
+	 */
+	private getBodyWidthSpanningLocalZBounds(current: boolean): { min: number; max: number } | null {
+		const body = this.findNodeByName(BODY_NODE_NAME);
+		if (!body) { return null; }
+		const meshes = this.getMeshesForNodes([body]);
+		const fullBounds = this.getLocalVertexBounds(meshes, "z");
+		if (!fullBounds) { return null; }
+		const sourceWidth = fullBounds.max - fullBounds.min;
+		if (sourceWidth <= 0) { return null; }
+		let min = Number.POSITIVE_INFINITY;
+		let max = Number.NEGATIVE_INFINITY;
+		meshes.forEach((mesh) => {
+			const positions = current
+				? this.readVertexPositions(mesh)
+				: this.rememberSnapshot(mesh).vertexPositions;
+			if (!positions) { return; }
+			this.getMeshComponents(mesh).forEach((component) => {
+				if (!this.isWidthSpanningComponent(component, sourceWidth)) { return; }
+				if (!current) {
+					min = Math.min(min, component.minimum.z);
+					max = Math.max(max, component.maximum.z);
+					return;
+				}
+				component.vertexIndices.forEach((vertexIndex) => {
+					const z = positions[vertexIndex * 3 + 2];
+					min = Math.min(min, z);
+					max = Math.max(max, z);
+				});
+			});
+		});
+		return Number.isFinite(min) && Number.isFinite(max) && max > min ? { min, max } : null;
+	}
+
+	/**
+	 * 对 mesh 全部顶点做电机端锚定的 Z 分段映射（用于 Ban.4 必须横跨全宽）。
+	 */
+	private stretchMeshAllVerticesByLocalZ(
+		mesh: any,
+		middleStart: number,
+		middleEnd: number,
+		middleScale: number,
+		extension: number,
+		anchorMinSide: boolean,
+	): void {
+		const baseline = this.rememberSnapshot(mesh).vertexPositions;
+		if (!baseline || typeof mesh.setVerticesData !== "function") { return; }
+		const current = this.readVertexPositions(mesh) ?? baseline;
+		const nextPositions = current.slice();
+		for (let index = 0; index < nextPositions.length; index += 3) {
+			nextPositions[index + 2] = this.mapMotorSideAnchoredWidthZ(
+				baseline[index + 2],
+				middleStart,
+				middleEnd,
+				middleScale,
+				extension,
+				anchorMinSide,
+			);
+		}
+		mesh.setVerticesData("position", nextPositions, true);
+		this.refreshMeshBounds(mesh);
+	}
+
+	/** 宽度锚定端与主体电机所在侧对齐（min-Z 或 max-Z）。 */
+	private resolveWidthAnchorMinSide(): boolean {
+		const body = this.findNodeByName(BODY_NODE_NAME);
+		if (!body) { return true; }
+		const bodyMeshes = this.getMeshesForNodes([body]);
+		const bounds = this.getLocalVertexBounds(bodyMeshes, "z");
+		const motorRange = this.getMotorAssemblyZRange(bodyMeshes);
+		if (!bounds || !motorRange) { return true; }
+		return motorRange.center <= (bounds.min + bounds.max) / 2;
+	}
+
+	/**
+	 * 辊筒 GT.3：按「辊筒密度」(中心距, m) 与「宽度」计算根数，固定间距从边沿复制；
+	 * 再与 Ban.4 共用长度/X 位置，并按辊筒宽度调单根厚度。
+	 */
+	private applyRollerParameters(
+		values: ValueMap,
+		platformLengthRatio: number,
+		heightOffset: number,
+		platformPosition: number,
+		widthMeters: number,
+	): void {
 		const roller = this.findNodeByName(ROLLER_NODE_NAME);
 		if (!roller) { return; }
 		const rollerWidth = this.readPositiveNumber(values, "rollerWidth", Number(DEFAULT_VALUES.rollerWidth));
 		const rollerWidthRatio = rollerWidth / Number(DEFAULT_VALUES.rollerWidth);
-		const density = this.clamp(Math.max(1, Math.round(this.readNumber(values, "rollerDensity", 0.6))), 1, 80);
+		const spacing = Math.max(PARAMETER_EPSILON, this.readPositiveNumber(values, "rollerDensity", Number(DEFAULT_VALUES.rollerDensity)));
 		const rollerPosition = this.readNumber(values, "rollerPosition", 0);
 		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
-		const platformBounds = platform ? this.getCurrentNodeMeterBounds(platform) : null;
-		const distributionCenterZ = platformBounds ? (platformBounds.minimum.z + platformBounds.maximum.z) / 2 : 0;
-		const centers = this.createRollerCenters(targetWidth, rollerWidth, density, distributionCenterZ);
-		const baseCenterZ = this.getNodeMeterCenterAxis(roller, "z") ?? distributionCenterZ - targetWidth / 2 + rollerWidth / 2;
-		this.scaleNodeWithAxisAnchors(roller, platformLengthRatio, 1, rollerWidthRatio, { x: "center", z: "center" });
+		const platformCurrent = platform ? this.getCurrentNodeMeterBounds(platform) : null;
+		const platformBaseline = platform ? this.getNodeMeterBounds(platform) : null;
+		const baseCenterZ = this.getNodeMeterCenterAxis(roller, "z") ?? -0.424;
+		const preferMinEdge = this.resolveRollerPreferMinWidthEdge(platformBaseline, baseCenterZ);
+		// 优先用 Ban.4 当前跨度（已随宽度拉伸）；读不到时回退到宽度参数。
+		const spanWidth = platformCurrent
+			? Math.max(0, platformCurrent.maximum.z - platformCurrent.minimum.z)
+			: Math.max(0, widthMeters);
+		const centers = this.createRollerCentersBySpacing(
+			platformCurrent,
+			spanWidth,
+			rollerWidth,
+			spacing,
+			preferMinEdge,
+			baseCenterZ,
+		);
+		// 厚度可缩放；长度只做顶点拉伸（节点位置不变），规则与主体 length 相同。
+		this.scaleNodeWithAxisAnchors(roller, 1, 1, rollerWidthRatio, { z: "center" });
+		this.stretchRollerLength(roller, platformLengthRatio);
 		this.applyRollerSkin(roller, this.readBoolean(values, "rollerSkin", true));
 		const rollerNodes = [roller];
 		for (let index = 1; index < centers.length; index += 1) {
@@ -535,23 +997,45 @@ export class ParametricModelRuntimeComponent {
 		rollerNodes.forEach((node, index) => this.placeRollerNode(node, platformPosition + rollerPosition, heightOffset, centers[index] ?? baseCenterZ, baseCenterZ));
 	}
 
-	/**
-	 * 根据目标链条机宽度和辊筒厚度，围绕当前顶升平台米制中心生成辊筒中心线；密度为 1 时保持原模型单根辊筒语义。
-	 */
-	private createRollerCenters(chainWidth: number, rollerWidth: number, density: number, centerMeters: number): number[] {
-		if (density <= 1) { return [this.getDefaultRollerCenterZ()]; }
-		const usableWidth = Math.max(0, chainWidth - rollerWidth);
-		const start = centerMeters - usableWidth / 2;
-		const step = density > 1 ? usableWidth / (density - 1) : 0;
-		return Array.from({ length: density }, (_, index) => start + step * index);
+	/** 原模型辊筒更靠近 Ban.4 的哪一侧（min-Z / max-Z），宽度变化后仍贴同一侧。 */
+	private resolveRollerPreferMinWidthEdge(
+		platformBaseline: { minimum: Vector3; maximum: Vector3 } | null,
+		rollerCenterZ: number,
+	): boolean {
+		if (!platformBaseline) { return true; }
+		const mid = (platformBaseline.minimum.z + platformBaseline.maximum.z) / 2;
+		return rollerCenterZ <= mid;
 	}
 
 	/**
-	 * 读取默认单根辊筒的中心位置，无法读取时回退到模型默认宽度左侧的合理位置。
+	 * 按固定中心距在宽度内排布：count = floor((span - rollerWidth) / spacing) + 1；
+	 * 从贴边一端起按 spacing 复制，间距不变（变宽加根数，变窄减根数）。
 	 */
-	private getDefaultRollerCenterZ(): number {
-		const roller = this.findNodeByName(ROLLER_NODE_NAME);
-		return roller ? (this.getNodeMeterCenterAxis(roller, "z") ?? -0.424) : -0.424;
+	private createRollerCentersBySpacing(
+		platformBounds: { minimum: Vector3; maximum: Vector3 } | null,
+		spanWidth: number,
+		rollerWidth: number,
+		spacing: number,
+		preferMinEdge: boolean,
+		fallbackCenterZ: number,
+	): number[] {
+		const usable = Math.max(0, spanWidth - rollerWidth);
+		const count = this.clamp(Math.floor(usable / spacing) + 1, 1, 80);
+		const half = Math.min(rollerWidth / 2, Math.max(0, spanWidth / 2));
+
+		if (!platformBounds) {
+			const start = preferMinEdge ? fallbackCenterZ : fallbackCenterZ - (count - 1) * spacing;
+			return Array.from({ length: count }, (_, index) => start + index * spacing);
+		}
+
+		const minZ = platformBounds.minimum.z;
+		const maxZ = platformBounds.maximum.z;
+		if (preferMinEdge) {
+			const first = minZ + half;
+			return Array.from({ length: count }, (_, index) => first + index * spacing);
+		}
+		const first = maxZ - half;
+		return Array.from({ length: count }, (_, index) => first - index * spacing);
 	}
 
 	/**
@@ -561,6 +1045,123 @@ export class ParametricModelRuntimeComponent {
 		if (!node.position) { return; }
 		const meterOffset = new Vector3(xOffsetMeters, yOffsetMeters, targetCenterZMeters - baseCenterZMeters);
 		node.position = node.position.add(this.meterOffsetToParentLocal(node, meterOffset));
+	}
+
+	/**
+	 * GT.3 长度：与 Ban.4 使用同一绝对伸长量（左固定、中拉、右平移），避免只按自身倍率导致接不上；
+	 * 辊轮本体顶点拉伸，辊轮皮只刚体跟随。
+	 */
+	private stretchRollerLength(roller: any, lengthRatio: number): void {
+		const meshes = this.getMeshesForNodes([roller]);
+		const bounds = this.getLocalVertexBounds(meshes, "x");
+		if (!bounds) { return; }
+		const sourceLength = bounds.max - bounds.min;
+		if (sourceLength <= 0) { return; }
+		const extension = this.resolveRollerLengthExtension(sourceLength, lengthRatio);
+		if (Math.abs(extension) < 0.0001) { return; }
+		const capLength = Math.min(this.getProtectedBodyEndLength(sourceLength) * 0.5, sourceLength * 0.15);
+		const minMiddle = Math.min(0.08, sourceLength * 0.1);
+		let middleStart = bounds.min + capLength;
+		let middleEnd = bounds.max - capLength;
+		if (middleEnd - middleStart < minMiddle) {
+			const mid = (bounds.min + bounds.max) / 2;
+			middleStart = mid - minMiddle / 2;
+			middleEnd = mid + minMiddle / 2;
+		}
+		const middleLength = middleEnd - middleStart;
+		if (middleLength <= 0) { return; }
+		const middleScale = (middleLength + extension) / middleLength;
+		meshes.forEach((mesh) => this.stretchRollerMeshLengthByLocalX(mesh, middleStart, middleEnd, middleScale, extension));
+	}
+
+	/**
+	 * 优先取 Ban.4 实际伸长量，保证辊筒与框架同步；读不到时回退到自身 lengthRatio。
+	 */
+	private resolveRollerLengthExtension(rollerSourceLength: number, lengthRatio: number): number {
+		const platform = this.findNodeByName(PLATFORM_NODE_NAME);
+		if (platform) {
+			const platformMeshes = this.getMeshesForNodes([platform]);
+			const baseline = this.getLocalVertexBounds(platformMeshes, "x");
+			const current = this.getLocalVertexBounds(platformMeshes, "x", true);
+			if (baseline && current) {
+				const platformExtension = (current.max - current.min) - (baseline.max - baseline.min);
+				if (Number.isFinite(platformExtension)) { return platformExtension; }
+			}
+		}
+		return rollerSourceLength * lengthRatio - rollerSourceLength;
+	}
+
+	/**
+	 * 仅拉伸辊轮本体；辊轮皮（短轴头/环）按组件中心刚体平移。
+	 * 若识别不到本体（如皮与筒焊成一体），整网按 Ban.4 规则拉伸，避免右端只位移一半而悬空。
+	 */
+	private stretchRollerMeshLengthByLocalX(
+		mesh: any,
+		middleStart: number,
+		middleEnd: number,
+		middleScale: number,
+		extension: number,
+	): void {
+		const positions = this.rememberSnapshot(mesh).vertexPositions;
+		if (!positions || typeof mesh.setVerticesData !== "function") { return; }
+		const nextPositions = positions.slice();
+		const components = this.getMeshComponents(mesh);
+		const bodyComponents = this.pickRollerBodyComponents(components);
+		const bodyVertices = new Set<number>();
+		bodyComponents.forEach((component) => {
+			component.vertexIndices.forEach((vertexIndex) => bodyVertices.add(vertexIndex));
+		});
+
+		if (bodyVertices.size === 0) {
+			for (let index = 0; index < nextPositions.length; index += 3) {
+				nextPositions[index] = this.mapMotorBayAnchoredLengthX(
+					positions[index],
+					middleStart,
+					middleEnd,
+					middleScale,
+					extension,
+				);
+			}
+			mesh.setVerticesData("position", nextPositions, true);
+			this.refreshMeshBounds(mesh);
+			return;
+		}
+
+		const skinDeltaByVertex = new Map<number, number>();
+		components.forEach((component) => {
+			if (bodyComponents.includes(component)) { return; }
+			const mappedCenter = this.mapMotorBayAnchoredLengthX(
+				component.center.x,
+				middleStart,
+				middleEnd,
+				middleScale,
+				extension,
+			);
+			const delta = mappedCenter - component.center.x;
+			component.vertexIndices.forEach((vertexIndex) => {
+				if (!bodyVertices.has(vertexIndex)) {
+					skinDeltaByVertex.set(vertexIndex, delta);
+				}
+			});
+		});
+
+		for (let index = 0; index < nextPositions.length; index += 3) {
+			const vertexIndex = index / 3;
+			const x = positions[index];
+			if (bodyVertices.has(vertexIndex)) {
+				nextPositions[index] = this.mapMotorBayAnchoredLengthX(x, middleStart, middleEnd, middleScale, extension);
+				continue;
+			}
+			const skinDelta = skinDeltaByVertex.get(vertexIndex);
+			if (skinDelta !== undefined) {
+				nextPositions[index] = x + skinDelta;
+			} else {
+				// 未归类顶点跟本体同样拉伸，避免悬空。
+				nextPositions[index] = this.mapMotorBayAnchoredLengthX(x, middleStart, middleEnd, middleScale, extension);
+			}
+		}
+		mesh.setVerticesData("position", nextPositions, true);
+		this.refreshMeshBounds(mesh);
 	}
 
 	/**
@@ -587,45 +1188,174 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 在 ZT.2 单体网格中移动或隐藏电机组件；图片参数以当前 GLB 基线为绝对位置。
+	 * 电机位置：零件 = length 电机侧保护区；
+	 * 0 时电机组 max.x 对齐腿 A 上方横梁的 max.x；增大则相对该基准偏移。
 	 */
-	private applyMotorParameters(values: ValueMap, widthRatio: number): void {
+	private applyMotorParameters(values: ValueMap, _widthRatio: number): void {
 		const body = this.findNodeByName(BODY_NODE_NAME);
 		if (!body) { return; }
-		const requestedPosition = this.readNumber(values, "motorPosition", Number(DEFAULT_VALUES.motorPosition));
-		const positionOffset = requestedPosition - Number(DEFAULT_VALUES.motorPosition);
-		const localOffset = positionOffset / Math.max(Math.abs(widthRatio), 0.0001);
+		const motorPos = this.readNumber(values, "motorPosition", Number(DEFAULT_VALUES.motorPosition));
 		const showMotor = this.readBoolean(values, "showMotor", true);
-		this.getMeshesForNodes([body]).forEach((mesh) => {
-			this.updateMeshComponents(mesh, (component) => this.isMotorComponent(component), new Vector3(0, 0, localOffset), showMotor);
+		const meshes = this.getMeshesForNodes([body]);
+		const baselineBounds = this.getLocalVertexBounds(meshes, "x", false);
+		const baselineBoundsZ = this.getLocalVertexBounds(meshes, "z", false);
+		const sourceLength = baselineBounds ? baselineBounds.max - baselineBounds.min : 0;
+		const sourceWidth = baselineBoundsZ ? baselineBoundsZ.max - baselineBoundsZ.min : 0;
+		const motorBayEndX = baselineBounds && sourceLength > 0
+			? this.getMotorBayProtectEndX(meshes, baselineBounds, sourceLength)
+			: Number.NEGATIVE_INFINITY;
+		const excludedCenters: Vector3[] = [];
+		meshes.forEach((mesh) => {
+			this.getMeshComponents(mesh).forEach((component) => {
+				if (this.isExcludedMotorTopSideHardware(component)) {
+					excludedCenters.push(component.center.clone());
+				}
+			});
+		});
+		const isMotorPositionPart = (component: MeshComponentSnapshot) => (
+			this.isMotorPositionComponent(component, motorBayEndX, sourceLength, excludedCenters)
+		);
+
+		const upperBeams = this.collectUpperLegBeamComponents(meshes, sourceWidth);
+		const beamMeter = this.getComponentsMeterXBounds(
+			meshes,
+			(component) => upperBeams.includes(component),
+			true,
+		);
+		const assemblyMeter = this.getComponentsMeterXBounds(meshes, isMotorPositionPart, true);
+		if (!beamMeter || !assemblyMeter || !meshes[0]) {
+			meshes.forEach((mesh) => this.setMeshComponentsVisible(mesh, isMotorPositionPart, showMotor));
+			return;
+		}
+
+		// 0 = 电机组 maximum.x 对齐腿 A 横梁 maximum.x；motorPos 增大则向 -X 移开。
+		const targetMeterMax = beamMeter.max - motorPos;
+		const meterDeltaX = targetMeterMax - assemblyMeter.max;
+		const deltaX = this.entityMeterDeltaXToMeshLocalX(meshes[0], meterDeltaX);
+
+		meshes.forEach((mesh) => {
+			this.updateMeshComponents(mesh, isMotorPositionPart, new Vector3(deltaX, 0, 0), true);
+			this.setMeshComponentsVisible(mesh, isMotorPositionPart, showMotor);
 		});
 	}
 
 	/**
-	 * 使用参数色对 ZT.2 材质做实例级着色，避免修改共享材质或原始 GLB。
+	 * 仅腿 A 的偏上横梁：非立柱、center.y 在立柱高度 45% 以上、偏水平/横跨。
+	 */
+	private collectUpperLegBeamComponents(meshes: any[], sourceWidth: number): MeshComponentSnapshot[] {
+		const beams: MeshComponentSnapshot[] = [];
+		meshes.forEach((mesh) => {
+			const components = this.getMeshComponents(mesh);
+			const legComponents = components.filter((component) => this.isLegAComponent(component));
+			const pillars = this.pickLegPillarsToStretch(legComponents);
+			if (legComponents.length === 0) { return; }
+			let upperLegMinCenterY = 0.45;
+			const pillarSet = new Set(pillars);
+			if (pillars.length > 0) {
+				const pillarBottom = Math.min(...pillars.map((pillar) => pillar.minimum.y));
+				const pillarTop = Math.max(...pillars.map((pillar) => pillar.maximum.y));
+				upperLegMinCenterY = pillarBottom + (pillarTop - pillarBottom) * 0.45;
+			}
+			legComponents.forEach((component) => {
+				if (pillarSet.has(component)) { return; }
+				if (component.center.y < upperLegMinCenterY) { return; }
+				const looksColumn = component.size.y >= component.size.x
+					&& component.size.y >= component.size.z
+					&& component.size.y >= 0.08;
+				if (looksColumn) { return; }
+				const spansWidth = sourceWidth > 0 && component.size.z >= sourceWidth * 0.15;
+				const flatBar = component.size.y <= Math.max(component.size.x, component.size.z) * 0.85;
+				if (!spansWidth && !flatBar) { return; }
+				beams.push(component);
+			});
+		});
+		return beams;
+	}
+
+	/**
+	 * 指定连通组件在实体根米空间中的当前/基线 X 范围。
+	 */
+	private getComponentsMeterXBounds(
+		meshes: any[],
+		predicate: (component: MeshComponentSnapshot) => boolean,
+		current: boolean,
+	): { min: number; max: number } | null {
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const inverseEntityRootWorldMatrix = entityRootWorldMatrix?.clone?.();
+		if (!inverseEntityRootWorldMatrix?.invert) { return null; }
+		inverseEntityRootWorldMatrix.invert();
+		let min = Number.POSITIVE_INFINITY;
+		let max = Number.NEGATIVE_INFINITY;
+		meshes.forEach((mesh) => {
+			const positions = current
+				? this.readVertexPositions(mesh)
+				: this.rememberSnapshot(mesh).vertexPositions;
+			const worldMatrix = mesh.computeWorldMatrix?.(true);
+			if (!positions || !worldMatrix) { return; }
+			this.getMeshComponents(mesh).forEach((component) => {
+				if (!predicate(component)) { return; }
+				component.vertexIndices.forEach((vertexIndex) => {
+					const offset = vertexIndex * 3;
+					const world = Vector3.TransformCoordinates(
+						new Vector3(positions[offset], positions[offset + 1], positions[offset + 2]),
+						worldMatrix,
+					);
+					const meter = Vector3.TransformCoordinates(world, inverseEntityRootWorldMatrix);
+					min = Math.min(min, meter.x);
+					max = Math.max(max, meter.x);
+				});
+			});
+		});
+		return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null;
+	}
+
+	/** 将实体根米空间 X 位移转为目标 mesh 局部 X 位移。 */
+	private entityMeterDeltaXToMeshLocalX(mesh: any, meterDeltaX: number): number {
+		if (Math.abs(meterDeltaX) < PARAMETER_EPSILON) { return 0; }
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const meshWorldMatrix = mesh?.computeWorldMatrix?.(true) ?? mesh?.getWorldMatrix?.();
+		const inverseMeshWorldMatrix = meshWorldMatrix?.clone?.();
+		if (!entityRootWorldMatrix || !inverseMeshWorldMatrix?.invert) { return meterDeltaX; }
+		inverseMeshWorldMatrix.invert();
+		const worldDelta = Vector3.TransformNormal(new Vector3(meterDeltaX, 0, 0), entityRootWorldMatrix);
+		return Vector3.TransformNormal(worldDelta, inverseMeshWorldMatrix).x;
+	}
+
+	/**
+	 * 使用参数色对 ZT.2 / Ban.4 材质做实例级着色，避免修改共享材质或原始 GLB。
 	 */
 	private applyBodyColor(values: ValueMap): void {
-		const body = this.findNodeByName(BODY_NODE_NAME);
-		if (!body) { return; }
 		const color = this.readColor3(values, "bodyColor", String(DEFAULT_VALUES.bodyColor));
-		this.getMeshesForNodes([body]).forEach((mesh, index) => {
-			const originalMaterial = this.rememberSnapshot(mesh).material ?? mesh.material;
-			const material = originalMaterial?.clone?.(`${String(originalMaterial?.name ?? "YZJBodyMaterial")}_parametric_${index}`);
-			if (!material) { return; }
-			if ("albedoColor" in material) { material.albedoColor = color.clone(); }
-			if ("diffuseColor" in material) { material.diffuseColor = color.clone(); }
-			if ("baseColor" in material) { material.baseColor = color.clone(); }
-			mesh.material = material;
-			this.generatedMaterials.push(material);
+		const targets = [this.findNodeByName(BODY_NODE_NAME), this.findNodeByName(PLATFORM_NODE_NAME)].filter(Boolean);
+		targets.forEach((target) => {
+			this.getMeshesForNodes([target]).forEach((mesh, index) => {
+				const originalMaterial = this.rememberSnapshot(mesh).material ?? mesh.material;
+				const material = originalMaterial?.clone?.(
+					`${String(originalMaterial?.name ?? "YZJBodyMaterial")}_${String(target.name ?? "node")}_${index}`,
+				);
+				if (!material) { return; }
+				if ("albedoColor" in material) { material.albedoColor = color.clone(); }
+				if ("diffuseColor" in material) { material.diffuseColor = color.clone(); }
+				if ("baseColor" in material) { material.baseColor = color.clone(); }
+				mesh.material = material;
+				this.generatedMaterials.push(material);
+			});
 		});
 	}
 
 	/**
-	 * 辊轮皮对应 GT.3 中的长圆柱连通组件，关闭时只保留两端轴头。
+	 * 「辊轮皮」开关：控制 GT.3 中除长圆柱辊轮体以外的剩余连通组件（轴头等）。
+	 * 长圆柱辊轮体本身不受此开关影响。
 	 */
 	private applyRollerSkin(roller: any, visible: boolean): void {
 		this.getMeshesForNodes([roller]).forEach((mesh) => {
-			this.setMeshComponentsVisible(mesh, (component) => this.isRollerSkinComponent(component), visible);
+			this.setMeshComponentsVisible(
+				mesh,
+				(component) => !this.isRollerBodyComponent(component),
+				visible,
+			);
 		});
 	}
 
@@ -1055,9 +1785,8 @@ export class ParametricModelRuntimeComponent {
 	 * 返回当前模型根节点及所有子级 transform/mesh。
 	 */
 	private getModelNodes(): any[] {
-		const scene = this.node.getScene?.();
-		const nodes = [this.node, ...(scene?.transformNodes ?? []), ...(scene?.meshes ?? [])];
-		return [...new Set(nodes.filter((candidate) => candidate === this.node || candidate.isDescendantOf?.(this.node)))];
+		const descendants = this.node.getDescendants?.(false) ?? [];
+		return [...new Set([this.node, ...descendants])];
 	}
 
 	/**
@@ -1089,11 +1818,13 @@ export class ParametricModelRuntimeComponent {
 	/**
 	 * 读取一组 mesh 的原始局部顶点单轴范围。
 	 */
-	private getLocalVertexBounds(meshes: any[], axis: AxisName): { min: number; max: number } | null {
+	private getLocalVertexBounds(meshes: any[], axis: AxisName, current = false): { min: number; max: number } | null {
 		let min = Number.POSITIVE_INFINITY;
 		let max = Number.NEGATIVE_INFINITY;
 		meshes.forEach((mesh) => {
-			const positions = this.rememberSnapshot(mesh).vertexPositions;
+			const positions = current
+				? this.readVertexPositions(mesh)
+				: this.rememberSnapshot(mesh).vertexPositions;
 			if (!positions) { return; }
 			const axisOffset = axis === "x" ? 0 : axis === "y" ? 1 : 2;
 			for (let index = axisOffset; index < positions.length; index += 3) {
@@ -1268,14 +1999,12 @@ export class ParametricModelRuntimeComponent {
 	}
 
 	/**
-	 * 将图片中的绝对辊筒框架位置转换为当前 GLB 基线偏移；旧 platformPosition 仍按偏移解释。
+	 * 辊筒框架位置：距主体 length 拉伸后物流最左侧（x+）的米制距离；旧 platformPosition 仍作为附加偏移。
 	 */
 	private resolveRollerFrameOffset(values: ValueMap): number {
-		const baseline = Number(DEFAULT_VALUES.rollerFramePosition);
-		const absolutePosition = this.readNumber(values, "rollerFramePosition", baseline);
+		const fromLeft = this.readNumber(values, "rollerFramePosition", Number(DEFAULT_VALUES.rollerFramePosition));
 		const legacyOffset = this.readNumber(values, "platformPosition", 0);
-		if (Math.abs(absolutePosition - baseline) <= PARAMETER_EPSILON && Math.abs(legacyOffset) > PARAMETER_EPSILON) { return legacyOffset; }
-		return absolutePosition - baseline;
+		return fromLeft + legacyOffset;
 	}
 
 	/**
@@ -1433,6 +2162,59 @@ export class ParametricModelRuntimeComponent {
 		return component.center.x > -0.15 && component.maximum.y <= 0.675;
 	}
 
+	/**
+	 * 电机位置联动件 = length 电机侧保护区；
+	 * 排除腿、长向梁，以及台面顶侧小五金（拱形凸起、U 形带孔耳，含其同位置邻件）。
+	 */
+	private isMotorPositionComponent(
+		component: MeshComponentSnapshot,
+		motorBayEndX: number,
+		sourceLength: number,
+		excludedCenters: Vector3[] = [],
+	): boolean {
+		if (!Number.isFinite(motorBayEndX)) { return false; }
+		if (this.isLegAComponent(component) || this.isLegBComponent(component)) { return false; }
+		if (sourceLength > 0 && component.size.x >= sourceLength * 0.4) { return false; }
+		if (this.isExcludedMotorTopSideHardware(component)) { return false; }
+		if (this.isNearExcludedMotorHardware(component, excludedCenters)) { return false; }
+		return component.center.x <= motorBayEndX;
+	}
+
+	/**
+	 * 电机位置排除：台面顶侧小五金——拱形凸起、U 形带孔耳（图中多出、不随电机移动）。
+	 */
+	private isExcludedMotorTopSideHardware(component: MeshComponentSnapshot): boolean {
+		if (this.isMotorComponent(component) || this.isMotorHousingComponent(component)) {
+			return false;
+		}
+		const sx = component.size.x;
+		const sy = component.size.y;
+		const sz = component.size.z;
+		const maxDim = Math.max(sx, sy, sz);
+		const minDim = Math.min(sx, sy, sz);
+		if (maxDim > 0.16 || maxDim < 0.012) { return false; }
+		if (sx >= 0.18 || sz >= 0.22) { return false; }
+		if (component.faceCount < 16 || component.faceCount > 500) { return false; }
+		// 与顶拱同一高度带
+		if (component.center.y < 0.48 || component.maximum.y < 0.55) { return false; }
+		// 矮拱凸起
+		const shortArch = sy <= 0.07 && minDim <= 0.05;
+		// U 形带孔耳（可略高）
+		const clevisEar = sy <= 0.16 && maxDim <= 0.14 && minDim <= 0.055;
+		return shortArch || clevisEar;
+	}
+
+	/** 紧挨已排除顶侧五金的其它小件一并排除（「位置在一起」）。 */
+	private isNearExcludedMotorHardware(component: MeshComponentSnapshot, excludedCenters: Vector3[]): boolean {
+		if (excludedCenters.length === 0) { return false; }
+		if (this.isMotorComponent(component) || this.isMotorHousingComponent(component)) {
+			return false;
+		}
+		const maxDim = Math.max(component.size.x, component.size.y, component.size.z);
+		if (maxDim > 0.2) { return false; }
+		return excludedCenters.some((center) => Vector3.Distance(component.center, center) <= 0.18);
+	}
+
 	/** 电机由 ZT.2 中四个相邻、尺寸稳定的连通组件组成。 */
 	private isMotorComponent(component: MeshComponentSnapshot): boolean {
 		return component.center.x >= -0.68 && component.center.x <= -0.52
@@ -1441,9 +2223,29 @@ export class ParametricModelRuntimeComponent {
 			&& component.size.x <= 0.15 && component.size.y <= 0.14 && component.size.z <= 0.3;
 	}
 
-	/** GT.3 最长的圆柱连通组件即图片参数中的辊轮皮。 */
-	private isRollerSkinComponent(component: MeshComponentSnapshot): boolean {
-		return component.size.x > 0.8 && component.size.y < 0.08 && component.size.z < 0.08;
+	/** 台面下电机仓/盒：结构顶面以下、电机同侧中段、非腿非电机本体的邻近结构。 */
+	private isMotorHousingComponent(component: MeshComponentSnapshot): boolean {
+		if (this.isMotorComponent(component) || this.isLegAComponent(component) || this.isLegBComponent(component)) {
+			return false;
+		}
+		if (component.center.y > 0.66 || component.maximum.y > 0.72) { return false; }
+		if (component.minimum.x > -0.2 || component.maximum.x < -1.0) { return false; }
+		if (component.maximum.z < -0.2 || component.minimum.z > 0.45) { return false; }
+		return component.faceCount >= 40 || component.size.x >= 0.12 || component.size.z >= 0.12;
+	}
+
+	/** GT.3 中细长圆柱连通组件 = 辊轮本体（非「辊轮皮」开关目标）。 */
+	private isRollerBodyComponent(component: MeshComponentSnapshot): boolean {
+		return component.size.x > 0.5 && component.size.y < 0.12 && component.size.z < 0.12;
+	}
+
+	/** 取最长的细长件作为辊筒本体；短件（轴头/环）视为皮。 */
+	private pickRollerBodyComponents(components: MeshComponentSnapshot[]): MeshComponentSnapshot[] {
+		const candidates = components.filter((component) => this.isRollerBodyComponent(component));
+		if (candidates.length > 0) { return candidates; }
+		const maxSpanX = Math.max(0, ...components.map((component) => component.size.x));
+		if (maxSpanX < 0.3) { return []; }
+		return components.filter((component) => component.size.x >= maxSpanX * 0.85);
 	}
 
 	/** 释放主体颜色生成的实例材质，但保留原 GLB 共享纹理。 */

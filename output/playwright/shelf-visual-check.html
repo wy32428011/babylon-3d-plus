@@ -102,12 +102,12 @@
       const denseOnly = query.get("dense") === "1";
       const visualView = query.get("view") === "detail" ? "detail" : "overview";
       const denseCase = {
-        id: "dense100x100",
-        label: "100层×100列 高密度",
+        id: "dense20x100",
+        label: "20层×100列 高密度",
         x: 0,
         z: 0,
         rotationY: 0,
-        values: { ...defaultValues, layerCount: 100, columnCount: 100, doubleDeepEnabled: true },
+        values: { ...defaultValues, layerCount: 20, columnCount: 100, cellWidth: 1.2, cellHeight: 1.2, supportLegHeight: 0.2, postExtension: 0, cellDepth: 1.183, doubleDeepEnabled: true, deepSlotGap: 1.2, bodyColor: "#ff0000", beamColor: "#00ff00" },
       };
       const matrixCases = [
         { id: "default", label: "默认", x: -14, z: -8, rotationY: 0, values: { ...defaultValues } },
@@ -172,7 +172,13 @@
       }
 
       function getRootBounds(root) {
-        const meshes = root.getChildMeshes(false).filter((mesh) => mesh.isEnabled());
+        const meshes = root.getChildMeshes(false).filter((mesh) => (
+          !mesh.isDisposed()
+          && mesh.getTotalVertices() > 0
+          && mesh.isVisible !== false
+          && Number(mesh.visibility ?? 1) > 0
+          && mesh.isEnabled(true)
+        ));
         let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
         let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
         let thinInstanceCount = 0;
@@ -218,7 +224,7 @@
         ground.scaling.z = Math.max(1, size.z / 38 + 0.5);
 
         if (denseOnly && visualView === "overview") {
-          // 正交前视只使用 X/Y 尺寸和视口比例取景，避免 100 层顶部/底部被横屏裁切。
+          // 正交前视只使用 X/Y 尺寸和视口比例取景，避免 20 层顶部/底部被横屏裁切。
           const aspect = engine.getRenderWidth() / Math.max(1, engine.getRenderHeight());
           const halfHeight = Math.max(size.y / 2, size.x / Math.max(0.001, aspect) / 2) * 1.08;
           camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
@@ -251,7 +257,7 @@
           // 透视细节视图聚焦约 12 列 × 12 层区域，并保留斜视角展示双深 Z 方向。
           const detailColumns = 12;
           const detailLayers = 12;
-          const denseReport = reports.find((item) => item.id === "dense100x100") ?? reports[0];
+          const denseReport = reports.find((item) => item.id === "dense20x100") ?? reports[0];
           const detailCenter = new Vector3(
             denseReport.minimum.x + Math.min(size.x, defaultValues.cellWidth * detailColumns) / 2,
             denseReport.minimum.y + Math.min(size.y, defaultValues.cellHeight * detailLayers) / 2,
@@ -349,7 +355,7 @@
         await runtime.start();
         runtime.update();
         const bounds = getRootBounds(root);
-        // 输出有效参数，便于 Playwright 视觉验收直接校验 100x100 高密度用例。
+        // 输出有效参数，便于 Playwright 视觉验收直接校验 20x100 高密度用例。
         return {
           id: testCase.id,
           label: testCase.label,
@@ -377,10 +383,11 @@
           if (byId.doubleGap.size.z <= 2.6) failures.push("双深间隔参数未生效");
           if (byId.deepLift.size.y <= byId.default.size.y + 0.25) failures.push("深位提升参数未生效");
         }
-        if (byId.dense100x100) {
-          if (byId.dense100x100.denseBatchCount <= 0) failures.push("100x100 未启用高密度批次");
-          if (byId.dense100x100.thinInstanceCount < 10000) failures.push("100x100 thin instance 数不足");
-          if (byId.dense100x100.meshCount >= 200) failures.push("100x100 Mesh 数未保持批次级");
+        if (byId.dense20x100) {
+          if (byId.dense20x100.effectiveLayerCount !== 20 || byId.dense20x100.effectiveColumnCount !== 100) failures.push("20x100 有效参数异常");
+          if (byId.dense20x100.denseBatchCount !== 18) failures.push(`20x100 dense batch 应为 18，实际 ${byId.dense20x100.denseBatchCount}`);
+          if (byId.dense20x100.thinInstanceCount !== 16674) failures.push(`20x100 thin instance 应为 16674，实际 ${byId.dense20x100.thinInstanceCount}`);
+          if (byId.dense20x100.meshCount !== 18) failures.push(`20x100 可渲染 Mesh 应为 18，实际 ${byId.dense20x100.meshCount}`);
         }
         const cameraStats = frameReports(reports);
         engine.runRenderLoop(() => scene.render());

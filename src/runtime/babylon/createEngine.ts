@@ -376,10 +376,26 @@ function createEditorGround(scene: Scene, initialSettings: EditorGridSettings) {
   };
 }
 
-/** 根据包围半径计算相机观察距离，给对象周围预留一圈编辑空间。 */
-function getFocusCameraRadius(bounds: EditorWorldBounds): number {
-  const radiusMeters = Number.isFinite(bounds.radiusMeters) ? bounds.radiusMeters : 1;
-  return clampCameraRadius(Math.max(radiusMeters * 2.2, 2.5));
+/**
+ * 根据包围球、相机 FOV 与实际画布宽高比计算完整取景距离。
+ * 旧的固定 2.2 倍半径在窄画布或超长场景中会把左右边缘裁出视野；这里取水平/垂直较窄半角，
+ * 以包围球切线距离保证相机旋转到任意方位时仍能看到完整模型，并保留少量编辑边距。
+ */
+function getFocusCameraRadius(bounds: EditorWorldBounds, camera: ArcRotateCamera, engine: Engine): number {
+  const radiusMeters = Number.isFinite(bounds.radiusMeters) ? Math.max(bounds.radiusMeters, 0.5) : 1;
+  const renderWidth = Math.max(1, engine.getRenderWidth());
+  const renderHeight = Math.max(1, engine.getRenderHeight());
+  const aspectRatio = renderWidth / renderHeight;
+  const configuredHalfFov = Math.min(Math.PI / 2 - 0.001, Math.max(0.01, camera.fov / 2));
+  const verticalHalfFov = camera.fovMode === Camera.FOVMODE_HORIZONTAL_FIXED
+    ? Math.atan(Math.tan(configuredHalfFov) / aspectRatio)
+    : configuredHalfFov;
+  const horizontalHalfFov = camera.fovMode === Camera.FOVMODE_HORIZONTAL_FIXED
+    ? configuredHalfFov
+    : Math.atan(Math.tan(configuredHalfFov) * aspectRatio);
+  const limitingHalfFov = Math.max(0.01, Math.min(verticalHalfFov, horizontalHalfFov));
+  const fitDistance = radiusMeters / Math.sin(limitingHalfFov);
+  return clampCameraRadius(Math.max(fitDistance * 1.08, 2.5));
 }
 
 /** 将场景灵敏度映射到 Babylon 相机参数，滑杆 10 对应原始默认手感。 */
@@ -703,7 +719,7 @@ export function createBabylonViewport(
     camera,
     focusOnBounds: (bounds) => {
       camera.setTarget(new Vector3(bounds.center.x, bounds.center.y, bounds.center.z));
-      camera.radius = getFocusCameraRadius(bounds);
+      camera.radius = getFocusCameraRadius(bounds, camera, engine);
     },
     setViewDistance: (meters) => {
       const viewDistance = sanitizeSceneViewDistance(meters);

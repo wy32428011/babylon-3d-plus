@@ -820,6 +820,37 @@ select {
   color: #777777;
 }
 
+.hierarchy-tree-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.panel .hierarchy-tree-action-button {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  padding: 0;
+  border-color: #4a4a4a;
+  color: #bdbdbd;
+  background: #262626;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.panel .hierarchy-tree-action-button:hover:not(:disabled) {
+  border-color: #686868;
+  color: #ffffff;
+  background: #3a3a3a;
+}
+
+.panel .hierarchy-tree-action-button:disabled {
+  opacity: 0.55;
+}
+
 .hierarchy-new-folder-button {
   flex: 0 0 auto;
   height: 24px;
@@ -839,19 +870,35 @@ select {
 }
 
 .hierarchy-panel .entity-list {
+  position: relative;
   display: block;
   min-height: 0;
   overflow: auto;
+  overflow-anchor: none;
   border-top: 1px solid #3a3a3a;
   background: #2f2f2f;
+}
+
+.hierarchy-virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.hierarchy-virtual-window {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  width: 100%;
 }
 
 .entity-tree-row {
   --entity-depth: 0;
 
   display: grid;
-  grid-template-columns: 22px 22px calc(var(--entity-depth) * 16px) 18px 18px minmax(0, 1fr) auto;
+  grid-template-columns: 22px 22px min(calc(var(--entity-depth) * 16px), 160px) 18px 18px minmax(0, 1fr) auto;
   align-items: center;
+  height: 24px;
   min-height: 24px;
   border-bottom: 1px solid #3d3d3d;
   color: #cfcfcf;
@@ -1845,7 +1892,7 @@ select {
   height: 190px;
   min-width: 0;
   min-height: 190px;
-  padding: 6px 14px 8px;
+  padding: 8px 14px 6px;
   /* 所有资源库保持单行排列，卡片超出宽度后仅使用横向滚动。 */
   overflow-x: auto;
   overflow-y: hidden;
@@ -2178,7 +2225,7 @@ select {
 
 .home-page {
   display: grid;
-  grid-template-rows: 72px minmax(0, 1fr) auto;
+  grid-template-rows: 72px auto minmax(0, 1fr) auto;
   width: 100vw;
   height: 100vh;
   min-width: 0;
@@ -2283,6 +2330,100 @@ select {
   color: #777777;
   cursor: not-allowed;
   opacity: 0.72;
+}
+
+.home-workspace-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  padding: 9px 20px;
+  border-bottom: 1px solid #111111;
+  background: #242426;
+}
+
+.home-workspace-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.home-workspace-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.home-workspace-heading strong {
+  color: #eeeeee;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.home-workspace-badge {
+  padding: 2px 6px;
+  border: 1px solid #3f5558;
+  border-radius: 999px;
+  color: #9fb7bb;
+  background: #1b2526;
+  font-size: 10px;
+}
+
+.home-workspace-badge-custom {
+  border-color: #1ba5af;
+  color: #7ceaf2;
+}
+
+.home-workspace-path {
+  min-width: 0;
+  overflow: hidden;
+  color: #d5d5d5;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-workspace-summary small {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-workspace-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.home-workspace-actions button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid #4c4c4c;
+  border-radius: 4px;
+  color: #e4e4e4;
+  background: #353535;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.home-workspace-actions button:hover:not(:disabled) {
+  border-color: #20dce9;
+  color: #ffffff;
+  background: #184f56;
+}
+
+.home-workspace-actions button:disabled {
+  color: #777777;
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .home-content {
@@ -2756,7 +2897,7 @@ select {
 
 @media (max-width: 760px) {
   .home-page {
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
   }
 
   .home-topbar {
@@ -2767,6 +2908,25 @@ select {
 
   .home-actions {
     justify-content: flex-start;
+  }
+
+  .home-workspace-bar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .home-workspace-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .home-workspace-heading,
+  .home-workspace-summary small {
+    grid-column: 1;
+  }
+
+  .home-workspace-actions {
+    flex-wrap: wrap;
   }
 
   .home-content {

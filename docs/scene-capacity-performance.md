@@ -2,16 +2,19 @@
 
 日期：2026-07-17
 
-更新：2026-07-24
+更新：2026-07-25
 
 ## 目标
 
-本轮优化只减少重复工作和资源峰值，不通过降低画质换取性能。以下视觉项保持不变：
+优化必须同时保留源资产、编辑语义和最终画面，不通过降低渲染分辨率、删除模型或替换 Geometry 换取性能。2026-07-25 起，大场景渲染遵守以下硬性契约：
 
-- Babylon Engine 抗锯齿继续开启；
-- stencil、GlowLayer、HighlightLayer、SelectionOutlineLayer 保留；
-- 模型纹理、PBR 材质、几何精度和相机可视距离不做自动降级；
-- 场景 JSON、模型包 `meta.json` 和米制单位契约不变。
+- Babylon Engine 抗锯齿继续开启，stencil、GlowLayer、HighlightLayer、SelectionOutlineLayer 保留；
+- 模型纹理、PBR 材质、光照、顶点、索引和拓扑不做降级、焊接、删面或替换；
+- 参数脚本必须先完整执行，脚本生成的梁、柱、辊筒、支架等全部部件都进入真实 Geometry 批次；
+- 任意相机距离、缩放和旋转视角都不得使用 box、框架、包围盒、低模或其它代理，也不得为了 FPS 隐藏视锥内模型；
+- thinInstance 只复用原模型 Geometry 与矩阵缓冲。正式批次仍可按空间分片，并对相机视锥外实例执行正常裁剪；实例进入视锥后始终绘制原模型；
+- 性能报告保留代理指标作为防回归守卫：`modelArrayScreenSpaceProxyBatchCount`、`modelArraySolidProxyEntityCount`、`modelArrayFrameProxyEntityCount`、`modelArrayProxyEntityCount` 必须全部为 `0`，`modelArrayDetailedEntityCount` 必须等于逻辑模型总数；
+- 场景 JSON、模型包 `meta.json`、米制单位、参数格式和运行预览契约不变。
 
 ## 硬件加速 WebGL 前置条件
 
@@ -58,26 +61,113 @@ Electron 主进程会在 `app ready` 前请求高性能 GPU、禁用 Chromium �
 Scene View 在编辑态会构造一层只存在于内存中的实体覆盖，不修改原始 `SceneDocument`，也不会把优化关系写入场景文件：
 
 - 完全相同的模型模板忽略实例级 `modelAsset.assetCode` 后分组；每组只保留一个真实模型和脚本宿主，其余实体临时映射到 `modelArrayInstance`，复用既有拾取、Gizmo、测量、显隐、锁定、选择描边和 thinInstance 矩阵批次。
-- 无外置脚本模型默认允许合批；带脚本模型仅允许经过编辑态行为核对的 `shelf.model.ts`、`yzj.model.ts` 和 `chain-conveyor.model.ts`。其它脚本继续走逐实体路径，避免把依赖 `assetCode` 或私有运行状态的视觉错误合并。
+- 同一模板若已经存在多个持久化阵列源，编辑态只保留一个稳定可见源，其它源及其阵列实例临时重映射到统一源；该映射不写回 `SceneDocument`，参数模板分离时会立即恢复各自原始源。仍含旧 `modelArray.items` 的兼容源不会被降级，避免尚未迁移的内存场景丢失隐藏阵列项。
+- 无外置脚本模型默认允许合批；带脚本模型仅允许经过编辑态行为核对的 `box.model.ts`、`chain-conveyor.model.ts`、`gd-motor-optimized.model.ts`、`hcts.model.ts`、`shelf.model.ts`、`wlts.model.ts` 和 `yzj.model.ts`。其它脚本继续走逐实体路径，避免把依赖 `assetCode` 或私有运行状态的视觉错误合并。
 - 模板签名包含资源版本、单位、脚本元数据、参数配置和 `parameterValues`，因此不同尺寸、材质或显隐参数会进入不同批次，不会共用已变形几何。
 - 模型模板签名和派生实体使用不可变对象缓存；单个 Transform 变化时复用其余逻辑实体，避免 Gizmo 拖动期间反复序列化整份脚本元数据。
 - 进入运行预览时 Scene View 始终同步原始文档，恢复每个设备独立的脚本实例、`assetCode`、参数和 MQTT 遥测状态；退出预览后再回到编辑态覆盖层。
 
 2026-07-23 使用指定的 `Untitled Scene.scene.json`（SHA-256 `f9d9fa6dc156dd0f96b5ba76f794ee2454efde415b7965b91cae92244a459b54`）和仓库内真实 YZJ/链条机 GLB、脚本进行 NullEngine 初始化回归：29,893,835 字节场景包含 1,840 个实体，其中 1,821 个模型被归并为 4 个参数变体源和 1,817 个逻辑 thinInstance 实体；实际只加载 4 次模型源，生成 135 个批次 Mesh、38,027 个 thinInstance，最终有效渲染 Mesh 为 270。最终一次运行中反序列化约 612 ms、编辑态分组约 572 ms、真实脚本与矩阵批次从 `sync()` 到就绪约 2.40 s，脚本警告和运行时日志均为 0。该数据用于验证初始化数量级和完整性，不等同于最终 Electron 窗口的 GPU 上传或首帧时间。
 
+## 2026-07-24 5k+ 模型性能报告定位
+
+指定性能报告运行在 RTX 5070 Laptop GPU、WebGL 2、ANGLE D3D11on12 硬件后端。60 个样本的平均 FPS 为 8.43、最低 3.02；GPU frame 中位数约 2.68 ms，而 CPU frame 中位数约 99.88 ms，最大 Draw Call 13,919、最大 active mesh 17,602、最大总 Mesh 32,703，60 秒内 Long Task 累计 47,164 ms。由此可确认本次卡顿不是“GPU 没有完全启用”，而是主线程 Mesh 遍历、脚本模型源和 Draw Call 提交过多；继续添加 GPU 启动参数不会消除该瓶颈。
+
+对报告对应的 113,110,088 字节场景执行当前编辑态计划：8,410 个实体中有 8,346 个模型实体，原始结构包含 1,966 个真实模型源和 6,380 个已有阵列实例；优化后只保留 18 个真实模型源，其余 8,328 个模型实体走矩阵实例，共减少 1,948 个逐源脚本/模型运行时。冷态计划计算约 475 ms，形成 8 个模板组；其中 YZJ 源减少 1,323 个、链条机减少 516 个、HCTS 减少 100 个。该结果验证了结构性降载，但不冒充最终 Electron FPS：发布前仍需在目标 NVIDIA 机器上重新采集同一份性能报告，重点核对 Draw Call、active mesh、CPU frame、Long Task 和 FPS。
+
+使用报告场景中的当前 `modelAsset` 元数据、仓库内真实 GLB 和真实脚本文本，对本次新增白名单的 Box、GD、HCTS、WLTS 分别执行“两份同模板源”集成验证：四者均只加载 1 次 GLB、只保留 1 个 `ModelRuntimeEntry`，并成功生成对应 thinInstance 批次；批次 Mesh 数分别为 1、105、49、30。
+
+## 2026-07-24/25 10k Electron 与真实重导入验收
+
+此前约 28–29 FPS 的数据来自局部相机视锥：10,000 个模型实体中，当时实际提交的是 52,331 / 612,400 个 thinInstance，因此不能作为“全模型入镜并旋转”的 FPS 结论。`smoke:reimport-performance` 会选择包含全部 10,000 个模型的临时文件夹，走正式 `F` 聚焦路径，把相机调整到约 `beta=1.03 rad` 的斜俯视角，再通过 `ArrowLeft` 持续环绕。旋转采样中的每一帧都要求：
+
+- `geometryReadyEntityCount=10,000/10,000`，没有 missing/not-ready 模型；
+- `modelArrayBatchEntityCount=10,000`，`modelArrayDetailedEntityCount=10,000`；
+- `modelArrayScreenSpaceProxyBatchCount=0`、`modelArraySolidProxyEntityCount=0`、`modelArrayFrameProxyEntityCount=0`、`modelArrayProxyEntityCount=0`；
+- Active Mesh 和物理 thinInstance 数只允许因正常视锥裁剪变化，不能因相机距离切换成其它 Geometry；
+- 相机 target 保持在完整场景中心，near/far plane 不裁剪场景，完整包围球取景比始终不低于 `1.02`；
+- 重导入前后总 Geometry 顶点、批次 Mesh 数和 GPU 工作量中的模型源集合保持一致，避免旧 Mesh 残留、源模型丢失或参数化批次未恢复；
+- 三个不同旋转角截图从边缘推导背景色板，并检查前景颜色、像素占比、横纵跨度和亮度变化，防止空白画面或模型消失被 FPS 数字掩盖。
+
+全原模型 Geometry 的既有实测基线为：
+
+- Intel UHD Graphics 630、WebGL 2、ANGLE D3D11：刷新前平均 `5.58 FPS`、GPU frame `175.51 ms`；刷新全部 10,000 个实例后平均 `5.60 FPS`、GPU frame `166.69 ms`；
+- 同一机器使用 `C:\Users\WY\Desktop\models` 再次执行 18 秒旋转：刷新前平均 `4.27 FPS`、刷新后平均 `4.26 FPS`，刷新后 GPU frame `220.78 ms`、CPU frame 约 `8.33 ms`；
+- 两轮均约为每帧 `59,600,000` 次顶点调用和 `25,000,000` 次三角调用，主要瓶颈是 Intel UHD 630 的 GPU 几何吞吐，而不是 Electron 未启用 GPU、主线程同步或软件 renderer；
+- 双面、Alpha test 和 Alpha blend 负载来自源资产真实开放几何与材质契约，强制开启背面剔除或改写透明状态会造成缺面，不进入正式路径。
+
+移除代理后的最新保真取证报告为 `2026-07-25T09-04-02-336Z-real-scene-full-rotation-performance.json`。本次直接启动 Electron，`electronArgs=[]`，未传入任何 GPU、VSync 或帧率解锁参数；使用 Intel UHD Graphics 630、WebGL 2、ANGLE D3D11：
+
+- 刷新前全景旋转平均 `4.33 FPS`、最低 `4.28 FPS`、GPU frame `231.73 ms`；刷新 10,000 个模型后平均 `4.53 FPS`、最低 `3.90 FPS`、GPU frame `223.72 ms`，FPS 保留率 `104.62%`；
+- 两阶段均为 `165` Draw Call、`159` Active/Total Mesh、`612,400` 个活动 thinInstance、每帧约 `59,667,902` 次顶点调用和 `25,022,060` 次三角调用；
+- 两阶段 `modelArrayBatchEntityCount=10,000`、`modelArrayDetailedEntityCount=10,000`，所有代理批次/实体指标均为 `0`，不存在方块、框架或其它替代 Geometry；
+- 刷新前后分别环绕 `6.89 rad` 和 `7.10 rad`，全景 fit ratio 均为 `1.08`，`10,000/10,000` 模型 geometry-ready，missing/not-ready 均为 `0`；
+- 三个刷新后角度截图通过前景颜色、像素占比、横纵跨度与亮度检查。该次使用 `ZENDING_MINIMUM_ROTATING_FPS=1` 只为采集全原模型基线，因此报告的 `PASS` 表示保真、完整性、重导入和旋转检查通过，不代表达到 30 FPS 发布门槛。
+
+2026-07-25 的两个代理实验报告已经否决：
+
+- `2026-07-25T07-57-21-760Z-real-scene-full-rotation-performance.json` 的 `33.07 FPS` 来自 10,000 个实体全部切换为实心方块代理；
+- `2026-07-25T07-52-09-970Z-real-scene-full-rotation-performance.json` 的 `248.65 FPS` 同样使用代理，并额外传入仅限诊断的 `--disable-frame-rate-limit --disable-gpu-vsync`；
+- 两份报告都不满足“任意视角显示原模型”的产品要求，不得再作为发布门槛、性能达标或视觉保真证据；对应生产代理代码、阈值和专项测试已移除。
+
+30 FPS 要求单帧不超过 `33.3 ms`，60 FPS 要求不超过 `16.7 ms`。在当前 Intel UHD 630 上，全原模型的 `166–221 ms` GPU frame 与 30 FPS 目标存在明确硬件差距，不能通过 Electron 启动参数、CPU 优化或小幅减少 Draw Call 消除。后续优化只能继续采用视觉完全等价的方式，例如原 Geometry thinInstance、空间分片、状态冻结、批次复用和经过真实 WebGL 像素一致性验证的安全数据布局优化；不得重新引入 LOD、代理、删面、隐藏、降分辨率或材质替换。目标 NVIDIA 设备仍须执行同一全景旋转脚本，不能从 Intel 数据推算。
+
+曾尝试对完全相同顶点属性做索引焊接，但真实 WebGL 路径出现模型缺面/不可稳定采样；该实验已撤销。正式路径继续保留每批次 `makeGeometryUnique()`、参数化脚本、正负 determinant、拾取和选择语义，不改变顶点/索引拓扑。
+
+可重复验收命令：
+
+```powershell
+$env:ZENDING_SCENE_SOURCE='C:/path/to/real-10000-models.scene.json'
+$env:ZENDING_MODEL_ROOT='C:/path/to/Assets/Models'
+npm run smoke:reimport-performance
+```
+
+脚本默认按 renderer 设置发布门槛：NVIDIA 为 60 FPS，其余硬件为 30 FPS；同时先测量空闲 renderer 的 `requestAnimationFrame` 节拍。当前硬件若无法在全原模型条件下达到门槛，脚本应明确失败，不能用代理或降低质量“通过”。`ZENDING_MINIMUM_ROTATING_FPS` 只用于采集诊断基线，不得用于发布放行。报告和三组旋转截图写入系统临时目录 `zending-performance-evidence`。
+
+吞吐诊断可以临时使用以下 PowerShell 环境变量；不得把参数写入应用快捷方式、Electron 主进程或安装包：
+
+```powershell
+$env:ZENDING_ELECTRON_EXTRA_ARGS='["--disable-frame-rate-limit","--disable-gpu-vsync"]'
+$env:ZENDING_MINIMUM_ROTATING_FPS='1'
+npm run smoke:reimport-performance
+```
+
 ## 增量场景同步
 
-每次 `SceneDocument` 变化时仍会完整计算实体存在性和父级显隐/锁定状态，但只有新增、删除、实体对象发生变化或运行时对象缺失的实体才执行完整 `syncEntity`。
+实体表或顺序变化时，`SceneRuntime.sync()` 仍会完整计算实体存在性和父级显隐/锁定状态，但只有新增、删除、实体对象发生变化或运行时对象缺失的实体才执行完整 `syncEntity`。
 
-仅选择变化、父文件夹显隐或锁定变化时，运行时只刷新：
+纯 `selectedEntityId` 变化不会再进入完整 `sync()`，而是调用 `SceneRuntime.syncSelection()`：
 
-- 基础 Mesh 选择颜色和拾取；
-- locator 边线与交互面；
-- CAD 显示；
-- 模型 Highlight/SelectionOutline 与拾取；
-- 模型生成器标记、POI 展示和灯光启用状态。
+- 普通单选只访问旧目标和新目标，不迭代 `document.entityIds`；
+- 文件夹选中按实际子实体数量处理，复杂度为 `O(selected)`；
+- 基础 Mesh、locator、CAD、模型、模型生成器、POI 和灯光只刷新选区相关表现；
+- Gizmo attachment 与 Inspector 模型尺寸仍在同一选择 effect 中更新。
 
-模型加载、参数绑定、外置脚本、子 Mesh 收集和遥测基线不会因无关实体或纯选择变化被重复执行。
+共享模型与模型阵列的 SelectionOutline 只从当前选区推导，不再扫描全部模型批次、展开全部可见 ID 或拼接全场景 signature。`EntityArrayThinInstanceBatch` 在矩阵提交时建立逻辑实体到连续实例区间的索引；切换单选时只清零旧区间并写入新区间，复用既有 `Float32Array`，不会扫描整个 thinInstance 缓冲。模型加载、参数绑定、外置脚本、子 Mesh 收集和遥测基线不会因纯选择变化被重复执行。
+
+## Hierarchy 大列表虚拟化
+
+Hierarchy 使用固定 `24px` 行高和上下各 `20` 行 overscan：
+
+- DOM 只包含当前可视窗口及缓冲行，总滚动高度仍为 `rows.length × 24px`；
+- 10,000 行、480px 视口最多渲染 61 行；50,000 行、720px 视口最多渲染 71 行；
+- 选区查询使用 `Set.has()`，Shift 范围多选继续使用完整 rows 的绝对索引；
+- 搜索、文件夹折叠、Ctrl/Cmd 多选、拖放、右键菜单和行内重命名语义不变；
+- 主要选中项或正在重命名项位于视口外时，以最小滚动距离移动到可见区域。
+
+## Scene View 性能 HUD 与报告
+
+Scene View 左上角显示低频性能摘要，点击后展开详细 HUD。Toolbar 的“性能”复选框控制整个 HUD 的显示与隐藏；隐藏只改变 HUD 可见性，不停止采样，也不清空最近一分钟历史，再次勾选后会恢复先前的摘要/详情展开状态。Babylon Instrumentation 每帧写入内部计数器，但 React 最多每秒更新一次，避免监控本身制造高频状态渲染。指标包括：
+
+- FPS、CPU frame time、render time、active mesh evaluation time；
+- GPU frame time（驱动/WebGL timer query 不支持时显示 `N/A`）；
+- Draw Call、active/total Mesh、总顶点和 thinInstance 数；
+- 当前 Active Mesh 的估算顶点/三角调用量，以及双面、Alpha test、Alpha blend 材质工作量；
+- 原模型逻辑实体数和代理逻辑实体数；正式路径中代理数必须恒为 `0`，便于立即发现视觉替代回归；
+- 最近一次完整同步、选择同步、选择变化实体数和编辑态 thinInstance 分组耗时；
+- 浏览器 Long Task 次数与持续时间。
+
+“复制最近一分钟报告”会输出 renderer、60 个有界采样和摘要 JSON，便于在 Intel、NVIDIA、AMD 设备上对比。GPU 使用率低不等于 GPU 未启用：如果 GPU frame time 较低而 CPU frame time、完整同步、分组、Long Task 或 Draw Call 偏高，瓶颈在主线程、场景遍历或提交阶段；如果 GPU frame time 接近或超过 frame time，则应继续检查材质、像素填充、阴影和后处理。
 
 ## 加载峰值控制
 
@@ -103,8 +193,10 @@ Engine 保留 antialias 和 stencil，同时把没有项目功能依赖的 `pres
 ## 验证
 
 ```powershell
+npm run smoke:editor-performance
 npm run smoke:scene-capacity
 npm run smoke:shelf-instancing
+npm run smoke:reimport-performance
 npm run smoke:gpu
 npm run smoke:packaged:gpu
 npm run smoke:installer:gpu
@@ -116,14 +208,25 @@ npm run smoke:installer:gpu
 
 `smoke:installer:gpu` 会重新生成 Windows NSIS 安装程序，再调用上述生产 EXE 验证；验证过程使用独立临时 `userData`，不会写入安装目录。
 
+`smoke:editor-performance` 覆盖：
+
+- 10,000 / 50,000 个同模板逻辑模型的编辑态分组数量级、实体完整性和派生引用复用；
+- 10,000 个 thinInstance 的矩阵提交、单选区间差量更新和选择缓冲复用；
+- 100 个参数化逻辑模型在极远景、中景、近景和 Transform 更新后始终使用两个真实模型部件；代理批次/实体计数恒为 0，并验证单选只高亮目标实体、源 Geometry 不被替换或销毁；
+- 10,000 / 50,000 行 Hierarchy 的总高度、overscan 边界和最大渲染行数；
+- Scene View 内容/选区 effect 分离、HUD 1 Hz 更新、Toolbar 显示/隐藏恢复和最近一分钟有界报告。
+
+毫秒值只作为当次环境观测输出，不设 CI 硬阈值；真实 GPU 首帧、驱动调度和显存行为仍需通过 Electron/安装态验收。
+
 `smoke:scene-capacity` 覆盖：
 
 - 静态/动态共享准入矩阵；
 - 加载调度器最大并发 4、FIFO 与 dispose；
 - 100 个同源静态实体在编辑态只保留 1 个真实模型和 99 个 thinInstance，切换原始运行文档后恢复 100 个独立运行实体；
-- 未知外置脚本明确回退，已核对参数化脚本允许按完整参数模板分组；
+- 未知外置脚本明确回退，7 个已核对参数化脚本允许按完整参数模板分组；
+- 多个已有阵列源只在编辑态统一，原实例引用同步重映射；参数模板分离后恢复原源，旧 `modelArray.items` 源保持兼容；
 - 1000 个模型阵列实体仍只加载一个源模型，每个源 Mesh 只增加一个批次 Mesh；
 - `thinInstanceIndex`、单实体移动/隐藏/锁定/删除和选择缓冲保持独立实体语义；
 - 运行预览中的普通静态共享模型继续使用 `InstancedMesh`；
-- 选择变化不重新收集未修改模型子 Mesh；
+- 选择变化走 `syncSelection()`，不读取 `entityIds`、不增加完整同步次数且不重新收集未修改模型子 Mesh；
 - 删除最后一个实例时源容器只释放一次。

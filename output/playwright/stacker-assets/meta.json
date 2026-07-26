@@ -36,14 +36,14 @@
           "key": "description",
           "label": "参数说明",
           "type": "string",
-          "defaultValue": "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。",
+          "defaultValue": "支持堆垛机主体尺寸、货箱尺寸、顶底轨显示和模型外观颜色参数化。",
           "configuration": {
             "type": "string"
           }
         },
         {
           "key": "appearanceColor",
-          "label": "模型外观颜色",
+          "label": "主体颜色",
           "type": "string",
           "defaultValue": "#ffffff",
           "configuration": {
@@ -55,20 +55,6 @@
           "label": "主体长度 (m)",
           "type": "number",
           "defaultValue": 23.012,
-          "configuration": {
-            "type": "number",
-            "min": 0.1,
-            "max": 100,
-            "step": 0.1,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
-        {
-          "key": "bodyWidth",
-          "label": "主体宽度 (m)",
-          "type": "number",
-          "defaultValue": 0.452,
           "configuration": {
             "type": "number",
             "min": 0.1,
@@ -94,7 +80,7 @@
         },
         {
           "key": "platformLength",
-          "label": "载货台长度 (m)",
+          "label": "货箱深度 (m)",
           "type": "number",
           "defaultValue": 1.279,
           "configuration": {
@@ -108,7 +94,7 @@
         },
         {
           "key": "platformHeight",
-          "label": "载货台高度 (m)",
+          "label": "货箱高度 (m)",
           "type": "number",
           "defaultValue": 1.695,
           "configuration": {
@@ -121,10 +107,10 @@
           "unit": "m"
         },
         {
-          "key": "forkLength",
-          "label": "货叉长度 (m)",
+          "key": "platformwidth",
+          "label": "货箱宽度",
           "type": "number",
-          "defaultValue": 0.941,
+          "defaultValue": 1.695,
           "configuration": {
             "type": "number",
             "min": 0.1,
@@ -135,46 +121,22 @@
           "unit": "m"
         },
         {
-          "key": "forkStageOneReach",
-          "label": "货叉第一段行程 (m)",
-          "type": "number",
-          "defaultValue": 0.8,
+          "key": "showTopTrack",
+          "label": "显示顶轨",
+          "type": "boolean",
+          "defaultValue": true,
           "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 10,
-            "step": 0.05,
-            "unit": "m"
-          },
-          "unit": "m"
+            "type": "boolean"
+          }
         },
         {
-          "key": "forkStageTwoReach",
-          "label": "货叉第二段行程 (m)",
-          "type": "number",
-          "defaultValue": 0.8,
+          "key": "showBottomTrack",
+          "label": "显示底轨",
+          "type": "boolean",
+          "defaultValue": true,
           "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 10,
-            "step": 0.05,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
-        {
-          "key": "forkGap",
-          "label": "货叉间距 (m)",
-          "type": "number",
-          "defaultValue": 0.6,
-          "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 50,
-            "step": 0.05,
-            "unit": "m"
-          },
-          "unit": "m"
+            "type": "boolean"
+          }
         }
       ],
       "values": {
@@ -204,7 +166,7 @@
         },
         "description": {
           "type": "string",
-          "value": "支持堆垛机主体尺寸、载货台尺寸、货叉长度、货叉间距和模型外观颜色参数化。",
+          "value": "支持堆垛机主体尺寸、货箱尺寸、顶底轨显示和模型外观颜色参数化。",
           "label": "参数说明",
           "configuration": {
             "type": "string"
@@ -231,19 +193,6 @@
           },
           "unit": "m"
         },
-        "bodyWidth": {
-          "type": "number",
-          "value": 0.452,
-          "label": "主体宽度 (m)",
-          "configuration": {
-            "type": "number",
-            "min": 0.1,
-            "max": 100,
-            "step": 0.1,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
         "bodyHeight": {
           "type": "number",
           "value": 7.837,
@@ -260,7 +209,7 @@
         "platformLength": {
           "type": "number",
           "value": 1.279,
-          "label": "载货台长度 (m)",
+          "label": "货箱深度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
@@ -273,7 +222,7 @@
         "platformHeight": {
           "type": "number",
           "value": 1.695,
-          "label": "载货台高度 (m)",
+          "label": "货箱高度 (m)",
           "configuration": {
             "type": "number",
             "min": 0.1,
@@ -283,10 +232,10 @@
           },
           "unit": "m"
         },
-        "forkLength": {
+        "platformwidth": {
           "type": "number",
-          "value": 0.941,
-          "label": "货叉长度 (m)",
+          "value": 1.695,
+          "label": "货箱宽度",
           "configuration": {
             "type": "number",
             "min": 0.1,
@@ -296,44 +245,21 @@
           },
           "unit": "m"
         },
-        "forkStageOneReach": {
-          "type": "number",
-          "value": 0.8,
-          "label": "货叉第一段行程 (m)",
+        "showTopTrack": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示顶轨",
           "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 10,
-            "step": 0.05,
-            "unit": "m"
-          },
-          "unit": "m"
+            "type": "boolean"
+          }
         },
-        "forkStageTwoReach": {
-          "type": "number",
-          "value": 0.8,
-          "label": "货叉第二段行程 (m)",
+        "showBottomTrack": {
+          "type": "boolean",
+          "value": true,
+          "label": "显示底轨",
           "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 10,
-            "step": 0.05,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
-        "forkGap": {
-          "type": "number",
-          "value": 0.6,
-          "label": "货叉间距 (m)",
-          "configuration": {
-            "type": "number",
-            "min": 0,
-            "max": 50,
-            "step": 0.05,
-            "unit": "m"
-          },
-          "unit": "m"
+            "type": "boolean"
+          }
         }
       }
     }
@@ -368,16 +294,6 @@
         "unit": "m"
       },
       {
-        "key": "bodyWidth",
-        "label": "主体宽度 (m)",
-        "type": "number",
-        "defaultValue": 0.452,
-        "min": 0.1,
-        "max": 100,
-        "step": 0.1,
-        "unit": "m"
-      },
-      {
         "key": "bodyHeight",
         "label": "主体高度 (m)",
         "type": "number",
@@ -389,7 +305,7 @@
       },
       {
         "key": "platformLength",
-        "label": "载货台长度 (m)",
+        "label": "货箱深度 (m)",
         "type": "number",
         "defaultValue": 1.279,
         "min": 0.1,
@@ -399,7 +315,7 @@
       },
       {
         "key": "platformHeight",
-        "label": "载货台高度 (m)",
+        "label": "货箱高度 (m)",
         "type": "number",
         "defaultValue": 1.695,
         "min": 0.1,
@@ -408,44 +324,26 @@
         "unit": "m"
       },
       {
-        "key": "forkLength",
-        "label": "货叉长度 (m)",
+        "key": "platformwidth",
+        "label": "货箱宽度",
         "type": "number",
-        "defaultValue": 0.941,
+        "defaultValue": 1.695,
         "min": 0.1,
         "max": 100,
         "step": 0.1,
         "unit": "m"
       },
       {
-        "key": "forkStageOneReach",
-        "label": "货叉第一段行程 (m)",
-        "type": "number",
-        "defaultValue": 0.8,
-        "min": 0,
-        "max": 10,
-        "step": 0.05,
-        "unit": "m"
+        "key": "showTopTrack",
+        "label": "显示顶轨",
+        "type": "boolean",
+        "defaultValue": true
       },
       {
-        "key": "forkStageTwoReach",
-        "label": "货叉第二段行程 (m)",
-        "type": "number",
-        "defaultValue": 0.8,
-        "min": 0,
-        "max": 10,
-        "step": 0.05,
-        "unit": "m"
-      },
-      {
-        "key": "forkGap",
-        "label": "货叉间距 (m)",
-        "type": "number",
-        "defaultValue": 0.6,
-        "min": 0,
-        "max": 50,
-        "step": 0.05,
-        "unit": "m"
+        "key": "showBottomTrack",
+        "label": "显示底轨",
+        "type": "boolean",
+        "defaultValue": true
       }
     ],
     "bindings": []

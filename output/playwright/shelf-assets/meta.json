@@ -49,7 +49,7 @@
           "configuration": {
             "type": "number",
             "min": 1,
-            "max": 100,
+            "max": 20,
             "step": 1
           }
         },
@@ -97,11 +97,25 @@
           "key": "supportLegHeight",
           "label": "支撑脚高度 (m)",
           "type": "number",
-          "defaultValue": 0.904,
+          "defaultValue": 0.05,
           "configuration": {
             "type": "number",
-            "min": 0.4,
+            "min": 0,
             "max": 5,
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        {
+          "key": "postExtension",
+          "label": "立柱延长 (m)",
+          "type": "number",
+          "defaultValue": 0,
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 100,
             "step": 0.05,
             "unit": "m"
           },
@@ -122,22 +136,8 @@
           "unit": "m"
         },
         {
-          "key": "postWidth",
-          "label": "立柱宽度 (m)",
-          "type": "number",
-          "defaultValue": 0.08,
-          "configuration": {
-            "type": "number",
-            "min": 0.01,
-            "max": 10,
-            "step": 0.01,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
-        {
           "key": "doubleDeepEnabled",
-          "label": "启用双深货位",
+          "label": "对侧货架",
           "type": "boolean",
           "defaultValue": false,
           "configuration": {
@@ -146,7 +146,7 @@
         },
         {
           "key": "deepSlotGap",
-          "label": "深位间隔 (m)",
+          "label": "对侧货架间隔 (m)",
           "type": "number",
           "defaultValue": 0.2,
           "configuration": {
@@ -159,18 +159,22 @@
           "unit": "m"
         },
         {
-          "key": "deepSlotLift",
-          "label": "深位提升 (m)",
-          "type": "number",
-          "defaultValue": 0,
+          "key": "bodyColor",
+          "label": "主体颜色",
+          "type": "string",
+          "defaultValue": "#ff0000",
           "configuration": {
-            "type": "number",
-            "min": -100,
-            "max": 100,
-            "step": 0.05,
-            "unit": "m"
-          },
-          "unit": "m"
+            "type": "string"
+          }
+        },
+        {
+          "key": "beamColor",
+          "label": "横梁颜色",
+          "type": "string",
+          "defaultValue": "#00ff00",
+          "configuration": {
+            "type": "string"
+          }
         }
       ],
       "values": {
@@ -256,12 +260,25 @@
         },
         "supportLegHeight": {
           "type": "number",
-          "value": 0.904,
+          "value": 0.05,
           "label": "支撑脚高度 (m)",
           "configuration": {
             "type": "number",
-            "min": 0.4,
+            "min": 0,
             "max": 5,
+            "step": 0.05,
+            "unit": "m"
+          },
+          "unit": "m"
+        },
+        "postExtension": {
+          "type": "number",
+          "value": 0,
+          "label": "立柱延长 (m)",
+          "configuration": {
+            "type": "number",
+            "min": 0,
+            "max": 100,
             "step": 0.05,
             "unit": "m"
           },
@@ -280,23 +297,10 @@
           },
           "unit": "m"
         },
-        "postWidth": {
-          "type": "number",
-          "value": 0.08,
-          "label": "立柱宽度 (m)",
-          "configuration": {
-            "type": "number",
-            "min": 0.01,
-            "max": 10,
-            "step": 0.01,
-            "unit": "m"
-          },
-          "unit": "m"
-        },
         "doubleDeepEnabled": {
           "type": "boolean",
           "value": false,
-          "label": "启用双深货位",
+          "label": "对侧货架",
           "configuration": {
             "type": "boolean"
           }
@@ -304,7 +308,7 @@
         "deepSlotGap": {
           "type": "number",
           "value": 0.2,
-          "label": "深位间隔 (m)",
+          "label": "对侧货架间隔 (m)",
           "configuration": {
             "type": "number",
             "min": 0,
@@ -314,18 +318,21 @@
           },
           "unit": "m"
         },
-        "deepSlotLift": {
-          "type": "number",
-          "value": 0,
-          "label": "深位提升 (m)",
+        "bodyColor": {
+          "type": "string",
+          "value": "#ff0000",
+          "label": "主体颜色",
           "configuration": {
-            "type": "number",
-            "min": -100,
-            "max": 100,
-            "step": 0.05,
-            "unit": "m"
-          },
-          "unit": "m"
+            "type": "string"
+          }
+        },
+        "beamColor": {
+          "type": "string",
+          "value": "#00ff00",
+          "label": "横梁颜色",
+          "configuration": {
+            "type": "string"
+          }
         }
       }
     }
@@ -349,7 +356,7 @@
         "type": "number",
         "defaultValue": 1,
         "min": 1,
-        "max": 100,
+        "max": 20,
         "step": 1
       },
       {
@@ -385,9 +392,19 @@
         "key": "supportLegHeight",
         "label": "支撑脚高度 (m)",
         "type": "number",
-        "defaultValue": 0.904,
-        "min": 0.4,
+        "defaultValue": 0.05,
+        "min": 0,
         "max": 5,
+        "step": 0.05,
+        "unit": "m"
+      },
+      {
+        "key": "postExtension",
+        "label": "立柱延长 (m)",
+        "type": "number",
+        "defaultValue": 0,
+        "min": 0,
+        "max": 100,
         "step": 0.05,
         "unit": "m"
       },
@@ -402,24 +419,14 @@
         "unit": "m"
       },
       {
-        "key": "postWidth",
-        "label": "立柱宽度 (m)",
-        "type": "number",
-        "defaultValue": 0.08,
-        "min": 0.01,
-        "max": 10,
-        "step": 0.01,
-        "unit": "m"
-      },
-      {
         "key": "doubleDeepEnabled",
-        "label": "启用双深货位",
+        "label": "对侧货架",
         "type": "boolean",
         "defaultValue": false
       },
       {
         "key": "deepSlotGap",
-        "label": "深位间隔 (m)",
+        "label": "对侧货架间隔 (m)",
         "type": "number",
         "defaultValue": 0.2,
         "min": 0,
@@ -428,14 +435,16 @@
         "unit": "m"
       },
       {
-        "key": "deepSlotLift",
-        "label": "深位提升 (m)",
-        "type": "number",
-        "defaultValue": 0,
-        "min": -100,
-        "max": 100,
-        "step": 0.05,
-        "unit": "m"
+        "key": "bodyColor",
+        "label": "主体颜色",
+        "type": "color",
+        "defaultValue": "#ff0000"
+      },
+      {
+        "key": "beamColor",
+        "label": "横梁颜色",
+        "type": "color",
+        "defaultValue": "#00ff00"
       }
     ],
     "bindings": []

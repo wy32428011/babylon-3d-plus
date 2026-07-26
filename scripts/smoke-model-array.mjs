@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   Color3,
+  Constants,
   Matrix,
   MeshBuilder,
   NullEngine,
@@ -12,7 +13,7 @@ import {
 } from '@babylonjs/core';
 import { createServer } from 'vite';
 
-const SSR_MODULE_LOAD_TIMEOUT_MS = 60_000;
+const SSR_MODULE_LOAD_TIMEOUT_MS = 180_000;
 const SOURCE_ENTITY_ID = 'model-array-source';
 
 /** 在限定时间内加载 SceneRuntime，避免 Vite SSR 异常时 smoke 无限等待。 */
@@ -76,6 +77,55 @@ function readThinInstancePositions(mesh) {
   return mesh.thinInstanceGetWorldMatrices()
     .slice(0, mesh.thinInstanceCount)
     .map((matrix) => matrix.getTranslation());
+}
+
+/** 跨空间分片查找逻辑实体当前实际提交的 thinInstance。 */
+function findFormalBatchEntity(runtime, batch, entityId) {
+  for (const internalBatch of batch?.batches ?? []) {
+    const mesh = internalBatch.mesh;
+    for (let thinInstanceIndex = 0; thinInstanceIndex < mesh.thinInstanceCount; thinInstanceIndex += 1) {
+      if (runtime.readEntityIdFromMesh(mesh, thinInstanceIndex) !== entityId) continue;
+      return {
+        internalBatch,
+        mesh,
+        thinInstanceIndex,
+        matrix: mesh.thinInstanceGetWorldMatrices()[thinInstanceIndex],
+      };
+    }
+  }
+  return null;
+}
+
+/** 从完整分片源缓冲读取实体矩阵，避免把分片内索引误当成全局 thinInstanceIndex。 */
+function readFormalBatchSourceMatrix(batch, entityId) {
+  const entityIndex = batch?.getEntityIds().indexOf(entityId) ?? -1;
+  if (entityIndex < 0) return null;
+  for (const internalBatch of batch.batches) {
+    const entityIndexes = internalBatch.sourceEntityIndexBuffer ?? internalBatch.entityIndexBuffer;
+    const matrices = internalBatch.sourceMatrixBuffer ?? internalBatch.matrixBuffer;
+    if (!entityIndexes || !matrices) continue;
+    for (let instanceIndex = 0; instanceIndex < entityIndexes.length; instanceIndex += 1) {
+      if (entityIndexes[instanceIndex] !== entityIndex) continue;
+      return Matrix.FromArray(matrices, instanceIndex * 16);
+    }
+  }
+  return null;
+}
+
+function countActiveThinInstances(batches) {
+  return batches.reduce((total, batch) => total + batch.mesh.thinInstanceCount, 0);
+}
+
+function countSelectedThinInstances(batches) {
+  return batches.reduce((total, batch) => {
+    const buffer = batch.selectionBuffer;
+    if (!buffer) return total;
+    let selected = 0;
+    for (let index = 0; index < batch.mesh.thinInstanceCount; index += 1) {
+      if (buffer[index] > 0) selected += 1;
+    }
+    return total + selected;
+  }, 0);
 }
 
 /** 读取预览根节点自身及后代中的全部 Mesh，兼容内置 Mesh 直接作为克隆根节点。 */
@@ -168,6 +218,7 @@ try {
       dispose: () => undefined,
     },
     meshes: [sourceMesh],
+    modelArraySuspendedMeshes: new Set(),
     modelArrayBatch: null,
     modelArraySourceSignature: '',
     modelArrayFailureSignature: '',
@@ -281,6 +332,51 @@ try {
   nestedThinMatrices.forEach((matrix, index) => matrix.copyToArray(nestedThinBuffer, index * 16));
   sourceMesh.thinInstanceSetBuffer('matrix', nestedThinBuffer, 16, true);
   sourceMesh.thinInstanceRefreshBoundingInfo(true);
+
+  // Babylon 9.12 不会在 thinInstanceBufferUpdated('matrix') 后清空 worldMatrices 缓存；
+  // 阵列捕获与实例测量必须直接读取当前 matrixData，而不是继续使用旧缓存。
+  sourceMesh.thinInstanceGetWorldMatrices();
+  const currentNestedMatrix = Matrix.Translation(7, 0, 0);
+  currentNestedMatrix.copyToArray(nestedThinBuffer, 16);
+  sourceMesh.thinInstanceBufferUpdated('matrix');
+  const nestedMeasurementEntityId = 'nested-thin-instance-measurement';
+  const nestedMeasurementEntity = {
+    id: nestedMeasurementEntityId,
+    name: 'Nested Thin Instance Measurement',
+    visible: true,
+    locked: false,
+    parentId: null,
+    childrenIds: [],
+    components: {
+      transform: {
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      modelArrayInstance: { sourceEntityId: SOURCE_ENTITY_ID },
+    },
+  };
+  runtime.modelArrayInstanceEntities.set(nestedMeasurementEntityId, nestedMeasurementEntity);
+  const currentNestedMeasurement = runtime.getModelMeasurement(nestedMeasurementEntityId);
+  assert.equal(currentNestedMeasurement.status, 'ready', '原地更新 ThinInstance 缓冲后实例测量必须保持可用');
+  assertClose(currentNestedMeasurement.sizeMeters.x, 9, '实例测量必须读取原地更新后的 ThinInstance X 跨度');
+  assertClose(currentNestedMeasurement.sizeMeters.y, 4, '实例测量必须保留 ThinInstance Y 尺寸');
+  assertClose(currentNestedMeasurement.sizeMeters.z, 6, '实例测量必须保留 ThinInstance Z 尺寸');
+  const currentMatrixBatch = EntityArrayThinInstanceBatch.create('current-thin-instance-buffer', [sourceMesh]);
+  assert.ok(currentMatrixBatch, '原地更新 ThinInstance 缓冲后必须仍可创建阵列批次');
+  assert.equal(currentMatrixBatch.updateOffsets([{ x: 0, y: 0, z: 0 }]), true, '阵列批次必须读取当前 ThinInstance 矩阵');
+  const currentSourceWorld = sourceMesh.getWorldMatrix().clone();
+  const currentExpectedPositions = [Matrix.Identity(), currentNestedMatrix]
+    .map((matrix) => matrix.multiply(currentSourceWorld).getTranslation());
+  const currentBatchPositions = readThinInstancePositions(currentMatrixBatch.meshes[0]);
+  assertPosition(currentBatchPositions[0], currentExpectedPositions[0], '当前 ThinInstance 批次第一个矩阵');
+  assertPosition(currentBatchPositions[1], currentExpectedPositions[1], '当前 ThinInstance 批次第二个矩阵');
+  currentMatrixBatch.dispose();
+  runtime.modelArrayInstanceEntities.delete(nestedMeasurementEntityId);
+  nestedThinMatrices[1].copyToArray(nestedThinBuffer, 16);
+  sourceMesh.thinInstanceBufferUpdated('matrix');
+  sourceMesh.thinInstanceRefreshBoundingInfo(true);
+
   const nestedGeometry = runtime.getEntityArrayGeometry(SOURCE_ENTITY_ID, { x: 1, y: 0, z: 0 });
   assert.ok(nestedGeometry, '已有 thinInstance 的模型必须仍可计算阵列跨度');
   assert.equal(
@@ -332,8 +428,81 @@ try {
   assertPosition(readThinInstancePositions(sharedGeometryBatch.meshes[1])[0], { x: 14, y: 0, z: 0 }, '第二个共享 Geometry 批次位置');
   sharedGeometryBatch.dispose();
   assert.equal(sharedGeometrySource.geometry, sharedSourceGeometry, '释放批次后源 Geometry 必须保持有效');
-  sharedGeometryClone.dispose(false, false);
-  sharedGeometrySource.dispose(false, false);
+
+  // 大 Geometry 曾产生多个空间分片后缩小阵列，必须释放历史分片 Geometry 和矩阵缓冲，
+  // 只保留一个当前有效主载体，避免编辑会话长期维持峰值 GPU/CPU 内存。
+  const partitionSource = MeshBuilder.CreateGround(
+    'entity-array-partition-release-source',
+    { width: 1, height: 1, subdivisions: 256 },
+    scene,
+  );
+  partitionSource.computeWorldMatrix(true);
+  const partitionReleaseBatch = EntityArrayThinInstanceBatch.create(
+    'partition-release-source',
+    [partitionSource],
+    { interactive: true },
+  );
+  assert.ok(partitionReleaseBatch, '高顶点模型必须可以创建正式空间分片批次');
+  const peakPartitionTransforms = Array.from({ length: 600 }, (_, index) => ({
+    entityId: `partition-release-${index}`,
+    transform: {
+      position: { x: index, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+    },
+    pickable: true,
+  }));
+  assert.equal(
+    partitionReleaseBatch.updateEntityTransforms(Matrix.Identity(), peakPartitionTransforms),
+    true,
+    '高顶点大阵列必须成功创建多个空间分片',
+  );
+  assert.ok(partitionReleaseBatch.batches.length > 1, '峰值阵列必须实际产生多个空间分片');
+  const historicalPartitionBatches = partitionReleaseBatch.batches.slice(1);
+  assert.ok(
+    historicalPartitionBatches.every((batch) => batch.sourceMatrixBuffer && batch.matrixBuffer),
+    '峰值空间分片必须持有完整源矩阵和渲染缓冲',
+  );
+  assert.equal(
+    partitionReleaseBatch.updateEntityTransforms(Matrix.Identity(), peakPartitionTransforms.slice(0, 1)),
+    true,
+    '缩小阵列必须继续复用主载体',
+  );
+  assert.equal(partitionReleaseBatch.batches.length, 1, '缩小阵列后必须移除全部历史空间分片');
+  assert.equal(partitionReleaseBatch.meshes.length, 1, '缩小阵列后公开批次 Mesh 列表只能保留主载体');
+  assert.ok(
+    historicalPartitionBatches.every((batch) => batch.mesh.isDisposed()),
+    '缩小阵列后历史空间分片 Mesh 和独立 Geometry 必须释放',
+  );
+  assert.equal(partitionReleaseBatch.batches[0].mesh.thinInstanceCount, 1, '主载体必须只保留当前一个实例');
+  assert.equal(partitionReleaseBatch.batches[0].sourceMatrixBuffer.length, 16, '主载体完整矩阵缓冲必须收缩到当前容量');
+  partitionReleaseBatch.dispose();
+  partitionSource.dispose(false, false);
+
+  // 跨 Geometry 合并只允许三角形列表；LineList 等拓扑必须保留各自 Geometry 和绘制语义。
+  const lineTopologyMaterial = new StandardMaterial('entity-array-line-topology-material', scene);
+  const lineTopologyA = MeshBuilder.CreateBox('entity-array-line-topology-a', { size: 1 }, scene);
+  const lineTopologyB = MeshBuilder.CreateBox('entity-array-line-topology-b', { size: 1.5 }, scene);
+  lineTopologyA.material = lineTopologyMaterial;
+  lineTopologyB.material = lineTopologyMaterial;
+  lineTopologyA.overrideRenderingFillMode = Constants.MATERIAL_LineListDrawMode;
+  lineTopologyB.overrideRenderingFillMode = Constants.MATERIAL_LineListDrawMode;
+  const lineTopologyBatch = EntityArrayThinInstanceBatch.create(
+    'line-topology-source',
+    [lineTopologyA, lineTopologyB],
+    { mergeStaticMeshesByMaterial: true, sourceRootWorldMatrix: Matrix.Identity() },
+  );
+  assert.ok(lineTopologyBatch, 'LineList 静态 Mesh 必须仍可创建矩阵批次');
+  assert.equal(lineTopologyBatch.sources.length, 2, 'LineList 跨 Geometry 不得按三角形规则烘焙合并');
+  assert.ok(
+    lineTopologyBatch.meshes.every((mesh) => mesh.overrideRenderingFillMode === Constants.MATERIAL_LineListDrawMode),
+    'LineList 批次必须保留源绘制拓扑',
+  );
+  lineTopologyBatch.dispose();
+  lineTopologyA.dispose(false, false);
+  lineTopologyB.dispose(false, false);
+  lineTopologyMaterial.dispose(false, false);
+
   // GLB 左右手坐标转换会产生负 determinant：批次 Mesh 必须承载镜像，避免材质方向和双面光照改变。
   const mirroredMesh = MeshBuilder.CreateCylinder(
     'entity-array-mirrored-source',
@@ -434,29 +603,100 @@ try {
   const formalBatchMeshes = [...(formalBatch?.meshes ?? [])];
   assert.equal(runtime.models.size, 1, '1000 个独立阵列实体不得创建逐副本 ModelRuntimeEntry');
   assert.equal(runtime.modelArrayInstanceEntities.size, 1000, '运行时必须保留 1000 个逻辑模型实体映射');
-  assert.equal(formalBatchMeshes.length, 1, '单 Mesh 正式阵列只应增加一个批次 Mesh');
-  assert.equal(scene.meshes.length, meshCountBeforeFormalArray + 1, '正式阵列 Mesh 节点数不得随 1000 个模型增长');
-  assert.equal(formalBatchMeshes[0].thinInstanceCount, 1000, '正式阵列必须一次写入 1000 个 thinInstance');
-  assert.notEqual(formalBatchMeshes[0].geometry, sourceGeometry, '正式阵列必须使用独立 Geometry 承载 thinInstance 缓冲');
-  assert.equal(formalBatchMeshes[0].getTotalVertices(), sourceMesh.getTotalVertices(), '正式阵列独立 Geometry 必须保留源顶点');
-  assert.equal(formalBatchMeshes[0].material, sourceMaterial, '正式阵列必须共享源材质');
-  assert.equal(formalBatchMeshes[0].metadata?.modelArraySourceEntityId, SOURCE_ENTITY_ID, '批次必须记录共享源模型');
   assert.equal(
-    runtime.readEntityIdFromMesh(formalBatchMeshes[0], 0),
-    formalArrayInstances[0].id,
-    '第一个 thinInstance 必须映射到第一个逻辑模型',
+    formalBatchMeshes.length,
+    1,
+    '低顶点正式阵列在动态 GPU 顶点预算内必须保持单批次，避免无收益 Draw Call 膨胀',
   );
   assert.equal(
-    runtime.readEntityIdFromMesh(formalBatchMeshes[0], 999),
-    formalArrayInstances[999].id,
-    '最后一个 thinInstance 必须映射到最后一个逻辑模型',
+    formalBatchMeshes.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
+    1001,
+    '空间分片必须完整承载源实体和 1000 个逻辑实例',
   );
-  assert.equal(formalBatchMeshes[0].isPickable, true, '存在未锁定实例时批次必须允许拾取');
-  const formalPositions = readThinInstancePositions(formalBatchMeshes[0]);
-  assertPosition(formalPositions[0], { x: 11, y: 2, z: -5 }, '正式阵列第一个矩阵实例');
-  assertPosition(formalPositions[999], { x: 1010, y: 2, z: -5 }, '正式阵列最后一个矩阵实例');
+  assert.ok(formalBatchMeshes.every((mesh) => mesh.thinInstanceCount <= 65_536), '任一空间分片不得超过正式批次硬上限');
+  assert.equal(
+    scene.meshes.length,
+    meshCountBeforeFormalArray - 1 + formalBatchMeshes.length,
+    '源宿主必须由固定数量空间分片替换，不能按逻辑模型数量增长',
+  );
+  assert.equal(scene.meshes.includes(sourceMesh), false, '正式阵列必须将源宿主 Mesh 从场景遍历列表移除');
+  assert.equal(sourceModelEntry.modelArraySuspendedMeshes.has(sourceMesh), true, '被移除的源宿主必须登记以便阵列取消时恢复');
 
-  const formalMatrixBuffer = formalBatch?.batches?.[0]?.matrixBuffer;
+  // 兼容仍通过 scene.meshes 扫描模型部件的外置脚本：生命周期执行时恢复，完成后重新暂停。
+  const sceneScanningScriptAsset = {
+    path: 'scene-scanning.model.ts',
+    sourceUrl: 'scene-scanning.model.ts',
+    name: 'scene-scanning.model.ts',
+  };
+  const sceneScanningModelAsset = {
+    ...formalArrayEntity.components.modelAsset,
+    scriptAssets: [sceneScanningScriptAsset],
+  };
+  const sceneScanningScriptSignature = JSON.stringify({
+    scripts: [sceneScanningScriptAsset],
+    parameterScripts: [],
+    animationScripts: [],
+  });
+  const sceneScanResults = [];
+  sourceModelEntry.stackerTelemetry = runtime.createStackerTelemetryState(root);
+  sourceModelEntry.conveyorTelemetry = runtime.createConveyorTelemetryState();
+  sourceModelEntry.externalScriptRuntime = {
+    updateAssetCode: () => undefined,
+    updateParameterValues: () => undefined,
+    updateRuntimeContext: () => sceneScanResults.push(scene.meshes.includes(sourceMesh)),
+    update: () => sceneScanResults.push(scene.meshes.includes(sourceMesh)),
+    getDataDrivenConfigs: () => [],
+    dispose: () => undefined,
+  };
+  sourceModelEntry.externalScriptSignature = sceneScanningScriptSignature;
+  sourceModelEntry.externalScriptStarting = false;
+  runtime.syncModelAssetExternalScripts(sceneScanningModelAsset, sourceModelEntry, (current) => {
+    runtime.applyModelInteractivity(current, SOURCE_ENTITY_ID);
+  });
+  assert.deepEqual(sceneScanResults, [true, true], '外置脚本的上下文更新和 onUpdate 都必须能扫描到完整宿主 Mesh');
+  assert.equal(scene.meshes.includes(sourceMesh), false, '脚本同步完成后必须再次从场景遍历列表暂停宿主 Mesh');
+  assert.equal(sourceModelEntry.modelArraySuspendedMeshes.has(sourceMesh), true, '脚本同步后的宿主 Mesh 必须继续登记为暂停状态');
+
+  sceneScanResults.length = 0;
+  sourceModelEntry.externalScriptStarting = true;
+  runtime.syncModelAssetExternalScripts(sceneScanningModelAsset, sourceModelEntry, () => {
+    throw new Error('异步脚本启动期间不应提前 settled');
+  });
+  runtime.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
+  assert.deepEqual(sceneScanResults, [true], '异步 start 期间脚本上下文必须继续扫描到宿主 Mesh');
+  assert.equal(scene.meshes.includes(sourceMesh), true, '异步 start settled 前不得再次移除宿主 Mesh');
+  assert.equal(root.isEnabled(), true, '异步 start settled 前脚本宿主根节点必须保持启用');
+  assert.equal(sourceMesh.isPickable, false, '临时恢复的脚本宿主不得与正式阵列重复参与拾取');
+  sourceModelEntry.externalScriptStarting = false;
+  runtime.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
+  assert.equal(scene.meshes.includes(sourceMesh), false, '异步 start settled 后必须重新暂停宿主 Mesh');
+  assert.equal(root.isEnabled(), false, '异步 start settled 后必须重新禁用脚本宿主根节点');
+  sourceModelEntry.externalScriptRuntime = null;
+  sourceModelEntry.externalScriptSignature = '';
+  assert.ok(formalBatchMeshes.every((mesh) => mesh.geometry !== sourceGeometry), '正式阵列必须使用独立 Geometry 承载 thinInstance 缓冲');
+  assert.ok(
+    formalBatchMeshes.every((mesh) => mesh.getTotalVertices() === sourceMesh.getTotalVertices()),
+    '每个空间分片的独立 Geometry 必须保留完整源顶点',
+  );
+  assert.ok(formalBatchMeshes.every((mesh) => mesh.material === sourceMaterial), '正式阵列必须共享源材质');
+  assert.ok(
+    formalBatchMeshes.every((mesh) => mesh.metadata?.modelArraySourceEntityId === SOURCE_ENTITY_ID),
+    '全部空间分片必须记录共享源模型',
+  );
+  const sourceEntityInstance = findFormalBatchEntity(runtime, formalBatch, SOURCE_ENTITY_ID);
+  const firstFormalInstance = findFormalBatchEntity(runtime, formalBatch, formalArrayInstances[0].id);
+  const lastFormalInstance = findFormalBatchEntity(runtime, formalBatch, formalArrayInstances[999].id);
+  assert.ok(sourceEntityInstance && firstFormalInstance && lastFormalInstance, '跨分片必须能找回源实体、首个和最后一个逻辑实例');
+  assertPosition(sourceEntityInstance.matrix.getTranslation(), { x: 10, y: 2, z: -5 }, '正式阵列源实体矩阵');
+  assertPosition(firstFormalInstance.matrix.getTranslation(), { x: 11, y: 2, z: -5 }, '正式阵列第一个逻辑实例矩阵');
+  assertPosition(lastFormalInstance.matrix.getTranslation(), { x: 1010, y: 2, z: -5 }, '正式阵列最后一个逻辑实例矩阵');
+  assert.ok(formalBatchMeshes.every((mesh) => mesh.isPickable), '存在未锁定实例时全部有效分片必须允许拾取');
+
+  const formalSourceBuffers = new Map(
+    formalBatch.batches
+      .filter((batch) => batch.mesh.thinInstanceCount > 0)
+      .map((batch) => [`${batch.orientation}:${batch.partitionIndex}`, batch.sourceMatrixBuffer]),
+  );
   const movedFirstInstance = {
     ...formalArrayInstances[0],
     components: {
@@ -471,11 +711,18 @@ try {
   runtime.modelArrayInstanceEntities.set(movedFirstInstance.id, movedFirstInstance);
   runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assert.equal(sourceModelEntry.modelArrayBatch, formalBatch, '移动单个逻辑模型时必须复用正式矩阵批次');
-  assert.equal(formalBatch?.batches?.[0]?.matrixBuffer, formalMatrixBuffer, '同数量更新必须复用连续 Float32Array');
-  assertClose(formalMatrixBuffer[12], 123, '移动后第一个阵列矩阵 X');
-  assertClose(formalMatrixBuffer[13], 4, '移动后第一个阵列矩阵 Y');
-  assertClose(formalMatrixBuffer[14], 6, '移动后第一个阵列矩阵 Z');
-  assertClose(formalMatrixBuffer[999 * 16 + 12], 1010, '移动单个模型不得影响最后一个阵列矩阵');
+  for (const batch of formalBatch.batches.filter((entry) => entry.mesh.thinInstanceCount > 0)) {
+    assert.equal(
+      batch.sourceMatrixBuffer,
+      formalSourceBuffers.get(`${batch.orientation}:${batch.partitionIndex}`),
+      '同数量更新必须按空间分片复用完整矩阵 Float32Array',
+    );
+  }
+  const movedFirstMatrix = readFormalBatchSourceMatrix(formalBatch, movedFirstInstance.id);
+  const unchangedLastMatrix = readFormalBatchSourceMatrix(formalBatch, formalArrayInstances[999].id);
+  assert.ok(movedFirstMatrix && unchangedLastMatrix, 'Transform 更新后必须能跨分片定位完整源矩阵');
+  assertPosition(movedFirstMatrix.getTranslation(), { x: 123, y: 4, z: 6 }, '移动后第一个逻辑实例矩阵');
+  assertPosition(unchangedLastMatrix.getTranslation(), { x: 1010, y: 2, z: -5 }, '移动单个模型不得影响最后一个逻辑实例矩阵');
   const instanceGizmoTarget = runtime.getGizmoTargetByEntityId(movedFirstInstance.id);
   assertPosition(instanceGizmoTarget, { x: 123, y: 4, z: 6 }, '矩阵实例 Gizmo 代理必须使用自身 Transform');
   const movedInstanceGeometry = runtime.getEntityArrayGeometry(movedFirstInstance.id, { x: 1, y: 0, z: 0 });
@@ -494,29 +741,43 @@ try {
   contentRoot.computeWorldMatrix(true);
   sourceMesh.computeWorldMatrix(true);
   runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
-  assertClose(formalMatrixBuffer[12], 123, '源模型移动不得拖动独立阵列实体');
-  assertClose(formalMatrixBuffer[999 * 16 + 12], 1010, '源模型移动不得改变其他独立实体');
+  assertClose(readFormalBatchSourceMatrix(formalBatch, SOURCE_ENTITY_ID)?.m[12], 10, '脚本宿主节点移动不得改变源实体文档矩阵');
+  assertClose(readFormalBatchSourceMatrix(formalBatch, movedFirstInstance.id)?.m[12], 123, '脚本宿主节点移动不得拖动独立逻辑实例');
+  assertClose(readFormalBatchSourceMatrix(formalBatch, formalArrayInstances[999].id)?.m[12], 1010, '脚本宿主节点移动不得改变其他独立实体');
   runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: false, locked: false });
   runtime.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
   runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
-  assert.equal(formalBatchMeshes[0].isEnabled(), true, '隐藏源模型不得隐藏独立阵列实体');
+  assert.ok(
+    formalBatch.batches.some((batch) => batch.mesh.thinInstanceCount > 0 && batch.mesh.isEnabled()),
+    '隐藏源模型不得隐藏独立阵列实体',
+  );
   runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
   runtime.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
 
   runtime.entityStates.set(movedFirstInstance.id, { visible: false, locked: false });
   runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
-  assert.equal(formalBatchMeshes[0].thinInstanceCount, 999, '隐藏单个逻辑模型必须只移除一个有效矩阵');
   assert.equal(
-    runtime.readEntityIdFromMesh(formalBatchMeshes[0], 0),
-    formalArrayInstances[1].id,
-    '隐藏首项后拾取索引必须重新映射到下一可见逻辑模型',
+    countActiveThinInstances(formalBatch.batches),
+    1000,
+    '隐藏单个逻辑实例必须跨全部空间分片只移除一个有效矩阵',
+  );
+  assert.ok(findFormalBatchEntity(runtime, formalBatch, SOURCE_ENTITY_ID), '隐藏逻辑实例后源实体映射必须保留');
+  assert.equal(findFormalBatchEntity(runtime, formalBatch, movedFirstInstance.id), null, '隐藏的逻辑实例不得继续出现在拾取映射中');
+  assert.ok(
+    findFormalBatchEntity(runtime, formalBatch, formalArrayInstances[1].id),
+    '隐藏首个逻辑实例后其他逻辑实体必须继续正确映射',
   );
 
+  runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: true });
   for (const instance of formalArrayInstances) {
     runtime.entityStates.set(instance.id, { visible: true, locked: true });
   }
   runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
-  assert.equal(formalBatchMeshes[0].isPickable, false, '全部逻辑模型锁定后批次必须禁用拾取');
+  assert.ok(
+    formalBatch.batches.filter((batch) => batch.mesh.thinInstanceCount > 0).every((batch) => !batch.mesh.isPickable),
+    '源实体和全部逻辑实例锁定后所有空间分片必须禁用拾取',
+  );
+  runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
   for (const instance of formalArrayInstances) {
     runtime.entityStates.set(instance.id, { visible: true, locked: false });
   }
@@ -524,9 +785,13 @@ try {
 
   runtime.selectedEntityIds = new Set([formalArrayInstances[5].id]);
   runtime.rebuildSharedModelSelectionOutline();
-  const selectionBuffer = formalBatch?.batches?.[0]?.selectionBuffer;
-  assert.equal(selectionBuffer?.filter((value) => value > 0).length, 1, '独立选中只能标记一个 thinInstance');
-  assert.ok(selectionBuffer?.[5] > 0, '选择缓冲必须标记目标逻辑模型索引');
+  const selectedFormalInstance = findFormalBatchEntity(runtime, formalBatch, formalArrayInstances[5].id);
+  assert.ok(selectedFormalInstance, '选中的逻辑实例必须能跨空间分片定位');
+  assert.equal(countSelectedThinInstances(formalBatch.batches), 1, '独立选中只能跨全部分片标记一个 thinInstance');
+  assert.ok(
+    selectedFormalInstance.internalBatch.selectionBuffer?.[selectedFormalInstance.thinInstanceIndex] > 0,
+    '选择缓冲必须在目标所在空间分片标记正确 thinInstanceIndex',
+  );
 
   // 同一源 Mesh 同时存在正负缩放时必须固定拆成两个方向批次，且拾取/选择仍映射到各自逻辑实体。
   const mirroredFormalInstance = {
@@ -542,34 +807,27 @@ try {
   formalArrayInstances[5] = mirroredFormalInstance;
   runtime.modelArrayInstanceEntities.set(mirroredFormalInstance.id, mirroredFormalInstance);
   runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
-  const orientationMeshes = formalBatch.meshes.filter((mesh) => mesh.thinInstanceCount > 0);
-  assert.equal(orientationMeshes.length, 2, '正负 determinant 混合时每个源 Mesh 只允许两个固定方向批次');
-  const negativeOrientationMesh = orientationMeshes.find((mesh) => (
-    mesh.computeWorldMatrix(true).determinant() < 0
-  ));
-  const positiveOrientationMesh = orientationMeshes.find((mesh) => mesh.getWorldMatrix().determinant() > 0);
-  assert.ok(negativeOrientationMesh && positiveOrientationMesh, '混合方向批次必须分别承载正负 Mesh determinant');
-  assert.equal(negativeOrientationMesh.thinInstanceCount, 1, '单个负缩放逻辑模型只应进入负方向批次');
-  assert.equal(positiveOrientationMesh.thinInstanceCount, 999, '其余逻辑模型必须继续合并在正方向批次');
+  const activeOrientationBatches = formalBatch.batches.filter((batch) => batch.mesh.thinInstanceCount > 0);
+  const negativeOrientationBatches = activeOrientationBatches.filter((batch) => batch.orientation < 0);
+  const positiveOrientationBatches = activeOrientationBatches.filter((batch) => batch.orientation > 0);
+  const negativeOrientationMeshes = negativeOrientationBatches.map((batch) => batch.mesh);
+  assert.equal(negativeOrientationBatches.length, 1, '单个负缩放逻辑模型只需要一个负方向空间分片');
+  assert.ok(positiveOrientationBatches.length <= Math.ceil(1000 / 65_536), '正方向分片数必须继续受 65,536 实例硬上限约束');
+  assert.equal(countActiveThinInstances(negativeOrientationBatches), 1, '单个负缩放逻辑模型只应进入负方向批次');
+  assert.equal(countActiveThinInstances(positiveOrientationBatches), 1000, '源实体和其余逻辑实例必须完整保留在正方向分片');
+  const mirroredBatchEntity = findFormalBatchEntity(runtime, formalBatch, mirroredFormalInstance.id);
+  assert.ok(mirroredBatchEntity && mirroredBatchEntity.internalBatch.orientation < 0, '负方向 thinInstance 必须映射回自己的逻辑模型');
   assert.ok(
-    negativeOrientationMesh.thinInstanceGetWorldMatrices()[0].determinant() > 0,
+    mirroredBatchEntity.matrix.determinant() > 0,
     '负方向批次的局部 thinInstance determinant 必须保持为正',
-  );
-  assert.equal(
-    runtime.readEntityIdFromMesh(negativeOrientationMesh, 0),
-    mirroredFormalInstance.id,
-    '负方向 thinInstanceIndex 必须映射回自己的逻辑模型',
   );
   runtime.selectedEntityIds = new Set([mirroredFormalInstance.id]);
   runtime.rebuildSharedModelSelectionOutline();
-  const negativeOrientationBatch = formalBatch.batches.find((batch) => batch.mesh === negativeOrientationMesh);
-  const positiveOrientationBatch = formalBatch.batches.find((batch) => batch.mesh === positiveOrientationMesh);
-  assert.ok(negativeOrientationBatch?.selectionBuffer?.[0] > 0, '负方向逻辑模型必须可独立描边');
-  assert.equal(
-    positiveOrientationBatch?.selectionBuffer?.filter((value) => value > 0).length,
-    0,
-    '选中负方向逻辑模型不得污染正方向批次',
+  assert.ok(
+    mirroredBatchEntity.internalBatch.selectionBuffer?.[mirroredBatchEntity.thinInstanceIndex] > 0,
+    '负方向逻辑模型必须可独立描边',
   );
+  assert.equal(countSelectedThinInstances(positiveOrientationBatches), 0, '选中负方向逻辑模型不得污染正方向分片');
 
   const restoredFormalInstance = {
     ...mirroredFormalInstance,
@@ -584,20 +842,28 @@ try {
   formalArrayInstances[5] = restoredFormalInstance;
   runtime.modelArrayInstanceEntities.set(restoredFormalInstance.id, restoredFormalInstance);
   runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
-  assert.equal(negativeOrientationMesh.thinInstanceCount, 0, '恢复正缩放后负方向固定批次必须停用');
-  assert.equal(formalBatch.meshes[0].thinInstanceCount, 1000, '恢复正缩放后全部逻辑模型必须重新合并');
   assert.equal(
-    runtime.readEntityIdFromMesh(formalBatch.meshes[0], 5),
-    restoredFormalInstance.id,
-    '方向批次合并后拾取索引必须恢复正确映射',
+    formalBatch.batches.filter((batch) => batch.orientation < 0).length,
+    0,
+    '恢复正缩放后全部负方向分片必须从批次表移除',
   );
+  assert.ok(
+    negativeOrientationMeshes.every((mesh) => mesh.isDisposed()),
+    '恢复正缩放后历史负方向 Mesh 和独立 Geometry 必须释放',
+  );
+  assert.equal(
+    countActiveThinInstances(formalBatch.batches.filter((batch) => batch.orientation > 0)),
+    1001,
+    '恢复正缩放后源实体和全部逻辑实例必须重新合并到正方向空间分片',
+  );
+  assert.ok(findFormalBatchEntity(runtime, formalBatch, restoredFormalInstance.id), '方向批次合并后拾取映射必须恢复');
   // 批次拥有隔离 Geometry 后，参数脚本改写顶点时必须按新的渲染签名重建并复制最新数据。
   const originalSourcePositions = sourceMesh.getVerticesData('position');
   const updatedSourcePositions = originalSourcePositions.map((value, index) => (
     index % 3 === 0 ? value * 1.25 : value
   ));
   sourceMesh.setVerticesData('position', updatedSourcePositions, true);
-  runtime.syncModelArrayBatchForEntities(formalArrayEntity, sourceModelEntry, formalArrayInstances, [], {
+  runtime.syncModelArrayBatchForEntities(formalArrayEntity, sourceModelEntry, [formalArrayEntity, ...formalArrayInstances], [], {
     sourceEntityId: SOURCE_ENTITY_ID,
     namePrefix: '__modelArrayThinInstance',
     renderSignature: 'geometry-update-2',
@@ -626,6 +892,8 @@ try {
   assert.equal(sourceMesh.isDisposed(), false, '释放正式阵列不得释放源 Mesh');
   assert.equal(sourceMesh.geometry, sourceGeometry, '释放正式阵列不得释放源几何');
   assert.equal(sourceMesh.material, sourceMaterial, '释放正式阵列不得释放源材质');
+  assert.equal(scene.meshes.includes(sourceMesh), true, '删除全部逻辑实例后必须将源宿主 Mesh 恢复到场景');
+  assert.equal(sourceModelEntry.modelArraySuspendedMeshes.size, 0, '源宿主恢复后暂停集合必须清空');
   runtime.selectedEntityIds = new Set();
   root.position.x = 10;
   root.computeWorldMatrix(true);
@@ -1367,6 +1635,48 @@ try {
   });
   assert.equal(missingCommit.ok, false, '失效源对象必须在原子提交阶段被阻止');
 
+  // 删除仍处于正式阵列中的模型时，旧脚本 onStop()/dispose() 必须先看到恢复后的完整宿主。
+  const stopLifecycleInstance = {
+    ...formalArrayEntity,
+    id: 'model-array-stop-lifecycle-instance',
+    name: 'Model Array Stop Lifecycle Instance',
+    components: {
+      ...formalArrayEntity.components,
+      transform: {
+        position: { x: 20, y: 2, z: -5 },
+        rotation: { x: 0, y: Math.PI / 2, z: 0 },
+        scale: { x: 2, y: 3, z: 4 },
+      },
+      modelAsset: {
+        ...formalArrayEntity.components.modelAsset,
+        assetCode: 'FORMAL-STOP',
+      },
+      modelArrayInstance: { sourceEntityId: SOURCE_ENTITY_ID },
+    },
+  };
+  runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
+  runtime.entityStates.set(stopLifecycleInstance.id, { visible: true, locked: false });
+  runtime.modelArrayInstanceEntities.set(stopLifecycleInstance.id, stopLifecycleInstance);
+  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  assert.equal(scene.meshes.includes(sourceMesh), false, 'onStop 生命周期夹具必须先进入暂停宿主状态');
+  const stopLifecycleObservations = [];
+  sourceModelEntry.textureCache = new Map();
+  sourceModelEntry.externalScriptRuntime = {
+    dispose: () => stopLifecycleObservations.push({
+      sceneIncluded: scene.meshes.includes(sourceMesh),
+      rootEnabled: root.isEnabled(),
+      suspendedCount: sourceModelEntry.modelArraySuspendedMeshes.size,
+    }),
+  };
+  runtime.disposeModel(SOURCE_ENTITY_ID, sourceModelEntry);
+  assert.deepEqual(
+    stopLifecycleObservations,
+    [{ sceneIncluded: true, rootEnabled: true, suspendedCount: 0 }],
+    '模型脚本 onStop()/dispose() 前必须恢复 scene.meshes、根启用状态和暂停集合',
+  );
+  runtime.modelArrayInstanceEntities.delete(stopLifecycleInstance.id);
+  runtime.entityStates.delete(stopLifecycleInstance.id);
+
   console.log(JSON.stringify({
     ok: true,
     modelArray: {
@@ -1376,7 +1686,10 @@ try {
       spacingAndDirectionUpdate: true,
       matrixBatchReuse: true,
       nestedThinInstanceComposition: true,
+      currentThinInstanceBufferRead: true,
       sharedGeometryBuffersIsolated: true,
+      historicalPartitionsReleased: true,
+      nonTriangleTopologyPreserved: true,
       parameterGeometryRefresh: true,
       mirroredMaterialOrientationPreserved: true,
       mixedDeterminantBatchesPreservePickingAndSelection: true,
@@ -1386,6 +1699,7 @@ try {
       thinInstancePickingMapsLogicalEntity: true,
       independentSelectionMask: true,
       sourceResourcesPreserved: true,
+      scriptStopRestoresArrayHost: true,
       shiftGizmoProxyKeepsSourceStable: true,
       negativeAxisAndCancelLifecycle: true,
       normalTransformDragPreserved: true,

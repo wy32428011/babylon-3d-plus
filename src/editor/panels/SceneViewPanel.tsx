@@ -7,6 +7,12 @@ import {
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import {
+  ScenePerformanceMonitor,
+  type EditModeThinInstancePlanPerformanceMetrics,
+  type SceneFocusPerformanceMetrics,
+  type ScenePerformanceSnapshot,
+} from '../../runtime/babylon/ScenePerformanceMonitor';
+import {
   TransformGizmoController,
   type EntityArrayDragUpdate,
 } from '../../runtime/babylon/TransformGizmoController';
@@ -25,6 +31,10 @@ import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
 import type { SceneCameraPose, SceneDocument } from '../model/SceneDocument';
 import type { Vector3Data } from '../model/math';
 import {
+  resolveFolderGroupMoveSelection,
+  type FolderGroupMoveReadySelection,
+} from '../model/entityHierarchy';
+import {
   getEntityArrayIdentifierError,
   getEntityArrayParameterError,
   getShiftEntityArrayIdentityBehavior,
@@ -36,6 +46,7 @@ import {
   type EditModeModelThinInstancePlan,
 } from '../model/editModeModelThinInstances';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
+import '../../styles/scene-performance.css';
 
 const CLICK_SELECTION_TOLERANCE_PX = 4;
 const CAMERA_POSE_CHANGE_EPSILON = 1e-6;
@@ -60,9 +71,51 @@ type EntityArrayDialogState = {
   commitError: string | null;
 };
 
+type FolderGroupTranslationSession = FolderGroupMoveReadySelection & {
+  sourceSceneDocument: SceneDocument;
+};
+
 /** 将未知异常转换成可展示的简短消息。 */
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 浏览器与 smoke 环境共用的高精度计时入口。 */
+function readScenePanelTimestampMs(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now();
+}
+
+/** HUD 只展示两位以内的稳定数字，原始报告仍保留完整精度。 */
+function formatPerformanceMetric(value: number, digits = 1): string {
+  return Number.isFinite(value) ? value.toFixed(digits) : '0';
+}
+
+/** 复制性能报告；Clipboard API 被策略禁用时回退到临时 textarea。 */
+async function copyScenePerformanceReport(report: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(report);
+      return;
+    } catch {
+      // Electron 权限或非安全上下文会进入同步 fallback。
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = report;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  let copied = false;
+  try {
+    textarea.focus();
+    textarea.select();
+    copied = document.execCommand('copy');
+  } finally {
+    textarea.remove();
+  }
+  if (!copied) throw new Error('系统剪贴板拒绝复制。');
 }
 
 /** 判断指针交互前后相机是否发生有效位姿变化，让真实视角拖拽优先于模型拾取。 */
@@ -145,21 +198,40 @@ function getEntityArrayDialogError(
   );
 }
 
-export function SceneViewPanel() {
+type SceneViewPanelProps = {
+  performanceHudVisible: boolean;
+};
+
+export function SceneViewPanel(props: SceneViewPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<BabylonViewport | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
   const gizmoRef = useRef<TransformGizmoController | null>(null);
   const mqttTelemetryClientRef = useRef<MqttStackerTelemetryClient | null>(null);
+  const performanceMonitorRef = useRef<ScenePerformanceMonitor | null>(null);
+  const sceneFocusPerformanceRef = useRef<SceneFocusPerformanceMetrics | null>(null);
   const clickSnapshotRef = useRef<PointerClickSnapshot | null>(null);
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
   const editRuntimeSceneDocumentRef = useRef<SceneDocument | null>(null);
   const editModeThinInstancePlanRef = useRef<EditModeModelThinInstancePlan | null>(null);
+  const editModeThinInstancePlanPerformanceRef = useRef<EditModeThinInstancePlanPerformanceMetrics>({
+    planCount: 0,
+    lastDurationMs: 0,
+    maxDurationMs: 0,
+    entityCount: 0,
+    groupCount: 0,
+    thinInstanceEntityCount: 0,
+  });
+  const recordedEditModeThinInstancePlanComputationRef = useRef<object | null>(null);
   const selectedEntityIdRef = useRef<string | null>(null);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
   const entityArrayDialogRef = useRef<EntityArrayDialogState | null>(null);
+  const folderGroupTranslationRef = useRef<FolderGroupTranslationSession | null>(null);
+  const folderGroupStatusLogSignatureRef = useRef('');
   const [viewportError, setViewportError] = useState<string | null>(null);
   const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
+  const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
+  const [performanceHudExpanded, setPerformanceHudExpanded] = useState(false);
   const sceneDocument = useEditorStore((state) => state.scene);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
@@ -184,6 +256,7 @@ export function SceneViewPanel() {
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
+  const commitFolderGroupTranslation = useEditorStore((state) => state.commitFolderGroupTranslation);
   const resolveEntityArrayRequest = useEditorStore((state) => state.resolveEntityArrayRequest);
   const commitResolvedEntityArray = useEditorStore((state) => state.commitResolvedEntityArray);
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
@@ -193,18 +266,28 @@ export function SceneViewPanel() {
   const pushLog = useEditorStore((state) => state.pushLog);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
   const isRuntimePreview = runtimeMode === 'preview';
-  const editModeThinInstancePlan = useMemo(
-    () => createEditModeModelThinInstancePlan(
+  const editModeThinInstancePlanComputation = useMemo(() => {
+    const startedAt = readScenePanelTimestampMs();
+    const plan = createEditModeModelThinInstancePlan(
       sceneDocument,
       editModeThinInstancePlanRef.current ?? undefined,
-    ),
-    [sceneDocument.entityIds, sceneDocument.entities],
-  );
+    );
+    return {
+      plan,
+      durationMs: Math.max(0, readScenePanelTimestampMs() - startedAt),
+      entityCount: sceneDocument.entityIds.length,
+    };
+  }, [sceneDocument.entityIds, sceneDocument.entities]);
+  const editModeThinInstancePlan = editModeThinInstancePlanComputation.plan;
   const editRuntimeSceneDocument = useMemo(
     () => editModeThinInstancePlan.entities === sceneDocument.entities
       ? sceneDocument
       : { ...sceneDocument, entities: editModeThinInstancePlan.entities },
     [editModeThinInstancePlan.entities, sceneDocument],
+  );
+  const folderGroupMoveSelection = useMemo(
+    () => resolveFolderGroupMoveSelection(sceneDocument, hierarchySelectionIds),
+    [hierarchySelectionIds, sceneDocument],
   );
 
   /** 把当前普通导入模型的运行时尺寸发布到临时 Inspector 状态。 */
@@ -228,13 +311,74 @@ export function SceneViewPanel() {
     runtimeRef.current?.clearEntityArrayPreview();
   }, []);
 
+  /** 根据当前 Store 选区绑定普通实体或文件夹组代理 Gizmo。 */
+  const attachCurrentSelectionGizmo = useCallback((
+    runtime: SceneRuntime,
+    gizmo: TransformGizmoController,
+  ): void => {
+    const state = useEditorStore.getState();
+    const folderSelection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
+    if (folderSelection.status === 'ready') {
+      const target = runtime.getFolderGroupGizmoTarget(folderSelection.folderId, folderSelection.entityIds);
+      gizmo.attachToGroupTarget(target, target ? folderSelection.folderId : null);
+      return;
+    }
+
+    const target = runtime.getGizmoTargetByEntityId(state.scene.selectedEntityId);
+    gizmo.attachToTarget(target, state.scene.selectedEntityId);
+    runtime.clearFolderGroupGizmoTarget();
+  }, []);
+
+  /** 空文件夹或锁定成员只提示一次，不创建可误导用户的组 Gizmo。 */
+  useEffect(() => {
+    if (isRuntimePreview || folderGroupMoveSelection.status === 'ready' || folderGroupMoveSelection.status === 'unavailable') {
+      folderGroupStatusLogSignatureRef.current = '';
+      return;
+    }
+
+    const folderId = folderGroupMoveSelection.folderId;
+    const folderName = folderId ? sceneDocument.entities[folderId]?.name ?? folderId : '当前文件夹';
+    const signature = folderGroupMoveSelection.status === 'blocked'
+      ? `blocked:${folderId}:${folderGroupMoveSelection.lockedEntityIds.join('|')}`
+      : `empty:${folderId}`;
+    if (folderGroupStatusLogSignatureRef.current === signature) return;
+    folderGroupStatusLogSignatureRef.current = signature;
+
+    if (folderGroupMoveSelection.status === 'blocked') {
+      pushLog(
+        `文件夹“${folderName}”整组移动已阻止：文件夹自身或后代中有 ${folderGroupMoveSelection.lockedEntityIds.length} 个锁定对象。`,
+      );
+      return;
+    }
+    pushLog(`文件夹“${folderName}”为空，无法显示整组移动 Gizmo。`);
+  }, [folderGroupMoveSelection, isRuntimePreview, pushLog, sceneDocument.entities]);
+
   useEffect(() => {
     editModeThinInstancePlanRef.current = editModeThinInstancePlan;
+    if (recordedEditModeThinInstancePlanComputationRef.current !== editModeThinInstancePlanComputation) {
+      const previousMetrics = editModeThinInstancePlanPerformanceRef.current;
+      editModeThinInstancePlanPerformanceRef.current = {
+        planCount: previousMetrics.planCount + 1,
+        lastDurationMs: editModeThinInstancePlanComputation.durationMs,
+        maxDurationMs: Math.max(previousMetrics.maxDurationMs, editModeThinInstancePlanComputation.durationMs),
+        entityCount: editModeThinInstancePlanComputation.entityCount,
+        groupCount: editModeThinInstancePlan.groupCount,
+        thinInstanceEntityCount: editModeThinInstancePlan.thinInstanceEntityCount,
+      };
+      recordedEditModeThinInstancePlanComputationRef.current = editModeThinInstancePlanComputation;
+    }
     sceneDocumentRef.current = sceneDocument;
     editRuntimeSceneDocumentRef.current = editRuntimeSceneDocument;
     selectedEntityIdRef.current = selectedEntityId;
     entityArrayDialogRef.current = entityArrayDialog;
-  }, [editModeThinInstancePlan, editRuntimeSceneDocument, sceneDocument, selectedEntityId, entityArrayDialog]);
+  }, [
+    editModeThinInstancePlan,
+    editModeThinInstancePlanComputation,
+    editRuntimeSceneDocument,
+    sceneDocument,
+    selectedEntityId,
+    entityArrayDialog,
+  ]);
 
 
   /** 源对象、单选状态或编辑模式失效时取消弹框，避免临时克隆悬挂。 */
@@ -407,6 +551,7 @@ export function SceneViewPanel() {
     let runtime: SceneRuntime | null = null;
     let gizmo: TransformGizmoController | null = null;
     let mqttTelemetryClient: MqttStackerTelemetryClient | null = null;
+    let performanceMonitor: ScenePerformanceMonitor | null = null;
 
     /** 处理 Babylon 运行状态回调，让渲染异常复用现有 scene-error 遮罩并在恢复时写入 Console。 */
     const handleRuntimeStatus = (status: BabylonViewportRuntimeStatus): void => {
@@ -529,6 +674,63 @@ export function SceneViewPanel() {
         cancelEntityArrayDrag: () => {
           (runtimeRef.current ?? runtime)?.clearEntityArrayPreview();
         },
+        beginGroupTranslation: (folderId) => {
+          const state = useEditorStore.getState();
+          const currentRuntime = runtimeRef.current ?? runtime;
+          const selection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
+          if (!currentRuntime) return false;
+          if (runtimeModeRef.current !== 'edit') {
+            pushLog('文件夹整组移动已阻止：运行预览期间不能编辑场景位置。');
+            return false;
+          }
+          if (entityArrayDialogRef.current) {
+            pushLog('文件夹整组移动已阻止：请先完成或取消当前阵列弹框。');
+            return false;
+          }
+          if (selection.status !== 'ready' || selection.folderId !== folderId) {
+            pushLog('文件夹整组移动已阻止：当前选区、成员或锁定状态已经变化。');
+            return false;
+          }
+
+          currentRuntime.clearEntityArrayPreview();
+          if (!currentRuntime.beginFolderGroupTranslation(selection.entityIds, selection.beforePositions)) {
+            pushLog('文件夹整组移动已阻止：没有可用于运行时预览的有效成员。');
+            return false;
+          }
+          folderGroupTranslationRef.current = {
+            ...selection,
+            sourceSceneDocument: state.scene,
+          };
+          return true;
+        },
+        previewGroupTranslation: (folderId, delta) => {
+          const session = folderGroupTranslationRef.current;
+          if (!session || session.folderId !== folderId) return;
+          (runtimeRef.current ?? runtime)?.updateFolderGroupTranslation(delta);
+        },
+        commitGroupTranslation: (folderId, delta) => {
+          const currentRuntime = runtimeRef.current ?? runtime;
+          const session = folderGroupTranslationRef.current;
+          folderGroupTranslationRef.current = null;
+          if (!currentRuntime || !session || session.folderId !== folderId) {
+            currentRuntime?.cancelFolderGroupTranslation();
+            return;
+          }
+
+          const committed = commitFolderGroupTranslation({
+            sourceSceneDocument: session.sourceSceneDocument,
+            folderId: session.folderId,
+            entityIds: session.entityIds,
+            beforePositions: session.beforePositions,
+            delta,
+          });
+          if (committed) currentRuntime.finishFolderGroupTranslation();
+          else currentRuntime.cancelFolderGroupTranslation();
+        },
+        cancelGroupTranslation: () => {
+          folderGroupTranslationRef.current = null;
+          (runtimeRef.current ?? runtime)?.cancelFolderGroupTranslation();
+        },
       });
       mqttTelemetryClient = new MqttStackerTelemetryClient(pushLog);
     } catch (error) {
@@ -551,6 +753,20 @@ export function SceneViewPanel() {
     gizmoRef.current = gizmo;
     mqttTelemetryClientRef.current = mqttTelemetryClient;
 
+    try {
+      performanceMonitor = new ScenePerformanceMonitor(viewport.engine, viewport.scene, {
+        getRuntimeMetrics: () => runtimeRef.current?.getPerformanceMetrics() ?? initializedRuntime.getPerformanceMetrics(),
+        getEditThinInstancePlanMetrics: () => editModeThinInstancePlanPerformanceRef.current,
+        getSceneFocusMetrics: () => sceneFocusPerformanceRef.current,
+      });
+      performanceMonitorRef.current = performanceMonitor;
+      performanceMonitor.start(setPerformanceSnapshot);
+    } catch (error) {
+      console.warn('Scene View 性能监控初始化失败，渲染功能不受影响。', error);
+      pushLog(`Scene View 性能监控初始化失败：${getErrorMessage(error)}`);
+    }
+
+    const initializedPerformanceMonitor = performanceMonitor;
     const canvas = canvasRef.current;
     // Project 内容会改变中列 auto 行高；元素自身尺寸变化不会触发 window.resize。
     const resize = () => initializedViewport.engine.resize();
@@ -567,6 +783,7 @@ export function SceneViewPanel() {
       resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
       window.removeEventListener('blur', cancelActiveGizmoDrag);
+      initializedPerformanceMonitor?.dispose();
       initializedMqttTelemetryClient?.dispose();
       initializedGizmo.dispose();
       initializedRuntime.dispose();
@@ -575,28 +792,58 @@ export function SceneViewPanel() {
       runtimeRef.current = null;
       gizmoRef.current = null;
       mqttTelemetryClientRef.current = null;
+      performanceMonitorRef.current = null;
+      setPerformanceSnapshot(null);
       setSelectedModelMeasurement(null);
     };
   }, [
     previewEntityTransform,
     commitEntityTransform,
+    commitFolderGroupTranslation,
     publishSelectedModelMeasurement,
     pushLog,
     setSelectedModelMeasurement,
     stopRuntimePreview,
   ]);
 
+  /** 文档内容变化才进入完整 SceneRuntime 同步；纯选择变化由下方专用 effect 处理。 */
   useEffect(() => {
     const runtime = runtimeRef.current;
     const gizmo = gizmoRef.current;
     if (!runtime || !gizmo) return;
     if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
 
+    gizmo.cancelActiveGroupDrag();
     runtime.sync(editRuntimeSceneDocument);
-    const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityId);
-    gizmo.attachToTarget(selectedTarget, selectedEntityId);
+    attachCurrentSelectionGizmo(runtime, gizmo);
+    publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
+  }, [
+    editRuntimeSceneDocument.entityIds,
+    editRuntimeSceneDocument.entities,
+    isRuntimePreview,
+    attachCurrentSelectionGizmo,
+    publishSelectedModelMeasurement,
+  ]);
+
+  /** 单选/文件夹选区变化只刷新目标表现、Gizmo 和 Inspector 测量，不重新扫描全场景。 */
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    const gizmo = gizmoRef.current;
+    if (!runtime || !gizmo) return;
+    if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
+
+    gizmo.cancelActiveGroupDrag();
+    runtime.syncSelection(editRuntimeSceneDocument);
+    attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedModelMeasurement(runtime, selectedEntityId);
-  }, [editRuntimeSceneDocument, selectedEntityId, isRuntimePreview, publishSelectedModelMeasurement]);
+  }, [
+    attachCurrentSelectionGizmo,
+    editRuntimeSceneDocument,
+    hierarchySelectionIds,
+    selectedEntityId,
+    isRuntimePreview,
+    publishSelectedModelMeasurement,
+  ]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -610,10 +857,10 @@ export function SceneViewPanel() {
       const currentSceneDocument = sceneDocumentRef.current;
       if (!currentSceneDocument) return;
       client.dispose();
+      gizmo.cancelActiveDrag();
       runtime.endTelemetryPreview();
       runtime.sync(editRuntimeSceneDocumentRef.current ?? currentSceneDocument);
-      const selectedTarget = runtime.getGizmoTargetByEntityId(selectedEntityIdRef.current);
-      gizmo.attachToTarget(selectedTarget, selectedEntityIdRef.current);
+      attachCurrentSelectionGizmo(runtime, gizmo);
       publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
       return;
     }
@@ -621,7 +868,9 @@ export function SceneViewPanel() {
     try {
       const currentSceneDocument = sceneDocumentRef.current;
       if (!currentSceneDocument) return;
+      gizmo.cancelActiveDrag();
       gizmo.attachToTarget(null, null);
+      runtime.clearFolderGroupGizmoTarget();
       runtime.sync(currentSceneDocument);
       runtime.beginTelemetryPreview();
       client.updateConfig(mqttConfig);
@@ -632,7 +881,7 @@ export function SceneViewPanel() {
       pushLog(`运行预览初始化失败：${message}`);
       stopRuntimePreview();
     }
-  }, [runtimeMode, isRuntimePreview, mqttConfig, publishSelectedModelMeasurement, pushLog, stopRuntimePreview]);
+  }, [attachCurrentSelectionGizmo, runtimeMode, isRuntimePreview, mqttConfig, publishSelectedModelMeasurement, pushLog, stopRuntimePreview]);
 
   useEffect(() => {
     if (!isRuntimePreview) return;
@@ -720,7 +969,13 @@ export function SceneViewPanel() {
     if (!runtime || !viewport) return;
 
     const bounds = runtime.getEntitiesWorldBounds(sceneFocusRequest.entityIds);
-    if (bounds) viewport.focusOnBounds(bounds);
+    if (bounds) {
+      viewport.focusOnBounds(bounds);
+      sceneFocusPerformanceRef.current = {
+        ...bounds,
+        focusedAt: new Date().toISOString(),
+      };
+    }
     consumeSceneFocusRequest(sceneFocusRequest.id);
   }, [sceneFocusRequest, consumeSceneFocusRequest]);
 
@@ -796,6 +1051,22 @@ export function SceneViewPanel() {
     closeEntityArrayDialog();
   }
 
+  /** 复制最近一分钟 Scene View 指标，便于在不同显卡设备上对比 CPU/GPU 瓶颈。 */
+  async function handleCopyPerformanceReport(): Promise<void> {
+    const monitor = performanceMonitorRef.current;
+    if (!monitor) {
+      pushLog('Scene View 性能报告尚未就绪。');
+      return;
+    }
+
+    try {
+      await copyScenePerformanceReport(monitor.createReport());
+      pushLog('Scene View 性能报告已复制到剪贴板。');
+    } catch (error) {
+      pushLog(`Scene View 性能报告复制失败：${getErrorMessage(error)}`);
+    }
+  }
+
   return (
     <section className={isRuntimePreview ? 'scene-panel scene-panel-preview' : 'scene-panel'}>
       <h2>Scene</h2>
@@ -810,6 +1081,47 @@ export function SceneViewPanel() {
           onPointerUp={handleCanvasPointerUp}
           onPointerCancelCapture={handleCanvasPointerCancel}
         />
+        {performanceSnapshot && props.performanceHudVisible ? (
+          <div className={performanceHudExpanded ? 'scene-performance-hud expanded' : 'scene-performance-hud'}>
+            <button
+              aria-expanded={performanceHudExpanded}
+              className="scene-performance-summary"
+              onClick={() => setPerformanceHudExpanded((expanded) => !expanded)}
+              title="展开或收起 Scene View 性能指标"
+              type="button"
+            >
+              <strong>{formatPerformanceMetric(performanceSnapshot.fps, 0)} FPS</strong>
+              <span>{formatPerformanceMetric(performanceSnapshot.frameTimeMs)} ms</span>
+              <span>{performanceSnapshot.drawCalls} DC</span>
+            </button>
+            {performanceHudExpanded ? (
+              <div className="scene-performance-details" role="status">
+                <dl>
+                  <div><dt>Frame / Render</dt><dd>{formatPerformanceMetric(performanceSnapshot.frameTimeMs)} / {formatPerformanceMetric(performanceSnapshot.renderTimeMs)} ms</dd></div>
+                  <div><dt>GPU frame</dt><dd>{performanceSnapshot.gpuFrameTimeMs === null ? 'N/A' : `${formatPerformanceMetric(performanceSnapshot.gpuFrameTimeMs)} ms`}</dd></div>
+                  <div><dt>Active eval</dt><dd>{formatPerformanceMetric(performanceSnapshot.activeMeshesEvaluationMs)} ms</dd></div>
+                  <div><dt>Draw Calls</dt><dd>{performanceSnapshot.drawCalls}</dd></div>
+                  <div><dt>Meshes</dt><dd>{performanceSnapshot.activeMeshes} / {performanceSnapshot.totalMeshes}</dd></div>
+                  <div><dt>Vertices</dt><dd>{performanceSnapshot.totalVertices.toLocaleString()}</dd></div>
+                  <div><dt>Thin instances</dt><dd>{performanceSnapshot.thinInstances.toLocaleString()}</dd></div>
+                  <div><dt>Active thin</dt><dd>{performanceSnapshot.activeThinInstances.toLocaleString()}</dd></div>
+                  <div><dt>GPU vertex calls</dt><dd>{performanceSnapshot.estimatedActiveVertexInvocations.toLocaleString()}</dd></div>
+                  <div><dt>GPU triangle calls</dt><dd>{performanceSnapshot.estimatedActiveTriangleInvocations.toLocaleString()}</dd></div>
+                  <div><dt>双面顶点</dt><dd>{performanceSnapshot.gpuMaterialTotals.doubleSidedVertexInvocations.toLocaleString()}</dd></div>
+                  <div><dt>Alpha test / blend</dt><dd>{performanceSnapshot.gpuMaterialTotals.alphaTestedVertexInvocations.toLocaleString()} / {performanceSnapshot.gpuMaterialTotals.alphaBlendedVertexInvocations.toLocaleString()}</dd></div>
+                  <div><dt>原模型 / 代理</dt><dd>{performanceSnapshot.runtime.modelArrayDetailedEntityCount.toLocaleString()} / {performanceSnapshot.runtime.modelArrayProxyEntityCount.toLocaleString()}</dd></div>
+                  <div><dt>完整同步</dt><dd>{formatPerformanceMetric(performanceSnapshot.runtime.lastFullSyncDurationMs)} ms</dd></div>
+                  <div><dt>选择同步</dt><dd>{formatPerformanceMetric(performanceSnapshot.runtime.lastSelectionSyncDurationMs)} ms / {performanceSnapshot.runtime.lastSelectionChangedEntityCount} 个</dd></div>
+                  <div><dt>编辑态分组</dt><dd>{formatPerformanceMetric(performanceSnapshot.editThinInstancePlan.lastDurationMs)} ms / {performanceSnapshot.editThinInstancePlan.entityCount.toLocaleString()} 个</dd></div>
+                  <div><dt>Long Task</dt><dd>{performanceSnapshot.longTaskCount} / {formatPerformanceMetric(performanceSnapshot.longTaskDurationMs)} ms</dd></div>
+                </dl>
+                <button className="scene-performance-copy" onClick={() => void handleCopyPerformanceReport()} type="button">
+                  复制最近一分钟报告
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {isRuntimePreview ? (
           <span aria-live="polite" className="scene-preview-badge" role="status">运行预览</span>
         ) : null}

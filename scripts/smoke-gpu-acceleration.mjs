@@ -49,7 +49,28 @@ await withEditor([], async (launched) => {
     await mainWindow.getByRole('button', { name: '进入空白编辑器' }).click();
     const canvas = mainWindow.locator('canvas.scene-canvas');
     await canvas.waitFor({ state: 'visible', timeout: 30_000 });
+    const performanceSummary = mainWindow.locator('.scene-performance-summary');
+    await performanceSummary.waitFor({ state: 'visible', timeout: 30_000 });
     await mainWindow.waitForTimeout(1_000);
+    const performanceSummaryText = (await performanceSummary.innerText()).trim();
+    await performanceSummary.click();
+    const performanceDetails = mainWindow.locator('.scene-performance-details');
+    await performanceDetails.waitFor({ state: 'visible', timeout: 10_000 });
+    const performanceDetailsText = (await performanceDetails.innerText()).trim();
+
+    const performanceToggle = mainWindow.getByRole('checkbox', { name: '性能监控' });
+    await performanceToggle.waitFor({ state: 'visible', timeout: 10_000 });
+    assert.equal(await performanceToggle.isChecked(), true, 'Toolbar 性能监控开关默认应开启');
+    await performanceToggle.uncheck();
+    await performanceSummary.waitFor({ state: 'hidden', timeout: 10_000 });
+    await performanceDetails.waitFor({ state: 'hidden', timeout: 10_000 });
+    assert.equal(await performanceToggle.isChecked(), false, 'Toolbar 未切换到隐藏状态');
+    await mainWindow.waitForTimeout(1_200);
+    await performanceToggle.check();
+    await performanceSummary.waitFor({ state: 'visible', timeout: 10_000 });
+    await performanceDetails.waitFor({ state: 'visible', timeout: 10_000 });
+    assert.equal(await performanceToggle.isChecked(), true, 'Toolbar 未恢复性能监控显示状态');
+    const restoredPerformanceSummaryText = (await performanceSummary.innerText()).trim();
 
     const mainProcess = await launched.evaluate(async ({ app }) => ({
       hardwareAccelerationEnabled: app.isHardwareAccelerationEnabled(),
@@ -94,6 +115,12 @@ await withEditor([], async (launched) => {
       'Electron GPU compositing 状态异常：' + mainProcess.featureStatus.gpu_compositing,
     );
     assert.equal(renderer.supported, true, 'Scene View 未创建 WebGL 上下文');
+    assert.match(performanceSummaryText, /FPS[\s\S]*ms[\s\S]*DC/, 'Scene View 性能摘要未显示 FPS/frame/DC');
+    assert.match(performanceDetailsText, /GPU frame/, 'Scene View 性能详情未显示 GPU frame 指标');
+    assert.match(performanceDetailsText, /完整同步/, 'Scene View 性能详情未显示运行时同步指标');
+    assert.match(performanceDetailsText, /复制最近一分钟报告/, 'Scene View 性能详情未提供报告入口');
+    assert.match(restoredPerformanceSummaryText, /FPS[\s\S]*ms[\s\S]*DC/, '性能监控重新显示后摘要未恢复');
+    assert.equal(await performanceDetails.isVisible(), true, 'Toolbar 恢复显示后应恢复原有详情展开状态');
     assert.equal(renderer.attributes?.powerPreference, 'high-performance', 'WebGL 未请求 high-performance GPU');
     assert.equal(renderer.attributes?.failIfMajorPerformanceCaveat, true, 'WebGL 仍允许重大性能降级');
     assert.equal(
@@ -114,6 +141,12 @@ await withEditor([], async (launched) => {
       activeGpu,
       featureStatus: mainProcess.featureStatus,
       renderer,
+      performanceHud: {
+        summary: performanceSummaryText,
+        details: performanceDetailsText,
+        restoredSummary: restoredPerformanceSummaryText,
+        toolbarHideShow: 'passed',
+      },
     }, null, 2));
   } catch (error) {
     if (rendererEvents.length > 0) console.error(rendererEvents.slice(-20).join('\n'));

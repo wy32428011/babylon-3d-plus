@@ -532,13 +532,13 @@ async function archiveDeploymentDirectory(
 
     signal.addEventListener('abort', handleAbort, { once: true });
     output.on('close', () => settle());
-    output.on('error', (error) => settle(error));
-    archive.on('error', (error) => settle(error));
-    archive.on('warning', (error) => settle(error));
-    archive.on('progress', (progress) => onProgress(progress.entries.processed, progress.entries.total));
+    output.on('error', (error: unknown) => settle(error));
+    archive.on('error', (error: unknown) => settle(error));
+    archive.on('warning', (error: unknown) => settle(error));
+    archive.on('progress', (progress: { entries: { processed: number; total: number } }) => onProgress(progress.entries.processed, progress.entries.total));
     archive.pipe(output);
     archive.directory(stagingPath, archiveRootName);
-    void archive.finalize().catch((error) => settle(error));
+    void archive.finalize().catch((error: unknown) => settle(error));
   });
 
   throwIfDeploymentExportAborted(signal);

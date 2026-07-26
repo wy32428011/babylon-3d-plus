@@ -20,7 +20,11 @@ const FIXTURE_ROOT = path.join(process.cwd(), 'output', 'playwright', 'shelf-ass
 const GLB_PATH = path.join(FIXTURE_ROOT, 'Shelf.glb');
 const SCRIPT_PATH = path.join(FIXTURE_ROOT, 'shelf.model.ts');
 const META_PATH = path.join(FIXTURE_ROOT, 'meta.json');
+const TARGET_SCENE_PATH = path.resolve(process.env.ZENDING_SCENE_SOURCE ?? path.join(process.cwd(), '..', '3d-projects', 'Untitled Scene.scene(1).json'));
 const MODULE_LOAD_TIMEOUT_MS = 180_000;
+const EXPECTED_DENSE_BATCH_COUNT_20X100 = 18;
+const EXPECTED_DENSE_THIN_INSTANCE_COUNT_20X100 = 16_674;
+const EXPECTED_DENSE_RENDERABLE_MESH_COUNT_20X100 = 18;
 
 const STAGE_TIMEOUT_MS = 180_000;
 
@@ -81,6 +85,27 @@ function createDefaultParameterValues(metadata) {
   );
 }
 
+/** 从目标场景读取当前真实 20x100 双深 Shelf 参数，避免专项 smoke 使用与现场无关的尺寸组合。 */
+async function readTargetSceneDenseShelfValues(metadata) {
+  const document = JSON.parse(await fs.readFile(TARGET_SCENE_PATH, 'utf8'));
+  const scene = document?.scene;
+  assert.ok(scene?.entityIds && scene?.entities, `目标场景缺少 SceneDocument：${TARGET_SCENE_PATH}`);
+  const candidates = [];
+  for (const entityId of scene.entityIds) {
+    const entity = scene.entities[entityId];
+    const modelAsset = entity?.components?.modelAsset;
+    const source = String(modelAsset?.sourcePath ?? modelAsset?.sourceUrl ?? '').replace(/\\/g, '/');
+    const values = modelAsset?.parameterValues;
+    if (!/\/Models\/Shelf\/Shelf\.glb$/i.test(source) || !values) continue;
+    if (Number(values.layerCount) !== 20 || Number(values.columnCount) !== 100 || values.doubleDeepEnabled !== true) continue;
+    candidates.push(values);
+  }
+  assert.ok(candidates.length > 0, `目标场景未找到 20x100 双深 Shelf：${TARGET_SCENE_PATH}`);
+  const signatures = new Map(candidates.map((values) => [JSON.stringify(values, Object.keys(values).sort()), values]));
+  assert.equal(signatures.size, 1, '目标场景中的 20x100 双深 Shelf 参数组合必须唯一');
+  return { ...createDefaultParameterValues(metadata), ...signatures.values().next().value };
+}
+
 /** 把实例参数写入脚本 metadata，复刻 SceneRuntime 的脚本注入边界。 */
 function syncScriptMetadata(contentRoot, metadata, values, assetCode) {
   const scripts = (metadata.parameterScripts ?? []).map((script) => {
@@ -104,10 +129,24 @@ function syncScriptMetadata(contentRoot, metadata, values, assetCode) {
   };
 }
 
-/** 收集实例根节点下具有真实顶点的活动 Mesh。 */
+/** 判断 Mesh 自身及其到 contentRoot 的祖先链均处于启用状态。 */
+function isEnabledWithinContentRoot(mesh, contentRoot) {
+  let current = mesh;
+  while (current && current !== contentRoot) {
+    if (current.isEnabled?.(false) === false) return false;
+    current = current.parent;
+  }
+  return current === contentRoot;
+}
+
+/** 收集实例根节点下真正可见且具有真实顶点的活动 Mesh。 */
 function collectRenderableMeshes(contentRoot) {
   return contentRoot.getChildMeshes(false).filter((mesh) => (
-    !mesh.isDisposed() && mesh.isEnabled(false) && mesh.getTotalVertices() > 0
+    !mesh.isDisposed()
+    && mesh.getTotalVertices() > 0
+    && mesh.isVisible !== false
+    && Number(mesh.visibility ?? 1) > 0
+    && isEnabledWithinContentRoot(mesh, contentRoot)
   ));
 }
 
@@ -148,13 +187,15 @@ function collectShelfMeterBounds(contentRoot) {
   return { minimum, maximum, size };
 }
 
-/** 断言 100x100 双深 dense 不只是实例数正确，三个正交空间轴也必须真实展开。 */
+/** 断言当前支持的 20x100 双深 dense 不只是实例数正确，三个正交空间轴也必须真实展开。 */
 function assertDenseShelfSpaceExpanded({ denseBounds, baselineBounds, values }) {
   const columnSpacing = Number(values.cellWidth);
   const layerSpacing = Number(values.cellHeight);
   const deepSpacing = Number(values.cellDepth) + Number(values.deepSlotGap);
-  assert.ok(denseBounds.size.x > baselineBounds.size.x + columnSpacing * 80, `100列必须沿 X 轴展开，当前 X=${denseBounds.size.x.toFixed(3)}，基线 X=${baselineBounds.size.x.toFixed(3)}`);
-  assert.ok(denseBounds.size.y > baselineBounds.size.y + layerSpacing * 80, `100层必须沿 Y 轴展开，当前 Y=${denseBounds.size.y.toFixed(3)}，基线 Y=${baselineBounds.size.y.toFixed(3)}`);
+  const minimumColumnGrowth = columnSpacing * Math.max(1, Number(values.columnCount) - 1) * 0.8;
+  const minimumLayerGrowth = layerSpacing * Math.max(1, Number(values.layerCount) - 1) * 0.8;
+  assert.ok(denseBounds.size.x > baselineBounds.size.x + minimumColumnGrowth, `${values.columnCount}列必须沿 X 轴展开，当前 X=${denseBounds.size.x.toFixed(3)}，基线 X=${baselineBounds.size.x.toFixed(3)}`);
+  assert.ok(denseBounds.size.y > baselineBounds.size.y + minimumLayerGrowth, `${values.layerCount}层必须沿 Y 轴展开，当前 Y=${denseBounds.size.y.toFixed(3)}，基线 Y=${baselineBounds.size.y.toFixed(3)}`);
   assert.ok(denseBounds.size.z > baselineBounds.size.z + deepSpacing * 0.45, `双深必须沿 Z 轴展开，当前 Z=${denseBounds.size.z.toFixed(3)}，基线 Z=${baselineBounds.size.z.toFixed(3)}`);
 }
 /** 直接从当前连续缓冲读取 thinInstance，避免 Babylon 公共矩阵缓存返回更新前快照。 */
@@ -165,11 +206,50 @@ function readThinInstanceFinalWorldMatrix(batch, thinInstanceIndex) {
   return Matrix.FromArray(batch.matrixBuffer, matrixOffset).multiply(batch.mesh.getWorldMatrix());
 }
 
-/** 汇总高密度批次的 thin instance 数量，兼容 Babylon 公开统计方法和脚本 metadata。 */
-function countDenseThinInstances(meshes) {
-  return meshes.reduce((sum, mesh) => (
-    sum + (Number(mesh.thinInstanceCount) || Number(mesh.metadata?.denseShelfThinInstanceCount) || 0)
-  ), 0);
+/** 从指定 Geometry 源的完整空间分片缓冲读取逻辑实体最终世界矩阵。 */
+function readModelArraySourceFinalWorldMatrix(modelArrayBatch, entityId, sourceIndex = 0) {
+  const entityIndex = modelArrayBatch?.getEntityIds().indexOf(entityId) ?? -1;
+  const source = modelArrayBatch?.sources?.[sourceIndex];
+  if (entityIndex < 0 || !source) return null;
+  for (const batch of source.batches) {
+    const entityIndexes = batch.sourceEntityIndexBuffer ?? batch.entityIndexBuffer;
+    const matrices = batch.sourceMatrixBuffer ?? batch.matrixBuffer;
+    if (!entityIndexes || !matrices) continue;
+    for (let instanceIndex = 0; instanceIndex < entityIndexes.length; instanceIndex += 1) {
+      if (entityIndexes[instanceIndex] !== entityIndex) continue;
+      batch.mesh.computeWorldMatrix(true);
+      return Matrix.FromArray(matrices, instanceIndex * 16).multiply(batch.mesh.getWorldMatrix());
+    }
+  }
+  return null;
+}
+
+/** 跨空间分片查找当前可见逻辑实体，验证 Babylon picking 索引映射。 */
+function findVisibleModelArrayEntity(runtime, modelArrayBatch, entityId, sourceIndex = null) {
+  const sources = sourceIndex === null
+    ? modelArrayBatch?.sources ?? []
+    : [modelArrayBatch?.sources?.[sourceIndex]].filter(Boolean);
+  for (const source of sources) {
+    for (const batch of source.batches) {
+      for (let thinInstanceIndex = 0; thinInstanceIndex < batch.mesh.thinInstanceCount; thinInstanceIndex += 1) {
+        if (runtime.readEntityIdFromMesh(batch.mesh, thinInstanceIndex) !== entityId) continue;
+        return { batch, thinInstanceIndex };
+      }
+    }
+  }
+  return null;
+}
+
+/** 只按 Babylon 已提交的真实 thinInstanceCount 汇总；metadata 仅用于交叉核对。 */
+function countDenseThinInstances(meshes, label = '高密度 Shelf') {
+  assert.ok(meshes.length > 0, `${label} 必须包含 dense batch`);
+  return meshes.reduce((sum, mesh, index) => {
+    const actual = Number(mesh.thinInstanceCount);
+    assert.ok(Number.isInteger(actual) && actual > 0, `${label} 第 ${index + 1} 个 dense batch 没有真实 thin instance`);
+    const metadataCount = Number(mesh.metadata?.denseShelfThinInstanceCount);
+    assert.equal(metadataCount, actual, `${label} 第 ${index + 1} 个 dense batch metadata 与真实数量不一致`);
+    return sum + actual;
+  }, 0);
 }
 
 /** 读取脚本写到参数根节点的高密度统计。 */
@@ -538,34 +618,77 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], left.id));
     const persistentBatch = runtime.models.get(left.id)?.modelArrayBatch;
     const persistentMeshes = [...(persistentBatch?.meshes ?? [])];
+    const persistentPrimaryBatches = persistentBatch?.sources.map((source) => source.batches[0]) ?? [];
+    const persistentPrimaryMeshes = persistentPrimaryBatches.map((batch) => batch.mesh);
     assert.equal(loadCount, 1, '正式 Shelf 阵列不得触发任何额外模型加载');
     assert.equal(runtime.models.size, 2, '1000 个 Shelf 阵列实体不得创建逐副本 ModelRuntimeEntry');
     assert.equal(runtime.modelArrayInstanceEntities.size, 1000, 'SceneRuntime 必须保留 1000 个独立 Shelf 逻辑实体');
-    assert.equal(persistentMeshes.length, leftMeshes.length, '正式 Shelf 阵列每个源 Mesh 只应创建一个批次 Mesh');
+    assert.ok(
+      persistentPrimaryMeshes.length > 0 && persistentPrimaryMeshes.length < leftMeshes.length,
+      '正式 Shelf 阵列必须把同材质静态叶 Mesh 合并成更少的 Geometry 源',
+    );
+    assert.equal(
+      persistentBatch.sources.reduce((total, source) => (
+        total + source.batches[0].mesh.getTotalVertices() * source.sourceMeshes.length
+      ), 0),
+      leftMeshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0),
+      'Geometry 顶点乘保留的叶矩阵数必须完整覆盖 Shelf 原始视觉数据',
+    );
+    const suspendedSourceMeshCount = runtime.models.get(left.id)?.modelArraySuspendedMeshes.size ?? 0;
     assert.equal(
       integrationScene.meshes.length,
-      meshCountBeforePersistentArray + leftMeshes.length,
-      '正式 Shelf 阵列 Mesh 数量只能增加固定批次数量',
+      meshCountBeforePersistentArray - suspendedSourceMeshCount + persistentMeshes.length,
+      '正式 Shelf 阵列必须用固定批次替换源宿主 Mesh，不能重复保留两套场景节点',
     );
     assert.ok(
-      persistentMeshes.every((mesh) => !mesh.isAnInstance && mesh.thinInstanceCount === 1000),
-      '正式 Shelf 阵列必须一次写入全部 1000 个 thinInstance',
+      leftMeshes.every((mesh) => !integrationScene.meshes.includes(mesh)),
+      '源 Shelf 的脚本宿主 Mesh 必须移出 scene.meshes，避免每帧重复遍历',
     );
-    assert.equal(
-      persistentMeshes.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
-      leftMeshes.length * 1000,
-      '正式 Shelf 阵列矩阵总数必须覆盖全部源 Mesh 与独立逻辑实体组合',
+    assert.equal(runtime.models.get(left.id)?.root.isEnabled(), false, '源 Shelf 脚本宿主根节点必须暂停渲染');
+    assert.ok(persistentMeshes.every((mesh) => !mesh.isAnInstance), '正式 Shelf 阵列不得退回 InstancedMesh 节点');
+    for (const source of persistentBatch.sources) {
+      const sourceMatrixCount = source.sourceMeshes.reduce((total, sourceMesh) => (
+        total + (sourceMesh.thinInstanceCount > 0 ? sourceMesh.thinInstanceCount : 1)
+      ), 0);
+      const completeInstanceCount = source.batches.reduce(
+        (total, batch) => total + (batch.sourceEntityIndexBuffer?.length ?? 0),
+        0,
+      );
+      const visibleInstanceCount = source.batches.reduce(
+        (total, batch) => total + batch.mesh.thinInstanceCount,
+        0,
+      );
+      assert.equal(
+        completeInstanceCount,
+        sourceMatrixCount * 1001,
+        '每个 Geometry 源的完整空间分片缓冲必须覆盖源实体和 1000 个逻辑副本',
+      );
+      assert.ok(visibleInstanceCount <= completeInstanceCount, '视锥压缩后的 GPU 实例前缀不得超过完整源缓冲');
+      const verticesPerInstance = Math.max(1, source.batchSource.getTotalVertices());
+      const maximumPartitionInstances = Math.max(128, Math.min(65_536, Math.floor(32_000_000 / verticesPerInstance)));
+      assert.ok(
+        source.batches
+          .filter((batch) => batch.sourceEntityIndexBuffer)
+          .every((batch) => batch.sourceEntityIndexBuffer.length <= maximumPartitionInstances),
+        `正式 Shelf 空间分片必须遵守当前顶点预算动态上限 ${maximumPartitionInstances}`,
+      );
+    }
+    assert.ok(
+      persistentMeshes.every((mesh) => mesh.metadata?.modelArraySourceEntityId === left.id),
+      '全部正式 Shelf 矩阵分片必须记录源模型',
     );
     assert.ok(
-      persistentMeshes.every((mesh) => mesh.metadata?.modelArraySourceEntityId === left.id && mesh.isPickable),
-      '正式 Shelf 矩阵批次必须记录源模型并支持实例拾取',
+      persistentMeshes.filter((mesh) => mesh.thinInstanceCount > 0).every((mesh) => mesh.isPickable),
+      '当前视锥内的正式 Shelf 矩阵分片必须支持实例拾取',
     );
-    assert.equal(
-      runtime.readEntityIdFromMesh(persistentMeshes[0], 0),
-      persistentEntities[0].id,
-      'Shelf thinInstanceIndex 必须映射到具体逻辑实体',
-    );
+    assert.ok(persistentBatch.hasEntityId(left.id), '完整空间分片缓冲必须保留源实体逻辑映射');
+    assert.ok(readModelArraySourceFinalWorldMatrix(persistentBatch, left.id), '完整空间分片缓冲必须能读取源实体矩阵');
+    assert.ok(persistentBatch.hasEntityId(persistentEntities[0].id), '完整空间分片缓冲必须保留具体逻辑实体');
     assert.doesNotThrow(() => integrationScene.render(), '正式 Shelf 1000 阵列必须保持可渲染');
+    assert.ok(
+      persistentBatch.getEntityIds().some((entityId) => findVisibleModelArrayEntity(runtime, persistentBatch, entityId)),
+      '当前视锥内至少一个 Shelf 实体必须保留 Babylon picking 索引映射',
+    );
 
     let persistentMatrixUpdateCount = 0;
     const originalPersistentMatrixUpdate = persistentBatch.updateEntityTransforms.bind(persistentBatch);
@@ -576,9 +699,14 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[10].id));
     assert.equal(persistentMatrixUpdateCount, 0, '仅切换选择不得重新组合 1000 个 Shelf 矩阵');
 
-    const persistentMatrixBuffer = persistentBatch?.batches?.[0]?.matrixBuffer;
-    const firstPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 0)?.getTranslation().x;
-    const lastPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1000 - 1)?.getTranslation().x;
+    const persistentSourceBuffers = new Map();
+    persistentBatch.sources.forEach((source, sourceIndex) => {
+      for (const batch of source.batches) {
+        persistentSourceBuffers.set(`${sourceIndex}:${batch.orientation}:${batch.partitionIndex}`, batch.sourceMatrixBuffer);
+      }
+    });
+    const firstPersistentX = readModelArraySourceFinalWorldMatrix(persistentBatch, persistentEntities[0].id)?.getTranslation().x;
+    const lastPersistentX = readModelArraySourceFinalWorldMatrix(persistentBatch, persistentEntities[999].id)?.getTranslation().x;
     persistentEntities = [
       createSceneRuntimeShelfEntity(persistentEntities[0].id, 7, modelAsset, {
         modelArrayInstance: { sourceEntityId: left.id },
@@ -588,9 +716,17 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[0].id));
     assert.equal(runtime.models.get(left.id)?.modelArrayBatch, persistentBatch, '移动单个 Shelf 实体必须复用正式矩阵批次');
     assert.equal(persistentMatrixUpdateCount, 1, '移动一个 Shelf 实体只允许触发一次整批矩阵刷新');
-    assert.equal(persistentBatch?.batches?.[0]?.matrixBuffer, persistentMatrixBuffer, '移动 Shelf 实体必须复用原 Float32Array');
-    const updatedFirstPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 0)?.getTranslation().x;
-    const updatedLastPersistentX = readThinInstanceFinalWorldMatrix(persistentBatch?.batches?.[0], 1000 - 1)?.getTranslation().x;
+    persistentBatch.sources.forEach((source, sourceIndex) => {
+      for (const batch of source.batches) {
+        assert.equal(
+          batch.sourceMatrixBuffer,
+          persistentSourceBuffers.get(`${sourceIndex}:${batch.orientation}:${batch.partitionIndex}`),
+          '移动 Shelf 实体必须按 Geometry 源和空间分片复用原 Float32Array',
+        );
+      }
+    });
+    const updatedFirstPersistentX = readModelArraySourceFinalWorldMatrix(persistentBatch, persistentEntities[0].id)?.getTranslation().x;
+    const updatedLastPersistentX = readModelArraySourceFinalWorldMatrix(persistentBatch, persistentEntities[999].id)?.getTranslation().x;
     assert.ok(
       Math.abs((updatedFirstPersistentX ?? Number.NaN) - ((firstPersistentX ?? Number.NaN) + 5)) <= 1e-6,
       '移动单个 Shelf 实体必须只让自己的最终世界矩阵平移 5m',
@@ -635,8 +771,8 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     assert.equal(runtime.modelArrayParameterVariants.size, 2, '两个不同参数组合只应创建两个脚本宿主');
     assert.equal(
       runtime.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
-      998,
-      '修改两个阵列实体参数后，基础批次必须保留其余 998 个模型',
+      999,
+      '修改两个阵列实体参数后，基础批次必须保留源实体和其余 998 个模型',
     );
     assert.deepEqual(
       firstParameterVariant.model.modelArrayBatch.getEntityIds(),
@@ -648,18 +784,39 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       [persistentEntities[1].id],
       '第二个参数变体批次必须只映射第二个逻辑模型',
     );
+    const firstVisibleParameterVariant = findVisibleModelArrayEntity(
+      runtime,
+      firstParameterVariant.model.modelArrayBatch,
+      persistentEntities[0].id,
+    );
+    assert.ok(firstVisibleParameterVariant, '参数变体当前视锥内必须保留可拾取 thinInstance');
     assert.equal(
-      runtime.readEntityIdFromMesh(firstParameterVariant.model.modelArrayBatch.meshes[0], 0),
+      runtime.readEntityIdFromMesh(firstVisibleParameterVariant.batch.mesh, firstVisibleParameterVariant.thinInstanceIndex),
       persistentEntities[0].id,
       '参数变体 thinInstance 拾取必须映射回自己的逻辑模型',
     );
     assert.ok(
-      firstParameterVariant.model.meshes.every((mesh) => mesh.layerMask === 0 && mesh.isPickable === false),
-      '参数脚本宿主必须隐藏且不可拾取，只显示 thinInstance 批次',
+      firstParameterVariant.model.meshes.every((mesh) => (
+        mesh.layerMask === 0
+        && mesh.isPickable === false
+        && !integrationScene.meshes.includes(mesh)
+      )),
+      '参数脚本宿主必须移出场景且不可拾取，只显示 thinInstance 批次',
+    );
+    assert.equal(firstParameterVariant.model.root.isEnabled(), false, '参数脚本宿主根节点必须暂停渲染');
+    assert.ok(
+      firstParameterVariant.model.modelArrayBatch.meshes.every((mesh) => mesh.layerMask !== 0),
+      '参数脚本输出的正式批次不得继承隐藏宿主的 layerMask=0',
     );
     assert.ok(
-      firstParameterVariant.model.modelArrayBatch.meshes.every((mesh) => mesh.layerMask !== 0 && mesh.thinInstanceCount > 0),
-      '参数脚本输出必须继续通过可见 thinInstance 批次渲染',
+      firstParameterVariant.model.modelArrayBatch.sources.every((source) => source.batches.some((batch) => (
+        batch.sourceEntityIndexBuffer?.length ?? 0
+      ) > 0)),
+      '参数脚本输出的每个 Geometry 源都必须保留完整逻辑矩阵缓冲',
+    );
+    assert.ok(
+      firstParameterVariant.model.modelArrayBatch.meshes.some((mesh) => mesh.thinInstanceCount > 0),
+      '参数脚本输出当前视锥内至少必须存在一个可见 thinInstance 批次',
     );
     assert.ok(
       hasMeasurementDifference(runtime.getModelMeasurement(persistentEntities[0].id).sizeMeters, baseMeasurement),
@@ -716,11 +873,16 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       [persistentEntities[0].id, persistentEntities[1].id],
       '相同参数组必须一次提交两个逻辑模型的 thinInstance 矩阵',
     );
-    const sharedVariantMesh = sharedFirstVariant.model.modelArrayBatch.meshes[0];
-    assert.equal(
-      runtime.readEntityIdFromMesh(sharedVariantMesh, sharedVariantMesh.thinInstanceCount - 1),
+    const sharedSecondVisible = findVisibleModelArrayEntity(
+      runtime,
+      sharedFirstVariant.model.modelArrayBatch,
       persistentEntities[1].id,
-      '合并参数组最后一个 thinInstance 必须映射到第二个逻辑模型',
+    );
+    assert.ok(sharedSecondVisible, '合并参数组中的第二个逻辑模型必须在当前视锥保留可拾取 thinInstance');
+    assert.equal(
+      runtime.readEntityIdFromMesh(sharedSecondVisible.batch.mesh, sharedSecondVisible.thinInstanceIndex),
+      persistentEntities[1].id,
+      '合并参数组 thinInstance 必须映射到第二个逻辑模型',
     );
 
     persistentEntities = persistentEntities.map((entity, index) => (
@@ -737,8 +899,8 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     assert.equal(runtime.modelArrayParameterVariants.size, 0, '恢复默认参数后必须释放全部额外脚本宿主');
     assert.equal(
       runtime.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
-      1000,
-      '恢复默认参数后全部 1000 个逻辑模型必须重新合并到基础 thinInstance 批次',
+      1001,
+      '恢复默认参数后源实体和全部 1000 个逻辑模型必须重新合并到基础 thinInstance 批次',
     );
 
     const lockedRight = createSceneRuntimeShelfEntity(right.id, 10, modelAsset, { locked: true });
@@ -806,9 +968,10 @@ try {
   const { SceneRuntime } = await withStageTimeout('加载 SceneRuntime 模块', () => loadSsrModuleWithTimeout(server, '/src/runtime/babylon/SceneRuntime.ts'));
 
   const defaults = createDefaultParameterValues(metadata);
+  const targetSceneDenseValues = await withStageTimeout('读取目标场景 20x100 双深 Shelf 参数', () => readTargetSceneDenseShelfValues(metadata));
   const layerParameter = metadata.modelParameters?.parameters?.find((parameter) => parameter.key === 'layerCount');
   const columnParameter = metadata.modelParameters?.parameters?.find((parameter) => parameter.key === 'columnCount');
-  assert.equal((layerParameter?.configuration?.max ?? layerParameter?.max), 100, 'meta.json layerCount 必须支持到 100');
+  assert.equal((layerParameter?.configuration?.max ?? layerParameter?.max), 20, 'meta.json layerCount 必须保持当前支持上限 20');
   assert.equal((columnParameter?.configuration?.max ?? columnParameter?.max), 100, 'meta.json columnCount 必须支持到 100');
   const values = {
     ...defaults,
@@ -967,19 +1130,14 @@ try {
   const denseBaselineBounds = withSyncStage('收集 1x1 单深空间基线包围盒', () => collectShelfMeterBounds(denseBaseline.contentRoot));
   disposeShelfRuntime(denseBaseline);
 
-  const denseInstantiation = await withStageTimeout('共享缓存实例化 100x100 高密度 Shelf', () => cache.instantiate(cacheKey, loader, (sourceName) => sourceName));
-  const dense = await withStageTimeout('创建 100x100 双深高密度 Shelf 运行时', () => createShelfRuntime({
-    id: 'SHELF-DENSE-100X100',
+  const denseInstantiation = await withStageTimeout('共享缓存实例化 20x100 高密度 Shelf', () => cache.instantiate(cacheKey, loader, (sourceName) => sourceName));
+  const dense = await withStageTimeout('创建 20x100 双深高密度 Shelf 运行时', () => createShelfRuntime({
+    id: 'SHELF-DENSE-20X100',
     x: 25,
     sharedInstantiation: denseInstantiation,
     metadata,
     scriptText,
-    values: {
-      ...values,
-      layerCount: 100,
-      columnCount: 100,
-      doubleDeepEnabled: true,
-    },
+    values: targetSceneDenseValues,
     ExternalModelScriptRuntime,
     scene,
   }));
@@ -987,15 +1145,24 @@ try {
   const denseThinInstances = withSyncStage('统计高密度 thin instance 数', () => countDenseThinInstances(denseBatches));
   const denseRenderableMeshes = withSyncStage('收集高密度可渲染 Mesh', () => collectRenderableMeshes(dense.contentRoot));
   const denseMetadata = readDenseMetadata(dense.contentRoot);
-  assert.equal(dense.values.layerCount, 100, '高密度 Shelf layerCount 不得被 clamp 到 20');
-  assert.equal(dense.values.columnCount, 100, '高密度 Shelf columnCount 必须保持 100');
-  assert.ok(denseBatches.length > 0, '100x100 Shelf 必须启用高密度 dense batch');
-  assert.ok(denseThinInstances > 10000, '100x100 双深 Shelf thin instance 数必须覆盖全部网格重复结构');
-  assert.ok(denseRenderableMeshes.length < 200, '100x100 Shelf 场景 Mesh 数必须保持批次级上界');
+  assert.equal(dense.values.layerCount, 20, '目标场景高密度 Shelf layerCount 必须保持当前支持上限 20');
+  assert.equal(dense.values.columnCount, 100, '目标场景高密度 Shelf columnCount 必须保持 100');
+  assert.equal(denseBatches.length, EXPECTED_DENSE_BATCH_COUNT_20X100, '20x100 双深 Shelf 必须生成完整的 18 个 dense batch');
+  assert.equal(
+    denseThinInstances,
+    EXPECTED_DENSE_THIN_INSTANCE_COUNT_20X100,
+    '目标场景 20x100 双深 Shelf 必须提交完整的 16674 个真实 thin instance',
+  );
+  assert.equal(
+    denseRenderableMeshes.length,
+    EXPECTED_DENSE_RENDERABLE_MESH_COUNT_20X100,
+    '20x100 双深 Shelf 可渲染 dense batch Mesh 数必须保持 18',
+  );
   assert.equal(denseMetadata?.enabled, true, '参数根 metadata 必须标记高密度模式已启用');
-  assert.equal(denseMetadata?.thinInstanceCount, denseThinInstances, '高密度 metadata thinInstanceCount 必须与批次统计一致');
-  const denseBounds = withSyncStage('收集 100x100 双深高密度空间包围盒', () => collectShelfMeterBounds(dense.contentRoot));
-  withSyncStage('断言 100x100 双深高密度空间展开', () => assertDenseShelfSpaceExpanded({
+  assert.equal(denseMetadata?.batchCount, denseBatches.length, '高密度 metadata batchCount 必须与真实批次数一致');
+  assert.equal(denseMetadata?.thinInstanceCount, denseThinInstances, '高密度 metadata thinInstanceCount 必须与真实统计一致');
+  const denseBounds = withSyncStage('收集 20x100 双深高密度空间包围盒', () => collectShelfMeterBounds(dense.contentRoot));
+  withSyncStage('断言 20x100 双深高密度空间展开', () => assertDenseShelfSpaceExpanded({
     denseBounds,
     baselineBounds: denseBaselineBounds,
     values: dense.values,
@@ -1007,7 +1174,7 @@ try {
   denseSelectionLayer.clearSelection();
   denseSelectionLayer.dispose();
   logStage('结束：高密度选择隔离验证');
-  withSyncStage('高密度 Shelf 更新参数重建', () => updateShelfRuntime(dense, { ...dense.values, layerCount: 99, columnCount: 100 }));
+  withSyncStage('高密度 Shelf 更新参数重建', () => updateShelfRuntime(dense, { ...dense.values, layerCount: 19, columnCount: 100 }));
   const rebuiltDenseBatches = collectDenseBatchMeshes(dense.contentRoot);
   assert.ok(rebuiltDenseBatches.length > 0, '高密度 Shelf 参数更新后必须重新生成 dense batch');
   assert.ok(countDenseThinInstances(rebuiltDenseBatches) < denseThinInstances, '高密度 Shelf 更新层数后 thin instance 数量必须随参数变化');
@@ -1034,6 +1201,8 @@ try {
     denseBatchCount: denseBatches.length,
     denseThinInstances,
     denseRenderableMeshes: denseRenderableMeshes.length,
+    targetScenePath: TARGET_SCENE_PATH,
+    targetSceneDenseValues,
     generatedRoots: generatedRoots.length,
     selectionBufferStressInstances,
     sceneRuntime,

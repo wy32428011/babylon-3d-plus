@@ -31,6 +31,7 @@ import {
   VertexData,
 } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
+import { collectFolderRuntimeEntityIds, createEntityHierarchyStateMap } from '../../editor/model/entityHierarchy';
 import type {
   CadReferenceComponent,
   LightComponent,
@@ -125,6 +126,10 @@ import {
 } from './instancedSelectionBuffers';
 import { ModelGeneratorFetchRuntime } from './ModelGeneratorFetchRuntime';
 import { EntityArrayThinInstanceBatch } from './EntityArrayThinInstanceBatch';
+import {
+  EntityGroupTranslationPreview,
+  type EntityGroupTranslationTarget,
+} from './EntityGroupTranslationPreview';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
 const SELECTED_EMISSIVE_COLOR = '#332400';
@@ -229,6 +234,8 @@ type ModelRuntimeEntry = {
   contentRoot: TransformNode;
   assetHandle: ModelRuntimeAssetHandle | null;
   meshes: AbstractMesh[];
+  /** 因模型阵列批次而从 scene.meshes 暂时移除的脚本宿主 Mesh。 */
+  modelArraySuspendedMeshes: Set<AbstractMesh>;
   modelArrayBatch: EntityArrayThinInstanceBatch | null;
   modelArraySourceSignature: string;
   modelArrayFailureSignature: string;
@@ -462,6 +469,46 @@ type RuntimeWorldBounds = {
   maximum: Vector3;
 };
 
+export type SceneRuntimePerformanceMetrics = {
+  fullSyncCount: number;
+  selectionSyncCount: number;
+  lastFullSyncDurationMs: number;
+  maxFullSyncDurationMs: number;
+  lastSelectionSyncDurationMs: number;
+  maxSelectionSyncDurationMs: number;
+  lastSelectionChangedEntityCount: number;
+  modelRuntimeCount: number;
+  modelArrayInstanceEntityCount: number;
+  modelArrayParameterVariantCount: number;
+  modelArrayBatchCount: number;
+  modelArrayBatchEntityCount: number;
+  modelArrayBatchMeshCount: number;
+  modelArrayScreenSpaceProxyBatchCount: number;
+  modelArraySolidProxyEntityCount: number;
+  modelArrayFrameProxyEntityCount: number;
+  modelArrayProxyEntityCount: number;
+  modelArrayDetailedEntityCount: number;
+};
+
+/** 浏览器和 Node smoke 共用的高精度计时入口。 */
+/**
+ * Babylon 9.12 的 thinInstanceBufferUpdated('matrix') 不会清空 worldMatrices 缓存；
+ * 读取当前连续 matrixData，避免包围盒和阵列重建使用旧矩阵。
+ */
+function readCurrentThinInstanceMatrices(mesh: Mesh): Matrix[] | null {
+  const count = mesh.thinInstanceCount;
+  const matrixData = mesh._thinInstanceDataStorage?.matrixData;
+  if (matrixData && matrixData.length >= count * 16) {
+    return Array.from({ length: count }, (_, index) => Matrix.FromArray(matrixData, index * 16));
+  }
+  const cached = mesh.thinInstanceGetWorldMatrices();
+  return cached.length >= count ? cached.slice(0, count).map((matrix) => matrix.clone()) : null;
+}
+
+function readRuntimeTimestampMs(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now();
+}
+
 export class SceneRuntime {
   private readonly meshes = new Map<string, Mesh>();
   private readonly locators = new Map<string, LocatorRuntimeEntry>();
@@ -479,6 +526,7 @@ export class SceneRuntime {
   private modelArrayCanonicalSignatureSequence = 0;
   private readonly modelArrayBatchByMeshUniqueId = new Map<number, EntityArrayThinInstanceBatch>();
   private modelArrayGizmoProxy: { entityId: string; node: TransformNode } | null = null;
+  private folderGroupGizmoProxy: { folderId: string; entityIds: string[]; node: TransformNode } | null = null;
   private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
   private readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
   private readonly stackerCargoMeshes = new Map<string, StackerCargoRuntimeEntry>();
@@ -493,6 +541,7 @@ export class SceneRuntime {
   private readonly sharedModelAssetCache = new SharedModelAssetCache();
   private readonly fetchRuntimes = new Map<string, ModelGeneratorFetchRuntime>();
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
+  private readonly groupTranslationPreviewObserver: Nullable<Observer<Scene>>;
   private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly reportedMissingTargets = new Set<string>();
@@ -507,7 +556,19 @@ export class SceneRuntime {
   private cargoHandoffBlockedSignature = '';
   private readonly reportedCargoHandoffIssues = new Set<string>();
   private sharedModelSelectionOutlineSignature = '';
+  private activeModelGeneratorEntityId: string | null = null;
+  private reportedModelGeneratorConflictSignature = '';
+  private outlinedModelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
+  private fullSyncCount = 0;
+  private selectionSyncCount = 0;
+  private lastFullSyncDurationMs = 0;
+  private maxFullSyncDurationMs = 0;
+  private lastSelectionSyncDurationMs = 0;
+  private maxSelectionSyncDurationMs = 0;
+  private lastSelectionChangedEntityCount = 0;
   private entityArrayPreview: EntityArrayPreviewEntry | null = null;
+  private groupTranslationPreview: EntityGroupTranslationPreview | null = null;
+  private pendingGroupTranslationDelta: Vector3Data | null = null;
   private modelLoadSequence = 0;
   private environmentLoadSequence = 0;
 
@@ -519,8 +580,15 @@ export class SceneRuntime {
     this.modelHighlightLayer = new HighlightLayer('EditorModelHighlightLayer', scene);
     this.modelSelectionOutlineLayer = new SelectionOutlineLayer('EditorInstancedModelSelectionOutlineLayer', scene);
     this.modelSelectionOutlineLayer.outlineColor = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
-    this.genericTelemetryMotionRuntime = new GenericTelemetryMotionRuntime(scene, { pushLog: this.pushLog });
+    this.genericTelemetryMotionRuntime = new GenericTelemetryMotionRuntime(scene, {
+      pushLog: this.pushLog,
+      beforeModelMutation: (entityId) => this.prepareModelArrayRuntimeMutationByEntityId(entityId),
+      afterModelMutation: (entityId) => this.refreshModelArrayRuntimeRepresentationByEntityId(entityId),
+    });
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
+    this.groupTranslationPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
+      this.flushGroupTranslationPreview();
+    });
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
   }
 
@@ -592,6 +660,7 @@ export class SceneRuntime {
   beginTelemetryPreview(): void {
     if (this.telemetryPreviewActive) return;
     this.clearEntityArrayPreview();
+    this.clearFolderGroupGizmoTarget();
     this.telemetryPreviewActive = true;
     this.genericTelemetryMotionRuntime.beginPreview();
     this.clearTelemetryPreviewRuntimeState();
@@ -646,6 +715,10 @@ export class SceneRuntime {
 
     const modelArrayInstance = this.modelArrayInstanceEntities.get(entityId);
     if (modelArrayInstance) return this.getOrCreateModelArrayGizmoProxy(modelArrayInstance);
+    const sourceModel = this.models.get(entityId);
+    if (sourceModel?.modelArrayBatch && sourceModel.entitySnapshot) {
+      return this.getOrCreateModelArrayGizmoProxy(sourceModel.entitySnapshot);
+    }
 
     return (
       this.meshes.get(entityId) ??
@@ -656,6 +729,193 @@ export class SceneRuntime {
       this.poiEffectRuntime.getGizmoTarget(entityId) ??
       null
     );
+  }
+
+  /** 在全部文件夹成员世界包围盒中心创建或更新不可见移动代理。 */
+  getFolderGroupGizmoTarget(folderId: string, entityIds: readonly string[]): TransformNode | null {
+    const uniqueEntityIds = [...new Set(entityIds)].filter((entityId) => Boolean(entityId));
+    const bounds = uniqueEntityIds.length > 0 ? this.getEntitiesWorldBounds(uniqueEntityIds) : null;
+    if (!bounds) {
+      if (this.folderGroupGizmoProxy?.folderId === folderId) {
+        this.folderGroupGizmoProxy.node.setEnabled(false);
+      }
+      return null;
+    }
+
+    let proxy = this.folderGroupGizmoProxy;
+    if (!proxy) {
+      proxy = {
+        folderId,
+        entityIds: uniqueEntityIds,
+        node: new TransformNode('__folderGroupTranslateGizmoProxy', this.scene),
+      };
+      this.folderGroupGizmoProxy = proxy;
+    }
+    proxy.folderId = folderId;
+    proxy.entityIds = uniqueEntityIds;
+    proxy.node.setEnabled(true);
+    proxy.node.position.copyFromFloats(bounds.center.x, bounds.center.y, bounds.center.z);
+    proxy.node.rotationQuaternion = null;
+    proxy.node.rotation.copyFromFloats(0, 0, 0);
+    proxy.node.scaling.copyFromFloats(1, 1, 1);
+    proxy.node.computeWorldMatrix(true);
+    return proxy.node;
+  }
+
+  /** 隐藏文件夹组代理并取消任何尚未提交的运行时预览。 */
+  clearFolderGroupGizmoTarget(): void {
+    this.cancelFolderGroupTranslation();
+    this.folderGroupGizmoProxy?.node.setEnabled(false);
+  }
+
+  /** 建立文件夹组运行时平移会话；未加载成员会在后续批次就绪时自动接回。 */
+  beginFolderGroupTranslation(
+    entityIds: readonly string[],
+    beforePositions: Readonly<Record<string, Vector3Data>>,
+  ): boolean {
+    if (this.telemetryPreviewActive) return false;
+    this.cancelFolderGroupTranslation();
+
+    const validEntityIds = [...new Set(entityIds)].filter((entityId) => {
+      const position = beforePositions[entityId];
+      return Boolean(
+        position
+        && Number.isFinite(position.x)
+        && Number.isFinite(position.y)
+        && Number.isFinite(position.z),
+      );
+    });
+    if (validEntityIds.length === 0) return false;
+
+    const baselines = Object.fromEntries(validEntityIds.map((entityId) => {
+      const position = beforePositions[entityId];
+      return [entityId, { x: position.x, y: position.y, z: position.z }];
+    }));
+    this.groupTranslationPreview = new EntityGroupTranslationPreview(
+      validEntityIds,
+      baselines,
+      (entityId) => this.resolveGroupTranslationTarget(entityId),
+    );
+    this.pendingGroupTranslationDelta = null;
+    this.groupTranslationPreview.refresh();
+    return true;
+  }
+
+  /** 记录最新绝对 delta，并在下一次 active-mesh 评估前合并为一次运行时更新。 */
+  updateFolderGroupTranslation(delta: Vector3Data): boolean {
+    if (
+      !this.groupTranslationPreview
+      || !Number.isFinite(delta.x)
+      || !Number.isFinite(delta.y)
+      || !Number.isFinite(delta.z)
+    ) return false;
+
+    this.pendingGroupTranslationDelta = { x: delta.x, y: delta.y, z: delta.z };
+    return true;
+  }
+
+  /** 取消整组预览并恢复节点、灯光与 thinInstance 矩阵基线。 */
+  cancelFolderGroupTranslation(): void {
+    const preview = this.groupTranslationPreview;
+    if (!preview) return;
+
+    this.pendingGroupTranslationDelta = null;
+    this.groupTranslationPreview = null;
+    preview.cancel();
+    this.refreshFolderGroupGizmoProxyPosition();
+  }
+
+  /** 完成整组预览并保留当前画面，等待场景文档同步权威位置。 */
+  finishFolderGroupTranslation(): void {
+    const preview = this.groupTranslationPreview;
+    if (!preview) return;
+
+    this.flushGroupTranslationPreview();
+    this.groupTranslationPreview = null;
+    this.pendingGroupTranslationDelta = null;
+    preview.finish();
+  }
+
+  /** 把同一渲染帧内最后一次拖拽 delta 应用到轻量预览会话。 */
+  private flushGroupTranslationPreview(): void {
+    const preview = this.groupTranslationPreview;
+    const delta = this.pendingGroupTranslationDelta;
+    if (!preview || !delta) return;
+
+    this.pendingGroupTranslationDelta = null;
+    preview.update(delta);
+  }
+
+  /** 异步模型或批次就绪后重新解析目标，并保持上一帧已应用的绝对位移。 */
+  private refreshGroupTranslationPreviewTargets(): void {
+    const preview = this.groupTranslationPreview;
+    preview?.refresh();
+    // 活动拖动期间代理位置由 PointerDragBehavior 权威控制；异步几何只接入预览目标，
+    // 否则包围盒中心变化会被误算进相对 drag delta。
+    if (!preview) this.refreshFolderGroupGizmoProxyPosition();
+  }
+
+  /** 运行时基线恢复后把组代理放回当前成员世界包围盒中心。 */
+  private refreshFolderGroupGizmoProxyPosition(): void {
+    const proxy = this.folderGroupGizmoProxy;
+    if (!proxy || proxy.node.isDisposed()) return;
+
+    const bounds = this.getEntitiesWorldBounds(proxy.entityIds);
+    if (!bounds) {
+      proxy.node.setEnabled(false);
+      return;
+    }
+    proxy.node.setEnabled(true);
+    proxy.node.position.copyFromFloats(bounds.center.x, bounds.center.y, bounds.center.z);
+    proxy.node.computeWorldMatrix(true);
+  }
+
+  /** 将逻辑实体解析为普通位置目标或共享 thinInstance 批次目标。 */
+  private resolveGroupTranslationTarget(entityId: string): EntityGroupTranslationTarget | null {
+    const batch = this.resolveModelArrayBatchForEntityId(entityId);
+    if (batch) return { kind: 'batch', batch };
+
+    const node = (
+      this.meshes.get(entityId)
+      ?? this.locators.get(entityId)?.root
+      ?? this.cadReferences.get(entityId)?.root
+      ?? this.models.get(entityId)?.root
+      ?? this.modelGenerators.get(entityId)?.markerRoot
+      ?? this.poiEffectRuntime.getGizmoTarget(entityId)
+      ?? null
+    );
+    if (node && !node.isDisposed()) {
+      return {
+        kind: 'position',
+        identity: node,
+        setPosition: (position) => {
+          if (node.isDisposed()) return;
+          node.position.copyFromFloats(position.x, position.y, position.z);
+          node.computeWorldMatrix(true);
+        },
+      };
+    }
+
+    const light = this.lights.get(entityId);
+    if (!light || light.isDisposed()) return null;
+    return {
+      kind: 'position',
+      identity: light,
+      setPosition: (position) => this.applyGroupTranslationLightPosition(light, position),
+    };
+  }
+
+  /** 灯光预览复用正式同步语义：半球光位置字段表示方向，其余灯光表示世界位置。 */
+  private applyGroupTranslationLightPosition(light: Light, position: Vector3Data): void {
+    const vector = new Vector3(position.x, position.y, position.z);
+    if (light instanceof HemisphericLight) {
+      if (vector.lengthSquared() <= 1e-12) vector.copyFromFloats(0, 1, 0);
+      light.direction.copyFrom(vector);
+      return;
+    }
+    if (light instanceof DirectionalLight || light instanceof PointLight) {
+      light.position.copyFrom(vector);
+    }
   }
 
   /** 在画布客户端坐标位置拾取可编辑 Mesh，并把 thinInstanceIndex 还原为具体阵列实体 ID。 */
@@ -920,17 +1180,40 @@ export class SceneRuntime {
     sizeMeters: Vector3Data;
     radiusMeters: number;
     geometryReady: boolean;
+    requestedEntityCount: number;
+    resolvedEntityCount: number;
+    geometryReadyEntityCount: number;
+    missingEntityCount: number;
+    notReadyEntityCount: number;
+    missingEntityIds: string[];
+    notReadyEntityIds: string[];
   } | null {
     let mergedBounds: RuntimeWorldBounds | null = null;
     let geometryReady = true;
+    let resolvedEntityCount = 0;
+    let geometryReadyEntityCount = 0;
+    let missingEntityCount = 0;
+    let notReadyEntityCount = 0;
+    const missingEntityIds: string[] = [];
+    const notReadyEntityIds: string[] = [];
+    const uniqueEntityIds = [...new Set(entityIds)];
 
-    for (const entityId of entityIds) {
+    for (const entityId of uniqueEntityIds) {
       const bounds = this.getEntityWorldBounds(entityId);
       if (!bounds) {
         geometryReady = false;
+        missingEntityCount += 1;
+        if (missingEntityIds.length < 32) missingEntityIds.push(entityId);
         continue;
       }
-      if (!this.isEntityWorldBoundsReady(entityId)) geometryReady = false;
+      resolvedEntityCount += 1;
+      if (this.isEntityWorldBoundsReady(entityId)) {
+        geometryReadyEntityCount += 1;
+      } else {
+        geometryReady = false;
+        notReadyEntityCount += 1;
+        if (notReadyEntityIds.length < 32) notReadyEntityIds.push(entityId);
+      }
       mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
     }
 
@@ -945,18 +1228,32 @@ export class SceneRuntime {
       sizeMeters: { x: size.x, y: size.y, z: size.z },
       radiusMeters,
       geometryReady,
+      requestedEntityCount: uniqueEntityIds.length,
+      resolvedEntityCount,
+      geometryReadyEntityCount,
+      missingEntityCount,
+      notReadyEntityCount,
+      missingEntityIds,
+      notReadyEntityIds,
     };
   }
 
   /** 判断实体的真实几何是否已就绪，避免模型加载或外置脚本初始化中的临时包围盒参与正式阵列。 */
   private isEntityWorldBoundsReady(entityId: string): boolean {
     const model = this.models.get(entityId);
-    if (model) return model.assetHandle !== null && model.stackerTelemetryReady;
+    if (model) {
+      if (!model.assetHandle || !model.stackerTelemetryReady) return false;
+      return !model.modelArrayBatch || model.modelArrayBatch.hasEntityId(entityId);
+    }
 
     const modelArrayInstance = this.modelArrayInstanceEntities.get(entityId);
     if (modelArrayInstance) {
       const renderModel = this.resolveModelArrayRenderModel(modelArrayInstance);
-      return Boolean(renderModel?.assetHandle && renderModel.measurementReady);
+      return Boolean(
+        renderModel?.assetHandle
+        && renderModel.measurementReady
+        && renderModel.modelArrayBatch?.hasEntityId(entityId),
+      );
     }
 
     const modelGenerator = this.modelGenerators.get(entityId);
@@ -987,7 +1284,15 @@ export class SceneRuntime {
     if (primitiveMesh) return this.getMeshWorldBounds(primitiveMesh);
 
     const locator = this.locators.get(entityId);
-    if (locator && locator.boxes.length > 0) return this.getMeshWorldBounds(locator.boxes[0]);
+    if (locator) {
+      let mergedBounds: RuntimeWorldBounds | null = null;
+      for (const box of locator.boxes) {
+        const bounds = this.getMeshWorldBounds(box);
+        if (!bounds) continue;
+        mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+      }
+      if (mergedBounds) return mergedBounds;
+    }
 
     const cadReference = this.cadReferences.get(entityId);
     if (cadReference) return this.getCadReferenceWorldBounds(cadReference);
@@ -1071,10 +1376,23 @@ export class SceneRuntime {
     for (const mesh of sourceModel.meshes) {
       if (!isMeasurableModelMesh(mesh)) continue;
       mesh.computeWorldMatrix(true);
-      for (const worldCorner of mesh.getBoundingInfo().boundingBox.vectorsWorld) {
-        const sourceLocalCorner = Vector3.TransformCoordinates(worldCorner, inverseSourceRoot);
-        const targetWorldCorner = Vector3.TransformCoordinates(sourceLocalCorner, targetWorldMatrix);
-        if (this.isFiniteVector3(targetWorldCorner)) points.push(targetWorldCorner);
+      const meshWorldMatrix = mesh.getWorldMatrix().clone();
+      const hasThinInstances = mesh instanceof Mesh && mesh.thinInstanceCount > 0;
+      const thinInstanceMatrices = hasThinInstances ? readCurrentThinInstanceMatrices(mesh) : null;
+      if (hasThinInstances && !thinInstanceMatrices) return null;
+      const sourceWorldMatrices = hasThinInstances
+        ? thinInstanceMatrices!.map((matrix) => matrix.multiply(meshWorldMatrix))
+        : [meshWorldMatrix];
+
+      // 必须从 Geometry 原始局部包围盒出发；先使用 world AABB 再旋转会二次放大斜置部件，
+      // 导致负缩放或旋转阵列实例的聚焦/测量范围与真实批次不一致。
+      const boundingBox = (mesh.rawBoundingInfo ?? mesh.getBoundingInfo()).boundingBox;
+      for (const sourceWorldMatrix of sourceWorldMatrices) {
+        const finalWorldMatrix = sourceWorldMatrix.multiply(inverseSourceRoot).multiply(targetWorldMatrix);
+        for (const localCorner of boundingBox.vectors) {
+          const targetWorldCorner = Vector3.TransformCoordinates(localCorner, finalWorldMatrix);
+          if (this.isFiniteVector3(targetWorldCorner)) points.push(targetWorldCorner);
+        }
       }
     }
     return points.length > 0 ? points : null;
@@ -1195,19 +1513,112 @@ export class SceneRuntime {
     return Number.isFinite(vector.x) && Number.isFinite(vector.y) && Number.isFinite(vector.z);
   }
 
-  /** 将编辑器文档增量同步到 Babylon 运行时场景，未变化实体只刷新必要的展示状态。 */
+  /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
   sync(document: SceneDocument): void {
+    this.cancelFolderGroupTranslation();
+    const startedAt = readRuntimeTimestampMs();
+    try {
+      this.syncDocument(document);
+    } finally {
+      const durationMs = Math.max(0, readRuntimeTimestampMs() - startedAt);
+      this.fullSyncCount += 1;
+      this.lastFullSyncDurationMs = durationMs;
+      this.maxFullSyncDurationMs = Math.max(this.maxFullSyncDurationMs, durationMs);
+    }
+  }
+
+  /**
+   * 只同步选区变化。普通单选只访问旧/新目标实体以及对应共享模型或矩阵批次，
+   * 不重新扫描 entityIds、加载模型、执行参数脚本或重建 Locator 索引。
+   */
+  syncSelection(document: SceneDocument): void {
+    this.cancelFolderGroupTranslation();
+    const startedAt = readRuntimeTimestampMs();
+    let changedEntityCount = 0;
+    try {
+      const nextSelectedEntityIds = this.resolveSelectedEntityIds(document);
+      const changedEntityIds = new Set<string>();
+      for (const entityId of this.selectedEntityIds) {
+        if (!nextSelectedEntityIds.has(entityId)) changedEntityIds.add(entityId);
+      }
+      for (const entityId of nextSelectedEntityIds) {
+        if (!this.selectedEntityIds.has(entityId)) changedEntityIds.add(entityId);
+      }
+
+      changedEntityCount = changedEntityIds.size;
+      if (changedEntityCount === 0) return;
+
+      for (const entityId of changedEntityIds) {
+        const entity = document.entities[entityId] ?? this.syncedEntities.get(entityId);
+        if (!entity) continue;
+        this.syncEntityPresentation(entity, nextSelectedEntityIds.has(entityId));
+      }
+
+      this.selectedEntityIds = nextSelectedEntityIds;
+      this.rebuildSharedModelSelectionOutline();
+    } finally {
+      const durationMs = Math.max(0, readRuntimeTimestampMs() - startedAt);
+      this.selectionSyncCount += 1;
+      this.lastSelectionSyncDurationMs = durationMs;
+      this.maxSelectionSyncDurationMs = Math.max(this.maxSelectionSyncDurationMs, durationMs);
+      this.lastSelectionChangedEntityCount = changedEntityCount;
+    }
+  }
+
+  /** 返回 Scene View HUD 使用的低频运行时同步指标快照。 */
+  getPerformanceMetrics(): SceneRuntimePerformanceMetrics {
+    const modelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
+    for (const model of this.models.values()) {
+      if (model.modelArrayBatch) modelArrayBatches.add(model.modelArrayBatch);
+    }
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      if (variant.model.modelArrayBatch) modelArrayBatches.add(variant.model.modelArrayBatch);
+    }
+
+    let modelArrayBatchEntityCount = 0;
+    let modelArrayBatchMeshCount = 0;
+    for (const batch of modelArrayBatches) {
+      modelArrayBatchEntityCount += batch.getEntityIds().length;
+      modelArrayBatchMeshCount += batch.meshes.length;
+    }
+    // 保留旧报告字段作为发布防回归守卫；正式路径已删除代理 API，所有实体均为原模型 Geometry。
+    const modelArrayScreenSpaceProxyBatchCount = 0;
+    const modelArraySolidProxyEntityCount = 0;
+    const modelArrayFrameProxyEntityCount = 0;
+    const modelArrayProxyEntityCount = 0;
+    const modelArrayDetailedEntityCount = modelArrayBatchEntityCount;
+
+    return {
+      fullSyncCount: this.fullSyncCount,
+      selectionSyncCount: this.selectionSyncCount,
+      lastFullSyncDurationMs: this.lastFullSyncDurationMs,
+      maxFullSyncDurationMs: this.maxFullSyncDurationMs,
+      lastSelectionSyncDurationMs: this.lastSelectionSyncDurationMs,
+      maxSelectionSyncDurationMs: this.maxSelectionSyncDurationMs,
+      lastSelectionChangedEntityCount: this.lastSelectionChangedEntityCount,
+      modelRuntimeCount: this.models.size,
+      modelArrayInstanceEntityCount: this.modelArrayInstanceEntities.size,
+      modelArrayParameterVariantCount: this.modelArrayParameterVariants.size,
+      modelArrayBatchCount: modelArrayBatches.size,
+      modelArrayBatchEntityCount,
+      modelArrayBatchMeshCount,
+      modelArrayScreenSpaceProxyBatchCount,
+      modelArraySolidProxyEntityCount,
+      modelArrayFrameProxyEntityCount,
+      modelArrayProxyEntityCount,
+      modelArrayDetailedEntityCount,
+    };
+  }
+
+  /** 完整同步文档内容；调用方负责统计耗时。 */
+  private syncDocument(document: SceneDocument): void {
     const previousEntityStates = new Map(this.entityStates);
     const previousSelectedEntityIds = this.selectedEntityIds;
     const dirtyModelArraySourceIds = new Set<string>();
 
     this.entityStates.clear();
-    for (const entityId of document.entityIds) {
-      const entity = document.entities[entityId];
-      if (!entity) continue;
-
-      this.entityStates.set(entityId, this.resolveEntityRuntimeState(document, entity));
-    }
+    const hierarchyStates = createEntityHierarchyStateMap(document.entityIds, document.entities);
+    for (const [entityId, state] of hierarchyStates) this.entityStates.set(entityId, state);
 
     const primitiveMeshIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.meshRenderer)),
@@ -1633,11 +2044,17 @@ export class SceneRuntime {
 
   dispose(): void {
     this.clearEntityArrayPreview();
+    this.cancelFolderGroupTranslation();
+    this.folderGroupGizmoProxy?.node.dispose(false, false);
+    this.folderGroupGizmoProxy = null;
     this.modelArrayGizmoProxy?.node.dispose(false, false);
     this.modelArrayGizmoProxy = null;
     this.assetLoadScheduler.dispose();
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
+    }
+    if (this.groupTranslationPreviewObserver) {
+      this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.groupTranslationPreviewObserver);
     }
     this.endTelemetryPreview();
     for (const [entityId, mesh] of this.meshes.entries()) {
@@ -1697,6 +2114,9 @@ export class SceneRuntime {
     this.cargoHandoffBlockedSignature = '';
     this.reportedCargoHandoffIssues.clear();
     this.sharedModelSelectionOutlineSignature = '';
+    this.activeModelGeneratorEntityId = null;
+    this.reportedModelGeneratorConflictSignature = '';
+    this.outlinedModelArrayBatches.clear();
   }
 
   /** 按组件类型同步单个实体的运行时表现。 */
@@ -1862,20 +2282,14 @@ export class SceneRuntime {
     );
   }
 
-  /** 将文件夹选中转换为子实体选中集合，用于在场景中高亮整组对象。 */
+  /** 将文件夹选中递归转换为全部普通后代，用于在场景中高亮整棵分组子树。 */
   private resolveSelectedEntityIds(document: SceneDocument): Set<string> {
     const selectedEntityId = document.selectedEntityId;
     const selectedEntity = selectedEntityId ? document.entities[selectedEntityId] : null;
     if (!selectedEntity) return new Set();
-
     if (!selectedEntity.isFolder) return new Set([selectedEntity.id]);
 
-    return new Set(
-      selectedEntity.childrenIds.filter((childId) => {
-        const childEntity = document.entities[childId];
-        return Boolean(childEntity && !childEntity.isFolder);
-      }),
-    );
+    return new Set(collectFolderRuntimeEntityIds(document.entities, selectedEntity.id));
   }
 
   /** 同步基础几何体 Mesh 类型、Transform 与选中材质状态。 */
@@ -2076,6 +2490,8 @@ export class SceneRuntime {
     const current = this.models.get(entity.id);
     if (current) {
       current.entitySnapshot = entity;
+      // 脚本宿主可能因上一帧矩阵批次而禁用；参数与脚本更新前先恢复节点计算。
+      current.root.setEnabled(true);
       this.applyTransform(current.root, entity.components.transform);
       if (current.assetCode !== modelAsset.assetCode) {
         this.disposeStackerCargoForAssetCode(current.assetCode);
@@ -2091,7 +2507,8 @@ export class SceneRuntime {
       current.stackerCapable = this.isStackerModelAsset(modelAsset);
       current.conveyorCapable = this.isConveyorModelAsset(modelAsset);
       current.stackerTelemetry.rootBasePosition = current.root.position.clone();
-      this.applyModelUnitScale(current.contentRoot, modelAsset.unitScaleToMeters);
+      // contentRoot 既承载源单位换算，也允许参数脚本在其上叠加尺寸缩放；同一资产同步时不得覆盖脚本输出。
+      // lengthUnit / unitScaleToMeters 已进入 assetSignature，单位契约变化会走完整重载。
       this.applyModelParameters(entity, current);
       this.syncExternalModelScripts(entity, current);
       this.applyModelSelection(current, selected);
@@ -2120,6 +2537,7 @@ export class SceneRuntime {
       contentRoot,
       assetHandle: null,
       meshes: [],
+      modelArraySuspendedMeshes: new Set(),
       modelArrayBatch: null,
       modelArraySourceSignature: '',
       modelArrayFailureSignature: '',
@@ -2170,6 +2588,7 @@ export class SceneRuntime {
         this.applyModelSelection(activeEntry, activeEntry.highlighted);
         this.applyModelInteractivity(activeEntry, latestEntity.id);
         this.rebuildSharedModelSelectionOutline();
+        this.refreshGroupTranslationPreviewTargets();
       })
       .catch((error) => {
         const activeEntry = this.models.get(entity.id);
@@ -2386,6 +2805,7 @@ export class SceneRuntime {
       contentRoot,
       assetHandle: null,
       meshes: [],
+      modelArraySuspendedMeshes: new Set(),
       modelArrayBatch: null,
       modelArraySourceSignature: '',
       modelArrayFailureSignature: '',
@@ -2607,8 +3027,12 @@ export class SceneRuntime {
     model: ModelRuntimeEntry,
     mode: ExternalModelScriptRuntimeMode,
     telemetry: ExternalModelScriptTelemetrySnapshot | null,
-  ): void {
+    deferArrayRefresh = false,
+  ): boolean {
+    const preparedArrayHost = this.prepareModelArrayRuntimeMutation(model);
     model.externalScriptRuntime?.updateRuntimeContext({ mode, telemetry });
+    if (preparedArrayHost && !deferArrayRefresh) this.refreshModelArrayRuntimeRepresentation(model);
+    return preparedArrayHost;
   }
 
   /** 从设备遥测快照提取外置脚本可消费的最小上下文，避免泄漏可变 store 对象。 */
@@ -2655,13 +3079,14 @@ export class SceneRuntime {
 
     for (const candidate of candidates) {
       const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
-      this.updateModelExternalScriptRuntimeContext(
+      const preparedArrayHost = this.updateModelExternalScriptRuntimeContext(
         candidate.model,
         'runtime',
         snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
+        true,
       );
-      if (!snapshot) continue;
-      this.applyStackerTelemetryToModel(candidate.model, snapshot as StackerTelemetrySnapshot, deltaSeconds);
+      if (snapshot) this.applyStackerTelemetryToModel(candidate.model, snapshot as StackerTelemetrySnapshot, deltaSeconds);
+      if (preparedArrayHost) this.refreshModelArrayRuntimeRepresentation(candidate.model);
     }
   }
 
@@ -2674,13 +3099,14 @@ export class SceneRuntime {
 
     for (const candidate of candidates) {
       const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
-      this.updateModelExternalScriptRuntimeContext(
+      const preparedArrayHost = this.updateModelExternalScriptRuntimeContext(
         candidate.model,
         'runtime',
         snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
+        true,
       );
-      if (!snapshot) continue;
-      this.applyConveyorTelemetryToModel(candidate.model, snapshot, deltaSeconds);
+      if (snapshot) this.applyConveyorTelemetryToModel(candidate.model, snapshot, deltaSeconds);
+      if (preparedArrayHost) this.refreshModelArrayRuntimeRepresentation(candidate.model);
     }
   }
 
@@ -2689,17 +3115,20 @@ export class SceneRuntime {
     deviceType: SpecializedTelemetryDeviceType,
   ): SpecializedTelemetryRuntimeEntry[] {
     const candidates: SpecializedTelemetryRuntimeEntry[] = [];
-    for (const [entityId, model] of this.models.entries()) {
-      if (!model.assetHandle || !model.stackerTelemetryReady) continue;
-      if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) continue;
-
+    const appendCandidate = (entityId: string, model: ModelRuntimeEntry): void => {
+      if (!model.assetHandle || !model.stackerTelemetryReady) return;
+      if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) return;
       const binding = resolveSpecializedTelemetryBinding({
         modelAssetCode: model.assetCode,
         deviceType,
         binding: model.telemetryBinding,
       });
-      if (!binding) continue;
-      candidates.push({ entityId, model, binding });
+      if (binding) candidates.push({ entityId, model, binding });
+    };
+
+    for (const [entityId, model] of this.models.entries()) appendCandidate(entityId, model);
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      appendCandidate(variant.representativeEntityId, variant.model);
     }
     return candidates;
   }
@@ -4912,6 +5341,8 @@ export class SceneRuntime {
     model.cancelLoad?.();
     model.cancelLoad = null;
     this.applyModelSelection(model, false);
+    this.restoreModelArrayHostMeshes(model);
+    model.root.setEnabled(true);
     model.externalScriptRuntime?.dispose();
     for (const texture of model.textureCache.values()) {
       texture.dispose();
@@ -4921,6 +5352,7 @@ export class SceneRuntime {
     model.assetHandle?.dispose();
     model.contentRoot.dispose();
     model.root.dispose();
+    model.modelArraySuspendedMeshes.clear();
     this.models.delete(entityId);
     this.onModelMeasurementChanged(entityId);
   }
@@ -5038,16 +5470,6 @@ export class SceneRuntime {
     return this.entityStates.get(entityId)?.visible !== false;
   }
 
-  /** 合并实体自身与直属分组文件夹的显示/锁定状态。 */
-  private resolveEntityRuntimeState(document: SceneDocument, entity: Entity): EntityRuntimeState {
-    const parentEntity = entity.parentId ? document.entities[entity.parentId] : null;
-
-    return {
-      visible: entity.visible !== false && parentEntity?.visible !== false,
-      locked: entity.locked === true || parentEntity?.locked === true,
-    };
-  }
-
   /** 判断实体是否允许被 Scene View 鼠标拾取。 */
   private isEntityScenePickable(entityId: string): boolean {
     const state = this.entityStates.get(entityId);
@@ -5068,13 +5490,42 @@ export class SceneRuntime {
 
   /** 将显隐和锁定状态应用到导入模型的根节点与子 Mesh。 */
   private applyModelInteractivity(model: ModelRuntimeEntry, entityId: string): void {
-    const visible = this.isEntityVisible(entityId);
-    const pickable = visible && this.isEntityScenePickable(entityId);
+    const keepScriptHostActive = model.externalScriptStarting
+      && (Boolean(model.modelArrayBatch) || model.modelArraySuspendedMeshes.size > 0);
+    if (model.modelArrayBatch && !keepScriptHostActive) {
+      this.suspendModelArrayHost(model);
+      return;
+    }
 
+    this.restoreModelArrayHostMeshes(model);
+    const visible = keepScriptHostActive || this.isEntityVisible(entityId);
+    const pickable = !keepScriptHostActive && visible && this.isEntityScenePickable(entityId);
     model.root.setEnabled(visible);
     for (const mesh of model.meshes) {
       mesh.isPickable = pickable;
     }
+  }
+
+  /**
+   * 阵列批次已经承载源实体本身和全部逻辑实例时，脚本宿主只保留节点与几何引用。
+   * 将其从 scene.meshes 移除，避免 Babylon 每帧重复遍历同一套隐藏叶 Mesh。
+   */
+  private suspendModelArrayHost(model: ModelRuntimeEntry): void {
+    model.root.setEnabled(false);
+    for (const mesh of model.meshes) {
+      if (mesh.isDisposed()) continue;
+      if (this.scene.removeMesh(mesh) >= 0) model.modelArraySuspendedMeshes.add(mesh);
+      mesh.isPickable = false;
+    }
+  }
+
+  /** 阵列取消或降级时，只把本运行时主动移除的宿主 Mesh 放回场景。 */
+  private restoreModelArrayHostMeshes(model: ModelRuntimeEntry): void {
+    if (model.modelArraySuspendedMeshes.size === 0) return;
+    for (const mesh of model.modelArraySuspendedMeshes) {
+      if (!mesh.isDisposed() && !this.scene.meshes.includes(mesh)) this.scene.addMesh(mesh);
+    }
+    model.modelArraySuspendedMeshes.clear();
   }
 
   /** 仅同步模型生成器配置标记；自动货物不继承实体显隐、锁定或选中状态。 */
@@ -5193,6 +5644,7 @@ export class SceneRuntime {
     cadReference.geometryReady = cadReference.lineMeshes.length > 0;
     this.applyCadReferenceLineMeshStyle(cadReference);
     this.applyCadReferenceInteractivity(cadReference, entityId);
+    this.refreshGroupTranslationPreviewTargets();
   }
 
   /** 判断当前 CAD 分批任务是否仍属于场景中的有效加载记录。 */
@@ -5395,6 +5847,7 @@ export class SceneRuntime {
       this.rebuildSharedModelSelectionOutline();
       this.syncGenericTelemetryMotion(latestEntity, current);
       this.onModelMeasurementChanged(latestEntity.id);
+      this.refreshGroupTranslationPreviewTargets();
     });
   }
 
@@ -5474,15 +5927,19 @@ export class SceneRuntime {
       this.disposeModelArrayBatch(model);
       this.disposeModelArrayParameterVariantsForSource(entity.id);
       model.modelArrayFailureSignature = '';
+      this.applyModelInteractivity(model, entity.id);
       return;
     }
 
-    const sourceRenderSignature = this.createModelArrayRenderSignature(modelAsset);
+    const sourceRenderSignature = this.createModelArrayRenderSignature(
+      modelAsset,
+      entity.components.telemetryBinding,
+    );
     const groups = new Map<string, Entity[]>();
     for (const instanceEntity of instanceEntities) {
       const instanceModelAsset = instanceEntity.components.modelAsset;
       const renderSignature = instanceModelAsset
-        ? this.createModelArrayRenderSignature(instanceModelAsset)
+        ? this.createModelArrayRenderSignature(instanceModelAsset, instanceEntity.components.telemetryBinding)
         : sourceRenderSignature;
       const group = groups.get(renderSignature) ?? [];
       group.push(instanceEntity);
@@ -5508,7 +5965,8 @@ export class SceneRuntime {
     }
     this.disposeMissingModelArrayParameterVariants(entity.id, activeVariantKeys);
 
-    this.syncModelArrayBatchForEntities(entity, model, baseInstances, legacyItems, {
+    // 源实体也由同一批次承载，才能安全移除完整脚本宿主，而不是保留成千上万个源叶 Mesh。
+    this.syncModelArrayBatchForEntities(entity, model, [entity, ...baseInstances], legacyItems, {
       sourceEntityId: entity.id,
       namePrefix: '__modelArrayThinInstance',
       renderSignature: sourceRenderSignature,
@@ -5516,7 +5974,16 @@ export class SceneRuntime {
   }
 
   /** 资产编号只代表逻辑设备身份；其它会影响参数脚本输出的字段共同决定共享分组。 */
-  private createModelArrayRenderSignature(modelAsset: ModelAssetComponent): string {
+  private createModelArrayRenderSignature(
+    modelAsset: ModelAssetComponent,
+    telemetryBinding: TelemetryBindingComponent | null | undefined = null,
+  ): string {
+    const telemetryIdentity = telemetryBinding && telemetryBinding.enabled !== false
+      ? {
+          assetCode: modelAsset.assetCode,
+          binding: this.createModelArrayJsonSignature(telemetryBinding),
+        }
+      : null;
     return JSON.stringify({
       sourcePath: modelAsset.sourcePath,
       sourceUrl: modelAsset.sourceUrl,
@@ -5534,6 +6001,7 @@ export class SceneRuntime {
       parameterConfig: this.createModelArrayJsonSignature(modelAsset.parameterConfig),
       parameterValues: this.createModelArrayTransientJsonSignature(modelAsset.parameterValues),
       dataDrivenConfig: this.createModelArrayJsonSignature(modelAsset.dataDrivenConfig),
+      telemetryIdentity,
     });
   }
 
@@ -5644,17 +6112,21 @@ export class SceneRuntime {
       return variant;
     }
 
+    if (variant.representativeEntityId !== representative.id) {
+      this.genericTelemetryMotionRuntime.disposeModel(variant.representativeEntityId);
+    }
     variant.representativeEntityId = representative.id;
     variant.entities = entities;
     const model = variant.model;
     model.entitySnapshot = representative;
     model.assetCode = modelAsset.assetCode;
+    model.telemetryBinding = representative.components.telemetryBinding ?? null;
     model.assetRevision = modelAsset.assetRevision ?? null;
     model.assetSignature = assetSignature;
     model.stackerCapable = this.isStackerModelAsset(modelAsset);
     model.conveyorCapable = this.isConveyorModelAsset(modelAsset);
     this.applyTransform(model.root, representative.components.transform);
-    this.applyModelUnitScale(model.contentRoot, modelAsset.unitScaleToMeters);
+    // 参数变体宿主的单位缩放只在创建时设置；重复同步保留脚本叠加在 contentRoot 上的参数缩放。
     if (!model.assetHandle) return variant;
 
     this.restoreModelArrayParameterVariantHost(variant);
@@ -5686,13 +6158,14 @@ export class SceneRuntime {
       assetSignature,
       entitySnapshot: representative,
       assetCode: modelAsset.assetCode,
-      telemetryBinding: null,
+      telemetryBinding: representative.components.telemetryBinding ?? null,
       stackerCapable: this.isStackerModelAsset(modelAsset),
       conveyorCapable: this.isConveyorModelAsset(modelAsset),
       root,
       contentRoot,
       assetHandle: null,
       meshes: [],
+      modelArraySuspendedMeshes: new Set(),
       modelArrayBatch: null,
       modelArraySourceSignature: '',
       modelArrayFailureSignature: '',
@@ -5789,12 +6262,13 @@ export class SceneRuntime {
           resolveLayerMask: (mesh) => activeVariant.sourceLayerMasks.get(mesh.uniqueId) ?? mesh.layerMask,
         });
       }
+      this.syncGenericTelemetryMotion(representative, current);
       for (const instanceEntity of activeVariant.entities) this.onModelMeasurementChanged(instanceEntity.id);
       this.rebuildSharedModelSelectionOutline();
     });
   }
 
-  /** 脚本宿主继续保持可执行，但 layerMask=0，场景只显示其批次 Mesh。 */
+  /** 先保存脚本宿主的原渲染层；批次创建期间仍需读取完整世界矩阵和视觉状态。 */
   private hideModelArrayParameterVariantHost(variant: ModelArrayParameterVariantRuntimeEntry): void {
     const activeMeshIds = new Set<number>();
     for (const mesh of variant.model.meshes) {
@@ -5809,12 +6283,105 @@ export class SceneRuntime {
     }
   }
 
-  /** 参数更新前恢复宿主原渲染层，让脚本基于正常节点状态运行；提交完成后会再次隐藏。 */
+  /** 参数更新前恢复宿主节点与原渲染层；Mesh 无需重新加入场景，脚本通过稳定节点引用直接更新。 */
   private restoreModelArrayParameterVariantHost(variant: ModelArrayParameterVariantRuntimeEntry): void {
+    variant.model.root.setEnabled(true);
     for (const mesh of variant.model.meshes) {
       const layerMask = variant.sourceLayerMasks.get(mesh.uniqueId);
       if (layerMask !== undefined) mesh.layerMask = layerMask;
     }
+  }
+
+  /** 根据遥测注册实体 ID 找到普通模型或参数变体宿主。 */
+  private resolveTelemetryRuntimeModel(entityId: string): ModelRuntimeEntry | null {
+    const sourceModel = this.models.get(entityId);
+    if (sourceModel) return sourceModel;
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      if (variant.representativeEntityId === entityId) return variant.model;
+    }
+    return null;
+  }
+
+  /** 通用遥测写节点前恢复阵列脚本宿主，兼容依赖 scene.meshes 的旧脚本和动画。 */
+  private prepareModelArrayRuntimeMutationByEntityId(entityId: string): void {
+    const model = this.resolveTelemetryRuntimeModel(entityId);
+    if (model) this.prepareModelArrayRuntimeMutation(model);
+  }
+
+  /** 通用遥测写节点后把最新脚本/节点矩阵重新提交到对应阵列批次。 */
+  private refreshModelArrayRuntimeRepresentationByEntityId(entityId: string): void {
+    const model = this.resolveTelemetryRuntimeModel(entityId);
+    if (model) this.refreshModelArrayRuntimeRepresentation(model);
+  }
+
+  /** 在运行态脚本或遥测修改前恢复当前阵列宿主；返回是否需要在修改后重提批次。 */
+  private prepareModelArrayRuntimeMutation(model: ModelRuntimeEntry): boolean {
+    if (!model.modelArrayBatch && model.modelArraySuspendedMeshes.size === 0) return false;
+    const variant = [...this.modelArrayParameterVariants.values()].find((item) => item.model === model);
+    if (variant) this.restoreModelArrayParameterVariantHost(variant);
+    this.restoreModelArrayHostMeshes(model);
+    model.root.setEnabled(true);
+    return true;
+  }
+
+  /**
+   * 运行态脚本/遥测可能改变 Transform、显隐、材质或增删 Mesh；重新收集宿主并更新当前参数组，
+   * Geometry/网格集合未变时仅改写矩阵和材质，不重复创建批次。
+   */
+  private refreshModelArrayRuntimeRepresentation(model: ModelRuntimeEntry): void {
+    if (!model.modelArrayBatch && model.modelArraySuspendedMeshes.size === 0) return;
+    const variant = [...this.modelArrayParameterVariants.values()].find((item) => item.model === model);
+    if (variant) {
+      const activeVariant = this.modelArrayParameterVariants.get(variant.key);
+      if (!activeVariant || activeVariant.model !== model) return;
+      const representative = activeVariant.entities.find((entity) => entity.id === activeVariant.representativeEntityId)
+        ?? activeVariant.entities[0];
+      if (!representative) return;
+      this.refreshModelMeshes(model, {
+        modelArrayParameterVariant: true,
+        modelArraySourceEntityId: activeVariant.sourceEntityId,
+      });
+      this.hideModelArrayParameterVariantHost(activeVariant);
+      this.syncModelArrayBatchForEntities(representative, model, activeVariant.entities, [], {
+        sourceEntityId: activeVariant.sourceEntityId,
+        namePrefix: '__modelArrayParameterVariantThinInstance',
+        variantKey: activeVariant.key,
+        renderSignature: activeVariant.renderSignature,
+        resolveLayerMask: (mesh) => activeVariant.sourceLayerMasks.get(mesh.uniqueId) ?? mesh.layerMask,
+      });
+      for (const entity of activeVariant.entities) this.onModelMeasurementChanged(entity.id);
+      return;
+    }
+
+    const entity = model.entitySnapshot;
+    const modelAsset = entity?.components.modelAsset;
+    if (!entity || !modelAsset || entity.components.modelArrayInstance) return;
+    this.refreshModelEntityMeshes(entity, model);
+    const sourceRenderSignature = this.createModelArrayRenderSignature(
+      modelAsset,
+      entity.components.telemetryBinding,
+    );
+    const baseInstances = [...this.modelArrayInstanceEntities.values()].filter((instanceEntity) => {
+      if (instanceEntity.components.modelArrayInstance?.sourceEntityId !== entity.id) return false;
+      const instanceAsset = instanceEntity.components.modelAsset;
+      return !instanceAsset || this.createModelArrayRenderSignature(
+        instanceAsset,
+        instanceEntity.components.telemetryBinding,
+      ) === sourceRenderSignature;
+    });
+    this.syncModelArrayBatchForEntities(
+      entity,
+      model,
+      [entity, ...baseInstances],
+      entity.components.modelArray?.items ?? [],
+      {
+        sourceEntityId: entity.id,
+        namePrefix: '__modelArrayThinInstance',
+        renderSignature: sourceRenderSignature,
+      },
+    );
+    this.onModelMeasurementChanged(entity.id);
+    for (const instanceEntity of baseInstances) this.onModelMeasurementChanged(instanceEntity.id);
   }
 
   /** 基础源和参数变体共用的矩阵批次提交路径。 */
@@ -5835,6 +6402,8 @@ export class SceneRuntime {
     if (totalInstanceCount === 0) {
       this.disposeModelArrayBatch(model);
       model.modelArrayFailureSignature = '';
+      if (options.variantKey) this.suspendModelArrayHost(model);
+      else this.applyModelInteractivity(model, entity.id);
       return;
     }
     if (!model.assetHandle || !model.measurementReady) return;
@@ -5843,21 +6412,27 @@ export class SceneRuntime {
       !mesh.isDisposed() && mesh.getTotalVertices() > 0
     ));
     // 批次 Geometry 与脚本宿主隔离；参数或脚本输入变化时必须重建，才能复制最新顶点数据。
-    const sourceSignature = `${options.renderSignature}|${sourceMeshes
+    // representation 标记确保旧的代理批次不会在开发热更新或缓存复用时继续存活。
+    const sourceSignature = `${options.renderSignature}|representation:original-geometry|${sourceMeshes
       .map((mesh) => `${mesh.uniqueId}:${mesh.geometry?.uniqueId ?? 0}:${mesh instanceof Mesh ? mesh.thinInstanceCount : 0}`)
       .join('|')}`;
     const failureSignature = `${options.variantKey ?? 'base'}:${sourceSignature}:${totalInstanceCount}`;
 
     if (sourceMeshes.length === 0) {
       this.disposeModelArrayBatch(model);
+      if (options.variantKey) this.suspendModelArrayHost(model);
+      else this.applyModelInteractivity(model, entity.id);
       this.reportModelArrayBatchFailure(entity, model, failureSignature, '参数脚本执行后没有可渲染 Mesh');
       return;
     }
 
     if (!model.modelArrayBatch || model.modelArraySourceSignature !== sourceSignature) {
       this.disposeModelArrayBatch(model);
+      model.root.computeWorldMatrix(true);
       model.modelArrayBatch = EntityArrayThinInstanceBatch.create(options.sourceEntityId, sourceMeshes, {
         interactive: true,
+        mergeStaticMeshesByMaterial: true,
+        sourceRootWorldMatrix: model.root.getWorldMatrix().clone(),
         metadata: {
           modelArraySourceEntityId: options.sourceEntityId,
           ...(options.variantKey ? { modelArrayParameterVariant: true } : {}),
@@ -5870,6 +6445,11 @@ export class SceneRuntime {
         for (const mesh of model.modelArrayBatch.meshes) {
           this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, model.modelArrayBatch);
         }
+      } else {
+        if (options.variantKey) this.suspendModelArrayHost(model);
+        else this.applyModelInteractivity(model, entity.id);
+        this.reportModelArrayBatchFailure(entity, model, failureSignature, '参数脚本输出 Mesh 不支持批量实例');
+        return;
       }
     }
 
@@ -5900,6 +6480,8 @@ export class SceneRuntime {
     model.root.computeWorldMatrix(true);
     if (!model.modelArrayBatch?.updateEntityTransforms(model.root.getWorldMatrix().clone(), visibleInstances)) {
       this.disposeModelArrayBatch(model);
+      if (options.variantKey) this.suspendModelArrayHost(model);
+      else this.applyModelInteractivity(model, entity.id);
       this.reportModelArrayBatchFailure(
         entity,
         model,
@@ -5914,6 +6496,8 @@ export class SceneRuntime {
       this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, model.modelArrayBatch);
     }
     model.modelArrayFailureSignature = '';
+    this.suspendModelArrayHost(model);
+    this.refreshGroupTranslationPreviewTargets();
   }
 
   private disposeMissingModelArrayParameterVariants(sourceEntityId: string, activeKeys: ReadonlySet<string>): void {
@@ -5940,8 +6524,12 @@ export class SceneRuntime {
     }
 
     const model = variant.model;
+    this.genericTelemetryMotionRuntime.disposeModel(variant.representativeEntityId);
     model.cancelLoad?.();
     model.cancelLoad = null;
+    this.restoreModelArrayParameterVariantHost(variant);
+    this.restoreModelArrayHostMeshes(model);
+    model.root.setEnabled(true);
     model.externalScriptRuntime?.dispose();
     model.externalScriptRuntime = null;
     for (const texture of model.textureCache.values()) texture.dispose();
@@ -5951,6 +6539,7 @@ export class SceneRuntime {
     model.assetHandle = null;
     model.contentRoot.dispose();
     model.root.dispose();
+    model.modelArraySuspendedMeshes.clear();
     for (const entity of variant.entities) this.onModelMeasurementChanged(entity.id);
   }
 
@@ -5973,13 +6562,16 @@ export class SceneRuntime {
       return;
     }
 
-    for (const mesh of model.modelArrayBatch.meshes) {
+    const modelArrayBatch = model.modelArrayBatch;
+    this.outlinedModelArrayBatches.delete(modelArrayBatch);
+    for (const mesh of modelArrayBatch.meshes) {
       this.modelHighlightLayer.removeMesh(mesh);
       this.modelArrayBatchByMeshUniqueId.delete(mesh.uniqueId);
     }
-    model.modelArrayBatch.dispose();
+    modelArrayBatch.dispose();
     model.modelArrayBatch = null;
     model.modelArraySourceSignature = '';
+    this.refreshGroupTranslationPreviewTargets();
   }
 
   /** 同步模型资产脚本生命周期，普通模型和生成模型共享同一份受控实现。 */
@@ -5989,6 +6581,11 @@ export class SceneRuntime {
     onSettled: (current: ModelRuntimeEntry) => void,
   ): void {
     if (!model.assetHandle) return;
+    // 阵列会把脚本宿主 Mesh 移出 scene.meshes；生命周期执行前临时恢复，兼容按场景列表查找部件的模型包。
+    // 异步 start 完成前保持根节点启用，避免旧脚本把 enabled=false 捕获为参数基线。
+    const hadArrayHost = Boolean(model.modelArrayBatch) || model.modelArraySuspendedMeshes.size > 0;
+    this.restoreModelArrayHostMeshes(model);
+    if (hadArrayHost) model.root.setEnabled(true);
     this.syncModelScriptMetadata(model.contentRoot, modelAsset);
 
     const scriptAssets = modelAsset.scriptAssets ?? [];
@@ -6485,6 +7082,8 @@ export class SceneRuntime {
     return JSON.stringify({
       sourceUrl: modelAsset.sourceUrl,
       assetRevision: modelAsset.assetRevision ?? null,
+      lengthUnit: modelAsset.lengthUnit,
+      unitScaleToMeters: modelAsset.unitScaleToMeters,
       instancingMode: resolveModelAssetSharedInstancingPolicy(modelAsset).mode,
     });
   }
@@ -6500,7 +7099,7 @@ export class SceneRuntime {
 
   /** 根据模型资源类型应用普通 Mesh 高亮或记录共享实例描边状态。 */
   private applyModelSelection(model: ModelRuntimeEntry, selected: boolean): void {
-    if (model.assetHandle?.kind === 'shared-instance') {
+    if (model.modelArrayBatch || model.assetHandle?.kind === 'shared-instance') {
       for (const mesh of model.highlightedMeshes) {
         this.modelHighlightLayer.removeMesh(mesh);
       }
@@ -6534,60 +7133,90 @@ export class SceneRuntime {
     model.highlighted = selected;
   }
 
-  /** 重建共享模型和矩阵阵列的选择描边，并只标记实际选中的 thinInstance。 */
+  /** 根据逻辑实体直接定位所属矩阵批次，避免选择变化扫描全部源模型和参数变体。 */
+  private resolveModelArrayBatchForEntityId(entityId: string): EntityArrayThinInstanceBatch | null {
+    const parameterVariant = this.modelArrayParameterVariantByEntityId.get(entityId);
+    if (parameterVariant?.model.modelArrayBatch) return parameterVariant.model.modelArrayBatch;
+
+    const sourceBatch = this.models.get(entityId)?.modelArrayBatch;
+    if (sourceBatch) return sourceBatch;
+
+    const instanceEntity = this.modelArrayInstanceEntities.get(entityId);
+    const sourceEntityId = instanceEntity?.components.modelArrayInstance?.sourceEntityId;
+    return sourceEntityId ? this.models.get(sourceEntityId)?.modelArrayBatch ?? null : null;
+  }
+
+  /**
+   * 只从当前选区推导共享模型和矩阵阵列描边。普通单选为 O(1)，文件夹整组选中为 O(selected)，
+   * 不再展开全部可见实体 ID 或拼接全场景 signature；批次内部再按差量刷新实例选择缓冲。
+   */
   private rebuildSharedModelSelectionOutline(): void {
-    const selectedSourceGroups = [...this.models.values()]
-      .filter((model) => model.assetHandle?.kind === 'shared-instance' && model.highlighted)
-      .map((model) => model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0))
-      .filter((meshes) => meshes.length > 0);
-    const arrayBatches = new Set<EntityArrayThinInstanceBatch>();
-    for (const model of this.models.values()) {
-      if (model.modelArrayBatch) arrayBatches.add(model.modelArrayBatch);
+    const selectedSourceGroups: AbstractMesh[][] = [];
+    const selectedArrayEntityIdsByBatch = new Map<EntityArrayThinInstanceBatch, Set<string>>();
+
+    for (const entityId of this.selectedEntityIds) {
+      const model = this.models.get(entityId);
+      if (model?.assetHandle?.kind === 'shared-instance' && !model.modelArrayBatch && model.highlighted) {
+        const meshes = model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
+        if (meshes.length > 0) selectedSourceGroups.push(meshes);
+      }
+
+      const batch = this.resolveModelArrayBatchForEntityId(entityId);
+      if (!batch) continue;
+      const selectedEntityIds = selectedArrayEntityIdsByBatch.get(batch) ?? new Set<string>();
+      selectedEntityIds.add(entityId);
+      selectedArrayEntityIdsByBatch.set(batch, selectedEntityIds);
     }
-    for (const variant of this.modelArrayParameterVariants.values()) {
-      if (variant.model.modelArrayBatch) arrayBatches.add(variant.model.modelArrayBatch);
+
+    for (const previousBatch of this.outlinedModelArrayBatches) {
+      if (selectedArrayEntityIdsByBatch.has(previousBatch)) continue;
+      if (previousBatch.meshes.some((mesh) => !mesh.isDisposed())) {
+        previousBatch.setSelectionMask(new Set(), 0);
+      }
     }
-    const selectedArrayGroups = [...arrayBatches]
-      .map((batch) => {
-        const visibleEntityIds = [...batch.getEntityIds()];
-        const selectedEntityIds = new Set(
-          visibleEntityIds.filter((entityId) => this.selectedEntityIds.has(entityId)),
-        );
+
+    // 先写入批次维护的权威选择缓冲，再把当前活动的原模型 Mesh 交给 SelectionOutlineLayer。
+    // 这样只高亮目标逻辑实体，不会因共享 Geometry 或 thinInstance 批次而整类高亮。
+    let nextArraySelectionId = selectedSourceGroups.length + 1;
+    const selectedArrayGroups = [...selectedArrayEntityIdsByBatch.entries()]
+      .map(([batch, selectedEntityIds]) => {
+        const selectionId = nextArraySelectionId;
+        nextArraySelectionId += 1;
+        batch.setSelectionMask(selectedEntityIds, selectionId);
         const meshes = batch.meshes.filter((mesh) => (
           !mesh.isDisposed() && mesh.thinInstanceCount > 0 && mesh.getTotalVertices() > 0
         ));
-        return selectedEntityIds.size > 0 && meshes.length > 0
-          ? { batch, meshes, selectedEntityIds, visibleEntityIds }
-          : null;
+        return meshes.length > 0 ? { batch, meshes, selectedEntityIds, selectionId } : null;
       })
       .filter((group): group is NonNullable<typeof group> => group !== null);
+    const nextOutlinedModelArrayBatches = new Set(selectedArrayGroups.map((group) => group.batch));
 
-    const signature = [
-      ...selectedSourceGroups.map((meshes) => `source:${meshes.map((mesh) => mesh.uniqueId).join(',')}`),
-      ...selectedArrayGroups.map(({ meshes, selectedEntityIds, visibleEntityIds }) => (
-        `array:${meshes.map((mesh) => `${mesh.uniqueId}:${mesh.thinInstanceCount}`).join(',')}:${visibleEntityIds.join(',')}:${[...selectedEntityIds].sort().join(',')}`
-      )),
-    ].join('|');
-    if (signature === this.sharedModelSelectionOutlineSignature) return;
-
-    this.sharedModelSelectionOutlineSignature = signature;
     this.modelSelectionOutlineLayer.clearSelection();
+    if (selectedSourceGroups.length === 0 && selectedArrayGroups.length === 0) {
+      // SelectionOutlineLayer 会为遮挡正确的描边延迟启用全场景 DepthRenderer，
+      // 但 clearSelection() 不会释放它；空选区继续保留会让所有模型永久多绘制一遍。
+      this.scene.disableDepthRenderer();
+      this.outlinedModelArrayBatches = nextOutlinedModelArrayBatches;
+      return;
+    }
+
     prepareInstancedMeshesForSelectionOutline([
       ...selectedSourceGroups.flat(),
       ...selectedArrayGroups.flatMap((group) => group.meshes),
     ]);
 
-    let nextSelectionId = 1;
     for (const meshes of selectedSourceGroups) {
       this.modelSelectionOutlineLayer.addSelection(meshes);
-      nextSelectionId += 1;
     }
     for (const group of selectedArrayGroups) {
       this.modelSelectionOutlineLayer.addSelection(group.meshes);
-      group.batch.setSelectionMask(group.selectedEntityIds, nextSelectionId);
-      nextSelectionId += 1;
+      // addSelection() 会临时把整个 thinInstance 批次改为选中；再次绑定权威缓冲只保留目标实体。
+      group.batch.setSelectionMask(group.selectedEntityIds, group.selectionId);
     }
+
+    this.outlinedModelArrayBatches = nextOutlinedModelArrayBatches;
   }
+
 
   /** 仅把 glTF 顶层节点挂到模型内容节点，保留模型内部层级、骨骼和动画关系。 */
   private parentTopLevelModelNodes(model: ModelRuntimeEntry, transformNodes: TransformNode[]): void {

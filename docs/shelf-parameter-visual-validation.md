@@ -6,7 +6,7 @@ Shelf 参数脚本以 `Shelf.glb` 的真实节点结构为基准，保持 GLB �
 
 1. 底部支架腿高度与货架高度分离，Inspector 新增 `supportLegHeight`。
 2. 层数不再重复整套底部基座；第一层保留完整基座，后续层只增加上方黄色框架和两侧三角支架。
-3. `layerCount` 与 `columnCount` 均支持 `1..100`；当组合规模超过逐节点生成阈值时，自动切换到 high-density thin-instance 批次路径。
+3. `layerCount` 支持 `1..20`、`columnCount` 支持 `1..100`；当组合规模超过逐节点生成阈值时，自动切换到 high-density thin-instance 批次路径。
 
 ## 节点分组
 
@@ -58,11 +58,11 @@ totalHeight = supportLegHeight + layerSpan * layerCount
 
 - 底腿与层结构专项：`output/playwright/shelf-height-visual-check.html`
 - 全参数矩阵：`output/playwright/shelf-visual-check.html`
-- 100 层 × 100 列高密度截图模式：`output/playwright/shelf-visual-check.html?dense=1`
+- 20 层 × 100 列高密度截图模式：`output/playwright/shelf-visual-check.html?dense=1`
 - 底腿/层结构截图：`output/playwright/shelf-support-leg-layer-visual.png`
 - 全参数矩阵截图：`output/playwright/shelf-parameter-matrix-visual.png`
 
-专项页会对底部件数量、上方框架数量、三角支架数量、下横梁中心高度和整架高度执行断言；全参数页覆盖默认值、宽度、深度、立柱宽度、货架高度、列数、层数、双深间隔、深位提升、旋转组合和 100x100 高密度模式。页面会自动按整体包围盒取景，并在左上角显示 effective layers/columns、node/mesh、dense batch、thin instance 和 FPS 采样。
+专项页会对底部件数量、上方框架数量、三角支架数量、下横梁中心高度和整架高度执行断言；全参数页覆盖默认值、宽度、深度、立柱宽度、货架高度、列数、层数、双深间隔、深位提升、旋转组合和 20x100 高密度模式。页面会自动按整体包围盒取景，并在左上角显示 effective layers/columns、node/mesh、dense batch、thin instance 和 FPS 采样。
 
 ## 本轮视觉结果
 
@@ -79,7 +79,7 @@ totalHeight = supportLegHeight + layerSpan * layerCount
 | `columnCount=4` | 连续 4 列，总宽约 `2.728m` |
 | 双深间隔 `0.4m` | 总深约 `2.766m` |
 | 双深提升 `0.35m` | 第二深位抬升，整体高度约 `4.875m` |
-| `layerCount=100` / `columnCount=100` / 双深 | 不再被 20 层 clamp；启用 18 个 dense batch，thin instance 总数 `121608`，可渲染 Mesh `36`，截图模式自动取景显示完整网格 |
+| 目标场景：`layerCount=20` / `columnCount=100` / 双深，`cellWidth=1.2`、`cellHeight=1.2`、`supportLegHeight=0.2`、`cellDepth=1.183`、`deepSlotGap=1.2` | 遵守当前 20 层上限；启用 18 个 dense batch，thin instance 总数 `16674`，可见 dense batch Mesh `18`，截图模式自动取景显示完整网格 |
 
 ## 同步要求
 

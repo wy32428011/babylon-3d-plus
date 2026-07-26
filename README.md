@@ -20,22 +20,22 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU、禁用软件 3D rasterizer，并在主窗口明确启用 WebGL；Windows 正式打包版按企业部署策略额外关闭 GPU sandbox。编辑器 Scene View 使用 `high-performance` 上下文并拒绝 SwiftShader、WARP 等软件 renderer，避免静默退回 CPU 模拟渲染。模型文件读取与格式解析仍由 CPU/Worker 执行，几何和纹理上传后由 GPU 完成绘制、Shader、纹理采样与画面合成。
 - Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部，中间列独立承载 Scene、Project 与 Console；Project/Console 只与 Scene 画布同宽，在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到 Project 区域最小化入口，点击后以弹窗查看完整日志，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
 - Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑；左键拖拽旋转或移动视角时以真实相机输入和位姿变化优先，即使从模型表面开始轻微拖拽也不会触发模型拾取，纯单击仍正常选中模型；Toolbar 新增“俯”视角按钮，可保留当前观察中心与缩放距离切换为稳定俯视视角，方便依据地面 CAD 图纸定位并搭建场景。
-- 大场景无损容量优化：不降低抗锯齿、纹理、材质、光照或几何质量；同一 `sourceUrl + assetRevision` 的普通静态模型会复用单份源 `AssetContainer`，每个实体继续保留独立 Transform、显隐、锁定、拾取和选择语义。带外置脚本、参数配置或脚本元数据的动态模型默认继续独占容器，Shelf 保留经过验证的脚本化共享特例。模型与环境加载统一限制为最多 4 个并发任务，SceneRuntime 只完整同步真正变化的实体；WebGL 上下文丢失或渲染循环异常会显示可读遮罩，Babylon 完成恢复后自动清除。详见 `docs/scene-capacity-performance.md`。
+- 大场景原模型 Geometry 无损优化：不降低渲染分辨率、抗锯齿、纹理、材质、光照或几何质量，也不焊接、删面、隐藏可见模型或使用 LOD/代理；同一 `sourceUrl + assetRevision` 的普通静态模型继续复用单份源 `AssetContainer`，每个实体保留独立 Transform、显隐、锁定、拾取和选择语义。Scene View 编辑态会把同模板的无脚本模型，以及已核对的 Box、Chain、GD、HCTS、Shelf、WLTS、YZJ 参数化模型临时归并为 thinInstance；参数脚本先完整执行，随后批次仅复用真实模型的顶点、索引、材质、纹理和所有部件，在任何相机距离与视角都不创建方块、框架或其它替代 Geometry。正式批次按空间分片并只对相机视锥外实例执行正常裁剪；实例进入视锥后始终提交原模型 Geometry。模型与环境加载最多 4 个并发任务，纯选择变化走 `SceneRuntime.syncSelection()`，Hierarchy 对 10k/50k 行采用固定行高虚拟化。Scene View 内置 1 Hz 性能 HUD，可查看 FPS、CPU/GPU frame time、Draw Call、Mesh、thinInstance、原模型/代理实体数、GPU 顶点/三角工作量与材质分类，并复制最近一分钟报告；代理计数必须恒为 0，监控器可通过 Toolbar 的“性能”复选框显示或隐藏。WebGL 上下文丢失或渲染循环异常会显示可读遮罩，Babylon 恢复后自动清除。详见 `docs/scene-capacity-performance.md`。
 - 米制场景单位：编辑器约定 `1 scene unit = 1 m`，Inspector 中 position、位置吸附步长与地面网格均按米解释；普通导入模型的实际 X/Y/Z 尺寸由编辑器运行时原生测量，不依赖参数化脚本。
 - 编辑器地面辅助层：Scene View 显示固定大范围的科技蓝地面网格，默认每小格表示 `5 m`，可在 Toolbar 中切换显示/隐藏并选择 `1 m`、`2 m`、`5 m`、`10 m` 四档格子大小；网格不会随相机视野重定位或被局部范围裁掉，网格线自身带有微弱低强度呼吸光晕效果，辅助层不参与选中、保存、加载或撤销/重做。
 - CAD/DXF 网格参考层：Toolbar 支持导入 `.dxf` CAD 图纸，导入过程中会显示读取、解析和创建参考层进度；`LINE`、`ARC`、`CIRCLE`、`ELLIPSE`、`SPLINE`、`LWPOLYLINE`、`POLYLINE` 会在解析阶段统一换算为米，并按 DXF 正 Y → Babylon 正 Z 的同向规则转为贴近 `y = 0` 网格层的半透明线稿，避免俯视图上下镜像。超过 64 MB 的图纸在 Worker 中分块读取并完整扫描块定义/嵌套 INSERT，曲线采用有界采样，几何以 TypedArray 紧凑缓冲区零拷贝回传并分批创建 LinesMesh；默认安全上限为 100 万条折线 / 800 万个点，不再按旧的“每块 128 个图元 / 全图 80 万点”预览策略截断常规大图。单位优先读取 `$INSUNITS` 0–24，未声明单位时参考 `$MEASUREMENT`，仍无法判断时明确按毫米兜底；参考图默认锁定、不可拾取，Inspector 会显示源单位、判定来源和换算系数，并随场景保存/加载恢复。
 - 创建基础对象：支持创建米制 Cube、Sphere、Plane；基准尺寸分别为 `1 m × 1 m × 1 m`、直径 `1 m`、`2 m × 2 m`，有体积对象拖入 Scene View 时会以底面落地。
 - 创建基础灯光：支持创建 Hemispheric、Directional、Point 三类灯光实体。
-- Hierarchy 选择与分组：支持在层级面板中选择场景对象，并与 Scene View 高亮状态同步；选中文件夹时会在 Scene View 高亮该文件夹下的所有可显示模型；左侧 Hierarchy 提供搜索、新建文件夹、单选/多选拖入文件夹分组、拖回根层级，以及实体/文件夹级显示隐藏、锁定解锁控制。
-- Hierarchy 右键菜单：左侧模型树单选或多选后可打开深色上下文菜单，支持场景聚焦、库聚焦、隐藏、复制、粘贴、模型阵列、锁定、重命名、删除、群组和解组；右键未选中对象会切换为单选，右键当前多选对象会保留多选集合。复制文件夹时会连同全部直属对象生成完整文件夹副本，空文件夹同样支持复制，粘贴和撤销/重做均按整个文件夹处理。
+- Hierarchy 选择与分组：支持在层级面板中选择场景对象，并与 Scene View 高亮状态同步；文件夹允许不限层级地包含子文件夹和普通对象，单独选中文件夹时会递归高亮其全部可显示后代，并在整组世界包围盒中心显示仅支持世界坐标平移的 Gizmo。拖动时普通节点与 thinInstance 逻辑实体使用可取消的运行时预览，松开后把同一位移一次性写回全部普通后代的位置并形成一条撤销记录；隐藏或尚未加载完成的后代同样参与最终写回，文件夹自身不保存 Transform。文件夹自身或任一后代锁定时整组移动原子阻止，空文件夹、多选和运行预览状态不显示组 Gizmo。左侧 Hierarchy 继续提供搜索、全部展开、全部收缩、新建根/子文件夹、单选/多选拖入任意层级文件夹、拖回根层级，以及实体/文件夹级显示隐藏、锁定解锁控制；拖拽会阻止把文件夹放入自身后代。
+- Hierarchy 右键菜单：左侧模型树单选或多选后可打开深色上下文菜单，支持场景聚焦、库聚焦、隐藏、复制、粘贴、模型阵列、锁定、重命名、删除、群组和解组；右键未选中对象会切换为单选，右键当前多选对象会保留多选集合。复制文件夹时会递归复制完整文件夹子树，包含空子文件夹和全部普通对象；文件夹副本可粘贴到当前目标文件夹，且粘贴和撤销/重做均按整棵子树处理。删除文件夹仍为非级联操作，其直属内容会提升到原父级。
 - Scene View 点击选中：支持在 Scene 画布单击对象完成选中，单击空白区域会清空当前选择。
 - Inspector 实体编辑：支持编辑选中实体名称、position、rotation、scale 等 Transform 数据；其中 position 按米、rotation 在 UI 中按角度、内部仍按弧度保存。内置 Box 以 1 米基准映射为 `size (m)`；Sphere/Plane 明确显示米制基准尺寸，但通用 scale 仍保持无量纲缩放比例。普通导入模型的 `Model Asset` 区域固定显示只读“实际尺寸 (m)”及 X/Y/Z，加载中或无有效可见几何时显示明确状态。
 - Inspector 材质编辑：支持编辑基础 Mesh 的材质颜色。
 - Inspector 灯光编辑：支持编辑灯光类型与强度。
-- Transform Gizmo：Scene View 中支持移动、旋转、缩放三种可视化操控模式，普通拖拽结束后写入撤销/重做历史；编辑模式下选中单个未锁定可阵列实体并使用移动工具时，可按住 `Shift` 拖动 X/Y/Z 单轴箭头进入模型阵列。可阵列实体包括导入模型、内置 Mesh、虚拟定位线框、已解锁 CAD 参考层和 POI 特效；文件夹、灯光和全局唯一模型生成器明确排除。
+- Transform Gizmo：Scene View 中支持移动、旋转、缩放三种可视化操控模式，普通拖拽结束后写入撤销/重做历史；单选文件夹会强制使用移动工具和世界坐标，文件夹组不支持旋转、缩放或 Shift 阵列，按住 `Shift` 仍执行普通整组平移。编辑模式下选中单个未锁定可阵列实体并使用移动工具时，可按住 `Shift` 拖动 X/Y/Z 单轴箭头进入模型阵列。可阵列实体包括导入模型、内置 Mesh、虚拟定位线框、已解锁 CAD 参考层和 POI 特效；文件夹、灯光和全局唯一模型生成器明确排除阵列。
 - Gizmo 坐标与吸附：支持局部/全局坐标空间切换，并可配置位置、旋转角度、缩放三类基础吸附步长；Shift 阵列沿当前可见局部/世界轴计算方向，阵列手势期间临时忽略位置吸附，普通移动吸附不受影响。
-- W/E/R 与批量操作快捷键：在非输入控件聚焦时，可用 W/E/R 快速切换移动、旋转、缩放工具；F 场景聚焦、H 隐藏对象、Ctrl+C 复制、Ctrl+V 粘贴、Ctrl+K 锁定、Ctrl+G 群组、Shift+G 解组、Delete/Backspace 删除当前 Hierarchy 选区；文件夹选区执行 Ctrl+C/Ctrl+V 时会整体复制文件夹及其全部直属对象。
-- 撤销/重做：通过命令历史支持基础编辑操作、实体创建、实体删除、实体重命名、材质编辑、灯光编辑与 Gizmo 拖拽的撤销与重做；Hierarchy 批量隐藏、锁定、删除、粘贴、模型阵列、群组和解组均作为单条命令进入历史，Shift 拖拽阵列确认后同样以一条“模型阵列”命令整体撤销/重做。
+- W/E/R 与批量操作快捷键：在非输入控件聚焦时，可用 W/E/R 快速切换移动、旋转、缩放工具；F 场景聚焦、H 隐藏对象、Ctrl+C 复制、Ctrl+V 粘贴、Ctrl+K 锁定、Ctrl+G 群组、Shift+G 解组、Delete/Backspace 删除当前 Hierarchy 选区；文件夹选区执行 Ctrl+C/Ctrl+V 时会整体复制文件夹及其完整后代子树。
+- 撤销/重做：通过命令历史支持基础编辑操作、实体创建、实体删除、实体重命名、材质编辑、灯光编辑与 Gizmo 拖拽的撤销与重做；Hierarchy 批量隐藏、锁定、删除、粘贴、模型阵列、群组、解组和文件夹整组平移均作为单条命令进入历史，文件夹平移撤销/重做只恢复全部子对象位置，不引入文件夹 Transform 继承。Shift 拖拽阵列确认后同样以一条“模型阵列”命令整体撤销/重做。
 - JSON 场景保存/加载：支持将当前场景保存为 JSON 文件，并从 JSON 场景文件加载；保存、文件选择加载和首页最近场景加载成功后都会更新最近场景列表。
 - Project 资源库外观：底部 Project 面板已切换为资源库浏览器样式，位于中间列 Scene 画布下方且与 Scene 同宽，并将图库区域加高到约 `300px` 至 `460px` 自适应，包含模型库、POI库、主题库、组合库、环境库、图表库、图片库七个页签，以及筛选占位行和可换行资源卡片；模型库卡片使用深色直角卡、上方缩略图、下方两行居中文字和单行省略标题，模型库内置立方体、球体、地面、虚拟定位线框、半球光、方向光、点光源七类基础资源，并支持导入普通模型文件夹展示项目内模型卡片；POI 库保留可点击或拖入 Scene 任意位置的“模型生成器”，重复创建入口会选中已有生成器而不是新建副本；环境库使用独立的单 GLB 文件导入入口，支持点击应用或拖入右侧“环境模型”整条属性行；所有导入模型进入场景后统一以米为操作单位。
 - POI 模型生成器：生成器保存共享生成模板、按顺序匹配的条件规则、MQTT 精确绑定和元数据 TTL；一个场景只有 `entityIds` 中第一个生成器生效，编辑态 Transform 只控制青色可拾取配置标记，不作为任何货物生成点。运行预览中该全局生成器统一管理普通 Conveyor、普通 Stacker 与 `warehouseFlow` 的模板/规则；货物实际位置来自输送面、货叉、locator 或仓储状态机。派生 Mesh/模型不进入 Hierarchy，也不写入场景文件或撤销历史。
@@ -383,6 +383,18 @@ npm run smoke:scene-capacity
 npm run smoke:shelf-instancing
 ```
 
+执行全部 16 个模型包的直接展示、参数修改、阵列、阵列后调参和恢复结构验收：
+
+```bash
+npm run smoke:model-array-packages
+```
+
+执行同一批 16 个模型的真实 WebGL 截图与像素对比，并生成逐包 JSON 和联系表：
+
+```bash
+npm run smoke:model-array-visual
+```
+
 执行完整构建检查：
 
 ```bash
@@ -392,10 +404,10 @@ npm run build
 ## 基础操作
 
 - 首页进入编辑：启动后在首页点击 `新建场景` 可重置为空白场景并进入编辑器；点击 `打开场景文件` 可选择 `.scene.json`；点击 `打开项目目录` 可进入编辑器并让 Project 面板加载本地项目资源；点击最近场景会直接加载对应场景。左侧数据中台项目卡片提供 `打开`：有可用工程包时下载并加载唯一场景，没有工程包或属于旧格式时创建当前格式本地项目并进入空白场景。
-- 数据中台配置：点击首页顶部 `数据中台配置`，填写 HTTP/HTTPS 服务根地址并选择 `保存并刷新`；本地联调可使用 `http://127.0.0.1:8086`。地址持久化到 Electron `userData/data-platform-config.json`，主进程随后请求 `<服务地址>/api/v1/projects/query`；留空保存可清除配置。左侧项目列表顶部可输入项目名称后按 Enter 或点击 `搜索`，搜索词通过请求体 `projectName` 字段交给数据中台筛选，点击 `清除` 会恢复默认列表。renderer 打开项目时只提交列表中的 `projectId`，工程包地址由主进程最近一次可信列表缓存解析；项目、Editor 工程和模型等业务主键始终按十进制字符串传递，避免 19 位 ID 被 JavaScript `number` 截断。
+- 数据中台配置：点击首页顶部 `数据中台配置`，填写 HTTP/HTTPS 服务根地址并选择 `保存并刷新`；本地联调可使用 `http://127.0.0.1:8086`。地址持久化到 Electron `userData/data-platform-config.json`，主进程随后请求 `<服务地址>/api/v1/projects/query`；留空保存可清除配置。首页常驻的“数据中台工作区”栏显示当前实际目录，可选择 `修改` 或 `恢复默认`；目录选择和读写校验全部由主进程完成，renderer 不能直接提交任意路径。左侧项目列表顶部可输入项目名称后按 Enter 或点击 `搜索`，搜索词通过请求体 `projectName` 字段交给数据中台筛选，点击 `清除` 会恢复默认列表。renderer 打开项目时只提交列表中的 `projectId`，工程包地址由主进程最近一次可信列表缓存解析；项目、Editor 工程和模型等业务主键始终按十进制字符串传递，避免 19 位 ID 被 JavaScript `number` 截断。
 - 数据中台工程包：只接受当前 ZENDING 3D EDITOR 目录结构，即 `.babylon-editor/`、`Assets/Models/`、`Assets/Environments/` 和恰好一个 `.scene.json`；ZIP 根目录和单层包装目录均可。旧 `project.bjseditor` 不迁移，统一按无可用工程包处理。主进程限制 ZIP 压缩体积、文件数、单文件及总展开大小，并拒绝 Zip Slip、绝对路径、盘符路径、加密条目和符号链接。
-- 数据中台模型同步：打开项目后后台分页读取 `POST /api/v1/models/query`、`POST /api/v1/env-models/query` 和 `POST /api/v1/combo-models/query`。普通模型写入 `Assets/Models/Model-<id>-<名称>/`，环境模型写入 `Assets/Environments/Env-<id>-<名称>/`，组合模型写入 `Assets/Models/ComboModels/Combo-<id>-<名称>/`。普通模型脚本为可选资源：优先使用 `scriptFiles` 权威列表，仅在列表没有有效项时读取旧 `scriptFileName/scriptFileUrl` 兼容字段；接口提供可识别的 `*.ts` 文件名或 URL 时才下载，不要求文件名以 `.model.ts` 结尾，旧字段中以换行拼接的多脚本也会拆分处理；未提供脚本或返回非 TS 条目时直接跳过，不阻断模型同步。同步层会保留这些 TS 文件，编辑器现有外置脚本执行仍遵循 `.model.ts` 运行约定。所有数据中台项目共享同一模型库；下载和校验全部完成后才原子替换模型目录与 `.babylon-editor/asset-index.json`。同步成功后 Project 模型库会自动刷新并优先展示同步模型；失败时保留旧库，失败提示支持关闭，也可在 Project 面板重试。
-- 数据中台存储位置：开发态继续使用 `app.getAppPath()`；安装态改用 Electron `userData/data-platform-workspace`（Windows 通常位于 `%APPDATA%/zending-3d-editor/data-platform-workspace`），不再向 EXE 所在目录或 `Program Files` 写入项目、场景和共享模型。首次打开会自动创建工作区，无需以管理员身份运行；测试环境仍可通过受保护的 `ZENDING_EDITOR_STORAGE_ROOT` 覆盖路径。 旧版本若已在自定义可写安装目录生成数据，不会自动删除，可继续通过“打开项目目录”访问或手动复制到新工作区。
+- 数据中台模型同步：打开数据中台项目或成功加载本地 `.scene.json` 场景后，若已配置数据中台地址，会在共享工作区后台分页读取 `POST /api/v1/models/query`、`POST /api/v1/env-models/query` 和 `POST /api/v1/combo-models/query`；未配置地址时本地场景仍正常打开并跳过同步。普通模型写入 `Assets/Models/Model-<id>-<名称>/`，环境模型写入 `Assets/Environments/Env-<id>-<名称>/`，组合模型写入 `Assets/Models/ComboModels/Combo-<id>-<名称>/`。普通模型脚本为可选资源：优先使用 `scriptFiles` 权威列表，仅在列表没有有效项时读取旧 `scriptFileName/scriptFileUrl` 兼容字段；接口提供可识别的 `*.ts` 文件名或 URL 时才下载，不要求文件名以 `.model.ts` 结尾，旧字段中以换行拼接的多脚本也会拆分处理；未提供脚本或返回非 TS 条目时直接跳过，不阻断模型同步。同步层会保留这些 TS 文件，编辑器现有外置脚本执行仍遵循 `.model.ts` 运行约定。所有数据中台项目共享同一模型库；下载和校验全部完成后才原子替换模型目录与 `.babylon-editor/asset-index.json`。同步成功后 Project 模型库会自动刷新并优先展示同步模型，同时按数据中台业务 ID 重新关联场景中的普通模型、组合模型、模型生成器目标和当前环境模型，通过新的 `assetRevision` 触发 Babylon 资源重载；即使模型名称或主文件名发生变化也能刷新。失败时保留旧库，失败提示支持关闭，也可在 Project 面板重试。
+- 数据中台存储位置：未自定义时开发态使用 `app.getAppPath()`，安装态使用 Electron `userData/data-platform-workspace`（Windows 通常位于 `%APPDATA%/zending-3d-editor/data-platform-workspace`）；也可在首页把目录修改为其他可写位置。所选目录本身即为工作区根目录，应用会在其中管理 `.babylon-editor/`、`Assets/Models/`、`Assets/Environments/` 和场景文件；安装态拒绝选择 EXE 安装目录及其内部路径。首次使用会自动创建所需目录，无需以管理员身份运行；测试环境仍可通过受保护的 `ZENDING_EDITOR_STORAGE_ROOT` 覆盖路径。切换工作区只影响后续打开和同步，不会迁移、覆盖或删除旧目录内容；旧数据可继续通过“打开项目目录”访问或手动复制。
 - 创建基础对象与常用灯光：在模型库中点击或拖拽 `立方体`、`球体`、`地面`、`虚拟定位线框`、`半球光`、`方向光`、`点光源` 内置资源卡片；Box/立方体卡片明确标注默认尺寸 `1 m × 1 m × 1 m`，拖拽到 Scene View 后会按鼠标释放位置投射到地面平面，并把 Box 中心抬高 `0.5 m` 使底面落地；其它对象保持原有创建路径。
 - 创建 POI 模型生成器：在 `POI库` 点击“模型生成器”可在原点创建青色配置标记，拖入 Scene View 可按地面落点放置标记；一个场景只保留一个有效生成器，重复点击/拖入会选中已有生成器。随后把模型库普通模型或内置立方体、球体、地面拖入 Inspector 的共享生成模板或规则覆盖模型槽位。
 - 选择对象：点击 Hierarchy 项，或在 Scene View 中单击对象；Hierarchy 中可使用 Ctrl/Cmd 多选、Shift 连续多选。
@@ -475,7 +487,7 @@ npm run build
 ## 当前限制
 
 - glTF/GLB 导入属于 MVP 级能力：支持导入、选择、基础 Transform、参数化外观绑定、保存和加载，不承诺完整材质编辑、动画、骨骼、蒙皮或嵌套资源管理。
-- 大场景共享只对明确安全的重复资产生效：普通模型仅在没有外置脚本、参数配置、参数脚本元数据和动画脚本元数据时共享源几何/材质；Shelf 使用独立验证过的脚本化共享路径。Stacker `appearanceColor`、YZJ 顶点修改等动态模型继续独占容器，因此不同资产、动态脚本和高面数贴图本身仍受 GPU 能力限制；本轮不会用降分辨率、LOD 或纹理降采样换取容量。
+- 大场景共享只对明确安全的重复资产生效：运行预览中的普通模型仅在没有外置脚本、参数配置、参数脚本元数据和动画脚本元数据时共享源几何/材质，Shelf 使用独立验证过的脚本化共享路径；编辑态另允许 7 个已核对参数脚本按完整模板签名临时 thinInstance 合批。未列入白名单的动态脚本继续独占容器，因此不同资产、动态脚本和高面数贴图本身仍受 GPU 能力限制；本轮不会用降分辨率、LOD 或纹理降采样换取容量。
 - CAD/DXF 导入属于布局参考层能力：只承诺常见二维线稿实体 `LINE`、`ARC`、`CIRCLE`、`LWPOLYLINE`、`POLYLINE`；不承诺 HATCH、DIMENSION、完整 TEXT/MTEXT、Paper Space、多布局、3D Solid 或可编辑 CAD 图元。普通图纸保持精确解析，`64 MB` 及以上图纸使用后台轻量扫描和固定预览预算。DXF 合法 `$INSUNITS` 0–24 会换算为米；无单位图纸只能依据 `$MEASUREMENT` 或毫米 fallback，建议源 CAD 明确写入单位。超过 `±1e15` 的异常原始坐标会被过滤。
 - 参数化模型依赖模型包中稳定的节点、网格或材质名称；安全 DSL 只支持 JSON AST 中的白名单运算和白名单属性绑定，不执行任意 JavaScript/TypeScript。贴图参数允许编辑器登记过的内置 `editor-image://` 逻辑引用，或模型包内 `.png`、`.jpg`、`.jpeg`、`.webp` 相对路径；仍不支持绝对路径、网络 URL、`data:`、反斜杠路径、未登记逻辑引用或 `../` 路径逃逸。重新导入模型包后，场景实例会使用新的 `modelParameters` 与 `.model.ts` 脚本元数据清洗参数：同名且仍合法的实例值会保留，新增参数使用新默认值，删除或非法参数会移除。
 - Project 资源库中模型库和环境库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库直接选择的单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/` 独立包。POI 库已接入模型生成器和 16 种内置 EFF，其它图表立标、图表面板、报警管理器、手动漫游卡片以及主题、组合、图表仍为占位；图片库已接入内置方向箭头和 texture 参数拖放，但尚未开放用户图片导入、项目级图片索引和真实搜索过滤。
@@ -483,10 +495,15 @@ npm run build
 - 主布局自适应当前只包含随窗口尺寸自动调整、左右面板贯通到底部、Project/Console 限定为中间 Scene 同宽以及底部 Console 弹窗入口，不包含拖拽分隔条、其它面板折叠或用户自定义布局保存；小于约 `1024×640` 的窗口会继续尽量收缩，但不保证所有内容舒适可读。
 - 图片库当前只登记内置方向箭头资源；用户图片导入、项目级图片持久化与更多图片类型仍待扩展。POI 库的模型生成器与 16 种内置 EFF 可用，图表立标、图表面板、报警管理器、手动漫游以及图表、主题、组合仍为占位分类。
 - 灯光编辑支持类型与强度，暂未提供颜色、阴影、范围、衰减等高级参数。
-- 当前 Hierarchy 文件夹仅用于场景对象组织分组；文件夹显隐和锁定会作用到组内对象，但不提供文件夹嵌套、文件夹 Transform 继承或批量 Transform 父子联动。
+- 当前 Hierarchy 文件夹用于场景对象组织分组并支持任意层级嵌套；文件夹显隐和锁定会作用到组内对象，单选文件夹可把一次世界位移写回全部普通后代，但仍不保存文件夹 Transform，也不提供持续的父子 Transform 继承、整组旋转或整组缩放。
 
 ## 最近完成
 
+- 2026-07-26：Hierarchy 单选文件夹新增整组世界坐标平移：递归高亮全部可显示后代，在世界包围盒中心显示移动 Gizmo；拖动期间普通节点与 thinInstance 逻辑实体走可取消运行时预览，松开后一次性写回全部普通后代位置并形成单条撤销记录。隐藏/未加载成员仍参与最终提交，任一文件夹后代锁定时原子阻止，空文件夹、多选和运行预览不显示组 Gizmo；不新增文件夹 Transform，不修改场景版本或序列化格式。
+
+- 2026-07-25：撤销大场景屏幕空间方块/框架代理方案。`SceneRuntime` 与 `EntityArrayThinInstanceBatch` 不再创建或切换任何替代 Geometry；极远景、中景、近景及任意旋转视角都使用参数化脚本完整生成后的原模型顶点、索引、材质、纹理和全部部件。保留 thinInstance、空间分片、原模型 OBB 视锥裁剪、前到后不透明排序、单实体拾取和单实体高亮；性能 HUD 与真实场景 smoke 强制断言代理数为 0、原模型实体数等于场景模型总数。Intel UHD 630 的最新 10k 全景旋转保真报告 `2026-07-25T09-04-02-336Z` 验证刷新前后均为 10,000 个原模型、0 个代理，刷新后平均 `4.53 FPS`、GPU frame `223.72 ms`；该结果确认 GPU 几何吞吐边界，不冒充 30 FPS 达标。此前依赖代理得到的 33.07 FPS / 248.65 FPS 报告标记为已否决实验，不再作为发布证据。
+- 2026-07-24：针对 RTX 5070 大场景报告中的 CPU/Draw Call 瓶颈扩展编辑态自动 thinInstance：新增 Box、GD、HCTS、WLTS 安全参数脚本，并把同模板的多个已有阵列源临时统一到一个真实源；原始场景、运行预览、参数变体、资产编号与遥测隔离不变。指定 113,110,088 字节场景的静态计划从 1,966 个真实模型源降至 18 个，其余 8,328 个模型实体走逻辑矩阵实例；旧 `modelArray.items` 源继续保留，避免兼容场景丢失隐藏阵列项。
+- 2026-07-24：完成大场景交互第一阶段优化：Scene View 将纯选择变化从完整 `SceneRuntime.sync()` 拆到 `syncSelection()`，普通单选只刷新前后目标；共享模型/矩阵阵列描边按当前选区推导，thinInstance 选择缓冲通过实体连续区间差量改写。Hierarchy 使用 24px 固定行高、上下各 20 行 overscan 的虚拟窗口，10k/50k 行只保留受控 DOM。新增 1 Hz 性能 HUD 与最近一分钟 JSON 报告，采集 FPS、CPU/GPU frame time、Draw Call、active mesh、thinInstance、同步/分组耗时和 Long Task；Toolbar 新增“性能”复选框控制 HUD 显示与隐藏，隐藏期间持续采样并保留报告历史；同时新增 `npm run smoke:editor-performance` 数量级回归。
 - 2026-07-24：Windows 正式打包版新增 `disable-gpu-sandbox`，与既有高性能 GPU 请求、软件 rasterizer 禁用和 Scene View 硬件 WebGL 严格校验共同固化到 `app.asar`；开发态继续保留 GPU sandbox，不绕过 Chromium GPU blocklist，也不固定 ANGLE 后端。生产 GPU smoke 新增开关策略检查，并在 Scene View 创建内置立方体后确认硬件 WebGL 上下文未丢失。该企业部署策略降低 GPU 进程隔离强度，使用方已明确接受相应安全风险。
 - 2026-07-23：修复 thinInstance 模型阵列中每个逻辑模型的参数化脚本失效：运行时按完整模型参数快照分组，相同参数组合共享一个隐藏脚本宿主，不同组合独立执行声明式参数绑定和外置参数脚本；脚本输出继续一次性提交为 thinInstance，宿主不显示、不拾取。连续调参复用原宿主，恢复相同参数后自动合并批次，源 GLB 仍通过资产缓存复用。
 - 2026-07-23：Windows NSIS 安装包补齐 GPU/WebGL 安装态回归：新增 `smoke-packaged-gpu.mjs` 直接校验生产主进程 GPU feature、活动显卡、启动开关和 Scene View 实际 renderer，并通过版本核对阻断旧安装程序；`npm run smoke:installer:gpu` 串联完整构建、NSIS 产物生成和生产 EXE 验证。Windows 打包继续复用已安装的 Electron runtime，并在 `afterPack` 清理默认入口文件，避免端点安全软件导致解压目录重命名失败。
@@ -496,7 +513,7 @@ npm run build
 - 2026-07-22：首页启动台新增数据中台地址配置弹窗，配置持久化到 Electron `userData/data-platform-config.json`；左侧“最近项目”由主进程通过 `POST /api/v1/projects/query` 拉取、校验并按更新时间展示业务项目，支持 `projectName` 搜索，并新增可信项目 ID 打开流程。当前格式工程包会安全下载、展开并加载唯一场景；无包、旧 `project.bjseditor` 或结构不兼容时进入空白场景；进入编辑器后后台全量同步普通、环境和组合模型。已使用 `http://127.0.0.1:8086` 完成真实联调：19 位业务 ID 无损保留，10 个普通模型共 25 个文件同步成功，Shelf 双 TS 脚本不再被旧换行拼接字段重复下载。
 - 2026-07-21：按参考图片重做 YZJ 一体式移载机参数契约，新增精确长宽高、主体颜色、辊筒框架位置/长度、电机位置、腿 A/B、电机与辊轮皮控制；通过连通组件处理单体 GLB，保留旧场景、MQTT 与方向箭头兼容，并完成静态、浏览器视觉矩阵和真实 Electron Inspector 联动验证。
 
-- 2026-07-17：完成 Scene View 大场景无损容量与稳定性优化：普通无脚本/无参数静态模型按 `sourceUrl + assetRevision + instancingMode` 复用单份源 `AssetContainer`，100 个同源实体 smoke 仅加载 1 次源资源、每实体保持 18 个独立实例 Mesh；SceneRuntime 改为实体引用驱动的增量同步，选择变化不再重跑全部模型参数/脚本/子 Mesh 收集；模型和环境加载统一限制为最多 4 并发；关闭无功能依赖的 `preserveDrawingBuffer`，保留抗锯齿与 stencil，并增加 WebGL context lost/restored 和 render error/recovered 可见恢复。既有 Shelf smoke 保持 `loadCount=1`、低密度 88/128 Mesh、高密度 121608 thin instances 与单次源释放。
+- 2026-07-17：完成 Scene View 大场景无损容量与稳定性优化：普通无脚本/无参数静态模型按 `sourceUrl + assetRevision + instancingMode` 复用单份源 `AssetContainer`，100 个同源实体 smoke 仅加载 1 次源资源、每实体保持 18 个独立实例 Mesh；SceneRuntime 改为实体引用驱动的增量同步，选择变化不再重跑全部模型参数/脚本/子 Mesh 收集；模型和环境加载统一限制为最多 4 并发；关闭无功能依赖的 `preserveDrawingBuffer`，保留抗锯齿与 stencil，并增加 WebGL context lost/restored 和 render error/recovered 可见恢复。当前 Shelf 回归按目标场景真实参数验证 `20 层 × 100 列 × 双深`（`cellWidth=1.2`、`cellHeight=1.2`、`supportLegHeight=0.2`、`cellDepth=1.183`、`deepSlotGap=1.2`），统计为 `denseBatch=18`、`thinInstances=16674`、`visibleMesh=18`。
 - 2026-07-16：Stacker 参数化脚本新增 `appearanceColor`“模型外观颜色”参数，默认 `#ffffff` 保留原 PBR 贴图外观；每个实例按原材质懒克隆并复用专属材质，反复换色不累计材质、多个实例不串色，停止时恢复原材质并释放克隆。源包、`Assets/Models/Stacker`、可视夹具、演示场景和定向刷新后的资产索引已同步，`smoke:model-parameters` 覆盖颜色类型、默认/自定义/非法颜色、材质复用、停止恢复和共享原材质的双实例隔离。
 - 2026-07-16：Toolbar 新增“俯”视角按钮；点击后通过 Zustand 临时请求驱动 Babylon ArcRotateCamera 保留当前 target/radius 切换到稳定俯视，并清除旋转、平移和缩放惯性。该操作不修改场景文档、已保存视角或撤销历史，运行预览中仍可使用，便于结合底层 CAD/DXF 图纸搭建场景。
 - 2026-07-16：完成全部 12 个外部模型参数化脚本的米制适配：`多穿小车/辊道机/链条机/box/GD/HCTS/LED/RGV/Shelf/Stacker/WLTS/YZJ` 的长度字段与元数据统一使用 `m`；通用脚本改为在实体根米空间测量，过滤无顶点 glTF 占位 Mesh，根缩放后保持底部中心锚点，并区分模型基线与生成克隆的包围盒上下文。源包、`Assets/Models` 副本、Shelf/Stacker/YZJ 可视夹具和资产索引同步刷新；`smoke:model-parameters` 已接入 `smoke:units`。
@@ -605,7 +622,7 @@ npm run build
 - 动画、物理、粒子、Terrain：补充完整 3D 编辑器常见运行时与内容创作能力。
 - 插件系统：后续提供可扩展的编辑器插件机制。
 ## Shelf 多穿货架参数化修复记录
-- 2026-07-17：Shelf `layerCount` 与 `columnCount` 均支持 `1..100`。当层/列/双深组合会超过逐节点生成阈值时，参数脚本自动切换为高密度 `dense batch + thin instance` 渲染：每个可渲染源叶 Mesh 只创建一个批次 Mesh，重复货格通过一次性矩阵缓冲提交，场景节点保持批次级；低密度路径继续保留原 `cloneSingleNode` 行为。100 层 × 100 列 × 双深 smoke 统计为 `denseBatch=18`、`thinInstances=121608`、`mesh=36`，低密度 88/128 回归保持不变。视觉页 `output/playwright/shelf-visual-check.html?dense=1` 会自动取景并显示 effective layers/columns、mesh/node、thin instance 与 FPS 采样。
+- 2026-07-25：Shelf 按当前模型契约支持 `layerCount=1..20`、`columnCount=1..100`。当层/列/双深组合会超过逐节点生成阈值时，参数脚本自动切换为高密度 `dense batch + thin instance` 渲染：每个可渲染源叶 Mesh 只创建一个批次 Mesh，重复货格通过一次性矩阵缓冲提交，场景节点保持批次级；低密度路径继续保留原 `cloneSingleNode` 行为。目标场景的 20 层 × 100 列 × 双深参数（`cellWidth=1.2`、`cellHeight=1.2`、`supportLegHeight=0.2`、`cellDepth=1.183`、`deepSlotGap=1.2`）smoke 统计为 `denseBatch=18`、`thinInstances=16674`、`visibleMesh=18`，低密度当前回归为 142/196。视觉页 `output/playwright/shelf-visual-check.html?dense=1` 会自动取景并显示 effective layers/columns、mesh/node、thin instance 与 FPS 采样。
 - 2026-07-17：Shelf 普通场景实体与模型生成器输出改为共享源 `AssetContainer` + `InstancedMesh`：同一资源签名只加载一次 GLB，实体继续保留独立根节点、参数值、外置脚本、拾取 metadata、显隐/锁定和 Gizmo。参数脚本无需修改，其层/列/双深生成节点的子 Mesh 会继续保持实例化；实例选择改用单个共享 `SelectionOutlineLayer`，普通模型仍保留 `HighlightLayer`。动态修改 `layerCount`/`columnCount` 后，运行时会在 `clearSelection()` 与 `addSelection()` 之间按 source mesh 补齐公开 `instancedBuffers` 容器，避免 Babylon 重新注册 `instanceSelectionId` 时写入空实例缓冲。新增引用计数回收与 `npm run smoke:shelf-instancing` 定向验证，详细边界见 `docs/shelf-shared-instancing.md`。
 - 2026-07-10：精简 Shelf 参数元数据，移除 `aisleWidth`、`aisleHeight`、`shelfStyle` 这 3 个无模型语义参数；剩余 9 个参数均会产生可见模型效果。`postWidth` 继续按 0.08 兼容基准，仅调整立柱横截面；立柱底端保持锚定，列布局统一支撑容差，旧场景刷新时按新参数集兼容。GLB 未修改，Sandbox 仅用于结构校验。
 
@@ -668,8 +685,8 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 ### 安装与数据目录
 
 - 安装器允许用户选择安装目录，并创建桌面快捷方式和开始菜单快捷方式。若旧版使用“为所有用户安装”并位于 `C:\Program Files\ZENDING 3D EDITOR`，升级时应选择相同安装模式和目录，或先卸载旧版，避免保留两个同名快捷方式继续启动旧 EXE。
-- 最近项目与最近场景记录写入 Electron 的 `userData` 目录，不写入只读安装目录；数据中台服务地址单独保存在同目录的 `data-platform-config.json`。
-- 数据中台下载的工程场景与共享模型库：开发态写入应用根目录，安装态统一写入 `userData/data-platform-workspace`；安装、升级程序不会覆盖该工作区，也不会放宽安装目录 ACL。
+- 最近项目与最近场景记录写入 Electron 的 `userData` 目录，不写入只读安装目录；数据中台服务地址和可选自定义工作区保存在同目录的 `data-platform-config.json`，旧版仅含服务地址的 v1 配置会继续兼容读取。
+- 数据中台下载的工程场景与共享模型库：默认开发态写入应用根目录，默认安装态写入 `userData/data-platform-workspace`，也可从首页选择其他可写目录；安装、升级程序不会覆盖工作区，也不会放宽安装目录 ACL。切换工作区不会自动迁移或删除旧数据。
 - 模型库、环境模型库、场景 JSON、CAD 文件和模型脚本仍保存在用户选择的项目目录中；安装或升级程序不会删除项目数据。
 - 卸载默认保留 `userData`，包括最近项目记录、数据中台配置以及 `data-platform-workspace` 中的场景和共享模型，便于重新安装后继续使用。
 
