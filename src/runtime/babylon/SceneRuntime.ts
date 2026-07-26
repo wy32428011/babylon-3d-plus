@@ -556,8 +556,6 @@ export class SceneRuntime {
   private cargoHandoffBlockedSignature = '';
   private readonly reportedCargoHandoffIssues = new Set<string>();
   private sharedModelSelectionOutlineSignature = '';
-  private activeModelGeneratorEntityId: string | null = null;
-  private reportedModelGeneratorConflictSignature = '';
   private outlinedModelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
   private fullSyncCount = 0;
   private selectionSyncCount = 0;
@@ -2114,8 +2112,6 @@ export class SceneRuntime {
     this.cargoHandoffBlockedSignature = '';
     this.reportedCargoHandoffIssues.clear();
     this.sharedModelSelectionOutlineSignature = '';
-    this.activeModelGeneratorEntityId = null;
-    this.reportedModelGeneratorConflictSignature = '';
     this.outlinedModelArrayBatches.clear();
   }
 
