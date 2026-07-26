@@ -1,6 +1,7 @@
 import {
   AbstractMesh,
   BoundingInfo,
+  Constants,
   type InstancedMesh,
   type Material,
   Matrix,
@@ -10,6 +11,7 @@ import {
   Quaternion,
   RenderingGroup,
   StandardMaterial,
+  SubMesh,
   type Plane,
   type Scene,
   Vector3,
@@ -928,18 +930,28 @@ export class EntityArrayThinInstanceBatch {
     return visibleLayoutChanged;
   }
 
-  /** 禁用当前方向不再使用的批次，但保留缓冲以供后续 Transform 改变时复用。 */
+  /** 释放不再使用的空间/方向分片；每个源只保留一个空主载体供后续快速复用。 */
   private deactivateUnusedBatches(
     source: EntityArrayMatrixSource,
     activeBatches: ReadonlySet<EntityArrayMatrixBatch>,
   ): void {
-    for (const batch of source.batches) {
+    const retainedPrimary = source.batches[0] ?? null;
+    for (const batch of [...source.batches]) {
       if (activeBatches.has(batch)) continue;
-      batch.mesh.thinInstanceCount = 0;
-      batch.visibleSourceIndexCount = 0;
-      batch.entityInstanceRangeStarts = null;
-      batch.entityInstanceRangeCounts = null;
-      applyBatchInteractionState(batch, false, false);
+      if (batch === retainedPrimary) {
+        resetInactiveBatchBuffers(batch);
+        applyBatchInteractionState(batch, false, false);
+        continue;
+      }
+
+      this.batchByMeshUniqueId.delete(batch.mesh.uniqueId);
+      const sourceIndex = source.batches.indexOf(batch);
+      if (sourceIndex >= 0) source.batches.splice(sourceIndex, 1);
+      const batchIndex = this.batches.indexOf(batch);
+      if (batchIndex >= 0) this.batches.splice(batchIndex, 1);
+      const meshIndex = this.meshes.indexOf(batch.mesh);
+      if (meshIndex >= 0) this.meshes.splice(meshIndex, 1);
+      disposeBatches([batch]);
     }
   }
 
@@ -1158,6 +1170,12 @@ function mergeStaticCandidatesByMaterial(
   const materialSignatureCache = new Map<Material, string | null>();
 
   for (const candidate of candidates) {
+    // Babylon 新建的跨 Geometry 无索引载体即使补齐 drawArrays 标记，PBR 纹理/光照仍可能与原 Mesh 不一致。
+    // LineList/LineStrip 等拓扑也不能按三角形翻面；跨 Geometry 合并仅允许有索引三角形列表。
+    if (!isIndexedTriangleListMergeCandidate(candidate)) {
+      output.push(candidate);
+      continue;
+    }
     const key = createStaticMergeKey(candidate, materialSignatureCache);
     if (!key) {
       output.push(candidate);
@@ -1210,6 +1228,18 @@ function mergeStaticCandidatesByMaterial(
   }
 
   return output.sort((left, right) => left.meshIndex - right.meshIndex);
+}
+
+/** 跨 Geometry 顶点烘焙只接受有索引三角形列表，避免反射变换破坏线或 strip 拓扑。 */
+function isIndexedTriangleListMergeCandidate(candidate: EntityArrayMatrixCandidate): boolean {
+  const { sourceMesh, batchSource } = candidate;
+  const totalIndices = batchSource.getTotalIndices();
+  if (totalIndices <= 0 || totalIndices % 3 !== 0) return false;
+  const fillMode = batchSource.overrideRenderingFillMode
+    ?? sourceMesh.material?.fillMode
+    ?? Constants.MATERIAL_TriangleFillMode;
+  if (fillMode !== Constants.MATERIAL_TriangleFillMode) return false;
+  return batchSource.subMeshes.every((subMesh) => subMesh.indexCount % 3 === 0);
 }
 
 /** 返回只有视觉状态完全兼容时才相同的静态合并键。 */
@@ -1546,7 +1576,8 @@ function createMergedStaticCandidate(
     return {
       ...representative,
       meshIndex: Math.min(...candidates.map((candidate) => candidate.meshIndex)),
-      sourceMeshes: [representative.sourceMesh],
+      // Geometry 已经烘焙为一个载体，但仍保留全部源 Mesh 作为覆盖诊断，避免合并后无法确认部件完整性。
+      sourceMeshes: candidates.flatMap((candidate) => candidate.sourceMeshes),
       rootLocalVertexData: merged,
       rootLocalGeometryBaked: true,
       sourceRootWorldMatrix: sourceRootWorldMatrix.clone(),
@@ -1682,11 +1713,23 @@ function captureSourceWorldMatrices(mesh: AbstractMesh): Matrix[] {
   const meshWorldMatrix = mesh.getWorldMatrix().clone();
   if (!(mesh instanceof Mesh) || mesh.thinInstanceCount <= 0) return [meshWorldMatrix];
 
-  const thinInstanceMatrices = mesh.thinInstanceGetWorldMatrices();
-  if (thinInstanceMatrices.length < mesh.thinInstanceCount) return [];
-  return thinInstanceMatrices
-    .slice(0, mesh.thinInstanceCount)
-    .map((matrix) => matrix.multiply(meshWorldMatrix));
+  const thinInstanceMatrices = readCurrentThinInstanceMatrices(mesh);
+  if (!thinInstanceMatrices) return [];
+  return thinInstanceMatrices.map((matrix) => matrix.multiply(meshWorldMatrix));
+}
+
+/**
+ * Babylon 9.12 的 thinInstanceBufferUpdated('matrix') 不会清空 worldMatrices 缓存；
+ * 优先读取当前连续 matrixData，只有不可用时才回退公共缓存。
+ */
+function readCurrentThinInstanceMatrices(mesh: Mesh): Matrix[] | null {
+  const count = mesh.thinInstanceCount;
+  const matrixData = mesh._thinInstanceDataStorage?.matrixData;
+  if (matrixData && matrixData.length >= count * 16) {
+    return Array.from({ length: count }, (_, index) => Matrix.FromArray(matrixData, index * 16));
+  }
+  const cached = mesh.thinInstanceGetWorldMatrices();
+  return cached.length >= count ? cached.slice(0, count).map((matrix) => matrix.clone()) : null;
 }
 
 /** 捕获矩阵的 determinant 方向；退化矩阵继续按正方向提交，保持既有零缩放语义。 */
@@ -1739,6 +1782,7 @@ function createMatrixBatch(
     // 同一几何的多个辊筒/克隆批次会互相覆盖矩阵缓冲，最终全部叠到最后一个位置。
     batchMesh.makeGeometryUnique();
   }
+  ensureBatchMeshHasGlobalSubMesh(batchMesh);
   const batch: EntityArrayMatrixBatch = {
     mesh: batchMesh,
     sourceMesh: source.sourceMesh,
@@ -1763,6 +1807,16 @@ function createMatrixBatch(
   };
   prepareBatchMesh(batch, interactive, source.metadata);
   return batch;
+}
+
+/** 统一批次的 indexed/unindexed 与全局 SubMesh 语义；缺少 SubMesh 时 active mesh 不会产生绘制。 */
+function ensureBatchMeshHasGlobalSubMesh(mesh: Mesh): void {
+  const totalVertices = mesh.getTotalVertices();
+  if (totalVertices <= 0) return;
+  const totalIndices = mesh.getTotalIndices();
+  mesh.isUnIndexed = totalIndices === 0;
+  if (mesh.subMeshes.length > 0) return;
+  new SubMesh(0, 0, totalVertices, 0, totalIndices || totalVertices, mesh);
 }
 
 /** 把几何源克隆重置为世界批次，并隔离源节点的行为与动画绑定。 */
@@ -2133,6 +2187,26 @@ function isTransformedBoxInFrustum(
 
 function acquireFloatBuffer(current: Float32Array | null, length: number): Float32Array {
   return current?.length === length ? current : new Float32Array(length);
+}
+
+
+/** 清空闲置主载体的历史峰值矩阵/选择/包围盒缓冲，但保留唯一 Geometry 供后续重建。 */
+function resetInactiveBatchBuffers(batch: EntityArrayMatrixBatch): void {
+  batch.mesh.thinInstanceSetBuffer(INSTANCE_SELECTION_ID_BUFFER, null);
+  batch.mesh.thinInstanceSetBuffer('matrix', null);
+  batch.mesh.thinInstanceCount = 0;
+  batch.matrixBuffer = null;
+  batch.selectionBuffer = null;
+  batch.entityIndexBuffer = null;
+  batch.entityInstanceRangeStarts = null;
+  batch.entityInstanceRangeCounts = null;
+  batch.sourceMatrixBuffer = null;
+  batch.sourceEntityIndexBuffer = null;
+  batch.visibleSourceIndexBuffer = null;
+  batch.cullingScratchIndexBuffer = null;
+  batch.visibleSourceIndexCount = 0;
+  batch.fullBoundingInfo = null;
+  batch.lastFrustumContainment = -1;
 }
 
 /** 左乘固定 X 镜像只需反转矩阵第一行，避免为每个实例再执行一次完整 4x4 乘法。 */

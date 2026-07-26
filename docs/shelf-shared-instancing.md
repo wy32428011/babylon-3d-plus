@@ -90,7 +90,7 @@ container.instantiateModelsToScene(
 
 高密度路径只作用于单个 Shelf 实体内部的重复结构：
 
-- `layerCount`、`columnCount` 均支持 `1..100`，双深 `100x100x2` 不会静默截断。
+- `layerCount` 支持 `1..20`、`columnCount` 支持 `1..100`，双深 `20x100x2` 不会静默截断。
 - 每个源叶 Mesh 只执行一次几何提取/烘焙；格子循环只累积矩阵，最后一次性提交 `Float32Array`。
 - 批次 Mesh 开启 thin instance picking，并保留 `editorEntityId` 可回写 metadata。
 - 原始基准 leaf Mesh 只在当前实体内隐藏，重建或停止脚本时通过快照恢复，避免污染另一个同源 Shelf。
@@ -116,15 +116,15 @@ npm run smoke:shelf-instancing
 - 每个相关 `sourceMesh.instances` 都具备公开 `instancedBuffers` 容器。
 - 删除一个实例不释放共享源；删除最后一个实例时只释放一次。
 - 参数从 2 列更新到 3 列后，新增结构仍为实例。
-- `100x100` 双深 Shelf 不被 clamp，启用 dense batch，thin instance 数覆盖全部重复结构，场景 Mesh 数保持批次级。
+- `20x100` 双深 Shelf 遵守当前 20 层上限，启用 dense batch，thin instance 数覆盖全部重复结构，场景 Mesh 数保持批次级。
 - 高密度 Shelf 选择不会污染另一个同源低密度 Shelf；高密度参数更新后可重新生成批次。
 
-2026-07-17 的定向 smoke 结果：
+2026-07-25 的定向 smoke 结果：
 
 - 实际源加载次数：1
-- 每个 2 层、2 列、双深 Shelf 的有效实例 Mesh：88
-- 更新为 3 列后的有效实例 Mesh：128
-- 参数脚本生成根节点：70
-- 100 层 × 100 列 × 双深：dense batch 18，thin instance 121608，高密度可渲染 Mesh 36
+- 每个低密度 Shelf 的有效实例 Mesh：142
+- 更新列数后的有效实例 Mesh：196
+- 参数脚本生成根节点：124
+- 目标场景 20 层 × 100 列 × 双深（`cellWidth=1.2`、`cellHeight=1.2`、`supportLegHeight=0.2`、`cellDepth=1.183`、`deepSlotGap=1.2`）：dense batch 18，thin instance 16674，高密度可见 dense batch Mesh 18
 - 共享源释放次数：1
 - SceneRuntime 集成实例基础 Mesh：每个 Shelf 18 个，加载次数和最终源释放次数均为 1

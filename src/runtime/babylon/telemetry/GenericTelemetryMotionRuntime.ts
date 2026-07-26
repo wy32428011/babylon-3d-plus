@@ -31,6 +31,8 @@ type GenericTelemetryMotionRuntimeOptions = {
   telemetryStore?: DeviceTelemetryStore;
   diagnosticsStore?: TelemetryRuntimeDiagnosticsStore;
   pushLog?: (message: string) => void;
+  beforeModelMutation?: (entityId: string) => void;
+  afterModelMutation?: (entityId: string) => void;
 };
 
 type TelemetryTargetOptions = {
@@ -90,6 +92,8 @@ export class GenericTelemetryMotionRuntime {
   private readonly telemetryStore: DeviceTelemetryStore;
   private readonly diagnosticsStore: TelemetryRuntimeDiagnosticsStore;
   private readonly pushLog: (message: string) => void;
+  private readonly beforeModelMutation: (entityId: string) => void;
+  private readonly afterModelMutation: (entityId: string) => void;
   private previewActive = false;
 
   /** 创建通用运动引擎；默认读取全局 deviceTelemetryStore，测试可注入隔离 store。 */
@@ -97,6 +101,8 @@ export class GenericTelemetryMotionRuntime {
     this.telemetryStore = options.telemetryStore ?? deviceTelemetryStore;
     this.diagnosticsStore = options.diagnosticsStore ?? telemetryRuntimeDiagnosticsStore;
     this.pushLog = options.pushLog ?? (() => undefined);
+    this.beforeModelMutation = options.beforeModelMutation ?? (() => undefined);
+    this.afterModelMutation = options.afterModelMutation ?? (() => undefined);
   }
 
   /** 同步一个模型实例的通用遥测绑定；签名变化时重建通道运行态。 */
@@ -217,12 +223,17 @@ export class GenericTelemetryMotionRuntime {
         this.pauseContinuousAnimations(model, compiled);
         continue;
       }
-      for (const [channelName, channel] of Object.entries(compiled.channels)) {
-        if (model.disabledChannels.has(channelName)) continue;
-        if (snapshot.faulted && channel.target.kind !== 'animation') continue;
-        this.applyChannel(model, compiled, channelName, channel, snapshot, deltaSeconds, errors);
+      this.beforeModelMutation(model.entityId);
+      try {
+        for (const [channelName, channel] of Object.entries(compiled.channels)) {
+          if (model.disabledChannels.has(channelName)) continue;
+          if (snapshot.faulted && channel.target.kind !== 'animation') continue;
+          this.applyChannel(model, compiled, channelName, channel, snapshot, deltaSeconds, errors);
+        }
+        this.writeMetadata(model, { online: !snapshot.faulted, stale: false, faulted: snapshot.faulted, lastReceivedAt: snapshot.receivedAt, conflict: false, errors }, snapshot);
+      } finally {
+        this.afterModelMutation(model.entityId);
       }
-      this.writeMetadata(model, { online: !snapshot.faulted, stale: false, faulted: snapshot.faulted, lastReceivedAt: snapshot.receivedAt, conflict: false, errors }, snapshot);
     }
   }
 

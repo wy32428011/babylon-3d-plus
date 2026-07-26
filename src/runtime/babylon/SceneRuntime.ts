@@ -537,6 +537,20 @@ export type SceneRuntimePerformanceMetrics = {
 };
 
 /** 浏览器和 Node smoke 共用的高精度计时入口。 */
+/**
+ * Babylon 9.12 的 thinInstanceBufferUpdated('matrix') 不会清空 worldMatrices 缓存；
+ * 读取当前连续 matrixData，避免包围盒和阵列重建使用旧矩阵。
+ */
+function readCurrentThinInstanceMatrices(mesh: Mesh): Matrix[] | null {
+  const count = mesh.thinInstanceCount;
+  const matrixData = mesh._thinInstanceDataStorage?.matrixData;
+  if (matrixData && matrixData.length >= count * 16) {
+    return Array.from({ length: count }, (_, index) => Matrix.FromArray(matrixData, index * 16));
+  }
+  const cached = mesh.thinInstanceGetWorldMatrices();
+  return cached.length >= count ? cached.slice(0, count).map((matrix) => matrix.clone()) : null;
+}
+
 function readRuntimeTimestampMs(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now();
 }
@@ -604,7 +618,11 @@ export class SceneRuntime {
     this.modelHighlightLayer = new HighlightLayer('EditorModelHighlightLayer', scene);
     this.modelSelectionOutlineLayer = new SelectionOutlineLayer('EditorInstancedModelSelectionOutlineLayer', scene);
     this.modelSelectionOutlineLayer.outlineColor = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
-    this.genericTelemetryMotionRuntime = new GenericTelemetryMotionRuntime(scene, { pushLog: this.pushLog });
+    this.genericTelemetryMotionRuntime = new GenericTelemetryMotionRuntime(scene, {
+      pushLog: this.pushLog,
+      beforeModelMutation: (entityId) => this.prepareModelArrayRuntimeMutationByEntityId(entityId),
+      afterModelMutation: (entityId) => this.refreshModelArrayRuntimeRepresentationByEntityId(entityId),
+    });
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
   }
@@ -1198,10 +1216,23 @@ export class SceneRuntime {
     for (const mesh of sourceModel.meshes) {
       if (!isMeasurableModelMesh(mesh)) continue;
       mesh.computeWorldMatrix(true);
-      for (const worldCorner of mesh.getBoundingInfo().boundingBox.vectorsWorld) {
-        const sourceLocalCorner = Vector3.TransformCoordinates(worldCorner, inverseSourceRoot);
-        const targetWorldCorner = Vector3.TransformCoordinates(sourceLocalCorner, targetWorldMatrix);
-        if (this.isFiniteVector3(targetWorldCorner)) points.push(targetWorldCorner);
+      const meshWorldMatrix = mesh.getWorldMatrix().clone();
+      const hasThinInstances = mesh instanceof Mesh && mesh.thinInstanceCount > 0;
+      const thinInstanceMatrices = hasThinInstances ? readCurrentThinInstanceMatrices(mesh) : null;
+      if (hasThinInstances && !thinInstanceMatrices) return null;
+      const sourceWorldMatrices = hasThinInstances
+        ? thinInstanceMatrices!.map((matrix) => matrix.multiply(meshWorldMatrix))
+        : [meshWorldMatrix];
+
+      // 必须从 Geometry 原始局部包围盒出发；先使用 world AABB 再旋转会二次放大斜置部件，
+      // 导致负缩放或旋转阵列实例的聚焦/测量范围与真实批次不一致。
+      const boundingBox = (mesh.rawBoundingInfo ?? mesh.getBoundingInfo()).boundingBox;
+      for (const sourceWorldMatrix of sourceWorldMatrices) {
+        const finalWorldMatrix = sourceWorldMatrix.multiply(inverseSourceRoot).multiply(targetWorldMatrix);
+        for (const localCorner of boundingBox.vectors) {
+          const targetWorldCorner = Vector3.TransformCoordinates(localCorner, finalWorldMatrix);
+          if (this.isFiniteVector3(targetWorldCorner)) points.push(targetWorldCorner);
+        }
       }
     }
     return points.length > 0 ? points : null;
@@ -2166,7 +2197,8 @@ export class SceneRuntime {
       current.stackerCapable = this.isStackerModelAsset(modelAsset);
       current.conveyorCapable = this.isConveyorModelAsset(modelAsset);
       current.stackerTelemetry.rootBasePosition = current.root.position.clone();
-      this.applyModelUnitScale(current.contentRoot, modelAsset.unitScaleToMeters);
+      // contentRoot 既承载源单位换算，也允许参数脚本在其上叠加尺寸缩放；同一资产同步时不得覆盖脚本输出。
+      // lengthUnit / unitScaleToMeters 已进入 assetSignature，单位契约变化会走完整重载。
       this.applyModelParameters(entity, current);
       this.syncExternalModelScripts(entity, current);
       this.applyModelSelection(current, selected);
@@ -2690,8 +2722,12 @@ export class SceneRuntime {
     model: ModelRuntimeEntry,
     mode: ExternalModelScriptRuntimeMode,
     telemetry: ExternalModelScriptTelemetrySnapshot | null,
-  ): void {
+    deferArrayRefresh = false,
+  ): boolean {
+    const preparedArrayHost = this.prepareModelArrayRuntimeMutation(model);
     model.externalScriptRuntime?.updateRuntimeContext({ mode, telemetry });
+    if (preparedArrayHost && !deferArrayRefresh) this.refreshModelArrayRuntimeRepresentation(model);
+    return preparedArrayHost;
   }
 
   /** 从设备遥测快照提取外置脚本可消费的最小上下文，避免泄漏可变 store 对象。 */
@@ -2738,13 +2774,14 @@ export class SceneRuntime {
 
     for (const candidate of candidates) {
       const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
-      this.updateModelExternalScriptRuntimeContext(
+      const preparedArrayHost = this.updateModelExternalScriptRuntimeContext(
         candidate.model,
         'runtime',
         snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
+        true,
       );
-      if (!snapshot) continue;
-      this.applyStackerTelemetryToModel(candidate.model, snapshot as StackerTelemetrySnapshot, deltaSeconds);
+      if (snapshot) this.applyStackerTelemetryToModel(candidate.model, snapshot as StackerTelemetrySnapshot, deltaSeconds);
+      if (preparedArrayHost) this.refreshModelArrayRuntimeRepresentation(candidate.model);
     }
   }
 
@@ -2757,13 +2794,14 @@ export class SceneRuntime {
 
     for (const candidate of candidates) {
       const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
-      this.updateModelExternalScriptRuntimeContext(
+      const preparedArrayHost = this.updateModelExternalScriptRuntimeContext(
         candidate.model,
         'runtime',
         snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
+        true,
       );
-      if (!snapshot) continue;
-      this.applyConveyorTelemetryToModel(candidate.model, snapshot, deltaSeconds);
+      if (snapshot) this.applyConveyorTelemetryToModel(candidate.model, snapshot, deltaSeconds);
+      if (preparedArrayHost) this.refreshModelArrayRuntimeRepresentation(candidate.model);
     }
   }
 
@@ -2772,17 +2810,20 @@ export class SceneRuntime {
     deviceType: SpecializedTelemetryDeviceType,
   ): SpecializedTelemetryRuntimeEntry[] {
     const candidates: SpecializedTelemetryRuntimeEntry[] = [];
-    for (const [entityId, model] of this.models.entries()) {
-      if (!model.assetHandle || !model.stackerTelemetryReady) continue;
-      if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) continue;
-
+    const appendCandidate = (entityId: string, model: ModelRuntimeEntry): void => {
+      if (!model.assetHandle || !model.stackerTelemetryReady) return;
+      if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) return;
       const binding = resolveSpecializedTelemetryBinding({
         modelAssetCode: model.assetCode,
         deviceType,
         binding: model.telemetryBinding,
       });
-      if (!binding) continue;
-      candidates.push({ entityId, model, binding });
+      if (binding) candidates.push({ entityId, model, binding });
+    };
+
+    for (const [entityId, model] of this.models.entries()) appendCandidate(entityId, model);
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      appendCandidate(variant.representativeEntityId, variant.model);
     }
     return candidates;
   }
@@ -5604,6 +5645,8 @@ export class SceneRuntime {
     model.cancelLoad?.();
     model.cancelLoad = null;
     this.applyModelSelection(model, false);
+    this.restoreModelArrayHostMeshes(model);
+    model.root.setEnabled(true);
     model.externalScriptRuntime?.dispose();
     for (const texture of model.textureCache.values()) {
       texture.dispose();
@@ -5876,14 +5919,16 @@ export class SceneRuntime {
 
   /** 将显隐和锁定状态应用到导入模型的根节点与子 Mesh。 */
   private applyModelInteractivity(model: ModelRuntimeEntry, entityId: string): void {
-    if (model.modelArrayBatch) {
+    const keepScriptHostActive = model.externalScriptStarting
+      && (Boolean(model.modelArrayBatch) || model.modelArraySuspendedMeshes.size > 0);
+    if (model.modelArrayBatch && !keepScriptHostActive) {
       this.suspendModelArrayHost(model);
       return;
     }
 
     this.restoreModelArrayHostMeshes(model);
-    const visible = this.isEntityVisible(entityId);
-    const pickable = visible && this.isEntityScenePickable(entityId);
+    const visible = keepScriptHostActive || this.isEntityVisible(entityId);
+    const pickable = !keepScriptHostActive && visible && this.isEntityScenePickable(entityId);
     model.root.setEnabled(visible);
     for (const mesh of model.meshes) {
       mesh.isPickable = pickable;
@@ -6313,12 +6358,15 @@ export class SceneRuntime {
       return;
     }
 
-    const sourceRenderSignature = this.createModelArrayRenderSignature(modelAsset);
+    const sourceRenderSignature = this.createModelArrayRenderSignature(
+      modelAsset,
+      entity.components.telemetryBinding,
+    );
     const groups = new Map<string, Entity[]>();
     for (const instanceEntity of instanceEntities) {
       const instanceModelAsset = instanceEntity.components.modelAsset;
       const renderSignature = instanceModelAsset
-        ? this.createModelArrayRenderSignature(instanceModelAsset)
+        ? this.createModelArrayRenderSignature(instanceModelAsset, instanceEntity.components.telemetryBinding)
         : sourceRenderSignature;
       const group = groups.get(renderSignature) ?? [];
       group.push(instanceEntity);
@@ -6353,7 +6401,16 @@ export class SceneRuntime {
   }
 
   /** 资产编号只代表逻辑设备身份；其它会影响参数脚本输出的字段共同决定共享分组。 */
-  private createModelArrayRenderSignature(modelAsset: ModelAssetComponent): string {
+  private createModelArrayRenderSignature(
+    modelAsset: ModelAssetComponent,
+    telemetryBinding: TelemetryBindingComponent | null | undefined = null,
+  ): string {
+    const telemetryIdentity = telemetryBinding && telemetryBinding.enabled !== false
+      ? {
+          assetCode: modelAsset.assetCode,
+          binding: this.createModelArrayJsonSignature(telemetryBinding),
+        }
+      : null;
     return JSON.stringify({
       sourcePath: modelAsset.sourcePath,
       sourceUrl: modelAsset.sourceUrl,
@@ -6371,6 +6428,7 @@ export class SceneRuntime {
       parameterConfig: this.createModelArrayJsonSignature(modelAsset.parameterConfig),
       parameterValues: this.createModelArrayTransientJsonSignature(modelAsset.parameterValues),
       dataDrivenConfig: this.createModelArrayJsonSignature(modelAsset.dataDrivenConfig),
+      telemetryIdentity,
     });
   }
 
@@ -6481,17 +6539,21 @@ export class SceneRuntime {
       return variant;
     }
 
+    if (variant.representativeEntityId !== representative.id) {
+      this.genericTelemetryMotionRuntime.disposeModel(variant.representativeEntityId);
+    }
     variant.representativeEntityId = representative.id;
     variant.entities = entities;
     const model = variant.model;
     model.entitySnapshot = representative;
     model.assetCode = modelAsset.assetCode;
+    model.telemetryBinding = representative.components.telemetryBinding ?? null;
     model.assetRevision = modelAsset.assetRevision ?? null;
     model.assetSignature = assetSignature;
     model.stackerCapable = this.isStackerModelAsset(modelAsset);
     model.conveyorCapable = this.isConveyorModelAsset(modelAsset);
     this.applyTransform(model.root, representative.components.transform);
-    this.applyModelUnitScale(model.contentRoot, modelAsset.unitScaleToMeters);
+    // 参数变体宿主的单位缩放只在创建时设置；重复同步保留脚本叠加在 contentRoot 上的参数缩放。
     if (!model.assetHandle) return variant;
 
     this.restoreModelArrayParameterVariantHost(variant);
@@ -6523,7 +6585,7 @@ export class SceneRuntime {
       assetSignature,
       entitySnapshot: representative,
       assetCode: modelAsset.assetCode,
-      telemetryBinding: null,
+      telemetryBinding: representative.components.telemetryBinding ?? null,
       stackerCapable: this.isStackerModelAsset(modelAsset),
       conveyorCapable: this.isConveyorModelAsset(modelAsset),
       root,
@@ -6627,6 +6689,7 @@ export class SceneRuntime {
           resolveLayerMask: (mesh) => activeVariant.sourceLayerMasks.get(mesh.uniqueId) ?? mesh.layerMask,
         });
       }
+      this.syncGenericTelemetryMotion(representative, current);
       for (const instanceEntity of activeVariant.entities) this.onModelMeasurementChanged(instanceEntity.id);
       this.rebuildSharedModelSelectionOutline();
     });
@@ -6654,6 +6717,98 @@ export class SceneRuntime {
       const layerMask = variant.sourceLayerMasks.get(mesh.uniqueId);
       if (layerMask !== undefined) mesh.layerMask = layerMask;
     }
+  }
+
+  /** 根据遥测注册实体 ID 找到普通模型或参数变体宿主。 */
+  private resolveTelemetryRuntimeModel(entityId: string): ModelRuntimeEntry | null {
+    const sourceModel = this.models.get(entityId);
+    if (sourceModel) return sourceModel;
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      if (variant.representativeEntityId === entityId) return variant.model;
+    }
+    return null;
+  }
+
+  /** 通用遥测写节点前恢复阵列脚本宿主，兼容依赖 scene.meshes 的旧脚本和动画。 */
+  private prepareModelArrayRuntimeMutationByEntityId(entityId: string): void {
+    const model = this.resolveTelemetryRuntimeModel(entityId);
+    if (model) this.prepareModelArrayRuntimeMutation(model);
+  }
+
+  /** 通用遥测写节点后把最新脚本/节点矩阵重新提交到对应阵列批次。 */
+  private refreshModelArrayRuntimeRepresentationByEntityId(entityId: string): void {
+    const model = this.resolveTelemetryRuntimeModel(entityId);
+    if (model) this.refreshModelArrayRuntimeRepresentation(model);
+  }
+
+  /** 在运行态脚本或遥测修改前恢复当前阵列宿主；返回是否需要在修改后重提批次。 */
+  private prepareModelArrayRuntimeMutation(model: ModelRuntimeEntry): boolean {
+    if (!model.modelArrayBatch && model.modelArraySuspendedMeshes.size === 0) return false;
+    const variant = [...this.modelArrayParameterVariants.values()].find((item) => item.model === model);
+    if (variant) this.restoreModelArrayParameterVariantHost(variant);
+    this.restoreModelArrayHostMeshes(model);
+    model.root.setEnabled(true);
+    return true;
+  }
+
+  /**
+   * 运行态脚本/遥测可能改变 Transform、显隐、材质或增删 Mesh；重新收集宿主并更新当前参数组，
+   * Geometry/网格集合未变时仅改写矩阵和材质，不重复创建批次。
+   */
+  private refreshModelArrayRuntimeRepresentation(model: ModelRuntimeEntry): void {
+    if (!model.modelArrayBatch && model.modelArraySuspendedMeshes.size === 0) return;
+    const variant = [...this.modelArrayParameterVariants.values()].find((item) => item.model === model);
+    if (variant) {
+      const activeVariant = this.modelArrayParameterVariants.get(variant.key);
+      if (!activeVariant || activeVariant.model !== model) return;
+      const representative = activeVariant.entities.find((entity) => entity.id === activeVariant.representativeEntityId)
+        ?? activeVariant.entities[0];
+      if (!representative) return;
+      this.refreshModelMeshes(model, {
+        modelArrayParameterVariant: true,
+        modelArraySourceEntityId: activeVariant.sourceEntityId,
+      });
+      this.hideModelArrayParameterVariantHost(activeVariant);
+      this.syncModelArrayBatchForEntities(representative, model, activeVariant.entities, [], {
+        sourceEntityId: activeVariant.sourceEntityId,
+        namePrefix: '__modelArrayParameterVariantThinInstance',
+        variantKey: activeVariant.key,
+        renderSignature: activeVariant.renderSignature,
+        resolveLayerMask: (mesh) => activeVariant.sourceLayerMasks.get(mesh.uniqueId) ?? mesh.layerMask,
+      });
+      for (const entity of activeVariant.entities) this.onModelMeasurementChanged(entity.id);
+      return;
+    }
+
+    const entity = model.entitySnapshot;
+    const modelAsset = entity?.components.modelAsset;
+    if (!entity || !modelAsset || entity.components.modelArrayInstance) return;
+    this.refreshModelEntityMeshes(entity, model);
+    const sourceRenderSignature = this.createModelArrayRenderSignature(
+      modelAsset,
+      entity.components.telemetryBinding,
+    );
+    const baseInstances = [...this.modelArrayInstanceEntities.values()].filter((instanceEntity) => {
+      if (instanceEntity.components.modelArrayInstance?.sourceEntityId !== entity.id) return false;
+      const instanceAsset = instanceEntity.components.modelAsset;
+      return !instanceAsset || this.createModelArrayRenderSignature(
+        instanceAsset,
+        instanceEntity.components.telemetryBinding,
+      ) === sourceRenderSignature;
+    });
+    this.syncModelArrayBatchForEntities(
+      entity,
+      model,
+      [entity, ...baseInstances],
+      entity.components.modelArray?.items ?? [],
+      {
+        sourceEntityId: entity.id,
+        namePrefix: '__modelArrayThinInstance',
+        renderSignature: sourceRenderSignature,
+      },
+    );
+    this.onModelMeasurementChanged(entity.id);
+    for (const instanceEntity of baseInstances) this.onModelMeasurementChanged(instanceEntity.id);
   }
 
   /** 基础源和参数变体共用的矩阵批次提交路径。 */
@@ -6795,8 +6950,12 @@ export class SceneRuntime {
     }
 
     const model = variant.model;
+    this.genericTelemetryMotionRuntime.disposeModel(variant.representativeEntityId);
     model.cancelLoad?.();
     model.cancelLoad = null;
+    this.restoreModelArrayParameterVariantHost(variant);
+    this.restoreModelArrayHostMeshes(model);
+    model.root.setEnabled(true);
     model.externalScriptRuntime?.dispose();
     model.externalScriptRuntime = null;
     for (const texture of model.textureCache.values()) texture.dispose();
@@ -6847,6 +7006,11 @@ export class SceneRuntime {
     onSettled: (current: ModelRuntimeEntry) => void,
   ): void {
     if (!model.assetHandle) return;
+    // 阵列会把脚本宿主 Mesh 移出 scene.meshes；生命周期执行前临时恢复，兼容按场景列表查找部件的模型包。
+    // 异步 start 完成前保持根节点启用，避免旧脚本把 enabled=false 捕获为参数基线。
+    const hadArrayHost = Boolean(model.modelArrayBatch) || model.modelArraySuspendedMeshes.size > 0;
+    this.restoreModelArrayHostMeshes(model);
+    if (hadArrayHost) model.root.setEnabled(true);
     this.syncModelScriptMetadata(model.contentRoot, modelAsset);
 
     const scriptAssets = modelAsset.scriptAssets ?? [];
@@ -7343,6 +7507,8 @@ export class SceneRuntime {
     return JSON.stringify({
       sourceUrl: modelAsset.sourceUrl,
       assetRevision: modelAsset.assetRevision ?? null,
+      lengthUnit: modelAsset.lengthUnit,
+      unitScaleToMeters: modelAsset.unitScaleToMeters,
       instancingMode: resolveModelAssetSharedInstancingPolicy(modelAsset).mode,
     });
   }

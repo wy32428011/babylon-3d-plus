@@ -1182,9 +1182,8 @@ export class ParametricModelRuntimeComponent {
 	 * 获取当前模型根节点及其子树内的节点。
 	 */
 	private getModelNodes(): any[] {
-		const scene = this.node.getScene?.();
-		const nodes = [this.node, ...(scene?.transformNodes ?? []), ...(scene?.meshes ?? [])];
-		return [...new Set(nodes.filter((candidate) => candidate === this.node || candidate.isDescendantOf?.(this.node)))];
+		const descendants = this.node.getDescendants?.(false) ?? [];
+		return [...new Set([this.node, ...descendants])];
 	}
 
 	/**

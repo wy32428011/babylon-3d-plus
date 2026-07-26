@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>模型阵列可视化验收</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #091019; color: #e7edf5; font-family: "Microsoft YaHei", sans-serif; }
+    #renderCanvas { width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
+    #status { position: fixed; left: -10000px; top: -10000px; }
+    #contactSheet { display: none; min-height: 100%; box-sizing: border-box; padding: 28px; background: #101722; }
+    #contactSheet.active { display: block; }
+    .sheet-title { margin: 0 0 20px; font-size: 28px; }
+    .sheet-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+    .sheet-card { background: #172231; border: 1px solid #31425a; border-radius: 10px; padding: 12px; break-inside: avoid; }
+    .sheet-card h2 { margin: 0 0 8px; font-size: 17px; }
+    .sheet-images { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .sheet-images img { width: 100%; aspect-ratio: 3 / 2; object-fit: cover; background: #091019; border-radius: 5px; }
+    .sheet-status { margin-top: 9px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; font-size: 10px; }
+    .sheet-status span { padding: 4px 2px; border-radius: 4px; text-align: center; background: #26364a; }
+    .sheet-status .pass { background: #165c3c; }
+    .sheet-status .fail { background: #7b2631; }
+    .sheet-error { margin-top: 8px; color: #ffb2ba; font-size: 11px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas"></canvas>
+  <pre id="status">loading</pre>
+  <main id="contactSheet"></main>
+  <script type="module" src="./model-array-visual-harness.ts"></script>
+</body>
+</html>

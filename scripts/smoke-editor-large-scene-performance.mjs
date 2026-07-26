@@ -585,15 +585,18 @@ function verifyOriginalGeometryAtAllDistances(EntityArrayThinInstanceBatch) {
   }
 }
 
-/** 验证同材质静态 Geometry 合并不丢顶点/法线，透明材质继续保留独立批次。 */
+/** 验证有索引静态 Geometry 可按材质安全合并，无索引 Geometry 保持独立且具备完整绘制语义。 */
 function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
   const engine = new NullEngine({ renderWidth: 64, renderHeight: 64 });
   const scene = new Scene(engine);
+  const camera = new FreeCamera('static-merge-camera', new Vector3(0, 3, -30), scene);
+  camera.setTarget(new Vector3(9, 2, -4));
+  scene.activeCamera = camera;
   const root = new TransformNode('static-merge-root', scene);
   root.position.set(3, 2, -4);
   root.rotation.set(0.2, -0.35, 0.1);
 
-  function createTriangle(name, x, material, mirrored = false) {
+  function createTriangle(name, x, material, { mirrored = false, indexed = true } = {}) {
     const mesh = new Mesh(name, scene);
     const vertexData = new VertexData();
     vertexData.positions = [0, 0, 0, 1, 0, 0, 0, 1, 0];
@@ -604,6 +607,7 @@ function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
       Math.SQRT1_2, Math.SQRT1_2, 0, 1,
     ];
     vertexData.uvs = [0, 0, 1, 0, 0, 1];
+    if (indexed) vertexData.indices = [0, 1, 2];
     vertexData.applyToMesh(mesh, false);
     mesh.parent = root;
     mesh.position.x = x;
@@ -624,13 +628,16 @@ function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
   const transparentB = transparentA.clone('transparent_chain_1');
   const sourceMeshes = [
     createTriangle('opaque-a', 0, opaqueA),
-    createTriangle('opaque-b', 2, opaqueB, true),
+    createTriangle('opaque-b', 2, opaqueB, { mirrored: true }),
     createTriangle('opaque-distinct', 4, distinctOpaque),
     createTriangle('transparent-a', 6, transparentA),
     createTriangle('transparent-b', 8, transparentB),
+    createTriangle('unindexed-a', 10, opaqueA, { indexed: false }),
+    createTriangle('unindexed-b', 12, opaqueB, { indexed: false }),
   ];
   root.computeWorldMatrix(true);
   const sourceVertexCount = sourceMeshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0);
+  const sourceIndexCount = sourceMeshes.reduce((total, mesh) => total + mesh.getTotalIndices(), 0);
   const batch = EntityArrayThinInstanceBatch.create('static-merge-source', sourceMeshes, {
     interactive: true,
     mergeStaticMeshesByMaterial: true,
@@ -639,14 +646,25 @@ function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
   assert.ok(batch, '静态材质合并批次必须创建成功');
 
   try {
-    assert.equal(batch.meshes.length, 4, '两个等价不透明材质应合并，视觉属性不同和透明 Mesh 必须保持独立');
+    assert.equal(batch.meshes.length, 6, '两个等价有索引不透明材质应合并，视觉属性不同、透明和无索引 Mesh 必须保持独立');
     assert.equal(
       batch.meshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0),
       sourceVertexCount,
       '材质合并不得减少任何顶点',
     );
-    const mergedOpaque = batch.meshes.find((mesh) => mesh.material?.alpha === 1 && mesh.getTotalVertices() === 6);
-    assert.ok(mergedOpaque, '必须生成包含两个无索引三角形的单一不透明载体');
+    assert.equal(
+      batch.meshes.reduce((total, mesh) => total + mesh.getTotalIndices(), 0),
+      sourceIndexCount,
+      '材质合并不得减少任何索引',
+    );
+    const mergedOpaque = batch.meshes.find((mesh) => (
+      mesh.material?.alpha === 1
+      && mesh.getTotalVertices() === 6
+      && mesh.getTotalIndices() === 6
+    ));
+    assert.ok(mergedOpaque, '必须生成包含两个有索引三角形的单一不透明载体');
+    assert.equal(mergedOpaque.isUnIndexed, false, '有索引合并载体不得误标记为无索引绘制');
+    assert.equal(mergedOpaque.subMeshes.length, 1, '有索引合并载体必须具备全局 SubMesh');
     const normals = mergedOpaque.getVerticesData('normal');
     assert.ok(normals && normals.length === 18, '合并载体必须保留全部法线');
     for (let offset = 0; offset < normals.length; offset += 3) {
@@ -663,6 +681,18 @@ function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
     assert.ok(
       tangentRows.some(([x, y, , w]) => Math.abs(x + 0.8) <= 1e-5 && Math.abs(y - 0.6) <= 1e-5 && w === -1),
       '镜像缩放必须同时变换切线方向并翻转 handedness',
+    );
+
+    const unindexedMeshes = batch.meshes.filter((mesh) => mesh.getTotalIndices() === 0);
+    assert.equal(unindexedMeshes.length, 2, '不同 Geometry 的无索引网格不得跨 Geometry 合并');
+    assert.ok(
+      unindexedMeshes.every((mesh) => (
+        mesh.isUnIndexed === true
+        && mesh.subMeshes.length === 1
+        && mesh.subMeshes[0].verticesStart === 0
+        && mesh.subMeshes[0].verticesCount === mesh.getTotalVertices()
+      )),
+      '无索引批次必须保留 isUnIndexed 和覆盖全部顶点的 SubMesh',
     );
 
     const instances = [
@@ -689,12 +719,17 @@ function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
     assert.ok(batch.meshes.every((mesh) => mesh.thinInstanceCount === 2), '每个合并载体必须只提交两个逻辑实体矩阵');
     assert.equal(batch.getEntityIdForThinInstance(mergedOpaque, 0), 'static-merge-source');
     assert.equal(batch.getEntityIdForThinInstance(mergedOpaque, 1), 'static-merge-copy');
+    assert.doesNotThrow(() => scene.render(), '有索引合并与无索引独立批次必须能够共同渲染');
 
     return {
       sourceMeshCount: sourceMeshes.length,
       batchMeshCount: batch.meshes.length,
       sourceVertexCount,
       batchVertexCount: batch.meshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0),
+      sourceIndexCount,
+      batchIndexCount: batch.meshes.reduce((total, mesh) => total + mesh.getTotalIndices(), 0),
+      mergedIndexedOpaqueMeshes: 2,
+      preservedUnindexedMeshes: unindexedMeshes.length,
       visuallyDistinctOpaqueFallbackMeshes: 1,
       transparentFallbackMeshes: 2,
     };

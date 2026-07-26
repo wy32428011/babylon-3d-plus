@@ -383,6 +383,18 @@ npm run smoke:scene-capacity
 npm run smoke:shelf-instancing
 ```
 
+执行全部 16 个模型包的直接展示、参数修改、阵列、阵列后调参和恢复结构验收：
+
+```bash
+npm run smoke:model-array-packages
+```
+
+执行同一批 16 个模型的真实 WebGL 截图与像素对比，并生成逐包 JSON 和联系表：
+
+```bash
+npm run smoke:model-array-visual
+```
+
 执行完整构建检查：
 
 ```bash
@@ -499,7 +511,7 @@ npm run build
 - 2026-07-22：首页启动台新增数据中台地址配置弹窗，配置持久化到 Electron `userData/data-platform-config.json`；左侧“最近项目”由主进程通过 `POST /api/v1/projects/query` 拉取、校验并按更新时间展示业务项目，支持 `projectName` 搜索，并新增可信项目 ID 打开流程。当前格式工程包会安全下载、展开并加载唯一场景；无包、旧 `project.bjseditor` 或结构不兼容时进入空白场景；进入编辑器后后台全量同步普通、环境和组合模型。已使用 `http://127.0.0.1:8086` 完成真实联调：19 位业务 ID 无损保留，10 个普通模型共 25 个文件同步成功，Shelf 双 TS 脚本不再被旧换行拼接字段重复下载。
 - 2026-07-21：按参考图片重做 YZJ 一体式移载机参数契约，新增精确长宽高、主体颜色、辊筒框架位置/长度、电机位置、腿 A/B、电机与辊轮皮控制；通过连通组件处理单体 GLB，保留旧场景、MQTT 与方向箭头兼容，并完成静态、浏览器视觉矩阵和真实 Electron Inspector 联动验证。
 
-- 2026-07-17：完成 Scene View 大场景无损容量与稳定性优化：普通无脚本/无参数静态模型按 `sourceUrl + assetRevision + instancingMode` 复用单份源 `AssetContainer`，100 个同源实体 smoke 仅加载 1 次源资源、每实体保持 18 个独立实例 Mesh；SceneRuntime 改为实体引用驱动的增量同步，选择变化不再重跑全部模型参数/脚本/子 Mesh 收集；模型和环境加载统一限制为最多 4 并发；关闭无功能依赖的 `preserveDrawingBuffer`，保留抗锯齿与 stencil，并增加 WebGL context lost/restored 和 render error/recovered 可见恢复。既有 Shelf smoke 保持 `loadCount=1`、低密度 88/128 Mesh、高密度 121608 thin instances 与单次源释放。
+- 2026-07-17：完成 Scene View 大场景无损容量与稳定性优化：普通无脚本/无参数静态模型按 `sourceUrl + assetRevision + instancingMode` 复用单份源 `AssetContainer`，100 个同源实体 smoke 仅加载 1 次源资源、每实体保持 18 个独立实例 Mesh；SceneRuntime 改为实体引用驱动的增量同步，选择变化不再重跑全部模型参数/脚本/子 Mesh 收集；模型和环境加载统一限制为最多 4 并发；关闭无功能依赖的 `preserveDrawingBuffer`，保留抗锯齿与 stencil，并增加 WebGL context lost/restored 和 render error/recovered 可见恢复。当前 Shelf 回归按目标场景真实参数验证 `20 层 × 100 列 × 双深`（`cellWidth=1.2`、`cellHeight=1.2`、`supportLegHeight=0.2`、`cellDepth=1.183`、`deepSlotGap=1.2`），统计为 `denseBatch=18`、`thinInstances=16674`、`visibleMesh=18`。
 - 2026-07-16：Stacker 参数化脚本新增 `appearanceColor`“模型外观颜色”参数，默认 `#ffffff` 保留原 PBR 贴图外观；每个实例按原材质懒克隆并复用专属材质，反复换色不累计材质、多个实例不串色，停止时恢复原材质并释放克隆。源包、`Assets/Models/Stacker`、可视夹具、演示场景和定向刷新后的资产索引已同步，`smoke:model-parameters` 覆盖颜色类型、默认/自定义/非法颜色、材质复用、停止恢复和共享原材质的双实例隔离。
 - 2026-07-16：Toolbar 新增“俯”视角按钮；点击后通过 Zustand 临时请求驱动 Babylon ArcRotateCamera 保留当前 target/radius 切换到稳定俯视，并清除旋转、平移和缩放惯性。该操作不修改场景文档、已保存视角或撤销历史，运行预览中仍可使用，便于结合底层 CAD/DXF 图纸搭建场景。
 - 2026-07-16：完成全部 12 个外部模型参数化脚本的米制适配：`多穿小车/辊道机/链条机/box/GD/HCTS/LED/RGV/Shelf/Stacker/WLTS/YZJ` 的长度字段与元数据统一使用 `m`；通用脚本改为在实体根米空间测量，过滤无顶点 glTF 占位 Mesh，根缩放后保持底部中心锚点，并区分模型基线与生成克隆的包围盒上下文。源包、`Assets/Models` 副本、Shelf/Stacker/YZJ 可视夹具和资产索引同步刷新；`smoke:model-parameters` 已接入 `smoke:units`。
@@ -608,7 +620,7 @@ npm run build
 - 动画、物理、粒子、Terrain：补充完整 3D 编辑器常见运行时与内容创作能力。
 - 插件系统：后续提供可扩展的编辑器插件机制。
 ## Shelf 多穿货架参数化修复记录
-- 2026-07-17：Shelf `layerCount` 与 `columnCount` 均支持 `1..100`。当层/列/双深组合会超过逐节点生成阈值时，参数脚本自动切换为高密度 `dense batch + thin instance` 渲染：每个可渲染源叶 Mesh 只创建一个批次 Mesh，重复货格通过一次性矩阵缓冲提交，场景节点保持批次级；低密度路径继续保留原 `cloneSingleNode` 行为。100 层 × 100 列 × 双深 smoke 统计为 `denseBatch=18`、`thinInstances=121608`、`mesh=36`，低密度 88/128 回归保持不变。视觉页 `output/playwright/shelf-visual-check.html?dense=1` 会自动取景并显示 effective layers/columns、mesh/node、thin instance 与 FPS 采样。
+- 2026-07-25：Shelf 按当前模型契约支持 `layerCount=1..20`、`columnCount=1..100`。当层/列/双深组合会超过逐节点生成阈值时，参数脚本自动切换为高密度 `dense batch + thin instance` 渲染：每个可渲染源叶 Mesh 只创建一个批次 Mesh，重复货格通过一次性矩阵缓冲提交，场景节点保持批次级；低密度路径继续保留原 `cloneSingleNode` 行为。目标场景的 20 层 × 100 列 × 双深参数（`cellWidth=1.2`、`cellHeight=1.2`、`supportLegHeight=0.2`、`cellDepth=1.183`、`deepSlotGap=1.2`）smoke 统计为 `denseBatch=18`、`thinInstances=16674`、`visibleMesh=18`，低密度当前回归为 142/196。视觉页 `output/playwright/shelf-visual-check.html?dense=1` 会自动取景并显示 effective layers/columns、mesh/node、thin instance 与 FPS 采样。
 - 2026-07-17：Shelf 普通场景实体与模型生成器输出改为共享源 `AssetContainer` + `InstancedMesh`：同一资源签名只加载一次 GLB，实体继续保留独立根节点、参数值、外置脚本、拾取 metadata、显隐/锁定和 Gizmo。参数脚本无需修改，其层/列/双深生成节点的子 Mesh 会继续保持实例化；实例选择改用单个共享 `SelectionOutlineLayer`，普通模型仍保留 `HighlightLayer`。动态修改 `layerCount`/`columnCount` 后，运行时会在 `clearSelection()` 与 `addSelection()` 之间按 source mesh 补齐公开 `instancedBuffers` 容器，避免 Babylon 重新注册 `instanceSelectionId` 时写入空实例缓冲。新增引用计数回收与 `npm run smoke:shelf-instancing` 定向验证，详细边界见 `docs/shelf-shared-instancing.md`。
 - 2026-07-10：精简 Shelf 参数元数据，移除 `aisleWidth`、`aisleHeight`、`shelfStyle` 这 3 个无模型语义参数；剩余 9 个参数均会产生可见模型效果。`postWidth` 继续按 0.08 兼容基准，仅调整立柱横截面；立柱底端保持锚定，列布局统一支撑容差，旧场景刷新时按新参数集兼容。GLB 未修改，Sandbox 仅用于结构校验。
 

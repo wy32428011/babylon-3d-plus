@@ -1,7 +1,9 @@
 // 此文件由模型包参数脚本和运行脚本合并而成，供编辑器以单个 TS 文件读取。
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { visibleAsBoolean, visibleAsNumber, visibleAsString } from "babylonjs-editor-tools";
-import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Matrix, Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Mesh } from "@babylonjs/core/Meshes/mesh";
+import { VertexData } from "@babylonjs/core/Meshes/mesh.vertexData";
 // 参数长度统一使用米；contentRoot 的基础 scaling 已由编辑器包含源单位换算。
 
 // 此文件按模型参数化说明生成，用于 多穿货架 的静态参数配置。
@@ -66,6 +68,9 @@ interface NodeSnapshot {
 	rotation?: Vector3;
 	rotationQuaternion?: any;
 	enabled?: boolean;
+	visibility?: number;
+	isVisible?: boolean;
+	isPickable?: boolean;
 }
 
 interface AxisBounds {
@@ -90,6 +95,15 @@ interface ShelfColumnLayout {
 	spacing: number;
 	startCenter: number | null;
 	tolerance: number;
+}
+
+interface DenseShelfGridPlan {
+	part: ShelfPart;
+	depth: number;
+	column: number;
+	layer: number;
+	offset: Vector3;
+	reason: string;
 }
 
 const DEFAULT_VALUES: ValueMap = {
@@ -132,11 +146,14 @@ const SUPPORT_LEG_CORNER_CLEARANCE = 0.03;
 const MAX_LAYER_COUNT = 20;
 const MAX_COLUMN_COUNT = 100;
 const MAX_GENERATED_NODES = 5000;
+const MAX_DENSE_THIN_INSTANCES = 250000;
+const DENSE_MATRIX_DETERMINANT_EPSILON = 1e-12;
 
 /** 根据 Inspector 参数对 Shelf.glb 执行部件级静态参数化调整。 */
 export class ParametricModelRuntimeComponent {
 	private readonly snapshots = new Map<any, NodeSnapshot>();
 	private readonly generatedNodes: any[] = [];
+	private readonly denseHiddenNodes = new Set<any>();
 	private lastSignature = "";
 
 	/** 创建 Shelf.glb 静态参数化运行组件。 */
@@ -187,7 +204,10 @@ export class ParametricModelRuntimeComponent {
 				scaling: target.scaling?.clone?.() ?? new Vector3(1, 1, 1),
 				rotation: target.rotation?.clone?.(),
 				rotationQuaternion: target.rotationQuaternion?.clone?.(),
-				enabled: typeof target.isEnabled === "function" ? target.isEnabled() : undefined
+				enabled: typeof target.isEnabled === "function" ? target.isEnabled() : undefined,
+				visibility: typeof target.visibility === "number" ? target.visibility : undefined,
+				isVisible: typeof target.isVisible === "boolean" ? target.isVisible : undefined,
+				isPickable: typeof target.isPickable === "boolean" ? target.isPickable : undefined
 			});
 		}
 		return this.snapshots.get(target) ?? { position: Vector3.Zero(), scaling: new Vector3(1, 1, 1) };
@@ -208,10 +228,23 @@ export class ParametricModelRuntimeComponent {
 			if (target.rotationQuaternion !== undefined) {
 				target.rotationQuaternion = snapshot.rotationQuaternion?.clone?.() ?? null;
 			}
+			if (snapshot.visibility !== undefined) {
+				target.visibility = snapshot.visibility;
+			}
+			if (snapshot.isVisible !== undefined) {
+				target.isVisible = snapshot.isVisible;
+			}
+			if (snapshot.isPickable !== undefined) {
+				target.isPickable = snapshot.isPickable;
+			}
 			if (snapshot.enabled !== undefined && typeof target.setEnabled === "function") {
 				target.setEnabled(snapshot.enabled);
 			}
 		});
+		this.denseHiddenNodes.clear();
+		if (this.node.metadata?.shelfDenseBatch) {
+			delete this.node.metadata.shelfDenseBatch;
+		}
 	}
 
 	/** 从模型 metadata 和运行实例属性中读取参数值，缺失时使用脚本内置默认值。 */
@@ -331,6 +364,17 @@ export class ParametricModelRuntimeComponent {
 		const columnLayout = this.createColumnLayout(parts, targetWidth);
 		const depthCount = this.readBoolean(values, "doubleDeepEnabled", false) ? 2 : 1;
 		const deepOffsetZ = targetDepth + this.readNumber(values, "deepSlotGap", 0);
+		const gridPlan = this.createDenseShelfGridPlan(parts, values, layers, columns, layerStepY, columnLayout, targetDepth);
+		const bracePlan = this.createDenseTriangleBracePlan(parts, bounds.minimum.y, totalRackHeight, columns, columnLayout, depthCount, deepOffsetZ);
+		const densePlan = [...gridPlan, ...bracePlan];
+		const partMeshes = this.createPartRenderableMeshMap(parts);
+		const estimatedGeneratedNodes = densePlan.reduce((count, item) => count + (partMeshes.get(item.part)?.length ?? 0), 0);
+		if (estimatedGeneratedNodes > MAX_GENERATED_NODES) {
+			this.setSideTriangleBracePartsVisible(parts, bracePlan.length > 0);
+			this.createDenseShelfGridBatches(parts, densePlan, partMeshes);
+			return;
+		}
+
 		let cloneIndex = this.cloneShelfGrid(parts, values, layers, columns, layerStepY, columnLayout, targetDepth, 1);
 		cloneIndex = this.cloneTriangleBracesForGrid(parts, bounds.minimum.y, totalRackHeight, columns, columnLayout, depthCount, deepOffsetZ, cloneIndex);
 	}
@@ -610,6 +654,275 @@ export class ParametricModelRuntimeComponent {
 				part.node.setEnabled(visible);
 			}
 		});
+	}
+
+	/** 生成当前层/列/深位语义的完整货架复制计划，高密度与逐节点路径共享同一组筛选规则。 */
+	private createDenseShelfGridPlan(parts: ShelfPart[], values: ValueMap, layers: number, columns: number, spacingY: number, columnLayout: ShelfColumnLayout, targetDepth: number): DenseShelfGridPlan[] {
+		const plan: DenseShelfGridPlan[] = [];
+		const depthCount = this.readBoolean(values, "doubleDeepEnabled", false) ? 2 : 1;
+		const deepOffsetZ = targetDepth + this.readNumber(values, "deepSlotGap", 0);
+		for (let depth = 0; depth < depthCount; depth += 1) {
+			for (let column = 0; column < columns; column += 1) {
+				for (let layer = 0; layer < layers; layer += 1) {
+					if (depth === 0 && column === 0 && layer === 0) {
+						continue;
+					}
+					const offset = this.createShelfGridOffset(column, layer, depth, columnLayout.spacing, spacingY, deepOffsetZ);
+					parts.forEach((part) => {
+						if (this.shouldClonePartForGridCell(part, column, layer, columnLayout)) {
+							plan.push({ part, depth, column, layer, offset, reason: `shelf_grid_d${depth}_c${column}_l${layer}` });
+						}
+					});
+				}
+			}
+		}
+		return plan;
+	}
+
+	/** 生成当前三角斜撑纵向节距的完整复制计划，避免 5000 节点上限截断第二深位。 */
+	private createDenseTriangleBracePlan(parts: ShelfPart[], rackMinimumY: number, totalHeight: number, columns: number, columnLayout: ShelfColumnLayout, depthCount: number, deepOffsetZ: number): DenseShelfGridPlan[] {
+		const braceCount = this.getTriangleBraceCount(parts, rackMinimumY, totalHeight);
+		const braceHeight = this.getTriangleBraceHeight(parts);
+		if (!braceCount || braceCount <= 0 || braceHeight === null) {
+			return [];
+		}
+		const plan: DenseShelfGridPlan[] = [];
+		const braceParts = parts.filter((part) => this.isSideTriangleBracePart(part));
+		for (let depth = 0; depth < depthCount; depth += 1) {
+			for (let column = 0; column < columns; column += 1) {
+				for (let layer = 0; layer < braceCount; layer += 1) {
+					if (column === 0 && depth === 0 && layer === 0) {
+						continue;
+					}
+					const offset = this.createShelfGridOffset(column, layer, depth, columnLayout.spacing, braceHeight, deepOffsetZ);
+					for (const part of braceParts) {
+						if (column <= 0 || !this.isColumnStartBracePart(part, columnLayout)) {
+							plan.push({ part, depth, column, layer, offset, reason: `shelf_brace_d${depth}_c${column}_y${layer}` });
+						}
+					}
+				}
+			}
+		}
+		return plan;
+	}
+
+	/** 为高密度 Shelf 创建每个可渲染叶 Mesh 一个批次，重复单元使用 thin-instance 矩阵表示。 */
+	private createDenseShelfGridBatches(parts: ShelfPart[], plan: DenseShelfGridPlan[], partMeshes: Map<ShelfPart, any[]>): any[] {
+		const batches: any[] = [];
+		const sourcePlans = new Map<any, DenseShelfGridPlan[]>();
+		parts.forEach((part) => {
+			(partMeshes.get(part) ?? []).forEach((mesh) => {
+				if (!sourcePlans.has(mesh)) {
+					sourcePlans.set(mesh, [{ part, depth: 0, column: 0, layer: 0, offset: Vector3.Zero(), reason: "shelf_dense_base" }]);
+				}
+			});
+		});
+		plan.forEach((item) => {
+			(partMeshes.get(item.part) ?? []).forEach((mesh) => {
+				const entries = sourcePlans.get(mesh) ?? [];
+				entries.push(item);
+				sourcePlans.set(mesh, entries);
+			});
+		});
+
+		let totalInstances = 0;
+		let batchIndex = 1;
+		for (const [sourceMesh, entries] of sourcePlans.entries()) {
+			totalInstances += entries.length;
+			if (totalInstances > MAX_DENSE_THIN_INSTANCES) {
+				throw new Error(`Shelf 高密度 thin-instance 数量 ${totalInstances} 超过安全上限 ${MAX_DENSE_THIN_INSTANCES}，请降低层/列/双深参数。`);
+			}
+			const batch = this.createDenseBatchMesh(sourceMesh, entries, batchIndex);
+			if (batch) {
+				batches.push(batch);
+				batchIndex += 1;
+			}
+		}
+		this.node.metadata = {
+			...(this.node.metadata ?? {}),
+			shelfDenseBatch: { enabled: true, batchCount: batches.length, thinInstanceCount: totalInstances }
+		};
+		return batches;
+	}
+
+	/** 使用逆转置矩阵修正非均匀缩放后的法线，并保持切线方向与 handedness。 */
+	private transformDenseVertexDataPreservingNormals(vertexData: VertexData, matrix: Matrix): boolean {
+		const determinant = matrix.determinant();
+		if (!Number.isFinite(determinant) || Math.abs(determinant) <= DENSE_MATRIX_DETERMINANT_EPSILON) {
+			return false;
+		}
+
+		const sourceNormals = vertexData.normals ? Float32Array.from(vertexData.normals) : null;
+		const sourceTangents = vertexData.tangents ? Float32Array.from(vertexData.tangents) : null;
+		vertexData.transform(matrix);
+
+		const normalMatrix = matrix.clone();
+		normalMatrix.invert();
+		normalMatrix.transpose();
+		const transformed = Vector3.Zero();
+		if (sourceNormals && vertexData.normals) {
+			for (let offset = 0; offset < sourceNormals.length; offset += 3) {
+				Vector3.TransformNormalFromFloatsToRef(
+					sourceNormals[offset],
+					sourceNormals[offset + 1],
+					sourceNormals[offset + 2],
+					normalMatrix,
+					transformed
+				);
+				transformed.normalize();
+				vertexData.normals[offset] = transformed.x;
+				vertexData.normals[offset + 1] = transformed.y;
+				vertexData.normals[offset + 2] = transformed.z;
+			}
+		}
+
+		if (sourceTangents && vertexData.tangents) {
+			const handedness = determinant < 0 ? -1 : 1;
+			for (let offset = 0; offset < sourceTangents.length; offset += 4) {
+				Vector3.TransformNormalFromFloatsToRef(
+					sourceTangents[offset],
+					sourceTangents[offset + 1],
+					sourceTangents[offset + 2],
+					matrix,
+					transformed
+				);
+				transformed.normalize();
+				vertexData.tangents[offset] = transformed.x;
+				vertexData.tangents[offset + 1] = transformed.y;
+				vertexData.tangents[offset + 2] = transformed.z;
+				vertexData.tangents[offset + 3] = sourceTangents[offset + 3] * handedness;
+			}
+		}
+
+		if (determinant < 0 && !vertexData.indices) {
+			return this.flipDenseUnindexedTriangleFaces(vertexData);
+		}
+		return true;
+	}
+
+	/** 反射变换下无索引三角形交换后两个顶点，保持正反面与属性顺序。 */
+	private flipDenseUnindexedTriangleFaces(vertexData: VertexData): boolean {
+		const vertexCount = (vertexData.positions?.length ?? 0) / 3;
+		if (!Number.isInteger(vertexCount) || vertexCount % 3 !== 0) {
+			return false;
+		}
+		for (let vertex = 0; vertex < vertexCount; vertex += 3) {
+			this.swapDenseVertexAttribute(vertexData.positions, 3, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.normals, 3, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.tangents, 4, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.colors, 4, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.uvs, 2, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.uvs2, 2, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.uvs3, 2, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.uvs4, 2, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.uvs5, 2, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.uvs6, 2, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.matricesIndices, 4, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.matricesWeights, 4, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.matricesIndicesExtra, 4, vertex + 1, vertex + 2);
+			this.swapDenseVertexAttribute(vertexData.matricesWeightsExtra, 4, vertex + 1, vertex + 2);
+		}
+		return true;
+	}
+
+	/** 交换两个顶点在同一属性缓冲中的完整 stride。 */
+	private swapDenseVertexAttribute(data: any, stride: number, leftVertex: number, rightVertex: number): void {
+		if (!data) {
+			return;
+		}
+		const leftOffset = leftVertex * stride;
+		const rightOffset = rightVertex * stride;
+		if (rightOffset + stride > data.length) {
+			return;
+		}
+		for (let component = 0; component < stride; component += 1) {
+			const temporary = data[leftOffset + component];
+			data[leftOffset + component] = data[rightOffset + component];
+			data[rightOffset + component] = temporary;
+		}
+	}
+
+	/** 创建单个源叶 Mesh 的高密度批次，并把源 Mesh 当前参数化结果烘焙到参数根局部空间。 */
+	private createDenseBatchMesh(sourceMesh: any, entries: DenseShelfGridPlan[], batchIndex: number): any | null {
+		const geometrySource = sourceMesh?.isAnInstance === true ? sourceMesh.sourceMesh : sourceMesh;
+		if (!geometrySource || typeof geometrySource.getTotalVertices !== "function" || geometrySource.getTotalVertices() <= 0) {
+			return null;
+		}
+		const scene = this.node.getScene?.();
+		if (!scene) {
+			return null;
+		}
+
+		const vertexData = VertexData.ExtractFromMesh(geometrySource, true, true);
+		const sourceWorld = sourceMesh.computeWorldMatrix?.(true) ?? geometrySource.computeWorldMatrix?.(true);
+		const rootWorld = this.node.computeWorldMatrix?.(true);
+		const inverseRootWorld = rootWorld?.clone?.();
+		if (!sourceWorld || !inverseRootWorld?.invert) {
+			return null;
+		}
+		inverseRootWorld.invert();
+		const rootLocalMatrix = sourceWorld.multiply(inverseRootWorld);
+		if (!this.transformDenseVertexDataPreservingNormals(vertexData, rootLocalMatrix)) {
+			return null;
+		}
+
+		const batch = new Mesh(`${String(sourceMesh.name ?? "shelf")}_dense_batch_${batchIndex}`, scene);
+		batch.parent = this.node;
+		batch.material = sourceMesh.material ?? geometrySource.material ?? null;
+		batch.metadata = {
+			...(sourceMesh.metadata ?? {}),
+			generatedByParametricRuntime: true,
+			sourceNodeName: sourceMesh.name,
+			reason: "shelf_dense_thin_instance_batch",
+			denseShelfBatch: true,
+			denseShelfSourceName: sourceMesh.name,
+			denseShelfThinInstanceCount: entries.length
+		};
+		batch.doNotSerialize = true;
+		batch.isPickable = sourceMesh.isPickable !== false;
+		batch.thinInstanceEnablePicking = true;
+		batch.visibility = sourceMesh.visibility ?? 1;
+		batch.renderingGroupId = sourceMesh.renderingGroupId ?? 0;
+		batch.alphaIndex = sourceMesh.alphaIndex ?? Number.MAX_SAFE_INTEGER;
+		batch.layerMask = sourceMesh.layerMask ?? 0x0fffffff;
+		batch.receiveShadows = sourceMesh.receiveShadows === true;
+		batch.hasVertexAlpha = sourceMesh.hasVertexAlpha === true;
+		batch.useVertexColors = sourceMesh.useVertexColors === true;
+		vertexData.applyToMesh(batch, true);
+		const matrices = new Float32Array(entries.length * 16);
+		entries.forEach((entry, index) => {
+			const localOffset = this.meterVectorToNodeLocal(this.node, entry.offset);
+			Matrix.Translation(localOffset.x, localOffset.y, localOffset.z).copyToArray(matrices, index * 16);
+		});
+		batch.thinInstanceSetBuffer("matrix", matrices, 16, true);
+		batch.thinInstanceRefreshBoundingInfo?.(true);
+		this.hideDenseSourceMesh(sourceMesh);
+		this.generatedNodes.push(batch);
+		return batch;
+	}
+
+	/** 预先缓存每个 Shelf 部件的可渲染叶 Mesh，避免高密度格子循环重复遍历子树。 */
+	private createPartRenderableMeshMap(parts: ShelfPart[]): Map<ShelfPart, any[]> {
+		const result = new Map<ShelfPart, any[]>();
+		parts.forEach((part) => result.set(part, this.collectRenderableLeafMeshes(part.node)));
+		return result;
+	}
+
+	/** 收集节点子树内实际参与渲染的叶 Mesh，兼容共享路径中的 InstancedMesh。 */
+	private collectRenderableLeafMeshes(node: any): any[] {
+		const meshes = typeof node.getChildMeshes === "function" ? node.getChildMeshes(false) : [];
+		const candidates = (node?.getTotalVertices?.() > 0 ? [node] : []).concat(meshes);
+		return [...new Set(candidates.filter((mesh: any) => (
+			mesh && !mesh.isDisposed?.() && mesh.getTotalVertices?.() > 0 && mesh.isEnabled?.(false) !== false && mesh.isVisible !== false && Number(mesh.visibility ?? 1) > 0
+		)))];
+	}
+
+	/** 隐藏高密度批次已覆盖的原始叶 Mesh；参数恢复由基础快照统一处理。 */
+	private hideDenseSourceMesh(sourceMesh: any): void {
+		this.rememberSnapshot(sourceMesh);
+		this.denseHiddenNodes.add(sourceMesh);
+		sourceMesh.isVisible = false;
+		sourceMesh.isPickable = false;
 	}
 
 	/** 在每个列位和深位上，从 Box005 高度到架顶按 Box008 节距 floor 纵向复制 Box008 和 Box007。 */
@@ -927,6 +1240,11 @@ export class ParametricModelRuntimeComponent {
 		return Vector3.TransformNormal(worldVector, inverseTargetParentWorldMatrix);
 	}
 
+	/** 将实体根米空间位移转换到指定节点本地坐标，供 high-density thin instance 矩阵使用。 */
+	private meterVectorToNodeLocal(parentNode: any, meterVector: Vector3): Vector3 {
+		return this.meterVectorToParentLocal({ parent: parentNode }, meterVector);
+	}
+
 	/** 克隆单个节点并应用偏移，克隆失败时直接跳过。 */
 	private cloneSingleNode(source: any, offset: Vector3, reason: string, index: number): any | null {
 		if (typeof source.clone !== "function") {
@@ -981,9 +1299,8 @@ export class ParametricModelRuntimeComponent {
 
 	/** 获取当前模型根节点及其子树内的节点。 */
 	private getModelNodes(): any[] {
-		const scene = this.node.getScene?.();
-		const nodes = [this.node, ...(scene?.transformNodes ?? []), ...(scene?.meshes ?? [])];
-		return [...new Set(nodes.filter((candidate) => candidate === this.node || candidate.isDescendantOf?.(this.node)))];
+		const descendants = this.node.getDescendants?.(false) ?? [];
+		return [...new Set([this.node, ...descendants])];
 	}
 
 	/** 判断节点是否为本脚本复制出来的运行态克隆。 */

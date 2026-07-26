@@ -23,7 +23,8 @@ const ASSET_MODEL_ROOT = path.resolve(
 const ASSET_INDEX_PATH = path.resolve(
   process.env.BABYLON_ASSET_INDEX_PATH ?? path.join(MODEL_ROOT, '.babylon-editor', 'asset-index.json'),
 );
-const REQUIRE_LABEL_UNIT_SUFFIX = process.env.BABYLON_REQUIRE_LABEL_UNIT_SUFFIX !== '0';
+// Inspector 会根据 unit 自动追加 (m)；仅在显式兼容审计时要求源标签重复携带单位。
+const REQUIRE_LABEL_UNIT_SUFFIX = process.env.BABYLON_REQUIRE_LABEL_UNIT_SUFFIX === '1';
 const NON_UNIFORM_SCALE = { x: 2, y: 3, z: 4 };
 const SSR_MODULE_LOAD_TIMEOUT_MS = 60_000;
 const MAX_REASONABLE_MODEL_SIZE_METERS = Number(process.env.BABYLON_MAX_REASONABLE_MODEL_SIZE_METERS ?? 100);

@@ -25,6 +25,8 @@
     "smoke:cad": "node scripts/smoke-cad-geometry-fidelity.mjs",
     "smoke:model-measurement": "node scripts/smoke-model-measurement.mjs",
     "smoke:model-array": "node scripts/smoke-model-array.mjs",
+    "smoke:model-array-packages": "node scripts/smoke-parametric-model-array-packages.mjs",
+    "smoke:model-array-visual": "node scripts/smoke-parametric-model-array-visual.mjs",
     "smoke:hierarchy-clipboard": "node scripts/smoke-hierarchy-clipboard.mjs",
     "smoke:model-parameters": "node scripts/smoke-model-parameter-meters.mjs",
     "smoke:shelf-instancing": "node scripts/smoke-shelf-shared-instancing.mjs",

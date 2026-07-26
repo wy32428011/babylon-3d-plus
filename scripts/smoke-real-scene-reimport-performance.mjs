@@ -17,12 +17,13 @@ const modelRoot = resolveRequiredPath(
   '请通过 ZENDING_MODEL_ROOT 或第二个参数提供待重导入的模型包根目录。',
 );
 const sceneAssetSourceRoot = process.env.ZENDING_SCENE_ASSET_SOURCE_ROOT ?? String.raw`D:\ZDDT\Assets`;
-const sceneAssetTargetRoot = path.resolve(process.env.ZENDING_SCENE_ASSET_TARGET_ROOT ?? path.join(workspace, 'Assets'));
+const sceneAssetTargetRoot = path.resolve(process.env.ZENDING_SCENE_ASSET_TARGET_ROOT ?? path.join(modelRoot, 'Assets'));
+const expectedModelEntityCount = readPositiveInteger(process.env.ZENDING_EXPECTED_MODEL_ENTITY_COUNT, 8_346);
 const stableSecondsRequired = readPositiveNumber(process.env.ZENDING_STABLE_SECONDS, 12);
 const stableTimeoutMs = readPositiveNumber(process.env.ZENDING_STABLE_TIMEOUT_SECONDS, 600) * 1_000;
 const reportCopyTimeoutMs = readPositiveNumber(process.env.ZENDING_REPORT_COPY_TIMEOUT_SECONDS, 5) * 1_000;
 const rotationSeconds = readPositiveNumber(process.env.ZENDING_ROTATION_SECONDS, 36);
-const minimumFpsRetention = readPositiveNumber(process.env.ZENDING_MINIMUM_FPS_RETENTION, 0.75);
+const minimumFpsRetention = readPositiveNumber(process.env.ZENDING_MINIMUM_FPS_RETENTION, 0.95);
 const minimumRotationRadians = readPositiveNumber(process.env.ZENDING_MINIMUM_ROTATION_RADIANS, Math.PI * 1.5);
 const overviewBetaTarget = readPositiveNumber(process.env.ZENDING_OVERVIEW_BETA_RADIANS, 1.05);
 const overviewBetaTolerance = readPositiveNumber(process.env.ZENDING_OVERVIEW_BETA_TOLERANCE_RADIANS, 0.08);
@@ -36,6 +37,8 @@ const focusFolderId = '__performance_full_scene_focus__';
 await access(path.join(workspace, 'dist', 'index.html'));
 await access(sourceScene);
 await access(modelRoot);
+await access(sceneAssetTargetRoot);
+await access(path.join(sceneAssetTargetRoot, 'Models'));
 await mkdir(evidenceRoot, { recursive: true });
 
 const runRoot = await mkdtemp(path.join(tmpdir(), 'zending-reimport-performance-'));
@@ -49,6 +52,7 @@ const fixture = await writeRebasedFullSceneFixture(
   scenePath,
   sceneAssetSourceRoot,
   sceneAssetTargetRoot,
+  expectedModelEntityCount,
 );
 await writeFile(path.join(userDataRoot, 'recent-workspaces.json'), JSON.stringify({
   version: 1,
@@ -63,8 +67,11 @@ try {
     phase: 'launch',
     sourceScene,
     modelRoot,
+    sceneAssetSourceRoot,
+    sceneAssetTargetRoot,
     projectRoot,
-    expectedModelEntityCount: fixture.modelEntityCount,
+    expectedModelEntityCount,
+    sourceSceneSha256: fixture.sourceSceneSha256,
     stableSecondsRequired,
     stableTimeoutMs,
     reportCopyTimeoutMs,
@@ -84,8 +91,17 @@ try {
   const window = await electronApp.firstWindow({ timeout: 120_000 });
   window.setDefaultTimeout(120_000);
   await window.bringToFront();
-  window.on('console', (message) => rendererEvents.push(`[console:${message.type()}] ${message.text()}`));
+  window.on('console', (message) => {
+    const location = message.location();
+    const source = location?.url
+      ? ` @ ${location.url}:${location.lineNumber ?? 0}:${location.columnNumber ?? 0}`
+      : '';
+    rendererEvents.push(`[console:${message.type()}] ${message.text()}${source}`);
+  });
   window.on('pageerror', (error) => rendererEvents.push(`[pageerror] ${error.message}`));
+  window.on('requestfailed', (request) => {
+    rendererEvents.push(`[requestfailed] ${request.failure()?.errorText ?? 'unknown'} ${request.url()}`);
+  });
   await window.waitForLoadState('domcontentloaded');
   const rendererFramePacing = await measureRendererFramePacing(window);
   console.log(JSON.stringify({ phase: 'renderer-frame-pacing', ...rendererFramePacing }));
@@ -216,7 +232,7 @@ try {
   await refreshStatus.waitFor({ state: 'visible', timeout: 600_000 });
   const refreshStatusText = await refreshStatus.innerText();
   const refreshedCount = Number(/已刷新\s+(\d+)/.exec(refreshStatusText)?.[1] ?? 0);
-  assert.ok(refreshedCount > 0, `模型重导入必须刷新当前场景实例，实际状态：${refreshStatusText}`);
+  assert.equal(refreshedCount, fixture.modelEntityCount, `模型重导入必须刷新全部 ${fixture.modelEntityCount} 个场景实例，实际状态：${refreshStatusText}`);
 
   await waitForStableReport({
     phase: 'after-reimport',
@@ -252,8 +268,11 @@ try {
     afterRotation.report?.renderer?.renderer,
     afterRotation.report?.renderer?.version,
   ].filter(Boolean).join(' ');
-  const automaticMinimumRotatingFps = /nvidia/i.test(rendererText) ? 60 : 30;
+  const rendererPacingTargetFps = Math.min(60, rendererFramePacing.estimatedFps);
+  const automaticMinimumRotatingFps = /nvidia/i.test(rendererText) ? 60 : rendererPacingTargetFps;
   const minimumRotatingFps = configuredMinimumRotatingFps ?? automaticMinimumRotatingFps;
+  // 60 Hz 下 16.6/16.7ms 的采样量化会产生约 59.98~60.02 FPS；只放宽 0.25%，不掩盖真实性能回退。
+  const minimumAcceptedRotatingFps = minimumRotatingFps * 0.9975;
   assert.ok(
     rendererFramePacing.estimatedFps >= minimumRotatingFps * 0.95,
     `当前 Electron 会话的 requestAnimationFrame 上限不足以验收 ${minimumRotatingFps} FPS：`
@@ -305,8 +324,8 @@ try {
     `重导入后全景旋转 FPS 保留率过低：${afterRotation.summary.averageFps.toFixed(2)} / ${baselineRotation.summary.averageFps.toFixed(2)}`,
   );
   assert.ok(
-    afterRotation.summary.averageFps >= minimumRotatingFps,
-    `全模型旋转视角平均 FPS 低于验收下限：${afterRotation.summary.averageFps.toFixed(2)} < ${minimumRotatingFps}`,
+    afterRotation.summary.averageFps >= minimumAcceptedRotatingFps,
+    `全模型旋转视角平均 FPS 低于验收下限：${afterRotation.summary.averageFps.toFixed(2)} < ${minimumAcceptedRotatingFps.toFixed(2)}`,
   );
   assert.ok(
     (afterRotation.summary.last.runtime?.fullSyncCount ?? 0) >= 2,
@@ -317,10 +336,15 @@ try {
     '重导入后必须重建编辑态 thinInstance 计划。',
   );
 
-  const modelFailures = rendererEvents.filter((event) => (
-    /模型(?:加载|脚本|参数|矩阵阵列).*失败|context lost|software renderer/i.test(event)
-  ));
+  const modelFailures = rendererEvents.filter((event) => {
+    const normalized = event.replace(/\\/g, '/');
+    return /模型(?:加载|脚本|参数|矩阵阵列).*失败|context lost|software renderer/i.test(event)
+      || (/Assets\/Models\//i.test(normalized) && /failed|ERR_/i.test(event));
+  });
   assert.deepEqual(modelFailures, [], `重导入期间存在模型或 GPU 失败：${modelFailures.join('\n')}`);
+
+  const sourceSceneSha256After = createHash('sha256').update(await readFile(sourceScene)).digest('hex');
+  assert.equal(sourceSceneSha256After, fixture.sourceSceneSha256, '真实源场景在重导入 smoke 期间被修改。');
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const reportPath = path.join(evidenceRoot, `${stamp}-real-scene-full-rotation-performance.json`);
@@ -328,13 +352,17 @@ try {
     status: 'PASS',
     generatedAt: new Date().toISOString(),
     sourceScene,
+    sourceSceneSha256Before: fixture.sourceSceneSha256,
+    sourceSceneSha256After,
+    fixtureSceneSha256: fixture.fixtureSceneSha256,
     modelRoot,
-    expectedModelEntityCount: fixture.modelEntityCount,
+    expectedModelEntityCount,
     refreshedCount,
     renderer: afterRotation.report.renderer,
     electronArgs: extraElectronArgs,
     rendererFramePacing,
     minimumRotatingFps,
+    minimumAcceptedRotatingFps,
     baseline: {
       focus: baselineFocus,
       rotation: baselineRotation.summary,
@@ -380,6 +408,11 @@ function readPositiveNumber(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function readPositiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function readOptionalPositiveNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -402,8 +435,10 @@ function readJsonStringArray(value, environmentName) {
   return parsed;
 }
 
-async function writeRebasedFullSceneFixture(sourcePath, destinationPath, sourceRoot, targetRoot) {
-  const raw = await readFile(sourcePath, 'utf8');
+async function writeRebasedFullSceneFixture(sourcePath, destinationPath, sourceRoot, targetRoot, expectedCount) {
+  const sourceBytes = await readFile(sourcePath);
+  const sourceSceneSha256 = createHash('sha256').update(sourceBytes).digest('hex');
+  const raw = sourceBytes.toString('utf8');
   const escapedSourceRoot = JSON.stringify(sourceRoot).slice(1, -1);
   const escapedTargetRoot = JSON.stringify(targetRoot).slice(1, -1);
   const encodedSourceRoot = encodeURIComponent(sourceRoot);
@@ -419,7 +454,11 @@ async function writeRebasedFullSceneFixture(sourcePath, destinationPath, sourceR
     const entity = scene.entities[entityId];
     return Boolean(entity && !entity.isFolder && entity.visible !== false && entity.components?.modelAsset);
   });
-  assert.ok(modelEntityIds.length > 0, '真实场景没有可见模型实体。');
+  assert.equal(
+    modelEntityIds.length,
+    expectedCount,
+    `真实目标场景可见模型实体必须为 ${expectedCount}，当前为 ${modelEntityIds.length}。`,
+  );
   const modelEntityIdSet = new Set(modelEntityIds);
 
   for (const entityId of scene.entityIds) {
@@ -450,8 +489,13 @@ async function writeRebasedFullSceneFixture(sourcePath, destinationPath, sourceR
   };
   scene.entityIds = [focusFolderId, ...scene.entityIds.filter((entityId) => entityId !== focusFolderId)];
   scene.selectedEntityId = focusFolderId;
-  await writeFile(destinationPath, JSON.stringify(document), 'utf8');
-  return { modelEntityCount: modelEntityIds.length };
+  const fixtureText = JSON.stringify(document);
+  await writeFile(destinationPath, fixtureText, 'utf8');
+  return {
+    modelEntityCount: modelEntityIds.length,
+    sourceSceneSha256,
+    fixtureSceneSha256: createHash('sha256').update(fixtureText).digest('hex'),
+  };
 }
 
 /** 测量空闲 renderer 的真实 requestAnimationFrame 节拍，区分场景瓶颈与显示/远程会话上限。 */
