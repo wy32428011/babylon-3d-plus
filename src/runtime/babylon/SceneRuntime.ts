@@ -1828,14 +1828,6 @@ export class SceneRuntime {
       if (previousSourceId) dirtyModelArraySourceIds.add(previousSourceId);
       this.modelArrayInstanceEntities.delete(entityId);
     }
-    if (
-      this.modelArrayGizmoProxy
-      && !modelArrayInstanceIds.has(this.modelArrayGizmoProxy.entityId)
-    ) {
-      this.modelArrayGizmoProxy.node.dispose(false, false);
-      this.modelArrayGizmoProxy = null;
-    }
-
     for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
       if (!modelGeneratorIds.has(entityId)) {
         this.disposeModelGenerator(entityId, modelGenerator);
@@ -1885,6 +1877,7 @@ export class SceneRuntime {
     }
 
     this.syncAllModelArrayBatches(document, dirtyModelArraySourceIds);
+    this.disposeStaleModelArrayGizmoProxy();
     this.selectedEntityIds = selectedEntityIds;
     this.rebuildLocatorTargetIndex(document);
     this.rebuildCargoHandoffGraph(document);
@@ -5948,6 +5941,24 @@ export class SceneRuntime {
     this.applyTransform(this.modelArrayGizmoProxy.node, entity.components.transform);
     this.modelArrayGizmoProxy.node.computeWorldMatrix(true);
     return this.modelArrayGizmoProxy.node;
+  }
+
+  /**
+   * 完整同步结束后回收不再由矩阵阵列承载的 Gizmo 代理。
+   * 正式阵列的原模型也使用该代理；若只检查 modelArrayInstance，拖动首帧同步会销毁当前目标。
+   */
+  private disposeStaleModelArrayGizmoProxy(): void {
+    const proxy = this.modelArrayGizmoProxy;
+    if (!proxy) return;
+    if (
+      this.modelArrayInstanceEntities.has(proxy.entityId)
+      || Boolean(this.models.get(proxy.entityId)?.modelArrayBatch)
+    ) {
+      return;
+    }
+
+    proxy.node.dispose(false, false);
+    this.modelArrayGizmoProxy = null;
   }
 
   /** 将模型或环境源单位换算到米，避免污染可被 Gizmo 写回的实体根 Transform。 */

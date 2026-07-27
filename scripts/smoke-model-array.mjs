@@ -692,6 +692,30 @@ try {
   assertPosition(lastFormalInstance.matrix.getTranslation(), { x: 1010, y: 2, z: -5 }, '正式阵列最后一个逻辑实例矩阵');
   assert.ok(formalBatchMeshes.every((mesh) => mesh.isPickable), '存在未锁定实例时全部有效分片必须允许拾取');
 
+  // 原模型由正式矩阵批次承载时，Scene View 的拖动预览仍会触发完整文档同步。
+  // 该同步必须保留同一个 Gizmo 代理，否则控制器会把正在进行的拖动当成目标切换并取消。
+  sourceModelEntry.entitySnapshot = formalArrayEntity;
+  const formalSceneDocument = createEmptySceneDocument('Formal Array');
+  formalSceneDocument.entityIds = [SOURCE_ENTITY_ID, ...formalArrayInstances.map((entity) => entity.id)];
+  formalSceneDocument.entities = Object.fromEntries(
+    [formalArrayEntity, ...formalArrayInstances].map((entity) => [entity.id, entity]),
+  );
+  formalSceneDocument.selectedEntityId = SOURCE_ENTITY_ID;
+  runtime.selectedEntityIds = new Set([SOURCE_ENTITY_ID]);
+  for (const entity of [formalArrayEntity, ...formalArrayInstances]) {
+    runtime.syncedEntities.set(entity.id, entity);
+  }
+  const sourceGizmoTargetBeforeSync = runtime.getGizmoTargetByEntityId(SOURCE_ENTITY_ID);
+  assert.ok(sourceGizmoTargetBeforeSync, '正式阵列原模型必须使用可编辑的 Gizmo 代理');
+  runtime.sync(formalSceneDocument);
+  const sourceGizmoTargetAfterSync = runtime.getGizmoTargetByEntityId(SOURCE_ENTITY_ID);
+  assert.equal(
+    sourceGizmoTargetAfterSync,
+    sourceGizmoTargetBeforeSync,
+    '正式阵列原模型的 Gizmo 代理必须跨完整文档同步保持稳定',
+  );
+  assert.equal(sourceGizmoTargetBeforeSync.isDisposed(), false, '完整文档同步不得销毁正在拖动的原模型代理');
+
   const formalSourceBuffers = new Map(
     formalBatch.batches
       .filter((batch) => batch.mesh.thinInstanceCount > 0)
@@ -881,6 +905,8 @@ try {
 
   runtime.selectedEntityIds = new Set();
   const allFormalBatchMeshes = [...rebuiltFormalBatch.meshes];
+  const sourceGizmoTargetBeforeArrayRemoval = runtime.getGizmoTargetByEntityId(SOURCE_ENTITY_ID);
+  assert.ok(sourceGizmoTargetBeforeArrayRemoval, '正式阵列释放前原模型代理必须仍可用');
 
   for (const instance of formalArrayInstances) {
     runtime.modelArrayInstanceEntities.delete(instance.id);
@@ -894,6 +920,16 @@ try {
   assert.equal(sourceMesh.material, sourceMaterial, '释放正式阵列不得释放源材质');
   assert.equal(scene.meshes.includes(sourceMesh), true, '删除全部逻辑实例后必须将源宿主 Mesh 恢复到场景');
   assert.equal(sourceModelEntry.modelArraySuspendedMeshes.size, 0, '源宿主恢复后暂停集合必须清空');
+  const sourceOnlySceneDocument = {
+    ...formalSceneDocument,
+    entityIds: [SOURCE_ENTITY_ID],
+    entities: { [SOURCE_ENTITY_ID]: formalArrayEntity },
+    selectedEntityId: null,
+  };
+  runtime.sync(sourceOnlySceneDocument);
+  assert.equal(sourceGizmoTargetBeforeArrayRemoval.isDisposed(), true, '阵列释放后完整同步必须回收原模型代理');
+  assert.equal(runtime.modelArrayGizmoProxy, null, '阵列释放后不得遗留无效 Gizmo 代理引用');
+  assert.equal(runtime.getGizmoTargetByEntityId(SOURCE_ENTITY_ID), root, '阵列释放后原模型必须恢复绑定真实根节点');
   runtime.selectedEntityIds = new Set();
   root.position.x = 10;
   root.computeWorldMatrix(true);
@@ -1694,6 +1730,8 @@ try {
       mirroredMaterialOrientationPreserved: true,
       mixedDeterminantBatchesPreservePickingAndSelection: true,
       persistentThinInstanceBatch: true,
+      sourceGizmoProxyStableAcrossDocumentSync: true,
+      sourceGizmoProxyReleasedWithArray: true,
       independentEntityTransforms: true,
       allModelPreviewUsesMatrix: true,
       thinInstancePickingMapsLogicalEntity: true,
