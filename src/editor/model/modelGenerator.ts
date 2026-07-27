@@ -3,7 +3,6 @@ import type {
   ModelAssetComponent,
   ModelAssetTemplate,
   ModelGeneratorComponent,
-  ModelGeneratorFetchBinding,
   ModelGeneratorModelTarget,
   ModelGeneratorRule,
   ModelGeneratorTarget,
@@ -34,16 +33,8 @@ type ModelGeneratorSourceAsset = {
   dataDrivenConfig?: ModelAssetTemplate['dataDrivenConfig'];
 };
 
-/** 模型生成器默认元数据 TTL，单位秒。 */
-export const MODEL_GENERATOR_DEFAULT_TTL_SECONDS = 5;
-/** 模型生成器元数据 TTL 最小值。 */
-export const MODEL_GENERATOR_TTL_MIN_SECONDS = 1;
-/** 模型生成器元数据 TTL 最大值。 */
-export const MODEL_GENERATOR_TTL_MAX_SECONDS = 3600;
 /** 单个模型生成器允许保存的最大规则数。 */
 export const MODEL_GENERATOR_MAX_RULES = 64;
-/** 单个模型生成器允许保存的最大绑定数。 */
-export const MODEL_GENERATOR_MAX_BINDINGS = 32;
 
 const AUTHORIZED_MODEL_GENERATOR_ASSET_URL_PREFIX = 'editor-asset://local/';
 const MODEL_SCRIPT_EXTENSION = '.model.ts';
@@ -73,12 +64,6 @@ function sanitizeId(value: unknown): string {
 /** 清理展示名称，非法或空值时使用兜底名称。 */
 function sanitizeDisplayName(value: unknown, fallback: string): string {
   return sanitizeText(value) || fallback;
-}
-
-/** 清理模型生成器 TTL，始终输出 1..3600 秒范围内的整数。 */
-export function sanitizeModelGeneratorMetadataTtlSeconds(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return MODEL_GENERATOR_DEFAULT_TTL_SECONDS;
-  return Math.min(MODEL_GENERATOR_TTL_MAX_SECONDS, Math.max(MODEL_GENERATOR_TTL_MIN_SECONDS, Math.trunc(value)));
 }
 
 /** 深拷贝可序列化 JSON 值，用于阻断 UI 与场景文档之间的可变引用。 */
@@ -193,9 +178,6 @@ export function createDefaultModelGeneratorComponent(): ModelGeneratorComponent 
   return {
     defaultTarget: null,
     rules: [],
-    metadataTtlSeconds: MODEL_GENERATOR_DEFAULT_TTL_SECONDS,
-    fetchBindings: [],
-    dataSource: 'mqtt',
   };
 }
 
@@ -286,34 +268,16 @@ export function sanitizeModelGeneratorRule(value: unknown): ModelGeneratorRule |
   };
 }
 
-/** 清理 fetch 定位线框绑定，只保留 id 和 assetCode。 */
-export function sanitizeModelGeneratorFetchBinding(value: unknown): ModelGeneratorFetchBinding | null {
-  if (!isPlainObject(value)) return null;
-  const id = sanitizeId(value.id);
-  if (!id) return null;
-
-  return {
-    id,
-    assetCode: sanitizeText(value.assetCode, 128),
-  };
-}
-
-/** 清理完整模型生成器组件，限制规则和绑定数量并过滤非法目标。 */
+/** 清理完整模型生成器组件，限制规则数量并过滤非法目标；旧版 fetchBindings/dataSource/metadataTtlSeconds 字段宽容忽略。 */
 export function sanitizeModelGeneratorComponent(value: unknown): ModelGeneratorComponent | null {
   if (!isPlainObject(value)) return null;
   const rules = Array.isArray(value.rules)
     ? value.rules.slice(0, MODEL_GENERATOR_MAX_RULES).map(sanitizeModelGeneratorRule).filter((rule): rule is ModelGeneratorRule => Boolean(rule))
     : [];
-  const fetchBindings = Array.isArray(value.fetchBindings)
-    ? value.fetchBindings.slice(0, MODEL_GENERATOR_MAX_BINDINGS).map(sanitizeModelGeneratorFetchBinding).filter((b): b is ModelGeneratorFetchBinding => Boolean(b))
-    : [];
 
   return {
     defaultTarget: sanitizeModelGeneratorTarget(value.defaultTarget),
     rules,
-    metadataTtlSeconds: sanitizeModelGeneratorMetadataTtlSeconds(value.metadataTtlSeconds),
-    fetchBindings,
-    dataSource: value.dataSource === 'fetch' ? 'fetch' : 'mqtt',
   };
 }
 

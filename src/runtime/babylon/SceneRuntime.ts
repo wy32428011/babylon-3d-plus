@@ -58,7 +58,8 @@ import {
 } from '../../editor/model/builtInMeshGeometry';
 import type { Vector3Data } from '../../editor/model/math';
 import { MODEL_ARRAY_COPY_COUNT_MAX, MODEL_ARRAY_MIN_SPAN_METERS } from '../../editor/model/modelArray';
-import { createModelAssetCode, type SceneDocument, type SceneEnvironmentSettings } from '../../editor/model/SceneDocument';
+import { createModelAssetCode, type FetchConfig, type SceneDocument, type SceneEnvironmentSettings } from '../../editor/model/SceneDocument';
+import { LocatorFetchRuntime, type FetchContainerRecord } from './LocatorFetchRuntime';
 import { createId } from '../../shared/ids';
 import type { TelemetryBindingComponent } from '../../editor/model/telemetryBinding';
 import {
@@ -124,7 +125,6 @@ import {
   prepareInstancedMeshesForSelectionOutline,
   repairInstancedMeshBufferContainers,
 } from './instancedSelectionBuffers';
-import { ModelGeneratorFetchRuntime } from './ModelGeneratorFetchRuntime';
 import { EntityArrayThinInstanceBatch } from './EntityArrayThinInstanceBatch';
 import {
   EntityGroupTranslationPreview,
@@ -327,6 +327,7 @@ type ModelParameterRuntimeTarget = AbstractMesh | TransformNode | Material;
 type ModelParameterBaselineValue = boolean | number | string | Vector3Data | Texture | null;
 
 export type LocatorRuntimeEntry = {
+  entityId: string;
   root: TransformNode;
   boxes: Mesh[];
   material: StandardMaterial;
@@ -531,6 +532,15 @@ export class SceneRuntime {
   private readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
   private readonly stackerCargoMeshes = new Map<string, StackerCargoRuntimeEntry>();
   private readonly conveyorCargoMeshes = new Map<string, ConveyorCargoRuntimeEntry>();
+  /** fetch 数据驱动的定位线框渲染运行时，按定位线框实体组织。 */
+  private readonly locatorFetchRuntimes = new Map<string, LocatorFetchRuntime>();
+  /** fetch 请求代际戳与每排最新请求序号：响应仅在仍是该排最新请求时应用，防止乱序覆盖。 */
+  private fetchRequestGeneration = 0;
+  private readonly latestFetchRequestByRow = new Map<number, number>();
+  /** 运行预览开始时捕获的 fetch 配置，供事件驱动的单排同步复用。 */
+  private fetchConfigSnapshot: FetchConfig | null = null;
+  /** 已放货到 fetch 驱动定位线框、等待单排同步响应后再销毁的 MQTT 货箱（按排号分组）。 */
+  private readonly fetchKeptCargoByRow = new Map<number, Set<string>>();
   private readonly lights = new Map<string, Light>();
   private readonly entityStates = new Map<string, EntityRuntimeState>();
   private readonly syncedEntities = new Map<string, Entity>();
@@ -539,7 +549,6 @@ export class SceneRuntime {
   private readonly modelSelectionOutlineLayer: SelectionOutlineLayer;
   private readonly assetLoadScheduler = new AssetLoadScheduler();
   private readonly sharedModelAssetCache = new SharedModelAssetCache();
-  private readonly fetchRuntimes = new Map<string, ModelGeneratorFetchRuntime>();
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
   private readonly groupTranslationPreviewObserver: Nullable<Observer<Scene>>;
   private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
@@ -590,24 +599,6 @@ export class SceneRuntime {
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
   }
 
-  /** 处理 fetch 数据源模式的外部事件。 */
-  async handleFetchGeneratorEvent(fetchConfig: { url: string; apiKey: string }): Promise<void> {
-    for (const [entityId, fetchRuntime] of this.fetchRuntimes) {
-      const runtimeEntry = this.generatedOutputOwners.get(entityId);
-      if (!runtimeEntry) continue;
-      await fetchRuntime.handleEvent(
-        fetchConfig,
-        runtimeEntry.component,
-        (assetId) => {
-          const assetIdTrimmed = assetId.trim();
-          return this.locatorTargets.get(assetIdTrimmed) ?? null;
-        },
-        (locator, column, layer) => this.getLocatorBoxWorldMatrix(locator, column, layer),
-        (target) => this.loadModelTemplateForFetch(target),
-      );
-    }
-  }
-
   /** 为 fetch thinInstance 加载模型模板：走完整资产加载管线并应用单位换算。 */
   private async loadModelTemplateForFetch(target: ModelGeneratorTarget): Promise<{ meshes: Mesh[]; dispose: () => void } | null> {
     if (target.kind !== 'model') return null;
@@ -654,6 +645,155 @@ export class SceneRuntime {
     }
   }
 
+  /** 进入运行预览时执行一次全量库存同步；无 fetch 驱动定位线框时直接返回。 */
+  async handleFetchDriveEvent(fetchConfig: FetchConfig): Promise<void> {
+    this.fetchConfigSnapshot = fetchConfig;
+    const targets = this.collectFetchDriveLocators();
+    if (targets.length === 0) return;
+
+    const generation = ++this.fetchRequestGeneration;
+    for (const target of targets) {
+      this.latestFetchRequestByRow.set(target.locatorComponent.rowNumber, generation);
+    }
+
+    const records = await this.fetchInventoryRecords(fetchConfig, []);
+    if (records === null) return;
+
+    for (const target of targets) {
+      // 全量响应到达时该排可能已有更新的单排请求，跳过避免旧数据覆盖新状态
+      if (this.latestFetchRequestByRow.get(target.locatorComponent.rowNumber) !== generation) continue;
+      this.applyFetchRecordsToLocator(records, target);
+    }
+  }
+
+  /** 堆垛机放货/取货完成后同步单排库存；同排多台定位线框共享一次请求。 */
+  handleFetchRowSync(rowNumber: number): void {
+    const fetchConfig = this.fetchConfigSnapshot;
+    if (!fetchConfig?.url) return;
+    const targets = this.collectFetchDriveLocators()
+      .filter((target) => target.locatorComponent.rowNumber === rowNumber);
+    if (targets.length === 0) return;
+
+    const generation = ++this.fetchRequestGeneration;
+    this.latestFetchRequestByRow.set(rowNumber, generation);
+
+    void (async () => {
+      const records = await this.fetchInventoryRecords(fetchConfig, [String(rowNumber)]);
+      if (records === null) return;
+      if (this.latestFetchRequestByRow.get(rowNumber) !== generation) return;
+      for (const target of targets) {
+        this.applyFetchRecordsToLocator(records, target);
+      }
+      this.disposeFetchKeptCargoForRow(rowNumber);
+    })();
+  }
+
+  /** 统一发 fetch 库存请求：rows 为空数组时服务端返回全量数据；失败时记日志并返回 null。 */
+  private async fetchInventoryRecords(fetchConfig: FetchConfig, rows: string[]): Promise<FetchContainerRecord[] | null> {
+    if (!fetchConfig.url) return null;
+
+    try {
+      const response = await fetch(fetchConfig.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': fetchConfig.apiKey,
+        },
+        body: JSON.stringify({ rows }),
+      });
+
+      if (!response.ok) {
+        this.pushLog(`Fetch 请求失败：HTTP ${response.status}`);
+        return null;
+      }
+
+      const data: { records: FetchContainerRecord[] } = (await response.json())?.data;
+      return data?.records ?? [];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.pushLog(`Fetch 处理异常：${message}`);
+      return null;
+    }
+  }
+
+  /** 收集当前启用了 fetch 数据驱动的定位线框及其运行时快照。 */
+  private collectFetchDriveLocators(): Array<{
+    entityId: string;
+    locatorEntry: LocatorRuntimeEntry;
+    locatorComponent: LocatorComponent;
+  }> {
+    const targets: Array<{ entityId: string; locatorEntry: LocatorRuntimeEntry; locatorComponent: LocatorComponent }> = [];
+    for (const [entityId, locatorEntry] of this.locators) {
+      const locatorComponent = this.syncedEntities.get(entityId)?.components.locator;
+      if (!locatorComponent?.fetchDrive?.enabled) continue;
+      targets.push({ entityId, locatorEntry, locatorComponent });
+    }
+    return targets;
+  }
+
+  /** 把（可能未按排过滤的）库存记录分发到单条定位线框的 fetch 渲染运行时。 */
+  private applyFetchRecordsToLocator(
+    records: FetchContainerRecord[],
+    target: { entityId: string; locatorEntry: LocatorRuntimeEntry; locatorComponent: LocatorComponent },
+  ): void {
+    const fetchRuntime = this.locatorFetchRuntimes.get(target.entityId);
+    if (!fetchRuntime) return;
+
+    const generatorId = target.locatorComponent.fetchDrive?.cargoGeneratorId;
+    const generatorComponent = generatorId
+      ? this.modelGenerators.get(generatorId)?.component ?? null
+      : null;
+
+    void fetchRuntime.applyRecords(
+      records,
+      target.locatorEntry,
+      target.locatorComponent,
+      generatorComponent,
+      (locator, column, layer) => this.getLocatorBoxWorldMatrix(locator, column, layer),
+      (modelTarget) => this.loadModelTemplateForFetch(modelTarget),
+    );
+  }
+
+  /** 定位线框启用 fetch 驱动时返回其排号，否则返回 null（MQTT 落位语义保持不变）。 */
+  private resolveFetchDriveRowForLocator(locator: LocatorRuntimeEntry): number | null {
+    const component = this.syncedEntities.get(locator.entityId)?.components.locator;
+    return component?.fetchDrive?.enabled ? locator.rowNumber : null;
+  }
+
+  /** 放货到 fetch 驱动定位线框后保留 MQTT 货箱，等待单排同步响应时销毁，避免网络延迟造成视觉空窗；返回是否为首次登记。 */
+  private keepCargoForFetchRowSync(rowNumber: number, assetCode: string, containerCode: string): boolean {
+    const key = this.getStackerCargoKey(assetCode, containerCode);
+    let keys = this.fetchKeptCargoByRow.get(rowNumber);
+    if (!keys) {
+      keys = new Set();
+      this.fetchKeptCargoByRow.set(rowNumber, keys);
+    }
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  }
+
+  /** 单排同步响应应用后销毁该排保留的 MQTT 货箱，渲染权完全交给 fetch 批次。 */
+  private disposeFetchKeptCargoForRow(rowNumber: number): void {
+    const keys = this.fetchKeptCargoByRow.get(rowNumber);
+    if (!keys) return;
+    this.fetchKeptCargoByRow.delete(rowNumber);
+    for (const key of keys) {
+      const cargo = this.stackerCargoMeshes.get(key);
+      if (!cargo) continue;
+      this.disposeStackerCargo(cargo);
+      this.stackerCargoMeshes.delete(key);
+    }
+  }
+
+  /** 释放指定定位线框的 fetch 渲染运行时。 */
+  private disposeLocatorFetchRuntime(entityId: string): void {
+    const fetchRuntime = this.locatorFetchRuntimes.get(entityId);
+    if (!fetchRuntime) return;
+    fetchRuntime.dispose();
+    this.locatorFetchRuntimes.delete(entityId);
+  }
+
   /** 开始 MQTT 运行预览；该方法幂等，并在真正驱动前清空上一次预览残留运行态。 */
   beginTelemetryPreview(): void {
     if (this.telemetryPreviewActive) return;
@@ -679,9 +819,12 @@ export class SceneRuntime {
     this.telemetryPreviewActive = false;
     this.genericTelemetryMotionRuntime.endPreview();
     this.disposeAllTelemetryRuntimeCargo();
-    for (const fetchRuntime of this.fetchRuntimes.values()) {
+    for (const fetchRuntime of this.locatorFetchRuntimes.values()) {
       fetchRuntime.clearAllBatches();
     }
+    this.latestFetchRequestByRow.clear();
+    this.fetchKeptCargoByRow.clear();
+    this.fetchConfigSnapshot = null;
     for (const model of this.models.values()) {
       if (model.telemetryPreviewBaseline) {
         restoreModelTelemetryPreviewBaseline(model.telemetryPreviewBaseline);
@@ -2360,6 +2503,14 @@ export class SceneRuntime {
     for (const box of runtimeLocator.boxes) {
       this.applyMeshInteractivity(box, entity.id);
     }
+
+    if (locator.fetchDrive?.enabled) {
+      if (!this.locatorFetchRuntimes.has(entity.id)) {
+        this.locatorFetchRuntimes.set(entity.id, new LocatorFetchRuntime(this.scene, entity.id, (message) => this.pushLog(message)));
+      }
+    } else {
+      this.disposeLocatorFetchRuntime(entity.id);
+    }
   }
 
   /** 同步 CAD/DXF 网格参考层，线稿不可拾取，只作为建模布局底图。 */
@@ -2673,13 +2824,6 @@ export class SceneRuntime {
       };
       this.modelGenerators.set(entity.id, runtimeEntry);
       this.generatedOutputOwners.set(runtimeEntry.entityId, runtimeEntry);
-    }
-
-    if (component.dataSource === 'fetch' && !this.fetchRuntimes.has(entity.id)) {
-      this.fetchRuntimes.set(entity.id, new ModelGeneratorFetchRuntime(this.scene, entity.id, this.pushLog));
-    } else if (component.dataSource !== 'fetch' && this.fetchRuntimes.has(entity.id)) {
-      this.fetchRuntimes.get(entity.id)?.dispose();
-      this.fetchRuntimes.delete(entity.id);
     }
 
     const runtimeConfigSignature = this.createModelGeneratorRuntimeConfigSignature(component);
@@ -3753,8 +3897,16 @@ export class SceneRuntime {
     containerCode: string | null,
   ): void {
     const command = readIntegerField(snapshot.fields, side === 'front' ? 'front_command' : 'back_command');
+    const previousForkCode = this.getStackerForkCargoCode(model, side);
     const activeContainerCode = this.resolveStackerForkCargoCode(model, side, containerCode, command, targetLocator);
     if (!activeContainerCode) return;
+
+    // 取货完成沿检测：新条码上叉且当前位是 fetch 驱动定位线框时，触发该排单排同步
+    if (activeContainerCode !== previousForkCode && (command === 1 || command === 2) && snapshot.currentLocationKey) {
+      const sourceLocator = this.locatorTargets.get(snapshot.currentLocationKey) ?? null;
+      const fetchRow = sourceLocator ? this.resolveFetchDriveRowForLocator(sourceLocator) : null;
+      if (fetchRow !== null) this.handleFetchRowSync(fetchRow);
+    }
 
     const cargo = this.getOrCreateStackerCargo(model.assetCode, activeContainerCode);
     cargo.placedLocatorKey = null;
@@ -3776,7 +3928,13 @@ export class SceneRuntime {
       : this.getNodeWorldRotation(model.root);
     this.setGeneratedCargoRootPose(cargo, nextPosition, nextRotation);
     if (supportPosition && placingProgress >= 1 && snapshot.targetLocationKey) {
-      cargo.placedLocatorKey = snapshot.targetLocationKey;
+      const fetchRow = targetLocator ? this.resolveFetchDriveRowForLocator(targetLocator) : null;
+      if (fetchRow === null) {
+        cargo.placedLocatorKey = snapshot.targetLocationKey;
+      } else if (this.keepCargoForFetchRowSync(fetchRow, model.assetCode, activeContainerCode)) {
+        // fetch 驱动定位线框的库位货物由 fetch 数据唯一渲染：MQTT 货箱保留到单排同步响应应用时再销毁
+        this.handleFetchRowSync(fetchRow);
+      }
       this.setStackerForkCargoCode(model, side, null);
     }
     this.disposeHandedOffCargo(model, activeContainerCode);
@@ -5092,7 +5250,7 @@ export class SceneRuntime {
 
     const boxes = this.createLocatorBoxes(entityId, locator, root, material);
 
-    return { root, boxes, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
+    return { entityId, root, boxes, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
   }
 
   private createLocatorBoxes(entityId: string, locator: LocatorComponent, root: TransformNode, material: StandardMaterial): Mesh[] {
@@ -5309,6 +5467,7 @@ export class SceneRuntime {
   /** 释放虚拟定位线框的根节点、网格盒和材质。 */
   private disposeLocator(entityId: string, locator: LocatorRuntimeEntry): void {
     this.clearEntityArrayPreviewIfSource(entityId);
+    this.disposeLocatorFetchRuntime(entityId);
     for (const box of locator.boxes) {
       box.dispose(false, false);
     }
@@ -5358,7 +5517,6 @@ export class SceneRuntime {
     return JSON.stringify({
       defaultTarget: component.defaultTarget,
       rules: component.rules,
-      metadataTtlSeconds: component.metadataTtlSeconds,
     });
   }
 
@@ -5403,8 +5561,6 @@ export class SceneRuntime {
     runtimeEntry.reportedLoadFailureKeys.clear();
     this.generatedOutputOwners.delete(runtimeEntry.entityId);
     this.modelGenerators.delete(entityId);
-    this.fetchRuntimes.get(entityId)?.dispose();
-    this.fetchRuntimes.delete(entityId);
   }
 
   /** 释放当前环境底座模型，切换场景或切换效果时避免 Babylon 资源残留。 */

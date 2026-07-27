@@ -7,18 +7,13 @@ import {
 } from '../assets/AssetDatabase';
 import type {
   ModelGeneratorComponent,
-  ModelGeneratorFetchBinding,
   ModelGeneratorRule,
   ModelGeneratorTarget,
 } from '../model/components';
 import {
-  MODEL_GENERATOR_MAX_BINDINGS,
   MODEL_GENERATOR_MAX_RULES,
-  MODEL_GENERATOR_TTL_MAX_SECONDS,
-  MODEL_GENERATOR_TTL_MIN_SECONDS,
   createMeshModelGeneratorTarget,
   createModelGeneratorTargetFromAsset,
-  sanitizeModelGeneratorMetadataTtlSeconds,
 } from '../model/modelGenerator';
 import { useEditorStore } from '../store/editorStore';
 import { createId } from '../../shared/ids';
@@ -29,7 +24,6 @@ type ModelGeneratorInspectorProps = {
 };
 
 type ModelGeneratorRulePatch = Partial<Omit<ModelGeneratorRule, 'id'>>;
-type ModelGeneratorFetchBindingPatch = Partial<Omit<ModelGeneratorFetchBinding, 'id'>>;
 
 const BUILT_IN_MODEL_NAMES = {
   cube: '立方体',
@@ -61,7 +55,7 @@ function readModelGeneratorTargetFromDrop(event: DragEvent<HTMLElement>): ModelG
   );
 }
 
-/** 渲染并编辑模型生成器的共享模板、条件规则与元数据 TTL；设备侧绑定在遥测绑定面板配置。 */
+/** 渲染并编辑模型生成器的共享模板与条件规则；设备侧绑定在遥测绑定面板、定位线框侧绑定在 Fetch 数据驱动中配置。 */
 export function ModelGeneratorInspector({ component, disabled = false }: ModelGeneratorInspectorProps) {
   const updateSelectedModelGenerator = useEditorStore((state) => state.updateSelectedModelGenerator);
   const [activeDropZone, setActiveDropZone] = useState<string | null>(null);
@@ -78,14 +72,6 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
       ruleIndex === index ? { ...rule, ...patch } : rule
     ));
     commitComponent({ ...component, rules }, label);
-  }
-
-  /** 更新指定 fetch 定位线框绑定。 */
-  function updateFetchBinding(index: number, patch: ModelGeneratorFetchBindingPatch): void {
-    const fetchBindings = component.fetchBindings.map((b, i) => (
-      i === index ? { ...b, ...patch } : b
-    ));
-    commitComponent({ ...component, fetchBindings }, '更新定位线框绑定');
   }
 
   /** 新增一条空生成规则，目标由后续模型库拖放补齐。 */
@@ -115,24 +101,6 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     const rules = [...component.rules];
     [rules[index], rules[targetIndex]] = [rules[targetIndex], rules[index]];
     commitComponent({ ...component, rules }, '调整生成规则顺序');
-  }
-
-  /** 新增一条 fetch 定位线框绑定。 */
-  function addFetchBinding(): void {
-    if (component.fetchBindings.length >= MODEL_GENERATOR_MAX_BINDINGS) return;
-    const binding: ModelGeneratorFetchBinding = {
-      id: createId('model_generator_binding'),
-      assetCode: '',
-    };
-    commitComponent({ ...component, fetchBindings: [...component.fetchBindings, binding] }, '添加定位线框绑定');
-  }
-
-  /** 删除指定 fetch 定位线框绑定。 */
-  function removeFetchBinding(index: number): void {
-    commitComponent(
-      { ...component, fetchBindings: component.fetchBindings.filter((_, i) => i !== index) },
-      '删除定位线框绑定',
-    );
   }
 
   /** 接收模型库拖放并更新对应默认槽位或规则槽位。 */
@@ -224,25 +192,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     <fieldset className="transform-fieldset model-generator-fieldset">
       <legend>模型生成器</legend>
 
-      <label className="inspector-row">
-        <span>数据源</span>
-        <select
-          disabled={disabled}
-          value={component.dataSource}
-          onChange={(event) => {
-            const dataSource = event.target.value === 'fetch' ? 'fetch' : 'mqtt';
-            commitComponent({ ...component, dataSource }, '切换数据源');
-          }}
-        >
-          <option value="mqtt">MQTT</option>
-          <option value="fetch">Fetch</option>
-        </select>
-      </label>
-      {component.dataSource === 'fetch' ? (
-        <p className="muted">fetch 模式下由外部事件驱动，绑定的资产编号用于匹配虚拟定位线框。基础 URL 和 API Key 在工具栏中配置。</p>
-      ) : (
-        <p className="muted">MQTT 模式下本生成器仅作为货箱模板库；在设备的遥测绑定面板中选择本生成器作为货箱来源。</p>
-      )}
+      <p className="muted">本生成器仅作为货箱模板库；在设备的遥测绑定面板或定位线框的 Fetch 数据驱动中选择本生成器作为货箱来源。规则属性名在 MQTT 下读取遥测快照字段、在 Fetch 下读取 record 字段（缺省比较 containerType）。</p>
 
       {renderTargetSlot(
         'default-target',
@@ -308,69 +258,6 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
           )}
         </div>
       ))}
-
-      {component.dataSource !== 'fetch' && (
-      <label className="number-row model-generator-ttl-row">
-        <span>元数据销毁时长</span>
-        <input
-          disabled={disabled}
-          min={MODEL_GENERATOR_TTL_MIN_SECONDS}
-          max={MODEL_GENERATOR_TTL_MAX_SECONDS}
-          step="1"
-          type="number"
-          value={component.metadataTtlSeconds}
-          onChange={(event) => {
-            if (event.target.value === '') return;
-            const value = Number(event.target.value);
-            if (!Number.isFinite(value)) return;
-            commitComponent(
-              { ...component, metadataTtlSeconds: sanitizeModelGeneratorMetadataTtlSeconds(value) },
-              '更新元数据销毁时长',
-            );
-          }}
-        />
-      </label>
-      )}
-      {component.dataSource !== 'fetch' && (
-        <p className="muted model-generator-unit-hint">单位：秒；遥测元数据超过该时长未刷新时销毁对应货箱。</p>
-      )}
-
-      {component.dataSource === 'fetch' && (
-        <>
-          <div className="model-generator-section-header">
-            <span>定位线框绑定</span>
-            <button
-              disabled={disabled || component.fetchBindings.length >= MODEL_GENERATOR_MAX_BINDINGS}
-              onClick={addFetchBinding}
-              title="添加定位线框绑定"
-              type="button"
-            >
-              +
-            </button>
-          </div>
-          {component.fetchBindings.length === 0 ? (
-            <p className="muted model-generator-empty-hint">暂无定位线框绑定；资产编号用于匹配虚拟定位线框的 assetId。</p>
-          ) : null}
-          {component.fetchBindings.map((binding, index) => (
-            <div className="model-generator-binding-card" key={binding.id}>
-              <div className="model-generator-card-header">
-                <span>绑定 {index + 1}</span>
-                <button disabled={disabled} onClick={() => removeFetchBinding(index)} title="删除绑定" type="button">−</button>
-              </div>
-              <label className="inspector-row">
-                <span>定位线框编号</span>
-                <input
-                  disabled={disabled}
-                  maxLength={128}
-                  type="text"
-                  value={binding.assetCode}
-                  onChange={(event) => updateFetchBinding(index, { assetCode: event.target.value })}
-                />
-              </label>
-            </div>
-          ))}
-        </>
-      )}
     </fieldset>
   );
 }

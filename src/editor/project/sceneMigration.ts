@@ -155,3 +155,67 @@ export function logLegacySceneMigrationSummary(summary: MigrationSummary): void 
     console.warn(`[场景迁移] ${warning}`);
   }
 }
+
+type SceneV2ToV3MigrationSummary = {
+  migratedFetchDrives: number;
+  warnings: string[];
+};
+
+/**
+ * 将 v2 场景的生成器 fetch 配置迁移为 v3 结构：
+ * fetchBindings 反转为定位线框侧 fetchDrive.cargoGeneratorId，生成器退化为纯模板库。
+ * 直接修改传入的原始场景对象，返回迁移摘要供 Console 输出。
+ * 注意：只要 fetchBindings 非空即迁移，不检查 dataSource——v2 UI 切回 mqtt 只隐藏不清空绑定，数据仍是有效配置意图。
+ */
+export function migrateSceneV2ToV3(scene: PlainObject): SceneV2ToV3MigrationSummary {
+  const summary: SceneV2ToV3MigrationSummary = { migratedFetchDrives: 0, warnings: [] };
+  if (!isPlainObject(scene.entities)) return summary;
+
+  const generatorEntries: Array<readonly [string, PlainObject]> = [];
+  const locatorEntries: Array<readonly [string, PlainObject]> = [];
+  for (const [entityId, rawEntity] of Object.entries(scene.entities)) {
+    if (!isPlainObject(rawEntity) || !isPlainObject(rawEntity.components)) continue;
+    const components = rawEntity.components;
+    if (isPlainObject(components.modelGenerator)) {
+      generatorEntries.push([entityId, components.modelGenerator]);
+    }
+    if (isPlainObject(components.locator)) {
+      locatorEntries.push([entityId, components.locator]);
+    }
+  }
+
+  for (const [generatorId, generator] of generatorEntries) {
+    const fetchBindings = Array.isArray(generator.fetchBindings) ? generator.fetchBindings.filter(isPlainObject) : [];
+    for (const binding of fetchBindings) {
+      const assetCode = readText(binding.assetCode);
+      if (!assetCode) continue;
+      const matches = locatorEntries.filter(([, locator]) => readText(locator.assetId) === assetCode);
+      if (matches.length !== 1) {
+        summary.warnings.push(`fetch 绑定「${assetCode}」匹配到 ${matches.length} 个定位线框，已跳过。`);
+        continue;
+      }
+      const locator = matches[0][1];
+      if (isPlainObject(locator.fetchDrive)) {
+        summary.warnings.push(`定位线框「${assetCode}」已被其他生成器绑定，保留首个，跳过生成器 ${generatorId} 的绑定。`);
+        continue;
+      }
+      locator.fetchDrive = { enabled: true, cargoGeneratorId: generatorId };
+      summary.migratedFetchDrives += 1;
+    }
+
+    delete generator.fetchBindings;
+    delete generator.dataSource;
+    delete generator.metadataTtlSeconds;
+  }
+
+  return summary;
+}
+
+/** 输出 v2 → v3 迁移摘要到控制台。 */
+export function logSceneV2ToV3MigrationSummary(summary: SceneV2ToV3MigrationSummary): void {
+  if (summary.migratedFetchDrives === 0 && summary.warnings.length === 0) return;
+  console.info(`[场景迁移] v2 → v3：反转 fetch 定位线框绑定 ${summary.migratedFetchDrives} 条，生成器转为纯模板库。`);
+  for (const warning of summary.warnings) {
+    console.warn(`[场景迁移] ${warning}`);
+  }
+}

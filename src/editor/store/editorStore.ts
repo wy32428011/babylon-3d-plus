@@ -43,6 +43,7 @@ import type {
   LightComponent,
   LightKind,
   LocatorComponent,
+  LocatorFetchDriveConfig,
   MeshKind,
   MeshRendererComponent,
   ModelAssetComponent,
@@ -509,6 +510,7 @@ function cloneLocator(locator: LocatorComponent): LocatorComponent {
     layerGap: locator.layerGap,
     deviceAssetCode: locator.deviceAssetCode,
     rowNumber: locator.rowNumber,
+    ...(locator.fetchDrive ? { fetchDrive: { ...locator.fetchDrive } } : {}),
   };
 }
 
@@ -623,6 +625,24 @@ function sanitizeLocatorInt(value: number | undefined, fallback: number, min: nu
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
+/** 清理定位线框 fetch 驱动 patch：undefined 保留原值，非法引用编号按空处理。 */
+function sanitizeLocatorFetchDrivePatch(
+  value: LocatorFetchDriveConfig | undefined,
+  before: LocatorFetchDriveConfig | undefined,
+): LocatorFetchDriveConfig | undefined {
+  if (value === undefined) return before;
+  const cargoGeneratorId = typeof value.cargoGeneratorId === 'string' ? value.cargoGeneratorId.trim().slice(0, 128) : '';
+  return {
+    enabled: value.enabled === true,
+    ...(cargoGeneratorId ? { cargoGeneratorId } : {}),
+  };
+}
+
+function areLocatorFetchDrivesEqual(left: LocatorFetchDriveConfig | undefined, right: LocatorFetchDriveConfig | undefined): boolean {
+  if (!left || !right) return left === right;
+  return left.enabled === right.enabled && (left.cargoGeneratorId ?? '') === (right.cargoGeneratorId ?? '');
+}
+
 function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): boolean {
   return (
     left.assetId === right.assetId &&
@@ -636,7 +656,8 @@ function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): bool
     left.columnGap === right.columnGap &&
     left.layerGap === right.layerGap &&
     left.deviceAssetCode === right.deviceAssetCode &&
-    left.rowNumber === right.rowNumber
+    left.rowNumber === right.rowNumber &&
+    areLocatorFetchDrivesEqual(left.fetchDrive, right.fetchDrive)
   );
 }
 
@@ -1360,6 +1381,14 @@ function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[]): Scene
       components = {
         ...components,
         telemetryBinding: { ...telemetryBinding, cargoGeneratorId: undefined },
+      };
+    }
+
+    const locator = components.locator;
+    if (locator?.fetchDrive?.cargoGeneratorId && deletingIds.has(locator.fetchDrive.cargoGeneratorId)) {
+      components = {
+        ...components,
+        locator: { ...locator, fetchDrive: { ...locator.fetchDrive, cargoGeneratorId: undefined } },
       };
     }
 
@@ -2865,6 +2894,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         layerGap: sanitizeLocatorGap(patch.layerGap, before.layerGap),
         deviceAssetCode: patch.deviceAssetCode !== undefined ? patch.deviceAssetCode.trim().slice(0, 128) : before.deviceAssetCode,
         rowNumber: sanitizeLocatorInt(patch.rowNumber, before.rowNumber, 1, 99),
+        fetchDrive: sanitizeLocatorFetchDrivePatch(patch.fetchDrive, before.fetchDrive),
       };
 
       if (areLocatorsEqual(before, after)) return state;

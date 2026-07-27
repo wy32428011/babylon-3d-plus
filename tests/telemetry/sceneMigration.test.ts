@@ -153,9 +153,10 @@ test('v1 场景迁移：warehouseFlow 未启用时只反转绑定，不写入 up
   assert.equal(binding.upstreamAssetCode, undefined);
 });
 
-test('SceneSerializer 接受 v1/v2 并在 v1 上执行迁移，序列化始终写出 version 2', () => {
+test('SceneSerializer 接受 v1/v2/v3 并执行链式迁移，序列化始终写出 version 3', () => {
   const source = readFileSync('src/editor/project/SceneSerializer.ts', 'utf8');
-  assert.match(source, /JSON\.stringify\(\{ version: 2,/);
-  assert.match(source, /document\.version !== 1 && document\.version !== 2/);
+  assert.match(source, /JSON\.stringify\(\{ version: 3,/);
+  assert.match(source, /document\.version !== 1 && document\.version !== 2 && document\.version !== 3/);
   assert.match(source, /migrateLegacySceneV1ToV2\(rawScene\)/);
+  assert.match(source, /migrateSceneV2ToV3\(rawScene\)/);
 });

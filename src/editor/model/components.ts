@@ -18,6 +18,13 @@ export type MeshRendererComponent = {
 
 export type LocatorStorageDepth = 'near' | 'far';
 
+/** 定位线框的 fetch 数据驱动配置；区别于 MQTT 遥测驱动，由 HTTP 接口按排号拉取库存数据。 */
+export type LocatorFetchDriveConfig = {
+  enabled: boolean;
+  /** 货箱模板来源：场景内模型生成器实体 ID；空 = 内置立方体回退。 */
+  cargoGeneratorId?: string;
+};
+
 export type LocatorComponent = {
   assetId: string;
   storageDepth: LocatorStorageDepth;
@@ -31,6 +38,8 @@ export type LocatorComponent = {
   layerGap: number;
   deviceAssetCode: string;
   rowNumber: number;
+  /** fetch 数据驱动；缺省表示不启用。 */
+  fetchDrive?: LocatorFetchDriveConfig;
 };
 
 export type CadReferenceOriginMode = 'center';
@@ -150,22 +159,10 @@ export type ModelGeneratorRule = {
   target: ModelGeneratorTarget | null;
 };
 
-/** 模型生成器 fetch 定位线框绑定，通过资产编号匹配虚拟定位线框。 */
-export type ModelGeneratorFetchBinding = {
-  id: string;
-  assetCode: string;
-};
-
-/** 模型生成器的数据源类型：mqtt 走遥测驱动，fetch 走 HTTP 接口驱动。 */
-export type ModelGeneratorDataSource = 'mqtt' | 'fetch';
-
-/** 模型生成器组件，作为纯货箱模板库保存默认目标、规则与元数据 TTL。 */
+/** 模型生成器组件，作为纯货箱模板库保存默认目标与规则；由设备遥测绑定或定位线框 fetch 驱动引用。 */
 export type ModelGeneratorComponent = {
   defaultTarget: ModelGeneratorTarget | null;
   rules: ModelGeneratorRule[];
-  metadataTtlSeconds: number;
-  fetchBindings: ModelGeneratorFetchBinding[];
-  dataSource: ModelGeneratorDataSource;
 };
 
 export type CameraComponent = {

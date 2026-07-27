@@ -1,7 +1,6 @@
 import { SCENE_LENGTH_UNIT_SYMBOL } from '../model/sceneUnits';
 import type { LocatorComponent } from '../model/components';
 import { useEditorStore } from '../store/editorStore';
-
 type LocatorInspectorProps = {
   component: LocatorComponent;
   disabled?: boolean;
@@ -29,6 +28,16 @@ const locatorDimensionFields: readonly LocatorDimensionConfig[] = [
 
 export function LocatorInspector({ component, disabled = false }: LocatorInspectorProps) {
   const updateSelectedLocator = useEditorStore((state) => state.updateSelectedLocator);
+  const scene = useEditorStore((state) => state.scene);
+
+  const generatorOptions = scene.entityIds
+    .map((entityId) => scene.entities[entityId])
+    .filter((entity) => entity?.components.modelGenerator)
+    .map((entity) => ({ id: entity.id, name: entity.name }));
+  const fetchDrive = component.fetchDrive;
+  const cargoGeneratorMissing = Boolean(
+    fetchDrive?.cargoGeneratorId && !generatorOptions.some((option) => option.id === fetchDrive.cargoGeneratorId),
+  );
 
   function handleDimensionChange(field: LocatorDimensionField, rawValue: string) {
     if (rawValue === '') return;
@@ -37,7 +46,18 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
     updateSelectedLocator({ [field]: nextValue } as Partial<LocatorComponent>);
   }
 
+  /** 提交完整 fetchDrive 对象，由 Store 统一清洗并写入撤销历史。 */
+  function updateFetchDrive(enabled: boolean, cargoGeneratorId: string | undefined) {
+    updateSelectedLocator({
+      fetchDrive: {
+        enabled,
+        ...(cargoGeneratorId ? { cargoGeneratorId } : {}),
+      },
+    });
+  }
+
   return (
+    <>
     <fieldset className="transform-fieldset">
       <legend>虚拟定位线框</legend>
       <label className="inspector-row">
@@ -121,5 +141,33 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
         </label>
       ))}
     </fieldset>
+    <fieldset className="transform-fieldset">
+      <legend>Fetch 数据驱动</legend>
+      <p className="muted">运行预览时按排号从 Fetch 接口拉取库存并渲染到本线框库位；排号、起始列使用上方已有配置。</p>
+      <label className="inspector-row">
+        <span>启用</span>
+        <input
+          type="checkbox"
+          disabled={disabled}
+          checked={fetchDrive?.enabled === true}
+          onChange={(event) => updateFetchDrive(event.target.checked, fetchDrive?.cargoGeneratorId)}
+        />
+      </label>
+      <label className="inspector-row">
+        <span>货箱生成器</span>
+        <select
+          disabled={disabled}
+          value={cargoGeneratorMissing ? '' : (fetchDrive?.cargoGeneratorId ?? '')}
+          onChange={(event) => updateFetchDrive(fetchDrive?.enabled === true, event.target.value || undefined)}
+        >
+          <option value="">未绑定（内置立方体）</option>
+          {generatorOptions.map((option) => (
+            <option key={option.id} value={option.id}>{option.name}（{option.id.slice(-6)}）</option>
+          ))}
+        </select>
+      </label>
+      {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退内置立方体。</p> : null}
+    </fieldset>
+    </>
   );
 }

@@ -7,13 +7,12 @@ import {
   Scene,
   VertexData,
 } from '@babylonjs/core';
-import type { ModelGeneratorComponent, ModelGeneratorRule, ModelGeneratorTarget } from '../../editor/model/components';
+import type { LocatorComponent, ModelGeneratorComponent, ModelGeneratorRule, ModelGeneratorTarget } from '../../editor/model/components';
 import type { LocatorRuntimeEntry } from './SceneRuntime';
-import { createModelGeneratorTargetSignature } from '../../editor/model/modelGenerator';
-import type { FetchConfig } from '../../editor/model/SceneDocument';
+import { createMeshModelGeneratorTarget, createModelGeneratorTargetSignature } from '../../editor/model/modelGenerator';
 
 /** fetch 响应中的单条货物记录 */
-type ContainerInfo = {
+export type FetchContainerRecord = {
   containerCode: string[];
   containerType: string;
   isEmpty: boolean;
@@ -31,12 +30,10 @@ type CargoInstance = {
   cargoCode: string;
   targetSignature: string;
   target: ModelGeneratorTarget;
-  locatorAssetId: string;
   column: number;
   layer: number;
 };
 
-type GetLocatorByAssetId = (assetId: string) => LocatorRuntimeEntry | null;
 type GetLocatorBoxWorldMatrix = (locator: LocatorRuntimeEntry, column: number, layer: number) => Matrix | null;
 type LoadModelTemplate = (target: ModelGeneratorTarget) => Promise<{ meshes: Mesh[]; dispose: () => void } | null>;
 
@@ -46,103 +43,92 @@ type ThinInstanceBatch = {
 };
 
 /**
- * Fetch 模式模型生成器的 thinInstance 渲染运行时。
- * 负责 fetch 请求 → 规则匹配 → thinInstance 合批渲染。
+ * 定位线框 fetch 数据驱动的 thinInstance 渲染运行时。
+ * 每个实例只服务一条定位线框：HTTP 请求编排由 SceneRuntime 负责，本类只接收本排 records
+ * 并完成规则匹配与 thinInstance 合批渲染。
  */
-export class ModelGeneratorFetchRuntime {
+export class LocatorFetchRuntime {
   private batches = new Map<string, ThinInstanceBatch>();
   private disposed = false;
+  private missingGeneratorReported = false;
 
   private readonly scene: Scene;
-  private readonly generatorEntityId: string;
+  private readonly locatorEntityId: string;
   private readonly onPushLog: (message: string) => void;
 
   constructor(
     scene: Scene,
-    generatorEntityId: string,
+    locatorEntityId: string,
     onPushLog: (message: string) => void = () => undefined,
   ) {
     this.scene = scene;
-    this.generatorEntityId = generatorEntityId;
+    this.locatorEntityId = locatorEntityId;
     this.onPushLog = onPushLog;
   }
 
-  /** 响应外部事件：fetch → 规则匹配 → 更新 thinInstance 批次 */
-  async handleEvent(
-    fetchConfig: FetchConfig,
-    component: ModelGeneratorComponent,
-    getLocatorByAssetId: GetLocatorByAssetId,
+  /** 应用本排库存记录：防御性按排号过滤 → 规则匹配 → 全量重建 thinInstance 批次。 */
+  async applyRecords(
+    records: FetchContainerRecord[],
+    locatorEntry: LocatorRuntimeEntry,
+    locatorComponent: LocatorComponent,
+    generatorComponent: ModelGeneratorComponent | null,
     getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
     loadModelTemplate: LoadModelTemplate,
   ): Promise<void> {
-    if (this.disposed || !fetchConfig.url) return;
+    if (this.disposed) return;
 
-    try {
-      const response = await fetch(fetchConfig.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': fetchConfig.apiKey,
-        },
-        body: JSON.stringify({ rows: [] }),
+    const rowKey = String(locatorComponent.rowNumber).trim();
+    const ownRecords = records.filter((record) => String(record.row ?? '').trim() === rowKey);
+
+    if (!generatorComponent) this.reportMissingGeneratorOnce(locatorComponent);
+    const fallbackTarget = generatorComponent ? null : createMeshModelGeneratorTarget('cube', '内置立方体');
+
+    const nextInstances: CargoInstance[] = [];
+    for (const record of ownRecords) {
+      const target = generatorComponent
+        ? this.matchRule(generatorComponent.rules, record) ?? generatorComponent.defaultTarget
+        : fallbackTarget;
+      if (!target) continue;
+
+      nextInstances.push({
+        cargoCode: record.containerCode?.[0] ?? `${record.containerType}_${record.column}_${record.layer}`,
+        targetSignature: createModelGeneratorTargetSignature(target),
+        target,
+        column: record.column,
+        layer: record.layer,
       });
-
-      if (!response.ok) {
-        this.onPushLog(`Fetch 请求失败：HTTP ${response.status}`);
-        return;
-      }
-
-      const data: { records: ContainerInfo[] } = (await response.json())?.data;
-      if (!data?.records?.length) {
-        this.clearAllBatches();
-        return;
-      }
-
-      const nextInstances: CargoInstance[] = [];
-
-      for (const record of data.records) {
-        // if (record.isEmpty) continue; // TODO: 测试原因 暂时忽略
-
-        const target = this.matchRule(component.rules, record.containerType) ?? component.defaultTarget;
-        if (!target) continue;
-
-        const targetSignature = createModelGeneratorTargetSignature(target);
-
-        for (const binding of component.fetchBindings) {
-          const cargoCode = record.containerCode[0] ?? `${record.containerType}_${record.column}_${record.layer}`;
-          nextInstances.push({
-            cargoCode,
-            targetSignature,
-            target,
-            locatorAssetId: binding.assetCode,
-            column: record.column,
-            layer: record.layer,
-          });
-        }
-      }
-
-      await this.syncBatches(nextInstances, getLocatorByAssetId, getLocatorBoxWorldMatrix, loadModelTemplate);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.onPushLog(`Fetch 处理异常：${message}`);
     }
+
+    await this.syncBatches(nextInstances, locatorEntry, getLocatorBoxWorldMatrix, loadModelTemplate);
   }
 
-  /** 按规则顺序匹配 containerType */
-  private matchRule(rules: ModelGeneratorRule[], containerType: string): ModelGeneratorTarget | null {
+  /** 按规则顺序匹配记录字段；属性名留空默认比较 containerType。 */
+  private matchRule(rules: ModelGeneratorRule[], record: FetchContainerRecord): ModelGeneratorTarget | null {
     for (const rule of rules) {
-      if (!rule.attributeName.trim()) continue;
-      if (rule.attributeValue.trim() !== containerType.trim()) continue;
+      const attributeName = rule.attributeName.trim();
+      const rawValue = attributeName
+        ? (record as unknown as Record<string, unknown>)[attributeName]
+        : record.containerType;
+      const recordValue = String(rawValue ?? record.containerType ?? '').trim();
+      if (!recordValue) continue;
+      if (rule.attributeValue.trim() !== recordValue) continue;
       const target = rule.target;
       if (target) return target;
     }
     return null;
   }
 
-  /** 同步 thinInstance 批次：按 targetSignature 分组，增删改矩阵 */
+  /** 未绑定货箱生成器时一次性提示，库存货物回退内置立方体。 */
+  private reportMissingGeneratorOnce(locatorComponent: LocatorComponent): void {
+    if (this.missingGeneratorReported) return;
+    this.missingGeneratorReported = true;
+    this.onPushLog(`定位线框 ${locatorComponent.assetId} 未绑定货箱生成器，库存货物回退内置立方体。`);
+  }
+
+  /** 同步 thinInstance 批次：按 targetSignature 分组，本批 records 即本排全量，缺失分组整体销毁。 */
   private async syncBatches(
     instances: CargoInstance[],
-    getLocatorByAssetId: GetLocatorByAssetId,
+    locatorEntry: LocatorRuntimeEntry,
     getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
     loadModelTemplate: LoadModelTemplate,
   ): Promise<void> {
@@ -153,7 +139,6 @@ export class ModelGeneratorFetchRuntime {
       else groups.set(instance.targetSignature, [instance]);
     }
 
-    // TODO: 应该根据入参的排号进行 有目标的清理，每次的请求并不是全量的更新
     for (const signature of [...this.batches.keys()]) {
       if (!groups.has(signature)) {
         this.disposeBatch(signature);
@@ -163,9 +148,9 @@ export class ModelGeneratorFetchRuntime {
     for (const [signature, group] of groups) {
       const existing = this.batches.get(signature);
       if (existing) {
-        this.updateBatchMatrices(existing, group, getLocatorByAssetId, getLocatorBoxWorldMatrix);
+        this.updateBatchMatrices(existing, group, locatorEntry, getLocatorBoxWorldMatrix);
       } else {
-        await this.createBatch(signature, group, getLocatorByAssetId, getLocatorBoxWorldMatrix, loadModelTemplate);
+        await this.createBatch(signature, group, locatorEntry, getLocatorBoxWorldMatrix, loadModelTemplate);
       }
     }
   }
@@ -174,7 +159,7 @@ export class ModelGeneratorFetchRuntime {
   private async createBatch(
     signature: string,
     instances: CargoInstance[],
-    getLocatorByAssetId: GetLocatorByAssetId,
+    locatorEntry: LocatorRuntimeEntry,
     getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
     loadModelTemplate: LoadModelTemplate,
   ): Promise<void> {
@@ -201,7 +186,7 @@ export class ModelGeneratorFetchRuntime {
 
       template.dispose();
 
-      const batchMesh = new Mesh(`fetch_batch_${this.generatorEntityId}_${signature.slice(0, 8)}`, this.scene);
+      const batchMesh = new Mesh(`fetch_batch_${this.locatorEntityId}_${signature.slice(0, 8)}`, this.scene);
       vertexData.applyToMesh(batchMesh);
       batchMesh.material = clonedMaterial;
       batchMesh.doNotSerialize = true;
@@ -213,7 +198,7 @@ export class ModelGeneratorFetchRuntime {
         instances: [...instances],
       };
       this.batches.set(signature, batch);
-      this.updateBatchMatrices(batch, instances, getLocatorByAssetId, getLocatorBoxWorldMatrix);
+      this.updateBatchMatrices(batch, instances, locatorEntry, getLocatorBoxWorldMatrix);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.onPushLog(`创建 thinInstance batch 失败：${message}`);
@@ -263,44 +248,33 @@ export class ModelGeneratorFetchRuntime {
     return vertexDatas[0].merge(vertexDatas.slice(1), true);
   }
 
-  /** 更新 thinInstance 矩阵 buffer */
+  /** 更新 thinInstance 矩阵 buffer；格口越界的记录直接跳过，不做位置兜底。 */
   private updateBatchMatrices(
     batch: ThinInstanceBatch,
     instances: CargoInstance[],
-    getLocatorByAssetId: GetLocatorByAssetId,
+    locatorEntry: LocatorRuntimeEntry,
     getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
   ): void {
     batch.instances = instances;
 
-    if (instances.length === 0) {
+    const matrices: Matrix[] = [];
+    for (const instance of instances) {
+      const worldMatrix = getLocatorBoxWorldMatrix(locatorEntry, instance.column, instance.layer);
+      if (worldMatrix) matrices.push(worldMatrix);
+    }
+
+    if (matrices.length === 0) {
       batch.mesh.setEnabled(false);
       return;
     }
 
     batch.mesh.setEnabled(true);
-    const matrices = new Float32Array(instances.length * 16);
-
-    for (let index = 0; index < instances.length; index += 1) {
-      const instance = instances[index];
-      const locator = getLocatorByAssetId(instance.locatorAssetId);
-      if (!locator) {
-        Matrix.Identity().copyToArray(matrices, index * 16);
-        continue;
-      }
-
-      const worldMatrix = getLocatorBoxWorldMatrix(locator, instance.column, instance.layer);
-      if (worldMatrix) {
-        worldMatrix.copyToArray(matrices, index * 16);
-      } else {
-        // 回退：使用 locator root + 简单偏移
-        locator.root.computeWorldMatrix(true);
-        const rootWorld = locator.root.getWorldMatrix();
-        const offset = Matrix.Translation(instance.column * 1.0, instance.layer * 1.0, 0);
-        rootWorld.multiply(offset).copyToArray(matrices, index * 16);
-      }
+    const buffer = new Float32Array(matrices.length * 16);
+    for (let index = 0; index < matrices.length; index += 1) {
+      matrices[index].copyToArray(buffer, index * 16);
     }
 
-    batch.mesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
+    batch.mesh.thinInstanceSetBuffer('matrix', buffer, 16, true);
     batch.mesh.thinInstanceEnablePicking = true;
     batch.mesh.thinInstanceRefreshBoundingInfo?.(true);
   }

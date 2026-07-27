@@ -16,14 +16,10 @@ import {
   type SceneEnvironmentVariant,
   type SceneSettings,
 } from '../model/SceneDocument';
-import type { EntityComponents, LightKind, LocatorStorageDepth, MeshKind, PoiEffectComponent } from '../model/components';
+import type { EntityComponents, LightKind, LocatorComponent, LocatorStorageDepth, MeshKind, PoiEffectComponent } from '../model/components';
 import {
-  MODEL_GENERATOR_MAX_BINDINGS,
   MODEL_GENERATOR_MAX_RULES,
-  MODEL_GENERATOR_TTL_MAX_SECONDS,
-  MODEL_GENERATOR_TTL_MIN_SECONDS,
   sanitizeModelGeneratorComponent,
-  sanitizeModelGeneratorFetchBinding,
   sanitizeModelGeneratorTarget,
 } from '../model/modelGenerator';
 import type { Vector3Data } from '../model/math';
@@ -36,7 +32,7 @@ import {
   normalizeModelDataDrivenConfig,
   normalizeTelemetryBindingComponent,
 } from '../model/telemetryBinding';
-import { logLegacySceneMigrationSummary, migrateLegacySceneV1ToV2 } from './sceneMigration';
+import { logLegacySceneMigrationSummary, logSceneV2ToV3MigrationSummary, migrateLegacySceneV1ToV2, migrateSceneV2ToV3 } from './sceneMigration';
 
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
 const MESH_KINDS: readonly MeshKind[] = ['cube', 'sphere', 'plane'];
@@ -61,7 +57,7 @@ const DEFAULT_SCENE_FILE_UNITS: SceneFileUnits = { length: SCENE_LENGTH_UNIT };
 type PlainObject = Record<string, unknown>;
 
 export function serializeScene(scene: SceneDocument): string {
-  return JSON.stringify({ version: 2, units: { length: SCENE_LENGTH_UNIT }, scene }, null, 2);
+  return JSON.stringify({ version: 3, units: { length: SCENE_LENGTH_UNIT }, scene }, null, 2);
 }
 
 export function deserializeScene(content: string): SceneDocument {
@@ -71,6 +67,9 @@ export function deserializeScene(content: string): SceneDocument {
     const rawScene = assertPlainObject(sceneFile.scene);
     if (sceneFile.version === 1) {
       logLegacySceneMigrationSummary(migrateLegacySceneV1ToV2(rawScene));
+    }
+    if (sceneFile.version <= 2) {
+      logSceneV2ToV3MigrationSummary(migrateSceneV2ToV3(rawScene));
     }
     return normalizeSceneDocument(rawScene);
   } catch (error) {
@@ -88,7 +87,7 @@ function assertSceneFileDocument(value: unknown): SceneFileDocument {
   const hasLegacyShape = keys.length === 2 && keys.includes('version') && keys.includes('scene');
   const hasUnitsShape = keys.length === 3 && keys.includes('version') && keys.includes('units') && keys.includes('scene');
 
-  if ((!hasLegacyShape && !hasUnitsShape) || (document.version !== 1 && document.version !== 2)) {
+  if ((!hasLegacyShape && !hasUnitsShape) || (document.version !== 1 && document.version !== 2 && document.version !== 3)) {
     throwUnsupportedSceneFileError();
   }
 
@@ -548,6 +547,7 @@ function normalizePoiEffect(value: unknown): PoiEffectComponent {
 function normalizeLocator(value: unknown): EntityComponents['locator'] {
   const locator = assertPlainObject(value);
 
+  const fetchDrive = normalizeLocatorFetchDrive(locator.fetchDrive);
   return {
     assetId: assertString(locator.assetId).trim().slice(0, LOCATOR_ASSET_ID_MAX_LENGTH),
     storageDepth: normalizeLocatorStorageDepth(locator.storageDepth),
@@ -559,8 +559,21 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
     startColumn: normalizeLocatorInt(locator.startColumn, 1, 1, 999),
     columnGap: normalizeLocatorGap(locator.columnGap),
     layerGap: normalizeLocatorGap(locator.layerGap),
-    deviceAssetCode: assertString(locator.deviceAssetCode).trim().slice(0, 128),
+    deviceAssetCode: (typeof locator.deviceAssetCode === 'string' ? locator.deviceAssetCode : '').trim().slice(0, 128),
     rowNumber: normalizeLocatorInt(locator.rowNumber, 1, 1, 99),
+    ...(fetchDrive ? { fetchDrive } : {}),
+  };
+}
+
+/** 清理定位线框 fetch 驱动配置，结构非法时整体缺省（不阻断加载）。 */
+function normalizeLocatorFetchDrive(value: unknown): LocatorComponent['fetchDrive'] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as PlainObject;
+  if (typeof record.enabled !== 'boolean') return undefined;
+  const cargoGeneratorId = typeof record.cargoGeneratorId === 'string' ? record.cargoGeneratorId.trim().slice(0, 128) : '';
+  return {
+    enabled: record.enabled,
+    ...(cargoGeneratorId ? { cargoGeneratorId } : {}),
   };
 }
 function normalizeLocatorDimension(value: unknown): number {
@@ -795,17 +808,12 @@ function normalizeJsonValue(value: unknown, depth: number, seen: { count: number
   );
 }
 
-/** 校验并清理模型生成器组件，旧场景缺失该字段时不会进入此分支。 */
+/** 校验并清理模型生成器组件；旧版 fetchBindings/dataSource/metadataTtlSeconds 由迁移处理或宽容忽略。 */
 function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerator'] {
   const modelGenerator = assertPlainObject(value);
-  const metadataTtlSeconds = assertFiniteNumber(modelGenerator.metadataTtlSeconds);
-  if (metadataTtlSeconds < MODEL_GENERATOR_TTL_MIN_SECONDS || metadataTtlSeconds > MODEL_GENERATOR_TTL_MAX_SECONDS) {
-    throwUnsupportedSceneFileError();
-  }
 
   const rules = assertArray(modelGenerator.rules);
-  const fetchBindings = Array.isArray(modelGenerator.fetchBindings) ? modelGenerator.fetchBindings : [];
-  if (rules.length > MODEL_GENERATOR_MAX_RULES || fetchBindings.length > MODEL_GENERATOR_MAX_BINDINGS) {
+  if (rules.length > MODEL_GENERATOR_MAX_RULES) {
     throwUnsupportedSceneFileError();
   }
 
@@ -823,19 +831,13 @@ function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerat
   const normalized = sanitizeModelGeneratorComponent({
     defaultTarget: rawDefaultTarget,
     rules,
-    metadataTtlSeconds,
-    fetchBindings,
-    dataSource: modelGenerator.dataSource,
   });
-  if (!normalized
-    || normalized.rules.length !== rules.length
-    || normalized.fetchBindings.length !== fetchBindings.filter((b: unknown) => sanitizeModelGeneratorFetchBinding(b)).length) {
+  if (!normalized || normalized.rules.length !== rules.length) {
     throwUnsupportedSceneFileError();
   }
 
   const ruleIds = normalized.rules.map((rule) => rule.id);
-  const fetchBindingIds = normalized.fetchBindings.map((b) => b.id);
-  if (new Set(ruleIds).size !== ruleIds.length || new Set(fetchBindingIds).size !== fetchBindingIds.length) {
+  if (new Set(ruleIds).size !== ruleIds.length) {
     throwUnsupportedSceneFileError();
   }
 
