@@ -289,7 +289,8 @@ async function inspectPackageCandidate(packageRoot: string): Promise<PackageDete
 
   try {
     const parsed = JSON.parse(await fs.readFile(sceneFiles[0], 'utf-8')) as unknown;
-    if (!isPlainObject(parsed) || parsed.version !== 1 || !isPlainObject(parsed.scene)) {
+    const sceneVersion = isPlainObject(parsed) ? parsed.version : null;
+    if (!isPlainObject(parsed) || (sceneVersion !== 1 && sceneVersion !== 2 && sceneVersion !== 3) || !isPlainObject(parsed.scene)) {
       return { kind: 'incompatible', reason: '工程包中的场景文件不是当前编辑器场景格式' };
     }
   } catch {

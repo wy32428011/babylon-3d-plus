@@ -225,7 +225,7 @@ function validateRemoveRecentWorkspaceItemRequest(
 function authorizeModelAssetsFromSceneContent(content: string): void {
   try {
     const parsed = JSON.parse(content) as unknown;
-    if (!isPlainObject(parsed) || parsed.version !== 1 || !isPlainObject(parsed.scene)) return;
+    if (!isPlainObject(parsed) || !isSupportedSceneFileVersion(parsed.version) || !isPlainObject(parsed.scene)) return;
 
     if (isPlainObject(parsed.scene.entities)) {
       for (const entity of Object.values(parsed.scene.entities)) {
@@ -289,6 +289,11 @@ function authorizeSceneModelFile(value: string): void {
   const sourcePath = normalizeFilePath(value);
   const extension = sourcePath.toLowerCase();
   if (extension.endsWith('.gltf') || extension.endsWith('.glb')) authorizeAssetFile(sourcePath);
+}
+
+/** 与 renderer SceneSerializer 支持的版本保持一致（v1 原始版、v2 绑定反转、v3 fetchDrive）；版本不符时不做资源授权。 */
+function isSupportedSceneFileVersion(version: unknown): boolean {
+  return version === 1 || version === 2 || version === 3;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
