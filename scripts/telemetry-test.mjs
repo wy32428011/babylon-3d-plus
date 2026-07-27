@@ -75,7 +75,10 @@ function rewriteRelativeImports(directory) {
     if (!entryPath.endsWith('.js')) continue;
     const source = readFileSync(entryPath, 'utf8');
     const rewritten = source.replace(/from '([^']+)'/g, (match, specifier) => {
-      if (!specifier.startsWith('.') || specifier.endsWith('.js')) return match;
+      if (!specifier.startsWith('.')) return match;
+      // 编译产物在纯 Node 环境运行，图片/模型等二进制资产无法加载，替换为空默认导出桩
+      if (/[.](png|jpe?g|webp|gif|svg|glb|gltf)$/.test(specifier)) return 'from "data:text/javascript,export default %22%22"';
+      if (specifier.endsWith('.js')) return match;
       return "from '" + specifier + ".js'";
     });
     if (rewritten !== source) writeFileSync(entryPath, rewritten);

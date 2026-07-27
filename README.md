@@ -317,16 +317,18 @@ npm run demo:stacker:scene
 
 如果 Stacker 模型包不在默认路径，可用 `STACKER_MODEL_DIR` 指向包含 `Stacker.glb`、`meta.json`、`stacker.model.ts` 的目录后再运行生成脚本。
 
+`npm run demo:stacker:mqtt` 默认运行库位驱动全演示（按库位任务自动发布 MQTT，用法见 `docs/stacker-mqtt-full-demo.md`）；旧的单设备模拟器保留为 `demo:stacker:mqtt:legacy`。
+
 打印一条模拟消息，不连接 broker：
 
 ```bash
-npm run demo:stacker:mqtt -- --once --stdout
+npm run demo:stacker:mqtt:legacy -- --once --stdout
 ```
 
 连接本地 MQTT over WebSocket broker 并持续发布 `DDJ2` 数据：
 
 ```bash
-npm run demo:stacker:mqtt
+npm run demo:stacker:mqtt:legacy
 ```
 
 如果没有部署 MQTT broker，加载 `examples/scenes/stacker-mqtt-demo.scene.json` 后保持 MQ 配置中的“启用配置”和“本地模拟”勾选，再点击 Toolbar “运行”；通过预检后，编辑器会在本次运行态内部生成同协议数据，不需要执行外部 broker。普通 Vite 浏览器调试可访问 `http://127.0.0.1:<port>/?demo=stacker-mqtt` 自动打开该演示场景；加载完成后仍需点击“运行”才会启动本地模拟。点击“停止”会断开本次模拟、清理运行时货物和诊断快照，并把模型姿态恢复到运行前，用于验证重复运行不会累计漂移。开发服务器会通过只读 `/__editor_asset__/` 通道加载 `editor-asset://local/` 指向的本地模型、脚本和贴图，正式 Electron 环境仍走受控本地资产协议。
