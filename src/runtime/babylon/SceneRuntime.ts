@@ -105,6 +105,7 @@ import {
   type SpecializedTelemetryDeviceType,
 } from './telemetry/specializedTelemetryBinding';
 import { resolveLocatorBoxIndex, resolveStackerStorageForkReach, resolveStackerStorageTargetOffsets, type StackerStorageTargetOffsets } from './telemetry/stackerStorageLocation';
+import { resolveConveyorCargoTravelHalfRange, wrapConveyorCargoOffset } from './telemetry/conveyorCargoTravel';
 import {
   deviceTelemetryStore,
   readBooleanField,
@@ -3487,17 +3488,22 @@ export class SceneRuntime {
     }
 
     const movementDirection = this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
+    const travelContext = this.resolveConveyorCargoTravelContext(model);
+    const travelHalfRange = resolveConveyorCargoTravelHalfRange(
+      travelContext.spanMeters ?? 0,
+      CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
+    );
     if (!snapshot.faulted && movementDirection !== 0) {
-      model.conveyorTelemetry.cargoTravelOffset = this.wrapConveyorOffset(
-        model.conveyorTelemetry.cargoTravelOffset + movementDirection * CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND * deltaSeconds,
-      );
+      model.conveyorTelemetry.cargoTravelOffset += movementDirection * CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND * deltaSeconds;
     }
+    // 每帧按当前行程收敛偏移，参数化改长度后旧偏移不会把货箱留在机外。
+    model.conveyorTelemetry.cargoTravelOffset = wrapConveyorCargoOffset(model.conveyorTelemetry.cargoTravelOffset, travelHalfRange);
 
     const cargo = this.getOrCreateConveyorCargo(model.assetCode, activeContainerCode);
     this.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.resolveCargoGeneratorForModel(model));
     this.setGeneratedCargoRootPose(
       cargo,
-      this.getConveyorCargoPosition(model),
+      this.getConveyorCargoPosition(model, travelContext),
       this.getNodeWorldRotation(model.root),
     );
     model.conveyorTelemetry.cargoCode = activeContainerCode;
@@ -4455,8 +4461,14 @@ export class SceneRuntime {
     return entry;
   }
 
-  /** 基于输送线几何包围盒计算货物底部支撑点，并沿输送方向加入短循环偏移。 */
-  private getConveyorCargoPosition(model: ModelRuntimeEntry): Vector3 {
+  /** 货箱行程上下文：支撑中心、竖直轴、行走轴与行走跨度，供偏移回绕和定位共用一份包围盒计算。 */
+  private resolveConveyorCargoTravelContext(model: ModelRuntimeEntry): {
+    center: Vector3;
+    upAxis: Vector3;
+    travelAxis: Vector3;
+    travelAxisName: 'x' | 'z';
+    spanMeters: number | null;
+  } {
     const configuredNodes = this.readConveyorMotionConfigs(model).flatMap((config) => this.findConveyorMotionNodes(model, config));
     const conveyorNodes = configuredNodes.length > 0
       ? configuredNodes
@@ -4466,12 +4478,22 @@ export class SceneRuntime {
       ? bounds.minimum.add(bounds.maximum).scale(0.5)
       : model.root.getAbsolutePosition();
     const upAxis = this.getModelAxis(model.root, 'y');
-    const legacyCenter = center.add(upAxis.scale(CONVEYOR_CARGO_SIZE.y * 0.75));
-    const travelAxis = this.getHorizontalModelAxis(model.root, this.readConveyorCargoTravelAxis(model));
+    const travelAxisName = this.readConveyorCargoTravelAxis(model);
+    const travelAxis = this.getHorizontalModelAxis(model.root, travelAxisName);
+    const projected = bounds ? this.projectWorldBoundsOntoAxis(bounds, travelAxis) : null;
+    const spanMeters = projected ? Math.max(0, projected.max - projected.min) : null;
+    return { center, upAxis, travelAxis, travelAxisName, spanMeters };
+  }
 
+  /** 基于输送线行程上下文计算货物底部支撑点，并沿输送方向加入行程偏移。 */
+  private getConveyorCargoPosition(
+    model: ModelRuntimeEntry,
+    travelContext: { center: Vector3; upAxis: Vector3; travelAxis: Vector3 },
+  ): Vector3 {
+    const legacyCenter = travelContext.center.add(travelContext.upAxis.scale(CONVEYOR_CARGO_SIZE.y * 0.75));
     return legacyCenter
-      .subtract(upAxis.scale(CONVEYOR_CARGO_SIZE.y / 2))
-      .add(travelAxis.scale(model.conveyorTelemetry.cargoTravelOffset));
+      .subtract(travelContext.upAxis.scale(CONVEYOR_CARGO_SIZE.y / 2))
+      .add(travelContext.travelAxis.scale(model.conveyorTelemetry.cargoTravelOffset));
   }
 
   /** 推断货物沿模型局部 x/z 哪个方向移动，滚筒线默认垂直于滚筒轴。 */
