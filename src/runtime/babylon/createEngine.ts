@@ -106,7 +106,7 @@ const GRID_LINE_GLOW_ALPHA_PULSE = 0.035;
 const GRID_LINE_GLOW_INTENSITY_BASE = 0.08;
 const GRID_LINE_GLOW_INTENSITY_PULSE = 0.12;
 const BREATHING_SPEED = 0.0018;
-const EDITOR_CAMERA_MIN_RADIUS_METERS = 0.35;
+const EDITOR_CAMERA_MIN_RADIUS_METERS = 0.2;
 const EDITOR_CAMERA_MIN_Z_METERS = 0.02;
 const EDITOR_CAMERA_DEFAULT_ALPHA = Math.PI / 4;
 const EDITOR_CAMERA_DEFAULT_BETA = Math.PI * 0.43;
@@ -404,7 +404,7 @@ function applyCameraSensitivity(camera: ArcRotateCamera, settings: SceneSensitiv
   const pan = sanitizeSceneSensitivityValue(settings.pan);
   const rotate = sanitizeSceneSensitivityValue(settings.rotate);
 
-  camera.wheelPrecision = 400 / (zoom * 10);
+  camera.wheelDeltaPercentage = zoom * 0.005;
   camera.panningSensibility = 10000 / (pan * 10);
   camera.angularSensibilityX = 10000 / (rotate * 10);
   camera.angularSensibilityY = 10000 / (rotate * 10);
@@ -508,6 +508,8 @@ function syncOrthographicBounds(camera: ArcRotateCamera, engine: Engine): void {
 const CAMERA_FLY_KEY_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyC']);
 /** 键盘平移速度：每秒移动距离占相机半径的比例，视野越远移动越快。 */
 const CAMERA_FLY_SPEED_PER_RADIUS_SECOND = 0.6;
+/** 键盘平移最小速度（m/s），防止极端近距离时 WASD 移动过于迟缓。 */
+const CAMERA_FLY_MIN_SPEED_METERS_PER_SECOND = 0.5;
 
 /**
  * 重映射相机鼠标键位：右键旋转、中键平移（Babylon 默认为左键旋转、右键平移）。
@@ -594,7 +596,8 @@ function createCameraFlyKeyControls(
     if (move.lengthSquared() === 0) return;
 
     const deltaSeconds = engine.getDeltaTime() / 1000;
-    move.normalize().scaleInPlace(camera.radius * CAMERA_FLY_SPEED_PER_RADIUS_SECOND * deltaSeconds);
+    const speed = Math.max(CAMERA_FLY_MIN_SPEED_METERS_PER_SECOND, camera.radius * CAMERA_FLY_SPEED_PER_RADIUS_SECOND);
+    move.normalize().scaleInPlace(speed * deltaSeconds);
     camera.target.addInPlace(move);
   });
 
