@@ -612,7 +612,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
         ) : null}
       </div>
 
-      <div className="resource-card-list" aria-label={`${activeLibrary.label}资源列表`}>
+      <div
+        className="resource-card-list"
+        aria-label={`${activeLibrary.label}资源列表`}
+        onWheel={(e) => {
+          e.currentTarget.scrollLeft += e.deltaY;
+        }}
+      >
         {activeLibrary.key === 'model' && modelAssets.length === 0 ? (
           <p className="library-empty-state">尚未导入普通模型包</p>
         ) : null}
