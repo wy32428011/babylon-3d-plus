@@ -1,6 +1,7 @@
 import type { Scene, Vector3 } from '@babylonjs/core';
 import { Quaternion, TransformNode } from '@babylonjs/core';
 import {
+  clampNumber,
   createLocalAxis,
   filterTopLevelMotionNodes,
   findModelNodes,
@@ -17,10 +18,7 @@ import {
   readNumberField,
   type DeviceTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
-import {
-  resolveConveyorCargoTravelHalfRange,
-  wrapConveyorCargoOffset,
-} from '../conveyorCargoTravel';
+import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { readConveyorMotionConfigs } from './specializedModelAssets';
 import { readContainerCode, writeDeviceTelemetryMetadata } from './telemetryMetadata';
@@ -110,7 +108,8 @@ export class ConveyorTelemetryDriver {
       model.conveyorTelemetry.cargoCode = null;
       return;
     }
-    if (model.conveyorTelemetry.cargoCode && model.conveyorTelemetry.cargoCode !== activeContainerCode) {
+    const isNewCargo = model.conveyorTelemetry.cargoCode !== activeContainerCode;
+    if (isNewCargo && model.conveyorTelemetry.cargoCode) {
       this.disposeConveyorCargoForAssetCode(model.assetCode);
     }
 
@@ -120,11 +119,15 @@ export class ConveyorTelemetryDriver {
       travelContext.spanMeters ?? 0,
       CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
     );
+    if (isNewCargo) {
+      // 新货箱从进入端边缘刷出：正向行程从上游端出发，反向行程从下游端出发。
+      model.conveyorTelemetry.cargoTravelOffset = movementDirection < 0 ? travelHalfRange : -travelHalfRange;
+    }
     if (!snapshot.faulted && movementDirection !== 0) {
       model.conveyorTelemetry.cargoTravelOffset += movementDirection * CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND * deltaSeconds;
     }
-    // 每帧按当前行程收敛偏移，参数化改长度后旧偏移不会把货箱留在机外。
-    model.conveyorTelemetry.cargoTravelOffset = wrapConveyorCargoOffset(model.conveyorTelemetry.cargoTravelOffset, travelHalfRange);
+    // 每帧按当前行程钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
+    model.conveyorTelemetry.cargoTravelOffset = clampNumber(model.conveyorTelemetry.cargoTravelOffset, -travelHalfRange, travelHalfRange);
 
     const cargo = this.getOrCreateConveyorCargo(model.assetCode, activeContainerCode);
     this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));

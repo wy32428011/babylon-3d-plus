@@ -1,17 +1,17 @@
 /**
- * 输送线货箱行程计算：货箱偏移量的回绕范围由输送线实际行程跨度和货箱长度决定，
- * 使货箱前沿走到输送线末端才回绕到起点，而不是固定在硬编码窗口内往返。
+ * 输送线货箱行程计算：货箱从进入端边缘刷出，偏移量钳制在由输送线实际行程跨度
+ * 和货箱长度决定的行程范围内，货箱前沿走到输送线末端即停住，不做回绕循环。
  */
 
 /** 行程半径下限，避免跨度数据异常时货箱完全钉死在中心。 */
 const MIN_CARGO_TRAVEL_HALF_RANGE_METERS = 0.01;
 
-/** 包围盒不可用时的回退行程跨度（沿用历史 1.2m 循环窗口）。 */
+/** 包围盒不可用时的回退行程跨度（沿用历史 1.2m 窗口）。 */
 export const CONVEYOR_CARGO_FALLBACK_SPAN_METERS = 1.2;
 
 /**
  * 计算货箱中心相对输送线中心的最大偏移半径。
- * 货箱前沿到达输送线末端即回绕：半径 = 跨度/2 − 货箱长度/2。
+ * 货箱前沿到达输送线末端即停住：半径 = 跨度/2 − 货箱长度/2。
  */
 export function resolveConveyorCargoTravelHalfRange(spanMeters: number, cargoLengthMeters: number): number {
   if (!Number.isFinite(spanMeters) || spanMeters <= 0) {
@@ -19,14 +19,4 @@ export function resolveConveyorCargoTravelHalfRange(spanMeters: number, cargoLen
   }
   const safeCargoLength = Number.isFinite(cargoLengthMeters) && cargoLengthMeters > 0 ? cargoLengthMeters : 0;
   return Math.max(spanMeters / 2 - safeCargoLength / 2, MIN_CARGO_TRAVEL_HALF_RANGE_METERS);
-}
-
-/** 把货箱行程偏移对称回绕到 [-halfRange, +halfRange)，非法输入归零。 */
-export function wrapConveyorCargoOffset(value: number, halfRange: number): number {
-  if (!Number.isFinite(value)) return 0;
-  const safeHalfRange = Number.isFinite(halfRange) && halfRange > 0
-    ? halfRange
-    : MIN_CARGO_TRAVEL_HALF_RANGE_METERS;
-  const loop = safeHalfRange * 2;
-  return ((((value + safeHalfRange) % loop) + loop) % loop) - safeHalfRange;
 }
