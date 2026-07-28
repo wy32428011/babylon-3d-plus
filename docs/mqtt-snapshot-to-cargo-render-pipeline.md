@@ -53,10 +53,10 @@
 |---|---|---|---|
 | 1 | 资源库导入模型包 | Electron IPC 扫描包目录（glb/gltf + meta.json + 可选 .model.ts + textures）→ 复制到 `Assets/Models` → 写 asset-index | `electron/ipc/modelPackageScanner.ts` |
 | 2 | 拖入/点击创建实体 | 创建 `modelAsset` 组件实体 → SceneRuntime 异步加载 GLB → 单位换算到米 → 启动 .model.ts 脚本 | `SceneRuntime` / `ExternalModelScriptRuntime` |
-| 3 | Inspector 配遥测绑定 | 填 `sourceId`/`deviceType`/`assetCode`（MQTT topic 身份），可选 `cargoGeneratorId`（货箱模板来源）、`upstreamAssetCode`（前置设备） | `TelemetryBindingInspector.tsx` |
+| 3 | Inspector 配遥测绑定 | 填 `sourceId`/`deviceType`/`assetCode`（MQTT topic 身份），可选 `cargoGeneratorId`（货箱模板来源） | `TelemetryBindingInspector.tsx` |
 | 4 | Inspector 配货箱生成器 | 生成器实体是纯模板库：`rules[]`（遥测字段匹配 → 目标模型）+ `defaultTarget` + 元数据 TTL | `ModelGeneratorInspector.tsx` |
 | 5 | 点「运行」 | 预检 `validateRuntimePreviewConfig`：MQTT 未启用拦截；模拟器已启用直接放行；真实连接需 broker 地址 + ≥1 个有效订阅 topic + 协议合规（Electron 支持 mqtt/mqtts/ws/wss，浏览器仅 ws/wss）。CAD 导入中也拦截。通过后 `runtimeMode='preview'`，冻结全部编辑写入（`guardRuntimePreviewMutation`） | `editorStore.startRuntimePreview` / `mqttConfigUtils.ts` |
-| 6 | 预览进行中 | SceneViewPanel effect：gizmo 脱手 → `runtime.sync()` 冻结文档（重建 Locator 索引与交接图）→ `beginTelemetryPreview()`（清阵列预览、脚本切 runtime 上下文、刷新生成器）→ `client.updateConfig(mqttConfig)`（连 broker 或起模拟器） | `SceneViewPanel.tsx` / `SceneRuntime.beginTelemetryPreview` |
+| 6 | 预览进行中 | SceneViewPanel effect：gizmo 脱手 → `runtime.sync()` 冻结文档（重建 Locator 索引）→ `beginTelemetryPreview()`（清阵列预览、脚本切 runtime 上下文、刷新生成器）→ `client.updateConfig(mqttConfig)`（连 broker 或起模拟器） | `SceneViewPanel.tsx` / `SceneRuntime.beginTelemetryPreview` |
 | 7 | 再点「运行」停止 | `client.dispose()` 断连 → `endTelemetryPreview()` 按基线恢复设备姿态、销货箱 → 回编辑态恢复 sync | `editorStore.stopRuntimePreview` / `telemetryPreviewBaseline.ts` |
 
 **注意**：设备匹配只认 `assetCode`（topic 中的资产编号），不认模型名称；生成器允许多实例，设备用 `cargoGeneratorId` 反向声明用哪台。
@@ -166,7 +166,7 @@ export const dataDriven = { motion: { ... } };
 | `applyConveyorCargoMotion()` | 读 `containerCode`/`container_quantity` → 生成货箱 → `movement_x` 驱动位移 |
 | `getOrCreateConveyorCargo()` | 按 `assetCode:containerCode` 管理 `ConveyorCargoRuntimeEntry` |
 
-## 五、货箱生命周期与跨设备交接
+## 五、货箱生命周期
 
 ### 5.1 外观生成（两路设备共用）
 
@@ -180,25 +180,15 @@ export const dataDriven = { motion: { ... } };
 
 模板缓存按生成器实例隔离，多生成器互不串扰。
 
-### 5.2 前置设备交接（upstream 链）
+### 5.2 各设备货箱独立
 
-每次场景同步（`runtime.sync()`，含进入预览时的那次）都会按各设备 `upstreamAssetCode` 重建交接图 `rebuildCargoHandoffGraph()` 并诊断（一次性日志）：
+货箱严格按「设备 assetCode + containerCode」建 key，各设备独立创建、独立销毁，不做跨设备交接或条码继承：
 
-| 异常 | 处理 |
-|---|---|
-| upstream 指向自身 | 按入口设备处理 |
-| upstream 在场景不存在 | 按入口设备处理 |
-| 环（A→B→A） | 环上设备全部加入阻断集，停止货箱驱动 |
+- 有 `containerCode`：按该条码创建/复用本设备货箱；条码变化时销旧箱刷新箱。
+- 无 `containerCode` 但 `container_quantity>0`：创建条码为 `__anonymous__` 的匿名占位箱。
+- 两者皆无：销毁本设备全部货箱。
 
-每帧行为：
-
-| 方法 | 说明 |
-|---|---|
-| `isCargoHandoffBlocked()` | 阻断集成员直接销货箱并跳过驱动 |
-| `resolveUpstreamCargoCode()` | 本设备无 `containerCode` 但有货（`container_quantity>0`）时，继承上游货箱条码，保证同货同码 |
-| `disposeHandedOffCargo()` | 本设备生成货箱后，销毁上游被接管的同码货箱（视觉交接） |
-
-无 upstream 的设备是入口设备，货物视作系统外进入；末端设备无货信号即销毁。
+输送机货箱从进入端边缘刷出（`movement_x` 正向从上游端、反向从下游端），沿行程单向移动，到端即停住，不做回绕循环。
 
 ## 六、排障速查
 
@@ -206,6 +196,6 @@ export const dataDriven = { motion: { ... } };
 |---|---|
 | 设备完全不动 | topic `assetCode` 与绑定是否严格一致；`collectSpecializedTelemetryConflictKeys` 是否报冲突 |
 | 货箱是立方体 | 设备未配 `cargoGeneratorId`，或生成器规则未命中且 `defaultTarget` 为空（Console 有一次性提示） |
-| 交接断链 | Console 的 `upstream-missing` / 环检测日志；上游是否真的有货 |
+| 货箱不出现 | 设备快照是否带 `containerCode` 或 `container_quantity>0`；topic `assetCode` 与绑定是否一致 |
 | 停止后姿态没恢复 | `telemetryPreviewBaseline` 捕获/恢复路径 |
 | 脚本参数不生效 | 运行组件属性名与参数 key 是否同名；meta.json 是否由 sync 脚本重新生成 |

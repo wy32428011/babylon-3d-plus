@@ -18,7 +18,6 @@ import { isConveyorRuntimeModel } from './specializedModelAssets';
 import { StackerTelemetryDriver } from './stackerDriver';
 import { ConveyorTelemetryDriver } from './conveyorDriver';
 import {
-  CONVEYOR_ANONYMOUS_CARGO_CODE,
   type ConveyorCargoRuntimeEntry,
   createSpecializedTelemetrySharedState,
   type SpecializedTelemetryDriverContext,
@@ -160,74 +159,6 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   }
 
   // ===== SpecializedTelemetryDriverContext 实现 =====
-
-  /** 判断设备是否处于前置设备环上，环上设备停止全部货箱驱动。 */
-  isCargoHandoffBlocked(model: ModelRuntimeEntry, deviceType: SpecializedTelemetryDeviceType): boolean {
-    const resolved = resolveSpecializedTelemetryBinding({
-      modelAssetCode: model.assetCode,
-      deviceType,
-      binding: model.telemetryBinding,
-    });
-    return resolved ? this.host.isBlockedAssetCode(resolved.assetCode) : false;
-  }
-
-  /** 从前置设备当前持有货物继承条码，保证同一货物在链路中条码连续。 */
-  resolveUpstreamCargoCode(model: ModelRuntimeEntry): string | null {
-    const upstreamAssetCode = model.telemetryBinding?.upstreamAssetCode?.trim();
-    if (!upstreamAssetCode) return null;
-    const upstreamModel = this.findModelByEffectiveAssetCode(upstreamAssetCode);
-    if (!upstreamModel) return null;
-
-    const binding = resolveSpecializedTelemetryBinding({
-      modelAssetCode: upstreamModel.assetCode,
-      deviceType: upstreamModel.stackerCapable ? 'stacker' : 'conveyor',
-      binding: upstreamModel.telemetryBinding,
-    });
-    if (!binding) return null;
-    const snapshot = resolveSpecializedTelemetrySnapshot(deviceTelemetryStore, binding);
-    if (!snapshot || Date.now() - snapshot.receivedAt > binding.staleAfterMs) return null;
-
-    const conveyorCode = upstreamModel.conveyorTelemetry.cargoCode;
-    if (conveyorCode && conveyorCode !== CONVEYOR_ANONYMOUS_CARGO_CODE) return conveyorCode;
-    const forkCodes = [upstreamModel.stackerTelemetry.frontCargoCode, upstreamModel.stackerTelemetry.backCargoCode]
-      .filter((code): code is string => Boolean(code));
-    return forkCodes.length === 1 ? forkCodes[0] : null;
-  }
-
-  /**
-   * 设备生成新货箱后清理其他设备上的同码货箱：仅当原持有设备已不再上报该条码时销毁，
-   * 已入库（placedLocatorKey）的货物不受交接影响。
-   */
-  disposeHandedOffCargo(spawningModel: ModelRuntimeEntry, containerCode: string): void {
-    if (containerCode === CONVEYOR_ANONYMOUS_CARGO_CODE) return;
-    const isOwnerStillReporting = (ownerAssetCode: string): boolean => {
-      const owner = findModelByAssetCode(ownerAssetCode);
-      if (!owner) return false;
-      if (owner.conveyorTelemetry.cargoCode === containerCode) return true;
-      return owner.stackerTelemetry.frontCargoCode === containerCode
-        || owner.stackerTelemetry.backCargoCode === containerCode;
-    };
-    const findModelByAssetCode = (assetCode: string): ModelRuntimeEntry | null => {
-      for (const candidate of this.host.collectModels()) {
-        if (candidate.model.assetCode === assetCode) return candidate.model;
-      }
-      return null;
-    };
-
-    for (const [key, cargo] of this.state.conveyorCargoMeshes.entries()) {
-      if (cargo.containerCode !== containerCode || cargo.assetCode === spawningModel.assetCode) continue;
-      if (isOwnerStillReporting(cargo.assetCode)) continue;
-      this.disposeConveyorCargo(cargo);
-      this.state.conveyorCargoMeshes.delete(key);
-    }
-    for (const [key, cargo] of this.state.stackerCargoMeshes.entries()) {
-      if (cargo.containerCode !== containerCode || cargo.assetCode === spawningModel.assetCode) continue;
-      if (cargo.placedLocatorKey) continue;
-      if (isOwnerStillReporting(cargo.assetCode)) continue;
-      this.disposeStackerCargo(cargo);
-      this.state.stackerCargoMeshes.delete(key);
-    }
-  }
 
   disposeStackerCargo(cargo: StackerCargoRuntimeEntry): void {
     this.host.disposeGeneratedCargo(cargo);
@@ -407,17 +338,5 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       faulted: snapshot.faulted,
       fields: { ...snapshot.fields },
     };
-  }
-
-  /** 按有效资产编号查找唯一设备模型，供前置设备解析使用。 */
-  private findModelByEffectiveAssetCode(assetCode: string): ModelRuntimeEntry | null {
-    const matches: ModelRuntimeEntry[] = [];
-    for (const { model } of this.host.collectModels()) {
-      const bindingAssetCode = model.telemetryBinding?.assetCode?.trim();
-      if ((bindingAssetCode || model.assetCode) === assetCode) {
-        matches.push(model);
-      }
-    }
-    return matches.length === 1 ? matches[0] : null;
   }
 }

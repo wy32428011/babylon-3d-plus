@@ -473,9 +473,7 @@ export class SceneRuntime {
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private telemetryPreviewActive = false;
   private environment: EnvironmentRuntimeEntry | null = null;
-  private cargoHandoffBlockedAssetCodes = new Set<string>();
-  private cargoHandoffBlockedSignature = '';
-  private readonly reportedCargoHandoffIssues = new Set<string>();
+  private readonly reportedCargoIssues = new Set<string>();
   private sharedModelSelectionOutlineSignature = '';
   private outlinedModelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
   private fullSyncCount = 0;
@@ -528,8 +526,6 @@ export class SceneRuntime {
       },
       findLocatorByDevice: (assetCode, x, y, z) => this.findLocatorByDevice(assetCode, x, y, z),
       getLocatorTarget: (key) => this.locatorTargets.get(key) ?? null,
-      isBlockedAssetCode: (code) => this.cargoHandoffBlockedAssetCodes.has(code),
-      reportCargoHandoffIssue: (key, message) => this.reportCargoHandoffIssue(key, message),
       resolveCargoGeneratorForModel: (model) => this.resolveCargoGeneratorForModel(model),
       resolveFetchDriveRowForLocator: (locator) => this.resolveFetchDriveRowForLocator(locator),
       handleFetchRowSync: (row) => this.handleFetchRowSync(row),
@@ -1789,7 +1785,6 @@ export class SceneRuntime {
     this.disposeStaleModelArrayGizmoProxy();
     this.selectedEntityIds = selectedEntityIds;
     this.rebuildLocatorTargetIndex(document);
-    this.rebuildCargoHandoffGraph(document);
     this.rebuildSharedModelSelectionOutline();
   }
 
@@ -1871,65 +1866,10 @@ export class SceneRuntime {
     this.lights.get(entity.id)?.setEnabled(this.isEntityVisible(entity.id));
   }
 
-  /** 依据设备侧 upstreamAssetCode 构建前置设备图，检测环并输出一次性诊断。 */
-  private rebuildCargoHandoffGraph(document: SceneDocument): void {
-    const upstreamByAssetCode = new Map<string, string>();
-    const knownAssetCodes = new Set<string>();
-    for (const entityId of document.entityIds) {
-      const entity = document.entities[entityId];
-      const modelAsset = entity?.components.modelAsset;
-      if (!entity || entity.isFolder || !modelAsset) continue;
-      const binding = entity.components.telemetryBinding;
-      const assetCode = (binding?.assetCode ?? modelAsset.assetCode).trim();
-      if (!assetCode) continue;
-      knownAssetCodes.add(assetCode);
-      const upstreamAssetCode = binding?.upstreamAssetCode?.trim();
-      if (upstreamAssetCode) upstreamByAssetCode.set(assetCode, upstreamAssetCode);
-    }
-
-    for (const [assetCode, upstreamAssetCode] of upstreamByAssetCode) {
-      if (upstreamAssetCode === assetCode) {
-        this.reportCargoHandoffIssue(`upstream-self:${assetCode}`, `设备 ${assetCode} 的前置设备不能是自身，已按入口设备处理。`);
-        continue;
-      }
-      if (!knownAssetCodes.has(upstreamAssetCode)) {
-        this.reportCargoHandoffIssue(
-          `upstream-missing:${assetCode}:${upstreamAssetCode}`,
-          `设备 ${assetCode} 的前置设备 ${upstreamAssetCode} 在场景中不存在，已按入口设备处理。`,
-        );
-      }
-    }
-
-    const blocked = new Set<string>();
-    for (const start of upstreamByAssetCode.keys()) {
-      const visited = new Set<string>([start]);
-      let cursor = upstreamByAssetCode.get(start);
-      while (cursor && upstreamByAssetCode.has(cursor)) {
-        if (visited.has(cursor)) {
-          for (const code of visited) blocked.add(code);
-          blocked.add(cursor);
-          break;
-        }
-        visited.add(cursor);
-        cursor = upstreamByAssetCode.get(cursor);
-      }
-    }
-
-    const signature = [...blocked].sort().join('|');
-    if (signature !== this.cargoHandoffBlockedSignature) {
-      this.cargoHandoffBlockedSignature = signature;
-      if (blocked.size > 0) {
-        this.pushLog(`检测到前置设备环（${[...blocked].join('、')}），相关设备已停止货箱驱动。`);
-      }
-    }
-    this.cargoHandoffBlockedAssetCodes = blocked;
-  }
-
-
-  /** 货箱交接问题按稳定 key 只写一次 Console。 */
-  private reportCargoHandoffIssue(key: string, message: string): void {
-    if (this.reportedCargoHandoffIssues.has(key)) return;
-    this.reportedCargoHandoffIssues.add(key);
+  /** 货箱运行问题按稳定 key 只写一次 Console。 */
+  private reportCargoIssue(key: string, message: string): void {
+    if (this.reportedCargoIssues.has(key)) return;
+    this.reportedCargoIssues.add(key);
     this.pushLog(message);
   }
 
@@ -1939,7 +1879,7 @@ export class SceneRuntime {
     if (!generatorId) return null;
     const generator = this.modelGenerators.get(generatorId) ?? null;
     if (!generator) {
-      this.reportCargoHandoffIssue(
+      this.reportCargoIssue(
         `cargo-generator-missing:${model.assetCode}:${generatorId}`,
         `设备 ${model.assetCode} 绑定的模型生成器已被删除，货箱回退内置几何体。`,
       );
@@ -2056,9 +1996,7 @@ export class SceneRuntime {
     this.entityStates.clear();
     this.syncedEntities.clear();
     this.selectedEntityIds.clear();
-    this.cargoHandoffBlockedAssetCodes = new Set<string>();
-    this.cargoHandoffBlockedSignature = '';
-    this.reportedCargoHandoffIssues.clear();
+    this.reportedCargoIssues.clear();
     this.sharedModelSelectionOutlineSignature = '';
     this.outlinedModelArrayBatches.clear();
   }

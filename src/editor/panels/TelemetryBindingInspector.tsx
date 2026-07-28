@@ -170,48 +170,6 @@ export function TelemetryBindingInspector(props: Props) {
     activeBinding.cargoGeneratorId && !generatorOptions.some((option) => option.id === activeBinding.cargoGeneratorId),
   );
 
-  const selfAssetCode = activeBinding.assetCode ?? props.modelAssetCode;
-  const deviceAssetCodeByEntityId = new Map<string, string>();
-  for (const entityId of scene.entityIds) {
-    if (entityId === props.entityId) continue;
-    const entity = scene.entities[entityId];
-    if (!entity || entity.isFolder) continue;
-    const assetCode = entity.components.telemetryBinding?.assetCode ?? entity.components.modelAsset?.assetCode;
-    if (assetCode && (entity.components.telemetryBinding || entity.components.modelAsset)) {
-      deviceAssetCodeByEntityId.set(entityId, assetCode);
-    }
-  }
-  const upstreamAssetCode = activeBinding.upstreamAssetCode ?? '';
-  const upstreamExists = upstreamAssetCode !== '' && [...deviceAssetCodeByEntityId.values()].includes(upstreamAssetCode);
-  const upstreamWarnings: string[] = [];
-  if (upstreamAssetCode && upstreamAssetCode === selfAssetCode) {
-    upstreamWarnings.push('前置设备不能与自身相同。');
-  }
-  if (upstreamAssetCode && !upstreamExists) {
-    upstreamWarnings.push(`场景中未找到资产编号为「${upstreamAssetCode}」的设备，运行时将按入口设备处理。`);
-  }
-  if (upstreamAssetCode && upstreamExists) {
-    const upstreamByAssetCode = new Map<string, string>();
-    for (const entityId of scene.entityIds) {
-      const entity = scene.entities[entityId];
-      if (!entity || entity.isFolder) continue;
-      const assetCode = entity.components.telemetryBinding?.assetCode ?? entity.components.modelAsset?.assetCode;
-      if (assetCode && !upstreamByAssetCode.has(assetCode)) {
-        upstreamByAssetCode.set(assetCode, entity.components.telemetryBinding?.upstreamAssetCode ?? '');
-      }
-    }
-    const visited = new Set<string>([selfAssetCode]);
-    let cursor: string | undefined = upstreamAssetCode;
-    while (cursor) {
-      if (visited.has(cursor)) {
-        upstreamWarnings.push('检测到前置设备环，运行时相关设备将停止货箱驱动。');
-        break;
-      }
-      visited.add(cursor);
-      cursor = upstreamByAssetCode.get(cursor) || undefined;
-    }
-  }
-
   return (
     <fieldset className="transform-fieldset telemetry-binding-inspector">
       <legend>数据驱动</legend>
@@ -236,20 +194,6 @@ export function TelemetryBindingInspector(props: Props) {
         </select>
       </label>
       {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退内置立方体。</p> : null}
-      <label className="inspector-row">
-        <span>前置设备资产编号</span>
-        <select
-          disabled={props.disabled}
-          value={upstreamAssetCode || '__none__'}
-          onChange={(event) => commit({ upstreamAssetCode: event.target.value !== '__none__' ? event.target.value : undefined })}
-        >
-          <option value="__none__">无（入口设备）</option>
-          {[...new Set(deviceAssetCodeByEntityId.values())].filter(Boolean).map((assetCode) => (
-            <option key={assetCode} value={assetCode}>{assetCode}</option>
-          ))}
-        </select>
-      </label>
-      {upstreamWarnings.map((warning) => <p className="telemetry-runtime-error" key={warning}>{warning}</p>)}
       <label className="number-row"><span>expected(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.expectedIntervalMs} onChange={(event) => commit({ expectedIntervalMs: Number(event.target.value) })} /></label>
       <label className="number-row"><span>stale(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.staleAfterMs} onChange={(event) => commit({ staleAfterMs: Number(event.target.value) })} /></label>
       <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>

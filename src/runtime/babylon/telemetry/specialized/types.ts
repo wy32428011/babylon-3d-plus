@@ -10,10 +10,7 @@ import type {
 } from '../../SceneRuntime';
 import type { RuntimeWorldBounds } from '../../runtimeNodeGeometry';
 import type { DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
-import type {
-  ResolvedSpecializedTelemetryBinding,
-  SpecializedTelemetryDeviceType,
-} from '../specializedTelemetryBinding';
+import type { ResolvedSpecializedTelemetryBinding } from '../specializedTelemetryBinding';
 
 export const STACKER_CALIBRATION_RATE = 4;
 export const STACKER_TARGET_SPEED_METERS_PER_SECOND = 1.2;
@@ -179,8 +176,6 @@ export interface SpecializedTelemetryHost {
   collectModels(): Iterable<{ entityId: string; model: ModelRuntimeEntry }>;
   findLocatorByDevice(assetCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
   getLocatorTarget(key: string): LocatorRuntimeEntry | null;
-  isBlockedAssetCode(assetCode: string): boolean;
-  reportCargoHandoffIssue(key: string, message: string): void;
   resolveCargoGeneratorForModel(model: ModelRuntimeEntry): ModelGeneratorRuntimeEntry | null;
   resolveFetchDriveRowForLocator(locator: LocatorRuntimeEntry): number | null;
   handleFetchRowSync(rowNumber: number): void;
@@ -219,9 +214,6 @@ export interface SpecializedTelemetryDriverContext {
   readonly scene: Scene;
   readonly state: SpecializedTelemetrySharedState;
   readonly host: SpecializedTelemetryHost;
-  isCargoHandoffBlocked(model: ModelRuntimeEntry, deviceType: SpecializedTelemetryDeviceType): boolean;
-  resolveUpstreamCargoCode(model: ModelRuntimeEntry): string | null;
-  disposeHandedOffCargo(spawningModel: ModelRuntimeEntry, containerCode: string): void;
   disposeStackerCargo(cargo: StackerCargoRuntimeEntry): void;
   disposeConveyorCargo(cargo: ConveyorCargoRuntimeEntry): void;
   getOrCreateStackerCargo(assetCode: string, containerCode: string): StackerCargoRuntimeEntry;

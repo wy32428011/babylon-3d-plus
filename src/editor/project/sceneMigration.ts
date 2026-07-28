@@ -9,7 +9,6 @@ type LegacyGeneratorBinding = {
 
 type MigrationSummary = {
   migratedCargoGenerators: number;
-  migratedUpstreams: number;
   warnings: string[];
 };
 
@@ -77,12 +76,12 @@ function ensureRawTelemetryBinding(components: PlainObject, binding: LegacyGener
 }
 
 /**
- * 将 v1 场景的生成器设备绑定与仓储流配置迁移为 v2 结构：
- * bindings 反转为设备侧 cargoGeneratorId，warehouseFlow 三设备链转为 upstreamAssetCode。
+ * 将 v1 场景的生成器设备绑定迁移为 v2 结构：bindings 反转为设备侧 cargoGeneratorId，
+ * warehouseFlow 旧字段随前置设备概念一并丢弃。
  * 直接修改传入的原始场景对象，返回迁移摘要供 Console 输出。
  */
 export function migrateLegacySceneV1ToV2(scene: PlainObject): MigrationSummary {
-  const summary: MigrationSummary = { migratedCargoGenerators: 0, migratedUpstreams: 0, warnings: [] };
+  const summary: MigrationSummary = { migratedCargoGenerators: 0, warnings: [] };
   if (!isPlainObject(scene.entities)) return summary;
 
   const generatorEntries: Array<readonly [string, PlainObject]> = [];
@@ -109,33 +108,11 @@ export function migrateLegacySceneV1ToV2(scene: PlainObject): MigrationSummary {
           }))
       : [];
 
-    const devicesByBindingId = new Map<string, PlainObject>();
     for (const binding of legacyBindings) {
       const device = findDeviceByLegacyBinding(binding, deviceEntries, summary.warnings);
       if (!device) continue;
       ensureRawTelemetryBinding(device, binding).cargoGeneratorId = generatorId;
       summary.migratedCargoGenerators += 1;
-      if (binding.id) devicesByBindingId.set(binding.id, device);
-    }
-
-    const flow = isPlainObject(generator.warehouseFlow) ? generator.warehouseFlow : null;
-    if (flow?.enabled === true) {
-      const bindingById = new Map(legacyBindings.map((binding) => [binding.id, binding]));
-      const inbound = bindingById.get(readText(flow.inboundBindingId));
-      const stacker = bindingById.get(readText(flow.stackerBindingId));
-      const outbound = bindingById.get(readText(flow.outboundBindingId));
-      const setUpstream = (deviceBinding: LegacyGeneratorBinding | undefined, upstreamBinding: LegacyGeneratorBinding | undefined, label: string) => {
-        if (!deviceBinding || !upstreamBinding) return;
-        const device = devicesByBindingId.get(deviceBinding.id);
-        if (!device) {
-          summary.warnings.push(`仓储流「${label}」设备「${deviceBinding.assetCode}」未匹配，跳过前置设备迁移。`);
-          return;
-        }
-        ensureRawTelemetryBinding(device, deviceBinding).upstreamAssetCode = upstreamBinding.assetCode;
-        summary.migratedUpstreams += 1;
-      };
-      setUpstream(stacker, inbound, '堆垛机');
-      setUpstream(outbound, stacker, '出库输送机');
     }
 
     delete generator.bindings;
@@ -147,9 +124,9 @@ export function migrateLegacySceneV1ToV2(scene: PlainObject): MigrationSummary {
 
 /** 输出迁移摘要到控制台，供编辑器 Console 面板镜像展示。 */
 export function logLegacySceneMigrationSummary(summary: MigrationSummary): void {
-  if (summary.migratedCargoGenerators === 0 && summary.migratedUpstreams === 0 && summary.warnings.length === 0) return;
+  if (summary.migratedCargoGenerators === 0 && summary.warnings.length === 0) return;
   console.info(
-    `[场景迁移] v1 → v2：反转设备绑定 ${summary.migratedCargoGenerators} 条，迁移前置设备 ${summary.migratedUpstreams} 条。`,
+    `[场景迁移] v1 → v2：反转设备绑定 ${summary.migratedCargoGenerators} 条。`,
   );
   for (const warning of summary.warnings) {
     console.warn(`[场景迁移] ${warning}`);

@@ -53,7 +53,7 @@ function readBinding(scene: PlainObject, entityId: string): PlainObject {
   return binding;
 }
 
-test('v1 场景迁移：生成器 bindings 反转为设备 cargoGeneratorId，warehouseFlow 转为 upstream 链', () => {
+test('v1 场景迁移：生成器 bindings 反转为设备 cargoGeneratorId，warehouseFlow 字段随前置设备概念一并丢弃', () => {
   const scene = createLegacyScene({
     entity_gen: createEntity('entity_gen', {
       modelGenerator: createGeneratorComponent({
@@ -72,7 +72,6 @@ test('v1 场景迁移：生成器 bindings 反转为设备 cargoGeneratorId，wa
 
   const summary = migrateLegacySceneV1ToV2(scene);
   assert.equal(summary.migratedCargoGenerators, 3);
-  assert.equal(summary.migratedUpstreams, 2);
   assert.deepEqual(summary.warnings, []);
 
   const entities = scene.entities as Record<string, PlainObject>;
@@ -88,8 +87,8 @@ test('v1 场景迁移：生成器 bindings 反转为设备 cargoGeneratorId，wa
   assert.equal(stacker.cargoGeneratorId, 'entity_gen');
   assert.equal(outbound.cargoGeneratorId, 'entity_gen');
   assert.equal(inbound.upstreamAssetCode, undefined);
-  assert.equal(stacker.upstreamAssetCode, '1004');
-  assert.equal(outbound.upstreamAssetCode, 'DDJ2');
+  assert.equal(stacker.upstreamAssetCode, undefined);
+  assert.equal(outbound.upstreamAssetCode, undefined);
 });
 
 test('v1 场景迁移：匹配到多台或零台设备的旧绑定被跳过并记录警告，其余绑定照常迁移', () => {
@@ -134,7 +133,7 @@ test('v1 场景迁移：设备缺少 telemetryBinding 时按旧绑定合成最�
   assert.equal(binding.deviceType, 'conveyor');
 });
 
-test('v1 场景迁移：warehouseFlow 未启用时只反转绑定，不写入 upstream', () => {
+test('v1 场景迁移：warehouseFlow 未启用时只反转绑定，同样不写入 upstreamAssetCode', () => {
   const scene = createLegacyScene({
     entity_gen: createEntity('entity_gen', {
       modelGenerator: createGeneratorComponent({
@@ -147,7 +146,6 @@ test('v1 场景迁移：warehouseFlow 未启用时只反转绑定，不写入 up
 
   const summary = migrateLegacySceneV1ToV2(scene);
   assert.equal(summary.migratedCargoGenerators, 1);
-  assert.equal(summary.migratedUpstreams, 0);
   const binding = readBinding(scene, 'entity_inbound');
   assert.equal(binding.cargoGeneratorId, 'entity_gen');
   assert.equal(binding.upstreamAssetCode, undefined);

@@ -491,11 +491,6 @@ export class StackerTelemetryDriver {
     targetLocator: LocatorRuntimeEntry | null,
     targetPosition: Vector3 | null,
   ): void {
-    if (this.context.isCargoHandoffBlocked(model, 'stacker')) {
-      this.disposeStackerCargoForAssetCode(model.assetCode);
-      return;
-    }
-
     const frontContainerCode = readContainerCode(snapshot, 'front_containerCode');
     const backContainerCode = readContainerCode(snapshot, 'back_containerCode');
 
@@ -553,7 +548,6 @@ export class StackerTelemetryDriver {
       }
       this.setStackerForkCargoCode(model, side, null);
     }
-    this.context.disposeHandedOffCargo(model, activeContainerCode);
   }
 
   /** 在条码清空但仍处于放货命令时，沿用上一帧货物编号完成落位。 */

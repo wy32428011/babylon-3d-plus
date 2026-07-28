@@ -91,18 +91,9 @@ export class ConveyorTelemetryDriver {
     snapshot: DeviceTelemetrySnapshot,
     deltaSeconds: number,
   ): void {
-    if (this.context.isCargoHandoffBlocked(model, 'conveyor')) {
-      this.disposeConveyorCargoForAssetCode(model.assetCode);
-      model.conveyorTelemetry.cargoCode = null;
-      model.conveyorTelemetry.cargoTravelOffset = 0;
-      return;
-    }
-
     const containerCode = readContainerCode(snapshot, 'containerCode');
     const containerQuantity = readNumberField(snapshot.fields, 'container_quantity') ?? 0;
-    const activeContainerCode = containerCode ?? (containerQuantity > 0
-      ? this.context.resolveUpstreamCargoCode(model) ?? CONVEYOR_ANONYMOUS_CARGO_CODE
-      : null);
+    const activeContainerCode = containerCode ?? (containerQuantity > 0 ? CONVEYOR_ANONYMOUS_CARGO_CODE : null);
     if (!activeContainerCode) {
       this.disposeConveyorCargoForAssetCode(model.assetCode);
       model.conveyorTelemetry.cargoCode = null;
@@ -137,7 +128,6 @@ export class ConveyorTelemetryDriver {
       getNodeWorldRotation(model.root),
     );
     model.conveyorTelemetry.cargoCode = activeContainerCode;
-    this.context.disposeHandedOffCargo(model, activeContainerCode);
   }
 
   /** 按 motion.fields 读取输送线方向，支持模型脚本自定义 actionMap。 */
