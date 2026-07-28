@@ -50,24 +50,25 @@ test('专用驱动只把完全相同主键的多个模型判定为冲突', () =>
   assert.deepEqual([...conflicts], [first.key]);
 });
 
-test('SceneRuntime 使用专用绑定解析器执行冲突检测和完整主键查询', () => {
-  const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
+test('SpecializedTelemetryRuntime 使用专用绑定解析器执行冲突检测和完整主键查询', () => {
+  const source = readFileSync('src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime.ts', 'utf8');
   assert.match(source, /resolveSpecializedTelemetryBinding/);
   assert.match(source, /collectSpecializedTelemetryConflictKeys/);
   assert.match(source, /resolveSpecializedTelemetrySnapshot/);
 });
-test('SceneRuntime 只在所有专用驱动都无有效绑定时清理诊断', () => {
-  const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
-  const collectStart = source.indexOf('private collectSpecializedTelemetryModels');
-  const collectEnd = source.indexOf('private resolveSpecializedTelemetryDeviceType', collectStart);
-  const collectBlock = source.slice(collectStart, collectEnd);
-  const applyStart = source.indexOf('private applyDeviceTelemetryFrame');
-  const applyEnd = source.indexOf('private applyStackerTelemetryFrame', applyStart);
-  const applyBlock = source.slice(applyStart, applyEnd);
-
+test('SpecializedTelemetryRuntime 只在所有专用驱动都无有效绑定时清理诊断', () => {
+  const facadeSource = readFileSync('src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime.ts', 'utf8');
+  const collectStart = facadeSource.indexOf('private collectSpecializedTelemetryModels');
+  const collectEnd = facadeSource.indexOf('private resolveSpecializedTelemetryDeviceType', collectStart);
+  const collectBlock = facadeSource.slice(collectStart, collectEnd);
   assert.doesNotMatch(collectBlock, /clearSpecializedTelemetryDiagnostics/);
-  assert.match(source, /private clearInactiveSpecializedTelemetryDiagnostics/);
-  assert.match(applyBlock, /clearInactiveSpecializedTelemetryDiagnostics/);
+  assert.match(facadeSource, /private clearInactiveSpecializedTelemetryDiagnostics/);
+
+  const runtimeSource = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
+  const applyStart = runtimeSource.indexOf('private applyDeviceTelemetryFrame');
+  const applyEnd = runtimeSource.indexOf('private captureReadyTelemetryPreviewBaselines', applyStart);
+  const applyBlock = runtimeSource.slice(applyStart, applyEnd);
+  assert.match(applyBlock, /specializedTelemetryRuntime\.clearInactiveDiagnostics\(\)/);
 });
 test('专用驱动尊重禁用状态并拒绝设备类型错配', () => {
   const disabled = resolveSpecializedTelemetryBinding({
@@ -120,8 +121,8 @@ function createSnapshot(overrides: Partial<DeviceTelemetrySnapshot> = {}): Devic
   };
 }
 
-test('SceneRuntime 按 Locator storageDepth 属性判断一段或两段货叉，并在目标缺失时禁止伸出', () => {
-  const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
+test('StackerTelemetryDriver 按 Locator storageDepth 属性判断一段或两段货叉，并在目标缺失时禁止伸出', () => {
+  const source = readFileSync('src/runtime/babylon/telemetry/specialized/stackerDriver.ts', 'utf8');
   assert.match(source, /resolveStackerStorageForkReach\(targetLocator\.storageDepth/);
   assert.match(source, /snapshot\.hasTargetLocation[\s\S]*resolveStackerStorageForkReach\(targetLocator\.storageDepth/);
   assert.match(source, /distanceX !== null && targetTravelOffset === null/);
@@ -159,10 +160,10 @@ test('SceneRuntime 在任何 Stacker 遥测运动前捕获未运动的货叉世�
   const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
   assert.match(
     source,
-    /private captureReadyTelemetryPreviewBaselines[\s\S]*resolveSpecializedTelemetryDeviceType\(model\) === 'stacker'[\s\S]*getStackerTargetReferencePosition\(model\)/,
+    /private captureReadyTelemetryPreviewBaselines[\s\S]*specializedTelemetryRuntime\.resolveDeviceType\(model\) === 'stacker'[\s\S]*specializedTelemetryRuntime\.primeStackerTargetReference\(model\)/,
   );
   assert.match(
     source,
-    /captureReadyTelemetryPreviewBaselines\(\);[\s\S]*applyStackerTelemetryFrame\(\);/,
+    /captureReadyTelemetryPreviewBaselines\(\);[\s\S]*specializedTelemetryRuntime\.applyFrame\(deltaSeconds\)/,
   );
 });

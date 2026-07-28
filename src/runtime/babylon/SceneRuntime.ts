@@ -104,8 +104,7 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from './telemetry/specializedTelemetryBinding';
-import { resolveLocatorBoxIndex, resolveStackerStorageForkReach, resolveStackerStorageTargetOffsets, type StackerStorageTargetOffsets } from './telemetry/stackerStorageLocation';
-import { resolveConveyorCargoTravelHalfRange, wrapConveyorCargoOffset } from './telemetry/conveyorCargoTravel';
+import { resolveLocatorBoxIndex, resolveStackerStorageForkReach } from './telemetry/stackerStorageLocation';
 import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from './runtimeValueUtils';
 import {
   clampNumber,
@@ -161,6 +160,33 @@ import {
   EntityGroupTranslationPreview,
   type EntityGroupTranslationTarget,
 } from './EntityGroupTranslationPreview';
+import {
+  createConveyorTelemetryState,
+  createStackerTelemetryState,
+  isConveyorModelAsset,
+  isConveyorRuntimeModel,
+  isStackerModelAsset,
+  resetConveyorTelemetryState,
+  resetStackerTelemetryState,
+} from './telemetry/specialized/specializedModelAssets';
+import {
+  SpecializedTelemetryRuntime,
+} from './telemetry/specialized/SpecializedTelemetryRuntime';
+import type { SpecializedTelemetryHost } from './telemetry/specialized/types';
+import {
+  STACKER_CARGO_COLOR,
+  STACKER_CARGO_EMISSIVE_COLOR,
+  STACKER_CARGO_SIZE,
+  CONVEYOR_CARGO_COLOR,
+  CONVEYOR_CARGO_EMISSIVE_COLOR,
+  CONVEYOR_CARGO_SIZE,
+} from './telemetry/specialized/types';
+import type {
+  ConveyorModelTelemetryState,
+  GeneratedCargoKind,
+  GeneratedCargoRuntimeEntry,
+  StackerModelTelemetryState,
+} from './telemetry/specialized/types';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
 const SELECTED_EMISSIVE_COLOR = '#332400';
@@ -171,36 +197,6 @@ const MODEL_GENERATOR_MARKER_ALPHA = 0.65;
 const LOCATOR_SURFACE_ALPHA = 0.025;
 const SELECTED_LOCATOR_SURFACE_ALPHA = 0.08;
 const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
-const STACKER_CALIBRATION_RATE = 4;
-const STACKER_TARGET_SPEED_METERS_PER_SECOND = 1.2;
-const STACKER_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND = 0.8;
-const STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND = 0.3;
-const STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND = 0.25;
-const STACKER_RPM_TO_METERS_PER_SECOND = 0.01;
-const STACKER_CARGO_COLOR = '#d8a03a';
-const STACKER_CARGO_EMISSIVE_COLOR = '#3a2508';
-const STACKER_CARGO_SIZE = new Vector3(0.8, 0.42, 0.8);
-const CONVEYOR_CARGO_COLOR = '#4fa3d8';
-const CONVEYOR_CARGO_EMISSIVE_COLOR = '#09283a';
-const CONVEYOR_CARGO_SIZE = new Vector3(0.72, 0.34, 0.72);
-const CONVEYOR_ANONYMOUS_CARGO_CODE = '__anonymous__';
-const CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS = 1.2;
-const CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND = 180;
-const CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND = 0.3;
-const STACKER_FALLBACK_FIXED_NODE_NAMES = ['guidaoshang.1', 'guidaoxia.2'];
-const STACKER_FALLBACK_TRAVEL_NODE_NAMES = [
-  'dingbuhuagui2.3',
-  'dingbuhuagui1.4',
-  'dingbu.5',
-  'dibu.6',
-  'lizhu1.11',
-  'lizhu2.12',
-  'dianji.7',
-  'caozuotai.8',
-  'xiang.13',
-  'huocha.9',
-  'huocha2.10',
-];
 
 type EditorMeshMetadata = {
   [EDITOR_ENTITY_ID_METADATA_KEY]?: unknown;
@@ -252,7 +248,7 @@ type EntityArrayPreviewEntry = {
   placementSignature: string;
 };
 
-type ModelRuntimeEntry = {
+export type ModelRuntimeEntry = {
   sourceUrl: string;
   assetRevision: string | null;
   assetSignature: string;
@@ -298,12 +294,6 @@ type ModelArrayParameterVariantRuntimeEntry = {
   model: ModelRuntimeEntry;
 };
 
-type SpecializedTelemetryRuntimeEntry = {
-  entityId: string;
-  model: ModelRuntimeEntry;
-  binding: ResolvedSpecializedTelemetryBinding;
-};
-
 type ModelGeneratorMarkerRuntimeEntry = {
   mesh: Mesh;
   material: StandardMaterial;
@@ -324,7 +314,7 @@ type ModelGeneratorModelOutputRuntimeEntry = {
 type ModelGeneratorOutputRuntimeEntry = ModelGeneratorMeshOutputRuntimeEntry | ModelGeneratorModelOutputRuntimeEntry;
 
 /** 可复用生成输出宿主，统一承载仓储货物和普通设备货物的异步模型生命周期。 */
-type GeneratedOutputOwnerRuntimeEntry = {
+export type GeneratedOutputOwnerRuntimeEntry = {
   entityId: string;
   entityName: string;
   editorEntityId: string | null;
@@ -341,7 +331,7 @@ type GeneratedOutputOwnerRuntimeEntry = {
   onTerminalLoadFailure?: () => void;
 };
 
-type ModelGeneratorRuntimeEntry = GeneratedOutputOwnerRuntimeEntry & {
+export type ModelGeneratorRuntimeEntry = GeneratedOutputOwnerRuntimeEntry & {
   markerRoot: TransformNode;
   marker: ModelGeneratorMarkerRuntimeEntry;
   selected: boolean;
@@ -370,104 +360,6 @@ export type LocatorRuntimeEntry = {
   deviceAssetCode: string;
   rowNumber: number;
   storageDepth: LocatorStorageDepth;
-};
-
-type StackerTravelConstraint = {
-  axis: Vector3;
-  trackMin: number;
-  trackMax: number;
-  movingMin: number;
-  movingMax: number;
-};
-
-type StackerForkSide = 'front' | 'back';
-
-type StackerForkReachConfig = {
-  stageOne: number;
-  stageTwo: number;
-  total: number;
-};
-
-type StackerForkOffsetParts = {
-  totalOffset: number;
-  stageOneOffset: number;
-  stageTwoOffset: number;
-  activeStage: 0 | 1 | 2;
-};
-
-type StackerForkNodeGroups = {
-  frontNodes: TransformNode[];
-  backNodes: TransformNode[];
-  frontStageOneNodes: TransformNode[];
-  frontStageTwoNodes: TransformNode[];
-  backStageOneNodes: TransformNode[];
-  backStageTwoNodes: TransformNode[];
-};
-
-type GeneratedCargoKind = 'stacker' | 'conveyor';
-
-type GeneratedCargoFallbackRuntimeEntry = {
-  mesh: Mesh;
-  material: StandardMaterial;
-};
-
-/** 普通自动货物共享字段；root 始终表示货物底部支撑点。 */
-type GeneratedCargoRuntimeEntry = {
-  assetCode: string;
-  containerCode: string;
-  root: TransformNode;
-  outputOwner: GeneratedOutputOwnerRuntimeEntry | null;
-  fallback: GeneratedCargoFallbackRuntimeEntry | null;
-  /** 货箱模板来源生成器实体 ID；null 表示内置几何体回退。 */
-  generatorEntityId: string | null;
-};
-
-type StackerCargoRuntimeEntry = GeneratedCargoRuntimeEntry & {
-  placedLocatorKey: string | null;
-};
-
-type StackerModelTelemetryState = {
-  rootBasePosition: Vector3;
-  /** 行走机构的虚拟世界位置；模型根节点和上下轨道保持静止。 */
-  rootPosition: Vector3 | null;
-  /** 基于固定轨道和行走机构基线计算的轨道约束，防止遥测把机体推出轨道。 */
-  travelConstraint: StackerTravelConstraint | null;
-  /** 货叉未伸出时用于对齐库位的世界坐标锚点。 */
-  targetReferencePosition: Vector3 | null;
-  liftOffset: number;
-  frontForkOffset: number;
-  backForkOffset: number;
-  lastFrameTimeMs: number;
-  frontForkDirection: number;
-  backForkDirection: number;
-  frontCargoCode: string | null;
-  backCargoCode: string | null;
-  nodeBaselines: Map<TransformNode, Vector3>;
-  lastTargetKey: string | null;
-};
-
-type ConveyorNodeBaseline = {
-  position: Vector3;
-};
-
-type ConveyorModelTelemetryState = {
-  cargoCode: string | null;
-  cargoTravelOffset: number;
-  motionOffsets: Map<string, number>;
-  nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;
-};
-
-type ConveyorCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
-
-type ConveyorMotionConfig = {
-  key: string;
-  fields: string[];
-  kind: 'rotate' | 'translate';
-  axis: 'x' | 'y' | 'z';
-  actionMap: Record<string, number>;
-  speed: number;
-  nodes: string[];
-  fallbackPattern: string | null;
 };
 
 type CadReferenceRuntimeEntry = {
@@ -556,8 +448,6 @@ export class SceneRuntime {
   private folderGroupGizmoProxy: { folderId: string; entityIds: string[]; node: TransformNode } | null = null;
   private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
   private readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
-  private readonly stackerCargoMeshes = new Map<string, StackerCargoRuntimeEntry>();
-  private readonly conveyorCargoMeshes = new Map<string, ConveyorCargoRuntimeEntry>();
   /** fetch 数据驱动的定位线框渲染运行时，按定位线框实体组织。 */
   private readonly locatorFetchRuntimes = new Map<string, LocatorFetchRuntime>();
   /** fetch 请求代际戳与每排最新请求序号：响应仅在仍是该排最新请求时应用，防止乱序覆盖。 */
@@ -579,12 +469,8 @@ export class SceneRuntime {
   private readonly groupTranslationPreviewObserver: Nullable<Observer<Scene>>;
   private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
   private readonly poiEffectRuntime: PoiEffectRuntime;
-  private readonly reportedMissingTargets = new Set<string>();
+  private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
-  private readonly reportedInvalidStackerBoxTargets = new Set<string>();
-  private readonly lastReportedStackerTargetSignatures = new Map<string, string>();
-  private readonly reportedFaults = new Map<string, string>();
-  private readonly reportedStatuses = new Map<string, string>();
   private telemetryPreviewActive = false;
   private environment: EnvironmentRuntimeEntry | null = null;
   private cargoHandoffBlockedAssetCodes = new Set<string>();
@@ -619,10 +505,45 @@ export class SceneRuntime {
       afterModelMutation: (entityId) => this.refreshModelArrayRuntimeRepresentationByEntityId(entityId),
     });
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
+    this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(scene, this.createSpecializedTelemetryHost());
     this.groupTranslationPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
       this.flushGroupTranslationPreview();
     });
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
+  }
+
+  /** 构造专用遥测门面所需的宿主委托对象。 */
+  private createSpecializedTelemetryHost(): SpecializedTelemetryHost {
+    return {
+      pushLog: (message) => this.pushLog(message),
+      collectModels: () => {
+        const models: { entityId: string; model: ModelRuntimeEntry }[] = [];
+        for (const [entityId, model] of this.models.entries()) {
+          models.push({ entityId, model });
+        }
+        for (const variant of this.modelArrayParameterVariants.values()) {
+          models.push({ entityId: variant.representativeEntityId, model: variant.model });
+        }
+        return models;
+      },
+      findLocatorByDevice: (assetCode, x, y, z) => this.findLocatorByDevice(assetCode, x, y, z),
+      getLocatorTarget: (key) => this.locatorTargets.get(key) ?? null,
+      isBlockedAssetCode: (code) => this.cargoHandoffBlockedAssetCodes.has(code),
+      reportCargoHandoffIssue: (key, message) => this.reportCargoHandoffIssue(key, message),
+      resolveCargoGeneratorForModel: (model) => this.resolveCargoGeneratorForModel(model),
+      resolveFetchDriveRowForLocator: (locator) => this.resolveFetchDriveRowForLocator(locator),
+      handleFetchRowSync: (row) => this.handleFetchRowSync(row),
+      keepCargoForFetchRowSync: (row, assetCode, containerCode) => this.keepCargoForFetchRowSync(row, assetCode, containerCode),
+      updateExternalScriptContext: (model, telemetry) => this.updateModelExternalScriptRuntimeContext(model, 'runtime', telemetry, true),
+      refreshModelArrayRepresentation: (model) => this.refreshModelArrayRuntimeRepresentation(model),
+      getGeneratedCargoFallbackSpec: (kind) => this.getGeneratedCargoFallbackSpec(kind),
+      ensureGeneratedCargoFallback: (cargo, kind) => this.ensureGeneratedCargoFallback(cargo, kind),
+      ensureGeneratedCargoOutputOwner: (cargo, kind, component, snapshot) => this.ensureGeneratedCargoOutputOwner(cargo, kind, component, snapshot),
+      syncGeneratedCargoVisual: (cargo, kind, snapshot, generator) => this.syncGeneratedCargoVisual(cargo, kind, snapshot, generator),
+      setGeneratedCargoRootPose: (cargo, position, rotation) => this.setGeneratedCargoRootPose(cargo, position, rotation),
+      disposeGeneratedCargo: (cargo) => this.disposeGeneratedCargo(cargo),
+      getModelWorldBounds: (model) => this.getModelWorldBounds(model),
+    } as SpecializedTelemetryHost;
   }
 
   /** 为 fetch thinInstance 加载模型模板：走完整资产加载管线并应用单位换算。 */
@@ -787,8 +708,9 @@ export class SceneRuntime {
   }
 
   /** 放货到 fetch 驱动定位线框后保留 MQTT 货箱，等待单排同步响应时销毁，避免网络延迟造成视觉空窗；返回是否为首次登记。 */
-  private keepCargoForFetchRowSync(rowNumber: number, assetCode: string, containerCode: string): boolean {
-    const key = this.getStackerCargoKey(assetCode, containerCode);
+  private keepCargoForFetchRowSync(rowNumber: number | null, assetCode: string, containerCode: string): boolean {
+    if (rowNumber === null) return false;
+    const key = JSON.stringify([assetCode, containerCode]);
     let keys = this.fetchKeptCargoByRow.get(rowNumber);
     if (!keys) {
       keys = new Set();
@@ -805,10 +727,7 @@ export class SceneRuntime {
     if (!keys) return;
     this.fetchKeptCargoByRow.delete(rowNumber);
     for (const key of keys) {
-      const cargo = this.stackerCargoMeshes.get(key);
-      if (!cargo) continue;
-      this.disposeStackerCargo(cargo);
-      this.stackerCargoMeshes.delete(key);
+      this.specializedTelemetryRuntime.disposeStackerCargoByKey(key);
     }
   }
 
@@ -844,7 +763,7 @@ export class SceneRuntime {
 
     this.telemetryPreviewActive = false;
     this.genericTelemetryMotionRuntime.endPreview();
-    this.disposeAllTelemetryRuntimeCargo();
+    this.specializedTelemetryRuntime.disposeAllCargo();
     for (const fetchRuntime of this.locatorFetchRuntimes.values()) {
       fetchRuntime.clearAllBatches();
     }
@@ -856,8 +775,8 @@ export class SceneRuntime {
         restoreModelTelemetryPreviewBaseline(model.telemetryPreviewBaseline);
         model.telemetryPreviewBaseline = null;
       }
-      this.resetStackerTelemetryState(model);
-      this.resetConveyorTelemetryState(model);
+      resetStackerTelemetryState(model);
+      resetConveyorTelemetryState(model);
     }
     for (const owner of this.generatedOutputOwners.values()) {
       if (owner.output?.kind !== 'model') continue;
@@ -866,8 +785,8 @@ export class SceneRuntime {
         restoreModelTelemetryPreviewBaseline(model.telemetryPreviewBaseline);
         model.telemetryPreviewBaseline = null;
       }
-      this.resetStackerTelemetryState(model);
-      this.resetConveyorTelemetryState(model);
+      resetStackerTelemetryState(model);
+      resetConveyorTelemetryState(model);
     }
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('edit', null);
@@ -2006,16 +1925,6 @@ export class SceneRuntime {
     this.cargoHandoffBlockedAssetCodes = blocked;
   }
 
-  /** 判断设备是否处于前置设备环上，环上设备停止全部货箱驱动。 */
-  private isCargoHandoffBlocked(model: ModelRuntimeEntry, deviceType: SpecializedTelemetryDeviceType): boolean {
-    if (this.cargoHandoffBlockedAssetCodes.size === 0) return false;
-    const resolved = resolveSpecializedTelemetryBinding({
-      modelAssetCode: model.assetCode,
-      deviceType,
-      binding: model.telemetryBinding,
-    });
-    return resolved ? this.cargoHandoffBlockedAssetCodes.has(resolved.assetCode) : false;
-  }
 
   /** 货箱交接问题按稳定 key 只写一次 Console。 */
   private reportCargoHandoffIssue(key: string, message: string): void {
@@ -2038,86 +1947,6 @@ export class SceneRuntime {
     return generator;
   }
 
-  /** 释放指定生成器提供模板的全部运行时货箱。 */
-  private disposeTelemetryCargoForGenerator(generatorEntityId: string): void {
-    for (const [key, cargo] of this.conveyorCargoMeshes.entries()) {
-      if (cargo.generatorEntityId !== generatorEntityId) continue;
-      this.disposeConveyorCargo(cargo);
-      this.conveyorCargoMeshes.delete(key);
-    }
-    for (const [key, cargo] of this.stackerCargoMeshes.entries()) {
-      if (cargo.generatorEntityId !== generatorEntityId) continue;
-      this.disposeStackerCargo(cargo);
-      this.stackerCargoMeshes.delete(key);
-    }
-  }
-
-  /** 按有效资产编号查找唯一设备模型，供前置设备解析使用。 */
-  private findModelByEffectiveAssetCode(assetCode: string): ModelRuntimeEntry | null {
-    const matches = [...this.models.values()].filter((model) => {
-      const bindingAssetCode = model.telemetryBinding?.assetCode?.trim();
-      return (bindingAssetCode || model.assetCode) === assetCode;
-    });
-    return matches.length === 1 ? matches[0] : null;
-  }
-
-  /** 从前置设备当前持有货物继承条码，保证同一货物在链路中条码连续。 */
-  private resolveUpstreamCargoCode(model: ModelRuntimeEntry): string | null {
-    const upstreamAssetCode = model.telemetryBinding?.upstreamAssetCode?.trim();
-    if (!upstreamAssetCode) return null;
-    const upstreamModel = this.findModelByEffectiveAssetCode(upstreamAssetCode);
-    if (!upstreamModel) return null;
-
-    const binding = resolveSpecializedTelemetryBinding({
-      modelAssetCode: upstreamModel.assetCode,
-      deviceType: upstreamModel.stackerCapable ? 'stacker' : 'conveyor',
-      binding: upstreamModel.telemetryBinding,
-    });
-    if (!binding) return null;
-    const snapshot = resolveSpecializedTelemetrySnapshot(deviceTelemetryStore, binding);
-    if (!snapshot || Date.now() - snapshot.receivedAt > binding.staleAfterMs) return null;
-
-    const conveyorCode = upstreamModel.conveyorTelemetry.cargoCode;
-    if (conveyorCode && conveyorCode !== CONVEYOR_ANONYMOUS_CARGO_CODE) return conveyorCode;
-    const forkCodes = [upstreamModel.stackerTelemetry.frontCargoCode, upstreamModel.stackerTelemetry.backCargoCode]
-      .filter((code): code is string => Boolean(code));
-    return forkCodes.length === 1 ? forkCodes[0] : null;
-  }
-
-  /**
-   * 设备生成新货箱后清理其他设备上的同码货箱：仅当原持有设备已不再上报该条码时销毁，
-   * 已入库（placedLocatorKey）的货物不受交接影响。
-   */
-  private disposeHandedOffCargo(spawningModel: ModelRuntimeEntry, containerCode: string): void {
-    if (containerCode === CONVEYOR_ANONYMOUS_CARGO_CODE) return;
-    const isOwnerStillReporting = (ownerAssetCode: string): boolean => {
-      const owner = findModelByAssetCode(ownerAssetCode);
-      if (!owner) return false;
-      if (owner.conveyorTelemetry.cargoCode === containerCode) return true;
-      return owner.stackerTelemetry.frontCargoCode === containerCode
-        || owner.stackerTelemetry.backCargoCode === containerCode;
-    };
-    const findModelByAssetCode = (assetCode: string): ModelRuntimeEntry | null => {
-      for (const candidate of this.models.values()) {
-        if (candidate.assetCode === assetCode) return candidate;
-      }
-      return null;
-    };
-
-    for (const [key, cargo] of this.conveyorCargoMeshes.entries()) {
-      if (cargo.containerCode !== containerCode || cargo.assetCode === spawningModel.assetCode) continue;
-      if (isOwnerStillReporting(cargo.assetCode)) continue;
-      this.disposeConveyorCargo(cargo);
-      this.conveyorCargoMeshes.delete(key);
-    }
-    for (const [key, cargo] of this.stackerCargoMeshes.entries()) {
-      if (cargo.containerCode !== containerCode || cargo.assetCode === spawningModel.assetCode) continue;
-      if (cargo.placedLocatorKey) continue;
-      if (isOwnerStillReporting(cargo.assetCode)) continue;
-      this.disposeStackerCargo(cargo);
-      this.stackerCargoMeshes.delete(key);
-    }
-  }
 
   /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
   syncEnvironment(environment: SceneEnvironmentSettings | null): void {
@@ -2201,12 +2030,7 @@ export class SceneRuntime {
     }
     this.genericTelemetryMotionRuntime.dispose();
     this.poiEffectRuntime.dispose();
-    for (const cargo of this.stackerCargoMeshes.values()) {
-      this.disposeStackerCargo(cargo);
-    }
-    for (const cargo of this.conveyorCargoMeshes.values()) {
-      this.disposeConveyorCargo(cargo);
-    }
+    this.specializedTelemetryRuntime.dispose();
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
     }
@@ -2228,8 +2052,6 @@ export class SceneRuntime {
     this.modelArrayBatchByMeshUniqueId.clear();
     this.modelGenerators.clear();
     this.generatedOutputOwners.clear();
-    this.stackerCargoMeshes.clear();
-    this.conveyorCargoMeshes.clear();
     this.lights.clear();
     this.entityStates.clear();
     this.syncedEntities.clear();
@@ -2359,50 +2181,6 @@ export class SceneRuntime {
     return box.getWorldMatrix();
   }
 
-  /** 解析堆垛机运动目标：设备网格匹配路径精确到格口支撑位，assetId 直查保持定位框根节点语义。 */
-  private resolveStackerTargetPosition(
-    locator: LocatorRuntimeEntry,
-    assetCode: string,
-    toX: number | null,
-    toY: number | null,
-    toZ: number | null,
-  ): Vector3 {
-    const rootPosition = locator.root.getAbsolutePosition();
-    if (!assetCode || toX === null || toY === null || toZ === null) return rootPosition;
-    return this.resolveLocatorBoxSupportPosition(locator, toX, toY) ?? rootPosition;
-  }
-
-  /** 解析目标格口的支撑位世界坐标：水平取 box 中心、高度取 box 底面，越界时返回 null 由调用方回退。 */
-  private resolveLocatorBoxSupportPosition(
-    locator: LocatorRuntimeEntry,
-    toX: number,
-    toY: number,
-  ): Vector3 | null {
-    const boxIndex = resolveLocatorBoxIndex({
-      startColumn: locator.startColumn,
-      columns: locator.columns,
-      layers: locator.layers,
-      toX,
-      toY,
-    });
-    const box = boxIndex === null ? null : locator.boxes[boxIndex];
-    if (!box) {
-      const reportKey = `${locator.assetId}:${toX}:${toY}`;
-      if (!this.reportedInvalidStackerBoxTargets.has(reportKey)) {
-        this.reportedInvalidStackerBoxTargets.add(reportKey);
-        this.pushLog(`库位 ${locator.assetId} 不存在格口 列${toX} 层${toY}，已回退定位框根节点。`);
-      }
-      return null;
-    }
-
-    const bounds = getMeshWorldBounds(box);
-    if (!bounds) return null;
-    return new Vector3(
-      (bounds.minimum.x + bounds.maximum.x) / 2,
-      bounds.minimum.y,
-      (bounds.minimum.z + bounds.maximum.z) / 2,
-    );
-  }
 
   /** 将文件夹选中递归转换为全部普通后代，用于在场景中高亮整棵分组子树。 */
   private resolveSelectedEntityIds(document: SceneDocument): Set<string> {
@@ -2624,18 +2402,17 @@ export class SceneRuntime {
       current.root.setEnabled(true);
       this.applyTransform(current.root, entity.components.transform);
       if (current.assetCode !== modelAsset.assetCode) {
-        this.disposeStackerCargoForAssetCode(current.assetCode);
-        this.disposeConveyorCargoForAssetCode(current.assetCode);
+        this.specializedTelemetryRuntime.disposeCargoForAssetCode(current.assetCode);
         current.stackerTelemetry.frontCargoCode = null;
         current.stackerTelemetry.backCargoCode = null;
-        this.resetConveyorTelemetryState(current);
+        resetConveyorTelemetryState(current);
       }
       current.assetCode = modelAsset.assetCode;
       current.telemetryBinding = entity.components.telemetryBinding ?? null;
       current.assetRevision = modelAsset.assetRevision ?? null;
       current.assetSignature = assetSignature;
-      current.stackerCapable = this.isStackerModelAsset(modelAsset);
-      current.conveyorCapable = this.isConveyorModelAsset(modelAsset);
+      current.stackerCapable = isStackerModelAsset(modelAsset);
+      current.conveyorCapable = isConveyorModelAsset(modelAsset);
       current.stackerTelemetry.rootBasePosition = current.root.position.clone();
       // contentRoot 既承载源单位换算，也允许参数脚本在其上叠加尺寸缩放；同一资产同步时不得覆盖脚本输出。
       // lengthUnit / unitScaleToMeters 已进入 assetSignature，单位契约变化会走完整重载。
@@ -2661,8 +2438,8 @@ export class SceneRuntime {
       entitySnapshot: entity,
       assetCode: modelAsset.assetCode,
       telemetryBinding: entity.components.telemetryBinding ?? null,
-      stackerCapable: this.isStackerModelAsset(modelAsset),
-      conveyorCapable: this.isConveyorModelAsset(modelAsset),
+      stackerCapable: isStackerModelAsset(modelAsset),
+      conveyorCapable: isConveyorModelAsset(modelAsset),
       root,
       contentRoot,
       assetHandle: null,
@@ -2682,8 +2459,8 @@ export class SceneRuntime {
       externalScriptSignature: '',
       externalScriptStarting: false,
       measurementReady: false,
-      stackerTelemetry: this.createStackerTelemetryState(root),
-      conveyorTelemetry: this.createConveyorTelemetryState(),
+      stackerTelemetry: createStackerTelemetryState(root),
+      conveyorTelemetry: createConveyorTelemetryState(),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -2811,7 +2588,7 @@ export class SceneRuntime {
 
     const runtimeConfigSignature = this.createModelGeneratorRuntimeConfigSignature(component);
     if (runtimeEntry.runtimeConfigSignature && runtimeEntry.runtimeConfigSignature !== runtimeConfigSignature) {
-      this.disposeTelemetryCargoForGenerator(entity.id);
+      this.specializedTelemetryRuntime.disposeCargoForGenerator(entity.id);
       this.disposeModelGeneratorOutput(runtimeEntry);
       runtimeEntry.activeTargetSignature = null;
       runtimeEntry.activeSnapshot = null;
@@ -2922,8 +2699,8 @@ export class SceneRuntime {
       entitySnapshot: null,
       assetCode: modelAsset.assetCode,
       telemetryBinding: null,
-      stackerCapable: this.isStackerModelAsset(modelAsset),
-      conveyorCapable: this.isConveyorModelAsset(modelAsset),
+      stackerCapable: isStackerModelAsset(modelAsset),
+      conveyorCapable: isConveyorModelAsset(modelAsset),
       root: modelRoot,
       contentRoot,
       assetHandle: null,
@@ -2943,8 +2720,8 @@ export class SceneRuntime {
       externalScriptSignature: '',
       externalScriptStarting: false,
       measurementReady: false,
-      stackerTelemetry: this.createStackerTelemetryState(modelRoot),
-      conveyorTelemetry: this.createConveyorTelemetryState(),
+      stackerTelemetry: createStackerTelemetryState(modelRoot),
+      conveyorTelemetry: createConveyorTelemetryState(),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -3082,11 +2859,10 @@ export class SceneRuntime {
   /** 每帧把最新 MQTT 设备遥测分发到对应设备运行时。 */
   private applyDeviceTelemetryFrame(): void {
     if (!this.telemetryPreviewActive) return;
-    this.clearInactiveSpecializedTelemetryDiagnostics();
+    this.specializedTelemetryRuntime.clearInactiveDiagnostics();
     this.captureReadyTelemetryPreviewBaselines();
     const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
-    this.applyStackerTelemetryFrame();
-    this.applyConveyorTelemetryFrame();
+    this.specializedTelemetryRuntime.applyFrame(deltaSeconds);
     this.genericTelemetryMotionRuntime.applyFrame(deltaSeconds);
   }
 
@@ -3095,8 +2871,8 @@ export class SceneRuntime {
     for (const model of this.models.values()) {
       if (model.telemetryPreviewBaseline || !model.assetHandle || !model.stackerTelemetryReady) continue;
       model.telemetryPreviewBaseline = captureModelTelemetryPreviewBaseline({ root: model.root, contentRoot: model.contentRoot });
-      if (this.resolveSpecializedTelemetryDeviceType(model) === 'stacker') {
-        this.getStackerTargetReferencePosition(model);
+      if (this.specializedTelemetryRuntime.resolveDeviceType(model) === 'stacker') {
+        this.specializedTelemetryRuntime.primeStackerTargetReference(model);
       }
     }
     for (const owner of this.generatedOutputOwners.values()) {
@@ -3109,21 +2885,16 @@ export class SceneRuntime {
 
   /** 清空 SceneRuntime 级别的预览诊断、metadata 和已上报状态，不影响模型注册或编译绑定。 */
   private clearTelemetryPreviewRuntimeState(): void {
-    telemetryRuntimeDiagnosticsStore.clear();
-    this.reportedMissingTargets.clear();
-    this.reportedFaults.clear();
-    this.reportedStatuses.clear();
-    this.reportedInvalidStackerBoxTargets.clear();
-    this.lastReportedStackerTargetSignatures.clear();
+    this.specializedTelemetryRuntime.clearReportedState();
     for (const model of this.models.values()) {
-      this.clearSpecializedTelemetryDiagnosticsForModel(model);
+      this.specializedTelemetryRuntime.clearDiagnosticsForModel(model);
     }
     for (const variant of this.modelArrayParameterVariants.values()) {
-      this.clearSpecializedTelemetryDiagnosticsForModel(variant.model);
+      this.specializedTelemetryRuntime.clearDiagnosticsForModel(variant.model);
     }
     for (const owner of this.generatedOutputOwners.values()) {
       if (owner.output?.kind === 'model') {
-        this.clearSpecializedTelemetryDiagnosticsForModel(owner.output.model);
+        this.specializedTelemetryRuntime.clearDiagnosticsForModel(owner.output.model);
       }
     }
   }
@@ -3168,802 +2939,6 @@ export class SceneRuntime {
     };
   }
 
-  /** 清理所有专用 Stacker/Conveyor 运行时货物，保证结束预览不污染编辑态场景。 */
-  private disposeAllTelemetryRuntimeCargo(): void {
-    for (const cargo of this.stackerCargoMeshes.values()) {
-      this.disposeStackerCargo(cargo);
-    }
-    this.stackerCargoMeshes.clear();
-    for (const cargo of this.conveyorCargoMeshes.values()) {
-      this.disposeConveyorCargo(cargo);
-    }
-    this.conveyorCargoMeshes.clear();
-  }
-
-  /** 清除模型 root/contentRoot 上的遥测运行态 metadata，避免预览状态泄漏到编辑态 Inspector。 */
-  private clearSpecializedTelemetryDiagnosticsForModel(model: ModelRuntimeEntry): void {
-    for (const node of [model.root, model.contentRoot]) {
-      if (!node.metadata || typeof node.metadata !== 'object') continue;
-      const metadata = { ...(node.metadata as Record<string, unknown>) };
-      delete metadata.telemetryRuntime;
-      delete metadata.telemetry;
-      delete metadata.stackerTelemetry;
-      delete metadata.conveyorTelemetry;
-      node.metadata = metadata;
-    }
-  }
-
-  /** 每帧把最新 MQTT stacker 遥测应用到完整主键匹配且无冲突的模型实例。 */
-  private applyStackerTelemetryFrame(): void {
-    const candidates = this.collectSpecializedTelemetryModels('stacker');
-    const conflictKeys = collectSpecializedTelemetryConflictKeys(candidates.map((candidate) => candidate.binding));
-    const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
-    const nowMs = Date.now();
-
-    for (const candidate of candidates) {
-      const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
-      const preparedArrayHost = this.updateModelExternalScriptRuntimeContext(
-        candidate.model,
-        'runtime',
-        snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
-        true,
-      );
-      if (snapshot) this.applyStackerTelemetryToModel(candidate.model, snapshot as StackerTelemetrySnapshot, deltaSeconds);
-      if (preparedArrayHost) this.refreshModelArrayRuntimeRepresentation(candidate.model);
-    }
-  }
-
-  /** 每帧把最新 MQTT conveyor 遥测应用到完整主键匹配且无冲突的模型实例。 */
-  private applyConveyorTelemetryFrame(): void {
-    const candidates = this.collectSpecializedTelemetryModels('conveyor');
-    const conflictKeys = collectSpecializedTelemetryConflictKeys(candidates.map((candidate) => candidate.binding));
-    const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
-    const nowMs = Date.now();
-
-    for (const candidate of candidates) {
-      const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
-      const preparedArrayHost = this.updateModelExternalScriptRuntimeContext(
-        candidate.model,
-        'runtime',
-        snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
-        true,
-      );
-      if (snapshot) this.applyConveyorTelemetryToModel(candidate.model, snapshot, deltaSeconds);
-      if (preparedArrayHost) this.refreshModelArrayRuntimeRepresentation(candidate.model);
-    }
-  }
-
-  /** 收集最终选择当前专用类型的模型，并把实例绑定归一成完整遥测主键。 */
-  private collectSpecializedTelemetryModels(
-    deviceType: SpecializedTelemetryDeviceType,
-  ): SpecializedTelemetryRuntimeEntry[] {
-    const candidates: SpecializedTelemetryRuntimeEntry[] = [];
-    const appendCandidate = (entityId: string, model: ModelRuntimeEntry): void => {
-      if (!model.assetHandle || !model.stackerTelemetryReady) return;
-      if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) return;
-      const binding = resolveSpecializedTelemetryBinding({
-        modelAssetCode: model.assetCode,
-        deviceType,
-        binding: model.telemetryBinding,
-      });
-      if (binding) candidates.push({ entityId, model, binding });
-    };
-
-    for (const [entityId, model] of this.models.entries()) appendCandidate(entityId, model);
-    for (const variant of this.modelArrayParameterVariants.values()) {
-      appendCandidate(variant.representativeEntityId, variant.model);
-    }
-    return candidates;
-  }
-
-  /** 为同时命中多种专用能力的模型选择唯一驱动类型，实例绑定优先、无绑定时 Stacker 优先。 */
-  private resolveSpecializedTelemetryDeviceType(model: ModelRuntimeEntry): SpecializedTelemetryDeviceType | null {
-    if (model.telemetryBinding?.enabled === false) return null;
-    const configuredDeviceType = model.telemetryBinding?.deviceType.trim().toLowerCase();
-    if (configuredDeviceType) {
-      if (configuredDeviceType === 'stacker' && model.stackerCapable) return 'stacker';
-      if (configuredDeviceType === 'conveyor' && this.isConveyorRuntimeModel(model)) return 'conveyor';
-      return null;
-    }
-    if (model.stackerCapable) return 'stacker';
-    if (this.isConveyorRuntimeModel(model)) return 'conveyor';
-    return null;
-  }
-
-  /** 仅在模型没有任何有效专用绑定时清理诊断，避免另一专用类型遍历覆盖有效状态。 */
-  private clearInactiveSpecializedTelemetryDiagnostics(): void {
-    for (const [entityId, model] of this.models.entries()) {
-      if (!model.assetHandle || !model.stackerTelemetryReady) continue;
-      const isSpecialized = model.stackerCapable || this.isConveyorRuntimeModel(model);
-      if (!isSpecialized || this.resolveSpecializedTelemetryDeviceType(model)) continue;
-      this.clearSpecializedTelemetryDiagnostics(entityId, model);
-    }
-  }
-
-  /** 解析当前帧专用快照，并统一处理冲突、离线、断流和诊断状态。 */
-  private resolveSpecializedTelemetryFrameSnapshot(
-    candidate: SpecializedTelemetryRuntimeEntry,
-    conflictKeys: ReadonlySet<string>,
-    nowMs: number,
-  ): DeviceTelemetrySnapshot | null {
-    const { entityId, model, binding } = candidate;
-    const snapshot = resolveSpecializedTelemetrySnapshot(deviceTelemetryStore, binding);
-    const conflictReportKey = `specialized-conflict:${binding.key}`;
-
-    if (conflictKeys.has(binding.key)) {
-      const errors = ['绑定冲突：同一 sourceId/deviceType/assetCode 匹配多个专用模型，已停止驱动。'];
-      this.writeSpecializedTelemetryDiagnostics(entityId, model, binding, {
-        online: false,
-        stale: false,
-        faulted: snapshot?.faulted ?? false,
-        conflict: true,
-        lastReceivedAt: snapshot?.receivedAt ?? null,
-        errors,
-      }, snapshot ?? undefined);
-      if (this.reportedStatuses.get(conflictReportKey) !== 'conflict') {
-        this.reportedStatuses.set(conflictReportKey, 'conflict');
-        this.pushLog(
-          `专用遥测绑定冲突，已停止驱动：sourceId=${binding.sourceId}，deviceType=${binding.deviceType}，assetCode=${binding.assetCode}`,
-        );
-      }
-      return null;
-    }
-
-    this.reportedStatuses.delete(conflictReportKey);
-    if (!snapshot) {
-      this.writeSpecializedTelemetryDiagnostics(entityId, model, binding, {
-        online: false,
-        stale: false,
-        faulted: false,
-        conflict: false,
-        lastReceivedAt: null,
-        errors: [],
-      });
-      return null;
-    }
-
-    const stale = nowMs - snapshot.receivedAt > binding.staleAfterMs;
-    this.writeSpecializedTelemetryDiagnostics(entityId, model, binding, {
-      online: !stale && !snapshot.faulted,
-      stale,
-      faulted: snapshot.faulted,
-      conflict: false,
-      lastReceivedAt: snapshot.receivedAt,
-      errors: [],
-    }, snapshot);
-    return stale ? null : snapshot;
-  }
-
-  /** 把专用驱动诊断写入 Babylon metadata 和只读外部 store，不进入场景文档或撤销历史。 */
-  private writeSpecializedTelemetryDiagnostics(
-    entityId: string,
-    model: ModelRuntimeEntry,
-    binding: ResolvedSpecializedTelemetryBinding,
-    status: TelemetryRuntimeDiagnosticStatus,
-    snapshot?: DeviceTelemetrySnapshot,
-  ): void {
-    const runtimeMetadata = { ...status, errors: [...status.errors] };
-    for (const node of [model.root, model.contentRoot]) {
-      node.metadata = { ...(node.metadata ?? {}), telemetryRuntime: runtimeMetadata };
-    }
-    telemetryRuntimeDiagnosticsStore.upsert(entityId, {
-      ...runtimeMetadata,
-      sourceId: snapshot?.sourceId ?? binding.sourceId,
-      deviceType: snapshot?.deviceType ?? binding.deviceType,
-      assetCode: snapshot?.assetCode ?? binding.assetCode,
-      topic: snapshot?.topic ?? null,
-      sequence: snapshot?.sequence ?? null,
-      sourceTimestamp: snapshot?.sourceTimestamp ?? null,
-      fields: snapshot?.fields ?? {},
-      message: snapshot?.message ?? '',
-      nodeTargets: [],
-      boneTargets: [],
-      animationTargets: [],
-    });
-  }
-
-  /** 清理禁用或类型错配的专用绑定诊断，避免 Inspector 展示过期状态。 */
-  private clearSpecializedTelemetryDiagnostics(entityId: string, model: ModelRuntimeEntry): void {
-    telemetryRuntimeDiagnosticsStore.delete(entityId);
-    for (const node of [model.root, model.contentRoot]) {
-      if (!node.metadata || typeof node.metadata !== 'object') continue;
-      const metadata = { ...(node.metadata as Record<string, unknown>) };
-      delete metadata.telemetryRuntime;
-      node.metadata = metadata;
-    }
-  }
-
-  /** 对单台 stacker 应用根节点、载货台和前后叉的遥测驱动。 */
-  private applyStackerTelemetryToModel(
-    model: ModelRuntimeEntry,
-    snapshot: StackerTelemetrySnapshot,
-    deltaSeconds: number,
-  ): void {
-    const toX = readIntegerField(snapshot.fields, 'to_x');
-    const toY = readIntegerField(snapshot.fields, 'to_y');
-    const toZ = readIntegerField(snapshot.fields, 'to_z');
-    const targetLocator = (snapshot.assetCode && toX !== null && toY !== null && toZ !== null)
-      ? this.findLocatorByDevice(snapshot.assetCode, toX, toY, toZ)
-      : snapshot.targetLocationKey
-        ? this.locatorTargets.get(snapshot.targetLocationKey) ?? null
-        : null;
-    this.reportStackerRuntimeState(snapshot, targetLocator);
-    this.writeDeviceTelemetryMetadata(model, snapshot);
-
-    const targetPosition = targetLocator
-      ? this.resolveStackerTargetPosition(targetLocator, snapshot.assetCode, toX, toY, toZ)
-      : null;
-    const targetOffsets = targetPosition ? this.resolveStackerTargetMotionOffsets(model, targetPosition) : null;
-    this.reportStackerTargetProjection(model, targetLocator, targetPosition, targetOffsets, toX, toY);
-    this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds);
-    this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds);
-    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds, targetLocator);
-    this.applyStackerNodeMotionOffsets(model);
-    this.applyStackerCargoMotion(model, snapshot, targetLocator, targetPosition);
-    this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
-  }
-
-  /** 对单条输送线应用滚筒/链条动作、货物占位和状态 metadata。 */
-  private applyConveyorTelemetryToModel(
-    model: ModelRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot,
-    deltaSeconds: number,
-  ): void {
-    this.reportConveyorRuntimeState(snapshot);
-    this.writeDeviceTelemetryMetadata(model, snapshot);
-
-    if (!snapshot.faulted) {
-      this.applyConveyorMotion(model, snapshot, deltaSeconds);
-    }
-
-    this.applyConveyorCargoMotion(model, snapshot, deltaSeconds);
-  }
-
-  /** 使用 locator 盒体底面作为生成模型原点，保证模型落在定位框内部而不是悬在中心高度。 */
-  private getWarehouseLocatorSupportPosition(locator: LocatorRuntimeEntry): Vector3 {
-    const bounds = locator.boxes.length > 0 ? getMeshWorldBounds(locator.boxes[0]) : null;
-    const position = locator.root.getAbsolutePosition();
-    return new Vector3(position.x, bounds?.minimum.y ?? position.y, position.z);
-  }
-
-  /** 根据模型脚本 dataDriven.motion 配置驱动 Conveyor 节点。 */
-  private applyConveyorMotion(
-    model: ModelRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot,
-    deltaSeconds: number,
-  ): void {
-    for (const config of this.readConveyorMotionConfigs(model)) {
-      const direction = this.readConveyorMotionDirection(snapshot, config);
-      if (direction === 0) continue;
-
-      const nodes = this.findConveyorMotionNodes(model, config);
-      if (nodes.length === 0) continue;
-
-      if (config.kind === 'rotate') {
-        const speed = this.readConveyorRotationSpeed(snapshot, config);
-        this.rotateConveyorNodes(nodes, config.axis, direction * speed * deltaSeconds);
-      } else {
-        const nextOffset = this.updateConveyorMotionOffset(model, config, direction * config.speed * deltaSeconds);
-        this.translateConveyorNodesFromBaseline(model, nodes, config.axis, nextOffset);
-      }
-    }
-  }
-
-  /** 根据 containerCode 或 container_quantity 创建输送线上只存在于运行时的货物盒。 */
-  private applyConveyorCargoMotion(
-    model: ModelRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot,
-    deltaSeconds: number,
-  ): void {
-    if (this.isCargoHandoffBlocked(model, 'conveyor')) {
-      this.disposeConveyorCargoForAssetCode(model.assetCode);
-      model.conveyorTelemetry.cargoCode = null;
-      model.conveyorTelemetry.cargoTravelOffset = 0;
-      return;
-    }
-
-    const containerCode = this.readContainerCode(snapshot, 'containerCode');
-    const containerQuantity = readNumberField(snapshot.fields, 'container_quantity') ?? 0;
-    const activeContainerCode = containerCode ?? (containerQuantity > 0
-      ? this.resolveUpstreamCargoCode(model) ?? CONVEYOR_ANONYMOUS_CARGO_CODE
-      : null);
-    if (!activeContainerCode) {
-      this.disposeConveyorCargoForAssetCode(model.assetCode);
-      model.conveyorTelemetry.cargoCode = null;
-      return;
-    }
-    if (model.conveyorTelemetry.cargoCode && model.conveyorTelemetry.cargoCode !== activeContainerCode) {
-      this.disposeConveyorCargoForAssetCode(model.assetCode);
-    }
-
-    const movementDirection = this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
-    const travelContext = this.resolveConveyorCargoTravelContext(model);
-    const travelHalfRange = resolveConveyorCargoTravelHalfRange(
-      travelContext.spanMeters ?? 0,
-      CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
-    );
-    if (!snapshot.faulted && movementDirection !== 0) {
-      model.conveyorTelemetry.cargoTravelOffset += movementDirection * CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND * deltaSeconds;
-    }
-    // 每帧按当前行程收敛偏移，参数化改长度后旧偏移不会把货箱留在机外。
-    model.conveyorTelemetry.cargoTravelOffset = wrapConveyorCargoOffset(model.conveyorTelemetry.cargoTravelOffset, travelHalfRange);
-
-    const cargo = this.getOrCreateConveyorCargo(model.assetCode, activeContainerCode);
-    this.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.resolveCargoGeneratorForModel(model));
-    this.setGeneratedCargoRootPose(
-      cargo,
-      this.getConveyorCargoPosition(model, travelContext),
-      getNodeWorldRotation(model.root),
-    );
-    model.conveyorTelemetry.cargoCode = activeContainerCode;
-    this.disposeHandedOffCargo(model, activeContainerCode);
-  }
-
-  /** 按货叉初始世界锚点把 Locator 绝对坐标换算成运行时偏移。 */
-  private resolveStackerTargetMotionOffsets(model: ModelRuntimeEntry, targetPosition: Vector3) {
-    const referencePosition = this.getStackerTargetReferencePosition(model);
-    const travelAxis = getHorizontalModelAxis(model.root, 'z');
-    return resolveStackerStorageTargetOffsets({
-      targetTravelCoordinate: Vector3.Dot(targetPosition, travelAxis),
-      targetLiftCoordinate: targetPosition.y,
-      referenceTravelCoordinate: Vector3.Dot(referencePosition, travelAxis),
-      referenceLiftCoordinate: referencePosition.y,
-    });
-  }
-
-  /** 目标位变化时在 Console 打印一次行走/升降/货叉投影距离，便于联调核对格口级目标。 */
-  private reportStackerTargetProjection(
-    model: ModelRuntimeEntry,
-    targetLocator: LocatorRuntimeEntry | null,
-    targetPosition: Vector3 | null,
-    targetOffsets: StackerStorageTargetOffsets | null,
-    toX: number | null,
-    toY: number | null,
-  ): void {
-    const signature = targetLocator && targetPosition
-      ? `${targetLocator.assetId}:${toX}:${toY}:${targetPosition.x.toFixed(3)}:${targetPosition.y.toFixed(3)}:${targetPosition.z.toFixed(3)}`
-      : 'none';
-    if (this.lastReportedStackerTargetSignatures.get(model.assetCode) === signature) return;
-    this.lastReportedStackerTargetSignatures.set(model.assetCode, signature);
-    if (!targetLocator || !targetPosition || !targetOffsets) return;
-
-    const forkAxis = getModelAxis(model.root, 'x');
-    const referencePosition = this.getStackerTargetReferencePosition(model);
-    const forkProjection = Math.abs(Vector3.Dot(targetPosition.subtract(referencePosition), forkAxis));
-    const reach = this.readStackerForkReachConfig(model);
-    const stageLabel = forkProjection > reach.stageOne + 0.001 ? '两段' : '一段';
-    this.pushLog(
-      `堆垛机 ${model.assetCode} 目标 ${targetLocator.assetId}（列${toX} 层${toY}）：` +
-      `box 支撑位 (${targetPosition.x.toFixed(3)}, ${targetPosition.y.toFixed(3)}, ${targetPosition.z.toFixed(3)})，` +
-      `行走投影偏移 ${targetOffsets.travelOffset.toFixed(3)}m，升降投影偏移 ${targetOffsets.liftOffset.toFixed(3)}m，` +
-      `货叉投影距离 ${forkProjection.toFixed(3)}m（一段行程 ${reach.stageOne}m，判定${stageLabel}）。`,
-    );
-  }
-
-  /** 读取并缓存前后一段货叉的初始世界中心，缺失货叉时回退到载货台。 */
-  private getStackerTargetReferencePosition(model: ModelRuntimeEntry): Vector3 {
-    const state = model.stackerTelemetry;
-    if (state.targetReferencePosition) return state.targetReferencePosition;
-
-    const forkGroups = this.findStackerForkNodeGroups(model);
-    const forkNodes = uniqueTransformNodes([
-      ...forkGroups.frontStageOneNodes,
-      ...forkGroups.backStageOneNodes,
-    ]);
-    const bounds = getNodesWorldBounds(forkNodes)
-      ?? getNodesWorldBounds(this.findStackerPlatformNodes(model));
-    state.targetReferencePosition = bounds
-      ? bounds.minimum.add(bounds.maximum).scale(0.5)
-      : state.rootBasePosition.clone();
-    return state.targetReferencePosition;
-  }
-
-  /** 根据 distance_x 校准行走机构虚拟位置，并在有目标位或 movement_x 时沿轨道推进。 */
-  private applyStackerRootMotion(
-    model: ModelRuntimeEntry,
-    snapshot: StackerTelemetrySnapshot,
-    targetTravelOffset: number | null,
-    deltaSeconds: number,
-  ): void {
-    const state = model.stackerTelemetry;
-    const travelAxis = getHorizontalModelAxis(model.root, 'z');
-    state.rootPosition ??= state.rootBasePosition.clone();
-
-    const distanceX = readNumberField(snapshot.fields, 'distance_x');
-    if (distanceX !== null && targetTravelOffset === null) {
-      const calibratedPosition = state.rootBasePosition.add(travelAxis.scale(distanceX));
-      state.rootPosition = lerpVector(
-        state.rootPosition,
-        this.constrainStackerTravelPosition(model, calibratedPosition, travelAxis),
-        this.getCalibrationAlpha(deltaSeconds),
-      );
-    }
-
-    if (!snapshot.faulted) {
-      if (targetTravelOffset !== null) {
-        const rootTargetPosition = this.constrainStackerTravelPosition(
-          model,
-          state.rootBasePosition.add(travelAxis.scale(targetTravelOffset)),
-          travelAxis,
-        );
-        const forkMoving = (readIntegerField(snapshot.fields, 'front_movement_z') ?? 0) !== 0
-          || (readIntegerField(snapshot.fields, 'back_movement_z') ?? 0) !== 0;
-        if (forkMoving) {
-          state.rootPosition = rootTargetPosition;
-        } else {
-          state.rootPosition = moveVectorTowards(
-            state.rootPosition,
-            rootTargetPosition,
-            STACKER_TARGET_SPEED_METERS_PER_SECOND * deltaSeconds,
-          );
-        }
-      } else {
-        const direction = this.readTravelDirection(readIntegerField(snapshot.fields, 'movement_x'));
-        const speed = this.readSpeed(snapshot, 'rpm_x', STACKER_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND);
-        if (direction !== 0) {
-          state.rootPosition = state.rootPosition.add(travelAxis.scale(direction * speed * deltaSeconds));
-        }
-      }
-    }
-
-    state.rootPosition = this.constrainStackerTravelPosition(model, state.rootPosition, travelAxis);
-  }
-
-  /** 根据 distance_y 校准载货台高度，并按目标位层高或 movement_y 推进升降。 */
-  private applyStackerLiftMotion(
-    model: ModelRuntimeEntry,
-    snapshot: StackerTelemetrySnapshot,
-    targetLiftOffset: number | null,
-    deltaSeconds: number,
-  ): void {
-    const state = model.stackerTelemetry;
-    const distanceY = readNumberField(snapshot.fields, 'distance_y');
-    if (distanceY !== null && targetLiftOffset === null) {
-      state.liftOffset = lerpNumber(state.liftOffset, distanceY, this.getCalibrationAlpha(deltaSeconds));
-    }
-
-    if (!snapshot.faulted) {
-      if (targetLiftOffset !== null) {
-        const forkMoving = (readIntegerField(snapshot.fields, 'front_movement_z') ?? 0) !== 0
-          || (readIntegerField(snapshot.fields, 'back_movement_z') ?? 0) !== 0;
-        if (forkMoving) {
-          state.liftOffset = targetLiftOffset;
-        } else {
-          state.liftOffset = moveNumberTowards(
-            state.liftOffset,
-            targetLiftOffset,
-            STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND * deltaSeconds,
-          );
-        }
-      } else {
-        const direction = this.readLiftDirection(readIntegerField(snapshot.fields, 'movement_y'));
-        const speed = this.readSpeed(snapshot, 'rpm_y', STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND);
-        state.liftOffset = Math.max(0, state.liftOffset + direction * speed * deltaSeconds);
-      }
-    }
-
-  }
-
-  /** 根据前后叉编码值和 movement_z 信号分别驱动两组货叉伸缩。 */
-  private applyStackerForkMotion(
-    model: ModelRuntimeEntry,
-    snapshot: StackerTelemetrySnapshot,
-    targetPosition: Vector3 | null,
-    deltaSeconds: number,
-    targetLocator: LocatorRuntimeEntry | null,
-  ): void {
-    const frontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
-    const backMovement = readIntegerField(snapshot.fields, 'back_movement_z');
-    const frontForkSpeed = this.readSpeed(snapshot, 'front_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
-    const backForkSpeed = this.readSpeed(snapshot, 'back_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
-    const reach = this.readStackerForkReachConfig(model);
-    const targetForkReach = snapshot.hasTargetLocation && targetLocator
-      ? resolveStackerStorageForkReach(targetLocator.storageDepth, reach.stageOne, reach.stageTwo)
-      : null;
-    const state = model.stackerTelemetry;
-
-    state.frontForkOffset = this.updateForkOffset(
-      state.frontForkOffset,
-      this.resolveForkCalibrationDistance(
-        model,
-        'front',
-        targetPosition,
-        this.resolveTargetLocatorForkDistance(targetForkReach, frontMovement),
-      ),
-      frontMovement,
-      frontForkSpeed,
-      targetForkReach ?? reach.total,
-      deltaSeconds,
-      snapshot.faulted,
-      (direction) => {
-        state.frontForkDirection = direction;
-      },
-      state.frontForkDirection,
-    );
-    state.backForkOffset = this.updateForkOffset(
-      state.backForkOffset,
-      this.resolveForkCalibrationDistance(
-        model,
-        'back',
-        targetPosition,
-        this.resolveTargetLocatorForkDistance(targetForkReach, backMovement),
-      ),
-      backMovement,
-      backForkSpeed,
-      targetForkReach ?? reach.total,
-      deltaSeconds,
-      snapshot.faulted,
-      (direction) => {
-        state.backForkDirection = direction;
-      },
-      state.backForkDirection,
-    );
-
-  }
-
-  /** 更新单侧货叉偏移：编码器/目标投影优先校准，movement_z 只在没有距离时兜底。 */
-  private updateForkOffset(
-    currentOffset: number,
-    distance: number | null,
-    movement: number | null,
-    speed: number,
-    maxReach: number,
-    deltaSeconds: number,
-    faulted: boolean,
-    rememberDirection: (direction: number) => void,
-    lastDirection: number,
-  ): number {
-    let nextOffset = currentOffset;
-    const movementDirection = this.readForkDirection(movement, nextOffset);
-    if (movementDirection === 1 || movementDirection === -1) rememberDirection(movementDirection);
-
-    if (distance !== null) {
-      const calibrationDirection = Math.sign(distance) || Math.sign(nextOffset) || lastDirection || 1;
-      nextOffset = lerpNumber(
-        nextOffset,
-        clampNumber(Math.abs(distance), 0, maxReach) * calibrationDirection,
-        this.getCalibrationAlpha(deltaSeconds),
-      );
-      return this.clampForkOffset(nextOffset, maxReach);
-    }
-
-    if (faulted) return this.clampForkOffset(nextOffset, maxReach);
-
-    if (movement === 2 || movement === 4) {
-      return moveNumberTowards(this.clampForkOffset(nextOffset, maxReach), 0, speed * deltaSeconds);
-    }
-
-    return this.clampForkOffset(nextOffset + movementDirection * speed * deltaSeconds, maxReach);
-  }
-
-  /** 读取模型脚本中的两段货叉行程配置，Inspector 参数优先于 dataDriven 默认值。 */
-  private readStackerForkReachConfig(model: ModelRuntimeEntry): StackerForkReachConfig {
-    const stageOne = this.readPositiveStackerModelNumber(
-      model,
-      'forkStageOneReach',
-      this.readStackerDataDrivenNumber(model, ['motion', 'fork', 'stageOneReach']) ?? 0.8,
-    );
-    const stageTwo = this.readNonNegativeStackerModelNumber(
-      model,
-      'forkStageTwoReach',
-      this.readStackerDataDrivenNumber(model, ['motion', 'fork', 'stageTwoReach']) ?? 0.8,
-    );
-
-    return {
-      stageOne,
-      stageTwo,
-      total: Math.max(0, stageOne + stageTwo),
-    };
-  }
-
-  /** 将货叉总偏移拆分成第一段和第二段，保留正负方向语义。 */
-  private splitForkOffset(offset: number, reach: StackerForkReachConfig): StackerForkOffsetParts {
-    const direction = Math.sign(offset) || 1;
-    const absoluteOffset = clampNumber(Math.abs(offset), 0, reach.total);
-    const stageOneDistance = Math.min(absoluteOffset, reach.stageOne);
-    const stageTwoDistance = Math.max(0, absoluteOffset - reach.stageOne);
-
-    return {
-      totalOffset: absoluteOffset * direction,
-      stageOneOffset: stageOneDistance * direction,
-      stageTwoOffset: stageTwoDistance * direction,
-      activeStage: stageTwoDistance > 0.001 ? 2 : (stageOneDistance > 0.001 ? 1 : 0),
-    };
-  }
-
-  /** 将货叉偏移限制在两段总行程内。 */
-  private clampForkOffset(offset: number, maxReach: number): number {
-    const reach = Math.max(0, maxReach);
-    return clampNumber(offset, -reach, reach);
-  }
-
-  /** 按目标定位框在模型局部 X 轴上的投影计算伸出距离，符号表示方向。 */
-  private resolveForkCalibrationDistance(
-    model: ModelRuntimeEntry,
-    side: StackerForkSide,
-    targetPosition: Vector3 | null,
-    targetForkDistance: number | null,
-  ): number | null {
-    if (!targetPosition) return null;
-
-    const forkGroups = this.findStackerForkNodeGroups(model);
-    const candidateNodes = side === 'front'
-      ? [forkGroups.frontStageOneNodes, forkGroups.frontStageTwoNodes, forkGroups.frontNodes]
-      : [forkGroups.backStageOneNodes, forkGroups.backStageTwoNodes, forkGroups.backNodes];
-    const forkBounds = getNodesWorldBounds(candidateNodes.find((n) => n.length > 0) ?? []);
-    if (!forkBounds) return null;
-
-    const forkCenter = forkBounds.minimum.add(forkBounds.maximum).scale(0.5);
-    const forkAxis = getModelAxis(model.root, 'x');
-    const projectedDistance = Vector3.Dot(targetPosition.subtract(forkCenter), forkAxis);
-    if (!Number.isFinite(projectedDistance)) return null;
-
-    if (targetForkDistance !== null) return Math.sign(projectedDistance) * targetForkDistance;
-    return projectedDistance;
-  }
-
-  /** 根据 MQTT 动作信号或目标库位返回货叉伸出/归零距离。 */
-  private resolveTargetLocatorForkDistance(targetForkReach: number | null, movement: number | null): number | null {
-    if (targetForkReach === null) return null;
-    if (movement === 2 || movement === 4) return 0;
-    if (movement === 1 || movement === 3) return targetForkReach;
-    if (targetForkReach > 0) return targetForkReach;
-    return null;
-  }
-
-  /** 从 Stacker 脚本 metadata 或当前参数值读取正数参数。 */
-  private readPositiveStackerModelNumber(model: ModelRuntimeEntry, key: string, fallback: number): number {
-    const value = this.readStackerModelNumber(model, key);
-    return value !== null && value > 0 ? value : fallback;
-  }
-
-  /** 从 Stacker 脚本 metadata 或当前参数值读取非负参数。 */
-  private readNonNegativeStackerModelNumber(model: ModelRuntimeEntry, key: string, fallback: number): number {
-    const value = this.readStackerModelNumber(model, key);
-    return value !== null && value >= 0 ? value : fallback;
-  }
-
-  /** 读取模型脚本 values 中的数值字段。 */
-  private readStackerModelNumber(model: ModelRuntimeEntry, key: string): number | null {
-    const scripts = Array.isArray(model.contentRoot.metadata?.scripts) ? model.contentRoot.metadata.scripts : [];
-    for (const script of scripts) {
-      if (!isPlainRecord(script)) continue;
-      const values = isPlainRecord(script.values) ? script.values : {};
-      const rawValue = this.readWrappedNumber(values[key]);
-      if (rawValue !== null) return rawValue;
-    }
-
-    return null;
-  }
-
-  /** 读取模型脚本 dataDriven 配置中的数值字段。 */
-  private readStackerDataDrivenNumber(model: ModelRuntimeEntry, path: string[]): number | null {
-    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
-      const value = this.readNumberPath(dataDriven, path);
-      if (value !== null) return value;
-    }
-
-    return null;
-  }
-
-  /** 兼容 meta.json 中 { value } 包装和普通数值。 */
-  private readWrappedNumber(value: unknown): number | null {
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (isPlainRecord(value)) {
-      const nestedValue = value.value ?? value.currentValue ?? value.defaultValue;
-      if (typeof nestedValue === 'number' && Number.isFinite(nestedValue)) return nestedValue;
-    }
-    return null;
-  }
-
-  /** 根据前叉/后叉托盘条码驱动货物：取货时随叉运动，放货时进入目标定位线框。 */
-  private applyStackerCargoMotion(
-    model: ModelRuntimeEntry,
-    snapshot: StackerTelemetrySnapshot,
-    targetLocator: LocatorRuntimeEntry | null,
-    targetPosition: Vector3 | null,
-  ): void {
-    if (this.isCargoHandoffBlocked(model, 'stacker')) {
-      this.disposeStackerCargoForAssetCode(model.assetCode);
-      return;
-    }
-
-    const frontContainerCode = this.readContainerCode(snapshot, 'front_containerCode');
-    const backContainerCode = this.readContainerCode(snapshot, 'back_containerCode');
-
-    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'front', frontContainerCode);
-    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'back', backContainerCode);
-  }
-
-  /** 让指定货叉上的托盘在叉尖和目标 locator 之间运动，放货完成后留在 locator 内。 */
-  private applyStackerForkCargoMotion(
-    model: ModelRuntimeEntry,
-    snapshot: StackerTelemetrySnapshot,
-    targetLocator: LocatorRuntimeEntry | null,
-    targetPosition: Vector3 | null,
-    side: StackerForkSide,
-    containerCode: string | null,
-  ): void {
-    const command = readIntegerField(snapshot.fields, side === 'front' ? 'front_command' : 'back_command');
-    const previousForkCode = this.getStackerForkCargoCode(model, side);
-    const activeContainerCode = this.resolveStackerForkCargoCode(model, side, containerCode, command, targetLocator);
-    if (!activeContainerCode) return;
-
-    // 取货完成沿检测：新条码上叉且当前位是 fetch 驱动定位线框时，触发该排单排同步
-    if (activeContainerCode !== previousForkCode && (command === 1 || command === 2) && snapshot.currentLocationKey) {
-      const sourceLocator = this.locatorTargets.get(snapshot.currentLocationKey) ?? null;
-      const fetchRow = sourceLocator ? this.resolveFetchDriveRowForLocator(sourceLocator) : null;
-      if (fetchRow !== null) this.handleFetchRowSync(fetchRow);
-    }
-
-    const cargo = this.getOrCreateStackerCargo(model.assetCode, activeContainerCode);
-    cargo.placedLocatorKey = null;
-    this.syncGeneratedCargoVisual(cargo, 'stacker', snapshot, this.resolveCargoGeneratorForModel(model));
-    const forkPosition = this.getStackerForkCargoPosition(model, side);
-    const supportPosition = targetLocator
-      ? targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator)
-      : null;
-    const reach = this.readStackerForkReachConfig(model);
-    const placingProgress = this.getStackerCargoPlacingProgress(command, side === 'front'
-      ? model.stackerTelemetry.frontForkOffset
-      : model.stackerTelemetry.backForkOffset, reach);
-    const nextPosition = supportPosition && placingProgress > 0
-      ? lerpVector(forkPosition, supportPosition, placingProgress)
-      : forkPosition;
-
-    const nextRotation = targetLocator && placingProgress >= 1
-      ? getNodeWorldRotation(targetLocator.root)
-      : getNodeWorldRotation(model.root);
-    this.setGeneratedCargoRootPose(cargo, nextPosition, nextRotation);
-    if (supportPosition && placingProgress >= 1 && snapshot.targetLocationKey) {
-      const fetchRow = targetLocator ? this.resolveFetchDriveRowForLocator(targetLocator) : null;
-      if (fetchRow === null) {
-        cargo.placedLocatorKey = snapshot.targetLocationKey;
-      } else if (this.keepCargoForFetchRowSync(fetchRow, model.assetCode, activeContainerCode)) {
-        // fetch 驱动定位线框的库位货物由 fetch 数据唯一渲染：MQTT 货箱保留到单排同步响应应用时再销毁
-        this.handleFetchRowSync(fetchRow);
-      }
-      this.setStackerForkCargoCode(model, side, null);
-    }
-    this.disposeHandedOffCargo(model, activeContainerCode);
-  }
-
-  /** 读取托盘条码，空字符串表示当前叉没有可视化货物。 */
-  private readContainerCode(snapshot: DeviceTelemetrySnapshot, key: string): string | null {
-    const value = readStringField(snapshot.fields, key)?.trim();
-    return value ? value : null;
-  }
-
-  /** 在条码清空但仍处于放货命令时，沿用上一帧货物编号完成落位。 */
-  private resolveStackerForkCargoCode(
-    model: ModelRuntimeEntry,
-    side: StackerForkSide,
-    containerCode: string | null,
-    command: number | null,
-    targetLocator: LocatorRuntimeEntry | null,
-  ): string | null {
-    if (containerCode) {
-      const previousContainerCode = this.getStackerForkCargoCode(model, side);
-      if (previousContainerCode && previousContainerCode !== containerCode) {
-        this.disposeUnplacedStackerCargo(model.assetCode, previousContainerCode);
-      }
-      this.setStackerForkCargoCode(model, side, containerCode);
-      return containerCode;
-    }
-
-    const previousContainerCode = this.getStackerForkCargoCode(model, side);
-    if (previousContainerCode && targetLocator && this.isStackerCargoPlacingCommand(command)) {
-      return previousContainerCode;
-    }
-
-    this.setStackerForkCargoCode(model, side, null);
-    return null;
-  }
-
-  /** 判断当前货叉状态是否正在把货物交接到目标定位框。 */
-  private isStackerCargoPlacingCommand(command: number | null): boolean {
-    return command === 3 || command === 4 || command === 5;
-  }
 
   /** 根据货物类型读取旧版 Box 回退尺寸和材质，保证无模板场景行为不变。 */
   private getGeneratedCargoFallbackSpec(kind: GeneratedCargoKind): {
@@ -4107,861 +3082,6 @@ export class SceneRuntime {
     cargo.outputOwner && this.applyGeneratedOutputPresentation(cargo.outputOwner);
   }
 
-  /** 创建或复用某个条码的堆垛机运行时货物。 */
-  private getOrCreateStackerCargo(assetCode: string, containerCode: string): StackerCargoRuntimeEntry {
-    const key = this.getStackerCargoKey(assetCode, containerCode);
-    const existing = this.stackerCargoMeshes.get(key);
-    if (existing) return existing;
-
-    const root = new TransformNode(
-      `stacker_cargo_root_${sanitizeBabylonName(assetCode)}_${sanitizeBabylonName(containerCode)}`,
-      this.scene,
-    );
-    const entry: StackerCargoRuntimeEntry = {
-      assetCode,
-      containerCode,
-      root,
-      outputOwner: null,
-      fallback: null,
-      generatorEntityId: null,
-      placedLocatorKey: null,
-    };
-    this.stackerCargoMeshes.set(key, entry);
-    return entry;
-  }
-
-  /** 货物跟随最远段叉节点包围盒中心，确保始终定位在货叉实际伸出位置而非全部叉节点几何中心。 */
-  private getStackerForkCargoPosition(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 {
-    const forkGroups = this.findStackerForkNodeGroups(model);
-    const stageTwoNodes = side === 'front' ? forkGroups.frontStageTwoNodes : forkGroups.backStageTwoNodes;
-    const allNodes = side === 'front' ? forkGroups.frontNodes : forkGroups.backNodes;
-    const nodes = stageTwoNodes.length > 0 ? stageTwoNodes : allNodes;
-    const bounds = getNodesWorldBounds(nodes);
-    if (!bounds) return model.root.getAbsolutePosition();
-
-    const upAxis = getModelAxis(model.root, 'y');
-    const legacyCenter = bounds.minimum
-      .add(bounds.maximum)
-      .scale(0.5)
-      .add(upAxis.scale(STACKER_CARGO_SIZE.y * 0.75));
-    return legacyCenter.subtract(upAxis.scale(STACKER_CARGO_SIZE.y / 2));
-  }
-
-  /** 放货中逐步进入目标框，放货完成时完全落入目标框。 */
-  private getStackerCargoPlacingProgress(command: number | null, forkOffset: number, reach: StackerForkReachConfig): number {
-    if (command === 5) return 1;
-    if (command === 4) return 0.85;
-    if (command === 3) return Math.max(0.45, Math.min(0.95, Math.abs(forkOffset) / Math.max(0.1, reach.total)));
-    return 0;
-  }
-
-  /** 读取某侧货叉当前正在携带或放货中的托盘编号。 */
-  private getStackerForkCargoCode(model: ModelRuntimeEntry, side: StackerForkSide): string | null {
-    return side === 'front' ? model.stackerTelemetry.frontCargoCode : model.stackerTelemetry.backCargoCode;
-  }
-
-  /** 更新某侧货叉当前货物编号，只保存运行时内存状态。 */
-  private setStackerForkCargoCode(model: ModelRuntimeEntry, side: StackerForkSide, containerCode: string | null): void {
-    if (side === 'front') {
-      model.stackerTelemetry.frontCargoCode = containerCode;
-      return;
-    }
-
-    model.stackerTelemetry.backCargoCode = containerCode;
-  }
-
-  /** 清理还没有落位的旧货物，避免条码切换后遗留在叉尖半路。 */
-  private disposeUnplacedStackerCargo(assetCode: string, containerCode: string): void {
-    const key = this.getStackerCargoKey(assetCode, containerCode);
-    const cargo = this.stackerCargoMeshes.get(key);
-    if (!cargo || cargo.placedLocatorKey) return;
-
-    this.disposeStackerCargo(cargo);
-    this.stackerCargoMeshes.delete(key);
-  }
-
-  /** 读取模型脚本声明的输送线运动配置，运行时只接受 devType=conveyor 的 dataDriven 配置。 */
-  private readConveyorMotionConfigs(model: ModelRuntimeEntry): ConveyorMotionConfig[] {
-    const configs: ConveyorMotionConfig[] = [];
-    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
-      if (!isPlainRecord(dataDriven)) continue;
-      const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
-      const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
-      if (devType !== 'conveyor') continue;
-
-      const motionConfig = isPlainRecord(dataDriven.motion) ? dataDriven.motion : null;
-      if (!motionConfig) continue;
-
-      for (const [key, rawConfig] of Object.entries(motionConfig)) {
-        const config = this.readConveyorMotionConfig(key, rawConfig);
-        if (config) configs.push(config);
-      }
-    }
-
-    return configs;
-  }
-
-  /** 把单个 dataDriven.motion 配置归一成运行时可直接执行的输送线动作。 */
-  private readConveyorMotionConfig(key: string, rawConfig: unknown): ConveyorMotionConfig | null {
-    if (!isPlainRecord(rawConfig)) return null;
-
-    const rawKind = typeof rawConfig.kind === 'string' ? rawConfig.kind.trim().toLowerCase() : '';
-    if (rawKind !== 'rotate' && rawKind !== 'translate') return null;
-    const kind: ConveyorMotionConfig['kind'] = rawKind;
-
-    const rawAxis = typeof rawConfig.axis === 'string' ? rawConfig.axis.trim().toLowerCase() : '';
-    const axis: ConveyorMotionConfig['axis'] = rawAxis === 'x' || rawAxis === 'y' || rawAxis === 'z'
-      ? rawAxis
-      : 'z';
-    const fallbackSpeed = kind === 'rotate'
-      ? CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND
-      : CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
-    const rawSpeed = typeof rawConfig.speed === 'number' ? rawConfig.speed : Number(rawConfig.speed);
-    const speed = Number.isFinite(rawSpeed) && rawSpeed > 0 ? rawSpeed : fallbackSpeed;
-    const fields = readStringArrayPath(rawConfig, ['fields']);
-    const nodes = readStringArrayPath(rawConfig, ['nodes']);
-    const rawFallbackPattern = typeof rawConfig.fallbackPattern === 'string' ? rawConfig.fallbackPattern.trim() : '';
-
-    return {
-      key,
-      fields: fields.length > 0 ? fields : (kind === 'rotate' ? ['movement_x', 'rotation'] : ['movement_x']),
-      kind,
-      axis,
-      actionMap: this.readConveyorActionMap(rawConfig.actionMap),
-      speed,
-      nodes,
-      fallbackPattern: rawFallbackPattern || null,
-    };
-  }
-
-  /** 读取 movement 编码映射，缺省遵循 0=停、1=正向、2=反向。 */
-  private readConveyorActionMap(rawActionMap: unknown): Record<string, number> {
-    const actionMap: Record<string, number> = { 0: 0, 1: 1, 2: -1 };
-    if (!isPlainRecord(rawActionMap)) return actionMap;
-
-    for (const [key, value] of Object.entries(rawActionMap)) {
-      const numberValue = typeof value === 'number' ? value : Number(value);
-      if (Number.isFinite(numberValue)) {
-        actionMap[key] = numberValue;
-      }
-    }
-
-    return actionMap;
-  }
-
-  /** 判断当前模型是否具备输送线驱动能力，脚本声明优先于文件名兜底识别。 */
-  private isConveyorRuntimeModel(model: ModelRuntimeEntry): boolean {
-    return model.conveyorCapable || this.readConveyorMotionConfigs(model).length > 0;
-  }
-
-  /** 通过模型包脚本、路径和资产编号兜底识别输送线模型。 */
-  private isConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
-    const signature = JSON.stringify([
-      modelAsset.assetCode,
-      modelAsset.sourcePath,
-      modelAsset.sourceUrl,
-      modelAsset.parameterScriptMetadata ?? [],
-      modelAsset.animationScriptMetadata ?? [],
-    ]).toLowerCase();
-
-    return signature.includes('conveyor')
-      || signature.includes('roller-conveyor')
-      || signature.includes('chain-conveyor')
-      || signature.includes('输送')
-      || signature.includes('滚筒')
-      || signature.includes('链条');
-  }
-
-  /** 创建输送线运行时状态，所有运动偏移和货物占位只保存在内存。 */
-  private createConveyorTelemetryState(): ConveyorModelTelemetryState {
-    return {
-      cargoCode: null,
-      cargoTravelOffset: 0,
-      motionOffsets: new Map(),
-      nodeBaselines: new Map(),
-    };
-  }
-
-  /** 模型脚本或资产编号变化后重置输送线基线，避免旧节点偏移污染新模型。 */
-  private resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
-    model.conveyorTelemetry.cargoCode = null;
-    model.conveyorTelemetry.cargoTravelOffset = 0;
-    model.conveyorTelemetry.motionOffsets.clear();
-    model.conveyorTelemetry.nodeBaselines.clear();
-  }
-
-  /** 按 motion.fields 读取输送线方向，支持模型脚本自定义 actionMap。 */
-  private readConveyorMotionDirection(snapshot: DeviceTelemetrySnapshot, config: ConveyorMotionConfig): number {
-    for (const field of config.fields) {
-      const fieldValue = readNumberField(snapshot.fields, field);
-      if (fieldValue === null) continue;
-
-      const mappedValue = config.actionMap[String(Math.trunc(fieldValue))];
-      if (Number.isFinite(mappedValue)) return mappedValue;
-      return this.readConveyorMovementDirection(fieldValue);
-    }
-
-    return 0;
-  }
-
-  /** 输送线 movement_x 编码：0 静止，1 正向，2 反向，正负数做现场兼容兜底。 */
-  private readConveyorMovementDirection(value: number | null): number {
-    if (value === 1) return 1;
-    if (value === 2) return -1;
-    if (value !== null && value > 0) return 1;
-    if (value !== null && value < 0) return -1;
-    return 0;
-  }
-
-  /** 读取滚筒角速度，rotation 大于 3 时按度/秒处理，否则沿用模型脚本默认速度。 */
-  private readConveyorRotationSpeed(snapshot: DeviceTelemetrySnapshot, config: ConveyorMotionConfig): number {
-    const rotationSpeed = readNumberField(snapshot.fields, 'rotation');
-    const degreesPerSecond = rotationSpeed !== null && rotationSpeed > 3 ? rotationSpeed : config.speed;
-    return degreesPerSecond * Math.PI / 180;
-  }
-
-  /** 查找输送线 motion 声明的节点，优先精确名称，失败后按 fallbackPattern 或通用名称兜底。 */
-  private findConveyorMotionNodes(model: ModelRuntimeEntry, config: ConveyorMotionConfig): TransformNode[] {
-    const configuredNodes = config.nodes.length > 0
-      ? this.findConfiguredConveyorMotionNodes(model, config.nodes)
-      : [];
-    if (configuredNodes.length > 0) return filterTopLevelMotionNodes(configuredNodes);
-
-    const fallbackPattern = this.createConveyorFallbackPattern(config.fallbackPattern);
-    return fallbackPattern ? filterTopLevelMotionNodes(findModelNodes(model, this.scene, fallbackPattern)) : [];
-  }
-
-  /**
-   * 按 motion.nodes 收集原始节点及其参数化运行时克隆。
-   * 参数脚本通过 metadata.motionSourceNodeName 声明克隆继承哪个源节点的遥测动作，
-   * 同时兼容旧脚本已经写入的 metadata.sourceNodeName。
-   */
-  private findConfiguredConveyorMotionNodes(model: ModelRuntimeEntry, names: string[]): TransformNode[] {
-    const nameSet = new Set(names);
-    return getModelTransformNodes(model, this.scene).filter((node) => {
-      if (nameSet.has(String(node.name ?? ''))) return true;
-      const sourceNodeName = this.readParametricMotionSourceNodeName(node);
-      return sourceNodeName !== null && nameSet.has(sourceNodeName);
-    });
-  }
-
-  /** 读取参数化克隆继承的源运动节点名，普通场景节点不会进入该兼容链路。 */
-  private readParametricMotionSourceNodeName(node: TransformNode): string | null {
-    if (!isPlainRecord(node.metadata) || node.metadata.generatedByParametricRuntime !== true) return null;
-    const sourceNodeName = typeof node.metadata.motionSourceNodeName === 'string'
-      ? node.metadata.motionSourceNodeName
-      : typeof node.metadata.sourceNodeName === 'string'
-        ? node.metadata.sourceNodeName
-        : '';
-    const normalizedName = sourceNodeName.trim();
-    return normalizedName || null;
-  }
-
-  /** 创建模型脚本显式声明的兜底正则；未声明或非法时跳过，避免猜中静态结构。 */
-  private createConveyorFallbackPattern(patternText: string | null): RegExp | null {
-    if (!patternText) return null;
-    try {
-      return new RegExp(patternText, 'i');
-    } catch {
-      return null;
-    }
-  }
-
-  /** 按局部轴旋转滚筒节点，兼容 GLB 节点使用 rotationQuaternion 的情况。 */
-  private rotateConveyorNodes(nodes: TransformNode[], axis: 'x' | 'y' | 'z', radians: number): void {
-    if (Math.abs(radians) <= 0.000001) return;
-    const deltaRotation = Quaternion.RotationAxis(createLocalAxis(axis), radians);
-
-    for (const node of nodes) {
-      if (node.rotationQuaternion) {
-        node.rotationQuaternion = node.rotationQuaternion.multiply(deltaRotation);
-      } else {
-        node.rotation[axis] += radians;
-      }
-    }
-  }
-
-  /** 更新链条平移偏移，使用循环偏移避免节点长期漂移到模型外。 */
-  private updateConveyorMotionOffset(model: ModelRuntimeEntry, config: ConveyorMotionConfig, delta: number): number {
-    const previousOffset = model.conveyorTelemetry.motionOffsets.get(config.key) ?? 0;
-    const nextOffset = this.wrapConveyorOffset(previousOffset + delta);
-    model.conveyorTelemetry.motionOffsets.set(config.key, nextOffset);
-    return nextOffset;
-  }
-
-  /** 从首次驱动前的节点基线出发做局部轴平移，避免每帧累计误差。 */
-  private translateConveyorNodesFromBaseline(
-    model: ModelRuntimeEntry,
-    nodes: TransformNode[],
-    axis: 'x' | 'y' | 'z',
-    offset: number,
-  ): void {
-    const localOffset = createLocalAxis(axis).scale(offset);
-    for (const node of filterTopLevelMotionNodes(nodes)) {
-      const baseline = this.getConveyorNodeBaseline(model, node);
-      node.position = baseline.position.add(localOffset);
-    }
-  }
-
-  /** 读取输送线节点基线，模型重新加载或脚本变化时会被 resetConveyorTelemetryState 清空。 */
-  private getConveyorNodeBaseline(model: ModelRuntimeEntry, node: TransformNode): ConveyorNodeBaseline {
-    const existing = model.conveyorTelemetry.nodeBaselines.get(node);
-    if (existing) return existing;
-
-    const baseline = { position: node.position.clone() };
-    model.conveyorTelemetry.nodeBaselines.set(node, baseline);
-    return baseline;
-  }
-
-  /** 把连续偏移约束在一个短循环内，适合链条和货物的运行时视觉表现。 */
-  private wrapConveyorOffset(value: number): number {
-    if (!Number.isFinite(value)) return 0;
-    const loop = CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS;
-    const halfLoop = loop / 2;
-    return ((((value + halfLoop) % loop) + loop) % loop) - halfLoop;
-  }
-
-  /** 创建或复用输送线运行时货物；可视模板不写入场景文档。 */
-  private getOrCreateConveyorCargo(assetCode: string, containerCode: string): ConveyorCargoRuntimeEntry {
-    const key = this.getConveyorCargoKey(assetCode, containerCode);
-    const existing = this.conveyorCargoMeshes.get(key);
-    if (existing) return existing;
-
-    const root = new TransformNode(
-      `conveyor_cargo_root_${sanitizeBabylonName(assetCode)}_${sanitizeBabylonName(containerCode)}`,
-      this.scene,
-    );
-    const entry: ConveyorCargoRuntimeEntry = {
-      assetCode,
-      containerCode,
-      root,
-      outputOwner: null,
-      fallback: null,
-      generatorEntityId: null,
-    };
-    this.conveyorCargoMeshes.set(key, entry);
-    return entry;
-  }
-
-  /** 货箱行程上下文：支撑中心、竖直轴、行走轴与行走跨度，供偏移回绕和定位共用一份包围盒计算。 */
-  private resolveConveyorCargoTravelContext(model: ModelRuntimeEntry): {
-    center: Vector3;
-    upAxis: Vector3;
-    travelAxis: Vector3;
-    travelAxisName: 'x' | 'z';
-    spanMeters: number | null;
-  } {
-    const configuredNodes = this.readConveyorMotionConfigs(model).flatMap((config) => this.findConveyorMotionNodes(model, config));
-    const conveyorNodes = configuredNodes.length > 0
-      ? configuredNodes
-      : findModelNodes(model, this.scene, /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i);
-    const bounds = (conveyorNodes.length > 0 ? getNodesWorldBounds(conveyorNodes) : null) ?? this.getModelWorldBounds(model);
-    const center = bounds
-      ? bounds.minimum.add(bounds.maximum).scale(0.5)
-      : model.root.getAbsolutePosition();
-    const upAxis = getModelAxis(model.root, 'y');
-    const travelAxisName = this.readConveyorCargoTravelAxis(model);
-    const travelAxis = getHorizontalModelAxis(model.root, travelAxisName);
-    const projected = bounds ? projectWorldBoundsOntoAxis(bounds, travelAxis) : null;
-    const spanMeters = projected ? Math.max(0, projected.max - projected.min) : null;
-    return { center, upAxis, travelAxis, travelAxisName, spanMeters };
-  }
-
-  /** 基于输送线行程上下文计算货物底部支撑点，并沿输送方向加入行程偏移。 */
-  private getConveyorCargoPosition(
-    model: ModelRuntimeEntry,
-    travelContext: { center: Vector3; upAxis: Vector3; travelAxis: Vector3 },
-  ): Vector3 {
-    const legacyCenter = travelContext.center.add(travelContext.upAxis.scale(CONVEYOR_CARGO_SIZE.y * 0.75));
-    return legacyCenter
-      .subtract(travelContext.upAxis.scale(CONVEYOR_CARGO_SIZE.y / 2))
-      .add(travelContext.travelAxis.scale(model.conveyorTelemetry.cargoTravelOffset));
-  }
-
-  /** 推断货物沿模型局部 x/z 哪个方向移动，滚筒线默认垂直于滚筒轴。 */
-  private readConveyorCargoTravelAxis(model: ModelRuntimeEntry): 'x' | 'z' {
-    const configs = this.readConveyorMotionConfigs(model);
-    const translateConfig = configs.find((config) => config.kind === 'translate' && config.axis !== 'y');
-    if (translateConfig?.axis === 'x' || translateConfig?.axis === 'z') return translateConfig.axis;
-
-    const rotateConfig = configs.find((config) => config.kind === 'rotate');
-    if (rotateConfig?.axis === 'x') return 'z';
-    return 'x';
-  }
-
-  /** 生成输送线运行时货物的无歧义唯一键，允许设备编号和条码包含任意分隔符。 */
-  private getConveyorCargoKey(assetCode: string, containerCode: string): string {
-    return JSON.stringify([assetCode, containerCode]);
-  }
-
-  /** 删除指定输送线实例生成的运行时货物，不影响其他设备。 */
-  private disposeConveyorCargoForAssetCode(assetCode: string): void {
-    for (const [key, cargo] of this.conveyorCargoMeshes.entries()) {
-      if (cargo.assetCode !== assetCode) continue;
-      this.disposeConveyorCargo(cargo);
-      this.conveyorCargoMeshes.delete(key);
-    }
-  }
-
-  /** 释放单个输送线运行时货物的模板、回退 Box 和支撑点根节点。 */
-  private disposeConveyorCargo(cargo: ConveyorCargoRuntimeEntry): void {
-    this.disposeGeneratedCargo(cargo);
-  }
-
-  /** 生成堆垛机运行时货物的无歧义唯一键，允许设备编号和条码包含任意分隔符。 */
-  private getStackerCargoKey(assetCode: string, containerCode: string): string {
-    return JSON.stringify([assetCode, containerCode]);
-  }
-
-  /** 写入通用设备 telemetry metadata，供脚本、调试面板和现场排查读取。 */
-  private writeDeviceTelemetryMetadata(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): void {
-    const telemetryMetadata = {
-      deviceType: snapshot.deviceType,
-      assetCode: snapshot.assetCode,
-      payloadDeviceCode: snapshot.payloadDeviceCode,
-      sourceTimestamp: snapshot.sourceTimestamp,
-      receivedAt: snapshot.receivedAt,
-      faulted: snapshot.faulted,
-      message: snapshot.message,
-      fields: { ...snapshot.fields },
-    };
-
-    model.root.metadata = {
-      ...(model.root.metadata ?? {}),
-      telemetry: telemetryMetadata,
-    };
-    model.contentRoot.metadata = {
-      ...(model.contentRoot.metadata ?? {}),
-      telemetry: telemetryMetadata,
-    };
-  }
-
-  /** 写入堆垛机兼容 metadata，保留旧调试入口 stackerTelemetry。 */
-  private writeStackerTelemetryMetadata(
-    model: ModelRuntimeEntry,
-    snapshot: StackerTelemetrySnapshot,
-    targetLocator: LocatorRuntimeEntry | null,
-  ): void {
-    const forkReach = this.readStackerForkReachConfig(model);
-    const frontFork = this.splitForkOffset(model.stackerTelemetry.frontForkOffset, forkReach);
-    const backFork = this.splitForkOffset(model.stackerTelemetry.backForkOffset, forkReach);
-    const telemetryMetadata = {
-      assetCode: snapshot.assetCode,
-      payloadDeviceCode: snapshot.payloadDeviceCode,
-      sourceTimestamp: snapshot.sourceTimestamp,
-      receivedAt: snapshot.receivedAt,
-      currentLocationKey: snapshot.currentLocationKey,
-      targetLocationKey: snapshot.targetLocationKey,
-      targetFound: Boolean(targetLocator),
-      hasTargetLocation: snapshot.hasTargetLocation,
-      faulted: snapshot.faulted,
-      message: snapshot.message,
-      fields: snapshot.fields,
-      forkReach,
-      forkOffsets: {
-        front: frontFork,
-        back: backFork,
-      },
-    };
-
-    model.root.metadata = {
-      ...(model.root.metadata ?? {}),
-      stackerTelemetry: telemetryMetadata,
-    };
-    model.contentRoot.metadata = {
-      ...(model.contentRoot.metadata ?? {}),
-      stackerTelemetry: telemetryMetadata,
-    };
-  }
-
-  /** 对故障和目标位缺失做一次性 Console 提示，避免每帧刷屏。 */
-  private reportStackerRuntimeState(snapshot: StackerTelemetrySnapshot, targetLocator: LocatorRuntimeEntry | null): void {
-    const deviceKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}`;
-    const mode = readIntegerField(snapshot.fields, 'mode');
-    const frontCommand = readIntegerField(snapshot.fields, 'front_command');
-    const backCommand = readIntegerField(snapshot.fields, 'back_command');
-    const statusSignature = JSON.stringify([mode, frontCommand, backCommand, snapshot.message]);
-    if (this.reportedStatuses.get(deviceKey) !== statusSignature) {
-      this.reportedStatuses.set(deviceKey, statusSignature);
-      this.pushLog(
-        `Stacker ${snapshot.assetCode} 状态：mode=${mode ?? '未知'}，front=${frontCommand ?? '未知'}，back=${backCommand ?? '未知'}${snapshot.message ? `，${snapshot.message}` : ''}`,
-      );
-    }
-
-    if (snapshot.hasTargetLocation && !targetLocator && snapshot.targetLocationKey) {
-      const missingTargetKey = `${deviceKey}:${snapshot.targetLocationKey}`;
-      if (!this.reportedMissingTargets.has(missingTargetKey)) {
-        this.reportedMissingTargets.add(missingTargetKey);
-        this.pushLog(`Stacker ${snapshot.assetCode} 未找到目标定位线框：${snapshot.targetLocationKey}`);
-      }
-    }
-
-    if (!snapshot.faulted) {
-      this.reportedFaults.delete(deviceKey);
-      return;
-    }
-
-    const faultMessage = snapshot.message || `errorCode=${readIntegerField(snapshot.fields, 'errorCode') ?? 0}`;
-    if (this.reportedFaults.get(deviceKey) === faultMessage) return;
-
-    this.reportedFaults.set(deviceKey, faultMessage);
-    this.pushLog(`Stacker ${snapshot.assetCode} 故障/急停：${faultMessage}`);
-  }
-
-  /** 对输送线状态和故障做节流日志，实时字段仍完整写入 metadata。 */
-  private reportConveyorRuntimeState(snapshot: DeviceTelemetrySnapshot): void {
-    const deviceKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}`;
-    const mode = readIntegerField(snapshot.fields, 'mode');
-    const task = readIntegerField(snapshot.fields, 'task');
-    const movementX = readIntegerField(snapshot.fields, 'movement_x');
-    const statusSignature = JSON.stringify([mode, task, movementX, snapshot.message]);
-    if (this.reportedStatuses.get(deviceKey) !== statusSignature) {
-      this.reportedStatuses.set(deviceKey, statusSignature);
-      this.pushLog(
-        `Conveyor ${snapshot.assetCode} 状态：mode=${mode ?? '未知'}，task=${task ?? '未知'}，movement_x=${movementX ?? '未知'}${snapshot.message ? `，${snapshot.message}` : ''}`,
-      );
-    }
-
-    if (!snapshot.faulted) {
-      this.reportedFaults.delete(deviceKey);
-      return;
-    }
-
-    const faultMessage = snapshot.message || `errorCode=${readIntegerField(snapshot.fields, 'errorCode') ?? 0}`;
-    if (this.reportedFaults.get(deviceKey) === faultMessage) return;
-
-    this.reportedFaults.set(deviceKey, faultMessage);
-    this.pushLog(`Conveyor ${snapshot.assetCode} 故障：${faultMessage}`);
-  }
-
-  /** 创建 stacker 遥测运行态，所有偏移都只保存在内存中。 */
-  private createStackerTelemetryState(root: TransformNode): StackerModelTelemetryState {
-    return {
-      rootBasePosition: root.position.clone(),
-      rootPosition: null,
-      travelConstraint: null,
-      targetReferencePosition: null,
-      liftOffset: 0,
-      frontForkOffset: 0,
-      backForkOffset: 0,
-      lastFrameTimeMs: performance.now(),
-      frontForkDirection: 1,
-      backForkDirection: 1,
-      frontCargoCode: null,
-      backCargoCode: null,
-      nodeBaselines: new Map(),
-      lastTargetKey: null,
-    };
-  }
-
-  /** 通过模型包脚本、元数据或路径判断当前导入模型是否是 stacker。 */
-  private isStackerModelAsset(modelAsset: ModelAssetComponent): boolean {
-    const signature = JSON.stringify([
-      modelAsset.assetCode,
-      modelAsset.sourcePath,
-      modelAsset.sourceUrl,
-      modelAsset.parameterScriptMetadata ?? [],
-      modelAsset.animationScriptMetadata ?? [],
-    ]).toLowerCase();
-
-    return signature.includes('stacker') || signature.includes('堆垛机');
-  }
-
-  /** 将行走、升降和货叉伸缩合成为每个节点的一次性世界偏移，避免重叠节点被后续动作覆盖。 */
-  private applyStackerNodeMotionOffsets(model: ModelRuntimeEntry): void {
-    const state = model.stackerTelemetry;
-    const travelPosition = state.rootPosition ?? state.rootBasePosition;
-    const travelWorldOffset = travelPosition.subtract(state.rootBasePosition);
-    const liftWorldOffset = getModelAxis(model.root, 'y').scale(state.liftOffset);
-    const forkAxis = getModelAxis(model.root, 'x');
-    const forkReach = this.readStackerForkReachConfig(model);
-    const frontOffset = this.splitForkOffset(state.frontForkOffset, forkReach);
-    const backOffset = this.splitForkOffset(state.backForkOffset, forkReach);
-    const {
-      frontStageOneNodes,
-      frontStageTwoNodes,
-      backStageOneNodes,
-      backStageTwoNodes,
-    } = this.findStackerForkNodeGroups(model);
-    const offsets = new Map<TransformNode, Vector3>();
-
-    this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(this.findStackerTravelNodes(model)), travelWorldOffset);
-    this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(this.findStackerLiftNodes(model)), liftWorldOffset);
-    this.addStackerForkStageOffsets(offsets, frontStageOneNodes, frontStageTwoNodes, forkAxis, frontOffset);
-    this.addStackerForkStageOffsets(offsets, backStageOneNodes, backStageTwoNodes, forkAxis, backOffset);
-    this.setStackerForkStageTwoNodesEnabled(frontStageTwoNodes, Math.abs(frontOffset.stageTwoOffset) > 0.001);
-    this.setStackerForkStageTwoNodesEnabled(backStageTwoNodes, Math.abs(backOffset.stageTwoOffset) > 0.001);
-    this.offsetNodesFromBaselineByWorldOffsets(model, offsets);
-  }
-
-  /** 将单侧货叉总偏移拆到一段/二段节点；没有二段节点时保持旧模型整体伸缩行为。 */
-  private addStackerForkStageOffsets(
-    offsets: Map<TransformNode, Vector3>,
-    stageOneNodes: TransformNode[],
-    stageTwoNodes: TransformNode[],
-    forkAxis: Vector3,
-    offset: StackerForkOffsetParts,
-  ): void {
-    if (stageTwoNodes.length === 0) {
-      this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(stageOneNodes), forkAxis.scale(offset.totalOffset));
-      return;
-    }
-
-    this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(stageOneNodes), forkAxis.scale(offset.stageOneOffset));
-    this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(stageTwoNodes), forkAxis.scale(offset.totalOffset));
-  }
-
-  /** 第二段收纳时隐藏克隆件，避免与第一段重叠产生闪烁；非 _stage2 标记的节点不参与显隐切换。 */
-  private setStackerForkStageTwoNodesEnabled(nodes: TransformNode[], enabled: boolean): void {
-    for (const node of nodes) {
-      if (!this.isStackerForkStageTwoNode(node)) continue;
-      node.setEnabled(enabled);
-    }
-  }
-
-  /** 查找随水平行走机构移动的节点；优先使用模型脚本 dataDriven 声明，缺失时回退当前 Stacker GLB 名称。 */
-  private findStackerTravelNodes(model: ModelRuntimeEntry): TransformNode[] {
-    const configuredNames = this.readStackerMotionNodeNames(model, 'travel');
-    const configuredNodes = configuredNames.length > 0 ? findModelNodesByName(model, this.scene, configuredNames) : [];
-    if (configuredNodes.length > 0) {
-      const forkGroups = this.findStackerForkNodeGroups(model);
-      return this.excludeStackerFixedNodes(model, uniqueTransformNodes([
-        ...configuredNodes,
-        ...forkGroups.frontStageTwoNodes,
-        ...forkGroups.backStageTwoNodes,
-      ]));
-    }
-
-    const exactNodes = findModelNodesByName(model, this.scene, STACKER_FALLBACK_TRAVEL_NODE_NAMES);
-    if (exactNodes.length > 0) {
-      return this.excludeStackerFixedNodes(model, exactNodes);
-    }
-
-    return this.excludeStackerFixedNodes(
-      model,
-      findModelNodes(model, this.scene, /dingbuhuagui|dingbu|dibu|lizhu|dianji|caozuotai|xiang|huocha|顶部|底部|立柱|电机|操作台|载货|货叉/i),
-    );
-  }
-
-  /** 查找模型脚本声明或当前 GLB 中的固定轨道节点，水平遥测不会直接写入这些节点。 */
-  private findStackerFixedNodes(model: ModelRuntimeEntry): TransformNode[] {
-    const configuredNodes = findModelNodesByName(model, this.scene, this.readStackerFixedNodeNames(model));
-    if (configuredNodes.length > 0) return configuredNodes;
-    return findModelNodesByName(model, this.scene, STACKER_FALLBACK_FIXED_NODE_NAMES);
-  }
-
-  /** 从候选运动节点中剔除固定轨道节点，避免上下轨道被 movement_x 带动。 */
-  private excludeStackerFixedNodes(model: ModelRuntimeEntry, nodes: TransformNode[]): TransformNode[] {
-    const fixedNodes = new Set(this.findStackerFixedNodes(model));
-    return nodes.filter((node) => !fixedNodes.has(node));
-  }
-
-  /** 将行走虚拟位置限制在固定轨道范围内，避免目标位或编码器值把机体推出轨道端点。 */
-  private constrainStackerTravelPosition(model: ModelRuntimeEntry, position: Vector3, travelAxis: Vector3): Vector3 {
-    const state = model.stackerTelemetry;
-    const projectedPosition = projectPointOntoAxis(state.rootBasePosition, travelAxis, position);
-    const constraint = this.getStackerTravelConstraint(model, travelAxis);
-    if (!constraint) return projectedPosition;
-
-    const requestedDelta = Vector3.Dot(projectedPosition.subtract(state.rootBasePosition), constraint.axis);
-    const minDelta = constraint.trackMin - constraint.movingMin;
-    const maxDelta = constraint.trackMax - constraint.movingMax;
-    const clampedDelta = minDelta <= maxDelta
-      ? clampNumber(requestedDelta, minDelta, maxDelta)
-      : (constraint.trackMin + constraint.trackMax - constraint.movingMin - constraint.movingMax) / 2;
-
-    return state.rootBasePosition.add(constraint.axis.scale(clampedDelta));
-  }
-
-  /** 读取或创建 Stacker 轨道约束，固定轨道决定可行范围，行走机构基线决定端点余量。 */
-  private getStackerTravelConstraint(model: ModelRuntimeEntry, travelAxis: Vector3): StackerTravelConstraint | null {
-    const state = model.stackerTelemetry;
-    if (state.travelConstraint && Vector3.Dot(state.travelConstraint.axis, travelAxis) > 0.999) {
-      return state.travelConstraint;
-    }
-
-    const fixedBounds = getNodesProjectedBounds(this.findStackerFixedNodes(model), travelAxis);
-    const movingBounds = getNodesProjectedBounds(this.findStackerTravelNodes(model), travelAxis);
-    if (!fixedBounds || !movingBounds) return null;
-
-    state.travelConstraint = {
-      axis: travelAxis.clone(),
-      trackMin: fixedBounds.min,
-      trackMax: fixedBounds.max,
-      movingMin: movingBounds.min,
-      movingMax: movingBounds.max,
-    };
-    return state.travelConstraint;
-  }
-
-  /** 查找载货台和货叉节点，升降时这两类部件需要一起动。 */
-  private findStackerLiftNodes(model: ModelRuntimeEntry): TransformNode[] {
-    return uniqueTransformNodes([
-      ...this.findStackerPlatformNodes(model),
-      ...this.findStackerForkNodeGroups(model).frontNodes,
-      ...this.findStackerForkNodeGroups(model).backNodes,
-    ]);
-  }
-
-  /** 查找 stacker 载货台节点。 */
-  private findStackerPlatformNodes(model: ModelRuntimeEntry): TransformNode[] {
-    const namedNodes = findModelNodesByName(model, this.scene, ['xiang.13']);
-    return namedNodes.length > 0 ? namedNodes : findModelNodes(model, this.scene, /platform|cargo|bay|xiang|台|仓/i);
-  }
-
-  /** 查找前后货叉节点，精确命名优先，名称变化时按顺序兜底。 */
-  private findStackerForkNodeGroups(model: ModelRuntimeEntry): StackerForkNodeGroups {
-    const exactFrontStageOneNodes = findModelNodesByName(model, this.scene, ['huocha.9']).filter((node) => !this.isStackerForkStageTwoNode(node));
-    const exactBackStageOneNodes = findModelNodesByName(model, this.scene, ['huocha2.10']).filter((node) => !this.isStackerForkStageTwoNode(node));
-    const exactFrontStageTwoNodes = findModelNodesByName(model, this.scene, ['huocha.9_stage2']);
-    const exactBackStageTwoNodes = findModelNodesByName(model, this.scene, ['huocha2.10_stage2']);
-    if (exactFrontStageOneNodes.length > 0 || exactBackStageOneNodes.length > 0) {
-      const hasStageTwoClones = exactFrontStageTwoNodes.length > 0 || exactBackStageTwoNodes.length > 0;
-      if (!hasStageTwoClones) {
-        // 无 _stage2 克隆件：huocha.9 两段都参与得 totalOffset，huocha2.10 只参与一段得 stageOneOffset
-        const frontMainNodes = exactFrontStageOneNodes;
-        const frontAuxNodes = exactBackStageOneNodes;
-        return {
-          frontNodes: uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
-          backNodes: uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
-          frontStageOneNodes: frontAuxNodes,
-          frontStageTwoNodes: frontMainNodes,
-          backStageOneNodes: [],
-          backStageTwoNodes: [],
-        };
-      }
-      return {
-        frontNodes: uniqueTransformNodes([...exactFrontStageOneNodes, ...exactFrontStageTwoNodes]),
-        backNodes: uniqueTransformNodes([...exactBackStageOneNodes, ...exactBackStageTwoNodes]),
-        frontStageOneNodes: exactFrontStageOneNodes,
-        frontStageTwoNodes: exactFrontStageTwoNodes,
-        backStageOneNodes: exactBackStageOneNodes,
-        backStageTwoNodes: exactBackStageTwoNodes,
-      };
-    }
-
-    const forkNodes = findModelNodes(model, this.scene, /fork|叉|huocha|cha\d*/i);
-    const stageOneNodes = forkNodes.filter((node) => !this.isStackerForkStageTwoNode(node));
-    const stageTwoNodes = forkNodes.filter((node) => this.isStackerForkStageTwoNode(node));
-    const frontStageOneNodes = stageOneNodes.slice(0, 1);
-    const backStageOneNodes = stageOneNodes.slice(1, 2);
-    return {
-      frontNodes: uniqueTransformNodes([...frontStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'front')]),
-      backNodes: uniqueTransformNodes([...backStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'back')]),
-      frontStageOneNodes,
-      frontStageTwoNodes: stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'front'),
-      backStageOneNodes,
-      backStageTwoNodes: stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'back'),
-    };
-  }
-
-  /** 判断节点是否为参数脚本生成的第二段货叉。 */
-  private isStackerForkStageTwoNode(node: TransformNode): boolean {
-    const metadata = isPlainRecord(node.metadata) ? node.metadata : {};
-    return metadata.stackerForkStage === 2 || String(node.name ?? '').endsWith('_stage2');
-  }
-
-  /** 读取第二段货叉所属侧，元数据缺失时按节点名称兜底。 */
-  private readStackerForkSide(node: TransformNode): StackerForkSide | null {
-    const metadata = isPlainRecord(node.metadata) ? node.metadata : {};
-    if (metadata.stackerForkSide === 'front' || metadata.stackerForkSide === 'back') return metadata.stackerForkSide;
-    const name = String(node.name ?? '').toLowerCase();
-    if (name.includes('huocha2') || name.includes('back')) return 'back';
-    if (name.includes('huocha') || name.includes('front')) return 'front';
-    return null;
-  }
-
-  /** 读取模型脚本 dataDriven.motion.<key>.nodes 中声明的节点名。 */
-  private readStackerMotionNodeNames(model: ModelRuntimeEntry, motionKey: string): string[] {
-    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
-      const nodes = readStringArrayPath(dataDriven, ['motion', motionKey, 'nodes']);
-      if (nodes.length > 0) return nodes;
-    }
-
-    return [];
-  }
-
-  /** 读取模型脚本 dataDriven.fixedNodes 中声明的固定节点名。 */
-  private readStackerFixedNodeNames(model: ModelRuntimeEntry): string[] {
-    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
-      const nodes = readStringArrayPath(dataDriven, ['fixedNodes']);
-      if (nodes.length > 0) return nodes;
-    }
-
-    return STACKER_FALLBACK_FIXED_NODE_NAMES;
-  }
-
-  /** 按路径读取数值配置，供模型脚本 dataDriven 扩展字段使用。 */
-  private readNumberPath(source: unknown, path: string[]): number | null {
-    let current: unknown = source;
-    for (const key of path) {
-      if (!isPlainRecord(current)) return null;
-      current = current[key];
-    }
-
-    return typeof current === 'number' && Number.isFinite(current) ? current : null;
-  }
-
-  /** 累加一组节点的世界位移，后续统一转换到各自父级本地坐标。 */
-  private addStackerWorldOffset(offsets: Map<TransformNode, Vector3>, nodes: TransformNode[], worldOffset: Vector3): void {
-    for (const node of nodes) {
-      const existing = offsets.get(node) ?? Vector3.Zero();
-      offsets.set(node, existing.add(worldOffset));
-    }
-  }
-
-  /** 按世界位移写回节点位置，兼容模型内容根节点的毫米缩放、旋转和父级层级。 */
-  private offsetNodesFromBaselineByWorldOffsets(model: ModelRuntimeEntry, offsets: Map<TransformNode, Vector3>): void {
-    for (const [node, worldOffset] of offsets) {
-      const baseline = this.getTelemetryNodeBaseline(model, node);
-      const localOffset = worldDeltaToParentLocalDelta(node, worldOffset);
-      node.position = baseline.add(localOffset);
-    }
-  }
-
-  /** 记录遥测动作前的节点基线位置。 */
-  private getTelemetryNodeBaseline(model: ModelRuntimeEntry, node: TransformNode): Vector3 {
-    const existing = model.stackerTelemetry.nodeBaselines.get(node);
-    if (existing) return existing;
-
-    const baseline = node.position.clone();
-    model.stackerTelemetry.nodeBaselines.set(node, baseline);
-    return baseline;
-  }
-
-  /** movement_x：0 静止，1 前进，2 后退。 */
-  private readTravelDirection(value: number | null): number {
-    if (value === 1) return 1;
-    if (value === 2) return -1;
-    return 0;
-  }
-
-  /** movement_y：0 原位，1 上升，2 下降。 */
-  private readLiftDirection(value: number | null): number {
-    if (value === 1) return 1;
-    if (value === 2) return -1;
-    return 0;
-  }
-
-  /** movement_z：1 右伸，2 左缩，3 左伸，4 右缩。 */
-  private readForkDirection(value: number | null, currentOffset: number): number {
-    if (value === 1) return 1;
-    if (value === 3) return -1;
-    if (value === 2 || value === 4) return currentOffset === 0 ? 0 : -Math.sign(currentOffset);
-    return 0;
-  }
-
-  /** 使用 rpm 字段换算速度；没有有效 rpm 时回退模型默认速度。 */
-  private readSpeed(snapshot: StackerTelemetrySnapshot, rpmKey: string, fallbackSpeed: number): number {
-    const rpm = readNumberField(snapshot.fields, rpmKey);
-    if (rpm === null || rpm <= 0) return fallbackSpeed;
-    return Math.max(fallbackSpeed * 0.25, rpm * STACKER_RPM_TO_METERS_PER_SECOND);
-  }
-
-  /** 根据帧时间计算编码器校准插值权重。 */
-  private getCalibrationAlpha(deltaSeconds: number): number {
-    return Math.min(1, Math.max(0, deltaSeconds * STACKER_CALIBRATION_RATE));
-  }
 
   /** 创建编辑态空生成器的青色线框标记；标记只属于 Babylon 运行时。 */
   private createModelGeneratorMarker(entityId: string, root: TransformNode): ModelGeneratorMarkerRuntimeEntry {
@@ -5320,6 +3440,7 @@ export class SceneRuntime {
     this.disposeModelArrayParameterVariantsForSource(entityId);
     this.disposeModelArrayBatch(model);
     model.assetHandle?.dispose();
+    this.specializedTelemetryRuntime.disposeCargoForAssetCode(model.assetCode);
     model.contentRoot.dispose();
     model.root.dispose();
     model.modelArraySuspendedMeshes.clear();
@@ -5366,7 +3487,7 @@ export class SceneRuntime {
   /** 释放模型生成器配置标记、独立输出根节点、以其为模板的货物和异步资源。 */
   private disposeModelGenerator(entityId: string, runtimeEntry: ModelGeneratorRuntimeEntry): void {
     runtimeEntry.loadToken += 1;
-    this.disposeTelemetryCargoForGenerator(entityId);
+    this.specializedTelemetryRuntime.disposeCargoForGenerator(entityId);
     this.disposeModelGeneratorOutput(runtimeEntry);
     runtimeEntry.marker.material.dispose();
     runtimeEntry.marker.mesh.dispose();
@@ -5387,21 +3508,6 @@ export class SceneRuntime {
     this.environment = null;
   }
 
-  /** 删除指定 Stacker 实例生成的运行时货物，不污染场景文档。 */
-  private disposeStackerCargoForAssetCode(assetCode: string): void {
-    for (const [key, cargo] of this.stackerCargoMeshes.entries()) {
-      if (cargo.assetCode !== assetCode) continue;
-      this.disposeStackerCargo(cargo);
-      this.stackerCargoMeshes.delete(key);
-    }
-  }
-
-  /** 释放单个堆垛机运行时货物的模板、回退 Box 和支撑点根节点。 */
-  private disposeStackerCargo(cargo: StackerCargoRuntimeEntry): void {
-    this.disposeGeneratedCargo(cargo);
-  }
-
-  /** 释放灯光资源。 */
   private disposeLight(entityId: string, light: Light): void {
     light.dispose();
     this.lights.delete(entityId);
@@ -6103,8 +4209,8 @@ export class SceneRuntime {
     model.telemetryBinding = representative.components.telemetryBinding ?? null;
     model.assetRevision = modelAsset.assetRevision ?? null;
     model.assetSignature = assetSignature;
-    model.stackerCapable = this.isStackerModelAsset(modelAsset);
-    model.conveyorCapable = this.isConveyorModelAsset(modelAsset);
+    model.stackerCapable = isStackerModelAsset(modelAsset);
+    model.conveyorCapable = isConveyorModelAsset(modelAsset);
     this.applyTransform(model.root, representative.components.transform);
     // 参数变体宿主的单位缩放只在创建时设置；重复同步保留脚本叠加在 contentRoot 上的参数缩放。
     if (!model.assetHandle) return variant;
@@ -6139,8 +4245,8 @@ export class SceneRuntime {
       entitySnapshot: representative,
       assetCode: modelAsset.assetCode,
       telemetryBinding: representative.components.telemetryBinding ?? null,
-      stackerCapable: this.isStackerModelAsset(modelAsset),
-      conveyorCapable: this.isConveyorModelAsset(modelAsset),
+      stackerCapable: isStackerModelAsset(modelAsset),
+      conveyorCapable: isConveyorModelAsset(modelAsset),
       root,
       contentRoot,
       assetHandle: null,
@@ -6160,8 +4266,8 @@ export class SceneRuntime {
       externalScriptSignature: '',
       externalScriptStarting: false,
       measurementReady: false,
-      stackerTelemetry: this.createStackerTelemetryState(root),
-      conveyorTelemetry: this.createConveyorTelemetryState(),
+      stackerTelemetry: createStackerTelemetryState(root),
+      conveyorTelemetry: createConveyorTelemetryState(),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -6575,8 +4681,8 @@ export class SceneRuntime {
       model.externalScriptSignature = '';
       model.externalScriptStarting = false;
       model.measurementReady = true;
-      this.resetStackerTelemetryState(model);
-      this.resetConveyorTelemetryState(model);
+      resetStackerTelemetryState(model);
+      resetConveyorTelemetryState(model);
       model.stackerTelemetryReady = true;
       onSettled(model);
       return;
@@ -6612,8 +4718,8 @@ export class SceneRuntime {
           if (!current || current.loadToken !== loadToken) return;
           this.updateModelExternalScriptRuntimeContext(current, this.telemetryPreviewActive ? 'runtime' : 'edit', null);
           runtime.update();
-          this.resetStackerTelemetryState(current);
-          this.resetConveyorTelemetryState(current);
+          resetStackerTelemetryState(current);
+          resetConveyorTelemetryState(current);
           current.externalScriptStarting = false;
           current.measurementReady = true;
           current.stackerTelemetryReady = true;
@@ -6624,8 +4730,8 @@ export class SceneRuntime {
           if (!current || current.loadToken !== loadToken) return;
           current.externalScriptStarting = false;
           current.measurementReady = true;
-          this.resetStackerTelemetryState(current);
-          this.resetConveyorTelemetryState(current);
+          resetStackerTelemetryState(current);
+          resetConveyorTelemetryState(current);
           current.stackerTelemetryReady = true;
           const message = error instanceof Error ? error.message : String(error);
           this.pushLog(`模型脚本初始化失败，已回退基础几何与测量：${message}`);
@@ -6640,8 +4746,8 @@ export class SceneRuntime {
     if (model.externalScriptStarting) return;
 
     model.externalScriptRuntime.update();
-    this.resetStackerTelemetryState(model);
-    this.resetConveyorTelemetryState(model);
+    resetStackerTelemetryState(model);
+    resetConveyorTelemetryState(model);
     model.measurementReady = true;
     model.stackerTelemetryReady = true;
     onSettled(model);
@@ -6675,7 +4781,7 @@ export class SceneRuntime {
       modelAsset,
       binding: entity.components.telemetryBinding ?? null,
       externalDataDrivenConfigs: model.externalScriptRuntime?.getDataDrivenConfigs() ?? [],
-      specializedDriver: model.stackerCapable || this.isConveyorRuntimeModel(model),
+      specializedDriver: model.stackerCapable || isConveyorRuntimeModel(model),
       loadToken: model.loadToken,
       baselineRevision: this.createGenericTelemetryBaselineRevision(entity, model),
       animationGroups: model.assetHandle?.animationGroups ?? [],
@@ -6691,23 +4797,6 @@ export class SceneRuntime {
       assetSignature: model.assetSignature,
       loadToken: model.loadToken,
     });
-  }
-
-  /** 模型完成归一化和外置脚本初始化后，重新建立 Stacker 遥测基线。 */
-  private resetStackerTelemetryState(model: ModelRuntimeEntry): void {
-    model.stackerTelemetry.rootBasePosition = model.root.position.clone();
-    model.stackerTelemetry.rootPosition = null;
-    model.stackerTelemetry.travelConstraint = null;
-    model.stackerTelemetry.targetReferencePosition = null;
-    model.stackerTelemetry.liftOffset = 0;
-    model.stackerTelemetry.frontForkOffset = 0;
-    model.stackerTelemetry.backForkOffset = 0;
-    model.stackerTelemetry.frontForkDirection = 1;
-    model.stackerTelemetry.backForkDirection = 1;
-    model.stackerTelemetry.frontCargoCode = null;
-    model.stackerTelemetry.backCargoCode = null;
-    model.stackerTelemetry.nodeBaselines.clear();
-    model.stackerTelemetry.lastTargetKey = null;
   }
 
   /** 把实例资产编号和 meta.json 脚本参数写回 Babylon 节点 metadata，供运行时和动画识别读取。 */
