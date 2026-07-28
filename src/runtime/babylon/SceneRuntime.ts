@@ -106,6 +106,36 @@ import {
 } from './telemetry/specializedTelemetryBinding';
 import { resolveLocatorBoxIndex, resolveStackerStorageForkReach, resolveStackerStorageTargetOffsets, type StackerStorageTargetOffsets } from './telemetry/stackerStorageLocation';
 import { resolveConveyorCargoTravelHalfRange, wrapConveyorCargoOffset } from './telemetry/conveyorCargoTravel';
+import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from './runtimeValueUtils';
+import {
+  clampNumber,
+  createLocalAxis,
+  createPointWorldBounds,
+  filterTopLevelMotionNodes,
+  findModelNodes,
+  findModelNodesByName,
+  getHorizontalModelAxis,
+  getMeshWorldBounds,
+  getModelAxis,
+  getModelTransformNodes,
+  getNodeMeshes,
+  getNodeWorldBounds,
+  getNodeWorldRotation,
+  getNodesProjectedBounds,
+  getNodesWorldBounds,
+  isFiniteVector3,
+  lerpNumber,
+  lerpVector,
+  mergeWorldBounds,
+  moveNumberTowards,
+  moveVectorTowards,
+  normalizeVector,
+  projectPointOntoAxis,
+  projectWorldBoundsOntoAxis,
+  uniqueTransformNodes,
+  worldDeltaToParentLocalDelta,
+  type RuntimeWorldBounds,
+} from './runtimeNodeGeometry';
 import {
   deviceTelemetryStore,
   readBooleanField,
@@ -464,11 +494,6 @@ type EnvironmentRuntimeEntry = {
 type EntityRuntimeState = {
   visible: boolean;
   locked: boolean;
-};
-
-type RuntimeWorldBounds = {
-  minimum: Vector3;
-  maximum: Vector3;
 };
 
 export type SceneRuntimePerformanceMetrics = {
@@ -1356,7 +1381,7 @@ export class SceneRuntime {
         notReadyEntityCount += 1;
         if (notReadyEntityIds.length < 32) notReadyEntityIds.push(entityId);
       }
-      mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+      mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
     }
 
     if (!mergedBounds) return null;
@@ -1423,15 +1448,15 @@ export class SceneRuntime {
   /** 根据运行时对象类型读取单个实体的世界包围盒。 */
   private getEntityWorldBounds(entityId: string): RuntimeWorldBounds | null {
     const primitiveMesh = this.meshes.get(entityId);
-    if (primitiveMesh) return this.getMeshWorldBounds(primitiveMesh);
+    if (primitiveMesh) return getMeshWorldBounds(primitiveMesh);
 
     const locator = this.locators.get(entityId);
     if (locator) {
       let mergedBounds: RuntimeWorldBounds | null = null;
       for (const box of locator.boxes) {
-        const bounds = this.getMeshWorldBounds(box);
+        const bounds = getMeshWorldBounds(box);
         if (!bounds) continue;
-        mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+        mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
       }
       if (mergedBounds) return mergedBounds;
     }
@@ -1458,9 +1483,9 @@ export class SceneRuntime {
     if (poiEffectMeshes.length > 0) {
       let mergedBounds: RuntimeWorldBounds | null = null;
       for (const mesh of poiEffectMeshes) {
-        const bounds = this.getMeshWorldBounds(mesh);
+        const bounds = getMeshWorldBounds(mesh);
         if (!bounds) continue;
-        mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+        mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
       }
       if (mergedBounds) return mergedBounds;
     }
@@ -1468,32 +1493,20 @@ export class SceneRuntime {
     return null;
   }
 
-  /** 从 Mesh 的 Babylon BoundingInfo 读取世界空间包围盒。 */
-  private getMeshWorldBounds(mesh: AbstractMesh): RuntimeWorldBounds | null {
-    mesh.computeWorldMatrix(true);
-    const boundingBox = mesh.getBoundingInfo().boundingBox;
-    if (!this.isFiniteVector3(boundingBox.minimumWorld) || !this.isFiniteVector3(boundingBox.maximumWorld)) return null;
-
-    return {
-      minimum: boundingBox.minimumWorld.clone(),
-      maximum: boundingBox.maximumWorld.clone(),
-    };
-  }
-
   /** 导入模型优先汇总子网格包围盒，加载中则回退到模型根节点位置。 */
   private getModelWorldBounds(model: ModelRuntimeEntry): RuntimeWorldBounds | null {
     let mergedBounds: RuntimeWorldBounds | null = null;
 
     for (const mesh of model.meshes) {
-      const bounds = this.getMeshWorldBounds(mesh);
+      const bounds = getMeshWorldBounds(mesh);
       if (!bounds) continue;
-      mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+      mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
     }
 
     if (mergedBounds) return mergedBounds;
 
     model.root.computeWorldMatrix(true);
-    return this.createPointWorldBounds(model.root.getAbsolutePosition());
+    return createPointWorldBounds(model.root.getAbsolutePosition());
   }
 
   /** 按实体参数组合返回真正提供几何的源模型或隐藏参数脚本宿主。 */
@@ -1533,7 +1546,7 @@ export class SceneRuntime {
         const finalWorldMatrix = sourceWorldMatrix.multiply(inverseSourceRoot).multiply(targetWorldMatrix);
         for (const localCorner of boundingBox.vectors) {
           const targetWorldCorner = Vector3.TransformCoordinates(localCorner, finalWorldMatrix);
-          if (this.isFiniteVector3(targetWorldCorner)) points.push(targetWorldCorner);
+          if (isFiniteVector3(targetWorldCorner)) points.push(targetWorldCorner);
         }
       }
     }
@@ -1543,7 +1556,7 @@ export class SceneRuntime {
   /** 计算单个独立矩阵实例的世界轴对齐包围盒。 */
   private getModelArrayInstanceWorldBounds(entity: Entity, sourceModel: ModelRuntimeEntry): RuntimeWorldBounds | null {
     const points = this.getModelArrayInstanceWorldPoints(entity, sourceModel);
-    if (!points) return this.createPointWorldBounds(
+    if (!points) return createPointWorldBounds(
       new Vector3(
         entity.components.transform.position.x,
         entity.components.transform.position.y,
@@ -1599,11 +1612,11 @@ export class SceneRuntime {
 
   /** 模型生成器包围盒始终只描述编辑态配置标记，不包含任何运行时自动货物。 */
   private getModelGeneratorWorldBounds(modelGenerator: ModelGeneratorRuntimeEntry): RuntimeWorldBounds | null {
-    const markerBounds = this.getMeshWorldBounds(modelGenerator.marker.mesh);
+    const markerBounds = getMeshWorldBounds(modelGenerator.marker.mesh);
     if (markerBounds) return markerBounds;
 
     modelGenerator.markerRoot.computeWorldMatrix(true);
-    return this.createPointWorldBounds(modelGenerator.markerRoot.getAbsolutePosition());
+    return createPointWorldBounds(modelGenerator.markerRoot.getAbsolutePosition());
   }
 
   /** CAD 参考层优先按所有线稿 Mesh 合并包围盒，加载中则回退到根节点位置。 */
@@ -1611,48 +1624,24 @@ export class SceneRuntime {
     let mergedBounds: RuntimeWorldBounds | null = null;
 
     for (const lineMesh of cadReference.lineMeshes) {
-      const bounds = this.getMeshWorldBounds(lineMesh);
+      const bounds = getMeshWorldBounds(lineMesh);
       if (!bounds) continue;
-      mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+      mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
     }
 
     if (mergedBounds) return mergedBounds;
 
     cadReference.root.computeWorldMatrix(true);
-    return this.createPointWorldBounds(cadReference.root.getAbsolutePosition());
+    return createPointWorldBounds(cadReference.root.getAbsolutePosition());
   }
 
   /** 灯光没有可见体积时用其位置生成一个小包围盒。 */
   private getLightWorldBounds(light: Light): RuntimeWorldBounds {
     if (light instanceof DirectionalLight || light instanceof PointLight) {
-      return this.createPointWorldBounds(light.position);
+      return createPointWorldBounds(light.position);
     }
 
-    return this.createPointWorldBounds(new Vector3(0, 2, 0));
-  }
-
-  /** 合并两个世界包围盒。 */
-  private mergeWorldBounds(left: RuntimeWorldBounds, right: RuntimeWorldBounds): RuntimeWorldBounds {
-    return {
-      minimum: Vector3.Minimize(left.minimum, right.minimum),
-      maximum: Vector3.Maximize(left.maximum, right.maximum),
-    };
-  }
-
-  /** 使用一个世界坐标点构造最小可用包围盒。 */
-  private createPointWorldBounds(point: Vector3): RuntimeWorldBounds {
-    const center = this.isFiniteVector3(point) ? point : Vector3.Zero();
-    const padding = new Vector3(0.25, 0.25, 0.25);
-
-    return {
-      minimum: center.subtract(padding),
-      maximum: center.add(padding),
-    };
-  }
-
-  /** 过滤异常包围盒数值，避免相机被移动到 NaN/Infinity。 */
-  private isFiniteVector3(vector: Vector3): boolean {
-    return Number.isFinite(vector.x) && Number.isFinite(vector.y) && Number.isFinite(vector.z);
+    return createPointWorldBounds(new Vector3(0, 2, 0));
   }
 
   /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
@@ -2406,7 +2395,7 @@ export class SceneRuntime {
       return null;
     }
 
-    const bounds = this.getMeshWorldBounds(box);
+    const bounds = getMeshWorldBounds(box);
     if (!bounds) return null;
     return new Vector3(
       (bounds.minimum.x + bounds.maximum.x) / 2,
@@ -3432,7 +3421,7 @@ export class SceneRuntime {
 
   /** 使用 locator 盒体底面作为生成模型原点，保证模型落在定位框内部而不是悬在中心高度。 */
   private getWarehouseLocatorSupportPosition(locator: LocatorRuntimeEntry): Vector3 {
-    const bounds = locator.boxes.length > 0 ? this.getMeshWorldBounds(locator.boxes[0]) : null;
+    const bounds = locator.boxes.length > 0 ? getMeshWorldBounds(locator.boxes[0]) : null;
     const position = locator.root.getAbsolutePosition();
     return new Vector3(position.x, bounds?.minimum.y ?? position.y, position.z);
   }
@@ -3504,7 +3493,7 @@ export class SceneRuntime {
     this.setGeneratedCargoRootPose(
       cargo,
       this.getConveyorCargoPosition(model, travelContext),
-      this.getNodeWorldRotation(model.root),
+      getNodeWorldRotation(model.root),
     );
     model.conveyorTelemetry.cargoCode = activeContainerCode;
     this.disposeHandedOffCargo(model, activeContainerCode);
@@ -3513,7 +3502,7 @@ export class SceneRuntime {
   /** 按货叉初始世界锚点把 Locator 绝对坐标换算成运行时偏移。 */
   private resolveStackerTargetMotionOffsets(model: ModelRuntimeEntry, targetPosition: Vector3) {
     const referencePosition = this.getStackerTargetReferencePosition(model);
-    const travelAxis = this.getHorizontalModelAxis(model.root, 'z');
+    const travelAxis = getHorizontalModelAxis(model.root, 'z');
     return resolveStackerStorageTargetOffsets({
       targetTravelCoordinate: Vector3.Dot(targetPosition, travelAxis),
       targetLiftCoordinate: targetPosition.y,
@@ -3538,7 +3527,7 @@ export class SceneRuntime {
     this.lastReportedStackerTargetSignatures.set(model.assetCode, signature);
     if (!targetLocator || !targetPosition || !targetOffsets) return;
 
-    const forkAxis = this.getModelAxis(model.root, 'x');
+    const forkAxis = getModelAxis(model.root, 'x');
     const referencePosition = this.getStackerTargetReferencePosition(model);
     const forkProjection = Math.abs(Vector3.Dot(targetPosition.subtract(referencePosition), forkAxis));
     const reach = this.readStackerForkReachConfig(model);
@@ -3557,12 +3546,12 @@ export class SceneRuntime {
     if (state.targetReferencePosition) return state.targetReferencePosition;
 
     const forkGroups = this.findStackerForkNodeGroups(model);
-    const forkNodes = this.uniqueTransformNodes([
+    const forkNodes = uniqueTransformNodes([
       ...forkGroups.frontStageOneNodes,
       ...forkGroups.backStageOneNodes,
     ]);
-    const bounds = this.getNodesWorldBounds(forkNodes)
-      ?? this.getNodesWorldBounds(this.findStackerPlatformNodes(model));
+    const bounds = getNodesWorldBounds(forkNodes)
+      ?? getNodesWorldBounds(this.findStackerPlatformNodes(model));
     state.targetReferencePosition = bounds
       ? bounds.minimum.add(bounds.maximum).scale(0.5)
       : state.rootBasePosition.clone();
@@ -3577,13 +3566,13 @@ export class SceneRuntime {
     deltaSeconds: number,
   ): void {
     const state = model.stackerTelemetry;
-    const travelAxis = this.getHorizontalModelAxis(model.root, 'z');
+    const travelAxis = getHorizontalModelAxis(model.root, 'z');
     state.rootPosition ??= state.rootBasePosition.clone();
 
     const distanceX = readNumberField(snapshot.fields, 'distance_x');
     if (distanceX !== null && targetTravelOffset === null) {
       const calibratedPosition = state.rootBasePosition.add(travelAxis.scale(distanceX));
-      state.rootPosition = this.lerpVector(
+      state.rootPosition = lerpVector(
         state.rootPosition,
         this.constrainStackerTravelPosition(model, calibratedPosition, travelAxis),
         this.getCalibrationAlpha(deltaSeconds),
@@ -3602,7 +3591,7 @@ export class SceneRuntime {
         if (forkMoving) {
           state.rootPosition = rootTargetPosition;
         } else {
-          state.rootPosition = this.moveVectorTowards(
+          state.rootPosition = moveVectorTowards(
             state.rootPosition,
             rootTargetPosition,
             STACKER_TARGET_SPEED_METERS_PER_SECOND * deltaSeconds,
@@ -3630,7 +3619,7 @@ export class SceneRuntime {
     const state = model.stackerTelemetry;
     const distanceY = readNumberField(snapshot.fields, 'distance_y');
     if (distanceY !== null && targetLiftOffset === null) {
-      state.liftOffset = this.lerpNumber(state.liftOffset, distanceY, this.getCalibrationAlpha(deltaSeconds));
+      state.liftOffset = lerpNumber(state.liftOffset, distanceY, this.getCalibrationAlpha(deltaSeconds));
     }
 
     if (!snapshot.faulted) {
@@ -3640,7 +3629,7 @@ export class SceneRuntime {
         if (forkMoving) {
           state.liftOffset = targetLiftOffset;
         } else {
-          state.liftOffset = this.moveNumberTowards(
+          state.liftOffset = moveNumberTowards(
             state.liftOffset,
             targetLiftOffset,
             STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND * deltaSeconds,
@@ -3730,9 +3719,9 @@ export class SceneRuntime {
 
     if (distance !== null) {
       const calibrationDirection = Math.sign(distance) || Math.sign(nextOffset) || lastDirection || 1;
-      nextOffset = this.lerpNumber(
+      nextOffset = lerpNumber(
         nextOffset,
-        this.clampNumber(Math.abs(distance), 0, maxReach) * calibrationDirection,
+        clampNumber(Math.abs(distance), 0, maxReach) * calibrationDirection,
         this.getCalibrationAlpha(deltaSeconds),
       );
       return this.clampForkOffset(nextOffset, maxReach);
@@ -3741,7 +3730,7 @@ export class SceneRuntime {
     if (faulted) return this.clampForkOffset(nextOffset, maxReach);
 
     if (movement === 2 || movement === 4) {
-      return this.moveNumberTowards(this.clampForkOffset(nextOffset, maxReach), 0, speed * deltaSeconds);
+      return moveNumberTowards(this.clampForkOffset(nextOffset, maxReach), 0, speed * deltaSeconds);
     }
 
     return this.clampForkOffset(nextOffset + movementDirection * speed * deltaSeconds, maxReach);
@@ -3770,7 +3759,7 @@ export class SceneRuntime {
   /** 将货叉总偏移拆分成第一段和第二段，保留正负方向语义。 */
   private splitForkOffset(offset: number, reach: StackerForkReachConfig): StackerForkOffsetParts {
     const direction = Math.sign(offset) || 1;
-    const absoluteOffset = this.clampNumber(Math.abs(offset), 0, reach.total);
+    const absoluteOffset = clampNumber(Math.abs(offset), 0, reach.total);
     const stageOneDistance = Math.min(absoluteOffset, reach.stageOne);
     const stageTwoDistance = Math.max(0, absoluteOffset - reach.stageOne);
 
@@ -3785,7 +3774,7 @@ export class SceneRuntime {
   /** 将货叉偏移限制在两段总行程内。 */
   private clampForkOffset(offset: number, maxReach: number): number {
     const reach = Math.max(0, maxReach);
-    return this.clampNumber(offset, -reach, reach);
+    return clampNumber(offset, -reach, reach);
   }
 
   /** 按目标定位框在模型局部 X 轴上的投影计算伸出距离，符号表示方向。 */
@@ -3801,11 +3790,11 @@ export class SceneRuntime {
     const candidateNodes = side === 'front'
       ? [forkGroups.frontStageOneNodes, forkGroups.frontStageTwoNodes, forkGroups.frontNodes]
       : [forkGroups.backStageOneNodes, forkGroups.backStageTwoNodes, forkGroups.backNodes];
-    const forkBounds = this.getNodesWorldBounds(candidateNodes.find((n) => n.length > 0) ?? []);
+    const forkBounds = getNodesWorldBounds(candidateNodes.find((n) => n.length > 0) ?? []);
     if (!forkBounds) return null;
 
     const forkCenter = forkBounds.minimum.add(forkBounds.maximum).scale(0.5);
-    const forkAxis = this.getModelAxis(model.root, 'x');
+    const forkAxis = getModelAxis(model.root, 'x');
     const projectedDistance = Vector3.Dot(targetPosition.subtract(forkCenter), forkAxis);
     if (!Number.isFinite(projectedDistance)) return null;
 
@@ -3838,8 +3827,8 @@ export class SceneRuntime {
   private readStackerModelNumber(model: ModelRuntimeEntry, key: string): number | null {
     const scripts = Array.isArray(model.contentRoot.metadata?.scripts) ? model.contentRoot.metadata.scripts : [];
     for (const script of scripts) {
-      if (!this.isPlainRecord(script)) continue;
-      const values = this.isPlainRecord(script.values) ? script.values : {};
+      if (!isPlainRecord(script)) continue;
+      const values = isPlainRecord(script.values) ? script.values : {};
       const rawValue = this.readWrappedNumber(values[key]);
       if (rawValue !== null) return rawValue;
     }
@@ -3860,7 +3849,7 @@ export class SceneRuntime {
   /** 兼容 meta.json 中 { value } 包装和普通数值。 */
   private readWrappedNumber(value: unknown): number | null {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (this.isPlainRecord(value)) {
+    if (isPlainRecord(value)) {
       const nestedValue = value.value ?? value.currentValue ?? value.defaultValue;
       if (typeof nestedValue === 'number' && Number.isFinite(nestedValue)) return nestedValue;
     }
@@ -3919,12 +3908,12 @@ export class SceneRuntime {
       ? model.stackerTelemetry.frontForkOffset
       : model.stackerTelemetry.backForkOffset, reach);
     const nextPosition = supportPosition && placingProgress > 0
-      ? this.lerpVector(forkPosition, supportPosition, placingProgress)
+      ? lerpVector(forkPosition, supportPosition, placingProgress)
       : forkPosition;
 
     const nextRotation = targetLocator && placingProgress >= 1
-      ? this.getNodeWorldRotation(targetLocator.root)
-      : this.getNodeWorldRotation(model.root);
+      ? getNodeWorldRotation(targetLocator.root)
+      : getNodeWorldRotation(model.root);
     this.setGeneratedCargoRootPose(cargo, nextPosition, nextRotation);
     if (supportPosition && placingProgress >= 1 && snapshot.targetLocationKey) {
       const fetchRow = targetLocator ? this.resolveFetchDriveRowForLocator(targetLocator) : null;
@@ -3992,7 +3981,7 @@ export class SceneRuntime {
     if (cargo.fallback) return;
     const spec = this.getGeneratedCargoFallbackSpec(kind);
     const mesh = MeshBuilder.CreateBox(
-      `${kind}_cargo_${this.sanitizeBabylonName(cargo.assetCode)}_${this.sanitizeBabylonName(cargo.containerCode)}`,
+      `${kind}_cargo_${sanitizeBabylonName(cargo.assetCode)}_${sanitizeBabylonName(cargo.containerCode)}`,
       { width: spec.size.x, height: spec.size.y, depth: spec.size.z },
       this.scene,
     );
@@ -4125,7 +4114,7 @@ export class SceneRuntime {
     if (existing) return existing;
 
     const root = new TransformNode(
-      `stacker_cargo_root_${this.sanitizeBabylonName(assetCode)}_${this.sanitizeBabylonName(containerCode)}`,
+      `stacker_cargo_root_${sanitizeBabylonName(assetCode)}_${sanitizeBabylonName(containerCode)}`,
       this.scene,
     );
     const entry: StackerCargoRuntimeEntry = {
@@ -4147,10 +4136,10 @@ export class SceneRuntime {
     const stageTwoNodes = side === 'front' ? forkGroups.frontStageTwoNodes : forkGroups.backStageTwoNodes;
     const allNodes = side === 'front' ? forkGroups.frontNodes : forkGroups.backNodes;
     const nodes = stageTwoNodes.length > 0 ? stageTwoNodes : allNodes;
-    const bounds = this.getNodesWorldBounds(nodes);
+    const bounds = getNodesWorldBounds(nodes);
     if (!bounds) return model.root.getAbsolutePosition();
 
-    const upAxis = this.getModelAxis(model.root, 'y');
+    const upAxis = getModelAxis(model.root, 'y');
     const legacyCenter = bounds.minimum
       .add(bounds.maximum)
       .scale(0.5)
@@ -4191,23 +4180,16 @@ export class SceneRuntime {
     this.stackerCargoMeshes.delete(key);
   }
 
-  /** 读取任意节点的世界旋转，货物在叉上跟设备，落位后跟定位框。 */
-  private getNodeWorldRotation(node: TransformNode): Quaternion {
-    const rotation = Quaternion.Identity();
-    node.computeWorldMatrix(true).decompose(undefined, rotation);
-    return rotation;
-  }
-
   /** 读取模型脚本声明的输送线运动配置，运行时只接受 devType=conveyor 的 dataDriven 配置。 */
   private readConveyorMotionConfigs(model: ModelRuntimeEntry): ConveyorMotionConfig[] {
     const configs: ConveyorMotionConfig[] = [];
     for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
-      if (!this.isPlainRecord(dataDriven)) continue;
-      const deviceConfig = this.isPlainRecord(dataDriven.device) ? dataDriven.device : {};
+      if (!isPlainRecord(dataDriven)) continue;
+      const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
       const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
       if (devType !== 'conveyor') continue;
 
-      const motionConfig = this.isPlainRecord(dataDriven.motion) ? dataDriven.motion : null;
+      const motionConfig = isPlainRecord(dataDriven.motion) ? dataDriven.motion : null;
       if (!motionConfig) continue;
 
       for (const [key, rawConfig] of Object.entries(motionConfig)) {
@@ -4221,7 +4203,7 @@ export class SceneRuntime {
 
   /** 把单个 dataDriven.motion 配置归一成运行时可直接执行的输送线动作。 */
   private readConveyorMotionConfig(key: string, rawConfig: unknown): ConveyorMotionConfig | null {
-    if (!this.isPlainRecord(rawConfig)) return null;
+    if (!isPlainRecord(rawConfig)) return null;
 
     const rawKind = typeof rawConfig.kind === 'string' ? rawConfig.kind.trim().toLowerCase() : '';
     if (rawKind !== 'rotate' && rawKind !== 'translate') return null;
@@ -4236,8 +4218,8 @@ export class SceneRuntime {
       : CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
     const rawSpeed = typeof rawConfig.speed === 'number' ? rawConfig.speed : Number(rawConfig.speed);
     const speed = Number.isFinite(rawSpeed) && rawSpeed > 0 ? rawSpeed : fallbackSpeed;
-    const fields = this.readStringArrayPath(rawConfig, ['fields']);
-    const nodes = this.readStringArrayPath(rawConfig, ['nodes']);
+    const fields = readStringArrayPath(rawConfig, ['fields']);
+    const nodes = readStringArrayPath(rawConfig, ['nodes']);
     const rawFallbackPattern = typeof rawConfig.fallbackPattern === 'string' ? rawConfig.fallbackPattern.trim() : '';
 
     return {
@@ -4255,7 +4237,7 @@ export class SceneRuntime {
   /** 读取 movement 编码映射，缺省遵循 0=停、1=正向、2=反向。 */
   private readConveyorActionMap(rawActionMap: unknown): Record<string, number> {
     const actionMap: Record<string, number> = { 0: 0, 1: 1, 2: -1 };
-    if (!this.isPlainRecord(rawActionMap)) return actionMap;
+    if (!isPlainRecord(rawActionMap)) return actionMap;
 
     for (const [key, value] of Object.entries(rawActionMap)) {
       const numberValue = typeof value === 'number' ? value : Number(value);
@@ -4343,10 +4325,10 @@ export class SceneRuntime {
     const configuredNodes = config.nodes.length > 0
       ? this.findConfiguredConveyorMotionNodes(model, config.nodes)
       : [];
-    if (configuredNodes.length > 0) return this.filterTopLevelMotionNodes(configuredNodes);
+    if (configuredNodes.length > 0) return filterTopLevelMotionNodes(configuredNodes);
 
     const fallbackPattern = this.createConveyorFallbackPattern(config.fallbackPattern);
-    return fallbackPattern ? this.filterTopLevelMotionNodes(this.findModelNodes(model, fallbackPattern)) : [];
+    return fallbackPattern ? filterTopLevelMotionNodes(findModelNodes(model, this.scene, fallbackPattern)) : [];
   }
 
   /**
@@ -4356,7 +4338,7 @@ export class SceneRuntime {
    */
   private findConfiguredConveyorMotionNodes(model: ModelRuntimeEntry, names: string[]): TransformNode[] {
     const nameSet = new Set(names);
-    return this.getModelTransformNodes(model).filter((node) => {
+    return getModelTransformNodes(model, this.scene).filter((node) => {
       if (nameSet.has(String(node.name ?? ''))) return true;
       const sourceNodeName = this.readParametricMotionSourceNodeName(node);
       return sourceNodeName !== null && nameSet.has(sourceNodeName);
@@ -4365,7 +4347,7 @@ export class SceneRuntime {
 
   /** 读取参数化克隆继承的源运动节点名，普通场景节点不会进入该兼容链路。 */
   private readParametricMotionSourceNodeName(node: TransformNode): string | null {
-    if (!this.isPlainRecord(node.metadata) || node.metadata.generatedByParametricRuntime !== true) return null;
+    if (!isPlainRecord(node.metadata) || node.metadata.generatedByParametricRuntime !== true) return null;
     const sourceNodeName = typeof node.metadata.motionSourceNodeName === 'string'
       ? node.metadata.motionSourceNodeName
       : typeof node.metadata.sourceNodeName === 'string'
@@ -4388,7 +4370,7 @@ export class SceneRuntime {
   /** 按局部轴旋转滚筒节点，兼容 GLB 节点使用 rotationQuaternion 的情况。 */
   private rotateConveyorNodes(nodes: TransformNode[], axis: 'x' | 'y' | 'z', radians: number): void {
     if (Math.abs(radians) <= 0.000001) return;
-    const deltaRotation = Quaternion.RotationAxis(this.createLocalAxis(axis), radians);
+    const deltaRotation = Quaternion.RotationAxis(createLocalAxis(axis), radians);
 
     for (const node of nodes) {
       if (node.rotationQuaternion) {
@@ -4414,8 +4396,8 @@ export class SceneRuntime {
     axis: 'x' | 'y' | 'z',
     offset: number,
   ): void {
-    const localOffset = this.createLocalAxis(axis).scale(offset);
-    for (const node of this.filterTopLevelMotionNodes(nodes)) {
+    const localOffset = createLocalAxis(axis).scale(offset);
+    for (const node of filterTopLevelMotionNodes(nodes)) {
       const baseline = this.getConveyorNodeBaseline(model, node);
       node.position = baseline.position.add(localOffset);
     }
@@ -4446,7 +4428,7 @@ export class SceneRuntime {
     if (existing) return existing;
 
     const root = new TransformNode(
-      `conveyor_cargo_root_${this.sanitizeBabylonName(assetCode)}_${this.sanitizeBabylonName(containerCode)}`,
+      `conveyor_cargo_root_${sanitizeBabylonName(assetCode)}_${sanitizeBabylonName(containerCode)}`,
       this.scene,
     );
     const entry: ConveyorCargoRuntimeEntry = {
@@ -4472,15 +4454,15 @@ export class SceneRuntime {
     const configuredNodes = this.readConveyorMotionConfigs(model).flatMap((config) => this.findConveyorMotionNodes(model, config));
     const conveyorNodes = configuredNodes.length > 0
       ? configuredNodes
-      : this.findModelNodes(model, /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i);
-    const bounds = (conveyorNodes.length > 0 ? this.getNodesWorldBounds(conveyorNodes) : null) ?? this.getModelWorldBounds(model);
+      : findModelNodes(model, this.scene, /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i);
+    const bounds = (conveyorNodes.length > 0 ? getNodesWorldBounds(conveyorNodes) : null) ?? this.getModelWorldBounds(model);
     const center = bounds
       ? bounds.minimum.add(bounds.maximum).scale(0.5)
       : model.root.getAbsolutePosition();
-    const upAxis = this.getModelAxis(model.root, 'y');
+    const upAxis = getModelAxis(model.root, 'y');
     const travelAxisName = this.readConveyorCargoTravelAxis(model);
-    const travelAxis = this.getHorizontalModelAxis(model.root, travelAxisName);
-    const projected = bounds ? this.projectWorldBoundsOntoAxis(bounds, travelAxis) : null;
+    const travelAxis = getHorizontalModelAxis(model.root, travelAxisName);
+    const projected = bounds ? projectWorldBoundsOntoAxis(bounds, travelAxis) : null;
     const spanMeters = projected ? Math.max(0, projected.max - projected.min) : null;
     return { center, upAxis, travelAxis, travelAxisName, spanMeters };
   }
@@ -4690,8 +4672,8 @@ export class SceneRuntime {
     const state = model.stackerTelemetry;
     const travelPosition = state.rootPosition ?? state.rootBasePosition;
     const travelWorldOffset = travelPosition.subtract(state.rootBasePosition);
-    const liftWorldOffset = this.getModelAxis(model.root, 'y').scale(state.liftOffset);
-    const forkAxis = this.getModelAxis(model.root, 'x');
+    const liftWorldOffset = getModelAxis(model.root, 'y').scale(state.liftOffset);
+    const forkAxis = getModelAxis(model.root, 'x');
     const forkReach = this.readStackerForkReachConfig(model);
     const frontOffset = this.splitForkOffset(state.frontForkOffset, forkReach);
     const backOffset = this.splitForkOffset(state.backForkOffset, forkReach);
@@ -4703,8 +4685,8 @@ export class SceneRuntime {
     } = this.findStackerForkNodeGroups(model);
     const offsets = new Map<TransformNode, Vector3>();
 
-    this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(this.findStackerTravelNodes(model)), travelWorldOffset);
-    this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(this.findStackerLiftNodes(model)), liftWorldOffset);
+    this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(this.findStackerTravelNodes(model)), travelWorldOffset);
+    this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(this.findStackerLiftNodes(model)), liftWorldOffset);
     this.addStackerForkStageOffsets(offsets, frontStageOneNodes, frontStageTwoNodes, forkAxis, frontOffset);
     this.addStackerForkStageOffsets(offsets, backStageOneNodes, backStageTwoNodes, forkAxis, backOffset);
     this.setStackerForkStageTwoNodesEnabled(frontStageTwoNodes, Math.abs(frontOffset.stageTwoOffset) > 0.001);
@@ -4721,12 +4703,12 @@ export class SceneRuntime {
     offset: StackerForkOffsetParts,
   ): void {
     if (stageTwoNodes.length === 0) {
-      this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(stageOneNodes), forkAxis.scale(offset.totalOffset));
+      this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(stageOneNodes), forkAxis.scale(offset.totalOffset));
       return;
     }
 
-    this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(stageOneNodes), forkAxis.scale(offset.stageOneOffset));
-    this.addStackerWorldOffset(offsets, this.filterTopLevelMotionNodes(stageTwoNodes), forkAxis.scale(offset.totalOffset));
+    this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(stageOneNodes), forkAxis.scale(offset.stageOneOffset));
+    this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(stageTwoNodes), forkAxis.scale(offset.totalOffset));
   }
 
   /** 第二段收纳时隐藏克隆件，避免与第一段重叠产生闪烁；非 _stage2 标记的节点不参与显隐切换。 */
@@ -4740,32 +4722,32 @@ export class SceneRuntime {
   /** 查找随水平行走机构移动的节点；优先使用模型脚本 dataDriven 声明，缺失时回退当前 Stacker GLB 名称。 */
   private findStackerTravelNodes(model: ModelRuntimeEntry): TransformNode[] {
     const configuredNames = this.readStackerMotionNodeNames(model, 'travel');
-    const configuredNodes = configuredNames.length > 0 ? this.findModelNodesByName(model, configuredNames) : [];
+    const configuredNodes = configuredNames.length > 0 ? findModelNodesByName(model, this.scene, configuredNames) : [];
     if (configuredNodes.length > 0) {
       const forkGroups = this.findStackerForkNodeGroups(model);
-      return this.excludeStackerFixedNodes(model, this.uniqueTransformNodes([
+      return this.excludeStackerFixedNodes(model, uniqueTransformNodes([
         ...configuredNodes,
         ...forkGroups.frontStageTwoNodes,
         ...forkGroups.backStageTwoNodes,
       ]));
     }
 
-    const exactNodes = this.findModelNodesByName(model, STACKER_FALLBACK_TRAVEL_NODE_NAMES);
+    const exactNodes = findModelNodesByName(model, this.scene, STACKER_FALLBACK_TRAVEL_NODE_NAMES);
     if (exactNodes.length > 0) {
       return this.excludeStackerFixedNodes(model, exactNodes);
     }
 
     return this.excludeStackerFixedNodes(
       model,
-      this.findModelNodes(model, /dingbuhuagui|dingbu|dibu|lizhu|dianji|caozuotai|xiang|huocha|顶部|底部|立柱|电机|操作台|载货|货叉/i),
+      findModelNodes(model, this.scene, /dingbuhuagui|dingbu|dibu|lizhu|dianji|caozuotai|xiang|huocha|顶部|底部|立柱|电机|操作台|载货|货叉/i),
     );
   }
 
   /** 查找模型脚本声明或当前 GLB 中的固定轨道节点，水平遥测不会直接写入这些节点。 */
   private findStackerFixedNodes(model: ModelRuntimeEntry): TransformNode[] {
-    const configuredNodes = this.findModelNodesByName(model, this.readStackerFixedNodeNames(model));
+    const configuredNodes = findModelNodesByName(model, this.scene, this.readStackerFixedNodeNames(model));
     if (configuredNodes.length > 0) return configuredNodes;
-    return this.findModelNodesByName(model, STACKER_FALLBACK_FIXED_NODE_NAMES);
+    return findModelNodesByName(model, this.scene, STACKER_FALLBACK_FIXED_NODE_NAMES);
   }
 
   /** 从候选运动节点中剔除固定轨道节点，避免上下轨道被 movement_x 带动。 */
@@ -4777,7 +4759,7 @@ export class SceneRuntime {
   /** 将行走虚拟位置限制在固定轨道范围内，避免目标位或编码器值把机体推出轨道端点。 */
   private constrainStackerTravelPosition(model: ModelRuntimeEntry, position: Vector3, travelAxis: Vector3): Vector3 {
     const state = model.stackerTelemetry;
-    const projectedPosition = this.projectPointOntoAxis(state.rootBasePosition, travelAxis, position);
+    const projectedPosition = projectPointOntoAxis(state.rootBasePosition, travelAxis, position);
     const constraint = this.getStackerTravelConstraint(model, travelAxis);
     if (!constraint) return projectedPosition;
 
@@ -4785,7 +4767,7 @@ export class SceneRuntime {
     const minDelta = constraint.trackMin - constraint.movingMin;
     const maxDelta = constraint.trackMax - constraint.movingMax;
     const clampedDelta = minDelta <= maxDelta
-      ? this.clampNumber(requestedDelta, minDelta, maxDelta)
+      ? clampNumber(requestedDelta, minDelta, maxDelta)
       : (constraint.trackMin + constraint.trackMax - constraint.movingMin - constraint.movingMax) / 2;
 
     return state.rootBasePosition.add(constraint.axis.scale(clampedDelta));
@@ -4798,8 +4780,8 @@ export class SceneRuntime {
       return state.travelConstraint;
     }
 
-    const fixedBounds = this.getNodesProjectedBounds(this.findStackerFixedNodes(model), travelAxis);
-    const movingBounds = this.getNodesProjectedBounds(this.findStackerTravelNodes(model), travelAxis);
+    const fixedBounds = getNodesProjectedBounds(this.findStackerFixedNodes(model), travelAxis);
+    const movingBounds = getNodesProjectedBounds(this.findStackerTravelNodes(model), travelAxis);
     if (!fixedBounds || !movingBounds) return null;
 
     state.travelConstraint = {
@@ -4814,7 +4796,7 @@ export class SceneRuntime {
 
   /** 查找载货台和货叉节点，升降时这两类部件需要一起动。 */
   private findStackerLiftNodes(model: ModelRuntimeEntry): TransformNode[] {
-    return this.uniqueTransformNodes([
+    return uniqueTransformNodes([
       ...this.findStackerPlatformNodes(model),
       ...this.findStackerForkNodeGroups(model).frontNodes,
       ...this.findStackerForkNodeGroups(model).backNodes,
@@ -4823,16 +4805,16 @@ export class SceneRuntime {
 
   /** 查找 stacker 载货台节点。 */
   private findStackerPlatformNodes(model: ModelRuntimeEntry): TransformNode[] {
-    const namedNodes = this.findModelNodesByName(model, ['xiang.13']);
-    return namedNodes.length > 0 ? namedNodes : this.findModelNodes(model, /platform|cargo|bay|xiang|台|仓/i);
+    const namedNodes = findModelNodesByName(model, this.scene, ['xiang.13']);
+    return namedNodes.length > 0 ? namedNodes : findModelNodes(model, this.scene, /platform|cargo|bay|xiang|台|仓/i);
   }
 
   /** 查找前后货叉节点，精确命名优先，名称变化时按顺序兜底。 */
   private findStackerForkNodeGroups(model: ModelRuntimeEntry): StackerForkNodeGroups {
-    const exactFrontStageOneNodes = this.findModelNodesByName(model, ['huocha.9']).filter((node) => !this.isStackerForkStageTwoNode(node));
-    const exactBackStageOneNodes = this.findModelNodesByName(model, ['huocha2.10']).filter((node) => !this.isStackerForkStageTwoNode(node));
-    const exactFrontStageTwoNodes = this.findModelNodesByName(model, ['huocha.9_stage2']);
-    const exactBackStageTwoNodes = this.findModelNodesByName(model, ['huocha2.10_stage2']);
+    const exactFrontStageOneNodes = findModelNodesByName(model, this.scene, ['huocha.9']).filter((node) => !this.isStackerForkStageTwoNode(node));
+    const exactBackStageOneNodes = findModelNodesByName(model, this.scene, ['huocha2.10']).filter((node) => !this.isStackerForkStageTwoNode(node));
+    const exactFrontStageTwoNodes = findModelNodesByName(model, this.scene, ['huocha.9_stage2']);
+    const exactBackStageTwoNodes = findModelNodesByName(model, this.scene, ['huocha2.10_stage2']);
     if (exactFrontStageOneNodes.length > 0 || exactBackStageOneNodes.length > 0) {
       const hasStageTwoClones = exactFrontStageTwoNodes.length > 0 || exactBackStageTwoNodes.length > 0;
       if (!hasStageTwoClones) {
@@ -4840,8 +4822,8 @@ export class SceneRuntime {
         const frontMainNodes = exactFrontStageOneNodes;
         const frontAuxNodes = exactBackStageOneNodes;
         return {
-          frontNodes: this.uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
-          backNodes: this.uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
+          frontNodes: uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
+          backNodes: uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
           frontStageOneNodes: frontAuxNodes,
           frontStageTwoNodes: frontMainNodes,
           backStageOneNodes: [],
@@ -4849,8 +4831,8 @@ export class SceneRuntime {
         };
       }
       return {
-        frontNodes: this.uniqueTransformNodes([...exactFrontStageOneNodes, ...exactFrontStageTwoNodes]),
-        backNodes: this.uniqueTransformNodes([...exactBackStageOneNodes, ...exactBackStageTwoNodes]),
+        frontNodes: uniqueTransformNodes([...exactFrontStageOneNodes, ...exactFrontStageTwoNodes]),
+        backNodes: uniqueTransformNodes([...exactBackStageOneNodes, ...exactBackStageTwoNodes]),
         frontStageOneNodes: exactFrontStageOneNodes,
         frontStageTwoNodes: exactFrontStageTwoNodes,
         backStageOneNodes: exactBackStageOneNodes,
@@ -4858,14 +4840,14 @@ export class SceneRuntime {
       };
     }
 
-    const forkNodes = this.findModelNodes(model, /fork|叉|huocha|cha\d*/i);
+    const forkNodes = findModelNodes(model, this.scene, /fork|叉|huocha|cha\d*/i);
     const stageOneNodes = forkNodes.filter((node) => !this.isStackerForkStageTwoNode(node));
     const stageTwoNodes = forkNodes.filter((node) => this.isStackerForkStageTwoNode(node));
     const frontStageOneNodes = stageOneNodes.slice(0, 1);
     const backStageOneNodes = stageOneNodes.slice(1, 2);
     return {
-      frontNodes: this.uniqueTransformNodes([...frontStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'front')]),
-      backNodes: this.uniqueTransformNodes([...backStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'back')]),
+      frontNodes: uniqueTransformNodes([...frontStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'front')]),
+      backNodes: uniqueTransformNodes([...backStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'back')]),
       frontStageOneNodes,
       frontStageTwoNodes: stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'front'),
       backStageOneNodes,
@@ -4875,13 +4857,13 @@ export class SceneRuntime {
 
   /** 判断节点是否为参数脚本生成的第二段货叉。 */
   private isStackerForkStageTwoNode(node: TransformNode): boolean {
-    const metadata = this.isPlainRecord(node.metadata) ? node.metadata : {};
+    const metadata = isPlainRecord(node.metadata) ? node.metadata : {};
     return metadata.stackerForkStage === 2 || String(node.name ?? '').endsWith('_stage2');
   }
 
   /** 读取第二段货叉所属侧，元数据缺失时按节点名称兜底。 */
   private readStackerForkSide(node: TransformNode): StackerForkSide | null {
-    const metadata = this.isPlainRecord(node.metadata) ? node.metadata : {};
+    const metadata = isPlainRecord(node.metadata) ? node.metadata : {};
     if (metadata.stackerForkSide === 'front' || metadata.stackerForkSide === 'back') return metadata.stackerForkSide;
     const name = String(node.name ?? '').toLowerCase();
     if (name.includes('huocha2') || name.includes('back')) return 'back';
@@ -4892,7 +4874,7 @@ export class SceneRuntime {
   /** 读取模型脚本 dataDriven.motion.<key>.nodes 中声明的节点名。 */
   private readStackerMotionNodeNames(model: ModelRuntimeEntry, motionKey: string): string[] {
     for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
-      const nodes = this.readStringArrayPath(dataDriven, ['motion', motionKey, 'nodes']);
+      const nodes = readStringArrayPath(dataDriven, ['motion', motionKey, 'nodes']);
       if (nodes.length > 0) return nodes;
     }
 
@@ -4902,66 +4884,22 @@ export class SceneRuntime {
   /** 读取模型脚本 dataDriven.fixedNodes 中声明的固定节点名。 */
   private readStackerFixedNodeNames(model: ModelRuntimeEntry): string[] {
     for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
-      const nodes = this.readStringArrayPath(dataDriven, ['fixedNodes']);
+      const nodes = readStringArrayPath(dataDriven, ['fixedNodes']);
       if (nodes.length > 0) return nodes;
     }
 
     return STACKER_FALLBACK_FIXED_NODE_NAMES;
   }
 
-  /** 按路径读取字符串数组，保证外置模型脚本配置只以安全 JSON 形态参与节点选择。 */
-  private readStringArrayPath(source: unknown, path: string[]): string[] {
-    let current: unknown = source;
-    for (const key of path) {
-      if (!this.isPlainRecord(current)) return [];
-      current = current[key];
-    }
-
-    if (!Array.isArray(current)) return [];
-    return current.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
-  }
-
   /** 按路径读取数值配置，供模型脚本 dataDriven 扩展字段使用。 */
   private readNumberPath(source: unknown, path: string[]): number | null {
     let current: unknown = source;
     for (const key of path) {
-      if (!this.isPlainRecord(current)) return null;
+      if (!isPlainRecord(current)) return null;
       current = current[key];
     }
 
     return typeof current === 'number' && Number.isFinite(current) ? current : null;
-  }
-
-  /** 在导入模型子树中按精确名称查找节点。 */
-  private findModelNodesByName(model: ModelRuntimeEntry, names: string[]): TransformNode[] {
-    const nameSet = new Set(names);
-    return this.getModelTransformNodes(model).filter((node) => nameSet.has(String(node.name ?? '')));
-  }
-
-  /** 在导入模型子树中按名称正则查找节点。 */
-  private findModelNodes(model: ModelRuntimeEntry, pattern: RegExp): TransformNode[] {
-    return this.getModelTransformNodes(model).filter((node) => pattern.test(String(node.name ?? '')));
-  }
-
-  /** 汇总模型内容根节点、TransformNode 与 Mesh，过滤模型实体根节点本身。 */
-  private getModelTransformNodes(model: ModelRuntimeEntry): TransformNode[] {
-    const nodes = [
-      model.contentRoot,
-      ...model.root.getChildTransformNodes(false),
-      ...model.meshes,
-      ...this.scene.transformNodes,
-      ...this.scene.meshes,
-    ].filter((node) => node !== model.root && node.isDescendantOf?.(model.root));
-
-    return this.uniqueTransformNodes(nodes);
-  }
-
-  /** 过滤同一运动分组中的子级节点，避免父子同时写入相同动作后产生双倍位移。 */
-  private filterTopLevelMotionNodes(nodes: TransformNode[]): TransformNode[] {
-    const uniqueNodes = this.uniqueTransformNodes(nodes);
-    return uniqueNodes.filter((node) => {
-      return !uniqueNodes.some((candidate) => candidate !== node && node.isDescendantOf?.(candidate));
-    });
   }
 
   /** 累加一组节点的世界位移，后续统一转换到各自父级本地坐标。 */
@@ -4972,69 +4910,11 @@ export class SceneRuntime {
     }
   }
 
-  /** 读取一组节点的世界包围盒在指定轨道轴上的投影范围。 */
-  private getNodesProjectedBounds(nodes: TransformNode[], axis: Vector3): { min: number; max: number } | null {
-    const bounds = this.getNodesWorldBounds(nodes);
-    return bounds ? this.projectWorldBoundsOntoAxis(bounds, axis) : null;
-  }
-
-  /** 合并一组节点及其子网格的世界包围盒。 */
-  private getNodesWorldBounds(nodes: TransformNode[]): RuntimeWorldBounds | null {
-    let mergedBounds: RuntimeWorldBounds | null = null;
-    for (const node of nodes) {
-      const bounds = this.getNodeWorldBounds(node);
-      if (!bounds) continue;
-      mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
-    }
-    return mergedBounds;
-  }
-
-  /** 读取单个节点自身或子网格包围盒，没有可见网格时退回节点世界位置。 */
-  private getNodeWorldBounds(node: TransformNode): RuntimeWorldBounds | null {
-    const meshes = this.getNodeMeshes(node);
-    let mergedBounds: RuntimeWorldBounds | null = null;
-    for (const mesh of meshes) {
-      const bounds = this.getMeshWorldBounds(mesh);
-      if (!bounds) continue;
-      mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
-    }
-
-    if (mergedBounds) return mergedBounds;
-    node.computeWorldMatrix(true);
-    return this.createPointWorldBounds(node.getAbsolutePosition());
-  }
-
-  /** 收集节点自身和后代 Mesh，用于从真实几何范围计算轨道端点。 */
-  private getNodeMeshes(node: TransformNode): AbstractMesh[] {
-    const meshes = new Set<AbstractMesh>();
-    if (node instanceof AbstractMesh) meshes.add(node);
-    for (const childMesh of node.getChildMeshes(false)) {
-      meshes.add(childMesh);
-    }
-    return [...meshes];
-  }
-
-  /** 将世界 AABB 投影到任意轴上，使用 8 个角点避免旋转模型时范围偏小。 */
-  private projectWorldBoundsOntoAxis(bounds: RuntimeWorldBounds, axis: Vector3): { min: number; max: number } {
-    const corners = [
-      new Vector3(bounds.minimum.x, bounds.minimum.y, bounds.minimum.z),
-      new Vector3(bounds.minimum.x, bounds.minimum.y, bounds.maximum.z),
-      new Vector3(bounds.minimum.x, bounds.maximum.y, bounds.minimum.z),
-      new Vector3(bounds.minimum.x, bounds.maximum.y, bounds.maximum.z),
-      new Vector3(bounds.maximum.x, bounds.minimum.y, bounds.minimum.z),
-      new Vector3(bounds.maximum.x, bounds.minimum.y, bounds.maximum.z),
-      new Vector3(bounds.maximum.x, bounds.maximum.y, bounds.minimum.z),
-      new Vector3(bounds.maximum.x, bounds.maximum.y, bounds.maximum.z),
-    ];
-    const values = corners.map((corner) => Vector3.Dot(corner, axis));
-    return { min: Math.min(...values), max: Math.max(...values) };
-  }
-
   /** 按世界位移写回节点位置，兼容模型内容根节点的毫米缩放、旋转和父级层级。 */
   private offsetNodesFromBaselineByWorldOffsets(model: ModelRuntimeEntry, offsets: Map<TransformNode, Vector3>): void {
     for (const [node, worldOffset] of offsets) {
       const baseline = this.getTelemetryNodeBaseline(model, node);
-      const localOffset = this.worldDeltaToParentLocalDelta(node, worldOffset);
+      const localOffset = worldDeltaToParentLocalDelta(node, worldOffset);
       node.position = baseline.add(localOffset);
     }
   }
@@ -5047,44 +4927,6 @@ export class SceneRuntime {
     const baseline = node.position.clone();
     model.stackerTelemetry.nodeBaselines.set(node, baseline);
     return baseline;
-  }
-
-  /** 读取模型局部轴在世界空间中的水平投影，用于把 distance_x 映射到行走方向。 */
-  private getHorizontalModelAxis(root: TransformNode, axis: 'x' | 'z'): Vector3 {
-    const worldAxis = this.getModelAxis(root, axis);
-    worldAxis.y = 0;
-    return this.normalizeVector(worldAxis, axis === 'x' ? new Vector3(1, 0, 0) : new Vector3(0, 0, 1));
-  }
-
-  /** 读取模型局部轴在世界空间中的方向，用于升降和货叉动作适配旋转后的模型。 */
-  private getModelAxis(root: TransformNode, axis: 'x' | 'y' | 'z'): Vector3 {
-    const localAxis = this.createLocalAxis(axis);
-    const worldMatrix = root.computeWorldMatrix(true);
-    const worldAxis = Vector3.TransformNormal(localAxis, worldMatrix);
-    return this.normalizeVector(worldAxis, localAxis);
-  }
-
-  /** 创建局部坐标轴单位向量。 */
-  private createLocalAxis(axis: 'x' | 'y' | 'z'): Vector3 {
-    if (axis === 'x') return new Vector3(1, 0, 0);
-    if (axis === 'y') return new Vector3(0, 1, 0);
-    return new Vector3(0, 0, 1);
-  }
-
-  /** 把目标点投影到轨道轴上，保证有目标位时只沿轨道移动。 */
-  private projectPointOntoAxis(origin: Vector3, axis: Vector3, point: Vector3): Vector3 {
-    const distance = Vector3.Dot(point.subtract(origin), axis);
-    return origin.add(axis.scale(distance));
-  }
-
-  /** 把世界位移转换为节点父级本地位移，避免 contentRoot 源单位缩放导致位移量错误。 */
-  private worldDeltaToParentLocalDelta(node: TransformNode, worldOffset: Vector3): Vector3 {
-    const parent = node.parent;
-    const parentWorldMatrix = parent?.computeWorldMatrix?.(true) ?? parent?.getWorldMatrix?.();
-    const inverseParentWorldMatrix = parentWorldMatrix?.clone?.();
-    if (!inverseParentWorldMatrix?.invert) return worldOffset.clone();
-    inverseParentWorldMatrix.invert();
-    return Vector3.TransformNormal(worldOffset, inverseParentWorldMatrix);
   }
 
   /** movement_x：0 静止，1 前进，2 后退。 */
@@ -5119,48 +4961,6 @@ export class SceneRuntime {
   /** 根据帧时间计算编码器校准插值权重。 */
   private getCalibrationAlpha(deltaSeconds: number): number {
     return Math.min(1, Math.max(0, deltaSeconds * STACKER_CALIBRATION_RATE));
-  }
-
-  /** 数值线性插值。 */
-  private lerpNumber(from: number, to: number, alpha: number): number {
-    return from + (to - from) * alpha;
-  }
-
-  /** 向目标数值移动指定最大步长。 */
-  private moveNumberTowards(from: number, to: number, maxDelta: number): number {
-    const delta = to - from;
-    if (Math.abs(delta) <= maxDelta) return to;
-    return from + Math.sign(delta) * maxDelta;
-  }
-
-  /** 向目标向量移动指定最大步长。 */
-  private moveVectorTowards(from: Vector3, to: Vector3, maxDelta: number): Vector3 {
-    const delta = to.subtract(from);
-    const distance = delta.length();
-    if (distance <= maxDelta || distance <= 0.000001) return to.clone();
-    return from.add(delta.scale(maxDelta / distance));
-  }
-
-  /** 向量线性插值。 */
-  private lerpVector(from: Vector3, to: Vector3, alpha: number): Vector3 {
-    return from.add(to.subtract(from).scale(alpha));
-  }
-
-  /** 归一化向量，异常时使用兜底方向。 */
-  private normalizeVector(vector: Vector3, fallback: Vector3): Vector3 {
-    const length = vector.length();
-    if (!Number.isFinite(length) || length <= 0.000001) return fallback.clone();
-    return vector.scale(1 / length);
-  }
-
-  /** 将数值限制在闭区间内。 */
-  private clampNumber(value: number, min: number, max: number): number {
-    return Math.max(min, Math.min(max, value));
-  }
-
-  /** 按引用去重 TransformNode 数组。 */
-  private uniqueTransformNodes(nodes: TransformNode[]): TransformNode[] {
-    return [...new Set(nodes)];
   }
 
   /** 创建编辑态空生成器的青色线框标记；标记只属于 Babylon 运行时。 */
@@ -5847,7 +5647,7 @@ export class SceneRuntime {
     }
 
     const lineMesh = new LinesMesh(
-      `${entityId}_cadLayer_${this.sanitizeBabylonName(layerName)}_${batchIndex}`,
+      `${entityId}_cadLayer_${sanitizeBabylonName(layerName)}_${batchIndex}`,
       this.scene,
       null,
       null,
@@ -5935,11 +5735,6 @@ export class SceneRuntime {
     } catch {
       return Color3.FromHexString(FALLBACK_MATERIAL_COLOR);
     }
-  }
-
-  /** 把外部图层名压缩成 Babylon 对象名可读片段。 */
-  private sanitizeBabylonName(value: string): string {
-    return value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'layer';
   }
 
   /** 将编辑器 Transform 写入 Babylon 节点。 */
@@ -6919,11 +6714,11 @@ export class SceneRuntime {
   private syncModelScriptMetadata(target: TransformNode, modelAsset: ModelAssetComponent): void {
     const scripts = (modelAsset.parameterScriptMetadata ?? []).map((script) => {
       const clonedScript = this.cloneJsonValue(script);
-      if (!this.isPlainRecord(clonedScript)) return clonedScript;
+      if (!isPlainRecord(clonedScript)) return clonedScript;
 
-      const values = this.isPlainRecord(clonedScript.values) ? { ...clonedScript.values } : {};
+      const values = isPlainRecord(clonedScript.values) ? { ...clonedScript.values } : {};
       for (const [key, value] of Object.entries(modelAsset.parameterValues ?? {})) {
-        const previousValue = this.isPlainRecord(values[key]) ? values[key] : {};
+        const previousValue = isPlainRecord(values[key]) ? values[key] : {};
         values[key] = { ...previousValue, value };
       }
       clonedScript.values = values;
@@ -6931,7 +6726,7 @@ export class SceneRuntime {
     });
 
     const previousMetadata = target.metadata ?? {};
-    const previousModelAssetMetadata = this.isPlainRecord(previousMetadata.modelAsset)
+    const previousModelAssetMetadata = isPlainRecord(previousMetadata.modelAsset)
       ? previousMetadata.modelAsset
       : {};
 
@@ -7191,9 +6986,6 @@ export class SceneRuntime {
   }
 
   /** 判断值是否为普通对象，用于安全处理模型脚本 JSON 元数据。 */
-  private isPlainRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
-  }
 
   private applyMaterialColor(material: Material, property: 'baseColor' | 'emissiveColor', value: string): void {
     const color = this.readColor(value);
@@ -7437,9 +7229,9 @@ export class SceneRuntime {
     for (const mesh of environment.container?.meshes ?? []) {
       if (mesh.getTotalVertices() <= 0) continue;
 
-      const bounds = this.getMeshWorldBounds(mesh);
+      const bounds = getMeshWorldBounds(mesh);
       if (!bounds) continue;
-      mergedBounds = mergedBounds ? this.mergeWorldBounds(mergedBounds, bounds) : bounds;
+      mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
     }
 
     if (!mergedBounds) {
