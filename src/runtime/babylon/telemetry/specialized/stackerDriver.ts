@@ -405,14 +405,14 @@ export class StackerTelemetryDriver {
     return clampNumber(offset, -reach, reach);
   }
 
-  /** 按目标定位框在模型局部 X 轴上的投影计算伸出距离，符号表示方向。 */
+  /** 按目标定位框在模型局部 X 轴上的投影计算伸出距离，符号表示方向；无伸缩信号时不提供校准。 */
   private resolveForkCalibrationDistance(
     model: ModelRuntimeEntry,
     side: StackerForkSide,
     targetPosition: Vector3 | null,
     targetForkDistance: number | null,
   ): number | null {
-    if (!targetPosition) return null;
+    if (!targetPosition || targetForkDistance === null) return null;
 
     const forkGroups = this.findStackerForkNodeGroups(model);
     const candidateNodes = side === 'front'
@@ -426,16 +426,14 @@ export class StackerTelemetryDriver {
     const projectedDistance = Vector3.Dot(targetPosition.subtract(forkCenter), forkAxis);
     if (!Number.isFinite(projectedDistance)) return null;
 
-    if (targetForkDistance !== null) return Math.sign(projectedDistance) * targetForkDistance;
-    return projectedDistance;
+    return Math.sign(projectedDistance) * targetForkDistance;
   }
 
-  /** 根据 MQTT 动作信号或目标库位返回货叉伸出/归零距离。 */
+  /** 只在货叉有伸缩信号（movement_z = 1/2/3/4）时返回校准距离，避免无信号时自动移向货格。 */
   private resolveTargetLocatorForkDistance(targetForkReach: number | null, movement: number | null): number | null {
     if (targetForkReach === null) return null;
     if (movement === 2 || movement === 4) return 0;
     if (movement === 1 || movement === 3) return targetForkReach;
-    if (targetForkReach > 0) return targetForkReach;
     return null;
   }
 
@@ -508,8 +506,9 @@ export class StackerTelemetryDriver {
     containerCode: string | null,
   ): void {
     const command = readIntegerField(snapshot.fields, side === 'front' ? 'front_command' : 'back_command');
+    const movementZ = readIntegerField(snapshot.fields, side === 'front' ? 'front_movement_z' : 'back_movement_z');
     const previousForkCode = this.getStackerForkCargoCode(model, side);
-    const activeContainerCode = this.resolveStackerForkCargoCode(model, side, containerCode, command, targetLocator);
+    const activeContainerCode = this.resolveStackerForkCargoCode(model, side, containerCode, command, targetLocator, movementZ);
     if (!activeContainerCode) return;
 
     // 取货完成沿检测：新条码上叉且当前位是 fetch 驱动定位线框时，触发该排单排同步
@@ -550,21 +549,30 @@ export class StackerTelemetryDriver {
     }
   }
 
-  /** 在条码清空但仍处于放货命令时，沿用上一帧货物编号完成落位。 */
+  /**
+   * 货叉货物绑定策略：containerCode 到达时不立即刷出，只在货叉收回（movement_z = 2/4）时
+   * 才真正让货物上叉；放货命令中沿用上一帧货物完成落位；无条码且非放货时清空。
+   */
   private resolveStackerForkCargoCode(
     model: ModelRuntimeEntry,
     side: StackerForkSide,
     containerCode: string | null,
     command: number | null,
     targetLocator: LocatorRuntimeEntry | null,
+    movementZ: number | null,
   ): string | null {
     if (containerCode) {
       const previousContainerCode = this.getStackerForkCargoCode(model, side);
       if (previousContainerCode && previousContainerCode !== containerCode) {
         this.disposeUnplacedStackerCargo(model.assetCode, previousContainerCode);
       }
-      this.setStackerForkCargoCode(model, side, containerCode);
-      return containerCode;
+      // 只在货叉收回或已在叉上时刷出货物，伸叉/静止阶段暂不生成
+      const isRetracting = movementZ === 2 || movementZ === 4;
+      if (isRetracting || previousContainerCode === containerCode) {
+        this.setStackerForkCargoCode(model, side, containerCode);
+        return containerCode;
+      }
+      return null;
     }
 
     const previousContainerCode = this.getStackerForkCargoCode(model, side);
