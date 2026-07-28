@@ -157,12 +157,12 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
         <span>货箱生成器</span>
         <select
           disabled={disabled}
-          value={cargoGeneratorMissing ? '' : (fetchDrive?.cargoGeneratorId ?? '')}
-          onChange={(event) => updateFetchDrive(fetchDrive?.enabled === true, event.target.value || undefined)}
+          value={fetchDrive?.cargoGeneratorId || '__none__'}
+          onChange={(event) => updateFetchDrive(fetchDrive?.enabled === true, event.target.value !== '__none__' ? event.target.value : undefined)}
         >
-          <option value="">未绑定（内置立方体）</option>
+          <option value="__none__">未绑定（内置立方体）</option>
           {generatorOptions.map((option) => (
-            <option key={option.id} value={option.id}>{option.name}（{option.id.slice(-6)}）</option>
+            <option key={option.id} value={option.id}>{option.name}</option>
           ))}
         </select>
       </label>

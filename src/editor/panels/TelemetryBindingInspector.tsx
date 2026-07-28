@@ -150,7 +150,15 @@ export function TelemetryBindingInspector(props: Props) {
 
   /** 提交绑定补丁前统一归一化。 */
   function commit(patch: Partial<TelemetryBindingComponent>): void {
-    const next = normalizeTelemetryBindingComponent({ ...cloneBinding(activeBinding), ...patch });
+    const merged = { ...cloneBinding(activeBinding) };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) {
+        delete (merged as Record<string, unknown>)[key];
+      } else {
+        (merged as Record<string, unknown>)[key] = value;
+      }
+    }
+    const next = normalizeTelemetryBindingComponent(merged);
     if (next) props.onChange(next);
   }
 
@@ -174,7 +182,6 @@ export function TelemetryBindingInspector(props: Props) {
     }
   }
   const upstreamAssetCode = activeBinding.upstreamAssetCode ?? '';
-  const upstreamListId = `upstream-asset-${props.entityId}`.replace(/[^A-Za-z0-9_-]/g, '-');
   const upstreamExists = upstreamAssetCode !== '' && [...deviceAssetCodeByEntityId.values()].includes(upstreamAssetCode);
   const upstreamWarnings: string[] = [];
   if (upstreamAssetCode && upstreamAssetCode === selfAssetCode) {
@@ -219,10 +226,10 @@ export function TelemetryBindingInspector(props: Props) {
         <span>货箱生成器</span>
         <select
           disabled={props.disabled}
-          value={cargoGeneratorMissing ? '' : (activeBinding.cargoGeneratorId ?? '')}
-          onChange={(event) => commit({ cargoGeneratorId: event.target.value || undefined })}
+          value={activeBinding.cargoGeneratorId || '__none__'}
+          onChange={(event) => commit({ cargoGeneratorId: event.target.value !== '__none__' ? event.target.value : undefined })}
         >
-          <option value="">未绑定（内置立方体）</option>
+          <option value="__none__">未绑定（内置立方体）</option>
           {generatorOptions.map((option) => (
             <option key={option.id} value={option.id}>{option.name}</option>
           ))}
@@ -231,16 +238,16 @@ export function TelemetryBindingInspector(props: Props) {
       {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退内置立方体。</p> : null}
       <label className="inspector-row">
         <span>前置设备资产编号</span>
-        <input
+        <select
           disabled={props.disabled}
-          list={upstreamListId}
-          placeholder="留空表示入口设备"
-          value={upstreamAssetCode}
-          onChange={(event) => commit({ upstreamAssetCode: event.target.value || undefined })}
-        />
-        <datalist id={upstreamListId}>
-          {[...deviceAssetCodeByEntityId.values()].map((assetCode) => <option key={assetCode} value={assetCode} />)}
-        </datalist>
+          value={upstreamAssetCode || '__none__'}
+          onChange={(event) => commit({ upstreamAssetCode: event.target.value !== '__none__' ? event.target.value : undefined })}
+        >
+          <option value="__none__">无（入口设备）</option>
+          {[...new Set(deviceAssetCodeByEntityId.values())].filter(Boolean).map((assetCode) => (
+            <option key={assetCode} value={assetCode}>{assetCode}</option>
+          ))}
+        </select>
       </label>
       {upstreamWarnings.map((warning) => <p className="telemetry-runtime-error" key={warning}>{warning}</p>)}
       <label className="number-row"><span>expected(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.expectedIntervalMs} onChange={(event) => commit({ expectedIntervalMs: Number(event.target.value) })} /></label>
