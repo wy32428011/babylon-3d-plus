@@ -86,27 +86,31 @@ export class StackerTelemetryDriver {
     const targetPosition = targetLocator
       ? this.resolveStackerTargetPosition(targetLocator, snapshot.assetCode, toX, toY, toZ)
       : null;
+    // 有目标位但货格无法解析：报错误日志并冻结移动，禁止盲目执行
+    const targetCellMissing = snapshot.hasTargetLocation && (targetLocator === null || targetPosition === null);
     const targetOffsets = targetPosition ? this.resolveStackerTargetMotionOffsets(model, targetPosition) : null;
     this.reportStackerTargetProjection(model, targetLocator, targetPosition, targetOffsets, toX, toY);
-    const travelMoving = this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds);
-    const liftMoving = this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds);
-    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds, targetLocator, travelMoving || liftMoving);
+    const travelMoving = this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds, targetCellMissing);
+    const liftMoving = this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds, targetCellMissing);
+    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds, targetLocator, travelMoving || liftMoving, targetCellMissing);
     this.applyStackerNodeMotionOffsets(model);
-    this.applyStackerCargoMotion(model, snapshot, targetLocator, targetPosition);
+    if (!targetCellMissing) {
+      this.applyStackerCargoMotion(model, snapshot, targetLocator, targetPosition);
+    }
     this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
   }
 
-  /** 解析堆垛机运动目标：设备网格匹配路径精确到格口支撑位，assetId 直查保持定位框根节点语义。 */
+  /** 解析堆垛机运动目标：设备网格匹配路径精确到格口支撑位（格口无效返回 null），assetId 直查保持定位框根节点语义。 */
   private resolveStackerTargetPosition(
     locator: LocatorRuntimeEntry,
     assetCode: string,
     toX: number | null,
     toY: number | null,
     toZ: number | null,
-  ): Vector3 {
+  ): Vector3 | null {
     const rootPosition = locator.root.getAbsolutePosition();
     if (!assetCode || toX === null || toY === null || toZ === null) return rootPosition;
-    return this.resolveLocatorBoxSupportPosition(locator, toX, toY) ?? rootPosition;
+    return this.resolveLocatorBoxSupportPosition(locator, toX, toY);
   }
 
   /** 解析目标格口的支撑位世界坐标：水平取 box 中心、高度取 box 底面，越界时返回 null 由调用方回退。 */
@@ -127,7 +131,7 @@ export class StackerTelemetryDriver {
       const reportKey = `${locator.assetId}:${toX}:${toY}`;
       if (!this.state.reportedInvalidStackerBoxTargets.has(reportKey)) {
         this.state.reportedInvalidStackerBoxTargets.add(reportKey);
-        this.host.pushLog(`库位 ${locator.assetId} 不存在格口 列${toX} 层${toY}，已回退定位框根节点。`);
+        this.host.pushLog(`错误：库位 ${locator.assetId} 不存在目标货格（列${toX} 层${toY}），已忽略移动指令。`);
       }
       return null;
     }
@@ -195,13 +199,15 @@ export class StackerTelemetryDriver {
     snapshot: StackerTelemetrySnapshot,
     targetTravelOffset: number | null,
     deltaSeconds: number,
+    movementBlocked: boolean,
   ): boolean {
     const state = model.stackerTelemetry;
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
     state.rootPosition ??= state.rootBasePosition.clone();
 
+    // 目标货格缺失时整机冻结：distance 校准同样跳过，保持当前位置不漂移
     const distanceX = readNumberField(snapshot.fields, 'distance_x');
-    if (distanceX !== null && targetTravelOffset === null) {
+    if (distanceX !== null && targetTravelOffset === null && !movementBlocked) {
       const calibratedPosition = state.rootBasePosition.add(travelAxis.scale(distanceX));
       state.rootPosition = lerpVector(
         state.rootPosition,
@@ -211,7 +217,7 @@ export class StackerTelemetryDriver {
     }
 
     let moving = false;
-    if (!snapshot.faulted) {
+    if (!snapshot.faulted && !movementBlocked) {
       if (targetTravelOffset !== null) {
         const rootTargetPosition = this.constrainStackerTravelPosition(
           model,
@@ -252,15 +258,16 @@ export class StackerTelemetryDriver {
     snapshot: StackerTelemetrySnapshot,
     targetLiftOffset: number | null,
     deltaSeconds: number,
+    movementBlocked: boolean,
   ): boolean {
     const state = model.stackerTelemetry;
     const distanceY = readNumberField(snapshot.fields, 'distance_y');
-    if (distanceY !== null && targetLiftOffset === null) {
+    if (distanceY !== null && targetLiftOffset === null && !movementBlocked) {
       state.liftOffset = lerpNumber(state.liftOffset, distanceY, this.getCalibrationAlpha(deltaSeconds));
     }
 
     let moving = false;
-    if (!snapshot.faulted) {
+    if (!snapshot.faulted && !movementBlocked) {
       if (targetLiftOffset !== null) {
         const forkMoving = (readIntegerField(snapshot.fields, 'front_movement_z') ?? 0) !== 0
           || (readIntegerField(snapshot.fields, 'back_movement_z') ?? 0) !== 0;
@@ -295,9 +302,13 @@ export class StackerTelemetryDriver {
     deltaSeconds: number,
     targetLocator: LocatorRuntimeEntry | null,
     bodyMoving: boolean,
+    extensionBlocked: boolean,
   ): void {
-    const frontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
-    const backMovement = readIntegerField(snapshot.fields, 'back_movement_z');
+    // 目标货格缺失时禁止伸叉（1/3 归一为静止），收回（2/4）始终可用
+    const rawFrontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
+    const rawBackMovement = readIntegerField(snapshot.fields, 'back_movement_z');
+    const frontMovement = extensionBlocked && (rawFrontMovement === 1 || rawFrontMovement === 3) ? null : rawFrontMovement;
+    const backMovement = extensionBlocked && (rawBackMovement === 1 || rawBackMovement === 3) ? null : rawBackMovement;
     const frontForkSpeed = this.readSpeed(snapshot, 'front_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const backForkSpeed = this.readSpeed(snapshot, 'back_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const reach = this.readStackerForkReachConfig(model);
@@ -919,7 +930,7 @@ export class StackerTelemetryDriver {
       const missingTargetKey = `${deviceKey}:${snapshot.targetLocationKey}`;
       if (!this.state.reportedMissingTargets.has(missingTargetKey)) {
         this.state.reportedMissingTargets.add(missingTargetKey);
-        this.host.pushLog(`Stacker ${snapshot.assetCode} 未找到目标定位线框：${snapshot.targetLocationKey}`);
+        this.host.pushLog(`错误：Stacker ${snapshot.assetCode} 未找到目标货格 ${snapshot.targetLocationKey}，已忽略移动指令。`);
       }
     }
 
