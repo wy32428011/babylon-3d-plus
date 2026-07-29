@@ -163,6 +163,9 @@ try {
   );
   const { useEditorStore } = await server.ssrLoadModule('/src/editor/store/editorStore.ts');
   const { isShiftEntityArraySupported } = await server.ssrLoadModule('/src/editor/model/modelArray.ts');
+  const { createConveyorTelemetryState, createStackerTelemetryState } = await server.ssrLoadModule(
+    '/src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts',
+  );
   const { deserializeScene, serializeScene } = await server.ssrLoadModule('/src/editor/project/SceneSerializer.ts');
   const {
     createCadReferenceEntity,
@@ -638,8 +641,8 @@ try {
     animationScripts: [],
   });
   const sceneScanResults = [];
-  sourceModelEntry.stackerTelemetry = runtime.createStackerTelemetryState(root);
-  sourceModelEntry.conveyorTelemetry = runtime.createConveyorTelemetryState();
+  sourceModelEntry.stackerTelemetry = createStackerTelemetryState(root);
+  sourceModelEntry.conveyorTelemetry = createConveyorTelemetryState();
   sourceModelEntry.externalScriptRuntime = {
     updateAssetCode: () => undefined,
     updateParameterValues: () => undefined,

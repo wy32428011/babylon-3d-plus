@@ -25,6 +25,7 @@ import {
   type SpecializedTelemetryRuntimeEntry,
   type SpecializedTelemetrySharedState,
   type StackerCargoRuntimeEntry,
+  type StackerForkSide,
 } from './types';
 
 /** 专用遥测运行时的门面类：组合 Stacker/Conveyor Driver，并承担帧级调度与诊断状态管理。 */
@@ -168,8 +169,8 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.host.disposeGeneratedCargo(cargo);
   }
 
-  getOrCreateStackerCargo(assetCode: string, containerCode: string): StackerCargoRuntimeEntry {
-    return this.stackerDriver.getOrCreateStackerCargo(assetCode, containerCode);
+  getOrCreateStackerCargo(assetCode: string, side: StackerForkSide): StackerCargoRuntimeEntry {
+    return this.stackerDriver.getOrCreateStackerCargo(assetCode, side);
   }
 
   getOrCreateConveyorCargo(assetCode: string, containerCode: string): ConveyorCargoRuntimeEntry {

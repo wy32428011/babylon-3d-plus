@@ -93,9 +93,7 @@ export type GeneratedCargoRuntimeEntry = {
   generatorEntityId: string | null;
 };
 
-export type StackerCargoRuntimeEntry = GeneratedCargoRuntimeEntry & {
-  placedLocatorKey: string | null;
-};
+export type StackerCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
 export type StackerModelTelemetryState = {
   rootBasePosition: Vector3;
@@ -111,8 +109,26 @@ export type StackerModelTelemetryState = {
   lastFrameTimeMs: number;
   frontForkDirection: number;
   backForkDirection: number;
-  frontCargoCode: string | null;
-  backCargoCode: string | null;
+  /** 叉上货物键（JSON.stringify([assetCode, side])）；非 null 表示叉上有货。 */
+  frontCargoKey: string | null;
+  backCargoKey: string | null;
+  /** 货物是否绑定叉尖；false 时静止于 holdPosition（取货=源箱位，放货=目标箱位）。 */
+  frontCargoBoundToFork: boolean;
+  backCargoBoundToFork: boolean;
+  frontCargoHoldPosition: Vector3 | null;
+  backCargoHoldPosition: Vector3 | null;
+  /** 未绑定时货物在箱位中的朝向（取货=源库位，放货=目标库位）。 */
+  frontCargoHoldRotation: Quaternion | null;
+  backCargoHoldRotation: Quaternion | null;
+  /** 箱位朝向含镜像（负缩放）时的缩放分量；null 表示无镜像，按单位缩放渲染。 */
+  frontCargoHoldScaling: Vector3 | null;
+  backCargoHoldScaling: Vector3 | null;
+  /** 取货时锁定的源排号，取货完成（command 2）用于触发 fetch 单排同步。 */
+  frontCargoFetchRow: number | null;
+  backCargoFetchRow: number | null;
+  /** command 边沿检测：取货/放货完成只触发一次。 */
+  frontLastCommand: number | null;
+  backLastCommand: number | null;
   nodeBaselines: Map<TransformNode, Vector3>;
   lastTargetKey: string | null;
 };
@@ -178,8 +194,10 @@ export interface SpecializedTelemetryHost {
   getLocatorTarget(key: string): LocatorRuntimeEntry | null;
   resolveCargoGeneratorForModel(model: ModelRuntimeEntry): ModelGeneratorRuntimeEntry | null;
   resolveFetchDriveRowForLocator(locator: LocatorRuntimeEntry): number | null;
+  /** 抑制 locator 某格口的 fetch 渲染（货物改由设备侧渲染）；返回排号，未启用 fetch 返回 null。 */
+  suppressFetchCellForLocator(locator: LocatorRuntimeEntry, column: number, layer: number): number | null;
   handleFetchRowSync(rowNumber: number): void;
-  keepCargoForFetchRowSync(rowNumber: number | null, assetCode: string, containerCode: string): boolean;
+  keepCargoForFetchRowSync(rowNumber: number | null, assetCode: string, cargoKey: string): boolean;
   /** 返回 preparedArrayHost；defer 刷新由调用方决定。对应 updateModelExternalScriptRuntimeContext(model, 'runtime', telemetry, true)。 */
   updateExternalScriptContext(
     model: ModelRuntimeEntry,
@@ -204,7 +222,7 @@ export interface SpecializedTelemetryHost {
     snapshot: DeviceTelemetrySnapshot,
     generator: ModelGeneratorRuntimeEntry | null,
   ): void;
-  setGeneratedCargoRootPose(cargo: GeneratedCargoRuntimeEntry, position: Vector3, rotation: Quaternion): void;
+  setGeneratedCargoRootPose(cargo: GeneratedCargoRuntimeEntry, position: Vector3, rotation: Quaternion, scaling?: Vector3 | null): void;
   disposeGeneratedCargo(cargo: GeneratedCargoRuntimeEntry): void;
   /** 导入模型优先汇总子网格包围盒，加载中则回退到模型根节点位置。 */
   getModelWorldBounds(model: ModelRuntimeEntry): RuntimeWorldBounds | null;
@@ -216,6 +234,6 @@ export interface SpecializedTelemetryDriverContext {
   readonly host: SpecializedTelemetryHost;
   disposeStackerCargo(cargo: StackerCargoRuntimeEntry): void;
   disposeConveyorCargo(cargo: ConveyorCargoRuntimeEntry): void;
-  getOrCreateStackerCargo(assetCode: string, containerCode: string): StackerCargoRuntimeEntry;
+  getOrCreateStackerCargo(assetCode: string, side: StackerForkSide): StackerCargoRuntimeEntry;
   getOrCreateConveyorCargo(assetCode: string, containerCode: string): ConveyorCargoRuntimeEntry;
 }
