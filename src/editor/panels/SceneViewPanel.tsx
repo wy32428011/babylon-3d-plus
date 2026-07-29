@@ -43,6 +43,8 @@ import {
 } from '../model/modelArray';
 import {
   createEditModeModelThinInstancePlan,
+  patchEditModeModelThinInstancePlanForModelParameters,
+  resolveModelParameterOnlySceneChangeEntityId,
   type EditModeModelThinInstancePlan,
 } from '../model/editModeModelThinInstances';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
@@ -223,6 +225,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     thinInstanceEntityCount: 0,
   });
   const recordedEditModeThinInstancePlanComputationRef = useRef<object | null>(null);
+  const modelParameterSceneChangeRef = useRef<{ entities: SceneDocument['entities']; entityId: string | null } | null>(null);
   const selectedEntityIdRef = useRef<string | null>(null);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
   const entityArrayDialogRef = useRef<EntityArrayDialogState | null>(null);
@@ -268,17 +271,25 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const isRuntimePreview = runtimeMode === 'preview';
   const editModeThinInstancePlanComputation = useMemo(() => {
     const startedAt = readScenePanelTimestampMs();
-    const plan = createEditModeModelThinInstancePlan(
-      sceneDocument,
-      editModeThinInstancePlanRef.current ?? undefined,
-    );
+    const previousPlan = editModeThinInstancePlanRef.current;
+    const cachedParameterSceneChange = modelParameterSceneChangeRef.current;
+    const parameterSyncEntityId = previousPlan
+      ? cachedParameterSceneChange?.entities === sceneDocument.entities
+        ? cachedParameterSceneChange.entityId
+        : resolveModelParameterOnlySceneChangeEntityId(sceneDocumentRef.current, sceneDocument)
+      : null;
+    const plan = parameterSyncEntityId && previousPlan
+      ? patchEditModeModelThinInstancePlanForModelParameters(sceneDocument, previousPlan, parameterSyncEntityId)
+      : createEditModeModelThinInstancePlan(sceneDocument, previousPlan ?? undefined);
     return {
       plan,
+      parameterSyncEntityId,
       durationMs: Math.max(0, readScenePanelTimestampMs() - startedAt),
       entityCount: sceneDocument.entityIds.length,
     };
   }, [sceneDocument.entityIds, sceneDocument.entities]);
   const editModeThinInstancePlan = editModeThinInstancePlanComputation.plan;
+  const modelParameterSyncEntityId = editModeThinInstancePlanComputation.parameterSyncEntityId;
   const editRuntimeSceneDocument = useMemo(
     () => editModeThinInstancePlan.entities === sceneDocument.entities
       ? sceneDocument
@@ -367,6 +378,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       };
       recordedEditModeThinInstancePlanComputationRef.current = editModeThinInstancePlanComputation;
     }
+    modelParameterSceneChangeRef.current = {
+      entities: sceneDocument.entities,
+      entityId: modelParameterSyncEntityId,
+    };
     sceneDocumentRef.current = sceneDocument;
     editRuntimeSceneDocumentRef.current = editRuntimeSceneDocument;
     selectedEntityIdRef.current = selectedEntityId;
@@ -376,6 +391,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     editModeThinInstancePlanComputation,
     editRuntimeSceneDocument,
     sceneDocument,
+    modelParameterSyncEntityId,
     selectedEntityId,
     entityArrayDialog,
   ]);
@@ -806,7 +822,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     stopRuntimePreview,
   ]);
 
-  /** 文档内容变化才进入完整 SceneRuntime 同步；纯选择变化由下方专用 effect 处理。 */
+  /** 参数值变化走单实体同步；其它文档内容变化才进入完整 SceneRuntime 同步。 */
   useEffect(() => {
     const runtime = runtimeRef.current;
     const gizmo = gizmoRef.current;
@@ -814,12 +830,17 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
 
     gizmo.cancelActiveGroupDrag();
-    runtime.sync(editRuntimeSceneDocument);
+    if (modelParameterSyncEntityId) {
+      runtime.syncModelParameters(editRuntimeSceneDocument, modelParameterSyncEntityId);
+    } else {
+      runtime.sync(editRuntimeSceneDocument);
+    }
     attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
   }, [
     editRuntimeSceneDocument.entityIds,
     editRuntimeSceneDocument.entities,
+    modelParameterSyncEntityId,
     isRuntimePreview,
     attachCurrentSelectionGizmo,
     publishSelectedModelMeasurement,

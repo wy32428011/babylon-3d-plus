@@ -115,6 +115,16 @@ async function waitForEditThinInstanceBatch(runtime, sourceEntityId, expectedEnt
   assert.fail(`等待编辑态 ${expectedEntityCount} 个 thinInstance 完成批量提交超时：${JSON.stringify(lastObserved)}`);
 }
 
+/** 等待单实体参数变化收敛到独立变体批次，并确认基础批次已移除旧视觉。 */
+async function waitForModelParameterVariantBatch(runtime, entityId) {
+  for (let attempt = 0; attempt < WAIT_ATTEMPTS; attempt += 1) {
+    const variant = runtime.modelArrayParameterVariantByEntityId.get(entityId);
+    if (variant?.model.modelArrayBatch?.hasEntityId(entityId)) return variant;
+    await new Promise((resolve) => setTimeout(resolve, WAIT_INTERVAL_MS));
+  }
+  assert.fail(`${entityId} 参数变体批次收敛超时`);
+}
+
 /** 收集指定实体的有效渲染 Mesh。 */
 function collectEntityMeshes(scene, entityId) {
   return scene.meshes.filter((mesh) => (
@@ -179,14 +189,14 @@ function verifyReferencedSourceCoalescing(createEditModeModelThinInstancePlan, m
     plan,
   );
   assert.equal(
-    divergentPlan.entities[secondarySource.id],
-    divergentSecondarySource,
-    '参数模板分组变化后，原阵列源必须恢复为独立真实模型',
+    divergentPlan.entities[secondarySource.id].components.modelArrayInstance?.sourceEntityId,
+    primarySource.id,
+    '参数值变化不得改变结构模板合批拓扑，差异外观由参数变体宿主承载',
   );
   assert.equal(
-    divergentPlan.entities[secondaryInstance.id],
-    secondaryInstance,
-    '参数模板分组变化后，已有实例必须恢复原始 sourceEntityId',
+    divergentPlan.entities[secondaryInstance.id].components.modelArrayInstance?.sourceEntityId,
+    primarySource.id,
+    '参数值变化后已有实例仍必须引用稳定统一源',
   );
 
   const legacySource = {
@@ -230,7 +240,7 @@ function verifyReferencedSourceCoalescing(createEditModeModelThinInstancePlan, m
     sourceCountBefore: 2,
     sourceCountAfter: 1,
     remappedInstanceCount: 2,
-    divergentSourceRestored: true,
+    parameterVariantTopologyStable: true,
     legacySourcePreserved: true,
   };
 }
@@ -261,7 +271,7 @@ async function run() {
   try {
     const [
       { SceneRuntime },
-      { createEditModeModelThinInstancePlan, resolveEditModeModelThinInstanceReason },
+      { createEditModeModelThinInstancePlan, patchEditModeModelThinInstancePlanForModelParameters, resolveEditModeModelThinInstanceReason },
     ] = await Promise.all([
       server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts'),
       server.ssrLoadModule('/src/editor/model/editModeModelThinInstances.ts'),
@@ -396,6 +406,77 @@ async function run() {
     );
     const editBatchMeshCount = editBatch.meshes.length;
 
+    const parameterEntityId = entityIds.at(-1);
+    const firstParameterEntity = {
+      ...entities[parameterEntityId],
+      components: {
+        ...entities[parameterEntityId].components,
+        modelAsset: {
+          ...entities[parameterEntityId].components.modelAsset,
+          parameterValues: { variant: 1 },
+        },
+      },
+    };
+    const firstParameterEntities = { ...entities, [parameterEntityId]: firstParameterEntity };
+    const firstParameterPlan = patchEditModeModelThinInstancePlanForModelParameters(
+      { entityIds, entities: firstParameterEntities },
+      editPlan,
+      parameterEntityId,
+    );
+    const performanceBeforeParameters = runtime.getPerformanceMetrics();
+    runtime.syncModelParameters(
+      { ...rawDocument, entities: firstParameterPlan.entities },
+      parameterEntityId,
+    );
+    await waitForModelParameterVariantBatch(runtime, parameterEntityId);
+
+    const sourceModelAfterFirstParameter = runtime.models.get(editPlan.sourceEntityIds[0]);
+    const stableBaseBatch = sourceModelAfterFirstParameter?.modelArrayBatch;
+    assert.ok(stableBaseBatch, '参数变体 ready 后必须保留稳定基础批次');
+    assert.equal(stableBaseBatch.hasEntityId(parameterEntityId), false, '基础批次必须只在首次参数分组变化时移除目标实体');
+    const originalUpdateEntityTransforms = stableBaseBatch.updateEntityTransforms.bind(stableBaseBatch);
+    let unchangedBaseBatchUpdateCount = 0;
+    stableBaseBatch.updateEntityTransforms = (...args) => {
+      unchangedBaseBatchUpdateCount += 1;
+      return originalUpdateEntityTransforms(...args);
+    };
+
+    const secondParameterEntity = {
+      ...firstParameterEntity,
+      components: {
+        ...firstParameterEntity.components,
+        modelAsset: {
+          ...firstParameterEntity.components.modelAsset,
+          parameterValues: { variant: 2 },
+        },
+      },
+    };
+    const secondParameterEntities = { ...firstParameterEntities, [parameterEntityId]: secondParameterEntity };
+    const secondParameterPlan = patchEditModeModelThinInstancePlanForModelParameters(
+      { entityIds, entities: secondParameterEntities },
+      firstParameterPlan,
+      parameterEntityId,
+    );
+    runtime.syncModelParameters(
+      { ...rawDocument, entities: secondParameterPlan.entities },
+      parameterEntityId,
+    );
+    await Promise.resolve();
+    stableBaseBatch.updateEntityTransforms = originalUpdateEntityTransforms;
+    const performanceAfterParameters = runtime.getPerformanceMetrics();
+    assert.equal(
+      performanceAfterParameters.fullSyncCount,
+      performanceBeforeParameters.fullSyncCount,
+      '参数专用同步不得增加完整 sync 次数',
+    );
+    assert.equal(
+      unchangedBaseBatchUpdateCount,
+      0,
+      '连续修改同一参数变体时不得重复提交未变化的基础批次矩阵',
+    );
+    const parameterSyncFullCountStable = true;
+    const parameterSyncBaseBatchReused = true;
+
     // 运行预览继续使用原始文档，必须恢复逐实体脚本、assetCode 和遥测隔离。
     runtime.sync(rawDocument);
     await waitForAllEntityMeshes(scene, entityIds);
@@ -461,6 +542,8 @@ async function run() {
       sourceDisposeCount,
       renderableMeshesPerEntity: firstMeshes.length,
       selectionSync: 'incremental',
+      parameterSyncFullCountStable,
+      parameterSyncBaseBatchReused,
       referencedSourceCoalescing,
       runtimeExpansion: 'isolated',
     }, null, 2));

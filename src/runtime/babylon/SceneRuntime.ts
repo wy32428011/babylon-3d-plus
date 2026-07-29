@@ -290,6 +290,7 @@ type ModelArrayParameterVariantRuntimeEntry = {
   representativeEntityId: string;
   entities: Entity[];
   sourceLayerMasks: Map<number, number>;
+  parameterOnlyChangedEntityId: string | null;
   model: ModelRuntimeEntry;
 };
 
@@ -438,7 +439,7 @@ export class SceneRuntime {
   private readonly modelArrayInstanceEntities = new Map<string, Entity>();
   private readonly modelArrayParameterVariants = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
   private readonly modelArrayParameterVariantByEntityId = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
-  private readonly pendingModelArraySourceResyncs = new Set<string>();
+  private readonly pendingModelArraySourceResyncs = new Map<string, string | null>();
   private readonly pendingModelArrayVariantRenderSuppressions = new Set<TransformNode>();
   private readonly suppressedModelArrayVariantRootsThisFrame = new Set<TransformNode>();
   private readonly modelArrayJsonSignatureCache = new WeakMap<object, string>();
@@ -1613,6 +1614,33 @@ export class SceneRuntime {
       this.lastFullSyncDurationMs = durationMs;
       this.maxFullSyncDurationMs = Math.max(this.maxFullSyncDurationMs, durationMs);
     }
+  }
+
+  /**
+   * 只同步一个实体的模型参数值。调用方已确认 Store 本次原子更新未改变其它场景内容；
+   * 因此这里不重建层级状态、组件 ID 集合或 Locator 索引，只刷新目标及其所属矩阵源。
+   */
+  syncModelParameters(document: SceneDocument, entityId: string): void {
+    this.cancelFolderGroupTranslation();
+    const entity = document.entities[entityId];
+    const previousEntity = this.syncedEntities.get(entityId);
+    if (!entity?.components.modelAsset || !previousEntity?.components.modelAsset) {
+      this.sync(document);
+      return;
+    }
+
+    const dirtyModelArraySourceIds = new Set<string>();
+    const previousSourceEntityId = previousEntity.components.modelArrayInstance?.sourceEntityId;
+    const nextSourceEntityId = entity.components.modelArrayInstance?.sourceEntityId;
+    if (previousSourceEntityId) dirtyModelArraySourceIds.add(previousSourceEntityId);
+    if (nextSourceEntityId) dirtyModelArraySourceIds.add(nextSourceEntityId);
+    if (!entity.components.modelArrayInstance) dirtyModelArraySourceIds.add(entity.id);
+
+    this.syncEntity(entity, this.selectedEntityIds.has(entityId));
+    this.syncedEntities.set(entityId, entity);
+    this.syncAllModelArrayBatches(document, dirtyModelArraySourceIds, entityId);
+    this.disposeStaleModelArrayGizmoProxy();
+    this.rebuildModelSelectionOutline();
   }
 
   /**
@@ -3980,7 +4008,11 @@ export class SceneRuntime {
   }
 
   /** 在文档实体完成同步后，按源模型统一刷新全部独立逻辑实例的矩阵批次。 */
-  private syncAllModelArrayBatches(document: SceneDocument, sourceEntityIds: ReadonlySet<string>): void {
+  private syncAllModelArrayBatches(
+    document: SceneDocument,
+    sourceEntityIds: ReadonlySet<string>,
+    parameterOnlyChangedEntityId?: string,
+  ): void {
     for (const sourceEntityId of sourceEntityIds) {
       const model = this.models.get(sourceEntityId);
       if (!model) continue;
@@ -3990,7 +4022,7 @@ export class SceneRuntime {
         this.disposeModelArrayParameterVariantsForSource(sourceEntityId);
         continue;
       }
-      this.syncModelArrayBatch(sourceEntity, model);
+      this.syncModelArrayBatch(sourceEntity, model, parameterOnlyChangedEntityId);
     }
   }
 
@@ -3998,7 +4030,11 @@ export class SceneRuntime {
    * 将引用同一源模型的 N 个独立 Scene Entity 一次性提交为 thinInstance 矩阵。
    * 每个实体继续拥有独立名称、资产编号、Transform、显隐、锁定、删除和选择语义。
    */
-  private syncModelArrayBatch(entity: Entity, model: ModelRuntimeEntry): void {
+  private syncModelArrayBatch(
+    entity: Entity,
+    model: ModelRuntimeEntry,
+    parameterOnlyChangedEntityId?: string,
+  ): void {
     const modelAsset = entity.components.modelAsset;
     if (!modelAsset) return;
 
@@ -4046,7 +4082,15 @@ export class SceneRuntime {
       const key = this.createModelArrayParameterVariantKey(entity.id, renderSignature);
       this.rekeyReusableModelArrayParameterVariant(entity.id, key, renderSignature, entities, activeVariantKeys);
       activeVariantKeys.add(key);
-      const variant = this.syncModelArrayParameterVariant(entity, key, renderSignature, entities);
+      const variant = this.syncModelArrayParameterVariant(
+        entity,
+        key,
+        renderSignature,
+        entities,
+        parameterOnlyChangedEntityId && entities.some((item) => item.id === parameterOnlyChangedEntityId)
+          ? parameterOnlyChangedEntityId
+          : undefined,
+      );
       if (!variant) continue;
       for (const instanceEntity of entities) targetVariantByEntityId.set(instanceEntity.id, variant);
     }
@@ -4114,6 +4158,7 @@ export class SceneRuntime {
         variantKey: variant.key,
         renderSignature: variant.renderSignature,
         resolveLayerMask: (mesh) => variant.sourceLayerMasks.get(mesh.uniqueId) ?? mesh.layerMask,
+        parameterOnlyChangedEntityId,
       });
     }
 
@@ -4129,6 +4174,7 @@ export class SceneRuntime {
         sourceEntityId: entity.id,
         namePrefix: '__modelArrayThinInstance',
         renderSignature: sourceRenderSignature,
+        parameterOnlyChangedEntityId,
       });
     } else {
       // 源参数已变化而副本的旧参数宿主尚未 ready：完整保留旧批次，等待新宿主就绪后原子切换。
@@ -4269,6 +4315,7 @@ export class SceneRuntime {
     key: string,
     renderSignature: string,
     entities: Entity[],
+    parameterOnlyChangedEntityId?: string,
   ): ModelArrayParameterVariantRuntimeEntry | null {
     const representative = entities[0];
     const modelAsset = representative?.components.modelAsset;
@@ -4290,6 +4337,7 @@ export class SceneRuntime {
         entities,
         modelAsset,
         assetSignature,
+        parameterOnlyChangedEntityId,
       );
       return variant;
     }
@@ -4299,6 +4347,7 @@ export class SceneRuntime {
     }
     variant.representativeEntityId = representative.id;
     variant.entities = entities;
+    variant.parameterOnlyChangedEntityId = parameterOnlyChangedEntityId ?? null;
     const model = variant.model;
     model.entitySnapshot = representative;
     model.assetCode = modelAsset.assetCode;
@@ -4328,6 +4377,7 @@ export class SceneRuntime {
     entities: Entity[],
     modelAsset: ModelAssetComponent,
     assetSignature: string,
+    parameterOnlyChangedEntityId?: string,
   ): ModelArrayParameterVariantRuntimeEntry {
     const variantSequence = ++this.modelLoadSequence;
     const root = new TransformNode(`__modelArrayParameterVariant_${sourceEntity.id}_${variantSequence}`, this.scene);
@@ -4376,6 +4426,7 @@ export class SceneRuntime {
       representativeEntityId: representative.id,
       entities,
       sourceLayerMasks: new Map(),
+      parameterOnlyChangedEntityId: parameterOnlyChangedEntityId ?? null,
       model,
     };
     this.modelArrayParameterVariants.set(key, variant);
@@ -4453,8 +4504,10 @@ export class SceneRuntime {
       this.syncGenericTelemetryMotion(representative, current);
       for (const instanceEntity of activeVariant.entities) this.onModelMeasurementChanged(instanceEntity.id);
       this.rebuildModelSelectionOutline();
+      const parameterOnlyChangedEntityId = activeVariant.parameterOnlyChangedEntityId ?? undefined;
+      activeVariant.parameterOnlyChangedEntityId = null;
       if (this.isModelArrayBatchCurrent(current, activeVariant.renderSignature)) {
-        this.scheduleModelArraySourceResync(activeVariant.sourceEntityId);
+        this.scheduleModelArraySourceResync(activeVariant.sourceEntityId, parameterOnlyChangedEntityId);
       }
     });
   }
@@ -4492,15 +4545,28 @@ export class SceneRuntime {
   }
 
   /** 参数变体异步 ready 后合并同一源的多次请求，并在微任务中完成最终原子换批。 */
-  private scheduleModelArraySourceResync(sourceEntityId: string): void {
-    if (this.pendingModelArraySourceResyncs.has(sourceEntityId)) return;
-    this.pendingModelArraySourceResyncs.add(sourceEntityId);
+  private scheduleModelArraySourceResync(
+    sourceEntityId: string,
+    parameterOnlyChangedEntityId?: string,
+  ): void {
+    const nextChangedEntityId = parameterOnlyChangedEntityId ?? null;
+    if (this.pendingModelArraySourceResyncs.has(sourceEntityId)) {
+      const pendingChangedEntityId = this.pendingModelArraySourceResyncs.get(sourceEntityId) ?? null;
+      if (pendingChangedEntityId !== nextChangedEntityId) {
+        // 同一微任务窗口内出现不同变化来源时不能再假设只有一个参数实体变化。
+        this.pendingModelArraySourceResyncs.set(sourceEntityId, null);
+      }
+      return;
+    }
+
+    this.pendingModelArraySourceResyncs.set(sourceEntityId, nextChangedEntityId);
     queueMicrotask(() => {
+      const changedEntityId = this.pendingModelArraySourceResyncs.get(sourceEntityId) ?? undefined;
       this.pendingModelArraySourceResyncs.delete(sourceEntityId);
       const sourceModel = this.models.get(sourceEntityId);
       const sourceEntity = sourceModel?.entitySnapshot;
       if (!sourceModel || !sourceEntity?.components.modelAsset || sourceEntity.components.modelArrayInstance) return;
-      this.syncModelArrayBatch(sourceEntity, sourceModel);
+      this.syncModelArrayBatch(sourceEntity, sourceModel, changedEntityId);
       this.rebuildModelSelectionOutline();
     });
   }
@@ -4641,6 +4707,7 @@ export class SceneRuntime {
       renderSignature: string;
       variantKey?: string;
       resolveLayerMask?: (mesh: AbstractMesh) => number;
+      parameterOnlyChangedEntityId?: string;
     },
   ): void {
     const totalInstanceCount = instanceEntities.length + legacyItems.length;
@@ -4652,6 +4719,45 @@ export class SceneRuntime {
       return;
     }
     if (!model.assetHandle || !model.measurementReady) return;
+
+    const sourceMeshes = model.meshes.filter((mesh) => (
+      !mesh.isDisposed() && mesh.getTotalVertices() > 0
+    ));
+    // 批次 Geometry 与脚本宿主隔离；参数或脚本输入变化时必须重建，才能复制最新顶点数据。
+    const sourceSignature = `${options.renderSignature}|representation:original-geometry|${sourceMeshes
+      .map((mesh) => `${mesh.uniqueId}:${mesh.geometry?.uniqueId ?? 0}:${mesh instanceof Mesh ? mesh.thinInstanceCount : 0}`)
+      .join('|')}`;
+    const failureSignature = `${options.variantKey ?? 'base'}:${sourceSignature}:${totalInstanceCount}`;
+
+    if (sourceMeshes.length === 0) {
+      if (model.modelArrayBatch) this.suspendModelArrayHost(model);
+      else if (options.variantKey) this.suspendModelArrayHost(model);
+      else this.applyModelInteractivity(model, entity.id);
+      this.reportModelArrayBatchFailure(entity, model, failureSignature, '参数脚本执行后没有可渲染 Mesh，已保留上一份有效阵列');
+      return;
+    }
+
+    const parameterOnlyChangedEntityId = options.parameterOnlyChangedEntityId;
+    if (
+      parameterOnlyChangedEntityId
+      && model.modelArrayBatch
+      && model.modelArraySourceSignature === sourceSignature
+    ) {
+      const shouldContainChangedEntity = instanceEntities.some((instance) => (
+        instance.id === parameterOnlyChangedEntityId && this.isEntityVisible(instance.id)
+      )) || (
+        legacyItems.length > 0
+        && entity.id === parameterOnlyChangedEntityId
+        && this.isEntityVisible(entity.id)
+      );
+      if (model.modelArrayBatch.hasEntityId(parameterOnlyChangedEntityId) === shouldContainChangedEntity) {
+        // 参数值变化未改变当前批次成员、Transform、显隐或拾取状态，复用既有 GPU 矩阵缓冲。
+        model.modelArrayFailureSignature = '';
+        this.suspendModelArrayHost(model);
+        this.refreshGroupTranslationPreviewTargets();
+        return;
+      }
+    }
 
     const visibleInstances = instanceEntities
       .filter((instanceEntity) => this.isEntityVisible(instanceEntity.id))
@@ -4675,23 +4781,6 @@ export class SceneRuntime {
         },
         pickable: this.isEntityScenePickable(entity.id),
       });
-    }
-
-    const sourceMeshes = model.meshes.filter((mesh) => (
-      !mesh.isDisposed() && mesh.getTotalVertices() > 0
-    ));
-    // 批次 Geometry 与脚本宿主隔离；参数或脚本输入变化时必须重建，才能复制最新顶点数据。
-    const sourceSignature = `${options.renderSignature}|representation:original-geometry|${sourceMeshes
-      .map((mesh) => `${mesh.uniqueId}:${mesh.geometry?.uniqueId ?? 0}:${mesh instanceof Mesh ? mesh.thinInstanceCount : 0}`)
-      .join('|')}`;
-    const failureSignature = `${options.variantKey ?? 'base'}:${sourceSignature}:${totalInstanceCount}`;
-
-    if (sourceMeshes.length === 0) {
-      if (model.modelArrayBatch) this.suspendModelArrayHost(model);
-      else if (options.variantKey) this.suspendModelArrayHost(model);
-      else this.applyModelInteractivity(model, entity.id);
-      this.reportModelArrayBatchFailure(entity, model, failureSignature, '参数脚本执行后没有可渲染 Mesh，已保留上一份有效阵列');
-      return;
     }
 
     model.root.computeWorldMatrix(true);

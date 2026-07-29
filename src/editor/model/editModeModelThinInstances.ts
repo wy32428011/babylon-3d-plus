@@ -22,6 +22,14 @@ const EDIT_MODE_THIN_INSTANCE_MODEL_FILES_BY_SCRIPT = new Map<string, ReadonlySe
 const modelAssetGroupKeyCache = new WeakMap<ModelAssetComponent, string | null>();
 const thinInstanceEntityCache = new WeakMap<Entity, Map<string, Entity>>();
 
+type EntityOverrideRecordState = {
+  base: SceneDocument['entities'];
+  overrides: ReadonlyMap<string, Entity>;
+};
+
+/** 参数连续预览只覆盖少量实体；使用稀疏代理避免每次输入都复制 10k/50k entities 索引。 */
+const entityOverrideRecordState = new WeakMap<SceneDocument['entities'], EntityOverrideRecordState>();
+
 export type EditModeModelThinInstanceReason = 'no-external-script' | 'verified-parametric-script';
 
 export type EditModeModelThinInstancePlan = {
@@ -44,6 +52,63 @@ export function resolveEditModeModelThinInstanceReason(
   return scriptAssets.every((scriptAsset) => isVerifiedParametricScript(modelAsset, scriptAsset))
     ? 'verified-parametric-script'
     : null;
+}
+
+/**
+ * 识别 Store 两次原子发布之间唯一的模型参数值变化。
+ * 参数编辑动作会保留场景其它顶层引用和实体其它组件引用，因此这里无需扫描全部 entities。
+ */
+export function resolveModelParameterOnlySceneChangeEntityId(
+  previousScene: SceneDocument | null | undefined,
+  nextScene: SceneDocument,
+): string | null {
+  if (
+    !previousScene
+    || previousScene === nextScene
+    || previousScene.entities === nextScene.entities
+    || previousScene.entityIds !== nextScene.entityIds
+    || previousScene.id !== nextScene.id
+    || previousScene.name !== nextScene.name
+    || previousScene.selectedEntityId !== nextScene.selectedEntityId
+    || previousScene.mqttConfig !== nextScene.mqttConfig
+    || previousScene.sceneSettings !== nextScene.sceneSettings
+    || previousScene.fetchConfig !== nextScene.fetchConfig
+  ) {
+    return null;
+  }
+
+  const entityId = nextScene.selectedEntityId;
+  if (!entityId) return null;
+  const previousEntity = previousScene.entities[entityId];
+  const nextEntity = nextScene.entities[entityId];
+  return isModelParameterOnlyEntityChange(previousEntity, nextEntity) ? entityId : null;
+}
+
+/**
+ * 参数值由 SceneRuntime 的参数变体承载，不改变编辑态源/实例拓扑。
+ * 只创建一个稀疏实体覆盖，避免高频预览重新扫描和复制完整场景实体表。
+ */
+export function patchEditModeModelThinInstancePlanForModelParameters(
+  scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
+  previousPlan: EditModeModelThinInstancePlan,
+  entityId: string,
+): EditModeModelThinInstancePlan {
+  const entity = scene.entities[entityId];
+  const previousEntity = previousPlan.entities[entityId];
+  if (!entity || !previousEntity) {
+    return createEditModeModelThinInstancePlan(scene, previousPlan);
+  }
+
+  const sourceEntityId = previousEntity.components.modelArrayInstance?.sourceEntityId;
+  const nextEntity = sourceEntityId
+    ? getOrCreateThinInstanceEntity(entity, sourceEntityId)
+    : entity;
+  if (previousEntity === nextEntity) return previousPlan;
+
+  return {
+    ...previousPlan,
+    entities: createEntityOverrideRecord(previousPlan.entities, entityId, nextEntity),
+  };
 }
 
 /**
@@ -242,15 +307,100 @@ function getOrCreateThinInstanceEntity(entity: Entity, sourceEntityId: string): 
   return derivedEntity;
 }
 
-/** 资产编号是实例身份，不参与几何/材质分组；其它模板字段必须完全一致。 */
+/** 资产编号和参数值属于逻辑实例身份；参数差异由 SceneRuntime 变体承载，不得改变合批拓扑。 */
 function createModelAssetTemplateSignature(modelAsset: ModelAssetComponent): string {
   const template: Record<string, unknown> = {};
   for (const key of Object.keys(modelAsset).sort()) {
-    if (key === 'assetCode') continue;
+    if (key === 'assetCode' || key === 'parameterValues') continue;
     const value = modelAsset[key as keyof ModelAssetComponent];
     if (value !== undefined) template[key] = value;
   }
   return stableSerialize(template);
+}
+
+/** 创建只覆盖少量实体的完整 Record 视图；Object.keys/展开操作仍保持普通对象语义。 */
+function createEntityOverrideRecord(
+  entities: SceneDocument['entities'],
+  entityId: string,
+  entity: Entity,
+): SceneDocument['entities'] {
+  const previousState = entityOverrideRecordState.get(entities);
+  const base = previousState?.base ?? entities;
+  const overrides = new Map(previousState?.overrides ?? []);
+  overrides.set(entityId, entity);
+  const target = Object.create(null) as SceneDocument['entities'];
+  const proxy = new Proxy(target, {
+    get: (_target, property) => (
+      typeof property === 'string' && overrides.has(property)
+        ? overrides.get(property)
+        : Reflect.get(base, property)
+    ),
+    has: (_target, property) => (
+      typeof property === 'string' && overrides.has(property)
+        ? true
+        : Reflect.has(base, property)
+    ),
+    ownKeys: () => {
+      const keys = new Set<string | symbol>(Reflect.ownKeys(base));
+      for (const key of overrides.keys()) keys.add(key);
+      return [...keys];
+    },
+    getOwnPropertyDescriptor: (_target, property) => {
+      if (typeof property === 'string' && overrides.has(property)) {
+        return { configurable: true, enumerable: true, writable: false, value: overrides.get(property) };
+      }
+      const descriptor = Reflect.getOwnPropertyDescriptor(base, property);
+      return descriptor ? { ...descriptor, configurable: true } : undefined;
+    },
+  });
+  entityOverrideRecordState.set(proxy, { base, overrides });
+  return proxy;
+}
+
+/** 参数动作除 modelAsset.parameterValues 外必须保持实体和组件的不可变引用。 */
+function isModelParameterOnlyEntityChange(previousEntity: Entity | undefined, nextEntity: Entity | undefined): boolean {
+  if (!previousEntity || !nextEntity || previousEntity === nextEntity) return false;
+  if (
+    previousEntity.id !== nextEntity.id
+    || previousEntity.name !== nextEntity.name
+    || previousEntity.isFolder !== nextEntity.isFolder
+    || previousEntity.visible !== nextEntity.visible
+    || previousEntity.locked !== nextEntity.locked
+    || previousEntity.parentId !== nextEntity.parentId
+    || previousEntity.childrenIds !== nextEntity.childrenIds
+  ) {
+    return false;
+  }
+
+  const previousComponents = previousEntity.components;
+  const nextComponents = nextEntity.components;
+  const componentKeys = new Set([...Object.keys(previousComponents), ...Object.keys(nextComponents)]);
+  for (const key of componentKeys) {
+    if (key === 'modelAsset') continue;
+    if (
+      previousComponents[key as keyof typeof previousComponents]
+      !== nextComponents[key as keyof typeof nextComponents]
+    ) {
+      return false;
+    }
+  }
+
+  const previousModelAsset = previousComponents.modelAsset;
+  const nextModelAsset = nextComponents.modelAsset;
+  if (!previousModelAsset || !nextModelAsset || previousModelAsset === nextModelAsset) return false;
+  if (previousModelAsset.parameterValues === nextModelAsset.parameterValues) return false;
+
+  const modelAssetKeys = new Set([...Object.keys(previousModelAsset), ...Object.keys(nextModelAsset)]);
+  for (const key of modelAssetKeys) {
+    if (key === 'parameterValues') continue;
+    if (
+      previousModelAsset[key as keyof ModelAssetComponent]
+      !== nextModelAsset[key as keyof ModelAssetComponent]
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** 对 JSON 兼容值递归排序对象键，避免仅属性插入顺序不同导致错误拆组。 */
