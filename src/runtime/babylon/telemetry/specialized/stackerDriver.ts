@@ -212,7 +212,7 @@ export class StackerTelemetryDriver {
       state.rootPosition = lerpVector(
         state.rootPosition,
         this.constrainStackerTravelPosition(model, calibratedPosition, travelAxis),
-        this.getCalibrationAlpha(deltaSeconds),
+        this.getCalibrationAlpha(model, deltaSeconds),
       );
     }
 
@@ -230,17 +230,19 @@ export class StackerTelemetryDriver {
           // 伸叉信号到位表示设备已就位：瞬移对齐，不视为移动（避免与"移动收叉"约束互相触发）
           state.rootPosition = rootTargetPosition;
         } else {
+          const targetSpeed = this.readStackerDataDrivenNumber(model, ['motion', 'travel', 'targetSpeed'])
+            ?? STACKER_TARGET_SPEED_METERS_PER_SECOND;
           const previous = state.rootPosition;
           state.rootPosition = moveVectorTowards(
             state.rootPosition,
             rootTargetPosition,
-            STACKER_TARGET_SPEED_METERS_PER_SECOND * deltaSeconds,
+            targetSpeed * deltaSeconds,
           );
           moving = Vector3.DistanceSquared(previous, state.rootPosition) > 1e-12;
         }
       } else {
         const direction = this.readTravelDirection(readIntegerField(snapshot.fields, 'movement_x'));
-        const speed = this.readSpeed(snapshot, 'rpm_x', STACKER_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND);
+        const speed = this.readSpeed(model, snapshot, 'rpm_x', 'travel', STACKER_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND);
         if (direction !== 0) {
           state.rootPosition = state.rootPosition.add(travelAxis.scale(direction * speed * deltaSeconds));
           moving = true;
@@ -263,7 +265,10 @@ export class StackerTelemetryDriver {
     const state = model.stackerTelemetry;
     const distanceY = readNumberField(snapshot.fields, 'distance_y');
     if (distanceY !== null && targetLiftOffset === null && !movementBlocked) {
-      state.liftOffset = lerpNumber(state.liftOffset, distanceY, this.getCalibrationAlpha(deltaSeconds));
+      state.liftOffset = this.clampStackerLiftOffset(
+        model,
+        lerpNumber(state.liftOffset, distanceY, this.getCalibrationAlpha(model, deltaSeconds)),
+      );
     }
 
     let moving = false;
@@ -272,21 +277,24 @@ export class StackerTelemetryDriver {
         const forkMoving = (readIntegerField(snapshot.fields, 'front_movement_z') ?? 0) !== 0
           || (readIntegerField(snapshot.fields, 'back_movement_z') ?? 0) !== 0;
         if (forkMoving) {
-          state.liftOffset = targetLiftOffset;
+          state.liftOffset = this.clampStackerLiftOffset(model, targetLiftOffset);
         } else {
           const previous = state.liftOffset;
-          state.liftOffset = moveNumberTowards(
-            state.liftOffset,
-            targetLiftOffset,
-            STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND * deltaSeconds,
+          state.liftOffset = this.clampStackerLiftOffset(
+            model,
+            moveNumberTowards(
+              state.liftOffset,
+              targetLiftOffset,
+              STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND * deltaSeconds,
+            ),
           );
           moving = Math.abs(state.liftOffset - previous) > 1e-9;
         }
       } else {
         const direction = this.readLiftDirection(readIntegerField(snapshot.fields, 'movement_y'));
-        const speed = this.readSpeed(snapshot, 'rpm_y', STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND);
+        const speed = this.readSpeed(model, snapshot, 'rpm_y', 'lift', STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND);
         if (direction !== 0) {
-          state.liftOffset = Math.max(0, state.liftOffset + direction * speed * deltaSeconds);
+          state.liftOffset = this.clampStackerLiftOffset(model, state.liftOffset + direction * speed * deltaSeconds);
           moving = true;
         }
       }
@@ -309,8 +317,8 @@ export class StackerTelemetryDriver {
     const rawBackMovement = readIntegerField(snapshot.fields, 'back_movement_z');
     const frontMovement = extensionBlocked && (rawFrontMovement === 1 || rawFrontMovement === 3) ? null : rawFrontMovement;
     const backMovement = extensionBlocked && (rawBackMovement === 1 || rawBackMovement === 3) ? null : rawBackMovement;
-    const frontForkSpeed = this.readSpeed(snapshot, 'front_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
-    const backForkSpeed = this.readSpeed(snapshot, 'back_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
+    const frontForkSpeed = this.readSpeed(model, snapshot, 'front_rpm_z', 'fork', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
+    const backForkSpeed = this.readSpeed(model, snapshot, 'back_rpm_z', 'fork', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const reach = this.readStackerForkReachConfig(model);
     const targetForkReach = snapshot.hasTargetLocation && targetLocator
       ? resolveStackerStorageForkReach(targetLocator.storageDepth, reach.stageOne, reach.stageTwo)
@@ -325,6 +333,7 @@ export class StackerTelemetryDriver {
     }
 
     state.frontForkOffset = this.updateForkOffset(
+      model,
       state.frontForkOffset,
       this.resolveForkCalibrationDistance(
         model,
@@ -343,6 +352,7 @@ export class StackerTelemetryDriver {
       state.frontForkDirection,
     );
     state.backForkOffset = this.updateForkOffset(
+      model,
       state.backForkOffset,
       this.resolveForkCalibrationDistance(
         model,
@@ -364,6 +374,7 @@ export class StackerTelemetryDriver {
 
   /** 更新单侧货叉偏移：编码器/目标投影优先校准，movement_z 只在没有距离时兜底。 */
   private updateForkOffset(
+    model: ModelRuntimeEntry,
     currentOffset: number,
     distance: number | null,
     movement: number | null,
@@ -383,7 +394,7 @@ export class StackerTelemetryDriver {
       nextOffset = lerpNumber(
         nextOffset,
         clampNumber(Math.abs(distance), 0, maxReach) * calibrationDirection,
-        this.getCalibrationAlpha(deltaSeconds),
+        this.getCalibrationAlpha(model, deltaSeconds),
       );
       return this.clampForkOffset(nextOffset, maxReach);
     }
@@ -1018,7 +1029,11 @@ export class StackerTelemetryDriver {
 
     return this.excludeStackerFixedNodes(
       model,
-      findModelNodes(model, this.scene, /dingbuhuagui|dingbu|dibu|lizhu|dianji|caozuotai|xiang|huocha|顶部|底部|立柱|电机|操作台|载货|货叉/i),
+      findModelNodes(
+        model,
+        this.scene,
+        this.readStackerMotionFallbackPattern(model, 'travel', /dingbuhuagui|dingbu|dibu|lizhu|dianji|caozuotai|xiang|huocha|顶部|底部|立柱|电机|操作台|载货|货叉/i),
+      ),
     );
   }
 
@@ -1073,8 +1088,12 @@ export class StackerTelemetryDriver {
     return state.travelConstraint;
   }
 
-  /** 查找载货台和货叉节点，升降时这两类部件需要一起动。 */
+  /** 查找载货台和货叉节点，升降时这两类部件需要一起动；优先使用模型脚本 dataDriven 声明。 */
   private findStackerLiftNodes(model: ModelRuntimeEntry): TransformNode[] {
+    const configuredNames = this.readStackerMotionNodeNames(model, 'lift');
+    const configuredNodes = configuredNames.length > 0 ? findModelNodesByName(model, this.scene, configuredNames) : [];
+    if (configuredNodes.length > 0) return configuredNodes;
+
     return uniqueTransformNodes([
       ...this.findStackerPlatformNodes(model),
       ...this.findStackerForkNodeGroups(model).frontNodes,
@@ -1082,14 +1101,47 @@ export class StackerTelemetryDriver {
     ]);
   }
 
+  /** 将载货台升降偏移限制在 dataDriven.motion.lift.limits 声明的行程内；未配置时保持 [0, +∞) 现行为。 */
+  private clampStackerLiftOffset(model: ModelRuntimeEntry, offset: number): number {
+    const min = this.readStackerDataDrivenNumber(model, ['motion', 'lift', 'limits', 'min']) ?? 0;
+    const max = this.readStackerDataDrivenNumber(model, ['motion', 'lift', 'limits', 'max']) ?? Number.POSITIVE_INFINITY;
+    return clampNumber(offset, Math.min(min, max), Math.max(min, max));
+  }
+
   /** 查找 stacker 载货台节点。 */
   private findStackerPlatformNodes(model: ModelRuntimeEntry): TransformNode[] {
     const namedNodes = findModelNodesByName(model, this.scene, ['xiang.13']);
-    return namedNodes.length > 0 ? namedNodes : findModelNodes(model, this.scene, /platform|cargo|bay|xiang|台|仓/i);
+    return namedNodes.length > 0
+      ? namedNodes
+      : findModelNodes(model, this.scene, this.readStackerMotionFallbackPattern(model, 'lift', /platform|cargo|bay|xiang|台|仓/i));
   }
 
-  /** 查找前后货叉节点，精确命名优先，名称变化时按顺序兜底。 */
+  /**
+   * 查找前后货叉节点：优先按模型脚本 dataDriven.motion.fork 的四个 stage 数组构建，
+   * 缺失时回退到精确命名和正则探测链。
+   * stage 数组是偏移驱动对象（一段得 stageOneOffset、二段得 totalOffset）；
+   * 单侧无独立货叉节点时该侧 Nodes 回退到对侧并集（共享叉），
+   * 使校准距离与货物跟随仍能解析到物理叉，且该侧 stage 为空不产生双重位移。
+   */
   private findStackerForkNodeGroups(model: ModelRuntimeEntry): StackerForkNodeGroups {
+    const configured = this.readStackerForkStageNodeNames(model);
+    if (configured) {
+      const frontStageOneNodes = findModelNodesByName(model, this.scene, configured.frontStageOne);
+      const frontStageTwoNodes = findModelNodesByName(model, this.scene, configured.frontStageTwo);
+      const backStageOneNodes = findModelNodesByName(model, this.scene, configured.backStageOne);
+      const backStageTwoNodes = findModelNodesByName(model, this.scene, configured.backStageTwo);
+      const frontNodes = uniqueTransformNodes([...frontStageOneNodes, ...frontStageTwoNodes]);
+      const backNodes = uniqueTransformNodes([...backStageOneNodes, ...backStageTwoNodes]);
+      return {
+        frontNodes: frontNodes.length > 0 ? frontNodes : backNodes,
+        backNodes: backNodes.length > 0 ? backNodes : frontNodes,
+        frontStageOneNodes,
+        frontStageTwoNodes,
+        backStageOneNodes,
+        backStageTwoNodes,
+      };
+    }
+
     const exactFrontStageOneNodes = findModelNodesByName(model, this.scene, ['huocha.9']).filter((node) => !this.isStackerForkStageTwoNode(node));
     const exactBackStageOneNodes = findModelNodesByName(model, this.scene, ['huocha2.10']).filter((node) => !this.isStackerForkStageTwoNode(node));
     const exactFrontStageTwoNodes = findModelNodesByName(model, this.scene, ['huocha.9_stage2']);
@@ -1119,7 +1171,7 @@ export class StackerTelemetryDriver {
       };
     }
 
-    const forkNodes = findModelNodes(model, this.scene, /fork|叉|huocha|cha\d*/i);
+    const forkNodes = findModelNodes(model, this.scene, this.readStackerMotionFallbackPattern(model, 'fork', /fork|叉|huocha|cha\d*/i));
     const stageOneNodes = forkNodes.filter((node) => !this.isStackerForkStageTwoNode(node));
     const stageTwoNodes = forkNodes.filter((node) => this.isStackerForkStageTwoNode(node));
     const frontStageOneNodes = stageOneNodes.slice(0, 1);
@@ -1132,6 +1184,23 @@ export class StackerTelemetryDriver {
       backStageOneNodes,
       backStageTwoNodes: stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'back'),
     };
+  }
+
+  /** 读取模型脚本 dataDriven.motion.fork 声明的前后叉两段节点名，任一数组非空即视为完整配置。 */
+  private readStackerForkStageNodeNames(
+    model: ModelRuntimeEntry,
+  ): { frontStageOne: string[]; frontStageTwo: string[]; backStageOne: string[]; backStageTwo: string[] } | null {
+    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+      const frontStageOne = readStringArrayPath(dataDriven, ['motion', 'fork', 'frontStageOneNodes']);
+      const frontStageTwo = readStringArrayPath(dataDriven, ['motion', 'fork', 'frontStageTwoNodes']);
+      const backStageOne = readStringArrayPath(dataDriven, ['motion', 'fork', 'backStageOneNodes']);
+      const backStageTwo = readStringArrayPath(dataDriven, ['motion', 'fork', 'backStageTwoNodes']);
+      if (frontStageOne.length > 0 || frontStageTwo.length > 0 || backStageOne.length > 0 || backStageTwo.length > 0) {
+        return { frontStageOne, frontStageTwo, backStageOne, backStageTwo };
+      }
+    }
+
+    return null;
   }
 
   /** 判断节点是否为参数脚本生成的第二段货叉。 */
@@ -1158,6 +1227,23 @@ export class StackerTelemetryDriver {
     }
 
     return [];
+  }
+
+  /** 读取模型脚本声明的兜底节点正则；配置缺失或编译失败时回退硬编码正则。 */
+  private readStackerMotionFallbackPattern(model: ModelRuntimeEntry, motionKey: string, fallback: RegExp): RegExp {
+    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+      const motion = isPlainRecord(dataDriven) && isPlainRecord(dataDriven.motion) ? dataDriven.motion : {};
+      const config = isPlainRecord(motion[motionKey]) ? motion[motionKey] : {};
+      const patternText = typeof config.fallbackPattern === 'string' ? config.fallbackPattern.trim() : '';
+      if (!patternText) continue;
+      try {
+        return new RegExp(patternText, 'i');
+      } catch {
+        return fallback;
+      }
+    }
+
+    return fallback;
   }
 
   /** 读取模型脚本 dataDriven.fixedNodes 中声明的固定节点名。 */
@@ -1230,15 +1316,24 @@ export class StackerTelemetryDriver {
     return 0;
   }
 
-  /** 使用 rpm 字段换算速度；没有有效 rpm 时回退模型默认速度。 */
-  private readSpeed(snapshot: StackerTelemetrySnapshot, rpmKey: string, fallbackSpeed: number): number {
+  /** 使用 rpm 字段换算速度；没有有效 rpm 时回退 dataDriven.motion.<motionKey>.speed 或模型默认速度。 */
+  private readSpeed(
+    model: ModelRuntimeEntry,
+    snapshot: StackerTelemetrySnapshot,
+    rpmKey: string,
+    motionKey: 'travel' | 'lift' | 'fork',
+    fallbackSpeed: number,
+  ): number {
+    const defaultSpeed = this.readStackerDataDrivenNumber(model, ['motion', motionKey, 'speed']) ?? fallbackSpeed;
     const rpm = readNumberField(snapshot.fields, rpmKey);
-    if (rpm === null || rpm <= 0) return fallbackSpeed;
-    return Math.max(fallbackSpeed * 0.25, rpm * STACKER_RPM_TO_METERS_PER_SECOND);
+    if (rpm === null || rpm <= 0) return defaultSpeed;
+    const rpmScale = this.readStackerDataDrivenNumber(model, ['device', 'rpmToMetersPerSecond']) ?? STACKER_RPM_TO_METERS_PER_SECOND;
+    return Math.max(defaultSpeed * 0.25, rpm * rpmScale);
   }
 
-  /** 根据帧时间计算编码器校准插值权重。 */
-  private getCalibrationAlpha(deltaSeconds: number): number {
-    return Math.min(1, Math.max(0, deltaSeconds * STACKER_CALIBRATION_RATE));
+  /** 根据帧时间计算编码器校准插值权重，速率读 dataDriven.device.calibrationRate。 */
+  private getCalibrationAlpha(model: ModelRuntimeEntry, deltaSeconds: number): number {
+    const rate = this.readStackerDataDrivenNumber(model, ['device', 'calibrationRate']) ?? STACKER_CALIBRATION_RATE;
+    return Math.min(1, Math.max(0, deltaSeconds * rate));
   }
 }
