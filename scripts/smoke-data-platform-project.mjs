@@ -290,7 +290,29 @@ async function createFixtures(root, storageRoot) {
 
   const modelFiles = new Map([
     ['global.glb', createMinimalGlb()],
-    ['global-meta.json', Buffer.from(JSON.stringify({ lengthUnit: 'meter', thumbnail: 'remote-name.png' }))],
+    ['global-meta.json', Buffer.from(JSON.stringify({
+      lengthUnit: 'meter',
+      thumbnail: 'remote-name.png',
+      modelParameters: {
+        schema: 'babylon-editor.model-parameters',
+        version: 1,
+        parameters: [{
+          key: 'serverRefreshValue',
+          label: '服务器刷新参数',
+          type: 'number',
+          defaultValue: 7,
+          min: 0,
+          max: 10,
+          step: 1,
+        }],
+        bindings: [],
+      },
+      parameterScripts: [{
+        scriptFilename: 'global-runtime.ts',
+        className: 'GlobalRuntime',
+        values: { serverRefreshValue: { value: 7 } },
+      }],
+    }))],
     ['global-runtime.ts', Buffer.from('export const dataDriven = { device: { defaultAssetCode: "GLOBAL" } };\n')],
     ['global-thumbnail.png', pngBytes],
     ['plain.glb', createMinimalGlb()],
@@ -387,6 +409,7 @@ async function startMockServer(fixtures) {
         scriptFiles: [
           { fileName: 'global-runtime.ts', fileUrl: 'files/global-runtime.ts', sortOrder: 1 },
           { fileName: 'ignore.js', fileUrl: 'files/not-a-typescript-file.js', sortOrder: 2 },
+          { fileName: 'runtime-types.d.ts', fileUrl: 'files/runtime-types.d.ts', sortOrder: 3 },
         ],
       }, {
         id: PLAIN_MODEL_ID,
@@ -807,6 +830,17 @@ async function run() {
     assert.equal(localSceneAssets.assets.length, 4);
     assert.equal(localSceneAssets.assets.filter((item) => item.libraryKind === 'model').length, 3);
     assert.equal(localSceneAssets.assets.filter((item) => item.libraryKind === 'environment').length, 1);
+    const syncedGlobalAsset = localSceneAssets.assets.find((item) => (
+      item.libraryKind === 'model' && item.packagePath?.includes(`Model-${GLOBAL_MODEL_ID}-`)
+    ));
+    assert.ok(syncedGlobalAsset, '同步后的普通模型资产必须存在。');
+    assert.deepEqual(
+      syncedGlobalAsset.scriptAssets?.map((item) => item.name),
+      ['global-runtime.ts'],
+      '数据中台显式返回的任意 .ts 脚本必须进入 scriptAssets。',
+    );
+    assert.equal(syncedGlobalAsset.parameterConfig?.parameters?.[0]?.key, 'serverRefreshValue');
+    assert.equal(syncedGlobalAsset.parameterScriptMetadata?.[0]?.scriptFilename, 'global-runtime.ts');
 
     const refreshedSceneModelPath = path.join(
       storageRoot,
@@ -819,6 +853,15 @@ async function run() {
     await launched.window.waitForFunction((expectedPath) => (
       document.querySelector('.model-asset-meta .asset-path')?.getAttribute('title') === expectedPath
     ), refreshedSceneModelPath, { timeout: 20000 });
+    await launched.window.getByText('服务器刷新参数', { exact: true }).waitFor({
+      state: 'visible',
+      timeout: 20000,
+    });
+    assert.equal(
+      await launched.window.locator('.model-parameters-fieldset label', { hasText: '服务器刷新参数' }).locator('input').inputValue(),
+      '7',
+      '场景实例必须使用新 meta.json 的参数 schema 与默认值。',
+    );
 
     await launched.window.locator('.console-dock-button').click();
     await launched.window.locator('.console-log').filter({ hasText: '已刷新 1 个场景模型实例。' }).waitFor({
@@ -860,6 +903,7 @@ async function run() {
     const noScriptFiles = await readdir(path.join(storageRoot, 'Assets', 'Models', `Model-${PLAIN_MODEL_ID}-无脚本普通模型`));
     assert.ok(noScriptFiles.every((fileName) => !fileName.toLowerCase().endsWith('.ts')));
     assert.ok(!mock.requests.some((item) => item.path.endsWith('/not-a-typescript-file.js')));
+    assert.ok(!mock.requests.some((item) => item.path.endsWith('/runtime-types.d.ts')));
     assert.ok(!mock.requests.some((item) => item.path.includes('legacy-one.ts')));
 
     await launched.window.reload();
@@ -1102,7 +1146,7 @@ async function run() {
         'legacy-package-fallback',
         'incompatible-package-fallback',
         'normal-environment-combo-sync',
-        'optional-any-ts-script-download',
+        'optional-any-ts-script-download-and-runtime-registration',
         'local-scene-opens-and-syncs-model-library',
         'synced-models-refresh-active-scene-models',
         'synced-environment-refreshes-active-scene',

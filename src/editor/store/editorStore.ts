@@ -227,7 +227,6 @@ const DEFAULT_SNAP_SETTINGS: TransformSnapSettings = {
 
 const LOCATOR_MIN_DIMENSION = 0.01;
 const LOCATOR_ASSET_ID_MAX_LENGTH = 128;
-const CLIPBOARD_PASTE_OFFSET_METERS = 0.35;
 
 /** 比较两份模型测量快照，避免相同运行时结果触发无意义的 React 重渲染。 */
 function areSelectedModelMeasurementsEqual(
@@ -1027,24 +1026,26 @@ type EntityDuplicateOverrides = {
   assetNumber?: EntityAssetNumberOverride;
 };
 
-/** 创建普通实体副本，复制所有业务组件并按偏移调整 Transform 位置。 */
+/** 创建普通实体副本，复制所有业务组件；阵列场景可按需调整 Transform 位置。 */
 function createDuplicatedRuntimeEntity(
   source: Entity,
   parentId: string | null,
-  offset: Vector3Data,
+  offset: Vector3Data | null,
   existingNames: Set<string>,
   overrides: EntityDuplicateOverrides = {},
 ): Entity {
   const id = overrides.id ?? createId('entity');
   const components = cloneEntityComponents(source);
-  components.transform = {
-    ...components.transform,
-    position: {
-      x: components.transform.position.x + offset.x,
-      y: components.transform.position.y + offset.y,
-      z: components.transform.position.z + offset.z,
-    },
-  };
+  if (offset) {
+    components.transform = {
+      ...components.transform,
+      position: {
+        x: components.transform.position.x + offset.x,
+        y: components.transform.position.y + offset.y,
+        z: components.transform.position.z + offset.z,
+      },
+    };
+  }
   if (components.modelAsset) {
     components.modelAsset = {
       ...components.modelAsset,
@@ -1134,7 +1135,6 @@ function prepareEntityClipboardPaste(
   const duplicatedIdBySourceId = new Map<string, string>();
   let folderCount = 0;
   let entityCount = 0;
-  const pasteOffset = { x: CLIPBOARD_PASTE_OFFSET_METERS, y: 0, z: CLIPBOARD_PASTE_OFFSET_METERS };
 
   for (const entry of clipboard.entries) {
     const sourceById = new Map(entry.entities.map((entity) => [entity.id, entity]));
@@ -1175,7 +1175,7 @@ function prepareEntityClipboardPaste(
         entities.push(createDuplicatedRuntimeEntity(
           source,
           duplicatedParentId,
-          pasteOffset,
+          null,
           existingNames,
           { id: duplicatedId },
         ));

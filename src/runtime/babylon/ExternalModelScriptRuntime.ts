@@ -142,7 +142,7 @@ export class ExternalModelScriptRuntime {
     this.instances.length = 0;
   }
 
-  /** 启动单个 .model.ts 文件中声明的运行组件。 */
+  /** 启动单个 TypeScript 模型脚本中声明的运行组件。 */
   private async startScriptAsset(scriptAsset: ModelScriptAsset): Promise<void> {
     try {
       const compiledScript = await loadCompiledExternalModelScript(scriptAsset, this.modelAsset.assetRevision);
@@ -256,7 +256,7 @@ function createVersionedRuntimeAssetUrl(sourceUrl: string, assetRevision: string
   return `${runtimeUrl}${separator}assetRevision=${encodeURIComponent(assetRevision)}`;
 }
 
-/** 将 .model.ts 转成可在 renderer 内执行的本地函数模块。 */
+/** 将 TypeScript 模型脚本转成可在 renderer 内执行的本地函数模块。 */
 async function compileExternalModelScript(sourceText: string): Promise<CompiledExternalModelScript> {
   const ts = await loadTypeScriptCompiler();
   const { sourceWithoutImports, importPrelude } = createImportPrelude(sourceText);

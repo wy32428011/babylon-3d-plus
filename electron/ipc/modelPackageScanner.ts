@@ -16,6 +16,7 @@ type ModelPackageMetadata = ModelLengthUnitInfo & {
   animationScriptMetadata?: unknown[];
   dataDrivenConfig?: unknown;
   defaultAssetCode?: string;
+  scriptFileNames?: string[];
 };
 
 type ModelPackageScanResult = {
@@ -194,6 +195,32 @@ function extractJsonArrayMetadata(metadata: unknown, key: 'parameterScripts' | '
   return metadata[key].map((item) => JSON.parse(JSON.stringify(item)) as unknown);
 }
 
+/** 判断文件名是否为可执行的 TypeScript 模型脚本，声明文件不会进入运行时。 */
+function isRuntimeModelScriptFileName(fileName: string): boolean {
+  const normalizedFileName = fileName.toLowerCase();
+  return normalizedFileName.endsWith('.ts') && !normalizedFileName.endsWith('.d.ts');
+}
+
+/** 收集 meta.json 中参数/动画脚本显式引用的包内 TypeScript 文件名。 */
+function extractScriptFileNamesFromMetadata(metadata: unknown): string[] | undefined {
+  if (!isPlainObject(metadata)) return undefined;
+
+  const scriptFileNames = new Set<string>();
+  for (const key of ['parameterScripts', 'animationScripts'] as const) {
+    const scripts = metadata[key];
+    if (!Array.isArray(scripts)) continue;
+
+    for (const script of scripts) {
+      if (!isPlainObject(script) || typeof script.scriptFilename !== 'string') continue;
+      const fileName = script.scriptFilename.trim().replace(/\\/g, '/');
+      if (!fileName || path.posix.basename(fileName) !== fileName || !isRuntimeModelScriptFileName(fileName)) continue;
+      scriptFileNames.add(fileName);
+    }
+  }
+
+  return scriptFileNames.size > 0 ? [...scriptFileNames] : undefined;
+}
+
 /** 从 meta.json 读取 dataDriven 并深拷贝为纯 JSON，运行时脚本 fallback 不在主进程执行。 */
 function extractDataDrivenConfigFromMetadata(metadata: unknown): unknown | undefined {
   if (!isPlainObject(metadata) || !('dataDriven' in metadata)) return undefined;
@@ -344,6 +371,7 @@ async function readModelPackageMetadata(
       parameterScriptMetadata: extractJsonArrayMetadata(parsed, 'parameterScripts'),
       animationScriptMetadata: extractJsonArrayMetadata(parsed, 'animationScripts'),
       dataDrivenConfig: extractDataDrivenConfigFromMetadata(parsed),
+      scriptFileNames: extractScriptFileNamesFromMetadata(parsed),
       ...unitInfo,
     };
   } catch (error) {
@@ -355,9 +383,21 @@ async function readModelPackageMetadata(
   }
 }
 
-function findModelScripts(packagePath: string, fileNames: string[]): string[] {
+function findModelScripts(
+  packagePath: string,
+  fileNames: string[],
+  referencedScriptFileNames: string[] | undefined,
+): string[] {
+  const referencedFileNames = new Set(
+    (referencedScriptFileNames ?? []).map((fileName) => fileName.toLowerCase()),
+  );
+
   return fileNames
-    .filter((fileName) => fileName.toLowerCase().endsWith('.model.ts'))
+    .filter((fileName) => {
+      const normalizedFileName = fileName.toLowerCase();
+      return normalizedFileName.endsWith('.model.ts')
+        || (referencedFileNames.has(normalizedFileName) && isRuntimeModelScriptFileName(normalizedFileName));
+    })
     .map((fileName) => path.join(packagePath, fileName));
 }
 
@@ -400,8 +440,8 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
     };
   }
 
-  const scriptPaths = findModelScripts(packagePath, fileNames);
   const metadata = await readModelPackageMetadata(packagePath);
+  const scriptPaths = findModelScripts(packagePath, fileNames, metadata.scriptFileNames);
   const defaultAssetCode = await readDefaultAssetCodeFromScripts(scriptPaths);
   const scriptAssets = createModelScriptAssets(scriptPaths);
   const modelFileName = path.basename(modelFilePath);

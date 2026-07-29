@@ -37,7 +37,8 @@ import { logLegacySceneMigrationSummary, logSceneV2ToV3MigrationSummary, migrate
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
 const MESH_KINDS: readonly MeshKind[] = ['cube', 'sphere', 'plane'];
 const LIGHT_KINDS: readonly LightKind[] = ['hemispheric', 'directional', 'point'];
-const MODEL_SCRIPT_EXTENSION = '.model.ts';
+const MODEL_SCRIPT_EXTENSION = '.ts';
+const MODEL_SCRIPT_DECLARATION_EXTENSION = '.d.ts';
 const LOCATOR_MIN_DIMENSION = 0.01;
 const LOCATOR_ASSET_ID_MAX_LENGTH = 128;
 const CAD_REFERENCE_LAYER_STATS_MAX_LENGTH = 512;
@@ -758,6 +759,13 @@ function normalizeModelAssetCode(value: unknown, entityId: string): string {
   return normalizedAssetCode || createModelAssetCode(undefined, entityId);
 }
 
+/** 判断场景中的脚本路径是否为可执行 TypeScript 文件，声明文件不允许持久化为运行脚本。 */
+function isRuntimeModelScriptFileName(value: string): boolean {
+  const normalizedValue = value.toLowerCase();
+  return normalizedValue.endsWith(MODEL_SCRIPT_EXTENSION)
+    && !normalizedValue.endsWith(MODEL_SCRIPT_DECLARATION_EXTENSION);
+}
+
 function normalizeModelScriptAssets(
   value: unknown,
 ): NonNullable<NonNullable<EntityComponents['modelAsset']>['scriptAssets']> {
@@ -770,9 +778,9 @@ function normalizeModelScriptAssets(
     const sourceUrl = assertString(asset.sourceUrl);
     const name = assertString(asset.name);
 
-    if (!scriptPath.toLowerCase().endsWith(MODEL_SCRIPT_EXTENSION)) throwUnsupportedSceneFileError();
+    if (!isRuntimeModelScriptFileName(scriptPath)) throwUnsupportedSceneFileError();
     if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) throwUnsupportedSceneFileError();
-    if (!name.toLowerCase().endsWith(MODEL_SCRIPT_EXTENSION)) throwUnsupportedSceneFileError();
+    if (!isRuntimeModelScriptFileName(name)) throwUnsupportedSceneFileError();
 
     return { path: scriptPath, sourceUrl, name };
   });

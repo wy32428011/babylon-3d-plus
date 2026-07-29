@@ -69,7 +69,7 @@ container.instantiateModelsToScene(
 
 ## 选择显示
 
-独占容器模型继续使用 `HighlightLayer`。Shelf 与普通静态共享模型的 `InstancedMesh` 使用单个共享 `SelectionOutlineLayer`，通过实例选择 ID 区分同源实例，避免选中一个实体时其它同源模型同时高亮。
+独占容器模型、Shelf、普通静态共享模型与矩阵阵列统一使用单个共享 `SelectionOutlineLayer`。普通 Mesh 按模型分组描边，`InstancedMesh` 与 thin instance 通过实例选择 ID 区分同源实体，避免选中一个实体时其它同源模型同时高亮。
 
 选择描边按当前选中 Mesh 的 `uniqueId` 生成签名；实体仅移动但选择和 Mesh 拓扑未变化时，不重复重建实例选择缓冲。签名变化时仍执行 `clearSelection()` 后重新 `addSelection()`，避免描边层累积已释放 Mesh 引用。由于 Babylon 清理实例选择缓冲后，已有 source mesh 的部分实例公开 `instancedBuffers` 容器可能为空，运行时会在重新添加选择前同时补齐当前选中实例、共享 source mesh 和 `sourceMesh.instances` 的公开容器；参数脚本或异步加载刷新 Mesh 后还会修复已经注册实例缓冲但容器暂时为空的新实例。这样可避免主渲染阶段读取 `instanceSelectionId` 时命中 `null`，且不扫描私有字段、不逐帧遍历场景，也不改参数化脚本。
 

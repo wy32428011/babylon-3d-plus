@@ -487,7 +487,7 @@ try {
     const directory = path.join(runRoot, packageFolder(index, packageName));
     await fs.mkdir(directory, { recursive: true });
     console.log(`[model-array-visual:start] ${packageName}`);
-    const lifecycle = { direct: false, parameter: false, array: false, parameterAfterArray: false, restore: false };
+    const lifecycle = { direct: false, parameter: false, array: false, parameterAfterArray: false, sourceParameterTransition: false, restore: false };
     try {
       const spec = await buildSpec(packageName, sceneValuesByPackage);
       const initialization = await page.evaluate((value) => window.modelArrayVisualHarness.initialize(value), spec);
@@ -568,6 +568,40 @@ try {
       captures.changedDetail = await captureCanvas({ page, canvas, electronApp, directory, name: 'changed-detail', preparation: changedDetailPreparation });
       lifecycle.parameterAfterArray = true;
 
+      const sourceParameterTransition = await page.evaluate(() => window.modelArrayVisualHarness.verifySourceParameterTransition());
+      assert.equal(sourceParameterTransition.logicalEntityCount, 4, `${packageName} 源参数换批必须覆盖源模型和三个阵列副本`);
+      assert.equal(sourceParameterTransition.minimumCoveredEntityCount, 4, `${packageName} 源参数经过默认值时存在阵列模型消失帧`);
+      assert.equal(sourceParameterTransition.contextLost, false, `${packageName} 源参数换批不得丢失 WebGL 上下文`);
+      lifecycle.sourceParameterTransition = true;
+
+      let denseShelfArray21 = null;
+      if (packageName === 'Shelf') {
+        denseShelfArray21 = await page.evaluate(() => window.modelArrayVisualHarness.verifyDenseShelfArrayCount(21));
+        assert.equal(denseShelfArray21.denseSourceMeshCount, 18, 'Shelf 20x100 双深必须保留 18 个 dense 源批次');
+        assert.equal(denseShelfArray21.denseSourceThinInstanceCount, 16_674, 'Shelf 20x100 双深必须保留 16674 个源矩阵');
+        assert.equal(denseShelfArray21.preview20, true, 'Shelf 20 个副本预览必须成功');
+        assert.equal(denseShelfArray21.preview21, true, 'Shelf 第 21 个副本预览必须成功');
+        assert.equal(denseShelfArray21.previewBatchReused, true, 'Shelf 第 21 个副本预览必须复用矩阵批次');
+        assert.equal(denseShelfArray21.previewThinInstanceCount, denseShelfArray21.previewMatrixSourceCount * 21, 'Shelf 第 21 个预览副本不得清空内部矩阵');
+        assert.ok(denseShelfArray21.previewRenderableMeshCount > 0, 'Shelf 第 21 个预览副本后必须保留可渲染批次');
+        assert.equal(denseShelfArray21.previewContextLost, false, 'Shelf 第 21 个预览副本不得丢失 WebGL 上下文');
+        assert.equal(denseShelfArray21.logicalEntityCount, 22, 'Shelf 正式阵列必须保留源和全部 21 个副本');
+        assert.equal(denseShelfArray21.completeThinInstanceCount, denseShelfArray21.formalMatrixSourceCount * 22, 'Shelf 第 21 个正式副本不得截断内部矩阵');
+        assert.ok(denseShelfArray21.formalRenderableMeshCount > 0, 'Shelf 第 21 个正式副本后必须保留可渲染分片');
+        assert.ok(denseShelfArray21.nearSource.renderableMeshCount > 0, '近看源 Shelf 时阵列分片不得全部被错误裁剪');
+        assert.ok(denseShelfArray21.nearMiddle.renderableMeshCount > 0, '近看中间 Shelf 时阵列分片不得全部被错误裁剪');
+        assert.ok(denseShelfArray21.nearLast.renderableMeshCount > 0, '近看末端 Shelf 时阵列分片不得全部被错误裁剪');
+        assert.equal(denseShelfArray21.contextLost, false, 'Shelf 第 21 个正式副本不得丢失 WebGL 上下文');
+        captures.denseShelfArray21 = await captureCanvas({
+          page,
+          canvas,
+          electronApp,
+          directory,
+          name: 'changed-dense-array-21',
+          preparation: denseShelfArray21,
+        });
+      }
+
       const restore = await page.evaluate(() => window.modelArrayVisualHarness.verifyRestore());
       assert.equal(restore.pass, true, `${packageName} 参数恢复/取消阵列后未恢复默认模型`);
       lifecycle.restore = true;
@@ -577,7 +611,7 @@ try {
       ));
       assert.deepEqual(failureMessages, [], `${packageName} 可视运行存在失败日志`);
 
-      assert.ok(Object.values(lifecycle).every(Boolean), `${packageName} 五阶段视觉生命周期未全部通过`);
+      assert.ok(Object.values(lifecycle).every(Boolean), `${packageName} 六阶段视觉生命周期未全部通过`);
       const result = {
         packageName,
         status: 'PASS',
@@ -585,6 +619,8 @@ try {
         changedKey: initialization.changedKey,
         lifecycle,
         comparisons: { default: defaultComparisons, changed: changedComparisons },
+        sourceParameterTransition,
+        denseShelfArray21,
         restore,
         captures: Object.fromEntries(Object.entries(captures).map(([key, capture]) => [key, {
           name: capture.name,

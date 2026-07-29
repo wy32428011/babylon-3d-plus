@@ -2,13 +2,13 @@
 
 日期：2026-07-17
 
-更新：2026-07-25
+更新：2026-07-29
 
 ## 目标
 
 优化必须同时保留源资产、编辑语义和最终画面，不通过降低渲染分辨率、删除模型或替换 Geometry 换取性能。2026-07-25 起，大场景渲染遵守以下硬性契约：
 
-- Babylon Engine 抗锯齿继续开启，stencil、GlowLayer、HighlightLayer、SelectionOutlineLayer 保留；
+- Babylon Engine 抗锯齿继续开启，stencil、GlowLayer 与统一模型选择描边 `SelectionOutlineLayer` 保留；
 - 模型纹理、PBR 材质、光照、顶点、索引和拓扑不做降级、焊接、删面或替换；
 - 参数脚本必须先完整执行，脚本生成的梁、柱、辊筒、支架等全部部件都进入真实 Geometry 批次；
 - 任意相机距离、缩放和旋转视角都不得使用 box、框架、包围盒、低模或其它代理，也不得为了 FPS 隐藏视锥内模型；

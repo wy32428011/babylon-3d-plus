@@ -111,7 +111,7 @@ npx vite preview --host 127.0.0.1
 
 ## 模型脚本与 CSP
 
-外置 `.model.ts` 使用当前项目的可信脚本运行机制：浏览器加载脚本文本、使用打包进 Viewer 的 TypeScript 编译器转译，并通过 `new Function` 执行。
+外置 TypeScript 模型脚本（`*.model.ts`、meta 显式引用或数据中台登记的其它可执行 `.ts`，不含 `.d.ts`）使用当前项目的可信脚本运行机制：浏览器加载脚本文本、使用打包进 Viewer 的 TypeScript 编译器转译，并通过 `new Function` 执行。
 
 如果部署服务器设置 Content-Security-Policy，需要允许该链路使用的 `unsafe-eval`。如果安全策略不允许 `unsafe-eval`，带外置脚本的模型无法正常工作；不带外置脚本的普通静态模型不受此限制。
 

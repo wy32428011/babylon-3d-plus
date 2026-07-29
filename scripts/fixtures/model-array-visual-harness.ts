@@ -315,6 +315,12 @@ function compactBounds(mesh: any, raw = false): any | null {
   };
 }
 
+function currentActiveMeshes(scene: Scene): any[] {
+  const activeMeshes = scene.getActiveMeshes();
+  // SmartArray.data 会保留 length 之后的旧槽位；只读取本帧实际有效前缀。
+  return activeMeshes.data.slice(0, activeMeshes.length);
+}
+
 function meshDebugState(mesh: any, scene: Scene): any {
   return {
     name: String(mesh?.name ?? ''),
@@ -330,7 +336,7 @@ function meshDebugState(mesh: any, scene: Scene): any {
     enabledSelf: mesh?.isEnabled?.(false) !== false,
     enabledWithAncestors: mesh?.isEnabled?.(true) !== false,
     sceneIncluded: scene.meshes.includes(mesh),
-    isActive: Array.from(scene.getActiveMeshes().data ?? []).includes(mesh),
+    isActive: currentActiveMeshes(scene).includes(mesh),
     layerMask: Number(mesh?.layerMask ?? 0),
     material: materialSignature(mesh?.material),
     bounds: compactBounds(mesh),
@@ -744,6 +750,524 @@ async function prepareCapture(request: {
   return result;
 }
 
+
+/** 收集真实 WebGL 场景中源基础批次和参数变体批次的逻辑实体覆盖。 */
+function collectSourceParameterTransitionCoverage(state: HarnessState): any {
+  const runtime = state.runtime as any;
+  const entries: Array<{ kind: string; batch: any; sourceSignature: string }> = [];
+  const sourceModel = runtime.models.get(SOURCE_ID);
+  const sourceBatch = sourceModel?.modelArrayBatch;
+  if (sourceBatch) {
+    entries.push({ kind: 'base', batch: sourceBatch, sourceSignature: sourceModel.modelArraySourceSignature });
+  }
+  for (const variant of runtime.modelArrayParameterVariants.values()) {
+    if (variant.sourceEntityId === SOURCE_ID && variant.model.modelArrayBatch) {
+      entries.push({
+        kind: 'variant',
+        batch: variant.model.modelArrayBatch,
+        sourceSignature: variant.model.modelArraySourceSignature,
+      });
+    }
+  }
+
+  const seenBatches = new Set<any>();
+  const entityCoverageCounts = new Map<string, number>();
+  const entitySourceSignatures = new Map<string, Set<string>>();
+  const batchSummaries: string[] = [];
+  let activeBatchCount = 0;
+  let renderableBatchCount = 0;
+  let visibleThinInstanceCount = 0;
+  for (const entry of entries) {
+    if (seenBatches.has(entry.batch)) continue;
+    seenBatches.add(entry.batch);
+    const entityIds = [...entry.batch.getEntityIds()];
+    const coveredEntityIndexes = new Set<number>();
+    let liveMeshCount = 0;
+    let renderableMeshCount = 0;
+    let sourceMatrixCount = 0;
+    let committedMatrixCount = 0;
+    for (const source of entry.batch.sources ?? []) {
+      for (const internal of source.batches ?? []) {
+        const mesh = internal.mesh;
+        if (mesh.isDisposed()) continue;
+        liveMeshCount += 1;
+        if (mesh.isEnabled(false) && mesh.thinInstanceCount > 0) {
+          renderableMeshCount += 1;
+          visibleThinInstanceCount += mesh.thinInstanceCount;
+        }
+        const sourceEntityIndexes = internal.sourceEntityIndexBuffer;
+        const renderedEntityIndexes = internal.entityIndexBuffer;
+        sourceMatrixCount += sourceEntityIndexes?.length ?? 0;
+        const renderedCount = Math.min(
+          Math.max(0, Number(mesh.thinInstanceCount) || 0),
+          renderedEntityIndexes?.length ?? 0,
+        );
+        if (!renderedEntityIndexes || renderedCount <= 0 || !mesh.isEnabled(false)) continue;
+        committedMatrixCount += renderedCount;
+        for (let index = 0; index < renderedCount; index += 1) {
+          coveredEntityIndexes.add(renderedEntityIndexes[index]);
+        }
+      }
+    }
+
+    if (liveMeshCount > 0 && coveredEntityIndexes.size > 0) activeBatchCount += 1;
+    if (renderableMeshCount > 0) renderableBatchCount += 1;
+    for (const entityIndex of coveredEntityIndexes) {
+      const entityId = entityIds[entityIndex];
+      if (!entityId) continue;
+      entityCoverageCounts.set(entityId, (entityCoverageCounts.get(entityId) ?? 0) + 1);
+      const signatures = entitySourceSignatures.get(entityId) ?? new Set<string>();
+      signatures.add(entry.sourceSignature);
+      entitySourceSignatures.set(entityId, signatures);
+    }
+    batchSummaries.push([
+      entry.kind,
+      `entities=${entityIds.length}`,
+      `covered=${coveredEntityIndexes.size}`,
+      `liveMeshes=${liveMeshCount}`,
+      `renderableMeshes=${renderableMeshCount}`,
+      `sourceMatrices=${sourceMatrixCount}`,
+      `renderedMatrices=${committedMatrixCount}`,
+    ].join(':'));
+  }
+
+  const activeHostMeshes: string[] = [];
+  const activeMeshes = new Set(currentActiveMeshes(state.scene));
+  const hostModels = [
+    runtime.models.get(SOURCE_ID),
+    ...[...runtime.modelArrayParameterVariants.values()]
+      .filter((variant: any) => variant.sourceEntityId === SOURCE_ID)
+      .map((variant: any) => variant.model),
+  ].filter(Boolean);
+  const seenHostModels = new Set<any>();
+  for (const model of hostModels) {
+    if (seenHostModels.has(model)) continue;
+    seenHostModels.add(model);
+    for (const mesh of model.root?.getChildMeshes?.(false) ?? model.meshes ?? []) {
+      if (mesh.isDisposed?.() || mesh.getTotalVertices?.() <= 0 || !activeMeshes.has(mesh)) continue;
+      activeHostMeshes.push(`${mesh.name}|${mesh.uniqueId}|layer=${mesh.layerMask}`);
+    }
+  }
+
+  return {
+    entityCoverageCounts,
+    entitySourceSignatures,
+    activeBatchCount,
+    renderableBatchCount,
+    visibleThinInstanceCount,
+    activeHostMeshes,
+    batchSummaries,
+  };
+}
+
+/** 每个真实渲染采样点都必须完整且唯一覆盖源模型和三个阵列副本。 */
+function assertSourceParameterTransitionCoverage(
+  state: HarnessState,
+  expectedEntityIds: string[],
+  label: string,
+  expectedRenderSignaturesByEntityId: ReadonlyMap<string, readonly string[]> | null = null,
+): any {
+  const coverage = collectSourceParameterTransitionCoverage(state);
+  const expected = new Set(expectedEntityIds);
+  const coveredEntityIds = [...coverage.entityCoverageCounts.keys()];
+  const missingEntityIds = expectedEntityIds.filter((entityId) => !coverage.entityCoverageCounts.has(entityId));
+  const unexpectedEntityIds = coveredEntityIds.filter((entityId) => !expected.has(entityId));
+  const duplicateEntityIds = coveredEntityIds.filter((entityId) => coverage.entityCoverageCounts.get(entityId) !== 1);
+  const wrongSignatureEntityIds = expectedRenderSignaturesByEntityId
+    ? expectedEntityIds.filter((entityId) => {
+      const expectedSignatures = expectedRenderSignaturesByEntityId.get(entityId) ?? [];
+      const actualSignatures = [...(coverage.entitySourceSignatures.get(entityId) ?? [])];
+      return expectedSignatures.length === 0
+        || actualSignatures.length !== 1
+        || !expectedSignatures.some((signature) => actualSignatures[0].startsWith(
+          `${signature}|representation:original-geometry|`,
+        ));
+    })
+    : [];
+  const summary = coverage.batchSummaries.join('; ') || 'none';
+  if (coverage.activeBatchCount <= 0) throw new Error(`${label}：活动阵列批次为 0，${summary}`);
+  if (coverage.renderableBatchCount <= 0) throw new Error(`${label}：可渲染阵列批次为 0，${summary}`);
+  if (coverage.visibleThinInstanceCount <= 0) throw new Error(`${label}：全部 thinInstance 被清空，${summary}`);
+  if (coverage.activeHostMeshes.length > 0) {
+    throw new Error(`${label}：参数脚本宿主与权威阵列批次同时可见，${coverage.activeHostMeshes.join('; ')}`);
+  }
+  if (missingEntityIds.length > 0) throw new Error(`${label}：缺失 ${missingEntityIds.join(',')}，${summary}`);
+  if (unexpectedEntityIds.length > 0) throw new Error(`${label}：出现非目标实体 ${unexpectedEntityIds.join(',')}，${summary}`);
+  if (duplicateEntityIds.length > 0) throw new Error(`${label}：旧、新批次重复覆盖 ${duplicateEntityIds.join(',')}，${summary}`);
+  if (wrongSignatureEntityIds.length > 0) {
+    throw new Error(`${label}：逻辑实体由错误参数视觉批次承载 ${wrongSignatureEntityIds.join(',')}，${summary}`);
+  }
+  return coverage;
+}
+
+function hasSameBatchEntityIds(batch: any, expectedEntityIds: string[]): boolean {
+  if (!batch) return false;
+  return JSON.stringify([...batch.getEntityIds()].sort()) === JSON.stringify([...expectedEntityIds].sort());
+}
+
+/** 逐帧执行源参数换批，并验证真实 WebGL 中不存在消失或重叠闪烁。 */
+async function waitForSourceParameterTransition(
+  state: HarnessState,
+  expectedEntityIds: string[],
+  label: string,
+  expectedRenderSignaturesByEntityId: ReadonlyMap<string, readonly string[]>,
+  isSettled: () => boolean,
+): Promise<any> {
+  const deadline = performance.now() + READY_TIMEOUT_MS;
+  let frameCount = 0;
+  let sampleCount = 0;
+  let minimumCoveredEntityCount = Number.POSITIVE_INFINITY;
+  let maximumActiveBatchCount = 0;
+  while (performance.now() < deadline) {
+    const beforeRender = assertSourceParameterTransitionCoverage(
+      state,
+      expectedEntityIds,
+      `${label} 第 ${frameCount + 1} 帧渲染前`,
+      expectedRenderSignaturesByEntityId,
+    );
+    minimumCoveredEntityCount = Math.min(minimumCoveredEntityCount, beforeRender.entityCoverageCounts.size);
+    maximumActiveBatchCount = Math.max(maximumActiveBatchCount, beforeRender.activeBatchCount);
+    sampleCount += 1;
+
+    state.scene.render();
+    const afterRender = assertSourceParameterTransitionCoverage(
+      state,
+      expectedEntityIds,
+      `${label} 第 ${frameCount + 1} 帧渲染后`,
+      expectedRenderSignaturesByEntityId,
+    );
+    minimumCoveredEntityCount = Math.min(minimumCoveredEntityCount, afterRender.entityCoverageCounts.size);
+    maximumActiveBatchCount = Math.max(maximumActiveBatchCount, afterRender.activeBatchCount);
+    sampleCount += 1;
+    frameCount += 1;
+    if (isSettled()) return { frameCount, sampleCount, minimumCoveredEntityCount, maximumActiveBatchCount };
+    await new Promise((resolve) => setTimeout(resolve, 16));
+  }
+  throw new Error(`${label} 在逐帧观察期间未完成原子换批`);
+}
+
+/** 精确复现：只修改阵列源模型，三个阵列副本始终保留默认参数。 */
+async function verifySourceParameterTransition(): Promise<any> {
+  if (!current) throw new Error('可视化 harness 尚未初始化');
+  const state = current;
+  const runtime = state.runtime as any;
+  const reference = state.defaultMetrics;
+  const size = reference?.localBounds?.size ?? { x: 1, y: 1, z: 1 };
+  const span = Math.max(0.8, size.x, size.y, size.z);
+  const sourceTransform = transform();
+  const instanceTransforms = [
+    transform(vector(span * 1.5, 0, 0)),
+    transform(vector(-span * 1.25, span * 0.1, span * 1.2), vector(0, Math.PI / 2, 0), vector(1.2, 0.8, 1.1)),
+    transform(vector(0, 0, -span * 1.5), vector(0, Math.PI / 6, 0), vector(-1, 1, 1)),
+  ];
+  const instances = INSTANCE_IDS.map((id, index) => createEntity(
+    id,
+    state.spec,
+    state.spec.defaults,
+    instanceTransforms[index],
+    true,
+    SOURCE_ID,
+  ));
+  const expectedEntityIds = [SOURCE_ID, ...INSTANCE_IDS];
+  applyCameraPreset(state.camera, {
+    alpha: Math.PI * 0.72,
+    beta: Math.PI * 0.31,
+    radius: Math.max(8, span * 8),
+    target: { x: 0, y: Math.max(0, size.y / 2), z: 0 },
+    minZ: 0.001,
+    maxZ: Math.max(1_000, span * 100),
+  });
+  state.camera.layerMask = DIRECT_CAPTURE_LAYER | ARRAY_CAPTURE_LAYER;
+
+  const defaultAsset = makeAsset(state.spec, state.spec.defaults, SOURCE_ID);
+  const changedAsset = makeAsset(state.spec, state.changed.values, SOURCE_ID);
+  const defaultRenderSignature = runtime.createModelArrayRenderSignature(defaultAsset);
+  const changedRenderSignature = runtime.createModelArrayRenderSignature(changedAsset);
+  const defaultExpectedRenderSignatures = new Map<string, readonly string[]>(
+    expectedEntityIds.map((entityId) => [entityId, [defaultRenderSignature]]),
+  );
+  const transitionExpectedRenderSignatures = new Map<string, readonly string[]>([
+    [SOURCE_ID, [defaultRenderSignature, changedRenderSignature]],
+    ...INSTANCE_IDS.map((entityId) => [entityId, [defaultRenderSignature]] as const),
+  ]);
+
+  state.runtime.sync(createDocument([
+    createEntity(DIRECT_ID, state.spec, state.spec.defaults, transform(), false),
+    createEntity(SOURCE_ID, state.spec, state.spec.defaults, sourceTransform, true),
+    ...instances,
+  ]));
+  await waitForReady(state);
+  assertSourceParameterTransitionCoverage(
+    state,
+    expectedEntityIds,
+    `${state.spec.packageName} 默认参数稳定帧`,
+    defaultExpectedRenderSignatures,
+  );
+
+  state.runtime.sync(createDocument([
+    createEntity(DIRECT_ID, state.spec, state.spec.defaults, transform(), false),
+    createEntity(SOURCE_ID, state.spec, state.changed.values, sourceTransform, true),
+    ...instances,
+  ]));
+  const defaultToChanged = await waitForSourceParameterTransition(
+    state,
+    expectedEntityIds,
+    `${state.spec.packageName} 源参数默认值切到 ${state.changed.key}`,
+    transitionExpectedRenderSignatures,
+    () => {
+      const sourceModel = runtime.models.get(SOURCE_ID);
+      const sourceBatch = sourceModel?.modelArrayBatch;
+      const defaultVariant = runtime.modelArrayParameterVariantByEntityId.get(INSTANCE_IDS[0]);
+      const variants = [...runtime.modelArrayParameterVariants.values()].filter((variant: any) => variant.sourceEntityId === SOURCE_ID);
+      return Boolean(
+        sourceModel
+        && runtime.isModelArrayBatchCurrent(sourceModel, changedRenderSignature)
+        && hasSameBatchEntityIds(sourceBatch, [SOURCE_ID])
+        && defaultVariant
+        && defaultVariant.renderSignature === defaultRenderSignature
+        && runtime.isModelArrayBatchCurrent(defaultVariant.model, defaultRenderSignature)
+        && hasSameBatchEntityIds(defaultVariant.model.modelArrayBatch, INSTANCE_IDS)
+        && INSTANCE_IDS.every((entityId) => runtime.modelArrayParameterVariantByEntityId.get(entityId) === defaultVariant)
+        && variants.length === 1
+      );
+    },
+  );
+
+  state.runtime.sync(createDocument([
+    createEntity(DIRECT_ID, state.spec, state.spec.defaults, transform(), false),
+    createEntity(SOURCE_ID, state.spec, state.spec.defaults, sourceTransform, true),
+    ...instances,
+  ]));
+  const changedToDefault = await waitForSourceParameterTransition(
+    state,
+    expectedEntityIds,
+    `${state.spec.packageName} 源参数 ${state.changed.key} 恢复默认值`,
+    transitionExpectedRenderSignatures,
+    () => {
+      const sourceModel = runtime.models.get(SOURCE_ID);
+      const variants = [...runtime.modelArrayParameterVariants.values()].filter((variant: any) => variant.sourceEntityId === SOURCE_ID);
+      return Boolean(
+        sourceModel
+        && runtime.isModelArrayBatchCurrent(sourceModel, defaultRenderSignature)
+        && hasSameBatchEntityIds(sourceModel.modelArrayBatch, expectedEntityIds)
+        && variants.length === 0
+        && INSTANCE_IDS.every((entityId) => !runtime.modelArrayParameterVariantByEntityId.has(entityId))
+      );
+    },
+  );
+
+  const result = {
+    changedKey: state.changed.key,
+    logicalEntityCount: expectedEntityIds.length,
+    minimumCoveredEntityCount: Math.min(defaultToChanged.minimumCoveredEntityCount, changedToDefault.minimumCoveredEntityCount),
+    defaultToChanged,
+    changedToDefault,
+    contextLost: Boolean((state.engine as any)._gl?.isContextLost?.()),
+    logs: [...state.logs],
+  };
+  setStatus(result);
+  return result;
+}
+
+/** 在真实 WebGL 中验证 20x100 双深 Shelf 的第 21 个预览及正式阵列副本。 */
+async function verifyDenseShelfArrayCount(copyCount = 21): Promise<any> {
+  if (!current) throw new Error('可视化 harness 尚未初始化');
+  if (current.spec.packageName !== 'Shelf') throw new Error('高密度阵列专项只支持 Shelf');
+  const state = current;
+  const values = state.changed.values;
+  const reference = state.referenceMetrics.get('changed') ?? state.defaultMetrics;
+  const size = reference?.localBounds?.size ?? { x: 1, y: 1, z: 1 };
+  const shelfSpan = Math.max(1, size.x, size.y, size.z);
+  const step = Math.max(0.2, size.z) * 1.08;
+  const sourceTransform = transform(vector(0, 0, -copyCount * step / 2));
+  const sourceEntity = createEntity(SOURCE_ID, state.spec, values, sourceTransform, true);
+  const existingInstances = Array.from({ length: 10 }, (_, index) => createEntity(
+    `visual-dense-existing-${index + 1}`,
+    state.spec,
+    values,
+    transform(vector(0, 0, (index + 1 - copyCount / 2) * step)),
+    true,
+    SOURCE_ID,
+  ));
+
+  state.runtime.sync(createDocument([sourceEntity, ...existingInstances]));
+  const sourceDeadline = performance.now() + READY_TIMEOUT_MS;
+  while (performance.now() < sourceDeadline) {
+    state.scene.render();
+    const sourceModel = state.runtime.models.get(SOURCE_ID);
+    if (
+      sourceModel?.measurementReady
+      && sourceModel.externalScriptStarting === false
+      && (sourceModel.externalScriptRuntime?.instances?.length ?? 0) > 0
+      && state.runtime.resolveModelArrayBatchForEntityId(SOURCE_ID)?.getEntityIds?.().length === existingInstances.length + 1
+    ) break;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  const sourceModel = state.runtime.models.get(SOURCE_ID);
+  if (!sourceModel?.measurementReady || sourceModel.externalScriptStarting) {
+    throw new Error('Shelf 高密度源模型未就绪');
+  }
+  const denseSourceMeshes = sourceModel.meshes.filter((mesh: any) => mesh.metadata?.denseShelfBatch === true);
+  const denseSourceThinInstanceCount = denseSourceMeshes.reduce(
+    (total: number, mesh: any) => total + Number(mesh.thinInstanceCount || 0),
+    0,
+  );
+  const matrixSourceCount = sourceModel.meshes.reduce(
+    (total: number, mesh: any) => total + (Number(mesh.thinInstanceCount) > 0 ? Number(mesh.thinInstanceCount) : 1),
+    0,
+  );
+
+  const preview20 = state.runtime.updateEntityArrayPreview(SOURCE_ID, vector(0, 0, 1), copyCount - 1, step - size.z);
+  const previewAt20 = (state.runtime as any).entityArrayPreview?.matrixPreview;
+  const preview21 = state.runtime.updateEntityArrayPreview(SOURCE_ID, vector(0, 0, 1), copyCount, step - size.z);
+  const previewAt21 = (state.runtime as any).entityArrayPreview?.matrixPreview;
+  for (let index = 0; index < 8; index += 1) {
+    state.scene.render();
+    await new Promise((resolve) => setTimeout(resolve, 16));
+  }
+  const previewMatrixSourceCount = (previewAt21?.sources ?? []).reduce((total: number, source: any) => (
+    total + (source.sourceMeshes ?? []).reduce((sourceTotal: number, mesh: any) => (
+      sourceTotal + (Number(mesh.thinInstanceCount) > 0 ? Number(mesh.thinInstanceCount) : 1)
+    ), 0)
+  ), 0);
+  const previewThinInstanceCount = (previewAt21?.meshes ?? []).reduce(
+    (total: number, mesh: any) => total + Number(mesh.thinInstanceCount || 0),
+    0,
+  );
+  const previewRenderableMeshCount = (previewAt21?.meshes ?? []).filter((mesh: any) => (
+    !mesh.isDisposed?.()
+    && mesh.isEnabled?.(false) !== false
+    && mesh.isVisible !== false
+    && Number(mesh.visibility ?? 1) > 0
+    && Number(mesh.thinInstanceCount) > 0
+  )).length;
+  const previewContextLost = Boolean((state.engine as any)._gl?.isContextLost?.());
+  state.runtime.clearEntityArrayPreview();
+
+  const instances = Array.from({ length: copyCount }, (_, index) => createEntity(
+    `visual-dense-array-${index + 1}`,
+    state.spec,
+    values,
+    transform(vector(0, 0, (index + 1 - copyCount / 2) * step)),
+    true,
+    SOURCE_ID,
+  ));
+  state.runtime.sync(createDocument([sourceEntity, ...instances]));
+  const batchDeadline = performance.now() + READY_TIMEOUT_MS;
+  let batch: any = null;
+  while (performance.now() < batchDeadline) {
+    state.scene.render();
+    batch = state.runtime.resolveModelArrayBatchForEntityId(SOURCE_ID);
+    if (batch?.getEntityIds?.().length === copyCount + 1) break;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  if (!batch) throw new Error('Shelf 第 21 个正式阵列副本未创建批次');
+  for (const mesh of batch.meshes ?? []) {
+    if (!mesh.isDisposed()) mesh.layerMask = ARRAY_CAPTURE_LAYER;
+  }
+  state.camera.layerMask = ARRAY_CAPTURE_LAYER;
+  const fullSpan = Math.max(step * (copyCount + 1), size.x, size.y);
+  const diagonal = Math.max(0.2, Math.hypot(size.x, size.y, fullSpan));
+  const radius = Math.max(1, diagonal / Math.max(0.25, 2 * Math.tan(state.camera.fov / 2)) * 1.32);
+  const cameraPreset: CameraPreset = {
+    alpha: Math.PI * 0.72,
+    beta: Math.PI * 0.31,
+    radius,
+    target: { x: 0, y: size.y / 2, z: 0 },
+    minZ: Math.max(0.001, radius / 10_000),
+    maxZ: Math.max(1_000, radius * 30),
+  };
+  applyCameraPreset(state.camera, cameraPreset);
+  for (let index = 0; index < 12; index += 1) {
+    state.scene.render();
+    await new Promise((resolve) => setTimeout(resolve, 16));
+  }
+  const formalMatrixSourceCount = (batch.sources ?? []).reduce((total: number, source: any) => (
+    total + (source.sourceMeshes ?? []).reduce((sourceTotal: number, mesh: any) => (
+      sourceTotal + (Number(mesh.thinInstanceCount) > 0 ? Number(mesh.thinInstanceCount) : 1)
+    ), 0)
+  ), 0);
+  const completeThinInstanceCount = (batch.sources ?? []).reduce((total: number, source: any) => (
+    total + (source.batches ?? []).reduce((sourceTotal: number, entry: any) => (
+      sourceTotal + Number(entry.sourceEntityIndexBuffer?.length ?? 0)
+    ), 0)
+  ), 0);
+  const formalVisibleThinInstanceCount = (batch.meshes ?? []).reduce(
+    (total: number, mesh: any) => total + Number(mesh.thinInstanceCount || 0),
+    0,
+  );
+  const formalRenderableMeshCount = (batch.meshes ?? []).filter((mesh: any) => (
+    !mesh.isDisposed?.()
+    && mesh.isEnabled?.(false) !== false
+    && mesh.isVisible !== false
+    && Number(mesh.visibility ?? 1) > 0
+    && Number(mesh.thinInstanceCount) > 0
+  )).length;
+  const contextLost = Boolean((state.engine as any)._gl?.isContextLost?.());
+  const renderNear = async (targetZ: number): Promise<{ thinInstanceCount: number; renderableMeshCount: number; activeMeshCount: number }> => {
+    const nearRadius = Math.max(2, shelfSpan * 2.4);
+    applyCameraPreset(state.camera, {
+      alpha: Math.PI * 0.72,
+      beta: Math.PI * 0.36,
+      radius: nearRadius,
+      target: { x: 0, y: size.y / 2, z: targetZ },
+      minZ: Math.max(0.001, nearRadius / 10_000),
+      maxZ: Math.max(1_000, nearRadius * 50),
+    });
+    for (let index = 0; index < 8; index += 1) {
+      state.scene.render();
+      await new Promise((resolve) => setTimeout(resolve, 16));
+    }
+    const renderableMeshes = (batch.meshes ?? []).filter((mesh: any) => (
+      !mesh.isDisposed?.()
+      && mesh.isEnabled?.(false) !== false
+      && mesh.isVisible !== false
+      && Number(mesh.visibility ?? 1) > 0
+      && Number(mesh.thinInstanceCount) > 0
+    ));
+    return {
+      thinInstanceCount: renderableMeshes.reduce((total: number, mesh: any) => total + Number(mesh.thinInstanceCount || 0), 0),
+      renderableMeshCount: renderableMeshes.length,
+      activeMeshCount: state.scene.getActiveMeshes().length,
+    };
+  };
+  const nearSource = await renderNear(-copyCount * step / 2);
+  const nearMiddle = await renderNear(0);
+  const nearLast = await renderNear(copyCount * step / 2);
+  applyCameraPreset(state.camera, cameraPreset);
+  for (let index = 0; index < 4; index += 1) {
+    state.scene.render();
+    await new Promise((resolve) => setTimeout(resolve, 16));
+  }
+  const result = {
+    copyCount,
+    logicalEntityCount: batch.getEntityIds?.().length ?? 0,
+    denseSourceMeshCount: denseSourceMeshes.length,
+    denseSourceThinInstanceCount,
+    matrixSourceCount,
+    preview20,
+    preview21,
+    previewBatchReused: previewAt20 === previewAt21,
+    previewMatrixSourceCount,
+    previewThinInstanceCount,
+    previewRenderableMeshCount,
+    previewContextLost,
+    formalMatrixSourceCount,
+    completeThinInstanceCount,
+    formalVisibleThinInstanceCount,
+    formalRenderableMeshCount,
+    formalBatchMeshCount: batch.meshes?.length ?? 0,
+    contextLost,
+    nearSource,
+    nearMiddle,
+    nearLast,
+    cameraPreset,
+    logs: [...state.logs],
+  };
+  setStatus(result);
+  return result;
+}
+
 async function verifyRestore(): Promise<any> {
   if (!current) throw new Error('可视化 harness 尚未初始化');
   current.runtime.sync(createDocument([
@@ -822,6 +1346,7 @@ async function renderContactSheet(payload: any): Promise<void> {
       ['parameter', 'parameter'],
       ['array', 'array'],
       ['parameterAfterArray', 'param-array'],
+      ['sourceParameterTransition', 'source-param'],
       ['restore', 'restore'],
     ]) {
       const span = document.createElement('span');
@@ -903,13 +1428,14 @@ async function renderContactSheet(payload: any): Promise<void> {
 
     const statusY = imageY + imageHeight + 9;
     const statusGap = 4;
-    const statusWidth = (innerWidth - statusGap * 4) / 5;
+    const statusWidth = (innerWidth - statusGap * 5) / 6;
     const statusHeight = 25;
     const lifecycleEntries = [
       ['direct', 'direct'],
       ['parameter', 'parameter'],
       ['array', 'array'],
       ['parameterAfterArray', 'param-array'],
+      ['sourceParameterTransition', 'source-param'],
       ['restore', 'restore'],
     ];
     lifecycleEntries.forEach(([key, label], statusIndex) => {
@@ -945,6 +1471,8 @@ async function renderContactSheet(payload: any): Promise<void> {
   ready: true,
   initialize,
   prepareCapture,
+  verifySourceParameterTransition,
+  verifyDenseShelfArrayCount,
   verifyRestore,
   dispose: disposeCurrent,
   renderContactSheet,
