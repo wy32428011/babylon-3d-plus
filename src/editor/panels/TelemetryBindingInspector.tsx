@@ -1,6 +1,12 @@
 import { useSyncExternalStore } from 'react';
-import type { TelemetryBindingComponent, TelemetryMotionChannel, TelemetryTargetKind } from '../model/telemetryBinding';
-import { normalizeTelemetryBindingComponent, normalizeTelemetryMotionChannel } from '../model/telemetryBinding';
+import type { ModelDataDrivenConfig, TelemetryBindingComponent, TelemetryMotionChannel, TelemetryTargetKind } from '../model/telemetryBinding';
+import {
+  createDefaultTelemetryBinding,
+  isSpecializedTelemetryDeviceType,
+  normalizeTelemetryBindingComponent,
+  normalizeTelemetryDeviceType,
+  normalizeTelemetryMotionChannel,
+} from '../model/telemetryBinding';
 import { deviceTelemetryStore } from '../../runtime/mqtt/deviceTelemetry';
 import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticSnapshot } from '../../runtime/mqtt/telemetryRuntimeDiagnostics';
 import { useEditorStore } from '../store/editorStore';
@@ -8,7 +14,7 @@ import { useEditorStore } from '../store/editorStore';
 type Props = {
   entityId: string;
   binding: TelemetryBindingComponent | undefined;
-  defaultChannels: Record<string, TelemetryMotionChannel>;
+  dataDrivenConfig: ModelDataDrivenConfig | null;
   disabled: boolean;
   modelAssetCode: string;
   onChange: (binding: TelemetryBindingComponent | null) => void;
@@ -28,6 +34,98 @@ function cloneBinding(binding: TelemetryBindingComponent): TelemetryBindingCompo
 /** 生成可编辑通道列表，默认通道和实例覆盖通道都会展示。 */
 function collectChannels(binding: TelemetryBindingComponent | undefined, defaultChannels: Record<string, TelemetryMotionChannel>) {
   return Object.entries({ ...defaultChannels, ...(binding?.channelOverrides ?? {}) });
+}
+
+/** 摘要渲染用的宽松对象守卫，不要求原型纯净。 */
+function isPlainObjectLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 把单条 specialized motion 配置压成一行只读摘要：数值平铺，短数组列内容，长数组只报数量。 */
+function formatSpecializedMotionEntry(config: unknown): string {
+  if (!isPlainObjectLike(config)) return '—';
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(config)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      parts.push(`${key} ${value}`);
+    } else if (Array.isArray(value)) {
+      const items = value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+      if (items.length === 0) continue;
+      parts.push(items.length <= 4 ? `${key} [${items.join(', ')}]` : `${key} ${items.length} 项`);
+    } else if (isPlainObjectLike(value) && ('min' in value || 'max' in value)) {
+      parts.push(`${key} ${String(value.min ?? '-∞')}~${String(value.max ?? '+∞')}`);
+    }
+  }
+  return parts.length > 0 ? parts.join(' · ') : '—';
+}
+
+/** specialized 模型的 dataDriven 只读摘要：配置真源在模型包 .model.ts，Inspector 不提供编辑。 */
+function SpecializedMotionSummary(props: { config: ModelDataDrivenConfig | null }) {
+  const motion = props.config?.specializedMotion ?? {};
+  const device = props.config?.device;
+  const deviceParts: string[] = [];
+  if (typeof device?.calibrationRate === 'number') deviceParts.push(`calibrationRate ${device.calibrationRate}`);
+  if (typeof device?.rpmToMetersPerSecond === 'number') deviceParts.push(`rpmToMetersPerSecond ${device.rpmToMetersPerSecond}`);
+  const motionEntries = Object.entries(motion);
+
+  return (
+    <div className="telemetry-specialized-summary">
+      <p className="muted">
+        专用 {device?.devType ?? ''} 驱动接管：通道映射由模型包 dataDriven 声明，此处只读；修改请编辑模型包 .model.ts。
+      </p>
+      {motionEntries.map(([key, value]) => (
+        <p className="muted" key={key}>{key}：{formatSpecializedMotionEntry(value)}</p>
+      ))}
+      {deviceParts.length > 0 ? <p className="muted">device：{deviceParts.join(' · ')}</p> : null}
+    </div>
+  );
+}
+
+/** 货箱生成器绑定：独立于遥测绑定入口，所有模型都可选择货箱模板来源。 */
+export function CargoGeneratorInspector(props: {
+  binding: TelemetryBindingComponent | undefined;
+  modelDevType: string | undefined;
+  disabled: boolean;
+  onChange: (binding: TelemetryBindingComponent | null) => void;
+}) {
+  const scene = useEditorStore((state) => state.scene);
+  const generatorOptions = scene.entityIds
+    .map((entityId) => scene.entities[entityId])
+    .filter((entity) => entity?.components.modelGenerator)
+    .map((entity) => ({ id: entity!.id, name: entity!.name }));
+  const cargoGeneratorMissing = Boolean(
+    props.binding?.cargoGeneratorId && !generatorOptions.some((option) => option.id === props.binding?.cargoGeneratorId),
+  );
+
+  /** 无遥测绑定的模型直接创建默认绑定再写入 cargoGeneratorId。 */
+  function handleGeneratorChange(generatorId: string | undefined): void {
+    const merged = cloneBinding(props.binding ?? createDefaultTelemetryBinding(props.modelDevType ?? 'device'));
+    if (generatorId) merged.cargoGeneratorId = generatorId;
+    else delete merged.cargoGeneratorId;
+    const next = normalizeTelemetryBindingComponent(merged);
+    if (next) props.onChange(next);
+  }
+
+  return (
+    <fieldset className="transform-fieldset">
+      <legend>货箱生成器</legend>
+      <label className="inspector-row">
+        <span>模板来源</span>
+        <select
+          disabled={props.disabled}
+          value={props.binding?.cargoGeneratorId || '__none__'}
+          onChange={(event) => handleGeneratorChange(event.target.value !== '__none__' ? event.target.value : undefined)}
+        >
+          <option value="__none__">未绑定（内置立方体）</option>
+          {generatorOptions.map((option) => (
+            <option key={option.id} value={option.id}>{option.name}</option>
+          ))}
+        </select>
+      </label>
+      {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退内置立方体。</p> : null}
+      <p className="muted">堆垛机/输送线取放货时按所选模型生成器渲染货箱。</p>
+    </fieldset>
+  );
 }
 
 /** 从字段文本生成安全通道补丁。 */
@@ -133,7 +231,6 @@ function TelemetryTargetSelector(props: {
 
 /** 独立数据驱动 Inspector，负责编辑实体级 telemetryBinding 覆盖。 */
 export function TelemetryBindingInspector(props: Props) {
-  const scene = useEditorStore((state) => state.scene);
   const binding = props.binding;
   if (!binding) {
     return (
@@ -147,6 +244,9 @@ export function TelemetryBindingInspector(props: Props) {
   }
 
   const activeBinding = binding;
+  // specialized 模型的通道映射由专用驱动按模型包 dataDriven 接管，generic 通道编辑器对其无效
+  const specialized = isSpecializedTelemetryDeviceType(normalizeTelemetryDeviceType(props.dataDrivenConfig?.device.devType));
+  const defaultChannels = props.dataDrivenConfig?.motion ?? {};
 
   /** 提交绑定补丁前统一归一化。 */
   function commit(patch: Partial<TelemetryBindingComponent>): void {
@@ -162,14 +262,6 @@ export function TelemetryBindingInspector(props: Props) {
     if (next) props.onChange(next);
   }
 
-  const generatorOptions = scene.entityIds
-    .map((entityId) => scene.entities[entityId])
-    .filter((entity) => entity?.components.modelGenerator)
-    .map((entity) => ({ id: entity.id, name: entity.name }));
-  const cargoGeneratorMissing = Boolean(
-    activeBinding.cargoGeneratorId && !generatorOptions.some((option) => option.id === activeBinding.cargoGeneratorId),
-  );
-
   return (
     <fieldset className="transform-fieldset telemetry-binding-inspector">
       <legend>数据驱动</legend>
@@ -180,25 +272,13 @@ export function TelemetryBindingInspector(props: Props) {
       <label className="inspector-row"><span>sourceId</span><input disabled={props.disabled} value={binding.sourceId} onChange={(event) => commit({ sourceId: event.target.value })} /></label>
       <label className="inspector-row"><span>deviceType</span><input disabled={props.disabled} value={binding.deviceType} onChange={(event) => commit({ deviceType: event.target.value })} /></label>
       <label className="inspector-row"><span>assetCode 覆盖</span><input disabled={props.disabled} value={binding.assetCode ?? ''} onChange={(event) => commit({ assetCode: event.target.value || undefined })} /></label>
-      <label className="inspector-row">
-        <span>货箱生成器</span>
-        <select
-          disabled={props.disabled}
-          value={activeBinding.cargoGeneratorId || '__none__'}
-          onChange={(event) => commit({ cargoGeneratorId: event.target.value !== '__none__' ? event.target.value : undefined })}
-        >
-          <option value="__none__">未绑定（内置立方体）</option>
-          {generatorOptions.map((option) => (
-            <option key={option.id} value={option.id}>{option.name}</option>
-          ))}
-        </select>
-      </label>
-      {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退内置立方体。</p> : null}
       <label className="number-row"><span>expected(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.expectedIntervalMs} onChange={(event) => commit({ expectedIntervalMs: Number(event.target.value) })} /></label>
       <label className="number-row"><span>stale(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.staleAfterMs} onChange={(event) => commit({ staleAfterMs: Number(event.target.value) })} /></label>
       <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>
       <TelemetryRuntimeDiagnosticsView entityId={props.entityId} binding={binding} modelAssetCode={props.modelAssetCode} />
-      {collectChannels(binding, props.defaultChannels).map(([channelId, channel]) => (
+      {specialized ? (
+        <SpecializedMotionSummary config={props.dataDrivenConfig} />
+      ) : collectChannels(binding, defaultChannels).map(([channelId, channel]) => (
         <div className="telemetry-channel-editor" key={channelId}>
           <strong>{channelId}{binding.channelOverrides[channelId] ? '（覆盖）' : '（默认）'}</strong>
           <label className="inspector-row"><span>fields</span><input disabled={props.disabled} value={channel.fields.join(',')} onChange={(event) => props.onChange(updateChannel(binding, channelId, { fields: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) }))} /></label>

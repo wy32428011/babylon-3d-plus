@@ -34,10 +34,27 @@ export type TelemetryMotionChannel = {
 };
 
 export type ModelDataDrivenConfig = {
-  device: { device?: string; devType?: string; defaultAssetCode?: string; interpolationMs: number };
+  device: {
+    device?: string;
+    devType?: string;
+    defaultAssetCode?: string;
+    interpolationMs: number;
+    calibrationRate?: number;
+    rpmToMetersPerSecond?: number;
+  };
   motion: Record<string, TelemetryMotionChannel>;
+  /** specialized 模型的 motion 原文透传，仅作 Inspector 只读摘要数据源；generic 模型为 undefined。 */
+  specializedMotion?: Record<string, unknown>;
   fixedNodes: string[];
 };
+
+/** 专用驱动接管的设备类型；这些模型的通道映射不走 generic 编译。 */
+export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor'];
+
+/** 判断归一化后的 devType 是否由 specialized 驱动接管。 */
+export function isSpecializedTelemetryDeviceType(devType: string | undefined): boolean {
+  return devType !== undefined && SPECIALIZED_TELEMETRY_DEVICE_TYPES.includes(devType);
+}
 
 export type TelemetryBindingComponent = {
   enabled: boolean;
@@ -239,17 +256,25 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
   const devType = normalizeTelemetryDeviceType(device.devType);
   const defaultAssetCode = normalizeOptionalString(device.defaultAssetCode);
   const interpolationMs = normalizePositiveInteger(device.interpolationMs, DEFAULT_TELEMETRY_INTERPOLATION_MS, 1, 60000);
+  const calibrationRate = device.calibrationRate === undefined ? undefined : normalizeFiniteNumber(device.calibrationRate, 4, 0.01, 10000);
+  const rpmToMetersPerSecond = device.rpmToMetersPerSecond === undefined ? undefined : normalizeFiniteNumber(device.rpmToMetersPerSecond, 0.01, 0, 1000);
   const motion = normalizeMotionRecord(value.motion);
+  const specializedMotion = isSpecializedTelemetryDeviceType(devType) && isPlainObject(value.motion)
+    ? JSON.parse(JSON.stringify(value.motion)) as Record<string, unknown>
+    : undefined;
   const fixedNodes = normalizeStringArray(value.fixedNodes);
-  if (!deviceName && !devType && !defaultAssetCode && Object.keys(motion).length === 0 && fixedNodes.length === 0) return null;
+  if (!deviceName && !devType && !defaultAssetCode && Object.keys(motion).length === 0 && !specializedMotion && fixedNodes.length === 0) return null;
   return {
     device: {
       ...(deviceName ? { device: deviceName } : {}),
       ...(devType ? { devType } : {}),
       ...(defaultAssetCode ? { defaultAssetCode } : {}),
       interpolationMs,
+      ...(calibrationRate !== undefined ? { calibrationRate } : {}),
+      ...(rpmToMetersPerSecond !== undefined ? { rpmToMetersPerSecond } : {}),
     },
     motion,
+    ...(specializedMotion ? { specializedMotion } : {}),
     fixedNodes,
   };
 }

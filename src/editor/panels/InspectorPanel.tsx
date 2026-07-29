@@ -10,7 +10,7 @@ import { ModelGeneratorInspector } from './ModelGeneratorInspector';
 import { LocatorInspector } from './LocatorInspector';
 import { PoiEffectInspector } from './PoiEffectInspector';
 import { ModelParametersInspector } from './ModelParametersInspector';
-import { TelemetryBindingInspector } from './TelemetryBindingInspector';
+import { TelemetryBindingInspector, CargoGeneratorInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
 
 type TransformField = 'position' | 'rotation' | 'scale';
@@ -333,11 +333,17 @@ export function InspectorPanel(props: InspectorPanelProps) {
           <TelemetryBindingInspector
             entityId={selectedEntity.id}
             binding={selectedEntity.components.telemetryBinding}
-            defaultChannels={modelAsset.dataDrivenConfig?.motion ?? {}}
+            dataDrivenConfig={modelAsset.dataDrivenConfig ?? null}
             disabled={isLocked}
             modelAssetCode={modelAsset.assetCode}
             onChange={updateSelectedTelemetryBinding}
             onRestoreDefault={restoreSelectedTelemetryBindingDefault}
+          />
+          <CargoGeneratorInspector
+            binding={selectedEntity.components.telemetryBinding}
+            modelDevType={modelAsset.dataDrivenConfig?.device.devType}
+            disabled={isLocked}
+            onChange={updateSelectedTelemetryBinding}
           />
           <ModelParametersInspector modelAsset={modelAsset} disabled={isLocked} compact={isCompactModelInspector} />
         </>
