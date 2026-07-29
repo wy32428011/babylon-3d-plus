@@ -158,6 +158,9 @@ try {
   const { EntityArrayThinInstanceBatch } = await server.ssrLoadModule(
     '/src/runtime/babylon/EntityArrayThinInstanceBatch.ts',
   );
+  const { createConveyorTelemetryState, createStackerTelemetryState } = await server.ssrLoadModule(
+    '/src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts',
+  );
   const { TransformGizmoController } = await server.ssrLoadModule(
     '/src/runtime/babylon/TransformGizmoController.ts',
   );
@@ -226,7 +229,6 @@ try {
     modelArraySourceSignature: '',
     modelArrayFailureSignature: '',
     highlighted: false,
-    highlightedMeshes: new Set(),
     measurementReady: true,
   });
 
@@ -479,6 +481,57 @@ try {
   );
   assert.equal(partitionReleaseBatch.batches[0].mesh.thinInstanceCount, 1, '主载体必须只保留当前一个实例');
   assert.equal(partitionReleaseBatch.batches[0].sourceMatrixBuffer.length, 16, '主载体完整矩阵缓冲必须收缩到当前容量');
+  // 分片资源准备在负方向中途失败时，不得先改写已经显示的正方向矩阵或遗留空载体。
+  const stablePartitionBatch = partitionReleaseBatch.batches[0];
+  const stablePartitionSourceMatrices = [...stablePartitionBatch.sourceMatrixBuffer];
+  const stablePartitionRenderMatrices = [...stablePartitionBatch.matrixBuffer];
+  const stablePartitionEntityIds = [...partitionReleaseBatch.getEntityIds()];
+  const mixedPartitionTransforms = [
+    ...peakPartitionTransforms,
+    ...Array.from({ length: 600 }, (_, index) => ({
+      entityId: `partition-release-negative-${index}`,
+      transform: {
+        position: { x: index + 1_000, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: -1, y: 1, z: 1 },
+      },
+      pickable: true,
+    })),
+  ];
+  const originalEnsureOrientationPartitionBatch = partitionReleaseBatch.ensureOrientationPartitionBatch.bind(
+    partitionReleaseBatch,
+  );
+  partitionReleaseBatch.ensureOrientationPartitionBatch = (source, orientation, partitionIndex) => (
+    orientation < 0 && partitionIndex === 1
+      ? null
+      : originalEnsureOrientationPartitionBatch(source, orientation, partitionIndex)
+  );
+  try {
+    assert.equal(
+      partitionReleaseBatch.updateEntityTransforms(Matrix.Identity(), mixedPartitionTransforms),
+      false,
+      '任一方向分片资源准备失败时必须原子拒绝整次更新',
+    );
+  } finally {
+    partitionReleaseBatch.ensureOrientationPartitionBatch = originalEnsureOrientationPartitionBatch;
+  }
+  assert.deepEqual(
+    [...partitionReleaseBatch.getEntityIds()],
+    stablePartitionEntityIds,
+    '失败更新不得提前替换逻辑实体映射',
+  );
+  assert.equal(partitionReleaseBatch.batches.length, 1, '失败更新不得遗留本次预创建的空方向或空间分片');
+  assert.equal(countActiveThinInstances(partitionReleaseBatch.batches), 1, '失败更新必须继续显示上一份唯一实例');
+  assert.deepEqual(
+    [...stablePartitionBatch.sourceMatrixBuffer],
+    stablePartitionSourceMatrices,
+    '失败更新不得改写完整分片源矩阵',
+  );
+  assert.deepEqual(
+    [...stablePartitionBatch.matrixBuffer],
+    stablePartitionRenderMatrices,
+    '失败更新不得改写当前 GPU 矩阵前缀',
+  );
   partitionReleaseBatch.dispose();
   partitionSource.dispose(false, false);
 
@@ -636,6 +689,7 @@ try {
     scriptAssets: [sceneScanningScriptAsset],
   };
   const sceneScanningScriptSignature = JSON.stringify({
+    assetRevision: sceneScanningModelAsset.assetRevision ?? null,
     scripts: [sceneScanningScriptAsset],
     parameterScripts: [],
     animationScripts: [],
@@ -676,6 +730,12 @@ try {
   assert.equal(root.isEnabled(), false, '异步 start settled 后必须重新禁用脚本宿主根节点');
   sourceModelEntry.externalScriptRuntime = null;
   sourceModelEntry.externalScriptSignature = '';
+  assert.equal(
+    runtime.updateModelExternalScriptRuntimeContext(sourceModelEntry, 'runtime', null, true),
+    false,
+    '没有外置脚本运行时时不得恢复阵列宿主或触发空批次刷新',
+  );
+  assert.equal(scene.meshes.includes(sourceMesh), false, '空数据驱动刷新不得把暂停宿主重新加入 scene.meshes');
   assert.ok(formalBatchMeshes.every((mesh) => mesh.geometry !== sourceGeometry), '正式阵列必须使用独立 Geometry 承载 thinInstance 缓冲');
   assert.ok(
     formalBatchMeshes.every((mesh) => mesh.getTotalVertices() === sourceMesh.getTotalVertices()),
@@ -718,6 +778,62 @@ try {
     '正式阵列原模型的 Gizmo 代理必须跨完整文档同步保持稳定',
   );
   assert.equal(sourceGizmoTargetBeforeSync.isDisposed(), false, '完整文档同步不得销毁正在拖动的原模型代理');
+
+  // 单个阵列副本首次修改独立参数时，新参数宿主尚未就绪；该副本继续由基础批次显示。
+  const changedFirstArrayInstance = {
+    ...formalArrayInstances[0],
+    components: {
+      ...formalArrayInstances[0].components,
+      modelAsset: {
+        ...formalArrayInstances[0].components.modelAsset,
+        parameterValues: { width: 2 },
+      },
+    },
+  };
+  const originalFirstArrayInstance = formalArrayInstances[0];
+  const originalSyncModelArrayParameterVariant = runtime.syncModelArrayParameterVariant.bind(runtime);
+  runtime.syncModelArrayParameterVariant = (sourceEntity, key, renderSignature, entities) => ({
+    key,
+    sourceEntityId: sourceEntity.id,
+    renderSignature,
+    representativeEntityId: entities[0]?.id ?? '',
+    entities,
+    sourceLayerMasks: new Map(),
+    model: { assetHandle: null, modelArrayBatch: null },
+  });
+  formalArrayInstances[0] = changedFirstArrayInstance;
+  runtime.modelArrayInstanceEntities.set(changedFirstArrayInstance.id, changedFirstArrayInstance);
+  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  assert.equal(sourceModelEntry.modelArrayBatch, formalBatch, '独立副本参数变化期间必须复用上一份基础批次');
+  assert.equal(countActiveThinInstances(formalBatch.batches), 1001, '独立副本参数宿主等待期间不得缺少任何模型');
+  formalArrayInstances[0] = originalFirstArrayInstance;
+  runtime.modelArrayInstanceEntities.set(originalFirstArrayInstance.id, originalFirstArrayInstance);
+  runtime.modelArrayParameterVariantByEntityId.clear();
+
+  // 源模型参数首次与阵列副本分组时，新参数宿主尚未就绪；旧批次必须继续完整显示。
+  const changedFormalArrayEntity = {
+    ...formalArrayEntity,
+    components: {
+      ...formalArrayEntity.components,
+      modelAsset: {
+        ...formalArrayEntity.components.modelAsset,
+        parameterValues: { width: 2 },
+      },
+    },
+  };
+  runtime.syncModelArrayBatch(changedFormalArrayEntity, sourceModelEntry);
+  assert.equal(
+    sourceModelEntry.modelArrayBatch,
+    formalBatch,
+    '源模型参数变化且副本的新参数宿主未就绪时必须保留上一份正式批次',
+  );
+  assert.equal(
+    countActiveThinInstances(formalBatch.batches),
+    1001,
+    '等待独立参数宿主期间源模型和全部阵列副本都不得消失',
+  );
+  runtime.syncModelArrayParameterVariant = originalSyncModelArrayParameterVariant;
+  runtime.modelArrayParameterVariantByEntityId.clear();
 
   const formalSourceBuffers = new Map(
     formalBatch.batches
@@ -811,7 +927,7 @@ try {
   runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
 
   runtime.selectedEntityIds = new Set([formalArrayInstances[5].id]);
-  runtime.rebuildSharedModelSelectionOutline();
+  runtime.rebuildModelSelectionOutline();
   const selectedFormalInstance = findFormalBatchEntity(runtime, formalBatch, formalArrayInstances[5].id);
   assert.ok(selectedFormalInstance, '选中的逻辑实例必须能跨空间分片定位');
   assert.equal(countSelectedThinInstances(formalBatch.batches), 1, '独立选中只能跨全部分片标记一个 thinInstance');
@@ -849,7 +965,7 @@ try {
     '负方向批次的局部 thinInstance determinant 必须保持为正',
   );
   runtime.selectedEntityIds = new Set([mirroredFormalInstance.id]);
-  runtime.rebuildSharedModelSelectionOutline();
+  runtime.rebuildModelSelectionOutline();
   assert.ok(
     mirroredBatchEntity.internalBatch.selectionBuffer?.[mirroredBatchEntity.thinInstanceIndex] > 0,
     '负方向逻辑模型必须可独立描边',
@@ -884,17 +1000,48 @@ try {
     '恢复正缩放后源实体和全部逻辑实例必须重新合并到正方向空间分片',
   );
   assert.ok(findFormalBatchEntity(runtime, formalBatch, restoredFormalInstance.id), '方向批次合并后拾取映射必须恢复');
-  // 批次拥有隔离 Geometry 后，参数脚本改写顶点时必须按新的渲染签名重建并复制最新数据。
+  // 新脚本结果暂时没有有效 Mesh 时必须继续显示上一份有效批次。
+  const stableBatchBeforeEmptyOutput = sourceModelEntry.modelArrayBatch;
+  sourceModelEntry.meshes = [];
+  runtime.syncModelArrayBatchForEntities(formalArrayEntity, sourceModelEntry, [formalArrayEntity, ...formalArrayInstances], [], {
+    sourceEntityId: SOURCE_ENTITY_ID,
+    namePrefix: '__modelArrayThinInstance',
+    renderSignature: 'temporary-empty-output',
+  });
+  assert.equal(
+    sourceModelEntry.modelArrayBatch,
+    stableBatchBeforeEmptyOutput,
+    '参数脚本暂时没有有效 Mesh 时必须保留上一份有效批次',
+  );
+  assert.ok(
+    stableBatchBeforeEmptyOutput.meshes.every((mesh) => !mesh.isDisposed()),
+    '失败回退期间上一份 Geometry 不得提前释放',
+  );
+  sourceModelEntry.meshes = [sourceMesh];
+
+  // 批次拥有隔离 Geometry 后，参数脚本改写顶点时必须按新的渲染签名原子重建并复制最新数据。
   const originalSourcePositions = sourceMesh.getVerticesData('position');
   const updatedSourcePositions = originalSourcePositions.map((value, index) => (
     index % 3 === 0 ? value * 1.25 : value
   ));
   sourceMesh.setVerticesData('position', updatedSourcePositions, true);
+  const createBatchBeforeAtomicSwap = EntityArrayThinInstanceBatch.create;
+  let previousBatchAliveDuringReplacement = false;
+  EntityArrayThinInstanceBatch.create = (...args) => {
+    previousBatchAliveDuringReplacement = stableBatchBeforeEmptyOutput.meshes.every((mesh) => !mesh.isDisposed());
+    return createBatchBeforeAtomicSwap(...args);
+  };
   runtime.syncModelArrayBatchForEntities(formalArrayEntity, sourceModelEntry, [formalArrayEntity, ...formalArrayInstances], [], {
     sourceEntityId: SOURCE_ENTITY_ID,
     namePrefix: '__modelArrayThinInstance',
     renderSignature: 'geometry-update-2',
   });
+  EntityArrayThinInstanceBatch.create = createBatchBeforeAtomicSwap;
+  assert.equal(
+    previousBatchAliveDuringReplacement,
+    true,
+    '新批次创建并写入成功前不得释放上一份正式批次',
+  );
   const rebuiltFormalBatch = sourceModelEntry.modelArrayBatch;
   assert.ok(rebuiltFormalBatch && rebuiltFormalBatch !== formalBatch, '参数脚本顶点变化必须重建隔离 Geometry 批次');
   assert.ok(formalBatch.meshes.every((mesh) => mesh.isDisposed()), '重建参数批次必须释放旧 Geometry 和全部方向批次');

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { createServer } from 'vite';
 
 const SSR_MODULE_LOAD_TIMEOUT_MS = 180_000;
-const PASTE_OFFSET_METERS = 0.35;
 
 /** 在限定时间内加载模块，避免 Vite SSR 异常时 smoke 无限等待。 */
 async function loadModule(server, modulePath) {
@@ -21,11 +20,9 @@ async function loadModule(server, modulePath) {
   }
 }
 
-/** 比较复制后的米制位置偏移。 */
-function assertPositionOffset(actual, source, message) {
-  assert.ok(Math.abs(actual.x - source.x - PASTE_OFFSET_METERS) <= 1e-9, `${message} X 偏移错误`);
-  assert.ok(Math.abs(actual.y - source.y) <= 1e-9, `${message} Y 不应偏移`);
-  assert.ok(Math.abs(actual.z - source.z - PASTE_OFFSET_METERS) <= 1e-9, `${message} Z 偏移错误`);
+/** 比较复制前后的位置，粘贴副本必须与源对象原地重叠。 */
+function assertPositionUnchanged(actual, source, message) {
+  assert.deepEqual(actual, source, `${message} 粘贴后位置必须保持不变`);
 }
 
 let server;
@@ -144,12 +141,12 @@ try {
   const duplicatedMesh = duplicatedChildren.find((entity) => entity.components.meshRenderer);
   assert.ok(duplicatedModel, '导入模型必须随文件夹复制');
   assert.ok(duplicatedMesh, '内置 Mesh 必须随文件夹复制');
-  assertPositionOffset(
+  assertPositionUnchanged(
     duplicatedModel.components.transform.position,
     sourceModel.components.transform.position,
     '导入模型',
   );
-  assertPositionOffset(
+  assertPositionUnchanged(
     duplicatedMesh.components.transform.position,
     sourceMesh.components.transform.position,
     '内置 Mesh',
@@ -246,7 +243,7 @@ try {
   assert.equal(pastedEntity.isFolder, undefined, '普通实体粘贴不得创建额外文件夹');
   assert.equal(pastedEntity.parentId, targetFolder.id, '普通实体必须继续粘贴到当前文件夹');
   assert.deepEqual(state.scene.entities[targetFolder.id].childrenIds, [pastedEntityId]);
-  assertPositionOffset(pastedEntity.components.transform.position, looseModel.components.transform.position, '普通实体');
+  assertPositionUnchanged(pastedEntity.components.transform.position, looseModel.components.transform.position, '普通实体');
 
   // 任意深度文件夹复制到目标文件夹：保留空目录、阵列引用与完整父子关系。
   const nestedRoot = createFolderEntity('一级目录');
@@ -302,8 +299,8 @@ try {
     pastedNestedSource.id,
     '跨子树复制后阵列实例必须引用新源实体',
   );
-  assertPositionOffset(pastedNestedSource.components.transform.position, nestedSourceModel.components.transform.position, '嵌套源模型');
-  assertPositionOffset(pastedNestedInstance.components.transform.position, nestedArrayInstance.components.transform.position, '嵌套阵列实例');
+  assertPositionUnchanged(pastedNestedSource.components.transform.position, nestedSourceModel.components.transform.position, '嵌套源模型');
+  assertPositionUnchanged(pastedNestedInstance.components.transform.position, nestedArrayInstance.components.transform.position, '嵌套阵列实例');
 
   const restoredNestedScene = deserializeScene(serializeScene(state.scene));
   assert.equal(restoredNestedScene.entities[pastedNestedRootId].parentId, nestedTarget.id, '多级文件夹必须可保存并重新加载');

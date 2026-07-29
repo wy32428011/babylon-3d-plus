@@ -115,6 +115,11 @@ type CapturedEntityArrayMatrix = {
   orientation: EntityArrayMatrixOrientation;
 };
 
+type PreparedEntityArraySpatialPartitions = {
+  sourceInstanceIndexesByPartition: number[][] | null;
+  batches: EntityArrayMatrixBatch[];
+};
+
 type EntityArrayTranslationPreviewBatch = {
   batch: EntityArrayMatrixBatch;
   sourceInstanceIndexes: Uint32Array;
@@ -457,42 +462,69 @@ export class EntityArrayThinInstanceBatch {
       });
     }
 
+    const batchPreparationSnapshots = new Map(this.batches.map((batch) => [batch, {
+      orientation: batch.orientation,
+      partitionIndex: batch.partitionIndex,
+    }]));
     for (const plan of plans) {
       const batchByOrientation = this.prepareOrientationBatches(
         plan.source,
         plan.positiveCount,
         plan.negativeCount,
       );
-      if (!batchByOrientation) return false;
+      if (!batchByOrientation) {
+        this.rollbackPreparedBatches(batchPreparationSnapshots);
+        return false;
+      }
       plan.batchByOrientation = batchByOrientation;
     }
 
     const hasPickableEntity = instances.some((instance) => instance.pickable);
     const scratchWorldMatrix = new Matrix();
+    const preparedPlans: Array<{
+      plan: (typeof plans)[number];
+      positiveBatch: EntityArrayMatrixBatch | undefined;
+      negativeBatch: EntityArrayMatrixBatch | undefined;
+      positiveBuffer: Float32Array | null;
+      negativeBuffer: Float32Array | null;
+      positiveEntityIndexes: Uint32Array | null;
+      negativeEntityIndexes: Uint32Array | null;
+      positiveEntityRangeStarts: Int32Array | null;
+      positiveEntityRangeCounts: Uint32Array | null;
+      negativeEntityRangeStarts: Int32Array | null;
+      negativeEntityRangeCounts: Uint32Array | null;
+      positiveSpatialPartitions: PreparedEntityArraySpatialPartitions | null;
+      negativeSpatialPartitions: PreparedEntityArraySpatialPartitions | null;
+    }> = [];
+
     for (const plan of plans) {
       const positiveBatch = plan.batchByOrientation[1];
       const negativeBatch = plan.batchByOrientation[-1];
       const positiveBuffer = positiveBatch
-        ? acquireFloatBuffer(
-          this.interactive ? plan.source.matrixScratchByOrientation[1] ?? null : positiveBatch.matrixBuffer,
+        ? acquireDetachedFloatBuffer(
+          plan.source.matrixScratchByOrientation[1] ?? null,
+          plan.source.batches,
           plan.positiveCount * 16,
         )
         : null;
       const negativeBuffer = negativeBatch
-        ? acquireFloatBuffer(
-          this.interactive ? plan.source.matrixScratchByOrientation[-1] ?? null : negativeBatch.matrixBuffer,
+        ? acquireDetachedFloatBuffer(
+          plan.source.matrixScratchByOrientation[-1] ?? null,
+          plan.source.batches,
           plan.negativeCount * 16,
         )
         : null;
       const positiveEntityIndexes = positiveBatch
-        ? acquireEntityIndexBuffer(
-          this.interactive ? plan.source.entityIndexScratchByOrientation[1] ?? null : positiveBatch.entityIndexBuffer,
+        ? acquireDetachedEntityIndexBuffer(
+          plan.source.entityIndexScratchByOrientation[1] ?? null,
+          plan.source.batches,
           plan.positiveCount,
         )
         : null;
       const negativeEntityIndexes = negativeBatch
-        ? acquireEntityIndexBuffer(
-          this.interactive ? plan.source.entityIndexScratchByOrientation[-1] ?? null : negativeBatch.entityIndexBuffer,
+        ? acquireDetachedEntityIndexBuffer(
+          plan.source.entityIndexScratchByOrientation[-1] ?? null,
+          plan.source.batches,
           plan.negativeCount,
         )
         : null;
@@ -554,48 +586,90 @@ export class EntityArrayThinInstanceBatch {
         }
       }
 
-      const activeBatches = new Set<EntityArrayMatrixBatch>();
-      if (positiveBatch && positiveBuffer && positiveEntityIndexes) {
-        if (this.interactive) {
-          const partitions = this.commitSpatialEntityPartitions(
-            plan.source,
+      preparedPlans.push({
+        plan,
+        positiveBatch,
+        negativeBatch,
+        positiveBuffer,
+        negativeBuffer,
+        positiveEntityIndexes,
+        negativeEntityIndexes,
+        positiveEntityRangeStarts,
+        positiveEntityRangeCounts,
+        negativeEntityRangeStarts,
+        negativeEntityRangeCounts,
+        positiveSpatialPartitions: null,
+        negativeSpatialPartitions: null,
+      });
+    }
+
+    if (this.interactive) {
+      // 所有方向/空间分片先完成资源准备，再允许任何现有批次写入，失败时画面保持原样。
+      for (const prepared of preparedPlans) {
+        if (prepared.positiveBatch && prepared.positiveBuffer && prepared.positiveEntityIndexes) {
+          prepared.positiveSpatialPartitions = this.prepareSpatialEntityPartitions(
+            prepared.plan.source,
             1,
-            positiveBuffer,
-            positiveEntityIndexes,
-            instances,
+            prepared.positiveBuffer,
+            prepared.positiveEntityIndexes,
           );
-          if (!partitions) return false;
-          for (const batch of partitions) activeBatches.add(batch);
-        } else if (positiveEntityRangeStarts && positiveEntityRangeCounts) {
-          positiveBatch.entityIndexBuffer = positiveEntityIndexes;
-          positiveBatch.entityInstanceRangeStarts = positiveEntityRangeStarts;
-          positiveBatch.entityInstanceRangeCounts = positiveEntityRangeCounts;
-          commitMatrixBuffer(positiveBatch, positiveBuffer, plan.positiveCount, true);
-          applyBatchInteractionState(positiveBatch, true, hasPickableEntity);
-          activeBatches.add(positiveBatch);
+          if (!prepared.positiveSpatialPartitions) {
+            this.rollbackPreparedBatches(batchPreparationSnapshots);
+            return false;
+          }
         }
-      }
-      if (negativeBatch && negativeBuffer && negativeEntityIndexes) {
-        if (this.interactive) {
-          const partitions = this.commitSpatialEntityPartitions(
-            plan.source,
+        if (prepared.negativeBatch && prepared.negativeBuffer && prepared.negativeEntityIndexes) {
+          prepared.negativeSpatialPartitions = this.prepareSpatialEntityPartitions(
+            prepared.plan.source,
             -1,
-            negativeBuffer,
-            negativeEntityIndexes,
-            instances,
+            prepared.negativeBuffer,
+            prepared.negativeEntityIndexes,
           );
-          if (!partitions) return false;
-          for (const batch of partitions) activeBatches.add(batch);
-        } else if (negativeEntityRangeStarts && negativeEntityRangeCounts) {
-          negativeBatch.entityIndexBuffer = negativeEntityIndexes;
-          negativeBatch.entityInstanceRangeStarts = negativeEntityRangeStarts;
-          negativeBatch.entityInstanceRangeCounts = negativeEntityRangeCounts;
-          commitMatrixBuffer(negativeBatch, negativeBuffer, plan.negativeCount, true);
-          applyBatchInteractionState(negativeBatch, true, hasPickableEntity);
-          activeBatches.add(negativeBatch);
+          if (!prepared.negativeSpatialPartitions) {
+            this.rollbackPreparedBatches(batchPreparationSnapshots);
+            return false;
+          }
         }
       }
-      this.deactivateUnusedBatches(plan.source, activeBatches);
+    }
+
+    for (const prepared of preparedPlans) {
+      const activeBatches = new Set<EntityArrayMatrixBatch>();
+      if (prepared.positiveBatch && prepared.positiveBuffer && prepared.positiveEntityIndexes) {
+        if (this.interactive && prepared.positiveSpatialPartitions) {
+          for (const batch of this.commitPreparedSpatialEntityPartitions(
+            prepared.positiveBuffer,
+            prepared.positiveEntityIndexes,
+            instances,
+            prepared.positiveSpatialPartitions,
+          )) activeBatches.add(batch);
+        } else if (prepared.positiveEntityRangeStarts && prepared.positiveEntityRangeCounts) {
+          prepared.positiveBatch.entityIndexBuffer = prepared.positiveEntityIndexes;
+          prepared.positiveBatch.entityInstanceRangeStarts = prepared.positiveEntityRangeStarts;
+          prepared.positiveBatch.entityInstanceRangeCounts = prepared.positiveEntityRangeCounts;
+          commitMatrixBuffer(prepared.positiveBatch, prepared.positiveBuffer, prepared.plan.positiveCount, true);
+          applyBatchInteractionState(prepared.positiveBatch, true, hasPickableEntity);
+          activeBatches.add(prepared.positiveBatch);
+        }
+      }
+      if (prepared.negativeBatch && prepared.negativeBuffer && prepared.negativeEntityIndexes) {
+        if (this.interactive && prepared.negativeSpatialPartitions) {
+          for (const batch of this.commitPreparedSpatialEntityPartitions(
+            prepared.negativeBuffer,
+            prepared.negativeEntityIndexes,
+            instances,
+            prepared.negativeSpatialPartitions,
+          )) activeBatches.add(batch);
+        } else if (prepared.negativeEntityRangeStarts && prepared.negativeEntityRangeCounts) {
+          prepared.negativeBatch.entityIndexBuffer = prepared.negativeEntityIndexes;
+          prepared.negativeBatch.entityInstanceRangeStarts = prepared.negativeEntityRangeStarts;
+          prepared.negativeBatch.entityInstanceRangeCounts = prepared.negativeEntityRangeCounts;
+          commitMatrixBuffer(prepared.negativeBatch, prepared.negativeBuffer, prepared.plan.negativeCount, true);
+          applyBatchInteractionState(prepared.negativeBatch, true, hasPickableEntity);
+          activeBatches.add(prepared.negativeBatch);
+        }
+      }
+      this.deactivateUnusedBatches(prepared.plan.source, activeBatches);
     }
 
     this.entityIds = instances.map((instance) => instance.entityId);
@@ -610,6 +684,33 @@ export class EntityArrayThinInstanceBatch {
     this.cullingDirty = true;
     this.updateFrustumCulling();
     return true;
+  }
+
+  /** 资源准备失败时移除本次新建的空分片，并恢复既有载体方向。 */
+  private rollbackPreparedBatches(
+    snapshots: ReadonlyMap<EntityArrayMatrixBatch, {
+      orientation: EntityArrayMatrixOrientation;
+      partitionIndex: number;
+    }>,
+  ): void {
+    for (const source of this.sources) {
+      for (const batch of [...source.batches]) {
+        const snapshot = snapshots.get(batch);
+        if (snapshot) {
+          applyBatchOrientation(batch, snapshot.orientation);
+          batch.partitionIndex = snapshot.partitionIndex;
+          continue;
+        }
+        this.batchByMeshUniqueId.delete(batch.mesh.uniqueId);
+        const sourceIndex = source.batches.indexOf(batch);
+        if (sourceIndex >= 0) source.batches.splice(sourceIndex, 1);
+        const batchIndex = this.batches.indexOf(batch);
+        if (batchIndex >= 0) this.batches.splice(batchIndex, 1);
+        const meshIndex = this.meshes.indexOf(batch.mesh);
+        if (meshIndex >= 0) this.meshes.splice(meshIndex, 1);
+        disposeBatches([batch]);
+      }
+    }
   }
 
   /** 为一个源 Mesh 准备当前实际需要的正/负方向主批次。 */
@@ -652,15 +753,18 @@ export class EntityArrayThinInstanceBatch {
     }
 
     const result: Partial<Record<EntityArrayMatrixOrientation, EntityArrayMatrixBatch>> = {};
+    const reservedBatches = new Set<EntityArrayMatrixBatch>();
     if (positiveCount > 0) {
-      const positiveBatch = this.ensureOrientationPartitionBatch(source, 1, 0);
+      const positiveBatch = this.ensureOrientationPartitionBatch(source, 1, 0, reservedBatches);
       if (!positiveBatch) return null;
       result[1] = positiveBatch;
+      reservedBatches.add(positiveBatch);
     }
     if (negativeCount > 0) {
-      const negativeBatch = this.ensureOrientationPartitionBatch(source, -1, 0);
+      const negativeBatch = this.ensureOrientationPartitionBatch(source, -1, 0, reservedBatches);
       if (!negativeBatch) return null;
       result[-1] = negativeBatch;
+      reservedBatches.add(negativeBatch);
     }
     return result;
   }
@@ -670,6 +774,7 @@ export class EntityArrayThinInstanceBatch {
     source: EntityArrayMatrixSource,
     orientation: EntityArrayMatrixOrientation,
     partitionIndex: number,
+    reservedBatches: ReadonlySet<EntityArrayMatrixBatch> | null = null,
   ): EntityArrayMatrixBatch | null {
     const existing = source.batches.find((batch) => (
       batch.orientation === orientation && batch.partitionIndex === partitionIndex
@@ -681,7 +786,10 @@ export class EntityArrayThinInstanceBatch {
     // 初次提交若源几何本身为负 determinant，可直接复用尚未写入矩阵的默认正方向载体。
     const unusedInitialBatch = partitionIndex === 0
       ? source.batches.find((batch) => (
-        batch.partitionIndex === 0 && batch.matrixBuffer === null && batch.mesh.thinInstanceCount === 0
+        !reservedBatches?.has(batch)
+        && batch.partitionIndex === 0
+        && batch.matrixBuffer === null
+        && batch.mesh.thinInstanceCount === 0
       ))
       : null;
     if (unusedInitialBatch) {
@@ -703,29 +811,42 @@ export class EntityArrayThinInstanceBatch {
     }
   }
 
-  /**
-   * 正式批次按世界平移的主跨度排序并有界分片。
-   * 每个分片保留全部矩阵、材质和几何，只利用独立包围盒恢复 Babylon 的批次级视锥裁剪。
-   */
-  private commitSpatialEntityPartitions(
+  /** 正式批次提交前创建全部方向/空间载体；本阶段不得改写任何有效矩阵。 */
+  private prepareSpatialEntityPartitions(
     source: EntityArrayMatrixSource,
     orientation: EntityArrayMatrixOrientation,
     matrixBuffer: Float32Array,
     entityIndexBuffer: Uint32Array,
-    instances: readonly EntityArrayThinInstanceTransform[],
-  ): EntityArrayMatrixBatch[] | null {
-    const instanceCount = entityIndexBuffer.length;
-    if (instanceCount <= 0) return [];
-    const partitions = createSpatialMatrixPartitions(
+  ): PreparedEntityArraySpatialPartitions | null {
+    const sourceInstanceIndexesByPartition = createSpatialMatrixPartitions(
       matrixBuffer,
       entityIndexBuffer,
-      instanceCount,
+      entityIndexBuffer.length,
       resolveFormalBatchMaxInstancesPerPartition(source),
     );
-
-    if (!partitions) {
-      const batch = this.ensureOrientationPartitionBatch(source, orientation, 0);
+    const partitionCount = sourceInstanceIndexesByPartition?.length ?? 1;
+    const batches: EntityArrayMatrixBatch[] = [];
+    for (let partitionIndex = 0; partitionIndex < partitionCount; partitionIndex += 1) {
+      const batch = this.ensureOrientationPartitionBatch(source, orientation, partitionIndex);
       if (!batch) return null;
+      batches.push(batch);
+    }
+    return { sourceInstanceIndexesByPartition, batches };
+  }
+
+  /**
+   * 使用已完成资源准备的批次按世界平移主跨度提交有界分片。
+   * 每个分片保留全部矩阵、材质和几何，只利用独立包围盒恢复 Babylon 的批次级视锥裁剪。
+   */
+  private commitPreparedSpatialEntityPartitions(
+    matrixBuffer: Float32Array,
+    entityIndexBuffer: Uint32Array,
+    instances: readonly EntityArrayThinInstanceTransform[],
+    prepared: PreparedEntityArraySpatialPartitions,
+  ): EntityArrayMatrixBatch[] {
+    const partitions = prepared.sourceInstanceIndexesByPartition;
+    if (!partitions) {
+      const batch = prepared.batches[0]!;
       this.commitInteractiveBatchSource(batch, matrixBuffer, entityIndexBuffer, instances.length);
       applyBatchInteractionState(
         batch,
@@ -738,8 +859,7 @@ export class EntityArrayThinInstanceBatch {
     const activeBatches: EntityArrayMatrixBatch[] = [];
     for (let partitionIndex = 0; partitionIndex < partitions.length; partitionIndex += 1) {
       const sourceInstanceIndexes: number[] = partitions[partitionIndex]!;
-      const batch = this.ensureOrientationPartitionBatch(source, orientation, partitionIndex);
-      if (!batch) return null;
+      const batch = prepared.batches[partitionIndex]!;
       const partitionMatrixBuffer = acquireFloatBuffer(batch.sourceMatrixBuffer, sourceInstanceIndexes.length * 16);
       const partitionEntityIndexes = acquireEntityIndexBuffer(
         batch.sourceEntityIndexBuffer,
@@ -778,20 +898,32 @@ export class EntityArrayThinInstanceBatch {
     entityCount: number,
   ): void {
     const instanceCount = sourceEntityIndexBuffer.length;
-    batch.sourceMatrixBuffer = sourceMatrixBuffer;
-    batch.sourceEntityIndexBuffer = sourceEntityIndexBuffer;
-    const renderMatrixBuffer = acquireIndependentFloatBuffer(
-      batch.matrixBuffer,
+    const completeSourceMatrixBuffer = acquireIndependentFloatBuffer(
+      batch.sourceMatrixBuffer,
       sourceMatrixBuffer,
       sourceMatrixBuffer.length,
     );
-    const renderEntityIndexBuffer = acquireIndependentEntityIndexBuffer(
-      batch.entityIndexBuffer,
+    const completeSourceEntityIndexBuffer = acquireIndependentEntityIndexBuffer(
+      batch.sourceEntityIndexBuffer,
       sourceEntityIndexBuffer,
       instanceCount,
     );
-    renderMatrixBuffer.set(sourceMatrixBuffer);
-    renderEntityIndexBuffer.set(sourceEntityIndexBuffer);
+    completeSourceMatrixBuffer.set(sourceMatrixBuffer);
+    completeSourceEntityIndexBuffer.set(sourceEntityIndexBuffer);
+    batch.sourceMatrixBuffer = completeSourceMatrixBuffer;
+    batch.sourceEntityIndexBuffer = completeSourceEntityIndexBuffer;
+    const renderMatrixBuffer = acquireIndependentFloatBuffer(
+      batch.matrixBuffer,
+      completeSourceMatrixBuffer,
+      completeSourceMatrixBuffer.length,
+    );
+    const renderEntityIndexBuffer = acquireIndependentEntityIndexBuffer(
+      batch.entityIndexBuffer,
+      completeSourceEntityIndexBuffer,
+      instanceCount,
+    );
+    renderMatrixBuffer.set(completeSourceMatrixBuffer);
+    renderEntityIndexBuffer.set(completeSourceEntityIndexBuffer);
     batch.entityIndexBuffer = renderEntityIndexBuffer;
     const ranges = createEntityInstanceRanges(renderEntityIndexBuffer, entityCount, instanceCount);
     batch.entityInstanceRangeStarts = ranges.starts;
@@ -2395,6 +2527,37 @@ function calculateTransformedExtentToRef(localExtent: Vector3, worldMatrix: Matr
 
 function acquireFloatBuffer(current: Float32Array | null, length: number): Float32Array {
   return current?.length === length ? current : new Float32Array(length);
+}
+
+/** 候选矩阵不得复用当前正在渲染或供视锥裁剪读取的缓冲。 */
+function acquireDetachedFloatBuffer(
+  current: Float32Array | null,
+  batches: readonly EntityArrayMatrixBatch[],
+  length: number,
+): Float32Array {
+  const conflictsWithActiveBatch = current !== null && batches.some((batch) => (
+    batch.matrixBuffer === current || batch.sourceMatrixBuffer === current
+  ));
+  return current && !conflictsWithActiveBatch && current.length === length
+    ? current
+    : new Float32Array(length);
+}
+
+/** 候选实体索引不得覆盖当前 GPU 前缀、完整分片或裁剪临时索引。 */
+function acquireDetachedEntityIndexBuffer(
+  current: Uint32Array | null,
+  batches: readonly EntityArrayMatrixBatch[],
+  length: number,
+): Uint32Array {
+  const conflictsWithActiveBatch = current !== null && batches.some((batch) => (
+    batch.entityIndexBuffer === current
+    || batch.sourceEntityIndexBuffer === current
+    || batch.visibleSourceIndexBuffer === current
+    || batch.cullingScratchIndexBuffer === current
+  ));
+  return current && !conflictsWithActiveBatch && current.length === length
+    ? current
+    : new Uint32Array(length);
 }
 
 

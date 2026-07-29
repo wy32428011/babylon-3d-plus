@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { MeshBuilder, NullEngine, Scene } from '@babylonjs/core';
 import { createServer } from 'vite';
 
 /** Vite SSR 加载上限，避免模块解析异常时 smoke 长时间无输出。 */
@@ -30,6 +32,51 @@ async function loadPolicyModule(server) {
   }
 }
 
+/** 在限定时间内载入 SceneRuntime，复用真实模型选择分流逻辑。 */
+async function loadSceneRuntimeModule(server) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts'),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('加载 SceneRuntime.ts 超时')), MODULE_LOAD_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+/** 读取模型当前使用的选择效果，避免只检查颜色而漏掉高亮管线差异。 */
+function readSelectionMode(runtime, mesh) {
+  const usesHighlightLayer = runtime.modelHighlightLayer?.hasMesh(mesh) ?? false;
+  const usesSelectionOutline = runtime.modelSelectionOutlineLayer.hasMesh(mesh);
+  if (usesHighlightLayer && !usesSelectionOutline) return 'highlight-layer';
+  if (!usesHighlightLayer && usesSelectionOutline) return 'selection-outline';
+  if (usesHighlightLayer && usesSelectionOutline) return 'mixed';
+  return 'none';
+}
+
+/** 构造只包含选择逻辑所需字段的模型运行时条目。 */
+function createSelectionFixtureModel(mesh, assetKind) {
+  return {
+    entitySnapshot: { id: mesh.id },
+    assetHandle: { kind: assetKind },
+    meshes: [mesh],
+    modelArrayBatch: null,
+    highlighted: false,
+  };
+}
+
+/** 通过 SceneRuntime 的真实选择分流返回单个场景模型的高亮模式。 */
+function selectFixtureModel(runtime, entityId, model) {
+  runtime.models.set(entityId, model);
+  runtime.selectedEntityIds = new Set([entityId]);
+  runtime.applyModelSelection(model, true);
+  runtime.rebuildModelSelectionOutline();
+  return readSelectionMode(runtime, model.meshes[0]);
+}
+
 /** 断言单个模型资产的共享策略模式和原因，输出失败时保留业务语义。 */
 function assertPolicy(module, asset, expectedMode, expectedReason, message) {
   const policy = module.resolveModelAssetSharedInstancingPolicy(asset);
@@ -48,8 +95,16 @@ try {
     root: process.cwd(),
     server: { middlewareMode: true, hmr: false },
     optimizeDeps: { noDiscovery: true },
+    resolve: {
+      alias: {
+        '@linkiez/dxf-renew': path.join(process.cwd(), 'scripts', 'smoke-stubs', 'dxf-renew.mjs'),
+      },
+    },
   });
-  const module = await loadPolicyModule(server);
+  const [module, { SceneRuntime }] = await Promise.all([
+    loadPolicyModule(server),
+    loadSceneRuntimeModule(server),
+  ]);
 
   const shelfWithScript = createModelAsset({
     assetCode: 'SHELF-WITH-SCRIPT',
@@ -107,8 +162,39 @@ try {
     '空数组动态字段不得阻止普通静态模型共享',
   );
 
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const runtime = new SceneRuntime(scene);
+  try {
+    const draggedMesh = MeshBuilder.CreateBox('dragged-model', {}, scene);
+    const draggedModel = createSelectionFixtureModel(draggedMesh, 'owned-container');
+    const draggedSelectionMode = selectFixtureModel(runtime, 'dragged-model', draggedModel);
+
+    runtime.applyModelSelection(draggedModel, false);
+    runtime.models.clear();
+    runtime.selectedEntityIds = new Set();
+    runtime.rebuildModelSelectionOutline();
+
+    const copiedMesh = MeshBuilder.CreateBox('copied-model', {}, scene);
+    const copiedModel = createSelectionFixtureModel(copiedMesh, 'shared-instance');
+    const copiedSelectionMode = selectFixtureModel(runtime, 'copied-model', copiedModel);
+
+    assert.equal(copiedSelectionMode, 'selection-outline', '复制/阵列实例必须继续使用实例选择描边');
+    assert.equal(
+      draggedSelectionMode,
+      copiedSelectionMode,
+      '拖入场景的普通模型必须与复制/阵列后的模型使用相同高亮模式',
+    );
+  } finally {
+    runtime.models.clear();
+    runtime.dispose();
+    scene.dispose();
+    engine.dispose();
+  }
+
   console.log(JSON.stringify({
     ok: true,
+    selectionHighlightMode: 'selection-outline',
     verifiedPolicies: [
       'shelf-resource',
       'plain-static-model',

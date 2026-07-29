@@ -95,6 +95,7 @@ type PreparedPackage = {
   mainFilePath: string;
   metadataPath: string;
   thumbnailPath: string | null;
+  scriptPaths: string[];
 };
 
 type DownloadJob = {
@@ -490,6 +491,7 @@ async function prepareDownloadPlan(
       mainFilePath: path.join(packagePath, mainFileName),
       metadataPath: path.join(packagePath, 'meta.json'),
       thumbnailPath: null,
+      scriptPaths: [],
     };
   });
 }
@@ -522,10 +524,12 @@ function createDownloadJobs(packages: PreparedPackage[]): DownloadJob[] {
       prepared.record.scripts.forEach((script, index) => {
         const fileName = normalizeOptionalTypeScriptFileName(script.fileName, script.fileUrl, index, usedNames);
         if (!fileName) return;
+        const destinationPath = path.join(prepared.packagePath, fileName);
+        prepared.scriptPaths.push(destinationPath);
         jobs.push({
           label: `${label}脚本 ${fileName}`,
           remoteUrl: script.fileUrl,
-          destinationPath: path.join(prepared.packagePath, fileName),
+          destinationPath,
           kind: 'script',
           preparedPackage: prepared,
         });
@@ -577,8 +581,19 @@ async function validatePreparedPackages(
       throw new Error(`${modelKindLabel(prepared.record.kind)}“${prepared.record.name}”校验失败：${scanResult.skipped?.reason ?? '无法扫描模型包。'}`);
     }
 
+    // 数据中台结构化脚本顺序优先；扫描结果只补充 meta 引用或约定命名但未显式返回的脚本。
+    const scriptPaths = [...new Set([
+      ...prepared.scriptPaths,
+      ...(scanResult.asset.scriptPaths ?? []),
+    ])];
     assets.push({
       ...scanResult.asset,
+      scriptPaths,
+      scriptAssets: scriptPaths.map((scriptPath) => ({
+        path: scriptPath,
+        sourceUrl: encodeAssetUrl(scriptPath),
+        name: path.basename(scriptPath),
+      })),
       displayName: prepared.record.name,
       assetRevision: `${runId}-${prepared.record.kind}-${prepared.record.id}`,
       kind: 'model',
@@ -775,6 +790,12 @@ function normalizeModelFileName(fileName: string | null, fileUrl: string, id: st
   return candidate;
 }
 
+/** 判断文件名是否为可执行 TypeScript 模型脚本，声明文件不会下载或进入运行时。 */
+function isRuntimeTypeScriptFileName(fileName: string): boolean {
+  const normalizedFileName = fileName.toLowerCase();
+  return normalizedFileName.endsWith('.ts') && !normalizedFileName.endsWith('.d.ts');
+}
+
 function normalizeOptionalTypeScriptFileName(
   fileName: string | null,
   fileUrl: string,
@@ -783,7 +804,7 @@ function normalizeOptionalTypeScriptFileName(
 ): string | null {
   const fromField = fileName ? sanitizeFileName(fileName) : '';
   const fromUrl = sanitizeFileName(fileNameFromUrl(fileUrl));
-  const candidate = [fromField, fromUrl].find((value) => path.extname(value).toLowerCase() === '.ts');
+  const candidate = [fromField, fromUrl].find(isRuntimeTypeScriptFileName);
   if (!candidate) return null;
 
   const base = path.parse(candidate).name || `script-${index + 1}`;

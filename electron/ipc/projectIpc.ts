@@ -254,7 +254,13 @@ function authorizeModelAssetsFromSceneContent(content: string): void {
   }
 }
 
-/** 登记普通模型资产及其外置 .model.ts 脚本。 */
+/** 判断文件路径是否为可执行 TypeScript 模型脚本，声明文件不会获得运行时读取授权。 */
+function isRuntimeModelScriptPath(filePath: string): boolean {
+  const normalizedPath = filePath.toLowerCase();
+  return normalizedPath.endsWith('.ts') && !normalizedPath.endsWith('.d.ts');
+}
+
+/** 登记普通模型资产及其外置 TypeScript 脚本。 */
 function authorizeSceneModelAsset(value: unknown): void {
   const modelAsset = value as SceneModelAssetShape | undefined;
   if (!isPlainObject(modelAsset)) return;
@@ -264,7 +270,7 @@ function authorizeSceneModelAsset(value: unknown): void {
   for (const scriptAsset of modelAsset.scriptAssets) {
     if (!isPlainObject(scriptAsset) || typeof scriptAsset.path !== 'string') continue;
     const scriptPath = normalizeFilePath(scriptAsset.path);
-    if (scriptPath.toLowerCase().endsWith('.model.ts')) authorizeAssetFile(scriptPath);
+    if (isRuntimeModelScriptPath(scriptPath)) authorizeAssetFile(scriptPath);
   }
 }
 

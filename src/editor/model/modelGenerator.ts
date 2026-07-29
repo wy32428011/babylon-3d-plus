@@ -37,7 +37,8 @@ type ModelGeneratorSourceAsset = {
 export const MODEL_GENERATOR_MAX_RULES = 64;
 
 const AUTHORIZED_MODEL_GENERATOR_ASSET_URL_PREFIX = 'editor-asset://local/';
-const MODEL_SCRIPT_EXTENSION = '.model.ts';
+const MODEL_SCRIPT_EXTENSION = '.ts';
+const MODEL_SCRIPT_DECLARATION_EXTENSION = '.d.ts';
 const MODEL_GENERATOR_ID_MAX_LENGTH = 128;
 const MODEL_GENERATOR_TEXT_MAX_LENGTH = 256;
 
@@ -88,7 +89,14 @@ function sanitizeJsonArray(value: unknown): unknown[] | undefined {
   return cloneJsonValue(value);
 }
 
-/** 清理模型脚本资产，只保留授权 URL 和 .model.ts 文件。 */
+/** 判断文件名是否为可执行的 TypeScript 模型脚本，声明文件不会进入运行时。 */
+function isRuntimeModelScriptFileName(value: string): boolean {
+  const normalizedValue = value.toLowerCase();
+  return normalizedValue.endsWith(MODEL_SCRIPT_EXTENSION)
+    && !normalizedValue.endsWith(MODEL_SCRIPT_DECLARATION_EXTENSION);
+}
+
+/** 清理模型脚本资产，只保留授权 URL 和可执行的 TypeScript 文件。 */
 function sanitizeModelScriptAssets(value: unknown): ModelScriptAsset[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const assets: ModelScriptAsset[] = [];
@@ -99,8 +107,8 @@ function sanitizeModelScriptAssets(value: unknown): ModelScriptAsset[] | undefin
     const sourceUrl = sanitizeText(item.sourceUrl, 512);
     const name = sanitizeText(item.name, 256);
     if (!path || !sourceUrl || !name) continue;
-    if (!path.toLowerCase().endsWith(MODEL_SCRIPT_EXTENSION)) continue;
-    if (!name.toLowerCase().endsWith(MODEL_SCRIPT_EXTENSION)) continue;
+    if (!isRuntimeModelScriptFileName(path)) continue;
+    if (!isRuntimeModelScriptFileName(name)) continue;
     if (!isAuthorizedEditorAssetUrl(sourceUrl)) continue;
     assets.push({ path, sourceUrl, name });
   }
