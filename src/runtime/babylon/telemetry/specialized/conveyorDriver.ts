@@ -21,7 +21,7 @@ import {
 } from '../../../mqtt/deviceTelemetry';
 import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
-import { readConveyorMotionConfigs } from './specializedModelAssets';
+import { readConveyorCargoSignalFields, readConveyorMotionConfigs } from './specializedModelAssets';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   type ConveyorCargoRuntimeEntry,
@@ -85,14 +85,15 @@ export class ConveyorTelemetryDriver {
     }
   }
 
-  /** 根据光电信号（front_has_goods / back_has_goods）决定输送线上货物的创建与销毁，movement_x 驱动货物移动。 */
+  /** 根据光电信号（缺省 front_has_goods / back_has_goods，可在 motion.cargo 配置）决定货物创建与销毁，货物走行跟随 translate 配置的方向与速度。 */
   private applyConveyorCargoMotion(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
     deltaSeconds: number,
   ): void {
-    const frontHasGoods = readBooleanField(snapshot.fields, 'front_has_goods') ?? false;
-    const backHasGoods = readBooleanField(snapshot.fields, 'back_has_goods') ?? false;
+    const signalFields = readConveyorCargoSignalFields(model);
+    const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods) ?? false;
+    const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
 
     if (!frontHasGoods && !backHasGoods) {
       this.disposeConveyorCargoForAssetCode(model.assetCode);
@@ -107,7 +108,11 @@ export class ConveyorTelemetryDriver {
       this.disposeConveyorCargoForAssetCode(model.assetCode);
     }
 
-    const movementDirection = this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
+    // 货物走行与链条本体共用同一份 translate 配置（fields+actionMap+speed），避免链/货速度脱节。
+    const translateConfig = this.findConveyorCargoTranslateConfig(model);
+    const movementDirection = translateConfig
+      ? this.readConveyorMotionDirection(snapshot, translateConfig)
+      : this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
     const travelContext = this.resolveConveyorCargoTravelContext(model);
     const travelHalfRange = resolveConveyorCargoTravelHalfRange(
       travelContext.spanMeters ?? 0,
@@ -118,7 +123,8 @@ export class ConveyorTelemetryDriver {
       model.conveyorTelemetry.cargoTravelOffset = frontHasGoods ? travelHalfRange : -travelHalfRange;
     }
     if (!snapshot.faulted && movementDirection !== 0) {
-      model.conveyorTelemetry.cargoTravelOffset += movementDirection * CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND * deltaSeconds;
+      const cargoSpeed = translateConfig?.speed ?? CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
+      model.conveyorTelemetry.cargoTravelOffset += movementDirection * cargoSpeed * deltaSeconds;
     }
     // 每帧按当前行程钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
     model.conveyorTelemetry.cargoTravelOffset = clampNumber(model.conveyorTelemetry.cargoTravelOffset, -travelHalfRange, travelHalfRange);
@@ -340,13 +346,17 @@ export class ConveyorTelemetryDriver {
       .add(travelContext.travelAxis.scale(model.conveyorTelemetry.cargoTravelOffset));
   }
 
+  /** 首个非竖直轴的 translate 配置：货物行走轴、速度与方向统一跟随它，与链条本体同源。 */
+  private findConveyorCargoTranslateConfig(model: ModelRuntimeEntry): ConveyorMotionConfig | null {
+    return readConveyorMotionConfigs(model).find((config) => config.kind === 'translate' && config.axis !== 'y') ?? null;
+  }
+
   /** 推断货物沿模型局部 x/z 哪个方向移动，滚筒线默认垂直于滚筒轴。 */
   private readConveyorCargoTravelAxis(model: ModelRuntimeEntry): 'x' | 'z' {
-    const configs = readConveyorMotionConfigs(model);
-    const translateConfig = configs.find((config) => config.kind === 'translate' && config.axis !== 'y');
+    const translateConfig = this.findConveyorCargoTranslateConfig(model);
     if (translateConfig?.axis === 'x' || translateConfig?.axis === 'z') return translateConfig.axis;
 
-    const rotateConfig = configs.find((config) => config.kind === 'rotate');
+    const rotateConfig = readConveyorMotionConfigs(model).find((config) => config.kind === 'rotate');
     if (rotateConfig?.axis === 'x') return 'z';
     return 'x';
   }

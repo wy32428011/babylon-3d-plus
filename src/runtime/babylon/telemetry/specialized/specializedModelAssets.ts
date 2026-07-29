@@ -46,15 +46,20 @@ export function isStackerModelAsset(modelAsset: ModelAssetComponent): boolean {
   return signature.includes('stacker') || signature.includes('堆垛机');
 }
 
-/** 读取模型脚本声明的输送线运动配置，运行时只接受 devType=conveyor 的 dataDriven 配置。 */
-export function readConveyorMotionConfigs(model: ModelRuntimeEntry): ConveyorMotionConfig[] {
-  const configs: ConveyorMotionConfig[] = [];
+/** 遍历模型脚本声明的 conveyor dataDriven 配置块，运行时只接受 devType=conveyor。 */
+function* iterateConveyorDataDrivenConfigs(model: ModelRuntimeEntry): Generator<Record<string, unknown>> {
   for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
     if (!isPlainRecord(dataDriven)) continue;
     const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
     const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
-    if (devType !== 'conveyor') continue;
+    if (devType === 'conveyor') yield dataDriven;
+  }
+}
 
+/** 读取模型脚本声明的输送线运动配置，运行时只接受 devType=conveyor 的 dataDriven 配置。 */
+export function readConveyorMotionConfigs(model: ModelRuntimeEntry): ConveyorMotionConfig[] {
+  const configs: ConveyorMotionConfig[] = [];
+  for (const dataDriven of iterateConveyorDataDrivenConfigs(model)) {
     const motionConfig = isPlainRecord(dataDriven.motion) ? dataDriven.motion : null;
     if (!motionConfig) continue;
 
@@ -65,6 +70,34 @@ export function readConveyorMotionConfigs(model: ModelRuntimeEntry): ConveyorMot
   }
 
   return configs;
+}
+
+/** 输送线货物生命周期信号字段名，缺省遵循 front_has_goods/back_has_goods 光电约定。 */
+export type ConveyorCargoSignalFields = {
+  frontHasGoods: string;
+  backHasGoods: string;
+};
+
+const DEFAULT_CONVEYOR_CARGO_SIGNAL_FIELDS: ConveyorCargoSignalFields = {
+  frontHasGoods: 'front_has_goods',
+  backHasGoods: 'back_has_goods',
+};
+
+/** 读取模型脚本 dataDriven.motion.cargo 声明的货物生命周期信号字段名，未声明时遵循默认约定。 */
+export function readConveyorCargoSignalFields(model: ModelRuntimeEntry): ConveyorCargoSignalFields {
+  for (const dataDriven of iterateConveyorDataDrivenConfigs(model)) {
+    const motionConfig = isPlainRecord(dataDriven.motion) ? dataDriven.motion : null;
+    const cargoConfig = motionConfig && isPlainRecord(motionConfig.cargo) ? motionConfig.cargo : null;
+    if (!cargoConfig) continue;
+
+    const front = typeof cargoConfig.frontHasGoodsField === 'string' ? cargoConfig.frontHasGoodsField.trim() : '';
+    const back = typeof cargoConfig.backHasGoodsField === 'string' ? cargoConfig.backHasGoodsField.trim() : '';
+    return {
+      frontHasGoods: front || DEFAULT_CONVEYOR_CARGO_SIGNAL_FIELDS.frontHasGoods,
+      backHasGoods: back || DEFAULT_CONVEYOR_CARGO_SIGNAL_FIELDS.backHasGoods,
+    };
+  }
+  return DEFAULT_CONVEYOR_CARGO_SIGNAL_FIELDS;
 }
 
 /** 把单个 dataDriven.motion 配置归一成运行时可直接执行的输送线动作。 */

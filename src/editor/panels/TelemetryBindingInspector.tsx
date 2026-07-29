@@ -46,7 +46,11 @@ function formatSpecializedMotionEntry(config: unknown): string {
   if (!isPlainObjectLike(config)) return '—';
   const parts: string[] = [];
   for (const [key, value] of Object.entries(config)) {
+    // 兜底正则信息量低且长，摘要不展示
+    if (key === 'fallbackPattern') continue;
     if (typeof value === 'number' && Number.isFinite(value)) {
+      parts.push(`${key} ${value}`);
+    } else if (typeof value === 'string' && value.length > 0) {
       parts.push(`${key} ${value}`);
     } else if (Array.isArray(value)) {
       const items = value.filter((item): item is string => typeof item === 'string' && item.length > 0);
