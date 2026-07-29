@@ -14,6 +14,7 @@ import {
 } from '../../runtimeNodeGeometry';
 import { isPlainRecord, sanitizeBabylonName } from '../../runtimeValueUtils';
 import {
+  readBooleanField,
   readIntegerField,
   readNumberField,
   type DeviceTelemetrySnapshot,
@@ -21,12 +22,11 @@ import {
 import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { readConveyorMotionConfigs } from './specializedModelAssets';
-import { readContainerCode, writeDeviceTelemetryMetadata } from './telemetryMetadata';
+import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   type ConveyorCargoRuntimeEntry,
   type ConveyorMotionConfig,
   type ConveyorNodeBaseline,
-  CONVEYOR_ANONYMOUS_CARGO_CODE,
   CONVEYOR_CARGO_SIZE,
   CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
@@ -85,21 +85,24 @@ export class ConveyorTelemetryDriver {
     }
   }
 
-  /** 根据 containerCode 或 container_quantity 创建输送线上只存在于运行时的货物盒。 */
+  /** 根据光电信号（front_has_goods / back_has_goods）决定输送线上货物的创建与销毁，movement_x 驱动货物移动。 */
   private applyConveyorCargoMotion(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
     deltaSeconds: number,
   ): void {
-    const containerCode = readContainerCode(snapshot, 'containerCode');
-    const containerQuantity = readNumberField(snapshot.fields, 'container_quantity') ?? 0;
-    const activeContainerCode = containerCode ?? (containerQuantity > 0 ? CONVEYOR_ANONYMOUS_CARGO_CODE : null);
-    if (!activeContainerCode) {
+    const frontHasGoods = readBooleanField(snapshot.fields, 'front_has_goods') ?? false;
+    const backHasGoods = readBooleanField(snapshot.fields, 'back_has_goods') ?? false;
+
+    if (!frontHasGoods && !backHasGoods) {
       this.disposeConveyorCargoForAssetCode(model.assetCode);
       model.conveyorTelemetry.cargoCode = null;
       return;
     }
-    const isNewCargo = model.conveyorTelemetry.cargoCode !== activeContainerCode;
+
+    // 前端有货优先；前后同时有货时按前端处理。
+    const photoelectricSource = frontHasGoods ? 'front' : 'back';
+    const isNewCargo = model.conveyorTelemetry.cargoCode !== photoelectricSource;
     if (isNewCargo && model.conveyorTelemetry.cargoCode) {
       this.disposeConveyorCargoForAssetCode(model.assetCode);
     }
@@ -111,8 +114,8 @@ export class ConveyorTelemetryDriver {
       CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
     );
     if (isNewCargo) {
-      // 新货箱从进入端边缘刷出：正向行程从上游端出发，反向行程从下游端出发。
-      model.conveyorTelemetry.cargoTravelOffset = movementDirection < 0 ? travelHalfRange : -travelHalfRange;
+      // front_has_goods → 正向前端刷出；back_has_goods → 负向末端刷出。
+      model.conveyorTelemetry.cargoTravelOffset = frontHasGoods ? travelHalfRange : -travelHalfRange;
     }
     if (!snapshot.faulted && movementDirection !== 0) {
       model.conveyorTelemetry.cargoTravelOffset += movementDirection * CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND * deltaSeconds;
@@ -120,14 +123,14 @@ export class ConveyorTelemetryDriver {
     // 每帧按当前行程钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
     model.conveyorTelemetry.cargoTravelOffset = clampNumber(model.conveyorTelemetry.cargoTravelOffset, -travelHalfRange, travelHalfRange);
 
-    const cargo = this.getOrCreateConveyorCargo(model.assetCode, activeContainerCode);
+    const cargo = this.getOrCreateConveyorCargo(model.assetCode, photoelectricSource);
     this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));
     this.host.setGeneratedCargoRootPose(
       cargo,
       this.getConveyorCargoPosition(model, travelContext),
       getNodeWorldRotation(model.root),
     );
-    model.conveyorTelemetry.cargoCode = activeContainerCode;
+    model.conveyorTelemetry.cargoCode = photoelectricSource;
   }
 
   /** 按 motion.fields 读取输送线方向，支持模型脚本自定义 actionMap。 */

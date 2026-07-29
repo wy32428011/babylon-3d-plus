@@ -535,15 +535,16 @@ export class SceneRuntime {
       getLocatorTarget: (key) => this.locatorTargets.get(key) ?? null,
       resolveCargoGeneratorForModel: (model) => this.resolveCargoGeneratorForModel(model),
       resolveFetchDriveRowForLocator: (locator) => this.resolveFetchDriveRowForLocator(locator),
+      suppressFetchCellForLocator: (locator, column, layer) => this.suppressFetchCellForLocator(locator, column, layer),
       handleFetchRowSync: (row) => this.handleFetchRowSync(row),
-      keepCargoForFetchRowSync: (row, assetCode, containerCode) => this.keepCargoForFetchRowSync(row, assetCode, containerCode),
+      keepCargoForFetchRowSync: (row, assetCode, cargoKey) => this.keepCargoForFetchRowSync(row, assetCode, cargoKey),
       updateExternalScriptContext: (model, telemetry) => this.updateModelExternalScriptRuntimeContext(model, 'runtime', telemetry, true),
       refreshModelArrayRepresentation: (model) => this.refreshModelArrayRuntimeRepresentation(model),
       getGeneratedCargoFallbackSpec: (kind) => this.getGeneratedCargoFallbackSpec(kind),
       ensureGeneratedCargoFallback: (cargo, kind) => this.ensureGeneratedCargoFallback(cargo, kind),
       ensureGeneratedCargoOutputOwner: (cargo, kind, component, snapshot) => this.ensureGeneratedCargoOutputOwner(cargo, kind, component, snapshot),
       syncGeneratedCargoVisual: (cargo, kind, snapshot, generator) => this.syncGeneratedCargoVisual(cargo, kind, snapshot, generator),
-      setGeneratedCargoRootPose: (cargo, position, rotation) => this.setGeneratedCargoRootPose(cargo, position, rotation),
+      setGeneratedCargoRootPose: (cargo, position, rotation, scaling) => this.setGeneratedCargoRootPose(cargo, position, rotation, scaling),
       disposeGeneratedCargo: (cargo) => this.disposeGeneratedCargo(cargo),
       getModelWorldBounds: (model) => this.getModelWorldBounds(model),
     } as SpecializedTelemetryHost;
@@ -633,6 +634,8 @@ export class SceneRuntime {
       if (this.latestFetchRequestByRow.get(rowNumber) !== generation) return;
       for (const target of targets) {
         this.applyFetchRecordsToLocator(records, target);
+        // 响应应用后再解除格口抑制：此时 records 已反映取/放结果，解除不会闪出旧货物
+        this.locatorFetchRuntimes.get(target.entityId)?.clearSuppressedCells();
       }
       this.disposeFetchKeptCargoForRow(rowNumber);
     })();
@@ -710,10 +713,20 @@ export class SceneRuntime {
     return component?.fetchDrive?.enabled ? locator.rowNumber : null;
   }
 
+  /** 设备取货/放货期间抑制 locator 某格口的 fetch 渲染，货物改由设备侧渲染；未启用 fetch 返回 null。 */
+  private suppressFetchCellForLocator(locator: LocatorRuntimeEntry, column: number, layer: number): number | null {
+    const rowNumber = this.resolveFetchDriveRowForLocator(locator);
+    if (rowNumber === null) return null;
+    const fetchRuntime = this.locatorFetchRuntimes.get(locator.entityId);
+    if (!fetchRuntime) return null;
+    fetchRuntime.suppressCell(column, layer);
+    return rowNumber;
+  }
+
   /** 放货到 fetch 驱动定位线框后保留 MQTT 货箱，等待单排同步响应时销毁，避免网络延迟造成视觉空窗；返回是否为首次登记。 */
-  private keepCargoForFetchRowSync(rowNumber: number | null, assetCode: string, containerCode: string): boolean {
+  private keepCargoForFetchRowSync(rowNumber: number | null, assetCode: string, cargoKey: string): boolean {
     if (rowNumber === null) return false;
-    const key = JSON.stringify([assetCode, containerCode]);
+    const key = JSON.stringify([assetCode, cargoKey]);
     let keys = this.fetchKeptCargoByRow.get(rowNumber);
     if (!keys) {
       keys = new Set();
@@ -2142,7 +2155,7 @@ export class SceneRuntime {
     return null;
   }
 
-  /** 在 Locator 的 boxes 网格中根据列/层定位具体 box 的世界矩阵。 */
+  /** 在 Locator 的 boxes 网格中根据列/层定位具体 box 的世界矩阵，平移对齐 box 底面中心（货物支撑位）。 */
   private getLocatorBoxWorldMatrix(locator: LocatorRuntimeEntry, toX: number, toY: number): Matrix | null {
     const boxIndex = resolveLocatorBoxIndex({
       startColumn: locator.startColumn,
@@ -2154,7 +2167,15 @@ export class SceneRuntime {
     const box = boxIndex === null ? null : locator.boxes[boxIndex];
     if (!box) return null;
     box.computeWorldMatrix(true);
-    return box.getWorldMatrix();
+    // 货物模板原点即底部支撑点：矩阵平移取 box 世界包围盒底面中心，与 stacker 接管货物的支撑位一致
+    const worldMatrix = box.getWorldMatrix().clone();
+    const bounds = box.getBoundingInfo().boundingBox;
+    worldMatrix.setTranslation(new Vector3(
+      (bounds.minimumWorld.x + bounds.maximumWorld.x) / 2,
+      bounds.minimumWorld.y,
+      (bounds.minimumWorld.z + bounds.maximumWorld.z) / 2,
+    ));
+    return worldMatrix;
   }
 
 
@@ -2379,8 +2400,7 @@ export class SceneRuntime {
       this.applyTransform(current.root, entity.components.transform);
       if (current.assetCode !== modelAsset.assetCode) {
         this.specializedTelemetryRuntime.disposeCargoForAssetCode(current.assetCode);
-        current.stackerTelemetry.frontCargoCode = null;
-        current.stackerTelemetry.backCargoCode = null;
+        resetStackerTelemetryState(current);
         resetConveyorTelemetryState(current);
       }
       current.assetCode = modelAsset.assetCode;
@@ -3051,10 +3071,11 @@ export class SceneRuntime {
     cargo.root.dispose();
   }
 
-  /** 设置普通自动货物世界支撑点和朝向；root 无父级，不受 POI Transform 影响。 */
-  private setGeneratedCargoRootPose(cargo: GeneratedCargoRuntimeEntry, position: Vector3, rotation: Quaternion): void {
+  /** 设置普通自动货物世界支撑点、朝向和缩放（箱位含镜像时缩放保留负号）；root 无父级，不受 POI Transform 影响。 */
+  private setGeneratedCargoRootPose(cargo: GeneratedCargoRuntimeEntry, position: Vector3, rotation: Quaternion, scaling?: Vector3 | null): void {
     cargo.root.position.copyFrom(position);
     cargo.root.rotationQuaternion = rotation.clone();
+    cargo.root.scaling.copyFrom(scaling ?? Vector3.OneReadOnly);
     cargo.root.computeWorldMatrix(true);
     cargo.outputOwner && this.applyGeneratedOutputPresentation(cargo.outputOwner);
   }

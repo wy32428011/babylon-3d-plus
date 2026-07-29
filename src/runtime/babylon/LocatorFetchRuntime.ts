@@ -42,6 +42,20 @@ type ThinInstanceBatch = {
   instances: CargoInstance[];
 };
 
+type ApplyRecordsContext = {
+  records: FetchContainerRecord[];
+  locatorEntry: LocatorRuntimeEntry;
+  locatorComponent: LocatorComponent;
+  generatorComponent: ModelGeneratorComponent | null;
+  getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix;
+  loadModelTemplate: LoadModelTemplate;
+};
+
+/** fetch 渲染格口键，用于设备接管渲染期间的格口抑制。 */
+export function createFetchCellKey(column: number, layer: number): string {
+  return `${column}-${layer}`;
+}
+
 /**
  * 定位线框 fetch 数据驱动的 thinInstance 渲染运行时。
  * 每个实例只服务一条定位线框：HTTP 请求编排由 SceneRuntime 负责，本类只接收本排 records
@@ -49,6 +63,9 @@ type ThinInstanceBatch = {
  */
 export class LocatorFetchRuntime {
   private batches = new Map<string, ThinInstanceBatch>();
+  /** 设备取货/放货期间接管渲染的格口；对应 thinInstance 暂时跳过。 */
+  private suppressedCellKeys = new Set<string>();
+  private lastApplyContext: ApplyRecordsContext | null = null;
   private disposed = false;
   private missingGeneratorReported = false;
 
@@ -77,8 +94,20 @@ export class LocatorFetchRuntime {
   ): Promise<void> {
     if (this.disposed) return;
 
+    this.lastApplyContext = {
+      records,
+      locatorEntry,
+      locatorComponent,
+      generatorComponent,
+      getLocatorBoxWorldMatrix,
+      loadModelTemplate,
+    };
+
     const rowKey = String(locatorComponent.rowNumber).trim();
-    const ownRecords = records.filter((record) => String(record.row ?? '').trim() === rowKey);
+    const ownRecords = records.filter(
+      (record) => String(record.row ?? '').trim() === rowKey
+        && !this.suppressedCellKeys.has(createFetchCellKey(record.column, record.layer)),
+    );
 
     if (!generatorComponent) this.reportMissingGeneratorOnce(locatorComponent);
     const fallbackTarget = generatorComponent ? null : createMeshModelGeneratorTarget('cube', '内置立方体');
@@ -281,9 +310,40 @@ export class LocatorFetchRuntime {
 
   /** 清空全部 thinInstance batch；退出运行预览回编辑态时调用，runtime 本身保留复用 */
   clearAllBatches(): void {
+    this.suppressedCellKeys.clear();
+    this.lastApplyContext = null;
     for (const signature of [...this.batches.keys()]) {
       this.disposeBatch(signature);
     }
+  }
+
+  /** 抑制某格口的 fetch 渲染：设备（如 stacker）接管该格口货物期间调用，幂等。 */
+  suppressCell(column: number, layer: number): void {
+    const key = createFetchCellKey(column, layer);
+    if (this.suppressedCellKeys.has(key)) return;
+    this.suppressedCellKeys.add(key);
+    this.replayLastRecords();
+  }
+
+  /** 解除全部格口抑制：fetch 单排同步响应应用后调用，渲染权重回 fetch 数据。 */
+  clearSuppressedCells(): void {
+    if (this.suppressedCellKeys.size === 0) return;
+    this.suppressedCellKeys.clear();
+    this.replayLastRecords();
+  }
+
+  /** 抑制集合变化后按上次 records 重建批次，避免等待下一次数据到达。 */
+  private replayLastRecords(): void {
+    const context = this.lastApplyContext;
+    if (!context || this.disposed) return;
+    void this.applyRecords(
+      context.records,
+      context.locatorEntry,
+      context.locatorComponent,
+      context.generatorComponent,
+      context.getLocatorBoxWorldMatrix,
+      context.loadModelTemplate,
+    );
   }
 
   private disposeBatch(signature: string): void {

@@ -27,8 +27,6 @@ type StackerMotionState = {
   backMovementZ: number;
   frontCommand: number;
   backCommand: number;
-  frontContainerCode: string;
-  backContainerCode: string;
   normal: boolean;
   errorCode: number;
   message: string;
@@ -149,8 +147,6 @@ export function createStackerSimulatorPayload(
       createPayloadPoint(assetCode, 'front_y', frontLocation.y),
       createPayloadPoint(assetCode, 'front_task', tick),
       createPayloadPoint(assetCode, 'back_task', 0),
-      createPayloadPoint(assetCode, 'front_containerCode', motion.frontContainerCode),
-      createPayloadPoint(assetCode, 'back_containerCode', motion.backContainerCode),
       createPayloadPoint(assetCode, 'signalBits', tick % 2),
       createPayloadPoint(assetCode, 'front_signalBits', tick % 4),
       createPayloadPoint(assetCode, 'back_signalBits', tick % 3),
@@ -201,8 +197,6 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
       backMovementZ: 0,
       frontCommand: 8,
       backCommand: 8,
-      frontContainerCode: '',
-      backContainerCode: '',
       normal: false,
       errorCode: 9001,
       message: '模拟急停',
@@ -217,7 +211,6 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
   ];
   const sequenceIndex = Math.floor(seconds / 8) % targetSequence.length;
   const phaseProgress = (seconds % 8) / 8;
-  const activeTarget = targetSequence[sequenceIndex];
   const forkCycle = Math.floor(seconds / 2) % 4;
 
   if (scenario === 'movement' || (scenario === 'cycle' && Math.floor(seconds / 24) % 2 === 1)) {
@@ -232,10 +225,8 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
       movementY: Math.sin(seconds * 0.4) >= 0 ? 1 : 2,
       frontMovementZ: [1, 2, 3, 4][forkCycle],
       backMovementZ: [3, 4, 1, 2][forkCycle],
-      frontCommand: 1,
-      backCommand: 3,
-      frontContainerCode: 'PALLET-MOVE-F',
-      backContainerCode: 'PALLET-MOVE-B',
+      frontCommand: 0,
+      backCommand: 0,
       normal: true,
       errorCode: 0,
       message: '全 0 目标位，按 movement 模拟移动',
@@ -243,57 +234,63 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
   }
 
   const activeSide: StackerForkSide = sequenceIndex % 2 === 0 ? 'front' : 'back';
-  const cargoCode = `PALLET-${String(sequenceIndex + 1).padStart(2, '0')}-${activeTarget.x}${activeTarget.y}${activeTarget.z}`;
-  const forkDistance = resolveTargetForkDistance(phaseProgress, activeTarget.forkDistance);
+  const fetchTarget = targetSequence[sequenceIndex];
+  const placeTarget = targetSequence[(sequenceIndex + 1) % targetSequence.length];
+  // 一个循环 = 取货任务 + 放货任务：command 1 取货中（含伸叉/收叉）→ 2 取货完成携带
+  // → 3 放货中（含伸叉/收叉）→ 5 放货完成 → 0 空闲；货物在三个库位间循环搬运。
+  const forkDistance = resolveTaskForkDistance(phaseProgress, fetchTarget.forkDistance);
   const frontActive = activeSide === 'front';
+  const activeTarget = phaseProgress < 0.5 ? fetchTarget : placeTarget;
 
   return {
-    target: activeTarget,
+    target: phaseProgress < 0.86 ? activeTarget : null,
     distanceX: activeTarget.distanceX + Math.sin(phaseProgress * Math.PI * 2) * 0.35,
     distanceY: activeTarget.distanceY + Math.sin(phaseProgress * Math.PI * 4) * 0.12,
     frontDistanceZ: frontActive ? forkDistance : 0,
     backDistanceZ: frontActive ? 0 : forkDistance,
     movementX: Math.cos(phaseProgress * Math.PI * 2) >= 0 ? 1 : 2,
     movementY: Math.cos(phaseProgress * Math.PI * 4) >= 0 ? 1 : 2,
-    frontMovementZ: frontActive ? resolveTargetForkMovement(phaseProgress, 1, 2) : 0,
-    backMovementZ: frontActive ? 0 : resolveTargetForkMovement(phaseProgress, 3, 4),
-    frontCommand: frontActive ? resolveTargetForkCommand(phaseProgress) : 0,
-    backCommand: frontActive ? 0 : resolveTargetForkCommand(phaseProgress),
-    frontContainerCode: frontActive ? resolveTargetContainerCode(cargoCode, phaseProgress) : '',
-    backContainerCode: frontActive ? '' : resolveTargetContainerCode(cargoCode, phaseProgress),
+    frontMovementZ: frontActive ? resolveTaskForkMovement(phaseProgress, 1, 2) : 0,
+    backMovementZ: frontActive ? 0 : resolveTaskForkMovement(phaseProgress, 3, 4),
+    frontCommand: frontActive ? resolveTaskForkCommand(phaseProgress) : 0,
+    backCommand: frontActive ? 0 : resolveTaskForkCommand(phaseProgress),
     normal: true,
     errorCode: 0,
-    message: `${frontActive ? '前叉' : '后叉'}${activeTarget.forkDistance <= 0.8 ? '近位一段' : '远位两段'}放货到目标位 ${activeTarget.x}-${activeTarget.y}-${activeTarget.z}`,
+    message: `${frontActive ? '前叉' : '后叉'}从 ${fetchTarget.x}-${fetchTarget.y}-${fetchTarget.z} 取货，放至 ${placeTarget.x}-${placeTarget.y}-${placeTarget.z}`,
   };
 }
 
-/** 目标位演示中生成货叉作业命令：取货、携带、放货、请求卸货、放货完成。 */
-function resolveTargetForkCommand(phaseProgress: number): number {
-  if (phaseProgress < 0.18) return 1;
-  if (phaseProgress < 0.52) return 2;
-  if (phaseProgress < 0.8) return 3;
-  if (phaseProgress < 0.92) return 4;
-  return 5;
-}
-
-/** 目标位演示中生成货叉伸缩动作，前叉和后叉传入各自的伸出/缩回编码。 */
-function resolveTargetForkMovement(phaseProgress: number, extendCode: number, retractCode: number): number {
-  if (phaseProgress >= 0.52 && phaseProgress < 0.8) return extendCode;
-  if (phaseProgress >= 0.92 && phaseProgress < 0.98) return retractCode;
+/** 任务序列货叉作业命令：取货中 → 取货完成 → 放货中 → 放货完成 → 空闲。 */
+function resolveTaskForkCommand(phaseProgress: number): number {
+  if (phaseProgress < 0.24) return 1;
+  if (phaseProgress < 0.5) return 2;
+  if (phaseProgress < 0.74) return 3;
+  if (phaseProgress < 0.86) return 5;
   return 0;
 }
 
-/** 目标位演示中生成货叉编码器距离，用于校准货物进入虚拟定位框的过程。 */
-function resolveTargetForkDistance(phaseProgress: number, targetDistance: number): number {
-  if (phaseProgress < 0.52) return 0.12;
-  if (phaseProgress < 0.8) return 0.12 + ((phaseProgress - 0.52) / 0.28) * (targetDistance - 0.12);
-  if (phaseProgress < 0.92) return targetDistance;
-  return Math.max(0.12, targetDistance - ((phaseProgress - 0.92) / 0.08) * (targetDistance - 0.12));
+/** 任务序列货叉伸缩动作：取货窗口 0.06~0.2、放货窗口 0.56~0.7，各一次伸出+收回。 */
+function resolveTaskForkMovement(phaseProgress: number, extendCode: number, retractCode: number): number {
+  if ((phaseProgress >= 0.06 && phaseProgress < 0.16) || (phaseProgress >= 0.56 && phaseProgress < 0.66)) return extendCode;
+  if ((phaseProgress >= 0.16 && phaseProgress < 0.2) || (phaseProgress >= 0.66 && phaseProgress < 0.7)) return retractCode;
+  return 0;
 }
 
-/** 放货完成后清空叉上条码，验证运行时能让上一帧货物留在 locator 内。 */
-function resolveTargetContainerCode(cargoCode: string, phaseProgress: number): string {
-  return phaseProgress >= 0.96 ? '' : cargoCode;
+/** 任务序列货叉编码器距离：与伸缩窗口同步，伸出到目标行程后收回。 */
+function resolveTaskForkDistance(phaseProgress: number, targetDistance: number): number {
+  const windows: Array<[number, number, number]> = [
+    [0.06, 0.16, 0.2],
+    [0.56, 0.66, 0.7],
+  ];
+  for (const [extendStart, retractStart, retractEnd] of windows) {
+    if (phaseProgress >= extendStart && phaseProgress < retractStart) {
+      return 0.12 + ((phaseProgress - extendStart) / (retractStart - extendStart)) * (targetDistance - 0.12);
+    }
+    if (phaseProgress >= retractStart && phaseProgress < retractEnd) {
+      return Math.max(0.12, targetDistance - ((phaseProgress - retractStart) / (retractEnd - retractStart)) * (targetDistance - 0.12));
+    }
+  }
+  return 0.12;
 }
 
 /** 将模拟浮点数收敛到 4 位小数，避免快照中出现无意义长小数。 */

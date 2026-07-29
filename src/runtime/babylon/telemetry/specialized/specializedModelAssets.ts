@@ -146,8 +146,20 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     lastFrameTimeMs: performance.now(),
     frontForkDirection: 1,
     backForkDirection: 1,
-    frontCargoCode: null,
-    backCargoCode: null,
+    frontCargoKey: null,
+    backCargoKey: null,
+    frontCargoBoundToFork: false,
+    backCargoBoundToFork: false,
+    frontCargoHoldPosition: null,
+    backCargoHoldPosition: null,
+    frontCargoHoldRotation: null,
+    backCargoHoldRotation: null,
+    frontCargoHoldScaling: null,
+    backCargoHoldScaling: null,
+    frontCargoFetchRow: null,
+    backCargoFetchRow: null,
+    frontLastCommand: null,
+    backLastCommand: null,
     nodeBaselines: new Map(),
     lastTargetKey: null,
   };
@@ -164,8 +176,20 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backForkOffset = 0;
   model.stackerTelemetry.frontForkDirection = 1;
   model.stackerTelemetry.backForkDirection = 1;
-  model.stackerTelemetry.frontCargoCode = null;
-  model.stackerTelemetry.backCargoCode = null;
+  model.stackerTelemetry.frontCargoKey = null;
+  model.stackerTelemetry.backCargoKey = null;
+  model.stackerTelemetry.frontCargoBoundToFork = false;
+  model.stackerTelemetry.backCargoBoundToFork = false;
+  model.stackerTelemetry.frontCargoHoldPosition = null;
+  model.stackerTelemetry.backCargoHoldPosition = null;
+  model.stackerTelemetry.frontCargoHoldRotation = null;
+  model.stackerTelemetry.backCargoHoldRotation = null;
+  model.stackerTelemetry.frontCargoHoldScaling = null;
+  model.stackerTelemetry.backCargoHoldScaling = null;
+  model.stackerTelemetry.frontCargoFetchRow = null;
+  model.stackerTelemetry.backCargoFetchRow = null;
+  model.stackerTelemetry.frontLastCommand = null;
+  model.stackerTelemetry.backLastCommand = null;
   model.stackerTelemetry.nodeBaselines.clear();
   model.stackerTelemetry.lastTargetKey = null;
 }

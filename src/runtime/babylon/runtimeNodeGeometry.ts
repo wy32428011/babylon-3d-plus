@@ -1,4 +1,4 @@
-import { AbstractMesh, Quaternion, TransformNode, Vector3, type Scene } from '@babylonjs/core';
+import { AbstractMesh, Matrix, Quaternion, TransformNode, Vector3, type Scene } from '@babylonjs/core';
 
 /** 世界空间轴对齐包围盒。 */
 export type RuntimeWorldBounds = {
@@ -112,6 +112,30 @@ export function getNodeWorldRotation(node: TransformNode): Quaternion {
   const rotation = Quaternion.Identity();
   node.computeWorldMatrix(true).decompose(undefined, rotation);
   return rotation;
+}
+
+/**
+ * 读取节点世界位姿（旋转 + 缩放），镜像（负行列式，如 scale.z=-1）由缩放符号保留。
+ * Matrix.decompose 无法把镜像表达为 quaternion，会把翻转折进旋转，导致货物落位后朝下。
+ */
+export function getNodeWorldPosePreservingMirror(node: TransformNode): { rotation: Quaternion; scaling: Vector3 } {
+  const m = node.computeWorldMatrix(true).m;
+  const sx = Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+  const sy = Math.sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+  let sz = Math.sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+  // 镜像轴取 z：R'·S' 与原矩阵恒等，渲染结果与完整世界矩阵一致
+  const det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) + m[2] * (m[4] * m[9] - m[5] * m[8]);
+  if (det < 0) sz = -sz;
+  const rotationMatrix = Matrix.FromArray([
+    m[0] / sx, m[1] / sx, m[2] / sx, 0,
+    m[4] / sy, m[5] / sy, m[6] / sy, 0,
+    m[8] / sz, m[9] / sz, m[10] / sz, 0,
+    0, 0, 0, 1,
+  ]);
+  return {
+    rotation: Quaternion.FromRotationMatrix(rotationMatrix),
+    scaling: new Vector3(sx, sy, sz),
+  };
 }
 
 /** 创建局部坐标轴单位向量。 */

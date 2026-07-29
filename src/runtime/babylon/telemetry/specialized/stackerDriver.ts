@@ -16,6 +16,7 @@ import {
   getModelAxis,
   getNodesProjectedBounds,
   getNodesWorldBounds,
+  getNodeWorldPosePreservingMirror,
   getNodeWorldRotation,
   lerpNumber,
   lerpVector,
@@ -32,7 +33,7 @@ import {
   type StackerTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
-import { readContainerCode, writeDeviceTelemetryMetadata } from './telemetryMetadata';
+import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
@@ -85,27 +86,31 @@ export class StackerTelemetryDriver {
     const targetPosition = targetLocator
       ? this.resolveStackerTargetPosition(targetLocator, snapshot.assetCode, toX, toY, toZ)
       : null;
+    // 有目标位但货格无法解析：报错误日志并冻结移动，禁止盲目执行
+    const targetCellMissing = snapshot.hasTargetLocation && (targetLocator === null || targetPosition === null);
     const targetOffsets = targetPosition ? this.resolveStackerTargetMotionOffsets(model, targetPosition) : null;
     this.reportStackerTargetProjection(model, targetLocator, targetPosition, targetOffsets, toX, toY);
-    this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds);
-    this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds);
-    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds, targetLocator);
+    const travelMoving = this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds, targetCellMissing);
+    const liftMoving = this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds, targetCellMissing);
+    this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds, targetLocator, travelMoving || liftMoving, targetCellMissing);
     this.applyStackerNodeMotionOffsets(model);
-    this.applyStackerCargoMotion(model, snapshot, targetLocator, targetPosition);
+    if (!targetCellMissing) {
+      this.applyStackerCargoMotion(model, snapshot, targetLocator, targetPosition);
+    }
     this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
   }
 
-  /** 解析堆垛机运动目标：设备网格匹配路径精确到格口支撑位，assetId 直查保持定位框根节点语义。 */
+  /** 解析堆垛机运动目标：设备网格匹配路径精确到格口支撑位（格口无效返回 null），assetId 直查保持定位框根节点语义。 */
   private resolveStackerTargetPosition(
     locator: LocatorRuntimeEntry,
     assetCode: string,
     toX: number | null,
     toY: number | null,
     toZ: number | null,
-  ): Vector3 {
+  ): Vector3 | null {
     const rootPosition = locator.root.getAbsolutePosition();
     if (!assetCode || toX === null || toY === null || toZ === null) return rootPosition;
-    return this.resolveLocatorBoxSupportPosition(locator, toX, toY) ?? rootPosition;
+    return this.resolveLocatorBoxSupportPosition(locator, toX, toY);
   }
 
   /** 解析目标格口的支撑位世界坐标：水平取 box 中心、高度取 box 底面，越界时返回 null 由调用方回退。 */
@@ -126,7 +131,7 @@ export class StackerTelemetryDriver {
       const reportKey = `${locator.assetId}:${toX}:${toY}`;
       if (!this.state.reportedInvalidStackerBoxTargets.has(reportKey)) {
         this.state.reportedInvalidStackerBoxTargets.add(reportKey);
-        this.host.pushLog(`库位 ${locator.assetId} 不存在格口 列${toX} 层${toY}，已回退定位框根节点。`);
+        this.host.pushLog(`错误：库位 ${locator.assetId} 不存在目标货格（列${toX} 层${toY}），已忽略移动指令。`);
       }
       return null;
     }
@@ -188,19 +193,21 @@ export class StackerTelemetryDriver {
     );
   }
 
-  /** 根据 distance_x 校准行走机构虚拟位置，并在有目标位或 movement_x 时沿轨道推进。 */
+  /** 根据 distance_x 校准行走机构虚拟位置，并在有目标位或 movement_x 时沿轨道推进；返回本帧是否在移动。 */
   private applyStackerRootMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
     targetTravelOffset: number | null,
     deltaSeconds: number,
-  ): void {
+    movementBlocked: boolean,
+  ): boolean {
     const state = model.stackerTelemetry;
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
     state.rootPosition ??= state.rootBasePosition.clone();
 
+    // 目标货格缺失时整机冻结：distance 校准同样跳过，保持当前位置不漂移
     const distanceX = readNumberField(snapshot.fields, 'distance_x');
-    if (distanceX !== null && targetTravelOffset === null) {
+    if (distanceX !== null && targetTravelOffset === null && !movementBlocked) {
       const calibratedPosition = state.rootBasePosition.add(travelAxis.scale(distanceX));
       state.rootPosition = lerpVector(
         state.rootPosition,
@@ -209,7 +216,8 @@ export class StackerTelemetryDriver {
       );
     }
 
-    if (!snapshot.faulted) {
+    let moving = false;
+    if (!snapshot.faulted && !movementBlocked) {
       if (targetTravelOffset !== null) {
         const rootTargetPosition = this.constrainStackerTravelPosition(
           model,
@@ -219,70 +227,88 @@ export class StackerTelemetryDriver {
         const forkMoving = (readIntegerField(snapshot.fields, 'front_movement_z') ?? 0) !== 0
           || (readIntegerField(snapshot.fields, 'back_movement_z') ?? 0) !== 0;
         if (forkMoving) {
+          // 伸叉信号到位表示设备已就位：瞬移对齐，不视为移动（避免与"移动收叉"约束互相触发）
           state.rootPosition = rootTargetPosition;
         } else {
+          const previous = state.rootPosition;
           state.rootPosition = moveVectorTowards(
             state.rootPosition,
             rootTargetPosition,
             STACKER_TARGET_SPEED_METERS_PER_SECOND * deltaSeconds,
           );
+          moving = Vector3.DistanceSquared(previous, state.rootPosition) > 1e-12;
         }
       } else {
         const direction = this.readTravelDirection(readIntegerField(snapshot.fields, 'movement_x'));
         const speed = this.readSpeed(snapshot, 'rpm_x', STACKER_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND);
         if (direction !== 0) {
           state.rootPosition = state.rootPosition.add(travelAxis.scale(direction * speed * deltaSeconds));
+          moving = true;
         }
       }
     }
 
     state.rootPosition = this.constrainStackerTravelPosition(model, state.rootPosition, travelAxis);
+    return moving;
   }
 
-  /** 根据 distance_y 校准载货台高度，并按目标位层高或 movement_y 推进升降。 */
+  /** 根据 distance_y 校准载货台高度，并按目标位层高或 movement_y 推进升降；返回本帧是否在移动。 */
   private applyStackerLiftMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
     targetLiftOffset: number | null,
     deltaSeconds: number,
-  ): void {
+    movementBlocked: boolean,
+  ): boolean {
     const state = model.stackerTelemetry;
     const distanceY = readNumberField(snapshot.fields, 'distance_y');
-    if (distanceY !== null && targetLiftOffset === null) {
+    if (distanceY !== null && targetLiftOffset === null && !movementBlocked) {
       state.liftOffset = lerpNumber(state.liftOffset, distanceY, this.getCalibrationAlpha(deltaSeconds));
     }
 
-    if (!snapshot.faulted) {
+    let moving = false;
+    if (!snapshot.faulted && !movementBlocked) {
       if (targetLiftOffset !== null) {
         const forkMoving = (readIntegerField(snapshot.fields, 'front_movement_z') ?? 0) !== 0
           || (readIntegerField(snapshot.fields, 'back_movement_z') ?? 0) !== 0;
         if (forkMoving) {
           state.liftOffset = targetLiftOffset;
         } else {
+          const previous = state.liftOffset;
           state.liftOffset = moveNumberTowards(
             state.liftOffset,
             targetLiftOffset,
             STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND * deltaSeconds,
           );
+          moving = Math.abs(state.liftOffset - previous) > 1e-9;
         }
       } else {
         const direction = this.readLiftDirection(readIntegerField(snapshot.fields, 'movement_y'));
         const speed = this.readSpeed(snapshot, 'rpm_y', STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND);
-        state.liftOffset = Math.max(0, state.liftOffset + direction * speed * deltaSeconds);
+        if (direction !== 0) {
+          state.liftOffset = Math.max(0, state.liftOffset + direction * speed * deltaSeconds);
+          moving = true;
+        }
       }
     }
+    return moving;
   }
 
-  /** 根据前后叉编码值和 movement_z 信号分别驱动两组货叉伸缩。 */
+  /** 根据前后叉编码值和 movement_z 信号分别驱动两组货叉伸缩；本体行走/升降期间强制收回原点。 */
   private applyStackerForkMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
     targetPosition: Vector3 | null,
     deltaSeconds: number,
     targetLocator: LocatorRuntimeEntry | null,
+    bodyMoving: boolean,
+    extensionBlocked: boolean,
   ): void {
-    const frontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
-    const backMovement = readIntegerField(snapshot.fields, 'back_movement_z');
+    // 目标货格缺失时禁止伸叉（1/3 归一为静止），收回（2/4）始终可用
+    const rawFrontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
+    const rawBackMovement = readIntegerField(snapshot.fields, 'back_movement_z');
+    const frontMovement = extensionBlocked && (rawFrontMovement === 1 || rawFrontMovement === 3) ? null : rawFrontMovement;
+    const backMovement = extensionBlocked && (rawBackMovement === 1 || rawBackMovement === 3) ? null : rawBackMovement;
     const frontForkSpeed = this.readSpeed(snapshot, 'front_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const backForkSpeed = this.readSpeed(snapshot, 'back_rpm_z', STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND);
     const reach = this.readStackerForkReachConfig(model);
@@ -290,6 +316,13 @@ export class StackerTelemetryDriver {
       ? resolveStackerStorageForkReach(targetLocator.storageDepth, reach.stageOne, reach.stageTwo)
       : null;
     const state = model.stackerTelemetry;
+
+    // 平移/升降与货叉伸出互斥：本体移动期间两叉收回并保持原点
+    if (bodyMoving) {
+      state.frontForkOffset = moveNumberTowards(state.frontForkOffset, 0, frontForkSpeed * deltaSeconds);
+      state.backForkOffset = moveNumberTowards(state.backForkOffset, 0, backForkSpeed * deltaSeconds);
+      return;
+    }
 
     state.frontForkOffset = this.updateForkOffset(
       state.frontForkOffset,
@@ -405,14 +438,14 @@ export class StackerTelemetryDriver {
     return clampNumber(offset, -reach, reach);
   }
 
-  /** 按目标定位框在模型局部 X 轴上的投影计算伸出距离，符号表示方向。 */
+  /** 按目标定位框在模型局部 X 轴上的投影计算伸出距离，符号表示方向；无伸缩信号时不提供校准。 */
   private resolveForkCalibrationDistance(
     model: ModelRuntimeEntry,
     side: StackerForkSide,
     targetPosition: Vector3 | null,
     targetForkDistance: number | null,
   ): number | null {
-    if (!targetPosition) return null;
+    if (!targetPosition || targetForkDistance === null) return null;
 
     const forkGroups = this.findStackerForkNodeGroups(model);
     const candidateNodes = side === 'front'
@@ -426,16 +459,14 @@ export class StackerTelemetryDriver {
     const projectedDistance = Vector3.Dot(targetPosition.subtract(forkCenter), forkAxis);
     if (!Number.isFinite(projectedDistance)) return null;
 
-    if (targetForkDistance !== null) return Math.sign(projectedDistance) * targetForkDistance;
-    return projectedDistance;
+    return Math.sign(projectedDistance) * targetForkDistance;
   }
 
-  /** 根据 MQTT 动作信号或目标库位返回货叉伸出/归零距离。 */
+  /** 只在货叉有伸缩信号（movement_z = 1/2/3/4）时返回校准距离，避免无信号时自动移向货格。 */
   private resolveTargetLocatorForkDistance(targetForkReach: number | null, movement: number | null): number | null {
     if (targetForkReach === null) return null;
     if (movement === 2 || movement === 4) return 0;
     if (movement === 1 || movement === 3) return targetForkReach;
-    if (targetForkReach > 0) return targetForkReach;
     return null;
   }
 
@@ -491,94 +522,246 @@ export class StackerTelemetryDriver {
     targetLocator: LocatorRuntimeEntry | null,
     targetPosition: Vector3 | null,
   ): void {
-    const frontContainerCode = readContainerCode(snapshot, 'front_containerCode');
-    const backContainerCode = readContainerCode(snapshot, 'back_containerCode');
-
-    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'front', frontContainerCode);
-    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'back', backContainerCode);
+    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'front');
+    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'back');
   }
 
-  /** 让指定货叉上的托盘在叉尖和目标 locator 之间运动，放货完成后留在 locator 内。 */
+  /**
+   * 单侧货叉的货物状态机：command 决定取/放阶段，货叉伸出到位（伸叉动画完结）执行绑定/解绑。
+   * command 语义：1 取货中 / 2 取货完成 / 3、4 放货中 / 5 放货完成。
+   */
   private applyStackerForkCargoMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
     targetLocator: LocatorRuntimeEntry | null,
     targetPosition: Vector3 | null,
     side: StackerForkSide,
-    containerCode: string | null,
   ): void {
+    const state = model.stackerTelemetry;
     const command = readIntegerField(snapshot.fields, side === 'front' ? 'front_command' : 'back_command');
-    const previousForkCode = this.getStackerForkCargoCode(model, side);
-    const activeContainerCode = this.resolveStackerForkCargoCode(model, side, containerCode, command, targetLocator);
-    if (!activeContainerCode) return;
+    const lastCommand = side === 'front' ? state.frontLastCommand : state.backLastCommand;
 
-    // 取货完成沿检测：新条码上叉且当前位是 fetch 驱动定位线框时，触发该排单排同步
-    if (activeContainerCode !== previousForkCode && (command === 1 || command === 2) && snapshot.currentLocationKey) {
-      const sourceLocator = this.host.getLocatorTarget(snapshot.currentLocationKey);
-      const fetchRow = sourceLocator ? this.host.resolveFetchDriveRowForLocator(sourceLocator) : null;
-      if (fetchRow !== null) this.host.handleFetchRowSync(fetchRow);
+    if (!snapshot.faulted) {
+      // command 1 边沿：取货初始化，接管目标格口渲染
+      if (command === 1 && lastCommand !== 1) {
+        this.beginStackerFetch(model, snapshot, targetLocator, targetPosition, side);
+      }
+      // 放货阶段：未经历取货直接放货（如开机即放货）时叉上补建货物并绑定叉尖；
+      // 同时接管目标格口渲染使其保持为空，货物全程由 stacker 渲染；
+      // 锁定目标排号：command 5 到达时目标位字段可能已清零，排号必须提前留存
+      if ((command === 3 || command === 4) && targetLocator) {
+        if (!this.getStackerForkCargoKey(model, side)) {
+          this.beginStackerPlaceWithCargo(model, side);
+        }
+        const lockedRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
+        if (lockedRow === null) {
+          const toX = readIntegerField(snapshot.fields, 'to_x');
+          const toY = readIntegerField(snapshot.fields, 'to_y');
+          const fetchRow = toX !== null && toY !== null
+            ? this.host.suppressFetchCellForLocator(targetLocator, toX, toY)
+            : this.host.resolveFetchDriveRowForLocator(targetLocator);
+          if (side === 'front') state.frontCargoFetchRow = fetchRow;
+          else state.backCargoFetchRow = fetchRow;
+        }
+      }
+      // 伸叉动画完结（偏移到达目标行程）：取货阶段绑定货物上叉，放货阶段解绑落入箱位
+      if (this.isStackerForkFullyExtended(model, snapshot, targetLocator, side)) {
+        if (command === 1 || command === 2) this.bindStackerCargo(model, side);
+        else if (command === 3 || command === 4) this.unbindStackerCargo(model, targetLocator, targetPosition, side);
+      }
+      // command 2 边沿：取货完成，交还源库位（触发 fetch 单排同步）
+      if (command === 2 && lastCommand !== 2) {
+        this.completeStackerFetch(model, side);
+      }
+      // command 5 边沿：放货完成，交还目标库位
+      if (command === 5 && lastCommand !== 5) {
+        this.completeStackerPlace(model, targetLocator, targetPosition, side);
+      }
     }
 
-    const cargo = this.getOrCreateStackerCargo(model.assetCode, activeContainerCode);
-    cargo.placedLocatorKey = null;
-    this.host.syncGeneratedCargoVisual(cargo, 'stacker', snapshot, this.host.resolveCargoGeneratorForModel(model));
-    const forkPosition = this.getStackerForkCargoPosition(model, side);
-    const supportPosition = targetLocator
-      ? targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator)
-      : null;
-    const reach = this.readStackerForkReachConfig(model);
-    const placingProgress = this.getStackerCargoPlacingProgress(command, side === 'front'
-      ? model.stackerTelemetry.frontForkOffset
-      : model.stackerTelemetry.backForkOffset, reach);
-    const nextPosition = supportPosition && placingProgress > 0
-      ? lerpVector(forkPosition, supportPosition, placingProgress)
-      : forkPosition;
+    this.updateStackerCargoPose(model, snapshot, side);
 
-    const nextRotation = targetLocator && placingProgress >= 1
-      ? getNodeWorldRotation(targetLocator.root)
-      : getNodeWorldRotation(model.root);
-    this.host.setGeneratedCargoRootPose(cargo, nextPosition, nextRotation);
-    if (supportPosition && placingProgress >= 1 && snapshot.targetLocationKey) {
-      const fetchRow = targetLocator ? this.host.resolveFetchDriveRowForLocator(targetLocator) : null;
-      if (fetchRow === null) {
-        cargo.placedLocatorKey = snapshot.targetLocationKey;
-      } else if (this.host.keepCargoForFetchRowSync(fetchRow, model.assetCode, activeContainerCode)) {
-        // fetch 驱动定位线框的库位货物由 fetch 数据唯一渲染：MQTT 货箱保留到单排同步响应应用时再销毁
-        this.host.handleFetchRowSync(fetchRow);
-      }
-      this.setStackerForkCargoCode(model, side, null);
+    if (side === 'front') {
+      state.frontLastCommand = command;
+    } else {
+      state.backLastCommand = command;
     }
   }
 
-  /** 在条码清空但仍处于放货命令时，沿用上一帧货物编号完成落位。 */
-  private resolveStackerForkCargoCode(
+  /** 货叉是否已伸出到目标行程（伸叉动画完结）；校准时偏移渐近目标值，留 2cm 到位余量。 */
+  private isStackerForkFullyExtended(
     model: ModelRuntimeEntry,
-    side: StackerForkSide,
-    containerCode: string | null,
-    command: number | null,
+    snapshot: StackerTelemetrySnapshot,
     targetLocator: LocatorRuntimeEntry | null,
-  ): string | null {
-    if (containerCode) {
-      const previousContainerCode = this.getStackerForkCargoCode(model, side);
-      if (previousContainerCode && previousContainerCode !== containerCode) {
-        this.disposeUnplacedStackerCargo(model.assetCode, previousContainerCode);
-      }
-      this.setStackerForkCargoCode(model, side, containerCode);
-      return containerCode;
-    }
-
-    const previousContainerCode = this.getStackerForkCargoCode(model, side);
-    if (previousContainerCode && targetLocator && this.isStackerCargoPlacingCommand(command)) {
-      return previousContainerCode;
-    }
-
-    this.setStackerForkCargoCode(model, side, null);
-    return null;
+    side: StackerForkSide,
+  ): boolean {
+    const reach = this.readStackerForkReachConfig(model);
+    const targetForkReach = snapshot.hasTargetLocation && targetLocator
+      ? resolveStackerStorageForkReach(targetLocator.storageDepth, reach.stageOne, reach.stageTwo)
+      : null;
+    const extendReach = targetForkReach ?? reach.total;
+    if (extendReach <= 0) return false;
+    const forkOffset = side === 'front'
+      ? model.stackerTelemetry.frontForkOffset
+      : model.stackerTelemetry.backForkOffset;
+    return Math.abs(forkOffset) >= extendReach - 0.02;
   }
 
-  /** 判断当前货叉状态是否正在把货物交接到目标定位框。 */
-  private isStackerCargoPlacingCommand(command: number | null): boolean {
-    return command === 3 || command === 4 || command === 5;
+  /** 取货初始化：在目标箱位支撑位创建货物并抑制该格口 fetch 渲染，货物暂留箱位等待伸叉绑定。 */
+  private beginStackerFetch(
+    model: ModelRuntimeEntry,
+    snapshot: StackerTelemetrySnapshot,
+    targetLocator: LocatorRuntimeEntry | null,
+    targetPosition: Vector3 | null,
+    side: StackerForkSide,
+  ): void {
+    const state = model.stackerTelemetry;
+    // 同侧旧货物（含 fetch 保留中的滞留项）先销毁，避免新任务复用到已交接的货物
+    this.disposeStackerCargoByKey(this.getStackerCargoKey(model.assetCode, side));
+    this.clearStackerForkCargoState(model, side);
+
+    if (!targetLocator) {
+      this.host.pushLog(`堆垛机 ${model.assetCode} 收到取货命令，但目标库位不存在，已忽略。`);
+      return;
+    }
+
+    this.getOrCreateStackerCargo(model.assetCode, side);
+    const toX = readIntegerField(snapshot.fields, 'to_x');
+    const toY = readIntegerField(snapshot.fields, 'to_y');
+    const fetchRow = toX !== null && toY !== null
+      ? this.host.suppressFetchCellForLocator(targetLocator, toX, toY)
+      : null;
+    const holdPosition = targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator);
+    const holdPose = getNodeWorldPosePreservingMirror(targetLocator.root);
+    if (side === 'front') {
+      state.frontCargoKey = this.getStackerCargoKey(model.assetCode, side);
+      state.frontCargoHoldPosition = holdPosition;
+      state.frontCargoHoldRotation = holdPose.rotation;
+      state.frontCargoHoldScaling = holdPose.scaling;
+      state.frontCargoFetchRow = fetchRow;
+    } else {
+      state.backCargoKey = this.getStackerCargoKey(model.assetCode, side);
+      state.backCargoHoldPosition = holdPosition;
+      state.backCargoHoldRotation = holdPose.rotation;
+      state.backCargoHoldScaling = holdPose.scaling;
+      state.backCargoFetchRow = fetchRow;
+    }
+  }
+
+  /** 直接进入放货流程时补建叉上货物：初始即绑定叉尖，等待伸叉到位后解绑落入目标箱位。 */
+  private beginStackerPlaceWithCargo(model: ModelRuntimeEntry, side: StackerForkSide): void {
+    this.disposeStackerCargoByKey(this.getStackerCargoKey(model.assetCode, side));
+    this.clearStackerForkCargoState(model, side);
+    this.getOrCreateStackerCargo(model.assetCode, side);
+    const state = model.stackerTelemetry;
+    const cargoKey = this.getStackerCargoKey(model.assetCode, side);
+    if (side === 'front') {
+      state.frontCargoKey = cargoKey;
+      state.frontCargoBoundToFork = true;
+    } else {
+      state.backCargoKey = cargoKey;
+      state.backCargoBoundToFork = true;
+    }
+  }
+
+  /** 伸叉结束，货物绑定到叉尖，之后随货叉一同运动。 */
+  private bindStackerCargo(model: ModelRuntimeEntry, side: StackerForkSide): void {
+    const state = model.stackerTelemetry;
+    if (!this.getStackerForkCargoKey(model, side)) return;
+    if (side === 'front') {
+      if (state.frontCargoBoundToFork) return;
+      state.frontCargoBoundToFork = true;
+      state.frontCargoHoldPosition = null;
+      state.frontCargoHoldRotation = null;
+      state.frontCargoHoldScaling = null;
+    } else {
+      if (state.backCargoBoundToFork) return;
+      state.backCargoBoundToFork = true;
+      state.backCargoHoldPosition = null;
+      state.backCargoHoldRotation = null;
+      state.backCargoHoldScaling = null;
+    }
+  }
+
+  /** 放货伸叉结束，货物解绑并留在目标箱位支撑位，货叉随后空收。 */
+  private unbindStackerCargo(
+    model: ModelRuntimeEntry,
+    targetLocator: LocatorRuntimeEntry | null,
+    targetPosition: Vector3 | null,
+    side: StackerForkSide,
+  ): void {
+    const state = model.stackerTelemetry;
+    if (!this.getStackerForkCargoKey(model, side) || !targetLocator) return;
+    const bound = side === 'front' ? state.frontCargoBoundToFork : state.backCargoBoundToFork;
+    if (!bound) return;
+    const holdPosition = targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator);
+    const holdPose = getNodeWorldPosePreservingMirror(targetLocator.root);
+    if (side === 'front') {
+      state.frontCargoBoundToFork = false;
+      state.frontCargoHoldPosition = holdPosition;
+      state.frontCargoHoldRotation = holdPose.rotation;
+      state.frontCargoHoldScaling = holdPose.scaling;
+    } else {
+      state.backCargoBoundToFork = false;
+      state.backCargoHoldPosition = holdPosition;
+      state.backCargoHoldRotation = holdPose.rotation;
+      state.backCargoHoldScaling = holdPose.scaling;
+    }
+  }
+
+  /** 取货完成：兜底绑定后交还源库位，触发该排 fetch 同步刷新库存渲染。 */
+  private completeStackerFetch(model: ModelRuntimeEntry, side: StackerForkSide): void {
+    if (!this.getStackerForkCargoKey(model, side)) return;
+    this.bindStackerCargo(model, side);
+    const state = model.stackerTelemetry;
+    const fetchRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
+    if (fetchRow !== null) this.host.handleFetchRowSync(fetchRow);
+    if (side === 'front') state.frontCargoFetchRow = null;
+    else state.backCargoFetchRow = null;
+  }
+
+  /** 放货完成：fetch 库位保留货物至单排同步响应后销毁，非 fetch 库位立即销毁。 */
+  private completeStackerPlace(
+    model: ModelRuntimeEntry,
+    targetLocator: LocatorRuntimeEntry | null,
+    targetPosition: Vector3 | null,
+    side: StackerForkSide,
+  ): void {
+    const cargoKey = this.getStackerForkCargoKey(model, side);
+    if (!cargoKey) return;
+    this.unbindStackerCargo(model, targetLocator, targetPosition, side);
+
+    const state = model.stackerTelemetry;
+    const fetchRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
+    if (this.host.keepCargoForFetchRowSync(fetchRow, model.assetCode, side)) {
+      this.host.handleFetchRowSync(fetchRow as number);
+    } else if (fetchRow === null) {
+      this.disposeStackerCargoByKey(cargoKey);
+    }
+    this.clearStackerForkCargoState(model, side);
+  }
+
+  /** 每帧刷新货物外观与位姿：绑定跟随叉尖，未绑定静止于箱位支撑位。 */
+  private updateStackerCargoPose(model: ModelRuntimeEntry, snapshot: StackerTelemetrySnapshot, side: StackerForkSide): void {
+    const cargoKey = this.getStackerForkCargoKey(model, side);
+    if (!cargoKey) return;
+    const cargo = this.state.stackerCargoMeshes.get(cargoKey);
+    if (!cargo) return;
+
+    const state = model.stackerTelemetry;
+    const bound = side === 'front' ? state.frontCargoBoundToFork : state.backCargoBoundToFork;
+    const holdPosition = side === 'front' ? state.frontCargoHoldPosition : state.backCargoHoldPosition;
+    const holdRotation = side === 'front' ? state.frontCargoHoldRotation : state.backCargoHoldRotation;
+    const holdScaling = side === 'front' ? state.frontCargoHoldScaling : state.backCargoHoldScaling;
+
+    this.host.syncGeneratedCargoVisual(cargo, 'stacker', snapshot, this.host.resolveCargoGeneratorForModel(model));
+    const position = bound || !holdPosition
+      ? this.getStackerForkCargoPosition(model, side)
+      : holdPosition;
+    const rotation = bound || !holdRotation
+      ? getNodeWorldRotation(model.root)
+      : holdRotation;
+    this.host.setGeneratedCargoRootPose(cargo, position, rotation, bound ? null : holdScaling);
   }
 
   /** 货物跟随最远段叉节点包围盒中心，确保始终定位在货叉实际伸出位置而非全部叉节点几何中心。 */
@@ -598,57 +781,57 @@ export class StackerTelemetryDriver {
     return legacyCenter.subtract(upAxis.scale(STACKER_CARGO_SIZE.y / 2));
   }
 
-  /** 放货中逐步进入目标框，放货完成时完全落入目标框。 */
-  private getStackerCargoPlacingProgress(command: number | null, forkOffset: number, reach: StackerForkReachConfig): number {
-    if (command === 5) return 1;
-    if (command === 4) return 0.85;
-    if (command === 3) return Math.max(0.45, Math.min(0.95, Math.abs(forkOffset) / Math.max(0.1, reach.total)));
-    return 0;
+  /** 读取某侧货叉当前货物键（JSON.stringify([assetCode, side])），null 表示叉上无货。 */
+  private getStackerForkCargoKey(model: ModelRuntimeEntry, side: StackerForkSide): string | null {
+    return side === 'front' ? model.stackerTelemetry.frontCargoKey : model.stackerTelemetry.backCargoKey;
   }
 
-  /** 读取某侧货叉当前正在携带或放货中的托盘编号。 */
-  private getStackerForkCargoCode(model: ModelRuntimeEntry, side: StackerForkSide): string | null {
-    return side === 'front' ? model.stackerTelemetry.frontCargoCode : model.stackerTelemetry.backCargoCode;
-  }
-
-  /** 更新某侧货叉当前货物编号，只保存运行时内存状态。 */
-  private setStackerForkCargoCode(model: ModelRuntimeEntry, side: StackerForkSide, containerCode: string | null): void {
+  /** 清空某侧货叉的全部货物状态，保留 lastCommand/lastMovementZ 边沿检测基线。 */
+  private clearStackerForkCargoState(model: ModelRuntimeEntry, side: StackerForkSide): void {
+    const state = model.stackerTelemetry;
     if (side === 'front') {
-      model.stackerTelemetry.frontCargoCode = containerCode;
+      state.frontCargoKey = null;
+      state.frontCargoBoundToFork = false;
+      state.frontCargoHoldPosition = null;
+      state.frontCargoHoldRotation = null;
+      state.frontCargoHoldScaling = null;
+      state.frontCargoFetchRow = null;
       return;
     }
 
-    model.stackerTelemetry.backCargoCode = containerCode;
+    state.backCargoKey = null;
+    state.backCargoBoundToFork = false;
+    state.backCargoHoldPosition = null;
+    state.backCargoHoldRotation = null;
+    state.backCargoHoldScaling = null;
+    state.backCargoFetchRow = null;
   }
 
-  /** 清理还没有落位的旧货物，避免条码切换后遗留在叉尖半路。 */
-  private disposeUnplacedStackerCargo(assetCode: string, containerCode: string): void {
-    const key = this.getStackerCargoKey(assetCode, containerCode);
+  /** 按键销毁堆垛机运行时货物，map 中不存在时幂等跳过。 */
+  private disposeStackerCargoByKey(key: string): void {
     const cargo = this.state.stackerCargoMeshes.get(key);
-    if (!cargo || cargo.placedLocatorKey) return;
-
+    if (!cargo) return;
     this.disposeStackerCargo(cargo);
     this.state.stackerCargoMeshes.delete(key);
   }
 
-  /** 创建或复用某个条码的堆垛机运行时货物。 */
-  getOrCreateStackerCargo(assetCode: string, containerCode: string): StackerCargoRuntimeEntry {
-    const key = this.getStackerCargoKey(assetCode, containerCode);
+  /** 创建或复用某侧货叉的堆垛机运行时货物。 */
+  getOrCreateStackerCargo(assetCode: string, side: StackerForkSide): StackerCargoRuntimeEntry {
+    const key = this.getStackerCargoKey(assetCode, side);
     const existing = this.state.stackerCargoMeshes.get(key);
     if (existing) return existing;
 
     const root = new TransformNode(
-      `stacker_cargo_root_${sanitizeBabylonName(assetCode)}_${sanitizeBabylonName(containerCode)}`,
+      `stacker_cargo_root_${sanitizeBabylonName(assetCode)}_${side}`,
       this.scene,
     );
     const entry: StackerCargoRuntimeEntry = {
       assetCode,
-      containerCode,
+      containerCode: side,
       root,
       outputOwner: null,
       fallback: null,
       generatorEntityId: null,
-      placedLocatorKey: null,
     };
     this.state.stackerCargoMeshes.set(key, entry);
     return entry;
@@ -668,9 +851,9 @@ export class StackerTelemetryDriver {
     this.host.disposeGeneratedCargo(cargo);
   }
 
-  /** 生成堆垛机运行时货物的无歧义唯一键，允许设备编号和条码包含任意分隔符。 */
-  getStackerCargoKey(assetCode: string, containerCode: string): string {
-    return JSON.stringify([assetCode, containerCode]);
+  /** 生成堆垛机运行时货物的唯一键：每台设备每侧货叉同时最多携带一箱。 */
+  getStackerCargoKey(assetCode: string, side: StackerForkSide): string {
+    return JSON.stringify([assetCode, side]);
   }
 
   /** 读取并缓存前后一段货叉的初始世界中心，缺失货叉时回退到载货台。 */
@@ -747,7 +930,7 @@ export class StackerTelemetryDriver {
       const missingTargetKey = `${deviceKey}:${snapshot.targetLocationKey}`;
       if (!this.state.reportedMissingTargets.has(missingTargetKey)) {
         this.state.reportedMissingTargets.add(missingTargetKey);
-        this.host.pushLog(`Stacker ${snapshot.assetCode} 未找到目标定位线框：${snapshot.targetLocationKey}`);
+        this.host.pushLog(`错误：Stacker ${snapshot.assetCode} 未找到目标货格 ${snapshot.targetLocationKey}，已忽略移动指令。`);
       }
     }
 
