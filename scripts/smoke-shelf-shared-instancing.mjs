@@ -385,20 +385,262 @@ async function waitForSceneRuntimeEntityMeshes(scene, runtime, entityId) {
   assert.fail(`${entityId} SceneRuntime 加载可渲染 Mesh 超时`);
 }
 
-/** 等待阵列实体自己的参数脚本宿主完成，并返回其参数变体运行时。 */
-async function waitForSceneRuntimeModelArrayParameterVariant(runtime, entityId) {
+/** 比较两个逻辑实体 ID 集合，避免断言失败时打印完整 Babylon 运行时对象。 */
+function hasSameEntityIds(actualEntityIds, expectedEntityIds) {
+  if (actualEntityIds.length !== expectedEntityIds.length) return false;
+  const expected = new Set(expectedEntityIds);
+  return actualEntityIds.every((entityId) => expected.has(entityId));
+}
+
+/** 等待阵列参数组收敛到目标签名、共享宿主和完整矩阵实体集合。 */
+async function waitForSceneRuntimeModelArrayParameterVariant(
+  runtime,
+  entityId,
+  { modelAsset, telemetryBinding = null, expectedEntityIds = [entityId] },
+) {
+  const expectedRenderSignature = runtime.createModelArrayRenderSignature(modelAsset, telemetryBinding);
+  let lastState = '尚未创建参数变体';
   for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const variant = runtime.modelArrayParameterVariantByEntityId?.get(entityId);
+    const mappedVariants = expectedEntityIds.map((expectedEntityId) => (
+      runtime.modelArrayParameterVariantByEntityId?.get(expectedEntityId)
+    ));
+    const sharedVariant = mappedVariants[0];
+    const batchEntityIds = variant?.model?.modelArrayBatch?.getEntityIds() ?? [];
     if (
-      variant?.model?.measurementReady
+      variant
+      && sharedVariant === variant
+      && mappedVariants.every((mappedVariant) => mappedVariant === variant)
+      && runtime.modelArrayParameterVariants?.get(variant.key) === variant
+      && variant.renderSignature === expectedRenderSignature
+      && variant.model.measurementReady
+      && !variant.model.externalScriptStarting
       && variant.model.modelArrayBatch
+      && runtime.isModelArrayBatchCurrent(variant.model, expectedRenderSignature)
+      && hasSameEntityIds(batchEntityIds, expectedEntityIds)
       && runtime.getModelMeasurement(entityId).status === 'ready'
     ) {
       return variant;
     }
+    lastState = [
+      `mapped=${mappedVariants.filter(Boolean).length}/${expectedEntityIds.length}`,
+      `shared=${Boolean(variant && mappedVariants.every((mappedVariant) => mappedVariant === variant))}`,
+      `signature=${variant?.renderSignature === expectedRenderSignature}`,
+      `ready=${Boolean(variant?.model?.measurementReady && !variant.model.externalScriptStarting)}`,
+      `batchEntities=${batchEntityIds.length}/${expectedEntityIds.length}`,
+    ].join(', ');
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.fail(`${entityId} 阵列参数脚本宿主初始化超时`);
+  assert.fail(`${entityId} 阵列参数脚本宿主收敛超时：${lastState}`);
+}
+
+/** 收集源批次及参数变体批次当前真正提交的逻辑实体覆盖。 */
+function collectSceneRuntimeModelArrayCoverage(runtime, sourceEntityId) {
+  const entries = [];
+  const sourceModel = runtime.models?.get(sourceEntityId);
+  const sourceBatch = sourceModel?.modelArrayBatch;
+  if (sourceBatch) {
+    entries.push({ kind: 'base', batch: sourceBatch, sourceSignature: sourceModel.modelArraySourceSignature });
+  }
+  for (const variant of runtime.modelArrayParameterVariants?.values?.() ?? []) {
+    if (variant.sourceEntityId === sourceEntityId && variant.model.modelArrayBatch) {
+      entries.push({
+        kind: 'variant',
+        batch: variant.model.modelArrayBatch,
+        sourceSignature: variant.model.modelArraySourceSignature,
+      });
+    }
+  }
+
+  const seenBatches = new Set();
+  const entityCoverageCounts = new Map();
+  const entitySourceSignatures = new Map();
+  const batchSummaries = [];
+  let activeBatchCount = 0;
+  let renderableBatchCount = 0;
+  let visibleThinInstanceCount = 0;
+  for (const entry of entries) {
+    if (seenBatches.has(entry.batch)) continue;
+    seenBatches.add(entry.batch);
+    const entityIds = [...entry.batch.getEntityIds()];
+    const coveredEntityIndexes = new Set();
+    let liveMeshCount = 0;
+    let renderableMeshCount = 0;
+    let sourceMatrixCount = 0;
+    let committedMatrixCount = 0;
+    for (const source of entry.batch.sources ?? []) {
+      for (const batch of source.batches ?? []) {
+        if (batch.mesh.isDisposed()) continue;
+        liveMeshCount += 1;
+        if (batch.mesh.isEnabled(false) && batch.mesh.thinInstanceCount > 0) {
+          renderableMeshCount += 1;
+          visibleThinInstanceCount += batch.mesh.thinInstanceCount;
+        }
+        const sourceEntityIndexes = batch.sourceEntityIndexBuffer;
+        const renderedEntityIndexes = batch.entityIndexBuffer;
+        sourceMatrixCount += sourceEntityIndexes?.length ?? 0;
+        const renderedCount = Math.min(
+          Math.max(0, Number(batch.mesh.thinInstanceCount) || 0),
+          renderedEntityIndexes?.length ?? 0,
+        );
+        if (!renderedEntityIndexes || renderedCount <= 0 || !batch.mesh.isEnabled(false)) continue;
+        committedMatrixCount += renderedCount;
+        for (let index = 0; index < renderedCount; index += 1) {
+          coveredEntityIndexes.add(renderedEntityIndexes[index]);
+        }
+      }
+    }
+
+    if (liveMeshCount > 0 && coveredEntityIndexes.size > 0) activeBatchCount += 1;
+    if (renderableMeshCount > 0) renderableBatchCount += 1;
+    for (const entityIndex of coveredEntityIndexes) {
+      const entityId = entityIds[entityIndex];
+      if (!entityId) continue;
+      entityCoverageCounts.set(entityId, (entityCoverageCounts.get(entityId) ?? 0) + 1);
+      const signatures = entitySourceSignatures.get(entityId) ?? new Set();
+      signatures.add(entry.sourceSignature);
+      entitySourceSignatures.set(entityId, signatures);
+    }
+    batchSummaries.push([
+      entry.kind,
+      `entities=${entityIds.length}`,
+      `covered=${coveredEntityIndexes.size}`,
+      `liveMeshes=${liveMeshCount}`,
+      `renderableMeshes=${renderableMeshCount}`,
+      `sourceMatrices=${sourceMatrixCount}`,
+      `renderedMatrices=${committedMatrixCount}`,
+    ].join(':'));
+  }
+
+  const activeHostMeshes = [];
+  const activeMeshCollection = runtime.scene?.getActiveMeshes?.();
+  const activeMeshes = new Set(
+    (activeMeshCollection?.data ?? []).slice(0, activeMeshCollection?.length ?? 0),
+  );
+  const hostModels = [
+    runtime.models?.get?.(sourceEntityId),
+    ...[...(runtime.modelArrayParameterVariants?.values?.() ?? [])]
+      .filter((variant) => variant.sourceEntityId === sourceEntityId)
+      .map((variant) => variant.model),
+  ].filter(Boolean);
+  const seenHostModels = new Set();
+  for (const model of hostModels) {
+    if (seenHostModels.has(model)) continue;
+    seenHostModels.add(model);
+    for (const mesh of model.root?.getChildMeshes?.(false) ?? model.meshes ?? []) {
+      if (mesh.isDisposed?.() || mesh.getTotalVertices?.() <= 0 || !activeMeshes.has(mesh)) continue;
+      activeHostMeshes.push(`${mesh.name}|${mesh.uniqueId}|layer=${mesh.layerMask}`);
+    }
+  }
+
+  return {
+    entityCoverageCounts,
+    entitySourceSignatures,
+    activeBatchCount,
+    renderableBatchCount,
+    visibleThinInstanceCount,
+    activeHostMeshes,
+    batchSummaries,
+  };
+}
+
+/** 每个采样帧都必须由至少一个可渲染批次无重叠地覆盖源模型和全部阵列副本。 */
+function assertSceneRuntimeModelArrayCoverageFrame(
+  runtime,
+  sourceEntityId,
+  expectedEntityIds,
+  label,
+  expectedRenderSignaturesByEntityId = null,
+) {
+  const coverage = collectSceneRuntimeModelArrayCoverage(runtime, sourceEntityId);
+  const expected = new Set(expectedEntityIds);
+  const coveredEntityIds = [...coverage.entityCoverageCounts.keys()];
+  const missingEntityIds = expectedEntityIds.filter((entityId) => !coverage.entityCoverageCounts.has(entityId));
+  const unexpectedEntityIds = coveredEntityIds.filter((entityId) => !expected.has(entityId));
+  const duplicateEntityIds = coveredEntityIds.filter((entityId) => coverage.entityCoverageCounts.get(entityId) !== 1);
+  const wrongSignatureEntityIds = expectedRenderSignaturesByEntityId
+    ? expectedEntityIds.filter((entityId) => {
+      const expectedSignatures = expectedRenderSignaturesByEntityId.get(entityId) ?? [];
+      const actualSignatures = [...(coverage.entitySourceSignatures.get(entityId) ?? [])];
+      return expectedSignatures.length === 0
+        || actualSignatures.length !== 1
+        || !expectedSignatures.some((signature) => actualSignatures[0].startsWith(
+          `${signature}|representation:original-geometry|`,
+        ));
+    })
+    : [];
+  const summary = coverage.batchSummaries.join('; ') || 'none';
+
+  assert.ok(coverage.activeBatchCount > 0, `${label}：活动阵列批次不得为 0，${summary}`);
+  assert.ok(coverage.renderableBatchCount > 0, `${label}：可渲染阵列批次不得为 0，${summary}`);
+  assert.ok(coverage.visibleThinInstanceCount > 0, `${label}：当前帧不得清空全部 thinInstance，${summary}`);
+  assert.deepEqual(
+    coverage.activeHostMeshes,
+    [],
+    `${label}：参数脚本宿主不得与权威阵列批次同时可见，${coverage.activeHostMeshes.join('; ') || 'none'}`,
+  );
+  assert.ok(
+    missingEntityIds.length === 0,
+    `${label}：缺失 ${missingEntityIds.length}/${expectedEntityIds.length} 个逻辑实体，示例=${missingEntityIds.slice(0, 5).join(',') || 'none'}，${summary}`,
+  );
+  assert.ok(
+    unexpectedEntityIds.length === 0,
+    `${label}：出现 ${unexpectedEntityIds.length} 个非目标逻辑实体，示例=${unexpectedEntityIds.slice(0, 5).join(',') || 'none'}，${summary}`,
+  );
+  assert.ok(
+    duplicateEntityIds.length === 0,
+    `${label}：${duplicateEntityIds.length} 个逻辑实体被旧/新批次重复覆盖，示例=${duplicateEntityIds.slice(0, 5).join(',') || 'none'}，${summary}`,
+  );
+  assert.ok(
+    wrongSignatureEntityIds.length === 0,
+    `${label}：${wrongSignatureEntityIds.length} 个逻辑实体由错误参数视觉批次承载，示例=${wrongSignatureEntityIds.slice(0, 5).join(',') || 'none'}，${summary}`,
+  );
+  return coverage;
+}
+
+/** 在真实渲染帧之间等待阵列换批收敛，并持续断言没有消失或重叠闪烁帧。 */
+async function waitForSceneRuntimeModelArrayTransition({
+  scene,
+  runtime,
+  sourceEntityId,
+  expectedEntityIds,
+  label,
+  expectedRenderSignaturesByEntityId,
+  isSettled,
+}) {
+  let minimumCoveredEntityCount = Number.POSITIVE_INFINITY;
+  let maximumActiveBatchCount = 0;
+  let sampleCount = 0;
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const beforeRender = assertSceneRuntimeModelArrayCoverageFrame(
+      runtime,
+      sourceEntityId,
+      expectedEntityIds,
+      `${label} 第 ${attempt + 1} 帧渲染前`,
+      expectedRenderSignaturesByEntityId,
+    );
+    minimumCoveredEntityCount = Math.min(minimumCoveredEntityCount, beforeRender.entityCoverageCounts.size);
+    maximumActiveBatchCount = Math.max(maximumActiveBatchCount, beforeRender.activeBatchCount);
+    sampleCount += 1;
+
+    assert.doesNotThrow(() => scene.render(), `${label} 第 ${attempt + 1} 帧必须保持可渲染`);
+    const afterRender = assertSceneRuntimeModelArrayCoverageFrame(
+      runtime,
+      sourceEntityId,
+      expectedEntityIds,
+      `${label} 第 ${attempt + 1} 帧渲染后`,
+      expectedRenderSignaturesByEntityId,
+    );
+    minimumCoveredEntityCount = Math.min(minimumCoveredEntityCount, afterRender.entityCoverageCounts.size);
+    maximumActiveBatchCount = Math.max(maximumActiveBatchCount, afterRender.activeBatchCount);
+    sampleCount += 1;
+
+    if (isSettled()) {
+      return { frameCount: attempt + 1, sampleCount, minimumCoveredEntityCount, maximumActiveBatchCount };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`${label} 在逐帧无闪烁观察期间未完成原子换批`);
 }
 
 /** 判断两个米制尺寸是否存在可观察差异。 */
@@ -764,8 +1006,12 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     });
     runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[0].id));
     const [firstParameterVariant, secondParameterVariant] = await Promise.all([
-      waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[0].id),
-      waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[1].id),
+      waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[0].id, {
+        modelAsset: persistentEntities[0].components.modelAsset,
+      }),
+      waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[1].id, {
+        modelAsset: persistentEntities[1].components.modelAsset,
+      }),
     ]);
     assert.notEqual(firstParameterVariant, secondParameterVariant, '不同参数值的阵列模型必须使用不同脚本宿主');
     assert.equal(runtime.modelArrayParameterVariants.size, 2, '两个不同参数组合只应创建两个脚本宿主');
@@ -847,7 +1093,9 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
         : entity
     ));
     runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[0].id));
-    const adjustedFirstVariant = await waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[0].id);
+    const adjustedFirstVariant = await waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[0].id, {
+      modelAsset: persistentEntities[0].components.modelAsset,
+    });
     assert.equal(adjustedFirstVariant, firstParameterVariant, '单个阵列模型连续调参必须复用同一个脚本宿主');
     assert.equal(adjustedFirstVariant.model, firstVariantModel, '连续调参不得重新创建模型运行时或重复加载资源');
     assert.equal(loadCount, 1, '连续调参不得增加 GLB 加载次数');
@@ -864,9 +1112,18 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     ));
     persistentEntities = sharedVariantEntities;
     runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[1].id));
-    const sharedFirstVariant = await waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[0].id);
-    const sharedSecondVariant = await waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[1].id);
-    assert.equal(sharedFirstVariant, sharedSecondVariant, '相同参数值的两个阵列模型必须合并复用一个脚本宿主');
+    const sharedVariantEntityIds = [persistentEntities[0].id, persistentEntities[1].id];
+    const [sharedFirstVariant, sharedSecondVariant] = await Promise.all([
+      waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[0].id, {
+        modelAsset: persistentEntities[0].components.modelAsset,
+        expectedEntityIds: sharedVariantEntityIds,
+      }),
+      waitForSceneRuntimeModelArrayParameterVariant(runtime, persistentEntities[1].id, {
+        modelAsset: persistentEntities[1].components.modelAsset,
+        expectedEntityIds: sharedVariantEntityIds,
+      }),
+    ]);
+    assert.ok(sharedFirstVariant === sharedSecondVariant, '相同参数值的两个阵列模型必须合并复用一个脚本宿主');
     assert.equal(runtime.modelArrayParameterVariants.size, 1, '参数组合合并后必须释放不再使用的脚本宿主');
     assert.deepEqual(
       sharedFirstVariant.model.modelArrayBatch.getEntityIds(),
@@ -925,6 +1182,336 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       persistentArrayMeshes: persistentMeshes.length,
       persistentArrayThinInstances: leftMeshes.length * 1000,
       independentParameterVariants: true,
+    };
+  } finally {
+    runtime.dispose();
+    SceneLoader.LoadAssetContainerAsync = originalLoadAssetContainerAsync;
+    integrationScene.dispose();
+    integrationEngine.dispose();
+  }
+}
+
+
+/** 验证阵列源模型从默认参数切到非默认值再恢复时，每个渲染帧都保持完整且唯一覆盖。 */
+async function runSceneRuntimeSourceParameterTransitionIntegration({ SceneRuntime, glbBytes, scriptText, metadata }) {
+  const integrationEngine = new NullEngine();
+  const integrationScene = new Scene(integrationEngine);
+  const originalLoadAssetContainerAsync = SceneLoader.LoadAssetContainerAsync;
+  let loadCount = 0;
+  let sourceDisposeCount = 0;
+  SceneLoader.LoadAssetContainerAsync = async () => {
+    loadCount += 1;
+    const container = await LoadAssetContainerAsync(glbBytes, integrationScene, {
+      pluginExtension: '.glb',
+      name: 'SceneRuntime-Shelf-Source-Parameter-Transition.glb',
+    });
+    const originalDispose = container.dispose.bind(container);
+    let sourceDisposed = false;
+    container.dispose = () => {
+      if (!sourceDisposed) {
+        sourceDisposed = true;
+        sourceDisposeCount += 1;
+      }
+      originalDispose();
+    };
+    return container;
+  };
+
+  const copyCount = 24;
+  const camera = new FreeCamera(
+    'SceneRuntimeShelfSourceParameterTransitionCamera',
+    new Vector3(copyCount, 8, -80),
+    integrationScene,
+  );
+  camera.setTarget(new Vector3(copyCount, 2, 0));
+  integrationScene.activeCamera = camera;
+  const runtime = new SceneRuntime(integrationScene);
+  let result;
+  try {
+    const defaultValues = createDefaultParameterValues(metadata);
+    const modelAsset = {
+      sourcePath: GLB_PATH,
+      sourceUrl: 'smoke://Assets/Models/Shelf/Shelf.glb',
+      assetCode: 'SHELF-SOURCE-PARAMETER-TRANSITION',
+      lengthUnit: 'millimeter',
+      unitScaleToMeters: 0.001,
+      scriptAssets: [{
+        path: SCRIPT_PATH,
+        sourceUrl: `data:text/plain;charset=utf-8,${encodeURIComponent(scriptText)}`,
+        name: 'shelf.model.ts',
+      }],
+      parameterScriptMetadata: metadata.parameterScripts ?? [],
+      animationScriptMetadata: metadata.animationScripts ?? [],
+      parameterConfig: metadata.modelParameters,
+      parameterValues: { ...defaultValues },
+    };
+    const source = createSceneRuntimeShelfEntity('RUNTIME-SHELF-SOURCE-PARAMETER', 0, modelAsset);
+    const instances = Array.from({ length: copyCount }, (_, index) => createSceneRuntimeShelfEntity(
+      `source-parameter-array-${index + 1}`,
+      (index + 1) * 2,
+      modelAsset,
+      { modelArrayInstance: { sourceEntityId: source.id } },
+    ));
+    const expectedEntityIds = [source.id, ...instances.map((entity) => entity.id)];
+
+    runtime.sync(createSceneRuntimeDocument([source], source.id));
+    await waitForSceneRuntimeEntityMeshes(integrationScene, runtime, source.id);
+    runtime.sync(createSceneRuntimeDocument([source, ...instances], source.id));
+    const sourceModel = runtime.models.get(source.id);
+    const initialBatch = sourceModel?.modelArrayBatch;
+    assert.ok(sourceModel && initialBatch, '默认参数 Shelf 阵列必须先创建完整基础批次');
+    const initialBatchMeshes = [...initialBatch.meshes];
+    const defaultRenderSignature = runtime.createModelArrayRenderSignature(
+      source.components.modelAsset,
+      source.components.telemetryBinding,
+    );
+    const defaultExpectedRenderSignatures = new Map(
+      expectedEntityIds.map((entityId) => [entityId, [defaultRenderSignature]]),
+    );
+    assert.ok(runtime.isModelArrayBatchCurrent(sourceModel, defaultRenderSignature), '默认参数基础批次必须使用默认渲染签名');
+    assert.ok(hasSameEntityIds(initialBatch.getEntityIds(), expectedEntityIds), '默认参数基础批次必须覆盖源模型和全部阵列副本');
+    assertSceneRuntimeModelArrayCoverageFrame(
+      runtime,
+      source.id,
+      expectedEntityIds,
+      '默认参数初始帧',
+      defaultExpectedRenderSignatures,
+    );
+
+    const changedModelAsset = {
+      ...modelAsset,
+      parameterValues: {
+        ...defaultValues,
+        layerCount: 2,
+        columnCount: 3,
+        doubleDeepEnabled: true,
+      },
+    };
+    const changedSource = createSceneRuntimeShelfEntity(source.id, 0, changedModelAsset);
+    const changedRenderSignature = runtime.createModelArrayRenderSignature(
+      changedSource.components.modelAsset,
+      changedSource.components.telemetryBinding,
+    );
+    const transitionExpectedRenderSignatures = new Map([
+      [source.id, [defaultRenderSignature, changedRenderSignature]],
+      ...instances.map((entity) => [entity.id, [defaultRenderSignature]]),
+    ]);
+    runtime.sync(createSceneRuntimeDocument([changedSource, ...instances], changedSource.id));
+    assert.ok(
+      runtime.models.get(source.id)?.modelArrayBatch === initialBatch,
+      '源模型从默认值改为非默认值时，新参数副本宿主 ready 前必须保留旧完整批次',
+    );
+    assert.ok(initialBatchMeshes.every((mesh) => !mesh.isDisposed()), '异步参数变体 ready 前不得提前释放旧完整批次 Mesh');
+    assertSceneRuntimeModelArrayCoverageFrame(
+      runtime,
+      source.id,
+      expectedEntityIds,
+      '默认值切到非默认值的同步帧',
+      transitionExpectedRenderSignatures,
+    );
+
+    const defaultToChanged = await waitForSceneRuntimeModelArrayTransition({
+      scene: integrationScene,
+      runtime,
+      sourceEntityId: source.id,
+      expectedEntityIds,
+      label: '源模型默认值切到非默认值',
+      expectedRenderSignaturesByEntityId: transitionExpectedRenderSignatures,
+      isSettled: () => {
+        const currentSourceModel = runtime.models.get(source.id);
+        const currentSourceBatch = currentSourceModel?.modelArrayBatch;
+        const copyVariant = runtime.modelArrayParameterVariantByEntityId?.get(instances[0].id);
+        return Boolean(
+          currentSourceModel
+          && currentSourceBatch
+          && currentSourceBatch !== initialBatch
+          && runtime.isModelArrayBatchCurrent(currentSourceModel, changedRenderSignature)
+          && hasSameEntityIds(currentSourceBatch.getEntityIds(), [source.id])
+          && copyVariant
+          && copyVariant.renderSignature === defaultRenderSignature
+          && copyVariant.model.modelArrayBatch
+          && runtime.isModelArrayBatchCurrent(copyVariant.model, defaultRenderSignature)
+          && hasSameEntityIds(copyVariant.model.modelArrayBatch.getEntityIds(), instances.map((entity) => entity.id))
+          && instances.every((entity) => runtime.modelArrayParameterVariantByEntityId?.get(entity.id) === copyVariant)
+          && runtime.modelArrayParameterVariants.size === 1
+        );
+      },
+    });
+    assert.ok(initialBatchMeshes.every((mesh) => mesh.isDisposed()), '新源批次和默认参数变体均 ready 后必须释放旧完整批次');
+
+    const changedSourceBatch = runtime.models.get(source.id)?.modelArrayBatch;
+    const defaultVariant = runtime.modelArrayParameterVariantByEntityId?.get(instances[0].id);
+    const defaultVariantBatch = defaultVariant?.model.modelArrayBatch;
+    assert.ok(changedSourceBatch && defaultVariantBatch, '非默认源模型收敛后必须同时保留源批次和默认副本变体批次');
+    const changedSourceBatchMeshes = [...changedSourceBatch.meshes];
+    const defaultVariantBatchMeshes = [...defaultVariantBatch.meshes];
+
+    runtime.sync(createSceneRuntimeDocument([source, ...instances], source.id));
+    const changedToDefault = await waitForSceneRuntimeModelArrayTransition({
+      scene: integrationScene,
+      runtime,
+      sourceEntityId: source.id,
+      expectedEntityIds,
+      label: '源模型非默认值恢复默认值',
+      expectedRenderSignaturesByEntityId: transitionExpectedRenderSignatures,
+      isSettled: () => {
+        const currentSourceModel = runtime.models.get(source.id);
+        const currentSourceBatch = currentSourceModel?.modelArrayBatch;
+        return Boolean(
+          currentSourceModel
+          && currentSourceBatch
+          && currentSourceBatch !== changedSourceBatch
+          && runtime.isModelArrayBatchCurrent(currentSourceModel, defaultRenderSignature)
+          && hasSameEntityIds(currentSourceBatch.getEntityIds(), expectedEntityIds)
+          && runtime.modelArrayParameterVariants.size === 0
+          && instances.every((entity) => !runtime.modelArrayParameterVariantByEntityId?.has(entity.id))
+        );
+      },
+    });
+    assert.ok(changedSourceBatchMeshes.every((mesh) => mesh.isDisposed()), '恢复默认值后必须释放非默认源批次');
+    assert.ok(defaultVariantBatchMeshes.every((mesh) => mesh.isDisposed()), '恢复默认值后必须释放旧默认参数变体批次');
+    assert.equal(loadCount, 1, '源参数往返切换必须复用同一 Shelf 源容器，不得重复加载 GLB');
+
+    result = {
+      copyCount,
+      logicalEntityCount: expectedEntityIds.length,
+      loadCount,
+      defaultToChanged,
+      changedToDefault,
+      minimumCoveredEntityCount: Math.min(
+        defaultToChanged.minimumCoveredEntityCount,
+        changedToDefault.minimumCoveredEntityCount,
+      ),
+    };
+  } finally {
+    runtime.dispose();
+    SceneLoader.LoadAssetContainerAsync = originalLoadAssetContainerAsync;
+    integrationScene.dispose();
+    integrationEngine.dispose();
+  }
+
+  assert.equal(sourceDisposeCount, 1, '源参数逐帧验证结束后必须且只能释放一次共享 Shelf 源容器');
+  return { ...result, sourceDisposeCount };
+}
+
+/** 验证现场最大参数 Shelf 在第 21 个副本处不会因内部 dense thinInstance 展开而整批消失。 */
+async function runDenseSceneRuntimeArrayIntegration({ SceneRuntime, glbBytes, scriptText, metadata, values }) {
+  const integrationEngine = new NullEngine();
+  const integrationScene = new Scene(integrationEngine);
+  const originalLoadAssetContainerAsync = SceneLoader.LoadAssetContainerAsync;
+  SceneLoader.LoadAssetContainerAsync = async () => LoadAssetContainerAsync(glbBytes, integrationScene, {
+    pluginExtension: '.glb',
+    name: 'SceneRuntime-Dense-Shelf.glb',
+  });
+
+  const camera = new FreeCamera('SceneRuntimeDenseShelfArrayCamera', new Vector3(1_300, 250, -3_000), integrationScene);
+  camera.setTarget(new Vector3(1_300, 50, 0));
+  integrationScene.activeCamera = camera;
+  const runtime = new SceneRuntime(integrationScene);
+  try {
+    const modelAsset = {
+      sourcePath: GLB_PATH,
+      sourceUrl: 'smoke://Assets/Models/Shelf/Shelf.glb',
+      assetCode: 'SHELF-DENSE-ARRAY',
+      lengthUnit: 'millimeter',
+      unitScaleToMeters: 0.001,
+      scriptAssets: [{
+        path: SCRIPT_PATH,
+        sourceUrl: `data:text/plain;charset=utf-8,${encodeURIComponent(scriptText)}`,
+        name: 'shelf.model.ts',
+      }],
+      parameterScriptMetadata: metadata.parameterScripts ?? [],
+      animationScriptMetadata: metadata.animationScripts ?? [],
+      parameterConfig: metadata.modelParameters,
+      parameterValues: { ...values },
+    };
+    const source = createSceneRuntimeShelfEntity('RUNTIME-SHELF-DENSE-SOURCE', 0, modelAsset);
+    runtime.sync(createSceneRuntimeDocument([source], source.id));
+    const sourceMeshes = await waitForSceneRuntimeEntityMeshes(integrationScene, runtime, source.id);
+    const denseSourceMeshes = sourceMeshes.filter((mesh) => mesh.metadata?.denseShelfBatch === true);
+    const denseSourceThinInstanceCount = denseSourceMeshes.reduce(
+      (total, mesh) => total + mesh.thinInstanceCount,
+      0,
+    );
+    const matrixSourceCount = sourceMeshes.reduce(
+      (total, mesh) => total + (mesh.thinInstanceCount > 0 ? mesh.thinInstanceCount : 1),
+      0,
+    );
+    assert.equal(denseSourceMeshes.length, EXPECTED_DENSE_RENDERABLE_MESH_COUNT_20X100, 'SceneRuntime 最大参数 Shelf 必须保留 18 个 dense batch');
+    assert.equal(denseSourceThinInstanceCount, EXPECTED_DENSE_THIN_INSTANCE_COUNT_20X100, 'SceneRuntime 最大参数 Shelf 必须保留 16674 个内部实例');
+
+    assert.equal(
+      runtime.updateEntityArrayPreview(source.id, { x: 1, y: 0, z: 0 }, 20, 0.2),
+      true,
+      '20 个最大参数 Shelf 副本必须创建临时矩阵预览',
+    );
+    const previewAt20 = runtime.entityArrayPreview?.matrixPreview;
+    assert.ok(previewAt20, '20 个最大参数 Shelf 副本必须保留矩阵预览批次');
+    const previewMeshesAt20 = [...previewAt20.meshes];
+    assert.equal(
+      previewMeshesAt20.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
+      matrixSourceCount * 20,
+      '20 个 Shelf 预览必须完整展开内部 dense 矩阵',
+    );
+    assert.equal(
+      runtime.updateEntityArrayPreview(source.id, { x: 1, y: 0, z: 0 }, 21, 0.2),
+      true,
+      '第 21 个最大参数 Shelf 副本不得触发预览批次失败',
+    );
+    assert.ok(runtime.entityArrayPreview?.matrixPreview === previewAt20, '第 21 个 Shelf 预览必须复用已有批次');
+    assert.equal(
+      previewMeshesAt20.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
+      matrixSourceCount * 21,
+      '第 21 个 Shelf 预览必须完整提交且不得清空前 20 个副本',
+    );
+    assert.ok(previewMeshesAt20.some((mesh) => mesh.isEnabled(false) && mesh.thinInstanceCount > 0), '第 21 个 Shelf 预览后至少一个批次必须保持可见');
+    assert.doesNotThrow(() => integrationScene.render(), '第 21 个最大参数 Shelf 预览必须保持可渲染');
+    runtime.clearEntityArrayPreview();
+
+    let instances = Array.from({ length: 20 }, (_, index) => createSceneRuntimeShelfEntity(
+      `dense-shelf-array-${index + 1}`,
+      (index + 1) * 120,
+      modelAsset,
+      { modelArrayInstance: { sourceEntityId: source.id } },
+    ));
+    runtime.sync(createSceneRuntimeDocument([source, ...instances], source.id));
+    const batchAt20 = runtime.models.get(source.id)?.modelArrayBatch;
+    assert.ok(batchAt20, '20 个正式 Shelf 副本必须创建矩阵批次');
+    assert.equal(batchAt20.getEntityIds().length, 21, '20 个正式副本加源 Shelf 必须保留 21 个逻辑实体');
+    const completeAt20 = batchAt20.sources.reduce((total, matrixSource) => total + matrixSource.batches.reduce(
+      (sourceTotal, batch) => sourceTotal + (batch.sourceEntityIndexBuffer?.length ?? 0),
+      0,
+    ), 0);
+    assert.equal(completeAt20, matrixSourceCount * 21, '20 个正式副本必须完整展开内部 dense 矩阵');
+
+    instances = [
+      ...instances,
+      createSceneRuntimeShelfEntity('dense-shelf-array-21', 21 * 120, modelAsset, {
+        modelArrayInstance: { sourceEntityId: source.id },
+      }),
+    ];
+    runtime.sync(createSceneRuntimeDocument([source, ...instances], instances.at(-1).id));
+    const batchAt21 = runtime.models.get(source.id)?.modelArrayBatch;
+    assert.ok(batchAt21 === batchAt20, '增加第 21 个正式 Shelf 副本必须复用已有矩阵批次');
+    assert.equal(batchAt21.getEntityIds().length, 22, '第 21 个副本提交后必须保留源和全部 21 个逻辑副本');
+    const completeAt21 = batchAt21.sources.reduce((total, matrixSource) => total + matrixSource.batches.reduce(
+      (sourceTotal, batch) => sourceTotal + (batch.sourceEntityIndexBuffer?.length ?? 0),
+      0,
+    ), 0);
+    assert.equal(completeAt21, matrixSourceCount * 22, '第 21 个正式副本不得清空或截断任何 dense 矩阵');
+    assert.ok(batchAt21.meshes.some((mesh) => mesh.isEnabled(false) && mesh.thinInstanceCount > 0), '第 21 个正式副本提交后至少一个分片必须保持可见');
+    assert.doesNotThrow(() => integrationScene.render(), '第 21 个最大参数 Shelf 正式阵列必须保持可渲染');
+
+    return {
+      sourceDenseMeshes: denseSourceMeshes.length,
+      sourceDenseThinInstanceCount: denseSourceThinInstanceCount,
+      matrixSourceCount,
+      previewCopies: 21,
+      previewThinInstances: matrixSourceCount * 21,
+      formalCopies: 21,
+      formalLogicalEntities: batchAt21.getEntityIds().length,
+      formalThinInstances: completeAt21,
+      formalBatchMeshes: batchAt21.meshes.length,
     };
   } finally {
     runtime.dispose();
@@ -1186,6 +1773,21 @@ try {
   cache.dispose();
   assert.equal(sourceDisposeCount, 1, '缓存重复释放不得重复销毁共享源容器');
 
+  const denseSceneRuntimeArray = await withStageTimeout('20x100 双深 Shelf 第 21 个阵列副本验证', () => runDenseSceneRuntimeArrayIntegration({
+    SceneRuntime,
+    glbBytes,
+    scriptText,
+    metadata,
+    values: targetSceneDenseValues,
+  }));
+  const sourceParameterTransition = await withStageTimeout('SceneRuntime 源参数逐帧无闪烁验证', () => (
+    runSceneRuntimeSourceParameterTransitionIntegration({
+      SceneRuntime,
+      glbBytes,
+      scriptText,
+      metadata,
+    })
+  ));
   const sceneRuntime = await withStageTimeout('SceneRuntime 集成验证', () => runSceneRuntimeIntegration({
     SceneRuntime,
     glbBytes,
@@ -1206,6 +1808,8 @@ try {
     generatedRoots: generatedRoots.length,
     selectionBufferStressInstances,
     sceneRuntime,
+    denseSceneRuntimeArray,
+    sourceParameterTransition,
   }, null, 2));
 } finally {
   await server?.close();

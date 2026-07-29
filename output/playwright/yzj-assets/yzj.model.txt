@@ -48,14 +48,14 @@ export const dataDriven = {
  * 管理 一体式顶升移载 在 Babylon.js Editor Inspector 中展示的静态参数。
  */
 export class ParametricModelParamsComponent {
-	@visibleAsNumber("长度", { step: 0.0001 })
-	public length: number = 1.8276;
+	@visibleAsNumber("长度", { step: 0.01 })
+	public length: number = 1.83;
 
-	@visibleAsNumber("宽度", { step: 0.0001 })
-	public width: number = 1.0621;
+	@visibleAsNumber("宽度", { step: 0.01 })
+	public width: number = 1.06;
 
-	@visibleAsNumber("高度", { step: 0.0000001 })
-	public height: number = 0.6478692;
+	@visibleAsNumber("高度", { step: 0.01 })
+	public height: number = 0.65;
 
 	@visibleAsString("主体颜色")
 	public bodyColor: string = "#387368";
@@ -63,8 +63,8 @@ export class ParametricModelParamsComponent {
 	@visibleAsNumber("辊筒框架位置", { step: 0.0000001 })
 	public rollerFramePosition: number = 1;
 
-	@visibleAsNumber("辊筒框架长度", { step: 0.000001 })
-	public rollerFrameLength: number = 1.021932;
+	@visibleAsNumber("辊筒框架长度", { step: 0.001 })
+	public rollerFrameLength: number = 1.022;
 
 	@visibleAsNumber("电机位置", { step: 0.0000001 })
 	public motorPosition: number = 0;
@@ -129,12 +129,12 @@ interface ResolvedDimension {
 }
 
 const DEFAULT_VALUES: ValueMap = {
-	"length": 1.8276,
-	"width": 1.0621,
-	"height": 0.6478692,
+	"length": 1.83,
+	"width": 1.06,
+	"height": 0.65,
 	"bodyColor": "#387368",
 	"rollerFramePosition": 0,
-	"rollerFrameLength": 1.021932,
+	"rollerFrameLength": 1.022,
 	"motorPosition": 0,
 	"rollerDensity": 0.6,
 	"showLegA": true,
