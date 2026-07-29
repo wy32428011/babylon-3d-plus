@@ -627,6 +627,7 @@ npm run build
 - 动画、物理、粒子、Terrain：补充完整 3D 编辑器常见运行时与内容创作能力。
 - 插件系统：后续提供可扩展的编辑器插件机制。
 ## Shelf 多穿货架参数化修复记录
+- 2026-07-29：扩大场景导入模型的可选中区域。真实三角面完全未命中时，Scene View 会按模型当前可见子 Mesh（包含参数脚本生成的 clone / thin instance）的实体局部有向包围盒补充拾取，使 Shelf 调整层数/列数后的货格空隙和多穿货架内部区域更容易选中；范围不增加额外 padding，旋转模型也不会退化为放大的世界 AABB，且后方真实可见模型仍保持命中优先。新增 `npm run smoke:model-picking` 定向回归。
 - 2026-07-29：统一场景模型选择效果。拖入场景的独占容器模型、共享实例、复制副本和阵列实例全部使用同一个 `SelectionOutlineLayer` 描边，不再因运行时资源策略不同而出现发光高亮与轮廓描边两种模式。
 - 2026-07-25：Shelf 按当前模型契约支持 `layerCount=1..20`、`columnCount=1..100`。当层/列/双深组合会超过逐节点生成阈值时，参数脚本自动切换为高密度 `dense batch + thin instance` 渲染：每个可渲染源叶 Mesh 只创建一个批次 Mesh，重复货格通过一次性矩阵缓冲提交，场景节点保持批次级；低密度路径继续保留原 `cloneSingleNode` 行为。目标场景的 20 层 × 100 列 × 双深参数（`cellWidth=1.2`、`cellHeight=1.2`、`supportLegHeight=0.2`、`cellDepth=1.183`、`deepSlotGap=1.2`）smoke 统计为 `denseBatch=18`、`thinInstances=16674`、`visibleMesh=18`，低密度当前回归为 142/196。视觉页 `output/playwright/shelf-visual-check.html?dense=1` 会自动取景并显示 effective layers/columns、mesh/node、thin instance 与 FPS 采样。
 - 2026-07-17：Shelf 普通场景实体与模型生成器输出改为共享源 `AssetContainer` + `InstancedMesh`：同一资源签名只加载一次 GLB，实体继续保留独立根节点、参数值、外置脚本、拾取 metadata、显隐/锁定和 Gizmo。参数脚本无需修改，其层/列/双深生成节点的子 Mesh 会继续保持实例化；实例选择改用单个共享 `SelectionOutlineLayer`。动态修改 `layerCount`/`columnCount` 后，运行时会在 `clearSelection()` 与 `addSelection()` 之间按 source mesh 补齐公开 `instancedBuffers` 容器，避免 Babylon 重新注册 `instanceSelectionId` 时写入空实例缓冲。新增引用计数回收与 `npm run smoke:shelf-instancing` 定向验证，详细边界见 `docs/shelf-shared-instancing.md`。

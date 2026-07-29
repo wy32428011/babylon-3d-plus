@@ -89,6 +89,7 @@ import {
   type ModelMeasurementResult,
 } from './modelMeasurement';
 import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
+import { intersectWorldRayWithModelDisplayBounds } from './modelPickBounds';
 import { GenericTelemetryMotionRuntime } from './telemetry/GenericTelemetryMotionRuntime';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
 import {
@@ -1012,6 +1013,11 @@ export class SceneRuntime {
     if (!point) return null;
 
     const picks = this.scene.multiPick(point.x, point.y, (mesh) => {
+      // Babylon 传入自定义 predicate 后会跳过默认的 enabled / visible / pickable 判断，
+      // 此处必须显式保留，否则参数脚本隐藏的源 Mesh 仍会形成不可见命中区域。
+      if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.isVisible || mesh.visibility <= 0 || !mesh.isPickable) {
+        return false;
+      }
       const batch = this.modelArrayBatchByMeshUniqueId.get(mesh.uniqueId);
       if (batch) return batch.hasPickableEntities();
       const entityId = this.readEntityIdFromMesh(mesh);
@@ -1026,7 +1032,24 @@ export class SceneRuntime {
       );
       if (entityId && this.isEntityScenePickable(entityId)) return entityId;
     }
-    return null;
+
+    const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
+    if (!camera) return null;
+    const ray = this.scene.createPickingRay(point.x, point.y, Matrix.Identity(), camera);
+    let nearestEntityId: string | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    // 精确三角面完全未命中时，才用模型当前显示范围填补细杆/梁之间的空隙；
+    // 真实可见几何仍保持优先，避免前方货架抢走透过空格看到的后方模型。
+    for (const [entityId, model] of this.models) {
+      if (model.modelArrayBatch || !this.isEntityScenePickable(entityId)) continue;
+      const distance = intersectWorldRayWithModelDisplayBounds(ray, model.root, model.contentRoot);
+      if (distance === null || distance >= nearestDistance) continue;
+      nearestEntityId = entityId;
+      nearestDistance = distance;
+    }
+
+    return nearestEntityId;
   }
 
   /** 将画布客户端坐标投射到世界 y=0 地面平面，用于拖拽释放时按鼠标位置放置模型。 */
