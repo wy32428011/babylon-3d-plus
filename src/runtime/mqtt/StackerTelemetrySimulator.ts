@@ -67,7 +67,7 @@ export class StackerTelemetrySimulator {
     this.configSignature = signature;
     this.stop(true);
 
-    if (!config.enabled || !config.simulatorEnabled || config.simulatorScenario === 'generic') return;
+    if (!config.enabled || !config.simulatorEnabled) return;
 
     this.start(config);
   }

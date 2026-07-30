@@ -166,7 +166,7 @@ async function createSymlinkZip(archivePath) {
 }
 
 async function createSceneFixture() {
-  const source = JSON.parse(await readFile(path.join(workspaceRoot, 'examples', 'scenes', 'generic-mqtt-motion-demo.scene.json'), 'utf8'));
+  const source = JSON.parse(await readFile(path.join(workspaceRoot, 'examples', 'scenes', 'stacker-mqtt-demo.scene.json'), 'utf8'));
   const sourceEntity = structuredClone(source.scene.entities[source.scene.entityIds[0]]);
   const entityId = 'entity_data_platform_smoke';
   const oldModelPath = 'D:\\old-editor\\Assets\\Models\\PackageModel\\PackageModel.glb';

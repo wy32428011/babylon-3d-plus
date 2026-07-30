@@ -16,7 +16,7 @@
                                            │
         ┌──────────────────────────────────┼──────────────────────────────────┐
         ▼ 数据源二选一                                                        │
-  MqttTelemetryClient               Stacker/GenericTelemetrySimulator         │
+  MqttTelemetryClient               StackerTelemetrySimulator                  │
   (broker / Electron 转发)           (无 broker 本地模拟)                        │
         └──────────────────────────────────┬──────────────────────────────────┘
                                            ▼ 'message' / tick
@@ -26,16 +26,17 @@
                                            ▼
         scene.onBeforeRenderObservable → applyDeviceTelemetryFrame()   ← 每帧
                                            │
-        ┌───────────────────┬──────────────┴───────────────┐
-        ▼ stacker           ▼ conveyor                     ▼ generic
-  applyStackerTelemetry   applyConveyorTelemetry      GenericTelemetryMotion
-  Frame()               Frame()                     Runtime.applyFrame()
-        │                     │                          (motionBinding 编译结果)
-        ▼                     ▼
-  行走/升降/货叉          滚筒/链条 + 货物位移
-  + 货叉货箱              + 输送货箱
-        │                     │
-        └──────────┬──────────┘
+                          SpecializedTelemetryRuntime.applyFrame()
+                          （驱动注册表按 deviceType 分发）
+                                           │
+                          ┌────────────────┴────────────────┐
+                          ▼ stacker                         ▼ conveyor
+                   StackerTelemetryDriver            ConveyorTelemetryDriver
+                          │                               │
+                   行走/升降/货叉                     滚筒/链条 + 货物位移
+                   + 货叉货箱                         + 输送货箱
+                          │                               │
+                          └──────────────┬────────────────┘
                    ▼ 货箱外观（两路共用）
         syncGeneratedCargoVisual()
           ├─ resolveCargoGeneratorForModel()     telemetryBinding.cargoGeneratorId
@@ -53,7 +54,7 @@
 |---|---|---|---|
 | 1 | 资源库导入模型包 | Electron IPC 扫描包目录（glb/gltf + meta.json + 可选 .model.ts + textures）→ 复制到 `Assets/Models` → 写 asset-index | `electron/ipc/modelPackageScanner.ts` |
 | 2 | 拖入/点击创建实体 | 创建 `modelAsset` 组件实体 → SceneRuntime 异步加载 GLB → 单位换算到米 → 启动 .model.ts 脚本 | `SceneRuntime` / `ExternalModelScriptRuntime` |
-| 3 | Inspector 配遥测绑定 | 填 `sourceId`/`deviceType`/`assetCode`（MQTT topic 身份），可选 `cargoGeneratorId`（货箱模板来源） | `TelemetryBindingInspector.tsx` |
+| 3 | Inspector 配遥测绑定 | 填 `sourceId`/`assetCode 覆盖`（MQTT topic 身份；deviceType 由模型包 dataDriven 声明，只读展示），可选 `cargoGeneratorId`（货箱模板来源） | `TelemetryBindingInspector.tsx` |
 | 4 | Inspector 配货箱生成器 | 生成器实体是纯模板库：`rules[]`（遥测字段匹配 → 目标模型）+ `defaultTarget` + 元数据 TTL | `ModelGeneratorInspector.tsx` |
 | 5 | 点「运行」 | 预检 `validateRuntimePreviewConfig`：MQTT 未启用拦截；模拟器已启用直接放行；真实连接需 broker 地址 + ≥1 个有效订阅 topic + 协议合规（Electron 支持 mqtt/mqtts/ws/wss，浏览器仅 ws/wss）。CAD 导入中也拦截。通过后 `runtimeMode='preview'`，冻结全部编辑写入（`guardRuntimePreviewMutation`） | `editorStore.startRuntimePreview` / `mqttConfigUtils.ts` |
 | 6 | 预览进行中 | SceneViewPanel effect：gizmo 脱手 → `runtime.sync()` 冻结文档（重建 Locator 索引）→ `beginTelemetryPreview()`（清阵列预览、脚本切 runtime 上下文、刷新生成器）→ `client.updateConfig(mqttConfig)`（连 broker 或起模拟器） | `SceneViewPanel.tsx` / `SceneRuntime.beginTelemetryPreview` |
@@ -91,8 +92,8 @@ export class ParametricModelRuntimeComponent {
   onStop(): void { /* 恢复自建资源 */ }
 }
 
-// ③ 可选 dataDriven 导出：声明运动节点/遥测字段映射，供输送机/通用运动运行时消费
-export const dataDriven = { motion: { ... } };
+// ③ 可选 dataDriven 导出：声明设备类型与运动节点/遥测字段映射，供对应专用驱动消费
+export const dataDriven = { device: { devType: 'conveyor' }, motion: { ... } };
 ```
 
 - 装饰器（`visibleAsNumber/String/Color/...`）来自 `babylonjs-editor-tools`，编译期由 `scripts/sync-model-parameters-from-scripts.mjs` 同步进 meta.json 的 `modelParameters`。
@@ -117,7 +118,7 @@ export const dataDriven = { motion: { ... } };
 |---|---|
 | `src/runtime/mqtt/MqttTelemetryClient.ts` | 浏览器侧 MQTT over WebSocket |
 | `src/runtime/mqtt/ElectronMqttTelemetryClient.ts` | Electron 主进程转发（桌面端） |
-| `src/runtime/mqtt/StackerTelemetrySimulator.ts` / `GenericTelemetrySimulator.ts` | 无 broker 本地模拟，构造 EPV payload |
+| `src/runtime/mqtt/StackerTelemetrySimulator.ts` | 无 broker 本地模拟，构造 EPV payload |
 | `src/runtime/mqtt/MqttStackerTelemetryClient.ts` | 统一调度：`updateConfig()` 按 `simulatorEnabled`/`simulatorScenario` 选真实连接或模拟器 |
 
 ### 4.2 解析 → 快照（`src/runtime/mqtt/deviceTelemetry.ts`）
@@ -137,13 +138,14 @@ export const dataDriven = { motion: { ... } };
 
 ### 4.4 逐帧分发（`SceneRuntime`）
 
-`applyDeviceTelemetryFrame()` 三路分流：
+`applyDeviceTelemetryFrame()` 委托 `SpecializedTelemetryRuntime.applyFrame()`，后者持有驱动注册表（`deviceType + isCapable + apply`），逐驱动收集候选模型并分发：
 
-| 路 | 归类依据 | 驱动入口 |
+| 驱动 | 归类依据 | 驱动入口 |
 |---|---|---|
-| stacker | `telemetryBinding.deviceType` 或模型能力 `stackerCapable` | `applyStackerTelemetryFrame()` → `applyStackerTelemetryToModel()` |
-| conveyor | 同上，`isConveyorRuntimeModel` | `applyConveyorTelemetryFrame()` → `applyConveyorTelemetryToModel()` |
-| generic | 其余带运动绑定的模型 | `GenericTelemetryMotionRuntime.applyFrame()`（`motionBindingCompiler` 编译的绑定驱动 Transform/Joint/Animation） |
+| stacker | `telemetryBinding.deviceType` 或模型能力 `stackerCapable` | `StackerTelemetryDriver.applyToModel()` |
+| conveyor | 同上，`isConveyorRuntimeModel` | `ConveyorTelemetryDriver.applyToModel()` |
+
+新增设备类型 = 新建 driver 文件 + 在 `SpecializedTelemetryRuntime` 构造函数注册一行（数组顺序即无实例绑定时的默认优先级），并把 devType 登记进 `SPECIALIZED_TELEMETRY_DEVICE_TYPES`（`src/editor/model/telemetryBinding.ts`）。
 
 `resolveSpecializedTelemetryDeviceType()` 负责归类；模型首次被驱动的那一帧惰性捕获姿态基线（`captureModelTelemetryPreviewBaseline`），后续帧跳过不重复捕获，停止预览时按基线恢复。
 

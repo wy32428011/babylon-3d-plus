@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { createLocatorEntity, createModelEntity, sanitizeMqttConfig } from '../../src/editor/model/SceneDocument';
+import { createModelEntity, sanitizeMqttConfig } from '../../src/editor/model/SceneDocument';
 import { deserializeScene, serializeScene } from '../../src/editor/project/SceneSerializer';
 import {
   createDefaultTelemetryBinding,
@@ -64,34 +63,31 @@ test('非法订阅会被过滤，JSON Path 字段必须是安全路径', () => {
 
 test('dataDriven 配置归一化并拒绝非法深度和非有限数值', () => {
   const config = normalizeModelDataDrivenConfig({
-    device: { devType: 'stacker', defaultAssetCode: 'DDJ2', interpolationMs: 1e999 },
+    device: { devType: 'stacker', defaultAssetCode: 'DDJ2', calibrationRate: 1e999 },
     motion: {
-      lift: {
-        channel: 'lift',
-        fields: ['height', 123, 'speed'],
-        mode: 'velocity',
-        target: { kind: 'node', selector: 'Lift' },
-        property: 'position',
-        axis: 'y',
-        scale: 2,
-        offset: 1,
-        min: 0,
-        max: 30,
-        smoothing: { kind: 'ema', alpha: 0.4 },
-      },
-      bad: { channel: 'bad', fields: ['bad'], mode: 'absolute', target: { kind: 'root' }, property: 'position', axis: 'x', scale: Number.POSITIVE_INFINITY },
+      lift: { speed: 2, nodes: ['Lift', 123], limits: { min: 0, max: 30 } },
     },
     fixedNodes: ['Base', 7],
   });
 
   assert.equal(config?.device.devType, 'stacker');
   assert.equal(config?.device.defaultAssetCode, 'DDJ2');
-  assert.equal(config?.device.interpolationMs, 200);
-  assert.deepEqual(config?.motion.lift.fields, ['height', 'speed']);
-  assert.equal(config?.motion.lift.smoothing?.kind, 'ema');
-  assert.equal(config?.motion.bad.scale, 1);
+  assert.equal(config?.device.calibrationRate, 4);
+  assert.deepEqual(config?.specializedMotion, {
+    lift: { speed: 2, nodes: ['Lift', 123], limits: { min: 0, max: 30 } },
+  });
   assert.deepEqual(config?.fixedNodes, ['Base']);
   assert.equal(normalizeModelDataDrivenConfig(createDeepObject()), null);
+});
+
+test('非专用 devType 的 motion 不透传，避免无效配置进入场景文档', () => {
+  const config = normalizeModelDataDrivenConfig({
+    device: { devType: 'unknown-device' },
+    motion: { x: { fields: ['x'] } },
+  });
+
+  assert.equal(config?.device.devType, 'unknown-device');
+  assert.equal(config?.specializedMotion, undefined);
 });
 
 test('遥测绑定 stale 默认值来自 expectedIntervalMs 的安全倍数', () => {
@@ -103,7 +99,6 @@ test('遥测绑定 stale 默认值来自 expectedIntervalMs 的安全倍数', ()
     deviceType: 'stacker',
     expectedIntervalMs: 300,
     staleAfterMs: 2000,
-    channelOverrides: {},
   });
 });
 
@@ -182,77 +177,6 @@ function createDeepObject(): unknown {
   for (let index = 0; index < 12; index += 1) value = { child: value };
   return value;
 }
-
-test('通用 MQTT 无 Broker 示例可被正式场景序列化器加载且映射匹配模拟器状态', () => {
-  const scene = deserializeScene(readFileSync('examples/scenes/generic-mqtt-motion-demo.scene.json', 'utf8'));
-
-  assert.equal(scene.mqttConfig.simulatorScenario, 'generic');
-  assert.equal(scene.mqttConfig.simulatorAssetCode, 'GEN-A,GEN-B');
-  const gltf = JSON.parse(readFileSync('examples/model-packages/GenericMqttMotionDemo/GenericMqttMotionDemo.gltf', 'utf8')) as {
-    nodes: Array<{ name?: string }>;
-    animations: Array<{ name?: string; channels: Array<{ target: { node: number } }> }>;
-  };
-  const doorPulse = gltf.animations.find((animation) => animation.name === 'DoorPulse');
-  assert.ok(doorPulse);
-  assert.equal(gltf.nodes[doorPulse.channels[0].target.node]?.name, 'ScreenSurface');
-  for (const entityId of ['entity_generic_mqtt_gen_a', 'entity_generic_mqtt_gen_b']) {
-    const entity = scene.entities[entityId];
-    assert.ok(entity.components.modelAsset?.dataDrivenConfig);
-    assert.equal(entity.components.telemetryBinding?.deviceType, 'generic-machine');
-    const actionMap = entity.components.modelAsset.dataDrivenConfig.motion.operation_state.actionMap;
-    assert.equal(actionMap?.forward, 'play');
-    assert.equal(actionMap?.reverse, 'reverse');
-    assert.equal(actionMap?.fault, 'play');
-    assert.equal(actionMap?.recovery, 'play');
-  }
-});
-
-test('legacy stacker/yzj dataDriven 形状归一到通用通道且保留动作语义', () => {
-  const config = normalizeModelDataDrivenConfig({
-    device: { device: 'DDJ', devType: 'stacker', defaultAssetCode: 'DDJ2', interpolationMs: 120 },
-    motion: {
-      travel: {
-        kind: 'translate',
-        fields: ['x'],
-        nodes: ['Bridge', 'Trolley'],
-        fallbackPattern: '^Bridge',
-        property: 'position',
-        axis: 'x',
-        speed: 0.5,
-        limits: { min: -12, max: 18 },
-      },
-      direction: {
-        kind: 'rotate',
-        field: 'direction',
-        valueMode: 'action',
-        nodes: ['Wheel'],
-        axis: 'y',
-        actionMap: { '-1': -1, '0': 0, '1': 1, stop: 'idle' },
-      },
-      yzjClamp: {
-        kind: 'translate',
-        field: 'clamp',
-        nodes: ['ClampLeft', 'ClampRight'],
-        fallbackPattern: 'Clamp.*',
-        speed: 2,
-        limits: { min: 0, max: 1 },
-      },
-    },
-  });
-
-  assert.equal(config?.motion.travel.legacyKind, 'translate');
-  assert.deepEqual(config?.motion.travel.target.selectors, ['Bridge', 'Trolley']);
-  assert.equal(config?.motion.travel.target.fallbackPattern, '^Bridge');
-  assert.equal(config?.motion.travel.speed, 0.5);
-  assert.equal(config?.motion.travel.scale, 0.5);
-  assert.equal(config?.motion.travel.min, -12);
-  assert.equal(config?.motion.travel.max, 18);
-  assert.equal(config?.motion.direction.legacyKind, 'rotate');
-  assert.equal(config?.motion.direction.valueMode, 'action');
-  assert.deepEqual(config?.motion.direction.fields, ['direction']);
-  assert.deepEqual(config?.motion.direction.actionMap, { '-1': -1, '0': 0, '1': 1, stop: 'idle' });
-  assert.equal(config?.motion.yzjClamp.target.fallbackPattern, 'Clamp.*');
-});
 
 test('默认遥测绑定不复制实例资产编号，运行时应从 modelAsset.assetCode 取缺省值', () => {
   const entity = createModelEntity(

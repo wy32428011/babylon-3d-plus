@@ -5,6 +5,7 @@ import type { Vector3Data } from '../model/math';
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
+import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
 import { LocatorInspector } from './LocatorInspector';
@@ -330,21 +331,25 @@ export function InspectorPanel(props: InspectorPanelProps) {
               </div>
             </div>
           </fieldset>
-          <TelemetryBindingInspector
-            entityId={selectedEntity.id}
-            binding={selectedEntity.components.telemetryBinding}
-            dataDrivenConfig={modelAsset.dataDrivenConfig ?? null}
-            disabled={isLocked}
-            modelAssetCode={modelAsset.assetCode}
-            onChange={updateSelectedTelemetryBinding}
-            onRestoreDefault={restoreSelectedTelemetryBindingDefault}
-          />
-          <CargoGeneratorInspector
-            binding={selectedEntity.components.telemetryBinding}
-            modelDevType={modelAsset.dataDrivenConfig?.device.devType}
-            disabled={isLocked}
-            onChange={updateSelectedTelemetryBinding}
-          />
+          {isSpecializedTelemetryDeviceType(modelAsset.dataDrivenConfig?.device.devType) ? (
+            <>
+              <TelemetryBindingInspector
+                entityId={selectedEntity.id}
+                binding={selectedEntity.components.telemetryBinding}
+                dataDrivenConfig={modelAsset.dataDrivenConfig ?? null}
+                disabled={isLocked}
+                modelAssetCode={modelAsset.assetCode}
+                onChange={updateSelectedTelemetryBinding}
+                onRestoreDefault={restoreSelectedTelemetryBindingDefault}
+              />
+              <CargoGeneratorInspector
+                binding={selectedEntity.components.telemetryBinding}
+                modelDevType={modelAsset.dataDrivenConfig?.device.devType}
+                disabled={isLocked}
+                onChange={updateSelectedTelemetryBinding}
+              />
+            </>
+          ) : null}
           <ModelParametersInspector modelAsset={modelAsset} disabled={isLocked} compact={isCompactModelInspector} />
         </>
       ) : null}

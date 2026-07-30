@@ -8,7 +8,6 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "dev:electron": "node scripts/dev-electron.mjs",
-    "demo:mqtt:generic:scene": "node scripts/create-generic-mqtt-motion-demo.mjs",
     "demo:stacker:scene": "node scripts/create-stacker-mqtt-demo-scene.mjs",
     "demo:stacker:mqtt": "node scripts/publish-stacker-full-demo.mjs",
     "demo:stacker:mqtt:legacy": "node scripts/simulate-stacker-mqtt.mjs",

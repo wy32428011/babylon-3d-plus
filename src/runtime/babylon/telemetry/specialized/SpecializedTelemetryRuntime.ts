@@ -28,13 +28,22 @@ import {
   type StackerForkSide,
 } from './types';
 
-/** 专用遥测运行时的门面类：组合 Stacker/Conveyor Driver，并承担帧级调度与诊断状态管理。 */
+/** 专用设备驱动注册项：新增设备类型时追加一行注册即可接入帧调度。 */
+type SpecializedDriverRegistration = {
+  readonly deviceType: SpecializedTelemetryDeviceType;
+  readonly isCapable: (model: ModelRuntimeEntry) => boolean;
+  readonly apply: (model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number) => void;
+};
+
+/** 专用遥测运行时的门面类：组合各专用 Driver，并承担帧级调度与诊断状态管理。 */
 export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverContext {
   readonly scene: Scene;
   readonly state: SpecializedTelemetrySharedState;
   readonly host: SpecializedTelemetryHost;
   private readonly stackerDriver: StackerTelemetryDriver;
   private readonly conveyorDriver: ConveyorTelemetryDriver;
+  /** 驱动注册表，数组顺序即无实例绑定时的默认优先级（Stacker 优先）。 */
+  private readonly drivers: readonly SpecializedDriverRegistration[];
 
   constructor(scene: Scene, host: SpecializedTelemetryHost) {
     this.scene = scene;
@@ -42,44 +51,40 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.state = createSpecializedTelemetrySharedState();
     this.stackerDriver = new StackerTelemetryDriver(this);
     this.conveyorDriver = new ConveyorTelemetryDriver(this);
+    this.drivers = [
+      {
+        deviceType: 'stacker',
+        isCapable: (model) => model.stackerCapable,
+        apply: (model, snapshot, deltaSeconds) => this.stackerDriver.applyToModel(model, snapshot as StackerTelemetrySnapshot, deltaSeconds),
+      },
+      {
+        deviceType: 'conveyor',
+        isCapable: isConveyorRuntimeModel,
+        apply: (model, snapshot, deltaSeconds) => this.conveyorDriver.applyToModel(model, snapshot, deltaSeconds),
+      },
+    ];
   }
 
-  /** 每帧把最新 MQTT stacker/conveyor 遥测应用到完整主键匹配且无冲突的模型实例。 */
+  /** 每帧把最新 MQTT 专用遥测应用到完整主键匹配且无冲突的模型实例。 */
   applyFrame(deltaSeconds: number): void {
-    const stackerCandidates = this.collectSpecializedTelemetryModels('stacker');
-    const stackerConflictKeys = collectSpecializedTelemetryConflictKeys(
-      stackerCandidates.map((candidate) => candidate.binding),
-    );
     const nowMs = Date.now();
-    for (const candidate of stackerCandidates) {
-      const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, stackerConflictKeys, nowMs);
-      const preparedArrayHost = this.host.updateExternalScriptContext(
-        candidate.model,
-        snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
+    for (const driver of this.drivers) {
+      const candidates = this.collectSpecializedTelemetryModels(driver.deviceType);
+      const conflictKeys = collectSpecializedTelemetryConflictKeys(
+        candidates.map((candidate) => candidate.binding),
       );
-      if (snapshot) {
-        this.stackerDriver.applyToModel(candidate.model, snapshot as StackerTelemetrySnapshot, deltaSeconds);
-      }
-      if (preparedArrayHost) {
-        this.host.refreshModelArrayRepresentation(candidate.model);
-      }
-    }
-
-    const conveyorCandidates = this.collectSpecializedTelemetryModels('conveyor');
-    const conveyorConflictKeys = collectSpecializedTelemetryConflictKeys(
-      conveyorCandidates.map((candidate) => candidate.binding),
-    );
-    for (const candidate of conveyorCandidates) {
-      const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conveyorConflictKeys, nowMs);
-      const preparedArrayHost = this.host.updateExternalScriptContext(
-        candidate.model,
-        snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
-      );
-      if (snapshot) {
-        this.conveyorDriver.applyToModel(candidate.model, snapshot, deltaSeconds);
-      }
-      if (preparedArrayHost) {
-        this.host.refreshModelArrayRepresentation(candidate.model);
+      for (const candidate of candidates) {
+        const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
+        const preparedArrayHost = this.host.updateExternalScriptContext(
+          candidate.model,
+          snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
+        );
+        if (snapshot) {
+          driver.apply(candidate.model, snapshot, deltaSeconds);
+        }
+        if (preparedArrayHost) {
+          this.host.refreshModelArrayRepresentation(candidate.model);
+        }
       }
     }
   }
@@ -89,7 +94,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.clearInactiveSpecializedTelemetryDiagnostics();
   }
 
-  /** 为同时命中多种专用能力的模型选择唯一驱动类型，实例绑定优先、无绑定时 Stacker 优先。 */
+  /** 为同时命中多种专用能力的模型选择唯一驱动类型，实例绑定优先、无绑定时按注册表顺序。 */
   resolveDeviceType(model: ModelRuntimeEntry): SpecializedTelemetryDeviceType | null {
     return this.resolveSpecializedTelemetryDeviceType(model);
   }
@@ -201,25 +206,24 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     return candidates;
   }
 
-  /** 为同时命中多种专用能力的模型选择唯一驱动类型，实例绑定优先、无绑定时 Stacker 优先。 */
+  /** 为同时命中多种专用能力的模型选择唯一驱动类型，实例绑定优先、无绑定时按注册表顺序取首个可用驱动。 */
   private resolveSpecializedTelemetryDeviceType(model: ModelRuntimeEntry): SpecializedTelemetryDeviceType | null {
     if (model.telemetryBinding?.enabled === false) return null;
     const configuredDeviceType = model.telemetryBinding?.deviceType.trim().toLowerCase();
     if (configuredDeviceType) {
-      if (configuredDeviceType === 'stacker' && model.stackerCapable) return 'stacker';
-      if (configuredDeviceType === 'conveyor' && isConveyorRuntimeModel(model)) return 'conveyor';
-      return null;
+      const matched = this.drivers.find(
+        (driver) => driver.deviceType === configuredDeviceType && driver.isCapable(model),
+      );
+      return matched ? matched.deviceType : null;
     }
-    if (model.stackerCapable) return 'stacker';
-    if (isConveyorRuntimeModel(model)) return 'conveyor';
-    return null;
+    return this.drivers.find((driver) => driver.isCapable(model))?.deviceType ?? null;
   }
 
   /** 仅在模型没有任何有效专用绑定时清理诊断，避免另一专用类型遍历覆盖有效状态。 */
   private clearInactiveSpecializedTelemetryDiagnostics(): void {
     for (const { entityId, model } of this.host.collectModels()) {
       if (!model.assetHandle || !model.stackerTelemetryReady) continue;
-      const isSpecialized = model.stackerCapable || isConveyorRuntimeModel(model);
+      const isSpecialized = this.drivers.some((driver) => driver.isCapable(model));
       if (!isSpecialized || this.resolveSpecializedTelemetryDeviceType(model)) continue;
       this.clearSpecializedTelemetryDiagnostics(entityId, model);
     }

@@ -71,7 +71,6 @@ const STACKER_SIMULATION_SCENARIO_LABELS: Record<StackerSimulationScenario, stri
   target: '目标位',
   movement: '全0运动',
   fault: '急停',
-  generic: '通用设备',
 };
 
 const MQTT_STATUS_LABELS = {

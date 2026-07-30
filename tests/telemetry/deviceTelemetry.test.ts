@@ -5,7 +5,6 @@ import test from 'node:test';
 import type { MqttConfig } from '../../src/editor/model/SceneDocument';
 
 import { resolveMqttStackerSubscriptions } from '../../src/runtime/mqtt/MqttStackerTelemetryConfig';
-import { GenericTelemetrySimulator, createGenericTelemetrySimulatorPayload } from '../../src/runtime/mqtt/GenericTelemetrySimulator';
 import { StackerTelemetrySimulator } from '../../src/runtime/mqtt/StackerTelemetrySimulator';
 import {
   deviceTelemetryStore,
@@ -200,71 +199,6 @@ test('StackerTelemetrySimulator 停用时只清理默认源模拟快照', () => 
   }
 });
 
-test('GenericTelemetrySimulator 按 EPV 入口写入两台 generic-machine 且方向相反', () => {
-  const originalWindow = globalThis.window;
-  const timers = new Set<number>();
-  let nextTimerId = 1;
-  globalThis.window = {
-    setInterval: () => {
-      const timerId = nextTimerId;
-      nextTimerId += 1;
-      timers.add(timerId);
-      return timerId;
-    },
-    clearInterval: (timerId: number) => {
-      timers.delete(timerId);
-    },
-  } as unknown as Window & typeof globalThis;
-
-  try {
-    deviceTelemetryStore.clear();
-    const logs: string[] = [];
-    const simulator = new GenericTelemetrySimulator((message) => logs.push(message));
-    simulator.updateConfig(createMqttConfig({ enabled: true, simulatorEnabled: true, simulatorScenario: 'generic', simulatorAssetCode: 'GEN-A, GEN-B', simulatorIntervalMs: 500 }));
-
-    const first = deviceTelemetryStore.getSnapshot('GEN-A', 'generic-machine');
-    const second = deviceTelemetryStore.getSnapshot('GEN-B', 'generic-machine');
-
-    assert.ok(first);
-    assert.ok(second);
-    assert.equal(first.fields.operation_state, 'forward');
-    assert.equal(second.fields.operation_state, 'reverse');
-    assert.equal(first.fields.normal, true);
-    assert.equal(first.fields.errorCode, 0);
-    assert.equal(first.fields.message, 'generic forward');
-    assert.equal(first.sequence, 0);
-    assert.equal(typeof first.sourceTimestamp, 'number');
-    assert.notEqual(first.fields.position_x, second.fields.position_x);
-    assert.notEqual(first.fields.joint_angle_deg, second.fields.joint_angle_deg);
-    assert.equal(timers.size, 1);
-
-    simulator.dispose();
-    assert.equal(deviceTelemetryStore.getSnapshot('GEN-A', 'generic-machine'), null);
-    assert.equal(deviceTelemetryStore.getSnapshot('GEN-B', 'generic-machine'), null);
-    assert.equal(logs.filter((message) => message.includes('generic')).length >= 1, true);
-  } finally {
-    deviceTelemetryStore.clear();
-    globalThis.window = originalWindow;
-  }
-});
-
-test('GenericTelemetrySimulator 20 秒周期覆盖 fault stale recovery 阶段', () => {
-  const startMs = 1_700_000_000_000;
-  const forward = createGenericTelemetrySimulatorPayload('GEN-A', 0, startMs, startMs, 0, 2);
-  const reverse = createGenericTelemetrySimulatorPayload('GEN-A', 6_000, startMs + 6_000, startMs, 0, 2);
-  const fault = createGenericTelemetrySimulatorPayload('GEN-A', 10_000, startMs + 10_000, startMs, 0, 2);
-  const stale = createGenericTelemetrySimulatorPayload('GEN-A', 14_000, startMs + 14_000, startMs, 0, 2);
-  const recovery = createGenericTelemetrySimulatorPayload('GEN-A', 19_000, startMs + 19_000, startMs, 0, 2);
-
-  assert.equal(readPayloadPoint(forward, 'operation_state'), 'forward');
-  assert.equal(readPayloadPoint(reverse, 'operation_state'), 'reverse');
-  assert.equal(readPayloadPoint(fault, 'operation_state'), 'fault');
-  assert.equal(readPayloadPoint(fault, 'normal'), false);
-  assert.equal(stale, null);
-  assert.equal(readPayloadPoint(recovery, 'operation_state'), 'recovery');
-  assert.equal(readPayloadPoint(recovery, 'normal'), true);
-});
-
 test('MqttTelemetryClient 事件回调具备 stale client 守卫并使用连接时订阅快照', () => {
   const clientSource = readFileSync('src/runtime/mqtt/MqttTelemetryClient.ts', 'utf8');
   for (const eventName of ['connect', 'message', 'error', 'close']) {
@@ -312,9 +246,4 @@ function createMqttConfig(overrides: Partial<MqttConfig> = {}): MqttConfig {
     simulatorIntervalMs: 1000,
     ...overrides,
   };
-}
-
-function readPayloadPoint(payload: ReturnType<typeof createGenericTelemetrySimulatorPayload>, name: string): unknown {
-  if (!payload) return undefined;
-  return payload.data.find((point) => point.p === name)?.v;
 }

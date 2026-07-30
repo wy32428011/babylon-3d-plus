@@ -35,7 +35,6 @@ writeFileSync(
         normalizedProjectRoot + '/src/vite-env.d.ts',
         normalizedProjectRoot + '/src/runtime/mqtt/deviceTelemetry.ts',
         normalizedProjectRoot + '/src/runtime/mqtt/MqttStackerTelemetryConfig.ts',
-        normalizedProjectRoot + '/src/runtime/mqtt/GenericTelemetrySimulator.ts',
         normalizedProjectRoot + '/src/runtime/mqtt/StackerTelemetrySimulator.ts',
         normalizedProjectRoot + '/src/runtime/babylon/telemetry/**/*.ts',
         normalizedProjectRoot + '/src/editor/model/**/*.ts',

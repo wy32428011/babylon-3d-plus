@@ -89,7 +89,6 @@ import {
   type ModelMeasurementResult,
 } from './modelMeasurement';
 import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
-import { GenericTelemetryMotionRuntime } from './telemetry/GenericTelemetryMotionRuntime';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
 import {
   captureModelTelemetryPreviewBaseline,
@@ -469,7 +468,6 @@ export class SceneRuntime {
   private readonly groupTranslationPreviewObserver: Nullable<Observer<Scene>>;
   private readonly modelArrayVariantRenderSuppressionObserver: Nullable<Observer<Scene>>;
   private readonly modelArrayVariantRenderRestoreObserver: Nullable<Observer<Scene>>;
-  private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
@@ -497,11 +495,6 @@ export class SceneRuntime {
   ) {
     this.modelSelectionOutlineLayer = new SelectionOutlineLayer('EditorModelSelectionOutlineLayer', scene);
     this.modelSelectionOutlineLayer.outlineColor = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
-    this.genericTelemetryMotionRuntime = new GenericTelemetryMotionRuntime(scene, {
-      pushLog: this.pushLog,
-      beforeModelMutation: (entityId) => this.prepareModelArrayRuntimeMutationByEntityId(entityId),
-      afterModelMutation: (entityId) => this.refreshModelArrayRuntimeRepresentationByEntityId(entityId),
-    });
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
     this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(scene, this.createSpecializedTelemetryHost());
     this.groupTranslationPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
@@ -760,7 +753,6 @@ export class SceneRuntime {
     this.clearEntityArrayPreview();
     this.clearFolderGroupGizmoTarget();
     this.telemetryPreviewActive = true;
-    this.genericTelemetryMotionRuntime.beginPreview();
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('runtime', null);
     this.clearModelGeneratorLoadFailureCache();
@@ -777,7 +769,6 @@ export class SceneRuntime {
     if (!hadPreviewState) return;
 
     this.telemetryPreviewActive = false;
-    this.genericTelemetryMotionRuntime.endPreview();
     this.specializedTelemetryRuntime.disposeAllCargo();
     for (const fetchRuntime of this.locatorFetchRuntimes.values()) {
       fetchRuntime.clearAllBatches();
@@ -1995,7 +1986,6 @@ export class SceneRuntime {
     for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
       this.disposeModelGenerator(entityId, modelGenerator);
     }
-    this.genericTelemetryMotionRuntime.dispose();
     this.poiEffectRuntime.dispose();
     this.specializedTelemetryRuntime.dispose();
     for (const [entityId, light] of this.lights.entries()) {
@@ -2834,7 +2824,6 @@ export class SceneRuntime {
     this.captureReadyTelemetryPreviewBaselines();
     const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
     this.specializedTelemetryRuntime.applyFrame(deltaSeconds);
-    this.genericTelemetryMotionRuntime.applyFrame(deltaSeconds);
   }
 
   /** 为已加载且 ready 的模型捕获本次预览基线，异步 GLB 后续 ready 时会在首个驱动帧前补捕获。 */
@@ -3401,7 +3390,6 @@ export class SceneRuntime {
   /** 释放导入模型的容器、根节点与所有子资源。 */
   private disposeModel(entityId: string, model: ModelRuntimeEntry): void {
     this.clearEntityArrayPreviewIfSource(entityId);
-    this.genericTelemetryMotionRuntime.disposeModel(entityId);
     model.telemetryPreviewBaseline = null;
     model.cancelLoad?.();
     model.cancelLoad = null;
@@ -3895,7 +3883,7 @@ export class SceneRuntime {
     model.parameterSignature = signature;
   }
 
-  /** 同步普通模型包外置脚本，并在脚本就绪后接回既有遥测运动链。 */
+  /** 同步普通模型包外置脚本，并在脚本就绪后刷新模型呈现。 */
   private syncExternalModelScripts(entity: Entity, model: ModelRuntimeEntry): void {
     const modelAsset = entity.components.modelAsset;
     if (!modelAsset) return;
@@ -3906,7 +3894,6 @@ export class SceneRuntime {
       this.applyModelInteractivity(current, latestEntity.id);
       this.applyModelSelection(current, current.highlighted);
       this.rebuildModelSelectionOutline();
-      this.syncGenericTelemetryMotion(latestEntity, current);
       this.onModelMeasurementChanged(latestEntity.id);
       this.refreshGroupTranslationPreviewTargets();
     });
@@ -4271,9 +4258,6 @@ export class SceneRuntime {
       return variant;
     }
 
-    if (variant.representativeEntityId !== representative.id) {
-      this.genericTelemetryMotionRuntime.disposeModel(variant.representativeEntityId);
-    }
     variant.representativeEntityId = representative.id;
     variant.entities = entities;
     const model = variant.model;
@@ -4427,7 +4411,6 @@ export class SceneRuntime {
           resolveLayerMask: (mesh) => activeVariant.sourceLayerMasks.get(mesh.uniqueId) ?? mesh.layerMask,
         });
       }
-      this.syncGenericTelemetryMotion(representative, current);
       for (const instanceEntity of activeVariant.entities) this.onModelMeasurementChanged(instanceEntity.id);
       this.rebuildModelSelectionOutline();
       if (this.isModelArrayBatchCurrent(current, activeVariant.renderSignature)) {
@@ -4504,28 +4487,6 @@ export class SceneRuntime {
       const layerMask = variant.sourceLayerMasks.get(mesh.uniqueId);
       if (layerMask !== undefined) mesh.layerMask = layerMask;
     }
-  }
-
-  /** 根据遥测注册实体 ID 找到普通模型或参数变体宿主。 */
-  private resolveTelemetryRuntimeModel(entityId: string): ModelRuntimeEntry | null {
-    const sourceModel = this.models.get(entityId);
-    if (sourceModel) return sourceModel;
-    for (const variant of this.modelArrayParameterVariants.values()) {
-      if (variant.representativeEntityId === entityId) return variant.model;
-    }
-    return null;
-  }
-
-  /** 通用遥测写节点前恢复阵列脚本宿主，兼容依赖 scene.meshes 的旧脚本和动画。 */
-  private prepareModelArrayRuntimeMutationByEntityId(entityId: string): void {
-    const model = this.resolveTelemetryRuntimeModel(entityId);
-    if (model) this.prepareModelArrayRuntimeMutation(model);
-  }
-
-  /** 通用遥测写节点后把最新脚本/节点矩阵重新提交到对应阵列批次。 */
-  private refreshModelArrayRuntimeRepresentationByEntityId(entityId: string): void {
-    const model = this.resolveTelemetryRuntimeModel(entityId);
-    if (model) this.refreshModelArrayRuntimeRepresentation(model);
   }
 
   /** 在运行态脚本或遥测修改前恢复当前阵列宿主；返回是否需要在修改后重提批次。 */
@@ -4756,7 +4717,6 @@ export class SceneRuntime {
 
     const model = variant.model;
     this.endModelArrayParameterVariantRenderSuppression(variant);
-    this.genericTelemetryMotionRuntime.disposeModel(variant.representativeEntityId);
     model.cancelLoad?.();
     model.cancelLoad = null;
     this.restoreModelArrayParameterVariantHost(variant);
@@ -4918,36 +4878,6 @@ export class SceneRuntime {
       }
     }
     return null;
-  }
-
-  /** 同步通用遥测运动引擎，专用 Stacker/Conveyor 模型默认跳过避免双重驱动。 */
-  private syncGenericTelemetryMotion(entity: Entity, model: ModelRuntimeEntry): void {
-    const modelAsset = entity.components.modelAsset;
-    if (!modelAsset || !model.assetHandle) return;
-
-    this.genericTelemetryMotionRuntime.syncModel({
-      entityId: entity.id,
-      root: model.root,
-      contentRoot: model.contentRoot,
-      modelAsset,
-      binding: entity.components.telemetryBinding ?? null,
-      externalDataDrivenConfigs: model.externalScriptRuntime?.getDataDrivenConfigs() ?? [],
-      specializedDriver: model.stackerCapable || isConveyorRuntimeModel(model),
-      loadToken: model.loadToken,
-      baselineRevision: this.createGenericTelemetryBaselineRevision(entity, model),
-      animationGroups: model.assetHandle?.animationGroups ?? [],
-    });
-  }
-
-  /** 生成通用遥测基线签名，参数、脚本、资产或实体 Transform 变化时重建运行态基线。 */
-  private createGenericTelemetryBaselineRevision(entity: Entity, model: ModelRuntimeEntry): string {
-    return JSON.stringify({
-      transform: entity.components.transform,
-      parameterSignature: model.parameterSignature,
-      externalScriptSignature: model.externalScriptSignature,
-      assetSignature: model.assetSignature,
-      loadToken: model.loadToken,
-    });
   }
 
   /** 把实例资产编号和 meta.json 脚本参数写回 Babylon 节点 metadata，供运行时和动画识别读取。 */

@@ -7,9 +7,14 @@ import {
   type DeviceTelemetrySnapshot,
   type DeviceTelemetryStore,
 } from '../../mqtt/deviceTelemetry';
-import { createTelemetryBindingKey } from './motionBindingCompiler';
 
 export type SpecializedTelemetryDeviceType = 'stacker' | 'conveyor';
+
+/** 生成遥测绑定唯一键，用于同主键冲突检测。 */
+export function createTelemetryBindingKey(sourceId: string, deviceType: string, assetCode: string): string {
+  const normalizedSourceId = sourceId.trim() || 'default';
+  return [normalizedSourceId, normalizeTelemetryDeviceType(deviceType, 'device') ?? 'device', assetCode].join('\u0000');
+}
 
 export type ResolvedSpecializedTelemetryBinding = {
   sourceId: string;

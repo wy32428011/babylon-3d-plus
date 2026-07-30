@@ -44,7 +44,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - 导入模型资产编号：每个导入模型实例都会生成并保存 `modelAsset.assetCode`，Inspector 的 `Model Asset` 区域可编辑该编号；复制、粘贴会按新实体 ID 重新生成编号。所有阵列副本名称统一按源对象名称递增：末尾有数字时递增并保留前导零，例如 `测试 1001 → 测试 1002`、`DEV009 → DEV010`；只有字符串时直接追加 `1、2、3…`，不添加“副本”。导入模型阵列会创建与阵列数量一致的独立 Scene Entity，并通过 `components.modelArrayInstance.sourceEntityId` 关联共享渲染源；Hierarchy 中可逐个选择、移动、旋转、缩放、显隐、锁定和删除。Babylon 运行时不会逐实体加载或克隆模型，而是按参数组合运行脚本：相同 `parameterValues` 共享一个源或隐藏脚本宿主，不同参数组合分别执行参数化脚本；所有阵列实体仍按该组合的可渲染 Mesh 创建固定数量批次 Mesh，一次提交连续 `Float32Array` thinInstance 矩阵，并通过 `thinInstanceIndex` 映射回具体逻辑实体。旧版 `components.modelArray.items` 场景加载时会自动迁移为独立实体。虚拟定位线框仍把编号写入 `locator.assetId`，内置 Mesh、CAD 和 POI 继续沿用实体复制语义。场景文件版本保持 `1`，新增字段为可选字段。
 - MQTT 配置入口：Toolbar 提供 MQTT 配置按钮，可在弹窗中填写 MQTT IP/域名、MQTT over WebSocket 地址、topic 与本地模拟参数；只填写 IP 时会自动生成 `ws://<IP>:8083/mqtt`。保存或启用配置只保存场景配置，不会自动连接 broker，也不会自动启动本地模拟。
 - MQTT 运行预览：Toolbar 的“运行/停止”是唯一运行入口；点击“运行”并通过预检后才会连接 broker 或启动本地模拟，连接状态 badge 显示 disabled/simulating/connecting/connected/disconnected/error，无效配置会自动打开 MQTT 配置弹窗。运行态允许相机、选择、Hierarchy 搜索/展开、网格、诊断和 Console，只读阻止 Gizmo、Inspector 修改、Hierarchy 变更、资源创建/导入、保存加载、undo/redo 与 MQTT 配置。
-- 通用 MQTT 数据驱动框架：详见 `docs/mqtt-data-driven-guide.md`，覆盖只读可视化边界、EPV `data[].e/p/v`、JSON Path、多订阅/QoS、`sourceId + deviceType + assetCode` 绑定、`dataDriven` 默认配置与 `telemetryBinding` 实例覆盖、Transform/Joint/Animation 示例，以及 stale/fault/conflict 和 Electron `wss://` 安全注意事项。
+- MQTT 专用设备数据驱动：详见 `docs/mqtt-data-driven-guide.md`，覆盖只读可视化边界、EPV `data[].e/p/v`、JSON Path、多订阅/QoS、`sourceId + deviceType + assetCode` 绑定、按设备类型（stacker/conveyor）分发的专用驱动与模型包 `dataDriven` 声明，以及 stale/fault/conflict 和 Electron `wss://` 安全注意事项。
 - 外置参数化脚本：模型包内的 `*.model.ts`、meta 显式引用的 `.ts`，以及数据中台 API 明确返回的 `.ts` 会随模型包复制到项目目录并作为受控 `editor-asset://` 资产授权；导入模型加载完成后，renderer 会以本地可信脚本方式转译并运行同包脚本，兼容 `ParametricModelRuntimeComponent`、`export default class`、`onStart/onUpdate/onStop` 生命周期以及 `babylonjs-editor-tools` 的 `visibleAs*` 装饰器写法。所有长度类参数统一以米输入；脚本在实体根米空间读取未销毁、自身启用、可见且有顶点的有效 Mesh，把米制位移转换回目标父节点局部坐标，并在整机根缩放时保持底部中心锚点。参数脚本只负责模型特有参数化和附加运行逻辑，不负责判断源单位或提供基础米制测量。
 - 参数化模型：模型包 `meta.json.modelParameters` 可声明 number、color、boolean、enum、vector3、texture 参数，以及绑定到模型节点、网格或材质的安全 JSON DSL；选中带参数配置的导入模型后，Inspector 会以紧凑布局显示“模型参数”区域，参数标签使用自适应宽度并在必要时换行，确保长中文名称完整显示；修改参数会通过场景文档实时驱动 Babylon 模型外观变化，并支持随场景保存/加载与撤销/重做。参数变化完成后，编辑器会重新测量实际尺寸；没有参数脚本的模型仍正常显示米制尺寸。
 - 模型库拖拽放置：模型库中已导入的真实模型卡片可直接拖拽到 Scene View，释放鼠标时会按当前鼠标射线与 `y = 0` 地面平面的交点创建模型实体；点击模型卡片仍保留原点快捷导入行为。
@@ -196,7 +196,7 @@ Toolbar 的 `MQ` 按钮用于维护场景级 MQTT 配置。弹窗包含“启用
 
 该配置会写入当前 `SceneDocument.mqttConfig` 并随 `.scene.json` 保存、加载。启用后运行时通过 MQTT over WebSocket 连接 broker 并订阅 PLC/MQTT 遥测数据；通用默认订阅 topic 为 `dt/factory/logistics/+/+/twindatadriven/joint`。
 
-如果启用“本地模拟”，运行时不会连接 MQTT broker，而是把模拟 payload 通过与真实 MQTT 相同的 EPV 解析入口写入内存遥测通道。Stacker 场景支持 `cycle`、`target`、`movement`、`fault`：`cycle` 会在目标位追踪和全 0 movement 模式之间切换，`target` 只追目标位，`movement` 固定发送 `to_x=0,to_y=0,to_z=0`，`fault` 发送急停/故障状态。`generic` 场景用于通用双机演示，`simulatorAssetCode` 以逗号分隔两台资产（例如 `GEN-A,GEN-B`），20 秒循环覆盖正向、反向、故障、4 秒断流和恢复。
+如果启用“本地模拟”，运行时不会连接 MQTT broker，而是把模拟 payload 通过与真实 MQTT 相同的 EPV 解析入口写入内存遥测通道。Stacker 场景支持 `cycle`、`target`、`movement`、`fault`：`cycle` 会在目标位追踪和全 0 movement 模式之间切换，`target` 只追目标位，`movement` 固定发送 `to_x=0,to_y=0,to_z=0`，`fault` 发送急停/故障状态。
 
 topic 路径固定为 `dt/factory/logistics/<设备类型>/<资产编号>/twindatadriven/joint`。第一个通配段表示设备类型，例如 `stacker` 或 `conveyor`；第二个通配段表示资产编号，例如 `DDJ2` 或 `1001`。运行时只把资产编号与场景中导入模型实例的 `modelAsset.assetCode` 匹配，匹配成功后才驱动对应模型。
 
@@ -212,18 +212,7 @@ payload 使用 `data[]` 数组承载 PLC 点位，每一项按 `e/p/v` 三个字
 
 实时 MQTT 数据只保存在运行时内存中，不写入 `SceneDocument`，也不进入 undo history。
 
-通用 MQTT 数据驱动框架的完整接入说明见 `docs/mqtt-data-driven-guide.md`。该指南补充说明 JSON Path 适配器、多订阅与 QoS、`sourceId + deviceType + assetCode` 三元绑定、模型包 `dataDriven` 默认配置、Inspector `telemetryBinding` 覆盖、Transform/Joint/Animation 通道配置、单位/坐标/平滑/stale/fault/conflict 处理，以及 Electron `wss://` 连接安全边界。
-
-### 通用 MQTT 无 Broker 演示
-
-演示文件位于 `examples/scenes/generic-mqtt-motion-demo.scene.json`，模型包位于 `examples/model-packages/GenericMqttMotionDemo`。场景包含 `GEN-A`、`GEN-B` 两台 `generic-machine`，分别验证根节点平移、`AccentPanel` 关节旋转和 `DoorPulse` AnimationGroup 状态动作；本地模拟按正向、反向、故障、断流、恢复循环，不需要 MQTT broker。
-
-```bash
-npm run demo:mqtt:generic:scene
-npm run dev
-```
-
-开发服务器启动后访问 `http://127.0.0.1:<port>/?demo=mqtt-generic` 自动加载场景。第一条命令用于从 `ParameterChainDemo` 可重复生成独立模型包、真实 glTF 动画和场景文件；已生成文件也可直接通过编辑器“打开场景”加载。
+MQTT 数据驱动的完整接入说明见 `docs/mqtt-data-driven-guide.md`。该指南补充说明 JSON Path 适配器、多订阅与 QoS、`sourceId + deviceType + assetCode` 三元绑定、专用驱动（stacker/conveyor）的模型包 `dataDriven` 声明、Inspector `telemetryBinding` 基础字段、stale/fault/conflict 处理、新增设备类型的接入步骤，以及 Electron `wss://` 连接安全边界。
 
 ## Stacker MQTT 动作解析与目标位规则
 

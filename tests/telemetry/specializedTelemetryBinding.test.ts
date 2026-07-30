@@ -95,7 +95,6 @@ function createBinding(overrides: Partial<TelemetryBindingComponent> = {}): Tele
     assetCode: 'STK-01',
     expectedIntervalMs: 500,
     staleAfterMs: 2000,
-    channelOverrides: {},
     ...overrides,
   };
 }

@@ -5,14 +5,9 @@ import {
   normalizeModelDataDrivenConfig,
   normalizeTelemetryBindingComponent,
   type TelemetryBindingComponent,
-  type TelemetryMotionChannel,
 } from '../../src/editor/model/telemetryBinding';
-import type { ModelAssetComponent } from '../../src/editor/model/components';
 import {
-  compileTelemetryMotionBinding,
   createTelemetryBindingKey,
-} from '../../src/runtime/babylon/telemetry/motionBindingCompiler';
-import {
   resolveSpecializedTelemetryBinding,
   resolveSpecializedTelemetrySnapshot,
 } from '../../src/runtime/babylon/telemetry/specializedTelemetryBinding';
@@ -69,40 +64,22 @@ test('专用 resolver 接受混合大小写绑定并查询小写 deviceType stor
   assert.deepEqual(resolveSpecializedTelemetrySnapshot(store, resolved)?.fields, { speed: 2 });
 });
 
-test('Stacker 和 stacker 两个通用绑定生成同一冲突 key', () => {
-  const upperBinding = compileTelemetryMotionBinding({
-    entityId: 'upper',
-    modelAsset: createModelAsset(),
+test('Stacker 和 stacker 两个专用绑定生成同一冲突 key', () => {
+  const upperBinding = resolveSpecializedTelemetryBinding({
+    modelAssetCode: 'STK-01',
+    deviceType: 'stacker',
     binding: createBinding({ sourceId: ' line-a ', deviceType: 'Stacker' }),
-    externalDataDrivenConfigs: [],
   });
-  const lowerBinding = compileTelemetryMotionBinding({
-    entityId: 'lower',
-    modelAsset: createModelAsset(),
+  const lowerBinding = resolveSpecializedTelemetryBinding({
+    modelAssetCode: 'STK-01',
+    deviceType: 'stacker',
     binding: createBinding({ sourceId: 'line-a', deviceType: 'stacker' }),
-    externalDataDrivenConfigs: [],
   });
 
   assert.ok(upperBinding);
   assert.ok(lowerBinding);
   assert.equal(upperBinding.key, lowerBinding.key);
 });
-
-/** 创建包含最小运动通道的模型资产，确保通用绑定编译能生成 key。 */
-function createModelAsset(): ModelAssetComponent {
-  return {
-    assetCode: 'STK-01',
-    sourcePath: 'fixtures/stacker.glb',
-    sourceUrl: 'fixtures/stacker.glb',
-    lengthUnit: 'meter',
-    unitScaleToMeters: 1,
-    dataDrivenConfig: {
-      device: { devType: 'stacker', interpolationMs: 200 },
-      motion: { x: createMotionChannel() },
-      fixedNodes: [],
-    },
-  };
-}
 
 /** 创建标准遥测绑定测试数据，按用例覆盖关键字段。 */
 function createBinding(overrides: Partial<TelemetryBindingComponent> = {}): TelemetryBindingComponent {
@@ -113,24 +90,7 @@ function createBinding(overrides: Partial<TelemetryBindingComponent> = {}): Tele
     assetCode: 'STK-01',
     expectedIntervalMs: 500,
     staleAfterMs: 2000,
-    channelOverrides: {},
     ...overrides,
-  };
-}
-
-/** 创建最小绝对位移通道，保证绑定编译不会被空 motion 丢弃。 */
-function createMotionChannel(): TelemetryMotionChannel {
-  return {
-    channel: 'x',
-    fields: ['x'],
-    mode: 'absolute',
-    target: { kind: 'root' },
-    property: 'position',
-    axis: 'x',
-    space: 'local',
-    scale: 1,
-    offset: 0,
-    invert: false,
   };
 }
 

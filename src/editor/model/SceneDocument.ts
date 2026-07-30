@@ -36,7 +36,7 @@ export const SCENE_SENSITIVITY_MIN = 1;
 export const SCENE_SENSITIVITY_MAX = 20;
 export const SCENE_SENSITIVITY_DEFAULT = 10;
 
-export const STACKER_SIMULATION_SCENARIOS = ['cycle', 'target', 'movement', 'fault', 'generic'] as const;
+export const STACKER_SIMULATION_SCENARIOS = ['cycle', 'target', 'movement', 'fault'] as const;
 
 export type StackerSimulationScenario = (typeof STACKER_SIMULATION_SCENARIOS)[number];
 

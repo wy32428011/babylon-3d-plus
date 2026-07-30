@@ -842,7 +842,7 @@ function createRuntimeMqttConfig(source: PlainObject, warnings: string[]): Plain
   if (address && !safeAddress) warnings.push('原场景 MQTT 地址不适合浏览器部署，runtime-config 已清空地址并保持禁用。');
   if (requestedEnabled && !enabled && safeAddress) warnings.push('原场景 MQTT 已启用但缺少有效订阅，runtime-config 已保持禁用。');
 
-  const simulatorScenario = typeof source.simulatorScenario === 'string' && ['cycle', 'target', 'movement', 'fault', 'generic'].includes(source.simulatorScenario)
+  const simulatorScenario = typeof source.simulatorScenario === 'string' && ['cycle', 'target', 'movement', 'fault'].includes(source.simulatorScenario)
     ? source.simulatorScenario
     : 'cycle';
   const sourceInterval = typeof source.simulatorIntervalMs === 'number' ? source.simulatorIntervalMs : Number.NaN;

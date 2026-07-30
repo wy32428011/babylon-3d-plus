@@ -2,7 +2,6 @@ import type { MqttConfig } from '../../editor/model/SceneDocument';
 import { ElectronMqttTelemetryClient, hasElectronMqttApi } from './ElectronMqttTelemetryClient';
 import { MqttTelemetryClient, type MqttTelemetryLog } from './MqttTelemetryClient';
 import { deviceTelemetryStore } from './deviceTelemetry';
-import { GenericTelemetrySimulator } from './GenericTelemetrySimulator';
 import { resolveMqttStackerSubscriptions } from './MqttStackerTelemetryConfig';
 import { mqttRuntimeStatusStore } from './mqttRuntimeStatus';
 import { StackerTelemetrySimulator } from './StackerTelemetrySimulator';
@@ -13,12 +12,10 @@ export class MqttStackerTelemetryClient {
   private readonly telemetryClient: MqttTelemetryClient;
   private electronTelemetryClient: ElectronMqttTelemetryClient | null = null;
   private readonly simulator: StackerTelemetrySimulator;
-  private readonly genericSimulator: GenericTelemetrySimulator;
 
   constructor(private readonly pushLog: MqttTelemetryLog) {
     this.telemetryClient = new MqttTelemetryClient(pushLog, deviceTelemetryStore);
     this.simulator = new StackerTelemetrySimulator(pushLog);
-    this.genericSimulator = new GenericTelemetrySimulator(pushLog);
   }
 
   /** 根据旧版场景 MQTT 配置连接、重连、断开或启动本地 Stacker 模拟。 */
@@ -39,13 +36,7 @@ export class MqttStackerTelemetryClient {
     this.telemetryClient.dispose();
     this.electronTelemetryClient?.dispose();
     this.electronTelemetryClient = null;
-    if (config.simulatorScenario === 'generic') {
-      this.simulator.dispose();
-      this.genericSimulator.updateConfig(config);
-    } else {
-      this.genericSimulator.dispose();
-      this.simulator.updateConfig(config);
-    }
+    this.simulator.updateConfig(config);
 
     if (!config.enabled) {
       mqttRuntimeStatusStore.update('disabled');
@@ -55,7 +46,7 @@ export class MqttStackerTelemetryClient {
 
     if (config.simulatorEnabled) {
       mqttRuntimeStatusStore.update('simulating');
-      this.pushLog(`MQTT 连接已跳过：当前使用${config.simulatorScenario === 'generic' ? '通用设备' : ' Stacker'}本地模拟数据。`);
+      this.pushLog('MQTT 连接已跳过：当前使用 Stacker 本地模拟数据。');
       return;
     }
 
@@ -81,7 +72,6 @@ export class MqttStackerTelemetryClient {
   dispose(): void {
     this.configSignature = '';
     this.simulator.dispose();
-    this.genericSimulator.dispose();
     this.electronTelemetryClient?.dispose();
     this.electronTelemetryClient = null;
     this.telemetryClient.dispose();
