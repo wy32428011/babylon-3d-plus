@@ -137,6 +137,7 @@ export type DataPlatformProjectListResult = {
 };
 
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
+export type SkyboxAssetFormat = 'hdr' | 'exr';
 
 export type ModelScriptAsset = {
   path: string;
@@ -178,6 +179,21 @@ export type ProjectModelAssetEntry = AssetEntry & {
   libraryKind: ModelAssetLibraryKind;
 };
 
+/** 项目天空盒资源独立于模型资产索引，直接扫描 Assets/Skyboxes 得到。 */
+export type ProjectSkyboxAssetEntry = {
+  id: string;
+  name: string;
+  displayName: string;
+  path: string;
+  sourceUrl: string;
+  assetRevision: string;
+  packagePath: string;
+  kind: 'skybox';
+  libraryKind: 'skybox';
+  format: SkyboxAssetFormat;
+  fileSizeBytes: number;
+};
+
 export type ModelPackageVariant = {
   name: string;
   path: string;
@@ -217,6 +233,14 @@ export type ImportEnvironmentModelFileResult = {
   projectAssets: ProjectModelAssetEntry[];
 };
 
+export type ImportSkyboxFileResult = {
+  canceled: boolean;
+  filePath: string | null;
+  projectRoot: string | null;
+  importedAsset: ProjectSkyboxAssetEntry | null;
+  skyboxes: ProjectSkyboxAssetEntry[];
+};
+
 export type ImportCadFileResult = {
   canceled: boolean;
   filePath: string | null;
@@ -232,6 +256,7 @@ export type ProjectAssetIndex = {
 export type ProjectListAssetsResult = {
   projectRoot: string | null;
   assets: ProjectModelAssetEntry[];
+  skyboxes: ProjectSkyboxAssetEntry[];
 };
 
 export type SelectProjectDirectoryResult = {

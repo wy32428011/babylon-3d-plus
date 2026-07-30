@@ -20,7 +20,9 @@ import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
   decodeBuiltInAssetDragPayload,
   decodeModelAssetDragPayload,
+  decodeSkyboxAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
+  SKYBOX_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
 import {
   useEditorStore,
@@ -28,7 +30,8 @@ import {
 } from '../store/editorStore';
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
-import type { SceneCameraPose, SceneDocument } from '../model/SceneDocument';
+import { getSceneSkyboxSettings, type SceneCameraPose, type SceneDocument } from '../model/SceneDocument';
+import { createSceneSkyboxFromAsset } from '../assets/skyboxAssets';
 import type { Vector3Data } from '../model/math';
 import {
   resolveFolderGroupMoveSelection,
@@ -257,6 +260,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
+  const placeSkybox = useEditorStore((state) => state.placeSkybox);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
   const commitFolderGroupTranslation = useEditorStore((state) => state.commitFolderGroupTranslation);
@@ -496,6 +500,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     const hasSupportedPayload =
       event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE) ||
+      event.dataTransfer.types.includes(SKYBOX_ASSET_DRAG_MIME_TYPE) ||
       event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE);
     if (!hasSupportedPayload) return;
 
@@ -516,6 +521,16 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       event.clientY,
       event.currentTarget,
     ) ?? { x: 0, y: 0, z: 0 };
+
+    const rawSkyboxPayload = event.dataTransfer.getData(SKYBOX_ASSET_DRAG_MIME_TYPE);
+    const skyboxAsset = decodeSkyboxAssetDragPayload(rawSkyboxPayload);
+    if (skyboxAsset) {
+      event.preventDefault();
+      clickSnapshotRef.current = null;
+      const currentSkybox = getSceneSkyboxSettings(sceneDocument);
+      placeSkybox(createSceneSkyboxFromAsset(skyboxAsset, currentSkybox), placementPosition);
+      return;
+    }
 
     const rawModelPayload = event.dataTransfer.getData(MODEL_ASSET_DRAG_MIME_TYPE);
     const modelAsset = decodeModelAssetDragPayload(rawModelPayload);
@@ -932,6 +947,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
     viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
+    runtime.syncSkybox(sceneDocument);
     runtime.syncEnvironment(sceneDocument.sceneSettings.environment);
   }, [sceneDocument.sceneSettings]);
 

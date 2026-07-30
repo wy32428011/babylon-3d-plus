@@ -1018,6 +1018,10 @@ select {
   color: #4bd0a0;
 }
 
+.entity-type-skybox {
+  color: #65d9f0;
+}
+
 .entity-tree-row.selected .entity-state-button,
 .entity-tree-row.selected .entity-tree-toggle,
 .entity-tree-row.selected .entity-type-icon {
@@ -1392,6 +1396,40 @@ select {
     linear-gradient(180deg, #4a4a4a 0%, #2f2f2f 58%, #171717 100%);
 }
 
+.skybox-preview-button {
+  background:
+    radial-gradient(circle at 26% 28%, rgb(255 188 92 / 32%), transparent 22%),
+    linear-gradient(180deg, #31506d 0%, #35475b 48%, #182026 100%);
+}
+
+.skybox-preview-content {
+  display: grid;
+  max-width: calc(100% - 20px);
+  place-items: center;
+  gap: 8px;
+}
+
+.skybox-preview-content strong {
+  padding: 4px 9px;
+  border: 1px solid rgb(94 222 236 / 72%);
+  border-radius: 999px;
+  color: #c6fbff;
+  background: rgb(10 26 34 / 68%);
+  letter-spacing: 0.08em;
+}
+
+.skybox-preview-content small {
+  width: 100%;
+  overflow: hidden;
+  color: #e1ebf2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skybox-resolution-row {
+  grid-template-columns: 84px minmax(0, 1fr);
+}
+
 .environment-preview-button-drop-active {
   border-color: #20dce9;
   box-shadow:
@@ -1627,6 +1665,44 @@ select {
 .environment-resource-card .resource-card-subtitle {
   color: #a8a8a8;
   font-size: 11px;
+}
+
+.skybox-resource-card .resource-card-icon {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  border: 2px solid #57c9dc;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 27%, rgb(255 226 153 / 92%) 0 7%, transparent 8%),
+    radial-gradient(ellipse at 52% 70%, #447050 0 30%, transparent 31%),
+    linear-gradient(180deg, #4c8bb6 0 48%, #314e5e 49% 100%);
+  box-shadow: inset -10px -12px 18px rgb(0 0 0 / 34%), 0 0 10px rgb(87 201 220 / 22%);
+}
+
+.skybox-resource-card .resource-card-icon::before,
+.skybox-resource-card .resource-card-icon::after {
+  position: absolute;
+  content: '';
+}
+
+.skybox-resource-card .resource-card-icon::before {
+  top: 8px;
+  left: 10px;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  background: #ffd17a;
+  box-shadow: 0 0 10px rgb(255 209 122 / 72%);
+}
+
+.skybox-resource-card .resource-card-icon::after {
+  right: 7px;
+  bottom: 8px;
+  left: 7px;
+  height: 9px;
+  border-top: 2px solid rgb(206 248 255 / 78%);
+  border-radius: 50%;
 }
 
 .environment-dialog-status {

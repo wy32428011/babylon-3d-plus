@@ -3,20 +3,25 @@ import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
   ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE,
   IMAGE_ASSET_DRAG_MIME_TYPE,
+  SKYBOX_ASSET_DRAG_MIME_TYPE,
   encodeBuiltInAssetDragPayload,
   encodeImageAssetDragPayload,
   encodeModelAssetDragPayload,
+  encodeSkyboxAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
   type AssetEntry,
-  type ModelAssetLibraryKind,
   type ProjectModelAssetEntry,
+  type ProjectSkyboxAssetEntry,
 } from '../assets/AssetDatabase';
 import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
+import { getSceneSkyboxSettings } from '../model/SceneDocument';
+import { createSceneSkyboxFromAsset, findSkyboxAssetForSettings } from '../assets/skyboxAssets';
 import { createImportedAssetIndexes, findImportedAssetForPackagePath } from '../assets/modelAssetRelink';
 import {
   BUILT_IN_MODEL_LIBRARY_ITEMS,
   PROJECT_LIBRARIES,
   createModelLibraryItems,
+  createSkyboxLibraryItems,
   getModelUnitTitle,
   isBuiltInImageProjectLibraryItem,
   isBuiltInProjectLibraryItem,
@@ -27,14 +32,14 @@ import {
 import { useEditorStore } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
 
-type ModelFolderStatus = {
+type LibraryStatus = {
   message: string;
   kind: 'info' | 'error';
 };
 
-type ImportableProjectLibraryKey = Extract<ProjectLibraryKey, ModelAssetLibraryKind>;
+type ImportableProjectLibraryKey = 'model' | 'environment' | 'skybox';
 
-type ModelFolderStatusMap = Record<ImportableProjectLibraryKey, ModelFolderStatus | null>;
+type LibraryStatusMap = Record<ImportableProjectLibraryKey, LibraryStatus | null>;
 
 type DataPlatformModelSyncProgress = {
   runId: string;
@@ -71,6 +76,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const refreshModelInstancesFromAssets = useEditorStore((state) => state.refreshModelInstancesFromAssets);
   const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
+  const updateSkyboxConfig = useEditorStore((state) => state.updateSkyboxConfig);
+  const placeSkybox = useEditorStore((state) => state.placeSkybox);
+  const sceneDocument = useEditorStore((state) => state.scene);
+  const currentSkybox = useMemo(() => getSceneSkyboxSettings(sceneDocument), [sceneDocument]);
   const currentEnvironmentPackagePath = useEditorStore((state) => state.scene.sceneSettings.environment?.packagePath);
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
@@ -81,17 +90,19 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const consumeProjectAssetFocusRequest = useEditorStore((state) => state.consumeProjectAssetFocusRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
   const resourceCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const currentSkyboxRef = useRef(currentSkybox);
   const projectAssetsLoadRequestRef = useRef(0);
   const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshModelSyncRunIdRef = useRef<string | null>(null);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
   const [libraryFilterText, setLibraryFilterText] = useState('');
   const [projectAssets, setProjectAssets] = useState<ProjectModelAssetEntry[]>([]);
+  const [skyboxAssets, setSkyboxAssets] = useState<ProjectSkyboxAssetEntry[]>([]);
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [importingLibraryKey, setImportingLibraryKey] = useState<ImportableProjectLibraryKey | null>(null);
   const [isLoadingProjectAssets, setIsLoadingProjectAssets] = useState(false);
-  const [modelFolderStatuses, setModelFolderStatuses] = useState<ModelFolderStatusMap>({ model: null, environment: null });
+  const [libraryStatuses, setLibraryStatuses] = useState<LibraryStatusMap>({ model: null, environment: null, skybox: null });
   const [modelSyncProgress, setModelSyncProgress] = useState<DataPlatformModelSyncProgress | null>(null);
   const [isRetryingModelSync, setIsRetryingModelSync] = useState(false);
 
@@ -111,15 +122,23 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   const activeItems = useMemo(() => {
     if (activeLibrary.key === 'model') {
-      return [...createModelLibraryItems(modelAssets), ...BUILT_IN_MODEL_LIBRARY_ITEMS];
+      return [
+        ...createModelLibraryItems(modelAssets),
+        ...createSkyboxLibraryItems(skyboxAssets),
+        ...BUILT_IN_MODEL_LIBRARY_ITEMS,
+      ];
     }
 
     if (activeLibrary.key === 'environment') {
       return createModelLibraryItems(environmentAssets);
     }
 
+    if (activeLibrary.key === 'skybox') {
+      return createSkyboxLibraryItems(skyboxAssets);
+    }
+
     return activeLibrary.items;
-  }, [activeLibrary, environmentAssets, modelAssets]);
+  }, [activeLibrary, environmentAssets, modelAssets, skyboxAssets]);
 
   const normalizedLibraryFilter = libraryFilterText.trim().toLowerCase();
   const filteredItems = useMemo(() => {
@@ -128,13 +147,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }, [activeItems, normalizedLibraryFilter]);
 
   const activeImportLibraryKey: ImportableProjectLibraryKey | null =
-    activeLibrary.key === 'model' || activeLibrary.key === 'environment' ? activeLibrary.key : null;
-  const isImportingModelFolder = importingLibraryKey !== null;
-  const modelFolderStatus = activeImportLibraryKey ? modelFolderStatuses[activeImportLibraryKey] : null;
+    activeLibrary.key === 'model' || activeLibrary.key === 'environment' || activeLibrary.key === 'skybox'
+      ? activeLibrary.key
+      : null;
+  const isImportingAsset = importingLibraryKey !== null;
+  const libraryStatus = activeImportLibraryKey ? libraryStatuses[activeImportLibraryKey] : null;
 
   /** 按分库存储导入状态，避免切换模型库和环境库时复用上一页文案。 */
-  function setLibraryStatus(libraryKind: ImportableProjectLibraryKey, status: ModelFolderStatus | null): void {
-    setModelFolderStatuses((current) => ({ ...current, [libraryKind]: status }));
+  function setLibraryStatus(libraryKind: ImportableProjectLibraryKey, status: LibraryStatus | null): void {
+    setLibraryStatuses((current) => ({ ...current, [libraryKind]: status }));
   }
 
   /** 当前场景引用同一环境包或同一数据中台环境 ID 时，用新版本配置触发 Babylon 重载。 */
@@ -166,6 +187,31 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
   }, [currentEnvironmentPackagePath, pushLog, updateEnvironmentConfig]);
 
+  useEffect(() => {
+    currentSkyboxRef.current = currentSkybox;
+  }, [currentSkybox]);
+
+  /** 用项目资源库中的稳定同名资产刷新当前天空盒路径，并保留场景级显示参数。 */
+  const refreshCurrentSkyboxFromAssets = useCallback((
+    assets: ProjectSkyboxAssetEntry[],
+  ): boolean => {
+    const activeSkybox = currentSkyboxRef.current;
+    if (!activeSkybox) return false;
+    const matchedAsset = findSkyboxAssetForSettings(activeSkybox, assets);
+    if (!matchedAsset) return false;
+
+    try {
+      const refreshedSkybox = createSceneSkyboxFromAsset(matchedAsset, activeSkybox);
+      if (JSON.stringify(refreshedSkybox) === JSON.stringify(activeSkybox)) return false;
+      updateSkyboxConfig(refreshedSkybox);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`天空盒资源已更新，但当前场景自动刷新失败：${message}`);
+      return false;
+    }
+  }, [pushLog, updateSkyboxConfig]);
+
   const loadProjectAssets = useCallback(async (refreshSceneAssets = false): Promise<boolean> => {
     if (!window.editorApi?.listProjectAssets) return false;
 
@@ -177,13 +223,17 @@ export function ProjectPanel(props: ProjectPanelProps) {
       const result = await window.editorApi.listProjectAssets();
       if (requestId !== projectAssetsLoadRequestRef.current) return false;
 
+      const loadedSkyboxes = result.skyboxes ?? [];
       setProjectRoot(result.projectRoot);
       setProjectAssets(result.assets);
+      setSkyboxAssets(loadedSkyboxes);
 
-      if (result.assets.length > 0) {
-        pushLog(`已加载项目资源库：${result.assets.length} 个资产。`);
+      const totalAssetCount = result.assets.length + loadedSkyboxes.length;
+      if (totalAssetCount > 0) {
+        pushLog(`已加载项目资源库：${totalAssetCount} 个资产。`);
       }
 
+      refreshCurrentSkyboxFromAssets(loadedSkyboxes);
       if (refreshSceneAssets) {
         refreshModelInstancesFromAssets(result.assets.filter((asset) => asset.libraryKind === 'model'));
         await refreshCurrentEnvironmentFromAssets(result.assets);
@@ -199,7 +249,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         setIsLoadingProjectAssets(false);
       }
     }
-  }, [pushLog, refreshCurrentEnvironmentFromAssets, refreshModelInstancesFromAssets]);
+  }, [pushLog, refreshCurrentEnvironmentFromAssets, refreshCurrentSkyboxFromAssets, refreshModelInstancesFromAssets]);
 
   useEffect(() => {
     void loadProjectAssets();
@@ -417,10 +467,53 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
   }
 
-  /** 根据当前资源库选择普通模型文件夹或环境 GLB 的专用导入入口。 */
+  /** 直接选择单个 HDR/EXR 导入天空盒库，同名资源由主进程原子替换。 */
+  async function handleImportSkyboxFile(): Promise<void> {
+    if (props.readOnly || activeImportLibraryKey !== 'skybox') return;
+    const libraryKind = 'skybox';
+    if (!window.editorApi?.importSkyboxFile) {
+      const statusMessage = '导入天空盒需要 Electron 桌面环境，请使用 npm run dev:electron 启动编辑器。';
+      setLibraryStatus(libraryKind, { message: statusMessage, kind: 'error' });
+      pushLog(statusMessage);
+      return;
+    }
+
+    setImportingLibraryKey(libraryKind);
+    setLibraryStatus(libraryKind, { message: '正在导入 HDR/EXR 天空盒...', kind: 'info' });
+    try {
+      const result = await window.editorApi.importSkyboxFile();
+      if (result.canceled) {
+        setLibraryStatus(libraryKind, null);
+        return;
+      }
+      if (!result.importedAsset) throw new Error('主进程未返回有效的天空盒资产。');
+
+      setSkyboxAssets(result.skyboxes);
+      setProjectRoot(result.projectRoot);
+      const refreshedCurrentSkybox = refreshCurrentSkyboxFromAssets([result.importedAsset]);
+      const projectSuffix = result.projectRoot ? `，已写入项目：${result.projectRoot}` : '';
+      const refreshSuffix = refreshedCurrentSkybox ? '，已刷新当前场景天空盒' : '';
+      const message = `天空盒已导入：${result.importedAsset.displayName}（${result.importedAsset.format.toUpperCase()}）${projectSuffix}${refreshSuffix}。`;
+      setLibraryStatus(libraryKind, { message, kind: 'info' });
+      pushLog(message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const statusMessage = `导入天空盒失败：${message}`;
+      setLibraryStatus(libraryKind, { message: statusMessage, kind: 'error' });
+      pushLog(statusMessage);
+    } finally {
+      setImportingLibraryKey(null);
+    }
+  }
+
+  /** 根据当前资源库选择对应的模型、环境 GLB 或天空盒导入入口。 */
   function handleImportActiveLibrary(): void {
     if (activeImportLibraryKey === 'environment') {
       void handleImportEnvironmentModelFile();
+      return;
+    }
+    if (activeImportLibraryKey === 'skybox') {
+      void handleImportSkyboxFile();
       return;
     }
 
@@ -445,6 +538,18 @@ export function ProjectPanel(props: ProjectPanelProps) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       pushLog(`环境模型读取失败：${message}`);
+    }
+  }
+
+  /** 从资源库创建或更新唯一球形天空盒实体，并保留当前显示参数。 */
+  function handleSkyboxAssetApply(asset: ProjectSkyboxAssetEntry): void {
+    if (props.readOnly) return;
+    try {
+      placeSkybox(createSceneSkyboxFromAsset(asset, currentSkyboxRef.current));
+      pushLog(`球形天空盒已放置并选中：${asset.displayName}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`天空盒配置无效，未更新场景：${message}`);
     }
   }
 
@@ -479,6 +584,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
     if (isBuiltInImageProjectLibraryItem(item)) return;
 
     if (isImportedProjectLibraryItem(item)) {
+      if (item.asset.kind === 'skybox') {
+        handleSkyboxAssetApply(item.asset);
+        return;
+      }
+
       if (activeLibrary.key === 'environment') {
         if (item.asset.kind !== 'model' || item.asset.libraryKind !== 'environment') return;
         void handleEnvironmentAssetApply(item.asset);
@@ -511,6 +621,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
 
     if (isImportedProjectLibraryItem(item)) {
+      if (item.asset.kind === 'skybox') {
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData(SKYBOX_ASSET_DRAG_MIME_TYPE, encodeSkyboxAssetDragPayload(item.asset));
+        event.dataTransfer.setData('text/plain', item.name);
+        return;
+      }
+
       if (item.asset.kind !== 'model') {
         event.preventDefault();
         return;
@@ -538,16 +655,19 @@ export function ProjectPanel(props: ProjectPanelProps) {
     event.preventDefault();
   }
 
-  const isModelImportButtonDisabled = props.readOnly || isImportingModelFolder || isLoadingProjectAssets;
-  const supportsProjectModelImport = activeLibrary.key === 'model' || activeLibrary.key === 'environment';
-  const importTargetLabel = activeLibrary.key === 'environment' ? '环境模型' : '模型';
-  const modelImportButtonLabel = isLoadingProjectAssets
+  const isImportButtonDisabled = props.readOnly || isImportingAsset || isLoadingProjectAssets;
+  const supportsProjectImport = activeLibrary.key === 'model'
+    || activeLibrary.key === 'environment'
+    || activeLibrary.key === 'skybox';
+  const importButtonLabel = isLoadingProjectAssets
     ? '加载项目中...'
-    : isImportingModelFolder
+    : isImportingAsset
       ? '导入中...'
       : activeLibrary.key === 'environment'
         ? '导入环境 GLB'
-        : `导入${importTargetLabel}文件夹`;
+        : activeLibrary.key === 'skybox'
+          ? '导入 HDR/EXR'
+          : '导入模型文件夹';
   const modelSyncPhaseLabel = modelSyncProgress
     ? DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS[modelSyncProgress.phase]
     : null;
@@ -591,23 +711,23 @@ export function ProjectPanel(props: ProjectPanelProps) {
           type="text"
           value={libraryFilterText}
         />
-        {supportsProjectModelImport ? (
-          modelFolderStatus ? (
-            <span className={`library-project-root library-status-${modelFolderStatus.kind}`} title={modelFolderStatus.message}>
-              {modelFolderStatus.message}
+        {supportsProjectImport ? (
+          libraryStatus ? (
+            <span className={`library-project-root library-status-${libraryStatus.kind}`} title={libraryStatus.message}>
+              {libraryStatus.message}
             </span>
           ) : projectRoot ? (
             <span className="library-project-root" title={projectRoot}>当前项目：{projectRoot}</span>
           ) : null
         ) : null}
-        {supportsProjectModelImport ? (
+        {supportsProjectImport ? (
           <button
             className="library-import-button"
-            disabled={isModelImportButtonDisabled}
+            disabled={isImportButtonDisabled}
             onClick={handleImportActiveLibrary}
             type="button"
           >
-            {modelImportButtonLabel}
+            {importButtonLabel}
           </button>
         ) : null}
       </div>
@@ -619,11 +739,14 @@ export function ProjectPanel(props: ProjectPanelProps) {
           e.currentTarget.scrollLeft += e.deltaY;
         }}
       >
-        {activeLibrary.key === 'model' && modelAssets.length === 0 ? (
-          <p className="library-empty-state">尚未导入普通模型包</p>
+        {activeLibrary.key === 'model' && modelAssets.length === 0 && skyboxAssets.length === 0 ? (
+          <p className="library-empty-state">尚未导入普通模型包或天空盒</p>
         ) : null}
         {activeLibrary.key === 'environment' && environmentAssets.length === 0 ? (
           <p className="library-empty-state">请先导入环境 GLB 文件</p>
+        ) : null}
+        {activeLibrary.key === 'skybox' && skyboxAssets.length === 0 ? (
+          <p className="library-empty-state">请先导入 HDR 或 EXR 天空盒</p>
         ) : null}
         {filteredItems.length === 0 && normalizedLibraryFilter ? (
           <p className="library-empty-state">未找到名称匹配“{libraryFilterText.trim()}”的资源</p>
@@ -631,12 +754,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
         {filteredItems.map((item) => {
           const isBuiltInItem = isBuiltInProjectLibraryItem(item);
           const isBuiltInImage = isBuiltInImageProjectLibraryItem(item);
-          const isImportedModel = isImportedProjectLibraryItem(item);
+          const isImportedAsset = isImportedProjectLibraryItem(item);
           const isEnvironmentLibrary = activeLibrary.key === 'environment';
-          const isActionableItem = (!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isImportedModel;
+          const isActionableItem = (!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isImportedAsset;
 
           return (
             <ResourceCard
+              className={isImportedAsset && item.asset.kind === 'skybox' ? 'skybox-resource-card' : undefined}
               disabled={props.readOnly || !isActionableItem}
               draggable={!props.readOnly && isActionableItem}
               focused={item.id === focusedAssetId}
@@ -657,10 +781,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
                   ? `点击创建或拖拽到 Scene：${item.name}`
                   : isBuiltInImage
                     ? `拖拽到模型 texture 属性：${item.name}`
-                    : isImportedModel
-                      ? isEnvironmentLibrary
-                        ? `点击应用或拖拽到环境属性：${item.name}，${getModelUnitTitle(item.asset)}`
-                        : `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`
+                    : isImportedAsset
+                      ? item.asset.kind === 'skybox'
+                        ? `点击放置球形天空盒或拖拽到 Scene：${item.name}（${item.asset.format.toUpperCase()}）`
+                        : isEnvironmentLibrary
+                          ? `点击应用或拖拽到环境属性：${item.name}，${getModelUnitTitle(item.asset)}`
+                          : `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`
                       : '占位资源，功能后续接入'
               }
             />

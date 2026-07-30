@@ -7,6 +7,7 @@ import type {
   ImportEnvironmentModelFileResult,
   ImportModelFolderRequest,
   ImportModelFolderResult,
+  ImportSkyboxFileResult,
   ListModelPackageVariantsRequest,
   ModelPackageVariant,
 } from '../types.js';
@@ -17,6 +18,7 @@ import {
   getCurrentProjectRoot,
   importEnvironmentModelFileIntoProject,
   importModelPackagesIntoProject,
+  importSkyboxFileIntoProject,
 } from './projectAssetStore.js';
 
 function getAssetKind(filePath: string, isDirectory: boolean): AssetEntry['kind'] {
@@ -154,6 +156,38 @@ export function registerAssetIpc(): void {
       projectRoot: getCurrentProjectRoot(),
       importedAsset,
       projectAssets,
+    };
+  });
+
+  /** 导入单个 HDR/EXR 天空盒，文件复制与同名替换由项目存储层原子完成。 */
+  ipcMain.handle('assets:importSkyboxFile', async (): Promise<ImportSkyboxFileResult> => {
+    const projectRoot = await ensureCurrentProjectRootWithDialog();
+    if (!projectRoot) {
+      return { canceled: true, filePath: null, projectRoot: null, importedAsset: null, skyboxes: [] };
+    }
+
+    const result = await dialog.showOpenDialog({
+      title: '选择 HDR/EXR 天空盒',
+      properties: ['openFile'],
+      filters: [{ name: 'HDR/EXR 天空盒', extensions: ['hdr', 'exr'] }],
+    });
+    const [filePath] = result.filePaths;
+    if (result.canceled || !filePath) {
+      return { canceled: true, filePath: null, projectRoot, importedAsset: null, skyboxes: [] };
+    }
+
+    const extension = path.extname(filePath).toLowerCase();
+    if (extension !== '.hdr' && extension !== '.exr') {
+      throw new Error('天空盒仅支持直接导入 .hdr 或 .exr 文件。');
+    }
+
+    const { importedAsset, skyboxes } = await importSkyboxFileIntoProject(filePath);
+    return {
+      canceled: false,
+      filePath,
+      projectRoot: getCurrentProjectRoot(),
+      importedAsset,
+      skyboxes,
     };
   });
 

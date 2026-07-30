@@ -57,7 +57,15 @@ import {
 } from '../../editor/model/builtInMeshGeometry';
 import type { Vector3Data } from '../../editor/model/math';
 import { MODEL_ARRAY_COPY_COUNT_MAX, MODEL_ARRAY_MIN_SPAN_METERS } from '../../editor/model/modelArray';
-import { createModelAssetCode, type FetchConfig, type SceneDocument, type SceneEnvironmentSettings } from '../../editor/model/SceneDocument';
+import {
+  createModelAssetCode,
+  createSceneSkyboxSettingsFromEntity,
+  getSceneSkyboxEntity,
+  getSceneSkyboxSettings,
+  type FetchConfig,
+  type SceneDocument,
+  type SceneEnvironmentSettings,
+} from '../../editor/model/SceneDocument';
 import { LocatorFetchRuntime, type FetchContainerRecord } from './LocatorFetchRuntime';
 import { createId } from '../../shared/ids';
 import type { TelemetryBindingComponent } from '../../editor/model/telemetryBinding';
@@ -78,6 +86,7 @@ import {
   type ExternalModelScriptRuntimeMode,
   type ExternalModelScriptTelemetrySnapshot,
 } from './ExternalModelScriptRuntime';
+import { SceneSkyboxRuntime } from './SceneSkyboxRuntime';
 import {
   calculateEnvironmentOriginLeftOffset,
   ENVIRONMENT_FALLBACK_LEFT_OFFSET_METERS,
@@ -474,6 +483,7 @@ export class SceneRuntime {
   private readonly genericTelemetryMotionRuntime: GenericTelemetryMotionRuntime;
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
+  private readonly skyboxRuntime: SceneSkyboxRuntime;
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private telemetryPreviewActive = false;
   private environment: EnvironmentRuntimeEntry | null = null;
@@ -505,6 +515,7 @@ export class SceneRuntime {
       afterModelMutation: (entityId) => this.refreshModelArrayRuntimeRepresentationByEntityId(entityId),
     });
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
+    this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
     this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(scene, this.createSpecializedTelemetryHost());
     this.groupTranslationPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
       this.flushGroupTranslationPreview();
@@ -825,6 +836,7 @@ export class SceneRuntime {
 
     return (
       this.meshes.get(entityId) ??
+      this.skyboxRuntime.getMesh(entityId) ??
       this.locators.get(entityId)?.root ??
       this.cadReferences.get(entityId)?.root ??
       this.models.get(entityId)?.root ??
@@ -980,6 +992,7 @@ export class SceneRuntime {
 
     const node = (
       this.meshes.get(entityId)
+      ?? this.skyboxRuntime.getMesh(entityId)
       ?? this.locators.get(entityId)?.root
       ?? this.cadReferences.get(entityId)?.root
       ?? this.models.get(entityId)?.root
@@ -1387,7 +1400,11 @@ export class SceneRuntime {
     const cadReference = this.cadReferences.get(entityId);
     if (cadReference) return cadReference.geometryReady && cadReference.lineMeshes.length > 0;
 
-    return this.meshes.has(entityId) || this.locators.has(entityId) || this.lights.has(entityId) || this.poiEffectRuntime.has(entityId);
+    return this.meshes.has(entityId)
+      || this.skyboxRuntime.hasEntity(entityId)
+      || this.locators.has(entityId)
+      || this.lights.has(entityId)
+      || this.poiEffectRuntime.has(entityId);
   }
 
   /** 将浏览器客户端坐标转换为 Babylon 画布内拾取坐标，并过滤画布外输入。 */
@@ -1407,6 +1424,9 @@ export class SceneRuntime {
   private getEntityWorldBounds(entityId: string): RuntimeWorldBounds | null {
     const primitiveMesh = this.meshes.get(entityId);
     if (primitiveMesh) return getMeshWorldBounds(primitiveMesh);
+
+    const skyboxMesh = this.skyboxRuntime.getMesh(entityId);
+    if (skyboxMesh) return getMeshWorldBounds(skyboxMesh);
 
     const locator = this.locators.get(entityId);
     if (locator) {
@@ -1851,6 +1871,7 @@ export class SceneRuntime {
       this.syncedEntities.set(entityId, entity);
     }
 
+    this.syncSkybox(document);
     this.syncAllModelArrayBatches(document, dirtyModelArraySourceIds);
     this.disposeStaleModelArrayGizmoProxy();
     this.selectedEntityIds = selectedEntityIds;
@@ -1861,6 +1882,7 @@ export class SceneRuntime {
   /** 判断实体已有的 Babylon 对象是否覆盖其全部运行时组件；缺失时回退完整同步。 */
   private hasCompleteRuntimeEntity(entity: Entity): boolean {
     if (entity.components.meshRenderer && !this.meshes.has(entity.id)) return false;
+    if (entity.components.skybox && !this.skyboxRuntime.hasEntity(entity.id)) return false;
     if (entity.components.locator && !this.locators.has(entity.id)) return false;
     if (entity.components.cadReference && !this.cadReferences.has(entity.id)) return false;
     if (entity.components.modelAsset) {
@@ -1890,6 +1912,8 @@ export class SceneRuntime {
       this.applyMeshInteractivity(primitiveMesh, entity.id);
       this.applyPrimitiveMeshAppearance(primitiveMesh, meshRenderer, selected);
     }
+
+    if (entity.components.skybox) this.syncSkyboxEntity(entity, selected);
 
     const locator = this.locators.get(entity.id);
     if (locator && entity.components.locator) {
@@ -1957,6 +1981,50 @@ export class SceneRuntime {
     return generator;
   }
 
+
+  /** 同步球形天空盒实体；没有实体时兼容旧 sceneSettings.skybox。 */
+  syncSkybox(document: SceneDocument): void {
+    const entity = getSceneSkyboxEntity(document);
+    if (entity?.components.skybox) {
+      this.syncSkyboxEntity(entity, this.resolveSelectedEntityIds(document).has(entity.id));
+      return;
+    }
+
+    const skybox = getSceneSkyboxSettings(document);
+    if (!skybox) {
+      this.skyboxRuntime.sync(null);
+      return;
+    }
+    this.skyboxRuntime.sync({
+      entityId: null,
+      skybox,
+      transform: {
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: skybox.rotationDegrees * Math.PI / 180, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      visible: true,
+      pickable: false,
+      selected: false,
+    });
+  }
+
+  /** 将天空盒实体的 Transform、层级显隐、锁定与选中态同步到球体运行时。 */
+  private syncSkyboxEntity(entity: Entity, selected: boolean): void {
+    const skybox = createSceneSkyboxSettingsFromEntity(entity);
+    if (!skybox) {
+      this.skyboxRuntime.sync(null);
+      return;
+    }
+    this.skyboxRuntime.sync({
+      entityId: entity.id,
+      skybox,
+      transform: entity.components.transform,
+      visible: this.isEntityVisible(entity.id),
+      pickable: this.isEntityScenePickable(entity.id),
+      selected,
+    });
+  }
 
   /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
   syncEnvironment(environment: SceneEnvironmentSettings | null): void {
@@ -2053,6 +2121,7 @@ export class SceneRuntime {
       this.disposeLight(entityId, light);
     }
     this.disposeEnvironment();
+    this.skyboxRuntime.dispose();
     this.sharedModelAssetCache.dispose();
     this.modelSelectionOutlineLayer.dispose();
     this.meshes.clear();
@@ -2085,6 +2154,10 @@ export class SceneRuntime {
     this.clearEntityArrayPreviewIfSource(entity.id);
     if (entity.components.meshRenderer) {
       this.syncPrimitiveMeshEntity(entity, selected);
+    }
+
+    if (entity.components.skybox) {
+      this.syncSkyboxEntity(entity, selected);
     }
 
     if (entity.components.locator) {

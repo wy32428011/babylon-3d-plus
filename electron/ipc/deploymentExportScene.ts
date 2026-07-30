@@ -55,7 +55,7 @@ const NON_RUNTIME_DEPLOYMENT_FILE_EXTENSIONS = new Set([
 const NON_RUNTIME_DEPLOYMENT_DIRECTORY_NAMES = new Set(['node_modules']);
 
 type PlainObject = Record<string, unknown>;
-type BundleCategory = 'models' | 'environments' | 'cad' | 'scripts';
+type BundleCategory = 'models' | 'environments' | 'skyboxes' | 'cad' | 'scripts';
 
 type ResourceBundle = {
   key: string;
@@ -90,6 +90,13 @@ type ResolvedEnvironmentReference = MutableEnvironmentReference & {
   originalActiveVariantUrl: string | null;
 };
 
+type MutableSkyboxReference = { skybox: PlainObject };
+
+type ResolvedSkyboxReference = MutableSkyboxReference & {
+  sourcePath: string;
+  bundle: ResourceBundle;
+};
+
 type MutableCadReference = { cad: PlainObject };
 
 type ResolvedCadReference = MutableCadReference & {
@@ -122,7 +129,7 @@ export type DeploymentAssetManifestEntry = {
   sha256: string;
 };
 
-/** 校验场景 v1、解析所有资源引用、预检文件并生成无本机路径的部署快照。 */
+/** 校验当前场景格式、解析所有资源引用、预检文件并生成无本机路径的部署快照。 */
 export async function prepareDeploymentExport(
   content: string,
   exportName: string,
@@ -131,15 +138,15 @@ export async function prepareDeploymentExport(
   onStatus: (message: string) => void,
 ): Promise<PreparedDeploymentExport> {
   throwIfDeploymentExportAborted(signal);
-  onStatus('正在解析场景 v1…');
-  const sceneFile = parseSceneFileV1(content);
+  onStatus('正在解析场景…');
+  const sceneFile = parseSceneFile(content);
   const scene = requirePlainObject(sceneFile.scene, '场景内容');
   const references = collectSceneReferences(scene);
   const warnings: string[] = [];
   const projectContext = await loadProjectAssetContext(signal, warnings);
   const bundles = new Map<string, ResourceBundle>();
 
-  onStatus('正在解析模型、环境、CAD 与脚本资源…');
+  onStatus('正在解析模型、环境、天空盒、CAD 与脚本资源…');
   const resolvedModels: ResolvedModelReference[] = [];
   for (const reference of references.models) {
     resolvedModels.push(await resolveModelReference(reference, projectContext, bundles, signal));
@@ -148,6 +155,11 @@ export async function prepareDeploymentExport(
   const resolvedEnvironments: ResolvedEnvironmentReference[] = [];
   for (const reference of references.environments) {
     resolvedEnvironments.push(await resolveEnvironmentReference(reference, projectContext, bundles, signal));
+  }
+
+  const resolvedSkyboxes: ResolvedSkyboxReference[] = [];
+  for (const reference of references.skyboxes) {
+    resolvedSkyboxes.push(await resolveSkyboxReference(reference, projectContext, bundles, signal));
   }
 
   const resolvedCadReferences: ResolvedCadReference[] = [];
@@ -170,6 +182,7 @@ export async function prepareDeploymentExport(
 
   rewriteModelReferences(resolvedModels, sourceUrlMap);
   rewriteEnvironmentReferences(resolvedEnvironments, sourceUrlMap);
+  rewriteSkyboxReferences(resolvedSkyboxes, sourceUrlMap);
   rewriteCadReferences(resolvedCadReferences, sourceUrlMap);
 
   const originalMqttConfig = isPlainObject(scene.mqttConfig) ? scene.mqttConfig : {};
@@ -214,8 +227,8 @@ function createManifestAssetPath(destinationRelativePath: string): string {
   return `./${normalizedPath.slice(assetRootPrefix.length)}`;
 }
 
-/** 解析并严格确认顶层场景文件为 version=1。 */
-function parseSceneFileV1(content: string): PlainObject {
+/** 解析并确认顶层场景文件为编辑器支持的 version 1/2/3。 */
+function parseSceneFile(content: string): PlainObject {
   if (typeof content !== 'string' || content.length === 0) throw new Error('导出场景内容不能为空。');
   if (Buffer.byteLength(content, 'utf8') > MAX_SCENE_CONTENT_BYTES) {
     throw new Error(`导出场景内容超过 ${MAX_SCENE_CONTENT_BYTES / 1024 / 1024} MiB 安全上限。`);
@@ -229,8 +242,11 @@ function parseSceneFileV1(content: string): PlainObject {
   }
 
   const sceneFile = requirePlainObject(parsed, '场景文件');
-  if (sceneFile.version !== 1 || !isPlainObject(sceneFile.scene)) {
-    throw new Error('仅支持导出 version=1 的场景文件。');
+  if (
+    (sceneFile.version !== 1 && sceneFile.version !== 2 && sceneFile.version !== 3)
+    || !isPlainObject(sceneFile.scene)
+  ) {
+    throw new Error('仅支持导出 version=1、version=2 或 version=3 的场景文件。');
   }
   return sceneFile;
 }
@@ -239,10 +255,12 @@ function parseSceneFileV1(content: string): PlainObject {
 function collectSceneReferences(scene: PlainObject): {
   models: MutableModelReference[];
   environments: MutableEnvironmentReference[];
+  skyboxes: MutableSkyboxReference[];
   cadReferences: MutableCadReference[];
 } {
   const entities = requirePlainObject(scene.entities, 'scene.entities');
   const models: MutableModelReference[] = [];
+  const skyboxes: MutableSkyboxReference[] = [];
   const cadReferences: MutableCadReference[] = [];
 
   for (const [entityId, entityValue] of Object.entries(entities)) {
@@ -253,6 +271,9 @@ function collectSceneReferences(scene: PlainObject): {
     }
     if (components.modelGenerator !== undefined) {
       collectModelGeneratorReferences(requirePlainObject(components.modelGenerator, `实体 ${entityId} modelGenerator`), models, entityId);
+    }
+    if (components.skybox !== undefined) {
+      skyboxes.push({ skybox: requirePlainObject(components.skybox, `实体 ${entityId} skybox`) });
     }
     if (components.cadReference !== undefined) {
       cadReferences.push({ cad: requirePlainObject(components.cadReference, `实体 ${entityId} cadReference`) });
@@ -268,8 +289,11 @@ function collectSceneReferences(scene: PlainObject): {
       if (variants.length === 0) throw new Error('环境配置至少需要一个变体。');
       environments.push({ environment, variants });
     }
+    if (sceneSettings.skybox !== null && sceneSettings.skybox !== undefined) {
+      skyboxes.push({ skybox: requirePlainObject(sceneSettings.skybox, 'scene.sceneSettings.skybox') });
+    }
   }
-  return { models, environments, cadReferences };
+  return { models, environments, skyboxes, cadReferences };
 }
 
 /** 收集模型生成器默认目标和每条规则中的 model 目标。 */
@@ -428,6 +452,31 @@ async function resolveEnvironmentReference(
       ? reference.environment.activeVariantUrl
       : null,
   };
+}
+
+/** 解析单个 HDR/EXR 天空盒，只复制明确资源文件并保留资源包目录语义。 */
+async function resolveSkyboxReference(
+  reference: MutableSkyboxReference,
+  projectContext: ProjectAssetContext | null,
+  bundles: Map<string, ResourceBundle>,
+  signal: AbortSignal,
+): Promise<ResolvedSkyboxReference> {
+  throwIfDeploymentExportAborted(signal);
+  const sourcePath = resolveLocalAssetPath(reference.skybox.sourcePath, reference.skybox.sourceUrl, '天空盒资源');
+  assertSkyboxFileExtension(sourcePath, reference.skybox.format);
+  const packagePathHint = readOptionalLocalPath(reference.skybox.packagePath, '天空盒包路径');
+  const packageRoot = packagePathHint ?? path.dirname(sourcePath);
+  if (!isPathInsideOrEqual(packageRoot, sourcePath)) throw new Error('天空盒文件路径逃逸天空盒包根目录。');
+
+  if (projectContext && isPathInsideOrEqual(projectContext.projectRoot, packageRoot)) {
+    await assertProjectPackageInsideRoot(packageRoot, projectContext);
+  } else {
+    assertAuthorizedDeploymentSourceFile(sourcePath, '天空盒资源');
+  }
+
+  const bundle = getOrCreateBundle(bundles, 'skyboxes', packageRoot, false);
+  addExplicitFileToBundle(bundle, sourcePath);
+  return { ...reference, sourcePath, bundle };
 }
 
 /** 解析单个 CAD 文件，并按明确文件模式登记。 */
@@ -700,6 +749,16 @@ function rewriteEnvironmentReferences(references: ResolvedEnvironmentReference[]
   }
 }
 
+/** 将天空盒路径改写为部署虚拟 URL，并保留场景级渲染参数。 */
+function rewriteSkyboxReferences(references: ResolvedSkyboxReference[], sourceUrlMap: Map<string, string>): void {
+  for (const reference of references) {
+    const skyboxUrl = requireMappedUrl(sourceUrlMap, reference.sourcePath, '天空盒资源');
+    reference.skybox.packagePath = createVirtualDirectoryUrl(reference.bundle.destinationRoot);
+    reference.skybox.sourcePath = skyboxUrl;
+    reference.skybox.sourceUrl = skyboxUrl;
+  }
+}
+
 /** 将 CAD sourcePath/sourceUrl 改写为部署虚拟 URL。 */
 function rewriteCadReferences(references: ResolvedCadReference[], sourceUrlMap: Map<string, string>): void {
   for (const reference of references) {
@@ -798,6 +857,15 @@ function assertModelFileExtension(filePath: string, label: string): void {
   if (!MODEL_EXTENSIONS.has(path.extname(filePath).toLowerCase())) throw new Error(`${label}必须是 .glb 或 .gltf 文件。`);
 }
 
+/** 限定天空盒资源扩展名必须与场景声明格式一致。 */
+function assertSkyboxFileExtension(filePath: string, formatValue: unknown): void {
+  if (formatValue !== 'hdr' && formatValue !== 'exr') throw new Error('天空盒格式必须是 hdr 或 exr。');
+  const expectedExtension = formatValue === 'hdr' ? '.hdr' : '.exr';
+  if (path.extname(filePath).toLowerCase() !== expectedExtension) {
+    throw new Error(`天空盒文件扩展名必须与 ${formatValue.toUpperCase()} 格式一致。`);
+  }
+}
+
 /** 根据资源类别和扩展名生成资产清单 kind。 */
 function inferAssetKind(category: BundleCategory, relativePath: string): DeploymentAssetKind {
   const lowerPath = relativePath.toLowerCase();
@@ -816,7 +884,7 @@ function createVirtualAssetUrl(destinationRelativePath: string): string {
   return `${EDITOR_ASSET_URL_PREFIX}${encodeURIComponent(toDeploymentPath(destinationRelativePath))}`;
 }
 
-/** 为模型包目录生成带尾斜杠的 editor-asset 虚拟 URL。 */
+/** 为资源包目录生成带尾斜杠的 editor-asset 虚拟 URL。 */
 function createVirtualDirectoryUrl(destinationRoot: string): string {
   return `${EDITOR_ASSET_URL_PREFIX}${encodeURIComponent(`${toDeploymentPath(destinationRoot)}/`)}`;
 }
@@ -1001,7 +1069,7 @@ function assertNoLocalMachinePaths(value: unknown, location = '$', seen = { coun
 
 /** 生成部署包内 README，说明运行方式与安全边界。 */
 function createDeploymentReadme(exportName: string): string {
-  return `# ${exportName}\n\n此目录是 ZENDING 3D EDITOR 导出的只读 Web 部署工程。\n\n## 使用方式\n\n1. 将整个目录部署到支持静态文件的 HTTP/HTTPS 服务器。\n2. 不要直接双击 index.html；浏览器需要通过 HTTP/HTTPS 加载模型、脚本和 Worker。\n3. 页面、资源路径和 MQTT 配置位于 runtime-config.json，修改后刷新页面即可生效。\n4. MQTT 是否启用取自安全清理后的场景配置；本地模拟器默认关闭，地址必须使用 ws:// 或 wss://，且配置中不得包含账号、密码或长期 Token。\n\n## 目录说明\n\n- index.html / assets：只读 Web Viewer。\n- runtime-config.json：部署期可修改配置。\n- project/scene.json：已移除本机路径的运行时场景。\n- project/asset-manifest.json：资源 URL、相对路径、大小和 SHA-256。\n- project/assets：模型、环境、CAD、脚本与贴图资源。\n\n带外置 TypeScript 模型脚本的工程需要部署站点 CSP 允许可信脚本运行链路所需的 unsafe-eval。\n`;
+  return `# ${exportName}\n\n此目录是 ZENDING 3D EDITOR 导出的只读 Web 部署工程。\n\n## 使用方式\n\n1. 将整个目录部署到支持静态文件的 HTTP/HTTPS 服务器。\n2. 不要直接双击 index.html；浏览器需要通过 HTTP/HTTPS 加载模型、脚本和 Worker。\n3. 页面、资源路径和 MQTT 配置位于 runtime-config.json，修改后刷新页面即可生效。\n4. MQTT 是否启用取自安全清理后的场景配置；本地模拟器默认关闭，地址必须使用 ws:// 或 wss://，且配置中不得包含账号、密码或长期 Token。\n\n## 目录说明\n\n- index.html / assets：只读 Web Viewer。\n- runtime-config.json：部署期可修改配置。\n- project/scene.json：已移除本机路径的运行时场景。\n- project/asset-manifest.json：资源 URL、相对路径、大小和 SHA-256。\n- project/assets：模型、环境、天空盒、CAD、脚本与贴图资源。\n\n带外置 TypeScript 模型脚本的工程需要部署站点 CSP 允许可信脚本运行链路所需的 unsafe-eval。\n`;
 }
 
 /** 读取长度受限的字符串字段。 */

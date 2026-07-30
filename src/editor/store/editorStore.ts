@@ -52,6 +52,7 @@ import type {
   ModelGeneratorTarget,
   PoiEffectComponent,
   PoiEffectKind,
+  SkyboxComponent,
   TransformComponent,
 } from '../model/components';
 import type { Entity } from '../model/Entity';
@@ -84,17 +85,23 @@ import {
   createModelEntity,
   createModelGeneratorEntity,
   createPoiEffectEntity,
+  createSkyboxComponent,
+  createSkyboxEntity,
+  getSceneSkyboxEntity,
+  getSceneSkyboxSettings,
   createModelAssetCode,
   extractModelAssetCodePrefix,
   sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneEnvironment,
+  sanitizeSceneSkybox,
   sanitizeSceneSensitivityValue,
   sanitizeSceneViewDistance,
   type SceneCameraPose,
   type FetchConfig,
   type MqttConfig,
   type SceneEnvironmentSettings,
+  type SceneSkyboxSettings,
   type SceneSensitivitySettings,
   type SceneDocument,
 } from '../model/SceneDocument';
@@ -285,6 +292,9 @@ type EditorState = {
   setCameraViewDistance: (viewDistance: number) => void;
   updateSensitivitySetting: (key: SceneSensitivitySettingKey, value: number) => void;
   updateEnvironmentConfig: (environment: SceneEnvironmentSettings | null) => void;
+  updateSkyboxConfig: (skybox: SceneSkyboxSettings | null) => void;
+  placeSkybox: (skybox: SceneSkyboxSettings, placementPosition?: Vector3Data) => void;
+  updateSelectedSkybox: (patch: Partial<Pick<SkyboxComponent, 'intensity' | 'resolution'>>) => void;
   setEnvironmentActiveVariant: (sourceUrl: string) => void;
   requestCameraPoseSave: () => void;
   consumeCameraPoseSaveRequest: (requestId: string, pose: SceneCameraPose) => void;
@@ -687,6 +697,77 @@ function isSceneEnvironmentEqual(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function isSceneSkyboxEqual(left: SceneSkyboxSettings | null, right: SceneSkyboxSettings | null): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+type UpsertSkyboxEntityOptions = {
+  placementPosition?: Vector3Data;
+  revealEntity?: boolean;
+  selectEntity: boolean;
+};
+
+/** 在场景中创建或更新唯一球形天空盒实体，并清除旧 sceneSettings.skybox 镜像。 */
+function upsertSkyboxEntityInScene(
+  scene: SceneDocument,
+  skybox: SceneSkyboxSettings,
+  options: UpsertSkyboxEntityOptions,
+): { scene: SceneDocument; entityId: string; created: boolean } {
+  const existing = getSceneSkyboxEntity(scene);
+  const placementPosition = options.placementPosition
+    ? sanitizeVector3(options.placementPosition)
+    : undefined;
+
+  if (!existing) {
+    const entity = createSkyboxEntity(skybox, placementPosition);
+    return {
+      entityId: entity.id,
+      created: true,
+      scene: {
+        ...scene,
+        entityIds: [...scene.entityIds, entity.id],
+        entities: { ...scene.entities, [entity.id]: entity },
+        selectedEntityId: options.selectEntity ? entity.id : scene.selectedEntityId,
+        sceneSettings: { ...scene.sceneSettings, skybox: null },
+      },
+    };
+  }
+
+  const transform = cloneTransform(existing.components.transform);
+  transform.rotation.y = skybox.rotationDegrees * Math.PI / 180;
+  if (placementPosition) transform.position = placementPosition;
+  const updatedEntity: Entity = {
+    ...existing,
+    visible: options.revealEntity ? true : existing.visible,
+    components: {
+      ...existing.components,
+      transform,
+      skybox: createSkyboxComponent(skybox),
+    },
+  };
+  return {
+    entityId: existing.id,
+    created: false,
+    scene: {
+      ...scene,
+      entities: { ...scene.entities, [existing.id]: updatedEntity },
+      selectedEntityId: options.selectEntity ? existing.id : scene.selectedEntityId,
+      sceneSettings: { ...scene.sceneSettings, skybox: null },
+    },
+  };
+}
+
+/** 删除场景中的球形天空盒实体，同时清除旧场景级兼容字段。 */
+function removeSkyboxEntitiesFromScene(scene: SceneDocument): SceneDocument {
+  const skyboxEntityIds = scene.entityIds.filter((entityId) => Boolean(scene.entities[entityId]?.components.skybox));
+  const withoutEntities = skyboxEntityIds.length > 0 ? deleteEntitiesInScene(scene, skyboxEntityIds) : scene;
+  if (!withoutEntities.sceneSettings.skybox) return withoutEntities;
+  return {
+    ...withoutEntities,
+    sceneSettings: { ...withoutEntities.sceneSettings, skybox: null },
+  };
+}
+
 /** 根据新导入的资产快照生成场景实例的新 modelAsset，同时保留现场资产编号。 */
 function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: AssetEntry): ModelAssetComponent {
   const parameterConfig = normalizeModelParameterConfig(asset.parameterConfig) ?? undefined;
@@ -881,6 +962,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
   return {
     transform: cloneTransform(entity.components.transform),
     ...(entity.components.meshRenderer ? { meshRenderer: cloneMeshRenderer(entity.components.meshRenderer) } : {}),
+    ...(entity.components.skybox ? { skybox: cloneJsonValue(entity.components.skybox) } : {}),
     ...(entity.components.locator ? { locator: cloneLocator(entity.components.locator) } : {}),
     ...(entity.components.cadReference ? { cadReference: cloneCadReference(entity.components.cadReference) } : {}),
     ...(entity.components.modelAsset ? { modelAsset: cloneModelAsset(entity.components.modelAsset) } : {}),
@@ -1531,11 +1613,12 @@ function prepareResolvedEntityArray(
       source
       && !source.isFolder
       && !source.components.modelGenerator
+      && !source.components.skybox
       && !isEntityEffectivelyLocked(state.scene.entities, source),
     );
   });
   if (sourceIds.length === 0 || sourceIds.length !== requestedSourceIds.length) {
-    return { ok: false, error: '原选区已失效、被锁定或包含不支持阵列的模型生成器。' };
+    return { ok: false, error: '原选区已失效、被锁定或包含不支持阵列的模型生成器/天空盒。' };
   }
 
   const copyCount = input.copyCount;
@@ -1994,6 +2077,79 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...result,
         logs: prependLog(state.logs, nextEnvironment ? '环境模型已更新。' : '环境模型已清除。'),
       };
+    });
+  },
+  updateSkyboxConfig: (skybox) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改天空盒');
+      const nextSkybox = sanitizeSceneSkybox(skybox);
+      const currentSkybox = getSceneSkyboxSettings(state.scene);
+      if (isSceneSkyboxEqual(currentSkybox, nextSkybox)) return state;
+
+      const command = updateSceneDocumentCommand('更新天空盒', (scene) => (
+        nextSkybox
+          ? upsertSkyboxEntityInScene(scene, nextSkybox, { selectEntity: false }).scene
+          : removeSkyboxEntitiesFromScene(scene)
+      ));
+      const result = executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds),
+        logs: prependLog(state.logs, nextSkybox ? '天空盒球体已更新。' : '天空盒球体已清除。'),
+      };
+    });
+  },
+  placeSkybox: (skybox, placementPosition) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '放置天空盒');
+      const nextSkybox = sanitizeSceneSkybox(skybox);
+      if (!nextSkybox) return state;
+      let targetEntityId: string | null = null;
+      let created = false;
+      const command = updateSceneDocumentCommand('放置天空盒球体', (scene) => {
+        const result = upsertSkyboxEntityInScene(scene, nextSkybox, {
+          placementPosition,
+          revealEntity: true,
+          selectEntity: true,
+        });
+        targetEntityId = result.entityId;
+        created = result.created;
+        return result.scene;
+      });
+      const result = executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        hierarchySelectionIds: targetEntityId ? [targetEntityId] : state.hierarchySelectionIds,
+        logs: prependLog(state.logs, created ? '天空盒球体已创建。' : '天空盒球体已更新并选中。'),
+      };
+    });
+  },
+  updateSelectedSkybox: (patch) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改天空盒');
+      const entity = getSelectedEntity(state);
+      const current = entity?.components.skybox;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !current) return state;
+      const currentSettings = getSceneSkyboxSettings(state.scene);
+      if (!currentSettings) return state;
+      const nextSettings = sanitizeSceneSkybox({ ...currentSettings, ...patch });
+      if (!nextSettings) return state;
+      const nextComponent = createSkyboxComponent(nextSettings);
+      if (areJsonValuesEqual(current, nextComponent)) return state;
+
+      const command = updateSceneDocumentCommand('更新天空盒参数', (scene) => ({
+        ...scene,
+        entities: {
+          ...scene.entities,
+          [entity.id]: {
+            ...scene.entities[entity.id],
+            components: { ...scene.entities[entity.id].components, skybox: nextComponent },
+          },
+        },
+        sceneSettings: { ...scene.sceneSettings, skybox: null },
+      }));
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, `${command.label}: ${entity.name}`) };
     });
   },
   setEnvironmentActiveVariant: (sourceUrl) => {
@@ -2521,7 +2677,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   copySelectedEntities: () => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '复制对象');
-      const snapshot = createEntityClipboardSnapshot(state.scene, getActiveHierarchySelectionIds(state));
+      const selectedIds = getActiveHierarchySelectionIds(state);
+      const containsSkybox = getTopLevelHierarchyEntityIds(state.scene.entities, selectedIds).some((rootId) => (
+        collectEntitySubtreeIds(state.scene.entities, rootId)
+          .some((entityId) => Boolean(state.scene.entities[entityId]?.components.skybox))
+      ));
+      if (containsSkybox) {
+        return { logs: prependLog(state.logs, '球形天空盒是场景唯一对象，不能复制或随文件夹复制。') };
+      }
+      const snapshot = createEntityClipboardSnapshot(state.scene, selectedIds);
       if (snapshot.entries.length === 0) return state;
 
       return {
@@ -2541,6 +2705,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '粘贴对象');
       const clipboard = state.entityClipboard;
       if (!clipboard || clipboard.entries.length === 0) return state;
+      if (clipboard.entries.some((entry) => entry.entities.some((entity) => Boolean(entity.components.skybox)))) {
+        return { logs: prependLog(state.logs, '剪贴板包含球形天空盒，已拒绝创建重复天空盒。') };
+      }
 
       const selectedEntity = getSelectedEntity(state);
       const inferredTargetFolderId =

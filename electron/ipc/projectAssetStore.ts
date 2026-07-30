@@ -8,6 +8,7 @@ import type {
   ModelAssetLibraryKind,
   ProjectAssetIndex,
   ProjectModelAssetEntry,
+  ProjectSkyboxAssetEntry,
   ProjectListAssetsResult,
   RecentProjectEntry,
   RecentSceneEntry,
@@ -21,12 +22,14 @@ import {
   normalizeFilePath,
 } from './assetRegistry.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
+import { importSkyboxFileIntoRoot, listSkyboxAssetsInRoot } from './skyboxAssetStore.js';
 
 const PROJECT_METADATA_DIRECTORY = '.babylon-editor';
 const PROJECT_ASSET_INDEX_FILE = 'asset-index.json';
 const PROJECT_ASSETS_DIRECTORY = 'Assets';
 const PROJECT_MODELS_DIRECTORY = 'Models';
 const PROJECT_ENVIRONMENTS_DIRECTORY = 'Environments';
+const PROJECT_SKYBOXES_DIRECTORY = 'Skyboxes';
 const RECENT_PROJECT_FILE = 'recent-project.json';
 const RECENT_WORKSPACES_FILE = 'recent-workspaces.json';
 const MAX_RECENT_WORKSPACE_ITEMS = 12;
@@ -556,27 +559,34 @@ export function getProjectEnvironmentsRoot(projectRoot: string): string {
   return path.join(normalizeFilePath(projectRoot), PROJECT_ASSETS_DIRECTORY, PROJECT_ENVIRONMENTS_DIRECTORY);
 }
 
+/** 返回项目天空盒目录 Assets/Skyboxes。 */
+export function getProjectSkyboxesRoot(projectRoot: string): string {
+  return path.join(normalizeFilePath(projectRoot), PROJECT_ASSETS_DIRECTORY, PROJECT_SKYBOXES_DIRECTORY);
+}
+
 /** 根据资产库分类选择实际复制目标目录。 */
 function getProjectAssetLibraryRoot(projectRoot: string, libraryKind: ModelAssetLibraryKind): string {
   return libraryKind === 'environment' ? getProjectEnvironmentsRoot(projectRoot) : getProjectModelsRoot(projectRoot);
 }
 
-/** 授权普通模型与环境模型两个项目资产目录。 */
+/** 授权普通模型、环境模型与天空盒三个项目资产目录。 */
 function authorizeProjectAssetRoots(projectRoot: string): void {
   authorizeAssetRoot(getProjectModelsRoot(projectRoot));
   authorizeAssetRoot(getProjectEnvironmentsRoot(projectRoot));
+  authorizeAssetRoot(getProjectSkyboxesRoot(projectRoot));
 }
 
 export function getProjectAssetIndexPath(projectRoot: string): string {
   return path.join(normalizeFilePath(projectRoot), PROJECT_METADATA_DIRECTORY, PROJECT_ASSET_INDEX_FILE);
 }
 
-/** 确保项目元数据、普通模型与环境模型目录都已创建。 */
+/** 确保项目元数据、模型、环境模型与天空盒目录都已创建。 */
 export async function ensureProjectDirectories(projectRoot: string): Promise<void> {
   const normalizedProjectRoot = normalizeFilePath(projectRoot);
   await fs.mkdir(path.join(normalizedProjectRoot, PROJECT_METADATA_DIRECTORY), { recursive: true });
   await fs.mkdir(getProjectModelsRoot(normalizedProjectRoot), { recursive: true });
   await fs.mkdir(getProjectEnvironmentsRoot(normalizedProjectRoot), { recursive: true });
+  await fs.mkdir(getProjectSkyboxesRoot(normalizedProjectRoot), { recursive: true });
 }
 
 /** 读取项目资产索引，兼容 v1 并返回 v2 内存结构，不在读取时写回。 */
@@ -706,7 +716,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   const projectRoot = await loadRecentProjectRoot();
 
   if (!projectRoot) {
-    return { projectRoot: null, assets: [] };
+    return { projectRoot: null, assets: [], skyboxes: [] };
   }
 
   await ensureProjectDirectories(projectRoot);
@@ -724,7 +734,27 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     }
   }
 
-  return { projectRoot, assets: index.assets };
+  const skyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
+  for (const skybox of skyboxes) authorizeAssetFile(skybox.path);
+
+  return { projectRoot, assets: index.assets, skyboxes };
+}
+
+/** 把用户选择的 HDR/EXR 导入项目天空盒库，并返回刷新后的资源快照。 */
+export async function importSkyboxFileIntoProject(
+  sourceFilePath: string,
+): Promise<{ importedAsset: ProjectSkyboxAssetEntry; skyboxes: ProjectSkyboxAssetEntry[] }> {
+  const projectRoot = await loadRecentProjectRoot();
+  if (!projectRoot) throw new Error('导入天空盒前需要先选择项目目录。');
+
+  await ensureProjectDirectories(projectRoot);
+  authorizeProjectAssetRoots(projectRoot);
+  const skyboxRoot = getProjectSkyboxesRoot(projectRoot);
+  const importedAsset = await importSkyboxFileIntoRoot(sourceFilePath, skyboxRoot);
+  authorizeAssetFile(importedAsset.path);
+  const skyboxes = await listSkyboxAssetsInRoot(skyboxRoot);
+  for (const skybox of skyboxes) authorizeAssetFile(skybox.path);
+  return { importedAsset, skyboxes };
 }
 
 /**

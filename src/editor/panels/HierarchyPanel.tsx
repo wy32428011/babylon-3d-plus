@@ -147,7 +147,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     && !isEntityEffectivelyLocked(entities, entity)
   ));
   const arraySourceEntities = activeSelectionEntities.filter(
-    (entity) => !entity.isFolder && !isEntityEffectivelyLocked(entities, entity),
+    (entity) => !entity.isFolder && !entity.components.skybox && !isEntityEffectivelyLocked(entities, entity),
   );
   const assetNumberedArraySourceCount = arraySourceEntities.filter(
     (entity) => Boolean(entity.components.modelAsset || entity.components.locator),
@@ -571,10 +571,14 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
                       {isFolder ? (isCollapsed ? '▶' : '▼') : ''}
                     </button>
                     <span
-                      className={isFolder ? 'entity-type-icon entity-type-folder' : 'entity-type-icon entity-type-object'}
+                      className={isFolder
+                        ? 'entity-type-icon entity-type-folder'
+                        : entity.components.skybox
+                          ? 'entity-type-icon entity-type-skybox'
+                          : 'entity-type-icon entity-type-object'}
                       aria-hidden="true"
                     >
-                      {isFolder ? '▦' : '◎'}
+                      {isFolder ? '▦' : entity.components.skybox ? '◉' : '◎'}
                     </span>
                     {renamingEntityId === entity.id ? (
                       <input

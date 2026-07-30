@@ -4,9 +4,10 @@ import { formatBuiltInMeshBaseDimensionsMeters } from '../model/builtInMeshGeome
 import type { LightKind, MeshKind } from '../model/components';
 import { POI_EFFECT_DEFINITIONS } from '../model/poiEffect';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/sceneUnits';
-import type { AssetEntry, BuiltInAssetDragPayload } from './AssetDatabase';
+import type { AssetEntry, BuiltInAssetDragPayload, ProjectSkyboxAssetEntry } from './AssetDatabase';
+import { formatSkyboxFileSize } from './skyboxAssets';
 
-export type ProjectLibraryKey = 'model' | 'poi' | 'theme' | 'composition' | 'environment' | 'chart' | 'image';
+export type ProjectLibraryKey = 'model' | 'poi' | 'theme' | 'composition' | 'environment' | 'skybox' | 'chart' | 'image';
 
 export type ProjectLibraryItemBase = {
   id: string;
@@ -22,7 +23,7 @@ export type BuiltInProjectLibraryItem = ProjectLibraryItemBase & {
 };
 
 export type ImportedProjectLibraryItem = ProjectLibraryItemBase & {
-  asset: AssetEntry;
+  asset: AssetEntry | ProjectSkyboxAssetEntry;
 };
 
 export type PlaceholderProjectLibraryItem = ProjectLibraryItemBase;
@@ -128,6 +129,13 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     ],
   },
   {
+    key: 'skybox',
+    label: '天空盒库',
+    searchLabel: '天空盒名称',
+    searchPlaceholder: '请输入天空盒名称...',
+    items: [],
+  },
+  {
     key: 'chart',
     label: '图表库',
     searchLabel: '图表名称',
@@ -184,6 +192,17 @@ export function createModelLibraryItems(modelAssets: AssetEntry[]): ImportedProj
   }));
 }
 
+/** 将项目天空盒资产转成无缩略图的格式化资源卡片。 */
+export function createSkyboxLibraryItems(skyboxAssets: ProjectSkyboxAssetEntry[]): ImportedProjectLibraryItem[] {
+  return skyboxAssets.map((asset) => ({
+    id: asset.id,
+    name: asset.displayName,
+    icon: 'ring',
+    subtitle: `${asset.format.toUpperCase()} · ${formatSkyboxFileSize(asset.fileSizeBytes)}`,
+    asset,
+  }));
+}
+
 /** 判断资源库卡片是否对应可直接创建的内置对象。 */
 export function isBuiltInProjectLibraryItem(item: ProjectLibraryItem): item is BuiltInProjectLibraryItem {
   return 'builtIn' in item;
@@ -217,11 +236,17 @@ export function getImportedModelCardSubtitle(asset: AssetEntry): string {
 /** 生成资源卡片副标题，避免不同入口出现不一致的兜底文案。 */
 export function getResourceCardSubtitle(item: ProjectLibraryItem, library: ProjectLibrary): string {
   if (item.subtitle) return item.subtitle;
-  if (isImportedProjectLibraryItem(item)) return getImportedModelCardSubtitle(item.asset);
+  if (isImportedProjectLibraryItem(item)) {
+    return item.asset.kind === 'skybox'
+      ? `${item.asset.format.toUpperCase()} · ${formatSkyboxFileSize(item.asset.fileSizeBytes)}`
+      : getImportedModelCardSubtitle(item.asset);
+  }
   return library.label.replace(/库$/, '') || '资源';
 }
 
 /** 获取资源卡片缩略图地址，内置对象没有缩略图时由图标占位。 */
 export function getResourceCardThumbnailUrl(item: ProjectLibraryItem): string | undefined {
-  return isImportedProjectLibraryItem(item) ? item.asset.thumbnailUrl : item.thumbnailUrl;
+  return isImportedProjectLibraryItem(item)
+    ? item.asset.kind === 'skybox' ? undefined : item.asset.thumbnailUrl
+    : item.thumbnailUrl;
 }

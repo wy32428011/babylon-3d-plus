@@ -1,5 +1,5 @@
 import { createId } from '../../shared/ids';
-import type { CadReferenceComponent, LightKind, MeshKind, PoiEffectKind } from './components';
+import type { CadReferenceComponent, LightKind, MeshKind, PoiEffectKind, SkyboxComponent, SkyboxFormat, SkyboxResolution } from './components';
 import type { Entity } from './Entity';
 import type { Vector3Data } from './math';
 import type { ModelParameterConfig } from './modelParameters';
@@ -35,6 +35,14 @@ export const SCENE_VIEW_DISTANCE_DEFAULT = 5000;
 export const SCENE_SENSITIVITY_MIN = 1;
 export const SCENE_SENSITIVITY_MAX = 20;
 export const SCENE_SENSITIVITY_DEFAULT = 10;
+export const SCENE_SKYBOX_ROTATION_MIN = 0;
+export const SCENE_SKYBOX_ROTATION_MAX = 360;
+export const SCENE_SKYBOX_INTENSITY_MIN = 0;
+export const SCENE_SKYBOX_INTENSITY_MAX = 5;
+export const SCENE_SKYBOX_INTENSITY_DEFAULT = 1;
+export const SCENE_SKYBOX_RESOLUTIONS = [256, 512, 1024] as const;
+export const SCENE_SKYBOX_RESOLUTION_DEFAULT = 512;
+export const SKYBOX_SPHERE_DIAMETER_METERS = 1000;
 
 export const STACKER_SIMULATION_SCENARIOS = ['cycle', 'target', 'movement', 'fault', 'generic'] as const;
 
@@ -56,6 +64,20 @@ export type SceneSensitivitySettings = {
   zoom: number;
   pan: number;
   rotate: number;
+};
+
+export type SceneSkyboxFormat = SkyboxFormat;
+export type SceneSkyboxResolution = SkyboxResolution;
+
+export type SceneSkyboxSettings = {
+  packagePath: string;
+  sourcePath: string;
+  sourceUrl: string;
+  assetRevision?: string;
+  format: SceneSkyboxFormat;
+  rotationDegrees: number;
+  intensity: number;
+  resolution: SceneSkyboxResolution;
 };
 
 export type SceneEnvironmentVariant = {
@@ -81,6 +103,7 @@ export type SceneSettings = {
   camera: SceneCameraSettings;
   sensitivity: SceneSensitivitySettings;
   environment: SceneEnvironmentSettings | null;
+  skybox: SceneSkyboxSettings | null;
 };
 
 export type FetchConfig = {
@@ -146,6 +169,7 @@ export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
     rotate: SCENE_SENSITIVITY_DEFAULT,
   },
   environment: null,
+  skybox: null,
 };
 
 /** 将数值约束在指定范围内，非法输入直接回退到默认值。 */
@@ -180,6 +204,122 @@ function isValidCameraPose(pose: SceneCameraPose | null): pose is SceneCameraPos
       Number.isFinite(pose.target.y) &&
       Number.isFinite(pose.target.z),
   );
+}
+
+/** 从本地或部署虚拟资源路径读取天空盒扩展名。 */
+function readSkyboxPathFormat(sourcePath: string): SceneSkyboxFormat | null {
+  let normalizedPath = sourcePath.trim();
+  if (normalizedPath.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) {
+    try {
+      const parsed = new URL(normalizedPath);
+      if (parsed.protocol !== 'editor-asset:' || parsed.hostname !== 'local') return null;
+      normalizedPath = decodeURIComponent(parsed.pathname.slice(1));
+    } catch {
+      return null;
+    }
+  } else {
+    normalizedPath = normalizedPath.split(/[?#]/, 1)[0] ?? '';
+  }
+
+  if (/\.hdr$/i.test(normalizedPath)) return 'hdr';
+  if (/\.exr$/i.test(normalizedPath)) return 'exr';
+  return null;
+}
+
+/** 归一化天空盒设置，拒绝非授权 URL、无效路径和格式不一致的资源。 */
+export function sanitizeSceneSkybox(
+  skybox: SceneSkyboxSettings | null | undefined,
+): SceneSkyboxSettings | null {
+  if (!skybox) return null;
+
+  const packagePath = skybox.packagePath.trim();
+  const sourcePath = skybox.sourcePath.trim();
+  const sourceUrl = skybox.sourceUrl.trim();
+  const format = skybox.format;
+  if (!packagePath || !sourcePath || !sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) return null;
+  if (
+    (format !== 'hdr' && format !== 'exr')
+    || readSkyboxPathFormat(sourcePath) !== format
+    || readSkyboxPathFormat(sourceUrl) !== format
+  ) return null;
+
+  const assetRevision = skybox.assetRevision?.trim();
+  const resolution = SCENE_SKYBOX_RESOLUTIONS.includes(skybox.resolution)
+    ? skybox.resolution
+    : SCENE_SKYBOX_RESOLUTION_DEFAULT;
+
+  return {
+    packagePath,
+    sourcePath,
+    sourceUrl,
+    ...(assetRevision ? { assetRevision } : {}),
+    format,
+    rotationDegrees: clampFiniteNumber(
+      skybox.rotationDegrees,
+      SCENE_SKYBOX_ROTATION_MIN,
+      SCENE_SKYBOX_ROTATION_MAX,
+      SCENE_SKYBOX_ROTATION_MIN,
+    ),
+    intensity: clampFiniteNumber(
+      skybox.intensity,
+      SCENE_SKYBOX_INTENSITY_MIN,
+      SCENE_SKYBOX_INTENSITY_MAX,
+      SCENE_SKYBOX_INTENSITY_DEFAULT,
+    ),
+    resolution,
+  };
+}
+
+/** 从场景级兼容设置提取球形天空盒实体组件。 */
+export function createSkyboxComponent(skybox: SceneSkyboxSettings): SkyboxComponent {
+  const normalized = sanitizeSceneSkybox(skybox);
+  if (!normalized) throw new Error('天空盒资源配置无效。');
+  return {
+    packagePath: normalized.packagePath,
+    sourcePath: normalized.sourcePath,
+    sourceUrl: normalized.sourceUrl,
+    ...(normalized.assetRevision ? { assetRevision: normalized.assetRevision } : {}),
+    format: normalized.format,
+    intensity: normalized.intensity,
+    resolution: normalized.resolution,
+  };
+}
+
+/** 将任意弧度旋转折算为 Inspector 使用的 0-360° 水平角。 */
+function normalizeSkyboxRotationRadians(rotationY: number): number {
+  if (!Number.isFinite(rotationY)) return SCENE_SKYBOX_ROTATION_MIN;
+  const degrees = rotationY * 180 / Math.PI;
+  const wrapped = ((degrees % 360) + 360) % 360;
+  return Number(wrapped.toFixed(6));
+}
+
+/** 读取场景中第一个球形天空盒实体；正常编辑流程只会维护一个。 */
+export function getSceneSkyboxEntity(
+  scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
+): Entity | null {
+  for (const entityId of scene.entityIds) {
+    const entity = scene.entities[entityId];
+    if (entity?.components.skybox) return entity;
+  }
+  return null;
+}
+
+/** 从单个球形天空盒实体恢复兼容设置，供资源重关联、Inspector 与运行时共享。 */
+export function createSceneSkyboxSettingsFromEntity(entity: Entity): SceneSkyboxSettings | null {
+  const skybox = entity.components.skybox;
+  if (!skybox) return null;
+  return sanitizeSceneSkybox({
+    ...skybox,
+    rotationDegrees: normalizeSkyboxRotationRadians(entity.components.transform.rotation.y),
+  });
+}
+
+/** 从球形实体恢复兼容的天空盒设置；没有实体时回退旧 sceneSettings.skybox。 */
+export function getSceneSkyboxSettings(scene: SceneDocument): SceneSkyboxSettings | null {
+  const entity = getSceneSkyboxEntity(scene);
+  return entity
+    ? createSceneSkyboxSettingsFromEntity(entity)
+    : sanitizeSceneSkybox(scene.sceneSettings.skybox);
 }
 
 /** 归一化环境模型设置，非法 URL 或空变体会回退为未启用环境模型。 */
@@ -242,6 +382,7 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
       rotate: sanitizeSceneSensitivityValue(settings.sensitivity.rotate),
     },
     environment: sanitizeSceneEnvironment(settings.environment),
+    skybox: sanitizeSceneSkybox(settings.skybox),
   };
 }
 
@@ -446,6 +587,35 @@ export function createMeshEntity(meshKind: MeshKind, position: Vector3Data = vec
         meshKind,
         materialColor: '#8ab4f8',
       },
+    },
+  };
+}
+
+/** 创建可选择、可移动和可缩放的球形天空盒实体。 */
+export function createSkyboxEntity(
+  skybox: SceneSkyboxSettings,
+  position: Vector3Data = vector3(0, 0, 0),
+): Entity {
+  const normalized = sanitizeSceneSkybox(skybox);
+  if (!normalized) throw new Error('天空盒资源配置无效。');
+  const id = createId('entity');
+  const fileName = normalized.sourcePath.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) ?? '天空盒';
+  const displayName = fileName.replace(/\.(hdr|exr)$/i, '').trim() || '天空盒';
+
+  return {
+    id,
+    name: `天空盒 ${displayName}`,
+    visible: true,
+    locked: false,
+    parentId: null,
+    childrenIds: [],
+    components: {
+      transform: {
+        position: vector3(position.x, position.y, position.z),
+        rotation: vector3(0, normalized.rotationDegrees * Math.PI / 180, 0),
+        scale: vector3(1, 1, 1),
+      },
+      skybox: createSkyboxComponent(normalized),
     },
   };
 }
