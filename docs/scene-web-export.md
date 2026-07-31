@@ -22,7 +22,9 @@
 
 导出过程使用当前场景引用自动收集普通模型、模型生成器目标、环境模型、HDR/EXR 天空盒、DXF、模型脚本和贴图。缺失、不可读取、符号链接、Junction 或路径逃逸资源会阻止导出，避免生成无法部署的半成品。
 
-球形天空盒以实体形式保存在 `components.skybox`，导出会保留它的 Hierarchy 状态以及 position / rotation / scale；旧场景级 `sceneSettings.skybox` 仍可兼容收集。Viewer 中球体位置和尺寸与编辑器一致；默认使用基础直径 `1000 m`，球心位于 `Y=0` 网格平面，上、下半球分别处于网格两侧，同时继续提供 PBR 环境照明。
+球形天空盒以实体形式保存在 `components.skybox`，导出会保留它的 Hierarchy 状态以及 position / rotation / scale；旧场景级 `sceneSettings.skybox` 仍可兼容收集。Viewer 中球体位置和尺寸与编辑器一致；默认使用基础直径 `10000 m`，球心位于 `Y=0` 网格平面，上、下半球分别处于网格两侧。尺寸倍率统一限制为 `0.1–1.0`，实际直径为 `1000–10000 m`；含天空盒场景的可视距离最低为 `12000 m`，旧场景在加载时自动迁移，同时继续提供 PBR 环境照明。
+
+环境模型以唯一的 `sceneSettings.environment` 场景底座导出，Viewer 会保留源单位换算、`scene-base / legacy-left` 摆放模式、position / XYZ rotation / 统一 scale、显隐、透明度和活动变体。Viewer 启动会等待环境候选容器加载完成后再进入 ready；环境只作为静态不可拾取视觉底座，不启用 GLB 内相机、灯光、动画或模型脚本。透明度小于 100% 时使用与编辑器一致的幽灵显示，加载失败会阻断 Viewer 启动并显示具体错误，避免静默展示缺少底座的场景。
 
 ## 输出结构
 

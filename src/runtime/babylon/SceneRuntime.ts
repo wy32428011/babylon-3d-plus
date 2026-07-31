@@ -62,6 +62,7 @@ import {
   createSceneSkyboxSettingsFromEntity,
   getSceneSkyboxEntity,
   getSceneSkyboxSettings,
+  isPointInsideSkyboxSphere,
   type FetchConfig,
   type SceneDocument,
   type SceneEnvironmentSettings,
@@ -88,9 +89,14 @@ import {
 } from './ExternalModelScriptRuntime';
 import { SceneSkyboxRuntime } from './SceneSkyboxRuntime';
 import {
-  calculateEnvironmentOriginLeftOffset,
-  ENVIRONMENT_FALLBACK_LEFT_OFFSET_METERS,
-} from './environmentPlacement';
+  SceneEnvironmentRuntime,
+  type SceneEnvironmentApplyOptions,
+} from './SceneEnvironmentRuntime';
+import type {
+  EnvironmentApplyResult,
+  EnvironmentRuntimeSnapshot,
+  EnvironmentWorldBounds,
+} from '../../editor/model/environmentRuntime';
 import {
   isMeasurableModelMesh,
   measureModelSizeMeters,
@@ -384,14 +390,6 @@ type CadReferenceRuntimeEntry = {
   cancelLoad: (() => void) | null;
 };
 
-type EnvironmentRuntimeEntry = {
-  sourceUrl: string;
-  unitScaleToMeters: number;
-  root: TransformNode;
-  container: AssetContainer | null;
-  loadToken: number;
-};
-
 type EntityRuntimeState = {
   visible: boolean;
   locked: boolean;
@@ -484,9 +482,9 @@ export class SceneRuntime {
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
   private readonly skyboxRuntime: SceneSkyboxRuntime;
+  private readonly environmentRuntime: SceneEnvironmentRuntime;
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private telemetryPreviewActive = false;
-  private environment: EnvironmentRuntimeEntry | null = null;
   private readonly reportedCargoIssues = new Set<string>();
   private outlinedModelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
   private fullSyncCount = 0;
@@ -500,12 +498,12 @@ export class SceneRuntime {
   private groupTranslationPreview: EntityGroupTranslationPreview | null = null;
   private pendingGroupTranslationDelta: Vector3Data | null = null;
   private modelLoadSequence = 0;
-  private environmentLoadSequence = 0;
 
   constructor(
     private readonly scene: Scene,
     private readonly pushLog: (message: string) => void = () => undefined,
     private readonly onModelMeasurementChanged: (entityId: string) => void = () => undefined,
+    onEnvironmentSnapshot: (snapshot: EnvironmentRuntimeSnapshot) => void = () => undefined,
   ) {
     this.modelSelectionOutlineLayer = new SelectionOutlineLayer('EditorModelSelectionOutlineLayer', scene);
     this.modelSelectionOutlineLayer.outlineColor = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
@@ -516,6 +514,11 @@ export class SceneRuntime {
     });
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
+    this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
+      loadAssetContainer: (rootUrl, fileName, signal) => this.loadAssetContainer(rootUrl, fileName, signal),
+      onSnapshot: onEnvironmentSnapshot,
+      pushLog: this.pushLog,
+    });
     this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(scene, this.createSpecializedTelemetryHost());
     this.groupTranslationPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
       this.flushGroupTranslationPreview();
@@ -1034,6 +1037,20 @@ export class SceneRuntime {
     }
   }
 
+  /** 天空盒包围当前相机时不参与背景拾取；相机位于球外时恢复球面点击选择。 */
+  private isEntityPickableFromActiveCamera(entityId: string): boolean {
+    const entity = this.syncedEntities.get(entityId);
+    if (!entity?.components.skybox) return true;
+    const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
+    if (!camera) return false;
+    const position = camera.globalPosition;
+    return !isPointInsideSkyboxSphere(entity.components.transform, {
+      x: position.x,
+      y: position.y,
+      z: position.z,
+    });
+  }
+
   /** 在画布客户端坐标位置拾取可编辑 Mesh，并把 thinInstanceIndex 还原为具体阵列实体 ID。 */
   pickEntityIdAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): string | null {
     const point = this.getCanvasPickPoint(clientX, clientY, canvas);
@@ -1048,7 +1065,9 @@ export class SceneRuntime {
       const batch = this.modelArrayBatchByMeshUniqueId.get(mesh.uniqueId);
       if (batch) return batch.hasPickableEntities();
       const entityId = this.readEntityIdFromMesh(mesh);
-      return entityId !== null && this.isEntityScenePickable(entityId);
+      return entityId !== null
+        && this.isEntityScenePickable(entityId)
+        && this.isEntityPickableFromActiveCamera(entityId);
     }) ?? [];
     picks.sort((left, right) => left.distance - right.distance);
 
@@ -1057,7 +1076,11 @@ export class SceneRuntime {
         picked.pickedMesh ?? null,
         typeof picked.thinInstanceIndex === 'number' ? picked.thinInstanceIndex : null,
       );
-      if (entityId && this.isEntityScenePickable(entityId)) return entityId;
+      if (
+        entityId
+        && this.isEntityScenePickable(entityId)
+        && this.isEntityPickableFromActiveCamera(entityId)
+      ) return entityId;
     }
 
     const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
@@ -2028,49 +2051,30 @@ export class SceneRuntime {
 
   /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
   syncEnvironment(environment: SceneEnvironmentSettings | null): void {
-    const sourceUrl = environment?.activeVariantUrl ?? null;
-    if (!sourceUrl) {
-      this.disposeEnvironment();
-      return;
-    }
+    this.environmentRuntime.sync(environment);
+  }
 
-    const unitScaleToMeters = environment?.unitScaleToMeters ?? 1;
-    if (this.environment?.sourceUrl === sourceUrl && this.environment.unitScaleToMeters === unitScaleToMeters) return;
+  /** 事务式加载候选环境；成功前保留当前有效环境。 */
+  applyEnvironment(
+    environment: SceneEnvironmentSettings,
+    options: SceneEnvironmentApplyOptions,
+  ): Promise<EnvironmentApplyResult> {
+    return this.environmentRuntime.apply(environment, options);
+  }
 
-    this.disposeEnvironment();
+  /** 返回环境根节点供临时 Gizmo 调整；旧版摆放环境不开放该入口。 */
+  getEnvironmentGizmoTarget(): TransformNode | null {
+    return this.environmentRuntime.getGizmoTarget();
+  }
 
-    const root = new TransformNode('EnvironmentRoot', this.scene);
-    this.applyModelUnitScale(root, unitScaleToMeters);
-    const loadToken = ++this.environmentLoadSequence;
-    this.environment = { sourceUrl, unitScaleToMeters, root, container: null, loadToken };
+  /** 返回当前环境的世界包围盒，供聚焦与 Inspector 摘要使用。 */
+  getEnvironmentWorldBounds(): EnvironmentWorldBounds | null {
+    return this.environmentRuntime.getWorldBounds();
+  }
 
-    const { rootUrl, fileName } = this.splitAssetUrl(resolveRuntimeAssetUrl(sourceUrl));
-
-    void this.loadAssetContainer(rootUrl, fileName)
-      .then((container) => {
-        const activeEnvironment = this.environment;
-        if (!activeEnvironment || activeEnvironment.loadToken !== loadToken || activeEnvironment.sourceUrl !== sourceUrl) {
-          container.dispose();
-          return;
-        }
-
-        container.addAllToScene();
-        activeEnvironment.container = container;
-        this.parentTopLevelEnvironmentNodes(activeEnvironment);
-        this.positionEnvironmentLeftOfOrigin(activeEnvironment);
-
-        for (const mesh of container.meshes) {
-          mesh.isPickable = false;
-        }
-      })
-      .catch((error) => {
-        const activeEnvironment = this.environment;
-        if (!activeEnvironment || activeEnvironment.loadToken !== loadToken) return;
-
-        this.disposeEnvironment();
-        const message = error instanceof Error ? error.message : String(error);
-        this.pushLog(`环境模型加载失败：${message}`);
-      });
+  /** 切换环境调整态的静态矩阵冻结与辅助包围框。 */
+  setEnvironmentAdjustmentActive(active: boolean): void {
+    this.environmentRuntime.setAdjustmentActive(active);
   }
 
   dispose(): void {
@@ -2080,6 +2084,7 @@ export class SceneRuntime {
     this.folderGroupGizmoProxy = null;
     this.modelArrayGizmoProxy?.node.dispose(false, false);
     this.modelArrayGizmoProxy = null;
+    this.environmentRuntime.dispose();
     this.assetLoadScheduler.dispose();
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
@@ -2120,7 +2125,6 @@ export class SceneRuntime {
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
     }
-    this.disposeEnvironment();
     this.skyboxRuntime.dispose();
     this.sharedModelAssetCache.dispose();
     this.modelSelectionOutlineLayer.dispose();
@@ -3598,15 +3602,6 @@ export class SceneRuntime {
     this.modelGenerators.delete(entityId);
   }
 
-  /** 释放当前环境底座模型，切换场景或切换效果时避免 Babylon 资源残留。 */
-  private disposeEnvironment(): void {
-    if (!this.environment) return;
-
-    this.environment.container?.dispose();
-    this.environment.root.dispose();
-    this.environment = null;
-  }
-
   private disposeLight(entityId: string, light: Light): void {
     light.dispose();
     this.lights.delete(entityId);
@@ -3632,6 +3627,7 @@ export class SceneRuntime {
         || this.modelArrayInstanceEntities.has(entityId)
         || this.modelGenerators.has(entityId)
         || this.poiEffectRuntime.has(entityId)
+        || this.skyboxRuntime.hasEntity(entityId)
       )
       ? entityId
       : null;
@@ -5598,51 +5594,6 @@ export class SceneRuntime {
         node.parent = model.contentRoot;
       }
     }
-  }
-
-  /** 将环境模型的顶层节点挂到独立根节点下，避免污染场景实体层级。 */
-  private parentTopLevelEnvironmentNodes(environment: EnvironmentRuntimeEntry): void {
-    const meshes = environment.container?.meshes ?? [];
-    const transformNodes = environment.container?.transformNodes ?? [];
-    const allImportedNodes = new Set([...meshes, ...transformNodes]);
-
-    for (const node of allImportedNodes) {
-      if (!node.parent || !allImportedNodes.has(node.parent as AbstractMesh | TransformNode)) {
-        node.parent = environment.root;
-      }
-    }
-  }
-
-  /**
-   * 根据有效环境网格的世界包围盒放置根节点，使整个 GLB 位于世界原点左侧并落到地面。
-   * 环境模型仍保持不可选中，也不会写入场景实体层级。
-   */
-  private positionEnvironmentLeftOfOrigin(environment: EnvironmentRuntimeEntry): void {
-    let mergedBounds: RuntimeWorldBounds | null = null;
-
-    for (const mesh of environment.container?.meshes ?? []) {
-      if (mesh.getTotalVertices() <= 0) continue;
-
-      const bounds = getMeshWorldBounds(mesh);
-      if (!bounds) continue;
-      mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
-    }
-
-    if (!mergedBounds) {
-      environment.root.position.copyFromFloats(-ENVIRONMENT_FALLBACK_LEFT_OFFSET_METERS, 0, 0);
-      environment.root.computeWorldMatrix(true);
-      return;
-    }
-
-    const offset = calculateEnvironmentOriginLeftOffset(mergedBounds.minimum, mergedBounds.maximum);
-    if (!offset) {
-      environment.root.position.copyFromFloats(-ENVIRONMENT_FALLBACK_LEFT_OFFSET_METERS, 0, 0);
-      environment.root.computeWorldMatrix(true);
-      return;
-    }
-
-    environment.root.position.copyFromFloats(offset.x, offset.y, offset.z);
-    environment.root.computeWorldMatrix(true);
   }
 
   /** 将导入模型内容的底部中心归一到实体根节点，避免源模型巨大坐标偏移影响场景放置。 */

@@ -1,5 +1,6 @@
 import type { AssetEntry } from './AssetDatabase';
 import {
+  createDefaultSceneEnvironmentTransform,
   sanitizeSceneEnvironment,
   type SceneEnvironmentSettings,
   type SceneEnvironmentVariant,
@@ -39,20 +40,39 @@ export function createFallbackEnvironmentVariant(asset: AssetEntry): SceneEnviro
 export function createEnvironmentFromAsset(
   asset: AssetEntry,
   variants: SceneEnvironmentVariant[],
+  previousEnvironment?: SceneEnvironmentSettings | null,
 ): SceneEnvironmentSettings | null {
   const sourceVariants = variants.length > 0 ? variants : [createFallbackEnvironmentVariant(asset)];
-  const unitInfo = createModelLengthUnitInfo(asset.lengthUnit);
+  const unitInfo = createModelLengthUnitInfo(previousEnvironment?.lengthUnit ?? asset.lengthUnit);
   const safeVariants = sourceVariants.map((variant) => ({
     ...variant,
     sourceUrl: createVersionedEnvironmentSourceUrl(variant.sourceUrl, asset.assetRevision),
   }));
+  const previousActiveVariant = previousEnvironment?.variants.find(
+    (variant) => variant.sourceUrl === previousEnvironment.activeVariantUrl,
+  );
+  const preservedActiveVariant = previousActiveVariant
+    ? safeVariants.find((variant) => (
+        variant.sourcePath.replace(/\\/g, '/').toLowerCase()
+        === previousActiveVariant.sourcePath.replace(/\\/g, '/').toLowerCase()
+      )) ?? safeVariants.find((variant) => variant.name === previousActiveVariant.name)
+    : null;
+  const displayName = asset.displayName?.trim()
+    || asset.name.replace(/\.(gltf|glb)$/i, '').trim()
+    || '环境模型';
 
   return sanitizeSceneEnvironment({
     packagePath: asset.packagePath ?? asset.path,
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     thumbnailUrl: asset.thumbnailUrl,
-    activeVariantUrl: safeVariants[0].sourceUrl,
+    displayName,
+    fileSizeBytes: asset.fileSizeBytes,
+    placementMode: previousEnvironment?.placementMode ?? 'scene-base',
+    transform: previousEnvironment?.transform ?? createDefaultSceneEnvironmentTransform(),
+    visible: previousEnvironment?.visible ?? true,
+    opacity: previousEnvironment?.opacity ?? 1,
+    activeVariantUrl: preservedActiveVariant?.sourceUrl ?? safeVariants[0].sourceUrl,
     variants: safeVariants,
   });
 }
@@ -79,9 +99,12 @@ export async function loadEnvironmentVariantsFromAsset(asset: AssetEntry): Promi
 }
 
 /** 从项目环境资产创建完整环境配置，非 environment 分库资产直接拒绝，形成跨库防御边界。 */
-export async function loadEnvironmentFromAsset(asset: AssetEntry): Promise<SceneEnvironmentSettings | null> {
+export async function loadEnvironmentFromAsset(
+  asset: AssetEntry,
+  previousEnvironment?: SceneEnvironmentSettings | null,
+): Promise<SceneEnvironmentSettings | null> {
   if (asset.libraryKind !== 'environment') return null;
 
   const variants = await loadEnvironmentVariantsFromAsset(asset);
-  return createEnvironmentFromAsset(asset, variants);
+  return createEnvironmentFromAsset(asset, variants, previousEnvironment);
 }

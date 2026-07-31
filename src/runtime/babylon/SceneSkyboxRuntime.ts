@@ -10,7 +10,7 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import type { TransformComponent } from '../../editor/model/components';
-import { SKYBOX_SPHERE_DIAMETER_METERS, type SceneSkyboxSettings } from '../../editor/model/SceneDocument';
+import { normalizeSkyboxSphereScale, SKYBOX_SPHERE_DIAMETER_METERS, type SceneSkyboxSettings } from '../../editor/model/SceneDocument';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 
 type SkyboxTexture = HDRCubeTexture | EXRCubeTexture;
@@ -258,7 +258,8 @@ export class SceneSkyboxRuntime {
     active.mesh.position = new Vector3(transform.position.x, transform.position.y, transform.position.z);
     active.mesh.rotationQuaternion = null;
     active.mesh.rotation = new Vector3(transform.rotation.x, transform.rotation.y, transform.rotation.z);
-    active.mesh.scaling = new Vector3(transform.scale.x, transform.scale.y, transform.scale.z);
+    const scale = normalizeSkyboxSphereScale(transform.scale);
+    active.mesh.scaling = new Vector3(scale.x, scale.y, scale.z);
     active.mesh.setEnabled(target.visible);
     active.mesh.isPickable = target.visible && target.pickable && Boolean(target.entityId);
     active.mesh.renderOutline = target.visible && target.selected;

@@ -695,6 +695,22 @@ select {
   pointer-events: none;
 }
 
+.scene-environment-adjustment-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  padding: 4px 9px;
+  border: 1px solid #37c9ff;
+  border-radius: 999px;
+  color: #dff8ff;
+  background: rgb(13 55 72 / 88%);
+  box-shadow: 0 0 12px rgb(55 201 255 / 28%);
+  font-size: 12px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
 .scene-error {
   position: absolute;
   inset: 0;
@@ -1472,6 +1488,201 @@ select {
 .environment-clear-button {
   justify-self: start;
   padding: 0 10px;
+}
+
+.environment-inspector-fieldset {
+  align-content: start;
+}
+
+.environment-runtime-status {
+  padding: 5px 7px;
+  border: 1px solid #454545;
+  border-radius: 3px;
+  color: #aeb4ba;
+  background: #232323;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.environment-runtime-status-loading {
+  border-color: #826d31;
+  color: #ffe29a;
+  background: #302b1e;
+}
+
+.environment-runtime-status-ready {
+  border-color: #2e7657;
+  color: #b9f3d4;
+  background: #1e3027;
+}
+
+.environment-runtime-status-error {
+  border-color: #8b4040;
+  color: #ffc4c4;
+  background: #341f1f;
+}
+
+.environment-summary-card,
+.environment-legacy-notice,
+.environment-transform-editor,
+.environment-statistics {
+  display: grid;
+  gap: 5px;
+  padding: 7px;
+  border: 1px solid #3f3f3f;
+  border-radius: 3px;
+  background: #222222;
+  font-size: 11px;
+}
+
+.environment-summary-card strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #eeeeee;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.environment-summary-card span,
+.environment-legacy-notice span {
+  color: #a9adb2;
+  line-height: 1.35;
+}
+
+.environment-legacy-notice {
+  border-color: #806c33;
+  background: #2c281d;
+}
+
+.environment-legacy-notice strong {
+  color: #ffe2a0;
+}
+
+.environment-legacy-notice button {
+  justify-self: start;
+  min-height: 25px;
+}
+
+.environment-transform-editor {
+  gap: 4px;
+  padding: 0 0 7px;
+  overflow: hidden;
+}
+
+.environment-transform-editor > .scene-effect-title {
+  margin-bottom: 2px;
+}
+
+.environment-transform-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px;
+  color: #c5c5c5;
+}
+
+.environment-transform-row input {
+  min-width: 0;
+  width: 100%;
+  height: 24px;
+  border: 1px solid #515151;
+  border-radius: 2px;
+  color: #dddddd;
+  background: #1b1b1b;
+}
+
+.environment-transform-row small {
+  color: #7f8991;
+  text-align: center;
+}
+
+.environment-visible-row {
+  grid-template-columns: 84px minmax(0, 1fr);
+}
+
+.environment-visible-row input[type="checkbox"] {
+  justify-self: start;
+  width: auto;
+}
+
+.environment-opacity-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 8px;
+  color: #d7d7d7;
+  font-size: 12px;
+}
+
+.environment-opacity-row input[type="range"] {
+  width: 100%;
+  accent-color: #45bfe8;
+}
+
+.environment-opacity-row output {
+  color: #9ecbda;
+  text-align: right;
+}
+
+.environment-display-presets,
+.environment-action-grid {
+  display: grid;
+  gap: 6px;
+}
+
+.environment-display-presets {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.environment-action-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.environment-display-presets button,
+.environment-action-grid button {
+  min-width: 0;
+  min-height: 26px;
+  padding: 0 6px;
+}
+
+.environment-action-grid button.active {
+  border-color: #37c9ff;
+  color: #dff8ff;
+  background: #13566f;
+}
+
+.environment-action-grid button.danger {
+  border-color: #754444;
+  color: #ffc0c0;
+}
+
+.environment-statistics summary {
+  color: #cfd7dc;
+  cursor: pointer;
+}
+
+.environment-statistics dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+  margin: 2px 0 0;
+}
+
+.environment-statistics dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.environment-statistics dt {
+  color: #8e979e;
+}
+
+.environment-statistics dd {
+  margin: 0;
+  color: #d5dadd;
+  font-variant-numeric: tabular-nums;
 }
 
 .scene-effect-section {

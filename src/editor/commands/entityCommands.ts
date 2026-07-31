@@ -19,7 +19,7 @@ import {
 } from '../model/entityHierarchy';
 import type { ModelParameterValues } from '../model/modelParameters';
 import type { Vector3Data } from '../model/math';
-import type { SceneDocument } from '../model/SceneDocument';
+import type { SceneDocument, SceneEnvironmentSettings } from '../model/SceneDocument';
 
 export function createEntityCommand(entity: Entity): Command {
   let previousSelectedEntityId: string | null = null;
@@ -152,6 +152,30 @@ export function updateSceneDocumentCommand(
     undo: (scene) => {
       return previousScene ?? scene;
     },
+  };
+}
+
+/** 用显式 before/after 环境快照提交场景级环境修改，支持 Gizmo 预览后的可靠撤销。 */
+export function updateSceneEnvironmentCommand(
+  label: string,
+  before: SceneEnvironmentSettings | null,
+  after: SceneEnvironmentSettings | null,
+): Command {
+  const replaceEnvironment = (
+    scene: SceneDocument,
+    environment: SceneEnvironmentSettings | null,
+  ): SceneDocument => ({
+    ...scene,
+    sceneSettings: {
+      ...scene.sceneSettings,
+      environment,
+    },
+  });
+
+  return {
+    label,
+    execute: (scene) => replaceEnvironment(scene, after),
+    undo: (scene) => replaceEnvironment(scene, before),
   };
 }
 

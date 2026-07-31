@@ -31,7 +31,7 @@ export const DEFAULT_STACKER_SIMULATOR_INTERVAL_MS = 500;
 export const AUTHORIZED_LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
 export const SCENE_VIEW_DISTANCE_MIN = 100;
 export const SCENE_VIEW_DISTANCE_MAX = 20000;
-export const SCENE_VIEW_DISTANCE_DEFAULT = 5000;
+export const SCENE_VIEW_DISTANCE_DEFAULT = 12000;
 export const SCENE_SENSITIVITY_MIN = 1;
 export const SCENE_SENSITIVITY_MAX = 20;
 export const SCENE_SENSITIVITY_DEFAULT = 10;
@@ -42,11 +42,29 @@ export const SCENE_SKYBOX_INTENSITY_MAX = 5;
 export const SCENE_SKYBOX_INTENSITY_DEFAULT = 1;
 export const SCENE_SKYBOX_RESOLUTIONS = [256, 512, 1024] as const;
 export const SCENE_SKYBOX_RESOLUTION_DEFAULT = 512;
-export const SKYBOX_SPHERE_DIAMETER_METERS = 1000;
+export const SCENE_SKYBOX_VIEW_DISTANCE_MIN = 12000;
+export const SKYBOX_FOCUS_VIEW_DISTANCE_METERS = SCENE_VIEW_DISTANCE_MAX;
+export const SKYBOX_SPHERE_DIAMETER_METERS = 10000;
+export const SKYBOX_SPHERE_SCALE_MIN = 0.1;
+export const SKYBOX_SPHERE_SCALE_MAX = 1;
+export const SCENE_ENVIRONMENT_OPACITY_MIN = 0;
+export const SCENE_ENVIRONMENT_OPACITY_MAX = 1;
+export const SCENE_ENVIRONMENT_OPACITY_DEFAULT = 1;
+export const SCENE_ENVIRONMENT_SCALE_MIN = 0.001;
+export const SCENE_ENVIRONMENT_SCALE_MAX = 1000;
+export const SCENE_ENVIRONMENT_SCALE_DEFAULT = 1;
 
 export const STACKER_SIMULATION_SCENARIOS = ['cycle', 'target', 'movement', 'fault', 'generic'] as const;
 
 export type StackerSimulationScenario = (typeof STACKER_SIMULATION_SCENARIOS)[number];
+
+export const SCENE_CAMERA_ORIENTATIONS = ['orbit', 'top'] as const;
+export type SceneCameraOrientation = (typeof SCENE_CAMERA_ORIENTATIONS)[number];
+export const SCENE_CAMERA_ORIENTATION_DEFAULT: SceneCameraOrientation = 'orbit';
+
+export const SCENE_CAMERA_PROJECTIONS = ['perspective', 'orthographic'] as const;
+export type SceneCameraProjection = (typeof SCENE_CAMERA_PROJECTIONS)[number];
+export const SCENE_CAMERA_PROJECTION_DEFAULT: SceneCameraProjection = 'perspective';
 
 export type SceneCameraPose = {
   alpha: number;
@@ -57,6 +75,8 @@ export type SceneCameraPose = {
 
 export type SceneCameraSettings = {
   savedPose: SceneCameraPose | null;
+  savedOrientation: SceneCameraOrientation;
+  savedProjection: SceneCameraProjection;
   viewDistance: number;
 };
 
@@ -86,18 +106,48 @@ export type SceneEnvironmentVariant = {
   sourceUrl: string;
 };
 
+export type SceneEnvironmentPlacementMode = 'legacy-left' | 'scene-base';
+
+/** 环境根节点使用米制位置、弧度旋转和统一无量纲缩放。 */
+export type SceneEnvironmentTransform = {
+  position: Vector3Data;
+  rotation: Vector3Data;
+  scale: number;
+};
+
 export type SceneEnvironmentSettings = {
   packagePath: string;
   lengthUnit: ModelSourceLengthUnit;
   unitScaleToMeters: number;
   thumbnailUrl?: string;
+  displayName?: string;
+  fileSizeBytes?: number;
+  placementMode: SceneEnvironmentPlacementMode;
+  transform: SceneEnvironmentTransform;
+  visible: boolean;
+  opacity: number;
   activeVariantUrl: string;
   variants: SceneEnvironmentVariant[];
 };
 
-/** 环境配置输入兼容旧场景缺失单位字段，归一化后始终返回完整米制信息。 */
-export type SceneEnvironmentSettingsInput = Omit<SceneEnvironmentSettings, 'lengthUnit' | 'unitScaleToMeters'> &
-  Partial<Pick<SceneEnvironmentSettings, 'lengthUnit' | 'unitScaleToMeters'>>;
+/** 环境配置输入兼容旧场景缺失单位、摆放与显示字段，归一化后始终返回完整配置。 */
+export type SceneEnvironmentSettingsInput = Omit<
+  SceneEnvironmentSettings,
+  | 'lengthUnit'
+  | 'unitScaleToMeters'
+  | 'placementMode'
+  | 'transform'
+  | 'visible'
+  | 'opacity'
+> & Partial<Pick<
+  SceneEnvironmentSettings,
+  | 'lengthUnit'
+  | 'unitScaleToMeters'
+  | 'placementMode'
+  | 'transform'
+  | 'visible'
+  | 'opacity'
+>>;
 
 export type SceneSettings = {
   camera: SceneCameraSettings;
@@ -161,6 +211,8 @@ export const DEFAULT_MQTT_CONFIG: MqttConfig = {
 export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
   camera: {
     savedPose: null,
+    savedOrientation: SCENE_CAMERA_ORIENTATION_DEFAULT,
+    savedProjection: SCENE_CAMERA_PROJECTION_DEFAULT,
     viewDistance: SCENE_VIEW_DISTANCE_DEFAULT,
   },
   sensitivity: {
@@ -178,9 +230,19 @@ function clampFiniteNumber(value: number, min: number, max: number, fallback: nu
   return Math.min(max, Math.max(min, value));
 }
 
-/** 归一化 Scene View 可视距离，避免写入会导致相机裁剪异常的数值。 */
-export function sanitizeSceneViewDistance(value: number): number {
-  return clampFiniteNumber(value, SCENE_VIEW_DISTANCE_MIN, SCENE_VIEW_DISTANCE_MAX, SCENE_VIEW_DISTANCE_DEFAULT);
+/** 归一化 Scene View 可视距离；天空盒场景可传入更高的业务最小值。 */
+export function sanitizeSceneViewDistance(
+  value: number,
+  minimum = SCENE_VIEW_DISTANCE_MIN,
+): number {
+  const safeMinimum = clampFiniteNumber(
+    minimum,
+    SCENE_VIEW_DISTANCE_MIN,
+    SCENE_VIEW_DISTANCE_MAX,
+    SCENE_VIEW_DISTANCE_MIN,
+  );
+  const fallback = Math.max(SCENE_VIEW_DISTANCE_DEFAULT, safeMinimum);
+  return clampFiniteNumber(value, safeMinimum, SCENE_VIEW_DISTANCE_MAX, fallback);
 }
 
 /** 归一化相机操作灵敏度，滑杆值越大代表操作响应越快。 */
@@ -204,6 +266,16 @@ function isValidCameraPose(pose: SceneCameraPose | null): pose is SceneCameraPos
       Number.isFinite(pose.target.y) &&
       Number.isFinite(pose.target.z),
   );
+}
+
+/** 判断相机朝向是否属于场景文件支持的稳定枚举。 */
+function isSceneCameraOrientation(value: unknown): value is SceneCameraOrientation {
+  return value === 'orbit' || value === 'top';
+}
+
+/** 判断相机投影是否属于场景文件支持的稳定枚举。 */
+function isSceneCameraProjection(value: unknown): value is SceneCameraProjection {
+  return value === 'perspective' || value === 'orthographic';
 }
 
 /** 从本地或部署虚拟资源路径读取天空盒扩展名。 */
@@ -270,6 +342,48 @@ export function sanitizeSceneSkybox(
   };
 }
 
+/** 将任意旧三轴缩放迁移为安全等比倍率；取最大绝对值避免缩小既有覆盖范围。 */
+export function getSkyboxSphereScaleMultiplier(scale: Vector3Data): number {
+  const finiteAbsoluteValues = [scale.x, scale.y, scale.z]
+    .filter((value) => Number.isFinite(value))
+    .map((value) => Math.abs(value));
+  const maximum = finiteAbsoluteValues.length > 0 ? Math.max(...finiteAbsoluteValues) : 1;
+  return clampFiniteNumber(maximum, SKYBOX_SPHERE_SCALE_MIN, SKYBOX_SPHERE_SCALE_MAX, 1);
+}
+
+/** 把天空盒缩放统一为 X/Y/Z 相同的安全倍率。 */
+export function normalizeSkyboxSphereScale(scale: Vector3Data): Vector3Data {
+  const multiplier = getSkyboxSphereScaleMultiplier(scale);
+  return vector3(multiplier, multiplier, multiplier);
+}
+
+/** 根据当前等比缩放返回天空盒球体的实际直径。 */
+export function getSkyboxSphereDiameterMeters(scale: Vector3Data): number {
+  return SKYBOX_SPHERE_DIAMETER_METERS * getSkyboxSphereScaleMultiplier(scale);
+}
+
+/** 判断指定世界点是否位于球形天空盒内部，供 Scene 背景拾取避让使用。 */
+export function isPointInsideSkyboxSphere(
+  transform: Pick<Entity['components']['transform'], 'position' | 'scale'>,
+  point: Vector3Data,
+): boolean {
+  const values = [
+    transform.position.x,
+    transform.position.y,
+    transform.position.z,
+    point.x,
+    point.y,
+    point.z,
+  ];
+  if (values.some((value) => !Number.isFinite(value))) return false;
+
+  const radius = getSkyboxSphereDiameterMeters(transform.scale) / 2;
+  const deltaX = point.x - transform.position.x;
+  const deltaY = point.y - transform.position.y;
+  const deltaZ = point.z - transform.position.z;
+  return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ < radius * radius;
+}
+
 /** 从场景级兼容设置提取球形天空盒实体组件。 */
 export function createSkyboxComponent(skybox: SceneSkyboxSettings): SkyboxComponent {
   const normalized = sanitizeSceneSkybox(skybox);
@@ -322,6 +436,44 @@ export function getSceneSkyboxSettings(scene: SceneDocument): SceneSkyboxSetting
     : sanitizeSceneSkybox(scene.sceneSettings.skybox);
 }
 
+/** 创建环境模型的默认根节点 Transform；新旧摆放模式都以此作为用户调整基线。 */
+export function createDefaultSceneEnvironmentTransform(): SceneEnvironmentTransform {
+  return {
+    position: vector3(),
+    rotation: vector3(),
+    scale: SCENE_ENVIRONMENT_SCALE_DEFAULT,
+  };
+}
+
+/** 对环境 Transform 的每个分量独立容错，避免单个非法输入污染整个场景。 */
+export function sanitizeSceneEnvironmentTransform(
+  transform: SceneEnvironmentTransform | null | undefined,
+): SceneEnvironmentTransform {
+  const defaults = createDefaultSceneEnvironmentTransform();
+  if (!transform) return defaults;
+
+  return {
+    position: {
+      x: Number.isFinite(transform.position?.x) ? transform.position.x : defaults.position.x,
+      y: Number.isFinite(transform.position?.y) ? transform.position.y : defaults.position.y,
+      z: Number.isFinite(transform.position?.z) ? transform.position.z : defaults.position.z,
+    },
+    rotation: {
+      x: Number.isFinite(transform.rotation?.x) ? transform.rotation.x : defaults.rotation.x,
+      y: Number.isFinite(transform.rotation?.y) ? transform.rotation.y : defaults.rotation.y,
+      z: Number.isFinite(transform.rotation?.z) ? transform.rotation.z : defaults.rotation.z,
+    },
+    scale: Number.isFinite(transform.scale) && transform.scale > 0
+      ? clampFiniteNumber(
+          transform.scale,
+          SCENE_ENVIRONMENT_SCALE_MIN,
+          SCENE_ENVIRONMENT_SCALE_MAX,
+          SCENE_ENVIRONMENT_SCALE_DEFAULT,
+        )
+      : SCENE_ENVIRONMENT_SCALE_DEFAULT,
+  };
+}
+
 /** 归一化环境模型设置，非法 URL 或空变体会回退为未启用环境模型。 */
 export function sanitizeSceneEnvironment(
   environment: SceneEnvironmentSettingsInput | null | undefined,
@@ -342,6 +494,15 @@ export function sanitizeSceneEnvironment(
   const activeVariantUrl = environment.activeVariantUrl.trim();
   const activeVariant = variants.find((variant) => variant.sourceUrl === activeVariantUrl) ?? variants[0];
   const thumbnailUrl = environment.thumbnailUrl?.trim();
+  const displayName = environment.displayName?.trim();
+  const placementMode: SceneEnvironmentPlacementMode = environment.placementMode === 'scene-base'
+    ? 'scene-base'
+    : 'legacy-left';
+  const fileSizeBytes = typeof environment.fileSizeBytes === 'number'
+    && Number.isFinite(environment.fileSizeBytes)
+    && environment.fileSizeBytes > 0
+      ? Math.floor(environment.fileSizeBytes)
+      : undefined;
   let unitInfo: ModelLengthUnitInfo;
 
   try {
@@ -355,6 +516,17 @@ export function sanitizeSceneEnvironment(
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
+    ...(displayName ? { displayName } : {}),
+    ...(fileSizeBytes ? { fileSizeBytes } : {}),
+    placementMode,
+    transform: sanitizeSceneEnvironmentTransform(environment.transform),
+    visible: environment.visible !== false,
+    opacity: clampFiniteNumber(
+      environment.opacity ?? SCENE_ENVIRONMENT_OPACITY_DEFAULT,
+      SCENE_ENVIRONMENT_OPACITY_MIN,
+      SCENE_ENVIRONMENT_OPACITY_MAX,
+      SCENE_ENVIRONMENT_OPACITY_DEFAULT,
+    ),
     activeVariantUrl: activeVariant.sourceUrl,
     variants,
   };
@@ -371,9 +543,18 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
       }
     : null;
 
+  const savedOrientation = savedPose && isSceneCameraOrientation(settings.camera.savedOrientation)
+    ? settings.camera.savedOrientation
+    : SCENE_CAMERA_ORIENTATION_DEFAULT;
+  const savedProjection = savedPose && isSceneCameraProjection(settings.camera.savedProjection)
+    ? settings.camera.savedProjection
+    : SCENE_CAMERA_PROJECTION_DEFAULT;
+
   return {
     camera: {
       savedPose,
+      savedOrientation,
+      savedProjection,
       viewDistance: sanitizeSceneViewDistance(settings.camera.viewDistance),
     },
     sensitivity: {

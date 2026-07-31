@@ -2,17 +2,24 @@ import type { Entity } from '../model/Entity';
 import { createLegacyCadReferenceUnitInfo, normalizeCadReferenceUnitInfo } from '../cad/cadUnits';
 import {
   AUTHORIZED_LOCAL_ASSET_URL_PREFIX,
+  SCENE_CAMERA_ORIENTATION_DEFAULT,
+  SCENE_CAMERA_PROJECTION_DEFAULT,
   createDefaultSceneSettings,
   createSkyboxEntity,
   DEFAULT_MQTT_CONFIG,
   MODEL_ASSET_CODE_MAX_LENGTH,
   createModelAssetCode,
+  normalizeSkyboxSphereScale,
   normalizeStackerSimulationScenario,
   sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneSettings,
   sanitizeSceneSkybox,
+  sanitizeSceneViewDistance,
+  SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   type MqttConfig,
+  type SceneCameraOrientation,
+  type SceneCameraProjection,
   type SceneDocument,
   type SceneEnvironmentSettings,
   type SceneEnvironmentVariant,
@@ -166,6 +173,19 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
   };
 }
 
+/** 天空盒存在时把持久化相机距离提升到 12 km，避免 10 km 球体被远裁剪面截断。 */
+function enforceSkyboxMinimumViewDistance(sceneSettings: SceneSettings): SceneSettings {
+  const viewDistance = sanitizeSceneViewDistance(
+    sceneSettings.camera.viewDistance,
+    SCENE_SKYBOX_VIEW_DISTANCE_MIN,
+  );
+  if (viewDistance === sceneSettings.camera.viewDistance) return sceneSettings;
+  return {
+    ...sceneSettings,
+    camera: { ...sceneSettings.camera, viewDistance },
+  };
+}
+
 /** 把旧 sceneSettings.skybox 自动迁移为可进入 Hierarchy 的球形天空盒实体。 */
 function migrateLegacySkyboxSettingsToEntity(
   entityIds: string[],
@@ -175,10 +195,13 @@ function migrateLegacySkyboxSettingsToEntity(
   const skyboxEntityIds = entityIds.filter((entityId) => Boolean(entities[entityId]?.components.skybox));
   if (skyboxEntityIds.length > 1) throwUnsupportedSceneFileError();
   if (skyboxEntityIds.length === 1 || !sceneSettings.skybox) {
+    const nextSceneSettings = sceneSettings.skybox ? { ...sceneSettings, skybox: null } : sceneSettings;
     return {
       entityIds,
       entities,
-      sceneSettings: sceneSettings.skybox ? { ...sceneSettings, skybox: null } : sceneSettings,
+      sceneSettings: skyboxEntityIds.length === 1
+        ? enforceSkyboxMinimumViewDistance(nextSceneSettings)
+        : nextSceneSettings,
     };
   }
 
@@ -191,7 +214,7 @@ function migrateLegacySkyboxSettingsToEntity(
   return {
     entityIds: [...entityIds, skyboxEntity.id],
     entities: { ...entities, [skyboxEntity.id]: skyboxEntity },
-    sceneSettings: { ...sceneSettings, skybox: null },
+    sceneSettings: enforceSkyboxMinimumViewDistance({ ...sceneSettings, skybox: null }),
   };
 }
 
@@ -226,6 +249,8 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
   return sanitizeSceneSettings({
     camera: {
       savedPose: normalizeSceneCameraPose(camera.savedPose),
+      savedOrientation: normalizeSceneCameraOrientation(camera.savedOrientation),
+      savedProjection: normalizeSceneCameraProjection(camera.savedProjection),
       viewDistance: assertFiniteNumber(camera.viewDistance),
     },
     sensitivity: {
@@ -278,6 +303,18 @@ function normalizeSceneCameraPose(value: unknown): SceneSettings['camera']['save
   };
 }
 
+function normalizeSceneCameraOrientation(value: unknown): SceneCameraOrientation {
+  if (value === undefined) return SCENE_CAMERA_ORIENTATION_DEFAULT;
+  if (value === 'orbit' || value === 'top') return value;
+  throwUnsupportedSceneFileError();
+}
+
+function normalizeSceneCameraProjection(value: unknown): SceneCameraProjection {
+  if (value === undefined) return SCENE_CAMERA_PROJECTION_DEFAULT;
+  if (value === 'perspective' || value === 'orthographic') return value;
+  throwUnsupportedSceneFileError();
+}
+
 function normalizeSceneEnvironmentSettings(value: unknown): SceneEnvironmentSettings | null {
   if (value === null || value === undefined) return null;
 
@@ -296,13 +333,47 @@ function normalizeSceneEnvironmentSettings(value: unknown): SceneEnvironmentSett
     throwUnsupportedSceneFileError();
   }
 
+  const placementMode = environment.placementMode === undefined
+    ? 'legacy-left'
+    : environment.placementMode;
+  if (placementMode !== 'legacy-left' && placementMode !== 'scene-base') {
+    throwUnsupportedSceneFileError();
+  }
+  const transform = environment.transform === undefined
+    ? undefined
+    : normalizeSceneEnvironmentTransform(environment.transform);
+  const opacity = environment.opacity === undefined ? 1 : assertFiniteNumber(environment.opacity);
+  const fileSizeBytes = environment.fileSizeBytes === undefined
+    ? undefined
+    : assertFiniteNumber(environment.fileSizeBytes);
+  if (fileSizeBytes !== undefined && fileSizeBytes <= 0) throwUnsupportedSceneFileError();
+
   return {
     packagePath: assertString(environment.packagePath),
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(environment.thumbnailUrl === undefined ? {} : { thumbnailUrl: assertString(environment.thumbnailUrl) }),
+    ...(environment.displayName === undefined ? {} : { displayName: assertString(environment.displayName) }),
+    ...(fileSizeBytes === undefined ? {} : { fileSizeBytes }),
+    placementMode,
+    transform: transform ?? {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: 1,
+    },
+    visible: assertOptionalBoolean(environment.visible, true),
+    opacity,
     activeVariantUrl,
     variants,
+  };
+}
+
+function normalizeSceneEnvironmentTransform(value: unknown): NonNullable<SceneEnvironmentSettings['transform']> {
+  const transform = assertPlainObject(value);
+  return {
+    position: normalizeVector3(transform.position),
+    rotation: normalizeVector3(transform.rotation),
+    scale: assertFiniteNumber(transform.scale),
   };
 }
 
@@ -361,6 +432,10 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
 
   if ('skybox' in components && components.skybox !== undefined) {
     normalized.skybox = normalizeSkyboxComponent(components.skybox);
+    normalized.transform = {
+      ...normalized.transform,
+      scale: normalizeSkyboxSphereScale(normalized.transform.scale),
+    };
   }
 
   if ('locator' in components && components.locator !== undefined) {

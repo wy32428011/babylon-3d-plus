@@ -8,7 +8,10 @@ import {
   SCENE_SKYBOX_INTENSITY_MAX,
   SCENE_SKYBOX_INTENSITY_MIN,
   SCENE_SKYBOX_RESOLUTIONS,
+  getSkyboxSphereDiameterMeters,
   SKYBOX_SPHERE_DIAMETER_METERS,
+  SKYBOX_SPHERE_SCALE_MAX,
+  SKYBOX_SPHERE_SCALE_MIN,
   type SceneSkyboxResolution,
 } from '../model/SceneDocument';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
@@ -137,6 +140,13 @@ export function InspectorPanel(props: InspectorPanelProps) {
     updateSelectedSkybox({ resolution });
   }
 
+  function handleSkyboxScaleChange(rawValue: string) {
+    if (rawValue === '') return;
+    const scale = Number(rawValue);
+    if (!Number.isFinite(scale)) return;
+    updateSelectedTransform('scale', 'x', scale);
+  }
+
   function handleCadReferenceOpacityChange(rawValue: string) {
     if (rawValue === '') return;
 
@@ -192,6 +202,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const modelGenerator = selectedEntity.components.modelGenerator;
   const poiEffect = selectedEntity.components.poiEffect;
   const isCompactModelInspector = Boolean(modelAsset || meshRenderer || skybox || modelGenerator || poiEffect || locator);
+  const transformFields = skybox ? fields.filter((field) => field !== 'scale') : fields;
 
   return (
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
@@ -207,7 +218,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
           onKeyDown={handleNameKeyDown}
         />
       </label>
-      {fields.map((field) => (
+      {transformFields.map((field) => (
         <fieldset className="transform-fieldset transform-axis-fieldset" key={field}>
           <legend>{getTransformLegend(field, meshRenderer?.meshKind)}</legend>
           {axes.map((axis) => (
@@ -259,6 +270,21 @@ export function InspectorPanel(props: InspectorPanelProps) {
           <p className="muted asset-path" title={skybox.sourcePath}>{skybox.sourcePath}</p>
           <p className="muted">格式：{skybox.format.toUpperCase()} · 基础直径：{SKYBOX_SPHERE_DIAMETER_METERS} m</p>
           <label className="number-row">
+            <span>尺寸倍率</span>
+            <input
+              disabled={isLocked}
+              max={SKYBOX_SPHERE_SCALE_MAX}
+              min={SKYBOX_SPHERE_SCALE_MIN}
+              step="0.1"
+              type="number"
+              value={transform.scale.x}
+              onChange={(event) => handleSkyboxScaleChange(event.target.value)}
+            />
+          </label>
+          <p className="muted">
+            实际直径：{MODEL_MEASUREMENT_FORMATTER.format(getSkyboxSphereDiameterMeters(transform.scale))} m
+          </p>
+          <label className="number-row">
             <span>环境强度</span>
             <input
               disabled={isLocked}
@@ -282,7 +308,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
               ))}
             </select>
           </label>
-          <p className="muted">使用 position 移动球心，rotation Y 旋转环境，scale 调整球体尺寸。</p>
+          <p className="muted">使用 position 移动球心，rotation Y 旋转环境；尺寸倍率始终等比缩放球体。</p>
         </fieldset>
       ) : null}
       {locator ? (

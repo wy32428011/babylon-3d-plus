@@ -4,6 +4,7 @@ import {
   type BabylonViewport,
   type BabylonViewportRuntimeStatus,
 } from '../../runtime/babylon/createEngine';
+import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import {
@@ -30,7 +31,13 @@ import {
 } from '../store/editorStore';
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
-import { getSceneSkyboxSettings, type SceneCameraPose, type SceneDocument } from '../model/SceneDocument';
+import {
+  getSceneSkyboxSettings,
+  SKYBOX_FOCUS_VIEW_DISTANCE_METERS,
+  SCENE_VIEW_DISTANCE_MAX,
+  type SceneCameraPose,
+  type SceneDocument,
+} from '../model/SceneDocument';
 import { createSceneSkyboxFromAsset } from '../assets/skyboxAssets';
 import type { Vector3Data } from '../model/math';
 import {
@@ -249,6 +256,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const gridSettings = useEditorStore((state) => state.gridSettings);
   const entityArrayRequest = useEditorStore((state) => state.entityArrayRequest);
   const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
+  const environmentApplyRequest = useEditorStore((state) => state.environmentApplyRequest);
+  const environmentAdjustmentActive = useEditorStore((state) => state.environmentAdjustmentActive);
+  const environmentRuntimePhase = useEditorStore((state) => state.environmentRuntimeSnapshot.phase);
+  const environmentFocusRequest = useEditorStore((state) => state.environmentFocusRequest);
   const cameraPoseSaveRequest = useEditorStore((state) => state.cameraPoseSaveRequest);
   const cameraResetRequest = useEditorStore((state) => state.cameraResetRequest);
   const cameraOrientation = useEditorStore((state) => state.cameraOrientation);
@@ -263,10 +274,17 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const placeSkybox = useEditorStore((state) => state.placeSkybox);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
+  const previewEnvironmentTransform = useEditorStore((state) => state.previewEnvironmentTransform);
+  const commitEnvironmentTransform = useEditorStore((state) => state.commitEnvironmentTransform);
+  const completeEnvironmentApply = useEditorStore((state) => state.completeEnvironmentApply);
+  const failEnvironmentApply = useEditorStore((state) => state.failEnvironmentApply);
+  const setEnvironmentRuntimeSnapshot = useEditorStore((state) => state.setEnvironmentRuntimeSnapshot);
+  const setEnvironmentAdjustmentActive = useEditorStore((state) => state.setEnvironmentAdjustmentActive);
   const commitFolderGroupTranslation = useEditorStore((state) => state.commitFolderGroupTranslation);
   const resolveEntityArrayRequest = useEditorStore((state) => state.resolveEntityArrayRequest);
   const commitResolvedEntityArray = useEditorStore((state) => state.commitResolvedEntityArray);
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
+  const consumeEnvironmentFocusRequest = useEditorStore((state) => state.consumeEnvironmentFocusRequest);
   const consumeCameraPoseSaveRequest = useEditorStore((state) => state.consumeCameraPoseSaveRequest);
   const consumeCameraResetRequest = useEditorStore((state) => state.consumeCameraResetRequest);
   const setSelectedModelMeasurement = useEditorStore((state) => state.setSelectedModelMeasurement);
@@ -332,6 +350,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     gizmo: TransformGizmoController,
   ): void => {
     const state = useEditorStore.getState();
+    if (state.environmentAdjustmentActive) {
+      runtime.clearFolderGroupGizmoTarget();
+      gizmo.attachToEnvironmentTarget(runtime.getEnvironmentGizmoTarget());
+      return;
+    }
+
     const folderSelection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
     if (folderSelection.status === 'ready') {
       const target = runtime.getFolderGroupGizmoTarget(folderSelection.folderId, folderSelection.entityIds);
@@ -339,8 +363,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       return;
     }
 
-    const target = runtime.getGizmoTargetByEntityId(state.scene.selectedEntityId);
-    gizmo.attachToTarget(target, state.scene.selectedEntityId);
+    const selectedEntityId = state.scene.selectedEntityId;
+    const selectedEntity = selectedEntityId ? state.scene.entities[selectedEntityId] : null;
+    const target = runtime.getGizmoTargetByEntityId(selectedEntityId);
+    gizmo.attachToTarget(target, selectedEntityId, {
+      uniformScaleOnly: Boolean(selectedEntity?.components.skybox),
+    });
     runtime.clearFolderGroupGizmoTarget();
   }, []);
 
@@ -485,6 +513,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       event.clientY,
       event.currentTarget,
     );
+    if (pickedEntityId) useEditorStore.getState().setEnvironmentAdjustmentActive(false);
     selectEntity(pickedEntityId ?? null);
   }
 
@@ -611,14 +640,21 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         requireHardwareAcceleration: true,
         onLog: pushLog,
       });
-      runtime = new SceneRuntime(viewport.scene, pushLog, (entityId) => {
-        const currentRuntime = runtimeRef.current;
-        if (!currentRuntime || selectedEntityIdRef.current !== entityId) return;
-        publishSelectedModelMeasurement(currentRuntime, entityId);
-      });
+      runtime = new SceneRuntime(
+        viewport.scene,
+        pushLog,
+        (entityId) => {
+          const currentRuntime = runtimeRef.current;
+          if (!currentRuntime || selectedEntityIdRef.current !== entityId) return;
+          publishSelectedModelMeasurement(currentRuntime, entityId);
+        },
+        setEnvironmentRuntimeSnapshot,
+      );
       gizmo = new TransformGizmoController(viewport.scene, {
         previewTransform: previewEntityTransform,
         commitTransform: commitEntityTransform,
+        previewEnvironmentTransform,
+        commitEnvironmentTransform,
         beginEntityArrayDrag: (context) => {
           const currentScene = sceneDocumentRef.current;
           const currentState = useEditorStore.getState();
@@ -830,12 +866,42 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   }, [
     previewEntityTransform,
     commitEntityTransform,
+    previewEnvironmentTransform,
+    commitEnvironmentTransform,
     commitFolderGroupTranslation,
     publishSelectedModelMeasurement,
     pushLog,
+    setEnvironmentRuntimeSnapshot,
     setSelectedModelMeasurement,
     stopRuntimePreview,
   ]);
+
+  /** 执行 Store 发起的候选环境事务；旧环境会保留到候选加载成功。 */
+  useEffect(() => {
+    if (!environmentApplyRequest) return;
+
+    const runtime = runtimeRef.current;
+    if (!runtime) {
+      failEnvironmentApply(environmentApplyRequest.id, 'Scene View 尚未就绪，无法加载环境模型。');
+      return;
+    }
+
+    let active = true;
+    void runtime.applyEnvironment(environmentApplyRequest.environment, {
+      requestId: environmentApplyRequest.id,
+      autoAlign: environmentApplyRequest.autoAlign,
+    }).then((result) => {
+      if (active) completeEnvironmentApply(environmentApplyRequest.id, result);
+    }).catch((error) => {
+      if (!active) return;
+      const message = getErrorMessage(error);
+      failEnvironmentApply(environmentApplyRequest.id, message);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [environmentApplyRequest, completeEnvironmentApply, failEnvironmentApply]);
 
   /** 参数值变化走单实体同步；其它文档内容变化才进入完整 SceneRuntime 同步。 */
   useEffect(() => {
@@ -924,6 +990,40 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     mqttTelemetryClientRef.current?.updateConfig(mqttConfig);
   }, [mqttConfig, isRuntimePreview]);
 
+  /** 环境调整态优先占用 Gizmo；进入预览或退出调整时恢复普通实体选区。 */
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    const gizmo = gizmoRef.current;
+    if (!runtime || !gizmo) return;
+
+    const active = environmentAdjustmentActive && !isRuntimePreview;
+    if (isRuntimePreview) {
+      gizmo.attachToEnvironmentTarget(null);
+      runtime.setEnvironmentAdjustmentActive(false);
+      if (environmentAdjustmentActive) setEnvironmentAdjustmentActive(false);
+      return;
+    }
+
+    if (active) {
+      runtime.setEnvironmentAdjustmentActive(true);
+      attachCurrentSelectionGizmo(runtime, gizmo);
+    } else {
+      // 先让 Gizmo 完成或回滚当前拖动，再冻结环境静态矩阵。
+      attachCurrentSelectionGizmo(runtime, gizmo);
+      runtime.setEnvironmentAdjustmentActive(false);
+    }
+    gizmo.setTool(transformTool);
+    gizmo.setTransformSpace(transformSpace);
+  }, [
+    attachCurrentSelectionGizmo,
+    environmentAdjustmentActive,
+    environmentRuntimePhase,
+    isRuntimePreview,
+    setEnvironmentAdjustmentActive,
+    transformSpace,
+    transformTool,
+  ]);
+
   useEffect(() => {
     if (!isRuntimePreview) gizmoRef.current?.setTool(transformTool);
   }, [transformTool, isRuntimePreview]);
@@ -935,6 +1035,19 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   useEffect(() => {
     if (!isRuntimePreview) gizmoRef.current?.setSnapSettings(snapSettings);
   }, [snapSettings, isRuntimePreview]);
+
+  /** Esc 随时结束环境临时调整，不影响当前普通实体选择。 */
+  useEffect(() => {
+    if (!environmentAdjustmentActive) return;
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      setEnvironmentAdjustmentActive(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [environmentAdjustmentActive, setEnvironmentAdjustmentActive]);
+
 
   useEffect(() => {
     viewportRef.current?.setGridSettings(gridSettings);
@@ -948,14 +1061,16 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
     viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
     runtime.syncSkybox(sceneDocument);
-    runtime.syncEnvironment(sceneDocument.sceneSettings.environment);
-  }, [sceneDocument.sceneSettings]);
+    if (!environmentApplyRequest && !environmentAdjustmentActive) {
+      runtime.syncEnvironment(sceneDocument.sceneSettings.environment);
+    }
+  }, [
+    environmentAdjustmentActive,
+    environmentApplyRequest,
+    sceneDocument.sceneSettings,
+  ]);
 
-  /**
-   * 把持久的视图状态同步到 Babylon 视口，状态驱动天然幂等。
-   * 注意声明顺序必须先于 cameraResetRequest 的消费 effect：复位视角会同时把
-   * orientation 置回 'orbit'，需要先退出俯视的角度锁定再应用保存的位姿。
-   */
+  /** 把当前工具栏视图模式同步到 Babylon 视口；普通切换不直接修改场景文档。 */
   useEffect(() => {
     viewportRef.current?.setCameraOrientation(cameraOrientation);
   }, [cameraOrientation]);
@@ -979,9 +1094,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const viewport = viewportRef.current;
     if (!viewport) return;
 
-    viewport.applyCameraPose(sceneDocument.sceneSettings.camera.savedPose);
+    applySavedSceneCameraView(viewport, sceneDocument.sceneSettings.camera);
     consumeCameraResetRequest(cameraResetRequest.id);
-  }, [cameraResetRequest, consumeCameraResetRequest, sceneDocument.sceneSettings.camera.savedPose]);
+  }, [cameraResetRequest, consumeCameraResetRequest, sceneDocument.sceneSettings.camera]);
 
   useEffect(() => {
     if (!entityArrayRequest) return;
@@ -1007,6 +1122,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     const bounds = runtime.getEntitiesWorldBounds(sceneFocusRequest.entityIds);
     if (bounds) {
+      const currentScene = sceneDocumentRef.current;
+      const containsSkybox = sceneFocusRequest.entityIds.some((entityId) => (
+        Boolean(currentScene?.entities[entityId]?.components.skybox)
+      ));
+      viewport.setViewDistance(
+        containsSkybox
+          ? SKYBOX_FOCUS_VIEW_DISTANCE_METERS
+          : currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX,
+      );
       viewport.focusOnBounds(bounds);
       sceneFocusPerformanceRef.current = {
         ...bounds,
@@ -1015,6 +1139,31 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     }
     consumeSceneFocusRequest(sceneFocusRequest.id);
   }, [sceneFocusRequest, consumeSceneFocusRequest]);
+
+
+  /** 聚焦全局环境，并在超大厂区场景中临时提高可视距离但不超过 20 km。 */
+  useEffect(() => {
+    if (!environmentFocusRequest) return;
+
+    const runtime = runtimeRef.current;
+    const viewport = viewportRef.current;
+    if (!runtime || !viewport) return;
+
+    const bounds = runtime.getEnvironmentWorldBounds();
+    if (bounds) {
+      const requiredViewDistance = Math.min(
+        SCENE_VIEW_DISTANCE_MAX,
+        Math.max(sceneDocument.sceneSettings.camera.viewDistance, Math.ceil(bounds.radiusMeters * 4)),
+      );
+      viewport.setViewDistance(requiredViewDistance);
+      viewport.focusOnBounds(bounds);
+    }
+    consumeEnvironmentFocusRequest(environmentFocusRequest.id);
+  }, [
+    consumeEnvironmentFocusRequest,
+    environmentFocusRequest,
+    sceneDocument.sceneSettings.camera.viewDistance,
+  ]);
 
   const entityArrayDialogValidationError = entityArrayDialog
     ? entityArrayDialog.commitError ?? getEntityArrayDialogError(sceneDocument, entityArrayDialog)
@@ -1161,6 +1310,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         ) : null}
         {isRuntimePreview ? (
           <span aria-live="polite" className="scene-preview-badge" role="status">运行预览</span>
+        ) : null}
+        {!isRuntimePreview && environmentAdjustmentActive ? (
+          <span aria-live="polite" className="scene-environment-adjustment-badge" role="status">
+            正在调整环境（Esc 结束）
+          </span>
         ) : null}
         {viewportError ? (
           <div className="scene-error" role="alert">
