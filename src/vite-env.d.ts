@@ -165,6 +165,7 @@ type AssetEntry = {
   displayName?: string;
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
+  fileSizeBytes?: number;
   parameterConfig?: ModelParameterConfig;
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;

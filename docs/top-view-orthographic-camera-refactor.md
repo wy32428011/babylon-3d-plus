@@ -50,7 +50,7 @@ camera.orthoLeft / orthoRight / orthoTop / orthoBottom = ...;
 
 - `scene.activeCamera` 不变 → Gizmo（`TransformGizmoController` 的 `GizmoManager`/`UtilityLayerRenderer`）、`SceneRuntime.pickEntityIdAtCanvasPoint`、`getGroundPointAtCanvasPoint`、键盘漫游（WASD）全部零改动。双相机方案则每一环都要处理切换/重绑。
 - `scene.pick` / `createPickingRay` 本身兼容正交相机。
-- 位姿模型（alpha/beta/radius/target）不变 → `hasCameraPoseChanged`、`getCameraPose`、`applyCameraPose`、序列化零改动。
+- 位姿模型（alpha/beta/radius/target）不变 → `hasCameraPoseChanged`、`getCameraPose`、`applyCameraPose` 保持原接口；后续完整视角持久化仅为相机设置补充朝向和投影字段。
 
 **正交缩放适配**（唯一的技术难点）：正交模式下滚轮改变 `radius` 无视觉效果。在 `onAfterCheckInputsObservable` 中把 `radius` 同步为 ortho 边界，使缩放/平移手感与透视一致：
 
@@ -72,7 +72,7 @@ camera.orthoRight = halfWidth; camera.orthoLeft = -halfWidth;
 
 ### 3.4 状态是否持久化
 
-不写入 `.scene.json`。视图朝向/投影是编辑器会话状态，不属于场景内容。`SceneCameraSettings.savedPose` 与序列化（`SceneSerializer.ts`）不动。
+普通 Toolbar 切换仍只影响编辑器会话；用户点击“保存当前视角”时，`savedPose`、`savedOrientation` 与 `savedProjection` 会作为一份完整启动视角写入 `.scene.json`。重新加载场景和启动导出 Viewer 时恢复一次；后续临时观察不会在保存场景文件时自动覆盖。旧场景缺少模式字段时回退为轨道透视。
 
 ## 4. 详细改动清单
 
@@ -98,7 +98,7 @@ toggleCameraOrientation / toggleCameraProjection  // 可选便捷 action
 ```
 
 - 日志沿用 `prependLog`（"已切换为俯视视角。"/"已切换为正交投影。"等）。
-- 参考：`cameraResetRequest`/`cameraPoseSaveRequest` 仍是一次性语义，保留不动。本次只替换 topView 这条链路。
+- `cameraResetRequest`/`cameraPoseSaveRequest` 保持一次性语义；后续完整视角持久化让保存请求同时快照朝向/投影，让复位请求恢复完整已保存状态。
 
 ### 4.2 Viewport API（`src/runtime/babylon/createEngine.ts`）
 
@@ -153,8 +153,8 @@ useEffect(() => { viewportRef.current?.setCameraProjection(cameraProjection); },
 | `SceneRuntime` 拾取/地面射线 | `scene.pick`/`createPickingRay` 兼容正交 |
 | 键盘漫游 WASD | 改的是 position/target，正交下平移有效 |
 | 网格 ShaderMaterial | `worldViewProjection` 与投影类型无关 |
-| `SceneSerializer` / `SceneCameraPose` | 视图状态不入场景文件 |
-| `PlayerApp` | 播放器用默认透视，不受影响 |
+| `SceneCameraPose` | 位姿结构保持不变；朝向与投影由 `SceneCameraSettings` 独立记录 |
+| `SceneSerializer` / `PlayerApp` | 显式保存的完整视角进入场景文件，并作为编辑器与 Viewer 的统一启动视角 |
 
 ## 5. 风险与验证点
 

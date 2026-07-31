@@ -15,6 +15,11 @@ import {
   type Observable,
 } from '@babylonjs/core';
 import type { TransformComponent } from '../../editor/model/components';
+import {
+  normalizeSkyboxSphereScale,
+  sanitizeSceneEnvironmentTransform,
+  type SceneEnvironmentTransform,
+} from '../../editor/model/SceneDocument';
 import type { Vector3Data } from '../../editor/model/math';
 import {
   calculateModelArraySignedCopyCount,
@@ -40,6 +45,11 @@ export type EntityArrayDragUpdate = EntityArrayDragContext & {
 type DragCallbacks = {
   previewTransform: (entityId: string, transform: TransformComponent) => void;
   commitTransform: (entityId: string, before: TransformComponent, after: TransformComponent) => void;
+  previewEnvironmentTransform: (transform: SceneEnvironmentTransform) => void;
+  commitEnvironmentTransform: (
+    before: SceneEnvironmentTransform,
+    after: SceneEnvironmentTransform,
+  ) => void;
   beginEntityArrayDrag: (context: EntityArrayDragContext) => { spanMeters: number } | null;
   previewEntityArrayDrag: (update: EntityArrayDragUpdate) => void;
   completeEntityArrayDrag: (update: EntityArrayDragUpdate) => void;
@@ -62,6 +72,10 @@ type DragObserverBinding = {
 
 type GizmoTarget = AbstractMesh | TransformNode;
 type PositionAxisGizmo = IPositionGizmo['xGizmo'];
+
+export type TransformGizmoTargetOptions = {
+  uniformScaleOnly?: boolean;
+};
 
 type EntityArrayDragSession = {
   context: EntityArrayDragContext;
@@ -91,6 +105,24 @@ function transformFromTarget(target: GizmoTarget): TransformComponent {
   };
 }
 
+/** 将统一缩放的环境根节点转换为持久化 Transform。 */
+function environmentTransformFromTarget(target: GizmoTarget): SceneEnvironmentTransform {
+  return sanitizeSceneEnvironmentTransform({
+    position: { x: target.position.x, y: target.position.y, z: target.position.z },
+    rotation: { x: target.rotation.x, y: target.rotation.y, z: target.rotation.z },
+    scale: target.scaling.x,
+  });
+}
+
+/** 从普通 Transform 快照恢复环境统一缩放语义。 */
+function environmentTransformFromComponent(transform: TransformComponent): SceneEnvironmentTransform {
+  return sanitizeSceneEnvironmentTransform({
+    position: { ...transform.position },
+    rotation: { ...transform.rotation },
+    scale: transform.scale.x,
+  });
+}
+
 function isFiniteVector(vector: { x: number; y: number; z: number }): boolean {
   return Number.isFinite(vector.x) && Number.isFinite(vector.y) && Number.isFinite(vector.z);
 }
@@ -114,6 +146,8 @@ export class TransformGizmoController {
   private attachedTarget: GizmoTarget | null = null;
   private attachedEntityId: string | null = null;
   private attachedGroupId: string | null = null;
+  private attachedEnvironment = false;
+  private attachedUniformScaleOnly = false;
   private dragStartTransform: TransformComponent | null = null;
   private activeTransformDrag = false;
   private entityArrayDragSession: EntityArrayDragSession | null = null;
@@ -171,6 +205,7 @@ export class TransformGizmoController {
     this.gizmoManager.positionGizmoEnabled = resolvedTool === 'translate';
     this.gizmoManager.rotationGizmoEnabled = resolvedTool === 'rotate';
     this.gizmoManager.scaleGizmoEnabled = resolvedTool === 'scale';
+    this.updateScaleGizmoHandles();
   }
 
   /** 将 Gizmo 轴向切换为世界坐标或对象局部坐标。 */
@@ -203,19 +238,28 @@ export class TransformGizmoController {
     }
   }
 
-  /** 将 Gizmo 绑定到指定实体的运行时节点，拖拽提交始终回写该实体。 */
-  attachToTarget(target: GizmoTarget | null, entityId: string | null): void {
+  /** 将 Gizmo 绑定到指定实体的运行时节点，天空盒可只开放统一缩放手柄。 */
+  attachToTarget(
+    target: GizmoTarget | null,
+    entityId: string | null,
+    options: TransformGizmoTargetOptions = {},
+  ): void {
     const nextEntityId = target ? entityId : null;
+    const nextUniformScaleOnly = Boolean(target && options.uniformScaleOnly);
     if (
       this.attachedTarget === target
       && this.attachedEntityId === nextEntityId
       && this.attachedGroupId === null
+      && this.attachedUniformScaleOnly === nextUniformScaleOnly
     ) return;
 
     this.cancelActiveDrag();
     this.attachedTarget = target;
     this.attachedEntityId = nextEntityId;
     this.attachedGroupId = null;
+    this.attachedEnvironment = false;
+    this.attachedUniformScaleOnly = nextUniformScaleOnly;
+    this.updateScaleGizmoHandles();
     this.attachGizmo(target);
     this.dragStartTransform = target ? this.readFiniteTransform(target) : null;
   }
@@ -233,6 +277,9 @@ export class TransformGizmoController {
     this.attachedTarget = target;
     this.attachedEntityId = null;
     this.attachedGroupId = nextGroupId;
+    this.attachedEnvironment = false;
+    this.attachedUniformScaleOnly = false;
+    this.updateScaleGizmoHandles();
     this.currentTool = 'translate';
     this.gizmoManager.positionGizmoEnabled = true;
     this.gizmoManager.rotationGizmoEnabled = false;
@@ -240,6 +287,26 @@ export class TransformGizmoController {
     this.transformSpace = 'global';
     const positionGizmo = this.gizmoManager.gizmos.positionGizmo;
     if (positionGizmo) positionGizmo.coordinatesMode = GizmoCoordinatesMode.World;
+    this.attachGizmo(target);
+    this.dragStartTransform = target ? this.readFiniteTransform(target) : null;
+  }
+
+  /** 将 Gizmo 临时绑定到全局环境根节点，拖动不进入实体选择或 Shift 阵列流程。 */
+  attachToEnvironmentTarget(target: TransformNode | null): void {
+    if (
+      this.attachedTarget === target
+      && this.attachedEnvironment === Boolean(target)
+      && this.attachedEntityId === null
+      && this.attachedGroupId === null
+    ) return;
+
+    this.cancelActiveDrag();
+    this.attachedTarget = target;
+    this.attachedEntityId = null;
+    this.attachedGroupId = null;
+    this.attachedEnvironment = Boolean(target);
+    this.attachedUniformScaleOnly = false;
+    this.updateScaleGizmoHandles();
     this.attachGizmo(target);
     this.dragStartTransform = target ? this.readFiniteTransform(target) : null;
   }
@@ -298,8 +365,11 @@ export class TransformGizmoController {
   previewAttachedTransform(): void {
     if (!this.activeTransformDrag || !this.attachedTarget || !this.dragStartTransform) return;
 
-    const transform = transformFromTarget(this.attachedTarget);
-    if (!isFiniteTransform(transform)) return;
+    const transform = this.readFiniteTransform(this.attachedTarget);
+    if (!transform) return;
+    if (this.attachedUniformScaleOnly) {
+      this.attachedTarget.scaling.copyFromFloats(transform.scale.x, transform.scale.y, transform.scale.z);
+    }
     if (this.attachedGroupId) {
       this.callbacks.previewGroupTranslation?.(
         this.attachedGroupId,
@@ -311,6 +381,16 @@ export class TransformGizmoController {
       );
       return;
     }
+    if (this.attachedEnvironment) {
+      const environmentTransform = environmentTransformFromTarget(this.attachedTarget);
+      this.attachedTarget.scaling.copyFromFloats(
+        environmentTransform.scale,
+        environmentTransform.scale,
+        environmentTransform.scale,
+      );
+      this.callbacks.previewEnvironmentTransform(environmentTransform);
+      return;
+    }
     if (this.attachedEntityId) this.callbacks.previewTransform(this.attachedEntityId, transform);
   }
 
@@ -320,12 +400,15 @@ export class TransformGizmoController {
     this.activeTransformDrag = false;
     if (
       !this.attachedTarget
-      || (!this.attachedEntityId && !this.attachedGroupId)
+      || (!this.attachedEntityId && !this.attachedGroupId && !this.attachedEnvironment)
       || !this.dragStartTransform
     ) return;
 
-    const after = transformFromTarget(this.attachedTarget);
-    if (!isFiniteTransform(after)) return;
+    const after = this.readFiniteTransform(this.attachedTarget);
+    if (!after) return;
+    if (this.attachedUniformScaleOnly) {
+      this.attachedTarget.scaling.copyFromFloats(after.scale.x, after.scale.y, after.scale.z);
+    }
 
     this.blockCanvasSelectionBriefly();
     if (this.attachedGroupId) {
@@ -336,6 +419,11 @@ export class TransformGizmoController {
           y: after.position.y - this.dragStartTransform.position.y,
           z: after.position.z - this.dragStartTransform.position.z,
         },
+      );
+    } else if (this.attachedEnvironment) {
+      this.callbacks.commitEnvironmentTransform(
+        environmentTransformFromComponent(this.dragStartTransform),
+        environmentTransformFromTarget(this.attachedTarget),
       );
     } else if (this.attachedEntityId) {
       this.callbacks.commitTransform(this.attachedEntityId, this.dragStartTransform, after);
@@ -354,6 +442,8 @@ export class TransformGizmoController {
     this.attachedTarget = null;
     this.attachedEntityId = null;
     this.attachedGroupId = null;
+    this.attachedEnvironment = false;
+    this.attachedUniformScaleOnly = false;
     this.dragStartTransform = null;
     this.activeTransformDrag = false;
   }
@@ -387,7 +477,7 @@ export class TransformGizmoController {
 
     this.addDragObserver(observables.onDragStartObservable, (event) => {
       const shiftKey = event.pointerInfo?.event.shiftKey === true;
-      if (this.attachedGroupId || !shiftKey || this.currentTool !== 'translate') {
+      if (this.attachedEnvironment || this.attachedGroupId || !shiftKey || this.currentTool !== 'translate') {
         this.beginDragSnapshot();
         return;
       }
@@ -511,6 +601,7 @@ export class TransformGizmoController {
 
     const target = this.attachedTarget;
     const entityId = this.attachedEntityId;
+    const environmentAttached = this.attachedEnvironment;
     const before = this.dragStartTransform;
     this.activeTransformDrag = false;
     this.releaseAllGizmoDrags();
@@ -523,6 +614,8 @@ export class TransformGizmoController {
     target.computeWorldMatrix(true);
     if (this.attachedGroupId) {
       this.callbacks.cancelGroupTranslation?.(this.attachedGroupId);
+    } else if (environmentAttached) {
+      this.callbacks.previewEnvironmentTransform(environmentTransformFromComponent(before));
     } else if (entityId) {
       this.callbacks.previewTransform(entityId, before);
     }
@@ -611,10 +704,27 @@ export class TransformGizmoController {
     this.canvasSelectionBlockedUntil = Date.now() + CANVAS_SELECTION_BLOCK_MS;
   }
 
-  /** 从目标节点读取有限数值 Transform，避免 NaN/Infinity 写入编辑状态。 */
+  /** 从目标节点读取有限 Transform；天空盒在回调前统一并限制三轴缩放。 */
   private readFiniteTransform(target: GizmoTarget): TransformComponent | null {
     const transform = transformFromTarget(target);
-    return isFiniteTransform(transform) ? transform : null;
+    if (!isFiniteTransform(transform)) return null;
+    if (!this.attachedUniformScaleOnly) return transform;
+    return {
+      ...transform,
+      scale: normalizeSkyboxSphereScale(transform.scale),
+    };
+  }
+
+  /** 环境和天空盒只允许统一缩放；普通实体保留三个轴向与统一缩放手柄。 */
+  private updateScaleGizmoHandles(): void {
+    const scaleGizmo = this.gizmoManager.gizmos.scaleGizmo;
+    if (!scaleGizmo) return;
+
+    const axisEnabled = !this.attachedEnvironment && !this.attachedUniformScaleOnly;
+    scaleGizmo.xGizmo.isEnabled = axisEnabled;
+    scaleGizmo.yGizmo.isEnabled = axisEnabled;
+    scaleGizmo.zGizmo.isEnabled = axisEnabled;
+    scaleGizmo.uniformScaleGizmo.isEnabled = true;
   }
 
   /** 根据目标类型选择 Babylon 推荐的 Gizmo 绑定 API。 */

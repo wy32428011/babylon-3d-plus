@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useState, type DragEvent, type KeyboardEvent, type ReactElement } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type DragEvent,
+  type FocusEvent,
+  type KeyboardEvent,
+  type ReactElement,
+} from 'react';
 import {
   decodeModelAssetDragPayload,
   decodeSkyboxAssetDragPayload,
@@ -18,6 +26,10 @@ import {
 } from '../assets/projectLibrary';
 import {
   getSceneSkyboxSettings,
+  SCENE_ENVIRONMENT_OPACITY_MAX,
+  SCENE_ENVIRONMENT_OPACITY_MIN,
+  SCENE_ENVIRONMENT_SCALE_MAX,
+  SCENE_ENVIRONMENT_SCALE_MIN,
   SCENE_SENSITIVITY_MAX,
   SCENE_SENSITIVITY_MIN,
   SCENE_SKYBOX_INTENSITY_MAX,
@@ -25,12 +37,18 @@ import {
   SCENE_SKYBOX_RESOLUTIONS,
   SCENE_SKYBOX_ROTATION_MAX,
   SCENE_SKYBOX_ROTATION_MIN,
+  SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   SCENE_VIEW_DISTANCE_MAX,
   SCENE_VIEW_DISTANCE_MIN,
+  type SceneEnvironmentTransform,
   type SceneEnvironmentVariant,
   type SceneSkyboxResolution,
 } from '../model/SceneDocument';
-import { formatModelLengthUnit } from '../model/sceneUnits';
+import {
+  createModelLengthUnitInfo,
+  formatModelLengthUnit,
+  type ModelSourceLengthUnit,
+} from '../model/sceneUnits';
 import { useEditorStore, type SceneSensitivitySettingKey } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
 
@@ -61,6 +79,39 @@ function parseFiniteNumber(rawValue: string): number | null {
 
   const nextValue = Number(rawValue);
   return Number.isFinite(nextValue) ? nextValue : null;
+}
+
+const RADIANS_TO_DEGREES = 180 / Math.PI;
+const DEGREES_TO_RADIANS = Math.PI / 180;
+
+function formatEnvironmentNumber(value: number): string {
+  return Number(value.toFixed(4)).toString();
+}
+
+function formatEnvironmentFileSize(fileSizeBytes: number | null | undefined): string {
+  if (!fileSizeBytes || !Number.isFinite(fileSizeBytes)) return '未知';
+  const units = ['B', 'KiB', 'MiB', 'GiB'];
+  let value = fileSizeBytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function formatEnvironmentMeters(value: number): string {
+  if (!Number.isFinite(value)) return '—';
+  const absolute = Math.abs(value);
+  if (absolute >= 1000) return `${value.toFixed(0)} m`;
+  if (absolute >= 10) return `${value.toFixed(1)} m`;
+  return `${value.toFixed(2)} m`;
+}
+
+function getEnvironmentDisplayName(packagePath: string, displayName?: string): string {
+  if (displayName?.trim()) return displayName.trim();
+  const lastSegment = packagePath.replace(/\\/g, '/').split('/').filter(Boolean).at(-1);
+  return lastSegment || '环境模型';
 }
 
 /** 判断拖拽事件是否包含可用于环境属性的模型资产载荷。 */
@@ -102,6 +153,14 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const setCameraViewDistance = useEditorStore((state) => state.setCameraViewDistance);
   const updateSensitivitySetting = useEditorStore((state) => state.updateSensitivitySetting);
   const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
+  const requestEnvironmentApply = useEditorStore((state) => state.requestEnvironmentApply);
+  const updateEnvironmentDisplay = useEditorStore((state) => state.updateEnvironmentDisplay);
+  const setEnvironmentAdjustmentActive = useEditorStore((state) => state.setEnvironmentAdjustmentActive);
+  const requestEnvironmentFocus = useEditorStore((state) => state.requestEnvironmentFocus);
+  const convertLegacyEnvironmentToSceneBase = useEditorStore((state) => state.convertLegacyEnvironmentToSceneBase);
+  const environmentApplyRequest = useEditorStore((state) => state.environmentApplyRequest);
+  const environmentRuntimeSnapshot = useEditorStore((state) => state.environmentRuntimeSnapshot);
+  const environmentAdjustmentActive = useEditorStore((state) => state.environmentAdjustmentActive);
   const updateSkyboxConfig = useEditorStore((state) => state.updateSkyboxConfig);
   const setEnvironmentActiveVariant = useEditorStore((state) => state.setEnvironmentActiveVariant);
   const [sceneNameDraft, setSceneNameDraft] = useState(scene.name);
@@ -116,10 +175,15 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
 
   const environment = scene.sceneSettings.environment;
   const skybox = getSceneSkyboxSettings(scene);
+  const minimumViewDistance = skybox ? SCENE_SKYBOX_VIEW_DISTANCE_MIN : SCENE_VIEW_DISTANCE_MIN;
   const presetVariant = environment?.variants[0] ?? null;
   const customVariants = environment?.variants.slice(1) ?? [];
   const environmentItems = useMemo(() => createModelLibraryItems(environmentAssets), [environmentAssets]);
   const skyboxItems = useMemo(() => createSkyboxLibraryItems(skyboxAssets), [skyboxAssets]);
+  const environmentLoading = environmentApplyRequest !== null || environmentRuntimeSnapshot.phase === 'loading';
+  const environmentBounds = environmentRuntimeSnapshot.bounds;
+  const environmentStatistics = environmentRuntimeSnapshot.statistics;
+  const environmentHasRuntime = Boolean(environmentBounds);
 
   useEffect(() => {
     setSceneNameDraft(scene.name);
@@ -229,7 +293,16 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         return;
       }
 
-      updateEnvironmentConfig(environmentConfig);
+      const requestId = requestEnvironmentApply(environmentConfig, {
+        autoAlign: true,
+        focusAfterLoad: true,
+        commandLabel: '应用环境模型',
+        successMessage: `环境模型已应用：${getEnvironmentDisplayName(environmentConfig.packagePath, environmentConfig.displayName)}`,
+      });
+      if (!requestId) {
+        setEnvironmentStatus('环境模型未能开始加载，请查看 Console 日志。');
+        return;
+      }
       setEnvironmentDialogOpen(false);
       setEnvironmentStatus(null);
     } catch (error) {
@@ -321,6 +394,87 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
     updateSkyboxConfig({ ...skybox, resolution });
   }
 
+  /** Inspector 数字输入在回车或失焦时提交，一次编辑只生成一条撤销记录。 */
+  function handleEnvironmentTransformBlur(
+    event: FocusEvent<HTMLInputElement>,
+    field: 'position' | 'rotation' | 'scale',
+    axis?: 'x' | 'y' | 'z',
+  ): void {
+    if (props.readOnly || !environment || environment.placementMode !== 'scene-base') return;
+    const value = parseFiniteNumber(event.currentTarget.value);
+    if (value === null) {
+      const currentValue = field === 'scale'
+        ? environment.transform.scale
+        : field === 'rotation' && axis
+          ? environment.transform.rotation[axis] * RADIANS_TO_DEGREES
+          : axis
+            ? environment.transform.position[axis]
+            : 0;
+      event.currentTarget.value = formatEnvironmentNumber(currentValue);
+      return;
+    }
+
+    let transform: SceneEnvironmentTransform;
+    if (field === 'scale') {
+      transform = { ...environment.transform, scale: value };
+    } else if (axis) {
+      const nextValue = field === 'rotation' ? value * DEGREES_TO_RADIANS : value;
+      transform = {
+        ...environment.transform,
+        [field]: { ...environment.transform[field], [axis]: nextValue },
+      };
+    } else {
+      return;
+    }
+    updateEnvironmentDisplay({ transform }, field === 'position'
+      ? '更新环境位置'
+      : field === 'rotation'
+        ? '更新环境旋转'
+        : '更新环境缩放');
+  }
+
+  function handleEnvironmentNumberKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
+    if (event.key === 'Enter') event.currentTarget.blur();
+  }
+
+  function handleEnvironmentUnitChange(rawValue: string): void {
+    if (props.readOnly || !environment || environmentLoading || environmentAdjustmentActive) return;
+    if (rawValue !== 'meter' && rawValue !== 'centimeter' && rawValue !== 'millimeter') return;
+    const unitInfo = createModelLengthUnitInfo(rawValue as ModelSourceLengthUnit);
+    requestEnvironmentApply(
+      { ...environment, ...unitInfo },
+      {
+        autoAlign: true,
+        focusAfterLoad: true,
+        commandLabel: '更新环境源单位',
+        successMessage: `环境源单位已更新为 ${formatModelLengthUnit(unitInfo.lengthUnit)}。`,
+      },
+    );
+  }
+
+  function handleResetEnvironmentPlacement(): void {
+    if (props.readOnly || !environment || environment.placementMode !== 'scene-base') return;
+    requestEnvironmentApply(environment, {
+      autoAlign: true,
+      focusAfterLoad: true,
+      commandLabel: '重置环境摆放',
+      successMessage: '环境模型已重新居中并落地。',
+    });
+  }
+
+  function getEnvironmentRuntimeStatus(): { label: string; className: string } {
+    switch (environmentRuntimeSnapshot.phase) {
+      case 'loading':
+        return { label: environmentRuntimeSnapshot.message || '环境模型正在加载...', className: 'loading' };
+      case 'ready':
+        return { label: '环境模型已就绪', className: 'ready' };
+      case 'error':
+        return { label: environmentRuntimeSnapshot.message || '环境模型加载失败', className: 'error' };
+      default:
+        return { label: environment ? '等待 Scene View 加载环境模型' : '未选择环境模型', className: 'idle' };
+    }
+  }
+
   function renderEffectButton(variant: SceneEnvironmentVariant, label: string): ReactElement {
     const active = environment?.activeVariantUrl === variant.sourceUrl;
 
@@ -328,7 +482,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
       <button
         className={active ? 'scene-effect-card active' : 'scene-effect-card'}
         key={variant.sourceUrl}
-        disabled={props.readOnly}
+        disabled={props.readOnly || environmentLoading || environmentAdjustmentActive}
         onClick={() => setEnvironmentActiveVariant(variant.sourceUrl)}
         title={variant.sourcePath}
         type="button"
@@ -370,7 +524,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         <label className="scene-slider-row">
           <span>可视距离</span>
           <input
-            min={SCENE_VIEW_DISTANCE_MIN}
+            min={minimumViewDistance}
             max={SCENE_VIEW_DISTANCE_MAX}
             step="100"
             type="range"
@@ -379,7 +533,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             onChange={(event) => handleViewDistanceChange(event.target.value)}
           />
           <input
-            min={SCENE_VIEW_DISTANCE_MIN}
+            min={minimumViewDistance}
             max={SCENE_VIEW_DISTANCE_MAX}
             step="100"
             type="number"
@@ -388,6 +542,9 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             onChange={(event) => handleViewDistanceChange(event.target.value)}
           />
         </label>
+        {skybox ? (
+          <p className="muted">10 km 天空盒要求可视距离至少为 {SCENE_SKYBOX_VIEW_DISTANCE_MIN} m。</p>
+        ) : null}
       </fieldset>
 
       <fieldset className="transform-fieldset">
@@ -518,7 +675,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         )}
       </fieldset>
 
-      <fieldset className="transform-fieldset">
+      <fieldset className="transform-fieldset environment-inspector-fieldset">
         <legend>环境属性</legend>
         <label
           className={environmentDropActive ? 'environment-preview-row environment-preview-row-drop-active' : 'environment-preview-row'}
@@ -531,7 +688,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
           <button
             className={environmentDropActive ? 'environment-preview-button environment-preview-button-drop-active' : 'environment-preview-button'}
             onClick={() => setEnvironmentDialogOpen(true)}
-            disabled={props.readOnly}
+            disabled={props.readOnly || environmentLoading || environmentAdjustmentActive}
             title="选择或拖入环境模型"
             type="button"
           >
@@ -542,16 +699,165 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             )}
           </button>
         </label>
+
+        <div className={`environment-runtime-status environment-runtime-status-${getEnvironmentRuntimeStatus().className}`} role="status" aria-live="polite">
+          {getEnvironmentRuntimeStatus().label}
+        </div>
+
         {environment ? (
-          <p className="muted">
-            源单位：{formatModelLengthUnit(environment.lengthUnit)} → m（×{environment.unitScaleToMeters}）
-          </p>
-        ) : null}
-        {environment ? (
-          <button className="environment-clear-button" type="button" disabled={props.readOnly} onClick={() => updateEnvironmentConfig(null)}>
-            清除环境模型
-          </button>
-        ) : null}
+          <>
+            <div className="environment-summary-card">
+              <strong>{getEnvironmentDisplayName(environment.packagePath, environment.displayName)}</strong>
+              <span>{environment.placementMode === 'scene-base' ? '场景底座' : '旧版左侧摆放'}</span>
+              <span>换算：{formatModelLengthUnit(environment.lengthUnit)} → m（×{environment.unitScaleToMeters}）</span>
+              <span>文件：{formatEnvironmentFileSize(environmentStatistics?.fileSizeBytes ?? environment.fileSizeBytes)}</span>
+              {environmentBounds ? (
+                <span>
+                  世界尺寸：{formatEnvironmentMeters(environmentBounds.sizeMeters.x)} × {formatEnvironmentMeters(environmentBounds.sizeMeters.y)} × {formatEnvironmentMeters(environmentBounds.sizeMeters.z)}
+                </span>
+              ) : null}
+            </div>
+
+            <label className="inspector-row environment-unit-row">
+              <span>源单位</span>
+              <select
+                disabled={props.readOnly || environmentLoading || environmentAdjustmentActive}
+                onChange={(event) => handleEnvironmentUnitChange(event.target.value)}
+                value={environment.lengthUnit}
+              >
+                <option value="meter">meter</option>
+                <option value="centimeter">centimeter</option>
+                <option value="millimeter">millimeter</option>
+              </select>
+            </label>
+
+            {environment.placementMode === 'legacy-left' ? (
+              <div className="environment-legacy-notice">
+                <strong>旧版摆放</strong>
+                <span>当前环境继续保持原点左侧 2 m 的兼容位置。转换后才会启用居中底座 Transform 与 Gizmo。</span>
+                <button
+                  disabled={props.readOnly || environmentLoading}
+                  onClick={convertLegacyEnvironmentToSceneBase}
+                  type="button"
+                >
+                  转换为场景底座
+                </button>
+              </div>
+            ) : (
+              <div className="environment-transform-editor">
+                <span className="scene-effect-title">Transform</span>
+                {(['x', 'y', 'z'] as const).map((axis) => (
+                  <label className="environment-transform-row" key={`position-${axis}`}>
+                    <span>位置 {axis.toUpperCase()}</span>
+                    <input
+                      defaultValue={formatEnvironmentNumber(environment.transform.position[axis])}
+                      disabled={props.readOnly || environmentLoading || environmentAdjustmentActive}
+                      key={`position-${axis}-${environment.transform.position[axis]}`}
+                      onBlur={(event) => handleEnvironmentTransformBlur(event, 'position', axis)}
+                      onKeyDown={handleEnvironmentNumberKeyDown}
+                      step="0.1"
+                      type="number"
+                    />
+                    <small>m</small>
+                  </label>
+                ))}
+                {(['x', 'y', 'z'] as const).map((axis) => (
+                  <label className="environment-transform-row" key={`rotation-${axis}`}>
+                    <span>旋转 {axis.toUpperCase()}</span>
+                    <input
+                      defaultValue={formatEnvironmentNumber(environment.transform.rotation[axis] * RADIANS_TO_DEGREES)}
+                      disabled={props.readOnly || environmentLoading || environmentAdjustmentActive}
+                      key={`rotation-${axis}-${environment.transform.rotation[axis]}`}
+                      onBlur={(event) => handleEnvironmentTransformBlur(event, 'rotation', axis)}
+                      onKeyDown={handleEnvironmentNumberKeyDown}
+                      step="1"
+                      type="number"
+                    />
+                    <small>°</small>
+                  </label>
+                ))}
+                <label className="environment-transform-row">
+                  <span>统一缩放</span>
+                  <input
+                    defaultValue={formatEnvironmentNumber(environment.transform.scale)}
+                    disabled={props.readOnly || environmentLoading || environmentAdjustmentActive}
+                    key={`scale-${environment.transform.scale}`}
+                    max={SCENE_ENVIRONMENT_SCALE_MAX}
+                    min={SCENE_ENVIRONMENT_SCALE_MIN}
+                    onBlur={(event) => handleEnvironmentTransformBlur(event, 'scale')}
+                    onKeyDown={handleEnvironmentNumberKeyDown}
+                    step="0.01"
+                    type="number"
+                  />
+                  <small>×</small>
+                </label>
+              </div>
+            )}
+
+            <label className="inspector-row environment-visible-row">
+              <span>显示</span>
+              <input
+                checked={environment.visible}
+                disabled={props.readOnly || environmentLoading || environmentAdjustmentActive}
+                onChange={(event) => updateEnvironmentDisplay({ visible: event.target.checked }, event.target.checked ? '显示环境模型' : '隐藏环境模型')}
+                type="checkbox"
+              />
+            </label>
+            <label className="environment-opacity-row">
+              <span>透明度</span>
+              <input
+                disabled={props.readOnly || environmentLoading || environmentAdjustmentActive || !environment.visible}
+                max={SCENE_ENVIRONMENT_OPACITY_MAX}
+                min={SCENE_ENVIRONMENT_OPACITY_MIN}
+                onChange={(event) => updateEnvironmentDisplay({ opacity: Number(event.target.value) }, '更新环境透明度')}
+                step="0.01"
+                type="range"
+                value={environment.opacity}
+              />
+              <output>{Math.round(environment.opacity * 100)}%</output>
+            </label>
+            <div className="environment-display-presets">
+              <button disabled={props.readOnly || environmentLoading || environmentAdjustmentActive} onClick={() => updateEnvironmentDisplay({ visible: true, opacity: 1 }, '环境正常显示')} type="button">正常</button>
+              <button disabled={props.readOnly || environmentLoading || environmentAdjustmentActive} onClick={() => updateEnvironmentDisplay({ visible: true, opacity: 0.35 }, '环境幽灵显示')} type="button">半透明</button>
+              <button disabled={props.readOnly || environmentLoading || environmentAdjustmentActive} onClick={() => updateEnvironmentDisplay({ visible: false }, '隐藏环境模型')} type="button">隐藏</button>
+            </div>
+
+            <div className="environment-action-grid">
+              {environment.placementMode === 'scene-base' ? (
+                <button
+                  className={environmentAdjustmentActive ? 'active' : undefined}
+                  disabled={props.readOnly || environmentLoading || !environment.visible || environment.opacity <= 0 || !environmentHasRuntime}
+                  onClick={() => setEnvironmentAdjustmentActive(!environmentAdjustmentActive)}
+                  type="button"
+                >
+                  {environmentAdjustmentActive ? '完成调整' : '场景中调整'}
+                </button>
+              ) : null}
+              <button disabled={environmentLoading || environmentAdjustmentActive || !environmentHasRuntime} onClick={requestEnvironmentFocus} type="button">聚焦环境</button>
+              {environment.placementMode === 'scene-base' ? (
+                <button disabled={props.readOnly || environmentLoading || environmentAdjustmentActive} onClick={handleResetEnvironmentPlacement} type="button">重置摆放</button>
+              ) : null}
+              <button className="danger" disabled={props.readOnly} onClick={() => updateEnvironmentConfig(null)} type="button">清除环境</button>
+            </div>
+
+            {environmentStatistics ? (
+              <details className="environment-statistics">
+                <summary>模型统计</summary>
+                <dl>
+                  <div><dt>Mesh</dt><dd>{environmentStatistics.meshCount.toLocaleString()}</dd></div>
+                  <div><dt>Primitive</dt><dd>{environmentStatistics.primitiveCount.toLocaleString()}</dd></div>
+                  <div><dt>顶点</dt><dd>{environmentStatistics.vertexCount.toLocaleString()}</dd></div>
+                  <div><dt>三角形</dt><dd>{environmentStatistics.triangleCount.toLocaleString()}</dd></div>
+                  <div><dt>材质</dt><dd>{environmentStatistics.materialCount.toLocaleString()}</dd></div>
+                  <div><dt>纹理</dt><dd>{environmentStatistics.textureCount.toLocaleString()}</dd></div>
+                </dl>
+              </details>
+            ) : null}
+          </>
+        ) : (
+          <p className="muted">从项目环境库选择厂房或周边地理环境 GLB，首次应用会自动居中并落地。</p>
+        )}
+
         <div className="scene-effect-section">
           <span className="scene-effect-title">预设效果</span>
           <div className="scene-effect-list">

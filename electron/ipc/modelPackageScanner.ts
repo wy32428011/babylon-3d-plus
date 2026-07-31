@@ -458,6 +458,7 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
   const scriptAssets = createModelScriptAssets(scriptPaths);
   const modelFileName = path.basename(modelFilePath);
   const packageName = path.basename(packagePath);
+  const modelFileStat = await fs.stat(modelFilePath);
 
   return {
     asset: {
@@ -478,6 +479,7 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
       displayName: metadata.displayName ?? packageName ?? path.parse(modelFileName).name,
       lengthUnit: metadata.lengthUnit,
       unitScaleToMeters: metadata.unitScaleToMeters,
+      fileSizeBytes: modelFileStat.size,
       parameterConfig: metadata.parameterConfig,
       dataDrivenConfig: metadata.dataDrivenConfig,
       builtInSlotBindingConfig: metadata.builtInSlotBinding,

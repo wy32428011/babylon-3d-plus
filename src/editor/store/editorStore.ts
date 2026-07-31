@@ -14,6 +14,7 @@ import {
   renameEntityCommand,
   updateCadReferenceCommand,
   updateSceneDocumentCommand,
+  updateSceneEnvironmentCommand,
   updateEntityLockCommand,
   updateEntityVisibilityCommand,
   updateLightCommand,
@@ -76,6 +77,7 @@ import {
 } from '../model/modelArray';
 import {
   MODEL_ASSET_CODE_MAX_LENGTH,
+  createDefaultSceneEnvironmentTransform,
   createEmptySceneDocument,
   createCadReferenceEntity,
   createFolderEntity,
@@ -91,16 +93,19 @@ import {
   getSceneSkyboxSettings,
   createModelAssetCode,
   extractModelAssetCodePrefix,
+  normalizeSkyboxSphereScale,
   sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneEnvironment,
   sanitizeSceneSkybox,
   sanitizeSceneSensitivityValue,
   sanitizeSceneViewDistance,
+  SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   type SceneCameraPose,
   type FetchConfig,
   type MqttConfig,
   type SceneEnvironmentSettings,
+  type SceneEnvironmentTransform,
   type SceneSkyboxSettings,
   type SceneSensitivitySettings,
   type SceneDocument,
@@ -114,6 +119,12 @@ import {
   patchBuiltInSlotDimensions,
   type BuiltInSlotBindingConfig,
 } from '../model/builtInSlotBinding';
+import {
+  createIdleEnvironmentRuntimeSnapshot,
+  type EnvironmentApplyRequest,
+  type EnvironmentApplyResult,
+  type EnvironmentRuntimeSnapshot,
+} from '../model/environmentRuntime';
 import {
   areModelParameterValuesEqual,
   cloneModelParameterValues,
@@ -211,6 +222,8 @@ export type ProjectAssetFocusRequest = {
 
 export type CameraPoseSaveRequest = {
   id: string;
+  orientation: CameraOrientation;
+  projection: CameraProjection;
 };
 
 export type CameraResetRequest = {
@@ -225,6 +238,18 @@ export type TransformTool = 'translate' | 'rotate' | 'scale';
 export type TransformSpace = 'local' | 'global';
 export type TransformSnapSettingKey = 'position' | 'rotationDegrees' | 'scale';
 export type SceneSensitivitySettingKey = keyof SceneSensitivitySettings;
+
+export type EnvironmentApplyOptions = {
+  autoAlign?: boolean;
+  focusAfterLoad?: boolean;
+  commandLabel?: string;
+  successMessage?: string;
+};
+
+export type EnvironmentDisplayPatch = Partial<Pick<
+  SceneEnvironmentSettings,
+  'visible' | 'opacity' | 'placementMode' | 'transform'
+>>;
 
 export type TransformSnapSettings = {
   enabled: boolean;
@@ -275,6 +300,10 @@ type EditorState = {
   entityClipboard: EntityClipboard | null;
   entityArrayRequest: EntityArrayRequest | null;
   sceneFocusRequest: SceneFocusRequest | null;
+  environmentApplyRequest: EnvironmentApplyRequest | null;
+  environmentRuntimeSnapshot: EnvironmentRuntimeSnapshot;
+  environmentAdjustmentActive: boolean;
+  environmentFocusRequest: { id: string } | null;
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
   cameraResetRequest: CameraResetRequest | null;
@@ -300,6 +329,23 @@ type EditorState = {
   setCameraViewDistance: (viewDistance: number) => void;
   updateSensitivitySetting: (key: SceneSensitivitySettingKey, value: number) => void;
   updateEnvironmentConfig: (environment: SceneEnvironmentSettings | null) => void;
+  requestEnvironmentApply: (
+    environment: SceneEnvironmentSettings,
+    options?: EnvironmentApplyOptions,
+  ) => string | null;
+  completeEnvironmentApply: (requestId: string, result: EnvironmentApplyResult) => void;
+  failEnvironmentApply: (requestId: string, message: string) => void;
+  setEnvironmentRuntimeSnapshot: (snapshot: EnvironmentRuntimeSnapshot) => void;
+  updateEnvironmentDisplay: (patch: EnvironmentDisplayPatch, label: string) => void;
+  previewEnvironmentTransform: (transform: SceneEnvironmentTransform) => void;
+  commitEnvironmentTransform: (
+    before: SceneEnvironmentTransform,
+    after: SceneEnvironmentTransform,
+  ) => void;
+  setEnvironmentAdjustmentActive: (active: boolean) => void;
+  requestEnvironmentFocus: () => void;
+  consumeEnvironmentFocusRequest: (requestId: string) => void;
+  convertLegacyEnvironmentToSceneBase: () => void;
   updateSkyboxConfig: (skybox: SceneSkyboxSettings | null) => void;
   placeSkybox: (skybox: SceneSkyboxSettings, placementPosition?: Vector3Data) => void;
   updateSelectedSkybox: (patch: Partial<Pick<SkyboxComponent, 'intensity' | 'resolution'>>) => void;
@@ -395,6 +441,8 @@ function prependLog(logs: EditorLog[], message: string): EditorLog[] {
 
 /** 生成切换场景后的统一状态，避免旧场景的历史、选区和剪贴板泄漏到新场景。 */
 function createLoadedSceneState(state: EditorState, scene: SceneDocument, message: string): Partial<EditorState> {
+  const camera = scene.sceneSettings.camera;
+
   return {
     scene,
     history: createCommandHistory(),
@@ -402,9 +450,15 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     entityClipboard: null,
     entityArrayRequest: null,
     sceneFocusRequest: null,
+    environmentApplyRequest: null,
+    environmentRuntimeSnapshot: createIdleEnvironmentRuntimeSnapshot(),
+    environmentAdjustmentActive: false,
+    environmentFocusRequest: null,
     projectAssetFocusRequest: null,
     cameraPoseSaveRequest: null,
-    cameraResetRequest: null,
+    cameraResetRequest: { id: createId('camera_reset') },
+    cameraOrientation: camera.savedOrientation,
+    cameraProjection: camera.savedProjection,
     selectedModelMeasurement: null,
     logs: prependLog(state.logs, message),
   };
@@ -504,6 +558,13 @@ function cloneTransform(transform: TransformComponent): TransformComponent {
     rotation: cloneVector3(transform.rotation),
     scale: cloneVector3(transform.scale),
   };
+}
+
+/** 对实体 Transform 应用组件级不变量；天空盒始终保持 0.1-1.0 的等比球形缩放。 */
+function normalizeTransformForEntity(entity: Entity, transform: TransformComponent): TransformComponent {
+  const normalized = cloneTransform(transform);
+  if (entity.components.skybox) normalized.scale = normalizeSkyboxSphereScale(normalized.scale);
+  return normalized;
 }
 
 function cloneMeshRenderer(meshRenderer: MeshRendererComponent): MeshRendererComponent {
@@ -752,6 +813,21 @@ type UpsertSkyboxEntityOptions = {
   selectEntity: boolean;
 };
 
+/** 创建启用天空盒后的场景设置，并把相机距离提升到 12 km 安全下限。 */
+function createSceneSettingsWithSkybox(scene: SceneDocument): SceneDocument['sceneSettings'] {
+  return {
+    ...scene.sceneSettings,
+    camera: {
+      ...scene.sceneSettings.camera,
+      viewDistance: sanitizeSceneViewDistance(
+        scene.sceneSettings.camera.viewDistance,
+        SCENE_SKYBOX_VIEW_DISTANCE_MIN,
+      ),
+    },
+    skybox: null,
+  };
+}
+
 /** 在场景中创建或更新唯一球形天空盒实体，并清除旧 sceneSettings.skybox 镜像。 */
 function upsertSkyboxEntityInScene(
   scene: SceneDocument,
@@ -773,12 +849,12 @@ function upsertSkyboxEntityInScene(
         entityIds: [...scene.entityIds, entity.id],
         entities: { ...scene.entities, [entity.id]: entity },
         selectedEntityId: options.selectEntity ? entity.id : scene.selectedEntityId,
-        sceneSettings: { ...scene.sceneSettings, skybox: null },
+        sceneSettings: createSceneSettingsWithSkybox(scene),
       },
     };
   }
 
-  const transform = cloneTransform(existing.components.transform);
+  const transform = normalizeTransformForEntity(existing, existing.components.transform);
   transform.rotation.y = skybox.rotationDegrees * Math.PI / 180;
   if (placementPosition) transform.position = placementPosition;
   const updatedEntity: Entity = {
@@ -797,7 +873,7 @@ function upsertSkyboxEntityInScene(
       ...scene,
       entities: { ...scene.entities, [existing.id]: updatedEntity },
       selectedEntityId: options.selectEntity ? existing.id : scene.selectedEntityId,
-      sceneSettings: { ...scene.sceneSettings, skybox: null },
+      sceneSettings: createSceneSettingsWithSkybox(scene),
     },
   };
 }
@@ -2007,6 +2083,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   entityClipboard: null,
   entityArrayRequest: null,
   sceneFocusRequest: null,
+  environmentApplyRequest: null,
+  environmentRuntimeSnapshot: createIdleEnvironmentRuntimeSnapshot(),
+  environmentAdjustmentActive: false,
+  environmentFocusRequest: null,
   projectAssetFocusRequest: null,
   cameraPoseSaveRequest: null,
   cameraResetRequest: null,
@@ -2021,6 +2101,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   gridSettings: DEFAULT_EDITOR_GRID_SETTINGS,
   startRuntimePreview: () => {
     const currentState = get();
+    if (currentState.environmentApplyRequest || currentState.environmentRuntimeSnapshot.phase === 'loading') {
+      const readiness: RuntimePreviewReadiness = {
+        ok: false,
+        code: 'environment-load-active',
+        message: '请等待环境模型加载完成。',
+      };
+      set((state) => ({ logs: prependLog(state.logs, `运行预览已阻止：${readiness.message}`) }));
+      return readiness;
+    }
     if (currentState.cadImportProgress?.active) {
       const readiness: RuntimePreviewReadiness = {
         ok: false,
@@ -2043,6 +2132,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (state.runtimeMode === 'preview') return state;
       return {
         runtimeMode: 'preview',
+        environmentAdjustmentActive: false,
         cameraPoseSaveRequest: null,
         logs: prependLog(state.logs, '已进入运行预览模式。'),
       };
@@ -2181,7 +2271,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setCameraViewDistance: (viewDistance) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改相机距离');
-      const nextViewDistance = sanitizeSceneViewDistance(viewDistance);
+      const minimum = getSceneSkyboxSettings(state.scene)
+        ? SCENE_SKYBOX_VIEW_DISTANCE_MIN
+        : undefined;
+      const nextViewDistance = sanitizeSceneViewDistance(viewDistance, minimum);
       if (state.scene.sceneSettings.camera.viewDistance === nextViewDistance) return state;
 
       return {
@@ -2221,23 +2314,204 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   updateEnvironmentConfig: (environment) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改环境模型');
+      const before = state.scene.sceneSettings.environment;
       const nextEnvironment = sanitizeSceneEnvironment(environment);
-      if (isSceneEnvironmentEqual(state.scene.sceneSettings.environment, nextEnvironment)) return state;
+      if (isSceneEnvironmentEqual(before, nextEnvironment)) return state;
 
-      const command = updateSceneDocumentCommand('更新环境模型', (scene) => ({
-        ...scene,
-        sceneSettings: {
-          ...scene.sceneSettings,
-          environment: nextEnvironment,
-        },
-      }));
+      const command = updateSceneEnvironmentCommand('更新环境模型', before, nextEnvironment);
       const result = executeCommand(state.scene, state.history, command);
 
       return {
         ...result,
+        environmentApplyRequest: null,
+        environmentAdjustmentActive: false,
+        environmentRuntimeSnapshot: nextEnvironment
+          ? state.environmentRuntimeSnapshot
+          : createIdleEnvironmentRuntimeSnapshot(),
         logs: prependLog(state.logs, nextEnvironment ? '环境模型已更新。' : '环境模型已清除。'),
       };
     });
+  },
+  requestEnvironmentApply: (environment, options = {}) => {
+    let requestId: string | null = null;
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '加载环境模型');
+      const normalized = sanitizeSceneEnvironment(environment);
+      if (!normalized) {
+        return { logs: prependLog(state.logs, '环境模型配置无效，未开始加载。') };
+      }
+
+      requestId = createId('environment-load');
+      const request: EnvironmentApplyRequest = {
+        id: requestId,
+        environment: normalized,
+        autoAlign: options.autoAlign === true,
+        focusAfterLoad: options.focusAfterLoad === true,
+        commandLabel: options.commandLabel?.trim() || '更新环境模型',
+        successMessage: options.successMessage?.trim() || '环境模型已更新。',
+      };
+      return {
+        environmentApplyRequest: request,
+        environmentAdjustmentActive: false,
+        environmentRuntimeSnapshot: {
+          ...state.environmentRuntimeSnapshot,
+          phase: 'loading',
+          requestId,
+          sourceUrl: normalized.activeVariantUrl,
+          message: '环境模型正在加载...',
+        },
+      };
+    });
+    return requestId;
+  },
+  completeEnvironmentApply: (requestId, applyResult) => {
+    set((state) => {
+      const request = state.environmentApplyRequest;
+      if (!request || request.id !== requestId) return state;
+      const nextEnvironment = sanitizeSceneEnvironment(applyResult.environment);
+      if (!nextEnvironment) {
+        return {
+          environmentApplyRequest: null,
+          environmentRuntimeSnapshot: {
+            ...applyResult.snapshot,
+            phase: 'error',
+            message: '环境模型加载完成，但返回配置无效。',
+          },
+          logs: prependLog(state.logs, '环境模型加载失败：运行时返回配置无效。'),
+        };
+      }
+
+      const before = state.scene.sceneSettings.environment;
+      const command = updateSceneEnvironmentCommand(request.commandLabel, before, nextEnvironment);
+      const result = isSceneEnvironmentEqual(before, nextEnvironment)
+        ? { scene: state.scene, history: state.history }
+        : executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        environmentApplyRequest: null,
+        environmentRuntimeSnapshot: applyResult.snapshot,
+        environmentAdjustmentActive: false,
+        environmentFocusRequest: request.focusAfterLoad ? { id: createId('environment-focus') } : state.environmentFocusRequest,
+        logs: prependLog(state.logs, request.successMessage),
+      };
+    });
+  },
+  failEnvironmentApply: (requestId, message) => {
+    set((state) => {
+      if (state.environmentApplyRequest?.id !== requestId) return state;
+      return {
+        environmentApplyRequest: null,
+        environmentRuntimeSnapshot: {
+          ...state.environmentRuntimeSnapshot,
+          phase: 'error',
+          requestId,
+          message,
+        },
+        logs: prependLog(state.logs, `环境模型加载失败：${message}`),
+      };
+    });
+  },
+  setEnvironmentRuntimeSnapshot: (snapshot) => {
+    set((state) => {
+      if (JSON.stringify(state.environmentRuntimeSnapshot) === JSON.stringify(snapshot)) return state;
+      return { environmentRuntimeSnapshot: snapshot };
+    });
+  },
+  updateEnvironmentDisplay: (patch, label) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
+      const before = state.scene.sceneSettings.environment;
+      if (!before) return state;
+      const after = sanitizeSceneEnvironment({ ...before, ...patch });
+      if (!after || isSceneEnvironmentEqual(before, after)) return state;
+
+      const command = updateSceneEnvironmentCommand(label, before, after);
+      const result = executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        environmentAdjustmentActive: after.visible && after.opacity > 0 ? state.environmentAdjustmentActive : false,
+        logs: prependLog(state.logs, label),
+      };
+    });
+  },
+  previewEnvironmentTransform: (transform) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '预览环境变换');
+      const environment = state.scene.sceneSettings.environment;
+      if (!environment || environment.placementMode !== 'scene-base') return state;
+      const nextEnvironment = sanitizeSceneEnvironment({ ...environment, transform });
+      if (!nextEnvironment || isSceneEnvironmentEqual(environment, nextEnvironment)) return state;
+      return {
+        scene: {
+          ...state.scene,
+          sceneSettings: {
+            ...state.scene.sceneSettings,
+            environment: nextEnvironment,
+          },
+        },
+      };
+    });
+  },
+  commitEnvironmentTransform: (beforeTransform, afterTransform) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '提交环境变换');
+      const current = state.scene.sceneSettings.environment;
+      if (!current || current.placementMode !== 'scene-base') return state;
+      const before = sanitizeSceneEnvironment({ ...current, transform: beforeTransform });
+      const after = sanitizeSceneEnvironment({ ...current, transform: afterTransform });
+      if (!before || !after || isSceneEnvironmentEqual(before, after)) return state;
+
+      const command = updateSceneEnvironmentCommand('调整环境模型', before, after);
+      const result = executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        logs: prependLog(state.logs, '环境模型 Transform 已更新。'),
+      };
+    });
+  },
+  setEnvironmentAdjustmentActive: (active) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return active
+        ? guardRuntimePreviewMutation(state, '调整环境模型')
+        : { environmentAdjustmentActive: false };
+      const environment = state.scene.sceneSettings.environment;
+      const nextActive = Boolean(
+        active
+        && environment?.placementMode === 'scene-base'
+        && environment.visible
+        && environment.opacity > 0,
+      );
+      if (state.environmentAdjustmentActive === nextActive) return state;
+      return { environmentAdjustmentActive: nextActive };
+    });
+  },
+  requestEnvironmentFocus: () => {
+    set((state) => state.scene.sceneSettings.environment
+      ? { environmentFocusRequest: { id: createId('environment-focus') } }
+      : state);
+  },
+  consumeEnvironmentFocusRequest: (requestId) => {
+    set((state) => state.environmentFocusRequest?.id === requestId
+      ? { environmentFocusRequest: null }
+      : state);
+  },
+  convertLegacyEnvironmentToSceneBase: () => {
+    const state = get();
+    const environment = state.scene.sceneSettings.environment;
+    if (!environment || environment.placementMode !== 'legacy-left') return;
+    get().requestEnvironmentApply(
+      {
+        ...environment,
+        placementMode: 'scene-base',
+        transform: createDefaultSceneEnvironmentTransform(),
+      },
+      {
+        autoAlign: true,
+        focusAfterLoad: true,
+        commandLabel: '转换环境为场景底座',
+        successMessage: '旧版环境已转换为场景底座。',
+      },
+    );
   },
   updateSkyboxConfig: (skybox) => {
     set((state) => {
@@ -2313,46 +2587,43 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
   setEnvironmentActiveVariant: (sourceUrl) => {
-    set((state) => {
-      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换环境效果');
-      const environment = state.scene.sceneSettings.environment;
-      if (!environment || environment.activeVariantUrl === sourceUrl) return state;
+    const state = get();
+    if (isRuntimePreviewState(state)) {
+      set((current) => guardRuntimePreviewMutation(current, '切换环境效果'));
+      return;
+    }
+    const environment = state.scene.sceneSettings.environment;
+    if (!environment || environment.activeVariantUrl === sourceUrl) return;
+    const activeVariant = environment.variants.find((variant) => variant.sourceUrl === sourceUrl);
+    if (!activeVariant) return;
 
-      const activeVariant = environment.variants.find((variant) => variant.sourceUrl === sourceUrl);
-      if (!activeVariant) return state;
-
-      const command = updateSceneDocumentCommand('切换环境效果', (scene) => ({
-        ...scene,
-        sceneSettings: {
-          ...scene.sceneSettings,
-          environment: scene.sceneSettings.environment
-            ? {
-                ...scene.sceneSettings.environment,
-                activeVariantUrl: activeVariant.sourceUrl,
-              }
-            : null,
-        },
-      }));
-      const result = executeCommand(state.scene, state.history, command);
-
-      return {
-        ...result,
-        logs: prependLog(state.logs, `${command.label}: ${activeVariant.name}`),
-      };
-    });
+    get().requestEnvironmentApply(
+      { ...environment, activeVariantUrl: activeVariant.sourceUrl },
+      {
+        autoAlign: false,
+        focusAfterLoad: false,
+        commandLabel: '切换环境效果',
+        successMessage: `切换环境效果：${activeVariant.name}`,
+      },
+    );
   },
   requestCameraPoseSave: () => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '保存当前视角');
       return {
-        cameraPoseSaveRequest: { id: createId('camera_pose_save') },
+        cameraPoseSaveRequest: {
+          id: createId('camera_pose_save'),
+          orientation: state.cameraOrientation,
+          projection: state.cameraProjection,
+        },
         logs: prependLog(state.logs, '准备保存当前视角。'),
       };
     });
   },
   consumeCameraPoseSaveRequest: (requestId, pose) => {
     set((state) => {
-      if (state.cameraPoseSaveRequest?.id !== requestId) return state;
+      const request = state.cameraPoseSaveRequest;
+      if (request?.id !== requestId) return state;
       if (isRuntimePreviewState(state)) {
         return {
           cameraPoseSaveRequest: null,
@@ -2369,6 +2640,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             camera: {
               ...state.scene.sceneSettings.camera,
               savedPose: pose,
+              savedOrientation: request.orientation,
+              savedProjection: request.projection,
             },
           },
         },
@@ -2379,8 +2652,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   requestCameraReset: () => {
     set((state) => ({
       cameraResetRequest: { id: createId('camera_reset') },
-      // 复位会写入任意 alpha/beta，必须先退出俯视的角度锁定，否则位姿被钳制在俯视方向
-      cameraOrientation: 'orbit',
+      cameraOrientation: state.scene.sceneSettings.camera.savedOrientation,
+      cameraProjection: state.scene.sceneSettings.camera.savedProjection,
       logs: prependLog(state.logs, '准备复位视角。'),
     }));
   },
@@ -2394,7 +2667,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  /** 切换编辑器视口朝向（轨道/俯视），属于持久的编辑器会话状态，不修改场景文档或撤销历史。 */
+  /** 切换编辑器视口朝向；只有显式“保存当前视角”才会把当前值写入场景文档。 */
   setCameraOrientation: (orientation) => {
     set((state) => {
       if (state.cameraOrientation === orientation) return state;
@@ -2404,7 +2677,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  /** 切换编辑器视口投影（透视/正交），与朝向状态正交组合。 */
+  /** 切换编辑器视口投影；普通切换只影响会话，显式保存视角后才持久化。 */
   setCameraProjection: (projection) => {
     set((state) => {
       if (state.cameraProjection === projection) return state;
@@ -3163,16 +3436,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!isRuntimeEntityEditable(state.scene, entity)) return state;
       if (entity.components.locator?.builtInBinding) return state;
 
-      if (entity.components.transform[field][axis] === value) return state;
+      const before = normalizeTransformForEntity(entity, entity.components.transform);
+      const candidate = cloneTransform(before);
+      if (entity.components.skybox && field === 'scale') {
+        candidate.scale = normalizeSkyboxSphereScale({ x: value, y: value, z: value });
+      } else {
+        candidate[field][axis] = value;
+      }
+      const after = normalizeTransformForEntity(entity, candidate);
+      if (areTransformsEqual(before, after)) return state;
 
-      const before = cloneTransform(entity.components.transform);
-      const after: TransformComponent = {
-        ...cloneTransform(entity.components.transform),
-        [field]: {
-          ...entity.components.transform[field],
-          [axis]: value,
-        },
-      };
       const command = updateTransformCommand(entity.id, before, after);
       const result = executeCommand(state.scene, state.history, command);
 
@@ -3471,7 +3744,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!isRuntimeEntityEditable(state.scene, entity)) return state;
       if (entity.components.locator?.builtInBinding) return state;
 
-      if (areTransformsEqual(entity.components.transform, transform)) return state;
+      const normalizedTransform = normalizeTransformForEntity(entity, transform);
+      if (areTransformsEqual(entity.components.transform, normalizedTransform)) return state;
 
       return {
         scene: {
@@ -3482,7 +3756,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
               ...entity,
               components: {
                 ...entity.components,
-                transform: cloneTransform(transform),
+                transform: normalizedTransform,
               },
             },
           },
@@ -3492,7 +3766,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   commitEntityTransform: (entityId, before, after) => {
     if (!isFiniteTransform(before) || !isFiniteTransform(after)) return;
-    if (areTransformsEqual(before, after)) return;
 
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '提交变换');
@@ -3500,7 +3773,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!isRuntimeEntityEditable(state.scene, entity)) return state;
       if (entity.components.locator?.builtInBinding) return state;
 
-      const command = updateTransformCommand(entityId, cloneTransform(before), cloneTransform(after));
+      const normalizedBefore = normalizeTransformForEntity(entity, before);
+      const normalizedAfter = normalizeTransformForEntity(entity, after);
+      if (areTransformsEqual(normalizedBefore, normalizedAfter)) return state;
+
+      const command = updateTransformCommand(entityId, normalizedBefore, normalizedAfter);
       const result = executeCommand(state.scene, state.history, command);
 
       return {
@@ -3599,6 +3876,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...result,
         hierarchySelectionIds,
         ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        environmentApplyRequest: null,
+        environmentAdjustmentActive: false,
+        environmentFocusRequest: null,
         logs: prependLog(state.logs, 'Undo'),
       };
     });
@@ -3614,6 +3894,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...result,
         hierarchySelectionIds,
         ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        environmentApplyRequest: null,
+        environmentAdjustmentActive: false,
+        environmentFocusRequest: null,
         logs: prependLog(state.logs, 'Redo'),
       };
     });

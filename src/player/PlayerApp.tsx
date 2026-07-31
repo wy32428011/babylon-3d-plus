@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { deserializeScene } from '../editor/project/SceneSerializer';
 import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '../runtime/assets/editorAssetUrl';
 import { createBabylonViewport, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
+import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { SceneRuntime } from '../runtime/babylon/SceneRuntime';
 import { mqttRuntimeStatusStore } from '../runtime/mqtt/mqttRuntimeStatus';
 import { MqttStackerTelemetryClient } from '../runtime/mqtt/MqttStackerTelemetryClient';
@@ -96,14 +97,30 @@ export function PlayerApp() {
         applySceneBackground(viewport, parsedConfig.page.backgroundColor);
         viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
         viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
-        viewport.applyCameraPose(sceneDocument.sceneSettings.camera.savedPose);
+        applySavedSceneCameraView(viewport, sceneDocument.sceneSettings.camera);
 
-        runtime = new SceneRuntime(viewport.scene, (logMessage) => {
-          console.info(`[Viewer] ${logMessage}`);
-          if (!disposed) setRuntimeMessage(logMessage);
-        });
+        runtime = new SceneRuntime(
+          viewport.scene,
+          (logMessage) => {
+            console.info(`[Viewer] ${logMessage}`);
+            if (!disposed) setRuntimeMessage(logMessage);
+          },
+          undefined,
+          (snapshot) => {
+            if (disposed) return;
+            if (snapshot.phase === 'loading') setRuntimeMessage(snapshot.message || '环境模型正在加载...');
+            else if (snapshot.phase === 'error') setRuntimeMessage(`环境模型加载失败：${snapshot.message || '未知错误'}`);
+            else if (snapshot.phase === 'ready') setRuntimeMessage(null);
+          },
+        );
         runtime.sync(sceneDocument);
-        runtime.syncEnvironment(sceneDocument.sceneSettings.environment);
+        const environment = sceneDocument.sceneSettings.environment;
+        if (environment) {
+          await runtime.applyEnvironment(environment, { requestId: null, autoAlign: false });
+        } else {
+          runtime.syncEnvironment(null);
+        }
+        if (disposed) return;
         runtime.beginTelemetryPreview();
 
         mqttClient = new MqttStackerTelemetryClient((logMessage) => console.info(`[Viewer MQTT] ${logMessage}`));

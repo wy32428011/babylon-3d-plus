@@ -19,17 +19,19 @@ import {
   SCENE_VIEW_DISTANCE_DEFAULT,
   sanitizeSceneSensitivityValue,
   sanitizeSceneViewDistance,
+  type SceneCameraOrientation,
   type SceneCameraPose,
+  type SceneCameraProjection,
   type SceneSensitivitySettings,
 } from '../../editor/model/SceneDocument';
 
 export { EDITOR_GRID_CELL_SIZES, DEFAULT_EDITOR_GRID_SETTINGS } from './EditorGroundGrid';
 export type { EditorGridCellSize, EditorGridSettings } from './EditorGroundGrid';
 
-/** 编辑器视口的持久朝向状态：俯视是可持续的模式而非一次性事件。 */
-export type CameraOrientation = 'orbit' | 'top';
-/** 编辑器视口的投影方式，与朝向状态正交组合。 */
-export type CameraProjection = 'perspective' | 'orthographic';
+/** 编辑器视口的当前朝向状态；可在显式保存视角时写入场景。 */
+export type CameraOrientation = SceneCameraOrientation;
+/** 编辑器视口的当前投影方式；可在显式保存视角时写入场景。 */
+export type CameraProjection = SceneCameraProjection;
 
 export type EditorWorldBounds = {
   center: Vector3Data;
@@ -164,6 +166,21 @@ function getFocusCameraRadius(bounds: EditorWorldBounds, camera: ArcRotateCamera
   const limitingHalfFov = Math.max(0.01, Math.min(verticalHalfFov, horizontalHalfFov));
   const fitDistance = radiusMeters / Math.sin(limitingHalfFov);
   return clampCameraRadius(Math.max(fitDistance * 1.08, 2.5));
+}
+
+
+/** 聚焦包围盒并保持 ArcRotate 当前观察方向，避免 Target 高差导致相机翻面。 */
+export function focusArcRotateCameraOnBounds(
+  camera: ArcRotateCamera,
+  engine: Engine,
+  bounds: EditorWorldBounds,
+): void {
+  const alpha = camera.alpha;
+  const beta = camera.beta;
+  camera.setTarget(new Vector3(bounds.center.x, bounds.center.y, bounds.center.z));
+  camera.alpha = alpha;
+  camera.beta = beta;
+  camera.radius = getFocusCameraRadius(bounds, camera, engine);
 }
 
 /** 将场景灵敏度映射到 Babylon 相机参数，滑杆 10 对应原始默认手感。 */
@@ -489,8 +506,7 @@ export function createBabylonViewport(
     scene,
     camera,
     focusOnBounds: (bounds) => {
-      camera.setTarget(new Vector3(bounds.center.x, bounds.center.y, bounds.center.z));
-      camera.radius = getFocusCameraRadius(bounds, camera, engine);
+      focusArcRotateCameraOnBounds(camera, engine, bounds);
     },
     setViewDistance: (meters) => {
       const viewDistance = sanitizeSceneViewDistance(meters);

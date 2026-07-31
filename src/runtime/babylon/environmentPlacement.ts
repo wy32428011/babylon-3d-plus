@@ -11,6 +11,11 @@ function isFiniteVector3Data(vector: Vector3Data): boolean {
   return Number.isFinite(vector.x) && Number.isFinite(vector.y) && Number.isFinite(vector.z);
 }
 
+/** 序列化与严格比较时不保留 JavaScript 的 -0 表示。 */
+function normalizeSignedZero(value: number): number {
+  return Object.is(value, -0) ? 0 : value;
+}
+
 /**
  * 根据环境模型世界包围盒计算根节点偏移。
  * 结果会把模型右边界放到 X=-2m、底部放到 Y=0，并让 Z 方向中心对齐世界原点。
@@ -23,8 +28,26 @@ export function calculateEnvironmentOriginLeftOffset(
   if (maximum.x < minimum.x || maximum.y < minimum.y || maximum.z < minimum.z) return null;
 
   return {
-    x: -ENVIRONMENT_ORIGIN_LEFT_GAP_METERS - maximum.x,
-    y: -minimum.y,
-    z: -(minimum.z + maximum.z) / 2,
+    x: normalizeSignedZero(-ENVIRONMENT_ORIGIN_LEFT_GAP_METERS - maximum.x),
+    y: normalizeSignedZero(-minimum.y),
+    z: normalizeSignedZero(-(minimum.z + maximum.z) / 2),
+  };
+}
+
+/**
+ * 根据环境模型世界包围盒计算场景底座偏移。
+ * 结果会让 X/Z 中心对齐世界原点，并把包围盒底部放到 Y=0。
+ */
+export function calculateEnvironmentSceneBaseOffset(
+  minimum: Vector3Data,
+  maximum: Vector3Data,
+): Vector3Data | null {
+  if (!isFiniteVector3Data(minimum) || !isFiniteVector3Data(maximum)) return null;
+  if (maximum.x < minimum.x || maximum.y < minimum.y || maximum.z < minimum.z) return null;
+
+  return {
+    x: normalizeSignedZero(-(minimum.x + maximum.x) / 2),
+    y: normalizeSignedZero(-minimum.y),
+    z: normalizeSignedZero(-(minimum.z + maximum.z) / 2),
   };
 }

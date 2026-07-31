@@ -29,6 +29,7 @@ export type AssetEntry = {
   displayName?: string;
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
+  fileSizeBytes?: number;
   parameterConfig?: ModelParameterConfig;
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
@@ -173,6 +174,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     const defaultAssetCode = readOptionalString(payload, 'defaultAssetCode');
     const lengthUnit = readOptionalLengthUnit(payload);
     const unitScaleToMeters = readOptionalFiniteNumber(payload, 'unitScaleToMeters');
+    const fileSizeBytes = readOptionalFiniteNumber(payload, 'fileSizeBytes');
     const parameterConfig = normalizeModelParameterConfig(payload.parameterConfig);
     const dataDrivenConfig = normalizeModelDataDrivenConfig(payload.dataDrivenConfig);
     const builtInSlotBindingConfig = normalizeBuiltInSlotBindingConfig(payload.builtInSlotBindingConfig);
@@ -190,6 +192,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (displayName) asset.displayName = displayName;
     if (lengthUnit) asset.lengthUnit = lengthUnit;
     if (unitScaleToMeters !== undefined) asset.unitScaleToMeters = unitScaleToMeters;
+    if (fileSizeBytes !== undefined && fileSizeBytes > 0) asset.fileSizeBytes = Math.floor(fileSizeBytes);
     if (parameterConfig) asset.parameterConfig = parameterConfig;
     if (dataDrivenConfig) asset.dataDrivenConfig = dataDrivenConfig;
     if (builtInSlotBindingConfig) asset.builtInSlotBindingConfig = builtInSlotBindingConfig;

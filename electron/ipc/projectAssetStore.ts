@@ -415,6 +415,11 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
   const scriptPaths = normalizeOptionalStringArray(asset.scriptPaths);
   const scriptAssets = normalizeOptionalScriptAssets(asset.scriptAssets) ?? createScriptAssetsFromPaths(scriptPaths);
   const unitInfo = normalizeModelLengthUnit(asset.lengthUnit) ?? DEFAULT_MODEL_LENGTH_UNIT_INFO;
+  const fileSizeBytes = typeof asset.fileSizeBytes === 'number'
+    && Number.isFinite(asset.fileSizeBytes)
+    && asset.fileSizeBytes > 0
+      ? Math.floor(asset.fileSizeBytes)
+      : undefined;
 
   return {
     id: modelPath,
@@ -436,6 +441,7 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
     displayName: typeof asset.displayName === 'string' ? asset.displayName : undefined,
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
+    fileSizeBytes,
     parameterConfig: isPlainObject(asset.parameterConfig) ? asset.parameterConfig : undefined,
     dataDrivenConfig: isPlainObject(asset.dataDrivenConfig) ? asset.dataDrivenConfig : undefined,
     builtInSlotBindingConfig: isPlainObject(asset.builtInSlotBindingConfig) ? asset.builtInSlotBindingConfig : undefined,

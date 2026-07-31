@@ -75,12 +75,12 @@ type ProjectPanelProps = {
 export function ProjectPanel(props: ProjectPanelProps) {
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const refreshModelInstancesFromAssets = useEditorStore((state) => state.refreshModelInstancesFromAssets);
-  const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
+  const requestEnvironmentApply = useEditorStore((state) => state.requestEnvironmentApply);
   const updateSkyboxConfig = useEditorStore((state) => state.updateSkyboxConfig);
   const placeSkybox = useEditorStore((state) => state.placeSkybox);
   const sceneDocument = useEditorStore((state) => state.scene);
   const currentSkybox = useMemo(() => getSceneSkyboxSettings(sceneDocument), [sceneDocument]);
-  const currentEnvironmentPackagePath = useEditorStore((state) => state.scene.sceneSettings.environment?.packagePath);
+  const currentEnvironment = useEditorStore((state) => state.scene.sceneSettings.environment);
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
@@ -91,6 +91,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const pushLog = useEditorStore((state) => state.pushLog);
   const resourceCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const currentSkyboxRef = useRef(currentSkybox);
+  const currentEnvironmentRef = useRef(currentEnvironment);
   const projectAssetsLoadRequestRef = useRef(0);
   const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshModelSyncRunIdRef = useRef<string | null>(null);
@@ -162,34 +163,44 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const refreshCurrentEnvironmentFromAssets = useCallback(async (
     assets: ProjectModelAssetEntry[],
   ): Promise<boolean> => {
-    if (!currentEnvironmentPackagePath) return false;
+    const environment = currentEnvironmentRef.current;
+    if (!environment) return false;
 
     const environmentAssets = assets.filter((asset) => asset.libraryKind === 'environment');
     const matchedAsset = findImportedAssetForPackagePath(
-      currentEnvironmentPackagePath,
+      environment.packagePath,
       createImportedAssetIndexes(environmentAssets),
     );
     if (!matchedAsset || matchedAsset.libraryKind !== 'environment') return false;
 
     try {
-      const environmentConfig = await loadEnvironmentFromAsset(matchedAsset);
+      const environmentConfig = await loadEnvironmentFromAsset(matchedAsset, environment);
       if (!environmentConfig) {
         pushLog('环境模型资源已更新，但当前场景环境配置无效，未自动刷新。');
         return false;
       }
 
-      updateEnvironmentConfig(environmentConfig);
-      return true;
+      const requestId = requestEnvironmentApply(environmentConfig, {
+        autoAlign: false,
+        focusAfterLoad: false,
+        commandLabel: '刷新环境模型资源',
+        successMessage: '环境模型资源已刷新，并保留当前摆放与显示设置。',
+      });
+      return requestId !== null;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       pushLog(`环境模型资源已更新，但当前场景自动刷新失败：${message}`);
       return false;
     }
-  }, [currentEnvironmentPackagePath, pushLog, updateEnvironmentConfig]);
+  }, [pushLog, requestEnvironmentApply]);
 
   useEffect(() => {
     currentSkyboxRef.current = currentSkybox;
   }, [currentSkybox]);
+
+  useEffect(() => {
+    currentEnvironmentRef.current = currentEnvironment;
+  }, [currentEnvironment]);
 
   /** 用项目资源库中的稳定同名资产刷新当前天空盒路径，并保留场景级显示参数。 */
   const refreshCurrentSkyboxFromAssets = useCallback((
@@ -453,7 +464,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       const displayName = result.importedAsset.displayName?.trim()
         || result.importedAsset.name.replace(/\.glb$/i, '');
       const projectSuffix = result.projectRoot ? `，已写入项目：${result.projectRoot}` : '';
-      const refreshSuffix = refreshedCurrentEnvironment ? '，已刷新当前场景环境模型' : '';
+      const refreshSuffix = refreshedCurrentEnvironment ? '，已开始刷新当前场景环境模型' : '';
       const message = `环境 GLB 已导入：${displayName}${projectSuffix}${refreshSuffix}。`;
       setLibraryStatus(libraryKind, { message, kind: 'info' });
       pushLog(message);
@@ -532,9 +543,14 @@ export function ProjectPanel(props: ProjectPanelProps) {
         return;
       }
 
-      updateEnvironmentConfig(environmentConfig);
       const displayName = asset.displayName?.trim() || asset.name.replace(/\.(gltf|glb)$/i, '');
-      pushLog(`环境模型已应用：${displayName}`);
+      const requestId = requestEnvironmentApply(environmentConfig, {
+        autoAlign: true,
+        focusAfterLoad: true,
+        commandLabel: '应用环境模型',
+        successMessage: `环境模型已应用：${displayName}`,
+      });
+      if (!requestId) pushLog('环境模型未能开始加载，请查看 Scene View 状态。');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       pushLog(`环境模型读取失败：${message}`);
