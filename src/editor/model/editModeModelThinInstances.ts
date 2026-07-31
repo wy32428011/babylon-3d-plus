@@ -121,6 +121,7 @@ export function createEditModeModelThinInstancePlan(
 ): EditModeModelThinInstancePlan {
   const referencedSourceIds = collectReferencedModelArraySourceIds(scene);
   const hierarchyStateByEntityId = createEntityHierarchyStateMap(scene.entityIds, scene.entities);
+  const builtInSlotHostIds = collectBuiltInSlotHostIds(scene);
   const groups = new Map<string, Entity[]>();
 
   for (const entityId of scene.entityIds) {
@@ -131,6 +132,7 @@ export function createEditModeModelThinInstancePlan(
       || !modelAsset
       || entity.components.modelArrayInstance
       || entity.childrenIds.length > 0
+      || builtInSlotHostIds.has(entityId)
     ) {
       continue;
     }
@@ -226,6 +228,18 @@ function materializeThinInstanceEntities(
   }
 
   return entities;
+}
+
+/** 内置货格宿主必须保留独立脚本宿主与 contentRoot metadata，不得降级为合批实例或批次源。 */
+function collectBuiltInSlotHostIds(
+  scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
+): ReadonlySet<string> {
+  const hostIds = new Set<string>();
+  for (const entityId of scene.entityIds) {
+    const hostEntityId = scene.entities[entityId]?.components.locator?.builtInBinding?.hostEntityId;
+    if (hostEntityId) hostIds.add(hostEntityId);
+  }
+  return hostIds;
 }
 
 /** 收集已有阵列源；同模板分组时优先选择其中一个，减少重映射并保持源选择稳定。 */
