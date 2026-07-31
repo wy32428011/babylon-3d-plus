@@ -99,6 +99,14 @@ import {
   type SceneDocument,
 } from '../model/SceneDocument';
 import type { Vector3Data } from '../model/math';
+import { vector3 } from '../model/math';
+import {
+  deriveLocatorDimensionsFromBinding,
+  findBuiltInSlotEntityId,
+  getBuiltInSlotBindingConfig,
+  patchBuiltInSlotDimensions,
+  type BuiltInSlotBindingConfig,
+} from '../model/builtInSlotBinding';
 import {
   areModelParameterValuesEqual,
   cloneModelParameterValues,
@@ -510,6 +518,9 @@ function cloneLocator(locator: LocatorComponent): LocatorComponent {
     deviceAssetCode: locator.deviceAssetCode,
     rowNumber: locator.rowNumber,
     ...(locator.fetchDrive ? { fetchDrive: { ...locator.fetchDrive } } : {}),
+    ...(locator.builtInBinding
+      ? { builtInBinding: { hostEntityId: locator.builtInBinding.hostEntityId, originOffset: { ...locator.builtInBinding.originOffset } } }
+      : {}),
   };
 }
 
@@ -642,6 +653,26 @@ function areLocatorFetchDrivesEqual(left: LocatorFetchDriveConfig | undefined, r
   return left.enabled === right.enabled && (left.cargoGeneratorId ?? '') === (right.cargoGeneratorId ?? '');
 }
 
+/** 清理内置货格绑定 patch：undefined 保留原值；绑定身份只能由启用/停用流程改写，这里仅允许调整 originOffset。 */
+function sanitizeLocatorBuiltInBindingPatch(
+  value: LocatorComponent['builtInBinding'] | undefined,
+  before: LocatorComponent['builtInBinding'],
+): LocatorComponent['builtInBinding'] {
+  if (value === undefined) return before;
+  if (!before) return undefined;
+  const read = (offset: number | undefined, fallback: number): number => (
+    typeof offset === 'number' && Number.isFinite(offset) ? offset : fallback
+  );
+  return {
+    hostEntityId: before.hostEntityId,
+    originOffset: {
+      x: read(value.originOffset?.x, before.originOffset.x),
+      y: read(value.originOffset?.y, before.originOffset.y),
+      z: read(value.originOffset?.z, before.originOffset.z),
+    },
+  };
+}
+
 function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): boolean {
   return (
     left.assetId === right.assetId &&
@@ -656,7 +687,21 @@ function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): bool
     left.layerGap === right.layerGap &&
     left.deviceAssetCode === right.deviceAssetCode &&
     left.rowNumber === right.rowNumber &&
-    areLocatorFetchDrivesEqual(left.fetchDrive, right.fetchDrive)
+    areLocatorFetchDrivesEqual(left.fetchDrive, right.fetchDrive) &&
+    areLocatorBuiltInBindingsEqual(left.builtInBinding, right.builtInBinding)
+  );
+}
+
+function areLocatorBuiltInBindingsEqual(
+  left: LocatorComponent['builtInBinding'],
+  right: LocatorComponent['builtInBinding'],
+): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.hostEntityId === right.hostEntityId &&
+    left.originOffset.x === right.originOffset.x &&
+    left.originOffset.y === right.originOffset.y &&
+    left.originOffset.z === right.originOffset.z
   );
 }
 
@@ -703,6 +748,7 @@ function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: Asset
     ...(asset.parameterScriptMetadata?.length ? { parameterScriptMetadata: cloneJsonValue(asset.parameterScriptMetadata) } : {}),
     ...(asset.animationScriptMetadata?.length ? { animationScriptMetadata: cloneJsonValue(asset.animationScriptMetadata) } : {}),
     ...(asset.dataDrivenConfig ? { dataDrivenConfig: cloneJsonValue(asset.dataDrivenConfig) } : {}),
+    ...(asset.builtInSlotBindingConfig ? { builtInSlotBindingConfig: cloneJsonValue(asset.builtInSlotBindingConfig) } : {}),
     ...(parameterConfig
       ? {
           parameterConfig,
@@ -730,6 +776,7 @@ function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetCompone
     areJsonValuesEqual(left.parameterScriptMetadata, right.parameterScriptMetadata) &&
     areJsonValuesEqual(left.animationScriptMetadata, right.animationScriptMetadata) &&
     areJsonValuesEqual(left.dataDrivenConfig, right.dataDrivenConfig) &&
+    areJsonValuesEqual(left.builtInSlotBindingConfig, right.builtInSlotBindingConfig) &&
     areJsonValuesEqual(left.parameterConfig, right.parameterConfig) &&
     areModelParameterValuesEqual(left.parameterValues ?? {}, right.parameterValues ?? {})
   );
@@ -992,6 +1039,14 @@ function createEntityClipboardSnapshot(scene: SceneDocument, selectedIds: string
     if (!includedIds.includes(rootId)) continue;
 
     const includedIdSet = new Set(includedIds);
+    // 绑定到被复制子树内宿主的内置货格一并打包；粘贴时按 ID 映射重建绑定关系。
+    for (const entity of Object.values(scene.entities)) {
+      const hostEntityId = entity.components.locator?.builtInBinding?.hostEntityId;
+      if (hostEntityId && includedIdSet.has(hostEntityId) && !includedIdSet.has(entity.id)) {
+        includedIds.push(entity.id);
+        includedIdSet.add(entity.id);
+      }
+    }
     const snapshotEntities = includedIds.flatMap((entityId) => {
       const entity = scene.entities[entityId];
       if (!entity) return [];
@@ -1172,13 +1227,23 @@ function prepareEntityClipboardPaste(
         entities.push(folder);
         folderCount += 1;
       } else {
-        entities.push(createDuplicatedRuntimeEntity(
+        const duplicated = createDuplicatedRuntimeEntity(
           source,
           duplicatedParentId,
           null,
           existingNames,
           { id: duplicatedId },
-        ));
+        );
+        const binding = duplicated.components.locator?.builtInBinding;
+        if (binding) {
+          // 宿主同批粘贴则按 ID 映射重建绑定；宿主不在剪贴板内则解除绑定，避免悬空引用。
+          const remappedHostId = duplicatedIdBySourceId.get(binding.hostEntityId);
+          const locator = { ...duplicated.components.locator! };
+          if (remappedHostId) locator.builtInBinding = { hostEntityId: remappedHostId, originOffset: { ...binding.originOffset } };
+          else delete locator.builtInBinding;
+          duplicated.components = { ...duplicated.components, locator };
+        }
+        entities.push(duplicated);
         entityCount += 1;
       }
     }
@@ -1336,10 +1401,105 @@ function collectPromotedChildrenIds(
   return result;
 }
 
+/** 内置货格世界坐标提供器：由 SceneRuntime 注册，解绑绑定时把运行时实际位置烘焙回实体数据。 */
+export type BuiltInSlotWorldTransformProvider = (entityId: string) => TransformComponent | null;
+
+let builtInSlotWorldTransformProvider: BuiltInSlotWorldTransformProvider | null = null;
+
+export function registerBuiltInSlotWorldTransformProvider(provider: BuiltInSlotWorldTransformProvider | null): void {
+  builtInSlotWorldTransformProvider = provider;
+}
+
+/** 为声明了内置货格绑定的宿主实体创建货格实体（幂等，调用方需先确认不存在）。货格与宿主同级，绑定身份记录在 builtInBinding.hostEntityId。 */
+function createBuiltInSlotEntityInScene(
+  scene: SceneDocument,
+  hostEntityId: string,
+  config: BuiltInSlotBindingConfig,
+): SceneDocument {
+  const host = scene.entities[hostEntityId];
+  if (!host) return scene;
+
+  const slotEntity = createLocatorEntity(host.components.transform.position);
+  slotEntity.name = '内置货格';
+  slotEntity.parentId = host.parentId;
+  const derived = deriveLocatorDimensionsFromBinding(config, host.components.modelAsset?.parameterValues);
+  slotEntity.components.locator = {
+    ...slotEntity.components.locator!,
+    ...derived,
+    builtInBinding: { hostEntityId, originOffset: vector3() },
+  };
+
+  const hostIndex = scene.entityIds.indexOf(hostEntityId);
+  const entityIds = [...scene.entityIds];
+  entityIds.splice(hostIndex >= 0 ? hostIndex + 1 : entityIds.length, 0, slotEntity.id);
+
+  const hostParent = host.parentId ? scene.entities[host.parentId] : null;
+  return {
+    ...scene,
+    entityIds,
+    entities: {
+      ...scene.entities,
+      ...(hostParent?.isFolder
+        ? { [hostParent.id]: { ...hostParent, childrenIds: [...hostParent.childrenIds, slotEntity.id] } }
+        : {}),
+      [slotEntity.id]: slotEntity,
+    },
+  };
+}
+
+/** 解除内置货格绑定：货格保留在场景中，烘焙当前世界坐标，变为普通定位线框。 */
+function detachBuiltInSlotEntityInScene(scene: SceneDocument, hostEntityId: string, slotEntityId: string): SceneDocument {
+  const slotEntity = scene.entities[slotEntityId];
+  const locator = slotEntity?.components.locator;
+  if (!scene.entities[hostEntityId] || !slotEntity || !locator) return scene;
+
+  const bakedTransform = builtInSlotWorldTransformProvider?.(slotEntityId) ?? slotEntity.components.transform;
+  const { builtInBinding: _removed, ...restLocator } = locator;
+
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [slotEntityId]: {
+        ...slotEntity,
+        components: { ...slotEntity.components, transform: bakedTransform, locator: restLocator },
+      },
+    },
+  };
+}
+
+/**
+ * 宿主模型参数变化后的内置货格副作用：按启用参数创建/解绑货格（幂等），并按声明派生维度。
+ * 仅在提交路径调用；preview 路径只应调用 patchBuiltInSlotDimensions。
+ */
+function applyBuiltInSlotSideEffects(scene: SceneDocument, hostEntityId: string): SceneDocument {
+  const host = scene.entities[hostEntityId];
+  const config = getBuiltInSlotBindingConfig(host);
+  if (!host || !config) return scene;
+
+  const enabled = host.components.modelAsset?.parameterValues?.[config.enabledParam] === true;
+  const slotEntityId = findBuiltInSlotEntityId(scene, hostEntityId);
+
+  let next = scene;
+  if (enabled && !slotEntityId) {
+    next = createBuiltInSlotEntityInScene(scene, hostEntityId, config);
+  } else if (!enabled && slotEntityId) {
+    next = detachBuiltInSlotEntityInScene(scene, hostEntityId, slotEntityId);
+  }
+  return patchBuiltInSlotDimensions(next, hostEntityId);
+}
+
 /** 批量删除实体；文件夹保持非级联语义，未删除内容提升到最近仍存在的父级。 */
 function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[]): SceneDocument {
   const deletingIds = new Set(entityIds.filter((entityId) => Boolean(scene.entities[entityId])));
   if (deletingIds.size === 0) return scene;
+
+  // 内置货格是宿主模型的附属物，随宿主一并删除而非提升为孤儿实体。
+  for (const entity of Object.values(scene.entities)) {
+    if (deletingIds.has(entity.id)) continue;
+    const hostEntityId = entity.components.locator?.builtInBinding?.hostEntityId;
+    if (hostEntityId && deletingIds.has(hostEntityId)) deletingIds.add(entity.id);
+  }
 
   // 删除阵列源时提升第一个未删除实例为新源，避免其余独立模型因悬空引用一起消失。
   const promotedSources = new Map<string, string>();
@@ -2216,6 +2376,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       asset.defaultAssetCode,
       asset.assetRevision,
       asset.dataDrivenConfig,
+      asset.builtInSlotBindingConfig,
     );
     const command = createEntityCommand(entity);
 
@@ -2833,6 +2994,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改变换');
       const entity = getSelectedEntity(state);
       if (!isRuntimeEntityEditable(state.scene, entity)) return state;
+      if (entity.components.locator?.builtInBinding) return state;
 
       if (entity.components.transform[field][axis] === value) return state;
 
@@ -2895,6 +3057,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         deviceAssetCode: patch.deviceAssetCode !== undefined ? patch.deviceAssetCode.trim().slice(0, 128) : before.deviceAssetCode,
         rowNumber: sanitizeLocatorInt(patch.rowNumber, before.rowNumber, 1, 99),
         fetchDrive: sanitizeLocatorFetchDrivePatch(patch.fetchDrive, before.fetchDrive),
+        builtInBinding: sanitizeLocatorBuiltInBindingPatch(patch.builtInBinding, before.builtInBinding),
       };
 
       if (areLocatorsEqual(before, after)) return state;
@@ -3051,7 +3214,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const after = patchModelParameterValue(before, key, sanitizedValue);
       if (areModelParameterValuesEqual(before, after)) return state;
 
-      const command = updateModelParameterValuesCommand(entity.id, before, after);
+      // 声明了内置货格绑定时，参数变化与货格副作用（创建/解绑/维度派生）合并为单条快照命令，保证 undo 整体回滚。
+      const command = getBuiltInSlotBindingConfig(entity)
+        ? updateSceneDocumentCommand('更新模型参数', (scene) => applyBuiltInSlotSideEffects(
+            updateModelParameterValuesCommand(entity.id, before, after).execute(scene),
+            entity.id,
+          ))
+        : updateModelParameterValuesCommand(entity.id, before, after);
       const result = executeCommand(state.scene, state.history, command);
 
       return {
@@ -3076,23 +3245,26 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const after = patchModelParameterValue(before, key, sanitizedValue);
       if (areModelParameterValuesEqual(before, after)) return state;
 
-      return {
-        scene: {
-          ...state.scene,
-          entities: {
-            ...state.scene.entities,
-            [entity.id]: {
-              ...entity,
-              components: {
-                ...entity.components,
-                modelAsset: {
-                  ...modelAsset,
-                  parameterValues: after,
-                },
+      const previewScene: SceneDocument = {
+        ...state.scene,
+        entities: {
+          ...state.scene.entities,
+          [entity.id]: {
+            ...entity,
+            components: {
+              ...entity.components,
+              modelAsset: {
+                ...modelAsset,
+                parameterValues: after,
               },
             },
           },
         },
+      };
+
+      // preview 不写撤销历史，仅同步派生货格维度；创建/解绑由 commit 路径处理。
+      return {
+        scene: patchBuiltInSlotDimensions(previewScene, entity.id),
       };
     });
   },
@@ -3109,7 +3281,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const sanitizedAfter = sanitizeModelParameterValues(modelAsset.parameterConfig, after);
       if (areModelParameterValuesEqual(sanitizedBefore, sanitizedAfter)) return state;
 
-      const command = updateModelParameterValuesCommand(entity.id, sanitizedBefore, sanitizedAfter);
+      const command = getBuiltInSlotBindingConfig(entity)
+        ? updateSceneDocumentCommand('更新模型参数', (scene) => applyBuiltInSlotSideEffects(
+            updateModelParameterValuesCommand(entity.id, sanitizedBefore, sanitizedAfter).execute(scene),
+            entity.id,
+          ))
+        : updateModelParameterValuesCommand(entity.id, sanitizedBefore, sanitizedAfter);
       const result = executeCommand(state.scene, state.history, command);
 
       return {
@@ -3125,6 +3302,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '预览变换');
       const entity = state.scene.entities[entityId];
       if (!isRuntimeEntityEditable(state.scene, entity)) return state;
+      if (entity.components.locator?.builtInBinding) return state;
 
       if (areTransformsEqual(entity.components.transform, transform)) return state;
 
@@ -3153,6 +3331,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '提交变换');
       const entity = state.scene.entities[entityId];
       if (!isRuntimeEntityEditable(state.scene, entity)) return state;
+      if (entity.components.locator?.builtInBinding) return state;
 
       const command = updateTransformCommand(entityId, cloneTransform(before), cloneTransform(after));
       const result = executeCommand(state.scene, state.history, command);

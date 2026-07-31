@@ -3,6 +3,7 @@ import { normalizeModelParameterConfig } from '../model/modelParameters';
 import type { ModelScriptAsset, PoiEffectKind } from '../model/components';
 import { findBuiltInImageAssetByReference, type BuiltInImageAsset } from '../../assets/imageAssets';
 import { normalizeModelDataDrivenConfig, type ModelDataDrivenConfig } from '../model/telemetryBinding';
+import { normalizeBuiltInSlotBindingConfig, type BuiltInSlotBindingConfig } from '../model/builtInSlotBinding';
 import { isPoiEffectKind } from '../model/poiEffect';
 
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
@@ -29,6 +30,7 @@ export type AssetEntry = {
   unitScaleToMeters?: number;
   parameterConfig?: ModelParameterConfig;
   dataDrivenConfig?: ModelDataDrivenConfig;
+  builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   libraryKind?: ModelAssetLibraryKind;
 };
 
@@ -153,6 +155,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     const unitScaleToMeters = readOptionalFiniteNumber(payload, 'unitScaleToMeters');
     const parameterConfig = normalizeModelParameterConfig(payload.parameterConfig);
     const dataDrivenConfig = normalizeModelDataDrivenConfig(payload.dataDrivenConfig);
+    const builtInSlotBindingConfig = normalizeBuiltInSlotBindingConfig(payload.builtInSlotBindingConfig);
 
     if (packagePath) asset.packagePath = packagePath;
     if (assetRevision) asset.assetRevision = assetRevision;
@@ -169,6 +172,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (unitScaleToMeters !== undefined) asset.unitScaleToMeters = unitScaleToMeters;
     if (parameterConfig) asset.parameterConfig = parameterConfig;
     if (dataDrivenConfig) asset.dataDrivenConfig = dataDrivenConfig;
+    if (builtInSlotBindingConfig) asset.builtInSlotBindingConfig = builtInSlotBindingConfig;
 
     return asset;
   } catch {

@@ -1,4 +1,5 @@
 import type { Vector3Data } from './math';
+import type { BuiltInSlotBindingConfig, LocatorBuiltInBinding } from './builtInSlotBinding';
 import type { ModelParameterConfig, ModelParameterValues } from './modelParameters';
 import type { ModelSourceLengthUnit } from './sceneUnits';
 import type { ModelDataDrivenConfig, TelemetryBindingComponent } from './telemetryBinding';
@@ -40,6 +41,8 @@ export type LocatorComponent = {
   rowNumber: number;
   /** fetch 数据驱动；缺省表示不启用。 */
   fetchDrive?: LocatorFetchDriveConfig;
+  /** 内置货格绑定标记；存在且 parentId 指向声明了绑定的模型实体时，维度与位置由宿主模型驱动。 */
+  builtInBinding?: LocatorBuiltInBinding;
 };
 
 export type CadReferenceOriginMode = 'center';
@@ -98,6 +101,8 @@ export type ModelAssetTemplate = {
   parameterConfig?: ModelParameterConfig;
   parameterValues?: ModelParameterValues;
   dataDrivenConfig?: ModelDataDrivenConfig;
+  /** 模型包声明的内置货格绑定映射；缺省表示该模型不支持内置货格。 */
+  builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
 };
 
 /** 运行时模型资产组件，在模板基础上追加实例级资产编号。 */

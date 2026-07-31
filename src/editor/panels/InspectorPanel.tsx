@@ -171,6 +171,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const modelGenerator = selectedEntity.components.modelGenerator;
   const poiEffect = selectedEntity.components.poiEffect;
   const isCompactModelInspector = Boolean(modelAsset || meshRenderer || modelGenerator || poiEffect || locator);
+  const isBuiltInBound = Boolean(locator?.builtInBinding);
+  const transformDisabled = isLocked || isBuiltInBound;
 
   return (
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
@@ -194,13 +196,14 @@ export function InspectorPanel(props: InspectorPanelProps) {
               <span>{axis.toUpperCase()}</span>
               <input
                 type="number"
-                disabled={isLocked}
+                disabled={transformDisabled}
                 step={getTransformInputStep(field)}
                 value={getTransformInputValue(field, transform[field][axis])}
                 onChange={(event) => handleTransformChange(field, axis, event.target.value)}
               />
             </label>
           ))}
+          {isBuiltInBound && field === 'position' ? <p className="muted">位置由货架驱动，解绑后可编辑。</p> : null}
         </fieldset>
       ))}
       {modelGenerator ? (

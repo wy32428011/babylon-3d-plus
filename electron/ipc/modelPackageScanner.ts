@@ -15,6 +15,7 @@ type ModelPackageMetadata = ModelLengthUnitInfo & {
   parameterScriptMetadata?: unknown[];
   animationScriptMetadata?: unknown[];
   dataDrivenConfig?: unknown;
+  builtInSlotBinding?: unknown;
   defaultAssetCode?: string;
   scriptFileNames?: string[];
 };
@@ -231,6 +232,16 @@ function extractDataDrivenConfigFromMetadata(metadata: unknown): unknown | undef
   }
 }
 
+/** 从 meta.json 读取内置货格绑定声明并深拷贝为纯 JSON，结构校验在渲染进程 normalize 时完成。 */
+function extractBuiltInSlotBindingFromMetadata(metadata: unknown): unknown | undefined {
+  if (!isPlainObject(metadata) || !('builtInSlotBinding' in metadata)) return undefined;
+  try {
+    return JSON.parse(JSON.stringify(metadata.builtInSlotBinding)) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 function readFieldConfiguration(field: Record<string, unknown>): Record<string, unknown> {
   return isPlainObject(field.configuration) ? field.configuration : {};
 }
@@ -371,6 +382,7 @@ async function readModelPackageMetadata(
       parameterScriptMetadata: extractJsonArrayMetadata(parsed, 'parameterScripts'),
       animationScriptMetadata: extractJsonArrayMetadata(parsed, 'animationScripts'),
       dataDrivenConfig: extractDataDrivenConfigFromMetadata(parsed),
+      builtInSlotBinding: extractBuiltInSlotBindingFromMetadata(parsed),
       scriptFileNames: extractScriptFileNamesFromMetadata(parsed),
       ...unitInfo,
     };
@@ -468,6 +480,7 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
       unitScaleToMeters: metadata.unitScaleToMeters,
       parameterConfig: metadata.parameterConfig,
       dataDrivenConfig: metadata.dataDrivenConfig,
+      builtInSlotBindingConfig: metadata.builtInSlotBinding,
     },
   };
 }

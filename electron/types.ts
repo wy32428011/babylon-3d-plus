@@ -170,6 +170,7 @@ export type AssetEntry = {
   unitScaleToMeters?: number;
   parameterConfig?: unknown;
   dataDrivenConfig?: unknown;
+  builtInSlotBindingConfig?: unknown;
 };
 
 /** 项目索引中的模型资产，必须是模型且带有明确资产库分类。 */

@@ -11,6 +11,7 @@ import type {
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from './modelParameters';
 import { createModelLengthUnitInfo, normalizeModelLengthUnitInfo } from './sceneUnits';
 import { normalizeModelDataDrivenConfig } from './telemetryBinding';
+import { normalizeBuiltInSlotBindingConfig } from './builtInSlotBinding';
 
 /** 模型生成器从项目资源库读取的最小资产快照，避免领域模型反向依赖带图片资源的 UI 资产模块。 */
 type ModelGeneratorSourceAsset = {
@@ -31,6 +32,7 @@ type ModelGeneratorSourceAsset = {
   animationScriptMetadata?: unknown[];
   parameterConfig?: ModelAssetTemplate['parameterConfig'];
   dataDrivenConfig?: ModelAssetTemplate['dataDrivenConfig'];
+  builtInSlotBindingConfig?: ModelAssetTemplate['builtInSlotBindingConfig'];
 };
 
 /** 单个模型生成器允许保存的最大规则数。 */
@@ -133,6 +135,10 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
   const parameterConfig = normalizeModelParameterConfig(value.parameterConfig) ?? undefined;
   const dataDrivenConfig = value.dataDrivenConfig === undefined ? null : normalizeModelDataDrivenConfig(value.dataDrivenConfig);
   if (value.dataDrivenConfig !== undefined && !dataDrivenConfig) return null;
+  const builtInSlotBindingConfig = value.builtInSlotBindingConfig === undefined
+    ? null
+    : normalizeBuiltInSlotBindingConfig(value.builtInSlotBindingConfig);
+  if (value.builtInSlotBindingConfig !== undefined && !builtInSlotBindingConfig) return null;
   const scriptAssets = sanitizeModelScriptAssets(value.scriptAssets);
   const parameterScriptMetadata = sanitizeJsonArray(value.parameterScriptMetadata);
   const animationScriptMetadata = sanitizeJsonArray(value.animationScriptMetadata);
@@ -154,6 +160,7 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
         }
       : {}),
     ...(dataDrivenConfig ? { dataDrivenConfig } : {}),
+    ...(builtInSlotBindingConfig ? { builtInSlotBindingConfig } : {}),
   };
 }
 
@@ -163,6 +170,7 @@ function createModelAssetTemplateFromAsset(asset: ModelGeneratorSourceAsset): Mo
   const parameterConfig = normalizeModelParameterConfig(asset.parameterConfig) ?? undefined;
   const unitInfo = createModelLengthUnitInfo(asset.lengthUnit);
   const dataDrivenConfig = asset.dataDrivenConfig ? normalizeModelDataDrivenConfig(asset.dataDrivenConfig) : null;
+  const builtInSlotBindingConfig = asset.builtInSlotBindingConfig ? normalizeBuiltInSlotBindingConfig(asset.builtInSlotBindingConfig) : null;
   const scriptAssets = sanitizeModelScriptAssets(asset.scriptAssets);
   const parameterScriptMetadata = sanitizeJsonArray(asset.parameterScriptMetadata);
   const animationScriptMetadata = sanitizeJsonArray(asset.animationScriptMetadata);
@@ -178,6 +186,7 @@ function createModelAssetTemplateFromAsset(asset: ModelGeneratorSourceAsset): Mo
     ...(animationScriptMetadata?.length ? { animationScriptMetadata } : {}),
     ...(parameterConfig ? { parameterConfig, parameterValues: createDefaultModelParameterValues(parameterConfig) } : {}),
     ...(dataDrivenConfig ? { dataDrivenConfig: cloneJsonValue(dataDrivenConfig) } : {}),
+    ...(builtInSlotBindingConfig ? { builtInSlotBindingConfig: cloneJsonValue(builtInSlotBindingConfig) } : {}),
   };
 }
 

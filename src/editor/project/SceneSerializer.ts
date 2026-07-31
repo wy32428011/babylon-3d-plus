@@ -32,6 +32,7 @@ import {
   normalizeModelDataDrivenConfig,
   normalizeTelemetryBindingComponent,
 } from '../model/telemetryBinding';
+import { normalizeBuiltInSlotBindingConfig, normalizeLocatorBuiltInBinding } from '../model/builtInSlotBinding';
 import { logLegacySceneMigrationSummary, logSceneV2ToV3MigrationSummary, migrateLegacySceneV1ToV2, migrateSceneV2ToV3 } from './sceneMigration';
 
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
@@ -549,6 +550,7 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
   const locator = assertPlainObject(value);
 
   const fetchDrive = normalizeLocatorFetchDrive(locator.fetchDrive);
+  const builtInBinding = normalizeLocatorBuiltInBinding(locator.builtInBinding);
   return {
     assetId: assertString(locator.assetId).trim().slice(0, LOCATOR_ASSET_ID_MAX_LENGTH),
     storageDepth: normalizeLocatorStorageDepth(locator.storageDepth),
@@ -563,6 +565,7 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
     deviceAssetCode: (typeof locator.deviceAssetCode === 'string' ? locator.deviceAssetCode : '').trim().slice(0, 128),
     rowNumber: normalizeLocatorInt(locator.rowNumber, 1, 1, 99),
     ...(fetchDrive ? { fetchDrive } : {}),
+    ...(builtInBinding ? { builtInBinding } : {}),
   };
 }
 
@@ -731,6 +734,10 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
   const animationScriptMetadata = normalizeOptionalJsonArray(modelAsset.animationScriptMetadata);
   const dataDrivenConfig = modelAsset.dataDrivenConfig === undefined ? null : normalizeModelDataDrivenConfig(modelAsset.dataDrivenConfig);
   if ('dataDrivenConfig' in modelAsset && !dataDrivenConfig) throwUnsupportedSceneFileError();
+  const builtInSlotBindingConfig = modelAsset.builtInSlotBindingConfig === undefined
+    ? null
+    : normalizeBuiltInSlotBindingConfig(modelAsset.builtInSlotBindingConfig);
+  if ('builtInSlotBindingConfig' in modelAsset && !builtInSlotBindingConfig) throwUnsupportedSceneFileError();
 
   return {
     assetCode,
@@ -744,6 +751,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     ...(animationScriptMetadata.length ? { animationScriptMetadata } : {}),
     ...(parameterConfig ? { parameterConfig, parameterValues } : {}),
     ...(dataDrivenConfig ? { dataDrivenConfig } : {}),
+    ...(builtInSlotBindingConfig ? { builtInSlotBindingConfig } : {}),
   };
 }
 

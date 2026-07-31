@@ -38,12 +38,23 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
   const cargoGeneratorMissing = Boolean(
     fetchDrive?.cargoGeneratorId && !generatorOptions.some((option) => option.id === fetchDrive.cargoGeneratorId),
   );
+  const builtInBinding = component.builtInBinding;
 
   function handleDimensionChange(field: LocatorDimensionField, rawValue: string) {
     if (rawValue === '') return;
     const nextValue = Number(rawValue);
     if (!Number.isFinite(nextValue)) return;
     updateSelectedLocator({ [field]: nextValue } as Partial<LocatorComponent>);
+  }
+
+  /** 提交内置货格基点微调；绑定身份本身只能由货架参数区的启用开关改写。 */
+  function handleOriginOffsetChange(axis: 'x' | 'y' | 'z', rawValue: string) {
+    if (!builtInBinding || rawValue === '') return;
+    const nextValue = Number(rawValue);
+    if (!Number.isFinite(nextValue)) return;
+    updateSelectedLocator({
+      builtInBinding: { hostEntityId: builtInBinding.hostEntityId, originOffset: { ...builtInBinding.originOffset, [axis]: nextValue } },
+    });
   }
 
   /** 提交完整 fetchDrive 对象，由 Store 统一清洗并写入撤销历史。 */
@@ -131,7 +142,7 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
           <span>{label}</span>
           <input
             type="number"
-            disabled={disabled}
+            disabled={disabled || Boolean(builtInBinding)}
             min={min}
             max={Number.isFinite(max) ? max : undefined}
             step={step}
@@ -140,7 +151,26 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
           />
         </label>
       ))}
+      {builtInBinding ? <p className="muted">维度由货架参数驱动，解绑后可编辑。</p> : null}
     </fieldset>
+    {builtInBinding ? (
+      <fieldset className="transform-fieldset">
+        <legend>内置货格</legend>
+        <p className="muted">位置与维度由货架驱动；基点微调用于在货架局部坐标内微调对齐。</p>
+        {(['x', 'y', 'z'] as const).map((axis) => (
+          <label className="inspector-row" key={axis}>
+            <span>基点微调 {axis.toUpperCase()}(m)</span>
+            <input
+              type="number"
+              disabled={disabled}
+              step={0.05}
+              value={builtInBinding.originOffset[axis]}
+              onChange={(event) => handleOriginOffsetChange(axis, event.target.value)}
+            />
+          </label>
+        ))}
+      </fieldset>
+    ) : null}
     <fieldset className="transform-fieldset">
       <legend>Fetch 数据驱动</legend>
       <p className="muted">运行预览时按排号从 Fetch 接口拉取库存并渲染到本线框库位；排号、起始列使用上方已有配置。</p>

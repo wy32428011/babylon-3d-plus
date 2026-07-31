@@ -23,6 +23,7 @@ import {
   MODEL_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
 import {
+  registerBuiltInSlotWorldTransformProvider,
   useEditorStore,
   type EntityArrayDirection,
 } from '../store/editorStore';
@@ -585,6 +586,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         if (!currentRuntime || selectedEntityIdRef.current !== entityId) return;
         publishSelectedModelMeasurement(currentRuntime, entityId);
       });
+      registerBuiltInSlotWorldTransformProvider((entityId) => runtime?.getBuiltInSlotWorldTransform(entityId) ?? null);
       gizmo = new TransformGizmoController(viewport.scene, {
         previewTransform: previewEntityTransform,
         commitTransform: commitEntityTransform,

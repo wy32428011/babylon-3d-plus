@@ -143,6 +143,7 @@ type ModelAssetLibraryKind = 'model' | 'environment';
 type ModelParameterConfig = import('./editor/model/modelParameters').ModelParameterConfig;
 type ModelScriptAsset = import('./editor/model/components').ModelScriptAsset;
 type ModelDataDrivenConfig = import('./editor/model/telemetryBinding').ModelDataDrivenConfig;
+type BuiltInSlotBindingConfig = import('./editor/model/builtInSlotBinding').BuiltInSlotBindingConfig;
 
 type AssetEntry = {
   id: string;
@@ -165,6 +166,7 @@ type AssetEntry = {
   unitScaleToMeters?: number;
   parameterConfig?: ModelParameterConfig;
   dataDrivenConfig?: ModelDataDrivenConfig;
+  builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   libraryKind?: ModelAssetLibraryKind;
 };
 

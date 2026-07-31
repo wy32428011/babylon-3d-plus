@@ -18,6 +18,7 @@ import {
   createDefaultTelemetryBinding,
   normalizeModelDataDrivenConfig,
 } from './telemetryBinding';
+import { normalizeBuiltInSlotBindingConfig } from './builtInSlotBinding';
 
 export const MODEL_ASSET_CODE_MAX_LENGTH = 128;
 
@@ -606,10 +607,12 @@ export function createModelEntity(
   defaultAssetCodePrefix?: string,
   assetRevision?: string,
   dataDrivenConfig?: unknown,
+  builtInSlotBindingConfig?: unknown,
 ): Entity {
   const id = createId('entity');
   const trimmedName = displayName.trim();
   const normalizedDataDrivenConfig = normalizeModelDataDrivenConfig(dataDrivenConfig);
+  const normalizedBuiltInSlotBindingConfig = normalizeBuiltInSlotBindingConfig(builtInSlotBindingConfig);
   const assetCode = createModelAssetCode(normalizedDataDrivenConfig?.device.defaultAssetCode ?? defaultAssetCodePrefix, id);
   const telemetryBinding = normalizedDataDrivenConfig?.device.devType
     ? createDefaultTelemetryBinding(normalizedDataDrivenConfig.device.devType)
@@ -645,6 +648,7 @@ export function createModelEntity(
             }
           : {}),
         ...(normalizedDataDrivenConfig ? { dataDrivenConfig: normalizedDataDrivenConfig } : {}),
+        ...(normalizedBuiltInSlotBindingConfig ? { builtInSlotBindingConfig: normalizedBuiltInSlotBindingConfig } : {}),
       },
       ...(telemetryBinding ? { telemetryBinding } : {}),
     },

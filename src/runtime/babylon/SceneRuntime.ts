@@ -359,6 +359,21 @@ export type LocatorRuntimeEntry = {
   storageDepth: LocatorStorageDepth;
 };
 
+/** 绑定货格渲染网格时使用的实测步距；缺省时回退货格自身 长度+间隔 公式。 */
+type LocatorBindingSteps = {
+  columnStepX: number;
+  layerStepY: number;
+};
+
+/** 货架脚本写入 contentRoot metadata 的内置货格布局，坐标为货架实体根节点局部米空间。 */
+type BuiltInSlotLayoutInfo = {
+  firstCellCenterX: number;
+  firstLayerSurfaceY: number;
+  columnSpacing: number;
+  layerStepY: number;
+  depthCenterZ: number;
+};
+
 type CadReferenceRuntimeEntry = {
   sourceUrl: string;
   unitScaleToMeters: number;
@@ -798,6 +813,23 @@ export class SceneRuntime {
     this.updateAllExternalScriptRuntimeContexts('edit', null);
     this.clearModelGeneratorLoadFailureCache();
     this.syncAllModelGeneratorPresentations();
+  }
+
+  /** 读取绑定货格当前世界 Transform，供编辑器解绑时烘焙回实体数据。 */
+  getBuiltInSlotWorldTransform(entityId: string): TransformComponent | null {
+    const locator = this.locators.get(entityId);
+    if (!locator) return null;
+    locator.root.computeWorldMatrix(true);
+    const position = new Vector3();
+    const quaternion = new Quaternion();
+    const scaling = new Vector3();
+    if (!locator.root.getWorldMatrix().decompose(scaling, quaternion, position)) return null;
+    const rotation = quaternion.toEulerAngles();
+    return {
+      position: { x: position.x, y: position.y, z: position.z },
+      rotation: { x: rotation.x, y: rotation.y, z: rotation.z },
+      scale: { x: scaling.x, y: scaling.y, z: scaling.z },
+    };
   }
 
   /** 根据实体 ID 获取当前运行时中可被 Gizmo 绑定的 Babylon 节点。 */
@@ -2191,16 +2223,50 @@ export class SceneRuntime {
     const locator = entity.components.locator;
     if (!locator) return;
 
-    const signature = this.createLocatorSignature(locator);
+    const binding = locator.builtInBinding ?? null;
+    const hostEntry = binding ? this.models.get(binding.hostEntityId) ?? null : null;
+    const bound = Boolean(binding && hostEntry);
+    const hostBindingConfig = bound && binding
+      ? this.syncedEntities.get(binding.hostEntityId)?.components.modelAsset?.builtInSlotBindingConfig
+        ?? hostEntry?.entitySnapshot?.components.modelAsset?.builtInSlotBindingConfig
+      : undefined;
+    const columnSign = hostBindingConfig?.columnDirection === '-x' ? -1 : 1;
+    const layout = bound && hostEntry ? this.readBuiltInSlotLayout(hostEntry.contentRoot.metadata) : null;
+    const bindingSteps = bound
+      ? {
+          columnStepX: columnSign * (layout?.columnSpacing ?? locator.length + locator.columnGap),
+          layerStepY: layout?.layerStepY ?? locator.height + locator.layerGap,
+        }
+      : null;
+    const signature = this.createLocatorSignature(locator, bindingSteps);
 
     let runtimeLocator = this.locators.get(entity.id);
     if (!runtimeLocator) {
-      runtimeLocator = this.createLocator(entity.id, locator);
+      runtimeLocator = this.createLocator(entity.id, locator, bindingSteps);
       runtimeLocator.signature = signature;
       this.locators.set(entity.id, runtimeLocator);
     }
 
-    this.applyTransform(runtimeLocator.root, entity.components.transform);
+    if (bound && hostEntry && binding) {
+      runtimeLocator.root.parent = hostEntry.root;
+      const offset = binding.originOffset;
+      if (layout) {
+        runtimeLocator.root.position.set(
+          columnSign * layout.firstCellCenterX + offset.x,
+          layout.firstLayerSurfaceY + offset.y,
+          layout.depthCenterZ + offset.z,
+        );
+      } else {
+        // 布局 metadata 未就绪（脚本尚未运行），先落在货架局部原点，脚本就绪后由 refreshBuiltInSlotBindings 修正。
+        runtimeLocator.root.position.set(offset.x, offset.y, offset.z);
+      }
+      runtimeLocator.root.rotationQuaternion = null;
+      runtimeLocator.root.rotation.set(0, 0, 0);
+      runtimeLocator.root.scaling.set(1, 1, 1);
+    } else {
+      if (runtimeLocator.root.parent) runtimeLocator.root.parent = null;
+      this.applyTransform(runtimeLocator.root, entity.components.transform);
+    }
     runtimeLocator.assetId = locator.assetId;
     runtimeLocator.deviceAssetCode = locator.deviceAssetCode;
     runtimeLocator.rowNumber = locator.rowNumber;
@@ -2217,14 +2283,14 @@ export class SceneRuntime {
       for (const box of runtimeLocator.boxes) {
         box.dispose(false, false);
       }
-      runtimeLocator.boxes = this.createLocatorBoxes(entity.id, locator, runtimeLocator.root, runtimeLocator.material);
+      runtimeLocator.boxes = this.createLocatorBoxes(entity.id, locator, runtimeLocator.root, runtimeLocator.material, bindingSteps ?? undefined);
       runtimeLocator.signature = signature;
     }
 
     for (const box of runtimeLocator.boxes) {
       box.metadata = { ...(box.metadata ?? {}), storageLocation: locatorMetadata };
     }
-    this.applyLocatorStyle(runtimeLocator, selected);
+    this.applyLocatorStyle(runtimeLocator, selected && !bound);
     for (const box of runtimeLocator.boxes) {
       this.applyMeshInteractivity(box, entity.id);
     }
@@ -3138,7 +3204,7 @@ export class SceneRuntime {
   }
 
   /** 创建虚拟定位线框：根节点交给 Gizmo，子级透明盒网格负责拾取和边线显示。 */
-  private createLocator(entityId: string, locator: LocatorComponent): LocatorRuntimeEntry {
+  private createLocator(entityId: string, locator: LocatorComponent, bindingSteps?: LocatorBindingSteps | null): LocatorRuntimeEntry {
     const root = new TransformNode(`${entityId}_locatorRoot`, this.scene);
     const material = new StandardMaterial(`${entityId}_locatorMat`, this.scene);
 
@@ -3147,20 +3213,22 @@ export class SceneRuntime {
     material.diffuseColor = Color3.FromHexString(LOCATOR_EDGE_COLOR);
     material.emissiveColor = Color3.FromHexString(LOCATOR_EDGE_COLOR);
 
-    const boxes = this.createLocatorBoxes(entityId, locator, root, material);
+    const boxes = this.createLocatorBoxes(entityId, locator, root, material, bindingSteps ?? undefined);
 
     return { entityId, root, boxes, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
   }
 
-  private createLocatorBoxes(entityId: string, locator: LocatorComponent, root: TransformNode, material: StandardMaterial): Mesh[] {
+  private createLocatorBoxes(entityId: string, locator: LocatorComponent, root: TransformNode, material: StandardMaterial, bindingSteps?: LocatorBindingSteps): Mesh[] {
     const boxes: Mesh[] = [];
     const { length, height, width, columns, layers, columnGap, layerGap } = locator;
+    const columnStepX = bindingSteps?.columnStepX ?? length + columnGap;
+    const layerStepY = bindingSteps?.layerStepY ?? height + layerGap;
 
     for (let layer = 0; layer < layers; layer += 1) {
       for (let col = 0; col < columns; col += 1) {
         const box = MeshBuilder.CreateBox(`${entityId}_locatorBox_${col}_${layer}`, { width: length, height, depth: width }, this.scene);
         box.parent = root;
-        box.position.set(col * (length + columnGap), height / 2 + layer * (height + layerGap), 0);
+        box.position.set(col * columnStepX, height / 2 + layer * layerStepY, 0);
         box.isPickable = true;
         box.material = material;
         box.metadata = { ...(box.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
@@ -3173,7 +3241,24 @@ export class SceneRuntime {
     return boxes;
   }
 
-  private createLocatorSignature(locator: LocatorComponent): string {
+  /** 读取货架脚本写入 contentRoot metadata 的内置货格实测布局；字段缺失或非有限数字时视为未就绪。 */
+  private readBuiltInSlotLayout(metadata: unknown): BuiltInSlotLayoutInfo | null {
+    if (!isPlainRecord(metadata)) return null;
+    const layout = metadata.builtInSlotLayout;
+    if (!isPlainRecord(layout)) return null;
+    const read = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+    const firstCellCenterX = read(layout.firstCellCenterX);
+    const firstLayerSurfaceY = read(layout.firstLayerSurfaceY);
+    const columnSpacing = read(layout.columnSpacing);
+    const layerStepY = read(layout.layerStepY);
+    const depthCenterZ = read(layout.depthCenterZ);
+    if (firstCellCenterX === null || firstLayerSurfaceY === null || columnSpacing === null || layerStepY === null || depthCenterZ === null) {
+      return null;
+    }
+    return { firstCellCenterX, firstLayerSurfaceY, columnSpacing, layerStepY, depthCenterZ };
+  }
+
+  private createLocatorSignature(locator: LocatorComponent, bindingSteps?: LocatorBindingSteps | null): string {
     return [
       locator.length.toFixed(3),
       locator.height.toFixed(3),
@@ -3182,6 +3267,7 @@ export class SceneRuntime {
       String(locator.layers),
       locator.columnGap.toFixed(3),
       locator.layerGap.toFixed(3),
+      bindingSteps ? `${bindingSteps.columnStepX.toFixed(3)}|${bindingSteps.layerStepY.toFixed(3)}` : 'free',
     ].join('|');
   }
 
@@ -3509,7 +3595,10 @@ export class SceneRuntime {
   /** 判断实体是否允许被 Scene View 鼠标拾取。 */
   private isEntityScenePickable(entityId: string): boolean {
     const state = this.entityStates.get(entityId);
-    return state?.visible !== false && state?.locked !== true;
+    if (state?.visible === false || state?.locked === true) return false;
+    // 内置货格绑定期间位置由货架驱动，场景内点击穿透到货架。
+    if (this.syncedEntities.get(entityId)?.components.locator?.builtInBinding) return false;
+    return true;
   }
 
   /** 判断实体是否允许绑定 Transform Gizmo。 */
@@ -3883,6 +3972,15 @@ export class SceneRuntime {
     model.parameterSignature = signature;
   }
 
+  /** 货架脚本更新布局 metadata 后，重同步其全部绑定货格的位置与网格步距。 */
+  private refreshBuiltInSlotBindings(hostEntityId: string): void {
+    for (const entity of this.syncedEntities.values()) {
+      const locator = entity.components.locator;
+      if (locator?.builtInBinding?.hostEntityId !== hostEntityId) continue;
+      this.syncLocatorEntity(entity, this.selectedEntityIds.has(entity.id));
+    }
+  }
+
   /** 同步普通模型包外置脚本，并在脚本就绪后刷新模型呈现。 */
   private syncExternalModelScripts(entity: Entity, model: ModelRuntimeEntry): void {
     const modelAsset = entity.components.modelAsset;
@@ -3895,6 +3993,7 @@ export class SceneRuntime {
       this.applyModelSelection(current, current.highlighted);
       this.rebuildModelSelectionOutline();
       this.onModelMeasurementChanged(latestEntity.id);
+      this.refreshBuiltInSlotBindings(latestEntity.id);
       this.refreshGroupTranslationPreviewTargets();
     });
   }

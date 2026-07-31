@@ -435,6 +435,7 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     parameterConfig: isPlainObject(asset.parameterConfig) ? asset.parameterConfig : undefined,
     dataDrivenConfig: isPlainObject(asset.dataDrivenConfig) ? asset.dataDrivenConfig : undefined,
+    builtInSlotBindingConfig: isPlainObject(asset.builtInSlotBindingConfig) ? asset.builtInSlotBindingConfig : undefined,
   };
 }
 
