@@ -56,7 +56,8 @@ export function resolveEditModeModelThinInstanceReason(
 
 /**
  * 识别 Store 两次原子发布之间唯一的模型参数值变化。
- * 参数编辑动作会保留场景其它顶层引用和实体其它组件引用，因此这里无需扫描全部 entities。
+ * 参数编辑动作会保留场景其它顶层引用和选中实体的其它组件引用；
+ * 其余实体只做引用比较，确认没有内置货格这类随参数同次原子更新的派生实体后才允许走单实体同步。
  */
 export function resolveModelParameterOnlySceneChangeEntityId(
   previousScene: SceneDocument | null | undefined,
@@ -81,7 +82,15 @@ export function resolveModelParameterOnlySceneChangeEntityId(
   if (!entityId) return null;
   const previousEntity = previousScene.entities[entityId];
   const nextEntity = nextScene.entities[entityId];
-  return isModelParameterOnlyEntityChange(previousEntity, nextEntity) ? entityId : null;
+  if (!isModelParameterOnlyEntityChange(previousEntity, nextEntity)) return null;
+
+  // 内置货格维度会随宿主参数在同一次原子更新中改写；存在任何其它实体变化即放弃单实体快路径，退回完整同步。
+  for (const otherEntityId of nextScene.entityIds) {
+    if (otherEntityId !== entityId && previousScene.entities[otherEntityId] !== nextScene.entities[otherEntityId]) {
+      return null;
+    }
+  }
+  return entityId;
 }
 
 /**
