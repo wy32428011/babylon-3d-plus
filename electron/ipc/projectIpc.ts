@@ -221,7 +221,7 @@ function validateRemoveRecentWorkspaceItemRequest(
   };
 }
 
-/** 从用户明确保存或打开的场景中登记模型、生成器、环境、脚本和 CAD 文件授权。 */
+/** 从用户明确保存或打开的场景中登记模型、生成器、环境、天空盒、脚本和 CAD 文件授权。 */
 function authorizeModelAssetsFromSceneContent(content: string): void {
   try {
     const parsed = JSON.parse(content) as unknown;
@@ -232,6 +232,7 @@ function authorizeModelAssetsFromSceneContent(content: string): void {
         if (!isPlainObject(entity) || !isPlainObject(entity.components)) continue;
         authorizeSceneModelAsset(entity.components.modelAsset);
         authorizeSceneModelGenerator(entity.components.modelGenerator);
+        authorizeSceneSkyboxFile(entity.components.skybox);
 
         const cadReference = entity.components.cadReference as SceneCadReferenceShape | undefined;
         if (!isPlainObject(cadReference) || typeof cadReference.sourcePath !== 'string') continue;
@@ -240,14 +241,18 @@ function authorizeModelAssetsFromSceneContent(content: string): void {
       }
     }
 
-    if (isPlainObject(parsed.scene.sceneSettings) && isPlainObject(parsed.scene.sceneSettings.environment)) {
-      const variants = parsed.scene.sceneSettings.environment.variants;
-      if (Array.isArray(variants)) {
-        for (const variant of variants) {
-          if (!isPlainObject(variant) || typeof variant.sourcePath !== 'string') continue;
-          authorizeSceneModelFile(variant.sourcePath);
+    if (isPlainObject(parsed.scene.sceneSettings)) {
+      if (isPlainObject(parsed.scene.sceneSettings.environment)) {
+        const variants = parsed.scene.sceneSettings.environment.variants;
+        if (Array.isArray(variants)) {
+          for (const variant of variants) {
+            if (!isPlainObject(variant) || typeof variant.sourcePath !== 'string') continue;
+            authorizeSceneModelFile(variant.sourcePath);
+          }
         }
       }
+
+      authorizeSceneSkyboxFile(parsed.scene.sceneSettings.skybox);
     }
   } catch {
     // 场景内容的完整格式校验由 renderer 的 SceneSerializer 负责；这里失败时只是不额外授权资源文件。
@@ -295,6 +300,15 @@ function authorizeSceneModelFile(value: string): void {
   const sourcePath = normalizeFilePath(value);
   const extension = sourcePath.toLowerCase();
   if (extension.endsWith('.gltf') || extension.endsWith('.glb')) authorizeAssetFile(sourcePath);
+}
+
+/** 只授权格式声明与扩展名一致的本地 HDR/EXR 天空盒文件。 */
+function authorizeSceneSkyboxFile(value: unknown): void {
+  if (!isPlainObject(value) || typeof value.sourcePath !== 'string') return;
+  if (value.format !== 'hdr' && value.format !== 'exr') return;
+  const sourcePath = normalizeFilePath(value.sourcePath);
+  const expectedExtension = value.format === 'hdr' ? '.hdr' : '.exr';
+  if (sourcePath.toLowerCase().endsWith(expectedExtension)) authorizeAssetFile(sourcePath);
 }
 
 /** 与 renderer SceneSerializer 支持的版本保持一致（v1 原始版、v2 绑定反转、v3 fetchDrive）；版本不符时不做资源授权。 */

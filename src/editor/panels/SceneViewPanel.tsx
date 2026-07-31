@@ -20,7 +20,9 @@ import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
   decodeBuiltInAssetDragPayload,
   decodeModelAssetDragPayload,
+  decodeSkyboxAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
+  SKYBOX_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
 import {
   registerBuiltInSlotWorldTransformProvider,
@@ -29,7 +31,8 @@ import {
 } from '../store/editorStore';
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
-import type { SceneCameraPose, SceneDocument } from '../model/SceneDocument';
+import { getSceneSkyboxSettings, type SceneCameraPose, type SceneDocument } from '../model/SceneDocument';
+import { createSceneSkyboxFromAsset } from '../assets/skyboxAssets';
 import type { Vector3Data } from '../model/math';
 import {
   resolveFolderGroupMoveSelection,
@@ -44,6 +47,8 @@ import {
 } from '../model/modelArray';
 import {
   createEditModeModelThinInstancePlan,
+  patchEditModeModelThinInstancePlanForModelParameters,
+  resolveModelParameterOnlySceneChangeEntityId,
   type EditModeModelThinInstancePlan,
 } from '../model/editModeModelThinInstances';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
@@ -224,6 +229,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     thinInstanceEntityCount: 0,
   });
   const recordedEditModeThinInstancePlanComputationRef = useRef<object | null>(null);
+  const modelParameterSceneChangeRef = useRef<{ entities: SceneDocument['entities']; entityId: string | null } | null>(null);
   const selectedEntityIdRef = useRef<string | null>(null);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
   const entityArrayDialogRef = useRef<EntityArrayDialogState | null>(null);
@@ -255,6 +261,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
+  const placeSkybox = useEditorStore((state) => state.placeSkybox);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
   const commitEntityTransform = useEditorStore((state) => state.commitEntityTransform);
   const commitFolderGroupTranslation = useEditorStore((state) => state.commitFolderGroupTranslation);
@@ -269,17 +276,25 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const isRuntimePreview = runtimeMode === 'preview';
   const editModeThinInstancePlanComputation = useMemo(() => {
     const startedAt = readScenePanelTimestampMs();
-    const plan = createEditModeModelThinInstancePlan(
-      sceneDocument,
-      editModeThinInstancePlanRef.current ?? undefined,
-    );
+    const previousPlan = editModeThinInstancePlanRef.current;
+    const cachedParameterSceneChange = modelParameterSceneChangeRef.current;
+    const parameterSyncEntityId = previousPlan
+      ? cachedParameterSceneChange?.entities === sceneDocument.entities
+        ? cachedParameterSceneChange.entityId
+        : resolveModelParameterOnlySceneChangeEntityId(sceneDocumentRef.current, sceneDocument)
+      : null;
+    const plan = parameterSyncEntityId && previousPlan
+      ? patchEditModeModelThinInstancePlanForModelParameters(sceneDocument, previousPlan, parameterSyncEntityId)
+      : createEditModeModelThinInstancePlan(sceneDocument, previousPlan ?? undefined);
     return {
       plan,
+      parameterSyncEntityId,
       durationMs: Math.max(0, readScenePanelTimestampMs() - startedAt),
       entityCount: sceneDocument.entityIds.length,
     };
   }, [sceneDocument.entityIds, sceneDocument.entities]);
   const editModeThinInstancePlan = editModeThinInstancePlanComputation.plan;
+  const modelParameterSyncEntityId = editModeThinInstancePlanComputation.parameterSyncEntityId;
   const editRuntimeSceneDocument = useMemo(
     () => editModeThinInstancePlan.entities === sceneDocument.entities
       ? sceneDocument
@@ -368,6 +383,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       };
       recordedEditModeThinInstancePlanComputationRef.current = editModeThinInstancePlanComputation;
     }
+    modelParameterSceneChangeRef.current = {
+      entities: sceneDocument.entities,
+      entityId: modelParameterSyncEntityId,
+    };
     sceneDocumentRef.current = sceneDocument;
     editRuntimeSceneDocumentRef.current = editRuntimeSceneDocument;
     selectedEntityIdRef.current = selectedEntityId;
@@ -377,6 +396,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     editModeThinInstancePlanComputation,
     editRuntimeSceneDocument,
     sceneDocument,
+    modelParameterSyncEntityId,
     selectedEntityId,
     entityArrayDialog,
   ]);
@@ -481,6 +501,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     const hasSupportedPayload =
       event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE) ||
+      event.dataTransfer.types.includes(SKYBOX_ASSET_DRAG_MIME_TYPE) ||
       event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE);
     if (!hasSupportedPayload) return;
 
@@ -501,6 +522,16 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       event.clientY,
       event.currentTarget,
     ) ?? { x: 0, y: 0, z: 0 };
+
+    const rawSkyboxPayload = event.dataTransfer.getData(SKYBOX_ASSET_DRAG_MIME_TYPE);
+    const skyboxAsset = decodeSkyboxAssetDragPayload(rawSkyboxPayload);
+    if (skyboxAsset) {
+      event.preventDefault();
+      clickSnapshotRef.current = null;
+      const currentSkybox = getSceneSkyboxSettings(sceneDocument);
+      placeSkybox(createSceneSkyboxFromAsset(skyboxAsset, currentSkybox), placementPosition);
+      return;
+    }
 
     const rawModelPayload = event.dataTransfer.getData(MODEL_ASSET_DRAG_MIME_TYPE);
     const modelAsset = decodeModelAssetDragPayload(rawModelPayload);
@@ -808,7 +839,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     stopRuntimePreview,
   ]);
 
-  /** 文档内容变化才进入完整 SceneRuntime 同步；纯选择变化由下方专用 effect 处理。 */
+  /** 参数值变化走单实体同步；其它文档内容变化才进入完整 SceneRuntime 同步。 */
   useEffect(() => {
     const runtime = runtimeRef.current;
     const gizmo = gizmoRef.current;
@@ -816,12 +847,17 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
 
     gizmo.cancelActiveGroupDrag();
-    runtime.sync(editRuntimeSceneDocument);
+    if (modelParameterSyncEntityId) {
+      runtime.syncModelParameters(editRuntimeSceneDocument, modelParameterSyncEntityId);
+    } else {
+      runtime.sync(editRuntimeSceneDocument);
+    }
     attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
   }, [
     editRuntimeSceneDocument.entityIds,
     editRuntimeSceneDocument.entities,
+    modelParameterSyncEntityId,
     isRuntimePreview,
     attachCurrentSelectionGizmo,
     publishSelectedModelMeasurement,
@@ -913,6 +949,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
     viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
+    runtime.syncSkybox(sceneDocument);
     runtime.syncEnvironment(sceneDocument.sceneSettings.environment);
   }, [sceneDocument.sceneSettings]);
 

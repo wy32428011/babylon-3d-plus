@@ -60,11 +60,11 @@ Electron 主进程会在 `app ready` 前请求高性能 GPU、禁用 Chromium �
 
 Scene View 在编辑态会构造一层只存在于内存中的实体覆盖，不修改原始 `SceneDocument`，也不会把优化关系写入场景文件：
 
-- 完全相同的模型模板忽略实例级 `modelAsset.assetCode` 后分组；每组只保留一个真实模型和脚本宿主，其余实体临时映射到 `modelArrayInstance`，复用既有拾取、Gizmo、测量、显隐、锁定、选择描边和 thinInstance 矩阵批次。
-- 同一模板若已经存在多个持久化阵列源，编辑态只保留一个稳定可见源，其它源及其阵列实例临时重映射到统一源；该映射不写回 `SceneDocument`，参数模板分离时会立即恢复各自原始源。仍含旧 `modelArray.items` 的兼容源不会被降级，避免尚未迁移的内存场景丢失隐藏阵列项。
+- 相同结构模板忽略实例级 `modelAsset.assetCode` 与 `parameterValues` 后分组；每组只保留一个稳定真实源，其余实体临时映射到 `modelArrayInstance`。不同参数值仍由运行时参数变体宿主执行完整绑定/脚本并生成各自原 Geometry，不会错误共用已变形几何。
+- 同一结构模板若已经存在多个持久化阵列源，编辑态只保留一个稳定可见源，其它源及其阵列实例临时重映射到统一源；该映射不写回 `SceneDocument`，资源、单位、脚本或参数配置等结构模板真正分离时才恢复各自原始源。仍含旧 `modelArray.items` 的兼容源不会被降级，避免尚未迁移的内存场景丢失隐藏阵列项。
 - 无外置脚本模型默认允许合批；带脚本模型仅允许经过编辑态行为核对的 `box.model.ts`、`chain-conveyor.model.ts`、`gd-motor-optimized.model.ts`、`hcts.model.ts`、`shelf.model.ts`、`wlts.model.ts` 和 `yzj.model.ts`。其它脚本继续走逐实体路径，避免把依赖 `assetCode` 或私有运行状态的视觉错误合并。
-- 模板签名包含资源版本、单位、脚本元数据、参数配置和 `parameterValues`，因此不同尺寸、材质或显隐参数会进入不同批次，不会共用已变形几何。
-- 模型模板签名和派生实体使用不可变对象缓存；单个 Transform 变化时复用其余逻辑实体，避免 Gizmo 拖动期间反复序列化整份脚本元数据。
+- 编辑态结构模板签名包含资源版本、单位、脚本元数据和参数配置，但不包含 `parameterValues`；参数值只进入 `SceneRuntime` 渲染签名，由基础批次或参数变体批次隔离不同尺寸、材质和显隐外观。
+- 模型模板签名和派生实体使用不可变对象缓存；单个 Transform 变化时复用其余逻辑实体。单模型参数变化进一步使用稀疏实体覆盖和 `SceneRuntime.syncModelParameters()`，不扫描/复制完整实体表、不重建层级与 Locator 索引；参数组成员未变化时继续复用基础批次 GPU 矩阵缓冲。
 - 进入运行预览时 Scene View 始终同步原始文档，恢复每个设备独立的脚本实例、`assetCode`、参数和 MQTT 遥测状态；退出预览后再回到编辑态覆盖层。
 
 2026-07-23 使用指定的 `Untitled Scene.scene.json`（SHA-256 `f9d9fa6dc156dd0f96b5ba76f794ee2454efde415b7965b91cae92244a459b54`）和仓库内真实 YZJ/链条机 GLB、脚本进行 NullEngine 初始化回归：29,893,835 字节场景包含 1,840 个实体，其中 1,821 个模型被归并为 4 个参数变体源和 1,817 个逻辑 thinInstance 实体；实际只加载 4 次模型源，生成 135 个批次 Mesh、38,027 个 thinInstance，最终有效渲染 Mesh 为 270。最终一次运行中反序列化约 612 ms、编辑态分组约 572 ms、真实脚本与矩阵批次从 `sync()` 到就绪约 2.40 s，脚本警告和运行时日志均为 0。该数据用于验证初始化数量级和完整性，不等同于最终 Electron 窗口的 GPU 上传或首帧时间。

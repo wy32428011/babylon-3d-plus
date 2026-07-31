@@ -108,6 +108,111 @@ function verifyEditModePlan(createEditModeModelThinInstancePlan, entityCount) {
   };
 }
 
+/** 验证单模型参数预览只替换目标派生实体，并保持跨参数值的稳定合批拓扑。 */
+function verifyModelParameterPreviewPlan(
+  createEditModeModelThinInstancePlan,
+  patchEditModeModelThinInstancePlanForModelParameters,
+  resolveModelParameterOnlySceneChangeEntityId,
+) {
+  const entityCount = 10_000;
+  const scene = createLargeStaticModelScene(entityCount);
+  const initialPlan = createEditModeModelThinInstancePlan(scene);
+  const targetEntityId = scene.entityIds.at(-1);
+  const targetEntity = scene.entities[targetEntityId];
+  const nextTargetEntity = {
+    ...targetEntity,
+    components: {
+      ...targetEntity.components,
+      modelAsset: {
+        ...targetEntity.components.modelAsset,
+        parameterValues: { width: 2 },
+      },
+    },
+  };
+  const nextScene = {
+    ...scene,
+    entities: { ...scene.entities, [targetEntityId]: nextTargetEntity },
+  };
+
+  const sharedMqttConfig = {};
+  const sharedSceneSettings = {};
+  const sharedFetchConfig = {};
+  const previousDocument = {
+    ...scene,
+    id: 'parameter-preview-performance',
+    name: 'Parameter Preview Performance',
+    selectedEntityId: targetEntityId,
+    mqttConfig: sharedMqttConfig,
+    sceneSettings: sharedSceneSettings,
+    fetchConfig: sharedFetchConfig,
+  };
+  const nextDocument = { ...previousDocument, entities: nextScene.entities };
+  assert.equal(
+    resolveModelParameterOnlySceneChangeEntityId(previousDocument, nextDocument),
+    targetEntityId,
+    '参数变化识别必须命中当前选中模型',
+  );
+  const transformChangedEntity = {
+    ...nextTargetEntity,
+    components: {
+      ...nextTargetEntity.components,
+      transform: { ...nextTargetEntity.components.transform, position: { x: 1, y: 0, z: 0 } },
+    },
+  };
+  assert.equal(
+    resolveModelParameterOnlySceneChangeEntityId(previousDocument, {
+      ...nextDocument,
+      entities: { ...nextDocument.entities, [targetEntityId]: transformChangedEntity },
+    }),
+    null,
+    '参数与 Transform 同时变化时必须回退完整同步',
+  );
+
+  let previewEntityReadCount = 0;
+  const guardedPreviewScene = {
+    entityIds: new Proxy(nextScene.entityIds, {
+      get() { throw new Error('参数预览增量计划不得读取或迭代完整 entityIds'); },
+    }),
+    entities: new Proxy(nextScene.entities, {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && property !== targetEntityId) {
+          throw new Error(`参数预览增量计划不得读取无关实体：${property}`);
+        }
+        if (property === targetEntityId) previewEntityReadCount += 1;
+        return Reflect.get(target, property, receiver);
+      },
+      ownKeys() { throw new Error('参数预览增量计划不得枚举完整 entities'); },
+    }),
+  };
+  const startedAt = performance.now();
+  const previewPlan = patchEditModeModelThinInstancePlanForModelParameters(
+    guardedPreviewScene,
+    initialPlan,
+    targetEntityId,
+  );
+  const durationMs = performance.now() - startedAt;
+
+  assert.equal(previewEntityReadCount, 1, '参数预览增量计划只能读取目标实体一次');
+  assert.equal(previewPlan.groupCount, 1, '参数预览不得拆散同一结构模板的编辑态分组');
+  assert.equal(previewPlan.thinInstanceEntityCount, entityCount - 1, '参数预览不得把目标退化为独立真实模型');
+  assert.equal(
+    previewPlan.entities[targetEntityId].components.modelArrayInstance?.sourceEntityId,
+    initialPlan.sourceEntityIds[0],
+    '参数预览必须保留目标原有矩阵源，由 SceneRuntime 参数变体承载视觉差异',
+  );
+  assert.equal(
+    previewPlan.entities[scene.entityIds[1]],
+    initialPlan.entities[scene.entityIds[1]],
+    '参数预览必须复用所有无关派生实体引用',
+  );
+
+  const rebuiltPlan = createEditModeModelThinInstancePlan(nextScene, previewPlan);
+  assert.equal(rebuiltPlan.groupCount, 1, '完整重算也必须按结构模板合并不同参数值');
+  assert.equal(rebuiltPlan.thinInstanceEntityCount, entityCount - 1, '完整重算不得因参数值不同改变合批拓扑');
+
+  return { entityCount, durationMs, stableSourceEntityId: initialPlan.sourceEntityIds[0] };
+}
+
 /** 验证高顶点 10k thinInstance 的动态空间分片、拾取映射和单选差量更新。 */
 function verifyThinInstanceSelectionDelta(EntityArrayThinInstanceBatch) {
   const engine = new NullEngine({ renderWidth: 64, renderHeight: 64 });
@@ -979,13 +1084,18 @@ async function verifySceneViewWiring() {
     readFile(ENTITY_ARRAY_BATCH_PATH, 'utf8'),
     readFile(SCENE_RUNTIME_PATH, 'utf8'),
   ]);
-  const fullSyncStart = panelSource.indexOf('/** 文档内容变化才进入完整 SceneRuntime 同步');
+  const fullSyncStart = panelSource.indexOf('/** 参数值变化走单实体同步');
   const selectionSyncStart = panelSource.indexOf('/** 单选/文件夹选区变化只刷新目标表现');
   assert.ok(fullSyncStart >= 0 && selectionSyncStart > fullSyncStart, 'SceneView 必须拆分内容与选择 effect');
 
   const fullSyncBlock = panelSource.slice(fullSyncStart, selectionSyncStart);
   const fullSyncDependencies = fullSyncBlock.slice(fullSyncBlock.lastIndexOf('}, ['));
-  assert.match(fullSyncBlock, /runtime\.sync\(editRuntimeSceneDocument\)/, '内容 effect 必须保留完整同步');
+  assert.match(
+    fullSyncBlock,
+    /runtime\.syncModelParameters\(editRuntimeSceneDocument, modelParameterSyncEntityId\)/,
+    '参数 effect 必须调用单实体参数同步',
+  );
+  assert.match(fullSyncBlock, /runtime\.sync\(editRuntimeSceneDocument\)/, '其它内容变化必须保留完整同步');
   assert.match(fullSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '内容 effect 只能取消过期的文件夹组拖动');
   assert.doesNotMatch(fullSyncBlock, /gizmo\.cancelActiveDrag\(\)/, '普通实体预览写入文档时不得被内容 effect 打断');
   assert.doesNotMatch(fullSyncDependencies, /selectedEntityId[,\]]/, '完整同步依赖不得包含纯选择字段');
@@ -1073,6 +1183,7 @@ async function verifySceneViewWiring() {
 
   return {
     contentAndSelectionEffectsSeparated: true,
+    modelParametersUseDedicatedRuntimePath: true,
     selectionUsesDedicatedRuntimePath: true,
     planIgnoresSelectionOnlyChanges: true,
     hudCanHideAndShowFromToolbar: true,
@@ -1103,6 +1214,11 @@ try {
   const planResults = LARGE_PLAN_COUNTS.map((entityCount) => (
     verifyEditModePlan(planModule.createEditModeModelThinInstancePlan, entityCount)
   ));
+  const modelParameterPreviewPlan = verifyModelParameterPreviewPlan(
+    planModule.createEditModeModelThinInstancePlan,
+    planModule.patchEditModeModelThinInstancePlanForModelParameters,
+    planModule.resolveModelParameterOnlySceneChangeEntityId,
+  );
   const batchResult = verifyThinInstanceSelectionDelta(batchModule.EntityArrayThinInstanceBatch);
   const frustumCompaction = verifyThinInstanceFrustumCompaction(batchModule.EntityArrayThinInstanceBatch);
   const originalGeometry = verifyOriginalGeometryAtAllDistances(batchModule.EntityArrayThinInstanceBatch);
@@ -1116,6 +1232,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     planResults,
+    modelParameterPreviewPlan,
     batchResult,
     frustumCompaction,
     originalGeometry,

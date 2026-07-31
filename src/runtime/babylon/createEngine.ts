@@ -2,19 +2,18 @@ import {
   ArcRotateCamera,
   Axis,
   Camera,
-  Color3,
   Engine,
-  GlowLayer,
   HemisphericLight,
-  Mesh,
-  MeshBuilder,
   type Observer,
   Scene,
-  ShaderMaterial,
   TmpVectors,
   Vector3,
 } from '@babylonjs/core';
-import { SCENE_LENGTH_UNIT_SYMBOL } from '../../editor/model/sceneUnits';
+import {
+  createEditorGroundGrid,
+  DEFAULT_EDITOR_GRID_SETTINGS,
+  type EditorGridSettings,
+} from './EditorGroundGrid';
 import type { Vector3Data } from '../../editor/model/math';
 import {
   SCENE_VIEW_DISTANCE_DEFAULT,
@@ -24,29 +23,17 @@ import {
   type SceneSensitivitySettings,
 } from '../../editor/model/SceneDocument';
 
-export type EditorGridCellSize = 1 | 2 | 5 | 10;
+export { EDITOR_GRID_CELL_SIZES, DEFAULT_EDITOR_GRID_SETTINGS } from './EditorGroundGrid';
+export type { EditorGridCellSize, EditorGridSettings } from './EditorGroundGrid';
 
 /** 编辑器视口的持久朝向状态：俯视是可持续的模式而非一次性事件。 */
 export type CameraOrientation = 'orbit' | 'top';
 /** 编辑器视口的投影方式，与朝向状态正交组合。 */
 export type CameraProjection = 'perspective' | 'orthographic';
 
-export type EditorGridSettings = {
-  visible: boolean;
-  cellSizeMeters: EditorGridCellSize;
-};
-
 export type EditorWorldBounds = {
   center: Vector3Data;
   radiusMeters: number;
-};
-
-type EditorGroundGridResources = {
-  grid: Mesh;
-  gridMaterial: ShaderMaterial;
-  lineGlowGrid: Mesh;
-  lineGlowMaterial: ShaderMaterial;
-  lineGlowLayer: GlowLayer;
 };
 
 export type BabylonViewportRuntimeStatus =
@@ -83,15 +70,6 @@ export type BabylonViewport = {
   dispose: () => void;
 };
 
-export const EDITOR_GRID_CELL_SIZES: readonly EditorGridCellSize[] = [1, 2, 5, 10];
-export const DEFAULT_EDITOR_GRID_SETTINGS: EditorGridSettings = {
-  visible: true,
-  cellSizeMeters: 5,
-};
-
-const GRID_SIZE_METERS = 80000;
-const GRID_ALPHA_BASE = 0.14;
-const GRID_ALPHA_PULSE = 0.025;
 const SOFTWARE_WEBGL_RENDERER_PATTERNS = [
   /swiftshader/i,
   /llvmpipe/i,
@@ -101,11 +79,6 @@ const SOFTWARE_WEBGL_RENDERER_PATTERNS = [
   /microsoft basic render driver/i,
   /(?:direct3d|d3d)\s*warp/i,
 ];
-const GRID_LINE_GLOW_ALPHA_BASE = 0.025;
-const GRID_LINE_GLOW_ALPHA_PULSE = 0.035;
-const GRID_LINE_GLOW_INTENSITY_BASE = 0.08;
-const GRID_LINE_GLOW_INTENSITY_PULSE = 0.12;
-const BREATHING_SPEED = 0.0018;
 const EDITOR_CAMERA_MIN_RADIUS_METERS = 0.2;
 const EDITOR_CAMERA_MIN_Z_METERS = 0.02;
 const EDITOR_CAMERA_DEFAULT_ALPHA = Math.PI / 4;
@@ -114,51 +87,6 @@ const EDITOR_CAMERA_DEFAULT_RADIUS = 28;
 const EDITOR_CAMERA_TOP_VIEW_ALPHA = -Math.PI / 2;
 const EDITOR_CAMERA_TOP_VIEW_BETA = 0.01;
 const EDITOR_CAMERA_DEFAULT_TARGET = Vector3.Zero();
-const GRID_VERTEX_SHADER = `
-precision highp float;
-
-attribute vec3 position;
-
-uniform mat4 world;
-uniform mat4 worldViewProjection;
-
-varying vec3 vWorldPosition;
-
-void main(void) {
-  vec4 worldPosition = world * vec4(position, 1.0);
-  vWorldPosition = worldPosition.xyz;
-  gl_Position = worldViewProjection * vec4(position, 1.0);
-}
-`;
-const GRID_FRAGMENT_SHADER = `
-#extension GL_OES_standard_derivatives : enable
-precision highp float;
-
-varying vec3 vWorldPosition;
-
-uniform float cellSizeMeters;
-uniform vec3 lineColor;
-uniform float lineAlpha;
-uniform float lineWidth;
-
-float getGridLine(vec2 worldPosition, float cellSize) {
-  vec2 gridPosition = worldPosition / max(cellSize, 0.0001);
-  vec2 derivative = max(fwidth(gridPosition), vec2(0.0001));
-  vec2 grid = abs(fract(gridPosition - 0.5) - 0.5) / derivative;
-  float distanceToLine = min(grid.x, grid.y);
-  return 1.0 - smoothstep(lineWidth, lineWidth + 1.0, distanceToLine);
-}
-
-void main(void) {
-  float line = getGridLine(vWorldPosition.xz, cellSizeMeters);
-  if (line <= 0.001) {
-    discard;
-  }
-
-  gl_FragColor = vec4(lineColor, line * lineAlpha);
-}
-`;
-
 /** 将未知异常转换成可读消息，便于向上层 UI 呈现 Babylon 初始化失败原因。 */
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -214,166 +142,6 @@ function probeHardwareAccelerationAvailable(): boolean {
 /** 限制编辑器相机距离，避免滚轮缩放过近时穿过模型或被近裁剪面裁空。 */
 function clampCameraRadius(radiusMeters: number): number {
   return Math.max(radiusMeters, EDITOR_CAMERA_MIN_RADIUS_METERS);
-}
-
-/** 创建地面网格过程式材质，用世界坐标绘制米制网格线，避免大范围网格生成海量几何。 */
-function createEditorGridShaderMaterial(
-  scene: Scene,
-  name: string,
-  lineColor: Color3,
-  lineAlpha: number,
-  lineWidth: number,
-  cellSizeMeters: EditorGridCellSize,
-): ShaderMaterial {
-  const material = new ShaderMaterial(
-    name,
-    scene,
-    {
-      vertexSource: GRID_VERTEX_SHADER,
-      fragmentSource: GRID_FRAGMENT_SHADER,
-    },
-    {
-      attributes: ['position'],
-      uniforms: ['world', 'worldViewProjection', 'cellSizeMeters', 'lineColor', 'lineAlpha', 'lineWidth'],
-      needAlphaBlending: true,
-    },
-  );
-  material.backFaceCulling = false;
-  material.setColor3('lineColor', lineColor);
-  material.setFloat('lineAlpha', lineAlpha);
-  material.setFloat('lineWidth', lineWidth);
-  material.setFloat('cellSizeMeters', cellSizeMeters);
-
-  return material;
-}
-
-/** 创建一组编辑器辅助地面网格资源；网格不进入 SceneDocument，也不可被拾取选中。 */
-function createEditorGroundGridResources(scene: Scene, settings: EditorGridSettings): EditorGroundGridResources {
-  const cellSizeLabel = `${settings.cellSizeMeters} ${SCENE_LENGTH_UNIT_SYMBOL}`;
-  const grid = MeshBuilder.CreateGround(
-    'EditorGroundGrid',
-    {
-      width: GRID_SIZE_METERS,
-      height: GRID_SIZE_METERS,
-      subdivisions: 1,
-    },
-    scene,
-  );
-  grid.isPickable = false;
-  grid.alwaysSelectAsActiveMesh = true;
-  grid.metadata = { cellSizeLabel };
-
-  const gridMaterial = createEditorGridShaderMaterial(
-    scene,
-    'EditorGroundGridMaterial',
-    Color3.FromHexString('#4fa8ff'),
-    GRID_ALPHA_BASE,
-    0.75,
-    settings.cellSizeMeters,
-  );
-  grid.material = gridMaterial;
-
-  const lineGlowGrid = MeshBuilder.CreateGround(
-    'EditorGroundLineGlowGrid',
-    {
-      width: GRID_SIZE_METERS,
-      height: GRID_SIZE_METERS,
-      subdivisions: 1,
-    },
-    scene,
-  );
-  lineGlowGrid.position.y = 0.006;
-  lineGlowGrid.isPickable = false;
-  lineGlowGrid.alwaysSelectAsActiveMesh = true;
-  lineGlowGrid.metadata = { cellSizeLabel };
-
-  const lineGlowMaterial = createEditorGridShaderMaterial(
-    scene,
-    'EditorGroundLineGlowMaterial',
-    Color3.FromHexString('#7fd4ff'),
-    GRID_LINE_GLOW_ALPHA_BASE,
-    1.1,
-    settings.cellSizeMeters,
-  );
-  lineGlowGrid.material = lineGlowMaterial;
-
-  const lineGlowLayer = new GlowLayer('EditorGroundLineGlowLayer', scene);
-  lineGlowLayer.intensity = GRID_LINE_GLOW_INTENSITY_BASE;
-  lineGlowLayer.addIncludedOnlyMesh(lineGlowGrid);
-
-  grid.setEnabled(settings.visible);
-  lineGlowGrid.setEnabled(settings.visible);
-  if (!settings.visible) {
-    lineGlowLayer.intensity = 0;
-  }
-
-  return { grid, gridMaterial, lineGlowGrid, lineGlowMaterial, lineGlowLayer };
-}
-
-/** 释放编辑器辅助地面网格资源，避免多次切换格子大小后残留 Babylon 对象。 */
-function disposeEditorGroundGridResources(resources: EditorGroundGridResources | null): void {
-  if (!resources) return;
-
-  resources.lineGlowLayer.dispose();
-  resources.grid.dispose(false, false);
-  resources.lineGlowGrid.dispose(false, false);
-  resources.gridMaterial.dispose();
-  resources.lineGlowMaterial.dispose();
-}
-
-/** 创建编辑器辅助地面网格控制器，集中管理格子大小、显示状态与呼吸光晕。 */
-function createEditorGround(scene: Scene, initialSettings: EditorGridSettings) {
-  let settings = { ...initialSettings };
-  let resources: EditorGroundGridResources | null = createEditorGroundGridResources(scene, settings);
-
-  function applyGridCellSize(): void {
-    if (!resources) return;
-
-    const cellSizeLabel = `${settings.cellSizeMeters} ${SCENE_LENGTH_UNIT_SYMBOL}`;
-    resources.grid.metadata = { cellSizeLabel };
-    resources.lineGlowGrid.metadata = { cellSizeLabel };
-    resources.gridMaterial.setFloat('cellSizeMeters', settings.cellSizeMeters);
-    resources.lineGlowMaterial.setFloat('cellSizeMeters', settings.cellSizeMeters);
-  }
-
-  function applyVisibility(): void {
-    if (!resources) return;
-
-    resources.grid.setEnabled(settings.visible);
-    resources.lineGlowGrid.setEnabled(settings.visible);
-    if (!settings.visible) {
-      resources.lineGlowLayer.intensity = 0;
-    }
-  }
-
-  const beforeRenderObserver = scene.onBeforeRenderObservable.add(() => {
-    if (!resources) return;
-
-    if (!settings.visible) return;
-
-    const pulse = (Math.sin(performance.now() * BREATHING_SPEED) + 1) / 2;
-    resources.gridMaterial.setFloat('lineAlpha', GRID_ALPHA_BASE + pulse * GRID_ALPHA_PULSE);
-    resources.lineGlowMaterial.setFloat('lineAlpha', GRID_LINE_GLOW_ALPHA_BASE + pulse * GRID_LINE_GLOW_ALPHA_PULSE);
-    resources.lineGlowLayer.intensity = GRID_LINE_GLOW_INTENSITY_BASE + pulse * GRID_LINE_GLOW_INTENSITY_PULSE;
-  });
-
-  return {
-    setSettings(nextSettings: EditorGridSettings): void {
-      const cellSizeChanged = settings.cellSizeMeters !== nextSettings.cellSizeMeters;
-      settings = { ...nextSettings };
-
-      if (cellSizeChanged) {
-        applyGridCellSize();
-      }
-
-      applyVisibility();
-    },
-    dispose(): void {
-      scene.onBeforeRenderObservable.remove(beforeRenderObserver);
-      disposeEditorGroundGridResources(resources);
-      resources = null;
-    },
-  };
 }
 
 /**
@@ -662,7 +430,7 @@ export function createBabylonViewport(
   const light = new HemisphericLight('EditorLight', new Vector3(0, 1, 0), scene);
   light.intensity = 0.8;
 
-  const editorGround = createEditorGround(scene, {
+  const editorGround = createEditorGroundGrid(scene, camera, engine, {
     ...DEFAULT_EDITOR_GRID_SETTINGS,
     visible: options.showGrid ?? DEFAULT_EDITOR_GRID_SETTINGS.visible,
   });

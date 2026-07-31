@@ -19,6 +19,7 @@ export type DeploymentSceneSummary = {
   resourceCount: number;
   modelCount: number;
   environmentCount: number;
+  skyboxCount: number;
   cadCount: number;
   scriptCount: number;
 };
@@ -118,12 +119,19 @@ function registerGeneratorTarget(
 export function createDeploymentSceneSummary(scene: SceneDocument): DeploymentSceneSummary {
   const modelResources = new Set<string>();
   const environmentResources = new Set<string>();
+  const skyboxResources = new Set<string>();
   const cadResources = new Set<string>();
   const scriptResources = new Set<string>();
 
   for (const entity of Object.values(scene.entities)) {
     const modelAsset = entity.components.modelAsset;
     if (modelAsset) registerModelAsset(modelAsset, modelResources, scriptResources);
+
+    const skybox = entity.components.skybox;
+    if (skybox) {
+      const skyboxKey = createResourceKey('skybox', skybox.sourcePath, skybox.sourceUrl);
+      if (skyboxKey) skyboxResources.add(skyboxKey);
+    }
 
     const cadReference = entity.components.cadReference;
     if (cadReference) {
@@ -145,12 +153,19 @@ export function createDeploymentSceneSummary(scene: SceneDocument): DeploymentSc
     if (environmentKey) environmentResources.add(environmentKey);
   }
 
+  const skybox = scene.sceneSettings.skybox;
+  if (skybox) {
+    const skyboxKey = createResourceKey('skybox', skybox.sourcePath, skybox.sourceUrl);
+    if (skyboxKey) skyboxResources.add(skyboxKey);
+  }
+
   return {
     entityCount: Object.keys(scene.entities).length,
     resourceCount:
-      modelResources.size + environmentResources.size + cadResources.size + scriptResources.size,
+      modelResources.size + environmentResources.size + skyboxResources.size + cadResources.size + scriptResources.size,
     modelCount: modelResources.size,
     environmentCount: environmentResources.size,
+    skyboxCount: skyboxResources.size,
     cadCount: cadResources.size,
     scriptCount: scriptResources.size,
   };

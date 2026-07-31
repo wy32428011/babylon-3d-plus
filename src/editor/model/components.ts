@@ -17,6 +17,20 @@ export type MeshRendererComponent = {
   materialColor: string;
 };
 
+export type SkyboxFormat = 'hdr' | 'exr';
+export type SkyboxResolution = 256 | 512 | 1024;
+
+/** 球形天空盒实体保存 HDR/EXR 资源及环境光参数，位置、旋转和尺寸统一使用实体 Transform。 */
+export type SkyboxComponent = {
+  packagePath: string;
+  sourcePath: string;
+  sourceUrl: string;
+  assetRevision?: string;
+  format: SkyboxFormat;
+  intensity: number;
+  resolution: SkyboxResolution;
+};
+
 export type LocatorStorageDepth = 'near' | 'far';
 
 /** 定位线框的 fetch 数据驱动配置；区别于 MQTT 遥测驱动，由 HTTP 接口按排号拉取库存数据。 */
@@ -216,6 +230,7 @@ export type PoiEffectComponent = {
 export type EntityComponents = {
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
+  skybox?: SkyboxComponent;
   locator?: LocatorComponent;
   cadReference?: CadReferenceComponent;
   modelAsset?: ModelAssetComponent;

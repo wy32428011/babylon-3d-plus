@@ -39,6 +39,7 @@ writeFileSync(
         normalizedProjectRoot + '/src/runtime/babylon/telemetry/**/*.ts',
         normalizedProjectRoot + '/src/editor/model/**/*.ts',
         normalizedProjectRoot + '/src/editor/project/SceneSerializer.ts',
+        normalizedProjectRoot + '/src/editor/deployment/deploymentExport.ts',
         normalizedProjectRoot + '/tests/telemetry/**/*.ts',
       ],
     },

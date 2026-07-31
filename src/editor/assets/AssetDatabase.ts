@@ -7,6 +7,7 @@ import { normalizeBuiltInSlotBindingConfig, type BuiltInSlotBindingConfig } from
 import { isPoiEffectKind } from '../model/poiEffect';
 
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
+export type SkyboxAssetFormat = 'hdr' | 'exr';
 export type ModelAssetLibraryKind = 'model' | 'environment';
 
 export type AssetEntry = {
@@ -39,8 +40,23 @@ export type ProjectModelAssetEntry = AssetEntry & {
   libraryKind: ModelAssetLibraryKind;
 };
 
+export type ProjectSkyboxAssetEntry = {
+  id: string;
+  name: string;
+  displayName: string;
+  path: string;
+  sourceUrl: string;
+  assetRevision: string;
+  packagePath: string;
+  kind: 'skybox';
+  libraryKind: 'skybox';
+  format: SkyboxAssetFormat;
+  fileSizeBytes: number;
+};
+
 export const MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-model-asset';
 export const ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-environment-model-asset';
+export const SKYBOX_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-skybox-asset';
 export const BUILT_IN_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-built-in-asset';
 export const IMAGE_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-image-asset';
 
@@ -103,6 +119,10 @@ function readProjectModelLibraryKind(record: AssetEntryRecord): ModelAssetLibrar
 
 /** 编码项目模型拖拽载荷时保留分库标识，供接收端二次校验 MIME 与资产归属。 */
 export function encodeModelAssetDragPayload(asset: ProjectModelAssetEntry): string {
+  return JSON.stringify(asset);
+}
+
+export function encodeSkyboxAssetDragPayload(asset: ProjectSkyboxAssetEntry): string {
   return JSON.stringify(asset);
 }
 
@@ -175,6 +195,41 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (builtInSlotBindingConfig) asset.builtInSlotBindingConfig = builtInSlotBindingConfig;
 
     return asset;
+  } catch {
+    return null;
+  }
+}
+
+/** 解码项目天空盒拖拽载荷，并拒绝非授权 URL、无效格式和不完整元数据。 */
+export function decodeSkyboxAssetDragPayload(rawPayload: string): ProjectSkyboxAssetEntry | null {
+  try {
+    const payload: unknown = JSON.parse(rawPayload);
+    if (!isRecord(payload) || payload.kind !== 'skybox' || payload.libraryKind !== 'skybox') return null;
+    if (typeof payload.id !== 'string' || !payload.id.trim()) return null;
+    if (typeof payload.name !== 'string' || !payload.name.trim()) return null;
+    if (typeof payload.displayName !== 'string' || !payload.displayName.trim()) return null;
+    if (typeof payload.path !== 'string' || !payload.path.trim()) return null;
+    if (typeof payload.packagePath !== 'string' || !payload.packagePath.trim()) return null;
+    if (typeof payload.sourceUrl !== 'string' || !payload.sourceUrl.startsWith('editor-asset://local/')) return null;
+    if (typeof payload.assetRevision !== 'string' || !payload.assetRevision.trim()) return null;
+    if (payload.format !== 'hdr' && payload.format !== 'exr') return null;
+    if (typeof payload.fileSizeBytes !== 'number' || !Number.isFinite(payload.fileSizeBytes) || payload.fileSizeBytes <= 0) return null;
+    const expectedExtension = payload.format === 'hdr' ? /\.hdr$/i : /\.exr$/i;
+    if (!expectedExtension.test(payload.path) || !expectedExtension.test(payload.name)) return null;
+
+    return {
+      id: payload.id,
+      name: payload.name,
+      displayName: payload.displayName,
+      path: payload.path,
+      sourceUrl: payload.sourceUrl,
+      assetRevision: payload.assetRevision,
+      packagePath: payload.packagePath,
+      kind: 'skybox',
+      libraryKind: 'skybox',
+      format: payload.format,
+      fileSizeBytes: payload.fileSizeBytes,
+    };
   } catch {
     return null;
   }

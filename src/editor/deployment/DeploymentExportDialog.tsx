@@ -239,7 +239,7 @@ export function DeploymentExportDialog(props: DeploymentExportDialogProps) {
             <div><strong>{summary.resourceCount}</strong><span>唯一资源</span></div>
           </div>
           <p className="deployment-export-resource-detail">
-            模型 {summary.modelCount} · 环境 {summary.environmentCount} · CAD {summary.cadCount} · 脚本 {summary.scriptCount}
+            模型 {summary.modelCount} · 环境 {summary.environmentCount} · 天空盒 {summary.skyboxCount} · CAD {summary.cadCount} · 脚本 {summary.scriptCount}
           </p>
         </section>
 

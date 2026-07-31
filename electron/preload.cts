@@ -14,6 +14,7 @@ import type {
   ImportEnvironmentModelFileResult,
   ImportModelFolderRequest,
   ImportModelFolderResult,
+  ImportSkyboxFileResult,
   ListModelPackageVariantsRequest,
   LoadSceneFileRequest,
   LoadSceneResult,
@@ -78,6 +79,8 @@ contextBridge.exposeInMainWorld('editorApi', {
   importModelFolder: (request: ImportModelFolderRequest): Promise<ImportModelFolderResult> => ipcRenderer.invoke('assets:importModelFolder', request),
   /** 透传环境模型单 GLB 文件导入请求。 */
   importEnvironmentModelFile: (): Promise<ImportEnvironmentModelFileResult> => ipcRenderer.invoke('assets:importEnvironmentModelFile'),
+  /** 透传项目级 HDR/EXR 天空盒导入请求。 */
+  importSkyboxFile: (): Promise<ImportSkyboxFileResult> => ipcRenderer.invoke('assets:importSkyboxFile'),
   listModelPackageVariants: (request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> =>
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
   /** 发起当前场景的 Web 部署工程导出。 */

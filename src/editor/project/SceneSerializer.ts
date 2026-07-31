@@ -3,6 +3,7 @@ import { createLegacyCadReferenceUnitInfo, normalizeCadReferenceUnitInfo } from 
 import {
   AUTHORIZED_LOCAL_ASSET_URL_PREFIX,
   createDefaultSceneSettings,
+  createSkyboxEntity,
   DEFAULT_MQTT_CONFIG,
   MODEL_ASSET_CODE_MAX_LENGTH,
   createModelAssetCode,
@@ -10,11 +11,13 @@ import {
   sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneSettings,
+  sanitizeSceneSkybox,
   type MqttConfig,
   type SceneDocument,
   type SceneEnvironmentSettings,
   type SceneEnvironmentVariant,
   type SceneSettings,
+  type SceneSkyboxSettings,
 } from '../model/SceneDocument';
 import type { EntityComponents, LightKind, LocatorComponent, LocatorStorageDepth, MeshKind, PoiEffectComponent } from '../model/components';
 import {
@@ -139,8 +142,14 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
   }
 
   const migratedScene = migrateLegacyModelArrays(entityIds, entities);
-  validateEntityHierarchy(migratedScene.entityIds, migratedScene.entities);
-  validateModelArrayInstanceReferences(migratedScene.entityIds, migratedScene.entities);
+  const sceneSettings = normalizeSceneSettings(scene.sceneSettings);
+  const migratedSkybox = migrateLegacySkyboxSettingsToEntity(
+    migratedScene.entityIds,
+    migratedScene.entities,
+    sceneSettings,
+  );
+  validateEntityHierarchy(migratedSkybox.entityIds, migratedSkybox.entities);
+  validateModelArrayInstanceReferences(migratedSkybox.entityIds, migratedSkybox.entities);
 
   if ('selectedEntityId' in scene && scene.selectedEntityId !== null && typeof scene.selectedEntityId !== 'string') {
     throwUnsupportedSceneFileError();
@@ -149,12 +158,41 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
   return {
     id,
     name,
-    entityIds: migratedScene.entityIds,
-    entities: migratedScene.entities,
+    entityIds: migratedSkybox.entityIds,
+    entities: migratedSkybox.entities,
     selectedEntityId: null,
     mqttConfig: normalizeMqttConfig(scene.mqttConfig),
     fetchConfig: sanitizeFetchConfig(scene.fetchConfig),
-    sceneSettings: normalizeSceneSettings(scene.sceneSettings),
+    sceneSettings: migratedSkybox.sceneSettings,
+  };
+}
+
+/** 把旧 sceneSettings.skybox 自动迁移为可进入 Hierarchy 的球形天空盒实体。 */
+function migrateLegacySkyboxSettingsToEntity(
+  entityIds: string[],
+  entities: Record<string, Entity>,
+  sceneSettings: SceneSettings,
+): { entityIds: string[]; entities: Record<string, Entity>; sceneSettings: SceneSettings } {
+  const skyboxEntityIds = entityIds.filter((entityId) => Boolean(entities[entityId]?.components.skybox));
+  if (skyboxEntityIds.length > 1) throwUnsupportedSceneFileError();
+  if (skyboxEntityIds.length === 1 || !sceneSettings.skybox) {
+    return {
+      entityIds,
+      entities,
+      sceneSettings: sceneSettings.skybox ? { ...sceneSettings, skybox: null } : sceneSettings,
+    };
+  }
+
+  let skyboxEntity = createSkyboxEntity(sceneSettings.skybox);
+  for (let attempt = 0; entities[skyboxEntity.id] && attempt < 8; attempt += 1) {
+    skyboxEntity = createSkyboxEntity(sceneSettings.skybox);
+  }
+  if (entities[skyboxEntity.id]) throwUnsupportedSceneFileError();
+
+  return {
+    entityIds: [...entityIds, skyboxEntity.id],
+    entities: { ...entities, [skyboxEntity.id]: skyboxEntity },
+    sceneSettings: { ...sceneSettings, skybox: null },
   };
 }
 
@@ -197,7 +235,36 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
       rotate: assertFiniteNumber(sensitivity.rotate),
     },
     environment: normalizeSceneEnvironmentSettings(settings.environment),
+    skybox: normalizeSceneSkyboxSettings(settings.skybox),
   });
+}
+
+function normalizeSceneSkyboxSettings(value: unknown): SceneSkyboxSettings | null {
+  if (value === null || value === undefined) return null;
+
+  const skybox = assertPlainObject(value);
+  const sourceUrl = assertString(skybox.sourceUrl);
+  if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) {
+    throwUnsupportedSceneFileError();
+  }
+
+  const format = skybox.format;
+  if (format !== 'hdr' && format !== 'exr') {
+    throwUnsupportedSceneFileError();
+  }
+
+  const normalized = sanitizeSceneSkybox({
+    packagePath: assertString(skybox.packagePath),
+    sourcePath: assertString(skybox.sourcePath),
+    sourceUrl,
+    ...(skybox.assetRevision === undefined ? {} : { assetRevision: assertString(skybox.assetRevision) }),
+    format,
+    rotationDegrees: assertFiniteNumber(skybox.rotationDegrees),
+    intensity: assertFiniteNumber(skybox.intensity),
+    resolution: assertFiniteNumber(skybox.resolution) as SceneSkyboxSettings['resolution'],
+  });
+  if (!normalized) throwUnsupportedSceneFileError();
+  return normalized;
 }
 
 function normalizeSceneCameraPose(value: unknown): SceneSettings['camera']['savedPose'] {
@@ -291,6 +358,10 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
 
   if ('meshRenderer' in components && components.meshRenderer !== undefined) {
     normalized.meshRenderer = normalizeMeshRenderer(components.meshRenderer);
+  }
+
+  if ('skybox' in components && components.skybox !== undefined) {
+    normalized.skybox = normalizeSkyboxComponent(components.skybox);
   }
 
   if ('locator' in components && components.locator !== undefined) {
@@ -511,6 +582,36 @@ function validateModelArrayInstanceReferences(entityIds: string[], entities: Rec
     if (nextCount > MODEL_ARRAY_ITEM_COUNT_MAX) throwUnsupportedSceneFileError();
     instanceCounts.set(instance.sourceEntityId, nextCount);
   }
+}
+
+/** 严格恢复球形天空盒实体资源，Transform 单独负责位置、旋转和缩放。 */
+function normalizeSkyboxComponent(value: unknown): NonNullable<EntityComponents['skybox']> {
+  const skybox = assertPlainObject(value);
+  const sourceUrl = assertString(skybox.sourceUrl);
+  if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) throwUnsupportedSceneFileError();
+  const format = skybox.format;
+  if (format !== 'hdr' && format !== 'exr') throwUnsupportedSceneFileError();
+
+  const normalized = sanitizeSceneSkybox({
+    packagePath: assertString(skybox.packagePath),
+    sourcePath: assertString(skybox.sourcePath),
+    sourceUrl,
+    ...(skybox.assetRevision === undefined ? {} : { assetRevision: assertString(skybox.assetRevision) }),
+    format,
+    rotationDegrees: 0,
+    intensity: assertFiniteNumber(skybox.intensity),
+    resolution: assertFiniteNumber(skybox.resolution) as SceneSkyboxSettings['resolution'],
+  });
+  if (!normalized) throwUnsupportedSceneFileError();
+  return {
+    packagePath: normalized.packagePath,
+    sourcePath: normalized.sourcePath,
+    sourceUrl: normalized.sourceUrl,
+    ...(normalized.assetRevision ? { assetRevision: normalized.assetRevision } : {}),
+    format: normalized.format,
+    intensity: normalized.intensity,
+    resolution: normalized.resolution,
+  };
 }
 
 function normalizeMeshRenderer(value: unknown): EntityComponents['meshRenderer'] {
@@ -944,6 +1045,7 @@ function validateEntityHierarchy(entityIds: string[], entities: Record<string, E
 function hasRuntimeComponent(components: EntityComponents): boolean {
   return Boolean(
     components.meshRenderer ||
+    components.skybox ||
     components.locator ||
     components.cadReference ||
     components.modelAsset ||

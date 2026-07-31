@@ -139,6 +139,7 @@ type DataPlatformProjectListResult = {
 };
 
 type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
+type SkyboxAssetFormat = 'hdr' | 'exr';
 type ModelAssetLibraryKind = 'model' | 'environment';
 type ModelParameterConfig = import('./editor/model/modelParameters').ModelParameterConfig;
 type ModelScriptAsset = import('./editor/model/components').ModelScriptAsset;
@@ -175,6 +176,20 @@ type ProjectModelAssetEntry = AssetEntry & {
   libraryKind: ModelAssetLibraryKind;
 };
 
+type ProjectSkyboxAssetEntry = {
+  id: string;
+  name: string;
+  displayName: string;
+  path: string;
+  sourceUrl: string;
+  assetRevision: string;
+  packagePath: string;
+  kind: 'skybox';
+  libraryKind: 'skybox';
+  format: SkyboxAssetFormat;
+  fileSizeBytes: number;
+};
+
 type ImportModelFolderRequest = {
   libraryKind: 'model';
 };
@@ -201,6 +216,14 @@ type ImportEnvironmentModelFileResult = {
   projectAssets: ProjectModelAssetEntry[];
 };
 
+type ImportSkyboxFileResult = {
+  canceled: boolean;
+  filePath: string | null;
+  projectRoot: string | null;
+  importedAsset: ProjectSkyboxAssetEntry | null;
+  skyboxes: ProjectSkyboxAssetEntry[];
+};
+
 type ModelPackageVariant = {
   name: string;
   path: string;
@@ -221,6 +244,7 @@ type ImportCadFileResult = {
 type ProjectListAssetsResult = {
   projectRoot: string | null;
   assets: ProjectModelAssetEntry[];
+  skyboxes: ProjectSkyboxAssetEntry[];
 };
 
 type SelectProjectDirectoryResult = {
@@ -349,6 +373,7 @@ interface Window {
     importCadFile: () => Promise<ImportCadFileResult>;
     importModelFolder: (request: ImportModelFolderRequest) => Promise<ImportModelFolderResult>;
     importEnvironmentModelFile: () => Promise<ImportEnvironmentModelFileResult>;
+    importSkyboxFile: () => Promise<ImportSkyboxFileResult>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
     exportWebProject: (request: DeploymentExportRequest) => Promise<DeploymentExportResult>;
     cancelWebProjectExport: (request: DeploymentExportCancelRequest) => Promise<boolean>;

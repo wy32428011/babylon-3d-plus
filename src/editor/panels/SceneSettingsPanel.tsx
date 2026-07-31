@@ -1,22 +1,34 @@
 import { useEffect, useMemo, useState, type DragEvent, type KeyboardEvent, type ReactElement } from 'react';
 import {
   decodeModelAssetDragPayload,
+  decodeSkyboxAssetDragPayload,
   ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE,
+  SKYBOX_ASSET_DRAG_MIME_TYPE,
   type ProjectModelAssetEntry,
+  type ProjectSkyboxAssetEntry,
 } from '../assets/AssetDatabase';
 import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
+import { createSceneSkyboxFromAsset } from '../assets/skyboxAssets';
 import {
   createModelLibraryItems,
+  createSkyboxLibraryItems,
   getModelUnitTitle,
   isImportedProjectLibraryItem,
   type ProjectLibrary,
 } from '../assets/projectLibrary';
 import {
+  getSceneSkyboxSettings,
   SCENE_SENSITIVITY_MAX,
   SCENE_SENSITIVITY_MIN,
+  SCENE_SKYBOX_INTENSITY_MAX,
+  SCENE_SKYBOX_INTENSITY_MIN,
+  SCENE_SKYBOX_RESOLUTIONS,
+  SCENE_SKYBOX_ROTATION_MAX,
+  SCENE_SKYBOX_ROTATION_MIN,
   SCENE_VIEW_DISTANCE_MAX,
   SCENE_VIEW_DISTANCE_MIN,
   type SceneEnvironmentVariant,
+  type SceneSkyboxResolution,
 } from '../model/SceneDocument';
 import { formatModelLengthUnit } from '../model/sceneUnits';
 import { useEditorStore, type SceneSensitivitySettingKey } from '../store/editorStore';
@@ -26,6 +38,14 @@ const ENVIRONMENT_LIBRARY: ProjectLibrary = {
   key: 'environment',
   label: '环境模型',
   searchLabel: '环境模型',
+  searchPlaceholder: '',
+  items: [],
+};
+
+const SKYBOX_LIBRARY: ProjectLibrary = {
+  key: 'skybox',
+  label: '天空盒',
+  searchLabel: '天空盒',
   searchPlaceholder: '',
   items: [],
 };
@@ -55,6 +75,19 @@ function readEnvironmentAssetFromDrop(event: DragEvent<HTMLElement>): ProjectMod
   return environmentAsset?.libraryKind === 'environment' ? environmentAsset : null;
 }
 
+function hasSkyboxAssetDragPayload(event: DragEvent<HTMLElement>): boolean {
+  return event.dataTransfer.types.includes(SKYBOX_ASSET_DRAG_MIME_TYPE);
+}
+
+function readSkyboxAssetFromDrop(event: DragEvent<HTMLElement>): ProjectSkyboxAssetEntry | null {
+  return decodeSkyboxAssetDragPayload(event.dataTransfer.getData(SKYBOX_ASSET_DRAG_MIME_TYPE));
+}
+
+function getSkyboxDisplayName(sourcePath: string): string {
+  const fileName = sourcePath.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) ?? sourcePath;
+  return fileName.replace(/\.(hdr|exr)$/i, '');
+}
+
 type SceneSettingsPanelProps = {
   readOnly?: boolean;
 };
@@ -69,17 +102,24 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const setCameraViewDistance = useEditorStore((state) => state.setCameraViewDistance);
   const updateSensitivitySetting = useEditorStore((state) => state.updateSensitivitySetting);
   const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
+  const updateSkyboxConfig = useEditorStore((state) => state.updateSkyboxConfig);
   const setEnvironmentActiveVariant = useEditorStore((state) => state.setEnvironmentActiveVariant);
   const [sceneNameDraft, setSceneNameDraft] = useState(scene.name);
   const [environmentAssets, setEnvironmentAssets] = useState<ProjectModelAssetEntry[]>([]);
   const [environmentDialogOpen, setEnvironmentDialogOpen] = useState(false);
   const [environmentStatus, setEnvironmentStatus] = useState<string | null>(null);
   const [environmentDropActive, setEnvironmentDropActive] = useState(false);
+  const [skyboxAssets, setSkyboxAssets] = useState<ProjectSkyboxAssetEntry[]>([]);
+  const [skyboxDialogOpen, setSkyboxDialogOpen] = useState(false);
+  const [skyboxStatus, setSkyboxStatus] = useState<string | null>(null);
+  const [skyboxDropActive, setSkyboxDropActive] = useState(false);
 
   const environment = scene.sceneSettings.environment;
+  const skybox = getSceneSkyboxSettings(scene);
   const presetVariant = environment?.variants[0] ?? null;
   const customVariants = environment?.variants.slice(1) ?? [];
   const environmentItems = useMemo(() => createModelLibraryItems(environmentAssets), [environmentAssets]);
+  const skyboxItems = useMemo(() => createSkyboxLibraryItems(skyboxAssets), [skyboxAssets]);
 
   useEffect(() => {
     setSceneNameDraft(scene.name);
@@ -118,6 +158,35 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
       mounted = false;
     };
   }, [environmentDialogOpen]);
+
+  useEffect(() => {
+    if (!skyboxDialogOpen) return;
+    let mounted = true;
+
+    async function loadProjectSkyboxes(): Promise<void> {
+      if (!window.editorApi?.listProjectAssets) {
+        setSkyboxStatus('当前环境未提供项目天空盒库。');
+        return;
+      }
+      setSkyboxStatus('正在加载项目天空盒库...');
+      try {
+        const result = await window.editorApi.listProjectAssets();
+        if (!mounted) return;
+        const assets = result.skyboxes ?? [];
+        setSkyboxAssets(assets);
+        setSkyboxStatus(assets.length > 0 ? null : '天空盒库为空，请先在底部天空盒库导入 HDR 或 EXR 文件。');
+      } catch (error) {
+        if (!mounted) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setSkyboxStatus(`加载项目天空盒库失败：${message}`);
+      }
+    }
+
+    void loadProjectSkyboxes();
+    return () => {
+      mounted = false;
+    };
+  }, [skyboxDialogOpen]);
 
   function commitSceneName(): void {
     if (props.readOnly) return;
@@ -199,6 +268,57 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
     const asset = readEnvironmentAssetFromDrop(event);
     if (!asset) return;
     void handleSelectEnvironmentAsset(asset);
+  }
+
+  function handleSelectSkyboxAsset(asset: ProjectSkyboxAssetEntry): void {
+    if (props.readOnly) return;
+    try {
+      updateSkyboxConfig(createSceneSkyboxFromAsset(asset, skybox));
+      setSkyboxDialogOpen(false);
+      setSkyboxStatus(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSkyboxStatus(`天空盒配置无效：${message}`);
+    }
+  }
+
+  function handleSkyboxDragOver(event: DragEvent<HTMLLabelElement>): void {
+    if (props.readOnly || !hasSkyboxAssetDragPayload(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setSkyboxDropActive(true);
+  }
+
+  function handleSkyboxDragLeave(event: DragEvent<HTMLLabelElement>): void {
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
+    setSkyboxDropActive(false);
+  }
+
+  function handleSkyboxDrop(event: DragEvent<HTMLLabelElement>): void {
+    if (props.readOnly || !hasSkyboxAssetDragPayload(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setSkyboxDropActive(false);
+    const asset = readSkyboxAssetFromDrop(event);
+    if (asset) handleSelectSkyboxAsset(asset);
+  }
+
+  function updateSkyboxNumber(
+    key: 'rotationDegrees' | 'intensity',
+    rawValue: string,
+  ): void {
+    if (props.readOnly || !skybox) return;
+    const value = parseFiniteNumber(rawValue);
+    if (value === null) return;
+    updateSkyboxConfig({ ...skybox, [key]: value });
+  }
+
+  function updateSkyboxResolution(rawValue: string): void {
+    if (props.readOnly || !skybox) return;
+    const resolution = Number(rawValue) as SceneSkyboxResolution;
+    if (!SCENE_SKYBOX_RESOLUTIONS.includes(resolution)) return;
+    updateSkyboxConfig({ ...skybox, resolution });
   }
 
   function renderEffectButton(variant: SceneEnvironmentVariant, label: string): ReactElement {
@@ -298,6 +418,107 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
       </fieldset>
 
       <fieldset className="transform-fieldset">
+        <legend>球形天空盒</legend>
+        <label
+          className={skyboxDropActive ? 'environment-preview-row environment-preview-row-drop-active' : 'environment-preview-row'}
+          onDragEnter={handleSkyboxDragOver}
+          onDragLeave={handleSkyboxDragLeave}
+          onDragOver={handleSkyboxDragOver}
+          onDrop={handleSkyboxDrop}
+        >
+          <span>天空盒资源</span>
+          <button
+            className={skyboxDropActive
+              ? 'environment-preview-button skybox-preview-button environment-preview-button-drop-active'
+              : 'environment-preview-button skybox-preview-button'}
+            onClick={() => setSkyboxDialogOpen(true)}
+            disabled={props.readOnly}
+            title="选择或拖入 HDR/EXR 球形天空盒"
+            type="button"
+          >
+            {skybox ? (
+              <span className="skybox-preview-content">
+                <strong>{skybox.format.toUpperCase()}</strong>
+                <small>{getSkyboxDisplayName(skybox.sourcePath)}</small>
+              </span>
+            ) : (
+              <span className="environment-preview-placeholder" aria-hidden="true" />
+            )}
+          </button>
+        </label>
+        {skybox ? (
+          <>
+            <p className="muted">{getSkyboxDisplayName(skybox.sourcePath)} · {skybox.format.toUpperCase()}</p>
+            <button
+              className="environment-clear-button"
+              type="button"
+              disabled={props.readOnly}
+              onClick={() => updateSkyboxConfig(null)}
+            >
+              清除天空盒
+            </button>
+            <label className="scene-slider-row">
+              <span>水平旋转</span>
+              <input
+                min={SCENE_SKYBOX_ROTATION_MIN}
+                max={SCENE_SKYBOX_ROTATION_MAX}
+                step="1"
+                type="range"
+                disabled={props.readOnly}
+                value={skybox.rotationDegrees}
+                onChange={(event) => updateSkyboxNumber('rotationDegrees', event.target.value)}
+              />
+              <input
+                min={SCENE_SKYBOX_ROTATION_MIN}
+                max={SCENE_SKYBOX_ROTATION_MAX}
+                step="1"
+                type="number"
+                disabled={props.readOnly}
+                value={skybox.rotationDegrees}
+                onChange={(event) => updateSkyboxNumber('rotationDegrees', event.target.value)}
+                title="天空盒水平旋转角度（度）"
+              />
+            </label>
+            <label className="scene-slider-row">
+              <span>环境强度</span>
+              <input
+                min={SCENE_SKYBOX_INTENSITY_MIN}
+                max={SCENE_SKYBOX_INTENSITY_MAX}
+                step="0.1"
+                type="range"
+                disabled={props.readOnly}
+                value={skybox.intensity}
+                onChange={(event) => updateSkyboxNumber('intensity', event.target.value)}
+              />
+              <input
+                min={SCENE_SKYBOX_INTENSITY_MIN}
+                max={SCENE_SKYBOX_INTENSITY_MAX}
+                step="0.1"
+                type="number"
+                disabled={props.readOnly}
+                value={skybox.intensity}
+                onChange={(event) => updateSkyboxNumber('intensity', event.target.value)}
+              />
+            </label>
+            <label className="inspector-row skybox-resolution-row">
+              <span>立方体分辨率</span>
+              <select
+                disabled={props.readOnly}
+                value={skybox.resolution}
+                onChange={(event) => updateSkyboxResolution(event.target.value)}
+              >
+                {SCENE_SKYBOX_RESOLUTIONS.map((resolution) => (
+                  <option key={resolution} value={resolution}>{resolution} × {resolution}</option>
+                ))}
+              </select>
+            </label>
+          </>
+        ) : (
+          <p className="muted">未放置球形天空盒，场景保持原有背景和环境反射。</p>
+        )}
+      </fieldset>
+
+      <fieldset className="transform-fieldset">
         <legend>环境属性</legend>
         <label
           className={environmentDropActive ? 'environment-preview-row environment-preview-row-drop-active' : 'environment-preview-row'}
@@ -346,6 +567,40 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
           </div>
         </div>
       </fieldset>
+
+      {skyboxDialogOpen ? (
+        <div
+          className="environment-dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSkyboxDialogOpen(false);
+          }}
+        >
+          <div className="environment-dialog" role="dialog" aria-label="选择天空盒">
+            <div className="environment-dialog-header">
+              <h3>选择天空盒</h3>
+              <button type="button" onClick={() => setSkyboxDialogOpen(false)}>关闭</button>
+            </div>
+            <div className="environment-dialog-list">
+              {skyboxItems.map((item) => {
+                if (!isImportedProjectLibraryItem(item) || item.asset.kind !== 'skybox') return null;
+                return (
+                  <ResourceCard
+                    className="environment-resource-card skybox-resource-card"
+                    disabled={props.readOnly}
+                    draggable={false}
+                    item={item}
+                    key={item.id}
+                    library={SKYBOX_LIBRARY}
+                    onClick={() => handleSelectSkyboxAsset(item.asset as ProjectSkyboxAssetEntry)}
+                    title={`选择天空盒：${item.name}（${item.asset.format.toUpperCase()}）`}
+                  />
+                );
+              })}
+              {skyboxStatus ? <p className="environment-dialog-status">{skyboxStatus}</p> : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {environmentDialogOpen ? (
         <div

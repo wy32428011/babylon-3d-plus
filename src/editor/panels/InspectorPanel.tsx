@@ -4,6 +4,13 @@ import type { LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
+import {
+  SCENE_SKYBOX_INTENSITY_MAX,
+  SCENE_SKYBOX_INTENSITY_MIN,
+  SCENE_SKYBOX_RESOLUTIONS,
+  SKYBOX_SPHERE_DIAMETER_METERS,
+  type SceneSkyboxResolution,
+} from '../model/SceneDocument';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
 import { useEditorStore } from '../store/editorStore';
@@ -74,6 +81,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const renameSelectedEntity = useEditorStore((state) => state.renameSelectedEntity);
   const updateSelectedTransform = useEditorStore((state) => state.updateSelectedTransform);
   const updateSelectedMaterialColor = useEditorStore((state) => state.updateSelectedMaterialColor);
+  const updateSelectedSkybox = useEditorStore((state) => state.updateSelectedSkybox);
   const updateSelectedCadReference = useEditorStore((state) => state.updateSelectedCadReference);
   const updateSelectedLight = useEditorStore((state) => state.updateSelectedLight);
   const updateSelectedModelAssetCode = useEditorStore((state) => state.updateSelectedModelAssetCode);
@@ -115,6 +123,19 @@ export function InspectorPanel(props: InspectorPanelProps) {
     if (!Number.isFinite(intensity)) return;
 
     updateSelectedLight({ intensity });
+  }
+
+  function handleSkyboxIntensityChange(rawValue: string) {
+    if (rawValue === '') return;
+    const intensity = Number(rawValue);
+    if (!Number.isFinite(intensity)) return;
+    updateSelectedSkybox({ intensity });
+  }
+
+  function handleSkyboxResolutionChange(rawValue: string) {
+    const resolution = Number(rawValue) as SceneSkyboxResolution;
+    if (!SCENE_SKYBOX_RESOLUTIONS.includes(resolution)) return;
+    updateSelectedSkybox({ resolution });
   }
 
   function handleCadReferenceOpacityChange(rawValue: string) {
@@ -164,13 +185,14 @@ export function InspectorPanel(props: InspectorPanelProps) {
 
   const transform = selectedEntity.components.transform;
   const meshRenderer = selectedEntity.components.meshRenderer;
+  const skybox = selectedEntity.components.skybox;
   const locator = selectedEntity.components.locator;
   const cadReference = selectedEntity.components.cadReference;
   const light = selectedEntity.components.light;
   const modelAsset = selectedEntity.components.modelAsset;
   const modelGenerator = selectedEntity.components.modelGenerator;
   const poiEffect = selectedEntity.components.poiEffect;
-  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || modelGenerator || poiEffect || locator);
+  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || skybox || modelGenerator || poiEffect || locator);
   const isBuiltInBound = Boolean(locator?.builtInBinding);
   const transformDisabled = isLocked || isBuiltInBound;
 
@@ -233,6 +255,38 @@ export function InspectorPanel(props: InspectorPanelProps) {
             />
           </label>
           <p className="muted">{getBuiltInMeshMeterDescription(meshRenderer.meshKind)}</p>
+        </fieldset>
+      ) : null}
+      {skybox ? (
+        <fieldset className="transform-fieldset">
+          <legend>球形天空盒</legend>
+          <p className="muted asset-path" title={skybox.sourcePath}>{skybox.sourcePath}</p>
+          <p className="muted">格式：{skybox.format.toUpperCase()} · 基础直径：{SKYBOX_SPHERE_DIAMETER_METERS} m</p>
+          <label className="number-row">
+            <span>环境强度</span>
+            <input
+              disabled={isLocked}
+              max={SCENE_SKYBOX_INTENSITY_MAX}
+              min={SCENE_SKYBOX_INTENSITY_MIN}
+              step="0.1"
+              type="number"
+              value={skybox.intensity}
+              onChange={(event) => handleSkyboxIntensityChange(event.target.value)}
+            />
+          </label>
+          <label className="inspector-row">
+            <span>纹理分辨率</span>
+            <select
+              disabled={isLocked}
+              value={skybox.resolution}
+              onChange={(event) => handleSkyboxResolutionChange(event.target.value)}
+            >
+              {SCENE_SKYBOX_RESOLUTIONS.map((resolution) => (
+                <option key={resolution} value={resolution}>{resolution} × {resolution}</option>
+              ))}
+            </select>
+          </label>
+          <p className="muted">使用 position 移动球心，rotation Y 旋转环境，scale 调整球体尺寸。</p>
         </fieldset>
       ) : null}
       {locator ? (

@@ -278,6 +278,7 @@ async function inspectPackageCandidate(packageRoot: string): Promise<PackageDete
   if (!(await isDirectory(metadataRoot))) missing.push('.babylon-editor/');
   if (!(await isDirectory(modelsRoot))) missing.push('Assets/Models/');
   if (!(await isDirectory(environmentsRoot))) missing.push('Assets/Environments/');
+  // Assets/Skyboxes 对旧工程保持可选；存在时会在落盘阶段完整迁移。
   if (missing.length > 0) {
     return { kind: 'incompatible', reason: `工程包缺少当前编辑器目录：${missing.join('、')}` };
   }
@@ -377,6 +378,7 @@ async function collectPackageDirectories(packageRoot: string): Promise<string[]>
   const result: string[] = [];
   const modelsRoot = path.join(packageRoot, 'Assets', 'Models');
   const environmentsRoot = path.join(packageRoot, 'Assets', 'Environments');
+  const skyboxesRoot = path.join(packageRoot, 'Assets', 'Skyboxes');
 
   for (const entry of await fs.readdir(modelsRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
@@ -392,6 +394,12 @@ async function collectPackageDirectories(packageRoot: string): Promise<string[]>
 
   for (const entry of await fs.readdir(environmentsRoot, { withFileTypes: true })) {
     if (entry.isDirectory()) result.push(path.join(environmentsRoot, entry.name));
+  }
+
+  if (await isDirectory(skyboxesRoot)) {
+    for (const entry of await fs.readdir(skyboxesRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) result.push(path.join(skyboxesRoot, entry.name));
+    }
   }
 
   return result;
@@ -437,10 +445,10 @@ function rewriteSceneAssetUrl(value: string, editorRoot: string): string {
 
 function rewriteSceneAssetPath(value: string, editorRoot: string): string | null {
   const normalized = value.trim().replace(/\\/g, '/');
-  const match = normalized.match(/(?:^|\/)(Assets\/(?:Models|Environments)(?:\/.*|$))/i);
+  const match = normalized.match(/(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes)(?:\/.*|$))/i);
   if (!match) return null;
   const relativeAssetPath = path.posix.normalize(match[1]);
-  if (!/^Assets\/(?:Models|Environments)(?:\/|$)/i.test(relativeAssetPath)) return null;
+  if (!/^Assets\/(?:Models|Environments|Skyboxes)(?:\/|$)/i.test(relativeAssetPath)) return null;
   const targetPath = path.resolve(editorRoot, ...relativeAssetPath.split('/'));
   return isPathInside(editorRoot, targetPath) ? targetPath : null;
 }
