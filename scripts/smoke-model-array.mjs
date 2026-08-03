@@ -158,7 +158,7 @@ try {
   const { EntityArrayThinInstanceBatch } = await server.ssrLoadModule(
     '/src/runtime/babylon/EntityArrayThinInstanceBatch.ts',
   );
-  const { createConveyorTelemetryState, createStackerTelemetryState } = await server.ssrLoadModule(
+  const { createConveyorTelemetryState, createRgvTelemetryState, createStackerTelemetryState } = await server.ssrLoadModule(
     '/src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts',
   );
   const { TransformGizmoController } = await server.ssrLoadModule(
@@ -694,6 +694,7 @@ try {
   const sceneScanResults = [];
   sourceModelEntry.stackerTelemetry = createStackerTelemetryState(root);
   sourceModelEntry.conveyorTelemetry = createConveyorTelemetryState();
+  sourceModelEntry.rgvTelemetry = createRgvTelemetryState(root);
   sourceModelEntry.externalScriptRuntime = {
     updateAssetCode: () => undefined,
     updateParameterValues: () => undefined,

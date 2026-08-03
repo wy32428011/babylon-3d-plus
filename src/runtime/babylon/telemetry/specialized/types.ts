@@ -28,6 +28,14 @@ export const CONVEYOR_ANONYMOUS_CARGO_CODE = '__anonymous__';
 export const CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS = 1.2;
 export const CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND = 180;
 export const CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND = 0.3;
+export const RGV_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND = 0.8;
+/** RGV 货箱交接（列接驳位 ↔ 车工位）一次完整移行时长。 */
+export const RGV_CARGO_TRANSFER_SECONDS = 1.5;
+export const RGV_CARGO_COLOR = '#7db85c';
+export const RGV_CARGO_EMISSIVE_COLOR = '#1e3a14';
+export const RGV_CARGO_SIZE = new Vector3(0.8, 0.42, 0.8);
+/** RGV 固定轨道节点（导轨 A45/A46 + 盖板 A37~A44）名称兜底匹配，兼容 GLB 导入的 . / _ 后缀。 */
+export const RGV_FALLBACK_FIXED_NODE_PATTERN = /^A(?:3[7-9]|4[0-6])(?:[._]|$)/i;
 export const STACKER_FALLBACK_FIXED_NODE_NAMES = ['guidaoshang.1', 'guidaoxia.2'];
 export const STACKER_FALLBACK_TRAVEL_NODE_NAMES = [
   'dingbuhuagui2.3',
@@ -75,7 +83,7 @@ export type StackerForkNodeGroups = {
   backStageTwoNodes: TransformNode[];
 };
 
-export type GeneratedCargoKind = 'stacker' | 'conveyor';
+export type GeneratedCargoKind = 'stacker' | 'conveyor' | 'rgv';
 
 export type GeneratedCargoFallbackRuntimeEntry = {
   mesh: Mesh;
@@ -146,6 +154,54 @@ export type ConveyorModelTelemetryState = {
 
 export type ConveyorCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
+export type RgvForkSide = 'front' | 'back';
+
+export type RgvTravelConstraint = {
+  axis: Vector3;
+  trackMin: number;
+  trackMax: number;
+  movingMin: number;
+  movingMax: number;
+};
+
+export type RgvModelTelemetryState = {
+  rootBasePosition: Vector3;
+  /** 车体的虚拟世界位置；模型根节点和固定轨道保持静止（同 stacker rootPosition 语义）。 */
+  rootPosition: Vector3 | null;
+  /** 基于固定轨道和车体基线计算的行走约束，防止遥测把车推出轨道。 */
+  travelConstraint: RgvTravelConstraint | null;
+  /** 列信号给出的行走目标世界位置（沿行走轴投影）。 */
+  travelTargetPosition: Vector3 | null;
+  /** 行走目标对应的列号，用于列号边沿检测。 */
+  travelTargetColumn: number | null;
+  /** 交接锁定列实体给出的台面高度基准；null 时回退车体包围盒顶面。 */
+  deckReferenceY: number | null;
+  frontCargoKey: string | null;
+  backCargoKey: string | null;
+  /** true=货箱在车上随工位；false=静止于列接驳位或正在交接插值。 */
+  frontCargoOnBoard: boolean;
+  backCargoOnBoard: boolean;
+  frontCargoHoldPosition: Vector3 | null;
+  backCargoHoldPosition: Vector3 | null;
+  frontCargoHoldRotation: Quaternion | null;
+  backCargoHoldRotation: Quaternion | null;
+  /** 0=在列接驳位，1=在车上工位（交接插值进度）。 */
+  frontTransferProgress: number;
+  backTransferProgress: number;
+  /** movement_z 起转边沿锁定的交接列。 */
+  frontTransferColumn: number | null;
+  backTransferColumn: number | null;
+  /** 放货完成后滞留在列上的货箱：列号 → 货箱键，同列再次起转时清理。 */
+  strandedCargoByColumn: Map<number, string>;
+  frontLastCommand: number | null;
+  backLastCommand: number | null;
+  frontLastMovementZ: number | null;
+  backLastMovementZ: number | null;
+  nodeBaselines: Map<TransformNode, Vector3>;
+};
+
+export type RgvCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
+
 export type ConveyorMotionConfig = {
   key: string;
   fields: string[];
@@ -167,6 +223,7 @@ export type SpecializedTelemetryRuntimeEntry = {
 export type SpecializedTelemetrySharedState = {
   stackerCargoMeshes: Map<string, StackerCargoRuntimeEntry>;
   conveyorCargoMeshes: Map<string, ConveyorCargoRuntimeEntry>;
+  rgvCargoMeshes: Map<string, RgvCargoRuntimeEntry>;
   reportedMissingTargets: Set<string>;
   reportedFaults: Map<string, string>;
   reportedStatuses: Map<string, string>;
@@ -178,6 +235,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
   return {
     stackerCargoMeshes: new Map(),
     conveyorCargoMeshes: new Map(),
+    rgvCargoMeshes: new Map(),
     reportedMissingTargets: new Set(),
     reportedFaults: new Map(),
     reportedStatuses: new Map(),
@@ -193,6 +251,8 @@ export interface SpecializedTelemetryHost {
   findLocatorByDevice(assetCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
   getLocatorTarget(key: string): LocatorRuntimeEntry | null;
   resolveCargoGeneratorForModel(model: ModelRuntimeEntry): ModelGeneratorRuntimeEntry | null;
+  /** 按实体 ID 解析 RGV 列接驳位的世界位姿（模型/定位线框/基础网格实体的 root）；不存在返回 null。 */
+  resolveColumnTargetPose(entityId: string): { position: Vector3; rotation: Quaternion } | null;
   resolveFetchDriveRowForLocator(locator: LocatorRuntimeEntry): number | null;
   /** 抑制 locator 某格口的 fetch 渲染（货物改由设备侧渲染）；返回排号，未启用 fetch 返回 null。 */
   suppressFetchCellForLocator(locator: LocatorRuntimeEntry, column: number, layer: number): number | null;

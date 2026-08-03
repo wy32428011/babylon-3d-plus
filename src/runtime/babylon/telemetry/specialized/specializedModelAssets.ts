@@ -7,6 +7,7 @@ import {
   type ConveyorMotionConfig,
   CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
+  type RgvModelTelemetryState,
   type StackerModelTelemetryState,
 } from './types';
 
@@ -44,6 +45,89 @@ export function isStackerModelAsset(modelAsset: ModelAssetComponent): boolean {
   ]).toLowerCase();
 
   return signature.includes('stacker') || signature.includes('堆垛机');
+}
+
+/** 通过模型包脚本、元数据或路径判断当前导入模型是否是 rgv。 */
+export function isRgvModelAsset(modelAsset: ModelAssetComponent): boolean {
+  const signature = JSON.stringify([
+    modelAsset.assetCode,
+    modelAsset.sourcePath,
+    modelAsset.sourceUrl,
+    modelAsset.parameterScriptMetadata ?? [],
+    modelAsset.animationScriptMetadata ?? [],
+  ]).toLowerCase();
+
+  return signature.includes('rgv') || signature.includes('穿梭车');
+}
+
+/** 判断当前模型是否具备 RGV 驱动能力：资产识别命中，或脚本声明 devType=rgv。 */
+export function isRgvRuntimeModel(model: ModelRuntimeEntry): boolean {
+  if (model.rgvCapable) return true;
+  for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+    if (!isPlainRecord(dataDriven)) continue;
+    const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
+    const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
+    if (devType === 'rgv') return true;
+  }
+  return false;
+}
+
+/** 创建 RGV 遥测运行态，所有偏移和货物占位只保存在内存中。 */
+export function createRgvTelemetryState(root: TransformNode): RgvModelTelemetryState {
+  return {
+    rootBasePosition: root.position.clone(),
+    rootPosition: null,
+    travelConstraint: null,
+    travelTargetPosition: null,
+    travelTargetColumn: null,
+    deckReferenceY: null,
+    frontCargoKey: null,
+    backCargoKey: null,
+    frontCargoOnBoard: false,
+    backCargoOnBoard: false,
+    frontCargoHoldPosition: null,
+    backCargoHoldPosition: null,
+    frontCargoHoldRotation: null,
+    backCargoHoldRotation: null,
+    frontTransferProgress: 0,
+    backTransferProgress: 0,
+    frontTransferColumn: null,
+    backTransferColumn: null,
+    strandedCargoByColumn: new Map(),
+    frontLastCommand: null,
+    backLastCommand: null,
+    frontLastMovementZ: null,
+    backLastMovementZ: null,
+    nodeBaselines: new Map(),
+  };
+}
+
+/** 模型完成归一化和外置脚本初始化后，重新建立 RGV 遥测基线。 */
+export function resetRgvTelemetryState(model: ModelRuntimeEntry): void {
+  model.rgvTelemetry.rootBasePosition = model.root.position.clone();
+  model.rgvTelemetry.rootPosition = null;
+  model.rgvTelemetry.travelConstraint = null;
+  model.rgvTelemetry.travelTargetPosition = null;
+  model.rgvTelemetry.travelTargetColumn = null;
+  model.rgvTelemetry.deckReferenceY = null;
+  model.rgvTelemetry.frontCargoKey = null;
+  model.rgvTelemetry.backCargoKey = null;
+  model.rgvTelemetry.frontCargoOnBoard = false;
+  model.rgvTelemetry.backCargoOnBoard = false;
+  model.rgvTelemetry.frontCargoHoldPosition = null;
+  model.rgvTelemetry.backCargoHoldPosition = null;
+  model.rgvTelemetry.frontCargoHoldRotation = null;
+  model.rgvTelemetry.backCargoHoldRotation = null;
+  model.rgvTelemetry.frontTransferProgress = 0;
+  model.rgvTelemetry.backTransferProgress = 0;
+  model.rgvTelemetry.frontTransferColumn = null;
+  model.rgvTelemetry.backTransferColumn = null;
+  model.rgvTelemetry.strandedCargoByColumn.clear();
+  model.rgvTelemetry.frontLastCommand = null;
+  model.rgvTelemetry.backLastCommand = null;
+  model.rgvTelemetry.frontLastMovementZ = null;
+  model.rgvTelemetry.backLastMovementZ = null;
+  model.rgvTelemetry.nodeBaselines.clear();
 }
 
 /** 遍历模型脚本声明的 conveyor dataDriven 配置块，运行时只接受 devType=conveyor。 */

@@ -114,7 +114,7 @@ export function CargoGeneratorInspector(props: {
         </select>
       </label>
       {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退内置立方体。</p> : null}
-      <p className="muted">堆垛机/输送线取放货时按所选模型生成器渲染货箱。</p>
+      <p className="muted">堆垛机/输送线/RGV 取放货时按所选模型生成器渲染货箱。</p>
     </fieldset>
   );
 }
@@ -174,8 +174,87 @@ function TelemetryRuntimeDiagnosticsView(props: Pick<Props, 'entityId' | 'bindin
   );
 }
 
-/** 数据驱动 Inspector：编辑实体级 telemetryBinding 基础字段，驱动映射由模型包 .model.ts 声明。 */
-export function TelemetryBindingInspector(props: Props) {
+/** RGV 列绑定编辑：协议列号(front_y/back_y) → 场景实体，运行时把实体位姿投影到车体行走轴。 */
+function RgvColumnBindingsEditor(props: {
+  entityId: string;
+  binding: TelemetryBindingComponent;
+  disabled: boolean;
+  commit: (patch: Partial<TelemetryBindingComponent>) => void;
+}) {
+  const scene = useEditorStore((state) => state.scene);
+  const entityOptions = scene.entityIds
+    .filter((entityId) => entityId !== props.entityId)
+    .map((entityId) => ({ id: entityId, name: scene.entities[entityId]?.name ?? entityId }));
+  const entries = Object.entries(props.binding.columnBindings ?? {})
+    .map(([column, targetId]) => ({ column: Number(column), targetId }))
+    .filter((entry) => Number.isInteger(entry.column) && entry.column > 0)
+    .sort((a, b) => a.column - b.column);
+  const hasMissingTarget = entries.some((entry) => !entityOptions.some((option) => option.id === entry.targetId));
+
+  /** 以完整表提交，统一走 normalize 丢弃非法行；空表按删除字段处理。 */
+  function commitEntries(next: { column: number; targetId: string }[]): void {
+    const columnBindings: Record<string, string> = {};
+    for (const entry of next) {
+      if (!Number.isInteger(entry.column) || entry.column <= 0 || !entry.targetId) continue;
+      columnBindings[String(entry.column)] = entry.targetId;
+    }
+    props.commit({ columnBindings: Object.keys(columnBindings).length > 0 ? columnBindings : undefined });
+  }
+
+  function handleColumnChange(index: number, column: number): void {
+    if (!Number.isInteger(column) || column <= 0) return;
+    if (entries.some((entry, other) => other !== index && entry.column === column)) return;
+    commitEntries(entries.map((entry, other) => (other === index ? { ...entry, column } : entry)));
+  }
+
+  function handleTargetChange(index: number, targetId: string): void {
+    commitEntries(entries.map((entry, other) => (other === index ? { ...entry, targetId } : entry)));
+  }
+
+  function handleRemove(index: number): void {
+    commitEntries(entries.filter((_, other) => other !== index));
+  }
+
+  function handleAdd(): void {
+    const firstOption = entityOptions[0];
+    if (!firstOption) return;
+    let column = 1;
+    while (entries.some((entry) => entry.column === column)) column += 1;
+    commitEntries([...entries, { column, targetId: firstOption.id }]);
+  }
+
+  return (
+    <div className="rgv-column-bindings">
+      <p className="muted">列绑定：协议列号(front_y/back_y) → 场景实体，运行时把实体位姿投影到 RGV 行走轴并作为货箱交接点。</p>
+      {entries.map((entry, index) => {
+        const missing = !entityOptions.some((option) => option.id === entry.targetId);
+        return (
+          <div className="inspector-row" key={entry.column}>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              disabled={props.disabled}
+              value={entry.column}
+              onChange={(event) => handleColumnChange(index, Number(event.target.value))}
+            />
+            <select disabled={props.disabled} value={entry.targetId} onChange={(event) => handleTargetChange(index, event.target.value)}>
+              {missing ? <option value={entry.targetId}>已删除实体（{entry.targetId}）</option> : null}
+              {entityOptions.map((option) => (
+                <option key={option.id} value={option.id}>{option.name}</option>
+              ))}
+            </select>
+            <button type="button" disabled={props.disabled} onClick={() => handleRemove(index)}>删除</button>
+          </div>
+        );
+      })}
+      {hasMissingTarget ? <p className="telemetry-runtime-error">存在指向已删除实体的列绑定，运行时对应列信号将被忽略。</p> : null}
+      <button type="button" disabled={props.disabled || entityOptions.length === 0} onClick={handleAdd}>添加列绑定</button>
+    </div>
+  );
+}
+
+/** 数据驱动 Inspector：编辑实体级 telemetryBinding 基础字段，驱动映射由模型包 .model.ts 声明。 */export function TelemetryBindingInspector(props: Props) {
   const binding = props.binding;
   if (!binding) {
     return (
@@ -217,6 +296,9 @@ export function TelemetryBindingInspector(props: Props) {
       <label className="number-row"><span>stale(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.staleAfterMs} onChange={(event) => commit({ staleAfterMs: Number(event.target.value) })} /></label>
       <p className="muted">deviceType：{binding.deviceType}（由模型包 dataDriven 声明，只读）</p>
       <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>
+      {binding.deviceType === 'rgv' ? (
+        <RgvColumnBindingsEditor entityId={props.entityId} binding={binding} disabled={props.disabled} commit={commit} />
+      ) : null}
       <TelemetryRuntimeDiagnosticsView entityId={props.entityId} binding={binding} modelAssetCode={props.modelAssetCode} />
       <SpecializedMotionSummary config={props.dataDrivenConfig} />
     </fieldset>

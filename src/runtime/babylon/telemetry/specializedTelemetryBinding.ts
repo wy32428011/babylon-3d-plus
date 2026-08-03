@@ -8,7 +8,7 @@ import {
   type DeviceTelemetryStore,
 } from '../../mqtt/deviceTelemetry';
 
-export type SpecializedTelemetryDeviceType = 'stacker' | 'conveyor';
+export type SpecializedTelemetryDeviceType = 'stacker' | 'conveyor' | 'rgv';
 
 /** 生成遥测绑定唯一键，用于同主键冲突检测。 */
 export function createTelemetryBindingKey(sourceId: string, deviceType: string, assetCode: string): string {

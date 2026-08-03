@@ -16,7 +16,7 @@ export type ModelDataDrivenConfig = {
 };
 
 /** 专用驱动接管的设备类型；新增专用驱动时需同步登记。 */
-export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor'];
+export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'rgv'];
 
 /** 判断归一化后的 devType 是否由 specialized 驱动接管。 */
 export function isSpecializedTelemetryDeviceType(devType: string | undefined): boolean {
@@ -32,6 +32,8 @@ export type TelemetryBindingComponent = {
   staleAfterMs: number;
   /** 货箱模板来源：场景内模型生成器实体 ID；缺省回退内置立方体。 */
   cargoGeneratorId?: string;
+  /** RGV 专用：协议列号(十进制正整数字符串) → 场景实体 ID；仅 deviceType === 'rgv' 时有意义。 */
+  columnBindings?: Record<string, string>;
 };
 
 type PlainObject = Record<string, unknown>;
@@ -107,6 +109,21 @@ function normalizeStringArray(value: unknown): string[] {
   return result;
 }
 
+/** 清理 RGV 列绑定表：列号必须为正整数，实体 ID 必须为非空字符串；非法条目丢弃。 */
+function normalizeColumnBindings(value: unknown): Record<string, string> | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const result: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const column = Number(key);
+    if (!Number.isInteger(column) || column <= 0) continue;
+    const entityId = normalizeOptionalString(item);
+    if (!entityId) continue;
+    result[String(column)] = entityId;
+    if (Object.keys(result).length >= TELEMETRY_COLLECTION_MAX_ITEMS) break;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 /** 归一化模型包 dataDriven 配置，输出纯 JSON 供场景和运行时共享。 */
 export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenConfig | null {
   if (!isSafeTelemetryShape(value) || !isPlainObject(value)) return null;
@@ -160,6 +177,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
   if (!deviceType) return null;
   const assetCode = normalizeOptionalString(value.assetCode);
   const cargoGeneratorId = normalizeOptionalString(value.cargoGeneratorId);
+  const columnBindings = normalizeColumnBindings(value.columnBindings);
   return {
     enabled: typeof value.enabled === 'boolean' ? value.enabled : true,
     sourceId: normalizeString(value.sourceId, 'default'),
@@ -168,5 +186,6 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     expectedIntervalMs,
     staleAfterMs: Math.max(createTelemetryStaleAfterMs(expectedIntervalMs), staleAfterMs),
     ...(cargoGeneratorId ? { cargoGeneratorId } : {}),
+    ...(columnBindings ? { columnBindings } : {}),
   };
 }

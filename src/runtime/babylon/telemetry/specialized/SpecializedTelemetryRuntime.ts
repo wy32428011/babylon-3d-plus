@@ -14,9 +14,10 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from '../specializedTelemetryBinding';
-import { isConveyorRuntimeModel } from './specializedModelAssets';
+import { isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
 import { StackerTelemetryDriver } from './stackerDriver';
 import { ConveyorTelemetryDriver } from './conveyorDriver';
+import { RgvTelemetryDriver } from './rgvDriver';
 import {
   type ConveyorCargoRuntimeEntry,
   createSpecializedTelemetrySharedState,
@@ -42,6 +43,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   readonly host: SpecializedTelemetryHost;
   private readonly stackerDriver: StackerTelemetryDriver;
   private readonly conveyorDriver: ConveyorTelemetryDriver;
+  private readonly rgvDriver: RgvTelemetryDriver;
   /** 驱动注册表，数组顺序即无实例绑定时的默认优先级（Stacker 优先）。 */
   private readonly drivers: readonly SpecializedDriverRegistration[];
 
@@ -51,6 +53,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.state = createSpecializedTelemetrySharedState();
     this.stackerDriver = new StackerTelemetryDriver(this);
     this.conveyorDriver = new ConveyorTelemetryDriver(this);
+    this.rgvDriver = new RgvTelemetryDriver(this);
     this.drivers = [
       {
         deviceType: 'stacker',
@@ -61,6 +64,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         deviceType: 'conveyor',
         isCapable: isConveyorRuntimeModel,
         apply: (model, snapshot, deltaSeconds) => this.conveyorDriver.applyToModel(model, snapshot, deltaSeconds),
+      },
+      {
+        deviceType: 'rgv',
+        isCapable: isRgvRuntimeModel,
+        apply: (model, snapshot, deltaSeconds) => this.rgvDriver.applyToModel(model, snapshot, deltaSeconds),
       },
     ];
   }
@@ -119,7 +127,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     telemetryRuntimeDiagnosticsStore.clear();
   }
 
-  /** 清理所有专用 Stacker/Conveyor 运行时货物，保证结束预览不污染编辑态场景。 */
+  /** 清理所有专用 Stacker/Conveyor/RGV 运行时货物，保证结束预览不污染编辑态场景。 */
   disposeAllCargo(): void {
     for (const cargo of this.state.stackerCargoMeshes.values()) {
       this.disposeStackerCargo(cargo);
@@ -129,12 +137,17 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       this.disposeConveyorCargo(cargo);
     }
     this.state.conveyorCargoMeshes.clear();
+    for (const cargo of this.state.rgvCargoMeshes.values()) {
+      this.host.disposeGeneratedCargo(cargo);
+    }
+    this.state.rgvCargoMeshes.clear();
   }
 
   /** 删除指定资产编号下的全部专用运行时货物。 */
   disposeCargoForAssetCode(assetCode: string): void {
     this.stackerDriver.disposeStackerCargoForAssetCode(assetCode);
     this.conveyorDriver.disposeConveyorCargoForAssetCode(assetCode);
+    this.rgvDriver.disposeRgvCargoForAssetCode(assetCode);
   }
 
   /** 释放指定生成器提供模板的全部运行时货箱。 */
@@ -148,6 +161,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       if (cargo.generatorEntityId !== generatorEntityId) continue;
       this.disposeStackerCargo(cargo);
       this.state.stackerCargoMeshes.delete(key);
+    }
+    for (const [key, cargo] of this.state.rgvCargoMeshes.entries()) {
+      if (cargo.generatorEntityId !== generatorEntityId) continue;
+      this.host.disposeGeneratedCargo(cargo);
+      this.state.rgvCargoMeshes.delete(key);
     }
   }
 

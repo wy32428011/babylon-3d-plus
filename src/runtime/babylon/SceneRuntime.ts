@@ -176,11 +176,14 @@ import {
 } from './EntityGroupTranslationPreview';
 import {
   createConveyorTelemetryState,
+  createRgvTelemetryState,
   createStackerTelemetryState,
   isConveyorModelAsset,
   isConveyorRuntimeModel,
+  isRgvModelAsset,
   isStackerModelAsset,
   resetConveyorTelemetryState,
+  resetRgvTelemetryState,
   resetStackerTelemetryState,
 } from './telemetry/specialized/specializedModelAssets';
 import {
@@ -194,11 +197,15 @@ import {
   CONVEYOR_CARGO_COLOR,
   CONVEYOR_CARGO_EMISSIVE_COLOR,
   CONVEYOR_CARGO_SIZE,
+  RGV_CARGO_COLOR,
+  RGV_CARGO_EMISSIVE_COLOR,
+  RGV_CARGO_SIZE,
 } from './telemetry/specialized/types';
 import type {
   ConveyorModelTelemetryState,
   GeneratedCargoKind,
   GeneratedCargoRuntimeEntry,
+  RgvModelTelemetryState,
   StackerModelTelemetryState,
 } from './telemetry/specialized/types';
 
@@ -271,6 +278,7 @@ export type ModelRuntimeEntry = {
   telemetryBinding: TelemetryBindingComponent | null;
   stackerCapable: boolean;
   conveyorCapable: boolean;
+  rgvCapable: boolean;
   root: TransformNode;
   contentRoot: TransformNode;
   assetHandle: ModelRuntimeAssetHandle | null;
@@ -292,6 +300,7 @@ export type ModelRuntimeEntry = {
   measurementReady: boolean;
   stackerTelemetry: StackerModelTelemetryState;
   conveyorTelemetry: ConveyorModelTelemetryState;
+  rgvTelemetry: RgvModelTelemetryState;
   stackerTelemetryReady: boolean;
   telemetryPreviewBaseline: ModelTelemetryPreviewBaseline | null;
 };
@@ -557,6 +566,7 @@ export class SceneRuntime {
       findLocatorByDevice: (assetCode, x, y, z) => this.findLocatorByDevice(assetCode, x, y, z),
       getLocatorTarget: (key) => this.locatorTargets.get(key) ?? null,
       resolveCargoGeneratorForModel: (model) => this.resolveCargoGeneratorForModel(model),
+      resolveColumnTargetPose: (entityId) => this.resolveColumnTargetPose(entityId),
       resolveFetchDriveRowForLocator: (locator) => this.resolveFetchDriveRowForLocator(locator),
       suppressFetchCellForLocator: (locator, column, layer) => this.suppressFetchCellForLocator(locator, column, layer),
       handleFetchRowSync: (row) => this.handleFetchRowSync(row),
@@ -814,6 +824,7 @@ export class SceneRuntime {
       }
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
+      resetRgvTelemetryState(model);
     }
     for (const owner of this.generatedOutputOwners.values()) {
       if (owner.output?.kind !== 'model') continue;
@@ -824,6 +835,7 @@ export class SceneRuntime {
       }
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
+      resetRgvTelemetryState(model);
     }
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('edit', null);
@@ -2027,6 +2039,23 @@ export class SceneRuntime {
     return generator;
   }
 
+  /** 按实体 ID 解析 RGV 列接驳位实体的世界位姿：依次查模型、定位线框和基础网格。 */
+  private resolveColumnTargetPose(entityId: string): { position: Vector3; rotation: Quaternion } | null {
+    const model = this.models.get(entityId);
+    if (model) {
+      return { position: model.root.getAbsolutePosition(), rotation: getNodeWorldRotation(model.root) };
+    }
+    const locator = this.locators.get(entityId);
+    if (locator) {
+      return { position: locator.root.getAbsolutePosition(), rotation: getNodeWorldRotation(locator.root) };
+    }
+    const mesh = this.meshes.get(entityId);
+    if (mesh) {
+      return { position: mesh.getAbsolutePosition(), rotation: getNodeWorldRotation(mesh) };
+    }
+    return null;
+  }
+
 
   /** 同步球形天空盒实体；没有实体时兼容旧 sceneSettings.skybox。 */
   syncSkybox(document: SceneDocument): void {
@@ -2563,6 +2592,7 @@ export class SceneRuntime {
         this.specializedTelemetryRuntime.disposeCargoForAssetCode(current.assetCode);
         resetStackerTelemetryState(current);
         resetConveyorTelemetryState(current);
+        resetRgvTelemetryState(current);
       }
       current.assetCode = modelAsset.assetCode;
       current.telemetryBinding = entity.components.telemetryBinding ?? null;
@@ -2570,7 +2600,9 @@ export class SceneRuntime {
       current.assetSignature = assetSignature;
       current.stackerCapable = isStackerModelAsset(modelAsset);
       current.conveyorCapable = isConveyorModelAsset(modelAsset);
+      current.rgvCapable = isRgvModelAsset(modelAsset);
       current.stackerTelemetry.rootBasePosition = current.root.position.clone();
+      current.rgvTelemetry.rootBasePosition = current.root.position.clone();
       // contentRoot 既承载源单位换算，也允许参数脚本在其上叠加尺寸缩放；同一资产同步时不得覆盖脚本输出。
       // lengthUnit / unitScaleToMeters 已进入 assetSignature，单位契约变化会走完整重载。
       this.applyModelParameters(entity, current);
@@ -2597,6 +2629,7 @@ export class SceneRuntime {
       telemetryBinding: entity.components.telemetryBinding ?? null,
       stackerCapable: isStackerModelAsset(modelAsset),
       conveyorCapable: isConveyorModelAsset(modelAsset),
+      rgvCapable: isRgvModelAsset(modelAsset),
       root,
       contentRoot,
       assetHandle: null,
@@ -2617,6 +2650,7 @@ export class SceneRuntime {
       measurementReady: false,
       stackerTelemetry: createStackerTelemetryState(root),
       conveyorTelemetry: createConveyorTelemetryState(),
+      rgvTelemetry: createRgvTelemetryState(root),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -2857,6 +2891,7 @@ export class SceneRuntime {
       telemetryBinding: null,
       stackerCapable: isStackerModelAsset(modelAsset),
       conveyorCapable: isConveyorModelAsset(modelAsset),
+      rgvCapable: isRgvModelAsset(modelAsset),
       root: modelRoot,
       contentRoot,
       assetHandle: null,
@@ -2877,6 +2912,7 @@ export class SceneRuntime {
       measurementReady: false,
       stackerTelemetry: createStackerTelemetryState(modelRoot),
       conveyorTelemetry: createConveyorTelemetryState(),
+      rgvTelemetry: createRgvTelemetryState(modelRoot),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -3103,9 +3139,13 @@ export class SceneRuntime {
     color: string;
     emissiveColor: string;
   } {
-    return kind === 'stacker'
-      ? { size: STACKER_CARGO_SIZE, color: STACKER_CARGO_COLOR, emissiveColor: STACKER_CARGO_EMISSIVE_COLOR }
-      : { size: CONVEYOR_CARGO_SIZE, color: CONVEYOR_CARGO_COLOR, emissiveColor: CONVEYOR_CARGO_EMISSIVE_COLOR };
+    if (kind === 'stacker') {
+      return { size: STACKER_CARGO_SIZE, color: STACKER_CARGO_COLOR, emissiveColor: STACKER_CARGO_EMISSIVE_COLOR };
+    }
+    if (kind === 'rgv') {
+      return { size: RGV_CARGO_SIZE, color: RGV_CARGO_COLOR, emissiveColor: RGV_CARGO_EMISSIVE_COLOR };
+    }
+    return { size: CONVEYOR_CARGO_SIZE, color: CONVEYOR_CARGO_COLOR, emissiveColor: CONVEYOR_CARGO_EMISSIVE_COLOR };
   }
 
   /** 为普通自动货物创建旧版 Box 回退；root 表示底部支撑点，Mesh 局部上移半高。 */
@@ -4508,6 +4548,7 @@ export class SceneRuntime {
     model.assetSignature = assetSignature;
     model.stackerCapable = isStackerModelAsset(modelAsset);
     model.conveyorCapable = isConveyorModelAsset(modelAsset);
+    model.rgvCapable = isRgvModelAsset(modelAsset);
     this.applyTransform(model.root, representative.components.transform);
     // 参数变体宿主的单位缩放只在创建时设置；重复同步保留脚本叠加在 contentRoot 上的参数缩放。
     if (!model.assetHandle) return variant;
@@ -4548,6 +4589,7 @@ export class SceneRuntime {
       telemetryBinding: representative.components.telemetryBinding ?? null,
       stackerCapable: isStackerModelAsset(modelAsset),
       conveyorCapable: isConveyorModelAsset(modelAsset),
+      rgvCapable: isRgvModelAsset(modelAsset),
       root,
       contentRoot,
       assetHandle: null,
@@ -4568,6 +4610,7 @@ export class SceneRuntime {
       measurementReady: false,
       stackerTelemetry: createStackerTelemetryState(root),
       conveyorTelemetry: createConveyorTelemetryState(),
+      rgvTelemetry: createRgvTelemetryState(root),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -5073,6 +5116,7 @@ export class SceneRuntime {
       model.measurementReady = true;
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
+      resetRgvTelemetryState(model);
       model.stackerTelemetryReady = true;
       onSettled(model);
       return;
@@ -5111,6 +5155,7 @@ export class SceneRuntime {
           runtime.update();
           resetStackerTelemetryState(current);
           resetConveyorTelemetryState(current);
+          resetRgvTelemetryState(current);
           current.externalScriptStarting = false;
           current.measurementReady = true;
           current.stackerTelemetryReady = true;
@@ -5123,6 +5168,7 @@ export class SceneRuntime {
           current.measurementReady = true;
           resetStackerTelemetryState(current);
           resetConveyorTelemetryState(current);
+          resetRgvTelemetryState(current);
           current.stackerTelemetryReady = true;
           const message = error instanceof Error ? error.message : String(error);
           this.pushLog(`模型脚本初始化失败，已回退基础几何与测量：${message}`);
@@ -5139,6 +5185,7 @@ export class SceneRuntime {
     model.externalScriptRuntime.update();
     resetStackerTelemetryState(model);
     resetConveyorTelemetryState(model);
+    resetRgvTelemetryState(model);
     model.measurementReady = true;
     model.stackerTelemetryReady = true;
     onSettled(model);
