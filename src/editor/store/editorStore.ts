@@ -1103,6 +1103,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
       ? { modelArrayInstance: { ...entity.components.modelArrayInstance } }
       : {}),
     ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
+    ...(entity.components.telemetryBinding ? { telemetryBinding: cloneJsonValue(entity.components.telemetryBinding) } : {}),
     ...(entity.components.poiEffect ? { poiEffect: { ...entity.components.poiEffect } } : {}),
     ...(entity.components.camera ? { camera: { ...entity.components.camera } } : {}),
     ...(entity.components.light ? { light: cloneLight(entity.components.light) } : {}),

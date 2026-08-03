@@ -183,7 +183,11 @@ function RgvColumnBindingsEditor(props: {
 }) {
   const scene = useEditorStore((state) => state.scene);
   const entityOptions = scene.entityIds
-    .filter((entityId) => entityId !== props.entityId)
+    .filter((entityId) => {
+      if (entityId === props.entityId) return false;
+      const entity = scene.entities[entityId];
+      return entity?.components.telemetryBinding?.deviceType === 'conveyor';
+    })
     .map((entityId) => ({ id: entityId, name: scene.entities[entityId]?.name ?? entityId }));
   const entries = Object.entries(props.binding.columnBindings ?? {})
     .map(([column, targetId]) => ({ column: Number(column), targetId }))
@@ -225,31 +229,59 @@ function RgvColumnBindingsEditor(props: {
 
   return (
     <div className="rgv-column-bindings">
-      <p className="muted">列绑定：协议列号(front_y/back_y) → 场景实体，运行时把实体位姿投影到 RGV 行走轴并作为货箱交接点。</p>
+      <p className="muted">协议列号(front_y/back_y) → 场景实体，运行时把实体位姿投影到 RGV 行走轴并作为货箱交接点。</p>
+
+      <div className="model-generator-section-header">
+        <span>列绑定</span>
+        <button
+          disabled={props.disabled || entityOptions.length === 0}
+          onClick={handleAdd}
+          title="添加列绑定"
+          type="button"
+        >
+          +
+        </button>
+      </div>
+
+      {entries.length === 0 ? (
+        <p className="muted model-generator-empty-hint">暂无列绑定，点击 + 添加。</p>
+      ) : null}
+
       {entries.map((entry, index) => {
         const missing = !entityOptions.some((option) => option.id === entry.targetId);
         return (
-          <div className="inspector-row" key={entry.column}>
-            <input
-              type="number"
-              min="1"
-              step="1"
-              disabled={props.disabled}
-              value={entry.column}
-              onChange={(event) => handleColumnChange(index, Number(event.target.value))}
-            />
-            <select disabled={props.disabled} value={entry.targetId} onChange={(event) => handleTargetChange(index, event.target.value)}>
-              {missing ? <option value={entry.targetId}>已删除实体（{entry.targetId}）</option> : null}
-              {entityOptions.map((option) => (
-                <option key={option.id} value={option.id}>{option.name}</option>
-              ))}
-            </select>
-            <button type="button" disabled={props.disabled} onClick={() => handleRemove(index)}>删除</button>
+          <div className="model-generator-rule-card" key={entry.column}>
+            <div className="model-generator-card-header">
+              <span>列 {entry.column}</span>
+              <span className="model-generator-inline-actions">
+                <button disabled={props.disabled} onClick={() => handleRemove(index)} title="删除列绑定" type="button">−</button>
+              </span>
+            </div>
+            <label className="inspector-row">
+              <span>列号</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                disabled={props.disabled}
+                value={entry.column}
+                onChange={(event) => handleColumnChange(index, Number(event.target.value))}
+              />
+            </label>
+            <label className="inspector-row">
+              <span>目标设备</span>
+              <select disabled={props.disabled} value={entry.targetId} onChange={(event) => handleTargetChange(index, event.target.value)}>
+                {missing ? <option value={entry.targetId}>已删除实体（{entry.targetId}）</option> : null}
+                {entityOptions.map((option) => (
+                  <option key={option.id} value={option.id}>{option.name}</option>
+                ))}
+              </select>
+            </label>
           </div>
         );
       })}
+
       {hasMissingTarget ? <p className="telemetry-runtime-error">存在指向已删除实体的列绑定，运行时对应列信号将被忽略。</p> : null}
-      <button type="button" disabled={props.disabled || entityOptions.length === 0} onClick={handleAdd}>添加列绑定</button>
     </div>
   );
 }
