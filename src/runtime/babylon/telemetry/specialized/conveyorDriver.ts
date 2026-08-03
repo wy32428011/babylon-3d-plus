@@ -1,5 +1,5 @@
-import type { Scene, Vector3 } from '@babylonjs/core';
-import { Quaternion, TransformNode } from '@babylonjs/core';
+import type { Scene } from '@babylonjs/core';
+import { Quaternion, TransformNode, Vector3 } from '@babylonjs/core';
 import {
   clampNumber,
   createLocalAxis,
@@ -85,7 +85,12 @@ export class ConveyorTelemetryDriver {
     }
   }
 
-  /** 根据光电信号（缺省 front_has_goods / back_has_goods，可在 motion.cargo 配置）决定货物创建与销毁，货物走行跟随 translate 配置的方向与速度。 */
+  /**
+   * 根据光电信号（缺省 front_has_goods / back_has_goods，可在 motion.cargo 配置）决定货物创建与销毁。
+   * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向：
+   * front 有货 → 轨迹轴起点端（正转上游）刷出并随正转前行；back 有货 → 末端刷出，反转时反向移动。
+   * 仅当 movement_x == 0 且前后都无货时才移除货物；运行中信号暂失时货物保持原位继续走。
+   */
   private applyConveyorCargoMotion(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
@@ -95,36 +100,39 @@ export class ConveyorTelemetryDriver {
     const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods) ?? false;
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
 
-    if (!frontHasGoods && !backHasGoods) {
-      this.disposeConveyorCargoForAssetCode(model.assetCode);
-      model.conveyorTelemetry.cargoCode = null;
-      return;
-    }
-
-    // 前端有货优先；前后同时有货时按前端处理。
-    const photoelectricSource = frontHasGoods ? 'front' : 'back';
-    const isNewCargo = model.conveyorTelemetry.cargoCode !== photoelectricSource;
-    if (isNewCargo && model.conveyorTelemetry.cargoCode) {
-      this.disposeConveyorCargoForAssetCode(model.assetCode);
-    }
-
     // 货物走行与链条本体共用同一份 translate 配置（fields+actionMap+speed），避免链/货速度脱节。
     const translateConfig = this.findConveyorCargoTranslateConfig(model);
     const movementDirection = translateConfig
       ? this.readConveyorMotionDirection(snapshot, translateConfig)
       : this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
+
+    if (movementDirection === 0 && !frontHasGoods && !backHasGoods) {
+      this.disposeConveyorCargoForAssetCode(model.assetCode);
+      model.conveyorTelemetry.cargoCode = null;
+      return;
+    }
+
+    // 前端有货优先；运行中前后信号都暂失时维持原货物身份继续走行。
+    const photoelectricSource = frontHasGoods ? 'front' : backHasGoods ? 'back' : model.conveyorTelemetry.cargoCode;
+    if (!photoelectricSource) return;
+    const isNewCargo = model.conveyorTelemetry.cargoCode !== photoelectricSource;
+    if (isNewCargo && model.conveyorTelemetry.cargoCode) {
+      this.disposeConveyorCargoForAssetCode(model.assetCode);
+    }
+
     const travelContext = this.resolveConveyorCargoTravelContext(model);
     const travelHalfRange = resolveConveyorCargoTravelHalfRange(
       travelContext.spanMeters ?? 0,
       CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
     );
+    const forwardSign = this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxis);
     if (isNewCargo) {
-      // front_has_goods → 正向前端刷出；back_has_goods → 负向末端刷出。
-      model.conveyorTelemetry.cargoTravelOffset = frontHasGoods ? travelHalfRange : -travelHalfRange;
+      // front → 轨迹轴起点端（正转上游端）；back → 末端（正转下游端）。
+      model.conveyorTelemetry.cargoTravelOffset = (photoelectricSource === 'front' ? -1 : 1) * forwardSign * travelHalfRange;
     }
     if (!snapshot.faulted && movementDirection !== 0) {
       const cargoSpeed = translateConfig?.speed ?? CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
-      model.conveyorTelemetry.cargoTravelOffset += movementDirection * cargoSpeed * deltaSeconds;
+      model.conveyorTelemetry.cargoTravelOffset += movementDirection * forwardSign * cargoSpeed * deltaSeconds;
     }
     // 每帧按当前行程钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
     model.conveyorTelemetry.cargoTravelOffset = clampNumber(model.conveyorTelemetry.cargoTravelOffset, -travelHalfRange, travelHalfRange);
@@ -354,6 +362,22 @@ export class ConveyorTelemetryDriver {
   /** 推断货物沿模型局部 x/z 哪个方向移动，滚筒线默认垂直于滚筒轴。 */
   private readConveyorCargoTravelAxis(model: ModelRuntimeEntry): 'x' | 'z' {
     return readConveyorTravelAxisFromConfigs(readConveyorMotionConfigs(model));
+  }
+
+  /**
+   * 轨迹方向（movement_x 正转时货物运动的世界方向）与行走轴世界向量的对齐符号。
+   * 同向返回 1：正转时偏移量沿行走轴正向增加；反向返回 -1。
+   */
+  private readConveyorTrajectoryForwardSign(model: ModelRuntimeEntry, travelAxisWorld: Vector3): 1 | -1 {
+    const direction = model.telemetryBinding?.trajectoryDirection ?? 'x';
+    const world = direction === '-x'
+      ? new Vector3(-1, 0, 0)
+      : direction === 'z'
+        ? new Vector3(0, 0, 1)
+        : direction === '-z'
+          ? new Vector3(0, 0, -1)
+          : new Vector3(1, 0, 0);
+    return Vector3.Dot(world, travelAxisWorld) >= 0 ? 1 : -1;
   }
 
   /** 对输送线状态和故障做节流日志，实时字段仍完整写入 metadata。 */
