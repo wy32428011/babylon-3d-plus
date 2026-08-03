@@ -21,7 +21,7 @@ import {
 } from '../../../mqtt/deviceTelemetry';
 import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
-import { readConveyorCargoSignalFields, readConveyorMotionConfigs } from './specializedModelAssets';
+import { readConveyorCargoSignalFields, readConveyorMotionConfigs, readConveyorTravelAxisFromConfigs } from './specializedModelAssets';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   type ConveyorCargoRuntimeEntry,
@@ -353,12 +353,7 @@ export class ConveyorTelemetryDriver {
 
   /** 推断货物沿模型局部 x/z 哪个方向移动，滚筒线默认垂直于滚筒轴。 */
   private readConveyorCargoTravelAxis(model: ModelRuntimeEntry): 'x' | 'z' {
-    const translateConfig = this.findConveyorCargoTranslateConfig(model);
-    if (translateConfig?.axis === 'x' || translateConfig?.axis === 'z') return translateConfig.axis;
-
-    const rotateConfig = readConveyorMotionConfigs(model).find((config) => config.kind === 'rotate');
-    if (rotateConfig?.axis === 'x') return 'z';
-    return 'x';
+    return readConveyorTravelAxisFromConfigs(readConveyorMotionConfigs(model));
   }
 
   /** 对输送线状态和故障做节流日志，实时字段仍完整写入 metadata。 */

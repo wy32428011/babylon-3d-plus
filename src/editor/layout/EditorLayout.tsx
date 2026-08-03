@@ -48,6 +48,8 @@ export function EditorLayout() {
   const updateSnapSetting = useEditorStore((state) => state.updateSnapSetting);
   const setGridVisible = useEditorStore((state) => state.setGridVisible);
   const setGridCellSize = useEditorStore((state) => state.setGridCellSize);
+  const trajectoryVisible = useEditorStore((state) => state.trajectoryVisible);
+  const setTrajectoryVisible = useEditorStore((state) => state.setTrajectoryVisible);
   const deleteSelectedEntity = useEditorStore((state) => state.deleteSelectedEntity);
   const hideSelectedEntities = useEditorStore((state) => state.hideSelectedEntities);
   const lockSelectedEntities = useEditorStore((state) => state.lockSelectedEntities);
@@ -247,6 +249,8 @@ export function EditorLayout() {
         onUpdateSnapSetting={updateSnapSetting}
         onSetGridVisible={setGridVisible}
         onSetGridCellSize={setGridCellSize}
+        trajectoryVisible={trajectoryVisible}
+        onSetTrajectoryVisible={setTrajectoryVisible}
         cameraOrientation={cameraOrientation}
         cameraProjection={cameraProjection}
         onSetCameraOrientation={setCameraOrientation}

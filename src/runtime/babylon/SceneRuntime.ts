@@ -5,6 +5,7 @@ import {
   AssetContainer,
   Color3,
   Color4,
+  CreateGreasedLine,
   DirectionalLight,
   HemisphericLight,
   LinesMesh,
@@ -182,6 +183,8 @@ import {
   isConveyorRuntimeModel,
   isRgvModelAsset,
   isStackerModelAsset,
+  readConveyorMotionConfigs,
+  readConveyorTravelAxisFromConfigs,
   resetConveyorTelemetryState,
   resetRgvTelemetryState,
   resetStackerTelemetryState,
@@ -203,6 +206,7 @@ import {
 } from './telemetry/specialized/types';
 import type {
   ConveyorModelTelemetryState,
+  ConveyorMotionConfig,
   GeneratedCargoKind,
   GeneratedCargoRuntimeEntry,
   RgvModelTelemetryState,
@@ -413,6 +417,23 @@ type CadReferenceRuntimeEntry = {
   cancelLoad: (() => void) | null;
 };
 
+/** 输送线编辑器轨迹可视化：虚线 + 方向箭头，仅编辑态、非拾取。 */
+type ConveyorTrajectoryRuntimeEntry = {
+  signature: string;
+  root: TransformNode;
+  lineMeshes: Mesh[];
+  arrowMeshes: Mesh[];
+  material: StandardMaterial;
+};
+
+/** 轨迹行程上下文：中心点（模型局部）、行走轴与世界方向、行程长度。 */
+type ConveyorTrajectoryContext = {
+  centerLocal: Vector3;
+  travelAxisName: 'x' | 'z';
+  travelAxisWorld: Vector3;
+  spanMeters: number;
+};
+
 type EntityRuntimeState = {
   visible: boolean;
   locked: boolean;
@@ -464,6 +485,8 @@ export class SceneRuntime {
   private readonly locatorTargets = new Map<string, LocatorRuntimeEntry>();
   private readonly locatorDeviceIndex = new Map<string, Map<number, LocatorRuntimeEntry[]>>();
   private readonly cadReferences = new Map<string, CadReferenceRuntimeEntry>();
+  private readonly conveyorTrajectories = new Map<string, ConveyorTrajectoryRuntimeEntry>();
+  private _trajectoryVisible = false;
   private readonly models = new Map<string, ModelRuntimeEntry>();
   /** 阵列副本保留完整 Scene Entity；相同参数组合共享一个脚本宿主，而不是逐实体加载模型。 */
   private readonly modelArrayInstanceEntities = new Map<string, Entity>();
@@ -1181,6 +1204,14 @@ export class SceneRuntime {
       : { status: 'unavailable', sizeMeters: null };
   }
 
+  /** 设置输送线轨迹可视化的全局开关，控制所有已创建轨迹的显示/隐藏。 */
+  setTrajectoryVisible(visible: boolean): void {
+    this._trajectoryVisible = visible;
+    for (const [entityId, entry] of this.conveyorTrajectories) {
+      entry.root.setEnabled(visible && this.isEntityVisible(entityId));
+    }
+  }
+
   /** 读取支持实体沿指定世界方向的有效几何跨度，供 Shift+Gizmo 阵列使用。 */
   getEntityArrayGeometry(entityId: string, worldDirection: Vector3Data): {
     direction: Vector3Data;
@@ -1880,6 +1911,8 @@ export class SceneRuntime {
       const previousSourceId = this.modelArrayInstanceEntities.get(entityId)?.components.modelArrayInstance?.sourceEntityId;
       if (previousSourceId) dirtyModelArraySourceIds.add(previousSourceId);
       this.modelArrayInstanceEntities.delete(entityId);
+      const trajectory = this.conveyorTrajectories.get(entityId);
+      if (trajectory) this.disposeConveyorTrajectory(entityId, trajectory);
     }
     for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
       if (!modelGeneratorIds.has(entityId)) {
@@ -2016,6 +2049,9 @@ export class SceneRuntime {
     }
 
     this.lights.get(entity.id)?.setEnabled(this.isEntityVisible(entity.id));
+
+    const trajectory = this.conveyorTrajectories.get(entity.id);
+    if (trajectory) this.refreshConveyorTrajectoryRoot(entity, trajectory.root);
   }
 
   /** 货箱运行问题按稳定 key 只写一次 Console。 */
@@ -2162,6 +2198,9 @@ export class SceneRuntime {
     for (const [entityId, cadReference] of this.cadReferences.entries()) {
       this.disposeCadReference(entityId, cadReference);
     }
+    for (const [entityId, trajectory] of this.conveyorTrajectories.entries()) {
+      this.disposeConveyorTrajectory(entityId, trajectory);
+    }
     for (const [entityId, model] of this.models.entries()) {
       this.disposeModel(entityId, model);
     }
@@ -2184,6 +2223,7 @@ export class SceneRuntime {
     this.locatorTargets.clear();
     this.reportedDuplicateLocatorTargets.clear();
     this.cadReferences.clear();
+    this.conveyorTrajectories.clear();
     this.models.clear();
     this.modelArrayInstanceEntities.clear();
     this.modelArrayParameterVariants.clear();
@@ -2609,6 +2649,7 @@ export class SceneRuntime {
       this.syncExternalModelScripts(entity, current);
       this.applyModelSelection(current, selected);
       this.applyModelInteractivity(current, entity.id);
+      this.syncConveyorTrajectory(entity, current);
       return;
     }
 
@@ -2685,6 +2726,7 @@ export class SceneRuntime {
         this.applyModelSelection(activeEntry, activeEntry.highlighted);
         this.applyModelInteractivity(activeEntry, latestEntity.id);
         this.rebuildModelSelectionOutline();
+        this.syncConveyorTrajectory(latestEntity, activeEntry);
         this.refreshGroupTranslationPreviewTargets();
       })
       .catch((error) => {
@@ -3641,9 +3683,203 @@ export class SceneRuntime {
     this.cadReferences.delete(entityId);
   }
 
+  // ===== 输送线轨迹可视化 =====
+
+  /** 同步输送线轨迹：conveyor 且模型就绪时创建（trajectoryDirection 缺省按 'x'），反之释放。 */
+  private syncConveyorTrajectory(entity: Entity, model: ModelRuntimeEntry | null): void {
+    const binding = entity.components.telemetryBinding;
+    const enabled = Boolean(
+      binding
+      && binding.deviceType === 'conveyor'
+      && model?.assetHandle
+      && model.measurementReady,
+    );
+    if (!enabled || !model) {
+      const existing = this.conveyorTrajectories.get(entity.id);
+      if (existing) this.disposeConveyorTrajectory(entity.id, existing);
+      return;
+    }
+
+    const context = this.resolveConveyorTrajectoryContext(entity, model);
+    const signature = this.createConveyorTrajectorySignature(entity, context);
+    const existing = this.conveyorTrajectories.get(entity.id);
+    if (existing && existing.signature === signature) {
+      // 轨迹挂独立根节点（阵列源模型 root 会被合批挂起禁用），实体移动/显隐变化只刷新根节点。
+      this.refreshConveyorTrajectoryRoot(entity, existing.root);
+      return;
+    }
+    if (existing) this.disposeConveyorTrajectory(entity.id, existing);
+    this.createConveyorTrajectory(entity, context, signature);
+  }
+
+  /** 轨迹根的变换与显隐：跟随实体 Transform、实体可见性与全局开关。 */
+  private refreshConveyorTrajectoryRoot(entity: Entity, root: TransformNode): void {
+    this.applyTransform(root, entity.components.transform);
+    root.setEnabled(this._trajectoryVisible && this.isEntityVisible(entity.id));
+  }
+
+  /** 同步某源模型全部阵列实例的输送线轨迹：几何取自实例所在批次（参数变体或源模型）。 */
+  private syncConveyorTrajectoriesForArrayInstances(sourceEntityId: string): void {
+    for (const instanceEntity of this.modelArrayInstanceEntities.values()) {
+      const instance = instanceEntity.components.modelArrayInstance;
+      if (!instance || instance.sourceEntityId !== sourceEntityId) continue;
+      const variant = this.modelArrayParameterVariantByEntityId.get(instanceEntity.id);
+      const model = variant?.model ?? this.models.get(instance.sourceEntityId) ?? null;
+      this.syncConveyorTrajectory(instanceEntity, model);
+    }
+  }
+
+  private createConveyorTrajectorySignature(entity: Entity, context: ConveyorTrajectoryContext): string {
+    const round = (v: Vector3) => `${v.x.toFixed(4)},${v.y.toFixed(4)},${v.z.toFixed(4)}`;
+    return JSON.stringify([
+      entity.components.telemetryBinding?.trajectoryDirection ?? 'x',
+      context.travelAxisName,
+      round(context.centerLocal),
+      context.spanMeters.toFixed(4),
+    ]);
+  }
+
+  /** 与 conveyorDriver 同源的行程计算：motion 配置行走轴 + 包围盒投影，转模型局部空间。 */
+  private resolveConveyorTrajectoryContext(entity: Entity, model: ModelRuntimeEntry): ConveyorTrajectoryContext {
+    const configs = readConveyorMotionConfigs(model);
+    const travelAxisName = readConveyorTravelAxisFromConfigs(configs);
+    const configuredNodes = configs.flatMap((config) => this.findEditorConveyorMotionNodes(model, config));
+    const conveyorNodes = configuredNodes.length > 0
+      ? configuredNodes
+      : findModelNodes(model, this.scene, /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i);
+    const bounds = (conveyorNodes.length > 0 ? getNodesWorldBounds(conveyorNodes) : null)
+      ?? this.getModelWorldBounds(model);
+    if (!bounds) {
+      return { centerLocal: Vector3.Zero(), travelAxisName, travelAxisWorld: Vector3.Right(), spanMeters: 0 };
+    }
+    const center = bounds.minimum.add(bounds.maximum).scale(0.5);
+    const travelAxisWorld = getHorizontalModelAxis(model.root, travelAxisName);
+    const projected = projectWorldBoundsOntoAxis(bounds, travelAxisWorld);
+    const spanMeters = Math.max(0, projected.max - projected.min);
+
+    model.root.computeWorldMatrix(true);
+    const rootWorldInverse = model.root.getWorldMatrix().clone();
+    rootWorldInverse.invert();
+    const centerLocal = Vector3.TransformCoordinates(center, rootWorldInverse);
+    return { centerLocal, travelAxisName, travelAxisWorld, spanMeters };
+  }
+
+  private findEditorConveyorMotionNodes(model: ModelRuntimeEntry, config: ConveyorMotionConfig): TransformNode[] {
+    if (config.nodes.length > 0) {
+      return filterTopLevelMotionNodes(findModelNodesByName(model, this.scene, config.nodes));
+    }
+    if (config.fallbackPattern) {
+      let pattern: RegExp | null = null;
+      try { pattern = new RegExp(config.fallbackPattern, 'i'); } catch { pattern = null; }
+      return pattern ? filterTopLevelMotionNodes(findModelNodes(model, this.scene, pattern)) : [];
+    }
+    return [];
+  }
+
+  /** 创建轨迹虚线 + 方向箭头；全部网格非拾取，挂独立根节点（阵列源模型 root 会被合批挂起禁用）。 */
+  private createConveyorTrajectory(entity: Entity, context: ConveyorTrajectoryContext, signature: string): void {
+    if (context.spanMeters <= 0.001) return;
+
+    const half = context.spanMeters / 2;
+    const baseY = context.centerLocal.y + 0.15;
+    const startBase = context.centerLocal.subtract(createLocalAxis(context.travelAxisName).scale(half));
+    const endBase = context.centerLocal.add(createLocalAxis(context.travelAxisName).scale(half));
+    const start = new Vector3(startBase.x, baseY, startBase.z);
+    const end = new Vector3(endBase.x, baseY, endBase.z);
+
+    const root = new TransformNode(`${entity.id}_conveyorTrajectoryRoot`, this.scene);
+    this.refreshConveyorTrajectoryRoot(entity, root);
+
+    const material = new StandardMaterial(`${entity.id}_conveyorTrajectoryMat`, this.scene);
+    material.diffuseColor = Color3.White();
+    material.emissiveColor = Color3.White();
+    material.disableLighting = true;
+    material.alpha = 0.9;
+    material.backFaceCulling = false;
+    material.disableDepthWrite = true;
+
+    const dashCount = clampNumber(Math.round(context.spanMeters / 1.2), 2, 12);
+    const line = CreateGreasedLine(
+      `${entity.id}_conveyorTrajectoryLine`,
+      { points: [start, end], updatable: false },
+      {
+        color: Color3.White(),
+        width: 0.06,
+        sizeAttenuation: false,
+        useDash: true,
+        dashCount,
+        dashRatio: 0.45,
+      },
+      this.scene,
+    );
+    line.parent = root;
+    line.isPickable = false;
+
+    const worldDir = this.readTrajectoryWorldDirection(entity.components.telemetryBinding?.trajectoryDirection ?? 'x');
+    const worldLineDir = normalizeVector(context.travelAxisWorld, worldDir);
+    const localDir = normalizeVector(end.subtract(start), createLocalAxis(context.travelAxisName));
+    const flip = Vector3.Dot(worldDir, worldLineDir) < 0;
+    const arrowDir = flip ? localDir.scale(-1) : localDir;
+    const dot = Vector3.Dot(new Vector3(1, 0, 0), arrowDir);
+    const cross = Vector3.Cross(new Vector3(1, 0, 0), arrowDir);
+    const arrowQuat = cross.lengthSquared() < 0.0001
+      ? (dot < 0 ? Quaternion.RotationAxis(new Vector3(0, 1, 0), Math.PI) : Quaternion.Identity())
+      : Quaternion.RotationAxis(cross, Math.acos(clampNumber(dot, -1, 1)));
+
+    // 平面 › 形箭头：两片扁盒从尖端向后张开，无柄无锥头。
+    const chevronAngle = Math.PI / 4.5;
+    const chevronArmLength = 0.35;
+    const arrowCount = clampNumber(Math.round(context.spanMeters / 3), 2, 5);
+    const arrowMeshes: Mesh[] = [];
+    for (let i = 0; i < arrowCount; i += 1) {
+      const t = (i + 1) / (arrowCount + 1);
+      const arrowRoot = new TransformNode(`${entity.id}_conveyorTrajectoryArrow_${i}`, this.scene);
+      arrowRoot.parent = root;
+      arrowRoot.position = Vector3.Lerp(start, end, t);
+      arrowRoot.rotationQuaternion = arrowQuat;
+
+      for (const side of [-1, 1]) {
+        const arm = MeshBuilder.CreateBox(
+          `${arrowRoot.name}_arm_${side}`,
+          { width: chevronArmLength, height: 0.02, depth: 0.06 },
+          this.scene,
+        );
+        arm.parent = arrowRoot;
+        arm.rotation.y = -side * (Math.PI - chevronAngle);
+        arm.position = new Vector3(
+          -Math.cos(chevronAngle) * chevronArmLength * 0.5,
+          0,
+          side * Math.sin(chevronAngle) * chevronArmLength * 0.5,
+        );
+        arm.material = material;
+        arm.isPickable = false;
+        arrowMeshes.push(arm);
+      }
+    }
+
+    this.conveyorTrajectories.set(entity.id, { signature, root, lineMeshes: [line], arrowMeshes, material });
+  }
+
+  private readTrajectoryWorldDirection(direction: string): Vector3 {
+    if (direction === '-x') return new Vector3(-1, 0, 0);
+    if (direction === 'z') return new Vector3(0, 0, 1);
+    if (direction === '-z') return new Vector3(0, 0, -1);
+    return new Vector3(1, 0, 0);
+  }
+
+  private disposeConveyorTrajectory(entityId: string, entry: ConveyorTrajectoryRuntimeEntry): void {
+    for (const lineMesh of entry.lineMeshes) lineMesh.dispose();
+    for (const mesh of entry.arrowMeshes) mesh.dispose();
+    entry.material.dispose();
+    entry.root.dispose();
+    this.conveyorTrajectories.delete(entityId);
+  }
+
   /** 释放导入模型的容器、根节点与所有子资源。 */
   private disposeModel(entityId: string, model: ModelRuntimeEntry): void {
     this.clearEntityArrayPreviewIfSource(entityId);
+    const trajectory = this.conveyorTrajectories.get(entityId);
+    if (trajectory) this.disposeConveyorTrajectory(entityId, trajectory);
     model.telemetryPreviewBaseline = null;
     model.cancelLoad?.();
     model.cancelLoad = null;
@@ -4153,6 +4389,7 @@ export class SceneRuntime {
       this.applyModelSelection(current, current.highlighted);
       this.rebuildModelSelectionOutline();
       this.onModelMeasurementChanged(latestEntity.id);
+      this.syncConveyorTrajectory(latestEntity, current);
       this.refreshBuiltInSlotBindings(latestEntity.id);
       this.refreshGroupTranslationPreviewTargets();
     });
@@ -4394,6 +4631,7 @@ export class SceneRuntime {
     }
 
     this.disposeMissingModelArrayParameterVariants(entity.id, retainedVariantKeys);
+    this.syncConveyorTrajectoriesForArrayInstances(entity.id);
   }
 
   /** 资产编号只代表逻辑设备身份；其它会影响参数脚本输出的字段共同决定共享分组。 */

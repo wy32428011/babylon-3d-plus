@@ -156,6 +156,15 @@ export function readConveyorMotionConfigs(model: ModelRuntimeEntry): ConveyorMot
   return configs;
 }
 
+/** 推断货物沿模型局部 x/z 哪个方向移动，与 conveyorDriver 同源。 */
+export function readConveyorTravelAxisFromConfigs(configs: ConveyorMotionConfig[]): 'x' | 'z' {
+  const translateConfig = configs.find((config) => config.kind === 'translate' && config.axis !== 'y');
+  if (translateConfig?.axis === 'x' || translateConfig?.axis === 'z') return translateConfig.axis;
+  const rotateConfig = configs.find((config) => config.kind === 'rotate');
+  if (rotateConfig?.axis === 'x') return 'z';
+  return 'x';
+}
+
 /** 输送线货物生命周期信号字段名，缺省遵循 front_has_goods/back_has_goods 光电约定。 */
 export type ConveyorCargoSignalFields = {
   frontHasGoods: string;

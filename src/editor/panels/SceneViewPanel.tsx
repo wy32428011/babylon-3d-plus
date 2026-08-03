@@ -255,6 +255,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
   const gridSettings = useEditorStore((state) => state.gridSettings);
+  const trajectoryVisible = useEditorStore((state) => state.trajectoryVisible);
   const entityArrayRequest = useEditorStore((state) => state.entityArrayRequest);
   const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
   const environmentApplyRequest = useEditorStore((state) => state.environmentApplyRequest);
@@ -1054,6 +1055,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   useEffect(() => {
     viewportRef.current?.setGridSettings(gridSettings);
   }, [gridSettings]);
+
+  useEffect(() => {
+    runtimeRef.current?.setTrajectoryVisible(trajectoryVisible);
+  }, [trajectoryVisible]);
 
   useEffect(() => {
     const viewport = viewportRef.current;

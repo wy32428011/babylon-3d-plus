@@ -119,6 +119,8 @@ type ToolbarProps = {
   gridSettings: EditorGridSettings;
   performanceHudVisible: boolean;
   onSetPerformanceHudVisible: (visible: boolean) => void;
+  trajectoryVisible: boolean;
+  onSetTrajectoryVisible: (visible: boolean) => void;
   onSetTransformTool: (tool: TransformTool) => void;
   onSetTransformSpace: (space: TransformSpace) => void;
   onSetSnapEnabled: (enabled: boolean) => void;
@@ -482,6 +484,14 @@ export function Toolbar(props: ToolbarProps) {
           onChange={(event) => props.onSetPerformanceHudVisible(event.target.checked)}
         />
         性能
+      </label>
+      <label className="toolbar-checkbox" title="显示输送线货物运行轨迹">
+        <input
+          type="checkbox"
+          checked={props.trajectoryVisible}
+          onChange={(event) => props.onSetTrajectoryVisible(event.target.checked)}
+        />
+        动画
       </label>
       <label className="toolbar-select">
         <span>格子</span>

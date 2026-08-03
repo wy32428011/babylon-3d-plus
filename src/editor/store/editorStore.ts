@@ -316,6 +316,7 @@ type EditorState = {
   transformSpace: TransformSpace;
   snapSettings: TransformSnapSettings;
   gridSettings: EditorGridSettings;
+  trajectoryVisible: boolean;
   startRuntimePreview: () => RuntimePreviewReadiness;
   stopRuntimePreview: () => void;
   setTransformTool: (tool: TransformTool) => void;
@@ -324,6 +325,7 @@ type EditorState = {
   updateSnapSetting: (key: TransformSnapSettingKey, value: number) => void;
   setGridVisible: (visible: boolean) => void;
   setGridCellSize: (cellSizeMeters: EditorGridCellSize) => void;
+  setTrajectoryVisible: (visible: boolean) => void;
   renameScene: (name: string) => void;
   resetSceneToBlank: () => void;
   setCameraViewDistance: (viewDistance: number) => void;
@@ -2100,6 +2102,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   transformSpace: 'local',
   snapSettings: DEFAULT_SNAP_SETTINGS,
   gridSettings: DEFAULT_EDITOR_GRID_SETTINGS,
+  trajectoryVisible: false,
   startRuntimePreview: () => {
     const currentState = get();
     if (currentState.environmentApplyRequest || currentState.environmentRuntimeSnapshot.phase === 'loading') {
@@ -2240,6 +2243,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           cellSizeMeters: nextCellSizeMeters,
         },
         logs: prependLog(state.logs, `网格格子大小：${nextCellSizeMeters} m。`),
+      };
+    });
+  },
+  setTrajectoryVisible: (visible) => {
+    set((state) => {
+      if (state.trajectoryVisible === visible) return state;
+      return {
+        trajectoryVisible: visible,
+        logs: prependLog(state.logs, visible ? '显示输送线货物轨迹。' : '隐藏输送线货物轨迹。'),
       };
     });
   },

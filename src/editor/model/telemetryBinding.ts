@@ -34,6 +34,8 @@ export type TelemetryBindingComponent = {
   cargoGeneratorId?: string;
   /** RGV 专用：协议列号(十进制正整数字符串) → 场景实体 ID；仅 deviceType === 'rgv' 时有意义。 */
   columnBindings?: Record<string, string>;
+  /** 输送线专用：货物运行轨迹方向（仅编辑态可视化, 非运行时遥测）。 */
+  trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
 };
 
 type PlainObject = Record<string, unknown>;
@@ -107,6 +109,14 @@ function normalizeStringArray(value: unknown): string[] {
     if (result.length >= TELEMETRY_COLLECTION_MAX_ITEMS) break;
   }
   return result;
+}
+
+const TELEMETRY_TRAJECTORY_DIRECTIONS = ['x', '-x', 'z', '-z'] as const;
+
+function normalizeTrajectoryDirection(value: unknown): string | undefined {
+  return typeof value === 'string' && (TELEMETRY_TRAJECTORY_DIRECTIONS as readonly string[]).includes(value)
+    ? value
+    : undefined;
 }
 
 /** 清理 RGV 列绑定表：列号必须为正整数，实体 ID 必须为非空字符串；非法条目丢弃。 */
@@ -187,5 +197,6 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     staleAfterMs: Math.max(createTelemetryStaleAfterMs(expectedIntervalMs), staleAfterMs),
     ...(cargoGeneratorId ? { cargoGeneratorId } : {}),
     ...(columnBindings ? { columnBindings } : {}),
+    ...(normalizeTrajectoryDirection(value.trajectoryDirection) ? { trajectoryDirection: value.trajectoryDirection as TelemetryBindingComponent['trajectoryDirection'] } : {}),
   };
 }

@@ -331,6 +331,21 @@ function RgvColumnBindingsEditor(props: {
       {binding.deviceType === 'rgv' ? (
         <RgvColumnBindingsEditor entityId={props.entityId} binding={binding} disabled={props.disabled} commit={commit} />
       ) : null}
+      {binding.deviceType === 'conveyor' ? (
+        <label className="inspector-row">
+          <span>轨迹方向</span>
+          <select
+            disabled={props.disabled}
+            value={binding.trajectoryDirection ?? 'x'}
+            onChange={(event) => commit({ trajectoryDirection: event.target.value as TelemetryBindingComponent['trajectoryDirection'] })}
+          >
+            <option value="x">+x</option>
+            <option value="-x">-x</option>
+            <option value="z">+z</option>
+            <option value="-z">-z</option>
+          </select>
+        </label>
+      ) : null}
       <TelemetryRuntimeDiagnosticsView entityId={props.entityId} binding={binding} modelAssetCode={props.modelAssetCode} />
       <SpecializedMotionSummary config={props.dataDrivenConfig} />
     </fieldset>
