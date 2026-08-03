@@ -146,6 +146,7 @@ export function PlayerApp() {
         viewport = createBabylonViewport(canvas, handleRuntimeStatus, {
           showGrid: parsedConfig.viewer.showGrid,
           allowCameraControl: parsedConfig.viewer.allowCameraControl,
+          requireHardwareAcceleration: true,
         });
         applySceneBackground(viewport, parsedConfig.page.backgroundColor);
         viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);

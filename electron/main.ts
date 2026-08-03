@@ -51,7 +51,7 @@ function dispatchDataPlatformDeepLink(deepLink: DataPlatformDeepLink): void {
   pendingDataPlatformDeepLink = null;
 }
 
-// 必须在 app ready 前请求高性能 GPU。保留 SwiftShader 软件回退，由渲染进程探测后降级并输出日志。
+// 必须在 app ready 前请求高性能 GPU；Scene View 会用严格 WebGL 上下文和实际 renderer 校验阻断软件回退。
 // 驱动黑名单仍由 Chromium 保留，避免强行启用不稳定驱动。
 app.commandLine.appendSwitch(HIGH_PERFORMANCE_GPU_SWITCH);
 

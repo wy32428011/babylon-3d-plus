@@ -35,6 +35,7 @@
     "smoke:shelf-instancing": "node scripts/smoke-shelf-shared-instancing.mjs",
     "smoke:scene-capacity": "node scripts/smoke-static-model-instancing-policy.mjs && node scripts/smoke-asset-load-scheduler.mjs && node scripts/smoke-scene-capacity.mjs && npm run smoke:editor-performance",
     "smoke:gpu": "npm run build && node scripts/smoke-gpu-acceleration.mjs",
+    "smoke:viewer:gpu": "node scripts/smoke-viewer-gpu-contract.mjs",
     "pack:win": "npm run build && electron-builder --win dir --x64",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs",

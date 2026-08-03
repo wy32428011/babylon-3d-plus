@@ -18,7 +18,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - 首页启动台：进入五面板编辑器前会先显示首页；左侧“最近项目”通过 Electron 主进程从可配置的数据中台 `POST /api/v1/projects/query` 拉取业务项目列表，支持按项目名称进行服务端搜索，并打开该业务项目当前绑定的数字孪生工程；右侧继续显示本地最近场景，并保留新建场景、打开项目目录和打开场景文件等入口。本地最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
 - 数据中台发布：Toolbar 提供 `发布到数据中台`，桌面端是数字孪生工程编辑和版本发布的唯一入口。发布会先保存当前场景，再生成包含全部场景与实际引用资源的 SOURCE ZIP、自包含 Viewer DIST ZIP，按分片断点上传并在数据中台创建工程版本、发布记录及 nginx 部署；数字孪生 SOURCE/DIST 发布包会跳过 CAD 参考图和 DXF 文件，避免跨机器原图路径失效阻断发布，本地场景与独立 Web 部署导出仍保留 CAD；目标业务项目已有当前数字孪生工程时必须显式确认覆盖，并沿用原 `editorProjectId` 创建下一版本。
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
-- GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU、禁用软件 3D rasterizer，并在主窗口明确启用 WebGL；Windows 正式打包版按企业部署策略额外关闭 GPU sandbox。编辑器 Scene View 使用 `high-performance` 上下文并拒绝 SwiftShader、WARP 等软件 renderer，避免静默退回 CPU 模拟渲染。模型文件读取与格式解析仍由 CPU/Worker 执行，几何和纹理上传后由 GPU 完成绘制、Shader、纹理采样与画面合成。
+- GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU，并在主窗口明确启用 WebGL；Windows 正式打包版按企业部署策略额外关闭 GPU sandbox。编辑器 Scene View 和发布后的独立 Web Viewer 都使用 `high-performance` 上下文、设置 `failIfMajorPerformanceCaveat=true`，并拒绝 SwiftShader、WARP 等软件 renderer，避免页面静默退回 CPU 模拟渲染；Viewer 无法获得硬件 WebGL 时会显示阻断原因和浏览器 GPU 排查建议。模型文件读取与格式解析仍由 CPU/Worker 执行，几何和纹理上传后由 GPU 完成绘制、Shader、纹理采样与画面合成。
 - Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部，中间列独立承载 Scene、Project 与 Console；Project/Console 只与 Scene 画布同宽，在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到 Project 区域最小化入口，点击后以弹窗查看完整日志，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
 - Babylon Scene View：在 Scene 面板中渲染 Babylon.js 3D 场景，并同步当前场景文档中的基础 Mesh、导入模型与灯光；默认编辑器相机使用更开阔的 `标准` 视野，新场景可视距离为 `12000 m`、最大为 `20000 m`，让地面网格上方和周围保留更大的黑色背景可见范围，并可在 Toolbar 中切换 `近景`、`标准`、`远景`、`全景` 四档可视范围；鼠标滚轮近距离缩放带有最小观察距离与近裁剪保护，避免靠近模型时画面被裁成全黑；左键拖拽旋转或移动视角时以真实相机输入和位姿变化优先，即使从模型表面开始轻微拖拽也不会触发模型拾取，纯单击仍正常选中模型；Toolbar 新增“俯”视角按钮，可保留当前观察中心与缩放距离切换为稳定俯视视角，方便依据地面 CAD 图纸定位并搭建场景。
 - 大场景原模型 Geometry 无损优化：不降低渲染分辨率、抗锯齿、纹理、材质、光照或几何质量，也不焊接、删面、隐藏可见模型或使用 LOD/代理；同一 `sourceUrl + assetRevision` 的普通静态模型继续复用单份源 `AssetContainer`，每个实体保留独立 Transform、显隐、锁定、拾取和选择语义；普通导入模型、复制副本与阵列实例选中时统一使用同一个 `SelectionOutlineLayer` 描边。Scene View 编辑态会把同模板的无脚本模型，以及已核对的 Box、Chain、GD、HCTS、Shelf、WLTS、YZJ 参数化模型临时归并为 thinInstance；参数脚本先完整执行，随后批次仅复用真实模型的顶点、索引、材质、纹理和所有部件，在任何相机距离与视角都不创建方块、框架或其它替代 Geometry。正式批次按空间分片并只对相机视锥外实例执行正常裁剪；实例进入视锥后始终提交原模型 Geometry。模型与环境加载最多 4 个并发任务，纯选择变化走 `SceneRuntime.syncSelection()`，Hierarchy 对 10k/50k 行采用固定行高虚拟化。Scene View 内置 1 Hz 性能 HUD，可查看 FPS、CPU/GPU frame time、Draw Call、Mesh、thinInstance、原模型/代理实体数、GPU 顶点/三角工作量与材质分类，并复制最近一分钟报告；代理计数必须恒为 0，监控器可通过 Toolbar 的“性能”复选框显示或隐藏。WebGL 上下文丢失或渲染循环异常会显示可读遮罩，Babylon 恢复后自动清除。详见 `docs/scene-capacity-performance.md`。
@@ -496,6 +496,7 @@ npm run build
 
 ## 最近完成
 
+- 2026-08-03：修复发布后的独立 Web Viewer 可静默回退软件 WebGL、拖动时出现低帧率和类似撕裂观感的问题：Viewer 现在显式要求硬件加速，共享 Babylon Engine 恢复 `requireHardwareAcceleration` 的严格语义，使用 `high-performance`、`failIfMajorPerformanceCaveat=true`、`desynchronized=false`，并校验实际 renderer；SwiftShader、WARP、llvmpipe 等软件实现会直接阻断并展示浏览器硬件加速排查提示。新增 `npm run smoke:viewer:gpu` 固化发布 Viewer 的 GPU 与帧同步契约。
 - 2026-07-31：天空盒基础直径扩大到 `10000 m`，尺寸倍率统一为 `0.1–1.0` 等比缩放并显示实际直径；含天空盒场景最低可视距离自动迁移为 `12000 m`，按 F 聚焦临时提升到 `20000 m`。相机在球体内部时背景点击不再误选天空盒，从外部查看时仍可点击球面；编辑器与导出 Viewer 保持一致。
 - 2026-07-31：场景“保存当前视角”扩展为完整启动视角，显式记录相机位姿、轨道/俯视朝向与透视/正交投影；所有编辑器场景加载入口和导出 Web Viewer 会自动恢复，复位按钮恢复同一完整状态，旧场景兼容回退到轨道透视。场景文件保存仍只写入最后一次显式确认的视角，不会被后续临时观察角度覆盖；新增序列化兼容测试和 `npm run smoke:camera-view`。
 - 2026-07-30：重构 Scene View 地面辅助网格：移除两个 `80,000 m` Ground、第二套 Shader、GlowLayer 和逐帧呼吸更新，改为单 Mesh、单 Shader 的相机局部有限网格；承载平面按主格吸附观察中心，Shader 使用有界世界原点余数保持米制坐标稳定，并提供细格/主格/粗格像素自适应、远端渐隐、正常深度遮挡和无深度写入。新增 `smoke:grid` 验证单 Draw 资源契约、事件驱动更新、正交覆盖、吸附稳定与资源释放。
@@ -514,7 +515,7 @@ npm run build
 - 2026-07-30：环境模型升级为单一全局场景底座：新环境按真实包围盒 X/Z 居中、Y=0 落地，旧场景继续保留 `X=-2m` 左侧摆放并提供显式转换；Inspector 新增源单位修正、位置/XYZ 旋转/统一缩放、显隐、透明度、幽灵显示、重置、聚焦、临时 Gizmo、加载状态和折叠统计。环境切换、变体、单位修正和同包重导采用候选容器事务，失败保留旧环境；编辑器、运行预览与导出 Viewer 共用同一静态环境运行时，不启用 GLB 相机、灯光、动画或脚本。环境聚焦同时修复 ArcRotate Target 高差导致相机翻到地下的问题。
 - 2026-07-23：修复 thinInstance 模型阵列中每个逻辑模型的参数化脚本失效：运行时按完整模型参数快照分组，相同参数组合共享一个隐藏脚本宿主，不同组合独立执行声明式参数绑定和外置参数脚本；脚本输出继续一次性提交为 thinInstance，宿主不显示、不拾取。连续调参复用原宿主，恢复相同参数后自动合并批次，源 GLB 仍通过资产缓存复用。
 - 2026-07-23：Windows NSIS 安装包补齐 GPU/WebGL 安装态回归：新增 `smoke-packaged-gpu.mjs` 直接校验生产主进程 GPU feature、活动显卡、启动开关和 Scene View 实际 renderer，并通过版本核对阻断旧安装程序；`npm run smoke:installer:gpu` 串联完整构建、NSIS 产物生成和生产 EXE 验证。Windows 打包继续复用已安装的 Electron runtime，并在 `afterPack` 清理默认入口文件，避免端点安全软件导致解压目录重命名失败。
-- 2026-07-23：固化编辑器 GPU/WebGL 硬件加速契约：Electron 在 ready 前请求高性能 GPU，BrowserWindow 明确启用 WebGL；Scene View 使用 `powerPreference: high-performance`、`failIfMajorPerformanceCaveat: true` 并拒绝 SwiftShader/WARP/llvmpipe 等软件 renderer，初始化失败通过现有 Scene 错误遮罩呈现；新增 `npm run smoke:gpu` 验证 Electron GPU compositing、WebGL 状态、上下文属性和实际 renderer。独立 Web Viewer 兼容策略不变。
+- 2026-07-23：固化编辑器 GPU/WebGL 硬件加速契约：Electron 在 ready 前请求高性能 GPU，BrowserWindow 明确启用 WebGL；Scene View 使用 `powerPreference: high-performance`、`failIfMajorPerformanceCaveat: true` 并拒绝 SwiftShader/WARP/llvmpipe 等软件 renderer，初始化失败通过现有 Scene 错误遮罩呈现；新增 `npm run smoke:gpu` 验证 Electron GPU compositing、WebGL 状态、上下文属性和实际 renderer。当时独立 Web Viewer 兼容策略未改；该策略已于 2026-08-03 收紧为必须使用硬件 WebGL。
 - 2026-07-23：Shift+Gizmo 单轴阵列从普通导入模型扩展到全部可阵列实体：新增内置 Mesh、虚拟定位线框、已解锁 CAD 参考层和 POI 特效的世界/局部正负轴投影测量与不可拾取临时预览；POI 纯粒子效果使用半透明范围代理，不复制粒子系统。文件夹、灯光和全局唯一模型生成器继续排除。阵列名称统一改为按源对象名称末尾数字递增，例如 `测试 1001 → 测试 1002/1003`，纯字符串追加序号且不再添加“副本”；导入模型和定位线框的资产编号继续独立递增。导入模型的临时预览与正式结果统一改为固定批次 Mesh + thinInstance 矩阵，正式阵列项持久化在源实体 `components.modelArray` 中，不再按数量创建模型实体、脚本和加载任务；非模型阵列保持普通实体复制。确认、取消、生命周期清理和单条撤销/重做语义保持不变，场景版本仍为 `1`。
 - 2026-07-22：新增普通导入模型 Shift+Gizmo 单轴阵列：局部/世界 X/Y/Z 拖动按可见几何投影跨度生成零间距临时克隆，原模型保持原位，松开后共享阵列弹框可实时调整副本数量、净间距和编号规则；确认时名称与 `modelAsset.assetCode` 从源资产编号同步递增并原子检查冲突，整组副本以一条命令撤销/重做，取消、失焦、选择/模式/场景变化会清理预览且不修改场景格式。
 - 2026-07-22：首页启动台新增数据中台地址配置弹窗，配置持久化到 Electron `userData/data-platform-config.json`；左侧“最近项目”由主进程通过 `POST /api/v1/projects/query` 拉取、校验并按更新时间展示业务项目，支持 `projectName` 搜索，并新增可信项目 ID 打开流程。当前格式工程包会安全下载、展开并加载唯一场景；无包、旧 `project.bjseditor` 或结构不兼容时进入空白场景；进入编辑器后后台全量同步普通、环境和组合模型。已使用 `http://127.0.0.1:8086` 完成真实联调：19 位业务 ID 无损保留，10 个普通模型共 25 个文件同步成功，Shelf 双 TS 脚本不再被旧换行拼接字段重复下载。
@@ -645,12 +646,12 @@ npm run build
 
 Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，自动收集普通模型、模型生成器目标、环境、天空盒、DXF、模型脚本与贴图，输出可部署目录或 ZIP。该离线部署包能力继续保留，并与 `发布到数据中台` 相互独立；导出结果使用独立只读 Web Viewer，不包含编辑器界面和 Electron 运行环境。
 
-部署包通过根目录 `runtime-config.json` 外置页面、资源和 MQTT 配置；修改 JSON 后刷新页面即可生效。真实 MQTT 仅支持 `ws://` / `wss://`，静态 JSON 不应保存用户名、密码或长期 Token。部署包必须通过 HTTP/HTTPS 静态服务器访问，不支持直接双击 `index.html`。
+部署包通过根目录 `runtime-config.json` 外置页面、资源和 MQTT 配置；修改 JSON 后刷新页面即可生效。真实 MQTT 仅支持 `ws://` / `wss://`，静态 JSON 不应保存用户名、密码或长期 Token。部署包必须通过 HTTP/HTTPS 静态服务器访问，不支持直接双击 `index.html`。Viewer 要求浏览器启用硬件加速 WebGL，不再静默降级到软件 renderer；无法获得 GPU 时会在页面状态层显示明确错误。
 
 完整目录结构、配置字段、CSP、外部资源、安全边界和部署说明见 [场景 Web 部署导出](docs/scene-web-export.md)。
 ## Windows 安装包构建与安装
 
-项目使用 Electron + electron-builder 生成 Windows x64 NSIS 安装包。生产构建使用相对资源路径，因此安装后由 `file://` 加载 renderer 时，React 页面、Babylon.js 分块、CAD Worker、样式和图片仍可正常读取。GPU 启动开关、软件 3D rasterizer 禁用和 Scene View 硬件 WebGL 校验位于打入 `app.asar` 的生产代码中；Windows 免安装目录和 NSIS 安装后的程序还会按企业部署策略关闭 GPU sandbox，开发态继续保留该 sandbox。正式包不绕过 Chromium GPU blocklist，也不固定 `use-angle` 后端。
+项目使用 Electron + electron-builder 生成 Windows x64 NSIS 安装包。生产构建使用相对资源路径，因此安装后由 `file://` 加载 renderer 时，React 页面、Babylon.js 分块、CAD Worker、样式和图片仍可正常读取。GPU 启动开关和 Scene View 硬件 WebGL 严格校验位于打入 `app.asar` 的生产代码中；Windows 免安装目录和 NSIS 安装后的程序还会按企业部署策略关闭 GPU sandbox，开发态继续保留该 sandbox。正式包不绕过 Chromium GPU blocklist，也不固定 `use-angle` 后端。
 
 ### 构建环境
 
