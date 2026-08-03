@@ -685,6 +685,8 @@ async function inspectResourceStrip(window, exerciseHorizontalScroll = false) {
 async function run() {
   const fixtureRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-fixtures-'));
   const storageRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-storage-'));
+  const validProjectRoot = path.join(storageRoot, 'Projects', VALID_PROJECT_ID);
+  const sharedResourcesRoot = path.join(storageRoot, 'SharedResources');
   const alternateStorageRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-storage-alternate-'));
   const userDataRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-userdata-'));
   const legacyUserDataRoot = await mkdtemp(path.join(tmpdir(), 'zending-data-platform-userdata-v1-'));
@@ -868,7 +870,7 @@ async function run() {
       state: 'visible',
       timeout: 20000,
     });
-    await launched.window.locator('.console-log').filter({ hasText: '环境模型已更新。' }).waitFor({
+    await launched.window.locator('.console-log').filter({ hasText: '环境模型资源已刷新，并保留当前摆放与显示设置。' }).waitFor({
       state: 'visible',
       timeout: 20000,
     });
@@ -886,21 +888,23 @@ async function run() {
     assert.equal(loadedScene.canceled, false);
     const loadedSceneDocument = JSON.parse(loadedScene.content);
     const loadedModelPath = loadedSceneDocument.scene.entities.entity_data_platform_smoke.components.modelAsset.sourcePath;
-    assert.equal(loadedModelPath, path.join(storageRoot, 'Assets', 'Models', 'PackageModel', 'PackageModel.glb'));
+    assert.equal(loadedModelPath, path.join(validProjectRoot, 'Assets', 'Models', 'PackageModel', 'PackageModel.glb'));
     assert.ok(!loadedModelPath.includes('old-editor'));
 
     const assets = await launched.window.evaluate(() => window.editorApi.listProjectAssets());
-    assert.equal(assets.projectRoot, storageRoot);
-    assert.equal(assets.assets.length, 4);
-    assert.equal(assets.assets.filter((item) => item.libraryKind === 'model').length, 3);
-    assert.equal(assets.assets.filter((item) => item.libraryKind === 'environment').length, 1);
-    assert.ok(assets.assets.every((item) => item.path.startsWith(storageRoot)));
+    assert.equal(assets.projectRoot, validProjectRoot);
+    assert.equal(assets.assets.length, 6);
+    assert.equal(assets.assets.filter((item) => item.libraryKind === 'model').length, 4);
+    assert.equal(assets.assets.filter((item) => item.libraryKind === 'environment').length, 2);
+    assert.ok(assets.assets.every((item) => (
+      item.path.startsWith(validProjectRoot) || item.path.startsWith(sharedResourcesRoot)
+    )));
     assert.ok(assets.assets.some((item) => item.packagePath.includes(path.join('Assets', 'Models', 'ComboModels', `Combo-${COMBO_MODEL_ID}-`))));
     assert.equal(
-      await readFile(path.join(storageRoot, 'Assets', 'Models', `Model-${GLOBAL_MODEL_ID}-全局普通模型`, 'global-runtime.ts'), 'utf8'),
+      await readFile(path.join(sharedResourcesRoot, 'Assets', 'Models', `Model-${GLOBAL_MODEL_ID}-全局普通模型`, 'global-runtime.ts'), 'utf8'),
       'export const dataDriven = { device: { defaultAssetCode: "GLOBAL" } };\n',
     );
-    const noScriptFiles = await readdir(path.join(storageRoot, 'Assets', 'Models', `Model-${PLAIN_MODEL_ID}-无脚本普通模型`));
+    const noScriptFiles = await readdir(path.join(sharedResourcesRoot, 'Assets', 'Models', `Model-${PLAIN_MODEL_ID}-无脚本普通模型`));
     assert.ok(noScriptFiles.every((fileName) => !fileName.toLowerCase().endsWith('.ts')));
     assert.ok(!mock.requests.some((item) => item.path.endsWith('/not-a-typescript-file.js')));
     assert.ok(!mock.requests.some((item) => item.path.endsWith('/runtime-types.d.ts')));
@@ -1019,7 +1023,7 @@ async function run() {
     assert.ok(layoutAt1180.scrollHeight <= layoutAt1180.clientHeight + 1);
     assert.equal(layoutAt1180.attemptedScrollTop, 0);
 
-    const beforeRetryFailureIndex = await readFile(path.join(storageRoot, '.babylon-editor', 'asset-index.json'), 'utf8');
+    const beforeRetryFailureIndex = await readFile(path.join(sharedResourcesRoot, '.babylon-editor', 'asset-index.json'), 'utf8');
     mock.failNextModelDownload();
     const noPackage = await openAndWaitForSync(launched.window, '2');
     assert.equal(noPackage.openResult.source, 'generated');
@@ -1065,9 +1069,9 @@ async function run() {
       Math.abs(restoredCompactLayout.bottomWorkspaceHeight - layoutAt1180.bottomWorkspaceHeight) <= 1,
       '同步提示关闭后底部资源区未恢复紧凑高度',
     );
-    assert.equal(await readFile(path.join(storageRoot, '.babylon-editor', 'asset-index.json'), 'utf8'), beforeRetryFailureIndex);
+    assert.equal(await readFile(path.join(sharedResourcesRoot, '.babylon-editor', 'asset-index.json'), 'utf8'), beforeRetryFailureIndex);
     const lockedModelPath = path.join(
-      storageRoot,
+      sharedResourcesRoot,
       'Assets',
       'Models',
       `Model-${GLOBAL_MODEL_ID}-全局普通模型`,
@@ -1098,7 +1102,7 @@ async function run() {
     assert.match(incompatible.openResult.warning, /只能包含一个 \.scene\.json|当前发现 0 个/);
     assert.equal(incompatible.finalProgress.phase, 'completed');
 
-    const indexPath = path.join(storageRoot, '.babylon-editor', 'asset-index.json');
+    const indexPath = path.join(sharedResourcesRoot, '.babylon-editor', 'asset-index.json');
     const beforeFailureIndex = await readFile(indexPath, 'utf8');
     await expectOpenFailure(launched.window, '5', '越界路径');
     await expectOpenFailure(launched.window, '6', 'ZIP 损坏');

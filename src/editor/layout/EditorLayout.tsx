@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { DeploymentExportDialog } from '../deployment/DeploymentExportDialog';
+import { DigitalTwinPublishDialog } from '../deployment/DigitalTwinPublishDialog';
 import { useDeploymentExport } from '../deployment/useDeploymentExport';
+import { useDigitalTwinPublish } from '../deployment/useDigitalTwinPublish';
 import { ConsolePanel } from '../panels/ConsolePanel';
 import { HierarchyPanel } from '../panels/HierarchyPanel';
 import { InspectorPanel } from '../panels/InspectorPanel';
@@ -31,8 +33,10 @@ export function EditorLayout() {
   const [isConsoleDialogOpen, setConsoleDialogOpen] = useState(false);
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
   const [isDeploymentExportDialogOpen, setDeploymentExportDialogOpen] = useState(false);
+  const [isDigitalTwinPublishDialogOpen, setDigitalTwinPublishDialogOpen] = useState(false);
   const [performanceHudVisible, setPerformanceHudVisible] = useState(true);
   const deploymentExport = useDeploymentExport();
+  const digitalTwinPublish = useDigitalTwinPublish();
   const [runtimePreviewError, setRuntimePreviewError] = useState<string | null>(null);
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
@@ -256,6 +260,9 @@ export function EditorLayout() {
         onRedo={redo}
         onSaveScene={() => void saveScene()}
         onLoadScene={() => void loadScene()}
+        onOpenDigitalTwinPublish={() => setDigitalTwinPublishDialogOpen(true)}
+        digitalTwinPublishBusy={digitalTwinPublish.isBusy}
+        digitalTwinPublishProgress={digitalTwinPublish.state.progress}
         onOpenDeploymentExport={() => setDeploymentExportDialogOpen(true)}
         deploymentExportStatus={deploymentExport.state.status}
         deploymentExportProgress={deploymentExport.state.progress}
@@ -282,6 +289,11 @@ export function EditorLayout() {
         controller={deploymentExport}
         onClose={() => setDeploymentExportDialogOpen(false)}
         open={isDeploymentExportDialogOpen}
+      />
+      <DigitalTwinPublishDialog
+        controller={digitalTwinPublish}
+        onClose={() => setDigitalTwinPublishDialogOpen(false)}
+        open={isDigitalTwinPublishDialogOpen}
       />
       <div className={styles.workspace}>
         <aside className={styles.leftColumn}>

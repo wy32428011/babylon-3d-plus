@@ -1,0 +1,868 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { app } from 'electron';
+
+const PROJECT_ID = '2054201280000000001';
+const EDITOR_PROJECT_ID = '2054201280000000101';
+const BASE_VERSION_ID = '2054201280000000201';
+const NEW_VERSION_ID = '2054201280000000202';
+const RESOURCE_REVISION = '2054201280000000301';
+const NEW_RESOURCE_REVISION = '2054201280000000302';
+const SUCCESS_REQUEST_ID = 'success-overwrite-resource-confirm';
+const MISSING_CONFIRM_REQUEST_ID = 'missing-resource-confirm';
+const RESOURCE_CONFLICT_REQUEST_ID = 'resource-revision-conflict';
+const COMMIT_CONFLICT_REQUEST_ID = 'commit-version-conflict';
+const VERSION_CONFLICT_REQUEST_ID = 'version-conflict';
+const CANCEL_REQUEST_ID = 'cancel-upload';
+const UPLOAD_FAILURE_REQUEST_ID = 'permanent-upload-failure';
+const MISMATCHED_PREPARE_REQUEST_ID = 'mismatched-prepare-response';
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function createSceneContent() {
+  return `${JSON.stringify({
+    version: 3,
+    scene: {
+      id: 'scene_digital_twin_publish_integration',
+      name: '数字孪生发布集成场景',
+      entityIds: ['cad-reference'],
+      entities: {
+        'cad-reference': {
+          id: 'cad-reference',
+          name: '发布时跳过的 CAD',
+          components: {
+            transform: {
+              position: { x: 0, y: 0, z: 0 },
+              rotation: { x: 0, y: 0, z: 0 },
+              scale: { x: 1, y: 1, z: 1 },
+            },
+            cadReference: {
+              sourcePath: 'C:\\missing-digital-twin-cad\\layout.dxf',
+              sourceUrl: 'editor-asset://local/C%3A%5Cmissing-digital-twin-cad%5Clayout.dxf',
+            },
+          },
+        },
+      },
+      selectedEntityId: null,
+      sceneSettings: {
+        camera: { savedPose: null, viewDistance: 5000 },
+        sensitivity: { zoom: 10, pan: 10, rotate: 10 },
+        environment: null,
+      },
+    },
+  }, null, 2)}\n`;
+}
+
+function createRemoteStatus(overrides = {}) {
+  return {
+    projectId: PROJECT_ID,
+    editorProjectId: EDITOR_PROJECT_ID,
+    latestVersionId: BASE_VERSION_ID,
+    latestVersionNumber: 1,
+    onlineVersionId: BASE_VERSION_ID,
+    onlineVersionNumber: 1,
+    status: 'ONLINE',
+    stableUrl: `http://127.0.0.1/digital-twin/projects/${PROJECT_ID}/`,
+    releaseUrl: `http://127.0.0.1/digital-twin/releases/${PROJECT_ID}/1/`,
+    lastPublishedAt: '2026-08-01T08:00:00',
+    ...overrides,
+  };
+}
+
+function createPublishRequest(requestId, sceneContent, overrides = {}) {
+  return {
+    requestId,
+    publishName: `发布-${requestId}`,
+    remark: 'Electron mock API 集成测试',
+    sceneContent,
+    overwriteExisting: true,
+    confirmResourceBindings: false,
+    ...overrides,
+  };
+}
+
+class DigitalTwinMockServer {
+  constructor() {
+    this.server = null;
+    this.baseUrl = '';
+    this.requests = [];
+    this.sessions = new Map();
+    this.tasks = new Map();
+    this.remoteStatus = createRemoteStatus();
+    this.nextId = 2054201281000000000n;
+    this.cancelChunkStarted = null;
+    this.resolveCancelChunkStarted = null;
+    this.cancelChunkGate = null;
+    this.releaseCancelChunkGate = null;
+    this.failNextStatus = false;
+    this.redirectNextStatus = false;
+  }
+
+  allocateId() {
+    const result = String(this.nextId);
+    this.nextId += 1n;
+    return result;
+  }
+
+  async start() {
+    this.server = createServer((request, response) => {
+      void this.handle(request, response).catch((error) => {
+        if (response.destroyed || response.writableEnded) return;
+        this.sendJson(response, {
+          success: false,
+          code: 'MOCK_SERVER_ERROR',
+          message: error instanceof Error ? error.message : String(error),
+          data: null,
+        }, 500);
+      });
+    });
+    await new Promise((resolve, reject) => {
+      this.server.once('error', reject);
+      this.server.listen(0, '127.0.0.1', resolve);
+    });
+    const address = this.server.address();
+    if (!address || typeof address === 'string') throw new Error('mock server address 无效。');
+    this.baseUrl = `http://127.0.0.1:${address.port}/platform`;
+  }
+
+  async close() {
+    this.releaseDelayedCancelChunk();
+    if (!this.server) return;
+    await new Promise((resolve, reject) => this.server.close((error) => error ? reject(error) : resolve()));
+    this.server = null;
+  }
+
+  setRemoteStatus(status) {
+    this.remoteStatus = { ...status };
+  }
+
+  resetRequests() {
+    this.requests.length = 0;
+  }
+
+  async waitForCancelChunkStart() {
+    if (!this.cancelChunkStarted) {
+      this.cancelChunkStarted = new Promise((resolve) => {
+        this.resolveCancelChunkStarted = resolve;
+      });
+    }
+    await Promise.race([
+      this.cancelChunkStarted,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('等待取消场景上传分片超时。')), 20000)),
+    ]);
+  }
+
+  releaseDelayedCancelChunk() {
+    this.releaseCancelChunkGate?.();
+    this.releaseCancelChunkGate = null;
+    this.cancelChunkGate = null;
+  }
+
+  async handle(request, response) {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    const rawBody = await this.readRequestBody(request);
+    const contentType = String(request.headers['content-type'] ?? '');
+    const body = contentType.includes('application/json') && rawBody.length > 0
+      ? JSON.parse(rawBody.toString('utf8'))
+      : rawBody;
+    this.requests.push({
+      method: request.method,
+      path: url.pathname,
+      body,
+      headers: { ...request.headers },
+    });
+
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/digital-twin/projects/status') {
+      assert.deepEqual(body, { projectId: PROJECT_ID });
+      if (this.redirectNextStatus) {
+        this.redirectNextStatus = false;
+        response.writeHead(302, { location: `${this.baseUrl}/redirect-target` });
+        response.end();
+      } else if (this.failNextStatus) {
+        this.failNextStatus = false;
+        this.sendJson(response, { success: false, code: 'STATUS_REFRESH_UNAVAILABLE', message: '状态刷新暂时不可用', data: null }, 503);
+      } else {
+        this.sendSuccess(response, this.remoteStatus);
+      }
+      return;
+    }
+
+    if (url.pathname === '/platform/redirect-json' || url.pathname === '/platform/redirect-file') {
+      response.writeHead(302, { location: `${this.baseUrl}/redirect-target` });
+      response.end();
+      return;
+    }
+
+    if (url.pathname === '/platform/redirect-target') {
+      this.sendSuccess(response, this.remoteStatus);
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/digital-twin/publish-tasks/prepare') {
+      await this.handlePrepare(response, body);
+      return;
+    }
+
+    const uploadDetailMatch = /^\/platform\/api\/v1\/digital-twin\/uploads\/(\d+)$/.exec(url.pathname);
+    if (request.method === 'GET' && uploadDetailMatch) {
+      this.sendSuccess(response, this.toSessionResponse(this.getSession(uploadDetailMatch[1])));
+      return;
+    }
+
+    const uploadChunkMatch = /^\/platform\/api\/v1\/digital-twin\/uploads\/(\d+)\/chunks\/(\d+)$/.exec(url.pathname);
+    if (request.method === 'PUT' && uploadChunkMatch) {
+      await this.handleChunk(response, uploadChunkMatch[1], Number(uploadChunkMatch[2]), rawBody);
+      return;
+    }
+
+    const uploadCompleteMatch = /^\/platform\/api\/v1\/digital-twin\/uploads\/(\d+)\/complete$/.exec(url.pathname);
+    if (request.method === 'POST' && uploadCompleteMatch) {
+      this.handleComplete(response, uploadCompleteMatch[1]);
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/digital-twin/publish-tasks/commit') {
+      this.handleCommit(response, body);
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/digital-twin/publish-tasks/cancel') {
+      this.handleCancel(response, body);
+      return;
+    }
+
+    this.sendJson(response, { success: false, code: 'NOT_FOUND', message: url.pathname, data: null }, 404);
+  }
+
+  async handlePrepare(response, body) {
+    assert.equal(typeof body.requestId, 'string');
+    assert.equal(body.projectId, PROJECT_ID);
+    assert.equal(typeof body.baseVersionId, 'string');
+    assert.match(body.sourcePackage.sha256, SHA256_PATTERN);
+    assert.match(body.distPackage.sha256, SHA256_PATTERN);
+    assert.ok(body.sourcePackage.fileSize > 0);
+    assert.ok(body.distPackage.fileSize > 0);
+
+    if (body.requestId === MISSING_CONFIRM_REQUEST_ID && body.confirmResourceBindings !== true) {
+      this.sendJson(response, {
+        success: false,
+        code: 'DIGITAL_TWIN_RESOURCE_BINDING_CONFIRM_REQUIRED',
+        message: '项目缺少数字孪生资源关联，请确认补充。',
+        data: { missingModelIds: ['101'], missingEnvModelIds: [], missingComboModelIds: [] },
+      }, 409);
+      return;
+    }
+    if (body.requestId === RESOURCE_CONFLICT_REQUEST_ID) {
+      this.sendJson(response, {
+        success: false,
+        code: 'DIGITAL_TWIN_RESOURCE_REVISION_CONFLICT',
+        message: '项目资源修订已经变化。',
+        data: { expectedRevision: body.resourceRevision, actualRevision: NEW_RESOURCE_REVISION },
+      }, 409);
+      return;
+    }
+
+    const taskId = this.allocateId();
+    const sourceUpload = this.createSession(body.requestId, 'SOURCE', body.sourcePackage);
+    const distUpload = this.createSession(body.requestId, 'DIST', body.distPackage);
+    const task = {
+      taskId,
+      requestId: body.requestId,
+      projectId: body.projectId,
+      editorProjectId: EDITOR_PROJECT_ID,
+      baseVersionId: body.baseVersionId,
+      projectResourceRevision: body.requestId === SUCCESS_REQUEST_ID && body.confirmResourceBindings === true
+        ? NEW_RESOURCE_REVISION
+        : body.resourceRevision,
+      publishName: body.publishName,
+      remark: body.remark,
+      entryScenePath: body.entryScenePath,
+      entrySceneName: body.entrySceneName,
+      status: 'PREPARED',
+      stage: 'UPLOADING',
+      errorCode: null,
+      errorMessage: null,
+      sourceUpload: this.toSessionResponse(sourceUpload),
+      distUpload: this.toSessionResponse(distUpload),
+      editorProjectVersionId: null,
+      editorProjectPublishId: null,
+      projectPublishId: null,
+      stableUrl: null,
+      releaseUrl: null,
+      createdAt: '2026-08-01T09:00:00',
+      updatedAt: '2026-08-01T09:00:00',
+    };
+    if (body.requestId === MISMATCHED_PREPARE_REQUEST_ID) {
+      task.projectId = '2054201280000000999';
+    }
+    this.tasks.set(taskId, { task, sourceUploadId: sourceUpload.uploadId, distUploadId: distUpload.uploadId });
+    this.sendSuccess(response, task);
+  }
+
+  createSession(requestId, packageType, descriptor) {
+    const uploadId = this.allocateId();
+    const chunkSize = Math.max(1, Math.ceil(descriptor.fileSize / 3));
+    const totalChunks = Math.ceil(descriptor.fileSize / chunkSize);
+    const uploadedChunks = requestId === SUCCESS_REQUEST_ID && totalChunks > 1 ? new Set([0]) : new Set();
+    const session = {
+      requestId,
+      uploadId,
+      packageType,
+      fileName: descriptor.fileName,
+      fileSize: descriptor.fileSize,
+      sha256: descriptor.sha256,
+      chunkSize,
+      totalChunks,
+      uploadedChunks,
+      completedFileId: null,
+      status: 'UPLOADING',
+      attempts: new Map(),
+    };
+    this.sessions.set(uploadId, session);
+    return session;
+  }
+
+  getSession(uploadId) {
+    const session = this.sessions.get(uploadId);
+    if (!session) throw new Error(`未知 uploadId：${uploadId}`);
+    return session;
+  }
+
+  async handleChunk(response, uploadId, chunkIndex, rawBody) {
+    const session = this.getSession(uploadId);
+    assert.ok(chunkIndex >= 0 && chunkIndex < session.totalChunks, '上传分片索引越界。');
+    const expectedBytes = Math.min(session.chunkSize, session.fileSize - chunkIndex * session.chunkSize);
+    assert.equal(rawBody.length, expectedBytes, `${session.packageType} 分片长度不正确。`);
+    const attempt = (session.attempts.get(chunkIndex) ?? 0) + 1;
+    session.attempts.set(chunkIndex, attempt);
+
+    if (session.requestId === SUCCESS_REQUEST_ID && session.packageType === 'SOURCE' && chunkIndex === 1 && attempt === 1) {
+      this.sendJson(response, { success: false, code: 'TEMPORARY_UPLOAD_FAILURE', message: '临时上传失败', data: null }, 503);
+      return;
+    }
+
+    if (session.requestId === UPLOAD_FAILURE_REQUEST_ID && session.packageType === 'SOURCE' && chunkIndex === 0) {
+      this.sendJson(response, { success: false, code: 'PERMANENT_UPLOAD_FAILURE', message: '永久上传失败', data: null }, 503);
+      return;
+    }
+
+    if (session.requestId === CANCEL_REQUEST_ID && !this.cancelChunkGate) {
+      this.cancelChunkStarted ??= new Promise((resolve) => {
+        this.resolveCancelChunkStarted = resolve;
+      });
+      this.cancelChunkGate = new Promise((resolve) => {
+        this.releaseCancelChunkGate = resolve;
+      });
+      this.resolveCancelChunkStarted?.();
+      await this.cancelChunkGate;
+      if (response.destroyed || response.writableEnded) return;
+    }
+
+    session.uploadedChunks.add(chunkIndex);
+    this.sendSuccess(response, this.toSessionResponse(session));
+  }
+
+  handleComplete(response, uploadId) {
+    const session = this.getSession(uploadId);
+    assert.equal(session.uploadedChunks.size, session.totalChunks, `${session.packageType} 分片尚未完整上传。`);
+    session.status = 'COMPLETED';
+    session.completedFileId = this.allocateId();
+    this.sendSuccess(response, this.toSessionResponse(session));
+  }
+
+  handleCommit(response, body) {
+    const record = this.tasks.get(String(body.taskId));
+    if (!record) throw new Error(`未知 taskId：${body.taskId}`);
+    const source = this.getSession(record.sourceUploadId);
+    const dist = this.getSession(record.distUploadId);
+    assert.equal(source.status, 'COMPLETED');
+    assert.equal(dist.status, 'COMPLETED');
+    if (record.task.requestId === COMMIT_CONFLICT_REQUEST_ID) {
+      this.sendJson(response, {
+        success: false,
+        code: 'DIGITAL_TWIN_VERSION_CONFLICT',
+        message: '上传期间远端数字孪生工程产生了新版本。',
+        data: { latestVersionId: NEW_VERSION_ID },
+      }, 409);
+      return;
+    }
+    record.task = {
+      ...record.task,
+      status: 'COMPLETED',
+      stage: 'COMPLETED',
+      sourceUpload: this.toSessionResponse(source),
+      distUpload: this.toSessionResponse(dist),
+      editorProjectVersionId: NEW_VERSION_ID,
+      editorProjectPublishId: this.allocateId(),
+      projectPublishId: this.allocateId(),
+      stableUrl: `http://127.0.0.1/digital-twin/projects/${PROJECT_ID}/`,
+      releaseUrl: `http://127.0.0.1/digital-twin/releases/${PROJECT_ID}/2/`,
+      updatedAt: '2026-08-01T09:10:00',
+    };
+    this.remoteStatus = createRemoteStatus({
+      latestVersionId: NEW_VERSION_ID,
+      latestVersionNumber: 2,
+      onlineVersionId: NEW_VERSION_ID,
+      onlineVersionNumber: 2,
+      releaseUrl: record.task.releaseUrl,
+      lastPublishedAt: '2026-08-01T09:10:00',
+    });
+    if (record.task.requestId === SUCCESS_REQUEST_ID) this.failNextStatus = true;
+    this.sendSuccess(response, record.task);
+  }
+
+  handleCancel(response, body) {
+    const record = this.tasks.get(String(body.id));
+    if (!record) throw new Error(`未知待取消 taskId：${body.id}`);
+    record.task = { ...record.task, status: 'CANCELED', stage: 'CANCELED', updatedAt: '2026-08-01T09:20:00' };
+    this.sendSuccess(response, record.task);
+  }
+
+  toSessionResponse(session) {
+    const uploadedChunks = [...session.uploadedChunks].sort((left, right) => left - right);
+    const receivedBytes = uploadedChunks.reduce((total, chunkIndex) => {
+      return total + Math.min(session.chunkSize, session.fileSize - chunkIndex * session.chunkSize);
+    }, 0);
+    assert.ok(Number.isSafeInteger(receivedBytes) && receivedBytes >= 0, JSON.stringify({
+      uploadId: session.uploadId,
+      fileSize: session.fileSize,
+      chunkSize: session.chunkSize,
+      uploadedChunks,
+      receivedBytes,
+    }));
+    return {
+      uploadId: session.uploadId,
+      packageType: session.packageType,
+      fileName: session.fileName,
+      fileSize: session.fileSize,
+      sha256: session.sha256,
+      chunkSize: session.chunkSize,
+      totalChunks: session.totalChunks,
+      uploadedChunks,
+      receivedBytes,
+      status: session.status,
+      completedFileId: session.completedFileId,
+      expiresAt: '2026-08-02T09:00:00',
+    };
+  }
+
+  async readRequestBody(request) {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks);
+  }
+
+  sendSuccess(response, data) {
+    this.sendJson(response, { success: true, code: 'SUCCESS', message: 'ok', data });
+  }
+
+  sendJson(response, payload, status = 200) {
+    response.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    });
+    response.end(JSON.stringify(payload));
+  }
+}
+
+async function expectFileMissing(filePath) {
+  await assert.rejects(stat(filePath), (error) => error && error.code === 'ENOENT');
+}
+
+async function run() {
+  const configuredTestRoot = process.env.ZENDING_DIGITAL_TWIN_PUBLISH_TEST_ROOT;
+  if (!configuredTestRoot || !path.isAbsolute(configuredTestRoot)) {
+    throw new Error('数字孪生发布集成测试必须由专用 runner 提供临时目录。');
+  }
+  const testRoot = path.resolve(configuredTestRoot);
+  const userDataRoot = path.join(testRoot, 'user-data');
+  const fakeAppRoot = path.join(testRoot, 'fake-app');
+  const workspaceRoot = path.join(testRoot, 'workspace');
+  const projectRoot = path.join(workspaceRoot, 'Projects', PROJECT_ID);
+  const sharedResourcesRoot = path.join(workspaceRoot, 'SharedResources');
+  const scenePath = path.join(projectRoot, 'Scenes', 'main.scene.json');
+  const sceneContent = createSceneContent();
+  const mock = new DigitalTwinMockServer();
+  let originalGetAppPath = null;
+  let clearCurrentDataPlatformBinding = () => undefined;
+
+  try {
+    await mkdir(userDataRoot, { recursive: true });
+    await mkdir(path.join(fakeAppRoot, 'dist-viewer-template'), { recursive: true });
+    await writeFile(path.join(fakeAppRoot, 'dist-viewer-template', 'index.html'), '<!doctype html><html><body><div id="root"></div></body></html>\n', 'utf8');
+    app.setPath('userData', userDataRoot);
+
+    originalGetAppPath = app.getAppPath.bind(app);
+    app.getAppPath = () => fakeAppRoot;
+    await mock.start();
+
+    const bindingModule = await import('../../dist-electron/ipc/dataPlatformBindingStore.js');
+    const transferModule = await import('../../dist-electron/ipc/dataPlatformTransfer.js');
+    const uploadClientModule = await import('../../dist-electron/ipc/digitalTwinUploadClient.js');
+    const projectAssetModule = await import('../../dist-electron/ipc/projectAssetStore.js');
+    const publishModule = await import('../../dist-electron/ipc/digitalTwinPublishService.js');
+    clearCurrentDataPlatformBinding = bindingModule.clearCurrentDataPlatformBinding;
+
+    const baseOrigin = new URL(mock.baseUrl).origin;
+    assert.equal(
+      transferModule.resolveDataPlatformRemoteUrl(mock.baseUrl, 'api/v1/files/1').toString(),
+      `${mock.baseUrl}/api/v1/files/1`,
+    );
+    assert.equal(
+      transferModule.resolveDataPlatformRemoteUrl(mock.baseUrl, `${baseOrigin}/files/1.zip#download`).toString(),
+      `${baseOrigin}/files/1.zip`,
+    );
+    assert.throws(
+      () => transferModule.resolveDataPlatformRemoteUrl(mock.baseUrl, 'https://example.com/files/1.zip'),
+      /必须与已配置服务地址同源/,
+    );
+
+    mock.resetRequests();
+    await assert.rejects(
+      transferModule.requestDataPlatformJson({
+        baseUrl: mock.baseUrl,
+        endpointPath: 'redirect-json',
+        body: {},
+        signal: new AbortController().signal,
+        timeoutMs: 5_000,
+        context: '数据中台 JSON 重定向测试',
+      }),
+      (error) => error instanceof Error && error.name !== 'AbortError',
+    );
+    assert.equal(mock.requests.some((request) => request.path.endsWith('/redirect-target')), false, '数据中台 JSON 请求不应跟随重定向。');
+
+    mock.resetRequests();
+    const redirectDestination = path.join(testRoot, 'redirect-download.bin');
+    await assert.rejects(
+      transferModule.downloadRemoteFile({
+        baseUrl: mock.baseUrl,
+        remoteUrl: 'redirect-file',
+        destinationPath: redirectDestination,
+        maxBytes: 1024,
+        signal: new AbortController().signal,
+        timeoutMs: 5_000,
+        context: '数据中台文件重定向测试',
+      }),
+      (error) => error instanceof Error && error.name !== 'AbortError',
+    );
+    await expectFileMissing(redirectDestination);
+    assert.equal(mock.requests.some((request) => request.path.endsWith('/redirect-target')), false, '数据中台文件下载不应跟随重定向。');
+
+    mock.redirectNextStatus = true;
+    mock.resetRequests();
+    const redirectClient = new uploadClientModule.DigitalTwinUploadClient(mock.baseUrl);
+    await assert.rejects(
+      redirectClient.projectStatus(PROJECT_ID, new AbortController().signal),
+      (error) => error instanceof Error && error.name !== 'AbortError',
+    );
+    assert.ok(mock.requests.some((request) => request.path.endsWith('/digital-twin/projects/status')));
+    assert.equal(mock.requests.some((request) => request.path.endsWith('/redirect-target')), false, '发布 API 不应跟随重定向。');
+
+    const oversizedUploadId = mock.allocateId();
+    mock.sessions.set(oversizedUploadId, {
+      requestId: 'oversized-chunk-session',
+      uploadId: oversizedUploadId,
+      packageType: 'SOURCE',
+      fileName: 'oversized.zip',
+      fileSize: 1,
+      sha256: 'a'.repeat(64),
+      chunkSize: 64 * 1024 * 1024 + 1,
+      totalChunks: 1,
+      uploadedChunks: new Set(),
+      completedFileId: null,
+      status: 'UPLOADING',
+      attempts: new Map(),
+    });
+    await assert.rejects(
+      redirectClient.uploadDetail(oversizedUploadId, new AbortController().signal),
+      /chunkSize 超过 64 MiB/,
+    );
+
+    mock.setRemoteStatus(createRemoteStatus({ projectId: '2054201280000000999' }));
+    await assert.rejects(
+      redirectClient.projectStatus(PROJECT_ID, new AbortController().signal),
+      /状态响应与请求项目不匹配/,
+    );
+    mock.setRemoteStatus(createRemoteStatus());
+
+    await assert.rejects(
+      redirectClient.prepare({
+        requestId: MISMATCHED_PREPARE_REQUEST_ID,
+        projectId: PROJECT_ID,
+        baseVersionId: BASE_VERSION_ID,
+        overwriteExisting: true,
+        publishName: '身份校验测试',
+        remark: null,
+        entryScenePath: 'Scenes/main.scene.json',
+        entrySceneName: 'main',
+        manifestJson: '{}',
+        resourceRevision: RESOURCE_REVISION,
+        confirmResourceBindings: false,
+        modelIds: [],
+        envModelIds: [],
+        comboModelIds: [],
+        sourcePackage: { fileName: 'source.zip', fileSize: 1, sha256: 'a'.repeat(64) },
+        distPackage: { fileName: 'dist.zip', fileSize: 1, sha256: 'b'.repeat(64) },
+      }, new AbortController().signal),
+      /prepare 响应与原发布请求不匹配/,
+    );
+
+    await projectAssetModule.ensureProjectDirectories(projectRoot);
+    await projectAssetModule.ensureProjectDirectories(sharedResourcesRoot);
+    await mkdir(path.dirname(scenePath), { recursive: true });
+    await writeFile(scenePath, sceneContent, 'utf8');
+    await writeFile(
+      path.join(projectRoot, '.babylon-editor', 'asset-index.json'),
+      `${JSON.stringify({ version: 2, assets: [] }, null, 2)}\n`,
+      'utf8',
+    );
+    await writeFile(
+      path.join(sharedResourcesRoot, '.babylon-editor', 'asset-index.json'),
+      `${JSON.stringify({ version: 2, assets: [] }, null, 2)}\n`,
+      'utf8',
+    );
+    await projectAssetModule.activateProjectRoot(projectRoot, scenePath);
+    projectAssetModule.setSharedProjectAssetRoot(sharedResourcesRoot);
+
+    async function resetBinding(overrides = {}) {
+      const metadata = bindingModule.createDataPlatformBinding({
+        baseUrl: mock.baseUrl,
+        projectId: PROJECT_ID,
+        projectName: '发布集成测试项目',
+        editorProjectId: EDITOR_PROJECT_ID,
+        latestVersionId: BASE_VERSION_ID,
+        latestVersionNumber: 1,
+        resourceRevision: RESOURCE_REVISION,
+        entryScenePath: 'Scenes/main.scene.json',
+        syncedAt: '2026-08-01T08:00:00.000Z',
+        ...overrides,
+      });
+      await bindingModule.writeDataPlatformBinding(projectRoot, metadata);
+      bindingModule.setCurrentDataPlatformBinding(projectRoot, metadata);
+      return metadata;
+    }
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    const localActiveContext = publishModule.getLocalDigitalTwinPublishContext(true);
+    assert.equal(localActiveContext.publishActive, true);
+    assert.equal(localActiveContext.projectId, PROJECT_ID);
+    assert.equal(mock.requests.length, 0, '本地发布活动状态不应访问网络。');
+    const overwriteResult = await publishModule.publishDigitalTwin(
+      createPublishRequest('overwrite-confirm-required', sceneContent, { overwriteExisting: false }),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(overwriteResult.status, 'confirmation-required');
+    assert.equal(overwriteResult.errorCode, 'DIGITAL_TWIN_OVERWRITE_CONFIRM_REQUIRED');
+    assert.match(overwriteResult.message, /已经有当前数字孪生工程/);
+    assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    const successProgress = [];
+    const successResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(SUCCESS_REQUEST_ID, sceneContent, { confirmResourceBindings: true }),
+      new AbortController().signal,
+      (progress) => successProgress.push(progress),
+    );
+    assert.equal(successResult.status, 'completed');
+    assert.equal(successResult.editorProjectId, EDITOR_PROJECT_ID);
+    assert.equal(successResult.editorProjectVersionId, NEW_VERSION_ID);
+    assert.equal(successResult.editorProjectVersionNumber, 2);
+    assert.match(successResult.stableUrl, /\/digital-twin\/projects\//);
+    assert.match(successResult.releaseUrl, /\/digital-twin\/releases\//);
+    assert.ok(successResult.warnings.some((warning) => warning.includes('CAD 参考图')));
+    assert.ok(successResult.warnings.some((warning) => warning.includes('刷新远端项目状态失败')));
+    for (const phase of ['saving', 'source-package', 'dist-package', 'prepare', 'upload-source', 'upload-dist', 'commit', 'completed']) {
+      assert.ok(successProgress.some((progress) => progress.phase === phase), `缺少发布进度阶段：${phase}`);
+    }
+    const successPrepare = mock.requests.find((request) => (
+      request.path.endsWith('/publish-tasks/prepare') && request.body.requestId === SUCCESS_REQUEST_ID
+    ));
+    assert.ok(successPrepare);
+    assert.equal(successPrepare.body.overwriteExisting, true);
+    assert.equal(successPrepare.body.confirmResourceBindings, true);
+    assert.equal(successPrepare.body.projectId, PROJECT_ID);
+    assert.equal(successPrepare.body.baseVersionId, BASE_VERSION_ID);
+    assert.equal(successPrepare.body.resourceRevision, RESOURCE_REVISION);
+    assert.deepEqual(successPrepare.body.modelIds, []);
+    assert.deepEqual(successPrepare.body.envModelIds, []);
+    assert.deepEqual(successPrepare.body.comboModelIds, []);
+    assert.ok(successPrepare.body.sourcePackage.fileName.endsWith('.zip'));
+    assert.ok(successPrepare.body.distPackage.fileName.endsWith('.zip'));
+    assert.equal(mock.requests.some((request) => request.headers.authorization), false, '可信内网发布不应附带鉴权头。');
+    for (const packageType of ['SOURCE', 'DIST']) {
+      const session = [...mock.sessions.values()].find((item) => item.requestId === SUCCESS_REQUEST_ID && item.packageType === packageType);
+      assert.ok(session, `${packageType} 上传会话缺失。`);
+      const putRequests = mock.requests.filter((request) => request.path.includes(`/uploads/${session.uploadId}/chunks/`));
+      assert.ok(putRequests.length > 0, `${packageType} 未上传任何待续传分片。`);
+      assert.equal(putRequests.some((request) => request.path.endsWith('/chunks/0')), false, `${packageType} 已上传分片 0 不应重复发送。`);
+      assert.ok(mock.requests.some((request) => request.path.endsWith(`/uploads/${session.uploadId}/complete`)), `${packageType} 未调用 complete。`);
+      assert.equal(session.status, 'COMPLETED');
+    }
+    const successSource = [...mock.sessions.values()].find((item) => item.requestId === SUCCESS_REQUEST_ID && item.packageType === 'SOURCE');
+    assert.equal(successSource.attempts.get(1), 2, 'SOURCE 临时失败分片应有限重试一次后成功。');
+    const commitRequest = mock.requests.find((request) => request.path.endsWith('/publish-tasks/commit'));
+    assert.ok(commitRequest);
+    assert.equal(typeof commitRequest.body.taskId, 'string');
+    const persistedAfterSuccess = await bindingModule.readDataPlatformBinding(projectRoot);
+    assert.equal(persistedAfterSuccess.latestVersionId, NEW_VERSION_ID);
+    assert.equal(persistedAfterSuccess.latestVersionNumber, 2);
+    assert.equal(persistedAfterSuccess.resourceRevision, NEW_RESOURCE_REVISION);
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    const missingResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(MISSING_CONFIRM_REQUEST_ID, sceneContent),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(missingResult.status, 'confirmation-required');
+    assert.equal(missingResult.errorCode, 'DIGITAL_TWIN_RESOURCE_BINDING_CONFIRM_REQUIRED');
+    assert.deepEqual(missingResult.errorData, {
+      missingModelIds: ['101'],
+      missingEnvModelIds: [],
+      missingComboModelIds: [],
+    });
+    const missingPrepare = mock.requests.find((request) => request.path.endsWith('/publish-tasks/prepare'));
+    assert.equal(missingPrepare.body.confirmResourceBindings, false);
+    assert.equal(mock.requests.some((request) => request.path.includes('/chunks/')), false);
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus({ latestVersionId: NEW_VERSION_ID, latestVersionNumber: 2 }));
+    mock.resetRequests();
+    const versionConflictResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(VERSION_CONFLICT_REQUEST_ID, sceneContent),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(versionConflictResult.status, 'conflict');
+    assert.equal(versionConflictResult.errorCode, 'DIGITAL_TWIN_VERSION_CONFLICT');
+    assert.ok(versionConflictResult.conflictCopyPath);
+    assert.ok(versionConflictResult.conflictCopyPath.startsWith(path.join(workspaceRoot, 'Conflicts', PROJECT_ID)));
+    assert.equal((await readFile(versionConflictResult.conflictCopyPath)).subarray(0, 2).toString('ascii'), 'PK');
+    assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    const resourceConflictResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(RESOURCE_CONFLICT_REQUEST_ID, sceneContent),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(resourceConflictResult.status, 'conflict');
+    assert.equal(resourceConflictResult.errorCode, 'DIGITAL_TWIN_RESOURCE_REVISION_CONFLICT');
+    assert.deepEqual(resourceConflictResult.errorData, {
+      expectedRevision: RESOURCE_REVISION,
+      actualRevision: NEW_RESOURCE_REVISION,
+    });
+    assert.ok(resourceConflictResult.conflictCopyPath);
+    assert.equal((await readFile(resourceConflictResult.conflictCopyPath)).subarray(0, 2).toString('ascii'), 'PK');
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    const commitConflictResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(COMMIT_CONFLICT_REQUEST_ID, sceneContent),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(commitConflictResult.status, 'conflict');
+    assert.equal(commitConflictResult.errorCode, 'DIGITAL_TWIN_VERSION_CONFLICT');
+    assert.deepEqual(commitConflictResult.errorData, { latestVersionId: NEW_VERSION_ID });
+    assert.ok(commitConflictResult.conflictCopyPath);
+    assert.equal((await readFile(commitConflictResult.conflictCopyPath)).subarray(0, 2).toString('ascii'), 'PK');
+    assert.ok(mock.requests.some((request) => request.path.endsWith('/publish-tasks/commit')));
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    await assert.rejects(
+      publishModule.publishDigitalTwin(
+        createPublishRequest(UPLOAD_FAILURE_REQUEST_ID, sceneContent),
+        new AbortController().signal,
+        () => undefined,
+      ),
+      /永久上传失败/,
+    );
+    const failedChunkRequests = mock.requests.filter((request) => request.path.includes('/chunks/'));
+    assert.equal(failedChunkRequests.length, 4, '永久分片错误应在有限重试后停止。');
+    assert.ok(mock.requests.some((request) => request.path.endsWith('/publish-tasks/cancel')));
+    await expectFileMissing(path.join(app.getPath('temp'), 'zending-digital-twin-publish', UPLOAD_FAILURE_REQUEST_ID));
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    const cancelController = new AbortController();
+    const cancelProgress = [];
+    const cancelPromise = publishModule.publishDigitalTwin(
+      createPublishRequest(CANCEL_REQUEST_ID, sceneContent),
+      cancelController.signal,
+      (progress) => cancelProgress.push(progress),
+    );
+    await mock.waitForCancelChunkStart();
+    cancelController.abort();
+    const cancelResult = await cancelPromise;
+    mock.releaseDelayedCancelChunk();
+    assert.equal(cancelResult.status, 'canceled');
+    assert.ok(cancelProgress.some((progress) => progress.phase === 'canceled'));
+    const cancelRequest = mock.requests.find((request) => request.path.endsWith('/publish-tasks/cancel'));
+    assert.ok(cancelRequest);
+    assert.equal(typeof cancelRequest.body.id, 'string');
+    await expectFileMissing(path.join(app.getPath('temp'), 'zending-digital-twin-publish', CANCEL_REQUEST_ID));
+
+    assert.equal(sha256(await readFile(scenePath)), sha256(Buffer.from(sceneContent)), '发布保存后的入口场景内容应稳定。');
+    console.log(JSON.stringify({
+      status: 'PASS',
+      verified: [
+        'local-active-state-without-network',
+        'overwrite-confirmation',
+        'prepare-source-dist',
+        'skip-missing-cad',
+        'resume-uploaded-chunks',
+        'transient-chunk-retry',
+        'permanent-upload-failure-cancel',
+        'complete-source-dist',
+        'commit-and-binding-refresh',
+        'post-commit-status-refresh-fallback',
+        'missing-resource-binding-confirmation',
+        'version-conflict-copy',
+        'resource-revision-conflict-copy',
+        'commit-version-conflict-copy',
+        'cancel-remote-task',
+        'no-auth-header',
+        'lossless-long-identifiers',
+        'same-origin-remote-url',
+        'data-platform-json-redirect-rejected',
+        'data-platform-download-redirect-rejected',
+        'publish-api-redirect-rejected',
+        'oversized-upload-chunk-rejected',
+        'project-status-identity-mismatch-rejected',
+        'prepare-task-identity-mismatch-rejected',
+      ],
+    }, null, 2));
+  } finally {
+    clearCurrentDataPlatformBinding();
+    await mock.close().catch(() => undefined);
+    if (originalGetAppPath) app.getAppPath = originalGetAppPath;
+  }
+}
+
+app.whenReady().then(run).then(
+  () => app.exit(0),
+  (error) => {
+    console.error('[digital-twin-publish-integration]', error);
+    app.exit(1);
+  },
+);

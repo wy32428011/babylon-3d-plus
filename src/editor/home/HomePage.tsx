@@ -18,9 +18,11 @@ type HomeStatus = {
 type DataPlatformProjectOpenResult = {
   projectRoot: string;
   sceneFilePath: string | null;
-  source: 'package' | 'generated';
+  source: 'package' | 'generated' | 'local';
   warning: string | null;
+  conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  binding: DataPlatformBindingSummary;
 };
 
 type DataPlatformProjectOpenApi = {

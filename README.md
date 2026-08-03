@@ -15,7 +15,8 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 ## 当前功能
 
 - Electron 桌面窗口：通过 Electron 主进程启动独立桌面应用窗口。
-- 首页启动台：进入五面板编辑器前会先显示首页；左侧“最近项目”通过 Electron 主进程从可配置的数据中台 `POST /api/v1/projects/query` 拉取业务项目列表，支持按项目名称进行服务端搜索，并可直接打开当前格式 Editor 工程；右侧继续显示本地最近场景，并保留新建场景、打开项目目录和打开场景文件等入口。本地最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
+- 首页启动台：进入五面板编辑器前会先显示首页；左侧“最近项目”通过 Electron 主进程从可配置的数据中台 `POST /api/v1/projects/query` 拉取业务项目列表，支持按项目名称进行服务端搜索，并打开该业务项目当前绑定的数字孪生工程；右侧继续显示本地最近场景，并保留新建场景、打开项目目录和打开场景文件等入口。本地最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
+- 数据中台发布：Toolbar 提供 `发布到数据中台`，桌面端是数字孪生工程编辑和版本发布的唯一入口。发布会先保存当前场景，再生成包含全部场景与实际引用资源的 SOURCE ZIP、自包含 Viewer DIST ZIP，按分片断点上传并在数据中台创建工程版本、发布记录及 nginx 部署；数字孪生 SOURCE/DIST 发布包会跳过 CAD 参考图和 DXF 文件，避免跨机器原图路径失效阻断发布，本地场景与独立 Web 部署导出仍保留 CAD；目标业务项目已有当前数字孪生工程时必须显式确认覆盖，并沿用原 `editorProjectId` 创建下一版本。
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
 - GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU、禁用软件 3D rasterizer，并在主窗口明确启用 WebGL；Windows 正式打包版按企业部署策略额外关闭 GPU sandbox。编辑器 Scene View 使用 `high-performance` 上下文并拒绝 SwiftShader、WARP 等软件 renderer，避免静默退回 CPU 模拟渲染。模型文件读取与格式解析仍由 CPU/Worker 执行，几何和纹理上传后由 GPU 完成绘制、Shader、纹理采样与画面合成。
 - Unity-like 五面板布局：包含 Hierarchy、Scene、Inspector、Project、Console 五个核心编辑器区域，并支持根据窗口尺寸自动自适应；Toolbar 下方左侧 Hierarchy 与右侧 Inspector 贯通到窗口底部，中间列独立承载 Scene、Project 与 Console；Project/Console 只与 Scene 画布同宽，在约 `1024×640` 及以上窗口中保持五面板可见，Console 默认收纳到 Project 区域最小化入口，点击后以弹窗查看完整日志，Toolbar 与 Project 页签通过内部横向滚动承接溢出，资源卡片按可用宽度自动换行并在超出高度后纵向滚动。
@@ -395,11 +396,13 @@ npm run build
 
 ## 基础操作
 
-- 首页进入编辑：启动后在首页点击 `新建场景` 可重置为空白场景并进入编辑器；点击 `打开场景文件` 可选择 `.scene.json`；点击 `打开项目目录` 可进入编辑器并让 Project 面板加载本地项目资源；点击最近场景会直接加载对应场景。左侧数据中台项目卡片提供 `打开`：有可用工程包时下载并加载唯一场景，没有工程包或属于旧格式时创建当前格式本地项目并进入空白场景。
+- 首页进入编辑：启动后在首页点击 `新建场景` 可重置为空白场景并进入编辑器；点击 `打开场景文件` 可选择 `.scene.json`；点击 `打开项目目录` 可进入编辑器并让 Project 面板加载本地项目资源；点击最近场景会直接加载对应场景。左侧数据中台项目卡片提供 `打开`：有可用工程包时下载并加载清单指定的入口场景，没有工程包或属于旧格式时创建当前格式本地项目并进入空白场景。
 - 数据中台配置：点击首页顶部 `数据中台配置`，填写 HTTP/HTTPS 服务根地址并选择 `保存并刷新`；本地联调可使用 `http://127.0.0.1:8086`。地址持久化到 Electron `userData/data-platform-config.json`，主进程随后请求 `<服务地址>/api/v1/projects/query`；留空保存可清除配置。首页常驻的“数据中台工作区”栏显示当前实际目录，可选择 `修改` 或 `恢复默认`；目录选择和读写校验全部由主进程完成，renderer 不能直接提交任意路径。左侧项目列表顶部可输入项目名称后按 Enter 或点击 `搜索`，搜索词通过请求体 `projectName` 字段交给数据中台筛选，点击 `清除` 会恢复默认列表。renderer 打开项目时只提交列表中的 `projectId`，工程包地址由主进程最近一次可信列表缓存解析；项目、Editor 工程和模型等业务主键始终按十进制字符串传递，避免 19 位 ID 被 JavaScript `number` 截断。
-- 数据中台工程包：只接受当前 ZENDING 3D EDITOR 目录结构，即 `.babylon-editor/`、`Assets/Models/`、`Assets/Environments/` 和恰好一个 `.scene.json`；ZIP 根目录和单层包装目录均可。旧 `project.bjseditor` 不迁移，统一按无可用工程包处理。主进程限制 ZIP 压缩体积、文件数、单文件及总展开大小，并拒绝 Zip Slip、绝对路径、盘符路径、加密条目和符号链接。
-- 数据中台模型同步：打开数据中台项目或成功加载本地 `.scene.json` 场景后，若已配置数据中台地址，会在共享工作区后台分页读取 `POST /api/v1/models/query`、`POST /api/v1/env-models/query` 和 `POST /api/v1/combo-models/query`；未配置地址时本地场景仍正常打开并跳过同步。普通模型写入 `Assets/Models/Model-<id>-<名称>/`，环境模型写入 `Assets/Environments/Env-<id>-<名称>/`，组合模型写入 `Assets/Models/ComboModels/Combo-<id>-<名称>/`。普通模型脚本为可选资源：优先使用 `scriptFiles` 权威列表，仅在列表没有有效项时读取旧 `scriptFileName/scriptFileUrl` 兼容字段；接口提供可识别的 `*.ts` 文件名或 URL 时才下载，不要求文件名以 `.model.ts` 结尾，旧字段中以换行拼接的多脚本也会拆分处理；未提供脚本或返回非 TS 条目时直接跳过，不阻断模型同步。同步层会把这些可执行 `.ts`（排除 `.d.ts`）登记为模型脚本，并在资产刷新后由编辑器重新加载。所有数据中台项目共享同一模型库；下载和校验全部完成后才原子替换模型目录与 `.babylon-editor/asset-index.json`。同步成功后 Project 模型库会自动刷新并优先展示同步模型，同时按数据中台业务 ID 重新关联场景中的普通模型、组合模型、模型生成器目标和当前环境模型，通过新的 `assetRevision` 触发 Babylon 资源重载；即使模型名称或主文件名发生变化也能刷新。失败时保留旧库，失败提示支持关闭，也可在 Project 面板重试。
-- 数据中台存储位置：未自定义时开发态使用 `app.getAppPath()`，安装态使用 Electron `userData/data-platform-workspace`（Windows 通常位于 `%APPDATA%/zending-3d-editor/data-platform-workspace`）；也可在首页把目录修改为其他可写位置。所选目录本身即为工作区根目录，应用会在其中管理 `.babylon-editor/`、`Assets/Models/`、`Assets/Environments/` 和场景文件；安装态拒绝选择 EXE 安装目录及其内部路径。首次使用会自动创建所需目录，无需以管理员身份运行；测试环境仍可通过受保护的 `ZENDING_EDITOR_STORAGE_ROOT` 覆盖路径。切换工作区只影响后续打开和同步，不会迁移、覆盖或删除旧目录内容；旧数据可继续通过“打开项目目录”访问或手动复制。
+- 数据中台工程包：当前数字孪生 SOURCE ZIP 保留 `Scenes/` 下的多场景、`.babylon-editor/digital-twin-source-manifest.json` 以及场景实际引用的模型、环境、天空盒和 CAD 资源；打开远端工程时兼容 ZIP 根目录和单层包装目录。旧 `project.bjseditor` 不自动迁移，统一按无可用当前工程包处理。主进程限制 ZIP 压缩体积、文件数、单文件及总展开大小，并拒绝 Zip Slip、绝对路径、盘符路径、加密条目、符号链接与 Junction。
+- 数据中台模型同步：打开数据中台项目或成功加载本地 `.scene.json` 场景后，若已配置数据中台地址，会在共享工作区后台分页读取 `POST /api/v1/models/query`、`POST /api/v1/env-models/query` 和 `POST /api/v1/combo-models/query`；未配置地址时本地场景仍正常打开并跳过同步。普通模型写入 `Assets/Models/Model-<id>-<名称>/`，环境模型写入 `Assets/Environments/Env-<id>-<名称>/`，组合模型写入 `Assets/Models/ComboModels/Combo-<id>-<名称>/`。普通模型脚本为可选资源：优先使用 `scriptFiles` 权威列表，仅在列表没有有效项时读取旧 `scriptFileName/scriptFileUrl` 兼容字段；接口提供可识别的 `*.ts` 文件名或 URL 时才下载，不要求文件名以 `.model.ts` 结尾，旧字段中以换行拼接的多脚本也会拆分处理；未提供脚本或返回非 TS 条目时直接跳过，不阻断模型同步。同步层会把这些可执行 `.ts`（排除 `.d.ts`）登记为模型脚本，并在资产刷新后由编辑器重新加载。所有数据中台项目共享同一模型库；下载和校验全部完成后才原子替换模型目录与 `.babylon-editor/asset-index.json`。同步成功后 Project 模型库会自动刷新并优先展示同步模型，同时按数据中台业务 ID 重新关联场景中的普通模型、组合模型、模型生成器目标和当前环境模型，通过新的 `assetRevision` 触发 Babylon 资源重载；即使模型名称或主文件名发生变化也能刷新。切换到其他数据中台地址后，如果同类型模型的数据库 ID 不同，但模型名称一致且在新模型库中唯一，也会按逻辑包名重新关联；存在同名歧义时不会自动替换。失败时保留旧库，失败提示支持关闭，也可在 Project 面板重试。
+- 数据中台存储位置：未自定义时开发态使用 `app.getAppPath()`，安装态使用 Electron `userData/data-platform-workspace`（Windows 通常位于 `%APPDATA%/zending-3d-editor/data-platform-workspace`）；也可在首页改为其他可写目录。每个业务项目独立写入 `Projects/{projectId}/`，全量共享模型缓存写入同级 `SharedResources/`，冲突副本写入 `Conflicts/{projectId}/`；安装态拒绝选择 EXE 安装目录及其内部路径。切换工作区只影响后续打开和同步，不会迁移、覆盖或删除旧目录内容。
+- 发布冲突与资源关系：远端最新工程版本或项目资源修订发生变化时禁止覆盖发布，并在工作区保留 SOURCE ZIP 冲突副本；场景引用了尚未关联到目标项目的共享资源时，用户确认后只补充缺失关系，不自动解绑已有关系。发布、回滚和 Viewer 按可信内网模式运行，不携带 `Authorization` 或 API Key。项目运行配置通过公开 Viewer 接口下发，因此 URL 和扩展 JSON 均禁止保存密码、令牌、API Key 或凭据字段。
+- 项目深链：Windows 安装包注册 `zending3d://` 协议，数据中台可使用 `zending3d://open-project?baseUrl=<HTTP(S)服务地址>&projectId=<字符串ID>` 打开项目。应用采用单实例处理第二次启动的深链；发布期间禁止切换项目，未保存场景切换前会再次确认。
 - 创建基础对象与常用灯光：在模型库中点击或拖拽 `立方体`、`球体`、`地面`、`虚拟定位线框`、`半球光`、`方向光`、`点光源` 内置资源卡片；Box/立方体卡片明确标注默认尺寸 `1 m × 1 m × 1 m`，拖拽到 Scene View 后会按鼠标释放位置投射到地面平面，并把 Box 中心抬高 `0.5 m` 使底面落地；其它对象保持原有创建路径。
 - 创建 POI 模型生成器：在 `POI库` 点击“模型生成器”可在原点创建青色配置标记，拖入 Scene View 可按地面落点放置标记；一个场景只保留一个有效生成器，重复点击/拖入会选中已有生成器。随后把模型库普通模型或内置立方体、球体、地面拖入 Inspector 的共享生成模板或规则覆盖模型槽位。
 - 选择对象：点击 Hierarchy 项，或在 Scene View 中单击对象；Hierarchy 中可使用 Ctrl/Cmd 多选、Shift 连续多选。
@@ -640,7 +643,7 @@ npm run build
 
 ## 场景 Web 部署导出
 
-Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，自动收集普通模型、模型生成器目标、环境、天空盒、DXF、模型脚本与贴图，输出可部署目录或 ZIP。导出结果使用独立只读 Web Viewer，不包含编辑器界面和 Electron 运行环境。
+Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，自动收集普通模型、模型生成器目标、环境、天空盒、DXF、模型脚本与贴图，输出可部署目录或 ZIP。该离线部署包能力继续保留，并与 `发布到数据中台` 相互独立；导出结果使用独立只读 Web Viewer，不包含编辑器界面和 Electron 运行环境。
 
 部署包通过根目录 `runtime-config.json` 外置页面、资源和 MQTT 配置；修改 JSON 后刷新页面即可生效。真实 MQTT 仅支持 `ws://` / `wss://`，静态 JSON 不应保存用户名、密码或长期 Token。部署包必须通过 HTTP/HTTPS 静态服务器访问，不支持直接双击 `index.html`。
 
@@ -692,7 +695,7 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 
 - 安装器允许用户选择安装目录，并创建桌面快捷方式和开始菜单快捷方式。若旧版使用“为所有用户安装”并位于 `C:\Program Files\ZENDING 3D EDITOR`，升级时应选择相同安装模式和目录，或先卸载旧版，避免保留两个同名快捷方式继续启动旧 EXE。
 - 最近项目与最近场景记录写入 Electron 的 `userData` 目录，不写入只读安装目录；数据中台服务地址和可选自定义工作区保存在同目录的 `data-platform-config.json`，旧版仅含服务地址的 v1 配置会继续兼容读取。
-- 数据中台下载的工程场景与共享模型库：默认开发态写入应用根目录，默认安装态写入 `userData/data-platform-workspace`，也可从首页选择其他可写目录；安装、升级程序不会覆盖工作区，也不会放宽安装目录 ACL。切换工作区不会自动迁移或删除旧数据。
+- 数据中台下载的工程场景默认写入工作区 `Projects/{projectId}`，共享模型库写入 `SharedResources`；默认开发态工作区为应用根目录，默认安装态为 `userData/data-platform-workspace`，也可从首页选择其他可写目录。安装、升级程序不会覆盖工作区，也不会放宽安装目录 ACL；切换工作区不会自动迁移或删除旧数据。
 - 模型库、环境模型库、天空盒库、场景 JSON、CAD 文件和模型脚本仍保存在用户选择的项目目录中；安装或升级程序不会删除项目数据。
 - 卸载默认保留 `userData`，包括最近项目记录、数据中台配置以及 `data-platform-workspace` 中的场景和共享模型，便于重新安装后继续使用。
 

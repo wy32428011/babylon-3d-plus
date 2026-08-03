@@ -4018,3 +4018,102 @@ select {
     grid-template-columns: 1fr;
   }
 }
+
+.digital-twin-publish-dialog {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.digital-twin-publish-message {
+  margin: 0;
+  color: #b9c8cb;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.digital-twin-publish-context-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.digital-twin-publish-context-grid > div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #394b50;
+  border-radius: 4px;
+  background: #1b292d;
+}
+
+.digital-twin-publish-context-grid dt {
+  color: #8fa9ad;
+  font-size: 11px;
+}
+
+.digital-twin-publish-context-grid dd {
+  min-width: 0;
+  margin: 0;
+  color: #e3f0f2;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.digital-twin-publish-context-grid .digital-twin-publish-context-wide {
+  grid-column: 1 / -1;
+}
+
+.digital-twin-publish-confirmation {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid #725f2f;
+  border-radius: 4px;
+  color: #f6df9e;
+  background: #302a1b;
+  cursor: pointer;
+}
+
+.digital-twin-publish-confirmation input {
+  margin-top: 3px;
+}
+
+.digital-twin-publish-confirmation span {
+  display: grid;
+  gap: 3px;
+}
+
+.digital-twin-publish-confirmation small {
+  color: #cbbd91;
+  line-height: 16px;
+}
+
+.digital-twin-publish-confirmation-warning {
+  border-color: #845151;
+  color: #ffd0d0;
+  background: #332020;
+}
+
+.digital-twin-publish-dialog .deployment-export-status p,
+.digital-twin-publish-dialog .deployment-export-result p {
+  margin: 0;
+  color: #b9c8cb;
+  font-size: 11px;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .digital-twin-publish-context-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .digital-twin-publish-context-grid .digital-twin-publish-context-wide {
+    grid-column: auto;
+  }
+}

@@ -6,10 +6,17 @@ import type {
   DataPlatformConfig,
   DataPlatformModelSyncProgress,
   DataPlatformProjectListRequest,
+  DataPlatformProjectEntry,
   DataPlatformProjectListResult,
   DataPlatformProjectOpenResult,
   DataPlatformWorkspaceSelectionResult,
+  DataPlatformDeepLink,
   DeploymentExportRevealRequest,
+  DigitalTwinPublishCancelRequest,
+  DigitalTwinPublishContext,
+  DigitalTwinPublishProgress,
+  DigitalTwinPublishRequest,
+  DigitalTwinPublishResult,
   ImportCadFileResult,
   ImportEnvironmentModelFileResult,
   ImportModelFolderRequest,
@@ -37,6 +44,16 @@ import type { IpcRendererEvent } from 'electron';
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+const dataPlatformDeepLinkHandlers = new Set<(deepLink: DataPlatformDeepLink) => void>();
+let pendingDataPlatformDeepLink: DataPlatformDeepLink | null = null;
+ipcRenderer.on('data-platform:deepLinkOpen', (_event: IpcRendererEvent, payload: DataPlatformDeepLink) => {
+  if (dataPlatformDeepLinkHandlers.size === 0) {
+    pendingDataPlatformDeepLink = payload;
+    return;
+  }
+  for (const handler of dataPlatformDeepLinkHandlers) handler(payload);
+});
+
 contextBridge.exposeInMainWorld('editorApi', {
   version: '0.1.0',
   saveScene: (request: SaveSceneRequest) => ipcRenderer.invoke('scene:save', request),
@@ -56,6 +73,8 @@ contextBridge.exposeInMainWorld('editorApi', {
     ipcRenderer.invoke('data-platform:listProjects', request),
   openDataPlatformProject: (request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectOpenResult> =>
     ipcRenderer.invoke('data-platform:openProject', request),
+  getDataPlatformProject: (request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectEntry> =>
+    ipcRenderer.invoke('data-platform:getProject', request),
   syncDataPlatformModels: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncModels'),
   retryDataPlatformModelSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryModelSync'),
   onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void): (() => void) => {
@@ -83,6 +102,28 @@ contextBridge.exposeInMainWorld('editorApi', {
   importSkyboxFile: (): Promise<ImportSkyboxFileResult> => ipcRenderer.invoke('assets:importSkyboxFile'),
   listModelPackageVariants: (request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> =>
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
+  getDigitalTwinPublishContext: (): Promise<DigitalTwinPublishContext> =>
+    ipcRenderer.invoke('digital-twin-publish:getContext'),
+  publishDigitalTwin: (request: DigitalTwinPublishRequest): Promise<DigitalTwinPublishResult> =>
+    ipcRenderer.invoke('digital-twin-publish:start', request),
+  cancelDigitalTwinPublish: (request: DigitalTwinPublishCancelRequest): Promise<boolean> =>
+    ipcRenderer.invoke('digital-twin-publish:cancel', request),
+  onDigitalTwinPublishProgress: (handler: (progress: DigitalTwinPublishProgress) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: DigitalTwinPublishProgress) => handler(payload);
+    ipcRenderer.on('digital-twin-publish:progress', listener);
+    return () => ipcRenderer.removeListener('digital-twin-publish:progress', listener);
+  },
+  onDataPlatformDeepLink: (handler: (deepLink: DataPlatformDeepLink) => void): (() => void) => {
+    dataPlatformDeepLinkHandlers.add(handler);
+    if (pendingDataPlatformDeepLink) {
+      const pending = pendingDataPlatformDeepLink;
+      pendingDataPlatformDeepLink = null;
+      queueMicrotask(() => {
+        if (dataPlatformDeepLinkHandlers.has(handler)) handler(pending);
+      });
+    }
+    return () => dataPlatformDeepLinkHandlers.delete(handler);
+  },
   /** 发起当前场景的 Web 部署工程导出。 */
   exportWebProject: (request: DeploymentExportRequest): Promise<DeploymentExportResult> =>
     ipcRenderer.invoke('deployment-export:start', request),

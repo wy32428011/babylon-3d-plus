@@ -1,5 +1,6 @@
 import { dialog, ipcMain } from 'electron';
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import type {
   LoadSceneFileRequest,
   LoadSceneResult,
@@ -22,7 +23,14 @@ import {
   rememberRecentSceneFile,
   removeRecentWorkspaceItem,
   selectCurrentProjectRootWithDialog,
+  setSharedProjectAssetRoot,
 } from './projectAssetStore.js';
+import {
+  clearCurrentDataPlatformBinding,
+  readDataPlatformBinding,
+  resolveDataPlatformSharedResourcesRoot,
+  setCurrentDataPlatformBinding,
+} from './dataPlatformBindingStore.js';
 
 type SaveSceneRequestShape = {
   suggestedName?: unknown;
@@ -62,7 +70,16 @@ export function registerProjectIpc(): void {
 
   ipcMain.handle('project:openRecent', async (_event, request: OpenRecentProjectRequest): Promise<ProjectListAssetsResult> => {
     const openRequest = validateOpenRecentProjectRequest(request);
-    return openRecentProject(openRequest.projectRoot);
+    await openRecentProject(openRequest.projectRoot);
+    const binding = await readDataPlatformBinding(openRequest.projectRoot);
+    if (!binding) {
+      clearCurrentDataPlatformBinding();
+      return listProjectAssets();
+    }
+    const workspaceRoot = resolveWorkspaceRootFromDataPlatformProject(openRequest.projectRoot, binding.projectId);
+    setSharedProjectAssetRoot(resolveDataPlatformSharedResourcesRoot(workspaceRoot));
+    setCurrentDataPlatformBinding(openRequest.projectRoot, binding);
+    return listProjectAssets();
   });
 
   ipcMain.handle('project:removeRecentWorkspaceItem', async (_event, request: RemoveRecentWorkspaceItemRequest): Promise<void> => {
@@ -72,6 +89,7 @@ export function registerProjectIpc(): void {
 
   ipcMain.handle('project:selectDirectory', async (): Promise<SelectProjectDirectoryResult> => {
     const projectRoot = await selectCurrentProjectRootWithDialog();
+    if (projectRoot) clearCurrentDataPlatformBinding();
     return { canceled: projectRoot === null, projectRoot };
   });
 
@@ -133,6 +151,15 @@ export function registerProjectIpc(): void {
 
     return { filePath: readRequest.filePath, content };
   });
+}
+
+function resolveWorkspaceRootFromDataPlatformProject(projectRoot: string, projectId: string): string {
+  const normalizedProjectRoot = normalizeFilePath(projectRoot);
+  const projectsRoot = path.dirname(normalizedProjectRoot);
+  if (path.basename(projectsRoot).toLowerCase() !== 'projects' || path.basename(normalizedProjectRoot) !== projectId) {
+    throw new Error('本地数据中台项目工作区结构无效。');
+  }
+  return path.dirname(projectsRoot);
 }
 
 function validateSaveSceneRequest(request: SaveSceneRequest): SaveSceneRequest {

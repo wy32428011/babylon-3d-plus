@@ -294,6 +294,7 @@ const ENTITY_ARRAY_DIRECTION_VECTORS: Record<EntityArrayDirection, Vector3Data> 
 
 type EditorState = {
   scene: SceneDocument;
+  persistedSceneContent: string;
   runtimeMode: EditorRuntimeMode;
   history: CommandHistory;
   hierarchySelectionIds: string[];
@@ -410,7 +411,9 @@ type EditorState = {
   undo: () => void;
   redo: () => void;
   newScene: () => void;
-  saveScene: () => Promise<void>;
+  hasUnsavedChanges: () => boolean;
+  markScenePersisted: (content?: string) => void;
+  saveScene: () => Promise<boolean>;
   loadScene: () => Promise<boolean>;
   loadSceneFromFile: (filePath: string) => Promise<boolean>;
   loadSceneFromContent: (content: string, sourceName: string) => boolean;
@@ -445,6 +448,7 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
 
   return {
     scene,
+    persistedSceneContent: serializeScene(scene),
     history: createCommandHistory(),
     hierarchySelectionIds: [],
     entityClipboard: null,
@@ -2075,8 +2079,11 @@ function ungroupFoldersInScene(scene: SceneDocument, folderIds: string[]): Scene
   };
 }
 
+const initialEditorScene = createEmptySceneDocument();
+
 export const useEditorStore = create<EditorState>((set, get) => ({
-  scene: createEmptySceneDocument(),
+  scene: initialEditorScene,
+  persistedSceneContent: serializeScene(initialEditorScene),
   runtimeMode: 'edit',
   history: createCommandHistory(),
   hierarchySelectionIds: [],
@@ -3907,10 +3914,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return createLoadedSceneState(state, createEmptySceneDocument(), '已新建空白场景。');
     });
   },
+  hasUnsavedChanges: () => {
+    const state = get();
+    return serializeScene(state.scene) !== state.persistedSceneContent;
+  },
+  markScenePersisted: (content) => {
+    const persistedSceneContent = content ?? serializeScene(get().scene);
+    set({ persistedSceneContent });
+  },
   saveScene: async () => {
     if (get().runtimeMode === 'preview') {
       set((state) => guardRuntimePreviewMutation(state, '保存场景'));
-      return;
+      return false;
     }
 
     const sceneSnapshot = get().scene;
@@ -3924,13 +3939,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       if (result.canceled) {
         set((state) => ({ logs: prependLog(state.logs, '已取消保存场景。') }));
-        return;
+        return false;
       }
 
-      set((state) => ({ logs: prependLog(state.logs, `场景已保存：${result.filePath ?? '未知路径'}`) }));
+      set((state) => ({
+        persistedSceneContent: content,
+        logs: prependLog(state.logs, `场景已保存：${result.filePath ?? '未知路径'}`),
+      }));
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set((state) => ({ logs: prependLog(state.logs, `保存场景失败：${message}`) }));
+      return false;
     }
   },
   loadScene: async () => {

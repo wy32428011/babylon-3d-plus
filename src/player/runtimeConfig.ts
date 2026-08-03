@@ -5,10 +5,11 @@ import {
   type MqttSubscriptionConfig,
   type StackerSimulationScenario,
 } from '../editor/model/SceneDocument';
+import { assertNoSensitiveRuntimeConfig, isSensitiveRuntimeConfigKey } from './runtimeConfigSecurity';
 
 /** Web Viewer 启动配置。 */
 export type PlayerRuntimeConfig = {
-  version: 1;
+  version: 1 | 2;
   page: {
     title: string;
     loadingText: string;
@@ -25,9 +26,22 @@ export type PlayerRuntimeConfig = {
     showStatusOverlay: boolean;
   };
   mqtt: MqttConfig;
+  digitalTwin?: {
+    projectId: string;
+    runtimeConfigEndpoint: string;
+  };
+};
+
+export type DigitalTwinProjectRuntimeConfig = {
+  projectId: string;
+  mqttBrokerUrl: string | null;
+  apiBaseUrl: string | null;
+  runtimeEnabled: boolean;
+  config: Record<string, unknown>;
 };
 
 type JsonObject = Record<string, unknown>;
+
 
 /** 将未知值严格断言为普通 JSON 对象。 */
 function assertObject(value: unknown, path: string): JsonObject {
@@ -118,8 +132,7 @@ function isSafeBrowserMqttAddress(address: string): boolean {
   try {
     const url = new URL(address);
     if (!['ws:', 'wss:'].includes(url.protocol) || url.username || url.password) return false;
-    const sensitiveKeys = new Set(['token', 'access_token', 'password', 'username', 'secret', 'apikey', 'api_key']);
-    return [...url.searchParams.keys()].every((key) => !sensitiveKeys.has(key.toLowerCase()));
+    return [...url.searchParams.keys()].every((key) => !isSensitiveRuntimeConfigKey(key));
   } catch {
     return false;
   }
@@ -154,11 +167,55 @@ function parseMqttConfig(value: unknown): MqttConfig {
   };
 }
 
+/** 解析数据中台项目级运行配置响应，所有 URL 均拒绝内嵌凭据。 */
+export function parseDigitalTwinProjectRuntimeConfig(value: unknown): DigitalTwinProjectRuntimeConfig {
+  const envelope = assertObject(value, 'digital-twin-runtime-config');
+  if (envelope.success !== true) throw new Error(typeof envelope.message === 'string' ? envelope.message : '读取项目运行配置失败。');
+  const data = assertObject(envelope.data, 'digital-twin-runtime-config.data');
+  const projectId = typeof data.projectId === 'string'
+    ? data.projectId.trim()
+    : typeof data.projectId === 'number' && Number.isSafeInteger(data.projectId) ? String(data.projectId) : '';
+  if (!/^[1-9]\d{0,63}$/.test(projectId)) throw new Error('项目运行配置 projectId 无效。');
+  const mqttBrokerUrl = parseOptionalSafeUrl(data.mqttBrokerUrl, '项目运行配置 mqttBrokerUrl', ['ws:', 'wss:']);
+  const apiBaseUrl = parseOptionalSafeUrl(data.apiBaseUrl, '项目运行配置 apiBaseUrl', ['http:', 'https:']);
+  let config: Record<string, unknown> = {};
+  if (typeof data.configJson === 'string' && data.configJson.trim()) {
+    try {
+      const parsed = JSON.parse(data.configJson) as unknown;
+      config = assertObject(parsed, '项目运行配置 configJson');
+      assertNoSensitiveRuntimeConfig(config, '项目运行配置 configJson');
+    } catch (error) {
+      throw new Error(`项目运行配置 configJson 无效：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return {
+    projectId,
+    mqttBrokerUrl,
+    apiBaseUrl,
+    runtimeEnabled: data.runtimeEnabled !== false,
+    config,
+  };
+}
+
+function parseOptionalSafeUrl(value: unknown, path: string, protocols: string[]): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  const source = assertString(value, path, 2048);
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    throw new Error(`${path} 不是有效 URL。`);
+  }
+  if (!protocols.includes(url.protocol) || url.username || url.password || url.hash) throw new Error(`${path} 协议或凭据无效。`);
+  if ([...url.searchParams.keys()].some(isSensitiveRuntimeConfigKey)) throw new Error(`${path} 不能包含敏感查询参数。`);
+  return url.toString().replace(/\/+$/, '');
+}
 /** 严格解析 runtime-config.json，任何未知或缺失字段都会阻断启动。 */
 export function parsePlayerRuntimeConfig(value: unknown): PlayerRuntimeConfig {
   const config = assertObject(value, 'runtime-config');
-  assertKeys(config, ['version', 'page', 'paths', 'viewer', 'mqtt'], 'runtime-config');
-  if (config.version !== 1) throw new Error('runtime-config.version 仅支持 1。');
+  const isDigitalTwin = config.version === 2;
+  if (config.version !== 1 && !isDigitalTwin) throw new Error('runtime-config.version 仅支持 1 或 2。');
+  assertKeys(config, isDigitalTwin ? ['version', 'page', 'paths', 'viewer', 'mqtt', 'digitalTwin'] : ['version', 'page', 'paths', 'viewer', 'mqtt'], 'runtime-config');
 
   const page = assertObject(config.page, 'runtime-config.page');
   const paths = assertObject(config.paths, 'runtime-config.paths');
@@ -169,8 +226,20 @@ export function parsePlayerRuntimeConfig(value: unknown): PlayerRuntimeConfig {
   const backgroundColor = assertString(page.backgroundColor, 'runtime-config.page.backgroundColor', 7);
   if (!/^#[0-9a-f]{6}$/i.test(backgroundColor)) throw new Error('runtime-config.page.backgroundColor 必须是 #RRGGBB。');
 
+  let digitalTwin: PlayerRuntimeConfig['digitalTwin'];
+  if (isDigitalTwin) {
+    const projectConfig = assertObject(config.digitalTwin, 'runtime-config.digitalTwin');
+    assertKeys(projectConfig, ['projectId', 'runtimeConfigEndpoint'], 'runtime-config.digitalTwin');
+    const projectId = assertString(projectConfig.projectId, 'runtime-config.digitalTwin.projectId', 64);
+    if (!/^[1-9]\d{0,63}$/.test(projectId)) throw new Error('runtime-config.digitalTwin.projectId 无效。');
+    digitalTwin = {
+      projectId,
+      runtimeConfigEndpoint: assertDeployUrl(projectConfig.runtimeConfigEndpoint, 'runtime-config.digitalTwin.runtimeConfigEndpoint'),
+    };
+  }
+
   return {
-    version: 1,
+    version: config.version as 1 | 2,
     page: {
       title: assertString(page.title, 'runtime-config.page.title', 200),
       loadingText: assertString(page.loadingText, 'runtime-config.page.loadingText', 200),
@@ -187,9 +256,9 @@ export function parsePlayerRuntimeConfig(value: unknown): PlayerRuntimeConfig {
       showStatusOverlay: assertBoolean(viewer.showStatusOverlay, 'runtime-config.viewer.showStatusOverlay'),
     },
     mqtt: parseMqttConfig(config.mqtt),
+    ...(digitalTwin ? { digitalTwin } : {}),
   };
 }
-
 /** 严格解析资源清单并生成虚拟 URL 到部署 URL 的映射。 */
 export function parseDeploymentAssetManifest(value: unknown, assetBaseUrl: URL): Record<string, string> {
   const manifest = assertObject(value, 'asset-manifest');

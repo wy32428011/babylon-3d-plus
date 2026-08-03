@@ -6,7 +6,13 @@ import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { SceneRuntime } from '../runtime/babylon/SceneRuntime';
 import { mqttRuntimeStatusStore } from '../runtime/mqtt/mqttRuntimeStatus';
 import { MqttStackerTelemetryClient } from '../runtime/mqtt/MqttStackerTelemetryClient';
-import { parseDeploymentAssetManifest, parsePlayerRuntimeConfig, type PlayerRuntimeConfig } from './runtimeConfig';
+import {
+  parseDeploymentAssetManifest,
+  parseDigitalTwinProjectRuntimeConfig,
+  parsePlayerRuntimeConfig,
+  type DigitalTwinProjectRuntimeConfig,
+  type PlayerRuntimeConfig,
+} from './runtimeConfig';
 import './player.css';
 
 type PlayerPhase = 'loading' | 'ready' | 'blocked';
@@ -23,6 +29,46 @@ async function fetchJson(url: URL, signal: AbortSignal): Promise<unknown> {
   return JSON.parse(await response.text()) as unknown;
 }
 
+/** 数字孪生部署每次启动都从数据中台读取项目级配置，因此回滚版本不会回滚运行配置。 */
+async function fetchDigitalTwinRuntimeConfig(
+  config: PlayerRuntimeConfig,
+  signal: AbortSignal,
+): Promise<DigitalTwinProjectRuntimeConfig | null> {
+  if (!config.digitalTwin) return null;
+  const endpoint = new URL(config.digitalTwin.runtimeConfigEndpoint, document.baseURI);
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+      'Cache-Control': 'no-store',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ projectId: config.digitalTwin.projectId }),
+    signal,
+  });
+  if (!response.ok) throw new Error(`读取项目运行配置失败：HTTP ${response.status}。`);
+  const runtimeConfig = parseDigitalTwinProjectRuntimeConfig(JSON.parse(await response.text()) as unknown);
+  if (runtimeConfig.projectId !== config.digitalTwin.projectId) throw new Error('项目运行配置与部署项目不匹配。');
+  return runtimeConfig;
+}
+
+function applyDigitalTwinRuntimeConfig(
+  config: PlayerRuntimeConfig,
+  runtimeConfig: DigitalTwinProjectRuntimeConfig | null,
+): PlayerRuntimeConfig {
+  if (!runtimeConfig) return config;
+  if (!runtimeConfig.runtimeEnabled) throw new Error('该数字孪生项目当前已在数据中台停用。');
+  const address = runtimeConfig.mqttBrokerUrl ?? "";
+  return {
+    ...config,
+    mqtt: {
+      ...config.mqtt,
+      address,
+      enabled: config.mqtt.enabled && Boolean(address) && config.mqtt.subscriptions.length > 0,
+    },
+  };
+}
 /** 以 no-store 方式读取场景文本并保留 SceneSerializer 的统一校验入口。 */
 async function fetchText(url: URL, signal: AbortSignal): Promise<string> {
   const response = await fetch(url, { cache: 'no-store', signal });
@@ -74,7 +120,9 @@ export function PlayerApp() {
     const start = async (): Promise<void> => {
       try {
         const runtimeConfigUrl = new URL('./runtime-config.json', document.baseURI);
-        const parsedConfig = parsePlayerRuntimeConfig(await fetchJson(runtimeConfigUrl, abortController.signal));
+        const baseConfig = parsePlayerRuntimeConfig(await fetchJson(runtimeConfigUrl, abortController.signal));
+        const projectRuntimeConfig = await fetchDigitalTwinRuntimeConfig(baseConfig, abortController.signal);
+        const parsedConfig = applyDigitalTwinRuntimeConfig(baseConfig, projectRuntimeConfig);
         if (disposed) return;
         document.title = parsedConfig.page.title;
         setConfig(parsedConfig);
@@ -88,6 +136,11 @@ export function PlayerApp() {
 
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
+        if (projectRuntimeConfig) {
+          sceneDocument.fetchConfig = { url: projectRuntimeConfig.apiBaseUrl ?? '', apiKey: '' };
+          (globalThis as typeof globalThis & { __ZENDING_DIGITAL_TWIN_CONFIG__?: Record<string, unknown> })
+            .__ZENDING_DIGITAL_TWIN_CONFIG__ = projectRuntimeConfig.config;
+        }
         if (disposed) return;
 
         viewport = createBabylonViewport(canvas, handleRuntimeStatus, {

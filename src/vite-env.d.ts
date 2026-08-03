@@ -97,6 +97,16 @@ type DataPlatformProjectEntry = {
   latestEditorProjectName: string | null;
   latestEditorProjectPackageUrl: string | null;
   latestEditorProjectPackageFileName: string | null;
+  currentResourceRevision: string;
+  publishedResourceRevision: string;
+  digitalTwinStatus: string | null;
+  onlineDigitalTwinVersionId: string | null;
+  onlineDigitalTwinVersionNumber: number | null;
+  onlineDigitalTwinPublishId: string | null;
+  onlineProjectPublishId: string | null;
+  digitalTwinStableUrl: string | null;
+  digitalTwinReleaseUrl: string | null;
+  digitalTwinLastPublishedAt: string | null;
   updatedAt: string | null;
 };
 
@@ -104,14 +114,103 @@ type OpenDataPlatformProjectRequest = {
   projectId: string;
 };
 
+type DataPlatformBindingSummary = {
+  baseUrl: string;
+  projectId: string;
+  projectName: string;
+  editorProjectId: string | null;
+  latestVersionId: string | null;
+  latestVersionNumber: number | null;
+  resourceRevision: string;
+  entryScenePath: string | null;
+  syncedAt: string;
+};
+
 type DataPlatformProjectOpenResult = {
   projectRoot: string;
   sceneFilePath: string | null;
-  source: 'package' | 'generated';
+  source: 'package' | 'generated' | 'local';
   warning: string | null;
+  conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  binding: DataPlatformBindingSummary;
 };
 
+type DataPlatformDeepLink = {
+  baseUrl: string;
+  projectId: string;
+};
+
+type DigitalTwinPublishContext = {
+  available: boolean;
+  projectRoot: string | null;
+  baseUrl: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  editorProjectId: string | null;
+  baseVersionId: string | null;
+  baseVersionNumber: number | null;
+  resourceRevision: string | null;
+  entryScenePath: string | null;
+  remoteLatestVersionId: string | null;
+  remoteLatestVersionNumber: number | null;
+  stableUrl: string | null;
+  releaseUrl: string | null;
+  overwriteConfirmationRequired: boolean;
+  versionConflict: boolean;
+  publishActive: boolean;
+};
+
+type DigitalTwinPublishRequest = {
+  requestId: string;
+  publishName: string;
+  remark: string;
+  sceneContent: string;
+  overwriteExisting: boolean;
+  confirmResourceBindings: boolean;
+};
+
+type DigitalTwinPublishProgressPhase =
+  | 'saving'
+  | 'source-package'
+  | 'dist-package'
+  | 'prepare'
+  | 'upload-source'
+  | 'upload-dist'
+  | 'commit'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
+
+type DigitalTwinPublishProgress = {
+  requestId: string;
+  phase: DigitalTwinPublishProgressPhase;
+  detail: string;
+  percent: number;
+  uploadedBytes: number;
+  totalBytes: number;
+};
+
+type DigitalTwinPublishResult = {
+  requestId: string;
+  status: 'completed' | 'confirmation-required' | 'conflict' | 'canceled';
+  errorCode: string | null;
+  message: string;
+  errorData: unknown;
+  conflictCopyPath: string | null;
+  editorProjectId: string | null;
+  editorProjectVersionId: string | null;
+  editorProjectVersionNumber: number | null;
+  editorProjectPublishId: string | null;
+  projectPublishId: string | null;
+  stableUrl: string | null;
+  releaseUrl: string | null;
+  warnings: string[];
+};
+
+type DigitalTwinPublishCancelRequest = {
+  requestId: string;
+};
 type DataPlatformModelSyncPhase =
   | 'querying'
   | 'downloading'
@@ -364,6 +463,7 @@ interface Window {
     resetDataPlatformWorkspace: () => Promise<DataPlatformConfig>;
     listDataPlatformProjects: (request?: DataPlatformProjectListRequest) => Promise<DataPlatformProjectListResult>;
     openDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectOpenResult>;
+    getDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectEntry>;
     syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
@@ -376,6 +476,11 @@ interface Window {
     importEnvironmentModelFile: () => Promise<ImportEnvironmentModelFileResult>;
     importSkyboxFile: () => Promise<ImportSkyboxFileResult>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
+    getDigitalTwinPublishContext: () => Promise<DigitalTwinPublishContext>;
+    publishDigitalTwin: (request: DigitalTwinPublishRequest) => Promise<DigitalTwinPublishResult>;
+    cancelDigitalTwinPublish: (request: DigitalTwinPublishCancelRequest) => Promise<boolean>;
+    onDigitalTwinPublishProgress: (handler: (progress: DigitalTwinPublishProgress) => void) => () => void;
+    onDataPlatformDeepLink: (handler: (deepLink: DataPlatformDeepLink) => void) => () => void;
     exportWebProject: (request: DeploymentExportRequest) => Promise<DeploymentExportResult>;
     cancelWebProjectExport: (request: DeploymentExportCancelRequest) => Promise<boolean>;
     onWebProjectExportProgress: (handler: (progress: DeploymentExportProgress) => void) => () => void;
