@@ -80,7 +80,6 @@ export function createRgvTelemetryState(root: TransformNode): RgvModelTelemetryS
     travelConstraint: null,
     travelTargetPosition: null,
     travelTargetColumn: null,
-    deckReferenceY: null,
     frontCargoKey: null,
     backCargoKey: null,
     frontCargoOnBoard: false,
@@ -91,9 +90,6 @@ export function createRgvTelemetryState(root: TransformNode): RgvModelTelemetryS
     backCargoHoldRotation: null,
     frontTransferProgress: 0,
     backTransferProgress: 0,
-    frontTransferColumn: null,
-    backTransferColumn: null,
-    strandedCargoByColumn: new Map(),
     frontLastCommand: null,
     backLastCommand: null,
     frontLastMovementZ: null,
@@ -109,7 +105,6 @@ export function resetRgvTelemetryState(model: ModelRuntimeEntry): void {
   model.rgvTelemetry.travelConstraint = null;
   model.rgvTelemetry.travelTargetPosition = null;
   model.rgvTelemetry.travelTargetColumn = null;
-  model.rgvTelemetry.deckReferenceY = null;
   model.rgvTelemetry.frontCargoKey = null;
   model.rgvTelemetry.backCargoKey = null;
   model.rgvTelemetry.frontCargoOnBoard = false;
@@ -120,9 +115,6 @@ export function resetRgvTelemetryState(model: ModelRuntimeEntry): void {
   model.rgvTelemetry.backCargoHoldRotation = null;
   model.rgvTelemetry.frontTransferProgress = 0;
   model.rgvTelemetry.backTransferProgress = 0;
-  model.rgvTelemetry.frontTransferColumn = null;
-  model.rgvTelemetry.backTransferColumn = null;
-  model.rgvTelemetry.strandedCargoByColumn.clear();
   model.rgvTelemetry.frontLastCommand = null;
   model.rgvTelemetry.backLastCommand = null;
   model.rgvTelemetry.frontLastMovementZ = null;

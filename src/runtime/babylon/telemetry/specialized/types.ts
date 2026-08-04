@@ -174,8 +174,6 @@ export type RgvModelTelemetryState = {
   travelTargetPosition: Vector3 | null;
   /** 行走目标对应的列号，用于列号边沿检测。 */
   travelTargetColumn: number | null;
-  /** 交接锁定列实体给出的台面高度基准；null 时回退车体包围盒顶面。 */
-  deckReferenceY: number | null;
   frontCargoKey: string | null;
   backCargoKey: string | null;
   /** true=货箱在车上随工位；false=静止于列接驳位或正在交接插值。 */
@@ -185,14 +183,9 @@ export type RgvModelTelemetryState = {
   backCargoHoldPosition: Vector3 | null;
   frontCargoHoldRotation: Quaternion | null;
   backCargoHoldRotation: Quaternion | null;
-  /** 0=在列接驳位，1=在车上工位（交接插值进度）。 */
+  /** 0=在车体朝向列设备一侧的侧缘，1=在车上工位（交接插值进度）。 */
   frontTransferProgress: number;
   backTransferProgress: number;
-  /** movement_z 起转边沿锁定的交接列。 */
-  frontTransferColumn: number | null;
-  backTransferColumn: number | null;
-  /** 放货完成后滞留在列上的货箱：列号 → 货箱键，同列再次起转时清理。 */
-  strandedCargoByColumn: Map<number, string>;
   frontLastCommand: number | null;
   backLastCommand: number | null;
   frontLastMovementZ: number | null;
@@ -251,7 +244,7 @@ export interface SpecializedTelemetryHost {
   findLocatorByDevice(assetCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
   getLocatorTarget(key: string): LocatorRuntimeEntry | null;
   resolveCargoGeneratorForModel(model: ModelRuntimeEntry): ModelGeneratorRuntimeEntry | null;
-  /** 按实体 ID 解析 RGV 列接驳位的世界位姿（模型/定位线框/基础网格实体的 root）；不存在返回 null。 */
+  /** 按实体 ID 解析 RGV 列接驳位的世界位姿（模型/定位线框/基础网格实体的 root，或合批阵列实例的实体位姿）；不存在返回 null。 */
   resolveColumnTargetPose(entityId: string): { position: Vector3; rotation: Quaternion } | null;
   resolveFetchDriveRowForLocator(locator: LocatorRuntimeEntry): number | null;
   /** 抑制 locator 某格口的 fetch 渲染（货物改由设备侧渲染）；返回排号，未启用 fetch 返回 null。 */

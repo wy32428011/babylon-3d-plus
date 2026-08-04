@@ -2079,7 +2079,7 @@ export class SceneRuntime {
     return generator;
   }
 
-  /** 按实体 ID 解析 RGV 列接驳位实体的世界位姿：依次查模型、定位线框和基础网格。 */
+  /** 按实体 ID 解析 RGV 列接驳位实体的世界位姿：依次查模型、定位线框、基础网格和合批阵列实例。 */
   private resolveColumnTargetPose(entityId: string): { position: Vector3; rotation: Quaternion } | null {
     const model = this.models.get(entityId);
     if (model) {
@@ -2092,6 +2092,15 @@ export class SceneRuntime {
     const mesh = this.meshes.get(entityId);
     if (mesh) {
       return { position: mesh.getAbsolutePosition(), rotation: getNodeWorldRotation(mesh) };
+    }
+    // 合批阵列实例没有独立运行时节点；其实体 Transform 就是批次实例的世界矩阵，直接等价于 root 位姿。
+    const arrayInstance = this.modelArrayInstanceEntities.get(entityId);
+    if (arrayInstance) {
+      const transform = arrayInstance.components.transform;
+      return {
+        position: new Vector3(transform.position.x, transform.position.y, transform.position.z),
+        rotation: Quaternion.RotationYawPitchRoll(transform.rotation.y, transform.rotation.x, transform.rotation.z),
+      };
     }
     return null;
   }
