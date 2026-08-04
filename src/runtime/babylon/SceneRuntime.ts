@@ -88,6 +88,7 @@ import {
   type ExternalModelScriptTelemetrySnapshot,
 } from './ExternalModelScriptRuntime';
 import { SceneSkyboxRuntime } from './SceneSkyboxRuntime';
+import { SceneShadowRuntime } from './SceneShadowRuntime';
 import {
   SceneEnvironmentRuntime,
   type SceneEnvironmentApplyOptions,
@@ -494,6 +495,7 @@ export class SceneRuntime {
   private readonly modelArrayVariantRenderRestoreObserver: Nullable<Observer<Scene>>;
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
+  private readonly shadowRuntime: SceneShadowRuntime;
   private readonly skyboxRuntime: SceneSkyboxRuntime;
   private readonly environmentRuntime: SceneEnvironmentRuntime;
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
@@ -521,6 +523,7 @@ export class SceneRuntime {
     this.modelSelectionOutlineLayer = new SelectionOutlineLayer('EditorModelSelectionOutlineLayer', scene);
     this.modelSelectionOutlineLayer.outlineColor = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
+    this.shadowRuntime = new SceneShadowRuntime(scene);
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
       loadAssetContainer: (rootUrl, fileName, signal) => this.loadAssetContainer(rootUrl, fileName, signal),
@@ -2147,6 +2150,7 @@ export class SceneRuntime {
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
     }
+    this.shadowRuntime.dispose();
     this.skyboxRuntime.dispose();
     this.sharedModelAssetCache.dispose();
     this.modelSelectionOutlineLayer.dispose();
@@ -2991,6 +2995,7 @@ export class SceneRuntime {
       this.lights.set(entity.id, light);
     }
 
+    this.shadowRuntime.syncLight(entity.id, light);
     light.intensity = lightComponent.intensity;
     light.setEnabled(this.isEntityVisible(entity.id));
 
@@ -3677,6 +3682,7 @@ export class SceneRuntime {
   }
 
   private disposeLight(entityId: string, light: Light): void {
+    this.shadowRuntime.removeLight(entityId);
     light.dispose();
     this.lights.delete(entityId);
   }
