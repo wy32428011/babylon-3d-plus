@@ -4,6 +4,11 @@ import {
   type BabylonViewport,
   type BabylonViewportRuntimeStatus,
 } from '../../runtime/babylon/createEngine';
+import {
+  DIGITAL_TWIN_CAMERA_CONTROL_STANDARD,
+  hasDigitalTwinCameraPoseChanged,
+  hasPendingDigitalTwinCameraInput,
+} from '../../runtime/babylon/cameraControlStandard';
 import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
@@ -60,9 +65,6 @@ import {
 } from '../model/editModeModelThinInstances';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 import '../../styles/scene-performance.css';
-
-const CLICK_SELECTION_TOLERANCE_PX = 4;
-const CAMERA_POSE_CHANGE_EPSILON = 1e-6;
 
 type PointerClickSnapshot = {
   pointerId: number;
@@ -129,33 +131,6 @@ async function copyScenePerformanceReport(report: string): Promise<void> {
     textarea.remove();
   }
   if (!copied) throw new Error('系统剪贴板拒绝复制。');
-}
-
-/** 判断指针交互前后相机是否发生有效位姿变化，让真实视角拖拽优先于模型拾取。 */
-function hasCameraPoseChanged(before: SceneCameraPose | null, after: SceneCameraPose | null): boolean {
-  if (!before || !after) return false;
-
-  return (
-    Math.abs(after.alpha - before.alpha) > CAMERA_POSE_CHANGE_EPSILON ||
-    Math.abs(after.beta - before.beta) > CAMERA_POSE_CHANGE_EPSILON ||
-    Math.abs(after.radius - before.radius) > CAMERA_POSE_CHANGE_EPSILON ||
-    Math.abs(after.target.x - before.target.x) > CAMERA_POSE_CHANGE_EPSILON ||
-    Math.abs(after.target.y - before.target.y) > CAMERA_POSE_CHANGE_EPSILON ||
-    Math.abs(after.target.z - before.target.z) > CAMERA_POSE_CHANGE_EPSILON
-  );
-}
-
-/** 判断 Babylon 相机是否已经累计本帧用户输入，覆盖位姿尚未刷新到 alpha/beta 的快速拖拽。 */
-function hasPendingCameraInput(viewport: BabylonViewport | null): boolean {
-  const movement = viewport?.camera.movement;
-  if (!movement) return false;
-
-  return (
-    movement.activeInput ||
-    Math.abs(movement.zoomAccumulatedPixels) > CAMERA_POSE_CHANGE_EPSILON ||
-    movement.panAccumulatedPixels.lengthSquared() > CAMERA_POSE_CHANGE_EPSILON ||
-    movement.rotationAccumulatedPixels.lengthSquared() > CAMERA_POSE_CHANGE_EPSILON
-  );
 }
 
 /** 从带正负号的阵列方向读取唯一世界坐标轴。 */
@@ -489,7 +464,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
       const viewport = viewportRef.current;
       const currentCameraPose = viewport?.getCameraPose() ?? null;
-      if (hasPendingCameraInput(viewport) || hasCameraPoseChanged(currentSnapshot.cameraPose, currentCameraPose)) {
+      if (
+        hasPendingDigitalTwinCameraInput(viewport?.camera ?? null)
+        || hasDigitalTwinCameraPoseChanged(currentSnapshot.cameraPose, currentCameraPose)
+      ) {
         currentSnapshot.cameraDragged = true;
       }
     });
@@ -504,10 +482,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (gizmoRef.current?.isPointerUsingGizmo()) return;
 
     const currentCameraPose = viewportRef.current?.getCameraPose() ?? null;
-    if (snapshot.cameraDragged || hasCameraPoseChanged(snapshot.cameraPose, currentCameraPose)) return;
+    if (snapshot.cameraDragged || hasDigitalTwinCameraPoseChanged(snapshot.cameraPose, currentCameraPose)) return;
 
     const movedDistance = Math.hypot(event.clientX - snapshot.clientX, event.clientY - snapshot.clientY);
-    if (movedDistance > CLICK_SELECTION_TOLERANCE_PX) return;
+    if (movedDistance > DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx) return;
 
     const pickedEntityId = runtimeRef.current?.pickEntityIdAtCanvasPoint(
       event.clientX,

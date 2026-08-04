@@ -548,7 +548,10 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
       </fieldset>
 
       <fieldset className="transform-fieldset">
-        <legend>编辑器设置</legend>
+        <legend>相机运动幅度（统一标准）</legend>
+        <p className="muted">
+          保留原有右键拖拽旋转、中键拖拽移动、Ctrl+左键平移、左键短点击选择和滚轮缩放。以下数值只调整运动幅度。
+        </p>
         {SENSITIVITY_ROWS.map((row) => (
           <label className="scene-slider-row" key={row.key}>
             <span>{row.label}</span>
