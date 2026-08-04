@@ -101,6 +101,15 @@ export class ConveyorTelemetryDriver {
     const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods) ?? false;
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
 
+    // 全局认领闩锁：货物被其他设备凭 containerCode 取走后，被认领端光电持续有货期间视为同一货物，
+    // 不重生、不反抢归属；该端回落至无货一次（真实空线边沿）后解除闩锁。
+    const claimedAwaySource = model.conveyorTelemetry.claimedAwaySource;
+    if (claimedAwaySource) {
+      const claimedHasGoods = claimedAwaySource === 'front' ? frontHasGoods : backHasGoods;
+      if (claimedHasGoods) return;
+      model.conveyorTelemetry.claimedAwaySource = null;
+    }
+
     // 货物走行与链条本体共用同一份 translate 配置（fields+actionMap+speed），避免链/货速度脱节。
     const translateConfig = this.findConveyorCargoTranslateConfig(model);
     const movementDirection = translateConfig
@@ -319,7 +328,7 @@ export class ConveyorTelemetryDriver {
     }
   }
 
-  /** 其他设备领取了同一 containerCode 时释放本货物：清理引用该货物的模型遥测状态后销毁。 */
+  /** 其他设备领取了同一 containerCode 时释放本货物：清理引用该货物的模型遥测状态后销毁，并闩锁该光电端防止逐帧重生反抢。 */
   releaseClaimedCargoByKey(key: string): void {
     const cargo = this.state.conveyorCargoMeshes.get(key);
     if (!cargo) return;
@@ -328,6 +337,7 @@ export class ConveyorTelemetryDriver {
       const cargoCode = model.conveyorTelemetry.cargoCode;
       if (cargoCode !== null && this.getConveyorCargoKey(model.assetCode, cargoCode) === key) {
         model.conveyorTelemetry.cargoCode = null;
+        model.conveyorTelemetry.claimedAwaySource = cargoCode;
       }
     }
     this.disposeConveyorCargo(cargo);

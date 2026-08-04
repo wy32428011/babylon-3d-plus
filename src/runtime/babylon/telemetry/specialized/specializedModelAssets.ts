@@ -237,6 +237,7 @@ export function readConveyorActionMap(rawActionMap: unknown): Record<string, num
 export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
   return {
     cargoCode: null,
+    claimedAwaySource: null,
     cargoTravelOffset: 0,
     motionOffsets: new Map(),
     nodeBaselines: new Map(),
@@ -246,6 +247,7 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
 /** 模型脚本或资产编号变化后重置输送线基线，避免旧节点偏移污染新模型。 */
 export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.cargoCode = null;
+  model.conveyorTelemetry.claimedAwaySource = null;
   model.conveyorTelemetry.cargoTravelOffset = 0;
   model.conveyorTelemetry.motionOffsets.clear();
   model.conveyorTelemetry.nodeBaselines.clear();

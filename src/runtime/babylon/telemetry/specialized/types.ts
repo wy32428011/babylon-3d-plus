@@ -152,6 +152,8 @@ export type ConveyorNodeBaseline = {
 
 export type ConveyorModelTelemetryState = {
   cargoCode: string | null;
+  /** 货物被其他设备凭 containerCode 全局认领的光电端；该端持续有货期间不重生货物，回落至无货一次后解除。 */
+  claimedAwaySource: string | null;
   cargoTravelOffset: number;
   motionOffsets: Map<string, number>;
   nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;
