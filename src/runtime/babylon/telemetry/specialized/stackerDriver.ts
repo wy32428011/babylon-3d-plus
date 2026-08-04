@@ -30,6 +30,7 @@ import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from '../../r
 import {
   readIntegerField,
   readNumberField,
+  readStringField,
   type StackerTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
@@ -562,7 +563,7 @@ export class StackerTelemetryDriver {
       // 锁定目标排号：command 5 到达时目标位字段可能已清零，排号必须提前留存
       if ((command === 3 || command === 4) && targetLocator) {
         if (!this.getStackerForkCargoKey(model, side)) {
-          this.beginStackerPlaceWithCargo(model, side);
+          this.beginStackerPlaceWithCargo(model, snapshot, side);
         }
         const lockedRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
         if (lockedRow === null) {
@@ -637,6 +638,7 @@ export class StackerTelemetryDriver {
     }
 
     this.getOrCreateStackerCargo(model.assetCode, side);
+    this.claimStackerCargoContainerCode(model, snapshot, side);
     const toX = readIntegerField(snapshot.fields, 'to_x');
     const toY = readIntegerField(snapshot.fields, 'to_y');
     const fetchRow = toX !== null && toY !== null
@@ -660,10 +662,11 @@ export class StackerTelemetryDriver {
   }
 
   /** 直接进入放货流程时补建叉上货物：初始即绑定叉尖，等待伸叉到位后解绑落入目标箱位。 */
-  private beginStackerPlaceWithCargo(model: ModelRuntimeEntry, side: StackerForkSide): void {
+  private beginStackerPlaceWithCargo(model: ModelRuntimeEntry, snapshot: StackerTelemetrySnapshot, side: StackerForkSide): void {
     this.disposeStackerCargoByKey(this.getStackerCargoKey(model.assetCode, side));
     this.clearStackerForkCargoState(model, side);
     this.getOrCreateStackerCargo(model.assetCode, side);
+    this.claimStackerCargoContainerCode(model, snapshot, side);
     const state = model.stackerTelemetry;
     const cargoKey = this.getStackerCargoKey(model.assetCode, side);
     if (side === 'front') {
@@ -826,6 +829,32 @@ export class StackerTelemetryDriver {
     this.state.stackerCargoMeshes.delete(key);
   }
 
+  /**
+   * 其他设备领取了同一 containerCode 时释放本货箱：清理引用该货箱的模型遥测状态后销毁，
+   * fetch 保留中的滞留货箱无模型引用，同样直接销毁。
+   */
+  releaseClaimedCargoByKey(key: string): void {
+    for (const { model } of this.host.collectModels()) {
+      if (model.stackerTelemetry.frontCargoKey === key) this.clearStackerForkCargoState(model, 'front');
+      if (model.stackerTelemetry.backCargoKey === key) this.clearStackerForkCargoState(model, 'back');
+    }
+    this.disposeStackerCargoByKey(key);
+  }
+
+  /** 刷出货物时记录 MQTT containerCode 并全局领取归属；无码货箱匿名，不参与全局唯一。 */
+  private claimStackerCargoContainerCode(
+    model: ModelRuntimeEntry,
+    snapshot: StackerTelemetrySnapshot,
+    side: StackerForkSide,
+  ): void {
+    const cargoKey = this.getStackerCargoKey(model.assetCode, side);
+    const cargo = this.state.stackerCargoMeshes.get(cargoKey);
+    if (!cargo) return;
+    const containerCode = readStringField(snapshot.fields, `${side}_containerCode`)?.trim() ?? '';
+    cargo.containerCode = containerCode;
+    this.context.claimGlobalCargoContainerCode(containerCode, cargoKey);
+  }
+
   /** 创建或复用某侧货叉的堆垛机运行时货物。 */
   getOrCreateStackerCargo(assetCode: string, side: StackerForkSide): StackerCargoRuntimeEntry {
     const key = this.getStackerCargoKey(assetCode, side);
@@ -838,7 +867,7 @@ export class StackerTelemetryDriver {
     );
     const entry: StackerCargoRuntimeEntry = {
       assetCode,
-      containerCode: side,
+      containerCode: '',
       root,
       outputOwner: null,
       fallback: null,

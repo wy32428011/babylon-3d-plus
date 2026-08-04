@@ -21,6 +21,7 @@ import { RgvTelemetryDriver } from './rgvDriver';
 import {
   type ConveyorCargoRuntimeEntry,
   createSpecializedTelemetrySharedState,
+  isClaimableCargoContainerCode,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
   type SpecializedTelemetryRuntimeEntry,
@@ -198,6 +199,29 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
 
   getOrCreateConveyorCargo(assetCode: string, containerCode: string): ConveyorCargoRuntimeEntry {
     return this.conveyorDriver.getOrCreateConveyorCargo(assetCode, containerCode);
+  }
+
+  /**
+   * 全局领取 containerCode 货物归属：三类设备中持有同码货箱的其他设备立即销毁并清理遥测状态，
+   * 保证同一 containerCode 全局只有一份货箱；空码/匿名码不参与，设备自行控制销毁。
+   */
+  claimGlobalCargoContainerCode(containerCode: string, claimingCargoKey: string): void {
+    if (!isClaimableCargoContainerCode(containerCode)) return;
+    for (const [key, cargo] of [...this.state.stackerCargoMeshes]) {
+      if (key !== claimingCargoKey && cargo.containerCode === containerCode) {
+        this.stackerDriver.releaseClaimedCargoByKey(key);
+      }
+    }
+    for (const [key, cargo] of [...this.state.conveyorCargoMeshes]) {
+      if (key !== claimingCargoKey && cargo.containerCode === containerCode) {
+        this.conveyorDriver.releaseClaimedCargoByKey(key);
+      }
+    }
+    for (const [key, cargo] of [...this.state.rgvCargoMeshes]) {
+      if (key !== claimingCargoKey && cargo.containerCode === containerCode) {
+        this.rgvDriver.releaseClaimedCargoByKey(key);
+      }
+    }
   }
 
   // ===== 帧内私有方法 =====

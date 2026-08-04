@@ -25,6 +25,11 @@ export const CONVEYOR_CARGO_COLOR = '#4fa3d8';
 export const CONVEYOR_CARGO_EMISSIVE_COLOR = '#09283a';
 export const CONVEYOR_CARGO_SIZE = new Vector3(0.72, 0.34, 0.72);
 export const CONVEYOR_ANONYMOUS_CARGO_CODE = '__anonymous__';
+
+/** 判断 containerCode 是否参与全局唯一归属：空串与匿名占位码不参与，设备自行控制销毁。 */
+export function isClaimableCargoContainerCode(containerCode: string): boolean {
+  return containerCode.trim() !== '' && containerCode !== CONVEYOR_ANONYMOUS_CARGO_CODE;
+}
 export const CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS = 1.2;
 export const CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND = 180;
 export const CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND = 0.3;
@@ -289,4 +294,9 @@ export interface SpecializedTelemetryDriverContext {
   disposeConveyorCargo(cargo: ConveyorCargoRuntimeEntry): void;
   getOrCreateStackerCargo(assetCode: string, side: StackerForkSide): StackerCargoRuntimeEntry;
   getOrCreateConveyorCargo(assetCode: string, containerCode: string): ConveyorCargoRuntimeEntry;
+  /**
+   * 全局领取 containerCode 货物归属：销毁其他设备持有的同码货箱并清理其遥测状态，
+   * 保证同一 containerCode 全局只有一份货箱；claimingCargoKey 为调用方自身货箱键。
+   */
+  claimGlobalCargoContainerCode(containerCode: string, claimingCargoKey: string): void;
 }

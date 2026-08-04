@@ -17,6 +17,7 @@ import {
   readBooleanField,
   readIntegerField,
   readNumberField,
+  readStringField,
   type DeviceTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
 import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
@@ -138,6 +139,15 @@ export class ConveyorTelemetryDriver {
     model.conveyorTelemetry.cargoTravelOffset = clampNumber(model.conveyorTelemetry.cargoTravelOffset, -travelHalfRange, travelHalfRange);
 
     const cargo = this.getOrCreateConveyorCargo(model.assetCode, photoelectricSource);
+    if (isNewCargo) {
+      // 新货物刷出时记录 MQTT containerCode（输送线协议为无前缀字段）并全局领取归属；无码货物匿名，不参与全局唯一。
+      const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
+      cargo.containerCode = containerCode;
+      this.context.claimGlobalCargoContainerCode(
+        containerCode,
+        this.getConveyorCargoKey(model.assetCode, photoelectricSource),
+      );
+    }
     this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));
     this.host.setGeneratedCargoRootPose(
       cargo,
@@ -307,6 +317,21 @@ export class ConveyorTelemetryDriver {
       this.disposeConveyorCargo(cargo);
       this.state.conveyorCargoMeshes.delete(key);
     }
+  }
+
+  /** 其他设备领取了同一 containerCode 时释放本货物：清理引用该货物的模型遥测状态后销毁。 */
+  releaseClaimedCargoByKey(key: string): void {
+    const cargo = this.state.conveyorCargoMeshes.get(key);
+    if (!cargo) return;
+    for (const { model } of this.host.collectModels()) {
+      if (model.assetCode !== cargo.assetCode) continue;
+      const cargoCode = model.conveyorTelemetry.cargoCode;
+      if (cargoCode !== null && this.getConveyorCargoKey(model.assetCode, cargoCode) === key) {
+        model.conveyorTelemetry.cargoCode = null;
+      }
+    }
+    this.disposeConveyorCargo(cargo);
+    this.state.conveyorCargoMeshes.delete(key);
   }
 
   /** 释放单个输送线运行时货物的模板、回退 Box 和支撑点根节点。 */

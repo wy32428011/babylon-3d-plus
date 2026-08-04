@@ -16,7 +16,7 @@ import {
   worldDeltaToParentLocalDelta,
 } from '../../runtimeNodeGeometry';
 import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from '../../runtimeValueUtils';
-import { readIntegerField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
+import { readIntegerField, readStringField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
@@ -34,7 +34,8 @@ import {
 /**
  * RGV（有轨穿梭车）遥测驱动：列号(front_y/back_y) → 列绑定实体投影定位车体；
  * movement_z 起转边沿锁定交接列，command 决定取货(列→车)/放货(车→列)方向。
- * 协议无完成码，command 回落 0 作为完成兜底；containerCode 不稳定，不参与任何逻辑。
+ * 协议无完成码，command 回落 0 作为完成兜底；
+ * containerCode 只参与全局货物唯一归属（同码他设备货箱被销毁），不参与本机流程。
  */
 export class RgvTelemetryDriver {
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
@@ -319,6 +320,7 @@ export class RgvTelemetryDriver {
     const command = readIntegerField(snapshot.fields, side === 'front' ? 'front_command' : 'back_command');
     const movementZ = readIntegerField(snapshot.fields, side === 'front' ? 'front_movement_z' : 'back_movement_z');
     const column = this.readPositiveColumn(snapshot, side === 'front' ? 'front_y' : 'back_y');
+    const containerCode = readStringField(snapshot.fields, `${side}_containerCode`)?.trim() ?? '';
     const lastCommand = side === 'front' ? state.frontLastCommand : state.backLastCommand;
     const lastMovementZ = side === 'front' ? state.frontLastMovementZ : state.backLastMovementZ;
 
@@ -329,11 +331,11 @@ export class RgvTelemetryDriver {
       }
       // command 0→2 边沿：放货起始；车上无货（开机即放货）时补建并置于车上工位
       if (command === 2 && lastCommand !== 2 && !this.getRgvForkCargoKey(model, side)) {
-        this.beginRgvOnboardCargo(model, side);
+        this.beginRgvOnboardCargo(model, side, containerCode);
       }
       // movement_z 0→非0 起转边沿：只有此时车才真实到达交接列，在此锁定交接列
       if (movementZ !== null && movementZ !== 0 && (lastMovementZ === null || lastMovementZ === 0)) {
-        if (command === 1 || command === 3) this.beginRgvFetchTransfer(model, side, column);
+        if (command === 1 || command === 3) this.beginRgvFetchTransfer(model, side, column, containerCode);
         else if (command === 2) this.beginRgvPlaceTransfer(model, side, column);
       }
       // 交接插值推进：方向由 command 决定（movement_z 正反转不区分出入）
@@ -349,7 +351,7 @@ export class RgvTelemetryDriver {
       if (command === 0 && (lastCommand === 1 || lastCommand === 3)) {
         if (!this.getRgvForkCargoKey(model, side) && lastCommand === 1) {
           // 起转边沿从未出现（遥测稀疏跳过流程）：直接补建上车
-          this.beginRgvOnboardCargo(model, side);
+          this.beginRgvOnboardCargo(model, side, containerCode);
         }
         this.completeRgvFetch(model, side);
       }
@@ -371,7 +373,7 @@ export class RgvTelemetryDriver {
   }
 
   /** 取货起转锁列：清理同侧旧货箱，在车体朝向列设备一侧的侧缘刷出货箱等待移入。 */
-  private beginRgvFetchTransfer(model: ModelRuntimeEntry, side: RgvForkSide, column: number | null): void {
+  private beginRgvFetchTransfer(model: ModelRuntimeEntry, side: RgvForkSide, column: number | null, containerCode: string): void {
     const state = model.rgvTelemetry;
     this.disposeRgvForkCargo(model, side);
 
@@ -388,6 +390,7 @@ export class RgvTelemetryDriver {
 
     this.getOrCreateRgvCargo(model.assetCode, side);
     const cargoKey = this.getRgvCargoKey(model.assetCode, side);
+    this.claimRgvCargoContainerCode(model, side, containerCode);
     const edgePose = this.getRgvTransferEdgePose(model, side, pose.position);
     if (side === 'front') {
       state.frontCargoKey = cargoKey;
@@ -423,18 +426,24 @@ export class RgvTelemetryDriver {
     if (side === 'front') {
       state.frontCargoHoldPosition = edgePose.position;
       state.frontCargoHoldRotation = edgePose.rotation;
+      state.frontTransferProgress = 1;
+      // 货箱离车进入交接插值：onBoard 置 false 后 pose 走 lerp 分支，否则钉在车工位无动画
+      state.frontCargoOnBoard = false;
     } else {
       state.backCargoHoldPosition = edgePose.position;
       state.backCargoHoldRotation = edgePose.rotation;
+      state.backTransferProgress = 1;
+      state.backCargoOnBoard = false;
     }
   }
 
   /** 直接建立车上货箱：放货起始补建、取货完成兜底共用；先清理同侧旧货箱。 */
-  private beginRgvOnboardCargo(model: ModelRuntimeEntry, side: RgvForkSide): void {
+  private beginRgvOnboardCargo(model: ModelRuntimeEntry, side: RgvForkSide, containerCode: string): void {
     this.disposeRgvCargoByKey(this.getRgvCargoKey(model.assetCode, side));
     this.clearRgvForkCargoState(model, side);
     this.getOrCreateRgvCargo(model.assetCode, side);
     const cargoKey = this.getRgvCargoKey(model.assetCode, side);
+    this.claimRgvCargoContainerCode(model, side, containerCode);
     const state = model.rgvTelemetry;
     if (side === 'front') {
       state.frontCargoKey = cargoKey;
@@ -620,7 +629,7 @@ export class RgvTelemetryDriver {
     );
     const entry: RgvCargoRuntimeEntry = {
       assetCode,
-      containerCode: side,
+      containerCode: '',
       root,
       outputOwner: null,
       fallback: null,
@@ -636,6 +645,24 @@ export class RgvTelemetryDriver {
     if (!cargo) return;
     this.host.disposeGeneratedCargo(cargo);
     this.state.rgvCargoMeshes.delete(key);
+  }
+
+  /** 其他设备领取了同一 containerCode 时释放本货箱：清理引用该货箱的模型遥测状态后销毁。 */
+  releaseClaimedCargoByKey(key: string): void {
+    for (const { model } of this.host.collectModels()) {
+      if (model.rgvTelemetry.frontCargoKey === key) this.clearRgvForkCargoState(model, 'front');
+      if (model.rgvTelemetry.backCargoKey === key) this.clearRgvForkCargoState(model, 'back');
+    }
+    this.disposeRgvCargoByKey(key);
+  }
+
+  /** 刷出货箱时记录 MQTT containerCode 并全局领取归属；无码货箱匿名，不参与全局唯一。 */
+  private claimRgvCargoContainerCode(model: ModelRuntimeEntry, side: RgvForkSide, containerCode: string): void {
+    const cargoKey = this.getRgvCargoKey(model.assetCode, side);
+    const cargo = this.state.rgvCargoMeshes.get(cargoKey);
+    if (!cargo) return;
+    cargo.containerCode = containerCode;
+    this.context.claimGlobalCargoContainerCode(containerCode, cargoKey);
   }
 
   /** 删除指定 RGV 实例生成的全部运行时货箱，不污染场景文档。 */

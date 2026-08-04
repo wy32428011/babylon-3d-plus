@@ -3256,7 +3256,8 @@ export class SceneRuntime {
       entityId: runtimeId,
       entityName: `${kind === 'stacker' ? '堆垛机' : '输送机'} ${cargo.assetCode} 货物 ${cargo.containerCode}`,
       editorEntityId: null,
-      runtimeAssetCode: cargo.containerCode,
+      // 匿名货物（无 containerCode）回退设备编号：生成器模型目标要求 runtimeAssetCode 非空，否则判定快照无效回退内置 Box
+      runtimeAssetCode: cargo.containerCode || cargo.assetCode,
       root: cargo.root,
       component,
       output: null,
