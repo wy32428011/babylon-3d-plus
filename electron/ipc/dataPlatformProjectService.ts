@@ -17,9 +17,19 @@ import {
   getProjectEnvironmentsRoot,
   getProjectModelsRoot,
   rememberRecentSceneFile,
+  setSharedProjectAssetRoot,
   writeProjectAssetIndex,
 } from './projectAssetStore.js';
 import { scanModelPackage } from './modelPackageScanner.js';
+import {
+  createDataPlatformBinding,
+  getCurrentDataPlatformBinding,
+  readDataPlatformBinding,
+  resolveDataPlatformProjectRoot,
+  resolveDataPlatformSharedResourcesRoot,
+  setCurrentDataPlatformBinding,
+  writeDataPlatformBinding,
+} from './dataPlatformBindingStore.js';
 import {
   clearDataPlatformModelSyncRetryContext,
   disposeDataPlatformModelSync,
@@ -44,13 +54,21 @@ const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
 const SCENE_PATH_KEYS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path']);
 const SCENE_URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl']);
 const SCENE_PATH_ARRAY_KEYS = new Set(['scriptPaths']);
+const DIGITAL_TWIN_SOURCE_MANIFEST_PATH = '.babylon-editor/digital-twin-source-manifest.json';
+const MAX_PROJECT_SCENE_FILES = 1_000;
 
 let dataPlatformProjectServiceShuttingDown = false;
 const openTaskControllers = new Set<AbortController>();
 const openTasks = new Set<Promise<unknown>>();
 
 type PackageDetection =
-  | { kind: 'current'; packageRoot: string; sceneFilePath: string }
+  | {
+      kind: 'current';
+      packageRoot: string;
+      sceneFilePaths: string[];
+      sceneFilePath: string;
+      entrySceneRelativePath: string;
+    }
   | { kind: 'incompatible'; reason: string };
 
 type PromotionItem = {
@@ -79,7 +97,7 @@ export function getDataPlatformEditorRoot(customWorkspaceRoot: string | null = n
 export async function openDataPlatformProject(
   project: DataPlatformProjectEntry,
   baseUrl: string,
-  editorRoot: string,
+  workspaceRoot: string,
 ): Promise<DataPlatformProjectOpenResult> {
   if (dataPlatformProjectServiceShuttingDown) {
     throw new Error('应用正在退出，无法打开数据中台项目。');
@@ -87,7 +105,7 @@ export async function openDataPlatformProject(
 
   const controller = new AbortController();
   openTaskControllers.add(controller);
-  const task = openDataPlatformProjectInternal(project, baseUrl, editorRoot, controller.signal);
+  const task = openDataPlatformProjectInternal(project, baseUrl, workspaceRoot, controller.signal);
   openTasks.add(task);
 
   try {
@@ -98,15 +116,24 @@ export async function openDataPlatformProject(
   }
 }
 
-/** 本地场景加载后激活共享工作区，并启动或复用数据中台全量模型同步。 */
+/** 本地场景加载后只刷新共享资源缓存，不切换当前业务工程根目录。 */
 export async function syncDataPlatformModelsForWorkspace(
   baseUrl: string,
-  editorRoot: string,
+  workspaceRoot: string,
 ): Promise<boolean> {
   if (dataPlatformProjectServiceShuttingDown) return false;
-  await ensureWritableEditorRoot(editorRoot);
-  await activateProjectRoot(editorRoot);
-  return startDataPlatformModelSync(baseUrl, editorRoot);
+  const binding = getCurrentDataPlatformBinding();
+  if (!binding) {
+    await ensureWritableEditorRoot(workspaceRoot);
+    await activateProjectRoot(workspaceRoot);
+    setSharedProjectAssetRoot(null);
+    return startDataPlatformModelSync(baseUrl, workspaceRoot);
+  }
+  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  await ensureWritableEditorRoot(sharedResourcesRoot);
+  await ensureProjectDirectories(sharedResourcesRoot);
+  setSharedProjectAssetRoot(sharedResourcesRoot);
+  return startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
 }
 
 /** 暴露模型同步重试给 IPC。 */
@@ -135,21 +162,45 @@ export async function disposeDataPlatformProjectTasks(): Promise<void> {
 async function openDataPlatformProjectInternal(
   project: DataPlatformProjectEntry,
   baseUrl: string,
-  editorRoot: string,
+  workspaceRoot: string,
   signal: AbortSignal,
 ): Promise<DataPlatformProjectOpenResult> {
-  await ensureWritableEditorRoot(editorRoot);
-  await ensureProjectDirectories(editorRoot);
+  // 先校验用户配置的工作区本身，避免子目录创建失败时只暴露晦涩的 ENOTDIR。
+  await ensureWritableEditorRoot(workspaceRoot);
+  const projectRoot = resolveDataPlatformProjectRoot(workspaceRoot, project.id);
+  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  await ensureWritableEditorRoot(projectRoot);
+  await ensureWritableEditorRoot(sharedResourcesRoot);
+  await ensureProjectDirectories(projectRoot);
+  await ensureProjectDirectories(sharedResourcesRoot);
+  setSharedProjectAssetRoot(sharedResourcesRoot);
 
   let source: DataPlatformProjectOpenResult['source'] = 'generated';
   let warning: string | null = null;
-  let sceneFilePath: string | null = null;
+  let conflictCopyPath: string | null = null;
+  const existingBinding = await readDataPlatformBinding(projectRoot);
+  let sceneFilePath = await resolveLocalEntryScenePath(projectRoot, existingBinding?.entryScenePath ?? null);
+  const remoteVersionId = project.latestEditorProjectVersionId;
+  const canReuseLocalProject = Boolean(
+    sceneFilePath
+    && existingBinding
+    && existingBinding.projectId === project.id
+    && existingBinding.baseUrl === baseUrl
+    && existingBinding.latestVersionId === remoteVersionId,
+  );
 
-  if (project.latestEditorProjectPackageUrl) {
-    const openRoot = path.join(editorRoot, '.babylon-editor', `data-platform-open-${randomUUID()}`);
+  if (canReuseLocalProject || (!project.latestEditorProjectPackageUrl && sceneFilePath)) {
+    source = 'local';
+  } else if (project.latestEditorProjectPackageUrl) {
+    if (sceneFilePath) {
+      conflictCopyPath = await createLocalConflictCopy(workspaceRoot, projectRoot, project.id, existingBinding?.latestVersionId ?? null);
+      warning = '检测到远端工程版本变化，已保留当前本地工程冲突副本，未执行自动合并。';
+    }
+
+    const openRoot = path.join(projectRoot, '.babylon-editor', `data-platform-open-${randomUUID()}`);
     const archivePath = path.join(openRoot, 'project-package.zip');
     const extractRoot = path.join(openRoot, 'extracted');
-    assertPathInside(editorRoot, openRoot, '工程包暂存目录');
+    assertPathInside(projectRoot, openRoot, '工程包暂存目录');
     await fs.rm(openRoot, { recursive: true, force: true });
 
     let preserveOpenRoot = false;
@@ -169,48 +220,105 @@ async function openDataPlatformProjectInternal(
 
       if (detection.kind === 'current') {
         const materialized = await materializeCurrentProjectPackage({
-          editorRoot,
+          editorRoot: projectRoot,
           packageRoot: detection.packageRoot,
-          sceneSourcePath: detection.sceneFilePath,
+          sceneSourcePaths: detection.sceneFilePaths,
+          entrySceneSourcePath: detection.sceneFilePath,
           project,
           openRoot,
         });
         source = 'package';
         sceneFilePath = materialized.sceneFilePath;
-        warning = materialized.warning;
+        warning = [warning, materialized.warning].filter(Boolean).join('；') || null;
       } else {
-        warning = `${detection.reason}，已在本地创建当前格式空项目。`;
+        warning = [warning, `${detection.reason}，已在本地创建当前格式空项目。`].filter(Boolean).join('；');
       }
     } catch (error) {
       preserveOpenRoot = error instanceof DataPlatformRollbackError;
       throw error;
     } finally {
-      if (!preserveOpenRoot) {
-        await fs.rm(openRoot, { recursive: true, force: true }).catch(() => undefined);
-      }
+      if (!preserveOpenRoot) await fs.rm(openRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   } else {
     warning = '该项目没有可用工程包，已在本地创建当前格式空项目。';
   }
 
   if (source === 'generated') {
-    await ensureGeneratedProjectMetadata(editorRoot);
-    await activateProjectRoot(editorRoot);
+    await ensureGeneratedProjectMetadata(projectRoot);
+    await activateProjectRoot(projectRoot);
   } else if (sceneFilePath) {
-    await activateProjectRoot(editorRoot, sceneFilePath);
-    await rememberRecentSceneFile(sceneFilePath, editorRoot);
+    await activateProjectRoot(projectRoot, sceneFilePath);
+    await rememberRecentSceneFile(sceneFilePath, projectRoot);
   }
 
-  const modelSyncStarted = startDataPlatformModelSync(baseUrl, editorRoot);
+  const entryScenePath = sceneFilePath ? toProjectRelativePath(projectRoot, sceneFilePath) : null;
+  const binding = createDataPlatformBinding({
+    baseUrl,
+    projectId: project.id,
+    projectName: project.projectName,
+    editorProjectId: project.latestEditorProjectId,
+    latestVersionId: remoteVersionId,
+    latestVersionNumber: project.latestEditorProjectVersionNumber,
+    resourceRevision: project.currentResourceRevision,
+    entryScenePath,
+    syncedAt: new Date().toISOString(),
+  });
+  await writeDataPlatformBinding(projectRoot, binding);
+  setCurrentDataPlatformBinding(projectRoot, binding);
+
+  const modelSyncStarted = startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
   return {
-    projectRoot: editorRoot,
+    projectRoot,
     sceneFilePath,
     source,
     warning,
+    conflictCopyPath,
     modelSyncStarted,
+    binding,
   };
 }
+/** 优先读取绑定入口场景，缺失时回退到项目中的第一份场景。 */
+async function resolveLocalEntryScenePath(projectRoot: string, entryScenePath: string | null): Promise<string | null> {
+  if (entryScenePath) {
+    const candidate = path.resolve(projectRoot, ...entryScenePath.split('/'));
+    if (isPathInside(projectRoot, candidate) && await isFile(candidate)) return candidate;
+  }
+  const sceneFiles = await findSceneFiles(projectRoot);
+  return sceneFiles.sort((left, right) => left.localeCompare(right, 'en'))[0] ?? null;
+}
 
+/** 远端版本变化时保留完整本地源工程副本，不尝试自动合并。 */
+async function createLocalConflictCopy(
+  workspaceRoot: string,
+  projectRoot: string,
+  projectId: string,
+  versionId: string | null,
+): Promise<string> {
+  const conflictParent = path.join(path.resolve(workspaceRoot), 'Conflicts', projectId);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const conflictRoot = path.join(conflictParent, `${timestamp}-version-${versionId ?? 'local'}`);
+  assertPathInside(path.resolve(workspaceRoot), conflictRoot, '本地冲突副本目录');
+  await fs.mkdir(conflictParent, { recursive: true });
+  await fs.cp(projectRoot, conflictRoot, {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+    filter: (sourcePath) => {
+      const relative = path.relative(projectRoot, sourcePath).replace(/\\/g, '/');
+      return !relative.startsWith('.babylon-editor/data-platform-open-')
+        && !relative.startsWith('.babylon-editor/digital-twin-publish-');
+    },
+  });
+  return conflictRoot;
+}
+
+function toProjectRelativePath(projectRoot: string, filePath: string): string {
+  const relative = path.relative(path.resolve(projectRoot), path.resolve(filePath));
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('入口场景不在当前数据中台项目目录内。');
+  }
+  return relative.replace(/\\/g, '/');
+}
 export async function ensureWritableEditorRoot(editorRoot: string): Promise<void> {
   assertWorkspaceOutsideInstallation(editorRoot);
 
@@ -278,33 +386,64 @@ async function inspectPackageCandidate(packageRoot: string): Promise<PackageDete
   if (!(await isDirectory(metadataRoot))) missing.push('.babylon-editor/');
   if (!(await isDirectory(modelsRoot))) missing.push('Assets/Models/');
   if (!(await isDirectory(environmentsRoot))) missing.push('Assets/Environments/');
-  // Assets/Skyboxes 对旧工程保持可选；存在时会在落盘阶段完整迁移。
   if (missing.length > 0) {
     return { kind: 'incompatible', reason: `工程包缺少当前编辑器目录：${missing.join('、')}` };
   }
 
-  const sceneFiles = await findSceneFiles(packageRoot);
-  if (sceneFiles.length !== 1) {
-    return { kind: 'incompatible', reason: `工程包必须且只能包含一个 .scene.json，当前发现 ${sceneFiles.length} 个` };
+  const sceneFilePaths = await findSceneFiles(packageRoot);
+  if (sceneFilePaths.length === 0 || sceneFilePaths.length > MAX_PROJECT_SCENE_FILES) {
+    return { kind: 'incompatible', reason: `工程包场景数量必须为 1 到 ${MAX_PROJECT_SCENE_FILES} 个，当前发现 ${sceneFilePaths.length} 个` };
   }
 
-  try {
-    const parsed = JSON.parse(await fs.readFile(sceneFiles[0], 'utf-8')) as unknown;
-    const sceneVersion = isPlainObject(parsed) ? parsed.version : null;
-    if (!isPlainObject(parsed) || (sceneVersion !== 1 && sceneVersion !== 2 && sceneVersion !== 3) || !isPlainObject(parsed.scene)) {
-      return { kind: 'incompatible', reason: '工程包中的场景文件不是当前编辑器场景格式' };
+  for (const sceneFilePath of sceneFilePaths) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(sceneFilePath, 'utf-8')) as unknown;
+      const sceneVersion = isPlainObject(parsed) ? parsed.version : null;
+      if (!isPlainObject(parsed) || (sceneVersion !== 1 && sceneVersion !== 2 && sceneVersion !== 3) || !isPlainObject(parsed.scene)) {
+        return { kind: 'incompatible', reason: `工程包中的场景文件不是当前编辑器场景格式：${path.basename(sceneFilePath)}` };
+      }
+    } catch {
+      return { kind: 'incompatible', reason: `工程包中的场景文件不是有效 JSON：${path.basename(sceneFilePath)}` };
     }
-  } catch {
-    return { kind: 'incompatible', reason: '工程包中的场景文件不是有效 JSON' };
   }
 
-  return { kind: 'current', packageRoot, sceneFilePath: sceneFiles[0] };
-}
+  const manifestPath = path.resolve(packageRoot, ...DIGITAL_TWIN_SOURCE_MANIFEST_PATH.split('/'));
+  let entryScenePath = sceneFilePaths[0];
+  if (await isFile(manifestPath)) {
+    try {
+      const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf-8')) as unknown;
+      if (!isPlainObject(manifest) || manifest.version !== 1 || typeof manifest.entryScenePath !== 'string') {
+        return { kind: 'incompatible', reason: '数字孪生源工程 manifest 结构无效' };
+      }
+      const normalizedEntryPath = path.posix.normalize(manifest.entryScenePath.trim().replace(/\\/g, '/'));
+      if (!normalizedEntryPath || normalizedEntryPath.startsWith('../') || normalizedEntryPath.startsWith('/') || !normalizedEntryPath.toLowerCase().endsWith('.scene.json')) {
+        return { kind: 'incompatible', reason: '数字孪生源工程入口场景路径无效' };
+      }
+      const candidate = path.resolve(packageRoot, ...normalizedEntryPath.split('/'));
+      if (!isPathInside(packageRoot, candidate) || !sceneFilePaths.some((item) => path.resolve(item) === candidate)) {
+        return { kind: 'incompatible', reason: '数字孪生源工程入口场景不存在' };
+      }
+      entryScenePath = candidate;
+    } catch {
+      return { kind: 'incompatible', reason: '数字孪生源工程 manifest 不是有效 JSON' };
+    }
+  } else if (sceneFilePaths.length !== 1) {
+    return { kind: 'incompatible', reason: '包含多个场景的工程包必须提供数字孪生源工程 manifest' };
+  }
 
+  return {
+    kind: 'current',
+    packageRoot,
+    sceneFilePaths,
+    sceneFilePath: entryScenePath,
+    entrySceneRelativePath: path.relative(packageRoot, entryScenePath).replace(/\\/g, '/'),
+  };
+}
 async function materializeCurrentProjectPackage(options: {
   editorRoot: string;
   packageRoot: string;
-  sceneSourcePath: string;
+  sceneSourcePaths: string[];
+  entrySceneSourcePath: string;
   project: DataPlatformProjectEntry;
   openRoot: string;
 }): Promise<{ sceneFilePath: string; warning: string | null }> {
@@ -315,29 +454,40 @@ async function materializeCurrentProjectPackage(options: {
   await fs.mkdir(stagedRoot, { recursive: true });
   await fs.mkdir(backupRoot, { recursive: true });
 
-  const packageDirectories = await collectPackageDirectories(options.packageRoot);
-  for (const packageDirectory of packageDirectories) {
-    const relativePath = path.relative(options.packageRoot, packageDirectory);
-    const targetPath = path.join(options.editorRoot, relativePath);
-    const stagedPath = path.join(stagedRoot, relativePath);
-    const backupPath = path.join(backupRoot, relativePath);
-    assertPathInside(options.editorRoot, targetPath, '工程包资产目标');
-    assertPathInside(transactionRoot, stagedPath, '工程包资产暂存路径');
-    await fs.mkdir(path.dirname(stagedPath), { recursive: true });
-    await fs.cp(packageDirectory, stagedPath, { recursive: true, errorOnExist: true, force: false });
-    promotionItems.push(createPromotionItem('directory', targetPath, stagedPath, backupPath));
-  }
+  const sourceAssetsRoot = path.join(options.packageRoot, 'Assets');
+  const stagedAssetsRoot = path.join(stagedRoot, 'Assets');
+  const targetAssetsRoot = path.join(options.editorRoot, 'Assets');
+  const backupAssetsRoot = path.join(backupRoot, 'Assets');
+  assertPathInside(options.editorRoot, targetAssetsRoot, '工程包资产目标');
+  await fs.cp(sourceAssetsRoot, stagedAssetsRoot, { recursive: true, errorOnExist: true, force: false });
+  promotionItems.push(createPromotionItem('directory', targetAssetsRoot, stagedAssetsRoot, backupAssetsRoot));
 
-  const sceneDirectory = path.join(options.editorRoot, 'Scenes', 'DataPlatform', String(options.project.id));
-  const sceneFileName = sanitizeSceneFileName(path.basename(options.sceneSourcePath), options.project.id);
-  const sceneTargetPath = path.join(sceneDirectory, sceneFileName);
-  const sceneStagedPath = path.join(stagedRoot, 'Scenes', 'DataPlatform', String(options.project.id), sceneFileName);
-  const sceneBackupPath = path.join(backupRoot, 'Scenes', 'DataPlatform', String(options.project.id), sceneFileName);
-  assertPathInside(options.editorRoot, sceneTargetPath, '数据中台场景目标');
-  const sceneContent = await rewriteSceneForEditorRoot(options.sceneSourcePath, options.editorRoot);
-  await fs.mkdir(path.dirname(sceneStagedPath), { recursive: true });
-  await fs.writeFile(sceneStagedPath, sceneContent, 'utf-8');
-  promotionItems.push(createPromotionItem('file', sceneTargetPath, sceneStagedPath, sceneBackupPath));
+  const stagedScenesRoot = path.join(stagedRoot, 'Scenes');
+  const targetScenesRoot = path.join(options.editorRoot, 'Scenes');
+  const backupScenesRoot = path.join(backupRoot, 'Scenes');
+  const sceneTargets = new Map<string, string>();
+  const usedRelativePaths = new Set<string>();
+  for (const sceneSourcePath of options.sceneSourcePaths) {
+    const packageRelative = path.relative(options.packageRoot, sceneSourcePath).replace(/\\/g, '/');
+    const targetRelative = packageRelative.toLowerCase().startsWith('scenes/')
+      ? packageRelative.slice(7)
+      : path.posix.join('DataPlatform', options.project.id, sanitizeSceneFileName(path.basename(sceneSourcePath), options.project.id));
+    const normalizedRelative = path.posix.normalize(targetRelative);
+    if (!normalizedRelative || normalizedRelative.startsWith('../') || usedRelativePaths.has(normalizedRelative.toLowerCase())) {
+      throw new Error(`工程包场景目标路径冲突：${targetRelative}`);
+    }
+    usedRelativePaths.add(normalizedRelative.toLowerCase());
+    const stagedScenePath = path.resolve(stagedScenesRoot, ...normalizedRelative.split('/'));
+    const targetScenePath = path.resolve(targetScenesRoot, ...normalizedRelative.split('/'));
+    assertPathInside(stagedRoot, stagedScenePath, '工程包场景暂存路径');
+    assertPathInside(options.editorRoot, targetScenePath, '工程包场景目标');
+    await fs.mkdir(path.dirname(stagedScenePath), { recursive: true });
+    await fs.writeFile(stagedScenePath, await rewriteSceneForEditorRoot(sceneSourcePath, options.editorRoot), 'utf-8');
+    sceneTargets.set(path.resolve(sceneSourcePath), targetScenePath);
+  }
+  promotionItems.push(createPromotionItem('directory', targetScenesRoot, stagedScenesRoot, backupScenesRoot));
+  const entrySceneTargetPath = sceneTargets.get(path.resolve(options.entrySceneSourcePath));
+  if (!entrySceneTargetPath) throw new Error('工程包入口场景未能物化。');
 
   try {
     for (const item of promotionItems) await promoteItem(item);
@@ -357,7 +507,7 @@ async function materializeCurrentProjectPackage(options: {
     await promoteItem(indexItem);
 
     return {
-      sceneFilePath: sceneTargetPath,
+      sceneFilePath: entrySceneTargetPath,
       warning: rebuilt.skipped.length > 0
         ? `工程已打开，但有 ${rebuilt.skipped.length} 个本地模型包未通过扫描：${rebuilt.skipped.slice(0, 3).join('；')}`
         : null,
@@ -367,44 +517,12 @@ async function materializeCurrentProjectPackage(options: {
     const message = error instanceof Error ? error.message : String(error);
     if (rollbackErrors.length > 0) {
       throw new DataPlatformRollbackError(
-        `${message}；工程写入回滚不完整：${rollbackErrors.join('；')}；已保留恢复目录：${backupRoot}`,
+        `${message}；工程写入回滚不完整：${rollbackErrors.join('；')}；已保留恢复目录：${backupRoot}` ,
       );
     }
     throw error;
   }
 }
-
-async function collectPackageDirectories(packageRoot: string): Promise<string[]> {
-  const result: string[] = [];
-  const modelsRoot = path.join(packageRoot, 'Assets', 'Models');
-  const environmentsRoot = path.join(packageRoot, 'Assets', 'Environments');
-  const skyboxesRoot = path.join(packageRoot, 'Assets', 'Skyboxes');
-
-  for (const entry of await fs.readdir(modelsRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const entryPath = path.join(modelsRoot, entry.name);
-    if (entry.name.toLowerCase() !== 'combomodels') {
-      result.push(entryPath);
-      continue;
-    }
-    for (const comboEntry of await fs.readdir(entryPath, { withFileTypes: true })) {
-      if (comboEntry.isDirectory()) result.push(path.join(entryPath, comboEntry.name));
-    }
-  }
-
-  for (const entry of await fs.readdir(environmentsRoot, { withFileTypes: true })) {
-    if (entry.isDirectory()) result.push(path.join(environmentsRoot, entry.name));
-  }
-
-  if (await isDirectory(skyboxesRoot)) {
-    for (const entry of await fs.readdir(skyboxesRoot, { withFileTypes: true })) {
-      if (entry.isDirectory() && !entry.isSymbolicLink()) result.push(path.join(skyboxesRoot, entry.name));
-    }
-  }
-
-  return result;
-}
-
 async function rewriteSceneForEditorRoot(sceneSourcePath: string, editorRoot: string): Promise<string> {
   const parsed = JSON.parse(await fs.readFile(sceneSourcePath, 'utf-8')) as unknown;
   const rewritten = rewriteSceneValue(parsed, null, editorRoot);
@@ -591,6 +709,15 @@ function sanitizeSceneFileName(value: string, projectId: string): string {
   const stem = name.split('.', 1)[0]?.toUpperCase() ?? '';
   if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)) name = `_${name}`;
   return name || `data-platform-${projectId}.scene.json`;
+}
+
+async function isFile(targetPath: string): Promise<boolean> {
+  try {
+    return (await fs.stat(targetPath)).isFile();
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 async function isDirectory(targetPath: string): Promise<boolean> {

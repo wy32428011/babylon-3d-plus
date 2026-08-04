@@ -60,6 +60,7 @@ const TOOLBAR_ICONS = {
   redo: '↷',
   save: '💾',
   load: '📂',
+  publish: '☁',
   deployment: '📦',
   cad: '▧',
   mqtt: 'MQ',
@@ -136,6 +137,9 @@ type ToolbarProps = {
   onRedo: () => void;
   onSaveScene: () => void;
   onLoadScene: () => void;
+  onOpenDigitalTwinPublish: () => void;
+  digitalTwinPublishBusy: boolean;
+  digitalTwinPublishProgress: DigitalTwinPublishProgress | null;
   onOpenDeploymentExport: () => void;
   deploymentExportStatus: DeploymentExportStatus;
   deploymentExportProgress: DeploymentExportViewProgress | null;
@@ -585,12 +589,25 @@ export function Toolbar(props: ToolbarProps) {
           percent={props.cadImportProgress.percent}
         />
       ) : null}
-      <ToolbarIconButton disabled={props.readOnly} icon={TOOLBAR_ICONS.save} label="保存场景" onClick={props.onSaveScene} />
-      <ToolbarIconButton disabled={props.readOnly} icon={TOOLBAR_ICONS.load} label="加载场景" onClick={props.onLoadScene} />
+      <ToolbarIconButton disabled={props.readOnly || props.digitalTwinPublishBusy} icon={TOOLBAR_ICONS.save} label="保存场景" onClick={props.onSaveScene} />
+      <ToolbarIconButton disabled={props.readOnly || props.digitalTwinPublishBusy} icon={TOOLBAR_ICONS.load} label="加载场景" onClick={props.onLoadScene} />
       <ToolbarIconButton
-        disabled={isPreview || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy}
+        disabled={isPreview || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy || props.digitalTwinPublishBusy}
+        icon={TOOLBAR_ICONS.publish}
+        label="发布到数据中台"
+        onClick={props.onOpenDigitalTwinPublish}
+      />
+      {props.digitalTwinPublishBusy && props.digitalTwinPublishProgress ? (
+        <ToolbarTaskProgress
+          detail={props.digitalTwinPublishProgress.detail}
+          label="数字孪生发布"
+          percent={props.digitalTwinPublishProgress.percent}
+        />
+      ) : null}
+      <ToolbarIconButton
+        disabled={isPreview || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy || props.digitalTwinPublishBusy}
         icon={TOOLBAR_ICONS.deployment}
-        label="导出部署工程"
+        label="导出离线部署包"
         onClick={props.onOpenDeploymentExport}
       />
       {props.deploymentExportBusy && deploymentExportProgress ? (

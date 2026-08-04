@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
 import { registerDataPlatformIpc } from './ipc/dataPlatformIpc.js';
+import { findDataPlatformDeepLink, parseDataPlatformDeepLink, type DataPlatformDeepLink } from './deepLink.js';
 import { disposeDataPlatformProjectTasks } from './ipc/dataPlatformProjectService.js';
 import { disposeAllDeploymentExportTasks, registerDeploymentExportIpc } from './ipc/deploymentExportIpc.js';
+import { disposeAllDigitalTwinPublishTasks, registerDigitalTwinPublishIpc } from './ipc/digitalTwinPublishIpc.js';
 import { disposeAllMqttIpcClients, registerMqttIpc } from './ipc/mqttIpc.js';
 import { registerProjectIpc } from './ipc/projectIpc.js';
 
@@ -18,7 +20,38 @@ const HIGH_PERFORMANCE_GPU_SWITCH = 'force_high_performance_gpu';
 const DISABLE_GPU_SANDBOX_SWITCH = 'disable-gpu-sandbox';
 const FAILURE_PAGE_BACKGROUND = '#1e1e1e';
 
-// 必须在 app ready 前请求高性能 GPU。保留 SwiftShader 软件回退，由渲染进程探测后降级并输出日志。
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+let mainWindowReference: BrowserWindow | null = null;
+let pendingDataPlatformDeepLink: DataPlatformDeepLink | null = findDataPlatformDeepLink(process.argv);
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    const deepLink = findDataPlatformDeepLink(argv);
+    if (deepLink) dispatchDataPlatformDeepLink(deepLink);
+    if (mainWindowReference && !mainWindowReference.isDestroyed()) {
+      if (mainWindowReference.isMinimized()) mainWindowReference.restore();
+      mainWindowReference.show();
+      mainWindowReference.focus();
+    }
+  });
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    const deepLink = parseDataPlatformDeepLink(url);
+    if (deepLink) dispatchDataPlatformDeepLink(deepLink);
+  });
+}
+
+function dispatchDataPlatformDeepLink(deepLink: DataPlatformDeepLink): void {
+  pendingDataPlatformDeepLink = deepLink;
+  const window = mainWindowReference;
+  if (!window || window.isDestroyed() || window.webContents.isLoadingMainFrame()) return;
+  window.webContents.send('data-platform:deepLinkOpen', deepLink);
+  pendingDataPlatformDeepLink = null;
+}
+
+// 必须在 app ready 前请求高性能 GPU；Scene View 会用严格 WebGL 上下文和实际 renderer 校验阻断软件回退。
 // 驱动黑名单仍由 Chromium 保留，避免强行启用不稳定驱动。
 app.commandLine.appendSwitch(HIGH_PERFORMANCE_GPU_SWITCH);
 
@@ -158,6 +191,15 @@ function createMainWindow(): void {
       webgl: true,
     },
   });
+  mainWindowReference = mainWindow;
+  mainWindow.once('closed', () => {
+    if (mainWindowReference === mainWindow) mainWindowReference = null;
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (!pendingDataPlatformDeepLink || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('data-platform:deepLinkOpen', pendingDataPlatformDeepLink);
+    pendingDataPlatformDeepLink = null;
+  });
 
   void loadRenderer(mainWindow).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -186,13 +228,14 @@ function registerEditorAssetProtocol(): void {
   });
 }
 
-app.whenReady().then(() => {
+if (hasSingleInstanceLock) app.whenReady().then(() => {
   registerEditorAssetProtocol();
   registerProjectIpc();
   registerDataPlatformIpc();
   registerAssetIpc();
   registerMqttIpc();
   registerDeploymentExportIpc();
+  registerDigitalTwinPublishIpc();
   createMainWindow();
 
   app.on('activate', () => {
@@ -219,12 +262,15 @@ app.on('before-quit', (event) => {
 
   disposeAllDeploymentExportTasks();
   disposeAllMqttIpcClients();
-  void disposeDataPlatformProjectTasks()
-    .catch((error: unknown) => {
-      console.error('[electron] 数据中台任务退出清理失败。', error);
-    })
-    .finally(() => {
-      quitCleanupCompleted = true;
-      app.quit();
-    });
+  void Promise.allSettled([
+    disposeAllDigitalTwinPublishTasks(),
+    disposeDataPlatformProjectTasks(),
+  ]).then((results) => {
+    for (const result of results) {
+      if (result.status === 'rejected') console.error('[electron] 退出任务清理失败。', result.reason);
+    }
+  }).finally(() => {
+    quitCleanupCompleted = true;
+    app.quit();
+  });
 });

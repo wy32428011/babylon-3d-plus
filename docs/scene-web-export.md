@@ -2,7 +2,7 @@
 
 ## 功能说明
 
-编辑器顶部 Toolbar 的“导出部署工程”用于把当前内存中的场景快照导出为独立静态 Web 工程。导出结果不包含编辑器、Electron 或 Node.js 运行环境，部署服务器只需要提供普通 HTTP/HTTPS 静态文件访问能力。
+编辑器顶部 Toolbar 的“导出部署工程”用于把当前内存中的场景快照导出为独立静态 Web 工程。导出结果不包含编辑器、Electron 或 Node.js 运行环境，部署服务器只需要提供普通 HTTP/HTTPS 静态文件访问能力。Viewer 运行端要求浏览器提供硬件加速 WebGL；若只能获得 SwiftShader、WARP、llvmpipe 等软件 renderer，页面会阻断启动并显示排查提示，不再以低帧率软件渲染静默运行。
 
 支持两种输出：
 
@@ -114,6 +114,14 @@ npx vite preview --host 127.0.0.1
 
 生产环境应由正式 Web 服务器提供 HTTPS。若 MQTT 页面使用 HTTPS，Broker 通常也应提供 `wss://`，否则浏览器会阻止混合内容连接。
 
+## 浏览器 GPU 要求与排查
+
+- Viewer 创建 WebGL 时请求 `high-performance` GPU，并设置 `failIfMajorPerformanceCaveat=true`，避免浏览器在存在重大性能降级时继续返回软件实现。
+- Viewer 会读取实际 WebGL renderer，并拒绝 SwiftShader、WARP、llvmpipe、lavapipe、softpipe 和 Microsoft Basic Render Driver；同时显式保持 `desynchronized=false`，继续通过 Babylon `runRenderLoop` 使用浏览器显示帧节拍。
+- 如果页面提示“硬件加速 WebGL 创建失败”，请在 Chrome/Edge 的系统设置中启用硬件加速后完全重启浏览器，更新显卡驱动，并确认系统图形策略允许该浏览器使用高性能 GPU。可通过 `chrome://gpu` 或 `edge://gpu` 检查 WebGL 与 GPU compositing 状态。
+- 网页无法绕过浏览器 GPU 黑名单、远程桌面限制或企业策略强制启用显卡；这些环境下 Viewer 会明确阻断，而不是回退到容易卡顿的 CPU 软件 renderer。
+- 启动成功时浏览器控制台会输出 `[Babylon] 硬件加速 WebGL 已启用`，并附带 WebGL 版本、vendor 和 renderer，便于现场确认实际显卡后端。
+
 ## 模型脚本与 CSP
 
 外置 TypeScript 模型脚本（`*.model.ts`、meta 显式引用或数据中台登记的其它可执行 `.ts`，不含 `.d.ts`）使用当前项目的可信脚本运行机制：浏览器加载脚本文本、使用打包进 Viewer 的 TypeScript 编译器转译，并通过 `new Function` 执行。
@@ -140,6 +148,7 @@ npx vite preview --host 127.0.0.1
 
 - 含普通模型、环境、天空盒、DXF、模型生成器、脚本和贴图的综合场景能够加载。
 - 修改 `runtime-config.json` 后，刷新页面即可更新标题和 MQTT 配置。
+- 在浏览器控制台确认 Viewer 输出真实 GPU renderer；关闭浏览器硬件加速后，页面应显示硬件 WebGL 阻断提示，而不是继续使用软件 renderer。
 - 导出目录和 ZIP 解压后的文件结构一致。
 - 导出内容中不存在 `C:\`、`F:\`、用户名目录或原始本机资产 URL。
 - 缺失资源、取消导出和磁盘写入失败不会留下正式半成品。

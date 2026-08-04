@@ -6,6 +6,7 @@ export type ImportedAssetIndexes = {
   bySourceUrl: Map<string, AssetEntry>;
   uniqueByPackagePath: Map<string, AssetEntry>;
   uniqueByDataPlatformPackage: Map<string, AssetEntry>;
+  uniqueByDataPlatformLogicalPackage: Map<string, AssetEntry>;
   uniqueByPortablePackage: Map<string, AssetEntry>;
 };
 
@@ -50,6 +51,17 @@ function getDataPlatformPackageMatchKey(modelPath: string | undefined, packagePa
   return match ? `${match[1].toLowerCase()}:${match[2]}` : '';
 }
 
+/**
+ * 去除数据中台实例内数据库 ID，只保留资源类型和模型名称。
+ * 同一模型迁移到不同数据中台后 ID 可能变化，但同步目录中的名称部分仍可作为唯一兜底键。
+ */
+function getDataPlatformLogicalPackageMatchKey(modelPath: string | undefined, packagePath?: string): string {
+  const packageDirectoryName = getPathBaseName(packagePath ?? getDirectoryPath(modelPath));
+  const match = /^(model|env|combo)-\d+-(.+)$/i.exec(packageDirectoryName);
+  const logicalName = match?.[2]?.trim();
+  return match && logicalName ? `${match[1].toLowerCase()}:${logicalName}` : '';
+}
+
 /** 只保留候选资产唯一的匹配键，歧义键不参与自动重新关联。 */
 function createUniqueAssetIndex(candidateLists: Map<string, AssetEntry[]>): Map<string, AssetEntry> {
   const uniqueAssets = new Map<string, AssetEntry>();
@@ -66,6 +78,7 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
   const bySourceUrl = new Map<string, AssetEntry>();
   const packageAssetLists = new Map<string, AssetEntry[]>();
   const dataPlatformPackageAssetLists = new Map<string, AssetEntry[]>();
+  const dataPlatformLogicalPackageAssetLists = new Map<string, AssetEntry[]>();
   const portablePackageAssetLists = new Map<string, AssetEntry[]>();
 
   for (const asset of modelAssets) {
@@ -89,6 +102,13 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
       dataPlatformPackageAssetLists.set(dataPlatformPackageKey, packageAssets);
     }
 
+    const dataPlatformLogicalPackageKey = getDataPlatformLogicalPackageMatchKey(asset.path, asset.packagePath);
+    if (dataPlatformLogicalPackageKey) {
+      const packageAssets = dataPlatformLogicalPackageAssetLists.get(dataPlatformLogicalPackageKey) ?? [];
+      packageAssets.push(asset);
+      dataPlatformLogicalPackageAssetLists.set(dataPlatformLogicalPackageKey, packageAssets);
+    }
+
     const portablePackageKey = getPortablePackageMatchKey(asset.path, asset.packagePath);
     if (portablePackageKey) {
       const packageAssets = portablePackageAssetLists.get(portablePackageKey) ?? [];
@@ -102,11 +122,12 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
     bySourceUrl,
     uniqueByPackagePath: createUniqueAssetIndex(packageAssetLists),
     uniqueByDataPlatformPackage: createUniqueAssetIndex(dataPlatformPackageAssetLists),
+    uniqueByDataPlatformLogicalPackage: createUniqueAssetIndex(dataPlatformLogicalPackageAssetLists),
     uniqueByPortablePackage: createUniqueAssetIndex(portablePackageAssetLists),
   };
 }
 
-/** 按完整目录或数据中台稳定业务 ID 查找唯一模型包，供普通模型和场景环境共同复用。 */
+/** 按完整目录、同中台业务 ID 或跨中台逻辑包名查找唯一模型包，供普通模型和场景环境共同复用。 */
 export function findImportedAssetForPackagePath(
   packagePath: string | undefined,
   indexes: ImportedAssetIndexes,
@@ -115,13 +136,19 @@ export function findImportedAssetForPackagePath(
   if (packageMatch) return packageMatch;
 
   const dataPlatformPackageKey = getDataPlatformPackageMatchKey(undefined, packagePath);
-  return dataPlatformPackageKey
-    ? indexes.uniqueByDataPlatformPackage.get(dataPlatformPackageKey) ?? null
+  if (dataPlatformPackageKey) {
+    const dataPlatformPackageMatch = indexes.uniqueByDataPlatformPackage.get(dataPlatformPackageKey);
+    if (dataPlatformPackageMatch) return dataPlatformPackageMatch;
+  }
+
+  const logicalPackageKey = getDataPlatformLogicalPackageMatchKey(undefined, packagePath);
+  return logicalPackageKey
+    ? indexes.uniqueByDataPlatformLogicalPackage.get(logicalPackageKey) ?? null
     : null;
 }
 
 /**
- * 优先按本机精确路径/URL 匹配；数据中台资源允许按稳定业务 ID 关联，其他跨电脑场景再按唯一包标识关联。
+ * 优先按本机精确路径/URL 匹配；数据中台先按业务 ID、再按跨中台唯一逻辑包名关联，其他场景再按便携包标识关联。
  */
 export function findImportedAssetForModelAsset(
   modelAsset: ModelAssetTemplate,

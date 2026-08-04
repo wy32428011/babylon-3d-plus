@@ -1,0 +1,131 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { ArcRotateCamera, NullEngine, Scene, Vector3 } from '@babylonjs/core';
+
+import {
+  DIGITAL_TWIN_CAMERA_CONTROL_STANDARD,
+  type DigitalTwinCameraPose,
+  applyDigitalTwinCameraControlStandard,
+  applyDigitalTwinCameraSensitivity,
+  clampDigitalTwinCameraRadius,
+  hasDigitalTwinCameraPoseChanged,
+  hasPendingDigitalTwinCameraInput,
+  syncDigitalTwinCameraPanScale,
+} from '../../src/runtime/babylon/cameraControlStandard.ts';
+
+function createCamera(): { engine: NullEngine; scene: Scene; camera: ArcRotateCamera } {
+  const engine = new NullEngine({ renderWidth: 1280, renderHeight: 720 });
+  const scene = new Scene(engine);
+  const camera = new ArcRotateCamera('CameraControlStandardTest', Math.PI / 4, Math.PI / 3, 20, Vector3.Zero(), scene);
+  return { engine, scene, camera };
+}
+
+function disposeCamera(fixture: ReturnType<typeof createCamera>): void {
+  fixture.scene.dispose();
+  fixture.engine.dispose();
+}
+
+function assertClose(actual: number, expected: number, message?: string): void {
+  assert.ok(Math.abs(actual - expected) < 1e-10, message ?? `${actual} 应接近 ${expected}`);
+}
+
+test('数字孪生保留原有右键旋转、中键平移、Ctrl+左键平移和左键选择习惯', () => {
+  const fixture = createCamera();
+  try {
+    applyDigitalTwinCameraControlStandard(fixture.camera, { zoom: 10, pan: 10, rotate: 10 });
+
+    const pointerEntries = fixture.camera.movement.input.inputMap.filter((entry) => entry.source === 'pointer');
+    const wheelEntries = fixture.camera.movement.input.inputMap.filter((entry) => entry.source === 'wheel');
+
+    assert.deepEqual(pointerEntries.map(({ source, button, modifiers, interaction }) => ({
+      source,
+      button,
+      ...(modifiers ? { modifiers } : {}),
+      interaction,
+    })), [
+      { source: 'pointer', button: 0, modifiers: { ctrl: true }, interaction: 'pan' },
+      { source: 'pointer', button: 2, interaction: 'rotate' },
+      { source: 'pointer', button: 1, interaction: 'pan' },
+    ]);
+    assert.deepEqual(wheelEntries.map(({ source, interaction }) => ({ source, interaction })), [
+      { source: 'wheel', interaction: 'zoom' },
+    ]);
+    assert.equal(fixture.camera.movement.input.resolveInteraction('pointer', { button: 0, modifiers: { ctrl: false } }), null);
+    assert.equal(
+      fixture.camera.movement.input.resolveInteraction('pointer', { button: 0, modifiers: { ctrl: true } })?.interaction,
+      'pan',
+    );
+    assert.equal(fixture.camera.movement.input.resolveInteraction('pointer', { button: 1 })?.interaction, 'pan');
+    assert.equal(fixture.camera.movement.input.resolveInteraction('pointer', { button: 2 })?.interaction, 'rotate');
+  } finally {
+    disposeCamera(fixture);
+  }
+});
+
+test('重复应用数字孪生相机标准不会产生重复或额外鼠标映射', () => {
+  const fixture = createCamera();
+  try {
+    applyDigitalTwinCameraControlStandard(fixture.camera, { zoom: 10, pan: 10, rotate: 10 });
+    applyDigitalTwinCameraControlStandard(fixture.camera, { zoom: 10, pan: 10, rotate: 10 });
+
+    assert.equal(fixture.camera.movement.input.getEntries('pointer', 'rotate').length, 1);
+    assert.equal(fixture.camera.movement.input.getEntries('pointer', 'pan').length, 2);
+    assert.equal(fixture.camera.movement.input.getEntries('wheel', 'zoom').length, 1);
+  } finally {
+    disposeCamera(fixture);
+  }
+});
+
+test('旋转角度、屏幕空间平移幅度和滚轮缩放按统一基准及灵敏度倍率计算', () => {
+  const fixture = createCamera();
+  try {
+    applyDigitalTwinCameraControlStandard(fixture.camera, { zoom: 10, pan: 10, rotate: 10 });
+
+    const rotateEntry = fixture.camera.movement.input.getEntry('pointer', 'rotate', { button: 2 });
+    const defaultRadiansPerPixel = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.rotation.radiansPerPixelAtDefault;
+    const defaultWorldUnitsPerPixel = 2 * fixture.camera.radius * Math.tan(fixture.camera.fov / 2) / 720;
+
+    assertClose(rotateEntry?.sensitivityX ?? Number.NaN, defaultRadiansPerPixel);
+    assertClose(rotateEntry?.sensitivityY ?? Number.NaN, defaultRadiansPerPixel);
+    assert.equal(fixture.camera.wheelDeltaPercentage, 0.05);
+    assertClose(fixture.camera.movement.panSpeed, defaultWorldUnitsPerPixel);
+
+    applyDigitalTwinCameraSensitivity(fixture.camera, { zoom: 20, pan: 5, rotate: 20 });
+    syncDigitalTwinCameraPanScale(fixture.camera);
+
+    assertClose(rotateEntry?.sensitivityX ?? Number.NaN, defaultRadiansPerPixel * 2);
+    assertClose(rotateEntry?.sensitivityY ?? Number.NaN, defaultRadiansPerPixel * 2);
+    assert.equal(fixture.camera.wheelDeltaPercentage, 0.1);
+    assertClose(fixture.camera.movement.panSpeed, defaultWorldUnitsPerPixel * 0.5);
+
+    fixture.camera.radius *= 2;
+    syncDigitalTwinCameraPanScale(fixture.camera);
+    assertClose(fixture.camera.movement.panSpeed, defaultWorldUnitsPerPixel);
+    assert.equal(fixture.camera.minZ, DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minZMeters);
+    assert.equal(fixture.camera.lowerRadiusLimit, DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters);
+    assert.equal(clampDigitalTwinCameraRadius(0.001), DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters);
+  } finally {
+    disposeCamera(fixture);
+  }
+});
+
+test('模型表面上的真实相机输入或位姿变化会被识别为视角拖拽', () => {
+  const fixture = createCamera();
+  const pose: DigitalTwinCameraPose = {
+    alpha: 1,
+    beta: 0.8,
+    radius: 20,
+    target: { x: 0, y: 0, z: 0 },
+  };
+
+  try {
+    assert.equal(hasDigitalTwinCameraPoseChanged(pose, { ...pose, target: { ...pose.target } }), false);
+    assert.equal(hasDigitalTwinCameraPoseChanged(pose, { ...pose, alpha: pose.alpha + 0.001 }), true);
+    assert.equal(hasPendingDigitalTwinCameraInput(fixture.camera), false);
+
+    fixture.camera.movement.rotationAccumulatedPixels.x = 0.01;
+    assert.equal(hasPendingDigitalTwinCameraInput(fixture.camera), true);
+  } finally {
+    disposeCamera(fixture);
+  }
+});

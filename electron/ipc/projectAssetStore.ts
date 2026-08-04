@@ -36,6 +36,7 @@ const MAX_RECENT_WORKSPACE_ITEMS = 12;
 const PROJECT_ASSET_INDEX_ERROR = '项目资产索引格式不正确。';
 
 let currentProjectRoot: string | null = null;
+let sharedProjectAssetRoot: string | null = null;
 let hasLoadedRecentProjectRoot = false;
 
 type PersistedRecentProjectEntry = {
@@ -472,6 +473,16 @@ export function setCurrentProjectRoot(projectRoot: string): void {
   currentProjectRoot = normalizeFilePath(projectRoot);
 }
 
+/** 为当前业务工程挂载数据中台共享资源缓存；null 表示普通本地项目。 */
+export function setSharedProjectAssetRoot(projectRoot: string | null): void {
+  sharedProjectAssetRoot = projectRoot ? normalizeFilePath(projectRoot) : null;
+  if (sharedProjectAssetRoot) authorizeProjectAssetRoots(sharedProjectAssetRoot);
+}
+
+export function getSharedProjectAssetRoot(): string | null {
+  return sharedProjectAssetRoot;
+}
+
 /** 生成项目内模型包导入版本，用于同一路径被覆盖后通知 renderer 和运行时重载资源。 */
 function createProjectAssetRevision(): string {
   return `${Date.now().toString(36)}-${randomUUID()}`;
@@ -546,6 +557,7 @@ export async function activateProjectRoot(
 }
 
 export async function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult> {
+  setSharedProjectAssetRoot(null);
   const normalizedProjectRoot = normalizeFilePath(projectRoot);
   const index = await readRecentWorkspaceIndex();
   const isKnownRecentProject = index.projects.some((entry) => entry.projectRoot === normalizedProjectRoot);
@@ -710,6 +722,7 @@ export async function selectCurrentProjectRootWithDialog(): Promise<string | nul
   }
 
   const selectedProjectRoot = normalizeFilePath(projectRoot);
+  setSharedProjectAssetRoot(null);
   setCurrentProjectRoot(selectedProjectRoot);
   await ensureProjectDirectories(selectedProjectRoot);
   authorizeProjectAssetRoots(selectedProjectRoot);
@@ -729,24 +742,46 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   await ensureProjectDirectories(projectRoot);
   authorizeProjectAssetRoots(projectRoot);
 
-  const index = await readProjectAssetIndex(projectRoot);
-  for (const asset of index.assets) {
-    authorizeAssetFile(asset.path);
-    if (asset.thumbnailPath) {
-      authorizeAssetFile(asset.thumbnailPath);
-    }
+  const localIndex = await readProjectAssetIndex(projectRoot);
+  let assets = localIndex.assets;
+  if (sharedProjectAssetRoot && normalizeFilePath(sharedProjectAssetRoot) !== normalizeFilePath(projectRoot)) {
+    await ensureProjectDirectories(sharedProjectAssetRoot);
+    authorizeProjectAssetRoots(sharedProjectAssetRoot);
+    const sharedIndex = await readProjectAssetIndex(sharedProjectAssetRoot);
+    assets = mergeProjectAssets(localIndex.assets, sharedIndex.assets);
+  }
 
-    for (const scriptAsset of asset.scriptAssets ?? []) {
-      authorizeAssetFile(scriptAsset.path);
-    }
+  for (const asset of assets) {
+    authorizeAssetFile(asset.path);
+    if (asset.thumbnailPath) authorizeAssetFile(asset.thumbnailPath);
+    for (const scriptAsset of asset.scriptAssets ?? []) authorizeAssetFile(scriptAsset.path);
   }
 
   const skyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
   for (const skybox of skyboxes) authorizeAssetFile(skybox.path);
 
-  return { projectRoot, assets: index.assets, skyboxes };
+  return { projectRoot, assets, skyboxes };
 }
 
+/** 共享缓存按稳定资源 ID 覆盖工程包内旧快照，普通本地资产仍完整保留。 */
+function mergeProjectAssets(
+  localAssets: ProjectModelAssetEntry[],
+  sharedAssets: ProjectModelAssetEntry[],
+): ProjectModelAssetEntry[] {
+  const merged = new Map<string, ProjectModelAssetEntry>();
+  for (const asset of localAssets) merged.set(createProjectAssetMergeKey(asset), asset);
+  for (const asset of sharedAssets) merged.set(createProjectAssetMergeKey(asset), asset);
+  return [...merged.values()].sort((left, right) => {
+    return (left.displayName ?? left.name).localeCompare(right.displayName ?? right.name, 'zh-CN');
+  });
+}
+
+function createProjectAssetMergeKey(asset: ProjectModelAssetEntry): string {
+  const packageName = path.basename(asset.packagePath ?? path.dirname(asset.path));
+  const dataPlatformMatch = /^(model|env|combo)-(\d+)(?:-|$)/i.exec(packageName);
+  if (dataPlatformMatch) return 'data-platform:' + dataPlatformMatch[1].toLowerCase() + ':' + dataPlatformMatch[2];
+  return 'local:' + normalizeFilePath(asset.path).toLowerCase();
+}
 /** 把用户选择的 HDR/EXR 导入项目天空盒库，并返回刷新后的资源快照。 */
 export async function importSkyboxFileIntoProject(
   sourceFilePath: string,

@@ -67,11 +67,13 @@ export function resolveDataPlatformRemoteUrl(baseUrl: string, value: string): UR
     throw new Error('数据中台返回了空的文件地址。');
   }
 
+  let base: URL;
   let resolved: URL;
   try {
+    base = new URL(baseUrl);
     resolved = new URL(value.trim(), `${baseUrl.replace(/\/+$/, '')}/`);
   } catch {
-    throw new Error(`数据中台文件地址格式不正确：${value}`);
+    throw new Error('数据中台文件地址格式不正确。');
   }
 
   if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') {
@@ -79,6 +81,9 @@ export function resolveDataPlatformRemoteUrl(baseUrl: string, value: string): UR
   }
   if (resolved.username || resolved.password) {
     throw new Error('数据中台文件地址不能包含账号或密码。');
+  }
+  if (resolved.origin !== base.origin) {
+    throw new Error('数据中台文件地址必须与已配置服务地址同源。');
   }
 
   resolved.hash = '';
@@ -122,6 +127,7 @@ export async function requestDataPlatformJson(options: {
 
     const response = await net.fetch(endpoint.toString(), {
       method: 'POST',
+      redirect: 'error',
       headers: {
         Accept: 'application/json',
         'Cache-Control': 'no-store',
@@ -174,6 +180,7 @@ export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Pr
 
     const response = await net.fetch(remoteUrl.toString(), {
       method: 'GET',
+      redirect: 'error',
       headers: {
         Accept: '*/*',
         'Cache-Control': 'no-store',

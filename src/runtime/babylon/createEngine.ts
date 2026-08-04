@@ -14,10 +14,16 @@ import {
   DEFAULT_EDITOR_GRID_SETTINGS,
   type EditorGridSettings,
 } from './EditorGroundGrid';
+import {
+  DIGITAL_TWIN_CAMERA_CONTROL_STANDARD,
+  applyDigitalTwinCameraControlStandard,
+  applyDigitalTwinCameraSensitivity,
+  clampDigitalTwinCameraRadius,
+  syncDigitalTwinCameraPanScale,
+} from './cameraControlStandard';
 import type { Vector3Data } from '../../editor/model/math';
 import {
   SCENE_VIEW_DISTANCE_DEFAULT,
-  sanitizeSceneSensitivityValue,
   sanitizeSceneViewDistance,
   type SceneCameraOrientation,
   type SceneCameraPose,
@@ -51,9 +57,9 @@ export type BabylonViewportRuntimeStatusCallback = (status: BabylonViewportRunti
 export type BabylonViewportOptions = {
   showGrid?: boolean;
   allowCameraControl?: boolean;
-  /** 编辑器模式设为 true 时拒绝 SwiftShader、WARP 等软件 WebGL 回退。 */
+  /** 设为 true 时要求真实硬件 WebGL，并拒绝 SwiftShader、WARP 等软件 renderer 回退。 */
   requireHardwareAcceleration?: boolean;
-  /** 可选日志回调，用于向编辑器控制台输出诊断信息。 */
+  /** 可选日志回调，用于向上层控制台输出 GPU renderer 诊断信息。 */
   onLog?: (message: string) => void;
 };
 
@@ -81,8 +87,6 @@ const SOFTWARE_WEBGL_RENDERER_PATTERNS = [
   /microsoft basic render driver/i,
   /(?:direct3d|d3d)\s*warp/i,
 ];
-const EDITOR_CAMERA_MIN_RADIUS_METERS = 0.2;
-const EDITOR_CAMERA_MIN_Z_METERS = 0.02;
 const EDITOR_CAMERA_DEFAULT_ALPHA = Math.PI / 4;
 const EDITOR_CAMERA_DEFAULT_BETA = Math.PI * 0.43;
 const EDITOR_CAMERA_DEFAULT_RADIUS = 28;
@@ -100,50 +104,30 @@ function isSoftwareWebGLRenderer(renderer: string): boolean {
 }
 
 /** 校验 Babylon 已连接真实 GPU，并记录可用于现场诊断的 WebGL 后端。 */
-function assertHardwareAcceleratedWebGL(engine: Engine): void {
+function assertHardwareAcceleratedWebGL(engine: Engine, onLog?: (message: string) => void): void {
   const info = engine.getGlInfo();
   if (isSoftwareWebGLRenderer(info.renderer)) {
     throw new Error(
-      '检测到软件 WebGL 渲染器（' + info.renderer + '）。编辑器要求显卡硬件加速，请更新显卡驱动或在系统图形设置中选择高性能 GPU。',
+      '检测到软件 WebGL 渲染器（' + info.renderer + '）。当前 3D 视口要求显卡硬件加速，禁止使用软件 renderer。',
     );
   }
 
-  console.info(
+  const message =
     '[Babylon] 硬件加速 WebGL 已启用：WebGL ' +
-      engine.webGLVersion +
-      '; vendor=' +
-      info.vendor +
-      '; renderer=' +
-      info.renderer,
-  );
+    engine.webGLVersion +
+    '; vendor=' +
+    info.vendor +
+    '; renderer=' +
+    info.renderer;
+  console.info(message);
+  onLog?.(message);
 }
 
-/** 在创建 Babylon Engine 前检查 WebGL 能力，避免 Electron 内容区静默白屏。 */
+/** 在创建 Babylon Engine 前检查 WebGL 能力，避免 3D 视口静默白屏。 */
 function assertWebGLSupported(): void {
   if (Engine.isSupported()) return;
 
-  throw new Error('当前 Electron 渲染进程不支持 WebGL，无法创建 Babylon Scene View。');
-}
-
-/** 在离屏画布上探测硬件加速 WebGL 是否可用，不可用时返回 false 而非抛错。 */
-function probeHardwareAccelerationAvailable(): boolean {
-  const canvas = document.createElement('canvas');
-  canvas.width = 1;
-  canvas.height = 1;
-  const gl =
-    canvas.getContext('webgl2', { failIfMajorPerformanceCaveat: true }) ??
-    canvas.getContext('webgl', { failIfMajorPerformanceCaveat: true });
-  if (gl) {
-    const ext = gl.getExtension('WEBGL_lose_context');
-    if (ext) ext.loseContext();
-    return true;
-  }
-  return false;
-}
-
-/** 限制编辑器相机距离，避免滚轮缩放过近时穿过模型或被近裁剪面裁空。 */
-function clampCameraRadius(radiusMeters: number): number {
-  return Math.max(radiusMeters, EDITOR_CAMERA_MIN_RADIUS_METERS);
+  throw new Error('当前运行环境不支持 WebGL，无法创建 Babylon 3D 视口。');
 }
 
 /**
@@ -165,7 +149,7 @@ function getFocusCameraRadius(bounds: EditorWorldBounds, camera: ArcRotateCamera
     : Math.atan(Math.tan(configuredHalfFov) * aspectRatio);
   const limitingHalfFov = Math.max(0.01, Math.min(verticalHalfFov, horizontalHalfFov));
   const fitDistance = radiusMeters / Math.sin(limitingHalfFov);
-  return clampCameraRadius(Math.max(fitDistance * 1.08, 2.5));
+  return clampDigitalTwinCameraRadius(Math.max(fitDistance * 1.08, 2.5));
 }
 
 
@@ -181,18 +165,7 @@ export function focusArcRotateCameraOnBounds(
   camera.alpha = alpha;
   camera.beta = beta;
   camera.radius = getFocusCameraRadius(bounds, camera, engine);
-}
-
-/** 将场景灵敏度映射到 Babylon 相机参数，滑杆 10 对应原始默认手感。 */
-function applyCameraSensitivity(camera: ArcRotateCamera, settings: SceneSensitivitySettings): void {
-  const zoom = sanitizeSceneSensitivityValue(settings.zoom);
-  const pan = sanitizeSceneSensitivityValue(settings.pan);
-  const rotate = sanitizeSceneSensitivityValue(settings.rotate);
-
-  camera.wheelDeltaPercentage = zoom * 0.005;
-  camera.panningSensibility = 10000 / (pan * 10);
-  camera.angularSensibilityX = 10000 / (rotate * 10);
-  camera.angularSensibilityY = 10000 / (rotate * 10);
+  syncDigitalTwinCameraPanScale(camera);
 }
 
 /** 读取当前 ArcRotateCamera 位姿，保存为可写入场景文件的纯数据。 */
@@ -208,12 +181,14 @@ function readCameraPose(camera: ArcRotateCamera): SceneCameraPose {
 }
 
 /** 应用保存的相机位姿；未保存时回到编辑器默认观察角度。 */
-function applySavedCameraPose(camera: ArcRotateCamera, pose: SceneCameraPose | null): void {
+export function applySavedCameraPose(camera: ArcRotateCamera, pose: SceneCameraPose | null): void {
   const target = pose ? new Vector3(pose.target.x, pose.target.y, pose.target.z) : EDITOR_CAMERA_DEFAULT_TARGET.clone();
   camera.alpha = pose?.alpha ?? EDITOR_CAMERA_DEFAULT_ALPHA;
   camera.beta = pose?.beta ?? EDITOR_CAMERA_DEFAULT_BETA;
-  camera.radius = clampCameraRadius(pose?.radius ?? EDITOR_CAMERA_DEFAULT_RADIUS);
-  camera.setTarget(target);
+  camera.radius = clampDigitalTwinCameraRadius(pose?.radius ?? EDITOR_CAMERA_DEFAULT_RADIUS);
+  // ArcRotateCamera.setTarget 默认会按旧 position 重算角度和距离；恢复视角时必须显式保留已设置的位姿。
+  camera.setTarget(target, false, false, true);
+  syncDigitalTwinCameraPanScale(camera);
 }
 
 /** 清除相机仍在衰减的旋转、平移和缩放输入，避免程序切换视角后继续漂移。 */
@@ -295,19 +270,6 @@ const CAMERA_FLY_KEY_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', '
 const CAMERA_FLY_SPEED_PER_RADIUS_SECOND = 0.6;
 /** 键盘平移最小速度（m/s），防止极端近距离时 WASD 移动过于迟缓。 */
 const CAMERA_FLY_MIN_SPEED_METERS_PER_SECOND = 0.5;
-
-/**
- * 重映射相机鼠标键位：右键旋转、中键平移（Babylon 默认为左键旋转、右键平移）。
- * 左键的旋转映射被移除，左键仅用于拾取与 Gizmo；ctrl+左键平移保留，触摸与滚轮缩放不受影响。
- */
-function remapEditorCameraMouseButtons(camera: ArcRotateCamera): void {
-  const input = camera.movement.input;
-  input.setInteraction('pointer', { button: 2 }, 'rotate');
-  input.setInteraction('pointer', { button: 1 }, 'pan');
-  for (const entry of input.getEntries('pointer', 'rotate', { button: 0 })) {
-    input.inputMap.splice(input.inputMap.indexOf(entry), 1);
-  }
-}
 
 /**
  * WASD 移动 + Space 升 C 降；焦点在输入控件上时不接管按键，返回清理函数。
@@ -401,26 +363,29 @@ export function createBabylonViewport(
 ): BabylonViewport {
   assertWebGLSupported();
 
-  const requestedHardwareAcceleration = options.requireHardwareAcceleration ?? false;
-  const useHardwareAcceleration = requestedHardwareAcceleration && probeHardwareAccelerationAvailable();
-  if (requestedHardwareAcceleration) {
-    const logMsg = useHardwareAcceleration
-      ? '硬件加速 WebGL 已启用。'
-      : '硬件加速 WebGL 不可用，已降级为软件渲染。建议更新显卡驱动或配置"高性能"图形模式。';
-    console.info('[Babylon] ' + logMsg);
-    options.onLog?.('[Babylon] ' + logMsg);
-  }
+  const requireHardwareAcceleration = options.requireHardwareAcceleration ?? false;
   let engine: Engine;
   try {
-    engine = new Engine(canvas, true, {
+    const candidate = new Engine(canvas, true, {
       preserveDrawingBuffer: false,
       stencil: true,
       powerPreference: 'high-performance',
-      failIfMajorPerformanceCaveat: useHardwareAcceleration,
+      failIfMajorPerformanceCaveat: requireHardwareAcceleration,
+      desynchronized: false,
     });
-    if (useHardwareAcceleration) assertHardwareAcceleratedWebGL(engine);
+    try {
+      if (requireHardwareAcceleration) assertHardwareAcceleratedWebGL(candidate, options.onLog);
+      engine = candidate;
+    } catch (error) {
+      candidate.dispose();
+      throw error;
+    }
   } catch (error) {
-    throw new Error('Babylon Engine 创建失败：' + getErrorMessage(error));
+    const mode = requireHardwareAcceleration ? '硬件加速 WebGL' : 'WebGL';
+    const guidance = requireHardwareAcceleration
+      ? ' 请确认浏览器或桌面应用已启用硬件加速并重启，同时检查显卡驱动与系统图形策略是否允许当前程序使用 GPU。'
+      : '';
+    throw new Error('Babylon Engine ' + mode + ' 创建失败：' + getErrorMessage(error) + guidance);
   }
 
   const scene = new Scene(engine);
@@ -434,15 +399,15 @@ export function createBabylonViewport(
     EDITOR_CAMERA_DEFAULT_TARGET.clone(),
     scene,
   );
-  if (options.allowCameraControl ?? true) {
-    camera.attachControl(canvas, true);
-    remapEditorCameraMouseButtons(camera);
-  }
-  camera.minZ = EDITOR_CAMERA_MIN_Z_METERS;
-  camera.lowerRadiusLimit = EDITOR_CAMERA_MIN_RADIUS_METERS;
+  if (options.allowCameraControl ?? true) camera.attachControl(canvas, true);
+  const defaultSensitivity = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.sensitivity.default;
+  applyDigitalTwinCameraControlStandard(camera, {
+    zoom: defaultSensitivity,
+    pan: defaultSensitivity,
+    rotate: defaultSensitivity,
+  });
   camera.maxZ = SCENE_VIEW_DISTANCE_DEFAULT;
   camera.upperRadiusLimit = SCENE_VIEW_DISTANCE_DEFAULT;
-  applyCameraSensitivity(camera, { zoom: 10, pan: 10, rotate: 10 });
 
   const light = new HemisphericLight('EditorLight', new Vector3(0, 1, 0), scene);
   light.intensity = 0.8;
@@ -453,6 +418,9 @@ export function createBabylonViewport(
   });
   let topViewLock: TopViewLockState | null = null;
   let orthoBoundsObserver: Observer<Scene> | null = null;
+  const cameraPanScaleObserver = scene.onBeforeRenderObservable.add(() => {
+    syncDigitalTwinCameraPanScale(camera);
+  });
   const disposeFlyControls = createCameraFlyKeyControls(camera, engine, scene, () => topViewLock !== null);
   let disposed = false;
   let contextLost = false;
@@ -512,10 +480,11 @@ export function createBabylonViewport(
       const viewDistance = sanitizeSceneViewDistance(meters);
       camera.maxZ = viewDistance;
       camera.upperRadiusLimit = viewDistance;
-      camera.radius = clampCameraRadius(Math.min(camera.radius, viewDistance));
+      camera.radius = clampDigitalTwinCameraRadius(Math.min(camera.radius, viewDistance));
+      syncDigitalTwinCameraPanScale(camera);
     },
     setSensitivity: (settings) => {
-      applyCameraSensitivity(camera, settings);
+      applyDigitalTwinCameraSensitivity(camera, settings);
     },
     getCameraPose: () => readCameraPose(camera),
     applyCameraPose: (pose) => {
@@ -552,6 +521,7 @@ export function createBabylonViewport(
     dispose: () => {
       disposed = true;
       disposeFlyControls();
+      scene.onBeforeRenderObservable.remove(cameraPanScaleObserver);
       if (orthoBoundsObserver) {
         scene.onBeforeRenderObservable.remove(orthoBoundsObserver);
         orthoBoundsObserver = null;

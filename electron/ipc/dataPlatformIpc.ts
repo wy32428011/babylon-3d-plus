@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain, net } from 'electron';
+import { app, dialog, ipcMain } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
@@ -21,12 +21,13 @@ import {
   retryLatestDataPlatformModelSync,
   syncDataPlatformModelsForWorkspace,
 } from './dataPlatformProjectService.js';
+import { requestDataPlatformJson } from './dataPlatformTransfer.js';
 
 const DATA_PLATFORM_CONFIG_FILE = 'data-platform-config.json';
 const PROJECT_QUERY_PATH = 'api/v1/projects/query';
+const PROJECT_DETAIL_PATH = 'api/v1/projects/detail';
 const PROJECT_PAGE_SIZE = 12;
 const PROJECT_REQUEST_TIMEOUT_MS = 10_000;
-const MAX_RESPONSE_TEXT_LENGTH = 2_000_000;
 
 let registered = false;
 const trustedProjectsById = new Map<string, DataPlatformProjectEntry>();
@@ -96,6 +97,18 @@ export function registerDataPlatformIpc(): void {
     },
   );
 
+  ipcMain.handle(
+    'data-platform:getProject',
+    async (_event, request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectEntry> => {
+      const detailRequest = validateOpenProjectRequest(request);
+      const config = await readDataPlatformConfig();
+      if (!config.baseUrl) throw new Error('尚未配置数据中台地址。');
+      const project = await requestDataPlatformProject(config.baseUrl, detailRequest.projectId);
+      trustedProjectsById.set(project.id, project);
+      trustedProjectsBaseUrl = config.baseUrl;
+      return project;
+    },
+  );
   ipcMain.handle(
     'data-platform:openProject',
     async (_event, request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectOpenResult> => {
@@ -276,67 +289,36 @@ async function resetDataPlatformWorkspace(): Promise<DataPlatformConfig> {
   });
 }
 
-/** 通过 Electron 网络栈查询数据中台业务项目列表。 */
+/** 按项目 ID 查询详情，供外部深链绕过分页列表精确打开目标工程。 */
+async function requestDataPlatformProject(baseUrl: string, projectId: string): Promise<DataPlatformProjectEntry> {
+  const payload = await requestDataPlatformJson({
+    baseUrl,
+    endpointPath: PROJECT_DETAIL_PATH,
+    body: { id: projectId },
+    signal: new AbortController().signal,
+    timeoutMs: PROJECT_REQUEST_TIMEOUT_MS,
+    context: '查询数据中台项目详情',
+  });
+  if (!isPlainObject(payload) || payload.success !== true || !isPlainObject(payload.data)) {
+    const message = isPlainObject(payload) && typeof payload.message === 'string' ? payload.message.trim() : '';
+    throw new Error(message || '数据中台项目详情响应结构不正确。');
+  }
+  return normalizeProjectEntry(payload.data, 0);
+}
+/** 通过统一受限请求读取数据中台业务项目列表。 */
 async function requestDataPlatformProjects(baseUrl: string, projectName: string): Promise<DataPlatformProjectListResult> {
-  const endpoint = new URL(PROJECT_QUERY_PATH, `${baseUrl}/`).toString();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PROJECT_REQUEST_TIMEOUT_MS);
-
-  let response: Awaited<ReturnType<typeof net.fetch>>;
-  try {
-    response = await net.fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Cache-Control': 'no-store',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        pageNum: 1,
-        pageSize: PROJECT_PAGE_SIZE,
-        projectName,
-      }),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    clearTimeout(timeout);
-    if (controller.signal.aborted) {
-      throw new Error('请求数据中台项目列表超时，请检查服务地址和网络。');
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`连接数据中台失败：${message}`);
-  }
-
-  let responseText: string;
-  try {
-    responseText = await response.text();
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new Error('请求数据中台项目列表超时，请检查服务地址和网络。');
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`读取数据中台响应失败：${message}`);
-  } finally {
-    clearTimeout(timeout);
-  }
-  if (responseText.length > MAX_RESPONSE_TEXT_LENGTH) {
-    throw new Error('数据中台项目列表响应过大，已停止解析。');
-  }
-
-  if (!response.ok) {
-    const detail = readResponseMessage(responseText);
-    throw new Error(`数据中台返回 HTTP ${response.status}${detail ? `：${detail}` : ''}`);
-  }
-
-  let payload: unknown;
-  try {
-    payload = JSON.parse(responseText) as unknown;
-  } catch {
-    throw new Error('数据中台项目列表响应不是有效 JSON。');
-  }
-
+  const payload = await requestDataPlatformJson({
+    baseUrl,
+    endpointPath: PROJECT_QUERY_PATH,
+    body: {
+      pageNum: 1,
+      pageSize: PROJECT_PAGE_SIZE,
+      projectName,
+    },
+    signal: new AbortController().signal,
+    timeoutMs: PROJECT_REQUEST_TIMEOUT_MS,
+    context: '查询数据中台项目列表',
+  });
   return normalizeProjectListResponse(payload);
 }
 
@@ -390,6 +372,16 @@ function normalizeProjectEntry(value: unknown, index: number): DataPlatformProje
     latestEditorProjectName: normalizeOptionalString(value.latestEditorProjectName),
     latestEditorProjectPackageUrl: normalizeOptionalString(value.latestEditorProjectPackageUrl),
     latestEditorProjectPackageFileName: normalizeOptionalString(value.latestEditorProjectPackageFileName),
+    currentResourceRevision: normalizeNonNegativeIntegerString(value.currentResourceRevision),
+    publishedResourceRevision: normalizeNonNegativeIntegerString(value.publishedResourceRevision),
+    digitalTwinStatus: normalizeOptionalString(value.digitalTwinStatus),
+    onlineDigitalTwinVersionId: normalizeOptionalIdentifier(value.onlineDigitalTwinVersionId),
+    onlineDigitalTwinVersionNumber: normalizeOptionalInteger(value.onlineDigitalTwinVersionNumber),
+    onlineDigitalTwinPublishId: normalizeOptionalIdentifier(value.onlineDigitalTwinPublishId),
+    onlineProjectPublishId: normalizeOptionalIdentifier(value.onlineProjectPublishId),
+    digitalTwinStableUrl: normalizeOptionalString(value.digitalTwinStableUrl),
+    digitalTwinReleaseUrl: normalizeOptionalString(value.digitalTwinReleaseUrl),
+    digitalTwinLastPublishedAt: normalizeOptionalString(value.digitalTwinLastPublishedAt),
     updatedAt: normalizeOptionalString(value.updatedAt),
   };
 }
@@ -446,19 +438,6 @@ function normalizePersistedWorkspaceRoot(value: unknown): string | null {
   return path.normalize(value.trim());
 }
 
-function readResponseMessage(responseText: string): string {
-  if (!responseText.trim()) return '';
-
-  try {
-    const parsed = JSON.parse(responseText) as unknown;
-    return isPlainObject(parsed) && typeof parsed.message === 'string'
-      ? parsed.message.trim().slice(0, 300)
-      : '';
-  } catch {
-    return '';
-  }
-}
-
 function normalizeRequiredString(value: unknown, fieldName: string): string {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error(`数据中台项目列表 ${fieldName} 无效。`);
@@ -488,14 +467,23 @@ function normalizeOptionalIdentifier(value: unknown): string | null {
 function normalizeIdentifier(value: unknown): string | null {
   if (typeof value === 'string') {
     const normalized = value.trim();
-    return /^\d{1,64}$/.test(normalized) ? normalized : null;
+    return /^[1-9]\d{0,63}$/.test(normalized) ? normalized : null;
   }
 
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
     return String(value);
   }
 
   return null;
+}
+
+/** 非负 Long 修订号按字符串保留，避免 JavaScript number 丢失精度。 */
+function normalizeNonNegativeIntegerString(value: unknown): string {
+  if (typeof value === 'string' && /^\d{1,64}$/.test(value.trim())) {
+    return value.trim().replace(/^0+(?=\d)/, '');
+  }
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value);
+  return '0';
 }
 
 function normalizeOptionalInteger(value: unknown): number | null {

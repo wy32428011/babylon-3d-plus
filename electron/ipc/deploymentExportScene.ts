@@ -17,6 +17,7 @@ import {
   type DeploymentCopyFile,
   type SafeSourceFile,
 } from './deploymentExportFileSystem.js';
+import { stripCadReferencesFromSceneFile } from './sceneCadReferenceSanitizer.js';
 
 const EDITOR_ASSET_URL_PREFIX = 'editor-asset://local/';
 const MAX_SCENE_CONTENT_BYTES = 64 * 1024 * 1024;
@@ -120,6 +121,10 @@ export type PreparedDeploymentExport = {
   warnings: string[];
 };
 
+export type PrepareDeploymentExportOptions = {
+  skipCadReferences?: boolean;
+};
+
 /** 资产清单的单条稳定记录。 */
 export type DeploymentAssetManifestEntry = {
   logicalUrl: string;
@@ -136,13 +141,18 @@ export async function prepareDeploymentExport(
   forbiddenOutputPaths: string[],
   signal: AbortSignal,
   onStatus: (message: string) => void,
+  options: PrepareDeploymentExportOptions = {},
 ): Promise<PreparedDeploymentExport> {
   throwIfDeploymentExportAborted(signal);
   onStatus('正在解析场景…');
   const sceneFile = parseSceneFile(content);
+  const warnings: string[] = [];
+  if (options.skipCadReferences) {
+    const skippedCadCount = stripCadReferencesFromSceneFile(sceneFile);
+    if (skippedCadCount > 0) warnings.push(`发布包已跳过 ${skippedCadCount} 个 CAD 参考图及其 DXF 文件。`);
+  }
   const scene = requirePlainObject(sceneFile.scene, '场景内容');
   const references = collectSceneReferences(scene);
-  const warnings: string[] = [];
   const projectContext = await loadProjectAssetContext(signal, warnings);
   const bundles = new Map<string, ResourceBundle>();
 

@@ -23,6 +23,7 @@ function readDemoSceneKey(): string | null {
 export default function App() {
   const [view, setView] = useState<AppView>('home');
   const demoSceneLoadedRef = useRef(false);
+  const deepLinkOpeningRef = useRef(false);
 
   useEffect(() => {
     if (demoSceneLoadedRef.current) return;
@@ -41,6 +42,45 @@ export default function App() {
     if (loaded) setView('editor');
   }, []);
 
+  useEffect(() => {
+    if (!window.editorApi?.onDataPlatformDeepLink) return undefined;
+    return window.editorApi.onDataPlatformDeepLink((deepLink) => {
+      if (deepLinkOpeningRef.current) return;
+      deepLinkOpeningRef.current = true;
+      void (async () => {
+        try {
+          const publishContext = await window.editorApi.getDigitalTwinPublishContext?.().catch(() => null);
+          if (publishContext?.publishActive) {
+            window.alert('数字孪生发布正在进行，完成或取消发布后才能切换项目。');
+            return;
+          }
+          if (useEditorStore.getState().hasUnsavedChanges()) {
+            const confirmed = window.confirm('当前场景有未保存修改。切换数据中台项目会丢失这些修改，是否继续？');
+            if (!confirmed) return;
+          }
+
+          await window.editorApi.saveDataPlatformConfig({ baseUrl: deepLink.baseUrl });
+          const project = await window.editorApi.getDataPlatformProject({ projectId: deepLink.projectId });
+          const result = await window.editorApi.openDataPlatformProject({ projectId: project.id });
+          if (result.sceneFilePath) {
+            const loaded = await useEditorStore.getState().loadSceneFromFile(result.sceneFilePath);
+            if (!loaded) throw new Error('数据中台项目入口场景加载失败。');
+          } else {
+            useEditorStore.getState().newScene();
+          }
+          if (result.warning) useEditorStore.getState().pushLog(`数据中台项目提示：${result.warning}`);
+          if (result.conflictCopyPath) useEditorStore.getState().pushLog(`本地冲突副本：${result.conflictCopyPath}`);
+          setView('editor');
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          useEditorStore.getState().pushLog(`打开数据中台深链失败：${message}`);
+          window.alert(`打开数据中台项目失败：${message}`);
+        } finally {
+          deepLinkOpeningRef.current = false;
+        }
+      })();
+    });
+  }, []);
   /** 进入空白编辑器工作台，显式重置场景状态。 */
   function enterBlankEditor(): void {
     useEditorStore.getState().newScene();

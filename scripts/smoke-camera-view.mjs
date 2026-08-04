@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { ArcRotateCamera, NullEngine, Scene, Vector3 } from '@babylonjs/core';
 import { createServer } from 'vite';
 
 const SSR_MODULE_LOAD_TIMEOUT_MS = 180_000;
@@ -8,6 +9,42 @@ const SAVED_POSE = {
   radius: 42,
   target: { x: 10, y: 5, z: -3 },
 };
+
+function verifySavedPoseApplication(applySavedCameraPose) {
+  assert.equal(typeof applySavedCameraPose, 'function', 'Babylon 相机位姿应用函数必须可用于回归验证');
+
+  const engine = new NullEngine({ renderWidth: 1280, renderHeight: 720 });
+  const scene = new Scene(engine);
+  try {
+    const camera = new ArcRotateCamera(
+      'PublishedViewerCameraPoseSmoke',
+      Math.PI / 4,
+      Math.PI * 0.43,
+      28,
+      Vector3.Zero(),
+      scene,
+    );
+    scene.activeCamera = camera;
+    camera.getViewMatrix(true);
+
+    applySavedCameraPose(camera, SAVED_POSE);
+
+    const restoredPose = {
+      alpha: camera.alpha,
+      beta: camera.beta,
+      radius: camera.radius,
+      target: { x: camera.target.x, y: camera.target.y, z: camera.target.z },
+    };
+    assert.deepEqual(
+      restoredPose,
+      SAVED_POSE,
+      '发布 Viewer 恢复非原点 target 时不得让 ArcRotateCamera.setTarget 覆盖已保存的角度和距离',
+    );
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+}
 
 async function loadModule(server, modulePath) {
   let timeoutId;
@@ -42,6 +79,8 @@ try {
   const { useEditorStore } = await loadModule(server, '/src/editor/store/editorStore.ts');
   const { createEmptySceneDocument } = await loadModule(server, '/src/editor/model/SceneDocument.ts');
   const { serializeScene } = await loadModule(server, '/src/editor/project/SceneSerializer.ts');
+  const { applySavedCameraPose } = await loadModule(server, '/src/runtime/babylon/createEngine.ts');
+  verifySavedPoseApplication(applySavedCameraPose);
   editorStore = useEditorStore;
   editorStoreSnapshot = useEditorStore.getState();
 
