@@ -51,7 +51,7 @@ function dispatchDataPlatformDeepLink(deepLink: DataPlatformDeepLink): void {
   pendingDataPlatformDeepLink = null;
 }
 
-// 必须在 app ready 前请求高性能 GPU；Scene View 会用严格 WebGL 上下文和实际 renderer 校验阻断软件回退。
+// 必须在 app ready 前请求高性能 GPU；渲染进程离屏探测硬件 WebGL，不可用时降级软件渲染并输出日志。
 // 驱动黑名单仍由 Chromium 保留，避免强行启用不稳定驱动。
 app.commandLine.appendSwitch(HIGH_PERFORMANCE_GPU_SWITCH);
 
