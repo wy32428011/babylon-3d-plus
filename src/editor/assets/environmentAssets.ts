@@ -5,7 +5,10 @@ import {
   type SceneEnvironmentSettings,
   type SceneEnvironmentVariant,
 } from '../model/SceneDocument';
-import { createModelLengthUnitInfo } from '../model/sceneUnits';
+import {
+  createModelLengthUnitInfo,
+  DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO,
+} from '../model/sceneUnits';
 
 type ModelPackageVariant = {
   name: string;
@@ -43,7 +46,11 @@ export function createEnvironmentFromAsset(
   previousEnvironment?: SceneEnvironmentSettings | null,
 ): SceneEnvironmentSettings | null {
   const sourceVariants = variants.length > 0 ? variants : [createFallbackEnvironmentVariant(asset)];
-  const unitInfo = createModelLengthUnitInfo(previousEnvironment?.lengthUnit ?? asset.lengthUnit);
+  const unitInfo = createModelLengthUnitInfo(
+    previousEnvironment?.lengthUnit
+      ?? asset.lengthUnit
+      ?? DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO.lengthUnit,
+  );
   const safeVariants = sourceVariants.map((variant) => ({
     ...variant,
     sourceUrl: createVersionedEnvironmentSourceUrl(variant.sourceUrl, asset.assetRevision),

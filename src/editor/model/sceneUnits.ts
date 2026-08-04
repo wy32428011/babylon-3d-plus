@@ -16,6 +16,12 @@ export const DEFAULT_MODEL_LENGTH_UNIT_INFO: ModelLengthUnitInfo = {
   unitScaleToMeters: 1,
 };
 
+/** 新环境资产缺失显式单位时默认按厘米解释，普通模型与旧场景仍沿用米制兼容值。 */
+export const DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO: ModelLengthUnitInfo = {
+  lengthUnit: 'centimeter',
+  unitScaleToMeters: 0.01,
+};
+
 const MODEL_LENGTH_UNIT_LABELS: Record<ModelSourceLengthUnit, string> = {
   meter: 'meter',
   centimeter: 'centimeter',
@@ -24,7 +30,7 @@ const MODEL_LENGTH_UNIT_LABELS: Record<ModelSourceLengthUnit, string> = {
 
 const MODEL_UNIT_SCALE_TO_METERS: Record<ModelSourceLengthUnit, number> = {
   meter: 1,
-  centimeter: 0.01,
+  centimeter: DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO.unitScaleToMeters,
   millimeter: 0.001,
 };
 

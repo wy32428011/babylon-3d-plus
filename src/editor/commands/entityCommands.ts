@@ -248,6 +248,16 @@ export type FolderGroupTranslationResult = {
   message: string;
 };
 
+export type FolderGroupRotationInput = {
+  sourceSceneDocument: SceneDocument;
+  folderId: string;
+  entityIds: string[];
+  beforeTransforms: Record<string, TransformComponent>;
+  afterTransforms: Record<string, TransformComponent>;
+};
+
+export type FolderGroupRotationResult = FolderGroupTranslationResult;
+
 /** 在写入历史前重新校验场景、文件夹成员、锁定状态与拖拽基线。 */
 export function commitFolderGroupTranslation(
   scene: SceneDocument,
@@ -309,6 +319,70 @@ export function commitFolderGroupTranslation(
     committed: true,
     ...result,
     message: `移动文件夹对象：${selection.entityIds.length} 个对象`,
+  };
+}
+
+/** 在写入历史前重新校验群组成员和完整 Transform 基线，并原子提交旋转结果。 */
+export function commitFolderGroupRotation(
+  scene: SceneDocument,
+  history: CommandHistory,
+  hierarchySelectionIds: readonly string[],
+  input: FolderGroupRotationInput,
+): FolderGroupRotationResult {
+  if (scene !== input.sourceSceneDocument) {
+    return { committed: false, scene, history, message: '场景已变化，已取消文件夹整组旋转。' };
+  }
+
+  const selection = resolveFolderGroupMoveSelection(scene, hierarchySelectionIds);
+  if (selection.status !== 'ready') {
+    const message = selection.status === 'blocked'
+      ? '文件夹整组旋转已阻止：文件夹内包含锁定对象。'
+      : selection.status === 'empty'
+        ? '文件夹整组旋转已取消：文件夹内没有可旋转对象。'
+        : '文件夹整组旋转已取消：当前不再是单文件夹选区。';
+    return { committed: false, scene, history, message };
+  }
+  if (selection.folderId !== input.folderId || !areStringArraysEqual(selection.entityIds, input.entityIds)) {
+    return { committed: false, scene, history, message: '文件夹成员已变化，已取消整组旋转。' };
+  }
+
+  const afterTransforms: Record<string, TransformComponent> = {};
+  let changed = false;
+  for (const entityId of selection.entityIds) {
+    const current = selection.beforeTransforms[entityId];
+    const before = input.beforeTransforms[entityId];
+    const after = input.afterTransforms[entityId];
+    if (!areTransformDataEqual(current, before)) {
+      return { committed: false, scene, history, message: '对象 Transform 已变化，已取消过期的整组旋转。' };
+    }
+    if (!isFiniteTransformData(after)) {
+      return { committed: false, scene, history, message: `文件夹整组旋转失败：对象 ${entityId} 的目标 Transform 无效。` };
+    }
+    if (!areVector3DataEqual(before.scale, after.scale)) {
+      return { committed: false, scene, history, message: '文件夹整组旋转失败：旋转不得改变对象缩放。' };
+    }
+
+    afterTransforms[entityId] = cloneTransformData(after);
+    changed = changed || !areTransformDataNearlyEqual(before, after);
+  }
+  if (!changed) {
+    return { committed: false, scene, history, message: '文件夹旋转未变化。' };
+  }
+
+  const result = executeCommand(
+    scene,
+    history,
+    createEntityTransformsCommand(
+      selection.entityIds,
+      input.beforeTransforms,
+      afterTransforms,
+      '旋转文件夹对象',
+    ),
+  );
+  return {
+    committed: true,
+    ...result,
+    message: `旋转文件夹对象：${selection.entityIds.length} 个对象`,
   };
 }
 
@@ -523,12 +597,77 @@ function createEntityPositionsCommand(
   };
 }
 
+function createEntityTransformsCommand(
+  entityIds: readonly string[],
+  beforeTransforms: Readonly<Record<string, TransformComponent>>,
+  afterTransforms: Readonly<Record<string, TransformComponent>>,
+  label: string,
+): Command {
+  const uniqueEntityIds = [...new Set(entityIds)];
+  const beforeSnapshots: Record<string, TransformComponent> = {};
+  const afterSnapshots: Record<string, TransformComponent> = {};
+  for (const entityId of uniqueEntityIds) {
+    const before = beforeTransforms[entityId];
+    const after = afterTransforms[entityId];
+    if (before) beforeSnapshots[entityId] = cloneTransformData(before);
+    if (after) afterSnapshots[entityId] = cloneTransformData(after);
+  }
+  return {
+    label,
+    execute: (scene) => updateEntityTransforms(scene, uniqueEntityIds, afterSnapshots),
+    undo: (scene) => updateEntityTransforms(scene, uniqueEntityIds, beforeSnapshots),
+  };
+}
+
 function areStringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function areVector3DataEqual(left: Vector3Data | undefined, right: Vector3Data | undefined): boolean {
   return Boolean(left && right && left.x === right.x && left.y === right.y && left.z === right.z);
+}
+
+function isFiniteTransformData(value: TransformComponent | undefined): value is TransformComponent {
+  return Boolean(
+    value
+    && [
+      value.position.x, value.position.y, value.position.z,
+      value.rotation.x, value.rotation.y, value.rotation.z,
+      value.scale.x, value.scale.y, value.scale.z,
+    ].every(Number.isFinite),
+  );
+}
+
+function areTransformDataEqual(
+  left: TransformComponent | undefined,
+  right: TransformComponent | undefined,
+): boolean {
+  return Boolean(
+    left
+    && right
+    && areVector3DataEqual(left.position, right.position)
+    && areVector3DataEqual(left.rotation, right.rotation)
+    && areVector3DataEqual(left.scale, right.scale),
+  );
+}
+
+function areTransformDataNearlyEqual(left: TransformComponent, right: TransformComponent): boolean {
+  return [
+    Math.abs(left.position.x - right.position.x),
+    Math.abs(left.position.y - right.position.y),
+    Math.abs(left.position.z - right.position.z),
+    Math.abs(left.rotation.x - right.rotation.x),
+    Math.abs(left.rotation.y - right.rotation.y),
+    Math.abs(left.rotation.z - right.rotation.z),
+  ].every((difference) => difference <= 1e-9);
+}
+
+function cloneTransformData(transform: TransformComponent): TransformComponent {
+  return {
+    position: { ...transform.position },
+    rotation: { ...transform.rotation },
+    scale: { ...transform.scale },
+  };
 }
 
 function updateEntityPositions(
@@ -576,6 +715,33 @@ function updateEntityName(scene: SceneDocument, entityId: string, name: string):
       },
     },
   };
+}
+
+function updateEntityTransforms(
+  scene: SceneDocument,
+  entityIds: readonly string[],
+  transforms: Readonly<Record<string, TransformComponent>>,
+): SceneDocument {
+  let changed = false;
+  const entities: Record<string, Entity> = { ...scene.entities };
+
+  for (const entityId of entityIds) {
+    const entity = scene.entities[entityId];
+    const transform = transforms[entityId];
+    if (!entity || entity.isFolder || !transform) continue;
+    if (areTransformDataEqual(entity.components.transform, transform)) continue;
+
+    changed = true;
+    entities[entityId] = {
+      ...entity,
+      components: {
+        ...entity.components,
+        transform: cloneTransformData(transform),
+      },
+    };
+  }
+
+  return changed ? { ...scene, entities } : scene;
 }
 
 function updateEntityVisibility(scene: SceneDocument, entityId: string, visible: boolean): SceneDocument {

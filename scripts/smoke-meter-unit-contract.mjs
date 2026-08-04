@@ -143,6 +143,7 @@ try {
   const sceneSerializer = await loadSsrModuleWithTimeout(server, '/src/editor/project/SceneSerializer.ts');
   const builtInGeometry = await loadSsrModuleWithTimeout(server, '/src/editor/model/builtInMeshGeometry.ts');
   const sceneUnits = await loadSsrModuleWithTimeout(server, '/src/editor/model/sceneUnits.ts');
+  const electronModelUnits = await loadSsrModuleWithTimeout(server, '/electron/modelUnits.ts');
   const modelPackageScanner = await loadSsrModuleWithTimeout(server, '/electron/ipc/modelPackageScanner.ts');
 
   const expectedInsUnits = new Map([
@@ -171,6 +172,34 @@ try {
   const largeResult = largeCadReference.parseLargeCadReferenceDxf(createUnitDxf({ insUnits: 10 }), { maxPolylines: 10, maxPoints: 20 });
   assertClose(largeResult.unitScaleToMeters, yardResult.unitScaleToMeters, '普通与大文件 CAD 单位结果必须一致');
   assert.equal(largeResult.sourceUnitName, yardResult.sourceUnitName);
+
+  assert.deepEqual(
+    sceneUnits.DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO,
+    { lengthUnit: 'centimeter', unitScaleToMeters: 0.01 },
+    '渲染端环境模型默认源单位必须是 centimeter',
+  );
+  assert.deepEqual(
+    electronModelUnits.DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO,
+    { lengthUnit: 'centimeter', unitScaleToMeters: 0.01 },
+    '主进程环境模型默认源单位必须是 centimeter',
+  );
+
+  const defaultEnvironmentAsset = {
+    id: 'environment-default-unit',
+    name: 'environment-default.glb',
+    path: 'F:/project/Assets/Environments/environment-default/environment-default.glb',
+    sourceUrl: 'editor-asset://local/environment-default.glb',
+    kind: 'model',
+    libraryKind: 'environment',
+  };
+  const defaultEnvironment = environmentAssets.createEnvironmentFromAsset(defaultEnvironmentAsset, [{
+    name: '默认环境',
+    sourcePath: defaultEnvironmentAsset.path,
+    sourceUrl: defaultEnvironmentAsset.sourceUrl,
+  }]);
+  assert.ok(defaultEnvironment);
+  assert.equal(defaultEnvironment.lengthUnit, 'centimeter');
+  assertClose(defaultEnvironment.unitScaleToMeters, 0.01, '缺失单位的环境模型必须默认按 centimeter 换算');
 
   const environmentAsset = {
     id: 'environment-centimeter',

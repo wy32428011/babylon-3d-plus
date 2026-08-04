@@ -165,7 +165,10 @@ export function PlayerApp() {
         applySceneBackground(viewport, parsedConfig.page.backgroundColor);
         viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
         viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
-        applySavedSceneCameraView(viewport, sceneDocument.sceneSettings.camera);
+        applySavedSceneCameraView(viewport, sceneDocument.sceneSettings.camera, {
+          animate: false,
+          lockStandardOrientation: false,
+        });
 
         runtime = new SceneRuntime(
           viewport.scene,

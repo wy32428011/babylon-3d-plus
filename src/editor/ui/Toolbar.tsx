@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore, type FormEvent } from 'react
 import type {
   CameraOrientation,
   CameraProjection,
+  StandardCameraOrientation,
   EditorGridCellSize,
   EditorGridSettings,
 } from '../../runtime/babylon/createEngine';
@@ -128,7 +129,7 @@ type ToolbarProps = {
   onSetGridCellSize: (cellSizeMeters: EditorGridCellSize) => void;
   cameraOrientation: CameraOrientation;
   cameraProjection: CameraProjection;
-  onSetCameraOrientation: (orientation: CameraOrientation) => void;
+  onToggleCameraStandardView: (orientation: StandardCameraOrientation) => void;
   onSetCameraProjection: (projection: CameraProjection) => void;
   onDeleteSelectedEntity: () => void;
   onUndo: () => void;
@@ -452,7 +453,7 @@ export function Toolbar(props: ToolbarProps) {
           active={props.cameraOrientation === 'top'}
           icon={TOOLBAR_ICONS.topView}
           label={props.cameraOrientation === 'top' ? '退出俯视视角' : '进入俯视视角'}
-          onClick={() => props.onSetCameraOrientation(props.cameraOrientation === 'top' ? 'orbit' : 'top')}
+          onClick={() => props.onToggleCameraStandardView('top')}
         />
         <ToolbarIconButton
           active={props.cameraProjection === 'orthographic'}

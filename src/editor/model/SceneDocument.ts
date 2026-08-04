@@ -59,7 +59,9 @@ export const STACKER_SIMULATION_SCENARIOS = ['cycle', 'target', 'movement', 'fau
 
 export type StackerSimulationScenario = (typeof STACKER_SIMULATION_SCENARIOS)[number];
 
-export const SCENE_CAMERA_ORIENTATIONS = ['orbit', 'top'] as const;
+export const STANDARD_SCENE_CAMERA_ORIENTATIONS = ['top', 'bottom', 'front', 'back', 'left', 'right'] as const;
+export type StandardSceneCameraOrientation = (typeof STANDARD_SCENE_CAMERA_ORIENTATIONS)[number];
+export const SCENE_CAMERA_ORIENTATIONS = ['orbit', ...STANDARD_SCENE_CAMERA_ORIENTATIONS] as const;
 export type SceneCameraOrientation = (typeof SCENE_CAMERA_ORIENTATIONS)[number];
 export const SCENE_CAMERA_ORIENTATION_DEFAULT: SceneCameraOrientation = 'orbit';
 
@@ -270,8 +272,13 @@ function isValidCameraPose(pose: SceneCameraPose | null): pose is SceneCameraPos
 }
 
 /** 判断相机朝向是否属于场景文件支持的稳定枚举。 */
-function isSceneCameraOrientation(value: unknown): value is SceneCameraOrientation {
-  return value === 'orbit' || value === 'top';
+export function isSceneCameraOrientation(value: unknown): value is SceneCameraOrientation {
+  return typeof value === 'string' && (SCENE_CAMERA_ORIENTATIONS as readonly string[]).includes(value);
+}
+
+/** 判断相机朝向是否为可由视口定向罗盘锁定的六个标准面。 */
+export function isStandardSceneCameraOrientation(value: unknown): value is StandardSceneCameraOrientation {
+  return typeof value === 'string' && (STANDARD_SCENE_CAMERA_ORIENTATIONS as readonly string[]).includes(value);
 }
 
 /** 判断相机投影是否属于场景文件支持的稳定枚举。 */

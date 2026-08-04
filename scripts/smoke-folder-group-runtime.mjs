@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { FreeCamera, Matrix, MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
+import { FreeCamera, Matrix, Mesh, MeshBuilder, NullEngine, Quaternion, Scene, TransformNode, Vector3 } from '@babylonjs/core';
 import { createServer } from 'vite';
 
 const SSR_MODULE_LOAD_TIMEOUT_MS = 180_000;
@@ -25,6 +25,15 @@ function assertVector(actual, expected, message) {
   assert.ok(Math.abs(actual.z - expected.z) <= 1e-6, `${message} z`);
 }
 
+function assertMatrix(actual, expected, message) {
+  for (let index = 0; index < 16; index += 1) {
+    assert.ok(
+      Math.abs(actual.m[index] - expected.m[index]) <= 1e-5,
+      `${message} matrix[${index}]`,
+    );
+  }
+}
+
 let server;
 try {
   server = await createServer({
@@ -40,6 +49,10 @@ try {
   const { EntityGroupTranslationPreview } = await loadModule(
     server,
     '/src/runtime/babylon/EntityGroupTranslationPreview.ts',
+  );
+  const { EntityGroupRotationPreview } = await loadModule(
+    server,
+    '/src/runtime/babylon/EntityGroupRotationPreview.ts',
   );
   const { EntityArrayThinInstanceBatch } = await loadModule(
     server,
@@ -67,6 +80,7 @@ try {
   const proxy = new TransformNode('folder-group-proxy', gizmoScene);
   proxy.position.copyFromFloats(2, 3, 4);
   const events = [];
+  const rotationEvents = [];
   const entityEvents = [];
   const controller = new TransformGizmoController(gizmoScene, {
     previewTransform: (entityId, transform) => entityEvents.push({ type: 'preview', entityId, transform }),
@@ -82,6 +96,13 @@ try {
     previewGroupTranslation: (folderId, delta) => events.push({ type: 'preview', folderId, delta }),
     commitGroupTranslation: (folderId, delta) => events.push({ type: 'commit', folderId, delta }),
     cancelGroupTranslation: (folderId) => events.push({ type: 'cancel', folderId }),
+    beginGroupRotation: (folderId) => {
+      rotationEvents.push({ type: 'begin', folderId });
+      return true;
+    },
+    previewGroupRotation: (folderId, matrix) => rotationEvents.push({ type: 'preview', folderId, matrix }),
+    commitGroupRotation: (folderId, matrix) => rotationEvents.push({ type: 'commit', folderId, matrix }),
+    cancelGroupRotation: (folderId) => rotationEvents.push({ type: 'cancel', folderId }),
   });
   controller.attachToGroupTarget(proxy, 'folder-a');
   controller.beginDragSnapshot();
@@ -107,6 +128,24 @@ try {
   assertVector(proxy.position, { x: 7, y: 1, z: 8 }, '组拖动期间请求旋转工具必须取消并恢复代理');
   assert.equal(events.at(-1).type, 'cancel', '组拖动期间请求旋转工具必须取消运行时预览');
 
+  controller.beginDragSnapshot();
+  proxy.rotation.y = Math.PI / 2;
+  proxy.computeWorldMatrix(true);
+  controller.previewAttachedTransform();
+  controller.commitActiveDrag();
+  assert.deepEqual(rotationEvents.slice(0, 1), [{ type: 'begin', folderId: 'folder-a' }]);
+  assert.deepEqual(rotationEvents.map((event) => event.type), ['begin', 'preview', 'commit']);
+  const controllerRotationMatrix = Matrix.FromArray(rotationEvents[1].matrix);
+  assertVector(
+    Vector3.TransformCoordinates(new Vector3(9, 1, 8), controllerRotationMatrix),
+    { x: 7, y: 1, z: 6 },
+    '群组旋转回调必须输出绕代理中心的世界增量矩阵',
+  );
+
+  controller.attachToGroupTarget(null, null);
+  proxy.rotation.copyFromFloats(0, 0, 0);
+  controller.setTool('translate');
+  controller.attachToGroupTarget(proxy, 'folder-a');
   controller.beginDragSnapshot();
   proxy.position.copyFromFloats(6, 5, 11);
   controller.previewAttachedTransform();
@@ -225,6 +264,124 @@ try {
   retainedSession.finish();
   assertVector(nodeTarget.position, { x: -1, y: 3, z: 9 }, '完成会话必须保留当前运行时位置等待文档同步');
   assert.deepEqual(batchEvents.at(-1), { type: 'end', restore: false });
+
+  assert.equal(typeof EntityGroupRotationPreview, 'function', '必须提供可取消的文件夹组旋转预览会话');
+  const rotationNodeTarget = new TransformNode('group-rotation-node-target', previewScene);
+  const rotationBaseline = {
+    position: { x: 2, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0 },
+    scale: { x: 1, y: 2, z: 3 },
+  };
+  const rotationBatchEvents = [];
+  let rotationBatchActive = false;
+  const rotationBatchTarget = {
+    beginEntityRotationPreview: (entityIds) => {
+      rotationBatchEvents.push({ type: 'begin', entityIds: [...entityIds] });
+      rotationBatchActive = true;
+      return true;
+    },
+    updateEntityRotationPreview: (matrix) => {
+      rotationBatchEvents.push({ type: 'update', matrix: [...matrix] });
+      return rotationBatchActive;
+    },
+    endEntityRotationPreview: (restore) => {
+      rotationBatchEvents.push({ type: 'end', restore });
+      rotationBatchActive = false;
+    },
+  };
+  const rotationPreview = new EntityGroupRotationPreview(
+    ['rotation-node', 'rotation-batch', 'rotation-unloaded'],
+    {
+      'rotation-node': rotationBaseline,
+      'rotation-batch': { ...rotationBaseline, position: { x: 4, y: 0, z: 0 } },
+      'rotation-unloaded': { ...rotationBaseline, position: { x: 6, y: 0, z: 0 } },
+    },
+    (entityId) => {
+      if (entityId === 'rotation-node') {
+        return {
+          kind: 'transform',
+          identity: rotationNodeTarget,
+          setTransform: (transform) => {
+            rotationNodeTarget.position.copyFromFloats(
+              transform.position.x,
+              transform.position.y,
+              transform.position.z,
+            );
+            rotationNodeTarget.rotation.copyFromFloats(
+              transform.rotation.x,
+              transform.rotation.y,
+              transform.rotation.z,
+            );
+            rotationNodeTarget.scaling.copyFromFloats(transform.scale.x, transform.scale.y, transform.scale.z);
+            rotationNodeTarget.computeWorldMatrix(true);
+          },
+        };
+      }
+      if (entityId === 'rotation-batch') return { kind: 'batch', batch: rotationBatchTarget };
+      return null;
+    },
+  );
+  const quarterTurnY = Array.from(Matrix.RotationY(Math.PI / 2).m);
+  assert.equal(rotationPreview.update(quarterTurnY), true);
+  assertVector(rotationNodeTarget.position, { x: 0, y: 0, z: -2 }, '普通节点必须绕群组轴心旋转位置');
+  assert.ok(Math.abs(rotationNodeTarget.rotation.y - Math.PI / 2) <= 1e-6, '普通节点必须合成世界旋转');
+  assertVector(rotationNodeTarget.scaling, { x: 1, y: 2, z: 3 }, '群组旋转不得改变实体缩放');
+  assert.deepEqual(rotationBatchEvents[0], { type: 'begin', entityIds: ['rotation-batch'] });
+  assert.deepEqual(rotationBatchEvents[1], { type: 'update', matrix: quarterTurnY });
+  assertVector(
+    rotationPreview.getTransforms()['rotation-unloaded'].position,
+    { x: 0, y: 0, z: -6 },
+    '尚未加载的群组成员也必须生成最终旋转 Transform',
+  );
+  rotationPreview.cancel();
+  assertVector(rotationNodeTarget.position, rotationBaseline.position, '取消群组旋转必须恢复节点基线');
+  assert.deepEqual(rotationBatchEvents.at(-1), { type: 'end', restore: true });
+
+  const composedBaseline = {
+    position: { x: 2, y: 3, z: 4 },
+    rotation: { x: -0.4, y: 0.7, z: 0.2 },
+    scale: { x: 1, y: 2, z: 3 },
+  };
+  const composedTargetIdentity = {};
+  const composedPreview = new EntityGroupRotationPreview(
+    ['rotation-composed'],
+    { 'rotation-composed': composedBaseline },
+    () => ({ kind: 'transform', identity: composedTargetIdentity, setTransform: () => undefined }),
+  );
+  const composedPivot = new Vector3(7, 1, 8);
+  const composedDeltaRotation = Quaternion.RotationYawPitchRoll(-0.3, 0.5, 0.1);
+  const composedBeforeProxy = Matrix.Compose(Vector3.One(), Quaternion.Identity(), composedPivot);
+  const composedAfterProxy = Matrix.Compose(Vector3.One(), composedDeltaRotation, composedPivot);
+  const inverseComposedBeforeProxy = composedBeforeProxy.clone();
+  inverseComposedBeforeProxy.invert();
+  const composedDelta = inverseComposedBeforeProxy.multiply(composedAfterProxy);
+  assert.equal(composedPreview.update(Array.from(composedDelta.m)), true);
+  const composedTransform = composedPreview.getTransforms()['rotation-composed'];
+  const actualComposedMatrix = Matrix.Compose(
+    new Vector3(composedTransform.scale.x, composedTransform.scale.y, composedTransform.scale.z),
+    Quaternion.RotationYawPitchRoll(
+      composedTransform.rotation.y,
+      composedTransform.rotation.x,
+      composedTransform.rotation.z,
+    ),
+    new Vector3(composedTransform.position.x, composedTransform.position.y, composedTransform.position.z),
+  );
+  const expectedComposedMatrix = Matrix.Compose(
+    new Vector3(composedBaseline.scale.x, composedBaseline.scale.y, composedBaseline.scale.z),
+    Quaternion.RotationYawPitchRoll(
+      composedBaseline.rotation.y,
+      composedBaseline.rotation.x,
+      composedBaseline.rotation.z,
+    ),
+    new Vector3(composedBaseline.position.x, composedBaseline.position.y, composedBaseline.position.z),
+  ).multiply(composedDelta);
+  assertMatrix(
+    actualComposedMatrix,
+    expectedComposedMatrix,
+    '非零初始旋转和非均匀缩放必须按同一世界增量矩阵刚性组合',
+  );
+  composedPreview.cancel();
+  rotationNodeTarget.dispose(false, false);
   previewScene.dispose();
   previewEngine.dispose();
 
@@ -275,11 +432,69 @@ try {
     );
     mirroredBatch.endEntityTranslationPreview(true);
     assertVector(readWorldTranslation(), { x: 10, y: 2, z: 3 }, '取消负缩放预览必须恢复世界位置');
+    assert.equal(mirroredBatch.beginEntityRotationPreview(new Set([mirroredEntityId])), true);
+    assert.equal(
+      mirroredBatch.updateEntityRotationPreview(Array.from(Matrix.RotationY(Math.PI / 2).m)),
+      true,
+    );
+    assertVector(
+      readWorldTranslation(),
+      { x: 3, y: 2, z: -10 },
+      '负缩放 thinInstance 必须按世界增量矩阵绕轴心旋转',
+    );
+    mirroredBatch.endEntityRotationPreview(true);
+    assertVector(readWorldTranslation(), { x: 10, y: 2, z: 3 }, '取消负缩放旋转预览必须恢复世界位置');
   } finally {
     mirroredBatch.dispose();
     mirroredSource.dispose(false, false);
     mirroredScene.dispose();
     mirroredEngine.dispose();
+  }
+
+  const atomicEngine = new NullEngine({ renderWidth: 64, renderHeight: 64 });
+  const atomicScene = new Scene(atomicEngine);
+  const atomicSourceA = MeshBuilder.CreateBox('group-rotation-atomic-source-a', { size: 1 }, atomicScene);
+  const atomicSourceB = MeshBuilder.CreateBox('group-rotation-atomic-source-b', { size: 1 }, atomicScene);
+  const atomicBatch = EntityArrayThinInstanceBatch.create(
+    'group-rotation-atomic-source',
+    [atomicSourceA, atomicSourceB],
+    { interactive: true },
+  );
+  assert.ok(atomicBatch, '必须创建跨多个渲染批次的群组旋转原子性测试对象');
+  try {
+    assert.equal(atomicBatch.updateEntityTransforms(Matrix.Identity(), [{
+      entityId: 'rotation-atomic-entity',
+      transform: {
+        position: { x: 3, y: 0, z: 1 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      pickable: true,
+    }]), true);
+    assert.ok(atomicBatch.batches.length >= 2, '原子性回归前提：测试对象必须覆盖至少两个矩阵批次');
+    assert.equal(atomicBatch.beginEntityRotationPreview(new Set(['rotation-atomic-entity'])), true);
+
+    const firstAtomicMatrices = Array.from(atomicBatch.batches[0].sourceMatrixBuffer ?? []);
+    const invalidCarrierBatch = atomicBatch.batches.at(-1);
+    invalidCarrierBatch.mesh.scaling.x = 0;
+    invalidCarrierBatch.mesh.computeWorldMatrix(true);
+    assert.equal(
+      atomicBatch.updateEntityRotationPreview(Array.from(Matrix.RotationY(Math.PI / 2).m)),
+      false,
+      '任一载体矩阵不可逆时必须拒绝整次群组旋转预览',
+    );
+    assert.deepEqual(
+      Array.from(atomicBatch.batches[0].sourceMatrixBuffer ?? []),
+      firstAtomicMatrices,
+      '群组旋转预校验失败时不得部分改写先前批次',
+    );
+    atomicBatch.endEntityRotationPreview(true);
+  } finally {
+    atomicBatch.dispose();
+    atomicSourceA.dispose(false, false);
+    atomicSourceB.dispose(false, false);
+    atomicScene.dispose();
+    atomicEngine.dispose();
   }
 
   const cullingEngine = new NullEngine({ renderWidth: 640, renderHeight: 480 });
@@ -371,6 +586,93 @@ try {
     cullingEngine.dispose();
   }
 
+  const modelBoundsEngine = new NullEngine({ renderWidth: 320, renderHeight: 240 });
+  const modelBoundsScene = new Scene(modelBoundsEngine);
+  const modelBoundsRuntime = new SceneRuntime(modelBoundsScene);
+  const modelBoundsEntityId = 'model-with-helper';
+  const modelArrayBoundsEntityId = 'model-array-instance-with-helper';
+  try {
+    const modelRoot = new TransformNode('group-center-model-root', modelBoundsScene);
+    const visibleMesh = MeshBuilder.CreateBox('group-center-visible-mesh', { size: 2 }, modelBoundsScene);
+    visibleMesh.parent = modelRoot;
+    visibleMesh.position.copyFromFloats(10, 2, 3);
+    const emptyHelperMesh = new Mesh('group-center-empty-helper', modelBoundsScene);
+    emptyHelperMesh.parent = modelRoot;
+    emptyHelperMesh.position.copyFromFloats(100, 50, -30);
+    const disabledHelperRoot = new TransformNode('group-center-disabled-helper-root', modelBoundsScene);
+    disabledHelperRoot.parent = modelRoot;
+    disabledHelperRoot.position.copyFromFloats(10, 100, 3);
+    const disabledDescendantMesh = MeshBuilder.CreateBox(
+      'group-center-disabled-descendant',
+      { size: 2 },
+      modelBoundsScene,
+    );
+    disabledDescendantMesh.parent = disabledHelperRoot;
+    disabledHelperRoot.setEnabled(false);
+    modelRoot.computeWorldMatrix(true);
+
+    modelBoundsRuntime.models.set(modelBoundsEntityId, {
+      root: modelRoot,
+      meshes: [visibleMesh, emptyHelperMesh, disabledDescendantMesh],
+      assetHandle: {},
+      stackerTelemetryReady: true,
+      modelArrayBatch: null,
+    });
+
+    const modelTarget = modelBoundsRuntime.getFolderGroupGizmoTarget('model-folder', [modelBoundsEntityId]);
+    assert.ok(modelTarget, '包含导入模型的文件夹必须提供组 Gizmo 代理');
+    assertVector(
+      modelTarget.position,
+      { x: 10, y: 2, z: 3 },
+      '无顶点或祖先禁用的辅助 Mesh 不得把组 Gizmo 推离可见模型包围盒中心',
+    );
+
+    modelRoot.setEnabled(false);
+    const suspendedModelTarget = modelBoundsRuntime.getFolderGroupGizmoTarget(
+      'suspended-model-folder',
+      [modelBoundsEntityId],
+    );
+    assert.ok(suspendedModelTarget, '隐藏或矩阵批次挂起的模型根仍必须提供几何中心');
+    assertVector(
+      suspendedModelTarget.position,
+      { x: 10, y: 2, z: 3 },
+      '模型实体根禁用不得让群组中心退化到根节点位置',
+    );
+
+    modelBoundsRuntime.modelArrayInstanceEntities.set(modelArrayBoundsEntityId, {
+      id: modelArrayBoundsEntityId,
+      name: 'Model Array Instance With Helper',
+      visible: true,
+      locked: false,
+      parentId: null,
+      childrenIds: [],
+      components: {
+        transform: {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        },
+        modelArrayInstance: { sourceEntityId: modelBoundsEntityId },
+      },
+    });
+    const modelArrayTarget = modelBoundsRuntime.getFolderGroupGizmoTarget(
+      'model-array-folder',
+      [modelArrayBoundsEntityId],
+    );
+    assert.ok(modelArrayTarget, '包含模型阵列实例的文件夹必须提供组 Gizmo 代理');
+    assertVector(
+      modelArrayTarget.position,
+      { x: 10, y: 2, z: 3 },
+      '模型阵列实例包围盒也必须忽略祖先禁用的辅助 Mesh',
+    );
+  } finally {
+    modelBoundsRuntime.modelArrayInstanceEntities.delete(modelArrayBoundsEntityId);
+    modelBoundsRuntime.models.delete(modelBoundsEntityId);
+    modelBoundsRuntime.dispose();
+    modelBoundsScene.dispose();
+    modelBoundsEngine.dispose();
+  }
+
   const locatorEngine = new NullEngine({ renderWidth: 320, renderHeight: 240 });
   const locatorScene = new Scene(locatorEngine);
   const locatorRuntime = new SceneRuntime(locatorScene);
@@ -415,10 +717,24 @@ try {
     locatorTarget.position.copyFromFloats(8, 0.5, 0);
     locatorEntry.boxes[2].position.x = 12;
     locatorEntry.boxes[2].computeWorldMatrix(true);
-    locatorRuntime.refreshGroupTranslationPreviewTargets();
+    locatorRuntime.refreshGroupTransformPreviewTargets();
     assertVector(locatorTarget.position, { x: 8, y: 0.5, z: 0 }, '活动拖动期间异步几何不得改变代理起点');
     locatorRuntime.cancelFolderGroupTranslation();
     assertVector(locatorTarget.position, { x: 6, y: 0.5, z: 0 }, '取消后必须按最新几何重新校正组代理中心');
+
+    assert.equal(
+      locatorRuntime.beginFolderGroupRotation(
+        [locatorEntity.id],
+        { [locatorEntity.id]: locatorEntity.components.transform },
+      ),
+      true,
+    );
+    locatorTarget.rotation.y = Math.PI / 3;
+    locatorTarget.computeWorldMatrix(true);
+    assert.equal(locatorRuntime.updateFolderGroupRotation(quarterTurnY), true);
+    assert.ok(locatorRuntime.getFolderGroupRotationTransforms(), '取消前必须生成群组旋转预览结果');
+    locatorRuntime.cancelFolderGroupRotation();
+    assertVector(locatorTarget.rotation, { x: 0, y: 0, z: 0 }, '取消群组旋转后代理必须恢复世界坐标单位旋转');
   } finally {
     locatorRuntime.dispose();
     locatorScene.dispose();

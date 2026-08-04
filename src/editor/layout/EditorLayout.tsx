@@ -62,7 +62,7 @@ export function EditorLayout() {
   const requestSceneFocusForSelection = useEditorStore((state) => state.requestSceneFocusForSelection);
   const cameraOrientation = useEditorStore((state) => state.cameraOrientation);
   const cameraProjection = useEditorStore((state) => state.cameraProjection);
-  const setCameraOrientation = useEditorStore((state) => state.setCameraOrientation);
+  const toggleCameraStandardView = useEditorStore((state) => state.toggleCameraStandardView);
   const setCameraProjection = useEditorStore((state) => state.setCameraProjection);
   const importCadReference = useEditorStore((state) => state.importCadReference);
   const saveScene = useEditorStore((state) => state.saveScene);
@@ -253,7 +253,7 @@ export function EditorLayout() {
         onSetGridCellSize={setGridCellSize}
         cameraOrientation={cameraOrientation}
         cameraProjection={cameraProjection}
-        onSetCameraOrientation={setCameraOrientation}
+        onToggleCameraStandardView={toggleCameraStandardView}
         onSetCameraProjection={setCameraProjection}
         onDeleteSelectedEntity={deleteSelectedEntity}
         onUndo={undo}

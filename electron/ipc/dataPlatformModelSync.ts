@@ -7,6 +7,10 @@ import type {
   ProjectAssetIndex,
   ProjectModelAssetEntry,
 } from '../types.js';
+import {
+  DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO,
+  DEFAULT_MODEL_LENGTH_UNIT_INFO,
+} from '../modelUnits.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 import {
   getProjectAssetIndexPath,
@@ -618,8 +622,14 @@ async function normalizeLocalMetadata(prepared: PreparedPackage): Promise<void> 
     }
   }
 
-  if (metadata.lengthUnit === undefined || metadata.lengthUnit === null || metadata.lengthUnit === '') {
-    metadata.lengthUnit = 'meter';
+  const metadataLengthUnit = metadata.lengthUnit;
+  if (metadataLengthUnit === undefined
+    || metadataLengthUnit === null
+    || (typeof metadataLengthUnit === 'string' && !metadataLengthUnit.trim())) {
+    const defaultUnitInfo = prepared.record.kind === 'environment'
+      ? DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO
+      : DEFAULT_MODEL_LENGTH_UNIT_INFO;
+    metadata.lengthUnit = defaultUnitInfo.lengthUnit;
   }
   if (prepared.thumbnailPath) {
     metadata.thumbnail = path.basename(prepared.thumbnailPath);

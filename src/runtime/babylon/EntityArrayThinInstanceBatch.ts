@@ -23,6 +23,7 @@ import type { Vector3Data } from '../../editor/model/math';
 
 const ENTITY_ARRAY_MATRIX_INSTANCE_LIMIT = 1_000_000;
 const ENTITY_ARRAY_MATRIX_DETERMINANT_EPSILON = 1e-12;
+const ENTITY_ARRAY_ROTATION_SCALE_EPSILON = 1e-6;
 const INSTANCE_SELECTION_ID_BUFFER = 'instanceSelectionId';
 const FRONT_TO_BACK_RENDERING_GROUPS_BY_SCENE = new WeakMap<Scene, Set<number>>();
 /** 正式矩阵批次按空间顺序分片，让 Babylon 能以批次包围盒做视锥裁剪；不减少任何实例或几何。 */
@@ -120,16 +121,27 @@ type PreparedEntityArraySpatialPartitions = {
   batches: EntityArrayMatrixBatch[];
 };
 
-type EntityArrayTranslationPreviewBatch = {
+type EntityArrayTransformPreviewBatch = {
   batch: EntityArrayMatrixBatch;
   sourceInstanceIndexes: Uint32Array;
   sourceInstanceIndexSet: Set<number>;
-  baselineTranslations: Float64Array;
   baselineFullBoundingInfo: BoundingInfo | null;
+};
+
+type EntityArrayTranslationPreviewBatch = EntityArrayTransformPreviewBatch & {
+  baselineTranslations: Float64Array;
 };
 
 type EntityArrayTranslationPreviewSession = {
   batches: EntityArrayTranslationPreviewBatch[];
+};
+
+type EntityArrayRotationPreviewBatch = EntityArrayTransformPreviewBatch & {
+  baselineMatrices: Float64Array;
+};
+
+type EntityArrayRotationPreviewSession = {
+  batches: EntityArrayRotationPreviewBatch[];
 };
 
 export type EntityArrayThinInstanceBatchOptions = {
@@ -178,8 +190,11 @@ export class EntityArrayThinInstanceBatch {
   private readonly cullingInstanceMatrix = new Matrix();
   private readonly cullingWorldMatrix = new Matrix();
   private readonly cullingCenter = new Vector3();
-  private readonly translationPreviewExtent = new Vector3();
+  private readonly transformPreviewExtent = new Vector3();
+  private readonly rotationPreviewBaselineMatrix = new Matrix();
+  private readonly rotationPreviewResultMatrix = new Matrix();
   private translationPreviewSession: EntityArrayTranslationPreviewSession | null = null;
+  private rotationPreviewSession: EntityArrayRotationPreviewSession | null = null;
 
   private constructor(
     private readonly sources: EntityArrayMatrixSource[],
@@ -404,6 +419,7 @@ export class EntityArrayThinInstanceBatch {
     instances: readonly EntityArrayThinInstanceTransform[],
   ): boolean {
     if (this.translationPreviewSession) this.endEntityTranslationPreview(true);
+    if (this.rotationPreviewSession) this.endEntityRotationPreview(true);
     if (!isFiniteMatrix(sourceRootWorldMatrix) || instances.some((instance) => (
       !instance.entityId || !isFiniteTransform(instance.transform)
     ))) {
@@ -1146,6 +1162,7 @@ export class EntityArrayThinInstanceBatch {
   /** 捕获目标逻辑实体的矩阵平移基线，后续预览始终按绝对 delta 重算。 */
   beginEntityTranslationPreview(entityIds: ReadonlySet<string>): boolean {
     if (this.translationPreviewSession) this.endEntityTranslationPreview(true);
+    if (this.rotationPreviewSession) this.endEntityRotationPreview(true);
     const selectedEntityIndexes = new Set<number>();
     for (const entityId of entityIds) {
       const entityIndex = this.entityIndexById.get(entityId);
@@ -1206,12 +1223,12 @@ export class EntityArrayThinInstanceBatch {
         sourceMatrices[matrixOffset + 13] = preview.baselineTranslations[translationOffset + 1] + delta.y;
         sourceMatrices[matrixOffset + 14] = preview.baselineTranslations[translationOffset + 2] + delta.z;
       }
-      this.refreshTranslationPreviewBatch(preview);
+      this.refreshEntityTransformPreviewBatch(preview);
     }
 
     this.cullingDirty = true;
     if (!this.updateFrustumCulling()) {
-      for (const preview of session.batches) this.syncTranslationPreviewRenderBuffer(preview);
+      for (const preview of session.batches) this.syncEntityTransformPreviewRenderBuffer(preview);
     }
     return true;
   }
@@ -1234,17 +1251,135 @@ export class EntityArrayThinInstanceBatch {
         sourceMatrices[matrixOffset + 14] = preview.baselineTranslations[translationOffset + 2];
       }
       preview.batch.fullBoundingInfo = cloneBoundingInfo(preview.baselineFullBoundingInfo);
-      this.syncTranslationPreviewMeshBounds(preview.batch);
+      this.syncEntityTransformPreviewMeshBounds(preview.batch);
     }
 
     this.cullingDirty = true;
     if (!this.updateFrustumCulling()) {
-      for (const preview of session.batches) this.syncTranslationPreviewRenderBuffer(preview);
+      for (const preview of session.batches) this.syncEntityTransformPreviewRenderBuffer(preview);
+    }
+  }
+
+  /** 捕获目标逻辑实体的完整矩阵基线，后续旋转预览始终按绝对世界增量矩阵重算。 */
+  beginEntityRotationPreview(entityIds: ReadonlySet<string>): boolean {
+    if (this.rotationPreviewSession) this.endEntityRotationPreview(true);
+    if (this.translationPreviewSession) this.endEntityTranslationPreview(true);
+    const selectedEntityIndexes = new Set<number>();
+    for (const entityId of entityIds) {
+      const entityIndex = this.entityIndexById.get(entityId);
+      if (entityIndex !== undefined) selectedEntityIndexes.add(entityIndex);
+    }
+    if (selectedEntityIndexes.size === 0) return false;
+
+    const previewBatches: EntityArrayRotationPreviewBatch[] = [];
+    for (const batch of this.batches) {
+      const sourceMatrices = batch.sourceMatrixBuffer;
+      const sourceEntityIndexes = batch.sourceEntityIndexBuffer;
+      if (!sourceMatrices || !sourceEntityIndexes) continue;
+
+      const matchingIndexes: number[] = [];
+      for (let sourceIndex = 0; sourceIndex < sourceEntityIndexes.length; sourceIndex += 1) {
+        if (selectedEntityIndexes.has(sourceEntityIndexes[sourceIndex])) matchingIndexes.push(sourceIndex);
+      }
+      if (matchingIndexes.length === 0) continue;
+
+      const sourceInstanceIndexes = Uint32Array.from(matchingIndexes);
+      const baselineMatrices = new Float64Array(sourceInstanceIndexes.length * 16);
+      for (let index = 0; index < sourceInstanceIndexes.length; index += 1) {
+        const matrixOffset = sourceInstanceIndexes[index] * 16;
+        baselineMatrices.set(sourceMatrices.subarray(matrixOffset, matrixOffset + 16), index * 16);
+      }
+      previewBatches.push({
+        batch,
+        sourceInstanceIndexes,
+        sourceInstanceIndexSet: new Set(sourceInstanceIndexes),
+        baselineMatrices,
+        baselineFullBoundingInfo: cloneBoundingInfo(batch.fullBoundingInfo),
+      });
+    }
+    if (previewBatches.length === 0) return false;
+
+    this.rotationPreviewSession = { batches: previewBatches };
+    return true;
+  }
+
+  /** 将同一刚体世界增量矩阵应用到目标实体的全部源实例，保持 determinant 分片和实体映射不变。 */
+  updateEntityRotationPreview(deltaMatrixData: readonly number[]): boolean {
+    const session = this.rotationPreviewSession;
+    if (!session || !isFiniteMatrixData(deltaMatrixData)) return false;
+    const deltaMatrix = Matrix.FromArray(Array.from(deltaMatrixData));
+    if (!isRigidTransformMatrix(deltaMatrix)) return false;
+
+    // 先验证全部 carrier，再统一改写源矩阵，避免后续批次不可逆时留下部分旋转结果。
+    const preparedBatches: Array<{
+      preview: EntityArrayRotationPreviewBatch;
+      sourceMatrices: Float32Array;
+      carrierLocalDelta: Matrix;
+    }> = [];
+    for (const preview of session.batches) {
+      const sourceMatrices = preview.batch.sourceMatrixBuffer;
+      if (!sourceMatrices) return false;
+
+      preview.batch.mesh.computeWorldMatrix(true);
+      const carrierWorldMatrix = preview.batch.mesh.getWorldMatrix().clone();
+      const inverseCarrierWorldMatrix = carrierWorldMatrix.clone();
+      const determinant = inverseCarrierWorldMatrix.determinant();
+      if (!Number.isFinite(determinant) || Math.abs(determinant) <= ENTITY_ARRAY_MATRIX_DETERMINANT_EPSILON) {
+        return false;
+      }
+      inverseCarrierWorldMatrix.invert();
+      const carrierLocalDelta = carrierWorldMatrix.multiply(deltaMatrix).multiply(inverseCarrierWorldMatrix);
+      if (!isFiniteMatrix(carrierLocalDelta)) return false;
+      preparedBatches.push({ preview, sourceMatrices, carrierLocalDelta });
+    }
+
+    for (const { preview, sourceMatrices, carrierLocalDelta } of preparedBatches) {
+      for (let index = 0; index < preview.sourceInstanceIndexes.length; index += 1) {
+        Matrix.FromArrayToRef(preview.baselineMatrices, index * 16, this.rotationPreviewBaselineMatrix);
+        this.rotationPreviewBaselineMatrix.multiplyToRef(carrierLocalDelta, this.rotationPreviewResultMatrix);
+        this.rotationPreviewResultMatrix.copyToArray(
+          sourceMatrices,
+          preview.sourceInstanceIndexes[index] * 16,
+        );
+      }
+      this.refreshEntityTransformPreviewBatch(preview);
+    }
+
+    this.cullingDirty = true;
+    if (!this.updateFrustumCulling()) {
+      for (const preview of session.batches) this.syncEntityTransformPreviewRenderBuffer(preview);
+    }
+    return true;
+  }
+
+  /** 结束逻辑实体旋转预览；取消时恢复完整矩阵和包围盒基线。 */
+  endEntityRotationPreview(restore: boolean): void {
+    const session = this.rotationPreviewSession;
+    if (!session) return;
+    this.rotationPreviewSession = null;
+
+    if (!restore) return;
+    for (const preview of session.batches) {
+      const sourceMatrices = preview.batch.sourceMatrixBuffer;
+      if (!sourceMatrices) continue;
+      for (let index = 0; index < preview.sourceInstanceIndexes.length; index += 1) {
+        sourceMatrices.set(
+          preview.baselineMatrices.subarray(index * 16, index * 16 + 16),
+          preview.sourceInstanceIndexes[index] * 16,
+        );
+      }
+      preview.batch.fullBoundingInfo = cloneBoundingInfo(preview.baselineFullBoundingInfo);
+      this.syncEntityTransformPreviewMeshBounds(preview.batch);
+    }
+
+    this.cullingDirty = true;
+    if (!this.updateFrustumCulling()) {
+      for (const preview of session.batches) this.syncEntityTransformPreviewRenderBuffer(preview);
     }
   }
 
   /** 刷新预览矩阵对应的当前可见 GPU 区间，并扩展完整分片包围盒。 */
-  private refreshTranslationPreviewBatch(preview: EntityArrayTranslationPreviewBatch): void {
+  private refreshEntityTransformPreviewBatch(preview: EntityArrayTransformPreviewBatch): void {
     const baselineBounds = preview.baselineFullBoundingInfo?.boundingBox;
     if (baselineBounds) {
       const minimum = baselineBounds.minimumWorld.clone();
@@ -1258,33 +1393,33 @@ export class EntityArrayThinInstanceBatch {
           Matrix.FromArrayToRef(sourceMatrices, sourceIndex * 16, this.cullingInstanceMatrix);
           this.cullingInstanceMatrix.multiplyToRef(batchWorldMatrix, this.cullingWorldMatrix);
           Vector3.TransformCoordinatesToRef(rawBounds.center, this.cullingWorldMatrix, this.cullingCenter);
-          calculateTransformedExtentToRef(rawBounds.extendSize, this.cullingWorldMatrix, this.translationPreviewExtent);
+          calculateTransformedExtentToRef(rawBounds.extendSize, this.cullingWorldMatrix, this.transformPreviewExtent);
           minimum.set(
-            Math.min(minimum.x, this.cullingCenter.x - this.translationPreviewExtent.x),
-            Math.min(minimum.y, this.cullingCenter.y - this.translationPreviewExtent.y),
-            Math.min(minimum.z, this.cullingCenter.z - this.translationPreviewExtent.z),
+            Math.min(minimum.x, this.cullingCenter.x - this.transformPreviewExtent.x),
+            Math.min(minimum.y, this.cullingCenter.y - this.transformPreviewExtent.y),
+            Math.min(minimum.z, this.cullingCenter.z - this.transformPreviewExtent.z),
           );
           maximum.set(
-            Math.max(maximum.x, this.cullingCenter.x + this.translationPreviewExtent.x),
-            Math.max(maximum.y, this.cullingCenter.y + this.translationPreviewExtent.y),
-            Math.max(maximum.z, this.cullingCenter.z + this.translationPreviewExtent.z),
+            Math.max(maximum.x, this.cullingCenter.x + this.transformPreviewExtent.x),
+            Math.max(maximum.y, this.cullingCenter.y + this.transformPreviewExtent.y),
+            Math.max(maximum.z, this.cullingCenter.z + this.transformPreviewExtent.z),
           );
         }
       }
       preview.batch.fullBoundingInfo = new BoundingInfo(minimum, maximum);
       preview.batch.lastFrustumContainment = -1;
-      this.syncTranslationPreviewMeshBounds(preview.batch);
+      this.syncEntityTransformPreviewMeshBounds(preview.batch);
     }
   }
 
   /** 使用完整预览世界包围盒保持 Mesh active，避免视锥进出后沿用旧可见前缀边界。 */
-  private syncTranslationPreviewMeshBounds(batch: EntityArrayMatrixBatch): void {
+  private syncEntityTransformPreviewMeshBounds(batch: EntityArrayMatrixBatch): void {
     const fullBounds = cloneBoundingInfo(batch.fullBoundingInfo);
     if (fullBounds) batch.mesh.setBoundingInfo(fullBounds);
   }
 
   /** 当前相机可见前缀保持原布局时，只覆盖受影响的矩阵行。 */
-  private syncTranslationPreviewRenderBuffer(preview: EntityArrayTranslationPreviewBatch): void {
+  private syncEntityTransformPreviewRenderBuffer(preview: EntityArrayTransformPreviewBatch): void {
     const batch = preview.batch;
     const sourceMatrices = batch.sourceMatrixBuffer;
     const renderMatrices = batch.matrixBuffer;
@@ -1421,6 +1556,7 @@ export class EntityArrayThinInstanceBatch {
     this.selectedEntityIds.clear();
     this.selectionId = 0;
     this.translationPreviewSession = null;
+    this.rotationPreviewSession = null;
     this.entityLayoutRevision = 0;
     this.selectionLayoutRevision = -1;
   }
@@ -2623,6 +2759,21 @@ function writeSelectionRange(
   const count = counts[entityIndex];
   if (start < 0 || count <= 0) return;
   buffer.fill(selectionId, start, start + count);
+}
+
+function isFiniteMatrixData(value: readonly number[]): boolean {
+  return value.length === 16 && value.every(Number.isFinite);
+}
+
+function isRigidTransformMatrix(matrix: Matrix): boolean {
+  if (!isFiniteMatrix(matrix)) return false;
+  const scaling = new Vector3();
+  const rotation = new Quaternion();
+  const translation = new Vector3();
+  if (!matrix.decompose(scaling, rotation, translation)) return false;
+  return Math.abs(scaling.x - 1) <= ENTITY_ARRAY_ROTATION_SCALE_EPSILON
+    && Math.abs(scaling.y - 1) <= ENTITY_ARRAY_ROTATION_SCALE_EPSILON
+    && Math.abs(scaling.z - 1) <= ENTITY_ARRAY_ROTATION_SCALE_EPSILON;
 }
 
 function createTransformMatrix(transform: TransformComponent): Matrix {

@@ -85,7 +85,11 @@ try {
   const batchModule = await loadModule(server, '/src/runtime/babylon/EntityArrayThinInstanceBatch.ts');
 
   const { resolveFolderGroupMoveSelection, resolveSingleSelectedFolderId } = hierarchyModule;
-  const { translateEntityPositionsCommand, commitFolderGroupTranslation } = commandModule;
+  const {
+    translateEntityPositionsCommand,
+    commitFolderGroupTranslation,
+    commitFolderGroupRotation,
+  } = commandModule;
   const { createCommandHistory, executeCommand, undoCommand, redoCommand } = historyModule;
   const { EntityArrayThinInstanceBatch } = batchModule;
 
@@ -108,6 +112,11 @@ try {
     typeof commitFolderGroupTranslation,
     'function',
     'entityCommands 必须导出带会话校验的文件夹整组提交函数',
+  );
+  assert.equal(
+    typeof commitFolderGroupRotation,
+    'function',
+    'entityCommands 必须导出带会话校验的文件夹整组旋转提交函数',
   );
 
   const root = folder('folder-root', '一级目录', null, ['model-visible', 'folder-child']);
@@ -142,6 +151,14 @@ try {
       [hiddenModel.id]: { x: -4, y: 5, z: 6 },
     },
     '移动会话必须保存全部成员的独立位置基线',
+  );
+  assert.deepEqual(
+    resolution.beforeTransforms,
+    {
+      [visibleModel.id]: visibleModel.components.transform,
+      [hiddenModel.id]: hiddenModel.components.transform,
+    },
+    '群组旋转会话必须保存全部成员的完整 Transform 基线',
   );
 
   const lockedHiddenModel = { ...hiddenModel, locked: true };
@@ -225,6 +242,44 @@ try {
     committed.scene.entities[hiddenModel.id].components.transform.position,
     { x: -1, y: 4, z: 8 },
     '状态提交必须移动隐藏后代',
+  );
+
+  const afterRotationTransforms = {
+    [visibleModel.id]: {
+      ...visibleModel.components.transform,
+      position: { x: 3, y: 2, z: -1 },
+      rotation: { x: 0.1, y: 1.2, z: 0.3 },
+    },
+    [hiddenModel.id]: {
+      ...hiddenModel.components.transform,
+      position: { x: 6, y: 5, z: 4 },
+      rotation: { x: 0.1, y: 1.2, z: 0.3 },
+    },
+  };
+  const rotationBeforeTransforms = structuredClone(resolution.beforeTransforms);
+  const rotated = commitFolderGroupRotation(
+    scene,
+    createCommandHistory(),
+    [root.id],
+    {
+      sourceSceneDocument: scene,
+      folderId: root.id,
+      entityIds: resolution.entityIds,
+      beforeTransforms: rotationBeforeTransforms,
+      afterTransforms: afterRotationTransforms,
+    },
+  );
+  assert.equal(rotated.committed, true, '群组旋转必须原子提交全部成员 Transform');
+  assert.equal(rotated.history.undoStack.length, 1, '群组旋转只能写入一条撤销历史');
+  assert.deepEqual(
+    rotated.scene.entities[visibleModel.id].components.transform,
+    afterRotationTransforms[visibleModel.id],
+  );
+  rotationBeforeTransforms[visibleModel.id].position.x = 999;
+  assert.deepEqual(
+    undoCommand(rotated.scene, rotated.history).scene.entities[visibleModel.id].components.transform,
+    visibleModel.components.transform,
+    'Undo 必须使用命令内部快照恢复群组旋转前的完整 Transform',
   );
 
   const blocked = commitFolderGroupTranslation(
@@ -323,6 +378,11 @@ try {
   assert.equal(groupedStoreState.scene.entities[groupedFolderId]?.isFolder, true, '群组命令必须选中新文件夹');
   assert.equal(groupedStoreState.transformTool, 'translate', '命令选中文件夹后必须自动切换移动工具');
   assert.equal(groupedStoreState.transformSpace, 'global', '命令选中文件夹后必须自动切换世界坐标');
+  groupedStoreState.setTransformTool('rotate');
+  assert.equal(useEditorStore.getState().transformTool, 'rotate', '文件夹群组必须允许切换旋转工具');
+  assert.equal(useEditorStore.getState().transformSpace, 'global', '文件夹旋转必须保持世界坐标');
+  useEditorStore.getState().setTransformTool('scale');
+  assert.equal(useEditorStore.getState().transformTool, 'translate', '文件夹群组仍不得启用缩放工具');
 
   groupedStoreState.undo();
   useEditorStore.setState({ transformTool: 'rotate', transformSpace: 'local' });
@@ -380,6 +440,21 @@ try {
     typeof EntityArrayThinInstanceBatch.prototype.endEntityTranslationPreview,
     'function',
     'thinInstance 批次必须支持恢复或保留预览结果',
+  );
+  assert.equal(
+    typeof EntityArrayThinInstanceBatch.prototype.beginEntityRotationPreview,
+    'function',
+    'thinInstance 批次必须支持开始逻辑实体旋转预览',
+  );
+  assert.equal(
+    typeof EntityArrayThinInstanceBatch.prototype.updateEntityRotationPreview,
+    'function',
+    'thinInstance 批次必须支持按世界增量矩阵更新旋转预览',
+  );
+  assert.equal(
+    typeof EntityArrayThinInstanceBatch.prototype.endEntityRotationPreview,
+    'function',
+    'thinInstance 批次必须支持取消或保留旋转预览',
   );
 
   const engine = new NullEngine({ renderWidth: 64, renderHeight: 64 });

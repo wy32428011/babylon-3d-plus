@@ -64,6 +64,7 @@ import {
   type EditModeModelThinInstancePlan,
 } from '../model/editModeModelThinInstances';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
+import { ViewportOrientationCompass } from '../ui/ViewportOrientationCompass';
 import '../../styles/scene-performance.css';
 
 type PointerClickSnapshot = {
@@ -87,6 +88,10 @@ type EntityArrayDialogState = {
 };
 
 type FolderGroupTranslationSession = FolderGroupMoveReadySelection & {
+  sourceSceneDocument: SceneDocument;
+};
+
+type FolderGroupRotationSession = FolderGroupMoveReadySelection & {
   sourceSceneDocument: SceneDocument;
 };
 
@@ -216,8 +221,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
   const entityArrayDialogRef = useRef<EntityArrayDialogState | null>(null);
   const folderGroupTranslationRef = useRef<FolderGroupTranslationSession | null>(null);
+  const folderGroupRotationRef = useRef<FolderGroupRotationSession | null>(null);
   const folderGroupStatusLogSignatureRef = useRef('');
   const [viewportError, setViewportError] = useState<string | null>(null);
+  const [viewportCamera, setViewportCamera] = useState<BabylonViewport['camera'] | null>(null);
   const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
   const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
   const [performanceHudExpanded, setPerformanceHudExpanded] = useState(false);
@@ -257,12 +264,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const setEnvironmentRuntimeSnapshot = useEditorStore((state) => state.setEnvironmentRuntimeSnapshot);
   const setEnvironmentAdjustmentActive = useEditorStore((state) => state.setEnvironmentAdjustmentActive);
   const commitFolderGroupTranslation = useEditorStore((state) => state.commitFolderGroupTranslation);
+  const commitFolderGroupRotation = useEditorStore((state) => state.commitFolderGroupRotation);
   const resolveEntityArrayRequest = useEditorStore((state) => state.resolveEntityArrayRequest);
   const commitResolvedEntityArray = useEditorStore((state) => state.commitResolvedEntityArray);
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
   const consumeEnvironmentFocusRequest = useEditorStore((state) => state.consumeEnvironmentFocusRequest);
   const consumeCameraPoseSaveRequest = useEditorStore((state) => state.consumeCameraPoseSaveRequest);
   const consumeCameraResetRequest = useEditorStore((state) => state.consumeCameraResetRequest);
+  const requestCameraReset = useEditorStore((state) => state.requestCameraReset);
+  const toggleCameraStandardView = useEditorStore((state) => state.toggleCameraStandardView);
   const setSelectedModelMeasurement = useEditorStore((state) => state.setSelectedModelMeasurement);
   const pushLog = useEditorStore((state) => state.pushLog);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
@@ -365,11 +375,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     if (folderGroupMoveSelection.status === 'blocked') {
       pushLog(
-        `文件夹“${folderName}”整组移动已阻止：文件夹自身或后代中有 ${folderGroupMoveSelection.lockedEntityIds.length} 个锁定对象。`,
+        `文件夹“${folderName}”整组变换已阻止：文件夹自身或后代中有 ${folderGroupMoveSelection.lockedEntityIds.length} 个锁定对象。`,
       );
       return;
     }
-    pushLog(`文件夹“${folderName}”为空，无法显示整组移动 Gizmo。`);
+    pushLog(`文件夹“${folderName}”为空，无法显示整组变换 Gizmo。`);
   }, [folderGroupMoveSelection, isRuntimePreview, pushLog, sceneDocument.entities]);
 
   useEffect(() => {
@@ -722,6 +732,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           (runtimeRef.current ?? runtime)?.clearEntityArrayPreview();
         },
         beginGroupTranslation: (folderId) => {
+          folderGroupRotationRef.current = null;
           const state = useEditorStore.getState();
           const currentRuntime = runtimeRef.current ?? runtime;
           const selection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
@@ -778,6 +789,70 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           folderGroupTranslationRef.current = null;
           (runtimeRef.current ?? runtime)?.cancelFolderGroupTranslation();
         },
+        beginGroupRotation: (folderId) => {
+          folderGroupTranslationRef.current = null;
+          const state = useEditorStore.getState();
+          const currentRuntime = runtimeRef.current ?? runtime;
+          const selection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
+          if (!currentRuntime) return false;
+          if (runtimeModeRef.current !== 'edit') {
+            pushLog('文件夹整组旋转已阻止：运行预览期间不能编辑场景 Transform。');
+            return false;
+          }
+          if (entityArrayDialogRef.current) {
+            pushLog('文件夹整组旋转已阻止：请先完成或取消当前阵列弹框。');
+            return false;
+          }
+          if (selection.status !== 'ready' || selection.folderId !== folderId) {
+            pushLog('文件夹整组旋转已阻止：当前选区、成员或锁定状态已经变化。');
+            return false;
+          }
+
+          currentRuntime.clearEntityArrayPreview();
+          if (!currentRuntime.beginFolderGroupRotation(selection.entityIds, selection.beforeTransforms)) {
+            pushLog('文件夹整组旋转已阻止：没有可用于运行时预览的有效成员。');
+            return false;
+          }
+          folderGroupRotationRef.current = {
+            ...selection,
+            sourceSceneDocument: state.scene,
+          };
+          return true;
+        },
+        previewGroupRotation: (folderId, deltaMatrix) => {
+          const session = folderGroupRotationRef.current;
+          if (!session || session.folderId !== folderId) return;
+          (runtimeRef.current ?? runtime)?.updateFolderGroupRotation(deltaMatrix);
+        },
+        commitGroupRotation: (folderId, deltaMatrix) => {
+          const currentRuntime = runtimeRef.current ?? runtime;
+          const session = folderGroupRotationRef.current;
+          folderGroupRotationRef.current = null;
+          if (!currentRuntime || !session || session.folderId !== folderId) {
+            currentRuntime?.cancelFolderGroupRotation();
+            return;
+          }
+
+          currentRuntime.updateFolderGroupRotation(deltaMatrix);
+          const afterTransforms = currentRuntime.getFolderGroupRotationTransforms();
+          if (!afterTransforms) {
+            currentRuntime.cancelFolderGroupRotation();
+            return;
+          }
+          const committed = commitFolderGroupRotation({
+            sourceSceneDocument: session.sourceSceneDocument,
+            folderId: session.folderId,
+            entityIds: session.entityIds,
+            beforeTransforms: session.beforeTransforms,
+            afterTransforms,
+          });
+          if (committed) currentRuntime.finishFolderGroupRotation();
+          else currentRuntime.cancelFolderGroupRotation();
+        },
+        cancelGroupRotation: () => {
+          folderGroupRotationRef.current = null;
+          (runtimeRef.current ?? runtime)?.cancelFolderGroupRotation();
+        },
       });
       mqttTelemetryClient = new MqttStackerTelemetryClient(pushLog);
     } catch (error) {
@@ -786,6 +861,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       gizmo?.dispose();
       runtime?.dispose();
       viewport?.dispose();
+      setViewportCamera(null);
       setViewportError(`Scene View 渲染引擎初始化失败：${getErrorMessage(error)}`);
       stopRuntimePreview();
       return;
@@ -796,6 +872,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const initializedGizmo = gizmo;
     const initializedMqttTelemetryClient = mqttTelemetryClient;
     viewportRef.current = viewport;
+    setViewportCamera(viewport.camera);
     runtimeRef.current = runtime;
     gizmoRef.current = gizmo;
     mqttTelemetryClientRef.current = mqttTelemetryClient;
@@ -836,6 +913,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       initializedRuntime.dispose();
       initializedViewport.dispose();
       viewportRef.current = null;
+      setViewportCamera(null);
       runtimeRef.current = null;
       gizmoRef.current = null;
       mqttTelemetryClientRef.current = null;
@@ -848,6 +926,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     commitEntityTransform,
     previewEnvironmentTransform,
     commitEnvironmentTransform,
+    commitFolderGroupRotation,
     commitFolderGroupTranslation,
     publishSelectedModelMeasurement,
     pushLog,
@@ -1050,14 +1129,16 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     sceneDocument.sceneSettings,
   ]);
 
-  /** 把当前工具栏视图模式同步到 Babylon 视口；普通切换不直接修改场景文档。 */
+  /** 复位请求由原子视角应用负责，普通切换则先同步投影再驱动方向动画。 */
   useEffect(() => {
-    viewportRef.current?.setCameraOrientation(cameraOrientation);
-  }, [cameraOrientation]);
+    if (cameraResetRequest) return;
+    viewportRef.current?.setCameraProjection(cameraProjection);
+  }, [cameraProjection, cameraResetRequest]);
 
   useEffect(() => {
-    viewportRef.current?.setCameraProjection(cameraProjection);
-  }, [cameraProjection]);
+    if (cameraResetRequest) return;
+    viewportRef.current?.setCameraOrientation(cameraOrientation);
+  }, [cameraOrientation, cameraResetRequest]);
 
   useEffect(() => {
     if (!cameraPoseSaveRequest) return;
@@ -1246,6 +1327,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           onPointerMove={handleCanvasPointerMove}
           onPointerUp={handleCanvasPointerUp}
           onPointerCancelCapture={handleCanvasPointerCancel}
+        />
+        <ViewportOrientationCompass
+          camera={viewportCamera}
+          disabled={Boolean(viewportError)}
+          onReset={requestCameraReset}
+          onToggleStandardView={toggleCameraStandardView}
+          orientation={cameraOrientation}
         />
         {performanceSnapshot && props.performanceHudVisible ? (
           <div className={performanceHudExpanded ? 'scene-performance-hud expanded' : 'scene-performance-hud'}>

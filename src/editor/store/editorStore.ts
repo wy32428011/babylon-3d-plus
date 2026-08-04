@@ -7,6 +7,7 @@ import {
   type CommandHistory,
 } from '../commands/CommandHistory';
 import {
+  commitFolderGroupRotation as commitFolderGroupRotationState,
   commitFolderGroupTranslation as commitFolderGroupTranslationState,
   createEntityCommand,
   createFolderCommand,
@@ -26,6 +27,7 @@ import {
   updateModelParameterValuesCommand,
   updateTelemetryBindingCommand,
   updateTransformCommand,
+  type FolderGroupRotationInput,
   type FolderGroupTranslationInput,
 } from '../commands/entityCommands';
 import {
@@ -33,6 +35,7 @@ import {
   EDITOR_GRID_CELL_SIZES,
   type CameraOrientation,
   type CameraProjection,
+  type StandardCameraOrientation,
   type EditorGridCellSize,
   type EditorGridSettings,
 } from '../../runtime/babylon/createEngine';
@@ -57,6 +60,7 @@ import type {
   TransformComponent,
 } from '../model/components';
 import type { Entity } from '../model/Entity';
+import { STANDARD_CAMERA_VIEW_LABELS } from '../model/cameraOrientation';
 import {
   collectEntitySubtreeIds,
   getTopLevelHierarchyEntityIds,
@@ -356,6 +360,7 @@ type EditorState = {
   requestCameraReset: () => void;
   consumeCameraResetRequest: (requestId: string) => void;
   setCameraOrientation: (orientation: CameraOrientation) => void;
+  toggleCameraStandardView: (orientation: StandardCameraOrientation) => void;
   setCameraProjection: (projection: CameraProjection) => void;
   setSelectedModelMeasurement: (measurement: SelectedModelMeasurement | null) => void;
   createMesh: (meshKind: MeshKind, placementPosition?: Vector3Data) => void;
@@ -404,6 +409,7 @@ type EditorState = {
   previewEntityTransform: (entityId: string, transform: TransformComponent) => void;
   commitEntityTransform: (entityId: string, before: TransformComponent, after: TransformComponent) => void;
   commitFolderGroupTranslation: (input: FolderGroupTranslationInput) => boolean;
+  commitFolderGroupRotation: (input: FolderGroupRotationInput) => boolean;
   previewSelectedTransform: (transform: TransformComponent) => void;
   commitSelectedTransform: (before: TransformComponent, after: TransformComponent) => void;
   updateMqttConfig: (config: MqttConfig) => void;
@@ -2159,11 +2165,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换变换工具');
       const folderId = resolveSingleSelectedFolderId(state.scene, state.hierarchySelectionIds);
-      if (folderId && tool !== 'translate') {
+      if (folderId && tool === 'scale') {
         return {
           transformTool: 'translate',
           transformSpace: 'global',
-          logs: prependLog(state.logs, '文件夹整组仅支持移动工具，已保持世界坐标平移。'),
+          logs: prependLog(state.logs, '文件夹整组不支持缩放，已切回世界坐标移动工具。'),
         };
       }
       if (state.transformTool === tool && (!folderId || state.transformSpace === 'global')) return state;
@@ -2181,9 +2187,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const folderId = resolveSingleSelectedFolderId(state.scene, state.hierarchySelectionIds);
       if (folderId && space !== 'global') {
         return {
-          transformTool: 'translate',
+          transformTool: state.transformTool === 'scale' ? 'translate' : state.transformTool,
           transformSpace: 'global',
-          logs: prependLog(state.logs, '文件夹整组仅支持世界坐标平移，已忽略局部坐标切换。'),
+          logs: prependLog(state.logs, '文件夹整组移动和旋转仅支持世界坐标，已忽略局部坐标切换。'),
         };
       }
       if (state.transformSpace === space) return state;
@@ -2678,9 +2684,26 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setCameraOrientation: (orientation) => {
     set((state) => {
       if (state.cameraOrientation === orientation) return state;
+      const message = orientation === 'orbit'
+        ? '已退出标准视角硬锁。'
+        : `已进入${STANDARD_CAMERA_VIEW_LABELS[orientation].chinese}硬锁。`;
+      return { cameraOrientation: orientation, logs: prependLog(state.logs, message) };
+    });
+  },
+  /** 点击标准面时原子切换硬锁并强制正交；再次点击当前面只退出硬锁，保留投影。 */
+  toggleCameraStandardView: (orientation) => {
+    set((state) => {
+      const label = STANDARD_CAMERA_VIEW_LABELS[orientation].chinese;
+      if (state.cameraOrientation === orientation) {
+        return {
+          cameraOrientation: 'orbit',
+          logs: prependLog(state.logs, `已退出${label}硬锁。`),
+        };
+      }
       return {
         cameraOrientation: orientation,
-        logs: prependLog(state.logs, orientation === 'top' ? '已进入俯视视角。' : '已退出俯视视角。'),
+        cameraProjection: 'orthographic',
+        logs: prependLog(state.logs, `已进入${label}硬锁并切换为正交投影。`),
       };
     });
   },
@@ -3801,6 +3824,34 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const result = commitFolderGroupTranslationState(
+        state.scene,
+        state.history,
+        state.hierarchySelectionIds,
+        input,
+      );
+      committed = result.committed;
+      if (!result.committed) {
+        return { logs: prependLog(state.logs, result.message) };
+      }
+
+      return {
+        scene: result.scene,
+        history: result.history,
+        hierarchySelectionIds: state.hierarchySelectionIds,
+        selectedModelMeasurement: null,
+        logs: prependLog(state.logs, result.message),
+      };
+    });
+    return committed;
+  },
+  commitFolderGroupRotation: (input) => {
+    let committed = false;
+    set((state) => {
+      if (isRuntimePreviewState(state)) {
+        return guardRuntimePreviewMutation(state, '旋转文件夹对象');
+      }
+
+      const result = commitFolderGroupRotationState(
         state.scene,
         state.history,
         state.hierarchySelectionIds,

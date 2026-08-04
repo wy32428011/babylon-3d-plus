@@ -14,7 +14,11 @@ import type {
   RecentSceneEntry,
   RecentWorkspacesResult,
 } from '../types.js';
-import { DEFAULT_MODEL_LENGTH_UNIT_INFO, normalizeModelLengthUnit } from '../modelUnits.js';
+import {
+  DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO,
+  DEFAULT_MODEL_LENGTH_UNIT_INFO,
+  normalizeModelLengthUnit,
+} from '../modelUnits.js';
 import {
   authorizeAssetFile,
   authorizeAssetRoot,
@@ -856,9 +860,9 @@ export async function importEnvironmentModelFileIntoProject(
       assetRevision: createProjectAssetRevision(),
       kind: 'model',
       libraryKind: 'environment',
-      // 单文件环境 GLB 按项目统一米制登记，避免历史目录中的单位元数据影响直接导入语义。
-      lengthUnit: DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit,
-      unitScaleToMeters: DEFAULT_MODEL_LENGTH_UNIT_INFO.unitScaleToMeters,
+      // 单文件环境 GLB 默认按厘米登记，避免普通模型的米制兜底覆盖环境模型导入语义。
+      lengthUnit: DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO.lengthUnit,
+      unitScaleToMeters: DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO.unitScaleToMeters,
     };
 
     authorizeAssetFile(importedAsset.path);
