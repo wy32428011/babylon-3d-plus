@@ -7,6 +7,9 @@ import {
   Color4,
   CreateGreasedLine,
   DirectionalLight,
+  GreasedLineMeshColorDistributionType,
+  GreasedLineMeshMaterialType,
+  type GreasedLineSimpleMaterial,
   HemisphericLight,
   LinesMesh,
   Light,
@@ -423,7 +426,8 @@ type ConveyorTrajectoryRuntimeEntry = {
   root: TransformNode;
   lineMeshes: Mesh[];
   arrowMeshes: Mesh[];
-  material: StandardMaterial;
+  arrowMaterials: StandardMaterial[];
+  flowObserver: Observer<Scene>;
 };
 
 /** 轨迹行程上下文：中心点（模型局部）、行走轴与世界方向、行程长度。 */
@@ -3790,25 +3794,29 @@ export class SceneRuntime {
     const root = new TransformNode(`${entity.id}_conveyorTrajectoryRoot`, this.scene);
     this.refreshConveyorTrajectoryRoot(entity, root);
 
-    const material = new StandardMaterial(`${entity.id}_conveyorTrajectoryMat`, this.scene);
-    material.diffuseColor = Color3.White();
-    material.emissiveColor = Color3.White();
-    material.disableLighting = true;
-    material.alpha = 0.9;
-    material.backFaceCulling = false;
-    material.disableDepthWrite = true;
+    // 流光渐变：颜色表沿虚线均匀分布（COLOR_DISTRIBUTION_TYPE_LINE），每帧滚动相位形成
+    // 从起点流向终点的亮度波；箭头按各自在线上的位置同步脉冲。base 为暗部亮度。
+    const flowSteps = 64;
+    const flowBaseIntensity = 0.2;
+    const flowSpeed = 1.0; // m/s，亮度波推进速度
+    const flowColors: Color3[] = [];
+    for (let i = 0; i < flowSteps; i += 1) flowColors.push(Color3.White());
 
     const dashCount = clampNumber(Math.round(context.spanMeters / 1.2), 2, 12);
     const line = CreateGreasedLine(
       `${entity.id}_conveyorTrajectoryLine`,
       { points: [start, end], updatable: false },
       {
+        materialType: GreasedLineMeshMaterialType.MATERIAL_TYPE_SIMPLE,
         color: Color3.White(),
-        width: 0.06,
+        width: 0.035,
         sizeAttenuation: false,
         useDash: true,
         dashCount,
         dashRatio: 0.45,
+        useColors: true,
+        colors: flowColors,
+        colorDistributionType: GreasedLineMeshColorDistributionType.COLOR_DISTRIBUTION_TYPE_LINE,
       },
       this.scene,
     );
@@ -3826,11 +3834,12 @@ export class SceneRuntime {
       ? (dot < 0 ? Quaternion.RotationAxis(new Vector3(0, 1, 0), Math.PI) : Quaternion.Identity())
       : Quaternion.RotationAxis(cross, Math.acos(clampNumber(dot, -1, 1)));
 
-    // 平面 › 形箭头：两片扁盒从尖端向后张开，无柄无锥头。
+    // 平面 › 形箭头：两片扁盒从尖端向后张开，无柄无锥头；每臂独立材质以支持脉冲亮度。
     const chevronAngle = Math.PI / 4.5;
-    const chevronArmLength = 0.35;
+    const chevronArmLength = 0.26;
     const arrowCount = clampNumber(Math.round(context.spanMeters / 3), 2, 5);
     const arrowMeshes: Mesh[] = [];
+    const arrowMaterials: StandardMaterial[] = [];
     for (let i = 0; i < arrowCount; i += 1) {
       const t = (i + 1) / (arrowCount + 1);
       const arrowRoot = new TransformNode(`${entity.id}_conveyorTrajectoryArrow_${i}`, this.scene);
@@ -3841,7 +3850,7 @@ export class SceneRuntime {
       for (const side of [-1, 1]) {
         const arm = MeshBuilder.CreateBox(
           `${arrowRoot.name}_arm_${side}`,
-          { width: chevronArmLength, height: 0.02, depth: 0.06 },
+          { width: chevronArmLength, height: 0.015, depth: 0.035 },
           this.scene,
         );
         arm.parent = arrowRoot;
@@ -3851,13 +3860,59 @@ export class SceneRuntime {
           0,
           side * Math.sin(chevronAngle) * chevronArmLength * 0.5,
         );
-        arm.material = material;
+        const armMaterial = new StandardMaterial(`${arrowRoot.name}_armMat_${side}`, this.scene);
+        armMaterial.diffuseColor = Color3.White();
+        armMaterial.emissiveColor = Color3.White();
+        armMaterial.disableLighting = true;
+        armMaterial.alpha = 0.9;
+        armMaterial.backFaceCulling = false;
+        armMaterial.disableDepthWrite = true;
+        arm.material = armMaterial;
         arm.isPickable = false;
         arrowMeshes.push(arm);
+        arrowMaterials.push(armMaterial);
       }
     }
 
-    this.conveyorTrajectories.set(entity.id, { signature, root, lineMeshes: [line], arrowMeshes, material });
+    // phase ∈ [0,1] 为沿货物流向的归一化位置，time 为当前波相位；波头最亮向后衰减。
+    const flowIntensity = (phase: number, time: number): number => {
+      const d = phase - time;
+      const f = d - Math.floor(d);
+      const pulse = Math.pow(1 - f, 3);
+      return flowBaseIntensity + (1 - flowBaseIntensity) * pulse;
+    };
+    const updateFlow = (time: number): void => {
+      for (let i = 0; i < flowSteps; i += 1) {
+        const phase = i / (flowSteps - 1);
+        const v = flowIntensity(flip ? 1 - phase : phase, time);
+        flowColors[i].set(v, v, v);
+      }
+      (line.material as GreasedLineSimpleMaterial).setColors(flowColors);
+      for (let i = 0; i < arrowCount; i += 1) {
+        const t = (i + 1) / (arrowCount + 1);
+        const v = flowIntensity(flip ? 1 - t : t, time);
+        arrowMaterials[i * 2].emissiveColor.set(v, v, v);
+        arrowMaterials[i * 2 + 1].emissiveColor.set(v, v, v);
+      }
+    };
+    updateFlow(0);
+
+    let flowTime = 0;
+    const flowObserver = this.scene.onBeforeRenderObservable.add(() => {
+      if (!root.isEnabled()) return;
+      const dtSeconds = this.scene.getEngine().getDeltaTime() / 1000;
+      flowTime = (flowTime + (dtSeconds * flowSpeed) / context.spanMeters) % 1;
+      updateFlow(flowTime);
+    });
+
+    this.conveyorTrajectories.set(entity.id, {
+      signature,
+      root,
+      lineMeshes: [line],
+      arrowMeshes,
+      arrowMaterials,
+      flowObserver,
+    });
   }
 
   private readTrajectoryWorldDirection(direction: string): Vector3 {
@@ -3868,9 +3923,10 @@ export class SceneRuntime {
   }
 
   private disposeConveyorTrajectory(entityId: string, entry: ConveyorTrajectoryRuntimeEntry): void {
-    for (const lineMesh of entry.lineMeshes) lineMesh.dispose();
+    this.scene.onBeforeRenderObservable.remove(entry.flowObserver);
+    for (const lineMesh of entry.lineMeshes) lineMesh.dispose(false, true);
     for (const mesh of entry.arrowMeshes) mesh.dispose();
-    entry.material.dispose();
+    for (const armMaterial of entry.arrowMaterials) armMaterial.dispose();
     entry.root.dispose();
     this.conveyorTrajectories.delete(entityId);
   }
