@@ -21,7 +21,7 @@ import { RgvTelemetryDriver } from './rgvDriver';
 import {
   type ConveyorCargoRuntimeEntry,
   createSpecializedTelemetrySharedState,
-  isClaimableCargoContainerCode,
+  type GeneratedCargoRuntimeEntry,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
   type SpecializedTelemetryRuntimeEntry,
@@ -202,26 +202,27 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   }
 
   /**
-   * 全局领取 containerCode 货物归属：三类设备中持有同码货箱的其他设备立即销毁并清理遥测状态，
-   * 保证同一 containerCode 全局只有一份货箱；空码/匿名码不参与，设备自行控制销毁。
+   * 按 task 全局接管货物实例：三张货物表即注册表，找到其他设备持有的同 task 货箱时
+   * 由其 driver 清理遥测引用并取出条目（不销毁，视觉连续）返回；空 task 不参与，返回 null。
    */
-  claimGlobalCargoContainerCode(containerCode: string, claimingCargoKey: string): void {
-    if (!isClaimableCargoContainerCode(containerCode)) return;
+  adoptGlobalCargoByTask(task: string, claimingCargoKey: string): GeneratedCargoRuntimeEntry | null {
+    if (!task) return null;
     for (const [key, cargo] of [...this.state.stackerCargoMeshes]) {
-      if (key !== claimingCargoKey && cargo.containerCode === containerCode) {
-        this.stackerDriver.releaseClaimedCargoByKey(key);
+      if (key !== claimingCargoKey && cargo.task === task) {
+        return this.stackerDriver.detachClaimedCargoByKey(key);
       }
     }
     for (const [key, cargo] of [...this.state.conveyorCargoMeshes]) {
-      if (key !== claimingCargoKey && cargo.containerCode === containerCode) {
-        this.conveyorDriver.releaseClaimedCargoByKey(key);
+      if (key !== claimingCargoKey && cargo.task === task) {
+        return this.conveyorDriver.detachClaimedCargoByKey(key);
       }
     }
     for (const [key, cargo] of [...this.state.rgvCargoMeshes]) {
-      if (key !== claimingCargoKey && cargo.containerCode === containerCode) {
-        this.rgvDriver.releaseClaimedCargoByKey(key);
+      if (key !== claimingCargoKey && cargo.task === task) {
+        return this.rgvDriver.detachClaimedCargoByKey(key);
       }
     }
+    return null;
   }
 
   // ===== 帧内私有方法 =====

@@ -148,19 +148,20 @@ function createTimeline(sequence, tasks) {
   const timeline = [];
   const home = { distanceX: sequence.home.distance_x, distanceY: sequence.home.distance_y };
   let current = { ...home };
-  for (const task of tasks) {
+  for (const [taskIndex, task] of tasks.entries()) {
     const location = sequence.locationMap.get(task.locationAssetId);
     const target = { distanceX: location.distance_x, distanceY: location.distance_y };
     const prefix = `库位 ${location.assetId}`;
+    const taskId = taskIndex + 1;
     timeline.push(
-      step(`${prefix}：Stacker 行走`, sequence.timing.travelMs, current, { ...current, distanceX: target.distanceX }, location, task),
-      step(`${prefix}：行走到位`, sequence.timing.travelHoldMs, { ...current, distanceX: target.distanceX }, { ...current, distanceX: target.distanceX }, location, task),
-      step(`${prefix}：载货台升降`, sequence.timing.liftMs, { ...current, distanceX: target.distanceX }, target, location, task),
-      step(`${prefix}：载货台到位`, sequence.timing.liftHoldMs, target, target, location, task),
-      step(`${prefix}：货叉叉出`, sequence.timing.forkExtendMs, target, target, location, task, 'extend'),
-      step(`${prefix}：货叉保持`, sequence.timing.forkHoldMs, target, target, location, task, 'hold'),
-      step(`${prefix}：货叉收回`, sequence.timing.forkRetractMs, target, target, location, task, 'retract'),
-      step(`${prefix}：任务完成`, sequence.timing.taskCompleteHoldMs, target, target, location, task),
+      step(`${prefix}：Stacker 行走`, sequence.timing.travelMs, current, { ...current, distanceX: target.distanceX }, location, task, 'idle', taskId),
+      step(`${prefix}：行走到位`, sequence.timing.travelHoldMs, { ...current, distanceX: target.distanceX }, { ...current, distanceX: target.distanceX }, location, task, 'idle', taskId),
+      step(`${prefix}：载货台升降`, sequence.timing.liftMs, { ...current, distanceX: target.distanceX }, target, location, task, 'idle', taskId),
+      step(`${prefix}：载货台到位`, sequence.timing.liftHoldMs, target, target, location, task, 'idle', taskId),
+      step(`${prefix}：货叉叉出`, sequence.timing.forkExtendMs, target, target, location, task, 'extend', taskId),
+      step(`${prefix}：货叉保持`, sequence.timing.forkHoldMs, target, target, location, task, 'hold', taskId),
+      step(`${prefix}：货叉收回`, sequence.timing.forkRetractMs, target, target, location, task, 'retract', taskId),
+      step(`${prefix}：任务完成`, sequence.timing.taskCompleteHoldMs, target, target, location, task, 'idle', taskId),
     );
     current = target;
   }
@@ -168,9 +169,9 @@ function createTimeline(sequence, tasks) {
   return timeline;
 }
 
-/** 创建单个动作段。 */
-function step(name, durationMs, from, to, location, task, forkAction = 'idle') {
-  return { name, durationMs, from, to, location, side: task.side, forkAction };
+/** 创建单个动作段；taskId 在一次任务内恒定，供货物按 task 全局唯一接管。 */
+function step(name, durationMs, from, to, location, task, forkAction = 'idle', taskId = 0) {
+  return { name, durationMs, from, to, location, side: task.side, forkAction, taskId };
 }
 
 /** 查找当前动作段。 */
@@ -206,8 +207,8 @@ function createDefaultTopic(sequence, assetCode) {
   return segments.join('/');
 }
 
-/** 生成库位任务 MQTT 消息，货叉距离由场景 Locator 决定。 */
-function createPayload(assetCode, frame, tick, loopIndex) {
+/** 生成库位任务 MQTT 消息，货叉距离由场景 Locator 决定；task 号一轮任务内恒定、逐轮递增。 */
+function createPayload(assetCode, frame, tick, loopIndex, tasksTotal) {
   const location = frame.step.location;
   const target = location ? parseLocationAssetId(location.assetId) : { x: 0, y: 0, z: 0 };
   const isFront = frame.step.side === 'front';
@@ -216,13 +217,14 @@ function createPayload(assetCode, frame, tick, loopIndex) {
   const movementZ = frame.step.forkAction === 'extend' ? extendCode : frame.step.forkAction === 'retract' ? retractCode : 0;
   const isTraveling = Math.abs(frame.step.to.distanceX - frame.step.from.distanceX) > 0.0001;
   const isLifting = Math.abs(frame.step.to.distanceY - frame.step.from.distanceY) > 0.0001;
+  const activeTask = frame.step.taskId > 0 ? loopIndex * tasksTotal + frame.step.taskId : 0;
   const points = [
     point(assetCode, 'deviceCode', assetCode),
     point(assetCode, 'mode', 3),
     point(assetCode, 'front_command', isFront && frame.step.forkAction !== 'idle' ? 3 : 0),
     point(assetCode, 'back_command', !isFront && frame.step.forkAction !== 'idle' ? 3 : 0),
-    point(assetCode, 'front_task', tick),
-    point(assetCode, 'back_task', 0),
+    point(assetCode, 'front_task', isFront ? activeTask : 0),
+    point(assetCode, 'back_task', isFront ? 0 : activeTask),
     point(assetCode, 'movement_x', isTraveling ? (frame.step.to.distanceX >= frame.step.from.distanceX ? 1 : 2) : 0),
     point(assetCode, 'movement_y', isLifting ? (frame.step.to.distanceY >= frame.step.from.distanceY ? 1 : 2) : 0),
     point(assetCode, 'front_movement_z', isFront ? movementZ : 0),
@@ -318,7 +320,7 @@ async function run() {
       const virtualElapsed = (Date.now() - startedAt) * options.speed;
       const loopIndex = Math.min(options.loops - 1, Math.floor(virtualElapsed / cycleMs));
       const frame = resolveFrame(timeline, Math.min(cycleMs, virtualElapsed - loopIndex * cycleMs));
-      const payload = createPayload(assetCode, frame, tick, loopIndex);
+      const payload = createPayload(assetCode, frame, tick, loopIndex, tasks.length);
       if (frame.step.name !== lastStepName) {
         console.log(`[动作] ${frame.step.name}`);
         lastStepName = frame.step.name;

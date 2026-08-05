@@ -36,6 +36,9 @@ import {
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
+  createCargoHandoffState,
+  normalizeCargoTask,
+  resolveCargoHandoffPose,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
   type SpecializedTelemetrySharedState,
@@ -96,7 +99,7 @@ export class StackerTelemetryDriver {
     this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds, targetLocator, travelMoving || liftMoving, targetCellMissing);
     this.applyStackerNodeMotionOffsets(model);
     if (!targetCellMissing) {
-      this.applyStackerCargoMotion(model, snapshot, targetLocator, targetPosition);
+      this.applyStackerCargoMotion(model, snapshot, targetLocator, targetPosition, deltaSeconds);
     }
     this.writeStackerTelemetryMetadata(model, snapshot, targetLocator);
   }
@@ -533,9 +536,10 @@ export class StackerTelemetryDriver {
     snapshot: StackerTelemetrySnapshot,
     targetLocator: LocatorRuntimeEntry | null,
     targetPosition: Vector3 | null,
+    deltaSeconds: number,
   ): void {
-    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'front');
-    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'back');
+    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'front', deltaSeconds);
+    this.applyStackerForkCargoMotion(model, snapshot, targetLocator, targetPosition, 'back', deltaSeconds);
   }
 
   /**
@@ -548,6 +552,7 @@ export class StackerTelemetryDriver {
     targetLocator: LocatorRuntimeEntry | null,
     targetPosition: Vector3 | null,
     side: StackerForkSide,
+    deltaSeconds: number,
   ): void {
     const state = model.stackerTelemetry;
     const command = readIntegerField(snapshot.fields, side === 'front' ? 'front_command' : 'back_command');
@@ -591,7 +596,7 @@ export class StackerTelemetryDriver {
       }
     }
 
-    this.updateStackerCargoPose(model, snapshot, side);
+    this.updateStackerCargoPose(model, snapshot, side, deltaSeconds);
 
     if (side === 'front') {
       state.frontLastCommand = command;
@@ -638,7 +643,7 @@ export class StackerTelemetryDriver {
     }
 
     this.getOrCreateStackerCargo(model.assetCode, side);
-    this.claimStackerCargoContainerCode(model, snapshot, side);
+    this.adoptOrCreateStackerCargo(model, snapshot, side);
     const toX = readIntegerField(snapshot.fields, 'to_x');
     const toY = readIntegerField(snapshot.fields, 'to_y');
     const fetchRow = toX !== null && toY !== null
@@ -666,7 +671,7 @@ export class StackerTelemetryDriver {
     this.disposeStackerCargoByKey(this.getStackerCargoKey(model.assetCode, side));
     this.clearStackerForkCargoState(model, side);
     this.getOrCreateStackerCargo(model.assetCode, side);
-    this.claimStackerCargoContainerCode(model, snapshot, side);
+    this.adoptOrCreateStackerCargo(model, snapshot, side);
     const state = model.stackerTelemetry;
     const cargoKey = this.getStackerCargoKey(model.assetCode, side);
     if (side === 'front') {
@@ -756,7 +761,7 @@ export class StackerTelemetryDriver {
   }
 
   /** 每帧刷新货物外观与位姿：绑定跟随叉尖，未绑定静止于箱位支撑位。 */
-  private updateStackerCargoPose(model: ModelRuntimeEntry, snapshot: StackerTelemetrySnapshot, side: StackerForkSide): void {
+  private updateStackerCargoPose(model: ModelRuntimeEntry, snapshot: StackerTelemetrySnapshot, side: StackerForkSide, deltaSeconds: number): void {
     const cargoKey = this.getStackerForkCargoKey(model, side);
     if (!cargoKey) return;
     const cargo = this.state.stackerCargoMeshes.get(cargoKey);
@@ -769,13 +774,15 @@ export class StackerTelemetryDriver {
     const holdScaling = side === 'front' ? state.frontCargoHoldScaling : state.backCargoHoldScaling;
 
     this.host.syncGeneratedCargoVisual(cargo, 'stacker', snapshot, this.host.resolveCargoGeneratorForModel(model));
-    const position = bound || !holdPosition
+    const targetPosition = bound || !holdPosition
       ? this.getStackerForkCargoPosition(model, side)
       : holdPosition;
-    const rotation = bound || !holdRotation
+    const targetRotation = bound || !holdRotation
       ? getNodeWorldRotation(model.root)
       : holdRotation;
-    this.host.setGeneratedCargoRootPose(cargo, position, rotation, bound ? null : holdScaling);
+    // 跨设备接管的货物从原世界位姿插值接入本机锚点，目标位姿每帧动态追踪（如叉尖随叉移动）
+    const pose = resolveCargoHandoffPose(cargo, targetPosition, targetRotation, deltaSeconds);
+    this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, bound ? null : holdScaling);
   }
 
   /** 货物跟随最远段叉节点包围盒中心，确保始终定位在货叉实际伸出位置而非全部叉节点几何中心。 */
@@ -830,29 +837,47 @@ export class StackerTelemetryDriver {
   }
 
   /**
-   * 其他设备领取了同一 containerCode 时释放本货箱：清理引用该货箱的模型遥测状态后销毁，
-   * fetch 保留中的滞留货箱无模型引用，同样直接销毁。
+   * 其他设备凭同一 task 接管本货箱：清理引用该货箱的模型遥测引用后从表中取出（不销毁），
+   * 货箱实例交给接管方保持视觉连续；fetch 保留中的滞留货箱无模型引用，同样直接取出。
    */
-  releaseClaimedCargoByKey(key: string): void {
+  detachClaimedCargoByKey(key: string): StackerCargoRuntimeEntry | null {
+    const cargo = this.state.stackerCargoMeshes.get(key);
+    if (!cargo) return null;
     for (const { model } of this.host.collectModels()) {
       if (model.stackerTelemetry.frontCargoKey === key) this.clearStackerForkCargoState(model, 'front');
       if (model.stackerTelemetry.backCargoKey === key) this.clearStackerForkCargoState(model, 'back');
     }
-    this.disposeStackerCargoByKey(key);
+    this.state.stackerCargoMeshes.delete(key);
+    return cargo;
   }
 
-  /** 刷出货物时记录 MQTT containerCode 并全局领取归属；无码货箱匿名，不参与全局唯一。 */
-  private claimStackerCargoContainerCode(
+  /**
+   * 刷出货物时按 task 全局接管或自建：接管成功则以货箱当前世界位姿为起点进入交接插值，
+   * 并销毁本侧刚建的占位条目（从未渲染）；无 task 匿名，不参与全局接管。
+   */
+  private adoptOrCreateStackerCargo(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
     side: StackerForkSide,
   ): void {
     const cargoKey = this.getStackerCargoKey(model.assetCode, side);
+    const task = normalizeCargoTask(readIntegerField(snapshot.fields, `${side}_task`));
+    const containerCode = readStringField(snapshot.fields, `${side}_containerCode`)?.trim() ?? '';
+    const adopted = this.context.adoptGlobalCargoByTask(task, cargoKey);
+    if (adopted) {
+      const placeholder = this.state.stackerCargoMeshes.get(cargoKey);
+      if (placeholder && placeholder !== adopted) this.disposeStackerCargoByKey(cargoKey);
+      adopted.assetCode = model.assetCode;
+      adopted.task = task;
+      adopted.containerCode = containerCode || adopted.containerCode;
+      adopted.handoff = createCargoHandoffState(adopted);
+      this.state.stackerCargoMeshes.set(cargoKey, adopted);
+      return;
+    }
     const cargo = this.state.stackerCargoMeshes.get(cargoKey);
     if (!cargo) return;
-    const containerCode = readStringField(snapshot.fields, `${side}_containerCode`)?.trim() ?? '';
+    cargo.task = task;
     cargo.containerCode = containerCode;
-    this.context.claimGlobalCargoContainerCode(containerCode, cargoKey);
   }
 
   /** 创建或复用某侧货叉的堆垛机运行时货物。 */
@@ -868,10 +893,12 @@ export class StackerTelemetryDriver {
     const entry: StackerCargoRuntimeEntry = {
       assetCode,
       containerCode: '',
+      task: '',
       root,
       outputOwner: null,
       fallback: null,
       generatorEntityId: null,
+      handoff: null,
     };
     this.state.stackerCargoMeshes.set(key, entry);
     return entry;

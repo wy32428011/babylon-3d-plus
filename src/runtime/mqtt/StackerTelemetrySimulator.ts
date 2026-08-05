@@ -27,6 +27,8 @@ type StackerMotionState = {
   backMovementZ: number;
   frontCommand: number;
   backCommand: number;
+  frontTask: number;
+  backTask: number;
   normal: boolean;
   errorCode: number;
   message: string;
@@ -145,8 +147,8 @@ export function createStackerSimulatorPayload(
       createPayloadPoint(assetCode, 'front_z', frontLocation.z),
       createPayloadPoint(assetCode, 'front_x', frontLocation.x),
       createPayloadPoint(assetCode, 'front_y', frontLocation.y),
-      createPayloadPoint(assetCode, 'front_task', tick),
-      createPayloadPoint(assetCode, 'back_task', 0),
+      createPayloadPoint(assetCode, 'front_task', motion.frontTask),
+      createPayloadPoint(assetCode, 'back_task', motion.backTask),
       createPayloadPoint(assetCode, 'signalBits', tick % 2),
       createPayloadPoint(assetCode, 'front_signalBits', tick % 4),
       createPayloadPoint(assetCode, 'back_signalBits', tick % 3),
@@ -197,6 +199,8 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
       backMovementZ: 0,
       frontCommand: 8,
       backCommand: 8,
+      frontTask: 0,
+      backTask: 0,
       normal: false,
       errorCode: 9001,
       message: '模拟急停',
@@ -227,6 +231,8 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
       backMovementZ: [3, 4, 1, 2][forkCycle],
       frontCommand: 0,
       backCommand: 0,
+      frontTask: 0,
+      backTask: 0,
       normal: true,
       errorCode: 0,
       message: '全 0 目标位，按 movement 模拟移动',
@@ -241,6 +247,8 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
   const forkDistance = resolveTaskForkDistance(phaseProgress, fetchTarget.forkDistance);
   const frontActive = activeSide === 'front';
   const activeTarget = phaseProgress < 0.5 ? fetchTarget : placeTarget;
+  // 每个 8 秒任务周期一个稳定 task 号，随周期单调递增，供货物按 task 全局唯一接管
+  const jobTask = 7000 + Math.floor(seconds / 8);
 
   return {
     target: phaseProgress < 0.86 ? activeTarget : null,
@@ -254,6 +262,8 @@ function resolveMotionState(elapsedMs: number, scenario: StackerSimulationScenar
     backMovementZ: frontActive ? 0 : resolveTaskForkMovement(phaseProgress, 3, 4),
     frontCommand: frontActive ? resolveTaskForkCommand(phaseProgress) : 0,
     backCommand: frontActive ? 0 : resolveTaskForkCommand(phaseProgress),
+    frontTask: frontActive ? jobTask : 0,
+    backTask: frontActive ? 0 : jobTask,
     normal: true,
     errorCode: 0,
     message: `${frontActive ? '前叉' : '后叉'}从 ${fetchTarget.x}-${fetchTarget.y}-${fetchTarget.z} 取货，放至 ${placeTarget.x}-${placeTarget.y}-${placeTarget.z}`,

@@ -31,6 +31,9 @@ import {
   CONVEYOR_CARGO_SIZE,
   CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
+  createCargoHandoffState,
+  normalizeCargoTask,
+  resolveCargoHandoffPose,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
   type SpecializedTelemetrySharedState,
@@ -87,27 +90,31 @@ export class ConveyorTelemetryDriver {
   }
 
   /**
-   * 根据光电信号（缺省 front_has_goods / back_has_goods，可在 motion.cargo 配置）决定货物创建与销毁。
+   * 货物生命周期两种模式：
+   * - task 模式（快照携带数值 task 字段）：新 task 边沿登记 pendingTask，光电有货且线体运行（movement_x 非 0）后刷出；
+   *   刷出时按 task 全局接管他设备货箱实例（插值接入本机走行），同 task 不重生（接管锁）；
+   *   停线且双光电无货时清空货物并复位任务锁，允许 task 复用。
+   * - 匿名模式（无 task 字段）：光电有货且线体运行时刷出，设备自管理，不参与全局接管。
    * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向：
-   * front 有货 → 轨迹轴起点端（正转上游）刷出并随正转前行；back 有货 → 末端刷出，反转时反向移动。
-   * 仅当 movement_x == 0 且前后都无货时才移除货物；运行中信号暂失时货物保持原位继续走。
+   * 正转（=1）刷在轨迹起点向终点移动；反转（=2）刷在轨迹终点向起点移动。
    */
   private applyConveyorCargoMotion(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
     deltaSeconds: number,
   ): void {
+    const state = model.conveyorTelemetry;
     const signalFields = readConveyorCargoSignalFields(model);
     const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods) ?? false;
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
 
-    // 全局认领闩锁：货物被其他设备凭 containerCode 取走后，被认领端光电持续有货期间视为同一货物，
-    // 不重生、不反抢归属；该端回落至无货一次（真实空线边沿）后解除闩锁。
-    const claimedAwaySource = model.conveyorTelemetry.claimedAwaySource;
-    if (claimedAwaySource) {
-      const claimedHasGoods = claimedAwaySource === 'front' ? frontHasGoods : backHasGoods;
-      if (claimedHasGoods) return;
-      model.conveyorTelemetry.claimedAwaySource = null;
+    // task 语义：数值 0/缺失为无任务；新 task 边沿登记，等待光电确认刷出。
+    const taskValue = readIntegerField(snapshot.fields, 'task');
+    const taskMode = taskValue !== null;
+    const task = normalizeCargoTask(taskValue);
+    if (taskMode && task && task !== state.currentTask) {
+      state.currentTask = task;
+      state.pendingTask = task;
     }
 
     // 货物走行与链条本体共用同一份 translate 配置（fields+actionMap+speed），避免链/货速度脱节。
@@ -118,16 +125,10 @@ export class ConveyorTelemetryDriver {
 
     if (movementDirection === 0 && !frontHasGoods && !backHasGoods) {
       this.disposeConveyorCargoForAssetCode(model.assetCode);
-      model.conveyorTelemetry.cargoCode = null;
+      state.cargoCode = null;
+      // 线体清空后复位任务锁允许 task 复用；待刷出任务保留，继续等待光电确认。
+      if (!state.pendingTask) state.currentTask = null;
       return;
-    }
-
-    // 前端有货优先；运行中前后信号都暂失时维持原货物身份继续走行。
-    const photoelectricSource = frontHasGoods ? 'front' : backHasGoods ? 'back' : model.conveyorTelemetry.cargoCode;
-    if (!photoelectricSource) return;
-    const isNewCargo = model.conveyorTelemetry.cargoCode !== photoelectricSource;
-    if (isNewCargo && model.conveyorTelemetry.cargoCode) {
-      this.disposeConveyorCargoForAssetCode(model.assetCode);
     }
 
     const travelContext = this.resolveConveyorCargoTravelContext(model);
@@ -136,34 +137,85 @@ export class ConveyorTelemetryDriver {
       CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
     );
     const forwardSign = this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxis);
-    if (isNewCargo) {
-      // front → 轨迹轴起点端（正转上游端）；back → 末端（正转下游端）。
-      model.conveyorTelemetry.cargoTravelOffset = (photoelectricSource === 'front' ? -1 : 1) * forwardSign * travelHalfRange;
+    // 刷出端由运行方向决定：正转刷在轨迹起点向终点移动，反转刷在轨迹终点向起点移动。
+    const spawnOffsetForDirection = (direction: number): number => -direction * forwardSign * travelHalfRange;
+
+    if (taskMode) {
+      // task 模式：待刷出任务经光电有货且线体运行确认后接管/自建；同 task 已被接管时 cargoCode 被清空且 pendingTask 为空，不会重生。
+      if (state.pendingTask && (frontHasGoods || backHasGoods) && movementDirection !== 0) {
+        const photoelectricSource = frontHasGoods ? 'front' : 'back';
+        state.pendingTask = null;
+        this.disposeConveyorCargoForAssetCode(model.assetCode);
+        state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
+        state.cargoCode = photoelectricSource;
+        this.adoptOrCreateConveyorCargo(model, snapshot, photoelectricSource);
+      }
+    } else {
+      // 匿名模式：前端有货优先；有货但线体未运行时不刷出，等待 movement_x 非 0 确认；
+      // 运行中前后信号都暂失时维持原货物身份继续走行。
+      const photoelectricSource = frontHasGoods ? 'front' : backHasGoods ? 'back' : state.cargoCode;
+      if (!photoelectricSource) return;
+      const isNewCargo = state.cargoCode !== photoelectricSource;
+      if (isNewCargo) {
+        if (movementDirection === 0) return;
+        if (state.cargoCode) {
+          this.disposeConveyorCargoForAssetCode(model.assetCode);
+        }
+        state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
+        const cargo = this.getOrCreateConveyorCargo(model.assetCode, photoelectricSource);
+        cargo.containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
+        cargo.task = '';
+      }
+      state.cargoCode = photoelectricSource;
     }
+
+    if (!state.cargoCode) return;
+    const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
+    if (!cargo) return;
+
     if (!snapshot.faulted && movementDirection !== 0) {
       const cargoSpeed = translateConfig?.speed ?? CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
-      model.conveyorTelemetry.cargoTravelOffset += movementDirection * forwardSign * cargoSpeed * deltaSeconds;
+      state.cargoTravelOffset += movementDirection * forwardSign * cargoSpeed * deltaSeconds;
     }
     // 每帧按当前行程钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
-    model.conveyorTelemetry.cargoTravelOffset = clampNumber(model.conveyorTelemetry.cargoTravelOffset, -travelHalfRange, travelHalfRange);
+    state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, -travelHalfRange, travelHalfRange);
 
-    const cargo = this.getOrCreateConveyorCargo(model.assetCode, photoelectricSource);
-    if (isNewCargo) {
-      // 新货物刷出时记录 MQTT containerCode（输送线协议为无前缀字段）并全局领取归属；无码货物匿名，不参与全局唯一。
-      const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
-      cargo.containerCode = containerCode;
-      this.context.claimGlobalCargoContainerCode(
-        containerCode,
-        this.getConveyorCargoKey(model.assetCode, photoelectricSource),
-      );
-    }
     this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));
-    this.host.setGeneratedCargoRootPose(
+    const pose = resolveCargoHandoffPose(
       cargo,
       this.getConveyorCargoPosition(model, travelContext),
       getNodeWorldRotation(model.root),
+      deltaSeconds,
     );
-    model.conveyorTelemetry.cargoCode = photoelectricSource;
+    this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation);
+  }
+
+  /** task 模式刷出：全局接管同 task 货箱实例（交接插值接入本机走行），否则自建；接管后本机持锁，上游不再重生。 */
+  private adoptOrCreateConveyorCargo(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    photoelectricSource: string,
+  ): void {
+    const cargoKey = this.getConveyorCargoKey(model.assetCode, photoelectricSource);
+    const task = model.conveyorTelemetry.currentTask ?? '';
+    const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
+    const adopted = this.context.adoptGlobalCargoByTask(task, cargoKey);
+    if (adopted) {
+      const placeholder = this.state.conveyorCargoMeshes.get(cargoKey);
+      if (placeholder && placeholder !== adopted) {
+        this.disposeConveyorCargo(placeholder);
+        this.state.conveyorCargoMeshes.delete(cargoKey);
+      }
+      adopted.assetCode = model.assetCode;
+      adopted.task = task;
+      adopted.containerCode = containerCode || adopted.containerCode;
+      adopted.handoff = createCargoHandoffState(adopted);
+      this.state.conveyorCargoMeshes.set(cargoKey, adopted);
+      return;
+    }
+    const cargo = this.getOrCreateConveyorCargo(model.assetCode, photoelectricSource);
+    cargo.task = task;
+    cargo.containerCode = containerCode;
   }
 
   /** 按 motion.fields 读取输送线方向，支持模型脚本自定义 actionMap。 */
@@ -310,10 +362,12 @@ export class ConveyorTelemetryDriver {
     const entry: ConveyorCargoRuntimeEntry = {
       assetCode,
       containerCode,
+      task: '',
       root,
       outputOwner: null,
       fallback: null,
       generatorEntityId: null,
+      handoff: null,
     };
     this.state.conveyorCargoMeshes.set(key, entry);
     return entry;
@@ -328,20 +382,19 @@ export class ConveyorTelemetryDriver {
     }
   }
 
-  /** 其他设备领取了同一 containerCode 时释放本货物：清理引用该货物的模型遥测状态后销毁，并闩锁该光电端防止逐帧重生反抢。 */
-  releaseClaimedCargoByKey(key: string): void {
+  /** 其他设备凭同一 task 接管本货物：清理引用该货物的模型遥测引用后从表中取出（不销毁），实例交给接管方保持视觉连续。 */
+  detachClaimedCargoByKey(key: string): ConveyorCargoRuntimeEntry | null {
     const cargo = this.state.conveyorCargoMeshes.get(key);
-    if (!cargo) return;
+    if (!cargo) return null;
     for (const { model } of this.host.collectModels()) {
       if (model.assetCode !== cargo.assetCode) continue;
       const cargoCode = model.conveyorTelemetry.cargoCode;
       if (cargoCode !== null && this.getConveyorCargoKey(model.assetCode, cargoCode) === key) {
         model.conveyorTelemetry.cargoCode = null;
-        model.conveyorTelemetry.claimedAwaySource = cargoCode;
       }
     }
-    this.disposeConveyorCargo(cargo);
     this.state.conveyorCargoMeshes.delete(key);
+    return cargo;
   }
 
   /** 释放单个输送线运行时货物的模板、回退 Box 和支撑点根节点。 */

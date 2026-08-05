@@ -71,7 +71,7 @@ function point(assetCode, p, v) {
   return { e: assetCode, p, v };
 }
 
-/** 按场景目标位生成确定性的运动轨迹。 */
+/** 按场景目标位生成确定性的运动轨迹；frontTask/backTask 在一次任务周期内恒定，供货物按 task 全局唯一接管。 */
 function resolveMotionState(elapsedMs, scenario) {
   if (scenario === 'fault') {
     return {
@@ -86,6 +86,8 @@ function resolveMotionState(elapsedMs, scenario) {
       backMovementZ: 0,
       frontCommand: 8,
       backCommand: 8,
+      frontTask: 0,
+      backTask: 0,
       frontContainerCode: '',
       backContainerCode: '',
       normal: false,
@@ -122,6 +124,8 @@ function resolveMotionState(elapsedMs, scenario) {
       backMovementZ: [3, 4, 1, 2][forkCycle],
       frontCommand: 1,
       backCommand: 3,
+      frontTask: 8001,
+      backTask: 8002,
       frontContainerCode: 'PALLET-MOVE-F',
       backContainerCode: 'PALLET-MOVE-B',
       normal: true,
@@ -134,6 +138,8 @@ function resolveMotionState(elapsedMs, scenario) {
   const cargoCode = `PALLET-${String(sequenceIndex + 1).padStart(2, '0')}-${activeTarget.x}${activeTarget.y}${activeTarget.z}`;
   const forkDistance = resolveTargetForkDistance(phaseProgress, activeTarget.forkDistance);
   const frontActive = activeSide === 'front';
+  // 每个 8 秒任务周期一个稳定 task 号，随周期单调递增
+  const jobTask = 7000 + Math.floor(seconds / 8);
 
   return {
     target: activeTarget,
@@ -147,6 +153,8 @@ function resolveMotionState(elapsedMs, scenario) {
     backMovementZ: frontActive ? 0 : resolveTargetForkMovement(phaseProgress, 3, 4),
     frontCommand: frontActive ? resolveTargetForkCommand(phaseProgress) : 0,
     backCommand: frontActive ? 0 : resolveTargetForkCommand(phaseProgress),
+    frontTask: frontActive ? jobTask : 0,
+    backTask: frontActive ? 0 : jobTask,
     frontContainerCode: frontActive ? resolveTargetContainerCode(cargoCode, phaseProgress) : '',
     backContainerCode: frontActive ? '' : resolveTargetContainerCode(cargoCode, phaseProgress),
     normal: true,
@@ -213,7 +221,8 @@ function resolveConveyorState(elapsedMs, scenario) {
     const direction = Math.floor(seconds / 4) % 2 === 0 ? 1 : 2;
     return {
       mode: 2,
-      task: 304 + Math.floor(seconds),
+      // task 与货物条码同周期（4 秒一箱），周期内恒定，供货物按 task 全局唯一接管
+      task: 304 + Math.floor(seconds / 4),
       movementX: direction,
       movementY: 0,
       signalBits: 2,
@@ -269,8 +278,8 @@ function createStackerPayload(options, tick, startMs) {
       point(options.asset, 'front_z', frontLocation.z),
       point(options.asset, 'front_x', frontLocation.x),
       point(options.asset, 'front_y', frontLocation.y),
-      point(options.asset, 'front_task', tick),
-      point(options.asset, 'back_task', 0),
+      point(options.asset, 'front_task', motion.frontTask),
+      point(options.asset, 'back_task', motion.backTask),
       point(options.asset, 'front_containerCode', motion.frontContainerCode),
       point(options.asset, 'back_containerCode', motion.backContainerCode),
       point(options.asset, 'signalBits', tick % 2),
@@ -312,7 +321,7 @@ function createConveyorPayload(options, tick, startMs) {
     data: [
       point(options.asset, 'deviceCode', options.asset),
       point(options.asset, 'mode', state.mode),
-      point(options.asset, 'task', state.task + tick),
+      point(options.asset, 'task', state.task),
       point(options.asset, 'movement_x', state.movementX),
       point(options.asset, 'movement_y', state.movementY),
       point(options.asset, 'signalBits', state.signalBits),

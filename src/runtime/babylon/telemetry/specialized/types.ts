@@ -1,5 +1,5 @@
-import type { Mesh, Quaternion, Scene, StandardMaterial, TransformNode } from '@babylonjs/core';
-import { Vector3 } from '@babylonjs/core';
+import type { Mesh, Scene, StandardMaterial, TransformNode } from '@babylonjs/core';
+import { Quaternion, Vector3 } from '@babylonjs/core';
 import type { ModelGeneratorComponent } from '../../../../editor/model/components';
 import type { ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
 import type {
@@ -26,9 +26,44 @@ export const CONVEYOR_CARGO_EMISSIVE_COLOR = '#09283a';
 export const CONVEYOR_CARGO_SIZE = new Vector3(0.72, 0.34, 0.72);
 export const CONVEYOR_ANONYMOUS_CARGO_CODE = '__anonymous__';
 
-/** 判断 containerCode 是否参与全局唯一归属：空串与匿名占位码不参与，设备自行控制销毁。 */
-export function isClaimableCargoContainerCode(containerCode: string): boolean {
-  return containerCode.trim() !== '' && containerCode !== CONVEYOR_ANONYMOUS_CARGO_CODE;
+/** 归一化 MQTT task 字段为全局货物身份：null/0 为匿名（空串），不参与全局唯一。 */
+export function normalizeCargoTask(value: number | null): string {
+  return value !== null && value !== 0 ? String(value) : '';
+}
+
+/** 货物跨设备交接的视觉过渡时长（秒）：接管后从原世界位姿插值接入新设备动画。 */
+export const CARGO_HANDOFF_SECONDS = 1.0;
+
+/** 交接插值状态：adopt 时记录货物当前世界位姿，progress 到 1 后过渡结束。 */
+export type CargoHandoffState = {
+  fromPosition: Vector3;
+  fromRotation: Quaternion;
+  progress: number;
+};
+
+/** 交接插值：handoff 未完结时在接管起点与目标位姿间插值并推进进度，完结后清除并返回目标位姿。 */
+export function resolveCargoHandoffPose(
+  cargo: { handoff: CargoHandoffState | null },
+  targetPosition: Vector3,
+  targetRotation: Quaternion,
+  deltaSeconds: number,
+): { position: Vector3; rotation: Quaternion } {
+  const handoff = cargo.handoff;
+  if (!handoff) return { position: targetPosition, rotation: targetRotation };
+  handoff.progress = Math.min(1, handoff.progress + deltaSeconds / CARGO_HANDOFF_SECONDS);
+  const position = Vector3.Lerp(handoff.fromPosition, targetPosition, handoff.progress);
+  const rotation = Quaternion.Slerp(handoff.fromRotation, targetRotation, handoff.progress);
+  if (handoff.progress >= 1) cargo.handoff = null;
+  return { position, rotation };
+}
+
+/** 以货物当前世界位姿为起点创建交接插值状态（root 无父级，本地位姿即世界位姿）。 */
+export function createCargoHandoffState(cargo: { root: TransformNode }): CargoHandoffState {
+  return {
+    fromPosition: cargo.root.position.clone(),
+    fromRotation: cargo.root.rotationQuaternion?.clone() ?? Quaternion.Identity(),
+    progress: 0,
+  };
 }
 export const CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS = 1.2;
 export const CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND = 180;
@@ -98,12 +133,17 @@ export type GeneratedCargoFallbackRuntimeEntry = {
 /** 普通自动货物共享字段；root 始终表示货物底部支撑点。 */
 export type GeneratedCargoRuntimeEntry = {
   assetCode: string;
+  /** MQTT containerCode，仅作元数据（命名/metadata），不参与全局唯一性。 */
   containerCode: string;
+  /** MQTT task（归一化字符串）：全局货物唯一身份，空串为匿名不参与跨设备接管。 */
+  task: string;
   root: TransformNode;
   outputOwner: GeneratedOutputOwnerRuntimeEntry | null;
   fallback: GeneratedCargoFallbackRuntimeEntry | null;
   /** 货箱模板来源生成器实体 ID；null 表示内置几何体回退。 */
   generatorEntityId: string | null;
+  /** 跨设备接管时的视觉过渡；null 表示无交接插值。 */
+  handoff: CargoHandoffState | null;
 };
 
 export type StackerCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
@@ -152,8 +192,10 @@ export type ConveyorNodeBaseline = {
 
 export type ConveyorModelTelemetryState = {
   cargoCode: string | null;
-  /** 货物被其他设备凭 containerCode 全局认领的光电端；该端持续有货期间不重生货物，回落至无货一次后解除。 */
-  claimedAwaySource: string | null;
+  /** 当前 task（归一化字符串）：task 模式下同 task 不重复刷出，构成接管锁；线体清空后复位允许复用。 */
+  currentTask: string | null;
+  /** 已登记待光电确认刷出的 task；光电报有货时消费。 */
+  pendingTask: string | null;
   cargoTravelOffset: number;
   motionOffsets: Map<string, number>;
   nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;
@@ -297,8 +339,9 @@ export interface SpecializedTelemetryDriverContext {
   getOrCreateStackerCargo(assetCode: string, side: StackerForkSide): StackerCargoRuntimeEntry;
   getOrCreateConveyorCargo(assetCode: string, containerCode: string): ConveyorCargoRuntimeEntry;
   /**
-   * 全局领取 containerCode 货物归属：销毁其他设备持有的同码货箱并清理其遥测状态，
-   * 保证同一 containerCode 全局只有一份货箱；claimingCargoKey 为调用方自身货箱键。
+   * 按 task 全局接管货物：找到其他设备持有的同 task 货箱时，由其 driver 清理遥测引用后
+   * 取出条目（不销毁）返回给调用方；未找到返回 null，调用方走自建路径。
+   * 空 task（匿名）不参与，直接返回 null。
    */
-  claimGlobalCargoContainerCode(containerCode: string, claimingCargoKey: string): void;
+  adoptGlobalCargoByTask(task: string, claimingCargoKey: string): GeneratedCargoRuntimeEntry | null;
 }
