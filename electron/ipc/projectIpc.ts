@@ -15,6 +15,7 @@ import type {
   SelectProjectDirectoryResult,
 } from '../types.js';
 import { authorizeAssetFile, authorizeSceneFile, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
+import { isSupportedSceneFilePath } from './sceneFilePath.js';
 import {
   assertRecentSceneFile,
   getRecentWorkspaces,
@@ -191,8 +192,8 @@ function validateLoadSceneFileRequest(request: LoadSceneFileRequest): LoadSceneF
   }
 
   const filePath = normalizeFilePath(candidate.filePath);
-  if (!filePath.toLowerCase().endsWith('.scene.json')) {
-    throw new Error('仅支持加载 .scene.json 场景文件。');
+  if (!isSupportedSceneFilePath(filePath)) {
+    throw new Error('仅支持加载 .json 场景文件。');
   }
 
   return { filePath };
