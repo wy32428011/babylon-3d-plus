@@ -92,6 +92,7 @@ import {
   type ExternalModelScriptTelemetrySnapshot,
 } from './ExternalModelScriptRuntime';
 import { SceneSkyboxRuntime } from './SceneSkyboxRuntime';
+import { SceneShadowRuntime } from './SceneShadowRuntime';
 import {
   SceneEnvironmentRuntime,
   type SceneEnvironmentApplyOptions,
@@ -178,6 +179,10 @@ import {
   EntityGroupTranslationPreview,
   type EntityGroupTranslationTarget,
 } from './EntityGroupTranslationPreview';
+import {
+  EntityGroupRotationPreview,
+  type EntityGroupRotationTarget,
+} from './EntityGroupRotationPreview';
 import {
   createConveyorTelemetryState,
   createRgvTelemetryState,
@@ -525,11 +530,12 @@ export class SceneRuntime {
   private readonly assetLoadScheduler = new AssetLoadScheduler();
   private readonly sharedModelAssetCache = new SharedModelAssetCache();
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
-  private readonly groupTranslationPreviewObserver: Nullable<Observer<Scene>>;
+  private readonly groupTransformPreviewObserver: Nullable<Observer<Scene>>;
   private readonly modelArrayVariantRenderSuppressionObserver: Nullable<Observer<Scene>>;
   private readonly modelArrayVariantRenderRestoreObserver: Nullable<Observer<Scene>>;
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
+  private readonly shadowRuntime: SceneShadowRuntime;
   private readonly skyboxRuntime: SceneSkyboxRuntime;
   private readonly environmentRuntime: SceneEnvironmentRuntime;
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
@@ -546,6 +552,8 @@ export class SceneRuntime {
   private entityArrayPreview: EntityArrayPreviewEntry | null = null;
   private groupTranslationPreview: EntityGroupTranslationPreview | null = null;
   private pendingGroupTranslationDelta: Vector3Data | null = null;
+  private groupRotationPreview: EntityGroupRotationPreview | null = null;
+  private pendingGroupRotationMatrix: number[] | null = null;
   private modelLoadSequence = 0;
 
   constructor(
@@ -557,6 +565,7 @@ export class SceneRuntime {
     this.modelSelectionOutlineLayer = new SelectionOutlineLayer('EditorModelSelectionOutlineLayer', scene);
     this.modelSelectionOutlineLayer.outlineColor = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
+    this.shadowRuntime = new SceneShadowRuntime(scene);
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
       loadAssetContainer: (rootUrl, fileName, signal) => this.loadAssetContainer(rootUrl, fileName, signal),
@@ -564,8 +573,9 @@ export class SceneRuntime {
       pushLog: this.pushLog,
     });
     this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(scene, this.createSpecializedTelemetryHost());
-    this.groupTranslationPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
+    this.groupTransformPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
       this.flushGroupTranslationPreview();
+      this.flushGroupRotationPreview();
     });
     this.modelArrayVariantRenderSuppressionObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
       this.suppressPendingModelArrayVariantHostsForRender();
@@ -911,7 +921,7 @@ export class SceneRuntime {
     );
   }
 
-  /** 在全部文件夹成员世界包围盒中心创建或更新不可见移动代理。 */
+  /** 在全部文件夹成员世界包围盒中心创建或更新不可见变换代理。 */
   getFolderGroupGizmoTarget(folderId: string, entityIds: readonly string[]): TransformNode | null {
     const uniqueEntityIds = [...new Set(entityIds)].filter((entityId) => Boolean(entityId));
     const bounds = uniqueEntityIds.length > 0 ? this.getEntitiesWorldBounds(uniqueEntityIds) : null;
@@ -927,7 +937,7 @@ export class SceneRuntime {
       proxy = {
         folderId,
         entityIds: uniqueEntityIds,
-        node: new TransformNode('__folderGroupTranslateGizmoProxy', this.scene),
+        node: new TransformNode('__folderGroupTransformGizmoProxy', this.scene),
       };
       this.folderGroupGizmoProxy = proxy;
     }
@@ -944,7 +954,7 @@ export class SceneRuntime {
 
   /** 隐藏文件夹组代理并取消任何尚未提交的运行时预览。 */
   clearFolderGroupGizmoTarget(): void {
-    this.cancelFolderGroupTranslation();
+    this.cancelFolderGroupTransforms();
     this.folderGroupGizmoProxy?.node.setEnabled(false);
   }
 
@@ -954,7 +964,7 @@ export class SceneRuntime {
     beforePositions: Readonly<Record<string, Vector3Data>>,
   ): boolean {
     if (this.telemetryPreviewActive) return false;
-    this.cancelFolderGroupTranslation();
+    this.cancelFolderGroupTransforms();
 
     const validEntityIds = [...new Set(entityIds)].filter((entityId) => {
       const position = beforePositions[entityId];
@@ -1016,6 +1026,83 @@ export class SceneRuntime {
     preview.finish();
   }
 
+  /** 建立文件夹组运行时旋转会话；最终 Transform 对全部成员计算，未加载成员也可随提交写回。 */
+  beginFolderGroupRotation(
+    entityIds: readonly string[],
+    beforeTransforms: Readonly<Record<string, TransformComponent>>,
+  ): boolean {
+    if (this.telemetryPreviewActive) return false;
+    this.cancelFolderGroupTransforms();
+
+    this.groupRotationPreview = new EntityGroupRotationPreview(
+      entityIds,
+      beforeTransforms,
+      (entityId) => this.resolveGroupRotationTarget(entityId),
+    );
+    this.pendingGroupRotationMatrix = null;
+    if (this.groupRotationPreview.refresh()) return true;
+
+    this.groupRotationPreview.cancel();
+    this.groupRotationPreview = null;
+    return false;
+  }
+
+  /** 记录最新绝对世界增量矩阵，并在下一次 active-mesh 评估前合并为一次运行时更新。 */
+  updateFolderGroupRotation(deltaMatrix: readonly number[]): boolean {
+    if (
+      !this.groupRotationPreview
+      || deltaMatrix.length !== 16
+      || !deltaMatrix.every(Number.isFinite)
+    ) return false;
+
+    this.pendingGroupRotationMatrix = [...deltaMatrix];
+    return true;
+  }
+
+  /** 返回当前旋转会话为全部成员计算出的最终 Transform。 */
+  getFolderGroupRotationTransforms(): Record<string, TransformComponent> | null {
+    this.flushGroupRotationPreview();
+    return this.groupRotationPreview?.getTransforms() ?? null;
+  }
+
+  /** 取消整组旋转预览并恢复普通节点与 thinInstance 完整矩阵基线。 */
+  cancelFolderGroupRotation(): void {
+    const preview = this.groupRotationPreview;
+    if (!preview) return;
+
+    this.pendingGroupRotationMatrix = null;
+    this.groupRotationPreview = null;
+    preview.cancel();
+    this.refreshFolderGroupGizmoProxyPosition();
+  }
+
+  /** 完成整组旋转预览并保留当前画面，等待场景文档同步权威 Transform。 */
+  finishFolderGroupRotation(): void {
+    const preview = this.groupRotationPreview;
+    if (!preview) return;
+
+    this.flushGroupRotationPreview();
+    this.groupRotationPreview = null;
+    this.pendingGroupRotationMatrix = null;
+    preview.finish();
+  }
+
+  /** 把同一渲染帧内最后一次旋转矩阵应用到轻量预览会话。 */
+  private flushGroupRotationPreview(): void {
+    const preview = this.groupRotationPreview;
+    const deltaMatrix = this.pendingGroupRotationMatrix;
+    if (!preview || !deltaMatrix) return;
+
+    this.pendingGroupRotationMatrix = null;
+    preview.update(deltaMatrix);
+  }
+
+  /** 同时取消文件夹平移和旋转会话，供选区/文档/运行模式切换统一清理。 */
+  private cancelFolderGroupTransforms(): void {
+    this.cancelFolderGroupTranslation();
+    this.cancelFolderGroupRotation();
+  }
+
   /** 把同一渲染帧内最后一次拖拽 delta 应用到轻量预览会话。 */
   private flushGroupTranslationPreview(): void {
     const preview = this.groupTranslationPreview;
@@ -1026,13 +1113,15 @@ export class SceneRuntime {
     preview.update(delta);
   }
 
-  /** 异步模型或批次就绪后重新解析目标，并保持上一帧已应用的绝对位移。 */
-  private refreshGroupTranslationPreviewTargets(): void {
-    const preview = this.groupTranslationPreview;
-    preview?.refresh();
-    // 活动拖动期间代理位置由 PointerDragBehavior 权威控制；异步几何只接入预览目标，
-    // 否则包围盒中心变化会被误算进相对 drag delta。
-    if (!preview) this.refreshFolderGroupGizmoProxyPosition();
+  /** 异步模型或批次就绪后重新解析群组变换目标，并保持上一帧已应用的绝对结果。 */
+  private refreshGroupTransformPreviewTargets(): void {
+    const translationPreview = this.groupTranslationPreview;
+    const rotationPreview = this.groupRotationPreview;
+    translationPreview?.refresh();
+    rotationPreview?.refresh();
+    // 活动拖动期间代理位姿由 Gizmo 权威控制；异步几何只接入预览目标，
+    // 否则包围盒中心变化会被误算进相对 delta。
+    if (!translationPreview && !rotationPreview) this.refreshFolderGroupGizmoProxyPosition();
   }
 
   /** 运行时基线恢复后把组代理放回当前成员世界包围盒中心。 */
@@ -1047,6 +1136,9 @@ export class SceneRuntime {
     }
     proxy.node.setEnabled(true);
     proxy.node.position.copyFromFloats(bounds.center.x, bounds.center.y, bounds.center.z);
+    proxy.node.rotationQuaternion = null;
+    proxy.node.rotation.copyFromFloats(0, 0, 0);
+    proxy.node.scaling.copyFromFloats(1, 1, 1);
     proxy.node.computeWorldMatrix(true);
   }
 
@@ -1084,6 +1176,58 @@ export class SceneRuntime {
       identity: light,
       setPosition: (position) => this.applyGroupTranslationLightPosition(light, position),
     };
+  }
+
+  /** 将逻辑实体解析为普通完整 Transform 目标或共享 thinInstance 旋转批次目标。 */
+  private resolveGroupRotationTarget(entityId: string): EntityGroupRotationTarget | null {
+    const batch = this.resolveModelArrayBatchForEntityId(entityId);
+    if (batch) return { kind: 'batch', batch };
+
+    const node = (
+      this.meshes.get(entityId)
+      ?? this.skyboxRuntime.getMesh(entityId)
+      ?? this.locators.get(entityId)?.root
+      ?? this.cadReferences.get(entityId)?.root
+      ?? this.models.get(entityId)?.root
+      ?? this.modelGenerators.get(entityId)?.markerRoot
+      ?? this.poiEffectRuntime.getGizmoTarget(entityId)
+      ?? null
+    );
+    if (node && !node.isDisposed()) {
+      return {
+        kind: 'transform',
+        identity: node,
+        setTransform: (transform) => {
+          if (node.isDisposed()) return;
+          this.applyTransform(node, transform);
+          node.computeWorldMatrix(true);
+        },
+      };
+    }
+
+    const light = this.lights.get(entityId);
+    if (!light || light.isDisposed()) return null;
+    return {
+      kind: 'transform',
+      identity: light,
+      setTransform: (transform) => this.applyGroupRotationLightTransform(light, transform),
+    };
+  }
+
+  /** 灯光旋转预览复用正式同步语义，方向光同时更新世界位置和方向。 */
+  private applyGroupRotationLightTransform(light: Light, transform: TransformComponent): void {
+    if (light instanceof HemisphericLight) {
+      light.direction.copyFrom(this.vectorFromTransformPosition(transform, new Vector3(0, 1, 0)));
+      return;
+    }
+    if (light instanceof DirectionalLight) {
+      light.position.copyFrom(this.vectorFromTransformPosition(transform, Vector3.Zero()));
+      light.direction.copyFrom(this.directionFromRotation(transform));
+      return;
+    }
+    if (light instanceof PointLight) {
+      light.position.copyFrom(this.vectorFromTransformPosition(transform, Vector3.Zero()));
+    }
   }
 
   /** 灯光预览复用正式同步语义：半球光位置字段表示方向，其余灯光表示世界位置。 */
@@ -1564,11 +1708,24 @@ export class SceneRuntime {
     return null;
   }
 
-  /** 导入模型优先汇总子网格包围盒，加载中则回退到模型根节点位置。 */
+  /** 检查 Mesh 自身和模型内部祖先；实体根可能因显隐或矩阵批次被禁用，不作为几何失效依据。 */
+  private isModelBoundsMesh(model: ModelRuntimeEntry, mesh: AbstractMesh): boolean {
+    if (!isMeasurableModelMesh(mesh)) return false;
+
+    let ancestor = mesh.parent;
+    while (ancestor && ancestor !== model.root) {
+      if (!ancestor.isEnabled(false)) return false;
+      ancestor = ancestor.parent;
+    }
+    return ancestor === model.root;
+  }
+
+  /** 导入模型只汇总内部层级有效且有顶点的子网格包围盒，加载中则回退到模型根节点位置。 */
   private getModelWorldBounds(model: ModelRuntimeEntry): RuntimeWorldBounds | null {
     let mergedBounds: RuntimeWorldBounds | null = null;
 
     for (const mesh of model.meshes) {
+      if (!this.isModelBoundsMesh(model, mesh)) continue;
       const bounds = getMeshWorldBounds(mesh);
       if (!bounds) continue;
       mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
@@ -1600,7 +1757,7 @@ export class SceneRuntime {
     const targetWorldMatrix = this.createEntityTransformMatrix(entity.components.transform);
     const points: Vector3[] = [];
     for (const mesh of sourceModel.meshes) {
-      if (!isMeasurableModelMesh(mesh)) continue;
+      if (!this.isModelBoundsMesh(sourceModel, mesh)) continue;
       mesh.computeWorldMatrix(true);
       const meshWorldMatrix = mesh.getWorldMatrix().clone();
       const hasThinInstances = mesh instanceof Mesh && mesh.thinInstanceCount > 0;
@@ -1717,7 +1874,7 @@ export class SceneRuntime {
 
   /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
   sync(document: SceneDocument): void {
-    this.cancelFolderGroupTranslation();
+    this.cancelFolderGroupTransforms();
     const startedAt = readRuntimeTimestampMs();
     try {
       this.syncDocument(document);
@@ -1734,7 +1891,7 @@ export class SceneRuntime {
    * 因此这里不重建层级状态、组件 ID 集合或 Locator 索引，只刷新目标及其所属矩阵源。
    */
   syncModelParameters(document: SceneDocument, entityId: string): void {
-    this.cancelFolderGroupTranslation();
+    this.cancelFolderGroupTransforms();
     const entity = document.entities[entityId];
     const previousEntity = this.syncedEntities.get(entityId);
     if (!entity?.components.modelAsset || !previousEntity?.components.modelAsset) {
@@ -1761,7 +1918,7 @@ export class SceneRuntime {
    * 不重新扫描 entityIds、加载模型、执行参数脚本或重建 Locator 索引。
    */
   syncSelection(document: SceneDocument): void {
-    this.cancelFolderGroupTranslation();
+    this.cancelFolderGroupTransforms();
     const startedAt = readRuntimeTimestampMs();
     let changedEntityCount = 0;
     try {
@@ -2180,7 +2337,7 @@ export class SceneRuntime {
 
   dispose(): void {
     this.clearEntityArrayPreview();
-    this.cancelFolderGroupTranslation();
+    this.cancelFolderGroupTransforms();
     this.folderGroupGizmoProxy?.node.dispose(false, false);
     this.folderGroupGizmoProxy = null;
     this.modelArrayGizmoProxy?.node.dispose(false, false);
@@ -2190,8 +2347,8 @@ export class SceneRuntime {
     if (this.telemetryObserver) {
       this.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
     }
-    if (this.groupTranslationPreviewObserver) {
-      this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.groupTranslationPreviewObserver);
+    if (this.groupTransformPreviewObserver) {
+      this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.groupTransformPreviewObserver);
     }
     if (this.modelArrayVariantRenderSuppressionObserver) {
       this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.modelArrayVariantRenderSuppressionObserver);
@@ -2228,6 +2385,7 @@ export class SceneRuntime {
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
     }
+    this.shadowRuntime.dispose();
     this.skyboxRuntime.dispose();
     this.sharedModelAssetCache.dispose();
     this.modelSelectionOutlineLayer.dispose();
@@ -2740,7 +2898,7 @@ export class SceneRuntime {
         this.applyModelInteractivity(activeEntry, latestEntity.id);
         this.rebuildModelSelectionOutline();
         this.syncConveyorTrajectory(latestEntity, activeEntry);
-        this.refreshGroupTranslationPreviewTargets();
+        this.refreshGroupTransformPreviewTargets();
       })
       .catch((error) => {
         const activeEntry = this.models.get(entity.id);
@@ -3082,6 +3240,7 @@ export class SceneRuntime {
       this.lights.set(entity.id, light);
     }
 
+    this.shadowRuntime.syncLight(entity.id, light);
     light.intensity = lightComponent.intensity;
     light.setEnabled(this.isEntityVisible(entity.id));
 
@@ -4019,6 +4178,7 @@ export class SceneRuntime {
   }
 
   private disposeLight(entityId: string, light: Light): void {
+    this.shadowRuntime.removeLight(entityId);
     light.dispose();
     this.lights.delete(entityId);
   }
@@ -4231,7 +4391,7 @@ export class SceneRuntime {
     cadReference.geometryReady = cadReference.lineMeshes.length > 0;
     this.applyCadReferenceLineMeshStyle(cadReference);
     this.applyCadReferenceInteractivity(cadReference, entityId);
-    this.refreshGroupTranslationPreviewTargets();
+    this.refreshGroupTransformPreviewTargets();
   }
 
   /** 判断当前 CAD 分批任务是否仍属于场景中的有效加载记录。 */
@@ -4457,7 +4617,7 @@ export class SceneRuntime {
       this.onModelMeasurementChanged(latestEntity.id);
       this.syncConveyorTrajectory(latestEntity, current);
       this.refreshBuiltInSlotBindings(latestEntity.id);
-      this.refreshGroupTranslationPreviewTargets();
+      this.refreshGroupTransformPreviewTargets();
     });
   }
 
@@ -5230,7 +5390,7 @@ export class SceneRuntime {
         // 参数值变化未改变当前批次成员、Transform、显隐或拾取状态，复用既有 GPU 矩阵缓冲。
         model.modelArrayFailureSignature = '';
         this.suspendModelArrayHost(model);
-        this.refreshGroupTranslationPreviewTargets();
+        this.refreshGroupTransformPreviewTargets();
         return;
       }
     }
@@ -5316,7 +5476,7 @@ export class SceneRuntime {
     }
     model.modelArrayFailureSignature = '';
     this.suspendModelArrayHost(model);
-    this.refreshGroupTranslationPreviewTargets();
+    this.refreshGroupTransformPreviewTargets();
   }
 
   private disposeMissingModelArrayParameterVariants(sourceEntityId: string, activeKeys: ReadonlySet<string>): void {
@@ -5393,7 +5553,7 @@ export class SceneRuntime {
     model.modelArrayBatch = null;
     model.modelArraySourceSignature = '';
     this.disposeModelArrayBatchResources(modelArrayBatch);
-    this.refreshGroupTranslationPreviewTargets();
+    this.refreshGroupTransformPreviewTargets();
   }
 
   /** 同步模型资产脚本生命周期，普通模型和生成模型共享同一份受控实现。 */

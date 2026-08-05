@@ -16,6 +16,7 @@ import {
   sanitizeSceneSettings,
   sanitizeSceneSkybox,
   sanitizeSceneViewDistance,
+  isSceneCameraOrientation,
   SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   type MqttConfig,
   type SceneCameraOrientation,
@@ -306,7 +307,7 @@ function normalizeSceneCameraPose(value: unknown): SceneSettings['camera']['save
 
 function normalizeSceneCameraOrientation(value: unknown): SceneCameraOrientation {
   if (value === undefined) return SCENE_CAMERA_ORIENTATION_DEFAULT;
-  if (value === 'orbit' || value === 'top') return value;
+  if (isSceneCameraOrientation(value)) return value;
   throwUnsupportedSceneFileError();
 }
 

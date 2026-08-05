@@ -1,0 +1,185 @@
+.viewport-orientation-compass {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  width: 104px;
+  height: 104px;
+  color: #e7f2fa;
+  filter: drop-shadow(0 5px 12px rgb(0 0 0 / 48%));
+  pointer-events: none;
+  user-select: none;
+}
+
+.viewport-orientation-compass.compact {
+  width: 80px;
+  height: 84px;
+}
+
+.viewport-orientation-compass.disabled {
+  opacity: 0.42;
+}
+
+.viewport-orientation-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.viewport-orientation-lock-status {
+  position: absolute;
+  top: 2px;
+  right: calc(100% + 5px);
+  z-index: 2;
+  min-width: 28px;
+  padding: 2px 5px;
+  border: 1px solid rgb(126 202 255 / 62%);
+  border-radius: 999px;
+  color: #dff4ff;
+  background: rgb(16 31 43 / 88%);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.viewport-orientation-face {
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.viewport-orientation-face polygon {
+  --face-light: 0.5;
+  fill: #344654;
+  opacity: calc(0.5 + var(--face-light) * 0.42);
+  stroke: rgb(174 205 224 / 70%);
+  stroke-linejoin: round;
+  stroke-width: 0.8;
+  transition: fill 100ms ease, stroke 100ms ease;
+}
+
+.viewport-orientation-face:hover polygon {
+  fill: #40677e;
+  stroke: #bce9ff;
+  stroke-width: 1.4;
+}
+
+.viewport-orientation-face.active polygon {
+  fill: #276b92;
+  stroke: #8bd5ff;
+  stroke-width: 1.8;
+}
+
+.viewport-orientation-face text {
+  fill: #edf8ff;
+  font-size: 9px;
+  font-weight: 750;
+  pointer-events: none;
+  text-anchor: middle;
+}
+
+.viewport-orientation-axis-line {
+  stroke: var(--axis-color);
+  stroke-linecap: round;
+  stroke-width: 1.7;
+  opacity: 0.86;
+}
+
+.viewport-orientation-axis-line.rear {
+  stroke-dasharray: 2 2;
+  opacity: 0.32;
+}
+
+.viewport-orientation-axis-action {
+  color: var(--axis-color);
+  cursor: pointer;
+  outline: none;
+  pointer-events: auto;
+}
+
+.viewport-orientation-axis-hit {
+  fill: transparent;
+  stroke: transparent;
+  stroke-width: 1.8;
+}
+
+.viewport-orientation-axis-dot {
+  fill: var(--axis-color);
+  stroke: rgb(15 21 27 / 92%);
+  stroke-width: 1.1;
+}
+
+.viewport-orientation-axis-action.rear .viewport-orientation-axis-dot {
+  fill: rgb(24 31 38 / 92%);
+  stroke: var(--axis-color);
+  opacity: 0.68;
+}
+
+.viewport-orientation-axis-label {
+  fill: #f4fbff;
+  font-size: 6.5px;
+  font-weight: 800;
+  pointer-events: none;
+  text-anchor: middle;
+}
+
+.viewport-orientation-axis-action.rear .viewport-orientation-axis-label {
+  opacity: 0.58;
+}
+
+.viewport-orientation-axis-action:hover .viewport-orientation-axis-hit,
+.viewport-orientation-axis-action:focus-visible .viewport-orientation-axis-hit,
+.viewport-orientation-axis-action.active .viewport-orientation-axis-hit {
+  fill: rgb(117 199 255 / 12%);
+  stroke: #a9e3ff;
+}
+
+.viewport-orientation-axis-action.active .viewport-orientation-axis-dot {
+  filter: drop-shadow(0 0 3px var(--axis-color));
+  stroke: #e7f8ff;
+  stroke-width: 1.7;
+}
+
+.viewport-orientation-home {
+  position: absolute;
+  right: 50%;
+  bottom: 0;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  transform: translateX(50%);
+  border: 1px solid rgb(143 194 226 / 66%);
+  border-radius: 4px;
+  color: #e8f7ff;
+  background: rgb(20 34 45 / 90%);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 20px;
+  pointer-events: auto;
+}
+
+.viewport-orientation-home:hover,
+.viewport-orientation-home:focus-visible {
+  border-color: #9edcff;
+  background: rgb(35 76 101 / 96%);
+  outline: none;
+}
+
+.viewport-orientation-home:disabled {
+  cursor: default;
+}
+
+.viewport-orientation-compass.compact .viewport-orientation-lock-status {
+  font-size: 9px;
+  line-height: 12px;
+}
+
+.viewport-orientation-compass.compact .viewport-orientation-home {
+  width: 23px;
+  height: 19px;
+  font-size: 13px;
+  line-height: 17px;
+}

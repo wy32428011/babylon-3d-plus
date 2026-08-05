@@ -240,9 +240,6 @@ test('独立 Viewer 导出会收集和改写天空盒，并接受编辑器当前
   assert.match(source, /rewriteSkyboxReferences/);
   assert.match(source, /sceneFile.version !== 1 && sceneFile.version !== 2 && sceneFile.version !== 3/);
 
-  const projectPanelSource = readFileSync('src/editor/panels/ProjectPanel.tsx', 'utf8');
-  assert.match(projectPanelSource, /activeLibrary.key === 'model'[\s\S]*createSkyboxLibraryItems\(skyboxAssets\)/);
-
   const sceneViewSource = readFileSync('src/editor/panels/SceneViewPanel.tsx', 'utf8');
   assert.match(sceneViewSource, /SKYBOX_ASSET_DRAG_MIME_TYPE/);
   assert.match(

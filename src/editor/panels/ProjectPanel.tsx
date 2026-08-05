@@ -125,7 +125,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
     if (activeLibrary.key === 'model') {
       return [
         ...createModelLibraryItems(modelAssets),
-        ...createSkyboxLibraryItems(skyboxAssets),
         ...BUILT_IN_MODEL_LIBRARY_ITEMS,
       ];
     }
@@ -755,8 +754,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
           e.currentTarget.scrollLeft += e.deltaY;
         }}
       >
-        {activeLibrary.key === 'model' && modelAssets.length === 0 && skyboxAssets.length === 0 ? (
-          <p className="library-empty-state">尚未导入普通模型包或天空盒</p>
+        {activeLibrary.key === 'model' && modelAssets.length === 0 ? (
+          <p className="library-empty-state">尚未导入普通模型包</p>
         ) : null}
         {activeLibrary.key === 'environment' && environmentAssets.length === 0 ? (
           <p className="library-empty-state">请先导入环境 GLB 文件</p>

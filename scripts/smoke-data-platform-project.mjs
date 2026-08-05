@@ -832,6 +832,12 @@ async function run() {
     assert.equal(localSceneAssets.assets.length, 4);
     assert.equal(localSceneAssets.assets.filter((item) => item.libraryKind === 'model').length, 3);
     assert.equal(localSceneAssets.assets.filter((item) => item.libraryKind === 'environment').length, 1);
+    const syncedEnvironmentAsset = localSceneAssets.assets.find((item) => (
+      item.libraryKind === 'environment' && item.packagePath?.includes(`Env-${ENVIRONMENT_MODEL_ID}-`)
+    ));
+    assert.ok(syncedEnvironmentAsset, '同步后的环境模型资产必须存在。');
+    assert.equal(syncedEnvironmentAsset.lengthUnit, 'centimeter');
+    assert.equal(syncedEnvironmentAsset.unitScaleToMeters, 0.01);
     const syncedGlobalAsset = localSceneAssets.assets.find((item) => (
       item.libraryKind === 'model' && item.packagePath?.includes(`Model-${GLOBAL_MODEL_ID}-`)
     ));

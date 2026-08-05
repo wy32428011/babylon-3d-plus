@@ -1,3 +1,4 @@
+import type { TransformComponent } from './components';
 import type { Entity } from './Entity';
 import type { Vector3Data } from './math';
 import type { SceneDocument } from './SceneDocument';
@@ -12,6 +13,7 @@ export type FolderGroupMoveReadySelection = {
   folderId: string;
   entityIds: string[];
   beforePositions: Record<string, Vector3Data>;
+  beforeTransforms: Record<string, TransformComponent>;
 };
 
 export type FolderGroupMoveSelection = FolderGroupMoveReadySelection | {
@@ -116,11 +118,19 @@ export function resolveFolderGroupMoveSelection(
     return { status: 'empty', folderId, entityIds, lockedEntityIds: [] };
   }
 
-  const beforePositions = Object.fromEntries(entityIds.map((entityId) => {
-    const position = scene.entities[entityId].components.transform.position;
-    return [entityId, { x: position.x, y: position.y, z: position.z }];
+  const beforeTransforms = Object.fromEntries(entityIds.map((entityId) => {
+    const transform = scene.entities[entityId].components.transform;
+    return [entityId, {
+      position: { ...transform.position },
+      rotation: { ...transform.rotation },
+      scale: { ...transform.scale },
+    }];
   }));
-  return { status: 'ready', folderId, entityIds, beforePositions };
+  const beforePositions = Object.fromEntries(entityIds.map((entityId) => [
+    entityId,
+    { ...beforeTransforms[entityId].position },
+  ]));
+  return { status: 'ready', folderId, entityIds, beforePositions, beforeTransforms };
 }
 
 /** 判断 ancestorId 是否位于 entityId 的父级链上。 */

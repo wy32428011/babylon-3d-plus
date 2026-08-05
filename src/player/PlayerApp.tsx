@@ -13,6 +13,11 @@ import {
   type DigitalTwinProjectRuntimeConfig,
   type PlayerRuntimeConfig,
 } from './runtimeConfig';
+import {
+  bindStatusOverlayPointerChordToggle,
+  resolveInitialPlayerStatusOverlayVisibility,
+  shouldShowPlayerStatusOverlay,
+} from './statusOverlayControls';
 import './player.css';
 
 type PlayerPhase = 'loading' | 'ready' | 'blocked';
@@ -92,6 +97,9 @@ export function PlayerApp() {
   const [phase, setPhase] = useState<PlayerPhase>('loading');
   const [message, setMessage] = useState('场景加载中...');
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
+  const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
+  const [environmentRuntimeIssue, setEnvironmentRuntimeIssue] = useState(false);
+  const [statusOverlayVisible, setStatusOverlayVisible] = useState(false);
   const [config, setConfig] = useState<PlayerRuntimeConfig | null>(null);
   const mqttStatus = useSyncExternalStore(
     mqttRuntimeStatusStore.subscribe,
@@ -113,7 +121,9 @@ export function PlayerApp() {
     /** 处理 WebGL 丢失和渲染异常，恢复事件只清除对应运行时阻断。 */
     const handleRuntimeStatus = (status: BabylonViewportRuntimeStatus): void => {
       if (disposed) return;
-      setRuntimeMessage(status.type === 'context-restored' || status.type === 'render-recovered' ? null : status.message);
+      const recovered = status.type === 'context-restored' || status.type === 'render-recovered';
+      setViewportRuntimeIssue(!recovered);
+      setRuntimeMessage(recovered ? null : status.message);
     };
 
     /** 按部署契约顺序启动 Viewer，manifest 必须先于场景反序列化安装。 */
@@ -126,6 +136,10 @@ export function PlayerApp() {
         if (disposed) return;
         document.title = parsedConfig.page.title;
         setConfig(parsedConfig);
+        setStatusOverlayVisible(resolveInitialPlayerStatusOverlayVisibility(
+          parsedConfig.viewer.showStatusOverlay,
+          Boolean(parsedConfig.digitalTwin),
+        ));
         setMessage(parsedConfig.page.loadingText);
 
         const assetBaseUrl = new URL(parsedConfig.paths.assetBase, document.baseURI);
@@ -151,7 +165,10 @@ export function PlayerApp() {
         applySceneBackground(viewport, parsedConfig.page.backgroundColor);
         viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
         viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
-        applySavedSceneCameraView(viewport, sceneDocument.sceneSettings.camera);
+        applySavedSceneCameraView(viewport, sceneDocument.sceneSettings.camera, {
+          animate: false,
+          lockStandardOrientation: false,
+        });
 
         runtime = new SceneRuntime(
           viewport.scene,
@@ -162,9 +179,16 @@ export function PlayerApp() {
           undefined,
           (snapshot) => {
             if (disposed) return;
-            if (snapshot.phase === 'loading') setRuntimeMessage(snapshot.message || '环境模型正在加载...');
-            else if (snapshot.phase === 'error') setRuntimeMessage(`环境模型加载失败：${snapshot.message || '未知错误'}`);
-            else if (snapshot.phase === 'ready') setRuntimeMessage(null);
+            if (snapshot.phase === 'loading') {
+              setEnvironmentRuntimeIssue(false);
+              setRuntimeMessage(snapshot.message || '环境模型正在加载...');
+            } else if (snapshot.phase === 'error') {
+              setEnvironmentRuntimeIssue(true);
+              setRuntimeMessage(`环境模型加载失败：${snapshot.message || '未知错误'}`);
+            } else if (snapshot.phase === 'ready') {
+              setEnvironmentRuntimeIssue(false);
+              setRuntimeMessage(null);
+            }
           },
         );
         runtime.sync(sceneDocument);
@@ -207,8 +231,22 @@ export function PlayerApp() {
     };
   }, []);
 
+  const isDigitalTwin = Boolean(config?.digitalTwin);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || phase !== 'ready' || !isDigitalTwin) return;
+
+    return bindStatusOverlayPointerChordToggle(canvas, window, () => {
+      setStatusOverlayVisible((visible) => !visible);
+    });
+  }, [isDigitalTwin, phase]);
+
   const backgroundColor = config?.page.backgroundColor ?? '#141414';
-  const showOverlay = phase !== 'ready' || Boolean(runtimeMessage) || Boolean(mqttStatus.lastError) || config?.viewer.showStatusOverlay;
+  const showOverlay = shouldShowPlayerStatusOverlay(
+    phase,
+    statusOverlayVisible,
+    viewportRuntimeIssue || environmentRuntimeIssue || Boolean(mqttStatus.lastError),
+  );
 
   return (
     <main className="player-root" style={{ backgroundColor }}>

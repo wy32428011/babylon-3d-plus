@@ -682,7 +682,7 @@ select {
 
 .scene-preview-badge {
   position: absolute;
-  top: 10px;
+  top: 122px;
   right: 10px;
   z-index: 2;
   padding: 4px 9px;
@@ -697,7 +697,7 @@ select {
 
 .scene-environment-adjustment-badge {
   position: absolute;
-  top: 10px;
+  top: 122px;
   right: 10px;
   z-index: 2;
   padding: 4px 9px;
@@ -714,6 +714,7 @@ select {
 .scene-error {
   position: absolute;
   inset: 0;
+  z-index: 5;
   display: grid;
   align-content: center;
   justify-items: center;
