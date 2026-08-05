@@ -6,6 +6,7 @@ import {
   DIGITAL_TWIN_CAMERA_CONTROL_STANDARD,
   type DigitalTwinCameraPose,
   applyDigitalTwinCameraControlStandard,
+  attachDigitalTwinCameraControl,
   applyDigitalTwinCameraSensitivity,
   clampDigitalTwinCameraRadius,
   hasDigitalTwinCameraPoseChanged,
@@ -57,6 +58,35 @@ test('数字孪生保留原有右键旋转、中键平移、Ctrl+左键平移和
     );
     assert.equal(fixture.camera.movement.input.resolveInteraction('pointer', { button: 1 })?.interaction, 'pan');
     assert.equal(fixture.camera.movement.input.resolveInteraction('pointer', { button: 2 })?.interaction, 'rotate');
+  } finally {
+    disposeCamera(fixture);
+  }
+});
+
+test('Babylon 相机控制重新绑定后，中键拖拽仍会产生平移输入', () => {
+  const fixture = createCamera();
+  try {
+    const sensitivity = { zoom: 10, pan: 10, rotate: 10 };
+    attachDigitalTwinCameraControl(fixture.camera, sensitivity);
+    fixture.camera.detachControl();
+    attachDigitalTwinCameraControl(fixture.camera, sensitivity);
+
+    assert.equal(fixture.camera.movement.input.resolveInteraction('pointer', { button: 1 })?.interaction, 'pan');
+    assert.equal(fixture.camera.movement.input.resolveInteraction('pointer', { button: 2 })?.interaction, 'rotate');
+    assert.equal(fixture.camera.movement.input.getEntries('pointer', 'pan').length, 2);
+
+    const pointerInput = fixture.camera.inputs.attached.pointers as unknown as {
+      onButtonDown: (event: { button: number; ctrlKey: boolean; altKey: boolean; shiftKey: boolean }) => void;
+      onTouch: (point: null, offsetX: number, offsetY: number) => void;
+      onButtonUp: (event: unknown) => void;
+    };
+    assert.ok(pointerInput, 'ArcRotateCamera 必须启用指针输入');
+    pointerInput.onButtonDown({ button: 1, ctrlKey: false, altKey: false, shiftKey: false });
+    pointerInput.onTouch(null, 12, 8);
+    pointerInput.onButtonUp({});
+
+    assert.deepEqual(fixture.camera.movement.panAccumulatedPixels.asArray(), [-12, 8, 0]);
+    assert.deepEqual(fixture.camera.movement.rotationAccumulatedPixels.asArray(), [0, 0, 0]);
   } finally {
     disposeCamera(fixture);
   }

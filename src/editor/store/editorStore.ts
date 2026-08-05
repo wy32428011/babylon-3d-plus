@@ -9,6 +9,8 @@ import {
 import {
   commitFolderGroupRotation as commitFolderGroupRotationState,
   commitFolderGroupTranslation as commitFolderGroupTranslationState,
+  commitHierarchyGroupRotation as commitHierarchyGroupRotationState,
+  commitHierarchyGroupTranslation as commitHierarchyGroupTranslationState,
   updateAutoPatrolCommand,
   createEntityCommand,
   createFolderCommand,
@@ -30,6 +32,8 @@ import {
   updateTransformCommand,
   type FolderGroupRotationInput,
   type FolderGroupTranslationInput,
+  type HierarchyGroupRotationInput,
+  type HierarchyGroupTranslationInput,
 } from '../commands/entityCommands';
 import {
   DEFAULT_EDITOR_GRID_SETTINGS,
@@ -70,7 +74,7 @@ import {
   getTopLevelHierarchyEntityIds,
   isEntityAncestorOf,
   isEntityEffectivelyLocked,
-  resolveSingleSelectedFolderId,
+  isHierarchyGroupTransformSelection,
 } from '../model/entityHierarchy';
 import { createArrayAssetNumber, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
 import {
@@ -263,6 +267,11 @@ export type SelectedModelMeasurement = ModelMeasurementResult & { entityId: stri
 type TransformField = 'position' | 'rotation' | 'scale';
 export type TransformTool = 'translate' | 'rotate' | 'scale';
 export type TransformSpace = 'local' | 'global';
+
+type GroupTransformModeRestore = {
+  tool: TransformTool;
+  space: TransformSpace;
+};
 export type TransformSnapSettingKey = 'position' | 'rotationDegrees' | 'scale';
 export type SceneSensitivitySettingKey = keyof SceneSensitivitySettings;
 
@@ -358,6 +367,7 @@ type EditorState = {
   logs: EditorLog[];
   transformTool: TransformTool;
   transformSpace: TransformSpace;
+  groupTransformModeRestore: GroupTransformModeRestore | null;
   snapSettings: TransformSnapSettings;
   gridSettings: EditorGridSettings;
   trajectoryVisible: boolean;
@@ -461,6 +471,8 @@ type EditorState = {
   commitEntityTransform: (entityId: string, before: TransformComponent, after: TransformComponent) => void;
   commitFolderGroupTranslation: (input: FolderGroupTranslationInput) => boolean;
   commitFolderGroupRotation: (input: FolderGroupRotationInput) => boolean;
+  commitHierarchyGroupTranslation: (input: HierarchyGroupTranslationInput) => boolean;
+  commitHierarchyGroupRotation: (input: HierarchyGroupRotationInput) => boolean;
   previewSelectedTransform: (transform: TransformComponent) => void;
   commitSelectedTransform: (before: TransformComponent, after: TransformComponent) => void;
   updateMqttConfig: (config: MqttConfig) => void;
@@ -525,6 +537,9 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     cameraOrientation: camera.savedOrientation,
     cameraProjection: camera.savedProjection,
     selectedModelMeasurement: null,
+    transformTool: state.groupTransformModeRestore?.tool ?? state.transformTool,
+    transformSpace: state.groupTransformModeRestore?.space ?? state.transformSpace,
+    groupTransformModeRestore: null,
     logs: prependLog(state.logs, message),
   };
 }
@@ -1112,24 +1127,37 @@ function sanitizeHierarchySelection(scene: SceneDocument, entityIds: string[]): 
   return [...new Set(entityIds)].filter((entityId) => Boolean(scene.entities[entityId]));
 }
 
-/** 单文件夹强制使用世界坐标；灯光与自动巡检按能力收敛 Gizmo 工具。 */
+/** 群组选区临时强制世界坐标移动/旋转，恢复单选时还原进入群组前的用户工具偏好。 */
 function resolveSelectionTransformMode(
-  state: Pick<EditorState, 'transformTool' | 'transformSpace'>,
+  state: Pick<EditorState, 'transformTool' | 'transformSpace' | 'groupTransformModeRestore'>,
   scene: SceneDocument,
   hierarchySelectionIds: readonly string[],
-): Pick<EditorState, 'transformTool' | 'transformSpace'> {
-  if (resolveSingleSelectedFolderId(scene, hierarchySelectionIds)) {
-    return { transformTool: 'translate', transformSpace: 'global' };
+): Pick<EditorState, 'transformTool' | 'transformSpace' | 'groupTransformModeRestore'> {
+  if (isHierarchyGroupTransformSelection(scene, hierarchySelectionIds)) {
+    return {
+      transformTool: state.transformTool === 'rotate' ? 'rotate' : 'translate',
+      transformSpace: 'global',
+      groupTransformModeRestore: state.groupTransformModeRestore ?? {
+        tool: state.transformTool,
+        space: state.transformSpace,
+      },
+    };
   }
 
+  const requestedTool = state.groupTransformModeRestore?.tool ?? state.transformTool;
+  const requestedSpace = state.groupTransformModeRestore?.space ?? state.transformSpace;
   const selectedEntity = scene.selectedEntityId ? scene.entities[scene.selectedEntityId] : null;
   const lightKind = selectedEntity?.components.light?.lightKind;
-  const transformTool = selectedEntity?.components.autoPatrol && state.transformTool === 'scale'
+  const transformTool = selectedEntity?.components.autoPatrol && requestedTool === 'scale'
     ? 'translate'
     : lightKind
-      ? resolveLightTransformTool(lightKind, state.transformTool)
-      : state.transformTool;
-  return { transformTool, transformSpace: state.transformSpace };
+      ? resolveLightTransformTool(lightKind, requestedTool)
+      : requestedTool;
+  return {
+    transformTool,
+    transformSpace: requestedSpace,
+    groupTransformModeRestore: null,
+  };
 }
 
 /** 根据当前场景生成不重名的新建文件夹名称。 */
@@ -2206,6 +2234,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   logs: [{ id: 'log_boot', message: '编辑器已启动。' }],
   transformTool: 'translate',
   transformSpace: 'local',
+  groupTransformModeRestore: null,
   snapSettings: DEFAULT_SNAP_SETTINGS,
   gridSettings: DEFAULT_EDITOR_GRID_SETTINGS,
   trajectoryVisible: false,
@@ -2263,12 +2292,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setTransformTool: (tool) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换变换工具');
-      const folderId = resolveSingleSelectedFolderId(state.scene, state.hierarchySelectionIds);
-      if (folderId && tool === 'scale') {
+      if (isHierarchyGroupTransformSelection(state.scene, state.hierarchySelectionIds)) {
+        const resolvedTool = tool === 'rotate' ? 'rotate' : 'translate';
+        if (tool === 'scale') {
+          return {
+            transformTool: resolvedTool,
+            transformSpace: 'global',
+            logs: prependLog(state.logs, '选区群组不支持缩放，已切回世界坐标移动工具。'),
+          };
+        }
+        if (state.transformTool === resolvedTool && state.transformSpace === 'global') return state;
         return {
-          transformTool: 'translate',
+          transformTool: resolvedTool,
           transformSpace: 'global',
-          logs: prependLog(state.logs, '文件夹整组不支持缩放，已切回世界坐标移动工具。'),
+          logs: prependLog(state.logs, `切换群组工具：${resolvedTool}`),
         };
       }
 
@@ -2283,7 +2320,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if ((selectedLightKind || patrolScaleUnsupported) && resolvedTool !== tool) {
         return {
           transformTool: resolvedTool,
-          transformSpace: folderId ? 'global' : state.transformSpace,
           logs: prependLog(
             state.logs,
             patrolScaleUnsupported
@@ -2292,11 +2328,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           ),
         };
       }
-      if (state.transformTool === resolvedTool && (!folderId || state.transformSpace === 'global')) return state;
+      if (state.transformTool === resolvedTool) return state;
 
       return {
         transformTool: resolvedTool,
-        transformSpace: folderId ? 'global' : state.transformSpace,
         logs: prependLog(state.logs, `切换工具：${resolvedTool}`),
       };
     });
@@ -2304,12 +2339,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setTransformSpace: (space) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换坐标空间');
-      const folderId = resolveSingleSelectedFolderId(state.scene, state.hierarchySelectionIds);
-      if (folderId && space !== 'global') {
+      if (isHierarchyGroupTransformSelection(state.scene, state.hierarchySelectionIds) && space !== 'global') {
         return {
           transformTool: state.transformTool === 'scale' ? 'translate' : state.transformTool,
           transformSpace: 'global',
-          logs: prependLog(state.logs, '文件夹整组移动和旋转仅支持世界坐标，已忽略局部坐标切换。'),
+          logs: prependLog(state.logs, '选区群组移动和旋转仅支持世界坐标，已忽略局部坐标切换。'),
         };
       }
       if (state.transformSpace === space) return state;
@@ -2668,9 +2702,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           : removeSkyboxEntitiesFromScene(scene)
       ));
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds);
       return {
         ...result,
-        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds),
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, nextSkybox ? '天空盒球体已更新。' : '天空盒球体已清除。'),
       };
     });
@@ -2693,9 +2729,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         return result.scene;
       });
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = targetEntityId ? [targetEntityId] : state.hierarchySelectionIds;
       return {
         ...result,
-        hierarchySelectionIds: targetEntityId ? [targetEntityId] : state.hierarchySelectionIds,
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, created ? '天空盒球体已创建。' : '天空盒球体已更新并选中。'),
       };
     });
@@ -3002,9 +3040,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建网格');
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -3016,9 +3056,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建定位器');
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -3064,9 +3106,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const entity = { ...baseEntity, name: createNextModelGeneratorName(state.scene) };
       const command = createEntityCommand(entity);
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -3079,9 +3123,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建 EFF 特效');
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -3132,9 +3178,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '导入模型');
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, `导入模型：${asset.name}`),
       };
     });
@@ -3232,10 +3280,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       set((state) => {
         const commandResult = executeCommand(state.scene, state.history, command);
+        const hierarchySelectionIds = [entity.id];
         return {
           ...commandResult,
           cadImportProgress: createCadImportProgress(importProgressId, 100, '导入完成', 'CAD 参考图已创建。', displayName),
-          hierarchySelectionIds: [entity.id],
+          hierarchySelectionIds,
+          ...resolveSelectionTransformMode(state, commandResult.scene, hierarchySelectionIds),
           logs: prependLog(
             state.logs,
             parseResult.budgetLimited
@@ -3307,7 +3357,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   selectHierarchyEntities: (entityIds, primaryEntityId) => {
     set((state) => {
       const hierarchySelectionIds = sanitizeHierarchySelection(state.scene, entityIds);
-      const selectedEntityId = primaryEntityId && state.scene.entities[primaryEntityId] ? primaryEntityId : hierarchySelectionIds[0] ?? null;
+      const selectedEntityId = primaryEntityId && hierarchySelectionIds.includes(primaryEntityId)
+        ? primaryEntityId
+        : hierarchySelectionIds[hierarchySelectionIds.length - 1] ?? null;
 
       const scene = {
         ...state.scene,
@@ -3766,10 +3818,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const command = updateSceneDocumentCommand('删除对象', (scene) => deleteEntitiesInScene(scene, deletingIds));
       const result = executeCommand(state.scene, state.history, command);
 
+      const hierarchySelectionIds = sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds);
       return {
         ...result,
-        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds),
+        hierarchySelectionIds,
         selectedAutoPatrolWaypointId: null,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, `${command.label}: ${deletingIds.length} 个对象`),
       };
     });
@@ -4249,6 +4303,62 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const result = commitFolderGroupRotationState(
+        state.scene,
+        state.history,
+        state.hierarchySelectionIds,
+        input,
+      );
+      committed = result.committed;
+      if (!result.committed) {
+        return { logs: prependLog(state.logs, result.message) };
+      }
+
+      return {
+        scene: result.scene,
+        history: result.history,
+        hierarchySelectionIds: state.hierarchySelectionIds,
+        selectedModelMeasurement: null,
+        logs: prependLog(state.logs, result.message),
+      };
+    });
+    return committed;
+  },
+  commitHierarchyGroupTranslation: (input) => {
+    let committed = false;
+    set((state) => {
+      if (isRuntimePreviewState(state)) {
+        return guardRuntimePreviewMutation(state, '移动选中对象');
+      }
+
+      const result = commitHierarchyGroupTranslationState(
+        state.scene,
+        state.history,
+        state.hierarchySelectionIds,
+        input,
+      );
+      committed = result.committed;
+      if (!result.committed) {
+        return { logs: prependLog(state.logs, result.message) };
+      }
+
+      return {
+        scene: result.scene,
+        history: result.history,
+        hierarchySelectionIds: state.hierarchySelectionIds,
+        selectedModelMeasurement: null,
+        logs: prependLog(state.logs, result.message),
+      };
+    });
+    return committed;
+  },
+  commitHierarchyGroupRotation: (input) => {
+    let committed = false;
+    set((state) => {
+      if (isRuntimePreviewState(state)) {
+        return guardRuntimePreviewMutation(state, '旋转选中对象');
+      }
+
+      const result = commitHierarchyGroupRotationState(
         state.scene,
         state.history,
         state.hierarchySelectionIds,

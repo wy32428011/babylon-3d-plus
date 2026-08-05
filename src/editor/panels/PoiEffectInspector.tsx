@@ -28,9 +28,9 @@ type NumberFieldConfig = {
 };
 
 const NUMBER_FIELDS: readonly NumberFieldConfig[] = [
-  { key: 'intensity', label: '强度', min: POI_EFFECT_INTENSITY_MIN, max: POI_EFFECT_INTENSITY_MAX, step: 0.1, commitLabel: '更新 POI 特效强度' },
-  { key: 'speed', label: '速度', min: POI_EFFECT_SPEED_MIN, max: POI_EFFECT_SPEED_MAX, step: 0.1, commitLabel: '更新 POI 特效速度' },
-  { key: 'density', label: '密度', min: POI_EFFECT_DENSITY_MIN, max: POI_EFFECT_DENSITY_MAX, step: 0.1, commitLabel: '更新 POI 特效密度' },
+  { key: 'intensity', label: '强度', min: POI_EFFECT_INTENSITY_MIN, max: POI_EFFECT_INTENSITY_MAX, step: 0.1, commitLabel: '更新特效强度' },
+  { key: 'speed', label: '速度', min: POI_EFFECT_SPEED_MIN, max: POI_EFFECT_SPEED_MAX, step: 0.1, commitLabel: '更新特效速度' },
+  { key: 'density', label: '密度', min: POI_EFFECT_DENSITY_MIN, max: POI_EFFECT_DENSITY_MAX, step: 0.1, commitLabel: '更新特效密度' },
 ];
 
 /** 将输入数值限制在特效参数允许范围内，避免 Inspector 写入运行时无法解释的值。 */
@@ -39,7 +39,7 @@ function clampEffectNumber(value: number, min: number, max: number, fallback: nu
   return Math.min(max, Math.max(min, value));
 }
 
-/** 渲染并编辑 POI 内置 EFF 的通用 Inspector 表单。 */
+/** 渲染并编辑内置 EFF 的通用 Inspector 表单。 */
 export function PoiEffectInspector({ component, disabled = false }: PoiEffectInspectorProps) {
   const updateSelectedPoiEffect = useEditorStore((state) => state.updateSelectedPoiEffect);
   const controlsDisabled = disabled;
@@ -53,22 +53,22 @@ export function PoiEffectInspector({ component, disabled = false }: PoiEffectIns
   /** 切换特效类型时应用该类型的默认颜色和数值参数。 */
   function handleKindChange(event: ChangeEvent<HTMLSelectElement>): void {
     const nextKind = event.target.value as PoiEffectKind;
-    commitComponent(createDefaultPoiEffectComponent(nextKind), '切换 POI 特效类型');
+    commitComponent(createDefaultPoiEffectComponent(nextKind), '切换特效类型');
   }
 
   /** 更新启用状态，不改变当前特效类型和其他参数。 */
   function handleEnabledChange(event: ChangeEvent<HTMLInputElement>): void {
-    commitComponent({ ...component, enabled: event.target.checked }, '切换 POI 特效启用状态');
+    commitComponent({ ...component, enabled: event.target.checked }, '切换特效启用状态');
   }
 
   /** 更新主颜色，颜色控件保证输出浏览器兼容的十六进制字符串。 */
   function handlePrimaryColorChange(event: ChangeEvent<HTMLInputElement>): void {
-    commitComponent({ ...component, primaryColor: event.target.value }, '更新 POI 特效主颜色');
+    commitComponent({ ...component, primaryColor: event.target.value }, '更新特效主颜色');
   }
 
   /** 更新辅助颜色，供运行时渲染渐变、边缘光或粒子尾迹使用。 */
   function handleSecondaryColorChange(event: ChangeEvent<HTMLInputElement>): void {
-    commitComponent({ ...component, secondaryColor: event.target.value }, '更新 POI 特效辅助颜色');
+    commitComponent({ ...component, secondaryColor: event.target.value }, '更新特效辅助颜色');
   }
 
   /** 更新强度、速度、密度等数值字段，并在写入前夹紧到定义范围。 */
@@ -80,7 +80,7 @@ export function PoiEffectInspector({ component, disabled = false }: PoiEffectIns
 
   return (
     <fieldset className="transform-fieldset">
-      <legend>POI 特效</legend>
+      <legend>特效</legend>
 
       <label className="inspector-row">
         <span>特效类型</span>

@@ -125,6 +125,11 @@ try {
   proxy.position.copyFromFloats(12, 4, 10);
   controller.previewAttachedTransform();
   controller.setTool('rotate');
+  assert.equal(
+    controller.gizmoManager.gizmos.rotationGizmo?.attachedNode,
+    proxy,
+    'TransformNode 群组切换旋转工具后必须重新绑定 RotationGizmo',
+  );
   assertVector(proxy.position, { x: 7, y: 1, z: 8 }, '组拖动期间请求旋转工具必须取消并恢复代理');
   assert.equal(events.at(-1).type, 'cancel', '组拖动期间请求旋转工具必须取消运行时预览');
 

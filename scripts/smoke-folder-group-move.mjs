@@ -376,7 +376,7 @@ try {
   const groupedStoreState = useEditorStore.getState();
   const groupedFolderId = groupedStoreState.scene.selectedEntityId;
   assert.equal(groupedStoreState.scene.entities[groupedFolderId]?.isFolder, true, '群组命令必须选中新文件夹');
-  assert.equal(groupedStoreState.transformTool, 'translate', '命令选中文件夹后必须自动切换移动工具');
+  assert.equal(groupedStoreState.transformTool, 'rotate', '命令选中文件夹后必须保留可用的旋转工具');
   assert.equal(groupedStoreState.transformSpace, 'global', '命令选中文件夹后必须自动切换世界坐标');
   groupedStoreState.setTransformTool('rotate');
   assert.equal(useEditorStore.getState().transformTool, 'rotate', '文件夹群组必须允许切换旋转工具');
@@ -393,7 +393,7 @@ try {
     true,
     'Redo 必须重新选中群组文件夹',
   );
-  assert.equal(redoneStoreState.transformTool, 'translate', 'Redo 重新选中文件夹后必须恢复移动工具');
+  assert.equal(redoneStoreState.transformTool, 'rotate', 'Redo 重新选中文件夹后必须保留进入群组前的旋转工具');
   assert.equal(redoneStoreState.transformSpace, 'global', 'Redo 重新选中文件夹后必须恢复世界坐标');
 
   useEditorStore.setState({
@@ -411,7 +411,7 @@ try {
     true,
     '新建文件夹后必须选中新文件夹',
   );
-  assert.equal(createdFolderState.transformTool, 'translate', '新建文件夹后必须自动切换移动工具');
+  assert.equal(createdFolderState.transformTool, 'rotate', '新建文件夹后必须保留可用的旋转工具');
   assert.equal(createdFolderState.transformSpace, 'global', '新建文件夹后必须自动切换世界坐标');
 
   createdFolderState.copySelectedEntities();
@@ -423,7 +423,7 @@ try {
     true,
     '粘贴单个文件夹后必须选中文件夹副本',
   );
-  assert.equal(pastedFolderState.transformTool, 'translate', '粘贴文件夹后必须自动切换移动工具');
+  assert.equal(pastedFolderState.transformTool, 'rotate', '粘贴文件夹后必须保留可用的旋转工具');
   assert.equal(pastedFolderState.transformSpace, 'global', '粘贴文件夹后必须自动切换世界坐标');
 
   assert.equal(

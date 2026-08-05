@@ -15,8 +15,8 @@ import {
 } from './EditorGroundGrid';
 import {
   DIGITAL_TWIN_CAMERA_CONTROL_STANDARD,
-  applyDigitalTwinCameraControlStandard,
   applyDigitalTwinCameraSensitivity,
+  attachDigitalTwinCameraControl,
   clampDigitalTwinCameraRadius,
   syncDigitalTwinCameraPanScale,
 } from './cameraControlStandard';
@@ -323,10 +323,16 @@ export function createBabylonViewport(
     scene,
   );
   const allowCameraControl = options.allowCameraControl ?? true;
+  const defaultSensitivity = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.sensitivity.default;
+  let cameraSensitivity: SceneSensitivitySettings = {
+    zoom: defaultSensitivity,
+    pan: defaultSensitivity,
+    rotate: defaultSensitivity,
+  };
   let cameraControlAttached = false;
   const attachCameraControl = (): void => {
     if (!allowCameraControl || cameraControlAttached) return;
-    camera.attachControl(canvas, true);
+    attachDigitalTwinCameraControl(camera, cameraSensitivity);
     cameraControlAttached = true;
   };
   const detachCameraControl = (): void => {
@@ -335,12 +341,6 @@ export function createBabylonViewport(
     cameraControlAttached = false;
   };
   attachCameraControl();
-  const defaultSensitivity = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.sensitivity.default;
-  applyDigitalTwinCameraControlStandard(camera, {
-    zoom: defaultSensitivity,
-    pan: defaultSensitivity,
-    rotate: defaultSensitivity,
-  });
   camera.maxZ = SCENE_VIEW_DISTANCE_DEFAULT;
   camera.upperRadiusLimit = SCENE_VIEW_DISTANCE_DEFAULT;
 
@@ -426,7 +426,8 @@ export function createBabylonViewport(
       syncDigitalTwinCameraPanScale(camera);
     },
     setSensitivity: (settings) => {
-      applyDigitalTwinCameraSensitivity(camera, settings);
+      cameraSensitivity = { ...settings };
+      applyDigitalTwinCameraSensitivity(camera, cameraSensitivity);
     },
     getCameraPose: () => cameraViewController.getCameraPose(),
     applyCameraPose: (pose, transitionOptions) => {

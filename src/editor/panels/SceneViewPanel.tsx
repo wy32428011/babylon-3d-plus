@@ -55,8 +55,9 @@ import {
 import { createSceneSkyboxFromAsset } from '../assets/skyboxAssets';
 import type { Vector3Data } from '../model/math';
 import {
-  resolveFolderGroupMoveSelection,
-  type FolderGroupMoveReadySelection,
+  resolveHierarchyGroupTransformSelection,
+  toggleHierarchyEntitySelection,
+  type HierarchyGroupTransformReadySelection,
 } from '../model/entityHierarchy';
 import {
   getEntityArrayIdentifierError,
@@ -83,6 +84,7 @@ type PointerClickSnapshot = {
   clientY: number;
   cameraPose: SceneCameraPose | null;
   cameraDragged: boolean;
+  toggleSelection: boolean;
 };
 
 
@@ -96,11 +98,11 @@ type EntityArrayDialogState = {
   commitError: string | null;
 };
 
-type FolderGroupTranslationSession = FolderGroupMoveReadySelection & {
+type HierarchyGroupTranslationSession = HierarchyGroupTransformReadySelection & {
   sourceSceneDocument: SceneDocument;
 };
 
-type FolderGroupRotationSession = FolderGroupMoveReadySelection & {
+type HierarchyGroupRotationSession = HierarchyGroupTransformReadySelection & {
   sourceSceneDocument: SceneDocument;
 };
 
@@ -231,9 +233,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const autoPatrolPreviewStartedRef = useRef(false);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
   const entityArrayDialogRef = useRef<EntityArrayDialogState | null>(null);
-  const folderGroupTranslationRef = useRef<FolderGroupTranslationSession | null>(null);
-  const folderGroupRotationRef = useRef<FolderGroupRotationSession | null>(null);
-  const folderGroupStatusLogSignatureRef = useRef('');
+  const hierarchyGroupTranslationRef = useRef<HierarchyGroupTranslationSession | null>(null);
+  const hierarchyGroupRotationRef = useRef<HierarchyGroupRotationSession | null>(null);
+  const hierarchyGroupStatusLogSignatureRef = useRef('');
   const [viewportError, setViewportError] = useState<string | null>(null);
   const [viewportCamera, setViewportCamera] = useState<BabylonViewport['camera'] | null>(null);
   const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
@@ -280,8 +282,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const failEnvironmentApply = useEditorStore((state) => state.failEnvironmentApply);
   const setEnvironmentRuntimeSnapshot = useEditorStore((state) => state.setEnvironmentRuntimeSnapshot);
   const setEnvironmentAdjustmentActive = useEditorStore((state) => state.setEnvironmentAdjustmentActive);
-  const commitFolderGroupTranslation = useEditorStore((state) => state.commitFolderGroupTranslation);
-  const commitFolderGroupRotation = useEditorStore((state) => state.commitFolderGroupRotation);
+  const commitHierarchyGroupTranslation = useEditorStore((state) => state.commitHierarchyGroupTranslation);
+  const commitHierarchyGroupRotation = useEditorStore((state) => state.commitHierarchyGroupRotation);
   const resolveEntityArrayRequest = useEditorStore((state) => state.resolveEntityArrayRequest);
   const commitResolvedEntityArray = useEditorStore((state) => state.commitResolvedEntityArray);
   const consumeSceneFocusRequest = useEditorStore((state) => state.consumeSceneFocusRequest);
@@ -329,8 +331,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     () => collectAutoPatrolPlaybackRoutes(sceneDocument),
     [sceneDocument.entityIds, sceneDocument.entities],
   );
-  const folderGroupMoveSelection = useMemo(
-    () => resolveFolderGroupMoveSelection(sceneDocument, hierarchySelectionIds),
+  const hierarchyGroupTransformSelection = useMemo(
+    () => resolveHierarchyGroupTransformSelection(sceneDocument, hierarchySelectionIds),
     [hierarchySelectionIds, sceneDocument],
   );
 
@@ -355,7 +357,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     runtimeRef.current?.clearEntityArrayPreview();
   }, []);
 
-  /** 根据当前 Store 选区绑定普通实体或文件夹组代理 Gizmo。 */
+  /** 根据当前 Store 选区绑定普通实体或 Hierarchy 群组代理 Gizmo。 */
   const attachCurrentSelectionGizmo = useCallback((
     runtime: SceneRuntime,
     gizmo: TransformGizmoController,
@@ -375,10 +377,20 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       return;
     }
 
-    const folderSelection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
-    if (folderSelection.status === 'ready') {
-      const target = runtime.getFolderGroupGizmoTarget(folderSelection.folderId, folderSelection.entityIds);
-      gizmo.attachToGroupTarget(target, target ? folderSelection.folderId : null);
+    const groupSelection = resolveHierarchyGroupTransformSelection(state.scene, state.hierarchySelectionIds);
+    if (groupSelection.status === 'ready') {
+      const groupTool = state.transformTool === 'rotate' ? 'rotate' : 'translate';
+      const target = runtime.getFolderGroupGizmoTarget(
+        groupSelection.groupId,
+        groupSelection.entityIds,
+        groupTool,
+      );
+      gizmo.attachToGroupTarget(target, groupSelection.groupId);
+      return;
+    }
+    if (groupSelection.status !== 'unavailable') {
+      runtime.clearFolderGroupGizmoTarget();
+      gizmo.attachToTarget(null, null);
       return;
     }
 
@@ -413,29 +425,41 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     runtime.clearFolderGroupGizmoTarget();
   }, []);
 
-  /** 空文件夹或锁定成员只提示一次，不创建可误导用户的组 Gizmo。 */
+  /** 空群组、锁定成员或异步几何未就绪时只提示一次。 */
   useEffect(() => {
-    if (isRuntimePreview || folderGroupMoveSelection.status === 'ready' || folderGroupMoveSelection.status === 'unavailable') {
-      folderGroupStatusLogSignatureRef.current = '';
+    if (isRuntimePreview || hierarchyGroupTransformSelection.status === 'unavailable') {
+      hierarchyGroupStatusLogSignatureRef.current = '';
       return;
     }
 
-    const folderId = folderGroupMoveSelection.folderId;
-    const folderName = folderId ? sceneDocument.entities[folderId]?.name ?? folderId : '当前文件夹';
-    const signature = folderGroupMoveSelection.status === 'blocked'
-      ? `blocked:${folderId}:${folderGroupMoveSelection.lockedEntityIds.join('|')}`
-      : `empty:${folderId}`;
-    if (folderGroupStatusLogSignatureRef.current === signature) return;
-    folderGroupStatusLogSignatureRef.current = signature;
+    if (hierarchyGroupTransformSelection.status === 'ready') {
+      const runtime = runtimeRef.current;
+      const groupTool = transformTool === 'rotate' ? 'rotate' : 'translate';
+      if (!runtime || runtime.isEntityGroupTransformReady(hierarchyGroupTransformSelection.entityIds, groupTool)) {
+        hierarchyGroupStatusLogSignatureRef.current = '';
+        return;
+      }
+      const signature = `loading:${hierarchyGroupTransformSelection.groupId}`;
+      if (hierarchyGroupStatusLogSignatureRef.current === signature) return;
+      hierarchyGroupStatusLogSignatureRef.current = signature;
+      pushLog('选区群组暂不可变换：选中对象仍在加载、缺少有效包围盒或运行时目标，全部就绪后将自动显示组合 Gizmo。');
+      return;
+    }
 
-    if (folderGroupMoveSelection.status === 'blocked') {
+    const signature = hierarchyGroupTransformSelection.status === 'blocked'
+      ? `blocked:${hierarchyGroupTransformSelection.groupId}:${hierarchyGroupTransformSelection.lockedEntityIds.join('|')}`
+      : `empty:${hierarchyGroupTransformSelection.groupId}`;
+    if (hierarchyGroupStatusLogSignatureRef.current === signature) return;
+    hierarchyGroupStatusLogSignatureRef.current = signature;
+
+    if (hierarchyGroupTransformSelection.status === 'blocked') {
       pushLog(
-        `文件夹“${folderName}”整组变换已阻止：文件夹自身或后代中有 ${folderGroupMoveSelection.lockedEntityIds.length} 个锁定对象。`,
+        `选区群组变换已阻止：选中节点或文件夹后代中有 ${hierarchyGroupTransformSelection.lockedEntityIds.length} 个锁定对象。`,
       );
       return;
     }
-    pushLog(`文件夹“${folderName}”为空，无法显示整组变换 Gizmo。`);
-  }, [folderGroupMoveSelection, isRuntimePreview, pushLog, sceneDocument.entities]);
+    pushLog('当前选区没有可移动或旋转的场景对象，无法显示组合 Gizmo。');
+  }, [hierarchyGroupTransformSelection, isRuntimePreview, pushLog, transformTool]);
 
   useEffect(() => {
     editModeThinInstancePlanRef.current = editModeThinInstancePlan;
@@ -499,7 +523,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     selectedEntityId,
   ]);
 
-  /** 记录左键按下位置，用于区分单击选中和拖拽旋转视角。 */
+  /** 记录左键按下位置与 Ctrl/Cmd 状态，用于区分多选点击和相机拖拽。 */
   function handleCanvasPointerDown(event: PointerEvent<HTMLCanvasElement>): void {
     if (gizmoRef.current?.isPointerUsingGizmo()) {
       clickSnapshotRef.current = null;
@@ -519,6 +543,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       clientY: event.clientY,
       cameraPose: viewportRef.current?.getCameraPose() ?? null,
       cameraDragged: false,
+      toggleSelection: event.ctrlKey || event.metaKey,
     };
   }
 
@@ -566,9 +591,20 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       event.currentTarget,
     );
     if (patrolPick) {
-      useEditorStore.getState().setEnvironmentAdjustmentActive(false);
-      selectEntity(patrolPick.entityId);
-      useEditorStore.getState().selectAutoPatrolWaypoint(patrolPick.waypointId);
+      const state = useEditorStore.getState();
+      state.setEnvironmentAdjustmentActive(false);
+      if (snapshot.toggleSelection) {
+        const nextSelection = toggleHierarchyEntitySelection(
+          state.scene,
+          state.hierarchySelectionIds,
+          state.scene.selectedEntityId,
+          patrolPick.entityId,
+        );
+        state.selectHierarchyEntities(nextSelection.entityIds, nextSelection.primaryEntityId);
+      } else {
+        state.selectEntity(patrolPick.entityId);
+        state.selectAutoPatrolWaypoint(patrolPick.waypointId);
+      }
       return;
     }
 
@@ -577,6 +613,20 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       event.clientY,
       event.currentTarget,
     );
+    if (snapshot.toggleSelection) {
+      if (!pickedEntityId) return;
+      const state = useEditorStore.getState();
+      state.setEnvironmentAdjustmentActive(false);
+      const nextSelection = toggleHierarchyEntitySelection(
+        state.scene,
+        state.hierarchySelectionIds,
+        state.scene.selectedEntityId,
+        pickedEntityId,
+      );
+      state.selectHierarchyEntities(nextSelection.entityIds, nextSelection.primaryEntityId);
+      return;
+    }
+
     if (pickedEntityId) useEditorStore.getState().setEnvironmentAdjustmentActive(false);
     selectEntity(pickedEntityId ?? null);
   }
@@ -845,53 +895,57 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         cancelEntityArrayDrag: () => {
           (runtimeRef.current ?? runtime)?.clearEntityArrayPreview();
         },
-        beginGroupTranslation: (folderId) => {
-          folderGroupRotationRef.current = null;
+        beginGroupTranslation: (groupId) => {
+          hierarchyGroupRotationRef.current = null;
           const state = useEditorStore.getState();
           const currentRuntime = runtimeRef.current ?? runtime;
-          const selection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
+          const selection = resolveHierarchyGroupTransformSelection(state.scene, state.hierarchySelectionIds);
           if (!currentRuntime) return false;
           if (runtimeModeRef.current !== 'edit') {
-            pushLog('文件夹整组移动已阻止：运行预览期间不能编辑场景位置。');
+            pushLog('选区群组移动已阻止：运行预览期间不能编辑场景位置。');
             return false;
           }
           if (entityArrayDialogRef.current) {
-            pushLog('文件夹整组移动已阻止：请先完成或取消当前阵列弹框。');
+            pushLog('选区群组移动已阻止：请先完成或取消当前阵列弹框。');
             return false;
           }
-          if (selection.status !== 'ready' || selection.folderId !== folderId) {
-            pushLog('文件夹整组移动已阻止：当前选区、成员或锁定状态已经变化。');
+          if (selection.status !== 'ready' || selection.groupId !== groupId) {
+            pushLog('选区群组移动已阻止：当前选区、成员或锁定状态已经变化。');
+            return false;
+          }
+          if (!currentRuntime.isEntityGroupTransformReady(selection.entityIds, 'translate')) {
+            pushLog('选区群组移动已阻止：选中对象仍在加载、缺少有效包围盒或运行时目标。');
             return false;
           }
 
           currentRuntime.clearEntityArrayPreview();
           if (!currentRuntime.beginFolderGroupTranslation(selection.entityIds, selection.beforePositions)) {
-            pushLog('文件夹整组移动已阻止：没有可用于运行时预览的有效成员。');
+            pushLog('选区群组移动已阻止：没有可用于运行时预览的有效成员。');
             return false;
           }
-          folderGroupTranslationRef.current = {
+          hierarchyGroupTranslationRef.current = {
             ...selection,
             sourceSceneDocument: state.scene,
           };
           return true;
         },
-        previewGroupTranslation: (folderId, delta) => {
-          const session = folderGroupTranslationRef.current;
-          if (!session || session.folderId !== folderId) return;
+        previewGroupTranslation: (groupId, delta) => {
+          const session = hierarchyGroupTranslationRef.current;
+          if (!session || session.groupId !== groupId) return;
           (runtimeRef.current ?? runtime)?.updateFolderGroupTranslation(delta);
         },
-        commitGroupTranslation: (folderId, delta) => {
+        commitGroupTranslation: (groupId, delta) => {
           const currentRuntime = runtimeRef.current ?? runtime;
-          const session = folderGroupTranslationRef.current;
-          folderGroupTranslationRef.current = null;
-          if (!currentRuntime || !session || session.folderId !== folderId) {
+          const session = hierarchyGroupTranslationRef.current;
+          hierarchyGroupTranslationRef.current = null;
+          if (!currentRuntime || !session || session.groupId !== groupId) {
             currentRuntime?.cancelFolderGroupTranslation();
             return;
           }
 
-          const committed = commitFolderGroupTranslation({
+          const committed = commitHierarchyGroupTranslation({
             sourceSceneDocument: session.sourceSceneDocument,
-            folderId: session.folderId,
+            groupId: session.groupId,
             entityIds: session.entityIds,
             beforePositions: session.beforePositions,
             delta,
@@ -900,49 +954,53 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           else currentRuntime.cancelFolderGroupTranslation();
         },
         cancelGroupTranslation: () => {
-          folderGroupTranslationRef.current = null;
+          hierarchyGroupTranslationRef.current = null;
           (runtimeRef.current ?? runtime)?.cancelFolderGroupTranslation();
         },
-        beginGroupRotation: (folderId) => {
-          folderGroupTranslationRef.current = null;
+        beginGroupRotation: (groupId) => {
+          hierarchyGroupTranslationRef.current = null;
           const state = useEditorStore.getState();
           const currentRuntime = runtimeRef.current ?? runtime;
-          const selection = resolveFolderGroupMoveSelection(state.scene, state.hierarchySelectionIds);
+          const selection = resolveHierarchyGroupTransformSelection(state.scene, state.hierarchySelectionIds);
           if (!currentRuntime) return false;
           if (runtimeModeRef.current !== 'edit') {
-            pushLog('文件夹整组旋转已阻止：运行预览期间不能编辑场景 Transform。');
+            pushLog('选区群组旋转已阻止：运行预览期间不能编辑场景 Transform。');
             return false;
           }
           if (entityArrayDialogRef.current) {
-            pushLog('文件夹整组旋转已阻止：请先完成或取消当前阵列弹框。');
+            pushLog('选区群组旋转已阻止：请先完成或取消当前阵列弹框。');
             return false;
           }
-          if (selection.status !== 'ready' || selection.folderId !== folderId) {
-            pushLog('文件夹整组旋转已阻止：当前选区、成员或锁定状态已经变化。');
+          if (selection.status !== 'ready' || selection.groupId !== groupId) {
+            pushLog('选区群组旋转已阻止：当前选区、成员或锁定状态已经变化。');
+            return false;
+          }
+          if (!currentRuntime.isEntityGroupTransformReady(selection.entityIds, 'rotate')) {
+            pushLog('选区群组旋转已阻止：选中对象仍在加载、缺少有效包围盒或运行时目标。');
             return false;
           }
 
           currentRuntime.clearEntityArrayPreview();
           if (!currentRuntime.beginFolderGroupRotation(selection.entityIds, selection.beforeTransforms)) {
-            pushLog('文件夹整组旋转已阻止：没有可用于运行时预览的有效成员。');
+            pushLog('选区群组旋转已阻止：没有可用于运行时预览的有效成员。');
             return false;
           }
-          folderGroupRotationRef.current = {
+          hierarchyGroupRotationRef.current = {
             ...selection,
             sourceSceneDocument: state.scene,
           };
           return true;
         },
-        previewGroupRotation: (folderId, deltaMatrix) => {
-          const session = folderGroupRotationRef.current;
-          if (!session || session.folderId !== folderId) return;
+        previewGroupRotation: (groupId, deltaMatrix) => {
+          const session = hierarchyGroupRotationRef.current;
+          if (!session || session.groupId !== groupId) return;
           (runtimeRef.current ?? runtime)?.updateFolderGroupRotation(deltaMatrix);
         },
-        commitGroupRotation: (folderId, deltaMatrix) => {
+        commitGroupRotation: (groupId, deltaMatrix) => {
           const currentRuntime = runtimeRef.current ?? runtime;
-          const session = folderGroupRotationRef.current;
-          folderGroupRotationRef.current = null;
-          if (!currentRuntime || !session || session.folderId !== folderId) {
+          const session = hierarchyGroupRotationRef.current;
+          hierarchyGroupRotationRef.current = null;
+          if (!currentRuntime || !session || session.groupId !== groupId) {
             currentRuntime?.cancelFolderGroupRotation();
             return;
           }
@@ -953,9 +1011,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
             currentRuntime.cancelFolderGroupRotation();
             return;
           }
-          const committed = commitFolderGroupRotation({
+          const committed = commitHierarchyGroupRotation({
             sourceSceneDocument: session.sourceSceneDocument,
-            folderId: session.folderId,
+            groupId: session.groupId,
             entityIds: session.entityIds,
             beforeTransforms: session.beforeTransforms,
             afterTransforms,
@@ -964,7 +1022,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           else currentRuntime.cancelFolderGroupRotation();
         },
         cancelGroupRotation: () => {
-          folderGroupRotationRef.current = null;
+          hierarchyGroupRotationRef.current = null;
           (runtimeRef.current ?? runtime)?.cancelFolderGroupRotation();
         },
       });
@@ -1048,8 +1106,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     commitEntityTransform,
     previewEnvironmentTransform,
     commitEnvironmentTransform,
-    commitFolderGroupRotation,
-    commitFolderGroupTranslation,
+    commitHierarchyGroupRotation,
+    commitHierarchyGroupTranslation,
     publishSelectedModelMeasurement,
     pushLog,
     setEnvironmentRuntimeSnapshot,
@@ -1093,9 +1151,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     gizmo.cancelActiveGroupDrag();
     if (modelParameterSyncEntityId) {
-      runtime.syncModelParameters(editRuntimeSceneDocument, modelParameterSyncEntityId);
+      runtime.syncModelParameters(
+        editRuntimeSceneDocument,
+        modelParameterSyncEntityId,
+        useEditorStore.getState().hierarchySelectionIds,
+      );
     } else {
-      runtime.sync(editRuntimeSceneDocument);
+      runtime.sync(editRuntimeSceneDocument, useEditorStore.getState().hierarchySelectionIds);
     }
     attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
@@ -1108,15 +1170,21 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     publishSelectedModelMeasurement,
   ]);
 
-  /** 单选/文件夹选区变化只刷新目标表现、Gizmo 和 Inspector 测量，不重新扫描全场景。 */
+  /** Hierarchy 选区变化只刷新目标表现、Gizmo 和 Inspector 测量，不重新扫描全场景。 */
   useEffect(() => {
     const runtime = runtimeRef.current;
     const gizmo = gizmoRef.current;
     if (!runtime || !gizmo) return;
-    if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
+    if (isRuntimePreview) {
+      runtime.syncSelection(sceneDocument, hierarchySelectionIds);
+      gizmo.attachToTarget(null, null);
+      publishSelectedModelMeasurement(runtime, selectedEntityId);
+      return;
+    }
+    if (runtimeModeRef.current !== 'edit') return;
 
     gizmo.cancelActiveGroupDrag();
-    runtime.syncSelection(editRuntimeSceneDocument);
+    runtime.syncSelection(editRuntimeSceneDocument, hierarchySelectionIds);
     attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedModelMeasurement(runtime, selectedEntityId);
   }, [
@@ -1127,6 +1195,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     selectedAutoPatrolWaypointId,
     isRuntimePreview,
     publishSelectedModelMeasurement,
+    sceneDocument,
   ]);
 
   useEffect(() => {
@@ -1143,7 +1212,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       client.dispose();
       gizmo.cancelActiveDrag();
       runtime.endTelemetryPreview();
-      runtime.sync(editRuntimeSceneDocumentRef.current ?? currentSceneDocument);
+      runtime.sync(
+        editRuntimeSceneDocumentRef.current ?? currentSceneDocument,
+        useEditorStore.getState().hierarchySelectionIds,
+      );
       attachCurrentSelectionGizmo(runtime, gizmo);
       publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);
       return;
@@ -1155,7 +1227,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       gizmo.cancelActiveDrag();
       gizmo.attachToTarget(null, null);
       runtime.clearFolderGroupGizmoTarget();
-      runtime.sync(currentSceneDocument);
+      runtime.sync(currentSceneDocument, useEditorStore.getState().hierarchySelectionIds);
       runtime.beginTelemetryPreview();
       client.updateConfig(mqttConfig);
       publishSelectedModelMeasurement(runtime, selectedEntityIdRef.current);

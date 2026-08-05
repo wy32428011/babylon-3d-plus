@@ -70,7 +70,7 @@
 ## 5. 实现约束
 
 - `cameraControlStandard.ts` 是键位恢复、角度/像素、屏幕空间平移、缩放步长和近距保护的统一实现；
-- `createBabylonViewport()` 在 `attachControl()` 之后应用标准，避免 Babylon 恢复默认左键旋转、右键平移；
+- 创建视口及视角动画恢复控制时统一调用 `attachDigitalTwinCameraControl()`；该入口会在 Babylon 完成 `attachControl()` 兼容参数写入后恢复中键平移、右键旋转和当前灵敏度，禁止业务代码直接重绑相机；
 - 平移比例在渲染前依据最新 `radius`、FOV 和画布高度同步；
 - 标准应用必须幂等，重复执行不得产生重复鼠标映射；
 - Gizmo 拖拽不得重新 `attachControl()` 并破坏中键平移；

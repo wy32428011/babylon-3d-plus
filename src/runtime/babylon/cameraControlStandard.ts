@@ -173,6 +173,22 @@ export function applyDigitalTwinCameraControlStandard(
   applyDigitalTwinCameraSensitivity(camera, settings);
 }
 
+/**
+ * 绑定 Babylon 相机控制，并在其兼容参数写入完成后恢复数字孪生键位。
+ * 视角动画等流程重新 attachControl 时必须复用此入口，避免默认右键平移覆盖中键平移。
+ */
+export function attachDigitalTwinCameraControl(
+  camera: ArcRotateCamera,
+  settings: DigitalTwinCameraSensitivity,
+): void {
+  camera.attachControl(
+    true,
+    DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.pointer.alternatePanRequiresCtrl,
+    DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.pointer.panButton,
+  );
+  applyDigitalTwinCameraControlStandard(camera, settings);
+}
+
 /** 判断指针会话前后是否发生有效位姿变化，让模型表面上的拖拽优先控制视角。 */
 export function hasDigitalTwinCameraPoseChanged(
   before: DigitalTwinCameraPose | null,

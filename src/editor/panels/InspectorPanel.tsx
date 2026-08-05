@@ -220,7 +220,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
       <h2>{modelGenerator ? '模型生成器' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : 'Inspector'}</h2>
       <label className="inspector-row">
-        <span>{modelGenerator || poiEffect || autoPatrol ? 'POI名称' : '名称'}</span>
+        <span>{poiEffect ? '特效名称' : modelGenerator || autoPatrol ? 'POI名称' : '名称'}</span>
         <input
           type="text"
           disabled={isLocked}

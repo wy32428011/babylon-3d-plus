@@ -8,7 +8,7 @@ import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/
 import type { AssetEntry, BuiltInAssetDragPayload, ProjectSkyboxAssetEntry } from './AssetDatabase';
 import { formatSkyboxFileSize } from './skyboxAssets';
 
-export type ProjectLibraryKey = 'model' | 'poi' | 'theme' | 'composition' | 'environment' | 'skybox' | 'chart' | 'image';
+export type ProjectLibraryKey = 'model' | 'poi' | 'effect' | 'theme' | 'composition' | 'environment' | 'skybox' | 'chart' | 'image';
 
 export type ProjectLibraryItemBase = {
   id: string;
@@ -88,12 +88,18 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     items: [
       { id: 'poi-auto-patrol', name: '自动巡检', icon: 'ring', subtitle: '内置POI', thumbnailUrl: autoPatrolThumbnailUrl, builtIn: { kind: 'auto-patrol' } },
       { id: 'poi-model-generator', name: '模型生成器', icon: 'ring', subtitle: '内置POI', builtIn: { kind: 'model-generator' } },
-      ...createPoiEffectLibraryItems(),
       { id: 'poi-chart-marker', name: '图表立标', icon: 'marker' },
       { id: 'poi-panel', name: '图表面板', icon: 'panel' },
       { id: 'poi-alarm', name: '报警管理器', icon: 'cube' },
       { id: 'poi-roam', name: '手动漫游', icon: 'person' },
     ],
+  },
+  {
+    key: 'effect',
+    label: '特效库',
+    searchLabel: '特效名称',
+    searchPlaceholder: '请输入特效名称...',
+    items: createPoiEffectLibraryItems(),
   },
   {
     key: 'theme',
@@ -159,7 +165,7 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
   },
 ];
 
-/** 将全部 EFF 预设转成 POI 库可点击、可拖拽的内置资源卡片。 */
+/** 将全部 EFF 预设转成特效库可点击、可拖拽的内置资源卡片。 */
 export function createPoiEffectLibraryItems(): BuiltInProjectLibraryItem[] {
   return POI_EFFECT_DEFINITIONS.map((definition) => ({
     id: `poi-eff-${definition.kind}`,

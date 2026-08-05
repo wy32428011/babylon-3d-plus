@@ -16,7 +16,11 @@ import {
   getHierarchyScrollTopForIndex,
 } from '../hierarchy/hierarchyVirtualization';
 import type { Entity } from '../model/Entity';
-import { getTopLevelHierarchyEntityIds, isEntityEffectivelyLocked } from '../model/entityHierarchy';
+import {
+  getTopLevelHierarchyEntityIds,
+  isEntityEffectivelyLocked,
+  toggleHierarchyEntitySelection,
+} from '../model/entityHierarchy';
 import { getEntityArrayIdentifierError } from '../model/modelArray';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 import { useEditorStore } from '../store/editorStore';
@@ -320,11 +324,13 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     }
 
     if (event.ctrlKey || event.metaKey) {
-      const nextIds = hierarchySelectionIdSet.has(entityId)
-        ? hierarchySelectionIds.filter((selectedId) => selectedId !== entityId)
-        : [...hierarchySelectionIds, entityId];
-      const nextSelectionIdSet = new Set(nextIds);
-      selectHierarchyEntities(nextIds, nextSelectionIdSet.has(entityId) ? entityId : nextIds[0] ?? null);
+      const nextSelection = toggleHierarchyEntitySelection(
+        scene,
+        hierarchySelectionIds,
+        selectedEntityId,
+        entityId,
+      );
+      selectHierarchyEntities(nextSelection.entityIds, nextSelection.primaryEntityId);
       setLastClickedIndex(rowIndex);
       return;
     }

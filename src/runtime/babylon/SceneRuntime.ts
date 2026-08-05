@@ -512,7 +512,12 @@ export class SceneRuntime {
   private modelArrayCanonicalSignatureSequence = 0;
   private readonly modelArrayBatchByMeshUniqueId = new Map<number, EntityArrayThinInstanceBatch>();
   private modelArrayGizmoProxy: { entityId: string; node: TransformNode } | null = null;
-  private folderGroupGizmoProxy: { folderId: string; entityIds: string[]; node: TransformNode } | null = null;
+  private entityGroupGizmoProxy: {
+    groupId: string;
+    entityIds: string[];
+    tool: 'translate' | 'rotate';
+    node: TransformNode;
+  } | null = null;
   private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
   private readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
   /** fetch 数据驱动的定位线框渲染运行时，按定位线框实体组织。 */
@@ -530,6 +535,7 @@ export class SceneRuntime {
   private readonly entityStates = new Map<string, EntityRuntimeState>();
   private readonly syncedEntities = new Map<string, Entity>();
   private selectedEntityIds = new Set<string>();
+  private hierarchySelectionIds: string[] | null = null;
   private readonly modelSelectionOutlineLayer: SelectionOutlineLayer;
   private readonly assetLoadScheduler = new AssetLoadScheduler();
   private readonly sharedModelAssetCache = new SharedModelAssetCache();
@@ -962,28 +968,46 @@ export class SceneRuntime {
     );
   }
 
-  /** 在全部文件夹成员世界包围盒中心创建或更新不可见变换代理。 */
-  getFolderGroupGizmoTarget(folderId: string, entityIds: readonly string[]): TransformNode | null {
+  /** 在完整选区世界包围盒中心创建或更新不可见变换代理；包围盒或当前工具目标未就绪时保持禁用。 */
+  getFolderGroupGizmoTarget(
+    groupId: string,
+    entityIds: readonly string[],
+    tool: 'translate' | 'rotate' = 'translate',
+  ): TransformNode | null {
     const uniqueEntityIds = [...new Set(entityIds)].filter((entityId) => Boolean(entityId));
-    const bounds = uniqueEntityIds.length > 0 ? this.getEntitiesWorldBounds(uniqueEntityIds) : null;
-    if (!bounds) {
-      if (this.folderGroupGizmoProxy?.folderId === folderId) {
-        this.folderGroupGizmoProxy.node.setEnabled(false);
-      }
+    if (uniqueEntityIds.length === 0) {
+      this.entityGroupGizmoProxy?.node.setEnabled(false);
       return null;
     }
 
-    let proxy = this.folderGroupGizmoProxy;
+    let proxy = this.entityGroupGizmoProxy;
     if (!proxy) {
+      const node = new Mesh('__entityGroupTransformGizmoProxy', this.scene);
+      node.isPickable = false;
       proxy = {
-        folderId,
+        groupId,
         entityIds: uniqueEntityIds,
-        node: new TransformNode('__folderGroupTransformGizmoProxy', this.scene),
+        tool,
+        node,
       };
-      this.folderGroupGizmoProxy = proxy;
+      this.entityGroupGizmoProxy = proxy;
     }
-    proxy.folderId = folderId;
+    proxy.groupId = groupId;
     proxy.entityIds = uniqueEntityIds;
+    proxy.tool = tool;
+
+    const bounds = this.getEntitiesWorldBounds(uniqueEntityIds);
+    const ready = Boolean(
+      bounds?.geometryReady
+      && bounds.resolvedEntityCount === uniqueEntityIds.length
+      && bounds.geometryReadyEntityCount === uniqueEntityIds.length
+      && this.areEntityGroupTransformTargetsReady(uniqueEntityIds, tool),
+    );
+    if (!bounds || !ready) {
+      proxy.node.setEnabled(false);
+      return proxy.node;
+    }
+
     proxy.node.setEnabled(true);
     proxy.node.position.copyFromFloats(bounds.center.x, bounds.center.y, bounds.center.z);
     proxy.node.rotationQuaternion = null;
@@ -993,10 +1017,40 @@ export class SceneRuntime {
     return proxy.node;
   }
 
-  /** 隐藏文件夹组代理并取消任何尚未提交的运行时预览。 */
+  /** 完整包围盒和对应运行时目标均就绪后，才允许开始组合移动或旋转。 */
+  isEntityGroupTransformReady(
+    entityIds: readonly string[],
+    tool: 'translate' | 'rotate',
+  ): boolean {
+    const uniqueEntityIds = [...new Set(entityIds)].filter((entityId) => Boolean(entityId));
+    if (uniqueEntityIds.length === 0) return false;
+
+    const bounds = this.getEntitiesWorldBounds(uniqueEntityIds);
+    if (
+      !bounds?.geometryReady
+      || bounds.resolvedEntityCount !== uniqueEntityIds.length
+      || bounds.geometryReadyEntityCount !== uniqueEntityIds.length
+    ) return false;
+
+    return this.areEntityGroupTransformTargetsReady(uniqueEntityIds, tool);
+  }
+
+  /** 当前工具所需的全部运行时写入目标均存在时，组合 Gizmo 才可见或开始拖拽。 */
+  private areEntityGroupTransformTargetsReady(
+    entityIds: readonly string[],
+    tool: 'translate' | 'rotate',
+  ): boolean {
+    return entityIds.every((entityId) => (
+      tool === 'rotate'
+        ? this.resolveGroupRotationTarget(entityId) !== null
+        : this.resolveGroupTranslationTarget(entityId) !== null
+    ));
+  }
+
+  /** 隐藏群组代理并取消任何尚未提交的运行时预览。 */
   clearFolderGroupGizmoTarget(): void {
     this.cancelFolderGroupTransforms();
-    this.folderGroupGizmoProxy?.node.setEnabled(false);
+    this.entityGroupGizmoProxy?.node.setEnabled(false);
   }
 
   /** 建立文件夹组运行时平移会话；未加载成员会在后续批次就绪时自动接回。 */
@@ -1165,13 +1219,18 @@ export class SceneRuntime {
     if (!translationPreview && !rotationPreview) this.refreshFolderGroupGizmoProxyPosition();
   }
 
-  /** 运行时基线恢复后把组代理放回当前成员世界包围盒中心。 */
+  /** 运行时基线恢复或异步几何就绪后，把群组代理放回完整选区包围盒中心。 */
   private refreshFolderGroupGizmoProxyPosition(): void {
-    const proxy = this.folderGroupGizmoProxy;
+    const proxy = this.entityGroupGizmoProxy;
     if (!proxy || proxy.node.isDisposed()) return;
 
     const bounds = this.getEntitiesWorldBounds(proxy.entityIds);
-    if (!bounds) {
+    if (
+      !bounds?.geometryReady
+      || bounds.resolvedEntityCount !== proxy.entityIds.length
+      || bounds.geometryReadyEntityCount !== proxy.entityIds.length
+      || !this.areEntityGroupTransformTargetsReady(proxy.entityIds, proxy.tool)
+    ) {
       proxy.node.setEnabled(false);
       return;
     }
@@ -1974,7 +2033,8 @@ export class SceneRuntime {
   }
 
   /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
-  sync(document: SceneDocument): void {
+  sync(document: SceneDocument, hierarchySelectionIds?: readonly string[]): void {
+    this.setHierarchySelectionIds(document, hierarchySelectionIds);
     this.cancelFolderGroupTransforms();
     const startedAt = readRuntimeTimestampMs();
     try {
@@ -1991,12 +2051,17 @@ export class SceneRuntime {
    * 只同步一个实体的模型参数值。调用方已确认 Store 本次原子更新未改变其它场景内容；
    * 因此这里不重建层级状态、组件 ID 集合或 Locator 索引，只刷新目标及其所属矩阵源。
    */
-  syncModelParameters(document: SceneDocument, entityId: string): void {
+  syncModelParameters(
+    document: SceneDocument,
+    entityId: string,
+    hierarchySelectionIds?: readonly string[],
+  ): void {
+    this.setHierarchySelectionIds(document, hierarchySelectionIds);
     this.cancelFolderGroupTransforms();
     const entity = document.entities[entityId];
     const previousEntity = this.syncedEntities.get(entityId);
     if (!entity?.components.modelAsset || !previousEntity?.components.modelAsset) {
-      this.sync(document);
+      this.sync(document, hierarchySelectionIds);
       return;
     }
 
@@ -2018,7 +2083,8 @@ export class SceneRuntime {
    * 只同步选区变化。普通单选只访问旧/新目标实体以及对应共享模型或矩阵批次，
    * 不重新扫描 entityIds、加载模型、执行参数脚本或重建 Locator 索引。
    */
-  syncSelection(document: SceneDocument): void {
+  syncSelection(document: SceneDocument, hierarchySelectionIds?: readonly string[]): void {
+    this.setHierarchySelectionIds(document, hierarchySelectionIds);
     this.cancelFolderGroupTransforms();
     const startedAt = readRuntimeTimestampMs();
     let changedEntityCount = 0;
@@ -2464,8 +2530,8 @@ export class SceneRuntime {
   dispose(): void {
     this.clearEntityArrayPreview();
     this.cancelFolderGroupTransforms();
-    this.folderGroupGizmoProxy?.node.dispose(false, false);
-    this.folderGroupGizmoProxy = null;
+    this.entityGroupGizmoProxy?.node.dispose(false, false);
+    this.entityGroupGizmoProxy = null;
     this.modelArrayGizmoProxy?.node.dispose(false, false);
     this.modelArrayGizmoProxy = null;
     this.environmentRuntime.dispose();
@@ -2683,14 +2749,34 @@ export class SceneRuntime {
   }
 
 
-  /** 将文件夹选中递归转换为全部普通后代，用于在场景中高亮整棵分组子树。 */
-  private resolveSelectedEntityIds(document: SceneDocument): Set<string> {
-    const selectedEntityId = document.selectedEntityId;
-    const selectedEntity = selectedEntityId ? document.entities[selectedEntityId] : null;
-    if (!selectedEntity) return new Set();
-    if (!selectedEntity.isFolder) return new Set([selectedEntity.id]);
+  /** 保存调用方提供的 transient Hierarchy 选区；未提供时回退到场景主选对象。 */
+  private setHierarchySelectionIds(
+    document: SceneDocument,
+    hierarchySelectionIds?: readonly string[],
+  ): void {
+    this.hierarchySelectionIds = hierarchySelectionIds === undefined
+      ? null
+      : [...new Set(hierarchySelectionIds)].filter((entityId) => Boolean(document.entities[entityId]));
+  }
 
-    return new Set(collectFolderRuntimeEntityIds(document.entities, selectedEntity.id));
+  /** 将普通实体和文件夹多选统一展开为全部需要高亮的运行时实体。 */
+  private resolveSelectedEntityIds(document: SceneDocument): Set<string> {
+    const selectionIds = this.hierarchySelectionIds
+      ?? (document.selectedEntityId ? [document.selectedEntityId] : []);
+    const selectedEntityIds = new Set<string>();
+
+    for (const selectionId of selectionIds) {
+      const selectedEntity = document.entities[selectionId];
+      if (!selectedEntity) continue;
+      if (!selectedEntity.isFolder) {
+        selectedEntityIds.add(selectedEntity.id);
+        continue;
+      }
+      for (const entityId of collectFolderRuntimeEntityIds(document.entities, selectedEntity.id)) {
+        selectedEntityIds.add(entityId);
+      }
+    }
+    return selectedEntityIds;
   }
 
   /** 同步基础几何体 Mesh 类型、Transform 与选中材质状态。 */
