@@ -4118,3 +4118,176 @@ select {
     grid-column: auto;
   }
 }
+
+/* 自动巡检 Inspector：摘要列表优先，选中节点再展开高密度参数。 */
+.auto-patrol-inspector {
+  padding: 8px;
+}
+
+.auto-patrol-switches,
+.auto-patrol-playback-actions,
+.auto-patrol-waypoint-toolbar,
+.auto-patrol-waypoint-summary,
+.auto-patrol-waypoint-actions,
+.auto-patrol-waypoint-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.auto-patrol-switches {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.auto-patrol-playback-actions,
+.auto-patrol-waypoint-detail-actions {
+  flex-wrap: wrap;
+}
+
+.auto-patrol-playback-actions button,
+.auto-patrol-waypoint-toolbar button,
+.auto-patrol-waypoint-actions button,
+.auto-patrol-waypoint-detail-actions button {
+  min-height: 25px;
+  border: 1px solid #515151;
+  border-radius: 3px;
+  color: #d9d9d9;
+  background: #292929;
+}
+
+.auto-patrol-playback-actions button:hover:not(:disabled),
+.auto-patrol-waypoint-toolbar button:hover:not(:disabled),
+.auto-patrol-waypoint-actions button:hover:not(:disabled),
+.auto-patrol-waypoint-detail-actions button:hover:not(:disabled) {
+  border-color: #1ca6c7;
+  color: #effcff;
+  background: #243a40;
+}
+
+.auto-patrol-playback-actions button:disabled,
+.auto-patrol-waypoint-toolbar button:disabled,
+.auto-patrol-waypoint-actions button:disabled,
+.auto-patrol-waypoint-detail-actions button:disabled {
+  opacity: 0.45;
+}
+
+.auto-patrol-runtime-status,
+.auto-patrol-capture-hint,
+.auto-patrol-empty {
+  margin: 2px 0;
+  line-height: 1.45;
+}
+
+.auto-patrol-waypoint-toolbar {
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+.auto-patrol-waypoint-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.auto-patrol-waypoint-card {
+  min-width: 0;
+  border: 1px solid #454545;
+  border-radius: 4px;
+  background: #292929;
+  transition: border-color 120ms ease, opacity 120ms ease, background 120ms ease;
+}
+
+.auto-patrol-waypoint-card.is-selected {
+  border-color: #1cb8d6;
+  background: #24363b;
+}
+
+.auto-patrol-waypoint-card.is-dragging {
+  opacity: 0.55;
+}
+
+.auto-patrol-waypoint-summary {
+  min-width: 0;
+  padding: 5px;
+}
+
+.auto-patrol-waypoint-select {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 2px;
+  border: 0;
+  color: #dedede;
+  text-align: left;
+  background: transparent;
+}
+
+.auto-patrol-waypoint-select > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.auto-patrol-waypoint-select small {
+  overflow: hidden;
+  color: #9d9d9d;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auto-patrol-waypoint-index {
+  display: inline-grid;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid #22bad5;
+  border-radius: 50%;
+  color: #95efff;
+  font-weight: 700;
+  background: #123943;
+}
+
+.auto-patrol-waypoint-actions {
+  flex: 0 0 auto;
+}
+
+.auto-patrol-waypoint-actions button {
+  width: 24px;
+  min-height: 23px;
+  padding: 0;
+}
+
+.auto-patrol-waypoint-details {
+  display: grid;
+  gap: 6px;
+  padding: 0 7px 7px;
+  border-top: 1px solid #3f555a;
+}
+
+.auto-patrol-waypoint-details .transform-fieldset {
+  margin: 7px 0 0;
+}
+
+.auto-patrol-waypoint-details .number-row {
+  grid-template-columns: 98px minmax(0, 1fr);
+}
+
+.auto-patrol-waypoint-detail-actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 1180px) {
+  .auto-patrol-waypoint-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .auto-patrol-waypoint-actions {
+    justify-content: flex-end;
+  }
+}

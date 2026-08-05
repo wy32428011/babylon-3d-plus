@@ -93,6 +93,8 @@ import {
 } from './ExternalModelScriptRuntime';
 import { SceneSkyboxRuntime } from './SceneSkyboxRuntime';
 import { SceneShadowRuntime } from './SceneShadowRuntime';
+import { EditorLightMarkerRuntime } from './EditorLightMarkerRuntime';
+import { EditorAutoPatrolRuntime, type AutoPatrolMarkerPick } from './EditorAutoPatrolRuntime';
 import {
   SceneEnvironmentRuntime,
   type SceneEnvironmentApplyOptions,
@@ -523,6 +525,8 @@ export class SceneRuntime {
   /** 已放货到 fetch 驱动定位线框、等待单排同步响应后再销毁的 MQTT 货箱（按排号分组）。 */
   private readonly fetchKeptCargoByRow = new Map<number, Set<string>>();
   private readonly lights = new Map<string, Light>();
+  private readonly lightMarkerRuntime: EditorLightMarkerRuntime;
+  private readonly autoPatrolMarkerRuntime: EditorAutoPatrolRuntime;
   private readonly entityStates = new Map<string, EntityRuntimeState>();
   private readonly syncedEntities = new Map<string, Entity>();
   private selectedEntityIds = new Set<string>();
@@ -566,6 +570,8 @@ export class SceneRuntime {
     this.modelSelectionOutlineLayer.outlineColor = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
     this.shadowRuntime = new SceneShadowRuntime(scene);
+    this.lightMarkerRuntime = new EditorLightMarkerRuntime(scene);
+    this.autoPatrolMarkerRuntime = new EditorAutoPatrolRuntime(scene);
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
       loadAssetContainer: (rootUrl, fileName, signal) => this.loadAssetContainer(rootUrl, fileName, signal),
@@ -831,6 +837,8 @@ export class SceneRuntime {
     this.clearEntityArrayPreview();
     this.clearFolderGroupGizmoTarget();
     this.telemetryPreviewActive = true;
+    this.lightMarkerRuntime.setPreviewActive(true);
+    this.autoPatrolMarkerRuntime.setPreviewActive(true);
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('runtime', null);
     this.clearModelGeneratorLoadFailureCache();
@@ -847,6 +855,8 @@ export class SceneRuntime {
     if (!hadPreviewState) return;
 
     this.telemetryPreviewActive = false;
+    this.lightMarkerRuntime.setPreviewActive(false);
+    this.autoPatrolMarkerRuntime.setPreviewActive(false);
     this.specializedTelemetryRuntime.disposeAllCargo();
     for (const fetchRuntime of this.locatorFetchRuntimes.values()) {
       fetchRuntime.clearAllBatches();
@@ -897,6 +907,35 @@ export class SceneRuntime {
     };
   }
 
+  /** 发布 Viewer 在首次同步前永久禁用编辑器专用灯光标记。 */
+  disableEditorLightMarkers(): void {
+    this.lightMarkerRuntime.disable();
+  }
+
+  /** 发布 Viewer 在首次同步前永久禁用巡检原点、节点和路径辅助对象。 */
+  disableEditorAutoPatrolMarkers(): void {
+    this.autoPatrolMarkerRuntime.disable();
+  }
+
+  /** 同步路线与节点子选区；节点 ID 是编辑器 transient 状态，不写入场景文档。 */
+  setAutoPatrolSelection(routeId: string | null, waypointId: string | null): void {
+    this.autoPatrolMarkerRuntime.setSelection(routeId, waypointId);
+  }
+
+  /** 同步播放目标高亮。 */
+  setAutoPatrolPlaybackTarget(routeId: string | null, waypointIndex: number | null): void {
+    this.autoPatrolMarkerRuntime.setPlaybackTarget(routeId, waypointIndex);
+  }
+
+  getAutoPatrolWaypointGizmoTarget(entityId: string, waypointId: string): TransformNode | null {
+    if (!this.isEntityTransformEditable(entityId)) return null;
+    return this.autoPatrolMarkerRuntime.getWaypointGizmoTarget(entityId, waypointId);
+  }
+
+  previewAutoPatrolWaypointTransform(entityId: string, waypointId: string, transform: TransformComponent): void {
+    this.autoPatrolMarkerRuntime.previewWaypointTransform(entityId, waypointId, transform);
+  }
+
   /** 根据实体 ID 获取当前运行时中可被 Gizmo 绑定的 Babylon 节点。 */
   getGizmoTargetByEntityId(entityId: string | null): AbstractMesh | TransformNode | null {
     if (!entityId) return null;
@@ -917,6 +956,8 @@ export class SceneRuntime {
       this.models.get(entityId)?.root ??
       this.modelGenerators.get(entityId)?.markerRoot ??
       this.poiEffectRuntime.getGizmoTarget(entityId) ??
+      this.lightMarkerRuntime.getGizmoTarget(entityId) ??
+      this.autoPatrolMarkerRuntime.getRouteGizmoTarget(entityId) ??
       null
     );
   }
@@ -1147,6 +1188,21 @@ export class SceneRuntime {
     const batch = this.resolveModelArrayBatchForEntityId(entityId);
     if (batch) return { kind: 'batch', batch };
 
+    const autoPatrolTarget = this.autoPatrolMarkerRuntime.getRouteTransformTarget(entityId);
+    const autoPatrolEntity = this.syncedEntities.get(entityId);
+    if (autoPatrolTarget && autoPatrolEntity?.components.autoPatrol) {
+      return {
+        kind: 'position',
+        identity: autoPatrolTarget,
+        setPosition: (position) => {
+          this.autoPatrolMarkerRuntime.previewRouteTransform(entityId, {
+            ...autoPatrolEntity.components.transform,
+            position,
+          });
+        },
+      };
+    }
+
     const node = (
       this.meshes.get(entityId)
       ?? this.skyboxRuntime.getMesh(entityId)
@@ -1171,10 +1227,14 @@ export class SceneRuntime {
 
     const light = this.lights.get(entityId);
     if (!light || light.isDisposed()) return null;
+    const markerTarget = this.lightMarkerRuntime.getGizmoTarget(entityId);
     return {
       kind: 'position',
-      identity: light,
-      setPosition: (position) => this.applyGroupTranslationLightPosition(light, position),
+      identity: markerTarget ?? light,
+      setPosition: (position) => {
+        this.applyGroupTranslationLightPosition(light, position);
+        this.lightMarkerRuntime.setPosition(entityId, position);
+      },
     };
   }
 
@@ -1182,6 +1242,18 @@ export class SceneRuntime {
   private resolveGroupRotationTarget(entityId: string): EntityGroupRotationTarget | null {
     const batch = this.resolveModelArrayBatchForEntityId(entityId);
     if (batch) return { kind: 'batch', batch };
+
+    const autoPatrolTarget = this.autoPatrolMarkerRuntime.getRouteTransformTarget(entityId);
+    const autoPatrolEntity = this.syncedEntities.get(entityId);
+    if (autoPatrolTarget && autoPatrolEntity?.components.autoPatrol) {
+      return {
+        kind: 'transform',
+        identity: autoPatrolTarget,
+        setTransform: (transform) => {
+          this.autoPatrolMarkerRuntime.previewRouteTransform(entityId, transform);
+        },
+      };
+    }
 
     const node = (
       this.meshes.get(entityId)
@@ -1207,10 +1279,14 @@ export class SceneRuntime {
 
     const light = this.lights.get(entityId);
     if (!light || light.isDisposed()) return null;
+    const markerTarget = this.lightMarkerRuntime.getGizmoTarget(entityId);
     return {
       kind: 'transform',
-      identity: light,
-      setTransform: (transform) => this.applyGroupRotationLightTransform(light, transform),
+      identity: markerTarget ?? light,
+      setTransform: (transform) => {
+        this.applyGroupRotationLightTransform(light, transform);
+        this.lightMarkerRuntime.setTransform(entityId, transform);
+      },
     };
   }
 
@@ -1255,6 +1331,24 @@ export class SceneRuntime {
       y: position.y,
       z: position.z,
     });
+  }
+
+  /** 优先拾取巡检节点编号；路线原点返回 waypointId=null。 */
+  pickAutoPatrolAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): AutoPatrolMarkerPick | null {
+    const point = this.getCanvasPickPoint(clientX, clientY, canvas);
+    if (!point) return null;
+    const picks = this.scene.multiPick(point.x, point.y, (mesh) => {
+      if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.isVisible || mesh.visibility <= 0 || !mesh.isPickable) {
+        return false;
+      }
+      return this.autoPatrolMarkerRuntime.readPick(mesh) !== null;
+    }) ?? [];
+    picks.sort((left, right) => left.distance - right.distance);
+    for (const picked of picks) {
+      const result = this.autoPatrolMarkerRuntime.readPick(picked.pickedMesh ?? null);
+      if (result) return result;
+    }
+    return null;
   }
 
   /** 在画布客户端坐标位置拾取可编辑 Mesh，并把 thinInstanceIndex 还原为具体阵列实体 ID。 */
@@ -1641,7 +1735,8 @@ export class SceneRuntime {
       || this.skyboxRuntime.hasEntity(entityId)
       || this.locators.has(entityId)
       || this.lights.has(entityId)
-      || this.poiEffectRuntime.has(entityId);
+      || this.poiEffectRuntime.has(entityId)
+      || Boolean(this.syncedEntities.get(entityId)?.components.autoPatrol);
   }
 
   /** 将浏览器客户端坐标转换为 Babylon 画布内拾取坐标，并过滤画布外输入。 */
@@ -1693,6 +1788,12 @@ export class SceneRuntime {
 
     const light = this.lights.get(entityId);
     if (light) return this.getLightWorldBounds(light);
+
+    const autoPatrolEntity = this.syncedEntities.get(entityId);
+    if (autoPatrolEntity?.components.autoPatrol) {
+      const position = autoPatrolEntity.components.transform.position;
+      return createPointWorldBounds(new Vector3(position.x, position.y, position.z));
+    }
 
     const poiEffectMeshes = this.poiEffectRuntime.getWorldBoundsMeshes(entityId);
     if (poiEffectMeshes.length > 0) {
@@ -2037,11 +2138,15 @@ export class SceneRuntime {
     const poiEffectIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.poiEffect)),
     );
+    const autoPatrolIds = new Set(
+      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.autoPatrol)),
+    );
     const previewSourceId = this.entityArrayPreview?.sourceEntityId;
     if (previewSourceId && this.poiEffectRuntime.has(previewSourceId) && !poiEffectIds.has(previewSourceId)) {
       this.clearEntityArrayPreview();
     }
     this.poiEffectRuntime.disposeMissing(poiEffectIds);
+    this.autoPatrolMarkerRuntime.disposeMissing(autoPatrolIds);
 
     for (const [entityId, mesh] of this.meshes.entries()) {
       if (!primitiveMeshIds.has(entityId)) {
@@ -2086,6 +2191,7 @@ export class SceneRuntime {
         this.disposeLight(entityId, light);
       }
     }
+    this.lightMarkerRuntime.disposeMissing(lightIds);
 
     for (const entityId of [...this.syncedEntities.keys()]) {
       if (!document.entities[entityId]) this.syncedEntities.delete(entityId);
@@ -2144,6 +2250,8 @@ export class SceneRuntime {
     if (entity.components.modelGenerator && !this.modelGenerators.has(entity.id)) return false;
     if (entity.components.poiEffect && !this.poiEffectRuntime.has(entity.id)) return false;
     if (entity.components.light && !this.lights.has(entity.id)) return false;
+    if (entity.components.light && !this.lightMarkerRuntime.isComplete(entity)) return false;
+    if (entity.components.autoPatrol && !this.autoPatrolMarkerRuntime.isComplete(entity)) return false;
     return true;
   }
 
@@ -2209,7 +2317,25 @@ export class SceneRuntime {
       );
     }
 
-    this.lights.get(entity.id)?.setEnabled(this.isEntityVisible(entity.id));
+    if (entity.components.autoPatrol) {
+      this.autoPatrolMarkerRuntime.syncPresentation(
+        entity,
+        selected,
+        this.isEntityVisible(entity.id),
+        this.isEntityScenePickable(entity.id),
+      );
+    }
+
+    const light = this.lights.get(entity.id);
+    light?.setEnabled(this.isEntityVisible(entity.id));
+    if (light && entity.components.light) {
+      this.lightMarkerRuntime.syncPresentation(
+        entity.id,
+        selected,
+        this.isEntityVisible(entity.id),
+        this.isEntityScenePickable(entity.id),
+      );
+    }
 
     const trajectory = this.conveyorTrajectories.get(entity.id);
     if (trajectory) this.refreshConveyorTrajectoryRoot(entity, trajectory.root);
@@ -2385,6 +2511,8 @@ export class SceneRuntime {
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
     }
+    this.lightMarkerRuntime.dispose();
+    this.autoPatrolMarkerRuntime.dispose();
     this.shadowRuntime.dispose();
     this.skyboxRuntime.dispose();
     this.sharedModelAssetCache.dispose();
@@ -2452,8 +2580,17 @@ export class SceneRuntime {
       );
     }
 
+    if (entity.components.autoPatrol) {
+      this.autoPatrolMarkerRuntime.sync(
+        entity,
+        selected,
+        this.isEntityVisible(entity.id),
+        this.isEntityScenePickable(entity.id),
+      );
+    }
+
     if (entity.components.light) {
-      this.syncLightEntity(entity);
+      this.syncLightEntity(entity, selected);
     }
   }
 
@@ -3224,8 +3361,8 @@ export class SceneRuntime {
     );
   }
 
-  /** 同步灯光类型、位置/方向和强度。 */
-  private syncLightEntity(entity: Entity): void {
+  /** 同步灯光类型、位置/方向、强度及编辑器标记。 */
+  private syncLightEntity(entity: Entity, selected: boolean): void {
     const lightComponent = entity.components.light;
     if (!lightComponent) return;
 
@@ -3243,6 +3380,12 @@ export class SceneRuntime {
     this.shadowRuntime.syncLight(entity.id, light);
     light.intensity = lightComponent.intensity;
     light.setEnabled(this.isEntityVisible(entity.id));
+    this.lightMarkerRuntime.sync(
+      entity,
+      selected,
+      this.isEntityVisible(entity.id),
+      this.isEntityScenePickable(entity.id),
+    );
 
     const transform = entity.components.transform;
     if (light instanceof HemisphericLight) {
@@ -4179,6 +4322,7 @@ export class SceneRuntime {
 
   private disposeLight(entityId: string, light: Light): void {
     this.shadowRuntime.removeLight(entityId);
+    this.lightMarkerRuntime.disposeEntity(entityId);
     light.dispose();
     this.lights.delete(entityId);
   }
@@ -4203,6 +4347,8 @@ export class SceneRuntime {
         || this.modelArrayInstanceEntities.has(entityId)
         || this.modelGenerators.has(entityId)
         || this.poiEffectRuntime.has(entityId)
+        || this.lightMarkerRuntime.has(entityId)
+        || this.autoPatrolMarkerRuntime.has(entityId)
         || this.skyboxRuntime.hasEntity(entityId)
       )
       ? entityId

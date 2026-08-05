@@ -1,6 +1,7 @@
 import type { Command } from './Command';
 import { executeCommand, type CommandHistory } from './CommandHistory';
 import type {
+  AutoPatrolComponent,
   CadReferenceComponent,
   LightComponent,
   LocatorComponent,
@@ -830,6 +831,35 @@ function updateLight(scene: SceneDocument, entityId: string, light: LightCompone
         },
       },
     },
+  };
+}
+
+/** 将自动巡检组件替换为已校验的不可变快照。 */
+function updateAutoPatrol(scene: SceneDocument, entityId: string, autoPatrol: AutoPatrolComponent): SceneDocument {
+  const entity = scene.entities[entityId];
+  if (!entity?.components.autoPatrol) return scene;
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [entityId]: {
+        ...entity,
+        components: { ...entity.components, autoPatrol },
+      },
+    },
+  };
+}
+
+export function updateAutoPatrolCommand(
+  entityId: string,
+  before: AutoPatrolComponent,
+  after: AutoPatrolComponent,
+  label = '更新自动巡检',
+): Command {
+  return {
+    label,
+    execute: (scene) => updateAutoPatrol(scene, entityId, after),
+    undo: (scene) => updateAutoPatrol(scene, entityId, before),
   };
 }
 

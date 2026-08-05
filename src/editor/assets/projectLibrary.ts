@@ -1,4 +1,5 @@
 import type { BuiltInImageAsset } from '../../assets/imageAssets';
+import autoPatrolThumbnailUrl from '../../assets/images/auto-patrol.png';
 import { BUILT_IN_IMAGE_ASSETS } from '../../assets/imageAssets';
 import { formatBuiltInMeshBaseDimensionsMeters } from '../model/builtInMeshGeometry';
 import type { LightKind, MeshKind } from '../model/components';
@@ -45,6 +46,7 @@ export type ProjectLibrary = {
 
 export type BuiltInProjectLibraryAction =
   | { kind: 'model-generator' }
+  | { kind: 'auto-patrol' }
   | { kind: 'poi-effect'; effectKind: (typeof POI_EFFECT_DEFINITIONS)[number]['kind'] }
   | { kind: 'mesh'; meshKind: MeshKind }
   | { kind: 'locator'; locatorKind: 'box-wire' }
@@ -84,6 +86,7 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     searchLabel: 'POI名称',
     searchPlaceholder: '请输入POI名称...',
     items: [
+      { id: 'poi-auto-patrol', name: '自动巡检', icon: 'ring', subtitle: '内置POI', thumbnailUrl: autoPatrolThumbnailUrl, builtIn: { kind: 'auto-patrol' } },
       { id: 'poi-model-generator', name: '模型生成器', icon: 'ring', subtitle: '内置POI', builtIn: { kind: 'model-generator' } },
       ...createPoiEffectLibraryItems(),
       { id: 'poi-chart-marker', name: '图表立标', icon: 'marker' },
