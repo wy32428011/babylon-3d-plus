@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ArcRotateCamera, NullEngine, Scene, Vector3 } from '@babylonjs/core';
+import { ArcRotateCamera, Camera, NullEngine, Scene, Vector3 } from '@babylonjs/core';
 
 import {
   DIGITAL_TWIN_CAMERA_CONTROL_STANDARD,
@@ -131,9 +131,43 @@ test('旋转角度、屏幕空间平移幅度和滚轮缩放按统一基准及�
     fixture.camera.radius *= 2;
     syncDigitalTwinCameraPanScale(fixture.camera);
     assertClose(fixture.camera.movement.panSpeed, defaultWorldUnitsPerPixel);
-    assert.equal(fixture.camera.minZ, DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minZMeters);
+    assert.equal(
+      fixture.camera.minZ,
+      fixture.camera.radius * DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.perspectiveMinZRadiusRatio,
+    );
     assert.equal(fixture.camera.lowerRadiusLimit, DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters);
     assert.equal(clampDigitalTwinCameraRadius(0.001), DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters);
+  } finally {
+    disposeCamera(fixture);
+  }
+});
+
+test('透视相机缩远时动态提高近裁剪面，正交和近景仍保留 2 cm 下限', () => {
+  const fixture = createCamera();
+  try {
+    applyDigitalTwinCameraControlStandard(fixture.camera, { zoom: 10, pan: 10, rotate: 10 });
+    fixture.camera.maxZ = 12_000;
+
+    fixture.camera.radius = 2_400;
+    syncDigitalTwinCameraPanScale(fixture.camera);
+    assert.equal(fixture.camera.minZ, 2.4, '大尺度透视远景应按半径的 0.1% 提高近裁剪面');
+
+    fixture.camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+    syncDigitalTwinCameraPanScale(fixture.camera);
+    assert.equal(
+      fixture.camera.minZ,
+      DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minZMeters,
+      '正交投影使用线性深度，不应为改善透视深度精度而扩大近裁剪面',
+    );
+
+    fixture.camera.mode = Camera.PERSPECTIVE_CAMERA;
+    fixture.camera.radius = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters;
+    syncDigitalTwinCameraPanScale(fixture.camera);
+    assert.equal(
+      fixture.camera.minZ,
+      DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minZMeters,
+      '近景必须继续保留 2 cm 近裁剪保护，避免贴近模型时被裁空',
+    );
   } finally {
     disposeCamera(fixture);
   }

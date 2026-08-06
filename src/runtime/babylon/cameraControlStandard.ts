@@ -16,11 +16,11 @@ export type DigitalTwinCameraPose = {
 };
 
 /**
- * 数字孪生相机运动幅度标准 V1。
+ * 数字孪生相机运动幅度标准 V2。
  * 键位沿用编辑器既有习惯；编辑态、运行预览和发布 Viewer 只统一旋转、平移与缩放幅度。
  */
 export const DIGITAL_TWIN_CAMERA_CONTROL_STANDARD = {
-  version: 1,
+  version: 2,
   pointer: {
     selectButton: 0,
     rotateButton: 2,
@@ -43,6 +43,7 @@ export const DIGITAL_TWIN_CAMERA_CONTROL_STANDARD = {
   zoom: {
     minRadiusMeters: 0.2,
     minZMeters: 0.02,
+    perspectiveMinZRadiusRatio: 0.001,
   },
   sensitivity: {
     min: 1,
@@ -71,6 +72,22 @@ function getSensitivityMultiplier(value: number): number {
 export function clampDigitalTwinCameraRadius(radiusMeters: number): number {
   if (!Number.isFinite(radiusMeters)) return DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters;
   return Math.max(radiusMeters, DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters);
+}
+
+/**
+ * 透视投影的深度精度主要集中在 near plane 附近；远景时按观察距离同步放大近裁剪面，
+ * 避免大尺度模型的相邻表面因深度精度不足出现条纹、缺面，同时保留近景 2 cm 下限。
+ */
+function resolveDigitalTwinCameraMinZ(camera: ArcRotateCamera): number {
+  const { minZMeters, perspectiveMinZRadiusRatio } = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom;
+  if (camera.mode !== Camera.PERSPECTIVE_CAMERA) return minZMeters;
+  return Math.max(minZMeters, clampDigitalTwinCameraRadius(camera.radius) * perspectiveMinZRadiusRatio);
+}
+
+/** 仅在近裁剪面实际变化时更新投影矩阵，避免稳定画面每帧重复失效。 */
+function syncDigitalTwinCameraNearPlane(camera: ArcRotateCamera): void {
+  const nextMinZ = resolveDigitalTwinCameraMinZ(camera);
+  if (camera.minZ !== nextMinZ) camera.minZ = nextMinZ;
 }
 
 /**
@@ -106,10 +123,11 @@ function applyDigitalTwinCameraInputMap(camera: ArcRotateCamera): void {
 }
 
 /**
- * 按相机当前取景高度计算世界单位/屏幕像素，使远近场景中的中键平移保持一致的屏幕幅度。
- * 默认灵敏度 10 时，鼠标移动 1 px，画面中的观察目标也移动约 1 px。
+ * 按相机当前取景高度计算世界单位/屏幕像素，使远近场景中的中键平移保持一致的屏幕幅度；
+ * 同时同步依赖 radius 的透视近裁剪面。默认灵敏度 10 时，鼠标移动 1 px，画面中的观察目标也移动约 1 px。
  */
 export function syncDigitalTwinCameraPanScale(camera: ArcRotateCamera): void {
+  syncDigitalTwinCameraNearPlane(camera);
   const engine = camera.getEngine();
   const renderWidth = Math.max(1, engine.getRenderWidth());
   const renderHeight = Math.max(1, engine.getRenderHeight());
@@ -167,7 +185,7 @@ export function applyDigitalTwinCameraControlStandard(
   settings: DigitalTwinCameraSensitivity,
 ): void {
   applyDigitalTwinCameraInputMap(camera);
-  camera.minZ = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minZMeters;
+  syncDigitalTwinCameraNearPlane(camera);
   camera.lowerRadiusLimit = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters;
   camera.zoomToMouseLocation = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.wheel.zoomToMouseLocation;
   applyDigitalTwinCameraSensitivity(camera, settings);
