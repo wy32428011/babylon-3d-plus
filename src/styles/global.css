@@ -603,10 +603,13 @@ select {
 }
 
 .telemetry-runtime-fields {
-  max-height: 140px;
+  height: 140px;
+  min-height: 60px;
+  max-height: 480px;
   margin: 0;
   padding: 5px 6px;
   overflow: auto;
+  resize: vertical;
   border: 1px solid #34464a;
   border-radius: 3px;
   color: #c9e4e8;
