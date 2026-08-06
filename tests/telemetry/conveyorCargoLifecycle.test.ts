@@ -89,6 +89,7 @@ function makeHarness(binding: { cargoAutoDispose?: boolean } | null) {
 
 const RUNNING = { task: 1, front_has_goods: 1, back_has_goods: 0, movement_x: 1 };
 const STOPPED_EMPTY = { task: 1, front_has_goods: 0, back_has_goods: 0, movement_x: 0 };
+const DISPOSE_FRAME = { task: 1, front_has_goods: 0, back_has_goods: 0, movement_x: 0, mode: 2 };
 
 test('telemetryBinding 归一化保留 cargoAutoDispose 显式布尔值', () => {
   const base = { enabled: true, sourceId: 'default', deviceType: 'conveyor' };
@@ -97,18 +98,53 @@ test('telemetryBinding 归一化保留 cargoAutoDispose 显式布尔值', () => 
   assert.equal(normalizeTelemetryBindingComponent(base)?.cargoAutoDispose, undefined);
 });
 
-test('默认开启自动销毁：停线且光电无货时清空货物', () => {
+test('默认开启自动销毁：mode=2 且双光电无货时清空货物', () => {
   const h = makeHarness(null);
   try {
     h.apply(RUNNING);
-    assert.equal(h.state.conveyorCargoMeshes.size, 1, '光电有货且线体运行后必须刷出货物');
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '线体运行后必须刷出货物');
 
     h.apply(STOPPED_EMPTY);
-    h.apply(STOPPED_EMPTY);
-    assert.equal(h.state.conveyorCargoMeshes.size, 0, '停线且光电无货后货物必须被销毁');
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '仅停线（无 mode=2）不得销毁货物');
+
+    h.apply({ ...DISPOSE_FRAME, front_has_goods: 1 });
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, 'mode=2 但光电有货时不得销毁货物');
+
+    h.apply(DISPOSE_FRAME);
+    h.apply(DISPOSE_FRAME);
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, 'mode=2 且双光电无货后货物必须被销毁');
     assert.equal(h.model.conveyorTelemetry.cargoCode, null);
   } finally {
     h.dispose();
+  }
+});
+
+test('movement_x 非 0 即刷出，不依赖光电信号；刷出位置只由转向决定', () => {
+  const h = makeHarness(null);
+  try {
+    h.apply({ task: 5, front_has_goods: 0, back_has_goods: 0, movement_x: 1 });
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, 'task 模式：光电无货但 movement_x 非 0 必须刷出');
+    const forwardSpawnOffset = h.model.conveyorTelemetry.cargoTravelOffset;
+
+    h.apply({ task: 5, front_has_goods: 0, back_has_goods: 0, movement_x: 0, mode: 2 });
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '前置：货物已被自动销毁');
+
+    h.apply({ task: 6, front_has_goods: 0, back_has_goods: 0, movement_x: 2 });
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '反转同样必须刷出');
+    assert.ok(
+      Math.sign(h.model.conveyorTelemetry.cargoTravelOffset) === -Math.sign(forwardSpawnOffset),
+      '反转刷出位置必须与正转刷出位置相反',
+    );
+  } finally {
+    h.dispose();
+  }
+
+  const anonymous = makeHarness(null);
+  try {
+    anonymous.apply({ front_has_goods: 0, back_has_goods: 0, movement_x: 1 });
+    assert.equal(anonymous.state.conveyorCargoMeshes.size, 1, '匿名模式：光电无货但 movement_x 非 0 必须刷出');
+  } finally {
+    anonymous.dispose();
   }
 });
 
@@ -117,7 +153,7 @@ test('同 task 重发不得重走刷出+走行，只有新 task 才刷出', () =
   try {
     h.apply(RUNNING);
     assert.equal(h.state.conveyorCargoMeshes.size, 1);
-    h.apply(STOPPED_EMPTY);
+    h.apply(DISPOSE_FRAME);
     assert.equal(h.state.conveyorCargoMeshes.size, 0, '前置：货物已被自动销毁');
 
     // 同一 task 重发完整刷出帧：不得重新刷出。
@@ -139,15 +175,15 @@ test('同 task 重发不得重走刷出+走行，只有新 task 才刷出', () =
   }
 });
 
-test('关闭自动销毁：停线且光电无货时货物保持，等待下游凭 task 接管', () => {
+test('关闭自动销毁：mode=2 且光电无货时货物保持，等待下游凭 task 接管', () => {
   const h = makeHarness({ cargoAutoDispose: false });
   try {
     h.apply(RUNNING);
     assert.equal(h.state.conveyorCargoMeshes.size, 1);
 
-    h.apply(STOPPED_EMPTY);
-    h.apply(STOPPED_EMPTY);
-    assert.equal(h.state.conveyorCargoMeshes.size, 1, '关闭自动销毁后停线不得清空货物');
+    h.apply(DISPOSE_FRAME);
+    h.apply(DISPOSE_FRAME);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '关闭自动销毁后 mode=2 不得清空货物');
     assert.notEqual(h.model.conveyorTelemetry.cargoCode, null);
 
     // 同 task 重发完整刷出帧：不得重复刷出或重置回刷出端（线体运行中货物继续走行为正常）。

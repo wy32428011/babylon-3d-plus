@@ -39,6 +39,9 @@ import {
   type SpecializedTelemetrySharedState,
 } from './types';
 
+/** 输送线运行时单货物固定身份键：刷出与走行不依赖光电信号，位置只由 movement_x 方向决定。 */
+const CONVEYOR_CARGO_IDENTITY = 'cargo';
+
 export class ConveyorTelemetryDriver {
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
 
@@ -92,10 +95,10 @@ export class ConveyorTelemetryDriver {
   /**
    * 货物生命周期两种模式：
    * - task 模式（快照携带数值 task 字段）：仅当 task 相对 lastTask 发生变化才登记 pendingTask（新 task 边沿），
-   *   光电有货且线体运行（movement_x 非 0）后刷出；同 task 重复到达（含线体清空后的重发）不再触发刷出+走行；
+   *   线体运行（movement_x 非 0）即刷出；同 task 重复到达（含线体清空后的重发）不再触发刷出+走行；
    *   刷出时按 task 全局接管他设备货箱实例（插值接入本机走行）。
-   * - 匿名模式（无 task 字段）：光电有货且线体运行时刷出，设备自管理，不参与全局接管。
-   * 停线且双光电无货时是否销毁货物由 telemetryBinding.cargoAutoDispose 控制（缺省开启）：
+   * - 匿名模式（无 task 字段）：线体运行即刷出，设备自管理，不参与全局接管。
+   * mode==2 且双光电（前后）都无货时是否销毁货物由 telemetryBinding.cargoAutoDispose 控制（缺省开启）：
    * 开启时清空本机货物；关闭时货物保持原位，交由下游设备凭 task 接管决定去向。
    * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向：
    * 正转（=1）刷在轨迹起点向终点移动；反转（=2）刷在轨迹终点向起点移动。
@@ -109,8 +112,9 @@ export class ConveyorTelemetryDriver {
     const signalFields = readConveyorCargoSignalFields(model);
     const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods) ?? false;
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
+    const mode = readIntegerField(snapshot.fields, 'mode');
 
-    // task 语义：数值 0/缺失为无任务；仅新 task 边沿（相对 lastTask 变化）登记，等待光电确认刷出。
+    // task 语义：数值 0/缺失为无任务；仅新 task 边沿（相对 lastTask 变化）登记，线体运行即刷出。
     // lastTask 持久保存：货物销毁/被接管后同 task 重发不得重走刷出+走行。
     const taskValue = readIntegerField(snapshot.fields, 'task');
     const taskMode = taskValue !== null;
@@ -127,7 +131,8 @@ export class ConveyorTelemetryDriver {
       ? this.readConveyorMotionDirection(snapshot, translateConfig)
       : this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
 
-    if (movementDirection === 0 && !frontHasGoods && !backHasGoods) {
+    // 销货条件：mode==2 且双光电（前后）都无货；与线体是否在走行无关。
+    if (mode === 2 && !frontHasGoods && !backHasGoods) {
       // 自动销毁关闭时货物交由 task 由下游设备接管：本机保留货物与位姿，直到被凭 task 取走。
       if (model.telemetryBinding?.cargoAutoDispose === false) {
         if (!state.cargoCode) return;
@@ -148,32 +153,23 @@ export class ConveyorTelemetryDriver {
     const spawnOffsetForDirection = (direction: number): number => -direction * forwardSign * travelHalfRange;
 
     if (taskMode) {
-      // task 模式：待刷出任务经光电有货且线体运行确认后接管/自建；同 task 已被接管时 cargoCode 被清空且 pendingTask 为空，不会重生。
-      if (state.pendingTask && (frontHasGoods || backHasGoods) && movementDirection !== 0) {
-        const photoelectricSource = frontHasGoods ? 'front' : 'back';
+      // task 模式：待刷出任务在线体运行（movement_x 非 0）后即接管/自建，不再依赖光电信号；
+      // 同 task 已被接管时 cargoCode 被清空且 pendingTask 为空，不会重生。
+      if (state.pendingTask && movementDirection !== 0) {
         state.pendingTask = null;
         this.disposeConveyorCargoForAssetCode(model.assetCode);
         state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
-        state.cargoCode = photoelectricSource;
-        this.adoptOrCreateConveyorCargo(model, snapshot, photoelectricSource);
+        state.cargoCode = CONVEYOR_CARGO_IDENTITY;
+        this.adoptOrCreateConveyorCargo(model, snapshot, state.cargoCode);
       }
-    } else {
-      // 匿名模式：前端有货优先；有货但线体未运行时不刷出，等待 movement_x 非 0 确认；
-      // 运行中前后信号都暂失时维持原货物身份继续走行。
-      const photoelectricSource = frontHasGoods ? 'front' : backHasGoods ? 'back' : state.cargoCode;
-      if (!photoelectricSource) return;
-      const isNewCargo = state.cargoCode !== photoelectricSource;
-      if (isNewCargo) {
-        if (movementDirection === 0) return;
-        if (state.cargoCode) {
-          this.disposeConveyorCargoForAssetCode(model.assetCode);
-        }
-        state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
-        const cargo = this.getOrCreateConveyorCargo(model.assetCode, photoelectricSource);
-        cargo.containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
-        cargo.task = '';
-      }
-      state.cargoCode = photoelectricSource;
+    } else if (!state.cargoCode) {
+      // 匿名模式：线体运行即刷出，不再依赖光电信号；单货物身份固定，刷出位置只由运行方向决定。
+      if (movementDirection === 0) return;
+      state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
+      const cargo = this.getOrCreateConveyorCargo(model.assetCode, CONVEYOR_CARGO_IDENTITY);
+      cargo.containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
+      cargo.task = '';
+      state.cargoCode = CONVEYOR_CARGO_IDENTITY;
     }
 
     if (!state.cargoCode) return;
@@ -201,9 +197,9 @@ export class ConveyorTelemetryDriver {
   private adoptOrCreateConveyorCargo(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
-    photoelectricSource: string,
+    cargoCode: string,
   ): void {
-    const cargoKey = this.getConveyorCargoKey(model.assetCode, photoelectricSource);
+    const cargoKey = this.getConveyorCargoKey(model.assetCode, cargoCode);
     const task = model.conveyorTelemetry.currentTask ?? '';
     const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
     const adopted = this.context.adoptGlobalCargoByTask(task, cargoKey);
@@ -220,7 +216,7 @@ export class ConveyorTelemetryDriver {
       this.state.conveyorCargoMeshes.set(cargoKey, adopted);
       return;
     }
-    const cargo = this.getOrCreateConveyorCargo(model.assetCode, photoelectricSource);
+    const cargo = this.getOrCreateConveyorCargo(model.assetCode, cargoCode);
     cargo.task = task;
     cargo.containerCode = containerCode;
   }

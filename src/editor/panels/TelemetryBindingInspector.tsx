@@ -353,7 +353,7 @@ function RgvColumnBindingsEditor(props: {
               checked={binding.cargoAutoDispose ?? true}
               onChange={(event) => commit({ cargoAutoDispose: event.target.checked })}
             />
-            货物自动销毁（停线且光电无货时）
+            货物自动销毁（mode=2 且光电无货时）
           </label>
         </>
       ) : null}

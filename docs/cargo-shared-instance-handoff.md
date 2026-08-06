@@ -34,11 +34,11 @@
 
 | 设备 | 刷出时机 | 锁的实现 |
 |---|---|---|
-| conveyor | 新 task 边沿登记 `pendingTask` → 光电（front/back_has_goods）有货且 movement_x 非 0 时刷出/接管；刷出端由运行方向决定（正转刷轨迹起点、反转刷终点） | `currentTask` 同 task 不重生；停线且双光电无货时清空并复位 `currentTask`（允许 task 复用），pendingTask 保留等待确认 |
+| conveyor | 新 task 边沿登记 `pendingTask` → movement_x 非 0 即刷出/接管（不依赖光电信号）；刷出位置只由运行方向决定（正转刷轨迹起点、反转刷终点） | `currentTask` 同 task 不重生；mode==2 且双光电无货时清空并复位 `currentTask`（允许 task 复用），pendingTask 保留等待确认 |
 | stacker | command 边沿（取货初始化/放货补建）不变 | command 边沿不重复触发，天然不反抢 |
 | rgv | movement_z 起转边沿/放货补建不变 | 同上 |
 
-- conveyor 匿名模式（快照无数值 task 字段）保留光电有货 + 线体运行的双条件刷出逻辑，设备自管理，不参与全局接管。
+- conveyor 匿名模式（快照无数值 task 字段）线体运行（movement_x 非 0）即刷出，设备自管理，不参与全局接管。
 - 被接管的 conveyor 货物：`detachClaimedCargoByKey` 清空 `cargoCode`，`currentTask` 保持 → 光电持续有货也不会重生（取代了原 containerCode 时代的 `claimedAwaySource` 闩锁）。
 
 ### 4. 视觉连续性
@@ -65,7 +65,7 @@
 | `telemetry/specialized/types.ts` | 条目加 `task`/`handoff`；`CARGO_HANDOFF_SECONDS`；`normalizeCargoTask`/`createCargoHandoffState`/`resolveCargoHandoffPose`；`ConveyorModelTelemetryState` 改 `currentTask`/`pendingTask`；context 接口 `adoptGlobalCargoByTask` |
 | `telemetry/specialized/SpecializedTelemetryRuntime.ts` | 门面 adopt 实现（三表扫描 → detach → 返回条目） |
 | `telemetry/specialized/stackerDriver.ts` / `rgvDriver.ts` | 认领点改读 `${side}_task` + adopt-or-create；`detachClaimedCargoByKey`；pose 接 handoff 插值（deltaSeconds 透传） |
-| `telemetry/specialized/conveyorDriver.ts` | task 边沿登记 + 光电确认刷出；adopt-or-create；同 task 锁与复位；匿名模式保留 |
+| `telemetry/specialized/conveyorDriver.ts` | task 边沿登记 + movement_x 非 0 刷出；adopt-or-create；同 task 锁与复位；mode==2 且双光电无货销货；匿名模式保留 |
 | `telemetry/specialized/specializedModelAssets.ts` | conveyor 状态创建/重置同步新字段 |
 | 三个模拟器 | task 稳定语义 |
 
