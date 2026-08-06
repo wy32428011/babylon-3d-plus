@@ -27,7 +27,7 @@ import {
   type SceneSettings,
   type SceneSkyboxSettings,
 } from '../model/SceneDocument';
-import type { EntityComponents, LightKind, LocatorComponent, LocatorStorageDepth, MeshKind, PoiEffectComponent } from '../model/components';
+import type { AutoPatrolComponent, EntityComponents, LightKind, LocatorComponent, LocatorStorageDepth, MeshKind, PoiEffectComponent } from '../model/components';
 import {
   MODEL_GENERATOR_MAX_RULES,
   sanitizeModelGeneratorComponent,
@@ -36,6 +36,7 @@ import {
 import type { Vector3Data } from '../model/math';
 import { ENTITY_NAME_MAX_LENGTH, MODEL_ARRAY_ITEM_COUNT_MAX } from '../model/modelArray';
 import { isPoiEffectHexColor, isPoiEffectKind, sanitizePoiEffectComponent } from '../model/poiEffect';
+import { sanitizeAutoPatrolComponent } from '../model/autoPatrol';
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
 import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit } from '../model/sceneUnits';
 import {
@@ -156,7 +157,11 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     migratedScene.entities,
     sceneSettings,
   );
-  validateEntityHierarchy(migratedSkybox.entityIds, migratedSkybox.entities);
+  const normalizedPatrolEntities = enforceSingleAutoStartPatrol(
+    migratedSkybox.entityIds,
+    migratedSkybox.entities,
+  );
+  validateEntityHierarchy(migratedSkybox.entityIds, normalizedPatrolEntities);
   validateModelArrayInstanceReferences(migratedSkybox.entityIds, migratedSkybox.entities);
 
   if ('selectedEntityId' in scene && scene.selectedEntityId !== null && typeof scene.selectedEntityId !== 'string') {
@@ -167,7 +172,7 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     id,
     name,
     entityIds: migratedSkybox.entityIds,
-    entities: migratedSkybox.entities,
+    entities: normalizedPatrolEntities,
     selectedEntityId: null,
     mqttConfig: normalizeMqttConfig(scene.mqttConfig),
     fetchConfig: sanitizeFetchConfig(scene.fetchConfig),
@@ -484,6 +489,14 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
 
   if ('poiEffect' in components && components.poiEffect !== undefined) {
     normalized.poiEffect = normalizePoiEffect(components.poiEffect);
+  }
+
+  if ('autoPatrol' in components && components.autoPatrol !== undefined) {
+    normalized.autoPatrol = normalizeAutoPatrol(components.autoPatrol);
+    normalized.transform = {
+      ...normalized.transform,
+      scale: { x: 1, y: 1, z: 1 },
+    };
   }
 
   return normalized;
@@ -1037,6 +1050,39 @@ function normalizeModelGenerator(value: unknown): EntityComponents['modelGenerat
   return normalized;
 }
 
+function normalizeAutoPatrol(value: unknown): AutoPatrolComponent {
+  const normalized = sanitizeAutoPatrolComponent(value);
+  if (!normalized) throwUnsupportedSceneFileError();
+  return normalized;
+}
+
+/** 宽容处理外部场景中的重复自动启动标记，只保留 Hierarchy 顺序中的第一条。 */
+function enforceSingleAutoStartPatrol(
+  entityIds: readonly string[],
+  entities: Record<string, Entity>,
+): Record<string, Entity> {
+  let foundAutoStart = false;
+  let normalizedEntities = entities;
+  for (const entityId of entityIds) {
+    const entity = normalizedEntities[entityId];
+    const autoPatrol = entity?.components.autoPatrol;
+    if (!autoPatrol?.autoStart) continue;
+    if (!foundAutoStart) {
+      foundAutoStart = true;
+      continue;
+    }
+    if (normalizedEntities === entities) normalizedEntities = { ...entities };
+    normalizedEntities[entityId] = {
+      ...entity,
+      components: {
+        ...entity.components,
+        autoPatrol: { ...autoPatrol, autoStart: false },
+      },
+    };
+  }
+  return normalizedEntities;
+}
+
 function normalizeCamera(value: unknown): EntityComponents['camera'] {
   const camera = assertPlainObject(value);
 
@@ -1127,6 +1173,7 @@ function hasRuntimeComponent(components: EntityComponents): boolean {
     components.modelAsset ||
     components.modelGenerator ||
     components.poiEffect ||
+    components.autoPatrol ||
     components.camera ||
     components.light,
   );

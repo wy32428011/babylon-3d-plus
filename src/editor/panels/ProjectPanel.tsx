@@ -85,6 +85,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
   const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
+  const createAutoPatrol = useEditorStore((state) => state.createAutoPatrol);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
   const projectAssetFocusRequest = useEditorStore((state) => state.projectAssetFocusRequest);
   const consumeProjectAssetFocusRequest = useEditorStore((state) => state.consumeProjectAssetFocusRequest);
@@ -572,6 +573,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
     if (props.readOnly) return;
 
     if (isBuiltInProjectLibraryItem(item)) {
+      if (item.builtIn.kind === 'auto-patrol') {
+        createAutoPatrol();
+        return;
+      }
+
       if (item.builtIn.kind === 'model-generator') {
         createModelGenerator();
         return;

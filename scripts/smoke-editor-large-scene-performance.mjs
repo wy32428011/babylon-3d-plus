@@ -547,11 +547,32 @@ function verifyThinInstanceFrustumCompaction(EntityArrayThinInstanceBatch) {
     assert.ok(firstMesh.thinInstanceCount > 0);
     assert.ok(batch.batches[0].selectionBuffer.includes(3), '可见选中实体必须保留 SelectionOutline ID');
 
-    camera.position.x = 1_004;
-    camera.setTarget(new Vector3(1_004, 0, 0));
-    scene.render();
+    const renderMatrixBufferBeforeExpansion = batch.batches[0].matrixBuffer;
+    const matrixUploadInstanceCounts = [];
+    const originalThinInstanceBufferUpdated = firstMesh.thinInstanceBufferUpdated;
+    firstMesh.thinInstanceBufferUpdated = function recordMatrixUploadInstanceCount(kind) {
+      if (kind === 'matrix') matrixUploadInstanceCounts.push(this.thinInstanceCount);
+      return originalThinInstanceBufferUpdated.call(this, kind);
+    };
+    try {
+      camera.position.x = 1_004;
+      camera.setTarget(new Vector3(1_004, 0, 0));
+      scene.render();
+    } finally {
+      firstMesh.thinInstanceBufferUpdated = originalThinInstanceBufferUpdated;
+    }
     const farVisibleCount = firstMesh.thinInstanceCount;
-    assert.ok(farVisibleCount > 0 && farVisibleCount <= 90, '相机移到远处分组后必须只提交远处可见实例');
+    assert.ok(farVisibleCount > nearVisibleCount && farVisibleCount <= 90, '相机移到远处分组后必须扩容并只提交远处可见实例');
+    assert.strictEqual(
+      batch.batches[0].matrixBuffer,
+      renderMatrixBufferBeforeExpansion,
+      '视锥可见数量扩容必须复用已有完整容量矩阵缓冲',
+    );
+    assert.equal(
+      matrixUploadInstanceCounts.at(-1),
+      farVisibleCount,
+      '复用矩阵缓冲扩容时，必须先更新 thinInstanceCount 再通知 Babylon 上传全部可见矩阵',
+    );
     const farIds = Array.from({ length: farVisibleCount }, (_, index) => (
       batch.getEntityIdForThinInstance(firstMesh, index)
     ));
@@ -1085,26 +1106,26 @@ async function verifySceneViewWiring() {
     readFile(SCENE_RUNTIME_PATH, 'utf8'),
   ]);
   const fullSyncStart = panelSource.indexOf('/** 参数值变化走单实体同步');
-  const selectionSyncStart = panelSource.indexOf('/** 单选/文件夹选区变化只刷新目标表现');
+  const selectionSyncStart = panelSource.indexOf('/** Hierarchy 选区变化只刷新目标表现');
   assert.ok(fullSyncStart >= 0 && selectionSyncStart > fullSyncStart, 'SceneView 必须拆分内容与选择 effect');
 
   const fullSyncBlock = panelSource.slice(fullSyncStart, selectionSyncStart);
   const fullSyncDependencies = fullSyncBlock.slice(fullSyncBlock.lastIndexOf('}, ['));
   assert.match(
     fullSyncBlock,
-    /runtime\.syncModelParameters\(editRuntimeSceneDocument, modelParameterSyncEntityId\)/,
+    /runtime\.syncModelParameters\([\s\S]*?editRuntimeSceneDocument,[\s\S]*?modelParameterSyncEntityId,[\s\S]*?hierarchySelectionIds[\s\S]*?\)/,
     '参数 effect 必须调用单实体参数同步',
   );
-  assert.match(fullSyncBlock, /runtime\.sync\(editRuntimeSceneDocument\)/, '其它内容变化必须保留完整同步');
-  assert.match(fullSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '内容 effect 只能取消过期的文件夹组拖动');
+  assert.match(fullSyncBlock, /runtime\.sync\(editRuntimeSceneDocument, useEditorStore\.getState\(\)\.hierarchySelectionIds\)/, '其它内容变化必须保留完整同步和完整多选');
+  assert.match(fullSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '内容 effect 只能取消过期的选区群组拖动');
   assert.doesNotMatch(fullSyncBlock, /gizmo\.cancelActiveDrag\(\)/, '普通实体预览写入文档时不得被内容 effect 打断');
   assert.doesNotMatch(fullSyncDependencies, /selectedEntityId[,\]]/, '完整同步依赖不得包含纯选择字段');
 
   const selectionEffectStart = panelSource.indexOf('  useEffect(() => {', selectionSyncStart);
   const selectionSyncEnd = panelSource.indexOf('  useEffect(() => {', selectionEffectStart + 20);
   const selectionSyncBlock = panelSource.slice(selectionSyncStart, selectionSyncEnd);
-  assert.match(selectionSyncBlock, /runtime\.syncSelection\(editRuntimeSceneDocument\)/, '选区 effect 必须调用专用同步');
-  assert.match(selectionSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '选区 effect 只能主动取消文件夹组预览');
+  assert.match(selectionSyncBlock, /runtime\.syncSelection\(editRuntimeSceneDocument, hierarchySelectionIds\)/, '编辑态选区 effect 必须用完整多选调用专用同步');
+  assert.match(selectionSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '选区 effect 只能主动取消选区群组预览');
   assert.doesNotMatch(selectionSyncBlock, /gizmo\.cancelActiveDrag\(\)/, '普通实体拖动不得因预览文档引用变化被选区 effect 打断');
   assert.doesNotMatch(selectionSyncBlock, /runtime\.sync\(/, '选区 effect 不得回退完整同步');
   const selectionSyncDependencies = selectionSyncBlock.slice(selectionSyncBlock.lastIndexOf('}, ['));
@@ -1159,11 +1180,11 @@ async function verifySceneViewWiring() {
 
   const groupCallbacksStart = panelSource.indexOf('        beginGroupTranslation:');
   const groupCallbacksEnd = panelSource.indexOf('      });', groupCallbacksStart);
-  assert.ok(groupCallbacksStart >= 0 && groupCallbacksEnd > groupCallbacksStart, 'SceneView 必须接入文件夹组 Gizmo 生命周期');
+  assert.ok(groupCallbacksStart >= 0 && groupCallbacksEnd > groupCallbacksStart, 'SceneView 必须接入 Hierarchy 群组 Gizmo 生命周期');
   const groupCallbacksBlock = panelSource.slice(groupCallbacksStart, groupCallbacksEnd);
   assert.match(groupCallbacksBlock, /beginFolderGroupTranslation/, '组拖动开始必须只建立运行时会话');
   assert.match(groupCallbacksBlock, /updateFolderGroupTranslation/, '组拖动过程必须只更新运行时绝对 delta');
-  assert.match(groupCallbacksBlock, /commitFolderGroupTranslation/, '组拖动结束必须调用 Store 原子提交');
+  assert.match(groupCallbacksBlock, /commitHierarchyGroupTranslation/, '组拖动结束必须调用通用 Store 原子提交');
   assert.doesNotMatch(groupCallbacksBlock, /runtime\.sync\(|createEditModeModelThinInstancePlan/, '拖动帧不得触发完整场景同步或 thinInstance 规划');
   assert.match(
     runtimeSource,

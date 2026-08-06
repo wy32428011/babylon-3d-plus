@@ -1,0 +1,114 @@
+.auto-patrol-controls {
+  position: absolute;
+  z-index: 18;
+  right: 14px;
+  bottom: 14px;
+  width: min(310px, calc(100% - 28px));
+  border: 1px solid rgba(65, 210, 235, 0.56);
+  border-radius: 8px;
+  color: #eefcff;
+  background: rgba(13, 24, 29, 0.92);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(8px);
+}
+
+.auto-patrol-controls.is-collapsed {
+  width: auto;
+}
+
+.auto-patrol-controls header,
+.auto-patrol-controls p {
+  margin: 0;
+}
+
+.auto-patrol-controls-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 11px;
+  border: 0;
+  color: #dffaff;
+  background: transparent;
+}
+
+.auto-patrol-controls-toggle > span:first-child {
+  color: #3ad6ef;
+  font-size: 22px;
+}
+
+.auto-patrol-controls-body {
+  display: grid;
+  gap: 9px;
+  padding: 0 11px 11px;
+}
+
+.auto-patrol-controls-body > label {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.auto-patrol-controls select {
+  min-width: 0;
+  height: 28px;
+  border: 1px solid #46636a;
+  border-radius: 3px;
+  color: #edfaff;
+  background: #18282d;
+}
+
+.auto-patrol-controls-route {
+  overflow: hidden;
+  color: #c9f7ff;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auto-patrol-controls-status {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 8px;
+  color: #a9c5cb;
+  font-size: 12px;
+}
+
+.auto-patrol-controls-status strong {
+  color: #77e8fb;
+}
+
+.auto-patrol-controls-status small {
+  margin-left: auto;
+  color: #ffd37b;
+}
+
+.auto-patrol-controls-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.auto-patrol-controls-actions button {
+  min-width: 48px;
+  min-height: 27px;
+  flex: 1 1 auto;
+  border: 1px solid #48666d;
+  border-radius: 4px;
+  color: #e9fbff;
+  background: #20343a;
+}
+
+.auto-patrol-controls-actions button:hover:not(:disabled) {
+  border-color: #38cfe8;
+  background: #28505a;
+}
+
+.auto-patrol-controls-actions button:disabled {
+  opacity: 0.42;
+}

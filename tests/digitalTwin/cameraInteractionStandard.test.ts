@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ArcRotateCamera, NullEngine, Scene, Vector3 } from '@babylonjs/core';
+import { ArcRotateCamera, Camera, NullEngine, Scene, Vector3 } from '@babylonjs/core';
 
 import {
   DIGITAL_TWIN_CAMERA_CONTROL_STANDARD,
   type DigitalTwinCameraPose,
   applyDigitalTwinCameraControlStandard,
+  attachDigitalTwinCameraControl,
   applyDigitalTwinCameraSensitivity,
   clampDigitalTwinCameraRadius,
   hasDigitalTwinCameraPoseChanged,
@@ -62,6 +63,35 @@ test('数字孪生保留原有右键旋转、中键平移、Ctrl+左键平移和
   }
 });
 
+test('Babylon 相机控制重新绑定后，中键拖拽仍会产生平移输入', () => {
+  const fixture = createCamera();
+  try {
+    const sensitivity = { zoom: 10, pan: 10, rotate: 10 };
+    attachDigitalTwinCameraControl(fixture.camera, sensitivity);
+    fixture.camera.detachControl();
+    attachDigitalTwinCameraControl(fixture.camera, sensitivity);
+
+    assert.equal(fixture.camera.movement.input.resolveInteraction('pointer', { button: 1 })?.interaction, 'pan');
+    assert.equal(fixture.camera.movement.input.resolveInteraction('pointer', { button: 2 })?.interaction, 'rotate');
+    assert.equal(fixture.camera.movement.input.getEntries('pointer', 'pan').length, 2);
+
+    const pointerInput = fixture.camera.inputs.attached.pointers as unknown as {
+      onButtonDown: (event: { button: number; ctrlKey: boolean; altKey: boolean; shiftKey: boolean }) => void;
+      onTouch: (point: null, offsetX: number, offsetY: number) => void;
+      onButtonUp: (event: unknown) => void;
+    };
+    assert.ok(pointerInput, 'ArcRotateCamera 必须启用指针输入');
+    pointerInput.onButtonDown({ button: 1, ctrlKey: false, altKey: false, shiftKey: false });
+    pointerInput.onTouch(null, 12, 8);
+    pointerInput.onButtonUp({});
+
+    assert.deepEqual(fixture.camera.movement.panAccumulatedPixels.asArray(), [-12, 8, 0]);
+    assert.deepEqual(fixture.camera.movement.rotationAccumulatedPixels.asArray(), [0, 0, 0]);
+  } finally {
+    disposeCamera(fixture);
+  }
+});
+
 test('重复应用数字孪生相机标准不会产生重复或额外鼠标映射', () => {
   const fixture = createCamera();
   try {
@@ -101,9 +131,43 @@ test('旋转角度、屏幕空间平移幅度和滚轮缩放按统一基准及�
     fixture.camera.radius *= 2;
     syncDigitalTwinCameraPanScale(fixture.camera);
     assertClose(fixture.camera.movement.panSpeed, defaultWorldUnitsPerPixel);
-    assert.equal(fixture.camera.minZ, DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minZMeters);
+    assert.equal(
+      fixture.camera.minZ,
+      fixture.camera.radius * DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.perspectiveMinZRadiusRatio,
+    );
     assert.equal(fixture.camera.lowerRadiusLimit, DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters);
     assert.equal(clampDigitalTwinCameraRadius(0.001), DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters);
+  } finally {
+    disposeCamera(fixture);
+  }
+});
+
+test('透视相机缩远时动态提高近裁剪面，正交和近景仍保留 2 cm 下限', () => {
+  const fixture = createCamera();
+  try {
+    applyDigitalTwinCameraControlStandard(fixture.camera, { zoom: 10, pan: 10, rotate: 10 });
+    fixture.camera.maxZ = 12_000;
+
+    fixture.camera.radius = 2_400;
+    syncDigitalTwinCameraPanScale(fixture.camera);
+    assert.equal(fixture.camera.minZ, 2.4, '大尺度透视远景应按半径的 0.1% 提高近裁剪面');
+
+    fixture.camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+    syncDigitalTwinCameraPanScale(fixture.camera);
+    assert.equal(
+      fixture.camera.minZ,
+      DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minZMeters,
+      '正交投影使用线性深度，不应为改善透视深度精度而扩大近裁剪面',
+    );
+
+    fixture.camera.mode = Camera.PERSPECTIVE_CAMERA;
+    fixture.camera.radius = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters;
+    syncDigitalTwinCameraPanScale(fixture.camera);
+    assert.equal(
+      fixture.camera.minZ,
+      DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minZMeters,
+      '近景必须继续保留 2 cm 近裁剪保护，避免贴近模型时被裁空',
+    );
   } finally {
     disposeCamera(fixture);
   }

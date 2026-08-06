@@ -9,6 +9,9 @@ import {
 import {
   commitFolderGroupRotation as commitFolderGroupRotationState,
   commitFolderGroupTranslation as commitFolderGroupTranslationState,
+  commitHierarchyGroupRotation as commitHierarchyGroupRotationState,
+  commitHierarchyGroupTranslation as commitHierarchyGroupTranslationState,
+  updateAutoPatrolCommand,
   createEntityCommand,
   createFolderCommand,
   moveEntitiesToFolderCommand,
@@ -29,6 +32,8 @@ import {
   updateTransformCommand,
   type FolderGroupRotationInput,
   type FolderGroupTranslationInput,
+  type HierarchyGroupRotationInput,
+  type HierarchyGroupTranslationInput,
 } from '../commands/entityCommands';
 import {
   DEFAULT_EDITOR_GRID_SETTINGS,
@@ -43,6 +48,8 @@ import type { AssetEntry } from '../assets/AssetDatabase';
 import { createImportedAssetIndexes, findImportedAssetForModelAsset } from '../assets/modelAssetRelink';
 import { createId } from '../../shared/ids';
 import type {
+  AutoPatrolComponent,
+  AutoPatrolWaypoint,
   CadReferenceComponent,
   LightComponent,
   LightKind,
@@ -60,13 +67,14 @@ import type {
   TransformComponent,
 } from '../model/components';
 import type { Entity } from '../model/Entity';
+import { resolveLightTransformTool } from '../model/lightEditor';
 import { STANDARD_CAMERA_VIEW_LABELS } from '../model/cameraOrientation';
 import {
   collectEntitySubtreeIds,
   getTopLevelHierarchyEntityIds,
   isEntityAncestorOf,
   isEntityEffectivelyLocked,
-  resolveSingleSelectedFolderId,
+  isHierarchyGroupTransformSelection,
 } from '../model/entityHierarchy';
 import { createArrayAssetNumber, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
 import {
@@ -83,6 +91,7 @@ import {
   MODEL_ASSET_CODE_MAX_LENGTH,
   createDefaultSceneEnvironmentTransform,
   createEmptySceneDocument,
+  createAutoPatrolEntity,
   createCadReferenceEntity,
   createFolderEntity,
   createLightEntity,
@@ -115,6 +124,14 @@ import {
   type SceneDocument,
 } from '../model/SceneDocument';
 import type { Vector3Data } from '../model/math';
+import {
+  AUTO_PATROL_MAX_WAYPOINTS,
+  cloneAutoPatrolComponent,
+  createAutoPatrolWaypointFromWorldPose,
+  sanitizeAutoPatrolComponent,
+  updateAutoPatrolWaypointView,
+} from '../model/autoPatrol';
+import type { AutoPatrolPlaybackSnapshot } from '../../runtime/babylon/AutoPatrolPlaybackController';
 import { vector3 } from '../model/math';
 import {
   deriveLocatorDimensionsFromBinding,
@@ -234,12 +251,27 @@ export type CameraResetRequest = {
   id: string;
 };
 
+export type AutoPatrolCameraRequest =
+  | { id: string; kind: 'capture'; entityId: string; waypointId: string | null }
+  | { id: string; kind: 'focus'; entityId: string; waypointId: string };
+
+export type AutoPatrolPlaybackRequest = {
+  id: string;
+  action: 'start' | 'pause' | 'resume' | 'stop' | 'return';
+  routeId: string | null;
+};
+
 /** 当前 Inspector 选中模型的运行时米制测量快照；该状态不进入场景持久化或撤销历史。 */
 export type SelectedModelMeasurement = ModelMeasurementResult & { entityId: string };
 
 type TransformField = 'position' | 'rotation' | 'scale';
 export type TransformTool = 'translate' | 'rotate' | 'scale';
 export type TransformSpace = 'local' | 'global';
+
+type GroupTransformModeRestore = {
+  tool: TransformTool;
+  space: TransformSpace;
+};
 export type TransformSnapSettingKey = 'position' | 'rotationDegrees' | 'scale';
 export type SceneSensitivitySettingKey = keyof SceneSensitivitySettings;
 
@@ -267,6 +299,18 @@ const DEFAULT_SNAP_SETTINGS: TransformSnapSettings = {
   position: 0.5,
   rotationDegrees: 15,
   scale: 0.1,
+};
+
+const RADIANS_TO_DEGREES = 180 / Math.PI;
+
+const AUTO_PATROL_IDLE_PLAYBACK_SNAPSHOT: AutoPatrolPlaybackSnapshot = {
+  phase: 'idle',
+  routeId: null,
+  routeName: null,
+  currentWaypointIndex: null,
+  waypointCount: 0,
+  pausedByManualInput: false,
+  canReturnToStart: false,
 };
 
 const LOCATOR_MIN_DIMENSION = 0.01;
@@ -312,6 +356,10 @@ type EditorState = {
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
   cameraResetRequest: CameraResetRequest | null;
+  selectedAutoPatrolWaypointId: string | null;
+  autoPatrolCameraRequest: AutoPatrolCameraRequest | null;
+  autoPatrolPlaybackRequest: AutoPatrolPlaybackRequest | null;
+  autoPatrolPlaybackSnapshot: AutoPatrolPlaybackSnapshot;
   cameraOrientation: CameraOrientation;
   cameraProjection: CameraProjection;
   selectedModelMeasurement: SelectedModelMeasurement | null;
@@ -319,6 +367,7 @@ type EditorState = {
   logs: EditorLog[];
   transformTool: TransformTool;
   transformSpace: TransformSpace;
+  groupTransformModeRestore: GroupTransformModeRestore | null;
   snapSettings: TransformSnapSettings;
   gridSettings: EditorGridSettings;
   trajectoryVisible: boolean;
@@ -361,6 +410,13 @@ type EditorState = {
   consumeCameraPoseSaveRequest: (requestId: string, pose: SceneCameraPose) => void;
   requestCameraReset: () => void;
   consumeCameraResetRequest: (requestId: string) => void;
+  selectAutoPatrolWaypoint: (waypointId: string | null) => void;
+  requestAutoPatrolCapture: () => void;
+  requestAutoPatrolFocus: (waypointId: string) => void;
+  consumeAutoPatrolCameraRequest: (requestId: string, pose?: SceneCameraPose) => void;
+  requestAutoPatrolPlayback: (action: AutoPatrolPlaybackRequest['action'], routeId?: string | null) => void;
+  consumeAutoPatrolPlaybackRequest: (requestId: string) => void;
+  setAutoPatrolPlaybackSnapshot: (snapshot: AutoPatrolPlaybackSnapshot) => void;
   setCameraOrientation: (orientation: CameraOrientation) => void;
   toggleCameraStandardView: (orientation: StandardCameraOrientation) => void;
   setCameraProjection: (projection: CameraProjection) => void;
@@ -369,6 +425,7 @@ type EditorState = {
   createLocator: (placementPosition?: Vector3Data) => void;
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
   createModelGenerator: (placementPosition?: Vector3Data) => void;
+  createAutoPatrol: (placementPosition?: Vector3Data) => void;
   createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
@@ -403,6 +460,8 @@ type EditorState = {
   updateSelectedModelAssetCode: (assetCode: string) => void;
   updateSelectedModelGenerator: (component: ModelGeneratorComponent, label?: string) => void;
   updateSelectedPoiEffect: (component: PoiEffectComponent, label?: string) => void;
+  updateSelectedAutoPatrol: (component: AutoPatrolComponent, label?: string) => void;
+  commitSelectedAutoPatrolWaypointTransform: (waypointId: string, transform: TransformComponent) => void;
   updateSelectedTelemetryBinding: (binding: import('../model/telemetryBinding').TelemetryBindingComponent | null) => void;
   restoreSelectedTelemetryBindingDefault: () => void;
   updateSelectedModelParameterValue: (key: string, value: ModelParameterValue) => void;
@@ -412,6 +471,8 @@ type EditorState = {
   commitEntityTransform: (entityId: string, before: TransformComponent, after: TransformComponent) => void;
   commitFolderGroupTranslation: (input: FolderGroupTranslationInput) => boolean;
   commitFolderGroupRotation: (input: FolderGroupRotationInput) => boolean;
+  commitHierarchyGroupTranslation: (input: HierarchyGroupTranslationInput) => boolean;
+  commitHierarchyGroupRotation: (input: HierarchyGroupRotationInput) => boolean;
   previewSelectedTransform: (transform: TransformComponent) => void;
   commitSelectedTransform: (before: TransformComponent, after: TransformComponent) => void;
   updateMqttConfig: (config: MqttConfig) => void;
@@ -469,9 +530,16 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     projectAssetFocusRequest: null,
     cameraPoseSaveRequest: null,
     cameraResetRequest: { id: createId('camera_reset') },
+    selectedAutoPatrolWaypointId: null,
+    autoPatrolCameraRequest: null,
+    autoPatrolPlaybackRequest: null,
+    autoPatrolPlaybackSnapshot: AUTO_PATROL_IDLE_PLAYBACK_SNAPSHOT,
     cameraOrientation: camera.savedOrientation,
     cameraProjection: camera.savedProjection,
     selectedModelMeasurement: null,
+    transformTool: state.groupTransformModeRestore?.tool ?? state.transformTool,
+    transformSpace: state.groupTransformModeRestore?.space ?? state.transformSpace,
+    groupTransformModeRestore: null,
     logs: prependLog(state.logs, message),
   };
 }
@@ -576,6 +644,7 @@ function cloneTransform(transform: TransformComponent): TransformComponent {
 function normalizeTransformForEntity(entity: Entity, transform: TransformComponent): TransformComponent {
   const normalized = cloneTransform(transform);
   if (entity.components.skybox) normalized.scale = normalizeSkyboxSphereScale(normalized.scale);
+  if (entity.components.autoPatrol) normalized.scale = { x: 1, y: 1, z: 1 };
   return normalized;
 }
 
@@ -1058,15 +1127,37 @@ function sanitizeHierarchySelection(scene: SceneDocument, entityIds: string[]): 
   return [...new Set(entityIds)].filter((entityId) => Boolean(scene.entities[entityId]));
 }
 
-/** 单文件夹成为主选区时统一归一到世界坐标移动，其他选区保持当前工具状态。 */
+/** 群组选区临时强制世界坐标移动/旋转，恢复单选时还原进入群组前的用户工具偏好。 */
 function resolveSelectionTransformMode(
-  state: Pick<EditorState, 'transformTool' | 'transformSpace'>,
+  state: Pick<EditorState, 'transformTool' | 'transformSpace' | 'groupTransformModeRestore'>,
   scene: SceneDocument,
   hierarchySelectionIds: readonly string[],
-): Pick<EditorState, 'transformTool' | 'transformSpace'> {
-  return resolveSingleSelectedFolderId(scene, hierarchySelectionIds)
-    ? { transformTool: 'translate', transformSpace: 'global' }
-    : { transformTool: state.transformTool, transformSpace: state.transformSpace };
+): Pick<EditorState, 'transformTool' | 'transformSpace' | 'groupTransformModeRestore'> {
+  if (isHierarchyGroupTransformSelection(scene, hierarchySelectionIds)) {
+    return {
+      transformTool: state.transformTool === 'rotate' ? 'rotate' : 'translate',
+      transformSpace: 'global',
+      groupTransformModeRestore: state.groupTransformModeRestore ?? {
+        tool: state.transformTool,
+        space: state.transformSpace,
+      },
+    };
+  }
+
+  const requestedTool = state.groupTransformModeRestore?.tool ?? state.transformTool;
+  const requestedSpace = state.groupTransformModeRestore?.space ?? state.transformSpace;
+  const selectedEntity = scene.selectedEntityId ? scene.entities[scene.selectedEntityId] : null;
+  const lightKind = selectedEntity?.components.light?.lightKind;
+  const transformTool = selectedEntity?.components.autoPatrol && requestedTool === 'scale'
+    ? 'translate'
+    : lightKind
+      ? resolveLightTransformTool(lightKind, requestedTool)
+      : requestedTool;
+  return {
+    transformTool,
+    transformSpace: requestedSpace,
+    groupTransformModeRestore: null,
+  };
 }
 
 /** 根据当前场景生成不重名的新建文件夹名称。 */
@@ -1117,6 +1208,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
     ...(entity.components.telemetryBinding ? { telemetryBinding: cloneJsonValue(entity.components.telemetryBinding) } : {}),
     ...(entity.components.poiEffect ? { poiEffect: { ...entity.components.poiEffect } } : {}),
+    ...(entity.components.autoPatrol ? { autoPatrol: cloneAutoPatrolComponent(entity.components.autoPatrol) } : {}),
     ...(entity.components.camera ? { camera: { ...entity.components.camera } } : {}),
     ...(entity.components.light ? { light: cloneLight(entity.components.light) } : {}),
   };
@@ -1164,6 +1256,28 @@ function getEntityAssetNumberTarget(entity: Entity): EntityAssetNumberOverride |
 /** 判断实体是否携带阵列可管理的资产编号字段。 */
 function hasEntityAssetNumber(entity: Entity): boolean {
   return getEntityAssetNumberTarget(entity) !== null;
+}
+
+/** 生成不重复的自动巡检名称：自动巡检、自动巡检 2、…。 */
+function createNextAutoPatrolName(scene: SceneDocument): string {
+  const existingNames = new Set(Object.values(scene.entities).map((entity) => entity.name));
+  const baseName = '自动巡检';
+  if (!existingNames.has(baseName)) return baseName;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${baseName} ${index}`;
+    if (!existingNames.has(candidate)) return candidate;
+  }
+  return `${baseName} ${Date.now()}`;
+}
+
+/** 返回当前仍有效的巡检节点子选区。 */
+function sanitizeSelectedAutoPatrolWaypointId(
+  scene: SceneDocument,
+  waypointId: string | null,
+): string | null {
+  if (!waypointId || !scene.selectedEntityId) return null;
+  const waypoints = scene.entities[scene.selectedEntityId]?.components.autoPatrol?.waypoints;
+  return waypoints?.some((waypoint) => waypoint.id === waypointId) ? waypointId : null;
 }
 
 /** 生成不重复的模型生成器名称：模型生成器、模型生成器 2、… */
@@ -1280,6 +1394,9 @@ function createDuplicatedRuntimeEntity(
           ? overrides.assetNumber.value
           : createModelAssetCode(extractModelAssetCodePrefix(components.modelAsset.assetCode), id),
     };
+  }
+  if (components.autoPatrol) {
+    components.autoPatrol = { ...components.autoPatrol, autoStart: false };
   }
   if (components.locator && overrides.assetNumber?.kind === 'locator') {
     components.locator = {
@@ -2107,6 +2224,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   projectAssetFocusRequest: null,
   cameraPoseSaveRequest: null,
   cameraResetRequest: null,
+  selectedAutoPatrolWaypointId: null,
+  autoPatrolCameraRequest: null,
+  autoPatrolPlaybackRequest: null,
+  autoPatrolPlaybackSnapshot: AUTO_PATROL_IDLE_PLAYBACK_SNAPSHOT,
   cameraOrientation: 'orbit',
   cameraProjection: 'perspective',
   selectedModelMeasurement: null,
@@ -2114,6 +2235,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   logs: [{ id: 'log_boot', message: '编辑器已启动。' }],
   transformTool: 'translate',
   transformSpace: 'local',
+  groupTransformModeRestore: null,
   snapSettings: DEFAULT_SNAP_SETTINGS,
   gridSettings: DEFAULT_EDITOR_GRID_SETTINGS,
   trajectoryVisible: false,
@@ -2152,6 +2274,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         runtimeMode: 'preview',
         environmentAdjustmentActive: false,
         cameraPoseSaveRequest: null,
+        autoPatrolCameraRequest: null,
+        selectedAutoPatrolWaypointId: null,
         logs: prependLog(state.logs, '已进入运行预览模式。'),
       };
     });
@@ -2169,32 +2293,58 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setTransformTool: (tool) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换变换工具');
-      const folderId = resolveSingleSelectedFolderId(state.scene, state.hierarchySelectionIds);
-      if (folderId && tool === 'scale') {
+      if (isHierarchyGroupTransformSelection(state.scene, state.hierarchySelectionIds)) {
+        const resolvedTool = tool === 'rotate' ? 'rotate' : 'translate';
+        if (tool === 'scale') {
+          return {
+            transformTool: resolvedTool,
+            transformSpace: 'global',
+            logs: prependLog(state.logs, '选区群组不支持缩放，已切回世界坐标移动工具。'),
+          };
+        }
+        if (state.transformTool === resolvedTool && state.transformSpace === 'global') return state;
         return {
-          transformTool: 'translate',
+          transformTool: resolvedTool,
           transformSpace: 'global',
-          logs: prependLog(state.logs, '文件夹整组不支持缩放，已切回世界坐标移动工具。'),
+          logs: prependLog(state.logs, `切换群组工具：${resolvedTool}`),
         };
       }
-      if (state.transformTool === tool && (!folderId || state.transformSpace === 'global')) return state;
+
+      const selectedEntity = getSelectedEntity(state);
+      const selectedLightKind = selectedEntity?.components.light?.lightKind;
+      const patrolScaleUnsupported = Boolean(selectedEntity?.components.autoPatrol && tool === 'scale');
+      const resolvedTool = patrolScaleUnsupported
+        ? 'translate'
+        : selectedLightKind
+          ? resolveLightTransformTool(selectedLightKind, tool)
+          : tool;
+      if ((selectedLightKind || patrolScaleUnsupported) && resolvedTool !== tool) {
+        return {
+          transformTool: resolvedTool,
+          logs: prependLog(
+            state.logs,
+            patrolScaleUnsupported
+              ? '自动巡检不支持缩放，已切回移动工具。'
+              : `${selectedLightKind} 灯光不支持 ${tool}，已切回移动工具。`,
+          ),
+        };
+      }
+      if (state.transformTool === resolvedTool) return state;
 
       return {
-        transformTool: tool,
-        transformSpace: folderId ? 'global' : state.transformSpace,
-        logs: prependLog(state.logs, `切换工具：${tool}`),
+        transformTool: resolvedTool,
+        logs: prependLog(state.logs, `切换工具：${resolvedTool}`),
       };
     });
   },
   setTransformSpace: (space) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换坐标空间');
-      const folderId = resolveSingleSelectedFolderId(state.scene, state.hierarchySelectionIds);
-      if (folderId && space !== 'global') {
+      if (isHierarchyGroupTransformSelection(state.scene, state.hierarchySelectionIds) && space !== 'global') {
         return {
           transformTool: state.transformTool === 'scale' ? 'translate' : state.transformTool,
           transformSpace: 'global',
-          logs: prependLog(state.logs, '文件夹整组移动和旋转仅支持世界坐标，已忽略局部坐标切换。'),
+          logs: prependLog(state.logs, '选区群组移动和旋转仅支持世界坐标，已忽略局部坐标切换。'),
         };
       }
       if (state.transformSpace === space) return state;
@@ -2553,9 +2703,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           : removeSkyboxEntitiesFromScene(scene)
       ));
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds);
       return {
         ...result,
-        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds),
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, nextSkybox ? '天空盒球体已更新。' : '天空盒球体已清除。'),
       };
     });
@@ -2578,9 +2730,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         return result.scene;
       });
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = targetEntityId ? [targetEntityId] : state.hierarchySelectionIds;
       return {
         ...result,
-        hierarchySelectionIds: targetEntityId ? [targetEntityId] : state.hierarchySelectionIds,
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, created ? '天空盒球体已创建。' : '天空盒球体已更新并选中。'),
       };
     });
@@ -2694,6 +2848,148 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
+  selectAutoPatrolWaypoint: (waypointId) => {
+    set((state) => {
+      const selectedEntity = getSelectedEntity(state);
+      const autoPatrol = selectedEntity?.components.autoPatrol;
+      const selectedAutoPatrolWaypointId = autoPatrol?.waypoints.some((waypoint) => waypoint.id === waypointId)
+        ? waypointId
+        : null;
+      if (state.selectedAutoPatrolWaypointId === selectedAutoPatrolWaypointId) return state;
+      return {
+        selectedAutoPatrolWaypointId,
+        transformTool: selectedAutoPatrolWaypointId && state.transformTool === 'scale' ? 'translate' : state.transformTool,
+      };
+    });
+  },
+  requestAutoPatrolCapture: () => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '录制巡检点位');
+      if (state.autoPatrolPlaybackSnapshot.phase !== 'idle' && state.autoPatrolPlaybackSnapshot.phase !== 'completed') {
+        return { logs: prependLog(state.logs, '巡检运行中不能录制点位，请先停止巡检。') };
+      }
+      const entity = getSelectedEntity(state);
+      const autoPatrol = entity?.components.autoPatrol;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !autoPatrol) return state;
+      const waypointId = sanitizeSelectedAutoPatrolWaypointId(state.scene, state.selectedAutoPatrolWaypointId);
+      if (!waypointId && autoPatrol.waypoints.length >= AUTO_PATROL_MAX_WAYPOINTS) {
+        return { logs: prependLog(state.logs, `单条巡检路线最多支持 ${AUTO_PATROL_MAX_WAYPOINTS} 个节点。`) };
+      }
+      return {
+        autoPatrolCameraRequest: {
+          id: createId('patrol_camera'),
+          kind: 'capture',
+          entityId: entity.id,
+          waypointId,
+        },
+      };
+    });
+  },
+  requestAutoPatrolFocus: (waypointId) => {
+    set((state) => {
+      const entity = getSelectedEntity(state);
+      const autoPatrol = entity?.components.autoPatrol;
+      if (!entity || !autoPatrol?.waypoints.some((waypoint) => waypoint.id === waypointId)) return state;
+      return {
+        selectedAutoPatrolWaypointId: waypointId,
+        autoPatrolCameraRequest: { id: createId('patrol_camera'), kind: 'focus', entityId: entity.id, waypointId },
+        autoPatrolPlaybackRequest: { id: createId('patrol_playback'), action: 'stop', routeId: null },
+      };
+    });
+  },
+  consumeAutoPatrolCameraRequest: (requestId, pose) => {
+    set((state) => {
+      const request = state.autoPatrolCameraRequest;
+      if (!request || request.id !== requestId) return state;
+      if (request.kind === 'focus') return { autoPatrolCameraRequest: null };
+      if (!pose) {
+        return {
+          autoPatrolCameraRequest: null,
+          logs: prependLog(state.logs, 'Scene View 尚未就绪，无法录制巡检视角。'),
+        };
+      }
+      const entity = state.scene.entities[request.entityId];
+      const current = entity?.components.autoPatrol;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !current) {
+        return { autoPatrolCameraRequest: null, selectedAutoPatrolWaypointId: null };
+      }
+
+      const before = cloneAutoPatrolComponent(current);
+      const captured = createAutoPatrolWaypointFromWorldPose(
+        pose,
+        entity.components.transform,
+        request.waypointId ?? undefined,
+      );
+      let selectedWaypointId = captured.id;
+      let waypoints: AutoPatrolWaypoint[];
+      const existingIndex = request.waypointId
+        ? current.waypoints.findIndex((waypoint) => waypoint.id === request.waypointId)
+        : -1;
+      if (existingIndex >= 0) {
+        const existing = current.waypoints[existingIndex];
+        const replacement: AutoPatrolWaypoint = {
+          ...captured,
+          id: existing.id,
+          travelDurationSeconds: existing.travelDurationSeconds,
+          dwellSeconds: existing.dwellSeconds,
+          arrivalActions: [],
+        };
+        waypoints = current.waypoints.map((waypoint, index) => index === existingIndex ? replacement : waypoint);
+        selectedWaypointId = existing.id;
+      } else {
+        if (current.waypoints.length >= AUTO_PATROL_MAX_WAYPOINTS) {
+          return {
+            autoPatrolCameraRequest: null,
+            logs: prependLog(state.logs, `单条巡检路线最多支持 ${AUTO_PATROL_MAX_WAYPOINTS} 个节点。`),
+          };
+        }
+        waypoints = [...current.waypoints, captured];
+      }
+      const after = sanitizeAutoPatrolComponent({ ...current, waypoints });
+      if (!after) return { autoPatrolCameraRequest: null };
+      const label = existingIndex >= 0 ? '覆盖巡检点位视角' : '添加巡检点位';
+      const command = updateAutoPatrolCommand(entity.id, before, after, label);
+      const result = executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        autoPatrolCameraRequest: null,
+        autoPatrolPlaybackRequest: { id: createId('patrol_playback'), action: 'stop', routeId: null },
+        selectedAutoPatrolWaypointId: selectedWaypointId,
+        logs: prependLog(state.logs, `${label}：节点 ${after.waypoints.findIndex((waypoint) => waypoint.id === selectedWaypointId) + 1}`),
+      };
+    });
+  },
+  requestAutoPatrolPlayback: (action, routeId) => {
+    set((state) => {
+      let resolvedRouteId = routeId ?? null;
+      if (action === 'start' && !resolvedRouteId) {
+        const selected = getSelectedEntity(state);
+        resolvedRouteId = selected?.components.autoPatrol ? selected.id : null;
+      }
+      if (action === 'start') {
+        const component = resolvedRouteId ? state.scene.entities[resolvedRouteId]?.components.autoPatrol : null;
+        if (!component?.enabled) return { logs: prependLog(state.logs, '巡检路线未启用，无法开始。') };
+        if (component.waypoints.length < 2) return { logs: prependLog(state.logs, '巡检路线至少需要两个节点。') };
+      }
+      return {
+        autoPatrolPlaybackRequest: {
+          id: createId('patrol_playback'),
+          action,
+          routeId: resolvedRouteId,
+        },
+      };
+    });
+  },
+  consumeAutoPatrolPlaybackRequest: (requestId) => {
+    set((state) => state.autoPatrolPlaybackRequest?.id === requestId
+      ? { autoPatrolPlaybackRequest: null }
+      : state);
+  },
+  setAutoPatrolPlaybackSnapshot: (snapshot) => {
+    set((state) => areJsonValuesEqual(state.autoPatrolPlaybackSnapshot, snapshot)
+      ? state
+      : { autoPatrolPlaybackSnapshot: snapshot });
+  },
   /** 切换编辑器视口朝向；只有显式“保存当前视角”才会把当前值写入场景文档。 */
   setCameraOrientation: (orientation) => {
     set((state) => {
@@ -2745,9 +3041,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建网格');
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -2759,9 +3057,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建定位器');
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -2773,9 +3073,28 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建灯光');
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        logs: prependLog(state.logs, command.label),
+      };
+    });
+  },
+  createAutoPatrol: (placementPosition) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建自动巡检');
+      const baseEntity = createAutoPatrolEntity(sanitizeVector3(placementPosition));
+      const entity = { ...baseEntity, name: createNextAutoPatrolName(state.scene) };
+      const command = createEntityCommand(entity);
+      const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
+      return {
+        ...result,
+        hierarchySelectionIds,
+        selectedAutoPatrolWaypointId: null,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -2788,9 +3107,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const entity = { ...baseEntity, name: createNextModelGeneratorName(state.scene) };
       const command = createEntityCommand(entity);
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -2803,9 +3124,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建 EFF 特效');
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
     });
@@ -2856,9 +3179,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '导入模型');
       const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
       return {
         ...result,
-        hierarchySelectionIds: [entity.id],
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, `导入模型：${asset.name}`),
       };
     });
@@ -2956,10 +3281,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       set((state) => {
         const commandResult = executeCommand(state.scene, state.history, command);
+        const hierarchySelectionIds = [entity.id];
         return {
           ...commandResult,
           cadImportProgress: createCadImportProgress(importProgressId, 100, '导入完成', 'CAD 参考图已创建。', displayName),
-          hierarchySelectionIds: [entity.id],
+          hierarchySelectionIds,
+          ...resolveSelectionTransformMode(state, commandResult.scene, hierarchySelectionIds),
           logs: prependLog(
             state.logs,
             parseResult.budgetLimited
@@ -3023,6 +3350,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         scene,
         hierarchySelectionIds,
         selectedModelMeasurement: null,
+        selectedAutoPatrolWaypointId: null,
         ...resolveSelectionTransformMode(state, scene, hierarchySelectionIds),
       };
     });
@@ -3030,7 +3358,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   selectHierarchyEntities: (entityIds, primaryEntityId) => {
     set((state) => {
       const hierarchySelectionIds = sanitizeHierarchySelection(state.scene, entityIds);
-      const selectedEntityId = primaryEntityId && state.scene.entities[primaryEntityId] ? primaryEntityId : hierarchySelectionIds[0] ?? null;
+      const selectedEntityId = primaryEntityId && hierarchySelectionIds.includes(primaryEntityId)
+        ? primaryEntityId
+        : hierarchySelectionIds[hierarchySelectionIds.length - 1] ?? null;
 
       const scene = {
         ...state.scene,
@@ -3040,6 +3370,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         scene,
         hierarchySelectionIds,
         selectedModelMeasurement: null,
+        selectedAutoPatrolWaypointId: null,
         ...resolveSelectionTransformMode(state, scene, hierarchySelectionIds),
       };
     });
@@ -3460,15 +3791,40 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   deleteSelectedEntity: () => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '删除对象');
+      const selectedEntity = getSelectedEntity(state);
+      const selectedWaypointId = sanitizeSelectedAutoPatrolWaypointId(
+        state.scene,
+        state.selectedAutoPatrolWaypointId,
+      );
+      if (selectedWaypointId && isRuntimeEntityEditable(state.scene, selectedEntity) && selectedEntity.components.autoPatrol) {
+        const current = selectedEntity.components.autoPatrol;
+        const before = cloneAutoPatrolComponent(current);
+        const after = cloneAutoPatrolComponent({
+          ...current,
+          autoStart: current.autoStart,
+          waypoints: current.waypoints.filter((waypoint) => waypoint.id !== selectedWaypointId),
+        });
+        const command = updateAutoPatrolCommand(selectedEntity.id, before, after, '删除巡检点位');
+        const result = executeCommand(state.scene, state.history, command);
+        return {
+          ...result,
+          selectedAutoPatrolWaypointId: null,
+          autoPatrolPlaybackRequest: { id: createId('patrol_playback'), action: 'stop', routeId: null },
+          logs: prependLog(state.logs, command.label),
+        };
+      }
       const deletingIds = getUnlockedSelectionIds(state);
       if (deletingIds.length === 0) return state;
 
       const command = updateSceneDocumentCommand('删除对象', (scene) => deleteEntitiesInScene(scene, deletingIds));
       const result = executeCommand(state.scene, state.history, command);
 
+      const hierarchySelectionIds = sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds);
       return {
         ...result,
-        hierarchySelectionIds: sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds),
+        hierarchySelectionIds,
+        selectedAutoPatrolWaypointId: null,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, `${command.label}: ${deletingIds.length} 个对象`),
       };
     });
@@ -3596,6 +3952,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       return {
         ...result,
+        ...resolveSelectionTransformMode(state, result.scene, state.hierarchySelectionIds),
         logs: prependLog(state.logs, `${command.label}: ${entity.name}`),
       };
     });
@@ -3653,6 +4010,87 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const command = updatePoiEffectCommand(entity.id, before, after, label);
       const result = executeCommand(state.scene, state.history, command);
       return { ...result, logs: prependLog(state.logs, `${command.label}: ${entity.name}`) };
+    });
+  },
+  updateSelectedAutoPatrol: (component, label = '更新自动巡检') => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
+      const entity = getSelectedEntity(state);
+      const current = entity?.components.autoPatrol;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !current) return state;
+      const sanitized = sanitizeAutoPatrolComponent(component);
+      if (!sanitized) return state;
+      const after = cloneAutoPatrolComponent({
+        ...sanitized,
+        autoStart: sanitized.autoStart,
+      });
+      const before = cloneAutoPatrolComponent(current);
+      if (areJsonValuesEqual(before, after)) return state;
+
+      const command = after.autoStart
+        ? updateSceneDocumentCommand(label, (scene) => {
+            const entities = { ...scene.entities };
+            for (const entityId of scene.entityIds) {
+              const candidate = entities[entityId];
+              const candidatePatrol = candidate?.components.autoPatrol;
+              if (!candidatePatrol) continue;
+              const nextPatrol = entityId === entity.id
+                ? after
+                : candidatePatrol.autoStart
+                  ? { ...candidatePatrol, autoStart: false }
+                  : candidatePatrol;
+              if (nextPatrol === candidatePatrol) continue;
+              entities[entityId] = {
+                ...candidate,
+                components: { ...candidate.components, autoPatrol: nextPatrol },
+              };
+            }
+            return { ...scene, entities };
+          })
+        : updateAutoPatrolCommand(entity.id, before, after, label);
+      const result = executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        selectedAutoPatrolWaypointId: sanitizeSelectedAutoPatrolWaypointId(
+          result.scene,
+          state.selectedAutoPatrolWaypointId,
+        ),
+        autoPatrolPlaybackRequest: { id: createId('patrol_playback'), action: 'stop', routeId: null },
+        logs: prependLog(state.logs, `${command.label}: ${entity.name}`),
+      };
+    });
+  },
+  commitSelectedAutoPatrolWaypointTransform: (waypointId, transform) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '调整巡检点位');
+      const entity = getSelectedEntity(state);
+      const current = entity?.components.autoPatrol;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !current) return state;
+      const waypointIndex = current.waypoints.findIndex((waypoint) => waypoint.id === waypointId);
+      if (waypointIndex < 0) return state;
+      const updatedWaypoint = updateAutoPatrolWaypointView(
+        current.waypoints[waypointIndex],
+        entity.components.transform,
+        {
+          position: transform.position,
+          headingDegrees: transform.rotation.y * RADIANS_TO_DEGREES,
+          pitchDegrees: -transform.rotation.x * RADIANS_TO_DEGREES,
+        },
+      );
+      const before = cloneAutoPatrolComponent(current);
+      const after = cloneAutoPatrolComponent({
+        ...current,
+        waypoints: current.waypoints.map((waypoint, index) => index === waypointIndex ? updatedWaypoint : waypoint),
+      });
+      if (areJsonValuesEqual(before, after)) return state;
+      const command = updateAutoPatrolCommand(entity.id, before, after, '调整巡检点位');
+      const result = executeCommand(state.scene, state.history, command);
+      return {
+        ...result,
+        selectedAutoPatrolWaypointId: waypointId,
+        autoPatrolPlaybackRequest: { id: createId('patrol_playback'), action: 'stop', routeId: null },
+        logs: prependLog(state.logs, `${command.label}: ${entity.name}`),
+      };
     });
   },
   updateSelectedTelemetryBinding: (binding) => {
@@ -3886,6 +4324,62 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
     return committed;
   },
+  commitHierarchyGroupTranslation: (input) => {
+    let committed = false;
+    set((state) => {
+      if (isRuntimePreviewState(state)) {
+        return guardRuntimePreviewMutation(state, '移动选中对象');
+      }
+
+      const result = commitHierarchyGroupTranslationState(
+        state.scene,
+        state.history,
+        state.hierarchySelectionIds,
+        input,
+      );
+      committed = result.committed;
+      if (!result.committed) {
+        return { logs: prependLog(state.logs, result.message) };
+      }
+
+      return {
+        scene: result.scene,
+        history: result.history,
+        hierarchySelectionIds: state.hierarchySelectionIds,
+        selectedModelMeasurement: null,
+        logs: prependLog(state.logs, result.message),
+      };
+    });
+    return committed;
+  },
+  commitHierarchyGroupRotation: (input) => {
+    let committed = false;
+    set((state) => {
+      if (isRuntimePreviewState(state)) {
+        return guardRuntimePreviewMutation(state, '旋转选中对象');
+      }
+
+      const result = commitHierarchyGroupRotationState(
+        state.scene,
+        state.history,
+        state.hierarchySelectionIds,
+        input,
+      );
+      committed = result.committed;
+      if (!result.committed) {
+        return { logs: prependLog(state.logs, result.message) };
+      }
+
+      return {
+        scene: result.scene,
+        history: result.history,
+        hierarchySelectionIds: state.hierarchySelectionIds,
+        selectedModelMeasurement: null,
+        logs: prependLog(state.logs, result.message),
+      };
+    });
+    return committed;
+  },
   previewSelectedTransform: (transform) => {
     const selectedId = get().scene.selectedEntityId;
     if (!selectedId) return;
@@ -3947,6 +4441,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return {
         ...result,
         hierarchySelectionIds,
+        selectedAutoPatrolWaypointId: sanitizeSelectedAutoPatrolWaypointId(
+          result.scene,
+          state.selectedAutoPatrolWaypointId,
+        ),
+        autoPatrolPlaybackRequest: { id: createId('patrol_playback'), action: 'stop', routeId: null },
         ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         environmentApplyRequest: null,
         environmentAdjustmentActive: false,
@@ -3965,6 +4464,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return {
         ...result,
         hierarchySelectionIds,
+        selectedAutoPatrolWaypointId: sanitizeSelectedAutoPatrolWaypointId(
+          result.scene,
+          state.selectedAutoPatrolWaypointId,
+        ),
+        autoPatrolPlaybackRequest: { id: createId('patrol_playback'), action: 'stop', routeId: null },
         ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         environmentApplyRequest: null,
         environmentAdjustmentActive: false,

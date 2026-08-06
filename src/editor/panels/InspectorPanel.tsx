@@ -2,6 +2,7 @@ import { useEffect, useState, type KeyboardEvent } from 'react';
 import { getBuiltInMeshMeterDescription } from '../model/builtInMeshGeometry';
 import type { LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
+import { getLightEditorCapabilities, getLightTransformFieldLabel } from '../model/lightEditor';
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import {
@@ -23,6 +24,7 @@ import { PoiEffectInspector } from './PoiEffectInspector';
 import { ModelParametersInspector } from './ModelParametersInspector';
 import { TelemetryBindingInspector, CargoGeneratorInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
+import { AutoPatrolInspector } from './AutoPatrolInspector';
 
 type TransformField = 'position' | 'rotation' | 'scale';
 const axes: Array<keyof Vector3Data> = ['x', 'y', 'z'];
@@ -31,13 +33,15 @@ const lightKinds: LightKind[] = ['hemispheric', 'directional', 'point'];
 const RADIANS_TO_DEGREES = 180 / Math.PI;
 const DEGREES_TO_RADIANS = Math.PI / 180;
 
-/** 根据 Transform 字段和基础网格类型生成单位明确的 Inspector 标题。 */
-function getTransformLegend(field: TransformField, meshKind?: MeshKind): string {
-  if (field === 'position') return `${field} (${SCENE_LENGTH_UNIT_SYMBOL})`;
-  if (field === 'rotation') return `${field} (deg)`;
+/** 根据实体类型生成单位明确且符合灯光实际语义的 Inspector 标题。 */
+function getTransformLegend(field: TransformField, meshKind?: MeshKind, lightKind?: LightKind): string {
+  const label = lightKind ? getLightTransformFieldLabel(lightKind, field) : field;
+  if (label === 'direction') return label;
+  if (field === 'position') return `${label} (${SCENE_LENGTH_UNIT_SYMBOL})`;
+  if (field === 'rotation') return `${label} (deg)`;
   if (field === 'scale' && meshKind === 'cube') return `size (${SCENE_LENGTH_UNIT_SYMBOL})`;
 
-  return field;
+  return label;
 }
 
 /** 将 Babylon 内部弧度转换为 Inspector 面向用户的角度。 */
@@ -202,16 +206,21 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const modelAsset = selectedEntity.components.modelAsset;
   const modelGenerator = selectedEntity.components.modelGenerator;
   const poiEffect = selectedEntity.components.poiEffect;
-  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || skybox || modelGenerator || poiEffect || locator);
+  const autoPatrol = selectedEntity.components.autoPatrol;
+  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || skybox || modelGenerator || poiEffect || autoPatrol || locator);
   const isBuiltInBound = Boolean(locator?.builtInBinding);
   const transformDisabled = isLocked || isBuiltInBound;
-  const transformFields = skybox ? fields.filter((field) => field !== 'scale') : fields;
+  const transformFields: readonly TransformField[] = light
+    ? getLightEditorCapabilities(light.lightKind).transformFields
+    : skybox || autoPatrol
+      ? fields.filter((field) => field !== 'scale')
+      : fields;
 
   return (
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
-      <h2>{modelGenerator ? '模型生成器' : poiEffect ? 'EFF 特效' : 'Inspector'}</h2>
+      <h2>{modelGenerator ? '模型生成器' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : 'Inspector'}</h2>
       <label className="inspector-row">
-        <span>{modelGenerator || poiEffect ? 'POI名称' : '名称'}</span>
+        <span>{poiEffect ? '特效名称' : modelGenerator || autoPatrol ? 'POI名称' : '名称'}</span>
         <input
           type="text"
           disabled={isLocked}
@@ -223,7 +232,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
       </label>
       {transformFields.map((field) => (
         <fieldset className="transform-fieldset transform-axis-fieldset" key={field}>
-          <legend>{getTransformLegend(field, meshRenderer?.meshKind)}</legend>
+          <legend>{getTransformLegend(field, meshRenderer?.meshKind, light?.lightKind)}</legend>
           {axes.map((axis) => (
             <label className="number-row" key={`${field}-${axis}`}>
               <span>{axis.toUpperCase()}</span>
@@ -252,6 +261,14 @@ export function InspectorPanel(props: InspectorPanelProps) {
       ) : null}
       {poiEffect ? (
         <PoiEffectInspector component={poiEffect} disabled={isLocked} />
+      ) : null}
+      {autoPatrol ? (
+        <AutoPatrolInspector
+          component={autoPatrol}
+          disabled={isLocked}
+          entityId={selectedEntity.id}
+          transform={transform}
+        />
       ) : null}
       {meshRenderer ? (
         <fieldset className="transform-fieldset">

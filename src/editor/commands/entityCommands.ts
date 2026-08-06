@@ -1,6 +1,7 @@
 import type { Command } from './Command';
 import { executeCommand, type CommandHistory } from './CommandHistory';
 import type {
+  AutoPatrolComponent,
   CadReferenceComponent,
   LightComponent,
   LocatorComponent,
@@ -16,6 +17,7 @@ import {
   getTopLevelHierarchyEntityIds,
   isEntityAncestorOf,
   resolveFolderGroupMoveSelection,
+  resolveHierarchyGroupTransformSelection,
 } from '../model/entityHierarchy';
 import type { ModelParameterValues } from '../model/modelParameters';
 import type { Vector3Data } from '../model/math';
@@ -233,6 +235,29 @@ export function updateTransformCommand(
   };
 }
 
+export type HierarchyGroupTranslationInput = {
+  sourceSceneDocument: SceneDocument;
+  groupId: string;
+  entityIds: string[];
+  beforePositions: Record<string, Vector3Data>;
+  delta: Vector3Data;
+};
+
+export type HierarchyGroupTransformResult = {
+  committed: boolean;
+  scene: SceneDocument;
+  history: CommandHistory;
+  message: string;
+};
+
+export type HierarchyGroupRotationInput = {
+  sourceSceneDocument: SceneDocument;
+  groupId: string;
+  entityIds: string[];
+  beforeTransforms: Record<string, TransformComponent>;
+  afterTransforms: Record<string, TransformComponent>;
+};
+
 export type FolderGroupTranslationInput = {
   sourceSceneDocument: SceneDocument;
   folderId: string;
@@ -241,12 +266,7 @@ export type FolderGroupTranslationInput = {
   delta: Vector3Data;
 };
 
-export type FolderGroupTranslationResult = {
-  committed: boolean;
-  scene: SceneDocument;
-  history: CommandHistory;
-  message: string;
-};
+export type FolderGroupTranslationResult = HierarchyGroupTransformResult;
 
 export type FolderGroupRotationInput = {
   sourceSceneDocument: SceneDocument;
@@ -256,41 +276,41 @@ export type FolderGroupRotationInput = {
   afterTransforms: Record<string, TransformComponent>;
 };
 
-export type FolderGroupRotationResult = FolderGroupTranslationResult;
+export type FolderGroupRotationResult = HierarchyGroupTransformResult;
 
-/** 在写入历史前重新校验场景、文件夹成员、锁定状态与拖拽基线。 */
-export function commitFolderGroupTranslation(
+/** 在写入历史前重新校验任意 Hierarchy 群组选区、锁定状态与位置基线。 */
+export function commitHierarchyGroupTranslation(
   scene: SceneDocument,
   history: CommandHistory,
   hierarchySelectionIds: readonly string[],
-  input: FolderGroupTranslationInput,
-): FolderGroupTranslationResult {
+  input: HierarchyGroupTranslationInput,
+): HierarchyGroupTransformResult {
   if (scene !== input.sourceSceneDocument) {
-    return { committed: false, scene, history, message: '场景已变化，已取消文件夹整组移动。' };
+    return { committed: false, scene, history, message: '场景已变化，已取消选区群组移动。' };
   }
   if (![input.delta.x, input.delta.y, input.delta.z].every(Number.isFinite)) {
-    return { committed: false, scene, history, message: '文件夹整组移动失败：位移无效。' };
+    return { committed: false, scene, history, message: '选区群组移动失败：位移无效。' };
   }
 
-  const selection = resolveFolderGroupMoveSelection(scene, hierarchySelectionIds);
+  const selection = resolveHierarchyGroupTransformSelection(scene, hierarchySelectionIds);
   if (selection.status !== 'ready') {
     const message = selection.status === 'blocked'
-      ? '文件夹整组移动已阻止：文件夹内包含锁定对象。'
+      ? '选区群组移动已阻止：选区内包含锁定对象。'
       : selection.status === 'empty'
-        ? '文件夹整组移动已取消：文件夹内没有可移动对象。'
-        : '文件夹整组移动已取消：当前不再是单文件夹选区。';
+        ? '选区群组移动已取消：选区内没有可移动对象。'
+        : '选区群组移动已取消：当前不再是多选或文件夹选区。';
     return { committed: false, scene, history, message };
   }
-  if (selection.folderId !== input.folderId || !areStringArraysEqual(selection.entityIds, input.entityIds)) {
-    return { committed: false, scene, history, message: '文件夹成员已变化，已取消整组移动。' };
+  if (selection.groupId !== input.groupId || !areStringArraysEqual(selection.entityIds, input.entityIds)) {
+    return { committed: false, scene, history, message: '选区成员已变化，已取消群组移动。' };
   }
   if (!selection.entityIds.every((entityId) => (
     areVector3DataEqual(selection.beforePositions[entityId], input.beforePositions[entityId])
   ))) {
-    return { committed: false, scene, history, message: '对象位置已变化，已取消过期的整组移动。' };
+    return { committed: false, scene, history, message: '对象位置已变化，已取消过期的群组移动。' };
   }
   if (input.delta.x === 0 && input.delta.y === 0 && input.delta.z === 0) {
-    return { committed: false, scene, history, message: '文件夹位置未变化。' };
+    return { committed: false, scene, history, message: '选区位置未变化。' };
   }
 
   const translation = resolveTranslatedEntityPositions(
@@ -303,11 +323,11 @@ export function commitFolderGroupTranslation(
       committed: false,
       scene,
       history,
-      message: `文件夹整组移动失败：${translation.error}。`,
+      message: `选区群组移动失败：${translation.error}。`,
     };
   }
   if (!translation.changed) {
-    return { committed: false, scene, history, message: '文件夹位置未变化。' };
+    return { committed: false, scene, history, message: '选区位置未变化。' };
   }
 
   const result = executeCommand(
@@ -318,11 +338,112 @@ export function commitFolderGroupTranslation(
   return {
     committed: true,
     ...result,
-    message: `移动文件夹对象：${selection.entityIds.length} 个对象`,
+    message: `移动选中对象：${selection.entityIds.length} 个对象`,
   };
 }
 
-/** 在写入历史前重新校验群组成员和完整 Transform 基线，并原子提交旋转结果。 */
+/** 在写入历史前重新校验任意 Hierarchy 群组选区与完整 Transform 基线。 */
+export function commitHierarchyGroupRotation(
+  scene: SceneDocument,
+  history: CommandHistory,
+  hierarchySelectionIds: readonly string[],
+  input: HierarchyGroupRotationInput,
+): HierarchyGroupTransformResult {
+  if (scene !== input.sourceSceneDocument) {
+    return { committed: false, scene, history, message: '场景已变化，已取消选区群组旋转。' };
+  }
+
+  const selection = resolveHierarchyGroupTransformSelection(scene, hierarchySelectionIds);
+  if (selection.status !== 'ready') {
+    const message = selection.status === 'blocked'
+      ? '选区群组旋转已阻止：选区内包含锁定对象。'
+      : selection.status === 'empty'
+        ? '选区群组旋转已取消：选区内没有可旋转对象。'
+        : '选区群组旋转已取消：当前不再是多选或文件夹选区。';
+    return { committed: false, scene, history, message };
+  }
+  if (selection.groupId !== input.groupId || !areStringArraysEqual(selection.entityIds, input.entityIds)) {
+    return { committed: false, scene, history, message: '选区成员已变化，已取消群组旋转。' };
+  }
+
+  const afterTransforms: Record<string, TransformComponent> = {};
+  let changed = false;
+  for (const entityId of selection.entityIds) {
+    const current = selection.beforeTransforms[entityId];
+    const before = input.beforeTransforms[entityId];
+    const after = input.afterTransforms[entityId];
+    if (!areTransformDataEqual(current, before)) {
+      return { committed: false, scene, history, message: '对象 Transform 已变化，已取消过期的群组旋转。' };
+    }
+    if (!isFiniteTransformData(after)) {
+      return { committed: false, scene, history, message: `选区群组旋转失败：对象 ${entityId} 的目标 Transform 无效。` };
+    }
+    if (!areVector3DataEqual(before.scale, after.scale)) {
+      return { committed: false, scene, history, message: '选区群组旋转失败：旋转不得改变对象缩放。' };
+    }
+
+    afterTransforms[entityId] = cloneTransformData(after);
+    changed = changed || !areTransformDataNearlyEqual(before, after);
+  }
+  if (!changed) {
+    return { committed: false, scene, history, message: '选区旋转未变化。' };
+  }
+
+  const result = executeCommand(
+    scene,
+    history,
+    createEntityTransformsCommand(
+      selection.entityIds,
+      input.beforeTransforms,
+      afterTransforms,
+      '旋转选中对象',
+    ),
+  );
+  return {
+    committed: true,
+    ...result,
+    message: `旋转选中对象：${selection.entityIds.length} 个对象`,
+  };
+}
+
+/** 保留单文件夹调用契约，并委托给通用 Hierarchy 群组移动提交。 */
+export function commitFolderGroupTranslation(
+  scene: SceneDocument,
+  history: CommandHistory,
+  hierarchySelectionIds: readonly string[],
+  input: FolderGroupTranslationInput,
+): FolderGroupTranslationResult {
+  if (scene !== input.sourceSceneDocument) {
+    return { committed: false, scene, history, message: '场景已变化，已取消文件夹整组移动。' };
+  }
+
+  const folderSelection = resolveFolderGroupMoveSelection(scene, hierarchySelectionIds);
+  if (folderSelection.status !== 'ready') {
+    const message = folderSelection.status === 'blocked'
+      ? '文件夹整组移动已阻止：文件夹内包含锁定对象。'
+      : folderSelection.status === 'empty'
+        ? '文件夹整组移动已取消：文件夹内没有可移动对象。'
+        : '文件夹整组移动已取消：当前不再是单文件夹选区。';
+    return { committed: false, scene, history, message };
+  }
+  if (folderSelection.folderId !== input.folderId || !areStringArraysEqual(folderSelection.entityIds, input.entityIds)) {
+    return { committed: false, scene, history, message: '文件夹成员已变化，已取消整组移动。' };
+  }
+
+  const selection = resolveHierarchyGroupTransformSelection(scene, hierarchySelectionIds);
+  if (selection.status !== 'ready') {
+    return { committed: false, scene, history, message: '文件夹整组移动已取消：没有可移动对象。' };
+  }
+  return commitHierarchyGroupTranslation(scene, history, hierarchySelectionIds, {
+    sourceSceneDocument: input.sourceSceneDocument,
+    groupId: selection.groupId,
+    entityIds: input.entityIds,
+    beforePositions: input.beforePositions,
+    delta: input.delta,
+  });
+}
+
+/** 保留单文件夹调用契约，并委托给通用 Hierarchy 群组旋转提交。 */
 export function commitFolderGroupRotation(
   scene: SceneDocument,
   history: CommandHistory,
@@ -333,57 +454,30 @@ export function commitFolderGroupRotation(
     return { committed: false, scene, history, message: '场景已变化，已取消文件夹整组旋转。' };
   }
 
-  const selection = resolveFolderGroupMoveSelection(scene, hierarchySelectionIds);
-  if (selection.status !== 'ready') {
-    const message = selection.status === 'blocked'
+  const folderSelection = resolveFolderGroupMoveSelection(scene, hierarchySelectionIds);
+  if (folderSelection.status !== 'ready') {
+    const message = folderSelection.status === 'blocked'
       ? '文件夹整组旋转已阻止：文件夹内包含锁定对象。'
-      : selection.status === 'empty'
+      : folderSelection.status === 'empty'
         ? '文件夹整组旋转已取消：文件夹内没有可旋转对象。'
         : '文件夹整组旋转已取消：当前不再是单文件夹选区。';
     return { committed: false, scene, history, message };
   }
-  if (selection.folderId !== input.folderId || !areStringArraysEqual(selection.entityIds, input.entityIds)) {
+  if (folderSelection.folderId !== input.folderId || !areStringArraysEqual(folderSelection.entityIds, input.entityIds)) {
     return { committed: false, scene, history, message: '文件夹成员已变化，已取消整组旋转。' };
   }
 
-  const afterTransforms: Record<string, TransformComponent> = {};
-  let changed = false;
-  for (const entityId of selection.entityIds) {
-    const current = selection.beforeTransforms[entityId];
-    const before = input.beforeTransforms[entityId];
-    const after = input.afterTransforms[entityId];
-    if (!areTransformDataEqual(current, before)) {
-      return { committed: false, scene, history, message: '对象 Transform 已变化，已取消过期的整组旋转。' };
-    }
-    if (!isFiniteTransformData(after)) {
-      return { committed: false, scene, history, message: `文件夹整组旋转失败：对象 ${entityId} 的目标 Transform 无效。` };
-    }
-    if (!areVector3DataEqual(before.scale, after.scale)) {
-      return { committed: false, scene, history, message: '文件夹整组旋转失败：旋转不得改变对象缩放。' };
-    }
-
-    afterTransforms[entityId] = cloneTransformData(after);
-    changed = changed || !areTransformDataNearlyEqual(before, after);
+  const selection = resolveHierarchyGroupTransformSelection(scene, hierarchySelectionIds);
+  if (selection.status !== 'ready') {
+    return { committed: false, scene, history, message: '文件夹整组旋转已取消：没有可旋转对象。' };
   }
-  if (!changed) {
-    return { committed: false, scene, history, message: '文件夹旋转未变化。' };
-  }
-
-  const result = executeCommand(
-    scene,
-    history,
-    createEntityTransformsCommand(
-      selection.entityIds,
-      input.beforeTransforms,
-      afterTransforms,
-      '旋转文件夹对象',
-    ),
-  );
-  return {
-    committed: true,
-    ...result,
-    message: `旋转文件夹对象：${selection.entityIds.length} 个对象`,
-  };
+  return commitHierarchyGroupRotation(scene, history, hierarchySelectionIds, {
+    sourceSceneDocument: input.sourceSceneDocument,
+    groupId: selection.groupId,
+    entityIds: input.entityIds,
+    beforeTransforms: input.beforeTransforms,
+    afterTransforms: input.afterTransforms,
+  });
 }
 
 /** 把同一世界位移原子写入多个实体位置，整组只占用一条撤销历史。 */
@@ -591,7 +685,7 @@ function createEntityPositionsCommand(
 ): Command {
   const uniqueEntityIds = [...new Set(entityIds)];
   return {
-    label: '移动文件夹对象',
+    label: '移动选中对象',
     execute: (scene) => updateEntityPositions(scene, uniqueEntityIds, afterPositions),
     undo: (scene) => updateEntityPositions(scene, uniqueEntityIds, beforePositions),
   };
@@ -830,6 +924,35 @@ function updateLight(scene: SceneDocument, entityId: string, light: LightCompone
         },
       },
     },
+  };
+}
+
+/** 将自动巡检组件替换为已校验的不可变快照。 */
+function updateAutoPatrol(scene: SceneDocument, entityId: string, autoPatrol: AutoPatrolComponent): SceneDocument {
+  const entity = scene.entities[entityId];
+  if (!entity?.components.autoPatrol) return scene;
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [entityId]: {
+        ...entity,
+        components: { ...entity.components, autoPatrol },
+      },
+    },
+  };
+}
+
+export function updateAutoPatrolCommand(
+  entityId: string,
+  before: AutoPatrolComponent,
+  after: AutoPatrolComponent,
+  label = '更新自动巡检',
+): Command {
+  return {
+    label,
+    execute: (scene) => updateAutoPatrol(scene, entityId, after),
+    undo: (scene) => updateAutoPatrol(scene, entityId, before),
   };
 }
 

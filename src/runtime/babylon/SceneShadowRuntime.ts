@@ -16,6 +16,7 @@ const SHADOW_NORMAL_BIAS = 0.02;
 const NON_SHADOW_PARENT_SUFFIXES = [
   '_locatorRoot',
   '_modelGeneratorMarkerRoot',
+  '_lightMarkerRoot',
   '_poiEffectRoot',
 ];
 
@@ -36,7 +37,7 @@ function isShadowSurface(mesh: AbstractMesh): boolean {
   if (mesh.name === 'LegacySceneSkyboxSphere' || mesh.name.endsWith('_skyboxSphere')) return false;
 
   const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
-  return metadata?.editorSkyboxSphere !== true;
+  return metadata?.editorSkyboxSphere !== true && metadata?.editorAutoPatrolMarker !== true;
 }
 
 /** Babylon 半球光不支持阴影；方向光和点光使用同一套动态 Mesh 注册策略。 */

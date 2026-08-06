@@ -66,6 +66,7 @@ export type ImageAssetDragPayload = Pick<BuiltInImageAsset, 'id' | 'name' | 'ref
 
 export type BuiltInAssetDragPayload =
   | { kind: 'model-generator' }
+  | { kind: 'auto-patrol' }
   | { kind: 'poi-effect'; effectKind: PoiEffectKind }
   | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
   | { kind: 'locator'; locatorKind: 'box-wire' }
@@ -270,6 +271,10 @@ export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetD
 
     if (payload.kind === 'model-generator') {
       return { kind: 'model-generator' };
+    }
+
+    if (payload.kind === 'auto-patrol') {
+      return { kind: 'auto-patrol' };
     }
 
     if (payload.kind === 'poi-effect') {

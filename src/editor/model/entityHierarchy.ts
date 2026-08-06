@@ -23,6 +23,30 @@ export type FolderGroupMoveSelection = FolderGroupMoveReadySelection | {
   lockedEntityIds: string[];
 };
 
+export type HierarchyEntitySelection = {
+  entityIds: string[];
+  primaryEntityId: string | null;
+};
+
+export type HierarchyGroupTransformReadySelection = {
+  status: 'ready';
+  groupId: string;
+  selectionIds: string[];
+  primaryEntityId: string | null;
+  entityIds: string[];
+  beforePositions: Record<string, Vector3Data>;
+  beforeTransforms: Record<string, TransformComponent>;
+};
+
+export type HierarchyGroupTransformSelection = HierarchyGroupTransformReadySelection | {
+  status: 'unavailable' | 'empty' | 'blocked';
+  groupId: string | null;
+  selectionIds: string[];
+  primaryEntityId: string | null;
+  entityIds: string[];
+  lockedEntityIds: string[];
+};
+
 /** 返回选区中没有已选祖先的最高层实体，保持输入顺序并移除重复项。 */
 export function getTopLevelHierarchyEntityIds(
   entities: Record<string, Entity>,
@@ -105,11 +129,14 @@ export function resolveFolderGroupMoveSelection(
   }
 
   const descendantIds = collectEntitySubtreeIds(scene.entities, folderId, false);
-  const entityIds = descendantIds.filter((entityId) => (
-    scene.entities[entityId] && !scene.entities[entityId].isFolder
-  ));
-  const lockedEntityIds = [folderId, ...descendantIds].filter((entityId) => (
-    isEntityEffectivelyLocked(scene.entities, scene.entities[entityId])
+  const entityIds = descendantIds.filter((entityId) => {
+    const entity = scene.entities[entityId];
+    return Boolean(entity && isHierarchyGroupTransformEntity(entity));
+  });
+  const lockScopeIds = [folderId, ...descendantIds];
+  const hierarchyStateByEntityId = createEntityHierarchyStateMap(lockScopeIds, scene.entities);
+  const lockedEntityIds = lockScopeIds.filter((entityId) => (
+    hierarchyStateByEntityId.get(entityId)?.locked === true
   ));
   if (lockedEntityIds.length > 0) {
     return { status: 'blocked', folderId, entityIds, lockedEntityIds };
@@ -131,6 +158,176 @@ export function resolveFolderGroupMoveSelection(
     { ...beforeTransforms[entityId].position },
   ]));
   return { status: 'ready', folderId, entityIds, beforePositions, beforeTransforms };
+}
+
+/** 按 Ctrl/Cmd 点击语义切换单个实体，并在移除主选后回退到最近加入的剩余实体。 */
+export function toggleHierarchyEntitySelection(
+  scene: SceneDocument,
+  hierarchySelectionIds: readonly string[],
+  primaryEntityId: string | null,
+  entityId: string,
+): HierarchyEntitySelection {
+  const entityIds = [...new Set(hierarchySelectionIds)]
+    .filter((selectedId) => Boolean(scene.entities[selectedId]));
+  if (!scene.entities[entityId]) {
+    return {
+      entityIds,
+      primaryEntityId: primaryEntityId && entityIds.includes(primaryEntityId)
+        ? primaryEntityId
+        : entityIds[entityIds.length - 1] ?? null,
+    };
+  }
+
+  if (!entityIds.includes(entityId)) {
+    return { entityIds: [...entityIds, entityId], primaryEntityId: entityId };
+  }
+
+  const nextEntityIds = entityIds.filter((selectedId) => selectedId !== entityId);
+  return {
+    entityIds: nextEntityIds,
+    primaryEntityId: primaryEntityId !== entityId && primaryEntityId && nextEntityIds.includes(primaryEntityId)
+      ? primaryEntityId
+      : nextEntityIds[nextEntityIds.length - 1] ?? null,
+  };
+}
+
+/** 多个有效选中节点，或严格单选文件夹时，使用组合变换语义。 */
+export function isHierarchyGroupTransformSelection(
+  scene: SceneDocument,
+  hierarchySelectionIds: readonly string[],
+): boolean {
+  const selectionIds = [...new Set(hierarchySelectionIds)]
+    .filter((entityId) => Boolean(scene.entities[entityId]));
+  return selectionIds.length > 1 || resolveSingleSelectedFolderId(scene, selectionIds) !== null;
+}
+
+/** 生成紧凑稳定的当前选区标识，避免大场景把完整 ID 列表复制到 Gizmo 状态。 */
+function createHierarchyGroupId(selectionIds: readonly string[], primaryEntityId: string | null): string {
+  let hash = 2166136261;
+  for (const entityId of selectionIds) {
+    for (let index = 0; index < entityId.length; index += 1) {
+      hash ^= entityId.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    hash ^= 0xff;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `hierarchy-group:${selectionIds.length}:${primaryEntityId ?? 'none'}:${(hash >>> 0).toString(16)}`;
+}
+
+/** 内置绑定定位线框的位置由宿主模型驱动，不单独参与组合 Transform。 */
+function isHierarchyGroupTransformEntity(entity: Entity): boolean {
+  return !entity.isFolder && !entity.components.locator?.builtInBinding;
+}
+
+/**
+ * 将任意 Hierarchy 多选展开为实际参与移动/旋转的普通实体。
+ * 文件夹递归展开、重复后代去重，任一选中节点或后代有效锁定时原子阻止。
+ */
+export function resolveHierarchyGroupTransformSelection(
+  scene: SceneDocument,
+  hierarchySelectionIds: readonly string[],
+): HierarchyGroupTransformSelection {
+  const selectionIds = [...new Set(hierarchySelectionIds)]
+    .filter((entityId) => Boolean(scene.entities[entityId]));
+  const primaryEntityId = scene.selectedEntityId && selectionIds.includes(scene.selectedEntityId)
+    ? scene.selectedEntityId
+    : selectionIds[selectionIds.length - 1] ?? null;
+
+  if (!isHierarchyGroupTransformSelection(scene, selectionIds)) {
+    return {
+      status: 'unavailable',
+      groupId: null,
+      selectionIds,
+      primaryEntityId,
+      entityIds: [],
+      lockedEntityIds: [],
+    };
+  }
+
+  const groupId = createHierarchyGroupId(selectionIds, primaryEntityId);
+  const entityIds: string[] = [];
+  const entityIdSet = new Set<string>();
+  const lockScopeIds: string[] = [];
+  const lockScopeIdSet = new Set<string>();
+
+  function addLockScope(entityId: string): void {
+    if (lockScopeIdSet.has(entityId)) return;
+    lockScopeIdSet.add(entityId);
+    lockScopeIds.push(entityId);
+  }
+
+  function addTransformEntity(entityId: string): void {
+    if (entityIdSet.has(entityId)) return;
+    const entity = scene.entities[entityId];
+    if (!entity || !isHierarchyGroupTransformEntity(entity)) return;
+    entityIdSet.add(entityId);
+    entityIds.push(entityId);
+  }
+
+  const topLevelSelectionIds = getTopLevelHierarchyEntityIds(scene.entities, selectionIds);
+  for (const selectedId of topLevelSelectionIds) {
+    const selectedEntity = scene.entities[selectedId];
+    if (!selectedEntity) continue;
+    if (!selectedEntity.isFolder) {
+      addLockScope(selectedId);
+      addTransformEntity(selectedId);
+      continue;
+    }
+
+    const subtreeIds = collectEntitySubtreeIds(scene.entities, selectedId, true);
+    for (const subtreeId of subtreeIds) {
+      addLockScope(subtreeId);
+      addTransformEntity(subtreeId);
+    }
+  }
+
+  const hierarchyStateByEntityId = createEntityHierarchyStateMap(lockScopeIds, scene.entities);
+  const lockedEntityIds = lockScopeIds.filter((entityId) => (
+    hierarchyStateByEntityId.get(entityId)?.locked === true
+  ));
+  if (lockedEntityIds.length > 0) {
+    return {
+      status: 'blocked',
+      groupId,
+      selectionIds,
+      primaryEntityId,
+      entityIds,
+      lockedEntityIds,
+    };
+  }
+  if (entityIds.length === 0) {
+    return {
+      status: 'empty',
+      groupId,
+      selectionIds,
+      primaryEntityId,
+      entityIds,
+      lockedEntityIds: [],
+    };
+  }
+
+  const beforeTransforms = Object.fromEntries(entityIds.map((entityId) => {
+    const transform = scene.entities[entityId].components.transform;
+    return [entityId, {
+      position: { ...transform.position },
+      rotation: { ...transform.rotation },
+      scale: { ...transform.scale },
+    }];
+  }));
+  const beforePositions = Object.fromEntries(entityIds.map((entityId) => [
+    entityId,
+    { ...beforeTransforms[entityId].position },
+  ]));
+  return {
+    status: 'ready',
+    groupId,
+    selectionIds,
+    primaryEntityId,
+    entityIds,
+    beforePositions,
+    beforeTransforms,
+  };
 }
 
 /** 判断 ancestorId 是否位于 entityId 的父级链上。 */

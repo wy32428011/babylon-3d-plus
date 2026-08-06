@@ -5,6 +5,7 @@ import type { Vector3Data } from './math';
 import type { ModelParameterConfig } from './modelParameters';
 import { createDefaultModelGeneratorComponent } from './modelGenerator';
 import { createDefaultPoiEffectComponent, getPoiEffectDefinition } from './poiEffect';
+import { createDefaultAutoPatrolComponent } from './autoPatrol';
 import { createDefaultModelParameterValues } from './modelParameters';
 import {
   DEFAULT_MODEL_LENGTH_UNIT_INFO,
@@ -924,6 +925,27 @@ export function createModelGeneratorEntity(position: Vector3Data = vector3()): E
         scale: vector3(1, 1, 1),
       },
       modelGenerator: createDefaultModelGeneratorComponent(),
+    },
+  };
+}
+
+/** 创建自动巡检 POI；实体 Transform 作为整条路线的局部坐标原点。 */
+export function createAutoPatrolEntity(position: Vector3Data = vector3()): Entity {
+  const id = createId('entity');
+  return {
+    id,
+    name: '自动巡检',
+    visible: true,
+    locked: false,
+    parentId: null,
+    childrenIds: [],
+    components: {
+      transform: {
+        position: vector3(position.x, position.y, position.z),
+        rotation: vector3(),
+        scale: vector3(1, 1, 1),
+      },
+      autoPatrol: createDefaultAutoPatrolComponent(),
     },
   };
 }

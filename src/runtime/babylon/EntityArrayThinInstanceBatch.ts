@@ -2381,10 +2381,12 @@ function commitMatrixBuffer(
   if (matrixBuffer !== batch.matrixBuffer) {
     batch.mesh.thinInstanceSetBuffer('matrix', matrixBuffer, 16, false);
     batch.matrixBuffer = matrixBuffer;
+    batch.mesh.thinInstanceCount = instanceCount;
   } else {
+    // Babylon 按调用时的 thinInstanceCount 决定上传矩阵行数，扩容时必须先更新数量。
+    batch.mesh.thinInstanceCount = instanceCount;
     batch.mesh.thinInstanceBufferUpdated('matrix');
   }
-  batch.mesh.thinInstanceCount = instanceCount;
   syncBatchSourcePresentation(batch);
   if (refreshBoundingInfo) batch.mesh.thinInstanceRefreshBoundingInfo(true);
 }

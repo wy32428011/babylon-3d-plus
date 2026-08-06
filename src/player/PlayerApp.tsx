@@ -4,6 +4,13 @@ import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '..
 import { createBabylonViewport, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { SceneRuntime } from '../runtime/babylon/SceneRuntime';
+import {
+  AutoPatrolPlaybackController,
+  collectAutoPatrolPlaybackRoutes,
+  findAutoStartPatrolRoute,
+  type AutoPatrolPlaybackRoute,
+  type AutoPatrolPlaybackSnapshot,
+} from '../runtime/babylon/AutoPatrolPlaybackController';
 import { mqttRuntimeStatusStore } from '../runtime/mqtt/mqttRuntimeStatus';
 import { MqttStackerTelemetryClient } from '../runtime/mqtt/MqttStackerTelemetryClient';
 import {
@@ -18,9 +25,20 @@ import {
   resolveInitialPlayerStatusOverlayVisibility,
   shouldShowPlayerStatusOverlay,
 } from './statusOverlayControls';
+import { AutoPatrolControls, type AutoPatrolControlAction } from '../shared/ui/AutoPatrolControls';
 import './player.css';
 
 type PlayerPhase = 'loading' | 'ready' | 'blocked';
+
+const IDLE_AUTO_PATROL_SNAPSHOT: AutoPatrolPlaybackSnapshot = {
+  phase: 'idle',
+  routeId: null,
+  routeName: null,
+  currentWaypointIndex: null,
+  waypointCount: 0,
+  pausedByManualInput: false,
+  canReturnToStart: false,
+};
 
 /** 将未知异常转换成状态层可展示消息。 */
 function getErrorMessage(error: unknown): string {
@@ -94,7 +112,10 @@ function applySceneBackground(viewport: BabylonViewport, color: string): void {
 /** 独立 Web Viewer 根组件，负责配置、资源、场景、遥测和完整释放生命周期。 */
 export function PlayerApp() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
   const [phase, setPhase] = useState<PlayerPhase>('loading');
+  const [autoPatrolRoutes, setAutoPatrolRoutes] = useState<AutoPatrolPlaybackRoute[]>([]);
+  const [autoPatrolSnapshot, setAutoPatrolSnapshot] = useState<AutoPatrolPlaybackSnapshot>(IDLE_AUTO_PATROL_SNAPSHOT);
   const [message, setMessage] = useState('场景加载中...');
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
   const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
@@ -115,6 +136,9 @@ export function PlayerApp() {
     let disposed = false;
     let viewport: BabylonViewport | null = null;
     let runtime: SceneRuntime | null = null;
+    let autoPatrolPlayback: AutoPatrolPlaybackController | null = null;
+    let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
+    let removeAutoPatrolManualInputListeners: (() => void) | null = null;
     let mqttClient: MqttStackerTelemetryClient | null = null;
     let resize: (() => void) | null = null;
 
@@ -191,6 +215,8 @@ export function PlayerApp() {
             }
           },
         );
+        runtime.disableEditorLightMarkers();
+        runtime.disableEditorAutoPatrolMarkers();
         runtime.sync(sceneDocument);
         const environment = sceneDocument.sceneSettings.environment;
         if (environment) {
@@ -200,6 +226,56 @@ export function PlayerApp() {
         }
         if (disposed) return;
         runtime.beginTelemetryPreview();
+
+        const patrolRoutes = collectAutoPatrolPlaybackRoutes(sceneDocument);
+        autoPatrolPlayback = new AutoPatrolPlaybackController({
+          readPose: () => viewport!.getCameraPose(),
+          writePose: (pose) => viewport!.applyCameraPose(pose, { animate: false }),
+          now: () => typeof performance === 'undefined' ? Date.now() : performance.now(),
+          subscribeFrame: (callback) => {
+            const observer = viewport!.scene.onBeforeRenderObservable.add(callback);
+            return () => viewport?.scene.onBeforeRenderObservable.remove(observer);
+          },
+        });
+        autoPatrolPlayback.setRoutes(patrolRoutes);
+        unsubscribeAutoPatrolSnapshot = autoPatrolPlayback.subscribe(() => {
+          if (!disposed && autoPatrolPlayback) setAutoPatrolSnapshot(autoPatrolPlayback.getSnapshot());
+        });
+        autoPatrolPlaybackRef.current = autoPatrolPlayback;
+        setAutoPatrolRoutes(patrolRoutes);
+
+        if (parsedConfig.viewer.allowCameraControl) {
+          const notifyManualInput = (): void => {
+            autoPatrolPlayback?.notifyManualInput();
+            autoPatrolPlayback?.notifyCameraChangedWhilePaused();
+          };
+          const handlePointerMove = (event: globalThis.PointerEvent): void => {
+            if (event.buttons !== 0) notifyManualInput();
+          };
+          const handleWheel = (): void => notifyManualInput();
+          const handleKeyDown = (event: KeyboardEvent): void => {
+            if (!['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyC'].includes(event.code)) return;
+            const target = event.target;
+            const interactiveControlFocused = target instanceof HTMLElement
+              && Boolean(target.closest('input, textarea, select, button, a, [role="button"], [contenteditable="true"]'));
+            if (interactiveControlFocused) return;
+            notifyManualInput();
+          };
+          canvas.addEventListener('pointermove', handlePointerMove);
+          canvas.addEventListener('wheel', handleWheel, { passive: true });
+          window.addEventListener('keydown', handleKeyDown, true);
+          removeAutoPatrolManualInputListeners = () => {
+            canvas.removeEventListener('pointermove', handlePointerMove);
+            canvas.removeEventListener('wheel', handleWheel);
+            window.removeEventListener('keydown', handleKeyDown, true);
+          };
+        }
+
+        const autoStartRoute = findAutoStartPatrolRoute(patrolRoutes);
+        if (autoStartRoute) {
+          const result = autoPatrolPlayback.start(autoStartRoute.entityId);
+          if (!result.ok) setRuntimeMessage(result.error);
+        }
 
         mqttClient = new MqttStackerTelemetryClient((logMessage) => console.info(`[Viewer MQTT] ${logMessage}`));
         mqttClient.updateConfig(parsedConfig.mqtt);
@@ -213,6 +289,10 @@ export function PlayerApp() {
         setPhase('blocked');
         setMessage(`Web Viewer 启动失败：${getErrorMessage(error)}`);
         mqttClient?.dispose();
+        removeAutoPatrolManualInputListeners?.();
+        unsubscribeAutoPatrolSnapshot?.();
+        autoPatrolPlayback?.dispose();
+        autoPatrolPlaybackRef.current = null;
         runtime?.dispose();
         viewport?.dispose();
         clearDeploymentAssetManifest();
@@ -225,6 +305,10 @@ export function PlayerApp() {
       abortController.abort();
       if (resize) window.removeEventListener('resize', resize);
       mqttClient?.dispose();
+      removeAutoPatrolManualInputListeners?.();
+      unsubscribeAutoPatrolSnapshot?.();
+      autoPatrolPlayback?.dispose();
+      autoPatrolPlaybackRef.current = null;
       runtime?.dispose();
       viewport?.dispose();
       clearDeploymentAssetManifest();
@@ -241,6 +325,30 @@ export function PlayerApp() {
     });
   }, [isDigitalTwin, phase]);
 
+  function handleAutoPatrolAction(action: AutoPatrolControlAction, routeId: string | null): void {
+    const controller = autoPatrolPlaybackRef.current;
+    if (!controller) return;
+    let result: { ok: true } | { ok: false; error: string } | null = null;
+    switch (action) {
+      case 'start':
+        result = routeId ? controller.start(routeId) : { ok: false, error: '未选择巡检路线。' };
+        break;
+      case 'pause':
+        result = controller.pause(false);
+        break;
+      case 'resume':
+        result = controller.resume();
+        break;
+      case 'stop':
+        controller.stop();
+        break;
+      case 'return':
+        result = controller.returnToStart();
+        break;
+    }
+    if (result && !result.ok) setRuntimeMessage(result.error);
+  }
+
   const backgroundColor = config?.page.backgroundColor ?? '#141414';
   const showOverlay = shouldShowPlayerStatusOverlay(
     phase,
@@ -251,6 +359,13 @@ export function PlayerApp() {
   return (
     <main className="player-root" style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
+      {phase === 'ready' && autoPatrolRoutes.length > 0 ? (
+        <AutoPatrolControls
+          routes={autoPatrolRoutes}
+          snapshot={autoPatrolSnapshot}
+          onAction={handleAutoPatrolAction}
+        />
+      ) : null}
       {showOverlay ? (
         <section className={`player-status player-status-${phase}`} role={phase === 'blocked' ? 'alert' : 'status'}>
           <strong>{phase === 'loading' ? message : phase === 'blocked' ? '场景已阻断' : '场景运行中'}</strong>

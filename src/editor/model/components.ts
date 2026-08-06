@@ -227,6 +227,35 @@ export type PoiEffectComponent = {
   density: number;
 };
 
+export type AutoPatrolPathType = 'smooth' | 'linear';
+
+export type AutoPatrolPlaybackMode = 'once' | 'loop' | 'ping-pong';
+
+/** 自动巡检节点内部保存完整 ArcRotateCamera 位姿；坐标相对于巡检实体原点。 */
+export type AutoPatrolCameraPose = {
+  alpha: number;
+  beta: number;
+  radius: number;
+  target: Vector3Data;
+};
+
+/** 到达动作在首期只保留空数组扩展位，避免提前固化不完整的通用事件协议。 */
+export type AutoPatrolWaypoint = {
+  id: string;
+  pose: AutoPatrolCameraPose;
+  travelDurationSeconds: number;
+  dwellSeconds: number;
+  arrivalActions: [];
+};
+
+export type AutoPatrolComponent = {
+  enabled: boolean;
+  autoStart: boolean;
+  pathType: AutoPatrolPathType;
+  playbackMode: AutoPatrolPlaybackMode;
+  waypoints: AutoPatrolWaypoint[];
+};
+
 export type EntityComponents = {
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
@@ -242,4 +271,5 @@ export type EntityComponents = {
   camera?: CameraComponent;
   light?: LightComponent;
   poiEffect?: PoiEffectComponent;
+  autoPatrol?: AutoPatrolComponent;
 };
