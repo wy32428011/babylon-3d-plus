@@ -79,6 +79,7 @@ function createParameterDefinition(field) {
     if (type === 'texture' && /\.(png|jpe?g|webp)$/i.test(defaultValue)) {
       return { ...base, type: 'texture', defaultValue, allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp'] };
     }
+    if (type === 'string') return { ...base, type: 'string', defaultValue };
   }
 
   if (

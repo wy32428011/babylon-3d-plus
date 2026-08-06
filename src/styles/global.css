@@ -4070,6 +4070,49 @@ select {
   grid-column: 1 / -1;
 }
 
+.digital-twin-publish-origin-list {
+  display: grid;
+  gap: 8px;
+}
+
+.digital-twin-publish-origin-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.digital-twin-publish-origin-row input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid #555555;
+  border-radius: 3px;
+  color: #eeeeee;
+  background: #181818;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+}
+
+.digital-twin-publish-dialog .digital-twin-publish-origin-add {
+  justify-self: start;
+  border-style: dashed;
+  color: #bfe2ff;
+  background: #203246;
+}
+
+.digital-twin-publish-origin-warning {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #725f2f;
+  border-radius: 4px;
+  color: #f6df9e;
+  background: #302a1b;
+  font-size: 11px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
 .digital-twin-publish-confirmation {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

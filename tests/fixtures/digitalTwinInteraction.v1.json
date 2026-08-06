@@ -1,0 +1,197 @@
+{
+  "fixtureVersion": 1,
+  "protocolVersion": 1,
+  "channel": "zending.digital-twin.bridge",
+  "viewerErrorCodes": [
+    "INVALID_ASSET_CODE",
+    "ASSET_NOT_FOUND",
+    "ASSET_CODE_AMBIGUOUS",
+    "ASSET_NOT_VISIBLE",
+    "ASSET_GEOMETRY_NOT_READY",
+    "COMMAND_CANCELLED",
+    "UNSUPPORTED_COMMAND",
+    "INTERNAL_ERROR"
+  ],
+  "valid": [
+    {
+      "name": "host hello",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "host.hello"
+      }
+    },
+    {
+      "name": "bridge ready",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "bridge.ready"
+      }
+    },
+    {
+      "name": "viewer ready",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "viewer.ready",
+        "payload": {
+          "projectId": "2051942646011785218",
+          "capabilities": [
+            "focusAsset"
+          ]
+        }
+      }
+    },
+    {
+      "name": "focus asset",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.focusAsset",
+        "requestId": "request-1",
+        "payload": {
+          "assetCode": "001005"
+        }
+      }
+    },
+    {
+      "name": "cancel focus asset",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.cancelFocusAsset",
+        "requestId": "request-1"
+      }
+    },
+    {
+      "name": "successful result",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.result",
+        "requestId": "request-1",
+        "ok": true,
+        "payload": {
+          "assetCode": "001005",
+          "entityIds": [
+            "entity_asset_1"
+          ]
+        }
+      }
+    },
+    {
+      "name": "failed result",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.result",
+        "requestId": "request-1",
+        "ok": false,
+        "error": {
+          "code": "ASSET_NOT_FOUND",
+          "message": "当前入口场景中未找到该资产编号"
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "wrong channel",
+      "message": {
+        "channel": "other.channel",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "host.hello"
+      }
+    },
+    {
+      "name": "wrong version",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 2,
+        "sessionId": "runtime-1:session-1",
+        "type": "host.hello"
+      }
+    },
+    {
+      "name": "missing session",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "type": "host.hello"
+      }
+    },
+    {
+      "name": "unknown command",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.flyCamera"
+      }
+    },
+    {
+      "name": "empty asset code",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.focusAsset",
+        "requestId": "request-1",
+        "payload": {
+          "assetCode": "   "
+        }
+      }
+    },
+    {
+      "name": "numeric asset code",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.focusAsset",
+        "requestId": "request-1",
+        "payload": {
+          "assetCode": 1005
+        }
+      }
+    },
+    {
+      "name": "unknown result error code",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.result",
+        "requestId": "request-1",
+        "ok": false,
+        "error": {
+          "code": "UNKNOWN",
+          "message": "unknown"
+        }
+      }
+    },
+    {
+      "name": "unexpected payload field",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.focusAsset",
+        "requestId": "request-1",
+        "payload": {
+          "assetCode": "DDJ2",
+          "animate": false
+        }
+      }
+    }
+  ]
+}

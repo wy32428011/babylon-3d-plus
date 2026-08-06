@@ -25,6 +25,13 @@ import {
   type DigitalTwinProjectStatus,
 } from './digitalTwinUploadClient.js';
 import { rememberRecentSceneFile } from './projectAssetStore.js';
+import {
+  buildDigitalTwinRuntimeConfigSavePayload,
+  createDefaultDigitalTwinAllowedParentOrigins,
+  normalizeDigitalTwinAllowedParentOrigins,
+  readDigitalTwinAllowedParentOrigins,
+  resolveDataPlatformParentOrigin,
+} from '../shared/digitalTwinRuntimeConfig.js';
 
 const MAX_SCENE_CONTENT_BYTES = 64 * 1024 * 1024;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -53,6 +60,7 @@ export function getLocalDigitalTwinPublishContext(publishActive: boolean): Digit
   const current = getCurrentDataPlatformBinding();
   if (!current) return emptyPublishContext(publishActive);
   const metadata = current.metadata;
+  const dataPlatformOrigin = resolveDataPlatformParentOrigin(metadata.baseUrl);
   return {
     available: true,
     projectRoot: current.projectRoot,
@@ -68,6 +76,8 @@ export function getLocalDigitalTwinPublishContext(publishActive: boolean): Digit
     remoteLatestVersionNumber: metadata.latestVersionNumber,
     stableUrl: null,
     releaseUrl: null,
+    dataPlatformOrigin,
+    allowedParentOrigins: [dataPlatformOrigin],
     overwriteConfirmationRequired: metadata.editorProjectId !== null,
     versionConflict: false,
     publishActive,
@@ -91,6 +101,18 @@ export async function publishDigitalTwin(
       errorCode: 'DIGITAL_TWIN_OVERWRITE_CONFIRM_REQUIRED',
       message: '目标业务项目已经有当前数字孪生工程，请确认覆盖后再发布。',
     });
+  }
+
+  if (!context.versionConflict) {
+    emit(onProgress, validated.requestId, 'saving', '正在保存大屏嵌入配置…', 1);
+    const savedRuntimeConfig = await client.saveRuntimeConfig(
+      buildDigitalTwinRuntimeConfigSavePayload(remote.runtimeConfig, validated.allowedParentOrigins),
+      signal,
+    );
+    const savedParentOrigins = readDigitalTwinAllowedParentOrigins(savedRuntimeConfig.configJson);
+    if (JSON.stringify(savedParentOrigins) !== JSON.stringify(validated.allowedParentOrigins)) {
+      throw new Error('数字孪生运行配置保存后与发布请求不一致。');
+    }
   }
 
   emit(onProgress, validated.requestId, 'saving', '正在保存当前场景…', 2);
@@ -302,6 +324,7 @@ function createPublishContext(
   remote: DigitalTwinProjectStatus,
   publishActive: boolean,
 ): DigitalTwinPublishContext {
+  const dataPlatformOrigin = resolveDataPlatformParentOrigin(metadata.baseUrl);
   return {
     available: true,
     projectRoot,
@@ -317,6 +340,11 @@ function createPublishContext(
     remoteLatestVersionNumber: remote.latestVersionNumber,
     stableUrl: remote.stableUrl,
     releaseUrl: remote.releaseUrl,
+    dataPlatformOrigin,
+    allowedParentOrigins: createDefaultDigitalTwinAllowedParentOrigins(
+      metadata.baseUrl,
+      remote.runtimeConfig.configJson,
+    ),
     overwriteConfirmationRequired: remote.editorProjectId !== null,
     versionConflict: remote.latestVersionId !== metadata.latestVersionId,
     publishActive,
@@ -339,6 +367,8 @@ function emptyPublishContext(publishActive = false): DigitalTwinPublishContext {
     remoteLatestVersionNumber: null,
     stableUrl: null,
     releaseUrl: null,
+    dataPlatformOrigin: null,
+    allowedParentOrigins: [],
     overwriteConfirmationRequired: false,
     versionConflict: false,
     publishActive,
@@ -435,6 +465,7 @@ function validatePublishRequest(request: DigitalTwinPublishRequest): DigitalTwin
     sceneContent: request.sceneContent,
     overwriteExisting: request.overwriteExisting === true,
     confirmResourceBindings: request.confirmResourceBindings === true,
+    allowedParentOrigins: normalizeDigitalTwinAllowedParentOrigins(request.allowedParentOrigins),
   };
 }
 

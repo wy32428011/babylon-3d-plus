@@ -1,7 +1,10 @@
 import { useEffect, useId, useMemo, useState, type FormEvent } from 'react';
 import { createDeploymentSceneSummary } from './deploymentExport';
+import { analyzeDigitalTwinAssetCodes } from '../../shared/digitalTwinAssetCodes';
+import { createDigitalTwinPublishAssetWarningView } from './digitalTwinPublishAssetWarnings';
 import type { DigitalTwinPublishController } from './useDigitalTwinPublish';
 import { useEditorStore } from '../store/editorStore';
+import { normalizeDigitalTwinAllowedParentOrigins } from '../../../electron/shared/digitalTwinRuntimeConfig';
 
 export type DigitalTwinPublishDialogProps = {
   open: boolean;
@@ -15,10 +18,16 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   const descriptionId = useId();
   const scene = useEditorStore((state) => state.scene);
   const summary = useMemo(() => createDeploymentSceneSummary(scene), [scene]);
+  const assetWarningView = useMemo(
+    () => createDigitalTwinPublishAssetWarningView(analyzeDigitalTwinAssetCodes(scene)),
+    [scene],
+  );
   const [publishName, setPublishName] = useState('');
   const [remark, setRemark] = useState('');
   const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [confirmResourceBindings, setConfirmResourceBindings] = useState(false);
+  const [confirmAssetWarnings, setConfirmAssetWarnings] = useState(false);
+  const [allowedParentOrigins, setAllowedParentOrigins] = useState<string[]>([]);
   const [validationError, setValidationError] = useState<string | null>(null);
   const { state, isBusy } = props.controller;
   const context = state.context;
@@ -43,6 +52,15 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   useEffect(() => {
     if (context?.overwriteConfirmationRequired) setOverwriteExisting(false);
   }, [context?.overwriteConfirmationRequired]);
+
+  useEffect(() => {
+    if (!props.open || !context?.available) return;
+    setAllowedParentOrigins(context.allowedParentOrigins);
+  }, [context?.allowedParentOrigins, context?.projectId, props.open]);
+
+  useEffect(() => {
+    if (props.open) setConfirmAssetWarnings(false);
+  }, [assetWarningView.generatedCount, assetWarningView.duplicateCount, props.open]);
 
   if (!props.open) return null;
 
@@ -69,12 +87,24 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
       setValidationError('请确认仅补充缺失的项目资源关联。');
       return;
     }
+    if (assetWarningView.requiresConfirmation && !confirmAssetWarnings) {
+      setValidationError('请确认已知晓入口场景的资产编号发布提示。');
+      return;
+    }
+    let normalizedParentOrigins: string[];
+    try {
+      normalizedParentOrigins = normalizeDigitalTwinAllowedParentOrigins(allowedParentOrigins);
+    } catch (error) {
+      setValidationError(error instanceof Error ? error.message : '父页面 Origin 配置无效。');
+      return;
+    }
     setValidationError(null);
     await props.controller.start({
       publishName: normalizedName,
       remark,
       overwriteExisting,
       confirmResourceBindings,
+      allowedParentOrigins: normalizedParentOrigins,
     });
   }
 
@@ -85,6 +115,8 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
     setRemark('');
     setOverwriteExisting(false);
     setConfirmResourceBindings(false);
+    setConfirmAssetWarnings(false);
+    setAllowedParentOrigins([]);
     setValidationError(null);
     props.onClose();
   }
@@ -144,6 +176,62 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
           ) : null}
         </section>
 
+        <section className="deployment-export-dialog-section" aria-label="大屏嵌入配置">
+          <div className="deployment-export-section-heading">
+            <h3>大屏嵌入配置</h3>
+            <span>发布时同步到项目运行配置</span>
+          </div>
+          <p className="deployment-export-resource-detail">
+            默认加入当前数据中台 Origin；可按实际部署地址增删修改。只填写协议、主机和端口，不要包含路径、Query 或 Fragment。
+          </p>
+          <div className="digital-twin-publish-origin-list">
+            {allowedParentOrigins.map((origin, index) => (
+              <div className="digital-twin-publish-origin-row" key={index}>
+                <input
+                  aria-label={`父页面 Origin ${index + 1}`}
+                  disabled={isBusy}
+                  maxLength={2048}
+                  onChange={(event) => {
+                    setAllowedParentOrigins((current) => current.map((item, itemIndex) => (
+                      itemIndex === index ? event.target.value : item
+                    )));
+                    setValidationError(null);
+                  }}
+                  placeholder="例如：http://127.0.0.1:8001"
+                  value={origin}
+                />
+                <button
+                  aria-label={`删除父页面 Origin ${index + 1}`}
+                  disabled={isBusy}
+                  onClick={() => {
+                    setAllowedParentOrigins((current) => current.filter((_, itemIndex) => itemIndex !== index));
+                    setValidationError(null);
+                  }}
+                  type="button"
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+            <button
+              className="digital-twin-publish-origin-add"
+              disabled={isBusy || allowedParentOrigins.length >= 64}
+              onClick={() => {
+                setAllowedParentOrigins((current) => [...current, '']);
+                setValidationError(null);
+              }}
+              type="button"
+            >
+              + 添加父页面 Origin
+            </button>
+          </div>
+          {context?.dataPlatformOrigin && !containsParentOrigin(allowedParentOrigins, context.dataPlatformOrigin) ? (
+            <p className="digital-twin-publish-origin-warning" role="status">
+              当前数据中台 Origin（{context.dataPlatformOrigin}）不在列表中，跨域大屏将无法建立资产聚焦连接。
+            </p>
+          ) : null}
+        </section>
+
         <section className="deployment-export-dialog-section" aria-label="工程包摘要">
           <div className="deployment-export-section-heading">
             <h3>工程包摘要</h3>
@@ -157,6 +245,40 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
             源工程 ZIP：项目全部场景及实际引用资源（跳过 CAD/DXF）；dist ZIP：当前入口场景、自包含 Viewer 与 SHA-256 清单。
           </p>
         </section>
+
+
+        {assetWarningView.requiresConfirmation ? (
+          <section className="deployment-export-dialog-section deployment-export-warnings" aria-label="资产编号发布提示">
+            <div className="deployment-export-section-heading">
+              <h3>资产编号提示</h3>
+              <span>
+                默认编号 {assetWarningView.generatedCount} 个 · 重复编号 {assetWarningView.duplicateCount} 组
+              </span>
+            </div>
+            <p className="deployment-export-resource-detail">
+              以下问题不会阻断发布，但会影响大屏按资产编号精确聚焦；重复编号在运行时会返回歧义错误。
+            </p>
+            <ul>
+              {assetWarningView.detailLines.map((line) => <li key={line}>{line}</li>)}
+            </ul>
+            {assetWarningView.truncatedCount > 0 ? <p>另有 {assetWarningView.truncatedCount} 项未展开。</p> : null}
+            <label className="digital-twin-publish-confirmation digital-twin-publish-confirmation-warning">
+              <input
+                checked={confirmAssetWarnings}
+                disabled={isBusy}
+                onChange={(event) => {
+                  setConfirmAssetWarnings(event.target.checked);
+                  setValidationError(null);
+                }}
+                type="checkbox"
+              />
+              <span>
+                <strong>确认仍然发布</strong>
+                <small>本次仅确认 warning，不会自动修改、去重或回退资产编号。</small>
+              </span>
+            </label>
+          </section>
+        ) : null}
 
         <section className="deployment-export-dialog-section" aria-label="发布设置">
           <label className="deployment-export-dialog-field">
@@ -260,6 +382,16 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
       </form>
     </div>
   );
+}
+
+function containsParentOrigin(values: readonly string[], targetOrigin: string): boolean {
+  return values.some((value) => {
+    try {
+      return new URL(value.trim()).origin === targetOrigin;
+    } catch {
+      return false;
+    }
+  });
 }
 
 type MissingBindings = { modelIds: string[]; envModelIds: string[]; comboModelIds: string[] };

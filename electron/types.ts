@@ -154,6 +154,8 @@ export type DigitalTwinPublishContext = {
   remoteLatestVersionNumber: number | null;
   stableUrl: string | null;
   releaseUrl: string | null;
+  dataPlatformOrigin: string | null;
+  allowedParentOrigins: string[];
   overwriteConfirmationRequired: boolean;
   versionConflict: boolean;
   publishActive: boolean;
@@ -166,6 +168,7 @@ export type DigitalTwinPublishRequest = {
   sceneContent: string;
   overwriteExisting: boolean;
   confirmResourceBindings: boolean;
+  allowedParentOrigins: string[];
 };
 
 export type DigitalTwinPublishProgressPhase =

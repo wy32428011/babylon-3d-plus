@@ -2,6 +2,7 @@ import { net } from 'electron';
 import { promises as fs } from 'node:fs';
 import { createPendingChunkIndexes } from './digitalTwinPublishProtocol.js';
 import { resolveDataPlatformRemoteUrl } from './dataPlatformTransfer.js';
+import type { DigitalTwinRuntimeConfigSavePayload } from '../shared/digitalTwinRuntimeConfig.js';
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const COMMIT_TIMEOUT_MS = 10 * 60_000;
@@ -51,6 +52,15 @@ export type DigitalTwinPublishTask = {
   updatedAt: string | null;
 };
 
+export type DigitalTwinRuntimeConfig = {
+  projectId: string;
+  mqttBrokerUrl: string | null;
+  apiBaseUrl: string | null;
+  runtimeEnabled: boolean;
+  configJson: string | null;
+  updatedAt: string | null;
+};
+
 export type DigitalTwinProjectStatus = {
   projectId: string;
   editorProjectId: string | null;
@@ -62,6 +72,7 @@ export type DigitalTwinProjectStatus = {
   stableUrl: string | null;
   releaseUrl: string | null;
   lastPublishedAt: string | null;
+  runtimeConfig: DigitalTwinRuntimeConfig;
 };
 
 export type DigitalTwinPreparePayload = {
@@ -185,6 +196,20 @@ export class DigitalTwinUploadClient {
     ));
     if (status.projectId !== projectId) throw new Error('数字孪生项目状态响应与请求项目不匹配。');
     return status;
+  }
+
+  async saveRuntimeConfig(
+    payload: DigitalTwinRuntimeConfigSavePayload,
+    signal: AbortSignal,
+  ): Promise<DigitalTwinRuntimeConfig> {
+    const config = normalizeRuntimeConfig(await this.requestJson(
+      'api/v1/digital-twin/runtime-config/save',
+      'POST',
+      payload,
+      signal,
+    ));
+    if (config.projectId !== payload.projectId) throw new Error('数字孪生运行配置响应与请求项目不匹配。');
+    return config;
   }
 
   private async uploadChunk(
@@ -463,8 +488,11 @@ function normalizeUploadSession(value: unknown): DigitalTwinUploadSession {
 
 function normalizeProjectStatus(value: unknown): DigitalTwinProjectStatus {
   const status = requireObject(value, '数字孪生项目状态');
+  const projectId = requiredId(status.projectId, 'projectId');
+  const runtimeConfig = normalizeRuntimeConfig(status.runtimeConfig);
+  if (runtimeConfig.projectId !== projectId) throw new Error('数字孪生项目状态中的运行配置项目不匹配。');
   return {
-    projectId: requiredId(status.projectId, 'projectId'),
+    projectId,
     editorProjectId: optionalId(status.editorProjectId),
     latestVersionId: optionalId(status.latestVersionId),
     latestVersionNumber: optionalPositiveInteger(status.latestVersionNumber),
@@ -474,6 +502,20 @@ function normalizeProjectStatus(value: unknown): DigitalTwinProjectStatus {
     stableUrl: optionalString(status.stableUrl),
     releaseUrl: optionalString(status.releaseUrl),
     lastPublishedAt: optionalString(status.lastPublishedAt),
+    runtimeConfig,
+  };
+}
+
+function normalizeRuntimeConfig(value: unknown): DigitalTwinRuntimeConfig {
+  const config = requireObject(value, '数字孪生运行配置');
+  if (typeof config.runtimeEnabled !== 'boolean') throw new Error('数字孪生响应 runtimeEnabled 无效。');
+  return {
+    projectId: requiredId(config.projectId, 'projectId'),
+    mqttBrokerUrl: optionalString(config.mqttBrokerUrl),
+    apiBaseUrl: optionalString(config.apiBaseUrl),
+    runtimeEnabled: config.runtimeEnabled,
+    configJson: optionalString(config.configJson),
+    updatedAt: optionalString(config.updatedAt),
   };
 }
 

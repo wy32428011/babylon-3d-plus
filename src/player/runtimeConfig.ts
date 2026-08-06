@@ -85,6 +85,47 @@ function assertDeployUrl(value: unknown, path: string, directory = false): strin
   return source;
 }
 
+/** 从项目扩展配置读取允许嵌入 Viewer 的跨域父页面 Origin；同源无需配置。 */
+export function parseDigitalTwinAllowedParentOrigins(config: Record<string, unknown>): string[] {
+  if (!Object.hasOwn(config, 'integration')) return [];
+  const integration = assertObject(config.integration, '项目运行配置 configJson.integration');
+  if (!Object.hasOwn(integration, 'allowedParentOrigins')) return [];
+  const rawOrigins = integration.allowedParentOrigins;
+  if (!Array.isArray(rawOrigins) || rawOrigins.length > 64) {
+    throw new Error('项目运行配置 configJson.integration.allowedParentOrigins 必须是最多 64 项的数组。');
+  }
+
+  const origins: string[] = [];
+  const seen = new Set<string>();
+  rawOrigins.forEach((value, index) => {
+    const path = `项目运行配置 configJson.integration.allowedParentOrigins[${index}]`;
+    const source = assertString(value, path, 2048);
+    if (source === '*') throw new Error(`${path} 禁止使用通配符。`);
+
+    let url: URL;
+    try {
+      url = new URL(source);
+    } catch {
+      throw new Error(`${path} 不是有效 Origin。`);
+    }
+    if (
+      !['http:', 'https:'].includes(url.protocol)
+      || url.username
+      || url.password
+      || url.pathname !== '/'
+      || url.search
+      || url.hash
+      || url.origin === 'null'
+    ) {
+      throw new Error(`${path} 必须是无凭据、无路径、无查询和无片段的 HTTP(S) Origin。`);
+    }
+    if (seen.has(url.origin)) return;
+    seen.add(url.origin);
+    origins.push(url.origin);
+  });
+  return origins;
+}
+
 /** 严格解析 MQTT 适配器配置。 */
 function parseMqttAdapter(value: unknown, path: string): MqttAdapterConfig {
   const adapter = assertObject(value, path);

@@ -148,6 +148,31 @@ export function ModelParametersInspector({ modelAsset, disabled = false, compact
     );
   }
 
+  function renderStringParameter(definition: ModelParameterDefinition & { type: 'string' }) {
+    const draftKey = getContinuousDraftKey(definition.key);
+    const currentValue = values[definition.key];
+    const draft = draftValues[draftKey] ?? formatValue(currentValue);
+
+    return (
+      <label className="inspector-row" key={definition.key}>
+        <span>{definition.label}</span>
+        <input
+          type="text"
+          disabled={disabled}
+          value={draft}
+          onBlur={commitContinuousEdit}
+          onChange={(event) => {
+            const rawValue = event.target.value;
+            setDraftValues((drafts) => ({ ...drafts, [draftKey]: rawValue }));
+            previewValue(definition, rawValue);
+          }}
+          onFocus={beginContinuousEdit}
+          onKeyDown={handleContinuousKeyDown}
+        />
+      </label>
+    );
+  }
+
   function renderColorParameter(definition: ModelParameterDefinition & { type: 'color' }) {
     return (
       <label className="inspector-row" key={definition.key}>
@@ -315,6 +340,7 @@ export function ModelParametersInspector({ modelAsset, disabled = false, compact
 
   function renderParameter(definition: ModelParameterDefinition) {
     if (definition.type === 'number') return renderNumberParameter(definition);
+    if (definition.type === 'string') return renderStringParameter(definition);
     if (definition.type === 'color') return renderColorParameter(definition);
     if (definition.type === 'boolean') return renderBooleanParameter(definition);
     if (definition.type === 'enum') return renderEnumParameter(definition);
