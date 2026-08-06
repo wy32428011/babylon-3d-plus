@@ -137,7 +137,6 @@ export type ModelAssetSharedInstancingMode = 'shared-instance' | 'owned-containe
 
 /** 模型共享策略判定原因，用于 smoke 和后续接入方精确解释准入边界。 */
 export type ModelAssetSharedInstancingReason =
-  | 'shelf-resource'
   | 'plain-static-model'
   | 'script-assets'
   | 'parameter-config'
@@ -152,15 +151,12 @@ export type ModelAssetSharedInstancingPolicy = {
 
 /**
  * 基于 ModelAssetComponent 快照判定模型是否可安全进入共享实例路径。
- * Shelf 是历史验证过的特例，允许携带参数脚本继续共享；其它带脚本或参数元数据的模型必须独占容器。
+ * 携带脚本或参数元数据的模型必须独占容器：脚本可能改写几何（如 Shelf 的顶点拉伸），
+ * 共享实例会把改写扩散到全部同源实例。
  */
 export function resolveModelAssetSharedInstancingPolicy(
   modelAsset: ModelAssetComponent,
 ): ModelAssetSharedInstancingPolicy {
-  if (isShelfInstancingCandidate(modelAsset)) {
-    return { mode: 'shared-instance', reason: 'shelf-resource' };
-  }
-
   const blockingReason = findOwnedContainerReason(modelAsset);
   if (blockingReason) {
     return { mode: 'owned-container', reason: blockingReason };
@@ -186,35 +182,4 @@ function findOwnedContainerReason(modelAsset: ModelAssetComponent): ModelAssetSh
 /** 判断快照数组字段是否真实携带条目；空数组等同于未启用该动态能力。 */
 function hasArrayEntries(value: readonly unknown[] | undefined | null): boolean {
   return Array.isArray(value) && value.length > 0;
-}
-
-/** 判断模型资产是否为允许共享几何和材质的 Shelf 模型。 */
-export function isShelfInstancingCandidate(modelAsset: ModelAssetComponent): boolean {
-  const resourceIdentifiers = [
-    modelAsset.sourcePath,
-    modelAsset.sourceUrl,
-    ...(modelAsset.scriptAssets ?? []).flatMap((scriptAsset) => [
-      scriptAsset.path,
-      scriptAsset.sourceUrl,
-      scriptAsset.name,
-    ]),
-  ];
-
-  if (resourceIdentifiers.some(isShelfResourceIdentifier)) return true;
-
-  const metadataSignature = JSON.stringify([
-    modelAsset.parameterScriptMetadata ?? [],
-    modelAsset.animationScriptMetadata ?? [],
-  ]);
-  return /"scriptFilename"\s*:\s*"shelf\.model\.ts"/i.test(metadataSignature);
-}
-
-/** 使用稳定文件名和目录名识别 Shelf 资源，避免依赖场景实体显示名称。 */
-function isShelfResourceIdentifier(value: string): boolean {
-  const normalized = value.replace(/\\/g, '/').toLowerCase().split(/[?#]/, 1)[0];
-  const fileName = normalized.slice(normalized.lastIndexOf('/') + 1);
-  return fileName === 'shelf.glb'
-    || fileName === 'shelf.gltf'
-    || fileName === 'shelf.model.ts'
-    || normalized.includes('/shelf/');
 }

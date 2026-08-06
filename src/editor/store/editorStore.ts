@@ -1572,15 +1572,6 @@ function collectPromotedChildrenIds(
   return result;
 }
 
-/** 内置货格世界坐标提供器：由 SceneRuntime 注册，解绑绑定时把运行时实际位置烘焙回实体数据。 */
-export type BuiltInSlotWorldTransformProvider = (entityId: string) => TransformComponent | null;
-
-let builtInSlotWorldTransformProvider: BuiltInSlotWorldTransformProvider | null = null;
-
-export function registerBuiltInSlotWorldTransformProvider(provider: BuiltInSlotWorldTransformProvider | null): void {
-  builtInSlotWorldTransformProvider = provider;
-}
-
 /** 为声明了内置货格绑定的宿主实体创建货格实体（幂等，调用方需先确认不存在）。货格与宿主同级，绑定身份记录在 builtInBinding.hostEntityId。 */
 function createBuiltInSlotEntityInScene(
   scene: SceneDocument,
@@ -1618,29 +1609,8 @@ function createBuiltInSlotEntityInScene(
   };
 }
 
-/** 解除内置货格绑定：货格保留在场景中，烘焙当前世界坐标，变为普通定位线框。 */
-function detachBuiltInSlotEntityInScene(scene: SceneDocument, hostEntityId: string, slotEntityId: string): SceneDocument {
-  const slotEntity = scene.entities[slotEntityId];
-  const locator = slotEntity?.components.locator;
-  if (!scene.entities[hostEntityId] || !slotEntity || !locator) return scene;
-
-  const bakedTransform = builtInSlotWorldTransformProvider?.(slotEntityId) ?? slotEntity.components.transform;
-  const { builtInBinding: _removed, ...restLocator } = locator;
-
-  return {
-    ...scene,
-    entities: {
-      ...scene.entities,
-      [slotEntityId]: {
-        ...slotEntity,
-        components: { ...slotEntity.components, transform: bakedTransform, locator: restLocator },
-      },
-    },
-  };
-}
-
 /**
- * 宿主模型参数变化后的内置货格副作用：按启用参数创建/解绑货格（幂等），并按声明派生维度。
+ * 宿主模型参数变化后的内置货格副作用：按启用参数创建/删除货格（幂等），并按声明派生维度。
  * 仅在提交路径调用；preview 路径只应调用 patchBuiltInSlotDimensions。
  */
 function applyBuiltInSlotSideEffects(scene: SceneDocument, hostEntityId: string): SceneDocument {
@@ -1655,7 +1625,7 @@ function applyBuiltInSlotSideEffects(scene: SceneDocument, hostEntityId: string)
   if (enabled && !slotEntityId) {
     next = createBuiltInSlotEntityInScene(scene, hostEntityId, config);
   } else if (!enabled && slotEntityId) {
-    next = detachBuiltInSlotEntityInScene(scene, hostEntityId, slotEntityId);
+    next = deleteEntitiesInScene(scene, [slotEntityId]);
   }
   return patchBuiltInSlotDimensions(next, hostEntityId);
 }
@@ -1928,14 +1898,45 @@ function prepareResolvedEntityArray(
         );
         if (!identity.ok) return identity;
 
-        duplicatedEntities.push(createModelArrayInstanceEntity(
+        const copyEntity = createModelArrayInstanceEntity(
           source,
           resolveModelArraySourceEntityId(state.scene, source),
           offset,
           identity.name,
           identity.assetCode,
           existingNames,
-        ));
+        );
+        duplicatedEntities.push(copyEntity);
+
+        // 源模型开着内置货格时副本同步生成绑定货格；副本无独立模型宿主，
+        // 运行时经 modelArrayInstanceEntities 解析其渲染源布局后放置。
+        const sourceSlotId = findBuiltInSlotEntityId(state.scene, sourceId);
+        const sourceSlot = sourceSlotId ? state.scene.entities[sourceSlotId] : null;
+        const sourceBinding = sourceSlot?.components.locator?.builtInBinding;
+        if (sourceSlot && sourceBinding) {
+          const slotNameResult = createEntityArrayName(sourceSlot.name, copyIndex);
+          if (!slotNameResult.ok) return slotNameResult;
+          const slotOverrides: EntityDuplicateOverrides = { name: slotNameResult.name };
+          const slotAssetNumberTarget = getEntityAssetNumberTarget(sourceSlot);
+          if (slotAssetNumberTarget) {
+            const slotAssetNumberResult = createArrayAssetNumber(
+              slotAssetNumberTarget.value,
+              copyIndex,
+              assetNumberRule,
+            );
+            if (!slotAssetNumberResult.ok) return slotAssetNumberResult;
+            slotOverrides.assetNumber = { kind: slotAssetNumberTarget.kind, value: slotAssetNumberResult.value };
+          }
+          const slotCopy = createDuplicatedRuntimeEntity(sourceSlot, sourceSlot.parentId, offset, existingNames, slotOverrides);
+          slotCopy.components = {
+            ...slotCopy.components,
+            locator: {
+              ...slotCopy.components.locator!,
+              builtInBinding: { hostEntityId: copyEntity.id, originOffset: { ...sourceBinding.originOffset } },
+            },
+          };
+          duplicatedEntities.push(slotCopy);
+        }
         continue;
       }
 
@@ -3697,7 +3698,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const after = patchModelParameterValue(before, key, sanitizedValue);
       if (areModelParameterValuesEqual(before, after)) return state;
 
-      // 声明了内置货格绑定时，参数变化与货格副作用（创建/解绑/维度派生）合并为单条快照命令，保证 undo 整体回滚。
+      // 声明了内置货格绑定时，参数变化与货格副作用（创建/删除/维度派生）合并为单条快照命令，保证 undo 整体回滚。
       const command = getBuiltInSlotBindingConfig(entity)
         ? updateSceneDocumentCommand('更新模型参数', (scene) => applyBuiltInSlotSideEffects(
             updateModelParameterValuesCommand(entity.id, before, after).execute(scene),

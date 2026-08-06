@@ -115,11 +115,9 @@ try {
     parameterScriptMetadata: [{ scriptFilename: 'shelf.model.ts' }],
     animationScriptMetadata: [{ scriptFilename: 'shelf.model.ts' }],
   });
-  assert.equal(module.isShelfInstancingCandidate(shelfWithScript), true, 'Shelf 旧导出必须继续识别带脚本资源');
-  assertPolicy(module, shelfWithScript, 'shared-instance', 'shelf-resource', 'Shelf 带脚本和参数元数据仍必须允许共享');
+  assertPolicy(module, shelfWithScript, 'owned-container', 'script-assets', 'Shelf 顶点拉伸脚本会改写几何，必须独占容器避免污染同源实例');
 
   const plainStaticModel = createModelAsset();
-  assert.equal(module.isShelfInstancingCandidate(plainStaticModel), false, '普通静态模型不得被旧 Shelf 函数误识别');
   assertPolicy(module, plainStaticModel, 'shared-instance', 'plain-static-model', '无脚本无参数的普通静态模型必须允许共享');
 
   assertPolicy(
@@ -196,7 +194,6 @@ try {
     ok: true,
     selectionHighlightMode: 'selection-outline',
     verifiedPolicies: [
-      'shelf-resource',
       'plain-static-model',
       'script-assets',
       'parameter-config',

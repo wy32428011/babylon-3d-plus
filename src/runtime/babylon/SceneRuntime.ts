@@ -880,23 +880,6 @@ export class SceneRuntime {
     this.syncAllModelGeneratorPresentations();
   }
 
-  /** 读取绑定货格当前世界 Transform，供编辑器解绑时烘焙回实体数据。 */
-  getBuiltInSlotWorldTransform(entityId: string): TransformComponent | null {
-    const locator = this.locators.get(entityId);
-    if (!locator) return null;
-    locator.root.computeWorldMatrix(true);
-    const position = new Vector3();
-    const quaternion = new Quaternion();
-    const scaling = new Vector3();
-    if (!locator.root.getWorldMatrix().decompose(scaling, quaternion, position)) return null;
-    const rotation = quaternion.toEulerAngles();
-    return {
-      position: { x: position.x, y: position.y, z: position.z },
-      rotation: { x: rotation.x, y: rotation.y, z: rotation.z },
-      scale: { x: scaling.x, y: scaling.y, z: scaling.z },
-    };
-  }
-
   /** 根据实体 ID 获取当前运行时中可被 Gizmo 绑定的 Babylon 节点。 */
   getGizmoTargetByEntityId(entityId: string | null): AbstractMesh | TransformNode | null {
     if (!entityId) return null;
@@ -2593,13 +2576,22 @@ export class SceneRuntime {
 
     const binding = locator.builtInBinding ?? null;
     const hostEntry = binding ? this.models.get(binding.hostEntityId) ?? null : null;
-    const bound = Boolean(binding && hostEntry);
+    // 阵列副本没有独立模型宿主：副本参数与源分化后经参数变体渲染，布局必须读实际渲染它的模型。
+    const arrayHostEntity = !hostEntry && binding
+      ? this.modelArrayInstanceEntities.get(binding.hostEntityId) ?? null
+      : null;
+    const arrayHostRenderEntry = arrayHostEntity ? this.resolveModelArrayRenderModel(arrayHostEntity) : null;
+    const bound = Boolean(binding && (hostEntry || (arrayHostEntity && arrayHostRenderEntry)));
     const hostBindingConfig = bound && binding
       ? this.syncedEntities.get(binding.hostEntityId)?.components.modelAsset?.builtInSlotBindingConfig
+        ?? arrayHostEntity?.components.modelAsset?.builtInSlotBindingConfig
         ?? hostEntry?.entitySnapshot?.components.modelAsset?.builtInSlotBindingConfig
+        ?? arrayHostRenderEntry?.entitySnapshot?.components.modelAsset?.builtInSlotBindingConfig
       : undefined;
     const columnSign = hostBindingConfig?.columnDirection === '-x' ? -1 : 1;
-    const layout = bound && hostEntry ? this.readBuiltInSlotLayout(hostEntry.contentRoot.metadata) : null;
+    const layout = bound
+      ? this.readBuiltInSlotLayout(hostEntry?.contentRoot.metadata ?? arrayHostRenderEntry?.contentRoot.metadata)
+      : null;
     const bindingSteps = bound
       ? {
           columnStepX: columnSign * (layout?.columnSpacing ?? locator.length + locator.columnGap),
@@ -2615,22 +2607,42 @@ export class SceneRuntime {
       this.locators.set(entity.id, runtimeLocator);
     }
 
-    if (bound && hostEntry && binding) {
-      runtimeLocator.root.parent = hostEntry.root;
+    if (bound && binding && (hostEntry || arrayHostEntity)) {
       const offset = binding.originOffset;
-      if (layout) {
-        runtimeLocator.root.position.set(
-          columnSign * layout.firstCellCenterX + offset.x,
-          layout.firstLayerSurfaceY + offset.y,
-          layout.depthCenterZ + offset.z,
-        );
-      } else {
+      const localPosition = layout
+        ? {
+            x: columnSign * layout.firstCellCenterX + offset.x,
+            y: layout.firstLayerSurfaceY + offset.y,
+            z: layout.depthCenterZ + offset.z,
+          }
         // 布局 metadata 未就绪（脚本尚未运行），先落在货架局部原点，脚本就绪后由 refreshBuiltInSlotBindings 修正。
-        runtimeLocator.root.position.set(offset.x, offset.y, offset.z);
+        : { x: offset.x, y: offset.y, z: offset.z };
+      if (hostEntry) {
+        runtimeLocator.root.parent = hostEntry.root;
+        runtimeLocator.root.position.set(localPosition.x, localPosition.y, localPosition.z);
+        runtimeLocator.root.rotationQuaternion = null;
+        runtimeLocator.root.rotation.set(0, 0, 0);
+        runtimeLocator.root.scaling.set(1, 1, 1);
+      } else if (arrayHostEntity) {
+        // 阵列副本在场景中没有宿主节点：把源布局点经副本实体 transform 转到世界空间。
+        const hostTransform = arrayHostEntity.components.transform;
+        const hostMatrix = Matrix.Compose(
+          new Vector3(hostTransform.scale.x, hostTransform.scale.y, hostTransform.scale.z),
+          Quaternion.RotationYawPitchRoll(hostTransform.rotation.y, hostTransform.rotation.x, hostTransform.rotation.z),
+          new Vector3(hostTransform.position.x, hostTransform.position.y, hostTransform.position.z),
+        );
+        const worldPosition = Vector3.TransformCoordinates(
+          new Vector3(localPosition.x, localPosition.y, localPosition.z),
+          hostMatrix,
+        );
+        runtimeLocator.root.parent = null;
+        runtimeLocator.root.position.copyFrom(worldPosition);
+        runtimeLocator.root.rotationQuaternion = null;
+        runtimeLocator.root.rotation.set(hostTransform.rotation.x, hostTransform.rotation.y, hostTransform.rotation.z);
+        runtimeLocator.root.scaling.set(hostTransform.scale.x, hostTransform.scale.y, hostTransform.scale.z);
       }
-      runtimeLocator.root.rotationQuaternion = null;
-      runtimeLocator.root.rotation.set(0, 0, 0);
-      runtimeLocator.root.scaling.set(1, 1, 1);
+      // 宿主可能被阵列批次挂起（根节点保持启用），货格显隐跟随宿主实体而非节点继承。
+      runtimeLocator.root.setEnabled(this.isEntityVisible(binding.hostEntityId));
     } else {
       if (runtimeLocator.root.parent) runtimeLocator.root.parent = null;
       this.applyTransform(runtimeLocator.root, entity.components.transform);
@@ -2779,6 +2791,11 @@ export class SceneRuntime {
     if (this.modelArrayGizmoProxy?.entityId === entity.id) {
       this.applyTransform(this.modelArrayGizmoProxy.node, entity.components.transform);
       this.modelArrayGizmoProxy.node.computeWorldMatrix(true);
+    }
+    // 绑定到副本的内置货格挂在场景根下、按副本位姿换算世界坐标；副本位移后需重算跟随。
+    for (const slotEntity of this.syncedEntities.values()) {
+      if (slotEntity.components.locator?.builtInBinding?.hostEntityId !== entity.id) continue;
+      this.syncLocatorEntity(slotEntity, this.selectedEntityIds.has(slotEntity.id));
     }
   }
 
@@ -4239,26 +4256,30 @@ export class SceneRuntime {
   private applyModelInteractivity(model: ModelRuntimeEntry, entityId: string): void {
     const keepScriptHostActive = model.externalScriptStarting
       && (Boolean(model.modelArrayBatch) || model.modelArraySuspendedMeshes.size > 0);
+    const visible = keepScriptHostActive || this.isEntityVisible(entityId);
     if (model.modelArrayBatch && !keepScriptHostActive) {
       this.suspendModelArrayHost(model);
-      return;
+    } else {
+      this.restoreModelArrayHostMeshes(model);
+      const pickable = !keepScriptHostActive && visible && this.isEntityScenePickable(entityId);
+      model.root.setEnabled(visible);
+      for (const mesh of model.meshes) {
+        mesh.isPickable = pickable;
+      }
     }
-
-    this.restoreModelArrayHostMeshes(model);
-    const visible = keepScriptHostActive || this.isEntityVisible(entityId);
-    const pickable = !keepScriptHostActive && visible && this.isEntityScenePickable(entityId);
-    model.root.setEnabled(visible);
-    for (const mesh of model.meshes) {
-      mesh.isPickable = pickable;
+    // 绑定货格挂在 model.root 下但不属于模型网格；宿主挂起期间根节点保持启用，货格显隐需显式跟随宿主实体。
+    for (const slotEntity of this.syncedEntities.values()) {
+      if (slotEntity.components.locator?.builtInBinding?.hostEntityId !== entityId) continue;
+      this.locators.get(slotEntity.id)?.root.setEnabled(visible);
     }
   }
 
   /**
    * 阵列批次已经承载源实体本身和全部逻辑实例时，脚本宿主只保留节点与几何引用。
    * 将其从 scene.meshes 移除，避免 Babylon 每帧重复遍历同一套隐藏叶 Mesh。
+   * 根节点保持启用：绑定货格等外来子节点挂在 root 下，不属于模型网格，不能连带隐藏。
    */
   private suspendModelArrayHost(model: ModelRuntimeEntry): void {
-    model.root.setEnabled(false);
     for (const mesh of model.meshes) {
       if (mesh.isDisposed()) continue;
       if (this.scene.removeMesh(mesh) >= 0) model.modelArraySuspendedMeshes.add(mesh);
@@ -4596,9 +4617,30 @@ export class SceneRuntime {
 
   /** 货架脚本更新布局 metadata 后，重同步其全部绑定货格的位置与网格步距。 */
   private refreshBuiltInSlotBindings(hostEntityId: string): void {
+    const hostEntity = this.syncedEntities.get(hostEntityId) ?? null;
+    const hostAsset = hostEntity?.components.modelAsset;
+    const hostRenderSignature = hostAsset
+      ? this.createModelArrayRenderSignature(hostAsset, hostEntity?.components.telemetryBinding)
+      : null;
     for (const entity of this.syncedEntities.values()) {
       const locator = entity.components.locator;
-      if (locator?.builtInBinding?.hostEntityId !== hostEntityId) continue;
+      const boundHostId = locator?.builtInBinding?.hostEntityId;
+      if (!boundHostId) continue;
+      if (boundHostId === hostEntityId) {
+        this.syncLocatorEntity(entity, this.selectedEntityIds.has(entity.id));
+        continue;
+      }
+      // 绑定到阵列副本的货格跟随副本渲染源的布局更新；副本参数与源已分化时改由参数变体脚本就绪后刷新。
+      const boundHost = this.syncedEntities.get(boundHostId) ?? this.modelArrayInstanceEntities.get(boundHostId);
+      if (boundHost?.components.modelArrayInstance?.sourceEntityId !== hostEntityId) continue;
+      const boundHostAsset = boundHost.components.modelAsset;
+      if (
+        hostRenderSignature
+        && boundHostAsset
+        && this.createModelArrayRenderSignature(boundHostAsset, boundHost.components.telemetryBinding) !== hostRenderSignature
+      ) {
+        continue;
+      }
       this.syncLocatorEntity(entity, this.selectedEntityIds.has(entity.id));
     }
   }
@@ -4657,7 +4699,8 @@ export class SceneRuntime {
 
   /** 从模型稳定根节点重新收集全部活动 Mesh，并合并运行时元数据。 */
   private refreshModelMeshes(model: ModelRuntimeEntry, metadata: Record<string, unknown>): void {
-    model.meshes = [...new Set(model.root.getChildMeshes(false))]
+    // 只收集 contentRoot 下的模型自身内容：绑定货格挂在 model.root 下，混入会被阵列批次克隆、挂起时移出场景。
+    model.meshes = [...new Set(model.contentRoot.getChildMeshes(false))]
       .filter((mesh) => !mesh.isDisposed());
     repairInstancedMeshBufferContainers(model.meshes);
     for (const mesh of model.meshes) {
@@ -5161,6 +5204,16 @@ export class SceneRuntime {
         });
       }
       for (const instanceEntity of activeVariant.entities) this.onModelMeasurementChanged(instanceEntity.id);
+      // 变体批次已承载这些副本：先切换渲染源映射，绑定货格才能读到变体布局而非阵列源布局。
+      for (const instanceEntity of activeVariant.entities) {
+        if (
+          current.modelArrayBatch?.hasEntityId(instanceEntity.id)
+          && this.isModelArrayBatchCurrent(current, activeVariant.renderSignature)
+        ) {
+          this.modelArrayParameterVariantByEntityId.set(instanceEntity.id, activeVariant);
+        }
+        this.refreshBuiltInSlotBindings(instanceEntity.id);
+      }
       this.rebuildModelSelectionOutline();
       const parameterOnlyChangedEntityId = activeVariant.parameterOnlyChangedEntityId ?? undefined;
       activeVariant.parameterOnlyChangedEntityId = null;
@@ -6140,7 +6193,9 @@ export class SceneRuntime {
   private normalizeModelContentOrigin(model: ModelRuntimeEntry): void {
     model.root.computeWorldMatrix(true);
 
-    const childMeshes = model.root.getChildMeshes(false).filter(isMeasurableModelMesh);
+    // 只测量模型自身内容：绑定货格等外来子节点可能在异步加载完成前就挂到 root 下，
+    // 参与测量会把归一化原点带偏（粘贴含内置货格的货架时原点跑到整排中点）。
+    const childMeshes = model.contentRoot.getChildMeshes(false).filter(isMeasurableModelMesh);
     if (childMeshes.length === 0) return;
 
     let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);

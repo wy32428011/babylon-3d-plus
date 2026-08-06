@@ -15,7 +15,7 @@
 
 ### 已确认决策
 
-1. 取消勾选 → 货格**保留并解除绑定**，烘焙当前世界坐标，变为普通 Locator，由用户自行对齐
+1. 取消勾选 → 内置货格**直接删除**（随参数更新同一命令提交，可 undo）
 2. 删除货架 → 内置货格**一并级联删除**（可 undo）
 3. 绑定期间货格**场景内不可点选、不可 Gizmo 拖动**（点击穿透到货架）；Hierarchy 可选中编辑业务属性
 4. 列拓展方向等映射规则是**模型开发者声明的固定值**，不是最终用户配置项
@@ -76,7 +76,7 @@ this.node.metadata = { ...(this.node.metadata ?? {}), builtInSlotLayout: {
 - 货架节点结构：`runtimeEntry.root`(实体世界 transform) → `modelRoot` → `contentRoot`(带 unitScaleToMeters) → GLB 节点；外置脚本宿主 = `contentRoot`（`SceneRuntime.ts:4818`），脚本内"实体根米空间" = 相对 modelRoot
 - 货架脚本已有全部几何量：`getFootTopY`、`resolveSupportLegHeight`(=0.03+supportLegHeight)、`getLayerBoardHeight`(Box032 层板厚)、`createColumnLayout`(spacing/startCenter)、`layerStepY`(=cellHeight+层板厚)
 - boolean 参数走 `updateSelectedModelParameterValue` 立即提交（`ModelParametersInspector.tsx:176`），number 走 preview + commit
-- `updateSceneDocumentCommand`（`entityCommands.ts:140`）快照式复合 Command，适合创建/解绑/级联删除
+- `updateSceneDocumentCommand`（`entityCommands.ts:140`）快照式复合 Command，适合创建/删除/级联删除
 - `isEntityScenePickable`（`SceneRuntime.ts:3510`）是拾取 + Gizmo 统一排除点（`getGizmoTargetByEntityId:804`、`isEntityTransformEditable:3516` 都走它）；`syncedEntities` 存最新 Entity（`:1791`）
 - 复制粘贴打包整个子树并重建 parentId（`editorStore.ts:983-1013, 1126-1188`）
 - Hierarchy 拖拽仅支持移入文件夹（`moveEntitiesToFolder`），无法拖拽改变非 folder 父子
@@ -107,13 +107,13 @@ this.node.metadata = { ...(this.node.metadata ?? {}), builtInSlotLayout: {
 
 - `updateSelectedModelParameterValue`（:3038）：若实体声明了 binding：
   - key===enabledParam 且 true 且无绑定货格 → `updateSceneDocumentCommand('启用内置货格')` 复合执行：写参数 + `createLocatorEntity()`（维度按声明派生、parentId=host.parentId 与宿主同级、builtInBinding={hostEntityId, originOffset:0}、name='内置货格'）。幂等：已有绑定货格只写参数。
-  - key===enabledParam 且 false 且有绑定货格 → `updateSceneDocumentCommand('停用内置货格')`：写参数 + 清 builtInBinding + 烘焙当前世界 transform 回 transform。
+  - key===enabledParam 且 false 且有绑定货格 → `updateSceneDocumentCommand('更新模型参数')`：写参数 + `deleteEntitiesInScene` 直接删除货格实体。
   - 其他参数出现在 dimensionMapping 且有绑定货格 → 同一 command 内同步子货格维度（undo/redo 两实体一起回滚）。
 - `previewSelectedModelParameterValue`（:3063）：preview 直接 patch 子货格维度（不写历史）；enabledParam 不触发创建/解绑。
 - `commitSelectedModelParameterValues`（:3099）：同 commit 路径同步子货格维度。
 - `deleteEntitiesInScene`（:1340）：deletingIds 确定后，把 `builtInBinding.hostEntityId ∈ deletingIds` 的货格并入 deletingIds。
 - 复制粘贴：快照打包子树时把绑定到子树内宿主的货格一并纳入；粘贴经 `duplicatedIdBySourceId` 重建 hostEntityId，宿主不在粘贴集合内则解除绑定。
-- 解绑烘焙坐标：模块级 provider 注册 `registerBuiltInSlotWorldTransformProvider(fn)`；provider 缺失时回退为货格实体 transform。
+- 阵列：`prepareResolvedEntityArray` 为每个模型阵列副本克隆源货格实体（builtInBinding.hostEntityId 指向副本）；副本无独立模型宿主，运行时 `syncLocatorEntity` 经 `modelArrayInstanceEntities` 解析其渲染源的布局 metadata，按副本实体 transform 放置货格；源脚本布局更新经 `refreshBuiltInSlotBindings` 同步到副本货格。
 
 ### 4. 运行时绑定（`src/runtime/babylon/SceneRuntime.ts`）
 
@@ -125,8 +125,6 @@ this.node.metadata = { ...(this.node.metadata ?? {}), builtInSlotLayout: {
   - `createLocatorBoxes` 绑定模式：列步距 = columnSpacing（×方向符号）、层步距 = layerStepY；`createLocatorSignature` 纳入绑定步距
   - `applyLocatorStyle(entry, false)` 强制关闭高亮
 - `isEntityScenePickable`（:3510）：`syncedEntities.get(entityId)?.components.locator?.builtInBinding` → false（拾取/Gizmo 一并排除）
-- 新增 `getBuiltInSlotWorldTransform(entityId): TransformComponent | null`：分解 locator.root 世界矩阵，供解绑烘焙
-- `SceneViewPanel.tsx:583` 创建 runtime 后注册 provider
 - MQTT/堆垛机匹配不受影响（deviceAssetCode+rowNumber+columns/layers 仍在实体数据；box 世界坐标正常）
 
 ### 5. Inspector
@@ -151,9 +149,9 @@ this.node.metadata = { ...(this.node.metadata ?? {}), builtInSlotLayout: {
 | `Assets/Models/Shelf/shelf.model.ts` | +enableBuiltInSlots 参数、+导出 builtInSlotBinding、+builtInSlotLayout metadata |
 | `Assets/Models/Shelf/meta.json` | +enableBuiltInSlots schema、+builtInSlotBinding |
 | `scripts/sync-model-parameters-from-scripts.mjs` | 扩展提取 .model.ts 导出常量写回 meta.json |
-| `src/editor/store/editorStore.ts` | 创建/解绑/维度同步 hook、级联删除、剪贴板绑定重建、provider 注册 |
-| `src/runtime/babylon/SceneRuntime.ts` | syncLocatorEntity 绑定分支、isEntityScenePickable、getBuiltInSlotWorldTransform |
-| `src/editor/panels/SceneViewPanel.tsx` | 注册 provider |
+| `src/editor/store/editorStore.ts` | 创建/删除/维度同步 hook、级联删除、剪贴板绑定重建、阵列副本货格生成 |
+| `src/runtime/babylon/SceneRuntime.ts` | syncLocatorEntity 绑定分支（含阵列副本宿主解析）、isEntityScenePickable、normalizeModelContentOrigin 只测 contentRoot |
+| `src/editor/panels/SceneViewPanel.tsx` | — |
 | `src/editor/panels/InspectorPanel.tsx` | Transform 禁用 |
 | `src/editor/panels/LocatorInspector.tsx` | 维度禁用 + originOffset 编辑 |
 
@@ -166,6 +164,8 @@ this.node.metadata = { ...(this.node.metadata ?? {}), builtInSlotLayout: {
    - 改 columnCount/cellWidth/cellHeight/supportLegHeight → 货格实时跟随（含拖动 preview）
    - 拖动/旋转货架 → 货格跟随；点击货格 → 选中货架
    - Hierarchy 选中货格 → 可改 assetId/关联设备/排号/originOffset；Transform 与维度禁用
-   - 取消勾选 → 货格留在原地变为普通线框（可选中拖动）
+   - 取消勾选 → 货格直接删除（随参数更新同一命令，undo 一并恢复）
    - 删除货架 → 货格一并删除；undo 恢复两者
+   - 阵列开着内置货格的货架 → 每个副本各生成一个绑定货格，位置对齐副本第一列
+   - 复制开着内置货格的货架 → 副本原点仍在第一列中部（不归一到整排中点）
    - 保存场景重开 → 绑定正常；`npm run demo:stacker:scene` + MQTT 模拟验证堆垛机仍能匹配内置货格
