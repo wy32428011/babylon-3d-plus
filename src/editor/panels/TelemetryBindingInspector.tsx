@@ -332,19 +332,30 @@ function RgvColumnBindingsEditor(props: {
         <RgvColumnBindingsEditor entityId={props.entityId} binding={binding} disabled={props.disabled} commit={commit} />
       ) : null}
       {binding.deviceType === 'conveyor' ? (
-        <label className="inspector-row">
-          <span>轨迹方向</span>
-          <select
-            disabled={props.disabled}
-            value={binding.trajectoryDirection ?? 'x'}
-            onChange={(event) => commit({ trajectoryDirection: event.target.value as TelemetryBindingComponent['trajectoryDirection'] })}
-          >
-            <option value="x">+x</option>
-            <option value="-x">-x</option>
-            <option value="z">+z</option>
-            <option value="-z">-z</option>
-          </select>
-        </label>
+        <>
+          <label className="inspector-row">
+            <span>轨迹方向</span>
+            <select
+              disabled={props.disabled}
+              value={binding.trajectoryDirection ?? 'x'}
+              onChange={(event) => commit({ trajectoryDirection: event.target.value as TelemetryBindingComponent['trajectoryDirection'] })}
+            >
+              <option value="x">+x</option>
+              <option value="-x">-x</option>
+              <option value="z">+z</option>
+              <option value="-z">-z</option>
+            </select>
+          </label>
+          <label className="mqtt-config-dialog-checkbox">
+            <input
+              type="checkbox"
+              disabled={props.disabled}
+              checked={binding.cargoAutoDispose ?? true}
+              onChange={(event) => commit({ cargoAutoDispose: event.target.checked })}
+            />
+            货物自动销毁（停线且光电无货时）
+          </label>
+        </>
       ) : null}
       <TelemetryRuntimeDiagnosticsView entityId={props.entityId} binding={binding} modelAssetCode={props.modelAssetCode} />
       <SpecializedMotionSummary config={props.dataDrivenConfig} />

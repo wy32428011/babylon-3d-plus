@@ -91,10 +91,12 @@ export class ConveyorTelemetryDriver {
 
   /**
    * 货物生命周期两种模式：
-   * - task 模式（快照携带数值 task 字段）：新 task 边沿登记 pendingTask，光电有货且线体运行（movement_x 非 0）后刷出；
-   *   刷出时按 task 全局接管他设备货箱实例（插值接入本机走行），同 task 不重生（接管锁）；
-   *   停线且双光电无货时清空货物并复位任务锁，允许 task 复用。
+   * - task 模式（快照携带数值 task 字段）：仅当 task 相对 lastTask 发生变化才登记 pendingTask（新 task 边沿），
+   *   光电有货且线体运行（movement_x 非 0）后刷出；同 task 重复到达（含线体清空后的重发）不再触发刷出+走行；
+   *   刷出时按 task 全局接管他设备货箱实例（插值接入本机走行）。
    * - 匿名模式（无 task 字段）：光电有货且线体运行时刷出，设备自管理，不参与全局接管。
+   * 停线且双光电无货时是否销毁货物由 telemetryBinding.cargoAutoDispose 控制（缺省开启）：
+   * 开启时清空本机货物；关闭时货物保持原位，交由下游设备凭 task 接管决定去向。
    * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向：
    * 正转（=1）刷在轨迹起点向终点移动；反转（=2）刷在轨迹终点向起点移动。
    */
@@ -108,11 +110,13 @@ export class ConveyorTelemetryDriver {
     const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods) ?? false;
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
 
-    // task 语义：数值 0/缺失为无任务；新 task 边沿登记，等待光电确认刷出。
+    // task 语义：数值 0/缺失为无任务；仅新 task 边沿（相对 lastTask 变化）登记，等待光电确认刷出。
+    // lastTask 持久保存：货物销毁/被接管后同 task 重发不得重走刷出+走行。
     const taskValue = readIntegerField(snapshot.fields, 'task');
     const taskMode = taskValue !== null;
     const task = normalizeCargoTask(taskValue);
-    if (taskMode && task && task !== state.currentTask) {
+    if (taskMode && task && task !== state.lastTask) {
+      state.lastTask = task;
       state.currentTask = task;
       state.pendingTask = task;
     }
@@ -124,11 +128,14 @@ export class ConveyorTelemetryDriver {
       : this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
 
     if (movementDirection === 0 && !frontHasGoods && !backHasGoods) {
-      this.disposeConveyorCargoForAssetCode(model.assetCode);
-      state.cargoCode = null;
-      // 线体清空后复位任务锁允许 task 复用；待刷出任务保留，继续等待光电确认。
-      if (!state.pendingTask) state.currentTask = null;
-      return;
+      // 自动销毁关闭时货物交由 task 由下游设备接管：本机保留货物与位姿，直到被凭 task 取走。
+      if (model.telemetryBinding?.cargoAutoDispose === false) {
+        if (!state.cargoCode) return;
+      } else {
+        this.disposeConveyorCargoForAssetCode(model.assetCode);
+        state.cargoCode = null;
+        return;
+      }
     }
 
     const travelContext = this.resolveConveyorCargoTravelContext(model);

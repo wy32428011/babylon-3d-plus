@@ -192,10 +192,12 @@ export type ConveyorNodeBaseline = {
 
 export type ConveyorModelTelemetryState = {
   cargoCode: string | null;
-  /** 当前 task（归一化字符串）：task 模式下同 task 不重复刷出，构成接管锁；线体清空后复位允许复用。 */
+  /** 当前 task（归一化字符串）：刷出时盖到货物上，供全局接管匹配。 */
   currentTask: string | null;
   /** 已登记待光电确认刷出的 task；光电报有货时消费。 */
   pendingTask: string | null;
+  /** 最近接受的 task：边沿判定基准，不随线体清空复位，同 task 重复到达不得重走刷出+走行。 */
+  lastTask: string | null;
   cargoTravelOffset: number;
   motionOffsets: Map<string, number>;
   nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;
