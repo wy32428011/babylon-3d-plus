@@ -101,6 +101,7 @@ function isGeometryReady(bounds: DigitalTwinFocusBounds | null): bounds is Digit
 export class DigitalTwinInteractionController {
   private readonly unsubscribeMessages: () => void;
   private readonly allowedParentOrigins = new Set<string>();
+  private allowAnyParentOrigin = false;
   private readonly now: () => number;
   private readonly setTimer: (callback: () => void, delayMs: number) => unknown;
   private readonly clearTimer: (timer: unknown) => void;
@@ -121,13 +122,19 @@ export class DigitalTwinInteractionController {
 
   setAllowedParentOrigins(origins: readonly string[]): void {
     this.allowedParentOrigins.clear();
+    this.allowAnyParentOrigin = false;
     for (const origin of origins) {
-      if (typeof origin !== 'string' || !origin || origin === '*') continue;
+      if (typeof origin !== 'string' || !origin) continue;
+      if (origin === '*') {
+        this.allowAnyParentOrigin = true;
+        continue;
+      }
       this.allowedParentOrigins.add(origin);
     }
 
     if (
-      this.activeParentOrigin
+      !this.allowAnyParentOrigin
+      && this.activeParentOrigin
       && this.activeParentOrigin !== this.options.viewerOrigin
       && !this.allowedParentOrigins.has(this.activeParentOrigin)
     ) {
@@ -188,7 +195,7 @@ export class DigitalTwinInteractionController {
   };
 
   private isAllowedOrigin(origin: string): boolean {
-    return origin === this.options.viewerOrigin || this.allowedParentOrigins.has(origin);
+    return this.allowAnyParentOrigin || origin === this.options.viewerOrigin || this.allowedParentOrigins.has(origin);
   }
 
   private acceptHostSession(sessionId: string, parentOrigin: string): void {

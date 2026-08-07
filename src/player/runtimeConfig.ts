@@ -100,7 +100,12 @@ export function parseDigitalTwinAllowedParentOrigins(config: Record<string, unkn
   rawOrigins.forEach((value, index) => {
     const path = `项目运行配置 configJson.integration.allowedParentOrigins[${index}]`;
     const source = assertString(value, path, 2048);
-    if (source === '*') throw new Error(`${path} 禁止使用通配符。`);
+    if (source === '*') {
+      if (seen.has('*')) return;
+      seen.add('*');
+      origins.push('*');
+      return;
+    }
 
     let url: URL;
     try {

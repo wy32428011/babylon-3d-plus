@@ -72,9 +72,8 @@ test('运行配置保存载荷保留 MQTT、API 和启用状态', () => {
   });
 });
 
-test('父页面 Origin 校验拒绝通配符、凭据、路径、Query、Fragment、非 HTTP 和重复项', () => {
+test('父页面 Origin 校验拒绝凭据、路径、Query、Fragment、非 HTTP 和重复项', () => {
   for (const origins of [
-    ['*'],
     ['https://user:pass@screen.example.com'],
     ['https://screen.example.com/path'],
     ['https://screen.example.com?x=1'],
@@ -84,6 +83,25 @@ test('父页面 Origin 校验拒绝通配符、凭据、路径、Query、Fragmen
   ]) {
     assert.throws(() => normalizeDigitalTwinAllowedParentOrigins(origins), /Origin/);
   }
+});
+
+test('父页面 Origin 支持独立通配符 *，可与具体 Origin 共存且重复 * 被拒绝', () => {
+  assert.deepEqual(normalizeDigitalTwinAllowedParentOrigins(['*']), ['*']);
+  assert.deepEqual(
+    normalizeDigitalTwinAllowedParentOrigins([' * ', 'https://screen.example.com/']),
+    ['*', 'https://screen.example.com'],
+  );
+  assert.throws(() => normalizeDigitalTwinAllowedParentOrigins(['*', '*']), /Origin/);
+});
+
+test('已配置 * 时发布默认列表不再补入数据中台 Origin', () => {
+  assert.deepEqual(
+    createDefaultDigitalTwinAllowedParentOrigins(
+      'http://127.0.0.1:8001/platform/',
+      '{"integration":{"allowedParentOrigins":["*"]}}',
+    ),
+    ['*'],
+  );
 });
 
 test('父页面 Origin 支持显式清空，但拒绝超过 64 项', () => {
