@@ -12,6 +12,7 @@ import type {
   TransformComponent,
 } from '../model/components';
 import type { TelemetryBindingComponent } from '../model/telemetryBinding';
+import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
 import type { Entity } from '../model/Entity';
 import {
   getTopLevelHierarchyEntityIds,
@@ -1111,20 +1112,30 @@ function updateModelAssetCode(scene: SceneDocument, entityId: string, assetCode:
   const modelAsset = entity?.components.modelAsset;
   if (!entity || !modelAsset) return scene;
 
-  return {
-    ...scene,
-    entities: {
-      ...scene.entities,
-      [entityId]: {
-        ...entity,
-        components: {
-          ...entity.components,
-          modelAsset: {
-            ...modelAsset,
-            assetCode,
-          },
+  const entities: SceneDocument['entities'] = {
+    ...scene.entities,
+    [entityId]: {
+      ...entity,
+      components: {
+        ...entity.components,
+        modelAsset: {
+          ...modelAsset,
+          assetCode,
         },
       },
     },
   };
+
+  // 内置货格的资产编号由宿主货架驱动，随货架编号在同一命令内同步，undo 一并回滚
+  const slotEntityId = findBuiltInSlotEntityId(scene, entityId);
+  const slotEntity = slotEntityId ? entities[slotEntityId] : null;
+  const slotLocator = slotEntity?.components.locator;
+  if (slotEntity && slotLocator && slotLocator.assetId !== assetCode) {
+    entities[slotEntity.id] = {
+      ...slotEntity,
+      components: { ...slotEntity.components, locator: { ...slotLocator, assetId: assetCode } },
+    };
+  }
+
+  return { ...scene, entities };
 }

@@ -1540,6 +1540,23 @@ function prepareEntityClipboardPaste(
     if (duplicatedRootId) rootEntityIds.push(duplicatedRootId);
   }
 
+  // 内置货格资产编号跟随宿主货架副本的编号（宿主粘贴时会生成新编号）
+  for (let index = 0; index < entities.length; index += 1) {
+    const entity = entities[index];
+    const binding = entity.components.locator?.builtInBinding;
+    if (!binding) continue;
+    const host = entities.find((candidate) => candidate.id === binding.hostEntityId);
+    const assetCode = host?.components.modelAsset?.assetCode;
+    if (!assetCode || entity.components.locator!.assetId === assetCode) continue;
+    entities[index] = {
+      ...entity,
+      components: {
+        ...entity.components,
+        locator: { ...entity.components.locator!, assetId: assetCode },
+      },
+    };
+  }
+
   for (let index = 0; index < entities.length; index += 1) {
     const entity = entities[index];
     const sourceEntityId = entity.components.modelArrayInstance?.sourceEntityId;
@@ -1705,6 +1722,8 @@ function createBuiltInSlotEntityInScene(
   slotEntity.components.locator = {
     ...slotEntity.components.locator!,
     ...derived,
+    // 资产编号由宿主货架驱动，创建即对齐，之后随货架编号同步
+    assetId: host.components.modelAsset?.assetCode ?? slotEntity.components.locator!.assetId,
     builtInBinding: { hostEntityId, originOffset: vector3() },
   };
 
@@ -2034,21 +2053,13 @@ function prepareResolvedEntityArray(
           const slotNameResult = createEntityArrayName(sourceSlot.name, copyIndex);
           if (!slotNameResult.ok) return slotNameResult;
           const slotOverrides: EntityDuplicateOverrides = { name: slotNameResult.name };
-          const slotAssetNumberTarget = getEntityAssetNumberTarget(sourceSlot);
-          if (slotAssetNumberTarget) {
-            const slotAssetNumberResult = createArrayAssetNumber(
-              slotAssetNumberTarget.value,
-              copyIndex,
-              assetNumberRule,
-            );
-            if (!slotAssetNumberResult.ok) return slotAssetNumberResult;
-            slotOverrides.assetNumber = { kind: slotAssetNumberTarget.kind, value: slotAssetNumberResult.value };
-          }
           const slotCopy = createDuplicatedRuntimeEntity(sourceSlot, sourceSlot.parentId, offset, existingNames, slotOverrides);
           slotCopy.components = {
             ...slotCopy.components,
             locator: {
               ...slotCopy.components.locator!,
+              // 内置货格资产编号跟随宿主货架副本，不按规则独立生成
+              assetId: copyEntity.components.modelAsset?.assetCode ?? slotCopy.components.locator!.assetId,
               builtInBinding: { hostEntityId: copyEntity.id, originOffset: { ...sourceBinding.originOffset } },
             },
           };
@@ -3884,7 +3895,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       const before = cloneLocator(locator);
       const after: LocatorComponent = {
-        assetId: sanitizeLocatorAssetId(patch.assetId, before.assetId),
+        // 内置货格资产编号始终跟随宿主货架，忽略外部 patch
+        assetId: before.builtInBinding ? before.assetId : sanitizeLocatorAssetId(patch.assetId, before.assetId),
         storageDepth: patch.storageDepth === 'far' ? 'far' : (patch.storageDepth === 'near' ? 'near' : before.storageDepth),
         length: sanitizeLocatorDimension(patch.length, before.length),
         width: sanitizeLocatorDimension(patch.width, before.width),

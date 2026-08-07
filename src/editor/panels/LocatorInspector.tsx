@@ -76,9 +76,10 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
         <input
           maxLength={128}
           type="text"
-          disabled={disabled}
+          disabled={disabled || Boolean(builtInBinding)}
           value={component.assetId}
           onChange={(event) => updateSelectedLocator({ assetId: event.target.value })}
+          title={builtInBinding ? '内置货格资产编号跟随货架，不可单独编辑' : undefined}
         />
       </label>
       <label className="inspector-row">
