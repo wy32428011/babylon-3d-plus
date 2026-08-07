@@ -18,6 +18,22 @@ test('SceneRuntime beginTelemetryPreview 重复调用时直接返回，不触发
   assert.doesNotMatch(beginBody, /this\.endTelemetryPreview\(\)/);
 });
 
+test('SceneRuntime endTelemetryPreview 清理合批阵列代表模型的遥测状态', () => {
+  const source = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
+  const endStart = source.indexOf('endTelemetryPreview(): void');
+  assert.notEqual(endStart, -1);
+  const endBody = source.slice(endStart, source.indexOf('disableEditorLightMarkers', endStart));
+  const variantsLoop = endBody.match(
+    /for \(const variant of this\.modelArrayParameterVariants\.values\(\)\) \{[\s\S]*?\}/,
+  );
+  assert.ok(variantsLoop, 'endTelemetryPreview 必须遍历 modelArrayParameterVariants');
+  assert.match(variantsLoop[0], /resetStackerTelemetryState\(variant\.model\)/);
+  assert.match(variantsLoop[0], /resetConveyorTelemetryState\(variant\.model\)/);
+  assert.match(variantsLoop[0], /resetRgvTelemetryState\(variant\.model\)/);
+  // 货物表与等待/交出状态必须清空：disposeAllCargo 在复位之前执行
+  assert.ok(endBody.indexOf('disposeAllCargo()') < endBody.indexOf('modelArrayParameterVariants'));
+});
+
 test('预览基线恢复节点 Transform、enabled 与骨骼本地矩阵，并保留 Euler/Quaternion 形态', () => {
   const engine = new NullEngine();
   const scene = new Scene(engine);

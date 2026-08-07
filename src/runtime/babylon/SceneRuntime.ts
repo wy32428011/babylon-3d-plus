@@ -894,6 +894,12 @@ export class SceneRuntime {
       resetConveyorTelemetryState(model);
       resetRgvTelemetryState(model);
     }
+    // 合批阵列代表模型同样接受遥测驱动（collectModels 合并视图），退出时必须一并清理
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      resetStackerTelemetryState(variant.model);
+      resetConveyorTelemetryState(variant.model);
+      resetRgvTelemetryState(variant.model);
+    }
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('edit', null);
     this.clearModelGeneratorLoadFailureCache();
