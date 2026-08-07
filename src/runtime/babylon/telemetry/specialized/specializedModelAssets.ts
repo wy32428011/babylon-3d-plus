@@ -271,6 +271,7 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     rootBasePosition: root.position.clone(),
     rootPosition: null,
     travelConstraint: null,
+    liftConstraint: null,
     targetReferencePosition: null,
     liftOffset: 0,
     frontForkOffset: 0,
@@ -302,6 +303,7 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.rootBasePosition = model.root.position.clone();
   model.stackerTelemetry.rootPosition = null;
   model.stackerTelemetry.travelConstraint = null;
+  model.stackerTelemetry.liftConstraint = null;
   model.stackerTelemetry.targetReferencePosition = null;
   model.stackerTelemetry.liftOffset = 0;
   model.stackerTelemetry.frontForkOffset = 0;

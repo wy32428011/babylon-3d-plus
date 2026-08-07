@@ -260,3 +260,47 @@ test('有效目标位（to_x/to_y/to_z）驱动优先于空闲吸附', () => {
     h.dispose();
   }
 });
+
+/** 为模型补齐堆垛机几何：立柱 y[0,3]，载货台 y[0,0.2]，前后叉 y[0.2,0.3] → 物理升降行程 [0, 2.7]。 */
+function makeStackerGeometry(h: ReturnType<typeof makeHarness>): void {
+  const root = h.model.root;
+  const addBox = (name: string, height: number, centerY: number) => {
+    const mesh = MeshBuilder.CreateBox(name, { width: 0.4, height, depth: 0.4 }, h.scene);
+    mesh.parent = root;
+    mesh.position.set(0, centerY, 0);
+    return mesh;
+  };
+  addBox('lizhu1.11', 3, 1.5);
+  addBox('xiang.13', 0.2, 0.1);
+  addBox('huocha.9', 0.1, 0.25);
+  addBox('huocha2.10', 0.1, 0.25);
+  root.computeWorldMatrix(true);
+}
+
+test('movement_y 持续上升时被整机框架物理钳制，载货台不得飞出立柱', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    // 0.3m/s × 30s = 9m 请求行程，必须被钳在框架顶部 3 - 货叉顶 0.3 = 2.7m
+    h.apply({ ...IDLE_FRAME, front_x: 0, front_y: 0, movement_y: 1 }, 0.1, 300);
+    const liftOffset = h.model.stackerTelemetry.liftOffset;
+    assert.ok(Math.abs(liftOffset - 2.7) < 1e-6, `升降必须停在物理上限 2.7m，实际 ${liftOffset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('front_y 越界报错后 movement_y 兜底上升同样受物理钳制', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 2, startColumn: 1, cellPositions: {} });
+    h.apply({ ...IDLE_FRAME, front_x: 5, front_y: 9, movement_y: 1 }, 0.1, 300);
+    const errors = h.logs.filter((message) => message.includes('超出已绑定货格范围'));
+    assert.equal(errors.length, 1, '同一当前位只报一次越界错误');
+    const liftOffset = h.model.stackerTelemetry.liftOffset;
+    assert.ok(Math.abs(liftOffset - 2.7) < 1e-6, `越界报错后载货台不得飞出模型，实际 ${liftOffset}`);
+  } finally {
+    h.dispose();
+  }
+});

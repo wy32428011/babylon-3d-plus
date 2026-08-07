@@ -99,6 +99,15 @@ export type StackerTravelConstraint = {
   movingMax: number;
 };
 
+/** 升降物理行程：整机移动框架（含立柱）决定框架范围，载货台/货叉基线决定端点余量。 */
+export type StackerLiftConstraint = {
+  axis: Vector3;
+  frameMin: number;
+  frameMax: number;
+  movingMin: number;
+  movingMax: number;
+};
+
 export type StackerForkSide = 'front' | 'back';
 
 export type StackerForkReachConfig = {
@@ -154,6 +163,8 @@ export type StackerModelTelemetryState = {
   rootPosition: Vector3 | null;
   /** 基于固定轨道和行走机构基线计算的轨道约束，防止遥测把机体推出轨道。 */
   travelConstraint: StackerTravelConstraint | null;
+  /** 基于整机框架和载货台基线计算的升降行程约束，防止遥测把载货台顶出立柱。 */
+  liftConstraint: StackerLiftConstraint | null;
   /** 货叉未伸出时用于对齐库位的世界坐标锚点。 */
   targetReferencePosition: Vector3 | null;
   liftOffset: number;

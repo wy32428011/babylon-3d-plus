@@ -46,6 +46,7 @@ import {
   type StackerForkOffsetParts,
   type StackerForkReachConfig,
   type StackerForkSide,
+  type StackerLiftConstraint,
   type StackerTravelConstraint,
   STACKER_CALIBRATION_RATE,
   STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND,
@@ -1189,11 +1190,42 @@ export class StackerTelemetryDriver {
     ]);
   }
 
-  /** 将载货台升降偏移限制在 dataDriven.motion.lift.limits 声明的行程内；未配置时保持 [0, +∞) 现行为。 */
+  /** 将载货台升降偏移限制在配置行程与物理行程的交集内：配置读 dataDriven.motion.lift.limits，物理行程由整机框架与载货台基线投影得出；两者都不可用时保持 [0, +∞) 现行为。 */
   private clampStackerLiftOffset(model: ModelRuntimeEntry, offset: number): number {
-    const min = this.readStackerDataDrivenNumber(model, ['motion', 'lift', 'limits', 'min']) ?? 0;
-    const max = this.readStackerDataDrivenNumber(model, ['motion', 'lift', 'limits', 'max']) ?? Number.POSITIVE_INFINITY;
+    let min = this.readStackerDataDrivenNumber(model, ['motion', 'lift', 'limits', 'min']) ?? 0;
+    let max = this.readStackerDataDrivenNumber(model, ['motion', 'lift', 'limits', 'max']) ?? Number.POSITIVE_INFINITY;
+    const constraint = this.getStackerLiftConstraint(model);
+    if (constraint) {
+      const physicalMin = constraint.frameMin - constraint.movingMin;
+      const physicalMax = constraint.frameMax - constraint.movingMax;
+      if (physicalMin <= physicalMax) {
+        min = Math.max(min, physicalMin);
+        max = Math.min(max, physicalMax);
+      }
+    }
     return clampNumber(offset, Math.min(min, max), Math.max(min, max));
+  }
+
+  /** 读取或创建 Stacker 升降行程约束：整机移动框架（含立柱/顶部）决定可升范围，载货台与货叉基线决定端点余量。 */
+  private getStackerLiftConstraint(model: ModelRuntimeEntry): StackerLiftConstraint | null {
+    const state = model.stackerTelemetry;
+    const upAxis = getModelAxis(model.root, 'y');
+    if (state.liftConstraint && Vector3.Dot(state.liftConstraint.axis, upAxis) > 0.999) {
+      return state.liftConstraint;
+    }
+
+    const frameBounds = getNodesProjectedBounds(this.findStackerTravelNodes(model), upAxis);
+    const movingBounds = getNodesProjectedBounds(this.findStackerLiftNodes(model), upAxis);
+    if (!frameBounds || !movingBounds) return null;
+
+    state.liftConstraint = {
+      axis: upAxis.clone(),
+      frameMin: frameBounds.min,
+      frameMax: frameBounds.max,
+      movingMin: movingBounds.min,
+      movingMax: movingBounds.max,
+    };
+    return state.liftConstraint;
   }
 
   /** 查找 stacker 载货台节点。 */
