@@ -103,7 +103,8 @@ export class ConveyorTelemetryDriver {
    *   货物由 stacker/RGV 持有时维持刷出即全局接管（交接插值接入本机走行）。
    * - 匿名模式（无 task 字段）：线体运行即刷出，设备自管理，不参与全局接管。
    * 等待协议（仅持有方为输送线）：
-   * - 等待方：等待中不刷出不走行；mode 变 2/0（同时放弃 pendingTask）、新 task 边沿或被交出时退出等待。
+   * - 等待方：等待中不刷出不走行；mode 变 0（同时放弃 pendingTask）、新 task 边沿或被交出时退出等待；
+   *   mode=2 是持有货物的设备的任务完成信号，等待方 mode=2 不构成完成、不退出等待、不影响接管资格。
    * - 持有方：存在等待本 task 的设备时执行出货动画——向轨迹正转终点额外推进半个货箱长度（超出终点半程即停）；
    *   mode 变 2/0 或收到新 task 时释放货物——动画期间或结束后都生效——交给「货物世界坐标距设备上货坐标最近」的等待设备；
    *   无等待设备时按 cargoAutoDispose 决定销毁或遗留（遗留箱不销毁，新 task 刷出时盖上新 task 直接复用）。
@@ -153,9 +154,10 @@ export class ConveyorTelemetryDriver {
       : this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
     if (movementDirection !== 0) state.lastMovementDirection = movementDirection;
 
-    // 等待方退出等待：mode 变 2/0（level 判断覆盖边沿）；持有方货物中途消失不自动退出。
+    // 等待方退出等待：仅 mode === 0（空闲，level 判断覆盖边沿）；持有方货物中途消失不自动退出。
+    // mode === 2 是持有货物的设备的任务完成信号（交出/销毁），等待方 mode=2 不构成完成、不退出等待。
     // 刷出判定已提前到 task 边沿，退出等待必须同时放弃 pendingTask，否则当帧立即重新等待。
-    if (mode === 2 || mode === 0) {
+    if (mode === 0) {
       if (state.waitingTask !== null) state.pendingTask = null;
       state.waitingTask = null;
     }

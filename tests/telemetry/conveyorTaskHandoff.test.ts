@@ -168,27 +168,30 @@ test('他设备输送线持有同 task 货物时放弃刷出进入等待', () =>
   }
 });
 
-test('等待周期中 mode 变为 2 或 0 退出等待状态', () => {
+test('等待方 mode=2 不退出等待（完成判定只看持有方），mode=0 仍退出', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
     h.apply('CV2', { task: 7, movement_x: 1 });
     h.apply('CV1', { task: 7, movement_x: 1 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7');
 
+    // 等待方 mode=2 不是任务完成：不退出等待、不放弃 pendingTask
     h.apply('CV1', { task: 7, movement_x: 0, mode: 2 });
-    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, 'mode=2 必须退出等待');
-    assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, null, '退出等待必须一并放弃 pendingTask，否则当帧立即重新等待');
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7', '等待方 mode=2 不得退出等待');
+    assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, '7', '等待方 mode=2 不得放弃 pendingTask');
 
-    // 同 task 重发不再重新等待（刷出/等待判定只发生在新 task 边沿）
-    h.apply('CV1', { task: 7, movement_x: 1 });
-    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, '同 task 重发不得重新等待');
+    // 持有方 mode=2 判定完成：仍交出给该等待者（等待方 mode=2 不影响接管资格）
+    h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, '被交出后等待结束');
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo', '等待方 mode=2 也必须能接管货物');
 
-    // 新 task 边沿重新进入等待后验证 mode=0
+    // mode=0 仍退出等待并放弃 pendingTask
     h.apply('CV2', { task: 9, movement_x: 1 });
     h.apply('CV1', { task: 9, movement_x: 1 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '9', '前置：新 task 边沿重新进入等待');
     h.apply('CV1', { task: 9, movement_x: 0, mode: 0 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, 'mode=0 必须退出等待');
+    assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, null, '退出等待必须一并放弃 pendingTask');
   } finally {
     h.dispose();
   }
