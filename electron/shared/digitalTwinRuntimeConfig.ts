@@ -48,7 +48,12 @@ export function normalizeDigitalTwinAllowedParentOrigins(values: readonly unknow
     }
     const source = value.trim();
     if (source.length > MAX_ORIGIN_LENGTH) throw new Error(`父页面 Origin 第 ${index + 1} 项过长。`);
-    if (source === '*') throw new Error('父页面 Origin 禁止使用通配符 *。');
+    if (source === '*') {
+      if (seen.has('*')) throw new Error('父页面 Origin 重复：*');
+      seen.add('*');
+      origins.push('*');
+      return;
+    }
 
     let url: URL;
     try {
@@ -106,6 +111,7 @@ export function createDefaultDigitalTwinAllowedParentOrigins(
   configJson?: string | null,
 ): string[] {
   const origins = readDigitalTwinAllowedParentOrigins(configJson);
+  if (origins.includes('*')) return origins;
   const dataPlatformOrigin = resolveDataPlatformParentOrigin(baseUrl);
   return origins.includes(dataPlatformOrigin) ? origins : [...origins, dataPlatformOrigin];
 }

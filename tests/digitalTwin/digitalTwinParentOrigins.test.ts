@@ -33,9 +33,8 @@ test('显式 Origin 被规范化、去重且保留端口', () => {
   }), ['https://screen.example.com', 'http://127.0.0.1:8000']);
 });
 
-test('Origin 白名单拒绝通配符、凭据、路径、查询、片段和非 HTTP 协议', () => {
+test('Origin 白名单拒绝凭据、路径、查询、片段和非 HTTP 协议', () => {
   for (const origin of [
-    '*',
     'https://user:pass@screen.example.com',
     'https://screen.example.com/path',
     'https://screen.example.com?x=1',
@@ -48,6 +47,17 @@ test('Origin 白名单拒绝通配符、凭据、路径、查询、片段和非 
       origin,
     );
   }
+});
+
+test('Origin 白名单支持独立通配符 * 表示任意来源', () => {
+  assert.deepEqual(
+    parseDigitalTwinAllowedParentOrigins({ integration: { allowedParentOrigins: ['*', 'https://screen.example.com/'] } }),
+    ['*', 'https://screen.example.com'],
+  );
+  assert.deepEqual(
+    parseDigitalTwinAllowedParentOrigins({ integration: { allowedParentOrigins: [' * '] } }),
+    ['*'],
+  );
 });
 
 test('Origin 白名单拒绝非数组和超量配置', () => {

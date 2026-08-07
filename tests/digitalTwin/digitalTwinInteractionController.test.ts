@@ -238,6 +238,23 @@ test('跨域父页面只有命中显式白名单时才可握手', () => {
   }
 });
 
+test('白名单含 * 时任意来源（含 null）都可握手并按实际 Origin 回发', () => {
+  const f = createFixture();
+  try {
+    f.controller.setAllowedParentOrigins(['*']);
+    dispatch(f.bus, hostHello(), 'https://random.example.com');
+    assert.deepEqual(f.posted.map((entry) => entry.targetOrigin), ['https://random.example.com']);
+    assert.deepEqual(f.posted.map((entry) => entry.message.type), ['bridge.ready']);
+
+    f.posted.length = 0;
+    dispatch(f.bus, hostHello(), 'null');
+    assert.deepEqual(f.posted.map((entry) => entry.targetOrigin), ['null']);
+    assert.deepEqual(f.posted.map((entry) => entry.message.type), ['bridge.ready']);
+  } finally {
+    f.controller.dispose();
+  }
+});
+
 test('唯一可见且几何就绪的模型开始聚焦时才暂停巡检并在完成后返回成功', () => {
   const f = createFixture();
   const runtime = new FakeRuntime([{ assetCode: 'DDJ2', entityIds: ['entity_1'] }]);

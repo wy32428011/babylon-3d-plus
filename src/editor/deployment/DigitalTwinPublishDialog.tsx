@@ -29,6 +29,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   const [confirmAssetWarnings, setConfirmAssetWarnings] = useState(false);
   const [allowedParentOrigins, setAllowedParentOrigins] = useState<string[]>([]);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const containsWildcard = allowedParentOrigins.some((value) => value.trim() === '*');
   const { state, isBusy } = props.controller;
   const context = state.context;
   const missingBindings = useMemo(() => readMissingBindings(state.result?.errorData), [state.result?.errorData]);
@@ -182,7 +183,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
             <span>发布时同步到项目运行配置</span>
           </div>
           <p className="deployment-export-resource-detail">
-            默认加入当前数据中台 Origin；可按实际部署地址增删修改。只填写协议、主机和端口，不要包含路径、Query 或 Fragment。
+            默认加入当前数据中台 Origin；可按实际部署地址增删修改。只填写协议、主机和端口，不要包含路径、Query 或 Fragment；填入 * 表示允许任意来源。
           </p>
           <div className="digital-twin-publish-origin-list">
             {allowedParentOrigins.map((origin, index) => (
@@ -225,7 +226,12 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
               + 添加父页面 Origin
             </button>
           </div>
-          {context?.dataPlatformOrigin && !containsParentOrigin(allowedParentOrigins, context.dataPlatformOrigin) ? (
+          {containsWildcard ? (
+            <p className="digital-twin-publish-origin-warning" role="status">
+              已允许任意来源（*）：任何网站都可嵌入并控制此 Viewer，请仅在可信环境使用。
+            </p>
+          ) : null}
+          {!containsWildcard && context?.dataPlatformOrigin && !containsParentOrigin(allowedParentOrigins, context.dataPlatformOrigin) ? (
             <p className="digital-twin-publish-origin-warning" role="status">
               当前数据中台 Origin（{context.dataPlatformOrigin}）不在列表中，跨域大屏将无法建立资产聚焦连接。
             </p>
