@@ -613,6 +613,8 @@ export class SceneRuntime {
         return models;
       },
       findLocatorByDevice: (assetCode, x, y, z) => this.findLocatorByDevice(assetCode, x, y, z),
+      findLocatorByDeviceAnyRow: (assetCode, x, y) => this.findLocatorByDeviceAnyRow(assetCode, x, y),
+      findLocatorsByDevice: (assetCode) => this.findLocatorsByDevice(assetCode),
       getLocatorTarget: (key) => this.locatorTargets.get(key) ?? null,
       resolveCargoGeneratorForModel: (model) => this.resolveCargoGeneratorForModel(model),
       resolveColumnTargetPose: (entityId) => this.resolveColumnTargetPose(entityId),
@@ -2706,6 +2708,33 @@ export class SceneRuntime {
       }
     }
     return null;
+  }
+
+  /** 按设备编号 + 列/层跨排查找已绑定 Locator（排号不限），供 stacker 空闲时按当前位吸附。 */
+  private findLocatorByDeviceAnyRow(
+    deviceAssetCode: string,
+    x: number,
+    y: number,
+  ): LocatorRuntimeEntry | null {
+    const rowMap = this.locatorDeviceIndex.get(deviceAssetCode);
+    if (!rowMap) return null;
+    for (const list of rowMap.values()) {
+      for (const locator of list) {
+        if (x >= locator.startColumn && x < locator.startColumn + locator.columns && y >= 1 && y <= locator.layers) {
+          return locator;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** 返回设备绑定的全部 Locator（所有排），无绑定时返回空数组。 */
+  private findLocatorsByDevice(deviceAssetCode: string): LocatorRuntimeEntry[] {
+    const rowMap = this.locatorDeviceIndex.get(deviceAssetCode);
+    if (!rowMap) return [];
+    const result: LocatorRuntimeEntry[] = [];
+    for (const list of rowMap.values()) result.push(...list);
+    return result;
   }
 
   /** 在 Locator 的 boxes 网格中根据列/层定位具体 box 的世界矩阵，平移对齐 box 底面中心（货物支撑位）。 */

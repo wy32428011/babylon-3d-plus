@@ -19,7 +19,6 @@ import {
   getNodeWorldPosePreservingMirror,
   getNodeWorldRotation,
   lerpNumber,
-  lerpVector,
   moveNumberTowards,
   moveVectorTowards,
   projectPointOntoAxis,
@@ -93,9 +92,14 @@ export class StackerTelemetryDriver {
     // 有目标位但货格无法解析：报错误日志并冻结移动，禁止盲目执行
     const targetCellMissing = snapshot.hasTargetLocation && (targetLocator === null || targetPosition === null);
     const targetOffsets = targetPosition ? this.resolveStackerTargetMotionOffsets(model, targetPosition) : null;
+    // 空闲（非取/放货且无有效目标位）时按当前位 front_x/front_y 跨排吸附已绑定货格，替代原 distance 编码器校准
+    const idleSnapOffsets = targetOffsets === null && !targetCellMissing && !snapshot.faulted && !this.isStackerFetchingOrPlacing(snapshot)
+      ? this.resolveStackerIdleSnapOffsets(model, snapshot)
+      : null;
+    const motionOffsets = targetOffsets ?? idleSnapOffsets;
     this.reportStackerTargetProjection(model, targetLocator, targetPosition, targetOffsets, toX, toY);
-    const travelMoving = this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds, targetCellMissing);
-    const liftMoving = this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds, targetCellMissing);
+    const travelMoving = this.applyStackerRootMotion(model, snapshot, motionOffsets?.travelOffset ?? null, deltaSeconds, targetCellMissing);
+    const liftMoving = this.applyStackerLiftMotion(model, snapshot, motionOffsets?.liftOffset ?? null, deltaSeconds, targetCellMissing);
     this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds, targetLocator, travelMoving || liftMoving, targetCellMissing);
     this.applyStackerNodeMotionOffsets(model);
     if (!targetCellMissing) {
@@ -115,6 +119,51 @@ export class StackerTelemetryDriver {
     const rootPosition = locator.root.getAbsolutePosition();
     if (!assetCode || toX === null || toY === null || toZ === null) return rootPosition;
     return this.resolveLocatorBoxSupportPosition(locator, toX, toY);
+  }
+
+  /** 是否处于取货（command 1/2）或放货（command 3/4/5）阶段；任一侧在执行即视为作业中，空闲吸附不得介入。 */
+  private isStackerFetchingOrPlacing(snapshot: StackerTelemetrySnapshot): boolean {
+    const isOperationCommand = (command: number | null): boolean => command !== null && command >= 1 && command <= 5;
+    return isOperationCommand(readIntegerField(snapshot.fields, 'front_command'))
+      || isOperationCommand(readIntegerField(snapshot.fields, 'back_command'));
+  }
+
+  /**
+   * 空闲吸附目标：按当前位（front_x/front_y，排号不限）匹配已绑定货格的支撑位，换算行走/升降偏移。
+   * front_x/front_y 缺失或为 0 视为未上报，直接跳过；设备未绑定货格、或当前位超出全部已绑定货格范围时
+   * 分别一次性报错（同一当前位重复上报不重复刷日志）。
+   */
+  private resolveStackerIdleSnapOffsets(
+    model: ModelRuntimeEntry,
+    snapshot: StackerTelemetrySnapshot,
+  ): StackerStorageTargetOffsets | null {
+    const frontX = readIntegerField(snapshot.fields, 'front_x');
+    const frontY = readIntegerField(snapshot.fields, 'front_y');
+    if (!snapshot.assetCode || frontX === null || frontY === null || frontX === 0 || frontY === 0) return null;
+    const locator = this.host.findLocatorByDeviceAnyRow(snapshot.assetCode, frontX, frontY);
+    if (!locator) {
+      this.reportStackerIdleSnapMiss(snapshot, frontX, frontY);
+      return null;
+    }
+    const position = this.resolveLocatorBoxSupportPosition(locator, frontX, frontY);
+    return position ? this.resolveStackerTargetMotionOffsets(model, position) : null;
+  }
+
+  /** 空闲吸附未命中的两类报错：设备无任何已绑定货格 / 当前位超出全部已绑定货格的列层范围。 */
+  private reportStackerIdleSnapMiss(snapshot: StackerTelemetrySnapshot, frontX: number, frontY: number): void {
+    const boundLocators = this.host.findLocatorsByDevice(snapshot.assetCode!);
+    const kind = boundLocators.length > 0 ? 'idle-snap-range' : 'idle-snap';
+    const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:${kind}:${frontX}:${frontY}`;
+    if (this.state.reportedMissingTargets.has(reportKey)) return;
+    this.state.reportedMissingTargets.add(reportKey);
+    if (boundLocators.length === 0) {
+      this.host.pushLog(`错误：Stacker ${snapshot.assetCode} 当前位（列${frontX} 层${frontY}）未匹配到任何已绑定货格，已忽略移动。`);
+      return;
+    }
+    const ranges = boundLocators
+      .map((entry) => `排${entry.rowNumber}：列${entry.startColumn}-${entry.startColumn + entry.columns - 1} 层1-${entry.layers}`)
+      .join('；');
+    this.host.pushLog(`错误：Stacker ${snapshot.assetCode} 当前位（列${frontX} 层${frontY}）超出已绑定货格范围（${ranges}），已忽略移动。`);
   }
 
   /** 解析目标格口的支撑位世界坐标：水平取 box 中心、高度取 box 底面，越界时返回 null 由调用方回退。 */
@@ -197,7 +246,7 @@ export class StackerTelemetryDriver {
     );
   }
 
-  /** 根据 distance_x 校准行走机构虚拟位置，并在有目标位或 movement_x 时沿轨道推进；返回本帧是否在移动。 */
+  /** 有目标位或空闲吸附偏移时沿轨道推进，否则按 movement_x 方向驱动；返回本帧是否在移动。 */
   private applyStackerRootMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
@@ -209,17 +258,7 @@ export class StackerTelemetryDriver {
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
     state.rootPosition ??= state.rootBasePosition.clone();
 
-    // 目标货格缺失时整机冻结：distance 校准同样跳过，保持当前位置不漂移
-    const distanceX = readNumberField(snapshot.fields, 'distance_x');
-    if (distanceX !== null && targetTravelOffset === null && !movementBlocked) {
-      const calibratedPosition = state.rootBasePosition.add(travelAxis.scale(distanceX));
-      state.rootPosition = lerpVector(
-        state.rootPosition,
-        this.constrainStackerTravelPosition(model, calibratedPosition, travelAxis),
-        this.getCalibrationAlpha(model, deltaSeconds),
-      );
-    }
-
+    // 目标货格缺失时整机冻结：保持当前位置不漂移
     let moving = false;
     if (!snapshot.faulted && !movementBlocked) {
       if (targetTravelOffset !== null) {
@@ -258,7 +297,7 @@ export class StackerTelemetryDriver {
     return moving;
   }
 
-  /** 根据 distance_y 校准载货台高度，并按目标位层高或 movement_y 推进升降；返回本帧是否在移动。 */
+  /** 按目标位层高、空闲吸附偏移或 movement_y 推进升降；返回本帧是否在移动。 */
   private applyStackerLiftMotion(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
@@ -267,13 +306,6 @@ export class StackerTelemetryDriver {
     movementBlocked: boolean,
   ): boolean {
     const state = model.stackerTelemetry;
-    const distanceY = readNumberField(snapshot.fields, 'distance_y');
-    if (distanceY !== null && targetLiftOffset === null && !movementBlocked) {
-      state.liftOffset = this.clampStackerLiftOffset(
-        model,
-        lerpNumber(state.liftOffset, distanceY, this.getCalibrationAlpha(model, deltaSeconds)),
-      );
-    }
 
     let moving = false;
     if (!snapshot.faulted && !movementBlocked) {

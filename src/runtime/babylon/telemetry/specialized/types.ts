@@ -293,6 +293,10 @@ export interface SpecializedTelemetryHost {
   /** models + modelArrayParameterVariants 的合并视图（entityId 用 representativeEntityId）。 */
   collectModels(): Iterable<{ entityId: string; model: ModelRuntimeEntry }>;
   findLocatorByDevice(assetCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
+  /** 跨排查找包含指定列/层的已绑定 Locator（排号不限），用于 stacker 空闲时按当前位 front_x/front_y 吸附。 */
+  findLocatorByDeviceAnyRow(assetCode: string, x: number, y: number): LocatorRuntimeEntry | null;
+  /** 返回设备绑定的全部 Locator（所有排），无绑定返回空数组；用于区分「未绑定」与「坐标越界」。 */
+  findLocatorsByDevice(assetCode: string): LocatorRuntimeEntry[];
   getLocatorTarget(key: string): LocatorRuntimeEntry | null;
   resolveCargoGeneratorForModel(model: ModelRuntimeEntry): ModelGeneratorRuntimeEntry | null;
   /** 按实体 ID 解析 RGV 列接驳位的世界位姿（模型/定位线框/基础网格实体的 root，或合批阵列实例的实体位姿）；不存在返回 null。 */

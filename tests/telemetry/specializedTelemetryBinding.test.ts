@@ -124,8 +124,9 @@ test('StackerTelemetryDriver 按 Locator storageDepth 属性判断一段或两�
   const source = readFileSync('src/runtime/babylon/telemetry/specialized/stackerDriver.ts', 'utf8');
   assert.match(source, /resolveStackerStorageForkReach\(targetLocator\.storageDepth/);
   assert.match(source, /snapshot\.hasTargetLocation[\s\S]*resolveStackerStorageForkReach\(targetLocator\.storageDepth/);
-  assert.match(source, /distanceX !== null && targetTravelOffset === null/);
-  assert.match(source, /distanceY !== null && targetLiftOffset === null/);
+  // distance_x/distance_y 编码器不再校准行走/升降（空闲改由 front_x/front_y 吸附已绑定货格）
+  assert.doesNotMatch(source, /distanceX !== null && targetTravelOffset === null/);
+  assert.doesNotMatch(source, /distanceY !== null && targetLiftOffset === null/);
 });
 
 test('Stacker 库位演示脚本不发送货叉距离，由 to_x to_y to_z 和 Locator 参数决定段数', () => {
