@@ -209,3 +209,64 @@ test('关闭自动销毁：mode=2 且光电无货时货物保持，等待下游�
     h.dispose();
   }
 });
+
+test('关闭自动销毁：新 task 刷出时遗留箱不销毁，直接复用并盖上新 task 从滞留位置继续走行', () => {
+  const h = makeHarness({ cargoAutoDispose: false });
+  try {
+    h.apply(RUNNING, 0.1);
+    for (let i = 0; i < 10; i += 1) h.apply(RUNNING, 0.1);
+    const leftover = [...h.state.conveyorCargoMeshes.values()][0];
+    const leftoverRoot = leftover.root;
+    assert.equal(leftover.task, '1');
+
+    // mode=2 停线遗留：货物与引用保持
+    h.apply(DISPOSE_FRAME);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1);
+    const strandedOffset = h.model.conveyorTelemetry.cargoTravelOffset;
+
+    // 线体停止中收到新 task：只登记 pendingTask，不刷出不动（分支4）
+    h.apply({ ...STOPPED_EMPTY, task: 2 });
+    assert.equal(h.model.conveyorTelemetry.cargoTravelOffset, strandedOffset, '停线收新 task 不得移动货物');
+
+    // 线体运行那一帧：复用遗留箱而非销毁重建（当帧同时推进一帧走行 0.3×0.1）
+    h.apply({ ...RUNNING, task: 2, containerCode: 'C-2' });
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '不得生成第二份货物');
+    const reused = [...h.state.conveyorCargoMeshes.values()][0];
+    assert.equal(reused.root, leftoverRoot, '必须复用遗留箱实例，不得销毁重建');
+    assert.equal(reused.task, '2', '复用箱必须盖上新 task');
+    assert.equal(reused.containerCode, 'C-2');
+    const offsetAfterReuse = h.model.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(
+      Math.abs(offsetAfterReuse - (strandedOffset + 0.3 * 0.1)) < 1e-6,
+      `复用必须从滞留位置继续走行，期望 ${strandedOffset + 0.03}，实际 ${offsetAfterReuse}`,
+    );
+
+    // 后续帧持续走行
+    h.apply({ ...RUNNING, task: 2 });
+    assert.ok(
+      h.model.conveyorTelemetry.cargoTravelOffset > offsetAfterReuse,
+      '复用后货物必须随线体继续走行',
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('默认开启自动销毁：新 task 刷出时仍销毁在机旧箱并重建', () => {
+  const h = makeHarness(null);
+  try {
+    h.apply(RUNNING, 0.1);
+    for (let i = 0; i < 5; i += 1) h.apply(RUNNING, 0.1);
+    const oldRoot = [...h.state.conveyorCargoMeshes.values()][0].root;
+
+    // 线体运行中直接换 task（无 mode=2，旧箱仍在机上）：销毁旧箱、刷出端重建
+    h.apply({ ...RUNNING, task: 2 });
+    assert.equal(h.state.conveyorCargoMeshes.size, 1);
+    const spawned = [...h.state.conveyorCargoMeshes.values()][0];
+    assert.notEqual(spawned.root, oldRoot, '自动销毁开启时旧箱必须销毁重建');
+    assert.equal(spawned.task, '2');
+    assert.ok(h.model.conveyorTelemetry.cargoTravelOffset < 0, '新箱必须刷在刷出端（负偏移）');
+  } finally {
+    h.dispose();
+  }
+});

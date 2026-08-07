@@ -104,7 +104,7 @@ export class ConveyorTelemetryDriver {
    * - 等待方：等待中不刷出不走行；mode 变 2/0、新 task 边沿或被交出时退出等待。
    * - 持有方：存在等待本 task 的设备时执行出货动画——向轨迹正转终点额外推进一个货箱长度；
    *   mode 变 2/0 或收到新 task 时把货物交给「货物世界坐标距设备上货坐标最近」的等待设备；
-   *   无等待设备时按 cargoAutoDispose 决定销毁或遗留（遗留箱在下次刷出时销毁）。
+   *   无等待设备时按 cargoAutoDispose 决定销毁或遗留（遗留箱不销毁，新 task 刷出时盖上新 task 直接复用）。
    * - 接管方：交接完成即按接管方向自驱走行（快照断流期间不等下一条 MQTT 消息），
    *   新消息到达（receivedAt 变化）即结束自驱、恢复字段驱动。
    * mode==2 且双光电（前后）都无货时的自动销毁由 telemetryBinding.cargoAutoDispose 控制（缺省开启），
@@ -166,7 +166,7 @@ export class ConveyorTelemetryDriver {
 
     // 销货条件：mode==2 且双光电（前后）都无货；与线体是否在走行无关。
     if (mode === 2 && !frontHasGoods && !backHasGoods) {
-      // 自动销毁关闭时货物交由 task 由下游设备接管：本机保留货物与位姿，直到被凭 task 取走。
+      // 自动销毁关闭时本机保留货物与位姿：等下游凭 task 取走，或新 task 刷出时直接复用该箱。
       if (model.telemetryBinding?.cargoAutoDispose === false) {
         if (!state.cargoCode) return;
       } else {
@@ -196,10 +196,20 @@ export class ConveyorTelemetryDriver {
           return;
         }
         state.pendingTask = null;
-        this.disposeConveyorCargoForAssetCode(model.assetCode);
-        state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
-        state.cargoCode = CONVEYOR_CARGO_IDENTITY;
-        this.adoptOrCreateConveyorCargo(model, snapshot, state.cargoCode);
+        // 仅自动销毁关闭时的遗留箱直接复用：不销毁不重建，保持滞留位置，盖上新 task 继续走行。
+        const leftover = model.telemetryBinding?.cargoAutoDispose === false && state.cargoCode !== null
+          ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
+          : null;
+        if (leftover) {
+          leftover.task = state.currentTask ?? '';
+          const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
+          leftover.containerCode = containerCode || leftover.containerCode;
+        } else {
+          this.disposeConveyorCargoForAssetCode(model.assetCode);
+          state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
+          state.cargoCode = CONVEYOR_CARGO_IDENTITY;
+          this.adoptOrCreateConveyorCargo(model, snapshot, state.cargoCode);
+        }
       }
     } else if (!state.cargoCode) {
       // 匿名模式：线体运行即刷出，不再依赖光电信号；单货物身份固定，刷出位置只由运行方向决定。
