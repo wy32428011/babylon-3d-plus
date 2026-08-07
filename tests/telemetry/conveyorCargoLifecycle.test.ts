@@ -7,10 +7,17 @@ import { normalizeTelemetryBindingComponent } from '../../src/editor/model/telem
 import type { DeviceTelemetrySnapshot } from '../../src/runtime/mqtt/deviceTelemetry';
 import { ConveyorTelemetryDriver } from '../../src/runtime/babylon/telemetry/specialized/conveyorDriver';
 import { createConveyorTelemetryState } from '../../src/runtime/babylon/telemetry/specialized/specializedModelAssets';
-import { createSpecializedTelemetrySharedState } from '../../src/runtime/babylon/telemetry/specialized/types';
+import {
+  CONVEYOR_CARGO_SIZE,
+  createSpecializedTelemetrySharedState,
+} from '../../src/runtime/babylon/telemetry/specialized/types';
+import { resolveConveyorCargoTravelHalfRange } from '../../src/runtime/babylon/telemetry/conveyorCargoTravel';
 import type { ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
 
-function makeSnapshot(fields: Record<string, unknown>): DeviceTelemetrySnapshot {
+/** harness bounds 跨度 4m、货箱轴向 0.72 → 行程半径 1.64，刷出端偏移 = -1.64。 */
+const HALF_RANGE = resolveConveyorCargoTravelHalfRange(4, CONVEYOR_CARGO_SIZE.x);
+
+function makeSnapshot(fields: Record<string, unknown>, receivedAt: number = Date.now()): DeviceTelemetrySnapshot {
   return {
     sourceId: 'default',
     topic: 'test/topic',
@@ -19,7 +26,7 @@ function makeSnapshot(fields: Record<string, unknown>): DeviceTelemetrySnapshot 
     payloadDeviceCode: null,
     sourceTimestamp: null,
     sequence: null,
-    receivedAt: Date.now(),
+    receivedAt,
     fields,
     currentLocationKey: null,
     targetLocationKey: null,
@@ -81,8 +88,10 @@ function makeHarness(binding: { cargoAutoDispose?: boolean } | null) {
     state,
     model,
     dispose: () => { scene.dispose(); engine.dispose(); },
-    apply: (fields: Record<string, unknown>, deltaSeconds = 0.1) => {
-      driver.applyToModel(model, makeSnapshot(fields), deltaSeconds);
+    apply: (fields: Record<string, unknown>, deltaSeconds = 0.1, frames = 1, receivedAt?: number) => {
+      for (let i = 0; i < frames; i += 1) {
+        driver.applyToModel(model, makeSnapshot(fields, receivedAt), deltaSeconds);
+      }
     },
   };
 }
@@ -210,39 +219,41 @@ test('关闭自动销毁：mode=2 且光电无货时货物保持，等待下游�
   }
 });
 
-test('关闭自动销毁：新 task 刷出时遗留箱不销毁，直接复用并盖上新 task 从滞留位置继续走行', () => {
+test('关闭自动销毁：新 task 边沿即复用遗留箱，盖上新 task 从滞留位置继续走行', () => {
   const h = makeHarness({ cargoAutoDispose: false });
   try {
-    h.apply(RUNNING, 0.1);
-    for (let i = 0; i < 10; i += 1) h.apply(RUNNING, 0.1);
+    h.apply(RUNNING, 0.1, 1, 1000);
+    for (let i = 0; i < 10; i += 1) h.apply(RUNNING, 0.1, 1, 1000);
     const leftover = [...h.state.conveyorCargoMeshes.values()][0];
     const leftoverRoot = leftover.root;
     assert.equal(leftover.task, '1');
 
     // mode=2 停线遗留：货物与引用保持
-    h.apply(DISPOSE_FRAME);
+    h.apply(DISPOSE_FRAME, 0.1, 1, 2000);
     assert.equal(h.state.conveyorCargoMeshes.size, 1);
     const strandedOffset = h.model.conveyorTelemetry.cargoTravelOffset;
 
-    // 线体停止中收到新 task：只登记 pendingTask，不刷出不动（分支4）
-    h.apply({ ...STOPPED_EMPTY, task: 2 });
-    assert.equal(h.model.conveyorTelemetry.cargoTravelOffset, strandedOffset, '停线收新 task 不得移动货物');
-
-    // 线体运行那一帧：复用遗留箱而非销毁重建（当帧同时推进一帧走行 0.3×0.1）
-    h.apply({ ...RUNNING, task: 2, containerCode: 'C-2' });
+    // 新 task 边沿即复用（不再等线体运行）：不销毁不重建，movement_x=0 按正转登记自驱，当帧推进一帧
+    h.apply({ ...STOPPED_EMPTY, task: 2, containerCode: 'C-2' }, 0.1, 1, 3000);
     assert.equal(h.state.conveyorCargoMeshes.size, 1, '不得生成第二份货物');
     const reused = [...h.state.conveyorCargoMeshes.values()][0];
     assert.equal(reused.root, leftoverRoot, '必须复用遗留箱实例，不得销毁重建');
     assert.equal(reused.task, '2', '复用箱必须盖上新 task');
     assert.equal(reused.containerCode, 'C-2');
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 刷出必须登记正转自驱');
     const offsetAfterReuse = h.model.conveyorTelemetry.cargoTravelOffset;
     assert.ok(
       Math.abs(offsetAfterReuse - (strandedOffset + 0.3 * 0.1)) < 1e-6,
       `复用必须从滞留位置继续走行，期望 ${strandedOffset + 0.03}，实际 ${offsetAfterReuse}`,
     );
 
-    // 后续帧持续走行
-    h.apply({ ...RUNNING, task: 2 });
+    // 下一条新消息 movement_x=0：自驱结束，立即停车
+    h.apply({ ...STOPPED_EMPTY, task: 2 }, 0.1, 1, 4000);
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 0, '新消息必须结束自驱');
+    assert.equal(h.model.conveyorTelemetry.cargoTravelOffset, offsetAfterReuse, '新消息 movement_x=0 必须停车');
+
+    // 线体运行后从滞留位置继续走行
+    h.apply({ ...RUNNING, task: 2 }, 0.1, 1, 5000);
     assert.ok(
       h.model.conveyorTelemetry.cargoTravelOffset > offsetAfterReuse,
       '复用后货物必须随线体继续走行',
@@ -252,20 +263,54 @@ test('关闭自动销毁：新 task 刷出时遗留箱不销毁，直接复用�
   }
 });
 
-test('默认开启自动销毁：新 task 刷出时仍销毁在机旧箱并重建', () => {
+test('默认开启自动销毁：新 task 边沿销毁在机旧箱并重建，movement_x=0 也立即刷出', () => {
   const h = makeHarness(null);
   try {
     h.apply(RUNNING, 0.1);
     for (let i = 0; i < 5; i += 1) h.apply(RUNNING, 0.1);
     const oldRoot = [...h.state.conveyorCargoMeshes.values()][0].root;
 
-    // 线体运行中直接换 task（无 mode=2，旧箱仍在机上）：销毁旧箱、刷出端重建
-    h.apply({ ...RUNNING, task: 2 });
+    // 旧箱仍在机上时收新 task（movement_x=0）：销毁旧箱、轨迹起点重建并登记正转自驱
+    h.apply({ ...STOPPED_EMPTY, task: 2 });
     assert.equal(h.state.conveyorCargoMeshes.size, 1);
     const spawned = [...h.state.conveyorCargoMeshes.values()][0];
     assert.notEqual(spawned.root, oldRoot, '自动销毁开启时旧箱必须销毁重建');
     assert.equal(spawned.task, '2');
-    assert.ok(h.model.conveyorTelemetry.cargoTravelOffset < 0, '新箱必须刷在刷出端（负偏移）');
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 刷出必须登记正转自驱');
+    assert.ok(
+      Math.abs(h.model.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE + 0.3 * 0.1)) < 1e-6,
+      `新箱必须刷在轨迹起点并当帧自驱推进，实际 ${h.model.conveyorTelemetry.cargoTravelOffset}`,
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('新 task 边沿即刷出：无旧箱时 movement_x=0 也立即刷在轨迹起点并自驱推进', () => {
+  const h = makeHarness(null);
+  try {
+    // 首条消息 movement_x=0：立即刷出并按正转自驱（不再等 movement_x 非 0）
+    h.apply({ task: 5, front_has_goods: 0, back_has_goods: 0, movement_x: 0 }, 0.1, 1, 1000);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, 'movement_x=0 的新 task 也必须立即刷出');
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 1);
+    const spawnedOffset = h.model.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(
+      Math.abs(spawnedOffset - (-HALF_RANGE + 0.3 * 0.1)) < 1e-6,
+      `刷出端 -1.64 + 当帧自驱 0.03，实际 ${spawnedOffset}`,
+    );
+
+    // 断流重放（同一 receivedAt）：自驱持续推进
+    h.apply({ task: 5, front_has_goods: 0, back_has_goods: 0, movement_x: 0 }, 0.1, 10, 1000);
+    const selfDrivenOffset = h.model.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(
+      Math.abs(selfDrivenOffset - (spawnedOffset + 0.3 * 0.1 * 10)) < 1e-6,
+      `自驱必须持续推进到 ${spawnedOffset + 0.3}，实际 ${selfDrivenOffset}`,
+    );
+
+    // 新消息到达 movement_x=0：自驱结束，立即停车
+    h.apply({ task: 5, front_has_goods: 0, back_has_goods: 0, movement_x: 0 }, 0.1, 1, 2000);
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 0, '新消息必须结束自驱');
+    assert.equal(h.model.conveyorTelemetry.cargoTravelOffset, selfDrivenOffset, '新消息 movement_x=0 必须停车');
   } finally {
     h.dispose();
   }

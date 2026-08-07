@@ -96,14 +96,16 @@ export class ConveyorTelemetryDriver {
   /**
    * 货物生命周期两种模式：
    * - task 模式（快照携带数值 task 字段）：仅当 task 相对 lastTask 发生变化才登记 pendingTask（新 task 边沿），
-   *   线体运行（movement_x 非 0）即刷出；同 task 重复到达（含线体清空后的重发）不再触发刷出+走行。
+   *   边沿当帧即刷出/等待判定，不再等线体运行；movement_x 为 0 时按正转处理——刷在轨迹起点，
+   *   登记自驱移向终点（下一条新消息到达即恢复字段驱动）。
+   *   同 task 重复到达（含线体清空后的重发）不再触发刷出+走行。
    *   刷出时若同 task 货物由他设备输送线持有，则不刷出进入等待（waitingTask），由持有方送货后交出；
    *   货物由 stacker/RGV 持有时维持刷出即全局接管（交接插值接入本机走行）。
    * - 匿名模式（无 task 字段）：线体运行即刷出，设备自管理，不参与全局接管。
    * 等待协议（仅持有方为输送线）：
-   * - 等待方：等待中不刷出不走行；mode 变 2/0、新 task 边沿或被交出时退出等待。
-   * - 持有方：存在等待本 task 的设备时执行出货动画——向轨迹正转终点额外推进一个货箱长度；
-   *   mode 变 2/0 或收到新 task 时把货物交给「货物世界坐标距设备上货坐标最近」的等待设备；
+   * - 等待方：等待中不刷出不走行；mode 变 2/0（同时放弃 pendingTask）、新 task 边沿或被交出时退出等待。
+   * - 持有方：存在等待本 task 的设备时执行出货动画——向轨迹正转终点额外推进半个货箱长度（超出终点半程即停）；
+   *   mode 变 2/0 或收到新 task 时释放货物——动画期间或结束后都生效——交给「货物世界坐标距设备上货坐标最近」的等待设备；
    *   无等待设备时按 cargoAutoDispose 决定销毁或遗留（遗留箱不销毁，新 task 刷出时盖上新 task 直接复用）。
    * - 接管方：交接完成即按接管方向自驱走行（快照断流期间不等下一条 MQTT 消息），
    *   新消息到达（receivedAt 变化）即结束自驱、恢复字段驱动。
@@ -152,7 +154,11 @@ export class ConveyorTelemetryDriver {
     if (movementDirection !== 0) state.lastMovementDirection = movementDirection;
 
     // 等待方退出等待：mode 变 2/0（level 判断覆盖边沿）；持有方货物中途消失不自动退出。
-    if (mode === 2 || mode === 0) state.waitingTask = null;
+    // 刷出判定已提前到 task 边沿，退出等待必须同时放弃 pendingTask，否则当帧立即重新等待。
+    if (mode === 2 || mode === 0) {
+      if (state.waitingTask !== null) state.pendingTask = null;
+      state.waitingTask = null;
+    }
 
     const cargoKey = state.cargoCode !== null ? this.getConveyorCargoKey(model.assetCode, state.cargoCode) : null;
     const heldCargo = cargoKey !== null ? this.state.conveyorCargoMeshes.get(cargoKey) ?? null : null;
@@ -187,15 +193,16 @@ export class ConveyorTelemetryDriver {
     const spawnOffsetForDirection = (direction: number): number => -direction * forwardSign * travelHalfRange;
 
     if (taskMode) {
-      // task 模式：待刷出任务在线体运行（movement_x 非 0）后即接管/自建，不再依赖光电信号；
-      // 同 task 已被接管时 cargoCode 被清空且 pendingTask 为空，不会重生。
-      if (state.pendingTask && movementDirection !== 0) {
+      // task 模式：新 task 边沿（pendingTask 登记）即刷出/等待判定，不再等线体运行；
+      // movement_x 为 0 时按正转处理——刷在轨迹起点，登记自驱移向终点（下一条新消息恢复字段驱动）。
+      if (state.pendingTask) {
         // 同 task 货物由他设备输送线持有：放弃刷出进入等待，由持有方送货后交出（pendingTask 保留）。
         if (this.findHeldConveyorCargoByTask(state.pendingTask, model.assetCode)) {
           state.waitingTask = state.pendingTask;
           return;
         }
         state.pendingTask = null;
+        const spawnDirection = movementDirection !== 0 ? movementDirection : 1;
         // 仅自动销毁关闭时的遗留箱直接复用：不销毁不重建，保持滞留位置，盖上新 task 继续走行。
         const leftover = model.telemetryBinding?.cargoAutoDispose === false && state.cargoCode !== null
           ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
@@ -206,10 +213,11 @@ export class ConveyorTelemetryDriver {
           leftover.containerCode = containerCode || leftover.containerCode;
         } else {
           this.disposeConveyorCargoForAssetCode(model.assetCode);
-          state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
+          state.cargoTravelOffset = spawnOffsetForDirection(spawnDirection);
           state.cargoCode = CONVEYOR_CARGO_IDENTITY;
           this.adoptOrCreateConveyorCargo(model, snapshot, state.cargoCode);
         }
+        if (movementDirection === 0) state.selfDriveDirection = 1;
       }
     } else if (!state.cargoCode) {
       // 匿名模式：线体运行即刷出，不再依赖光电信号；单货物身份固定，刷出位置只由运行方向决定。
@@ -232,11 +240,11 @@ export class ConveyorTelemetryDriver {
       state.cargoTravelOffset += cargoDirection * forwardSign * cargoSpeed * deltaSeconds;
     }
 
-    // 出货动画：存在等待本 task 的设备时，向轨迹正转终点额外推进一个货箱长度（与线体是否走行无关）。
+    // 出货动画：存在等待本 task 的设备时，向轨迹正转终点额外推进半个货箱长度（与线体是否走行无关）。
     let clampMin = -travelHalfRange;
     let clampMax = travelHalfRange;
     if (!snapshot.faulted && cargo.task && this.findWaitingConveyorModels(model, cargo.task).length > 0) {
-      const pushTarget = forwardSign * (travelHalfRange + cargoAxialLength);
+      const pushTarget = forwardSign * (travelHalfRange + cargoAxialLength / 2);
       state.cargoTravelOffset = moveNumberTowards(state.cargoTravelOffset, pushTarget, cargoSpeed * deltaSeconds);
       clampMin = Math.min(clampMin, pushTarget);
       clampMax = Math.max(clampMax, pushTarget);

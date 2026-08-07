@@ -18,12 +18,12 @@ import type { ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
 /**
  * 输送线等待/交出协议测试的几何约定（与 harness bounds 对齐）：
  * 行走轴为局部 x（空 motion 配置缺省），货箱轴向长度 0.72，各设备跨度 4m → 行程半径 1.64。
- * 出货动画目标 = 1.64 + 0.72 = 2.36（正转方向）。
+ * 出货动画目标 = 1.64 + 0.72/2 = 2.0（正转方向，超出终点半程即停）。
  */
 const SPAN_HALF = 2;
 const CARGO_AXIAL = CONVEYOR_CARGO_SIZE.x;
 const HALF_RANGE = resolveConveyorCargoTravelHalfRange(SPAN_HALF * 2, CARGO_AXIAL);
-const PUSH_TARGET = HALF_RANGE + CARGO_AXIAL;
+const PUSH_TARGET = HALF_RANGE + CARGO_AXIAL / 2;
 /** 空 motion 配置时的缺省走行速度（m/s），与 CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND 对齐。 */
 const CARGO_SPEED = 0.3;
 
@@ -177,11 +177,17 @@ test('等待周期中 mode 变为 2 或 0 退出等待状态', () => {
 
     h.apply('CV1', { task: 7, movement_x: 0, mode: 2 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, 'mode=2 必须退出等待');
+    assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, null, '退出等待必须一并放弃 pendingTask，否则当帧立即重新等待');
 
-    // 重新进入等待后验证 mode=0
+    // 同 task 重发不再重新等待（刷出/等待判定只发生在新 task 边沿）
     h.apply('CV1', { task: 7, movement_x: 1 });
-    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7', '前置：线体运行且货物仍被持有时重新等待');
-    h.apply('CV1', { task: 7, movement_x: 0, mode: 0 });
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, '同 task 重发不得重新等待');
+
+    // 新 task 边沿重新进入等待后验证 mode=0
+    h.apply('CV2', { task: 9, movement_x: 1 });
+    h.apply('CV1', { task: 9, movement_x: 1 });
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '9', '前置：新 task 边沿重新进入等待');
+    h.apply('CV1', { task: 9, movement_x: 0, mode: 0 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, 'mode=0 必须退出等待');
   } finally {
     h.dispose();
@@ -206,7 +212,7 @@ test('等待中收到新 task 时旧等待作废，走新 task 自建流程', ()
   }
 });
 
-test('存在等待设备时持有方执行出货动画：向轨迹终点额外推进一个货箱长度', () => {
+test('存在等待设备时持有方执行出货动画：向轨迹终点额外推进半个货箱长度', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
     h.apply('CV2', { task: 7, movement_x: 1 });
@@ -217,13 +223,37 @@ test('存在等待设备时持有方执行出货动画：向轨迹终点额外�
     assert.ok(Math.abs(h.models.CV2.conveyorTelemetry.cargoTravelOffset - HALF_RANGE) < 1e-6,
       `无等待者时必须停在 halfRange=${HALF_RANGE}，实际 ${h.models.CV2.conveyorTelemetry.cargoTravelOffset}`);
 
-    // 出现等待者：即使线体停止（movement_x=0）也向终点额外推进
+    // 出现等待者：即使线体停止（movement_x=0）也向终点额外推进半个货箱长度
     h.apply('CV1', { task: 7, movement_x: 1 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7');
     h.apply('CV2', { task: 7, movement_x: 0 }, 0.1, 200);
     const offset = h.models.CV2.conveyorTelemetry.cargoTravelOffset;
     assert.ok(Math.abs(offset - PUSH_TARGET) < 1e-6, `出货动画必须推进到 ${PUSH_TARGET}，实际 ${offset}`);
-    assert.ok(cargo.root.position.x > SPAN_HALF, `货箱必须越出持有方轨迹端点 x=${SPAN_HALF}，实际 ${cargo.root.position.x}`);
+    assert.ok(Math.abs(cargo.root.position.x - PUSH_TARGET) < 1e-6, `货箱中心必须停在轨迹端点 x=${PUSH_TARGET}，实际 ${cargo.root.position.x}`);
+    assert.ok(cargo.root.position.x + CARGO_AXIAL / 2 > SPAN_HALF, `货箱前半身必须越出持有方轨迹端点 x=${SPAN_HALF}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('出货动画期间收到释放逻辑立即移交，不等动画结束', () => {
+  const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
+  try {
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 200);
+    h.apply('CV1', { task: 7, movement_x: 1 });
+
+    // 出货动画推进 5 帧（0.15m），仍在半程目标之下
+    h.apply('CV2', { task: 7, movement_x: 0 }, 0.1, 5);
+    const midOffset = h.models.CV2.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(midOffset > HALF_RANGE && midOffset < PUSH_TARGET, `前置：动画必须进行中（${HALF_RANGE} < ${midOffset} < ${PUSH_TARGET}）`);
+
+    // 动画进行中收到 mode=2：立即释放
+    h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
+    const transferred = onlyCargo(h.state);
+    assert.equal(transferred.assetCode, 'CV1', '动画期间收到释放必须立即移交');
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null);
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo');
   } finally {
     h.dispose();
   }
@@ -257,19 +287,30 @@ test('持有方 mode=2 时交出货物：实例不销毁、换绑等待方，且
   }
 });
 
-test('持有方收到新 task 时交出旧 task 货物', () => {
+test('持有方收到新 task 时交出旧 task 货物，新 task 当帧即刷出', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
     h.apply('CV2', { task: 7, movement_x: 1 });
     h.apply('CV1', { task: 7, movement_x: 1 });
 
     h.apply('CV2', { task: 8, movement_x: 0 });
-    const transferred = onlyCargo(h.state);
+    const transferred = [...h.state.conveyorCargoMeshes.values()].find((cargo) => cargo.task === '7');
+    assert.ok(transferred, '旧 task 货物必须存在');
     assert.equal(transferred.assetCode, 'CV1', '新 task 边沿必须把旧 task 货物交给等待方');
-    assert.equal(transferred.task, '7');
-    assert.equal(h.models.CV2.conveyorTelemetry.cargoCode, null);
-    assert.equal(h.models.CV2.conveyorTelemetry.currentTask, '8', '持有方进入新 task 流程');
-    assert.equal(h.models.CV2.conveyorTelemetry.pendingTask, '8', '新 task 待线体运行时刷出');
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null);
+
+    // 新 task 边沿当帧即刷出（不再等 movement_x 非 0）：movement_x=0 按正转刷在起点并自驱推进
+    assert.equal(h.models.CV2.conveyorTelemetry.currentTask, '8');
+    assert.equal(h.models.CV2.conveyorTelemetry.pendingTask, null, '新 task 当帧即刷出，pendingTask 已消费');
+    assert.equal(h.models.CV2.conveyorTelemetry.cargoCode, 'cargo', '持有方必须持有新 task 货物');
+    assert.equal(h.models.CV2.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 刷出必须登记正转自驱');
+    const spawned = [...h.state.conveyorCargoMeshes.values()].find((cargo) => cargo.assetCode === 'CV2');
+    assert.ok(spawned);
+    assert.equal(spawned.task, '8');
+    assert.ok(
+      Math.abs(h.models.CV2.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE + 0.3 * 0.1)) < 1e-6,
+      `新箱必须刷在轨迹起点并当帧自驱推进，实际 ${h.models.CV2.conveyorTelemetry.cargoTravelOffset}`,
+    );
   } finally {
     h.dispose();
   }
@@ -285,7 +326,7 @@ test('多台等待设备时由上货坐标距货物世界坐标最近者接管',
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7');
     assert.equal(h.models.CV3.conveyorTelemetry.waitingTask, '7');
 
-    // 出货动画把货物推到 x≈+2.36，距 CV3 上货点（3.36）更近
+    // 出货动画把货物推到 x≈+2.0，距 CV3 上货点（3.36）更近
     h.apply('CV2', { task: 7, movement_x: 0 }, 0.1, 200);
     h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
 
