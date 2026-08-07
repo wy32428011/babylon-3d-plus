@@ -10,6 +10,7 @@ import {
   getModelTransformNodes,
   getNodeWorldRotation,
   getNodesWorldBounds,
+  moveNumberTowards,
   projectWorldBoundsOntoAxis,
 } from '../../runtimeNodeGeometry';
 import { isPlainRecord, sanitizeBabylonName } from '../../runtimeValueUtils';
@@ -95,11 +96,17 @@ export class ConveyorTelemetryDriver {
   /**
    * 货物生命周期两种模式：
    * - task 模式（快照携带数值 task 字段）：仅当 task 相对 lastTask 发生变化才登记 pendingTask（新 task 边沿），
-   *   线体运行（movement_x 非 0）即刷出；同 task 重复到达（含线体清空后的重发）不再触发刷出+走行；
-   *   刷出时按 task 全局接管他设备货箱实例（插值接入本机走行）。
+   *   线体运行（movement_x 非 0）即刷出；同 task 重复到达（含线体清空后的重发）不再触发刷出+走行。
+   *   刷出时若同 task 货物由他设备输送线持有，则不刷出进入等待（waitingTask），由持有方送货后交出；
+   *   货物由 stacker/RGV 持有时维持刷出即全局接管（交接插值接入本机走行）。
    * - 匿名模式（无 task 字段）：线体运行即刷出，设备自管理，不参与全局接管。
-   * mode==2 且双光电（前后）都无货时是否销毁货物由 telemetryBinding.cargoAutoDispose 控制（缺省开启）：
-   * 开启时清空本机货物；关闭时货物保持原位，交由下游设备凭 task 接管决定去向。
+   * 等待协议（仅持有方为输送线）：
+   * - 等待方：等待中不刷出不走行；mode 变 2/0、新 task 边沿或被交出时退出等待。
+   * - 持有方：存在等待本 task 的设备时执行出货动画——向轨迹正转终点额外推进一个货箱长度；
+   *   mode 变 2/0 或收到新 task 时把货物交给「货物世界坐标距设备上货坐标最近」的等待设备；
+   *   无等待设备时按 cargoAutoDispose 决定销毁或遗留（遗留箱在下次刷出时销毁）。
+   * mode==2 且双光电（前后）都无货时的自动销毁由 telemetryBinding.cargoAutoDispose 控制（缺省开启），
+   * 交出优先于销毁：有等待设备时货物移交而非销毁。
    * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向：
    * 正转（=1）刷在轨迹起点向终点移动；反转（=2）刷在轨迹终点向起点移动。
    */
@@ -119,10 +126,13 @@ export class ConveyorTelemetryDriver {
     const taskValue = readIntegerField(snapshot.fields, 'task');
     const taskMode = taskValue !== null;
     const task = normalizeCargoTask(taskValue);
-    if (taskMode && task && task !== state.lastTask) {
+    const newTaskEdge = taskMode && task !== '' && task !== state.lastTask;
+    if (newTaskEdge) {
       state.lastTask = task;
       state.currentTask = task;
       state.pendingTask = task;
+      // 新 task 取代旧等待：等待目标作废，走新 task 的刷出/等待判定
+      state.waitingTask = null;
     }
 
     // 货物走行与链条本体共用同一份 translate 配置（fields+actionMap+speed），避免链/货速度脱节。
@@ -130,6 +140,20 @@ export class ConveyorTelemetryDriver {
     const movementDirection = translateConfig
       ? this.readConveyorMotionDirection(snapshot, translateConfig)
       : this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
+    if (movementDirection !== 0) state.lastMovementDirection = movementDirection;
+
+    // 等待方退出等待：mode 变 2/0（level 判断覆盖边沿）；持有方货物中途消失不自动退出。
+    if (mode === 2 || mode === 0) state.waitingTask = null;
+
+    const cargoKey = state.cargoCode !== null ? this.getConveyorCargoKey(model.assetCode, state.cargoCode) : null;
+    const heldCargo = cargoKey !== null ? this.state.conveyorCargoMeshes.get(cargoKey) ?? null : null;
+
+    // 持有方交出：mode 2/0 或新 task 边沿时，把货物交给上货坐标距货物世界坐标最近的等待设备。
+    // 必须在销毁逻辑之前：有等待设备时移交优先于自动销毁。
+    if (heldCargo?.task && (mode === 2 || mode === 0 || newTaskEdge)) {
+      const waiters = this.findWaitingConveyorModels(model, heldCargo.task);
+      if (waiters.length > 0) this.transferConveyorCargoToNearestWaiter(model, heldCargo, waiters);
+    }
 
     // 销货条件：mode==2 且双光电（前后）都无货；与线体是否在走行无关。
     if (mode === 2 && !frontHasGoods && !backHasGoods) {
@@ -143,11 +167,12 @@ export class ConveyorTelemetryDriver {
       }
     }
 
+    // 等待中：放弃主动创建货物和运动（本机已有货物同样静止）。
+    if (state.waitingTask) return;
+
     const travelContext = this.resolveConveyorCargoTravelContext(model);
-    const travelHalfRange = resolveConveyorCargoTravelHalfRange(
-      travelContext.spanMeters ?? 0,
-      CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
-    );
+    const cargoAxialLength = CONVEYOR_CARGO_SIZE[travelContext.travelAxisName];
+    const travelHalfRange = resolveConveyorCargoTravelHalfRange(travelContext.spanMeters ?? 0, cargoAxialLength);
     const forwardSign = this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxis);
     // 刷出端由运行方向决定：正转刷在轨迹起点向终点移动，反转刷在轨迹终点向起点移动。
     const spawnOffsetForDirection = (direction: number): number => -direction * forwardSign * travelHalfRange;
@@ -156,6 +181,11 @@ export class ConveyorTelemetryDriver {
       // task 模式：待刷出任务在线体运行（movement_x 非 0）后即接管/自建，不再依赖光电信号；
       // 同 task 已被接管时 cargoCode 被清空且 pendingTask 为空，不会重生。
       if (state.pendingTask && movementDirection !== 0) {
+        // 同 task 货物由他设备输送线持有：放弃刷出进入等待，由持有方送货后交出（pendingTask 保留）。
+        if (this.findHeldConveyorCargoByTask(state.pendingTask, model.assetCode)) {
+          state.waitingTask = state.pendingTask;
+          return;
+        }
         state.pendingTask = null;
         this.disposeConveyorCargoForAssetCode(model.assetCode);
         state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
@@ -176,21 +206,113 @@ export class ConveyorTelemetryDriver {
     const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
     if (!cargo) return;
 
+    const cargoSpeed = translateConfig?.speed ?? CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
     if (!snapshot.faulted && movementDirection !== 0) {
-      const cargoSpeed = translateConfig?.speed ?? CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
       state.cargoTravelOffset += movementDirection * forwardSign * cargoSpeed * deltaSeconds;
     }
+
+    // 出货动画：存在等待本 task 的设备时，向轨迹正转终点额外推进一个货箱长度（与线体是否走行无关）。
+    let clampMin = -travelHalfRange;
+    let clampMax = travelHalfRange;
+    if (!snapshot.faulted && cargo.task && this.findWaitingConveyorModels(model, cargo.task).length > 0) {
+      const pushTarget = forwardSign * (travelHalfRange + cargoAxialLength);
+      state.cargoTravelOffset = moveNumberTowards(state.cargoTravelOffset, pushTarget, cargoSpeed * deltaSeconds);
+      clampMin = Math.min(clampMin, pushTarget);
+      clampMax = Math.max(clampMax, pushTarget);
+    }
     // 每帧按当前行程钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
-    state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, -travelHalfRange, travelHalfRange);
+    state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, clampMin, clampMax);
 
     this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));
     const pose = resolveCargoHandoffPose(
       cargo,
-      this.getConveyorCargoPosition(model, travelContext),
+      this.getConveyorCargoPosition(model, travelContext, state.cargoTravelOffset),
       getNodeWorldRotation(model.root),
       deltaSeconds,
     );
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation);
+  }
+
+  /** 扫描等待指定 task 的他设备输送线模型（waitingTask 由等待方在刷出判定失败时登记）。 */
+  private findWaitingConveyorModels(selfModel: ModelRuntimeEntry, task: string): ModelRuntimeEntry[] {
+    const waiters: ModelRuntimeEntry[] = [];
+    for (const { model } of this.host.collectModels()) {
+      if (model === selfModel || model.assetCode === selfModel.assetCode) continue;
+      if (model.conveyorTelemetry?.waitingTask === task) waiters.push(model);
+    }
+    return waiters;
+  }
+
+  /** 查询他设备输送线持有的同 task 货物；stacker/RGV 持有的货物不在此表，维持刷出即接管。 */
+  private findHeldConveyorCargoByTask(task: string, selfAssetCode: string): ConveyorCargoRuntimeEntry | null {
+    for (const cargo of this.state.conveyorCargoMeshes.values()) {
+      if (cargo.task === task && cargo.assetCode !== selfAssetCode) return cargo;
+    }
+    return null;
+  }
+
+  /** 等待设备的上货坐标：按其最近运行方向的刷出端世界坐标。 */
+  private getConveyorLoadingPoint(waiterModel: ModelRuntimeEntry): Vector3 {
+    const waiterState = waiterModel.conveyorTelemetry;
+    const travelContext = this.resolveConveyorCargoTravelContext(waiterModel);
+    const travelHalfRange = resolveConveyorCargoTravelHalfRange(
+      travelContext.spanMeters ?? 0,
+      CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
+    );
+    const forwardSign = this.readConveyorTrajectoryForwardSign(waiterModel, travelContext.travelAxis);
+    const direction = waiterState.lastMovementDirection !== 0 ? waiterState.lastMovementDirection : 1;
+    return this.getConveyorCargoPosition(waiterModel, travelContext, -direction * forwardSign * travelHalfRange);
+  }
+
+  /** 持有方交出货物：最近等待设备接管所有权（实例不销毁，交接插值保持视觉连续）；等待设备的遗留箱先销毁。 */
+  private transferConveyorCargoToNearestWaiter(
+    holderModel: ModelRuntimeEntry,
+    cargo: ConveyorCargoRuntimeEntry,
+    waiters: ModelRuntimeEntry[],
+  ): void {
+    const cargoPosition = cargo.root.getAbsolutePosition();
+    let winner = waiters[0];
+    let nearestDistance = Infinity;
+    for (const waiter of waiters) {
+      const distance = Vector3.DistanceSquared(cargoPosition, this.getConveyorLoadingPoint(waiter));
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        winner = waiter;
+      }
+    }
+
+    const holderState = holderModel.conveyorTelemetry;
+    const winnerState = winner.conveyorTelemetry;
+    if (winnerState.cargoCode !== null) {
+      const leftoverKey = this.getConveyorCargoKey(winner.assetCode, winnerState.cargoCode);
+      const leftover = this.state.conveyorCargoMeshes.get(leftoverKey);
+      if (leftover) {
+        this.disposeConveyorCargo(leftover);
+        this.state.conveyorCargoMeshes.delete(leftoverKey);
+      }
+    }
+
+    const holderKey = this.getConveyorCargoKey(holderModel.assetCode, holderState.cargoCode!);
+    this.state.conveyorCargoMeshes.delete(holderKey);
+    holderState.cargoCode = null;
+    if (holderState.currentTask === cargo.task) holderState.currentTask = null;
+
+    cargo.assetCode = winner.assetCode;
+    cargo.handoff = createCargoHandoffState(cargo);
+
+    const winnerContext = this.resolveConveyorCargoTravelContext(winner);
+    const winnerHalfRange = resolveConveyorCargoTravelHalfRange(
+      winnerContext.spanMeters ?? 0,
+      CONVEYOR_CARGO_SIZE[winnerContext.travelAxisName],
+    );
+    const winnerForwardSign = this.readConveyorTrajectoryForwardSign(winner, winnerContext.travelAxis);
+    const winnerDirection = winnerState.lastMovementDirection !== 0 ? winnerState.lastMovementDirection : 1;
+    winnerState.cargoCode = CONVEYOR_CARGO_IDENTITY;
+    winnerState.cargoTravelOffset = -winnerDirection * winnerForwardSign * winnerHalfRange;
+    winnerState.pendingTask = null;
+    winnerState.waitingTask = null;
+    this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(winner.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
+    this.host.pushLog(`Conveyor ${holderModel.assetCode} 凭 task=${cargo.task} 将货物移交 ${winner.assetCode}`);
   }
 
   /** task 模式刷出：全局接管同 task 货箱实例（交接插值接入本机走行），否则自建；接管后本机持锁，上游不再重生。 */
@@ -434,15 +556,16 @@ export class ConveyorTelemetryDriver {
     return { center, upAxis, travelAxis, travelAxisName, spanMeters };
   }
 
-  /** 基于输送线行程上下文计算货物底部支撑点，并沿输送方向加入行程偏移。 */
+  /** 基于输送线行程上下文计算货物底部支撑点，并沿输送方向加入给定行程偏移。 */
   private getConveyorCargoPosition(
     model: ModelRuntimeEntry,
     travelContext: { center: Vector3; upAxis: Vector3; travelAxis: Vector3 },
+    travelOffset: number,
   ): Vector3 {
     const legacyCenter = travelContext.center.add(travelContext.upAxis.scale(CONVEYOR_CARGO_SIZE.y * 0.75));
     return legacyCenter
       .subtract(travelContext.upAxis.scale(CONVEYOR_CARGO_SIZE.y / 2))
-      .add(travelContext.travelAxis.scale(model.conveyorTelemetry.cargoTravelOffset));
+      .add(travelContext.travelAxis.scale(travelOffset));
   }
 
   /** 首个非竖直轴的 translate 配置：货物行走轴、速度与方向统一跟随它，与链条本体同源。 */

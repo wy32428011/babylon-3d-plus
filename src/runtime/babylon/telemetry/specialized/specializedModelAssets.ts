@@ -240,6 +240,8 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     currentTask: null,
     pendingTask: null,
     lastTask: null,
+    waitingTask: null,
+    lastMovementDirection: 0,
     cargoTravelOffset: 0,
     motionOffsets: new Map(),
     nodeBaselines: new Map(),
@@ -252,6 +254,8 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.currentTask = null;
   model.conveyorTelemetry.pendingTask = null;
   model.conveyorTelemetry.lastTask = null;
+  model.conveyorTelemetry.waitingTask = null;
+  model.conveyorTelemetry.lastMovementDirection = 0;
   model.conveyorTelemetry.cargoTravelOffset = 0;
   model.conveyorTelemetry.motionOffsets.clear();
   model.conveyorTelemetry.nodeBaselines.clear();

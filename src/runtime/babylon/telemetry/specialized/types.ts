@@ -198,6 +198,10 @@ export type ConveyorModelTelemetryState = {
   pendingTask: string | null;
   /** 最近接受的 task：边沿判定基准，不随线体清空复位，同 task 重复到达不得重走刷出+走行。 */
   lastTask: string | null;
+  /** 正在等待他设备交出的 task（归一化字符串）；非 null 时本机不刷出、不走行。 */
+  waitingTask: string | null;
+  /** 最近一次非 0 的 movement_x 运行方向（±1），供持有方计算机等待设备的上货坐标。 */
+  lastMovementDirection: number;
   cargoTravelOffset: number;
   motionOffsets: Map<string, number>;
   nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;
