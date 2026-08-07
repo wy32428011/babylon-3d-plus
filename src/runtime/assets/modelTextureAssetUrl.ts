@@ -1,5 +1,7 @@
 import { resolveBuiltInImageSourceUrl } from '../../assets/imageAssets';
-import { resolveRelativeEditorAssetUrl, resolveRuntimeAssetUrl } from './editorAssetUrl';
+import { resolveSyncedImageSourceUrl } from '../../assets/syncedImageAssets';
+import { isLocalEditorAssetUrl, resolveRelativeEditorAssetUrl, resolveRuntimeAssetUrl } from './editorAssetUrl';
+
 
 const MODEL_TEXTURE_EXTENSION_PATTERN = /\.(png|jpe?g|webp)$/i;
 
@@ -11,7 +13,8 @@ export type ModelTextureAssetUrlContext = {
 
 /**
  * 将模型参数中的逻辑贴图引用解析为 Babylon 可直接读取的 URL。
- * 内置 editor-image 引用使用全局图片库 URL，不追加模型导入版本；模型包相对贴图继续跟随 assetRevision 防缓存。
+ * 内置 editor-image 引用使用全局图片库 URL；数据中台同步图片经登记表解析为本地 editor-asset URL；
+ * 发布后的 Viewer 场景值可能是便携 editor-asset URL，直接走部署清单解析；模型包相对贴图继续跟随 assetRevision 防缓存。
  */
 export function resolveModelTextureAssetUrl(
   reference: string,
@@ -22,6 +25,13 @@ export function resolveModelTextureAssetUrl(
 
   const builtInImageUrl = resolveBuiltInImageSourceUrl(normalizedReference);
   if (builtInImageUrl) return builtInImageUrl;
+
+  const syncedImageUrl = resolveSyncedImageSourceUrl(normalizedReference);
+  if (syncedImageUrl) return createVersionedRuntimeAssetUrl(syncedImageUrl, context.assetRevision);
+
+  if (isLocalEditorAssetUrl(normalizedReference)) {
+    return createVersionedRuntimeAssetUrl(normalizedReference, context.assetRevision);
+  }
 
   const editorAssetUrl = resolveRelativeEditorAssetUrl(
     context.sourceUrl,

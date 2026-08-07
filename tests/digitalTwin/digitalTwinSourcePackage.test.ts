@@ -55,6 +55,8 @@ test('源工程包保留多场景且只复制场景实际引用的共享资源',
         resourceRevision: '7',
       },
       signal: new AbortController().signal,
+      isPlatformImageReference: () => false,
+      findSyncedImageForReference: async () => null,
     });
 
     assert.equal(result.sceneCount, 2);
@@ -106,6 +108,8 @@ test('源工程包拒绝任一场景携带旧 Fetch API Key', async () => {
           resourceRevision: '7',
         },
         signal: new AbortController().signal,
+        isPlatformImageReference: () => false,
+        findSyncedImageForReference: async () => null,
       }),
       /Fetch API Key/,
     );
@@ -158,6 +162,8 @@ test('数字孪生源工程包按发布策略剔除 CAD 引用且不读取缺失
         resourceRevision: '1',
       },
       signal: new AbortController().signal,
+      isPlatformImageReference: () => false,
+      findSyncedImageForReference: async () => null,
       skipCadReferences: true,
     });
 

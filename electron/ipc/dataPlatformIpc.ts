@@ -3,7 +3,9 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
   DataPlatformConfig,
+  DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  SyncedImageAssetEntry,
   DataPlatformProjectEntry,
   DataPlatformProjectListRequest,
   DataPlatformProjectListResult,
@@ -18,8 +20,12 @@ import {
   getCurrentDataPlatformModelSyncProgress,
   getDataPlatformEditorRoot,
   openDataPlatformProject,
+  listSyncedImagesForWorkspace,
   retryLatestDataPlatformModelSync,
+  retryLatestDataPlatformImageSync,
+  syncDataPlatformImagesForWorkspace,
   syncDataPlatformModelsForWorkspace,
+  getCurrentDataPlatformImageSyncProgress,
 } from './dataPlatformProjectService.js';
 import { requestDataPlatformJson } from './dataPlatformTransfer.js';
 
@@ -140,6 +146,30 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle(
     'data-platform:getModelSyncProgress',
     async (): Promise<DataPlatformModelSyncProgress | null> => getCurrentDataPlatformModelSyncProgress(),
+  );
+
+  ipcMain.handle('data-platform:syncImages', async (): Promise<boolean> => {
+    const config = await readDataPlatformConfig();
+    if (!config.baseUrl) return false;
+    return syncDataPlatformImagesForWorkspace(config.baseUrl, config.workspaceRoot);
+  });
+
+  ipcMain.handle('data-platform:retryImageSync', async (): Promise<boolean> => {
+    return retryLatestDataPlatformImageSync();
+  });
+
+  ipcMain.handle(
+    'data-platform:getImageSyncProgress',
+    async (): Promise<DataPlatformImageSyncProgress | null> => getCurrentDataPlatformImageSyncProgress(),
+  );
+
+  ipcMain.handle(
+    'data-platform:listSyncedImages',
+    async (): Promise<SyncedImageAssetEntry[]> => {
+      const config = await readDataPlatformConfig();
+      if (!config.baseUrl) return [];
+      return listSyncedImagesForWorkspace(config.workspaceRoot);
+    },
   );
 }
 

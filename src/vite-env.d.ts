@@ -231,6 +231,37 @@ type DataPlatformModelSyncProgress = {
   error: string | null;
 };
 
+type SyncedImageAssetEntry = {
+  id: string;
+  iconKey: string;
+  name: string;
+  category?: string;
+  sortOrder?: number;
+  updatedAt: string;
+  fileName: string;
+  filePath: string;
+  sourceUrl: string;
+  reference: string;
+  fileSizeBytes?: number;
+};
+
+type DataPlatformImageSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+type DataPlatformImageSyncProgress = {
+  runId: string;
+  phase: DataPlatformImageSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
 type DataPlatformProjectListRequest = {
   projectName: string;
 };
@@ -470,6 +501,10 @@ interface Window {
     syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
+    syncDataPlatformImages: () => Promise<boolean>;
+    retryDataPlatformImageSync: () => Promise<boolean>;
+    listSyncedImages: () => Promise<SyncedImageAssetEntry[]>;
+    onDataPlatformImageSyncProgress: (handler: (progress: DataPlatformImageSyncProgress) => void) => () => void;
     listProjectAssets: () => Promise<ProjectListAssetsResult>;
     openRecentProject: (request: OpenRecentProjectRequest) => Promise<ProjectListAssetsResult>;
     removeRecentWorkspaceItem: (request: RemoveRecentWorkspaceItemRequest) => Promise<void>;

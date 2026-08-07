@@ -18,6 +18,7 @@ import {
 import { buildDigitalTwinDistPackage } from './digitalTwinDistPackage.js';
 import { collectDigitalTwinResourceIds } from './digitalTwinPublishProtocol.js';
 import { buildDigitalTwinSourcePackage, type DigitalTwinSourcePackageResult } from './digitalTwinSourcePackage.js';
+import { findSyncedImageForReference, isPlatformImageReference } from './dataPlatformImageSync.js';
 import {
   DigitalTwinApiError,
   DigitalTwinUploadClient,
@@ -145,6 +146,8 @@ export async function publishDigitalTwin(
       },
       signal,
       skipCadReferences: true,
+      isPlatformImageReference,
+      findSyncedImageForReference,
       onProgress: (detail, completedFiles, totalFiles) => {
         const ratio = totalFiles > 0 ? completedFiles / totalFiles : 0;
         emit(onProgress, validated.requestId, 'source-package', detail, 6 + ratio * 22);

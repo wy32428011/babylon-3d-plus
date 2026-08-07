@@ -20,15 +20,19 @@ import { createImportedAssetIndexes, findImportedAssetForPackagePath } from '../
 import {
   BUILT_IN_MODEL_LIBRARY_ITEMS,
   PROJECT_LIBRARIES,
+  createImageLibraryItems,
   createModelLibraryItems,
   createSkyboxLibraryItems,
+  createSyncedImageLibraryItems,
   getModelUnitTitle,
   isBuiltInImageProjectLibraryItem,
   isBuiltInProjectLibraryItem,
   isImportedProjectLibraryItem,
+  isSyncedImageProjectLibraryItem,
   type ProjectLibraryItem,
   type ProjectLibraryKey,
 } from '../assets/projectLibrary';
+import { setSyncedImageAssets } from '../../assets/syncedImageAssets';
 import { useEditorStore } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
 
@@ -55,6 +59,21 @@ type DataPlatformModelSyncApi = {
   retryDataPlatformModelSync?: () => Promise<boolean>;
 };
 
+type DataPlatformImageSyncProgress = {
+  runId: string;
+  phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+type DataPlatformImageSyncApi = {
+  syncDataPlatformImages?: () => Promise<boolean>;
+  onDataPlatformImageSyncProgress?: (listener: (progress: DataPlatformImageSyncProgress) => void) => () => void;
+  retryDataPlatformImageSync?: () => Promise<boolean>;
+};
+
 const DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS: Record<DataPlatformModelSyncProgress['phase'], string> = {
   querying: '查询模型',
   downloading: '下载模型',
@@ -66,6 +85,19 @@ const DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS: Record<DataPlatformModelSyncProgres
 
 function getDataPlatformModelSyncApi(): DataPlatformModelSyncApi {
   return (window.editorApi ?? {}) as DataPlatformModelSyncApi;
+}
+
+const DATA_PLATFORM_IMAGE_SYNC_PHASE_LABELS: Record<DataPlatformImageSyncProgress['phase'], string> = {
+  querying: '查询图片',
+  downloading: '下载图片',
+  validating: '校验图片',
+  promoting: '写入图片库',
+  completed: '同步完成',
+  failed: '同步失败',
+};
+
+function getDataPlatformImageSyncApi(): DataPlatformImageSyncApi {
+  return (window.editorApi ?? {}) as DataPlatformImageSyncApi;
 }
 
 type ProjectPanelProps = {
@@ -96,6 +128,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const projectAssetsLoadRequestRef = useRef(0);
   const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshModelSyncRunIdRef = useRef<string | null>(null);
+  const imageSyncCompletedDismissTimerRef = useRef<number | null>(null);
+  const lastSceneRefreshImageSyncRunIdRef = useRef<string | null>(null);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
   const [libraryFilterText, setLibraryFilterText] = useState('');
   const [projectAssets, setProjectAssets] = useState<ProjectModelAssetEntry[]>([]);
@@ -107,6 +141,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const [libraryStatuses, setLibraryStatuses] = useState<LibraryStatusMap>({ model: null, environment: null, skybox: null });
   const [modelSyncProgress, setModelSyncProgress] = useState<DataPlatformModelSyncProgress | null>(null);
   const [isRetryingModelSync, setIsRetryingModelSync] = useState(false);
+  const [syncedImages, setSyncedImages] = useState<SyncedImageAssetEntry[]>([]);
+  const [imageSyncProgress, setImageSyncProgress] = useState<DataPlatformImageSyncProgress | null>(null);
+  const [isRetryingImageSync, setIsRetryingImageSync] = useState(false);
 
   const modelAssets = useMemo(
     () => projectAssets.filter((asset) => asset.libraryKind === 'model'),
@@ -138,13 +175,27 @@ export function ProjectPanel(props: ProjectPanelProps) {
       return createSkyboxLibraryItems(skyboxAssets);
     }
 
+    if (activeLibrary.key === 'image') {
+      return [
+        ...createImageLibraryItems(),
+        ...createSyncedImageLibraryItems(syncedImages),
+      ];
+    }
+
     return activeLibrary.items;
-  }, [activeLibrary, environmentAssets, modelAssets, skyboxAssets]);
+  }, [activeLibrary, environmentAssets, modelAssets, skyboxAssets, syncedImages]);
 
   const normalizedLibraryFilter = libraryFilterText.trim().toLowerCase();
   const filteredItems = useMemo(() => {
     if (!normalizedLibraryFilter) return activeItems;
-    return activeItems.filter((item) => item.name.toLowerCase().includes(normalizedLibraryFilter));
+    return activeItems.filter((item) => {
+      if (item.name.toLowerCase().includes(normalizedLibraryFilter)) return true;
+      if (isSyncedImageProjectLibraryItem(item)) {
+        const searchableText = `${item.syncedImage.iconKey} ${item.syncedImage.category ?? ''}`.toLowerCase();
+        return searchableText.includes(normalizedLibraryFilter);
+      }
+      return false;
+    });
   }, [activeItems, normalizedLibraryFilter]);
 
   const activeImportLibraryKey: ImportableProjectLibraryKey | null =
@@ -262,12 +313,28 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
   }, [pushLog, refreshCurrentEnvironmentFromAssets, refreshCurrentSkyboxFromAssets, refreshModelInstancesFromAssets]);
 
+  /** 从主进程本地图片索引加载同步图片并登记，供图片库展示与拖拽校验使用。 */
+  const loadSyncedImages = useCallback(async (): Promise<boolean> => {
+    if (!window.editorApi?.listSyncedImages) return false;
+    try {
+      const images = await window.editorApi.listSyncedImages();
+      setSyncedImageAssets(images);
+      setSyncedImages(images);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`加载数据中台图片库失败：${message}`);
+      return false;
+    }
+  }, [pushLog]);
+
   useEffect(() => {
     void loadProjectAssets();
+    void loadSyncedImages();
     return () => {
       projectAssetsLoadRequestRef.current += 1;
     };
-  }, [loadProjectAssets]);
+  }, [loadProjectAssets, loadSyncedImages]);
 
   useEffect(() => {
     const dataPlatformModelSyncApi = getDataPlatformModelSyncApi();
@@ -310,6 +377,44 @@ export function ProjectPanel(props: ProjectPanelProps) {
       unsubscribe();
     };
   }, [loadProjectAssets, pushLog]);
+
+  useEffect(() => {
+    const dataPlatformImageSyncApi = getDataPlatformImageSyncApi();
+    if (!dataPlatformImageSyncApi.onDataPlatformImageSyncProgress) return undefined;
+
+    const clearCompletedDismissTimer = () => {
+      if (imageSyncCompletedDismissTimerRef.current === null) return;
+      window.clearTimeout(imageSyncCompletedDismissTimerRef.current);
+      imageSyncCompletedDismissTimerRef.current = null;
+    };
+    const unsubscribe = dataPlatformImageSyncApi.onDataPlatformImageSyncProgress((progress) => {
+      clearCompletedDismissTimer();
+      setImageSyncProgress(progress);
+      const phaseLabel = DATA_PLATFORM_IMAGE_SYNC_PHASE_LABELS[progress.phase];
+      const countLabel = progress.total > 0 ? `（${progress.completed}/${progress.total}）` : '';
+      const detail = progress.error || progress.message;
+      pushLog(`数据中台图片同步：${phaseLabel}${countLabel}${detail ? `：${detail}` : ''}`);
+
+      if (progress.phase === 'completed') {
+        const shouldRefreshImages = lastSceneRefreshImageSyncRunIdRef.current !== progress.runId;
+        if (shouldRefreshImages) {
+          lastSceneRefreshImageSyncRunIdRef.current = progress.runId;
+          void loadSyncedImages();
+        }
+        imageSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
+          imageSyncCompletedDismissTimerRef.current = null;
+          setImageSyncProgress((current) =>
+            current?.runId === progress.runId && current.phase === 'completed' ? null : current,
+          );
+        }, 2200);
+      }
+    });
+
+    return () => {
+      clearCompletedDismissTimer();
+      unsubscribe();
+    };
+  }, [loadSyncedImages, pushLog]);
 
   useEffect(() => {
     if (!projectAssetFocusRequest) return;
@@ -377,6 +482,58 @@ export function ProjectPanel(props: ProjectPanelProps) {
     } finally {
       setIsRetryingModelSync(false);
     }
+  }
+
+  async function handleSyncDataPlatformImages(): Promise<void> {
+    if (props.readOnly) return;
+    const dataPlatformImageSyncApi = getDataPlatformImageSyncApi();
+    if (!dataPlatformImageSyncApi.syncDataPlatformImages) {
+      const statusMessage = '从数据中台同步图片需要 Electron 桌面环境，请使用 npm run dev:electron 启动编辑器。';
+      pushLog(statusMessage);
+      return;
+    }
+    try {
+      const started = await dataPlatformImageSyncApi.syncDataPlatformImages();
+      if (!started) {
+        pushLog('数据中台图片同步未能启动，请检查数据中台连接配置。');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`启动数据中台图片同步失败：${message}`);
+    }
+  }
+
+  async function handleRetryDataPlatformImageSync(): Promise<void> {
+    if (!imageSyncProgress || imageSyncProgress.phase !== 'failed') return;
+
+    const dataPlatformImageSyncApi = getDataPlatformImageSyncApi();
+    if (!dataPlatformImageSyncApi.retryDataPlatformImageSync) {
+      pushLog('重试数据中台图片同步需要 Electron 桌面环境。');
+      return;
+    }
+
+    setIsRetryingImageSync(true);
+    try {
+      const retryStarted = await dataPlatformImageSyncApi.retryDataPlatformImageSync();
+      setImageSyncProgress({
+        ...imageSyncProgress,
+        phase: retryStarted ? 'querying' : 'failed',
+        message: retryStarted ? '已提交重试，正在重新查询图片...' : '当前没有可重试的图片同步任务。',
+        error: retryStarted ? null : '当前没有可重试的图片同步任务。',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setImageSyncProgress({ ...imageSyncProgress, error: message });
+      pushLog(`重试数据中台图片同步失败：${message}`);
+    } finally {
+      setIsRetryingImageSync(false);
+    }
+  }
+
+  function handleDismissDataPlatformImageSyncFailure(): void {
+    if (imageSyncProgress?.phase !== 'failed') return;
+    setIsRetryingImageSync(false);
+    setImageSyncProgress(null);
   }
 
   async function handleImportModelFolder(): Promise<void> {
@@ -604,6 +761,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
     if (isBuiltInImageProjectLibraryItem(item)) return;
 
+    if (isSyncedImageProjectLibraryItem(item)) return;
+
     if (isImportedProjectLibraryItem(item)) {
       if (item.asset.kind === 'skybox') {
         handleSkyboxAssetApply(item.asset);
@@ -637,6 +796,21 @@ export function ProjectPanel(props: ProjectPanelProps) {
     if (isBuiltInImageProjectLibraryItem(item)) {
       event.dataTransfer.effectAllowed = 'copy';
       event.dataTransfer.setData(IMAGE_ASSET_DRAG_MIME_TYPE, encodeImageAssetDragPayload(item.imageAsset));
+      event.dataTransfer.setData('text/plain', item.name);
+      return;
+    }
+
+    if (isSyncedImageProjectLibraryItem(item)) {
+      event.dataTransfer.effectAllowed = 'copy';
+      event.dataTransfer.setData(
+        IMAGE_ASSET_DRAG_MIME_TYPE,
+        encodeImageAssetDragPayload({
+          id: item.syncedImage.id,
+          name: item.syncedImage.name,
+          reference: item.syncedImage.reference,
+          sourceUrl: item.syncedImage.sourceUrl,
+        }),
+      );
       event.dataTransfer.setData('text/plain', item.name);
       return;
     }
@@ -696,6 +870,16 @@ export function ProjectPanel(props: ProjectPanelProps) {
     ? `${modelSyncProgress.completed}/${modelSyncProgress.total}`
     : null;
   const modelSyncMessage = modelSyncProgress?.error || modelSyncProgress?.message || '等待模型同步进度...';
+  const imageSyncPhaseLabel = imageSyncProgress
+    ? DATA_PLATFORM_IMAGE_SYNC_PHASE_LABELS[imageSyncProgress.phase]
+    : null;
+  const imageSyncCountLabel = imageSyncProgress
+    ? `${imageSyncProgress.completed}/${imageSyncProgress.total}`
+    : null;
+  const imageSyncMessage = imageSyncProgress?.error || imageSyncProgress?.message || '等待图片同步进度...';
+  const isImageSyncActive = imageSyncProgress !== null
+    && imageSyncProgress.phase !== 'completed'
+    && imageSyncProgress.phase !== 'failed';
 
   return (
     <section className="panel project-library" aria-label="Project 资源库">
@@ -751,6 +935,16 @@ export function ProjectPanel(props: ProjectPanelProps) {
             {importButtonLabel}
           </button>
         ) : null}
+        {activeLibrary.key === 'image' ? (
+          <button
+            className="library-import-button"
+            disabled={isImageSyncActive || isRetryingImageSync}
+            onClick={() => void handleSyncDataPlatformImages()}
+            type="button"
+          >
+            {isImageSyncActive ? '同步中...' : '从数据中台同步'}
+          </button>
+        ) : null}
       </div>
 
       <div
@@ -777,7 +971,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
           const isBuiltInImage = isBuiltInImageProjectLibraryItem(item);
           const isImportedAsset = isImportedProjectLibraryItem(item);
           const isEnvironmentLibrary = activeLibrary.key === 'environment';
-          const isActionableItem = (!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isImportedAsset;
+          const isSyncedImage = isSyncedImageProjectLibraryItem(item);
+          const isActionableItem = (!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset;
 
           return (
             <ResourceCard
@@ -800,7 +995,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
               title={
                 isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`
-                  : isBuiltInImage
+                  : isBuiltInImage || isSyncedImage
                     ? `拖拽到模型 texture 属性：${item.name}`
                     : isImportedAsset
                       ? item.asset.kind === 'skybox'
@@ -835,6 +1030,35 @@ export function ProjectPanel(props: ProjectPanelProps) {
                 aria-label="关闭同步失败提示"
                 className="library-sync-status-close-button"
                 onClick={handleDismissDataPlatformModelSyncFailure}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {imageSyncProgress ? (
+        <div className={`library-sync-status library-sync-status-${imageSyncProgress.phase}`} role="status" aria-live="polite">
+          <div className="library-sync-status-heading">
+            <strong>{imageSyncPhaseLabel}</strong>
+            {imageSyncCountLabel ? <span>{imageSyncCountLabel}</span> : null}
+          </div>
+          <p>{imageSyncMessage}</p>
+          {imageSyncProgress.phase === 'failed' ? (
+            <div className="library-sync-status-actions">
+              <button
+                disabled={isRetryingImageSync}
+                onClick={() => void handleRetryDataPlatformImageSync()}
+                type="button"
+              >
+                {isRetryingImageSync ? '重试中...' : '重试同步'}
+              </button>
+              <button
+                aria-label="关闭同步失败提示"
+                className="library-sync-status-close-button"
+                onClick={handleDismissDataPlatformImageSyncFailure}
                 type="button"
               >
                 关闭

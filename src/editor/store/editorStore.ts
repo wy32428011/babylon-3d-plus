@@ -557,6 +557,19 @@ async function syncDataPlatformModelsAfterLocalSceneLoad(pushLog: (message: stri
   }
 }
 
+/** 本地场景成功加载后异步同步数据中台图片库；同步失败不影响已经打开的场景。 */
+async function syncDataPlatformImagesAfterLocalSceneLoad(pushLog: (message: string) => void): Promise<void> {
+  if (!window.editorApi?.syncDataPlatformImages) return;
+
+  try {
+    const started = await window.editorApi.syncDataPlatformImages();
+    if (started) pushLog('本地场景已加载，正在同步数据中台图片库。');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`本地场景已加载，但启动数据中台图片同步失败：${message}`);
+  }
+}
+
 /** 归一化导入进度，避免 UI 收到越界百分比后产生异常宽度。 */
 function createCadImportProgress(
   id: string,
@@ -4552,6 +4565,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       set((state) => createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`));
       void syncDataPlatformModelsAfterLocalSceneLoad((message) => get().pushLog(message));
+      void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4580,6 +4594,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const scene = deserializeScene(result.content);
       set((state) => createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`));
       void syncDataPlatformModelsAfterLocalSceneLoad((message) => get().pushLog(message));
+      void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

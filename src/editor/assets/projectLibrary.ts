@@ -34,7 +34,12 @@ export type BuiltInImageProjectLibraryItem = ProjectLibraryItemBase & {
   imageAsset: BuiltInImageAsset;
 };
 
-export type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | BuiltInImageProjectLibraryItem | PlaceholderProjectLibraryItem;
+/** 图片库中台同步图片卡片，保存可拖拽的同步图片资产元数据。 */
+export type SyncedImageProjectLibraryItem = ProjectLibraryItemBase & {
+  syncedImage: SyncedImageAssetEntry;
+};
+
+export type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | BuiltInImageProjectLibraryItem | SyncedImageProjectLibraryItem | PlaceholderProjectLibraryItem;
 
 export type ProjectLibrary = {
   key: ProjectLibraryKey;
@@ -189,6 +194,18 @@ export function createImageLibraryItems(): BuiltInImageProjectLibraryItem[] {
   }));
 }
 
+/** 将数据中台同步图片转成 Project 图片库卡片展示数据，分类作为副标题。 */
+export function createSyncedImageLibraryItems(syncedImages: SyncedImageAssetEntry[]): SyncedImageProjectLibraryItem[] {
+  return syncedImages.map((asset) => ({
+    id: asset.reference,
+    name: asset.name,
+    icon: 'panel',
+    subtitle: asset.category?.trim() ? asset.category.trim() : '数据中台图片',
+    thumbnailUrl: asset.sourceUrl,
+    syncedImage: asset,
+  }));
+}
+
 /** 将项目模型资产转成 Project 资源库卡片展示数据。 */
 export function createModelLibraryItems(modelAssets: AssetEntry[]): ImportedProjectLibraryItem[] {
   return modelAssets.map((asset) => ({
@@ -225,6 +242,11 @@ export function isImportedProjectLibraryItem(item: ProjectLibraryItem): item is 
 /** 判断资源库卡片是否对应可拖拽的内置图片。 */
 export function isBuiltInImageProjectLibraryItem(item: ProjectLibraryItem): item is BuiltInImageProjectLibraryItem {
   return 'imageAsset' in item;
+}
+
+/** 判断资源库卡片是否对应可拖拽的数据中台同步图片。 */
+export function isSyncedImageProjectLibraryItem(item: ProjectLibraryItem): item is SyncedImageProjectLibraryItem {
+  return 'syncedImage' in item;
 }
 
 /** 生成人类可读的模型单位提示，用于卡片标题和无障碍说明。 */

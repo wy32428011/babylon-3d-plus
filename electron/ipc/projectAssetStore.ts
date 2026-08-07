@@ -34,6 +34,7 @@ const PROJECT_ASSETS_DIRECTORY = 'Assets';
 const PROJECT_MODELS_DIRECTORY = 'Models';
 const PROJECT_ENVIRONMENTS_DIRECTORY = 'Environments';
 const PROJECT_SKYBOXES_DIRECTORY = 'Skyboxes';
+const PROJECT_IMAGES_DIRECTORY = 'Images';
 const RECENT_PROJECT_FILE = 'recent-project.json';
 const RECENT_WORKSPACES_FILE = 'recent-workspaces.json';
 const MAX_RECENT_WORKSPACE_ITEMS = 12;
@@ -587,6 +588,11 @@ export function getProjectSkyboxesRoot(projectRoot: string): string {
   return path.join(normalizeFilePath(projectRoot), PROJECT_ASSETS_DIRECTORY, PROJECT_SKYBOXES_DIRECTORY);
 }
 
+/** 返回项目同步图片目录 Assets/Images，存放从数据中台图标库同步的图片。 */
+export function getProjectImagesRoot(projectRoot: string): string {
+  return path.join(normalizeFilePath(projectRoot), PROJECT_ASSETS_DIRECTORY, PROJECT_IMAGES_DIRECTORY);
+}
+
 /** 根据资产库分类选择实际复制目标目录。 */
 function getProjectAssetLibraryRoot(projectRoot: string, libraryKind: ModelAssetLibraryKind): string {
   return libraryKind === 'environment' ? getProjectEnvironmentsRoot(projectRoot) : getProjectModelsRoot(projectRoot);
@@ -597,6 +603,7 @@ function authorizeProjectAssetRoots(projectRoot: string): void {
   authorizeAssetRoot(getProjectModelsRoot(projectRoot));
   authorizeAssetRoot(getProjectEnvironmentsRoot(projectRoot));
   authorizeAssetRoot(getProjectSkyboxesRoot(projectRoot));
+  authorizeAssetRoot(getProjectImagesRoot(projectRoot));
 }
 
 export function getProjectAssetIndexPath(projectRoot: string): string {
@@ -610,6 +617,7 @@ export async function ensureProjectDirectories(projectRoot: string): Promise<voi
   await fs.mkdir(getProjectModelsRoot(normalizedProjectRoot), { recursive: true });
   await fs.mkdir(getProjectEnvironmentsRoot(normalizedProjectRoot), { recursive: true });
   await fs.mkdir(getProjectSkyboxesRoot(normalizedProjectRoot), { recursive: true });
+  await fs.mkdir(getProjectImagesRoot(normalizedProjectRoot), { recursive: true });
 }
 
 /** 读取项目资产索引，兼容 v1 并返回 v2 内存结构，不在读取时写回。 */

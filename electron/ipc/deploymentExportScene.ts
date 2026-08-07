@@ -18,6 +18,8 @@ import {
   type SafeSourceFile,
 } from './deploymentExportFileSystem.js';
 import { stripCadReferencesFromSceneFile } from './sceneCadReferenceSanitizer.js';
+import { findSyncedImageForReference, isPlatformImageReference } from './dataPlatformImageSync.js';
+import { getCurrentDataPlatformBinding } from './dataPlatformBindingStore.js';
 
 const EDITOR_ASSET_URL_PREFIX = 'editor-asset://local/';
 const MAX_SCENE_CONTENT_BYTES = 64 * 1024 * 1024;
@@ -56,7 +58,7 @@ const NON_RUNTIME_DEPLOYMENT_FILE_EXTENSIONS = new Set([
 const NON_RUNTIME_DEPLOYMENT_DIRECTORY_NAMES = new Set(['node_modules']);
 
 type PlainObject = Record<string, unknown>;
-type BundleCategory = 'models' | 'environments' | 'skyboxes' | 'cad' | 'scripts';
+type BundleCategory = 'models' | 'environments' | 'skyboxes' | 'cad' | 'scripts' | 'images';
 
 type ResourceBundle = {
   key: string;
@@ -78,6 +80,7 @@ type ResolvedModelReference = MutableModelReference & {
   sourcePath: string;
   bundle: ResourceBundle;
   scriptPaths: Array<{ script: PlainObject; sourcePath: string }>;
+  textureImagePaths: Map<string, string>;
 };
 
 type MutableEnvironmentReference = {
@@ -109,6 +112,7 @@ type ProjectAssetContext = {
   projectRoot: string;
   projectRootRealPath: string;
   assets: ProjectModelAssetEntry[];
+  sharedResourcesRoot: string | null;
 };
 
 /** Web 部署导出预检与场景改写的完整结果。 */
@@ -341,7 +345,11 @@ async function loadProjectAssetContext(signal: AbortSignal, warnings: string[]):
   }
   const projectRootRealPath = await assertSafeDirectory(projectRoot, '当前项目目录');
   const index = await readProjectAssetIndex(projectRoot);
-  return { projectRoot: path.resolve(projectRoot), projectRootRealPath, assets: index.assets };
+  const binding = getCurrentDataPlatformBinding();
+  const sharedResourcesRoot = binding && path.resolve(binding.projectRoot) === path.resolve(projectRoot)
+    ? path.resolve(projectRoot, '..', '..', 'SharedResources')
+    : null;
+  return { projectRoot: path.resolve(projectRoot), projectRootRealPath, assets: index.assets, sharedResourcesRoot };
 }
 
 /** 判断文件路径是否为可执行 TypeScript 模型脚本，声明文件不进入部署包运行时。 */
@@ -383,7 +391,15 @@ async function resolveModelReference(
       scriptPaths.push({ script, sourcePath: scriptPath });
     }
   }
-  return { ...reference, sourcePath, bundle, scriptPaths };
+  const textureImagePaths = await collectModelTextureImagePaths(reference.asset, projectContext, signal);
+  for (const imagePath of new Set(textureImagePaths.values())) {
+    const imageBundle = getOrCreateBundle(bundles, 'images', path.dirname(imagePath), false);
+    if (!isPathInsideOrEqual(imageBundle.sourceRoot, imagePath)) {
+      throw new Error(`贴图文件路径逃逸资源根目录：${imagePath}`);
+    }
+    addExplicitFileToBundle(imageBundle, imagePath);
+  }
+  return { ...reference, sourcePath, bundle, scriptPaths, textureImagePaths };
 }
 
 /** 根据项目索引、显式 packagePath 或相邻 meta.json 选择模型包根。 */
@@ -711,6 +727,80 @@ function isKnownNonRuntimeDeploymentFile(relativePath: string): boolean {
   return NON_RUNTIME_DEPLOYMENT_FILE_EXTENSIONS.has(path.posix.extname(fileName));
 }
 
+/** 解析模型参数中的贴图引用为本地文件；支持数据中台稳定引用与便携 Assets/Images URL。 */
+async function resolveModelTextureImagePath(
+  value: string,
+  projectContext: ProjectAssetContext | null,
+): Promise<string | null> {
+  if (isPlatformImageReference(value)) {
+    if (!projectContext) throw new Error('数据中台贴图引用缺少项目上下文，无法解析。');
+    const candidateRoots = projectContext.sharedResourcesRoot
+      ? [projectContext.projectRoot, projectContext.sharedResourcesRoot]
+      : [projectContext.projectRoot];
+    const entry = await findSyncedImageForReference(candidateRoots, value);
+    if (!entry) throw new Error(`模型参数引用的数据中台图片未同步到当前项目：${value}`);
+    return entry.filePath;
+  }
+  const trimmed = value.trim();
+  if (!trimmed.startsWith(EDITOR_ASSET_URL_PREFIX)) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(new URL(trimmed).pathname.slice(1));
+  } catch {
+    return null;
+  }
+  const normalizedDecoded = decoded.replace(/\\/g, '/');
+  if (!/^assets\/images\//i.test(normalizedDecoded)) return null;
+  if (!projectContext) throw new Error('便携贴图引用缺少项目上下文，无法解析。');
+  return path.resolve(projectContext.projectRoot, decoded);
+}
+
+/** 递归收集模型参数值中的贴图引用，返回原始引用到本地文件的映射。 */
+async function collectModelTextureImagePaths(
+  asset: PlainObject,
+  projectContext: ProjectAssetContext | null,
+  signal: AbortSignal,
+): Promise<Map<string, string>> {
+  const parameterValues = asset.parameterValues;
+  if (!isPlainObject(parameterValues)) return new Map();
+  const result = new Map<string, string>();
+  const pending: unknown[] = Object.values(parameterValues);
+  while (pending.length > 0) {
+    throwIfDeploymentExportAborted(signal);
+    const current = pending.pop();
+    if (typeof current === 'string') {
+      const imagePath = await resolveModelTextureImagePath(current, projectContext);
+      if (imagePath) result.set(current, imagePath);
+      continue;
+    }
+    if (Array.isArray(current)) {
+      for (const item of current) pending.push(item);
+      continue;
+    }
+    if (isPlainObject(current)) {
+      for (const child of Object.values(current)) pending.push(child);
+    }
+  }
+  return result;
+}
+
+/** 递归把模型参数值中匹配的贴图引用替换为部署虚拟 URL。 */
+function replaceParameterValueStrings(value: unknown, original: string, replacement: string): void {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+      if (item === original) value[index] = replacement;
+      else if (typeof item === 'object' && item !== null) replaceParameterValueStrings(item, original, replacement);
+    }
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const [childKey, child] of Object.entries(value)) {
+    if (child === original) value[childKey] = replacement;
+    else if (typeof child === 'object' && child !== null) replaceParameterValueStrings(child, original, replacement);
+  }
+}
+
 /** 将普通模型、生成器目标及脚本路径改写为部署虚拟 URL。 */
 function rewriteModelReferences(references: ResolvedModelReference[], sourceUrlMap: Map<string, string>): void {
   for (const reference of references) {
@@ -731,6 +821,11 @@ function rewriteModelReferences(references: ResolvedModelReference[], sourceUrlM
       const scriptUrl = requireMappedUrl(sourceUrlMap, sourcePath, '模型脚本');
       script.path = scriptUrl;
       script.sourceUrl = scriptUrl;
+    }
+
+    for (const [originalValue, imagePath] of reference.textureImagePaths) {
+      const imageUrl = requireMappedUrl(sourceUrlMap, imagePath, '贴图资源');
+      replaceParameterValueStrings(reference.asset.parameterValues, originalValue, imageUrl);
     }
   }
 }
