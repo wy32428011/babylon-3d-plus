@@ -2,7 +2,10 @@ import type { SceneCameraSettings } from '../../editor/model/SceneDocument';
 import type { CameraViewApplicationOptions } from './ArcRotateCameraViewController';
 
 export type SceneCameraViewController = {
-  applyCameraView: (settings: SceneCameraSettings, options: Required<CameraViewApplicationOptions>) => void;
+  applyCameraView: (
+    settings: SceneCameraSettings,
+    options: CameraViewApplicationOptions & { animate: boolean; lockStandardOrientation: boolean },
+  ) => void;
 };
 
 /**

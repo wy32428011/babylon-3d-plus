@@ -77,6 +77,21 @@
 
 Inspector 使用 number input；输入时实时预览，blur 或 Enter 后提交撤销历史。
 
+### string
+
+用于标签、编号或其它需要原样传给参数化脚本的文本内容，允许空字符串并保留首尾空格。
+
+```json
+{
+  "key": "displayText",
+  "label": "显示文本",
+  "type": "string",
+  "defaultValue": "A-01"
+}
+```
+
+Inspector 使用 text input；输入时实时预览，blur 或 Enter 后合并为一条撤销记录。`modelKey`、`deviceType`、`deviceName`、`description` 仍作为模型包信息字段保留，不由 `parameterScripts` fallback 自动暴露为可编辑参数；如确需编辑，可在 `modelParameters.parameters` 中显式声明。
+
 ### color
 
 用于基础色或自发光色。

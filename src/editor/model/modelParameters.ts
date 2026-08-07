@@ -1,7 +1,7 @@
 import type { Vector3Data } from './math';
 import { isAllowedTextureReference } from './textureReferences';
 
-export type ModelParameterType = 'number' | 'color' | 'boolean' | 'enum' | 'vector3' | 'texture';
+export type ModelParameterType = 'number' | 'string' | 'color' | 'boolean' | 'enum' | 'vector3' | 'texture';
 
 export type ModelParameterPrimitiveValue = number | string | boolean;
 export type ModelParameterVector3Value = Vector3Data;
@@ -25,6 +25,11 @@ export type ModelNumberParameterDefinition = BaseModelParameterDefinition & {
   min?: number;
   max?: number;
   step?: number;
+};
+
+export type ModelStringParameterDefinition = BaseModelParameterDefinition & {
+  type: 'string';
+  defaultValue: string;
 };
 
 export type ModelColorParameterDefinition = BaseModelParameterDefinition & {
@@ -60,6 +65,7 @@ export type ModelTextureParameterDefinition = BaseModelParameterDefinition & {
 
 export type ModelParameterDefinition =
   | ModelNumberParameterDefinition
+  | ModelStringParameterDefinition
   | ModelColorParameterDefinition
   | ModelBooleanParameterDefinition
   | ModelEnumParameterDefinition
@@ -172,6 +178,10 @@ export function sanitizeModelParameterValue(
   if (definition.type === 'number') {
     const numberValue = typeof value === 'number' && Number.isFinite(value) ? value : definition.defaultValue;
     return clampNumber(numberValue, definition.min, definition.max);
+  }
+
+  if (definition.type === 'string') {
+    return typeof value === 'string' ? value : definition.defaultValue;
   }
 
   if (definition.type === 'color') {
@@ -298,6 +308,12 @@ function normalizeParameterDefinition(value: unknown): ModelParameterDefinition 
     const defaultValue = readFiniteNumber(value, 'defaultValue');
     if (defaultValue === undefined) return null;
     return { ...base, type, defaultValue, min, max, step };
+  }
+
+  if (type === 'string') {
+    return typeof value.defaultValue === 'string'
+      ? { ...base, type, defaultValue: value.defaultValue }
+      : null;
   }
 
   if (type === 'color') {

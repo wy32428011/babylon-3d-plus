@@ -26,8 +26,13 @@ export const EDITOR_CAMERA_DEFAULT_BETA = Math.PI * 0.43;
 export const EDITOR_CAMERA_DEFAULT_RADIUS = 28;
 export const CAMERA_VIEW_TRANSITION_DURATION_MS = 200;
 
+export type CameraTransitionCancelReason = 'replaced' | 'manual-input' | 'cancelled' | 'disposed';
+
 export type CameraViewTransitionOptions = {
   animate?: boolean;
+  durationMs?: number;
+  onCompleted?: () => void;
+  onCancelled?: (reason: CameraTransitionCancelReason) => void;
 };
 
 export type CameraViewApplicationOptions = CameraViewTransitionOptions & {
@@ -41,6 +46,7 @@ export type ArcRotateCameraViewControllerOptions = {
   suspendCameraControl?: () => void;
   resumeCameraControl?: () => void;
   prefersReducedMotion?: () => boolean;
+  now?: () => number;
 };
 
 type CameraAngleLimits = {
@@ -67,6 +73,8 @@ type CameraTransition = {
   fromTarget: Vector3;
   toTarget: Vector3;
   finalize: () => void;
+  onCompleted?: () => void;
+  onCancelled?: (reason: CameraTransitionCancelReason) => void;
 };
 
 /** 读取当前 ArcRotateCamera 位姿，保存为可写入场景文件的纯数据。 */
@@ -278,10 +286,22 @@ export class ArcRotateCameraViewController {
     });
   }
 
+  cancelTransition(reason: CameraTransitionCancelReason = 'cancelled'): boolean {
+    const transition = this.transition;
+    if (!transition) return false;
+    this.transition = null;
+    try {
+      transition.onCancelled?.(reason);
+    } finally {
+      this.resumeCameraControl();
+    }
+    return true;
+  }
+
   dispose(): void {
     if (this.disposed) return;
+    this.cancelTransition('disposed');
     this.disposed = true;
-    this.transition = null;
     this.scene.onBeforeRenderObservable.remove(this.transitionObserver);
     if (this.orthographicObserver) {
       this.scene.onBeforeRenderObservable.remove(this.orthographicObserver);
@@ -342,10 +362,10 @@ export class ArcRotateCameraViewController {
     options: CameraViewTransitionOptions,
     finalize: () => void,
   ): void {
-    this.transition = null;
+    this.cancelTransition('replaced');
     clearCameraMovement(this.camera);
 
-    const durationMs = Math.max(0, this.options.transitionDurationMs ?? CAMERA_VIEW_TRANSITION_DURATION_MS);
+    const durationMs = Math.max(0, options.durationMs ?? this.options.transitionDurationMs ?? CAMERA_VIEW_TRANSITION_DURATION_MS);
     const prefersReducedMotion = (this.options.prefersReducedMotion ?? defaultPrefersReducedMotion)();
     const animate = options.animate !== false && durationMs > 0 && !prefersReducedMotion;
     const toRadius = clampDigitalTwinCameraRadius(target.radius);
@@ -353,13 +373,14 @@ export class ArcRotateCameraViewController {
     if (!animate) {
       this.applyTransitionPose(target.alpha, target.beta, toRadius, target.target);
       finalize();
+      options.onCompleted?.();
       this.resumeCameraControl();
       return;
     }
 
     this.suspendCameraControl();
     this.transition = {
-      startedAt: readTimestampMs(),
+      startedAt: (this.options.now ?? readTimestampMs)(),
       durationMs,
       fromAlpha: this.camera.alpha,
       alphaDelta: getShortestCameraAlphaDelta(this.camera.alpha, target.alpha),
@@ -370,6 +391,8 @@ export class ArcRotateCameraViewController {
       fromTarget: this.camera.getTarget().clone(),
       toTarget: target.target.clone(),
       finalize,
+      onCompleted: options.onCompleted,
+      onCancelled: options.onCancelled,
     };
   }
 
@@ -377,7 +400,7 @@ export class ArcRotateCameraViewController {
     const transition = this.transition;
     if (!transition) return;
 
-    const elapsed = Math.max(0, readTimestampMs() - transition.startedAt);
+    const elapsed = Math.max(0, (this.options.now ?? readTimestampMs)() - transition.startedAt);
     const linearProgress = Scalar.Clamp(elapsed / transition.durationMs, 0, 1);
     const progress = easeOutCubic(linearProgress);
     const alpha = transition.fromAlpha + transition.alphaDelta * progress;
@@ -388,8 +411,12 @@ export class ArcRotateCameraViewController {
 
     if (linearProgress < 1) return;
     this.transition = null;
-    transition.finalize();
-    this.resumeCameraControl();
+    try {
+      transition.finalize();
+      transition.onCompleted?.();
+    } finally {
+      this.resumeCameraControl();
+    }
   }
 
   private applyTransitionPose(alpha: number, beta: number, radius: number, target: Vector3): void {

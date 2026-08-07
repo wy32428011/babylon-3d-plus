@@ -19,7 +19,9 @@ const VERSION_CONFLICT_REQUEST_ID = 'version-conflict';
 const CANCEL_REQUEST_ID = 'cancel-upload';
 const UPLOAD_FAILURE_REQUEST_ID = 'permanent-upload-failure';
 const MISMATCHED_PREPARE_REQUEST_ID = 'mismatched-prepare-response';
+const RUNTIME_CONFIG_FAILURE_REQUEST_ID = 'runtime-config-save-failure';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const PUBLISH_PARENT_ORIGINS = ['https://screen.example.com', 'http://127.0.0.1:8001'];
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -60,8 +62,9 @@ function createSceneContent() {
 }
 
 function createRemoteStatus(overrides = {}) {
+  const projectId = overrides.projectId ?? PROJECT_ID;
   return {
-    projectId: PROJECT_ID,
+    projectId,
     editorProjectId: EDITOR_PROJECT_ID,
     latestVersionId: BASE_VERSION_ID,
     latestVersionNumber: 1,
@@ -71,6 +74,20 @@ function createRemoteStatus(overrides = {}) {
     stableUrl: `http://127.0.0.1/digital-twin/projects/${PROJECT_ID}/`,
     releaseUrl: `http://127.0.0.1/digital-twin/releases/${PROJECT_ID}/1/`,
     lastPublishedAt: '2026-08-01T08:00:00',
+    runtimeConfig: {
+      projectId,
+      mqttBrokerUrl: 'ws://broker.internal:8083/mqtt',
+      apiBaseUrl: 'https://api.internal/runtime',
+      runtimeEnabled: false,
+      configJson: JSON.stringify({
+        telemetryInterval: 1000,
+        integration: {
+          futureField: true,
+          allowedParentOrigins: ['https://existing.example.com'],
+        },
+      }),
+      updatedAt: '2026-08-01T08:00:00',
+    },
     ...overrides,
   };
 }
@@ -83,6 +100,7 @@ function createPublishRequest(requestId, sceneContent, overrides = {}) {
     sceneContent,
     overwriteExisting: true,
     confirmResourceBindings: false,
+    allowedParentOrigins: PUBLISH_PARENT_ORIGINS,
     ...overrides,
   };
 }
@@ -101,6 +119,7 @@ class DigitalTwinMockServer {
     this.cancelChunkGate = null;
     this.releaseCancelChunkGate = null;
     this.failNextStatus = false;
+    this.failNextRuntimeConfigSave = false;
     this.redirectNextStatus = false;
   }
 
@@ -190,6 +209,30 @@ class DigitalTwinMockServer {
       } else {
         this.sendSuccess(response, this.remoteStatus);
       }
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/digital-twin/runtime-config/save') {
+      assert.equal(body.projectId, PROJECT_ID);
+      if (this.failNextRuntimeConfigSave) {
+        this.failNextRuntimeConfigSave = false;
+        this.sendJson(response, {
+          success: false,
+          code: 'DIGITAL_TWIN_RUNTIME_CONFIG_SAVE_FAILED',
+          message: '模拟运行配置保存失败',
+          data: null,
+        }, 500);
+        return;
+      }
+      this.remoteStatus.runtimeConfig = {
+        projectId: PROJECT_ID,
+        mqttBrokerUrl: body.mqttBrokerUrl ?? null,
+        apiBaseUrl: body.apiBaseUrl ?? null,
+        runtimeEnabled: body.runtimeEnabled !== false,
+        configJson: body.configJson ?? null,
+        updatedAt: '2026-08-06T17:00:00',
+      };
+      this.sendSuccess(response, this.remoteStatus.runtimeConfig);
       return;
     }
 
@@ -651,9 +694,18 @@ async function run() {
     await resetBinding();
     mock.setRemoteStatus(createRemoteStatus());
     mock.resetRequests();
+    const remoteContext = await publishModule.getDigitalTwinPublishContext();
+    assert.equal(remoteContext.dataPlatformOrigin, new URL(mock.baseUrl).origin);
+    assert.deepEqual(remoteContext.allowedParentOrigins, [
+      'https://existing.example.com',
+      new URL(mock.baseUrl).origin,
+    ]);
+    mock.resetRequests();
     const localActiveContext = publishModule.getLocalDigitalTwinPublishContext(true);
     assert.equal(localActiveContext.publishActive, true);
     assert.equal(localActiveContext.projectId, PROJECT_ID);
+    assert.equal(localActiveContext.dataPlatformOrigin, new URL(mock.baseUrl).origin);
+    assert.deepEqual(localActiveContext.allowedParentOrigins, [new URL(mock.baseUrl).origin]);
     assert.equal(mock.requests.length, 0, '本地发布活动状态不应访问网络。');
     const overwriteResult = await publishModule.publishDigitalTwin(
       createPublishRequest('overwrite-confirm-required', sceneContent, { overwriteExisting: false }),
@@ -663,6 +715,20 @@ async function run() {
     assert.equal(overwriteResult.status, 'confirmation-required');
     assert.equal(overwriteResult.errorCode, 'DIGITAL_TWIN_OVERWRITE_CONFIRM_REQUIRED');
     assert.match(overwriteResult.message, /已经有当前数字孪生工程/);
+    assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.failNextRuntimeConfigSave = true;
+    mock.resetRequests();
+    await assert.rejects(
+      publishModule.publishDigitalTwin(
+        createPublishRequest(RUNTIME_CONFIG_FAILURE_REQUEST_ID, sceneContent),
+        new AbortController().signal,
+        () => undefined,
+      ),
+      /模拟运行配置保存失败/,
+    );
     assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
 
     await resetBinding();
@@ -685,6 +751,25 @@ async function run() {
     for (const phase of ['saving', 'source-package', 'dist-package', 'prepare', 'upload-source', 'upload-dist', 'commit', 'completed']) {
       assert.ok(successProgress.some((progress) => progress.phase === phase), `缺少发布进度阶段：${phase}`);
     }
+    const runtimeConfigSave = mock.requests.find((request) => request.path.endsWith('/runtime-config/save'));
+    assert.ok(runtimeConfigSave, '发布前应保存父页面 Origin。');
+    assert.equal(runtimeConfigSave.body.projectId, PROJECT_ID);
+    assert.equal(runtimeConfigSave.body.mqttBrokerUrl, 'ws://broker.internal:8083/mqtt');
+    assert.equal(runtimeConfigSave.body.apiBaseUrl, 'https://api.internal/runtime');
+    assert.equal(runtimeConfigSave.body.runtimeEnabled, false);
+    assert.deepEqual(JSON.parse(runtimeConfigSave.body.configJson), {
+      telemetryInterval: 1000,
+      integration: {
+        futureField: true,
+        allowedParentOrigins: PUBLISH_PARENT_ORIGINS,
+      },
+    });
+    const runtimeConfigSaveIndex = mock.requests.indexOf(runtimeConfigSave);
+    const prepareIndex = mock.requests.findIndex((request) => (
+      request.path.endsWith('/publish-tasks/prepare') && request.body.requestId === SUCCESS_REQUEST_ID
+    ));
+    assert.ok(runtimeConfigSaveIndex >= 0 && runtimeConfigSaveIndex < prepareIndex, '运行配置必须先于发布任务保存。');
+
     const successPrepare = mock.requests.find((request) => (
       request.path.endsWith('/publish-tasks/prepare') && request.body.requestId === SUCCESS_REQUEST_ID
     ));
@@ -751,6 +836,7 @@ async function run() {
     assert.ok(versionConflictResult.conflictCopyPath);
     assert.ok(versionConflictResult.conflictCopyPath.startsWith(path.join(workspaceRoot, 'Conflicts', PROJECT_ID)));
     assert.equal((await readFile(versionConflictResult.conflictCopyPath)).subarray(0, 2).toString('ascii'), 'PK');
+    assert.equal(mock.requests.some((request) => request.path.endsWith('/runtime-config/save')), false);
     assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
 
     await resetBinding();
@@ -826,6 +912,10 @@ async function run() {
     console.log(JSON.stringify({
       status: 'PASS',
       verified: [
+        'publish-context-default-parent-origin',
+        'runtime-config-save-before-publish',
+        'runtime-config-save-failure-blocks-publish',
+        'version-conflict-does-not-change-runtime-config',
         'local-active-state-without-network',
         'overwrite-confirmation',
         'prepare-source-dist',

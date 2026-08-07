@@ -222,6 +222,7 @@ import type {
   RgvModelTelemetryState,
   StackerModelTelemetryState,
 } from './telemetry/specialized/types';
+import { mergeSceneRuntimeHighlightEntityIds } from './sceneRuntimeHighlight';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
 const SELECTED_EMISSIVE_COLOR = '#332400';
@@ -535,6 +536,7 @@ export class SceneRuntime {
   private readonly entityStates = new Map<string, EntityRuntimeState>();
   private readonly syncedEntities = new Map<string, Entity>();
   private selectedEntityIds = new Set<string>();
+  private externalHighlightedEntityIds = new Set<string>();
   private hierarchySelectionIds: string[] | null = null;
   private readonly modelSelectionOutlineLayer: SelectionOutlineLayer;
   private readonly assetLoadScheduler = new AssetLoadScheduler();
@@ -1751,6 +1753,31 @@ export class SceneRuntime {
     };
   }
 
+  /** 设置不影响编辑器选区的外部临时描边。 */
+  setExternalHighlightEntityIds(entityIds: readonly string[]): void {
+    const nextEntityIds = new Set(entityIds.filter((entityId) => typeof entityId === 'string' && entityId.length > 0));
+    const changedEntityIds = new Set<string>();
+    for (const entityId of this.externalHighlightedEntityIds) {
+      if (!nextEntityIds.has(entityId)) changedEntityIds.add(entityId);
+    }
+    for (const entityId of nextEntityIds) {
+      if (!this.externalHighlightedEntityIds.has(entityId)) changedEntityIds.add(entityId);
+    }
+    if (changedEntityIds.size === 0) return;
+
+    this.externalHighlightedEntityIds = nextEntityIds;
+    for (const entityId of changedEntityIds) {
+      const entity = this.syncedEntities.get(entityId);
+      if (entity) this.syncEntityPresentation(entity, this.isEntityHighlighted(entityId));
+    }
+    this.rebuildModelSelectionOutline();
+  }
+
+  /** 清除外部临时描边，同时保留编辑器自身选区。 */
+  clearExternalHighlight(): void {
+    this.setExternalHighlightEntityIds([]);
+  }
+
   /** 判断实体的真实几何是否已就绪，避免模型加载或外置脚本初始化中的临时包围盒参与正式阵列。 */
   private isEntityWorldBoundsReady(entityId: string): boolean {
     const model = this.models.get(entityId);
@@ -2057,7 +2084,7 @@ export class SceneRuntime {
     if (nextSourceEntityId) dirtyModelArraySourceIds.add(nextSourceEntityId);
     if (!entity.components.modelArrayInstance) dirtyModelArraySourceIds.add(entity.id);
 
-    this.syncEntity(entity, this.selectedEntityIds.has(entityId));
+    this.syncEntity(entity, this.isEntityHighlighted(entityId));
     this.syncedEntities.set(entityId, entity);
     this.syncAllModelArrayBatches(document, dirtyModelArraySourceIds, entityId);
     this.disposeStaleModelArrayGizmoProxy();
@@ -2089,7 +2116,7 @@ export class SceneRuntime {
       for (const entityId of changedEntityIds) {
         const entity = document.entities[entityId] ?? this.syncedEntities.get(entityId);
         if (!entity) continue;
-        this.syncEntityPresentation(entity, nextSelectedEntityIds.has(entityId));
+        this.syncEntityPresentation(entity, this.isEntityHighlighted(entityId, nextSelectedEntityIds));
       }
 
       this.selectedEntityIds = nextSelectedEntityIds;
@@ -2247,6 +2274,9 @@ export class SceneRuntime {
     for (const entityId of [...this.syncedEntities.keys()]) {
       if (!document.entities[entityId]) this.syncedEntities.delete(entityId);
     }
+    for (const entityId of this.externalHighlightedEntityIds) {
+      if (!document.entities[entityId]) this.externalHighlightedEntityIds.delete(entityId);
+    }
 
     const selectedEntityIds = this.resolveSelectedEntityIds(document);
 
@@ -2254,7 +2284,7 @@ export class SceneRuntime {
       const entity = document.entities[entityId];
       if (!entity) continue;
 
-      const selected = selectedEntityIds.has(entityId);
+      const selected = this.isEntityHighlighted(entityId, selectedEntityIds);
       const previousEntity = this.syncedEntities.get(entityId);
       const previousState = previousEntityStates.get(entityId);
       const nextState = this.entityStates.get(entityId);
@@ -2590,6 +2620,7 @@ export class SceneRuntime {
     this.entityStates.clear();
     this.syncedEntities.clear();
     this.selectedEntityIds.clear();
+    this.externalHighlightedEntityIds.clear();
     this.reportedCargoIssues.clear();
     this.outlinedModelArrayBatches.clear();
   }
@@ -2769,6 +2800,14 @@ export class SceneRuntime {
     this.hierarchySelectionIds = hierarchySelectionIds === undefined
       ? null
       : [...new Set(hierarchySelectionIds)].filter((entityId) => Boolean(document.entities[entityId]));
+  }
+
+  /** 外部描边只叠加展示，不修改编辑器的权威选区。 */
+  private isEntityHighlighted(
+    entityId: string,
+    selectedEntityIds: ReadonlySet<string> = this.selectedEntityIds,
+  ): boolean {
+    return selectedEntityIds.has(entityId) || this.externalHighlightedEntityIds.has(entityId);
   }
 
   /** 将普通实体和文件夹多选统一展开为全部需要高亮的运行时实体。 */
@@ -3047,7 +3086,7 @@ export class SceneRuntime {
     // 绑定到副本的内置货格挂在场景根下、按副本位姿换算世界坐标；副本位移后需重算跟随。
     for (const slotEntity of this.syncedEntities.values()) {
       if (slotEntity.components.locator?.builtInBinding?.hostEntityId !== entity.id) continue;
-      this.syncLocatorEntity(slotEntity, this.selectedEntityIds.has(slotEntity.id));
+      this.syncLocatorEntity(slotEntity, this.isEntityHighlighted(slotEntity.id));
     }
   }
 
@@ -4888,7 +4927,7 @@ export class SceneRuntime {
       const boundHostId = locator?.builtInBinding?.hostEntityId;
       if (!boundHostId) continue;
       if (boundHostId === hostEntityId) {
-        this.syncLocatorEntity(entity, this.selectedEntityIds.has(entity.id));
+        this.syncLocatorEntity(entity, this.isEntityHighlighted(entity.id));
         continue;
       }
       // 绑定到阵列副本的货格跟随副本渲染源的布局更新；副本参数与源已分化时改由参数变体脚本就绪后刷新。
@@ -4902,7 +4941,7 @@ export class SceneRuntime {
       ) {
         continue;
       }
-      this.syncLocatorEntity(entity, this.selectedEntityIds.has(entity.id));
+      this.syncLocatorEntity(entity, this.isEntityHighlighted(entity.id));
     }
   }
 
@@ -6374,8 +6413,12 @@ export class SceneRuntime {
   private rebuildModelSelectionOutline(): void {
     const selectedModelGroups: AbstractMesh[][] = [];
     const selectedArrayEntityIdsByBatch = new Map<EntityArrayThinInstanceBatch, Set<string>>();
+    const highlightedEntityIds = mergeSceneRuntimeHighlightEntityIds(
+      this.selectedEntityIds,
+      this.externalHighlightedEntityIds,
+    );
 
-    for (const entityId of this.selectedEntityIds) {
+    for (const entityId of highlightedEntityIds) {
       const model = this.models.get(entityId);
       if (model && !model.modelArrayBatch && model.highlighted) {
         const meshes = model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);

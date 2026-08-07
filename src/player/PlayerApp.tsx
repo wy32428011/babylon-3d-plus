@@ -4,6 +4,7 @@ import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '..
 import { createBabylonViewport, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { SceneRuntime } from '../runtime/babylon/SceneRuntime';
+import { buildDigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
 import {
   AutoPatrolPlaybackController,
   collectAutoPatrolPlaybackRoutes,
@@ -15,11 +16,13 @@ import { mqttRuntimeStatusStore } from '../runtime/mqtt/mqttRuntimeStatus';
 import { MqttStackerTelemetryClient } from '../runtime/mqtt/MqttStackerTelemetryClient';
 import {
   parseDeploymentAssetManifest,
+  parseDigitalTwinAllowedParentOrigins,
   parseDigitalTwinProjectRuntimeConfig,
   parsePlayerRuntimeConfig,
   type DigitalTwinProjectRuntimeConfig,
   type PlayerRuntimeConfig,
 } from './runtimeConfig';
+import { DigitalTwinInteractionController } from './DigitalTwinInteractionController';
 import {
   bindStatusOverlayPointerChordToggle,
   resolveInitialPlayerStatusOverlayVisibility,
@@ -137,6 +140,7 @@ export function PlayerApp() {
     let viewport: BabylonViewport | null = null;
     let runtime: SceneRuntime | null = null;
     let autoPatrolPlayback: AutoPatrolPlaybackController | null = null;
+    let interactionController: DigitalTwinInteractionController | null = null;
     let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
     let removeAutoPatrolManualInputListeners: (() => void) | null = null;
     let mqttClient: MqttStackerTelemetryClient | null = null;
@@ -158,6 +162,25 @@ export function PlayerApp() {
         const projectRuntimeConfig = await fetchDigitalTwinRuntimeConfig(baseConfig, abortController.signal);
         const parsedConfig = applyDigitalTwinRuntimeConfig(baseConfig, projectRuntimeConfig);
         if (disposed) return;
+        interactionController = new DigitalTwinInteractionController({
+          parentWindow: window.parent,
+          viewerOrigin: window.location.origin,
+          projectId: parsedConfig.digitalTwin?.projectId,
+          subscribeToMessages: (listener) => {
+            const handleMessage = (event: MessageEvent<unknown>) => listener({
+              data: event.data,
+              origin: event.origin,
+              source: event.source,
+            });
+            window.addEventListener('message', handleMessage);
+            return () => window.removeEventListener('message', handleMessage);
+          },
+          postToParent: (message, targetOrigin) => window.parent.postMessage(message, targetOrigin),
+          now: () => typeof performance === 'undefined' ? Date.now() : performance.now(),
+        });
+        interactionController.setAllowedParentOrigins(
+          projectRuntimeConfig ? parseDigitalTwinAllowedParentOrigins(projectRuntimeConfig.config) : [],
+        );
         document.title = parsedConfig.page.title;
         setConfig(parsedConfig);
         setStatusOverlayVisible(resolveInitialPlayerStatusOverlayVisibility(
@@ -174,6 +197,7 @@ export function PlayerApp() {
 
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
+        const digitalTwinAssetIndex = buildDigitalTwinAssetIndex(sceneDocument);
         if (projectRuntimeConfig) {
           sceneDocument.fetchConfig = { url: projectRuntimeConfig.apiBaseUrl ?? '', apiKey: '' };
           (globalThis as typeof globalThis & { __ZENDING_DIGITAL_TWIN_CONFIG__?: Record<string, unknown> })
@@ -246,6 +270,7 @@ export function PlayerApp() {
 
         if (parsedConfig.viewer.allowCameraControl) {
           const notifyManualInput = (): void => {
+            interactionController?.notifyManualCameraInput();
             autoPatrolPlayback?.notifyManualInput();
             autoPatrolPlayback?.notifyCameraChangedWhilePaused();
           };
@@ -277,6 +302,18 @@ export function PlayerApp() {
           if (!result.ok) setRuntimeMessage(result.error);
         }
 
+        interactionController.markViewerReady({
+          assetIndex: digitalTwinAssetIndex,
+          getEntityBounds: (entityId) => runtime!.getEntitiesWorldBounds([entityId]),
+          focusOnBounds: (bounds, options) => viewport!.focusOnBounds(bounds, options),
+          cancelCameraTransition: (reason) => viewport!.cancelCameraTransition(reason),
+          setExternalHighlightEntityIds: (entityIds) => runtime!.setExternalHighlightEntityIds(entityIds),
+          clearExternalHighlight: () => runtime!.clearExternalHighlight(),
+          getPatrolPhase: () => autoPatrolPlayback!.getSnapshot().phase,
+          pausePatrol: () => { autoPatrolPlayback!.pause(false); },
+          notifyCameraChangedWhilePaused: () => autoPatrolPlayback!.notifyCameraChangedWhilePaused(),
+        });
+
         mqttClient = new MqttStackerTelemetryClient((logMessage) => console.info(`[Viewer MQTT] ${logMessage}`));
         mqttClient.updateConfig(parsedConfig.mqtt);
         resize = () => viewport?.engine.resize();
@@ -288,6 +325,8 @@ export function PlayerApp() {
         console.error('Web Viewer 启动失败。', error);
         setPhase('blocked');
         setMessage(`Web Viewer 启动失败：${getErrorMessage(error)}`);
+        interactionController?.dispose();
+        interactionController = null;
         mqttClient?.dispose();
         removeAutoPatrolManualInputListeners?.();
         unsubscribeAutoPatrolSnapshot?.();
@@ -304,6 +343,8 @@ export function PlayerApp() {
       disposed = true;
       abortController.abort();
       if (resize) window.removeEventListener('resize', resize);
+      interactionController?.dispose();
+      interactionController = null;
       mqttClient?.dispose();
       removeAutoPatrolManualInputListeners?.();
       unsubscribeAutoPatrolSnapshot?.();

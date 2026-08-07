@@ -26,6 +26,7 @@ export type StartDigitalTwinPublishOptions = {
   remark: string;
   overwriteExisting: boolean;
   confirmResourceBindings: boolean;
+  allowedParentOrigins: string[];
 };
 
 export type DigitalTwinPublishController = {
@@ -103,6 +104,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
         sceneContent,
         overwriteExisting: options.overwriteExisting,
         confirmResourceBindings: options.confirmResourceBindings,
+        allowedParentOrigins: options.allowedParentOrigins,
       });
       const status: DigitalTwinPublishStatus = result.status === 'completed'
         ? 'completed'

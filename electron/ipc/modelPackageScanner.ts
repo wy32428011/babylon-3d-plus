@@ -315,6 +315,7 @@ function createParameterDefinitionFromScriptField(field: unknown): unknown | nul
       return { ...base, type: 'texture', defaultValue, allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp'] };
     }
     if (isParameterInfoField(key)) return null;
+    if (type === 'string') return { ...base, type: 'string', defaultValue };
   }
 
   if (isPlainObject(defaultValue) &&

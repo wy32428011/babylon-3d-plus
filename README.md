@@ -50,7 +50,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - MQTT 运行预览：Toolbar 的“运行/停止”是唯一运行入口；点击“运行”并通过预检后才会连接 broker 或启动本地模拟，连接状态 badge 显示 disabled/simulating/connecting/connected/disconnected/error，无效配置会自动打开 MQTT 配置弹窗。运行态允许相机、选择、Hierarchy 搜索/展开、网格、诊断和 Console，只读阻止 Gizmo、Inspector 修改、Hierarchy 变更、资源创建/导入、保存加载、undo/redo 与 MQTT 配置。
 - MQTT 专用设备数据驱动：详见 `docs/mqtt-data-driven-guide.md`，覆盖只读可视化边界、EPV `data[].e/p/v`、JSON Path、多订阅/QoS、`sourceId + deviceType + assetCode` 绑定、按设备类型（stacker/conveyor）分发的专用驱动与模型包 `dataDriven` 声明，以及 stale/fault/conflict 和 Electron `wss://` 安全注意事项。
 - 外置参数化脚本：模型包内的 `*.model.ts`、meta 显式引用的 `.ts`，以及数据中台 API 明确返回的 `.ts` 会随模型包复制到项目目录并作为受控 `editor-asset://` 资产授权；导入模型加载完成后，renderer 会以本地可信脚本方式转译并运行同包脚本，兼容 `ParametricModelRuntimeComponent`、`export default class`、`onStart/onUpdate/onStop` 生命周期以及 `babylonjs-editor-tools` 的 `visibleAs*` 装饰器写法。所有长度类参数统一以米输入；脚本在实体根米空间读取未销毁、自身启用、可见且有顶点的有效 Mesh，把米制位移转换回目标父节点局部坐标，并在整机根缩放时保持底部中心锚点。参数脚本只负责模型特有参数化和附加运行逻辑，不负责判断源单位或提供基础米制测量。
-- 参数化模型：模型包 `meta.json.modelParameters` 可声明 number、color、boolean、enum、vector3、texture 参数，以及绑定到模型节点、网格或材质的安全 JSON DSL；选中带参数配置的导入模型后，Inspector 会以紧凑布局显示“模型参数”区域，参数标签使用自适应宽度并在必要时换行，确保长中文名称完整显示；修改参数会通过场景文档实时驱动 Babylon 模型外观变化，并支持随场景保存/加载与撤销/重做。参数变化完成后，编辑器会重新测量实际尺寸；没有参数脚本的模型仍正常显示米制尺寸。
+- 参数化模型：模型包 `meta.json.modelParameters` 可声明 number、string、color、boolean、enum、vector3、texture 参数，以及绑定到模型节点、网格或材质的安全 JSON DSL；选中带参数配置的导入模型后，Inspector 会以紧凑布局显示“模型参数”区域，参数标签使用自适应宽度并在必要时换行，确保长中文名称完整显示；修改参数会通过场景文档实时驱动 Babylon 模型外观变化，并支持随场景保存/加载与撤销/重做。参数变化完成后，编辑器会重新测量实际尺寸；没有参数脚本的模型仍正常显示米制尺寸。
 - 模型库拖拽放置：模型库中已导入的真实模型卡片可直接拖拽到 Scene View，释放鼠标时会按当前鼠标射线与 `y = 0` 地面平面的交点创建模型实体；点击模型卡片仍保留原点快捷导入行为。
 - Assets 目录能力：模型库已接入本地模型文件夹扫描和 glTF/GLB 导入，环境库已接入单 GLB 导入，天空盒库已接入 HDR/EXR 导入；三类资源分别保存到 `Assets/Models`、`Assets/Environments` 和 `Assets/Skyboxes`。其它资源类型的真实分类、搜索、扫描与导入会在后续资源库功能中继续补齐。
 
@@ -86,7 +86,7 @@ npm run dev:electron
 
 1. 执行 `npm run dev:electron` 启动 Electron 编辑器。
 2. 点击 Project 面板中的模型文件夹导入，选择 `F:\3d-models\models`；模型包会复制到当前项目 `Assets/Models`，同目录 `*.model.ts` 以及 meta 显式引用的其它 `.ts` 会随包登记为外置参数化脚本。
-3. 在 Project 模型库中点击任意导入模型，选中场景实例后在 Inspector 的“模型参数”区域调整数值、布尔、枚举或贴图参数；参数会同时写入 `modelAsset.parameterValues`、运行节点 `metadata.scripts[].values` 和脚本实例属性。
+3. 在 Project 模型库中点击任意导入模型，选中场景实例后在 Inspector 的“模型参数”区域调整数值、字符串、颜色、布尔、枚举或贴图参数；参数会同时写入 `modelAsset.parameterValues`、运行节点 `metadata.scripts[].values` 和脚本实例属性。
 2. 在 Project 面板的模型库点击 `导入模型文件夹`；首次导入会先选择项目目录，随后模型文件夹选择本仓库的 `examples/model-packages`。
 3. 模型库出现 `参数链路示例机柜` 后，点击或拖拽它进入 Scene View；选中模型后，在 Inspector 的“模型参数”里修改 `主体颜色`、`主体高度`、`显示侧边面板`、`屏幕贴图`。
 4. 需要比对保存后的参数值时，点击 Toolbar 的 `加载场景`，选择 `examples/scenes/parameter-chain-demo.scene.json`；该场景包含默认蓝色网格实例和红色高柜斜纹实例，便于验证颜色、高度、显隐和贴图链路。

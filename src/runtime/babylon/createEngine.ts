@@ -37,6 +37,7 @@ import {
   EDITOR_CAMERA_DEFAULT_BETA,
   EDITOR_CAMERA_DEFAULT_RADIUS,
   type CameraNavigationMode,
+  type CameraTransitionCancelReason,
   type CameraViewApplicationOptions,
   type CameraViewTransitionOptions,
 } from './ArcRotateCameraViewController';
@@ -79,7 +80,8 @@ export type BabylonViewport = {
   engine: Engine;
   scene: Scene;
   camera: ArcRotateCamera;
-  focusOnBounds: (bounds: EditorWorldBounds) => void;
+  focusOnBounds: (bounds: EditorWorldBounds, options?: CameraViewTransitionOptions) => void;
+  cancelCameraTransition: (reason?: CameraTransitionCancelReason) => boolean;
   setViewDistance: (meters: number) => void;
   setSensitivity: (settings: SceneSensitivitySettings) => void;
   getCameraPose: () => SceneCameraPose;
@@ -415,9 +417,19 @@ export function createBabylonViewport(
     engine,
     scene,
     camera,
-    focusOnBounds: (bounds) => {
-      focusArcRotateCameraOnBounds(camera, engine, bounds);
+    focusOnBounds: (bounds, transitionOptions) => {
+      if (!transitionOptions) {
+        focusArcRotateCameraOnBounds(camera, engine, bounds);
+        return;
+      }
+      cameraViewController.applyCameraPose({
+        alpha: camera.alpha,
+        beta: camera.beta,
+        radius: getFocusCameraRadius(bounds, camera, engine),
+        target: { x: bounds.center.x, y: bounds.center.y, z: bounds.center.z },
+      }, transitionOptions);
     },
+    cancelCameraTransition: (reason) => cameraViewController.cancelTransition(reason),
     setViewDistance: (meters) => {
       const viewDistance = sanitizeSceneViewDistance(meters);
       camera.maxZ = viewDistance;
