@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
@@ -23,8 +24,14 @@ const SPAN_HALF = 2;
 const CARGO_AXIAL = CONVEYOR_CARGO_SIZE.x;
 const HALF_RANGE = resolveConveyorCargoTravelHalfRange(SPAN_HALF * 2, CARGO_AXIAL);
 const PUSH_TARGET = HALF_RANGE + CARGO_AXIAL;
+/** 空 motion 配置时的缺省走行速度（m/s），与 CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND 对齐。 */
+const CARGO_SPEED = 0.3;
 
-function makeSnapshot(assetCode: string, fields: Record<string, unknown>): DeviceTelemetrySnapshot {
+function makeSnapshot(
+  assetCode: string,
+  fields: Record<string, unknown>,
+  receivedAt: number = Date.now(),
+): DeviceTelemetrySnapshot {
   return {
     sourceId: 'default',
     topic: 'test/topic',
@@ -33,7 +40,7 @@ function makeSnapshot(assetCode: string, fields: Record<string, unknown>): Devic
     payloadDeviceCode: null,
     sourceTimestamp: null,
     sequence: null,
-    receivedAt: Date.now(),
+    receivedAt,
     fields,
     currentLocationKey: null,
     targetLocationKey: null,
@@ -130,10 +137,10 @@ function makeHarness(layout: Record<string, { centerX: number; autoDispose?: boo
     logs,
     models: Object.fromEntries(models),
     dispose: () => { scene.dispose(); engine.dispose(); },
-    apply: (assetCode: string, fields: Record<string, unknown>, deltaSeconds = 0.1, frames = 1) => {
+    apply: (assetCode: string, fields: Record<string, unknown>, deltaSeconds = 0.1, frames = 1, receivedAt?: number) => {
       const model = models.get(assetCode)!;
       for (let i = 0; i < frames; i += 1) {
-        driver.applyToModel(model, makeSnapshot(assetCode, fields), deltaSeconds);
+        driver.applyToModel(model, makeSnapshot(assetCode, fields, receivedAt), deltaSeconds);
       }
     },
   };
@@ -317,4 +324,56 @@ test('等待中本机已有货物保持静止；被交出时遗留箱销毁、�
   } finally {
     h.dispose();
   }
+});
+
+test('接管后断流期间按接管方向自驱走行，新消息到达即恢复字段驱动', () => {
+  const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
+  try {
+    const stamp = 1_000_000;
+    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 1, stamp);
+    h.apply('CV1', { task: 7, movement_x: 1 }, 0.1, 1, stamp);
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7');
+
+    // 持有方收新消息 mode=2 → 交出；CV1 接管时登记自驱方向
+    h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 }, 0.1, 1, stamp + 1);
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo', '前置：CV1 必须已接管货物');
+    assert.equal(h.models.CV1.conveyorTelemetry.selfDriveDirection, 1, '接管必须登记自驱方向');
+    const takeoverOffset = h.models.CV1.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(Math.abs(takeoverOffset - (-HALF_RANGE)) < 1e-6, '接管起点必须为刷出端');
+
+    // 断流重放（同一 receivedAt，缓存 movement_x=0）：自驱仍按接管方向推进
+    h.apply('CV1', { task: 7, movement_x: 0 }, 0.1, 10, stamp);
+    const selfDrivenOffset = h.models.CV1.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(
+      Math.abs(selfDrivenOffset - (takeoverOffset + CARGO_SPEED * 0.1 * 10)) < 1e-6,
+      `自驱必须按走行速度推进到 ${takeoverOffset + CARGO_SPEED * 0.1 * 10}，实际 ${selfDrivenOffset}`,
+    );
+    assert.equal(h.models.CV1.conveyorTelemetry.selfDriveDirection, 1, '断流重放不得清零自驱');
+
+    // 新消息到达（receivedAt 变化）：自驱结束，movement_x=0 即停车
+    h.apply('CV1', { task: 7, movement_x: 0 }, 0.1, 10, stamp + 2);
+    assert.equal(h.models.CV1.conveyorTelemetry.selfDriveDirection, 0, '新消息必须结束自驱');
+    assert.ok(
+      Math.abs(h.models.CV1.conveyorTelemetry.cargoTravelOffset - selfDrivenOffset) < 1e-6,
+      '新消息 movement_x=0 必须立即停车',
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('帧调度在快照断流时仍驱动处于接管自驱的输送线', () => {
+  const source = readFileSync('src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime.ts', 'utf8');
+  const conveyorRegistration = source.match(/deviceType: 'conveyor',[\s\S]*?\},\r?\n/);
+  assert.ok(conveyorRegistration, '必须存在 conveyor 驱动注册项');
+  assert.match(
+    conveyorRegistration[0],
+    /applyWhenStale: \(model\) => \(model\.conveyorTelemetry\?\.selfDriveDirection \?\? 0\) !== 0/,
+    'conveyor 注册必须声明断流自驱判定',
+  );
+  assert.match(
+    source,
+    /!frame\.stale \|\| \(driver\.applyWhenStale\?\.\(candidate\.model\) \?\? false\)/,
+    'applyFrame 必须在快照断流且驱动声明自驱时仍应用缓存快照',
+  );
 });

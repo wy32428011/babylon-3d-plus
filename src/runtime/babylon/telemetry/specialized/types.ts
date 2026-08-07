@@ -202,6 +202,10 @@ export type ConveyorModelTelemetryState = {
   waitingTask: string | null;
   /** 最近一次非 0 的 movement_x 运行方向（±1），供持有方计算机等待设备的上货坐标。 */
   lastMovementDirection: number;
+  /** 接管货物后的自驱走行方向（±1，0=关闭）：快照断流期间不等新 MQTT 消息直接执行移动动画，新消息到达即清零。 */
+  selfDriveDirection: number;
+  /** 最近一次应用的快照 receivedAt：识别新消息到达并结束自驱；断流重放时保持不变。 */
+  lastSnapshotReceivedAt: number;
   cargoTravelOffset: number;
   motionOffsets: Map<string, number>;
   nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;

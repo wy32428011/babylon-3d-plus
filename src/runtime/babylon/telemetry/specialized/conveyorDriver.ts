@@ -105,6 +105,8 @@ export class ConveyorTelemetryDriver {
    * - 持有方：存在等待本 task 的设备时执行出货动画——向轨迹正转终点额外推进一个货箱长度；
    *   mode 变 2/0 或收到新 task 时把货物交给「货物世界坐标距设备上货坐标最近」的等待设备；
    *   无等待设备时按 cargoAutoDispose 决定销毁或遗留（遗留箱在下次刷出时销毁）。
+   * - 接管方：交接完成即按接管方向自驱走行（快照断流期间不等下一条 MQTT 消息），
+   *   新消息到达（receivedAt 变化）即结束自驱、恢复字段驱动。
    * mode==2 且双光电（前后）都无货时的自动销毁由 telemetryBinding.cargoAutoDispose 控制（缺省开启），
    * 交出优先于销毁：有等待设备时货物移交而非销毁。
    * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向：
@@ -120,6 +122,13 @@ export class ConveyorTelemetryDriver {
     const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods) ?? false;
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
     const mode = readIntegerField(snapshot.fields, 'mode');
+
+    // 接管自驱只活到下一条新消息：receivedAt 变化即恢复字段驱动；断流重放（stale 快照）保持不变。
+    // mode 变 2/0、新 task 边沿等停止语义都随新消息到达，天然由该清零覆盖。
+    if (snapshot.receivedAt !== state.lastSnapshotReceivedAt) {
+      state.lastSnapshotReceivedAt = snapshot.receivedAt;
+      state.selfDriveDirection = 0;
+    }
 
     // task 语义：数值 0/缺失为无任务；仅新 task 边沿（相对 lastTask 变化）登记，线体运行即刷出。
     // lastTask 持久保存：货物销毁/被接管后同 task 重发不得重走刷出+走行。
@@ -207,8 +216,10 @@ export class ConveyorTelemetryDriver {
     if (!cargo) return;
 
     const cargoSpeed = translateConfig?.speed ?? CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
-    if (!snapshot.faulted && movementDirection !== 0) {
-      state.cargoTravelOffset += movementDirection * forwardSign * cargoSpeed * deltaSeconds;
+    // 快照 movement 为 0 时回退到接管自驱方向：承接货物控制权后立即走行，不等下一条 MQTT 消息。
+    const cargoDirection = movementDirection !== 0 ? movementDirection : state.selfDriveDirection;
+    if (!snapshot.faulted && cargoDirection !== 0) {
+      state.cargoTravelOffset += cargoDirection * forwardSign * cargoSpeed * deltaSeconds;
     }
 
     // 出货动画：存在等待本 task 的设备时，向轨迹正转终点额外推进一个货箱长度（与线体是否走行无关）。
@@ -311,6 +322,8 @@ export class ConveyorTelemetryDriver {
     winnerState.cargoTravelOffset = -winnerDirection * winnerForwardSign * winnerHalfRange;
     winnerState.pendingTask = null;
     winnerState.waitingTask = null;
+    // 承接即走行：登记自驱方向，快照断流期间由帧调度继续驱动，新消息到达即恢复字段驱动。
+    winnerState.selfDriveDirection = winnerDirection;
     this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(winner.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
     this.host.pushLog(`Conveyor ${holderModel.assetCode} 凭 task=${cargo.task} 将货物移交 ${winner.assetCode}`);
   }

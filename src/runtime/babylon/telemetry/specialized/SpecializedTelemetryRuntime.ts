@@ -35,6 +35,8 @@ type SpecializedDriverRegistration = {
   readonly deviceType: SpecializedTelemetryDeviceType;
   readonly isCapable: (model: ModelRuntimeEntry) => boolean;
   readonly apply: (model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number) => void;
+  /** 快照断流（stale）时仍要求帧级驱动的判定（如输送线接管货物后的自驱走行）。 */
+  readonly applyWhenStale?: (model: ModelRuntimeEntry) => boolean;
 };
 
 /** 专用遥测运行时的门面类：组合各专用 Driver，并承担帧级调度与诊断状态管理。 */
@@ -65,6 +67,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         deviceType: 'conveyor',
         isCapable: isConveyorRuntimeModel,
         apply: (model, snapshot, deltaSeconds) => this.conveyorDriver.applyToModel(model, snapshot, deltaSeconds),
+        applyWhenStale: (model) => (model.conveyorTelemetry?.selfDriveDirection ?? 0) !== 0,
       },
       {
         deviceType: 'rgv',
@@ -74,7 +77,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     ];
   }
 
-  /** 每帧把最新 MQTT 专用遥测应用到完整主键匹配且无冲突的模型实例。 */
+  /** 每帧把最新 MQTT 专用遥测应用到完整主键匹配且无冲突的模型实例；断流设备默认停摆，仅驱动声明 applyWhenStale 的例外（输送线接管自驱）。 */
   applyFrame(deltaSeconds: number): void {
     const nowMs = Date.now();
     for (const driver of this.drivers) {
@@ -83,7 +86,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         candidates.map((candidate) => candidate.binding),
       );
       for (const candidate of candidates) {
-        const snapshot = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
+        const frame = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
+        // 断流快照默认不驱动；驱动声明 applyWhenStale（如输送线接管自驱）时仍用缓存快照推进。
+        const snapshot = frame && (!frame.stale || (driver.applyWhenStale?.(candidate.model) ?? false))
+          ? frame.snapshot
+          : null;
         const preparedArrayHost = this.host.updateExternalScriptContext(
           candidate.model,
           snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
@@ -272,12 +279,12 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     }
   }
 
-  /** 解析当前帧专用快照，并统一处理冲突、离线、断流和诊断状态。 */
+  /** 解析当前帧专用快照，并统一处理冲突、离线、断流和诊断状态；冲突/无快照返回 null，否则返回快照与断流标记。 */
   private resolveSpecializedTelemetryFrameSnapshot(
     candidate: SpecializedTelemetryRuntimeEntry,
     conflictKeys: ReadonlySet<string>,
     nowMs: number,
-  ): DeviceTelemetrySnapshot | null {
+  ): { snapshot: DeviceTelemetrySnapshot; stale: boolean } | null {
     const { entityId, model, binding } = candidate;
     const snapshot = resolveSpecializedTelemetrySnapshot(deviceTelemetryStore, binding);
     const conflictReportKey = `specialized-conflict:${binding.key}`;
@@ -323,7 +330,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       lastReceivedAt: snapshot.receivedAt,
       errors: [],
     }, snapshot);
-    return stale ? null : snapshot;
+    return { snapshot, stale };
   }
 
   /** 把专用驱动诊断写入 Babylon metadata 和只读外部 store，不进入场景文档或撤销历史。 */
