@@ -32,6 +32,10 @@ import {
   type ProjectLibraryItem,
   type ProjectLibraryKey,
 } from '../assets/projectLibrary';
+import {
+  createModelDeviceTypeOptions,
+  matchesModelDeviceType,
+} from '../assets/modelLibraryDeviceTypeFilter';
 import { setSyncedImageAssets } from '../../assets/syncedImageAssets';
 import { useEditorStore } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
@@ -132,6 +136,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const lastSceneRefreshImageSyncRunIdRef = useRef<string | null>(null);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
   const [libraryFilterText, setLibraryFilterText] = useState('');
+  const [modelDeviceTypeFilter, setModelDeviceTypeFilter] = useState('');
   const [projectAssets, setProjectAssets] = useState<ProjectModelAssetEntry[]>([]);
   const [skyboxAssets, setSkyboxAssets] = useState<ProjectSkyboxAssetEntry[]>([]);
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
@@ -153,11 +158,22 @@ export function ProjectPanel(props: ProjectPanelProps) {
     () => projectAssets.filter((asset) => asset.libraryKind === 'environment'),
     [projectAssets],
   );
+  const modelDeviceTypes = useMemo(
+    () => createModelDeviceTypeOptions(modelAssets),
+    [modelAssets],
+  );
 
   const activeLibrary = useMemo(
     () => PROJECT_LIBRARIES.find((library) => library.key === activeLibraryKey) ?? PROJECT_LIBRARIES[0],
     [activeLibraryKey],
   );
+
+  useEffect(() => {
+    if (!modelDeviceTypeFilter) return;
+    if (activeLibrary.key === 'model' && !modelDeviceTypes.includes(modelDeviceTypeFilter)) {
+      setModelDeviceTypeFilter('');
+    }
+  }, [activeLibrary.key, modelDeviceTypeFilter, modelDeviceTypes]);
 
   const activeItems = useMemo(() => {
     if (activeLibrary.key === 'model') {
@@ -186,17 +202,30 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }, [activeLibrary, environmentAssets, modelAssets, skyboxAssets, syncedImages]);
 
   const normalizedLibraryFilter = libraryFilterText.trim().toLowerCase();
+  const hasActiveLibraryFilter = Boolean(normalizedLibraryFilter)
+    || (activeLibrary.key === 'model' && Boolean(modelDeviceTypeFilter));
   const filteredItems = useMemo(() => {
-    if (!normalizedLibraryFilter) return activeItems;
+    if (!hasActiveLibraryFilter) return activeItems;
+
     return activeItems.filter((item) => {
-      if (item.name.toLowerCase().includes(normalizedLibraryFilter)) return true;
-      if (isSyncedImageProjectLibraryItem(item)) {
-        const searchableText = `${item.syncedImage.iconKey} ${item.syncedImage.category ?? ''}`.toLowerCase();
-        return searchableText.includes(normalizedLibraryFilter);
-      }
-      return false;
+      const matchesName = !normalizedLibraryFilter
+        || item.name.toLowerCase().includes(normalizedLibraryFilter)
+        || (isSyncedImageProjectLibraryItem(item)
+          && `${item.syncedImage.iconKey} ${item.syncedImage.category ?? ''}`
+            .toLowerCase()
+            .includes(normalizedLibraryFilter));
+      if (!matchesName) return false;
+
+      return activeLibrary.key !== 'model'
+        || matchesModelDeviceType(item, modelDeviceTypeFilter);
     });
-  }, [activeItems, normalizedLibraryFilter]);
+  }, [
+    activeItems,
+    activeLibrary.key,
+    hasActiveLibraryFilter,
+    modelDeviceTypeFilter,
+    normalizedLibraryFilter,
+  ]);
 
   const activeImportLibraryKey: ImportableProjectLibraryKey | null =
     activeLibrary.key === 'model' || activeLibrary.key === 'environment' || activeLibrary.key === 'skybox'
@@ -432,6 +461,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
     setActiveLibraryKey('model');
     setLibraryFilterText('');
+    setModelDeviceTypeFilter('');
     setFocusedAssetId(matchedAsset.id);
     pushLog(`库聚焦到模型卡片：${matchedAsset.displayName ?? matchedAsset.name}`);
     consumeProjectAssetFocusRequest(projectAssetFocusRequest.id);
@@ -895,6 +925,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
               onClick={() => {
                 setActiveLibraryKey(library.key);
                 setLibraryFilterText('');
+                setModelDeviceTypeFilter('');
               }}
               type="button"
             >
@@ -916,6 +947,24 @@ export function ProjectPanel(props: ProjectPanelProps) {
           type="text"
           value={libraryFilterText}
         />
+        {activeLibrary.key === 'model' ? (
+          <>
+            <label className="library-filter-label" htmlFor="project-library-model-type">
+              模型类型
+            </label>
+            <select
+              className="library-filter-select"
+              id="project-library-model-type"
+              onChange={(event) => setModelDeviceTypeFilter(event.target.value)}
+              value={modelDeviceTypeFilter}
+            >
+              <option value="">全部类型</option>
+              {modelDeviceTypes.map((deviceType) => (
+                <option key={deviceType} value={deviceType}>{deviceType}</option>
+              ))}
+            </select>
+          </>
+        ) : null}
         {supportsProjectImport ? (
           libraryStatus ? (
             <span className={`library-project-root library-status-${libraryStatus.kind}`} title={libraryStatus.message}>
@@ -963,8 +1012,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
         {activeLibrary.key === 'skybox' && skyboxAssets.length === 0 ? (
           <p className="library-empty-state">请先导入 HDR 或 EXR 天空盒</p>
         ) : null}
-        {filteredItems.length === 0 && normalizedLibraryFilter ? (
-          <p className="library-empty-state">未找到名称匹配“{libraryFilterText.trim()}”的资源</p>
+        {filteredItems.length === 0 && hasActiveLibraryFilter ? (
+          <p className="library-empty-state">未找到符合当前筛选条件的资源</p>
         ) : null}
         {filteredItems.map((item) => {
           const isBuiltInItem = isBuiltInProjectLibraryItem(item);

@@ -6,6 +6,7 @@ const PROJECT_PANEL_PATH = 'src/editor/panels/ProjectPanel.tsx';
 const PROJECT_LIBRARY_PATH = 'src/editor/assets/projectLibrary.ts';
 const INSPECTOR_PANEL_PATH = 'src/editor/panels/InspectorPanel.tsx';
 const POI_EFFECT_INSPECTOR_PATH = 'src/editor/panels/PoiEffectInspector.tsx';
+const GLOBAL_STYLE_PATH = 'src/styles/global.css';
 
 function readLibraryBranch(source: string, libraryKey: 'model' | 'skybox'): string {
   const branchStart = `if (activeLibrary.key === '${libraryKey}') {`;
@@ -75,4 +76,26 @@ test('特效 Inspector 使用独立于 POI 的用户可见术语', () => {
   assert.ok(inspectorSource.includes("modelGenerator || autoPatrol ? 'POI名称'"));
   assert.ok(effectInspectorSource.includes('<legend>特效</legend>'));
   assert.ok(!effectInspectorSource.includes('POI 特效'));
+});
+
+test('模型库提供 deviceType 下拉筛选并与名称筛选组合生效', () => {
+  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const styles = readFileSync(GLOBAL_STYLE_PATH, 'utf8');
+
+  assert.ok(source.includes("from '../assets/modelLibraryDeviceTypeFilter'"));
+  assert.ok(source.includes("const [modelDeviceTypeFilter, setModelDeviceTypeFilter] = useState('')"));
+  assert.ok(source.includes('createModelDeviceTypeOptions(modelAssets)'));
+  assert.ok(source.includes("activeLibrary.key === 'model' && !modelDeviceTypes.includes(modelDeviceTypeFilter)"));
+  assert.ok(source.includes('matchesModelDeviceType(item, modelDeviceTypeFilter)'));
+  assert.ok(source.includes('id="project-library-model-type"'));
+  assert.ok(source.includes('<option value="">全部类型</option>'));
+  assert.ok(source.includes('未找到符合当前筛选条件的资源'));
+  assert.match(styles, /\.project-library \.library-filter-select/);
+});
+
+test('切换资源库或聚焦模型卡片时重置模型类型筛选', () => {
+  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+
+  const resetCalls = source.match(/setModelDeviceTypeFilter\(''\)/g) ?? [];
+  assert.ok(resetCalls.length >= 2, 'Tab 切换和模型聚焦至少各有一次类型重置');
 });

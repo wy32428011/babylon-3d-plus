@@ -2125,14 +2125,22 @@ select {
   font-size: 13px;
 }
 
-.project-library .library-filter-input {
-  width: 188px;
+.project-library .library-filter-input,
+.project-library .library-filter-select {
   height: 28px;
   padding: 0 10px;
   border: 1px solid #474747;
   color: #d7d7d7;
   background: #202020;
   outline: none;
+}
+
+.project-library .library-filter-input {
+  width: 188px;
+}
+
+.project-library .library-filter-select {
+  width: 132px;
 }
 
 .project-library .library-filter-input::placeholder {
