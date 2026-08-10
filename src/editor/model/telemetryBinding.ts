@@ -36,8 +36,10 @@ export type TelemetryBindingComponent = {
   columnBindings?: Record<string, string>;
   /** 输送线专用：货物运行轨迹方向（仅编辑态可视化, 非运行时遥测）。 */
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
-  /** 输送线专用：停线且光电无货时自动销毁货物；关闭后货物交由 task 由下游设备接管。缺省为开启。 */
+  /** 输送线专用：停线且光电无货时自动销毁货物；未勾选时货物滞留，等下游订阅推送取走或新 task 复用。缺省关闭。 */
   cargoAutoDispose?: boolean;
+  /** 输送线专用：起点设备——探测点未触及上游设备时允许自行创建货箱；缺省关闭。 */
+  cargoOriginDevice?: boolean;
 };
 
 type PlainObject = Record<string, unknown>;
@@ -201,5 +203,6 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     ...(columnBindings ? { columnBindings } : {}),
     ...(normalizeTrajectoryDirection(value.trajectoryDirection) ? { trajectoryDirection: value.trajectoryDirection as TelemetryBindingComponent['trajectoryDirection'] } : {}),
     ...(typeof value.cargoAutoDispose === 'boolean' ? { cargoAutoDispose: value.cargoAutoDispose } : {}),
+    ...(typeof value.cargoOriginDevice === 'boolean' ? { cargoOriginDevice: value.cargoOriginDevice } : {}),
   };
 }

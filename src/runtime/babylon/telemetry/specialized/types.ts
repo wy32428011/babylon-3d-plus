@@ -209,10 +209,12 @@ export type ConveyorModelTelemetryState = {
   pendingTask: string | null;
   /** 最近接受的 task：边沿判定基准，不随线体清空复位，同 task 重复到达不得重走刷出+走行。 */
   lastTask: string | null;
-  /** 正在等待他设备交出的 task（归一化字符串）；非 null 时本机不刷出、不走行。 */
+  /** 正在等待探测点上游设备推送的 task（归一化字符串）；非 null 时本机不刷出、不走行。 */
   waitingTask: string | null;
-  /** 货物锁定态：mode==3 锁定（等待设备不得接管，仅出货动画），其他任何值非锁定（可被接管/交出）。 */
-  cargoLocked: boolean;
+  /** 探测点邻居缓存（按正/反转各存邻居 assetCode），reset 时清空重算。 */
+  probeNeighbors: { forward: string | null; reverse: string | null } | null;
+  /** 向上游设备的订阅：等待期间登记，被推送/退出等待时清空；seq 决定多下游时的推送顺序（先订阅先得）。 */
+  probeSubscription: { holderAssetCode: string; direction: number; seq: number } | null;
   /** 最近一次非 0 的 movement_x 运行方向（±1），供持有方计算机等待设备的上货坐标。 */
   lastMovementDirection: number;
   /** 接管货物后的自驱走行方向（±1，0=关闭）：快照断流期间不等新 MQTT 消息直接执行移动动画，新消息到达即清零。 */
@@ -371,4 +373,9 @@ export interface SpecializedTelemetryDriverContext {
    * 空 task（匿名）不参与，直接返回 null。
    */
   adoptGlobalCargoByTask(task: string, claimingCargoKey: string): GeneratedCargoRuntimeEntry | null;
+  /**
+   * 按货物实例引用摘除（不销毁）：扫三张货物表找到所属条目，交由对应 driver 清理遥测引用后取出；
+   * 未找到返回 null。输送线探测点推送用。
+   */
+  detachClaimedCargoByReference(cargo: GeneratedCargoRuntimeEntry): GeneratedCargoRuntimeEntry | null;
 }

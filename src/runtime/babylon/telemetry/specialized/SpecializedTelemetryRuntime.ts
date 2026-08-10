@@ -67,8 +67,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         deviceType: 'conveyor',
         isCapable: isConveyorRuntimeModel,
         apply: (model, snapshot, deltaSeconds) => this.conveyorDriver.applyToModel(model, snapshot, deltaSeconds),
-        applyWhenStale: (model) => (model.conveyorTelemetry?.selfDriveDirection ?? 0) !== 0
-          || this.conveyorDriver.needsLockedPushOutDrive(model),
+        applyWhenStale: (model) => (model.conveyorTelemetry?.selfDriveDirection ?? 0) !== 0,
       },
       {
         deviceType: 'rgv',
@@ -104,6 +103,8 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         }
       }
     }
+    // 帧尾统一执行探测点订阅推送：与快照新旧无关，持有方持货即推给最先订阅的下游。
+    this.conveyorDriver.pushCargoToProbeSubscribers();
   }
 
   /** 清理已不存在有效专用绑定的模型诊断，避免 Inspector 展示过期状态。 */
@@ -229,6 +230,20 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       if (key !== claimingCargoKey && cargo.task === task) {
         return this.rgvDriver.detachClaimedCargoByKey(key);
       }
+    }
+    return null;
+  }
+
+  /** 按货物实例引用摘除（不销毁）：扫三张货物表定位所属条目，交由对应 driver 清理遥测引用后取出。 */
+  detachClaimedCargoByReference(cargo: GeneratedCargoRuntimeEntry): GeneratedCargoRuntimeEntry | null {
+    for (const [key, entry] of [...this.state.stackerCargoMeshes]) {
+      if (entry === cargo) return this.stackerDriver.detachClaimedCargoByKey(key);
+    }
+    for (const [key, entry] of [...this.state.conveyorCargoMeshes]) {
+      if (entry === cargo) return this.conveyorDriver.detachClaimedCargoByKey(key);
+    }
+    for (const [key, entry] of [...this.state.rgvCargoMeshes]) {
+      if (entry === cargo) return this.rgvDriver.detachClaimedCargoByKey(key);
     }
     return null;
   }

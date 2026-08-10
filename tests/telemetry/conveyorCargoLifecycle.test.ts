@@ -36,7 +36,7 @@ function makeSnapshot(fields: Record<string, unknown>, receivedAt: number = Date
   };
 }
 
-function makeHarness(binding: { cargoAutoDispose?: boolean } | null) {
+function makeHarness(binding: { cargoAutoDispose?: boolean; cargoOriginDevice?: boolean } | null) {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   const state = createSpecializedTelemetrySharedState();
@@ -47,7 +47,8 @@ function makeHarness(binding: { cargoAutoDispose?: boolean } | null) {
     contentRoot: root,
     meshes: [],
     conveyorTelemetry: createConveyorTelemetryState(),
-    telemetryBinding: binding,
+    // 单机无邻居场景：探测点触及不到任何设备，必须勾选起点设备才允许自行创建货箱
+    telemetryBinding: { cargoOriginDevice: true, ...(binding ?? {}) },
     externalScriptRuntime: null,
   } as unknown as ModelRuntimeEntry;
 
@@ -81,6 +82,7 @@ function makeHarness(binding: { cargoAutoDispose?: boolean } | null) {
     getOrCreateStackerCargo: () => { throw new Error('not used'); },
     getOrCreateConveyorCargo: () => { throw new Error('driver 内部自建，不应走 context'); },
     adoptGlobalCargoByTask: () => null,
+    detachClaimedCargoByReference: () => null,
   };
   const driver = new ConveyorTelemetryDriver(context as never);
   return {
@@ -100,15 +102,29 @@ const RUNNING = { task: 1, front_has_goods: 1, back_has_goods: 0, movement_x: 1 
 const STOPPED_EMPTY = { task: 1, front_has_goods: 0, back_has_goods: 0, movement_x: 0 };
 const DISPOSE_FRAME = { task: 1, front_has_goods: 0, back_has_goods: 0, movement_x: 0, mode: 2 };
 
-test('telemetryBinding 归一化保留 cargoAutoDispose 显式布尔值', () => {
+test('telemetryBinding 归一化保留 cargoAutoDispose/cargoOriginDevice 显式布尔值', () => {
   const base = { enabled: true, sourceId: 'default', deviceType: 'conveyor' };
   assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoAutoDispose: false })?.cargoAutoDispose, false);
   assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoAutoDispose: true })?.cargoAutoDispose, true);
   assert.equal(normalizeTelemetryBindingComponent(base)?.cargoAutoDispose, undefined);
+  assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoOriginDevice: true })?.cargoOriginDevice, true);
+  assert.equal(normalizeTelemetryBindingComponent(base)?.cargoOriginDevice, undefined);
 });
 
-test('默认开启自动销毁：mode=2 且双光电无货时清空货物', () => {
-  const h = makeHarness(null);
+test('非起点设备探测点无上游时不刷出，仅进入等待', () => {
+  const h = makeHarness({ cargoOriginDevice: false });
+  try {
+    h.apply(RUNNING);
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '非起点设备无邻居不得自行创建货箱');
+    assert.equal(h.model.conveyorTelemetry.waitingTask, '1', '必须进入等待');
+    assert.equal(h.model.conveyorTelemetry.probeSubscription, null, '无订阅对象不得登记');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('勾选自动销毁：mode=2 且双光电无货时清空货物', () => {
+  const h = makeHarness({ cargoAutoDispose: true });
   try {
     h.apply(RUNNING);
     assert.equal(h.state.conveyorCargoMeshes.size, 1, '线体运行后必须刷出货物');
@@ -129,7 +145,7 @@ test('默认开启自动销毁：mode=2 且双光电无货时清空货物', () =
 });
 
 test('movement_x 非 0 即刷出，不依赖光电信号；刷出位置只由转向决定', () => {
-  const h = makeHarness(null);
+  const h = makeHarness({ cargoAutoDispose: true });
   try {
     h.apply({ task: 5, front_has_goods: 0, back_has_goods: 0, movement_x: 1 });
     assert.equal(h.state.conveyorCargoMeshes.size, 1, 'task 模式：光电无货但 movement_x 非 0 必须刷出');
@@ -158,7 +174,7 @@ test('movement_x 非 0 即刷出，不依赖光电信号；刷出位置只由转
 });
 
 test('同 task 重发不得重走刷出+走行，只有新 task 才刷出', () => {
-  const h = makeHarness(null);
+  const h = makeHarness({ cargoAutoDispose: true });
   try {
     h.apply(RUNNING);
     assert.equal(h.state.conveyorCargoMeshes.size, 1);
@@ -184,8 +200,8 @@ test('同 task 重发不得重走刷出+走行，只有新 task 才刷出', () =
   }
 });
 
-test('关闭自动销毁：mode=2 且光电无货时货物保持，等待下游凭 task 接管', () => {
-  const h = makeHarness({ cargoAutoDispose: false });
+test('缺省不勾选自动销毁：mode=2 且光电无货时货物保持，等待下游接管', () => {
+  const h = makeHarness(null);
   try {
     h.apply(RUNNING);
     assert.equal(h.state.conveyorCargoMeshes.size, 1);
@@ -219,8 +235,8 @@ test('关闭自动销毁：mode=2 且光电无货时货物保持，等待下游�
   }
 });
 
-test('关闭自动销毁：新 task 边沿即复用遗留箱，盖上新 task 从滞留位置继续走行', () => {
-  const h = makeHarness({ cargoAutoDispose: false });
+test('缺省不勾选自动销毁：新 task 边沿即复用遗留箱，盖上新 task 从滞留位置继续走行', () => {
+  const h = makeHarness(null);
   try {
     h.apply(RUNNING, 0.1, 1, 1000);
     for (let i = 0; i < 10; i += 1) h.apply(RUNNING, 0.1, 1, 1000);
@@ -263,23 +279,26 @@ test('关闭自动销毁：新 task 边沿即复用遗留箱，盖上新 task �
   }
 });
 
-test('默认开启自动销毁：新 task 边沿销毁在机旧箱并重建，movement_x=0 也立即刷出', () => {
+test('新 task 边沿复用在机旧箱：与 autoDispose 无关，同一实例盖新 task 从滞留位置继续走行', () => {
   const h = makeHarness(null);
   try {
     h.apply(RUNNING, 0.1);
     for (let i = 0; i < 5; i += 1) h.apply(RUNNING, 0.1);
     const oldRoot = [...h.state.conveyorCargoMeshes.values()][0].root;
+    const strandedOffset = h.model.conveyorTelemetry.cargoTravelOffset;
 
-    // 旧箱仍在机上时收新 task（movement_x=0）：销毁旧箱、轨迹起点重建并登记正转自驱
+    // 旧箱仍在机上时收新 task（movement_x=0）：探测点协议下直接复用旧箱，不销毁不重建
     h.apply({ ...STOPPED_EMPTY, task: 2 });
     assert.equal(h.state.conveyorCargoMeshes.size, 1);
-    const spawned = [...h.state.conveyorCargoMeshes.values()][0];
-    assert.notEqual(spawned.root, oldRoot, '自动销毁开启时旧箱必须销毁重建');
-    assert.equal(spawned.task, '2');
-    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 刷出必须登记正转自驱');
+    const reused = [...h.state.conveyorCargoMeshes.values()][0];
+    assert.equal(reused.root, oldRoot, '新 task 必须直接复用滞留箱实例');
+    assert.equal(reused.task, '2');
+    assert.equal(h.model.conveyorTelemetry.waitingTask, null, '持有滞留箱不得进入等待');
+    assert.equal(h.model.conveyorTelemetry.probeSubscription, null, '持有滞留箱不得订阅上游');
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 复用必须登记正转自驱');
     assert.ok(
-      Math.abs(h.model.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE + 0.3 * 0.1)) < 1e-6,
-      `新箱必须刷在轨迹起点并当帧自驱推进，实际 ${h.model.conveyorTelemetry.cargoTravelOffset}`,
+      Math.abs(h.model.conveyorTelemetry.cargoTravelOffset - (strandedOffset + 0.3 * 0.1)) < 1e-6,
+      `复用必须从滞留位置继续走行，期望 ${strandedOffset + 0.03}，实际 ${h.model.conveyorTelemetry.cargoTravelOffset}`,
     );
   } finally {
     h.dispose();
