@@ -2,6 +2,7 @@ import type { ModelParameterConfig } from '../model/modelParameters';
 import { normalizeModelParameterConfig } from '../model/modelParameters';
 import type { ModelScriptAsset, PoiEffectKind } from '../model/components';
 import { findBuiltInImageAssetByReference, type BuiltInImageAsset } from '../../assets/imageAssets';
+import { findSyncedImageAssetByReference } from '../../assets/syncedImageAssets';
 import { normalizeModelDataDrivenConfig, type ModelDataDrivenConfig } from '../model/telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig, type BuiltInSlotBindingConfig } from '../model/builtInSlotBinding';
 import { isPoiEffectKind } from '../model/poiEffect';
@@ -249,15 +250,18 @@ export function decodeImageAssetDragPayload(rawPayload: string): ImageAssetDragP
     if (typeof payload.reference !== 'string' || !payload.reference.trim()) return null;
     if (typeof payload.sourceUrl !== 'string' || !payload.sourceUrl.trim()) return null;
 
-    const registeredAsset = findBuiltInImageAssetByReference(payload.reference.trim());
-    if (!registeredAsset) return null;
-    if (payload.id !== registeredAsset.id || payload.name !== registeredAsset.name || payload.sourceUrl !== registeredAsset.sourceUrl) return null;
+    const normalizedReference = payload.reference.trim();
+    const registeredAsset = findBuiltInImageAssetByReference(normalizedReference);
+    const syncedAsset = registeredAsset ? null : findSyncedImageAssetByReference(normalizedReference);
+    const matchedAsset = registeredAsset ?? syncedAsset;
+    if (!matchedAsset) return null;
+    if (payload.id !== matchedAsset.id || payload.name !== matchedAsset.name || payload.sourceUrl !== matchedAsset.sourceUrl) return null;
 
     return {
-      id: registeredAsset.id,
-      name: registeredAsset.name,
-      reference: registeredAsset.reference,
-      sourceUrl: registeredAsset.sourceUrl,
+      id: matchedAsset.id,
+      name: matchedAsset.name,
+      reference: matchedAsset.reference,
+      sourceUrl: matchedAsset.sourceUrl,
     };
   } catch {
     return null;

@@ -3,7 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
+  DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  SyncedImageAssetEntry,
   DataPlatformProjectEntry,
   DataPlatformProjectOpenResult,
   ProjectAssetIndex,
@@ -37,6 +39,14 @@ import {
   retryDataPlatformModelSync,
   startDataPlatformModelSync,
 } from './dataPlatformModelSync.js';
+import {
+  clearDataPlatformImageSyncRetryContext,
+  disposeDataPlatformImageSync,
+  getLatestDataPlatformImageSyncProgress,
+  listSyncedImages,
+  retryDataPlatformImageSync,
+  startDataPlatformImageSync,
+} from './dataPlatformImageSync.js';
 import {
   assertPathInside,
   DataPlatformRollbackError,
@@ -136,6 +146,47 @@ export async function syncDataPlatformModelsForWorkspace(
   return startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
 }
 
+/** 本地场景或业务工程打开后启动数据中台图标图片同步，与模型同步共用同一资源根判定。 */
+export async function syncDataPlatformImagesForWorkspace(
+  baseUrl: string,
+  workspaceRoot: string,
+): Promise<boolean> {
+  if (dataPlatformProjectServiceShuttingDown) return false;
+  const binding = getCurrentDataPlatformBinding();
+  if (!binding) {
+    await ensureWritableEditorRoot(workspaceRoot);
+    await activateProjectRoot(workspaceRoot);
+    setSharedProjectAssetRoot(null);
+    return startDataPlatformImageSync(baseUrl, workspaceRoot);
+  }
+  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  await ensureWritableEditorRoot(sharedResourcesRoot);
+  await ensureProjectDirectories(sharedResourcesRoot);
+  setSharedProjectAssetRoot(sharedResourcesRoot);
+  return startDataPlatformImageSync(baseUrl, sharedResourcesRoot);
+}
+
+/** 重试最近一次数据中台图片同步。 */
+export function retryLatestDataPlatformImageSync(): boolean {
+  return retryDataPlatformImageSync();
+}
+
+/** 暴露最近图片同步进度给晚挂载的 renderer。 */
+export function getCurrentDataPlatformImageSyncProgress(): DataPlatformImageSyncProgress | null {
+  return getLatestDataPlatformImageSyncProgress();
+}
+
+/** 读取当前工作区生效的同步图片清单，供 renderer 图片库与拖拽校验使用。 */
+export async function listSyncedImagesForWorkspace(workspaceRoot: string): Promise<SyncedImageAssetEntry[]> {
+  const binding = getCurrentDataPlatformBinding();
+  if (!binding) {
+    await ensureWritableEditorRoot(workspaceRoot).catch(() => undefined);
+    return listSyncedImages(workspaceRoot);
+  }
+  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  return listSyncedImages(sharedResourcesRoot);
+}
+
 /** 暴露模型同步重试给 IPC。 */
 export function retryLatestDataPlatformModelSync(): boolean {
   return retryDataPlatformModelSync();
@@ -149,6 +200,7 @@ export function getCurrentDataPlatformModelSyncProgress(): DataPlatformModelSync
 /** 数据中台配置变更后清除旧地址对应的重试上下文。 */
 export function clearDataPlatformProjectServiceRetryContext(): void {
   clearDataPlatformModelSyncRetryContext();
+  clearDataPlatformImageSyncRetryContext();
 }
 
 /** 应用退出时取消并等待工程打开与模型同步任务。 */
@@ -157,6 +209,7 @@ export async function disposeDataPlatformProjectTasks(): Promise<void> {
   for (const controller of openTaskControllers) controller.abort();
   await Promise.allSettled([...openTasks]);
   await disposeDataPlatformModelSync();
+  await disposeDataPlatformImageSync();
 }
 
 async function openDataPlatformProjectInternal(

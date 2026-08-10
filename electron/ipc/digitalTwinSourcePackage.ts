@@ -2,6 +2,7 @@ import { ZipArchive } from 'archiver';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
 import path from 'node:path';
+import type { SyncedImageAssetEntry } from '../types.js';
 
 const MAX_SCENE_FILES = 1_000;
 const MAX_SCENE_BYTES = 64 * 1024 * 1024;
@@ -29,6 +30,9 @@ export type BuildDigitalTwinSourcePackageOptions = {
   manifest: DigitalTwinSourceManifestInput;
   signal: AbortSignal;
   skipCadReferences?: boolean;
+  /** 数据中台图片引用判定与本地解析注入，避免打包模块直接依赖同步模块。 */
+  isPlatformImageReference: (value: string) => boolean;
+  findSyncedImageForReference: (editorRoots: readonly string[], reference: string) => Promise<SyncedImageAssetEntry | null>;
   onProgress?: (detail: string, completedFiles: number, totalFiles: number) => void;
 };
 
@@ -60,6 +64,11 @@ type ResourceBundle = {
   destinationRelativePath: string;
 };
 
+/** 数据中台同步图片在源工程中的便携资源映射，reference 为场景内稳定引用。 */
+type PlatformImageBundle = ResourceBundle & {
+  reference: string;
+};
+
 /** 构建可重新编辑的多场景源工程 ZIP，仅包含场景实际引用的资源包。 */
 export async function buildDigitalTwinSourcePackage(
   options: BuildDigitalTwinSourcePackageOptions,
@@ -81,12 +90,17 @@ export async function buildDigitalTwinSourcePackage(
   await fs.mkdir(stagingRoot, { recursive: false });
 
   try {
-    const scenes = await readSceneSnapshots(
+    const scenesResult = await readSceneSnapshots(
       projectRoot,
+      sharedResourcesRoot,
       entrySceneFilePath,
       options.signal,
       options.skipCadReferences === true,
+      options.isPlatformImageReference,
+      options.findSyncedImageForReference,
     );
+    const scenes = scenesResult.snapshots;
+    const platformImageBundleMap = scenesResult.platformImageBundleMap;
     const entryScene = scenes.find((scene) => path.resolve(scene.sourcePath) === entrySceneFilePath);
     if (!entryScene) throw new Error('入口场景不在当前项目 Scenes 目录中。');
 
@@ -94,6 +108,7 @@ export async function buildDigitalTwinSourcePackage(
       scenes.map((scene) => scene.content),
       projectRoot,
       sharedResourcesRoot,
+      platformImageBundleMap,
     );
     const estimatedFiles = scenes.length + bundles.length + 1;
     options.onProgress?.('正在复制源工程场景…', 0, estimatedFiles);
@@ -113,6 +128,7 @@ export async function buildDigitalTwinSourcePackage(
     await Promise.all([
       fs.mkdir(path.join(stagingRoot, 'Assets', 'Models'), { recursive: true }),
       fs.mkdir(path.join(stagingRoot, 'Assets', 'Environments'), { recursive: true }),
+      fs.mkdir(path.join(stagingRoot, 'Assets', 'Images'), { recursive: true }),
       fs.mkdir(path.join(stagingRoot, '.babylon-editor'), { recursive: true }),
     ]);
 
@@ -180,10 +196,13 @@ export async function buildDigitalTwinSourcePackage(
 
 async function readSceneSnapshots(
   projectRoot: string,
+  sharedResourcesRoot: string,
   entrySceneFilePath: string,
   signal: AbortSignal,
   skipCadReferences: boolean,
-): Promise<SceneSnapshot[]> {
+  isPlatformImageReference: (value: string) => boolean,
+  findSyncedImageForReference: (editorRoots: readonly string[], reference: string) => Promise<SyncedImageAssetEntry | null>,
+): Promise<{ snapshots: SceneSnapshot[]; platformImageBundleMap: ReadonlyMap<string, PlatformImageBundle> }> {
   const scenesRoot = path.join(projectRoot, 'Scenes');
   const scenePaths = await findSceneFiles(scenesRoot, signal);
   if (scenePaths.length === 0 || scenePaths.length > MAX_SCENE_FILES) {
@@ -217,7 +236,6 @@ async function readSceneSnapshots(
       throw new Error('场景文件路径逃逸 Scenes 目录。');
     }
     const relativePath = `Scenes/${toPortablePath(relativeFromScenes)}`;
-    const portableContent = `${JSON.stringify(rewriteSceneToPortableAssets(parsed), null, 2)}\n`;
     const sceneName = typeof parsed.scene.name === 'string' && parsed.scene.name.trim()
       ? parsed.scene.name.trim().slice(0, 128)
       : path.basename(sourcePath).replace(/\.scene\.json$/i, '');
@@ -225,13 +243,28 @@ async function readSceneSnapshots(
       sourcePath,
       relativePath,
       content: snapshotContent,
-      portableContent,
+      portableContent: snapshotContent,
       name: sceneName,
       size: Buffer.byteLength(snapshotContent, 'utf8'),
       sha256: sha256Text(snapshotContent),
     });
   }
-  return snapshots.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'en'));
+  snapshots.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'en'));
+
+  const platformImageBundleMap = await collectPlatformImageBundleMap(
+    snapshots.map((snapshot) => snapshot.content),
+    [projectRoot, sharedResourcesRoot],
+    isPlatformImageReference,
+    findSyncedImageForReference,
+  );
+  for (const snapshot of snapshots) {
+    snapshot.portableContent = `${JSON.stringify(
+      rewriteSceneToPortableAssets(JSON.parse(snapshot.content) as unknown, null, platformImageBundleMap),
+      null,
+      2,
+    )}\n`;
+  }
+  return { snapshots, platformImageBundleMap };
 }
 
 async function findSceneFiles(root: string, signal: AbortSignal): Promise<string[]> {
@@ -260,30 +293,94 @@ async function findSceneFiles(root: string, signal: AbortSignal): Promise<string
   return result;
 }
 
+/** 收集场景内全部数据中台图片稳定引用，并解析为本地 Assets/Images 文件；缺失时阻止打包以保持包完整。 */
+async function collectPlatformImageBundleMap(
+  sceneContents: readonly string[],
+  editorRoots: readonly string[],
+  isPlatformImageReference: (value: string) => boolean,
+  findSyncedImageForReference: (editorRoots: readonly string[], reference: string) => Promise<SyncedImageAssetEntry | null>,
+): Promise<ReadonlyMap<string, PlatformImageBundle>> {
+  const references = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (typeof value === 'string') {
+      if (isPlatformImageReference(value)) references.add(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (isPlainObject(value)) {
+      for (const child of Object.values(value)) visit(child);
+    }
+  };
+  for (const content of sceneContents) visit(JSON.parse(content) as unknown);
+
+  const bundles = new Map<string, PlatformImageBundle>();
+  for (const reference of [...references].sort()) {
+    const entry = await findSyncedImageForReference(editorRoots, reference);
+    if (!entry) {
+      throw new Error(`场景引用的数据中台图片未同步到当前项目：${reference}`);
+    }
+    bundles.set(reference, {
+      reference,
+      sourcePath: entry.filePath,
+      destinationRelativePath: `Assets/Images/${toPortablePath(entry.fileName)}`,
+    });
+  }
+  return bundles;
+}
+
+/** 判断字符串是否为便携数据中台图片引用（editor-asset URL 或 Assets/Images 相对路径）。 */
+function isPortableImageAssetReference(value: string): boolean {
+  const normalized = value.trim().replace(/\\/g, '/');
+  if (normalized.toLowerCase().startsWith('assets/images/')) return true;
+  if (!normalized.startsWith(LOCAL_ASSET_URL_PREFIX)) return false;
+  try {
+    const decoded = decodeURIComponent(new URL(normalized).pathname.slice(1)).replace(/\\/g, '/');
+    return decoded.toLowerCase().startsWith('assets/images/');
+  } catch {
+    return false;
+  }
+}
+
 function collectResourceBundles(
   sceneContents: readonly string[],
   projectRoot: string,
   sharedResourcesRoot: string,
+  platformImageBundleMap: ReadonlyMap<string, PlatformImageBundle>,
 ): ResourceBundle[] {
   const bundles = new Map<string, ResourceBundle>();
+  const registerBundle = (bundle: ResourceBundle): void => {
+    const key = bundle.destinationRelativePath.toLowerCase();
+    const existing = bundles.get(key);
+    if (existing && path.resolve(existing.sourcePath) !== path.resolve(bundle.sourcePath)) {
+      throw new Error(`源工程资源目标冲突：${bundle.destinationRelativePath}`);
+    }
+    bundles.set(key, bundle);
+  };
+
+  for (const platformBundle of platformImageBundleMap.values()) registerBundle(platformBundle);
+
   let visited = 0;
   const visit = (value: unknown, fieldName: string | null = null): void => {
     visited += 1;
     if (visited > 1_000_000) throw new Error('场景结构过大，无法完成源工程资源扫描。');
     if (typeof value === 'string') {
+      const platformBundle = platformImageBundleMap.get(value);
+      if (platformBundle) {
+        registerBundle(platformBundle);
+        return;
+      }
       const isResourceReference = Boolean(
         fieldName
         && (PATH_KEYS.has(fieldName) || URL_KEYS.has(fieldName) || PATH_ARRAY_KEYS.has(fieldName)),
       );
-      if (!isResourceReference) return;
+      const isImageAssetReference = isPortableImageAssetReference(value);
+      if (!isResourceReference && !isImageAssetReference) return;
       const bundle = resolveResourceBundle(value, projectRoot, sharedResourcesRoot);
       if (!bundle) return;
-      const key = bundle.destinationRelativePath.toLowerCase();
-      const existing = bundles.get(key);
-      if (existing && path.resolve(existing.sourcePath) !== path.resolve(bundle.sourcePath)) {
-        throw new Error(`源工程资源目标冲突：${bundle.destinationRelativePath}`);
-      }
-      bundles.set(key, bundle);
+      registerBundle(bundle);
       return;
     }
     if (Array.isArray(value)) {
@@ -352,11 +449,21 @@ function resolveResourceBundle(
   };
 }
 
-function rewriteSceneToPortableAssets(value: unknown, key: string | null = null): unknown {
+function rewriteSceneToPortableAssets(
+  value: unknown,
+  key: string | null = null,
+  platformImageBundleMap: ReadonlyMap<string, PlatformImageBundle> = new Map(),
+): unknown {
   if (typeof value === 'string') {
+    const platformBundle = platformImageBundleMap.get(value);
+    if (platformBundle) {
+      return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(platformBundle.destinationRelativePath)}`;
+    }
     const portablePath = toPortableAssetReference(value);
     if (!portablePath) return value;
+    const isImageAssetPortablePath = portablePath.toLowerCase().startsWith('assets/images/');
     if (key && URL_KEYS.has(key)) return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(portablePath)}`;
+    if (isImageAssetPortablePath) return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(portablePath)}`;
     if (key && PATH_KEYS.has(key)) return portablePath;
     return value;
   }
@@ -364,12 +471,12 @@ function rewriteSceneToPortableAssets(value: unknown, key: string | null = null)
     if (key && PATH_ARRAY_KEYS.has(key)) {
       return value.map((item) => typeof item === 'string' ? toPortableAssetReference(item) ?? item : item);
     }
-    return value.map((item) => rewriteSceneToPortableAssets(item, key));
+    return value.map((item) => rewriteSceneToPortableAssets(item, key, platformImageBundleMap));
   }
   if (!isPlainObject(value)) return value;
   return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
     childKey,
-    rewriteSceneToPortableAssets(childValue, childKey),
+    rewriteSceneToPortableAssets(childValue, childKey, platformImageBundleMap),
   ]));
 }
 
@@ -383,7 +490,7 @@ function toPortableAssetReference(value: string): string | null {
     }
   }
   normalized = normalized.replace(/\\/g, '/');
-  const match = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad)(?:\/.*|$))/i.exec(normalized);
+  const match = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images)(?:\/.*|$))/i.exec(normalized);
   return match ? path.posix.normalize(match[1]) : null;
 }
 

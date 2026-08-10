@@ -57,3 +57,23 @@ export function findBuiltInImageAssetByReference(reference: string): BuiltInImag
 export function resolveBuiltInImageSourceUrl(reference: string): string | null {
   return findBuiltInImageAssetByReference(reference)?.sourceUrl ?? null;
 }
+
+/** 数据中台同步图片的稳定引用前缀，场景只保存前缀 + iconKey。 */
+export const PLATFORM_IMAGE_REFERENCE_PREFIX = 'editor-image://platform/' as const;
+
+/** 数据中台图标 Key 命名规则，与后端 dt_bigscreen_icon 约束保持一致。 */
+const PLATFORM_ICON_KEY_PATTERN = /^[a-z][a-z0-9_-]{1,63}$/;
+
+/** 生成数据中台同步图片的稳定逻辑引用。 */
+export function createPlatformImageReference(iconKey: string): string {
+  if (!PLATFORM_ICON_KEY_PATTERN.test(iconKey)) {
+    throw new Error(`数据中台图标 Key 格式不正确：${iconKey}`);
+  }
+  return `${PLATFORM_IMAGE_REFERENCE_PREFIX}${iconKey}`;
+}
+
+/** 判断字符串是否为合法格式的数据中台同步图片引用，不校验本地登记状态。 */
+export function isPlatformImageReference(value: string): value is string {
+  if (!value.startsWith(PLATFORM_IMAGE_REFERENCE_PREFIX)) return false;
+  return PLATFORM_ICON_KEY_PATTERN.test(value.slice(PLATFORM_IMAGE_REFERENCE_PREFIX.length));
+}

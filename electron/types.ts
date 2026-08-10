@@ -229,6 +229,56 @@ export type DataPlatformModelSyncProgress = {
   error: string | null;
 };
 
+/** 同步自数据中台大屏图标库的图片资产，仅登记 CUSTOM + ACTIVE 且带 iconUrl 的图标。 */
+export type SyncedImageAssetEntry = {
+  /** 中台图标资产主键。 */
+  id: string;
+  /** 组件引用时使用的稳定图标 Key，创建后不可变。 */
+  iconKey: string;
+  /** 图标展示名称。 */
+  name: string;
+  /** 图标分类。 */
+  category?: string;
+  /** 排序号。 */
+  sortOrder?: number;
+  /** 中台更新时间，用于增量同步判定。 */
+  updatedAt: string;
+  /** 本地文件名，格式为 <iconKey>.<ext>。 */
+  fileName: string;
+  /** 本地文件绝对路径。 */
+  filePath: string;
+  /** 编辑器授权资产 URL。 */
+  sourceUrl: string;
+  /** 稳定逻辑引用，场景只保存该引用。 */
+  reference: string;
+  fileSizeBytes?: number;
+};
+
+/** 本地同步图片索引文件结构。 */
+export type SyncedImageIndex = {
+  version: 1;
+  images: SyncedImageAssetEntry[];
+};
+
+/** 数据中台图片同步执行阶段。 */
+export type DataPlatformImageSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+/** 数据中台图片同步进度，与模型同步进度同构。 */
+export type DataPlatformImageSyncProgress = {
+  runId: string;
+  phase: DataPlatformImageSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
 export type DataPlatformProjectListRequest = {
   projectName: string;
 };

@@ -4,7 +4,9 @@ import type {
   DeploymentExportRequest,
   DeploymentExportResult,
   DataPlatformConfig,
+  DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  SyncedImageAssetEntry,
   DataPlatformProjectListRequest,
   DataPlatformProjectEntry,
   DataPlatformProjectListResult,
@@ -87,6 +89,21 @@ contextBridge.exposeInMainWorld('editorApi', {
     return () => {
       active = false;
       ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
+    };
+  },
+  syncDataPlatformImages: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncImages'),
+  retryDataPlatformImageSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryImageSync'),
+  listSyncedImages: (): Promise<SyncedImageAssetEntry[]> => ipcRenderer.invoke('data-platform:listSyncedImages'),
+  onDataPlatformImageSyncProgress: (handler: (progress: DataPlatformImageSyncProgress) => void): (() => void) => {
+    let active = true;
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformImageSyncProgress) => handler(payload);
+    ipcRenderer.on('data-platform:imageSyncProgress', listener);
+    void ipcRenderer.invoke('data-platform:getImageSyncProgress').then((payload: DataPlatformImageSyncProgress | null) => {
+      if (active && payload) handler(payload);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      ipcRenderer.removeListener('data-platform:imageSyncProgress', listener);
     };
   },
   listProjectAssets: (): Promise<ProjectListAssetsResult> => ipcRenderer.invoke('project:listAssets'),

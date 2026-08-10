@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
 import { resolveBuiltInImageSourceUrl } from '../../assets/imageAssets';
+import { resolveSyncedImageSourceUrl } from '../../assets/syncedImageAssets';
 import { decodeImageAssetDragPayload, IMAGE_ASSET_DRAG_MIME_TYPE } from '../assets/AssetDatabase';
 import type { ModelAssetComponent } from '../model/components';
 import type {
@@ -50,9 +51,10 @@ function getContinuousDraftKey(parameterKey: string, axis?: keyof Vector3Data): 
   return axis ? `${parameterKey}.${axis}` : parameterKey;
 }
 
-/** 解析 texture 参数当前值的可预览缩略图，仅内置图片有稳定编辑器缩略图。 */
+/** 解析 texture 参数当前值的可预览缩略图：先查内置图片，再查数据中台同步图片登记表。 */
 function getTexturePreviewUrl(value: ModelParameterValue | undefined): string | null {
-  return typeof value === 'string' ? resolveBuiltInImageSourceUrl(value) : null;
+  if (typeof value !== 'string') return null;
+  return resolveBuiltInImageSourceUrl(value) ?? resolveSyncedImageSourceUrl(value);
 }
 
 export function ModelParametersInspector({ modelAsset, disabled = false, compact = false }: ModelParametersInspectorProps) {
