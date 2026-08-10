@@ -10,7 +10,6 @@ import {
   getModelTransformNodes,
   getNodeWorldRotation,
   getNodesWorldBounds,
-  moveNumberTowards,
   projectWorldBoundsOntoAxis,
 } from '../../runtimeNodeGeometry';
 import { isPlainRecord, sanitizeBabylonName } from '../../runtimeValueUtils';
@@ -23,7 +22,7 @@ import {
 } from '../../../mqtt/deviceTelemetry';
 import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
-import { readConveyorCargoSignalFields, readConveyorMotionConfigs, readConveyorTravelAxisFromConfigs } from './specializedModelAssets';
+import { readConveyorCargoSignalFields, readConveyorMotionConfigs, readConveyorTravelAxisFromConfigs, isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   type ConveyorCargoRuntimeEntry,
@@ -45,6 +44,9 @@ import {
 const CONVEYOR_CARGO_IDENTITY = 'cargo';
 
 export class ConveyorTelemetryDriver {
+  /** 探测点订阅序号：单调递增，多下游订阅同一上游时先订阅者（seq 小）先被推送。 */
+  private nextProbeSubscriptionSeq = 0;
+
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
 
   private get scene(): Scene {
@@ -97,24 +99,25 @@ export class ConveyorTelemetryDriver {
   /**
    * 货物生命周期两种模式：
    * - task 模式（快照携带数值 task 字段）：仅当 task 相对 lastTask 发生变化才登记 pendingTask（新 task 边沿），
-   *   边沿当帧即刷出/等待判定，不再等线体运行；movement_x 为 0 时按正转处理——刷在轨迹起点，
-   *   登记自驱移向终点（下一条新消息到达即恢复字段驱动）。
+   *   边沿当帧即刷出/订阅判定；movement_x 为 0 时按正转（方向 1）处理。
    *   同 task 重复到达（含线体清空后的重发）不再触发刷出+走行。
-   *   刷出判定：同 task 货物由他设备输送线持有且锁定时不刷出、进入等待（waitingTask），由持有方解锁后交出；
-   *   他机持有但未锁定、或 stacker/RGV 持有时直接接管（交接插值接入本机走行）；无持有时自建/复用遗留箱。
-   *   外界有可接管货物且自身持有旧 task 货物时：销毁自身货物、接管外界货物（优先于遗留箱复用）。
-   * - 匿名模式（无 task 字段）：线体运行即刷出，设备自管理，不参与全局接管。
-   * 锁定协议（仅持有方为输送线）：
-   * - 锁定态：mode==3 锁定货物（包括创建/接管货物的那一条消息），其他任何值都非锁定。
-   * - 等待方：等待中不刷出不走行；mode 变 0（同时放弃 pendingTask）、新 task 边沿或被交出时退出等待；
-   *   mode=2 不构成退出条件。
-   * - 持有方：锁定且存在等待本 task 的设备时执行出货动画——向轨迹正转终点额外推进半个货箱长度（超出终点半程即停）；
-   *   货物解锁（接到 mode≠3 的消息）或收到新 task 时交出货物，交给「货物世界坐标距设备上货坐标最近」的等待设备；
-   *   无等待设备时按 cargoAutoDispose 与销毁条件决定销毁或遗留（遗留箱等新 task 复用或被下游接管）。
-   * - 接管方：交接完成即按接管方向自驱走行（快照断流期间不等下一条 MQTT 消息），
-   *   新消息到达（receivedAt 变化）即结束自驱、恢复字段驱动。
-   * mode==2 且双光电（前后）都无货时的自动销毁由 telemetryBinding.cargoAutoDispose 控制（缺省开启），
-   * 交出优先于销毁：有等待设备时货物移交而非销毁。
+   * - 匿名模式（无 task 字段）：线体运行即刷出，设备自管理，不参与探测点订阅推送。
+   *
+   * 探测点订阅/推送协议（货物流转由 3D 场景布局决定，不再按 task 匹配）：
+   * - 探测点：轨迹轴向两端各向外延伸一个货箱长度的点；正转探测点对应 movement_x 0/1，反转探测点对应 movement_x 2。
+   *   探测点落在其他专用设备（conveyor/stacker/rgv）世界包围盒内即视为上游邻居。
+   * - 新 task 边沿：自身持有货物 → 直接复用滞留箱（盖新 task）；否则解析探测点邻居——
+   *   有邻居 → 进入等待（waitingTask）并登记订阅 probeSubscription（holderAssetCode+方向+seq，先订阅者 seq 小）；
+   *   无邻居且为起点设备（telemetryBinding.cargoOriginDevice）→ 自行创建货箱（movement_x=0 登记自驱移向终点）；
+   *   无邻居且非起点 → 仅等待（无订阅对象）。
+   * - 等待中：不刷出、不走行；mode 变 0（同时放弃 pendingTask 并退订）、新 task 边沿（退订后重新判定）、
+   *   被推送三种方式退出。方向翻转时邻居不变则更新订阅方向保留 seq，邻居变化则重新排队。
+   * - 推送：facade 每帧无条件执行 pushCargoToProbeSubscribers（与快照新旧无关）——
+   *   持有方一旦在三张货物表中有货，即推送给其订阅者中 seq 最小者（实例不销毁，1 秒交接插值接入），
+   *   无需下游再收 MQTT 消息；其余订阅者顺位等下一箱。
+   * - 被推送方：cargoTravelOffset 置自身刷出端、按订阅方向自驱走行（断流期间由帧调度驱动，新消息到达恢复字段驱动）。
+   * - 持有方完全被动：无订阅者时继续持有（clamp 在行程端点）；mode==2 且双光电无货时
+   *   由 telemetryBinding.cargoAutoDispose（缺省不销毁，勾选才销毁）决定销毁或遗留（遗留箱等新 task 复用或被下游推送取走）。
    * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向：
    * 正转（=1）刷在轨迹起点向终点移动；反转（=2）刷在轨迹终点向起点移动。
    */
@@ -128,9 +131,6 @@ export class ConveyorTelemetryDriver {
     const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods) ?? false;
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
     const mode = readIntegerField(snapshot.fields, 'mode');
-    // 锁定态：mode==3 锁定货物（包括创建/接管货物的那一条消息），其他任何值都非锁定。
-    // 断流重放用缓存 mode 重算结果一致，锁定态在快照断流期间保持。
-    state.cargoLocked = mode === 3;
 
     // 接管自驱只活到下一条新消息：receivedAt 变化即恢复字段驱动；断流重放（stale 快照）保持不变。
     // mode 变 2/0、新 task 边沿等停止语义都随新消息到达，天然由该清零覆盖。
@@ -139,8 +139,8 @@ export class ConveyorTelemetryDriver {
       state.selfDriveDirection = 0;
     }
 
-    // task 语义：数值 0/缺失为无任务；仅新 task 边沿（相对 lastTask 变化）登记，线体运行即刷出。
-    // lastTask 持久保存：货物销毁/被接管后同 task 重发不得重走刷出+走行。
+    // task 语义：数值 0/缺失为无任务；仅新 task 边沿（相对 lastTask 变化）登记。
+    // lastTask 持久保存：货物销毁/被推送走后同 task 重发不得重走刷出+走行。
     const taskValue = readIntegerField(snapshot.fields, 'task');
     const taskMode = taskValue !== null;
     const task = normalizeCargoTask(taskValue);
@@ -149,8 +149,9 @@ export class ConveyorTelemetryDriver {
       state.lastTask = task;
       state.currentTask = task;
       state.pendingTask = task;
-      // 新 task 取代旧等待：等待目标作废，走新 task 的刷出/等待判定
+      // 新 task 取代旧等待：退订旧上游，走新 task 的刷出/订阅判定
       state.waitingTask = null;
+      state.probeSubscription = null;
     }
 
     // 货物走行与链条本体共用同一份 translate 配置（fields+actionMap+speed），避免链/货速度脱节。
@@ -161,37 +162,24 @@ export class ConveyorTelemetryDriver {
     if (movementDirection !== 0) state.lastMovementDirection = movementDirection;
 
     // 等待方退出等待：仅 mode === 0（空闲，level 判断覆盖边沿）；持有方货物中途消失不自动退出。
-    // mode=2 是销毁条件而非等待退出条件：等待方 mode=2 不退出等待、不影响接管资格。
-    // 刷出判定已提前到 task 边沿，退出等待必须同时放弃 pendingTask，否则当帧立即重新等待。
+    // mode=2 是销毁条件而非等待退出条件：等待方 mode=2 不退出等待、不影响被推送资格。
+    // 退出等待必须同时放弃 pendingTask 并退订，否则当帧立即重新订阅。
     if (mode === 0) {
       if (state.waitingTask !== null) state.pendingTask = null;
       state.waitingTask = null;
-    }
-
-    const cargoKey = state.cargoCode !== null ? this.getConveyorCargoKey(model.assetCode, state.cargoCode) : null;
-    const heldCargo = cargoKey !== null ? this.state.conveyorCargoMeshes.get(cargoKey) ?? null : null;
-
-    // 持有方交出：货物解锁（接到 mode≠3 的消息）或新 task 边沿时，把货物交给上货坐标距货物世界坐标最近的等待设备。
-    // 必须在销毁逻辑之前：有等待设备时移交优先于自动销毁。等待只存在于锁定货物，解锁当帧即交出。
-    if (heldCargo?.task && (!state.cargoLocked || newTaskEdge)) {
-      const waiters = this.findWaitingConveyorModels(model, heldCargo.task);
-      if (waiters.length > 0) this.transferConveyorCargoToNearestWaiter(model, heldCargo, waiters);
+      state.probeSubscription = null;
     }
 
     // 销货条件：mode==2 且双光电（前后）都无货；与线体是否在走行无关。
     if (mode === 2 && !frontHasGoods && !backHasGoods) {
-      // 自动销毁关闭时本机保留货物与位姿：等下游凭 task 取走，或新 task 刷出时直接复用该箱。
-      if (model.telemetryBinding?.cargoAutoDispose === false) {
-        if (!state.cargoCode) return;
-      } else {
+      // 勾选自动销毁时才销毁；缺省不勾选：保留货物与位姿（遗留箱），等下游订阅推送取走或新 task 复用。
+      if (model.telemetryBinding?.cargoAutoDispose === true) {
         this.disposeConveyorCargoForAssetCode(model.assetCode);
         state.cargoCode = null;
         return;
       }
+      if (!state.cargoCode) return;
     }
-
-    // 等待中：放弃主动创建货物和运动（本机已有货物同样静止）。
-    if (state.waitingTask) return;
 
     const travelContext = this.resolveConveyorCargoTravelContext(model);
     const cargoAxialLength = CONVEYOR_CARGO_SIZE[travelContext.travelAxisName];
@@ -200,39 +188,50 @@ export class ConveyorTelemetryDriver {
     // 刷出端由运行方向决定：正转刷在轨迹起点向终点移动，反转刷在轨迹终点向起点移动。
     const spawnOffsetForDirection = (direction: number): number => -direction * forwardSign * travelHalfRange;
 
-    if (taskMode) {
-      // task 模式：新 task 边沿（pendingTask 登记）即刷出/等待判定，不再等线体运行；
-      // movement_x 为 0 时按正转处理——刷在轨迹起点，登记自驱移向终点（下一条新消息恢复字段驱动）。
-      if (state.pendingTask) {
-        // 同 task 货物由他设备输送线持有且锁定：放弃刷出进入等待，由持有方解锁后交出（pendingTask 保留）；
-        // 他机持有但未锁定、或 stacker/RGV 持有时不当等待，直接走下方接管。
-        const heldByOther = this.findHeldConveyorCargoByTask(state.pendingTask, model.assetCode);
-        if (heldByOther && this.isConveyorCargoLocked(heldByOther)) {
-          state.waitingTask = state.pendingTask;
-          return;
-        }
-        const spawnTask = state.pendingTask;
+    // task 模式：新 task 边沿（pendingTask 登记）即刷出/订阅判定，不再等线体运行；movement_x 为 0 时按正转处理。
+    // 等待期间 pendingTask 保留，本块每帧幂等重估：方向翻转时切换订阅目标，邻居消失的起点设备随即自建。
+    if (taskMode && state.pendingTask) {
+      const heldCargo = state.cargoCode !== null
+        ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
+        : null;
+      if (heldCargo) {
+        // 滞留箱直接复用：保持位置，盖上新 task，不等待不订阅（无论 autoDispose 与否）。
+        heldCargo.task = state.pendingTask;
+        const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
+        heldCargo.containerCode = containerCode || heldCargo.containerCode;
         state.pendingTask = null;
-        const spawnDirection = movementDirection !== 0 ? movementDirection : 1;
-        // 外界存在可接管货物且自身仍持有旧 task 货物：销毁自身货物、接管外界货物，该优先级高于遗留箱复用。
-        const externalAdoptable = this.findAdoptableGlobalCargoByTask(spawnTask, model.assetCode) !== null;
-        // 仅自动销毁关闭且外界无可接管货物时的遗留箱直接复用：不销毁不重建，保持滞留位置，盖上新 task 继续走行。
-        const leftover = !externalAdoptable && model.telemetryBinding?.cargoAutoDispose === false && state.cargoCode !== null
-          ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
-          : null;
-        if (leftover) {
-          leftover.task = state.currentTask ?? '';
-          const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
-          leftover.containerCode = containerCode || leftover.containerCode;
-        } else {
-          this.disposeConveyorCargoForAssetCode(model.assetCode);
-          state.cargoTravelOffset = spawnOffsetForDirection(spawnDirection);
-          state.cargoCode = CONVEYOR_CARGO_IDENTITY;
-          this.adoptOrCreateConveyorCargo(model, snapshot, state.cargoCode);
-        }
+        state.waitingTask = null;
+        state.probeSubscription = null;
+        // movement_x=0 按正转处理：登记自驱从滞留位置继续移向终点（下一条新消息恢复字段驱动）。
         if (movementDirection === 0) state.selfDriveDirection = 1;
+      } else {
+        const probeDirection = movementDirection !== 0 ? movementDirection : 1;
+        const neighbor = this.resolveProbeNeighbor(model, probeDirection);
+        if (neighbor) {
+          // 上游邻居存在：进入等待并向其订阅，由其持货后主动推送（无需本机再收消息）。
+          state.waitingTask = state.pendingTask;
+          this.subscribeProbe(model, neighbor.assetCode, probeDirection);
+        } else if (model.telemetryBinding?.cargoOriginDevice === true) {
+          // 起点设备：探测点未触及上游设备时允许自行创建货箱。
+          state.pendingTask = null;
+          state.waitingTask = null;
+          state.probeSubscription = null;
+          state.cargoTravelOffset = spawnOffsetForDirection(probeDirection);
+          state.cargoCode = CONVEYOR_CARGO_IDENTITY;
+          this.createConveyorCargoForTask(model, snapshot, state.cargoCode);
+          if (movementDirection === 0) state.selfDriveDirection = 1;
+        } else {
+          // 探测点无上游且非起点设备：无货可等，仅挂起等待（无订阅对象）。
+          state.waitingTask = state.pendingTask;
+          state.probeSubscription = null;
+        }
       }
-    } else if (!state.cargoCode) {
+    }
+
+    // 等待中：放弃主动创建货物和运动；接管完全由帧级推送扫描完成，本机断流也能收到推送。
+    if (state.waitingTask) return;
+
+    if (!taskMode && !state.cargoCode) {
       // 匿名模式：线体运行即刷出，不再依赖光电信号；单货物身份固定，刷出位置只由运行方向决定。
       if (movementDirection === 0) return;
       state.cargoTravelOffset = spawnOffsetForDirection(movementDirection);
@@ -252,18 +251,8 @@ export class ConveyorTelemetryDriver {
     if (!snapshot.faulted && cargoDirection !== 0) {
       state.cargoTravelOffset += cargoDirection * forwardSign * cargoSpeed * deltaSeconds;
     }
-
-    // 出货动画：锁定态且存在等待本 task 的设备时，向轨迹正转终点额外推进半个货箱长度（与线体是否走行无关）。
-    let clampMin = -travelHalfRange;
-    let clampMax = travelHalfRange;
-    if (!snapshot.faulted && state.cargoLocked && cargo.task && this.findWaitingConveyorModels(model, cargo.task).length > 0) {
-      const pushTarget = forwardSign * (travelHalfRange + cargoAxialLength / 2);
-      state.cargoTravelOffset = moveNumberTowards(state.cargoTravelOffset, pushTarget, cargoSpeed * deltaSeconds);
-      clampMin = Math.min(clampMin, pushTarget);
-      clampMax = Math.max(clampMax, pushTarget);
-    }
     // 每帧按当前行程钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
-    state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, clampMin, clampMax);
+    state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, -travelHalfRange, travelHalfRange);
 
     this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));
     const pose = resolveCargoHandoffPose(
@@ -275,145 +264,155 @@ export class ConveyorTelemetryDriver {
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation);
   }
 
-  /** 扫描等待指定 task 的他设备输送线模型（waitingTask 由等待方在刷出判定失败时登记）。 */
-  private findWaitingConveyorModels(selfModel: ModelRuntimeEntry, task: string): ModelRuntimeEntry[] {
-    const waiters: ModelRuntimeEntry[] = [];
+  /**
+   * 帧级推送扫描（facade 每帧调用，与快照新旧无关）：持有方一旦持货，
+   * 即把货物推送给其订阅者中 seq 最小者；推送后该订阅者退出等待，其余订阅者顺位等下一箱。
+   * 链式接力在同一扫描内逐级传递（A 推 B 后 B 持货，同帧可再推 C）。
+   */
+  pushCargoToProbeSubscribers(): void {
+    const subscribersByHolder = new Map<string, ModelRuntimeEntry[]>();
     for (const { model } of this.host.collectModels()) {
-      if (model === selfModel || model.assetCode === selfModel.assetCode) continue;
-      if (model.conveyorTelemetry?.waitingTask === task) waiters.push(model);
+      const subscription = model.conveyorTelemetry?.probeSubscription;
+      if (!subscription) continue;
+      const list = subscribersByHolder.get(subscription.holderAssetCode) ?? [];
+      list.push(model);
+      subscribersByHolder.set(subscription.holderAssetCode, list);
     }
-    return waiters;
+    for (const [holderAssetCode, subscribers] of subscribersByHolder) {
+      subscribers.sort(
+        (a, b) => (a.conveyorTelemetry.probeSubscription?.seq ?? 0) - (b.conveyorTelemetry.probeSubscription?.seq ?? 0),
+      );
+      // 同组可能有多件货物（如 stacker 双叉）：循环按订阅顺序逐个推送，直到货物或订阅者耗尽。
+      for (const subscriber of subscribers) {
+        const subscription = subscriber.conveyorTelemetry.probeSubscription;
+        if (!subscription || subscription.holderAssetCode !== holderAssetCode) continue;
+        const cargo = this.findProbeHeldCargo(holderAssetCode, this.resolveProbePoint(subscriber, subscription.direction));
+        if (!cargo) break;
+        this.pushCargoToSubscriber(holderAssetCode, cargo, subscriber, subscription.direction);
+      }
+    }
   }
 
-  /** 查询他设备输送线持有的同 task 货物；stacker/RGV 持有的货物不在此表，维持刷出即接管。 */
-  private findHeldConveyorCargoByTask(task: string, selfAssetCode: string): ConveyorCargoRuntimeEntry | null {
-    for (const cargo of this.state.conveyorCargoMeshes.values()) {
-      if (cargo.task === task && cargo.assetCode !== selfAssetCode) return cargo;
+  /** 向探测点上游设备登记订阅：邻居不变时仅更新方向并保留 seq（先来后到），邻居变化才重新排队。 */
+  private subscribeProbe(model: ModelRuntimeEntry, holderAssetCode: string, direction: number): void {
+    const state = model.conveyorTelemetry;
+    const existing = state.probeSubscription;
+    if (existing && existing.holderAssetCode === holderAssetCode) {
+      existing.direction = direction;
+      return;
+    }
+    state.probeSubscription = { holderAssetCode, direction, seq: ++this.nextProbeSubscriptionSeq };
+  }
+
+  /** 探测点邻居解析（带缓存）：正/反转各解析一次，预览期间模型不动，缓存安全。 */
+  private resolveProbeNeighbor(model: ModelRuntimeEntry, direction: number): ModelRuntimeEntry | null {
+    const state = model.conveyorTelemetry;
+    if (!state.probeNeighbors) {
+      state.probeNeighbors = {
+        forward: this.findProbeNeighborAssetCode(model, 1),
+        reverse: this.findProbeNeighborAssetCode(model, -1),
+      };
+    }
+    const assetCode = direction < 0 ? state.probeNeighbors.reverse : state.probeNeighbors.forward;
+    if (!assetCode) return null;
+    for (const { model: candidate } of this.host.collectModels()) {
+      if (candidate.assetCode === assetCode) return candidate;
     }
     return null;
   }
 
-  /** 他设备输送线持有的货物是否处于锁定态（holder 模型缺失时按未锁定处理，允许直接接管）。 */
-  private isConveyorCargoLocked(cargo: ConveyorCargoRuntimeEntry): boolean {
-    for (const { model } of this.host.collectModels()) {
-      if (model.assetCode === cargo.assetCode) return model.conveyorTelemetry?.cargoLocked ?? false;
-    }
-    return false;
+  /** 探测点世界坐标：轨迹端点沿走行方向向外延伸一个货箱长度（复用刷出端偏移公式）。 */
+  private resolveProbePoint(model: ModelRuntimeEntry, direction: number): Vector3 {
+    const travelContext = this.resolveConveyorCargoTravelContext(model);
+    const cargoAxialLength = CONVEYOR_CARGO_SIZE[travelContext.travelAxisName];
+    const travelHalfRange = resolveConveyorCargoTravelHalfRange(travelContext.spanMeters ?? 0, cargoAxialLength);
+    const forwardSign = this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxis);
+    return this.getConveyorCargoPosition(model, travelContext, -direction * forwardSign * (travelHalfRange + cargoAxialLength));
   }
 
-  /** 扫三张货物表找他设备持有的同 task 可接管货物（镜像 facade adoptGlobalCargoByTask 的扫描范围，只读不写）。 */
-  private findAdoptableGlobalCargoByTask(task: string, selfAssetCode: string): GeneratedCargoRuntimeEntry | null {
-    if (!task) return null;
+  /** 探测点落在哪个专用设备（conveyor/stacker/rgv）的世界包围盒内；多个命中取盒中心最近者。 */
+  private findProbeNeighborAssetCode(model: ModelRuntimeEntry, direction: number): string | null {
+    const probePoint = this.resolveProbePoint(model, direction);
+    const epsilon = 0.05;
+    let nearestAssetCode: string | null = null;
+    let nearestDistance = Infinity;
+    for (const { model: candidate } of this.host.collectModels()) {
+      if (candidate === model || candidate.assetCode === model.assetCode) continue;
+      if (!isConveyorRuntimeModel(candidate) && !isRgvRuntimeModel(candidate) && !candidate.stackerCapable) continue;
+      const bounds = this.host.getModelWorldBounds(candidate);
+      if (!bounds) continue;
+      const { minimum, maximum } = bounds;
+      if (probePoint.x < minimum.x - epsilon || probePoint.x > maximum.x + epsilon
+        || probePoint.y < minimum.y - epsilon || probePoint.y > maximum.y + epsilon
+        || probePoint.z < minimum.z - epsilon || probePoint.z > maximum.z + epsilon) continue;
+      const distance = Vector3.DistanceSquared(probePoint, minimum.add(maximum).scale(0.5));
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestAssetCode = candidate.assetCode;
+      }
+    }
+    return nearestAssetCode;
+  }
+
+  /** 扫三张货物表找持有方持有的货物；多件时取距参考点最近的一件（如 stacker 双叉各持一箱）。 */
+  private findProbeHeldCargo(holderAssetCode: string, nearPoint: Vector3): GeneratedCargoRuntimeEntry | null {
+    let nearest: GeneratedCargoRuntimeEntry | null = null;
+    let nearestDistance = Infinity;
     const tables = [this.state.stackerCargoMeshes, this.state.conveyorCargoMeshes, this.state.rgvCargoMeshes];
     for (const table of tables) {
       for (const cargo of table.values()) {
-        if (cargo.task === task && cargo.assetCode !== selfAssetCode) return cargo;
+        if (cargo.assetCode !== holderAssetCode) continue;
+        const distance = Vector3.DistanceSquared(cargo.root.getAbsolutePosition(), nearPoint);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearest = cargo;
+        }
       }
     }
-    return null;
+    return nearest;
   }
 
-  /** 断流兜底：锁定货物且存在等待本 task 的设备时仍要求帧级驱动，让出货动画在快照断流期间走完。 */
-  needsLockedPushOutDrive(model: ModelRuntimeEntry): boolean {
-    const state = model.conveyorTelemetry;
-    if (!state?.cargoLocked || state.cargoCode === null) return false;
-    const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
-    if (!cargo?.task) return false;
-    return this.findWaitingConveyorModels(model, cargo.task).length > 0;
-  }
+  /** 推送货物给订阅者：实例不销毁（交接插值保持视觉连续），订阅者置刷出端并按订阅方向自驱走行。 */
+  private pushCargoToSubscriber(
+    holderAssetCode: string,
+    cargo: GeneratedCargoRuntimeEntry,
+    subscriber: ModelRuntimeEntry,
+    direction: number,
+  ): void {
+    const subscriberState = subscriber.conveyorTelemetry;
+    const detached = this.context.detachClaimedCargoByReference(cargo);
+    if (!detached) return;
+    const task = subscriberState.pendingTask ?? subscriberState.currentTask ?? '';
+    detached.assetCode = subscriber.assetCode;
+    detached.task = task;
+    detached.handoff = createCargoHandoffState(detached);
 
-  /** 等待设备的上货坐标：按其最近运行方向的刷出端世界坐标。 */
-  private getConveyorLoadingPoint(waiterModel: ModelRuntimeEntry): Vector3 {
-    const waiterState = waiterModel.conveyorTelemetry;
-    const travelContext = this.resolveConveyorCargoTravelContext(waiterModel);
+    const travelContext = this.resolveConveyorCargoTravelContext(subscriber);
     const travelHalfRange = resolveConveyorCargoTravelHalfRange(
       travelContext.spanMeters ?? 0,
       CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
     );
-    const forwardSign = this.readConveyorTrajectoryForwardSign(waiterModel, travelContext.travelAxis);
-    const direction = waiterState.lastMovementDirection !== 0 ? waiterState.lastMovementDirection : 1;
-    return this.getConveyorCargoPosition(waiterModel, travelContext, -direction * forwardSign * travelHalfRange);
-  }
-
-  /** 持有方交出货物：最近等待设备接管所有权（实例不销毁，交接插值保持视觉连续）；等待设备的遗留箱先销毁。 */
-  private transferConveyorCargoToNearestWaiter(
-    holderModel: ModelRuntimeEntry,
-    cargo: ConveyorCargoRuntimeEntry,
-    waiters: ModelRuntimeEntry[],
-  ): void {
-    const cargoPosition = cargo.root.getAbsolutePosition();
-    let winner = waiters[0];
-    let nearestDistance = Infinity;
-    for (const waiter of waiters) {
-      const distance = Vector3.DistanceSquared(cargoPosition, this.getConveyorLoadingPoint(waiter));
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        winner = waiter;
-      }
-    }
-
-    const holderState = holderModel.conveyorTelemetry;
-    const winnerState = winner.conveyorTelemetry;
-    if (winnerState.cargoCode !== null) {
-      const leftoverKey = this.getConveyorCargoKey(winner.assetCode, winnerState.cargoCode);
-      const leftover = this.state.conveyorCargoMeshes.get(leftoverKey);
-      if (leftover) {
-        this.disposeConveyorCargo(leftover);
-        this.state.conveyorCargoMeshes.delete(leftoverKey);
-      }
-    }
-
-    const holderKey = this.getConveyorCargoKey(holderModel.assetCode, holderState.cargoCode!);
-    this.state.conveyorCargoMeshes.delete(holderKey);
-    holderState.cargoCode = null;
-    if (holderState.currentTask === cargo.task) holderState.currentTask = null;
-
-    cargo.assetCode = winner.assetCode;
-    cargo.handoff = createCargoHandoffState(cargo);
-
-    const winnerContext = this.resolveConveyorCargoTravelContext(winner);
-    const winnerHalfRange = resolveConveyorCargoTravelHalfRange(
-      winnerContext.spanMeters ?? 0,
-      CONVEYOR_CARGO_SIZE[winnerContext.travelAxisName],
-    );
-    const winnerForwardSign = this.readConveyorTrajectoryForwardSign(winner, winnerContext.travelAxis);
-    const winnerDirection = winnerState.lastMovementDirection !== 0 ? winnerState.lastMovementDirection : 1;
-    winnerState.cargoCode = CONVEYOR_CARGO_IDENTITY;
-    winnerState.cargoTravelOffset = -winnerDirection * winnerForwardSign * winnerHalfRange;
-    winnerState.pendingTask = null;
-    winnerState.waitingTask = null;
+    const forwardSign = this.readConveyorTrajectoryForwardSign(subscriber, travelContext.travelAxis);
+    subscriberState.cargoCode = CONVEYOR_CARGO_IDENTITY;
+    subscriberState.cargoTravelOffset = -direction * forwardSign * travelHalfRange;
+    subscriberState.pendingTask = null;
+    subscriberState.waitingTask = null;
+    subscriberState.probeSubscription = null;
     // 承接即走行：登记自驱方向，快照断流期间由帧调度继续驱动，新消息到达即恢复字段驱动。
-    winnerState.selfDriveDirection = winnerDirection;
-    this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(winner.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
-    this.host.pushLog(`Conveyor ${holderModel.assetCode} 凭 task=${cargo.task} 将货物移交 ${winner.assetCode}`);
+    subscriberState.selfDriveDirection = direction;
+    this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(subscriber.assetCode, CONVEYOR_CARGO_IDENTITY), detached);
+    this.host.pushLog(`Conveyor ${subscriber.assetCode} 凭探测点订阅接管 ${holderAssetCode} 持有的货物（task=${task || '匿名'}）`);
   }
 
-  /** task 模式刷出：全局接管同 task 货箱实例（交接插值接入本机走行），否则自建；接管后本机持锁，上游不再重生。 */
-  private adoptOrCreateConveyorCargo(
+  /** task 模式刷出：探测点无上游的起点设备自建货箱。 */
+  private createConveyorCargoForTask(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
     cargoCode: string,
   ): void {
-    const cargoKey = this.getConveyorCargoKey(model.assetCode, cargoCode);
-    const task = model.conveyorTelemetry.currentTask ?? '';
-    const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
-    const adopted = this.context.adoptGlobalCargoByTask(task, cargoKey);
-    if (adopted) {
-      const placeholder = this.state.conveyorCargoMeshes.get(cargoKey);
-      if (placeholder && placeholder !== adopted) {
-        this.disposeConveyorCargo(placeholder);
-        this.state.conveyorCargoMeshes.delete(cargoKey);
-      }
-      adopted.assetCode = model.assetCode;
-      adopted.task = task;
-      adopted.containerCode = containerCode || adopted.containerCode;
-      adopted.handoff = createCargoHandoffState(adopted);
-      this.state.conveyorCargoMeshes.set(cargoKey, adopted);
-      return;
-    }
     const cargo = this.getOrCreateConveyorCargo(model.assetCode, cargoCode);
-    cargo.task = task;
-    cargo.containerCode = containerCode;
+    cargo.task = model.conveyorTelemetry.currentTask ?? '';
+    cargo.containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
   }
 
   /** 按 motion.fields 读取输送线方向，支持模型脚本自定义 actionMap。 */

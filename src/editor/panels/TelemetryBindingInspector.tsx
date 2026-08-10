@@ -350,10 +350,19 @@ function RgvColumnBindingsEditor(props: {
             <input
               type="checkbox"
               disabled={props.disabled}
-              checked={binding.cargoAutoDispose ?? true}
+              checked={binding.cargoAutoDispose ?? false}
               onChange={(event) => commit({ cargoAutoDispose: event.target.checked })}
             />
             货物自动销毁（mode=2 且光电无货时）
+          </label>
+          <label className="mqtt-config-dialog-checkbox">
+            <input
+              type="checkbox"
+              disabled={props.disabled}
+              checked={binding.cargoOriginDevice ?? false}
+              onChange={(event) => commit({ cargoOriginDevice: event.target.checked })}
+            />
+            起点设备（探测点无上游设备时自行创建货箱）
           </label>
         </>
       ) : null}
