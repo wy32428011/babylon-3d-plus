@@ -187,6 +187,25 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       state.stackerCargoMeshes.set(JSON.stringify([assetCode, 'front']), entry as ConveyorCargoRuntimeEntry);
       return entry;
     },
+    /** 向 conveyor 货物表插入持有货物并置 holder 遥测引用（模拟输送线已持有的货箱）。 */
+    insertConveyorCargo: (assetCode: string, task: string) => {
+      const root = new TransformNode(`${assetCode}_cargo_root`, scene);
+      const entry = {
+        assetCode,
+        containerCode: '',
+        task,
+        root,
+        outputOwner: null,
+        fallback: null,
+        generatorEntityId: null,
+        handoff: null,
+      };
+      state.conveyorCargoMeshes.set(JSON.stringify([assetCode, 'cargo']), entry as ConveyorCargoRuntimeEntry);
+      models.get(assetCode)!.conveyorTelemetry.cargoCode = 'cargo';
+      return entry;
+    },
+    /** 仅执行帧尾推送扫描（不驱动任何设备帧）。 */
+    scan: () => driver.pushCargoToProbeSubscribers(),
   };
 }
 
@@ -196,9 +215,25 @@ function onlyCargo(state: ReturnType<typeof createSpecializedTelemetrySharedStat
   return [...state.conveyorCargoMeshes.values()][0];
 }
 
-test('新 task 且探测点触及上游设备：进入等待并登记订阅（holderAssetCode/direction/seq）', () => {
-  const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 } });
+test('直接邻居无货且 task 不一致（含无 task）：不订阅，仅挂起等待', () => {
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });
   try {
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    assert.equal(h.models.CV2.conveyorTelemetry.waitingTask, '7', '必须登记等待 task');
+    assert.equal(h.models.CV2.conveyorTelemetry.pendingTask, '7', 'pendingTask 保留');
+    assert.equal(h.models.CV2.conveyorTelemetry.cargoCode, null, '等待方不得刷出货物');
+    assert.equal(h.models.CV2.conveyorTelemetry.probeSubscription, null, '上游无货且 task 不一致不得订阅');
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '无货物被创建');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('直接邻居无货但同 task：进入等待并登记订阅（holderAssetCode/direction/seq）', () => {
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });
+  try {
+    // CV1 先收 task=7（探测点无上游且非起点 → 空载等待），CV2 凭同 task 订阅 CV1
+    h.apply('CV1', { task: 7, movement_x: 1 });
     h.apply('CV2', { task: 7, movement_x: 1 });
     assert.equal(h.models.CV2.conveyorTelemetry.waitingTask, '7', '必须登记等待 task');
     assert.equal(h.models.CV2.conveyorTelemetry.pendingTask, '7', 'pendingTask 保留');
@@ -218,12 +253,17 @@ test('上游持货后主动推送：下游无需再收 MQTT 消息即接管货�
   const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 } });
   try {
     const stamp = 1_000_000;
-    // CV2 先订阅（CV1 尚无货物），此后不再给 CV2 任何新消息
+    // CV2 先收 task：CV1 尚无货物且无 task → 不订阅（task 不一致），仅等待
     h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 1, stamp);
-    assert.equal(h.models.CV2.conveyorTelemetry.probeSubscription?.holderAssetCode, 'CV1');
+    assert.equal(h.models.CV2.conveyorTelemetry.probeSubscription, null, '上游无货且 task 不一致时不得订阅');
+    assert.equal(h.models.CV2.conveyorTelemetry.waitingTask, '7');
 
-    // CV1 收 task 刷出（起点设备）；帧尾推送扫描必须把货物推给 CV2
+    // CV1 收 task 刷出（起点设备）；此刻无人订阅，货物留在 CV1
     h.apply('CV1', { task: 7, movement_x: 1 });
+    assert.equal(onlyCargo(h.state).assetCode, 'CV1');
+
+    // CV2 断流重放（同一 receivedAt，无新消息）：逐帧重估发现 CV1 持货 → 订阅并当帧被推送
+    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 1, stamp);
     const pushed = onlyCargo(h.state);
     assert.equal(pushed.assetCode, 'CV2', '货物必须换绑到订阅者');
     assert.equal(pushed.task, '7', '货物必须盖上订阅者的 task');
@@ -259,12 +299,13 @@ test('上游持货后主动推送：下游无需再收 MQTT 消息即接管货�
 test('多台下游订阅同一上游：先订阅者先得，其余顺位等下一箱', () => {
   // CV3 放在 -0.5：其正转探测点 x=-2.86 同样落入 CV1 包围盒（且 CV2 探测点距 CV1 中心更近，不受影响）
   const h = makeHarness({
-    CV1: { centerX: -4, origin: true },
+    CV1: { centerX: -4 },
     CV2: { centerX: 0 },
     CV3: { centerX: -0.5 },
   });
   try {
-    // CV2 先订阅（seq=1），CV3 后订阅（seq=2）
+    // CV1 先收 task=7 空载等待（探测点无上游且非起点），CV2/CV3 凭同 task 先后订阅 CV1
+    h.apply('CV1', { task: 7, movement_x: 1 });
     h.apply('CV2', { task: 7, movement_x: 1 });
     h.apply('CV3', { task: 7, movement_x: 1 });
     assert.equal(h.models.CV2.conveyorTelemetry.probeSubscription?.holderAssetCode, 'CV1');
@@ -274,14 +315,16 @@ test('多台下游订阅同一上游：先订阅者先得，其余顺位等下�
     assert.ok(seq2 < seq3, `先订阅者 seq 必须更小（${seq2} < ${seq3}）`);
 
     // 第一箱推给先订阅的 CV2；CV3 继续等待
-    h.apply('CV1', { task: 7, movement_x: 1 });
+    h.insertConveyorCargo('CV1', '7');
+    h.scan();
     const first = onlyCargo(h.state);
     assert.equal(first.assetCode, 'CV2', '第一箱必须推给先订阅者');
     assert.equal(h.models.CV3.conveyorTelemetry.waitingTask, '7', 'CV3 必须继续等待');
     assert.ok(h.models.CV3.conveyorTelemetry.probeSubscription, 'CV3 订阅必须保留');
 
-    // CV1 新 task 刷出第二箱 → 推给顺位的 CV3
-    h.apply('CV1', { task: 8, movement_x: 1 });
+    // CV1 持第二箱 → 推给顺位的 CV3（货物盖上 CV3 等待的 task）
+    h.insertConveyorCargo('CV1', '8');
+    h.scan();
     const cargos = [...h.state.conveyorCargoMeshes.values()];
     assert.equal(cargos.length, 2);
     const second = cargos.find((cargo) => cargo.assetCode === 'CV3');
@@ -295,12 +338,14 @@ test('多台下游订阅同一上游：先订阅者先得，其余顺位等下�
 
 test('等待中方向翻转：邻居不变保留 seq 仅更新方向；邻居变化重新排队', () => {
   const h = makeHarness({
-    CV1: { centerX: -4, origin: true },
+    CV1: { centerX: -4 },
     CV2: { centerX: 0 },
     CV3: { centerX: 4 },
   });
   try {
-    // CV2 正转订阅 CV1（seq=1）
+    // CV1/CV3 先收 task=7 空载等待，CV2 正转订阅 CV1
+    h.apply('CV1', { task: 7, movement_x: 1 });
+    h.apply('CV3', { task: 7, movement_x: 1 });
     h.apply('CV2', { task: 7, movement_x: 1 });
     assert.equal(h.models.CV2.conveyorTelemetry.probeSubscription?.holderAssetCode, 'CV1');
     // 翻转为反转：反转探测点触及 CV3 → 邻居变化必须重新排队（新 seq）
@@ -385,9 +430,10 @@ test('自身持有滞留货箱时新 task 直接复用，不等待不订阅', ()
 });
 
 test('mode=0 退出等待并退订，上游货物保持不动', () => {
-  const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 } });
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });
   try {
-    // CV2 先订阅（CV1 尚无货物，不会被推送）
+    // CV1 先收 task=7 空载等待，CV2 凭同 task 订阅 CV1
+    h.apply('CV1', { task: 7, movement_x: 1 });
     h.apply('CV2', { task: 7, movement_x: 1 });
     assert.ok(h.models.CV2.conveyorTelemetry.probeSubscription);
     h.apply('CV2', { task: 7, movement_x: 0, mode: 0 });
@@ -396,7 +442,8 @@ test('mode=0 退出等待并退订，上游货物保持不动', () => {
     assert.equal(h.models.CV2.conveyorTelemetry.probeSubscription, null, '退出等待必须退订');
 
     // 退订后上游持货不再推送
-    h.apply('CV1', { task: 7, movement_x: 1 });
+    h.insertConveyorCargo('CV1', '7');
+    h.scan();
     assert.equal(onlyCargo(h.state).assetCode, 'CV1', '退订后货物必须留在上游');
     assert.equal(h.models.CV2.conveyorTelemetry.cargoCode, null);
   } finally {
@@ -405,14 +452,16 @@ test('mode=0 退出等待并退订，上游货物保持不动', () => {
 });
 
 test('等待方 mode=2 不退出等待、不影响被推送资格', () => {
-  const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 } });
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });
   try {
+    h.apply('CV1', { task: 7, movement_x: 1 });
     h.apply('CV2', { task: 7, movement_x: 1 });
     h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
     assert.equal(h.models.CV2.conveyorTelemetry.waitingTask, '7', '等待方 mode=2 不得退出等待');
     assert.ok(h.models.CV2.conveyorTelemetry.probeSubscription, '等待方 mode=2 不得退订');
 
-    h.apply('CV1', { task: 7, movement_x: 1 });
+    h.insertConveyorCargo('CV1', '7');
+    h.scan();
     assert.equal(onlyCargo(h.state).assetCode, 'CV2', 'mode=2 的等待者仍必须能被推送');
     assert.equal(h.models.CV2.conveyorTelemetry.waitingTask, null);
   } finally {
@@ -488,19 +537,98 @@ test('链式接力：A 推 B、B 推 C，同一货物实例沿订阅链传到末
   }
 });
 
-test('等待中收到新 task：退订旧上游，按新 task 重新判定', () => {
-  const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 } });
+test('等待中收到新 task：旧订阅失效，按新 task 重估（无同 task 上游则无订阅）', () => {
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });
   try {
+    h.apply('CV1', { task: 7, movement_x: 1 });
     h.apply('CV2', { task: 7, movement_x: 1 });
-    const oldSeq = h.models.CV2.conveyorTelemetry.probeSubscription!.seq;
+    assert.ok(h.models.CV2.conveyorTelemetry.probeSubscription, '同 task 时必须订阅 CV1');
 
-    // 新 task 边沿：退订旧订阅并重新订阅（新 seq 排队）
+    // 下游 task 改变（7→9）：旧订阅退订；CV1 的 task 仍是 7，与新 task 不匹配 → 无订阅目标
     h.apply('CV2', { task: 9, movement_x: 1 });
-    const subscription = h.models.CV2.conveyorTelemetry.probeSubscription;
-    assert.ok(subscription, '新 task 无持货变化时仍订阅同一上游');
-    assert.ok(subscription.seq > oldSeq, '新 task 必须重新排队（新 seq）');
-    assert.equal(h.models.CV2.conveyorTelemetry.waitingTask, '9');
+    assert.equal(h.models.CV2.conveyorTelemetry.probeSubscription, null, 'task 改变后旧订阅不得存续');
+    assert.equal(h.models.CV2.conveyorTelemetry.waitingTask, '9', '仍按新 task 等待');
     assert.equal(h.models.CV2.conveyorTelemetry.pendingTask, '9');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('等待期间上游 task 改变：订阅失效摘除，等待保留', () => {
+  const h = makeHarness({ UP: { centerX: -4 }, DOWN: { centerX: 0 } });
+  try {
+    const stamp = 1_000_000;
+    h.apply('UP', { task: 7, movement_x: 1 }, 0.1, 1, stamp);
+    h.apply('DOWN', { task: 7, movement_x: 1 }, 0.1, 1, stamp);
+    assert.equal(h.models.DOWN.conveyorTelemetry.probeSubscription?.holderAssetCode, 'UP');
+
+    // UP 改收 task=8：DOWN 断流重放（无新消息）逐帧重估 → 目标失配，订阅摘除
+    h.apply('UP', { task: 8, movement_x: 1 }, 0.1, 1, stamp + 1);
+    h.apply('DOWN', { task: 7, movement_x: 1 }, 0.1, 1, stamp);
+    assert.equal(h.models.DOWN.conveyorTelemetry.probeSubscription, null, '上游 task 改变后订阅不得存续');
+    assert.equal(h.models.DOWN.conveyorTelemetry.waitingTask, '7', '等待必须保留，目标复现时可重新订阅');
+    assert.equal(h.models.DOWN.conveyorTelemetry.pendingTask, '7');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('越级订阅：跳过空载且 task 不一致的中间设备直订同 task 上位设备；中间设备记录流转 task 后不再响应同 task', () => {
+  const h = makeHarness({
+    UP: { centerX: -4 },
+    MID: { centerX: 0 },
+    DOWN: { centerX: 4 },
+  });
+  try {
+    // UP 收 task=7 空载等待；MID 收 task=3（与 7 不一致）；DOWN 收 task=7 → 越过 MID 直订 UP
+    h.apply('UP', { task: 7, movement_x: 1 });
+    h.apply('MID', { task: 3, movement_x: 1 });
+    h.apply('DOWN', { task: 7, movement_x: 1 });
+    const subscription = h.models.DOWN.conveyorTelemetry.probeSubscription;
+    assert.ok(subscription, '必须登记订阅');
+    assert.equal(subscription.holderAssetCode, 'UP', '必须越过 MID 直订同 task 的 UP');
+    assert.equal(h.models.DOWN.conveyorTelemetry.waitingTask, '7');
+
+    // UP 持货 → 帧级扫描直推 DOWN（跳过 MID）
+    h.insertConveyorCargo('UP', '7');
+    h.scan();
+    const pushed = onlyCargo(h.state);
+    assert.equal(pushed.assetCode, 'DOWN', '货物必须直推给 DOWN');
+    assert.equal(pushed.task, '7');
+    assert.equal(h.models.UP.conveyorTelemetry.cargoCode, null, 'UP 引用必须清空');
+    assert.equal(h.models.MID.conveyorTelemetry.cargoCode, null, 'MID 全程不得持货');
+    assert.equal(h.models.DOWN.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.models.DOWN.conveyorTelemetry.waitingTask, null);
+    assert.equal(h.models.DOWN.conveyorTelemetry.selfDriveDirection, 1);
+    assert.ok(Math.abs(h.models.DOWN.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE)) < 1e-6,
+      `DOWN 必须从自身刷出端接入，实际 ${h.models.DOWN.conveyorTelemetry.cargoTravelOffset}`);
+    assert.ok(pushed.handoff, '必须登记交接插值保持视觉连续');
+
+    // 中间设备记录已流转 task：此后收到同 task 不再触发边沿/订阅（自身 task=3 的等待状态不受影响）
+    assert.ok(h.models.MID.conveyorTelemetry.bypassedTasks.has('7'), 'MID 必须记录流转过的 task');
+    h.apply('MID', { task: 7, movement_x: 1 });
+    assert.equal(h.models.MID.conveyorTelemetry.lastTask, '7', 'lastTask 仍须更新');
+    assert.equal(h.models.MID.conveyorTelemetry.currentTask, '3', '已流转 task 不得覆盖自身 task');
+    assert.equal(h.models.MID.conveyorTelemetry.pendingTask, '3', '自身 task=3 的等待必须保持');
+    assert.equal(h.models.MID.conveyorTelemetry.waitingTask, '3');
+    assert.equal(h.models.MID.conveyorTelemetry.probeSubscription, null, '已流转 task 不得再向上游订阅');
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '不得产生新货物');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('直接邻居持异 task 货物：持货优先，仍订阅并被推送（货物盖订阅者 task）', () => {
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });
+  try {
+    h.insertConveyorCargo('CV1', '3');
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    const pushed = onlyCargo(h.state);
+    assert.equal(pushed.assetCode, 'CV2', '邻居持货即订阅并当帧被推送，不看货物 task');
+    assert.equal(pushed.task, '7', '货物必须盖上订阅者的 task');
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, null);
+    assert.equal(h.models.CV2.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.models.CV2.conveyorTelemetry.waitingTask, null);
   } finally {
     h.dispose();
   }

@@ -213,8 +213,10 @@ export type ConveyorModelTelemetryState = {
   waitingTask: string | null;
   /** 探测点邻居缓存（按正/反转各存邻居 assetCode），reset 时清空重算。 */
   probeNeighbors: { forward: string | null; reverse: string | null } | null;
-  /** 向上游设备的订阅：等待期间登记，被推送/退出等待时清空；seq 决定多下游时的推送顺序（先订阅先得）。 */
+  /** 向上游设备的订阅：等待期间登记，被推送/退出等待/任一侧 task 改变时清空；目标为首个持货或同 task 的上位设备（可越级），seq 决定多下游时的推送顺序（先订阅先得）。 */
   probeSubscription: { holderAssetCode: string; direction: number; seq: number } | null;
+  /** 越级推送时被跳过期间已流转过的 task 集合：此后收到同 task 仅更新 lastTask，不再触发边沿/订阅（货物已过机，本机不参与）。 */
+  bypassedTasks: Set<string>;
   /** 最近一次非 0 的 movement_x 运行方向（±1），供持有方计算机等待设备的上货坐标。 */
   lastMovementDirection: number;
   /** 接管货物后的自驱走行方向（±1，0=关闭）：快照断流期间不等新 MQTT 消息直接执行移动动画，新消息到达即清零。 */

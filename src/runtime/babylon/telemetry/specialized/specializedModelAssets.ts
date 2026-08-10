@@ -243,6 +243,7 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     waitingTask: null,
     probeNeighbors: null,
     probeSubscription: null,
+    bypassedTasks: new Set(),
     lastMovementDirection: 0,
     selfDriveDirection: 0,
     lastSnapshotReceivedAt: 0,
@@ -261,6 +262,7 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.waitingTask = null;
   model.conveyorTelemetry.probeNeighbors = null;
   model.conveyorTelemetry.probeSubscription = null;
+  model.conveyorTelemetry.bypassedTasks.clear();
   model.conveyorTelemetry.lastMovementDirection = 0;
   model.conveyorTelemetry.selfDriveDirection = 0;
   model.conveyorTelemetry.lastSnapshotReceivedAt = 0;

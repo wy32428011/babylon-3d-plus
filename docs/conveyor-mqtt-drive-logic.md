@@ -70,7 +70,8 @@
 | `lastTask` | 边沿判定基准，**不随清线复位**——同 task 重发（含销毁/被推送后）不重刷 |
 | `waitingTask` | 正在等待探测点上游设备推送的 task；非 null 时不刷出、不走行 |
 | `probeNeighbors` | 探测点邻居缓存 `{forward, reverse}`（各存邻居 assetCode 或 null），按方向各解析一次，reset 时清空重算 |
-| `probeSubscription` | 向上游设备的订阅 `{holderAssetCode, direction, seq}`；等待期间登记，被推送/退出等待时清空；seq 单调递增，多下游订阅同一上游时**先订阅者（seq 小）先被推送** |
+| `probeSubscription` | 向上游设备的订阅 `{holderAssetCode, direction, seq}`；等待期间登记，被推送/退出等待/任一侧 task 改变时清空；目标为首个持货或同 task 的上位设备（可越级），seq 单调递增，多下游订阅同一上游时**先订阅者（seq 小）先被推送** |
+| `bypassedTasks` | 越级推送时被跳过期间已流转过的 task 集合；此后收到同 task 仅更新 `lastTask`，不再触发边沿/订阅（货已过机，本机不参与） |
 | `lastMovementDirection` | 最近非 0 运行方向（±1） |
 | `selfDriveDirection` | 自驱走行方向（±1，0=关闭）：被推送时登记订阅方向；movement_x=0 的新 task 刷出/复用时登记正转 1 |
 | `lastSnapshotReceivedAt` | 最近应用的快照 receivedAt，识别新消息 |
@@ -87,8 +88,9 @@
 
 ### 6.2 新 task 边沿
 `task` 为数值、归一化非空、且 ≠ `lastTask` 时：
-- `lastTask = currentTask = pendingTask = task`
-- `waitingTask = null`、`probeSubscription = null`（旧等待作废，**退订旧上游**）
+- `lastTask = task`
+- **若 task 不在 `bypassedTasks` 中**（非越级流转已过境的 task）：`currentTask = pendingTask = task`，`waitingTask = null`、`probeSubscription = null`（旧等待作废，**退订旧上游**）
+- 若 task 在 `bypassedTasks` 中：仅更新 `lastTask`，不登记、不等待、不订阅（货已过机，本机不参与，自身进行中的 task 状态不受影响）
 
 注意：`task=0` 或缺失不产生边沿；同 task 重发不产生边沿。
 
@@ -111,10 +113,10 @@
 
 ### 6.7 新 task 边沿的三支分流
 1. **自身持有货物**（滞留箱复用，无论 autoDispose 与否）：不销毁不重建，`cargoTravelOffset` 保持滞留位置，货物 `task` 盖上新 task、`containerCode` 更新（新值优先，空则保留旧值）；消费 `pendingTask=null`，不等待不订阅
-2. **否则解析探测点邻居**（`probeDirection = movementDirection ≠ 0 ? movementDirection : 1`）：
-   - **邻居存在** → `waitingTask = pendingTask`（pendingTask 保留）+ 登记订阅（§7）：等邻居持货后主动推送，无需本机再收消息
-   - **邻居不存在且为起点设备**（`cargoOriginDevice === true`）→ 消费 pendingTask，`cargoTravelOffset = spawnOffset`（按 probeDirection 的刷出端），自行创建货箱
-   - **邻居不存在且非起点** → `waitingTask = pendingTask`（无订阅对象，仅阻塞自身刷出，永远等不到）
+2. **否则解析订阅目标**（`probeDirection = movementDirection ≠ 0 ? movementDirection : 1`，解析规则见 §7.1）：
+   - **目标存在** → `waitingTask = pendingTask`（pendingTask 保留）+ 登记订阅：等目标持货后主动推送，无需本机再收消息
+   - **无目标且探测点无直接邻居且为起点设备**（`cargoOriginDevice === true`）→ 消费 pendingTask，`cargoTravelOffset = spawnOffset`（按 probeDirection 的刷出端），自行创建货箱
+   - **无目标**（一路向上无持货/同 task 设备，含上游 task 已改变）→ `waitingTask = pendingTask`、摘除旧订阅（无订阅对象，仅阻塞自身刷出）
 3. 复用与自建两支中 `movementDirection === 0` 时登记 `selfDriveDirection = 1`：从当前位置/轨迹起点自驱移向终点，下一条新消息到达恢复字段驱动（见 §9）
 
 ### 6.8 等待中截断
@@ -136,13 +138,39 @@
 
 ## 7. 探测点订阅/推送协议
 
-货物流转**完全由 3D 场景布局决定**，不再按 task 匹配，也无锁定/解锁握手。三方视角：
+货物流转**由 3D 场景布局决定**（探测点决定上下游关系、推送无需下游再收消息），订阅目标的选取引入 task 语义（同 task 才可越级挂单），无锁定/解锁握手。
+
+### 7.1 订阅目标解析（可越级）
+
+从直接探测点邻居开始，沿同方向探测点逐级向上（`resolveProbeNeighbor` 带正/反转缓存），每级判定：
+
+1. **持货（任意 task）** → 即目标（持货优先于 task 匹配；推送时货物盖上订阅者的 task）
+2. **非输送线**（stacker/RGV，无探测点无法继续向上）→ 视为源头终端，直接订阅等其产货
+3. **输送线且 `currentTask` 与本机 pendingTask 一致** → 即目标（无论其是否持货；持货则当帧被推送）
+4. 以上都不沾（空载且 task 不一致）→ 越过，继续向上；**无邻居或成环**（visited 防环）→ 无目标
+
+典型场景：task=7 只下发给 A 和 D（中间 B/C 是别的 task）→ D 越过 B/C 直接订阅 A，A 拿到 task=7 的货后直推 D（跳过中间设备，1 秒 handoff 插值接入）。
+
+### 7.2 订阅存续（任一侧 task 改变即失效）
+
+等待期间 pendingTask 保留，目标解析**每帧重估**：
+
+- **上游（目标方）task 改变** → 目标失配/消失 → 摘除订阅（或改挂新目标，新 seq 排队）；`waitingTask` 保留，目标复现时自动重新订阅
+- **下游（本机）task 改变** → 新 task 边沿先行退订，再按新 task 重估目标
+- 方向翻转（movement_x 变化）→ 邻居不变则更新订阅方向保留 seq，邻居变化则重新排队
+- 注意：断流期间等待方不被帧调度驱动、不重估，订阅以最后一次登记为准
+
+### 7.3 三方视角
 
 - **邻居嗅探**：探测点（§4）落在其他**专用设备**（conveyor/stacker/rgv 能力模型）世界包围盒内（外扩 epsilon 0.05）即视为上游邻居；多个命中取盒中心距探测点最近者。按正/反转各缓存一次到 `probeNeighbors`（预览期间模型不动，缓存安全）
-- **等待方（下游）**：新 task 边沿 + 探测点有邻居 → 不刷出、不走行，登记 `waitingTask` 并**向邻居订阅**（`probeSubscription = {holderAssetCode, direction, seq}`）。退出：mode 0（同时放弃 pendingTask 并退订）、新 task 边沿（退订后重新判定）、被推送；**mode=2 不构成退出条件**
-- **持有方（上游）**：**完全被动**——一旦持货且存在订阅者，帧级扫描即把货物推送走（不等货到端点、无需自身收到任何消息）；无订阅者时继续持有（clamp 在 ±halfRange）；mode==2 且双光电无货时按 cargoAutoDispose 销毁或遗留（6.5）
+- **等待方（下游）**：新 task 边沿 + 解析到订阅目标 → 不刷出、不走行，登记 `waitingTask` + `probeSubscription`。退出：mode 0（同时放弃 pendingTask 并退订）、新 task 边沿（退订后重新判定）、被推送；**mode=2 不构成退出条件**
+- **持有方（上游）**：**完全被动**——一旦持货且存在订阅者，帧级扫描即把货物推送走（不等货到端点、无需自身收到任何消息、不看货物 task）；无订阅者时继续持有（clamp 在 ±halfRange）；mode==2 且双光电无货时按 cargoAutoDispose 销毁或遗留（6.5）
 - **被推送方**：见 §8/§9
 - stacker/RGV 持有的货物同样可被推送：三张货物表统一扫描，双叉各持一箱时取距订阅者探测点最近的一件
+
+### 7.4 越级推送的 bypass 记录
+
+越级直推（如 A→D）成功时，沿订阅方向从订阅者向持有方走查探测链，**被跳过的中间输送线把该 task 记入 `bypassedTasks`**：此后它们收到同 task 消息仅更新 `lastTask`，不再触发边沿/等待/订阅（货已过机，防止 B/C 事后又向 A 挂单）。相邻推送无中间设备、不产生记录，链式接力不受影响。
 
 ## 8. 推送仲裁（`pushCargoToProbeSubscribers`）
 
@@ -154,6 +182,7 @@ facade 帧尾每帧无条件执行（**与快照新旧无关**，等待方断流
 4. 推送执行（`pushCargoToSubscriber`）：
    - `detachClaimedCargoByReference(cargo)` 从持有方表取出（**实例不销毁**，由持有方 driver 清理其遥测引用——conveyor 的 cargoCode、stacker 的货叉 key 等）
    - 换绑：`assetCode = 订阅者`、`task = 订阅者 pendingTask ?? currentTask`、`handoff` 登记（1 秒视觉插值保持连续）
+   - 越级推送（订阅者与持有方之间隔着中间设备）时，沿订阅方向从订阅者向持有方走查探测链，被跳过的中间输送线 `bypassedTasks.add(task)`（§7.4）
    - 订阅者状态：`cargoCode='cargo'`、`cargoTravelOffset = 自身刷出端（按订阅 direction）`、`pendingTask=null`、`waitingTask=null`、`probeSubscription=null`、`selfDriveDirection = direction`
    - 输出移交日志 `Conveyor {订阅者} 凭探测点订阅接管 {持有方} 持有的货物（task=...）`
 5. **链式接力**：A 推 B 后 B 即持货，同组扫描中若 C 订阅了 B 可同帧（最迟下一帧）再推 C——货箱实例沿订阅链逐级传递到末端
@@ -194,12 +223,14 @@ facade 帧尾每帧无条件执行（**与快照新旧无关**，等待方断流
 
 ### 新 task 边沿判定（当帧执行，不再等线体运行；movement_x=0 按正转处理）
 
-| 自身持有货物 | 探测点邻居 | cargoOriginDevice | 结果 |
+task 在 `bypassedTasks` 中（越级流转货已过机，§7.4）时**不触发边沿**：仅更新 `lastTask`，不登记、不等待、不订阅。
+
+| 自身持有货物 | 订阅目标（§7.1，可越级） | cargoOriginDevice | 结果 |
 |---|---|---|---|
 | 有 | — | — | 复用滞留箱：盖新 task、滞留位置继续走行（movement_x=0 登记正转自驱） |
-| 无 | 有 | 任意 | 进入等待 + 订阅邻居，等其持货后推送 |
-| 无 | 无 | 开 | 刷出端自建（movement_x=0 登记正转自驱） |
-| 无 | 无 | 关 | 仅等待（无订阅对象，永远等不到） |
+| 无 | 有 | 任意 | 进入等待 + 订阅目标，等其持货后推送 |
+| 无 | 无（且探测点无直接邻居） | 开 | 刷出端自建（movement_x=0 登记正转自驱） |
+| 无 | 无 | 关 | 仅等待（无订阅对象，目标复现时自动重新订阅） |
 
 ### mode=2（双光电无货）
 
@@ -217,6 +248,7 @@ facade 帧尾每帧无条件执行（**与快照新旧无关**，等待方断流
 | mode 变 0 | 退出等待、放弃 pendingTask 并退订（同 task 重发不再重新等待，仅新 task 边沿再判定） |
 | mode 变 2 | **不退出**（mode=2 仅是销毁条件），保持等待且不影响被推送资格 |
 | 新 task 边沿 | 退订旧上游，旧等待作废，走新 task 判定 |
+| 上游 task 改变（目标失配/消失） | 摘除订阅（或改挂新目标、新 seq 排队）；waitingTask 保留，目标复现时自动重新订阅 |
 | 方向翻转（movement_x 变化） | 邻居不变 → 更新订阅方向、保留 seq；邻居变化 → 重新登记、排到队尾 |
 | 被推送 | 接管货物：刷出端起走 + 自驱 + handoff 插值（1 秒） |
 

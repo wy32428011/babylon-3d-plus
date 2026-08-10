@@ -103,18 +103,22 @@ export class ConveyorTelemetryDriver {
    *   同 task 重复到达（含线体清空后的重发）不再触发刷出+走行。
    * - 匿名模式（无 task 字段）：线体运行即刷出，设备自管理，不参与探测点订阅推送。
    *
-   * 探测点订阅/推送协议（货物流转由 3D 场景布局决定，不再按 task 匹配）：
+   * 探测点订阅/推送协议（货物流转由 3D 场景布局决定，不再按 task 匹配货物）：
    * - 探测点：轨迹轴向两端各向外延伸一个货箱长度的点；正转探测点对应 movement_x 0/1，反转探测点对应 movement_x 2。
    *   探测点落在其他专用设备（conveyor/stacker/rgv）世界包围盒内即视为上游邻居。
-   * - 新 task 边沿：自身持有货物 → 直接复用滞留箱（盖新 task）；否则解析探测点邻居——
-   *   有邻居 → 进入等待（waitingTask）并登记订阅 probeSubscription（holderAssetCode+方向+seq，先订阅者 seq 小）；
-   *   无邻居且为起点设备（telemetryBinding.cargoOriginDevice）→ 自行创建货箱（movement_x=0 登记自驱移向终点）；
-   *   无邻居且非起点 → 仅等待（无订阅对象）。
-   * - 等待中：不刷出、不走行；mode 变 0（同时放弃 pendingTask 并退订）、新 task 边沿（退订后重新判定）、
-   *   被推送三种方式退出。方向翻转时邻居不变则更新订阅方向保留 seq，邻居变化则重新排队。
+   * - 新 task 边沿：自身持有货物 → 直接复用滞留箱（盖新 task）；否则解析订阅目标——
+   *   从直接邻居沿探测点一路向上，首个「持货（任意 task）/同 currentTask 的输送线/stacker 源头」即目标，
+   *   可越级跳过空载且 task 不一致的中间设备；有目标 → 进入等待（waitingTask）并登记订阅
+   *   probeSubscription（holderAssetCode+方向+seq，先订阅者 seq 小）；
+   *   无目标且探测点无直接邻居且为起点设备（telemetryBinding.cargoOriginDevice）→ 自行创建货箱（movement_x=0 登记自驱）；
+   *   无目标 → 仅等待（无订阅对象）。
+   * - 订阅存续：等待期间每帧重估目标，任一侧 task 改变订阅即失效——上游 task 改变使目标失配时自动摘除/改挂，
+   *   下游 task 改变由新 task 边沿先行退订；方向翻转时邻居不变则更新订阅方向保留 seq，邻居变化则重新排队。
    * - 推送：facade 每帧无条件执行 pushCargoToProbeSubscribers（与快照新旧无关）——
    *   持有方一旦在三张货物表中有货，即推送给其订阅者中 seq 最小者（实例不销毁，1 秒交接插值接入），
    *   无需下游再收 MQTT 消息；其余订阅者顺位等下一箱。
+   * - 越级推送时被跳过的中间输送线记录已流转 task（bypassedTasks）：此后收到同 task 仅更新 lastTask，
+   *   不再触发边沿/订阅，防止货已过机还向上游挂单。
    * - 被推送方：cargoTravelOffset 置自身刷出端、按订阅方向自驱走行（断流期间由帧调度驱动，新消息到达恢复字段驱动）。
    * - 持有方完全被动：无订阅者时继续持有（clamp 在行程端点）；mode==2 且双光电无货时
    *   由 telemetryBinding.cargoAutoDispose（缺省不销毁，勾选才销毁）决定销毁或遗留（遗留箱等新 task 复用或被下游推送取走）。
@@ -141,17 +145,19 @@ export class ConveyorTelemetryDriver {
 
     // task 语义：数值 0/缺失为无任务；仅新 task 边沿（相对 lastTask 变化）登记。
     // lastTask 持久保存：货物销毁/被推送走后同 task 重发不得重走刷出+走行。
+    // 越级推送已流转过的 task（bypassedTasks）：货已过机，仅更新 lastTask，不触发边沿，防止再次向上游订阅。
     const taskValue = readIntegerField(snapshot.fields, 'task');
     const taskMode = taskValue !== null;
     const task = normalizeCargoTask(taskValue);
-    const newTaskEdge = taskMode && task !== '' && task !== state.lastTask;
-    if (newTaskEdge) {
+    if (taskMode && task !== '' && task !== state.lastTask) {
       state.lastTask = task;
-      state.currentTask = task;
-      state.pendingTask = task;
-      // 新 task 取代旧等待：退订旧上游，走新 task 的刷出/订阅判定
-      state.waitingTask = null;
-      state.probeSubscription = null;
+      if (!state.bypassedTasks.has(task)) {
+        state.currentTask = task;
+        state.pendingTask = task;
+        // 新 task 取代旧等待：退订旧上游，走新 task 的刷出/订阅判定
+        state.waitingTask = null;
+        state.probeSubscription = null;
+      }
     }
 
     // 货物走行与链条本体共用同一份 translate 配置（fields+actionMap+speed），避免链/货速度脱节。
@@ -206,12 +212,12 @@ export class ConveyorTelemetryDriver {
         if (movementDirection === 0) state.selfDriveDirection = 1;
       } else {
         const probeDirection = movementDirection !== 0 ? movementDirection : 1;
-        const neighbor = this.resolveProbeNeighbor(model, probeDirection);
-        if (neighbor) {
-          // 上游邻居存在：进入等待并向其订阅，由其持货后主动推送（无需本机再收消息）。
+        const subscriptionTarget = this.resolveProbeSubscriptionTarget(model, probeDirection, state.pendingTask);
+        if (subscriptionTarget) {
+          // 订阅目标（首个持货或同 task 的上位设备，可越级）：等待其持货后主动推送，无需本机再收消息。
           state.waitingTask = state.pendingTask;
-          this.subscribeProbe(model, neighbor.assetCode, probeDirection);
-        } else if (model.telemetryBinding?.cargoOriginDevice === true) {
+          this.subscribeProbe(model, subscriptionTarget.assetCode, probeDirection);
+        } else if (!this.resolveProbeNeighbor(model, probeDirection) && model.telemetryBinding?.cargoOriginDevice === true) {
           // 起点设备：探测点未触及上游设备时允许自行创建货箱。
           state.pendingTask = null;
           state.waitingTask = null;
@@ -221,7 +227,7 @@ export class ConveyorTelemetryDriver {
           this.createConveyorCargoForTask(model, snapshot, state.cargoCode);
           if (movementDirection === 0) state.selfDriveDirection = 1;
         } else {
-          // 探测点无上游且非起点设备：无货可等，仅挂起等待（无订阅对象）。
+          // 无订阅目标（一路向上无持货/同 task 设备，或上游 task 已改变）：摘除旧订阅，仅挂起等待。
           state.waitingTask = state.pendingTask;
           state.probeSubscription = null;
         }
@@ -302,6 +308,55 @@ export class ConveyorTelemetryDriver {
       return;
     }
     state.probeSubscription = { holderAssetCode, direction, seq: ++this.nextProbeSubscriptionSeq };
+  }
+
+  /**
+   * 订阅目标解析：从直接探测点邻居开始沿同方向一路向上，逐级判定——
+   * 持货（任意 task）即目标；stacker/RGV 无探测点可继续向上，视为源头直接订阅；
+   * 输送线 currentTask 与本机 task 一致即目标；空载且 task 不一致则越过。
+   * 等待期间每帧重估：上游 task 改变使目标失配时订阅自动摘除/改挂。无目标返回 null。
+   */
+  private resolveProbeSubscriptionTarget(model: ModelRuntimeEntry, direction: number, task: string): ModelRuntimeEntry | null {
+    const visited = new Set<string>([model.assetCode]);
+    let current = this.resolveProbeNeighbor(model, direction);
+    while (current && !visited.has(current.assetCode)) {
+      visited.add(current.assetCode);
+      if (this.holdsAnySpecializedCargo(current.assetCode)) return current;
+      if (!isConveyorRuntimeModel(current)) return current;
+      const telemetry = current.conveyorTelemetry;
+      if (!telemetry) return current;
+      if (telemetry.currentTask === task) return current;
+      current = this.resolveProbeNeighbor(current, direction);
+    }
+    return null;
+  }
+
+  /** 三张货物表（stacker/conveyor/rgv）中该设备是否持有任意货物。 */
+  private holdsAnySpecializedCargo(assetCode: string): boolean {
+    const tables = [this.state.stackerCargoMeshes, this.state.conveyorCargoMeshes, this.state.rgvCargoMeshes];
+    for (const table of tables) {
+      for (const cargo of table.values()) {
+        if (cargo.assetCode === assetCode) return true;
+      }
+    }
+    return false;
+  }
+
+  /** 越级推送时被跳过的中间输送线记录已流转 task：此后收到同 task 不再触发边沿（货已过机，防止重复向上订阅）。 */
+  private recordBypassedTaskForIntermediates(
+    subscriber: ModelRuntimeEntry,
+    holderAssetCode: string,
+    direction: number,
+    task: string,
+  ): void {
+    if (!task) return;
+    const visited = new Set<string>([subscriber.assetCode, holderAssetCode]);
+    let current = this.resolveProbeNeighbor(subscriber, direction);
+    while (current && !visited.has(current.assetCode)) {
+      visited.add(current.assetCode);
+      current.conveyorTelemetry?.bypassedTasks.add(task);
+      current = this.resolveProbeNeighbor(current, direction);
+    }
   }
 
   /** 探测点邻居解析（带缓存）：正/反转各解析一次，预览期间模型不动，缓存安全。 */
@@ -386,6 +441,7 @@ export class ConveyorTelemetryDriver {
     detached.assetCode = subscriber.assetCode;
     detached.task = task;
     detached.handoff = createCargoHandoffState(detached);
+    this.recordBypassedTaskForIntermediates(subscriber, holderAssetCode, direction, task);
 
     const travelContext = this.resolveConveyorCargoTravelContext(subscriber);
     const travelHalfRange = resolveConveyorCargoTravelHalfRange(
