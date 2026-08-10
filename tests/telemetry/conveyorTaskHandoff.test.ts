@@ -152,10 +152,10 @@ function onlyCargo(state: ReturnType<typeof createSpecializedTelemetrySharedStat
   return [...state.conveyorCargoMeshes.values()][0];
 }
 
-test('他设备输送线持有同 task 货物时放弃刷出进入等待', () => {
+test('他设备输送线持有同 task 货物且锁定时放弃刷出进入等待', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
-    h.apply('CV2', { task: 7, movement_x: 1 });
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 });
     assert.equal(h.state.conveyorCargoMeshes.size, 1, 'CV2 必须先刷出货物');
 
     h.apply('CV1', { task: 7, movement_x: 1 });
@@ -168,25 +168,47 @@ test('他设备输送线持有同 task 货物时放弃刷出进入等待', () =>
   }
 });
 
-test('等待方 mode=2 不退出等待（完成判定只看持有方），mode=0 仍退出', () => {
+test('他设备持有但未锁定（mode 非 3）的货物直接接管，不进入等待', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
     h.apply('CV2', { task: 7, movement_x: 1 });
+    const held = onlyCargo(h.state);
+    const heldRoot = held.root;
+    assert.equal(h.models.CV2.conveyorTelemetry.cargoLocked, false, '前置：无 mode=3 不得锁定');
+
+    h.apply('CV1', { task: 7, movement_x: 1 });
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, '未锁定货物不得进入等待');
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '不得刷出第二份货物');
+    const adopted = onlyCargo(h.state);
+    assert.equal(adopted.root, heldRoot, '必须接管同一货物实例');
+    assert.equal(adopted.assetCode, 'CV1', '货物必须换绑到本机');
+    assert.equal(h.models.CV2.conveyorTelemetry.cargoCode, null, '原持有方引用必须清空');
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo');
+    assert.ok(adopted.handoff, '接管必须登记交接插值保持视觉连续');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('等待方 mode=2 不退出等待、不影响接管资格；mode=0 退出等待', () => {
+  const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
+  try {
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 });
     h.apply('CV1', { task: 7, movement_x: 1 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7');
 
-    // 等待方 mode=2 不是任务完成：不退出等待、不放弃 pendingTask
+    // 等待方 mode=2 不退出等待、不放弃 pendingTask
     h.apply('CV1', { task: 7, movement_x: 0, mode: 2 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7', '等待方 mode=2 不得退出等待');
     assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, '7', '等待方 mode=2 不得放弃 pendingTask');
 
-    // 持有方 mode=2 判定完成：仍交出给该等待者（等待方 mode=2 不影响接管资格）
+    // 持有方解锁（mode≠3）即交出；等待方 mode=2 不影响接管资格
     h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, '被交出后等待结束');
     assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo', '等待方 mode=2 也必须能接管货物');
 
     // mode=0 仍退出等待并放弃 pendingTask
-    h.apply('CV2', { task: 9, movement_x: 1 });
+    h.apply('CV2', { task: 9, movement_x: 1, mode: 3 });
     h.apply('CV1', { task: 9, movement_x: 1 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '9', '前置：新 task 边沿重新进入等待');
     h.apply('CV1', { task: 9, movement_x: 0, mode: 0 });
@@ -200,7 +222,7 @@ test('等待方 mode=2 不退出等待（完成判定只看持有方），mode=0
 test('等待中收到新 task 时旧等待作废，走新 task 自建流程', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
-    h.apply('CV2', { task: 7, movement_x: 1 });
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 });
     h.apply('CV1', { task: 7, movement_x: 1 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7');
 
@@ -215,21 +237,21 @@ test('等待中收到新 task 时旧等待作废，走新 task 自建流程', ()
   }
 });
 
-test('存在等待设备时持有方执行出货动画：向轨迹终点额外推进半个货箱长度', () => {
+test('锁定且存在等待设备时持有方执行出货动画：向轨迹终点额外推进半个货箱长度', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
-    h.apply('CV2', { task: 7, movement_x: 1 });
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 });
     const cargo = onlyCargo(h.state);
 
     // 无等待者：货物走到常规行程端即停住
-    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 200);
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 }, 0.1, 200);
     assert.ok(Math.abs(h.models.CV2.conveyorTelemetry.cargoTravelOffset - HALF_RANGE) < 1e-6,
       `无等待者时必须停在 halfRange=${HALF_RANGE}，实际 ${h.models.CV2.conveyorTelemetry.cargoTravelOffset}`);
 
     // 出现等待者：即使线体停止（movement_x=0）也向终点额外推进半个货箱长度
     h.apply('CV1', { task: 7, movement_x: 1 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7');
-    h.apply('CV2', { task: 7, movement_x: 0 }, 0.1, 200);
+    h.apply('CV2', { task: 7, movement_x: 0, mode: 3 }, 0.1, 200);
     const offset = h.models.CV2.conveyorTelemetry.cargoTravelOffset;
     assert.ok(Math.abs(offset - PUSH_TARGET) < 1e-6, `出货动画必须推进到 ${PUSH_TARGET}，实际 ${offset}`);
     assert.ok(Math.abs(cargo.root.position.x - PUSH_TARGET) < 1e-6, `货箱中心必须停在轨迹端点 x=${PUSH_TARGET}，实际 ${cargo.root.position.x}`);
@@ -239,22 +261,22 @@ test('存在等待设备时持有方执行出货动画：向轨迹终点额外�
   }
 });
 
-test('出货动画期间收到释放逻辑立即移交，不等动画结束', () => {
+test('出货动画期间持有方解锁立即移交，不等动画结束', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
-    h.apply('CV2', { task: 7, movement_x: 1 });
-    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 200);
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 });
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 }, 0.1, 200);
     h.apply('CV1', { task: 7, movement_x: 1 });
 
     // 出货动画推进 5 帧（0.15m），仍在半程目标之下
-    h.apply('CV2', { task: 7, movement_x: 0 }, 0.1, 5);
+    h.apply('CV2', { task: 7, movement_x: 0, mode: 3 }, 0.1, 5);
     const midOffset = h.models.CV2.conveyorTelemetry.cargoTravelOffset;
     assert.ok(midOffset > HALF_RANGE && midOffset < PUSH_TARGET, `前置：动画必须进行中（${HALF_RANGE} < ${midOffset} < ${PUSH_TARGET}）`);
 
-    // 动画进行中收到 mode=2：立即释放
+    // 动画进行中解锁（mode≠3）：立即释放
     h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
     const transferred = onlyCargo(h.state);
-    assert.equal(transferred.assetCode, 'CV1', '动画期间收到释放必须立即移交');
+    assert.equal(transferred.assetCode, 'CV1', '动画期间解锁必须立即移交');
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null);
     assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo');
   } finally {
@@ -262,15 +284,15 @@ test('出货动画期间收到释放逻辑立即移交，不等动画结束', ()
   }
 });
 
-test('持有方 mode=2 时交出货物：实例不销毁、换绑等待方，且交出优先于自动销毁', () => {
+test('持有方解锁时交出货物：实例不销毁、换绑等待方，且交出优先于自动销毁', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
-    h.apply('CV2', { task: 7, movement_x: 1 });
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 });
     const cargo = onlyCargo(h.state);
     const rootBefore = cargo.root;
     h.apply('CV1', { task: 7, movement_x: 1 });
 
-    // CV2 默认开启自动销毁（binding 为 null）：有等待者时必须移交而非销毁
+    // CV2 默认开启自动销毁（binding 为 null）：有等待者时解锁必须移交而非销毁
     h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
 
     const transferred = onlyCargo(h.state);
@@ -290,10 +312,10 @@ test('持有方 mode=2 时交出货物：实例不销毁、换绑等待方，且
   }
 });
 
-test('持有方收到新 task 时交出旧 task 货物，新 task 当帧即刷出', () => {
+test('持有方收到新 task 时交出旧 task 货物（锁定中也交出），新 task 当帧即刷出', () => {
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
-    h.apply('CV2', { task: 7, movement_x: 1 });
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 });
     h.apply('CV1', { task: 7, movement_x: 1 });
 
     h.apply('CV2', { task: 8, movement_x: 0 });
@@ -322,7 +344,7 @@ test('持有方收到新 task 时交出旧 task 货物，新 task 当帧即刷�
 test('多台等待设备时由上货坐标距货物世界坐标最近者接管', () => {
   const h = makeHarness({ CV1: { centerX: -5 }, CV2: { centerX: 0 }, CV3: { centerX: 5 } });
   try {
-    h.apply('CV2', { task: 7, movement_x: 1 });
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 });
     // 两台下游都在等待：CV1 上货点 x=-6.64，CV3 上货点 x=+3.36
     h.apply('CV1', { task: 7, movement_x: 1 });
     h.apply('CV3', { task: 7, movement_x: 1 });
@@ -330,7 +352,7 @@ test('多台等待设备时由上货坐标距货物世界坐标最近者接管',
     assert.equal(h.models.CV3.conveyorTelemetry.waitingTask, '7');
 
     // 出货动画把货物推到 x≈+2.0，距 CV3 上货点（3.36）更近
-    h.apply('CV2', { task: 7, movement_x: 0 }, 0.1, 200);
+    h.apply('CV2', { task: 7, movement_x: 0, mode: 3 }, 0.1, 200);
     h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
 
     const transferred = onlyCargo(h.state);
@@ -350,8 +372,8 @@ test('等待中本机已有货物保持静止；被交出时遗留箱销毁、�
     const ownCargo = [...h.state.conveyorCargoMeshes.values()].find((cargo) => cargo.assetCode === 'CV1')!;
     const frozenOffset = h.models.CV1.conveyorTelemetry.cargoTravelOffset;
 
-    // CV2 持有 task=7，CV1 收 task=7 进入等待
-    h.apply('CV2', { task: 7, movement_x: 1 });
+    // CV2 持有 task=7 且锁定，CV1 收 task=7 进入等待
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 });
     h.apply('CV1', { task: 7, movement_x: 1 });
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7');
 
@@ -359,7 +381,7 @@ test('等待中本机已有货物保持静止；被交出时遗留箱销毁、�
     h.apply('CV1', { task: 7, movement_x: 1 }, 0.1, 10);
     assert.equal(h.models.CV1.conveyorTelemetry.cargoTravelOffset, frozenOffset, '等待中本机货物必须静止');
 
-    // 持有方交出：CV1 的遗留箱销毁，task=7 货物接管
+    // 持有方解锁交出：CV1 的遗留箱销毁，task=7 货物接管
     h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
     const transferred = onlyCargo(h.state);
     assert.equal(transferred.assetCode, 'CV1');
@@ -374,11 +396,11 @@ test('接管后断流期间按接管方向自驱走行，新消息到达即恢�
   const h = makeHarness({ CV1: { centerX: 5 }, CV2: { centerX: 0 } });
   try {
     const stamp = 1_000_000;
-    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 1, stamp);
+    h.apply('CV2', { task: 7, movement_x: 1, mode: 3 }, 0.1, 1, stamp);
     h.apply('CV1', { task: 7, movement_x: 1 }, 0.1, 1, stamp);
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7');
 
-    // 持有方收新消息 mode=2 → 交出；CV1 接管时登记自驱方向
+    // 持有方收新消息解锁 → 交出；CV1 接管时登记自驱方向
     h.apply('CV2', { task: 7, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 }, 0.1, 1, stamp + 1);
     assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo', '前置：CV1 必须已接管货物');
     assert.equal(h.models.CV1.conveyorTelemetry.selfDriveDirection, 1, '接管必须登记自驱方向');
@@ -406,14 +428,42 @@ test('接管后断流期间按接管方向自驱走行，新消息到达即恢�
   }
 });
 
+test('新 task 边沿：外界有可接管货物且自身持有旧 task 货物时销毁自身货物并接管外界货物', () => {
+  const h = makeHarness({ CV1: { centerX: 5, autoDispose: false }, CV2: { centerX: 0 } });
+  try {
+    // CV1 持有 task=3 遗留箱（autoDispose 关）
+    h.apply('CV1', { task: 3, movement_x: 1 }, 0.1, 10);
+    const ownRoot = onlyCargo(h.state).root;
+
+    // CV2 持有 task=7 未锁定货物
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    const external = [...h.state.conveyorCargoMeshes.values()].find((cargo) => cargo.assetCode === 'CV2')!;
+    const externalRoot = external.root;
+
+    // CV1 收 task=7：销毁自身旧箱，接管 CV2 的货物（不走遗留复用）
+    h.apply('CV1', { task: 7, movement_x: 1 });
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, '未锁定货物不得进入等待');
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '自身旧箱必须销毁，不得残留两份货物');
+    const adopted = onlyCargo(h.state);
+    assert.equal(adopted.root, externalRoot, '必须接管外界货物实例');
+    assert.notEqual(adopted.root, ownRoot, '自身旧箱必须销毁');
+    assert.equal(adopted.assetCode, 'CV1');
+    assert.equal(adopted.task, '7');
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.models.CV2.conveyorTelemetry.cargoCode, null);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('帧调度在快照断流时仍驱动处于接管自驱的输送线', () => {
   const source = readFileSync('src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime.ts', 'utf8');
   const conveyorRegistration = source.match(/deviceType: 'conveyor',[\s\S]*?\},\r?\n/);
   assert.ok(conveyorRegistration, '必须存在 conveyor 驱动注册项');
   assert.match(
     conveyorRegistration[0],
-    /applyWhenStale: \(model\) => \(model\.conveyorTelemetry\?\.selfDriveDirection \?\? 0\) !== 0/,
-    'conveyor 注册必须声明断流自驱判定',
+    /applyWhenStale: \(model\) => \(model\.conveyorTelemetry\?\.selfDriveDirection \?\? 0\) !== 0\s*\|\| this\.conveyorDriver\.needsLockedPushOutDrive\(model\)/,
+    'conveyor 注册必须声明断流自驱与锁定出货动画判定',
   );
   assert.match(
     source,

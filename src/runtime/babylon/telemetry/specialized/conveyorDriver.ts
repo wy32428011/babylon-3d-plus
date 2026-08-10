@@ -33,6 +33,7 @@ import {
   CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
   createCargoHandoffState,
+  type GeneratedCargoRuntimeEntry,
   normalizeCargoTask,
   resolveCargoHandoffPose,
   type SpecializedTelemetryDriverContext,
@@ -99,15 +100,17 @@ export class ConveyorTelemetryDriver {
    *   边沿当帧即刷出/等待判定，不再等线体运行；movement_x 为 0 时按正转处理——刷在轨迹起点，
    *   登记自驱移向终点（下一条新消息到达即恢复字段驱动）。
    *   同 task 重复到达（含线体清空后的重发）不再触发刷出+走行。
-   *   刷出时若同 task 货物由他设备输送线持有，则不刷出进入等待（waitingTask），由持有方送货后交出；
-   *   货物由 stacker/RGV 持有时维持刷出即全局接管（交接插值接入本机走行）。
+   *   刷出判定：同 task 货物由他设备输送线持有且锁定时不刷出、进入等待（waitingTask），由持有方解锁后交出；
+   *   他机持有但未锁定、或 stacker/RGV 持有时直接接管（交接插值接入本机走行）；无持有时自建/复用遗留箱。
+   *   外界有可接管货物且自身持有旧 task 货物时：销毁自身货物、接管外界货物（优先于遗留箱复用）。
    * - 匿名模式（无 task 字段）：线体运行即刷出，设备自管理，不参与全局接管。
-   * 等待协议（仅持有方为输送线）：
+   * 锁定协议（仅持有方为输送线）：
+   * - 锁定态：mode==3 锁定货物（包括创建/接管货物的那一条消息），其他任何值都非锁定。
    * - 等待方：等待中不刷出不走行；mode 变 0（同时放弃 pendingTask）、新 task 边沿或被交出时退出等待；
-   *   mode=2 是持有货物的设备的任务完成信号，等待方 mode=2 不构成完成、不退出等待、不影响接管资格。
-   * - 持有方：存在等待本 task 的设备时执行出货动画——向轨迹正转终点额外推进半个货箱长度（超出终点半程即停）；
-   *   mode 变 2/0 或收到新 task 时释放货物——动画期间或结束后都生效——交给「货物世界坐标距设备上货坐标最近」的等待设备；
-   *   无等待设备时按 cargoAutoDispose 决定销毁或遗留（遗留箱不销毁，新 task 刷出时盖上新 task 直接复用）。
+   *   mode=2 不构成退出条件。
+   * - 持有方：锁定且存在等待本 task 的设备时执行出货动画——向轨迹正转终点额外推进半个货箱长度（超出终点半程即停）；
+   *   货物解锁（接到 mode≠3 的消息）或收到新 task 时交出货物，交给「货物世界坐标距设备上货坐标最近」的等待设备；
+   *   无等待设备时按 cargoAutoDispose 与销毁条件决定销毁或遗留（遗留箱等新 task 复用或被下游接管）。
    * - 接管方：交接完成即按接管方向自驱走行（快照断流期间不等下一条 MQTT 消息），
    *   新消息到达（receivedAt 变化）即结束自驱、恢复字段驱动。
    * mode==2 且双光电（前后）都无货时的自动销毁由 telemetryBinding.cargoAutoDispose 控制（缺省开启），
@@ -125,6 +128,9 @@ export class ConveyorTelemetryDriver {
     const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods) ?? false;
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
     const mode = readIntegerField(snapshot.fields, 'mode');
+    // 锁定态：mode==3 锁定货物（包括创建/接管货物的那一条消息），其他任何值都非锁定。
+    // 断流重放用缓存 mode 重算结果一致，锁定态在快照断流期间保持。
+    state.cargoLocked = mode === 3;
 
     // 接管自驱只活到下一条新消息：receivedAt 变化即恢复字段驱动；断流重放（stale 快照）保持不变。
     // mode 变 2/0、新 task 边沿等停止语义都随新消息到达，天然由该清零覆盖。
@@ -155,7 +161,7 @@ export class ConveyorTelemetryDriver {
     if (movementDirection !== 0) state.lastMovementDirection = movementDirection;
 
     // 等待方退出等待：仅 mode === 0（空闲，level 判断覆盖边沿）；持有方货物中途消失不自动退出。
-    // mode === 2 是持有货物的设备的任务完成信号（交出/销毁），等待方 mode=2 不构成完成、不退出等待。
+    // mode=2 是销毁条件而非等待退出条件：等待方 mode=2 不退出等待、不影响接管资格。
     // 刷出判定已提前到 task 边沿，退出等待必须同时放弃 pendingTask，否则当帧立即重新等待。
     if (mode === 0) {
       if (state.waitingTask !== null) state.pendingTask = null;
@@ -165,9 +171,9 @@ export class ConveyorTelemetryDriver {
     const cargoKey = state.cargoCode !== null ? this.getConveyorCargoKey(model.assetCode, state.cargoCode) : null;
     const heldCargo = cargoKey !== null ? this.state.conveyorCargoMeshes.get(cargoKey) ?? null : null;
 
-    // 持有方交出：mode 2/0 或新 task 边沿时，把货物交给上货坐标距货物世界坐标最近的等待设备。
-    // 必须在销毁逻辑之前：有等待设备时移交优先于自动销毁。
-    if (heldCargo?.task && (mode === 2 || mode === 0 || newTaskEdge)) {
+    // 持有方交出：货物解锁（接到 mode≠3 的消息）或新 task 边沿时，把货物交给上货坐标距货物世界坐标最近的等待设备。
+    // 必须在销毁逻辑之前：有等待设备时移交优先于自动销毁。等待只存在于锁定货物，解锁当帧即交出。
+    if (heldCargo?.task && (!state.cargoLocked || newTaskEdge)) {
       const waiters = this.findWaitingConveyorModels(model, heldCargo.task);
       if (waiters.length > 0) this.transferConveyorCargoToNearestWaiter(model, heldCargo, waiters);
     }
@@ -198,15 +204,20 @@ export class ConveyorTelemetryDriver {
       // task 模式：新 task 边沿（pendingTask 登记）即刷出/等待判定，不再等线体运行；
       // movement_x 为 0 时按正转处理——刷在轨迹起点，登记自驱移向终点（下一条新消息恢复字段驱动）。
       if (state.pendingTask) {
-        // 同 task 货物由他设备输送线持有：放弃刷出进入等待，由持有方送货后交出（pendingTask 保留）。
-        if (this.findHeldConveyorCargoByTask(state.pendingTask, model.assetCode)) {
+        // 同 task 货物由他设备输送线持有且锁定：放弃刷出进入等待，由持有方解锁后交出（pendingTask 保留）；
+        // 他机持有但未锁定、或 stacker/RGV 持有时不当等待，直接走下方接管。
+        const heldByOther = this.findHeldConveyorCargoByTask(state.pendingTask, model.assetCode);
+        if (heldByOther && this.isConveyorCargoLocked(heldByOther)) {
           state.waitingTask = state.pendingTask;
           return;
         }
+        const spawnTask = state.pendingTask;
         state.pendingTask = null;
         const spawnDirection = movementDirection !== 0 ? movementDirection : 1;
-        // 仅自动销毁关闭时的遗留箱直接复用：不销毁不重建，保持滞留位置，盖上新 task 继续走行。
-        const leftover = model.telemetryBinding?.cargoAutoDispose === false && state.cargoCode !== null
+        // 外界存在可接管货物且自身仍持有旧 task 货物：销毁自身货物、接管外界货物，该优先级高于遗留箱复用。
+        const externalAdoptable = this.findAdoptableGlobalCargoByTask(spawnTask, model.assetCode) !== null;
+        // 仅自动销毁关闭且外界无可接管货物时的遗留箱直接复用：不销毁不重建，保持滞留位置，盖上新 task 继续走行。
+        const leftover = !externalAdoptable && model.telemetryBinding?.cargoAutoDispose === false && state.cargoCode !== null
           ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
           : null;
         if (leftover) {
@@ -242,10 +253,10 @@ export class ConveyorTelemetryDriver {
       state.cargoTravelOffset += cargoDirection * forwardSign * cargoSpeed * deltaSeconds;
     }
 
-    // 出货动画：存在等待本 task 的设备时，向轨迹正转终点额外推进半个货箱长度（与线体是否走行无关）。
+    // 出货动画：锁定态且存在等待本 task 的设备时，向轨迹正转终点额外推进半个货箱长度（与线体是否走行无关）。
     let clampMin = -travelHalfRange;
     let clampMax = travelHalfRange;
-    if (!snapshot.faulted && cargo.task && this.findWaitingConveyorModels(model, cargo.task).length > 0) {
+    if (!snapshot.faulted && state.cargoLocked && cargo.task && this.findWaitingConveyorModels(model, cargo.task).length > 0) {
       const pushTarget = forwardSign * (travelHalfRange + cargoAxialLength / 2);
       state.cargoTravelOffset = moveNumberTowards(state.cargoTravelOffset, pushTarget, cargoSpeed * deltaSeconds);
       clampMin = Math.min(clampMin, pushTarget);
@@ -280,6 +291,35 @@ export class ConveyorTelemetryDriver {
       if (cargo.task === task && cargo.assetCode !== selfAssetCode) return cargo;
     }
     return null;
+  }
+
+  /** 他设备输送线持有的货物是否处于锁定态（holder 模型缺失时按未锁定处理，允许直接接管）。 */
+  private isConveyorCargoLocked(cargo: ConveyorCargoRuntimeEntry): boolean {
+    for (const { model } of this.host.collectModels()) {
+      if (model.assetCode === cargo.assetCode) return model.conveyorTelemetry?.cargoLocked ?? false;
+    }
+    return false;
+  }
+
+  /** 扫三张货物表找他设备持有的同 task 可接管货物（镜像 facade adoptGlobalCargoByTask 的扫描范围，只读不写）。 */
+  private findAdoptableGlobalCargoByTask(task: string, selfAssetCode: string): GeneratedCargoRuntimeEntry | null {
+    if (!task) return null;
+    const tables = [this.state.stackerCargoMeshes, this.state.conveyorCargoMeshes, this.state.rgvCargoMeshes];
+    for (const table of tables) {
+      for (const cargo of table.values()) {
+        if (cargo.task === task && cargo.assetCode !== selfAssetCode) return cargo;
+      }
+    }
+    return null;
+  }
+
+  /** 断流兜底：锁定货物且存在等待本 task 的设备时仍要求帧级驱动，让出货动画在快照断流期间走完。 */
+  needsLockedPushOutDrive(model: ModelRuntimeEntry): boolean {
+    const state = model.conveyorTelemetry;
+    if (!state?.cargoLocked || state.cargoCode === null) return false;
+    const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
+    if (!cargo?.task) return false;
+    return this.findWaitingConveyorModels(model, cargo.task).length > 0;
   }
 
   /** 等待设备的上货坐标：按其最近运行方向的刷出端世界坐标。 */

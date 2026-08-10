@@ -211,6 +211,8 @@ export type ConveyorModelTelemetryState = {
   lastTask: string | null;
   /** 正在等待他设备交出的 task（归一化字符串）；非 null 时本机不刷出、不走行。 */
   waitingTask: string | null;
+  /** 货物锁定态：mode==3 锁定（等待设备不得接管，仅出货动画），其他任何值非锁定（可被接管/交出）。 */
+  cargoLocked: boolean;
   /** 最近一次非 0 的 movement_x 运行方向（±1），供持有方计算机等待设备的上货坐标。 */
   lastMovementDirection: number;
   /** 接管货物后的自驱走行方向（±1，0=关闭）：快照断流期间不等新 MQTT 消息直接执行移动动画，新消息到达即清零。 */

@@ -12,7 +12,7 @@
 2. 快照判定：
    - 绑定冲突（同一主键匹配多个专用模型）→ 不驱动，报冲突日志
    - 无快照 → 不驱动
-   - 快照断流（`now - receivedAt > staleAfterMs`）→ **默认不驱动**；例外：驱动注册项声明 `applyWhenStale` 且返回 true 时仍用缓存快照驱动。conveyor 的判定是 `conveyorTelemetry.selfDriveDirection !== 0`（见 §9 接管自驱）
+   - 快照断流（`now - receivedAt > staleAfterMs`）→ **默认不驱动**；例外：驱动注册项声明 `applyWhenStale` 且返回 true 时仍用缓存快照驱动。conveyor 的判定是 `conveyorTelemetry.selfDriveDirection !== 0`（见 §9 接管自驱），或**锁定且存在等待者**（出货动画未走完，见 §6.11）
 3. 命中驱动 → `ConveyorTelemetryDriver.applyToModel(model, snapshot, delta)`：
    - 节流输出状态/故障日志，写入设备 metadata
    - **非故障**时执行本体动画（滚筒/链条）
@@ -23,7 +23,7 @@
 | 字段 | 类型 | 语义 |
 |---|---|---|
 | `movement_x` | int | 0 静止，1 正转，2 反转（正负数兜底兼容）。实际读取走 translate 配置的 `fields`+`actionMap`，缺省即 movement_x。**不再门控刷出**：新 task 刷出时若为 0 按正转（1）处理并登记自驱（见 §6.8/§9） |
-| `mode` | int | 2=任务完成/清线（**仅持有货物时构成完成判定**，见 §6.5/§6.6；等待方 mode=2 不算完成），0=空闲；缺省（null）视为运行中。1 等其他值无特殊语义 |
+| `mode` | int | **3=锁定货物**（含创建/接管货物的那一条消息；其他任何值都非锁定）；2=销毁条件（配合双光电无货+勾选自动销毁）；0=空闲（等待方退出等待）；缺省（null）视为运行中 |
 | `task` | int | 任务号；缺失=匿名模式；0=无任务（归一化为空串，不触发任何边沿，状态不变） |
 | `front_has_goods` / `back_has_goods` | bool | 前后光电，仅用于 mode==2 的销毁判定（字段名可由脚本 `motion.cargo` 覆盖） |
 | `containerCode` | string | 货箱条码，仅元数据（命名/metadata），不参与身份唯一性 |
@@ -59,6 +59,7 @@
 | `pendingTask` | 已登记待刷出的 task；新 task 边沿当帧消费（刷出或转等待）；等待被 mode 2/0 退出时一并放弃 |
 | `lastTask` | 边沿判定基准，**不随清线复位**——同 task 重发（含销毁后）不重刷 |
 | `waitingTask` | 正在等待他设备交出的 task；非 null 时不刷出、不走行 |
+| `cargoLocked` | 货物锁定态：`mode==3` 锁定，其他任何值非锁定；每帧按快照 mode 重算，断流期间保持 |
 | `lastMovementDirection` | 最近非 0 运行方向（±1），供他设备计算本机上货坐标 |
 | `selfDriveDirection` | 自驱走行方向（±1，0=关闭）：接管货物时登记接管方向；movement_x=0 的新 task 刷出时登记正转 1 |
 | `lastSnapshotReceivedAt` | 最近应用的快照 receivedAt，识别新消息 |
@@ -85,22 +86,22 @@
 
 ### 6.4 等待方退出（level 判断）
 `mode === 0`（空闲）→ `waitingTask = null`；若退出前在等待则**同时放弃 `pendingTask`**（刷出判定已提前到 task 边沿，不放弃会当帧立即重新等待）。
-**`mode === 2` 不退出等待**：任务完成判定只看持有货物的设备；等待方 mode=2 不构成完成，保持等待且不影响接管资格。
+**`mode === 2` 不退出等待**：mode=2 仅是销毁条件（6.6），与等待无关；等待方 mode=2 保持等待且不影响接管资格。
 持有方货物中途消失**不**自动退出等待——等待只能被 mode 0、新 task 边沿、被交出三种方式结束。
 
 ### 6.5 持有方交出（移交优先于销毁）
-本机持有带 task 的货物，且（`mode==2 || mode==0 || 新 task 边沿`）时：
+本机持有带 task 的货物，且（**货物解锁**——接到 mode≠3 的消息，或**新 task 边沿**）时：
 - 扫全局找等待该 task 的输送线（`waitingTask === task` 的他设备）
 - **有等待者** → 移交给「货物世界坐标距其**上货坐标**最近」的等待设备（见 §8），此后本机 `cargoCode=null`、货物从持有表摘除
-- **无等待者** → 落入 6.6 的销毁/遗留规则
+- **无等待者** → 落入 6.6 的销毁/遗留规则或 6.8 的新 task 刷出规则
 
-level 判断（非纯边沿）：mode 持续为 2/0 期间出现等待者也能交出，避免「持有方先停线、等待者后出现」的死锁。
+等待只存在于锁定货物（6.8），故解锁当帧即交出；锁定期间收到新 task 边沿也强制交出旧 task 货物。
 
 ### 6.6 mode==2 销货
 条件：`mode==2 && 双光电都无货`（与线体是否走行无关；光电有货则整个块跳过）：
 
 - **cargoAutoDispose 开启（缺省）** → 销毁本机全部货物，`cargoCode=null`，return
-- **cargoAutoDispose 关闭** → 保留货物与位姿（遗留箱）：等下游凭 task 取走（6.5），或新 task 刷出时复用（6.8）；无货物时 return
+- **cargoAutoDispose 关闭** → 保留货物与位姿（遗留箱）：等下游凭 task 直接接管（6.8，未锁定货物不当等待），或新 task 刷出时复用；无货物时 return
 
 ### 6.7 等待中截断
 `waitingTask` 非 null → return：不刷出、不走行，**本机已有货物同样静止**。
@@ -108,11 +109,12 @@ level 判断（非纯边沿）：mode 持续为 2/0 期间出现等待者也能�
 ### 6.8 task 模式刷出
 条件：`pendingTask` 非空（**新 task 边沿当帧即刷出/等待判定，不再等 movement_x 非 0**）：
 
-1. **等待判定**：他设备**输送线**持有同 task 货物 → `waitingTask = pendingTask`，return（pendingTask 保留，被交出后仍按原 task 接管）
-2. 否则消费 `pendingTask = null`，`spawnDirection = movementDirection ≠ 0 ? movementDirection : 1`（movement_x=0 按正转处理），按本机是否有遗留箱分两支：
-   - **遗留箱复用**（仅 `cargoAutoDispose === false` 且本机持有货物）：不销毁不重建，`cargoTravelOffset` 保持滞留位置，货物 `task` 盖上新 task、`containerCode` 更新（新值优先，空则保留旧值）
+1. **等待判定**：他设备**输送线**持有同 task 货物**且锁定** → `waitingTask = pendingTask`，return（pendingTask 保留，被交出后仍按原 task 接管）；他机持有但**未锁定**、或 stacker/RGV 持有 → 不当等待，走下方接管
+2. 否则消费 `pendingTask = null`，`spawnDirection = movementDirection ≠ 0 ? movementDirection : 1`（movement_x=0 按正转处理），按以下优先级分三支：
+   - **外界货物接管**（扫 stacker/conveyor/rgv 三张货物表存在他机持有的同 task 货物，且本机仍持有旧 task 货物）→ **销毁自身旧箱**、走下方 `adoptOrCreateConveyorCargo` 接管外界货物（**优先于遗留箱复用**）
+   - **遗留箱复用**（仅 `cargoAutoDispose === false`、外界无可接管货物、且本机持有货物）：不销毁不重建，`cargoTravelOffset` 保持滞留位置，货物 `task` 盖上新 task、`containerCode` 更新（新值优先，空则保留旧值）
    - **新建/接管**：先销毁本机旧箱（自动销毁开启时换 task 即此路径），`cargoTravelOffset = spawnOffset`（按 spawnDirection 计算的刷出端），然后 `adoptOrCreateConveyorCargo`：
-     - `adoptGlobalCargoByTask` 命中（stacker/RGV 持有的同 task 货物，或历史遗留的他机货物）→ **立即接管**：实例不销毁，换绑本机，登记 1 秒交接插值（handoff），从原世界位姿平滑接入本机走行
+     - `adoptGlobalCargoByTask` 命中（他机未锁定输送线/stacker/RGV 持有的同 task 货物）→ **立即接管**：实例不销毁，换绑本机，登记 1 秒交接插值（handoff），从原世界位姿平滑接入本机走行
      - 未命中 → 自建新货箱
 3. `movementDirection === 0` 时登记 `selfDriveDirection = 1`：刷在轨迹起点后自驱移向终点，下一条新消息到达恢复字段驱动（见 §9）
 
@@ -125,11 +127,11 @@ level 判断（非纯边沿）：mode 持续为 2/0 期间出现等待者也能�
 - `cargoSpeed` = translate 配置速度，缺省 0.3 m/s（与链条同源，链/货速度不脱节）
 
 ### 6.11 出货动画 + 钳制
-存在等待本 task 的设备时（`findWaitingConveyorModels` 命中），**无论 movement_x 是否为 0**（故障除外）：
+**锁定态（`cargoLocked`）**且存在等待本 task 的设备时（`findWaitingConveyorModels` 命中），**无论 movement_x 是否为 0**（故障除外）：
 - 每帧向 `pushTarget = forwardSign × (halfRange + 货箱轴向长度/2)` 推进（moveNumberTowards，按 cargoSpeed），**最多越出轨迹终点半个货箱长度即停**
 - 钳制范围同步放宽到 pushTarget
 - 无等待者时货物走到 ±halfRange 即停
-- **动画期间或结束后收到释放逻辑（mode 2/0、新 task 边沿）都立即交出**（6.5 判定不受动画进度影响）
+- **解锁（接到 mode≠3 的消息）当帧即交出**（6.5），出货动画只存在于锁定期间；动画期间或结束后解锁都立即生效
 
 最终 `cargoTravelOffset` clamp 到当前允许区间。
 
@@ -138,15 +140,16 @@ level 判断（非纯边沿）：mode 持续为 2/0 期间出现等待者也能�
 - `resolveCargoHandoffPose`：handoff 未完结时在「接管起点世界位姿 → 当前目标位姿」间插值（1 秒），完结清除
 - `setGeneratedCargoRootPose` 写世界位姿
 
-## 7. 等待/交出协议（仅持有方为输送线）
+## 7. 锁定/交出协议（仅持有方为输送线）
 
 三方视角：
 
-- **等待方（下游）**：新 task 边沿（不再要求线体运行）+ 发现他机输送线持有同 task 货物 → 不刷出、不走行，登记 `waitingTask`（`pendingTask` 保留）。退出：mode 0（同时放弃 pendingTask）、新 task 边沿、被交出；**等待方 mode=2 不构成完成、不退出**
-- **持有方（上游）**：有等待者 → 出货动画（6.11，最多越出终点半箱）；动画期间或结束后收到 mode 2/0 或新 task 边沿 → 交出（6.5）。**mode==2 的任务完成判定以持有方为准**
+- **锁定态**：`mode==3` 锁定货物（包括创建/接管货物的那一条消息），其他任何值都非锁定；每帧按快照 mode 重算，断流期间保持
+- **等待方（下游）**：新 task 边沿（不再要求线体运行）+ 他机输送线持有同 task 货物**且锁定** → 不刷出、不走行，登记 `waitingTask`（`pendingTask` 保留）。退出：mode 0（同时放弃 pendingTask）、新 task 边沿、被交出；**mode=2 不构成退出条件**。他机持有但未锁定的货物不等待，直接接管
+- **持有方（上游）**：锁定 + 有等待者 → 出货动画（6.11，最多越出终点半箱）；**解锁（接到 mode≠3 的消息）或新 task 边沿** → 交出（6.5）
 - **接管方（等待方被选中后）**：见 §8/§9
 
-stacker/RGV 持有的货物**不在等待协议内**：下游刷出时直接 `adoptGlobalCargoByTask` 立即接管（6.8）。
+stacker/RGV 持有的货物**无锁定概念**：下游刷出时直接 `adoptGlobalCargoByTask` 立即接管（6.8）。
 
 ## 8. 交出仲裁（`transferConveyorCargoToNearestWaiter`）
 
@@ -160,7 +163,7 @@ stacker/RGV 持有的货物**不在等待协议内**：下游刷出时直接 `ad
    - 货物 `assetCode` 换绑、`handoff` 登记（1 秒视觉插值保持连续）
 6. 输出移交日志 `Conveyor {持有方} 凭 task={task} 将货物移交 {接管方}`
 
-链式送货：接管后若仍有其他设备等待同 task，接管方变成新持有方，继续出货动画 → 再交出，逐级传递。
+链式送货：接管后若仍有其他设备等待同 task，接管方变成新持有方，按自身锁定态继续出货动画 → 解锁后再交出，逐级传递。
 
 ## 9. 接管自驱（断流不停货）
 
@@ -169,9 +172,9 @@ stacker/RGV 持有的货物**不在等待协议内**：下游刷出时直接 `ad
 机制：
 - 两个登记入口：交出时给接管方登记 `selfDriveDirection = 接管方向`（8.5）；**movement_x=0 的新 task 刷出时登记 `selfDriveDirection = 1`**（6.8，从轨迹起点移向终点）
 - 走行时快照 movement 为 0 回退到自驱方向（6.10）
-- facade 的 `applyWhenStale` 钩子让处于自驱的输送线在快照断流时仍被帧调度驱动（用缓存快照）
-- **任何新消息到达**（receivedAt 变化）→ 自驱清零，恢复字段驱动（movement_x=0 即停车，mode 2/0、新 task 正常生效）
-- 持续到货：走行至行程端 clamp 停住；有下游等待则继续出货动画
+- facade 的 `applyWhenStale` 钩子让处于自驱、或**锁定且有等待者（出货动画未走完）**的输送线在快照断流时仍被帧调度驱动（用缓存快照）
+- **任何新消息到达**（receivedAt 变化）→ 自驱清零，恢复字段驱动（movement_x=0 即停车，mode 2/0/3、新 task 正常生效）
+- 持续到货：走行至行程端 clamp 停住；锁定且有下游等待则继续出货动画
 
 ## 10. 故障（faulted）行为
 
@@ -197,11 +200,13 @@ stacker/RGV 持有的货物**不在等待协议内**：下游刷出时直接 `ad
 
 ### 刷出判定（task 模式，新 task 边沿当帧判定，不再等线体运行；movement_x=0 按正转刷在起点并自驱）
 
-| 同 task 货物持有方 | 本机遗留箱 | 结果 |
+| 同 task 货物持有方 | 本机旧 task 货物 | 结果 |
 |---|---|---|
-| 他机输送线 | — | 进入等待，不刷出 |
+| 他机输送线（**锁定**） | — | 进入等待，不刷出 |
+| 他机输送线（未锁定） | 无 | 立即接管（handoff 插值） |
+| 他机输送线（未锁定） | 有 | **销毁本机旧箱**，接管外界货物 |
 | stacker/RGV | 无 | 立即接管（handoff 插值） |
-| stacker/RGV | 有（autoDispose 关） | **遗留箱复用优先**，不触发接管 |
+| stacker/RGV | 有 | **销毁本机旧箱**，接管外界货物 |
 | 无 | 有（autoDispose 关） | 复用遗留箱，盖新 task，滞留位置继续走行 |
 | 无 | 有（autoDispose 开） | 销毁旧箱，刷出端新建 |
 | 无 | 无 | 刷出端自建 |
@@ -210,9 +215,9 @@ stacker/RGV 持有的货物**不在等待协议内**：下游刷出时直接 `ad
 
 | 持有货物 | 等待者 | autoDispose | 结果 |
 |---|---|---|---|
-| 有 | 有 | 任意 | 移交最近等待者（不销毁） |
+| 有 | 有 | 任意 | mode≠3 即解锁 → 移交最近等待者（不销毁） |
 | 有 | 无 | 开 | 销毁 |
-| 有 | 无 | 关 | 遗留（等下游取走或新 task 复用） |
+| 有 | 无 | 关 | 遗留（等下游凭 task 接管或新 task 复用） |
 | 无 | — | 任意 | 无操作 |
 
 ### 等待中（waitingTask 非空）
@@ -221,22 +226,23 @@ stacker/RGV 持有的货物**不在等待协议内**：下游刷出时直接 `ad
 |---|---|
 | 任意帧 | 不刷出、不走行、本机已有货物静止 |
 | mode 变 0 | 退出等待并放弃 pendingTask（同 task 重发不再重新等待，仅新 task 边沿再判定） |
-| mode 变 2 | **不退出**（完成判定只看持有方），保持等待且不影响接管资格 |
+| mode 变 2 | **不退出**（mode=2 仅是销毁条件），保持等待且不影响接管资格 |
 | 新 task 边沿 | 旧等待作废，走新 task 流程 |
-| 被持有方选中交出 | 接管货物：刷出端起走 + 自驱 + handoff 插值 |
+| 持有方解锁/收新 task 交出 | 接管货物：刷出端起走 + 自驱 + handoff 插值 |
 | 持有方货物消失（非交出） | **不退出**，继续等 |
 
 ### 持有方走行
 
-| 等待者 | movement_x | 结果 |
-|---|---|---|
-| 无 | ≠0 | 走到 ±halfRange 停住 |
-| 无 | 0 | 静止 |
-| 有 | 任意 | 推进到 forwardSign×(halfRange+货箱长/2)，越出常规端点半箱即停；动画期间或结束后收到释放都立即交出 |
+| 等待者 | 锁定 | movement_x | 结果 |
+|---|---|---|---|
+| 无 | 任意 | ≠0 | 走到 ±halfRange 停住 |
+| 无 | 任意 | 0 | 静止 |
+| 有 | 锁定 | 任意 | 推进到 forwardSign×(halfRange+货箱长/2)，越出常规端点半箱即停 |
+| 有 | 未锁定 | 任意 | 当帧交出（6.5），无持续走行 |
 
 ### 新 task 边沿（持有旧 task 货物时）
 
 | 等待旧 task 的设备 | 结果 |
 |---|---|
-| 有 | 旧货物移交最近等待者，新 task 当帧即刷出 |
-| 无 | 旧货物按 6.8 刷出规则处理（复用/销毁），新 task 当帧即刷出 |
+| 有 | 旧货物移交最近等待者（**锁定中也强制交出**），新 task 当帧即刷出 |
+| 无 | 旧货物按 6.8 刷出规则处理（外界可接管货物优先 → 销毁旧箱接管；否则复用/销毁），新 task 当帧即刷出 |

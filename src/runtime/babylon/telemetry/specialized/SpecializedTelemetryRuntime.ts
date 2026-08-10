@@ -67,7 +67,8 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         deviceType: 'conveyor',
         isCapable: isConveyorRuntimeModel,
         apply: (model, snapshot, deltaSeconds) => this.conveyorDriver.applyToModel(model, snapshot, deltaSeconds),
-        applyWhenStale: (model) => (model.conveyorTelemetry?.selfDriveDirection ?? 0) !== 0,
+        applyWhenStale: (model) => (model.conveyorTelemetry?.selfDriveDirection ?? 0) !== 0
+          || this.conveyorDriver.needsLockedPushOutDrive(model),
       },
       {
         deviceType: 'rgv',
