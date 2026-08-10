@@ -1,7 +1,7 @@
 # 数据中台天空盒资源与数字孪生编辑器同步设计
 
 - 日期：2026-08-10
-- 状态：已完成需求访谈，待用户复核书面规范
+- 状态：用户已确认
 - 影响仓库：`CentralDataPlatform`、`babylon-3d-plus`
 - 设计结论：新增独立天空盒领域模块，并在编辑器中新增独立的增量、原子、后台同步管线
 
@@ -191,15 +191,15 @@ CREATE TABLE dt_skybox (
   "fileName": "sunny-meadow.hdr",
   "fileUrl": "/api/v1/files/...",
   "fileFormat": "HDR",
-  "fileSize": 134217728,
+  "fileSize": "134217728",
   "fileSha256": "64-character-lowercase-sha256",
-  "revision": 3,
+  "revision": "3",
   "createdAt": "2026-08-10T10:00:00",
   "updatedAt": "2026-08-10T11:00:00"
 }
 ```
 
-`BIGINT` ID 继续以字符串返回，避免 JavaScript 精度损失。查询最大页大小遵循现有资源接口上限，编辑器通过有界分页拉取全部资源。
+`BIGINT` ID、文件大小、revision 以及分页结果中的 `long` 字段都按十进制字符串返回，避免 JavaScript 精度损失；前端只在确认字符串为安全整数且不超过对应资源上限后转换为 `number`。查询最大页大小遵循现有资源接口上限，编辑器通过有界分页拉取全部资源。
 
 ### 6.4 上传与替换事务
 
