@@ -1095,6 +1095,106 @@ test('首个完整 validate 失败后不再领取后续下载任务并等待已�
   await assertMissing(getDataPlatformSkyboxIndexPath(editorRoot));
 });
 
+test('validate throw null 仍标记失败、停止领取且旧库不变', async (t) => {
+  const sync = await loadSyncModule();
+  const store = await loadSkyboxStoreModule();
+  const editorRoot = await createEditorRoot(t, 'babylon-skybox-null-failure-');
+  const oldData = createHdrFixture('null-old', 33);
+  const oldRaw = createRawRecord({ id: '99', data: oldData });
+  const oldEntry = createIndexEntry(oldRaw);
+  await writeCurrentIndex(editorRoot, [oldEntry]);
+  const oldTarget = await writeAsset(editorRoot, oldEntry, oldData);
+  const indexPath = getDataPlatformSkyboxIndexPath(editorRoot);
+  const oldIndexBytes = await fs.readFile(indexPath);
+  const records = Array.from({ length: 5 }, (_, index) => {
+    const id = String(index + 1);
+    const data = createHdrFixture(`null-failure-${id}`, 45 + index);
+    return { raw: createRawRecord({ id, data }), data };
+  });
+  const request = singlePageRequest(records.map((item) => item.raw));
+  const started: string[] = [];
+  let twoStarted: (() => void) | null = null;
+  const twoStartedPromise = new Promise<void>((resolve) => {
+    twoStarted = resolve;
+  });
+  const downloadFile: SyncDependencies['downloadFile'] = async (options) => {
+    const id = /skybox-(\d+)\./.exec(options.remoteUrl)?.[1] ?? 'unknown';
+    started.push(id);
+    if (started.length === 2) twoStarted?.();
+    if (id === '2') await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    return await mappedDownloader(new Map([[options.remoteUrl, records[Number(id) - 1].data]]))(options);
+  };
+  const validateFile: SyncDependencies['validateFile'] = async (filePath) => {
+    if (filePath.endsWith(`${path.sep}Skybox-1${path.sep}skybox.hdr`)) {
+      await twoStartedPromise;
+      throw null;
+    }
+    return await store.validateSkyboxSourceFile(filePath);
+  };
+
+  const noError = Symbol('no-error');
+  let caught: unknown = noError;
+  try {
+    await sync.executeDataPlatformSkyboxSync({
+      baseUrl: BASE_URL,
+      editorRoot,
+      runId: 'null-failure-run',
+      dependencies: fixedDependencies(request.requestJson, downloadFile, validateFile),
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(caught, null);
+  assert.deepEqual(started, ['1', '2']);
+  assert.equal(sync.getLatestDataPlatformSkyboxSyncProgress()?.phase, 'failed');
+  assert.deepEqual(await fs.readFile(indexPath), oldIndexBytes);
+  assert.deepEqual(await fs.readFile(oldTarget), oldData);
+});
+
+test('恶意错误字符串化异常使用固定安全 fallback 并仍发布 failed', async (t) => {
+  const sync = await loadSyncModule();
+  const editorRoot = await createEditorRoot(t, 'babylon-skybox-safe-error-');
+  const oldData = createHdrFixture('safe-error-old', 34);
+  const oldRaw = createRawRecord({ id: '99', data: oldData });
+  const oldEntry = createIndexEntry(oldRaw);
+  await writeCurrentIndex(editorRoot, [oldEntry]);
+  const oldTarget = await writeAsset(editorRoot, oldEntry, oldData);
+  const indexPath = getDataPlatformSkyboxIndexPath(editorRoot);
+  const oldIndexBytes = await fs.readFile(indexPath);
+  const newData = createHdrFixture('safe-error-new', 64);
+  const raw = createRawRecord({ id: '1', data: newData });
+  const request = singlePageRequest([raw]);
+  const malicious = {
+    [Symbol.toPrimitive](): never {
+      throw new Error('coercion trap must not escape');
+    },
+  };
+
+  let caught: unknown;
+  try {
+    await sync.executeDataPlatformSkyboxSync({
+      baseUrl: BASE_URL,
+      editorRoot,
+      runId: 'safe-error-run',
+      dependencies: fixedDependencies(
+        request.requestJson,
+        mappedDownloader(new Map([['/files/skybox-1.hdr', newData]])),
+        async () => { throw malicious; },
+      ),
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(caught, malicious);
+  const progress = sync.getLatestDataPlatformSkyboxSyncProgress();
+  assert.equal(progress?.phase, 'failed');
+  assert.equal(progress?.error, '数据中台天空盒同步失败，错误详情不可读取。');
+  assert.deepEqual(await fs.readFile(indexPath), oldIndexBytes);
+  assert.deepEqual(await fs.readFile(oldTarget), oldData);
+});
+
 test('推广中途失败时逆序删除新目标并完整恢复备份，随后清理 staging', { concurrency: false }, async (t) => {
   const sync = await loadSyncModule();
   const store = await loadSkyboxStoreModule();

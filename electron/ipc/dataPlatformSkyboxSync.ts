@@ -269,7 +269,7 @@ export async function executeDataPlatformSkyboxSync(
         await removeStagingRoot(editorRoot, stagingRoot);
         stagingRoot = null;
       } catch (cleanupError) {
-        error = new Error(`${toErrorMessage(error)}；清理天空盒 staging 失败：${toErrorMessage(cleanupError)}`);
+        error = new Error(`${toSafeErrorMessage(error)}；清理天空盒 staging 失败：${toSafeErrorMessage(cleanupError)}`);
       }
     }
 
@@ -570,20 +570,24 @@ async function runWithConcurrency<T>(
   worker: (value: T) => Promise<void>,
 ): Promise<void> {
   let nextIndex = 0;
-  let firstError: unknown = null;
+  let hasError = false;
+  let firstError: unknown;
   const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
-    while (firstError === null && nextIndex < values.length) {
+    while (!hasError && nextIndex < values.length) {
       const currentIndex = nextIndex;
       nextIndex += 1;
       try {
         await worker(values[currentIndex]);
       } catch (error) {
-        if (firstError === null) firstError = error;
+        if (!hasError) {
+          hasError = true;
+          firstError = error;
+        }
       }
     }
   });
   await Promise.all(workers);
-  if (firstError !== null) throw firstError;
+  if (hasError) throw firstError;
 }
 
 async function renamePathWithWindowsRetry(sourcePath: string, targetPath: string): Promise<void> {
@@ -696,7 +700,11 @@ function createCanceledError(): Error {
 }
 
 function toSafeErrorMessage(error: unknown): string {
-  return toErrorMessage(error).replace(/\r?\n\s*at\s[\s\S]*/u, '').slice(0, 2_000);
+  try {
+    return toErrorMessage(error).replace(/\r?\n\s*at\s[\s\S]*/u, '').slice(0, 2_000);
+  } catch {
+    return '数据中台天空盒同步失败，错误详情不可读取。';
+  }
 }
 
 function toErrorMessage(error: unknown): string {
