@@ -364,6 +364,11 @@ export type ProjectSkyboxAssetEntry = {
   libraryKind: 'skybox';
   format: SkyboxAssetFormat;
   fileSizeBytes: number;
+  source: 'project' | 'data-platform';
+  availability: 'active' | 'orphaned';
+  dataPlatformResourceId?: string;
+  dataPlatformRevision?: string;
+  fileSha256?: string;
 };
 
 export type ModelPackageVariant = {
@@ -429,6 +434,7 @@ export type ProjectListAssetsResult = {
   projectRoot: string | null;
   assets: ProjectModelAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
 };
 
 export type SelectProjectDirectoryResult = {

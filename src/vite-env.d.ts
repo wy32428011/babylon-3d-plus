@@ -340,6 +340,11 @@ type ProjectSkyboxAssetEntry = {
   libraryKind: 'skybox';
   format: SkyboxAssetFormat;
   fileSizeBytes: number;
+  source: 'project' | 'data-platform';
+  availability: 'active' | 'orphaned';
+  dataPlatformResourceId?: string;
+  dataPlatformRevision?: string;
+  fileSha256?: string;
 };
 
 type ImportModelFolderRequest = {
@@ -397,6 +402,7 @@ type ProjectListAssetsResult = {
   projectRoot: string | null;
   assets: ProjectModelAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
 };
 
 type SelectProjectDirectoryResult = {

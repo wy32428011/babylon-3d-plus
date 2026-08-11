@@ -4,6 +4,10 @@ import test from 'node:test';
 
 const PROJECT_PANEL_PATH = 'src/editor/panels/ProjectPanel.tsx';
 const PROJECT_LIBRARY_PATH = 'src/editor/assets/projectLibrary.ts';
+const ASSET_DATABASE_PATH = 'src/editor/assets/AssetDatabase.ts';
+const ELECTRON_TYPES_PATH = 'electron/types.ts';
+const VITE_ENV_PATH = 'src/vite-env.d.ts';
+const PROJECT_ASSET_STORE_PATH = 'electron/ipc/projectAssetStore.ts';
 const INSPECTOR_PANEL_PATH = 'src/editor/panels/InspectorPanel.tsx';
 const POI_EFFECT_INSPECTOR_PATH = 'src/editor/panels/PoiEffectInspector.tsx';
 const GLOBAL_STYLE_PATH = 'src/styles/global.css';
@@ -98,4 +102,61 @@ test('切换资源库或聚焦模型卡片时重置模型类型筛选', () => {
 
   const resetCalls = source.match(/setModelDeviceTypeFilter\(''\)/g) ?? [];
   assert.ok(resetCalls.length >= 2, 'Tab 切换和模型聚焦至少各有一次类型重置');
+});
+
+
+test('三处天空盒类型包含一致来源、可用性与 Long 字符串元数据', () => {
+  for (const sourcePath of [ELECTRON_TYPES_PATH, VITE_ENV_PATH, ASSET_DATABASE_PATH]) {
+    const source = readFileSync(sourcePath, 'utf8');
+    assert.match(source, /source:\s*'project'\s*\|\s*'data-platform'/, sourcePath);
+    assert.match(source, /availability:\s*'active'\s*\|\s*'orphaned'/, sourcePath);
+    assert.match(source, /dataPlatformResourceId\?:\s*string/, sourcePath);
+    assert.match(source, /dataPlatformRevision\?:\s*string/, sourcePath);
+    assert.match(source, /fileSha256\?:\s*string/, sourcePath);
+  }
+});
+
+test('项目资源结果分离 orphaned 天空盒且无项目返回四字段空值', () => {
+  const types = readFileSync(ELECTRON_TYPES_PATH, 'utf8');
+  const rendererTypes = readFileSync(VITE_ENV_PATH, 'utf8');
+  const store = readFileSync(PROJECT_ASSET_STORE_PATH, 'utf8');
+
+  assert.match(types, /orphanedSkyboxes:\s*ProjectSkyboxAssetEntry\[\]/);
+  assert.match(rendererTypes, /orphanedSkyboxes:\s*ProjectSkyboxAssetEntry\[\]/);
+  assert.match(store, /return \{ projectRoot: null, assets: \[\], skyboxes: \[\], orphanedSkyboxes: \[\] \};/);
+  assert.match(store, /\[\.\.\.skyboxes, \.\.\.orphanedSkyboxes\]/);
+});
+
+test('共享模型根授权不再顺带放开整个共享天空盒目录', () => {
+  const source = readFileSync(PROJECT_ASSET_STORE_PATH, 'utf8');
+  const helperStart = source.indexOf('function authorizeSharedProjectAssetRoots');
+  const helperEnd = source.indexOf('\n}', helperStart);
+  assert.notEqual(helperStart, -1, '应定义独立的共享模型资源授权函数');
+  const helper = source.slice(helperStart, helperEnd + 2);
+
+  assert.match(helper, /getProjectModelsRoot/);
+  assert.match(helper, /getProjectEnvironmentsRoot/);
+  assert.match(helper, /getProjectImagesRoot/);
+  assert.doesNotMatch(helper, /getProjectSkyboxesRoot/);
+  assert.match(source, /setSharedProjectAssetRoot[\s\S]*?authorizeSharedProjectAssetRoots\(sharedProjectAssetRoot\)/);
+});
+
+test('天空盒卡片只接收 active 并显示固定来源文案', () => {
+  const source = readFileSync(PROJECT_LIBRARY_PATH, 'utf8');
+
+  assert.match(source, /filter\(\(asset\) => asset\.availability === 'active'\)/);
+  assert.ok(source.includes("asset.source === 'data-platform' ? '数据中台' : '项目本地'"));
+  assert.match(source, /\$\{sourceLabel\} · \$\{asset\.format\.toUpperCase\(\)\} · \$\{formatSkyboxFileSize\(asset\.fileSizeBytes\)\}/);
+});
+
+test('天空盒拖拽兼容旧本地载荷并严格拒绝 orphaned 或不完整中台元数据', () => {
+  const source = readFileSync(ASSET_DATABASE_PATH, 'utf8');
+
+  assert.match(source, /source[^\n]+\?\? 'project'/);
+  assert.match(source, /availability[^\n]+\?\? 'active'/);
+  assert.match(source, /availability !== 'active'/);
+  assert.match(source, /dataPlatformResourceId/);
+  assert.match(source, /dataPlatformRevision/);
+  assert.match(source, /\^\[0-9a-f\]\{64\}\$/);
+  assert.match(source, /Object\.getOwnPropertyDescriptor/);
 });

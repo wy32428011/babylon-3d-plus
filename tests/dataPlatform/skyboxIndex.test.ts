@@ -21,6 +21,8 @@ import {
   MAX_SKYBOX_FILE_BYTES,
   type DataPlatformSkyboxRecord,
 } from '../../electron/ipc/dataPlatformSkyboxContract.ts';
+import * as task5SkyboxIndexModule from '../../electron/ipc/dataPlatformSkyboxIndex.ts';
+import type { ProjectSkyboxAssetEntry } from '../../electron/types.ts';
 
 const SYNCED_AT = '2026-08-11T12:34:56.789Z';
 const NEXT_SYNCED_AT = '2026-08-11T13:34:56Z';
@@ -98,6 +100,94 @@ function deepFreeze<T>(value: T): T {
   Object.freeze(value);
   for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
   return value;
+}
+
+
+type SkyboxDiagnostic = {
+  resourceId: string;
+  code: string;
+  message: string;
+};
+
+type Task5SkyboxIndexApi = {
+  listIndexedDataPlatformSkyboxes?: (
+    editorRoot: string,
+    index?: DataPlatformSkyboxIndex,
+  ) => Promise<{
+    skyboxes: ProjectSkyboxAssetEntry[];
+    orphanedSkyboxes: ProjectSkyboxAssetEntry[];
+    errors: SkyboxDiagnostic[];
+  }>;
+  mergeSkyboxAssets?: (
+    local: readonly ProjectSkyboxAssetEntry[],
+    remoteActive: readonly ProjectSkyboxAssetEntry[],
+    reportError?: (error: SkyboxDiagnostic) => void,
+  ) => ProjectSkyboxAssetEntry[];
+};
+
+function getTask5SkyboxIndexApi(): Required<Task5SkyboxIndexApi> {
+  const api = task5SkyboxIndexModule as Task5SkyboxIndexApi;
+  assert.equal(typeof api.listIndexedDataPlatformSkyboxes, 'function', '应导出 listIndexedDataPlatformSkyboxes');
+  assert.equal(typeof api.mergeSkyboxAssets, 'function', '应导出 mergeSkyboxAssets');
+  return api as Required<Task5SkyboxIndexApi>;
+}
+
+function createExrFixture(width = 8, height = 1): Buffer {
+  const version = Buffer.alloc(4);
+  version.writeUInt32LE(2);
+  const dataWindowSize = Buffer.alloc(4);
+  dataWindowSize.writeUInt32LE(16);
+  const dataWindow = Buffer.alloc(16);
+  dataWindow.writeInt32LE(0, 0);
+  dataWindow.writeInt32LE(0, 4);
+  dataWindow.writeInt32LE(width - 1, 8);
+  dataWindow.writeInt32LE(height - 1, 12);
+  return Buffer.concat([
+    Buffer.from([0x76, 0x2f, 0x31, 0x01]),
+    version,
+    Buffer.from('dataWindow\0box2i\0', 'ascii'),
+    dataWindowSize,
+    dataWindow,
+    Buffer.from([0]),
+    Buffer.from('EXR-DATA'),
+  ]);
+}
+
+async function writeIndexedSkybox(
+  editorRoot: string,
+  entry: DataPlatformSkyboxIndexEntry,
+  content: Uint8Array,
+): Promise<string> {
+  const filePath = resolveSkyboxIndexEntryPath(editorRoot, entry.relativePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, content);
+  return filePath;
+}
+
+function createSkyboxAsset(
+  id: string,
+  displayName: string,
+  overrides: Partial<ProjectSkyboxAssetEntry> = {},
+): ProjectSkyboxAssetEntry {
+  const source = overrides.source ?? 'project';
+  const format = overrides.format ?? 'exr';
+  const dataPlatformResourceId = overrides.dataPlatformResourceId;
+  return {
+    id,
+    name: `${id}.${format}`,
+    displayName,
+    path: path.join(os.tmpdir(), `${id}.${format}`),
+    sourceUrl: `editor-asset://local/${encodeURIComponent(path.join(os.tmpdir(), `${id}.${format}`))}`,
+    assetRevision: overrides.assetRevision ?? (source === 'data-platform' ? shaForId(dataPlatformResourceId ?? '1') : 'local-revision'),
+    packagePath: path.join(os.tmpdir(), id),
+    kind: 'skybox',
+    libraryKind: 'skybox',
+    format,
+    fileSizeBytes: overrides.fileSizeBytes ?? 64,
+    source,
+    availability: overrides.availability ?? 'active',
+    ...overrides,
+  };
 }
 
 test('索引版本和同步下载总量上限固定', () => {
@@ -712,4 +802,181 @@ test('未知 version 不触发不可信 primitive 转换且错误稳定', async 
   );
   assert.equal(conversionCalls, 0);
   await assert.rejects(fs.stat(targetPath), { code: 'ENOENT' });
+});
+
+
+test('索引天空盒转换保留数据中台来源元数据并分离 active/orphaned', async (t) => {
+  const { listIndexedDataPlatformSkyboxes } = getTask5SkyboxIndexApi();
+  const editorRoot = await createEditorRoot(t);
+  const content = createExrFixture();
+  const active10 = createEntry(createRecord('10', { format: 'exr', fileSizeBytes: content.length }));
+  const orphaned3 = createEntry(createRecord('3', { format: 'exr', fileSizeBytes: content.length }), { status: 'orphaned' });
+  const active2 = createEntry(createRecord('2', { format: 'exr', fileSizeBytes: content.length }));
+  for (const entry of [active10, orphaned3, active2]) await writeIndexedSkybox(editorRoot, entry, content);
+
+  const result = await listIndexedDataPlatformSkyboxes(editorRoot, createIndex([active10, orphaned3, active2]));
+
+  assert.deepEqual(result.skyboxes.map((asset) => asset.dataPlatformResourceId), ['2', '10']);
+  assert.deepEqual(result.orphanedSkyboxes.map((asset) => asset.dataPlatformResourceId), ['3']);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(
+    result.skyboxes[0],
+    {
+      id: 'data-platform-skybox:2',
+      name: 'skybox.exr',
+      displayName: '天空盒 2',
+      path: resolveSkyboxIndexEntryPath(editorRoot, active2.relativePath),
+      sourceUrl: `editor-asset://local/${encodeURIComponent(resolveSkyboxIndexEntryPath(editorRoot, active2.relativePath))}`,
+      assetRevision: active2.sha256,
+      packagePath: path.dirname(resolveSkyboxIndexEntryPath(editorRoot, active2.relativePath)),
+      kind: 'skybox',
+      libraryKind: 'skybox',
+      format: 'exr',
+      fileSizeBytes: content.length,
+      source: 'data-platform',
+      availability: 'active',
+      dataPlatformResourceId: '2',
+      dataPlatformRevision: '2',
+      fileSha256: active2.sha256,
+    },
+  );
+  assert.equal(result.orphanedSkyboxes[0].availability, 'orphaned');
+});
+
+test('损坏、缺失、目录、symlink 和 size 不一致条目不暴露且逐项返回无路径泄露诊断', async (t) => {
+  const { listIndexedDataPlatformSkyboxes } = getTask5SkyboxIndexApi();
+  const editorRoot = await createEditorRoot(t);
+  const content = createExrFixture();
+  const missing = createEntry(createRecord('1', { format: 'exr', fileSizeBytes: content.length }));
+  const directory = createEntry(createRecord('2', { format: 'exr', fileSizeBytes: content.length }));
+  const symlink = createEntry(createRecord('3', { format: 'exr', fileSizeBytes: content.length }));
+  const invalidFormat = createEntry(createRecord('4', { format: 'exr', fileSizeBytes: 7 }));
+  const wrongSize = createEntry(createRecord('5', { format: 'exr', fileSizeBytes: content.length + 1 }));
+  const missingOrphan = createEntry(createRecord('6', { format: 'exr', fileSizeBytes: content.length }), { status: 'orphaned' });
+
+  const directoryPath = resolveSkyboxIndexEntryPath(editorRoot, directory.relativePath);
+  await fs.mkdir(directoryPath, { recursive: true });
+  const symlinkPath = resolveSkyboxIndexEntryPath(editorRoot, symlink.relativePath);
+  await fs.mkdir(path.dirname(symlinkPath), { recursive: true });
+  const symlinkTarget = path.join(editorRoot, 'safe-symlink-target');
+  await fs.mkdir(symlinkTarget, { recursive: true });
+  await fs.symlink(symlinkTarget, symlinkPath, process.platform === 'win32' ? 'junction' : 'dir');
+  await writeIndexedSkybox(editorRoot, invalidFormat, Buffer.from('invalid'));
+  await writeIndexedSkybox(editorRoot, wrongSize, content);
+
+  const result = await listIndexedDataPlatformSkyboxes(
+    editorRoot,
+    createIndex([missing, directory, symlink, invalidFormat, wrongSize, missingOrphan]),
+  );
+
+  assert.deepEqual(result.skyboxes, []);
+  assert.deepEqual(result.orphanedSkyboxes, []);
+  assert.deepEqual(
+    Object.fromEntries(result.errors.map((error) => [error.resourceId, error.code])),
+    {
+      '1': 'missing',
+      '2': 'not-file',
+      '3': 'symbolic-link',
+      '4': 'invalid-file',
+      '5': 'size-mismatch',
+      '6': 'missing',
+    },
+  );
+  for (const error of result.errors) assert.equal(error.message.includes(editorRoot), false);
+});
+
+test('索引文件的父目录为 symlink 时拒绝暴露越界缓存', async (t) => {
+  const { listIndexedDataPlatformSkyboxes } = getTask5SkyboxIndexApi();
+  const editorRoot = await createEditorRoot(t);
+  const externalRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'skybox-index-external-'));
+  t.after(async () => {
+    await fs.rm(externalRoot, { recursive: true, force: true });
+  });
+  const content = createExrFixture();
+  const entry = createEntry(createRecord('7', { format: 'exr', fileSizeBytes: content.length }));
+  const filePath = resolveSkyboxIndexEntryPath(editorRoot, entry.relativePath);
+  const packagePath = path.dirname(filePath);
+  await fs.mkdir(path.dirname(packagePath), { recursive: true });
+  await fs.writeFile(path.join(externalRoot, 'skybox.exr'), content);
+  await fs.symlink(externalRoot, packagePath, process.platform === 'win32' ? 'junction' : 'dir');
+
+  const result = await listIndexedDataPlatformSkyboxes(editorRoot, createIndex([entry]));
+
+  assert.deepEqual(result.skyboxes, []);
+  assert.deepEqual(result.orphanedSkyboxes, []);
+  assert.deepEqual(result.errors.map((error) => [error.resourceId, error.code]), [['7', 'symbolic-link']]);
+  assert.equal(result.errors[0].message.includes(externalRoot), false);
+});
+
+test('索引整体损坏时 listIndexedDataPlatformSkyboxes 明确失败', async (t) => {
+  const { listIndexedDataPlatformSkyboxes } = getTask5SkyboxIndexApi();
+  const editorRoot = await createEditorRoot(t);
+  await writeRawIndex(editorRoot, '{broken json');
+  await assert.rejects(listIndexedDataPlatformSkyboxes(editorRoot), /索引 JSON 已损坏|索引.*损坏/);
+});
+
+test('mergeSkyboxAssets 即使重复 ID 中只有一个候选元数据有效也剔除整组', () => {
+  const { mergeSkyboxAssets } = getTask5SkyboxIndexApi();
+  const resourceId = '8';
+  const valid = createSkyboxAsset(`data-platform-skybox:${resourceId}`, '远端', {
+    source: 'data-platform',
+    dataPlatformResourceId: resourceId,
+    dataPlatformRevision: '8',
+    fileSha256: shaForId(resourceId),
+    assetRevision: shaForId(resourceId),
+  });
+  const malformed = createSkyboxAsset('malformed-remote', '伪造远端', {
+    source: 'project',
+    dataPlatformResourceId: resourceId,
+    dataPlatformRevision: '9',
+    fileSha256: shaForId('9'),
+    assetRevision: shaForId('9'),
+  });
+  const errors: SkyboxDiagnostic[] = [];
+
+  const merged = mergeSkyboxAssets([], [valid, malformed], (error) => errors.push(error));
+
+  assert.deepEqual(merged, []);
+  assert.deepEqual(errors.map((error) => [error.resourceId, error.code]), [[resourceId, 'duplicate-resource-id']]);
+});
+
+test('mergeSkyboxAssets 保留同名本地与远端、本地优先并保守剔除重复远端 ID', () => {
+  const { mergeSkyboxAssets } = getTask5SkyboxIndexApi();
+  const local = deepFreeze([
+    createSkyboxAsset('local-b', '乙'),
+    createSkyboxAsset('local-a', '同名'),
+  ]);
+  const remote = deepFreeze([
+    createSkyboxAsset('data-platform-skybox:2', '同名', {
+      source: 'data-platform',
+      dataPlatformResourceId: '2',
+      dataPlatformRevision: '2',
+      fileSha256: shaForId('2'),
+      assetRevision: shaForId('2'),
+    }),
+    createSkyboxAsset('data-platform-skybox:9-a', '甲', {
+      source: 'data-platform',
+      dataPlatformResourceId: '9',
+      dataPlatformRevision: '9',
+      fileSha256: shaForId('9'),
+      assetRevision: shaForId('9'),
+    }),
+    createSkyboxAsset('data-platform-skybox:9-b', '丙', {
+      source: 'data-platform',
+      dataPlatformResourceId: '9',
+      dataPlatformRevision: '10',
+      fileSha256: shaForId('10'),
+      assetRevision: shaForId('10'),
+    }),
+  ]);
+  const localSnapshot = structuredClone(local);
+  const remoteSnapshot = structuredClone(remote);
+  const errors: SkyboxDiagnostic[] = [];
+
+  const merged = mergeSkyboxAssets(local, remote, (error) => errors.push(error));
+
+  assert.deepEqual(merged.map((asset) => asset.id), ['local-a', 'data-platform-skybox:2', 'local-b']);
+  assert.deepEqual(errors.map((error) => [error.resourceId, error.code]), [['9', 'duplicate-resource-id']]);
+  assert.deepEqual(local, localSnapshot);
+  assert.deepEqual(remote, remoteSnapshot);
 });

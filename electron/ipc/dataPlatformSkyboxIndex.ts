@@ -1,17 +1,22 @@
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import type { ProjectSkyboxAssetEntry } from '../types.js';
 import type { DataPlatformSkyboxRecord } from './dataPlatformSkyboxContract.js';
 
 // 源码测试直接执行 .ts，Electron 构建产物执行 .js；按当前扩展名复用 Task1 契约，避免复制校验逻辑。
 const require = createRequire(import.meta.url);
 type DataPlatformSkyboxContractModule = typeof import('./dataPlatformSkyboxContract.js');
-const contractExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
+type AssetRegistryModule = typeof import('./assetRegistry.js');
+type SkyboxAssetStoreModule = typeof import('./skyboxAssetStore.js');
+const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
 const {
   assertUniqueSkyboxRecords,
   MAX_SKYBOX_FILE_BYTES,
   normalizePositiveIdentifier,
-} = require(`./dataPlatformSkyboxContract${contractExtension}`) as DataPlatformSkyboxContractModule;
+} = require(`./dataPlatformSkyboxContract${runtimeExtension}`) as DataPlatformSkyboxContractModule;
+const { encodeAssetUrl } = require(`./assetRegistry${runtimeExtension}`) as AssetRegistryModule;
+const { inspectSkyboxAssetFile } = require(`./skyboxAssetStore${runtimeExtension}`) as SkyboxAssetStoreModule;
 
 export const DATA_PLATFORM_SKYBOX_INDEX_VERSION = 1 as const;
 export const MAX_SKYBOX_SYNC_DOWNLOAD_BYTES = 8 * 1024 ** 3;
@@ -67,6 +72,32 @@ export type Index = DataPlatformSkyboxIndex;
 export type DownloadPlan = DataPlatformSkyboxDownloadPlan;
 export type Plan = DataPlatformSkyboxPlan;
 
+export type DataPlatformSkyboxAssetDiagnosticCode =
+  | 'missing'
+  | 'symbolic-link'
+  | 'not-file'
+  | 'invalid-file'
+  | 'format-mismatch'
+  | 'size-mismatch'
+  | 'io-error'
+  | 'invalid-remote-entry'
+  | 'duplicate-resource-id';
+
+export type DataPlatformSkyboxAssetDiagnostic = {
+  resourceId: string;
+  availability: 'active' | 'orphaned';
+  code: DataPlatformSkyboxAssetDiagnosticCode;
+  message: string;
+};
+
+export type IndexedDataPlatformSkyboxesResult = {
+  skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
+  errors: DataPlatformSkyboxAssetDiagnostic[];
+};
+
+export type SkyboxAssetDiagnosticReporter = (error: DataPlatformSkyboxAssetDiagnostic) => void;
+
 export function getDataPlatformSkyboxIndexPath(editorRoot: string): string {
   return path.join(editorRoot, '.babylon-editor', INDEX_FILE_NAME);
 }
@@ -108,6 +139,110 @@ export async function readDataPlatformSkyboxIndex(editorRoot: string): Promise<D
     }
     throw error;
   }
+}
+
+/**
+ * 将索引中的缓存文件转换为编辑器天空盒资产。索引整体损坏直接失败；单条缓存损坏只进入 errors。
+ */
+export async function listIndexedDataPlatformSkyboxes(
+  editorRoot: string,
+  index?: DataPlatformSkyboxIndex,
+): Promise<IndexedDataPlatformSkyboxesResult> {
+  const normalizedIndex = index === undefined
+    ? await readDataPlatformSkyboxIndex(editorRoot)
+    : normalizeDataPlatformSkyboxIndex(index);
+  const skyboxes: ProjectSkyboxAssetEntry[] = [];
+  const orphanedSkyboxes: ProjectSkyboxAssetEntry[] = [];
+  const errors: DataPlatformSkyboxAssetDiagnostic[] = [];
+  const entries = [...normalizedIndex.entries]
+    .sort((left, right) => compareResourceIds(left.resourceId, right.resourceId));
+
+  for (const entry of entries) {
+    const filePath = resolveSkyboxIndexEntryPath(editorRoot, entry.relativePath);
+    let stat;
+    try {
+      const ancestorIssue = await inspectIndexEntryAncestors(editorRoot, filePath);
+      if (ancestorIssue) {
+        errors.push(createAssetDiagnostic(entry, ancestorIssue));
+        continue;
+      }
+      stat = await fs.lstat(filePath);
+    } catch (error) {
+      errors.push(createAssetDiagnostic(
+        entry,
+        isNodeError(error) && error.code === 'ENOENT' ? 'missing' : 'io-error',
+      ));
+      continue;
+    }
+
+    if (stat.isSymbolicLink()) {
+      errors.push(createAssetDiagnostic(entry, 'symbolic-link'));
+      continue;
+    }
+    if (!stat.isFile()) {
+      errors.push(createAssetDiagnostic(entry, 'not-file'));
+      continue;
+    }
+
+    let inspection;
+    try {
+      inspection = await inspectSkyboxAssetFile(filePath);
+    } catch {
+      errors.push(createAssetDiagnostic(entry, 'invalid-file'));
+      continue;
+    }
+    if (inspection.format !== entry.format) {
+      errors.push(createAssetDiagnostic(entry, 'format-mismatch'));
+      continue;
+    }
+    if (inspection.fileSizeBytes !== entry.fileSizeBytes) {
+      errors.push(createAssetDiagnostic(entry, 'size-mismatch'));
+      continue;
+    }
+
+    const asset = createIndexedSkyboxAsset(entry, filePath);
+    if (entry.status === 'active') skyboxes.push(asset);
+    else orphanedSkyboxes.push(asset);
+  }
+
+  return { skyboxes, orphanedSkyboxes, errors };
+}
+
+/**
+ * 合并项目本地与 active 数据中台天空盒。重复远端 resourceId 的全部候选都会被剔除并报告诊断。
+ */
+export function mergeSkyboxAssets(
+  local: readonly ProjectSkyboxAssetEntry[],
+  remoteActive: readonly ProjectSkyboxAssetEntry[],
+  reportError: SkyboxAssetDiagnosticReporter = () => undefined,
+): ProjectSkyboxAssetEntry[] {
+  const remoteByResourceId = new Map<string, ProjectSkyboxAssetEntry[]>();
+  for (const asset of remoteActive) {
+    const resourceId = asset.dataPlatformResourceId;
+    if (typeof resourceId !== 'string' || !/^[1-9]\d{0,63}$/.test(resourceId)) {
+      reportError(createMergeDiagnostic('unknown', 'invalid-remote-entry'));
+      continue;
+    }
+    const candidates = remoteByResourceId.get(resourceId) ?? [];
+    candidates.push(asset);
+    remoteByResourceId.set(resourceId, candidates);
+  }
+
+  const uniqueRemote: ProjectSkyboxAssetEntry[] = [];
+  for (const [resourceId, candidates] of remoteByResourceId) {
+    if (candidates.length !== 1) {
+      reportError(createMergeDiagnostic(resourceId, 'duplicate-resource-id'));
+      continue;
+    }
+    const candidate = candidates[0];
+    if (!isTrustedRemoteSkyboxCandidate(candidate, resourceId)) {
+      reportError(createMergeDiagnostic(resourceId, 'invalid-remote-entry'));
+      continue;
+    }
+    uniqueRemote.push(candidate);
+  }
+
+  return [...local, ...uniqueRemote].sort(compareSkyboxAssets);
 }
 
 export async function writeDataPlatformSkyboxIndexFile(
@@ -185,6 +320,133 @@ export function buildDataPlatformSkyboxPlan(
     changedResourceIds,
     orphanedResourceIds,
   };
+}
+
+async function inspectIndexEntryAncestors(
+  editorRoot: string,
+  filePath: string,
+): Promise<'symbolic-link' | 'not-file' | null> {
+  const root = path.resolve(editorRoot);
+  const parentRelativePath = path.relative(root, path.dirname(filePath));
+  let currentPath = root;
+  for (const segment of parentRelativePath.split(path.sep).filter(Boolean)) {
+    currentPath = path.join(currentPath, segment);
+    const stat = await fs.lstat(currentPath);
+    if (stat.isSymbolicLink()) return 'symbolic-link';
+    if (!stat.isDirectory()) return 'not-file';
+  }
+  return null;
+}
+
+function createIndexedSkyboxAsset(
+  entry: DataPlatformSkyboxIndexEntry,
+  filePath: string,
+): ProjectSkyboxAssetEntry {
+  return {
+    id: `data-platform-skybox:${entry.resourceId}`,
+    name: path.basename(filePath),
+    displayName: entry.displayName,
+    path: filePath,
+    sourceUrl: encodeAssetUrl(filePath),
+    assetRevision: entry.sha256,
+    packagePath: path.dirname(filePath),
+    kind: 'skybox',
+    libraryKind: 'skybox',
+    format: entry.format,
+    fileSizeBytes: entry.fileSizeBytes,
+    source: 'data-platform',
+    availability: entry.status,
+    dataPlatformResourceId: entry.resourceId,
+    dataPlatformRevision: entry.revision,
+    fileSha256: entry.sha256,
+  };
+}
+
+function createAssetDiagnostic(
+  entry: DataPlatformSkyboxIndexEntry,
+  code: DataPlatformSkyboxAssetDiagnosticCode,
+): DataPlatformSkyboxAssetDiagnostic {
+  const reasonByCode: Record<DataPlatformSkyboxAssetDiagnosticCode, string> = {
+    missing: '缓存文件缺失',
+    'symbolic-link': '缓存路径是 symbolic link',
+    'not-file': '缓存路径不是普通文件',
+    'invalid-file': '缓存文件格式校验失败',
+    'format-mismatch': '缓存文件格式与索引不一致',
+    'size-mismatch': '缓存文件大小与索引不一致',
+    'io-error': '缓存文件读取失败',
+    'invalid-remote-entry': '远端候选元数据无效',
+    'duplicate-resource-id': '远端候选 resourceId 重复',
+  };
+  return {
+    resourceId: entry.resourceId,
+    availability: entry.status,
+    code,
+    message: `数据中台天空盒 ${entry.resourceId}：${reasonByCode[code]}。`,
+  };
+}
+
+function isTrustedRemoteSkyboxCandidate(
+  asset: ProjectSkyboxAssetEntry,
+  resourceId: string,
+): boolean {
+  return asset.source === 'data-platform'
+    && asset.availability === 'active'
+    && asset.id === `data-platform-skybox:${resourceId}`
+    && typeof asset.dataPlatformRevision === 'string'
+    && POSITIVE_REVISION_PATTERN.test(asset.dataPlatformRevision)
+    && typeof asset.fileSha256 === 'string'
+    && LOWERCASE_SHA256_PATTERN.test(asset.fileSha256)
+    && asset.assetRevision === asset.fileSha256;
+}
+
+function createMergeDiagnostic(
+  resourceId: string,
+  code: 'invalid-remote-entry' | 'duplicate-resource-id',
+): DataPlatformSkyboxAssetDiagnostic {
+  const message = code === 'duplicate-resource-id'
+    ? '远端候选 resourceId 重复，已保守剔除全部重复候选。'
+    : '远端候选缺少可信的 active 数据中台来源元数据，已剔除。';
+  return {
+    resourceId,
+    availability: 'active',
+    code,
+    message: `数据中台天空盒 ${resourceId}：${message}`,
+  };
+}
+
+const SKYBOX_ASSET_COLLATOR = new Intl.Collator('zh-CN', {
+  numeric: true,
+  sensitivity: 'base',
+  usage: 'sort',
+});
+
+function compareSkyboxAssets(left: ProjectSkyboxAssetEntry, right: ProjectSkyboxAssetEntry): number {
+  const displayNameOrder = SKYBOX_ASSET_COLLATOR.compare(
+    normalizeSkyboxSortText(left.displayName),
+    normalizeSkyboxSortText(right.displayName),
+  );
+  if (displayNameOrder !== 0) return displayNameOrder;
+
+  const sourceOrder = getSkyboxSourceOrder(left.source) - getSkyboxSourceOrder(right.source);
+  if (sourceOrder !== 0) return sourceOrder;
+
+  const idOrder = SKYBOX_ASSET_COLLATOR.compare(
+    normalizeSkyboxSortText(left.id),
+    normalizeSkyboxSortText(right.id),
+  );
+  if (idOrder !== 0) return idOrder;
+  return SKYBOX_ASSET_COLLATOR.compare(
+    normalizeSkyboxSortText(left.path),
+    normalizeSkyboxSortText(right.path),
+  );
+}
+
+function normalizeSkyboxSortText(value: string): string {
+  return value.normalize('NFKC').trim().replace(/\s+/g, ' ');
+}
+
+function getSkyboxSourceOrder(source: ProjectSkyboxAssetEntry['source']): number {
+  return source === 'project' ? 0 : 1;
 }
 
 function normalizeDataPlatformSkyboxIndex(value: unknown): DataPlatformSkyboxIndex {

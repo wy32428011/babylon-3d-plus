@@ -54,6 +54,11 @@ export type ProjectSkyboxAssetEntry = {
   libraryKind: 'skybox';
   format: SkyboxAssetFormat;
   fileSizeBytes: number;
+  source: 'project' | 'data-platform';
+  availability: 'active' | 'orphaned';
+  dataPlatformResourceId?: string;
+  dataPlatformRevision?: string;
+  fileSha256?: string;
 };
 
 export const MODEL_ASSET_DRAG_MIME_TYPE = 'application/x-babylon-editor-model-asset';
@@ -77,6 +82,24 @@ type AssetEntryRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is AssetEntryRecord {
   return typeof value === 'object' && value !== null;
+}
+
+const POSITIVE_DATA_PLATFORM_IDENTIFIER = /^[1-9]\d{0,63}$/;
+const POSITIVE_DATA_PLATFORM_REVISION = /^[1-9]\d*$/;
+const LOWERCASE_SHA256 = /^[0-9a-f]{64}$/;
+
+function isPlainDataRecord(value: unknown): value is AssetEntryRecord {
+  return isRecord(value) && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function readOwnDataField(record: AssetEntryRecord, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key);
+  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+}
+
+function hasOwnDataField(record: AssetEntryRecord, key: string): boolean {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key);
+  return Boolean(descriptor && Object.hasOwn(descriptor, 'value'));
 }
 
 function readOptionalString(record: AssetEntryRecord, key: keyof AssetEntry): string | undefined {
@@ -205,35 +228,84 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
   }
 }
 
-/** 解码项目天空盒拖拽载荷，并拒绝非授权 URL、无效格式和不完整元数据。 */
+/** 解码项目天空盒拖拽载荷；旧本地载荷补齐 project/active，中台载荷执行严格来源校验。 */
 export function decodeSkyboxAssetDragPayload(rawPayload: string): ProjectSkyboxAssetEntry | null {
   try {
     const payload: unknown = JSON.parse(rawPayload);
-    if (!isRecord(payload) || payload.kind !== 'skybox' || payload.libraryKind !== 'skybox') return null;
-    if (typeof payload.id !== 'string' || !payload.id.trim()) return null;
-    if (typeof payload.name !== 'string' || !payload.name.trim()) return null;
-    if (typeof payload.displayName !== 'string' || !payload.displayName.trim()) return null;
-    if (typeof payload.path !== 'string' || !payload.path.trim()) return null;
-    if (typeof payload.packagePath !== 'string' || !payload.packagePath.trim()) return null;
-    if (typeof payload.sourceUrl !== 'string' || !payload.sourceUrl.startsWith('editor-asset://local/')) return null;
-    if (typeof payload.assetRevision !== 'string' || !payload.assetRevision.trim()) return null;
-    if (payload.format !== 'hdr' && payload.format !== 'exr') return null;
-    if (typeof payload.fileSizeBytes !== 'number' || !Number.isFinite(payload.fileSizeBytes) || payload.fileSizeBytes <= 0) return null;
-    const expectedExtension = payload.format === 'hdr' ? /\.hdr$/i : /\.exr$/i;
-    if (!expectedExtension.test(payload.path) || !expectedExtension.test(payload.name)) return null;
+    if (!isPlainDataRecord(payload)) return null;
 
-    return {
-      id: payload.id,
-      name: payload.name,
-      displayName: payload.displayName,
-      path: payload.path,
-      sourceUrl: payload.sourceUrl,
-      assetRevision: payload.assetRevision,
-      packagePath: payload.packagePath,
+    const kind = readOwnDataField(payload, 'kind');
+    const libraryKind = readOwnDataField(payload, 'libraryKind');
+    const id = readOwnDataField(payload, 'id');
+    const name = readOwnDataField(payload, 'name');
+    const displayName = readOwnDataField(payload, 'displayName');
+    const assetPath = readOwnDataField(payload, 'path');
+    const packagePath = readOwnDataField(payload, 'packagePath');
+    const sourceUrl = readOwnDataField(payload, 'sourceUrl');
+    const assetRevision = readOwnDataField(payload, 'assetRevision');
+    const format = readOwnDataField(payload, 'format');
+    const fileSizeBytes = readOwnDataField(payload, 'fileSizeBytes');
+    const sourceValue = readOwnDataField(payload, 'source');
+    const availabilityValue = readOwnDataField(payload, 'availability');
+    const source = sourceValue ?? 'project';
+    const availability = availabilityValue ?? 'active';
+
+    if (hasOwnDataField(payload, 'source') && sourceValue == null) return null;
+    if (hasOwnDataField(payload, 'availability') && availabilityValue == null) return null;
+    if (kind !== 'skybox' || libraryKind !== 'skybox') return null;
+    if (typeof id !== 'string' || !id.trim()) return null;
+    if (typeof name !== 'string' || !name.trim()) return null;
+    if (typeof displayName !== 'string' || !displayName.trim()) return null;
+    if (typeof assetPath !== 'string' || !assetPath.trim()) return null;
+    if (typeof packagePath !== 'string' || !packagePath.trim()) return null;
+    if (typeof sourceUrl !== 'string' || !sourceUrl.startsWith('editor-asset://local/')) return null;
+    if (typeof assetRevision !== 'string' || !assetRevision.trim()) return null;
+    if (format !== 'hdr' && format !== 'exr') return null;
+    if (typeof fileSizeBytes !== 'number' || !Number.isSafeInteger(fileSizeBytes) || fileSizeBytes <= 0) return null;
+    if (source !== 'project' && source !== 'data-platform') return null;
+    if (availability !== 'active') return null;
+
+    const expectedExtension = format === 'hdr' ? /\.hdr$/i : /\.exr$/i;
+    if (!expectedExtension.test(assetPath) || !expectedExtension.test(name)) return null;
+
+    const asset: ProjectSkyboxAssetEntry = {
+      id,
+      name,
+      displayName,
+      path: assetPath,
+      sourceUrl,
+      assetRevision,
+      packagePath,
       kind: 'skybox',
       libraryKind: 'skybox',
-      format: payload.format,
-      fileSizeBytes: payload.fileSizeBytes,
+      format,
+      fileSizeBytes,
+      source,
+      availability: 'active',
+    };
+
+    const hasDataPlatformMetadata = ['dataPlatformResourceId', 'dataPlatformRevision', 'fileSha256']
+      .some((key) => hasOwnDataField(payload, key));
+    if (source === 'project') {
+      if (id.startsWith('data-platform-skybox:') || hasDataPlatformMetadata) return null;
+      return asset;
+    }
+
+    if (!hasOwnDataField(payload, 'source') || !hasOwnDataField(payload, 'availability')) return null;
+    const dataPlatformResourceId = readOwnDataField(payload, 'dataPlatformResourceId');
+    const dataPlatformRevision = readOwnDataField(payload, 'dataPlatformRevision');
+    const fileSha256 = readOwnDataField(payload, 'fileSha256');
+    if (typeof dataPlatformResourceId !== 'string' || !POSITIVE_DATA_PLATFORM_IDENTIFIER.test(dataPlatformResourceId)) return null;
+    if (typeof dataPlatformRevision !== 'string' || !POSITIVE_DATA_PLATFORM_REVISION.test(dataPlatformRevision)) return null;
+    if (typeof fileSha256 !== 'string' || !LOWERCASE_SHA256.test(fileSha256)) return null;
+    if (id !== `data-platform-skybox:${dataPlatformResourceId}` || assetRevision !== fileSha256) return null;
+
+    return {
+      ...asset,
+      source: 'data-platform',
+      dataPlatformResourceId,
+      dataPlatformRevision,
+      fileSha256,
     };
   } catch {
     return null;

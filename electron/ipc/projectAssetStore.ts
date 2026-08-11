@@ -26,6 +26,11 @@ import {
   normalizeFilePath,
 } from './assetRegistry.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
+import {
+  listIndexedDataPlatformSkyboxes,
+  mergeSkyboxAssets,
+  type DataPlatformSkyboxAssetDiagnostic,
+} from './dataPlatformSkyboxIndex.js';
 import { importSkyboxFileIntoRoot, listSkyboxAssetsInRoot } from './skyboxAssetStore.js';
 
 const PROJECT_METADATA_DIRECTORY = '.babylon-editor';
@@ -482,7 +487,7 @@ export function setCurrentProjectRoot(projectRoot: string): void {
 /** 为当前业务工程挂载数据中台共享资源缓存；null 表示普通本地项目。 */
 export function setSharedProjectAssetRoot(projectRoot: string | null): void {
   sharedProjectAssetRoot = projectRoot ? normalizeFilePath(projectRoot) : null;
-  if (sharedProjectAssetRoot) authorizeProjectAssetRoots(sharedProjectAssetRoot);
+  if (sharedProjectAssetRoot) authorizeSharedProjectAssetRoots(sharedProjectAssetRoot);
 }
 
 export function getSharedProjectAssetRoot(): string | null {
@@ -492,7 +497,6 @@ export function getSharedProjectAssetRoot(): string | null {
 /** 为当前业务工程挂载独立的数据中台共享天空盒缓存；null 表示使用项目本地天空盒。 */
 export function setSharedProjectSkyboxRoot(projectRoot: string | null): void {
   sharedProjectSkyboxRoot = projectRoot ? normalizeFilePath(projectRoot) : null;
-  if (sharedProjectSkyboxRoot) authorizeAssetRoot(getProjectSkyboxesRoot(sharedProjectSkyboxRoot));
 }
 
 export function getSharedProjectSkyboxRoot(): string | null {
@@ -672,6 +676,12 @@ function authorizeProjectAssetRoots(projectRoot: string): void {
   authorizeAssetRoot(getProjectImagesRoot(projectRoot));
 }
 
+function authorizeSharedProjectAssetRoots(projectRoot: string): void {
+  authorizeAssetRoot(getProjectModelsRoot(projectRoot));
+  authorizeAssetRoot(getProjectEnvironmentsRoot(projectRoot));
+  authorizeAssetRoot(getProjectImagesRoot(projectRoot));
+}
+
 export function getProjectAssetIndexPath(projectRoot: string): string {
   return path.join(normalizeFilePath(projectRoot), PROJECT_METADATA_DIRECTORY, PROJECT_ASSET_INDEX_FILE);
 }
@@ -815,7 +825,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   const projectRoot = await loadRecentProjectRoot();
 
   if (!projectRoot) {
-    return { projectRoot: null, assets: [], skyboxes: [] };
+    return { projectRoot: null, assets: [], skyboxes: [], orphanedSkyboxes: [] };
   }
 
   await ensureProjectDirectories(projectRoot);
@@ -825,7 +835,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   let assets = localIndex.assets;
   if (sharedProjectAssetRoot && normalizeFilePath(sharedProjectAssetRoot) !== normalizeFilePath(projectRoot)) {
     await ensureProjectDirectories(sharedProjectAssetRoot);
-    authorizeProjectAssetRoots(sharedProjectAssetRoot);
+    authorizeSharedProjectAssetRoots(sharedProjectAssetRoot);
     const sharedIndex = await readProjectAssetIndex(sharedProjectAssetRoot);
     assets = mergeProjectAssets(localIndex.assets, sharedIndex.assets);
   }
@@ -836,10 +846,24 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     for (const scriptAsset of asset.scriptAssets ?? []) authorizeAssetFile(scriptAsset.path);
   }
 
-  const skyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
-  for (const skybox of skyboxes) authorizeAssetFile(skybox.path);
+  const localSkyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
+  let skyboxes = localSkyboxes;
+  let orphanedSkyboxes: ProjectSkyboxAssetEntry[] = [];
+  if (sharedProjectSkyboxRoot) {
+    const indexed = await listIndexedDataPlatformSkyboxes(sharedProjectSkyboxRoot);
+    const mergeErrors: DataPlatformSkyboxAssetDiagnostic[] = [];
+    skyboxes = mergeSkyboxAssets(localSkyboxes, indexed.skyboxes, (error) => mergeErrors.push(error));
+    orphanedSkyboxes = indexed.orphanedSkyboxes;
+    reportDataPlatformSkyboxDiagnostics([...indexed.errors, ...mergeErrors]);
+  }
 
-  return { projectRoot, assets, skyboxes };
+  for (const skybox of [...skyboxes, ...orphanedSkyboxes]) authorizeAssetFile(skybox.path);
+
+  return { projectRoot, assets, skyboxes, orphanedSkyboxes };
+}
+
+function reportDataPlatformSkyboxDiagnostics(errors: readonly DataPlatformSkyboxAssetDiagnostic[]): void {
+  for (const error of errors) console.warn(`[data-platform-skybox] ${error.message}`);
 }
 
 /** 共享缓存按稳定资源 ID 覆盖工程包内旧快照，普通本地资产仍完整保留。 */
