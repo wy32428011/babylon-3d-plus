@@ -190,6 +190,42 @@ export class EntityGroupRotationPreview {
   }
 }
 
+/**
+ * 把 Inspector 的参考旋转绝对值转换为绕当前群组中心的世界刚体增量。
+ * EntityGroupRotationPreview 会把该增量左乘到每个成员的基线旋转。
+ */
+export function createEntityGroupRotationDeltaMatrix(
+  center: { x: number; y: number; z: number },
+  currentRotation: { x: number; y: number; z: number },
+  targetRotation: { x: number; y: number; z: number },
+): number[] | null {
+  if (!isFiniteVector(center) || !isFiniteVector(currentRotation) || !isFiniteVector(targetRotation)) return null;
+
+  const currentQuaternion = Quaternion.RotationYawPitchRoll(
+    currentRotation.y,
+    currentRotation.x,
+    currentRotation.z,
+  ).normalize();
+  const targetQuaternion = Quaternion.RotationYawPitchRoll(
+    targetRotation.y,
+    targetRotation.x,
+    targetRotation.z,
+  ).normalize();
+  const deltaQuaternion = targetQuaternion.multiply(currentQuaternion.conjugate()).normalize();
+  const beforeMatrix = Matrix.Translation(center.x, center.y, center.z);
+  const afterMatrix = Matrix.Compose(
+    Vector3.One(),
+    deltaQuaternion,
+    new Vector3(center.x, center.y, center.z),
+  );
+  const inverseBefore = beforeMatrix.clone();
+  const determinant = inverseBefore.determinant();
+  if (!Number.isFinite(determinant) || Math.abs(determinant) <= 1e-12) return null;
+  inverseBefore.invert();
+  const deltaMatrix = inverseBefore.multiply(afterMatrix);
+  return deltaMatrix.m.every(Number.isFinite) ? Array.from(deltaMatrix.m) : null;
+}
+
 /** 将实体基线绕同一世界增量矩阵旋转；缩放保持原值。 */
 function createRotatedTransforms(
   entityIds: readonly string[],

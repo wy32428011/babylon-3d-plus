@@ -75,6 +75,7 @@ import {
   isEntityAncestorOf,
   isEntityEffectivelyLocked,
   isHierarchyGroupTransformSelection,
+  resolveHierarchyGroupTransformSelection,
 } from '../model/entityHierarchy';
 import { createArrayAssetNumber, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
 import {
@@ -158,6 +159,7 @@ import {
 } from '../model/modelParameters';
 import { createModelLengthUnitInfo, type ModelLengthUnitInfo } from '../model/sceneUnits';
 import type { ModelMeasurementResult } from '../../runtime/babylon/modelMeasurement';
+import type { GroupSpatialInfoResult } from '../model/groupSpatialInfo';
 import {
   isMqttConfigEqual,
   validateRuntimePreviewConfig,
@@ -264,6 +266,22 @@ export type AutoPatrolPlaybackRequest = {
 /** 当前 Inspector 选中模型的运行时米制测量快照；该状态不进入场景持久化或撤销历史。 */
 export type SelectedModelMeasurement = ModelMeasurementResult & { entityId: string };
 
+/** 当前 Hierarchy 群组的运行时空间快照；旋转取实际参与成员中的第一个对象作为参考。 */
+export type SelectedGroupSpatialInfo = GroupSpatialInfoResult & {
+  groupId: string;
+  rotation: Vector3Data;
+};
+
+export type GroupInspectorTransformField = 'position' | 'rotation';
+
+export type GroupInspectorTransformRequest = {
+  id: string;
+  groupId: string;
+  field: GroupInspectorTransformField;
+  axis: keyof Vector3Data;
+  value: number;
+};
+
 type TransformField = 'position' | 'rotation' | 'scale';
 export type TransformTool = 'translate' | 'rotate' | 'scale';
 export type TransformSpace = 'local' | 'global';
@@ -330,6 +348,34 @@ function areSelectedModelMeasurementsEqual(
     && Math.abs(left.sizeMeters.z - right.sizeMeters.z) <= 1e-6;
 }
 
+/** 比较群组空间快照，避免相同包围盒结果触发 Inspector 重渲染。 */
+function areSelectedGroupSpatialInfosEqual(
+  left: SelectedGroupSpatialInfo | null,
+  right: SelectedGroupSpatialInfo | null,
+): boolean {
+  if (left === right) return true;
+  if (
+    !left
+    || !right
+    || left.groupId !== right.groupId
+    || left.status !== right.status
+    || left.memberCount !== right.memberCount
+  ) return false;
+  if (
+    Math.abs(left.rotation.x - right.rotation.x) > 1e-6
+    || Math.abs(left.rotation.y - right.rotation.y) > 1e-6
+    || Math.abs(left.rotation.z - right.rotation.z) > 1e-6
+  ) return false;
+  if (left.status !== 'ready' || right.status !== 'ready') return true;
+
+  return Math.abs(left.center.x - right.center.x) <= 1e-6
+    && Math.abs(left.center.y - right.center.y) <= 1e-6
+    && Math.abs(left.center.z - right.center.z) <= 1e-6
+    && Math.abs(left.sizeMeters.x - right.sizeMeters.x) <= 1e-6
+    && Math.abs(left.sizeMeters.y - right.sizeMeters.y) <= 1e-6
+    && Math.abs(left.sizeMeters.z - right.sizeMeters.z) <= 1e-6;
+}
+
 /** 模型阵列方向到世界坐标单位偏移的映射，负方向通过向量符号表达。 */
 const ENTITY_ARRAY_DIRECTION_VECTORS: Record<EntityArrayDirection, Vector3Data> = {
   x: { x: 1, y: 0, z: 0 },
@@ -364,6 +410,8 @@ type EditorState = {
   cameraOrientation: CameraOrientation;
   cameraProjection: CameraProjection;
   selectedModelMeasurement: SelectedModelMeasurement | null;
+  selectedGroupSpatialInfo: SelectedGroupSpatialInfo | null;
+  groupInspectorTransformRequest: GroupInspectorTransformRequest | null;
   cadImportProgress: CadImportProgress | null;
   logs: EditorLog[];
   transformTool: TransformTool;
@@ -422,6 +470,13 @@ type EditorState = {
   toggleCameraStandardView: (orientation: StandardCameraOrientation) => void;
   setCameraProjection: (projection: CameraProjection) => void;
   setSelectedModelMeasurement: (measurement: SelectedModelMeasurement | null) => void;
+  setSelectedGroupSpatialInfo: (info: SelectedGroupSpatialInfo | null) => void;
+  requestSelectedGroupTransform: (
+    field: GroupInspectorTransformField,
+    axis: keyof Vector3Data,
+    value: number,
+  ) => void;
+  consumeGroupInspectorTransformRequest: (requestId: string) => void;
   createMesh: (meshKind: MeshKind, placementPosition?: Vector3Data) => void;
   createLocator: (placementPosition?: Vector3Data) => void;
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
@@ -2258,6 +2313,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   cameraOrientation: 'orbit',
   cameraProjection: 'perspective',
   selectedModelMeasurement: null,
+  selectedGroupSpatialInfo: null,
+  groupInspectorTransformRequest: null,
   cadImportProgress: null,
   logs: [{ id: 'log_boot', message: '编辑器已启动。' }],
   transformTool: 'translate',
@@ -3060,6 +3117,43 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (areSelectedModelMeasurementsEqual(state.selectedModelMeasurement, measurement)) return state;
       return { selectedModelMeasurement: measurement };
     });
+  },
+  setSelectedGroupSpatialInfo: (info) => {
+    set((state) => {
+      if (areSelectedGroupSpatialInfosEqual(state.selectedGroupSpatialInfo, info)) return state;
+      return { selectedGroupSpatialInfo: info };
+    });
+  },
+  requestSelectedGroupTransform: (field, axis, value) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改群组空间信息');
+      if (!Number.isFinite(value)) return state;
+
+      const selection = resolveHierarchyGroupTransformSelection(state.scene, state.hierarchySelectionIds);
+      if (selection.status !== 'ready') {
+        const message = selection.status === 'blocked'
+          ? '群组空间信息修改已阻止：选区内包含锁定对象。'
+          : selection.status === 'empty'
+            ? '群组空间信息修改已取消：群组内没有可变换对象。'
+            : '群组空间信息修改已取消：当前不再是群组选区。';
+        return { logs: prependLog(state.logs, message) };
+      }
+
+      return {
+        groupInspectorTransformRequest: {
+          id: createId('group_inspector_transform'),
+          groupId: selection.groupId,
+          field,
+          axis,
+          value,
+        },
+      };
+    });
+  },
+  consumeGroupInspectorTransformRequest: (requestId) => {
+    set((state) => state.groupInspectorTransformRequest?.id === requestId
+      ? { groupInspectorTransformRequest: null }
+      : state);
   },
   createMesh: (meshKind, placementPosition) => {
     const entity = createMeshEntity(meshKind, sanitizeVector3(placementPosition));
