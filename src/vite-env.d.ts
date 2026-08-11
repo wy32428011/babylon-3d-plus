@@ -133,6 +133,7 @@ type DataPlatformProjectOpenResult = {
   warning: string | null;
   conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
 };
 
@@ -225,6 +226,23 @@ type DataPlatformModelSyncPhase =
 type DataPlatformModelSyncProgress = {
   runId: string;
   phase: DataPlatformModelSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+type DataPlatformSkyboxSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+type DataPlatformSkyboxSyncProgress = {
+  runId: string;
+  phase: DataPlatformSkyboxSyncPhase;
   completed: number;
   total: number;
   message: string;
@@ -501,6 +519,9 @@ interface Window {
     syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
+    syncDataPlatformSkyboxes: () => Promise<boolean>;
+    retryDataPlatformSkyboxSync: () => Promise<boolean>;
+    onDataPlatformSkyboxSyncProgress: (handler: (progress: DataPlatformSkyboxSyncProgress) => void) => () => void;
     syncDataPlatformImages: () => Promise<boolean>;
     retryDataPlatformImageSync: () => Promise<boolean>;
     listSyncedImages: () => Promise<SyncedImageAssetEntry[]>;

@@ -131,6 +131,7 @@ export type DataPlatformProjectOpenResult = {
   warning: string | null;
   conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
 };
 
@@ -223,6 +224,23 @@ export type DataPlatformModelSyncPhase =
 export type DataPlatformModelSyncProgress = {
   runId: string;
   phase: DataPlatformModelSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+export type DataPlatformSkyboxSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+export type DataPlatformSkyboxSyncProgress = {
+  runId: string;
+  phase: DataPlatformSkyboxSyncPhase;
   completed: number;
   total: number;
   message: string;

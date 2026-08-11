@@ -1,4 +1,5 @@
 import type {
+  AssetEntry,
   DeploymentExportCancelRequest,
   DeploymentExportProgress,
   DeploymentExportRequest,
@@ -6,6 +7,7 @@ import type {
   DataPlatformConfig,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  DataPlatformSkyboxSyncProgress,
   SyncedImageAssetEntry,
   DataPlatformProjectListRequest,
   DataPlatformProjectEntry,
@@ -35,10 +37,12 @@ import type {
   OpenRecentProjectRequest,
   ProjectListAssetsResult,
   ReadTextFileRequest,
+  ReadTextFileResult,
   RecentWorkspacesResult,
   RemoveRecentWorkspaceItemRequest,
   SaveDataPlatformConfigRequest,
   SaveSceneRequest,
+  SaveSceneResult,
   SelectProjectDirectoryResult,
 } from './types.js';
 
@@ -58,11 +62,11 @@ ipcRenderer.on('data-platform:deepLinkOpen', (_event: IpcRendererEvent, payload:
 
 contextBridge.exposeInMainWorld('editorApi', {
   version: '0.1.0',
-  saveScene: (request: SaveSceneRequest) => ipcRenderer.invoke('scene:save', request),
-  loadScene: () => ipcRenderer.invoke('scene:load'),
+  saveScene: (request: SaveSceneRequest): Promise<SaveSceneResult> => ipcRenderer.invoke('scene:save', request),
+  loadScene: (): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:load'),
   loadSceneFile: (request: LoadSceneFileRequest): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:loadFile', request),
-  readTextFile: (request: ReadTextFileRequest) => ipcRenderer.invoke('file:readText', request),
-  scanAssets: () => ipcRenderer.invoke('assets:scan'),
+  readTextFile: (request: ReadTextFileRequest): Promise<ReadTextFileResult> => ipcRenderer.invoke('file:readText', request),
+  scanAssets: (): Promise<AssetEntry[]> => ipcRenderer.invoke('assets:scan'),
   getRecentWorkspaces: (): Promise<RecentWorkspacesResult> => ipcRenderer.invoke('project:getRecentWorkspaces'),
   getDataPlatformConfig: (): Promise<DataPlatformConfig> => ipcRenderer.invoke('data-platform:getConfig'),
   saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> =>
@@ -89,6 +93,20 @@ contextBridge.exposeInMainWorld('editorApi', {
     return () => {
       active = false;
       ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
+    };
+  },
+  syncDataPlatformSkyboxes: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncSkyboxes'),
+  retryDataPlatformSkyboxSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retrySkyboxSync'),
+  onDataPlatformSkyboxSyncProgress: (handler: (progress: DataPlatformSkyboxSyncProgress) => void): (() => void) => {
+    let active = true;
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformSkyboxSyncProgress) => handler(payload);
+    ipcRenderer.on('data-platform:skyboxSyncProgress', listener);
+    void ipcRenderer.invoke('data-platform:getSkyboxSyncProgress').then((payload: DataPlatformSkyboxSyncProgress | null) => {
+      if (active && payload) handler(payload);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      ipcRenderer.removeListener('data-platform:skyboxSyncProgress', listener);
     };
   },
   syncDataPlatformImages: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncImages'),

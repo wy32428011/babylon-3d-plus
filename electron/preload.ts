@@ -8,6 +8,7 @@ import type {
   DataPlatformConfig,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  DataPlatformSkyboxSyncProgress,
   SyncedImageAssetEntry,
   DataPlatformProjectListRequest,
   DataPlatformProjectEntry,
@@ -89,6 +90,20 @@ contextBridge.exposeInMainWorld('editorApi', {
     return () => {
       active = false;
       ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
+    };
+  },
+  syncDataPlatformSkyboxes: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncSkyboxes'),
+  retryDataPlatformSkyboxSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retrySkyboxSync'),
+  onDataPlatformSkyboxSyncProgress: (handler: (progress: DataPlatformSkyboxSyncProgress) => void): (() => void) => {
+    let active = true;
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformSkyboxSyncProgress) => handler(payload);
+    ipcRenderer.on('data-platform:skyboxSyncProgress', listener);
+    void ipcRenderer.invoke('data-platform:getSkyboxSyncProgress').then((payload: DataPlatformSkyboxSyncProgress | null) => {
+      if (active && payload) handler(payload);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      ipcRenderer.removeListener('data-platform:skyboxSyncProgress', listener);
     };
   },
   syncDataPlatformImages: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncImages'),

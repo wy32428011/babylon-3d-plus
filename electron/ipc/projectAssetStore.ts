@@ -42,6 +42,7 @@ const PROJECT_ASSET_INDEX_ERROR = '项目资产索引格式不正确。';
 
 let currentProjectRoot: string | null = null;
 let sharedProjectAssetRoot: string | null = null;
+let sharedProjectSkyboxRoot: string | null = null;
 let hasLoadedRecentProjectRoot = false;
 
 type PersistedRecentProjectEntry = {
@@ -488,6 +489,16 @@ export function getSharedProjectAssetRoot(): string | null {
   return sharedProjectAssetRoot;
 }
 
+/** 为当前业务工程挂载独立的数据中台共享天空盒缓存；null 表示使用项目本地天空盒。 */
+export function setSharedProjectSkyboxRoot(projectRoot: string | null): void {
+  sharedProjectSkyboxRoot = projectRoot ? normalizeFilePath(projectRoot) : null;
+  if (sharedProjectSkyboxRoot) authorizeAssetRoot(getProjectSkyboxesRoot(sharedProjectSkyboxRoot));
+}
+
+export function getSharedProjectSkyboxRoot(): string | null {
+  return sharedProjectSkyboxRoot;
+}
+
 /** 生成项目内模型包导入版本，用于同一路径被覆盖后通知 renderer 和运行时重载资源。 */
 function createProjectAssetRevision(): string {
   return `${Date.now().toString(36)}-${randomUUID()}`;
@@ -563,6 +574,7 @@ export async function activateProjectRoot(
 
 export async function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult> {
   setSharedProjectAssetRoot(null);
+  setSharedProjectSkyboxRoot(null);
   const normalizedProjectRoot = normalizeFilePath(projectRoot);
   const index = await readRecentWorkspaceIndex();
   const isKnownRecentProject = index.projects.some((entry) => entry.projectRoot === normalizedProjectRoot);
@@ -735,6 +747,7 @@ export async function selectCurrentProjectRootWithDialog(): Promise<string | nul
 
   const selectedProjectRoot = normalizeFilePath(projectRoot);
   setSharedProjectAssetRoot(null);
+  setSharedProjectSkyboxRoot(null);
   setCurrentProjectRoot(selectedProjectRoot);
   await ensureProjectDirectories(selectedProjectRoot);
   authorizeProjectAssetRoots(selectedProjectRoot);
@@ -769,7 +782,11 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     for (const scriptAsset of asset.scriptAssets ?? []) authorizeAssetFile(scriptAsset.path);
   }
 
-  const skyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
+  const skyboxProjectRoot = sharedProjectSkyboxRoot ?? projectRoot;
+  const skyboxRoot = getProjectSkyboxesRoot(skyboxProjectRoot);
+  await fs.mkdir(skyboxRoot, { recursive: true });
+  authorizeAssetRoot(skyboxRoot);
+  const skyboxes = await listSkyboxAssetsInRoot(skyboxRoot);
   for (const skybox of skyboxes) authorizeAssetFile(skybox.path);
 
   return { projectRoot, assets, skyboxes };

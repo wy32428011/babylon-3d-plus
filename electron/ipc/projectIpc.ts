@@ -25,6 +25,7 @@ import {
   removeRecentWorkspaceItem,
   selectCurrentProjectRootWithDialog,
   setSharedProjectAssetRoot,
+  setSharedProjectSkyboxRoot,
 } from './projectAssetStore.js';
 import {
   clearCurrentDataPlatformBinding,
@@ -32,6 +33,7 @@ import {
   resolveDataPlatformSharedResourcesRoot,
   setCurrentDataPlatformBinding,
 } from './dataPlatformBindingStore.js';
+import { syncDataPlatformSkyboxesForWorkspace } from './dataPlatformProjectService.js';
 
 type SaveSceneRequestShape = {
   suggestedName?: unknown;
@@ -75,11 +77,17 @@ export function registerProjectIpc(): void {
     const binding = await readDataPlatformBinding(openRequest.projectRoot);
     if (!binding) {
       clearCurrentDataPlatformBinding();
+      setSharedProjectSkyboxRoot(null);
       return listProjectAssets();
     }
     const workspaceRoot = resolveWorkspaceRootFromDataPlatformProject(openRequest.projectRoot, binding.projectId);
-    setSharedProjectAssetRoot(resolveDataPlatformSharedResourcesRoot(workspaceRoot));
+    const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+    setSharedProjectAssetRoot(sharedResourcesRoot);
+    setSharedProjectSkyboxRoot(sharedResourcesRoot);
     setCurrentDataPlatformBinding(openRequest.projectRoot, binding);
+    void syncDataPlatformSkyboxesForWorkspace(binding.baseUrl, workspaceRoot).catch((error) => {
+      console.error('[electron] 最近数据中台项目天空盒同步启动失败。', error);
+    });
     return listProjectAssets();
   });
 

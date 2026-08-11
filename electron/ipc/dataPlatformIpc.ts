@@ -5,6 +5,7 @@ import type {
   DataPlatformConfig,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  DataPlatformSkyboxSyncProgress,
   SyncedImageAssetEntry,
   DataPlatformProjectEntry,
   DataPlatformProjectListRequest,
@@ -18,13 +19,16 @@ import {
   clearDataPlatformProjectServiceRetryContext,
   ensureWritableEditorRoot,
   getCurrentDataPlatformModelSyncProgress,
+  getCurrentDataPlatformSkyboxSyncProgress,
   getDataPlatformEditorRoot,
   openDataPlatformProject,
   listSyncedImagesForWorkspace,
   retryLatestDataPlatformModelSync,
+  retryLatestDataPlatformSkyboxSync,
   retryLatestDataPlatformImageSync,
   syncDataPlatformImagesForWorkspace,
   syncDataPlatformModelsForWorkspace,
+  syncDataPlatformSkyboxesForWorkspace,
   getCurrentDataPlatformImageSyncProgress,
 } from './dataPlatformProjectService.js';
 import { requestDataPlatformJson } from './dataPlatformTransfer.js';
@@ -146,6 +150,21 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle(
     'data-platform:getModelSyncProgress',
     async (): Promise<DataPlatformModelSyncProgress | null> => getCurrentDataPlatformModelSyncProgress(),
+  );
+
+  ipcMain.handle('data-platform:syncSkyboxes', async (): Promise<boolean> => {
+    const config = await readDataPlatformConfig();
+    if (!config.baseUrl) throw new Error('尚未配置数据中台地址。');
+    return syncDataPlatformSkyboxesForWorkspace(config.baseUrl, config.workspaceRoot);
+  });
+
+  ipcMain.handle('data-platform:retrySkyboxSync', async (): Promise<boolean> => {
+    return retryLatestDataPlatformSkyboxSync();
+  });
+
+  ipcMain.handle(
+    'data-platform:getSkyboxSyncProgress',
+    async (): Promise<DataPlatformSkyboxSyncProgress | null> => getCurrentDataPlatformSkyboxSyncProgress(),
   );
 
   ipcMain.handle('data-platform:syncImages', async (): Promise<boolean> => {

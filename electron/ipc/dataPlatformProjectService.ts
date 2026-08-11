@@ -5,6 +5,7 @@ import path from 'node:path';
 import type {
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  DataPlatformSkyboxSyncProgress,
   SyncedImageAssetEntry,
   DataPlatformProjectEntry,
   DataPlatformProjectOpenResult,
@@ -20,6 +21,7 @@ import {
   getProjectModelsRoot,
   rememberRecentSceneFile,
   setSharedProjectAssetRoot,
+  setSharedProjectSkyboxRoot,
   writeProjectAssetIndex,
 } from './projectAssetStore.js';
 import { scanModelPackage } from './modelPackageScanner.js';
@@ -47,6 +49,13 @@ import {
   retryDataPlatformImageSync,
   startDataPlatformImageSync,
 } from './dataPlatformImageSync.js';
+import {
+  clearDataPlatformSkyboxSyncRetryContext,
+  disposeDataPlatformSkyboxSync,
+  getLatestDataPlatformSkyboxSyncProgress,
+  retryDataPlatformSkyboxSync,
+  startDataPlatformSkyboxSync,
+} from './dataPlatformSkyboxSync.js';
 import {
   assertPathInside,
   DataPlatformRollbackError,
@@ -146,6 +155,19 @@ export async function syncDataPlatformModelsForWorkspace(
   return startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
 }
 
+/** 手动同步始终写入工作区共享天空盒缓存，不创建或切换业务项目 binding。 */
+export async function syncDataPlatformSkyboxesForWorkspace(
+  baseUrl: string,
+  workspaceRoot: string,
+): Promise<boolean> {
+  if (dataPlatformProjectServiceShuttingDown) return false;
+  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  await ensureWritableEditorRoot(sharedResourcesRoot);
+  await ensureProjectDirectories(sharedResourcesRoot);
+  setSharedProjectSkyboxRoot(sharedResourcesRoot);
+  return startDataPlatformSkyboxSync(baseUrl, sharedResourcesRoot);
+}
+
 /** 本地场景或业务工程打开后启动数据中台图标图片同步，与模型同步共用同一资源根判定。 */
 export async function syncDataPlatformImagesForWorkspace(
   baseUrl: string,
@@ -164,6 +186,16 @@ export async function syncDataPlatformImagesForWorkspace(
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
   return startDataPlatformImageSync(baseUrl, sharedResourcesRoot);
+}
+
+/** 重试最近一次数据中台天空盒同步。 */
+export function retryLatestDataPlatformSkyboxSync(): boolean {
+  return retryDataPlatformSkyboxSync();
+}
+
+/** 暴露最近天空盒同步进度给晚挂载的 renderer。 */
+export function getCurrentDataPlatformSkyboxSyncProgress(): DataPlatformSkyboxSyncProgress | null {
+  return getLatestDataPlatformSkyboxSyncProgress();
 }
 
 /** 重试最近一次数据中台图片同步。 */
@@ -201,15 +233,17 @@ export function getCurrentDataPlatformModelSyncProgress(): DataPlatformModelSync
 export function clearDataPlatformProjectServiceRetryContext(): void {
   clearDataPlatformModelSyncRetryContext();
   clearDataPlatformImageSyncRetryContext();
+  clearDataPlatformSkyboxSyncRetryContext();
 }
 
-/** 应用退出时取消并等待工程打开与模型同步任务。 */
+/** 应用退出时取消并等待工程打开与全部共享资源同步任务。 */
 export async function disposeDataPlatformProjectTasks(): Promise<void> {
   dataPlatformProjectServiceShuttingDown = true;
   for (const controller of openTaskControllers) controller.abort();
   await Promise.allSettled([...openTasks]);
   await disposeDataPlatformModelSync();
   await disposeDataPlatformImageSync();
+  await disposeDataPlatformSkyboxSync();
 }
 
 async function openDataPlatformProjectInternal(
@@ -318,8 +352,10 @@ async function openDataPlatformProjectInternal(
   });
   await writeDataPlatformBinding(projectRoot, binding);
   setCurrentDataPlatformBinding(projectRoot, binding);
+  setSharedProjectSkyboxRoot(sharedResourcesRoot);
 
   const modelSyncStarted = startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
+  const skyboxSyncStarted = startDataPlatformSkyboxSync(baseUrl, sharedResourcesRoot);
   return {
     projectRoot,
     sceneFilePath,
@@ -327,6 +363,7 @@ async function openDataPlatformProjectInternal(
     warning,
     conflictCopyPath,
     modelSyncStarted,
+    skyboxSyncStarted,
     binding,
   };
 }
