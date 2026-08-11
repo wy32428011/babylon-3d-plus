@@ -27,8 +27,8 @@ type BoundedDecimalOptions = {
 
 const MAX_SKYBOX_FILE_SIZE_BYTES = 512 * 1024 * 1024;
 const LOWERCASE_SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const POSITIVE_DECIMAL_PATTERN = /^\d+$/;
-const IDENTIFIER_PATTERN = /^\d{1,64}$/;
+const POSITIVE_DECIMAL_PATTERN = /^[1-9]\d*$/;
+const IDENTIFIER_PATTERN = /^[1-9]\d{0,63}$/;
 const UPDATED_AT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:(Z)|([+-])(\d{2}):(\d{2}))?)?$/;
 
 export function parseBoundedDecimalString(value: unknown, options: BoundedDecimalOptions): number {
@@ -37,7 +37,7 @@ export function parseBoundedDecimalString(value: unknown, options: BoundedDecima
   }
 
   const normalized = value.trim();
-  if (!/^-?\d+$/.test(normalized)) {
+  if (!/^\d+$/.test(normalized)) {
     throw new Error(`${options.label}必须是十进制字符串。`);
   }
 
@@ -60,7 +60,7 @@ export function parseBoundedDecimalString(value: unknown, options: BoundedDecima
 export function normalizePositiveIdentifier(value: unknown, label = '标识符'): string {
   if (typeof value === 'string') {
     const normalized = value.trim();
-    if (IDENTIFIER_PATTERN.test(normalized) && /[1-9]/.test(normalized)) return normalized;
+    if (IDENTIFIER_PATTERN.test(normalized)) return normalized;
   }
   throw new Error(`${label}必须是最多 64 位的正十进制字符串。`);
 }
@@ -78,8 +78,11 @@ export function normalizeSkyboxQueryResponse(value: unknown): DataPlatformSkybox
     throw new Error('数据中台天空盒响应缺少合法的 data.records。');
   }
 
+  const records = value.data.records.map((record, index) => normalizeSkyboxRecord(record, index));
+  assertUniqueSkyboxRecords(records);
+
   return {
-    records: value.data.records.map((record, index) => normalizeSkyboxRecord(record, index)),
+    records,
     total: parseBoundedDecimalString(value.data.total, {
       label: 'data.total',
       min: 0,
@@ -143,7 +146,7 @@ function normalizeSkyboxRecord(value: unknown, index: number): DataPlatformSkybo
       min: 1,
       max: MAX_SKYBOX_FILE_SIZE_BYTES,
     }),
-    sha256: normalizeSha256(value.sha256, `${label} SHA-256`),
+    sha256: normalizeSha256(value.fileSha256, `${label} SHA-256`),
     revision: normalizePositiveRevision(value.revision, `${label} revision`),
     updatedAt: normalizeUpdatedAt(value.updatedAt, `${label} updatedAt`),
   };
@@ -187,7 +190,7 @@ function normalizeSha256(value: unknown, label: string): string {
 function normalizePositiveRevision(value: unknown, label: string): string {
   if (typeof value === 'string') {
     const normalized = value.trim();
-    if (POSITIVE_DECIMAL_PATTERN.test(normalized) && /[1-9]/.test(normalized)) return normalized;
+    if (POSITIVE_DECIMAL_PATTERN.test(normalized)) return normalized;
   }
   throw new Error(`${label}必须是正十进制字符串。`);
 }

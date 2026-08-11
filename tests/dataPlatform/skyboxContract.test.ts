@@ -21,7 +21,7 @@ function createRawRecord(overrides: Record<string, unknown> = {}): Record<string
     fileUrl: ' https://cdn.example.com/skyboxes/factory.hdr ',
     fileFormat: 'HDR',
     fileSize: String(MAX_SKYBOX_BYTES),
-    sha256: VALID_SHA,
+    fileSha256: VALID_SHA,
     revision: LONG_REVISION,
     updatedAt: '2026-08-11 10:20:30',
     untrusted: 'must-not-leak',
@@ -70,6 +70,13 @@ function assertRecordRejected(overrides: Record<string, unknown>, expected: RegE
   );
 }
 
+test('从真实响应字段 fileSha256 映射规范化 sha256', () => {
+  const page = normalizeSkyboxQueryResponse(createSuccessResponse());
+
+  assert.equal(page.records[0].sha256, VALID_SHA);
+  assert.equal('fileSha256' in page.records[0], false);
+});
+
 test('归一化合法天空盒分页并保留超出安全整数的 Long 字符串', () => {
   const page = normalizeSkyboxQueryResponse(createSuccessResponse());
 
@@ -116,7 +123,7 @@ test('parseBoundedDecimalString 仅接受范围内且可安全转换的十进制
   assert.equal(parseBoundedDecimalString(' 42 ', { label: '数量', min: 0, max: 100 }), 42);
   assert.equal(parseBoundedDecimalString('0007', { label: '数量', min: 0n, max: 100n }), 7);
 
-  for (const value of [42, null, undefined, '', ' ', '1.5', '1e2', '0x10', '+1']) {
+  for (const value of [42, null, undefined, '', ' ', '1.5', '1e2', '0x10', '+1', '-0']) {
     assert.throws(
       () => parseBoundedDecimalString(value, { label: '数量', min: 0, max: 100 }),
       /数量/,
@@ -139,7 +146,7 @@ test('normalizePositiveIdentifier 只接受最多 64 位的正十进制字符串
   const sixtyFourDigits = '9'.repeat(64);
   assert.equal(normalizePositiveIdentifier(sixtyFourDigits), sixtyFourDigits);
 
-  for (const value of [LONG_ID.length, 0, '0', '0000', '-1', '+1', '1.0', '1e2', '', '9'.repeat(65)]) {
+  for (const value of [LONG_ID.length, 0, '0', '0000', '0001', '-1', '+1', '1.0', '1e2', '', '9'.repeat(65)]) {
     assert.throws(() => normalizePositiveIdentifier(value), /标识符/);
   }
 });
@@ -221,6 +228,7 @@ test('revision 独立按正十进制字符串规范化且不转换为 number', (
   assertRecordRejected({ revision: '-1' }, /revision/);
   assertRecordRejected({ revision: Number(LONG_REVISION) }, /revision/);
   assertRecordRejected({ revision: '1.0' }, /revision/);
+  assertRecordRejected({ revision: '01' }, /revision/);
 });
 
 test('拒绝零字节、超过 512MiB 和数值型 fileSize', () => {
@@ -230,10 +238,11 @@ test('拒绝零字节、超过 512MiB 和数值型 fileSize', () => {
 });
 
 test('SHA-256 必须是 64 位小写十六进制', () => {
-  assertRecordRejected({ sha256: 'A'.repeat(64) }, /SHA-256|sha256/);
-  assertRecordRejected({ sha256: 'a'.repeat(63) }, /SHA-256|sha256/);
-  assertRecordRejected({ sha256: `${'a'.repeat(63)}g` }, /SHA-256|sha256/);
-  assertRecordRejected({ sha256: 123 }, /SHA-256|sha256/);
+  assertRecordRejected({ fileSha256: 'A'.repeat(64) }, /SHA-256|sha256/);
+  assertRecordRejected({ fileSha256: 'a'.repeat(63) }, /SHA-256|sha256/);
+  assertRecordRejected({ fileSha256: `${'a'.repeat(63)}g` }, /SHA-256|sha256/);
+  assertRecordRejected({ fileSha256: 123 }, /SHA-256|sha256/);
+  assertRecordRejected({ fileSha256: undefined, sha256: VALID_SHA }, /SHA-256|sha256/);
 });
 
 test('fileFormat 仅接受 HDR/EXR 且文件扩展名必须一致', () => {
@@ -271,6 +280,36 @@ test('updatedAt 可为 null，非空时必须是有效约定时间字符串', ()
   assertRecordRejected({ updatedAt: 'not-a-date' }, /updatedAt/);
   assertRecordRejected({ updatedAt: 1786414830000 }, /updatedAt/);
   assertRecordRejected({ updatedAt: undefined }, /updatedAt/);
+});
+
+test('完整 response 拒绝重复 ID', () => {
+  assert.throws(
+    () => normalizeSkyboxQueryResponse(createSuccessResponse([
+      createRawRecord(),
+      createRawRecord({ skyboxName: '其他名称', fileSha256: 'b'.repeat(64) }),
+    ])),
+    /重复 ID/,
+  );
+});
+
+test('完整 response 按 NFKC、trim 和 lowercase 拒绝重复名称', () => {
+  assert.throws(
+    () => normalizeSkyboxQueryResponse(createSuccessResponse([
+      createRawRecord({ skyboxName: ' ＡＢＣ ' }),
+      createRawRecord({ id: '2', skyboxName: 'abc', fileSha256: 'b'.repeat(64) }),
+    ])),
+    /重复名称/,
+  );
+});
+
+test('完整 response 拒绝重复 SHA-256', () => {
+  assert.throws(
+    () => normalizeSkyboxQueryResponse(createSuccessResponse([
+      createRawRecord(),
+      createRawRecord({ id: '2', skyboxName: '其他名称' }),
+    ])),
+    /重复 SHA-256/,
+  );
 });
 
 test('assertUniqueSkyboxRecords 拒绝重复 ID', () => {
