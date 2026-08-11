@@ -499,6 +499,24 @@ export function getSharedProjectSkyboxRoot(): string | null {
   return sharedProjectSkyboxRoot;
 }
 
+export type ProjectAssetStoreStateSnapshot = {
+  currentProjectRoot: string | null;
+  sharedProjectAssetRoot: string | null;
+  sharedProjectSkyboxRoot: string | null;
+};
+
+export function getProjectAssetStoreStateSnapshot(): ProjectAssetStoreStateSnapshot {
+  return { currentProjectRoot, sharedProjectAssetRoot, sharedProjectSkyboxRoot };
+}
+
+export async function restoreProjectAssetStoreState(snapshot: ProjectAssetStoreStateSnapshot): Promise<void> {
+  currentProjectRoot = snapshot.currentProjectRoot;
+  setSharedProjectAssetRoot(snapshot.sharedProjectAssetRoot);
+  setSharedProjectSkyboxRoot(snapshot.sharedProjectSkyboxRoot);
+  if (snapshot.currentProjectRoot) await persistCurrentProjectRoot(snapshot.currentProjectRoot);
+  else await fs.rm(getRecentProjectFilePath(), { force: true });
+}
+
 /** 生成项目内模型包导入版本，用于同一路径被覆盖后通知 renderer 和运行时重载资源。 */
 function createProjectAssetRevision(): string {
   return `${Date.now().toString(36)}-${randomUUID()}`;
@@ -554,6 +572,15 @@ export async function removeRecentWorkspaceItem(kind: 'project' | 'scene', itemP
   });
 }
 
+export async function commitRecentProjectActivation(projectRoot: string): Promise<void> {
+  const normalizedProjectRoot = normalizeFilePath(projectRoot);
+  await ensureProjectDirectories(normalizedProjectRoot);
+  authorizeProjectAssetRoots(normalizedProjectRoot);
+  await persistCurrentProjectRoot(normalizedProjectRoot);
+  await rememberRecentProjectRoot(normalizedProjectRoot);
+  setCurrentProjectRoot(normalizedProjectRoot);
+}
+
 export async function activateProjectRoot(
   projectRoot: string,
   lastScenePath?: string,
@@ -563,28 +590,38 @@ export async function activateProjectRoot(
     throw new Error('项目路径不存在或不是目录。');
   }
 
-  setCurrentProjectRoot(normalizedProjectRoot);
   await ensureProjectDirectories(normalizedProjectRoot);
   authorizeProjectAssetRoots(normalizedProjectRoot);
   await persistCurrentProjectRoot(normalizedProjectRoot);
   await rememberRecentProjectRoot(normalizedProjectRoot, lastScenePath);
-
+  setCurrentProjectRoot(normalizedProjectRoot);
   return listProjectAssets();
 }
 
-export async function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult> {
+export async function validateRecentProjectRoot(projectRoot: string): Promise<string> {
   const normalizedProjectRoot = normalizeFilePath(projectRoot);
   const index = await readRecentWorkspaceIndex();
-  const isKnownRecentProject = index.projects.some((entry) => entry.projectRoot === normalizedProjectRoot);
-
-  if (!isKnownRecentProject) {
+  if (!index.projects.some((entry) => entry.projectRoot === normalizedProjectRoot)) {
     throw new Error('只能打开最近记录中的项目目录。');
   }
+  if (!(await isDirectoryPath(normalizedProjectRoot))) {
+    throw new Error('项目路径不存在或不是目录。');
+  }
+  return normalizedProjectRoot;
+}
 
-  await activateProjectRoot(normalizedProjectRoot);
+export async function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult> {
+  const normalizedProjectRoot = await validateRecentProjectRoot(projectRoot);
+  const snapshot = getProjectAssetStoreStateSnapshot();
   setSharedProjectAssetRoot(null);
   setSharedProjectSkyboxRoot(null);
-  return listProjectAssets();
+  try {
+    await commitRecentProjectActivation(normalizedProjectRoot);
+    return await listProjectAssets();
+  } catch (error) {
+    await restoreProjectAssetStoreState(snapshot);
+    throw error;
+  }
 }
 
 export function getProjectModelsRoot(projectRoot: string): string {
