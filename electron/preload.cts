@@ -49,7 +49,26 @@ import type {
 import type { IpcRendererEvent } from 'electron';
 
 const { contextBridge, ipcRenderer } = require('electron');
-const { createRealtimeFirstProgressGate } = require('./preloadProgressGate.js');
+
+/** sandbox preload 不能加载相对模块，因此实时优先 gate 必须在入口内联。 */
+function createRealtimeFirstProgressGate<T>(handler: (payload: T) => void) {
+  let active = true;
+  let receivedRealtime = false;
+  return {
+    handleRealtime(payload: T): void {
+      if (!active) return;
+      receivedRealtime = true;
+      handler(payload);
+    },
+    handleSnapshot(payload: T | null): void {
+      if (!active || receivedRealtime || payload === null) return;
+      handler(payload);
+    },
+    dispose(): void {
+      active = false;
+    },
+  };
+}
 
 const dataPlatformDeepLinkHandlers = new Set<(deepLink: DataPlatformDeepLink) => void>();
 let pendingDataPlatformDeepLink: DataPlatformDeepLink | null = null;
