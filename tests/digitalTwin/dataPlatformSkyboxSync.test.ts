@@ -457,8 +457,7 @@ test('天空盒 store 唯一复用轻量 inspect 与完整 HDR/EXR 内容校验'
   assert.deepEqual(await store.validateSkyboxSourceFile(hdrPath), { format: 'hdr', fileSizeBytes: hdr.byteLength });
   assert.deepEqual(await store.validateSkyboxSourceFile(exrPath), { format: 'exr', fileSizeBytes: exr.byteLength });
   const inspection = await store.inspectSkyboxAssetFile(corruptPath);
-  assert.equal(inspection.format, 'hdr');
-  assert.equal(inspection.fileSizeBytes, corruptHdr.byteLength);
+  assert.deepEqual(inspection, { format: 'hdr', fileSizeBytes: corruptHdr.byteLength });
   await assert.rejects(store.validateSkyboxSourceFile(corruptPath), /RLE 数据越界/);
 
   const packagePath = path.join(libraryRoot, 'CorruptHeaderOnly');
@@ -501,7 +500,7 @@ test('首次同步下载 HDR/EXR，后续相同内容及仅名称/revision 变�
 
   assert.deepEqual(firstRequest.response, responseSnapshot, '查询响应输入不得被修改');
   assert.equal(requestCalls.length, 1);
-  assert.deepEqual(requestCalls[0].body, { pageNum: 1, pageSize: 100 });
+  assert.deepEqual(requestCalls[0].body, { pageNum: 1, pageSize: 100, skyboxName: '' });
   assert.match(requestCalls[0].endpointPath, /skybox/i);
   assert.equal(downloadCalls.length, 2);
   assert.ok(downloadCalls.every((call) => call.maxBytes === 512 * 1024 * 1024));
@@ -826,9 +825,9 @@ test('有界分页完整读取多页并要求请求与响应 pageNum/pageSize �
     await writeAsset(editorRoot, entries[index], Buffer.from([index % 251]));
   }
 
-  const calls: Array<{ pageNum: number; pageSize: number }> = [];
+  const calls: Array<{ pageNum: number; pageSize: number; skyboxName: string }> = [];
   const requestJson: SyncDependencies['requestJson'] = async (options) => {
-    const body = options.body as { pageNum: number; pageSize: number };
+    const body = options.body as { pageNum: number; pageSize: number; skyboxName: string };
     calls.push({ ...body });
     const start = (body.pageNum - 1) * body.pageSize;
     return createPageResponse(records.slice(start, start + body.pageSize), {
@@ -853,7 +852,10 @@ test('有界分页完整读取多页并要求请求与响应 pageNum/pageSize �
     ),
   });
 
-  assert.deepEqual(calls, [{ pageNum: 1, pageSize: 100 }, { pageNum: 2, pageSize: 100 }]);
+  assert.deepEqual(calls, [
+    { pageNum: 1, pageSize: 100, skyboxName: '' },
+    { pageNum: 2, pageSize: 100, skyboxName: '' },
+  ]);
   assert.equal(downloadCalls, 0);
   const nextIndex = await readDataPlatformSkyboxIndex(editorRoot);
   assert.equal(nextIndex.entries.length, normalized.length);
@@ -1048,6 +1050,51 @@ test('下载并发峰值严格为 2，首个失败后不再领取新任务并等
   await assertMissing(getDataPlatformSkyboxIndexPath(editorRoot));
 });
 
+test('首个完整 validate 失败后不再领取后续下载任务并等待已领取任务释放', async (t) => {
+  const sync = await loadSyncModule();
+  const store = await loadSkyboxStoreModule();
+  const editorRoot = await createEditorRoot(t, 'babylon-skybox-validate-stop-');
+  const records = Array.from({ length: 5 }, (_, index) => {
+    const id = String(index + 1);
+    const data = createHdrFixture(`validate-stop-${id}`, 40 + index);
+    return { raw: createRawRecord({ id, data }), data };
+  });
+  const request = singlePageRequest(records.map((item) => item.raw));
+  const started: string[] = [];
+  let twoStarted: (() => void) | null = null;
+  const twoStartedPromise = new Promise<void>((resolve) => {
+    twoStarted = resolve;
+  });
+  const downloadFile: SyncDependencies['downloadFile'] = async (options) => {
+    const id = /skybox-(\d+)\./.exec(options.remoteUrl)?.[1] ?? 'unknown';
+    started.push(id);
+    if (started.length === 2) twoStarted?.();
+    if (id === '2') await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    return await mappedDownloader(new Map([[options.remoteUrl, records[Number(id) - 1].data]]))(options);
+  };
+  const validateFile: SyncDependencies['validateFile'] = async (filePath) => {
+    if (filePath.endsWith(`${path.sep}Skybox-1${path.sep}skybox.hdr`)) {
+      await twoStartedPromise;
+      throw new Error('injected validate failure');
+    }
+    return await store.validateSkyboxSourceFile(filePath);
+  };
+
+  await assert.rejects(
+    sync.executeDataPlatformSkyboxSync({
+      baseUrl: BASE_URL,
+      editorRoot,
+      runId: 'validate-stop-run',
+      dependencies: fixedDependencies(request.requestJson, downloadFile, validateFile),
+    }),
+    /injected validate failure/,
+  );
+
+  assert.deepEqual(started, ['1', '2']);
+  await assertMissing(stagingRootFor(editorRoot, 'validate-stop-run'));
+  await assertMissing(getDataPlatformSkyboxIndexPath(editorRoot));
+});
+
 test('推广中途失败时逆序删除新目标并完整恢复备份，随后清理 staging', { concurrency: false }, async (t) => {
   const sync = await loadSyncModule();
   const store = await loadSkyboxStoreModule();
@@ -1110,6 +1157,9 @@ test('推广中途失败时逆序删除新目标并完整恢复备份，随后�
   assert.deepEqual(await fs.readFile(targetTwo), oldTwo);
   assert.deepEqual(await fs.readFile(indexPath), oldIndexBytes);
   await assertMissing(stagingRootFor(editorRoot, 'rollback-complete-run'));
+  const progress = sync.getLatestDataPlatformSkyboxSyncProgress();
+  assert.equal(progress?.phase, 'failed');
+  assert.match(progress?.message ?? '', /原资源库|旧库|完整恢复/);
 });
 
 test('回滚不完整时抛 DataPlatformRollbackError，包含全部错误并保留恢复目录', { concurrency: false }, async (t) => {
@@ -1187,6 +1237,93 @@ test('回滚不完整时抛 DataPlatformRollbackError，包含全部错误并保
   assert.deepEqual(await fs.readFile(indexPath), oldIndexBytes);
   await assertMissing(targetOne);
   await assertMissing(targetTwo);
+  const progress = sync.getLatestDataPlatformSkyboxSyncProgress();
+  assert.equal(progress?.phase, 'failed');
+  assert.match(progress?.message ?? '', /回滚不完整|恢复材料/);
+  assert.doesNotMatch(progress?.message ?? '', /已保留原资源库|旧库完整/);
+});
+
+test('索引推广完成后触发 Abort 仍按已提交成功报告 completed', { concurrency: false }, async (t) => {
+  const sync = await loadSyncModule();
+  const store = await loadSkyboxStoreModule();
+  const editorRoot = await createEditorRoot(t, 'babylon-skybox-post-commit-abort-');
+  const data = createHdrFixture('post-commit-abort', 61);
+  const raw = createRawRecord({ id: '1', data });
+  const request = singlePageRequest([raw]);
+  const controller = new AbortController();
+  const indexPath = getDataPlatformSkyboxIndexPath(editorRoot);
+  const originalRename = fs.rename;
+  (fs as unknown as { rename: typeof fs.rename }).rename = async (source, target) => {
+    await originalRename(source, target);
+    if (String(target) === indexPath) controller.abort();
+  };
+
+  try {
+    await sync.executeDataPlatformSkyboxSync({
+      baseUrl: BASE_URL,
+      editorRoot,
+      runId: 'post-commit-abort-run',
+      signal: controller.signal,
+      dependencies: fixedDependencies(
+        request.requestJson,
+        mappedDownloader(new Map([['/files/skybox-1.hdr', data]])),
+        store.validateSkyboxSourceFile,
+      ),
+    });
+  } finally {
+    (fs as unknown as { rename: typeof fs.rename }).rename = originalRename;
+  }
+
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(sync.getLatestDataPlatformSkyboxSyncProgress()?.phase, 'completed');
+  assert.equal((await readDataPlatformSkyboxIndex(editorRoot)).entries.length, 1);
+});
+
+test('索引提交后的 staging 清理失败只记录告警且保持 completed', { concurrency: false }, async (t) => {
+  const sync = await loadSyncModule();
+  const store = await loadSkyboxStoreModule();
+  const editorRoot = await createEditorRoot(t, 'babylon-skybox-post-commit-cleanup-');
+  const data = createHdrFixture('post-commit-cleanup', 62);
+  const raw = createRawRecord({ id: '1', data });
+  const request = singlePageRequest([raw]);
+  const runId = 'post-commit-cleanup-run';
+  const stagingRoot = stagingRootFor(editorRoot, runId);
+  const indexPath = getDataPlatformSkyboxIndexPath(editorRoot);
+  const originalRename = fs.rename;
+  const originalRm = fs.rm;
+  let committed = false;
+  (fs as unknown as { rename: typeof fs.rename }).rename = async (source, target) => {
+    await originalRename(source, target);
+    if (String(target) === indexPath) committed = true;
+  };
+  (fs as unknown as { rm: typeof fs.rm }).rm = async (target, options) => {
+    if (committed && path.resolve(String(target)) === path.resolve(stagingRoot)) {
+      throw new Error('injected post-commit cleanup failure');
+    }
+    return await originalRm(target, options);
+  };
+
+  try {
+    await sync.executeDataPlatformSkyboxSync({
+      baseUrl: BASE_URL,
+      editorRoot,
+      runId,
+      dependencies: fixedDependencies(
+        request.requestJson,
+        mappedDownloader(new Map([['/files/skybox-1.hdr', data]])),
+        store.validateSkyboxSourceFile,
+      ),
+    });
+  } finally {
+    (fs as unknown as { rename: typeof fs.rename }).rename = originalRename;
+    (fs as unknown as { rm: typeof fs.rm }).rm = originalRm;
+  }
+
+  const progress = sync.getLatestDataPlatformSkyboxSyncProgress();
+  assert.equal(progress?.phase, 'completed');
+  assert.match(progress?.message ?? '', /清理|staging/i);
+  assert.equal((await readDataPlatformSkyboxIndex(editorRoot)).entries.length, 1);
+  assert.equal((await fs.lstat(stagingRoot)).isDirectory(), true);
 });
 
 test('Abort 会等待已领取下载释放并清理所有 staging/partial，不伪报 completed', async (t) => {

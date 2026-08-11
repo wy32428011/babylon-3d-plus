@@ -60,6 +60,9 @@ type RadianceHdrInfo = {
 export type SkyboxAssetFileInspection = {
   format: SkyboxAssetFormat;
   fileSizeBytes: number;
+};
+
+type InternalSkyboxAssetFileInspection = SkyboxAssetFileInspection & {
   hdrInfo?: RadianceHdrInfo;
 };
 
@@ -176,7 +179,7 @@ function validateExrHeader(header: Buffer): void {
   }
 }
 
-export async function inspectSkyboxAssetFile(filePath: string): Promise<SkyboxAssetFileInspection> {
+async function inspectSkyboxAssetFileInternal(filePath: string): Promise<InternalSkyboxAssetFileInspection> {
   const normalizedPath = path.resolve(filePath);
   const format = getSkyboxFormat(normalizedPath);
   if (!format) throw new Error('天空盒仅支持 .hdr 或 .exr 文件。');
@@ -195,6 +198,11 @@ export async function inspectSkyboxAssetFile(filePath: string): Promise<SkyboxAs
   }
   validateExrHeader(header);
   return { format, fileSizeBytes: stat.size };
+}
+
+export async function inspectSkyboxAssetFile(filePath: string): Promise<SkyboxAssetFileInspection> {
+  const inspection = await inspectSkyboxAssetFileInternal(filePath);
+  return { format: inspection.format, fileSizeBytes: inspection.fileSizeBytes };
 }
 
 /** 流式校验 RGBE 扫描线，避免损坏文件进入资源库后才在 Babylon 运行时失败。 */
@@ -286,7 +294,7 @@ async function validateRadianceHdrPayload(
 export async function validateSkyboxSourceFile(
   filePath: string,
 ): Promise<{ format: SkyboxAssetFormat; fileSizeBytes: number }> {
-  const metadata = await inspectSkyboxAssetFile(filePath);
+  const metadata = await inspectSkyboxAssetFileInternal(filePath);
   if (metadata.format === 'hdr' && metadata.hdrInfo) {
     await validateRadianceHdrPayload(path.resolve(filePath), metadata.fileSizeBytes, metadata.hdrInfo);
   }

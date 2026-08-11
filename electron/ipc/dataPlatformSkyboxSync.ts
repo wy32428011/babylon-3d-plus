@@ -158,6 +158,7 @@ export async function executeDataPlatformSkyboxSync(
 
     const stagedDownloads = createStagedDownloads(stagingRoot, plan.downloads);
     let actualDownloadedBytes = 0;
+    let validationStarted = false;
     await runWithConcurrency(stagedDownloads, MAX_CONCURRENT_DOWNLOADS, async (item) => {
       assertNotAborted(signal);
       const hash = createHash('sha256');
@@ -187,28 +188,17 @@ export async function executeDataPlatformSkyboxSync(
       assertNotAborted(signal);
       assertDownloadedMetadata(item.plan.record, result, hashedBytes, hash.digest('hex'));
 
-      completedDownloads += 1;
-      updateSkyboxSyncProgress({
-        runId,
-        phase: 'downloading',
-        completed: completedDownloads,
-        total: totalDownloads,
-        message: `已下载 ${completedDownloads}/${totalDownloads} 个天空盒文件。`,
-        error: null,
-      });
-    });
-
-    updateSkyboxSyncProgress({
-      runId,
-      phase: 'validating',
-      completed: completedDownloads,
-      total: totalDownloads,
-      message: totalDownloads === 0 ? '正在校验下一版天空盒索引…' : '正在完整校验 HDR/EXR 内容…',
-      error: null,
-    });
-
-    for (const item of stagedDownloads) {
-      assertNotAborted(signal);
+      if (!validationStarted) {
+        validationStarted = true;
+        updateSkyboxSyncProgress({
+          runId,
+          phase: 'validating',
+          completed: completedDownloads,
+          total: totalDownloads,
+          message: '正在逐项完整校验 HDR/EXR 内容…',
+          error: null,
+        });
+      }
       const validation = await dependencies.validateFile(item.stagedPath);
       if (validation.format !== item.plan.record.format) {
         throw new Error(`天空盒 ${item.plan.record.displayName} 实际格式与元数据不一致。`);
@@ -216,6 +206,27 @@ export async function executeDataPlatformSkyboxSync(
       if (validation.fileSizeBytes !== item.plan.record.fileSizeBytes) {
         throw new Error(`天空盒 ${item.plan.record.displayName} 校验大小与元数据不一致。`);
       }
+
+      completedDownloads += 1;
+      updateSkyboxSyncProgress({
+        runId,
+        phase: 'validating',
+        completed: completedDownloads,
+        total: totalDownloads,
+        message: `已下载并校验 ${completedDownloads}/${totalDownloads} 个天空盒文件。`,
+        error: null,
+      });
+    });
+
+    if (!validationStarted) {
+      updateSkyboxSyncProgress({
+        runId,
+        phase: 'validating',
+        completed: 0,
+        total: 0,
+        message: '正在校验下一版天空盒索引…',
+        error: null,
+      });
     }
 
     const stagedIndexPath = path.join(stagingRoot, 'index', 'data-platform-skybox-index.json');
@@ -239,16 +250,15 @@ export async function executeDataPlatformSkyboxSync(
       stagedIndexPath,
       signal,
     });
-    assertNotAborted(signal);
 
-    await removeStagingRoot(editorRoot, stagingRoot);
-    stagingRoot = null;
+    const cleanupWarning = await cleanupCommittedStaging(editorRoot, stagingRoot);
+    if (!cleanupWarning) stagingRoot = null;
     updateSkyboxSyncProgress({
       runId,
       phase: 'completed',
       completed: totalDownloads,
       total: totalDownloads,
-      message: `天空盒同步完成：远端 ${records.length} 项，本次下载 ${totalDownloads} 项。`,
+      message: `天空盒同步完成：远端 ${records.length} 项，本次下载 ${totalDownloads} 项。${cleanupWarning ? `；${cleanupWarning}` : ''}`,
       error: null,
     });
   } catch (caughtError) {
@@ -268,7 +278,11 @@ export async function executeDataPlatformSkyboxSync(
       phase: 'failed',
       completed: completedDownloads,
       total: totalDownloads,
-      message: signal.aborted ? '数据中台天空盒同步已取消。' : '数据中台天空盒同步失败，已保留原资源库。',
+      message: preserveStaging
+        ? '数据中台天空盒同步失败，回滚不完整，恢复材料已保留。'
+        : signal.aborted
+          ? '数据中台天空盒同步已取消，原资源库保持不变或已完整恢复。'
+          : '数据中台天空盒同步失败，原资源库保持不变或已完整恢复。',
       error: toSafeErrorMessage(error),
     });
     throw error;
@@ -334,7 +348,7 @@ async function queryAllSkyboxes(
     const payload = await requestJson({
       baseUrl,
       endpointPath: SKYBOX_QUERY_PATH,
-      body: { pageNum, pageSize: SKYBOX_QUERY_PAGE_SIZE },
+      body: { pageNum, pageSize: SKYBOX_QUERY_PAGE_SIZE, skyboxName: '' },
       signal,
       timeoutMs: QUERY_TIMEOUT_MS,
       context: '查询数据中台天空盒',
@@ -509,7 +523,6 @@ async function promoteSkyboxBatch(options: {
       assertNotAborted(options.signal);
       await renamePathWithWindowsRetry(state.item.staged, state.item.target);
       state.stagedMoved = true;
-      assertNotAborted(options.signal);
     }
   } catch (error) {
     const rollbackErrors: string[] = [];
@@ -592,6 +605,16 @@ async function renamePathWithWindowsRetry(sourcePath: string, targetPath: string
       retryIndex += 1;
       await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
     }
+  }
+}
+
+
+async function cleanupCommittedStaging(editorRoot: string, stagingRoot: string): Promise<string | null> {
+  try {
+    await removeStagingRoot(editorRoot, stagingRoot);
+    return null;
+  } catch (error) {
+    return `staging 清理失败，已保留待后续清理：${toSafeErrorMessage(error)}`;
   }
 }
 
