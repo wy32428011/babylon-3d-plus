@@ -573,8 +573,6 @@ export async function activateProjectRoot(
 }
 
 export async function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult> {
-  setSharedProjectAssetRoot(null);
-  setSharedProjectSkyboxRoot(null);
   const normalizedProjectRoot = normalizeFilePath(projectRoot);
   const index = await readRecentWorkspaceIndex();
   const isKnownRecentProject = index.projects.some((entry) => entry.projectRoot === normalizedProjectRoot);
@@ -583,7 +581,10 @@ export async function openRecentProject(projectRoot: string): Promise<ProjectLis
     throw new Error('只能打开最近记录中的项目目录。');
   }
 
-  return activateProjectRoot(normalizedProjectRoot);
+  await activateProjectRoot(normalizedProjectRoot);
+  setSharedProjectAssetRoot(null);
+  setSharedProjectSkyboxRoot(null);
+  return listProjectAssets();
 }
 
 export function getProjectModelsRoot(projectRoot: string): string {
@@ -746,13 +747,13 @@ export async function selectCurrentProjectRootWithDialog(): Promise<string | nul
   }
 
   const selectedProjectRoot = normalizeFilePath(projectRoot);
-  setSharedProjectAssetRoot(null);
-  setSharedProjectSkyboxRoot(null);
-  setCurrentProjectRoot(selectedProjectRoot);
   await ensureProjectDirectories(selectedProjectRoot);
   authorizeProjectAssetRoots(selectedProjectRoot);
   await persistCurrentProjectRoot(selectedProjectRoot);
   await rememberRecentProjectRoot(selectedProjectRoot);
+  setSharedProjectAssetRoot(null);
+  setSharedProjectSkyboxRoot(null);
+  setCurrentProjectRoot(selectedProjectRoot);
 
   return selectedProjectRoot;
 }

@@ -27,6 +27,7 @@ type HarnessState = {
   recentSkyboxSyncCalls: Array<{ baseUrl: string; workspaceRoot: string }>;
   recentSkyboxSyncPromise: Promise<boolean> | null;
   skyboxDisposePromise: Promise<void> | null;
+  directoryPrepareGates: Map<string, Promise<void>>;
   networkCalls: number;
   listAssetsResult: { projectRoot: string | null; assets: unknown[]; skyboxes: unknown[] };
 };
@@ -40,6 +41,14 @@ function createDeferred(): Deferred {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+async function waitForEvent(state: HarnessState, event: string): Promise<void> {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    if (state.events.includes(event)) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`等待测试事件超时：${event}`);
 }
 
 function resetHarness(root: string): HarnessState {
@@ -58,6 +67,7 @@ function resetHarness(root: string): HarnessState {
     recentSkyboxSyncCalls: [],
     recentSkyboxSyncPromise: null,
     skyboxDisposePromise: null,
+    directoryPrepareGates: new Map(),
     networkCalls: 0,
     listAssetsResult: { projectRoot: root, assets: [], skyboxes: [] },
   };
@@ -137,7 +147,10 @@ const harnessPlugin: Plugin = {
           return getState().listAssetsResult;
         }
         export async function ensureProjectDirectories(projectRoot) {
-          getState().events.push('ensureDirectories:' + projectRoot);
+          const normalizedRoot = path.resolve(projectRoot);
+          getState().events.push('ensureDirectories:' + normalizedRoot);
+          const gate = getState().directoryPrepareGates.get(normalizedRoot);
+          if (gate) await gate;
         }
         export const getProjectAssetIndexPath = (root) => path.join(root, '.babylon-editor', 'asset-index.json');
         export const getProjectModelsRoot = (root) => path.join(root, 'Assets', 'Models');
@@ -251,6 +264,9 @@ const harnessPlugin: Plugin = {
     if (id === '\0task4-recent-project-service') {
       return `
         const getState = () => ${stateLookup};
+        export function invalidateDataPlatformSkyboxSyncPrepareContext() {
+          getState().events.push('invalidateSkyboxPrepare');
+        }
         export function syncDataPlatformSkyboxesForWorkspace(baseUrl, workspaceRoot) {
           getState().recentSkyboxSyncCalls.push({ baseUrl, workspaceRoot });
           getState().events.push('recentSkyboxSync:' + workspaceRoot);
@@ -409,7 +425,42 @@ test('设置共享天空盒根后仍只列出当前项目本地天空盒，不�
   await fs.rm(root, { recursive: true, force: true });
 });
 
-test('项目服务手动同步不建 binding，数据中台打开不等待同步，dispose 最后等待天空盒任务', async () => {
+test('无效 recent 项目打开失败时保持原 project 与 shared roots 状态', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task4-invalid-recent-'));
+  resetHarness(root);
+  const store = await server.ssrLoadModule('/electron/ipc/projectAssetStore.ts') as {
+    setCurrentProjectRoot(root: string): void;
+    getCurrentProjectRoot(): string | null;
+    setSharedProjectAssetRoot(root: string | null): void;
+    getSharedProjectAssetRoot(): string | null;
+    setSharedProjectSkyboxRoot(root: string | null): void;
+    getSharedProjectSkyboxRoot(): string | null;
+    openRecentProject(root: string): Promise<unknown>;
+  };
+
+  const previousProjectRoot = path.join(root, 'previous-project');
+  const previousAssetRoot = path.join(root, 'previous-assets');
+  const previousSkyboxRoot = path.join(root, 'previous-skyboxes');
+  await fs.mkdir(previousProjectRoot, { recursive: true });
+  store.setCurrentProjectRoot(previousProjectRoot);
+  store.setSharedProjectAssetRoot(previousAssetRoot);
+  store.setSharedProjectSkyboxRoot(previousSkyboxRoot);
+
+  await assert.rejects(
+    store.openRecentProject(path.join(root, 'missing-project')),
+    /只能打开最近记录中的项目目录。/,
+  );
+
+  assert.equal(store.getCurrentProjectRoot(), path.normalize(previousProjectRoot));
+  assert.equal(store.getSharedProjectAssetRoot(), path.normalize(previousAssetRoot));
+  assert.equal(store.getSharedProjectSkyboxRoot(), path.normalize(previousSkyboxRoot));
+
+  store.setSharedProjectAssetRoot(null);
+  store.setSharedProjectSkyboxRoot(null);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test('天空盒 prepare 在项目切换与 dispose 竞态中失效并被等待，项目打开仍不阻塞网络同步', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task4-service-'));
   const state = resetHarness(root);
   const service = await server.ssrLoadModule('/electron/ipc/dataPlatformProjectService.ts') as {
@@ -425,6 +476,30 @@ test('项目服务手动同步不建 binding，数据中台打开不等待同步
   assert.deepEqual(state.sharedSkyboxRoots, [sharedRoot]);
   assert.deepEqual(state.skyboxStarts, [{ baseUrl, editorRoot: sharedRoot }]);
   assert.equal(state.currentBinding, null);
+
+  state.events.length = 0;
+  state.sharedSkyboxRoots.length = 0;
+  state.skyboxStarts.length = 0;
+  const staleBaseUrl = 'https://stale.example.test';
+  const staleWorkspaceRoot = path.join(root, 'stale-workspace');
+  const staleSharedRoot = path.resolve(staleWorkspaceRoot, 'SharedResources');
+  const stalePrepareGate = createDeferred();
+  state.directoryPrepareGates.set(staleSharedRoot, stalePrepareGate.promise);
+  const stalePrepare = service.syncDataPlatformSkyboxesForWorkspace(staleBaseUrl, staleWorkspaceRoot);
+  await waitForEvent(state, `ensureDirectories:${staleSharedRoot}`);
+
+  const currentBaseUrl = 'https://current.example.test';
+  const currentWorkspaceRoot = path.join(root, 'current-workspace');
+  const currentSharedRoot = path.resolve(currentWorkspaceRoot, 'SharedResources');
+  assert.equal(await service.syncDataPlatformSkyboxesForWorkspace(currentBaseUrl, currentWorkspaceRoot), true);
+  assert.deepEqual(state.sharedSkyboxRoots, [currentSharedRoot]);
+  assert.deepEqual(state.skyboxStarts, [{ baseUrl: currentBaseUrl, editorRoot: currentSharedRoot }]);
+
+  stalePrepareGate.resolve();
+  assert.equal(await stalePrepare, false);
+  assert.deepEqual(state.sharedSkyboxRoots, [currentSharedRoot]);
+  assert.equal(state.skyboxStarts.some((entry) => entry.baseUrl === staleBaseUrl), false);
+  state.directoryPrepareGates.delete(staleSharedRoot);
 
   state.events.length = 0;
   state.sharedSkyboxRoots.length = 0;
@@ -467,16 +542,38 @@ test('项目服务手动同步不建 binding，数据中台打开不等待同步
   assert.ok(state.events.indexOf(`writeBinding:${path.resolve(workspaceRoot, 'Projects', '42')}`) < state.events.indexOf(`setSkybox:${sharedRoot}`));
   assert.ok(state.events.indexOf(`setSkybox:${sharedRoot}`) < state.events.indexOf(`startSkybox:${sharedRoot}`));
 
-  const disposeGate = createDeferred();
-  state.skyboxDisposePromise = disposeGate.promise;
+  state.events.length = 0;
+  state.sharedSkyboxRoots.length = 0;
+  state.skyboxStarts.length = 0;
+  const disposeWorkspaceRoot = path.join(root, 'dispose-workspace');
+  const disposeSharedRoot = path.resolve(disposeWorkspaceRoot, 'SharedResources');
+  const disposePrepareGate = createDeferred();
+  const skyboxDisposeGate = createDeferred();
+  state.directoryPrepareGates.set(disposeSharedRoot, disposePrepareGate.promise);
+  state.skyboxDisposePromise = skyboxDisposeGate.promise;
+  const disposePrepare = service.syncDataPlatformSkyboxesForWorkspace(
+    'https://dispose.example.test',
+    disposeWorkspaceRoot,
+  );
+  await waitForEvent(state, `ensureDirectories:${disposeSharedRoot}`);
+
   let disposed = false;
   const disposePromise = service.disposeDataPlatformProjectTasks().then(() => {
     disposed = true;
   });
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(disposed, false);
+  assert.equal(state.events.includes('disposeModel'), false);
+
+  disposePrepareGate.resolve();
+  assert.equal(await disposePrepare, false);
+  await waitForEvent(state, 'disposeSkybox');
+  assert.equal(disposed, false);
   assert.deepEqual(state.events.slice(-3), ['disposeModel', 'disposeImage', 'disposeSkybox']);
-  disposeGate.resolve();
+  assert.equal(state.sharedSkyboxRoots.includes(disposeSharedRoot), false);
+  assert.equal(state.skyboxStarts.some((entry) => entry.baseUrl === 'https://dispose.example.test'), false);
+
+  skyboxDisposeGate.resolve();
   await disposePromise;
   assert.equal(disposed, true);
   await fs.rm(root, { recursive: true, force: true });
@@ -523,7 +620,8 @@ test('recent 普通项目不启动网络同步，binding 项目挂载共享根�
   await handler(undefined, { projectRoot: localRoot });
   assert.equal(state.recentSkyboxSyncCalls.length, 0);
   assert.equal(state.sharedSkyboxRoots.at(-1), null);
-  assert.ok(state.events.includes('clearBinding'));
+  assert.ok(state.events.indexOf(`openRecent:${localRoot}`) < state.events.indexOf('invalidateSkyboxPrepare'));
+  assert.ok(state.events.indexOf('invalidateSkyboxPrepare') < state.events.indexOf('clearBinding'));
 
   state.events.length = 0;
   state.sharedAssetRoots.length = 0;
@@ -557,6 +655,7 @@ test('recent 普通项目不启动网络同步，binding 项目挂载共享根�
     baseUrl: 'https://platform.example.test',
     workspaceRoot: path.resolve(workspaceRoot),
   }]);
+  assert.ok(state.events.indexOf('invalidateSkyboxPrepare') < state.events.indexOf(`setAsset:${sharedRoot}`));
   assert.ok(state.events.indexOf(`setAsset:${sharedRoot}`) < state.events.indexOf(`setSkybox:${sharedRoot}`));
   assert.ok(state.events.indexOf(`setSkybox:${sharedRoot}`) < state.events.indexOf(`recentSkyboxSync:${path.resolve(workspaceRoot)}`));
   assert.ok(state.events.indexOf(`recentSkyboxSync:${path.resolve(workspaceRoot)}`) < state.events.indexOf('listAssets'));

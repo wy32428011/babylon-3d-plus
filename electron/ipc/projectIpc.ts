@@ -33,7 +33,10 @@ import {
   resolveDataPlatformSharedResourcesRoot,
   setCurrentDataPlatformBinding,
 } from './dataPlatformBindingStore.js';
-import { syncDataPlatformSkyboxesForWorkspace } from './dataPlatformProjectService.js';
+import {
+  invalidateDataPlatformSkyboxSyncPrepareContext,
+  syncDataPlatformSkyboxesForWorkspace,
+} from './dataPlatformProjectService.js';
 
 type SaveSceneRequestShape = {
   suggestedName?: unknown;
@@ -74,6 +77,7 @@ export function registerProjectIpc(): void {
   ipcMain.handle('project:openRecent', async (_event, request: OpenRecentProjectRequest): Promise<ProjectListAssetsResult> => {
     const openRequest = validateOpenRecentProjectRequest(request);
     await openRecentProject(openRequest.projectRoot);
+    invalidateDataPlatformSkyboxSyncPrepareContext();
     const binding = await readDataPlatformBinding(openRequest.projectRoot);
     if (!binding) {
       clearCurrentDataPlatformBinding();
@@ -98,7 +102,12 @@ export function registerProjectIpc(): void {
 
   ipcMain.handle('project:selectDirectory', async (): Promise<SelectProjectDirectoryResult> => {
     const projectRoot = await selectCurrentProjectRootWithDialog();
-    if (projectRoot) clearCurrentDataPlatformBinding();
+    if (projectRoot) {
+      invalidateDataPlatformSkyboxSyncPrepareContext();
+      setSharedProjectAssetRoot(null);
+      setSharedProjectSkyboxRoot(null);
+      clearCurrentDataPlatformBinding();
+    }
     return { canceled: projectRoot === null, projectRoot };
   });
 

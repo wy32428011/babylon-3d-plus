@@ -80,6 +80,18 @@ let dataPlatformProjectServiceShuttingDown = false;
 const openTaskControllers = new Set<AbortController>();
 const openTasks = new Set<Promise<unknown>>();
 
+type SkyboxSyncPrepareContext = {
+  generation: number;
+  baseUrl: string;
+  workspaceRoot: string;
+  sharedResourcesRoot: string;
+};
+
+let skyboxSyncPrepareGeneration = 0;
+let currentSkyboxSyncPrepareContext: SkyboxSyncPrepareContext | null = null;
+const skyboxSyncPrepareControllers = new Set<AbortController>();
+const skyboxSyncPrepareTasks = new Set<Promise<boolean>>();
+
 type PackageDetection =
   | {
       kind: 'current';
@@ -155,17 +167,61 @@ export async function syncDataPlatformModelsForWorkspace(
   return startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
 }
 
+/** 使所有在途天空盒 prepare 失效；调用方无需等待，dispose 会统一回收任务。 */
+export function invalidateDataPlatformSkyboxSyncPrepareContext(): void {
+  skyboxSyncPrepareGeneration += 1;
+  currentSkyboxSyncPrepareContext = null;
+  for (const controller of skyboxSyncPrepareControllers) controller.abort();
+}
+
+function isCurrentSkyboxSyncPrepare(context: SkyboxSyncPrepareContext, signal: AbortSignal): boolean {
+  return !dataPlatformProjectServiceShuttingDown
+    && !signal.aborted
+    && currentSkyboxSyncPrepareContext === context
+    && context.generation === skyboxSyncPrepareGeneration;
+}
+
+async function prepareDataPlatformSkyboxSync(
+  context: SkyboxSyncPrepareContext,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
+  await ensureWritableEditorRoot(context.sharedResourcesRoot);
+  if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
+  await ensureProjectDirectories(context.sharedResourcesRoot);
+  if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
+  setSharedProjectSkyboxRoot(context.sharedResourcesRoot);
+  if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
+  return startDataPlatformSkyboxSync(context.baseUrl, context.sharedResourcesRoot);
+}
+
 /** 手动同步始终写入工作区共享天空盒缓存，不创建或切换业务项目 binding。 */
-export async function syncDataPlatformSkyboxesForWorkspace(
+export function syncDataPlatformSkyboxesForWorkspace(
   baseUrl: string,
   workspaceRoot: string,
 ): Promise<boolean> {
-  if (dataPlatformProjectServiceShuttingDown) return false;
-  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
-  await ensureWritableEditorRoot(sharedResourcesRoot);
-  await ensureProjectDirectories(sharedResourcesRoot);
-  setSharedProjectSkyboxRoot(sharedResourcesRoot);
-  return startDataPlatformSkyboxSync(baseUrl, sharedResourcesRoot);
+  if (dataPlatformProjectServiceShuttingDown) return Promise.resolve(false);
+  invalidateDataPlatformSkyboxSyncPrepareContext();
+  if (dataPlatformProjectServiceShuttingDown) return Promise.resolve(false);
+
+  const controller = new AbortController();
+  const context: SkyboxSyncPrepareContext = {
+    generation: skyboxSyncPrepareGeneration,
+    baseUrl,
+    workspaceRoot,
+    sharedResourcesRoot: resolveDataPlatformSharedResourcesRoot(workspaceRoot),
+  };
+  currentSkyboxSyncPrepareContext = context;
+  skyboxSyncPrepareControllers.add(controller);
+  const task = prepareDataPlatformSkyboxSync(context, controller.signal);
+  skyboxSyncPrepareTasks.add(task);
+  const cleanup = (): void => {
+    skyboxSyncPrepareControllers.delete(controller);
+    skyboxSyncPrepareTasks.delete(task);
+    if (currentSkyboxSyncPrepareContext === context) currentSkyboxSyncPrepareContext = null;
+  };
+  void task.then(cleanup, cleanup);
+  return task;
 }
 
 /** 本地场景或业务工程打开后启动数据中台图标图片同步，与模型同步共用同一资源根判定。 */
@@ -234,13 +290,16 @@ export function clearDataPlatformProjectServiceRetryContext(): void {
   clearDataPlatformModelSyncRetryContext();
   clearDataPlatformImageSyncRetryContext();
   clearDataPlatformSkyboxSyncRetryContext();
+  invalidateDataPlatformSkyboxSyncPrepareContext();
 }
 
 /** 应用退出时取消并等待工程打开与全部共享资源同步任务。 */
 export async function disposeDataPlatformProjectTasks(): Promise<void> {
   dataPlatformProjectServiceShuttingDown = true;
+  invalidateDataPlatformSkyboxSyncPrepareContext();
   for (const controller of openTaskControllers) controller.abort();
   await Promise.allSettled([...openTasks]);
+  await Promise.allSettled([...skyboxSyncPrepareTasks]);
   await disposeDataPlatformModelSync();
   await disposeDataPlatformImageSync();
   await disposeDataPlatformSkyboxSync();
@@ -352,6 +411,7 @@ async function openDataPlatformProjectInternal(
   });
   await writeDataPlatformBinding(projectRoot, binding);
   setCurrentDataPlatformBinding(projectRoot, binding);
+  invalidateDataPlatformSkyboxSyncPrepareContext();
   setSharedProjectSkyboxRoot(sharedResourcesRoot);
 
   const modelSyncStarted = startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
