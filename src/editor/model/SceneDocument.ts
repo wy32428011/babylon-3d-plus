@@ -98,6 +98,7 @@ export type SceneSkyboxSettings = {
   sourcePath: string;
   sourceUrl: string;
   assetRevision?: string;
+  dataPlatformResourceId?: string;
   format: SceneSkyboxFormat;
   rotationDegrees: number;
   intensity: number;
@@ -307,6 +308,28 @@ function readSkyboxPathFormat(sourcePath: string): SceneSkyboxFormat | null {
   return null;
 }
 
+const DATA_PLATFORM_RESOURCE_ID_PATTERN = /^[1-9]\d{0,63}$/;
+
+/** 归一化数据中台正整数资源 ID，始终保持字符串以避免 Long 精度丢失。 */
+export function normalizeDataPlatformResourceId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return DATA_PLATFORM_RESOURCE_ID_PATTERN.test(normalized) ? normalized : null;
+}
+
+export type OwnDataPropertyResult =
+  | { kind: 'missing' }
+  | { kind: 'accessor' }
+  | { kind: 'data'; value: unknown };
+
+/** 仅读取自有数据字段；继承属性和 accessor 不参与持久化，也不会执行 getter。 */
+export function readOwnDataProperty(value: object, propertyKey: PropertyKey): OwnDataPropertyResult {
+  const descriptor = Object.getOwnPropertyDescriptor(value, propertyKey);
+  if (!descriptor) return { kind: 'missing' };
+  if (!Object.hasOwn(descriptor, 'value')) return { kind: 'accessor' };
+  return { kind: 'data', value: descriptor.value };
+}
+
 /** 归一化天空盒设置，拒绝非授权 URL、无效路径和格式不一致的资源。 */
 export function sanitizeSceneSkybox(
   skybox: SceneSkyboxSettings | null | undefined,
@@ -325,6 +348,11 @@ export function sanitizeSceneSkybox(
   ) return null;
 
   const assetRevision = skybox.assetRevision?.trim();
+  const resourceIdField = readOwnDataProperty(skybox, 'dataPlatformResourceId');
+  const dataPlatformResourceId = resourceIdField.kind === 'data'
+    ? normalizeDataPlatformResourceId(resourceIdField.value)
+    : null;
+  if (resourceIdField.kind === 'data' && !dataPlatformResourceId) return null;
   const resolution = SCENE_SKYBOX_RESOLUTIONS.includes(skybox.resolution)
     ? skybox.resolution
     : SCENE_SKYBOX_RESOLUTION_DEFAULT;
@@ -334,6 +362,7 @@ export function sanitizeSceneSkybox(
     sourcePath,
     sourceUrl,
     ...(assetRevision ? { assetRevision } : {}),
+    ...(dataPlatformResourceId ? { dataPlatformResourceId } : {}),
     format,
     rotationDegrees: clampFiniteNumber(
       skybox.rotationDegrees,
@@ -402,6 +431,7 @@ export function createSkyboxComponent(skybox: SceneSkyboxSettings): SkyboxCompon
     sourcePath: normalized.sourcePath,
     sourceUrl: normalized.sourceUrl,
     ...(normalized.assetRevision ? { assetRevision: normalized.assetRevision } : {}),
+    ...(normalized.dataPlatformResourceId ? { dataPlatformResourceId: normalized.dataPlatformResourceId } : {}),
     format: normalized.format,
     intensity: normalized.intensity,
     resolution: normalized.resolution,
@@ -431,9 +461,17 @@ export function getSceneSkyboxEntity(
 export function createSceneSkyboxSettingsFromEntity(entity: Entity): SceneSkyboxSettings | null {
   const skybox = entity.components.skybox;
   if (!skybox) return null;
+  const resourceIdField = readOwnDataProperty(skybox, 'dataPlatformResourceId');
   return sanitizeSceneSkybox({
-    ...skybox,
+    packagePath: skybox.packagePath,
+    sourcePath: skybox.sourcePath,
+    sourceUrl: skybox.sourceUrl,
+    ...(skybox.assetRevision === undefined ? {} : { assetRevision: skybox.assetRevision }),
+    ...(resourceIdField.kind === 'data' ? { dataPlatformResourceId: resourceIdField.value as string } : {}),
+    format: skybox.format,
     rotationDegrees: normalizeSkyboxRotationRadians(entity.components.transform.rotation.y),
+    intensity: skybox.intensity,
+    resolution: skybox.resolution,
   });
 }
 

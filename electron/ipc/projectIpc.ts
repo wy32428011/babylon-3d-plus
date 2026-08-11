@@ -18,20 +18,33 @@ import { authorizeAssetFile, authorizeSceneFile, isAuthorizedSceneFile, normaliz
 import { isSupportedSceneFilePath } from './sceneFilePath.js';
 import {
   assertRecentSceneFile,
+  commitRecentProjectActivation,
+  getProjectAssetStoreStateSnapshot,
+  getRecentWorkspaceStateSnapshot,
   getRecentWorkspaces,
   listProjectAssets,
-  openRecentProject,
+  rememberRecentProjectRoot,
   rememberRecentSceneFile,
+  restoreProjectAssetStoreState,
+  restoreRecentWorkspaceStateSnapshot,
   removeRecentWorkspaceItem,
   selectCurrentProjectRootWithDialog,
   setSharedProjectAssetRoot,
+  setSharedProjectSkyboxRoot,
+  validateRecentProjectRoot,
 } from './projectAssetStore.js';
 import {
   clearCurrentDataPlatformBinding,
+  getCurrentDataPlatformBinding,
   readDataPlatformBinding,
   resolveDataPlatformSharedResourcesRoot,
   setCurrentDataPlatformBinding,
 } from './dataPlatformBindingStore.js';
+import {
+  getCurrentDataPlatformSkyboxSyncContextKey,
+  invalidateDataPlatformSkyboxSyncPrepareContext,
+  syncDataPlatformSkyboxesForWorkspace,
+} from './dataPlatformProjectService.js';
 
 type SaveSceneRequestShape = {
   suggestedName?: unknown;
@@ -66,21 +79,63 @@ export function registerProjectIpc(): void {
   });
 
   ipcMain.handle('project:listAssets', async (): Promise<ProjectListAssetsResult> => {
-    return listProjectAssets();
+    const result = await listProjectAssets();
+    return {
+      ...result,
+      skyboxSyncContextKey: getCurrentDataPlatformSkyboxSyncContextKey(),
+    };
   });
 
   ipcMain.handle('project:openRecent', async (_event, request: OpenRecentProjectRequest): Promise<ProjectListAssetsResult> => {
     const openRequest = validateOpenRecentProjectRequest(request);
-    await openRecentProject(openRequest.projectRoot);
-    const binding = await readDataPlatformBinding(openRequest.projectRoot);
-    if (!binding) {
-      clearCurrentDataPlatformBinding();
-      return listProjectAssets();
+    const projectRoot = await validateRecentProjectRoot(openRequest.projectRoot);
+    const projectStateSnapshot = getProjectAssetStoreStateSnapshot();
+    const recentWorkspaceSnapshot = await getRecentWorkspaceStateSnapshot();
+    const bindingSnapshot = getCurrentDataPlatformBinding();
+    invalidateDataPlatformSkyboxSyncPrepareContext();
+    setSharedProjectAssetRoot(null);
+    setSharedProjectSkyboxRoot(null);
+    clearCurrentDataPlatformBinding();
+
+    try {
+      await commitRecentProjectActivation(projectRoot);
+      const binding = await readDataPlatformBinding(projectRoot);
+      let workspaceRoot: string | null = null;
+      if (binding) {
+        workspaceRoot = resolveWorkspaceRootFromDataPlatformProject(projectRoot, binding.projectId);
+        const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+        setSharedProjectAssetRoot(sharedResourcesRoot);
+        setSharedProjectSkyboxRoot(sharedResourcesRoot);
+      }
+
+      const result = await listProjectAssets();
+      await rememberRecentProjectRoot(projectRoot);
+      if (binding && workspaceRoot) {
+        setCurrentDataPlatformBinding(projectRoot, binding);
+        void syncDataPlatformSkyboxesForWorkspace(binding.baseUrl, workspaceRoot).catch((error) => {
+          console.error('[electron] 最近数据中台项目天空盒同步启动失败。', error);
+        });
+      }
+      return {
+        ...result,
+        skyboxSyncContextKey: getCurrentDataPlatformSkyboxSyncContextKey(),
+      };
+    } catch (error) {
+      try {
+        await restoreProjectAssetStoreState(projectStateSnapshot);
+      } finally {
+        try {
+          await restoreRecentWorkspaceStateSnapshot(recentWorkspaceSnapshot);
+        } finally {
+          if (bindingSnapshot) {
+            setCurrentDataPlatformBinding(bindingSnapshot.projectRoot, bindingSnapshot.metadata);
+          } else {
+            clearCurrentDataPlatformBinding();
+          }
+        }
+      }
+      throw error;
     }
-    const workspaceRoot = resolveWorkspaceRootFromDataPlatformProject(openRequest.projectRoot, binding.projectId);
-    setSharedProjectAssetRoot(resolveDataPlatformSharedResourcesRoot(workspaceRoot));
-    setCurrentDataPlatformBinding(openRequest.projectRoot, binding);
-    return listProjectAssets();
   });
 
   ipcMain.handle('project:removeRecentWorkspaceItem', async (_event, request: RemoveRecentWorkspaceItemRequest): Promise<void> => {
@@ -90,7 +145,12 @@ export function registerProjectIpc(): void {
 
   ipcMain.handle('project:selectDirectory', async (): Promise<SelectProjectDirectoryResult> => {
     const projectRoot = await selectCurrentProjectRootWithDialog();
-    if (projectRoot) clearCurrentDataPlatformBinding();
+    if (projectRoot) {
+      invalidateDataPlatformSkyboxSyncPrepareContext();
+      setSharedProjectAssetRoot(null);
+      setSharedProjectSkyboxRoot(null);
+      clearCurrentDataPlatformBinding();
+    }
     return { canceled: projectRoot === null, projectRoot };
   });
 

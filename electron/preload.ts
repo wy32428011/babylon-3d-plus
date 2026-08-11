@@ -8,6 +8,7 @@ import type {
   DataPlatformConfig,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  DataPlatformSkyboxSyncProgress,
   SyncedImageAssetEntry,
   DataPlatformProjectListRequest,
   DataPlatformProjectEntry,
@@ -45,6 +46,26 @@ import type {
   SaveSceneResult,
   SelectProjectDirectoryResult,
 } from './types.js';
+
+/** sandbox preload 不能加载相对模块，因此实时优先 gate 必须在入口内联。 */
+function createRealtimeFirstProgressGate<T>(handler: (payload: T) => void) {
+  let active = true;
+  let receivedRealtime = false;
+  return {
+    handleRealtime(payload: T): void {
+      if (!active) return;
+      receivedRealtime = true;
+      handler(payload);
+    },
+    handleSnapshot(payload: T | null): void {
+      if (!active || receivedRealtime || payload === null) return;
+      handler(payload);
+    },
+    dispose(): void {
+      active = false;
+    },
+  };
+}
 
 const dataPlatformDeepLinkHandlers = new Set<(deepLink: DataPlatformDeepLink) => void>();
 let pendingDataPlatformDeepLink: DataPlatformDeepLink | null = null;
@@ -89,6 +110,23 @@ contextBridge.exposeInMainWorld('editorApi', {
     return () => {
       active = false;
       ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
+    };
+  },
+  syncDataPlatformSkyboxes: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncSkyboxes'),
+  retryDataPlatformSkyboxSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retrySkyboxSync'),
+  onDataPlatformSkyboxSyncProgress: (onProgress: (progress: DataPlatformSkyboxSyncProgress) => void): (() => void) => {
+    let active = true;
+    const progressGate = createRealtimeFirstProgressGate(onProgress);
+    const handler = (payload: DataPlatformSkyboxSyncProgress) => progressGate.handleSnapshot(payload);
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformSkyboxSyncProgress) => progressGate.handleRealtime(payload);
+    ipcRenderer.on('data-platform:skyboxSyncProgress', listener);
+    void ipcRenderer.invoke('data-platform:getSkyboxSyncProgress').then((payload: DataPlatformSkyboxSyncProgress | null) => {
+      if (active && payload) handler(payload);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      progressGate.dispose();
+      ipcRenderer.removeListener('data-platform:skyboxSyncProgress', listener);
     };
   },
   syncDataPlatformImages: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncImages'),

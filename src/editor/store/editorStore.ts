@@ -342,6 +342,7 @@ const ENTITY_ARRAY_DIRECTION_VECTORS: Record<EntityArrayDirection, Vector3Data> 
 
 type EditorState = {
   scene: SceneDocument;
+  sceneSessionId: string;
   persistedSceneContent: string;
   runtimeMode: EditorRuntimeMode;
   history: CommandHistory;
@@ -517,6 +518,7 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
 
   return {
     scene,
+    sceneSessionId: createId('scene_session'),
     persistedSceneContent: serializeScene(scene),
     history: createCommandHistory(),
     hierarchySelectionIds: [],
@@ -2234,6 +2236,7 @@ const initialEditorScene = createEmptySceneDocument();
 
 export const useEditorStore = create<EditorState>((set, get) => ({
   scene: initialEditorScene,
+  sceneSessionId: createId('scene_session'),
   persistedSceneContent: serializeScene(initialEditorScene),
   runtimeMode: 'edit',
   history: createCommandHistory(),

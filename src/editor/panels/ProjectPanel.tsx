@@ -15,7 +15,21 @@ import {
 } from '../assets/AssetDatabase';
 import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
 import { getSceneSkyboxSettings } from '../model/SceneDocument';
-import { createSceneSkyboxFromAsset, findSkyboxAssetForSettings } from '../assets/skyboxAssets';
+import {
+  createSceneSkyboxFromAsset,
+  findOrphanedSkyboxForSettings,
+  findSkyboxAssetForSettings,
+  formatSkyboxSyncError,
+  formatSkyboxSyncProgressCount,
+  refreshCurrentSkyboxAfterProjectAssetsLoad,
+  type SkyboxSyncProgress,
+} from '../assets/skyboxAssets';
+import {
+  createSkyboxSyncController,
+  type SkyboxSyncApplyResult,
+  type SkyboxSyncController,
+  type SkyboxSyncControllerState,
+} from '../assets/skyboxSyncController';
 import { createImportedAssetIndexes, findImportedAssetForPackagePath } from '../assets/modelAssetRelink';
 import {
   BUILT_IN_MODEL_LIBRARY_ITEMS,
@@ -49,6 +63,10 @@ type ImportableProjectLibraryKey = 'model' | 'environment' | 'skybox';
 
 type LibraryStatusMap = Record<ImportableProjectLibraryKey, LibraryStatus | null>;
 
+type ProjectAssetsLoadResult =
+  | { ok: true; skyboxes: ProjectSkyboxAssetEntry[] }
+  | { ok: false; error: string };
+
 type DataPlatformModelSyncProgress = {
   runId: string;
   phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
@@ -78,6 +96,14 @@ type DataPlatformImageSyncApi = {
   retryDataPlatformImageSync?: () => Promise<boolean>;
 };
 
+type DataPlatformSkyboxSyncProgress = SkyboxSyncProgress;
+
+type DataPlatformSkyboxSyncApi = {
+  syncDataPlatformSkyboxes?: () => Promise<boolean>;
+  retryDataPlatformSkyboxSync?: () => Promise<boolean>;
+  onDataPlatformSkyboxSyncProgress?: (listener: (progress: unknown) => void) => () => void;
+};
+
 const DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS: Record<DataPlatformModelSyncProgress['phase'], string> = {
   querying: '查询模型',
   downloading: '下载模型',
@@ -104,6 +130,19 @@ function getDataPlatformImageSyncApi(): DataPlatformImageSyncApi {
   return (window.editorApi ?? {}) as DataPlatformImageSyncApi;
 }
 
+const DATA_PLATFORM_SKYBOX_SYNC_PHASE_LABELS: Record<DataPlatformSkyboxSyncProgress['phase'], string> = {
+  querying: '查询天空盒',
+  downloading: '下载天空盒',
+  validating: '校验天空盒',
+  promoting: '写入天空盒库',
+  completed: '同步完成',
+  failed: '同步失败',
+};
+
+function getDataPlatformSkyboxSyncApi(): DataPlatformSkyboxSyncApi {
+  return (window.editorApi ?? {}) as DataPlatformSkyboxSyncApi;
+}
+
 type ProjectPanelProps = {
   readOnly?: boolean;
 };
@@ -115,6 +154,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const updateSkyboxConfig = useEditorStore((state) => state.updateSkyboxConfig);
   const placeSkybox = useEditorStore((state) => state.placeSkybox);
   const sceneDocument = useEditorStore((state) => state.scene);
+  const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
   const currentSkybox = useMemo(() => getSceneSkyboxSettings(sceneDocument), [sceneDocument]);
   const currentEnvironment = useEditorStore((state) => state.scene.sceneSettings.environment);
   const createMesh = useEditorStore((state) => state.createMesh);
@@ -127,9 +167,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const consumeProjectAssetFocusRequest = useEditorStore((state) => state.consumeProjectAssetFocusRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
   const resourceCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
-  const currentSkyboxRef = useRef(currentSkybox);
   const currentEnvironmentRef = useRef(currentEnvironment);
   const projectAssetsLoadRequestRef = useRef(0);
+  const sceneSessionIdRef = useRef(sceneSessionId);
+  sceneSessionIdRef.current = sceneSessionId;
+  const skyboxSyncControllerRef = useRef<SkyboxSyncController | null>(null);
   const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshModelSyncRunIdRef = useRef<string | null>(null);
   const imageSyncCompletedDismissTimerRef = useRef<number | null>(null);
@@ -139,11 +181,27 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const [modelDeviceTypeFilter, setModelDeviceTypeFilter] = useState('');
   const [projectAssets, setProjectAssets] = useState<ProjectModelAssetEntry[]>([]);
   const [skyboxAssets, setSkyboxAssets] = useState<ProjectSkyboxAssetEntry[]>([]);
+  const [orphanedSkyboxAssets, setOrphanedSkyboxAssets] = useState<ProjectSkyboxAssetEntry[]>([]);
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
+  const [skyboxSyncContextBinding, setSkyboxSyncContextBinding] = useState(() => ({
+    sceneSessionId,
+    key: null as string | null,
+  }));
+  const skyboxSyncContextKey = skyboxSyncContextBinding.sceneSessionId === sceneSessionId
+    ? skyboxSyncContextBinding.key
+    : null;
   const [importingLibraryKey, setImportingLibraryKey] = useState<ImportableProjectLibraryKey | null>(null);
   const [isLoadingProjectAssets, setIsLoadingProjectAssets] = useState(false);
   const [libraryStatuses, setLibraryStatuses] = useState<LibraryStatusMap>({ model: null, environment: null, skybox: null });
+  const [skyboxSyncState, setSkyboxSyncState] = useState<SkyboxSyncControllerState>({
+    progress: null,
+    starting: false,
+    retrying: false,
+    reloadingAssets: false,
+    pendingRunId: null,
+    reloadError: null,
+  });
   const [modelSyncProgress, setModelSyncProgress] = useState<DataPlatformModelSyncProgress | null>(null);
   const [isRetryingModelSync, setIsRetryingModelSync] = useState(false);
   const [syncedImages, setSyncedImages] = useState<SyncedImageAssetEntry[]>([]);
@@ -158,6 +216,20 @@ export function ProjectPanel(props: ProjectPanelProps) {
     () => projectAssets.filter((asset) => asset.libraryKind === 'environment'),
     [projectAssets],
   );
+  const orphanedCurrentSkybox = useMemo(
+    () => currentSkybox
+      ? findOrphanedSkyboxForSettings(currentSkybox, orphanedSkyboxAssets)
+      : null,
+    [currentSkybox, orphanedSkyboxAssets],
+  );
+  const skyboxSyncProgress = skyboxSyncState.progress;
+  const isStartingSkyboxSync = skyboxSyncState.starting;
+  const isRetryingSkyboxSync = skyboxSyncState.retrying;
+  const isReloadingSkyboxAssets = skyboxSyncState.reloadingAssets;
+  const skyboxSyncReloadError = skyboxSyncState.reloadError;
+  const isSkyboxSyncActive = skyboxSyncProgress !== null
+    && skyboxSyncProgress.phase !== 'completed'
+    && skyboxSyncProgress.phase !== 'failed';
   const modelDeviceTypes = useMemo(
     () => createModelDeviceTypeOptions(modelAssets),
     [modelAssets],
@@ -275,66 +347,92 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }, [pushLog, requestEnvironmentApply]);
 
   useEffect(() => {
-    currentSkyboxRef.current = currentSkybox;
-  }, [currentSkybox]);
-
-  useEffect(() => {
     currentEnvironmentRef.current = currentEnvironment;
   }, [currentEnvironment]);
 
-  /** 用项目资源库中的稳定同名资产刷新当前天空盒路径，并保留场景级显示参数。 */
-  const refreshCurrentSkyboxFromAssets = useCallback((
+  /** 按当前场景身份用稳定 ID 重关联天空盒；只有命令实际生效或配置已相同时才消费同步完成。 */
+  const relinkCurrentSkyboxFromAssets = useCallback((
     assets: ProjectSkyboxAssetEntry[],
-  ): boolean => {
-    const activeSkybox = currentSkyboxRef.current;
-    if (!activeSkybox) return false;
+    expectedSceneId: string,
+  ): SkyboxSyncApplyResult => {
+    const beforeState = useEditorStore.getState();
+    if (beforeState.scene.id !== expectedSceneId) return 'blocked';
+    const activeSkybox = getSceneSkyboxSettings(beforeState.scene);
+    if (!activeSkybox) return 'not-found';
     const matchedAsset = findSkyboxAssetForSettings(activeSkybox, assets);
-    if (!matchedAsset) return false;
+    if (!matchedAsset) return 'not-found';
 
     try {
       const refreshedSkybox = createSceneSkyboxFromAsset(matchedAsset, activeSkybox);
-      if (JSON.stringify(refreshedSkybox) === JSON.stringify(activeSkybox)) return false;
+      if (JSON.stringify(refreshedSkybox) === JSON.stringify(activeSkybox)) return 'unchanged';
       updateSkyboxConfig(refreshedSkybox);
-      return true;
+      const afterState = useEditorStore.getState();
+      if (afterState.scene.id !== expectedSceneId) return 'blocked';
+      const appliedSkybox = getSceneSkyboxSettings(afterState.scene);
+      return JSON.stringify(appliedSkybox) === JSON.stringify(refreshedSkybox) ? 'applied' : 'blocked';
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = formatSkyboxSyncError(error);
       pushLog(`天空盒资源已更新，但当前场景自动刷新失败：${message}`);
-      return false;
+      return 'blocked';
     }
   }, [pushLog, updateSkyboxConfig]);
 
-  const loadProjectAssets = useCallback(async (refreshSceneAssets = false): Promise<boolean> => {
-    if (!window.editorApi?.listProjectAssets) return false;
+  /** 导入和显式资源刷新仍沿用既有命令路径，并只把实际修改计为刷新成功。 */
+  const refreshCurrentSkyboxFromAssets = useCallback((
+    assets: ProjectSkyboxAssetEntry[],
+  ): boolean => relinkCurrentSkyboxFromAssets(
+    assets,
+    useEditorStore.getState().scene.id,
+  ) === 'applied', [relinkCurrentSkyboxFromAssets]);
+
+  const loadProjectAssets = useCallback(async (refreshSceneAssets = false): Promise<ProjectAssetsLoadResult> => {
+    if (!window.editorApi?.listProjectAssets) {
+      return { ok: false, error: '加载项目资源库需要 Electron 桌面环境。' };
+    }
 
     const requestId = projectAssetsLoadRequestRef.current + 1;
+    const requestSceneSessionId = sceneSessionIdRef.current;
     projectAssetsLoadRequestRef.current = requestId;
     setIsLoadingProjectAssets(true);
 
     try {
       const result = await window.editorApi.listProjectAssets();
-      if (requestId !== projectAssetsLoadRequestRef.current) return false;
+      if (requestId !== projectAssetsLoadRequestRef.current) {
+        return { ok: false, error: '项目资源库加载请求已被较新的请求取代。' };
+      }
 
       const loadedSkyboxes = result.skyboxes ?? [];
       setProjectRoot(result.projectRoot);
+      setSkyboxSyncContextBinding({
+        sceneSessionId: requestSceneSessionId,
+        key: result.skyboxSyncContextKey ?? null,
+      });
       setProjectAssets(result.assets);
-      setSkyboxAssets(loadedSkyboxes);
+      setSkyboxAssets(result.skyboxes ?? []);
+      setOrphanedSkyboxAssets(result.orphanedSkyboxes ?? []);
 
       const totalAssetCount = result.assets.length + loadedSkyboxes.length;
       if (totalAssetCount > 0) {
         pushLog(`已加载项目资源库：${totalAssetCount} 个资产。`);
       }
 
-      refreshCurrentSkyboxFromAssets(loadedSkyboxes);
+      refreshCurrentSkyboxAfterProjectAssetsLoad(
+        refreshSceneAssets,
+        loadedSkyboxes,
+        refreshCurrentSkyboxFromAssets,
+      );
       if (refreshSceneAssets) {
         refreshModelInstancesFromAssets(result.assets.filter((asset) => asset.libraryKind === 'model'));
         await refreshCurrentEnvironmentFromAssets(result.assets);
       }
-      return true;
+      return { ok: true, skyboxes: loadedSkyboxes };
     } catch (error) {
-      if (requestId !== projectAssetsLoadRequestRef.current) return false;
-      const message = error instanceof Error ? error.message : String(error);
+      if (requestId !== projectAssetsLoadRequestRef.current) {
+        return { ok: false, error: '项目资源库加载请求已被较新的请求取代。' };
+      }
+      const message = formatSkyboxSyncError(error);
       pushLog(`加载项目资源库失败：${message}`);
-      return false;
+      return { ok: false, error: message };
     } finally {
       if (requestId === projectAssetsLoadRequestRef.current) {
         setIsLoadingProjectAssets(false);
@@ -358,12 +456,18 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }, [pushLog]);
 
   useEffect(() => {
+    setIsLoadingProjectAssets(false);
+    setProjectRoot(null);
+    setSkyboxSyncContextBinding({ sceneSessionId, key: null });
+    setProjectAssets([]);
+    setSkyboxAssets([]);
+    setOrphanedSkyboxAssets([]);
     void loadProjectAssets();
     void loadSyncedImages();
     return () => {
       projectAssetsLoadRequestRef.current += 1;
     };
-  }, [loadProjectAssets, loadSyncedImages]);
+  }, [loadProjectAssets, loadSyncedImages, sceneSessionId]);
 
   useEffect(() => {
     const dataPlatformModelSyncApi = getDataPlatformModelSyncApi();
@@ -387,7 +491,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         if (shouldRefreshSceneAssets) {
           lastSceneRefreshModelSyncRunIdRef.current = progress.runId;
           void loadProjectAssets(true).then((loaded) => {
-            if (!loaded && lastSceneRefreshModelSyncRunIdRef.current === progress.runId) {
+            if (!loaded.ok && lastSceneRefreshModelSyncRunIdRef.current === progress.runId) {
               lastSceneRefreshModelSyncRunIdRef.current = null;
             }
           });
@@ -406,6 +510,74 @@ export function ProjectPanel(props: ProjectPanelProps) {
       unsubscribe();
     };
   }, [loadProjectAssets, pushLog]);
+
+  useEffect(() => {
+    const controller = createSkyboxSyncController({
+      startSync: async () => {
+        const api = getDataPlatformSkyboxSyncApi();
+        if (!api.syncDataPlatformSkyboxes) {
+          throw new Error('同步数据中台天空盒需要 Electron 桌面环境。');
+        }
+        return api.syncDataPlatformSkyboxes();
+      },
+      retrySync: async () => {
+        const api = getDataPlatformSkyboxSyncApi();
+        if (!api.retryDataPlatformSkyboxSync) {
+          throw new Error('重试数据中台天空盒同步需要 Electron 桌面环境。');
+        }
+        return api.retryDataPlatformSkyboxSync();
+      },
+      reloadAssets: async () => {
+        const result = await loadProjectAssets(false);
+        if (!result.ok) throw new Error(result.error);
+        return result.skyboxes;
+      },
+      applyAssets: (assets, sceneId) => relinkCurrentSkyboxFromAssets(assets, sceneId),
+      onStateChange: setSkyboxSyncState,
+      onProgressLog: (progress) => {
+        const phaseLabel = DATA_PLATFORM_SKYBOX_SYNC_PHASE_LABELS[progress.phase];
+        const countLabel = formatSkyboxSyncProgressCount(progress);
+        const detail = progress.error || progress.message;
+        pushLog(`数据中台天空盒同步：${phaseLabel}${countLabel ? `（${countLabel}）` : ''}${detail ? `：${detail}` : ''}`);
+      },
+      schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      cancelSchedule: (handle) => window.clearTimeout(handle as number),
+      progressThrottleMs: 225,
+    });
+    skyboxSyncControllerRef.current = controller;
+    controller.setContext({
+      readOnly: Boolean(props.readOnly),
+      sceneId: sceneDocument.id,
+      contextKey: sceneSessionId,
+      syncContextKey: skyboxSyncContextKey,
+    });
+
+    const dataPlatformSkyboxSyncApi = getDataPlatformSkyboxSyncApi();
+    const unsubscribe = dataPlatformSkyboxSyncApi.onDataPlatformSkyboxSyncProgress?.((progress) => {
+      controller.receiveProgress(progress);
+    });
+
+    return () => {
+      unsubscribe?.();
+      controller.dispose();
+      if (skyboxSyncControllerRef.current === controller) skyboxSyncControllerRef.current = null;
+    };
+  }, [
+    loadProjectAssets,
+    pushLog,
+    relinkCurrentSkyboxFromAssets,
+    sceneSessionId,
+    skyboxSyncContextKey,
+  ]);
+
+  useEffect(() => {
+    skyboxSyncControllerRef.current?.setContext({
+      readOnly: Boolean(props.readOnly),
+      sceneId: sceneDocument.id,
+      contextKey: sceneSessionId,
+      syncContextKey: skyboxSyncContextKey,
+    });
+  }, [props.readOnly, sceneDocument.id, sceneSessionId, skyboxSyncContextKey]);
 
   useEffect(() => {
     const dataPlatformImageSyncApi = getDataPlatformImageSyncApi();
@@ -480,6 +652,24 @@ export function ProjectPanel(props: ProjectPanelProps) {
       window.clearTimeout(timeoutId);
     };
   }, [activeLibraryKey, focusedAssetId, filteredItems]);
+
+  async function handleSyncDataPlatformSkyboxes(): Promise<void> {
+    if (props.readOnly) return;
+    await skyboxSyncControllerRef.current?.start();
+  }
+
+  async function handleRetryDataPlatformSkyboxSync(): Promise<void> {
+    if (props.readOnly) return;
+    await skyboxSyncControllerRef.current?.retry();
+  }
+
+  async function handleReloadSkyboxAssets(): Promise<void> {
+    await skyboxSyncControllerRef.current?.retryAssetReload();
+  }
+
+  function handleDismissDataPlatformSkyboxSyncFailure(): void {
+    skyboxSyncControllerRef.current?.dismissFailure();
+  }
 
   function handleDismissDataPlatformModelSyncFailure(): void {
     if (modelSyncProgress?.phase !== 'failed') return;
@@ -686,7 +876,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
       }
       if (!result.importedAsset) throw new Error('主进程未返回有效的天空盒资产。');
 
-      setSkyboxAssets(result.skyboxes);
+      setSkyboxAssets(result.skyboxes ?? []);
+      setOrphanedSkyboxAssets(result.orphanedSkyboxes ?? []);
       setProjectRoot(result.projectRoot);
       const refreshedCurrentSkybox = refreshCurrentSkyboxFromAssets([result.importedAsset]);
       const projectSuffix = result.projectRoot ? `，已写入项目：${result.projectRoot}` : '';
@@ -695,7 +886,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       setLibraryStatus(libraryKind, { message, kind: 'info' });
       pushLog(message);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = formatSkyboxSyncError(error);
       const statusMessage = `导入天空盒失败：${message}`;
       setLibraryStatus(libraryKind, { message: statusMessage, kind: 'error' });
       pushLog(statusMessage);
@@ -748,10 +939,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
   function handleSkyboxAssetApply(asset: ProjectSkyboxAssetEntry): void {
     if (props.readOnly) return;
     try {
-      placeSkybox(createSceneSkyboxFromAsset(asset, currentSkyboxRef.current));
+      placeSkybox(createSceneSkyboxFromAsset(asset, currentSkybox));
       pushLog(`球形天空盒已放置并选中：${asset.displayName}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = formatSkyboxSyncError(error);
       pushLog(`天空盒配置无效，未更新场景：${message}`);
     }
   }
@@ -893,6 +1084,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
         : activeLibrary.key === 'skybox'
           ? '导入 HDR/EXR'
           : '导入模型文件夹';
+  const skyboxSyncPhaseLabel = skyboxSyncProgress
+    ? DATA_PLATFORM_SKYBOX_SYNC_PHASE_LABELS[skyboxSyncProgress.phase]
+    : null;
+  const skyboxSyncCountLabel = skyboxSyncProgress
+    ? formatSkyboxSyncProgressCount(skyboxSyncProgress)
+    : null;
+  const skyboxSyncMessage = skyboxSyncProgress?.error
+    || skyboxSyncProgress?.message
+    || '等待天空盒同步进度...';
   const modelSyncPhaseLabel = modelSyncProgress
     ? DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS[modelSyncProgress.phase]
     : null;
@@ -984,6 +1184,16 @@ export function ProjectPanel(props: ProjectPanelProps) {
             {importButtonLabel}
           </button>
         ) : null}
+        {activeLibrary.key === 'skybox' ? (
+          <button
+            className="library-import-button"
+            disabled={props.readOnly || isStartingSkyboxSync || isSkyboxSyncActive || isRetryingSkyboxSync}
+            onClick={() => void handleSyncDataPlatformSkyboxes()}
+            type="button"
+          >
+            {isStartingSkyboxSync ? '启动同步...' : isSkyboxSyncActive ? '同步中...' : '同步数据中台天空盒'}
+          </button>
+        ) : null}
         {activeLibrary.key === 'image' ? (
           <button
             className="library-import-button"
@@ -1058,6 +1268,56 @@ export function ProjectPanel(props: ProjectPanelProps) {
           );
         })}
       </div>
+
+      {activeLibrary.key === 'skybox' && orphanedCurrentSkybox ? (
+        <div className="library-sync-status library-sync-status-warning" role="status" aria-live="polite">
+          <div className="library-sync-status-heading">
+            <strong>资源已从数据中台删除</strong>
+          </div>
+          <p title={`天空盒“${orphanedCurrentSkybox.displayName}”（数据中台资源 ID：${orphanedCurrentSkybox.dataPlatformResourceId}）已从数据中台删除。当前场景继续使用本地兼容缓存，但不能用于新场景；现有场景显示不受影响，重新选择天空盒时需使用仍在资源库中的资源。`}>
+            天空盒“{orphanedCurrentSkybox.displayName}”（数据中台资源 ID：{orphanedCurrentSkybox.dataPlatformResourceId}）已从数据中台删除。
+            当前场景继续使用本地兼容缓存，但不能用于新场景；现有场景显示不受影响，重新选择天空盒时需使用仍在资源库中的资源。
+          </p>
+        </div>
+      ) : null}
+
+      {activeLibrary.key === 'skybox' && skyboxSyncProgress ? (
+        <div className={`library-sync-status library-sync-status-${skyboxSyncProgress.phase}`} role="status" aria-live="polite">
+          <div className="library-sync-status-heading">
+            <strong>{skyboxSyncPhaseLabel}</strong>
+            {skyboxSyncCountLabel ? <span>{skyboxSyncCountLabel}</span> : null}
+          </div>
+          <p>{skyboxSyncMessage}</p>
+          {skyboxSyncProgress.phase === 'failed' ? (
+            <div className="library-sync-status-actions">
+              {skyboxSyncReloadError ? (
+                <button
+                  disabled={isReloadingSkyboxAssets}
+                  onClick={() => void handleReloadSkyboxAssets()}
+                  type="button"
+                >
+                  {isReloadingSkyboxAssets ? '重新加载中...' : '重新加载资源库'}
+                </button>
+              ) : null}
+              <button
+                disabled={props.readOnly || isRetryingSkyboxSync || isReloadingSkyboxAssets}
+                onClick={() => void handleRetryDataPlatformSkyboxSync()}
+                type="button"
+              >
+                {isRetryingSkyboxSync ? '重试中...' : '重试同步'}
+              </button>
+              <button
+                aria-label="关闭天空盒同步失败提示"
+                className="library-sync-status-close-button"
+                onClick={handleDismissDataPlatformSkyboxSyncFailure}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {modelSyncProgress ? (
         <div className={`library-sync-status library-sync-status-${modelSyncProgress.phase}`} role="status" aria-live="polite">

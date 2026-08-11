@@ -218,15 +218,22 @@ export function createModelLibraryItems(modelAssets: AssetEntry[]): ImportedProj
   }));
 }
 
-/** 将项目天空盒资产转成无缩略图的格式化资源卡片。 */
+function formatSkyboxLibrarySubtitle(asset: ProjectSkyboxAssetEntry): string {
+  const sourceLabel = asset.source === 'data-platform' ? '数据中台' : '项目本地';
+  return `${sourceLabel} · ${asset.format.toUpperCase()} · ${formatSkyboxFileSize(asset.fileSizeBytes)}`;
+}
+
+/** 将 active 项目天空盒资产转成无缩略图的格式化资源卡片。 */
 export function createSkyboxLibraryItems(skyboxAssets: ProjectSkyboxAssetEntry[]): ImportedProjectLibraryItem[] {
-  return skyboxAssets.map((asset) => ({
-    id: asset.id,
-    name: asset.displayName,
-    icon: 'ring',
-    subtitle: `${asset.format.toUpperCase()} · ${formatSkyboxFileSize(asset.fileSizeBytes)}`,
-    asset,
-  }));
+  return skyboxAssets
+    .filter((asset) => asset.availability === 'active')
+    .map((asset) => ({
+      id: asset.id,
+      name: asset.displayName,
+      icon: 'ring',
+      subtitle: formatSkyboxLibrarySubtitle(asset),
+      asset,
+    }));
 }
 
 /** 判断资源库卡片是否对应可直接创建的内置对象。 */
@@ -269,7 +276,7 @@ export function getResourceCardSubtitle(item: ProjectLibraryItem, library: Proje
   if (item.subtitle) return item.subtitle;
   if (isImportedProjectLibraryItem(item)) {
     return item.asset.kind === 'skybox'
-      ? `${item.asset.format.toUpperCase()} · ${formatSkyboxFileSize(item.asset.fileSizeBytes)}`
+      ? formatSkyboxLibrarySubtitle(item.asset)
       : getImportedModelCardSubtitle(item.asset);
   }
   return library.label.replace(/库$/, '') || '资源';

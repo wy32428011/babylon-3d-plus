@@ -2342,8 +2342,7 @@ select {
 }
 
 .project-library .library-sync-status-heading strong,
-.project-library .library-sync-status-heading span,
-.project-library .library-sync-status p {
+.project-library .library-sync-status-heading span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2360,8 +2359,21 @@ select {
 }
 
 .project-library .library-sync-status p {
+  min-width: 0;
   margin: 0;
+  overflow-wrap: anywhere;
   color: #b9cfd2;
+  white-space: normal;
+}
+
+.project-library .library-sync-status-warning {
+  border-color: #80672f;
+  color: #fff0bd;
+  background: #332c1c;
+}
+
+.project-library .library-sync-status-warning .library-sync-status-heading strong {
+  color: #ffd978;
 }
 
 .project-library .library-sync-status-actions {
