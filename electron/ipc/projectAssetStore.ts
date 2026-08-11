@@ -531,6 +531,16 @@ export async function getRecentWorkspaces(): Promise<RecentWorkspacesResult> {
   };
 }
 
+export type RecentWorkspaceStateSnapshot = RecentWorkspaceIndex;
+
+export async function getRecentWorkspaceStateSnapshot(): Promise<RecentWorkspaceStateSnapshot> {
+  return normalizeRecentWorkspaceIndex(await readRecentWorkspaceIndex());
+}
+
+export async function restoreRecentWorkspaceStateSnapshot(snapshot: RecentWorkspaceStateSnapshot): Promise<void> {
+  await writeRecentWorkspaceIndex(normalizeRecentWorkspaceIndex(snapshot));
+}
+
 export async function rememberRecentProjectRoot(projectRoot: string, lastScenePath?: string): Promise<void> {
   const index = await readRecentWorkspaceIndex();
   await writeRecentWorkspaceIndex(upsertRecentProject(index, projectRoot, lastScenePath));
@@ -577,7 +587,6 @@ export async function commitRecentProjectActivation(projectRoot: string): Promis
   await ensureProjectDirectories(normalizedProjectRoot);
   authorizeProjectAssetRoots(normalizedProjectRoot);
   await persistCurrentProjectRoot(normalizedProjectRoot);
-  await rememberRecentProjectRoot(normalizedProjectRoot);
   setCurrentProjectRoot(normalizedProjectRoot);
 }
 
@@ -613,13 +622,20 @@ export async function validateRecentProjectRoot(projectRoot: string): Promise<st
 export async function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult> {
   const normalizedProjectRoot = await validateRecentProjectRoot(projectRoot);
   const snapshot = getProjectAssetStoreStateSnapshot();
+  const recentSnapshot = await getRecentWorkspaceStateSnapshot();
   setSharedProjectAssetRoot(null);
   setSharedProjectSkyboxRoot(null);
   try {
     await commitRecentProjectActivation(normalizedProjectRoot);
-    return await listProjectAssets();
+    const result = await listProjectAssets();
+    await rememberRecentProjectRoot(normalizedProjectRoot);
+    return result;
   } catch (error) {
-    await restoreProjectAssetStoreState(snapshot);
+    try {
+      await restoreProjectAssetStoreState(snapshot);
+    } finally {
+      await restoreRecentWorkspaceStateSnapshot(recentSnapshot);
+    }
     throw error;
   }
 }

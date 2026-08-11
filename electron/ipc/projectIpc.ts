@@ -20,10 +20,13 @@ import {
   assertRecentSceneFile,
   commitRecentProjectActivation,
   getProjectAssetStoreStateSnapshot,
+  getRecentWorkspaceStateSnapshot,
   getRecentWorkspaces,
   listProjectAssets,
+  rememberRecentProjectRoot,
   rememberRecentSceneFile,
   restoreProjectAssetStoreState,
+  restoreRecentWorkspaceStateSnapshot,
   removeRecentWorkspaceItem,
   selectCurrentProjectRootWithDialog,
   setSharedProjectAssetRoot,
@@ -82,6 +85,7 @@ export function registerProjectIpc(): void {
     const openRequest = validateOpenRecentProjectRequest(request);
     const projectRoot = await validateRecentProjectRoot(openRequest.projectRoot);
     const projectStateSnapshot = getProjectAssetStoreStateSnapshot();
+    const recentWorkspaceSnapshot = await getRecentWorkspaceStateSnapshot();
     const bindingSnapshot = getCurrentDataPlatformBinding();
     invalidateDataPlatformSkyboxSyncPrepareContext();
     setSharedProjectAssetRoot(null);
@@ -100,6 +104,7 @@ export function registerProjectIpc(): void {
       }
 
       const result = await listProjectAssets();
+      await rememberRecentProjectRoot(projectRoot);
       if (binding && workspaceRoot) {
         setCurrentDataPlatformBinding(projectRoot, binding);
         void syncDataPlatformSkyboxesForWorkspace(binding.baseUrl, workspaceRoot).catch((error) => {
@@ -111,10 +116,14 @@ export function registerProjectIpc(): void {
       try {
         await restoreProjectAssetStoreState(projectStateSnapshot);
       } finally {
-        if (bindingSnapshot) {
-          setCurrentDataPlatformBinding(bindingSnapshot.projectRoot, bindingSnapshot.metadata);
-        } else {
-          clearCurrentDataPlatformBinding();
+        try {
+          await restoreRecentWorkspaceStateSnapshot(recentWorkspaceSnapshot);
+        } finally {
+          if (bindingSnapshot) {
+            setCurrentDataPlatformBinding(bindingSnapshot.projectRoot, bindingSnapshot.metadata);
+          } else {
+            clearCurrentDataPlatformBinding();
+          }
         }
       }
       throw error;
