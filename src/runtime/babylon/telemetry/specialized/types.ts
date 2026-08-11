@@ -65,7 +65,6 @@ export function createCargoHandoffState(cargo: { root: TransformNode }): CargoHa
     progress: 0,
   };
 }
-export const CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS = 1.2;
 export const CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND = 180;
 export const CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND = 0.3;
 export const RGV_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND = 0.8;
@@ -197,10 +196,6 @@ export type StackerModelTelemetryState = {
   lastTargetKey: string | null;
 };
 
-export type ConveyorNodeBaseline = {
-  position: Vector3;
-};
-
 export type ConveyorModelTelemetryState = {
   cargoCode: string | null;
   /** 当前 task（归一化字符串）：刷出时盖到货物上，供全局接管匹配。 */
@@ -224,8 +219,6 @@ export type ConveyorModelTelemetryState = {
   /** 最近一次应用的快照 receivedAt：识别新消息到达并结束自驱；断流重放时保持不变。 */
   lastSnapshotReceivedAt: number;
   cargoTravelOffset: number;
-  motionOffsets: Map<string, number>;
-  nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;
 };
 
 export type ConveyorCargoRuntimeEntry = GeneratedCargoRuntimeEntry;

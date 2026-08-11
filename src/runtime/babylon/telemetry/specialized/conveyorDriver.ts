@@ -1,8 +1,7 @@
 import type { Scene } from '@babylonjs/core';
-import { Quaternion, TransformNode, Vector3 } from '@babylonjs/core';
+import { TransformNode, Vector3 } from '@babylonjs/core';
 import {
   clampNumber,
-  createLocalAxis,
   filterTopLevelMotionNodes,
   findModelNodes,
   getHorizontalModelAxis,
@@ -27,9 +26,7 @@ import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   type ConveyorCargoRuntimeEntry,
   type ConveyorMotionConfig,
-  type ConveyorNodeBaseline,
   CONVEYOR_CARGO_SIZE,
-  CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
   createCargoHandoffState,
   type GeneratedCargoRuntimeEntry,
@@ -61,39 +58,12 @@ export class ConveyorTelemetryDriver {
     return this.context.host;
   }
 
-  /** 对单条输送线应用滚筒/链条动作、货物占位和状态 metadata。 */
+  /** 对单条输送线应用货物占位/走行和状态 metadata；本体滚筒/链条不再驱动，仅维护货物运动。 */
   applyToModel(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     this.reportConveyorRuntimeState(snapshot);
     writeDeviceTelemetryMetadata(model, snapshot);
 
-    if (!snapshot.faulted) {
-      this.applyConveyorMotion(model, snapshot, deltaSeconds);
-    }
-
     this.applyConveyorCargoMotion(model, snapshot, deltaSeconds);
-  }
-
-  /** 根据模型脚本 dataDriven.motion 配置驱动 Conveyor 节点。 */
-  private applyConveyorMotion(
-    model: ModelRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot,
-    deltaSeconds: number,
-  ): void {
-    for (const config of readConveyorMotionConfigs(model)) {
-      const direction = this.readConveyorMotionDirection(snapshot, config);
-      if (direction === 0) continue;
-
-      const nodes = this.findConveyorMotionNodes(model, config);
-      if (nodes.length === 0) continue;
-
-      if (config.kind === 'rotate') {
-        const speed = this.readConveyorRotationSpeed(snapshot, config);
-        this.rotateConveyorNodes(nodes, config.axis, direction * speed * deltaSeconds);
-      } else {
-        const nextOffset = this.updateConveyorMotionOffset(model, config, direction * config.speed * deltaSeconds);
-        this.translateConveyorNodesFromBaseline(model, nodes, config.axis, nextOffset);
-      }
-    }
   }
 
   /**
@@ -122,7 +92,8 @@ export class ConveyorTelemetryDriver {
    * - 被推送方：cargoTravelOffset 置自身刷出端、按订阅方向自驱走行（断流期间由帧调度驱动，新消息到达恢复字段驱动）。
    * - 持有方完全被动：无订阅者时继续持有（clamp 在行程端点）；mode==2 且双光电无货时
    *   由 telemetryBinding.cargoAutoDispose（缺省不销毁，勾选才销毁）决定销毁或遗留（遗留箱等新 task 复用或被下游推送取走）。
-   * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向：
+   * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向，
+   * 取**模型本地坐标**（x/-x/z/-z，缺省 x），模型旋转后仍跟随本地轴：
    * 正转（=1）刷在轨迹起点向终点移动；反转（=2）刷在轨迹终点向起点移动。
    */
   private applyConveyorCargoMotion(
@@ -160,7 +131,7 @@ export class ConveyorTelemetryDriver {
       }
     }
 
-    // 货物走行与链条本体共用同一份 translate 配置（fields+actionMap+speed），避免链/货速度脱节。
+    // 货物走行的方向与速度取自首个非竖直 translate 配置（fields+actionMap+speed），缺省回退 movement_x。
     const translateConfig = this.findConveyorCargoTranslateConfig(model);
     const movementDirection = translateConfig
       ? this.readConveyorMotionDirection(snapshot, translateConfig)
@@ -190,7 +161,7 @@ export class ConveyorTelemetryDriver {
     const travelContext = this.resolveConveyorCargoTravelContext(model);
     const cargoAxialLength = CONVEYOR_CARGO_SIZE[travelContext.travelAxisName];
     const travelHalfRange = resolveConveyorCargoTravelHalfRange(travelContext.spanMeters ?? 0, cargoAxialLength);
-    const forwardSign = this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxis);
+    const forwardSign = this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxisName);
     // 刷出端由运行方向决定：正转刷在轨迹起点向终点移动，反转刷在轨迹终点向起点移动。
     const spawnOffsetForDirection = (direction: number): number => -direction * forwardSign * travelHalfRange;
 
@@ -381,7 +352,7 @@ export class ConveyorTelemetryDriver {
     const travelContext = this.resolveConveyorCargoTravelContext(model);
     const cargoAxialLength = CONVEYOR_CARGO_SIZE[travelContext.travelAxisName];
     const travelHalfRange = resolveConveyorCargoTravelHalfRange(travelContext.spanMeters ?? 0, cargoAxialLength);
-    const forwardSign = this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxis);
+    const forwardSign = this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxisName);
     return this.getConveyorCargoPosition(model, travelContext, -direction * forwardSign * (travelHalfRange + cargoAxialLength));
   }
 
@@ -448,7 +419,7 @@ export class ConveyorTelemetryDriver {
       travelContext.spanMeters ?? 0,
       CONVEYOR_CARGO_SIZE[travelContext.travelAxisName],
     );
-    const forwardSign = this.readConveyorTrajectoryForwardSign(subscriber, travelContext.travelAxis);
+    const forwardSign = this.readConveyorTrajectoryForwardSign(subscriber, travelContext.travelAxisName);
     subscriberState.cargoCode = CONVEYOR_CARGO_IDENTITY;
     subscriberState.cargoTravelOffset = -direction * forwardSign * travelHalfRange;
     subscriberState.pendingTask = null;
@@ -492,13 +463,6 @@ export class ConveyorTelemetryDriver {
     if (value !== null && value > 0) return 1;
     if (value !== null && value < 0) return -1;
     return 0;
-  }
-
-  /** 读取滚筒角速度，rotation 大于 3 时按度/秒处理，否则沿用模型脚本默认速度。 */
-  private readConveyorRotationSpeed(snapshot: DeviceTelemetrySnapshot, config: ConveyorMotionConfig): number {
-    const rotationSpeed = readNumberField(snapshot.fields, 'rotation');
-    const degreesPerSecond = rotationSpeed !== null && rotationSpeed > 3 ? rotationSpeed : config.speed;
-    return degreesPerSecond * Math.PI / 180;
   }
 
   /** 查找输送线 motion 声明的节点，优先精确名称，失败后按 fallbackPattern 或通用名称兜底。 */
@@ -546,60 +510,6 @@ export class ConveyorTelemetryDriver {
     } catch {
       return null;
     }
-  }
-
-  /** 按局部轴旋转滚筒节点，兼容 GLB 节点使用 rotationQuaternion 的情况。 */
-  private rotateConveyorNodes(nodes: TransformNode[], axis: 'x' | 'y' | 'z', radians: number): void {
-    if (Math.abs(radians) <= 0.000001) return;
-    const deltaRotation = Quaternion.RotationAxis(createLocalAxis(axis), radians);
-
-    for (const node of nodes) {
-      if (node.rotationQuaternion) {
-        node.rotationQuaternion = node.rotationQuaternion.multiply(deltaRotation);
-      } else {
-        node.rotation[axis] += radians;
-      }
-    }
-  }
-
-  /** 更新链条平移偏移，使用循环偏移避免节点长期漂移到模型外。 */
-  private updateConveyorMotionOffset(model: ModelRuntimeEntry, config: ConveyorMotionConfig, delta: number): number {
-    const previousOffset = model.conveyorTelemetry.motionOffsets.get(config.key) ?? 0;
-    const nextOffset = this.wrapConveyorOffset(previousOffset + delta);
-    model.conveyorTelemetry.motionOffsets.set(config.key, nextOffset);
-    return nextOffset;
-  }
-
-  /** 从首次驱动前的节点基线出发做局部轴平移，避免每帧累计误差。 */
-  private translateConveyorNodesFromBaseline(
-    model: ModelRuntimeEntry,
-    nodes: TransformNode[],
-    axis: 'x' | 'y' | 'z',
-    offset: number,
-  ): void {
-    const localOffset = createLocalAxis(axis).scale(offset);
-    for (const node of filterTopLevelMotionNodes(nodes)) {
-      const baseline = this.getConveyorNodeBaseline(model, node);
-      node.position = baseline.position.add(localOffset);
-    }
-  }
-
-  /** 读取输送线节点基线，模型重新加载或脚本变化时会被 resetConveyorTelemetryState 清空。 */
-  private getConveyorNodeBaseline(model: ModelRuntimeEntry, node: TransformNode): ConveyorNodeBaseline {
-    const existing = model.conveyorTelemetry.nodeBaselines.get(node);
-    if (existing) return existing;
-
-    const baseline = { position: node.position.clone() };
-    model.conveyorTelemetry.nodeBaselines.set(node, baseline);
-    return baseline;
-  }
-
-  /** 把连续偏移约束在一个短循环内，适合链条和货物的运行时视觉表现。 */
-  private wrapConveyorOffset(value: number): number {
-    if (!Number.isFinite(value)) return 0;
-    const loop = CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS;
-    const halfLoop = loop / 2;
-    return ((((value + halfLoop) % loop) + loop) % loop) - halfLoop;
   }
 
   /** 创建或复用输送线运行时货物；可视模板不写入场景文档。 */
@@ -660,7 +570,7 @@ export class ConveyorTelemetryDriver {
     return JSON.stringify([assetCode, containerCode]);
   }
 
-  /** 货箱行程上下文：支撑中心、竖直轴、行走轴与行走跨度，供偏移回绕和定位共用一份包围盒计算。 */
+  /** 货箱行程上下文：支撑中心、竖直轴、行走轴与行走跨度，供货物定位与探测点共用一份包围盒计算。 */
   private resolveConveyorCargoTravelContext(model: ModelRuntimeEntry): {
     center: Vector3;
     upAxis: Vector3;
@@ -696,7 +606,7 @@ export class ConveyorTelemetryDriver {
       .add(travelContext.travelAxis.scale(travelOffset));
   }
 
-  /** 首个非竖直轴的 translate 配置：货物行走轴、速度与方向统一跟随它，与链条本体同源。 */
+  /** 首个非竖直轴的 translate 配置：货物行走轴、速度与方向统一跟随它。 */
   private findConveyorCargoTranslateConfig(model: ModelRuntimeEntry): ConveyorMotionConfig | null {
     return readConveyorMotionConfigs(model).find((config) => config.kind === 'translate' && config.axis !== 'y') ?? null;
   }
@@ -707,19 +617,15 @@ export class ConveyorTelemetryDriver {
   }
 
   /**
-   * 轨迹方向（movement_x 正转时货物运动的世界方向）与行走轴世界向量的对齐符号。
-   * 同向返回 1：正转时偏移量沿行走轴正向增加；反向返回 -1。
+   * 轨迹方向（movement_x 正转时货物运动方向）与行走轴的对齐符号，取**模型本地坐标**：
+   * trajectoryDirection 的轴与行走轴名一致时按其正负号返回 ±1；轴向不一致（配置缺省/错配）回退 1。
+   * 同向返回 1：正转时偏移量沿行走轴正向增加；反向返回 -1。模型整体旋转不影响判定。
    */
-  private readConveyorTrajectoryForwardSign(model: ModelRuntimeEntry, travelAxisWorld: Vector3): 1 | -1 {
+  private readConveyorTrajectoryForwardSign(model: ModelRuntimeEntry, travelAxisName: 'x' | 'z'): 1 | -1 {
     const direction = model.telemetryBinding?.trajectoryDirection ?? 'x';
-    const world = direction === '-x'
-      ? new Vector3(-1, 0, 0)
-      : direction === 'z'
-        ? new Vector3(0, 0, 1)
-        : direction === '-z'
-          ? new Vector3(0, 0, -1)
-          : new Vector3(1, 0, 0);
-    return Vector3.Dot(world, travelAxisWorld) >= 0 ? 1 : -1;
+    const negative = direction.startsWith('-');
+    const axisName = negative ? direction.slice(1) : direction;
+    return axisName === travelAxisName ? (negative ? -1 : 1) : 1;
   }
 
   /** 对输送线状态和故障做节流日志，实时字段仍完整写入 metadata。 */

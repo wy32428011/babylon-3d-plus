@@ -233,7 +233,7 @@ export function readConveyorActionMap(rawActionMap: unknown): Record<string, num
   return actionMap;
 }
 
-/** 创建输送线运行时状态，所有运动偏移和货物占位只保存在内存。 */
+/** 创建输送线运行时状态，货物占位只保存在内存。 */
 export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
   return {
     cargoCode: null,
@@ -248,12 +248,10 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     selfDriveDirection: 0,
     lastSnapshotReceivedAt: 0,
     cargoTravelOffset: 0,
-    motionOffsets: new Map(),
-    nodeBaselines: new Map(),
   };
 }
 
-/** 模型脚本或资产编号变化后重置输送线基线，避免旧节点偏移污染新模型。 */
+/** 模型脚本或资产编号变化后重置输送线基线，避免旧状态污染新模型。 */
 export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.cargoCode = null;
   model.conveyorTelemetry.currentTask = null;
@@ -267,8 +265,6 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.selfDriveDirection = 0;
   model.conveyorTelemetry.lastSnapshotReceivedAt = 0;
   model.conveyorTelemetry.cargoTravelOffset = 0;
-  model.conveyorTelemetry.motionOffsets.clear();
-  model.conveyorTelemetry.nodeBaselines.clear();
 }
 
 /** 创建 stacker 遥测运行态，所有偏移都只保存在内存中。 */

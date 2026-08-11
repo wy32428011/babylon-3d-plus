@@ -58,6 +58,10 @@ type HarnessDeviceConfig = {
   stacker?: boolean;
   /** 世界包围盒 x 方向半径（缺省 2m，span 4m）。 */
   halfSpanX?: number;
+  /** 模型本地绕 Y 轴旋转（弧度）：验证 trajectoryDirection 的模型本地坐标语义。 */
+  rotationY?: number;
+  /** telemetryBinding.trajectoryDirection（x/-x/z/-z，模型本地坐标）。 */
+  trajectoryDirection?: string;
 };
 
 /** 多设备 harness：共享货物表与 collectModels 视图，帧函数镜像 facade（applyToModel 后执行推送扫描）。 */
@@ -70,9 +74,11 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
 
   for (const [assetCode, config] of Object.entries(layout)) {
     const root = new TransformNode(`${assetCode}_root`, scene);
+    if (config.rotationY !== undefined) root.rotation.y = config.rotationY;
     const binding: Record<string, unknown> = {};
     if (config.autoDispose !== undefined) binding.cargoAutoDispose = config.autoDispose;
     if (config.origin !== undefined) binding.cargoOriginDevice = config.origin;
+    if (config.trajectoryDirection !== undefined) binding.trajectoryDirection = config.trajectoryDirection;
     const model = {
       assetCode,
       root,
@@ -653,4 +659,39 @@ test('帧调度契约：applyWhenStale 仅自驱，帧尾无条件执行推送�
     /this\.conveyorDriver\.pushCargoToProbeSubscribers\(\)/,
     'applyFrame 帧尾必须执行探测点订阅推送扫描',
   );
+});
+
+test('trajectoryDirection 为模型本地坐标：模型旋转 180° 后正转仍从本地轨迹起点刷出', () => {
+  const h = makeHarness({
+    CV1: { centerX: 0, origin: true, rotationY: Math.PI, trajectoryDirection: 'x' },
+  });
+  try {
+    // 本地 x 轴经 180° 旋转后指向世界 −x；trajectoryDirection='x' 按本地语义
+    // 正转刷出端为本地轨迹起点 → 世界 +x 端（若按世界语义会刷在世界 −x 端）。
+    h.apply('CV1', { task: 7, movement_x: 1 });
+    const cargo = onlyCargo(h.state);
+    const spawnX = cargo.root.position.x;
+    assert.ok(spawnX > HALF_RANGE - 0.1,
+      `正转必须从世界 +x 端（本地轨迹起点）刷出，实际 x=${spawnX}`);
+
+    // 继续走行：货物沿本地轨迹方向推进，即世界 −x 方向
+    h.apply('CV1', { task: 7, movement_x: 1 }, 0.1, 10);
+    const laterX = cargo.root.position.x;
+    assert.ok(laterX < spawnX, `货物必须向世界 −x 方向走行：${spawnX} → ${laterX}`);
+
+    // 对照：trajectoryDirection='-x' 时刷出端翻到世界 −x 端
+    const h2 = makeHarness({
+      CV1: { centerX: 0, origin: true, rotationY: Math.PI, trajectoryDirection: '-x' },
+    });
+    try {
+      h2.apply('CV1', { task: 7, movement_x: 1 });
+      const cargo2 = onlyCargo(h2.state);
+      assert.ok(cargo2.root.position.x < -(HALF_RANGE - 0.1),
+        `trajectoryDirection='-x' 必须从世界 −x 端刷出，实际 x=${cargo2.root.position.x}`);
+    } finally {
+      h2.dispose();
+    }
+  } finally {
+    h.dispose();
+  }
 });

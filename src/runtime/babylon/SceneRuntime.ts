@@ -4312,10 +4312,10 @@ export class SceneRuntime {
     line.parent = root;
     line.isPickable = false;
 
-    const worldDir = this.readTrajectoryWorldDirection(entity.components.telemetryBinding?.trajectoryDirection ?? 'x');
-    const worldLineDir = normalizeVector(context.travelAxisWorld, worldDir);
+    // trajectoryDirection 为模型本地坐标：与本地行走轴点积判定箭头/流光是否翻转。
+    const trajectoryDirLocal = this.readTrajectoryLocalDirection(entity.components.telemetryBinding?.trajectoryDirection ?? 'x');
     const localDir = normalizeVector(end.subtract(start), createLocalAxis(context.travelAxisName));
-    const flip = Vector3.Dot(worldDir, worldLineDir) < 0;
+    const flip = Vector3.Dot(trajectoryDirLocal, localDir) < 0;
     const arrowDir = flip ? localDir.scale(-1) : localDir;
     const dot = Vector3.Dot(new Vector3(1, 0, 0), arrowDir);
     const cross = Vector3.Cross(new Vector3(1, 0, 0), arrowDir);
@@ -4404,7 +4404,8 @@ export class SceneRuntime {
     });
   }
 
-  private readTrajectoryWorldDirection(direction: string): Vector3 {
+  /** trajectoryDirection 配置值转模型本地坐标向量（与 conveyorDriver 的本地语义一致）。 */
+  private readTrajectoryLocalDirection(direction: string): Vector3 {
     if (direction === '-x') return new Vector3(-1, 0, 0);
     if (direction === 'z') return new Vector3(0, 0, 1);
     if (direction === '-z') return new Vector3(0, 0, -1);
