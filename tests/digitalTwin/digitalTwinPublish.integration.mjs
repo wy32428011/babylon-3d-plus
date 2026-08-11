@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
+import { statSync, utimesSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { app } from 'electron';
@@ -23,6 +24,8 @@ const MISMATCHED_PREPARE_REQUEST_ID = 'mismatched-prepare-response';
 const RUNTIME_CONFIG_FAILURE_REQUEST_ID = 'runtime-config-save-failure';
 const INDEXED_SKYBOX_REQUEST_ID = 'skybox-indexed-active';
 const ORPHANED_SKYBOX_REQUEST_ID = 'skybox-indexed-orphaned';
+const SOURCE_SKYBOX_TOCTOU_REQUEST_ID = 'skybox-source-toctou';
+const DIST_SKYBOX_TOCTOU_REQUEST_ID = 'skybox-dist-toctou';
 const PRIMARY_SKYBOX_ID = '2054201280000000401';
 const UNUSED_SKYBOX_ID = '2054201280000000402';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -131,6 +134,17 @@ function createLocalSkyboxSceneContent(sourcePath) {
 
 async function readZipEntries(buffer) {
   const directory = await unzipper.Open.buffer(buffer);
+  const entries = new Map();
+  for (const entry of directory.files) {
+    if (entry.type !== 'File') continue;
+    entries.set(entry.path.replace(/\\/g, '/'), await entry.buffer());
+  }
+  return entries;
+}
+
+
+async function readZipFileEntries(filePath) {
+  const directory = await unzipper.Open.file(filePath);
   const entries = new Map();
   for (const entry of directory.files) {
     if (entry.type !== 'File') continue;
@@ -861,6 +875,27 @@ async function run() {
     const expectedSkyboxPath = `project/assets/skyboxes/Skybox-${PRIMARY_SKYBOX_ID}/skybox.hdr`;
     const expectedSkyboxUrl = `editor-asset://local/${encodeURIComponent(expectedSkyboxPath)}`;
     const expectedSkyboxPackageUrl = `editor-asset://local/${encodeURIComponent(`project/assets/skyboxes/Skybox-${PRIMARY_SKYBOX_ID}/`)}`;
+    const expectedSourceSkyboxPath = `Assets/Skyboxes/DataPlatform/Skybox-${PRIMARY_SKYBOX_ID}/skybox.hdr`;
+    const expectedSourceSkyboxPackagePath = `Assets/Skyboxes/DataPlatform/Skybox-${PRIMARY_SKYBOX_ID}`;
+    const expectedSourceSkyboxUrl = `editor-asset://local/${encodeURIComponent(expectedSourceSkyboxPath)}`;
+    const assertOfflineSourceSkyboxPackage = (sourceEntries, label) => {
+      const sourceSkyboxPaths = [...sourceEntries.keys()].filter((entryPath) => (
+        entryPath.startsWith('Assets/Skyboxes/DataPlatform/') && /\.(?:hdr|exr)$/i.test(entryPath)
+      ));
+      assert.deepEqual(sourceSkyboxPaths, [expectedSourceSkyboxPath], `${label}只能包含实际引用的 SOURCE 天空盒。`);
+      assert.deepEqual(sourceEntries.get(expectedSourceSkyboxPath), primarySkyboxData);
+      assert.equal(sourceEntries.has(`Assets/Skyboxes/DataPlatform/Skybox-${UNUSED_SKYBOX_ID}/skybox.hdr`), false);
+      const sourceScene = JSON.parse(sourceEntries.get('Scenes/main.scene.json').toString('utf8'));
+      const sourceSettingsSkybox = sourceScene.scene.sceneSettings.skybox;
+      const sourceEntitySkybox = sourceScene.scene.entities['skybox-reference'].components.skybox;
+      for (const sourceSkybox of [sourceSettingsSkybox, sourceEntitySkybox]) {
+        assert.equal(sourceSkybox.packagePath, expectedSourceSkyboxPackagePath);
+        assert.equal(sourceSkybox.sourcePath, expectedSourceSkyboxPath);
+        assert.equal(sourceSkybox.sourceUrl, expectedSourceSkyboxUrl);
+        assert.equal(sourceSkybox.dataPlatformResourceId, PRIMARY_SKYBOX_ID);
+      }
+      assert.equal(JSON.stringify(sourceScene).includes(mock.baseUrl), false, `${label}场景不得保留数据中台天空盒 URL。`);
+    };
     const prepareSkyboxScene = (content) => deploymentSceneModule.prepareDeploymentExport(
       content,
       '天空盒发布预检',
@@ -894,6 +929,8 @@ async function run() {
       () => undefined,
     );
     assert.equal(indexedSkyboxResult.status, 'completed');
+    const indexedSourceEntries = await readZipEntries(mock.getUploadedPackage(INDEXED_SKYBOX_REQUEST_ID, 'SOURCE'));
+    assertOfflineSourceSkyboxPackage(indexedSourceEntries, 'SOURCE 发布包');
     const indexedDistEntries = await readZipEntries(mock.getUploadedPackage(INDEXED_SKYBOX_REQUEST_ID, 'DIST'));
     const packagedSkyboxPaths = [...indexedDistEntries.keys()].filter((entryPath) => (
       entryPath.startsWith('project/assets/skyboxes/') && /\.(?:hdr|exr)$/i.test(entryPath)
@@ -921,6 +958,69 @@ async function run() {
       .join('\n');
     assert.equal(viewerText.includes(mock.baseUrl), false, 'Viewer 产物不得保留数据中台天空盒 URL。');
 
+    const toctouSkyboxData = createHdrFixture('primary-remote', 63);
+    assert.equal(toctouSkyboxData.length, primarySkyboxData.length);
+    const createStableSkyboxSnapshot = async () => {
+      const fixedTime = new Date(Math.floor(Date.now() / 1000) * 1000);
+      utimesSync(primarySkyboxPath, fixedTime, fixedTime);
+      return stat(primarySkyboxPath);
+    };
+    const overwriteSkyboxPreservingSnapshot = (snapshot) => {
+      writeFileSync(primarySkyboxPath, toctouSkyboxData);
+      utimesSync(primarySkyboxPath, snapshot.atime, snapshot.mtime);
+      const replacedStat = statSync(primarySkyboxPath);
+      assert.equal(replacedStat.size, snapshot.size);
+      assert.equal(replacedStat.mtimeMs, snapshot.mtimeMs, 'TOCTOU 测试必须保持预检 mtime 快照。');
+    };
+
+    await writeFile(primarySkyboxPath, primarySkyboxData);
+    await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('active'));
+    await resetSkyboxPublishState();
+    const sourceSnapshot = await createStableSkyboxSnapshot();
+    const sourceToctouPhases = [];
+    let sourceReplaced = false;
+    await assert.rejects(
+      publishModule.publishDigitalTwin(
+        createPublishRequest(SOURCE_SKYBOX_TOCTOU_REQUEST_ID, indexedSkyboxSceneContent),
+        new AbortController().signal,
+        (progress) => {
+          sourceToctouPhases.push(progress.phase);
+          if (!sourceReplaced && progress.phase === 'source-package' && progress.detail === '正在复制源工程场景…') {
+            sourceReplaced = true;
+            overwriteSkyboxPreservingSnapshot(sourceSnapshot);
+          }
+        },
+      ),
+      /SHA-256|完整性|最终复制/,
+    );
+    assert.equal(sourceReplaced, true);
+    assert.equal(sourceToctouPhases.includes('dist-package'), false, 'SOURCE 最终复制校验必须先于 DIST 构建失败。');
+    assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
+    await expectFileMissing(path.join(app.getPath('temp'), 'zending-digital-twin-publish', SOURCE_SKYBOX_TOCTOU_REQUEST_ID));
+
+    await writeFile(primarySkyboxPath, primarySkyboxData);
+    await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('active'));
+    await resetSkyboxPublishState();
+    const distSnapshot = await createStableSkyboxSnapshot();
+    let distReplaced = false;
+    await assert.rejects(
+      publishModule.publishDigitalTwin(
+        createPublishRequest(DIST_SKYBOX_TOCTOU_REQUEST_ID, indexedSkyboxSceneContent),
+        new AbortController().signal,
+        (progress) => {
+          if (!distReplaced && progress.phase === 'dist-package' && progress.detail === '正在复制场景资源并计算哈希…') {
+            distReplaced = true;
+            overwriteSkyboxPreservingSnapshot(distSnapshot);
+          }
+        },
+      ),
+      /SHA-256|完整性|最终复制/,
+    );
+    assert.equal(distReplaced, true);
+    assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
+    await expectFileMissing(path.join(app.getPath('temp'), 'zending-digital-twin-publish', DIST_SKYBOX_TOCTOU_REQUEST_ID));
+
+    await writeFile(primarySkyboxPath, primarySkyboxData);
     await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('orphaned'));
     await resetSkyboxPublishState();
     const orphanedSkyboxResult = await publishModule.publishDigitalTwin(
@@ -1143,7 +1243,7 @@ async function run() {
     mock.setRemoteStatus(createRemoteStatus({ latestVersionId: NEW_VERSION_ID, latestVersionNumber: 2 }));
     mock.resetRequests();
     const versionConflictResult = await publishModule.publishDigitalTwin(
-      createPublishRequest(VERSION_CONFLICT_REQUEST_ID, sceneContent),
+      createPublishRequest(VERSION_CONFLICT_REQUEST_ID, indexedSkyboxSceneContent),
       new AbortController().signal,
       () => undefined,
     );
@@ -1152,6 +1252,8 @@ async function run() {
     assert.ok(versionConflictResult.conflictCopyPath);
     assert.ok(versionConflictResult.conflictCopyPath.startsWith(path.join(workspaceRoot, 'Conflicts', PROJECT_ID)));
     assert.equal((await readFile(versionConflictResult.conflictCopyPath)).subarray(0, 2).toString('ascii'), 'PK');
+    const versionConflictEntries = await readZipFileEntries(versionConflictResult.conflictCopyPath);
+    assertOfflineSourceSkyboxPackage(versionConflictEntries, '版本冲突副本');
     assert.equal(mock.requests.some((request) => request.path.endsWith('/runtime-config/save')), false);
     assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
 
@@ -1257,6 +1359,10 @@ async function run() {
         'project-status-identity-mismatch-rejected',
         'prepare-task-identity-mismatch-rejected',
         'indexed-skybox-offline-package',
+        'indexed-skybox-source-offline-package',
+        'indexed-skybox-conflict-copy-offline',
+        'source-skybox-final-copy-integrity',
+        'dist-skybox-final-copy-integrity',
         'indexed-skybox-reference-deduplication',
         'unreferenced-indexed-skybox-excluded',
         'orphaned-skybox-cache-warning',

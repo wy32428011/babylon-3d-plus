@@ -7,6 +7,8 @@ import { createRequire } from 'node:module';
 import { buildDigitalTwinSourcePackage } from '../../electron/ipc/digitalTwinSourcePackage.ts';
 
 const require = createRequire(import.meta.url);
+const NO_SKYBOX_CACHE = { getSharedProjectSkyboxRoot: () => null };
+
 const unzipper = require('unzipper') as { Open: { file: (filePath: string) => Promise<{ files: Array<{ path: string; buffer: () => Promise<Buffer> }> }> } };
 
 test('源工程包保留多场景且只复制场景实际引用的共享资源', async () => {
@@ -57,6 +59,7 @@ test('源工程包保留多场景且只复制场景实际引用的共享资源',
       signal: new AbortController().signal,
       isPlatformImageReference: () => false,
       findSyncedImageForReference: async () => null,
+      skyboxCacheDependencies: NO_SKYBOX_CACHE,
     });
 
     assert.equal(result.sceneCount, 2);
@@ -110,6 +113,7 @@ test('源工程包拒绝任一场景携带旧 Fetch API Key', async () => {
         signal: new AbortController().signal,
         isPlatformImageReference: () => false,
         findSyncedImageForReference: async () => null,
+      skyboxCacheDependencies: NO_SKYBOX_CACHE,
       }),
       /Fetch API Key/,
     );
@@ -164,6 +168,7 @@ test('数字孪生源工程包按发布策略剔除 CAD 引用且不读取缺失
       signal: new AbortController().signal,
       isPlatformImageReference: () => false,
       findSyncedImageForReference: async () => null,
+      skyboxCacheDependencies: NO_SKYBOX_CACHE,
       skipCadReferences: true,
     });
 

@@ -26,6 +26,7 @@ import {
   type DigitalTwinProjectStatus,
 } from './digitalTwinUploadClient.js';
 import { rememberRecentSceneFile } from './projectAssetStore.js';
+import { createDeploymentSkyboxValidationCache, loadDeploymentSkyboxCacheContext } from './deploymentSkyboxCache.js';
 import {
   buildDigitalTwinRuntimeConfigSavePayload,
   createDefaultDigitalTwinAllowedParentOrigins,
@@ -131,6 +132,8 @@ export async function publishDigitalTwin(
   const warnings: string[] = [];
 
   try {
+    const skyboxCacheContext = await loadDeploymentSkyboxCacheContext(signal);
+    const skyboxValidationCache = createDeploymentSkyboxValidationCache();
     emit(onProgress, validated.requestId, 'source-package', '正在生成多场景源工程包…', 6);
     sourcePackage = await buildDigitalTwinSourcePackage({
       projectRoot: current.projectRoot,
@@ -145,6 +148,8 @@ export async function publishDigitalTwin(
         resourceRevision: current.metadata.resourceRevision,
       },
       signal,
+      skyboxCacheContext,
+      skyboxValidationCache,
       skipCadReferences: true,
       isPlatformImageReference,
       findSyncedImageForReference,
@@ -153,6 +158,7 @@ export async function publishDigitalTwin(
         emit(onProgress, validated.requestId, 'source-package', detail, 6 + ratio * 22);
       },
     });
+    appendUniqueWarnings(warnings, sourcePackage.warnings);
 
     if (context.versionConflict) {
       const conflictCopyPath = await preserveConflictPackage(workspaceRoot, current.metadata.projectId, sourcePackage.filePath, 'version-conflict');
@@ -160,6 +166,7 @@ export async function publishDigitalTwin(
         errorCode: 'DIGITAL_TWIN_VERSION_CONFLICT',
         message: '远端数字孪生工程已经产生新版本，当前源工程已另存为冲突副本，请重新打开最新工程。',
         conflictCopyPath,
+        warnings,
       });
     }
 
@@ -170,6 +177,8 @@ export async function publishDigitalTwin(
       sceneContent: validated.sceneContent,
       outputRoot: taskRoot,
       signal,
+      skyboxCacheContext,
+      skyboxValidationCache,
       onProgress: (detail, percent) => emit(
         onProgress,
         validated.requestId,
@@ -178,7 +187,7 @@ export async function publishDigitalTwin(
         30 + (Math.max(0, Math.min(100, percent)) / 100) * 18,
       ),
     });
-    warnings.push(...distPackage.warnings);
+    appendUniqueWarnings(warnings, distPackage.warnings);
     const resourceIds = collectDigitalTwinResourceIds(sourcePackage.sceneContents);
 
     emit(onProgress, validated.requestId, 'prepare', '正在创建数据中台发布任务…', 50);
@@ -494,6 +503,12 @@ function createTerminalResult(
     warnings: [],
     ...patch,
   };
+}
+
+function appendUniqueWarnings(target: string[], additions: readonly string[]): void {
+  for (const warning of additions) {
+    if (!target.includes(warning)) target.push(warning);
+  }
 }
 
 function emit(

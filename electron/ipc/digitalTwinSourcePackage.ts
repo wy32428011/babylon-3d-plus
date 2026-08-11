@@ -1,8 +1,29 @@
 import { ZipArchive } from 'archiver';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { SyncedImageAssetEntry } from '../types.js';
+import type { DeploymentCopyFile } from './deploymentExportFileSystem.js';
+import type {
+  DeploymentSkyboxCacheDependencies,
+  DeploymentSkyboxCacheContext,
+  DeploymentSkyboxValidationCache,
+  ResolvedDeploymentSkyboxReference,
+} from './deploymentSkyboxCache.js';
+
+const require = createRequire(import.meta.url);
+const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
+type DeploymentExportFileSystemModule = typeof import('./deploymentExportFileSystem.js');
+type DeploymentSkyboxCacheModule = typeof import('./deploymentSkyboxCache.js');
+const { copyDeploymentFiles } = require(`./deploymentExportFileSystem${runtimeExtension}`) as DeploymentExportFileSystemModule;
+const {
+  createDataPlatformSkyboxIntegrityLabel,
+  createDataPlatformSkyboxOrphanedWarning,
+  createDeploymentSkyboxValidationCache,
+  loadDeploymentSkyboxCacheContext,
+  resolveDeploymentSkyboxReference,
+} = require(`./deploymentSkyboxCache${runtimeExtension}`) as DeploymentSkyboxCacheModule;
 
 const MAX_SCENE_FILES = 1_000;
 const MAX_SCENE_BYTES = 64 * 1024 * 1024;
@@ -13,6 +34,9 @@ const PATH_KEYS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbna
 const URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl']);
 const PATH_ARRAY_KEYS = new Set(['scriptPaths']);
 const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
+const STABLE_SKYBOX_PATH_FIELDS = new Set(['packagePath', 'sourcePath', 'sourceUrl']);
+
+type PlainObject = Record<string, unknown>;
 
 export type DigitalTwinSourceManifestInput = {
   projectId: string;
@@ -33,6 +57,11 @@ export type BuildDigitalTwinSourcePackageOptions = {
   /** 数据中台图片引用判定与本地解析注入，避免打包模块直接依赖同步模块。 */
   isPlatformImageReference: (value: string) => boolean;
   findSyncedImageForReference: (editorRoots: readonly string[], reference: string) => Promise<SyncedImageAssetEntry | null>;
+  /** 同一次发布在 SOURCE/DIST 间复用的严格索引上下文与完整校验 Promise。 */
+  skyboxCacheContext?: DeploymentSkyboxCacheContext;
+  skyboxValidationCache?: DeploymentSkyboxValidationCache;
+  /** 仅供测试注入共享缓存边界与完整校验依赖。 */
+  skyboxCacheDependencies?: Partial<DeploymentSkyboxCacheDependencies>;
   onProgress?: (detail: string, completedFiles: number, totalFiles: number) => void;
 };
 
@@ -47,6 +76,7 @@ export type DigitalTwinSourcePackageResult = {
   resourceFileCount: number;
   manifestJson: string;
   sceneContents: string[];
+  warnings: string[];
 };
 
 type SceneSnapshot = {
@@ -57,11 +87,13 @@ type SceneSnapshot = {
   name: string;
   size: number;
   sha256: string;
+  parsed: PlainObject;
 };
 
 type ResourceBundle = {
   sourcePath: string;
   destinationRelativePath: string;
+  copyFile?: DeploymentCopyFile;
 };
 
 /** 数据中台同步图片在源工程中的便携资源映射，reference 为场景内稳定引用。 */
@@ -90,6 +122,10 @@ export async function buildDigitalTwinSourcePackage(
   await fs.mkdir(stagingRoot, { recursive: false });
 
   try {
+    const skyboxCacheContext = options.skyboxCacheContext ?? await loadDeploymentSkyboxCacheContext(
+      options.signal,
+      options.skyboxCacheDependencies,
+    );
     const scenesResult = await readSceneSnapshots(
       projectRoot,
       sharedResourcesRoot,
@@ -104,11 +140,38 @@ export async function buildDigitalTwinSourcePackage(
     const entryScene = scenes.find((scene) => path.resolve(scene.sourcePath) === entrySceneFilePath);
     if (!entryScene) throw new Error('入口场景不在当前项目 Scenes 目录中。');
 
+    const warnings: string[] = [];
+    const warnedOrphanedSkyboxIds = new Set<string>();
+    const validationCache = options.skyboxValidationCache ?? createDeploymentSkyboxValidationCache();
+    const stableSkyboxObjects = new WeakSet<object>();
+    const stableSkyboxBundles = new Map<string, ResourceBundle>();
+    for (const scene of scenes) {
+      await prepareSourceSceneSkyboxes(
+        scene.parsed,
+        skyboxCacheContext,
+        validationCache,
+        stableSkyboxObjects,
+        stableSkyboxBundles,
+        warnings,
+        warnedOrphanedSkyboxIds,
+        options.signal,
+        options.skyboxCacheDependencies,
+      );
+      scene.portableContent = `${JSON.stringify(
+        rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap),
+        null,
+        2,
+      )}
+`;
+    }
+
     const bundles = collectResourceBundles(
-      scenes.map((scene) => scene.content),
+      scenes.map((scene) => scene.parsed),
       projectRoot,
       sharedResourcesRoot,
       platformImageBundleMap,
+      stableSkyboxObjects,
+      stableSkyboxBundles,
     );
     const estimatedFiles = scenes.length + bundles.length + 1;
     options.onProgress?.('正在复制源工程场景…', 0, estimatedFiles);
@@ -128,21 +191,32 @@ export async function buildDigitalTwinSourcePackage(
     await Promise.all([
       fs.mkdir(path.join(stagingRoot, 'Assets', 'Models'), { recursive: true }),
       fs.mkdir(path.join(stagingRoot, 'Assets', 'Environments'), { recursive: true }),
+      fs.mkdir(path.join(stagingRoot, 'Assets', 'Skyboxes'), { recursive: true }),
       fs.mkdir(path.join(stagingRoot, 'Assets', 'Images'), { recursive: true }),
       fs.mkdir(path.join(stagingRoot, '.babylon-editor'), { recursive: true }),
     ]);
 
     for (const bundle of bundles) {
       throwIfAborted(options.signal);
-      const destination = resolveInside(stagingRoot, bundle.destinationRelativePath, '源工程资源目标');
-      await copySafeResource(bundle.sourcePath, destination, options.signal, (bytes) => {
+      if (bundle.copyFile) {
         if (resourceFileCount + 1 > MAX_SOURCE_FILES) {
           throw new Error(`源工程资源文件数量超过 ${MAX_SOURCE_FILES} 项限制。`);
         }
-        if (copiedBytes + bytes > MAX_SOURCE_BYTES) throw new Error('源工程资源总量超过 8 GB 安全上限。');
+        if (copiedBytes + bundle.copyFile.size > MAX_SOURCE_BYTES) throw new Error('源工程资源总量超过 8 GB 安全上限。');
+        await copyDeploymentFiles([bundle.copyFile], stagingRoot, 1, options.signal, () => undefined);
         resourceFileCount += 1;
-        copiedBytes += bytes;
-      });
+        copiedBytes += bundle.copyFile.size;
+      } else {
+        const destination = resolveInside(stagingRoot, bundle.destinationRelativePath, '源工程资源目标');
+        await copySafeResource(bundle.sourcePath, destination, options.signal, (bytes) => {
+          if (resourceFileCount + 1 > MAX_SOURCE_FILES) {
+            throw new Error(`源工程资源文件数量超过 ${MAX_SOURCE_FILES} 项限制。`);
+          }
+          if (copiedBytes + bytes > MAX_SOURCE_BYTES) throw new Error('源工程资源总量超过 8 GB 安全上限。');
+          resourceFileCount += 1;
+          copiedBytes += bytes;
+        });
+      }
       completed += 1;
       options.onProgress?.(`已复制资源：${bundle.destinationRelativePath}`, completed, estimatedFiles);
     }
@@ -185,6 +259,7 @@ export async function buildDigitalTwinSourcePackage(
       resourceFileCount,
       manifestJson,
       sceneContents: scenes.map((scene) => scene.content),
+      warnings,
     };
   } catch (error) {
     await fs.rm(archivePath, { force: true }).catch(() => undefined);
@@ -247,6 +322,7 @@ async function readSceneSnapshots(
       name: sceneName,
       size: Buffer.byteLength(snapshotContent, 'utf8'),
       sha256: sha256Text(snapshotContent),
+      parsed,
     });
   }
   snapshots.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'en'));
@@ -257,13 +333,6 @@ async function readSceneSnapshots(
     isPlatformImageReference,
     findSyncedImageForReference,
   );
-  for (const snapshot of snapshots) {
-    snapshot.portableContent = `${JSON.stringify(
-      rewriteSceneToPortableAssets(JSON.parse(snapshot.content) as unknown, null, platformImageBundleMap),
-      null,
-      2,
-    )}\n`;
-  }
   return { snapshots, platformImageBundleMap };
 }
 
@@ -344,11 +413,92 @@ function isPortableImageAssetReference(value: string): boolean {
   }
 }
 
+/** 按稳定 ID 解析 SOURCE 场景中的天空盒，并改写为源工程包内便携引用。 */
+async function prepareSourceSceneSkyboxes(
+  sceneFile: PlainObject,
+  cacheContext: DeploymentSkyboxCacheContext,
+  validationCache: DeploymentSkyboxValidationCache,
+  stableSkyboxObjects: WeakSet<object>,
+  stableSkyboxBundles: Map<string, ResourceBundle>,
+  warnings: string[],
+  warnedOrphanedSkyboxIds: Set<string>,
+  signal: AbortSignal,
+  dependencyOverrides: Partial<DeploymentSkyboxCacheDependencies> | undefined,
+): Promise<void> {
+  const scene = isPlainObject(sceneFile.scene) ? sceneFile.scene : null;
+  if (!scene) return;
+  const skyboxes: PlainObject[] = [];
+  if (isPlainObject(scene.entities)) {
+    for (const entity of Object.values(scene.entities)) {
+      if (!isPlainObject(entity) || !isPlainObject(entity.components)) continue;
+      if (isPlainObject(entity.components.skybox)) skyboxes.push(entity.components.skybox);
+    }
+  }
+  if (isPlainObject(scene.sceneSettings) && isPlainObject(scene.sceneSettings.skybox)) {
+    skyboxes.push(scene.sceneSettings.skybox);
+  }
+
+  for (const skybox of skyboxes) {
+    const resolved = await resolveDeploymentSkyboxReference(
+      skybox,
+      cacheContext,
+      validationCache,
+      signal,
+      dependencyOverrides,
+    );
+    if (!resolved) continue;
+    rewriteSourceSkyboxReference(skybox, resolved);
+    stableSkyboxObjects.add(skybox);
+    registerStableSourceSkyboxBundle(stableSkyboxBundles, resolved);
+    if (resolved.entry.status === 'orphaned' && !warnedOrphanedSkyboxIds.has(resolved.entry.resourceId)) {
+      warnedOrphanedSkyboxIds.add(resolved.entry.resourceId);
+      warnings.push(createDataPlatformSkyboxOrphanedWarning(resolved.entry));
+    }
+  }
+}
+
+function rewriteSourceSkyboxReference(
+  skybox: PlainObject,
+  resolved: ResolvedDeploymentSkyboxReference,
+): void {
+  const sourcePath = resolved.entry.relativePath;
+  skybox.packagePath = path.posix.dirname(sourcePath);
+  skybox.sourcePath = sourcePath;
+  skybox.sourceUrl = `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(sourcePath)}`;
+}
+
+function registerStableSourceSkyboxBundle(
+  bundles: Map<string, ResourceBundle>,
+  resolved: ResolvedDeploymentSkyboxReference,
+): void {
+  const destinationRelativePath = resolved.entry.relativePath;
+  const key = destinationRelativePath.toLowerCase();
+  const bundle: ResourceBundle = {
+    sourcePath: resolved.sourcePath,
+    destinationRelativePath,
+    copyFile: {
+      ...resolved.sourceFile,
+      destinationRelativePath,
+      kind: 'texture',
+      expectedSize: resolved.entry.fileSizeBytes,
+      expectedSha256: resolved.entry.sha256,
+      integrityLabel: createDataPlatformSkyboxIntegrityLabel(resolved.entry),
+    },
+  };
+  const existing = bundles.get(key);
+  if (existing && path.resolve(existing.sourcePath) !== path.resolve(bundle.sourcePath)) {
+    throw new Error(`源工程天空盒目标冲突：${destinationRelativePath}`);
+  }
+  bundles.set(key, bundle);
+}
+
 function collectResourceBundles(
-  sceneContents: readonly string[],
+  sceneValues: readonly unknown[],
   projectRoot: string,
   sharedResourcesRoot: string,
   platformImageBundleMap: ReadonlyMap<string, PlatformImageBundle>,
+  stableSkyboxObjects: WeakSet<object>,
+  stableSkyboxBundles: ReadonlyMap<string, ResourceBundle>,
 ): ResourceBundle[] {
   const bundles = new Map<string, ResourceBundle>();
   const registerBundle = (bundle: ResourceBundle): void => {
@@ -357,10 +507,11 @@ function collectResourceBundles(
     if (existing && path.resolve(existing.sourcePath) !== path.resolve(bundle.sourcePath)) {
       throw new Error(`源工程资源目标冲突：${bundle.destinationRelativePath}`);
     }
-    bundles.set(key, bundle);
+    if (!existing || bundle.copyFile || !existing.copyFile) bundles.set(key, bundle);
   };
 
   for (const platformBundle of platformImageBundleMap.values()) registerBundle(platformBundle);
+  for (const skyboxBundle of stableSkyboxBundles.values()) registerBundle(skyboxBundle);
 
   let visited = 0;
   const visit = (value: unknown, fieldName: string | null = null): void => {
@@ -388,11 +539,15 @@ function collectResourceBundles(
       return;
     }
     if (isPlainObject(value)) {
-      for (const [childKey, child] of Object.entries(value)) visit(child, childKey);
+      const stableSkybox = stableSkyboxObjects.has(value);
+      for (const [childKey, child] of Object.entries(value)) {
+        if (stableSkybox && STABLE_SKYBOX_PATH_FIELDS.has(childKey)) continue;
+        visit(child, childKey);
+      }
     }
   };
 
-  for (const content of sceneContents) visit(JSON.parse(content) as unknown, null);
+  for (const sceneValue of sceneValues) visit(sceneValue, null);
   return [...bundles.values()].sort((left, right) => left.destinationRelativePath.localeCompare(right.destinationRelativePath, 'en'));
 }
 
