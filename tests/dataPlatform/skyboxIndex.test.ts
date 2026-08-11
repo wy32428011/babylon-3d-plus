@@ -113,6 +113,9 @@ type Task5SkyboxIndexApi = {
   listIndexedDataPlatformSkyboxes?: (
     editorRoot: string,
     index?: DataPlatformSkyboxIndex,
+    dependencies?: {
+      inspectSkyboxAssetFile(filePath: string): Promise<{ format: 'hdr' | 'exr'; fileSizeBytes: number }>;
+    },
   ) => Promise<{
     skyboxes: ProjectSkyboxAssetEntry[];
     orphanedSkyboxes: ProjectSkyboxAssetEntry[];
@@ -883,6 +886,35 @@ test('损坏、缺失、目录、symlink 和 size 不一致条目不暴露且逐
     },
   );
   for (const error of result.errors) assert.equal(error.message.includes(editorRoot), false);
+});
+
+test('inspect 的 Node 文件系统错误归为 io-error，内容错误归为 invalid-file 且消息安全', async (t) => {
+  const { listIndexedDataPlatformSkyboxes } = getTask5SkyboxIndexApi();
+  const editorRoot = await createEditorRoot(t);
+  const content = createExrFixture();
+  const entry = createEntry(createRecord('7', { format: 'exr', fileSizeBytes: content.length }));
+  await writeIndexedSkybox(editorRoot, entry, content);
+
+  for (const code of ['EACCES', 'EIO', 'EMFILE']) {
+    const result = await listIndexedDataPlatformSkyboxes(editorRoot, createIndex([entry]), {
+      async inspectSkyboxAssetFile(filePath) {
+        throw Object.assign(new Error(`sensitive path: ${filePath}`), { code });
+      },
+    });
+    assert.deepEqual(result.skyboxes, [], code);
+    assert.deepEqual(result.errors.map((error) => error.code), ['io-error'], code);
+    assert.equal(result.errors[0].message.includes(editorRoot), false, code);
+    assert.equal(result.errors[0].message.includes('sensitive'), false, code);
+  }
+
+  const invalidResult = await listIndexedDataPlatformSkyboxes(editorRoot, createIndex([entry]), {
+    async inspectSkyboxAssetFile() {
+      throw new Error('EXR header is invalid');
+    },
+  });
+  assert.deepEqual(invalidResult.skyboxes, []);
+  assert.deepEqual(invalidResult.errors.map((error) => error.code), ['invalid-file']);
+  assert.equal(invalidResult.errors[0].message.includes('EXR header is invalid'), false);
 });
 
 test('索引文件的父目录为 symlink 时拒绝暴露越界缓存', async (t) => {

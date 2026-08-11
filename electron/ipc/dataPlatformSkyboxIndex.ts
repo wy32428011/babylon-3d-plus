@@ -98,6 +98,10 @@ export type IndexedDataPlatformSkyboxesResult = {
 
 export type SkyboxAssetDiagnosticReporter = (error: DataPlatformSkyboxAssetDiagnostic) => void;
 
+export type DataPlatformSkyboxInspectionDependencies = {
+  inspectSkyboxAssetFile: typeof inspectSkyboxAssetFile;
+};
+
 export function getDataPlatformSkyboxIndexPath(editorRoot: string): string {
   return path.join(editorRoot, '.babylon-editor', INDEX_FILE_NAME);
 }
@@ -147,7 +151,9 @@ export async function readDataPlatformSkyboxIndex(editorRoot: string): Promise<D
 export async function listIndexedDataPlatformSkyboxes(
   editorRoot: string,
   index?: DataPlatformSkyboxIndex,
+  dependencies: Partial<DataPlatformSkyboxInspectionDependencies> = {},
 ): Promise<IndexedDataPlatformSkyboxesResult> {
+  const inspectAssetFile = dependencies.inspectSkyboxAssetFile ?? inspectSkyboxAssetFile;
   const normalizedIndex = index === undefined
     ? await readDataPlatformSkyboxIndex(editorRoot)
     : normalizeDataPlatformSkyboxIndex(index);
@@ -186,9 +192,12 @@ export async function listIndexedDataPlatformSkyboxes(
 
     let inspection;
     try {
-      inspection = await inspectSkyboxAssetFile(filePath);
-    } catch {
-      errors.push(createAssetDiagnostic(entry, 'invalid-file'));
+      inspection = await inspectAssetFile(filePath);
+    } catch (error) {
+      errors.push(createAssetDiagnostic(
+        entry,
+        isNodeFileSystemError(error) ? 'io-error' : 'invalid-file',
+      ));
       continue;
     }
     if (inspection.format !== entry.format) {
@@ -707,6 +716,10 @@ function isCanonicalArrayIndex(key: string, length: number): boolean {
 function isPathInside(root: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function isNodeFileSystemError(value: unknown): value is NodeJS.ErrnoException {
+  return isNodeError(value) && /^E[A-Z0-9]+$/.test(value.code ?? '');
 }
 
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {

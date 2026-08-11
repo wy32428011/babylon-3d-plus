@@ -176,6 +176,8 @@ const PROJECT_SKYBOX_ASSET: ProjectSkyboxAssetEntry = {
   libraryKind: 'skybox',
   format: 'hdr',
   fileSizeBytes: 1024,
+  source: 'project',
+  availability: 'active',
 };
 
 test('从资源创建天空盒时使用默认参数，重导刷新路径时保留场景级参数', () => {
@@ -273,7 +275,7 @@ test('独立 Viewer 导出会收集和改写天空盒，并接受编辑器当前
 
   const projectServiceSource = readFileSync('electron/ipc/dataPlatformProjectService.ts', 'utf8');
   assert.match(projectServiceSource, /Skyboxes/);
-  assert.match(projectServiceSource, /skyboxesRoot/);
+  assert.match(projectServiceSource, /setSharedProjectSkyboxRoot\(context\.sharedResourcesRoot\)/);
 
   const projectIpcSource = readFileSync('electron/ipc/projectIpc.ts', 'utf8');
   assert.match(projectIpcSource, /authorizeSceneSkyboxFile/);
