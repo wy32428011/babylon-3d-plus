@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { app } from 'electron';
+import unzipper from 'unzipper';
 
 const PROJECT_ID = '2054201280000000001';
 const EDITOR_PROJECT_ID = '2054201280000000101';
@@ -20,11 +21,122 @@ const CANCEL_REQUEST_ID = 'cancel-upload';
 const UPLOAD_FAILURE_REQUEST_ID = 'permanent-upload-failure';
 const MISMATCHED_PREPARE_REQUEST_ID = 'mismatched-prepare-response';
 const RUNTIME_CONFIG_FAILURE_REQUEST_ID = 'runtime-config-save-failure';
+const INDEXED_SKYBOX_REQUEST_ID = 'skybox-indexed-active';
+const ORPHANED_SKYBOX_REQUEST_ID = 'skybox-indexed-orphaned';
+const PRIMARY_SKYBOX_ID = '2054201280000000401';
+const UNUSED_SKYBOX_ID = '2054201280000000402';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const PUBLISH_PARENT_ORIGINS = ['https://screen.example.com', 'http://127.0.0.1:8001'];
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function createHdrFixture(comment = 'fixture', baseValue = 32) {
+  const header = Buffer.from(`#?RADIANCE\nCOMMENT=${comment}\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 8\n`, 'ascii');
+  const scanline = [Buffer.from([2, 2, 0, 8])];
+  for (let channel = 0; channel < 4; channel += 1) {
+    scanline.push(Buffer.from([8]), Buffer.alloc(8, baseValue + channel));
+  }
+  return Buffer.concat([header, ...scanline]);
+}
+
+function createCorruptHdrFixture() {
+  const header = Buffer.from('#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 8\n', 'ascii');
+  return Buffer.concat([header, Buffer.from([2, 2, 0, 8, 137, 10])]);
+}
+
+function createDataPlatformSkyboxEntry(resourceId, displayName, data, status = 'active') {
+  return {
+    resourceId,
+    displayName,
+    relativePath: `Assets/Skyboxes/DataPlatform/Skybox-${resourceId}/skybox.hdr`,
+    format: 'hdr',
+    fileSizeBytes: data.length,
+    sha256: sha256(data),
+    revision: '1',
+    status,
+    syncedAt: '2026-08-10T08:00:00.000Z',
+  };
+}
+
+async function writeDataPlatformSkyboxIndex(editorRoot, entries) {
+  const indexPath = path.join(editorRoot, '.babylon-editor', 'data-platform-skybox-index.json');
+  await mkdir(path.dirname(indexPath), { recursive: true });
+  await writeFile(indexPath, `${JSON.stringify({ version: 1, entries }, null, 2)}\n`, 'utf8');
+}
+
+function createDataPlatformSkyboxSceneContent(resourceId, baseUrl, overrides = {}) {
+  const remoteUrl = `${baseUrl}/api/v1/skyboxes/${resourceId}/download`;
+  const skybox = {
+    packagePath: `${baseUrl}/api/v1/skyboxes/${resourceId}/`,
+    sourcePath: remoteUrl,
+    sourceUrl: remoteUrl,
+    format: 'hdr',
+    intensity: 1,
+    rotationY: 0,
+    dataPlatformResourceId: resourceId,
+    ...overrides,
+  };
+  return `${JSON.stringify({
+    version: 3,
+    scene: {
+      id: `scene_skybox_${resourceId}`,
+      name: '数据中台天空盒发布场景',
+      entityIds: ['skybox-reference'],
+      entities: {
+        'skybox-reference': {
+          id: 'skybox-reference',
+          name: '重复天空盒引用',
+          components: { skybox: { ...skybox } },
+        },
+      },
+      selectedEntityId: null,
+      sceneSettings: {
+        camera: { savedPose: null, viewDistance: 5000 },
+        sensitivity: { zoom: 10, pan: 10, rotate: 10 },
+        environment: null,
+        skybox: { ...skybox },
+      },
+    },
+  }, null, 2)}\n`;
+}
+
+function createLocalSkyboxSceneContent(sourcePath) {
+  const sourceUrl = `editor-asset://local/${encodeURIComponent(sourcePath)}`;
+  return `${JSON.stringify({
+    version: 3,
+    scene: {
+      id: 'scene_local_skybox',
+      name: '本地天空盒发布场景',
+      entityIds: [],
+      entities: {},
+      selectedEntityId: null,
+      sceneSettings: {
+        camera: { savedPose: null, viewDistance: 5000 },
+        sensitivity: { zoom: 10, pan: 10, rotate: 10 },
+        environment: null,
+        skybox: {
+          packagePath: path.dirname(sourcePath),
+          sourcePath,
+          sourceUrl,
+          format: 'hdr',
+          intensity: 1,
+          rotationY: 0,
+        },
+      },
+    },
+  }, null, 2)}\n`;
+}
+
+async function readZipEntries(buffer) {
+  const directory = await unzipper.Open.buffer(buffer);
+  const entries = new Map();
+  for (const entry of directory.files) {
+    if (entry.type !== 'File') continue;
+    entries.set(entry.path.replace(/\\/g, '/'), await entry.buffer());
+  }
+  return entries;
 }
 
 function createSceneContent() {
@@ -366,6 +478,7 @@ class DigitalTwinMockServer {
       completedFileId: null,
       status: 'UPLOADING',
       attempts: new Map(),
+      chunkBodies: new Map(),
     };
     this.sessions.set(uploadId, session);
     return session;
@@ -407,6 +520,8 @@ class DigitalTwinMockServer {
       if (response.destroyed || response.writableEnded) return;
     }
 
+    session.chunkBodies ??= new Map();
+    session.chunkBodies.set(chunkIndex, Buffer.from(rawBody));
     session.uploadedChunks.add(chunkIndex);
     this.sendSuccess(response, this.toSessionResponse(session));
   }
@@ -495,6 +610,19 @@ class DigitalTwinMockServer {
     };
   }
 
+  getUploadedPackage(requestId, packageType) {
+    const session = [...this.sessions.values()].find((item) => item.requestId === requestId && item.packageType === packageType);
+    assert.ok(session, `${requestId} ${packageType} 上传会话缺失。`);
+    assert.equal(session.status, 'COMPLETED');
+    const chunks = [];
+    for (let chunkIndex = 0; chunkIndex < session.totalChunks; chunkIndex += 1) {
+      const chunk = session.chunkBodies?.get(chunkIndex);
+      assert.ok(chunk, `${requestId} ${packageType} 分片 ${chunkIndex} 未被测试服务器捕获。`);
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  }
+
   async readRequestBody(request) {
     const chunks = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -534,6 +662,7 @@ async function run() {
   const mock = new DigitalTwinMockServer();
   let originalGetAppPath = null;
   let clearCurrentDataPlatformBinding = () => undefined;
+  let clearSharedProjectSkyboxRoot = () => undefined;
 
   try {
     await mkdir(userDataRoot, { recursive: true });
@@ -549,8 +678,10 @@ async function run() {
     const transferModule = await import('../../dist-electron/ipc/dataPlatformTransfer.js');
     const uploadClientModule = await import('../../dist-electron/ipc/digitalTwinUploadClient.js');
     const projectAssetModule = await import('../../dist-electron/ipc/projectAssetStore.js');
+    const deploymentSceneModule = await import('../../dist-electron/ipc/deploymentExportScene.js');
     const publishModule = await import('../../dist-electron/ipc/digitalTwinPublishService.js');
     clearCurrentDataPlatformBinding = bindingModule.clearCurrentDataPlatformBinding;
+    clearSharedProjectSkyboxRoot = () => projectAssetModule.setSharedProjectSkyboxRoot(null);
 
     const baseOrigin = new URL(mock.baseUrl).origin;
     assert.equal(
@@ -621,6 +752,7 @@ async function run() {
       completedFileId: null,
       status: 'UPLOADING',
       attempts: new Map(),
+      chunkBodies: new Map(),
     });
     await assert.rejects(
       redirectClient.uploadDetail(oversizedUploadId, new AbortController().signal),
@@ -673,6 +805,22 @@ async function run() {
     await projectAssetModule.activateProjectRoot(projectRoot, scenePath);
     projectAssetModule.setSharedProjectAssetRoot(sharedResourcesRoot);
 
+    const manualSkyboxRoot = path.join(workspaceRoot, 'ManualSkyboxCache');
+    const primarySkyboxData = createHdrFixture('primary-remote', 41);
+    const unusedSkyboxData = createHdrFixture('unused-remote', 52);
+    const primarySkyboxPath = path.join(manualSkyboxRoot, 'Assets', 'Skyboxes', 'DataPlatform', `Skybox-${PRIMARY_SKYBOX_ID}`, 'skybox.hdr');
+    const unusedSkyboxPath = path.join(manualSkyboxRoot, 'Assets', 'Skyboxes', 'DataPlatform', `Skybox-${UNUSED_SKYBOX_ID}`, 'skybox.hdr');
+    await mkdir(path.dirname(primarySkyboxPath), { recursive: true });
+    await mkdir(path.dirname(unusedSkyboxPath), { recursive: true });
+    await writeFile(primarySkyboxPath, primarySkyboxData);
+    await writeFile(unusedSkyboxPath, unusedSkyboxData);
+    const createSkyboxEntries = (primaryStatus = 'active', primaryData = primarySkyboxData) => [
+      createDataPlatformSkyboxEntry(PRIMARY_SKYBOX_ID, '晨曦天空', primaryData, primaryStatus),
+      createDataPlatformSkyboxEntry(UNUSED_SKYBOX_ID, '未引用夜空', unusedSkyboxData),
+    ];
+    await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries());
+    projectAssetModule.setSharedProjectSkyboxRoot(manualSkyboxRoot);
+
     async function resetBinding(overrides = {}) {
       const metadata = bindingModule.createDataPlatformBinding({
         baseUrl: mock.baseUrl,
@@ -707,6 +855,174 @@ async function run() {
     assert.equal(localActiveContext.dataPlatformOrigin, new URL(mock.baseUrl).origin);
     assert.deepEqual(localActiveContext.allowedParentOrigins, [new URL(mock.baseUrl).origin]);
     assert.equal(mock.requests.length, 0, '本地发布活动状态不应访问网络。');
+
+
+    const indexedSkyboxSceneContent = createDataPlatformSkyboxSceneContent(PRIMARY_SKYBOX_ID, mock.baseUrl);
+    const expectedSkyboxPath = `project/assets/skyboxes/Skybox-${PRIMARY_SKYBOX_ID}/skybox.hdr`;
+    const expectedSkyboxUrl = `editor-asset://local/${encodeURIComponent(expectedSkyboxPath)}`;
+    const expectedSkyboxPackageUrl = `editor-asset://local/${encodeURIComponent(`project/assets/skyboxes/Skybox-${PRIMARY_SKYBOX_ID}/`)}`;
+    const prepareSkyboxScene = (content) => deploymentSceneModule.prepareDeploymentExport(
+      content,
+      '天空盒发布预检',
+      [],
+      new AbortController().signal,
+      () => undefined,
+    );
+    const resetSkyboxPublishState = async () => {
+      await resetBinding();
+      mock.setRemoteStatus(createRemoteStatus());
+      mock.resetRequests();
+    };
+    const assertCacheFailure = async (promise, statusLabel) => {
+      await assert.rejects(promise, (error) => {
+        assert.ok(error instanceof Error);
+        assert.match(
+          error.message,
+          new RegExp(`数据中台天空盒“晨曦天空”（ID ${PRIMARY_SKYBOX_ID}）兼容缓存缺失：`),
+          `${statusLabel}缓存失败应携带资源上下文。`,
+        );
+        assert.equal(error.message.includes(testRoot), false, '缓存错误不得泄漏测试机绝对路径。');
+        assert.equal(error.message.includes(manualSkyboxRoot), false, '缓存错误不得泄漏共享缓存绝对路径。');
+        return true;
+      });
+    };
+
+    await resetSkyboxPublishState();
+    const indexedSkyboxResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(INDEXED_SKYBOX_REQUEST_ID, indexedSkyboxSceneContent),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(indexedSkyboxResult.status, 'completed');
+    const indexedDistEntries = await readZipEntries(mock.getUploadedPackage(INDEXED_SKYBOX_REQUEST_ID, 'DIST'));
+    const packagedSkyboxPaths = [...indexedDistEntries.keys()].filter((entryPath) => (
+      entryPath.startsWith('project/assets/skyboxes/') && /\.(?:hdr|exr)$/i.test(entryPath)
+    ));
+    assert.deepEqual(packagedSkyboxPaths, [expectedSkyboxPath], '发布包只能包含场景实际引用的天空盒。');
+    assert.deepEqual(indexedDistEntries.get(expectedSkyboxPath), primarySkyboxData);
+    assert.equal(indexedDistEntries.has(`project/assets/skyboxes/Skybox-${UNUSED_SKYBOX_ID}/skybox.hdr`), false);
+    const packagedSkyboxScene = JSON.parse(indexedDistEntries.get('project/scene.json').toString('utf8'));
+    const packagedSettingsSkybox = packagedSkyboxScene.scene.sceneSettings.skybox;
+    const packagedEntitySkybox = packagedSkyboxScene.scene.entities['skybox-reference'].components.skybox;
+    for (const packagedSkybox of [packagedSettingsSkybox, packagedEntitySkybox]) {
+      assert.equal(packagedSkybox.packagePath, expectedSkyboxPackageUrl);
+      assert.equal(packagedSkybox.sourcePath, expectedSkyboxUrl);
+      assert.equal(packagedSkybox.sourceUrl, expectedSkyboxUrl);
+      assert.equal(packagedSkybox.dataPlatformResourceId, PRIMARY_SKYBOX_ID);
+    }
+    const packagedManifest = JSON.parse(indexedDistEntries.get('project/asset-manifest.json').toString('utf8'));
+    assert.deepEqual(
+      packagedManifest.assets.filter((asset) => asset.path.startsWith('./skyboxes/')).map((asset) => asset.path),
+      [`./skyboxes/Skybox-${PRIMARY_SKYBOX_ID}/skybox.hdr`],
+    );
+    const viewerText = [...indexedDistEntries.entries()]
+      .filter(([entryPath]) => /\.(?:html|js|css|json|md)$/i.test(entryPath))
+      .map(([, data]) => data.toString('utf8'))
+      .join('\n');
+    assert.equal(viewerText.includes(mock.baseUrl), false, 'Viewer 产物不得保留数据中台天空盒 URL。');
+
+    await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('orphaned'));
+    await resetSkyboxPublishState();
+    const orphanedSkyboxResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(ORPHANED_SKYBOX_REQUEST_ID, indexedSkyboxSceneContent),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(orphanedSkyboxResult.status, 'completed');
+    const orphanedSkyboxWarning = `数据中台天空盒“晨曦天空”（ID ${PRIMARY_SKYBOX_ID}）已删除，发布包将使用本地兼容缓存。`;
+    assert.ok(orphanedSkyboxResult.warnings.includes(orphanedSkyboxWarning));
+    assert.equal(
+      orphanedSkyboxResult.warnings.filter((warning) => warning === orphanedSkyboxWarning).length,
+      1,
+      '同一天空盒重复引用只能产生一条 orphaned 警告。',
+    );
+
+    await rm(primarySkyboxPath, { force: true });
+    await assertCacheFailure(prepareSkyboxScene(indexedSkyboxSceneContent), 'orphaned');
+
+    await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('active'));
+    await assertCacheFailure(prepareSkyboxScene(indexedSkyboxSceneContent), 'active');
+
+    await writeFile(primarySkyboxPath, primarySkyboxData);
+    await writeFile(
+      path.join(manualSkyboxRoot, '.babylon-editor', 'data-platform-skybox-index.json'),
+      '{"version":1,"entries":[',
+      'utf8',
+    );
+    await assert.rejects(prepareSkyboxScene(indexedSkyboxSceneContent), /天空盒索引 JSON 已损坏/);
+
+    await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('active'));
+    await assert.rejects(
+      prepareSkyboxScene(createDataPlatformSkyboxSceneContent('01', mock.baseUrl)),
+      /dataPlatformResourceId.*1-64/,
+    );
+
+    const corruptSkyboxData = createCorruptHdrFixture();
+    await writeFile(primarySkyboxPath, corruptSkyboxData);
+    await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('active', corruptSkyboxData));
+    await assertCacheFailure(prepareSkyboxScene(indexedSkyboxSceneContent), '损坏');
+
+    const mismatchedSkyboxData = createHdrFixture('primary-remote', 61);
+    assert.equal(mismatchedSkyboxData.length, primarySkyboxData.length);
+    await writeFile(primarySkyboxPath, mismatchedSkyboxData);
+    await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('active'));
+    await assertCacheFailure(prepareSkyboxScene(indexedSkyboxSceneContent), 'SHA-256 不一致');
+
+    await writeFile(primarySkyboxPath, primarySkyboxData);
+    await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('active'));
+    const localSkyboxPath = path.join(projectRoot, 'Assets', 'Skyboxes', 'LocalCompatibility', 'skybox.hdr');
+    await mkdir(path.dirname(localSkyboxPath), { recursive: true });
+    await writeFile(localSkyboxPath, createHdrFixture('local-compatibility', 35));
+    const localPrepared = await prepareSkyboxScene(createLocalSkyboxSceneContent(localSkyboxPath));
+    assert.equal(localPrepared.assetFiles.filter((file) => /skybox\.hdr$/i.test(file.destinationRelativePath)).length, 1);
+
+    const originalJsonParse = JSON.parse;
+    try {
+      let accessorGetterCalls = 0;
+      const accessorScene = originalJsonParse(indexedSkyboxSceneContent);
+      const accessorSkybox = accessorScene.scene.sceneSettings.skybox;
+      delete accessorSkybox.dataPlatformResourceId;
+      Object.defineProperty(accessorSkybox, 'dataPlatformResourceId', {
+        enumerable: true,
+        configurable: true,
+        get() {
+          accessorGetterCalls += 1;
+          return PRIMARY_SKYBOX_ID;
+        },
+      });
+      JSON.parse = (content, ...args) => content === '__ACCESSOR_SKYBOX_SCENE__'
+        ? accessorScene
+        : originalJsonParse(content, ...args);
+      await assert.rejects(prepareSkyboxScene('__ACCESSOR_SKYBOX_SCENE__'), /dataPlatformResourceId/);
+      assert.equal(accessorGetterCalls, 0, '发布预检不得执行 dataPlatformResourceId getter。');
+
+      let inheritedGetterCalls = 0;
+      const inheritedScene = originalJsonParse(indexedSkyboxSceneContent);
+      const inheritedSource = inheritedScene.scene.sceneSettings.skybox;
+      const inheritedPrototype = {};
+      Object.defineProperty(inheritedPrototype, 'dataPlatformResourceId', {
+        enumerable: true,
+        configurable: true,
+        get() {
+          inheritedGetterCalls += 1;
+          return PRIMARY_SKYBOX_ID;
+        },
+      });
+      delete inheritedSource.dataPlatformResourceId;
+      const inheritedSkybox = Object.assign(Object.create(inheritedPrototype), inheritedSource);
+      inheritedScene.scene.sceneSettings.skybox = inheritedSkybox;
+      JSON.parse = (content, ...args) => content === '__INHERITED_SKYBOX_SCENE__'
+        ? inheritedScene
+        : originalJsonParse(content, ...args);
+      await assert.rejects(prepareSkyboxScene('__INHERITED_SKYBOX_SCENE__'), /dataPlatformResourceId/);
+      assert.equal(inheritedGetterCalls, 0, '发布预检不得执行继承的 dataPlatformResourceId getter。');
+    } finally {
+      JSON.parse = originalJsonParse;
+    }
+
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
     const overwriteResult = await publishModule.publishDigitalTwin(
       createPublishRequest('overwrite-confirm-required', sceneContent, { overwriteExisting: false }),
       new AbortController().signal,
@@ -940,9 +1256,18 @@ async function run() {
         'oversized-upload-chunk-rejected',
         'project-status-identity-mismatch-rejected',
         'prepare-task-identity-mismatch-rejected',
+        'indexed-skybox-offline-package',
+        'indexed-skybox-reference-deduplication',
+        'unreferenced-indexed-skybox-excluded',
+        'orphaned-skybox-cache-warning',
+        'indexed-skybox-cache-context-errors',
+        'corrupt-skybox-index-rejected',
+        'stable-skybox-id-own-data-validation',
+        'local-skybox-publish-regression',
       ],
     }, null, 2));
   } finally {
+    clearSharedProjectSkyboxRoot();
     clearCurrentDataPlatformBinding();
     await mock.close().catch(() => undefined);
     if (originalGetAppPath) app.getAppPath = originalGetAppPath;
