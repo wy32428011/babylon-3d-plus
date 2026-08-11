@@ -141,7 +141,7 @@ test('项目资源结果分离 orphaned 天空盒且无项目返回四字段空�
 
   assert.match(types, /orphanedSkyboxes:\s*ProjectSkyboxAssetEntry\[\]/);
   assert.match(rendererTypes, /orphanedSkyboxes:\s*ProjectSkyboxAssetEntry\[\]/);
-  assert.match(store, /return \{ projectRoot: null, assets: \[\], skyboxes: \[\], orphanedSkyboxes: \[\] \};/);
+  assert.match(store, /projectRoot: null,[\s\S]*?skyboxSyncContextKey: null,[\s\S]*?orphanedSkyboxes: \[\]/);
   assert.match(store, /\[\.\.\.skyboxes, \.\.\.orphanedSkyboxes\]/);
 });
 
@@ -197,6 +197,7 @@ test('天空盒同步纯逻辑仅在 completed 编排资源刷新，并安全归
   for (const phase of ['querying', 'downloading', 'validating', 'promoting', 'failed'] as const) {
     const result = normalizeSkyboxSyncProgress({
       runId: `run-${phase}`,
+      contextKey: 'project-a',
       phase,
       completed: 1,
       total: 3,
@@ -210,6 +211,7 @@ test('天空盒同步纯逻辑仅在 completed 编排资源刷新，并安全归
 
   const completed = normalizeSkyboxSyncProgress({
     runId: 'run-completed',
+    contextKey: 'project-a',
     phase: 'completed',
     completed: 3,
     total: 3,
@@ -227,6 +229,7 @@ test('天空盒同步纯逻辑仅在 completed 编排资源刷新，并安全归
   };
   const invalid = normalizeSkyboxSyncProgress({
     runId: 'run-invalid',
+    contextKey: 'project-a',
     phase: 'failed',
     completed: Number.POSITIVE_INFINITY,
     total: -1,
@@ -243,6 +246,7 @@ test('天空盒同步纯逻辑仅在 completed 编排资源刷新，并安全归
 
   const invalidPhase = normalizeSkyboxSyncProgress({
     runId: 'run-invalid-phase',
+    contextKey: 'project-a',
     phase: 'unknown',
     completed: 0,
     total: 0,

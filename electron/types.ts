@@ -240,6 +240,7 @@ export type DataPlatformSkyboxSyncPhase =
 
 export type DataPlatformSkyboxSyncProgress = {
   runId: string;
+  contextKey: string | null;
   phase: DataPlatformSkyboxSyncPhase;
   completed: number;
   total: number;
@@ -433,6 +434,7 @@ export type ProjectAssetIndex = {
 
 export type ProjectListAssetsResult = {
   projectRoot: string | null;
+  skyboxSyncContextKey: string | null;
   assets: ProjectModelAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
   orphanedSkyboxes: ProjectSkyboxAssetEntry[];

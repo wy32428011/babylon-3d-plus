@@ -41,6 +41,7 @@ import {
   setCurrentDataPlatformBinding,
 } from './dataPlatformBindingStore.js';
 import {
+  getCurrentDataPlatformSkyboxSyncContextKey,
   invalidateDataPlatformSkyboxSyncPrepareContext,
   syncDataPlatformSkyboxesForWorkspace,
 } from './dataPlatformProjectService.js';
@@ -78,7 +79,11 @@ export function registerProjectIpc(): void {
   });
 
   ipcMain.handle('project:listAssets', async (): Promise<ProjectListAssetsResult> => {
-    return listProjectAssets();
+    const result = await listProjectAssets();
+    return {
+      ...result,
+      skyboxSyncContextKey: getCurrentDataPlatformSkyboxSyncContextKey(),
+    };
   });
 
   ipcMain.handle('project:openRecent', async (_event, request: OpenRecentProjectRequest): Promise<ProjectListAssetsResult> => {
@@ -111,7 +116,10 @@ export function registerProjectIpc(): void {
           console.error('[electron] 最近数据中台项目天空盒同步启动失败。', error);
         });
       }
-      return result;
+      return {
+        ...result,
+        skyboxSyncContextKey: getCurrentDataPlatformSkyboxSyncContextKey(),
+      };
     } catch (error) {
       try {
         await restoreProjectAssetStoreState(projectStateSnapshot);

@@ -42,6 +42,7 @@ export type SkyboxSyncPhase =
 
 export type SkyboxSyncProgress = {
   runId: string;
+  contextKey: string | null;
   phase: SkyboxSyncPhase;
   completed: number;
   total: number;
@@ -99,6 +100,7 @@ function createInvalidSkyboxSyncProgress(progress: unknown): SkyboxSyncProgress 
     : 'renderer-invalid-skybox-sync';
   return {
     runId,
+    contextKey: null,
     phase: 'failed',
     completed: 0,
     total: 0,
@@ -114,6 +116,7 @@ export function normalizeSkyboxSyncProgress(progress: unknown): {
   shouldReloadProjectAssets: boolean;
 } {
   const runIdField = readOwnDataPropertySafely(progress, 'runId');
+  const contextKeyField = readOwnDataPropertySafely(progress, 'contextKey');
   const phaseField = readOwnDataPropertySafely(progress, 'phase');
   const completedField = readOwnDataPropertySafely(progress, 'completed');
   const totalField = readOwnDataPropertySafely(progress, 'total');
@@ -123,6 +126,12 @@ export function normalizeSkyboxSyncProgress(progress: unknown): {
   const runId = runIdField.kind === 'data' && typeof runIdField.value === 'string'
     ? runIdField.value.trim()
     : '';
+  const rawContextKey = contextKeyField.kind === 'data' ? contextKeyField.value : undefined;
+  const contextKey = rawContextKey === null
+    ? null
+    : typeof rawContextKey === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(rawContextKey.trim())
+      ? rawContextKey.trim()
+      : undefined;
   const phase = phaseField.kind === 'data' && typeof phaseField.value === 'string'
     && SKYBOX_SYNC_PHASES.has(phaseField.value as SkyboxSyncPhase)
     ? phaseField.value as SkyboxSyncPhase
@@ -132,6 +141,7 @@ export function normalizeSkyboxSyncProgress(progress: unknown): {
   const message = messageField.kind === 'data' ? messageField.value : null;
   const error = errorField.kind === 'data' ? errorField.value : undefined;
   const valid = Boolean(runId)
+    && contextKey !== undefined
     && phase !== null
     && typeof completed === 'number'
     && typeof total === 'number'
@@ -154,6 +164,7 @@ export function normalizeSkyboxSyncProgress(progress: unknown): {
 
   const normalizedProgress: SkyboxSyncProgress = {
     runId,
+    contextKey: contextKey as string | null,
     phase,
     completed,
     total,

@@ -51,6 +51,7 @@ export type DataPlatformSkyboxSyncPhase =
 
 export type DataPlatformSkyboxSyncProgress = {
   runId: string;
+  contextKey: string | null;
   phase: DataPlatformSkyboxSyncPhase;
   completed: number;
   total: number;
@@ -61,6 +62,7 @@ export type DataPlatformSkyboxSyncProgress = {
 export type DataPlatformSkyboxSyncContext = {
   baseUrl: string;
   editorRoot: string;
+  contextKey: string | null;
 };
 
 export type DataPlatformSkyboxSyncDependencies = {
@@ -79,6 +81,7 @@ export type ExecuteDataPlatformSkyboxSyncOptions = DataPlatformSkyboxSyncContext
 
 type ActiveSkyboxSync = {
   runId: string;
+  contextKey: string | null;
   controller: AbortController;
   promise: Promise<void>;
 };
@@ -104,6 +107,7 @@ const DEFAULT_DEPENDENCIES: DataPlatformSkyboxSyncDependencies = {
 };
 
 let activeSkyboxSync: ActiveSkyboxSync | null = null;
+let queuedSkyboxSyncContext: DataPlatformSkyboxSyncContext | null = null;
 let latestSkyboxSyncProgress: DataPlatformSkyboxSyncProgress | null = null;
 let lastSkyboxSyncContext: DataPlatformSkyboxSyncContext | null = null;
 let skyboxSyncShuttingDown = false;
@@ -114,6 +118,7 @@ export async function executeDataPlatformSkyboxSync(
 ): Promise<void> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
   const editorRoot = normalizeEditorRoot(options.editorRoot);
+  const contextKey = normalizeSyncContextKey(options.contextKey);
   const runId = normalizeRunId(options.runId ?? dependencies.randomId());
   const signal = options.signal ?? new AbortController().signal;
   let completedDownloads = 0;
@@ -123,6 +128,7 @@ export async function executeDataPlatformSkyboxSync(
 
   updateSkyboxSyncProgress({
     runId,
+    contextKey,
     phase: 'querying',
     completed: 0,
     total: 0,
@@ -149,6 +155,7 @@ export async function executeDataPlatformSkyboxSync(
 
     updateSkyboxSyncProgress({
       runId,
+      contextKey,
       phase: 'downloading',
       completed: 0,
       total: totalDownloads,
@@ -192,6 +199,7 @@ export async function executeDataPlatformSkyboxSync(
         validationStarted = true;
         updateSkyboxSyncProgress({
           runId,
+          contextKey,
           phase: 'validating',
           completed: completedDownloads,
           total: totalDownloads,
@@ -210,6 +218,7 @@ export async function executeDataPlatformSkyboxSync(
       completedDownloads += 1;
       updateSkyboxSyncProgress({
         runId,
+        contextKey,
         phase: 'validating',
         completed: completedDownloads,
         total: totalDownloads,
@@ -221,6 +230,7 @@ export async function executeDataPlatformSkyboxSync(
     if (!validationStarted) {
       updateSkyboxSyncProgress({
         runId,
+        contextKey,
         phase: 'validating',
         completed: 0,
         total: 0,
@@ -236,6 +246,7 @@ export async function executeDataPlatformSkyboxSync(
 
     updateSkyboxSyncProgress({
       runId,
+      contextKey,
       phase: 'promoting',
       completed: completedDownloads,
       total: totalDownloads,
@@ -255,6 +266,7 @@ export async function executeDataPlatformSkyboxSync(
     if (!cleanupWarning) stagingRoot = null;
     updateSkyboxSyncProgress({
       runId,
+      contextKey,
       phase: 'completed',
       completed: totalDownloads,
       total: totalDownloads,
@@ -275,6 +287,7 @@ export async function executeDataPlatformSkyboxSync(
 
     updateSkyboxSyncProgress({
       runId,
+      contextKey,
       phase: 'failed',
       completed: completedDownloads,
       total: totalDownloads,
@@ -289,28 +302,57 @@ export async function executeDataPlatformSkyboxSync(
   }
 }
 
-/** 启动全局天空盒同步；重复启动复用当前任务。 */
-export function startDataPlatformSkyboxSync(baseUrl: string, editorRoot: string): boolean {
-  if (skyboxSyncShuttingDown) return false;
-  if (activeSkyboxSync) return true;
+function launchDataPlatformSkyboxSync(context: DataPlatformSkyboxSyncContext): boolean {
+  if (skyboxSyncShuttingDown || activeSkyboxSync) return false;
 
-  const context = { baseUrl, editorRoot };
-  lastSkyboxSyncContext = { ...context };
   const runId = randomUUID();
   const controller = new AbortController();
   const promise = executeDataPlatformSkyboxSync({ ...context, runId, signal: controller.signal })
     .catch(() => undefined)
     .finally(() => {
       if (activeSkyboxSync?.runId === runId) activeSkyboxSync = null;
+      const queued = queuedSkyboxSyncContext;
+      queuedSkyboxSyncContext = null;
+      if (!skyboxSyncShuttingDown && queued) launchDataPlatformSkyboxSync(queued);
     });
-  activeSkyboxSync = { runId, controller, promise };
+  activeSkyboxSync = { runId, contextKey: context.contextKey, controller, promise };
   return true;
+}
+
+/** 启动全局天空盒同步；同一业务 context 复用当前任务，切换项目时取消旧任务并串行启动最新 context。 */
+export function startDataPlatformSkyboxSync(
+  baseUrl: string,
+  editorRoot: string,
+  contextKey: string | null = null,
+): boolean {
+  if (skyboxSyncShuttingDown) return false;
+  const context: DataPlatformSkyboxSyncContext = {
+    baseUrl,
+    editorRoot,
+    contextKey: normalizeSyncContextKey(contextKey),
+  };
+  lastSkyboxSyncContext = { ...context };
+
+  if (activeSkyboxSync) {
+    if (activeSkyboxSync.contextKey === context.contextKey) {
+      queuedSkyboxSyncContext = activeSkyboxSync.controller.signal.aborted ? context : null;
+      return true;
+    }
+    queuedSkyboxSyncContext = context;
+    activeSkyboxSync.controller.abort();
+    return true;
+  }
+  return launchDataPlatformSkyboxSync(context);
 }
 
 /** 使用最近一次 context 重试。 */
 export function retryDataPlatformSkyboxSync(): boolean {
   if (activeSkyboxSync || !lastSkyboxSyncContext || skyboxSyncShuttingDown) return false;
-  return startDataPlatformSkyboxSync(lastSkyboxSyncContext.baseUrl, lastSkyboxSyncContext.editorRoot);
+  return startDataPlatformSkyboxSync(
+    lastSkyboxSyncContext.baseUrl,
+    lastSkyboxSyncContext.editorRoot,
+    lastSkyboxSyncContext.contextKey,
+  );
 }
 
 /** 返回最近进度快照。 */
@@ -321,11 +363,13 @@ export function getLatestDataPlatformSkyboxSyncProgress(): DataPlatformSkyboxSyn
 /** 清除重试 context，不影响正在运行的任务。 */
 export function clearDataPlatformSkyboxSyncRetryContext(): void {
   lastSkyboxSyncContext = null;
+  queuedSkyboxSyncContext = null;
 }
 
 /** 取消并等待活动任务完全释放。 */
 export async function disposeDataPlatformSkyboxSync(): Promise<void> {
   skyboxSyncShuttingDown = true;
+  queuedSkyboxSyncContext = null;
   const active = activeSkyboxSync;
   if (!active) return;
   active.controller.abort();
@@ -676,6 +720,15 @@ async function pathExists(targetPath: string): Promise<boolean> {
 function normalizeEditorRoot(value: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error('editorRoot 不能为空。');
   return path.resolve(value);
+}
+
+function normalizeSyncContextKey(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(normalized)) {
+    throw new Error('天空盒同步 contextKey 格式不安全。');
+  }
+  return normalized;
 }
 
 function normalizeRunId(value: string): string {

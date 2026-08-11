@@ -28,14 +28,19 @@ type HarnessState = {
   sharedAssetRoots: Array<string | null>;
   sharedSkyboxRoots: Array<string | null>;
   modelStarts: Array<{ baseUrl: string; editorRoot: string }>;
-  skyboxStarts: Array<{ baseUrl: string; editorRoot: string }>;
+  skyboxStarts: Array<{ baseUrl: string; editorRoot: string; contextKey: string | null }>;
   ipcSkyboxSyncCalls: Array<{ baseUrl: string; workspaceRoot: string }>;
   recentSkyboxSyncCalls: Array<{ baseUrl: string; workspaceRoot: string }>;
   recentSkyboxSyncPromise: Promise<boolean> | null;
   skyboxDisposePromise: Promise<void> | null;
   directoryPrepareGates: Map<string, Promise<void>>;
   networkCalls: number;
-  listAssetsResult: { projectRoot: string | null; assets: unknown[]; skyboxes: unknown[] };
+  listAssetsResult: {
+    projectRoot: string | null;
+    skyboxSyncContextKey: string | null;
+    assets: unknown[];
+    skyboxes: unknown[];
+  };
 };
 
 const HARNESS_STATE_KEY = '__task4SkyboxLifecycleHarness';
@@ -81,7 +86,7 @@ function resetHarness(root: string): HarnessState {
     skyboxDisposePromise: null,
     directoryPrepareGates: new Map(),
     networkCalls: 0,
-    listAssetsResult: { projectRoot: root, assets: [], skyboxes: [] },
+    listAssetsResult: { projectRoot: root, skyboxSyncContextKey: null, assets: [], skyboxes: [] },
   };
   (globalThis as Record<string, unknown>)[HARNESS_STATE_KEY] = state;
   return state;
@@ -287,8 +292,8 @@ const harnessPlugin: Plugin = {
         }
         export function getLatestDataPlatformSkyboxSyncProgress() { return null; }
         export function retryDataPlatformSkyboxSync() { return false; }
-        export function startDataPlatformSkyboxSync(baseUrl, editorRoot) {
-          getState().skyboxStarts.push({ baseUrl, editorRoot });
+        export function startDataPlatformSkyboxSync(baseUrl, editorRoot, contextKey = null) {
+          getState().skyboxStarts.push({ baseUrl, editorRoot, contextKey });
           getState().events.push('startSkybox:' + editorRoot);
           return true;
         }
@@ -307,6 +312,9 @@ const harnessPlugin: Plugin = {
     if (id === '\0task4-recent-project-service') {
       return `
         const getState = () => ${stateLookup};
+        export function getCurrentDataPlatformSkyboxSyncContextKey() {
+          return getState().currentBinding?.metadata?.projectId ?? null;
+        }
         export function invalidateDataPlatformSkyboxSyncPrepareContext() {
           getState().events.push('invalidateSkyboxPrepare');
         }
@@ -373,7 +381,7 @@ test('共享类型、IPC 通道和两份 preload 保持天空盒同步契约一�
 
   for (const source of [electronTypes, rendererTypes]) {
     assert.match(source, /DataPlatformSkyboxSyncPhase[\s\S]*?'querying'[\s\S]*?'downloading'[\s\S]*?'validating'[\s\S]*?'promoting'[\s\S]*?'completed'[\s\S]*?'failed'/);
-    assert.match(source, /DataPlatformSkyboxSyncProgress[\s\S]*?runId: string;[\s\S]*?completed: number;[\s\S]*?total: number;[\s\S]*?message: string;[\s\S]*?error: string \| null;/);
+    assert.match(source, /DataPlatformSkyboxSyncProgress[\s\S]*?runId: string;[\s\S]*?contextKey: string \| null;[\s\S]*?completed: number;[\s\S]*?total: number;[\s\S]*?message: string;[\s\S]*?error: string \| null;/);
     assert.match(source, /skyboxSyncStarted: boolean;/);
   }
 
@@ -669,7 +677,7 @@ test('天空盒 prepare 在项目切换与 dispose 竞态中失效并被等待�
   const sharedRoot = path.resolve(workspaceRoot, 'SharedResources');
   assert.equal(await service.syncDataPlatformSkyboxesForWorkspace(baseUrl, workspaceRoot), true);
   assert.deepEqual(state.sharedSkyboxRoots, [sharedRoot]);
-  assert.deepEqual(state.skyboxStarts, [{ baseUrl, editorRoot: sharedRoot }]);
+  assert.deepEqual(state.skyboxStarts, [{ baseUrl, editorRoot: sharedRoot, contextKey: null }]);
   assert.equal(state.currentBinding, null);
 
   state.events.length = 0;
@@ -688,7 +696,11 @@ test('天空盒 prepare 在项目切换与 dispose 竞态中失效并被等待�
   const currentSharedRoot = path.resolve(currentWorkspaceRoot, 'SharedResources');
   assert.equal(await service.syncDataPlatformSkyboxesForWorkspace(currentBaseUrl, currentWorkspaceRoot), true);
   assert.deepEqual(state.sharedSkyboxRoots, [currentSharedRoot]);
-  assert.deepEqual(state.skyboxStarts, [{ baseUrl: currentBaseUrl, editorRoot: currentSharedRoot }]);
+  assert.deepEqual(state.skyboxStarts, [{
+    baseUrl: currentBaseUrl,
+    editorRoot: currentSharedRoot,
+    contextKey: null,
+  }]);
 
   stalePrepareGate.resolve();
   assert.equal(await stalePrepare, false);
@@ -736,6 +748,7 @@ test('天空盒 prepare 在项目切换与 dispose 竞态中失效并被等待�
   assert.equal(state.networkCalls, 0);
   assert.ok(state.events.indexOf(`writeBinding:${path.resolve(workspaceRoot, 'Projects', '42')}`) < state.events.indexOf(`setSkybox:${sharedRoot}`));
   assert.ok(state.events.indexOf(`setSkybox:${sharedRoot}`) < state.events.indexOf(`startSkybox:${sharedRoot}`));
+  assert.match(state.skyboxStarts.at(-1)?.contextKey ?? '', /^[a-f0-9]{64}$/);
 
   state.events.length = 0;
   state.sharedSkyboxRoots.length = 0;

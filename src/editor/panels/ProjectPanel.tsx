@@ -154,6 +154,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const updateSkyboxConfig = useEditorStore((state) => state.updateSkyboxConfig);
   const placeSkybox = useEditorStore((state) => state.placeSkybox);
   const sceneDocument = useEditorStore((state) => state.scene);
+  const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
   const currentSkybox = useMemo(() => getSceneSkyboxSettings(sceneDocument), [sceneDocument]);
   const currentEnvironment = useEditorStore((state) => state.scene.sceneSettings.environment);
   const createMesh = useEditorStore((state) => state.createMesh);
@@ -168,6 +169,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const resourceCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const currentEnvironmentRef = useRef(currentEnvironment);
   const projectAssetsLoadRequestRef = useRef(0);
+  const sceneSessionIdRef = useRef(sceneSessionId);
+  sceneSessionIdRef.current = sceneSessionId;
   const skyboxSyncControllerRef = useRef<SkyboxSyncController | null>(null);
   const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshModelSyncRunIdRef = useRef<string | null>(null);
@@ -181,6 +184,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const [orphanedSkyboxAssets, setOrphanedSkyboxAssets] = useState<ProjectSkyboxAssetEntry[]>([]);
   const [focusedAssetId, setFocusedAssetId] = useState<string | null>(null);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
+  const [skyboxSyncContextBinding, setSkyboxSyncContextBinding] = useState(() => ({
+    sceneSessionId,
+    key: null as string | null,
+  }));
+  const skyboxSyncContextKey = skyboxSyncContextBinding.sceneSessionId === sceneSessionId
+    ? skyboxSyncContextBinding.key
+    : null;
   const [importingLibraryKey, setImportingLibraryKey] = useState<ImportableProjectLibraryKey | null>(null);
   const [isLoadingProjectAssets, setIsLoadingProjectAssets] = useState(false);
   const [libraryStatuses, setLibraryStatuses] = useState<LibraryStatusMap>({ model: null, environment: null, skybox: null });
@@ -381,6 +391,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
 
     const requestId = projectAssetsLoadRequestRef.current + 1;
+    const requestSceneSessionId = sceneSessionIdRef.current;
     projectAssetsLoadRequestRef.current = requestId;
     setIsLoadingProjectAssets(true);
 
@@ -392,6 +403,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
       const loadedSkyboxes = result.skyboxes ?? [];
       setProjectRoot(result.projectRoot);
+      setSkyboxSyncContextBinding({
+        sceneSessionId: requestSceneSessionId,
+        key: result.skyboxSyncContextKey ?? null,
+      });
       setProjectAssets(result.assets);
       setSkyboxAssets(result.skyboxes ?? []);
       setOrphanedSkyboxAssets(result.orphanedSkyboxes ?? []);
@@ -441,12 +456,18 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }, [pushLog]);
 
   useEffect(() => {
+    setIsLoadingProjectAssets(false);
+    setProjectRoot(null);
+    setSkyboxSyncContextBinding({ sceneSessionId, key: null });
+    setProjectAssets([]);
+    setSkyboxAssets([]);
+    setOrphanedSkyboxAssets([]);
     void loadProjectAssets();
     void loadSyncedImages();
     return () => {
       projectAssetsLoadRequestRef.current += 1;
     };
-  }, [loadProjectAssets, loadSyncedImages]);
+  }, [loadProjectAssets, loadSyncedImages, sceneSessionId]);
 
   useEffect(() => {
     const dataPlatformModelSyncApi = getDataPlatformModelSyncApi();
@@ -524,7 +545,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
       progressThrottleMs: 225,
     });
     skyboxSyncControllerRef.current = controller;
-    controller.setContext({ readOnly: Boolean(props.readOnly), sceneId: sceneDocument.id });
+    controller.setContext({
+      readOnly: Boolean(props.readOnly),
+      sceneId: sceneDocument.id,
+      contextKey: sceneSessionId,
+      syncContextKey: skyboxSyncContextKey,
+    });
 
     const dataPlatformSkyboxSyncApi = getDataPlatformSkyboxSyncApi();
     const unsubscribe = dataPlatformSkyboxSyncApi.onDataPlatformSkyboxSyncProgress?.((progress) => {
@@ -536,14 +562,22 @@ export function ProjectPanel(props: ProjectPanelProps) {
       controller.dispose();
       if (skyboxSyncControllerRef.current === controller) skyboxSyncControllerRef.current = null;
     };
-  }, [loadProjectAssets, pushLog, relinkCurrentSkyboxFromAssets]);
+  }, [
+    loadProjectAssets,
+    pushLog,
+    relinkCurrentSkyboxFromAssets,
+    sceneSessionId,
+    skyboxSyncContextKey,
+  ]);
 
   useEffect(() => {
     skyboxSyncControllerRef.current?.setContext({
       readOnly: Boolean(props.readOnly),
       sceneId: sceneDocument.id,
+      contextKey: sceneSessionId,
+      syncContextKey: skyboxSyncContextKey,
     });
-  }, [props.readOnly, sceneDocument.id]);
+  }, [props.readOnly, sceneDocument.id, sceneSessionId, skyboxSyncContextKey]);
 
   useEffect(() => {
     const dataPlatformImageSyncApi = getDataPlatformImageSyncApi();

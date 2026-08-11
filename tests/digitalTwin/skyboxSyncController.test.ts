@@ -61,8 +61,8 @@ function createSettings(revision = SHA_A): SceneSkyboxSettings {
   };
 }
 
-function completed(runId: string) {
-  return { runId, phase: 'completed', completed: 1, total: 1, message: 'done', error: null };
+function completed(runId: string, contextKey = 'project-a') {
+  return { runId, contextKey, phase: 'completed', completed: 1, total: 1, message: 'done', error: null };
 }
 
 function createManualScheduler() {
@@ -172,7 +172,7 @@ test('controller 防 double start/retry，readOnly completed 只加载并 pendin
     },
   });
 
-  controller.setContext({ readOnly: false, sceneId: scene.id });
+  controller.setContext({ readOnly: false, sceneId: scene.id, contextKey: 'session-main', syncContextKey: 'project-main' });
   const firstStart = controller.start();
   const secondStart = controller.start();
   assert.equal(startCalls, 1);
@@ -180,27 +180,35 @@ test('controller 防 double start/retry，readOnly completed 只加载并 pendin
   resolveStart(true);
   assert.equal(await firstStart, true);
 
-  controller.receiveProgress({ runId: 'failed-run', phase: 'failed', completed: 0, total: 0, message: 'failed', error: 'failed' });
+  controller.receiveProgress({
+    runId: 'failed-run',
+    contextKey: 'project-main',
+    phase: 'failed',
+    completed: 0,
+    total: 0,
+    message: 'failed',
+    error: 'failed',
+  });
   const firstRetry = controller.retry();
   const secondRetry = controller.retry();
   assert.equal(await firstRetry, false);
   assert.equal(await secondRetry, false);
   assert.equal(retryCalls, 1);
 
-  controller.setContext({ readOnly: true, sceneId: scene.id });
-  controller.receiveProgress(completed('run-complete'));
+  controller.setContext({ readOnly: true, sceneId: scene.id, contextKey: 'session-main', syncContextKey: 'project-main' });
+  controller.receiveProgress(completed('run-complete', 'project-main'));
   await flushPromises();
   assert.equal(applyCalls, 0);
   assert.equal(controller.getState().pendingRunId, 'run-complete');
   assert.equal(JSON.stringify(scene), persisted);
 
-  controller.setContext({ readOnly: false, sceneId: scene.id });
+  controller.setContext({ readOnly: false, sceneId: scene.id, contextKey: 'session-main', syncContextKey: 'project-main' });
   assert.equal(applyCalls, 1);
   assert.equal(history.undoStack.length, 1);
   assert.notEqual(JSON.stringify(scene), persisted);
   assert.equal(controller.getState().pendingRunId, null);
 
-  controller.setContext({ readOnly: false, sceneId: 'another-scene' });
+  controller.setContext({ readOnly: false, sceneId: 'another-scene', contextKey: 'session-other', syncContextKey: 'project-other' });
   assert.equal(applyCalls, 1);
 
   const undone = historyModule.undoCommand(scene, history);
@@ -210,28 +218,83 @@ test('controller 防 double start/retry，readOnly completed 只加载并 pendin
   assert.equal(history.undoStack.length, 0);
 });
 
-test('guard blocked 不消费 completed；scene identity 变化后补一次稳定 ID 重关联', async () => {
+test('guard blocked 不消费 completed；切换场景会丢弃旧 session pending，禁止跨项目重关联', async () => {
   let attempts = 0;
   const controller = controllerModule.createSkyboxSyncController({
     startSync: async () => true,
     retrySync: async () => true,
     reloadAssets: async () => [createAsset()],
-    applyAssets: (_assets, sceneId) => {
+    applyAssets: () => {
       attempts += 1;
-      return sceneId === 'scene-b' ? 'applied' : 'blocked';
+      return 'blocked';
     },
   });
-  controller.setContext({ readOnly: false, sceneId: 'scene-a' });
+  controller.setContext({ readOnly: false, sceneId: 'shared-scene', contextKey: 'project-a-session', syncContextKey: 'project-a' });
   controller.receiveProgress(completed('run-switch'));
   await flushPromises();
   assert.equal(attempts, 1);
   assert.equal(controller.getState().pendingRunId, 'run-switch');
 
-  controller.setContext({ readOnly: false, sceneId: 'scene-b' });
-  assert.equal(attempts, 2);
+  controller.setContext({ readOnly: false, sceneId: 'shared-scene', contextKey: 'project-b-session', syncContextKey: 'project-b' });
+  assert.equal(attempts, 1);
   assert.equal(controller.getState().pendingRunId, null);
-  controller.setContext({ readOnly: false, sceneId: 'scene-c' });
-  assert.equal(attempts, 2);
+  assert.equal(controller.getState().progress, null);
+});
+
+test('旧 session 已观察到的 run 迟到 completed 不得绑定新场景', async () => {
+  let reloadCalls = 0;
+  let applyCalls = 0;
+  const controller = controllerModule.createSkyboxSyncController({
+    startSync: async () => true,
+    retrySync: async () => true,
+    reloadAssets: async () => { reloadCalls += 1; return [createAsset()]; },
+    applyAssets: () => { applyCalls += 1; return 'applied'; },
+  });
+  controller.setContext({ readOnly: false, sceneId: 'scene-a', contextKey: 'project-a-session', syncContextKey: 'project-a' });
+  controller.receiveProgress({
+    runId: 'run-late',
+    contextKey: 'project-a',
+    phase: 'downloading',
+    completed: 0,
+    total: 1,
+    message: 'downloading',
+    error: null,
+  });
+
+  controller.setContext({ readOnly: false, sceneId: 'scene-b', contextKey: 'project-b-session', syncContextKey: 'project-b' });
+  controller.receiveProgress(completed('run-late', 'project-a'));
+  await flushPromises();
+
+  assert.equal(reloadCalls, 0);
+  assert.equal(applyCalls, 0);
+  assert.equal(controller.getState().progress, null);
+});
+
+test('场景 session 切换使在途资源重载和旧 start 结果失效', async () => {
+  const reload = createDeferred<ProjectSkyboxAssetEntry[]>();
+  const start = createDeferred<boolean>();
+  let applyCalls = 0;
+  const controller = controllerModule.createSkyboxSyncController({
+    startSync: () => start.promise,
+    retrySync: async () => true,
+    reloadAssets: () => reload.promise,
+    applyAssets: () => { applyCalls += 1; return 'applied'; },
+  });
+  controller.setContext({ readOnly: false, sceneId: 'shared-scene', contextKey: 'project-a-session', syncContextKey: 'project-a' });
+  const startResult = controller.start();
+  controller.receiveProgress(completed('run-a'));
+
+  controller.setContext({ readOnly: false, sceneId: 'shared-scene', contextKey: 'project-b-session', syncContextKey: 'project-b' });
+  start.resolve(false);
+  reload.resolve([createAsset()]);
+  await flushPromises();
+
+  assert.equal(await startResult, false);
+  assert.equal(applyCalls, 0);
+  assert.equal(controller.getState().pendingRunId, null);
+  assert.equal(controller.getState().progress, null);
+  assert.equal(controller.getState().starting, false);
+  assert.equal(controller.getState().reloadingAssets, false);
 });
 
 test('run A 重载期间收到 run B completed 时，结束后串行处理最新 pending run', async () => {
@@ -251,7 +314,7 @@ test('run A 重载期间收到 run B completed 时，结束后串行处理最新
       return 'unchanged';
     },
   });
-  controller.setContext({ readOnly: false, sceneId: 'scene-a' });
+  controller.setContext({ readOnly: false, sceneId: 'scene-a', contextKey: 'session-a', syncContextKey: 'project-a' });
 
   controller.receiveProgress(completed('run-a'));
   assert.equal(reloadCalls, 1);
@@ -287,7 +350,7 @@ test('资源列表加载失败转 renderer failed，可重新加载并仅在成�
     schedule: (callback) => scheduler.schedule(callback),
     cancelSchedule: (id) => scheduler.cancel(id),
   });
-  controller.setContext({ readOnly: false, sceneId: 'scene-a' });
+  controller.setContext({ readOnly: false, sceneId: 'scene-a', contextKey: 'session-a', syncContextKey: 'project-a' });
   controller.receiveProgress(completed('run-reload'));
   await flushPromises();
   assert.equal(controller.getState().progress?.phase, 'failed');
@@ -317,15 +380,15 @@ test('进度更新 225ms 节流，日志只记录阶段切换且 completed 立�
     cancelSchedule: (id) => scheduler.cancel(id),
     progressThrottleMs: 225,
   });
-  controller.setContext({ readOnly: false, sceneId: 'scene-a' });
-  controller.receiveProgress({ runId: 'run-throttle', phase: 'downloading', completed: 1, total: 3, message: '1', error: null });
-  controller.receiveProgress({ runId: 'run-throttle', phase: 'downloading', completed: 2, total: 3, message: '2', error: null });
+  controller.setContext({ readOnly: false, sceneId: 'scene-a', contextKey: 'session-a', syncContextKey: 'project-a' });
+  controller.receiveProgress({ runId: 'run-throttle', contextKey: 'project-a', phase: 'downloading', completed: 1, total: 3, message: '1', error: null });
+  controller.receiveProgress({ runId: 'run-throttle', contextKey: 'project-a', phase: 'downloading', completed: 2, total: 3, message: '2', error: null });
   assert.equal(controller.getState().progress, null);
   scheduler.flush();
   assert.equal(controller.getState().progress?.completed, 2);
   assert.deepEqual(logs, ['run-throttle:downloading']);
 
-  controller.receiveProgress({ runId: 'run-throttle', phase: 'validating', completed: 3, total: 3, message: 'valid', error: null });
+  controller.receiveProgress({ runId: 'run-throttle', contextKey: 'project-a', phase: 'validating', completed: 3, total: 3, message: 'valid', error: null });
   controller.receiveProgress(completed('run-throttle'));
   assert.equal(controller.getState().progress?.phase, 'completed');
   assert.deepEqual(logs, ['run-throttle:downloading', 'run-throttle:validating', 'run-throttle:completed']);

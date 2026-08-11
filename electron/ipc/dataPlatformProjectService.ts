@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
@@ -85,6 +85,7 @@ type SkyboxSyncPrepareContext = {
   baseUrl: string;
   workspaceRoot: string;
   sharedResourcesRoot: string;
+  syncContextKey: string | null;
 };
 
 let skyboxSyncPrepareGeneration = 0;
@@ -192,7 +193,11 @@ async function prepareDataPlatformSkyboxSync(
   if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
   setSharedProjectSkyboxRoot(context.sharedResourcesRoot);
   if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
-  return startDataPlatformSkyboxSync(context.baseUrl, context.sharedResourcesRoot);
+  return startDataPlatformSkyboxSync(
+    context.baseUrl,
+    context.sharedResourcesRoot,
+    context.syncContextKey,
+  );
 }
 
 /** 手动同步始终写入工作区共享天空盒缓存，不创建或切换业务项目 binding。 */
@@ -205,11 +210,19 @@ export function syncDataPlatformSkyboxesForWorkspace(
   if (dataPlatformProjectServiceShuttingDown) return Promise.resolve(false);
 
   const controller = new AbortController();
+  const binding = getCurrentDataPlatformBinding();
   const context: SkyboxSyncPrepareContext = {
     generation: skyboxSyncPrepareGeneration,
     baseUrl,
     workspaceRoot,
     sharedResourcesRoot: resolveDataPlatformSharedResourcesRoot(workspaceRoot),
+    syncContextKey: binding
+      ? createDataPlatformSkyboxSyncContextKey(
+        binding.metadata.baseUrl,
+        binding.metadata.projectId,
+        binding.projectRoot,
+      )
+      : null,
   };
   currentSkyboxSyncPrepareContext = context;
   skyboxSyncPrepareControllers.add(controller);
@@ -242,6 +255,38 @@ export async function syncDataPlatformImagesForWorkspace(
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
   return startDataPlatformImageSync(baseUrl, sharedResourcesRoot);
+}
+
+/** 根据数据中台地址和项目 ID 生成不暴露地址的稳定同步业务 key。 */
+export function createDataPlatformSkyboxSyncContextKey(
+  baseUrl: string,
+  projectId: string,
+  projectRoot: string,
+): string {
+  const normalizedBaseUrl = new URL(baseUrl).toString().replace(/\/$/, '');
+  const normalizedProjectId = projectId.trim();
+  if (!/^[1-9]\d{0,63}$/.test(normalizedProjectId)) {
+    throw new Error('数据中台项目 ID 无效，无法创建天空盒同步 contextKey。');
+  }
+  const absoluteProjectRoot = path.resolve(projectRoot);
+  const normalizedProjectRoot = process.platform === 'win32'
+    ? absoluteProjectRoot.toLowerCase()
+    : absoluteProjectRoot;
+  return createHash('sha256')
+    .update(`${normalizedBaseUrl}\n${normalizedProjectId}\n${normalizedProjectRoot}`, 'utf8')
+    .digest('hex');
+}
+
+/** 当前项目用于隔离天空盒同步进度的安全业务 key。 */
+export function getCurrentDataPlatformSkyboxSyncContextKey(): string | null {
+  const binding = getCurrentDataPlatformBinding();
+  return binding
+    ? createDataPlatformSkyboxSyncContextKey(
+      binding.metadata.baseUrl,
+      binding.metadata.projectId,
+      binding.projectRoot,
+    )
+    : null;
 }
 
 /** 重试最近一次数据中台天空盒同步。 */
@@ -415,7 +460,11 @@ async function openDataPlatformProjectInternal(
   setSharedProjectSkyboxRoot(sharedResourcesRoot);
 
   const modelSyncStarted = startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
-  const skyboxSyncStarted = startDataPlatformSkyboxSync(baseUrl, sharedResourcesRoot);
+  const skyboxSyncStarted = startDataPlatformSkyboxSync(
+    baseUrl,
+    sharedResourcesRoot,
+    createDataPlatformSkyboxSyncContextKey(baseUrl, project.id, projectRoot),
+  );
   return {
     projectRoot,
     sceneFilePath,

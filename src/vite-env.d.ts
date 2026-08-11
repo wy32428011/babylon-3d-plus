@@ -242,6 +242,7 @@ type DataPlatformSkyboxSyncPhase =
 
 type DataPlatformSkyboxSyncProgress = {
   runId: string;
+  contextKey: string | null;
   phase: DataPlatformSkyboxSyncPhase;
   completed: number;
   total: number;
@@ -401,6 +402,7 @@ type ImportCadFileResult = {
 
 type ProjectListAssetsResult = {
   projectRoot: string | null;
+  skyboxSyncContextKey: string | null;
   assets: ProjectModelAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
   orphanedSkyboxes: ProjectSkyboxAssetEntry[];

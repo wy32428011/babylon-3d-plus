@@ -825,7 +825,13 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   const projectRoot = await loadRecentProjectRoot();
 
   if (!projectRoot) {
-    return { projectRoot: null, assets: [], skyboxes: [], orphanedSkyboxes: [] };
+    return {
+      projectRoot: null,
+      skyboxSyncContextKey: null,
+      assets: [],
+      skyboxes: [],
+      orphanedSkyboxes: [],
+    };
   }
 
   await ensureProjectDirectories(projectRoot);
@@ -847,7 +853,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   }
 
   const { skyboxes, orphanedSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
-  return { projectRoot, assets, skyboxes, orphanedSkyboxes };
+  return { projectRoot, skyboxSyncContextKey: null, assets, skyboxes, orphanedSkyboxes };
 }
 
 async function loadProjectSkyboxAssets(

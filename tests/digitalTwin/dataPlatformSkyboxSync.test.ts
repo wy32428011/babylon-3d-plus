@@ -23,6 +23,7 @@ type SyncPhase = 'querying' | 'downloading' | 'validating' | 'promoting' | 'comp
 
 type SyncProgress = {
   runId: string;
+  contextKey: string | null;
   phase: SyncPhase;
   completed: number;
   total: number;
@@ -74,7 +75,7 @@ type SyncModule = {
     dependencies?: Partial<SyncDependencies>;
     runId?: string;
   }): Promise<void>;
-  startDataPlatformSkyboxSync(baseUrl: string, editorRoot: string): boolean;
+  startDataPlatformSkyboxSync(baseUrl: string, editorRoot: string, contextKey?: string | null): boolean;
   retryDataPlatformSkyboxSync(): boolean;
   getLatestDataPlatformSkyboxSyncProgress(): SyncProgress | null;
   clearDataPlatformSkyboxSyncRetryContext(): void;

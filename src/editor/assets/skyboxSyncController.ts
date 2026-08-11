@@ -20,7 +20,14 @@ export type SkyboxSyncControllerState = {
 type SkyboxSyncContext = {
   readOnly: boolean;
   sceneId: string | null;
+  contextKey: string | null;
+  syncContextKey: string | null;
 };
+
+type SkyboxSyncContextIdentity = Pick<
+  SkyboxSyncContext,
+  'sceneId' | 'contextKey' | 'syncContextKey'
+>;
 
 type Schedule = (callback: () => void, delayMs: number) => unknown;
 type CancelSchedule = (handle: unknown) => void;
@@ -59,11 +66,12 @@ const MAX_TRACKED_RUNS = 32;
 
 function createLocalProgress(
   runId: string,
+  contextKey: string | null,
   phase: 'querying' | 'failed',
   message: string,
   error: string | null,
 ): SkyboxSyncProgress {
-  return { runId, phase, completed: 0, total: 0, message, error };
+  return { runId, contextKey, phase, completed: 0, total: 0, message, error };
 }
 
 function defaultSchedule(callback: () => void, delayMs: number): unknown {
@@ -72,6 +80,23 @@ function defaultSchedule(callback: () => void, delayMs: number): unknown {
 
 function defaultCancelSchedule(handle: unknown): void {
   globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>);
+}
+
+function captureContextIdentity(context: SkyboxSyncContext): SkyboxSyncContextIdentity {
+  return {
+    sceneId: context.sceneId,
+    contextKey: context.contextKey,
+    syncContextKey: context.syncContextKey,
+  };
+}
+
+function isSameContextIdentity(
+  left: SkyboxSyncContextIdentity,
+  right: SkyboxSyncContextIdentity,
+): boolean {
+  return left.sceneId === right.sceneId
+    && left.contextKey === right.contextKey
+    && left.syncContextKey === right.syncContextKey;
 }
 
 /** 管理天空盒同步的有序进度、资源重载与受编辑权限保护的稳定 ID 重关联。 */
@@ -90,7 +115,12 @@ export function createSkyboxSyncController(
     pendingRunId: null,
     reloadError: null,
   };
-  let context: SkyboxSyncContext = { readOnly: true, sceneId: null };
+  let context: SkyboxSyncContext = {
+    readOnly: true,
+    sceneId: null,
+    contextKey: null,
+    syncContextKey: null,
+  };
   let disposed = false;
   let localRunCounter = 0;
   let throttleHandle: unknown = null;
@@ -98,10 +128,18 @@ export function createSkyboxSyncController(
   let completedDismissHandle: unknown = null;
   let pendingAssets: ProjectSkyboxAssetEntry[] | null = null;
   let pendingCompletedProgress: SkyboxSyncProgress | null = null;
+  let pendingContextIdentity: SkyboxSyncContextIdentity | null = null;
   let loadingRunId: string | null = null;
   let applying = false;
   const processedRuns = new Set<string>();
   const loggedPhases = new Map<string, SkyboxSyncPhase>();
+  const runContextIdentities = new Map<string, SkyboxSyncContextIdentity>();
+
+  const clearPendingData = (): void => {
+    pendingAssets = null;
+    pendingCompletedProgress = null;
+    pendingContextIdentity = null;
+  };
 
   const publishState = (): void => {
     if (disposed) return;
@@ -118,6 +156,19 @@ export function createSkyboxSyncController(
     if (collection.size <= MAX_TRACKED_RUNS) return;
     const oldest = collection.values().next().value as T | undefined;
     if (oldest !== undefined) collection.delete(oldest);
+  };
+
+  const getRunContextIdentity = (runId: string): SkyboxSyncContextIdentity => {
+    const existing = runContextIdentities.get(runId);
+    if (existing) return existing;
+
+    const identity = captureContextIdentity(context);
+    runContextIdentities.set(runId, identity);
+    if (runContextIdentities.size > MAX_TRACKED_RUNS) {
+      const oldest = runContextIdentities.keys().next().value as string | undefined;
+      if (oldest !== undefined && oldest !== runId) runContextIdentities.delete(oldest);
+    }
+    return identity;
   };
 
   const logPhaseTransition = (progress: SkyboxSyncProgress): void => {
@@ -161,7 +212,7 @@ export function createSkyboxSyncController(
   };
 
   const failRendererRun = (runId: string, message: string, reloadError: string | null): void => {
-    const failed = createLocalProgress(runId, 'failed', message, message);
+    const failed = createLocalProgress(runId, context.syncContextKey, 'failed', message, message);
     clearCompletedDismiss();
     logPhaseTransition(failed);
     updateState({ progress: failed, reloadError, reloadingAssets: false });
@@ -176,6 +227,8 @@ export function createSkyboxSyncController(
       || !state.pendingRunId
       || !pendingAssets
       || !pendingCompletedProgress
+      || !pendingContextIdentity
+      || !isSameContextIdentity(context, pendingContextIdentity)
     ) return;
 
     const runId = state.pendingRunId;
@@ -187,8 +240,7 @@ export function createSkyboxSyncController(
       if (result !== 'applied' && result !== 'unchanged') return;
 
       rememberBounded(processedRuns, runId);
-      pendingAssets = null;
-      pendingCompletedProgress = null;
+      clearPendingData();
       updateState({
         progress: state.progress?.runId === runId && state.progress.phase === 'failed'
           ? { ...state.progress, phase: 'completed', message: '天空盒同步完成。', error: null }
@@ -260,6 +312,7 @@ export function createSkyboxSyncController(
     };
     pendingAssets = null;
     pendingCompletedProgress = progress;
+    pendingContextIdentity = captureContextIdentity(context);
     publishState();
     void reloadCompletedRun(progress.runId);
   };
@@ -269,13 +322,18 @@ export function createSkyboxSyncController(
     clearCompletedDismiss();
     const normalized = normalizeSkyboxSyncProgress(payload);
     const progress = normalized.progress;
-    logPhaseTransition(progress);
 
     if (!normalized.valid) {
+      logPhaseTransition(progress);
       clearThrottle();
       commitProgress(progress);
       return;
     }
+
+    if (progress.contextKey !== context.syncContextKey) return;
+    const runContextIdentity = getRunContextIdentity(progress.runId);
+    if (!isSameContextIdentity(context, runContextIdentity)) return;
+    logPhaseTransition(progress);
 
     if (progress.phase === 'completed' || progress.phase === 'failed') {
       clearThrottle();
@@ -287,8 +345,7 @@ export function createSkyboxSyncController(
 
     if (state.pendingRunId && state.pendingRunId !== progress.runId) {
       state = { ...state, pendingRunId: null, reloadError: null };
-      pendingAssets = null;
-      pendingCompletedProgress = null;
+      clearPendingData();
     }
     throttledProgress = progress;
     if (throttleHandle !== null) return;
@@ -311,12 +368,19 @@ export function createSkyboxSyncController(
     ) return false;
 
     clearCompletedDismiss();
+    const operationContextIdentity = captureContextIdentity(context);
     localRunCounter += 1;
     const runId = `renderer-skybox-${kind}-${localRunCounter}`;
     const queryingMessage = kind === 'start'
       ? '正在启动数据中台天空盒同步...'
       : '已提交重试，正在重新查询天空盒...';
-    const querying = createLocalProgress(runId, 'querying', queryingMessage, null);
+    const querying = createLocalProgress(
+      runId,
+      context.syncContextKey,
+      'querying',
+      queryingMessage,
+      null,
+    );
     logPhaseTransition(querying);
     updateState({
       progress: querying,
@@ -327,7 +391,7 @@ export function createSkyboxSyncController(
 
     try {
       const started = await (kind === 'start' ? options.startSync() : options.retrySync());
-      if (disposed) return false;
+      if (disposed || !isSameContextIdentity(context, operationContextIdentity)) return false;
       if (!started) {
         const message = kind === 'start'
           ? '数据中台天空盒同步未能启动，请检查数据中台连接配置。'
@@ -336,7 +400,7 @@ export function createSkyboxSyncController(
       }
       return started;
     } catch (error) {
-      if (disposed) return false;
+      if (disposed || !isSameContextIdentity(context, operationContextIdentity)) return false;
       const detail = formatSkyboxSyncError(error);
       const message = kind === 'start'
         ? `启动数据中台天空盒同步失败：${detail}`
@@ -344,7 +408,7 @@ export function createSkyboxSyncController(
       failRendererRun(runId, message, null);
       return false;
     } finally {
-      if (!disposed) {
+      if (!disposed && isSameContextIdentity(context, operationContextIdentity)) {
         updateState({
           starting: kind === 'start' ? false : state.starting,
           retrying: kind === 'retry' ? false : state.retrying,
@@ -357,10 +421,29 @@ export function createSkyboxSyncController(
     getState: () => ({ ...state }),
     setContext(nextContext) {
       if (disposed) return;
-      const shouldRetryPending = !nextContext.readOnly
-        && Boolean(nextContext.sceneId)
-        && ((context.readOnly && !nextContext.readOnly) || context.sceneId !== nextContext.sceneId);
+      const identityChanged = !isSameContextIdentity(context, nextContext);
+      const shouldRetryPending = !identityChanged
+        && context.readOnly
+        && !nextContext.readOnly
+        && Boolean(nextContext.sceneId);
       context = { ...nextContext };
+
+      if (identityChanged) {
+        clearThrottle();
+        clearCompletedDismiss();
+        clearPendingData();
+        state = {
+          ...state,
+          progress: null,
+          starting: false,
+          retrying: false,
+          reloadingAssets: false,
+          pendingRunId: null,
+          reloadError: null,
+        };
+        publishState();
+        return;
+      }
       if (shouldRetryPending) tryApplyPending();
     },
     receiveProgress,
@@ -373,20 +456,23 @@ export function createSkyboxSyncController(
         || !state.reloadError
         || !state.pendingRunId
         || !pendingCompletedProgress
+        || !pendingContextIdentity
+        || !isSameContextIdentity(context, pendingContextIdentity)
       ) return false;
       return reloadCompletedRun(state.pendingRunId);
     },
     dismissFailure() {
       if (disposed || state.progress?.phase !== 'failed') return;
-      updateState({ progress: null });
+      clearPendingData();
+      updateState({ progress: null, pendingRunId: null, reloadError: null });
     },
     dispose() {
       if (disposed) return;
       disposed = true;
       clearThrottle();
       clearCompletedDismiss();
-      pendingAssets = null;
-      pendingCompletedProgress = null;
+      clearPendingData();
+      runContextIdentities.clear();
     },
   };
 }
