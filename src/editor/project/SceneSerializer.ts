@@ -9,6 +9,7 @@ import {
   DEFAULT_MQTT_CONFIG,
   MODEL_ASSET_CODE_MAX_LENGTH,
   createModelAssetCode,
+  normalizeDataPlatformResourceId,
   normalizeSkyboxSphereScale,
   normalizeStackerSimulationScenario,
   sanitizeFetchConfig,
@@ -48,6 +49,7 @@ import { normalizeBuiltInSlotBindingConfig, normalizeLocatorBuiltInBinding } fro
 import { logLegacySceneMigrationSummary, logSceneV2ToV3MigrationSummary, migrateLegacySceneV1ToV2, migrateSceneV2ToV3 } from './sceneMigration';
 
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
+const INVALID_SKYBOX_RESOURCE_ID_ERROR = '场景文件格式不受支持：dataPlatformResourceId 必须是 trim 后 1-64 位正十进制字符串。';
 const MESH_KINDS: readonly MeshKind[] = ['cube', 'sphere', 'plane'];
 const LIGHT_KINDS: readonly LightKind[] = ['hemispheric', 'directional', 'point'];
 const MODEL_SCRIPT_EXTENSION = '.ts';
@@ -87,7 +89,10 @@ export function deserializeScene(content: string): SceneDocument {
     }
     return normalizeSceneDocument(rawScene);
   } catch (error) {
-    if (error instanceof Error && error.message === UNSUPPORTED_SCENE_FILE_ERROR) {
+    if (error instanceof Error && (
+      error.message === UNSUPPORTED_SCENE_FILE_ERROR
+      || error.message === INVALID_SKYBOX_RESOURCE_ID_ERROR
+    )) {
       throw error;
     }
 
@@ -284,11 +289,13 @@ function normalizeSceneSkyboxSettings(value: unknown): SceneSkyboxSettings | nul
     throwUnsupportedSceneFileError();
   }
 
+  const dataPlatformResourceId = normalizeOptionalDataPlatformResourceId(skybox);
   const normalized = sanitizeSceneSkybox({
     packagePath: assertString(skybox.packagePath),
     sourcePath: assertString(skybox.sourcePath),
     sourceUrl,
     ...(skybox.assetRevision === undefined ? {} : { assetRevision: assertString(skybox.assetRevision) }),
+    ...(dataPlatformResourceId ? { dataPlatformResourceId } : {}),
     format,
     rotationDegrees: assertFiniteNumber(skybox.rotationDegrees),
     intensity: assertFiniteNumber(skybox.intensity),
@@ -681,11 +688,13 @@ function normalizeSkyboxComponent(value: unknown): NonNullable<EntityComponents[
   const format = skybox.format;
   if (format !== 'hdr' && format !== 'exr') throwUnsupportedSceneFileError();
 
+  const dataPlatformResourceId = normalizeOptionalDataPlatformResourceId(skybox);
   const normalized = sanitizeSceneSkybox({
     packagePath: assertString(skybox.packagePath),
     sourcePath: assertString(skybox.sourcePath),
     sourceUrl,
     ...(skybox.assetRevision === undefined ? {} : { assetRevision: assertString(skybox.assetRevision) }),
+    ...(dataPlatformResourceId ? { dataPlatformResourceId } : {}),
     format,
     rotationDegrees: 0,
     intensity: assertFiniteNumber(skybox.intensity),
@@ -697,6 +706,7 @@ function normalizeSkyboxComponent(value: unknown): NonNullable<EntityComponents[
     sourcePath: normalized.sourcePath,
     sourceUrl: normalized.sourceUrl,
     ...(normalized.assetRevision ? { assetRevision: normalized.assetRevision } : {}),
+    ...(normalized.dataPlatformResourceId ? { dataPlatformResourceId: normalized.dataPlatformResourceId } : {}),
     format: normalized.format,
     intensity: normalized.intensity,
     resolution: normalized.resolution,
@@ -1193,6 +1203,14 @@ function assertArray(value: unknown): unknown[] {
   }
 
   return value;
+}
+
+function normalizeOptionalDataPlatformResourceId(value: PlainObject): string | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'dataPlatformResourceId');
+  if (!descriptor || !('value' in descriptor)) return undefined;
+  const normalized = normalizeDataPlatformResourceId(descriptor.value);
+  if (!normalized) throw new Error(INVALID_SKYBOX_RESOURCE_ID_ERROR);
+  return normalized;
 }
 
 function assertString(value: unknown): string {

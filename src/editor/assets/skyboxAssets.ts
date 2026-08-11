@@ -3,6 +3,7 @@ import {
   SCENE_SKYBOX_INTENSITY_DEFAULT,
   SCENE_SKYBOX_RESOLUTION_DEFAULT,
   SCENE_SKYBOX_ROTATION_MIN,
+  normalizeDataPlatformResourceId,
   sanitizeSceneSkybox,
   type SceneSkyboxSettings,
 } from '../model/SceneDocument';
@@ -35,11 +36,15 @@ export function createSceneSkyboxFromAsset(
   asset: ProjectSkyboxAssetEntry,
   current: SceneSkyboxSettings | null = null,
 ): SceneSkyboxSettings {
+  const dataPlatformResourceId = asset.source === 'data-platform' && asset.availability === 'active'
+    ? normalizeDataPlatformResourceId(asset.dataPlatformResourceId)
+    : null;
   const skybox = sanitizeSceneSkybox({
     packagePath: asset.packagePath,
     sourcePath: asset.path,
     sourceUrl: asset.sourceUrl,
     assetRevision: asset.assetRevision,
+    ...(dataPlatformResourceId ? { dataPlatformResourceId } : {}),
     format: asset.format,
     rotationDegrees: current?.rotationDegrees ?? SCENE_SKYBOX_ROTATION_MIN,
     intensity: current?.intensity ?? SCENE_SKYBOX_INTENSITY_DEFAULT,
@@ -54,6 +59,18 @@ export function findSkyboxAssetForSettings(
   skybox: SceneSkyboxSettings,
   assets: ProjectSkyboxAssetEntry[],
 ): ProjectSkyboxAssetEntry | null {
+  const resourceIdDescriptor = Object.getOwnPropertyDescriptor(skybox, 'dataPlatformResourceId');
+  if (resourceIdDescriptor && 'value' in resourceIdDescriptor) {
+    const dataPlatformResourceId = normalizeDataPlatformResourceId(resourceIdDescriptor.value);
+    if (!dataPlatformResourceId) return null;
+    const idCandidates = assets.filter((asset) =>
+      asset.source === 'data-platform'
+      && asset.availability === 'active'
+      && normalizeDataPlatformResourceId(asset.dataPlatformResourceId) === dataPlatformResourceId,
+    );
+    return idCandidates.length === 1 ? idCandidates[0] : null;
+  }
+
   const sourcePathKey = normalizePortablePath(skybox.sourcePath);
   const exactCandidates = assets.filter((asset) =>
     normalizePortablePath(asset.path) === sourcePathKey || asset.sourceUrl === skybox.sourceUrl,
