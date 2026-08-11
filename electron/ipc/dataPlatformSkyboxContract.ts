@@ -25,11 +25,11 @@ type BoundedDecimalOptions = {
   max: DecimalBound;
 };
 
-const MAX_SKYBOX_FILE_SIZE_BYTES = 512 * 1024 * 1024;
+export const MAX_SKYBOX_FILE_BYTES = 512 * 1024 * 1024;
 const LOWERCASE_SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const POSITIVE_DECIMAL_PATTERN = /^[1-9]\d*$/;
 const IDENTIFIER_PATTERN = /^[1-9]\d{0,63}$/;
-const UPDATED_AT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:(Z)|([+-])(\d{2}):(\d{2}))?)?$/;
+const UPDATED_AT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:(?:Z)|[+-](\d{2}):(\d{2}))?$/;
 
 export function parseBoundedDecimalString(value: unknown, options: BoundedDecimalOptions): number {
   if (typeof value !== 'string') {
@@ -69,36 +69,51 @@ export function normalizeSkyboxQueryResponse(value: unknown): DataPlatformSkybox
   if (!isPlainObject(value)) {
     throw new Error('数据中台天空盒响应结构不正确。');
   }
-
-  if (value.success !== true) {
-    throw new Error(normalizeOptionalNonEmptyString(value.message) ?? '查询天空盒失败');
+  if (!Object.hasOwn(value, 'success')) {
+    throw new Error('数据中台天空盒响应结构不正确：缺少 success。');
   }
 
-  if (!isPlainObject(value.data) || !isPlainArray(value.data.records)) {
-    throw new Error('数据中台天空盒响应缺少合法的 data.records。');
+  if (readOwnField(value, 'success') !== true) {
+    throw new Error(normalizeOptionalNonEmptyString(readOwnField(value, 'message')) ?? '查询天空盒失败');
   }
 
-  const records = value.data.records.map((record, index) => normalizeSkyboxRecord(record, index));
+  const data = readOwnField(value, 'data');
+  if (!isPlainObject(data)) {
+    throw new Error('数据中台天空盒响应结构不正确：data 不是普通对象。');
+  }
+
+  const rawRecords = readOwnField(data, 'records');
+  if (!isPlainArray(rawRecords)) {
+    throw new Error('数据中台天空盒响应结构不正确：data.records 不是数组。');
+  }
+
+  const total = parseBoundedDecimalString(readOwnField(data, 'total'), {
+    label: 'data.total',
+    min: 0,
+    max: 100000,
+  });
+  const pageNum = parseBoundedDecimalString(readOwnField(data, 'pageNum'), {
+    label: 'data.pageNum',
+    min: 1,
+    max: 1000,
+  });
+  const pageSize = parseBoundedDecimalString(readOwnField(data, 'pageSize'), {
+    label: 'data.pageSize',
+    min: 1,
+    max: 100,
+  });
+
+  if (rawRecords.length > pageSize) {
+    throw new Error('数据中台天空盒响应结构不正确：记录数量不能超过 pageSize。');
+  }
+  if (rawRecords.length > total) {
+    throw new Error('数据中台天空盒响应结构不正确：记录数量不能超过 total。');
+  }
+
+  const records = rawRecords.map((record, index) => normalizeSkyboxRecord(record, index));
   assertUniqueSkyboxRecords(records);
 
-  return {
-    records,
-    total: parseBoundedDecimalString(value.data.total, {
-      label: 'data.total',
-      min: 0,
-      max: 100000,
-    }),
-    pageNum: parseBoundedDecimalString(value.data.pageNum, {
-      label: 'data.pageNum',
-      min: 1,
-      max: 1000,
-    }),
-    pageSize: parseBoundedDecimalString(value.data.pageSize, {
-      label: 'data.pageSize',
-      min: 1,
-      max: 100,
-    }),
-  };
+  return { records, total, pageNum, pageSize };
 }
 
 export function assertUniqueSkyboxRecords(records: readonly DataPlatformSkyboxRecord[]): void {
@@ -127,28 +142,28 @@ export function assertUniqueSkyboxRecords(records: readonly DataPlatformSkyboxRe
 
 function normalizeSkyboxRecord(value: unknown, index: number): DataPlatformSkyboxRecord {
   const label = `数据中台天空盒第 ${index + 1} 项`;
-  if (!isPlainObject(value)) throw new Error(`${label}不是 plain object。`);
+  if (!isPlainObject(value)) throw new Error(`${label}不是普通对象。`);
 
-  const fileName = normalizeRequiredString(value.fileName, `${label} fileName`);
-  const format = normalizeFileFormat(value.fileFormat, `${label} fileFormat`);
+  const fileName = normalizeRequiredString(readOwnField(value, 'fileName'), `${label} fileName`);
+  const format = normalizeFileFormat(readOwnField(value, 'fileFormat'), `${label} fileFormat`);
   if (!fileName.toLowerCase().endsWith(`.${format}`)) {
     throw new Error(`${label}文件扩展名必须与 ${format.toUpperCase()} 格式一致。`);
   }
 
   return {
-    id: normalizePositiveIdentifier(value.id, `${label} id`),
-    displayName: normalizeRequiredString(value.skyboxName, `${label} skyboxName`),
+    id: normalizePositiveIdentifier(readOwnField(value, 'id'), `${label} id`),
+    displayName: normalizeRequiredString(readOwnField(value, 'skyboxName'), `${label} skyboxName`),
     fileName,
-    fileUrl: normalizeRequiredString(value.fileUrl, `${label} fileUrl`),
+    fileUrl: normalizeRequiredString(readOwnField(value, 'fileUrl'), `${label} fileUrl`),
     format,
-    fileSizeBytes: parseBoundedDecimalString(value.fileSize, {
+    fileSizeBytes: parseBoundedDecimalString(readOwnField(value, 'fileSize'), {
       label: `${label} fileSize`,
       min: 1,
-      max: MAX_SKYBOX_FILE_SIZE_BYTES,
+      max: MAX_SKYBOX_FILE_BYTES,
     }),
-    sha256: normalizeSha256(value.fileSha256, `${label} SHA-256`),
-    revision: normalizePositiveRevision(value.revision, `${label} revision`),
-    updatedAt: normalizeUpdatedAt(value.updatedAt, `${label} updatedAt`),
+    sha256: normalizeSha256(readOwnField(value, 'fileSha256'), `${label} SHA-256`),
+    revision: normalizePositiveRevision(readOwnField(value, 'revision'), `${label} revision`),
+    updatedAt: normalizeUpdatedAt(readOwnField(value, 'updatedAt'), `${label} updatedAt`),
   };
 }
 
@@ -197,35 +212,27 @@ function normalizePositiveRevision(value: unknown, label: string): string {
 
 function normalizeUpdatedAt(value: unknown, label: string): string | null {
   if (value === null) return null;
-  if (typeof value !== 'string') throw new Error(`${label}必须是有效时间字符串或 null。`);
+  if (typeof value !== 'string') throw new Error(`${label}必须是有效日期时间字符串或 null。`);
 
   const normalized = value.trim();
   const match = UPDATED_AT_PATTERN.exec(normalized);
-  if (!match) throw new Error(`${label}必须是有效时间字符串或 null。`);
+  if (!match) throw new Error(`${label}必须是有效日期时间字符串或 null。`);
 
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , , , offsetHourText, offsetMinuteText] = match;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offsetHourText, offsetMinuteText] = match;
   const year = Number(yearText);
   const month = Number(monthText);
   const day = Number(dayText);
-  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
-    throw new Error(`${label}必须是有效时间字符串或 null。`);
-  }
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const offsetHour = offsetHourText === undefined ? 0 : Number(offsetHourText);
+  const offsetMinute = offsetMinuteText === undefined ? 0 : Number(offsetMinuteText);
 
-  if (hourText !== undefined) {
-    const hour = Number(hourText);
-    const minute = Number(minuteText);
-    const second = Number(secondText);
-    if (hour > 23 || minute > 59 || second > 59) {
-      throw new Error(`${label}必须是有效时间字符串或 null。`);
-    }
-  }
-
-  if (offsetHourText !== undefined) {
-    const offsetHour = Number(offsetHourText);
-    const offsetMinute = Number(offsetMinuteText);
-    if (offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0)) {
-      throw new Error(`${label}必须是有效时间字符串或 null。`);
-    }
+  const invalidDate = month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month);
+  const invalidTime = hour > 23 || minute > 59 || second > 59;
+  const invalidOffset = offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0);
+  if (invalidDate || invalidTime || invalidOffset) {
+    throw new Error(`${label}必须是有效日期时间字符串或 null。`);
   }
 
   return normalized;
@@ -237,6 +244,10 @@ function daysInMonth(year: number, month: number): number {
     return leapYear ? 29 : 28;
   }
   return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function readOwnField(value: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(value, key) ? value[key] : undefined;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

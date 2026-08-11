@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   assertUniqueSkyboxRecords,
+  MAX_SKYBOX_FILE_BYTES,
   normalizePositiveIdentifier,
   normalizeSkyboxQueryResponse,
   parseBoundedDecimalString,
   type DataPlatformSkyboxRecord,
 } from '../../electron/ipc/dataPlatformSkyboxContract.ts';
 
-const MAX_SKYBOX_BYTES = 512 * 1024 * 1024;
 const LONG_ID = '2052912068767571969';
 const LONG_REVISION = '2052912068767571970';
 const VALID_SHA = 'a'.repeat(64);
@@ -20,10 +20,10 @@ function createRawRecord(overrides: Record<string, unknown> = {}): Record<string
     fileName: ' factory.hdr ',
     fileUrl: ' https://cdn.example.com/skyboxes/factory.hdr ',
     fileFormat: 'HDR',
-    fileSize: String(MAX_SKYBOX_BYTES),
+    fileSize: '1048576',
     fileSha256: VALID_SHA,
     revision: LONG_REVISION,
-    updatedAt: '2026-08-11 10:20:30',
+    updatedAt: '2026-08-11T10:20:30',
     untrusted: 'must-not-leak',
     ...overrides,
   };
@@ -38,9 +38,9 @@ function createSuccessResponse(
     message: 'ok',
     data: {
       records,
-      total: '100000',
-      pageNum: '1000',
-      pageSize: '100',
+      total: '1',
+      pageNum: '1',
+      pageSize: '1',
       ignored: 'must-not-leak',
       ...dataOverrides,
     },
@@ -87,32 +87,40 @@ test('归一化合法天空盒分页并保留超出安全整数的 Long 字符�
       fileName: 'factory.hdr',
       fileUrl: 'https://cdn.example.com/skyboxes/factory.hdr',
       format: 'hdr',
-      fileSizeBytes: MAX_SKYBOX_BYTES,
+      fileSizeBytes: 1_048_576,
       sha256: VALID_SHA,
       revision: LONG_REVISION,
-      updatedAt: '2026-08-11 10:20:30',
+      updatedAt: '2026-08-11T10:20:30',
     }],
-    total: 100000,
-    pageNum: 1000,
-    pageSize: 100,
+    total: 1,
+    pageNum: 1,
+    pageSize: 1,
   });
   assert.equal('untrusted' in page.records[0], false);
   assert.equal('ignored' in page, false);
 });
 
-test('分页与文件大小的下限和上限恰好通过', () => {
-  const minimum = normalizeSkyboxQueryResponse(createSuccessResponse(
-    [createRawRecord({ fileSize: '1' })],
+test('分页和文件大小下限恰好通过', () => {
+  const emptyPage = normalizeSkyboxQueryResponse(createSuccessResponse(
+    [],
     { total: '0', pageNum: '1', pageSize: '1' },
   ));
-  assert.equal(minimum.records[0].fileSizeBytes, 1);
-  assert.deepEqual(
-    { total: minimum.total, pageNum: minimum.pageNum, pageSize: minimum.pageSize },
-    { total: 0, pageNum: 1, pageSize: 1 },
-  );
+  assert.deepEqual(emptyPage, { records: [], total: 0, pageNum: 1, pageSize: 1 });
 
-  const maximum = normalizeSkyboxQueryResponse(createSuccessResponse());
-  assert.equal(maximum.records[0].fileSizeBytes, MAX_SKYBOX_BYTES);
+  const minimumFile = normalizeSkyboxQueryResponse(createSuccessResponse([
+    createRawRecord({ fileSize: '1' }),
+  ]));
+  assert.equal(minimumFile.records[0].fileSizeBytes, 1);
+});
+
+test('分页和文件大小上限恰好通过', () => {
+  assert.equal(MAX_SKYBOX_FILE_BYTES, 512 * 1024 * 1024);
+
+  const maximum = normalizeSkyboxQueryResponse(createSuccessResponse(
+    [createRawRecord({ fileSize: String(MAX_SKYBOX_FILE_BYTES) })],
+    { total: '100000', pageNum: '1000', pageSize: '100' },
+  ));
+  assert.equal(maximum.records[0].fileSizeBytes, MAX_SKYBOX_FILE_BYTES);
   assert.deepEqual(
     { total: maximum.total, pageNum: maximum.pageNum, pageSize: maximum.pageSize },
     { total: 100000, pageNum: 1000, pageSize: 100 },
@@ -166,7 +174,7 @@ test('失败 envelope 使用非空 message，否则使用默认错误', () => {
   );
 });
 
-test('拒绝非 plain object、数组和自定义原型 envelope', () => {
+test('拒绝非普通对象、数组和自定义原型 envelope', () => {
   for (const value of [null, [], new Date('2026-08-11T00:00:00Z')]) {
     assert.throws(() => normalizeSkyboxQueryResponse(value), /响应|结构/);
   }
@@ -175,18 +183,70 @@ test('拒绝非 plain object、数组和自定义原型 envelope', () => {
   assert.throws(() => normalizeSkyboxQueryResponse(pollutedEnvelope), /响应|结构/);
 });
 
+test('所有契约字段只读取自有属性并抵御 Object.prototype 污染', () => {
+  const pollution: Record<string, unknown> = {
+    success: true,
+    message: '原型污染消息',
+    data: createSuccessResponse().data,
+    records: [createRawRecord()],
+    total: '1',
+    pageNum: '1',
+    pageSize: '1',
+    id: LONG_ID,
+    skyboxName: '原型天空盒',
+    fileName: 'prototype.hdr',
+    fileUrl: 'https://cdn.example.com/prototype.hdr',
+    fileFormat: 'HDR',
+    fileSize: '1',
+    fileSha256: VALID_SHA,
+    revision: '1',
+    updatedAt: '2026-08-11T10:20:30Z',
+  };
+  const originalDescriptors = new Map<string, PropertyDescriptor | undefined>();
+
+  try {
+    for (const [key, value] of Object.entries(pollution)) {
+      originalDescriptors.set(key, Object.getOwnPropertyDescriptor(Object.prototype, key));
+      Object.defineProperty(Object.prototype, key, {
+        configurable: true,
+        writable: true,
+        value,
+      });
+    }
+
+    assert.throws(() => normalizeSkyboxQueryResponse({}), /结构不正确/);
+    assert.throws(
+      () => normalizeSkyboxQueryResponse({ success: false }),
+      { message: '查询天空盒失败' },
+    );
+    assert.throws(
+      () => normalizeSkyboxQueryResponse({ success: true, data: {} }),
+      /结构不正确/,
+    );
+    assert.throws(
+      () => normalizeSkyboxQueryResponse(createSuccessResponse([{}])),
+      /第 1 项|结构不正确|不能为空|无效/,
+    );
+  } finally {
+    for (const [key, descriptor] of originalDescriptors) {
+      if (descriptor) Object.defineProperty(Object.prototype, key, descriptor);
+      else Reflect.deleteProperty(Object.prototype, key);
+    }
+  }
+});
+
 test('严格校验 data、records 和每条记录均为可信结构', () => {
   assert.throws(() => normalizeSkyboxQueryResponse({ success: true, data: [] }), /data|records/);
   assert.throws(
     () => normalizeSkyboxQueryResponse({ success: true, data: { records: {} } }),
     /data|records/,
   );
-  assert.throws(() => normalizeSkyboxQueryResponse(createSuccessResponse([[]])), /第 1 项|对象/);
+  assert.throws(() => normalizeSkyboxQueryResponse(createSuccessResponse([[]])), /不是普通对象/);
 
   const pollutedRecord = Object.assign(Object.create({ polluted: true }), createRawRecord());
   assert.throws(
     () => normalizeSkyboxQueryResponse(createSuccessResponse([pollutedRecord])),
-    /第 1 项|对象/,
+    /不是普通对象/,
   );
 });
 
@@ -211,6 +271,26 @@ test('拒绝分页字段的非法类型、越界值和不安全整数', () => {
   }
 });
 
+test('映射记录前拒绝 records 数量超过 pageSize', () => {
+  assert.throws(
+    () => normalizeSkyboxQueryResponse(createSuccessResponse(
+      Array.from({ length: 101 }, () => null),
+      { total: '101', pageSize: '100' },
+    )),
+    /记录数量.*pageSize/,
+  );
+});
+
+test('映射记录前拒绝 records 数量超过 total', () => {
+  assert.throws(
+    () => normalizeSkyboxQueryResponse(createSuccessResponse(
+      [null, null],
+      { total: '1', pageSize: '2' },
+    )),
+    /记录数量.*total/,
+  );
+});
+
 test('拒绝数值型 Long、零 ID 和超长 ID', () => {
   assertRecordRejected({ id: Number(LONG_ID) }, /id/);
   assertRecordRejected({ id: '0' }, /id/);
@@ -233,7 +313,7 @@ test('revision 独立按正十进制字符串规范化且不转换为 number', (
 
 test('拒绝零字节、超过 512MiB 和数值型 fileSize', () => {
   assertRecordRejected({ fileSize: '0' }, /fileSize/);
-  assertRecordRejected({ fileSize: String(MAX_SKYBOX_BYTES + 1) }, /fileSize/);
+  assertRecordRejected({ fileSize: String(MAX_SKYBOX_FILE_BYTES + 1) }, /fileSize/);
   assertRecordRejected({ fileSize: 1024 }, /fileSize/);
 });
 
@@ -264,20 +344,42 @@ test('display name、fileName 和 fileUrl 均不能为空', () => {
   assertRecordRejected({ fileUrl: null }, /fileUrl/);
 });
 
-test('updatedAt 可为 null，非空时必须是有效约定时间字符串', () => {
+test('updatedAt 可为 null，非空时必须是完整且有效的 date-time', () => {
   const nullable = normalizeSkyboxQueryResponse(createSuccessResponse([
     createRawRecord({ updatedAt: null }),
   ]));
   assert.equal(nullable.records[0].updatedAt, null);
 
-  const iso = normalizeSkyboxQueryResponse(createSuccessResponse([
-    createRawRecord({ updatedAt: '2026-08-11T10:20:30.123+08:00' }),
-  ]));
-  assert.equal(iso.records[0].updatedAt, '2026-08-11T10:20:30.123+08:00');
+  for (const updatedAt of [
+    '2026-08-11T10:20:30',
+    '2026-08-11T10:20:30.123+08:00',
+    '2024-02-29T23:59:59Z',
+    '2026-08-11T00:00:00+14:00',
+    '2026-08-11T00:00:00-14:00',
+  ]) {
+    const page = normalizeSkyboxQueryResponse(createSuccessResponse([
+      createRawRecord({ updatedAt }),
+    ]));
+    assert.equal(page.records[0].updatedAt, updatedAt);
+  }
 
-  assertRecordRejected({ updatedAt: '' }, /updatedAt/);
-  assertRecordRejected({ updatedAt: '2026-02-30 10:20:30' }, /updatedAt/);
-  assertRecordRejected({ updatedAt: 'not-a-date' }, /updatedAt/);
+  for (const updatedAt of [
+    '',
+    '2026-08-11',
+    '2026-08-11 10:20:30',
+    '2026-02-29T10:20:30',
+    '2024-02-30T10:20:30',
+    '2026-08-11T24:00:00',
+    '2026-08-11T23:60:00',
+    '2026-08-11T23:59:60',
+    '2026-08-11T00:00:00+14:01',
+    '2026-08-11T00:00:00-14:01',
+    '2026-08-11T00:00:00+15:00',
+    '2026-08-11T00:00:00+08:60',
+    'not-a-date',
+  ]) {
+    assertRecordRejected({ updatedAt }, /updatedAt/);
+  }
   assertRecordRejected({ updatedAt: 1786414830000 }, /updatedAt/);
   assertRecordRejected({ updatedAt: undefined }, /updatedAt/);
 });
@@ -287,7 +389,7 @@ test('完整 response 拒绝重复 ID', () => {
     () => normalizeSkyboxQueryResponse(createSuccessResponse([
       createRawRecord(),
       createRawRecord({ skyboxName: '其他名称', fileSha256: 'b'.repeat(64) }),
-    ])),
+    ], { total: '2', pageSize: '2' })),
     /重复 ID/,
   );
 });
@@ -297,7 +399,7 @@ test('完整 response 按 NFKC、trim 和 lowercase 拒绝重复名称', () => {
     () => normalizeSkyboxQueryResponse(createSuccessResponse([
       createRawRecord({ skyboxName: ' ＡＢＣ ' }),
       createRawRecord({ id: '2', skyboxName: 'abc', fileSha256: 'b'.repeat(64) }),
-    ])),
+    ], { total: '2', pageSize: '2' })),
     /重复名称/,
   );
 });
@@ -307,7 +409,7 @@ test('完整 response 拒绝重复 SHA-256', () => {
     () => normalizeSkyboxQueryResponse(createSuccessResponse([
       createRawRecord(),
       createRawRecord({ id: '2', skyboxName: '其他名称' }),
-    ])),
+    ], { total: '2', pageSize: '2' })),
     /重复 SHA-256/,
   );
 });
