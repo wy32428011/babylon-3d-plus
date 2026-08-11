@@ -140,6 +140,7 @@ export function normalizeSkyboxSyncProgress(progress: unknown): {
     && completed >= 0
     && total >= 0
     && completed <= total
+    && (phase !== 'completed' || completed === total)
     && typeof message === 'string'
     && (error === null || typeof error === 'string');
 

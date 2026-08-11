@@ -234,7 +234,14 @@ export function createSkyboxSyncController(
     } finally {
       if (loadingRunId === runId) {
         loadingRunId = null;
+        const nextRunId = !disposed
+          && state.pendingRunId !== runId
+          && pendingCompletedProgress?.runId === state.pendingRunId
+          ? state.pendingRunId
+          : null;
         if (!disposed) updateState({ reloadingAssets: false });
+        // completed 可能在上一次资源重载期间到达；释放后只处理最新 pending run。
+        if (nextRunId) void reloadCompletedRun(nextRunId);
       }
     }
   };

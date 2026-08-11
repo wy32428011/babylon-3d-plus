@@ -90,6 +90,14 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 test('严格 progress 校验拒绝继承/accessor/非法计数与字段类型，非法状态 never reload', async () => {
   let getterReads = 0;
   const inherited = Object.create({ runId: 'inherited' }) as Record<string, unknown>;
@@ -103,6 +111,7 @@ test('严格 progress 校验拒绝继承/accessor/非法计数与字段类型，
     { runId: 'x', phase: 'unknown', completed: 1, total: 1, message: 'done', error: null },
     { runId: 'x', phase: 'completed', completed: -1, total: 1, message: 'done', error: null },
     { runId: 'x', phase: 'completed', completed: 2, total: 1, message: 'done', error: null },
+    { runId: 'x', phase: 'completed', completed: 0, total: 1, message: 'done', error: null },
     { runId: 'x', phase: 'completed', completed: 1.5, total: 2, message: 'done', error: null },
     { runId: 'x', phase: 'completed', completed: 1, total: 1, message: 7, error: null },
     { runId: 'x', phase: 'completed', completed: 1, total: 1, message: 'done', error: {} },
@@ -123,7 +132,7 @@ test('严格 progress 校验拒绝继承/accessor/非法计数与字段类型，
     reloadAssets: async () => { reloads += 1; return []; },
     applyAssets: () => 'unchanged',
   });
-  controller.receiveProgress(invalidPayloads[0]);
+  for (const payload of invalidPayloads) controller.receiveProgress(payload);
   await flushPromises();
   assert.equal(reloads, 0);
   assert.equal(controller.getState().progress?.phase, 'failed');
@@ -223,6 +232,44 @@ test('guard blocked 不消费 completed；scene identity 变化后补一次稳�
   assert.equal(controller.getState().pendingRunId, null);
   controller.setContext({ readOnly: false, sceneId: 'scene-c' });
   assert.equal(attempts, 2);
+});
+
+test('run A 重载期间收到 run B completed 时，结束后串行处理最新 pending run', async () => {
+  const reloadA = createDeferred<ProjectSkyboxAssetEntry[]>();
+  const reloadB = createDeferred<ProjectSkyboxAssetEntry[]>();
+  const appliedRevisions: string[] = [];
+  let reloadCalls = 0;
+  const controller = controllerModule.createSkyboxSyncController({
+    startSync: async () => true,
+    retrySync: async () => true,
+    reloadAssets: () => {
+      reloadCalls += 1;
+      return reloadCalls === 1 ? reloadA.promise : reloadB.promise;
+    },
+    applyAssets: (assets) => {
+      appliedRevisions.push(assets[0]?.assetRevision ?? 'missing');
+      return 'unchanged';
+    },
+  });
+  controller.setContext({ readOnly: false, sceneId: 'scene-a' });
+
+  controller.receiveProgress(completed('run-a'));
+  assert.equal(reloadCalls, 1);
+  controller.receiveProgress(completed('run-b'));
+  assert.equal(reloadCalls, 1, 'run B 必须等待 run A 的资源重载释放。');
+  assert.equal(controller.getState().pendingRunId, 'run-b');
+
+  reloadA.resolve([createAsset(SHA_A)]);
+  await flushPromises();
+  assert.equal(reloadCalls, 2, 'run A 结束后必须自动 drain 最新 pending run B。');
+  assert.deepEqual(appliedRevisions, [], '过期 run A 的资源不得应用到场景。');
+
+  reloadB.resolve([createAsset(SHA_B)]);
+  await flushPromises();
+  assert.deepEqual(appliedRevisions, [SHA_B]);
+  assert.equal(controller.getState().pendingRunId, null);
+  assert.equal(controller.getState().progress?.runId, 'run-b');
+  assert.equal(controller.getState().progress?.phase, 'completed');
 });
 
 test('资源列表加载失败转 renderer failed，可重新加载并仅在成功处理后自动关闭', async () => {
