@@ -193,7 +193,7 @@ function normalizeDataPlatformSkyboxIndex(value: unknown): DataPlatformSkyboxInd
 
   const version = readOwnDataField(value, 'version', '数据中台天空盒索引');
   if (version !== DATA_PLATFORM_SKYBOX_INDEX_VERSION) {
-    throw new Error(`数据中台天空盒索引版本不受支持：${String(version)}`);
+    throw new Error('数据中台天空盒索引版本不受支持。');
   }
 
   const rawEntries = readOwnDataField(value, 'entries', '数据中台天空盒索引');
@@ -203,8 +203,11 @@ function normalizeDataPlatformSkyboxIndex(value: unknown): DataPlatformSkyboxInd
   const resourceIds = new Set<string>();
   const relativePaths = new Set<string>();
   for (let index = 0; index < rawEntries.length; index += 1) {
-    if (!Object.hasOwn(rawEntries, index)) throw new Error('数据中台天空盒索引 entries 不允许稀疏条目。');
-    const entry = normalizeIndexEntry(rawEntries[index], index);
+    const descriptor = Object.getOwnPropertyDescriptor(rawEntries, index);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) {
+      throw new Error(`数据中台天空盒索引 entries 第 ${index + 1} 项必须是自有 data property。`);
+    }
+    const entry = normalizeIndexEntry(descriptor.value, index);
     if (resourceIds.has(entry.resourceId)) {
       throw new Error(`数据中台天空盒索引存在重复 resourceId：${entry.resourceId}`);
     }

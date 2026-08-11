@@ -661,3 +661,55 @@ test('写入拒绝 entries 数组上的隐藏自有字段', async (t) => {
   );
   await assert.rejects(fs.stat(targetPath), { code: 'ENOENT' });
 });
+
+test('entries 数组索引必须是自有 data property 且不执行 getter', async (t) => {
+  const editorRoot = await createEditorRoot(t);
+  const targetPath = path.join(editorRoot, 'staging', 'index.json');
+  const entries: DataPlatformSkyboxIndexEntry[] = [];
+  let getterCalls = 0;
+  Object.defineProperty(entries, 0, {
+    configurable: true,
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return createEntry();
+    },
+  });
+
+  await assert.rejects(
+    writeDataPlatformSkyboxIndexFile(targetPath, createIndex(entries)),
+    /entries.*data property|entries.*数据属性|自有数据属性/,
+  );
+  assert.equal(getterCalls, 0);
+  await assert.rejects(fs.stat(targetPath), { code: 'ENOENT' });
+});
+
+test('未知 version 不触发不可信 primitive 转换且错误稳定', async (t) => {
+  const editorRoot = await createEditorRoot(t);
+  const targetPath = path.join(editorRoot, 'staging', 'index.json');
+  let conversionCalls = 0;
+  const untrustedVersion = {
+    [Symbol.toPrimitive]() {
+      conversionCalls += 1;
+      throw new Error('不应执行 Symbol.toPrimitive');
+    },
+    toString() {
+      conversionCalls += 1;
+      throw new Error('不应执行 toString');
+    },
+    valueOf() {
+      conversionCalls += 1;
+      throw new Error('不应执行 valueOf');
+    },
+  };
+
+  await assert.rejects(
+    writeDataPlatformSkyboxIndexFile(targetPath, {
+      version: untrustedVersion,
+      entries: [],
+    } as unknown as DataPlatformSkyboxIndex),
+    { message: '数据中台天空盒索引版本不受支持。' },
+  );
+  assert.equal(conversionCalls, 0);
+  await assert.rejects(fs.stat(targetPath), { code: 'ENOENT' });
+});
