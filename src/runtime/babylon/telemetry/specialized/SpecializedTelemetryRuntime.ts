@@ -91,10 +91,19 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         const snapshot = frame && (!frame.stale || (driver.applyWhenStale?.(candidate.model) ?? false))
           ? frame.snapshot
           : null;
-        const preparedArrayHost = this.host.updateExternalScriptContext(
-          candidate.model,
-          snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null,
-        );
+        const context = snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null;
+        // 无快照且注入上下文未变时跳过注入与阵列刷新（恢复→注入→隐藏→重规划→挂起全链路），稳态帧零成本；
+        // 有快照时保留完整周期，脚本动画与驱动位移依赖每帧刷新。
+        const contextSignature = context ? JSON.stringify(context) : null;
+        const scriptRuntime = candidate.model.externalScriptRuntime;
+        const lastContext = this.state.lastInjectedScriptContexts.get(candidate.entityId);
+        if (!snapshot
+          && lastContext?.signature === contextSignature
+          && lastContext?.runtime === scriptRuntime) {
+          continue;
+        }
+        const preparedArrayHost = this.host.updateExternalScriptContext(candidate.model, context);
+        this.state.lastInjectedScriptContexts.set(candidate.entityId, { signature: contextSignature, runtime: scriptRuntime });
         if (snapshot) {
           driver.apply(candidate.model, snapshot, deltaSeconds);
         }
@@ -134,6 +143,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.state.reportedStatuses.clear();
     this.state.reportedInvalidStackerBoxTargets.clear();
     this.state.lastReportedStackerTargetSignatures.clear();
+    this.state.lastInjectedScriptContexts.clear();
     telemetryRuntimeDiagnosticsStore.clear();
   }
 

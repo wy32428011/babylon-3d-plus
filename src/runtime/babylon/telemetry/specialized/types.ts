@@ -1,7 +1,7 @@
 import type { Mesh, Scene, StandardMaterial, TransformNode } from '@babylonjs/core';
 import { Quaternion, Vector3 } from '@babylonjs/core';
 import type { ModelGeneratorComponent } from '../../../../editor/model/components';
-import type { ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
+import type { ExternalModelScriptRuntime, ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
 import type {
   GeneratedOutputOwnerRuntimeEntry,
   LocatorRuntimeEntry,
@@ -298,6 +298,8 @@ export type SpecializedTelemetrySharedState = {
   reportedStatuses: Map<string, string>;
   reportedInvalidStackerBoxTargets: Set<string>;
   lastReportedStackerTargetSignatures: Map<string, string>;
+  /** 各模型最近一次注入的外置脚本遥测上下文（签名 + 脚本运行时实例）：无快照且未变化时跳过重复注入与阵列刷新。 */
+  lastInjectedScriptContexts: Map<string, { signature: string | null; runtime: ExternalModelScriptRuntime | null }>;
 };
 
 export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySharedState {
@@ -310,6 +312,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
     reportedStatuses: new Map(),
     reportedInvalidStackerBoxTargets: new Set(),
     lastReportedStackerTargetSignatures: new Map(),
+    lastInjectedScriptContexts: new Map(),
   };
 }
 
