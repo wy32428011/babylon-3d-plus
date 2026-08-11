@@ -22,6 +22,7 @@ export type DownloadRemoteFileOptions = {
   signal: AbortSignal;
   timeoutMs: number;
   context: string;
+  onChunk?: (chunk: Uint8Array) => void;
   onBytes?: (bytes: number) => void;
 };
 
@@ -212,6 +213,7 @@ export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Pr
         throw new Error(`${options.context}超过允许大小。`);
       }
       await writeBufferFully(handle, chunk);
+      options.onChunk?.(chunk);
       options.onBytes?.(chunk.byteLength);
     }
 

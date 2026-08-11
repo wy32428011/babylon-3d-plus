@@ -57,7 +57,7 @@ type RadianceHdrInfo = {
   dataPosition: number;
 };
 
-type SkyboxSourceMetadata = {
+export type SkyboxAssetFileInspection = {
   format: SkyboxAssetFormat;
   fileSizeBytes: number;
   hdrInfo?: RadianceHdrInfo;
@@ -176,7 +176,7 @@ function validateExrHeader(header: Buffer): void {
   }
 }
 
-async function inspectSkyboxSourceFile(filePath: string): Promise<SkyboxSourceMetadata> {
+export async function inspectSkyboxAssetFile(filePath: string): Promise<SkyboxAssetFileInspection> {
   const normalizedPath = path.resolve(filePath);
   const format = getSkyboxFormat(normalizedPath);
   if (!format) throw new Error('天空盒仅支持 .hdr 或 .exr 文件。');
@@ -286,7 +286,7 @@ async function validateRadianceHdrPayload(
 export async function validateSkyboxSourceFile(
   filePath: string,
 ): Promise<{ format: SkyboxAssetFormat; fileSizeBytes: number }> {
-  const metadata = await inspectSkyboxSourceFile(filePath);
+  const metadata = await inspectSkyboxAssetFile(filePath);
   if (metadata.format === 'hdr' && metadata.hdrInfo) {
     await validateRadianceHdrPayload(path.resolve(filePath), metadata.fileSizeBytes, metadata.hdrInfo);
   }
@@ -298,7 +298,7 @@ function createAssetRevision(stat: { mtimeMs: number; size: number }): string {
 }
 
 async function createSkyboxAsset(packagePath: string, filePath: string): Promise<ProjectSkyboxAssetEntry> {
-  const validation = await inspectSkyboxSourceFile(filePath);
+  const validation = await inspectSkyboxAssetFile(filePath);
   const stat = await fs.stat(filePath);
   const name = path.basename(filePath);
   return {
