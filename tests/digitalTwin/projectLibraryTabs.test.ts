@@ -8,6 +8,7 @@ const ASSET_DATABASE_PATH = 'src/editor/assets/AssetDatabase.ts';
 const ELECTRON_TYPES_PATH = 'electron/types.ts';
 const VITE_ENV_PATH = 'src/vite-env.d.ts';
 const PROJECT_ASSET_STORE_PATH = 'electron/ipc/projectAssetStore.ts';
+const ASSET_IPC_PATH = 'electron/ipc/assetIpc.ts';
 const INSPECTOR_PANEL_PATH = 'src/editor/panels/InspectorPanel.tsx';
 const POI_EFFECT_INSPECTOR_PATH = 'src/editor/panels/PoiEffectInspector.tsx';
 const GLOBAL_STYLE_PATH = 'src/styles/global.css';
@@ -159,4 +160,18 @@ test('天空盒拖拽兼容旧本地载荷并严格拒绝 orphaned 或不完整�
   assert.match(source, /dataPlatformRevision/);
   assert.match(source, /\^\[0-9a-f\]\{64\}\$/);
   assert.match(source, /Object\.getOwnPropertyDescriptor/);
+});
+
+
+test('天空盒导入结果携带 orphaned 并复用 listProjectAssets 的共享加载 helper', () => {
+  const electronTypes = readFileSync(ELECTRON_TYPES_PATH, 'utf8');
+  const rendererTypes = readFileSync(VITE_ENV_PATH, 'utf8');
+  const store = readFileSync(PROJECT_ASSET_STORE_PATH, 'utf8');
+  const assetIpc = readFileSync(ASSET_IPC_PATH, 'utf8');
+
+  assert.match(electronTypes, /ImportSkyboxFileResult[\s\S]*?orphanedSkyboxes:\s*ProjectSkyboxAssetEntry\[\]/);
+  assert.match(rendererTypes, /ImportSkyboxFileResult[\s\S]*?orphanedSkyboxes:\s*ProjectSkyboxAssetEntry\[\]/);
+  assert.ok((store.match(/loadProjectSkyboxAssets\(/g) ?? []).length >= 3);
+  assert.match(assetIpc, /orphanedSkyboxes:\s*\[\]/);
+  assert.match(assetIpc, /const \{ importedAsset, skyboxes, orphanedSkyboxes \}/);
 });

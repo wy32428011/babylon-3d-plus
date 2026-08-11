@@ -468,6 +468,88 @@ test('设置共享天空盒根后仍只列出当前项目本地天空盒，不�
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test('导入本地天空盒后复用共享合并逻辑并返回 active/orphaned 且完成授权', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task5-import-merged-skybox-'));
+  resetHarness(root);
+  const store = await server.ssrLoadModule('/electron/ipc/projectAssetStore.ts') as {
+    setCurrentProjectRoot(root: string): void;
+    setSharedProjectSkyboxRoot(root: string | null): void;
+    importSkyboxFileIntoProject(sourceFilePath: string): Promise<{
+      importedAsset: { path: string; source: string };
+      skyboxes: Array<{ id: string; displayName: string; path: string; source: string }>;
+      orphanedSkyboxes: Array<{ id: string; path: string; availability: string }>;
+    }>;
+  };
+  const registry = await server.ssrLoadModule('/electron/ipc/assetRegistry.ts') as {
+    isAuthorizedAssetFile(filePath: string): boolean;
+  };
+
+  const projectRoot = path.join(root, 'project');
+  const sharedRoot = path.join(root, 'SharedResources');
+  const sourceRoot = path.join(root, 'source');
+  const sourceFilePath = path.join(sourceRoot, 'same-name.hdr');
+  const hdrPayload = Buffer.concat([
+    Buffer.from('#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 8\n', 'ascii'),
+    Buffer.alloc(32, 1),
+  ]);
+  const createEntry = (resourceId: string, status: 'active' | 'orphaned') => ({
+    resourceId,
+    displayName: status === 'active' ? 'same-name' : '已删除天空盒',
+    relativePath: `Assets/Skyboxes/DataPlatform/Skybox-${resourceId}/skybox.hdr`,
+    format: 'hdr',
+    fileSizeBytes: hdrPayload.length,
+    sha256: resourceId.padStart(64, '0'),
+    revision: resourceId,
+    status,
+    syncedAt: '2026-08-11T12:00:00Z',
+  });
+  const activeEntry = createEntry('42', 'active');
+  const orphanedEntry = createEntry('43', 'orphaned');
+  const missingEntry = createEntry('44', 'active');
+  const activePath = path.join(sharedRoot, ...activeEntry.relativePath.split('/'));
+  const orphanedPath = path.join(sharedRoot, ...orphanedEntry.relativePath.split('/'));
+  await Promise.all([
+    fs.mkdir(sourceRoot, { recursive: true }),
+    fs.mkdir(path.dirname(activePath), { recursive: true }),
+    fs.mkdir(path.dirname(orphanedPath), { recursive: true }),
+    fs.mkdir(path.join(sharedRoot, '.babylon-editor'), { recursive: true }),
+  ]);
+  await Promise.all([
+    fs.writeFile(sourceFilePath, hdrPayload),
+    fs.writeFile(activePath, hdrPayload),
+    fs.writeFile(orphanedPath, hdrPayload),
+    fs.writeFile(
+      path.join(sharedRoot, '.babylon-editor', 'data-platform-skybox-index.json'),
+      `${JSON.stringify({ version: 1, entries: [activeEntry, orphanedEntry, missingEntry] }, null, 2)}\n`,
+      'utf8',
+    ),
+  ]);
+
+  store.setCurrentProjectRoot(projectRoot);
+  store.setSharedProjectSkyboxRoot(sharedRoot);
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...values: unknown[]) => warnings.push(values.map(String).join(' '));
+  try {
+    const result = await store.importSkyboxFileIntoProject(sourceFilePath);
+
+    assert.equal(result.importedAsset.source, 'project');
+    assert.deepEqual(result.skyboxes.map((asset) => asset.source), ['project', 'data-platform']);
+    assert.deepEqual(result.skyboxes.map((asset) => asset.displayName), ['same-name', 'same-name']);
+    assert.equal(result.skyboxes[0].path, result.importedAsset.path);
+    assert.deepEqual(result.orphanedSkyboxes.map((asset) => asset.id), ['data-platform-skybox:43']);
+    assert.equal(result.orphanedSkyboxes[0].availability, 'orphaned');
+    assert.equal(registry.isAuthorizedAssetFile(result.importedAsset.path), true);
+    assert.equal(registry.isAuthorizedAssetFile(activePath), true);
+    assert.equal(registry.isAuthorizedAssetFile(orphanedPath), true);
+    assert.ok(warnings.some((warning) => warning.includes('44') && warning.includes('缺失')));
+  } finally {
+    console.warn = originalWarn;
+    store.setSharedProjectSkyboxRoot(null);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('无效 recent 项目打开失败时保持原 project 与 shared roots 状态', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task4-invalid-recent-'));
   resetHarness(root);

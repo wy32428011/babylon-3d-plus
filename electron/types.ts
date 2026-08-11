@@ -416,6 +416,7 @@ export type ImportSkyboxFileResult = {
   projectRoot: string | null;
   importedAsset: ProjectSkyboxAssetEntry | null;
   skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
 };
 
 export type ImportCadFileResult = {

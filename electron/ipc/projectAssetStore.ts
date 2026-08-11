@@ -846,6 +846,13 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     for (const scriptAsset of asset.scriptAssets ?? []) authorizeAssetFile(scriptAsset.path);
   }
 
+  const { skyboxes, orphanedSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
+  return { projectRoot, assets, skyboxes, orphanedSkyboxes };
+}
+
+async function loadProjectSkyboxAssets(
+  projectRoot: string,
+): Promise<Pick<ProjectListAssetsResult, 'skyboxes' | 'orphanedSkyboxes'>> {
   const localSkyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
   let skyboxes = localSkyboxes;
   let orphanedSkyboxes: ProjectSkyboxAssetEntry[] = [];
@@ -858,8 +865,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   }
 
   for (const skybox of [...skyboxes, ...orphanedSkyboxes]) authorizeAssetFile(skybox.path);
-
-  return { projectRoot, assets, skyboxes, orphanedSkyboxes };
+  return { skyboxes, orphanedSkyboxes };
 }
 
 function reportDataPlatformSkyboxDiagnostics(errors: readonly DataPlatformSkyboxAssetDiagnostic[]): void {
@@ -888,18 +894,22 @@ function createProjectAssetMergeKey(asset: ProjectModelAssetEntry): string {
 /** 把用户选择的 HDR/EXR 导入项目天空盒库，并返回刷新后的资源快照。 */
 export async function importSkyboxFileIntoProject(
   sourceFilePath: string,
-): Promise<{ importedAsset: ProjectSkyboxAssetEntry; skyboxes: ProjectSkyboxAssetEntry[] }> {
+): Promise<{
+  importedAsset: ProjectSkyboxAssetEntry;
+  skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
+}> {
   const projectRoot = await loadRecentProjectRoot();
   if (!projectRoot) throw new Error('导入天空盒前需要先选择项目目录。');
 
   await ensureProjectDirectories(projectRoot);
   authorizeProjectAssetRoots(projectRoot);
-  const skyboxRoot = getProjectSkyboxesRoot(projectRoot);
-  const importedAsset = await importSkyboxFileIntoRoot(sourceFilePath, skyboxRoot);
-  authorizeAssetFile(importedAsset.path);
-  const skyboxes = await listSkyboxAssetsInRoot(skyboxRoot);
-  for (const skybox of skyboxes) authorizeAssetFile(skybox.path);
-  return { importedAsset, skyboxes };
+  const importedAsset = await importSkyboxFileIntoRoot(
+    sourceFilePath,
+    getProjectSkyboxesRoot(projectRoot),
+  );
+  const { skyboxes, orphanedSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
+  return { importedAsset, skyboxes, orphanedSkyboxes };
 }
 
 /**
