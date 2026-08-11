@@ -110,6 +110,8 @@ test('稳定资源 ID 为零个或多个候选时拒绝匹配且绝不回退路�
   const exactLocal = createAsset({ id: 'local-exact' });
   const first = createAsset({
     id: `data-platform-skybox:${RESOURCE_ID}:1`,
+    path: String.raw`E:\Remote\first.hdr\first.hdr`,
+    sourceUrl: 'editor-asset://local/remote-first.hdr',
     source: 'data-platform',
     dataPlatformResourceId: RESOURCE_ID,
     dataPlatformRevision: '1',
@@ -117,6 +119,8 @@ test('稳定资源 ID 为零个或多个候选时拒绝匹配且绝不回退路�
   });
   const second = createAsset({
     id: `data-platform-skybox:${RESOURCE_ID}:2`,
+    path: String.raw`F:\Remote\second.hdr\second.hdr`,
+    sourceUrl: 'editor-asset://local/remote-second.hdr',
     source: 'data-platform',
     dataPlatformResourceId: RESOURCE_ID,
     dataPlatformRevision: '2',
