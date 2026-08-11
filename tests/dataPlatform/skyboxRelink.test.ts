@@ -6,7 +6,7 @@ import type { SceneSkyboxSettings } from '../../src/editor/model/SceneDocument.t
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
 
-const [{ createSceneSkyboxFromAsset, findSkyboxAssetForSettings }] =
+const [{ createSceneSkyboxFromAsset, findOrphanedSkyboxForSettings, findSkyboxAssetForSettings }] =
   await importIsolatedTypeScriptModules<[
     typeof import('../../src/editor/assets/skyboxAssets'),
   ]>(['src/editor/assets/skyboxAssets.ts']);
@@ -280,6 +280,117 @@ test('稳定 ID 候选只读取自有数据属性，继承/accessor 均不匹配
     },
   });
   assert.equal(findSkyboxAssetForSettings(accessorSettings, [createAsset({ id: 'exact-local' })]), null);
+  assert.equal(getterReads, 0);
+});
+
+test('orphaned 天空盒只按场景稳定 ID 唯一匹配数据中台孤立缓存', () => {
+  const settings = createSettings({
+    dataPlatformResourceId: RESOURCE_ID,
+    sourcePath: String.raw`D:\\Legacy\\renamed.hdr`,
+    sourceUrl: 'editor-asset://local/legacy-renamed.hdr',
+  });
+  const matching = createAsset({
+    id: `data-platform-skybox:${RESOURCE_ID}`,
+    path: String.raw`E:\\Shared\\renamed.hdr\\renamed.hdr`,
+    sourceUrl: 'editor-asset://local/shared-renamed.hdr',
+    packagePath: String.raw`E:\\Shared\\renamed.hdr`,
+    source: 'data-platform',
+    availability: 'orphaned',
+    dataPlatformResourceId: `  ${RESOURCE_ID}  `,
+    dataPlatformRevision: '9',
+    fileSha256: SHA_A,
+  });
+  const activeSameId = createAsset({
+    id: 'active-same-id',
+    source: 'data-platform',
+    availability: 'active',
+    dataPlatformResourceId: RESOURCE_ID,
+    dataPlatformRevision: '9',
+    fileSha256: SHA_A,
+  });
+  const projectSameId = createAsset({
+    id: 'project-same-id',
+    source: 'project',
+    availability: 'orphaned',
+    dataPlatformResourceId: RESOURCE_ID,
+  });
+
+  assert.equal(findOrphanedSkyboxForSettings(settings, [activeSameId, projectSameId, matching]), matching);
+});
+
+test('orphaned 天空盒稳定 ID 为零个或多个候选时拒绝匹配且不按旧路径或名称猜测', () => {
+  const legacySettings = createSettings();
+  const legacyNameMatch = createAsset({
+    id: 'legacy-name-match',
+    source: 'data-platform',
+    availability: 'orphaned',
+    dataPlatformResourceId: RESOURCE_ID,
+    dataPlatformRevision: '1',
+    fileSha256: SHA_A,
+  });
+  assert.equal(findOrphanedSkyboxForSettings(legacySettings, [legacyNameMatch]), null);
+
+  const settings = createSettings({ dataPlatformResourceId: RESOURCE_ID });
+  const first = createAsset({
+    id: 'orphaned-first',
+    source: 'data-platform',
+    availability: 'orphaned',
+    dataPlatformResourceId: RESOURCE_ID,
+    dataPlatformRevision: '1',
+    fileSha256: SHA_A,
+  });
+  const second = createAsset({
+    id: 'orphaned-second',
+    source: 'data-platform',
+    availability: 'orphaned',
+    dataPlatformResourceId: RESOURCE_ID,
+    dataPlatformRevision: '2',
+    fileSha256: SHA_B,
+  });
+
+  assert.equal(findOrphanedSkyboxForSettings(settings, []), null);
+  assert.equal(findOrphanedSkyboxForSettings(settings, [first, second]), null);
+});
+
+test('orphaned 匹配只读取设置和候选的自有合法 ID，accessor getter 不执行', () => {
+  let getterReads = 0;
+  const accessorSettings = createSettings();
+  Object.defineProperty(accessorSettings, 'dataPlatformResourceId', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return RESOURCE_ID;
+    },
+  });
+  const valid = createAsset({
+    id: 'valid-orphaned',
+    source: 'data-platform',
+    availability: 'orphaned',
+    dataPlatformResourceId: RESOURCE_ID,
+    dataPlatformRevision: '1',
+    fileSha256: SHA_A,
+  });
+  assert.equal(findOrphanedSkyboxForSettings(accessorSettings, [valid]), null);
+
+  const settings = createSettings({ dataPlatformResourceId: RESOURCE_ID });
+  const inherited = createAsset({ source: 'data-platform', availability: 'orphaned' });
+  delete inherited.dataPlatformResourceId;
+  Object.setPrototypeOf(inherited, { dataPlatformResourceId: RESOURCE_ID });
+  const accessor = createAsset({ source: 'data-platform', availability: 'orphaned' });
+  Object.defineProperty(accessor, 'dataPlatformResourceId', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return RESOURCE_ID;
+    },
+  });
+  const invalid = createAsset({
+    source: 'data-platform',
+    availability: 'orphaned',
+    dataPlatformResourceId: '01',
+  });
+
+  assert.equal(findOrphanedSkyboxForSettings(settings, [inherited, accessor, invalid]), null);
   assert.equal(getterReads, 0);
 });
 

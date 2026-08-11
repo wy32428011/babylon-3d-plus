@@ -32,6 +32,132 @@ function createPortableSkyboxKey(packagePath: string, sourcePath: string): strin
   return packageName && fileName ? `${packageName}/${fileName}` : '';
 }
 
+export type SkyboxSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+export type SkyboxSyncProgress = {
+  runId: string;
+  phase: SkyboxSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+const SKYBOX_SYNC_PHASES = new Set<SkyboxSyncPhase>([
+  'querying',
+  'downloading',
+  'validating',
+  'promoting',
+  'completed',
+  'failed',
+]);
+
+function readOwnDataPropertySafely(value: unknown, propertyKey: PropertyKey) {
+  if ((typeof value !== 'object' || value === null) && typeof value !== 'function') {
+    return { kind: 'missing' } as const;
+  }
+  try {
+    return readOwnDataProperty(value, propertyKey);
+  } catch {
+    return { kind: 'missing' } as const;
+  }
+}
+
+/** 将未知同步错误转换为可渲染文本，绝不调用对象的隐式字符串转换。 */
+export function formatSkyboxSyncError(error: unknown): string {
+  if (typeof error === 'string') return error.trim() || '未知错误';
+  if (typeof error === 'number') return Number.isFinite(error) ? String(error) : '未知错误';
+  if (typeof error === 'boolean' || typeof error === 'bigint' || typeof error === 'symbol') {
+    try {
+      return String(error);
+    } catch {
+      return '未知错误';
+    }
+  }
+
+  const messageField = readOwnDataPropertySafely(error, 'message');
+  if (messageField.kind === 'data' && typeof messageField.value === 'string') {
+    return messageField.value.trim() || '未知错误';
+  }
+  return '未知错误';
+}
+
+function readSkyboxSyncString(progress: unknown, propertyKey: PropertyKey): string {
+  const field = readOwnDataPropertySafely(progress, propertyKey);
+  return field.kind === 'data' && typeof field.value === 'string' ? field.value : '';
+}
+
+function readSkyboxSyncCountPair(progress: unknown): Pick<SkyboxSyncProgress, 'completed' | 'total'> {
+  const completedField = readOwnDataPropertySafely(progress, 'completed');
+  const totalField = readOwnDataPropertySafely(progress, 'total');
+  const completed = completedField.kind === 'data' ? completedField.value : null;
+  const total = totalField.kind === 'data' ? totalField.value : null;
+  if (
+    typeof completed !== 'number'
+    || typeof total !== 'number'
+    || !Number.isSafeInteger(completed)
+    || !Number.isSafeInteger(total)
+    || completed < 0
+    || total < 0
+    || completed > total
+  ) {
+    return { completed: 0, total: 0 };
+  }
+  return { completed, total };
+}
+
+/** 归一化 IPC 进度并返回“是否刷新资源库”的编排决策。 */
+export function normalizeSkyboxSyncProgress(progress: unknown): {
+  progress: SkyboxSyncProgress;
+  shouldReloadProjectAssets: boolean;
+} {
+  const runId = readSkyboxSyncString(progress, 'runId').trim() || 'renderer-invalid-skybox-sync';
+  const phaseField = readOwnDataPropertySafely(progress, 'phase');
+  const rawPhase = phaseField.kind === 'data' ? phaseField.value : null;
+  const phase = typeof rawPhase === 'string' && SKYBOX_SYNC_PHASES.has(rawPhase as SkyboxSyncPhase)
+    ? rawPhase as SkyboxSyncPhase
+    : 'failed';
+  const counts = readSkyboxSyncCountPair(progress);
+  const message = readSkyboxSyncString(progress, 'message');
+  const errorField = readOwnDataPropertySafely(progress, 'error');
+  const error = errorField.kind === 'data' && errorField.value !== null && errorField.value !== undefined
+    ? formatSkyboxSyncError(errorField.value)
+    : phaseField.kind === 'data' && phaseField.value === phase
+      ? null
+      : '收到无效的天空盒同步状态。';
+  const normalizedProgress: SkyboxSyncProgress = {
+    runId,
+    phase,
+    ...counts,
+    message,
+    error,
+  };
+  return {
+    progress: normalizedProgress,
+    shouldReloadProjectAssets: normalizedProgress.phase === 'completed',
+  };
+}
+
+/** 仅在进度计数完整合法且 total 大于零时显示 completed/total。 */
+export function formatSkyboxSyncProgressCount(
+  progress: Pick<SkyboxSyncProgress, 'completed' | 'total'>,
+): string | null {
+  if (
+    !Number.isSafeInteger(progress.completed)
+    || !Number.isSafeInteger(progress.total)
+    || progress.completed < 0
+    || progress.total <= 0
+    || progress.completed > progress.total
+  ) return null;
+  return `${progress.completed}/${progress.total}`;
+}
+
 /** 用项目资源路径刷新天空盒引用；场景级显示参数由当前设置保留。 */
 export function createSceneSkyboxFromAsset(
   asset: ProjectSkyboxAssetEntry,
@@ -93,6 +219,25 @@ export function findSkyboxAssetForSettings(
     createPortableSkyboxKey(asset.packagePath, asset.path) === portableKey,
   );
   return portableCandidates.length === 1 ? portableCandidates[0] : null;
+}
+
+/** 仅按场景稳定 ID 唯一定位已孤立的数据中台天空盒缓存。 */
+export function findOrphanedSkyboxForSettings(
+  settings: SceneSkyboxSettings,
+  orphaned: ProjectSkyboxAssetEntry[],
+): ProjectSkyboxAssetEntry | null {
+  const resourceIdField = readOwnDataProperty(settings, 'dataPlatformResourceId');
+  if (resourceIdField.kind !== 'data') return null;
+  const dataPlatformResourceId = normalizeDataPlatformResourceId(resourceIdField.value);
+  if (!dataPlatformResourceId) return null;
+
+  const candidates = orphaned.filter((asset) => {
+    if (asset.source !== 'data-platform' || asset.availability !== 'orphaned') return false;
+    const candidateIdField = readOwnDataProperty(asset, 'dataPlatformResourceId');
+    return candidateIdField.kind === 'data'
+      && normalizeDataPlatformResourceId(candidateIdField.value) === dataPlatformResourceId;
+  });
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 /** 生成资源卡片使用的紧凑文件体积文案。 */
