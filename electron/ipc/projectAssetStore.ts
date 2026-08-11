@@ -782,11 +782,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     for (const scriptAsset of asset.scriptAssets ?? []) authorizeAssetFile(scriptAsset.path);
   }
 
-  const skyboxProjectRoot = sharedProjectSkyboxRoot ?? projectRoot;
-  const skyboxRoot = getProjectSkyboxesRoot(skyboxProjectRoot);
-  await fs.mkdir(skyboxRoot, { recursive: true });
-  authorizeAssetRoot(skyboxRoot);
-  const skyboxes = await listSkyboxAssetsInRoot(skyboxRoot);
+  const skyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
   for (const skybox of skyboxes) authorizeAssetFile(skybox.path);
 
   return { projectRoot, assets, skyboxes };

@@ -366,6 +366,49 @@ test('projectAssetStore 独立归一化共享天空盒根且不改变模型共�
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test('设置共享天空盒根后仍只列出当前项目本地天空盒，不把 DataPlatform 目录当普通包', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task4-local-skybox-'));
+  resetHarness(root);
+  const store = await server.ssrLoadModule('/electron/ipc/projectAssetStore.ts') as {
+    setCurrentProjectRoot(root: string): void;
+    setSharedProjectSkyboxRoot(root: string | null): void;
+    getSharedProjectSkyboxRoot(): string | null;
+    listProjectAssets(): Promise<{
+      projectRoot: string | null;
+      skyboxes: Array<{ path: string; packagePath: string }>;
+    }>;
+  };
+
+  const projectRoot = path.join(root, 'project');
+  const sharedRoot = path.join(root, 'SharedResources');
+  const localPackageRoot = path.join(projectRoot, 'Assets', 'Skyboxes', 'local-skybox');
+  const dataPlatformPackageRoot = path.join(sharedRoot, 'Assets', 'Skyboxes', 'DataPlatform-42');
+  const hdrPayload = Buffer.concat([
+    Buffer.from('#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 8\n', 'ascii'),
+    Buffer.alloc(32, 1),
+  ]);
+  await Promise.all([
+    fs.mkdir(localPackageRoot, { recursive: true }),
+    fs.mkdir(dataPlatformPackageRoot, { recursive: true }),
+  ]);
+  await Promise.all([
+    fs.writeFile(path.join(localPackageRoot, 'local.hdr'), hdrPayload),
+    fs.writeFile(path.join(dataPlatformPackageRoot, 'remote.hdr'), hdrPayload),
+  ]);
+
+  store.setCurrentProjectRoot(projectRoot);
+  store.setSharedProjectSkyboxRoot(sharedRoot);
+  const result = await store.listProjectAssets();
+
+  assert.equal(store.getSharedProjectSkyboxRoot(), path.normalize(sharedRoot));
+  assert.deepEqual(result.skyboxes.map((asset) => path.basename(asset.path)), ['local.hdr']);
+  assert.equal(result.skyboxes[0]?.packagePath, path.resolve(localPackageRoot));
+  assert.equal(result.skyboxes.some((asset) => asset.packagePath.includes('DataPlatform-42')), false);
+
+  store.setSharedProjectSkyboxRoot(null);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test('项目服务手动同步不建 binding，数据中台打开不等待同步，dispose 最后等待天空盒任务', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task4-service-'));
   const state = resetHarness(root);
