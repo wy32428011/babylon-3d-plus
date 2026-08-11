@@ -126,13 +126,13 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
         <input
           type="number"
           disabled={disabled}
-          min={1}
+          min={0}
           max={999}
           step={1}
           value={component.startColumn}
           onChange={(event) => {
             const value = Number(event.target.value);
-            if (Number.isFinite(value) && value >= 1 && value <= 999) {
+            if (Number.isFinite(value) && value >= 0 && value <= 999) {
               updateSelectedLocator({ startColumn: Math.round(value) });
             }
           }}
