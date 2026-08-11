@@ -1,43 +1,15 @@
 import assert from 'node:assert/strict';
-import { register } from 'node:module';
 import test from 'node:test';
 
 import type { ProjectSkyboxAssetEntry } from '../../src/editor/assets/AssetDatabase.ts';
 import type { SceneSkyboxSettings } from '../../src/editor/model/SceneDocument.ts';
+import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
-function registerExtensionlessTypeScriptResolver(): void {
-  const loaderSource = `
-    import { existsSync } from 'node:fs';
-    import { fileURLToPath } from 'node:url';
 
-    export async function resolve(specifier, context, nextResolve) {
-      if ((specifier.startsWith('./') || specifier.startsWith('../')) && context.parentURL) {
-        const targetUrl = new URL(specifier, context.parentURL);
-        if (!/\\.[^/]+$/.test(targetUrl.pathname)) {
-          for (const extension of ['.js', '.ts']) {
-            const candidate = new URL(targetUrl.href + extension);
-            if (existsSync(fileURLToPath(candidate))) return nextResolve(specifier + extension, context);
-          }
-        }
-      }
-      return nextResolve(specifier, context);
-    }
-
-    export async function load(url, context, nextLoad) {
-      if (/\\.(png|jpe?g|webp|gif|svg|glb|gltf)$/.test(new URL(url).pathname)) {
-        return { format: 'module', source: 'export default "";', shortCircuit: true };
-      }
-      return nextLoad(url, context);
-    }
-  `;
-  register(`data:text/javascript,${encodeURIComponent(loaderSource)}`, import.meta.url);
-}
-
-registerExtensionlessTypeScriptResolver();
-
-const { createSceneSkyboxFromAsset, findSkyboxAssetForSettings } = await import(
-  '../../src/editor/assets/skyboxAssets'
-);
+const [{ createSceneSkyboxFromAsset, findSkyboxAssetForSettings }] =
+  await importIsolatedTypeScriptModules<[
+    typeof import('../../src/editor/assets/skyboxAssets'),
+  ]>(['src/editor/assets/skyboxAssets.ts']);
 
 const SHA_A = 'a'.repeat(64);
 const SHA_B = 'b'.repeat(64);
@@ -218,4 +190,102 @@ test('远端仅改名或业务 revision 且 sha/path 不变时设置引用完全
   };
 
   assert.deepEqual(createSceneSkyboxFromAsset(renamed, current), current);
+});
+
+
+test('active 数据中台资源缺失、非法、继承或 accessor ID 时 fail-closed 且不执行 getter', () => {
+  const baseRemote = {
+    source: 'data-platform' as const,
+    availability: 'active' as const,
+    dataPlatformRevision: '1',
+    fileSha256: SHA_A,
+  };
+  const missing = createAsset({ ...baseRemote });
+  delete missing.dataPlatformResourceId;
+  const invalid = createAsset({ ...baseRemote, dataPlatformResourceId: '01' });
+  const inherited = createAsset({ ...baseRemote });
+  delete inherited.dataPlatformResourceId;
+  Object.setPrototypeOf(inherited, { dataPlatformResourceId: RESOURCE_ID });
+  let getterReads = 0;
+  const accessor = createAsset({ ...baseRemote });
+  Object.defineProperty(accessor, 'dataPlatformResourceId', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return RESOURCE_ID;
+    },
+  });
+
+  for (const asset of [missing, invalid, inherited, accessor]) {
+    assert.throws(() => createSceneSkyboxFromAsset(asset), /天空盒资源元数据无效/);
+  }
+  assert.equal(getterReads, 0);
+
+  const nonEnumerable = createAsset({ ...baseRemote });
+  Object.defineProperty(nonEnumerable, 'dataPlatformResourceId', {
+    configurable: true,
+    enumerable: false,
+    value: RESOURCE_ID,
+  });
+  assert.equal(createSceneSkyboxFromAsset(nonEnumerable).dataPlatformResourceId, RESOURCE_ID);
+});
+
+test('orphaned 数据中台资源不可选择且不匹配，project 伪带稳定 ID 也不匹配', () => {
+  const settings = createSettings({ dataPlatformResourceId: RESOURCE_ID });
+  const orphaned = createAsset({
+    id: `data-platform-skybox:${RESOURCE_ID}`,
+    source: 'data-platform',
+    availability: 'orphaned',
+    dataPlatformResourceId: RESOURCE_ID,
+    dataPlatformRevision: '1',
+    fileSha256: SHA_A,
+  });
+  const fakeProject = createAsset({
+    id: 'project-with-fake-id',
+    source: 'project',
+    dataPlatformResourceId: RESOURCE_ID,
+  });
+
+  assert.equal(findSkyboxAssetForSettings(settings, [orphaned, fakeProject]), null);
+  assert.equal(findSkyboxAssetForSettings(createSettings(), [orphaned]), null);
+  assert.throws(() => createSceneSkyboxFromAsset(orphaned), /天空盒资源元数据无效/);
+});
+
+test('稳定 ID 候选只读取自有数据属性，继承/accessor 均不匹配且 getter 不执行', () => {
+  const settings = createSettings({ dataPlatformResourceId: RESOURCE_ID });
+  const inheritedCandidate = createAsset({ source: 'data-platform' });
+  delete inheritedCandidate.dataPlatformResourceId;
+  Object.setPrototypeOf(inheritedCandidate, { dataPlatformResourceId: RESOURCE_ID });
+
+  let getterReads = 0;
+  const accessorCandidate = createAsset({ source: 'data-platform' });
+  Object.defineProperty(accessorCandidate, 'dataPlatformResourceId', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return RESOURCE_ID;
+    },
+  });
+
+  assert.equal(findSkyboxAssetForSettings(settings, [inheritedCandidate]), null);
+  assert.equal(findSkyboxAssetForSettings(settings, [accessorCandidate]), null);
+  assert.equal(getterReads, 0);
+
+  const accessorSettings = createSettings();
+  Object.defineProperty(accessorSettings, 'dataPlatformResourceId', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return RESOURCE_ID;
+    },
+  });
+  assert.equal(findSkyboxAssetForSettings(accessorSettings, [createAsset({ id: 'exact-local' })]), null);
+  assert.equal(getterReads, 0);
+});
+
+test('extensionless 测试 bootstrap 清理后不影响 isolation none 的后续 import', async () => {
+  await assert.rejects(
+    import('../../src/editor/assets/modelAssetRelink'),
+    /ERR_MODULE_NOT_FOUND|Cannot find module/,
+  );
 });

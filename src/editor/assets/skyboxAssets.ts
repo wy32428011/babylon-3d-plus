@@ -4,6 +4,7 @@ import {
   SCENE_SKYBOX_RESOLUTION_DEFAULT,
   SCENE_SKYBOX_ROTATION_MIN,
   normalizeDataPlatformResourceId,
+  readOwnDataProperty,
   sanitizeSceneSkybox,
   type SceneSkyboxSettings,
 } from '../model/SceneDocument';
@@ -36,9 +37,14 @@ export function createSceneSkyboxFromAsset(
   asset: ProjectSkyboxAssetEntry,
   current: SceneSkyboxSettings | null = null,
 ): SceneSkyboxSettings {
-  const dataPlatformResourceId = asset.source === 'data-platform' && asset.availability === 'active'
-    ? normalizeDataPlatformResourceId(asset.dataPlatformResourceId)
-    : null;
+  let dataPlatformResourceId: string | null = null;
+  if (asset.source === 'data-platform') {
+    if (asset.availability !== 'active') throw new Error('天空盒资源元数据无效。');
+    const resourceIdField = readOwnDataProperty(asset, 'dataPlatformResourceId');
+    if (resourceIdField.kind !== 'data') throw new Error('天空盒资源元数据无效。');
+    dataPlatformResourceId = normalizeDataPlatformResourceId(resourceIdField.value);
+    if (!dataPlatformResourceId) throw new Error('天空盒资源元数据无效。');
+  }
   const skybox = sanitizeSceneSkybox({
     packagePath: asset.packagePath,
     sourcePath: asset.path,
@@ -59,20 +65,23 @@ export function findSkyboxAssetForSettings(
   skybox: SceneSkyboxSettings,
   assets: ProjectSkyboxAssetEntry[],
 ): ProjectSkyboxAssetEntry | null {
-  const resourceIdDescriptor = Object.getOwnPropertyDescriptor(skybox, 'dataPlatformResourceId');
-  if (resourceIdDescriptor && 'value' in resourceIdDescriptor) {
-    const dataPlatformResourceId = normalizeDataPlatformResourceId(resourceIdDescriptor.value);
+  const activeAssets = assets.filter((asset) => asset.availability === 'active');
+  const resourceIdField = readOwnDataProperty(skybox, 'dataPlatformResourceId');
+  if (resourceIdField.kind === 'accessor') return null;
+  if (resourceIdField.kind === 'data') {
+    const dataPlatformResourceId = normalizeDataPlatformResourceId(resourceIdField.value);
     if (!dataPlatformResourceId) return null;
-    const idCandidates = assets.filter((asset) =>
-      asset.source === 'data-platform'
-      && asset.availability === 'active'
-      && normalizeDataPlatformResourceId(asset.dataPlatformResourceId) === dataPlatformResourceId,
-    );
+    const idCandidates = activeAssets.filter((asset) => {
+      if (asset.source !== 'data-platform' || asset.availability !== 'active') return false;
+      const candidateIdField = readOwnDataProperty(asset, 'dataPlatformResourceId');
+      return candidateIdField.kind === 'data'
+        && normalizeDataPlatformResourceId(candidateIdField.value) === dataPlatformResourceId;
+    });
     return idCandidates.length === 1 ? idCandidates[0] : null;
   }
 
   const sourcePathKey = normalizePortablePath(skybox.sourcePath);
-  const exactCandidates = assets.filter((asset) =>
+  const exactCandidates = activeAssets.filter((asset) =>
     normalizePortablePath(asset.path) === sourcePathKey || asset.sourceUrl === skybox.sourceUrl,
   );
   if (exactCandidates.length === 1) return exactCandidates[0];
@@ -80,7 +89,7 @@ export function findSkyboxAssetForSettings(
 
   const portableKey = createPortableSkyboxKey(skybox.packagePath, skybox.sourcePath);
   if (!portableKey) return null;
-  const portableCandidates = assets.filter((asset) =>
+  const portableCandidates = activeAssets.filter((asset) =>
     createPortableSkyboxKey(asset.packagePath, asset.path) === portableKey,
   );
   return portableCandidates.length === 1 ? portableCandidates[0] : null;

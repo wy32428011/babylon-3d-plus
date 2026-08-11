@@ -1,41 +1,24 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { register } from 'node:module';
 import test from 'node:test';
 
 import type { SceneSkyboxSettings } from '../../src/editor/model/SceneDocument';
 import type { ProjectSkyboxAssetEntry } from '../../src/editor/assets/AssetDatabase';
+import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
-function registerExtensionlessTypeScriptResolver(): void {
-  const loaderSource = `
-    import { existsSync } from 'node:fs';
-    import { fileURLToPath } from 'node:url';
 
-    export async function resolve(specifier, context, nextResolve) {
-      if ((specifier.startsWith('./') || specifier.startsWith('../')) && context.parentURL) {
-        const targetUrl = new URL(specifier, context.parentURL);
-        if (!/\\.[^/]+$/.test(targetUrl.pathname)) {
-          for (const extension of ['.js', '.ts']) {
-            const candidate = new URL(targetUrl.href + extension);
-            if (existsSync(fileURLToPath(candidate))) return nextResolve(specifier + extension, context);
-          }
-        }
-      }
-      return nextResolve(specifier, context);
-    }
-
-    export async function load(url, context, nextLoad) {
-      if (/\\.(png|jpe?g|webp|gif|svg|glb|gltf)$/.test(new URL(url).pathname)) {
-        return { format: 'module', source: 'export default "";', shortCircuit: true };
-      }
-      return nextLoad(url, context);
-    }
-  `;
-  register(`data:text/javascript,${encodeURIComponent(loaderSource)}`, import.meta.url);
-}
-
-registerExtensionlessTypeScriptResolver();
-
+const [sceneDocumentModule, sceneSerializerModule, deploymentExportModule, skyboxAssetsModule] =
+  await importIsolatedTypeScriptModules<[
+    typeof import('../../src/editor/model/SceneDocument'),
+    typeof import('../../src/editor/project/SceneSerializer'),
+    typeof import('../../src/editor/deployment/deploymentExport'),
+    typeof import('../../src/editor/assets/skyboxAssets'),
+  ]>([
+    'src/editor/model/SceneDocument.ts',
+    'src/editor/project/SceneSerializer.ts',
+    'src/editor/deployment/deploymentExport.ts',
+    'src/editor/assets/skyboxAssets.ts',
+  ]);
 const {
   createDefaultSceneSettings,
   createEmptySceneDocument,
@@ -52,12 +35,10 @@ const {
   SKYBOX_SPHERE_DIAMETER_METERS,
   SKYBOX_SPHERE_SCALE_MAX,
   SKYBOX_SPHERE_SCALE_MIN,
-} = await import('../../src/editor/model/SceneDocument');
-const { deserializeScene, serializeScene } = await import('../../src/editor/project/SceneSerializer');
-const { createDeploymentSceneSummary } = await import('../../src/editor/deployment/deploymentExport');
-const { createSceneSkyboxFromAsset, findSkyboxAssetForSettings } = await import(
-  '../../src/editor/assets/skyboxAssets'
-);
+} = sceneDocumentModule;
+const { deserializeScene, serializeScene } = sceneSerializerModule;
+const { createDeploymentSceneSummary } = deploymentExportModule;
+const { createSceneSkyboxFromAsset, findSkyboxAssetForSettings } = skyboxAssetsModule;
 
 const VALID_SKYBOX: SceneSkyboxSettings = {
   packagePath: String.raw`C:\Project\Assets\Skyboxes\grasslands_sunset_4k.hdr`,
@@ -69,6 +50,45 @@ const VALID_SKYBOX: SceneSkyboxSettings = {
   intensity: 1,
   resolution: 512,
 };
+
+
+function createHandwrittenLegacySkyboxFile(
+  version: 1 | 2,
+  dataPlatformResourceId?: string,
+): string {
+  return JSON.stringify({
+    version,
+    scene: {
+      id: `legacy-skybox-v${version}`,
+      name: `Legacy Skybox v${version}`,
+      entityIds: [],
+      entities: {},
+      sceneSettings: {
+        camera: {
+          savedPose: null,
+          viewDistance: 12000,
+        },
+        sensitivity: {
+          zoom: 1,
+          pan: 1,
+          rotate: 1,
+        },
+        environment: null,
+        skybox: {
+          packagePath: String.raw`D:\Legacy\Skyboxes\factory.hdr`,
+          sourcePath: String.raw`D:\Legacy\Skyboxes\factory.hdr\factory.hdr`,
+          sourceUrl: 'editor-asset://local/D%3A%5CLegacy%5CSkyboxes%5Cfactory.hdr%5Cfactory.hdr',
+          assetRevision: 'legacy-revision',
+          ...(dataPlatformResourceId ? { dataPlatformResourceId } : {}),
+          format: 'hdr',
+          rotationDegrees: 45,
+          intensity: 1.25,
+          resolution: 512,
+        },
+      },
+    },
+  });
+}
 
 test('天空盒默认关闭，合法设置会约束旋转、强度与立方体分辨率', () => {
   const defaults = createDefaultSceneSettings();
@@ -208,6 +228,162 @@ test('SceneSerializer 在 scene settings 与实体组件两处清晰拒绝非法
     () => deserializeScene(serializeScene(entityScene)),
     /dataPlatformResourceId.*1-64/,
   );
+});
+
+
+
+test('稳定资源 ID 接受 1 位和 64 位合法边界', () => {
+  for (const dataPlatformResourceId of ['1', '9'.repeat(64)]) {
+    const normalized = sanitizeSceneSkybox({ ...VALID_SKYBOX, dataPlatformResourceId });
+    assert.ok(normalized);
+    assert.equal(normalized.dataPlatformResourceId, dataPlatformResourceId);
+    assert.equal(createSkyboxEntity(normalized).components.skybox?.dataPlatformResourceId, dataPlatformResourceId);
+  }
+});
+
+test('own-data descriptor 不受 Object.prototype.value 污染且不执行 accessor getter', () => {
+  const previousValueDescriptor = Object.getOwnPropertyDescriptor(Object.prototype, 'value');
+  let descriptorPrototypeReads = 0;
+  let resourceGetterReads = 0;
+  const accessor = { ...VALID_SKYBOX } as SceneSkyboxSettings;
+  Object.defineProperty(accessor, 'dataPlatformResourceId', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      resourceGetterReads += 1;
+      return '8';
+    },
+  });
+  Object.defineProperty(Object.prototype, 'value', {
+    configurable: true,
+    get() {
+      descriptorPrototypeReads += 1;
+      return '7';
+    },
+  });
+
+  try {
+    const normalized = sanitizeSceneSkybox(accessor);
+    assert.ok(normalized);
+    assert.equal('dataPlatformResourceId' in normalized, false);
+    assert.equal(descriptorPrototypeReads, 0);
+    assert.equal(resourceGetterReads, 0);
+  } finally {
+    if (previousValueDescriptor) {
+      Object.defineProperty(Object.prototype, 'value', previousValueDescriptor);
+    } else {
+      delete (Object.prototype as { value?: unknown }).value;
+    }
+  }
+});
+
+test('serializeScene 对 scene settings 和实体天空盒生成安全 snapshot，保留 non-enumerable ID 且不修改输入', () => {
+  const settingsScene = createEmptySceneDocument('Non-enumerable Settings ID');
+  const settingsSkybox = { ...VALID_SKYBOX };
+  Object.defineProperty(settingsSkybox, 'dataPlatformResourceId', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: '1',
+  });
+  settingsScene.sceneSettings.skybox = settingsSkybox;
+  const settingsDescriptorBefore = Object.getOwnPropertyDescriptor(settingsSkybox, 'dataPlatformResourceId');
+  const settingsContent = serializeScene(settingsScene);
+  const settingsRaw = JSON.parse(settingsContent) as {
+    scene: { sceneSettings: { skybox: { dataPlatformResourceId?: string } } };
+  };
+  assert.equal(settingsRaw.scene.sceneSettings.skybox.dataPlatformResourceId, '1');
+  assert.equal(getSceneSkyboxSettings(deserializeScene(settingsContent))?.dataPlatformResourceId, '1');
+  assert.deepEqual(
+    Object.getOwnPropertyDescriptor(settingsSkybox, 'dataPlatformResourceId'),
+    settingsDescriptorBefore,
+  );
+
+  const entityScene = createEmptySceneDocument('Non-enumerable Component ID');
+  const entity = createSkyboxEntity(VALID_SKYBOX);
+  const maximumId = '9'.repeat(64);
+  Object.defineProperty(entity.components.skybox!, 'dataPlatformResourceId', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: maximumId,
+  });
+  entityScene.entityIds.push(entity.id);
+  entityScene.entities[entity.id] = entity;
+  const componentDescriptorBefore = Object.getOwnPropertyDescriptor(
+    entity.components.skybox!,
+    'dataPlatformResourceId',
+  );
+  const entityContent = serializeScene(entityScene);
+  const entityRaw = JSON.parse(entityContent) as {
+    scene: { entities: Record<string, { components: { skybox: { dataPlatformResourceId?: string } } }> };
+  };
+  assert.equal(
+    entityRaw.scene.entities[entity.id].components.skybox.dataPlatformResourceId,
+    maximumId,
+  );
+  assert.equal(getSceneSkyboxSettings(deserializeScene(entityContent))?.dataPlatformResourceId, maximumId);
+  assert.deepEqual(
+    Object.getOwnPropertyDescriptor(entity.components.skybox!, 'dataPlatformResourceId'),
+    componentDescriptorBefore,
+  );
+});
+
+test('serializeScene 不执行稳定 ID getter，并在保存入口拒绝 accessor 与非法 ID', () => {
+  let getterReads = 0;
+  const accessorSettingsScene = createEmptySceneDocument('Accessor Settings ID');
+  const accessorSettings = { ...VALID_SKYBOX };
+  Object.defineProperty(accessorSettings, 'dataPlatformResourceId', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return '1';
+    },
+  });
+  accessorSettingsScene.sceneSettings.skybox = accessorSettings;
+  assert.throws(() => serializeScene(accessorSettingsScene), /dataPlatformResourceId.*1-64/);
+  assert.equal(getterReads, 0);
+
+  const accessorEntityScene = createEmptySceneDocument('Accessor Component ID');
+  const accessorEntity = createSkyboxEntity(VALID_SKYBOX);
+  Object.defineProperty(accessorEntity.components.skybox!, 'dataPlatformResourceId', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return '1';
+    },
+  });
+  accessorEntityScene.entityIds.push(accessorEntity.id);
+  accessorEntityScene.entities[accessorEntity.id] = accessorEntity;
+  assert.throws(() => serializeScene(accessorEntityScene), /dataPlatformResourceId.*1-64/);
+  assert.equal(getterReads, 0);
+
+  const invalidSettingsScene = createEmptySceneDocument('Invalid Settings ID');
+  invalidSettingsScene.sceneSettings.skybox = { ...VALID_SKYBOX, dataPlatformResourceId: '01' };
+  assert.throws(() => serializeScene(invalidSettingsScene), /dataPlatformResourceId.*1-64/);
+
+  const invalidEntityScene = createEmptySceneDocument('Invalid Component ID');
+  const invalidEntity = createSkyboxEntity(VALID_SKYBOX);
+  invalidEntity.components.skybox = {
+    ...invalidEntity.components.skybox!,
+    dataPlatformResourceId: '01',
+  };
+  invalidEntityScene.entityIds.push(invalidEntity.id);
+  invalidEntityScene.entities[invalidEntity.id] = invalidEntity;
+  assert.throws(() => serializeScene(invalidEntityScene), /dataPlatformResourceId.*1-64/);
+});
+
+test('真实手写 version 1/2 场景 fixture 缺失字段兼容并保真合法稳定 ID', () => {
+  for (const version of [1, 2] as const) {
+    const withId = deserializeScene(createHandwrittenLegacySkyboxFile(version, '1'));
+    assert.equal(getSceneSkyboxSettings(withId)?.dataPlatformResourceId, '1');
+    assert.equal(withId.sceneSettings.skybox, null);
+
+    const withoutId = deserializeScene(createHandwrittenLegacySkyboxFile(version));
+    const settings = getSceneSkyboxSettings(withoutId);
+    assert.ok(settings);
+    assert.equal('dataPlatformResourceId' in settings, false);
+  }
 });
 
 test('天空盒资源创建为可移动球体实体，Transform Y 旋转映射为天空纹理水平旋转', () => {

@@ -25,6 +25,8 @@ writeFileSync(
         allowSyntheticDefaultImports: true,
         resolveJsonModule: true,
         isolatedModules: true,
+        allowImportingTsExtensions: true,
+        rewriteRelativeImportExtensions: true,
         noEmit: false,
         outDir,
         rootDir: projectRoot,

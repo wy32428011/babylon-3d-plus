@@ -317,12 +317,17 @@ export function normalizeDataPlatformResourceId(value: unknown): string | null {
   return DATA_PLATFORM_RESOURCE_ID_PATTERN.test(normalized) ? normalized : null;
 }
 
-/** 仅读取自有数据字段；继承属性和 accessor 不参与持久化。 */
-function readOwnDataPlatformResourceId(value: object): { present: boolean; value: unknown } {
-  const descriptor = Object.getOwnPropertyDescriptor(value, 'dataPlatformResourceId');
-  return descriptor && 'value' in descriptor
-    ? { present: true, value: descriptor.value }
-    : { present: false, value: undefined };
+export type OwnDataPropertyResult =
+  | { kind: 'missing' }
+  | { kind: 'accessor' }
+  | { kind: 'data'; value: unknown };
+
+/** 仅读取自有数据字段；继承属性和 accessor 不参与持久化，也不会执行 getter。 */
+export function readOwnDataProperty(value: object, propertyKey: PropertyKey): OwnDataPropertyResult {
+  const descriptor = Object.getOwnPropertyDescriptor(value, propertyKey);
+  if (!descriptor) return { kind: 'missing' };
+  if (!Object.hasOwn(descriptor, 'value')) return { kind: 'accessor' };
+  return { kind: 'data', value: descriptor.value };
 }
 
 /** 归一化天空盒设置，拒绝非授权 URL、无效路径和格式不一致的资源。 */
@@ -343,11 +348,11 @@ export function sanitizeSceneSkybox(
   ) return null;
 
   const assetRevision = skybox.assetRevision?.trim();
-  const resourceIdField = readOwnDataPlatformResourceId(skybox);
-  const dataPlatformResourceId = resourceIdField.present
+  const resourceIdField = readOwnDataProperty(skybox, 'dataPlatformResourceId');
+  const dataPlatformResourceId = resourceIdField.kind === 'data'
     ? normalizeDataPlatformResourceId(resourceIdField.value)
     : null;
-  if (resourceIdField.present && !dataPlatformResourceId) return null;
+  if (resourceIdField.kind === 'data' && !dataPlatformResourceId) return null;
   const resolution = SCENE_SKYBOX_RESOLUTIONS.includes(skybox.resolution)
     ? skybox.resolution
     : SCENE_SKYBOX_RESOLUTION_DEFAULT;
@@ -456,13 +461,13 @@ export function getSceneSkyboxEntity(
 export function createSceneSkyboxSettingsFromEntity(entity: Entity): SceneSkyboxSettings | null {
   const skybox = entity.components.skybox;
   if (!skybox) return null;
-  const resourceIdField = readOwnDataPlatformResourceId(skybox);
+  const resourceIdField = readOwnDataProperty(skybox, 'dataPlatformResourceId');
   return sanitizeSceneSkybox({
     packagePath: skybox.packagePath,
     sourcePath: skybox.sourcePath,
     sourceUrl: skybox.sourceUrl,
     ...(skybox.assetRevision === undefined ? {} : { assetRevision: skybox.assetRevision }),
-    ...(resourceIdField.present ? { dataPlatformResourceId: resourceIdField.value as string } : {}),
+    ...(resourceIdField.kind === 'data' ? { dataPlatformResourceId: resourceIdField.value as string } : {}),
     format: skybox.format,
     rotationDegrees: normalizeSkyboxRotationRadians(entity.components.transform.rotation.y),
     intensity: skybox.intensity,

@@ -10,6 +10,7 @@ import {
   MODEL_ASSET_CODE_MAX_LENGTH,
   createModelAssetCode,
   normalizeDataPlatformResourceId,
+  readOwnDataProperty,
   normalizeSkyboxSphereScale,
   normalizeStackerSimulationScenario,
   sanitizeFetchConfig,
@@ -73,7 +74,40 @@ const DEFAULT_SCENE_FILE_UNITS: SceneFileUnits = { length: SCENE_LENGTH_UNIT };
 type PlainObject = Record<string, unknown>;
 
 export function serializeScene(scene: SceneDocument): string {
-  return JSON.stringify({ version: 3, units: { length: SCENE_LENGTH_UNIT }, scene }, null, 2);
+  const snapshot = createSerializableSceneSnapshot(scene);
+  return JSON.stringify({ version: 3, units: { length: SCENE_LENGTH_UNIT }, scene: snapshot }, null, 2);
+}
+
+/** 保存前只替换天空盒嵌套对象，保留其它场景引用并确保不修改输入。 */
+function createSerializableSceneSnapshot(scene: SceneDocument): SceneDocument {
+  const entities = Object.fromEntries(
+    Object.entries(scene.entities).map(([entityId, entity]) => [
+      entityId,
+      createSerializableEntitySnapshot(entity),
+    ]),
+  );
+  const sceneSettings = scene.sceneSettings as SceneSettings | undefined;
+  if (sceneSettings === undefined) return { ...scene, entities };
+  return {
+    ...scene,
+    entities,
+    sceneSettings: {
+      ...sceneSettings,
+      skybox: normalizeSceneSkyboxSettings(sceneSettings.skybox),
+    },
+  };
+}
+
+/** 实体天空盒使用加载入口同一套严格规范化，避免保存无法重新打开的组件。 */
+function createSerializableEntitySnapshot(entity: Entity): Entity {
+  if (!entity.components.skybox) return entity;
+  return {
+    ...entity,
+    components: {
+      ...entity.components,
+      skybox: normalizeSkyboxComponent(entity.components.skybox),
+    },
+  };
 }
 
 export function deserializeScene(content: string): SceneDocument {
@@ -1206,9 +1240,10 @@ function assertArray(value: unknown): unknown[] {
 }
 
 function normalizeOptionalDataPlatformResourceId(value: PlainObject): string | undefined {
-  const descriptor = Object.getOwnPropertyDescriptor(value, 'dataPlatformResourceId');
-  if (!descriptor || !('value' in descriptor)) return undefined;
-  const normalized = normalizeDataPlatformResourceId(descriptor.value);
+  const field = readOwnDataProperty(value, 'dataPlatformResourceId');
+  if (field.kind === 'missing') return undefined;
+  if (field.kind === 'accessor') throw new Error(INVALID_SKYBOX_RESOURCE_ID_ERROR);
+  const normalized = normalizeDataPlatformResourceId(field.value);
   if (!normalized) throw new Error(INVALID_SKYBOX_RESOURCE_ID_ERROR);
   return normalized;
 }
