@@ -123,7 +123,7 @@ export function buildDataPlatformSkyboxPlan(
   remote: readonly DataPlatformSkyboxRecord[],
   current: DataPlatformSkyboxIndex,
   existingPaths: ReadonlySet<string>,
-  syncedAt: string,
+  syncedAt = new Date().toISOString(),
 ): DataPlatformSkyboxPlan {
   const normalizedSyncedAt = normalizeIsoTimestamp(syncedAt, 'syncedAt');
   assertUniqueSkyboxRecords(remote);
@@ -164,8 +164,8 @@ export function buildDataPlatformSkyboxPlan(
     };
     if (!hasSameSemanticState(entry, orphanedEntry)) {
       changedResourceIds.push(entry.resourceId);
-      orphanedResourceIds.push(entry.resourceId);
     }
+    orphanedResourceIds.push(entry.resourceId);
     nextEntries.push(orphanedEntry);
   }
 

@@ -358,6 +358,22 @@ test('首次同步每个远端 ID 都下载并按 1、2、10 稳定排序', () =
   assert.deepEqual(plan.orphanedResourceIds, []);
 });
 
+test('三参数调用使用当前时间生成合法 syncedAt', () => {
+  const before = Date.now();
+  const plan = buildDataPlatformSkyboxPlan(
+    [createRecord('1')],
+    createIndex(),
+    new Set(),
+  );
+  const after = Date.now();
+  const syncedAt = plan.nextIndex.entries[0].syncedAt;
+
+  assert.match(syncedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  const timestamp = Date.parse(syncedAt);
+  assert.equal(Number.isFinite(timestamp), true);
+  assert.equal(timestamp >= before && timestamp <= after, true);
+});
+
 test('内容相同且物理路径存在时零下载，只更新展示名、revision 和 syncedAt', () => {
   const oldRecord = createRecord('1', { displayName: '旧名称', revision: '1' });
   const currentEntry = createEntry(oldRecord);
@@ -473,7 +489,7 @@ test('索引内容相同但物理文件缺失时重新下载，不把 syncedAt �
   assert.deepEqual(plan.changedResourceIds, []);
 });
 
-test('远端缺失时保留原路径并标记本轮新增 orphaned', () => {
+test('远端缺失时保留原路径并列入 orphanedResourceIds', () => {
   const first = createEntry(createRecord('1'));
   const second = createEntry(createRecord('2'));
 
@@ -498,7 +514,7 @@ test('远端缺失时保留原路径并标记本轮新增 orphaned', () => {
   assert.deepEqual(plan.orphanedResourceIds, ['2']);
 });
 
-test('已 orphaned 且仍缺失时不重复列为本轮 orphaned', () => {
+test('已 orphaned 且仍缺失时仍列入 nextIndex 的全部 orphaned ID', () => {
   const currentEntry = createEntry(createRecord('2'), { status: 'orphaned' });
 
   const plan = buildDataPlatformSkyboxPlan(
@@ -511,7 +527,7 @@ test('已 orphaned 且仍缺失时不重复列为本轮 orphaned', () => {
   assert.equal(plan.nextIndex.entries[0].status, 'orphaned');
   assert.equal(plan.nextIndex.entries[0].syncedAt, NEXT_SYNCED_AT);
   assert.deepEqual(plan.changedResourceIds, []);
-  assert.deepEqual(plan.orphanedResourceIds, []);
+  assert.deepEqual(plan.orphanedResourceIds, ['2']);
 });
 
 test('远端重新出现时可从 orphaned 恢复 active', () => {
