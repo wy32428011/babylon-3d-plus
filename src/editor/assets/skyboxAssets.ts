@@ -158,6 +158,15 @@ export function formatSkyboxSyncProgressCount(
   return `${progress.completed}/${progress.total}`;
 }
 
+/** 普通初载只更新资源状态；显式刷新时才允许通过命令系统重关联当前天空盒。 */
+export function refreshCurrentSkyboxAfterProjectAssetsLoad(
+  refreshSceneAssets: boolean,
+  assets: ProjectSkyboxAssetEntry[],
+  refreshCurrentSkyboxFromAssets: (assets: ProjectSkyboxAssetEntry[]) => boolean,
+): boolean {
+  return refreshSceneAssets ? refreshCurrentSkyboxFromAssets(assets) : false;
+}
+
 /** 用项目资源路径刷新天空盒引用；场景级显示参数由当前设置保留。 */
 export function createSceneSkyboxFromAsset(
   asset: ProjectSkyboxAssetEntry,
@@ -223,9 +232,10 @@ export function findSkyboxAssetForSettings(
 
 /** 仅按场景稳定 ID 唯一定位已孤立的数据中台天空盒缓存。 */
 export function findOrphanedSkyboxForSettings(
-  settings: SceneSkyboxSettings,
+  settings: SceneSkyboxSettings | null,
   orphaned: ProjectSkyboxAssetEntry[],
 ): ProjectSkyboxAssetEntry | null {
+  if (!settings) return null;
   const resourceIdField = readOwnDataProperty(settings, 'dataPlatformResourceId');
   if (resourceIdField.kind !== 'data') return null;
   const dataPlatformResourceId = normalizeDataPlatformResourceId(resourceIdField.value);

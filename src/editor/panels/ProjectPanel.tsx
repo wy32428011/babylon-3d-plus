@@ -22,6 +22,7 @@ import {
   formatSkyboxSyncError,
   formatSkyboxSyncProgressCount,
   normalizeSkyboxSyncProgress,
+  refreshCurrentSkyboxAfterProjectAssetsLoad,
   type SkyboxSyncProgress,
 } from '../assets/skyboxAssets';
 import { createImportedAssetIndexes, findImportedAssetForPackagePath } from '../assets/modelAssetRelink';
@@ -122,9 +123,9 @@ function getDataPlatformImageSyncApi(): DataPlatformImageSyncApi {
 
 const DATA_PLATFORM_SKYBOX_SYNC_PHASE_LABELS: Record<DataPlatformSkyboxSyncProgress['phase'], string> = {
   querying: '查询天空盒',
-  downloading: '下载',
-  validating: '校验',
-  promoting: '写入库',
+  downloading: '下载天空盒',
+  validating: '校验天空盒',
+  promoting: '写入天空盒库',
   completed: '同步完成',
   failed: '同步失败',
 };
@@ -398,7 +399,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
         pushLog(`已加载项目资源库：${totalAssetCount} 个资产。`);
       }
 
-      refreshCurrentSkyboxFromAssets(loadedSkyboxes);
+      refreshCurrentSkyboxAfterProjectAssetsLoad(
+        refreshSceneAssets,
+        loadedSkyboxes,
+        refreshCurrentSkyboxFromAssets,
+      );
       if (refreshSceneAssets) {
         refreshModelInstancesFromAssets(result.assets.filter((asset) => asset.libraryKind === 'model'));
         await refreshCurrentEnvironmentFromAssets(result.assets);
@@ -649,7 +654,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   async function handleRetryDataPlatformSkyboxSync(): Promise<void> {
     if (
-      !skyboxSyncProgress
+      props.readOnly
+      || !skyboxSyncProgress
       || skyboxSyncProgress.phase !== 'failed'
       || skyboxSyncStartInFlightRef.current
       || skyboxSyncRetryInFlightRef.current
@@ -1296,11 +1302,14 @@ export function ProjectPanel(props: ProjectPanelProps) {
       </div>
 
       {activeLibrary.key === 'skybox' && orphanedCurrentSkybox ? (
-        <div className="library-sync-status library-sync-status-failed" role="status" aria-live="polite">
+        <div className="library-sync-status library-sync-status-warning" role="status" aria-live="polite">
           <div className="library-sync-status-heading">
             <strong>资源已从数据中台删除</strong>
           </div>
-          <p>当前场景继续使用本地兼容缓存，但不能用于新场景。</p>
+          <p>
+            天空盒“{orphanedCurrentSkybox.displayName}”（数据中台资源 ID：{orphanedCurrentSkybox.dataPlatformResourceId}）已从数据中台删除。
+            当前场景继续使用本地兼容缓存，但不能用于新场景；现有场景显示不受影响，重新选择天空盒时需使用仍在资源库中的资源。
+          </p>
         </div>
       ) : null}
 
@@ -1314,7 +1323,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
           {skyboxSyncProgress.phase === 'failed' ? (
             <div className="library-sync-status-actions">
               <button
-                disabled={isRetryingSkyboxSync}
+                disabled={props.readOnly || isRetryingSkyboxSync}
                 onClick={() => void handleRetryDataPlatformSkyboxSync()}
                 type="button"
               >

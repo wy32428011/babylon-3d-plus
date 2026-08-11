@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import type { ProjectSkyboxAssetEntry } from '../../src/editor/assets/AssetDatabase.ts';
+
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
 const PROJECT_PANEL_PATH = 'src/editor/panels/ProjectPanel.tsx';
@@ -17,7 +19,12 @@ const GLOBAL_STYLE_PATH = 'src/styles/global.css';
 const SCENE_SETTINGS_PANEL_PATH = 'src/editor/panels/SceneSettingsPanel.tsx';
 const PROJECT_IPC_PATH = 'electron/ipc/projectIpc.ts';
 
-const [{ formatSkyboxSyncError, formatSkyboxSyncProgressCount, normalizeSkyboxSyncProgress }] =
+const [{
+  formatSkyboxSyncError,
+  formatSkyboxSyncProgressCount,
+  normalizeSkyboxSyncProgress,
+  refreshCurrentSkyboxAfterProjectAssetsLoad,
+}] =
   await importIsolatedTypeScriptModules<[
     typeof import('../../src/editor/assets/skyboxAssets'),
   ]>(['src/editor/assets/skyboxAssets.ts']);
@@ -242,6 +249,20 @@ test('天空盒同步纯逻辑仅在 completed 编排资源刷新，并安全归
   assert.equal(invalidPhase.shouldReloadProjectAssets, false);
 });
 
+test('项目资源初载不刷新当前天空盒，显式刷新才委托稳定 ID 重关联', () => {
+  const skyboxes: ProjectSkyboxAssetEntry[] = [];
+  const calls: ProjectSkyboxAssetEntry[][] = [];
+  const refresh = (assets: ProjectSkyboxAssetEntry[]): boolean => {
+    calls.push(assets);
+    return true;
+  };
+
+  assert.equal(refreshCurrentSkyboxAfterProjectAssetsLoad(false, skyboxes, refresh), false);
+  assert.deepEqual(calls, []);
+  assert.equal(refreshCurrentSkyboxAfterProjectAssetsLoad(true, skyboxes, refresh), true);
+  assert.deepEqual(calls, [skyboxes]);
+});
+
 test('ProjectPanel 天空盒 Tab 使用现有同步 API、固定阶段文案和四类本地状态', () => {
   const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
 
@@ -250,9 +271,9 @@ test('ProjectPanel 天空盒 Tab 使用现有同步 API、固定阶段文案和�
   assert.ok(source.includes('onDataPlatformSkyboxSyncProgress?:'));
   for (const [phase, label] of [
     ['querying', '查询天空盒'],
-    ['downloading', '下载'],
-    ['validating', '校验'],
-    ['promoting', '写入库'],
+    ['downloading', '下载天空盒'],
+    ['validating', '校验天空盒'],
+    ['promoting', '写入天空盒库'],
     ['completed', '同步完成'],
     ['failed', '同步失败'],
   ]) {
@@ -273,8 +294,19 @@ test('天空盒同步订阅清理迟到事件，且仅 completed 通过既有命
   assert.ok(source.includes('unsubscribe();'));
   assert.ok(source.includes('if (shouldReloadProjectAssets)'));
   assert.ok(source.includes('void loadProjectAssets(true)'));
-  assert.ok(source.includes('refreshCurrentSkyboxFromAssets(loadedSkyboxes)'));
+  assert.ok(source.includes('refreshCurrentSkyboxAfterProjectAssetsLoad('));
   assert.ok(source.includes('updateSkyboxConfig(refreshedSkybox)'));
+
+  const loadStart = source.indexOf('const loadProjectAssets = useCallback');
+  const loadEnd = source.indexOf('/** 从主进程本地图片索引加载同步图片', loadStart);
+  const loadProjectAssetsSource = source.slice(loadStart, loadEnd);
+  assert.ok(loadProjectAssetsSource.includes('refreshSceneAssets'));
+  assert.ok(loadProjectAssetsSource.includes('refreshCurrentSkyboxAfterProjectAssetsLoad('));
+
+  const importStart = source.indexOf('async function handleImportSkyboxFile');
+  const importEnd = source.indexOf('/** 根据当前资源库选择对应的模型', importStart);
+  const importSkyboxSource = source.slice(importStart, importEnd);
+  assert.ok(importSkyboxSource.includes('refreshCurrentSkyboxFromAssets([result.importedAsset])'));
   assert.doesNotMatch(source, /useEditorStore.setState/);
 });
 
@@ -292,6 +324,11 @@ test('天空盒工具栏支持手动同步、失败重试关闭、active 禁重�
   assert.ok(source.includes('dataPlatformSkyboxSyncApi.syncDataPlatformSkyboxes()'));
   assert.ok(source.includes('async function handleRetryDataPlatformSkyboxSync'));
   assert.ok(source.includes('dataPlatformSkyboxSyncApi.retryDataPlatformSkyboxSync()'));
+  const retryStart = source.indexOf('async function handleRetryDataPlatformSkyboxSync');
+  const retryEnd = source.indexOf('function handleDismissDataPlatformSkyboxSyncFailure', retryStart);
+  const retryHandler = source.slice(retryStart, retryEnd);
+  assert.ok(retryHandler.includes('props.readOnly'));
+  assert.ok(source.includes('disabled={props.readOnly || isRetryingSkyboxSync}'));
   assert.ok(source.includes('if (!started) {'));
   assert.ok(source.includes('if (!retryStarted) {'));
   assert.ok(source.includes('formatSkyboxSyncError(error)'));
@@ -310,8 +347,11 @@ test('active 与 orphaned 天空盒严格分离，当前场景只按稳定 ID �
   assert.ok(source.includes('setSkyboxAssets(result.skyboxes ?? [])'));
   assert.ok(source.includes('setOrphanedSkyboxAssets(result.orphanedSkyboxes ?? [])'));
   assert.ok(source.includes('findOrphanedSkyboxForSettings(currentSkybox, orphanedSkyboxAssets)'));
+  assert.ok(source.includes('className="library-sync-status library-sync-status-warning" role="status"'));
   assert.ok(source.includes('资源已从数据中台删除'));
-  assert.ok(source.includes('当前场景继续使用本地兼容缓存，但不能用于新场景'));
+  assert.ok(source.includes('orphanedCurrentSkybox.displayName'));
+  assert.ok(source.includes('orphanedCurrentSkybox.dataPlatformResourceId'));
+  assert.ok(source.includes('当前场景继续使用本地兼容缓存，但不能用于新场景；现有场景显示不受影响，重新选择天空盒时需使用仍在资源库中的资源。'));
   assert.ok(source.includes('createSkyboxLibraryItems(skyboxAssets)'));
   assert.ok(!source.includes('createSkyboxLibraryItems(orphanedSkyboxAssets)'));
   assert.ok(sceneSettingsSource.includes('const assets = result.skyboxes ?? [];'));

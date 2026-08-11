@@ -318,6 +318,18 @@ test('orphaned 天空盒只按场景稳定 ID 唯一匹配数据中台孤立缓�
   assert.equal(findOrphanedSkyboxForSettings(settings, [activeSameId, projectSameId, matching]), matching);
 });
 
+test('orphaned 匹配接受 null 场景设置并直接返回 null', () => {
+  const orphaned = createAsset({
+    source: 'data-platform',
+    availability: 'orphaned',
+    dataPlatformResourceId: RESOURCE_ID,
+    dataPlatformRevision: '1',
+    fileSha256: SHA_A,
+  });
+
+  assert.equal(findOrphanedSkyboxForSettings(null, [orphaned]), null);
+});
+
 test('orphaned 天空盒稳定 ID 为零个或多个候选时拒绝匹配且不按旧路径或名称猜测', () => {
   const legacySettings = createSettings();
   const legacyNameMatch = createAsset({
