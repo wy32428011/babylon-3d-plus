@@ -88,59 +88,81 @@ export function formatSkyboxSyncError(error: unknown): string {
   return '未知错误';
 }
 
-function readSkyboxSyncString(progress: unknown, propertyKey: PropertyKey): string {
-  const field = readOwnDataPropertySafely(progress, propertyKey);
-  return field.kind === 'data' && typeof field.value === 'string' ? field.value : '';
+const INVALID_SKYBOX_SYNC_MESSAGE = '收到无效的天空盒同步状态。';
+
+function createInvalidSkyboxSyncProgress(progress: unknown): SkyboxSyncProgress {
+  const runIdField = readOwnDataPropertySafely(progress, 'runId');
+  const runId = runIdField.kind === 'data'
+    && typeof runIdField.value === 'string'
+    && runIdField.value.trim()
+    ? runIdField.value.trim()
+    : 'renderer-invalid-skybox-sync';
+  return {
+    runId,
+    phase: 'failed',
+    completed: 0,
+    total: 0,
+    message: INVALID_SKYBOX_SYNC_MESSAGE,
+    error: INVALID_SKYBOX_SYNC_MESSAGE,
+  };
 }
 
-function readSkyboxSyncCountPair(progress: unknown): Pick<SkyboxSyncProgress, 'completed' | 'total'> {
-  const completedField = readOwnDataPropertySafely(progress, 'completed');
-  const totalField = readOwnDataPropertySafely(progress, 'total');
-  const completed = completedField.kind === 'data' ? completedField.value : null;
-  const total = totalField.kind === 'data' ? totalField.value : null;
-  if (
-    typeof completed !== 'number'
-    || typeof total !== 'number'
-    || !Number.isSafeInteger(completed)
-    || !Number.isSafeInteger(total)
-    || completed < 0
-    || total < 0
-    || completed > total
-  ) {
-    return { completed: 0, total: 0 };
-  }
-  return { completed, total };
-}
-
-/** 归一化 IPC 进度并返回“是否刷新资源库”的编排决策。 */
+/** 严格校验 IPC 进度；任一字段非法都转为 renderer failed，且绝不触发资源刷新。 */
 export function normalizeSkyboxSyncProgress(progress: unknown): {
+  valid: boolean;
   progress: SkyboxSyncProgress;
   shouldReloadProjectAssets: boolean;
 } {
-  const runId = readSkyboxSyncString(progress, 'runId').trim() || 'renderer-invalid-skybox-sync';
+  const runIdField = readOwnDataPropertySafely(progress, 'runId');
   const phaseField = readOwnDataPropertySafely(progress, 'phase');
-  const rawPhase = phaseField.kind === 'data' ? phaseField.value : null;
-  const phase = typeof rawPhase === 'string' && SKYBOX_SYNC_PHASES.has(rawPhase as SkyboxSyncPhase)
-    ? rawPhase as SkyboxSyncPhase
-    : 'failed';
-  const counts = readSkyboxSyncCountPair(progress);
-  const message = readSkyboxSyncString(progress, 'message');
+  const completedField = readOwnDataPropertySafely(progress, 'completed');
+  const totalField = readOwnDataPropertySafely(progress, 'total');
+  const messageField = readOwnDataPropertySafely(progress, 'message');
   const errorField = readOwnDataPropertySafely(progress, 'error');
-  const error = errorField.kind === 'data' && errorField.value !== null && errorField.value !== undefined
-    ? formatSkyboxSyncError(errorField.value)
-    : phaseField.kind === 'data' && phaseField.value === phase
-      ? null
-      : '收到无效的天空盒同步状态。';
+
+  const runId = runIdField.kind === 'data' && typeof runIdField.value === 'string'
+    ? runIdField.value.trim()
+    : '';
+  const phase = phaseField.kind === 'data' && typeof phaseField.value === 'string'
+    && SKYBOX_SYNC_PHASES.has(phaseField.value as SkyboxSyncPhase)
+    ? phaseField.value as SkyboxSyncPhase
+    : null;
+  const completed = completedField.kind === 'data' ? completedField.value : null;
+  const total = totalField.kind === 'data' ? totalField.value : null;
+  const message = messageField.kind === 'data' ? messageField.value : null;
+  const error = errorField.kind === 'data' ? errorField.value : undefined;
+  const valid = Boolean(runId)
+    && phase !== null
+    && typeof completed === 'number'
+    && typeof total === 'number'
+    && Number.isSafeInteger(completed)
+    && Number.isSafeInteger(total)
+    && completed >= 0
+    && total >= 0
+    && completed <= total
+    && typeof message === 'string'
+    && (error === null || typeof error === 'string');
+
+  if (!valid || phase === null || typeof completed !== 'number' || typeof total !== 'number' || typeof message !== 'string') {
+    return {
+      valid: false,
+      progress: createInvalidSkyboxSyncProgress(progress),
+      shouldReloadProjectAssets: false,
+    };
+  }
+
   const normalizedProgress: SkyboxSyncProgress = {
     runId,
     phase,
-    ...counts,
+    completed,
+    total,
     message,
-    error,
+    error: error as string | null,
   };
   return {
+    valid: true,
     progress: normalizedProgress,
-    shouldReloadProjectAssets: normalizedProgress.phase === 'completed',
+    shouldReloadProjectAssets: phase === 'completed',
   };
 }
 

@@ -18,6 +18,7 @@ const POI_EFFECT_INSPECTOR_PATH = 'src/editor/panels/PoiEffectInspector.tsx';
 const GLOBAL_STYLE_PATH = 'src/styles/global.css';
 const SCENE_SETTINGS_PANEL_PATH = 'src/editor/panels/SceneSettingsPanel.tsx';
 const PROJECT_IPC_PATH = 'electron/ipc/projectIpc.ts';
+const SKYBOX_SYNC_CONTROLLER_PATH = 'src/editor/assets/skyboxSyncController.ts';
 
 const [{
   formatSkyboxSyncError,
@@ -202,6 +203,7 @@ test('天空盒同步纯逻辑仅在 completed 编排资源刷新，并安全归
       message: phase,
       error: phase === 'failed' ? 'failed' : null,
     });
+    assert.equal(result.valid, true, phase);
     assert.equal(result.shouldReloadProjectAssets, false, phase);
     assert.equal(formatSkyboxSyncProgressCount(result.progress), '1/3');
   }
@@ -214,6 +216,7 @@ test('天空盒同步纯逻辑仅在 completed 编排资源刷新，并安全归
     message: 'done',
     error: null,
   });
+  assert.equal(completed.valid, true);
   assert.equal(completed.shouldReloadProjectAssets, true);
   assert.equal(formatSkyboxSyncProgressCount(completed.progress), '3/3');
 
@@ -230,9 +233,10 @@ test('天空盒同步纯逻辑仅在 completed 编排资源刷新，并安全归
     message: malicious,
     error: malicious,
   });
+  assert.equal(invalid.valid, false);
   assert.equal(formatSkyboxSyncProgressCount(invalid.progress), null);
-  assert.equal(invalid.progress.message, '');
-  assert.equal(invalid.progress.error, '未知错误');
+  assert.equal(invalid.progress.message, '收到无效的天空盒同步状态。');
+  assert.equal(invalid.progress.error, '收到无效的天空盒同步状态。');
   assert.equal(formatSkyboxSyncError(malicious), '未知错误');
   assert.equal(formatSkyboxSyncError(new Error('网络异常')), '网络异常');
   assert.equal(formatSkyboxSyncProgressCount({ completed: 4, total: 3 }), null);
@@ -245,6 +249,7 @@ test('天空盒同步纯逻辑仅在 completed 编排资源刷新，并安全归
     message: 'invalid',
     error: null,
   });
+  assert.equal(invalidPhase.valid, false);
   assert.equal(invalidPhase.progress.phase, 'failed');
   assert.equal(invalidPhase.shouldReloadProjectAssets, false);
 });
@@ -263,7 +268,7 @@ test('项目资源初载不刷新当前天空盒，显式刷新才委托稳定 I
   assert.deepEqual(calls, [skyboxes]);
 });
 
-test('ProjectPanel 天空盒 Tab 使用现有同步 API、固定阶段文案和四类本地状态', () => {
+test('ProjectPanel 天空盒 Tab 使用现有同步 API、固定阶段文案并接入纯 controller', () => {
   const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
 
   assert.ok(source.includes('syncDataPlatformSkyboxes?: () => Promise<boolean>'));
@@ -279,23 +284,25 @@ test('ProjectPanel 天空盒 Tab 使用现有同步 API、固定阶段文案和�
   ]) {
     assert.ok(source.includes(`${phase}: '${label}'`), `缺少 ${phase} 固定文案`);
   }
-  assert.ok(source.includes('const [skyboxSyncProgress, setSkyboxSyncProgress]'));
-  assert.ok(source.includes('const [isStartingSkyboxSync, setIsStartingSkyboxSync]'));
-  assert.ok(source.includes('const [isRetryingSkyboxSync, setIsRetryingSkyboxSync]'));
+  assert.ok(source.includes('createSkyboxSyncController({'));
+  assert.ok(source.includes('const [skyboxSyncState, setSkyboxSyncState]'));
+  assert.ok(source.includes('const skyboxSyncProgress = skyboxSyncState.progress'));
   assert.ok(source.includes('const [orphanedSkyboxAssets, setOrphanedSkyboxAssets]'));
 });
 
-test('天空盒同步订阅清理迟到事件，且仅 completed 通过既有命令路径重载并重关联', () => {
+test('天空盒同步订阅委托 controller 清理迟到事件，列表成功后才按稳定 ID 命令重关联', () => {
   const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const controllerSource = readFileSync(SKYBOX_SYNC_CONTROLLER_PATH, 'utf8');
 
-  assert.ok(source.includes('const unsubscribe = dataPlatformSkyboxSyncApi.onDataPlatformSkyboxSyncProgress((progress) => {'));
-  assert.ok(source.includes('if (!active) return;'));
-  assert.ok(source.includes('active = false;'));
-  assert.ok(source.includes('unsubscribe();'));
-  assert.ok(source.includes('if (shouldReloadProjectAssets)'));
-  assert.ok(source.includes('void loadProjectAssets(true)'));
-  assert.ok(source.includes('refreshCurrentSkyboxAfterProjectAssetsLoad('));
+  assert.ok(source.includes('onDataPlatformSkyboxSyncProgress?.((progress) => {'));
+  assert.ok(source.includes('controller.receiveProgress(progress);'));
+  assert.ok(source.includes('unsubscribe?.();'));
+  assert.ok(source.includes('controller.dispose();'));
+  assert.ok(source.includes('const result = await loadProjectAssets(false);'));
+  assert.ok(source.includes('applyAssets: (assets, sceneId) => relinkCurrentSkyboxFromAssets(assets, sceneId)'));
   assert.ok(source.includes('updateSkyboxConfig(refreshedSkybox)'));
+  assert.match(controllerSource, /await options\.reloadAssets\(\)/);
+  assert.match(controllerSource, /result !== 'applied' && result !== 'unchanged'/);
 
   const loadStart = source.indexOf('const loadProjectAssets = useCallback');
   const loadEnd = source.indexOf('/** 从主进程本地图片索引加载同步图片', loadStart);
@@ -305,38 +312,36 @@ test('天空盒同步订阅清理迟到事件，且仅 completed 通过既有命
 
   const importStart = source.indexOf('async function handleImportSkyboxFile');
   const importEnd = source.indexOf('/** 根据当前资源库选择对应的模型', importStart);
-  const importSkyboxSource = source.slice(importStart, importEnd);
-  assert.ok(importSkyboxSource.includes('refreshCurrentSkyboxFromAssets([result.importedAsset])'));
+  const importHandler = source.slice(importStart, importEnd);
+  assert.ok(importHandler.includes('refreshCurrentSkyboxFromAssets([result.importedAsset])'));
   assert.doesNotMatch(source, /useEditorStore.setState/);
 });
 
-test('天空盒工具栏支持手动同步、失败重试关闭、active 禁重并只在天空盒 Tab 显示状态', () => {
+test('天空盒工具栏支持手动同步、失败重试关闭、资源库重载，且 readOnly 双重门控', () => {
   const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
 
   assert.ok(source.includes('同步数据中台天空盒'));
-  assert.ok(source.includes("isSkyboxSyncActive"));
+  assert.ok(source.includes('isSkyboxSyncActive'));
   assert.ok(source.includes('disabled={props.readOnly || isStartingSkyboxSync || isSkyboxSyncActive || isRetryingSkyboxSync}'));
   assert.ok(source.includes('重试同步'));
+  assert.ok(source.includes('重新加载资源库'));
   assert.ok(source.includes('关闭'));
   assert.ok(source.includes("activeLibrary.key === 'skybox' && skyboxSyncProgress ? ("));
   assert.ok(source.includes('role="status" aria-live="polite"'));
   assert.ok(source.includes('async function handleSyncDataPlatformSkyboxes'));
-  assert.ok(source.includes('dataPlatformSkyboxSyncApi.syncDataPlatformSkyboxes()'));
+  assert.ok(source.includes('skyboxSyncControllerRef.current?.start()'));
   assert.ok(source.includes('async function handleRetryDataPlatformSkyboxSync'));
-  assert.ok(source.includes('dataPlatformSkyboxSyncApi.retryDataPlatformSkyboxSync()'));
+  assert.ok(source.includes('skyboxSyncControllerRef.current?.retry()'));
   const retryStart = source.indexOf('async function handleRetryDataPlatformSkyboxSync');
-  const retryEnd = source.indexOf('function handleDismissDataPlatformSkyboxSyncFailure', retryStart);
+  const retryEnd = source.indexOf('async function handleReloadSkyboxAssets', retryStart);
   const retryHandler = source.slice(retryStart, retryEnd);
   assert.ok(retryHandler.includes('props.readOnly'));
-  assert.ok(source.includes('disabled={props.readOnly || isRetryingSkyboxSync}'));
-  assert.ok(source.includes('if (!started) {'));
-  assert.ok(source.includes('if (!retryStarted) {'));
-  assert.ok(source.includes('formatSkyboxSyncError(error)'));
+  assert.ok(source.includes('disabled={props.readOnly || isRetryingSkyboxSync || isReloadingSkyboxAssets}'));
 
   const dismissStart = source.indexOf('function handleDismissDataPlatformSkyboxSyncFailure');
   const dismissEnd = source.indexOf('function handleDismissDataPlatformModelSyncFailure', dismissStart);
   const dismissHandler = source.slice(dismissStart, dismissEnd);
-  assert.ok(dismissHandler.includes('setSkyboxSyncProgress(null)'));
+  assert.ok(dismissHandler.includes('dismissFailure()'));
   assert.doesNotMatch(dismissHandler, /retryDataPlatformSkyboxSync|clearDataPlatformSkyboxSyncRetryContext/);
 });
 
@@ -352,6 +357,10 @@ test('active 与 orphaned 天空盒严格分离，当前场景只按稳定 ID �
   assert.ok(source.includes('orphanedCurrentSkybox.displayName'));
   assert.ok(source.includes('orphanedCurrentSkybox.dataPlatformResourceId'));
   assert.ok(source.includes('当前场景继续使用本地兼容缓存，但不能用于新场景；现有场景显示不受影响，重新选择天空盒时需使用仍在资源库中的资源。'));
+  const styles = readFileSync(GLOBAL_STYLE_PATH, 'utf8');
+  assert.match(styles, /library-sync-status-warning/);
+  assert.match(styles, /library-sync-status p[\s\S]*?overflow-wrap:\s*anywhere/);
+  assert.match(styles, /library-sync-status p[\s\S]*?white-space:\s*normal/);
   assert.ok(source.includes('createSkyboxLibraryItems(skyboxAssets)'));
   assert.ok(!source.includes('createSkyboxLibraryItems(orphanedSkyboxAssets)'));
   assert.ok(sceneSettingsSource.includes('const assets = result.skyboxes ?? [];'));
@@ -368,11 +377,11 @@ test('手动天空盒同步不依赖业务项目且明确不存在本地场景�
   assert.doesNotMatch(projectPanelSource, forbidden);
   assert.doesNotMatch(sceneSettingsSource, forbidden);
   assert.doesNotMatch(projectIpcSource, forbidden);
-  const handlerStart = projectPanelSource.indexOf('async function handleSyncDataPlatformSkyboxes');
-  const handlerEnd = projectPanelSource.indexOf('async function handleRetryDataPlatformSkyboxSync', handlerStart);
-  assert.notEqual(handlerStart, -1);
-  assert.notEqual(handlerEnd, -1);
-  const handler = projectPanelSource.slice(handlerStart, handlerEnd);
-  assert.ok(handler.includes('syncDataPlatformSkyboxes()'));
-  assert.doesNotMatch(handler, /projectRoot|binding/);
+  const startSyncStart = projectPanelSource.indexOf('startSync: async () => {');
+  const startSyncEnd = projectPanelSource.indexOf('retrySync: async () => {', startSyncStart);
+  assert.notEqual(startSyncStart, -1);
+  assert.notEqual(startSyncEnd, -1);
+  const startSync = projectPanelSource.slice(startSyncStart, startSyncEnd);
+  assert.ok(startSync.includes('syncDataPlatformSkyboxes()'));
+  assert.doesNotMatch(startSync, /projectRoot|binding/);
 });

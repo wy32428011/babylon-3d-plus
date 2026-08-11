@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
+import { createRealtimeFirstProgressGate } from './preloadProgressGate.js';
 import type {
   AssetEntry,
   DeploymentExportCancelRequest,
@@ -94,15 +95,18 @@ contextBridge.exposeInMainWorld('editorApi', {
   },
   syncDataPlatformSkyboxes: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncSkyboxes'),
   retryDataPlatformSkyboxSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retrySkyboxSync'),
-  onDataPlatformSkyboxSyncProgress: (handler: (progress: DataPlatformSkyboxSyncProgress) => void): (() => void) => {
+  onDataPlatformSkyboxSyncProgress: (onProgress: (progress: DataPlatformSkyboxSyncProgress) => void): (() => void) => {
     let active = true;
-    const listener = (_event: IpcRendererEvent, payload: DataPlatformSkyboxSyncProgress) => handler(payload);
+    const progressGate = createRealtimeFirstProgressGate(onProgress);
+    const handler = (payload: DataPlatformSkyboxSyncProgress) => progressGate.handleSnapshot(payload);
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformSkyboxSyncProgress) => progressGate.handleRealtime(payload);
     ipcRenderer.on('data-platform:skyboxSyncProgress', listener);
     void ipcRenderer.invoke('data-platform:getSkyboxSyncProgress').then((payload: DataPlatformSkyboxSyncProgress | null) => {
       if (active && payload) handler(payload);
     }).catch(() => undefined);
     return () => {
       active = false;
+      progressGate.dispose();
       ipcRenderer.removeListener('data-platform:skyboxSyncProgress', listener);
     };
   },
