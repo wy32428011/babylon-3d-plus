@@ -3,6 +3,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
   DataPlatformConfig,
+  DataPlatformEnvironmentSyncProgress,
+  DataPlatformEnvironmentSyncRequest,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
@@ -19,15 +21,18 @@ import {
   clearDataPlatformProjectServiceRetryContext,
   ensureWritableEditorRoot,
   getCurrentDataPlatformModelSyncProgress,
+  getCurrentDataPlatformEnvironmentSyncProgress,
   getCurrentDataPlatformSkyboxSyncProgress,
   getDataPlatformEditorRoot,
   openDataPlatformProject,
   listSyncedImagesForWorkspace,
   retryLatestDataPlatformModelSync,
+  retryLatestDataPlatformEnvironmentSync,
   retryLatestDataPlatformSkyboxSync,
   retryLatestDataPlatformImageSync,
   syncDataPlatformImagesForWorkspace,
   syncDataPlatformModelsForWorkspace,
+  syncDataPlatformEnvironmentsForWorkspace,
   syncDataPlatformSkyboxesForWorkspace,
   getCurrentDataPlatformImageSyncProgress,
 } from './dataPlatformProjectService.js';
@@ -150,6 +155,21 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle(
     'data-platform:getModelSyncProgress',
     async (): Promise<DataPlatformModelSyncProgress | null> => getCurrentDataPlatformModelSyncProgress(),
+  );
+
+  ipcMain.handle('data-platform:syncEnvironments', async (_event, request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => {
+    const config = await readDataPlatformConfig();
+    if (!config.baseUrl) return false;
+    return syncDataPlatformEnvironmentsForWorkspace(config.baseUrl, config.workspaceRoot, request?.expectedSourceKey);
+  });
+
+  ipcMain.handle('data-platform:retryEnvironmentSync', async (): Promise<boolean> => {
+    return retryLatestDataPlatformEnvironmentSync();
+  });
+
+  ipcMain.handle(
+    'data-platform:getEnvironmentSyncProgress',
+    async (): Promise<DataPlatformEnvironmentSyncProgress | null> => getCurrentDataPlatformEnvironmentSyncProgress(),
   );
 
   ipcMain.handle('data-platform:syncSkyboxes', async (): Promise<boolean> => {

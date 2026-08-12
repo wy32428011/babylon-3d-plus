@@ -133,6 +133,7 @@ type DataPlatformProjectOpenResult = {
   warning: string | null;
   conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  envModelSyncStarted: boolean;
   skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
 };
@@ -232,6 +233,28 @@ type DataPlatformModelSyncProgress = {
   error: string | null;
 };
 
+type DataPlatformEnvironmentSyncRequest = {
+  expectedSourceKey?: string;
+};
+
+type DataPlatformEnvironmentSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+type DataPlatformEnvironmentSyncProgress = {
+  runId: string;
+  contextKey: string;
+  phase: DataPlatformEnvironmentSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
 type DataPlatformSkyboxSyncPhase =
   | 'querying'
   | 'downloading'
@@ -322,6 +345,14 @@ type AssetEntry = {
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   libraryKind?: ModelAssetLibraryKind;
+  source?: 'project' | 'data-platform';
+  availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
+  dataPlatformResourceId?: string;
+  dataPlatformResourceType?: 'ENV_MODEL';
+  dataPlatformSourceKey?: string;
+  dataPlatformRevision?: string;
+  dataPlatformFileRevision?: string;
+  fileSha256?: string;
 };
 
 type ProjectModelAssetEntry = AssetEntry & {
@@ -403,6 +434,7 @@ type ImportCadFileResult = {
 type ProjectListAssetsResult = {
   projectRoot: string | null;
   skyboxSyncContextKey: string | null;
+  environmentSyncContextKey: string | null;
   assets: ProjectModelAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
   orphanedSkyboxes: ProjectSkyboxAssetEntry[];
@@ -546,6 +578,9 @@ interface Window {
     syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
+    syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest) => Promise<boolean>;
+    retryDataPlatformEnvironmentSync: () => Promise<boolean>;
+    onDataPlatformEnvironmentSyncProgress: (handler: (progress: DataPlatformEnvironmentSyncProgress) => void) => () => void;
     syncDataPlatformSkyboxes: () => Promise<boolean>;
     retryDataPlatformSkyboxSync: () => Promise<boolean>;
     onDataPlatformSkyboxSyncProgress: (handler: (progress: DataPlatformSkyboxSyncProgress) => void) => () => void;

@@ -1,4 +1,7 @@
 import '@babylonjs/loaders';
+import { configureLocalBabylonDecoders } from './localDecoderConfiguration';
+
+configureLocalBabylonDecoders();
 import {
   AbstractMesh,
   type AnimationGroup,

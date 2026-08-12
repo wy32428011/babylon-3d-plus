@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
@@ -17,6 +17,7 @@ import {
 } from './dataPlatformBindingStore.js';
 import { buildDigitalTwinDistPackage } from './digitalTwinDistPackage.js';
 import { collectDigitalTwinResourceIds } from './digitalTwinPublishProtocol.js';
+import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
 import { buildDigitalTwinSourcePackage, type DigitalTwinSourcePackageResult } from './digitalTwinSourcePackage.js';
 import { findSyncedImageForReference, isPlatformImageReference } from './dataPlatformImageSync.js';
 import {
@@ -189,6 +190,12 @@ export async function publishDigitalTwin(
     });
     appendUniqueWarnings(warnings, distPackage.warnings);
     const resourceIds = collectDigitalTwinResourceIds(sourcePackage.sceneContents);
+    await validateDataPlatformEnvironmentPublishReferences(
+      workspaceRoot,
+      current.metadata.baseUrl,
+      resourceIds.envModelIds,
+      signal,
+    );
 
     emit(onProgress, validated.requestId, 'prepare', '正在创建数据中台发布任务…', 50);
     try {
@@ -385,6 +392,39 @@ function emptyPublishContext(publishActive = false): DigitalTwinPublishContext {
     versionConflict: false,
     publishActive,
   };
+}
+
+async function validateDataPlatformEnvironmentPublishReferences(
+  workspaceRoot: string,
+  expectedBaseUrl: string,
+  envModelIds: readonly string[],
+  signal: AbortSignal,
+): Promise<void> {
+  if (envModelIds.length === 0) return;
+  if (signal.aborted) throw new Error('数字孪生发布已取消。');
+  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const indexed = await listIndexedDataPlatformEnvironments(sharedResourcesRoot);
+  if (indexed.errors.length > 0) throw new Error(`环境模型缓存校验失败：${indexed.errors.join('；')}`);
+  const expectedSourceKey = createHash('sha256').update(normalizePublishBaseUrl(expectedBaseUrl), 'utf8').digest('hex');
+  const byId = new Map(indexed.assets.map((asset) => [asset.dataPlatformResourceId, asset]));
+  for (const id of envModelIds) {
+    const asset = byId.get(id);
+    if (!asset || asset.availability !== 'active') throw new Error(`环境模型 ${id} 没有可发布的最新有效缓存，请先完成在线同步。`);
+    if (asset.dataPlatformSourceKey !== expectedSourceKey) throw new Error(`环境模型 ${id} 属于其他数据中台，禁止发布。`);
+    if (!asset.fileSha256 || !asset.dataPlatformFileRevision || !asset.dataPlatformRevision) {
+      throw new Error(`环境模型 ${id} 缺少文件摘要或修订信息，禁止发布。`);
+    }
+  }
+}
+
+function normalizePublishBaseUrl(value: string): string {
+  const url = new URL(value);
+  url.protocol = url.protocol.toLowerCase();
+  url.hostname = url.hostname.toLowerCase();
+  if ((url.protocol === 'http:' && url.port === '80') || (url.protocol === 'https:' && url.port === '443')) url.port = '';
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/+$/, '');
 }
 
 async function saveCurrentScene(

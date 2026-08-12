@@ -131,6 +131,7 @@ export type DataPlatformProjectOpenResult = {
   warning: string | null;
   conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  envModelSyncStarted: boolean;
   skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
 };
@@ -224,6 +225,28 @@ export type DataPlatformModelSyncPhase =
 export type DataPlatformModelSyncProgress = {
   runId: string;
   phase: DataPlatformModelSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+export type DataPlatformEnvironmentSyncRequest = {
+  expectedSourceKey?: string;
+};
+
+export type DataPlatformEnvironmentSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+export type DataPlatformEnvironmentSyncProgress = {
+  runId: string;
+  contextKey: string;
+  phase: DataPlatformEnvironmentSyncPhase;
   completed: number;
   total: number;
   message: string;
@@ -344,6 +367,14 @@ export type AssetEntry = {
   parameterConfig?: unknown;
   dataDrivenConfig?: unknown;
   builtInSlotBindingConfig?: unknown;
+  source?: 'project' | 'data-platform';
+  availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
+  dataPlatformResourceId?: string;
+  dataPlatformResourceType?: 'ENV_MODEL';
+  dataPlatformSourceKey?: string;
+  dataPlatformRevision?: string;
+  dataPlatformFileRevision?: string;
+  fileSha256?: string;
 };
 
 /** 项目索引中的模型资产，必须是模型且带有明确资产库分类。 */
@@ -435,6 +466,7 @@ export type ProjectAssetIndex = {
 export type ProjectListAssetsResult = {
   projectRoot: string | null;
   skyboxSyncContextKey: string | null;
+  environmentSyncContextKey: string | null;
   assets: ProjectModelAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
   orphanedSkyboxes: ProjectSkyboxAssetEntry[];

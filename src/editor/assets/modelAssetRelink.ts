@@ -6,6 +6,7 @@ export type ImportedAssetIndexes = {
   bySourceUrl: Map<string, AssetEntry>;
   uniqueByPackagePath: Map<string, AssetEntry>;
   uniqueByDataPlatformPackage: Map<string, AssetEntry>;
+  uniqueByDataPlatformIdentity: Map<string, AssetEntry>;
   uniqueByDataPlatformLogicalPackage: Map<string, AssetEntry>;
   uniqueByPortablePackage: Map<string, AssetEntry>;
 };
@@ -51,6 +52,14 @@ function getDataPlatformPackageMatchKey(modelPath: string | undefined, packagePa
   return match ? `${match[1].toLowerCase()}:${match[2]}` : '';
 }
 
+
+function getDataPlatformIdentityKey(sourceKey: unknown, resourceId: unknown): string {
+  return typeof sourceKey === 'string' && /^[0-9a-f]{64}$/.test(sourceKey)
+    && typeof resourceId === 'string' && /^[1-9]\d{0,63}$/.test(resourceId)
+      ? `${sourceKey}:${resourceId}`
+      : '';
+}
+
 /**
  * 去除数据中台实例内数据库 ID，只保留资源类型和模型名称。
  * 同一模型迁移到不同数据中台后 ID 可能变化，但同步目录中的名称部分仍可作为唯一兜底键。
@@ -78,6 +87,7 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
   const bySourceUrl = new Map<string, AssetEntry>();
   const packageAssetLists = new Map<string, AssetEntry[]>();
   const dataPlatformPackageAssetLists = new Map<string, AssetEntry[]>();
+  const dataPlatformIdentityAssetLists = new Map<string, AssetEntry[]>();
   const dataPlatformLogicalPackageAssetLists = new Map<string, AssetEntry[]>();
   const portablePackageAssetLists = new Map<string, AssetEntry[]>();
 
@@ -93,6 +103,13 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
       const packageAssets = packageAssetLists.get(packageKey) ?? [];
       packageAssets.push(asset);
       packageAssetLists.set(packageKey, packageAssets);
+    }
+
+    const dataPlatformIdentityKey = getDataPlatformIdentityKey(asset.dataPlatformSourceKey, asset.dataPlatformResourceId);
+    if (dataPlatformIdentityKey) {
+      const identityAssets = dataPlatformIdentityAssetLists.get(dataPlatformIdentityKey) ?? [];
+      identityAssets.push(asset);
+      dataPlatformIdentityAssetLists.set(dataPlatformIdentityKey, identityAssets);
     }
 
     const dataPlatformPackageKey = getDataPlatformPackageMatchKey(asset.path, asset.packagePath);
@@ -122,6 +139,7 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
     bySourceUrl,
     uniqueByPackagePath: createUniqueAssetIndex(packageAssetLists),
     uniqueByDataPlatformPackage: createUniqueAssetIndex(dataPlatformPackageAssetLists),
+    uniqueByDataPlatformIdentity: createUniqueAssetIndex(dataPlatformIdentityAssetLists),
     uniqueByDataPlatformLogicalPackage: createUniqueAssetIndex(dataPlatformLogicalPackageAssetLists),
     uniqueByPortablePackage: createUniqueAssetIndex(portablePackageAssetLists),
   };
@@ -131,7 +149,11 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
 export function findImportedAssetForPackagePath(
   packagePath: string | undefined,
   indexes: ImportedAssetIndexes,
+  remoteIdentity?: { sourceKey?: string; resourceId?: string },
 ): AssetEntry | null {
+  const remoteIdentityKey = getDataPlatformIdentityKey(remoteIdentity?.sourceKey, remoteIdentity?.resourceId);
+  if (remoteIdentityKey) return indexes.uniqueByDataPlatformIdentity.get(remoteIdentityKey) ?? null;
+
   const packageMatch = indexes.uniqueByPackagePath.get(normalizeAssetMatchPath(packagePath));
   if (packageMatch) return packageMatch;
 

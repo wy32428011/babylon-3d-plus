@@ -69,6 +69,11 @@ export function collectDigitalTwinResourceIds(sceneContents: readonly string[]):
       return;
     }
     if (isPlainObject(value)) {
+      if (value.source === 'data-platform' && value.resourceType === 'ENV_MODEL') {
+        const resourceId = typeof value.dataPlatformResourceId === 'string' ? value.dataPlatformResourceId.trim() : '';
+        if (!/^[1-9]\d{0,63}$/.test(resourceId)) throw new Error('场景中的数据中台环境模型 ID 无效。');
+        envModelIds.add(resourceId);
+      }
       for (const [childKey, child] of Object.entries(value)) visit(child, childKey);
     }
   };

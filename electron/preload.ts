@@ -6,6 +6,8 @@ import type {
   DeploymentExportRequest,
   DeploymentExportResult,
   DataPlatformConfig,
+  DataPlatformEnvironmentSyncProgress,
+  DataPlatformEnvironmentSyncRequest,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
@@ -113,6 +115,22 @@ contextBridge.exposeInMainWorld('editorApi', {
     return () => {
       active = false;
       ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
+    };
+  },
+  syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => ipcRenderer.invoke('data-platform:syncEnvironments', request),
+  retryDataPlatformEnvironmentSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryEnvironmentSync'),
+  onDataPlatformEnvironmentSyncProgress: (handler: (progress: DataPlatformEnvironmentSyncProgress) => void): (() => void) => {
+    let active = true;
+    const progressGate = createRealtimeFirstProgressGate(handler);
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformEnvironmentSyncProgress) => progressGate.handleRealtime(payload);
+    ipcRenderer.on('data-platform:environmentSyncProgress', listener);
+    void ipcRenderer.invoke('data-platform:getEnvironmentSyncProgress').then((payload: DataPlatformEnvironmentSyncProgress | null) => {
+      if (active) progressGate.handleSnapshot(payload);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      progressGate.dispose();
+      ipcRenderer.removeListener('data-platform:environmentSyncProgress', listener);
     };
   },
   syncDataPlatformSkyboxes: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncSkyboxes'),

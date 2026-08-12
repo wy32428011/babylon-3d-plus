@@ -42,3 +42,22 @@ test('断点分片规划跳过已上传分片并保持有界索引', () => {
   assert.deepEqual(createPendingChunkIndexes(0, 10, []), []);
   assert.throws(() => createPendingChunkIndexes(10, 0, []), /分片大小/);
 });
+
+
+test('结构化数据中台环境模型身份直接进入发布资源 ID', () => {
+  const ids = collectDigitalTwinResourceIds([JSON.stringify({
+    version: 3,
+    scene: {
+      sceneSettings: {
+        environment: {
+          source: 'data-platform',
+          resourceType: 'ENV_MODEL',
+          dataPlatformResourceId: '9007199254740993',
+          dataPlatformSourceKey: 'a'.repeat(64),
+          dataPlatformRevision: '7',
+        },
+      },
+    },
+  })]);
+  assert.deepEqual(ids.envModelIds, ['9007199254740993']);
+});

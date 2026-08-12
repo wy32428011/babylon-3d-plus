@@ -35,6 +35,14 @@ export type AssetEntry = {
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   libraryKind?: ModelAssetLibraryKind;
+  source?: 'project' | 'data-platform';
+  availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
+  dataPlatformResourceId?: string;
+  dataPlatformResourceType?: 'ENV_MODEL';
+  dataPlatformSourceKey?: string;
+  dataPlatformRevision?: string;
+  dataPlatformFileRevision?: string;
+  fileSha256?: string;
 };
 
 export type ProjectModelAssetEntry = AssetEntry & {
@@ -221,6 +229,25 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (parameterConfig) asset.parameterConfig = parameterConfig;
     if (dataDrivenConfig) asset.dataDrivenConfig = dataDrivenConfig;
     if (builtInSlotBindingConfig) asset.builtInSlotBindingConfig = builtInSlotBindingConfig;
+    const source = payload.source === 'project' || payload.source === 'data-platform' ? payload.source : undefined;
+    const availability = payload.availability === 'active' || payload.availability === 'stale'
+      || payload.availability === 'unavailable' || payload.availability === 'deleted'
+        ? payload.availability
+        : undefined;
+    const dataPlatformResourceId = readOptionalString(payload, 'dataPlatformResourceId');
+    const dataPlatformResourceType = payload.dataPlatformResourceType === 'ENV_MODEL' ? 'ENV_MODEL' : undefined;
+    const dataPlatformSourceKey = readOptionalString(payload, 'dataPlatformSourceKey');
+    const dataPlatformRevision = readOptionalString(payload, 'dataPlatformRevision');
+    const dataPlatformFileRevision = readOptionalString(payload, 'dataPlatformFileRevision');
+    const fileSha256 = readOptionalString(payload, 'fileSha256');
+    if (source) asset.source = source;
+    if (availability) asset.availability = availability;
+    if (dataPlatformResourceId) asset.dataPlatformResourceId = dataPlatformResourceId;
+    if (dataPlatformResourceType) asset.dataPlatformResourceType = dataPlatformResourceType;
+    if (dataPlatformSourceKey) asset.dataPlatformSourceKey = dataPlatformSourceKey;
+    if (dataPlatformRevision) asset.dataPlatformRevision = dataPlatformRevision;
+    if (dataPlatformFileRevision) asset.dataPlatformFileRevision = dataPlatformFileRevision;
+    if (fileSha256) asset.fileSha256 = fileSha256;
 
     return asset;
   } catch {

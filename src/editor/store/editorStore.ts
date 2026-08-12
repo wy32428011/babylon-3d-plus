@@ -298,6 +298,8 @@ export type EnvironmentApplyOptions = {
   focusAfterLoad?: boolean;
   commandLabel?: string;
   successMessage?: string;
+  persistSceneChange?: boolean;
+  runtimeEnvironment?: SceneEnvironmentSettings;
 };
 
 export type EnvironmentDisplayPatch = Partial<Pick<
@@ -599,6 +601,24 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     groupTransformModeRestore: null,
     logs: prependLog(state.logs, message),
   };
+}
+
+/** 打开任意场景或新建空白场景后异步同步环境模型；旧缓存继续可用，不阻塞编辑。 */
+async function syncDataPlatformEnvironmentsAfterWorkspaceOpen(pushLog: (message: string) => void): Promise<void> {
+  if (!window.editorApi?.syncDataPlatformEnvironments) return;
+
+  try {
+    const currentEnvironment = useEditorStore.getState().scene.sceneSettings.environment;
+    const started = await window.editorApi.syncDataPlatformEnvironments({
+      expectedSourceKey: currentEnvironment?.source === 'data-platform'
+        ? currentEnvironment.dataPlatformSourceKey
+        : undefined,
+    });
+    if (started) pushLog('编辑工作区已打开，正在后台同步数据中台环境模型。');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`编辑工作区已打开，但启动环境模型同步失败：${message}`);
+  }
 }
 
 /** 本地场景成功加载后异步同步共享模型库；同步失败不影响已经打开的场景。 */
@@ -2610,6 +2630,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         focusAfterLoad: options.focusAfterLoad === true,
         commandLabel: options.commandLabel?.trim() || '更新环境模型',
         successMessage: options.successMessage?.trim() || '环境模型已更新。',
+        persistSceneChange: options.persistSceneChange !== false,
+        runtimeEnvironment: options.runtimeEnvironment ? sanitizeSceneEnvironment(options.runtimeEnvironment) ?? undefined : undefined,
       };
       return {
         environmentApplyRequest: request,
@@ -2644,7 +2666,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       const before = state.scene.sceneSettings.environment;
       const command = updateSceneEnvironmentCommand(request.commandLabel, before, nextEnvironment);
-      const result = isSceneEnvironmentEqual(before, nextEnvironment)
+      const result = !request.persistSceneChange || isSceneEnvironmentEqual(before, nextEnvironment)
         ? { scene: state.scene, history: state.history }
         : executeCommand(state.scene, state.history, command);
       return {
@@ -4600,10 +4622,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
   newScene: () => {
+    let opened = false;
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '新建场景');
+      opened = true;
       return createLoadedSceneState(state, createEmptySceneDocument(), '已新建空白场景。');
     });
+    if (opened) void syncDataPlatformEnvironmentsAfterWorkspaceOpen((message) => get().pushLog(message));
   },
   hasUnsavedChanges: () => {
     const state = get();
@@ -4662,6 +4687,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       set((state) => createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`));
       void syncDataPlatformModelsAfterLocalSceneLoad((message) => get().pushLog(message));
+      void syncDataPlatformEnvironmentsAfterWorkspaceOpen((message) => get().pushLog(message));
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
@@ -4691,6 +4717,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const scene = deserializeScene(result.content);
       set((state) => createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`));
       void syncDataPlatformModelsAfterLocalSceneLoad((message) => get().pushLog(message));
+      void syncDataPlatformEnvironmentsAfterWorkspaceOpen((message) => get().pushLog(message));
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
@@ -4708,6 +4735,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     try {
       const scene = deserializeScene(content);
       set((state) => createLoadedSceneState(state, scene, `场景已加载：${sourceName || scene.name}`));
+      void syncDataPlatformEnvironmentsAfterWorkspaceOpen((message) => get().pushLog(message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -1136,7 +1136,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     }
 
     let active = true;
-    void runtime.applyEnvironment(environmentApplyRequest.environment, {
+    void runtime.applyEnvironment(environmentApplyRequest.runtimeEnvironment ?? environmentApplyRequest.environment, {
       requestId: environmentApplyRequest.id,
       autoAlign: environmentApplyRequest.autoAlign,
     }).then((result) => {

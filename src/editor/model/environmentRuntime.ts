@@ -35,6 +35,8 @@ export type EnvironmentApplyRequest = {
   focusAfterLoad: boolean;
   commandLabel: string;
   successMessage: string;
+  persistSceneChange: boolean;
+  runtimeEnvironment?: SceneEnvironmentSettings;
 };
 
 export type EnvironmentApplyResult = {

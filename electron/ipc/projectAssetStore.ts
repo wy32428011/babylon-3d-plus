@@ -25,13 +25,14 @@ import {
   encodeAssetUrl,
   normalizeFilePath,
 } from './assetRegistry.js';
-import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
+import { scanModelPackage, validateEnvironmentGlbFile } from './modelPackageScanner.js';
 import {
   listIndexedDataPlatformSkyboxes,
   mergeSkyboxAssets,
   type DataPlatformSkyboxAssetDiagnostic,
 } from './dataPlatformSkyboxIndex.js';
 import { importSkyboxFileIntoRoot, listSkyboxAssetsInRoot } from './skyboxAssetStore.js';
+import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
 
 const PROJECT_METADATA_DIRECTORY = '.babylon-editor';
 const PROJECT_ASSET_INDEX_FILE = 'asset-index.json';
@@ -48,6 +49,7 @@ const PROJECT_ASSET_INDEX_ERROR = '项目资产索引格式不正确。';
 let currentProjectRoot: string | null = null;
 let sharedProjectAssetRoot: string | null = null;
 let sharedProjectSkyboxRoot: string | null = null;
+let sharedProjectEnvironmentRoot: string | null = null;
 let hasLoadedRecentProjectRoot = false;
 
 type PersistedRecentProjectEntry = {
@@ -427,6 +429,17 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
   const scriptPaths = normalizeOptionalStringArray(asset.scriptPaths);
   const scriptAssets = normalizeOptionalScriptAssets(asset.scriptAssets) ?? createScriptAssetsFromPaths(scriptPaths);
   const unitInfo = normalizeModelLengthUnit(asset.lengthUnit) ?? DEFAULT_MODEL_LENGTH_UNIT_INFO;
+  const source = asset.source === 'data-platform' ? 'data-platform' : asset.source === 'project' ? 'project' : undefined;
+  const availability = asset.availability === 'active' || asset.availability === 'stale'
+    || asset.availability === 'unavailable' || asset.availability === 'deleted'
+      ? asset.availability
+      : undefined;
+  const dataPlatformResourceId = normalizeOptionalTrimmedString(asset.dataPlatformResourceId);
+  const dataPlatformResourceType = asset.dataPlatformResourceType === 'ENV_MODEL' ? 'ENV_MODEL' : undefined;
+  const dataPlatformSourceKey = normalizeOptionalTrimmedString(asset.dataPlatformSourceKey);
+  const dataPlatformRevision = normalizeOptionalTrimmedString(asset.dataPlatformRevision);
+  const dataPlatformFileRevision = normalizeOptionalTrimmedString(asset.dataPlatformFileRevision);
+  const fileSha256 = normalizeOptionalTrimmedString(asset.fileSha256);
   const fileSizeBytes = typeof asset.fileSizeBytes === 'number'
     && Number.isFinite(asset.fileSizeBytes)
     && asset.fileSizeBytes > 0
@@ -457,6 +470,14 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
     parameterConfig: isPlainObject(asset.parameterConfig) ? asset.parameterConfig : undefined,
     dataDrivenConfig: isPlainObject(asset.dataDrivenConfig) ? asset.dataDrivenConfig : undefined,
     builtInSlotBindingConfig: isPlainObject(asset.builtInSlotBindingConfig) ? asset.builtInSlotBindingConfig : undefined,
+    source,
+    availability,
+    dataPlatformResourceId,
+    dataPlatformResourceType,
+    dataPlatformSourceKey,
+    dataPlatformRevision,
+    dataPlatformFileRevision,
+    fileSha256,
   };
 }
 
@@ -503,20 +524,32 @@ export function getSharedProjectSkyboxRoot(): string | null {
   return sharedProjectSkyboxRoot;
 }
 
+/** 为当前工程挂载独立的数据中台环境模型 Sidecar 缓存。 */
+export function setSharedProjectEnvironmentRoot(projectRoot: string | null): void {
+  sharedProjectEnvironmentRoot = projectRoot ? normalizeFilePath(projectRoot) : null;
+  if (sharedProjectEnvironmentRoot) authorizeAssetRoot(path.join(sharedProjectEnvironmentRoot, '.babylon-editor', 'data-platform-cache', 'environments'));
+}
+
+export function getSharedProjectEnvironmentRoot(): string | null {
+  return sharedProjectEnvironmentRoot;
+}
+
 export type ProjectAssetStoreStateSnapshot = {
   currentProjectRoot: string | null;
   sharedProjectAssetRoot: string | null;
   sharedProjectSkyboxRoot: string | null;
+  sharedProjectEnvironmentRoot: string | null;
 };
 
 export function getProjectAssetStoreStateSnapshot(): ProjectAssetStoreStateSnapshot {
-  return { currentProjectRoot, sharedProjectAssetRoot, sharedProjectSkyboxRoot };
+  return { currentProjectRoot, sharedProjectAssetRoot, sharedProjectSkyboxRoot, sharedProjectEnvironmentRoot };
 }
 
 export async function restoreProjectAssetStoreState(snapshot: ProjectAssetStoreStateSnapshot): Promise<void> {
   currentProjectRoot = snapshot.currentProjectRoot;
   setSharedProjectAssetRoot(snapshot.sharedProjectAssetRoot);
   setSharedProjectSkyboxRoot(snapshot.sharedProjectSkyboxRoot);
+  setSharedProjectEnvironmentRoot(snapshot.sharedProjectEnvironmentRoot);
   if (snapshot.currentProjectRoot) await persistCurrentProjectRoot(snapshot.currentProjectRoot);
   else await fs.rm(getRecentProjectFilePath(), { force: true });
 }
@@ -629,6 +662,7 @@ export async function openRecentProject(projectRoot: string): Promise<ProjectLis
   const recentSnapshot = await getRecentWorkspaceStateSnapshot();
   setSharedProjectAssetRoot(null);
   setSharedProjectSkyboxRoot(null);
+  setSharedProjectEnvironmentRoot(null);
   try {
     await commitRecentProjectActivation(normalizedProjectRoot);
     const result = await listProjectAssets();
@@ -757,7 +791,7 @@ async function prepareEnvironmentPackageWithGlb(
   const normalizedTargetPackagePath = normalizeFilePath(targetPackagePath);
   const targetFilePath = path.join(normalizedTargetPackagePath, path.basename(normalizedSourceFilePath));
 
-  if (!(await validateGlbModelFile(normalizedSourceFilePath))) {
+  if (!(await validateEnvironmentGlbFile(normalizedSourceFilePath))) {
     throw new Error('环境 GLB 文件结构无效或已损坏。');
   }
 
@@ -774,7 +808,7 @@ async function prepareEnvironmentPackageWithGlb(
     await fs.mkdir(stagingPackagePath, { recursive: true });
     await fs.copyFile(normalizedSourceFilePath, stagedFilePath);
 
-    if (!(await validateGlbModelFile(stagedFilePath))) {
+    if (!(await validateEnvironmentGlbFile(stagedFilePath))) {
       throw new Error('项目内环境 GLB 暂存副本校验失败。');
     }
 
@@ -816,6 +850,7 @@ export async function selectCurrentProjectRootWithDialog(): Promise<string | nul
   await rememberRecentProjectRoot(selectedProjectRoot);
   setSharedProjectAssetRoot(null);
   setSharedProjectSkyboxRoot(null);
+  setSharedProjectEnvironmentRoot(null);
   setCurrentProjectRoot(selectedProjectRoot);
 
   return selectedProjectRoot;
@@ -828,6 +863,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     return {
       projectRoot: null,
       skyboxSyncContextKey: null,
+      environmentSyncContextKey: null,
       assets: [],
       skyboxes: [],
       orphanedSkyboxes: [],
@@ -846,6 +882,14 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     assets = mergeProjectAssets(localIndex.assets, sharedIndex.assets);
   }
 
+  let environmentSyncContextKey: string | null = null;
+  if (sharedProjectEnvironmentRoot) {
+    const indexedEnvironments = await listIndexedDataPlatformEnvironments(sharedProjectEnvironmentRoot);
+    assets = mergeProjectAssets(assets, indexedEnvironments.assets);
+    environmentSyncContextKey = indexedEnvironments.sourceKey;
+    for (const error of indexedEnvironments.errors) console.warn(`[data-platform-environment] ${error}`);
+  }
+
   for (const asset of assets) {
     authorizeAssetFile(asset.path);
     if (asset.thumbnailPath) authorizeAssetFile(asset.thumbnailPath);
@@ -853,7 +897,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   }
 
   const { skyboxes, orphanedSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
-  return { projectRoot, skyboxSyncContextKey: null, assets, skyboxes, orphanedSkyboxes };
+  return { projectRoot, skyboxSyncContextKey: null, environmentSyncContextKey, assets, skyboxes, orphanedSkyboxes };
 }
 
 async function loadProjectSkyboxAssets(
@@ -892,6 +936,9 @@ function mergeProjectAssets(
 }
 
 function createProjectAssetMergeKey(asset: ProjectModelAssetEntry): string {
+  if (asset.source === 'data-platform' && asset.dataPlatformSourceKey && asset.dataPlatformResourceId) {
+    return `data-platform:${asset.dataPlatformSourceKey}:environment:${asset.dataPlatformResourceId}`;
+  }
   const packageName = path.basename(asset.packagePath ?? path.dirname(asset.path));
   const dataPlatformMatch = /^(model|env|combo)-(\d+)(?:-|$)/i.exec(packageName);
   if (dataPlatformMatch) return 'data-platform:' + dataPlatformMatch[1].toLowerCase() + ':' + dataPlatformMatch[2];

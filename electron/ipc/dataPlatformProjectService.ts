@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
+  DataPlatformEnvironmentSyncProgress,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
@@ -21,6 +22,7 @@ import {
   getProjectModelsRoot,
   rememberRecentSceneFile,
   setSharedProjectAssetRoot,
+  setSharedProjectEnvironmentRoot,
   setSharedProjectSkyboxRoot,
   writeProjectAssetIndex,
 } from './projectAssetStore.js';
@@ -41,6 +43,14 @@ import {
   retryDataPlatformModelSync,
   startDataPlatformModelSync,
 } from './dataPlatformModelSync.js';
+import {
+  clearDataPlatformEnvironmentSyncRetryContext,
+  createDataPlatformSourceKey,
+  disposeDataPlatformEnvironmentSync,
+  getLatestDataPlatformEnvironmentSyncProgress,
+  retryDataPlatformEnvironmentSync,
+  startDataPlatformEnvironmentSync,
+} from './dataPlatformEnvironmentSync.js';
 import {
   clearDataPlatformImageSyncRetryContext,
   disposeDataPlatformImageSync,
@@ -159,13 +169,36 @@ export async function syncDataPlatformModelsForWorkspace(
     await ensureWritableEditorRoot(workspaceRoot);
     await activateProjectRoot(workspaceRoot);
     setSharedProjectAssetRoot(null);
+    setSharedProjectEnvironmentRoot(workspaceRoot);
     return startDataPlatformModelSync(baseUrl, workspaceRoot);
   }
   const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
   await ensureWritableEditorRoot(sharedResourcesRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
+  setSharedProjectEnvironmentRoot(sharedResourcesRoot);
   return startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
+}
+
+
+/** 打开任意编辑工作区时独立触发环境模型同步，不与普通/组合模型整批事务耦合。 */
+export async function syncDataPlatformEnvironmentsForWorkspace(
+  baseUrl: string,
+  workspaceRoot: string,
+  expectedSourceKey?: string,
+): Promise<boolean> {
+  if (dataPlatformProjectServiceShuttingDown) return false;
+  const binding = getCurrentDataPlatformBinding();
+  const sharedResourcesRoot = binding ? resolveDataPlatformSharedResourcesRoot(workspaceRoot) : workspaceRoot;
+  await ensureWritableEditorRoot(sharedResourcesRoot);
+  await ensureProjectDirectories(sharedResourcesRoot);
+  setSharedProjectEnvironmentRoot(sharedResourcesRoot);
+  return startDataPlatformEnvironmentSync(
+    baseUrl,
+    sharedResourcesRoot,
+    createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedResourcesRoot),
+    expectedSourceKey,
+  );
 }
 
 /** 使所有在途天空盒 prepare 失效；调用方无需等待，dispose 会统一回收任务。 */
@@ -257,8 +290,12 @@ export async function syncDataPlatformImagesForWorkspace(
   return startDataPlatformImageSync(baseUrl, sharedResourcesRoot);
 }
 
-/** 根据数据中台地址和项目 ID 生成不暴露地址的稳定同步业务 key。 */
-export function createDataPlatformSkyboxSyncContextKey(
+/** 根据数据中台地址和共享缓存目录生成环境同步业务 key。 */
+export function createDataPlatformEnvironmentSyncContextKey(baseUrl: string, sharedResourcesRoot: string): string {
+  return `${createDataPlatformSourceKey(baseUrl)}:${path.resolve(sharedResourcesRoot).toLowerCase()}`;
+}
+
+function createDataPlatformSkyboxSyncContextKey(
   baseUrl: string,
   projectId: string,
   projectRoot: string,
@@ -320,6 +357,16 @@ export async function listSyncedImagesForWorkspace(workspaceRoot: string): Promi
   return listSyncedImages(sharedResourcesRoot);
 }
 
+/** 重试最近一次独立环境模型同步。 */
+export function retryLatestDataPlatformEnvironmentSync(): boolean {
+  return retryDataPlatformEnvironmentSync();
+}
+
+/** 暴露最近环境模型同步进度。 */
+export function getCurrentDataPlatformEnvironmentSyncProgress(): DataPlatformEnvironmentSyncProgress | null {
+  return getLatestDataPlatformEnvironmentSyncProgress();
+}
+
 /** 暴露模型同步重试给 IPC。 */
 export function retryLatestDataPlatformModelSync(): boolean {
   return retryDataPlatformModelSync();
@@ -333,6 +380,7 @@ export function getCurrentDataPlatformModelSyncProgress(): DataPlatformModelSync
 /** 数据中台配置变更后清除旧地址对应的重试上下文。 */
 export function clearDataPlatformProjectServiceRetryContext(): void {
   clearDataPlatformModelSyncRetryContext();
+  clearDataPlatformEnvironmentSyncRetryContext();
   clearDataPlatformImageSyncRetryContext();
   clearDataPlatformSkyboxSyncRetryContext();
   invalidateDataPlatformSkyboxSyncPrepareContext();
@@ -346,6 +394,7 @@ export async function disposeDataPlatformProjectTasks(): Promise<void> {
   await Promise.allSettled([...openTasks]);
   await Promise.allSettled([...skyboxSyncPrepareTasks]);
   await disposeDataPlatformModelSync();
+  await disposeDataPlatformEnvironmentSync();
   await disposeDataPlatformImageSync();
   await disposeDataPlatformSkyboxSync();
 }
@@ -365,6 +414,7 @@ async function openDataPlatformProjectInternal(
   await ensureProjectDirectories(projectRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
+  setSharedProjectEnvironmentRoot(sharedResourcesRoot);
 
   let source: DataPlatformProjectOpenResult['source'] = 'generated';
   let warning: string | null = null;
@@ -460,6 +510,11 @@ async function openDataPlatformProjectInternal(
   setSharedProjectSkyboxRoot(sharedResourcesRoot);
 
   const modelSyncStarted = startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
+  const envModelSyncStarted = startDataPlatformEnvironmentSync(
+    baseUrl,
+    sharedResourcesRoot,
+    createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedResourcesRoot),
+  );
   const skyboxSyncStarted = startDataPlatformSkyboxSync(
     baseUrl,
     sharedResourcesRoot,
@@ -472,6 +527,7 @@ async function openDataPlatformProjectInternal(
     warning,
     conflictCopyPath,
     modelSyncStarted,
+    envModelSyncStarted,
     skyboxSyncStarted,
     binding,
   };
