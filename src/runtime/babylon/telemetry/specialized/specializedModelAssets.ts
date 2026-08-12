@@ -233,7 +233,7 @@ export function readConveyorActionMap(rawActionMap: unknown): Record<string, num
   return actionMap;
 }
 
-/** 创建输送线运行时状态，所有运动偏移和货物占位只保存在内存。 */
+/** 创建输送线运行时状态，货物占位只保存在内存。 */
 export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
   return {
     cargoCode: null,
@@ -242,18 +242,19 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     lastTask: null,
     waitingTask: null,
     probeNeighbors: null,
-    probeSubscription: null,
-    bypassedTasks: new Set(),
+    travelPlan: null,
+    upstreamLinks: new Map(),
+    downstreamLinks: new Map(),
+    externalPulls: new Map(),
+    transitedTasks: new Set(),
     lastMovementDirection: 0,
     selfDriveDirection: 0,
     lastSnapshotReceivedAt: 0,
     cargoTravelOffset: 0,
-    motionOffsets: new Map(),
-    nodeBaselines: new Map(),
   };
 }
 
-/** 模型脚本或资产编号变化后重置输送线基线，避免旧节点偏移污染新模型。 */
+/** 模型脚本或资产编号变化后重置输送线基线，避免旧状态污染新模型。 */
 export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.cargoCode = null;
   model.conveyorTelemetry.currentTask = null;
@@ -261,14 +262,15 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.lastTask = null;
   model.conveyorTelemetry.waitingTask = null;
   model.conveyorTelemetry.probeNeighbors = null;
-  model.conveyorTelemetry.probeSubscription = null;
-  model.conveyorTelemetry.bypassedTasks.clear();
+  model.conveyorTelemetry.travelPlan = null;
+  model.conveyorTelemetry.upstreamLinks.clear();
+  model.conveyorTelemetry.downstreamLinks.clear();
+  model.conveyorTelemetry.externalPulls.clear();
+  model.conveyorTelemetry.transitedTasks.clear();
   model.conveyorTelemetry.lastMovementDirection = 0;
   model.conveyorTelemetry.selfDriveDirection = 0;
   model.conveyorTelemetry.lastSnapshotReceivedAt = 0;
   model.conveyorTelemetry.cargoTravelOffset = 0;
-  model.conveyorTelemetry.motionOffsets.clear();
-  model.conveyorTelemetry.nodeBaselines.clear();
 }
 
 /** 创建 stacker 遥测运行态，所有偏移都只保存在内存中。 */

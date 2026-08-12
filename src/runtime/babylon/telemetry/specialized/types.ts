@@ -1,7 +1,7 @@
 import type { Mesh, Scene, StandardMaterial, TransformNode } from '@babylonjs/core';
 import { Quaternion, Vector3 } from '@babylonjs/core';
 import type { ModelGeneratorComponent } from '../../../../editor/model/components';
-import type { ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
+import type { ExternalModelScriptRuntime, ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
 import type {
   GeneratedOutputOwnerRuntimeEntry,
   LocatorRuntimeEntry,
@@ -39,6 +39,8 @@ export type CargoHandoffState = {
   fromPosition: Vector3;
   fromRotation: Quaternion;
   progress: number;
+  /** 本次交接的插值总时长（秒）：越级交付按跳数除数加快（CARGO_HANDOFF_SECONDS / hops）。 */
+  durationSeconds: number;
 };
 
 /** 交接插值：handoff 未完结时在接管起点与目标位姿间插值并推进进度，完结后清除并返回目标位姿。 */
@@ -50,7 +52,7 @@ export function resolveCargoHandoffPose(
 ): { position: Vector3; rotation: Quaternion } {
   const handoff = cargo.handoff;
   if (!handoff) return { position: targetPosition, rotation: targetRotation };
-  handoff.progress = Math.min(1, handoff.progress + deltaSeconds / CARGO_HANDOFF_SECONDS);
+  handoff.progress = Math.min(1, handoff.progress + deltaSeconds / handoff.durationSeconds);
   const position = Vector3.Lerp(handoff.fromPosition, targetPosition, handoff.progress);
   const rotation = Quaternion.Slerp(handoff.fromRotation, targetRotation, handoff.progress);
   if (handoff.progress >= 1) cargo.handoff = null;
@@ -58,14 +60,17 @@ export function resolveCargoHandoffPose(
 }
 
 /** 以货物当前世界位姿为起点创建交接插值状态（root 无父级，本地位姿即世界位姿）。 */
-export function createCargoHandoffState(cargo: { root: TransformNode }): CargoHandoffState {
+export function createCargoHandoffState(
+  cargo: { root: TransformNode },
+  durationSeconds: number = CARGO_HANDOFF_SECONDS,
+): CargoHandoffState {
   return {
     fromPosition: cargo.root.position.clone(),
     fromRotation: cargo.root.rotationQuaternion?.clone() ?? Quaternion.Identity(),
     progress: 0,
+    durationSeconds: Math.max(durationSeconds, 0.05),
   };
 }
-export const CONVEYOR_DEFAULT_TRANSLATE_LOOP_METERS = 1.2;
 export const CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND = 180;
 export const CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND = 0.3;
 export const RGV_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND = 0.8;
@@ -197,26 +202,72 @@ export type StackerModelTelemetryState = {
   lastTargetKey: string | null;
 };
 
-export type ConveyorNodeBaseline = {
-  position: Vector3;
+/** 上位链路：本机的一条货物来向通道，由持有方的 available 通知建立（探测邻居或注册设备均可为上一跳）。 */
+export type ConveyorUpstreamLink = {
+  /** 该链路通报的在持货物 task。 */
+  task: string;
+  /** 实际持货设备 assetCode（链路可跨越多跳，holder 未必是上一跳）。 */
+  holderAssetCode: string;
+  /** 本机距持货设备的跳数，兼作越级交付交接动画的时长除数。 */
+  hops: number;
+  /** 链路建立时的流向；流向翻转后链路失效清空。 */
+  direction: number;
+};
+
+/** 下位链路：最终订阅者的货物订阅登记，由 subscribe 消息建立。 */
+export type ConveyorDownstreamLink = {
+  /** 订阅的货物 task。 */
+  task: string;
+  /** 订阅者距本机的跳数，兼作越级交付交接动画的时长除数。 */
+  hops: number;
+  /** 链路建立时的流向；流向翻转后链路失效清空。 */
+  direction: number;
+};
+
+/** 外部持货拉取登记：订阅传播到 stacker/RGV 邻居时由相邻 conveyor 登记，帧尾扫描拉取。key=最终订阅者 assetCode。 */
+export type ConveyorExternalPull = {
+  holderAssetCode: string;
+  task: string;
+  /** 订阅者距外部持货设备的跳数，兼作交接动画时长除数。 */
+  hops: number;
+  direction: number;
+};
+
+/** 输送线行程规划缓存：走行上下文/行程半径/轨迹符号，预览期间模型不动可安全缓存，reset 时清空重算。 */
+export type ConveyorCargoTravelPlan = {
+  readonly travelContext: {
+    readonly center: Vector3;
+    readonly upAxis: Vector3;
+    readonly travelAxis: Vector3;
+    readonly travelAxisName: 'x' | 'z';
+    readonly spanMeters: number | null;
+  };
+  readonly travelHalfRange: number;
+  readonly forwardSign: 1 | -1;
 };
 
 export type ConveyorModelTelemetryState = {
   cargoCode: string | null;
   /** 当前 task（归一化字符串）：刷出时盖到货物上，供全局接管匹配。 */
   currentTask: string | null;
-  /** 已登记待光电确认刷出的 task；光电报有货时消费。 */
+  /** 已登记待确认的 task；新 task 边沿当帧进入持货复用/销毁或订阅判定。 */
   pendingTask: string | null;
   /** 最近接受的 task：边沿判定基准，不随线体清空复位，同 task 重复到达不得重走刷出+走行。 */
   lastTask: string | null;
-  /** 正在等待探测点上游设备推送的 task（归一化字符串）；非 null 时本机不刷出、不走行。 */
+  /** 正在等待上游交付的 task（归一化字符串）；非 null 时本机不刷出、不走行。 */
   waitingTask: string | null;
   /** 探测点邻居缓存（按正/反转各存邻居 assetCode），reset 时清空重算。 */
   probeNeighbors: { forward: string | null; reverse: string | null } | null;
-  /** 向上游设备的订阅：等待期间登记，被推送/退出等待/任一侧 task 改变时清空；目标为首个持货或同 task 的上位设备（可越级），seq 决定多下游时的推送顺序（先订阅先得）。 */
-  probeSubscription: { holderAssetCode: string; direction: number; seq: number } | null;
-  /** 越级推送时被跳过期间已流转过的 task 集合：此后收到同 task 仅更新 lastTask，不再触发边沿/订阅（货物已过机，本机不参与）。 */
-  bypassedTasks: Set<string>;
+  /** 行程规划缓存：首次需要时计算（避免等待设备每帧全场景几何扫描），reset 时清空。 */
+  travelPlan: ConveyorCargoTravelPlan | null;
+  /** 上位链路表：key=上一跳 assetCode；available 通知建立、taken 通知清除，含通知注册进来的非探测上游。 */
+  upstreamLinks: Map<string, ConveyorUpstreamLink>;
+  /** 下位链路表：key=最终订阅者 assetCode；subscribe 建立、unsubscribe/交付完成清除。 */
+  downstreamLinks: Map<string, ConveyorDownstreamLink>;
+  /** 外部持货拉取登记：订阅传播到 stacker/RGV 邻居时由相邻 conveyor 登记，帧尾扫描拉取。key=最终订阅者 assetCode。 */
+  externalPulls: Map<string, ConveyorExternalPull>;
+  /** 已过境 task：货物沿链路越过本机交付给更下游后标记，此后收到同 task 仅更新 lastTask，不再订阅。 */
+  transitedTasks: Set<string>;
   /** 最近一次非 0 的 movement_x 运行方向（±1），供持有方计算机等待设备的上货坐标。 */
   lastMovementDirection: number;
   /** 接管货物后的自驱走行方向（±1，0=关闭）：快照断流期间不等新 MQTT 消息直接执行移动动画，新消息到达即清零。 */
@@ -224,8 +275,6 @@ export type ConveyorModelTelemetryState = {
   /** 最近一次应用的快照 receivedAt：识别新消息到达并结束自驱；断流重放时保持不变。 */
   lastSnapshotReceivedAt: number;
   cargoTravelOffset: number;
-  motionOffsets: Map<string, number>;
-  nodeBaselines: Map<TransformNode, ConveyorNodeBaseline>;
 };
 
 export type ConveyorCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
@@ -298,6 +347,8 @@ export type SpecializedTelemetrySharedState = {
   reportedStatuses: Map<string, string>;
   reportedInvalidStackerBoxTargets: Set<string>;
   lastReportedStackerTargetSignatures: Map<string, string>;
+  /** 各模型最近一次注入的外置脚本遥测上下文（签名 + 脚本运行时实例）：无快照且未变化时跳过重复注入与阵列刷新。 */
+  lastInjectedScriptContexts: Map<string, { signature: string | null; runtime: ExternalModelScriptRuntime | null }>;
 };
 
 export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySharedState {
@@ -310,6 +361,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
     reportedStatuses: new Map(),
     reportedInvalidStackerBoxTargets: new Set(),
     lastReportedStackerTargetSignatures: new Map(),
+    lastInjectedScriptContexts: new Map(),
   };
 }
 

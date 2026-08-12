@@ -719,20 +719,9 @@ export class RgvTelemetryDriver {
 
   // ===== 诊断与配置读取 =====
 
-  /** 对故障和状态变化做一次性 Console 提示，避免每帧刷屏。 */
+  /** 对故障做一次性 Console 提示，避免每帧刷屏；info 类状态不进编辑器 Console。 */
   private reportRgvRuntimeState(snapshot: DeviceTelemetrySnapshot): void {
     const deviceKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}`;
-    const mode = readIntegerField(snapshot.fields, 'mode');
-    const frontCommand = readIntegerField(snapshot.fields, 'front_command');
-    const backCommand = readIntegerField(snapshot.fields, 'back_command');
-    const statusSignature = JSON.stringify([mode, frontCommand, backCommand, snapshot.message]);
-    if (this.state.reportedStatuses.get(deviceKey) !== statusSignature) {
-      this.state.reportedStatuses.set(deviceKey, statusSignature);
-      this.host.pushLog(
-        `RGV ${snapshot.assetCode} 状态：mode=${mode ?? '未知'}，front=${frontCommand ?? '未知'}，back=${backCommand ?? '未知'}${snapshot.message ? `，${snapshot.message}` : ''}`,
-      );
-    }
-
     if (!snapshot.faulted) {
       this.state.reportedFaults.delete(deviceKey);
       return;

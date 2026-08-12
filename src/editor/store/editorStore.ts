@@ -4013,7 +4013,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         height: sanitizeLocatorDimension(patch.height, before.height),
         columns: sanitizeLocatorInt(patch.columns, before.columns, 1, 100),
         layers: sanitizeLocatorInt(patch.layers, before.layers, 1, 100),
-        startColumn: sanitizeLocatorInt(patch.startColumn, before.startColumn, 1, 999),
+        startColumn: sanitizeLocatorInt(patch.startColumn, before.startColumn, 0, 999),
         columnGap: sanitizeLocatorGap(patch.columnGap, before.columnGap),
         layerGap: sanitizeLocatorGap(patch.layerGap, before.layerGap),
         deviceAssetCode: patch.deviceAssetCode !== undefined ? patch.deviceAssetCode.trim().slice(0, 128) : before.deviceAssetCode,
