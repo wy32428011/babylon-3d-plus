@@ -50,7 +50,7 @@ export type MqttConnectionTestDependencies = {
 export type MqttConnectionTestHandle = {
   requestId: string;
   result: Promise<MqttConnectionTestResult>;
-  cancel: () => void;
+  cancel: () => Promise<void>;
 };
 
 type NormalizedMqttConnectionTestRequest = {
@@ -142,36 +142,46 @@ function startBrowserConnectionTest(
   }
   let settled = false;
   let subscribing = false;
+  let finishPromise: Promise<void> | null = null;
   let resolveResult!: (result: MqttConnectionTestResult) => void;
   const result = new Promise<MqttConnectionTestResult>((resolve) => {
     resolveResult = resolve;
   });
 
-  /** 先失效全部延迟事件，再清理物理连接，避免 close 或晚到 SUBACK 二次覆盖结果。 */
-  const finish = async (
+  /** 先失效全部延迟事件，再清理物理连接；重复取消会等待同一次物理清理。 */
+  const finish = (
     status: MqttConnectionTestResult['status'],
     message: string,
   ): Promise<void> => {
-    if (settled) return;
+    if (finishPromise) return finishPromise;
     settled = true;
     dependencies.clearTimeout(timeoutId);
 
-    let finalStatus = status;
-    let finalMessage = message;
-    try {
-      await client.endAsync(true);
-    } catch (error) {
-      const cleanupMessage = '清理临时连接失败：' + getErrorMessage(error);
-      finalStatus = status === 'canceled' ? 'canceled' : 'error';
-      finalMessage = status === 'canceled' ? message : `${message}；${cleanupMessage}`;
-    }
-
-    resolveResult({
-      requestId: request.requestId,
-      status: finalStatus,
-      message: finalMessage,
-      durationMs: Math.max(0, dependencies.now() - startedAt),
+    let resolveFinish!: () => void;
+    finishPromise = new Promise<void>((resolve) => {
+      resolveFinish = resolve;
     });
+
+    void (async () => {
+      let finalStatus = status;
+      let finalMessage = message;
+      try {
+        await client.endAsync(true);
+      } catch (error) {
+        const cleanupMessage = '清理临时连接失败：' + getErrorMessage(error);
+        finalStatus = status === 'canceled' ? 'canceled' : 'error';
+        finalMessage = status === 'canceled' ? message : `${message}；${cleanupMessage}`;
+      }
+
+      resolveResult({
+        requestId: request.requestId,
+        status: finalStatus,
+        message: finalMessage,
+        durationMs: Math.max(0, dependencies.now() - startedAt),
+      });
+      resolveFinish();
+    })();
+    return finishPromise;
   };
 
   const timeoutId = dependencies.setTimeout(() => {
@@ -219,9 +229,7 @@ function startBrowserConnectionTest(
   return {
     requestId: request.requestId,
     result,
-    cancel: () => {
-      void finish('canceled', '连接测试已取消。');
-    },
+    cancel: () => finish('canceled', '连接测试已取消。'),
   };
 }
 
@@ -233,6 +241,7 @@ function startElectronConnectionTest(
 ): MqttConnectionTestHandle {
   const startedAt = now();
   let settled = false;
+  let cancelPromise: Promise<void> | null = null;
   let resolveResult!: (result: MqttConnectionTestResult) => void;
   const result = new Promise<MqttConnectionTestResult>((resolve) => {
     resolveResult = resolve;
@@ -260,7 +269,8 @@ function startElectronConnectionTest(
     requestId: request.requestId,
     result,
     cancel: () => {
-      if (settled) return;
+      if (cancelPromise) return cancelPromise;
+      if (settled) return Promise.resolve();
       settled = true;
       resolveResult({
         requestId: request.requestId,
@@ -268,7 +278,11 @@ function startElectronConnectionTest(
         message: '连接测试已取消。',
         durationMs: Math.max(0, now() - startedAt),
       });
-      void api.mqttCancelConnectionTest({ requestId: request.requestId }).catch(() => false);
+      cancelPromise = api.mqttCancelConnectionTest({ requestId: request.requestId }).then(
+        () => undefined,
+        () => undefined,
+      );
+      return cancelPromise;
     },
   };
 }
@@ -288,7 +302,7 @@ function createImmediateErrorHandle(
       message,
       durationMs: Math.max(0, now() - startedAt),
     }),
-    cancel: () => undefined,
+    cancel: () => Promise.resolve(),
   };
 }
 

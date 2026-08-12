@@ -34,8 +34,18 @@ type MqttConnectionTestTask = {
   resolve: (result: MqttConnectionTestResult) => void;
 };
 
+type PendingMqttConnectionTest = {
+  requestId: string;
+  generation: number;
+  startedAt: number;
+  settled: boolean;
+  resolve: (result: MqttConnectionTestResult) => void;
+};
+
 const clientsByWebContentsId = new Map<number, MqttRendererClient>();
 const connectionTestsByKey = new Map<string, MqttConnectionTestTask>();
+const pendingConnectionTestsByWebContentsId = new Map<number, PendingMqttConnectionTest>();
+const connectionTestGenerationsByWebContentsId = new Map<number, number>();
 const connectionTestCleanupBoundWebContentsIds = new Set<number>();
 let registered = false;
 
@@ -63,6 +73,11 @@ export function disposeAllMqttIpcClients(): void {
   ];
   void Promise.allSettled(cleanupTasks);
   clientsByWebContentsId.clear();
+  for (const [webContentsId, pending] of pendingConnectionTestsByWebContentsId) {
+    pendingConnectionTestsByWebContentsId.delete(webContentsId);
+    settlePendingConnectionTest(pending, 'canceled', '应用退出，连接测试已取消。');
+  }
+  connectionTestGenerationsByWebContentsId.clear();
   connectionTestCleanupBoundWebContentsIds.clear();
 }
 
@@ -148,36 +163,87 @@ async function handleTestConnection(
     return createConnectionTestResult(normalized.requestId, 'error', normalized.errorMessage, startedAt);
   }
 
+  const webContentsId = event.sender.id;
   const timeoutMs = normalized.timeoutMs;
-  const key = createConnectionTestKey(event.sender.id, normalized.requestId);
-  const existingTask = connectionTestsByKey.get(key);
-  if (existingTask) {
-    await finishConnectionTest(existingTask, 'canceled', '同一连接测试已被新请求替换。');
-  }
+  const generation = (connectionTestGenerationsByWebContentsId.get(webContentsId) ?? 0) + 1;
+  connectionTestGenerationsByWebContentsId.set(webContentsId, generation);
+  cancelPendingConnectionTestForWebContents(webContentsId, '同一 renderer 已发起新的连接测试。');
   bindConnectionTestCleanup(event.sender);
 
-  let client: MqttClient;
-  try {
-    client = mqtt.connect(normalized.address, {
-      clean: true,
-      clientId: 'babylon-editor-electron-connection-test-' + crypto.randomUUID(),
-      connectTimeout: timeoutMs,
-      reconnectPeriod: 0,
-    });
-  } catch (error) {
-    return createConnectionTestResult(
-      normalized.requestId,
-      'error',
-      'MQTT 连接失败：' + getErrorMessage(error),
-      startedAt,
-    );
-  }
+  let resolvePending!: (result: MqttConnectionTestResult) => void;
+  const result = new Promise<MqttConnectionTestResult>((resolve) => {
+    resolvePending = resolve;
+  });
+  const pending: PendingMqttConnectionTest = {
+    requestId: normalized.requestId,
+    generation,
+    startedAt,
+    settled: false,
+    resolve: resolvePending,
+  };
+  pendingConnectionTestsByWebContentsId.set(webContentsId, pending);
 
+  void (async () => {
+    const previousCleanup = cancelConnectionTestsForWebContents(webContentsId, '同一 renderer 已发起新的连接测试。');
+    if (previousCleanup) await previousCleanup;
+    if (!isPendingConnectionTestCurrent(webContentsId, pending)) return;
+
+    let client: MqttClient;
+    try {
+      client = mqtt.connect(normalized.address, {
+        clean: true,
+        clientId: 'babylon-editor-electron-connection-test-' + crypto.randomUUID(),
+        connectTimeout: timeoutMs,
+        reconnectPeriod: 0,
+      });
+    } catch (error) {
+      completePendingConnectionTest(
+        webContentsId,
+        pending,
+        createConnectionTestResult(
+          normalized.requestId,
+          'error',
+          'MQTT 连接失败：' + getErrorMessage(error),
+          startedAt,
+        ),
+      );
+      return;
+    }
+
+    if (!isPendingConnectionTestCurrent(webContentsId, pending)) {
+      try {
+        await client.endAsync(true);
+      } catch {
+        // 请求在建连前已失效，此处只负责释放尚未纳入任务映射的临时客户端。
+      }
+      return;
+    }
+
+    const taskResult = await runConnectionTestTask(
+      webContentsId,
+      normalized,
+      startedAt,
+      client,
+    );
+    completePendingConnectionTest(webContentsId, pending, taskResult);
+  })();
+
+  return result;
+}
+
+/** 将已完成清理的请求注册为活动任务，并等待会话和全部订阅 SUBACK。 */
+function runConnectionTestTask(
+  webContentsId: number,
+  request: NormalizedConnectionTestRequest,
+  startedAt: number,
+  client: MqttClient,
+): Promise<MqttConnectionTestResult> {
+  const key = createConnectionTestKey(webContentsId, request.requestId);
   return new Promise<MqttConnectionTestResult>((resolve) => {
     const task: MqttConnectionTestTask = {
       key,
-      requestId: normalized.requestId,
-      webContentsId: event.sender.id,
+      requestId: request.requestId,
+      webContentsId,
       client,
       timeout: null,
       startedAt,
@@ -190,9 +256,9 @@ async function handleTestConnection(
       void finishConnectionTest(
         task,
         'error',
-        '连接测试超时（' + formatConnectionTestTimeout(timeoutMs) + '）。',
+        '连接测试超时（' + formatConnectionTestTimeout(request.timeoutMs) + '）。',
       );
-    }, timeoutMs);
+    }, request.timeoutMs);
 
     let subscribing = false;
     client.on('connect', () => {
@@ -200,7 +266,7 @@ async function handleTestConnection(
       subscribing = true;
       let completedCount = 0;
 
-      for (const subscription of normalized.subscriptions) {
+      for (const subscription of request.subscriptions) {
         let subscriptionSettled = false;
         const completeSubscription = (error: unknown): void => {
           if (task.settled || subscriptionSettled) return;
@@ -215,11 +281,11 @@ async function handleTestConnection(
           }
 
           completedCount += 1;
-          if (completedCount === normalized.subscriptions.length) {
+          if (completedCount === request.subscriptions.length) {
             void finishConnectionTest(
               task,
               'success',
-              '连接成功，已确认 ' + normalized.subscriptions.length + ' 个 Topic。',
+              '连接成功，已确认 ' + request.subscriptions.length + ' 个 Topic。',
             );
           }
         };
@@ -251,8 +317,15 @@ async function handleCancelConnectionTest(
 ): Promise<boolean> {
   const requestId = typeof request?.requestId === 'string' ? request.requestId.trim() : '';
   if (!requestId) return false;
-  const task = connectionTestsByKey.get(createConnectionTestKey(event.sender.id, requestId));
-  if (!task) return false;
+  const webContentsId = event.sender.id;
+  const pending = pendingConnectionTestsByWebContentsId.get(webContentsId);
+  if (pending?.requestId === requestId) {
+    pendingConnectionTestsByWebContentsId.delete(webContentsId);
+    settlePendingConnectionTest(pending, 'canceled', '连接测试已取消。');
+  }
+
+  const task = connectionTestsByKey.get(createConnectionTestKey(webContentsId, requestId));
+  if (!task) return Boolean(pending?.requestId === requestId);
   await finishConnectionTest(task, 'canceled', '连接测试已取消。');
   return true;
 }
@@ -284,20 +357,71 @@ function bindConnectionTestCleanup(webContents: WebContents): void {
   connectionTestCleanupBoundWebContentsIds.add(webContents.id);
   webContents.once('destroyed', () => {
     connectionTestCleanupBoundWebContentsIds.delete(webContents.id);
+    cancelPendingConnectionTestForWebContents(webContents.id);
+    connectionTestGenerationsByWebContentsId.delete(webContents.id);
     cancelConnectionTestsForWebContents(webContents.id);
   });
 }
 
-/** 取消指定 renderer 尚未完成的全部连接测试。 */
-function cancelConnectionTestsForWebContents(webContentsId: number): void {
-  for (const task of Array.from(connectionTestsByKey.values())) {
-    if (task.webContentsId === webContentsId) {
-      void finishConnectionTest(task, 'canceled', 'renderer 已销毁，连接测试已取消。');
-    }
-  }
+
+/** 判断等待旧连接清理的请求仍是当前 renderer 的最新请求。 */
+function isPendingConnectionTestCurrent(
+  webContentsId: number,
+  pending: PendingMqttConnectionTest,
+): boolean {
+  return !pending.settled
+    && pendingConnectionTestsByWebContentsId.get(webContentsId) === pending
+    && connectionTestGenerationsByWebContentsId.get(webContentsId) === pending.generation;
 }
 
-/** 统一结算连接测试；先锁定状态和移除任务，再关闭物理连接，防止延迟事件回写。 */
+/** 用结构化结果结算等待阶段，并仅移除仍指向自己的 pending 槽位。 */
+function completePendingConnectionTest(
+  webContentsId: number,
+  pending: PendingMqttConnectionTest,
+  result: MqttConnectionTestResult,
+): void {
+  if (pending.settled) return;
+  pending.settled = true;
+  if (pendingConnectionTestsByWebContentsId.get(webContentsId) === pending) {
+    pendingConnectionTestsByWebContentsId.delete(webContentsId);
+  }
+  pending.resolve(result);
+}
+
+/** 取消 renderer 正在排队的测试请求，防止旧清理完成后建立过期连接。 */
+function cancelPendingConnectionTestForWebContents(
+  webContentsId: number,
+  message = 'renderer 已销毁，连接测试已取消。',
+): boolean {
+  const pending = pendingConnectionTestsByWebContentsId.get(webContentsId);
+  if (!pending) return false;
+  pendingConnectionTestsByWebContentsId.delete(webContentsId);
+  settlePendingConnectionTest(pending, 'canceled', message);
+  return true;
+}
+
+/** 结算尚未创建物理客户端的 pending 请求。 */
+function settlePendingConnectionTest(
+  pending: PendingMqttConnectionTest,
+  status: MqttConnectionTestResult['status'],
+  message: string,
+): void {
+  if (pending.settled) return;
+  pending.settled = true;
+  pending.resolve(createConnectionTestResult(pending.requestId, status, message, pending.startedAt));
+}
+
+/** 取消指定 renderer 尚未完成的全部连接测试。 */
+function cancelConnectionTestsForWebContents(
+  webContentsId: number,
+  message = 'renderer 已销毁，连接测试已取消。',
+): Promise<void> | null {
+  const tasks = Array.from(connectionTestsByKey.values()).filter((task) => task.webContentsId === webContentsId);
+  if (tasks.length === 0) return null;
+  return Promise.all(tasks.map((task) => finishConnectionTest(task, 'canceled', message))).then(() => undefined);
+}
+
+/** 统一结算连接测试；先锁定状态，待物理连接关闭后移除任务，供后续请求复用同一清理 Promise。 */
 function finishConnectionTest(
   task: MqttConnectionTestTask,
   status: MqttConnectionTestResult['status'],
@@ -309,8 +433,6 @@ function finishConnectionTest(
     clearTimeout(task.timeout);
     task.timeout = null;
   }
-  if (connectionTestsByKey.get(task.key) === task) connectionTestsByKey.delete(task.key);
-
   let resolveFinish!: (result: MqttConnectionTestResult) => void;
   task.finishPromise = new Promise<MqttConnectionTestResult>((resolve) => {
     resolveFinish = resolve;
@@ -334,6 +456,7 @@ function finishConnectionTest(
       finalMessage,
       task.startedAt,
     );
+    if (connectionTestsByKey.get(task.key) === task) connectionTestsByKey.delete(task.key);
     task.resolve(result);
     resolveFinish(result);
   })();

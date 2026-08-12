@@ -18,6 +18,8 @@ class FakeMqttConnectionTestClient extends EventEmitter implements MqttConnectio
   readonly subscribeCalls: Array<{ topic: string; qos: 0 | 1 | 2; callback: SubscribeCallback }> = [];
   endCalls = 0;
   endError: Error | null = null;
+  endPromise: Promise<void> | null = null;
+  emitCloseOnFirstEnd = false;
   subscribeError: Error | null = null;
 
   subscribe(topic: string, options: { qos: 0 | 1 | 2 }, callback: SubscribeCallback): void {
@@ -27,6 +29,8 @@ class FakeMqttConnectionTestClient extends EventEmitter implements MqttConnectio
 
   async endAsync(): Promise<void> {
     this.endCalls += 1;
+    if (this.emitCloseOnFirstEnd && this.endCalls === 1) this.emit('close');
+    if (this.endPromise) await this.endPromise;
     if (this.endError) throw this.endError;
   }
 }
@@ -117,6 +121,41 @@ test('取消测试会返回 canceled 且延迟事件不能覆盖结果', async (
   assert.equal(client.endCalls, 1);
 });
 
+test('取消返回的 Promise 会等待浏览器临时连接物理清理完成', async () => {
+  const client = new FakeMqttConnectionTestClient();
+  const cleanup = createDeferred<void>();
+  client.endPromise = cleanup.promise;
+  const handle = startMqttConnectionTest(createRequest(), createDependencies(client));
+  let cancelCompleted = false;
+
+  const cancelPromise = handle.cancel().then(() => {
+    cancelCompleted = true;
+  });
+  await Promise.resolve();
+
+  assert.equal(client.endCalls, 1);
+  assert.equal(cancelCompleted, false);
+  cleanup.resolve();
+  await cancelPromise;
+  assert.equal(cancelCompleted, true);
+  assert.equal((await handle.result).status, 'canceled');
+});
+
+
+test('浏览器临时连接清理同步触发 close 时只断开一次', async () => {
+  const client = new FakeMqttConnectionTestClient();
+  client.emitCloseOnFirstEnd = true;
+  const handle = startMqttConnectionTest(createRequest(), createDependencies(client));
+
+  client.emit('connect');
+  client.subscribeCalls[0].callback(null);
+  client.subscribeCalls[1].callback(null);
+  const result = await handle.result;
+
+  assert.equal(result.status, 'success');
+  assert.equal(client.endCalls, 1);
+});
+
 test('subscribe 同步抛错会归入对应 Topic 失败', async () => {
   const client = new FakeMqttConnectionTestClient();
   client.subscribeError = new Error('subscribe crashed');
@@ -197,6 +236,32 @@ test('非法地址和空订阅不创建网络客户端', async () => {
   assert.equal(connectCalls, 0);
 });
 
+
+test('Electron 取消返回的 Promise 会等待主进程确认清理', async () => {
+  const cleanup = createDeferred<boolean>();
+  const api: ElectronMqttConnectionTestApi = {
+    mqttTestConnection: () => new Promise(() => undefined),
+    mqttCancelConnectionTest: () => cleanup.promise,
+  };
+  const client = new FakeMqttConnectionTestClient();
+  const handle = startMqttConnectionTest(createRequest(), {
+    ...createDependencies(client),
+    electronApi: api,
+  });
+  let cancelCompleted = false;
+
+  const cancelPromise = handle.cancel().then(() => {
+    cancelCompleted = true;
+  });
+  await Promise.resolve();
+
+  assert.equal(cancelCompleted, false);
+  cleanup.resolve(true);
+  await cancelPromise;
+  assert.equal(cancelCompleted, true);
+  assert.equal((await handle.result).status, 'canceled');
+});
+
 test('Electron 测试调用取消窄 API 并忽略取消后的成功结果', async () => {
   let cancelCalls = 0;
   let resolveTest!: (value: Awaited<ReturnType<ElectronMqttConnectionTestApi['mqttTestConnection']>>) => void;
@@ -247,6 +312,20 @@ function createDependencies(
     clearTimeout: clock.clearTimeout,
     electronApi: null,
   };
+}
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+};
+
+/** 创建可手动结算的 Promise，用于验证取消会等待物理连接清理。 */
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: Deferred<T>['resolve'];
+  const promise = new Promise<T>((resolver) => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
 }
 
 /** 控制定时器与耗时，避免单元测试真实等待 8 秒。 */
