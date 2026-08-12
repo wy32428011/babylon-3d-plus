@@ -92,18 +92,22 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
           ? frame.snapshot
           : null;
         const context = snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null;
-        // 无快照且注入上下文未变时跳过注入与阵列刷新（恢复→注入→隐藏→重规划→挂起全链路），稳态帧零成本；
-        // 有快照时保留完整周期，脚本动画与驱动位移依赖每帧刷新。
+        // 上下文不含 receivedAt：字段未变即签名不变。签名不变时跳过注入与阵列刷新（含阵列批次重建），
+        // 避免非断流设备每帧全量执行脚本 onUpdate/阵列刷新——设备全部在线时该成本随设备数线性增长直至卡死；
+        // driver.apply 不受门控，货物走行/自驱仍按帧推进。
         const contextSignature = context ? JSON.stringify(context) : null;
         const scriptRuntime = candidate.model.externalScriptRuntime;
         const lastContext = this.state.lastInjectedScriptContexts.get(candidate.entityId);
-        if (!snapshot
-          && lastContext?.signature === contextSignature
-          && lastContext?.runtime === scriptRuntime) {
+        const contextUnchanged = lastContext?.signature === contextSignature && lastContext?.runtime === scriptRuntime;
+        if (!snapshot && contextUnchanged) {
           continue;
         }
-        const preparedArrayHost = this.host.updateExternalScriptContext(candidate.model, context);
-        this.state.lastInjectedScriptContexts.set(candidate.entityId, { signature: contextSignature, runtime: scriptRuntime });
+        const preparedArrayHost = contextUnchanged
+          ? false
+          : this.host.updateExternalScriptContext(candidate.model, context);
+        if (!contextUnchanged) {
+          this.state.lastInjectedScriptContexts.set(candidate.entityId, { signature: contextSignature, runtime: scriptRuntime });
+        }
         if (snapshot) {
           driver.apply(candidate.model, snapshot, deltaSeconds);
         }
@@ -112,8 +116,9 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         }
       }
     }
-    // 帧尾统一执行探测点订阅推送：与快照新旧无关，持有方持货即推给最先订阅的下游。
-    this.conveyorDriver.pushCargoToProbeSubscribers();
+    // 帧尾统一执行外部持货拉取：与快照新旧无关，conveyor 间流转已由链路协议事件驱动，
+    // 仅 stacker/RGV 等无链路能力设备的持货需要扫描登记目标后代交付。
+    this.conveyorDriver.pullExternalHolderCargo();
   }
 
   /** 清理已不存在有效专用绑定的模型诊断，避免 Inspector 展示过期状态。 */
@@ -129,6 +134,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   /** 预计算并缓存堆垛机货叉参考位置，供首个驱动帧前捕获基线使用。 */
   primeStackerTargetReference(model: ModelRuntimeEntry): void {
     this.stackerDriver.getStackerTargetReferencePosition(model);
+  }
+
+  /** 预热输送线行程规划与双向探测邻居缓存，避免首个货物事件的级联把全场景几何扫描挤在一帧。 */
+  primeConveyorLinkCaches(model: ModelRuntimeEntry): void {
+    this.conveyorDriver.primeLinkCaches(model);
   }
 
   /** 清除模型 root/contentRoot 上的遥测运行态 metadata，避免预览状态泄漏到编辑态 Inspector。 */

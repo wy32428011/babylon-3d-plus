@@ -3597,6 +3597,8 @@ export class SceneRuntime {
       model.telemetryPreviewBaseline = captureModelTelemetryPreviewBaseline({ root: model.root, contentRoot: model.contentRoot });
       if (this.specializedTelemetryRuntime.resolveDeviceType(model) === 'stacker') {
         this.specializedTelemetryRuntime.primeStackerTargetReference(model);
+      } else if (this.specializedTelemetryRuntime.resolveDeviceType(model) === 'conveyor') {
+        this.specializedTelemetryRuntime.primeConveyorLinkCaches(model);
       }
     }
     for (const owner of this.generatedOutputOwners.values()) {

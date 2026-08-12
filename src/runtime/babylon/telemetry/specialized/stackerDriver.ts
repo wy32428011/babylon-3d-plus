@@ -98,7 +98,6 @@ export class StackerTelemetryDriver {
       ? this.resolveStackerIdleSnapOffsets(model, snapshot)
       : null;
     const motionOffsets = targetOffsets ?? idleSnapOffsets;
-    this.reportStackerTargetProjection(model, targetLocator, targetPosition, targetOffsets, toX, toY);
     const travelMoving = this.applyStackerRootMotion(model, snapshot, motionOffsets?.travelOffset ?? null, deltaSeconds, targetCellMissing);
     const liftMoving = this.applyStackerLiftMotion(model, snapshot, motionOffsets?.liftOffset ?? null, deltaSeconds, targetCellMissing);
     this.applyStackerForkMotion(model, snapshot, targetPosition, deltaSeconds, targetLocator, travelMoving || liftMoving, targetCellMissing);
@@ -216,35 +215,6 @@ export class StackerTelemetryDriver {
       referenceTravelCoordinate: Vector3.Dot(referencePosition, travelAxis),
       referenceLiftCoordinate: referencePosition.y,
     });
-  }
-
-  /** 目标位变化时在 Console 打印一次行走/升降/货叉投影距离，便于联调核对格口级目标。 */
-  private reportStackerTargetProjection(
-    model: ModelRuntimeEntry,
-    targetLocator: LocatorRuntimeEntry | null,
-    targetPosition: Vector3 | null,
-    targetOffsets: StackerStorageTargetOffsets | null,
-    toX: number | null,
-    toY: number | null,
-  ): void {
-    const signature = targetLocator && targetPosition
-      ? `${targetLocator.assetId}:${toX}:${toY}:${targetPosition.x.toFixed(3)}:${targetPosition.y.toFixed(3)}:${targetPosition.z.toFixed(3)}`
-      : 'none';
-    if (this.state.lastReportedStackerTargetSignatures.get(model.assetCode) === signature) return;
-    this.state.lastReportedStackerTargetSignatures.set(model.assetCode, signature);
-    if (!targetLocator || !targetPosition || !targetOffsets) return;
-
-    const forkAxis = getModelAxis(model.root, 'x');
-    const referencePosition = this.getStackerTargetReferencePosition(model);
-    const forkProjection = Math.abs(Vector3.Dot(targetPosition.subtract(referencePosition), forkAxis));
-    const reach = this.readStackerForkReachConfig(model);
-    const stageLabel = forkProjection > reach.stageOne + 0.001 ? '两段' : '一段';
-    this.host.pushLog(
-      `堆垛机 ${model.assetCode} 目标 ${targetLocator.assetId}（列${toX} 层${toY}）：` +
-      `box 支撑位 (${targetPosition.x.toFixed(3)}, ${targetPosition.y.toFixed(3)}, ${targetPosition.z.toFixed(3)})，` +
-      `行走投影偏移 ${targetOffsets.travelOffset.toFixed(3)}m，升降投影偏移 ${targetOffsets.liftOffset.toFixed(3)}m，` +
-      `货叉投影距离 ${forkProjection.toFixed(3)}m（一段行程 ${reach.stageOne}m，判定${stageLabel}）。`,
-    );
   }
 
   /** 有目标位或空闲吸附偏移时沿轨道推进，否则按 movement_x 方向驱动；返回本帧是否在移动。 */

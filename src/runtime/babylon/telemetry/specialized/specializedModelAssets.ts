@@ -242,8 +242,11 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     lastTask: null,
     waitingTask: null,
     probeNeighbors: null,
-    probeSubscription: null,
-    bypassedTasks: new Set(),
+    travelPlan: null,
+    upstreamLinks: new Map(),
+    downstreamLinks: new Map(),
+    externalPulls: new Map(),
+    transitedTasks: new Set(),
     lastMovementDirection: 0,
     selfDriveDirection: 0,
     lastSnapshotReceivedAt: 0,
@@ -259,8 +262,11 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.lastTask = null;
   model.conveyorTelemetry.waitingTask = null;
   model.conveyorTelemetry.probeNeighbors = null;
-  model.conveyorTelemetry.probeSubscription = null;
-  model.conveyorTelemetry.bypassedTasks.clear();
+  model.conveyorTelemetry.travelPlan = null;
+  model.conveyorTelemetry.upstreamLinks.clear();
+  model.conveyorTelemetry.downstreamLinks.clear();
+  model.conveyorTelemetry.externalPulls.clear();
+  model.conveyorTelemetry.transitedTasks.clear();
   model.conveyorTelemetry.lastMovementDirection = 0;
   model.conveyorTelemetry.selfDriveDirection = 0;
   model.conveyorTelemetry.lastSnapshotReceivedAt = 0;

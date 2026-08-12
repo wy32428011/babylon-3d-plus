@@ -117,7 +117,7 @@ test('非起点设备探测点无上游时不刷出，仅进入等待', () => {
     h.apply(RUNNING);
     assert.equal(h.state.conveyorCargoMeshes.size, 0, '非起点设备无邻居不得自行创建货箱');
     assert.equal(h.model.conveyorTelemetry.waitingTask, '1', '必须进入等待');
-    assert.equal(h.model.conveyorTelemetry.probeSubscription, null, '无订阅对象不得登记');
+    assert.equal(h.model.conveyorTelemetry.upstreamLinks.size, 0, '无邻居不得有上位链路登记');
   } finally {
     h.dispose();
   }
@@ -167,7 +167,7 @@ test('movement_x 非 0 即刷出，不依赖光电信号；刷出位置只由转
   const anonymous = makeHarness(null);
   try {
     anonymous.apply({ front_has_goods: 0, back_has_goods: 0, movement_x: 1 });
-    assert.equal(anonymous.state.conveyorCargoMeshes.size, 1, '匿名模式：光电无货但 movement_x 非 0 必须刷出');
+    assert.equal(anonymous.state.conveyorCargoMeshes.size, 0, '匿名模式已移除：无 task 字段不得刷出');
   } finally {
     anonymous.dispose();
   }
@@ -294,7 +294,7 @@ test('新 task 边沿复用在机旧箱：与 autoDispose 无关，同一实例�
     assert.equal(reused.root, oldRoot, '新 task 必须直接复用滞留箱实例');
     assert.equal(reused.task, '2');
     assert.equal(h.model.conveyorTelemetry.waitingTask, null, '持有滞留箱不得进入等待');
-    assert.equal(h.model.conveyorTelemetry.probeSubscription, null, '持有滞留箱不得订阅上游');
+    assert.equal(h.model.conveyorTelemetry.upstreamLinks.size, 0, '单机无邻居不得有上位链路');
     assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 复用必须登记正转自驱');
     assert.ok(
       Math.abs(h.model.conveyorTelemetry.cargoTravelOffset - (strandedOffset + 0.3 * 0.1)) < 1e-6,
