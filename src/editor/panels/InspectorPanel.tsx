@@ -15,7 +15,10 @@ import {
   SKYBOX_SPHERE_SCALE_MIN,
   type SceneSkyboxResolution,
 } from '../model/SceneDocument';
-import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
+import {
+  isEntityEffectivelyLocked,
+  resolveHierarchyGroupTransformSelection,
+} from '../model/entityHierarchy';
 import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
@@ -68,6 +71,55 @@ function formatModelMeasurementMeters(value: number): string {
   return MODEL_MEASUREMENT_FORMATTER.format(Number.isFinite(value) ? Math.max(0, value) : 0);
 }
 
+type GroupSpatialAxisInputProps = {
+  ariaLabel: string;
+  disabled: boolean;
+  step: string;
+  value: number;
+  onCommit?: (value: number) => void;
+};
+
+/** 群组 Transform 输入在 blur/Enter 时提交，避免受控值在运行时事务完成前回弹。 */
+function GroupSpatialAxisInput(props: GroupSpatialAxisInputProps) {
+  const [draft, setDraft] = useState(String(props.value));
+
+  useEffect(() => {
+    setDraft(String(props.value));
+  }, [props.value]);
+
+  function commit(): void {
+    if (draft.trim() === '') {
+      setDraft(String(props.value));
+      return;
+    }
+    const value = Number(draft);
+    if (!Number.isFinite(value)) {
+      setDraft(String(props.value));
+      return;
+    }
+    props.onCommit?.(value);
+  }
+
+  return (
+    <input
+      aria-label={props.ariaLabel}
+      disabled={props.disabled}
+      step={props.step}
+      type="number"
+      value={draft}
+      onBlur={commit}
+      onChange={(event) => setDraft(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') event.currentTarget.blur();
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          setDraft(String(props.value));
+        }
+      }}
+    />
+  );
+}
+
 /** 根据 Transform 字段返回 Inspector 输入框显示值，rotation 单独从弧度转为角度。 */
 function getTransformInputValue(field: TransformField, value: number): number {
   return field === 'rotation' ? formatRotationDegrees(radiansToDegrees(value)) : value;
@@ -84,7 +136,10 @@ type InspectorPanelProps = {
 
 export function InspectorPanel(props: InspectorPanelProps) {
   const scene = useEditorStore((state) => state.scene);
+  const hierarchySelectionIds = useEditorStore((state) => state.hierarchySelectionIds);
   const selectedModelMeasurement = useEditorStore((state) => state.selectedModelMeasurement);
+  const selectedGroupSpatialInfo = useEditorStore((state) => state.selectedGroupSpatialInfo);
+  const requestSelectedGroupTransform = useEditorStore((state) => state.requestSelectedGroupTransform);
   const renameSelectedEntity = useEditorStore((state) => state.renameSelectedEntity);
   const updateSelectedTransform = useEditorStore((state) => state.updateSelectedTransform);
   const updateSelectedMaterialColor = useEditorStore((state) => state.updateSelectedMaterialColor);
@@ -95,6 +150,10 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const updateSelectedTelemetryBinding = useEditorStore((state) => state.updateSelectedTelemetryBinding);
   const restoreSelectedTelemetryBindingDefault = useEditorStore((state) => state.restoreSelectedTelemetryBindingDefault);
   const selectedEntity = scene.selectedEntityId ? scene.entities[scene.selectedEntityId] : null;
+  const groupSelection = resolveHierarchyGroupTransformSelection(scene, hierarchySelectionIds);
+  const groupSpatialInfo = groupSelection.groupId && selectedGroupSpatialInfo?.groupId === groupSelection.groupId
+    ? selectedGroupSpatialInfo
+    : null;
   const modelMeasurement = selectedEntity && selectedModelMeasurement?.entityId === selectedEntity.id
     ? selectedModelMeasurement
     : null;
@@ -112,6 +171,14 @@ export function InspectorPanel(props: InspectorPanelProps) {
     if (event.key !== 'Enter') return;
 
     event.currentTarget.blur();
+  }
+
+  function handleGroupTransformCommit(
+    field: 'position' | 'rotation',
+    axis: keyof Vector3Data,
+    value: number,
+  ): void {
+    requestSelectedGroupTransform(field, axis, field === 'rotation' ? degreesToRadians(value) : value);
   }
 
   function handleTransformChange(field: TransformField, axis: keyof Vector3Data, rawValue: string) {
@@ -173,26 +240,102 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const isFolder = selectedEntity.isFolder === true;
   const isLocked = isEntityEffectivelyLocked(scene.entities, selectedEntity) || props.readOnly === true;
 
+  if (groupSelection.groupId) {
+    const isSingleFolder = groupSelection.selectionIds.length === 1 && isFolder;
+    return (
+      <section className="panel inspector-panel">
+        <h2>Inspector</h2>
+        {isSingleFolder ? (
+          <label className="inspector-row">
+            <span>名称</span>
+            <input
+              type="text"
+              disabled={isLocked}
+              value={nameDraft}
+              onBlur={handleNameBlur}
+              onChange={(event) => setNameDraft(event.target.value)}
+              onKeyDown={handleNameKeyDown}
+            />
+          </label>
+        ) : null}
+        <fieldset className="transform-fieldset">
+          <legend>{isSingleFolder ? '群组文件夹' : '群组选择'}</legend>
+          <p className="muted">选中项目：{groupSelection.selectionIds.length}</p>
+          <p className="muted">参与空间计算：{groupSelection.entityIds.length}</p>
+          {isSingleFolder ? <p className="muted">直属项目：{selectedEntity.childrenIds.length}</p> : null}
+          {groupSelection.status === 'blocked' ? (
+            <p className="muted">群组包含锁定对象，空间信息仍可查看，但不能整体变换。</p>
+          ) : null}
+        </fieldset>
+        {groupSpatialInfo?.status === 'ready' ? (
+          <fieldset className="transform-fieldset group-spatial-transform-fieldset">
+            <legend>空间信息</legend>
+            <div className="group-spatial-transform-row">
+              <span>位置</span>
+              {axes.map((axis) => (
+                <label className="group-spatial-axis" key={`group-position-${axis}`}>
+                  <span>{axis.toUpperCase()}</span>
+                  <GroupSpatialAxisInput
+                    ariaLabel={`群组位置 ${axis.toUpperCase()}`}
+                    disabled={props.readOnly === true || groupSelection.status !== 'ready'}
+                    step="0.1"
+                    value={Number(groupSpatialInfo.center[axis].toFixed(6))}
+                    onCommit={(value) => handleGroupTransformCommit('position', axis, value)}
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="group-spatial-transform-row">
+              <span>旋转</span>
+              {axes.map((axis) => (
+                <label className="group-spatial-axis" key={`group-rotation-${axis}`}>
+                  <span>{axis.toUpperCase()}</span>
+                  <GroupSpatialAxisInput
+                    ariaLabel={`群组旋转 ${axis.toUpperCase()}`}
+                    disabled={props.readOnly === true || groupSelection.status !== 'ready'}
+                    step="1"
+                    value={formatRotationDegrees(radiansToDegrees(groupSpatialInfo.rotation[axis]))}
+                    onCommit={(value) => handleGroupTransformCommit('rotation', axis, value)}
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="group-spatial-transform-row">
+              <span>缩放</span>
+              {axes.map((axis) => (
+                <label className="group-spatial-axis" key={`group-scale-${axis}`}>
+                  <span>{axis.toUpperCase()}</span>
+                  <GroupSpatialAxisInput
+                    ariaLabel={`群组缩放 ${axis.toUpperCase()}`}
+                    disabled
+                    step="0.1"
+                    value={1}
+                  />
+                </label>
+              ))}
+            </div>
+            <p className="muted">位置为世界包围盒中心；旋转以首个参与对象为参考并绕群组中心执行。群组缩放暂不支持。</p>
+          </fieldset>
+        ) : groupSelection.status === 'empty' || groupSpatialInfo?.status === 'unavailable' ? (
+          <fieldset className="transform-fieldset">
+            <legend>空间信息</legend>
+            <p className="muted">群组中暂无可计算空间范围的对象。</p>
+          </fieldset>
+        ) : (
+          <fieldset className="transform-fieldset">
+            <legend>空间信息</legend>
+            <p className="muted">正在计算群组世界包围盒…</p>
+          </fieldset>
+        )}
+      </section>
+    );
+  }
+
   if (isFolder) {
     return (
       <section className="panel">
         <h2>Inspector</h2>
-        <label className="inspector-row">
-          <span>名称</span>
-          <input
-            type="text"
-            disabled={isLocked}
-            value={nameDraft}
-            onBlur={handleNameBlur}
-            onChange={(event) => setNameDraft(event.target.value)}
-            onKeyDown={handleNameKeyDown}
-          />
-        </label>
-        <fieldset className="transform-fieldset">
-          <legend>文件夹</legend>
-          <p className="muted">直属项目：{selectedEntity.childrenIds.length}</p>
-          <p className="muted">仅用于 Hierarchy 分组，不参与场景变换。</p>
-        </fieldset>
+        <p className="muted">当前文件夹选区尚未完成空间信息解析。</p>
       </section>
     );
   }

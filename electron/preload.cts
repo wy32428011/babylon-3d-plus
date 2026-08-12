@@ -1,4 +1,5 @@
 import type {
+  AssetEntry,
   DeploymentExportCancelRequest,
   DeploymentExportProgress,
   DeploymentExportRequest,
@@ -6,6 +7,7 @@ import type {
   DataPlatformConfig,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  DataPlatformSkyboxSyncProgress,
   SyncedImageAssetEntry,
   DataPlatformProjectListRequest,
   DataPlatformProjectEntry,
@@ -35,16 +37,38 @@ import type {
   OpenRecentProjectRequest,
   ProjectListAssetsResult,
   ReadTextFileRequest,
+  ReadTextFileResult,
   RecentWorkspacesResult,
   RemoveRecentWorkspaceItemRequest,
   SaveDataPlatformConfigRequest,
   SaveSceneRequest,
+  SaveSceneResult,
   SelectProjectDirectoryResult,
 } from './types.js';
 
 import type { IpcRendererEvent } from 'electron';
 
 const { contextBridge, ipcRenderer } = require('electron');
+
+/** sandbox preload 不能加载相对模块，因此实时优先 gate 必须在入口内联。 */
+function createRealtimeFirstProgressGate<T>(handler: (payload: T) => void) {
+  let active = true;
+  let receivedRealtime = false;
+  return {
+    handleRealtime(payload: T): void {
+      if (!active) return;
+      receivedRealtime = true;
+      handler(payload);
+    },
+    handleSnapshot(payload: T | null): void {
+      if (!active || receivedRealtime || payload === null) return;
+      handler(payload);
+    },
+    dispose(): void {
+      active = false;
+    },
+  };
+}
 
 const dataPlatformDeepLinkHandlers = new Set<(deepLink: DataPlatformDeepLink) => void>();
 let pendingDataPlatformDeepLink: DataPlatformDeepLink | null = null;
@@ -58,11 +82,11 @@ ipcRenderer.on('data-platform:deepLinkOpen', (_event: IpcRendererEvent, payload:
 
 contextBridge.exposeInMainWorld('editorApi', {
   version: '0.1.0',
-  saveScene: (request: SaveSceneRequest) => ipcRenderer.invoke('scene:save', request),
-  loadScene: () => ipcRenderer.invoke('scene:load'),
+  saveScene: (request: SaveSceneRequest): Promise<SaveSceneResult> => ipcRenderer.invoke('scene:save', request),
+  loadScene: (): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:load'),
   loadSceneFile: (request: LoadSceneFileRequest): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:loadFile', request),
-  readTextFile: (request: ReadTextFileRequest) => ipcRenderer.invoke('file:readText', request),
-  scanAssets: () => ipcRenderer.invoke('assets:scan'),
+  readTextFile: (request: ReadTextFileRequest): Promise<ReadTextFileResult> => ipcRenderer.invoke('file:readText', request),
+  scanAssets: (): Promise<AssetEntry[]> => ipcRenderer.invoke('assets:scan'),
   getRecentWorkspaces: (): Promise<RecentWorkspacesResult> => ipcRenderer.invoke('project:getRecentWorkspaces'),
   getDataPlatformConfig: (): Promise<DataPlatformConfig> => ipcRenderer.invoke('data-platform:getConfig'),
   saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> =>
@@ -89,6 +113,23 @@ contextBridge.exposeInMainWorld('editorApi', {
     return () => {
       active = false;
       ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
+    };
+  },
+  syncDataPlatformSkyboxes: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncSkyboxes'),
+  retryDataPlatformSkyboxSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retrySkyboxSync'),
+  onDataPlatformSkyboxSyncProgress: (onProgress: (progress: DataPlatformSkyboxSyncProgress) => void): (() => void) => {
+    let active = true;
+    const progressGate = createRealtimeFirstProgressGate(onProgress);
+    const handler = (payload: DataPlatformSkyboxSyncProgress) => progressGate.handleSnapshot(payload);
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformSkyboxSyncProgress) => progressGate.handleRealtime(payload);
+    ipcRenderer.on('data-platform:skyboxSyncProgress', listener);
+    void ipcRenderer.invoke('data-platform:getSkyboxSyncProgress').then((payload: DataPlatformSkyboxSyncProgress | null) => {
+      if (active && payload) handler(payload);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      progressGate.dispose();
+      ipcRenderer.removeListener('data-platform:skyboxSyncProgress', listener);
     };
   },
   syncDataPlatformImages: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncImages'),

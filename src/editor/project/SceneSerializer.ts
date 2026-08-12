@@ -9,6 +9,8 @@ import {
   DEFAULT_MQTT_CONFIG,
   MODEL_ASSET_CODE_MAX_LENGTH,
   createModelAssetCode,
+  normalizeDataPlatformResourceId,
+  readOwnDataProperty,
   normalizeSkyboxSphereScale,
   normalizeStackerSimulationScenario,
   sanitizeFetchConfig,
@@ -48,6 +50,7 @@ import { normalizeBuiltInSlotBindingConfig, normalizeLocatorBuiltInBinding } fro
 import { logLegacySceneMigrationSummary, logSceneV2ToV3MigrationSummary, migrateLegacySceneV1ToV2, migrateSceneV2ToV3 } from './sceneMigration';
 
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
+const INVALID_SKYBOX_RESOURCE_ID_ERROR = '场景文件格式不受支持：dataPlatformResourceId 必须是 trim 后 1-64 位正十进制字符串。';
 const MESH_KINDS: readonly MeshKind[] = ['cube', 'sphere', 'plane'];
 const LIGHT_KINDS: readonly LightKind[] = ['hemispheric', 'directional', 'point'];
 const MODEL_SCRIPT_EXTENSION = '.ts';
@@ -71,7 +74,40 @@ const DEFAULT_SCENE_FILE_UNITS: SceneFileUnits = { length: SCENE_LENGTH_UNIT };
 type PlainObject = Record<string, unknown>;
 
 export function serializeScene(scene: SceneDocument): string {
-  return JSON.stringify({ version: 3, units: { length: SCENE_LENGTH_UNIT }, scene }, null, 2);
+  const snapshot = createSerializableSceneSnapshot(scene);
+  return JSON.stringify({ version: 3, units: { length: SCENE_LENGTH_UNIT }, scene: snapshot }, null, 2);
+}
+
+/** 保存前只替换天空盒嵌套对象，保留其它场景引用并确保不修改输入。 */
+function createSerializableSceneSnapshot(scene: SceneDocument): SceneDocument {
+  const entities = Object.fromEntries(
+    Object.entries(scene.entities).map(([entityId, entity]) => [
+      entityId,
+      createSerializableEntitySnapshot(entity),
+    ]),
+  );
+  const sceneSettings = scene.sceneSettings as SceneSettings | undefined;
+  if (sceneSettings === undefined) return { ...scene, entities };
+  return {
+    ...scene,
+    entities,
+    sceneSettings: {
+      ...sceneSettings,
+      skybox: normalizeSceneSkyboxSettings(sceneSettings.skybox),
+    },
+  };
+}
+
+/** 实体天空盒使用加载入口同一套严格规范化，避免保存无法重新打开的组件。 */
+function createSerializableEntitySnapshot(entity: Entity): Entity {
+  if (!entity.components.skybox) return entity;
+  return {
+    ...entity,
+    components: {
+      ...entity.components,
+      skybox: normalizeSkyboxComponent(entity.components.skybox),
+    },
+  };
 }
 
 export function deserializeScene(content: string): SceneDocument {
@@ -87,7 +123,10 @@ export function deserializeScene(content: string): SceneDocument {
     }
     return normalizeSceneDocument(rawScene);
   } catch (error) {
-    if (error instanceof Error && error.message === UNSUPPORTED_SCENE_FILE_ERROR) {
+    if (error instanceof Error && (
+      error.message === UNSUPPORTED_SCENE_FILE_ERROR
+      || error.message === INVALID_SKYBOX_RESOURCE_ID_ERROR
+    )) {
       throw error;
     }
 
@@ -284,11 +323,13 @@ function normalizeSceneSkyboxSettings(value: unknown): SceneSkyboxSettings | nul
     throwUnsupportedSceneFileError();
   }
 
+  const dataPlatformResourceId = normalizeOptionalDataPlatformResourceId(skybox);
   const normalized = sanitizeSceneSkybox({
     packagePath: assertString(skybox.packagePath),
     sourcePath: assertString(skybox.sourcePath),
     sourceUrl,
     ...(skybox.assetRevision === undefined ? {} : { assetRevision: assertString(skybox.assetRevision) }),
+    ...(dataPlatformResourceId ? { dataPlatformResourceId } : {}),
     format,
     rotationDegrees: assertFiniteNumber(skybox.rotationDegrees),
     intensity: assertFiniteNumber(skybox.intensity),
@@ -681,11 +722,13 @@ function normalizeSkyboxComponent(value: unknown): NonNullable<EntityComponents[
   const format = skybox.format;
   if (format !== 'hdr' && format !== 'exr') throwUnsupportedSceneFileError();
 
+  const dataPlatformResourceId = normalizeOptionalDataPlatformResourceId(skybox);
   const normalized = sanitizeSceneSkybox({
     packagePath: assertString(skybox.packagePath),
     sourcePath: assertString(skybox.sourcePath),
     sourceUrl,
     ...(skybox.assetRevision === undefined ? {} : { assetRevision: assertString(skybox.assetRevision) }),
+    ...(dataPlatformResourceId ? { dataPlatformResourceId } : {}),
     format,
     rotationDegrees: 0,
     intensity: assertFiniteNumber(skybox.intensity),
@@ -697,6 +740,7 @@ function normalizeSkyboxComponent(value: unknown): NonNullable<EntityComponents[
     sourcePath: normalized.sourcePath,
     sourceUrl: normalized.sourceUrl,
     ...(normalized.assetRevision ? { assetRevision: normalized.assetRevision } : {}),
+    ...(normalized.dataPlatformResourceId ? { dataPlatformResourceId: normalized.dataPlatformResourceId } : {}),
     format: normalized.format,
     intensity: normalized.intensity,
     resolution: normalized.resolution,
@@ -1193,6 +1237,15 @@ function assertArray(value: unknown): unknown[] {
   }
 
   return value;
+}
+
+function normalizeOptionalDataPlatformResourceId(value: PlainObject): string | undefined {
+  const field = readOwnDataProperty(value, 'dataPlatformResourceId');
+  if (field.kind === 'missing') return undefined;
+  if (field.kind === 'accessor') throw new Error(INVALID_SKYBOX_RESOURCE_ID_ERROR);
+  const normalized = normalizeDataPlatformResourceId(field.value);
+  if (!normalized) throw new Error(INVALID_SKYBOX_RESOURCE_ID_ERROR);
+  return normalized;
 }
 
 function assertString(value: unknown): string {

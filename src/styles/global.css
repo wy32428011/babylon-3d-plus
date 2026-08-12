@@ -1341,6 +1341,52 @@ select {
   background: #1e1e1e;
 }
 
+.group-spatial-transform-fieldset {
+  gap: 7px;
+  padding: 7px;
+}
+
+.group-spatial-transform-row {
+  display: grid;
+  grid-template-columns: 42px repeat(3, minmax(0, 1fr));
+  align-items: center;
+  gap: 5px;
+}
+
+.group-spatial-transform-row > span {
+  color: #cfcfcf;
+  font-size: 12px;
+}
+
+.group-spatial-axis {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.group-spatial-axis > span {
+  color: #a9a9a9;
+  font-size: 11px;
+}
+
+.group-spatial-axis input {
+  min-width: 0;
+  width: 100%;
+  height: 24px;
+  padding: 0 4px;
+  border: 1px solid #555;
+  color: #d7d7d7;
+  background: #1e1e1e;
+  font-size: 12px;
+}
+
+.group-spatial-axis input:disabled {
+  color: #888;
+  background: #242424;
+}
+
 .inspector-row input[type="color"] {
   height: 28px;
   padding: 2px;
@@ -2342,8 +2388,7 @@ select {
 }
 
 .project-library .library-sync-status-heading strong,
-.project-library .library-sync-status-heading span,
-.project-library .library-sync-status p {
+.project-library .library-sync-status-heading span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2360,8 +2405,21 @@ select {
 }
 
 .project-library .library-sync-status p {
+  min-width: 0;
   margin: 0;
+  overflow-wrap: anywhere;
   color: #b9cfd2;
+  white-space: normal;
+}
+
+.project-library .library-sync-status-warning {
+  border-color: #80672f;
+  color: #fff0bd;
+  background: #332c1c;
+}
+
+.project-library .library-sync-status-warning .library-sync-status-heading strong {
+  color: #ffd978;
 }
 
 .project-library .library-sync-status-actions {

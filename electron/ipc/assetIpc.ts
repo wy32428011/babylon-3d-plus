@@ -163,7 +163,7 @@ export function registerAssetIpc(): void {
   ipcMain.handle('assets:importSkyboxFile', async (): Promise<ImportSkyboxFileResult> => {
     const projectRoot = await ensureCurrentProjectRootWithDialog();
     if (!projectRoot) {
-      return { canceled: true, filePath: null, projectRoot: null, importedAsset: null, skyboxes: [] };
+      return { canceled: true, filePath: null, projectRoot: null, importedAsset: null, skyboxes: [], orphanedSkyboxes: [] };
     }
 
     const result = await dialog.showOpenDialog({
@@ -173,7 +173,7 @@ export function registerAssetIpc(): void {
     });
     const [filePath] = result.filePaths;
     if (result.canceled || !filePath) {
-      return { canceled: true, filePath: null, projectRoot, importedAsset: null, skyboxes: [] };
+      return { canceled: true, filePath: null, projectRoot, importedAsset: null, skyboxes: [], orphanedSkyboxes: [] };
     }
 
     const extension = path.extname(filePath).toLowerCase();
@@ -181,13 +181,14 @@ export function registerAssetIpc(): void {
       throw new Error('天空盒仅支持直接导入 .hdr 或 .exr 文件。');
     }
 
-    const { importedAsset, skyboxes } = await importSkyboxFileIntoProject(filePath);
+    const { importedAsset, skyboxes, orphanedSkyboxes } = await importSkyboxFileIntoProject(filePath);
     return {
       canceled: false,
       filePath,
       projectRoot: getCurrentProjectRoot(),
       importedAsset,
       skyboxes,
+      orphanedSkyboxes,
     };
   });
 

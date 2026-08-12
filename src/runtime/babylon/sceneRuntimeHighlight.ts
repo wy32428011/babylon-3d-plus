@@ -1,7 +1,10 @@
-/** 合并编辑器选区和 Viewer 外部描边，保持输入集合不变且按首次出现顺序去重。 */
+/** 合并编辑器选区、Viewer 本地选区和外部临时描边，调用方输入保持只读。 */
 export function mergeSceneRuntimeHighlightEntityIds(
-  selectedEntityIds: ReadonlySet<string>,
-  externalHighlightedEntityIds: ReadonlySet<string>,
+  ...highlightSources: readonly ReadonlySet<string>[]
 ): Set<string> {
-  return new Set([...selectedEntityIds, ...externalHighlightedEntityIds]);
+  const merged = new Set<string>();
+  for (const source of highlightSources) {
+    for (const entityId of source) merged.add(entityId);
+  }
+  return merged;
 }

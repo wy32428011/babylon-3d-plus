@@ -20,6 +20,17 @@ import {
 import { stripCadReferencesFromSceneFile } from './sceneCadReferenceSanitizer.js';
 import { findSyncedImageForReference, isPlatformImageReference } from './dataPlatformImageSync.js';
 import { getCurrentDataPlatformBinding } from './dataPlatformBindingStore.js';
+import type { DataPlatformSkyboxIndexEntry } from './dataPlatformSkyboxIndex.js';
+import {
+  createDataPlatformSkyboxCacheError,
+  createDataPlatformSkyboxIntegrityLabel,
+  createDataPlatformSkyboxOrphanedWarning,
+  createDeploymentSkyboxValidationCache,
+  loadDeploymentSkyboxCacheContext,
+  resolveDeploymentSkyboxReference,
+  type DeploymentSkyboxCacheContext,
+  type DeploymentSkyboxValidationCache,
+} from './deploymentSkyboxCache.js';
 
 const EDITOR_ASSET_URL_PREFIX = 'editor-asset://local/';
 const MAX_SCENE_CONTENT_BYTES = 64 * 1024 * 1024;
@@ -68,6 +79,7 @@ type ResourceBundle = {
   explicitRelativePaths: Set<string>;
   gltfDependencyCache: Map<string, Promise<string[]>>;
   destinationRoot: string;
+  dataPlatformSkyboxEntry: DataPlatformSkyboxIndexEntry | null;
 };
 
 type MutableModelReference = {
@@ -108,7 +120,7 @@ type ResolvedCadReference = MutableCadReference & {
   bundle: ResourceBundle;
 };
 
-type ProjectAssetContext = {
+type ProjectAssetContext = DeploymentSkyboxCacheContext & {
   projectRoot: string;
   projectRootRealPath: string;
   assets: ProjectModelAssetEntry[];
@@ -127,6 +139,8 @@ export type PreparedDeploymentExport = {
 
 export type PrepareDeploymentExportOptions = {
   skipCadReferences?: boolean;
+  skyboxCacheContext?: DeploymentSkyboxCacheContext;
+  skyboxValidationCache?: DeploymentSkyboxValidationCache;
 };
 
 /** 资产清单的单条稳定记录。 */
@@ -157,7 +171,7 @@ export async function prepareDeploymentExport(
   }
   const scene = requirePlainObject(sceneFile.scene, '场景内容');
   const references = collectSceneReferences(scene);
-  const projectContext = await loadProjectAssetContext(signal, warnings);
+  const projectContext = await loadProjectAssetContext(signal, warnings, options.skyboxCacheContext);
   const bundles = new Map<string, ResourceBundle>();
 
   onStatus('正在解析模型、环境、天空盒、CAD 与脚本资源…');
@@ -172,8 +186,18 @@ export async function prepareDeploymentExport(
   }
 
   const resolvedSkyboxes: ResolvedSkyboxReference[] = [];
+  const warnedOrphanedSkyboxIds = new Set<string>();
+  const skyboxValidationCache = options.skyboxValidationCache ?? createDeploymentSkyboxValidationCache();
   for (const reference of references.skyboxes) {
-    resolvedSkyboxes.push(await resolveSkyboxReference(reference, projectContext, bundles, signal));
+    resolvedSkyboxes.push(await resolveSkyboxReference(
+      reference,
+      projectContext,
+      bundles,
+      signal,
+      warnings,
+      warnedOrphanedSkyboxIds,
+      skyboxValidationCache,
+    ));
   }
 
   const resolvedCadReferences: ResolvedCadReference[] = [];
@@ -333,8 +357,12 @@ function collectModelGeneratorTarget(value: unknown, packageOwner: PlainObject, 
   });
 }
 
-/** 加载当前项目资产索引；项目根失效时降级为外部资源解析并给出警告。 */
-async function loadProjectAssetContext(signal: AbortSignal, warnings: string[]): Promise<ProjectAssetContext | null> {
+/** 加载当前项目资产索引与独立天空盒缓存索引；损坏的天空盒索引必须阻止发布。 */
+async function loadProjectAssetContext(
+  signal: AbortSignal,
+  warnings: string[],
+  suppliedSkyboxCacheContext?: DeploymentSkyboxCacheContext,
+): Promise<ProjectAssetContext | null> {
   throwIfDeploymentExportAborted(signal);
   const projectRoot = getCurrentProjectRoot();
   if (!projectRoot) return null;
@@ -349,7 +377,15 @@ async function loadProjectAssetContext(signal: AbortSignal, warnings: string[]):
   const sharedResourcesRoot = binding && path.resolve(binding.projectRoot) === path.resolve(projectRoot)
     ? path.resolve(projectRoot, '..', '..', 'SharedResources')
     : null;
-  return { projectRoot: path.resolve(projectRoot), projectRootRealPath, assets: index.assets, sharedResourcesRoot };
+
+  const skyboxCacheContext = suppliedSkyboxCacheContext ?? await loadDeploymentSkyboxCacheContext(signal);
+  return {
+    projectRoot: path.resolve(projectRoot),
+    projectRootRealPath,
+    assets: index.assets,
+    sharedResourcesRoot,
+    ...skyboxCacheContext,
+  };
 }
 
 /** 判断文件路径是否为可执行 TypeScript 模型脚本，声明文件不进入部署包运行时。 */
@@ -480,14 +516,40 @@ async function resolveEnvironmentReference(
   };
 }
 
-/** 解析单个 HDR/EXR 天空盒，只复制明确资源文件并保留资源包目录语义。 */
+/** 解析单个 HDR/EXR 天空盒；带稳定资源 ID 时复用共享缓存校验契约。 */
 async function resolveSkyboxReference(
   reference: MutableSkyboxReference,
   projectContext: ProjectAssetContext | null,
   bundles: Map<string, ResourceBundle>,
   signal: AbortSignal,
+  warnings: string[],
+  warnedOrphanedSkyboxIds: Set<string>,
+  validationCache: DeploymentSkyboxValidationCache,
 ): Promise<ResolvedSkyboxReference> {
   throwIfDeploymentExportAborted(signal);
+  const indexed = await resolveDeploymentSkyboxReference(
+    reference.skybox,
+    projectContext,
+    validationCache,
+    signal,
+  );
+  if (indexed) {
+    const bundle = getOrCreateBundle(
+      bundles,
+      'skyboxes',
+      indexed.packageRoot,
+      false,
+      `project/assets/skyboxes/Skybox-${indexed.entry.resourceId}`,
+      indexed.entry,
+    );
+    addExplicitFileToBundle(bundle, indexed.sourcePath);
+    if (indexed.entry.status === 'orphaned' && !warnedOrphanedSkyboxIds.has(indexed.entry.resourceId)) {
+      warnedOrphanedSkyboxIds.add(indexed.entry.resourceId);
+      warnings.push(createDataPlatformSkyboxOrphanedWarning(indexed.entry));
+    }
+    return { ...reference, sourcePath: indexed.sourcePath, bundle };
+  }
+
   const sourcePath = resolveLocalAssetPath(reference.skybox.sourcePath, reference.skybox.sourceUrl, '天空盒资源');
   assertSkyboxFileExtension(sourcePath, reference.skybox.format);
   const packagePathHint = readOptionalLocalPath(reference.skybox.packagePath, '天空盒包路径');
@@ -601,12 +663,16 @@ function getOrCreateBundle(
   category: BundleCategory,
   sourceRoot: string,
   copyCompleteDirectory: boolean,
+  destinationRootHint?: string,
+  dataPlatformSkyboxEntry: DataPlatformSkyboxIndexEntry | null = null,
 ): ResourceBundle {
   const normalizedRoot = path.resolve(sourceRoot);
   const key = `${category}:${toLocalPathKey(normalizedRoot)}`;
   const existing = bundles.get(key);
   if (existing) {
     if (copyCompleteDirectory) existing.copyCompleteDirectory = true;
+    if (destinationRootHint) existing.destinationRoot = destinationRootHint;
+    if (dataPlatformSkyboxEntry) existing.dataPlatformSkyboxEntry = dataPlatformSkyboxEntry;
     return existing;
   }
 
@@ -619,7 +685,8 @@ function getOrCreateBundle(
     copyCompleteDirectory,
     explicitRelativePaths: new Set<string>(),
     gltfDependencyCache: new Map<string, Promise<string[]>>(),
-    destinationRoot: `project/assets/${category}/${baseName}-${hash}`,
+    destinationRoot: destinationRootHint ?? `project/assets/${category}/${baseName}-${hash}`,
+    dataPlatformSkyboxEntry,
   };
   bundles.set(key, bundle);
   return bundle;
@@ -650,12 +717,19 @@ async function createAssetCopyPlan(
   for (const [index, bundle] of bundles.entries()) {
     throwIfDeploymentExportAborted(signal);
     onStatus(`正在扫描资源包 ${index + 1}/${bundles.length}…`);
-    const files = await scanSafeSourceRoot(
-      bundle.sourceRoot,
-      bundle.copyCompleteDirectory ? null : bundle.explicitRelativePaths,
-      forbiddenOutputPaths,
-      signal,
-    );
+    let files: SafeSourceFile[];
+    try {
+      files = await scanSafeSourceRoot(
+        bundle.sourceRoot,
+        bundle.copyCompleteDirectory ? null : bundle.explicitRelativePaths,
+        forbiddenOutputPaths,
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+      if (bundle.dataPlatformSkyboxEntry) throw createDataPlatformSkyboxCacheError(bundle.dataPlatformSkyboxEntry, error);
+      throw error;
+    }
     auditDeploymentPackageFiles(bundle, files, warnings);
 
     for (const file of files) {
@@ -670,6 +744,11 @@ async function createAssetCopyPlan(
         destinationRelativePath,
         logicalUrl,
         kind: inferAssetKind(bundle.category, file.relativePath),
+        ...(bundle.dataPlatformSkyboxEntry ? {
+          expectedSize: bundle.dataPlatformSkyboxEntry.fileSizeBytes,
+          expectedSha256: bundle.dataPlatformSkyboxEntry.sha256,
+          integrityLabel: createDataPlatformSkyboxIntegrityLabel(bundle.dataPlatformSkyboxEntry),
+        } : {}),
       });
       sourceUrlMap.set(toLocalPathKey(file.sourcePath), logicalUrl);
       const lexicalSourcePath = path.resolve(bundle.sourceRoot, ...file.relativePath.split('/'));

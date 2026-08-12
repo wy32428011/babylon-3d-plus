@@ -133,6 +133,7 @@ type DataPlatformProjectOpenResult = {
   warning: string | null;
   conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
 };
 
@@ -231,6 +232,24 @@ type DataPlatformModelSyncProgress = {
   error: string | null;
 };
 
+type DataPlatformSkyboxSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+type DataPlatformSkyboxSyncProgress = {
+  runId: string;
+  contextKey: string | null;
+  phase: DataPlatformSkyboxSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
 type SyncedImageAssetEntry = {
   id: string;
   iconKey: string;
@@ -322,6 +341,11 @@ type ProjectSkyboxAssetEntry = {
   libraryKind: 'skybox';
   format: SkyboxAssetFormat;
   fileSizeBytes: number;
+  source: 'project' | 'data-platform';
+  availability: 'active' | 'orphaned';
+  dataPlatformResourceId?: string;
+  dataPlatformRevision?: string;
+  fileSha256?: string;
 };
 
 type ImportModelFolderRequest = {
@@ -356,6 +380,7 @@ type ImportSkyboxFileResult = {
   projectRoot: string | null;
   importedAsset: ProjectSkyboxAssetEntry | null;
   skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
 };
 
 type ModelPackageVariant = {
@@ -377,8 +402,10 @@ type ImportCadFileResult = {
 
 type ProjectListAssetsResult = {
   projectRoot: string | null;
+  skyboxSyncContextKey: string | null;
   assets: ProjectModelAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
 };
 
 type SelectProjectDirectoryResult = {
@@ -501,6 +528,9 @@ interface Window {
     syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
+    syncDataPlatformSkyboxes: () => Promise<boolean>;
+    retryDataPlatformSkyboxSync: () => Promise<boolean>;
+    onDataPlatformSkyboxSyncProgress: (handler: (progress: DataPlatformSkyboxSyncProgress) => void) => () => void;
     syncDataPlatformImages: () => Promise<boolean>;
     retryDataPlatformImageSync: () => Promise<boolean>;
     listSyncedImages: () => Promise<SyncedImageAssetEntry[]>;

@@ -131,6 +131,7 @@ export type DataPlatformProjectOpenResult = {
   warning: string | null;
   conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
 };
 
@@ -223,6 +224,24 @@ export type DataPlatformModelSyncPhase =
 export type DataPlatformModelSyncProgress = {
   runId: string;
   phase: DataPlatformModelSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+export type DataPlatformSkyboxSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+export type DataPlatformSkyboxSyncProgress = {
+  runId: string;
+  contextKey: string | null;
+  phase: DataPlatformSkyboxSyncPhase;
   completed: number;
   total: number;
   message: string;
@@ -346,6 +365,11 @@ export type ProjectSkyboxAssetEntry = {
   libraryKind: 'skybox';
   format: SkyboxAssetFormat;
   fileSizeBytes: number;
+  source: 'project' | 'data-platform';
+  availability: 'active' | 'orphaned';
+  dataPlatformResourceId?: string;
+  dataPlatformRevision?: string;
+  fileSha256?: string;
 };
 
 export type ModelPackageVariant = {
@@ -393,6 +417,7 @@ export type ImportSkyboxFileResult = {
   projectRoot: string | null;
   importedAsset: ProjectSkyboxAssetEntry | null;
   skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
 };
 
 export type ImportCadFileResult = {
@@ -409,8 +434,10 @@ export type ProjectAssetIndex = {
 
 export type ProjectListAssetsResult = {
   projectRoot: string | null;
+  skyboxSyncContextKey: string | null;
   assets: ProjectModelAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
 };
 
 export type SelectProjectDirectoryResult = {

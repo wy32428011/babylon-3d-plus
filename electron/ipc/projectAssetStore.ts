@@ -26,6 +26,11 @@ import {
   normalizeFilePath,
 } from './assetRegistry.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
+import {
+  listIndexedDataPlatformSkyboxes,
+  mergeSkyboxAssets,
+  type DataPlatformSkyboxAssetDiagnostic,
+} from './dataPlatformSkyboxIndex.js';
 import { importSkyboxFileIntoRoot, listSkyboxAssetsInRoot } from './skyboxAssetStore.js';
 
 const PROJECT_METADATA_DIRECTORY = '.babylon-editor';
@@ -42,6 +47,7 @@ const PROJECT_ASSET_INDEX_ERROR = '项目资产索引格式不正确。';
 
 let currentProjectRoot: string | null = null;
 let sharedProjectAssetRoot: string | null = null;
+let sharedProjectSkyboxRoot: string | null = null;
 let hasLoadedRecentProjectRoot = false;
 
 type PersistedRecentProjectEntry = {
@@ -481,11 +487,38 @@ export function setCurrentProjectRoot(projectRoot: string): void {
 /** 为当前业务工程挂载数据中台共享资源缓存；null 表示普通本地项目。 */
 export function setSharedProjectAssetRoot(projectRoot: string | null): void {
   sharedProjectAssetRoot = projectRoot ? normalizeFilePath(projectRoot) : null;
-  if (sharedProjectAssetRoot) authorizeProjectAssetRoots(sharedProjectAssetRoot);
+  if (sharedProjectAssetRoot) authorizeSharedProjectAssetRoots(sharedProjectAssetRoot);
 }
 
 export function getSharedProjectAssetRoot(): string | null {
   return sharedProjectAssetRoot;
+}
+
+/** 为当前业务工程挂载独立的数据中台共享天空盒缓存；null 表示使用项目本地天空盒。 */
+export function setSharedProjectSkyboxRoot(projectRoot: string | null): void {
+  sharedProjectSkyboxRoot = projectRoot ? normalizeFilePath(projectRoot) : null;
+}
+
+export function getSharedProjectSkyboxRoot(): string | null {
+  return sharedProjectSkyboxRoot;
+}
+
+export type ProjectAssetStoreStateSnapshot = {
+  currentProjectRoot: string | null;
+  sharedProjectAssetRoot: string | null;
+  sharedProjectSkyboxRoot: string | null;
+};
+
+export function getProjectAssetStoreStateSnapshot(): ProjectAssetStoreStateSnapshot {
+  return { currentProjectRoot, sharedProjectAssetRoot, sharedProjectSkyboxRoot };
+}
+
+export async function restoreProjectAssetStoreState(snapshot: ProjectAssetStoreStateSnapshot): Promise<void> {
+  currentProjectRoot = snapshot.currentProjectRoot;
+  setSharedProjectAssetRoot(snapshot.sharedProjectAssetRoot);
+  setSharedProjectSkyboxRoot(snapshot.sharedProjectSkyboxRoot);
+  if (snapshot.currentProjectRoot) await persistCurrentProjectRoot(snapshot.currentProjectRoot);
+  else await fs.rm(getRecentProjectFilePath(), { force: true });
 }
 
 /** 生成项目内模型包导入版本，用于同一路径被覆盖后通知 renderer 和运行时重载资源。 */
@@ -500,6 +533,16 @@ export async function getRecentWorkspaces(): Promise<RecentWorkspacesResult> {
     projects: await Promise.all(sortRecentEntries(index.projects).map(toRecentProjectEntry)),
     scenes: await Promise.all(sortRecentEntries(index.scenes).map(toRecentSceneEntry)),
   };
+}
+
+export type RecentWorkspaceStateSnapshot = RecentWorkspaceIndex;
+
+export async function getRecentWorkspaceStateSnapshot(): Promise<RecentWorkspaceStateSnapshot> {
+  return normalizeRecentWorkspaceIndex(await readRecentWorkspaceIndex());
+}
+
+export async function restoreRecentWorkspaceStateSnapshot(snapshot: RecentWorkspaceStateSnapshot): Promise<void> {
+  await writeRecentWorkspaceIndex(normalizeRecentWorkspaceIndex(snapshot));
 }
 
 export async function rememberRecentProjectRoot(projectRoot: string, lastScenePath?: string): Promise<void> {
@@ -543,6 +586,14 @@ export async function removeRecentWorkspaceItem(kind: 'project' | 'scene', itemP
   });
 }
 
+export async function commitRecentProjectActivation(projectRoot: string): Promise<void> {
+  const normalizedProjectRoot = normalizeFilePath(projectRoot);
+  await ensureProjectDirectories(normalizedProjectRoot);
+  authorizeProjectAssetRoots(normalizedProjectRoot);
+  await persistCurrentProjectRoot(normalizedProjectRoot);
+  setCurrentProjectRoot(normalizedProjectRoot);
+}
+
 export async function activateProjectRoot(
   projectRoot: string,
   lastScenePath?: string,
@@ -552,26 +603,45 @@ export async function activateProjectRoot(
     throw new Error('项目路径不存在或不是目录。');
   }
 
-  setCurrentProjectRoot(normalizedProjectRoot);
   await ensureProjectDirectories(normalizedProjectRoot);
   authorizeProjectAssetRoots(normalizedProjectRoot);
   await persistCurrentProjectRoot(normalizedProjectRoot);
   await rememberRecentProjectRoot(normalizedProjectRoot, lastScenePath);
-
+  setCurrentProjectRoot(normalizedProjectRoot);
   return listProjectAssets();
 }
 
-export async function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult> {
-  setSharedProjectAssetRoot(null);
+export async function validateRecentProjectRoot(projectRoot: string): Promise<string> {
   const normalizedProjectRoot = normalizeFilePath(projectRoot);
   const index = await readRecentWorkspaceIndex();
-  const isKnownRecentProject = index.projects.some((entry) => entry.projectRoot === normalizedProjectRoot);
-
-  if (!isKnownRecentProject) {
+  if (!index.projects.some((entry) => entry.projectRoot === normalizedProjectRoot)) {
     throw new Error('只能打开最近记录中的项目目录。');
   }
+  if (!(await isDirectoryPath(normalizedProjectRoot))) {
+    throw new Error('项目路径不存在或不是目录。');
+  }
+  return normalizedProjectRoot;
+}
 
-  return activateProjectRoot(normalizedProjectRoot);
+export async function openRecentProject(projectRoot: string): Promise<ProjectListAssetsResult> {
+  const normalizedProjectRoot = await validateRecentProjectRoot(projectRoot);
+  const snapshot = getProjectAssetStoreStateSnapshot();
+  const recentSnapshot = await getRecentWorkspaceStateSnapshot();
+  setSharedProjectAssetRoot(null);
+  setSharedProjectSkyboxRoot(null);
+  try {
+    await commitRecentProjectActivation(normalizedProjectRoot);
+    const result = await listProjectAssets();
+    await rememberRecentProjectRoot(normalizedProjectRoot);
+    return result;
+  } catch (error) {
+    try {
+      await restoreProjectAssetStoreState(snapshot);
+    } finally {
+      await restoreRecentWorkspaceStateSnapshot(recentSnapshot);
+    }
+    throw error;
+  }
 }
 
 export function getProjectModelsRoot(projectRoot: string): string {
@@ -603,6 +673,12 @@ function authorizeProjectAssetRoots(projectRoot: string): void {
   authorizeAssetRoot(getProjectModelsRoot(projectRoot));
   authorizeAssetRoot(getProjectEnvironmentsRoot(projectRoot));
   authorizeAssetRoot(getProjectSkyboxesRoot(projectRoot));
+  authorizeAssetRoot(getProjectImagesRoot(projectRoot));
+}
+
+function authorizeSharedProjectAssetRoots(projectRoot: string): void {
+  authorizeAssetRoot(getProjectModelsRoot(projectRoot));
+  authorizeAssetRoot(getProjectEnvironmentsRoot(projectRoot));
   authorizeAssetRoot(getProjectImagesRoot(projectRoot));
 }
 
@@ -734,12 +810,13 @@ export async function selectCurrentProjectRootWithDialog(): Promise<string | nul
   }
 
   const selectedProjectRoot = normalizeFilePath(projectRoot);
-  setSharedProjectAssetRoot(null);
-  setCurrentProjectRoot(selectedProjectRoot);
   await ensureProjectDirectories(selectedProjectRoot);
   authorizeProjectAssetRoots(selectedProjectRoot);
   await persistCurrentProjectRoot(selectedProjectRoot);
   await rememberRecentProjectRoot(selectedProjectRoot);
+  setSharedProjectAssetRoot(null);
+  setSharedProjectSkyboxRoot(null);
+  setCurrentProjectRoot(selectedProjectRoot);
 
   return selectedProjectRoot;
 }
@@ -748,7 +825,13 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   const projectRoot = await loadRecentProjectRoot();
 
   if (!projectRoot) {
-    return { projectRoot: null, assets: [], skyboxes: [] };
+    return {
+      projectRoot: null,
+      skyboxSyncContextKey: null,
+      assets: [],
+      skyboxes: [],
+      orphanedSkyboxes: [],
+    };
   }
 
   await ensureProjectDirectories(projectRoot);
@@ -758,7 +841,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   let assets = localIndex.assets;
   if (sharedProjectAssetRoot && normalizeFilePath(sharedProjectAssetRoot) !== normalizeFilePath(projectRoot)) {
     await ensureProjectDirectories(sharedProjectAssetRoot);
-    authorizeProjectAssetRoots(sharedProjectAssetRoot);
+    authorizeSharedProjectAssetRoots(sharedProjectAssetRoot);
     const sharedIndex = await readProjectAssetIndex(sharedProjectAssetRoot);
     assets = mergeProjectAssets(localIndex.assets, sharedIndex.assets);
   }
@@ -769,10 +852,30 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     for (const scriptAsset of asset.scriptAssets ?? []) authorizeAssetFile(scriptAsset.path);
   }
 
-  const skyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
-  for (const skybox of skyboxes) authorizeAssetFile(skybox.path);
+  const { skyboxes, orphanedSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
+  return { projectRoot, skyboxSyncContextKey: null, assets, skyboxes, orphanedSkyboxes };
+}
 
-  return { projectRoot, assets, skyboxes };
+async function loadProjectSkyboxAssets(
+  projectRoot: string,
+): Promise<Pick<ProjectListAssetsResult, 'skyboxes' | 'orphanedSkyboxes'>> {
+  const localSkyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
+  let skyboxes = localSkyboxes;
+  let orphanedSkyboxes: ProjectSkyboxAssetEntry[] = [];
+  if (sharedProjectSkyboxRoot) {
+    const indexed = await listIndexedDataPlatformSkyboxes(sharedProjectSkyboxRoot);
+    const mergeErrors: DataPlatformSkyboxAssetDiagnostic[] = [];
+    skyboxes = mergeSkyboxAssets(localSkyboxes, indexed.skyboxes, (error) => mergeErrors.push(error));
+    orphanedSkyboxes = indexed.orphanedSkyboxes;
+    reportDataPlatformSkyboxDiagnostics([...indexed.errors, ...mergeErrors]);
+  }
+
+  for (const skybox of [...skyboxes, ...orphanedSkyboxes]) authorizeAssetFile(skybox.path);
+  return { skyboxes, orphanedSkyboxes };
+}
+
+function reportDataPlatformSkyboxDiagnostics(errors: readonly DataPlatformSkyboxAssetDiagnostic[]): void {
+  for (const error of errors) console.warn(`[data-platform-skybox] ${error.message}`);
 }
 
 /** 共享缓存按稳定资源 ID 覆盖工程包内旧快照，普通本地资产仍完整保留。 */
@@ -797,18 +900,22 @@ function createProjectAssetMergeKey(asset: ProjectModelAssetEntry): string {
 /** 把用户选择的 HDR/EXR 导入项目天空盒库，并返回刷新后的资源快照。 */
 export async function importSkyboxFileIntoProject(
   sourceFilePath: string,
-): Promise<{ importedAsset: ProjectSkyboxAssetEntry; skyboxes: ProjectSkyboxAssetEntry[] }> {
+): Promise<{
+  importedAsset: ProjectSkyboxAssetEntry;
+  skyboxes: ProjectSkyboxAssetEntry[];
+  orphanedSkyboxes: ProjectSkyboxAssetEntry[];
+}> {
   const projectRoot = await loadRecentProjectRoot();
   if (!projectRoot) throw new Error('导入天空盒前需要先选择项目目录。');
 
   await ensureProjectDirectories(projectRoot);
   authorizeProjectAssetRoots(projectRoot);
-  const skyboxRoot = getProjectSkyboxesRoot(projectRoot);
-  const importedAsset = await importSkyboxFileIntoRoot(sourceFilePath, skyboxRoot);
-  authorizeAssetFile(importedAsset.path);
-  const skyboxes = await listSkyboxAssetsInRoot(skyboxRoot);
-  for (const skybox of skyboxes) authorizeAssetFile(skybox.path);
-  return { importedAsset, skyboxes };
+  const importedAsset = await importSkyboxFileIntoRoot(
+    sourceFilePath,
+    getProjectSkyboxesRoot(projectRoot),
+  );
+  const { skyboxes, orphanedSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
+  return { importedAsset, skyboxes, orphanedSkyboxes };
 }
 
 /**

@@ -60,6 +60,7 @@ import {
   getBuiltInMeshGroundOffsetMeters,
 } from '../../editor/model/builtInMeshGeometry';
 import type { Vector3Data } from '../../editor/model/math';
+import { createGroupSpatialInfo, type GroupSpatialInfoResult } from '../../editor/model/groupSpatialInfo';
 import { MODEL_ARRAY_COPY_COUNT_MAX, MODEL_ARRAY_MIN_SPAN_METERS } from '../../editor/model/modelArray';
 import {
   createModelAssetCode,
@@ -223,6 +224,7 @@ import type {
   StackerModelTelemetryState,
 } from './telemetry/specialized/types';
 import { mergeSceneRuntimeHighlightEntityIds } from './sceneRuntimeHighlight';
+import { isRuntimeModelSelectionCandidate } from './sceneRuntimeSelection';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
 const SELECTED_EMISSIVE_COLOR = '#332400';
@@ -536,6 +538,7 @@ export class SceneRuntime {
   private readonly entityStates = new Map<string, EntityRuntimeState>();
   private readonly syncedEntities = new Map<string, Entity>();
   private selectedEntityIds = new Set<string>();
+  private localHighlightedEntityIds = new Set<string>();
   private externalHighlightedEntityIds = new Set<string>();
   private hierarchySelectionIds: string[] | null = null;
   private readonly modelSelectionOutlineLayer: SelectionOutlineLayer;
@@ -959,6 +962,11 @@ export class SceneRuntime {
       this.autoPatrolMarkerRuntime.getRouteGizmoTarget(entityId) ??
       null
     );
+  }
+
+  /** 返回当前群组完整世界包围盒，供 Inspector 展示中心位置和包围尺寸。 */
+  getEntityGroupSpatialInfo(entityIds: readonly string[]): GroupSpatialInfoResult {
+    return createGroupSpatialInfo(entityIds, this.getEntitiesWorldBounds([...entityIds]));
   }
 
   /** 在完整选区世界包围盒中心创建或更新不可见变换代理；包围盒或当前工具目标未就绪时保持禁用。 */
@@ -1405,21 +1413,40 @@ export class SceneRuntime {
 
   /** 在画布客户端坐标位置拾取可编辑 Mesh，并把 thinInstanceIndex 还原为具体阵列实体 ID。 */
   pickEntityIdAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): string | null {
+    return this.pickSceneEntityIdAtCanvasPoint(clientX, clientY, canvas, 'editable');
+  }
+
+  /** 运行预览和发布 Viewer 只读拾取真实业务模型；locked 不影响查看，但隐藏和辅助对象仍被过滤。 */
+  pickRuntimeModelEntityIdAtCanvasPoint(
+    clientX: number,
+    clientY: number,
+    canvas: HTMLCanvasElement,
+  ): string | null {
+    return this.pickSceneEntityIdAtCanvasPoint(clientX, clientY, canvas, 'runtime-model');
+  }
+
+  /** 按编辑或运行态策略执行最近可见实体拾取，并统一处理 thinInstance 与模型显示范围兜底。 */
+  private pickSceneEntityIdAtCanvasPoint(
+    clientX: number,
+    clientY: number,
+    canvas: HTMLCanvasElement,
+    mode: 'editable' | 'runtime-model',
+  ): string | null {
     const point = this.getCanvasPickPoint(clientX, clientY, canvas);
     if (!point) return null;
+    const isCandidate = (entityId: string): boolean => mode === 'runtime-model'
+      ? this.isRuntimeModelSceneSelectable(entityId)
+      : this.isEntityScenePickable(entityId) && this.isEntityPickableFromActiveCamera(entityId);
 
     const picks = this.scene.multiPick(point.x, point.y, (mesh) => {
-      // Babylon 传入自定义 predicate 后会跳过默认的 enabled / visible / pickable 判断，
-      // 此处必须显式保留，否则参数脚本隐藏的源 Mesh 仍会形成不可见命中区域。
-      if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.isVisible || mesh.visibility <= 0 || !mesh.isPickable) {
-        return false;
-      }
+      // Babylon 传入自定义 predicate 后会跳过默认的 enabled / visible / pickable 判断。
+      // 运行态故意忽略 authoring lock 导致的 isPickable=false，但仍保留真实显隐约束。
+      if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.isVisible || mesh.visibility <= 0) return false;
       const batch = this.modelArrayBatchByMeshUniqueId.get(mesh.uniqueId);
-      if (batch) return batch.hasPickableEntities();
+      if (batch) return mode === 'runtime-model' || (mesh.isPickable && batch.hasPickableEntities());
+      if (mode === 'editable' && !mesh.isPickable) return false;
       const entityId = this.readEntityIdFromMesh(mesh);
-      return entityId !== null
-        && this.isEntityScenePickable(entityId)
-        && this.isEntityPickableFromActiveCamera(entityId);
+      return entityId !== null && isCandidate(entityId);
     }) ?? [];
     picks.sort((left, right) => left.distance - right.distance);
 
@@ -1428,11 +1455,7 @@ export class SceneRuntime {
         picked.pickedMesh ?? null,
         typeof picked.thinInstanceIndex === 'number' ? picked.thinInstanceIndex : null,
       );
-      if (
-        entityId
-        && this.isEntityScenePickable(entityId)
-        && this.isEntityPickableFromActiveCamera(entityId)
-      ) return entityId;
+      if (entityId && isCandidate(entityId)) return entityId;
     }
 
     const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
@@ -1444,7 +1467,7 @@ export class SceneRuntime {
     // 精确三角面完全未命中时，才用模型当前显示范围填补细杆/梁之间的空隙；
     // 真实可见几何仍保持优先，避免前方货架抢走透过空格看到的后方模型。
     for (const [entityId, model] of this.models) {
-      if (model.modelArrayBatch || !this.isEntityScenePickable(entityId)) continue;
+      if (model.modelArrayBatch || !isCandidate(entityId)) continue;
       const distance = intersectWorldRayWithModelDisplayBounds(ray, model.root, model.contentRoot);
       if (distance === null || distance >= nearestDistance) continue;
       nearestEntityId = entityId;
@@ -1453,7 +1476,6 @@ export class SceneRuntime {
 
     return nearestEntityId;
   }
-
   /** 将画布客户端坐标投射到世界 y=0 地面平面，用于拖拽释放时按鼠标位置放置模型。 */
   getGroundPointAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): Vector3Data | null {
     const point = this.getCanvasPickPoint(clientX, clientY, canvas);
@@ -1759,31 +1781,52 @@ export class SceneRuntime {
     };
   }
 
+  /** 设置发布 Viewer 的本地持久选区，不影响编辑器权威选区和外部定位高亮。 */
+  setLocalHighlightEntityIds(entityIds: readonly string[]): void {
+    this.setTransientHighlightEntityIds('local', entityIds);
+  }
+
+  /** 清除发布 Viewer 的本地持久选区。 */
+  clearLocalHighlight(): void {
+    this.setLocalHighlightEntityIds([]);
+  }
+
   /** 设置不影响编辑器选区的外部临时描边。 */
   setExternalHighlightEntityIds(entityIds: readonly string[]): void {
+    this.setTransientHighlightEntityIds('external', entityIds);
+  }
+
+  /** 清除外部临时描边，同时保留编辑器和 Viewer 本地选区。 */
+  clearExternalHighlight(): void {
+    this.setExternalHighlightEntityIds([]);
+  }
+
+  /** 差量替换指定临时高亮来源，并只刷新前后变化实体的表现。 */
+  private setTransientHighlightEntityIds(
+    source: 'local' | 'external',
+    entityIds: readonly string[],
+  ): void {
+    const currentEntityIds = source === 'local'
+      ? this.localHighlightedEntityIds
+      : this.externalHighlightedEntityIds;
     const nextEntityIds = new Set(entityIds.filter((entityId) => typeof entityId === 'string' && entityId.length > 0));
     const changedEntityIds = new Set<string>();
-    for (const entityId of this.externalHighlightedEntityIds) {
+    for (const entityId of currentEntityIds) {
       if (!nextEntityIds.has(entityId)) changedEntityIds.add(entityId);
     }
     for (const entityId of nextEntityIds) {
-      if (!this.externalHighlightedEntityIds.has(entityId)) changedEntityIds.add(entityId);
+      if (!currentEntityIds.has(entityId)) changedEntityIds.add(entityId);
     }
     if (changedEntityIds.size === 0) return;
 
-    this.externalHighlightedEntityIds = nextEntityIds;
+    if (source === 'local') this.localHighlightedEntityIds = nextEntityIds;
+    else this.externalHighlightedEntityIds = nextEntityIds;
     for (const entityId of changedEntityIds) {
       const entity = this.syncedEntities.get(entityId);
       if (entity) this.syncEntityPresentation(entity, this.isEntityHighlighted(entityId));
     }
     this.rebuildModelSelectionOutline();
   }
-
-  /** 清除外部临时描边，同时保留编辑器自身选区。 */
-  clearExternalHighlight(): void {
-    this.setExternalHighlightEntityIds([]);
-  }
-
   /** 判断实体的真实几何是否已就绪，避免模型加载或外置脚本初始化中的临时包围盒参与正式阵列。 */
   private isEntityWorldBoundsReady(entityId: string): boolean {
     const model = this.models.get(entityId);
@@ -2184,7 +2227,11 @@ export class SceneRuntime {
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument): void {
     const previousEntityStates = new Map(this.entityStates);
-    const previousSelectedEntityIds = this.selectedEntityIds;
+    const previousHighlightedEntityIds = mergeSceneRuntimeHighlightEntityIds(
+      this.selectedEntityIds,
+      this.localHighlightedEntityIds,
+      this.externalHighlightedEntityIds,
+    );
     const dirtyModelArraySourceIds = new Set<string>();
 
     this.entityStates.clear();
@@ -2280,6 +2327,9 @@ export class SceneRuntime {
     for (const entityId of [...this.syncedEntities.keys()]) {
       if (!document.entities[entityId]) this.syncedEntities.delete(entityId);
     }
+    for (const entityId of this.localHighlightedEntityIds) {
+      if (!document.entities[entityId]) this.localHighlightedEntityIds.delete(entityId);
+    }
     for (const entityId of this.externalHighlightedEntityIds) {
       if (!document.entities[entityId]) this.externalHighlightedEntityIds.delete(entityId);
     }
@@ -2296,7 +2346,7 @@ export class SceneRuntime {
       const nextState = this.entityStates.get(entityId);
       const entityChanged = previousEntity !== entity;
       const runtimeStateChanged = !this.areEntityRuntimeStatesEqual(previousState, nextState);
-      const presentationChanged = previousSelectedEntityIds.has(entityId) !== selected || runtimeStateChanged;
+      const presentationChanged = previousHighlightedEntityIds.has(entityId) !== selected || runtimeStateChanged;
       if (entityChanged || runtimeStateChanged) {
         const previousSourceId = previousEntity?.components.modelArrayInstance?.sourceEntityId;
         const nextSourceId = entity.components.modelArrayInstance?.sourceEntityId;
@@ -2626,6 +2676,7 @@ export class SceneRuntime {
     this.entityStates.clear();
     this.syncedEntities.clear();
     this.selectedEntityIds.clear();
+    this.localHighlightedEntityIds.clear();
     this.externalHighlightedEntityIds.clear();
     this.reportedCargoIssues.clear();
     this.outlinedModelArrayBatches.clear();
@@ -2813,9 +2864,10 @@ export class SceneRuntime {
     entityId: string,
     selectedEntityIds: ReadonlySet<string> = this.selectedEntityIds,
   ): boolean {
-    return selectedEntityIds.has(entityId) || this.externalHighlightedEntityIds.has(entityId);
+    return selectedEntityIds.has(entityId)
+      || this.localHighlightedEntityIds.has(entityId)
+      || this.externalHighlightedEntityIds.has(entityId);
   }
-
   /** 将普通实体和文件夹多选统一展开为全部需要高亮的运行时实体。 */
   private resolveSelectedEntityIds(document: SceneDocument): Set<string> {
     const selectionIds = this.hierarchySelectionIds
@@ -4547,6 +4599,14 @@ export class SceneRuntime {
     // 内置货格绑定期间位置由货架驱动，场景内点击穿透到货架。
     if (this.syncedEntities.get(entityId)?.components.locator?.builtInBinding) return false;
     return true;
+  }
+
+  /** 运行预览和发布 Viewer 的只读选择只要求模型可见，不继承 authoring lock。 */
+  private isRuntimeModelSceneSelectable(entityId: string): boolean {
+    return isRuntimeModelSelectionCandidate(
+      this.syncedEntities.get(entityId),
+      this.entityStates.get(entityId),
+    );
   }
 
   /** 判断实体是否允许绑定 Transform Gizmo。 */
@@ -6424,6 +6484,7 @@ export class SceneRuntime {
     const selectedArrayEntityIdsByBatch = new Map<EntityArrayThinInstanceBatch, Set<string>>();
     const highlightedEntityIds = mergeSceneRuntimeHighlightEntityIds(
       this.selectedEntityIds,
+      this.localHighlightedEntityIds,
       this.externalHighlightedEntityIds,
     );
 

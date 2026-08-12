@@ -13,6 +13,7 @@ import {
   type DeploymentCopyFile,
 } from './deploymentExportFileSystem.js';
 import { createAssetManifestContent, prepareDeploymentExport } from './deploymentExportScene.js';
+import type { DeploymentSkyboxCacheContext, DeploymentSkyboxValidationCache } from './deploymentSkyboxCache.js';
 
 const COPY_CONCURRENCY = 4;
 const MAX_DIST_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -29,6 +30,8 @@ export type BuildDigitalTwinDistPackageOptions = {
   sceneContent: string;
   outputRoot: string;
   signal: AbortSignal;
+  skyboxCacheContext?: DeploymentSkyboxCacheContext;
+  skyboxValidationCache?: DeploymentSkyboxValidationCache;
   onProgress?: (detail: string, percent: number) => void;
 };
 
@@ -64,7 +67,11 @@ export async function buildDigitalTwinDistPackage(
       [stagingRoot, archivePath],
       options.signal,
       (detail) => options.onProgress?.(detail, 8),
-      { skipCadReferences: true },
+      {
+        skipCadReferences: true,
+        skyboxCacheContext: options.skyboxCacheContext,
+        skyboxValidationCache: options.skyboxValidationCache,
+      },
     );
     assertNoCopyPlanCollisions(templateFiles, prepared.assetFiles);
 

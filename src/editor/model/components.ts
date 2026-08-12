@@ -26,6 +26,7 @@ export type SkyboxComponent = {
   sourcePath: string;
   sourceUrl: string;
   assetRevision?: string;
+  dataPlatformResourceId?: string;
   format: SkyboxFormat;
   intensity: number;
   resolution: SkyboxResolution;

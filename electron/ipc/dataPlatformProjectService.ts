@@ -1,10 +1,11 @@
 import { app } from 'electron';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
+  DataPlatformSkyboxSyncProgress,
   SyncedImageAssetEntry,
   DataPlatformProjectEntry,
   DataPlatformProjectOpenResult,
@@ -20,6 +21,7 @@ import {
   getProjectModelsRoot,
   rememberRecentSceneFile,
   setSharedProjectAssetRoot,
+  setSharedProjectSkyboxRoot,
   writeProjectAssetIndex,
 } from './projectAssetStore.js';
 import { scanModelPackage } from './modelPackageScanner.js';
@@ -48,6 +50,13 @@ import {
   startDataPlatformImageSync,
 } from './dataPlatformImageSync.js';
 import {
+  clearDataPlatformSkyboxSyncRetryContext,
+  disposeDataPlatformSkyboxSync,
+  getLatestDataPlatformSkyboxSyncProgress,
+  retryDataPlatformSkyboxSync,
+  startDataPlatformSkyboxSync,
+} from './dataPlatformSkyboxSync.js';
+import {
   assertPathInside,
   DataPlatformRollbackError,
   downloadRemoteFile,
@@ -70,6 +79,19 @@ const MAX_PROJECT_SCENE_FILES = 1_000;
 let dataPlatformProjectServiceShuttingDown = false;
 const openTaskControllers = new Set<AbortController>();
 const openTasks = new Set<Promise<unknown>>();
+
+type SkyboxSyncPrepareContext = {
+  generation: number;
+  baseUrl: string;
+  workspaceRoot: string;
+  sharedResourcesRoot: string;
+  syncContextKey: string | null;
+};
+
+let skyboxSyncPrepareGeneration = 0;
+let currentSkyboxSyncPrepareContext: SkyboxSyncPrepareContext | null = null;
+const skyboxSyncPrepareControllers = new Set<AbortController>();
+const skyboxSyncPrepareTasks = new Set<Promise<boolean>>();
 
 type PackageDetection =
   | {
@@ -146,6 +168,75 @@ export async function syncDataPlatformModelsForWorkspace(
   return startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
 }
 
+/** 使所有在途天空盒 prepare 失效；调用方无需等待，dispose 会统一回收任务。 */
+export function invalidateDataPlatformSkyboxSyncPrepareContext(): void {
+  skyboxSyncPrepareGeneration += 1;
+  currentSkyboxSyncPrepareContext = null;
+  for (const controller of skyboxSyncPrepareControllers) controller.abort();
+}
+
+function isCurrentSkyboxSyncPrepare(context: SkyboxSyncPrepareContext, signal: AbortSignal): boolean {
+  return !dataPlatformProjectServiceShuttingDown
+    && !signal.aborted
+    && currentSkyboxSyncPrepareContext === context
+    && context.generation === skyboxSyncPrepareGeneration;
+}
+
+async function prepareDataPlatformSkyboxSync(
+  context: SkyboxSyncPrepareContext,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
+  await ensureWritableEditorRoot(context.sharedResourcesRoot);
+  if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
+  await ensureProjectDirectories(context.sharedResourcesRoot);
+  if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
+  setSharedProjectSkyboxRoot(context.sharedResourcesRoot);
+  if (!isCurrentSkyboxSyncPrepare(context, signal)) return false;
+  return startDataPlatformSkyboxSync(
+    context.baseUrl,
+    context.sharedResourcesRoot,
+    context.syncContextKey,
+  );
+}
+
+/** 手动同步始终写入工作区共享天空盒缓存，不创建或切换业务项目 binding。 */
+export function syncDataPlatformSkyboxesForWorkspace(
+  baseUrl: string,
+  workspaceRoot: string,
+): Promise<boolean> {
+  if (dataPlatformProjectServiceShuttingDown) return Promise.resolve(false);
+  invalidateDataPlatformSkyboxSyncPrepareContext();
+  if (dataPlatformProjectServiceShuttingDown) return Promise.resolve(false);
+
+  const controller = new AbortController();
+  const binding = getCurrentDataPlatformBinding();
+  const context: SkyboxSyncPrepareContext = {
+    generation: skyboxSyncPrepareGeneration,
+    baseUrl,
+    workspaceRoot,
+    sharedResourcesRoot: resolveDataPlatformSharedResourcesRoot(workspaceRoot),
+    syncContextKey: binding
+      ? createDataPlatformSkyboxSyncContextKey(
+        binding.metadata.baseUrl,
+        binding.metadata.projectId,
+        binding.projectRoot,
+      )
+      : null,
+  };
+  currentSkyboxSyncPrepareContext = context;
+  skyboxSyncPrepareControllers.add(controller);
+  const task = prepareDataPlatformSkyboxSync(context, controller.signal);
+  skyboxSyncPrepareTasks.add(task);
+  const cleanup = (): void => {
+    skyboxSyncPrepareControllers.delete(controller);
+    skyboxSyncPrepareTasks.delete(task);
+    if (currentSkyboxSyncPrepareContext === context) currentSkyboxSyncPrepareContext = null;
+  };
+  void task.then(cleanup, cleanup);
+  return task;
+}
+
 /** 本地场景或业务工程打开后启动数据中台图标图片同步，与模型同步共用同一资源根判定。 */
 export async function syncDataPlatformImagesForWorkspace(
   baseUrl: string,
@@ -164,6 +255,48 @@ export async function syncDataPlatformImagesForWorkspace(
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
   return startDataPlatformImageSync(baseUrl, sharedResourcesRoot);
+}
+
+/** 根据数据中台地址和项目 ID 生成不暴露地址的稳定同步业务 key。 */
+export function createDataPlatformSkyboxSyncContextKey(
+  baseUrl: string,
+  projectId: string,
+  projectRoot: string,
+): string {
+  const normalizedBaseUrl = new URL(baseUrl).toString().replace(/\/$/, '');
+  const normalizedProjectId = projectId.trim();
+  if (!/^[1-9]\d{0,63}$/.test(normalizedProjectId)) {
+    throw new Error('数据中台项目 ID 无效，无法创建天空盒同步 contextKey。');
+  }
+  const absoluteProjectRoot = path.resolve(projectRoot);
+  const normalizedProjectRoot = process.platform === 'win32'
+    ? absoluteProjectRoot.toLowerCase()
+    : absoluteProjectRoot;
+  return createHash('sha256')
+    .update(`${normalizedBaseUrl}\n${normalizedProjectId}\n${normalizedProjectRoot}`, 'utf8')
+    .digest('hex');
+}
+
+/** 当前项目用于隔离天空盒同步进度的安全业务 key。 */
+export function getCurrentDataPlatformSkyboxSyncContextKey(): string | null {
+  const binding = getCurrentDataPlatformBinding();
+  return binding
+    ? createDataPlatformSkyboxSyncContextKey(
+      binding.metadata.baseUrl,
+      binding.metadata.projectId,
+      binding.projectRoot,
+    )
+    : null;
+}
+
+/** 重试最近一次数据中台天空盒同步。 */
+export function retryLatestDataPlatformSkyboxSync(): boolean {
+  return retryDataPlatformSkyboxSync();
+}
+
+/** 暴露最近天空盒同步进度给晚挂载的 renderer。 */
+export function getCurrentDataPlatformSkyboxSyncProgress(): DataPlatformSkyboxSyncProgress | null {
+  return getLatestDataPlatformSkyboxSyncProgress();
 }
 
 /** 重试最近一次数据中台图片同步。 */
@@ -201,15 +334,20 @@ export function getCurrentDataPlatformModelSyncProgress(): DataPlatformModelSync
 export function clearDataPlatformProjectServiceRetryContext(): void {
   clearDataPlatformModelSyncRetryContext();
   clearDataPlatformImageSyncRetryContext();
+  clearDataPlatformSkyboxSyncRetryContext();
+  invalidateDataPlatformSkyboxSyncPrepareContext();
 }
 
-/** 应用退出时取消并等待工程打开与模型同步任务。 */
+/** 应用退出时取消并等待工程打开与全部共享资源同步任务。 */
 export async function disposeDataPlatformProjectTasks(): Promise<void> {
   dataPlatformProjectServiceShuttingDown = true;
+  invalidateDataPlatformSkyboxSyncPrepareContext();
   for (const controller of openTaskControllers) controller.abort();
   await Promise.allSettled([...openTasks]);
+  await Promise.allSettled([...skyboxSyncPrepareTasks]);
   await disposeDataPlatformModelSync();
   await disposeDataPlatformImageSync();
+  await disposeDataPlatformSkyboxSync();
 }
 
 async function openDataPlatformProjectInternal(
@@ -318,8 +456,15 @@ async function openDataPlatformProjectInternal(
   });
   await writeDataPlatformBinding(projectRoot, binding);
   setCurrentDataPlatformBinding(projectRoot, binding);
+  invalidateDataPlatformSkyboxSyncPrepareContext();
+  setSharedProjectSkyboxRoot(sharedResourcesRoot);
 
   const modelSyncStarted = startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
+  const skyboxSyncStarted = startDataPlatformSkyboxSync(
+    baseUrl,
+    sharedResourcesRoot,
+    createDataPlatformSkyboxSyncContextKey(baseUrl, project.id, projectRoot),
+  );
   return {
     projectRoot,
     sceneFilePath,
@@ -327,6 +472,7 @@ async function openDataPlatformProjectInternal(
     warning,
     conflictCopyPath,
     modelSyncStarted,
+    skyboxSyncStarted,
     binding,
   };
 }

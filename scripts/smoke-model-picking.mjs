@@ -66,7 +66,7 @@ function toCanvasPoint(x, y) {
 }
 
 /** 注册只包含拾取所需字段的导入模型运行时。 */
-function registerModel(runtime, entityId, root, contentRoot, meshes) {
+function registerModel(runtime, entityId, root, contentRoot, meshes, state = { visible: true, locked: false }) {
   runtime.models.set(entityId, {
     entitySnapshot: { id: entityId },
     root,
@@ -75,7 +75,24 @@ function registerModel(runtime, entityId, root, contentRoot, meshes) {
     modelArrayBatch: null,
     highlighted: false,
   });
-  runtime.entityStates.set(entityId, { visible: true, locked: false });
+  runtime.entityStates.set(entityId, state);
+  runtime.syncedEntities.set(entityId, {
+    id: entityId,
+    name: entityId,
+    isFolder: false,
+    parentId: null,
+    childrenIds: [],
+    visible: true,
+    locked: state.locked,
+    components: {
+      transform: {
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      modelAsset: {},
+    },
+  });
 }
 
 /** 让场景 Mesh 具备编辑器模型实体元数据。 */
@@ -229,6 +246,42 @@ function verifyRotatedModelBounds(SceneRuntime) {
   }
 }
 
+/** 运行态只读拾取允许 locked 模型，同时普通编辑拾取继续遵守 authoring lock。 */
+function verifyRuntimeLockedModelPicking(SceneRuntime) {
+  const fixture = createRuntimeFixture(SceneRuntime, 'runtime-locked-model');
+  try {
+    const root = new TransformNode('runtime-locked-root', fixture.scene);
+    const contentRoot = new TransformNode('runtime-locked-content', fixture.scene);
+    contentRoot.parent = root;
+    const box = MeshBuilder.CreateBox('runtime-locked-box', { size: 2 }, fixture.scene);
+    box.parent = contentRoot;
+    markEntityMeshes([box], 'runtime-locked-model');
+    box.isPickable = false;
+    registerModel(
+      fixture.runtime,
+      'runtime-locked-model',
+      root,
+      contentRoot,
+      [box],
+      { visible: true, locked: true },
+    );
+    fixture.scene.render();
+
+    const center = toCanvasPoint(0, 0);
+    assert.equal(
+      fixture.runtime.pickEntityIdAtCanvasPoint(center.x, center.y, fixture.canvas),
+      null,
+      '普通编辑拾取必须继续拒绝 locked 模型',
+    );
+    assert.equal(
+      fixture.runtime.pickRuntimeModelEntityIdAtCanvasPoint(center.x, center.y, fixture.canvas),
+      'runtime-locked-model',
+      '运行预览与 Viewer 的只读拾取必须允许 locked 模型',
+    );
+  } finally {
+    disposeFixture(fixture);
+  }
+}
 /** 真实可见几何命中优先，前方货架扩展范围不能抢走后方模型。 */
 function verifyExactGeometryPriority(SceneRuntime) {
   const fixture = createRuntimeFixture(SceneRuntime, 'exact-priority');
@@ -284,6 +337,7 @@ try {
   verifyShelfLayerColumnPicking(SceneRuntime);
   verifyMultiwearingGeneratedPicking(SceneRuntime);
   verifyRotatedModelBounds(SceneRuntime);
+  verifyRuntimeLockedModelPicking(SceneRuntime);
   verifyExactGeometryPriority(SceneRuntime);
 
   console.log('模型拾取范围 smoke 通过');

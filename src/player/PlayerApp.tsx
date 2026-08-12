@@ -3,8 +3,10 @@ import { deserializeScene } from '../editor/project/SceneSerializer';
 import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '../runtime/assets/editorAssetUrl';
 import { createBabylonViewport, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
+import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../runtime/babylon/cameraControlStandard';
 import { SceneRuntime } from '../runtime/babylon/SceneRuntime';
 import { buildDigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
+import { bindSceneModelSelectionPointer } from '../shared/sceneModelSelectionPointer';
 import {
   AutoPatrolPlaybackController,
   collectAutoPatrolPlaybackRoutes,
@@ -143,6 +145,7 @@ export function PlayerApp() {
     let interactionController: DigitalTwinInteractionController | null = null;
     let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
     let removeAutoPatrolManualInputListeners: (() => void) | null = null;
+    let removeModelSelectionListeners: (() => void) | null = null;
     let mqttClient: MqttStackerTelemetryClient | null = null;
     let resize: (() => void) | null = null;
 
@@ -268,14 +271,28 @@ export function PlayerApp() {
         autoPatrolPlaybackRef.current = autoPatrolPlayback;
         setAutoPatrolRoutes(patrolRoutes);
 
+        const notifyManualInput = (): void => {
+          interactionController?.notifyManualCameraInput();
+          autoPatrolPlayback?.notifyManualInput();
+          autoPatrolPlayback?.notifyCameraChangedWhilePaused();
+        };
+        removeModelSelectionListeners = bindSceneModelSelectionPointer(canvas, {
+          clickTolerancePx: DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx,
+          onSelectionClick: ({ clientX, clientY }) => {
+            if (disposed || !runtime) return;
+            const entityId = runtime.pickRuntimeModelEntityIdAtCanvasPoint(clientX, clientY, canvas);
+            runtime.setLocalHighlightEntityIds(entityId ? [entityId] : []);
+          },
+          onDragStarted: () => {
+            if (parsedConfig.viewer.allowCameraControl) notifyManualInput();
+          },
+        });
+
         if (parsedConfig.viewer.allowCameraControl) {
-          const notifyManualInput = (): void => {
-            interactionController?.notifyManualCameraInput();
-            autoPatrolPlayback?.notifyManualInput();
-            autoPatrolPlayback?.notifyCameraChangedWhilePaused();
-          };
           const handlePointerMove = (event: globalThis.PointerEvent): void => {
-            if (event.buttons !== 0) notifyManualInput();
+            const secondaryOrAdditionalPointerDrag = event.buttons !== 0
+              && ((event.buttons & 1) === 0 || !event.isPrimary);
+            if (secondaryOrAdditionalPointerDrag) notifyManualInput();
           };
           const handleWheel = (): void => notifyManualInput();
           const handleKeyDown = (event: KeyboardEvent): void => {
@@ -328,6 +345,7 @@ export function PlayerApp() {
         interactionController?.dispose();
         interactionController = null;
         mqttClient?.dispose();
+        removeModelSelectionListeners?.();
         removeAutoPatrolManualInputListeners?.();
         unsubscribeAutoPatrolSnapshot?.();
         autoPatrolPlayback?.dispose();
@@ -346,6 +364,7 @@ export function PlayerApp() {
       interactionController?.dispose();
       interactionController = null;
       mqttClient?.dispose();
+      removeModelSelectionListeners?.();
       removeAutoPatrolManualInputListeners?.();
       unsubscribeAutoPatrolSnapshot?.();
       autoPatrolPlayback?.dispose();

@@ -30,6 +30,12 @@ export type DeploymentCopyFile = SafeSourceFile & {
   destinationRelativePath: string;
   kind: DeploymentAssetKind;
   logicalUrl?: string;
+  /** 预检绑定的最终复制大小；存在时复制阶段必须再次匹配。 */
+  expectedSize?: number;
+  /** 预检绑定的最终复制 SHA-256；存在时复制阶段必须再次匹配。 */
+  expectedSha256?: string;
+  /** 完整性错误使用的安全资源上下文，不得包含本机绝对路径。 */
+  integrityLabel?: string;
 };
 
 /** 单个已复制文件的哈希结果。 */
@@ -300,6 +306,12 @@ export async function copyDeploymentFiles(
     if (destinationKeys.has(destinationKey)) {
       throw new Error(`导出目标文件冲突：${file.destinationRelativePath}`);
     }
+    if (file.expectedSize !== undefined && (!Number.isSafeInteger(file.expectedSize) || file.expectedSize < 0)) {
+      throw new Error('导出资源 expectedSize 格式不正确。');
+    }
+    if (file.expectedSha256 !== undefined && !/^[0-9a-f]{64}$/.test(file.expectedSha256)) {
+      throw new Error('导出资源 expectedSha256 格式不正确。');
+    }
     destinationKeys.add(destinationKey);
   }
 
@@ -397,12 +409,22 @@ async function copySingleFileWithHash(
     throw error;
   }
 
+  const actualSha256 = hash.digest('hex');
+  const integrityLabel = file.integrityLabel ?? `资源文件 ${file.relativePath}`;
   if (copiedBytes !== file.size) {
     await fs.rm(destinationPath, { force: true }).catch(() => undefined);
-    throw new Error(`资源文件复制字节数不一致：${file.relativePath}`);
+    throw new Error(`${integrityLabel}最终复制字节数与预检快照不一致。`);
+  }
+  if (file.expectedSize !== undefined && copiedBytes !== file.expectedSize) {
+    await fs.rm(destinationPath, { force: true }).catch(() => undefined);
+    throw new Error(`${integrityLabel}最终复制大小与预期不一致。`);
+  }
+  if (file.expectedSha256 !== undefined && actualSha256 !== file.expectedSha256) {
+    await fs.rm(destinationPath, { force: true }).catch(() => undefined);
+    throw new Error(`${integrityLabel}最终复制 SHA-256 与预期不一致。`);
   }
 
-  return { ...file, sha256: hash.digest('hex') };
+  return { ...file, sha256: actualSha256 };
 }
 
 /** 累加文件字节数，并在超过 JavaScript 安全整数时立即失败。 */

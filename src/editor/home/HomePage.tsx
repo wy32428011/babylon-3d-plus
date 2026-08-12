@@ -22,6 +22,7 @@ type DataPlatformProjectOpenResult = {
   warning: string | null;
   conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
 };
 
@@ -415,16 +416,21 @@ export function HomePage({
 
     try {
       const result = await requestOpenDataPlatformProject(project.id);
+      const sharedResourceSyncStarted = result.modelSyncStarted || result.skyboxSyncStarted;
       if (result.warning) {
-        setStatus({ kind: 'info', message: `数据中台项目已准备：${result.warning}` });
+        const syncNotice = sharedResourceSyncStarted ? '；共享资源同步已开始。' : '';
+        setStatus({ kind: 'info', message: `数据中台项目已准备：${result.warning}${syncNotice}` });
         useEditorStore.getState().pushLog(`数据中台项目提示：${result.warning}`);
-      } else if (result.modelSyncStarted) {
-        setStatus({ kind: 'info', message: '数据中台项目已打开，模型同步已开始。' });
+      } else if (sharedResourceSyncStarted) {
+        setStatus({ kind: 'info', message: '数据中台项目已打开，共享资源同步已开始。' });
       } else {
         setStatus({ kind: 'info', message: '数据中台项目已准备完成。' });
       }
       if (result.modelSyncStarted) {
         useEditorStore.getState().pushLog('数据中台全局模型同步已在后台启动。');
+      }
+      if (result.skyboxSyncStarted) {
+        useEditorStore.getState().pushLog('数据中台全局天空盒同步已在后台启动。');
       }
 
       if (result.sceneFilePath) {
