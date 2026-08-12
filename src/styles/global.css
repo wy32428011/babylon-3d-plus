@@ -359,6 +359,55 @@ select {
   color: #777777;
 }
 
+.mqtt-connection-test-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.toolbar .mqtt-connection-test-actions button {
+  min-width: 88px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid #357c8c;
+  border-radius: 3px;
+  color: #d8f8ff;
+  background: #23434b;
+}
+
+.toolbar .mqtt-connection-test-actions button:hover:not(:disabled) {
+  border-color: #45abc2;
+  background: #2a5661;
+}
+
+.mqtt-connection-test-status {
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid #555555;
+  border-radius: 3px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mqtt-connection-test-status-idle,
+.mqtt-connection-test-status-testing {
+  border-color: #42545a;
+  color: #b8e8ee;
+  background: #1d3034;
+}
+
+.mqtt-connection-test-status-success {
+  border-color: #3f6f52;
+  color: #b8f2c9;
+  background: #20352a;
+}
+
+.mqtt-connection-test-status-error {
+  border-color: #754545;
+  color: #ffb0b0;
+  background: #3b2323;
+}
+
 .mqtt-config-dialog-actions {
   display: flex;
   justify-content: flex-end;
