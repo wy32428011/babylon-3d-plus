@@ -31,6 +31,9 @@ import type {
   LoadSceneFileRequest,
   LoadSceneResult,
   ModelPackageVariant,
+  MqttConnectionTestCancelRequest,
+  MqttConnectionTestRequest,
+  MqttConnectionTestResult,
   MqttIpcConfigureRequest,
   MqttIpcEvent,
   MqttIpcStatus,
@@ -194,6 +197,10 @@ contextBridge.exposeInMainWorld('editorApi', {
   /** 在文件管理器中定位已经成功发布的导出结果。 */
   revealWebProjectExport: (request: DeploymentExportRevealRequest): Promise<void> =>
     ipcRenderer.invoke('deployment-export:reveal', request),
+  mqttTestConnection: (request: MqttConnectionTestRequest): Promise<MqttConnectionTestResult> =>
+    ipcRenderer.invoke('mqtt:testConnection', request),
+  mqttCancelConnectionTest: (request: MqttConnectionTestCancelRequest): Promise<boolean> =>
+    ipcRenderer.invoke('mqtt:cancelConnectionTest', request),
   mqttConfigure: (request: MqttIpcConfigureRequest): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:configure', request),
   mqttDisconnect: (): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:disconnect'),
   mqttGetStatus: (): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:getStatus'),

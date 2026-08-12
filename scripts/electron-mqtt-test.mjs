@@ -307,6 +307,15 @@ test('临时测试超时后返回失败并释放连接', async () => {
 });
 
 
+test('preload 只暴露 MQTT 测试连接和取消窄 API', () => {
+  for (const preloadSourceText of [preloadSource, preloadCtsSource]) {
+    assert.match(preloadSourceText, /mqttTestConnection/);
+    assert.match(preloadSourceText, /mqttCancelConnectionTest/);
+    assert.match(preloadSourceText, /mqtt:testConnection/);
+    assert.match(preloadSourceText, /mqtt:cancelConnectionTest/);
+  }
+});
+
 test('preload 只暴露窄 MQTT API 且事件订阅返回 unsubscribe', () => {
   for (const source of [preloadSource, preloadCtsSource]) {
     assert.match(source, /mqttConfigure/);

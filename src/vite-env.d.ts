@@ -437,6 +437,24 @@ type MqttIpcConfigureRequest = {
   subscriptions: MqttIpcSubscriptionConfig[];
 };
 
+type MqttConnectionTestRequest = {
+  requestId: string;
+  address: string;
+  subscriptions: MqttIpcSubscriptionConfig[];
+  timeoutMs?: number;
+};
+
+type MqttConnectionTestCancelRequest = {
+  requestId: string;
+};
+
+type MqttConnectionTestResult = {
+  requestId: string;
+  status: 'success' | 'error' | 'canceled';
+  message: string;
+  durationMs: number;
+};
+
 type MqttIpcStatus = {
   state: 'disabled' | 'connecting' | 'connected' | 'disconnected' | 'error';
   address?: string;
@@ -553,6 +571,8 @@ interface Window {
     cancelWebProjectExport: (request: DeploymentExportCancelRequest) => Promise<boolean>;
     onWebProjectExportProgress: (handler: (progress: DeploymentExportProgress) => void) => () => void;
     revealWebProjectExport: (request: DeploymentExportRevealRequest) => Promise<void>;
+    mqttTestConnection?: (request: MqttConnectionTestRequest) => Promise<MqttConnectionTestResult>;
+    mqttCancelConnectionTest?: (request: MqttConnectionTestCancelRequest) => Promise<boolean>;
     mqttConfigure?: (request: MqttIpcConfigureRequest) => Promise<MqttIpcStatus>;
     mqttDisconnect?: () => Promise<MqttIpcStatus>;
     mqttGetStatus?: () => Promise<MqttIpcStatus>;
