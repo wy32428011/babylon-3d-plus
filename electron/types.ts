@@ -469,6 +469,24 @@ export type MqttIpcConfigureRequest = {
   subscriptions: MqttIpcSubscriptionConfig[];
 };
 
+export type MqttConnectionTestRequest = {
+  requestId: string;
+  address: string;
+  subscriptions: MqttIpcSubscriptionConfig[];
+  timeoutMs?: number;
+};
+
+export type MqttConnectionTestCancelRequest = {
+  requestId: string;
+};
+
+export type MqttConnectionTestResult = {
+  requestId: string;
+  status: 'success' | 'error' | 'canceled';
+  message: string;
+  durationMs: number;
+};
+
 export type MqttIpcStatus = {
   state: 'disabled' | 'connecting' | 'connected' | 'disconnected' | 'error';
   address?: string;
