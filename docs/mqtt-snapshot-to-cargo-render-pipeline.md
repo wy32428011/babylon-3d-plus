@@ -92,8 +92,8 @@ export class ParametricModelRuntimeComponent {
   onStop(): void { /* 恢复自建资源 */ }
 }
 
-// ③ 可选 dataDriven 导出：声明设备类型与运动节点/遥测字段映射，供对应专用驱动消费
-export const dataDriven = { device: { devType: 'conveyor' }, motion: { ... } };
+// ③ 可选 dataDriven 导出：声明设备类型与货物走行/本体动画的节点、遥测字段映射，供对应专用驱动消费
+export const dataDriven = { device: { devType: 'conveyor' }, cargo: { travel: { ... } } };
 ```
 
 - 装饰器（`visibleAsNumber/String/Color/...`）来自 `babylonjs-editor-tools`，编译期由 `scripts/sync-model-parameters-from-scripts.mjs` 同步进 meta.json 的 `modelParameters`。

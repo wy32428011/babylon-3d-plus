@@ -21,17 +21,16 @@ import {
 } from '../../../mqtt/deviceTelemetry';
 import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
-import { readConveyorCargoSignalFields, readConveyorMotionConfigs, readConveyorTravelAxisFromConfigs, isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
+import { readConveyorCargoSignalFields, readConveyorCargoTravelConfig, isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   type ConveyorCargoRuntimeEntry,
+  type ConveyorCargoTravelConfig,
   type ConveyorCargoTravelPlan,
   type ConveyorDownstreamLink,
   type ConveyorModelTelemetryState,
-  type ConveyorMotionConfig,
   CARGO_HANDOFF_SECONDS,
   CONVEYOR_CARGO_SIZE,
-  CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
   createCargoHandoffState,
   type GeneratedCargoRuntimeEntry,
   normalizeCargoTask,
@@ -165,11 +164,9 @@ export class ConveyorTelemetryDriver {
       }
     }
 
-    // 货物走行的方向与速度取自首个非竖直 translate 配置（fields+actionMap+speed），缺省回退 movement_x。
-    const translateConfig = this.findConveyorCargoTranslateConfig(model);
-    const movementDirection = translateConfig
-      ? this.readConveyorMotionDirection(snapshot, translateConfig)
-      : this.readConveyorMovementDirection(readIntegerField(snapshot.fields, 'movement_x'));
+    // 货物走行的方向与速度取自 dataDriven.cargo.travel（fields+actionMap+speed），脚本未声明时回退 movement_x 默认映射。
+    const travelConfig = readConveyorCargoTravelConfig(model);
+    const movementDirection = this.readConveyorMotionDirection(snapshot, travelConfig);
     // 流向翻转：链路全部失效清空（探测缓存保留），等待中的订阅先退订再以新方向重订。
     const previousDirection = state.lastMovementDirection;
     if (movementDirection !== 0) state.lastMovementDirection = movementDirection;
@@ -285,7 +282,7 @@ export class ConveyorTelemetryDriver {
     if (!cargo) return;
 
     const plan = this.resolveConveyorTravelPlan(model);
-    const cargoSpeed = translateConfig?.speed ?? CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
+    const cargoSpeed = travelConfig.speed;
     // 快照 movement 为 0 时回退到接管自驱方向：承接货物控制权后立即走行，不等下一条 MQTT 消息。
     const cargoDirection = movementDirection !== 0 ? movementDirection : state.selfDriveDirection;
     if (!snapshot.faulted && cargoDirection !== 0) {
@@ -740,8 +737,8 @@ export class ConveyorTelemetryDriver {
     cargo.containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
   }
 
-  /** 按 motion.fields 读取输送线方向，支持模型脚本自定义 actionMap。 */
-  private readConveyorMotionDirection(snapshot: DeviceTelemetrySnapshot, config: ConveyorMotionConfig): number {
+  /** 按 cargo.travel.fields 读取输送线方向，支持模型脚本自定义 actionMap。 */
+  private readConveyorMotionDirection(snapshot: DeviceTelemetrySnapshot, config: ConveyorCargoTravelConfig): number {
     for (const field of config.fields) {
       const fieldValue = readNumberField(snapshot.fields, field);
       if (fieldValue === null) continue;
@@ -763,8 +760,8 @@ export class ConveyorTelemetryDriver {
     return 0;
   }
 
-  /** 查找输送线 motion 声明的节点，优先精确名称，失败后按 fallbackPattern 或通用名称兜底。 */
-  private findConveyorMotionNodes(model: ModelRuntimeEntry, config: ConveyorMotionConfig): TransformNode[] {
+  /** 查找 cargo.travel 声明的行程节点，优先精确名称，失败后按 fallbackPattern 兜底。 */
+  private findConveyorCargoSpanNodes(model: ModelRuntimeEntry, config: ConveyorCargoTravelConfig): TransformNode[] {
     const configuredNodes = config.nodes.length > 0
       ? this.findConfiguredConveyorMotionNodes(model, config.nodes)
       : [];
@@ -894,7 +891,8 @@ export class ConveyorTelemetryDriver {
     travelAxisName: 'x' | 'z';
     spanMeters: number | null;
   } {
-    const configuredNodes = readConveyorMotionConfigs(model).flatMap((config) => this.findConveyorMotionNodes(model, config));
+    const travelConfig = readConveyorCargoTravelConfig(model);
+    const configuredNodes = this.findConveyorCargoSpanNodes(model, travelConfig);
     const conveyorNodes = configuredNodes.length > 0
       ? configuredNodes
       : findModelNodes(model, this.scene, /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i);
@@ -903,7 +901,7 @@ export class ConveyorTelemetryDriver {
       ? bounds.minimum.add(bounds.maximum).scale(0.5)
       : model.root.getAbsolutePosition();
     const upAxis = getModelAxis(model.root, 'y');
-    const travelAxisName = this.readConveyorCargoTravelAxis(model);
+    const travelAxisName = travelConfig.axis;
     const travelAxis = getHorizontalModelAxis(model.root, travelAxisName);
     const projected = bounds ? projectWorldBoundsOntoAxis(bounds, travelAxis) : null;
     const spanMeters = projected ? Math.max(0, projected.max - projected.min) : null;
@@ -920,16 +918,6 @@ export class ConveyorTelemetryDriver {
     return legacyCenter
       .subtract(travelContext.upAxis.scale(CONVEYOR_CARGO_SIZE.y / 2))
       .add(travelContext.travelAxis.scale(travelOffset));
-  }
-
-  /** 首个非竖直轴的 translate 配置：货物行走轴、速度与方向统一跟随它。 */
-  private findConveyorCargoTranslateConfig(model: ModelRuntimeEntry): ConveyorMotionConfig | null {
-    return readConveyorMotionConfigs(model).find((config) => config.kind === 'translate' && config.axis !== 'y') ?? null;
-  }
-
-  /** 推断货物沿模型局部 x/z 哪个方向移动，滚筒线默认垂直于滚筒轴。 */
-  private readConveyorCargoTravelAxis(model: ModelRuntimeEntry): 'x' | 'z' {
-    return readConveyorTravelAxisFromConfigs(readConveyorMotionConfigs(model));
   }
 
   /**

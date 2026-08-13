@@ -28,8 +28,8 @@ function isPlainObjectLike(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** 把单条 specialized motion 配置压成一行只读摘要：数值平铺，短数组列内容，长数组只报数量。 */
-function formatSpecializedMotionEntry(config: unknown): string {
+/** 把单条 specialized motion/cargo 配置压成一行只读摘要：数值平铺，短数组列内容，长数组只报数量，嵌套对象递归压行。 */
+function formatSpecializedEntry(config: unknown, depth = 0): string {
   if (!isPlainObjectLike(config)) return '—';
   const parts: string[] = [];
   for (const [key, value] of Object.entries(config)) {
@@ -43,21 +43,33 @@ function formatSpecializedMotionEntry(config: unknown): string {
       const items = value.filter((item): item is string => typeof item === 'string' && item.length > 0);
       if (items.length === 0) continue;
       parts.push(items.length <= 4 ? `${key} [${items.join(', ')}]` : `${key} ${items.length} 项`);
-    } else if (isPlainObjectLike(value) && ('min' in value || 'max' in value)) {
-      parts.push(`${key} ${String(value.min ?? '-∞')}~${String(value.max ?? '+∞')}`);
+    } else if (isPlainObjectLike(value)) {
+      if ('min' in value || 'max' in value) {
+        parts.push(`${key} ${String(value.min ?? '-∞')}~${String(value.max ?? '+∞')}`);
+        continue;
+      }
+      const entries = Object.entries(value);
+      if (entries.length > 0 && entries.every(([, item]) => typeof item === 'number' && Number.isFinite(item))) {
+        parts.push(`${key} ${entries.map(([k, v]) => `${k}→${String(v)}`).join(', ')}`);
+      } else if (depth === 0) {
+        const nested = formatSpecializedEntry(value, depth + 1);
+        if (nested !== '—') parts.push(`${key}（${nested}）`);
+      }
     }
   }
   return parts.length > 0 ? parts.join(' · ') : '—';
 }
 
 /** specialized 模型的 dataDriven 只读摘要：配置真源在模型包 .model.ts，Inspector 不提供编辑。 */
-function SpecializedMotionSummary(props: { config: ModelDataDrivenConfig | null }) {
+function SpecializedDataDrivenSummary(props: { config: ModelDataDrivenConfig | null }) {
   const motion = props.config?.specializedMotion ?? {};
+  const cargo = props.config?.cargo ?? {};
   const device = props.config?.device;
   const deviceParts: string[] = [];
   if (typeof device?.calibrationRate === 'number') deviceParts.push(`calibrationRate ${device.calibrationRate}`);
   if (typeof device?.rpmToMetersPerSecond === 'number') deviceParts.push(`rpmToMetersPerSecond ${device.rpmToMetersPerSecond}`);
   const motionEntries = Object.entries(motion);
+  const cargoEntries = Object.entries(cargo);
 
   return (
     <div className="telemetry-specialized-summary">
@@ -65,7 +77,10 @@ function SpecializedMotionSummary(props: { config: ModelDataDrivenConfig | null 
         专用 {device?.devType ?? ''} 驱动接管：通道映射由模型包 dataDriven 声明，此处只读；修改请编辑模型包 .model.ts。
       </p>
       {motionEntries.map(([key, value]) => (
-        <p className="muted" key={key}>{key}：{formatSpecializedMotionEntry(value)}</p>
+        <p className="muted" key={`motion-${key}`}>motion.{key}：{formatSpecializedEntry(value)}</p>
+      ))}
+      {cargoEntries.map(([key, value]) => (
+        <p className="muted" key={`cargo-${key}`}>cargo.{key}：{formatSpecializedEntry(value)}</p>
       ))}
       {deviceParts.length > 0 ? <p className="muted">device：{deviceParts.join(' · ')}</p> : null}
     </div>
@@ -367,7 +382,7 @@ function RgvColumnBindingsEditor(props: {
         </>
       ) : null}
       <TelemetryRuntimeDiagnosticsView entityId={props.entityId} binding={binding} modelAssetCode={props.modelAssetCode} />
-      <SpecializedMotionSummary config={props.dataDrivenConfig} />
+      <SpecializedDataDrivenSummary config={props.dataDrivenConfig} />
     </fieldset>
   );
 }

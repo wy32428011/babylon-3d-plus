@@ -194,8 +194,7 @@ import {
   isConveyorRuntimeModel,
   isRgvModelAsset,
   isStackerModelAsset,
-  readConveyorMotionConfigs,
-  readConveyorTravelAxisFromConfigs,
+  readConveyorCargoTravelConfig,
   resetConveyorTelemetryState,
   resetRgvTelemetryState,
   resetStackerTelemetryState,
@@ -216,8 +215,8 @@ import {
   RGV_CARGO_SIZE,
 } from './telemetry/specialized/types';
 import type {
+  ConveyorCargoTravelConfig,
   ConveyorModelTelemetryState,
-  ConveyorMotionConfig,
   GeneratedCargoKind,
   GeneratedCargoRuntimeEntry,
   RgvModelTelemetryState,
@@ -4286,11 +4285,11 @@ export class SceneRuntime {
     ]);
   }
 
-  /** 与 conveyorDriver 同源的行程计算：motion 配置行走轴 + 包围盒投影，转模型局部空间。 */
+  /** 与 conveyorDriver 同源的行程计算：cargo.travel 配置行走轴 + 包围盒投影，转模型局部空间。 */
   private resolveConveyorTrajectoryContext(entity: Entity, model: ModelRuntimeEntry): ConveyorTrajectoryContext {
-    const configs = readConveyorMotionConfigs(model);
-    const travelAxisName = readConveyorTravelAxisFromConfigs(configs);
-    const configuredNodes = configs.flatMap((config) => this.findEditorConveyorMotionNodes(model, config));
+    const travelConfig = readConveyorCargoTravelConfig(model);
+    const travelAxisName = travelConfig.axis;
+    const configuredNodes = this.findEditorConveyorMotionNodes(model, travelConfig);
     const conveyorNodes = configuredNodes.length > 0
       ? configuredNodes
       : findModelNodes(model, this.scene, /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i);
@@ -4311,7 +4310,7 @@ export class SceneRuntime {
     return { centerLocal, travelAxisName, travelAxisWorld, spanMeters };
   }
 
-  private findEditorConveyorMotionNodes(model: ModelRuntimeEntry, config: ConveyorMotionConfig): TransformNode[] {
+  private findEditorConveyorMotionNodes(model: ModelRuntimeEntry, config: ConveyorCargoTravelConfig): TransformNode[] {
     if (config.nodes.length > 0) {
       return filterTopLevelMotionNodes(findModelNodesByName(model, this.scene, config.nodes));
     }

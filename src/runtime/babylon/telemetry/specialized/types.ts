@@ -71,7 +71,6 @@ export function createCargoHandoffState(
     durationSeconds: Math.max(durationSeconds, 0.05),
   };
 }
-export const CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND = 180;
 export const CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND = 0.3;
 export const RGV_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND = 0.8;
 /** RGV 货箱交接（列接驳位 ↔ 车工位）一次完整移行时长。 */
@@ -320,15 +319,14 @@ export type RgvModelTelemetryState = {
 
 export type RgvCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
-export type ConveyorMotionConfig = {
-  key: string;
-  fields: string[];
-  kind: 'rotate' | 'translate';
-  axis: 'x' | 'y' | 'z';
-  actionMap: Record<string, number>;
+/** conveyor 货物走行配置：由模型脚本 dataDriven.cargo.travel 归一化而来，本体无自主动画。 */
+export type ConveyorCargoTravelConfig = {
+  axis: 'x' | 'z';
   speed: number;
   nodes: string[];
   fallbackPattern: string | null;
+  fields: string[];
+  actionMap: Record<string, number>;
 };
 
 export type SpecializedTelemetryRuntimeEntry = {

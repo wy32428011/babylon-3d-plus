@@ -30,7 +30,7 @@
 货物需要的全部几何量（行走轴、法线、姿态、行程）改为从**配置的载物面节点组**的世界矩阵推导，
 不再从 `model.root` 推导。零件级、成组、实体级倾斜的世界矩阵天然都被包含。
 
-### 配置（`dataDriven.motion.cargo` 增加一个字段）
+### 配置（`dataDriven.cargo` 增加一个字段）
 
 ```ts
 cargo: {
@@ -67,12 +67,12 @@ cargo: {
 ## 四、实施清单（到时候照着做）
 
 1. `specializedModelAssets.ts`
-   - `readConveyorMotionConfig` 或新增 `readConveyorCargoSurfaceNodeNames(model)`：
-     读 `motion.cargo.surfaceNodes` 字符串数组（参照 `readConveyorCargoSignalFields` 的写法）
+   - 新增 `readConveyorCargoSurfaceNodeNames(model)`：
+     读 `cargo.surfaceNodes` 字符串数组（参照 `readConveyorCargoSignalFields` 的写法）
 2. `conveyorDriver.ts`
    - `resolveConveyorCargoTravelContext`：
      - 解析 surfaceNodes → 节点数组（空则走现有 root 路径，行为逐帧不变）
-     - travelAxis = 成员局部 x（按 translate config 的 axis 名）符号对齐平均，再按 translate config 的 axis 语义取用
+     - travelAxis = 成员局部 x（按 `cargo.travel.axis` 名）符号对齐平均，再按 `cargo.travel.axis` 语义取用
      - upAxis = 成员局部 y 符号对齐平均，对 travel 正交化
      - 跨度/中心 = 成员联合包围盒（`getNodesWorldBounds`）投影到 travelAxis
      - travelContext 增加携带合成旋转（quaternion from basis）

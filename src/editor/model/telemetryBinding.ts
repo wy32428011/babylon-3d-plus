@@ -12,6 +12,8 @@ export type ModelDataDrivenConfig = {
   };
   /** specialized 模型的 motion 原文透传，仅作 Inspector 只读摘要数据源。 */
   specializedMotion?: Record<string, unknown>;
+  /** specialized 模型的 cargo 原文透传（conveyor 走行参数 / rgv 载货台面节点），仅作 Inspector 只读摘要数据源。 */
+  cargo?: Record<string, unknown>;
   fixedNodes: string[];
 };
 
@@ -150,8 +152,11 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
   const specializedMotion = isSpecializedTelemetryDeviceType(devType) && isPlainObject(value.motion)
     ? JSON.parse(JSON.stringify(value.motion)) as Record<string, unknown>
     : undefined;
+  const cargo = isSpecializedTelemetryDeviceType(devType) && isPlainObject(value.cargo)
+    ? JSON.parse(JSON.stringify(value.cargo)) as Record<string, unknown>
+    : undefined;
   const fixedNodes = normalizeStringArray(value.fixedNodes);
-  if (!deviceName && !devType && !defaultAssetCode && !specializedMotion && fixedNodes.length === 0) return null;
+  if (!deviceName && !devType && !defaultAssetCode && !specializedMotion && !cargo && fixedNodes.length === 0) return null;
   return {
     device: {
       ...(deviceName ? { device: deviceName } : {}),
@@ -161,6 +166,7 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
       ...(rpmToMetersPerSecond !== undefined ? { rpmToMetersPerSecond } : {}),
     },
     ...(specializedMotion ? { specializedMotion } : {}),
+    ...(cargo ? { cargo } : {}),
     fixedNodes,
   };
 }

@@ -90,6 +90,32 @@ test('非专用 devType 的 motion 不透传，避免无效配置进入场景文
   assert.equal(config?.specializedMotion, undefined);
 });
 
+test('专用 devType 的顶层 cargo 透传进入场景文档（conveyor 走行参数 / rgv 载货台面节点）', () => {
+  const conveyor = normalizeModelDataDrivenConfig({
+    device: { devType: 'conveyor' },
+    cargo: {
+      travel: { axis: 'x', speed: 0.3, nodes: ['链条机'], fields: ['movement_x'], actionMap: { '0': 0, '1': 1, '2': -1 } },
+      frontHasGoodsField: 'front_has_goods',
+    },
+  });
+  assert.deepEqual(conveyor?.cargo, {
+    travel: { axis: 'x', speed: 0.3, nodes: ['链条机'], fields: ['movement_x'], actionMap: { '0': 0, '1': 1, '2': -1 } },
+    frontHasGoodsField: 'front_has_goods',
+  });
+
+  const rgv = normalizeModelDataDrivenConfig({
+    device: { devType: 'rgv' },
+    cargo: { frontNodes: ['Front'], backNodes: ['Back'] },
+  });
+  assert.deepEqual(rgv?.cargo, { frontNodes: ['Front'], backNodes: ['Back'] });
+
+  const nonSpecialized = normalizeModelDataDrivenConfig({
+    device: { devType: 'unknown-device' },
+    cargo: { travel: { axis: 'x' } },
+  });
+  assert.equal(nonSpecialized?.cargo, undefined);
+});
+
 test('遥测绑定 stale 默认值来自 expectedIntervalMs 的安全倍数', () => {
   const binding = normalizeTelemetryBindingComponent({ enabled: true, sourceId: 'plc', deviceType: 'stacker', expectedIntervalMs: 300 });
 

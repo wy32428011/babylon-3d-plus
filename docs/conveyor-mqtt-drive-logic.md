@@ -22,10 +22,10 @@
 
 | 字段 | 类型 | 语义 |
 |---|---|---|
-| `movement_x` | int | 0 静止，1 正转，2 反转（正负数兜底兼容）。实际读取走 translate 配置的 `fields`+`actionMap`，缺省即 movement_x。**不再门控刷出**：新 task 刷出/复用时若为 0 按正转（1）处理并登记自驱（见 §5.7/§8） |
+| `movement_x` | int | 0 静止，1 正转，2 反转（正负数兜底兼容）。实际读取走 `cargo.travel` 的 `fields`+`actionMap`，缺省即 movement_x。**不再门控刷出**：新 task 刷出/复用时若为 0 按正转（1）处理并登记自驱（见 §5.7/§8） |
 | `mode` | int | 2=销毁条件（配合双光电无货+勾选自动销毁）；0=空闲（等待方退出等待并退订）；缺省（null）视为运行中 |
 | `task` | int | 任务号；缺失/0=无任务（归一化为空串，不触发任何边沿，状态不变）。**匿名模式已移除**：无 task 不再刷出货箱 |
-| `front_has_goods` / `back_has_goods` | bool | 前后光电，仅用于 mode==2 的销毁判定（字段名可由脚本 `motion.cargo` 覆盖） |
+| `front_has_goods` / `back_has_goods` | bool | 前后光电，仅用于 mode==2 的销毁判定（字段名可由脚本顶层 `cargo.frontHasGoodsField/backHasGoodsField` 覆盖） |
 | `containerCode` | string | 货箱条码，仅元数据（命名/metadata），不参与身份唯一性 |
 | `faulted`（快照级） | bool | 故障门控，见 §9 |
 
@@ -39,8 +39,8 @@
 
 ## 3. 货物几何基础
 
-- **行走轴**：首个非竖直轴 translate 配置的轴（x/z）；无配置时按 rotate 轴推断（rotate=x → 走 z），最终缺省 x
-- **跨度**：运动节点包围盒（无则用整机包围盒）投影到行走轴的长度
+- **行走轴**：脚本 `cargo.travel.axis` 声明（x/z），缺省 x；conveyor 本体无自主动画，`motion` 块已废弃
+- **跨度**：`cargo.travel.nodes` 精确名节点（兜底 `fallbackPattern` 正则，再兜底通用命名正则/整机包围盒）投影到行走轴的长度
 - **行程半径** `halfRange = span/2 − 货箱轴向长度/2`，货箱尺寸 `CONVEYOR_CARGO_SIZE=(0.72, 0.34, 0.72)`
 - **轨迹方向** `forwardSign`：`telemetryBinding.trajectoryDirection`（x/-x/z/-z，缺省 x）为**模型本地坐标**方向；其轴与行走轴名一致时取配置正负号（±1），轴向不一致（缺省/错配）回退 1
 - **刷出端偏移** `spawnOffset = −direction × forwardSign × halfRange`：正转刷在轨迹起点向终点走，反转反之
@@ -84,7 +84,7 @@
 注意：`task=0` 或缺失不产生边沿；同 task 重发不产生边沿。
 
 ### 5.3 运行方向与流向翻转
-从 translate 配置（或 movement_x 兜底）读 `movementDirection`；非 0 时记入 `lastMovementDirection`。
+从 `cargo.travel` 配置（fields+actionMap，或 movement_x 缺省映射）读 `movementDirection`；非 0 时记入 `lastMovementDirection`。
 **流向翻转**（新非 0 方向 ≠ 旧非 0 方向）：链路全部失效——等待中的订阅先以旧方向退订，然后 `upstreamLinks`/`downstreamLinks`/`externalPulls` 清空（探测缓存保留），仍以新方向重新订阅。
 
 ### 5.4 等待方退出（level 判断）
@@ -119,7 +119,7 @@
 
 `cargoDirection = movementDirection ≠ 0 ? movementDirection : selfDriveDirection`（自驱回退，见 §8）：
 - 非故障且方向非 0 → `cargoTravelOffset += cargoDirection × forwardSign × cargoSpeed × delta`
-- `cargoSpeed` = translate 配置速度，缺省 0.3 m/s
+- `cargoSpeed` = `cargo.travel.speed`，缺省 0.3 m/s
 - 最终 `cargoTravelOffset` clamp 到 ±halfRange：货箱走到行程端即停住，无订阅者时持有方持续持货
 
 ### 5.10 视觉落地

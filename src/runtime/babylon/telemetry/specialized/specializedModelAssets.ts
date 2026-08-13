@@ -3,17 +3,18 @@ import type { ModelAssetComponent } from '../../../../editor/model/components';
 import { isPlainRecord, readStringArrayPath } from '../../runtimeValueUtils';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import {
+  type ConveyorCargoTravelConfig,
   type ConveyorModelTelemetryState,
-  type ConveyorMotionConfig,
-  CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
   type RgvModelTelemetryState,
   type StackerModelTelemetryState,
 } from './types';
 
-/** 判断当前模型是否具备输送线驱动能力，脚本声明优先于文件名兜底识别。 */
+/** 判断当前模型是否具备输送线驱动能力，脚本声明 devType=conveyor 或文件名兜底识别即接入。 */
 export function isConveyorRuntimeModel(model: ModelRuntimeEntry): boolean {
-  return model.conveyorCapable || readConveyorMotionConfigs(model).length > 0;
+  if (model.conveyorCapable) return true;
+  for (const _config of iterateConveyorDataDrivenConfigs(model)) return true;
+  return false;
 }
 
 /** 通过模型包脚本、路径和资产编号兜底识别输送线模型。 */
@@ -132,29 +133,39 @@ function* iterateConveyorDataDrivenConfigs(model: ModelRuntimeEntry): Generator<
   }
 }
 
-/** 读取模型脚本声明的输送线运动配置，运行时只接受 devType=conveyor 的 dataDriven 配置。 */
-export function readConveyorMotionConfigs(model: ModelRuntimeEntry): ConveyorMotionConfig[] {
-  const configs: ConveyorMotionConfig[] = [];
+/** 读取模型脚本 dataDriven.cargo.travel 声明的货物走行配置，逐键归一化；conveyor 本体无自主动画，全部走行语义集中于此。 */
+export function readConveyorCargoTravelConfig(model: ModelRuntimeEntry): ConveyorCargoTravelConfig {
   for (const dataDriven of iterateConveyorDataDrivenConfigs(model)) {
-    const motionConfig = isPlainRecord(dataDriven.motion) ? dataDriven.motion : null;
-    if (!motionConfig) continue;
+    const cargo = isPlainRecord(dataDriven.cargo) ? dataDriven.cargo : null;
+    const travel = cargo && isPlainRecord(cargo.travel) ? cargo.travel : null;
+    if (!travel) continue;
 
-    for (const [key, rawConfig] of Object.entries(motionConfig)) {
-      const config = readConveyorMotionConfig(key, rawConfig);
-      if (config) configs.push(config);
-    }
+    const rawAxis = typeof travel.axis === 'string' ? travel.axis.trim().toLowerCase() : '';
+    const axis: ConveyorCargoTravelConfig['axis'] = rawAxis === 'z' ? 'z' : 'x';
+    const rawSpeed = typeof travel.speed === 'number' ? travel.speed : Number(travel.speed);
+    const speed = Number.isFinite(rawSpeed) && rawSpeed > 0 ? rawSpeed : CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
+    const nodes = readStringArrayPath(travel, ['nodes']);
+    const fields = readStringArrayPath(travel, ['fields']);
+    const rawFallbackPattern = typeof travel.fallbackPattern === 'string' ? travel.fallbackPattern.trim() : '';
+
+    return {
+      axis,
+      speed,
+      nodes,
+      fallbackPattern: rawFallbackPattern || null,
+      fields: fields.length > 0 ? fields : ['movement_x'],
+      actionMap: readConveyorActionMap(travel.actionMap),
+    };
   }
 
-  return configs;
-}
-
-/** 推断货物沿模型局部 x/z 哪个方向移动，与 conveyorDriver 同源。 */
-export function readConveyorTravelAxisFromConfigs(configs: ConveyorMotionConfig[]): 'x' | 'z' {
-  const translateConfig = configs.find((config) => config.kind === 'translate' && config.axis !== 'y');
-  if (translateConfig?.axis === 'x' || translateConfig?.axis === 'z') return translateConfig.axis;
-  const rotateConfig = configs.find((config) => config.kind === 'rotate');
-  if (rotateConfig?.axis === 'x') return 'z';
-  return 'x';
+  return {
+    axis: 'x',
+    speed: CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
+    nodes: [],
+    fallbackPattern: null,
+    fields: ['movement_x'],
+    actionMap: readConveyorActionMap(undefined),
+  };
 }
 
 /** 输送线货物生命周期信号字段名，缺省遵循 front_has_goods/back_has_goods 光电约定。 */
@@ -168,11 +179,10 @@ const DEFAULT_CONVEYOR_CARGO_SIGNAL_FIELDS: ConveyorCargoSignalFields = {
   backHasGoods: 'back_has_goods',
 };
 
-/** 读取模型脚本 dataDriven.motion.cargo 声明的货物生命周期信号字段名，未声明时遵循默认约定。 */
+/** 读取模型脚本 dataDriven.cargo 声明的货物生命周期信号字段名，未声明时遵循默认约定。 */
 export function readConveyorCargoSignalFields(model: ModelRuntimeEntry): ConveyorCargoSignalFields {
   for (const dataDriven of iterateConveyorDataDrivenConfigs(model)) {
-    const motionConfig = isPlainRecord(dataDriven.motion) ? dataDriven.motion : null;
-    const cargoConfig = motionConfig && isPlainRecord(motionConfig.cargo) ? motionConfig.cargo : null;
+    const cargoConfig = isPlainRecord(dataDriven.cargo) ? dataDriven.cargo : null;
     if (!cargoConfig) continue;
 
     const front = typeof cargoConfig.frontHasGoodsField === 'string' ? cargoConfig.frontHasGoodsField.trim() : '';
@@ -185,41 +195,8 @@ export function readConveyorCargoSignalFields(model: ModelRuntimeEntry): Conveyo
   return DEFAULT_CONVEYOR_CARGO_SIGNAL_FIELDS;
 }
 
-/** 把单个 dataDriven.motion 配置归一成运行时可直接执行的输送线动作。 */
-export function readConveyorMotionConfig(key: string, rawConfig: unknown): ConveyorMotionConfig | null {
-  if (!isPlainRecord(rawConfig)) return null;
-
-  const rawKind = typeof rawConfig.kind === 'string' ? rawConfig.kind.trim().toLowerCase() : '';
-  if (rawKind !== 'rotate' && rawKind !== 'translate') return null;
-  const kind: ConveyorMotionConfig['kind'] = rawKind;
-
-  const rawAxis = typeof rawConfig.axis === 'string' ? rawConfig.axis.trim().toLowerCase() : '';
-  const axis: ConveyorMotionConfig['axis'] = rawAxis === 'x' || rawAxis === 'y' || rawAxis === 'z'
-    ? rawAxis
-    : 'z';
-  const fallbackSpeed = kind === 'rotate'
-    ? CONVEYOR_DEFAULT_ROTATE_SPEED_DEGREES_PER_SECOND
-    : CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND;
-  const rawSpeed = typeof rawConfig.speed === 'number' ? rawConfig.speed : Number(rawConfig.speed);
-  const speed = Number.isFinite(rawSpeed) && rawSpeed > 0 ? rawSpeed : fallbackSpeed;
-  const fields = readStringArrayPath(rawConfig, ['fields']);
-  const nodes = readStringArrayPath(rawConfig, ['nodes']);
-  const rawFallbackPattern = typeof rawConfig.fallbackPattern === 'string' ? rawConfig.fallbackPattern.trim() : '';
-
-  return {
-    key,
-    fields: fields.length > 0 ? fields : (kind === 'rotate' ? ['movement_x', 'rotation'] : ['movement_x']),
-    kind,
-    axis,
-    actionMap: readConveyorActionMap(rawConfig.actionMap),
-    speed,
-    nodes,
-    fallbackPattern: rawFallbackPattern || null,
-  };
-}
-
 /** 读取 movement 编码映射，缺省遵循 0=停、1=正向、2=反向。 */
-export function readConveyorActionMap(rawActionMap: unknown): Record<string, number> {
+function readConveyorActionMap(rawActionMap: unknown): Record<string, number> {
   const actionMap: Record<string, number> = { 0: 0, 1: 1, 2: -1 };
   if (!isPlainRecord(rawActionMap)) return actionMap;
 

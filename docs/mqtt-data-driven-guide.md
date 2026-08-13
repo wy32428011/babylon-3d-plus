@@ -120,21 +120,29 @@ dt/factory/logistics/conveyor/1001/twindatadriven/joint
 
 ## 专用驱动与 dataDriven 声明
 
-每种设备类型的运动语义由对应专用驱动实现，驱动所需的节点、字段、速度等配置全部声明在模型包 `.model.ts` 的 `dataDriven` 导出中，配置真源是模型包而不是场景文件。以 conveyor 为例：
+每种设备类型的运动语义由对应专用驱动实现，驱动所需的节点、字段、速度等配置全部声明在模型包 `.model.ts` 的 `dataDriven` 导出中，配置真源是模型包而不是场景文件。三类专用设备的约定：`motion` 声明本体部件动画（stacker 的 travel/lift/fork），`cargo` 声明货物相关参数。conveyor 本体无自主动画，只有 cargo：
 
 ```ts
 export const dataDriven = {
   device: { devType: 'conveyor', defaultAssetCode: '1001' },
-  motion: {
-    chain: { fields: ['movement_x'], kind: 'translate', axis: 'x', speed: 0.5, nodes: ['Chain'], fallbackPattern: '^Chain' },
-    cargo: { frontHasGoodsField: 'front_hasGoods', backHasGoodsField: 'back_hasGoods' },
+  cargo: {
+    travel: {
+      axis: 'x',                                   // 走行轴 x/z，缺省 x
+      speed: 0.5,                                  // m/s，缺省 0.3
+      nodes: ['Chain'],                            // 行程几何节点（精确名）
+      fallbackPattern: '^Chain',                   // nodes 全不匹配时的兜底正则
+      fields: ['movement_x'],                      // 方向来源字段，缺省 ['movement_x']
+      actionMap: { '0': 0, '1': 1, '2': -1 },      // 字段值→方向倍数，缺省即此
+    },
+    frontHasGoodsField: 'front_hasGoods',          // 光电字段改名，缺省 front_has_goods/back_has_goods
+    backHasGoodsField: 'back_hasGoods',
   },
 };
 ```
 
-stacker 的 `dataDriven` 则声明 `motion.travel/lift/fork` 的节点、速度、行程与限位，详见 `Assets/Models/Stacker/stacker.model.ts`。
+stacker 的 `dataDriven` 则声明 `motion.travel/lift/fork` 的节点、速度、行程与限位，详见 `Assets/Models/Stacker/stacker.model.ts`；rgv 另以顶层 `cargo.frontNodes/backNodes` 声明载货台面节点、`fixedNodes` 声明固定轨道。
 
-导入模型时，编辑器根据 `dataDriven.device.devType` 创建默认 `telemetryBinding`，并把 motion 原文透传到 `modelAsset.dataDrivenConfig.specializedMotion`，Inspector“数据驱动”区域以只读摘要展示。未声明专用 devType 的模型不显示“数据驱动”与“货箱生成器”区域。`deviceType` 真源是模型包 `dataDriven`，Inspector 只读展示；实体级可编辑字段仅有：
+导入模型时，编辑器根据 `dataDriven.device.devType` 创建默认 `telemetryBinding`，并把 motion/cargo 原文透传到 `modelAsset.dataDrivenConfig.specializedMotion`/`cargo`，Inspector“数据驱动”区域以只读摘要分组展示。未声明专用 devType 的模型不显示“数据驱动”与“货箱生成器”区域。`deviceType` 真源是模型包 `dataDriven`，Inspector 只读展示；实体级可编辑字段仅有：
 
 - `enabled`：关闭后该实例不再消费遥测。
 - `sourceId`：指定数据源，默认 `default`。
