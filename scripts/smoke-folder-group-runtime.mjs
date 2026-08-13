@@ -750,7 +750,7 @@ try {
     assertVector(locatorTarget.position, { x: 3, y: 0.5, z: 0 }, '组代理中心必须覆盖定位框全部格口');
 
     const locatorEntry = locatorRuntime.locators.get(locatorEntity.id);
-    assert.ok(locatorEntry?.boxes[2], '回归前提：必须创建三个定位格口');
+    assert.equal(locatorEntry?.fillMesh.thinInstanceCount, 3, '回归前提：必须创建三个定位格口薄实例');
     assert.equal(
       locatorRuntime.beginFolderGroupTranslation(
         [locatorEntity.id],
@@ -761,8 +761,10 @@ try {
     assert.equal(locatorRuntime.updateFolderGroupTranslation({ x: 5, y: 0, z: 0 }), true);
     locatorRuntime.flushGroupTranslationPreview();
     locatorTarget.position.copyFromFloats(8, 0.5, 0);
-    locatorEntry.boxes[2].position.x = 12;
-    locatorEntry.boxes[2].computeWorldMatrix(true);
+    const locatorMatrices = locatorEntry.fillMesh._thinInstanceDataStorage.matrixData.slice();
+    Matrix.Translation(12, 0.5, 0).copyToArray(locatorMatrices, 2 * 16);
+    locatorEntry.fillMesh.thinInstanceSetBuffer('matrix', locatorMatrices, 16, true);
+    locatorEntry.fillMesh.thinInstanceRefreshBoundingInfo(true);
     locatorRuntime.refreshGroupTransformPreviewTargets();
     assertVector(locatorTarget.position, { x: 8, y: 0.5, z: 0 }, '活动拖动期间异步几何不得改变代理起点');
     locatorRuntime.cancelFolderGroupTranslation();

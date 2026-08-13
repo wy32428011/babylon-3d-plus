@@ -1,3 +1,4 @@
+import { Vector3, type TransformNode } from '@babylonjs/core';
 import type { LocatorStorageDepth } from '../../../editor/model/components';
 
 /**
@@ -58,4 +59,28 @@ export function resolveLocatorBoxIndex(input: LocatorBoxIndexInput): number | nu
   if (columnIndex < 0 || columnIndex >= input.columns) return null;
   if (layerIndex < 0 || layerIndex >= input.layers) return null;
   return layerIndex * input.columns + columnIndex;
+}
+
+/** 解析货格支撑位所需的最小运行时结构，避免反向依赖 SceneRuntime 的 LocatorRuntimeEntry。 */
+export type LocatorCellGridShape = {
+  columns: number;
+  layers: number;
+  /** 构建渲染网格时实际使用的步距（含绑定期货架脚本写入的实测步距）。 */
+  cellSteps: { columnStepX: number; layerStepY: number };
+  root: TransformNode;
+};
+
+/**
+ * 按构建步距解析货格底面中心的世界坐标（货叉/货物支撑位）。
+ * 格子本地底面中心 = (列 × 列步距, 层 × 层步距, 0)，与渲染网格的生成公式严格一致。
+ */
+export function resolveLocatorCellSupportWorldPosition(locator: LocatorCellGridShape, boxIndex: number): Vector3 | null {
+  if (!Number.isInteger(boxIndex) || boxIndex < 0 || boxIndex >= locator.columns * locator.layers) return null;
+  const columnIndex = boxIndex % locator.columns;
+  const layerIndex = Math.floor(boxIndex / locator.columns);
+  locator.root.computeWorldMatrix(true);
+  return Vector3.TransformCoordinates(
+    new Vector3(columnIndex * locator.cellSteps.columnStepX, layerIndex * locator.cellSteps.layerStepY, 0),
+    locator.root.getWorldMatrix(),
+  );
 }

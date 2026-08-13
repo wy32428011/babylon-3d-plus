@@ -3,6 +3,7 @@ import { TransformNode, Vector3 } from '@babylonjs/core';
 import type { StackerStorageTargetOffsets } from '../stackerStorageLocation';
 import {
   resolveLocatorBoxIndex,
+  resolveLocatorCellSupportWorldPosition,
   resolveStackerStorageForkReach,
   resolveStackerStorageTargetOffsets,
 } from '../stackerStorageLocation';
@@ -12,7 +13,6 @@ import {
   findModelNodes,
   findModelNodesByName,
   getHorizontalModelAxis,
-  getMeshWorldBounds,
   getModelAxis,
   getNodesProjectedBounds,
   getNodesWorldBounds,
@@ -179,8 +179,8 @@ export class StackerTelemetryDriver {
       toX,
       toY,
     });
-    const box = boxIndex === null ? null : locator.boxes[boxIndex];
-    if (!box) {
+    const supportPosition = boxIndex === null ? null : resolveLocatorCellSupportWorldPosition(locator, boxIndex);
+    if (!supportPosition) {
       const reportKey = `${locator.assetId}:${toX}:${toY}`;
       if (!this.state.reportedInvalidStackerBoxTargets.has(reportKey)) {
         this.state.reportedInvalidStackerBoxTargets.add(reportKey);
@@ -189,20 +189,14 @@ export class StackerTelemetryDriver {
       return null;
     }
 
-    const bounds = getMeshWorldBounds(box);
-    if (!bounds) return null;
-    return new Vector3(
-      (bounds.minimum.x + bounds.maximum.x) / 2,
-      bounds.minimum.y,
-      (bounds.minimum.z + bounds.maximum.z) / 2,
-    );
+    return supportPosition;
   }
 
   /** 使用 locator 盒体底面作为生成模型原点，保证模型落在定位框内部而不是悬在中心高度。 */
   private getWarehouseLocatorSupportPosition(locator: LocatorRuntimeEntry): Vector3 {
-    const bounds = locator.boxes.length > 0 ? getMeshWorldBounds(locator.boxes[0]) : null;
+    const supportPosition = resolveLocatorCellSupportWorldPosition(locator, 0);
     const position = locator.root.getAbsolutePosition();
-    return new Vector3(position.x, bounds?.minimum.y ?? position.y, position.z);
+    return new Vector3(position.x, supportPosition?.y ?? position.y, position.z);
   }
 
   /** 按货叉初始世界锚点把 Locator 绝对坐标换算成运行时偏移。 */

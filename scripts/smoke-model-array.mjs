@@ -1136,26 +1136,36 @@ try {
   assert.equal(readPreviewClones(runtime).length, 0, '源 Mesh 释放时必须立即清理阵列预览');
   assert.equal(primitivePreview.isDisposed(), true, '源 Mesh 释放必须销毁临时副本');
 
-  // 虚拟定位线框：多个盒体共同参与投影，临时层级共享源材质但不可拾取。
+  // 虚拟定位线框：填充薄实例 + 合并边线共同参与投影，临时层级共享源材质但不可拾取。
   const locatorEntityId = 'entity-array-locator';
   const locatorRoot = new TransformNode('entity-array-locator-root', scene);
   locatorRoot.position.copyFromFloats(2, 0, 10);
   locatorRoot.rotation.y = Math.PI / 2;
   const locatorMaterial = new StandardMaterial('entity-array-locator-material', scene);
-  const locatorBoxes = [-2, 2].map((x, index) => {
-    const box = MeshBuilder.CreateBox(`entity-array-locator-box-${index}`, { size: 2 }, scene);
-    box.parent = locatorRoot;
-    box.position.x = x;
-    box.material = locatorMaterial;
-    box.isPickable = true;
-    box.metadata = { editorEntityId: locatorEntityId };
-    return box;
-  });
+  const locatorFillMesh = MeshBuilder.CreateBox('entity-array-locator-fill', { size: 2 }, scene);
+  locatorFillMesh.parent = locatorRoot;
+  locatorFillMesh.material = locatorMaterial;
+  locatorFillMesh.isPickable = true;
+  locatorFillMesh.metadata = { editorEntityId: locatorEntityId };
+  const locatorInstanceMatrices = new Float32Array(2 * 16);
+  Matrix.Translation(-2, 0, 0).copyToArray(locatorInstanceMatrices, 0);
+  Matrix.Translation(2, 0, 0).copyToArray(locatorInstanceMatrices, 16);
+  locatorFillMesh.thinInstanceSetBuffer('matrix', locatorInstanceMatrices, 16, true);
+  locatorFillMesh.thinInstanceRefreshBoundingInfo(true);
+  const locatorEdgeLines = MeshBuilder.CreateLineSystem(
+    'entity-array-locator-edges',
+    { lines: [[new Vector3(-3, -1, -1), new Vector3(3, -1, -1)], [new Vector3(-3, 1, 1), new Vector3(3, 1, 1)]] },
+    scene,
+  );
+  locatorEdgeLines.parent = locatorRoot;
+  locatorEdgeLines.isPickable = false;
   locatorRoot.computeWorldMatrix(true);
-  locatorBoxes.forEach((box) => box.computeWorldMatrix(true));
+  locatorFillMesh.computeWorldMatrix(true);
   runtime.locators.set(locatorEntityId, {
     root: locatorRoot,
-    boxes: locatorBoxes,
+    fillMesh: locatorFillMesh,
+    edgeLines: locatorEdgeLines,
+    cellSteps: { columnStepX: 4, layerStepY: 2 },
     material: locatorMaterial,
     assetId: 'LOC9',
     signature: 'fixture',
@@ -1169,7 +1179,7 @@ try {
   const locatorLocalX = locatorRoot.getDirection(Vector3.Right()).normalize();
   const locatorGeometry = runtime.getEntityArrayGeometry(locatorEntityId, locatorLocalX);
   assert.ok(locatorGeometry, '定位线框必须支持局部轴阵列测量');
-  assertClose(locatorGeometry.spanMeters, 6, '定位线框跨度必须汇总全部盒体');
+  assertClose(locatorGeometry.spanMeters, 6, '定位线框跨度必须汇总全部薄实例盒体');
   assert.equal(
     runtime.updateEntityArrayPreview(locatorEntityId, locatorLocalX, 1, 1),
     true,
@@ -1185,8 +1195,10 @@ try {
     },
     '定位线框间距副本',
   );
-  assert.equal(locatorPreview.getChildMeshes(false).length, 2, '定位线框预览必须保留全部盒体');
+  assert.equal(locatorPreview.getChildMeshes(false).length, 2, '定位线框预览必须保留填充与边线网格');
   assert.ok(locatorPreview.getChildMeshes(false).every((mesh) => !mesh.isPickable && mesh.metadata === null));
+  const locatorPreviewFill = locatorPreview.getChildMeshes(false).find((mesh) => mesh.name.endsWith('.entity-array-locator-fill'));
+  assert.equal(locatorPreviewFill?.thinInstanceCount, 2, '定位线框预览必须保留全部薄实例');
   runtime.clearEntityArrayPreview();
 
   // CAD：加载完成前阻止阵列，完成后按线稿世界包围盒支持正负局部轴。

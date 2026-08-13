@@ -7,7 +7,6 @@ import {
   type AnimationGroup,
   AssetContainer,
   Color3,
-  Color4,
   CreateGreasedLine,
   DirectionalLight,
   GreasedLineMeshColorDistributionType,
@@ -128,7 +127,7 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from './telemetry/specializedTelemetryBinding';
-import { resolveLocatorBoxIndex, resolveStackerStorageForkReach } from './telemetry/stackerStorageLocation';
+import { resolveLocatorBoxIndex, resolveLocatorCellSupportWorldPosition, resolveStackerStorageForkReach } from './telemetry/stackerStorageLocation';
 import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from './runtimeValueUtils';
 import {
   clampNumber,
@@ -240,6 +239,7 @@ const MODEL_GENERATOR_MARKER_COLOR = '#19c7d4';
 const MODEL_GENERATOR_MARKER_ALPHA = 0.65;
 const LOCATOR_SURFACE_ALPHA = 0.025;
 const SELECTED_LOCATOR_SURFACE_ALPHA = 0.08;
+const LOCATOR_CONTIGUOUS_EPSILON = 1e-6;
 const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
 const CHAIN_CONVEYOR_MODEL_KEYS = new Set(['chain-conveyor', 'newchain-conveyor']);
 const CHAIN_CONVEYOR_SCRIPT_FILENAMES = new Set([
@@ -401,7 +401,12 @@ type ModelParameterBaselineValue = boolean | number | string | Vector3Data | Tex
 export type LocatorRuntimeEntry = {
   entityId: string;
   root: TransformNode;
-  boxes: Mesh[];
+  /** 全部货格共用的薄实例填充网格：一格一实例，整货架一次 draw call。 */
+  fillMesh: Mesh;
+  /** 全部货格边线合并的线框网格（12 边 × 格数），仅描边不拾取。 */
+  edgeLines: LinesMesh;
+  /** 构建网格时实际使用的步距；解析格子世界坐标必须与渲染公式同源。 */
+  cellSteps: LocatorBindingSteps;
   material: StandardMaterial;
   assetId: string;
   signature: string;
@@ -1957,13 +1962,9 @@ export class SceneRuntime {
 
     const locator = this.locators.get(entityId);
     if (locator) {
-      let mergedBounds: RuntimeWorldBounds | null = null;
-      for (const box of locator.boxes) {
-        const bounds = getMeshWorldBounds(box);
-        if (!bounds) continue;
-        mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
-      }
-      if (mergedBounds) return mergedBounds;
+      // fillMesh 的局部包围盒已覆盖全部薄实例格子，直接读世界包围盒即可。
+      const bounds = getMeshWorldBounds(locator.fillMesh);
+      if (bounds) return bounds;
     }
 
     const cadReference = this.cadReferences.get(entityId);
@@ -2506,9 +2507,7 @@ export class SceneRuntime {
     const locator = this.locators.get(entity.id);
     if (locator && entity.components.locator) {
       this.applyLocatorStyle(locator, selected);
-      for (const box of locator.boxes) {
-        this.applyMeshInteractivity(box, entity.id);
-      }
+      this.applyLocatorInteractivity(locator, entity.id);
     }
 
     const cadReference = this.cadReferences.get(entity.id);
@@ -2925,17 +2924,12 @@ export class SceneRuntime {
       toX,
       toY,
     });
-    const box = boxIndex === null ? null : locator.boxes[boxIndex];
-    if (!box) return null;
-    box.computeWorldMatrix(true);
-    // 货物模板原点即底部支撑点：矩阵平移取 box 世界包围盒底面中心，与 stacker 接管货物的支撑位一致
-    const worldMatrix = box.getWorldMatrix().clone();
-    const bounds = box.getBoundingInfo().boundingBox;
-    worldMatrix.setTranslation(new Vector3(
-      (bounds.minimumWorld.x + bounds.maximumWorld.x) / 2,
-      bounds.minimumWorld.y,
-      (bounds.minimumWorld.z + bounds.maximumWorld.z) / 2,
-    ));
+    if (boxIndex === null) return null;
+    const supportPosition = resolveLocatorCellSupportWorldPosition(locator, boxIndex);
+    if (!supportPosition) return null;
+    // 货物模板原点即底部支撑点：矩阵平移取格子底面中心，与 stacker 接管货物的支撑位一致
+    const worldMatrix = locator.root.getWorldMatrix().clone();
+    worldMatrix.setTranslation(supportPosition);
     return worldMatrix;
   }
 
@@ -3100,20 +3094,22 @@ export class SceneRuntime {
 
     if (runtimeLocator.signature !== signature) {
       // Rebuild grid
-      for (const box of runtimeLocator.boxes) {
-        box.dispose(false, false);
-      }
-      runtimeLocator.boxes = this.createLocatorBoxes(entity.id, locator, runtimeLocator.root, runtimeLocator.material, bindingSteps ?? undefined);
+      const cellSteps = {
+        columnStepX: bindingSteps?.columnStepX ?? locator.length + locator.columnGap,
+        layerStepY: bindingSteps?.layerStepY ?? locator.height + locator.layerGap,
+      };
+      runtimeLocator.fillMesh.dispose(false, false);
+      runtimeLocator.edgeLines.dispose(false, false);
+      const rebuilt = this.buildLocatorGridMeshes(entity.id, locator, runtimeLocator.root, runtimeLocator.material, cellSteps);
+      runtimeLocator.fillMesh = rebuilt.fillMesh;
+      runtimeLocator.edgeLines = rebuilt.edgeLines;
+      runtimeLocator.cellSteps = cellSteps;
       runtimeLocator.signature = signature;
     }
 
-    for (const box of runtimeLocator.boxes) {
-      box.metadata = { ...(box.metadata ?? {}), storageLocation: locatorMetadata };
-    }
+    runtimeLocator.fillMesh.metadata = { ...(runtimeLocator.fillMesh.metadata ?? {}), storageLocation: locatorMetadata };
     this.applyLocatorStyle(runtimeLocator, selected && !bound);
-    for (const box of runtimeLocator.boxes) {
-      this.applyMeshInteractivity(box, entity.id);
-    }
+    this.applyLocatorInteractivity(runtimeLocator, entity.id);
 
     if (locator.fetchDrive?.enabled) {
       if (!this.locatorFetchRuntimes.has(entity.id)) {
@@ -4051,7 +4047,7 @@ export class SceneRuntime {
     return mesh;
   }
 
-  /** 创建虚拟定位线框：根节点交给 Gizmo，子级透明盒网格负责拾取和边线显示。 */
+  /** 创建虚拟定位线框：根节点交给 Gizmo；填充面与边线各一个网格，整货架只产生两次 draw call。 */
   private createLocator(entityId: string, locator: LocatorComponent, bindingSteps?: LocatorBindingSteps | null): LocatorRuntimeEntry {
     const root = new TransformNode(`${entityId}_locatorRoot`, this.scene);
     const material = new StandardMaterial(`${entityId}_locatorMat`, this.scene);
@@ -4061,32 +4057,110 @@ export class SceneRuntime {
     material.diffuseColor = Color3.FromHexString(LOCATOR_EDGE_COLOR);
     material.emissiveColor = Color3.FromHexString(LOCATOR_EDGE_COLOR);
 
-    const boxes = this.createLocatorBoxes(entityId, locator, root, material, bindingSteps ?? undefined);
+    const cellSteps: LocatorBindingSteps = {
+      columnStepX: bindingSteps?.columnStepX ?? locator.length + locator.columnGap,
+      layerStepY: bindingSteps?.layerStepY ?? locator.height + locator.layerGap,
+    };
+    const { fillMesh, edgeLines } = this.buildLocatorGridMeshes(entityId, locator, root, material, cellSteps);
 
-    return { entityId, root, boxes, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
+    return { entityId, root, fillMesh, edgeLines, cellSteps, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
   }
 
-  private createLocatorBoxes(entityId: string, locator: LocatorComponent, root: TransformNode, material: StandardMaterial, bindingSteps?: LocatorBindingSteps): Mesh[] {
-    const boxes: Mesh[] = [];
-    const { length, height, width, columns, layers, columnGap, layerGap } = locator;
-    const columnStepX = bindingSteps?.columnStepX ?? length + columnGap;
-    const layerStepY = bindingSteps?.layerStepY ?? height + layerGap;
+  /**
+   * 生成货格的填充网格与合并边线网格。
+   * 格子中心公式（列 × 列步距, 高/2 + 层 × 层步距, 0）是渲染与支撑位解析的共同来源，改动必须两边同步。
+   * 连续网格（步距等于格子尺寸）时合并为单个覆盖盒 + 通长网格线，软渲染下避免上万实例的顶点处理。
+   */
+  private buildLocatorGridMeshes(
+    entityId: string,
+    locator: LocatorComponent,
+    root: TransformNode,
+    material: StandardMaterial,
+    cellSteps: LocatorBindingSteps,
+  ): { fillMesh: Mesh; edgeLines: LinesMesh } {
+    const { length, height, width, columns, layers } = locator;
+    const cellCount = Math.max(1, columns * layers);
+    const contiguous =
+      Math.abs(cellSteps.columnStepX - length) < LOCATOR_CONTIGUOUS_EPSILON &&
+      Math.abs(cellSteps.layerStepY - height) < LOCATOR_CONTIGUOUS_EPSILON;
 
-    for (let layer = 0; layer < layers; layer += 1) {
-      for (let col = 0; col < columns; col += 1) {
-        const box = MeshBuilder.CreateBox(`${entityId}_locatorBox_${col}_${layer}`, { width: length, height, depth: width }, this.scene);
-        box.parent = root;
-        box.position.set(col * columnStepX, height / 2 + layer * layerStepY, 0);
-        box.isPickable = true;
-        box.material = material;
-        box.metadata = { ...(box.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
-        box.enableEdgesRendering();
-        box.edgesWidth = 2;
-        box.edgesColor = this.color4FromHex(LOCATOR_EDGE_COLOR, 1);
-        boxes.push(box);
+    const halfLength = length / 2;
+    const halfHeight = height / 2;
+    const halfWidth = width / 2;
+    const edgeLines: Vector3[][] = [];
+
+    let fillMesh: Mesh;
+    if (contiguous) {
+      const spanX = (columns - 1) * cellSteps.columnStepX + length;
+      const spanY = (layers - 1) * cellSteps.layerStepY + height;
+      fillMesh = MeshBuilder.CreateBox(`${entityId}_locatorFill`, { width: spanX, height: spanY, depth: width }, this.scene);
+      fillMesh.position.set((columns - 1) * cellSteps.columnStepX / 2, spanY / 2, 0);
+
+      const minX = -halfLength;
+      const maxX = minX + spanX;
+      const maxY = spanY;
+      for (const z of [-halfWidth, halfWidth]) {
+        for (let i = 0; i <= columns; i += 1) {
+          const x = minX + i * cellSteps.columnStepX;
+          edgeLines.push([new Vector3(x, 0, z), new Vector3(x, maxY, z)]);
+        }
+        for (let j = 0; j <= layers; j += 1) {
+          const y = j * cellSteps.layerStepY;
+          edgeLines.push([new Vector3(minX, y, z), new Vector3(maxX, y, z)]);
+        }
       }
+      for (let i = 0; i <= columns; i += 1) {
+        for (let j = 0; j <= layers; j += 1) {
+          const x = minX + i * cellSteps.columnStepX;
+          const y = j * cellSteps.layerStepY;
+          edgeLines.push([new Vector3(x, y, -halfWidth), new Vector3(x, y, halfWidth)]);
+        }
+      }
+    } else {
+      fillMesh = MeshBuilder.CreateBox(`${entityId}_locatorFill`, { width: length, height, depth: width }, this.scene);
+      const matrices = new Float32Array(cellCount * 16);
+      for (let layer = 0; layer < layers; layer += 1) {
+        for (let col = 0; col < columns; col += 1) {
+          const cellIndex = layer * columns + col;
+          const centerX = col * cellSteps.columnStepX;
+          const centerY = height / 2 + layer * cellSteps.layerStepY;
+          Matrix.Translation(centerX, centerY, 0).copyToArray(matrices, cellIndex * 16);
+
+          const minX = centerX - halfLength;
+          const maxX = centerX + halfLength;
+          const minY = centerY - halfHeight;
+          const maxY = centerY + halfHeight;
+          const minZ = -halfWidth;
+          const maxZ = halfWidth;
+          edgeLines.push(
+            [new Vector3(minX, minY, minZ), new Vector3(maxX, minY, minZ)],
+            [new Vector3(maxX, minY, minZ), new Vector3(maxX, minY, maxZ)],
+            [new Vector3(maxX, minY, maxZ), new Vector3(minX, minY, maxZ)],
+            [new Vector3(minX, minY, maxZ), new Vector3(minX, minY, minZ)],
+            [new Vector3(minX, maxY, minZ), new Vector3(maxX, maxY, minZ)],
+            [new Vector3(maxX, maxY, minZ), new Vector3(maxX, maxY, maxZ)],
+            [new Vector3(maxX, maxY, maxZ), new Vector3(minX, maxY, maxZ)],
+            [new Vector3(minX, maxY, maxZ), new Vector3(minX, maxY, minZ)],
+            [new Vector3(minX, minY, minZ), new Vector3(minX, maxY, minZ)],
+            [new Vector3(maxX, minY, minZ), new Vector3(maxX, maxY, minZ)],
+            [new Vector3(maxX, minY, maxZ), new Vector3(maxX, maxY, maxZ)],
+            [new Vector3(minX, minY, maxZ), new Vector3(minX, maxY, maxZ)],
+          );
+        }
+      }
+      fillMesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
+      fillMesh.thinInstanceRefreshBoundingInfo(true);
     }
-    return boxes;
+    fillMesh.parent = root;
+    fillMesh.material = material;
+    fillMesh.metadata = { [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
+
+    const edgeLinesMesh = MeshBuilder.CreateLineSystem(`${entityId}_locatorEdges`, { lines: edgeLines }, this.scene);
+    edgeLinesMesh.parent = root;
+    edgeLinesMesh.color = Color3.FromHexString(LOCATOR_EDGE_COLOR);
+    edgeLinesMesh.alpha = 1;
+    edgeLinesMesh.isPickable = false;
+    return { fillMesh, edgeLines: edgeLinesMesh };
   }
 
   /** 读取货架脚本写入 contentRoot metadata 的内置货格实测布局；字段缺失或非有限数字时视为未就绪。 */
@@ -4148,12 +4222,13 @@ export class SceneRuntime {
 
     const locator = this.locators.get(entityId);
     if (locator) {
+      const renderMeshes: AbstractMesh[] = [locator.fillMesh, locator.edgeLines];
       return {
         kind: 'locator',
         root: locator.root,
-        geometryMeshes: locator.boxes,
-        previewMeshes: locator.boxes,
-        geometryReady: locator.boxes.length > 0,
+        geometryMeshes: renderMeshes,
+        previewMeshes: renderMeshes,
+        geometryReady: true,
         strategy: 'clone-hierarchy',
       };
     }
@@ -4226,6 +4301,7 @@ export class SceneRuntime {
       const clone = source.root.clone(cloneName, null, false);
       if (!clone) return null;
       this.prepareEntityArrayPreviewClone(clone);
+      this.copyThinInstanceBuffersForPreviewClone(source.root, clone);
       return clone;
     }
 
@@ -4289,6 +4365,39 @@ export class SceneRuntime {
     repairInstancedMeshBufferContainers(previewMeshes);
   }
 
+  /**
+   * 递归 clone 同样不携带 thinInstance 矩阵缓冲；从源拷贝，预览副本才能呈现全部实例。
+   * 子克隆按 `克隆根名.源相对路径` 命名（见 TransformNode/Mesh._copySource），按相对路径回溯源 Mesh。
+   */
+  private copyThinInstanceBuffersForPreviewClone(sourceRoot: TransformNode, cloneRoot: TransformNode): void {
+    const clonePrefix = `${cloneRoot.name}.`;
+    const cloneMeshesByPath = new Map<string, AbstractMesh>();
+    for (const node of cloneRoot.getDescendants(false)) {
+      if (node instanceof AbstractMesh && node.name.startsWith(clonePrefix)) {
+        cloneMeshesByPath.set(node.name.slice(clonePrefix.length), node);
+      }
+    }
+    if (cloneMeshesByPath.size === 0) return;
+
+    const relativePathOf = (node: Node): string => {
+      const parts: string[] = [];
+      let current: Node | null = node;
+      while (current && current !== sourceRoot) {
+        parts.unshift(current.name);
+        current = current.parent;
+      }
+      return parts.join('.');
+    };
+    for (const node of sourceRoot.getDescendants(false)) {
+      if (!(node instanceof Mesh) || node.thinInstanceCount === 0) continue;
+      const matrixData = node._thinInstanceDataStorage?.matrixData;
+      const cloneMesh = cloneMeshesByPath.get(relativePathOf(node));
+      if (!matrixData || !(cloneMesh instanceof Mesh)) continue;
+      cloneMesh.thinInstanceSetBuffer('matrix', new Float32Array(matrixData), 16, true);
+      cloneMesh.thinInstanceRefreshBoundingInfo(true);
+    }
+  }
+
   /** 释放实体对应的 Mesh 与材质资源。 */
   private disposeMesh(entityId: string, mesh: Mesh): void {
     this.clearEntityArrayPreviewIfSource(entityId);
@@ -4297,13 +4406,12 @@ export class SceneRuntime {
     this.meshes.delete(entityId);
   }
 
-  /** 释放虚拟定位线框的根节点、网格盒和材质。 */
+  /** 释放虚拟定位线框的根节点、填充/边线网格和材质。 */
   private disposeLocator(entityId: string, locator: LocatorRuntimeEntry): void {
     this.clearEntityArrayPreviewIfSource(entityId);
     this.disposeLocatorFetchRuntime(entityId);
-    for (const box of locator.boxes) {
-      box.dispose(false, false);
-    }
+    locator.fillMesh.dispose(false, false);
+    locator.edgeLines.dispose(false, false);
     locator.material.dispose();
     locator.root.dispose(false, true);
     this.locators.delete(entityId);
@@ -4713,6 +4821,12 @@ export class SceneRuntime {
     mesh.isPickable = visible && this.isEntityScenePickable(entityId);
   }
 
+  /** 货格交互：填充网格承载拾取（薄实例拾取解析到实体），边线只跟随显隐。 */
+  private applyLocatorInteractivity(locator: LocatorRuntimeEntry, entityId: string): void {
+    this.applyMeshInteractivity(locator.fillMesh, entityId);
+    locator.edgeLines.isVisible = this.isEntityVisible(entityId);
+  }
+
   /** 将显隐和锁定状态应用到导入模型的根节点与子 Mesh。 */
   private applyModelInteractivity(model: ModelRuntimeEntry, entityId: string): void {
     const keepScriptHostActive = model.externalScriptStarting
@@ -4969,7 +5083,7 @@ export class SceneRuntime {
     }
   }
 
-  /** 根据选中状态更新全部 locator 盒子边线和表面颜色。 */
+  /** 根据选中状态更新 locator 填充面与边线颜色。 */
   private applyLocatorStyle(entry: LocatorRuntimeEntry, selected: boolean): void {
     const color = selected ? SELECTED_MATERIAL_COLOR : LOCATOR_EDGE_COLOR;
     const color3 = Color3.FromHexString(color);
@@ -4977,17 +5091,7 @@ export class SceneRuntime {
     entry.material.alpha = selected ? SELECTED_LOCATOR_SURFACE_ALPHA : LOCATOR_SURFACE_ALPHA;
     entry.material.diffuseColor = color3;
     entry.material.emissiveColor = color3;
-
-    for (const box of entry.boxes) {
-      box.edgesWidth = selected ? 4 : 2;
-      box.edgesColor = this.color4FromHex(color, 1);
-    }
-  }
-
-  /** 从十六进制颜色生成带透明度的 Color4，用于 Babylon edgesRenderer。 */
-  private color4FromHex(hexColor: string, alpha: number): Color4 {
-    const color = this.readColor(hexColor);
-    return new Color4(color.r, color.g, color.b, alpha);
+    entry.edgeLines.color = color3;
   }
 
   /** 读取材质颜色，非法颜色回退到默认编辑器颜色。 */
