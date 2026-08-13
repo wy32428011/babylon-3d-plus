@@ -5,6 +5,8 @@ import type {
   DeploymentExportRequest,
   DeploymentExportResult,
   DataPlatformConfig,
+  DataPlatformEnvironmentSyncProgress,
+  DataPlatformEnvironmentSyncRequest,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
@@ -18,6 +20,7 @@ import type {
   DeploymentExportRevealRequest,
   DigitalTwinPublishCancelRequest,
   DigitalTwinPublishContext,
+  DigitalTwinPublishContextRequest,
   DigitalTwinPublishProgress,
   DigitalTwinPublishRequest,
   DigitalTwinPublishResult,
@@ -30,6 +33,9 @@ import type {
   LoadSceneFileRequest,
   LoadSceneResult,
   ModelPackageVariant,
+  MqttConnectionTestCancelRequest,
+  MqttConnectionTestRequest,
+  MqttConnectionTestResult,
   MqttIpcConfigureRequest,
   MqttIpcEvent,
   MqttIpcStatus,
@@ -115,6 +121,22 @@ contextBridge.exposeInMainWorld('editorApi', {
       ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
     };
   },
+  syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => ipcRenderer.invoke('data-platform:syncEnvironments', request),
+  retryDataPlatformEnvironmentSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryEnvironmentSync'),
+  onDataPlatformEnvironmentSyncProgress: (handler: (progress: DataPlatformEnvironmentSyncProgress) => void): (() => void) => {
+    let active = true;
+    const progressGate = createRealtimeFirstProgressGate(handler);
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformEnvironmentSyncProgress) => progressGate.handleRealtime(payload);
+    ipcRenderer.on('data-platform:environmentSyncProgress', listener);
+    void ipcRenderer.invoke('data-platform:getEnvironmentSyncProgress').then((payload: DataPlatformEnvironmentSyncProgress | null) => {
+      if (active) progressGate.handleSnapshot(payload);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      progressGate.dispose();
+      ipcRenderer.removeListener('data-platform:environmentSyncProgress', listener);
+    };
+  },
   syncDataPlatformSkyboxes: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncSkyboxes'),
   retryDataPlatformSkyboxSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retrySkyboxSync'),
   onDataPlatformSkyboxSyncProgress: (onProgress: (progress: DataPlatformSkyboxSyncProgress) => void): (() => void) => {
@@ -160,8 +182,8 @@ contextBridge.exposeInMainWorld('editorApi', {
   importSkyboxFile: (): Promise<ImportSkyboxFileResult> => ipcRenderer.invoke('assets:importSkyboxFile'),
   listModelPackageVariants: (request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> =>
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
-  getDigitalTwinPublishContext: (): Promise<DigitalTwinPublishContext> =>
-    ipcRenderer.invoke('digital-twin-publish:getContext'),
+  getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest): Promise<DigitalTwinPublishContext> =>
+    ipcRenderer.invoke('digital-twin-publish:getContext', request),
   publishDigitalTwin: (request: DigitalTwinPublishRequest): Promise<DigitalTwinPublishResult> =>
     ipcRenderer.invoke('digital-twin-publish:start', request),
   cancelDigitalTwinPublish: (request: DigitalTwinPublishCancelRequest): Promise<boolean> =>
@@ -197,6 +219,10 @@ contextBridge.exposeInMainWorld('editorApi', {
   /** 在文件管理器中定位已经成功发布的导出结果。 */
   revealWebProjectExport: (request: DeploymentExportRevealRequest): Promise<void> =>
     ipcRenderer.invoke('deployment-export:reveal', request),
+  mqttTestConnection: (request: MqttConnectionTestRequest): Promise<MqttConnectionTestResult> =>
+    ipcRenderer.invoke('mqtt:testConnection', request),
+  mqttCancelConnectionTest: (request: MqttConnectionTestCancelRequest): Promise<boolean> =>
+    ipcRenderer.invoke('mqtt:cancelConnectionTest', request),
   mqttConfigure: (request: MqttIpcConfigureRequest): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:configure', request),
   mqttDisconnect: (): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:disconnect'),
   mqttGetStatus: (): Promise<MqttIpcStatus> => ipcRenderer.invoke('mqtt:getStatus'),

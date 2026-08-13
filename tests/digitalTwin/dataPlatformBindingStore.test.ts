@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { lstat, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -9,6 +9,8 @@ import {
   getCurrentDataPlatformBinding,
   getDataPlatformBindingPath,
   readDataPlatformBinding,
+  resolveDataPlatformBindingSharedResourcesRoot,
+  resolveDataPlatformBindingWorkspaceRoot,
   resolveDataPlatformProjectRoot,
   resolveDataPlatformSharedResourcesRoot,
   setCurrentDataPlatformBinding,
@@ -17,9 +19,23 @@ import {
 } from '../../electron/ipc/dataPlatformBindingStore.ts';
 
 test('数据中台工作区按项目与共享资源隔离', () => {
-  const root = path.join('C:', 'workspace');
-  assert.equal(resolveDataPlatformProjectRoot(root, '2054201280000000001'), path.resolve(root, 'Projects', '2054201280000000001'));
+  const root = path.resolve(tmpdir(), 'workspace-contract');
+  const projectRoot = resolveDataPlatformProjectRoot(root, '2054201280000000001');
+  const localProjectRoot = path.resolve(tmpdir(), 'local-project');
+  assert.equal(projectRoot, path.resolve(root, 'Projects', '2054201280000000001'));
   assert.equal(resolveDataPlatformSharedResourcesRoot(root), path.resolve(root, 'SharedResources'));
+  assert.equal(
+    resolveDataPlatformBindingWorkspaceRoot(projectRoot, { workspaceRoot: null, projectId: '2054201280000000001' }),
+    root,
+  );
+  assert.equal(
+    resolveDataPlatformBindingSharedResourcesRoot(localProjectRoot, { workspaceRoot: root, projectId: '2054201280000000001' }),
+    path.resolve(root, 'SharedResources'),
+  );
+  assert.throws(
+    () => resolveDataPlatformBindingWorkspaceRoot(localProjectRoot, { workspaceRoot: null, projectId: '2054201280000000001' }),
+    /无法安全反推/,
+  );
   assert.throws(() => resolveDataPlatformProjectRoot(root, '../escape'), /项目 ID/);
 });
 
@@ -29,6 +45,7 @@ test('本地绑定元数据原子写入并按字符串保留 Long 精度', async
   try {
     const binding = createDataPlatformBinding({
       baseUrl: 'https://twin.example.com/platform/',
+      workspaceRoot: workspace,
       projectId: '2054201280000000001',
       projectName: '一号工程',
       editorProjectId: '2054201280000000002',
@@ -41,8 +58,38 @@ test('本地绑定元数据原子写入并按字符串保留 Long 精度', async
     await writeDataPlatformBinding(projectRoot, binding);
     assert.deepEqual(await readDataPlatformBinding(projectRoot), binding);
     const persisted = JSON.parse(await readFile(getDataPlatformBindingPath(projectRoot), 'utf8'));
+    assert.equal(persisted.workspaceRoot, path.resolve(workspace));
     assert.equal(persisted.resourceRevision, '9007199254740993');
     assert.equal(persisted.latestVersionId, '2054201280000000003');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('旧版绑定缺少 workspaceRoot 时仍可从规范项目目录恢复工作区', async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'zending-binding-legacy-'));
+  const projectId = '2054201280000000004';
+  const projectRoot = resolveDataPlatformProjectRoot(workspace, projectId);
+  const bindingPath = getDataPlatformBindingPath(projectRoot);
+  try {
+    await mkdir(path.dirname(bindingPath), { recursive: true });
+    await writeFile(bindingPath, `${JSON.stringify({
+      version: 1,
+      baseUrl: 'https://twin.example.com/platform',
+      projectId,
+      projectName: '旧版工程',
+      editorProjectId: null,
+      latestVersionId: null,
+      latestVersionNumber: null,
+      resourceRevision: '0',
+      entryScenePath: null,
+      syncedAt: '2026-08-01T08:00:00.000Z',
+    }, null, 2)}
+`, 'utf8');
+
+    const binding = await readDataPlatformBinding(projectRoot);
+    assert.equal(binding?.workspaceRoot, null);
+    assert.equal(resolveDataPlatformBindingWorkspaceRoot(projectRoot, binding!), path.resolve(workspace));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

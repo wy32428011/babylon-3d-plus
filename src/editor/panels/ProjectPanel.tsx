@@ -81,6 +81,21 @@ type DataPlatformModelSyncApi = {
   retryDataPlatformModelSync?: () => Promise<boolean>;
 };
 
+type DataPlatformEnvironmentSyncProgress = {
+  runId: string;
+  contextKey: string;
+  phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+type DataPlatformEnvironmentSyncApi = {
+  onDataPlatformEnvironmentSyncProgress?: (listener: (progress: DataPlatformEnvironmentSyncProgress) => void) => () => void;
+  retryDataPlatformEnvironmentSync?: () => Promise<boolean>;
+};
+
 type DataPlatformImageSyncProgress = {
   runId: string;
   phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
@@ -115,6 +130,19 @@ const DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS: Record<DataPlatformModelSyncProgres
 
 function getDataPlatformModelSyncApi(): DataPlatformModelSyncApi {
   return (window.editorApi ?? {}) as DataPlatformModelSyncApi;
+}
+
+const DATA_PLATFORM_ENVIRONMENT_SYNC_PHASE_LABELS: Record<DataPlatformEnvironmentSyncProgress['phase'], string> = {
+  querying: '查询环境模型',
+  downloading: '下载环境模型',
+  validating: '校验环境模型',
+  promoting: '写入环境缓存',
+  completed: '环境同步完成',
+  failed: '环境同步失败',
+};
+
+function getDataPlatformEnvironmentSyncApi(): DataPlatformEnvironmentSyncApi {
+  return (window.editorApi ?? {}) as DataPlatformEnvironmentSyncApi;
 }
 
 const DATA_PLATFORM_IMAGE_SYNC_PHASE_LABELS: Record<DataPlatformImageSyncProgress['phase'], string> = {
@@ -174,6 +202,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const skyboxSyncControllerRef = useRef<SkyboxSyncController | null>(null);
   const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshModelSyncRunIdRef = useRef<string | null>(null);
+  const environmentSyncCompletedDismissTimerRef = useRef<number | null>(null);
+  const lastSceneRefreshEnvironmentSyncRunIdRef = useRef<string | null>(null);
   const imageSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshImageSyncRunIdRef = useRef<string | null>(null);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
@@ -204,6 +234,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   });
   const [modelSyncProgress, setModelSyncProgress] = useState<DataPlatformModelSyncProgress | null>(null);
   const [isRetryingModelSync, setIsRetryingModelSync] = useState(false);
+  const [environmentSyncProgress, setEnvironmentSyncProgress] = useState<DataPlatformEnvironmentSyncProgress | null>(null);
+  const [isRetryingEnvironmentSync, setIsRetryingEnvironmentSync] = useState(false);
   const [syncedImages, setSyncedImages] = useState<SyncedImageAssetEntry[]>([]);
   const [imageSyncProgress, setImageSyncProgress] = useState<DataPlatformImageSyncProgress | null>(null);
   const [isRetryingImageSync, setIsRetryingImageSync] = useState(false);
@@ -322,6 +354,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
     const matchedAsset = findImportedAssetForPackagePath(
       environment.packagePath,
       createImportedAssetIndexes(environmentAssets),
+      environment.source === 'data-platform'
+        ? { sourceKey: environment.dataPlatformSourceKey, resourceId: environment.dataPlatformResourceId }
+        : undefined,
     );
     if (!matchedAsset || matchedAsset.libraryKind !== 'environment') return false;
 
@@ -330,6 +365,18 @@ export function ProjectPanel(props: ProjectPanelProps) {
       if (!environmentConfig) {
         pushLog('环境模型资源已更新，但当前场景环境配置无效，未自动刷新。');
         return false;
+      }
+
+      if (environment.source === 'data-platform') {
+        const requestId = requestEnvironmentApply(environment, {
+          autoAlign: false,
+          focusAfterLoad: false,
+          commandLabel: '刷新环境模型资源',
+          successMessage: '环境模型运行缓存已刷新，并保留场景绑定身份与显示设置。',
+          persistSceneChange: false,
+          runtimeEnvironment: environmentConfig,
+        });
+        return requestId !== null;
       }
 
       const requestId = requestEnvironmentApply(environmentConfig, {
@@ -580,6 +627,40 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }, [props.readOnly, sceneDocument.id, sceneSessionId, skyboxSyncContextKey]);
 
   useEffect(() => {
+    const environmentSyncApi = getDataPlatformEnvironmentSyncApi();
+    if (!environmentSyncApi.onDataPlatformEnvironmentSyncProgress) return undefined;
+    const clearCompletedTimer = () => {
+      if (environmentSyncCompletedDismissTimerRef.current === null) return;
+      window.clearTimeout(environmentSyncCompletedDismissTimerRef.current);
+      environmentSyncCompletedDismissTimerRef.current = null;
+    };
+    const unsubscribe = environmentSyncApi.onDataPlatformEnvironmentSyncProgress((progress) => {
+      clearCompletedTimer();
+      setEnvironmentSyncProgress(progress);
+      const label = DATA_PLATFORM_ENVIRONMENT_SYNC_PHASE_LABELS[progress.phase];
+      pushLog(`数据中台环境模型同步：${label}${progress.total > 0 ? `（${progress.completed}/${progress.total}）` : ''}${progress.error || progress.message ? `：${progress.error || progress.message}` : ''}`);
+      if (progress.phase === 'completed') {
+        if (lastSceneRefreshEnvironmentSyncRunIdRef.current !== progress.runId) {
+          lastSceneRefreshEnvironmentSyncRunIdRef.current = progress.runId;
+          void loadProjectAssets(true).then((loaded) => {
+            if (!loaded.ok && lastSceneRefreshEnvironmentSyncRunIdRef.current === progress.runId) {
+              lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
+            }
+          });
+        }
+        environmentSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
+          environmentSyncCompletedDismissTimerRef.current = null;
+          setEnvironmentSyncProgress((current) => current?.runId === progress.runId && current.phase === 'completed' ? null : current);
+        }, 2200);
+      }
+    });
+    return () => {
+      clearCompletedTimer();
+      unsubscribe();
+    };
+  }, [loadProjectAssets, pushLog]);
+
+  useEffect(() => {
     const dataPlatformImageSyncApi = getDataPlatformImageSyncApi();
     if (!dataPlatformImageSyncApi.onDataPlatformImageSyncProgress) return undefined;
 
@@ -703,6 +784,28 @@ export function ProjectPanel(props: ProjectPanelProps) {
       setIsRetryingModelSync(false);
     }
   }
+
+  function handleDismissDataPlatformEnvironmentSyncFailure(): void {
+    if (environmentSyncProgress?.phase !== 'failed') return;
+    setEnvironmentSyncProgress(null);
+  }
+
+  async function handleRetryDataPlatformEnvironmentSync(): Promise<void> {
+    if (!environmentSyncProgress || environmentSyncProgress.phase !== 'failed') return;
+    const api = getDataPlatformEnvironmentSyncApi();
+    if (!api.retryDataPlatformEnvironmentSync) return;
+    setIsRetryingEnvironmentSync(true);
+    try {
+      const started = await api.retryDataPlatformEnvironmentSync();
+      if (started) setEnvironmentSyncProgress({ ...environmentSyncProgress, phase: 'querying', error: null, message: '正在重试环境模型同步…' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setEnvironmentSyncProgress({ ...environmentSyncProgress, error: message });
+    } finally {
+      setIsRetryingEnvironmentSync(false);
+    }
+  }
+
 
   async function handleSyncDataPlatformImages(): Promise<void> {
     if (props.readOnly) return;
@@ -1100,6 +1203,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
     ? `${modelSyncProgress.completed}/${modelSyncProgress.total}`
     : null;
   const modelSyncMessage = modelSyncProgress?.error || modelSyncProgress?.message || '等待模型同步进度...';
+  const environmentSyncPhaseLabel = environmentSyncProgress
+    ? DATA_PLATFORM_ENVIRONMENT_SYNC_PHASE_LABELS[environmentSyncProgress.phase]
+    : null;
+  const environmentSyncCountLabel = environmentSyncProgress
+    ? `${environmentSyncProgress.completed}/${environmentSyncProgress.total}`
+    : null;
+  const environmentSyncMessage = environmentSyncProgress?.error || environmentSyncProgress?.message || '等待环境模型同步进度...';
   const imageSyncPhaseLabel = imageSyncProgress
     ? DATA_PLATFORM_IMAGE_SYNC_PHASE_LABELS[imageSyncProgress.phase]
     : null;
@@ -1312,6 +1422,26 @@ export function ProjectPanel(props: ProjectPanelProps) {
                 onClick={handleDismissDataPlatformSkyboxSyncFailure}
                 type="button"
               >
+                关闭
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {environmentSyncProgress ? (
+        <div className={`library-sync-status library-sync-status-${environmentSyncProgress.phase}`} role="status" aria-live="polite">
+          <div className="library-sync-status-heading">
+            <strong>{environmentSyncPhaseLabel}</strong>
+            {environmentSyncCountLabel ? <span>{environmentSyncCountLabel}</span> : null}
+          </div>
+          <p>{environmentSyncMessage}</p>
+          {environmentSyncProgress.phase === 'failed' ? (
+            <div className="library-sync-status-actions">
+              <button disabled={isRetryingEnvironmentSync} onClick={() => void handleRetryDataPlatformEnvironmentSync()} type="button">
+                {isRetryingEnvironmentSync ? '重试中...' : '重试环境同步'}
+              </button>
+              <button aria-label="关闭环境模型同步失败提示" className="library-sync-status-close-button" onClick={handleDismissDataPlatformEnvironmentSyncFailure} type="button">
                 关闭
               </button>
             </div>

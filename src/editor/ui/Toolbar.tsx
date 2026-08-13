@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore, type FormEvent } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from 'react';
 import type {
   CameraOrientation,
   CameraProjection,
@@ -19,6 +19,12 @@ import {
 import { reindexRecordAfterRemoval } from '../model/mqttConfigUtils';
 import { parseDeviceTelemetryMessage } from '../../runtime/mqtt/deviceTelemetry';
 import { mqttRuntimeStatusStore } from '../../runtime/mqtt/mqttRuntimeStatus';
+import {
+  startMqttConnectionTest,
+  type MqttConnectionTestHandle,
+  type MqttConnectionTestResult,
+} from '../../runtime/mqtt/MqttConnectionTest';
+import { resolveMqttStackerSubscriptions } from '../../runtime/mqtt/MqttStackerTelemetryConfig';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
 import type {
   CadImportProgress,
@@ -83,6 +89,16 @@ const MQTT_STATUS_LABELS = {
   disconnected: '已断开',
   error: '错误',
 } as const;
+
+type MqttConnectionTestViewState = {
+  state: 'idle' | 'testing' | 'success' | 'error';
+  message: string;
+};
+
+const MQTT_CONNECTION_TEST_IDLE: MqttConnectionTestViewState = {
+  state: 'idle',
+  message: '未测试',
+};
 
 type MqttPreviewResult = {
   topic: string;
@@ -194,6 +210,10 @@ function ToolbarIconButton(props: ToolbarIconButtonProps) {
 
 export function Toolbar(props: ToolbarProps) {
   const [mqttDraft, setMqttDraft] = useState<MqttConfig>(props.mqttConfig);
+  const [mqttConnectionTestState, setMqttConnectionTestState] = useState<MqttConnectionTestViewState>(MQTT_CONNECTION_TEST_IDLE);
+  const mqttConnectionTestHandleRef = useRef<MqttConnectionTestHandle | null>(null);
+  const mqttConnectionTestCleanupRef = useRef<Promise<void>>(Promise.resolve());
+  const mqttConnectionTestGenerationRef = useRef(0);
   const [jsonFieldsDrafts, setJsonFieldsDrafts] = useState<Record<number, string>>({});
   const [jsonFieldsErrors, setJsonFieldsErrors] = useState<Record<number, string>>({});
   const [previewSubscriptionIndex, setPreviewSubscriptionIndex] = useState(0);
@@ -213,6 +233,7 @@ export function Toolbar(props: ToolbarProps) {
 
   useEffect(() => {
     if (props.mqttConfigDialogOpen) {
+      resetMqttConnectionTest();
       setMqttDraft(props.mqttConfig);
       setJsonFieldsDrafts(Object.fromEntries((props.mqttConfig.subscriptions ?? []).map((subscription, index) => [index, subscription.adapter.kind === 'json-path' ? JSON.stringify(subscription.adapter.fields ?? {}, null, 2) : '{}'])));
       setJsonFieldsErrors({});
@@ -225,12 +246,17 @@ export function Toolbar(props: ToolbarProps) {
     }
   }, [props.mqttConfig, props.mqttConfigDialogOpen]);
 
+  useEffect(() => () => {
+    mqttConnectionTestGenerationRef.current += 1;
+    void queueMqttConnectionTestCancellation();
+  }, []);
+
   useEffect(() => {
     if (!props.mqttConfigDialogOpen) return;
 
     /** 弹窗打开后允许按 Esc 关闭，避免键盘用户被困在遮罩内。 */
     function handleWindowKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape') props.onCloseMqttConfig();
+      if (event.key === 'Escape') handleCloseMqttConfigDialog();
     }
 
     window.addEventListener('keydown', handleWindowKeyDown);
@@ -278,8 +304,73 @@ export function Toolbar(props: ToolbarProps) {
     }));
   }
 
+  /** 将当前测试的物理清理串行化，供字段变化后的快速重测等待。 */
+  function queueMqttConnectionTestCancellation(): Promise<void> {
+    const previousHandle = mqttConnectionTestHandleRef.current;
+    mqttConnectionTestHandleRef.current = null;
+    if (!previousHandle) return mqttConnectionTestCleanupRef.current;
+
+    const previousCleanup = mqttConnectionTestCleanupRef.current;
+    const cleanup = (async () => {
+      await previousCleanup;
+      await previousHandle.cancel();
+    })();
+    mqttConnectionTestCleanupRef.current = cleanup.catch(() => undefined);
+    return mqttConnectionTestCleanupRef.current;
+  }
+
+  /** 取消旧连接测试并恢复未测试状态，防止延迟结果覆盖新草稿。 */
+  function resetMqttConnectionTest(): void {
+    mqttConnectionTestGenerationRef.current += 1;
+    void queueMqttConnectionTestCancellation();
+    setMqttConnectionTestState(MQTT_CONNECTION_TEST_IDLE);
+  }
+
+  /** 关闭弹窗前取消临时连接，保证遮罩、Esc、取消和保存路径行为一致。 */
+  function handleCloseMqttConfigDialog(): void {
+    resetMqttConnectionTest();
+    props.onCloseMqttConfig();
+  }
+
+  /** 使用未保存草稿测试 Broker 会话与全部有效 Topic 的 SUBACK。 */
+  async function handleTestMqttConnection(): Promise<void> {
+    if (props.readOnly) return;
+    const generation = mqttConnectionTestGenerationRef.current + 1;
+    mqttConnectionTestGenerationRef.current = generation;
+    const config = sanitizeMqttConfig(mqttDraft);
+    setMqttConnectionTestState({ state: 'testing', message: '连接测试中…' });
+
+    await queueMqttConnectionTestCancellation();
+    if (generation !== mqttConnectionTestGenerationRef.current) return;
+
+    const handle = startMqttConnectionTest({
+      requestId: crypto.randomUUID(),
+      address: config.address,
+      subscriptions: resolveMqttStackerSubscriptions(config).map(({ topic, qos }) => ({ topic, qos })),
+    });
+    if (generation !== mqttConnectionTestGenerationRef.current) {
+      await handle.cancel();
+      return;
+    }
+    mqttConnectionTestHandleRef.current = handle;
+
+    const result: MqttConnectionTestResult = await handle.result;
+    if (
+      generation !== mqttConnectionTestGenerationRef.current
+      || mqttConnectionTestHandleRef.current !== handle
+    ) return;
+    mqttConnectionTestHandleRef.current = null;
+    if (result.status === 'success') {
+      const message = result.message.startsWith('连接成功') ? result.message : `连接成功：${result.message}`;
+      setMqttConnectionTestState({ state: 'success', message });
+    } else if (result.status === 'error') {
+      setMqttConnectionTestState({ state: 'error', message: `连接失败：${result.message}` });
+    }
+  }
+
   /** IP 变化时，如果地址仍是旧 IP 自动生成值，就同步生成新的默认 WebSocket 地址。 */
   function handleMqttIpChange(ip: string): void {
+    resetMqttConnectionTest();
     setMqttDraft((current) => {
       const previousGeneratedAddress = createMqttAddressFromIp(current.ip);
       const shouldRefreshAddress = !current.address.trim() || current.address.trim() === previousGeneratedAddress;
@@ -293,8 +384,21 @@ export function Toolbar(props: ToolbarProps) {
   }
 
 
+  /** 更新真实 Broker 地址并让旧测试结果失效。 */
+  function handleMqttAddressChange(address: string): void {
+    resetMqttConnectionTest();
+    setMqttDraft((current) => ({ ...current, address }));
+  }
+
+  /** 更新兼容 Topic 并让旧测试结果失效。 */
+  function handleMqttLegacyTopicChange(topic: string): void {
+    resetMqttConnectionTest();
+    setMqttDraft((current) => ({ ...current, topic }));
+  }
+
   /** 新增一条 EPV 订阅，保持旧 topic 输入只作为兼容字段。 */
   function handleAddSubscription(): void {
+    resetMqttConnectionTest();
     setMqttDraft((current) => {
       const nextIndex = current.subscriptions?.length ?? 0;
       setJsonFieldsDrafts((drafts) => ({ ...drafts, [nextIndex]: '{}' }));
@@ -308,6 +412,7 @@ export function Toolbar(props: ToolbarProps) {
 
   /** 删除指定订阅，保存时 sanitizer 会在空列表时回退 legacy topic。 */
   function handleRemoveSubscription(index: number): void {
+    resetMqttConnectionTest();
     setMqttDraft((current) => ({ ...current, subscriptions: (current.subscriptions ?? []).filter((_, itemIndex) => itemIndex !== index) }));
     setJsonFieldsDrafts((current) => reindexRecordAfterRemoval(current, index));
     setJsonFieldsErrors((current) => reindexRecordAfterRemoval(current, index));
@@ -315,6 +420,7 @@ export function Toolbar(props: ToolbarProps) {
 
   /** 更新指定订阅并立即归一化局部字段。 */
   function handleSubscriptionChange(index: number, patch: Partial<MqttSubscriptionConfig>): void {
+    if (Object.hasOwn(patch, 'topic') || Object.hasOwn(patch, 'qos')) resetMqttConnectionTest();
     if (patch.adapter?.kind === 'json-path') {
       const fields = patch.adapter.fields;
       setJsonFieldsDrafts((current) => ({ ...current, [index]: JSON.stringify(fields ?? {}, null, 2) }));
@@ -403,7 +509,7 @@ export function Toolbar(props: ToolbarProps) {
     if (props.readOnly) return;
     if (Object.values(jsonFieldsErrors).some(Boolean)) return;
     props.onSaveMqttConfig(sanitizeMqttConfig(mqttDraft));
-    props.onCloseMqttConfig();
+    handleCloseMqttConfigDialog();
   }
 
   return (
@@ -623,7 +729,7 @@ export function Toolbar(props: ToolbarProps) {
         <div
           className="mqtt-config-dialog-backdrop"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) props.onCloseMqttConfig();
+            if (event.target === event.currentTarget) handleCloseMqttConfigDialog();
           }}
         >
           <form
@@ -639,6 +745,13 @@ export function Toolbar(props: ToolbarProps) {
             <p className={`mqtt-runtime-status mqtt-runtime-status-${mqttRuntimeStatus.state}`}>
               当前状态：{MQTT_STATUS_LABELS[mqttRuntimeStatus.state]}
               {mqttRuntimeStatus.lastError ? `；最近错误：${mqttRuntimeStatus.lastError}` : ''}
+            </p>
+            <p
+              aria-live="polite"
+              className={`mqtt-connection-test-status mqtt-connection-test-status-${mqttConnectionTestState.state}`}
+              role="status"
+            >
+              当前连接状态：{mqttConnectionTestState.message}
             </p>
             {props.runtimePreviewError ? (
               <p className="mqtt-config-dialog-error" role="alert">{props.runtimePreviewError}</p>
@@ -704,7 +817,7 @@ export function Toolbar(props: ToolbarProps) {
               <input
                 placeholder="ws://192.168.60.154:8083/mqtt"
                 value={mqttDraft.address}
-                onChange={(event) => setMqttDraft((current) => ({ ...current, address: event.target.value }))}
+                onChange={(event) => handleMqttAddressChange(event.target.value)}
               />
             </label>
             <label className="mqtt-config-dialog-row">
@@ -712,9 +825,19 @@ export function Toolbar(props: ToolbarProps) {
               <input
                 placeholder="dt/factory/logistics/stacker/+/twindatadriven/joint"
                 value={mqttDraft.topic}
-                onChange={(event) => setMqttDraft((current) => ({ ...current, topic: event.target.value }))}
+                onChange={(event) => handleMqttLegacyTopicChange(event.target.value)}
               />
             </label>
+            <div className="mqtt-connection-test-actions">
+              <button
+                aria-label="测试 MQTT 连接"
+                disabled={props.readOnly || mqttConnectionTestState.state === 'testing'}
+                onClick={handleTestMqttConnection}
+                type="button"
+              >
+                {mqttConnectionTestState.state === 'testing' ? '测试中…' : '测试连接'}
+              </button>
+            </div>
             <div className="mqtt-subscription-list">
               <div className="mqtt-subscription-list-header">
                 <strong>订阅列表</strong>
@@ -794,7 +917,7 @@ export function Toolbar(props: ToolbarProps) {
               ) : null}
             </div>
             <div className="mqtt-config-dialog-actions">
-              <button type="button" onClick={props.onCloseMqttConfig}>取消</button>
+              <button type="button" onClick={handleCloseMqttConfigDialog}>取消</button>
               <button className="mqtt-config-dialog-primary" type="submit">保存</button>
             </div>
           </form>

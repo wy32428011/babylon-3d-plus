@@ -38,11 +38,12 @@ test('sandbox preload 入口内联 gate，不得依赖相对模块 require', asy
   assert.match(cjsSource, /function createRealtimeFirstProgressGate/);
 
   const extractInlineGate = (source: string) => {
-    const start = source.indexOf('function createRealtimeFirstProgressGate');
+    const normalizedSource = source.replace(/\r\n/g, '\n');
+    const start = normalizedSource.indexOf('function createRealtimeFirstProgressGate');
     const endMarker = '\n}\n\nconst dataPlatformDeepLinkHandlers';
-    const end = source.indexOf(endMarker, start);
+    const end = normalizedSource.indexOf(endMarker, start);
     assert.ok(start >= 0 && end >= 0, '无法定位 preload 内联 progress gate');
-    return source.slice(start, end + 2).replace(/\r\n/g, '\n');
+    return normalizedSource.slice(start, end + 2);
   };
   assert.equal(extractInlineGate(esmSource), extractInlineGate(cjsSource));
 });

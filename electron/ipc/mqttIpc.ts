@@ -1,6 +1,14 @@
 import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import mqtt, { type IClientSubscribeOptions, type MqttClient } from 'mqtt';
-import type { MqttIpcConfigureRequest, MqttIpcEvent, MqttIpcStatus, MqttIpcSubscriptionConfig } from '../types.js';
+import type {
+  MqttConnectionTestCancelRequest,
+  MqttConnectionTestRequest,
+  MqttConnectionTestResult,
+  MqttIpcConfigureRequest,
+  MqttIpcEvent,
+  MqttIpcStatus,
+  MqttIpcSubscriptionConfig,
+} from '../types.js';
 
 type MqttRendererClient = {
   webContents: WebContents;
@@ -14,7 +22,31 @@ type MqttDisconnectResult =
   | { ok: true }
   | { ok: false; errorMessage: string };
 
+type MqttConnectionTestTask = {
+  key: string;
+  requestId: string;
+  webContentsId: number;
+  client: MqttClient;
+  timeout: ReturnType<typeof setTimeout> | null;
+  startedAt: number;
+  settled: boolean;
+  finishPromise: Promise<MqttConnectionTestResult> | null;
+  resolve: (result: MqttConnectionTestResult) => void;
+};
+
+type PendingMqttConnectionTest = {
+  requestId: string;
+  generation: number;
+  startedAt: number;
+  settled: boolean;
+  resolve: (result: MqttConnectionTestResult) => void;
+};
+
 const clientsByWebContentsId = new Map<number, MqttRendererClient>();
+const connectionTestsByKey = new Map<string, MqttConnectionTestTask>();
+const pendingConnectionTestsByWebContentsId = new Map<number, PendingMqttConnectionTest>();
+const connectionTestGenerationsByWebContentsId = new Map<number, number>();
+const connectionTestCleanupBoundWebContentsIds = new Set<number>();
 let registered = false;
 
 /** 注册受控 MQTT IPC 通道；多次调用只会注册一次，避免热重载或测试重复绑定。 */
@@ -25,16 +57,28 @@ export function registerMqttIpc(): void {
   ipcMain.handle('mqtt:configure', handleConfigure);
   ipcMain.handle('mqtt:disconnect', handleDisconnect);
   ipcMain.handle('mqtt:getStatus', handleGetStatus);
+  ipcMain.handle('mqtt:testConnection', handleTestConnection);
+  ipcMain.handle('mqtt:cancelConnectionTest', handleCancelConnectionTest);
 }
 
-/** 清理所有 renderer 对应的 MQTT 客户端，供 app will-quit 生命周期调用。 */
+/** 清理所有正式客户端和临时测试任务，供应用退出生命周期调用。 */
 export function disposeAllMqttIpcClients(): void {
-  void Promise.allSettled(
-    Array.from(clientsByWebContentsId.values(), (rendererClient) =>
+  const cleanupTasks = [
+    ...Array.from(clientsByWebContentsId.values(), (rendererClient) =>
       disconnectRendererClient(rendererClient, '应用退出，MQTT 连接已关闭。'),
     ),
-  );
+    ...Array.from(connectionTestsByKey.values(), (task) =>
+      finishConnectionTest(task, 'canceled', '应用退出，连接测试已取消。'),
+    ),
+  ];
+  void Promise.allSettled(cleanupTasks);
   clientsByWebContentsId.clear();
+  for (const [webContentsId, pending] of pendingConnectionTestsByWebContentsId) {
+    pendingConnectionTestsByWebContentsId.delete(webContentsId);
+    settlePendingConnectionTest(pending, 'canceled', '应用退出，连接测试已取消。');
+  }
+  connectionTestGenerationsByWebContentsId.clear();
+  connectionTestCleanupBoundWebContentsIds.clear();
 }
 
 /** 处理 renderer 配置请求，仅接受地址和订阅等非敏感字段。 */
@@ -108,6 +152,184 @@ async function handleGetStatus(event: IpcMainInvokeEvent): Promise<MqttIpcStatus
   return getRendererClient(event.sender).status;
 }
 
+/** 使用独立临时客户端测试 Broker 会话和全部订阅 SUBACK，不修改正式运行状态。 */
+async function handleTestConnection(
+  event: IpcMainInvokeEvent,
+  request: MqttConnectionTestRequest,
+): Promise<MqttConnectionTestResult> {
+  const startedAt = Date.now();
+  const normalized = normalizeConnectionTestRequest(request);
+  if ('errorMessage' in normalized) {
+    return createConnectionTestResult(normalized.requestId, 'error', normalized.errorMessage, startedAt);
+  }
+
+  const webContentsId = event.sender.id;
+  const timeoutMs = normalized.timeoutMs;
+  const generation = (connectionTestGenerationsByWebContentsId.get(webContentsId) ?? 0) + 1;
+  connectionTestGenerationsByWebContentsId.set(webContentsId, generation);
+  cancelPendingConnectionTestForWebContents(webContentsId, '同一 renderer 已发起新的连接测试。');
+  bindConnectionTestCleanup(event.sender);
+
+  let resolvePending!: (result: MqttConnectionTestResult) => void;
+  const result = new Promise<MqttConnectionTestResult>((resolve) => {
+    resolvePending = resolve;
+  });
+  const pending: PendingMqttConnectionTest = {
+    requestId: normalized.requestId,
+    generation,
+    startedAt,
+    settled: false,
+    resolve: resolvePending,
+  };
+  pendingConnectionTestsByWebContentsId.set(webContentsId, pending);
+
+  void (async () => {
+    const previousCleanup = cancelConnectionTestsForWebContents(webContentsId, '同一 renderer 已发起新的连接测试。');
+    if (previousCleanup) await previousCleanup;
+    if (!isPendingConnectionTestCurrent(webContentsId, pending)) return;
+
+    let client: MqttClient;
+    try {
+      client = mqtt.connect(normalized.address, {
+        clean: true,
+        clientId: 'babylon-editor-electron-connection-test-' + crypto.randomUUID(),
+        connectTimeout: timeoutMs,
+        reconnectPeriod: 0,
+      });
+    } catch (error) {
+      completePendingConnectionTest(
+        webContentsId,
+        pending,
+        createConnectionTestResult(
+          normalized.requestId,
+          'error',
+          'MQTT 连接失败：' + getErrorMessage(error),
+          startedAt,
+        ),
+      );
+      return;
+    }
+
+    if (!isPendingConnectionTestCurrent(webContentsId, pending)) {
+      try {
+        await client.endAsync(true);
+      } catch {
+        // 请求在建连前已失效，此处只负责释放尚未纳入任务映射的临时客户端。
+      }
+      return;
+    }
+
+    const taskResult = await runConnectionTestTask(
+      webContentsId,
+      normalized,
+      startedAt,
+      client,
+    );
+    completePendingConnectionTest(webContentsId, pending, taskResult);
+  })();
+
+  return result;
+}
+
+/** 将已完成清理的请求注册为活动任务，并等待会话和全部订阅 SUBACK。 */
+function runConnectionTestTask(
+  webContentsId: number,
+  request: NormalizedConnectionTestRequest,
+  startedAt: number,
+  client: MqttClient,
+): Promise<MqttConnectionTestResult> {
+  const key = createConnectionTestKey(webContentsId, request.requestId);
+  return new Promise<MqttConnectionTestResult>((resolve) => {
+    const task: MqttConnectionTestTask = {
+      key,
+      requestId: request.requestId,
+      webContentsId,
+      client,
+      timeout: null,
+      startedAt,
+      settled: false,
+      finishPromise: null,
+      resolve,
+    };
+    connectionTestsByKey.set(key, task);
+    task.timeout = setTimeout(() => {
+      void finishConnectionTest(
+        task,
+        'error',
+        '连接测试超时（' + formatConnectionTestTimeout(request.timeoutMs) + '）。',
+      );
+    }, request.timeoutMs);
+
+    let subscribing = false;
+    client.on('connect', () => {
+      if (task.settled || subscribing) return;
+      subscribing = true;
+      let completedCount = 0;
+
+      for (const subscription of request.subscriptions) {
+        let subscriptionSettled = false;
+        const completeSubscription = (error: unknown): void => {
+          if (task.settled || subscriptionSettled) return;
+          subscriptionSettled = true;
+          if (error) {
+            void finishConnectionTest(
+              task,
+              'error',
+              '订阅 ' + subscription.topic + ' 失败：' + getErrorMessage(error),
+            );
+            return;
+          }
+
+          completedCount += 1;
+          if (completedCount === request.subscriptions.length) {
+            void finishConnectionTest(
+              task,
+              'success',
+              '连接成功，已确认 ' + request.subscriptions.length + ' 个 Topic。',
+            );
+          }
+        };
+
+        try {
+          const options: IClientSubscribeOptions = { qos: subscription.qos };
+          client.subscribe(subscription.topic, options, (error) => completeSubscription(error));
+        } catch (error) {
+          completeSubscription(error);
+        }
+        if (task.settled) break;
+      }
+    });
+
+    client.on('error', (error) => {
+      void finishConnectionTest(task, 'error', 'MQTT 连接失败：' + error.message);
+    });
+
+    client.on('close', () => {
+      void finishConnectionTest(task, 'error', 'MQTT 连接在测试完成前已关闭。');
+    });
+  });
+}
+
+/** 按 renderer 与 requestId 取消对应的临时连接测试。 */
+async function handleCancelConnectionTest(
+  event: IpcMainInvokeEvent,
+  request: MqttConnectionTestCancelRequest,
+): Promise<boolean> {
+  const requestId = typeof request?.requestId === 'string' ? request.requestId.trim() : '';
+  if (!requestId) return false;
+  const webContentsId = event.sender.id;
+  const pending = pendingConnectionTestsByWebContentsId.get(webContentsId);
+  if (pending?.requestId === requestId) {
+    pendingConnectionTestsByWebContentsId.delete(webContentsId);
+    settlePendingConnectionTest(pending, 'canceled', '连接测试已取消。');
+  }
+
+  const task = connectionTestsByKey.get(createConnectionTestKey(webContentsId, requestId));
+  if (!task) return Boolean(pending?.requestId === requestId);
+  await finishConnectionTest(task, 'canceled', '连接测试已取消。');
+  return true;
+}
+
 /** 获取或创建 webContents 级客户端，并绑定销毁清理。 */
 function getRendererClient(webContents: WebContents): MqttRendererClient {
   const existingClient = clientsByWebContentsId.get(webContents.id);
@@ -123,9 +345,147 @@ function getRendererClient(webContents: WebContents): MqttRendererClient {
   clientsByWebContentsId.set(webContents.id, rendererClient);
   webContents.once('destroyed', () => {
     void disconnectRendererClient(rendererClient, 'renderer 已销毁，MQTT 连接已清理。');
+    cancelConnectionTestsForWebContents(webContents.id);
     clientsByWebContentsId.delete(webContents.id);
   });
   return rendererClient;
+}
+
+/** 为只进行测试连接的 renderer 绑定一次销毁清理，避免多次测试累积监听器。 */
+function bindConnectionTestCleanup(webContents: WebContents): void {
+  if (connectionTestCleanupBoundWebContentsIds.has(webContents.id)) return;
+  connectionTestCleanupBoundWebContentsIds.add(webContents.id);
+  webContents.once('destroyed', () => {
+    connectionTestCleanupBoundWebContentsIds.delete(webContents.id);
+    cancelPendingConnectionTestForWebContents(webContents.id);
+    connectionTestGenerationsByWebContentsId.delete(webContents.id);
+    cancelConnectionTestsForWebContents(webContents.id);
+  });
+}
+
+
+/** 判断等待旧连接清理的请求仍是当前 renderer 的最新请求。 */
+function isPendingConnectionTestCurrent(
+  webContentsId: number,
+  pending: PendingMqttConnectionTest,
+): boolean {
+  return !pending.settled
+    && pendingConnectionTestsByWebContentsId.get(webContentsId) === pending
+    && connectionTestGenerationsByWebContentsId.get(webContentsId) === pending.generation;
+}
+
+/** 用结构化结果结算等待阶段，并仅移除仍指向自己的 pending 槽位。 */
+function completePendingConnectionTest(
+  webContentsId: number,
+  pending: PendingMqttConnectionTest,
+  result: MqttConnectionTestResult,
+): void {
+  if (pending.settled) return;
+  pending.settled = true;
+  if (pendingConnectionTestsByWebContentsId.get(webContentsId) === pending) {
+    pendingConnectionTestsByWebContentsId.delete(webContentsId);
+  }
+  pending.resolve(result);
+}
+
+/** 取消 renderer 正在排队的测试请求，防止旧清理完成后建立过期连接。 */
+function cancelPendingConnectionTestForWebContents(
+  webContentsId: number,
+  message = 'renderer 已销毁，连接测试已取消。',
+): boolean {
+  const pending = pendingConnectionTestsByWebContentsId.get(webContentsId);
+  if (!pending) return false;
+  pendingConnectionTestsByWebContentsId.delete(webContentsId);
+  settlePendingConnectionTest(pending, 'canceled', message);
+  return true;
+}
+
+/** 结算尚未创建物理客户端的 pending 请求。 */
+function settlePendingConnectionTest(
+  pending: PendingMqttConnectionTest,
+  status: MqttConnectionTestResult['status'],
+  message: string,
+): void {
+  if (pending.settled) return;
+  pending.settled = true;
+  pending.resolve(createConnectionTestResult(pending.requestId, status, message, pending.startedAt));
+}
+
+/** 取消指定 renderer 尚未完成的全部连接测试。 */
+function cancelConnectionTestsForWebContents(
+  webContentsId: number,
+  message = 'renderer 已销毁，连接测试已取消。',
+): Promise<void> | null {
+  const tasks = Array.from(connectionTestsByKey.values()).filter((task) => task.webContentsId === webContentsId);
+  if (tasks.length === 0) return null;
+  return Promise.all(tasks.map((task) => finishConnectionTest(task, 'canceled', message))).then(() => undefined);
+}
+
+/** 统一结算连接测试；先锁定状态，待物理连接关闭后移除任务，供后续请求复用同一清理 Promise。 */
+function finishConnectionTest(
+  task: MqttConnectionTestTask,
+  status: MqttConnectionTestResult['status'],
+  message: string,
+): Promise<MqttConnectionTestResult> {
+  if (task.finishPromise) return task.finishPromise;
+  task.settled = true;
+  if (task.timeout) {
+    clearTimeout(task.timeout);
+    task.timeout = null;
+  }
+  let resolveFinish!: (result: MqttConnectionTestResult) => void;
+  task.finishPromise = new Promise<MqttConnectionTestResult>((resolve) => {
+    resolveFinish = resolve;
+  });
+
+  void (async () => {
+    let finalStatus = status;
+    let finalMessage = message;
+    try {
+      await task.client.endAsync(true);
+    } catch (error) {
+      if (status !== 'canceled') {
+        finalStatus = 'error';
+        finalMessage += '；清理临时连接失败：' + getErrorMessage(error);
+      }
+    }
+
+    const result = createConnectionTestResult(
+      task.requestId,
+      finalStatus,
+      finalMessage,
+      task.startedAt,
+    );
+    if (connectionTestsByKey.get(task.key) === task) connectionTestsByKey.delete(task.key);
+    task.resolve(result);
+    resolveFinish(result);
+  })();
+  return task.finishPromise;
+}
+
+/** 生成 webContents 范围内稳定的测试任务 key。 */
+function createConnectionTestKey(webContentsId: number, requestId: string): string {
+  return webContentsId + ':' + requestId;
+}
+
+/** 构造结构化测试结果，避免主进程 IPC 裸抛异常。 */
+function createConnectionTestResult(
+  requestId: string,
+  status: MqttConnectionTestResult['status'],
+  message: string,
+  startedAt: number,
+): MqttConnectionTestResult {
+  return {
+    requestId,
+    status,
+    message,
+    durationMs: Math.max(0, Date.now() - startedAt),
+  };
+}
+
+/** 把超时转换为用户可读的秒或毫秒。 */
+function formatConnectionTestTimeout(timeoutMs: number): string {
+  return timeoutMs % 1000 === 0 ? timeoutMs / 1000 + ' 秒' : timeoutMs + ' 毫秒';
 }
 
 /** 建立主进程 mqtt.js 连接，只订阅白名单配置中的 topic 并发送受控事件。 */
@@ -273,6 +633,40 @@ function normalizeConfigureRequest(request: MqttIpcConfigureRequest): MqttIpcCon
       ? request.subscriptions.map(normalizeSubscription).filter((subscription): subscription is MqttIpcSubscriptionConfig => Boolean(subscription))
       : [],
   };
+}
+
+type NormalizedConnectionTestRequest = {
+  requestId: string;
+  address: string;
+  subscriptions: MqttIpcSubscriptionConfig[];
+  timeoutMs: number;
+};
+
+/** 归一化一次性测试请求，并复用正式通道的订阅和地址安全规则。 */
+function normalizeConnectionTestRequest(
+  request: MqttConnectionTestRequest,
+): NormalizedConnectionTestRequest | { requestId: string; errorMessage: string } {
+  const requestId = typeof request?.requestId === 'string' ? request.requestId.trim() : '';
+  if (!requestId) return { requestId: '', errorMessage: '连接测试 requestId 不能为空。' };
+
+  const address = typeof request.address === 'string' ? request.address.trim() : '';
+  if (!address) return { requestId, errorMessage: '请填写 MQTT Broker 地址。' };
+  if (!isSafeMqttAddress(address)) {
+    return { requestId, errorMessage: 'MQTT 地址仅支持 ws:// 或 wss://，且不能包含账号、密码或敏感 query。' };
+  }
+
+  const subscriptions = Array.isArray(request.subscriptions)
+    ? request.subscriptions
+        .map(normalizeSubscription)
+        .filter((subscription): subscription is MqttIpcSubscriptionConfig => Boolean(subscription))
+    : [];
+  if (subscriptions.length === 0) return { requestId, errorMessage: '至少需要一个有效订阅 Topic。' };
+
+  const requestedTimeoutMs = Number(request.timeoutMs);
+  const timeoutMs = Number.isFinite(requestedTimeoutMs)
+    ? Math.min(8000, Math.max(1, Math.trunc(requestedTimeoutMs)))
+    : 8000;
+  return { requestId, address, subscriptions, timeoutMs };
 }
 
 /** 清理单条订阅，保证主进程只处理 topic、qos 和 adapter。 */

@@ -127,6 +127,12 @@ export type SceneEnvironmentSettings = {
   thumbnailUrl?: string;
   displayName?: string;
   fileSizeBytes?: number;
+  source?: 'data-platform';
+  resourceType?: 'ENV_MODEL';
+  dataPlatformResourceId?: string;
+  dataPlatformSourceKey?: string;
+  dataPlatformRevision?: string;
+  displayNameSnapshot?: string;
   placementMode: SceneEnvironmentPlacementMode;
   transform: SceneEnvironmentTransform;
   visible: boolean;
@@ -550,6 +556,26 @@ export function sanitizeSceneEnvironment(
     && environment.fileSizeBytes > 0
       ? Math.floor(environment.fileSizeBytes)
       : undefined;
+  const sourceField = readOwnDataProperty(environment, 'source');
+  const resourceTypeField = readOwnDataProperty(environment, 'resourceType');
+  const resourceIdField = readOwnDataProperty(environment, 'dataPlatformResourceId');
+  const sourceKeyField = readOwnDataProperty(environment, 'dataPlatformSourceKey');
+  const revisionField = readOwnDataProperty(environment, 'dataPlatformRevision');
+  const source = sourceField.kind === 'data' && sourceField.value === 'data-platform' ? 'data-platform' : undefined;
+  const resourceType = resourceTypeField.kind === 'data' && resourceTypeField.value === 'ENV_MODEL' ? 'ENV_MODEL' : undefined;
+  const dataPlatformResourceId = resourceIdField.kind === 'data'
+    ? normalizeDataPlatformResourceId(resourceIdField.value)
+    : null;
+  const dataPlatformSourceKey = sourceKeyField.kind === 'data' && typeof sourceKeyField.value === 'string'
+    && /^[0-9a-f]{64}$/.test(sourceKeyField.value.trim()) ? sourceKeyField.value.trim() : null;
+  const dataPlatformRevision = revisionField.kind === 'data' && typeof revisionField.value === 'string'
+    && /^[1-9]\d{0,63}$/.test(revisionField.value.trim()) ? revisionField.value.trim() : null;
+  const hasAnyRemoteIdentity = [sourceField, resourceTypeField, resourceIdField, sourceKeyField, revisionField]
+    .some((field) => field.kind !== 'missing');
+  if (hasAnyRemoteIdentity && (!source || !resourceType || !dataPlatformResourceId || !dataPlatformSourceKey || !dataPlatformRevision)) {
+    return null;
+  }
+  const displayNameSnapshot = environment.displayNameSnapshot?.trim();
   let unitInfo: ModelLengthUnitInfo;
 
   try {
@@ -565,6 +591,14 @@ export function sanitizeSceneEnvironment(
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
     ...(displayName ? { displayName } : {}),
     ...(fileSizeBytes ? { fileSizeBytes } : {}),
+    ...(source ? {
+      source,
+      resourceType: resourceType!,
+      dataPlatformResourceId: dataPlatformResourceId!,
+      dataPlatformSourceKey: dataPlatformSourceKey!,
+      dataPlatformRevision: dataPlatformRevision!,
+      ...(displayNameSnapshot ? { displayNameSnapshot } : {}),
+    } : {}),
     placementMode,
     transform: sanitizeSceneEnvironmentTransform(environment.transform),
     visible: environment.visible !== false,

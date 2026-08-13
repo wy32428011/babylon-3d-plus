@@ -108,7 +108,7 @@ type EntityArrayDragSession = {
 const CANVAS_SELECTION_BLOCK_MS = 120;
 const DEGREES_TO_RADIANS = Math.PI / 180;
 const ALL_TRANSFORM_TOOLS: readonly TransformTool[] = ['translate', 'rotate', 'scale'];
-const ALL_ROTATION_AXES: readonly TransformGizmoAxis[] = ['x', 'y', 'z'];
+const ALL_TRANSFORM_AXES: readonly TransformGizmoAxis[] = ['x', 'y', 'z'];
 
 const LOCAL_AXIS_VECTORS: Record<TransformGizmoAxis, Vector3> = {
   x: new Vector3(1, 0, 0),
@@ -193,10 +193,11 @@ export class TransformGizmoController {
   private attachedUniformScaleOnly = false;
   private attachedSupportedTools = new Set<TransformTool>(ALL_TRANSFORM_TOOLS);
   private attachedEntityArrayEnabled = true;
-  private attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_ROTATION_AXES);
+  private attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_TRANSFORM_AXES);
   private dragStartTransform: TransformComponent | null = null;
   private activeTransformDrag = false;
   private activeGroupTool: 'translate' | 'rotate' | null = null;
+  private activeGroupTranslationAxes: ReadonlySet<TransformGizmoAxis> | null = null;
   private entityArrayDragSession: EntityArrayDragSession | null = null;
   private currentTool: TransformTool = 'translate';
   private transformSpace: TransformSpace = 'local';
@@ -302,7 +303,7 @@ export class TransformGizmoController {
     );
     const nextEntityArrayEnabled = Boolean(target && !nextSubTargetId && (options.entityArrayEnabled ?? true));
     const nextRotationAxes = new Set<TransformGizmoAxis>(
-      target ? options.rotationAxes ?? ALL_ROTATION_AXES : ALL_ROTATION_AXES,
+      target ? options.rotationAxes ?? ALL_TRANSFORM_AXES : ALL_TRANSFORM_AXES,
     );
     if (
       this.attachedTarget === target
@@ -349,7 +350,7 @@ export class TransformGizmoController {
     this.attachedUniformScaleOnly = false;
     this.attachedSupportedTools = new Set<TransformTool>(['translate', 'rotate']);
     this.attachedEntityArrayEnabled = false;
-    this.attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_ROTATION_AXES);
+    this.attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_TRANSFORM_AXES);
     this.currentTool = this.currentTool === 'rotate' ? 'rotate' : 'translate';
     this.setTool(this.currentTool);
     this.transformSpace = 'global';
@@ -378,7 +379,7 @@ export class TransformGizmoController {
     this.attachedUniformScaleOnly = false;
     this.attachedSupportedTools = new Set<TransformTool>(ALL_TRANSFORM_TOOLS);
     this.attachedEntityArrayEnabled = false;
-    this.attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_ROTATION_AXES);
+    this.attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_TRANSFORM_AXES);
     this.attachGizmo(target);
     this.dragStartTransform = target ? this.readFiniteTransform(target) : null;
     this.setTool(this.currentTool);
@@ -421,9 +422,10 @@ export class TransformGizmoController {
   }
 
   /** 记录拖拽开始时的 Transform 快照，后续 Undo/Redo 使用这一份 before。 */
-  beginDragSnapshot(): void {
+  beginDragSnapshot(translationAxes?: readonly TransformGizmoAxis[]): void {
     if (!this.attachedTarget) return;
     this.activeGroupTool = null;
+    this.activeGroupTranslationAxes = null;
     if (this.attachedGroupId) {
       const groupTool = this.currentTool === 'rotate' ? 'rotate' : 'translate';
       const started = groupTool === 'rotate'
@@ -435,6 +437,9 @@ export class TransformGizmoController {
         return;
       }
       this.activeGroupTool = groupTool;
+      if (groupTool === 'translate' && translationAxes) {
+        this.activeGroupTranslationAxes = new Set(translationAxes);
+      }
     }
 
     this.blockCanvasSelectionBriefly();
@@ -456,12 +461,16 @@ export class TransformGizmoController {
         const deltaMatrix = createRelativeTransformMatrixData(this.dragStartTransform, transform);
         if (deltaMatrix) this.callbacks.previewGroupRotation?.(this.attachedGroupId, deltaMatrix);
       } else {
+        const constrainedTransform = this.constrainGroupTranslationTransform(
+          transform,
+          this.activeGroupTranslationAxes,
+        );
         this.callbacks.previewGroupTranslation?.(
           this.attachedGroupId,
           {
-            x: transform.position.x - this.dragStartTransform.position.x,
-            y: transform.position.y - this.dragStartTransform.position.y,
-            z: transform.position.z - this.dragStartTransform.position.z,
+            x: constrainedTransform.position.x - this.dragStartTransform.position.x,
+            y: constrainedTransform.position.y - this.dragStartTransform.position.y,
+            z: constrainedTransform.position.z - this.dragStartTransform.position.z,
           },
         );
       }
@@ -489,15 +498,20 @@ export class TransformGizmoController {
     if (this.entityArrayDragSession || !this.activeTransformDrag) return;
     this.activeTransformDrag = false;
     const activeGroupTool = this.activeGroupTool;
+    const activeGroupTranslationAxes = this.activeGroupTranslationAxes;
     this.activeGroupTool = null;
+    this.activeGroupTranslationAxes = null;
     if (
       !this.attachedTarget
       || (!this.attachedEntityId && !this.attachedGroupId && !this.attachedEnvironment)
       || !this.dragStartTransform
     ) return;
 
-    const after = this.readFiniteTransform(this.attachedTarget);
+    let after = this.readFiniteTransform(this.attachedTarget);
     if (!after) return;
+    if (this.attachedGroupId && activeGroupTool !== 'rotate') {
+      after = this.constrainGroupTranslationTransform(after, activeGroupTranslationAxes);
+    }
     if (this.attachedUniformScaleOnly) {
       this.attachedTarget.scaling.copyFromFloats(after.scale.x, after.scale.y, after.scale.z);
     }
@@ -549,7 +563,7 @@ export class TransformGizmoController {
     this.attachedGroupId = null;
     this.attachedEnvironment = false;
     this.attachedUniformScaleOnly = false;
-    this.attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_ROTATION_AXES);
+    this.attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_TRANSFORM_AXES);
     this.dragStartTransform = null;
     this.activeTransformDrag = false;
   }
@@ -569,9 +583,9 @@ export class TransformGizmoController {
       this.bindPositionAxisDrag(positionGizmo.xGizmo, 'x');
       this.bindPositionAxisDrag(positionGizmo.yGizmo, 'y');
       this.bindPositionAxisDrag(positionGizmo.zGizmo, 'z');
-      this.bindDragObservableGroup(positionGizmo.xPlaneGizmo.dragBehavior);
-      this.bindDragObservableGroup(positionGizmo.yPlaneGizmo.dragBehavior);
-      this.bindDragObservableGroup(positionGizmo.zPlaneGizmo.dragBehavior);
+      this.bindDragObservableGroup(positionGizmo.xPlaneGizmo.dragBehavior, ['y', 'z']);
+      this.bindDragObservableGroup(positionGizmo.yPlaneGizmo.dragBehavior, ['x', 'z']);
+      this.bindDragObservableGroup(positionGizmo.zPlaneGizmo.dragBehavior, ['x', 'y']);
     }
     if (rotationGizmo) this.bindDragObservableGroup(rotationGizmo);
     if (scaleGizmo) this.bindDragObservableGroup(scaleGizmo);
@@ -590,7 +604,7 @@ export class TransformGizmoController {
         || !shiftKey
         || this.currentTool !== 'translate'
       ) {
-        this.beginDragSnapshot();
+        this.beginDragSnapshot([axis]);
         return;
       }
 
@@ -613,11 +627,14 @@ export class TransformGizmoController {
   }
 
   /** 给非阵列 Gizmo 统一绑定开始、预览和结束事件。 */
-  private bindDragObservableGroup(gizmo: IRotationGizmo | IScaleGizmo | DragObservableGroup): void {
+  private bindDragObservableGroup(
+    gizmo: IRotationGizmo | IScaleGizmo | DragObservableGroup,
+    translationAxes?: readonly TransformGizmoAxis[],
+  ): void {
     const observables: DragObservableGroup = gizmo;
 
     this.addDragObserver(observables.onDragStartObservable, () => {
-      this.beginDragSnapshot();
+      this.beginDragSnapshot(translationAxes);
     });
     this.addDragObserver(observables.onDragObservable, () => {
       this.previewAttachedTransform();
@@ -719,6 +736,7 @@ export class TransformGizmoController {
     const before = this.dragStartTransform;
     this.activeTransformDrag = false;
     this.activeGroupTool = null;
+    this.activeGroupTranslationAxes = null;
     this.releaseAllGizmoDrags();
 
     if (!target || target.isDisposed() || !before) return;
@@ -739,6 +757,29 @@ export class TransformGizmoController {
     }
     this.dragStartTransform = this.readFiniteTransform(target);
     this.blockCanvasSelectionBriefly();
+  }
+
+  /** 把群组代理限制在当前轴或平面内，避免 Babylon 非目标轴漂移污染持久化坐标。 */
+  private constrainGroupTranslationTransform(
+    transform: TransformComponent,
+    allowedAxes: ReadonlySet<TransformGizmoAxis> | null,
+  ): TransformComponent {
+    if (!allowedAxes || !this.dragStartTransform || !this.attachedTarget) return transform;
+
+    const position = { ...transform.position };
+    let constrained = false;
+    for (const axis of ALL_TRANSFORM_AXES) {
+      if (allowedAxes.has(axis)) continue;
+      const baseline = this.dragStartTransform.position[axis];
+      if (position[axis] === baseline) continue;
+      position[axis] = baseline;
+      constrained = true;
+    }
+    if (!constrained) return transform;
+
+    this.attachedTarget.position.copyFromFloats(position.x, position.y, position.z);
+    this.attachedTarget.computeWorldMatrix(true);
+    return { ...transform, position };
   }
 
   /** 释放三类 Gizmo 当前指针拖动；观察者会因活动标记已清除而不提交历史。 */
@@ -827,9 +868,9 @@ export class TransformGizmoController {
     let transform = transformFromTarget(target);
     if (!isFiniteTransform(transform)) return null;
 
-    if (this.dragStartTransform && this.attachedRotationAxes.size < ALL_ROTATION_AXES.length) {
+    if (this.dragStartTransform && this.attachedRotationAxes.size < ALL_TRANSFORM_AXES.length) {
       const rotation = { ...transform.rotation };
-      for (const axis of ALL_ROTATION_AXES) {
+      for (const axis of ALL_TRANSFORM_AXES) {
         if (!this.attachedRotationAxes.has(axis)) rotation[axis] = this.dragStartTransform.rotation[axis];
       }
       transform = { ...transform, rotation };

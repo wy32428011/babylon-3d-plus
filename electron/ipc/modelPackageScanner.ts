@@ -6,6 +6,37 @@ import { encodeAssetUrl } from './assetRegistry.js';
 
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
 const MODEL_THUMBNAIL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+export const MAX_GLB_MODEL_FILE_BYTES = 512 * 1024 * 1024;
+const MAX_GLB_JSON_CHUNK_BYTES = 64 * 1024 * 1024;
+const GLB_JSON_CHUNK_TYPE = 0x4e4f534a;
+const GLB_BINARY_CHUNK_TYPE = 0x004e4942;
+const SUPPORTED_GLTF_REQUIRED_EXTENSIONS = new Set([
+  'EXT_mesh_gpu_instancing',
+  'EXT_meshopt_compression',
+  'EXT_texture_avif',
+  'EXT_texture_webp',
+  'KHR_draco_mesh_compression',
+  'KHR_lights_punctual',
+  'KHR_materials_anisotropy',
+  'KHR_materials_clearcoat',
+  'KHR_materials_diffuse_transmission',
+  'KHR_materials_dispersion',
+  'KHR_materials_emissive_strength',
+  'KHR_materials_ior',
+  'KHR_materials_iridescence',
+  'KHR_materials_pbrSpecularGlossiness',
+  'KHR_materials_sheen',
+  'KHR_materials_specular',
+  'KHR_materials_transmission',
+  'KHR_materials_unlit',
+  'KHR_materials_variants',
+  'KHR_materials_volume',
+  'KHR_mesh_quantization',
+  'KHR_texture_basisu',
+  'KHR_texture_transform',
+  'KHR_xmp_json_ld',
+  'MSFT_lod',
+]);
 
 type ModelPackageMetadata = ModelLengthUnitInfo & {
   displayName?: string;
@@ -30,52 +61,190 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
 }
 
-async function readGlbJson(modelFilePath: string): Promise<Record<string, unknown> | null> {
-  if (path.extname(modelFilePath).toLowerCase() !== '.glb') return null;
+export type GlbModelInspection = {
+  fileSizeBytes: number;
+  extensionsUsed: string[];
+  warnings: string[];
+};
 
-  const buffer = await fs.readFile(modelFilePath);
-  if (buffer.length < 20 || buffer.toString('utf-8', 0, 4) !== 'glTF') return null;
+type ParsedGlbDocument = {
+  fileSizeBytes: number;
+  gltf: Record<string, unknown>;
+  hasBinaryChunk: boolean;
+};
 
-  const version = buffer.readUInt32LE(4);
-  const declaredLength = buffer.readUInt32LE(8);
-  if (version !== 2 || declaredLength !== buffer.length) return null;
-
-  let offset = 12;
-  let isFirstChunk = true;
-  let gltf: Record<string, unknown> | null = null;
-
-  while (offset + 8 <= buffer.length) {
-    const chunkLength = buffer.readUInt32LE(offset);
-    const chunkType = buffer.readUInt32LE(offset + 4);
-    const chunkDataOffset = offset + 8;
-    const chunkEnd = chunkDataOffset + chunkLength;
-
-    if (chunkLength === 0 || chunkLength % 4 !== 0 || chunkEnd > buffer.length) return null;
-    if (isFirstChunk && chunkType !== 0x4e4f534a) return null;
-
-    if (chunkType === 0x4e4f534a) {
-      if (gltf) return null;
-
-      const jsonText = buffer
-        .toString('utf-8', chunkDataOffset, chunkEnd)
-        .replace(/\u0000+$/g, '')
-        .trimEnd();
-      const parsed = JSON.parse(jsonText) as unknown;
-      gltf = isPlainObject(parsed) ? parsed : null;
-      if (!gltf) return null;
-    }
-
-    isFirstChunk = false;
-    offset = chunkEnd;
+async function readExactly(
+  handle: Awaited<ReturnType<typeof fs.open>>,
+  length: number,
+  position: number,
+): Promise<Buffer> {
+  const buffer = Buffer.allocUnsafe(length);
+  let offset = 0;
+  while (offset < length) {
+    const result = await handle.read(buffer, offset, length - offset, position + offset);
+    if (result.bytesRead <= 0) throw new Error('GLB 文件提前结束。');
+    offset += result.bytesRead;
   }
-
-  return offset === buffer.length ? gltf : null;
+  return buffer;
 }
 
-/** 校验 GLB 头、版本、声明长度、JSON 首块和分块边界，拒绝仅伪装扩展名的损坏文件。 */
+function normalizeGlbStringArray(value: unknown, label: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string' && item.trim())) {
+    throw new Error(`${label} 必须是非空字符串数组。`);
+  }
+  return value.map((item) => item.trim());
+}
+
+function assertSelfContainedGlbUris(value: unknown, location = 'glTF'): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertSelfContainedGlbUris(item, `${location}[${index}]`));
+    return;
+  }
+  if (!isPlainObject(value)) return;
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'uri' && typeof child === 'string') {
+      const uri = child.trim();
+      if (!uri.toLowerCase().startsWith('data:')) {
+        throw new Error(`${location}.uri 引用了外部资源，环境 GLB 必须是自包含单文件。`);
+      }
+    }
+    assertSelfContainedGlbUris(child, `${location}.${key}`);
+  }
+}
+
+function inspectEnvironmentGlbJson(
+  gltf: Record<string, unknown>,
+  hasBinaryChunk: boolean,
+): Pick<GlbModelInspection, 'extensionsUsed' | 'warnings'> {
+  if (!isPlainObject(gltf.asset) || gltf.asset.version !== '2.0') {
+    throw new Error('环境模型必须是 glTF 2.0 Binary。');
+  }
+  if (!Array.isArray(gltf.meshes)) throw new Error('GLB 不包含可渲染 Mesh。');
+  const hasRenderablePrimitive = gltf.meshes.some((mesh) => (
+    isPlainObject(mesh) && Array.isArray(mesh.primitives) && mesh.primitives.some(isPlainObject)
+  ));
+  if (!hasRenderablePrimitive) throw new Error('GLB 不包含可渲染 Mesh primitive。');
+  assertSelfContainedGlbUris(gltf);
+
+  const extensionsUsed = normalizeGlbStringArray(gltf.extensionsUsed, 'extensionsUsed');
+  const extensionsRequired = normalizeGlbStringArray(gltf.extensionsRequired, 'extensionsRequired');
+  for (const extension of extensionsRequired) {
+    if (!extensionsUsed.includes(extension)) {
+      throw new Error(`必需扩展 ${extension} 未出现在 extensionsUsed 中。`);
+    }
+    if (!SUPPORTED_GLTF_REQUIRED_EXTENSIONS.has(extension)) {
+      throw new Error(`不支持的 glTF 必需扩展：${extension}`);
+    }
+  }
+
+  if (Array.isArray(gltf.buffers)) {
+    const embeddedBuffers = gltf.buffers.filter((buffer) => isPlainObject(buffer) && buffer.uri === undefined);
+    if (embeddedBuffers.length > 1) throw new Error('GLB 只能包含一个无 URI 的内嵌 Buffer。');
+    if (embeddedBuffers.length === 1 && !hasBinaryChunk) {
+      throw new Error('GLB 声明了内嵌 Buffer，但缺少 BIN chunk。');
+    }
+  }
+
+  const warnings: string[] = [];
+  if (Array.isArray(gltf.cameras) && gltf.cameras.length > 0) warnings.push('GLB 内相机将在环境运行时被忽略。');
+  if (Array.isArray(gltf.animations) && gltf.animations.length > 0) warnings.push('GLB 内动画将在环境运行时被忽略。');
+  if (extensionsUsed.includes('KHR_lights_punctual')) warnings.push('GLB 内灯光将在环境运行时被忽略。');
+  const unknownOptional = extensionsUsed.filter((extension) => (
+    !extensionsRequired.includes(extension) && !SUPPORTED_GLTF_REQUIRED_EXTENSIONS.has(extension)
+  ));
+  if (unknownOptional.length > 0) {
+    warnings.push(`未知非必需扩展将按 Babylon.js 可用能力处理：${unknownOptional.join(', ')}`);
+  }
+  if (Object.hasOwn(gltf, 'extras')) warnings.push('GLB extras 仅作为静态数据保留，不会执行其中内容。');
+  return { extensionsUsed, warnings };
+}
+
+/** 只校验普通 GLB 的容器结构，不施加环境模型的自包含、Mesh 或扩展白名单规则。 */
+async function parseGlbContainer(modelFilePath: string): Promise<ParsedGlbDocument> {
+  if (path.extname(modelFilePath).toLowerCase() !== '.glb') throw new Error('模型文件必须使用 .glb 扩展名。');
+  const stat = await fs.lstat(modelFilePath);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('GLB 路径必须是普通文件。');
+  if (stat.size < 20 || stat.size > MAX_GLB_MODEL_FILE_BYTES) {
+    throw new Error('GLB 文件大小必须在 20 字节到 512 MiB 之间。');
+  }
+
+  const handle = await fs.open(modelFilePath, 'r');
+  try {
+    const header = await readExactly(handle, 12, 0);
+    if (header.toString('ascii', 0, 4) !== 'glTF') throw new Error('GLB magic 无效。');
+    if (header.readUInt32LE(4) !== 2) throw new Error('GLB 必须使用 version 2。');
+    if (header.readUInt32LE(8) !== stat.size) throw new Error('GLB 声明长度与实际文件大小不一致。');
+
+    let offset = 12;
+    let gltf: Record<string, unknown> | null = null;
+    let hasBinaryChunk = false;
+    let chunkIndex = 0;
+    while (offset < stat.size) {
+      if (offset + 8 > stat.size) throw new Error('GLB chunk header 不完整。');
+      const chunkHeader = await readExactly(handle, 8, offset);
+      const chunkLength = chunkHeader.readUInt32LE(0);
+      const chunkType = chunkHeader.readUInt32LE(4);
+      const dataOffset = offset + 8;
+      const chunkEnd = dataOffset + chunkLength;
+      if (chunkLength === 0 || chunkLength % 4 !== 0 || chunkEnd > stat.size) {
+        throw new Error('GLB chunk 边界无效。');
+      }
+      if (chunkIndex === 0 && chunkType !== GLB_JSON_CHUNK_TYPE) {
+        throw new Error('GLB 首个 chunk 必须是 JSON。');
+      }
+
+      if (chunkType === GLB_JSON_CHUNK_TYPE) {
+        if (gltf) throw new Error('GLB 只能包含一个 JSON chunk。');
+        if (chunkLength > MAX_GLB_JSON_CHUNK_BYTES) throw new Error('GLB JSON chunk 超过 64 MiB 上限。');
+        const jsonBuffer = await readExactly(handle, chunkLength, dataOffset);
+        const jsonText = jsonBuffer.toString('utf8').replace(/[\u0000\u0020]+$/g, '');
+        const parsed = JSON.parse(jsonText) as unknown;
+        if (!isPlainObject(parsed)) throw new Error('GLB JSON 根节点必须是普通对象。');
+        gltf = parsed;
+      } else if (chunkType === GLB_BINARY_CHUNK_TYPE) {
+        if (hasBinaryChunk) throw new Error('GLB 只能包含一个 BIN chunk。');
+        hasBinaryChunk = true;
+      }
+
+      offset = chunkEnd;
+      chunkIndex += 1;
+    }
+    if (offset !== stat.size || !gltf) throw new Error('GLB 分块未完整覆盖文件或缺少 JSON chunk。');
+    return { fileSizeBytes: stat.size, gltf, hasBinaryChunk };
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * 以有界读取校验环境 GLB 的结构、自包含 URI、必需扩展和可渲染 Mesh。
+ * 二进制主体不会整体载入内存，适用于 512 MiB 环境模型重复校验。
+ */
+export async function inspectGlbModelFile(modelFilePath: string): Promise<GlbModelInspection> {
+  const parsed = await parseGlbContainer(modelFilePath);
+  return {
+    fileSizeBytes: parsed.fileSizeBytes,
+    ...inspectEnvironmentGlbJson(parsed.gltf, parsed.hasBinaryChunk),
+  };
+}
+
+/** 校验普通模型 GLB 的头、版本、声明长度、JSON 首块和分块边界。 */
 export async function validateGlbModelFile(modelFilePath: string): Promise<boolean> {
   try {
-    return (await readGlbJson(modelFilePath)) !== null;
+    await parseGlbContainer(modelFilePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 校验完整环境 GLB 契约，调用方只需要布尔结果时使用。 */
+export async function validateEnvironmentGlbFile(modelFilePath: string): Promise<boolean> {
+  try {
+    await inspectGlbModelFile(modelFilePath);
+    return true;
   } catch {
     return false;
   }

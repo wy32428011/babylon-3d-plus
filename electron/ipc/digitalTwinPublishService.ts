@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
@@ -10,13 +10,21 @@ import type {
 } from '../types.js';
 import { authorizeSceneFile } from './assetRegistry.js';
 import {
+  clearCurrentDataPlatformBinding,
+  createDataPlatformBinding,
   getCurrentDataPlatformBinding,
+  readDataPlatformBinding,
+  resolveDataPlatformBindingSharedResourcesRoot,
+  resolveDataPlatformBindingWorkspaceRoot,
+  resolveDataPlatformProjectRoot,
   resolveDataPlatformSharedResourcesRoot,
+  setCurrentDataPlatformBinding,
   type DataPlatformBindingMetadata,
   updateDataPlatformBinding,
 } from './dataPlatformBindingStore.js';
 import { buildDigitalTwinDistPackage } from './digitalTwinDistPackage.js';
 import { collectDigitalTwinResourceIds } from './digitalTwinPublishProtocol.js';
+import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
 import { buildDigitalTwinSourcePackage, type DigitalTwinSourcePackageResult } from './digitalTwinSourcePackage.js';
 import { findSyncedImageForReference, isPlatformImageReference } from './dataPlatformImageSync.js';
 import {
@@ -25,8 +33,16 @@ import {
   type DigitalTwinPublishTask,
   type DigitalTwinProjectStatus,
 } from './digitalTwinUploadClient.js';
-import { rememberRecentSceneFile } from './projectAssetStore.js';
+import {
+  getCurrentProjectRoot,
+  rememberRecentSceneFile,
+  setSharedProjectAssetRoot,
+  setSharedProjectEnvironmentRoot,
+  setSharedProjectSkyboxRoot,
+} from './projectAssetStore.js';
 import { createDeploymentSkyboxValidationCache, loadDeploymentSkyboxCacheContext } from './deploymentSkyboxCache.js';
+import { resolveDataPlatformPublishProjectContext } from './dataPlatformIpc.js';
+import { prepareDataPlatformProjectForPublish } from './dataPlatformProjectService.js';
 import {
   buildDigitalTwinRuntimeConfigSavePayload,
   createDefaultDigitalTwinAllowedParentOrigins,
@@ -48,13 +64,76 @@ const CONFLICT_CODES = new Set([
 
 export type DigitalTwinPublishProgressHandler = (progress: DigitalTwinPublishProgress) => void;
 
-/** 查询当前绑定与远端版本，renderer 不需要也不能自行提交项目 ID 或 Base URL。 */
-export async function getDigitalTwinPublishContext(signal = new AbortController().signal): Promise<DigitalTwinPublishContext> {
+/** 查询当前绑定与远端版本；未绑定场景可按可信项目详情预览发布目标。 */
+export async function getDigitalTwinPublishContext(
+  selectedProjectId: string | null = null,
+  signal = new AbortController().signal,
+): Promise<DigitalTwinPublishContext> {
+  const current = await resolveCurrentDataPlatformBinding();
+  if (current) {
+    if (selectedProjectId && selectedProjectId !== current.metadata.projectId) {
+      throw new Error('当前场景已绑定数据中台业务项目，不能在发布时切换项目。');
+    }
+    const client = new DigitalTwinUploadClient(current.metadata.baseUrl);
+    const remote = await client.projectStatus(current.metadata.projectId, signal);
+    return createPublishContext(current.projectRoot, current.metadata, remote, false);
+  }
+  if (!selectedProjectId) return emptyPublishContext();
+
+  const target = await resolveDataPlatformPublishProjectContext(selectedProjectId);
+  const remote = await new DigitalTwinUploadClient(target.baseUrl).projectStatus(target.project.id, signal);
+  const metadata = createPublishMetadata(target.project, target.baseUrl, target.workspaceRoot, remote);
+  const projectRoot = getCurrentProjectRoot() ?? resolveDataPlatformProjectRoot(target.workspaceRoot, target.project.id);
+  return createPublishContext(projectRoot, metadata, remote, false);
+}
+
+type ResolvedDataPlatformBinding = {
+  projectRoot: string;
+  metadata: DataPlatformBindingMetadata;
+};
+
+/** 优先使用当前内存绑定；应用重启后可从当前项目目录恢复持久化绑定。 */
+async function resolveCurrentDataPlatformBinding(): Promise<ResolvedDataPlatformBinding | null> {
+  const currentProjectRoot = getCurrentProjectRoot();
   const current = getCurrentDataPlatformBinding();
-  if (!current) return emptyPublishContext();
-  const client = new DigitalTwinUploadClient(current.metadata.baseUrl);
-  const remote = await client.projectStatus(current.metadata.projectId, signal);
-  return createPublishContext(current.projectRoot, current.metadata, remote, false);
+  if (current && (!currentProjectRoot || isSameFilePath(current.projectRoot, currentProjectRoot))) return current;
+  if (!currentProjectRoot) return current;
+
+  const metadata = await readDataPlatformBinding(currentProjectRoot);
+  if (!metadata) {
+    if (current) clearCurrentDataPlatformBinding();
+    return null;
+  }
+  setCurrentDataPlatformBinding(currentProjectRoot, metadata);
+  mountDataPlatformBindingResources(currentProjectRoot, metadata);
+  return { projectRoot: path.resolve(currentProjectRoot), metadata };
+}
+
+function mountDataPlatformBindingResources(projectRoot: string, metadata: DataPlatformBindingMetadata): void {
+  const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(projectRoot, metadata);
+  setSharedProjectAssetRoot(sharedResourcesRoot);
+  setSharedProjectEnvironmentRoot(sharedResourcesRoot);
+  setSharedProjectSkyboxRoot(sharedResourcesRoot);
+}
+
+function createPublishMetadata(
+  project: Awaited<ReturnType<typeof resolveDataPlatformPublishProjectContext>>['project'],
+  baseUrl: string,
+  workspaceRoot: string,
+  remote: DigitalTwinProjectStatus,
+): DataPlatformBindingMetadata {
+  return createDataPlatformBinding({
+    baseUrl,
+    workspaceRoot,
+    projectId: project.id,
+    projectName: project.projectName,
+    editorProjectId: remote.editorProjectId,
+    latestVersionId: remote.latestVersionId,
+    latestVersionNumber: remote.latestVersionNumber,
+    resourceRevision: project.currentResourceRevision,
+    entryScenePath: null,
+    syncedAt: new Date().toISOString(),
+  });
 }
 
 /** 发布活动期间只读取本地绑定，避免网络异常掩盖全局发布锁。 */
@@ -93,11 +172,43 @@ export async function publishDigitalTwin(
   onProgress: DigitalTwinPublishProgressHandler,
 ): Promise<DigitalTwinPublishResult> {
   const validated = validatePublishRequest(request);
-  const current = getCurrentDataPlatformBinding();
-  if (!current) throw new Error('当前工程未绑定数据中台业务项目，无法发布。');
-  const client = new DigitalTwinUploadClient(current.metadata.baseUrl);
-  const remote = await client.projectStatus(current.metadata.projectId, signal);
-  const context = createPublishContext(current.projectRoot, current.metadata, remote, true);
+  let current = await resolveCurrentDataPlatformBinding();
+  let client: DigitalTwinUploadClient;
+  let remote: DigitalTwinProjectStatus;
+  let context: DigitalTwinPublishContext;
+  if (current) {
+    if (validated.projectId && validated.projectId !== current.metadata.projectId) {
+      throw new Error('当前场景已绑定数据中台业务项目，不能在发布时切换项目。');
+    }
+    client = new DigitalTwinUploadClient(current.metadata.baseUrl);
+    remote = await client.projectStatus(current.metadata.projectId, signal);
+    context = createPublishContext(current.projectRoot, current.metadata, remote, true);
+  } else {
+    if (!validated.projectId) throw new Error('当前场景未绑定数据中台业务项目，请先选择发布项目。');
+    const target = await resolveDataPlatformPublishProjectContext(validated.projectId);
+    client = new DigitalTwinUploadClient(target.baseUrl);
+    remote = await client.projectStatus(target.project.id, signal);
+    const previewMetadata = createPublishMetadata(target.project, target.baseUrl, target.workspaceRoot, remote);
+    const previewProjectRoot = getCurrentProjectRoot() ?? resolveDataPlatformProjectRoot(target.workspaceRoot, target.project.id);
+    context = createPublishContext(previewProjectRoot, previewMetadata, remote, true);
+    if (context.overwriteConfirmationRequired && !validated.overwriteExisting) {
+      return createTerminalResult(validated.requestId, 'confirmation-required', {
+        errorCode: 'DIGITAL_TWIN_OVERWRITE_CONFIRM_REQUIRED',
+        message: '目标业务项目已经有当前数字孪生工程，请确认覆盖后再发布。',
+      });
+    }
+    await prepareDataPlatformProjectForPublish({
+      ...target.project,
+      latestEditorProjectId: remote.editorProjectId,
+      latestEditorProjectVersionId: remote.latestVersionId,
+      latestEditorProjectVersionNumber: remote.latestVersionNumber,
+    }, target.baseUrl, target.workspaceRoot);
+    current = getCurrentDataPlatformBinding();
+    if (!current || current.metadata.projectId !== validated.projectId) {
+      throw new Error('当前场景绑定数据中台业务项目失败。');
+    }
+    context = createPublishContext(current.projectRoot, current.metadata, remote, true);
+  }
   if (context.overwriteConfirmationRequired && !validated.overwriteExisting) {
     return createTerminalResult(validated.requestId, 'confirmation-required', {
       errorCode: 'DIGITAL_TWIN_OVERWRITE_CONFIRM_REQUIRED',
@@ -121,7 +232,7 @@ export async function publishDigitalTwin(
   const savedScene = await saveCurrentScene(current.projectRoot, current.metadata.entryScenePath, validated.sceneContent);
   await updateDataPlatformBinding(current.projectRoot, current.metadata.projectId, { entryScenePath: savedScene.entryScenePath });
 
-  const workspaceRoot = resolveWorkspaceRoot(current.projectRoot, current.metadata.projectId);
+  const workspaceRoot = resolveDataPlatformBindingWorkspaceRoot(current.projectRoot, current.metadata);
   const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
   const taskRoot = path.join(app.getPath('temp'), 'zending-digital-twin-publish', encodeURIComponent(validated.requestId));
   await fs.rm(taskRoot, { recursive: true, force: true });
@@ -189,6 +300,12 @@ export async function publishDigitalTwin(
     });
     appendUniqueWarnings(warnings, distPackage.warnings);
     const resourceIds = collectDigitalTwinResourceIds(sourcePackage.sceneContents);
+    await validateDataPlatformEnvironmentPublishReferences(
+      workspaceRoot,
+      current.metadata.baseUrl,
+      resourceIds.envModelIds,
+      signal,
+    );
 
     emit(onProgress, validated.requestId, 'prepare', '正在创建数据中台发布任务…', 50);
     try {
@@ -387,6 +504,39 @@ function emptyPublishContext(publishActive = false): DigitalTwinPublishContext {
   };
 }
 
+async function validateDataPlatformEnvironmentPublishReferences(
+  workspaceRoot: string,
+  expectedBaseUrl: string,
+  envModelIds: readonly string[],
+  signal: AbortSignal,
+): Promise<void> {
+  if (envModelIds.length === 0) return;
+  if (signal.aborted) throw new Error('数字孪生发布已取消。');
+  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const indexed = await listIndexedDataPlatformEnvironments(sharedResourcesRoot);
+  if (indexed.errors.length > 0) throw new Error(`环境模型缓存校验失败：${indexed.errors.join('；')}`);
+  const expectedSourceKey = createHash('sha256').update(normalizePublishBaseUrl(expectedBaseUrl), 'utf8').digest('hex');
+  const byId = new Map(indexed.assets.map((asset) => [asset.dataPlatformResourceId, asset]));
+  for (const id of envModelIds) {
+    const asset = byId.get(id);
+    if (!asset || asset.availability !== 'active') throw new Error(`环境模型 ${id} 没有可发布的最新有效缓存，请先完成在线同步。`);
+    if (asset.dataPlatformSourceKey !== expectedSourceKey) throw new Error(`环境模型 ${id} 属于其他数据中台，禁止发布。`);
+    if (!asset.fileSha256 || !asset.dataPlatformFileRevision || !asset.dataPlatformRevision) {
+      throw new Error(`环境模型 ${id} 缺少文件摘要或修订信息，禁止发布。`);
+    }
+  }
+}
+
+function normalizePublishBaseUrl(value: string): string {
+  const url = new URL(value);
+  url.protocol = url.protocol.toLowerCase();
+  url.hostname = url.hostname.toLowerCase();
+  if ((url.protocol === 'http:' && url.port === '80') || (url.protocol === 'https:' && url.port === '443')) url.port = '';
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/+$/, '');
+}
+
 async function saveCurrentScene(
   projectRoot: string,
   entryScenePath: string | null,
@@ -401,9 +551,6 @@ async function saveCurrentScene(
   }
   if (!isPlainObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) || !isPlainObject(parsed.scene)) {
     throw new Error('当前场景格式不受支持。');
-  }
-  if (isPlainObject(parsed.scene.fetchConfig) && typeof parsed.scene.fetchConfig.apiKey === 'string' && parsed.scene.fetchConfig.apiKey.trim()) {
-    throw new Error('可信内网数字孪生发布不携带 API Key，请先清空场景 Fetch API Key。');
   }
   const sceneName = typeof parsed.scene.name === 'string' && parsed.scene.name.trim() ? parsed.scene.name.trim() : 'main';
   const relativePath = entryScenePath ?? `Scenes/${createSafeSceneFileName(sceneName)}.scene.json`;
@@ -454,13 +601,6 @@ function resolveCompletedVersionNumber(
   return completedVersionId ? (metadata.latestVersionNumber ?? 0) + 1 : metadata.latestVersionNumber;
 }
 
-function resolveWorkspaceRoot(projectRoot: string, projectId: string): string {
-  const projectsRoot = path.dirname(path.resolve(projectRoot));
-  if (path.basename(projectsRoot).toLowerCase() !== 'projects' || path.basename(projectRoot) !== projectId) {
-    throw new Error('当前数据中台项目工作区结构无效。');
-  }
-  return path.dirname(projectsRoot);
-}
 
 function validatePublishRequest(request: DigitalTwinPublishRequest): DigitalTwinPublishRequest {
   if (!isPlainObject(request)) throw new Error('数字孪生发布请求格式不正确。');
@@ -475,10 +615,19 @@ function validatePublishRequest(request: DigitalTwinPublishRequest): DigitalTwin
     publishName: request.publishName.trim(),
     remark: request.remark.trim(),
     sceneContent: request.sceneContent,
+    projectId: normalizeOptionalProjectId(request.projectId),
     overwriteExisting: request.overwriteExisting === true,
     confirmResourceBindings: request.confirmResourceBindings === true,
     allowedParentOrigins: normalizeDigitalTwinAllowedParentOrigins(request.allowedParentOrigins),
   };
+}
+
+function normalizeOptionalProjectId(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !/^[1-9]\d{0,63}$/.test(value.trim())) {
+    throw new Error('数字孪生发布 projectId 无效。');
+  }
+  return value.trim();
 }
 
 function createTerminalResult(
@@ -612,6 +761,14 @@ async function ensureSafeDirectoryWithin(root: string, directory: string, label:
 function isPathInside(root: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function isSameFilePath(left: string, right: string): boolean {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

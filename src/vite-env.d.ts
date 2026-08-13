@@ -133,6 +133,7 @@ type DataPlatformProjectOpenResult = {
   warning: string | null;
   conflictCopyPath: string | null;
   modelSyncStarted: boolean;
+  envModelSyncStarted: boolean;
   skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
 };
@@ -164,11 +165,16 @@ type DigitalTwinPublishContext = {
   publishActive: boolean;
 };
 
+type DigitalTwinPublishContextRequest = {
+  projectId: string | null;
+};
+
 type DigitalTwinPublishRequest = {
   requestId: string;
   publishName: string;
   remark: string;
   sceneContent: string;
+  projectId: string | null;
   overwriteExisting: boolean;
   confirmResourceBindings: boolean;
   allowedParentOrigins: string[];
@@ -226,6 +232,28 @@ type DataPlatformModelSyncPhase =
 type DataPlatformModelSyncProgress = {
   runId: string;
   phase: DataPlatformModelSyncPhase;
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+type DataPlatformEnvironmentSyncRequest = {
+  expectedSourceKey?: string;
+};
+
+type DataPlatformEnvironmentSyncPhase =
+  | 'querying'
+  | 'downloading'
+  | 'validating'
+  | 'promoting'
+  | 'completed'
+  | 'failed';
+
+type DataPlatformEnvironmentSyncProgress = {
+  runId: string;
+  contextKey: string;
+  phase: DataPlatformEnvironmentSyncPhase;
   completed: number;
   total: number;
   message: string;
@@ -322,6 +350,14 @@ type AssetEntry = {
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   libraryKind?: ModelAssetLibraryKind;
+  source?: 'project' | 'data-platform';
+  availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
+  dataPlatformResourceId?: string;
+  dataPlatformResourceType?: 'ENV_MODEL';
+  dataPlatformSourceKey?: string;
+  dataPlatformRevision?: string;
+  dataPlatformFileRevision?: string;
+  fileSha256?: string;
 };
 
 type ProjectModelAssetEntry = AssetEntry & {
@@ -403,6 +439,7 @@ type ImportCadFileResult = {
 type ProjectListAssetsResult = {
   projectRoot: string | null;
   skyboxSyncContextKey: string | null;
+  environmentSyncContextKey: string | null;
   assets: ProjectModelAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
   orphanedSkyboxes: ProjectSkyboxAssetEntry[];
@@ -435,6 +472,24 @@ type MqttIpcConfigureRequest = {
   enabled: boolean;
   address: string;
   subscriptions: MqttIpcSubscriptionConfig[];
+};
+
+type MqttConnectionTestRequest = {
+  requestId: string;
+  address: string;
+  subscriptions: MqttIpcSubscriptionConfig[];
+  timeoutMs?: number;
+};
+
+type MqttConnectionTestCancelRequest = {
+  requestId: string;
+};
+
+type MqttConnectionTestResult = {
+  requestId: string;
+  status: 'success' | 'error' | 'canceled';
+  message: string;
+  durationMs: number;
 };
 
 type MqttIpcStatus = {
@@ -528,6 +583,9 @@ interface Window {
     syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
+    syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest) => Promise<boolean>;
+    retryDataPlatformEnvironmentSync: () => Promise<boolean>;
+    onDataPlatformEnvironmentSyncProgress: (handler: (progress: DataPlatformEnvironmentSyncProgress) => void) => () => void;
     syncDataPlatformSkyboxes: () => Promise<boolean>;
     retryDataPlatformSkyboxSync: () => Promise<boolean>;
     onDataPlatformSkyboxSyncProgress: (handler: (progress: DataPlatformSkyboxSyncProgress) => void) => () => void;
@@ -544,7 +602,7 @@ interface Window {
     importEnvironmentModelFile: () => Promise<ImportEnvironmentModelFileResult>;
     importSkyboxFile: () => Promise<ImportSkyboxFileResult>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
-    getDigitalTwinPublishContext: () => Promise<DigitalTwinPublishContext>;
+    getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest) => Promise<DigitalTwinPublishContext>;
     publishDigitalTwin: (request: DigitalTwinPublishRequest) => Promise<DigitalTwinPublishResult>;
     cancelDigitalTwinPublish: (request: DigitalTwinPublishCancelRequest) => Promise<boolean>;
     onDigitalTwinPublishProgress: (handler: (progress: DigitalTwinPublishProgress) => void) => () => void;
@@ -553,6 +611,8 @@ interface Window {
     cancelWebProjectExport: (request: DeploymentExportCancelRequest) => Promise<boolean>;
     onWebProjectExportProgress: (handler: (progress: DeploymentExportProgress) => void) => () => void;
     revealWebProjectExport: (request: DeploymentExportRevealRequest) => Promise<void>;
+    mqttTestConnection?: (request: MqttConnectionTestRequest) => Promise<MqttConnectionTestResult>;
+    mqttCancelConnectionTest?: (request: MqttConnectionTestCancelRequest) => Promise<boolean>;
     mqttConfigure?: (request: MqttIpcConfigureRequest) => Promise<MqttIpcStatus>;
     mqttDisconnect?: () => Promise<MqttIpcStatus>;
     mqttGetStatus?: () => Promise<MqttIpcStatus>;

@@ -75,6 +75,18 @@ export function createEnvironmentFromAsset(
     thumbnailUrl: asset.thumbnailUrl,
     displayName,
     fileSizeBytes: asset.fileSizeBytes,
+    ...(asset.source === 'data-platform'
+      && asset.dataPlatformResourceType === 'ENV_MODEL'
+      && asset.dataPlatformResourceId
+      && asset.dataPlatformSourceKey
+      && asset.dataPlatformRevision ? {
+        source: 'data-platform' as const,
+        resourceType: 'ENV_MODEL' as const,
+        dataPlatformResourceId: asset.dataPlatformResourceId,
+        dataPlatformSourceKey: asset.dataPlatformSourceKey,
+        dataPlatformRevision: asset.dataPlatformRevision,
+        displayNameSnapshot: displayName,
+      } : {}),
     placementMode: previousEnvironment?.placementMode ?? 'scene-base',
     transform: previousEnvironment?.transform ?? createDefaultSceneEnvironmentTransform(),
     visible: previousEnvironment?.visible ?? true,

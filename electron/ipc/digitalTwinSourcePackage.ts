@@ -303,7 +303,6 @@ async function readSceneSnapshots(
     if (!isPlainObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) || !isPlainObject(parsed.scene)) {
       throw new Error(`场景文件格式不受支持：${sourcePath}`);
     }
-    assertSceneDoesNotContainApiKey(parsed, sourcePath);
     const skippedCadCount = skipCadReferences ? stripCadReferencesFromSourceScene(parsed) : 0;
     const snapshotContent = skippedCadCount > 0 ? `${JSON.stringify(parsed, null, 2)}\n` : content;
     const relativeFromScenes = path.relative(scenesRoot, sourcePath);
@@ -761,16 +760,6 @@ function throwIfAborted(signal: AbortSignal): void {
     const error = new Error('数字孪生源工程打包已取消。');
     error.name = 'AbortError';
     throw error;
-  }
-}
-
-/** 可信内网发布不允许任何场景把旧 Fetch API Key 带入源工程包。 */
-function assertSceneDoesNotContainApiKey(value: Record<string, unknown>, sourcePath: string): void {
-  const scene = value.scene;
-  if (!isPlainObject(scene)) return;
-  const fetchConfig = scene.fetchConfig;
-  if (isPlainObject(fetchConfig) && typeof fetchConfig.apiKey === 'string' && fetchConfig.apiKey.trim()) {
-    throw new Error(`场景包含 Fetch API Key，请先清空后再发布：${sourcePath}`);
   }
 }
 

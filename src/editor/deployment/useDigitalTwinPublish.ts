@@ -22,6 +22,7 @@ export type DigitalTwinPublishState = {
 };
 
 export type StartDigitalTwinPublishOptions = {
+  projectId: string | null;
   publishName: string;
   remark: string;
   overwriteExisting: boolean;
@@ -32,7 +33,7 @@ export type StartDigitalTwinPublishOptions = {
 export type DigitalTwinPublishController = {
   state: DigitalTwinPublishState;
   isBusy: boolean;
-  loadContext: () => Promise<void>;
+  loadContext: (projectId?: string | null) => Promise<void>;
   start: (options: StartDigitalTwinPublishOptions) => Promise<DigitalTwinPublishResult | null>;
   cancel: () => Promise<void>;
   reset: () => void;
@@ -50,6 +51,7 @@ const INITIAL_STATE: DigitalTwinPublishState = {
 export function useDigitalTwinPublish(): DigitalTwinPublishController {
   const [state, setState] = useState<DigitalTwinPublishState>(INITIAL_STATE);
   const activeRequestIdRef = useRef<string | null>(null);
+  const contextRequestIdRef = useRef(0);
   const pushLog = useEditorStore((store) => store.pushLog);
 
   useEffect(() => {
@@ -60,16 +62,25 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     });
   }, []);
 
-  const loadContext = useCallback(async (): Promise<void> => {
+  const loadContext = useCallback(async (projectId: string | null = null): Promise<void> => {
+    const requestId = contextRequestIdRef.current + 1;
+    contextRequestIdRef.current = requestId;
     if (!window.editorApi?.getDigitalTwinPublishContext) {
-      setState((current) => ({ ...current, status: 'error', error: '发布到数据中台需要 Electron 桌面环境。' }));
+      setState((current) => ({
+        ...current,
+        context: null,
+        status: 'error',
+        error: '发布到数据中台需要 Electron 桌面环境。',
+      }));
       return;
     }
-    setState((current) => ({ ...current, status: 'loading-context', error: null, result: null }));
+    setState((current) => ({ ...current, context: null, status: 'loading-context', error: null, result: null }));
     try {
-      const context = await window.editorApi.getDigitalTwinPublishContext();
+      const context = await window.editorApi.getDigitalTwinPublishContext({ projectId });
+      if (requestId !== contextRequestIdRef.current) return;
       setState((current) => ({ ...current, context, status: 'ready', error: null }));
     } catch (error) {
+      if (requestId !== contextRequestIdRef.current) return;
       const message = getErrorMessage(error);
       setState((current) => ({ ...current, status: 'error', error: message }));
       pushLog(`读取数字孪生发布上下文失败：${message}`);
@@ -80,6 +91,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     if (!window.editorApi?.publishDigitalTwin) return null;
     const requestId = crypto.randomUUID();
     const sceneContent = serializeScene(useEditorStore.getState().scene);
+    contextRequestIdRef.current += 1;
     activeRequestIdRef.current = requestId;
     setState((current) => ({
       ...current,
@@ -102,6 +114,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
         publishName: options.publishName,
         remark: options.remark,
         sceneContent,
+        projectId: options.projectId,
         overwriteExisting: options.overwriteExisting,
         confirmResourceBindings: options.confirmResourceBindings,
         allowedParentOrigins: options.allowedParentOrigins,
@@ -142,6 +155,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
 
   const reset = useCallback((): void => {
     if (activeRequestIdRef.current) return;
+    contextRequestIdRef.current += 1;
     setState(INITIAL_STATE);
   }, []);
 

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
+  DataPlatformEnvironmentSyncProgress,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
@@ -16,11 +17,13 @@ import { encodeAssetUrl } from './assetRegistry.js';
 import {
   activateProjectRoot,
   ensureProjectDirectories,
+  getCurrentProjectRoot,
   getProjectAssetIndexPath,
   getProjectEnvironmentsRoot,
   getProjectModelsRoot,
   rememberRecentSceneFile,
   setSharedProjectAssetRoot,
+  setSharedProjectEnvironmentRoot,
   setSharedProjectSkyboxRoot,
   writeProjectAssetIndex,
 } from './projectAssetStore.js';
@@ -29,6 +32,8 @@ import {
   createDataPlatformBinding,
   getCurrentDataPlatformBinding,
   readDataPlatformBinding,
+  resolveDataPlatformBindingSharedResourcesRoot,
+  resolveDataPlatformBindingWorkspaceRoot,
   resolveDataPlatformProjectRoot,
   resolveDataPlatformSharedResourcesRoot,
   setCurrentDataPlatformBinding,
@@ -41,6 +46,14 @@ import {
   retryDataPlatformModelSync,
   startDataPlatformModelSync,
 } from './dataPlatformModelSync.js';
+import {
+  clearDataPlatformEnvironmentSyncRetryContext,
+  createDataPlatformSourceKey,
+  disposeDataPlatformEnvironmentSync,
+  getLatestDataPlatformEnvironmentSyncProgress,
+  retryDataPlatformEnvironmentSync,
+  startDataPlatformEnvironmentSync,
+} from './dataPlatformEnvironmentSync.js';
 import {
   clearDataPlatformImageSyncRetryContext,
   disposeDataPlatformImageSync,
@@ -125,6 +138,68 @@ export function getDataPlatformEditorRoot(customWorkspaceRoot: string | null = n
     : app.getAppPath();
 }
 
+/** 把当前本地项目绑定到选定业务项目，不下载或覆盖远端 Editor 工程包。 */
+export async function prepareDataPlatformProjectForPublish(
+  project: DataPlatformProjectEntry,
+  baseUrl: string,
+  workspaceRoot: string,
+): Promise<DataPlatformProjectOpenResult> {
+  if (dataPlatformProjectServiceShuttingDown) {
+    throw new Error('应用正在退出，无法绑定数字孪生发布项目。');
+  }
+
+  await ensureWritableEditorRoot(workspaceRoot);
+  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const currentProjectRoot = getCurrentProjectRoot();
+  const normalizedCurrentRoot = currentProjectRoot ? path.resolve(currentProjectRoot) : null;
+  const normalizedWorkspaceRoot = path.resolve(workspaceRoot);
+  const projectRoot = normalizedCurrentRoot
+    && !isSameFilePath(normalizedCurrentRoot, normalizedWorkspaceRoot)
+    && !isSameFilePath(normalizedCurrentRoot, sharedResourcesRoot)
+    ? normalizedCurrentRoot
+    : resolveDataPlatformProjectRoot(workspaceRoot, project.id);
+  await ensureWritableEditorRoot(projectRoot);
+  await ensureProjectDirectories(projectRoot);
+  if (!normalizedCurrentRoot || !isSameFilePath(normalizedCurrentRoot, projectRoot)) await activateProjectRoot(projectRoot);
+  const existingBinding = await readDataPlatformBinding(projectRoot);
+  if (existingBinding) throw new Error('当前场景已经绑定数据中台业务项目。');
+
+  await ensureWritableEditorRoot(sharedResourcesRoot);
+  await ensureProjectDirectories(sharedResourcesRoot);
+  setSharedProjectAssetRoot(sharedResourcesRoot);
+  setSharedProjectEnvironmentRoot(sharedResourcesRoot);
+  setSharedProjectSkyboxRoot(sharedResourcesRoot);
+
+  const binding = createDataPlatformBinding({
+    baseUrl,
+    workspaceRoot,
+    projectId: project.id,
+    projectName: project.projectName,
+    editorProjectId: project.latestEditorProjectId,
+    latestVersionId: project.latestEditorProjectVersionId,
+    latestVersionNumber: project.latestEditorProjectVersionNumber,
+    resourceRevision: project.currentResourceRevision,
+    entryScenePath: null,
+    syncedAt: new Date().toISOString(),
+  });
+  await writeDataPlatformBinding(projectRoot, binding);
+  setCurrentDataPlatformBinding(projectRoot, binding);
+  invalidateDataPlatformSkyboxSyncPrepareContext();
+
+  return {
+    projectRoot,
+    sceneFilePath: null,
+    source: 'local',
+    warning: null,
+    conflictCopyPath: null,
+    // 发布开始前不启动资源同步，避免缓存更新与 SOURCE/DIST 打包并发修改同一资源。
+    modelSyncStarted: false,
+    envModelSyncStarted: false,
+    skyboxSyncStarted: false,
+    binding,
+  };
+}
+
 /** 从可信项目缓存打开工程，renderer 只允许提交项目 ID。 */
 export async function openDataPlatformProject(
   project: DataPlatformProjectEntry,
@@ -159,13 +234,39 @@ export async function syncDataPlatformModelsForWorkspace(
     await ensureWritableEditorRoot(workspaceRoot);
     await activateProjectRoot(workspaceRoot);
     setSharedProjectAssetRoot(null);
+    setSharedProjectEnvironmentRoot(workspaceRoot);
     return startDataPlatformModelSync(baseUrl, workspaceRoot);
   }
-  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata);
   await ensureWritableEditorRoot(sharedResourcesRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
-  return startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
+  setSharedProjectEnvironmentRoot(sharedResourcesRoot);
+  return startDataPlatformModelSync(binding.metadata.baseUrl, sharedResourcesRoot);
+}
+
+
+/** 打开任意编辑工作区时独立触发环境模型同步，不与普通/组合模型整批事务耦合。 */
+export async function syncDataPlatformEnvironmentsForWorkspace(
+  baseUrl: string,
+  workspaceRoot: string,
+  expectedSourceKey?: string,
+): Promise<boolean> {
+  if (dataPlatformProjectServiceShuttingDown) return false;
+  const binding = getCurrentDataPlatformBinding();
+  const sharedResourcesRoot = binding
+    ? resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata)
+    : workspaceRoot;
+  const sourceBaseUrl = binding?.metadata.baseUrl ?? baseUrl;
+  await ensureWritableEditorRoot(sharedResourcesRoot);
+  await ensureProjectDirectories(sharedResourcesRoot);
+  setSharedProjectEnvironmentRoot(sharedResourcesRoot);
+  return startDataPlatformEnvironmentSync(
+    sourceBaseUrl,
+    sharedResourcesRoot,
+    createDataPlatformEnvironmentSyncContextKey(sourceBaseUrl, sharedResourcesRoot),
+    expectedSourceKey,
+  );
 }
 
 /** 使所有在途天空盒 prepare 失效；调用方无需等待，dispose 会统一回收任务。 */
@@ -211,11 +312,15 @@ export function syncDataPlatformSkyboxesForWorkspace(
 
   const controller = new AbortController();
   const binding = getCurrentDataPlatformBinding();
+  const boundWorkspaceRoot = binding
+    ? resolveDataPlatformBindingWorkspaceRoot(binding.projectRoot, binding.metadata)
+    : workspaceRoot;
+  const sourceBaseUrl = binding?.metadata.baseUrl ?? baseUrl;
   const context: SkyboxSyncPrepareContext = {
     generation: skyboxSyncPrepareGeneration,
-    baseUrl,
-    workspaceRoot,
-    sharedResourcesRoot: resolveDataPlatformSharedResourcesRoot(workspaceRoot),
+    baseUrl: sourceBaseUrl,
+    workspaceRoot: boundWorkspaceRoot,
+    sharedResourcesRoot: resolveDataPlatformSharedResourcesRoot(boundWorkspaceRoot),
     syncContextKey: binding
       ? createDataPlatformSkyboxSyncContextKey(
         binding.metadata.baseUrl,
@@ -250,15 +355,19 @@ export async function syncDataPlatformImagesForWorkspace(
     setSharedProjectAssetRoot(null);
     return startDataPlatformImageSync(baseUrl, workspaceRoot);
   }
-  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata);
   await ensureWritableEditorRoot(sharedResourcesRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
-  return startDataPlatformImageSync(baseUrl, sharedResourcesRoot);
+  return startDataPlatformImageSync(binding.metadata.baseUrl, sharedResourcesRoot);
 }
 
-/** 根据数据中台地址和项目 ID 生成不暴露地址的稳定同步业务 key。 */
-export function createDataPlatformSkyboxSyncContextKey(
+/** 根据数据中台地址和共享缓存目录生成环境同步业务 key。 */
+export function createDataPlatformEnvironmentSyncContextKey(baseUrl: string, sharedResourcesRoot: string): string {
+  return `${createDataPlatformSourceKey(baseUrl)}:${path.resolve(sharedResourcesRoot).toLowerCase()}`;
+}
+
+function createDataPlatformSkyboxSyncContextKey(
   baseUrl: string,
   projectId: string,
   projectRoot: string,
@@ -316,8 +425,18 @@ export async function listSyncedImagesForWorkspace(workspaceRoot: string): Promi
     await ensureWritableEditorRoot(workspaceRoot).catch(() => undefined);
     return listSyncedImages(workspaceRoot);
   }
-  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata);
   return listSyncedImages(sharedResourcesRoot);
+}
+
+/** 重试最近一次独立环境模型同步。 */
+export function retryLatestDataPlatformEnvironmentSync(): boolean {
+  return retryDataPlatformEnvironmentSync();
+}
+
+/** 暴露最近环境模型同步进度。 */
+export function getCurrentDataPlatformEnvironmentSyncProgress(): DataPlatformEnvironmentSyncProgress | null {
+  return getLatestDataPlatformEnvironmentSyncProgress();
 }
 
 /** 暴露模型同步重试给 IPC。 */
@@ -333,6 +452,7 @@ export function getCurrentDataPlatformModelSyncProgress(): DataPlatformModelSync
 /** 数据中台配置变更后清除旧地址对应的重试上下文。 */
 export function clearDataPlatformProjectServiceRetryContext(): void {
   clearDataPlatformModelSyncRetryContext();
+  clearDataPlatformEnvironmentSyncRetryContext();
   clearDataPlatformImageSyncRetryContext();
   clearDataPlatformSkyboxSyncRetryContext();
   invalidateDataPlatformSkyboxSyncPrepareContext();
@@ -346,6 +466,7 @@ export async function disposeDataPlatformProjectTasks(): Promise<void> {
   await Promise.allSettled([...openTasks]);
   await Promise.allSettled([...skyboxSyncPrepareTasks]);
   await disposeDataPlatformModelSync();
+  await disposeDataPlatformEnvironmentSync();
   await disposeDataPlatformImageSync();
   await disposeDataPlatformSkyboxSync();
 }
@@ -365,6 +486,7 @@ async function openDataPlatformProjectInternal(
   await ensureProjectDirectories(projectRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
+  setSharedProjectEnvironmentRoot(sharedResourcesRoot);
 
   let source: DataPlatformProjectOpenResult['source'] = 'generated';
   let warning: string | null = null;
@@ -445,6 +567,7 @@ async function openDataPlatformProjectInternal(
   const entryScenePath = sceneFilePath ? toProjectRelativePath(projectRoot, sceneFilePath) : null;
   const binding = createDataPlatformBinding({
     baseUrl,
+    workspaceRoot,
     projectId: project.id,
     projectName: project.projectName,
     editorProjectId: project.latestEditorProjectId,
@@ -460,6 +583,11 @@ async function openDataPlatformProjectInternal(
   setSharedProjectSkyboxRoot(sharedResourcesRoot);
 
   const modelSyncStarted = startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
+  const envModelSyncStarted = startDataPlatformEnvironmentSync(
+    baseUrl,
+    sharedResourcesRoot,
+    createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedResourcesRoot),
+  );
   const skyboxSyncStarted = startDataPlatformSkyboxSync(
     baseUrl,
     sharedResourcesRoot,
@@ -472,6 +600,7 @@ async function openDataPlatformProjectInternal(
     warning,
     conflictCopyPath,
     modelSyncStarted,
+    envModelSyncStarted,
     skyboxSyncStarted,
     binding,
   };
@@ -963,6 +1092,14 @@ async function assertWorkspaceRealPathOutsideInstallation(editorRoot: string): P
 function isPathInsideOrEqual(parentPath: string, candidatePath: string): boolean {
   const relative = path.relative(path.resolve(parentPath), path.resolve(candidatePath));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function isSameFilePath(left: string, right: string): boolean {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

@@ -200,6 +200,220 @@ test('配置切换遇到 endAsync 拒绝时记录错误并继续建立新连接'
   );
 });
 
+test('Electron MQTT 提供独立测试连接 IPC 且不复用正式客户端映射', () => {
+  assert.match(mqttIpcSource, /mqtt:testConnection/);
+  assert.match(mqttIpcSource, /mqtt:cancelConnectionTest/);
+  assert.match(mqttIpcSource, /connectionTestsByKey/);
+  assert.match(mqttIpcSource, /reconnectPeriod:\s*0/);
+  assert.match(mqttIpcSource, /connectTimeout:\s*timeoutMs/);
+  assert.match(electronTypesSource, /export type MqttConnectionTestRequest/);
+  assert.match(electronTypesSource, /export type MqttConnectionTestResult/);
+});
+
+test('临时测试全部 SUBACK 成功后返回成功、断开且不写正式客户端映射', async () => {
+  const controlledClient = createControlledMqttClient();
+  const harness = createMqttIpcHarness({ createClient: () => controlledClient });
+  const sender = createFakeWebContents(30);
+  const testPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-success', 'ws://broker.example/mqtt', ['factory/a', 'factory/b']),
+  );
+
+  controlledClient.emit('connect');
+  controlledClient.completeSubscription('factory/a', null);
+  controlledClient.completeSubscription('factory/b', null);
+  const result = await testPromise;
+
+  assert.equal(result.status, 'success');
+  assert.match(result.message, /2 个 Topic/);
+  assert.equal(controlledClient.endCalls, 1);
+  assert.equal(harness.clientsByWebContentsId.has(sender.id), false);
+  assert.equal(harness.connectionTestsByKey.size, 0);
+  assert.deepEqual(sender.events, []);
+});
+
+test('临时测试任一订阅失败后返回 Topic 错误并释放任务', async () => {
+  const controlledClient = createControlledMqttClient();
+  const harness = createMqttIpcHarness({ createClient: () => controlledClient });
+  const sender = createFakeWebContents(31);
+  const testPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-suback-error', 'ws://broker.example/mqtt', ['factory/a', 'factory/b']),
+  );
+
+  controlledClient.emit('connect');
+  controlledClient.completeSubscription('factory/a', new Error('not authorized'));
+  const result = await testPromise;
+
+  assert.equal(result.status, 'error');
+  assert.match(result.message, /factory\/a/);
+  assert.match(result.message, /not authorized/);
+  assert.equal(controlledClient.endCalls, 1);
+  assert.equal(harness.connectionTestsByKey.size, 0);
+});
+
+test('取消临时测试按 requestId 结算 canceled 且延迟连接事件无效', async () => {
+  const controlledClient = createControlledMqttClient();
+  const harness = createMqttIpcHarness({ createClient: () => controlledClient });
+  const sender = createFakeWebContents(32);
+  const testPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-cancel', 'ws://broker.example/mqtt', ['factory/a']),
+  );
+
+  const canceled = await harness.handleCancelConnectionTest({ sender }, { requestId: 'req-cancel' });
+  controlledClient.emit('connect');
+  const result = await testPromise;
+
+  assert.equal(canceled, true);
+  assert.equal(result.status, 'canceled');
+  assert.equal(controlledClient.subscribeCalls.length, 0);
+  assert.equal(controlledClient.endCalls, 1);
+  assert.equal(harness.connectionTestsByKey.size, 0);
+});
+
+test('同一 renderer 的新测试会取消不同 requestId 的旧测试', async () => {
+  const clients = [createControlledMqttClient(), createControlledMqttClient()];
+  const harness = createMqttIpcHarness({ createClient: () => clients.shift() });
+  const sender = createFakeWebContents(35);
+  const firstPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-first', 'ws://broker.example/mqtt', ['factory/a']),
+  );
+  const firstClient = harness.connectCalls[0].client;
+  const secondPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-second', 'ws://broker.example/mqtt', ['factory/b']),
+  );
+
+  await waitForCondition(() => harness.connectCalls.length === 2 && harness.connectionTestsByKey.size === 1);
+  firstClient.emit('connect');
+  if (firstClient.subscribeCalls.length > 0) firstClient.completeSubscription('factory/a', null);
+  const firstResult = await firstPromise;
+
+  assert.equal(firstResult.status, 'canceled');
+  assert.equal(firstClient.endCalls, 1);
+  assert.equal(harness.connectionTestsByKey.size, 1);
+
+  const secondClient = harness.connectCalls[1].client;
+  secondClient.emit('connect');
+  secondClient.completeSubscription('factory/b', null);
+  const secondResult = await secondPromise;
+  assert.equal(secondResult.status, 'success');
+  assert.equal(harness.connectionTestsByKey.size, 0);
+});
+
+
+test('三连测试在旧连接清理期间只会启动最新请求', async () => {
+  const cleanup = createDeferred();
+  const firstClient = createControlledMqttClient();
+  firstClient.endPromise = cleanup.promise;
+  const latestClient = createControlledMqttClient();
+  const clients = [firstClient, latestClient];
+  const harness = createMqttIpcHarness({ createClient: () => clients.shift() });
+  const sender = createFakeWebContents(36);
+
+  const firstPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-first', 'ws://broker.example/mqtt', ['factory/a']),
+  );
+  const middlePromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-middle', 'ws://broker.example/mqtt', ['factory/b']),
+  );
+  await waitForCondition(() => firstClient.endCalls === 1);
+  const latestPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-latest', 'ws://broker.example/mqtt', ['factory/c']),
+  );
+  await Promise.resolve();
+
+  assert.equal(harness.connectCalls.length, 1);
+  cleanup.resolve();
+  await waitForCondition(() => harness.connectCalls.length === 2);
+
+  assert.equal((await firstPromise).status, 'canceled');
+  assert.equal((await middlePromise).status, 'canceled');
+  latestClient.emit('connect');
+  latestClient.completeSubscription('factory/c', null);
+  assert.equal((await latestPromise).status, 'success');
+  assert.equal(harness.connectCalls.length, 2);
+  assert.equal(harness.connectionTestsByKey.size, 0);
+});
+
+test('可取消尚在等待旧连接清理的测试请求', async () => {
+  const cleanup = createDeferred();
+  const firstClient = createControlledMqttClient();
+  firstClient.endPromise = cleanup.promise;
+  const unexpectedClient = createControlledMqttClient();
+  const clients = [firstClient, unexpectedClient];
+  const harness = createMqttIpcHarness({ createClient: () => clients.shift() });
+  const sender = createFakeWebContents(37);
+
+  const firstPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-active', 'ws://broker.example/mqtt', ['factory/a']),
+  );
+  const pendingPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-pending', 'ws://broker.example/mqtt', ['factory/b']),
+  );
+  await waitForCondition(() => firstClient.endCalls === 1);
+
+  const canceled = await harness.handleCancelConnectionTest({ sender }, { requestId: 'req-pending' });
+  cleanup.resolve();
+
+  assert.equal(canceled, true);
+  assert.equal((await firstPromise).status, 'canceled');
+  assert.equal((await pendingPromise).status, 'canceled');
+  assert.equal(harness.connectCalls.length, 1);
+  assert.equal(harness.connectionTestsByKey.size, 0);
+});
+
+test('临时连接清理同步触发 close 时只结算和断开一次', async () => {
+  const controlledClient = createControlledMqttClient();
+  controlledClient.emitCloseOnFirstEnd = true;
+  const harness = createMqttIpcHarness({ createClient: () => controlledClient });
+  const sender = createFakeWebContents(34);
+  const testPromise = harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-close-reentry', 'ws://broker.example/mqtt', ['factory/a']),
+  );
+
+  controlledClient.emit('connect');
+  controlledClient.completeSubscription('factory/a', null);
+  const result = await testPromise;
+
+  assert.equal(result.status, 'success');
+  assert.equal(controlledClient.endCalls, 1);
+  assert.equal(harness.connectionTestsByKey.size, 0);
+});
+
+test('临时测试超时后返回失败并释放连接', async () => {
+  const controlledClient = createControlledMqttClient();
+  const harness = createMqttIpcHarness({ createClient: () => controlledClient });
+  const sender = createFakeWebContents(33);
+  const result = await harness.handleTestConnection(
+    { sender },
+    createTestRequest('req-timeout', 'ws://broker.example/mqtt', ['factory/a'], 1),
+  );
+
+  assert.equal(result.status, 'error');
+  assert.match(result.message, /超时/);
+  assert.equal(controlledClient.endCalls, 1);
+  assert.equal(harness.connectionTestsByKey.size, 0);
+});
+
+
+test('preload 只暴露 MQTT 测试连接和取消窄 API', () => {
+  for (const preloadSourceText of [preloadSource, preloadCtsSource]) {
+    assert.match(preloadSourceText, /mqttTestConnection/);
+    assert.match(preloadSourceText, /mqttCancelConnectionTest/);
+    assert.match(preloadSourceText, /mqtt:testConnection/);
+    assert.match(preloadSourceText, /mqtt:cancelConnectionTest/);
+  }
+});
+
 test('preload 只暴露窄 MQTT API 且事件订阅返回 unsubscribe', () => {
   for (const source of [preloadSource, preloadCtsSource]) {
     assert.match(source, /mqttConfigure/);
@@ -213,7 +427,8 @@ test('preload 只暴露窄 MQTT API 且事件订阅返回 unsubscribe', () => {
 
 test('主进程注册 MQTT IPC 并在退出前清理', () => {
   assert.match(mainSource, /registerMqttIpc/);
-  assert.match(mainSource, /app\.on\('will-quit'/);
+  assert.match(mainSource, /app\.on\('before-quit'/);
+  assert.match(mainSource, /disposeAllMqttIpcClients/);
 });
 
 test('渲染端在 Electron 和浏览器之间二选一，本地 simulator 保持浏览器路径', () => {
@@ -225,7 +440,11 @@ test('渲染端在 Electron 和浏览器之间二选一，本地 simulator 保�
 
 function createMqttIpcHarness(options = {}) {
   const connectCalls = [];
-  const source = mqttIpcSource + '\nObject.assign(globalThis.__mqttIpcHarness, { handleConfigure, handleDisconnect, clientsByWebContentsId });';
+  const source = mqttIpcSource + '\nconst mqttIpcHarnessExports = { handleConfigure, handleDisconnect, clientsByWebContentsId };' +
+    '\nif (typeof handleTestConnection !== \'undefined\') {' +
+    '\n  Object.assign(mqttIpcHarnessExports, { handleTestConnection, handleCancelConnectionTest, connectionTestsByKey });' +
+    '\n}' +
+    '\nObject.assign(globalThis.__mqttIpcHarness, mqttIpcHarnessExports);';
   const output = ts.transpileModule(source, {
     compilerOptions: {
       esModuleInterop: true,
@@ -243,6 +462,8 @@ function createMqttIpcHarness(options = {}) {
     Array,
     Date,
     Promise,
+    setTimeout,
+    clearTimeout,
     require: (specifier) => {
       if (specifier === 'electron') return { ipcMain: { handle: () => undefined } };
       if (specifier === 'mqtt') {
@@ -272,6 +493,16 @@ function createConfigureRequest(address, topic) {
   };
 }
 
+function createTestRequest(requestId, address, topics, timeoutMs = 8000) {
+  return {
+    requestId,
+    address,
+    subscriptions: topics.map((topic) => ({ topic, qos: 0, adapter: { kind: 'epv' } })),
+    timeoutMs,
+  };
+}
+
+
 function createFakeWebContents(id) {
   return {
     id,
@@ -297,6 +528,48 @@ function createFakeMqttClient(endPromise, subscriptionErrors = new Map()) {
       return this;
     },
   };
+}
+
+function createControlledMqttClient() {
+  return {
+    handlers: new Map(),
+    subscribeCalls: [],
+    subscriptionCallbacks: new Map(),
+    endCalls: 0,
+    endPromise: null,
+    emitCloseOnFirstEnd: false,
+    on(event, handler) {
+      this.handlers.set(event, handler);
+      return this;
+    },
+    emit(event, ...args) {
+      this.handlers.get(event)?.(...args);
+    },
+    subscribe(topic, options, callback) {
+      this.subscribeCalls.push({ topic, qos: options.qos });
+      this.subscriptionCallbacks.set(topic, callback);
+      return this;
+    },
+    completeSubscription(topic, error) {
+      const callback = this.subscriptionCallbacks.get(topic);
+      if (!callback) throw new Error('Subscription callback missing: ' + topic);
+      callback(error);
+    },
+    async endAsync() {
+      this.endCalls += 1;
+      if (this.emitCloseOnFirstEnd && this.endCalls === 1) this.emit('close');
+      if (this.endPromise) await this.endPromise;
+    },
+  };
+}
+
+
+async function waitForCondition(predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('等待测试条件超时。');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 function createDeferred() {

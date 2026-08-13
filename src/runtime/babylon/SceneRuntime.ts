@@ -1,4 +1,7 @@
 import '@babylonjs/loaders';
+import { configureLocalBabylonDecoders } from './localDecoderConfiguration';
+
+configureLocalBabylonDecoders();
 import {
   AbstractMesh,
   type AnimationGroup,
@@ -25,7 +28,6 @@ import {
   Quaternion,
   Scene,
   SceneLoader,
-  SelectionOutlineLayer,
   StandardMaterial,
   Texture,
   TransformNode,
@@ -223,10 +225,15 @@ import type {
   StackerModelTelemetryState,
 } from './telemetry/specialized/types';
 import { mergeSceneRuntimeHighlightEntityIds } from './sceneRuntimeHighlight';
+import {
+  clearSceneSelectionHighlight,
+  createSceneSelectionHighlightLayer,
+  setSceneSelectionHighlightGroups,
+  type SceneSelectionHighlightLayer,
+} from './sceneSelectionHighlight';
 import { isRuntimeModelSelectionCandidate } from './sceneRuntimeSelection';
 
 const SELECTED_MATERIAL_COLOR = '#f7d774';
-const SELECTED_EMISSIVE_COLOR = '#332400';
 const FALLBACK_MATERIAL_COLOR = '#8ab4f8';
 const LOCATOR_EDGE_COLOR = '#19c7d4';
 const MODEL_GENERATOR_MARKER_COLOR = '#19c7d4';
@@ -540,7 +547,7 @@ export class SceneRuntime {
   private localHighlightedEntityIds = new Set<string>();
   private externalHighlightedEntityIds = new Set<string>();
   private hierarchySelectionIds: string[] | null = null;
-  private readonly modelSelectionOutlineLayer: SelectionOutlineLayer;
+  private readonly modelSelectionOutlineLayer: SceneSelectionHighlightLayer;
   private readonly assetLoadScheduler = new AssetLoadScheduler();
   private readonly sharedModelAssetCache = new SharedModelAssetCache();
   private readonly telemetryObserver: Nullable<Observer<Scene>>;
@@ -576,8 +583,7 @@ export class SceneRuntime {
     private readonly onModelMeasurementChanged: (entityId: string) => void = () => undefined,
     onEnvironmentSnapshot: (snapshot: EnvironmentRuntimeSnapshot) => void = () => undefined,
   ) {
-    this.modelSelectionOutlineLayer = new SelectionOutlineLayer('EditorModelSelectionOutlineLayer', scene);
-    this.modelSelectionOutlineLayer.outlineColor = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
+    this.modelSelectionOutlineLayer = createSceneSelectionHighlightLayer(scene, undefined, this.pushLog);
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
     this.shadowRuntime = new SceneShadowRuntime(scene);
     this.lightMarkerRuntime = new EditorLightMarkerRuntime(scene);
@@ -2909,11 +2915,11 @@ export class SceneRuntime {
     this.applyPrimitiveMeshAppearance(mesh, meshRenderer, selected);
   }
 
-  /** 根据实体材质与选择状态刷新基础 Mesh 外观，不重建几何。 */
-  private applyPrimitiveMeshAppearance(mesh: Mesh, meshRenderer: MeshRendererComponent, selected: boolean): void {
+  /** 刷新基础 Mesh 原始材质；选中反馈统一由选择高亮层绘制，不改写模型表面。 */
+  private applyPrimitiveMeshAppearance(mesh: Mesh, meshRenderer: MeshRendererComponent, _selected: boolean): void {
     const material = mesh.material instanceof StandardMaterial ? mesh.material : new StandardMaterial(`${mesh.name}_mat`, this.scene);
-    material.diffuseColor = selected ? Color3.FromHexString(SELECTED_MATERIAL_COLOR) : this.readColor(meshRenderer.materialColor);
-    material.emissiveColor = selected ? Color3.FromHexString(SELECTED_EMISSIVE_COLOR) : Color3.Black();
+    material.diffuseColor = this.readColor(meshRenderer.materialColor);
+    material.emissiveColor = Color3.Black();
     mesh.material = material;
   }
 
@@ -6456,7 +6462,7 @@ export class SceneRuntime {
     return `${runtimeUrl}${separator}assetRevision=${encodeURIComponent(assetRevision)}`;
   }
 
-  /** 记录模型选中状态；普通模型、共享实例和矩阵阵列统一由 SelectionOutlineLayer 描边。 */
+  /** 记录模型选中状态；普通模型、共享实例和矩阵阵列统一由场景选择高亮层描边。 */
   private applyModelSelection(model: ModelRuntimeEntry, selected: boolean): void {
     model.highlighted = selected;
   }
@@ -6475,7 +6481,7 @@ export class SceneRuntime {
   }
 
   /**
-   * 只从当前选区推导普通模型、共享实例和矩阵阵列描边。普通单选为 O(1)，文件夹整组选中为 O(selected)，
+   * 只从当前选区推导基础 Mesh、普通模型、共享实例和矩阵阵列描边。普通单选为 O(1)，文件夹整组选中为 O(selected)，
    * 不再展开全部可见实体 ID 或拼接全场景 signature；批次内部再按差量刷新实例选择缓冲。
    */
   private rebuildModelSelectionOutline(): void {
@@ -6488,6 +6494,11 @@ export class SceneRuntime {
     );
 
     for (const entityId of highlightedEntityIds) {
+      const primitiveMesh = this.meshes.get(entityId);
+      if (primitiveMesh && !primitiveMesh.isDisposed() && primitiveMesh.getTotalVertices() > 0) {
+        selectedModelGroups.push([primitiveMesh]);
+      }
+
       const model = this.models.get(entityId);
       if (model && !model.modelArrayBatch && model.highlighted) {
         const meshes = model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
@@ -6508,7 +6519,7 @@ export class SceneRuntime {
       }
     }
 
-    // 先写入批次维护的权威选择缓冲，再把当前活动的原模型 Mesh 交给 SelectionOutlineLayer。
+    // 先写入批次维护的权威选择缓冲，再把当前活动的原模型 Mesh 交给场景选择高亮层。
     // 这样只高亮目标逻辑实体，不会因共享 Geometry 或 thinInstance 批次而整类高亮。
     let nextArraySelectionId = selectedModelGroups.length + 1;
     const selectedArrayGroups = [...selectedArrayEntityIdsByBatch.entries()]
@@ -6524,25 +6535,21 @@ export class SceneRuntime {
       .filter((group): group is NonNullable<typeof group> => group !== null);
     const nextOutlinedModelArrayBatches = new Set(selectedArrayGroups.map((group) => group.batch));
 
-    this.modelSelectionOutlineLayer.clearSelection();
-    if (selectedModelGroups.length === 0 && selectedArrayGroups.length === 0) {
-      // SelectionOutlineLayer 会为遮挡正确的描边延迟启用全场景 DepthRenderer，
-      // 但 clearSelection() 不会释放它；空选区继续保留会让所有模型永久多绘制一遍。
-      this.scene.disableDepthRenderer();
+    const selectedGlowGroups = [
+      ...selectedModelGroups,
+      ...selectedArrayGroups.map((group) => group.meshes),
+    ];
+    if (selectedGlowGroups.length === 0) {
+      // 选择效果会为遮挡正确的描边延迟启用全场景 DepthRenderer；空选区必须主动释放。
+      clearSceneSelectionHighlight(this.modelSelectionOutlineLayer, this.scene);
       this.outlinedModelArrayBatches = nextOutlinedModelArrayBatches;
       return;
     }
 
-    prepareInstancedMeshesForSelectionOutline([
-      ...selectedModelGroups.flat(),
-      ...selectedArrayGroups.flatMap((group) => group.meshes),
-    ]);
+    prepareInstancedMeshesForSelectionOutline(selectedGlowGroups.flat());
+    setSceneSelectionHighlightGroups(this.modelSelectionOutlineLayer, selectedGlowGroups);
 
-    for (const meshes of selectedModelGroups) {
-      this.modelSelectionOutlineLayer.addSelection(meshes);
-    }
     for (const group of selectedArrayGroups) {
-      this.modelSelectionOutlineLayer.addSelection(group.meshes);
       // addSelection() 会临时把整个 thinInstance 批次改为选中；再次绑定权威缓冲只保留目标实体。
       group.batch.setSelectionMask(group.selectedEntityIds, group.selectionId);
     }

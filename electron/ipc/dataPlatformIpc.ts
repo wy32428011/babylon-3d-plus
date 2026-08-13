@@ -3,6 +3,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
   DataPlatformConfig,
+  DataPlatformEnvironmentSyncProgress,
+  DataPlatformEnvironmentSyncRequest,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
@@ -19,15 +21,18 @@ import {
   clearDataPlatformProjectServiceRetryContext,
   ensureWritableEditorRoot,
   getCurrentDataPlatformModelSyncProgress,
+  getCurrentDataPlatformEnvironmentSyncProgress,
   getCurrentDataPlatformSkyboxSyncProgress,
   getDataPlatformEditorRoot,
   openDataPlatformProject,
   listSyncedImagesForWorkspace,
   retryLatestDataPlatformModelSync,
+  retryLatestDataPlatformEnvironmentSync,
   retryLatestDataPlatformSkyboxSync,
   retryLatestDataPlatformImageSync,
   syncDataPlatformImagesForWorkspace,
   syncDataPlatformModelsForWorkspace,
+  syncDataPlatformEnvironmentsForWorkspace,
   syncDataPlatformSkyboxesForWorkspace,
   getCurrentDataPlatformImageSyncProgress,
 } from './dataPlatformProjectService.js';
@@ -57,6 +62,12 @@ type PersistedDataPlatformConfigV2 = {
 type StoredDataPlatformConfig = {
   baseUrl: string;
   customWorkspaceRoot: string | null;
+};
+
+export type DataPlatformPublishProjectContext = {
+  baseUrl: string;
+  workspaceRoot: string;
+  project: DataPlatformProjectEntry;
 };
 
 /** 注册数据中台配置与项目列表 IPC，重复调用时保持幂等。 */
@@ -150,6 +161,21 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle(
     'data-platform:getModelSyncProgress',
     async (): Promise<DataPlatformModelSyncProgress | null> => getCurrentDataPlatformModelSyncProgress(),
+  );
+
+  ipcMain.handle('data-platform:syncEnvironments', async (_event, request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => {
+    const config = await readDataPlatformConfig();
+    if (!config.baseUrl) return false;
+    return syncDataPlatformEnvironmentsForWorkspace(config.baseUrl, config.workspaceRoot, request?.expectedSourceKey);
+  });
+
+  ipcMain.handle('data-platform:retryEnvironmentSync', async (): Promise<boolean> => {
+    return retryLatestDataPlatformEnvironmentSync();
+  });
+
+  ipcMain.handle(
+    'data-platform:getEnvironmentSyncProgress',
+    async (): Promise<DataPlatformEnvironmentSyncProgress | null> => getCurrentDataPlatformEnvironmentSyncProgress(),
   );
 
   ipcMain.handle('data-platform:syncSkyboxes', async (): Promise<boolean> => {
@@ -274,7 +300,7 @@ function toDataPlatformConfig(stored: StoredDataPlatformConfig): DataPlatformCon
 }
 
 /** 读取 userData 中持久化的数据中台配置。 */
-async function readDataPlatformConfig(): Promise<DataPlatformConfig> {
+export async function readDataPlatformConfig(): Promise<DataPlatformConfig> {
   return toDataPlatformConfig(await readStoredDataPlatformConfig());
 }
 
@@ -338,8 +364,22 @@ async function resetDataPlatformWorkspace(): Promise<DataPlatformConfig> {
   });
 }
 
+/** 按当前数据中台配置解析发布目标；项目详情只在主进程内作为可信元数据使用。 */
+export async function resolveDataPlatformPublishProjectContext(
+  projectId: string,
+): Promise<DataPlatformPublishProjectContext> {
+  const normalizedProjectId = normalizeRequiredIdentifier(projectId, '数字孪生发布请求中的 projectId');
+  const config = await readDataPlatformConfig();
+  if (!config.baseUrl) throw new Error('尚未配置数据中台地址。');
+  return {
+    baseUrl: config.baseUrl,
+    workspaceRoot: config.workspaceRoot,
+    project: await requestDataPlatformProject(config.baseUrl, normalizedProjectId),
+  };
+}
+
 /** 按项目 ID 查询详情，供外部深链绕过分页列表精确打开目标工程。 */
-async function requestDataPlatformProject(baseUrl: string, projectId: string): Promise<DataPlatformProjectEntry> {
+export async function requestDataPlatformProject(baseUrl: string, projectId: string): Promise<DataPlatformProjectEntry> {
   const payload = await requestDataPlatformJson({
     baseUrl,
     endpointPath: PROJECT_DETAIL_PATH,
@@ -352,7 +392,9 @@ async function requestDataPlatformProject(baseUrl: string, projectId: string): P
     const message = isPlainObject(payload) && typeof payload.message === 'string' ? payload.message.trim() : '';
     throw new Error(message || '数据中台项目详情响应结构不正确。');
   }
-  return normalizeProjectEntry(payload.data, 0);
+  const project = normalizeProjectEntry(payload.data, 0);
+  if (project.id !== projectId) throw new Error('数据中台项目详情响应与请求项目不匹配。');
+  return project;
 }
 /** 通过统一受限请求读取数据中台业务项目列表。 */
 async function requestDataPlatformProjects(baseUrl: string, projectName: string): Promise<DataPlatformProjectListResult> {

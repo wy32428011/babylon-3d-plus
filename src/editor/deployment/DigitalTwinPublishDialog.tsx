@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createDeploymentSceneSummary } from './deploymentExport';
 import { analyzeDigitalTwinAssetCodes } from '../../shared/digitalTwinAssetCodes';
 import { createDigitalTwinPublishAssetWarningView } from './digitalTwinPublishAssetWarnings';
@@ -28,6 +28,12 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   const [confirmResourceBindings, setConfirmResourceBindings] = useState(false);
   const [confirmAssetWarnings, setConfirmAssetWarnings] = useState(false);
   const [allowedParentOrigins, setAllowedParentOrigins] = useState<string[]>([]);
+  const [requiresProjectSelection, setRequiresProjectSelection] = useState(false);
+  const [projects, setProjects] = useState<DataPlatformProjectEntry[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState('');
+  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+  const [projectListError, setProjectListError] = useState<string | null>(null);
+  const projectListRequestRef = useRef(0);
   const [validationError, setValidationError] = useState<string | null>(null);
   const containsWildcard = allowedParentOrigins.some((value) => value.trim() === '*');
   const { state, isBusy } = props.controller;
@@ -41,8 +47,20 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
 
   useEffect(() => {
     if (!props.open) return;
+    projectListRequestRef.current += 1;
+    setRequiresProjectSelection(false);
+    setProjects([]);
+    setSelectedProjectId('');
+    setIsLoadingProjects(false);
+    setProjectListError(null);
     void props.controller.loadContext();
   }, [props.controller.loadContext, props.open]);
+
+  useEffect(() => {
+    if (!props.open || state.status === 'loading-context' || context === null || context.available || requiresProjectSelection) return;
+    setRequiresProjectSelection(true);
+    void loadProjectOptions();
+  }, [context, props.open, requiresProjectSelection, state.status]);
 
   useEffect(() => {
     if (!props.open || publishName || !context?.projectName) return;
@@ -65,10 +83,47 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
 
   if (!props.open) return null;
 
+  async function loadProjectOptions(): Promise<void> {
+    if (!window.editorApi?.listDataPlatformProjects) {
+      setProjectListError('读取数据中台项目列表需要 Electron 桌面环境。');
+      return;
+    }
+    const requestId = projectListRequestRef.current + 1;
+    projectListRequestRef.current = requestId;
+    setIsLoadingProjects(true);
+    setProjectListError(null);
+    try {
+      const result = await window.editorApi.listDataPlatformProjects({ projectName: '' });
+      if (requestId !== projectListRequestRef.current) return;
+      setProjects(result.records);
+      if (result.records.length === 0) setProjectListError('当前数据中台没有可选择的业务项目。');
+    } catch (error) {
+      if (requestId !== projectListRequestRef.current) return;
+      setProjects([]);
+      setProjectListError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (requestId === projectListRequestRef.current) setIsLoadingProjects(false);
+    }
+  }
+
+  function handleProjectChange(projectId: string): void {
+    setSelectedProjectId(projectId);
+    setPublishName('');
+    setOverwriteExisting(false);
+    setConfirmResourceBindings(false);
+    setAllowedParentOrigins([]);
+    setValidationError(null);
+    void props.controller.loadContext(projectId || null);
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    if (requiresProjectSelection && !selectedProjectId) {
+      setValidationError('请选择要发布并绑定的业务项目。');
+      return;
+    }
     if (!context?.available) {
-      setValidationError('当前工程未绑定数据中台业务项目。');
+      setValidationError(requiresProjectSelection ? '所选业务项目发布上下文尚未就绪。' : '当前工程未绑定数据中台业务项目。');
       return;
     }
     if (context.versionConflict) {
@@ -101,6 +156,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
     }
     setValidationError(null);
     await props.controller.start({
+      projectId: requiresProjectSelection ? selectedProjectId : null,
       publishName: normalizedName,
       remark,
       overwriteExisting,
@@ -111,6 +167,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
 
   function handleClose(): void {
     if (isBusy) return;
+    projectListRequestRef.current += 1;
     props.controller.reset();
     setPublishName('');
     setRemark('');
@@ -163,10 +220,35 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
         <section className="deployment-export-dialog-section" aria-label="发布目标">
           <div className="deployment-export-section-heading">
             <h3>发布目标</h3>
-            <span>{context?.available ? context.projectId : '未绑定'}</span>
+            <span>{context?.available ? context.projectId : requiresProjectSelection ? '请选择项目' : '未绑定'}</span>
           </div>
+          {requiresProjectSelection ? (
+            <div className="digital-twin-publish-project-selector">
+              <label className="deployment-export-dialog-field">
+                <span>业务项目</span>
+                <select
+                  aria-label="发布业务项目"
+                  disabled={isBusy || isLoadingProjects || completed}
+                  onChange={(event) => handleProjectChange(event.target.value)}
+                  value={selectedProjectId}
+                >
+                  <option value="">{isLoadingProjects ? '正在加载项目…' : '请选择业务项目'}</option>
+                  {projects.map((project) => (
+                    <option key={project.id} value={project.id}>{project.projectName}（{project.id}）</option>
+                  ))}
+                </select>
+              </label>
+              <button disabled={isBusy || isLoadingProjects || completed} onClick={() => void loadProjectOptions()} type="button">刷新项目</button>
+            </div>
+          ) : null}
+          {requiresProjectSelection ? (
+            <p className="deployment-export-resource-detail">
+              当前场景未绑定业务项目；选择后将按该项目发布，并把当前本地项目绑定到所选业务项目。
+            </p>
+          ) : null}
+          {projectListError ? <p className="deployment-export-error" role="alert">{projectListError}</p> : null}
           <dl className="digital-twin-publish-context-grid">
-            <div><dt>业务项目</dt><dd>{context?.projectName ?? '当前工程未绑定数据中台项目'}</dd></div>
+            <div><dt>业务项目</dt><dd>{context?.projectName ?? (requiresProjectSelection ? '请选择业务项目' : '当前工程未绑定数据中台项目')}</dd></div>
             <div><dt>本地基础版本</dt><dd>{context?.baseVersionNumber ? `v${context.baseVersionNumber}` : '首次发布'}</dd></div>
             <div><dt>远端最新版本</dt><dd>{context?.remoteLatestVersionNumber ? `v${context.remoteLatestVersionNumber}` : '暂无'}</dd></div>
             <div><dt>资源修订</dt><dd>{context?.resourceRevision ?? '-'}</dd></div>
@@ -378,7 +460,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
           {!completed ? (
             <button
               className="deployment-export-primary-button"
-              disabled={isBusy || !context?.available || Boolean(context.versionConflict)}
+              disabled={isBusy || !context?.available || Boolean(context.versionConflict) || (requiresProjectSelection && !selectedProjectId)}
               type="submit"
             >
               {state.status === 'publishing' ? '发布中…' : requiresResourceConfirmation ? '确认关联并重试发布' : '确认发布'}

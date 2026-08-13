@@ -10,6 +10,7 @@ const POSITIVE_ID_PATTERN = /^[1-9]\d{0,63}$/;
 export type DataPlatformBindingMetadata = {
   version: 1;
   baseUrl: string;
+  workspaceRoot: string | null;
   projectId: string;
   projectName: string;
   editorProjectId: string | null;
@@ -20,7 +21,9 @@ export type DataPlatformBindingMetadata = {
   syncedAt: string;
 };
 
-export type CreateDataPlatformBindingInput = Omit<DataPlatformBindingMetadata, 'version'>;
+export type CreateDataPlatformBindingInput = Omit<DataPlatformBindingMetadata, 'version' | 'workspaceRoot'> & {
+  workspaceRoot?: string | null;
+};
 
 type CurrentDataPlatformBinding = {
   projectRoot: string;
@@ -40,6 +43,27 @@ export function resolveDataPlatformSharedResourcesRoot(workspaceRoot: string): s
   return path.resolve(workspaceRoot, 'SharedResources');
 }
 
+/** 从绑定恢复数据中台工作区；旧版绑定仅允许按规范 Projects/{projectId} 目录反推。 */
+export function resolveDataPlatformBindingWorkspaceRoot(
+  projectRoot: string,
+  metadata: Pick<DataPlatformBindingMetadata, 'workspaceRoot' | 'projectId'>,
+): string {
+  if (metadata.workspaceRoot) return path.resolve(metadata.workspaceRoot);
+  const normalizedProjectRoot = path.resolve(projectRoot);
+  const projectsRoot = path.dirname(normalizedProjectRoot);
+  if (path.basename(projectsRoot).toLowerCase() !== 'projects' || path.basename(normalizedProjectRoot) !== metadata.projectId) {
+    throw new Error('本地数据中台项目绑定缺少工作区信息，且项目目录结构无法安全反推。');
+  }
+  return path.dirname(projectsRoot);
+}
+
+export function resolveDataPlatformBindingSharedResourcesRoot(
+  projectRoot: string,
+  metadata: Pick<DataPlatformBindingMetadata, 'workspaceRoot' | 'projectId'>,
+): string {
+  return resolveDataPlatformSharedResourcesRoot(resolveDataPlatformBindingWorkspaceRoot(projectRoot, metadata));
+}
+
 export function getDataPlatformBindingPath(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), '.babylon-editor', BINDING_FILE_NAME);
 }
@@ -53,6 +77,7 @@ export function createDataPlatformBinding(input: CreateDataPlatformBindingInput)
   return {
     version: 1,
     baseUrl: normalizeBaseUrl(input.baseUrl),
+    workspaceRoot: normalizeWorkspaceRoot(input.workspaceRoot),
     projectId: normalizeProjectId(input.projectId),
     projectName: normalizeProjectName(input.projectName),
     editorProjectId: normalizeOptionalId(input.editorProjectId, 'Editor 工程 ID'),
@@ -91,6 +116,7 @@ export async function readDataPlatformBinding(projectRoot: string): Promise<Data
     if (!isPlainObject(parsed) || parsed.version !== 1) throw new Error('本地数据中台绑定文件版本或结构无效。');
     return createDataPlatformBinding({
       baseUrl: parsed.baseUrl as string,
+      workspaceRoot: (parsed.workspaceRoot ?? null) as string | null,
       projectId: parsed.projectId as string,
       projectName: parsed.projectName as string,
       editorProjectId: (parsed.editorProjectId ?? null) as string | null,
@@ -125,7 +151,7 @@ export function clearCurrentDataPlatformBinding(): void {
 export async function updateDataPlatformBinding(
   projectRoot: string,
   expectedProjectId: string,
-  patch: Partial<Omit<DataPlatformBindingMetadata, 'version' | 'projectId' | 'baseUrl'>>,
+  patch: Partial<Omit<DataPlatformBindingMetadata, 'version' | 'projectId' | 'baseUrl' | 'workspaceRoot'>>,
 ): Promise<DataPlatformBindingMetadata> {
   const normalizedRoot = path.resolve(projectRoot);
   const normalizedProjectId = normalizeProjectId(expectedProjectId);
@@ -155,6 +181,14 @@ function normalizeBaseUrl(value: string): string {
   url.hash = '';
   url.search = '';
   return url.toString().replace(/\/+$/, '');
+}
+
+function normalizeWorkspaceRoot(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !value.trim() || !path.isAbsolute(value.trim())) {
+    throw new Error('数据中台工作区路径无效。');
+  }
+  return path.resolve(value.trim());
 }
 
 function normalizeProjectId(value: string): string {

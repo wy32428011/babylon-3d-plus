@@ -12,6 +12,12 @@ import {
 import type { TransformComponent } from '../../editor/model/components';
 import { normalizeSkyboxSphereScale, SKYBOX_SPHERE_DIAMETER_METERS, type SceneSkyboxSettings } from '../../editor/model/SceneDocument';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
+import {
+  clearSceneSelectionHighlight,
+  createSceneSelectionHighlightLayer,
+  setSceneSelectionHighlightGroups,
+  type SceneSelectionHighlightLayer,
+} from './sceneSelectionHighlight';
 
 type SkyboxTexture = HDRCubeTexture | EXRCubeTexture;
 
@@ -41,7 +47,6 @@ type PendingSkybox = {
 
 const DEFAULT_ENVIRONMENT_INTENSITY = 1;
 const LEGACY_SKYBOX_ENTITY_KEY = '__legacy_scene_skybox';
-const SKYBOX_OUTLINE_COLOR = Color3.FromHexString('#53e6f2');
 const SKYBOX_PLACEHOLDER_COLOR = Color3.FromHexString('#263d4d');
 
 export function createSceneSkyboxSignature(skybox: SceneSkyboxSettings): string {
@@ -74,11 +79,18 @@ export class SceneSkyboxRuntime {
   private pending: PendingSkybox | null = null;
   private desired: SceneSkyboxRuntimeTarget | null = null;
   private loadToken = 0;
+  private readonly selectionHighlightLayer: SceneSelectionHighlightLayer;
 
   constructor(
     private readonly scene: Scene,
     private readonly pushLog: (message: string) => void = () => undefined,
-  ) {}
+  ) {
+    this.selectionHighlightLayer = createSceneSelectionHighlightLayer(
+      scene,
+      'EditorSkyboxSelectionHighlightLayer',
+      this.pushLog,
+    );
+  }
 
   sync(target: SceneSkyboxRuntimeTarget | null): void {
     this.desired = target;
@@ -123,6 +135,7 @@ export class SceneSkyboxRuntime {
     this.desired = null;
     this.cancelPending();
     this.disposeActive(true);
+    this.selectionHighlightLayer.dispose();
   }
 
   private createActiveSkybox(entityKey: string, entityId: string | null): ActiveSkybox {
@@ -149,8 +162,6 @@ export class SceneSkyboxRuntime {
     mesh.metadata = { ...(mesh.metadata ?? {}), ...(entityId ? { editorEntityId: entityId } : {}), editorSkyboxSphere: true };
     mesh.isPickable = Boolean(entityId);
     mesh.renderOutline = false;
-    mesh.outlineColor = SKYBOX_OUTLINE_COLOR;
-    mesh.outlineWidth = 0.035;
     return { entityKey, signature: null, texture: null, mesh, material };
   }
 
@@ -262,7 +273,7 @@ export class SceneSkyboxRuntime {
     active.mesh.scaling = new Vector3(scale.x, scale.y, scale.z);
     active.mesh.setEnabled(target.visible);
     active.mesh.isPickable = target.visible && target.pickable && Boolean(target.entityId);
-    active.mesh.renderOutline = target.visible && target.selected;
+    this.syncSelectionHighlight(active.mesh, target.visible && target.selected);
 
     const rotationY = degreesToRadians(target.skybox.rotationDegrees);
     if (active.texture) active.texture.rotationY = rotationY;
@@ -300,7 +311,22 @@ export class SceneSkyboxRuntime {
       this.scene.environmentTexture = null;
       this.scene.environmentIntensity = DEFAULT_ENVIRONMENT_INTENSITY;
     }
+    this.clearSelectionHighlight();
     active.mesh.dispose(false, true);
     active.texture?.dispose();
+  }
+
+  /** 天空盒与普通模型共享同一深红光晕主题，但使用独立选择层避免污染模型分组。 */
+  private syncSelectionHighlight(mesh: Mesh, selected: boolean): void {
+    if (!selected || mesh.isDisposed() || mesh.getTotalVertices() <= 0) {
+      this.clearSelectionHighlight();
+      return;
+    }
+
+    setSceneSelectionHighlightGroups(this.selectionHighlightLayer, [[mesh]]);
+  }
+
+  private clearSelectionHighlight(): void {
+    clearSceneSelectionHighlight(this.selectionHighlightLayer, this.scene);
   }
 }

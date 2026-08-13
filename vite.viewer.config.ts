@@ -10,6 +10,7 @@ export default defineConfig({
   root: path.join(workspaceRoot, 'src', 'player'),
   base: './',
   cacheDir: path.join(workspaceRoot, 'node_modules', '.vite-viewer'),
+  publicDir: path.join(workspaceRoot, 'public'),
   plugins: [react()],
   build: {
     outDir: path.join(workspaceRoot, 'dist-viewer-template'),

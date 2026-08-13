@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { ProjectModelAssetEntry } from '../types.js';
 import { decodeAssetUrl, isAuthorizedAssetFile, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { getCurrentProjectRoot, readProjectAssetIndex } from './projectAssetStore.js';
+import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
 import {
   assertSafeDirectory,
   isPathInsideOrEqual,
@@ -19,7 +20,7 @@ import {
 } from './deploymentExportFileSystem.js';
 import { stripCadReferencesFromSceneFile } from './sceneCadReferenceSanitizer.js';
 import { findSyncedImageForReference, isPlatformImageReference } from './dataPlatformImageSync.js';
-import { getCurrentDataPlatformBinding } from './dataPlatformBindingStore.js';
+import { getCurrentDataPlatformBinding, resolveDataPlatformBindingSharedResourcesRoot } from './dataPlatformBindingStore.js';
 import type { DataPlatformSkyboxIndexEntry } from './dataPlatformSkyboxIndex.js';
 import {
   createDataPlatformSkyboxCacheError,
@@ -375,14 +376,22 @@ async function loadProjectAssetContext(
   const index = await readProjectAssetIndex(projectRoot);
   const binding = getCurrentDataPlatformBinding();
   const sharedResourcesRoot = binding && path.resolve(binding.projectRoot) === path.resolve(projectRoot)
-    ? path.resolve(projectRoot, '..', '..', 'SharedResources')
+    ? resolveDataPlatformBindingSharedResourcesRoot(projectRoot, binding.metadata)
     : null;
+  let assets = index.assets;
+  if (sharedResourcesRoot) {
+    const indexedEnvironments = await listIndexedDataPlatformEnvironments(sharedResourcesRoot);
+    if (indexedEnvironments.errors.length > 0) {
+      throw new Error(`数据中台环境模型缓存校验失败：${indexedEnvironments.errors.join('；')}`);
+    }
+    assets = [...assets, ...indexedEnvironments.assets];
+  }
 
   const skyboxCacheContext = suppliedSkyboxCacheContext ?? await loadDeploymentSkyboxCacheContext(signal);
   return {
     projectRoot: path.resolve(projectRoot),
     projectRootRealPath,
-    assets: index.assets,
+    assets,
     sharedResourcesRoot,
     ...skyboxCacheContext,
   };
@@ -990,10 +999,18 @@ function findProjectAsset(
 /** 校验项目索引中的包 realpath 仍位于当前项目根目录内。 */
 async function assertProjectPackageInsideRoot(packagePath: string, projectContext: ProjectAssetContext | null): Promise<void> {
   if (!projectContext) throw new Error('项目资产索引上下文缺失。');
-  if (!isPathInsideOrEqual(projectContext.projectRoot, packagePath)) throw new Error('项目资产包路径逃逸当前项目目录。');
+  const allowedRoot = isPathInsideOrEqual(projectContext.projectRoot, packagePath)
+    ? projectContext.projectRoot
+    : projectContext.sharedResourcesRoot && isPathInsideOrEqual(projectContext.sharedResourcesRoot, packagePath)
+      ? projectContext.sharedResourcesRoot
+      : null;
+  if (!allowedRoot) throw new Error('项目资产包路径逃逸当前项目或受管共享资源目录。');
+  const allowedRootRealPath = allowedRoot === projectContext.projectRoot
+    ? projectContext.projectRootRealPath
+    : await assertSafeDirectory(allowedRoot, '共享资源目录');
   const packageRealPath = await assertSafeDirectory(packagePath, '项目资产包');
-  if (!isPathInsideOrEqual(projectContext.projectRootRealPath, packageRealPath)) {
-    throw new Error('项目资产包 realpath 逃逸当前项目目录。');
+  if (!isPathInsideOrEqual(allowedRootRealPath, packageRealPath)) {
+    throw new Error('项目资产包 realpath 逃逸允许目录。');
   }
 }
 

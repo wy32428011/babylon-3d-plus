@@ -8,13 +8,11 @@ import type {
   ProjectModelAssetEntry,
 } from '../types.js';
 import {
-  DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO,
   DEFAULT_MODEL_LENGTH_UNIT_INFO,
 } from '../modelUnits.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 import {
   getProjectAssetIndexPath,
-  getProjectEnvironmentsRoot,
   getProjectModelsRoot,
 } from './projectAssetStore.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
@@ -26,7 +24,6 @@ import {
 } from './dataPlatformTransfer.js';
 
 const MODEL_QUERY_PATH = 'api/v1/models/query';
-const ENVIRONMENT_MODEL_QUERY_PATH = 'api/v1/env-models/query';
 const COMBO_MODEL_QUERY_PATH = 'api/v1/combo-models/query';
 const MODEL_QUERY_PAGE_SIZE = 100;
 const MAX_MODEL_QUERY_PAGES = 1_000;
@@ -73,15 +70,6 @@ type NormalModelRecord = {
   scripts: Array<{ fileName: string | null; fileUrl: string }>;
 };
 
-type EnvironmentModelRecord = {
-  kind: 'environment';
-  id: string;
-  name: string;
-  fileName: string | null;
-  fileUrl: string;
-  thumbnailUrl: string | null;
-};
-
 type ComboModelRecord = {
   kind: 'combo';
   id: string;
@@ -91,7 +79,7 @@ type ComboModelRecord = {
   thumbnailUrl: string | null;
 };
 
-type SyncModelRecord = NormalModelRecord | EnvironmentModelRecord | ComboModelRecord;
+type SyncModelRecord = NormalModelRecord | ComboModelRecord;
 
 type PreparedPackage = {
   record: SyncModelRecord;
@@ -190,20 +178,19 @@ async function runDataPlatformModelSync(
     phase: 'querying',
     completed: 0,
     total: 0,
-    message: `已查询 ${normalModels.length} 个普通模型，正在查询环境模型…`,
+    message: `已查询 ${normalModels.length} 个普通模型，环境模型由独立同步任务处理，正在查询组合模型…`,
     error: null,
   });
-  const environmentModels = await queryAllEnvironmentModels(context.baseUrl, signal);
   updateModelSyncProgress({
     runId,
     phase: 'querying',
     completed: 0,
     total: 0,
-    message: `已查询 ${environmentModels.length} 个环境模型，正在查询组合模型…`,
+    message: '环境模型由独立同步任务处理，正在查询组合模型…',
     error: null,
   });
   const comboModels = await queryAllComboModels(context.baseUrl, signal);
-  const records: SyncModelRecord[] = [...normalModels, ...environmentModels, ...comboModels];
+  const records: SyncModelRecord[] = [...normalModels, ...comboModels];
 
   assertUniqueModelRecords(records);
 
@@ -299,7 +286,6 @@ async function runDataPlatformModelSync(
       editorRoot: context.editorRoot,
       stagingRoot,
       stagedModelsRoot: path.join(stagingRoot, 'Assets', 'Models'),
-      stagedEnvironmentsRoot: path.join(stagingRoot, 'Assets', 'Environments'),
       stagedIndexPath,
       runId,
     });
@@ -309,7 +295,7 @@ async function runDataPlatformModelSync(
       phase: 'completed',
       completed: jobs.length,
       total: jobs.length,
-      message: `模型同步完成：普通 ${normalModels.length}、环境 ${environmentModels.length}、组合 ${comboModels.length}。`,
+      message: `模型同步完成：普通 ${normalModels.length}、组合 ${comboModels.length}；环境模型由独立任务同步。`,
       error: null,
     });
   } catch (error) {
@@ -325,11 +311,6 @@ async function runDataPlatformModelSync(
 async function queryAllNormalModels(baseUrl: string, signal: AbortSignal): Promise<NormalModelRecord[]> {
   const rawRecords = await queryAllPages(baseUrl, MODEL_QUERY_PATH, '普通模型', 'modelName', signal);
   return rawRecords.map((value, index) => normalizeNormalModelRecord(value, index));
-}
-
-async function queryAllEnvironmentModels(baseUrl: string, signal: AbortSignal): Promise<EnvironmentModelRecord[]> {
-  const rawRecords = await queryAllPages(baseUrl, ENVIRONMENT_MODEL_QUERY_PATH, '环境模型', 'modelName', signal);
-  return rawRecords.map((value, index) => normalizeEnvironmentModelRecord(value, index));
 }
 
 async function queryAllComboModels(baseUrl: string, signal: AbortSignal): Promise<ComboModelRecord[]> {
@@ -405,19 +386,6 @@ function normalizeNormalModelRecord(value: unknown, index: number): NormalModelR
   };
 }
 
-function normalizeEnvironmentModelRecord(value: unknown, index: number): EnvironmentModelRecord {
-  const record = requireRecord(value, '环境模型', index);
-  const id = normalizeRequiredId(record.id, '环境模型', index);
-  return {
-    kind: 'environment',
-    id,
-    name: normalizeOptionalString(record.modelName) ?? `环境-${id}`,
-    fileName: normalizeOptionalString(record.fileName),
-    fileUrl: normalizeRequiredUrl(record.fileUrl, '环境模型', index),
-    thumbnailUrl: normalizeOptionalString(record.thumbnailUrl),
-  };
-}
-
 function normalizeComboModelRecord(value: unknown, index: number): ComboModelRecord {
   const record = requireRecord(value, '组合模型', index);
   const id = normalizeRequiredId(record.id, '组合模型', index);
@@ -474,18 +442,16 @@ async function prepareDownloadPlan(
   records: SyncModelRecord[],
 ): Promise<PreparedPackage[]> {
   const modelsRoot = path.join(stagingRoot, 'Assets', 'Models');
-  const environmentsRoot = path.join(stagingRoot, 'Assets', 'Environments');
   const comboRoot = path.join(modelsRoot, 'ComboModels');
   await Promise.all([
     fs.mkdir(modelsRoot, { recursive: true }),
-    fs.mkdir(environmentsRoot, { recursive: true }),
     fs.mkdir(comboRoot, { recursive: true }),
   ]);
 
   return records.map((record) => {
-    const prefix = record.kind === 'model' ? 'Model' : record.kind === 'environment' ? 'Env' : 'Combo';
+    const prefix = record.kind === 'model' ? 'Model' : 'Combo';
     const directoryName = `${prefix}-${record.id}-${sanitizePathSegment(record.name)}`;
-    const parentRoot = record.kind === 'environment' ? environmentsRoot : record.kind === 'combo' ? comboRoot : modelsRoot;
+    const parentRoot = record.kind === 'combo' ? comboRoot : modelsRoot;
     const packagePath = path.join(parentRoot, directoryName);
     assertPathInside(stagingRoot, packagePath, '模型包暂存路径');
     const mainFileName = normalizeModelFileName(record.fileName, record.fileUrl, record.id);
@@ -601,7 +567,7 @@ async function validatePreparedPackages(
       displayName: prepared.record.name,
       assetRevision: `${runId}-${prepared.record.kind}-${prepared.record.id}`,
       kind: 'model',
-      libraryKind: prepared.record.kind === 'environment' ? 'environment' : 'model',
+      libraryKind: 'model',
     });
   }
 
@@ -626,10 +592,7 @@ async function normalizeLocalMetadata(prepared: PreparedPackage): Promise<void> 
   if (metadataLengthUnit === undefined
     || metadataLengthUnit === null
     || (typeof metadataLengthUnit === 'string' && !metadataLengthUnit.trim())) {
-    const defaultUnitInfo = prepared.record.kind === 'environment'
-      ? DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO
-      : DEFAULT_MODEL_LENGTH_UNIT_INFO;
-    metadata.lengthUnit = defaultUnitInfo.lengthUnit;
+    metadata.lengthUnit = DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit;
   }
   if (prepared.thumbnailPath) {
     metadata.thumbnail = path.basename(prepared.thumbnailPath);
@@ -693,7 +656,6 @@ async function promoteModelLibrary(options: {
   editorRoot: string;
   stagingRoot: string;
   stagedModelsRoot: string;
-  stagedEnvironmentsRoot: string;
   stagedIndexPath: string;
   runId: string;
 }): Promise<void> {
@@ -704,12 +666,6 @@ async function promoteModelLibrary(options: {
       target: getProjectModelsRoot(options.editorRoot),
       staged: options.stagedModelsRoot,
       backup: path.join(backupRoot, 'Models'),
-    },
-    {
-      type: 'directory' as const,
-      target: getProjectEnvironmentsRoot(options.editorRoot),
-      staged: options.stagedEnvironmentsRoot,
-      backup: path.join(backupRoot, 'Environments'),
     },
     {
       type: 'file' as const,
@@ -878,7 +834,7 @@ function maxBytesForDownloadKind(kind: DownloadJob['kind']): number {
 }
 
 function modelKindLabel(kind: SyncModelRecord['kind']): string {
-  return kind === 'model' ? '普通模型' : kind === 'environment' ? '环境模型' : '组合模型';
+  return kind === 'model' ? '普通模型' : '组合模型';
 }
 
 function assertUniqueModelRecords(records: SyncModelRecord[]): void {

@@ -30,6 +30,7 @@ import {
   removeRecentWorkspaceItem,
   selectCurrentProjectRootWithDialog,
   setSharedProjectAssetRoot,
+  setSharedProjectEnvironmentRoot,
   setSharedProjectSkyboxRoot,
   validateRecentProjectRoot,
 } from './projectAssetStore.js';
@@ -37,7 +38,8 @@ import {
   clearCurrentDataPlatformBinding,
   getCurrentDataPlatformBinding,
   readDataPlatformBinding,
-  resolveDataPlatformSharedResourcesRoot,
+  resolveDataPlatformBindingSharedResourcesRoot,
+  resolveDataPlatformBindingWorkspaceRoot,
   setCurrentDataPlatformBinding,
 } from './dataPlatformBindingStore.js';
 import {
@@ -94,6 +96,7 @@ export function registerProjectIpc(): void {
     const bindingSnapshot = getCurrentDataPlatformBinding();
     invalidateDataPlatformSkyboxSyncPrepareContext();
     setSharedProjectAssetRoot(null);
+    setSharedProjectEnvironmentRoot(null);
     setSharedProjectSkyboxRoot(null);
     clearCurrentDataPlatformBinding();
 
@@ -102,9 +105,10 @@ export function registerProjectIpc(): void {
       const binding = await readDataPlatformBinding(projectRoot);
       let workspaceRoot: string | null = null;
       if (binding) {
-        workspaceRoot = resolveWorkspaceRootFromDataPlatformProject(projectRoot, binding.projectId);
-        const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+        workspaceRoot = resolveDataPlatformBindingWorkspaceRoot(projectRoot, binding);
+        const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(projectRoot, binding);
         setSharedProjectAssetRoot(sharedResourcesRoot);
+        setSharedProjectEnvironmentRoot(sharedResourcesRoot);
         setSharedProjectSkyboxRoot(sharedResourcesRoot);
       }
 
@@ -148,6 +152,7 @@ export function registerProjectIpc(): void {
     if (projectRoot) {
       invalidateDataPlatformSkyboxSyncPrepareContext();
       setSharedProjectAssetRoot(null);
+      setSharedProjectEnvironmentRoot(null);
       setSharedProjectSkyboxRoot(null);
       clearCurrentDataPlatformBinding();
     }
@@ -214,14 +219,6 @@ export function registerProjectIpc(): void {
   });
 }
 
-function resolveWorkspaceRootFromDataPlatformProject(projectRoot: string, projectId: string): string {
-  const normalizedProjectRoot = normalizeFilePath(projectRoot);
-  const projectsRoot = path.dirname(normalizedProjectRoot);
-  if (path.basename(projectsRoot).toLowerCase() !== 'projects' || path.basename(normalizedProjectRoot) !== projectId) {
-    throw new Error('本地数据中台项目工作区结构无效。');
-  }
-  return path.dirname(projectsRoot);
-}
 
 function validateSaveSceneRequest(request: SaveSceneRequest): SaveSceneRequest {
   if (typeof request !== 'object' || request === null || Array.isArray(request)) {

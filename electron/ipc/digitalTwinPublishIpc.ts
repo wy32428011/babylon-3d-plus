@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import type {
   DigitalTwinPublishCancelRequest,
   DigitalTwinPublishContext,
+  DigitalTwinPublishContextRequest,
   DigitalTwinPublishProgress,
   DigitalTwinPublishRequest,
   DigitalTwinPublishResult,
@@ -54,11 +55,14 @@ function isDigitalTwinPublishActive(): boolean {
   return activeTasks.size > 0;
 }
 
-async function handleGetContext(event: IpcMainInvokeEvent): Promise<DigitalTwinPublishContext> {
+async function handleGetContext(
+  event: IpcMainInvokeEvent,
+  request?: DigitalTwinPublishContextRequest,
+): Promise<DigitalTwinPublishContext> {
   const { sender } = assertTrustedSender(event);
   const publishActive = activeTasks.has(sender.id) || isDigitalTwinPublishActive();
   if (publishActive) return getLocalDigitalTwinPublishContext(true);
-  return getDigitalTwinPublishContext();
+  return getDigitalTwinPublishContext(validateOptionalProjectId(request?.projectId));
 }
 
 async function handleStartPublish(
@@ -133,6 +137,14 @@ function isAllowedRendererUrl(rendererUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+function validateOptionalProjectId(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !/^[1-9]\d{0,63}$/.test(value.trim())) {
+    throw new Error('数字孪生发布 projectId 无效。');
+  }
+  return value.trim();
 }
 
 function validateRequestId(value: unknown): string {

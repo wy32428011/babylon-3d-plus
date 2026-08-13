@@ -83,3 +83,27 @@ test('同一数据中台业务 ID 仍优先于逻辑名称匹配', () => {
 
   assert.equal(matched, renamedAsset);
 });
+
+
+test('新版数据中台环境模型只按 sourceKey + resourceId 精确关联', () => {
+  const sourceKeyA = 'a'.repeat(64);
+  const sourceKeyB = 'b'.repeat(64);
+  const packageA = 'C:\\workspace\\cache\\a\\1\\2';
+  const packageB = 'C:\\workspace\\cache\\b\\1\\2';
+  const assetA = {
+    ...createModelAsset(`${packageA}\\model.glb`, packageA, 'environment'),
+    source: 'data-platform' as const,
+    dataPlatformResourceId: '1',
+    dataPlatformSourceKey: sourceKeyA,
+  };
+  const assetB = {
+    ...createModelAsset(`${packageB}\\model.glb`, packageB, 'environment'),
+    source: 'data-platform' as const,
+    dataPlatformResourceId: '1',
+    dataPlatformSourceKey: sourceKeyB,
+  };
+  const indexes = createImportedAssetIndexes([assetA, assetB]);
+
+  assert.equal(findImportedAssetForPackagePath('C:\\old\\same-name', indexes, { sourceKey: sourceKeyA, resourceId: '1' }), assetA);
+  assert.equal(findImportedAssetForPackagePath(packageA, indexes, { sourceKey: sourceKeyA, resourceId: '999' }), null);
+});
