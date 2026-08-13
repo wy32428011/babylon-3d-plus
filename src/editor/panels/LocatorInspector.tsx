@@ -138,6 +138,23 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
           }}
         />
       </label>
+      <label className="inspector-row">
+        <span>起始层</span>
+        <input
+          type="number"
+          disabled={disabled}
+          min={0}
+          max={999}
+          step={1}
+          value={component.startLayer}
+          onChange={(event) => {
+            const value = Number(event.target.value);
+            if (Number.isFinite(value) && value >= 0 && value <= 999) {
+              updateSelectedLocator({ startLayer: Math.round(value) });
+            }
+          }}
+        />
+      </label>
       {locatorDimensionFields.map(({ key, label, min, max, step }) => (
         <label className="inspector-row" key={key}>
           <span>{label}</span>

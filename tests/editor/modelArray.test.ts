@@ -68,6 +68,7 @@ function createLocatorEntity(id: string, name: string, assetId: string): Entity 
     columns: 1,
     layers: 1,
     startColumn: 1,
+    startLayer: 1,
     columnGap: 0,
     layerGap: 0,
     deviceAssetCode: '',

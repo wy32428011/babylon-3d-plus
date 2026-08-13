@@ -794,6 +794,7 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
     columns: normalizeLocatorInt(locator.columns, 1, 1, 100),
     layers: normalizeLocatorInt(locator.layers, 1, 1, 100),
     startColumn: normalizeLocatorInt(locator.startColumn, 1, 0, 999),
+    startLayer: normalizeLocatorInt(locator.startLayer, 1, 0, 999),
     columnGap: normalizeLocatorGap(locator.columnGap),
     layerGap: normalizeLocatorGap(locator.layerGap),
     deviceAssetCode: (typeof locator.deviceAssetCode === 'string' ? locator.deviceAssetCode : '').trim().slice(0, 128),

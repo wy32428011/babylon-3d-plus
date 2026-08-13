@@ -909,6 +909,7 @@ export function createLocatorEntity(position: Vector3Data = vector3()): Entity {
         columns: 1,
         layers: 1,
         startColumn: 1,
+        startLayer: 1,
         columnGap: 0,
         layerGap: 0,
         deviceAssetCode: '',

@@ -413,6 +413,7 @@ export type LocatorRuntimeEntry = {
   columns: number;
   layers: number;
   startColumn: number;
+  startLayer: number;
   deviceAssetCode: string;
   rowNumber: number;
   storageDepth: LocatorStorageDepth;
@@ -2881,7 +2882,7 @@ export class SceneRuntime {
     const list = rowMap.get(toZ);
     if (!list?.length) return null;
     for (const locator of list) {
-      if (toX >= locator.startColumn && toX < locator.startColumn + locator.columns && toY >= 1 && toY <= locator.layers) {
+      if (toX >= locator.startColumn && toX < locator.startColumn + locator.columns && toY >= locator.startLayer && toY < locator.startLayer + locator.layers) {
         return locator;
       }
     }
@@ -2898,7 +2899,7 @@ export class SceneRuntime {
     if (!rowMap) return null;
     for (const list of rowMap.values()) {
       for (const locator of list) {
-        if (x >= locator.startColumn && x < locator.startColumn + locator.columns && y >= 1 && y <= locator.layers) {
+        if (x >= locator.startColumn && x < locator.startColumn + locator.columns && y >= locator.startLayer && y < locator.startLayer + locator.layers) {
           return locator;
         }
       }
@@ -2919,6 +2920,7 @@ export class SceneRuntime {
   private getLocatorBoxWorldMatrix(locator: LocatorRuntimeEntry, toX: number, toY: number): Matrix | null {
     const boxIndex = resolveLocatorBoxIndex({
       startColumn: locator.startColumn,
+      startLayer: locator.startLayer,
       columns: locator.columns,
       layers: locator.layers,
       toX,
@@ -3087,6 +3089,7 @@ export class SceneRuntime {
     runtimeLocator.columns = locator.columns;
     runtimeLocator.layers = locator.layers;
     runtimeLocator.startColumn = locator.startColumn;
+    runtimeLocator.startLayer = locator.startLayer;
     runtimeLocator.storageDepth = locator.storageDepth;
 
     const locatorMetadata = { assetId: locator.assetId };
@@ -4063,7 +4066,7 @@ export class SceneRuntime {
     };
     const { fillMesh, edgeLines } = this.buildLocatorGridMeshes(entityId, locator, root, material, cellSteps);
 
-    return { entityId, root, fillMesh, edgeLines, cellSteps, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
+    return { entityId, root, fillMesh, edgeLines, cellSteps, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
   }
 
   /**

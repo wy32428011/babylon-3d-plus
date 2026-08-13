@@ -46,6 +46,7 @@ export function resolveStackerStorageTargetOffsets(
 
 export type LocatorBoxIndexInput = {
   startColumn: number;
+  startLayer: number;
   columns: number;
   layers: number;
   toX: number;
@@ -55,7 +56,7 @@ export type LocatorBoxIndexInput = {
 /** 把 MQTT 目标列/层换算为 Locator boxes 数组下标；越界返回 null，调用方回退 locator 根节点。 */
 export function resolveLocatorBoxIndex(input: LocatorBoxIndexInput): number | null {
   const columnIndex = input.toX - input.startColumn;
-  const layerIndex = input.toY - 1;
+  const layerIndex = input.toY - input.startLayer;
   if (columnIndex < 0 || columnIndex >= input.columns) return null;
   if (layerIndex < 0 || layerIndex >= input.layers) return null;
   return layerIndex * input.columns + columnIndex;

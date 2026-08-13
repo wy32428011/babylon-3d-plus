@@ -53,6 +53,7 @@ function createSlotEntity(id: string, assetId: string, hostEntityId: string | nu
         columns: 1,
         layers: 1,
         startColumn: 1,
+        startLayer: 1,
         columnGap: 0,
         layerGap: 0,
         deviceAssetCode: '',

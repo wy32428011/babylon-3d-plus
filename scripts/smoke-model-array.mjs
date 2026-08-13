@@ -1172,6 +1172,7 @@ try {
     columns: 2,
     layers: 1,
     startColumn: 1,
+    startLayer: 1,
     deviceAssetCode: '',
     rowNumber: 1,
     storageDepth: 'near',

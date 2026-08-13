@@ -161,7 +161,7 @@ export class StackerTelemetryDriver {
       return;
     }
     const ranges = boundLocators
-      .map((entry) => `排${entry.rowNumber}：列${entry.startColumn}-${entry.startColumn + entry.columns - 1} 层1-${entry.layers}`)
+      .map((entry) => `排${entry.rowNumber}：列${entry.startColumn}-${entry.startColumn + entry.columns - 1} 层${entry.startLayer}-${entry.startLayer + entry.layers - 1}`)
       .join('；');
     this.host.pushLog(`错误：Stacker ${snapshot.assetCode} 当前位（列${frontX} 层${frontY}）超出已绑定货格范围（${ranges}），已忽略移动。`);
   }
@@ -174,6 +174,7 @@ export class StackerTelemetryDriver {
   ): Vector3 | null {
     const boxIndex = resolveLocatorBoxIndex({
       startColumn: locator.startColumn,
+      startLayer: locator.startLayer,
       columns: locator.columns,
       layers: locator.layers,
       toX,

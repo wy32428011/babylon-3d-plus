@@ -26,19 +26,28 @@ test('目标库位世界坐标必须相对货叉初始锚点换算行走与升�
 });
 
 test('目标列/层换算为 Locator boxes 下标，层优先行展开', () => {
-  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, columns: 4, layers: 3, toX: 1, toY: 1 }), 0);
-  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, columns: 4, layers: 3, toX: 4, toY: 2 }), 7);
-  assert.equal(resolveLocatorBoxIndex({ startColumn: 5, columns: 2, layers: 2, toX: 6, toY: 2 }), 3);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 1, columns: 4, layers: 3, toX: 1, toY: 1 }), 0);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 1, columns: 4, layers: 3, toX: 4, toY: 2 }), 7);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 5, startLayer: 1, columns: 2, layers: 2, toX: 6, toY: 2 }), 3);
 });
 
 test('目标列/层越界时返回 null，由调用方回退 locator 根节点', () => {
-  assert.equal(resolveLocatorBoxIndex({ startColumn: 2, columns: 4, layers: 3, toX: 1, toY: 1 }), null);
-  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, columns: 4, layers: 3, toX: 5, toY: 1 }), null);
-  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, columns: 4, layers: 3, toX: 1, toY: 0 }), null);
-  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, columns: 4, layers: 3, toX: 1, toY: 4 }), null);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 2, startLayer: 1, columns: 4, layers: 3, toX: 1, toY: 1 }), null);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 1, columns: 4, layers: 3, toX: 5, toY: 1 }), null);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 1, columns: 4, layers: 3, toX: 1, toY: 0 }), null);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 1, columns: 4, layers: 3, toX: 1, toY: 4 }), null);
+});
+
+test('起始层偏移参与下标换算，可以为 0', () => {
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 3, columns: 4, layers: 3, toX: 1, toY: 3 }), 0);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 3, columns: 4, layers: 3, toX: 4, toY: 4 }), 7);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 3, columns: 4, layers: 3, toX: 1, toY: 2 }), null);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 3, columns: 4, layers: 3, toX: 1, toY: 6 }), null);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 0, startLayer: 0, columns: 2, layers: 2, toX: 0, toY: 0 }), 0);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 0, startLayer: 0, columns: 2, layers: 2, toX: 1, toY: 1 }), 3);
 });
 
 test('单格口 Locator 只接受第一列第一层', () => {
-  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, columns: 1, layers: 1, toX: 1, toY: 1 }), 0);
-  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, columns: 1, layers: 1, toX: 2, toY: 1 }), null);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 1, columns: 1, layers: 1, toX: 1, toY: 1 }), 0);
+  assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 1, columns: 1, layers: 1, toX: 2, toY: 1 }), null);
 });

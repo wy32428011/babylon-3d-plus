@@ -33,32 +33,38 @@ function makeSnapshot(fields: Record<string, unknown>): DeviceTelemetrySnapshot 
   };
 }
 
-/** 构建 columns×layers 的单排 Locator，cellPositions 按（层优先行展开）下标放置支撑位为 position 的货格。 */
+/**
+ * 构建 columns×layers 的单排 Locator。支撑位走解析公式（与 SceneRuntime 同源）：
+ * 格子本地底面中心 = (列 × columnStepX, 层 × layerStepY, 0) 经 root 世界矩阵变换。
+ * 默认 root 绕 Y 轴转 -90°（本地 +X 映射到世界 +Z），便于用 columnStepX/position 摆出目标支撑位。
+ */
 function makeLocator(
   scene: Scene,
-  options: { columns: number; layers: number; startColumn: number; cellPositions: Record<number, Vector3> },
+  options: {
+    columns: number;
+    layers: number;
+    startColumn: number;
+    startLayer?: number;
+    cellSteps?: { columnStepX: number; layerStepY: number };
+    rootPosition?: Vector3;
+    rootRotationY?: number;
+  },
 ): LocatorRuntimeEntry {
   const root = new TransformNode('locator_root', scene);
-  const boxCount = options.columns * options.layers;
-  const boxes = Array.from({ length: boxCount }, (_, index) => {
-    const mesh = MeshBuilder.CreateBox(`cell_${index}`, { size: 2 }, scene);
-    mesh.parent = root;
-    const support = options.cellPositions[index];
-    // size=2 的 box 中心抬高 1m 后底面即支撑位
-    mesh.position.set(support?.x ?? -100, (support?.y ?? 0) + 1, support?.z ?? -100);
-    return mesh;
-  });
+  root.rotation.y = options.rootRotationY ?? -Math.PI / 2;
+  if (options.rootPosition) root.position.copyFrom(options.rootPosition);
   root.computeWorldMatrix(true);
   return {
     entityId: 'loc1',
     root,
-    boxes,
+    cellSteps: options.cellSteps ?? { columnStepX: 1, layerStepY: 1 },
     material: null,
     assetId: 'L1',
     signature: 'test',
     columns: options.columns,
     layers: options.layers,
     startColumn: options.startColumn,
+    startLayer: options.startLayer ?? 1,
     deviceAssetCode: 'STK1',
     rowNumber: 2,
     storageDepth: 'near',
@@ -90,7 +96,7 @@ function makeHarness() {
       const locator = ref.locator;
       if (!locator) return null;
       // 与 SceneRuntime.findLocatorByDeviceAnyRow 同规则：仅当列/层落在货格范围内才命中
-      return x >= locator.startColumn && x < locator.startColumn + locator.columns && y >= 1 && y <= locator.layers
+      return x >= locator.startColumn && x < locator.startColumn + locator.columns && y >= locator.startLayer && y < locator.startLayer + locator.layers
         ? locator
         : null;
     },
@@ -161,8 +167,8 @@ const IDLE_FRAME = {
 test('空闲时按 front_x/front_y 跨排吸附已绑定货格，distance 编码器不再校准', () => {
   const h = makeHarness();
   try {
-    // 列 10 层 1（下标 9）的货格支撑位在 (0, 2, 20)：行走轴 z 上应收敛到 20 而不是 distance_x 的 13.1528
-    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, cellPositions: { 9: new Vector3(0, 2, 20) } });
+    // 列 10 层 1（列下标 9）的货格支撑位在 (0, 2, 20)：行走轴 z 上应收敛到 20 而不是 distance_x 的 13.1528
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
     h.apply(IDLE_FRAME, 0.1, 400);
     const position = h.model.stackerTelemetry.rootPosition;
     assert.ok(position, '行走位置必须被初始化');
@@ -192,7 +198,7 @@ test('空闲且无任何已绑定货格时报错一次，整机保持不动', ()
 test('取货/放货命令期间不做空闲吸附', () => {
   const h = makeHarness();
   try {
-    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, cellPositions: { 9: new Vector3(0, 2, 20) } });
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
     h.apply({ ...IDLE_FRAME, front_command: 1 }, 0.1, 50);
     const position = h.model.stackerTelemetry.rootPosition;
     assert.ok(position);
@@ -206,7 +212,7 @@ test('取货/放货命令期间不做空闲吸附', () => {
 test('当前位超出已绑定货格列/层范围时报越界错误（含范围信息），整机保持不动', () => {
   const h = makeHarness();
   try {
-    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 2, startColumn: 1, cellPositions: {} });
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 2, startColumn: 1 });
     // 列越界：columns=10，front_x=15
     h.apply({ ...IDLE_FRAME, front_x: 15, front_y: 1 });
     // 层越界：layers=2，front_y=9
@@ -244,12 +250,13 @@ test('front_x/front_y 为 0 视为未上报：不吸附也不报错', () => {
 test('有效目标位（to_x/to_y/to_z）驱动优先于空闲吸附', () => {
   const h = makeHarness();
   try {
-    // 列 5 层 1（下标 4）支撑位 (0, 1.5, 8)；列 10 层 1（下标 9）支撑位 (0, 2, 20)
+    // 列 5 层 1（列下标 4）支撑位 (0, 1.5, 8)；列 10 层 1（列下标 9）支撑位 (0, 1.5, 18)
     h.ref.locator = makeLocator(h.scene, {
       columns: 10,
       layers: 1,
       startColumn: 1,
-      cellPositions: { 4: new Vector3(0, 1.5, 8), 9: new Vector3(0, 2, 20) },
+      cellSteps: { columnStepX: 2, layerStepY: 1 },
+      rootPosition: new Vector3(0, 1.5, 0),
     });
     h.apply({ ...IDLE_FRAME, to_x: 5, to_y: 1, to_z: 2, front_x: 10, front_y: 1 }, 0.1, 400);
     const position = h.model.stackerTelemetry.rootPosition;
@@ -294,7 +301,7 @@ test('front_y 越界报错后 movement_y 兜底上升同样受物理钳制', () 
   const h = makeHarness();
   try {
     makeStackerGeometry(h);
-    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 2, startColumn: 1, cellPositions: {} });
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 2, startColumn: 1 });
     h.apply({ ...IDLE_FRAME, front_x: 5, front_y: 9, movement_y: 1 }, 0.1, 300);
     const errors = h.logs.filter((message) => message.includes('超出已绑定货格范围'));
     assert.equal(errors.length, 1, '同一当前位只报一次越界错误');

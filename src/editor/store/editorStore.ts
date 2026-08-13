@@ -755,6 +755,7 @@ function cloneLocator(locator: LocatorComponent): LocatorComponent {
     columns: locator.columns,
     layers: locator.layers,
     startColumn: locator.startColumn,
+    startLayer: locator.startLayer,
     columnGap: locator.columnGap,
     layerGap: locator.layerGap,
     deviceAssetCode: locator.deviceAssetCode,
@@ -925,6 +926,7 @@ function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): bool
     left.columns === right.columns &&
     left.layers === right.layers &&
     left.startColumn === right.startColumn &&
+    left.startLayer === right.startLayer &&
     left.columnGap === right.columnGap &&
     left.layerGap === right.layerGap &&
     left.deviceAssetCode === right.deviceAssetCode &&
@@ -4036,6 +4038,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         columns: sanitizeLocatorInt(patch.columns, before.columns, 1, 100),
         layers: sanitizeLocatorInt(patch.layers, before.layers, 1, 100),
         startColumn: sanitizeLocatorInt(patch.startColumn, before.startColumn, 0, 999),
+        startLayer: sanitizeLocatorInt(patch.startLayer, before.startLayer, 0, 999),
         columnGap: sanitizeLocatorGap(patch.columnGap, before.columnGap),
         layerGap: sanitizeLocatorGap(patch.layerGap, before.layerGap),
         deviceAssetCode: patch.deviceAssetCode !== undefined ? patch.deviceAssetCode.trim().slice(0, 128) : before.deviceAssetCode,

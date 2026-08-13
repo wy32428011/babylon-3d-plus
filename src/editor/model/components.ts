@@ -50,6 +50,7 @@ export type LocatorComponent = {
   columns: number;
   layers: number;
   startColumn: number;
+  startLayer: number;
   columnGap: number;
   layerGap: number;
   deviceAssetCode: string;
