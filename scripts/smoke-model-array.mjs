@@ -3,6 +3,7 @@ import {
   Color3,
   Constants,
   Matrix,
+  Mesh,
   MeshBuilder,
   NullEngine,
   ParticleSystem,
@@ -10,6 +11,7 @@ import {
   StandardMaterial,
   TransformNode,
   Vector3,
+  VertexData,
 } from '@babylonjs/core';
 import { createServer } from 'vite';
 
@@ -555,6 +557,58 @@ try {
   lineTopologyA.dispose(false, false);
   lineTopologyB.dispose(false, false);
   lineTopologyMaterial.dispose(false, false);
+
+  // glTF 坐标系转换节点通常带负缩放；无索引三角形合并烘焙后必须同步翻转顶点顺序，
+  // 否则批次转为正 determinant 后会被背面剔除，表现为纹理部件消失或模型镂空。
+  const mirroredUnindexedParent = new TransformNode('entity-array-mirrored-unindexed-parent', scene);
+  mirroredUnindexedParent.scaling.z = -1;
+  const mirroredUnindexedMaterial = new StandardMaterial('entity-array-mirrored-unindexed-material', scene);
+  const mirroredUnindexedMeshes = [0, 2].map((x, index) => {
+    const mesh = new Mesh(`entity-array-mirrored-unindexed-${index}`, scene);
+    const vertexData = new VertexData();
+    vertexData.positions = [0, 0, 0, 1, 0, 0, 0, 1, 0];
+    vertexData.normals = [0, 0, 1, 0, 0, 1, 0, 0, 1];
+    vertexData.uvs = [0, 0, 1, 0, 0, 1];
+    vertexData.applyToMesh(mesh, false);
+    mesh.parent = mirroredUnindexedParent;
+    mesh.position.x = x;
+    mesh.material = mirroredUnindexedMaterial;
+    return mesh;
+  });
+  mirroredUnindexedParent.computeWorldMatrix(true);
+  mirroredUnindexedMeshes.forEach((mesh) => mesh.computeWorldMatrix(true));
+  const mirroredUnindexedBatch = EntityArrayThinInstanceBatch.create(
+    'mirrored-unindexed-source',
+    mirroredUnindexedMeshes,
+    { mergeStaticMeshesByMaterial: true, sourceRootWorldMatrix: Matrix.Identity() },
+  );
+  assert.ok(mirroredUnindexedBatch, '负缩放父节点下的无索引 Mesh 必须可以创建材质合并批次');
+  assert.equal(mirroredUnindexedBatch.meshes.length, 1, '同材质无索引 Mesh 必须合并为一个绘制载体');
+  const mirroredUnindexedBatchMesh = mirroredUnindexedBatch.meshes[0];
+  const mirroredUnindexedPositions = mirroredUnindexedBatchMesh.getVerticesData('position');
+  const mirroredUnindexedNormals = mirroredUnindexedBatchMesh.getVerticesData('normal');
+  assert.ok(mirroredUnindexedPositions && mirroredUnindexedNormals, '合并载体必须保留位置和法线');
+  for (let offset = 0; offset < mirroredUnindexedPositions.length; offset += 9) {
+    const edge1X = mirroredUnindexedPositions[offset + 3] - mirroredUnindexedPositions[offset];
+    const edge1Y = mirroredUnindexedPositions[offset + 4] - mirroredUnindexedPositions[offset + 1];
+    const edge1Z = mirroredUnindexedPositions[offset + 5] - mirroredUnindexedPositions[offset + 2];
+    const edge2X = mirroredUnindexedPositions[offset + 6] - mirroredUnindexedPositions[offset];
+    const edge2Y = mirroredUnindexedPositions[offset + 7] - mirroredUnindexedPositions[offset + 1];
+    const edge2Z = mirroredUnindexedPositions[offset + 8] - mirroredUnindexedPositions[offset + 2];
+    const faceNormalX = edge1Y * edge2Z - edge1Z * edge2Y;
+    const faceNormalY = edge1Z * edge2X - edge1X * edge2Z;
+    const faceNormalZ = edge1X * edge2Y - edge1Y * edge2X;
+    const normalOffset = (offset / 9) * 9;
+    const normalDot = (
+      faceNormalX * mirroredUnindexedNormals[normalOffset]
+      + faceNormalY * mirroredUnindexedNormals[normalOffset + 1]
+      + faceNormalZ * mirroredUnindexedNormals[normalOffset + 2]
+    );
+    assert.ok(normalDot > 0, '镜像烘焙后的无索引三角面朝向必须与法线一致');
+  }
+  mirroredUnindexedBatch.dispose();
+  mirroredUnindexedParent.dispose();
+  mirroredUnindexedMaterial.dispose();
 
   // GLB 左右手坐标转换会产生负 determinant：批次 Mesh 必须承载镜像，避免材质方向和双面光照改变。
   const mirroredMesh = MeshBuilder.CreateCylinder(
@@ -1888,6 +1942,7 @@ try {
       sharedGeometryBuffersIsolated: true,
       historicalPartitionsReleased: true,
       nonTriangleTopologyPreserved: true,
+      mirroredUnindexedFacesPreserved: true,
       parameterGeometryRefresh: true,
       mirroredMaterialOrientationPreserved: true,
       mixedDeterminantBatchesPreservePickingAndSelection: true,

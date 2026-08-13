@@ -208,7 +208,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const sceneFocusPerformanceRef = useRef<SceneFocusPerformanceMetrics | null>(null);
   const clickSnapshotRef = useRef<SceneModelSelectionPointerSnapshot | null>(null);
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
-  const editRuntimeSceneDocumentRef = useRef<SceneDocument | null>(null);
   const editModeThinInstancePlanRef = useRef<EditModeModelThinInstancePlan | null>(null);
   const editModeThinInstancePlanPerformanceRef = useRef<EditModeThinInstancePlanPerformanceMetrics>({
     planCount: 0,
@@ -490,7 +489,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       entityId: modelParameterSyncEntityId,
     };
     sceneDocumentRef.current = sceneDocument;
-    editRuntimeSceneDocumentRef.current = editRuntimeSceneDocument;
     selectedEntityIdRef.current = selectedEntityId;
     entityArrayDialogRef.current = entityArrayDialog;
   }, [
@@ -1191,7 +1189,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const gizmo = gizmoRef.current;
     if (!runtime || !gizmo) return;
     if (isRuntimePreview) {
-      runtime.syncSelection(sceneDocument, hierarchySelectionIds);
+      runtime.syncSelection(editRuntimeSceneDocument, hierarchySelectionIds);
       gizmo.attachToTarget(null, null);
       publishSelectedInspectorSpatialInfo(runtime, selectedEntityId);
       return;
@@ -1210,7 +1208,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     selectedAutoPatrolWaypointId,
     isRuntimePreview,
     publishSelectedInspectorSpatialInfo,
-    sceneDocument,
   ]);
 
   /** 把 Inspector 中的群组绝对位置/旋转转换为现有原子群组事务。 */
@@ -1325,17 +1322,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (runtimeModeRef.current === runtimeMode) return;
     runtimeModeRef.current = runtimeMode;
 
+    // 运行模式只切换脚本、动画和遥测生命周期，保留已完成的 Geometry 合批及逻辑实体参数。
     if (!isRuntimePreview) {
-      const currentSceneDocument = sceneDocumentRef.current;
-      if (!currentSceneDocument) return;
       client.dispose();
       gizmo.cancelActiveDrag();
       runtime.endTelemetryPreview();
-      runtime.sync(
-        editRuntimeSceneDocumentRef.current ?? currentSceneDocument,
-        useEditorStore.getState().hierarchySelectionIds,
-        { modelArrayIdentityMode: 'visual' },
-      );
       attachCurrentSelectionGizmo(runtime, gizmo);
       publishSelectedInspectorSpatialInfo(runtime, selectedEntityIdRef.current);
       return;
@@ -1347,11 +1338,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       gizmo.cancelActiveDrag();
       gizmo.attachToTarget(null, null);
       runtime.clearFolderGroupGizmoTarget();
-      runtime.sync(
-        currentSceneDocument,
-        useEditorStore.getState().hierarchySelectionIds,
-        { modelArrayIdentityMode: 'device' },
-      );
       runtime.beginTelemetryPreview();
       client.updateConfig(mqttConfig);
       publishSelectedInspectorSpatialInfo(runtime, selectedEntityIdRef.current);
