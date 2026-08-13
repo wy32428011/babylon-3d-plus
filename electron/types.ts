@@ -163,11 +163,16 @@ export type DigitalTwinPublishContext = {
   publishActive: boolean;
 };
 
+export type DigitalTwinPublishContextRequest = {
+  projectId: string | null;
+};
+
 export type DigitalTwinPublishRequest = {
   requestId: string;
   publishName: string;
   remark: string;
   sceneContent: string;
+  projectId: string | null;
   overwriteExisting: boolean;
   confirmResourceBindings: boolean;
   allowedParentOrigins: string[];

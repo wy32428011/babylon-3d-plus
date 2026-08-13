@@ -113,6 +113,47 @@ try {
   assert.deepEqual(events[1], { type: 'preview', folderId: 'folder-a', delta: { x: 5, y: -2, z: 4 } });
   assert.deepEqual(events[2], { type: 'commit', folderId: 'folder-a', delta: { x: 5, y: -2, z: 4 } });
 
+  const horizontalDragEventStart = events.length;
+  controller.attachToGroupTarget(proxy, 'folder-a');
+  const xAxisDragBehavior = controller.gizmoManager.gizmos.positionGizmo?.xGizmo.dragBehavior;
+  assert.ok(xAxisDragBehavior, '群组 X 轴移动手柄必须存在');
+  xAxisDragBehavior.onDragStartObservable.notifyObservers({ pointerInfo: { event: { shiftKey: false } } });
+  proxy.position.copyFromFloats(12, 1.0004, 8);
+  controller.previewAttachedTransform();
+  assertVector(proxy.position, { x: 12, y: 1, z: 8 }, 'X 轴群组预览必须同步校正代理的非目标轴位置');
+  controller.commitActiveDrag();
+  proxy.position.copyFromFloats(7, 1, 8);
+  proxy.computeWorldMatrix(true);
+  assert.deepEqual(
+    events.slice(horizontalDragEventStart),
+    [
+      { type: 'begin', folderId: 'folder-a' },
+      { type: 'preview', folderId: 'folder-a', delta: { x: 5, y: 0, z: 0 } },
+      { type: 'commit', folderId: 'folder-a', delta: { x: 5, y: 0, z: 0 } },
+    ],
+    '沿 X 轴水平移动群组时必须忽略 Babylon 拖拽产生的非目标轴漂移',
+  );
+
+  const horizontalPlaneDragEventStart = events.length;
+  const horizontalPlaneDragBehavior = controller.gizmoManager.gizmos.positionGizmo?.yPlaneGizmo.dragBehavior;
+  assert.ok(horizontalPlaneDragBehavior, '群组水平面移动手柄必须存在');
+  horizontalPlaneDragBehavior.onDragStartObservable.notifyObservers({ pointerInfo: { event: { shiftKey: false } } });
+  proxy.position.copyFromFloats(10, 1.0008, 12);
+  controller.previewAttachedTransform();
+  assertVector(proxy.position, { x: 10, y: 1, z: 12 }, 'XZ 水平面群组预览必须同步校正代理的垂直位置');
+  controller.commitActiveDrag();
+  proxy.position.copyFromFloats(7, 1, 8);
+  proxy.computeWorldMatrix(true);
+  assert.deepEqual(
+    events.slice(horizontalPlaneDragEventStart),
+    [
+      { type: 'begin', folderId: 'folder-a' },
+      { type: 'preview', folderId: 'folder-a', delta: { x: 3, y: 0, z: 4 } },
+      { type: 'commit', folderId: 'folder-a', delta: { x: 3, y: 0, z: 4 } },
+    ],
+    '在 XZ 水平面移动群组时必须保持垂直 Y 坐标不变',
+  );
+
   controller.attachToGroupTarget(proxy, 'folder-a');
   controller.beginDragSnapshot();
   proxy.position.copyFromFloats(9, 2, 9);

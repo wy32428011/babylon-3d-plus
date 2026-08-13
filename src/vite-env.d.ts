@@ -165,11 +165,16 @@ type DigitalTwinPublishContext = {
   publishActive: boolean;
 };
 
+type DigitalTwinPublishContextRequest = {
+  projectId: string | null;
+};
+
 type DigitalTwinPublishRequest = {
   requestId: string;
   publishName: string;
   remark: string;
   sceneContent: string;
+  projectId: string | null;
   overwriteExisting: boolean;
   confirmResourceBindings: boolean;
   allowedParentOrigins: string[];
@@ -597,7 +602,7 @@ interface Window {
     importEnvironmentModelFile: () => Promise<ImportEnvironmentModelFileResult>;
     importSkyboxFile: () => Promise<ImportSkyboxFileResult>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
-    getDigitalTwinPublishContext: () => Promise<DigitalTwinPublishContext>;
+    getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest) => Promise<DigitalTwinPublishContext>;
     publishDigitalTwin: (request: DigitalTwinPublishRequest) => Promise<DigitalTwinPublishResult>;
     cancelDigitalTwinPublish: (request: DigitalTwinPublishCancelRequest) => Promise<boolean>;
     onDigitalTwinPublishProgress: (handler: (progress: DigitalTwinPublishProgress) => void) => () => void;

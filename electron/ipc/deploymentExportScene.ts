@@ -20,7 +20,7 @@ import {
 } from './deploymentExportFileSystem.js';
 import { stripCadReferencesFromSceneFile } from './sceneCadReferenceSanitizer.js';
 import { findSyncedImageForReference, isPlatformImageReference } from './dataPlatformImageSync.js';
-import { getCurrentDataPlatformBinding } from './dataPlatformBindingStore.js';
+import { getCurrentDataPlatformBinding, resolveDataPlatformBindingSharedResourcesRoot } from './dataPlatformBindingStore.js';
 import type { DataPlatformSkyboxIndexEntry } from './dataPlatformSkyboxIndex.js';
 import {
   createDataPlatformSkyboxCacheError,
@@ -376,7 +376,7 @@ async function loadProjectAssetContext(
   const index = await readProjectAssetIndex(projectRoot);
   const binding = getCurrentDataPlatformBinding();
   const sharedResourcesRoot = binding && path.resolve(binding.projectRoot) === path.resolve(projectRoot)
-    ? path.resolve(projectRoot, '..', '..', 'SharedResources')
+    ? resolveDataPlatformBindingSharedResourcesRoot(projectRoot, binding.metadata)
     : null;
   let assets = index.assets;
   if (sharedResourcesRoot) {

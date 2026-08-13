@@ -3829,13 +3829,15 @@ select {
 
 .deployment-export-dialog button:disabled,
 .deployment-export-dialog input:disabled,
+.deployment-export-dialog select:disabled,
 .deployment-export-dialog fieldset:disabled {
   opacity: 0.58;
   cursor: not-allowed;
 }
 
 .deployment-export-dialog button:focus-visible,
-.deployment-export-dialog input:focus-visible {
+.deployment-export-dialog input:focus-visible,
+.deployment-export-dialog select:focus-visible {
   outline: 2px solid #69a9ff;
   outline-offset: 2px;
 }
@@ -3904,7 +3906,8 @@ select {
   font-size: 12px;
 }
 
-.deployment-export-dialog-field input {
+.deployment-export-dialog-field input,
+.deployment-export-dialog-field select {
   width: 100%;
   height: 30px;
   min-width: 0;
@@ -3915,7 +3918,8 @@ select {
   background: #181818;
 }
 
-.deployment-export-dialog-field input[aria-invalid="true"] {
+.deployment-export-dialog-field input[aria-invalid="true"],
+.deployment-export-dialog-field select[aria-invalid="true"] {
   border-color: #c85b5b;
 }
 
@@ -4142,6 +4146,21 @@ select {
   width: min(760px, calc(100vw - 32px));
 }
 
+.digital-twin-publish-project-selector {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.digital-twin-publish-project-selector .deployment-export-dialog-field {
+  grid-template-columns: 92px minmax(0, 1fr);
+}
+
+.digital-twin-publish-project-selector select {
+  color-scheme: dark;
+}
+
 .digital-twin-publish-message {
   margin: 0;
   color: #b9c8cb;
@@ -4271,6 +4290,18 @@ select {
 }
 
 @media (max-width: 640px) {
+  .digital-twin-publish-project-selector {
+    grid-template-columns: 1fr;
+  }
+
+  .digital-twin-publish-project-selector .deployment-export-dialog-field {
+    grid-template-columns: 1fr;
+  }
+
+  .digital-twin-publish-project-selector button {
+    justify-self: start;
+  }
+
   .digital-twin-publish-context-grid {
     grid-template-columns: 1fr;
   }

@@ -22,14 +22,23 @@ const CANCEL_REQUEST_ID = 'cancel-upload';
 const UPLOAD_FAILURE_REQUEST_ID = 'permanent-upload-failure';
 const MISMATCHED_PREPARE_REQUEST_ID = 'mismatched-prepare-response';
 const RUNTIME_CONFIG_FAILURE_REQUEST_ID = 'runtime-config-save-failure';
+const BOUND_PROJECT_SWITCH_REQUEST_ID = 'bound-project-switch';
+const UNBOUND_NO_PROJECT_REQUEST_ID = 'unbound-no-project';
+const SELECTED_PROJECT_CONFIRM_REQUEST_ID = 'selected-project-confirm';
+const SELECTED_PROJECT_REQUEST_ID = 'selected-project-bind';
 const INDEXED_SKYBOX_REQUEST_ID = 'skybox-indexed-active';
 const ORPHANED_SKYBOX_REQUEST_ID = 'skybox-indexed-orphaned';
 const SOURCE_SKYBOX_TOCTOU_REQUEST_ID = 'skybox-source-toctou';
 const DIST_SKYBOX_TOCTOU_REQUEST_ID = 'skybox-dist-toctou';
+const OTHER_PROJECT_ID = '2054201280000000998';
 const PRIMARY_SKYBOX_ID = '2054201280000000401';
 const UNUSED_SKYBOX_ID = '2054201280000000402';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const PUBLISH_PARENT_ORIGINS = ['https://screen.example.com', 'http://127.0.0.1:8001'];
+const PUBLISHED_FETCH_CONFIG = Object.freeze({
+  url: 'https://fetch.example.test/inventory',
+  apiKey: 'integration-test-api-key',
+});
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -159,6 +168,7 @@ function createSceneContent() {
     scene: {
       id: 'scene_digital_twin_publish_integration',
       name: '数字孪生发布集成场景',
+      fetchConfig: { ...PUBLISHED_FETCH_CONFIG },
       entityIds: ['cad-reference'],
       entities: {
         'cad-reference': {
@@ -224,6 +234,7 @@ function createPublishRequest(requestId, sceneContent, overrides = {}) {
     publishName: `发布-${requestId}`,
     remark: 'Electron mock API 集成测试',
     sceneContent,
+    projectId: null,
     overwriteExisting: true,
     confirmResourceBindings: false,
     allowedParentOrigins: PUBLISH_PARENT_ORIGINS,
@@ -239,6 +250,8 @@ class DigitalTwinMockServer {
     this.sessions = new Map();
     this.tasks = new Map();
     this.remoteStatus = createRemoteStatus();
+    this.projectDetailId = PROJECT_ID;
+    this.projectDetailOverrides = {};
     this.nextId = 2054201281000000000n;
     this.cancelChunkStarted = null;
     this.resolveCancelChunkStarted = null;
@@ -322,6 +335,41 @@ class DigitalTwinMockServer {
       body,
       headers: { ...request.headers },
     });
+
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/projects/detail') {
+      assert.deepEqual(body, { id: PROJECT_ID });
+      this.sendSuccess(response, {
+        id: this.projectDetailId,
+        projectName: '发布集成测试项目',
+        sceneCount: 0,
+        screenCount: 0,
+        modelCount: 0,
+        envModelCount: 0,
+        comboModelCount: 0,
+        poiCount: 0,
+        chartCount: 0,
+        themeCount: 0,
+        latestEditorProjectId: this.remoteStatus.editorProjectId,
+        latestEditorProjectVersionId: this.remoteStatus.latestVersionId,
+        latestEditorProjectVersionNumber: this.remoteStatus.latestVersionNumber,
+        latestEditorProjectName: '发布集成测试工程',
+        latestEditorProjectPackageUrl: null,
+        latestEditorProjectPackageFileName: null,
+        currentResourceRevision: RESOURCE_REVISION,
+        publishedResourceRevision: RESOURCE_REVISION,
+        digitalTwinStatus: this.remoteStatus.status,
+        onlineDigitalTwinVersionId: this.remoteStatus.onlineVersionId,
+        onlineDigitalTwinVersionNumber: this.remoteStatus.onlineVersionNumber,
+        onlineDigitalTwinPublishId: null,
+        onlineProjectPublishId: null,
+        digitalTwinStableUrl: this.remoteStatus.stableUrl,
+        digitalTwinReleaseUrl: this.remoteStatus.releaseUrl,
+        digitalTwinLastPublishedAt: this.remoteStatus.lastPublishedAt,
+        updatedAt: '2026-08-01T08:00:00',
+        ...this.projectDetailOverrides,
+      });
+      return;
+    }
 
     if (request.method === 'POST' && url.pathname === '/platform/api/v1/digital-twin/projects/status') {
       assert.deepEqual(body, { projectId: PROJECT_ID });
@@ -687,6 +735,12 @@ async function run() {
     originalGetAppPath = app.getAppPath.bind(app);
     app.getAppPath = () => fakeAppRoot;
     await mock.start();
+    await writeFile(
+      path.join(userDataRoot, 'data-platform-config.json'),
+      `${JSON.stringify({ version: 2, baseUrl: mock.baseUrl, workspaceRoot }, null, 2)}
+`,
+      'utf8',
+    );
 
     const bindingModule = await import('../../dist-electron/ipc/dataPlatformBindingStore.js');
     const transferModule = await import('../../dist-electron/ipc/dataPlatformTransfer.js');
@@ -850,18 +904,36 @@ async function run() {
       });
       await bindingModule.writeDataPlatformBinding(projectRoot, metadata);
       bindingModule.setCurrentDataPlatformBinding(projectRoot, metadata);
+      projectAssetModule.setSharedProjectSkyboxRoot(manualSkyboxRoot);
       return metadata;
     }
 
     await resetBinding();
+    bindingModule.clearCurrentDataPlatformBinding();
     mock.setRemoteStatus(createRemoteStatus());
     mock.resetRequests();
     const remoteContext = await publishModule.getDigitalTwinPublishContext();
     assert.equal(remoteContext.dataPlatformOrigin, new URL(mock.baseUrl).origin);
+    assert.equal(bindingModule.getCurrentDataPlatformBinding()?.metadata.projectId, PROJECT_ID);
+    assert.equal(projectAssetModule.getSharedProjectAssetRoot(), path.resolve(sharedResourcesRoot));
+    assert.equal(projectAssetModule.getSharedProjectEnvironmentRoot(), path.resolve(sharedResourcesRoot));
+    assert.equal(projectAssetModule.getSharedProjectSkyboxRoot(), path.resolve(sharedResourcesRoot));
     assert.deepEqual(remoteContext.allowedParentOrigins, [
       'https://existing.example.com',
       new URL(mock.baseUrl).origin,
     ]);
+    await assert.rejects(
+      publishModule.getDigitalTwinPublishContext(OTHER_PROJECT_ID),
+      /不能在发布时切换项目/,
+    );
+    await assert.rejects(
+      publishModule.publishDigitalTwin(
+        createPublishRequest(BOUND_PROJECT_SWITCH_REQUEST_ID, sceneContent, { projectId: OTHER_PROJECT_ID }),
+        new AbortController().signal,
+        () => undefined,
+      ),
+      /不能在发布时切换项目/,
+    );
     mock.resetRequests();
     const localActiveContext = publishModule.getLocalDigitalTwinPublishContext(true);
     assert.equal(localActiveContext.publishActive, true);
@@ -870,6 +942,77 @@ async function run() {
     assert.deepEqual(localActiveContext.allowedParentOrigins, [new URL(mock.baseUrl).origin]);
     assert.equal(mock.requests.length, 0, '本地发布活动状态不应访问网络。');
 
+    await rm(bindingModule.getDataPlatformBindingPath(projectRoot), { force: true });
+    bindingModule.clearCurrentDataPlatformBinding();
+    await assert.rejects(
+      publishModule.publishDigitalTwin(
+        createPublishRequest(UNBOUND_NO_PROJECT_REQUEST_ID, sceneContent),
+        new AbortController().signal,
+        () => undefined,
+      ),
+      /请先选择发布项目/,
+    );
+    mock.projectDetailId = '2054201280000000999';
+    mock.setRemoteStatus(createRemoteStatus({ projectId: mock.projectDetailId }));
+    mock.resetRequests();
+    await assert.rejects(
+      publishModule.getDigitalTwinPublishContext(PROJECT_ID),
+      /项目详情响应与请求项目不匹配/,
+    );
+    assert.equal(await bindingModule.readDataPlatformBinding(projectRoot), null);
+
+    mock.projectDetailId = PROJECT_ID;
+    mock.projectDetailOverrides = {
+      latestEditorProjectId: null,
+      latestEditorProjectVersionId: null,
+      latestEditorProjectVersionNumber: null,
+    };
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    const selectedProjectContext = await publishModule.getDigitalTwinPublishContext(PROJECT_ID);
+    assert.equal(selectedProjectContext.available, true);
+    assert.equal(selectedProjectContext.projectId, PROJECT_ID);
+    assert.equal(selectedProjectContext.projectName, '发布集成测试项目');
+    assert.equal(selectedProjectContext.editorProjectId, EDITOR_PROJECT_ID);
+    assert.equal(selectedProjectContext.baseVersionId, BASE_VERSION_ID);
+    assert.equal(selectedProjectContext.versionConflict, false);
+    const selectedProjectConfirmation = await publishModule.publishDigitalTwin(
+      createPublishRequest(SELECTED_PROJECT_CONFIRM_REQUEST_ID, sceneContent, {
+        projectId: PROJECT_ID,
+        overwriteExisting: false,
+      }),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(selectedProjectConfirmation.status, 'confirmation-required');
+    assert.equal(await bindingModule.readDataPlatformBinding(projectRoot), null, '确认覆盖前不应写入本地绑定。');
+    assert.equal(bindingModule.getCurrentDataPlatformBinding(), null, '确认覆盖前不应激活当前绑定。');
+
+    const selectedProjectResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(SELECTED_PROJECT_REQUEST_ID, sceneContent, {
+        projectId: PROJECT_ID,
+        overwriteExisting: true,
+      }),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(selectedProjectResult.status, 'completed');
+    const selectedSourceEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'SOURCE'));
+    const selectedSourceScene = JSON.parse(selectedSourceEntries.get('Scenes/main.scene.json').toString('utf8'));
+    assert.deepEqual(selectedSourceScene.scene.fetchConfig, PUBLISHED_FETCH_CONFIG);
+    const selectedDistEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'DIST'));
+    const selectedDistScene = JSON.parse(selectedDistEntries.get('project/scene.json').toString('utf8'));
+    assert.deepEqual(selectedDistScene.scene.fetchConfig, PUBLISHED_FETCH_CONFIG);
+    const selectedProjectBinding = await bindingModule.readDataPlatformBinding(projectRoot);
+    assert.equal(selectedProjectBinding?.workspaceRoot, path.resolve(workspaceRoot));
+    assert.equal(selectedProjectBinding?.projectId, PROJECT_ID);
+    assert.equal(selectedProjectBinding?.projectName, '发布集成测试项目');
+    assert.equal(bindingModule.getCurrentDataPlatformBinding()?.metadata.projectId, PROJECT_ID);
+
+    mock.projectDetailOverrides = {};
+    await resetBinding({ workspaceRoot });
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
 
     const indexedSkyboxSceneContent = createDataPlatformSkyboxSceneContent(PRIMARY_SKYBOX_ID, mock.baseUrl);
     const expectedSkyboxPath = `project/assets/skyboxes/Skybox-${PRIMARY_SKYBOX_ID}/skybox.hdr`;
@@ -1330,7 +1473,15 @@ async function run() {
     console.log(JSON.stringify({
       status: 'PASS',
       verified: [
+        'publish-context-restores-persisted-binding',
         'publish-context-default-parent-origin',
+        'bound-scene-project-switch-rejected',
+        'unbound-scene-project-required',
+        'unbound-scene-uses-current-remote-version',
+        'unbound-scene-project-detail-identity',
+        'unbound-scene-overwrite-confirmation-before-binding',
+        'unbound-scene-project-selection-and-binding',
+        'fetch-config-with-api-key-published-to-source-and-dist',
         'runtime-config-save-before-publish',
         'runtime-config-save-failure-blocks-publish',
         'version-conflict-does-not-change-runtime-config',

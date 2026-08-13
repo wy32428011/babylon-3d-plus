@@ -34,6 +34,7 @@
     "test:model-parameters": "node --test tests/editor/modelStringParameters.test.mjs",
     "smoke:model-parameters": "npm run test:model-parameters && node scripts/smoke-model-parameter-meters.mjs",
     "smoke:model-picking": "node scripts/smoke-model-picking.mjs",
+    "smoke:selection-highlight": "node scripts/smoke-selection-highlight.mjs",
     "smoke:grid": "node scripts/smoke-editor-ground-grid.mjs",
     "smoke:light-editor": "node scripts/smoke-light-editor.mjs",
     "smoke:auto-patrol": "node scripts/smoke-auto-patrol.mjs",

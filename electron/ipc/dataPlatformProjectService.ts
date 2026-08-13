@@ -17,6 +17,7 @@ import { encodeAssetUrl } from './assetRegistry.js';
 import {
   activateProjectRoot,
   ensureProjectDirectories,
+  getCurrentProjectRoot,
   getProjectAssetIndexPath,
   getProjectEnvironmentsRoot,
   getProjectModelsRoot,
@@ -31,6 +32,8 @@ import {
   createDataPlatformBinding,
   getCurrentDataPlatformBinding,
   readDataPlatformBinding,
+  resolveDataPlatformBindingSharedResourcesRoot,
+  resolveDataPlatformBindingWorkspaceRoot,
   resolveDataPlatformProjectRoot,
   resolveDataPlatformSharedResourcesRoot,
   setCurrentDataPlatformBinding,
@@ -135,6 +138,68 @@ export function getDataPlatformEditorRoot(customWorkspaceRoot: string | null = n
     : app.getAppPath();
 }
 
+/** 把当前本地项目绑定到选定业务项目，不下载或覆盖远端 Editor 工程包。 */
+export async function prepareDataPlatformProjectForPublish(
+  project: DataPlatformProjectEntry,
+  baseUrl: string,
+  workspaceRoot: string,
+): Promise<DataPlatformProjectOpenResult> {
+  if (dataPlatformProjectServiceShuttingDown) {
+    throw new Error('应用正在退出，无法绑定数字孪生发布项目。');
+  }
+
+  await ensureWritableEditorRoot(workspaceRoot);
+  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const currentProjectRoot = getCurrentProjectRoot();
+  const normalizedCurrentRoot = currentProjectRoot ? path.resolve(currentProjectRoot) : null;
+  const normalizedWorkspaceRoot = path.resolve(workspaceRoot);
+  const projectRoot = normalizedCurrentRoot
+    && !isSameFilePath(normalizedCurrentRoot, normalizedWorkspaceRoot)
+    && !isSameFilePath(normalizedCurrentRoot, sharedResourcesRoot)
+    ? normalizedCurrentRoot
+    : resolveDataPlatformProjectRoot(workspaceRoot, project.id);
+  await ensureWritableEditorRoot(projectRoot);
+  await ensureProjectDirectories(projectRoot);
+  if (!normalizedCurrentRoot || !isSameFilePath(normalizedCurrentRoot, projectRoot)) await activateProjectRoot(projectRoot);
+  const existingBinding = await readDataPlatformBinding(projectRoot);
+  if (existingBinding) throw new Error('当前场景已经绑定数据中台业务项目。');
+
+  await ensureWritableEditorRoot(sharedResourcesRoot);
+  await ensureProjectDirectories(sharedResourcesRoot);
+  setSharedProjectAssetRoot(sharedResourcesRoot);
+  setSharedProjectEnvironmentRoot(sharedResourcesRoot);
+  setSharedProjectSkyboxRoot(sharedResourcesRoot);
+
+  const binding = createDataPlatformBinding({
+    baseUrl,
+    workspaceRoot,
+    projectId: project.id,
+    projectName: project.projectName,
+    editorProjectId: project.latestEditorProjectId,
+    latestVersionId: project.latestEditorProjectVersionId,
+    latestVersionNumber: project.latestEditorProjectVersionNumber,
+    resourceRevision: project.currentResourceRevision,
+    entryScenePath: null,
+    syncedAt: new Date().toISOString(),
+  });
+  await writeDataPlatformBinding(projectRoot, binding);
+  setCurrentDataPlatformBinding(projectRoot, binding);
+  invalidateDataPlatformSkyboxSyncPrepareContext();
+
+  return {
+    projectRoot,
+    sceneFilePath: null,
+    source: 'local',
+    warning: null,
+    conflictCopyPath: null,
+    // 发布开始前不启动资源同步，避免缓存更新与 SOURCE/DIST 打包并发修改同一资源。
+    modelSyncStarted: false,
+    envModelSyncStarted: false,
+    skyboxSyncStarted: false,
+    binding,
+  };
+}
+
 /** 从可信项目缓存打开工程，renderer 只允许提交项目 ID。 */
 export async function openDataPlatformProject(
   project: DataPlatformProjectEntry,
@@ -172,12 +237,12 @@ export async function syncDataPlatformModelsForWorkspace(
     setSharedProjectEnvironmentRoot(workspaceRoot);
     return startDataPlatformModelSync(baseUrl, workspaceRoot);
   }
-  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata);
   await ensureWritableEditorRoot(sharedResourcesRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
   setSharedProjectEnvironmentRoot(sharedResourcesRoot);
-  return startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
+  return startDataPlatformModelSync(binding.metadata.baseUrl, sharedResourcesRoot);
 }
 
 
@@ -189,14 +254,17 @@ export async function syncDataPlatformEnvironmentsForWorkspace(
 ): Promise<boolean> {
   if (dataPlatformProjectServiceShuttingDown) return false;
   const binding = getCurrentDataPlatformBinding();
-  const sharedResourcesRoot = binding ? resolveDataPlatformSharedResourcesRoot(workspaceRoot) : workspaceRoot;
+  const sharedResourcesRoot = binding
+    ? resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata)
+    : workspaceRoot;
+  const sourceBaseUrl = binding?.metadata.baseUrl ?? baseUrl;
   await ensureWritableEditorRoot(sharedResourcesRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectEnvironmentRoot(sharedResourcesRoot);
   return startDataPlatformEnvironmentSync(
-    baseUrl,
+    sourceBaseUrl,
     sharedResourcesRoot,
-    createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedResourcesRoot),
+    createDataPlatformEnvironmentSyncContextKey(sourceBaseUrl, sharedResourcesRoot),
     expectedSourceKey,
   );
 }
@@ -244,11 +312,15 @@ export function syncDataPlatformSkyboxesForWorkspace(
 
   const controller = new AbortController();
   const binding = getCurrentDataPlatformBinding();
+  const boundWorkspaceRoot = binding
+    ? resolveDataPlatformBindingWorkspaceRoot(binding.projectRoot, binding.metadata)
+    : workspaceRoot;
+  const sourceBaseUrl = binding?.metadata.baseUrl ?? baseUrl;
   const context: SkyboxSyncPrepareContext = {
     generation: skyboxSyncPrepareGeneration,
-    baseUrl,
-    workspaceRoot,
-    sharedResourcesRoot: resolveDataPlatformSharedResourcesRoot(workspaceRoot),
+    baseUrl: sourceBaseUrl,
+    workspaceRoot: boundWorkspaceRoot,
+    sharedResourcesRoot: resolveDataPlatformSharedResourcesRoot(boundWorkspaceRoot),
     syncContextKey: binding
       ? createDataPlatformSkyboxSyncContextKey(
         binding.metadata.baseUrl,
@@ -283,11 +355,11 @@ export async function syncDataPlatformImagesForWorkspace(
     setSharedProjectAssetRoot(null);
     return startDataPlatformImageSync(baseUrl, workspaceRoot);
   }
-  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata);
   await ensureWritableEditorRoot(sharedResourcesRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
   setSharedProjectAssetRoot(sharedResourcesRoot);
-  return startDataPlatformImageSync(baseUrl, sharedResourcesRoot);
+  return startDataPlatformImageSync(binding.metadata.baseUrl, sharedResourcesRoot);
 }
 
 /** 根据数据中台地址和共享缓存目录生成环境同步业务 key。 */
@@ -353,7 +425,7 @@ export async function listSyncedImagesForWorkspace(workspaceRoot: string): Promi
     await ensureWritableEditorRoot(workspaceRoot).catch(() => undefined);
     return listSyncedImages(workspaceRoot);
   }
-  const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
+  const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata);
   return listSyncedImages(sharedResourcesRoot);
 }
 
@@ -495,6 +567,7 @@ async function openDataPlatformProjectInternal(
   const entryScenePath = sceneFilePath ? toProjectRelativePath(projectRoot, sceneFilePath) : null;
   const binding = createDataPlatformBinding({
     baseUrl,
+    workspaceRoot,
     projectId: project.id,
     projectName: project.projectName,
     editorProjectId: project.latestEditorProjectId,
@@ -1019,6 +1092,14 @@ async function assertWorkspaceRealPathOutsideInstallation(editorRoot: string): P
 function isPathInsideOrEqual(parentPath: string, candidatePath: string): boolean {
   const relative = path.relative(path.resolve(parentPath), path.resolve(candidatePath));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function isSameFilePath(left: string, right: string): boolean {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

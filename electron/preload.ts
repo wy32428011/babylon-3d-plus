@@ -21,6 +21,7 @@ import type {
   DeploymentExportRevealRequest,
   DigitalTwinPublishCancelRequest,
   DigitalTwinPublishContext,
+  DigitalTwinPublishContextRequest,
   DigitalTwinPublishProgress,
   DigitalTwinPublishRequest,
   DigitalTwinPublishResult,
@@ -178,8 +179,8 @@ contextBridge.exposeInMainWorld('editorApi', {
   importSkyboxFile: (): Promise<ImportSkyboxFileResult> => ipcRenderer.invoke('assets:importSkyboxFile'),
   listModelPackageVariants: (request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> =>
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
-  getDigitalTwinPublishContext: (): Promise<DigitalTwinPublishContext> =>
-    ipcRenderer.invoke('digital-twin-publish:getContext'),
+  getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest): Promise<DigitalTwinPublishContext> =>
+    ipcRenderer.invoke('digital-twin-publish:getContext', request),
   publishDigitalTwin: (request: DigitalTwinPublishRequest): Promise<DigitalTwinPublishResult> =>
     ipcRenderer.invoke('digital-twin-publish:start', request),
   cancelDigitalTwinPublish: (request: DigitalTwinPublishCancelRequest): Promise<boolean> =>

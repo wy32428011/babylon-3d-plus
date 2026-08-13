@@ -82,41 +82,45 @@ test('源工程包保留多场景且只复制场景实际引用的共享资源',
   }
 });
 
-test('源工程包拒绝任一场景携带旧 Fetch API Key', async () => {
+test('源工程包允许场景携带 Fetch 配置并原样保留', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'zending-source-api-key-'));
   const projectRoot = path.join(root, 'Projects', '42');
   const sharedRoot = path.join(root, 'SharedResources');
   const tempRoot = path.join(root, 'temp');
   const mainScenePath = path.join(projectRoot, 'Scenes', 'main.scene.json');
   const secondaryScenePath = path.join(projectRoot, 'Scenes', 'secondary.scene.json');
+  const fetchConfig = { url: 'https://fetch.example.test/inventory', apiKey: 'source-package-test-api-key' };
   try {
     await mkdir(path.dirname(mainScenePath), { recursive: true });
     await writeFile(mainScenePath, JSON.stringify({ version: 3, scene: { name: '主场景', entities: {} } }), 'utf8');
     await writeFile(secondaryScenePath, JSON.stringify({
       version: 3,
-      scene: { name: '备用场景', entities: {}, fetchConfig: { url: 'http://127.0.0.1/api', apiKey: 'secret-key' } },
+      scene: { name: '备用场景', entities: {}, fetchConfig },
     }), 'utf8');
 
-    await assert.rejects(
-      buildDigitalTwinSourcePackage({
-        projectRoot,
-        sharedResourcesRoot: sharedRoot,
-        entrySceneFilePath: mainScenePath,
-        outputRoot: tempRoot,
-        manifest: {
-          projectId: '42',
-          projectName: '测试工程',
-          editorProjectId: null,
-          baseVersionId: null,
-          resourceRevision: '7',
-        },
-        signal: new AbortController().signal,
-        isPlatformImageReference: () => false,
-        findSyncedImageForReference: async () => null,
+    const result = await buildDigitalTwinSourcePackage({
+      projectRoot,
+      sharedResourcesRoot: sharedRoot,
+      entrySceneFilePath: mainScenePath,
+      outputRoot: tempRoot,
+      manifest: {
+        projectId: '42',
+        projectName: '测试工程',
+        editorProjectId: null,
+        baseVersionId: null,
+        resourceRevision: '7',
+      },
+      signal: new AbortController().signal,
+      isPlatformImageReference: () => false,
+      findSyncedImageForReference: async () => null,
       skyboxCacheDependencies: NO_SKYBOX_CACHE,
-      }),
-      /Fetch API Key/,
-    );
+    });
+
+    const archive = await unzipper.Open.file(result.filePath);
+    const sceneEntry = archive.files.find((entry) => entry.path.replace(/\\/g, '/') === 'Scenes/secondary.scene.json');
+    assert.ok(sceneEntry);
+    const packagedScene = JSON.parse((await sceneEntry!.buffer()).toString('utf8'));
+    assert.deepEqual(packagedScene.scene.fetchConfig, fetchConfig);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
