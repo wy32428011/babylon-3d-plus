@@ -110,14 +110,14 @@ contextBridge.exposeInMainWorld('editorApi', {
   syncDataPlatformModels: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncModels'),
   retryDataPlatformModelSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryModelSync'),
   onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void): (() => void) => {
-    let active = true;
-    const listener = (_event: IpcRendererEvent, payload: DataPlatformModelSyncProgress) => handler(payload);
+    const progressGate = createRealtimeFirstProgressGate(handler);
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformModelSyncProgress) => progressGate.handleRealtime(payload);
     ipcRenderer.on('data-platform:modelSyncProgress', listener);
     void ipcRenderer.invoke('data-platform:getModelSyncProgress').then((payload: DataPlatformModelSyncProgress | null) => {
-      if (active && payload) handler(payload);
+      progressGate.handleSnapshot(payload);
     }).catch(() => undefined);
     return () => {
-      active = false;
+      progressGate.dispose();
       ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
     };
   },

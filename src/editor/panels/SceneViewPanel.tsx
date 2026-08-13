@@ -77,6 +77,16 @@ import {
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 import { ViewportOrientationCompass } from '../ui/ViewportOrientationCompass';
 import { AutoPatrolControls } from '../../shared/ui/AutoPatrolControls';
+import {
+  beginScenePreparation,
+  countExpectedSceneBatchedEntities,
+  getScenePreparationSnapshot,
+  hasScenePreparationRuntimeTimedOut,
+  isScenePreparationActive,
+  reportSceneRuntimeProgress,
+  settleSceneRuntimeWithWarning,
+  subscribeScenePreparation,
+} from '../loading/scenePreparationProgress';
 import '../../styles/scene-performance.css';
 
 type EntityArrayDialogState = {
@@ -88,6 +98,8 @@ type EntityArrayDialogState = {
   value: EntityArrayDialogValue;
   commitError: string | null;
 };
+
+const SCENE_PREPARATION_RUNTIME_TIMEOUT_WARNING = '模型加载或 Geometry 合批超过 120 秒，已解除蒙版，请在 Console 检查失败模型。';
 
 type HierarchyGroupTranslationSession = HierarchyGroupTransformReadySelection & {
   sourceSceneDocument: SceneDocument;
@@ -219,6 +231,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   });
   const recordedEditModeThinInstancePlanComputationRef = useRef<object | null>(null);
   const modelParameterSceneChangeRef = useRef<{ entities: SceneDocument['entities']; entityId: string | null } | null>(null);
+  const sceneRuntimeReadinessStableSamplesRef = useRef(0);
+  const sceneRuntimeReadinessStartedAtRef = useRef(0);
+  const sceneRuntimeTimeoutLoggedRef = useRef(false);
   const selectedEntityIdRef = useRef<string | null>(null);
   const autoPatrolPreviewStartedRef = useRef(false);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
@@ -232,6 +247,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
   const [performanceHudExpanded, setPerformanceHudExpanded] = useState(false);
   const sceneDocument = useEditorStore((state) => state.scene);
+  const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
   const selectedEntityId = useEditorStore((state) => state.scene.selectedEntityId);
@@ -328,6 +344,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     () => resolveHierarchyGroupTransformSelection(sceneDocument, hierarchySelectionIds),
     [hierarchySelectionIds, sceneDocument],
   );
+
+  const sceneRuntimeReadinessGeneration = sceneSessionId;
 
   /** 发布当前单模型尺寸和 Hierarchy 群组世界包围盒，二者都只进入临时 Inspector 状态。 */
   const publishSelectedInspectorSpatialInfo = useCallback((runtime: SceneRuntime, entityId: string | null): void => {
@@ -1183,6 +1201,150 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     publishSelectedInspectorSpatialInfo,
   ]);
 
+  /**
+   * 场景打开或模型资源修订变化后，持续观察真实加载与 thinInstance 指标。
+   * 连续两个采样周期一致才解除蒙版，避免脚本微任务刚结束但最终 Geometry 尚未提交。
+   */
+  useEffect(() => {
+    beginScenePreparation(sceneSessionId);
+    sceneRuntimeReadinessStableSamplesRef.current = 0;
+    sceneRuntimeReadinessStartedAtRef.current = readScenePanelTimestampMs();
+    sceneRuntimeTimeoutLoggedRef.current = false;
+    const modelEntityIds = sceneDocument.entityIds.filter((entityId) => {
+      const entity = editRuntimeSceneDocument.entities[entityId];
+      return Boolean(entity?.components.modelAsset && !entity.components.modelArrayInstance);
+    });
+    const expectedBatchedEntities = countExpectedSceneBatchedEntities(
+      sceneDocument.entityIds,
+      editRuntimeSceneDocument.entities,
+    );
+    let active = true;
+    let lastSignature = '';
+    let intervalId: number | null = null;
+
+    const stopReadinessPolling = (): void => {
+      if (intervalId === null) return;
+      window.clearInterval(intervalId);
+      intervalId = null;
+    };
+
+    const sampleReadiness = (): void => {
+      if (!active) return;
+      const preparationState = getScenePreparationSnapshot();
+      if (preparationState.sceneSessionId !== sceneSessionId || preparationState.completed) {
+        stopReadinessPolling();
+        return;
+      }
+      if (preparationState.assetRefreshStatus !== 'settled') {
+        sceneRuntimeReadinessStableSamplesRef.current = 0;
+        sceneRuntimeReadinessStartedAtRef.current = readScenePanelTimestampMs();
+        sceneRuntimeTimeoutLoggedRef.current = false;
+        lastSignature = '';
+        return;
+      }
+      if (preparationState.runtime.generation !== sceneRuntimeReadinessGeneration) {
+        sceneRuntimeReadinessStableSamplesRef.current = 0;
+        sceneRuntimeReadinessStartedAtRef.current = readScenePanelTimestampMs();
+        sceneRuntimeTimeoutLoggedRef.current = false;
+        lastSignature = '';
+      }
+
+      const settleRuntimeAfterTimeout = (): void => {
+        if (sceneRuntimeTimeoutLoggedRef.current) return;
+        sceneRuntimeTimeoutLoggedRef.current = true;
+        pushLog(SCENE_PREPARATION_RUNTIME_TIMEOUT_WARNING);
+        settleSceneRuntimeWithWarning(sceneSessionId, SCENE_PREPARATION_RUNTIME_TIMEOUT_WARNING);
+      };
+      const runtime = runtimeRef.current;
+      if (!runtime) {
+        reportSceneRuntimeProgress(sceneSessionId, {
+          generation: sceneRuntimeReadinessGeneration,
+          totalModels: modelEntityIds.length,
+          settledModels: 0,
+          expectedBatchedEntities,
+          batchedEntities: 0,
+          stable: false,
+        });
+        if (hasScenePreparationRuntimeTimedOut(
+          sceneRuntimeReadinessStartedAtRef.current,
+          readScenePanelTimestampMs(),
+        )) {
+          settleRuntimeAfterTimeout();
+        }
+        return;
+      }
+
+      let settledModels = 0;
+      for (const entityId of modelEntityIds) {
+        if (runtime.getModelMeasurement(entityId).status !== 'loading') settledModels += 1;
+      }
+      const runtimeMetrics = runtime.getPerformanceMetrics();
+      const batchedEntities = Math.min(expectedBatchedEntities, runtimeMetrics.modelArrayBatchEntityCount);
+      const readyNow = settledModels >= modelEntityIds.length
+        && batchedEntities >= expectedBatchedEntities;
+      const signature = `${settledModels}:${batchedEntities}:${runtimeMetrics.modelArrayBatchMeshCount}`;
+      sceneRuntimeReadinessStableSamplesRef.current = readyNow && signature === lastSignature
+        ? sceneRuntimeReadinessStableSamplesRef.current + 1
+        : readyNow ? 1 : 0;
+      lastSignature = signature;
+      const stable = sceneRuntimeReadinessStableSamplesRef.current >= 2;
+
+      reportSceneRuntimeProgress(sceneSessionId, {
+        generation: sceneRuntimeReadinessGeneration,
+        totalModels: modelEntityIds.length,
+        settledModels,
+        expectedBatchedEntities,
+        batchedEntities,
+        stable,
+      });
+
+      if (
+        !stable
+        && hasScenePreparationRuntimeTimedOut(
+          sceneRuntimeReadinessStartedAtRef.current,
+          readScenePanelTimestampMs(),
+        )
+      ) {
+        settleRuntimeAfterTimeout();
+      }
+    };
+
+    const startReadinessPolling = (): void => {
+      if (!active || intervalId !== null) return;
+      const preparationState = getScenePreparationSnapshot();
+      if (
+        active
+        && preparationState.sceneSessionId === sceneSessionId
+        && !preparationState.completed
+      ) {
+        intervalId = window.setInterval(sampleReadiness, 250);
+      }
+    };
+
+    const unsubscribeScenePreparation = subscribeScenePreparation(() => {
+      const preparationState = getScenePreparationSnapshot();
+      if (preparationState.sceneSessionId !== sceneSessionId || preparationState.completed) {
+        stopReadinessPolling();
+        return;
+      }
+      startReadinessPolling();
+    });
+
+    sampleReadiness();
+    startReadinessPolling();
+    return () => {
+      active = false;
+      unsubscribeScenePreparation();
+      stopReadinessPolling();
+    };
+  }, [
+    editRuntimeSceneDocument.entities,
+    sceneDocument.entityIds,
+    sceneRuntimeReadinessGeneration,
+    sceneSessionId,
+    pushLog,
+  ]);
+
   /** Hierarchy 选区变化只刷新目标表现、Gizmo 和 Inspector 测量，不重新扫描全场景。 */
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -1479,6 +1641,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   /** F1 只在非输入态、编辑模式且选中巡检路线时录制或覆盖当前相机视角。 */
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (isScenePreparationActive()) {
+        event.preventDefault();
+        return;
+      }
       const target = event.target;
       const inputFocused = target instanceof HTMLInputElement
         || target instanceof HTMLTextAreaElement
@@ -1512,6 +1678,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!environmentAdjustmentActive) return;
 
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (isScenePreparationActive()) return;
       if (event.key !== 'Escape') return;
       setEnvironmentAdjustmentActive(false);
     };
