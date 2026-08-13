@@ -1693,9 +1693,7 @@ function mergeStaticCandidatesByMaterial(
   const materialSignatureCache = new Map<Material, string | null>();
 
   for (const candidate of candidates) {
-    // Babylon 新建的跨 Geometry 无索引载体即使补齐 drawArrays 标记，PBR 纹理/光照仍可能与原 Mesh 不一致。
-    // LineList/LineStrip 等拓扑也不能按三角形翻面；跨 Geometry 合并仅允许有索引三角形列表。
-    if (!isIndexedTriangleListMergeCandidate(candidate)) {
+    if (!isTriangleListMergeCandidate(candidate)) {
       output.push(candidate);
       continue;
     }
@@ -1753,16 +1751,22 @@ function mergeStaticCandidatesByMaterial(
   return output.sort((left, right) => left.meshIndex - right.meshIndex);
 }
 
-/** 跨 Geometry 顶点烘焙只接受有索引三角形列表，避免反射变换破坏线或 strip 拓扑。 */
-function isIndexedTriangleListMergeCandidate(candidate: EntityArrayMatrixCandidate): boolean {
+/** 跨 Geometry 顶点烘焙只接受三角形列表；无索引 drawArrays 也必须按完整三角形覆盖。 */
+function isTriangleListMergeCandidate(candidate: EntityArrayMatrixCandidate): boolean {
   const { sourceMesh, batchSource } = candidate;
   const totalIndices = batchSource.getTotalIndices();
-  if (totalIndices <= 0 || totalIndices % 3 !== 0) return false;
+  const totalVertices = batchSource.getTotalVertices();
   const fillMode = batchSource.overrideRenderingFillMode
     ?? sourceMesh.material?.fillMode
     ?? Constants.MATERIAL_TriangleFillMode;
   if (fillMode !== Constants.MATERIAL_TriangleFillMode) return false;
-  return batchSource.subMeshes.every((subMesh) => subMesh.indexCount % 3 === 0);
+  if (totalIndices > 0) {
+    return totalIndices % 3 === 0
+      && batchSource.subMeshes.every((subMesh) => subMesh.indexCount % 3 === 0);
+  }
+  return totalVertices > 0
+    && totalVertices % 3 === 0
+    && batchSource.subMeshes.every((subMesh) => subMesh.verticesCount % 3 === 0);
 }
 
 /** 返回只有视觉状态完全兼容时才相同的静态合并键。 */

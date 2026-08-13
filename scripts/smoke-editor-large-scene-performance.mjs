@@ -801,7 +801,7 @@ function verifyOriginalGeometryAtAllDistances(EntityArrayThinInstanceBatch) {
   }
 }
 
-/** 验证有索引静态 Geometry 可按材质安全合并，无索引 Geometry 保持独立且具备完整绘制语义。 */
+/** 验证同材质静态三角 Geometry 可安全合并，并保留透明、视觉差异和完整绘制语义。 */
 function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
   const engine = new NullEngine({ renderWidth: 64, renderHeight: 64 });
   const scene = new Scene(engine);
@@ -862,7 +862,7 @@ function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
   assert.ok(batch, '静态材质合并批次必须创建成功');
 
   try {
-    assert.equal(batch.meshes.length, 6, '两个等价有索引不透明材质应合并，视觉属性不同、透明和无索引 Mesh 必须保持独立');
+    assert.equal(batch.meshes.length, 5, '等价有索引与无索引不透明材质都应分别合并，视觉属性不同和透明 Mesh 必须保持独立');
     assert.equal(
       batch.meshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0),
       sourceVertexCount,
@@ -900,15 +900,15 @@ function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
     );
 
     const unindexedMeshes = batch.meshes.filter((mesh) => mesh.getTotalIndices() === 0);
-    assert.equal(unindexedMeshes.length, 2, '不同 Geometry 的无索引网格不得跨 Geometry 合并');
+    assert.equal(unindexedMeshes.length, 1, '等价无索引三角 Mesh 必须跨 Geometry 合并为一个绘制载体');
+    const mergedUnindexed = unindexedMeshes[0];
     assert.ok(
-      unindexedMeshes.every((mesh) => (
-        mesh.isUnIndexed === true
-        && mesh.subMeshes.length === 1
-        && mesh.subMeshes[0].verticesStart === 0
-        && mesh.subMeshes[0].verticesCount === mesh.getTotalVertices()
-      )),
-      '无索引批次必须保留 isUnIndexed 和覆盖全部顶点的 SubMesh',
+      mergedUnindexed.isUnIndexed === true
+      && mergedUnindexed.getTotalVertices() === 6
+      && mergedUnindexed.subMeshes.length === 1
+      && mergedUnindexed.subMeshes[0].verticesStart === 0
+      && mergedUnindexed.subMeshes[0].verticesCount === mergedUnindexed.getTotalVertices(),
+      '无索引合并批次必须保留全部顶点、isUnIndexed 和全局 SubMesh',
     );
 
     const instances = [
@@ -945,7 +945,7 @@ function verifyStaticMaterialMerge(EntityArrayThinInstanceBatch) {
       sourceIndexCount,
       batchIndexCount: batch.meshes.reduce((total, mesh) => total + mesh.getTotalIndices(), 0),
       mergedIndexedOpaqueMeshes: 2,
-      preservedUnindexedMeshes: unindexedMeshes.length,
+      mergedUnindexedOpaqueMeshes: 2,
       visuallyDistinctOpaqueFallbackMeshes: 1,
       transparentFallbackMeshes: 2,
     };
@@ -1116,7 +1116,11 @@ async function verifySceneViewWiring() {
     /runtime\.syncModelParameters\([\s\S]*?editRuntimeSceneDocument,[\s\S]*?modelParameterSyncEntityId,[\s\S]*?hierarchySelectionIds[\s\S]*?\)/,
     '参数 effect 必须调用单实体参数同步',
   );
-  assert.match(fullSyncBlock, /runtime\.sync\(editRuntimeSceneDocument, useEditorStore\.getState\(\)\.hierarchySelectionIds\)/, '其它内容变化必须保留完整同步和完整多选');
+  assert.match(
+    fullSyncBlock,
+    /runtime\.sync\([\s\S]*?editRuntimeSceneDocument,[\s\S]*?hierarchySelectionIds,[\s\S]*?modelArrayIdentityMode: 'visual'[\s\S]*?\)/,
+    '其它内容变化必须保留编辑态视觉合批、完整同步和完整多选',
+  );
   assert.match(fullSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '内容 effect 只能取消过期的选区群组拖动');
   assert.doesNotMatch(fullSyncBlock, /gizmo\.cancelActiveDrag\(\)/, '普通实体预览写入文档时不得被内容 effect 打断');
   assert.doesNotMatch(fullSyncDependencies, /selectedEntityId[,\]]/, '完整同步依赖不得包含纯选择字段');

@@ -46,6 +46,14 @@ function createStaticEntity(index, modelAsset) {
         scale: { x: 1, y: 1, z: 1 },
       },
       modelAsset: { ...modelAsset, assetCode: id },
+      // 编辑态自动合批必须忽略设备身份；运行预览恢复原文档后仍由独立模型保留遥测隔离。
+      telemetryBinding: {
+        enabled: true,
+        sourceId: 'scene-capacity-smoke',
+        deviceType: 'static-fixture',
+        expectedIntervalMs: 500,
+        staleAfterMs: 2_000,
+      },
     },
   };
 }
@@ -123,6 +131,130 @@ async function waitForModelParameterVariantBatch(runtime, entityId) {
     await new Promise((resolve) => setTimeout(resolve, WAIT_INTERVAL_MS));
   }
   assert.fail(`${entityId} 参数变体批次收敛超时`);
+}
+
+/** 验证外置参数脚本批次源修改资产编号时只更新设备上下文，不重建编辑态 Geometry 批次。 */
+async function verifyParametricSourceAssetCodeBatchReuse({
+  SceneRuntime,
+  createEditModeModelThinInstancePlan,
+  glbBytes,
+}) {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const previousLoadAssetContainerAsync = SceneLoader.LoadAssetContainerAsync;
+  const scriptSource = `
+export class ParametricModelRuntimeComponent {
+  public assetCode = '';
+  public constructor(public node: any) {}
+  public onStart(): void { this.onUpdate(); }
+  public onUpdate(): void {
+    const metadata = this.node.metadata && typeof this.node.metadata === 'object' ? this.node.metadata : {};
+    this.node.metadata = { ...metadata, sceneCapacitySmokeAssetCode: this.assetCode };
+  }
+}
+`;
+  const modelAsset = {
+    sourcePath: 'F:/Verified/box.glb',
+    sourceUrl: 'smoke://Verified/box.glb',
+    assetCode: 'PARAMETRIC-SOURCE',
+    lengthUnit: 'centimeter',
+    unitScaleToMeters: 0.01,
+    scriptAssets: [{
+      name: 'box.model.ts',
+      path: 'F:/Verified/box.model.ts',
+      sourceUrl: `data:text/plain;charset=utf-8,${encodeURIComponent(scriptSource)}`,
+    }],
+    parameterScriptMetadata: [],
+    animationScriptMetadata: [{
+      modelFilename: 'box.glb',
+      scriptFilename: 'box.model.ts',
+      className: 'ParametricModelRuntimeComponent',
+      fields: [],
+      values: {},
+    }],
+    parameterConfig: {
+      schema: 'babylon-editor.model-parameters',
+      version: 1,
+      parameters: [],
+      bindings: [],
+    },
+    parameterValues: {},
+  };
+  const entityList = Array.from({ length: 3 }, (_, index) => createStaticEntity(2_000 + index, modelAsset));
+  const entities = Object.fromEntries(entityList.map((entity) => [entity.id, entity]));
+  const entityIds = entityList.map((entity) => entity.id);
+  const rawDocument = createDocument(entities, entityIds);
+  const initialPlan = createEditModeModelThinInstancePlan(rawDocument);
+  const sourceEntityId = initialPlan.sourceEntityIds[0];
+  let runtime;
+
+  try {
+    assert.equal(initialPlan.groupCount, 1, '已核对外置参数脚本模型必须形成一个编辑态分组');
+    assert.ok(sourceEntityId, '外置参数脚本分组必须选择稳定批次源');
+    SceneLoader.LoadAssetContainerAsync = async () => LoadAssetContainerAsync(glbBytes, scene, {
+      pluginExtension: '.glb',
+      name: 'SceneCapacity-ParametricSource.glb',
+    });
+    runtime = new SceneRuntime(scene);
+    runtime.sync(
+      { ...rawDocument, entities: initialPlan.entities },
+      undefined,
+      { modelArrayIdentityMode: 'visual' },
+    );
+    const initialBatch = await waitForEditThinInstanceBatch(runtime, sourceEntityId, entityIds.length);
+    const sourceModel = runtime.models.get(sourceEntityId);
+    const externalScriptRuntime = sourceModel?.externalScriptRuntime;
+    assert.ok(sourceModel && externalScriptRuntime, '编辑态批次源必须保留唯一外置参数脚本宿主');
+    assert.equal(
+      sourceModel.contentRoot.metadata?.sceneCapacitySmokeAssetCode,
+      entities[sourceEntityId].components.modelAsset.assetCode,
+      '外置脚本必须收到初始批次源资产编号',
+    );
+
+    const editedAssetCode = 'PARAMETRIC-SOURCE-EDITED';
+    const editedSource = {
+      ...entities[sourceEntityId],
+      components: {
+        ...entities[sourceEntityId].components,
+        modelAsset: { ...entities[sourceEntityId].components.modelAsset, assetCode: editedAssetCode },
+      },
+    };
+    const editedEntities = { ...entities, [sourceEntityId]: editedSource };
+    const editedPlan = createEditModeModelThinInstancePlan(
+      createDocument(editedEntities, entityIds),
+      initialPlan,
+    );
+    runtime.sync(
+      { ...rawDocument, entities: editedPlan.entities },
+      undefined,
+      { modelArrayIdentityMode: 'visual' },
+    );
+    const editedBatch = await waitForEditThinInstanceBatch(runtime, sourceEntityId, entityIds.length);
+    const editedSourceModel = runtime.models.get(sourceEntityId);
+
+    assert.equal(editedBatch, initialBatch, '批次源输入资产编号不得重建编辑态 Geometry 批次');
+    assert.equal(editedSourceModel, sourceModel, '批次源输入资产编号不得重建模型或外置脚本宿主');
+    assert.equal(editedSourceModel?.externalScriptRuntime, externalScriptRuntime, '资产编号变化必须复用已启动的参数脚本运行时');
+    assert.equal(editedSourceModel?.assetCode, editedAssetCode, '批次源运行时必须更新为新的资产编号');
+    assert.equal(externalScriptRuntime.assetCode, editedAssetCode, '外置参数脚本上下文必须同步新的资产编号');
+    assert.equal(
+      editedSourceModel?.contentRoot.metadata?.sceneCapacitySmokeAssetCode,
+      editedAssetCode,
+      '外置参数脚本必须实际收到修改后的资产编号',
+    );
+    assert.equal(runtime.modelArrayParameterVariants.size, 0, '编辑态资产编号不得创建逐设备参数脚本宿主');
+
+    return {
+      logicalEntityCount: entityIds.length,
+      sourceBatchReused: true,
+      externalScriptHostReused: true,
+    };
+  } finally {
+    runtime?.dispose();
+    SceneLoader.LoadAssetContainerAsync = previousLoadAssetContainerAsync;
+    scene.dispose();
+    engine.dispose();
+  }
 }
 
 /** 收集指定实体的有效渲染 Mesh。 */
@@ -276,6 +408,11 @@ async function run() {
       server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts'),
       server.ssrLoadModule('/src/editor/model/editModeModelThinInstances.ts'),
     ]);
+    const parametricSourceAssetCode = await verifyParametricSourceAssetCodeBatchReuse({
+      SceneRuntime,
+      createEditModeModelThinInstancePlan,
+      glbBytes,
+    });
     SceneLoader.LoadAssetContainerAsync = async () => {
       loadCount += 1;
       const container = await LoadAssetContainerAsync(glbBytes, scene, {
@@ -387,7 +524,7 @@ async function run() {
       '发生 Transform 变化的逻辑实体必须生成新的派生快照',
     );
 
-    runtime.sync(editDocument);
+    runtime.sync(editDocument, undefined, { modelArrayIdentityMode: 'visual' });
     const editBatch = await waitForEditThinInstanceBatch(
       runtime,
       editPlan.sourceEntityIds[0],
@@ -405,6 +542,48 @@ async function run() {
       '编辑态重复模型必须按源 Mesh 创建固定批次并同时提交源实体与全部逻辑实例矩阵',
     );
     const editBatchMeshCount = editBatch.meshes.length;
+    assert.equal(
+      runtime.modelArrayParameterVariants.size,
+      0,
+      '编辑态自动合批不得因不同 assetCode 或相同遥测配置拆成逐设备参数宿主',
+    );
+
+    const assetCodeEntityId = entityIds.at(-2);
+    const assetCodeEntity = entities[assetCodeEntityId];
+    const editedAssetCode = 'INPUT-ASSET-CODE-001';
+    const assetCodeEntities = {
+      ...entities,
+      [assetCodeEntityId]: {
+        ...assetCodeEntity,
+        components: {
+          ...assetCodeEntity.components,
+          modelAsset: { ...assetCodeEntity.components.modelAsset, assetCode: editedAssetCode },
+        },
+      },
+    };
+    const assetCodePlan = createEditModeModelThinInstancePlan(
+      createDocument(assetCodeEntities, entityIds),
+      editPlan,
+    );
+    runtime.sync(
+      { ...rawDocument, entities: assetCodePlan.entities },
+      undefined,
+      { modelArrayIdentityMode: 'visual' },
+    );
+    const assetCodeBatch = await waitForEditThinInstanceBatch(
+      runtime,
+      editPlan.sourceEntityIds[0],
+      EDIT_BATCH_ENTITY_COUNT,
+    );
+    assert.equal(assetCodeBatch, editBatch, '输入资产编号不得重建或拆散编辑态 Geometry 批次');
+    assert.equal(runtime.modelArrayParameterVariants.size, 0, '输入资产编号后不得新增单实例参数宿主');
+    assert.equal(
+      runtime.modelArrayInstanceEntities.get(assetCodeEntityId)?.components.modelAsset?.assetCode,
+      editedAssetCode,
+      '合批后仍必须保留逻辑实体自己的资产编号',
+    );
+    runtime.sync(editDocument, undefined, { modelArrayIdentityMode: 'visual' });
+    await waitForEditThinInstanceBatch(runtime, editPlan.sourceEntityIds[0], EDIT_BATCH_ENTITY_COUNT);
 
     const parameterEntityId = entityIds.at(-1);
     const firstParameterEntity = {
@@ -544,6 +723,9 @@ async function run() {
       selectionSync: 'incremental',
       parameterSyncFullCountStable,
       parameterSyncBaseBatchReused,
+      editTelemetryIdentityIgnored: true,
+      assetCodeEditBatchReused: true,
+      parametricSourceAssetCode,
       referencedSourceCoalescing,
       runtimeExpansion: 'isolated',
     }, null, 2));

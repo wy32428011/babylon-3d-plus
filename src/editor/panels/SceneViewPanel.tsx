@@ -1165,9 +1165,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         editRuntimeSceneDocument,
         modelParameterSyncEntityId,
         useEditorStore.getState().hierarchySelectionIds,
+        { modelArrayIdentityMode: 'visual' },
       );
     } else {
-      runtime.sync(editRuntimeSceneDocument, useEditorStore.getState().hierarchySelectionIds);
+      runtime.sync(
+        editRuntimeSceneDocument,
+        useEditorStore.getState().hierarchySelectionIds,
+        { modelArrayIdentityMode: 'visual' },
+      );
     }
     attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedInspectorSpatialInfo(runtime, selectedEntityIdRef.current);
@@ -1329,6 +1334,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       runtime.sync(
         editRuntimeSceneDocumentRef.current ?? currentSceneDocument,
         useEditorStore.getState().hierarchySelectionIds,
+        { modelArrayIdentityMode: 'visual' },
       );
       attachCurrentSelectionGizmo(runtime, gizmo);
       publishSelectedInspectorSpatialInfo(runtime, selectedEntityIdRef.current);
@@ -1341,7 +1347,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       gizmo.cancelActiveDrag();
       gizmo.attachToTarget(null, null);
       runtime.clearFolderGroupGizmoTarget();
-      runtime.sync(currentSceneDocument, useEditorStore.getState().hierarchySelectionIds);
+      runtime.sync(
+        currentSceneDocument,
+        useEditorStore.getState().hierarchySelectionIds,
+        { modelArrayIdentityMode: 'device' },
+      );
       runtime.beginTelemetryPreview();
       client.updateConfig(mqttConfig);
       publishSelectedInspectorSpatialInfo(runtime, selectedEntityIdRef.current);

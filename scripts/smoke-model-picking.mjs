@@ -4,6 +4,7 @@ import {
   Camera,
   FreeCamera,
   Matrix,
+  Mesh,
   MeshBuilder,
   NullEngine,
   Scene,
@@ -66,17 +67,16 @@ function toCanvasPoint(x, y) {
 }
 
 /** 注册只包含拾取所需字段的导入模型运行时。 */
-function registerModel(runtime, entityId, root, contentRoot, meshes, state = { visible: true, locked: false }) {
-  runtime.models.set(entityId, {
-    entitySnapshot: { id: entityId },
-    root,
-    contentRoot,
-    meshes,
-    modelArrayBatch: null,
-    highlighted: false,
-  });
-  runtime.entityStates.set(entityId, state);
-  runtime.syncedEntities.set(entityId, {
+function registerModel(
+  runtime,
+  entityId,
+  root,
+  contentRoot,
+  meshes,
+  state = { visible: true, locked: false },
+  modelAsset = {},
+) {
+  const entitySnapshot = {
     id: entityId,
     name: entityId,
     isFolder: false,
@@ -90,9 +90,19 @@ function registerModel(runtime, entityId, root, contentRoot, meshes, state = { v
         rotation: { x: 0, y: 0, z: 0 },
         scale: { x: 1, y: 1, z: 1 },
       },
-      modelAsset: {},
+      modelAsset,
     },
+  };
+  runtime.models.set(entityId, {
+    entitySnapshot,
+    root,
+    contentRoot,
+    meshes,
+    modelArrayBatch: null,
+    highlighted: false,
   });
+  runtime.entityStates.set(entityId, state);
+  runtime.syncedEntities.set(entityId, entitySnapshot);
 }
 
 /** 让场景 Mesh 具备编辑器模型实体元数据。 */
@@ -246,6 +256,202 @@ function verifyRotatedModelBounds(SceneRuntime) {
   }
 }
 
+const CHAIN_CONVEYOR_IDENTITIES = [
+  {
+    label: 'values.modelKey.value',
+    modelAsset: {
+      parameterScriptMetadata: [{ values: { modelKey: { value: ' chain-conveyor ' } } }],
+    },
+  },
+  {
+    label: 'fields.defaultValue',
+    modelAsset: {
+      parameterScriptMetadata: [{ fields: [{ key: 'modelKey', defaultValue: 'NEWCHAIN-CONVEYOR' }] }],
+    },
+  },
+  {
+    label: 'parameter metadata scriptFilename',
+    modelAsset: {
+      parameterScriptMetadata: [{ scriptFilename: 'legacy\\Chain-Conveyor.Model.ts?revision=1#script' }],
+    },
+  },
+  {
+    label: 'script asset path',
+    modelAsset: {
+      scriptAssets: [{
+        name: 'ordinary.model.ts',
+        path: 'Assets/Models/NewChain/NewChain-Conveyor.Model.ts',
+        sourceUrl: 'editor-asset://Models/ordinary.model.ts',
+      }],
+    },
+  },
+  {
+    label: 'script asset sourceUrl',
+    modelAsset: {
+      scriptAssets: [{
+        name: 'ordinary.model.ts',
+        path: 'Assets/Models/ordinary.model.ts',
+        sourceUrl: 'editor-asset://Models/Chain/%63hain-conveyor.model.ts?revision=2',
+      }],
+    },
+  },
+  {
+    label: 'script asset name',
+    modelAsset: {
+      scriptAssets: [{
+        name: ' Chain-Conveyor.Model.ts ',
+        path: 'Assets/Models/ordinary.model.ts',
+        sourceUrl: 'editor-asset://Models/ordinary.model.ts',
+      }],
+    },
+  },
+];
+
+/** 构造字段完整且不携带链条机暗示的模型资产，只让各用例的单一强信号决定身份。 */
+function createNeutralModelAsset(overrides = {}) {
+  return {
+    assetCode: 'neutral-device',
+    sourcePath: 'Assets/Models/Neutral/model.glb',
+    sourceUrl: 'editor-asset://Models/Neutral/model.glb',
+    lengthUnit: 'meter',
+    unitScaleToMeters: 1,
+    ...overrides,
+  };
+}
+
+/** 创建中间为空、外围有真实梁体的模型，稳定区分三角面拾取与显示范围兜底。 */
+function createFrameModel(fixture, entityId) {
+  const root = new TransformNode(`${entityId}-root`, fixture.scene);
+  const contentRoot = new TransformNode(`${entityId}-content`, fixture.scene);
+  contentRoot.parent = root;
+
+  const left = MeshBuilder.CreateBox(`${entityId}-left`, { width: 0.2, height: 2, depth: 0.2 }, fixture.scene);
+  const right = MeshBuilder.CreateBox(`${entityId}-right`, { width: 0.2, height: 2, depth: 0.2 }, fixture.scene);
+  const top = MeshBuilder.CreateBox(`${entityId}-top`, { width: 6, height: 0.2, depth: 0.2 }, fixture.scene);
+  const bottom = MeshBuilder.CreateBox(`${entityId}-bottom`, { width: 6, height: 0.2, depth: 0.2 }, fixture.scene);
+  left.position.x = -3;
+  right.position.x = 3;
+  top.position.y = 1;
+  bottom.position.y = -1;
+  const frame = Mesh.MergeMeshes([left, right, top, bottom], true, true, undefined, false, true);
+  assert.ok(frame, `${entityId} 测试 Mesh 合并失败`);
+  frame.name = `${entityId}-merged`;
+  frame.parent = contentRoot;
+  markEntityMeshes([frame], entityId);
+  return { root, contentRoot, frame };
+}
+
+/** 链条机只按真实几何拾取；相同结构的普通模型继续保留原显示范围兜底。 */
+function verifyChainConveyorGapPicking(SceneRuntime) {
+  for (const [index, identity] of CHAIN_CONVEYOR_IDENTITIES.entries()) {
+    const fixture = createRuntimeFixture(SceneRuntime, `chain-conveyor-gap-${index}`);
+    try {
+      const entityId = `identity-case-${index}`;
+      const { root, contentRoot, frame } = createFrameModel(fixture, entityId);
+      registerModel(
+        fixture.runtime,
+        entityId,
+        root,
+        contentRoot,
+        [frame],
+        { visible: true, locked: false },
+        createNeutralModelAsset(identity.modelAsset),
+      );
+      fixture.scene.render();
+
+      const emptyGap = toCanvasPoint(0, 0);
+      assertNoExactGeometryHit(fixture.scene, emptyGap, `${identity.label} 用例中心必须是无三角面的真实空隙`);
+      assert.equal(
+        fixture.runtime.pickEntityIdAtCanvasPoint(emptyGap.x, emptyGap.y, fixture.canvas),
+        null,
+        `${identity.label} 必须将模型识别为链条机并拒绝空隙拾取`,
+      );
+      assert.equal(
+        fixture.runtime.pickRuntimeModelEntityIdAtCanvasPoint(emptyGap.x, emptyGap.y, fixture.canvas),
+        null,
+        `${identity.label} 在运行预览与 Viewer 中也不得通过空隙选中链条机`,
+      );
+      const beamBody = toCanvasPoint(0, 1);
+      assert.equal(
+        fixture.runtime.pickEntityIdAtCanvasPoint(beamBody.x, beamBody.y, fixture.canvas),
+        entityId,
+        `${identity.label} 链条机的真实梁体必须仍可选中`,
+      );
+    } finally {
+      disposeFixture(fixture);
+    }
+  }
+}
+
+/** 非链条机模型继续保留历史范围拾取，避免回退 Shelf 等既有交互。 */
+function verifyOrdinaryFrameDisplayBoundsPicking(SceneRuntime) {
+  const ordinaryModelAssets = [
+    { label: '无链条机身份元数据', modelAsset: createNeutralModelAsset() },
+    {
+      label: '仅包含输送机近似信号',
+      modelAsset: createNeutralModelAsset({
+        assetCode: 'chain-conveyor',
+        sourcePath: 'Assets/Models/Chain-Conveyor/ordinary.glb',
+        sourceUrl: 'editor-asset://Models/conveyor-like.glb',
+        scriptAssets: [{
+          name: 'warehouse-conveyor.model.ts',
+          path: 'Assets/Models/Chain-Conveyor/warehouse-conveyor.model.ts',
+          sourceUrl: 'editor-asset://Models/Chain-Conveyor/warehouse-conveyor.model.ts',
+        }],
+        parameterScriptMetadata: [{
+          fields: [{ key: 'deviceType', defaultValue: 'conveyor' }],
+          values: { modelKey: { value: 'chain-conveyor-v2' } },
+        }],
+      }),
+    },
+    {
+      label: '脚本 URL 含损坏转义',
+      modelAsset: createNeutralModelAsset({
+        scriptAssets: [{
+          name: 'ordinary.model.ts',
+          path: 'Assets/Models/ordinary.model.ts',
+          sourceUrl: 'editor-asset://Models/%/chain-conveyor.model.ts',
+        }],
+      }),
+    },
+    {
+      label: '脚本元数据字段为旧场景脏数据',
+      modelAsset: createNeutralModelAsset({
+        parameterScriptMetadata: { scriptFilename: 'chain-conveyor.model.ts' },
+        scriptAssets: 'chain-conveyor.model.ts',
+      }),
+    },
+  ];
+
+  for (const [index, ordinary] of ordinaryModelAssets.entries()) {
+    const fixture = createRuntimeFixture(SceneRuntime, `ordinary-frame-gap-${index}`);
+    try {
+      const entityId = `ordinary-frame-${index}`;
+      const { root, contentRoot, frame } = createFrameModel(fixture, entityId);
+      registerModel(
+        fixture.runtime,
+        entityId,
+        root,
+        contentRoot,
+        [frame],
+        { visible: true, locked: false },
+        ordinary.modelAsset,
+      );
+      fixture.scene.render();
+
+      const center = toCanvasPoint(0, 0);
+      assertNoExactGeometryHit(fixture.scene, center, `${ordinary.label} 用例中心必须是无三角面的真实空隙`);
+      assert.equal(
+        fixture.runtime.pickEntityIdAtCanvasPoint(center.x, center.y, fixture.canvas),
+        entityId,
+        `${ordinary.label} 的普通模型必须继续保留显示范围兜底拾取`,
+      );
+    } finally {
+      disposeFixture(fixture);
+    }
+  }
+}
+
 /** 运行态只读拾取允许 locked 模型，同时普通编辑拾取继续遵守 authoring lock。 */
 function verifyRuntimeLockedModelPicking(SceneRuntime) {
   const fixture = createRuntimeFixture(SceneRuntime, 'runtime-locked-model');
@@ -337,6 +543,8 @@ try {
   verifyShelfLayerColumnPicking(SceneRuntime);
   verifyMultiwearingGeneratedPicking(SceneRuntime);
   verifyRotatedModelBounds(SceneRuntime);
+  verifyChainConveyorGapPicking(SceneRuntime);
+  verifyOrdinaryFrameDisplayBoundsPicking(SceneRuntime);
   verifyRuntimeLockedModelPicking(SceneRuntime);
   verifyExactGeometryPriority(SceneRuntime);
 

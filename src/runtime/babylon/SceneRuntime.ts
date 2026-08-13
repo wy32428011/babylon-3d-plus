@@ -241,6 +241,11 @@ const MODEL_GENERATOR_MARKER_ALPHA = 0.65;
 const LOCATOR_SURFACE_ALPHA = 0.025;
 const SELECTED_LOCATOR_SURFACE_ALPHA = 0.08;
 const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
+const CHAIN_CONVEYOR_MODEL_KEYS = new Set(['chain-conveyor', 'newchain-conveyor']);
+const CHAIN_CONVEYOR_SCRIPT_FILENAMES = new Set([
+  'chain-conveyor.model.ts',
+  'newchain-conveyor.model.ts',
+]);
 
 type EditorMeshMetadata = {
   [EDITOR_ENTITY_ID_METADATA_KEY]?: unknown;
@@ -459,6 +464,13 @@ type EntityRuntimeState = {
   locked: boolean;
 };
 
+export type SceneRuntimeModelArrayIdentityMode = 'visual' | 'device';
+
+export type SceneRuntimeSyncOptions = {
+  /** 编辑态仅按可见外观分组；运行态按设备身份隔离遥测宿主。 */
+  modelArrayIdentityMode?: SceneRuntimeModelArrayIdentityMode;
+};
+
 export type SceneRuntimePerformanceMetrics = {
   fullSyncCount: number;
   selectionSyncCount: number;
@@ -497,6 +509,61 @@ function readCurrentThinInstanceMatrices(mesh: Mesh): Matrix[] | null {
 
 function readRuntimeTimestampMs(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now();
+}
+
+/** 规范化模型脚本引用，只以精确文件名兼容本地路径、URL 和旧场景编码。 */
+function normalizeModelScriptFilename(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const reference = trimmed.replace(/\\/g, '/').split(/[?#]/, 1)[0];
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(reference);
+  } catch {
+    // 损坏的转义不应阻断场景拾取，也不能通过部分规范化误识别模型。
+    return null;
+  }
+  const path = decoded.replace(/\\/g, '/');
+  const filename = path.split('/').pop()?.trim().toLowerCase() ?? '';
+  return filename || null;
+}
+
+/** 精确识别新旧链条机模型，缺失或近似元数据时保持普通模型历史拾取行为。 */
+function isChainConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
+  const metadataEntries = Array.isArray(modelAsset.parameterScriptMetadata)
+    ? modelAsset.parameterScriptMetadata
+    : [];
+  for (const metadata of metadataEntries) {
+    if (!isPlainRecord(metadata)) continue;
+    if (CHAIN_CONVEYOR_SCRIPT_FILENAMES.has(normalizeModelScriptFilename(metadata.scriptFilename) ?? '')) {
+      return true;
+    }
+
+    const values = isPlainRecord(metadata.values) ? metadata.values : null;
+    const modelKeyValue = values && isPlainRecord(values.modelKey) ? values.modelKey.value : null;
+    if (
+      typeof modelKeyValue === 'string'
+      && CHAIN_CONVEYOR_MODEL_KEYS.has(modelKeyValue.trim().toLowerCase())
+    ) {
+      return true;
+    }
+
+    const fields = Array.isArray(metadata.fields) ? metadata.fields : [];
+    for (const field of fields) {
+      if (!isPlainRecord(field) || field.key !== 'modelKey' || typeof field.defaultValue !== 'string') continue;
+      if (CHAIN_CONVEYOR_MODEL_KEYS.has(field.defaultValue.trim().toLowerCase())) return true;
+    }
+  }
+
+  const scriptAssets = Array.isArray(modelAsset.scriptAssets) ? modelAsset.scriptAssets : [];
+  for (const scriptAsset of scriptAssets) {
+    if (!isPlainRecord(scriptAsset)) continue;
+    for (const reference of [scriptAsset.name, scriptAsset.path, scriptAsset.sourceUrl]) {
+      if (CHAIN_CONVEYOR_SCRIPT_FILENAMES.has(normalizeModelScriptFilename(reference) ?? '')) return true;
+    }
+  }
+  return false;
 }
 
 export class SceneRuntime {
@@ -561,6 +628,7 @@ export class SceneRuntime {
   private readonly environmentRuntime: SceneEnvironmentRuntime;
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private telemetryPreviewActive = false;
+  private modelArrayIdentityMode: SceneRuntimeModelArrayIdentityMode = 'device';
   private readonly reportedCargoIssues = new Set<string>();
   private outlinedModelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
   private fullSyncCount = 0;
@@ -1473,6 +1541,8 @@ export class SceneRuntime {
     // 真实可见几何仍保持优先，避免前方货架抢走透过空格看到的后方模型。
     for (const [entityId, model] of this.models) {
       if (model.modelArrayBatch || !isCandidate(entityId)) continue;
+      const modelAsset = model.entitySnapshot?.components.modelAsset;
+      if (modelAsset && isChainConveyorModelAsset(modelAsset)) continue;
       const distance = intersectWorldRayWithModelDisplayBounds(ray, model.root, model.contentRoot);
       if (distance === null || distance >= nearestDistance) continue;
       nearestEntityId = entityId;
@@ -2099,12 +2169,19 @@ export class SceneRuntime {
   }
 
   /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
-  sync(document: SceneDocument, hierarchySelectionIds?: readonly string[]): void {
+  sync(
+    document: SceneDocument,
+    hierarchySelectionIds?: readonly string[],
+    options: SceneRuntimeSyncOptions = {},
+  ): void {
+    const nextModelArrayIdentityMode = options.modelArrayIdentityMode ?? 'device';
+    const modelArrayIdentityModeChanged = this.modelArrayIdentityMode !== nextModelArrayIdentityMode;
+    this.modelArrayIdentityMode = nextModelArrayIdentityMode;
     this.setHierarchySelectionIds(document, hierarchySelectionIds);
     this.cancelFolderGroupTransforms();
     const startedAt = readRuntimeTimestampMs();
     try {
-      this.syncDocument(document);
+      this.syncDocument(document, modelArrayIdentityModeChanged);
     } finally {
       const durationMs = Math.max(0, readRuntimeTimestampMs() - startedAt);
       this.fullSyncCount += 1;
@@ -2121,13 +2198,19 @@ export class SceneRuntime {
     document: SceneDocument,
     entityId: string,
     hierarchySelectionIds?: readonly string[],
+    options?: SceneRuntimeSyncOptions,
   ): void {
+    const nextModelArrayIdentityMode = options?.modelArrayIdentityMode ?? this.modelArrayIdentityMode;
+    if (nextModelArrayIdentityMode !== this.modelArrayIdentityMode) {
+      this.sync(document, hierarchySelectionIds, { modelArrayIdentityMode: nextModelArrayIdentityMode });
+      return;
+    }
     this.setHierarchySelectionIds(document, hierarchySelectionIds);
     this.cancelFolderGroupTransforms();
     const entity = document.entities[entityId];
     const previousEntity = this.syncedEntities.get(entityId);
     if (!entity?.components.modelAsset || !previousEntity?.components.modelAsset) {
-      this.sync(document, hierarchySelectionIds);
+      this.sync(document, hierarchySelectionIds, { modelArrayIdentityMode: this.modelArrayIdentityMode });
       return;
     }
 
@@ -2230,7 +2313,7 @@ export class SceneRuntime {
   }
 
   /** 完整同步文档内容；调用方负责统计耗时。 */
-  private syncDocument(document: SceneDocument): void {
+  private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
     const previousEntityStates = new Map(this.entityStates);
     const previousHighlightedEntityIds = mergeSceneRuntimeHighlightEntityIds(
       this.selectedEntityIds,
@@ -2267,6 +2350,9 @@ export class SceneRuntime {
     const modelGeneratorIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.modelGenerator)),
     );
+    if (forceModelArrayResync) {
+      for (const modelId of modelIds) dirtyModelArraySourceIds.add(modelId);
+    }
 
     const lightIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.light)),
@@ -5277,12 +5363,14 @@ export class SceneRuntime {
     this.syncConveyorTrajectoriesForArrayInstances(entity.id);
   }
 
-  /** 资产编号只代表逻辑设备身份；其它会影响参数脚本输出的字段共同决定共享分组。 */
+  /** 编辑态资产编号不影响外观；运行态仅对启用遥测的真实阵列按设备身份隔离宿主。 */
   private createModelArrayRenderSignature(
     modelAsset: ModelAssetComponent,
     telemetryBinding: TelemetryBindingComponent | null | undefined = null,
   ): string {
-    const telemetryIdentity = telemetryBinding && telemetryBinding.enabled !== false
+    const telemetryIdentity = this.modelArrayIdentityMode === 'device'
+      && telemetryBinding
+      && telemetryBinding.enabled !== false
       ? {
           assetCode: modelAsset.assetCode,
           binding: this.createModelArrayJsonSignature(telemetryBinding),
