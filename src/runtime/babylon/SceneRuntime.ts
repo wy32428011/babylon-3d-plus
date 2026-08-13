@@ -4574,6 +4574,7 @@ export class SceneRuntime {
     model.telemetryPreviewBaseline = null;
     model.cancelLoad?.();
     model.cancelLoad = null;
+    this.endModelArrayHostRenderSuppression(model);
     this.applyModelSelection(model, false);
     this.restoreModelArrayHostMeshes(model);
     model.root.setEnabled(true);
@@ -5687,12 +5688,22 @@ export class SceneRuntime {
 
   /** 新参数宿主异步初始化时保留脚本可见状态，只在每帧 Active Mesh 评估阶段禁止绘制。 */
   private beginModelArrayParameterVariantRenderSuppression(variant: ModelArrayParameterVariantRuntimeEntry): void {
-    if (!variant.model.root.isDisposed()) this.pendingModelArrayVariantRenderSuppressions.add(variant.model.root);
+    this.beginModelArrayHostRenderSuppression(variant.model);
   }
 
   /** 参数脚本最终 Mesh 已转入 layerMask=0 后结束逐帧临时禁用，并恢复脚本宿主 enabled 状态。 */
   private endModelArrayParameterVariantRenderSuppression(variant: ModelArrayParameterVariantRuntimeEntry): void {
-    const root = variant.model.root;
+    this.endModelArrayHostRenderSuppression(variant.model);
+  }
+
+  /** 脚本异步刷新期间只保留宿主的脚本可见性，禁止它和上一份有效批次同时参与绘制。 */
+  private beginModelArrayHostRenderSuppression(model: ModelRuntimeEntry): void {
+    if (!model.root.isDisposed()) this.pendingModelArrayVariantRenderSuppressions.add(model.root);
+  }
+
+  /** 脚本完成并原子提交新批次后，结束宿主的逐帧渲染屏蔽。 */
+  private endModelArrayHostRenderSuppression(model: ModelRuntimeEntry): void {
+    const root = model.root;
     this.pendingModelArrayVariantRenderSuppressions.delete(root);
     if (this.suppressedModelArrayVariantRootsThisFrame.delete(root) && !root.isDisposed()) {
       root.setEnabled(true);
@@ -6083,8 +6094,18 @@ export class SceneRuntime {
     // 异步 start 完成前保持根节点启用，避免旧脚本把 enabled=false 捕获为参数基线。
     const hadArrayHost = Boolean(model.modelArrayBatch) || model.modelArraySuspendedMeshes.size > 0;
     this.restoreModelArrayHostMeshes(model);
-    if (hadArrayHost) model.root.setEnabled(true);
+    if (hadArrayHost) {
+      model.root.setEnabled(true);
+      this.beginModelArrayHostRenderSuppression(model);
+    }
     this.syncModelScriptMetadata(model.contentRoot, modelAsset);
+    const settle = (current: ModelRuntimeEntry): void => {
+      try {
+        onSettled(current);
+      } finally {
+        this.endModelArrayHostRenderSuppression(current);
+      }
+    };
 
     const scriptAssets = modelAsset.scriptAssets ?? [];
     if (scriptAssets.length === 0) {
@@ -6097,7 +6118,7 @@ export class SceneRuntime {
       resetConveyorTelemetryState(model);
       resetRgvTelemetryState(model);
       model.stackerTelemetryReady = true;
-      onSettled(model);
+      settle(model);
       return;
     }
 
@@ -6138,7 +6159,7 @@ export class SceneRuntime {
           current.externalScriptStarting = false;
           current.measurementReady = true;
           current.stackerTelemetryReady = true;
-          onSettled(current);
+          settle(current);
         })
         .catch((error) => {
           const current = this.findActiveModelRuntimeEntry(runtime);
@@ -6151,7 +6172,7 @@ export class SceneRuntime {
           current.stackerTelemetryReady = true;
           const message = error instanceof Error ? error.message : String(error);
           this.pushLog(`模型脚本初始化失败，已回退基础几何与测量：${message}`);
-          onSettled(current);
+          settle(current);
         });
       return;
     }
@@ -6167,7 +6188,7 @@ export class SceneRuntime {
     resetRgvTelemetryState(model);
     model.measurementReady = true;
     model.stackerTelemetryReady = true;
-    onSettled(model);
+    settle(model);
   }
 
   /** 在普通模型和生成器派生模型中查找仍处于活动状态的脚本宿主。 */

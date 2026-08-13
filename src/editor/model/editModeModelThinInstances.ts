@@ -6,6 +6,7 @@ import type { SceneDocument } from './SceneDocument';
 const EDIT_MODE_THIN_INSTANCE_MODEL_FILES_BY_SCRIPT = new Map<string, ReadonlySet<string>>([
   ['box.model.ts', new Set(['box.glb', 'box.gltf'])],
   ['chain-conveyor.model.ts', new Set(['链条机.glb', '链条机.gltf'])],
+  ['newchain-conveyor.model.ts', new Set(['链条机新.glb', '链条机新.gltf'])],
   ['gd-motor-optimized.model.ts', new Set([
     'gd_有电机_optimized(1).glb',
     'gd_有电机_optimized(1).gltf',

@@ -464,6 +464,7 @@ async function run() {
     for (const [modelFileName, scriptFileName] of [
       ['box.glb', 'box.model.ts'],
       ['链条机.glb', 'chain-conveyor.model.ts'],
+      ['链条机新.glb', 'newchain-conveyor.model.ts'],
       ['GD_有电机_Optimized(1).glb', 'gd-motor-optimized.model.ts'],
       ['HCTS.glb', 'hcts.model.ts'],
       ['Shelf.glb', 'shelf.model.ts'],

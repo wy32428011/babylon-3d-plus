@@ -722,10 +722,24 @@ try {
   assert.equal(scene.meshes.includes(sourceMesh), true, '异步 start settled 前不得再次移除宿主 Mesh');
   assert.equal(root.isEnabled(), true, '异步 start settled 前脚本宿主根节点必须保持启用');
   assert.equal(sourceMesh.isPickable, false, '临时恢复的脚本宿主不得与正式阵列重复参与拾取');
+  scene.onBeforeActiveMeshesEvaluationObservable.notifyObservers(scene);
+  assert.equal(
+    root.isEnabled(),
+    false,
+    '异步 start pending 的脚本宿主必须在 Active Mesh 评估阶段临时禁用，避免与旧批次重复绘制',
+  );
+  assert.ok(
+    formalBatchMeshes.every((mesh) => !mesh.isDisposed() && mesh.isEnabled()),
+    '脚本宿主临时禁用期间必须继续由上一份有效批次完整显示',
+  );
+  scene.onAfterRenderObservable.notifyObservers(scene);
+  assert.equal(root.isEnabled(), true, '帧结束后必须恢复脚本宿主，保持参数化脚本和动画的节点语义');
   sourceModelEntry.externalScriptStarting = false;
-  runtime.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
+  runtime.syncModelAssetExternalScripts(sceneScanningModelAsset, sourceModelEntry, (current) => {
+    runtime.applyModelInteractivity(current, SOURCE_ENTITY_ID);
+  });
   assert.equal(scene.meshes.includes(sourceMesh), false, '异步 start settled 后必须重新暂停宿主 Mesh');
-  assert.equal(root.isEnabled(), false, '异步 start settled 后必须重新禁用脚本宿主根节点');
+  assert.equal(root.isEnabled(), true, '异步 start settled 后根节点必须继续承载脚本与绑定子节点，宿主 Mesh 不再参与绘制');
   sourceModelEntry.externalScriptRuntime = null;
   sourceModelEntry.externalScriptSignature = '';
   assert.equal(
