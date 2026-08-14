@@ -431,9 +431,11 @@ async function run() {
     const [
       { SceneRuntime },
       { createEditModeModelThinInstancePlan, patchEditModeModelThinInstancePlanForModelParameters, resolveEditModeModelThinInstanceReason },
+      { normalizeModelDataDrivenConfig },
     ] = await Promise.all([
       server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts'),
       server.ssrLoadModule('/src/editor/model/editModeModelThinInstances.ts'),
+      server.ssrLoadModule('/src/editor/model/telemetryBinding.ts'),
     ]);
     const parametricSourceAssetCode = await verifyParametricSourceAssetCodeBatchReuse({
       SceneRuntime,
@@ -471,6 +473,51 @@ async function run() {
       resolveEditModeModelThinInstanceReason(modelAsset),
       'no-external-script',
       '无外置脚本静态模型必须允许编辑态 thinInstance',
+    );
+    const dataDrivenWithoutMotion = normalizeModelDataDrivenConfig({
+      device: { devType: 'static-fixture' },
+    });
+    assert.ok(dataDrivenWithoutMotion, '不含 motion 的 dataDriven 必须保留有效设备配置');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(dataDrivenWithoutMotion, 'motion'),
+      false,
+      '不含 motion 的 meta.json 不得生成 motion 声明标记',
+    );
+    assert.equal(
+      resolveEditModeModelThinInstanceReason({ ...modelAsset, dataDrivenConfig: dataDrivenWithoutMotion }),
+      'no-external-script',
+      'dataDriven 不含 motion 时必须继续允许合批',
+    );
+    for (const [motionValue, label] of [[{}, '空对象'], [null, 'null']]) {
+      const dataDrivenWithMotion = normalizeModelDataDrivenConfig({
+        device: { devType: 'static-fixture' },
+        motion: motionValue,
+      });
+      assert.ok(dataDrivenWithMotion, `motion 为 ${label} 时仍必须保留键存在语义`);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(dataDrivenWithMotion, 'motion'),
+        true,
+        `motion 为 ${label} 时必须保留 meta.json 的自有键`,
+      );
+      assert.equal(
+        resolveEditModeModelThinInstanceReason({ ...modelAsset, dataDrivenConfig: dataDrivenWithMotion }),
+        null,
+        `motion 为 ${label} 时模型不得进入自动合批`,
+      );
+    }
+    assert.deepEqual(
+      normalizeModelDataDrivenConfig({ motion: null }),
+      { device: {}, motion: true, fixedNodes: [] },
+      'dataDriven 仅包含 motion 键时也必须保留键存在语义',
+    );
+    const specializedDataDriven = normalizeModelDataDrivenConfig({
+      device: { devType: 'stacker' },
+      motion: { lift: { fields: ['lift_position'] } },
+    });
+    assert.deepEqual(
+      normalizeModelDataDrivenConfig(specializedDataDriven),
+      specializedDataDriven,
+      '旧场景 specializedMotion 再次归一化时必须保持 motion 标记和原配置幂等',
     );
     assert.equal(
       resolveEditModeModelThinInstanceReason({

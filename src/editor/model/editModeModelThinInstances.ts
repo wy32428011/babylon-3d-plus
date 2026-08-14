@@ -2,6 +2,7 @@ import type { Entity } from './Entity';
 import { createEntityHierarchyStateMap, type EntityHierarchyState } from './entityHierarchy';
 import type { ModelAssetComponent } from './components';
 import type { SceneDocument } from './SceneDocument';
+import { hasModelDataDrivenMotionKey } from './telemetryBinding';
 
 const EDIT_MODE_THIN_INSTANCE_MODEL_FILES_BY_SCRIPT = new Map<string, ReadonlySet<string>>([
   ['box.model.ts', new Set(['box.glb', 'box.gltf'])],
@@ -22,6 +23,7 @@ const EDIT_MODE_THIN_INSTANCE_MODEL_FILES_BY_SCRIPT = new Map<string, ReadonlySe
 /** SceneDocument 采用不可变对象更新；复用未变化模板和实体的派生结果，避免 Gizmo 拖动时重复扫描大段脚本元数据。 */
 const modelAssetGroupKeyCache = new WeakMap<ModelAssetComponent, string | null>();
 const thinInstanceEntityCache = new WeakMap<Entity, Map<string, Entity>>();
+const independentModelEntityCache = new WeakMap<Entity, Entity>();
 
 type EntityOverrideRecordState = {
   base: SceneDocument['entities'];
@@ -51,11 +53,14 @@ export function createPersistedModelThinInstanceScene(scene: SceneDocument): Sce
 
 /**
  * 编辑态只需要呈现参数化后的静态外观；运行预览仍必须为每个设备保留独立脚本和遥测状态。
- * 因此这里只允许无外置脚本模型，或已经核对过编辑态行为的参数化脚本进入自动 thinInstance 分组。
+ * 因此这里只允许 dataDriven 未声明 motion 的无外置脚本模型，
+ * 或已经核对过编辑态行为的参数化脚本进入自动 thinInstance 分组。
  */
 export function resolveEditModeModelThinInstanceReason(
   modelAsset: ModelAssetComponent,
 ): EditModeModelThinInstanceReason | null {
+  if (hasModelDataDrivenMotionKey(modelAsset.dataDrivenConfig)) return null;
+
   const scriptAssets = modelAsset.scriptAssets ?? [];
   if (scriptAssets.length === 0) return 'no-external-script';
 
@@ -141,6 +146,7 @@ export function createEditModeModelThinInstancePlan(
   const referencedSourceIds = collectReferencedModelArraySourceIds(scene);
   const hierarchyStateByEntityId = createEntityHierarchyStateMap(scene.entityIds, scene.entities);
   const builtInSlotHostIds = collectBuiltInSlotHostIds(scene);
+  const motionExcludedModelArrayEntityIds = collectMotionExcludedModelArrayEntityIds(scene);
   const groups = new Map<string, Entity[]>();
 
   for (const entityId of scene.entityIds) {
@@ -192,6 +198,7 @@ export function createEditModeModelThinInstancePlan(
   const desiredSourceEntityIdByEntityId = collectRemappedModelArraySources(
     scene,
     sourceEntityIdByEntityId,
+    motionExcludedModelArrayEntityIds,
   );
 
   return {
@@ -208,7 +215,7 @@ export function createEditModeModelThinInstancePlan(
  */
 function materializeThinInstanceEntities(
   scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
-  sourceEntityIdByEntityId: ReadonlyMap<string, string>,
+  sourceEntityIdByEntityId: ReadonlyMap<string, string | null>,
   previousPlan?: EditModeModelThinInstancePlan,
 ): SceneDocument['entities'] {
   if (!previousPlan) {
@@ -216,7 +223,11 @@ function materializeThinInstanceEntities(
     const entities = { ...scene.entities };
     for (const [entityId, sourceEntityId] of sourceEntityIdByEntityId) {
       const entity = scene.entities[entityId];
-      if (entity) entities[entityId] = getOrCreateThinInstanceEntity(entity, sourceEntityId);
+      if (entity) {
+        entities[entityId] = sourceEntityId
+          ? getOrCreateThinInstanceEntity(entity, sourceEntityId)
+          : getOrCreateIndependentModelEntity(entity);
+      }
     }
     return entities;
   }
@@ -234,10 +245,13 @@ function materializeThinInstanceEntities(
   for (const entityId of scene.entityIds) {
     const entity = scene.entities[entityId];
     if (!entity) continue;
+    const hasSourceOverride = sourceEntityIdByEntityId.has(entityId);
     const sourceEntityId = sourceEntityIdByEntityId.get(entityId);
-    const desiredEntity = sourceEntityId
+    const desiredEntity = !hasSourceOverride
+      ? entity
+      : sourceEntityId
       ? getOrCreateThinInstanceEntity(entity, sourceEntityId)
-      : entity;
+      : getOrCreateIndependentModelEntity(entity);
     if (entities[entityId] !== desiredEntity) ensureMutable()[entityId] = desiredEntity;
   }
 
@@ -276,16 +290,45 @@ function collectReferencedModelArraySourceIds(
 }
 
 /**
+ * 旧场景可能已经把 motion 模型持久化为 modelArrayInstance。
+ * 实例或源任一方声明 motion 时都解除关系，确保首次打开和下一次保存立即恢复独立渲染。
+ */
+function collectMotionExcludedModelArrayEntityIds(
+  scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
+): ReadonlySet<string> {
+  const entityIds = new Set<string>();
+  for (const entityId of scene.entityIds) {
+    const entity = scene.entities[entityId];
+    const sourceEntityId = entity?.components.modelArrayInstance?.sourceEntityId;
+    if (!entity || !sourceEntityId) continue;
+    const sourceModelAsset = scene.entities[sourceEntityId]?.components.modelAsset;
+    if (
+      hasModelDataDrivenMotionKey(entity.components.modelAsset?.dataDrivenConfig)
+      || hasModelDataDrivenMotionKey(sourceModelAsset?.dataDrivenConfig)
+    ) {
+      entityIds.add(entityId);
+    }
+  }
+  return entityIds;
+}
+
+/**
  * 把被合并阵列源的已有实例改指向统一源。
  * 只修改返回的派生实体；编辑态和持久化快照共用直接源引用，避免形成链式关系。
  */
 function collectRemappedModelArraySources(
   scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
   sourceEntityIdByEntityId: ReadonlyMap<string, string>,
-): Map<string, string> {
-  const desiredSourceEntityIdByEntityId = new Map(sourceEntityIdByEntityId);
+  motionExcludedModelArrayEntityIds: ReadonlySet<string>,
+): Map<string, string | null> {
+  const desiredSourceEntityIdByEntityId = new Map<string, string | null>(sourceEntityIdByEntityId);
+
+  for (const entityId of motionExcludedModelArrayEntityIds) {
+    desiredSourceEntityIdByEntityId.set(entityId, null);
+  }
 
   for (const entityId of scene.entityIds) {
+    if (motionExcludedModelArrayEntityIds.has(entityId)) continue;
     const currentSourceEntityId = scene.entities[entityId]?.components.modelArrayInstance?.sourceEntityId;
     if (!currentSourceEntityId) continue;
     const remappedSourceEntityId = sourceEntityIdByEntityId.get(currentSourceEntityId);
@@ -337,6 +380,21 @@ function getOrCreateThinInstanceEntity(entity: Entity, sourceEntityId: string): 
   };
   cachedBySource.set(sourceEntityId, derivedEntity);
   thinInstanceEntityCache.set(entity, cachedBySource);
+  return derivedEntity;
+}
+
+/** 删除派生快照中的合批关系，不修改输入实体及其参数、脚本、动画或其它组件。 */
+function getOrCreateIndependentModelEntity(entity: Entity): Entity {
+  if (!entity.components.modelArrayInstance) return entity;
+  const cached = independentModelEntityCache.get(entity);
+  if (cached) return cached;
+
+  const { modelArrayInstance: _modelArrayInstance, ...components } = entity.components;
+  const derivedEntity: Entity = {
+    ...entity,
+    components,
+  };
+  independentModelEntityCache.set(entity, derivedEntity);
   return derivedEntity;
 }
 

@@ -36,6 +36,7 @@ function createModelAsset(assetCode, options = {}) {
     ...(options.parameterScriptMetadata ? { parameterScriptMetadata: options.parameterScriptMetadata } : {}),
     ...(options.animationScriptMetadata ? { animationScriptMetadata: options.animationScriptMetadata } : {}),
     ...(options.parameterConfig ? { parameterConfig: options.parameterConfig } : {}),
+    ...(options.dataDrivenConfig ? { dataDrivenConfig: options.dataDrivenConfig } : {}),
   };
 }
 
@@ -117,6 +118,14 @@ function snapshotBatchTopology(document) {
   ]));
 }
 
+function hasDataDrivenMotion(modelAsset) {
+  const config = modelAsset?.dataDrivenConfig;
+  return config !== undefined && (
+    Object.prototype.hasOwnProperty.call(config, 'motion')
+    || Object.prototype.hasOwnProperty.call(config, 'specializedMotion')
+  );
+}
+
 function snapshotRequiredPersistedState(document) {
   return Object.fromEntries(document.entityIds.map((entityId) => {
     const entity = document.entities[entityId];
@@ -138,6 +147,7 @@ function snapshotRequiredPersistedState(document) {
         scriptAssets: modelAsset.scriptAssets,
         parameterScriptMetadata: modelAsset.parameterScriptMetadata,
         animationScriptMetadata: modelAsset.animationScriptMetadata,
+        dataDrivenConfig: modelAsset.dataDrivenConfig,
       } : undefined,
     }];
   }));
@@ -145,6 +155,8 @@ function snapshotRequiredPersistedState(document) {
 
 async function run() {
   assertSerializationWiring();
+  let editorStore;
+  let editorStoreSnapshot;
   const server = await createServer({
     appType: 'custom',
     configFile: false,
@@ -154,13 +166,24 @@ async function run() {
     server: { middlewareMode: true, hmr: false, port: 0, ws: false },
     preview: { port: 0 },
     optimizeDeps: { noDiscovery: true },
+    // editorStore 会间接加载 CAD 模块，沿用现有 Store smoke 的 ESM 转换配置。
+    ssr: { noExternal: ['@linkiez/dxf-renew'] },
   });
 
   try {
-    const [{ serializeScene, deserializeScene }, batching] = await Promise.all([
+    const [
+      { serializeScene, deserializeScene },
+      batching,
+      { normalizeModelDataDrivenConfig },
+      { useEditorStore },
+    ] = await Promise.all([
       server.ssrLoadModule('/src/editor/project/SceneSerializer.ts'),
       server.ssrLoadModule('/src/editor/model/editModeModelThinInstances.ts'),
+      server.ssrLoadModule('/src/editor/model/telemetryBinding.ts'),
+      server.ssrLoadModule('/src/editor/store/editorStore.ts'),
     ]);
+    editorStore = useEditorStore;
+    editorStoreSnapshot = useEditorStore.getState();
     assert.equal(
       typeof batching.createPersistedModelThinInstanceScene,
       'function',
@@ -228,7 +251,31 @@ async function run() {
     }];
     const dynamicA = createEntity('DYNAMIC-A', createModelAsset('DYNAMIC-001', { scriptAssets: unsupportedScript }));
     const dynamicB = createEntity('DYNAMIC-B', createModelAsset('DYNAMIC-002', { scriptAssets: unsupportedScript }));
-    const scene = createDocument([staticSource, staticInstance, chainSource, chainInstance, dynamicA, dynamicB]);
+    const motionDataDrivenConfig = normalizeModelDataDrivenConfig({
+      device: { devType: 'static-fixture' },
+      motion: null,
+    });
+    assert.ok(motionDataDrivenConfig, 'motion 为 null 时也必须保留键存在语义');
+    const motionSource = createEntity('MOTION-A', createModelAsset('MOTION-001', {
+      sourcePath: 'F:/fixtures/Motion/Motion.glb',
+      sourceUrl: 'editor-asset://local/Assets/Models/Motion/Motion.glb',
+      dataDrivenConfig: motionDataDrivenConfig,
+    }));
+    const motionInstance = createEntity('MOTION-B', createModelAsset('MOTION-002', {
+      sourcePath: 'F:/fixtures/Motion/Motion.glb',
+      sourceUrl: 'editor-asset://local/Assets/Models/Motion/Motion.glb',
+      dataDrivenConfig: motionDataDrivenConfig,
+    }), { sourceEntityId: 'MOTION-A' });
+    const scene = createDocument([
+      staticSource,
+      staticInstance,
+      chainSource,
+      chainInstance,
+      dynamicA,
+      dynamicB,
+      motionSource,
+      motionInstance,
+    ]);
     const logicalStateBefore = snapshotLogicalState(scene);
     const topologyBefore = snapshotBatchTopology(scene);
 
@@ -240,6 +287,8 @@ async function run() {
     assert.equal(saved.entities['CHAIN-B'].components.modelArrayInstance?.sourceEntityId, 'CHAIN-A');
     assert.equal(saved.entities['DYNAMIC-A'].components.modelArrayInstance, undefined, '未知脚本模型必须保持独立');
     assert.equal(saved.entities['DYNAMIC-B'].components.modelArrayInstance, undefined, '未知脚本模型必须保持独立');
+    assert.equal(saved.entities['MOTION-A'].components.modelArrayInstance, undefined, '含 motion 键的源模型必须保持独立');
+    assert.equal(saved.entities['MOTION-B'].components.modelArrayInstance, undefined, '含 motion 键的既有合批实例必须自动解除关系');
 
     const savedTopology = snapshotBatchTopology(saved);
     const serializedDirectly = deserializeScene(serializeScene(scene));
@@ -254,6 +303,11 @@ async function run() {
     const reopened = deserializeScene(serializeScene(saved));
     assert.deepEqual(snapshotBatchTopology(reopened), savedTopology, '重新打开必须直接恢复持久化合批关系');
     assert.deepEqual(snapshotLogicalState(reopened), logicalStateBefore, '重新打开后必须保留全部逻辑实体参数');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(reopened.entities['MOTION-B'].components.modelAsset.dataDrivenConfig, 'motion'),
+      true,
+      '重新打开后必须保留 meta.json dataDriven.motion 的键存在语义',
+    );
     for (const entityId of reopened.entityIds) {
       const sourceEntityId = reopened.entities[entityId].components.modelArrayInstance?.sourceEntityId;
       if (!sourceEntityId) continue;
@@ -263,6 +317,125 @@ async function run() {
         `${entityId} 不得形成链式 modelArrayInstance`,
       );
     }
+
+    const refreshScriptAssets = [{
+      name: 'chain-conveyor.model.ts',
+      path: 'F:/fixtures/RefreshMotion/chain-conveyor.model.ts',
+      sourceUrl: 'editor-asset://local/Assets/Models/RefreshMotion/chain-conveyor.model.ts',
+    }];
+    const refreshParameterConfig = {
+      schema: 'babylon-editor.model-parameters',
+      version: 1,
+      parameters: [
+        { key: 'length', label: '长度', unit: undefined, type: 'number', defaultValue: 10, min: 1, max: 100, step: 1 },
+        { key: 'speed', label: '速度', unit: undefined, type: 'number', defaultValue: 1, min: 0, max: 10, step: 0.25 },
+      ],
+      bindings: [],
+    };
+    const refreshParameterMetadata = [{ scriptFilename: 'chain-conveyor.model.ts', values: { mode: 'stretch' } }];
+    const refreshAnimationMetadata = [{
+      modelFilename: '链条机.glb',
+      scriptFilename: 'chain-conveyor.model.ts',
+      fields: ['speed'],
+      values: { speed: 1 },
+    }];
+    const refreshSource = createEntity('REFRESH-MOTION-A', createModelAsset('REFRESH-001', {
+      sourcePath: 'F:/fixtures/RefreshMotion/链条机.glb',
+      sourceUrl: 'editor-asset://local/Assets/Models/RefreshMotion/链条机.glb',
+      parameterValues: { length: 18, speed: 1.5 },
+      parameterConfig: refreshParameterConfig,
+      scriptAssets: refreshScriptAssets,
+      parameterScriptMetadata: refreshParameterMetadata,
+      animationScriptMetadata: refreshAnimationMetadata,
+    }), {
+      name: '刷新源模型',
+      visible: false,
+      locked: true,
+      position: { x: 30, y: 2, z: 4 },
+      rotation: { x: 0.2, y: 0.4, z: 0.6 },
+      scale: { x: 1.2, y: 1.3, z: 1.4 },
+    });
+    const refreshInstance = createEntity('REFRESH-MOTION-B', createModelAsset('REFRESH-002', {
+      sourcePath: 'F:/fixtures/RefreshMotion/链条机.glb',
+      sourceUrl: 'editor-asset://local/Assets/Models/RefreshMotion/链条机.glb',
+      parameterValues: { length: 24, speed: 2.25 },
+      parameterConfig: refreshParameterConfig,
+      scriptAssets: refreshScriptAssets,
+      parameterScriptMetadata: refreshParameterMetadata,
+      animationScriptMetadata: refreshAnimationMetadata,
+    }), {
+      name: '刷新合批实例',
+      position: { x: 50, y: 3, z: 8 },
+      sourceEntityId: refreshSource.id,
+    });
+    const refreshScene = createDocument([refreshSource, refreshInstance]);
+    const snapshotRefreshPreservedState = (document) => Object.fromEntries(document.entityIds.map((entityId) => {
+      const entity = document.entities[entityId];
+      const modelAsset = entity.components.modelAsset;
+      return [entityId, {
+        name: entity.name,
+        visible: entity.visible,
+        locked: entity.locked,
+        transform: entity.components.transform,
+        telemetryBinding: entity.components.telemetryBinding,
+        assetCode: modelAsset.assetCode,
+        parameterValues: modelAsset.parameterValues,
+        parameterConfig: modelAsset.parameterConfig,
+        scriptAssets: modelAsset.scriptAssets,
+        parameterScriptMetadata: modelAsset.parameterScriptMetadata,
+        animationScriptMetadata: modelAsset.animationScriptMetadata,
+      }];
+    }));
+    const refreshPreservedStateBefore = snapshotRefreshPreservedState(refreshScene);
+    useEditorStore.setState({
+      scene: refreshScene,
+      runtimeMode: 'edit',
+      history: { undoStack: [], redoStack: [] },
+      hierarchySelectionIds: [refreshInstance.id],
+      logs: [],
+    });
+    const updatedMotionConfig = normalizeModelDataDrivenConfig({
+      device: { devType: 'conveyor' },
+      motion: {},
+    });
+    assert.ok(updatedMotionConfig, '新增 motion 的 meta.json 必须能生成 dataDrivenConfig');
+    const refreshedCount = useEditorStore.getState().refreshModelInstancesFromAssets([{
+      id: 'refresh-motion-model',
+      name: '链条机.glb',
+      path: 'F:/fixtures/RefreshMotion/链条机.glb',
+      sourceUrl: 'editor-asset://local/Assets/Models/RefreshMotion/链条机.glb',
+      assetRevision: 'motion-added',
+      kind: 'model',
+      lengthUnit: 'millimeter',
+      unitScaleToMeters: 0.001,
+      parameterConfig: refreshParameterConfig,
+      scriptAssets: refreshScriptAssets,
+      parameterScriptMetadata: refreshParameterMetadata,
+      animationScriptMetadata: refreshAnimationMetadata,
+      dataDrivenConfig: updatedMotionConfig,
+    }]);
+    const refreshedScene = useEditorStore.getState().scene;
+    assert.equal(refreshedCount, 2, '同一模型包的源和实例都必须刷新新 meta.json');
+    assert.deepEqual(
+      snapshotRefreshPreservedState(refreshedScene),
+      refreshPreservedStateBefore,
+      '新增 motion 并拆批时必须保留参数、脚本、动画、Transform、显隐、锁定和 assetCode',
+    );
+    for (const entityId of refreshedScene.entityIds) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(
+          refreshedScene.entities[entityId].components.modelAsset.dataDrivenConfig,
+          'motion',
+        ),
+        true,
+        `${entityId} 必须刷新到新增的 motion 键`,
+      );
+    }
+    assert.equal(
+      refreshedScene.entities[refreshInstance.id].components.modelArrayInstance,
+      undefined,
+      '模型 meta.json 后续新增 motion 时必须立即从已持久化合批中拆分',
+    );
 
     let realScene = null;
     if (existsSync(REAL_SCENE_PATH)) {
@@ -274,6 +447,19 @@ async function run() {
       const optimizedContent = serializeScene(sourceDocument);
       const optimizedDocument = deserializeScene(optimizedContent);
       const optimizedTopology = snapshotBatchTopology(optimizedDocument);
+      const motionBatchEntityIds = optimizedDocument.entityIds.filter((entityId) => {
+        const entity = optimizedDocument.entities[entityId];
+        const sourceEntityId = entity.components.modelArrayInstance?.sourceEntityId;
+        return sourceEntityId && (
+          hasDataDrivenMotion(entity.components.modelAsset)
+          || hasDataDrivenMotion(optimizedDocument.entities[sourceEntityId]?.components.modelAsset)
+        );
+      });
+      assert.deepEqual(
+        motionBatchEntityIds,
+        [],
+        '真实场景优化后不得保留任何 dataDriven.motion 模型合批关系',
+      );
       assert.deepEqual(
         snapshotRequiredPersistedState(optimizedDocument),
         sourceRequiredState,
@@ -288,6 +474,10 @@ async function run() {
         entityCount: optimizedDocument.entityIds.length,
         persistedBatchCountBefore: Object.values(sourceTopology).filter(Boolean).length,
         persistedBatchCountAfter: Object.values(optimizedTopology).filter(Boolean).length,
+        motionDrivenModelCount: optimizedDocument.entityIds.filter((entityId) => (
+          hasDataDrivenMotion(optimizedDocument.entities[entityId].components.modelAsset)
+        )).length,
+        motionBatchCountAfter: motionBatchEntityIds.length,
         chainConveyorCount: optimizedDocument.entityIds.filter((entityId) => (
           optimizedDocument.entities[entityId].components.modelAsset?.scriptAssets
             ?.some((asset) => ['chain-conveyor.model.ts', 'newchain-conveyor.model.ts'].includes(asset.name.toLowerCase()))
@@ -300,10 +490,13 @@ async function run() {
       persistedBatchCount: Object.values(savedTopology).filter(Boolean).length,
       unsupportedScriptEntitiesPreserved: 2,
       parameterizedChainEntitiesPreserved: 2,
+      motionDrivenEntitiesPreserved: 2,
+      motionMetadataRefreshDetached: true,
       idempotent: true,
       realScene,
     }, null, 2));
   } finally {
+    if (editorStore && editorStoreSnapshot) editorStore.setState(editorStoreSnapshot, true);
     await server.close();
   }
 }
