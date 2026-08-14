@@ -1,4 +1,4 @@
-import { AbstractMesh, Matrix, Quaternion, TransformNode, Vector3, type Scene } from '@babylonjs/core';
+import { AbstractMesh, Matrix, Mesh, Quaternion, TransformNode, Vector3, type Scene } from '@babylonjs/core';
 
 /** 世界空间轴对齐包围盒。 */
 export type RuntimeWorldBounds = {
@@ -37,7 +37,7 @@ export function createPointWorldBounds(point: Vector3): RuntimeWorldBounds {
   };
 }
 
-/** 组合相对矩阵：把源根节点世界系中的点换算到目标根节点世界系（M_target × M_source⁻¹），源变换奇异时返回 null。 */
+/** 组合相对矩阵：把源根节点世界系中的点换算到目标根节点世界系（行向量约定下先乘 M_source⁻¹ 再乘 M_target），源变换奇异时返回 null。 */
 export function computeRootRelativeWorldMatrix(sourceRoot: TransformNode, targetRoot: TransformNode): Matrix | null {
   sourceRoot.computeWorldMatrix(true);
   targetRoot.computeWorldMatrix(true);
@@ -45,7 +45,9 @@ export function computeRootRelativeWorldMatrix(sourceRoot: TransformNode, target
   const determinant = inverseSourceWorld.determinant();
   if (!Number.isFinite(determinant) || Math.abs(determinant) <= 1e-12) return null;
   inverseSourceWorld.invert();
-  return targetRoot.getWorldMatrix().multiply(inverseSourceWorld);
+  // Babylon 行向量语义：TransformCoordinates(p, M) 计算 p×M，multiply 左操作数先应用。
+  // 必须先 H⁻¹（目标世界点→源本地），再 P（源本地→目标世界）；纯平移可交换，旋转场景下顺序错误会旋转相对平移。
+  return inverseSourceWorld.multiply(targetRoot.getWorldMatrix());
 }
 
 /** 世界 AABB 按矩阵变换 8 个角点后重建，旋转/缩放下仍保持轴对齐；出现非法数值时返回 null。 */
@@ -75,6 +77,13 @@ export function transformWorldBounds(bounds: RuntimeWorldBounds, matrix: Matrix)
 /** 从 Mesh 的 Babylon BoundingInfo 读取世界空间包围盒。 */
 export function getMeshWorldBounds(mesh: AbstractMesh): RuntimeWorldBounds | null {
   mesh.computeWorldMatrix(true);
+  // thinInstance mesh 的 boundingInfo 会扩展覆盖全部实例（视锥剔除需要）；探测、行程与取景
+  // 语义需要 mesh 自身几何的包围盒，改从 geometry.extend 按自身世界矩阵重建。
+  const geometry = mesh instanceof Mesh && mesh.thinInstanceCount > 0 ? mesh.geometry : null;
+  if (geometry) {
+    const { minimum, maximum } = geometry.extend;
+    return transformWorldBounds({ minimum, maximum }, mesh.getWorldMatrix());
+  }
   const boundingBox = mesh.getBoundingInfo().boundingBox;
   if (!isFiniteVector3(boundingBox.minimumWorld) || !isFiniteVector3(boundingBox.maximumWorld)) return null;
 

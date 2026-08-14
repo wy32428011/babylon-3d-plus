@@ -811,3 +811,23 @@ test('合批遥测代理：订阅沿代理几何上行注册，货物越级直�
     h.dispose();
   }
 });
+
+test('合批代理作为起点设备：探测无上游时在代理自身位姿刷出货物', () => {
+  const h = makeHarness({
+    CV1: { centerX: -4, origin: true, proxyOf: 'CV2' },
+    CV2: { centerX: 0 },
+    CV3: { centerX: 4, proxyOf: 'CV2' },
+  });
+  try {
+    h.apply('CV1', { task: 9, movement_x: 1 });
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo', '代理起点必须刷出货物');
+    const cargo = onlyCargo(h.state);
+    assert.equal(cargo.assetCode, 'CV1');
+    // 刷出端 −HALF_RANGE，刷出当帧随 movement_x=1 前进一个帧步长
+    const expectedX = -4 - HALF_RANGE + CARGO_SPEED * 0.1;
+    assert.ok(Math.abs(cargo.root.position.x - expectedX) < 1e-6,
+      `货物必须刷在代理自身位姿刷出端（${expectedX}），实际 x=${cargo.root.position.x}`);
+  } finally {
+    h.dispose();
+  }
+});

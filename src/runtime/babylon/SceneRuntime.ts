@@ -5327,8 +5327,11 @@ export class SceneRuntime {
     for (const instanceEntity of this.modelArrayInstanceEntities.values()) {
       const modelAsset = instanceEntity.components.modelAsset;
       const binding = instanceEntity.components.telemetryBinding;
-      if (!modelAsset || !binding || binding.enabled === false) continue;
-      if (!isConveyorModelAsset(modelAsset)) continue;
+      // 无显式绑定的实例与真实模型一致：按 assetCode 走默认绑定解析，不得跳过代理创建。
+      if (!modelAsset || binding?.enabled === false) continue;
+      // devType 归一化在导入边界已统一小写；文件名关键词识别兜底未声明 devType 的旧包。
+      const devType = modelAsset.dataDrivenConfig?.device?.devType?.trim().toLowerCase();
+      if (devType !== 'conveyor' && !isConveyorModelAsset(modelAsset)) continue;
 
       const variant = this.modelArrayParameterVariantByEntityId.get(instanceEntity.id);
       if (variant) {
