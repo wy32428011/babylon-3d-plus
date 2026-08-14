@@ -19,6 +19,15 @@ export type ModelDataDrivenConfig = {
   fixedNodes: string[];
 };
 
+/** 判断归一化 dataDriven 是否保留 motion 键语义；specializedMotion 用于兼容旧场景。 */
+export function hasModelDataDrivenMotionKey(config: ModelDataDrivenConfig | null | undefined): boolean {
+  if (!config) return false;
+  return (
+    Object.prototype.hasOwnProperty.call(config, 'motion')
+    || Object.prototype.hasOwnProperty.call(config, 'specializedMotion')
+  );
+}
+
 /** 专用驱动接管的设备类型；新增专用驱动时需同步登记。 */
 export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'rgv'];
 

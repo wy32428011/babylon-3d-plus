@@ -171,7 +171,11 @@ import {
   createModelGeneratorTargetFromAsset,
   sanitizeModelGeneratorComponent,
 } from '../model/modelGenerator';
-import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent } from '../model/telemetryBinding';
+import {
+  createDefaultTelemetryBinding,
+  hasModelDataDrivenMotionKey,
+  normalizeTelemetryBindingComponent,
+} from '../model/telemetryBinding';
 import { sanitizePoiEffectComponent } from '../model/poiEffect';
 import { deserializeScene, serializeScene } from '../project/SceneSerializer';
 import {
@@ -1155,9 +1159,10 @@ function refreshModelGeneratorFromImportedAssets(
 function refreshSceneModelAssetsFromImportedAssets(
   scene: SceneDocument,
   assets: AssetEntry[],
-): { scene: SceneDocument; refreshedCount: number } {
+): { scene: SceneDocument; refreshedCount: number; detachedMotionInstanceCount: number } {
   const indexes = createImportedAssetIndexes(assets);
   let refreshedCount = 0;
+  let detachedMotionInstanceCount = 0;
   const entities: SceneDocument['entities'] = { ...scene.entities };
 
   for (const entityId of scene.entityIds) {
@@ -1192,7 +1197,28 @@ function refreshSceneModelAssetsFromImportedAssets(
     if (entityChanged) entities[entityId] = { ...entity, components };
   }
 
-  if (refreshedCount === 0) return { scene, refreshedCount };
+  // 元数据刷新后以最终模型快照判定；实例或其源新增 motion 都必须立即退出旧合批。
+  for (const entityId of scene.entityIds) {
+    const entity = entities[entityId];
+    const sourceEntityId = entity?.components.modelArrayInstance?.sourceEntityId;
+    if (!entity || !sourceEntityId) continue;
+
+    const sourceEntity = entities[sourceEntityId];
+    if (
+      !hasModelDataDrivenMotionKey(entity.components.modelAsset?.dataDrivenConfig)
+      && !hasModelDataDrivenMotionKey(sourceEntity?.components.modelAsset?.dataDrivenConfig)
+    ) {
+      continue;
+    }
+
+    const { modelArrayInstance: _modelArrayInstance, ...components } = entity.components;
+    entities[entityId] = { ...entity, components };
+    detachedMotionInstanceCount += 1;
+  }
+
+  if (refreshedCount === 0 && detachedMotionInstanceCount === 0) {
+    return { scene, refreshedCount, detachedMotionInstanceCount };
+  }
 
   return {
     scene: {
@@ -1200,6 +1226,7 @@ function refreshSceneModelAssetsFromImportedAssets(
       entities,
     },
     refreshedCount,
+    detachedMotionInstanceCount,
   };
 }
 
@@ -3340,7 +3367,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '刷新模型实例');
       const refreshResult = refreshSceneModelAssetsFromImportedAssets(state.scene, assets);
       refreshedCount = refreshResult.refreshedCount;
-      if (refreshedCount === 0) return state;
+      if (refreshResult.scene === state.scene) return state;
 
       const command = updateSceneDocumentCommand('刷新导入模型', () => refreshResult.scene);
       const result = executeCommand(state.scene, state.history, command);
@@ -3348,7 +3375,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return {
         ...result,
         hierarchySelectionIds: sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds),
-        logs: prependLog(state.logs, `已刷新 ${refreshedCount} 个场景模型实例。`),
+        logs: prependLog(
+          state.logs,
+          refreshedCount > 0
+            ? `已刷新 ${refreshedCount} 个场景模型实例${refreshResult.detachedMotionInstanceCount > 0 ? `，并拆分 ${refreshResult.detachedMotionInstanceCount} 个 motion 合批实例` : ''}。`
+            : `已拆分 ${refreshResult.detachedMotionInstanceCount} 个 motion 合批实例。`,
+        ),
       };
     });
 

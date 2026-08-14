@@ -2,6 +2,7 @@ import type { Entity } from './Entity';
 import { createEntityHierarchyStateMap, type EntityHierarchyState } from './entityHierarchy';
 import type { ModelAssetComponent } from './components';
 import type { SceneDocument } from './SceneDocument';
+import { hasModelDataDrivenMotionKey } from './telemetryBinding';
 
 const EDIT_MODE_THIN_INSTANCE_MODEL_FILES_BY_SCRIPT = new Map<string, ReadonlySet<string>>([
   ['box.model.ts', new Set(['box.glb', 'box.gltf'])],
@@ -58,7 +59,7 @@ export function createPersistedModelThinInstanceScene(scene: SceneDocument): Sce
 export function resolveEditModeModelThinInstanceReason(
   modelAsset: ModelAssetComponent,
 ): EditModeModelThinInstanceReason | null {
-  if (hasModelDataDrivenMotion(modelAsset)) return null;
+  if (hasModelDataDrivenMotionKey(modelAsset.dataDrivenConfig)) return null;
 
   const scriptAssets = modelAsset.scriptAssets ?? [];
   if (scriptAssets.length === 0) return 'no-external-script';
@@ -66,15 +67,6 @@ export function resolveEditModeModelThinInstanceReason(
   return scriptAssets.every((scriptAsset) => isVerifiedParametricScript(modelAsset, scriptAsset))
     ? 'verified-parametric-script'
     : null;
-}
-
-/** motion 表示模型具有独立运动状态；旧场景的 specializedMotion 也只能由 meta.json motion 派生。 */
-function hasModelDataDrivenMotion(modelAsset: ModelAssetComponent): boolean {
-  const config = modelAsset.dataDrivenConfig;
-  return config !== undefined && (
-    Object.prototype.hasOwnProperty.call(config, 'motion')
-    || Object.prototype.hasOwnProperty.call(config, 'specializedMotion')
-  );
 }
 
 /**
@@ -311,8 +303,8 @@ function collectMotionExcludedModelArrayEntityIds(
     if (!entity || !sourceEntityId) continue;
     const sourceModelAsset = scene.entities[sourceEntityId]?.components.modelAsset;
     if (
-      (entity.components.modelAsset && hasModelDataDrivenMotion(entity.components.modelAsset))
-      || (sourceModelAsset && hasModelDataDrivenMotion(sourceModelAsset))
+      hasModelDataDrivenMotionKey(entity.components.modelAsset?.dataDrivenConfig)
+      || hasModelDataDrivenMotionKey(sourceModelAsset?.dataDrivenConfig)
     ) {
       entityIds.add(entityId);
     }

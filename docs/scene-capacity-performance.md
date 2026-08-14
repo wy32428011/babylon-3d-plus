@@ -2,7 +2,7 @@
 
 日期：2026-07-17
 
-更新：2026-08-13
+更新：2026-08-14
 
 ## 目标
 
@@ -63,6 +63,7 @@ Scene View 使用同一份安全分组规则构造不修改输入 `SceneDocument
 - 相同结构模板忽略实例级 `modelAsset.assetCode` 与 `parameterValues` 后分组；每组只保留一个稳定真实源，其余实体通过 `modelArrayInstance` 直接引用该源。不同参数值仍由运行时参数变体宿主执行完整绑定/脚本并生成各自原 Geometry，不会错误共用已变形几何。
 - 同一结构模板若已经存在多个持久化阵列源，派生覆盖和序列化快照会选择一个稳定可见源，并把其它源及其既有实例归一为直接引用；不得产生悬空、自引用或链式 `modelArrayInstance`。仍含旧 `modelArray.items` 的兼容源不会被降级，避免尚未迁移的内存场景丢失隐藏阵列项。
 - `meta.json.dataDriven` 只有不包含自有 `motion` 键时才允许合批；判断只看键是否存在，值为 `null` 或空对象也继续走逐实体路径。无外置脚本模型在满足该前提时默认允许合批；带脚本模型还必须是经过行为核对的 `box.model.ts`、`chain-conveyor.model.ts`、`newchain-conveyor.model.ts`、`gd-motor-optimized.model.ts`、`hcts.model.ts`、`shelf.model.ts`、`wlts.model.ts` 或 `yzj.model.ts`。其它脚本继续走逐实体路径，避免把依赖 `assetCode`、运动状态或私有运行状态的视觉错误合并。
+- Project 资源刷新发现模型包从未声明 `motion` 变为已声明时，会立即删除该实例或其合批源关联的旧 `modelArrayInstance`；只更新合批拓扑和新元数据，不改动模型参数、参数化脚本、动画元数据、Transform、显隐、锁定或 `assetCode`。
 - 结构模板签名包含资源版本、单位、脚本元数据和参数配置，但不包含 `assetCode` 与 `parameterValues`；参数值只进入 `SceneRuntime` 渲染签名，由基础批次或参数变体批次隔离不同尺寸、材质和显隐外观。
 - 模型模板签名和派生实体使用不可变对象缓存；单个 Transform 变化时复用其余逻辑实体。单模型参数变化进一步使用稀疏实体覆盖和 `SceneRuntime.syncModelParameters()`，不扫描/复制完整实体表、不重建层级与 Locator 索引；参数组成员未变化时继续复用基础批次 GPU 矩阵缓冲。
 - 普通保存、数据中台发布和独立部署导出全部调用 `serializeScene()`。该入口只生成一次幂等合批快照；数据中台保存当前场景、SOURCE ZIP 和 Viewer DIST 继续消费同一个 `sceneContent`，不会在主进程各阶段重复规划合批。
