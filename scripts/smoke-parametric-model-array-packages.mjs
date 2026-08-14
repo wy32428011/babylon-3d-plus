@@ -38,11 +38,13 @@ const workspace = process.cwd();
 const modelRoot = path.resolve(process.env.BABYLON_MODEL_ROOT ?? process.argv[2] ?? path.join(workspace, '..', '3d-models', 'models'));
 const scenePath = path.resolve(process.env.BABYLON_SCENE_PATH ?? process.argv[3] ?? String.raw`F:\3d-projects\Untitled Scene.scene(1).json`);
 const configuredReportPath = process.env.BABYLON_MODEL_ARRAY_REPORT?.trim();
-const assetModelRoot = path.join(modelRoot, 'Assets', 'Models');
-const assetIndexPath = path.join(modelRoot, '.babylon-editor', 'asset-index.json');
+const assetModelRoot = path.resolve(process.env.BABYLON_ASSET_MODEL_ROOT ?? path.join(modelRoot, 'Assets', 'Models'));
+const assetIndexPath = path.resolve(process.env.BABYLON_ASSET_INDEX_PATH ?? path.join(modelRoot, '.babylon-editor', 'asset-index.json'));
 const SSR_TIMEOUT_MS = 180_000;
 const READY_TIMEOUT_MS = 120_000;
 const EXPECTED_PACKAGE_COUNT = 16;
+const expectedPackageCount = Number(process.env.BABYLON_EXPECTED_PACKAGE_COUNT ?? EXPECTED_PACKAGE_COUNT);
+assert.ok(Number.isSafeInteger(expectedPackageCount) && expectedPackageCount > 0, 'BABYLON_EXPECTED_PACKAGE_COUNT 必须为正整数');
 
 let server;
 let SceneRuntime;
@@ -929,6 +931,17 @@ function sourceVariants(runtime, sourceEntityId) {
   return [...runtime.modelArrayParameterVariants.values()].filter((variant) => variant.sourceEntityId === sourceEntityId);
 }
 
+function captureBatchMatrixBuffers(batch) {
+  return (batch?.sources ?? []).flatMap((source) => (
+    (source.batches ?? []).map((internal) => internal.sourceMatrixBuffer ?? internal.matrixBuffer)
+  ));
+}
+
+function assertSameReferences(actual, expected, message) {
+  assert.equal(actual.length, expected.length, `${message}：引用数量变化`);
+  actual.forEach((value, index) => assert.equal(value, expected[index], `${message}：第 ${index + 1} 个引用变化`));
+}
+
 async function runPackageLifecycle(spec, defaults, changedCandidates) {
   const engine = new NullEngine({ renderWidth: 1024, renderHeight: 768, textureSize: 512 });
   const scene = new Scene(engine);
@@ -1116,8 +1129,16 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
       batchMetrics(runtime.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.models.get(sourceId), scene),
     );
 
+    const lifecycleBatch = runtime.resolveModelArrayBatchForEntityId(sourceId);
+    const lifecycleMeshes = [...(lifecycleBatch?.meshes ?? [])];
+    const lifecycleMatrixBuffers = captureBatchMatrixBuffers(lifecycleBatch);
+    const lifecyclePerformance = runtime.getPerformanceMetrics();
     runtime.beginTelemetryPreview();
     scene.render();
+    assert.equal(runtime.resolveModelArrayBatchForEntityId(sourceId), lifecycleBatch, `${spec.packageName} 进入运行预览不得重建参数 Geometry 批次`);
+    assertSameReferences([...(lifecycleBatch?.meshes ?? [])], lifecycleMeshes, `${spec.packageName} 进入运行预览不得替换参数批次 Mesh`);
+    assertSameReferences(captureBatchMatrixBuffers(lifecycleBatch), lifecycleMatrixBuffers, `${spec.packageName} 进入运行预览不得重新分配矩阵缓冲`);
+    assert.equal(runtime.getPerformanceMetrics().fullSyncCount, lifecyclePerformance.fullSyncCount, `${spec.packageName} 进入运行预览不得增加完整 sync 次数`);
     const runtimePreviewHost = hostMetrics(runtime.models.get(sourceId), scene);
     assertEquivalent(
       `${spec.packageName} 运行预览脚本更新后阵列`,
@@ -1126,6 +1147,10 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
     );
     runtime.endTelemetryPreview();
     scene.render();
+    assert.equal(runtime.resolveModelArrayBatchForEntityId(sourceId), lifecycleBatch, `${spec.packageName} 退出运行预览不得重新合批`);
+    assertSameReferences([...(lifecycleBatch?.meshes ?? [])], lifecycleMeshes, `${spec.packageName} 退出运行预览不得替换参数批次 Mesh`);
+    assertSameReferences(captureBatchMatrixBuffers(lifecycleBatch), lifecycleMatrixBuffers, `${spec.packageName} 退出运行预览不得重新分配矩阵缓冲`);
+    assert.equal(runtime.getPerformanceMetrics().fullSyncCount, lifecyclePerformance.fullSyncCount, `${spec.packageName} 退出运行预览不得增加完整 sync 次数`);
     const editRestoredHost = hostMetrics(runtime.models.get(sourceId), scene);
     assertEquivalent(
       `${spec.packageName} 结束运行预览后阵列`,
@@ -1294,7 +1319,7 @@ const allPackageNames = (await fs.readdir(modelRoot, { withFileTypes: true }))
   .filter((entry) => entry.isDirectory() && !['Assets', '.babylon-editor'].includes(entry.name))
   .map((entry) => entry.name)
   .sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'));
-assert.equal(allPackageNames.length, EXPECTED_PACKAGE_COUNT, `模型包数量必须为 ${EXPECTED_PACKAGE_COUNT}`);
+assert.equal(allPackageNames.length, expectedPackageCount, `模型包数量必须为 ${expectedPackageCount}`);
 const focusedPackageName = process.env.BABYLON_MODEL_ARRAY_PACKAGE?.trim();
 const packageNames = focusedPackageName
   ? allPackageNames.filter((packageName) => packageName === focusedPackageName)
@@ -1316,7 +1341,7 @@ try {
   server = await createServer({
     configFile: false,
     root: workspace,
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, ws: false },
     optimizeDeps: { noDiscovery: true },
     ssr: { noExternal: ['@linkiez/dxf-renew'] },
   });
@@ -1380,7 +1405,7 @@ try {
   await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
   console.log(JSON.stringify({ ...report, results: results.map(({ packageName, status, durationMs, error }) => ({ packageName, status, durationMs, error })) }, null, 2));
   assert.equal(failures.length, 0, `存在 ${failures.length} 个模型包未通过，详见 ${reportPath}`);
-  if (fullRun) assert.equal(report.executedPackageCount, report.packageCount, '全量结构报告必须执行全部 16 个模型包');
+  if (fullRun) assert.equal(report.executedPackageCount, report.packageCount, `全量结构报告必须执行全部 ${expectedPackageCount} 个模型包`);
 } finally {
   await server?.close();
 }

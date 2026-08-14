@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
+  beginSceneModelAssetRefresh,
+  beginScenePreparation,
+  reportSceneModelSyncProgress,
+  settleSceneModelAssetRefresh,
+  skipSceneModelSync,
+} from '../loading/scenePreparationProgress';
+import {
   BUILT_IN_ASSET_DRAG_MIME_TYPE,
   ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE,
   IMAGE_ASSET_DRAG_MIME_TYPE,
@@ -206,6 +213,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const lastSceneRefreshEnvironmentSyncRunIdRef = useRef<string | null>(null);
   const imageSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshImageSyncRunIdRef = useRef<string | null>(null);
+  const modelSyncDiscoveryTimerRef = useRef<number | null>(null);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
   const [libraryFilterText, setLibraryFilterText] = useState('');
   const [modelDeviceTypeFilter, setModelDeviceTypeFilter] = useState('');
@@ -503,15 +511,42 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }, [pushLog]);
 
   useEffect(() => {
+    let active = true;
+    beginScenePreparation(sceneSessionId);
+    lastSceneRefreshModelSyncRunIdRef.current = null;
     setIsLoadingProjectAssets(false);
     setProjectRoot(null);
     setSkyboxSyncContextBinding({ sceneSessionId, key: null });
     setProjectAssets([]);
     setSkyboxAssets([]);
     setOrphanedSkyboxAssets([]);
-    void loadProjectAssets();
+    void loadProjectAssets().then((initialLoad) => {
+      if (!active || sceneSessionIdRef.current !== sceneSessionId) return;
+      if (modelSyncDiscoveryTimerRef.current !== null) {
+        window.clearTimeout(modelSyncDiscoveryTimerRef.current);
+      }
+      modelSyncDiscoveryTimerRef.current = window.setTimeout(() => {
+        modelSyncDiscoveryTimerRef.current = null;
+        if (!active || sceneSessionIdRef.current !== sceneSessionId) return;
+        if (!skipSceneModelSync(sceneSessionId, initialLoad.ok ? null : initialLoad.error)) return;
+        const refreshId = crypto.randomUUID();
+        beginSceneModelAssetRefresh(sceneSessionId, refreshId);
+        void loadProjectAssets(true).then((refreshed) => {
+          settleSceneModelAssetRefresh(
+            sceneSessionId,
+            refreshed.ok ? null : `场景内模型刷新失败：${refreshed.error}`,
+            refreshId,
+          );
+        });
+      }, 350);
+    });
     void loadSyncedImages();
     return () => {
+      active = false;
+      if (modelSyncDiscoveryTimerRef.current !== null) {
+        window.clearTimeout(modelSyncDiscoveryTimerRef.current);
+        modelSyncDiscoveryTimerRef.current = null;
+      }
       projectAssetsLoadRequestRef.current += 1;
     };
   }, [loadProjectAssets, loadSyncedImages, sceneSessionId]);
@@ -525,24 +560,42 @@ export function ProjectPanel(props: ProjectPanelProps) {
       window.clearTimeout(modelSyncCompletedDismissTimerRef.current);
       modelSyncCompletedDismissTimerRef.current = null;
     };
+
+    const refreshSceneModelsForSyncRun = (runId: string, progressSceneSessionId: string): void => {
+      if (lastSceneRefreshModelSyncRunIdRef.current === runId) return;
+      lastSceneRefreshModelSyncRunIdRef.current = runId;
+      const refreshId = crypto.randomUUID();
+      beginSceneModelAssetRefresh(progressSceneSessionId, refreshId);
+      void loadProjectAssets(true).then((loaded) => {
+        settleSceneModelAssetRefresh(
+          progressSceneSessionId,
+          loaded.ok ? null : `场景内模型刷新失败：${loaded.error}`,
+          refreshId,
+        );
+        if (!loaded.ok && lastSceneRefreshModelSyncRunIdRef.current === runId) {
+          lastSceneRefreshModelSyncRunIdRef.current = null;
+        }
+      });
+    };
+
     const unsubscribe = dataPlatformModelSyncApi.onDataPlatformModelSyncProgress((progress) => {
+      if (modelSyncDiscoveryTimerRef.current !== null) {
+        window.clearTimeout(modelSyncDiscoveryTimerRef.current);
+        modelSyncDiscoveryTimerRef.current = null;
+      }
       clearCompletedDismissTimer();
       setModelSyncProgress(progress);
+      const progressSceneSessionId = sceneSessionIdRef.current;
+      reportSceneModelSyncProgress(progressSceneSessionId, progress);
       const phaseLabel = DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS[progress.phase];
       const countLabel = progress.total > 0 ? `（${progress.completed}/${progress.total}）` : '';
       const detail = progress.error || progress.message;
       pushLog(`数据中台模型同步：${phaseLabel}${countLabel}${detail ? `：${detail}` : ''}`);
 
+      if (progress.phase === 'completed' || progress.phase === 'failed') {
+        refreshSceneModelsForSyncRun(progress.runId, progressSceneSessionId);
+      }
       if (progress.phase === 'completed') {
-        const shouldRefreshSceneAssets = lastSceneRefreshModelSyncRunIdRef.current !== progress.runId;
-        if (shouldRefreshSceneAssets) {
-          lastSceneRefreshModelSyncRunIdRef.current = progress.runId;
-          void loadProjectAssets(true).then((loaded) => {
-            if (!loaded.ok && lastSceneRefreshModelSyncRunIdRef.current === progress.runId) {
-              lastSceneRefreshModelSyncRunIdRef.current = null;
-            }
-          });
-        }
         modelSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
           modelSyncCompletedDismissTimerRef.current = null;
           setModelSyncProgress((current) =>
@@ -556,7 +609,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       clearCompletedDismissTimer();
       unsubscribe();
     };
-  }, [loadProjectAssets, pushLog]);
+  }, [loadProjectAssets, pushLog, sceneSessionId]);
 
   useEffect(() => {
     const controller = createSkyboxSyncController({

@@ -41,6 +41,15 @@ export type EditModeModelThinInstancePlan = {
 };
 
 /**
+ * 为保存、发布和离线导出生成稳定合批快照。
+ * 只追加或归一 modelArrayInstance 关系，不修改参数、脚本、动画或其它逻辑实体字段。
+ */
+export function createPersistedModelThinInstanceScene(scene: SceneDocument): SceneDocument {
+  const plan = createEditModeModelThinInstancePlan(scene);
+  return plan.entities === scene.entities ? scene : { ...scene, entities: plan.entities };
+}
+
+/**
  * 编辑态只需要呈现参数化后的静态外观；运行预览仍必须为每个设备保留独立脚本和遥测状态。
  * 因此这里只允许无外置脚本模型，或已经核对过编辑态行为的参数化脚本进入自动 thinInstance 分组。
  */
@@ -122,8 +131,8 @@ export function patchEditModeModelThinInstancePlanForModelParameters(
 }
 
 /**
- * 为 Scene View 构造只存在于内存中的编辑态实体覆盖层。
- * 原 SceneDocument 不会被修改或保存；重复模型临时追加 modelArrayInstance，已有多阵列源也会改指向统一渲染源。
+ * 为 Scene View 和持久化序列化构造不修改输入文档的实体覆盖层。
+ * 重复模型追加 modelArrayInstance，已有多阵列源也会归一到同一个直接渲染源。
  */
 export function createEditModeModelThinInstancePlan(
   scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
@@ -267,8 +276,8 @@ function collectReferencedModelArraySourceIds(
 }
 
 /**
- * 把被合并阵列源的已有实例临时改指向统一源。
- * 仅修改编辑态派生实体，保存场景和运行预览继续使用原始 sourceEntityId。
+ * 把被合并阵列源的已有实例改指向统一源。
+ * 只修改返回的派生实体；编辑态和持久化快照共用直接源引用，避免形成链式关系。
  */
 function collectRemappedModelArraySources(
   scene: Pick<SceneDocument, 'entityIds' | 'entities'>,

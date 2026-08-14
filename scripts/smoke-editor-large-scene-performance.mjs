@@ -1129,6 +1129,11 @@ async function verifySceneViewWiring() {
   const selectionSyncEnd = panelSource.indexOf('  useEffect(() => {', selectionEffectStart + 20);
   const selectionSyncBlock = panelSource.slice(selectionSyncStart, selectionSyncEnd);
   assert.match(selectionSyncBlock, /runtime\.syncSelection\(editRuntimeSceneDocument, hierarchySelectionIds\)/, '编辑态选区 effect 必须用完整多选调用专用同步');
+  assert.doesNotMatch(
+    selectionSyncBlock,
+    /runtime\.syncSelection\(sceneDocument, hierarchySelectionIds\)/,
+    '运行预览复用合批时选区也必须使用同一份派生文档',
+  );
   assert.match(selectionSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '选区 effect 只能主动取消选区群组预览');
   assert.doesNotMatch(selectionSyncBlock, /gizmo\.cancelActiveDrag\(\)/, '普通实体拖动不得因预览文档引用变化被选区 effect 打断');
   assert.doesNotMatch(selectionSyncBlock, /runtime\.sync\(/, '选区 effect 不得回退完整同步');
@@ -1142,6 +1147,18 @@ async function verifySceneViewWiring() {
     panelSource,
     /\}, \[sceneDocument\.entityIds, sceneDocument\.entities\]\);/,
     '编辑态 thinInstance 分组只能依赖实体表和顺序，不得依赖 selectedEntityId',
+  );
+  const runtimeModeEffectStart = panelSource.indexOf('    if (runtimeModeRef.current === runtimeMode) return;');
+  const runtimeModeEffectEnd = panelSource.indexOf('\n  useEffect(() => {', runtimeModeEffectStart);
+  assert.ok(runtimeModeEffectStart >= 0 && runtimeModeEffectEnd > runtimeModeEffectStart, 'SceneView 必须保留运行模式切换 effect');
+  const runtimeModeEffectBlock = panelSource.slice(runtimeModeEffectStart, runtimeModeEffectEnd);
+  assert.match(runtimeModeEffectBlock, /runtime\.beginTelemetryPreview\(\)/, '进入运行预览必须切换遥测和脚本生命周期');
+  assert.match(runtimeModeEffectBlock, /runtime\.endTelemetryPreview\(\)/, '退出运行预览必须恢复编辑态生命周期');
+  assert.doesNotMatch(runtimeModeEffectBlock, /runtime\.sync\(/, '运行模式切换必须复用已完成的 Geometry 合批，不得再次完整同步');
+  assert.doesNotMatch(
+    runtimeModeEffectBlock,
+    /modelArrayIdentityMode:\s*'device'/,
+    '运行模式切换不得把视觉合批拆回逐设备模型',
   );
   assert.match(panelSource, /ScenePerformanceMonitor/, 'SceneView 必须启用独立性能监控器');
   assert.match(panelSource, /复制最近一分钟报告/, 'HUD 必须提供可复制性能报告');

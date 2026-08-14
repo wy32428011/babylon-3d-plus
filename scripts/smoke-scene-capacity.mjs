@@ -133,6 +133,18 @@ async function waitForModelParameterVariantBatch(runtime, entityId) {
   assert.fail(`${entityId} 参数变体批次收敛超时`);
 }
 
+/** 捕获批次当前提交到 GPU 的矩阵缓冲引用，用于确认运行生命周期切换没有重新分配。 */
+function captureBatchMatrixBuffers(batch) {
+  return (batch?.sources ?? []).flatMap((source) => (
+    (source.batches ?? []).map((internal) => internal.sourceMatrixBuffer ?? internal.matrixBuffer)
+  ));
+}
+
+function assertSameReferences(actual, expected, message) {
+  assert.equal(actual.length, expected.length, `${message}：引用数量变化`);
+  actual.forEach((value, index) => assert.equal(value, expected[index], `${message}：第 ${index + 1} 个引用变化`));
+}
+
 /** 验证外置参数脚本批次源修改资产编号时只更新设备上下文，不重建编辑态 Geometry 批次。 */
 async function verifyParametricSourceAssetCodeBatchReuse({
   SceneRuntime,
@@ -244,10 +256,25 @@ export class ParametricModelRuntimeComponent {
     );
     assert.equal(runtime.modelArrayParameterVariants.size, 0, '编辑态资产编号不得创建逐设备参数脚本宿主');
 
+    const lifecycleMeshes = [...initialBatch.meshes];
+    const lifecycleMatrixBuffers = captureBatchMatrixBuffers(initialBatch);
+    const lifecyclePerformance = runtime.getPerformanceMetrics();
+    runtime.beginTelemetryPreview();
+    assert.equal(runtime.resolveModelArrayBatchForEntityId(sourceEntityId), initialBatch, '参数脚本切换到运行上下文不得重建 Geometry 批次');
+    assertSameReferences([...initialBatch.meshes], lifecycleMeshes, '参数脚本切换到运行上下文不得替换批次 Mesh');
+    assertSameReferences(captureBatchMatrixBuffers(initialBatch), lifecycleMatrixBuffers, '参数脚本切换到运行上下文不得重新分配矩阵缓冲');
+    assert.equal(runtime.getPerformanceMetrics().fullSyncCount, lifecyclePerformance.fullSyncCount, '参数脚本切换到运行上下文不得增加完整 sync 次数');
+    runtime.endTelemetryPreview();
+    assert.equal(runtime.resolveModelArrayBatchForEntityId(sourceEntityId), initialBatch, '参数脚本恢复编辑上下文不得重新合批');
+    assertSameReferences([...initialBatch.meshes], lifecycleMeshes, '参数脚本恢复编辑上下文不得替换批次 Mesh');
+    assertSameReferences(captureBatchMatrixBuffers(initialBatch), lifecycleMatrixBuffers, '参数脚本恢复编辑上下文不得重新分配矩阵缓冲');
+    assert.equal(runtime.getPerformanceMetrics().fullSyncCount, lifecyclePerformance.fullSyncCount, '参数脚本恢复编辑上下文不得增加完整 sync 次数');
+
     return {
       logicalEntityCount: entityIds.length,
       sourceBatchReused: true,
       externalScriptHostReused: true,
+      runtimeLifecycleBatchReused: true,
     };
   } finally {
     runtime?.dispose();
@@ -657,25 +684,30 @@ async function run() {
     const parameterSyncFullCountStable = true;
     const parameterSyncBaseBatchReused = true;
 
-    // 运行预览继续使用原始文档，必须恢复逐实体脚本、assetCode 和遥测隔离。
-    runtime.sync(rawDocument);
-    await waitForAllEntityMeshes(scene, entityIds);
-    assert.equal(runtime.models.size, STATIC_ENTITY_COUNT, '原始运行文档必须恢复全部独立 ModelRuntimeEntry');
-    assert.equal(runtime.modelArrayInstanceEntities.size, 0, '编辑态自动覆盖不得写回或污染运行文档');
-    assert.equal(loadCount, 1, '展开运行实体仍应复用同一个共享源 AssetContainer');
-    const firstMeshes = collectEntityMeshes(scene, entityIds[0]);
-    const lastMeshes = collectEntityMeshes(scene, entityIds.at(-1));
-    assert.ok(firstMeshes.length > 0, '首个静态实体必须包含有效渲染 Mesh');
-    assert.equal(firstMeshes.length, lastMeshes.length, '同源静态实体必须保持一致 Mesh 结构');
-    assert.ok(firstMeshes.every((mesh) => mesh.isAnInstance), '运行态普通静态模型必须保持 InstancedMesh 共享路径');
-    assert.ok(lastMeshes.every((mesh) => mesh.isAnInstance), '最后一个运行实体也必须保持 InstancedMesh');
+    // 运行预览只切换脚本、动画和遥测生命周期，必须原位复用已完成的 Geometry 合批。
+    const previewBatch = runtime.resolveModelArrayBatchForEntityId(editPlan.sourceEntityIds[0]);
+    assert.equal(previewBatch, stableBaseBatch, '运行预览前必须以当前参数稳定批次作为唯一渲染结果');
+    const previewBatchMeshes = [...previewBatch.meshes];
+    const previewMatrixBuffers = captureBatchMatrixBuffers(previewBatch);
+    const performanceBeforePreview = runtime.getPerformanceMetrics();
+    runtime.beginTelemetryPreview();
+    const performanceDuringPreview = runtime.getPerformanceMetrics();
+    assert.equal(runtime.resolveModelArrayBatchForEntityId(editPlan.sourceEntityIds[0]), previewBatch, '进入运行预览不得重建 Geometry 合批');
+    assertSameReferences([...previewBatch.meshes], previewBatchMeshes, '进入运行预览不得替换已提交的批次 Mesh');
+    assertSameReferences(captureBatchMatrixBuffers(previewBatch), previewMatrixBuffers, '进入运行预览不得重新分配矩阵缓冲');
+    assert.equal(performanceDuringPreview.fullSyncCount, performanceBeforePreview.fullSyncCount, '进入运行预览不得增加完整 sync 次数');
+    assert.equal(runtime.models.size, 1, '运行预览不得把视觉合批展开为逐设备 ModelRuntimeEntry');
+    assert.equal(runtime.modelArrayInstanceEntities.size, EDIT_THIN_INSTANCE_ENTITY_COUNT, '运行预览必须保留每个逻辑实体及其参数');
+    assert.equal(loadCount, 1, '进入运行预览不得重新加载模型源');
 
-    const firstContentRoot = scene.transformNodes.find((node) => node.name === `${entityIds[0]}_modelContentRoot`);
-    assert.ok(firstContentRoot, '必须找到首个静态实体 contentRoot');
-    const originalGetChildMeshes = firstContentRoot.getChildMeshes.bind(firstContentRoot);
-    firstContentRoot.getChildMeshes = () => {
-      throw new Error('选择变化不应重新收集未修改模型的全部子 Mesh');
-    };
+    runtime.endTelemetryPreview();
+    const performanceAfterPreview = runtime.getPerformanceMetrics();
+    assert.equal(runtime.resolveModelArrayBatchForEntityId(editPlan.sourceEntityIds[0]), previewBatch, '退出运行预览不得重新合批');
+    assertSameReferences([...previewBatch.meshes], previewBatchMeshes, '退出运行预览不得替换已提交的批次 Mesh');
+    assertSameReferences(captureBatchMatrixBuffers(previewBatch), previewMatrixBuffers, '退出运行预览不得重新分配矩阵缓冲');
+    assert.equal(performanceAfterPreview.fullSyncCount, performanceBeforePreview.fullSyncCount, '退出运行预览不得增加完整 sync 次数');
+    assert.equal(loadCount, 1, '退出运行预览不得重新加载模型源');
+
     const performanceBeforeSelection = runtime.getPerformanceMetrics();
     const selectionOnlyEntityIds = new Proxy(entityIds, {
       get(target, property, receiver) {
@@ -701,8 +733,11 @@ async function run() {
       '选择专用同步必须单独计数',
     );
     assert.equal(performanceAfterSelection.lastSelectionChangedEntityCount, 1, '单选只应刷新一个目标实体');
-    firstContentRoot.getChildMeshes = originalGetChildMeshes;
 
+    // 共享实例释放策略是独立回归：显式同步原始文档仅用于验证剩余引用生命周期，不属于运行预览路径。
+    runtime.sync(rawDocument);
+    await waitForAllEntityMeshes(scene, entityIds);
+    const firstMeshes = collectEntityMeshes(scene, entityIds[0]);
     const remainingIds = entityIds.slice(1);
     const remainingEntities = Object.fromEntries(remainingIds.map((entityId) => [entityId, entities[entityId]]));
     runtime.sync(createDocument(remainingEntities, remainingIds));
@@ -729,6 +764,7 @@ async function run() {
       parametricSourceAssetCode,
       referencedSourceCoalescing,
       runtimeExpansion: 'isolated',
+      runtimePreviewBatchReused: true,
     }, null, 2));
   } finally {
     runtime?.dispose();

@@ -1,4 +1,5 @@
 .editorShell {
+  position: relative;
   display: grid;
   /* 主壳只保留 Toolbar 与工作区两行，左右栏可贯通到底部。 */
   grid-template-rows: 48px minmax(0, 1fr);

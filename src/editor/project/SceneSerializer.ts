@@ -1,4 +1,5 @@
 import type { Entity } from '../model/Entity';
+import { createPersistedModelThinInstanceScene } from '../model/editModeModelThinInstances';
 import { createLegacyCadReferenceUnitInfo, normalizeCadReferenceUnitInfo } from '../cad/cadUnits';
 import {
   AUTHORIZED_LOCAL_ASSET_URL_PREFIX,
@@ -74,7 +75,7 @@ const DEFAULT_SCENE_FILE_UNITS: SceneFileUnits = { length: SCENE_LENGTH_UNIT };
 type PlainObject = Record<string, unknown>;
 
 export function serializeScene(scene: SceneDocument): string {
-  const snapshot = createSerializableSceneSnapshot(scene);
+  const snapshot = createSerializableSceneSnapshot(createPersistedModelThinInstanceScene(scene));
   return JSON.stringify({ version: 3, units: { length: SCENE_LENGTH_UNIT }, scene: snapshot }, null, 2);
 }
 

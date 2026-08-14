@@ -11,6 +11,8 @@ import { SceneViewPanel } from '../panels/SceneViewPanel';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { useEditorStore, type TransformTool } from '../store/editorStore';
 import { Toolbar } from '../ui/Toolbar';
+import { ScenePreparationOverlay } from '../loading/ScenePreparationOverlay';
+import { isScenePreparationActive } from '../loading/scenePreparationProgress';
 import styles from './EditorLayout.module.css';
 
 const TOOL_SHORTCUTS: Record<string, TransformTool> = {
@@ -88,6 +90,11 @@ export function EditorLayout() {
   useEffect(() => {
     /** 处理编辑器全局快捷键，保持和菜单/Toolbar 共用同一条 store 更新路径。 */
     function handleWindowKeyDown(event: KeyboardEvent): void {
+      if (isScenePreparationActive()) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
       if (event.altKey || isKeyboardEditableTarget(event.target)) return;
 
       const key = event.key.toLowerCase();
@@ -171,9 +178,9 @@ export function EditorLayout() {
       setTransformTool(tool);
     }
 
-    window.addEventListener('keydown', handleWindowKeyDown);
+    window.addEventListener('keydown', handleWindowKeyDown, true);
     return () => {
-      window.removeEventListener('keydown', handleWindowKeyDown);
+      window.removeEventListener('keydown', handleWindowKeyDown, true);
     };
   }, [
     copySelectedEntities,
@@ -318,6 +325,7 @@ export function EditorLayout() {
           <InspectorPanel readOnly={isRuntimePreview} />
         </aside>
       </div>
+      <ScenePreparationOverlay />
     </div>
   );
 }

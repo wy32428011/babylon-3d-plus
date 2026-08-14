@@ -2163,7 +2163,11 @@ function transformVertexDataPreservingNormals(vertexData: VertexData, matrix: Ma
       vertexData.tangents[offset + 3] = sourceTangents[offset + 3] * handedness;
     }
   }
-  if (determinant < 0 && !vertexData.indices && !flipUnindexedTriangleFaces(vertexData)) return false;
+  if (
+    determinant < 0
+    && (vertexData.indices?.length ?? 0) === 0
+    && !flipUnindexedTriangleFaces(vertexData)
+  ) return false;
   return true;
 }
 
