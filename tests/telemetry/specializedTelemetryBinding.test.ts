@@ -120,13 +120,22 @@ function createSnapshot(overrides: Partial<DeviceTelemetrySnapshot> = {}): Devic
   };
 }
 
-test('StackerTelemetryDriver 按 Locator storageDepth 属性判断一段或两段货叉，并在目标缺失时禁止伸出', () => {
+test('StackerTelemetryDriver 始终由 front_x/front_y/front_z 驱动位置，货叉行程按货格几何解算', () => {
   const source = readFileSync('src/runtime/babylon/telemetry/specialized/stackerDriver.ts', 'utf8');
-  assert.match(source, /resolveStackerStorageForkReach\(targetLocator\.storageDepth/);
-  assert.match(source, /snapshot\.hasTargetLocation[\s\S]*resolveStackerStorageForkReach\(targetLocator\.storageDepth/);
-  // distance_x/distance_y 编码器不再校准行走/升降（空闲改由 front_x/front_y 吸附已绑定货格）
-  assert.doesNotMatch(source, /distanceX !== null && targetTravelOffset === null/);
-  assert.doesNotMatch(source, /distanceY !== null && targetLiftOffset === null/);
+  // 位置唯一驱动源：front_ 三字段匹配当前库位
+  assert.match(source, /readIntegerField\(snapshot\.fields, 'front_x'\)/);
+  assert.match(source, /readIntegerField\(snapshot\.fields, 'front_z'\)/);
+  // 不再依赖 to_ 目标位与 movement_x/movement_y 兜底
+  assert.doesNotMatch(source, /readIntegerField\(snapshot\.fields, 'to_x'\)/);
+  assert.doesNotMatch(source, /readIntegerField\(snapshot\.fields, 'movement_x'\)/);
+  assert.doesNotMatch(source, /readIntegerField\(snapshot\.fields, 'movement_y'\)/);
+  // 货叉行程不再读参数，由节点几何实测 + 货格远端覆盖决定
+  assert.doesNotMatch(source, /forkStageOneReach/);
+  assert.match(source, /getStackerForkStroke/);
+  assert.match(source, /resolveForkTargetOffset/);
+  // front_ 变化时快速收尾：catch-up 收叉并冻结平移/升降
+  assert.match(source, /forkCatchUp/);
+  assert.match(source, /STACKER_FORK_CATCH_UP_SPEED_MULTIPLIER/);
 });
 
 test('Stacker 库位演示脚本不发送货叉距离，由 to_x to_y to_z 和 Locator 参数决定段数', () => {

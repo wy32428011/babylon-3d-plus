@@ -56,7 +56,6 @@ function makeHarness(binding: { cargoAutoDispose?: boolean; cargoOriginDevice?: 
     pushLog: () => undefined,
     collectModels: () => [{ entityId: 'e1', model }],
     findLocatorByDevice: () => null,
-    getLocatorTarget: () => null,
     resolveCargoGeneratorForModel: () => null,
     resolveColumnTargetPose: () => null,
     resolveFetchDriveRowForLocator: () => null,

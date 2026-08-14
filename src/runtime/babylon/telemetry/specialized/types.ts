@@ -12,11 +12,12 @@ import type { RuntimeWorldBounds } from '../../runtimeNodeGeometry';
 import type { DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ResolvedSpecializedTelemetryBinding } from '../specializedTelemetryBinding';
 
-export const STACKER_CALIBRATION_RATE = 4;
 export const STACKER_TARGET_SPEED_METERS_PER_SECOND = 1.2;
 export const STACKER_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND = 0.8;
 export const STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND = 0.3;
 export const STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND = 0.25;
+/** front_ 变化触发动作收尾时，货叉收回速度倍率。 */
+export const STACKER_FORK_CATCH_UP_SPEED_MULTIPLIER = 4;
 export const STACKER_RPM_TO_METERS_PER_SECOND = 0.01;
 export const STACKER_CARGO_COLOR = '#d8a03a';
 export const STACKER_CARGO_EMISSIVE_COLOR = '#3a2508';
@@ -175,8 +176,6 @@ export type StackerModelTelemetryState = {
   frontForkOffset: number;
   backForkOffset: number;
   lastFrameTimeMs: number;
-  frontForkDirection: number;
-  backForkDirection: number;
   /** 叉上货物键（JSON.stringify([assetCode, side])）；非 null 表示叉上有货。 */
   frontCargoKey: string | null;
   backCargoKey: string | null;
@@ -199,6 +198,16 @@ export type StackerModelTelemetryState = {
   backLastCommand: number | null;
   nodeBaselines: Map<TransformNode, Vector3>;
   lastTargetKey: string | null;
+  /** 上一帧 front_x/front_y/front_z 组成的库位键；变化时触发动作收尾（catch-up）。 */
+  lastFrontCellKey: string | null;
+  /** true 表示正在快速收尾：货叉加速收回，收回前冻结平移/升降。 */
+  forkCatchUp: boolean;
+  /** 按节点几何实测的前叉一段/二段行程上限；null 表示尚未测量。 */
+  frontForkStroke: StackerForkReachConfig | null;
+  backForkStroke: StackerForkReachConfig | null;
+  /** 当前货格要求的前叉目标行程（有符号，沿伸出方向）；由库位几何每帧求解。 */
+  frontForkTargetOffset: number;
+  backForkTargetOffset: number;
 };
 
 /** 上位链路：本机的一条货物来向通道，由持有方的 available 通知建立（探测邻居或注册设备均可为上一跳）。 */
@@ -368,11 +377,8 @@ export interface SpecializedTelemetryHost {
   /** models + modelArrayParameterVariants 的合并视图（entityId 用 representativeEntityId）。 */
   collectModels(): Iterable<{ entityId: string; model: ModelRuntimeEntry }>;
   findLocatorByDevice(assetCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
-  /** 跨排查找包含指定列/层的已绑定 Locator（排号不限），用于 stacker 空闲时按当前位 front_x/front_y 吸附。 */
-  findLocatorByDeviceAnyRow(assetCode: string, x: number, y: number): LocatorRuntimeEntry | null;
   /** 返回设备绑定的全部 Locator（所有排），无绑定返回空数组；用于区分「未绑定」与「坐标越界」。 */
   findLocatorsByDevice(assetCode: string): LocatorRuntimeEntry[];
-  getLocatorTarget(key: string): LocatorRuntimeEntry | null;
   resolveCargoGeneratorForModel(model: ModelRuntimeEntry): ModelGeneratorRuntimeEntry | null;
   /** 按实体 ID 解析 RGV 列接驳位的世界位姿（模型/定位线框/基础网格实体的 root，或合批阵列实例的实体位姿）；不存在返回 null。 */
   resolveColumnTargetPose(entityId: string): { position: Vector3; rotation: Quaternion } | null;

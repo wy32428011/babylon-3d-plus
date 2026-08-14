@@ -127,7 +127,7 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from './telemetry/specializedTelemetryBinding';
-import { resolveLocatorBoxIndex, resolveLocatorCellSupportWorldPosition, resolveStackerStorageForkReach } from './telemetry/stackerStorageLocation';
+import { resolveLocatorBoxIndex, resolveLocatorCellSupportWorldPosition } from './telemetry/stackerStorageLocation';
 import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from './runtimeValueUtils';
 import {
   clampNumber,
@@ -407,6 +407,8 @@ export type LocatorRuntimeEntry = {
   edgeLines: LinesMesh;
   /** 构建网格时实际使用的步距；解析格子世界坐标必须与渲染公式同源。 */
   cellSteps: LocatorBindingSteps;
+  /** 单个货格的尺寸（米）：length=列向，height=层向，width=深度方向。 */
+  cellSize: { length: number; height: number; width: number };
   material: StandardMaterial;
   assetId: string;
   signature: string;
@@ -697,9 +699,7 @@ export class SceneRuntime {
         return models;
       },
       findLocatorByDevice: (assetCode, x, y, z) => this.findLocatorByDevice(assetCode, x, y, z),
-      findLocatorByDeviceAnyRow: (assetCode, x, y) => this.findLocatorByDeviceAnyRow(assetCode, x, y),
       findLocatorsByDevice: (assetCode) => this.findLocatorsByDevice(assetCode),
-      getLocatorTarget: (key) => this.locatorTargets.get(key) ?? null,
       resolveCargoGeneratorForModel: (model) => this.resolveCargoGeneratorForModel(model),
       resolveColumnTargetPose: (entityId) => this.resolveColumnTargetPose(entityId),
       resolveFetchDriveRowForLocator: (locator) => this.resolveFetchDriveRowForLocator(locator),
@@ -2889,24 +2889,6 @@ export class SceneRuntime {
     return null;
   }
 
-  /** 按设备编号 + 列/层跨排查找已绑定 Locator（排号不限），供 stacker 空闲时按当前位吸附。 */
-  private findLocatorByDeviceAnyRow(
-    deviceAssetCode: string,
-    x: number,
-    y: number,
-  ): LocatorRuntimeEntry | null {
-    const rowMap = this.locatorDeviceIndex.get(deviceAssetCode);
-    if (!rowMap) return null;
-    for (const list of rowMap.values()) {
-      for (const locator of list) {
-        if (x >= locator.startColumn && x < locator.startColumn + locator.columns && y >= locator.startLayer && y < locator.startLayer + locator.layers) {
-          return locator;
-        }
-      }
-    }
-    return null;
-  }
-
   /** 返回设备绑定的全部 Locator（所有排），无绑定时返回空数组。 */
   private findLocatorsByDevice(deviceAssetCode: string): LocatorRuntimeEntry[] {
     const rowMap = this.locatorDeviceIndex.get(deviceAssetCode);
@@ -3091,6 +3073,7 @@ export class SceneRuntime {
     runtimeLocator.startColumn = locator.startColumn;
     runtimeLocator.startLayer = locator.startLayer;
     runtimeLocator.storageDepth = locator.storageDepth;
+    runtimeLocator.cellSize = { length: locator.length, height: locator.height, width: locator.width };
 
     const locatorMetadata = { assetId: locator.assetId };
     runtimeLocator.root.metadata = { ...(runtimeLocator.root.metadata ?? {}), storageLocation: locatorMetadata };
@@ -4066,7 +4049,7 @@ export class SceneRuntime {
     };
     const { fillMesh, edgeLines } = this.buildLocatorGridMeshes(entityId, locator, root, material, cellSteps);
 
-    return { entityId, root, fillMesh, edgeLines, cellSteps, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
+    return { entityId, root, fillMesh, edgeLines, cellSteps, cellSize: { length: locator.length, height: locator.height, width: locator.width }, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
   }
 
   /**

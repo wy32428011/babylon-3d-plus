@@ -262,8 +262,6 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     frontForkOffset: 0,
     backForkOffset: 0,
     lastFrameTimeMs: performance.now(),
-    frontForkDirection: 1,
-    backForkDirection: 1,
     frontCargoKey: null,
     backCargoKey: null,
     frontCargoBoundToFork: false,
@@ -280,6 +278,12 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backLastCommand: null,
     nodeBaselines: new Map(),
     lastTargetKey: null,
+    lastFrontCellKey: null,
+    forkCatchUp: false,
+    frontForkStroke: null,
+    backForkStroke: null,
+    frontForkTargetOffset: 0,
+    backForkTargetOffset: 0,
   };
 }
 
@@ -293,8 +297,6 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.liftOffset = 0;
   model.stackerTelemetry.frontForkOffset = 0;
   model.stackerTelemetry.backForkOffset = 0;
-  model.stackerTelemetry.frontForkDirection = 1;
-  model.stackerTelemetry.backForkDirection = 1;
   model.stackerTelemetry.frontCargoKey = null;
   model.stackerTelemetry.backCargoKey = null;
   model.stackerTelemetry.frontCargoBoundToFork = false;
@@ -311,4 +313,10 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backLastCommand = null;
   model.stackerTelemetry.nodeBaselines.clear();
   model.stackerTelemetry.lastTargetKey = null;
+  model.stackerTelemetry.lastFrontCellKey = null;
+  model.stackerTelemetry.forkCatchUp = false;
+  model.stackerTelemetry.frontForkStroke = null;
+  model.stackerTelemetry.backForkStroke = null;
+  model.stackerTelemetry.frontForkTargetOffset = 0;
+  model.stackerTelemetry.backForkTargetOffset = 0;
 }
