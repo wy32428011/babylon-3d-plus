@@ -19,6 +19,7 @@ import type { Entity } from '../model/Entity';
 import {
   getTopLevelHierarchyEntityIds,
   isEntityEffectivelyLocked,
+  isEntityEffectivelyVisible,
   toggleHierarchyEntitySelection,
 } from '../model/entityHierarchy';
 import { getEntityArrayIdentifierError } from '../model/modelArray';
@@ -513,8 +514,8 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
                 const isFolder = entity.isFolder === true;
                 const isSelected = hierarchySelectionIdSet.has(entity.id);
                 const isPrimarySelected = entity.id === selectedEntityId;
-                const isVisible = entity.visible !== false;
-                const isLocked = entity.locked === true;
+                const isVisible = isEntityEffectivelyVisible(entities, entity);
+                const isLocked = isEntityEffectivelyLocked(entities, entity);
                 const isCollapsed = isFolder && collapsedFolderIds.has(entity.id) && !searchText.trim();
                 const rowClassName = [
                   'entity-tree-row',
