@@ -47,9 +47,12 @@ import {
   type StackerTravelConstraint,
   STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND,
   STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND,
+  STACKER_CATCH_UP_MAX_WINDOW_SECONDS,
+  STACKER_CATCH_UP_MIN_WINDOW_SECONDS,
   STACKER_FALLBACK_FIXED_NODE_NAMES,
   STACKER_FALLBACK_TRAVEL_NODE_NAMES,
   STACKER_FORK_CATCH_UP_SPEED_MULTIPLIER,
+  STACKER_MAX_CATCH_UP_SPEED_METERS_PER_SECOND,
   STACKER_RPM_TO_METERS_PER_SECOND,
   STACKER_TARGET_SPEED_METERS_PER_SECOND,
   STACKER_CARGO_SIZE,
@@ -77,10 +80,10 @@ export class StackerTelemetryDriver {
     this.reportStackerRuntimeState(snapshot);
     writeDeviceTelemetryMetadata(model, snapshot);
 
-    // front_ 跳变表示设备开始转场：快速收尾当前取/放动作并收叉，收回前冻结平移/升降
-    this.updateStackerForkCatchUp(model, snapshot, frontCell.cell);
-
     const targetOffsets = frontCell.cell ? this.resolveStackerTargetMotionOffsets(model, frontCell.cell.supportPosition) : null;
+    // front_ 跟踪：首帧直接吸附到上报库位；后续跳变表示设备转场，快速收尾取/放动作并收叉，收回前冻结平移/升降
+    this.trackStackerFrontCellChange(model, snapshot, frontCell.key, frontCell.cell, targetOffsets);
+
     if (state.forkCatchUp) {
       this.applyStackerForkCatchUpRetract(model, snapshot, deltaSeconds);
     } else {
@@ -96,23 +99,25 @@ export class StackerTelemetryDriver {
   /**
    * 按 front_x/front_y/front_z 解析当前货格：三字段缺失或为 0 视为未上报（保持原位）；
    * 有值但匹配不到已绑定货格时一次性报错并冻结移动与伸叉（mismatch）。
+   * key 为三字段组成的库位键，供首帧吸附与变化检测使用。
    */
   private resolveStackerFrontCell(
     snapshot: StackerTelemetrySnapshot,
-  ): { cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null; mismatch: boolean } {
+  ): { cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null; mismatch: boolean; key: string | null } {
     const frontX = readIntegerField(snapshot.fields, 'front_x');
     const frontY = readIntegerField(snapshot.fields, 'front_y');
     const frontZ = readIntegerField(snapshot.fields, 'front_z');
-    if (!snapshot.assetCode || !frontX || !frontY || !frontZ) return { cell: null, mismatch: false };
+    if (!snapshot.assetCode || !frontX || !frontY || !frontZ) return { cell: null, mismatch: false, key: null };
+    const key = JSON.stringify([frontX, frontY, frontZ]);
     const locator = this.host.findLocatorByDevice(snapshot.assetCode, frontX, frontY, frontZ);
     if (!locator) {
       this.reportStackerFrontCellMiss(snapshot, frontX, frontY, frontZ);
-      return { cell: null, mismatch: true };
+      return { cell: null, mismatch: true, key };
     }
     const supportPosition = this.resolveLocatorBoxSupportPosition(locator, frontX, frontY);
     return supportPosition
-      ? { cell: { locator, supportPosition }, mismatch: false }
-      : { cell: null, mismatch: true };
+      ? { cell: { locator, supportPosition }, mismatch: false, key }
+      : { cell: null, mismatch: true, key };
   }
 
   /** 当前位匹配失败的两类一次性报错：设备无任何已绑定货格 / 当前位超出已绑定货格的列层范围。 */
@@ -132,20 +137,36 @@ export class StackerTelemetryDriver {
     this.host.pushLog(`错误：Stacker ${snapshot.assetCode} 当前位（排${frontZ} 列${frontX} 层${frontY}）超出已绑定货格范围（${ranges}），已忽略移动。`);
   }
 
-  /** front_ 变化检测：变化且货叉已伸出或取/放动作未完结时进入 catch-up，并立即补齐动作语义。 */
-  private updateStackerForkCatchUp(
+  /**
+   * front_ 库位键跟踪：
+   * - 首条有效库位：行走/升降直接吸附到上报库位，避免从原点缓慢追赶期间消息已经推进；
+   * - 后续跳变：记录变化间隔（供自适应追赶速度估算），货叉已伸出或取/放动作未完结时进入 catch-up 并立即补齐动作语义。
+   */
+  private trackStackerFrontCellChange(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
+    key: string | null,
     cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
+    targetOffsets: { travelOffset: number; liftOffset: number } | null,
   ): void {
     const state = model.stackerTelemetry;
-    const frontX = readIntegerField(snapshot.fields, 'front_x');
-    const frontY = readIntegerField(snapshot.fields, 'front_y');
-    const frontZ = readIntegerField(snapshot.fields, 'front_z');
-    const key = frontX && frontY && frontZ ? JSON.stringify([frontX, frontY, frontZ]) : null;
-    const changed = key !== null && state.lastFrontCellKey !== null && key !== state.lastFrontCellKey;
-    if (key !== null) state.lastFrontCellKey = key;
-    if (!changed || state.forkCatchUp) return;
+    if (key === null) return;
+
+    const nowMs = performance.now();
+    if (state.lastFrontCellKey === null) {
+      state.lastFrontCellKey = key;
+      state.lastFrontCellChangedAtMs = nowMs;
+      if (targetOffsets) this.snapStackerToTargetOffsets(model, targetOffsets);
+      return;
+    }
+    if (key === state.lastFrontCellKey) return;
+
+    if (state.lastFrontCellChangedAtMs !== null) {
+      state.frontCellChangeIntervalMs = nowMs - state.lastFrontCellChangedAtMs;
+    }
+    state.lastFrontCellChangedAtMs = nowMs;
+    state.lastFrontCellKey = key;
+    if (state.forkCatchUp) return;
 
     const frontCommand = readIntegerField(snapshot.fields, 'front_command');
     const backCommand = readIntegerField(snapshot.fields, 'back_command');
@@ -159,6 +180,45 @@ export class StackerTelemetryDriver {
     state.forkCatchUp = true;
     this.forceCompleteStackerForkAction(model, 'front', frontCommand, cell);
     this.forceCompleteStackerForkAction(model, 'back', backCommand, cell);
+  }
+
+  /** 首帧吸附：行走/升降一步到位对齐上报库位（仍受轨道与升降框架物理钳制），货叉保持原点。 */
+  private snapStackerToTargetOffsets(
+    model: ModelRuntimeEntry,
+    targetOffsets: { travelOffset: number; liftOffset: number },
+  ): void {
+    const state = model.stackerTelemetry;
+    const travelAxis = getHorizontalModelAxis(model.root, 'z');
+    state.rootPosition = this.constrainStackerTravelPosition(
+      model,
+      state.rootBasePosition.add(travelAxis.scale(targetOffsets.travelOffset)),
+      travelAxis,
+    );
+    state.liftOffset = this.clampStackerLiftOffset(model, targetOffsets.liftOffset);
+  }
+
+  /**
+   * 自适应追赶速度：按最近两次 front_ 变化间隔估算本期窗口（夹在 0.25s~2s），
+   * 速度 = 剩余距离 ÷ 窗口剩余时间，不低于默认速度、不超过上限，保证推送再快也能在下次变化前到位。
+   */
+  private resolveStackerCatchUpSpeed(
+    model: ModelRuntimeEntry,
+    distance: number,
+    defaultSpeed: number,
+  ): number {
+    const state = model.stackerTelemetry;
+    if (distance <= 1e-6 || state.frontCellChangeIntervalMs === null || state.lastFrontCellChangedAtMs === null) {
+      return defaultSpeed;
+    }
+    const windowMs = Math.min(
+      Math.max(state.frontCellChangeIntervalMs, STACKER_CATCH_UP_MIN_WINDOW_SECONDS * 1000),
+      STACKER_CATCH_UP_MAX_WINDOW_SECONDS * 1000,
+    );
+    const remainingSeconds = Math.max(0.05, (windowMs - (performance.now() - state.lastFrontCellChangedAtMs)) / 1000);
+    return Math.min(
+      STACKER_MAX_CATCH_UP_SPEED_METERS_PER_SECOND,
+      Math.max(defaultSpeed, distance / remainingSeconds),
+    );
   }
 
   /** catch-up 进入时按当前 command 补齐单侧取/放语义：取货立即绑定并完成，放货立即解绑落位并完成。 */
@@ -262,8 +322,9 @@ export class StackerTelemetryDriver {
         state.rootBasePosition.add(travelAxis.scale(targetTravelOffset)),
         travelAxis,
       );
-      const targetSpeed = this.readStackerDataDrivenNumber(model, ['motion', 'travel', 'targetSpeed'])
+      const defaultSpeed = this.readStackerDataDrivenNumber(model, ['motion', 'travel', 'targetSpeed'])
         ?? STACKER_TARGET_SPEED_METERS_PER_SECOND;
+      const targetSpeed = this.resolveStackerCatchUpSpeed(model, Vector3.Distance(state.rootPosition, rootTargetPosition), defaultSpeed);
       const previous = state.rootPosition;
       state.rootPosition = moveVectorTowards(
         state.rootPosition,
@@ -288,13 +349,18 @@ export class StackerTelemetryDriver {
 
     let moving = false;
     if (!snapshot.faulted && targetLiftOffset !== null) {
+      const targetSpeed = this.resolveStackerCatchUpSpeed(
+        model,
+        Math.abs(targetLiftOffset - state.liftOffset),
+        STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND,
+      );
       const previous = state.liftOffset;
       state.liftOffset = this.clampStackerLiftOffset(
         model,
         moveNumberTowards(
           state.liftOffset,
           targetLiftOffset,
-          STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND * deltaSeconds,
+          targetSpeed * deltaSeconds,
         ),
       );
       moving = Math.abs(state.liftOffset - previous) > 1e-9;

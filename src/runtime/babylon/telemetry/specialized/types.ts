@@ -18,6 +18,11 @@ export const STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND = 0.3;
 export const STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND = 0.25;
 /** front_ 变化触发动作收尾时，货叉收回速度倍率。 */
 export const STACKER_FORK_CATCH_UP_SPEED_MULTIPLIER = 4;
+/** 自适应追赶速度的估算窗口下限/上限（秒）：按 front_ 变化间隔估算，夹在 0.25s~2s。 */
+export const STACKER_CATCH_UP_MIN_WINDOW_SECONDS = 0.25;
+export const STACKER_CATCH_UP_MAX_WINDOW_SECONDS = 2;
+/** 自适应追赶速度上限（m/s），防止极端间隔下速度爆炸。 */
+export const STACKER_MAX_CATCH_UP_SPEED_METERS_PER_SECOND = 8;
 export const STACKER_RPM_TO_METERS_PER_SECOND = 0.01;
 export const STACKER_CARGO_COLOR = '#d8a03a';
 export const STACKER_CARGO_EMISSIVE_COLOR = '#3a2508';
@@ -208,6 +213,10 @@ export type StackerModelTelemetryState = {
   /** 当前货格要求的前叉目标行程（有符号，沿伸出方向）；由库位几何每帧求解。 */
   frontForkTargetOffset: number;
   backForkTargetOffset: number;
+  /** 最近一次 front_ 库位键变化的时间戳（performance.now()）；null 表示尚未收到过有效库位。 */
+  lastFrontCellChangedAtMs: number | null;
+  /** 最近两次 front_ 变化的间隔（毫秒），用于估算自适应追赶窗口；null 表示尚未观察到变化。 */
+  frontCellChangeIntervalMs: number | null;
 };
 
 /** 上位链路：本机的一条货物来向通道，由持有方的 available 通知建立（探测邻居或注册设备均可为上一跳）。 */

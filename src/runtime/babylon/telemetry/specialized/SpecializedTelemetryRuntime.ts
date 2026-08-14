@@ -62,6 +62,8 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         deviceType: 'stacker',
         isCapable: (model) => model.stackerCapable,
         apply: (model, snapshot, deltaSeconds) => this.stackerDriver.applyToModel(model, snapshot as StackerTelemetrySnapshot, deltaSeconds),
+        // 断流时继续朝最后已知库位做确定性插值，避免推送间隔超过 staleAfterMs 时整机停在半途；故障帧仍由 faulted 检查冻结
+        applyWhenStale: () => true,
       },
       {
         deviceType: 'conveyor',

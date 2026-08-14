@@ -168,6 +168,50 @@ test('front_x/front_y/front_z 当前位驱动行走与升降到库位支撑位',
   }
 });
 
+test('首条 front_ 消息直接吸附到上报库位，不从原点缓慢追赶', () => {
+  const h = makeHarness();
+  try {
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    h.apply(POSITION_FRAME, 0.1, 1);
+    const position = h.model.stackerTelemetry.rootPosition;
+    assert.ok(position);
+    assert.ok(Math.abs(position.z - 20) < 1e-6, `首帧必须一步到位吸附到 z=20，实际 ${position.z}`);
+    assert.ok(Math.abs(h.model.stackerTelemetry.liftOffset - 2) < 1e-6, `首帧升降必须吸附到 y=2，实际 ${h.model.stackerTelemetry.liftOffset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('front_ 变化间隔已知时按窗口剩余时间自适应提速，上限 8 m/s', () => {
+  const h = makeHarness();
+  try {
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    // 先吸附到列 10（z=20）
+    h.apply(POSITION_FRAME, 0.1, 1);
+    assert.ok(Math.abs(h.model.stackerTelemetry.rootPosition!.z - 20) < 1e-6);
+
+    // 转到列 5（z=15）触发变化检测；随后人为固定变化间隔 300ms 并把位置归位，单独计量下一帧
+    h.apply({ ...POSITION_FRAME, front_x: 5 }, 0.1, 1);
+    h.model.stackerTelemetry.frontCellChangeIntervalMs = 300;
+    h.model.stackerTelemetry.lastFrontCellChangedAtMs = performance.now();
+    h.model.stackerTelemetry.rootPosition!.z = 20;
+    // 5m / 0.3s ≈ 16.7 m/s，必须被钳到 8 m/s → 单帧走 0.8m
+    h.apply({ ...POSITION_FRAME, front_x: 5 }, 0.1, 1);
+    const z = h.model.stackerTelemetry.rootPosition!.z;
+    assert.ok(Math.abs(z - (20 - 8 * 0.1)) < 1e-6, `自适应提速后单帧必须走 0.8m（8 m/s 上限），实际 z=${z}`);
+
+    // 缺省（无变化间隔）时保持默认 1.2 m/s → 单帧走 0.12m
+    h.model.stackerTelemetry.frontCellChangeIntervalMs = null;
+    h.model.stackerTelemetry.lastFrontCellChangedAtMs = null;
+    h.model.stackerTelemetry.rootPosition!.z = 20;
+    h.apply({ ...POSITION_FRAME, front_x: 5 }, 0.1, 1);
+    const z2 = h.model.stackerTelemetry.rootPosition!.z;
+    assert.ok(Math.abs(z2 - (20 - 1.2 * 0.1)) < 1e-6, `无间隔信息时必须退回默认速度 1.2 m/s，实际 z=${z2}`);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('当前位未匹配到任何已绑定货格时报错一次，整机保持不动', () => {
   const h = makeHarness();
   try {

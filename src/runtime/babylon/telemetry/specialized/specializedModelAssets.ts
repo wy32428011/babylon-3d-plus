@@ -286,6 +286,8 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backForkStroke: null,
     frontForkTargetOffset: 0,
     backForkTargetOffset: 0,
+    lastFrontCellChangedAtMs: null,
+    frontCellChangeIntervalMs: null,
   };
 }
 
@@ -321,4 +323,6 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backForkStroke = null;
   model.stackerTelemetry.frontForkTargetOffset = 0;
   model.stackerTelemetry.backForkTargetOffset = 0;
+  model.stackerTelemetry.lastFrontCellChangedAtMs = null;
+  model.stackerTelemetry.frontCellChangeIntervalMs = null;
 }
