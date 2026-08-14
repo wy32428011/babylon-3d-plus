@@ -23,7 +23,7 @@ import {
 } from '../../../mqtt/deviceTelemetry';
 import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
-import { readConveyorCargoSignalFields, readConveyorCargoTravelConfig, isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
+import { readConveyorCargoSignalFields, readConveyorCargoSurfaceOffset, readConveyorCargoTravelConfig, isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   type ConveyorCargoRuntimeEntry,
@@ -885,13 +885,14 @@ export class ConveyorTelemetryDriver {
     return plan;
   }
 
-  /** 货箱行程上下文：支撑中心、竖直轴、行走轴与行走跨度，供货物定位与探测点共用一份包围盒计算。 */
+  /** 货箱行程上下文：支撑中心、竖直轴、行走轴、行走跨度与支撑面抬升量，供货物定位与探测点共用一份包围盒计算。 */
   private resolveConveyorCargoTravelContext(model: ModelRuntimeEntry): {
     center: Vector3;
     upAxis: Vector3;
     travelAxis: Vector3;
     travelAxisName: 'x' | 'z';
     spanMeters: number | null;
+    surfaceLiftMeters: number;
   } {
     const travelConfig = readConveyorCargoTravelConfig(model);
     // 合批遥测代理无自身节点：行程节点与包围盒取自宿主模型，再按相对位姿换算到代理世界系。
@@ -914,18 +915,21 @@ export class ConveyorTelemetryDriver {
     const travelAxis = getHorizontalModelAxis(model.root, travelAxisName);
     const projected = bounds ? projectWorldBoundsOntoAxis(bounds, travelAxis) : null;
     const spanMeters = projected ? Math.max(0, projected.max - projected.min) : null;
-    return { center, upAxis, travelAxis, travelAxisName, spanMeters };
+    // 支撑面 = 包围盒沿竖直轴的上表面（投影最高点到 center 的抬升量），surfaceOffset 微调贴合真实台面。
+    const surfaceLiftMeters = (bounds
+      ? projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis)
+      : 0) + readConveyorCargoSurfaceOffset(model);
+    return { center, upAxis, travelAxis, travelAxisName, spanMeters, surfaceLiftMeters };
   }
 
-  /** 基于输送线行程上下文计算货物底部支撑点，并沿输送方向加入给定行程偏移。 */
+  /** 基于输送线行程上下文计算货物底部支撑点：落在设备包围盒上表面，并沿输送方向加入给定行程偏移。 */
   private getConveyorCargoPosition(
     model: ModelRuntimeEntry,
-    travelContext: { center: Vector3; upAxis: Vector3; travelAxis: Vector3 },
+    travelContext: { center: Vector3; upAxis: Vector3; travelAxis: Vector3; surfaceLiftMeters: number },
     travelOffset: number,
   ): Vector3 {
-    const legacyCenter = travelContext.center.add(travelContext.upAxis.scale(CONVEYOR_CARGO_SIZE.y * 0.75));
-    return legacyCenter
-      .subtract(travelContext.upAxis.scale(CONVEYOR_CARGO_SIZE.y / 2))
+    return travelContext.center
+      .add(travelContext.upAxis.scale(travelContext.surfaceLiftMeters))
       .add(travelContext.travelAxis.scale(travelOffset));
   }
 

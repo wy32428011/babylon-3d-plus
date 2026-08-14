@@ -181,6 +181,18 @@ const DEFAULT_CONVEYOR_CARGO_SIGNAL_FIELDS: ConveyorCargoSignalFields = {
   backHasGoods: 'back_has_goods',
 };
 
+/** 读取模型脚本 dataDriven.cargo.surfaceOffset 声明的货物支撑面微调偏移（米，正抬负沉），未声明或非法时为 0。 */
+export function readConveyorCargoSurfaceOffset(model: ModelRuntimeEntry): number {
+  for (const dataDriven of iterateConveyorDataDrivenConfigs(model)) {
+    const cargoConfig = isPlainRecord(dataDriven.cargo) ? dataDriven.cargo : null;
+    if (!cargoConfig) continue;
+
+    const raw = typeof cargoConfig.surfaceOffset === 'number' ? cargoConfig.surfaceOffset : Number(cargoConfig.surfaceOffset);
+    return Number.isFinite(raw) ? raw : 0;
+  }
+  return 0;
+}
+
 /** 读取模型脚本 dataDriven.cargo 声明的货物生命周期信号字段名，未声明时遵循默认约定。 */
 export function readConveyorCargoSignalFields(model: ModelRuntimeEntry): ConveyorCargoSignalFields {
   for (const dataDriven of iterateConveyorDataDrivenConfigs(model)) {

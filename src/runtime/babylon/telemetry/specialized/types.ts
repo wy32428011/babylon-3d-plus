@@ -258,6 +258,8 @@ export type ConveyorCargoTravelPlan = {
     readonly travelAxis: Vector3;
     readonly travelAxisName: 'x' | 'z';
     readonly spanMeters: number | null;
+    /** 支撑面抬升量（米）：center 沿 upAxis 到设备包围盒上表面的距离 + dataDriven.cargo.surfaceOffset 微调。 */
+    readonly surfaceLiftMeters: number;
   };
   readonly travelHalfRange: number;
   readonly forwardSign: 1 | -1;

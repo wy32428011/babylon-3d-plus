@@ -831,3 +831,15 @@ test('合批代理作为起点设备：探测无上游时在代理自身位姿�
     h.dispose();
   }
 });
+
+test('货物支撑点落在设备包围盒上表面（harness 包围盒 y∈[0,1]，支撑点 y=1）', () => {
+  const h = makeHarness({ CV1: { centerX: 0, origin: true } });
+  try {
+    h.apply('CV1', { task: 1, movement_x: 0 });
+    const cargo = onlyCargo(h.state);
+    assert.ok(Math.abs(cargo.root.position.y - 1) < 1e-6,
+      `货物底部必须贴包围盒上表面 y=1，实际 y=${cargo.root.position.y}`);
+  } finally {
+    h.dispose();
+  }
+});
