@@ -62,14 +62,14 @@ Scene View 使用同一份安全分组规则构造不修改输入 `SceneDocument
 
 - 相同结构模板忽略实例级 `modelAsset.assetCode` 与 `parameterValues` 后分组；每组只保留一个稳定真实源，其余实体通过 `modelArrayInstance` 直接引用该源。不同参数值仍由运行时参数变体宿主执行完整绑定/脚本并生成各自原 Geometry，不会错误共用已变形几何。
 - 同一结构模板若已经存在多个持久化阵列源，派生覆盖和序列化快照会选择一个稳定可见源，并把其它源及其既有实例归一为直接引用；不得产生悬空、自引用或链式 `modelArrayInstance`。仍含旧 `modelArray.items` 的兼容源不会被降级，避免尚未迁移的内存场景丢失隐藏阵列项。
-- 无外置脚本模型默认允许合批；带脚本模型仅允许经过行为核对的 `box.model.ts`、`chain-conveyor.model.ts`、`newchain-conveyor.model.ts`、`gd-motor-optimized.model.ts`、`hcts.model.ts`、`shelf.model.ts`、`wlts.model.ts` 和 `yzj.model.ts`。其它脚本继续走逐实体路径，避免把依赖 `assetCode` 或私有运行状态的视觉错误合并。
+- `meta.json.dataDriven` 只有不包含自有 `motion` 键时才允许合批；判断只看键是否存在，值为 `null` 或空对象也继续走逐实体路径。无外置脚本模型在满足该前提时默认允许合批；带脚本模型还必须是经过行为核对的 `box.model.ts`、`chain-conveyor.model.ts`、`newchain-conveyor.model.ts`、`gd-motor-optimized.model.ts`、`hcts.model.ts`、`shelf.model.ts`、`wlts.model.ts` 或 `yzj.model.ts`。其它脚本继续走逐实体路径，避免把依赖 `assetCode`、运动状态或私有运行状态的视觉错误合并。
 - 结构模板签名包含资源版本、单位、脚本元数据和参数配置，但不包含 `assetCode` 与 `parameterValues`；参数值只进入 `SceneRuntime` 渲染签名，由基础批次或参数变体批次隔离不同尺寸、材质和显隐外观。
 - 模型模板签名和派生实体使用不可变对象缓存；单个 Transform 变化时复用其余逻辑实体。单模型参数变化进一步使用稀疏实体覆盖和 `SceneRuntime.syncModelParameters()`，不扫描/复制完整实体表、不重建层级与 Locator 索引；参数组成员未变化时继续复用基础批次 GPU 矩阵缓冲。
 - 普通保存、数据中台发布和独立部署导出全部调用 `serializeScene()`。该入口只生成一次幂等合批快照；数据中台保存当前场景、SOURCE ZIP 和 Viewer DIST 继续消费同一个 `sceneContent`，不会在主进程各阶段重复规划合批。
-- 持久化快照只追加或归一合批关系，保留每个逻辑实体自己的 ID、名称、`assetCode`、`parameterValues`、参数配置、脚本/动画元数据、遥测绑定、Transform、显隐、锁定和层级关系。重新打开及独立 Viewer 直接恢复该拓扑。
+- 持久化快照只调整 `modelArrayInstance` 合批关系，保留每个逻辑实体自己的 ID、名称、`assetCode`、`parameterValues`、参数配置、`dataDriven`、脚本/动画元数据、遥测绑定、Transform、显隐、锁定和层级关系。旧场景中带 `motion` 模型已有的合批关系会在派生快照中解除；重新打开及独立 Viewer 直接恢复校正后的拓扑。
 - 进入和退出运行预览只切换参数化脚本、动画、MQTT 遥测及编辑器标记的生命周期，直接复用已经完成的 Geometry 批次、批次 Mesh 和矩阵缓冲；不得再次执行完整 `SceneRuntime.sync()`、重新加载模型或把视觉合批拆回逐设备模型。
 
-2026-08-13 对 `珀莱雅一楼场景.scene.json` 执行只读回归：场景共 206 个实体、118 个链条机，原有 151 个持久化实例，统一序列化后为 153 个；二次保存拓扑稳定，链条机及全部逻辑实体的参数、`assetCode`、Transform、显隐、锁定、遥测、脚本和动画元数据保持不变。验证没有改写原场景文件。
+2026-08-14 对 `珀莱雅一楼场景.scene.json` 执行只读回归：场景共 206 个实体、118 个链条机，原有 151 个持久化实例；应用 `dataDriven.motion` 排除规则后为 29 个，旧的 motion 模型合批关系已解除。二次保存拓扑稳定，链条机及全部逻辑实体的参数、`dataDriven`、`assetCode`、Transform、显隐、锁定、遥测、脚本和动画元数据保持不变，且没有改写原场景文件。
 
 2026-07-23 使用指定的 `Untitled Scene.scene.json`（SHA-256 `f9d9fa6dc156dd0f96b5ba76f794ee2454efde415b7965b91cae92244a459b54`）和仓库内真实 YZJ/链条机 GLB、脚本进行 NullEngine 初始化回归：29,893,835 字节场景包含 1,840 个实体，其中 1,821 个模型被归并为 4 个参数变体源和 1,817 个逻辑 thinInstance 实体；实际只加载 4 次模型源，生成 135 个批次 Mesh、38,027 个 thinInstance，最终有效渲染 Mesh 为 270。最终一次运行中反序列化约 612 ms、编辑态分组约 572 ms、真实脚本与矩阵批次从 `sync()` 到就绪约 2.40 s，脚本警告和运行时日志均为 0。该数据用于验证初始化数量级和完整性，不等同于最终 Electron 窗口的 GPU 上传或首帧时间。
 
@@ -228,6 +228,7 @@ npm run smoke:installer:gpu
 - 加载调度器最大并发 4、FIFO 与 dispose；
 - 100 个同源静态实体在编辑态只保留 1 个真实模型和 99 个 thinInstance，进入及退出运行预览继续复用同一批次、批次 Mesh 和矩阵缓冲；
 - 未知外置脚本明确回退，8 个已核对参数化脚本允许按完整结构模板分组；
+- `dataDriven` 不含 `motion` 时保持原准入规则；自有 `motion` 键值为空对象或 `null` 时均禁止合批，并解除旧场景已有的对应实例关系；
 - 多个已有阵列源在编辑态覆盖和持久化快照中统一为直接源引用；输入 Store 保持不变，旧 `modelArray.items` 源保持兼容；
 - 保存、数据中台发布和独立部署导出共用幂等合批入口，序列化重开后不形成链式引用，并保留参数、脚本、动画、Transform、显隐、锁定、`assetCode` 和遥测绑定；
 - 1000 个模型阵列实体仍只加载一个源模型，每个源 Mesh 只增加一个批次 Mesh；

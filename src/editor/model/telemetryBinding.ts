@@ -10,6 +10,8 @@ export type ModelDataDrivenConfig = {
     calibrationRate?: number;
     rpmToMetersPerSecond?: number;
   };
+  /** meta.json 的 dataDriven 是否声明自有 motion 键；只记录键存在语义，值仍按既有规则归一化。 */
+  motion?: true;
   /** specialized 模型的 motion 原文透传，仅作 Inspector 只读摘要数据源。 */
   specializedMotion?: Record<string, unknown>;
   /** specialized 模型的 cargo 原文透传（conveyor 走行参数 / rgv 载货台面节点），仅作 Inspector 只读摘要数据源。 */
@@ -149,14 +151,18 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
   const defaultAssetCode = normalizeOptionalString(device.defaultAssetCode);
   const calibrationRate = device.calibrationRate === undefined ? undefined : normalizeFiniteNumber(device.calibrationRate, 4, 0.01, 10000);
   const rpmToMetersPerSecond = device.rpmToMetersPerSecond === undefined ? undefined : normalizeFiniteNumber(device.rpmToMetersPerSecond, 0.01, 0, 1000);
-  const specializedMotion = isSpecializedTelemetryDeviceType(devType) && isPlainObject(value.motion)
-    ? JSON.parse(JSON.stringify(value.motion)) as Record<string, unknown>
+  // specializedMotion 是旧场景中的归一化字段；将它视为 motion 来源可保持再次打开时的键存在语义和配置幂等。
+  const hasMotionKey = Object.prototype.hasOwnProperty.call(value, 'motion')
+    || Object.prototype.hasOwnProperty.call(value, 'specializedMotion');
+  const motionValue = isPlainObject(value.specializedMotion) ? value.specializedMotion : value.motion;
+  const specializedMotion = isSpecializedTelemetryDeviceType(devType) && isPlainObject(motionValue)
+    ? JSON.parse(JSON.stringify(motionValue)) as Record<string, unknown>
     : undefined;
   const cargo = isSpecializedTelemetryDeviceType(devType) && isPlainObject(value.cargo)
     ? JSON.parse(JSON.stringify(value.cargo)) as Record<string, unknown>
     : undefined;
   const fixedNodes = normalizeStringArray(value.fixedNodes);
-  if (!deviceName && !devType && !defaultAssetCode && !specializedMotion && !cargo && fixedNodes.length === 0) return null;
+  if (!deviceName && !devType && !defaultAssetCode && !hasMotionKey && !specializedMotion && !cargo && fixedNodes.length === 0) return null;
   return {
     device: {
       ...(deviceName ? { device: deviceName } : {}),
@@ -165,6 +171,7 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
       ...(calibrationRate !== undefined ? { calibrationRate } : {}),
       ...(rpmToMetersPerSecond !== undefined ? { rpmToMetersPerSecond } : {}),
     },
+    ...(hasMotionKey ? { motion: true } : {}),
     ...(specializedMotion ? { specializedMotion } : {}),
     ...(cargo ? { cargo } : {}),
     fixedNodes,
