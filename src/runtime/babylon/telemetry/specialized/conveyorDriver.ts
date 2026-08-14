@@ -2,6 +2,7 @@ import type { Scene } from '@babylonjs/core';
 import { TransformNode, Vector3 } from '@babylonjs/core';
 import {
   clampNumber,
+  computeRootRelativeWorldMatrix,
   filterTopLevelMotionNodes,
   findModelNodes,
   getHorizontalModelAxis,
@@ -10,6 +11,7 @@ import {
   getNodeWorldRotation,
   getNodesWorldBounds,
   projectWorldBoundsOntoAxis,
+  transformWorldBounds,
 } from '../../runtimeNodeGeometry';
 import { isPlainRecord, sanitizeBabylonName } from '../../runtimeValueUtils';
 import {
@@ -892,11 +894,18 @@ export class ConveyorTelemetryDriver {
     spanMeters: number | null;
   } {
     const travelConfig = readConveyorCargoTravelConfig(model);
-    const configuredNodes = this.findConveyorCargoSpanNodes(model, travelConfig);
+    // 合批遥测代理无自身节点：行程节点与包围盒取自宿主模型，再按相对位姿换算到代理世界系。
+    const geometryHost = model.telemetryProxySource ?? model;
+    const configuredNodes = this.findConveyorCargoSpanNodes(geometryHost, travelConfig);
     const conveyorNodes = configuredNodes.length > 0
       ? configuredNodes
-      : findModelNodes(model, this.scene, /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i);
-    const bounds = (conveyorNodes.length > 0 ? getNodesWorldBounds(conveyorNodes) : null) ?? this.host.getModelWorldBounds(model);
+      : findModelNodes(geometryHost, this.scene, /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i);
+    let bounds = (conveyorNodes.length > 0 ? getNodesWorldBounds(conveyorNodes) : null)
+      ?? this.host.getModelWorldBounds(geometryHost);
+    if (model.telemetryProxySource && bounds) {
+      const relativeMatrix = computeRootRelativeWorldMatrix(model.telemetryProxySource.root, model.root);
+      bounds = relativeMatrix ? transformWorldBounds(bounds, relativeMatrix) : null;
+    }
     const center = bounds
       ? bounds.minimum.add(bounds.maximum).scale(0.5)
       : model.root.getAbsolutePosition();

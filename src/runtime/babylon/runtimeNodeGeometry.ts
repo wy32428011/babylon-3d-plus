@@ -37,6 +37,41 @@ export function createPointWorldBounds(point: Vector3): RuntimeWorldBounds {
   };
 }
 
+/** 组合相对矩阵：把源根节点世界系中的点换算到目标根节点世界系（M_target × M_source⁻¹），源变换奇异时返回 null。 */
+export function computeRootRelativeWorldMatrix(sourceRoot: TransformNode, targetRoot: TransformNode): Matrix | null {
+  sourceRoot.computeWorldMatrix(true);
+  targetRoot.computeWorldMatrix(true);
+  const inverseSourceWorld = sourceRoot.getWorldMatrix().clone();
+  const determinant = inverseSourceWorld.determinant();
+  if (!Number.isFinite(determinant) || Math.abs(determinant) <= 1e-12) return null;
+  inverseSourceWorld.invert();
+  return targetRoot.getWorldMatrix().multiply(inverseSourceWorld);
+}
+
+/** 世界 AABB 按矩阵变换 8 个角点后重建，旋转/缩放下仍保持轴对齐；出现非法数值时返回 null。 */
+export function transformWorldBounds(bounds: RuntimeWorldBounds, matrix: Matrix): RuntimeWorldBounds | null {
+  const { minimum, maximum } = bounds;
+  const corners = [
+    new Vector3(minimum.x, minimum.y, minimum.z),
+    new Vector3(minimum.x, minimum.y, maximum.z),
+    new Vector3(minimum.x, maximum.y, minimum.z),
+    new Vector3(minimum.x, maximum.y, maximum.z),
+    new Vector3(maximum.x, minimum.y, minimum.z),
+    new Vector3(maximum.x, minimum.y, maximum.z),
+    new Vector3(maximum.x, maximum.y, minimum.z),
+    new Vector3(maximum.x, maximum.y, maximum.z),
+  ];
+
+  let merged: RuntimeWorldBounds | null = null;
+  for (const corner of corners) {
+    const transformed = Vector3.TransformCoordinates(corner, matrix);
+    if (!isFiniteVector3(transformed)) return null;
+    const pointBounds = { minimum: transformed, maximum: transformed };
+    merged = merged ? mergeWorldBounds(merged, pointBounds) : pointBounds;
+  }
+  return merged;
+}
+
 /** 从 Mesh 的 Babylon BoundingInfo 读取世界空间包围盒。 */
 export function getMeshWorldBounds(mesh: AbstractMesh): RuntimeWorldBounds | null {
   mesh.computeWorldMatrix(true);

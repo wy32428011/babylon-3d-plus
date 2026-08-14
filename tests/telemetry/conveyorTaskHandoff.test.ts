@@ -63,6 +63,8 @@ type HarnessDeviceConfig = {
   rotationY?: number;
   /** telemetryBinding.trajectoryDirection（x/-x/z/-z，模型本地坐标）。 */
   trajectoryDirection?: string;
+  /** 合批遥测代理：无自身几何，包围盒/行程经宿主模型按相对位姿换算（值为宿主 assetCode）。 */
+  proxyOf?: string;
 };
 
 /** 多设备 harness：共享货物表与 collectModels 视图，帧函数镜像 facade（applyToModel 后执行帧尾外部拉取扫描）。 */
@@ -76,6 +78,8 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
   for (const [assetCode, config] of Object.entries(layout)) {
     const root = new TransformNode(`${assetCode}_root`, scene);
     if (config.rotationY !== undefined) root.rotation.y = config.rotationY;
+    // 代理条目必须把根节点放到自身位姿：相对矩阵换算依赖宿主与代理的根节点世界矩阵差。
+    if (config.proxyOf) root.position.x = config.centerX;
     const binding: Record<string, unknown> = {};
     if (config.autoDispose !== undefined) binding.cargoAutoDispose = config.autoDispose;
     if (config.origin !== undefined) binding.cargoOriginDevice = config.origin;
@@ -92,6 +96,12 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       externalScriptRuntime: null,
     } as unknown as ModelRuntimeEntry;
     models.set(assetCode, model);
+  }
+  for (const [assetCode, config] of Object.entries(layout)) {
+    if (!config.proxyOf) continue;
+    const host = models.get(config.proxyOf);
+    assert.ok(host, `代理 ${assetCode} 的宿主 ${config.proxyOf} 必须存在`);
+    (models.get(assetCode) as { telemetryProxySource?: ModelRuntimeEntry }).telemetryProxySource = host;
   }
 
   const host = {
@@ -761,6 +771,42 @@ test('trajectoryDirection 为模型本地坐标：模型旋转 180° 后正转�
     } finally {
       h2.dispose();
     }
+  } finally {
+    h.dispose();
+  }
+});
+
+test('合批遥测代理：订阅沿代理几何上行注册，货物越级直达交付到代理设备', () => {
+  // CV3 是 CV2 的合批代理（无自身几何，包围盒经宿主换算）；链路必须穿过宿主邻居 CV2 到达 CV1。
+  const h = makeHarness({
+    CV1: { centerX: -4, origin: true },
+    CV2: { centerX: 0 },
+    CV3: { centerX: 4, proxyOf: 'CV2' },
+  });
+  try {
+    const stamp = 1_000_000;
+    // CV3（代理）先收 task：探测点由宿主包围盒换算得到，订阅沿 CV3→CV2→CV1 上行注册
+    h.apply('CV3', { task: 9, movement_x: 1 }, 0.1, 1, stamp);
+    assert.equal(h.models.CV3.conveyorTelemetry.waitingTask, '9', '代理设备必须登记等待 task');
+    assert.ok(h.models.CV2.conveyorTelemetry.downstreamLinks.has('CV3'), '订阅必须途经宿主邻居 CV2');
+    assert.ok(h.models.CV1.conveyorTelemetry.downstreamLinks.has('CV3'), '订阅必须传递到起点 CV1');
+
+    // CV1 刷出后事件驱动交付：货物越级直达最终订阅者 CV3（代理的行程上下文参与交付落地）
+    h.apply('CV1', { task: 9, movement_x: 1 });
+    const pushed = onlyCargo(h.state);
+    assert.equal(pushed.assetCode, 'CV3', '货物必须换绑到代理设备');
+    assert.equal(pushed.task, '9');
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, null, '持有方引用必须清空');
+    assert.equal(h.models.CV3.conveyorTelemetry.cargoCode, 'cargo', '代理设备必须接管货物身份');
+    assert.equal(h.models.CV3.conveyorTelemetry.waitingTask, null, '被交付后必须退出等待');
+    assert.ok(Math.abs(h.models.CV3.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE)) < 1e-6,
+      '代理设备货物必须从本机刷出端开始走行');
+    assert.equal(h.models.CV3.conveyorTelemetry.selfDriveDirection, 1, '承接后必须登记自驱方向');
+
+    // 代理设备断流自驱（同一 receivedAt 重放）：货物从 CV3 刷出端（世界 x=4−1.64）向终点推进
+    h.apply('CV3', { task: 9, movement_x: 0 }, 0.1, 5, stamp);
+    const movedX = pushed.root.position.x;
+    assert.ok(movedX > 4 - HALF_RANGE, `代理设备货物必须在本机位姿走行，实际 x=${movedX}`);
   } finally {
     h.dispose();
   }

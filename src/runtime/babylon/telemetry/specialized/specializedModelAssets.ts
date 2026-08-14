@@ -125,7 +125,9 @@ export function resetRgvTelemetryState(model: ModelRuntimeEntry): void {
 
 /** 遍历模型脚本声明的 conveyor dataDriven 配置块，运行时只接受 devType=conveyor。 */
 function* iterateConveyorDataDrivenConfigs(model: ModelRuntimeEntry): Generator<Record<string, unknown>> {
-  for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+  // 合批遥测代理自身不持有脚本运行时，配置读取委托给承载几何的宿主模型。
+  const scriptRuntime = model.externalScriptRuntime ?? model.telemetryProxySource?.externalScriptRuntime ?? null;
+  for (const dataDriven of scriptRuntime?.getDataDrivenConfigs() ?? []) {
     if (!isPlainRecord(dataDriven)) continue;
     const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
     const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';

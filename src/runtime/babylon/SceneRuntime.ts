@@ -131,6 +131,7 @@ import { resolveLocatorBoxIndex, resolveLocatorCellSupportWorldPosition } from '
 import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from './runtimeValueUtils';
 import {
   clampNumber,
+  computeRootRelativeWorldMatrix,
   createLocalAxis,
   createPointWorldBounds,
   filterTopLevelMotionNodes,
@@ -154,6 +155,7 @@ import {
   normalizeVector,
   projectPointOntoAxis,
   projectWorldBoundsOntoAxis,
+  transformWorldBounds,
   uniqueTransformNodes,
   worldDeltaToParentLocalDelta,
   type RuntimeWorldBounds,
@@ -331,6 +333,11 @@ export type ModelRuntimeEntry = {
   rgvTelemetry: RgvModelTelemetryState;
   stackerTelemetryReady: boolean;
   telemetryPreviewBaseline: ModelTelemetryPreviewBaseline | null;
+  /**
+   * 合批阵列中仅承载遥测身份的代理条目：指向提供几何与脚本配置的宿主模型（源模型或参数变体）。
+   * 普通模型为 undefined；代理条目无网格，渲染仍由宿主批次的 thinInstance 承担。
+   */
+  telemetryProxySource?: ModelRuntimeEntry;
 };
 
 /** 同一源模型下，一个独立参数组合只保留一个隐藏脚本宿主和一个 thinInstance 批次。 */
@@ -587,6 +594,8 @@ export class SceneRuntime {
   private readonly modelArrayInstanceEntities = new Map<string, Entity>();
   private readonly modelArrayParameterVariants = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
   private readonly modelArrayParameterVariantByEntityId = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
+  /** 合批 conveyor 实例的遥测代理（key=实例实体 ID）：无几何，仅承载设备身份与遥测状态。 */
+  private readonly modelArrayTelemetryProxies = new Map<string, ModelRuntimeEntry>();
   private readonly pendingModelArraySourceResyncs = new Map<string, string | null>();
   private readonly pendingModelArrayVariantRenderSuppressions = new Set<TransformNode>();
   private readonly suppressedModelArrayVariantRootsThisFrame = new Set<TransformNode>();
@@ -695,6 +704,9 @@ export class SceneRuntime {
         }
         for (const variant of this.modelArrayParameterVariants.values()) {
           models.push({ entityId: variant.representativeEntityId, model: variant.model });
+        }
+        for (const [entityId, proxy] of this.modelArrayTelemetryProxies.entries()) {
+          models.push({ entityId, model: proxy });
         }
         return models;
       },
@@ -981,6 +993,9 @@ export class SceneRuntime {
       resetStackerTelemetryState(variant.model);
       resetConveyorTelemetryState(variant.model);
       resetRgvTelemetryState(variant.model);
+    }
+    for (const proxy of this.modelArrayTelemetryProxies.values()) {
+      resetConveyorTelemetryState(proxy);
     }
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('edit', null);
@@ -2020,6 +2035,15 @@ export class SceneRuntime {
 
   /** 导入模型只汇总内部层级有效且有顶点的子网格包围盒，加载中则回退到模型根节点位置。 */
   private getModelWorldBounds(model: ModelRuntimeEntry): RuntimeWorldBounds | null {
+    // 遥测代理没有自身网格：把宿主模型的世界包围盒按两台设备的相对位姿换算到代理位姿。
+    const proxySource = model.telemetryProxySource;
+    if (proxySource) {
+      const sourceBounds = this.getModelWorldBounds(proxySource);
+      if (!sourceBounds) return null;
+      const relativeMatrix = computeRootRelativeWorldMatrix(proxySource.root, model.root);
+      return relativeMatrix ? transformWorldBounds(sourceBounds, relativeMatrix) : null;
+    }
+
     let mergedBounds: RuntimeWorldBounds | null = null;
 
     for (const mesh of model.meshes) {
@@ -2226,6 +2250,7 @@ export class SceneRuntime {
     this.syncEntity(entity, this.isEntityHighlighted(entityId));
     this.syncedEntities.set(entityId, entity);
     this.syncAllModelArrayBatches(document, dirtyModelArraySourceIds, entityId);
+    this.syncModelArrayTelemetryProxies();
     this.disposeStaleModelArrayGizmoProxy();
     this.rebuildModelSelectionOutline();
   }
@@ -2461,6 +2486,7 @@ export class SceneRuntime {
 
     this.syncSkybox(document);
     this.syncAllModelArrayBatches(document, dirtyModelArraySourceIds);
+    this.syncModelArrayTelemetryProxies();
     this.disposeStaleModelArrayGizmoProxy();
     this.selectedEntityIds = selectedEntityIds;
     this.rebuildLocatorTargetIndex(document);
@@ -2730,6 +2756,9 @@ export class SceneRuntime {
     }
     for (const variant of [...this.modelArrayParameterVariants.values()]) {
       this.disposeModelArrayParameterVariant(variant);
+    }
+    for (const [entityId, proxy] of [...this.modelArrayTelemetryProxies.entries()]) {
+      this.disposeModelArrayTelemetryProxy(entityId, proxy);
     }
     for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
       this.disposeModelGenerator(entityId, modelGenerator);
@@ -3732,6 +3761,13 @@ export class SceneRuntime {
       if (model.telemetryPreviewBaseline || !model.assetHandle || !model.stackerTelemetryReady) continue;
       model.telemetryPreviewBaseline = captureModelTelemetryPreviewBaseline({ root: model.root, contentRoot: model.contentRoot });
     }
+    // 遥测代理无几何无需捕获基线，但探测邻居/行程缓存需要同样的预热；就绪状态跟随宿主。
+    for (const proxy of this.modelArrayTelemetryProxies.values()) {
+      if (!proxy.assetHandle || !proxy.stackerTelemetryReady) continue;
+      if (this.specializedTelemetryRuntime.resolveDeviceType(proxy) === 'conveyor') {
+        this.specializedTelemetryRuntime.primeConveyorLinkCaches(proxy);
+      }
+    }
   }
 
   /** 清空 SceneRuntime 级别的预览诊断、metadata 和已上报状态，不影响模型注册或编译绑定。 */
@@ -3742,6 +3778,9 @@ export class SceneRuntime {
     }
     for (const variant of this.modelArrayParameterVariants.values()) {
       this.specializedTelemetryRuntime.clearDiagnosticsForModel(variant.model);
+    }
+    for (const proxy of this.modelArrayTelemetryProxies.values()) {
+      this.specializedTelemetryRuntime.clearDiagnosticsForModel(proxy);
     }
     for (const owner of this.generatedOutputOwners.values()) {
       if (owner.output?.kind === 'model') {
@@ -5279,6 +5318,114 @@ export class SceneRuntime {
   }
 
   /**
+   * 合批 conveyor 只失去渲染身份，不失去设备身份：为每台启用遥测的非代表实例维护一个
+   * 无几何遥测代理（独立 assetCode/binding/遥测状态），几何查询经 telemetryProxySource
+   * 换算回宿主模型，链路协议与货物走行无需拆批即可逐设备运行。
+   */
+  private syncModelArrayTelemetryProxies(): void {
+    const desired = new Map<string, { entity: Entity; host: ModelRuntimeEntry }>();
+    for (const instanceEntity of this.modelArrayInstanceEntities.values()) {
+      const modelAsset = instanceEntity.components.modelAsset;
+      const binding = instanceEntity.components.telemetryBinding;
+      if (!modelAsset || !binding || binding.enabled === false) continue;
+      if (!isConveyorModelAsset(modelAsset)) continue;
+
+      const variant = this.modelArrayParameterVariantByEntityId.get(instanceEntity.id);
+      if (variant) {
+        // 变体代表机的位姿与身份由变体宿主模型直接承载，无需代理。
+        if (variant.representativeEntityId === instanceEntity.id) continue;
+        desired.set(instanceEntity.id, { entity: instanceEntity, host: variant.model });
+        continue;
+      }
+
+      // 未映射变体：与源同签名说明由源批次承载；签名不同则参数变体宿主尚未就绪，等重同步后再建代理。
+      const sourceEntityId = instanceEntity.components.modelArrayInstance?.sourceEntityId;
+      const sourceModel = sourceEntityId ? this.models.get(sourceEntityId) : null;
+      const sourceEntity = sourceModel?.entitySnapshot ?? null;
+      const sourceModelAsset = sourceEntity?.components.modelAsset;
+      if (!sourceModel || !sourceEntity || !sourceModelAsset) continue;
+      if (
+        this.createModelArrayRenderSignature(modelAsset, binding)
+        !== this.createModelArrayRenderSignature(sourceModelAsset, sourceEntity.components.telemetryBinding)
+      ) {
+        continue;
+      }
+      desired.set(instanceEntity.id, { entity: instanceEntity, host: sourceModel });
+    }
+
+    for (const [entityId, proxy] of [...this.modelArrayTelemetryProxies.entries()]) {
+      const target = desired.get(entityId);
+      if (!target || proxy.telemetryProxySource !== target.host) {
+        this.disposeModelArrayTelemetryProxy(entityId, proxy);
+      }
+    }
+    for (const [entityId, target] of desired) {
+      const proxy = this.modelArrayTelemetryProxies.get(entityId)
+        ?? this.createModelArrayTelemetryProxy(target.entity, target.host);
+      proxy.entitySnapshot = target.entity;
+      proxy.assetCode = target.entity.components.modelAsset?.assetCode ?? proxy.assetCode;
+      proxy.telemetryBinding = target.entity.components.telemetryBinding ?? null;
+      this.applyTransform(proxy.root, target.entity.components.transform);
+    }
+  }
+
+  /** 创建合批 conveyor 实例的遥测代理：加载/就绪门控通过访问器跟随宿主，避免异步时序两处各写一份。 */
+  private createModelArrayTelemetryProxy(entity: Entity, host: ModelRuntimeEntry): ModelRuntimeEntry {
+    const modelAsset = entity.components.modelAsset;
+    const root = new TransformNode(`__telemetryProxy_${sanitizeBabylonName(entity.id)}`, this.scene);
+    const contentRoot = new TransformNode(`__telemetryProxyContent_${sanitizeBabylonName(entity.id)}`, this.scene);
+    contentRoot.parent = root;
+    this.applyTransform(root, entity.components.transform);
+
+    const proxy: ModelRuntimeEntry = {
+      sourceUrl: modelAsset?.sourceUrl ?? host.sourceUrl,
+      assetRevision: modelAsset?.assetRevision ?? null,
+      assetSignature: host.assetSignature,
+      entitySnapshot: entity,
+      assetCode: modelAsset?.assetCode ?? '',
+      telemetryBinding: entity.components.telemetryBinding ?? null,
+      stackerCapable: false,
+      conveyorCapable: true,
+      rgvCapable: false,
+      root,
+      contentRoot,
+      assetHandle: null,
+      meshes: [],
+      modelArraySuspendedMeshes: new Set(),
+      modelArrayBatch: null,
+      modelArraySourceSignature: '',
+      modelArrayFailureSignature: '',
+      highlighted: false,
+      loadToken: 0,
+      cancelLoad: null,
+      parameterSignature: '',
+      parameterBaseline: new Map(),
+      textureCache: new Map(),
+      externalScriptRuntime: null,
+      externalScriptSignature: '',
+      externalScriptStarting: false,
+      measurementReady: true,
+      stackerTelemetry: createStackerTelemetryState(root),
+      conveyorTelemetry: createConveyorTelemetryState(),
+      rgvTelemetry: createRgvTelemetryState(root),
+      stackerTelemetryReady: false,
+      telemetryPreviewBaseline: null,
+      telemetryProxySource: host,
+    };
+    Object.defineProperty(proxy, 'assetHandle', { get: () => host.assetHandle });
+    Object.defineProperty(proxy, 'stackerTelemetryReady', { get: () => host.stackerTelemetryReady });
+    this.modelArrayTelemetryProxies.set(entity.id, proxy);
+    return proxy;
+  }
+
+  /** 销毁遥测代理：代理自身没有网格与资产，只释放位姿节点子树。 */
+  private disposeModelArrayTelemetryProxy(entityId: string, proxy: ModelRuntimeEntry): void {
+    if (this.modelArrayTelemetryProxies.get(entityId) !== proxy) return;
+    this.modelArrayTelemetryProxies.delete(entityId);
+    if (!proxy.root.isDisposed()) proxy.root.dispose(false, false);
+  }
+
+  /**
    * 将引用同一源模型的 N 个独立 Scene Entity 一次性提交为 thinInstance 矩阵。
    * 每个实体继续拥有独立名称、资产编号、Transform、显隐、锁定、删除和选择语义。
    */
@@ -5841,6 +5988,7 @@ export class SceneRuntime {
       const sourceEntity = sourceModel?.entitySnapshot;
       if (!sourceModel || !sourceEntity?.components.modelAsset || sourceEntity.components.modelArrayInstance) return;
       this.syncModelArrayBatch(sourceEntity, sourceModel, changedEntityId);
+      this.syncModelArrayTelemetryProxies();
       this.rebuildModelSelectionOutline();
     });
   }
