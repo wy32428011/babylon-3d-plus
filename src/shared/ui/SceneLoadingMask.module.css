@@ -63,7 +63,7 @@
 
 .brandFill {
   background: linear-gradient(90deg, #176bd7, #2f9dff 58%, #77c8ff);
-  clip-path: inset(0 calc(100% - var(--scene-preparation-progress)) 0 0);
+  clip-path: inset(0 calc(100% - var(--scene-loading-progress)) 0 0);
   mask: url('../../assets/branding/zending-scene-loading-logo.png') center / contain no-repeat;
   transition: clip-path 180ms ease-out;
 }

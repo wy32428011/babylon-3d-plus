@@ -3,11 +3,9 @@
   font-family: Inter, "Microsoft YaHei", system-ui, sans-serif;
   background: #141414;
 }
-
 * {
   box-sizing: border-box;
 }
-
 html,
 body,
 #root,
@@ -17,11 +15,9 @@ body,
   margin: 0;
   overflow: hidden;
 }
-
 .player-root {
   position: relative;
 }
-
 .player-canvas {
   display: block;
   width: 100%;
@@ -29,7 +25,6 @@ body,
   outline: none;
   touch-action: none;
 }
-
 .player-status {
   position: absolute;
   top: 16px;
@@ -43,13 +38,11 @@ body,
   backdrop-filter: blur(8px);
   pointer-events: none;
 }
-
 .player-status strong,
 .player-status p {
   display: block;
   margin: 0;
 }
-
 .player-status p {
   margin-top: 6px;
   color: #c8d0da;
@@ -57,7 +50,6 @@ body,
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
-
 .player-status-blocked {
   border-color: rgb(255 92 92 / 58%);
   background: rgb(72 18 22 / 92%);
