@@ -197,6 +197,7 @@ import {
   isConveyorRuntimeModel,
   isRgvModelAsset,
   isStackerModelAsset,
+  readConveyorCargoSurfaceOffset,
   readConveyorCargoTravelConfig,
   resetConveyorTelemetryState,
   resetRgvTelemetryState,
@@ -466,12 +467,14 @@ type ConveyorTrajectoryRuntimeEntry = {
   flowObserver: Observer<Scene>;
 };
 
-/** 轨迹行程上下文：中心点（模型局部）、行走轴与世界方向、行程长度。 */
+/** 轨迹行程上下文：中心点（模型局部）、行走轴与世界方向、行程长度、支撑面局部高度。 */
 type ConveyorTrajectoryContext = {
   centerLocal: Vector3;
   travelAxisName: 'x' | 'z';
   travelAxisWorld: Vector3;
   spanMeters: number;
+  /** 货物支撑面（设备包围盒上表面 + cargo.surfaceOffset）在模型局部空间的 y 高度，与 conveyorDriver 的 surfaceLiftMeters 同源。 */
+  surfaceYLocal: number;
 };
 
 type EntityRuntimeState = {
@@ -644,6 +647,7 @@ export class SceneRuntime {
   private readonly skyboxRuntime: SceneSkyboxRuntime;
   private readonly environmentRuntime: SceneEnvironmentRuntime;
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
+  private readonly reportedOverlappingLocatorRanges = new Set<string>();
   private telemetryPreviewActive = false;
   private modelArrayIdentityMode: SceneRuntimeModelArrayIdentityMode = 'device';
   private readonly reportedCargoIssues = new Set<string>();
@@ -2778,6 +2782,7 @@ export class SceneRuntime {
     this.locators.clear();
     this.locatorTargets.clear();
     this.reportedDuplicateLocatorTargets.clear();
+    this.reportedOverlappingLocatorRanges.clear();
     this.cadReferences.clear();
     this.conveyorTrajectories.clear();
     this.models.clear();
@@ -2897,9 +2902,33 @@ export class SceneRuntime {
     for (const assetId of [...this.reportedDuplicateLocatorTargets]) {
       if (!duplicateAssetIds.has(assetId)) this.reportedDuplicateLocatorTargets.delete(assetId);
     }
+
+    // 同设备同排的列/层范围重叠检测：front_ 定位要求唯一命中，重叠时在编辑期即告警，运行时拒绝定位
+    const overlappingPairs = new Set<string>();
+    for (const [deviceCode, rowMap] of this.locatorDeviceIndex) {
+      for (const [rowNumber, list] of rowMap) {
+        for (let i = 0; i < list.length; i += 1) {
+          for (let j = i + 1; j < list.length; j += 1) {
+            const a = list[i];
+            const b = list[j];
+            const columnOverlap = a.startColumn < b.startColumn + b.columns && b.startColumn < a.startColumn + a.columns;
+            const layerOverlap = a.startLayer < b.startLayer + b.layers && b.startLayer < a.startLayer + a.layers;
+            if (!columnOverlap || !layerOverlap) continue;
+            const pairKey = `${deviceCode}:${rowNumber}:${[a.assetId, b.assetId].sort().join('|')}`;
+            overlappingPairs.add(pairKey);
+            if (this.reportedOverlappingLocatorRanges.has(pairKey)) continue;
+            this.reportedOverlappingLocatorRanges.add(pairKey);
+            this.pushLog(`错误：定位线框「${a.assetId}」（列${a.startColumn}-${a.startColumn + a.columns - 1} 层${a.startLayer}-${a.startLayer + a.layers - 1}）与「${b.assetId}」（列${b.startColumn}-${b.startColumn + b.columns - 1} 层${b.startLayer}-${b.startLayer + b.layers - 1}）关联同一设备 ${deviceCode} 排${rowNumber} 且范围重叠，front_ 定位将拒绝命中重叠区域，请调整使范围互不重叠。`);
+          }
+        }
+      }
+    }
+    for (const key of [...this.reportedOverlappingLocatorRanges]) {
+      if (!overlappingPairs.has(key)) this.reportedOverlappingLocatorRanges.delete(key);
+    }
   }
 
-  /** 按设备编号 + 排号 + 列/层范围查找目标 Locator，支持多 Locator 绑定同一设备。 */
+  /** 按设备编号 + 排号 + 列/层范围查找目标 Locator：front_ 定位要求 (x, y, z) 唯一命中，零个或多个（同排范围重叠）命中都返回 null。 */
   private findLocatorByDevice(
     deviceAssetCode: string,
     toX: number,
@@ -2910,12 +2939,15 @@ export class SceneRuntime {
     if (!rowMap) return null;
     const list = rowMap.get(toZ);
     if (!list?.length) return null;
+    let matched: LocatorRuntimeEntry | null = null;
     for (const locator of list) {
-      if (toX >= locator.startColumn && toX < locator.startColumn + locator.columns && toY >= locator.startLayer && toY < locator.startLayer + locator.layers) {
-        return locator;
-      }
+      const covered = toX >= locator.startColumn && toX < locator.startColumn + locator.columns
+        && toY >= locator.startLayer && toY < locator.startLayer + locator.layers;
+      if (!covered) continue;
+      if (matched) return null;
+      matched = locator;
     }
-    return null;
+    return matched;
   }
 
   /** 返回设备绑定的全部 Locator（所有排），无绑定时返回空数组。 */
@@ -4507,6 +4539,7 @@ export class SceneRuntime {
       context.travelAxisName,
       round(context.centerLocal),
       context.spanMeters.toFixed(4),
+      context.surfaceYLocal.toFixed(4),
     ]);
   }
 
@@ -4521,7 +4554,7 @@ export class SceneRuntime {
     const bounds = (conveyorNodes.length > 0 ? getNodesWorldBounds(conveyorNodes) : null)
       ?? this.getModelWorldBounds(model);
     if (!bounds) {
-      return { centerLocal: Vector3.Zero(), travelAxisName, travelAxisWorld: Vector3.Right(), spanMeters: 0 };
+      return { centerLocal: Vector3.Zero(), travelAxisName, travelAxisWorld: Vector3.Right(), spanMeters: 0, surfaceYLocal: 0 };
     }
     const center = bounds.minimum.add(bounds.maximum).scale(0.5);
     const travelAxisWorld = getHorizontalModelAxis(model.root, travelAxisName);
@@ -4532,7 +4565,13 @@ export class SceneRuntime {
     const rootWorldInverse = model.root.getWorldMatrix().clone();
     rootWorldInverse.invert();
     const centerLocal = Vector3.TransformCoordinates(center, rootWorldInverse);
-    return { centerLocal, travelAxisName, travelAxisWorld, spanMeters };
+    // 与 conveyorDriver.resolveConveyorCargoTravelContext 同源：包围盒沿竖直轴投影最高点 + cargo.surfaceOffset。
+    const upAxisWorld = getModelAxis(model.root, 'y');
+    const liftWorld = projectWorldBoundsOntoAxis(bounds, upAxisWorld).max
+      - Vector3.Dot(center, upAxisWorld)
+      + readConveyorCargoSurfaceOffset(model);
+    const surfaceYLocal = Vector3.TransformCoordinates(center.add(upAxisWorld.scale(liftWorld)), rootWorldInverse).y;
+    return { centerLocal, travelAxisName, travelAxisWorld, spanMeters, surfaceYLocal };
   }
 
   private findEditorConveyorMotionNodes(model: ModelRuntimeEntry, config: ConveyorCargoTravelConfig): TransformNode[] {
@@ -4552,7 +4591,7 @@ export class SceneRuntime {
     if (context.spanMeters <= 0.001) return;
 
     const half = context.spanMeters / 2;
-    const baseY = context.centerLocal.y + 0.15;
+    const baseY = context.surfaceYLocal;
     const startBase = context.centerLocal.subtract(createLocalAxis(context.travelAxisName).scale(half));
     const endBase = context.centerLocal.add(createLocalAxis(context.travelAxisName).scale(half));
     const start = new Vector3(startBase.x, baseY, startBase.z);

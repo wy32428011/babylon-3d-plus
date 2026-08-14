@@ -97,7 +97,8 @@ export class StackerTelemetryDriver {
   }
 
   /**
-   * 按 front_x/front_y/front_z 解析当前货格：三字段缺失或为 0 视为未上报（保持原位）；
+   * 按 front_x/front_y/front_z 解析当前货格：三字段全部缺失或全为 0（设备回原点空闲姿态）视为未上报（保持原位）；
+   * 任一非零即为真实坐标（允许单列/单层为 0，如起始列 0 的库位）；
    * 有值但匹配不到已绑定货格时一次性报错并冻结移动与伸叉（mismatch）。
    * key 为三字段组成的库位键，供首帧吸附与变化检测使用。
    */
@@ -107,7 +108,10 @@ export class StackerTelemetryDriver {
     const frontX = readIntegerField(snapshot.fields, 'front_x');
     const frontY = readIntegerField(snapshot.fields, 'front_y');
     const frontZ = readIntegerField(snapshot.fields, 'front_z');
-    if (!snapshot.assetCode || !frontX || !frontY || !frontZ) return { cell: null, mismatch: false, key: null };
+    if (!snapshot.assetCode || frontX === null || frontY === null || frontZ === null) {
+      return { cell: null, mismatch: false, key: null };
+    }
+    if (frontX === 0 && frontY === 0 && frontZ === 0) return { cell: null, mismatch: false, key: null };
     const key = JSON.stringify([frontX, frontY, frontZ]);
     const locator = this.host.findLocatorByDevice(snapshot.assetCode, frontX, frontY, frontZ);
     if (!locator) {

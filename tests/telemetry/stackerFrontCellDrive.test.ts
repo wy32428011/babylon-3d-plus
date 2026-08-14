@@ -268,6 +268,22 @@ test('front_ 三字段为 0 或缺失视为未上报：不驱动也不报错', (
   }
 });
 
+test('front_ 任一非零即为真实坐标：起始列 0 的线框库位正常定位', () => {
+  const h = makeHarness();
+  try {
+    // 起始列 0 起始层 1 的 1×2 线框：front(0, 2, 排2) → 列下标 0 层下标 1，支撑位 (0, 3, 11)
+    h.ref.locator = makeLocator(h.scene, { columns: 1, layers: 2, startColumn: 0, startLayer: 1, rootPosition: new Vector3(0, 2, 11) });
+    h.apply({ ...POSITION_FRAME, front_x: 0, front_y: 2, front_z: 2 }, 0.1, 1);
+    const position = h.model.stackerTelemetry.rootPosition;
+    assert.ok(position);
+    assert.ok(Math.abs(position.z - 11) < 1e-6, `列 0 必须定位到支撑位 z=11，实际 ${position.z}`);
+    assert.ok(Math.abs(h.model.stackerTelemetry.liftOffset - 3) < 1e-6, `层 2 必须定位到支撑位 y=3，实际 ${h.model.stackerTelemetry.liftOffset}`);
+    assert.equal(h.logs.filter((message) => message.includes('已绑定货格')).length, 0, '合法坐标不得报错');
+  } finally {
+    h.dispose();
+  }
+});
+
 /** 为模型补齐堆垛机几何：立柱 y[0,3]，载货台 y[0,0.2]，前后叉 y[0.2,0.3] → 物理升降行程 [0, 2.7]。 */
 function makeStackerGeometry(h: ReturnType<typeof makeHarness>): void {
   const root = h.model.root;
