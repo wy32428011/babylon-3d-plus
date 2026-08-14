@@ -74,6 +74,7 @@ import {
   getTopLevelHierarchyEntityIds,
   isEntityAncestorOf,
   isEntityEffectivelyLocked,
+  isEntityEffectivelyVisible,
   isHierarchyGroupTransformSelection,
   resolveHierarchyGroupTransformSelection,
 } from '../model/entityHierarchy';
@@ -1771,6 +1772,42 @@ function setEntitiesLockedInScene(scene: SceneDocument, entityIds: string[], loc
   }
 
   return { ...scene, entities };
+}
+
+/**
+ * 收集“显示被祖先隐藏的实体”时需要一并显示的隐藏祖先。
+ * 图标展示的是继承后的有效显隐；只翻转实体自身无法让被文件夹隐藏的模型真正出现。
+ */
+function collectVisibilityShowTargetIds(entities: Record<string, Entity>, entityId: string): string[] {
+  const targetIds = [entityId];
+  const visited = new Set<string>([entityId]);
+  let currentId = entities[entityId]?.parentId ?? null;
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    const current = entities[currentId];
+    if (!current) break;
+    if (current.visible === false) targetIds.push(currentId);
+    currentId = current.parentId ?? null;
+  }
+  return targetIds;
+}
+
+/**
+ * 收集“解锁被祖先锁定的实体”时需要一并解锁的锁定祖先。
+ * 与显隐按钮一致：按钮按继承后的有效锁定状态切换，否则会把子实体自身 locked 反向翻转。
+ */
+function collectLockUnlockTargetIds(entities: Record<string, Entity>, entityId: string): string[] {
+  const targetIds = [entityId];
+  const visited = new Set<string>([entityId]);
+  let currentId = entities[entityId]?.parentId ?? null;
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    const current = entities[currentId];
+    if (!current) break;
+    if (current.locked === true) targetIds.push(currentId);
+    currentId = current.parentId ?? null;
+  }
+  return targetIds;
 }
 
 /** 沿被移除文件夹向上查找最近仍存在的父文件夹。 */
@@ -3593,12 +3630,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   toggleEntityVisible: (entityId) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换显隐');
-      const entity = state.scene.entities[entityId];
+      const entities = state.scene.entities;
+      const entity = entities[entityId];
       if (!entity) return state;
 
-      const before = entity.visible !== false;
-      const after = !before;
-      const command = updateEntityVisibilityCommand(entityId, before, after);
+      // 按钮图标展示继承后的有效显隐；点击也按有效状态切换：
+      // 显示被祖先隐藏的模型时必须连同隐藏祖先一起显示，
+      // 否则会把自身 visible 反向翻转为 false，保存重开后模型永远无法出现。
+      const effectivelyVisible = isEntityEffectivelyVisible(entities, entity);
+      const command = effectivelyVisible
+        ? updateEntityVisibilityCommand(entityId, true, false)
+        : updateSceneDocumentCommand('显示对象', (scene) => setEntitiesVisibleInScene(
+            scene,
+            collectVisibilityShowTargetIds(scene.entities, entityId),
+            true,
+          ));
       const result = executeCommand(state.scene, state.history, command);
 
       return {
@@ -3611,12 +3657,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   toggleEntityLocked: (entityId) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '切换锁定');
-      const entity = state.scene.entities[entityId];
+      const entities = state.scene.entities;
+      const entity = entities[entityId];
       if (!entity) return state;
 
-      const before = entity.locked === true;
-      const after = !before;
-      const command = updateEntityLockCommand(entityId, before, after);
+      // 与显隐按钮一致：图标展示继承后的有效锁定；解锁被祖先锁定的实体时
+      // 必须连同锁定祖先一起解锁，否则会把自身 locked 反向翻转为 true。
+      const effectivelyLocked = isEntityEffectivelyLocked(entities, entity);
+      const command = effectivelyLocked
+        ? updateSceneDocumentCommand('解锁对象', (scene) => setEntitiesLockedInScene(
+            scene,
+            collectLockUnlockTargetIds(scene.entities, entityId),
+            false,
+          ))
+        : updateEntityLockCommand(entityId, false, true);
       const result = executeCommand(state.scene, state.history, command);
 
       return {

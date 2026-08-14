@@ -1043,14 +1043,14 @@ select {
 }
 
 .panel .entity-state-button {
-  border-right-color: rgb(255 255 255 / 22%);
-  background: #2f8cff;
-  color: #ffffff;
+  border-right-color: #3d3d3d;
+  background: transparent;
+  color: #a9a9a9;
   cursor: pointer;
 }
 
 .panel .entity-state-button + .entity-state-button {
-  border-left: 1px solid rgb(0 35 92 / 22%);
+  border-left: 1px solid #3d3d3d;
 }
 
 .panel .entity-state-button:hover,
@@ -1059,11 +1059,11 @@ select {
   background: rgb(255 255 255 / 10%);
 }
 
-.panel .entity-state-button:hover {
+.panel .entity-tree-row.selected .entity-state-button:hover {
   background: #4aa1ff;
 }
 
-.panel .entity-state-button:active {
+.panel .entity-tree-row.selected .entity-state-button:active {
   background: #2376df;
 }
 
@@ -1091,7 +1091,16 @@ select {
   color: #65d9f0;
 }
 
-.entity-tree-row.selected .entity-state-button,
+.entity-tree-row.selected .entity-state-button {
+  border-right-color: rgb(255 255 255 / 22%);
+  background: #2f8cff;
+  color: #ffffff;
+}
+
+.entity-tree-row.selected .entity-state-button + .entity-state-button {
+  border-left-color: rgb(0 35 92 / 22%);
+}
+
 .entity-tree-row.selected .entity-tree-toggle,
 .entity-tree-row.selected .entity-type-icon {
   color: #ffffff;
