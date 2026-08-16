@@ -16,6 +16,11 @@ function matchesSearch(entity: Entity, query: string): boolean {
   return entity.name.toLocaleLowerCase().includes(query);
 }
 
+/** 场景级环境对象（如天空盒）不进入模型树，由场景设置面板统一管理。 */
+function isHiddenFromHierarchy(entity: Entity): boolean {
+  return Boolean(entity.components.skybox);
+}
+
 /** 按 childrenIds 顺序压入子项，使用逆序 stack 保持最终 DFS 展示顺序。 */
 function pushChildren(
   stack: TraversalEntry[],
@@ -54,7 +59,7 @@ export function buildHierarchyRows(
       const current = stack.pop();
       if (!current || visited.has(current.entityId)) continue;
       const entity = entities[current.entityId];
-      if (!entity) continue;
+      if (!entity || isHiddenFromHierarchy(entity)) continue;
 
       visited.add(entity.id);
       rows.push({ entity, depth: current.depth });
@@ -71,7 +76,7 @@ export function buildHierarchyRows(
     const entityId = traversalStack.pop();
     if (!entityId || visited.has(entityId)) continue;
     const entity = entities[entityId];
-    if (!entity) continue;
+    if (!entity || isHiddenFromHierarchy(entity)) continue;
 
     visited.add(entityId);
     traversalOrder.push(entityId);
@@ -106,7 +111,7 @@ export function buildHierarchyRows(
     const current = stack.pop();
     if (!current || visited.has(current.entityId)) continue;
     const entity = entities[current.entityId];
-    if (!entity) continue;
+    if (!entity || isHiddenFromHierarchy(entity)) continue;
 
     const currentMatches = selfMatches.has(entity.id);
     const includeWholeSubtree = current.ancestorMatches || currentMatches;
