@@ -26,12 +26,18 @@ test('场景准备期间拦截编辑器全局快捷键和场景视图键盘操�
 });
 
 test('场景准备蒙版声明忙碌状态并阻止键盘焦点进入底层编辑器', async () => {
-  const overlaySource = await readFile(
-    new URL('../../src/editor/loading/ScenePreparationOverlay.tsx', import.meta.url),
-    'utf8',
-  );
+  const [overlaySource, sharedMaskSource] = await Promise.all([
+    readFile(
+      new URL('../../src/editor/loading/ScenePreparationOverlay.tsx', import.meta.url),
+      'utf8',
+    ),
+    readFile(
+      new URL('../../src/shared/ui/SceneLoadingMask.tsx', import.meta.url),
+      'utf8',
+    ),
+  ]);
 
-  assert.match(overlaySource, /aria-busy="true"/);
+  assert.match(sharedMaskSource, /aria-busy="true"/);
   assert.match(overlaySource, /tabIndex=\{-1\}/);
   assert.match(overlaySource, /overlayRef\.current\?\.focus\(\)/);
 });

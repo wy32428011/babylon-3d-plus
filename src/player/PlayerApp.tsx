@@ -4,7 +4,7 @@ import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '..
 import { createBabylonViewport, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../runtime/babylon/cameraControlStandard';
-import { SceneRuntime } from '../runtime/babylon/SceneRuntime';
+import { SceneRuntime, type SceneRuntimeModelLoadProgress } from '../runtime/babylon/SceneRuntime';
 import { buildDigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
 import { bindSceneModelSelectionPointer } from '../shared/sceneModelSelectionPointer';
 import {
@@ -31,6 +31,8 @@ import {
   shouldShowPlayerStatusOverlay,
 } from './statusOverlayControls';
 import { AutoPatrolControls, type AutoPatrolControlAction } from '../shared/ui/AutoPatrolControls';
+import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
+import { computePlayerLoadingProgress, PLAYER_SCENE_LOADING_TIMEOUT_MS } from './playerLoadingProgress';
 import './player.css';
 
 type PlayerPhase = 'loading' | 'ready' | 'blocked';
@@ -127,6 +129,23 @@ export function PlayerApp() {
   const [environmentRuntimeIssue, setEnvironmentRuntimeIssue] = useState(false);
   const [statusOverlayVisible, setStatusOverlayVisible] = useState(false);
   const [config, setConfig] = useState<PlayerRuntimeConfig | null>(null);
+  const [startupPercent, setStartupPercent] = useState(6);
+  const [modelLoadProgress, setModelLoadProgress] = useState<SceneRuntimeModelLoadProgress | null>(null);
+  /** 首次场景加载全部结算后置位：后续按需加载（如 MQTT 货物模板）不再重新弹出全屏蒙版。 */
+  const initialLoadCompletedRef = useRef(false);
+  /** 首次场景加载是否仍在途：驱动超时兜底与蒙版显示。 */
+  const modelLoadingInProgress = modelLoadProgress?.loading === true
+    && modelLoadProgress.totalCount > 0
+    && !initialLoadCompletedRef.current;
+
+  useEffect(() => {
+    if (!modelLoadingInProgress) return undefined;
+    const timer = window.setTimeout(() => {
+      initialLoadCompletedRef.current = true;
+      setRuntimeMessage('部分场景资源加载超时，场景可能尚未完整显示。');
+    }, PLAYER_SCENE_LOADING_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [modelLoadingInProgress]);
   const mqttStatus = useSyncExternalStore(
     mqttRuntimeStatusStore.subscribe,
     mqttRuntimeStatusStore.getSnapshot,
@@ -191,12 +210,14 @@ export function PlayerApp() {
           Boolean(parsedConfig.digitalTwin),
         ));
         setMessage(parsedConfig.page.loadingText);
+        setStartupPercent(14);
 
         const assetBaseUrl = new URL(parsedConfig.paths.assetBase, document.baseURI);
         const manifestUrl = new URL(parsedConfig.paths.assetManifest, document.baseURI);
         const manifestMappings = parseDeploymentAssetManifest(await fetchJson(manifestUrl, abortController.signal), assetBaseUrl);
         if (disposed) return;
         installDeploymentAssetManifest(manifestMappings);
+        setStartupPercent(20);
 
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
@@ -207,6 +228,7 @@ export function PlayerApp() {
             .__ZENDING_DIGITAL_TWIN_CONFIG__ = projectRuntimeConfig.config;
         }
         if (disposed) return;
+        setStartupPercent(30);
 
         viewport = createBabylonViewport(canvas, handleRuntimeStatus, {
           showGrid: parsedConfig.viewer.showGrid,
@@ -241,10 +263,18 @@ export function PlayerApp() {
               setRuntimeMessage(null);
             }
           },
+          (progress) => {
+            if (disposed) return;
+            setModelLoadProgress(progress);
+            if (!progress.loading && progress.totalCount > 0) {
+              initialLoadCompletedRef.current = true;
+            }
+          },
         );
         runtime.disableEditorLightMarkers();
         runtime.disableEditorAutoPatrolMarkers();
         runtime.sync(sceneDocument);
+        setStartupPercent(36);
         const environment = sceneDocument.sceneSettings.environment;
         if (environment) {
           await runtime.applyEnvironment(environment, { requestId: null, autoAlign: false });
@@ -252,6 +282,7 @@ export function PlayerApp() {
           runtime.syncEnvironment(null);
         }
         if (disposed) return;
+        setStartupPercent(50);
         runtime.beginTelemetryPreview();
 
         const patrolRoutes = collectAutoPatrolPlaybackRoutes(sceneDocument);
@@ -416,6 +447,15 @@ export function PlayerApp() {
     viewportRuntimeIssue || environmentRuntimeIssue || Boolean(mqttStatus.lastError),
   );
 
+  // 首次场景加载：启动阶段里程碑 + 模型/环境资源单元进度共同驱动全屏蒙版。
+  const loadingMask = computePlayerLoadingProgress({
+    phase,
+    startupPercent,
+    modelLoadProgress,
+    initialLoadCompleted: initialLoadCompletedRef.current,
+    message,
+  });
+
   return (
     <main className="player-root" style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
@@ -424,6 +464,13 @@ export function PlayerApp() {
           routes={autoPatrolRoutes}
           snapshot={autoPatrolSnapshot}
           onAction={handleAutoPatrolAction}
+        />
+      ) : null}
+      {loadingMask.visible ? (
+        <SceneLoadingMask
+          detail={loadingMask.detail}
+          label={loadingMask.label}
+          percent={loadingMask.percent}
         />
       ) : null}
       {showOverlay ? (

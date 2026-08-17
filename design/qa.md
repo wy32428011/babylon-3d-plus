@@ -26,3 +26,39 @@ source: 用户提供的 ZENDING Logo 与场景准备进度需求
 ## 结论
 
 READY — 用户要求的视觉、阶段门控、二次刷新与交互阻断均已通过自动化和真实浏览器验收。
+
+---
+
+# 发布 Web Viewer 加载蒙版设计验收（2026-08-14）
+
+场景：真实 Chrome（Intel UHD 630 硬件 WebGL）打开本地静态部署的 Viewer，脚本化采样 DOM 与计算样式，并截取加载中/就绪截图。
+
+## 视觉
+
+- ✓ 蒙版为固定全屏覆盖层（z-index 2000，覆盖完整视口，深色底 + 光标等待），与编辑器共享同一组件与品牌资源。
+- ✓ ZENDING Logo 以蓝色渐变填充并按进度揭晓（clip-path + mask-image，源图与编辑器一致）。
+- ✓ 独立蓝色渐变进度条（圆角轨道 + 发光填充）与百分数同步，标题、百分数和当前工作说明清晰可见。
+
+## 行为
+
+- ✓ 页面打开立即显示，进度按里程碑推进：实测 6%（初始）→ 20%（配置/清单）→ 50%（引擎与场景就绪）。
+- ✓ 模型加载阶段显示“正在加载场景模型 50% 模型 0/1 · Shelf.glb”，模型全部结算后蒙版消失。
+- ✓ 场景就绪后蒙版消失，场景正常运行（硬件 WebGL，Skybox/模型加载成功）。
+- ✓ 首次加载完成后按需加载（如 MQTT 货物模板）不再重新弹出蒙版。
+- ✓ 首次场景加载超过 120 秒强制收起蒙版并提示部分资源可能未完整显示；阻断性错误直接切换错误状态层。
+
+## 可访问性
+
+- ✓ 复用共享蒙版：`role="progressbar"`、`aria-busy`、数值范围、`aria-valuetext` 与百分数文本。
+- 发布版未自动夺取焦点（避免干扰嵌入父页面键盘），进度语义通过 ARIA 完整暴露。
+
+## 验证方式
+
+- 单元测试：`tests/digitalTwin/playerLoadingProgress.test.ts`（8 用例）覆盖启动、模型加载、完成、按需加载、阻断与越界裁剪。
+- 构建：`npm run typecheck`、`npm run build`（编辑器 + Viewer + Electron）通过。
+- 真实浏览器：Playwright（headful Chrome + D3D11 硬件 WebGL）验证蒙版显示、进度推进、模型阶段详情与收起时机。
+- 截图：`output/playwright/viewer-mask-loading.png`、`viewer-mask-model-loading.png`、`viewer-mask-ready.png`。
+
+## 结论
+
+READY — 发布场景加载蒙版与编辑器视觉一致，进度、详情、超时兜底与无障碍语义均已验证。

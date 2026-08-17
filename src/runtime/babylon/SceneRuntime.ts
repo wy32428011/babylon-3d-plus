@@ -30,6 +30,7 @@ import {
   StandardMaterial,
   Texture,
   TransformNode,
+  type ISceneLoaderProgressEvent,
   type Node,
   Vector3,
   VertexData,
@@ -490,6 +491,25 @@ export type SceneRuntimeSyncOptions = {
   modelArrayIdentityMode?: SceneRuntimeModelArrayIdentityMode;
 };
 
+/**
+ * 场景模型（含环境底座）加载进度快照，供发布 Viewer 和运行预览展示进度条。
+ * 每个进度单元对应一次资产容器加载：普通模型、参数变体宿主、生成模型输出或环境模型。
+ */
+export type SceneRuntimeModelLoadProgress = {
+  /** 当前是否仍有加载单元在途（下载、解析或排队）。 */
+  loading: boolean;
+  /** 总体进度 0-1：已结算单元按个数计，在途单元按当前文件字节进度折算。 */
+  percent: number;
+  /** 已结算（成功或失败）的加载单元数。 */
+  completedCount: number;
+  /** 已登记的加载单元总数。 */
+  totalCount: number;
+  /** 最近上报下载进度的文件名；无在途下载时为 null。 */
+  currentFile: string | null;
+  /** 当前文件字节进度 0-1；文件大小未知时为 null。 */
+  filePercent: number | null;
+};
+
 export type SceneRuntimePerformanceMetrics = {
   fullSyncCount: number;
   selectionSyncCount: number;
@@ -666,12 +686,24 @@ export class SceneRuntime {
   private groupRotationPreview: EntityGroupRotationPreview | null = null;
   private pendingGroupRotationMatrix: number[] | null = null;
   private modelLoadSequence = 0;
+  /** 模型加载进度单元序号与最近上报字节进度；单元在 loadModelRuntimeAssets 或环境加载期间登记。 */
+  private modelLoadProgressSequence = 0;
+  private modelLoadProgressReportSequence = 0;
+  private modelLoadProgressStartedCount = 0;
+  private modelLoadProgressSettledCount = 0;
+  private readonly activeModelLoadProgress = new Map<number, {
+    fileName: string | null;
+    loaded: number;
+    total: number;
+    reportedAt: number;
+  }>();
 
   constructor(
     private readonly scene: Scene,
     private readonly pushLog: (message: string) => void = () => undefined,
     private readonly onModelMeasurementChanged: (entityId: string) => void = () => undefined,
     onEnvironmentSnapshot: (snapshot: EnvironmentRuntimeSnapshot) => void = () => undefined,
+    private readonly onModelLoadProgress?: (progress: SceneRuntimeModelLoadProgress) => void,
   ) {
     this.modelSelectionOutlineLayer = createSceneSelectionHighlightLayer(scene, undefined, this.pushLog);
     this.poiEffectRuntime = new PoiEffectRuntime(scene);
@@ -680,7 +712,18 @@ export class SceneRuntime {
     this.autoPatrolMarkerRuntime = new EditorAutoPatrolRuntime(scene);
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
-      loadAssetContainer: (rootUrl, fileName, signal) => this.loadAssetContainer(rootUrl, fileName, signal),
+      // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
+      loadAssetContainer: (rootUrl, fileName, signal) => {
+        const sequence = this.beginModelLoadProgressUnit(fileName);
+        const promise = this.loadAssetContainer(rootUrl, fileName, signal, (event) => {
+          this.updateModelLoadProgressUnit(sequence, event);
+        });
+        void promise.then(
+          () => this.settleModelLoadProgressUnit(sequence),
+          () => this.settleModelLoadProgressUnit(sequence),
+        );
+        return promise;
+      },
       onSnapshot: onEnvironmentSnapshot,
       pushLog: this.pushLog,
     });
@@ -3433,41 +3476,120 @@ export class SceneRuntime {
       this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
     );
 
-    const instancingPolicy = resolveModelAssetSharedInstancingPolicy(modelAsset);
-    if (instancingPolicy.mode === 'shared-instance') {
-      const sharedInstance = await this.sharedModelAssetCache.instantiate(
-        assetSignature,
-        () => this.loadAssetContainer(rootUrl, fileName),
-        (sourceName) => sourceName,
-      );
-      return {
-        kind: 'shared-instance',
-        handle: {
-          kind: 'shared-instance',
-          animationGroups: sharedInstance.entries.animationGroups,
-          dispose: sharedInstance.dispose,
-        },
-        rootNodes: sharedInstance.entries.rootNodes,
-      };
-    }
-
-    const container = await this.loadAssetContainer(rootUrl, fileName, loadSignal);
+    const loadSequence = this.beginModelLoadProgressUnit(fileName);
     try {
-      container.addAllToScene();
-      return {
-        kind: 'owned-container',
-        handle: {
+      const instancingPolicy = resolveModelAssetSharedInstancingPolicy(modelAsset);
+      if (instancingPolicy.mode === 'shared-instance') {
+        const sharedInstance = await this.sharedModelAssetCache.instantiate(
+          assetSignature,
+          () => this.loadAssetContainer(rootUrl, fileName, undefined, (event) => {
+            this.updateModelLoadProgressUnit(loadSequence, event);
+          }),
+          (sourceName) => sourceName,
+        );
+        return {
+          kind: 'shared-instance',
+          handle: {
+            kind: 'shared-instance',
+            animationGroups: sharedInstance.entries.animationGroups,
+            dispose: sharedInstance.dispose,
+          },
+          rootNodes: sharedInstance.entries.rootNodes,
+        };
+      }
+
+      const container = await this.loadAssetContainer(rootUrl, fileName, loadSignal, (event) => {
+        this.updateModelLoadProgressUnit(loadSequence, event);
+      });
+      try {
+        container.addAllToScene();
+        return {
           kind: 'owned-container',
-          animationGroups: container.animationGroups,
-          dispose: () => container.dispose(),
-        },
-        meshes: container.meshes,
-        transformNodes: container.transformNodes,
-      };
-    } catch (error) {
-      container.dispose();
-      throw error;
+          handle: {
+            kind: 'owned-container',
+            animationGroups: container.animationGroups,
+            dispose: () => container.dispose(),
+          },
+          meshes: container.meshes,
+          transformNodes: container.transformNodes,
+        };
+      } catch (error) {
+        container.dispose();
+        throw error;
+      }
+    } finally {
+      this.settleModelLoadProgressUnit(loadSequence);
     }
+  }
+
+  /** 登记一个模型或环境加载进度单元（按文件名跟踪当前下载目标）。 */
+  private beginModelLoadProgressUnit(fileName: string): number {
+    const sequence = ++this.modelLoadProgressSequence;
+    this.modelLoadProgressStartedCount += 1;
+    this.activeModelLoadProgress.set(sequence, {
+      fileName,
+      loaded: 0,
+      total: 0,
+      reportedAt: -1,
+    });
+    this.notifyModelLoadProgressChanged();
+    return sequence;
+  }
+
+  /** 把 SceneLoader 的字节进度合并进对应加载单元；容器内多文件时按当前文件进度折算。 */
+  private updateModelLoadProgressUnit(sequence: number, event: ISceneLoaderProgressEvent): void {
+    const active = this.activeModelLoadProgress.get(sequence);
+    if (!active) return;
+    active.loaded = event.loaded;
+    active.total = event.total;
+    active.reportedAt = ++this.modelLoadProgressReportSequence;
+    this.notifyModelLoadProgressChanged();
+  }
+
+  /** 结算一个加载单元：移出在途表并累加已结算单元数。 */
+  private settleModelLoadProgressUnit(sequence: number): void {
+    if (this.activeModelLoadProgress.delete(sequence)) {
+      this.modelLoadProgressSettledCount += 1;
+    }
+    this.notifyModelLoadProgressChanged();
+  }
+
+  /** 有订阅方时重新计算并推送模型加载进度快照。 */
+  private notifyModelLoadProgressChanged(): void {
+    if (!this.onModelLoadProgress) return;
+    this.onModelLoadProgress(this.computeModelLoadProgress());
+  }
+
+  /** 按单元数汇总已结算与在途单元，生成 0-1 的总体进度；在途单元按当前文件字节折算。 */
+  private computeModelLoadProgress(): SceneRuntimeModelLoadProgress {
+    const totalCount = this.modelLoadProgressStartedCount;
+    const settledCount = this.modelLoadProgressSettledCount;
+    let weightedSettled = settledCount;
+    let latestReportedAt = -1;
+    let currentFile: string | null = null;
+    let currentFilePercent: number | null = null;
+    for (const progress of this.activeModelLoadProgress.values()) {
+      const fraction = progress.total > 0
+        ? Math.min(1, Math.max(0, progress.loaded / progress.total))
+        : 0;
+      weightedSettled += fraction;
+      if (progress.reportedAt >= latestReportedAt) {
+        latestReportedAt = progress.reportedAt;
+        currentFile = progress.fileName;
+        currentFilePercent = progress.total > 0 ? fraction : null;
+      }
+    }
+    const percent = totalCount > 0
+      ? Math.min(1, Math.max(0, weightedSettled / totalCount))
+      : 1;
+    return {
+      loading: this.activeModelLoadProgress.size > 0 || settledCount < totalCount,
+      percent,
+      completedCount: settledCount,
+      totalCount,
+      currentFile,
+      filePercent: currentFilePercent,
+    };
   }
 
   /** 同步模型生成器配置标记；实体 Transform 只影响 markerRoot，不影响任何自动货物。 */
@@ -6994,9 +7116,14 @@ export class SceneRuntime {
   }
 
   /** 通过统一并发调度器加载 Babylon 资产容器，限制批量模型解析和 GPU 上传峰值。 */
-  private loadAssetContainer(rootUrl: string, fileName: string, loadSignal?: AbortSignal): Promise<AssetContainer> {
+  private loadAssetContainer(
+    rootUrl: string,
+    fileName: string,
+    loadSignal?: AbortSignal,
+    onProgress?: (event: ISceneLoaderProgressEvent) => void,
+  ): Promise<AssetContainer> {
     return this.assetLoadScheduler.run(
-      () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene),
+      () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, onProgress),
       loadSignal,
     );
   }

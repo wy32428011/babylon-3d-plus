@@ -115,6 +115,23 @@ try {
     };
   }
 
+  /** 创建只包含层级字段的天空盒轻量实体夹具。 */
+  function createSkyboxEntity(id, name) {
+    return {
+      ...createHierarchyEntity(id, name, null),
+      components: {
+        ...createHierarchyEntity(id, name, null).components,
+        skybox: {
+          format: 'hdr',
+          sourcePath: 'sky.hdr',
+          sourceUrl: 'editor-asset://local/sky.hdr',
+          intensity: 1,
+          resolution: 256,
+        },
+      },
+    };
+  }
+
   const hierarchyEntities = {
     root: createHierarchyEntity('root', '根目录', null, ['child', 'empty'], true),
     child: createHierarchyEntity('child', '二级目录', 'root', ['grandchild'], true),
@@ -147,6 +164,30 @@ try {
     buildHierarchyRows(hierarchyEntityIds, hierarchyEntities, '不存在', new Set()),
     [],
     '无匹配搜索不得保留空祖先行',
+  );
+
+  /** 天空盒是场景级环境对象，不得出现在模型树中，也不得因搜索命中而展开父文件夹。 */
+  const skyboxEntities = {
+    'skybox-1': createSkyboxEntity('skybox-1', '天空盒 晨曦'),
+    'model-1': createHierarchyEntity('model-1', '一号线模型', null),
+    folder: createHierarchyEntity('folder', '环境目录', null, ['skybox-2'], true),
+    'skybox-2': createSkyboxEntity('skybox-2', '天空盒 黄昏'),
+  };
+  const skyboxEntityIds = ['folder', 'skybox-2', 'skybox-1', 'model-1'];
+  assert.deepEqual(
+    buildHierarchyRows(skyboxEntityIds, skyboxEntities, '', new Set()).map((row) => row.entity.id),
+    ['folder', 'model-1'],
+    '天空盒不得出现在模型树行中（含文件夹子项）',
+  );
+  assert.deepEqual(
+    buildHierarchyRows(skyboxEntityIds, skyboxEntities, '天空盒', new Set()).map((row) => row.entity.id),
+    [],
+    '搜索命中天空盒不得展开其父文件夹路径',
+  );
+  assert.deepEqual(
+    buildHierarchyRows(['skybox-1', 'model-1'], { 'skybox-1': skyboxEntities['skybox-1'], 'model-1': skyboxEntities['model-1'] }, '', new Set()).map((row) => row.entity.id),
+    ['model-1'],
+    '顶层天空盒不得出现在模型树行中',
   );
 
   const deepEntityIds = [];
@@ -234,6 +275,7 @@ try {
       deepHierarchyStackSafe: true,
       deepSelectionNormalization: true,
       indentationClamped: true,
+      skyboxHiddenFromHierarchy: true,
       folderDraggingEnabled: true,
     },
   }, null, 2));
