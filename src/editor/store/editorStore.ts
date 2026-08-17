@@ -4128,7 +4128,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         columnGap: sanitizeLocatorGap(patch.columnGap, before.columnGap),
         layerGap: sanitizeLocatorGap(patch.layerGap, before.layerGap),
         deviceAssetCode: patch.deviceAssetCode !== undefined ? patch.deviceAssetCode.trim().slice(0, 128) : before.deviceAssetCode,
-        rowNumber: sanitizeLocatorInt(patch.rowNumber, before.rowNumber, 1, 99),
+        rowNumber: sanitizeLocatorInt(patch.rowNumber, before.rowNumber, 0, 999),
         fetchDrive: sanitizeLocatorFetchDrivePatch(patch.fetchDrive, before.fetchDrive),
         builtInBinding: sanitizeLocatorBuiltInBindingPatch(patch.builtInBinding, before.builtInBinding),
       };

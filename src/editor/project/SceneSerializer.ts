@@ -799,7 +799,7 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
     columnGap: normalizeLocatorGap(locator.columnGap),
     layerGap: normalizeLocatorGap(locator.layerGap),
     deviceAssetCode: (typeof locator.deviceAssetCode === 'string' ? locator.deviceAssetCode : '').trim().slice(0, 128),
-    rowNumber: normalizeLocatorInt(locator.rowNumber, 1, 1, 99),
+    rowNumber: normalizeLocatorInt(locator.rowNumber, 1, 0, 999),
     ...(fetchDrive ? { fetchDrive } : {}),
     ...(builtInBinding ? { builtInBinding } : {}),
   };
