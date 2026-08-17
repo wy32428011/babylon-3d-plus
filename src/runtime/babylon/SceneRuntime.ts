@@ -1007,6 +1007,7 @@ export class SceneRuntime {
     this.updateAllExternalScriptRuntimeContexts('runtime', null);
     this.clearModelGeneratorLoadFailureCache();
     this.syncAllModelGeneratorPresentations();
+    this.refreshAllBuiltInSlotRenderability();
   }
 
   /** 结束 MQTT 运行预览；该方法幂等，按驱动关闭、运行态清理、模型恢复的顺序回到编辑态。 */
@@ -1061,6 +1062,7 @@ export class SceneRuntime {
     this.updateAllExternalScriptRuntimeContexts('edit', null);
     this.clearModelGeneratorLoadFailureCache();
     this.syncAllModelGeneratorPresentations();
+    this.refreshAllBuiltInSlotRenderability();
   }
 
   /** 发布 Viewer 在首次同步前永久禁用编辑器专用灯光标记。 */
@@ -1977,6 +1979,9 @@ export class SceneRuntime {
 
     if (source === 'local') this.localHighlightedEntityIds = nextEntityIds;
     else this.externalHighlightedEntityIds = nextEntityIds;
+    for (const entityId of [...changedEntityIds]) {
+      this.appendBuiltInSlotEntityIdsForHost(entityId, changedEntityIds);
+    }
     for (const entityId of changedEntityIds) {
       const entity = this.syncedEntities.get(entityId);
       if (entity) this.syncEntityPresentation(entity, this.isEntityHighlighted(entityId));
@@ -2315,6 +2320,13 @@ export class SceneRuntime {
     this.rebuildModelSelectionOutline();
   }
 
+  /** 把高亮状态依赖宿主/副本的绑定货格实体 ID 追加进刷新集合。 */
+  private appendBuiltInSlotEntityIdsForHost(hostEntityId: string, target: Set<string>): void {
+    for (const entity of this.syncedEntities.values()) {
+      if (entity.components.locator?.builtInBinding?.hostEntityId === hostEntityId) target.add(entity.id);
+    }
+  }
+
   /**
    * 只同步选区变化。普通单选只访问旧/新目标实体以及对应共享模型或矩阵批次，
    * 不重新扫描 entityIds、加载模型、执行参数脚本或重建 Locator 索引。
@@ -2337,10 +2349,19 @@ export class SceneRuntime {
       changedEntityCount = changedEntityIds.size;
       if (changedEntityCount === 0) return;
 
+      const nextHighlightSet = mergeSceneRuntimeHighlightEntityIds(
+        nextSelectedEntityIds,
+        this.localHighlightedEntityIds,
+        this.externalHighlightedEntityIds,
+      );
+      for (const entityId of [...changedEntityIds]) {
+        this.appendBuiltInSlotEntityIdsForHost(entityId, changedEntityIds);
+      }
+
       for (const entityId of changedEntityIds) {
         const entity = document.entities[entityId] ?? this.syncedEntities.get(entityId);
         if (!entity) continue;
-        this.syncEntityPresentation(entity, this.isEntityHighlighted(entityId, nextSelectedEntityIds));
+        this.syncEntityPresentation(entity, this.isEntityHighlighted(entityId, nextSelectedEntityIds), nextHighlightSet);
       }
 
       this.selectedEntityIds = nextSelectedEntityIds;
@@ -2513,6 +2534,11 @@ export class SceneRuntime {
     }
 
     const selectedEntityIds = this.resolveSelectedEntityIds(document);
+    const nextHighlightSet = mergeSceneRuntimeHighlightEntityIds(
+      selectedEntityIds,
+      this.localHighlightedEntityIds,
+      this.externalHighlightedEntityIds,
+    );
 
     for (const entityId of document.entityIds) {
       const entity = document.entities[entityId];
@@ -2524,7 +2550,14 @@ export class SceneRuntime {
       const nextState = this.entityStates.get(entityId);
       const entityChanged = previousEntity !== entity;
       const runtimeStateChanged = !this.areEntityRuntimeStatesEqual(previousState, nextState);
-      const presentationChanged = previousHighlightedEntityIds.has(entityId) !== selected || runtimeStateChanged;
+      const slotBinding = entity.components.locator?.builtInBinding;
+      const slotHostHighlightChanged = slotBinding
+        ? previousHighlightedEntityIds.has(slotBinding.hostEntityId)
+          !== this.isEntityHighlighted(slotBinding.hostEntityId, nextHighlightSet)
+        : false;
+      const presentationChanged = previousHighlightedEntityIds.has(entityId) !== selected
+        || runtimeStateChanged
+        || slotHostHighlightChanged;
       if (entityChanged || runtimeStateChanged) {
         const previousSourceId = previousEntity?.components.modelArrayInstance?.sourceEntityId;
         const nextSourceId = entity.components.modelArrayInstance?.sourceEntityId;
@@ -2536,9 +2569,9 @@ export class SceneRuntime {
       }
 
       if (entityChanged || !this.hasCompleteRuntimeEntity(entity)) {
-        this.syncEntity(entity, selected);
+        this.syncEntity(entity, selected, nextHighlightSet);
       } else if (presentationChanged) {
-        this.syncEntityPresentation(entity, selected);
+        this.syncEntityPresentation(entity, selected, nextHighlightSet);
       }
 
       this.syncedEntities.set(entityId, entity);
@@ -2580,7 +2613,11 @@ export class SceneRuntime {
   }
 
   /** 仅刷新选择、显隐和锁定相关表现，不重复执行模型加载、参数或外置脚本。 */
-  private syncEntityPresentation(entity: Entity, selected: boolean): void {
+  private syncEntityPresentation(
+    entity: Entity,
+    selected: boolean,
+    highlightSet: ReadonlySet<string> = this.selectedEntityIds,
+  ): void {
     this.clearEntityArrayPreviewIfSource(entity.id);
     const primitiveMesh = this.meshes.get(entity.id);
     const meshRenderer = entity.components.meshRenderer;
@@ -2594,7 +2631,7 @@ export class SceneRuntime {
     const locator = this.locators.get(entity.id);
     if (locator && entity.components.locator) {
       this.applyLocatorStyle(locator, selected);
-      this.applyLocatorInteractivity(locator, entity.id);
+      this.applyLocatorInteractivity(locator, entity, highlightSet);
     }
 
     const cadReference = this.cadReferences.get(entity.id);
@@ -2612,7 +2649,7 @@ export class SceneRuntime {
       const model = this.models.get(entity.id);
       if (model) {
         this.applyModelSelection(model, selected);
-        this.applyModelInteractivity(model, entity.id);
+        this.applyModelInteractivity(model, entity.id, highlightSet);
       }
     }
 
@@ -2864,7 +2901,11 @@ export class SceneRuntime {
   }
 
   /** 按组件类型同步单个实体的运行时表现。 */
-  private syncEntity(entity: Entity, selected: boolean): void {
+  private syncEntity(
+    entity: Entity,
+    selected: boolean,
+    highlightSet: ReadonlySet<string> = this.selectedEntityIds,
+  ): void {
     this.clearEntityArrayPreviewIfSource(entity.id);
     if (entity.components.meshRenderer) {
       this.syncPrimitiveMeshEntity(entity, selected);
@@ -2875,7 +2916,7 @@ export class SceneRuntime {
     }
 
     if (entity.components.locator) {
-      this.syncLocatorEntity(entity, selected);
+      this.syncLocatorEntity(entity, selected, highlightSet);
     }
 
     if (entity.components.cadReference) {
@@ -2883,8 +2924,8 @@ export class SceneRuntime {
     }
 
     if (entity.components.modelAsset) {
-      if (entity.components.modelArrayInstance) this.syncModelArrayInstanceEntity(entity);
-      else this.syncModelEntity(entity, selected);
+      if (entity.components.modelArrayInstance) this.syncModelArrayInstanceEntity(entity, highlightSet);
+      else this.syncModelEntity(entity, selected, highlightSet);
     }
 
     if (entity.components.modelGenerator) {
@@ -3105,7 +3146,11 @@ export class SceneRuntime {
   }
 
   /** 同步虚拟定位线框的根 Transform、业务尺寸和选中态线框颜色。 */
-  private syncLocatorEntity(entity: Entity, selected: boolean): void {
+  private syncLocatorEntity(
+    entity: Entity,
+    selected: boolean,
+    highlightSet: ReadonlySet<string> = this.selectedEntityIds,
+  ): void {
     const locator = entity.components.locator;
     if (!locator) return;
 
@@ -3176,8 +3221,8 @@ export class SceneRuntime {
         runtimeLocator.root.rotation.set(hostTransform.rotation.x, hostTransform.rotation.y, hostTransform.rotation.z);
         runtimeLocator.root.scaling.set(hostTransform.scale.x, hostTransform.scale.y, hostTransform.scale.z);
       }
-      // 宿主可能被阵列批次挂起（根节点保持启用），货格显隐跟随宿主实体而非节点继承。
-      runtimeLocator.root.setEnabled(this.isEntityVisible(binding.hostEntityId));
+      // 宿主可能被阵列批次挂起（根节点保持启用），货格显隐由绑定条件统一计算。
+      runtimeLocator.root.setEnabled(this.computeBuiltInSlotRenderable(entity, highlightSet));
     } else {
       if (runtimeLocator.root.parent) runtimeLocator.root.parent = null;
       this.applyTransform(runtimeLocator.root, entity.components.transform);
@@ -3211,8 +3256,8 @@ export class SceneRuntime {
     }
 
     runtimeLocator.fillMesh.metadata = { ...(runtimeLocator.fillMesh.metadata ?? {}), storageLocation: locatorMetadata };
-    this.applyLocatorStyle(runtimeLocator, selected && !bound);
-    this.applyLocatorInteractivity(runtimeLocator, entity.id);
+    this.applyLocatorStyle(runtimeLocator, selected);
+    this.applyLocatorInteractivity(runtimeLocator, entity, highlightSet);
 
     if (locator.fetchDrive?.enabled) {
       if (!this.locatorFetchRuntimes.has(entity.id)) {
@@ -3325,7 +3370,10 @@ export class SceneRuntime {
   }
 
   /** 记录独立矩阵实例实体；其几何由 sourceEntityId 对应源模型的批次统一提交。 */
-  private syncModelArrayInstanceEntity(entity: Entity): void {
+  private syncModelArrayInstanceEntity(
+    entity: Entity,
+    highlightSet: ReadonlySet<string> = this.selectedEntityIds,
+  ): void {
     this.modelArrayInstanceEntities.set(entity.id, entity);
     if (this.modelArrayGizmoProxy?.entityId === entity.id) {
       this.applyTransform(this.modelArrayGizmoProxy.node, entity.components.transform);
@@ -3334,12 +3382,16 @@ export class SceneRuntime {
     // 绑定到副本的内置货格挂在场景根下、按副本位姿换算世界坐标；副本位移后需重算跟随。
     for (const slotEntity of this.syncedEntities.values()) {
       if (slotEntity.components.locator?.builtInBinding?.hostEntityId !== entity.id) continue;
-      this.syncLocatorEntity(slotEntity, this.isEntityHighlighted(slotEntity.id));
+      this.syncLocatorEntity(slotEntity, this.isEntityHighlighted(slotEntity.id), highlightSet);
     }
   }
 
   /** 同步 glTF/GLB 模型资源，并通过加载 token 避免异步过期结果污染当前场景。 */
-  private syncModelEntity(entity: Entity, selected: boolean): void {
+  private syncModelEntity(
+    entity: Entity,
+    selected: boolean,
+    highlightSet: ReadonlySet<string> = this.selectedEntityIds,
+  ): void {
     const modelAsset = entity.components.modelAsset;
     if (!modelAsset) return;
 
@@ -3375,7 +3427,7 @@ export class SceneRuntime {
       this.applyModelParameters(entity, current);
       this.syncExternalModelScripts(entity, current);
       this.applyModelSelection(current, selected);
-      this.applyModelInteractivity(current, entity.id);
+      this.applyModelInteractivity(current, entity.id, highlightSet);
       this.syncConveyorTrajectory(entity, current);
       return;
     }
@@ -5020,14 +5072,52 @@ export class SceneRuntime {
     mesh.isPickable = visible && this.isEntityScenePickable(entityId);
   }
 
+  /**
+   * 计算绑定货格当前是否应渲染：编辑态仅当眼睛开关开启且宿主或货格自身被选中时显示；
+   * 运行预览与发布模式一律隐藏。非绑定货格返回 true，不受管控。
+   */
+  private computeBuiltInSlotRenderable(
+    entity: Entity,
+    selectedEntityIds: ReadonlySet<string> = this.selectedEntityIds,
+  ): boolean {
+    if (this.telemetryPreviewActive) return false;
+    const binding = entity.components.locator?.builtInBinding;
+    if (!binding) return true;
+    const hostState = this.entityStates.get(binding.hostEntityId);
+    if (!hostState || hostState.visible === false) return false;
+    if (!this.isEntityVisible(entity.id)) return false;
+    return this.isEntityHighlighted(binding.hostEntityId, selectedEntityIds)
+      || this.isEntityHighlighted(entity.id, selectedEntityIds);
+  }
+
+  /** 预览开关切换时全量重算绑定货格显隐；幂等，未创建的 locator 条目直接跳过。 */
+  private refreshAllBuiltInSlotRenderability(): void {
+    for (const entity of this.syncedEntities.values()) {
+      if (!entity.components.locator?.builtInBinding) continue;
+      const locator = this.locators.get(entity.id);
+      if (locator) locator.root.setEnabled(this.computeBuiltInSlotRenderable(entity));
+    }
+  }
+
   /** 货格交互：填充网格承载拾取（薄实例拾取解析到实体），边线只跟随显隐。 */
-  private applyLocatorInteractivity(locator: LocatorRuntimeEntry, entityId: string): void {
-    this.applyMeshInteractivity(locator.fillMesh, entityId);
-    locator.edgeLines.isVisible = this.isEntityVisible(entityId);
+  private applyLocatorInteractivity(
+    locator: LocatorRuntimeEntry,
+    entity: Entity,
+    highlightSet: ReadonlySet<string> = this.selectedEntityIds,
+  ): void {
+    this.applyMeshInteractivity(locator.fillMesh, entity.id);
+    locator.edgeLines.isVisible = this.isEntityVisible(entity.id);
+    if (entity.components.locator?.builtInBinding) {
+      locator.root.setEnabled(this.computeBuiltInSlotRenderable(entity, highlightSet));
+    }
   }
 
   /** 将显隐和锁定状态应用到导入模型的根节点与子 Mesh。 */
-  private applyModelInteractivity(model: ModelRuntimeEntry, entityId: string): void {
+  private applyModelInteractivity(
+    model: ModelRuntimeEntry,
+    entityId: string,
+    highlightSet: ReadonlySet<string> = this.selectedEntityIds,
+  ): void {
     const keepScriptHostActive = model.externalScriptStarting
       && (Boolean(model.modelArrayBatch) || model.modelArraySuspendedMeshes.size > 0);
     const visible = keepScriptHostActive || this.isEntityVisible(entityId);
@@ -5041,10 +5131,10 @@ export class SceneRuntime {
         mesh.isPickable = pickable;
       }
     }
-    // 绑定货格挂在 model.root 下但不属于模型网格；宿主挂起期间根节点保持启用，货格显隐需显式跟随宿主实体。
+    // 绑定货格挂在 model.root 下但不属于模型网格；宿主挂起期间根节点保持启用，货格显隐由绑定条件统一计算。
     for (const slotEntity of this.syncedEntities.values()) {
       if (slotEntity.components.locator?.builtInBinding?.hostEntityId !== entityId) continue;
-      this.locators.get(slotEntity.id)?.root.setEnabled(visible);
+      this.locators.get(slotEntity.id)?.root.setEnabled(this.computeBuiltInSlotRenderable(slotEntity, highlightSet));
     }
   }
 
