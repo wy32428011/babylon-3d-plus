@@ -82,6 +82,9 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const hierarchySelectionIds = useEditorStore((state) => state.hierarchySelectionIds);
   const createFolder = useEditorStore((state) => state.createFolder);
   const selectHierarchyEntities = useEditorStore((state) => state.selectHierarchyEntities);
+  const selectEntity = useEditorStore((state) => state.selectEntity);
+  const revealHierarchyEntityRequest = useEditorStore((state) => state.revealHierarchyEntityRequest);
+  const consumeRevealHierarchyEntityRequest = useEditorStore((state) => state.consumeRevealHierarchyEntityRequest);
   const moveEntitiesToFolder = useEditorStore((state) => state.moveEntitiesToFolder);
   const toggleEntityVisible = useEditorStore((state) => state.toggleEntityVisible);
   const toggleEntityLocked = useEditorStore((state) => state.toggleEntityLocked);
@@ -278,6 +281,35 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     list.scrollTop = nextScrollTop;
     setScrollTop(nextScrollTop);
   }, [renamingEntityId, rowIndexByEntityId, rows.length, selectedEntityId, viewportHeight]);
+
+  useEffect(() => {
+    if (!revealHierarchyEntityRequest) return;
+    const { id, entityId } = revealHierarchyEntityRequest;
+    const target = entities[entityId];
+    if (!target) {
+      consumeRevealHierarchyEntityRequest(id);
+      return;
+    }
+
+    setSearchText('');
+    const ancestorFolderIds: string[] = [];
+    let parentId = target.parentId;
+    while (parentId) {
+      const parent = entities[parentId];
+      if (!parent) break;
+      if (parent.isFolder) ancestorFolderIds.push(parent.id);
+      parentId = parent.parentId;
+    }
+    if (ancestorFolderIds.length > 0) {
+      setCollapsedFolderIds((current) => {
+        const next = new Set(current);
+        for (const folderId of ancestorFolderIds) next.delete(folderId);
+        return next;
+      });
+    }
+    selectEntity(entityId);
+    consumeRevealHierarchyEntityRequest(id);
+  }, [revealHierarchyEntityRequest, entities, consumeRevealHierarchyEntityRequest, selectEntity]);
 
   useEffect(() => {
     if (!contextMenu) return;

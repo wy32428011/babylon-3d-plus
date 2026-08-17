@@ -408,6 +408,7 @@ type EditorState = {
   environmentAdjustmentActive: boolean;
   environmentFocusRequest: { id: string } | null;
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
+  revealHierarchyEntityRequest: { id: string; entityId: string } | null;
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
   cameraResetRequest: CameraResetRequest | null;
   selectedAutoPatrolWaypointId: string | null;
@@ -512,6 +513,8 @@ type EditorState = {
   requestSceneFocusForSelection: () => void;
   requestProjectAssetFocusForEntity: (entityId: string | null) => void;
   consumeSceneFocusRequest: (requestId: string) => void;
+  requestRevealHierarchyEntity: (entityId: string) => void;
+  consumeRevealHierarchyEntityRequest: (requestId: string) => void;
   consumeProjectAssetFocusRequest: (requestId: string) => void;
   renameSelectedEntity: (name: string) => void;
   deleteSelectedEntity: () => void;
@@ -592,6 +595,7 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     environmentAdjustmentActive: false,
     environmentFocusRequest: null,
     projectAssetFocusRequest: null,
+    revealHierarchyEntityRequest: null,
     cameraPoseSaveRequest: null,
     cameraResetRequest: { id: createId('camera_reset') },
     selectedAutoPatrolWaypointId: null,
@@ -2390,6 +2394,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   environmentAdjustmentActive: false,
   environmentFocusRequest: null,
   projectAssetFocusRequest: null,
+  revealHierarchyEntityRequest: null,
   cameraPoseSaveRequest: null,
   cameraResetRequest: null,
   selectedAutoPatrolWaypointId: null,
@@ -3993,6 +3998,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => {
       if (state.sceneFocusRequest?.id !== requestId) return state;
       return { sceneFocusRequest: null };
+    });
+  },
+  requestRevealHierarchyEntity: (entityId) => {
+    set((state) => {
+      if (!state.scene.entities[entityId]) return state;
+      return {
+        revealHierarchyEntityRequest: {
+          id: createId('reveal_hierarchy'),
+          entityId,
+        },
+      };
+    });
+  },
+  consumeRevealHierarchyEntityRequest: (requestId) => {
+    set((state) => {
+      if (state.revealHierarchyEntityRequest?.id !== requestId) return state;
+      return { revealHierarchyEntityRequest: null };
     });
   },
   consumeProjectAssetFocusRequest: (requestId) => {

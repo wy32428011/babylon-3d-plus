@@ -20,6 +20,7 @@ import {
   resolveHierarchyGroupTransformSelection,
 } from '../model/entityHierarchy';
 import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
+import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
 import { LocatorInspector } from './LocatorInspector';
@@ -149,6 +150,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const updateSelectedModelAssetCode = useEditorStore((state) => state.updateSelectedModelAssetCode);
   const updateSelectedTelemetryBinding = useEditorStore((state) => state.updateSelectedTelemetryBinding);
   const restoreSelectedTelemetryBindingDefault = useEditorStore((state) => state.restoreSelectedTelemetryBindingDefault);
+  const requestRevealHierarchyEntity = useEditorStore((state) => state.requestRevealHierarchyEntity);
   const selectedEntity = scene.selectedEntityId ? scene.entities[scene.selectedEntityId] : null;
   const groupSelection = resolveHierarchyGroupTransformSelection(scene, hierarchySelectionIds);
   const groupSpatialInfo = groupSelection.groupId && selectedGroupSpatialInfo?.groupId === groupSelection.groupId
@@ -352,6 +354,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const autoPatrol = selectedEntity.components.autoPatrol;
   const isCompactModelInspector = Boolean(modelAsset || meshRenderer || skybox || modelGenerator || poiEffect || autoPatrol || locator);
   const isBuiltInBound = Boolean(locator?.builtInBinding);
+  const builtInSlotEntityId = modelAsset ? findBuiltInSlotEntityId(scene, selectedEntity.id) : null;
   const transformDisabled = isLocked || isBuiltInBound;
   const transformFields: readonly TransformField[] = light
     ? getLightEditorCapabilities(light.lightKind).transformFields
@@ -573,6 +576,18 @@ export function InspectorPanel(props: InspectorPanelProps) {
                 )}
               </div>
             </div>
+            {builtInSlotEntityId ? (
+              <label className="inspector-row">
+                <span>内置货格</span>
+                <button
+                  type="button"
+                  disabled={isLocked}
+                  onClick={() => requestRevealHierarchyEntity(builtInSlotEntityId)}
+                >
+                  跳转定位
+                </button>
+              </label>
+            ) : null}
           </fieldset>
           {isSpecializedTelemetryDeviceType(modelAsset.dataDrivenConfig?.device.devType) ? (
             <>
