@@ -139,6 +139,7 @@ import {
   findModelNodesByName,
   getHorizontalModelAxis,
   getMeshWorldBounds,
+  getMeshesWorldBottomCenter,
   getModelAxis,
   getModelTransformNodes,
   getNodeMeshes,
@@ -766,11 +767,23 @@ export class SceneRuntime {
         }
       }
 
+      // 与 normalizeModelContentOrigin 同语义：把内容包围盒底部中心平移到原点，
+      // getLocatorBoxWorldMatrix 的格口矩阵平移即底面中心，实例落位后货物底部贴合格口。
+      const anchorNode = new TransformNode('_fetch_tmpl_anchor', this.scene);
+      if (scaleNode) scaleNode.parent = anchorNode;
+      else {
+        for (const rootNode of container.rootNodes) {
+          rootNode.parent = anchorNode;
+        }
+      }
+      const bottomCenter = getMeshesWorldBottomCenter(meshes);
+      if (bottomCenter) anchorNode.position = bottomCenter.scale(-1);
+
       return {
         meshes,
         dispose: () => {
           container.dispose();
-          scaleNode?.dispose();
+          anchorNode.dispose();
         },
       };
     } catch (error) {
@@ -6967,24 +6980,9 @@ export class SceneRuntime {
     const childMeshes = model.contentRoot.getChildMeshes(false).filter(isMeasurableModelMesh);
     if (childMeshes.length === 0) return;
 
-    let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
-    let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+    const bottomCenter = getMeshesWorldBottomCenter(childMeshes);
+    if (!bottomCenter) return;
 
-    for (const mesh of childMeshes) {
-      mesh.computeWorldMatrix(true);
-      const boundingInfo = mesh.getBoundingInfo();
-      minimum = Vector3.Minimize(minimum, boundingInfo.boundingBox.minimumWorld);
-      maximum = Vector3.Maximize(maximum, boundingInfo.boundingBox.maximumWorld);
-    }
-
-    if (!Number.isFinite(minimum.x) || !Number.isFinite(minimum.y) || !Number.isFinite(minimum.z)) return;
-    if (!Number.isFinite(maximum.x) || !Number.isFinite(maximum.y) || !Number.isFinite(maximum.z)) return;
-
-    const bottomCenter = new Vector3(
-      (minimum.x + maximum.x) / 2,
-      minimum.y,
-      (minimum.z + maximum.z) / 2,
-    );
     const inverseRootMatrix = model.root.getWorldMatrix().clone().invert();
     const localBottomCenter = Vector3.TransformCoordinates(bottomCenter, inverseRootMatrix);
 

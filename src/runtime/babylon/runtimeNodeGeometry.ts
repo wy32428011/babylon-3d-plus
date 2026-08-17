@@ -129,6 +129,23 @@ export function getNodesWorldBounds(nodes: TransformNode[]): RuntimeWorldBounds 
   return mergedBounds;
 }
 
+/** 计算一组 mesh 合并世界包围盒的底部中心（x/z 取中点、y 取最低点）；无有效包围盒时返回 null。 */
+export function getMeshesWorldBottomCenter(meshes: AbstractMesh[]): Vector3 | null {
+  let mergedBounds: RuntimeWorldBounds | null = null;
+  for (const mesh of meshes) {
+    const bounds = getMeshWorldBounds(mesh);
+    if (!bounds) continue;
+    mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
+  }
+  if (!mergedBounds) return null;
+  const { minimum, maximum } = mergedBounds;
+  return new Vector3(
+    (minimum.x + maximum.x) / 2,
+    minimum.y,
+    (minimum.z + maximum.z) / 2,
+  );
+}
+
 /** 将世界 AABB 投影到任意轴上，使用 8 个角点避免旋转模型时范围偏小。 */
 export function projectWorldBoundsOntoAxis(bounds: RuntimeWorldBounds, axis: Vector3): { min: number; max: number } {
   const corners = [

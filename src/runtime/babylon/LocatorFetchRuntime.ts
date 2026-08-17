@@ -2,6 +2,7 @@ import {
   CreateBox,
   CreatePlane,
   CreateSphere,
+  Material,
   Matrix,
   Mesh,
   Scene,
@@ -38,7 +39,8 @@ type GetLocatorBoxWorldMatrix = (locator: LocatorRuntimeEntry, column: number, l
 type LoadModelTemplate = (target: ModelGeneratorTarget) => Promise<{ meshes: Mesh[]; dispose: () => void } | null>;
 
 type ThinInstanceBatch = {
-  mesh: Mesh;
+  meshes: Mesh[];
+  materials: Material[];
   instances: CargoInstance[];
 };
 
@@ -201,34 +203,46 @@ export class LocatorFetchRuntime {
     }
 
     try {
-      // 顶点抽取时烘焙各 mesh 的世界矩阵（含单位换算 scaleNode 与 GLB 节点 TRS），
-      // thinInstance 矩阵只负责把模型放到库位上
-      const vertexData = this.extractMergedVertexData(template.meshes);
-      if (!vertexData) {
+      // 逐 mesh 抽取顶点并烘焙各自世界矩阵（含单位换算、锚定偏移与 GLB 节点 TRS），
+      // 不跨 mesh 合并：属性集不一致会错位顶点，多材质模型必须保留各自材质。
+      const parts = this.extractTemplateParts(template.meshes);
+      if (parts.length === 0) {
         template.dispose();
         this.onPushLog(`创建 thinInstance batch 失败：目标模型无顶点数据 (${target.kind})`);
         return;
       }
 
-      const material = template.meshes.find((mesh) => mesh.getTotalVertices() > 0 && mesh.material)?.material ?? null;
-      const clonedMaterial = material ? material.clone(`${material.name}_fetch_batch`) : null;
-
+      const meshes: Mesh[] = [];
+      const materials: Material[] = [];
+      for (const [index, part] of parts.entries()) {
+        const batchMesh = new Mesh(`fetch_batch_${this.locatorEntityId}_${signature.slice(0, 8)}_${index}`, this.scene);
+        part.vertexData.applyToMesh(batchMesh);
+        // GLB 模板带 z=-1 镜像（sideOrientation=CW）：烘焙时 VertexData.transform 已翻转索引绕向，
+        // 复制源 sideOrientation 正好与烘焙翻转抵消；缺了这步批次渲染内外面颠倒
+        batchMesh.sideOrientation = part.sideOrientation;
+        if (part.material) {
+          const clonedMaterial = part.material.clone(`${part.material.name}_fetch_batch_${index}`);
+          if (clonedMaterial) {
+            batchMesh.material = clonedMaterial;
+            materials.push(clonedMaterial);
+          }
+        }
+        batchMesh.doNotSerialize = true;
+        // thinInstance 矩阵是世界矩阵，Babylon 渲染时会再乘 mesh 自身世界矩阵，
+        // 因此 batchMesh 必须保持单位变换，不能挂到 locator.root 下（否则双重变换）
+        meshes.push(batchMesh);
+      }
       template.dispose();
 
-      const batchMesh = new Mesh(`fetch_batch_${this.locatorEntityId}_${signature.slice(0, 8)}`, this.scene);
-      vertexData.applyToMesh(batchMesh);
-      batchMesh.material = clonedMaterial;
-      batchMesh.doNotSerialize = true;
-      // thinInstance 矩阵是世界矩阵，Babylon 渲染时会再乘 mesh 自身世界矩阵，
-      // 因此 batchMesh 必须保持单位变换，不能挂到 locator.root 下（否则双重变换）
-
       const batch: ThinInstanceBatch = {
-        mesh: batchMesh,
+        meshes,
+        materials,
         instances: [...instances],
       };
       this.batches.set(signature, batch);
       this.updateBatchMatrices(batch, instances, locatorEntry, getLocatorBoxWorldMatrix);
     } catch (error) {
+      template.dispose();
       const message = error instanceof Error ? error.message : String(error);
       this.onPushLog(`创建 thinInstance batch 失败：${message}`);
     }
@@ -248,9 +262,11 @@ export class LocatorFetchRuntime {
     switch (target.meshKind) {
       case 'cube':
         mesh = CreateBox('fetch_batch_source', { size: 1, ...meshOpts }, this.scene);
+        mesh.position.y = 0.5;
         break;
       case 'sphere':
         mesh = CreateSphere('fetch_batch_source', { diameter: 1, ...meshOpts }, this.scene);
+        mesh.position.y = 0.5;
         break;
       case 'plane':
         mesh = CreatePlane('fetch_batch_source', { size: 1, ...meshOpts }, this.scene);
@@ -259,22 +275,23 @@ export class LocatorFetchRuntime {
         return null;
     }
     mesh.doNotSerialize = true;
+    // 内置几何体中心在原点：position 抬半高后由抽取步骤烘焙，底部中心同样锚定到原点
     return { meshes: [mesh], dispose: () => mesh.dispose() };
   }
 
-  /** 抽取所有有几何的 mesh 的顶点数据，烘焙各自世界矩阵后合并；无几何返回 null */
-  private extractMergedVertexData(meshes: Mesh[]): VertexData | null {
-    const vertexDatas: VertexData[] = [];
+  /** 逐 mesh 抽取顶点数据（烘焙各自世界矩阵）、材质与 sideOrientation；无几何的 mesh 跳过。 */
+  private extractTemplateParts(
+    meshes: Mesh[],
+  ): Array<{ vertexData: VertexData; material: Material | null; sideOrientation: number }> {
+    const parts: Array<{ vertexData: VertexData; material: Material | null; sideOrientation: number }> = [];
     for (const mesh of meshes) {
       if (mesh.getTotalVertices() === 0) continue;
       mesh.computeWorldMatrix(true);
       const vertexData = VertexData.ExtractFromMesh(mesh, true, true);
       vertexData.transform(mesh.getWorldMatrix());
-      vertexDatas.push(vertexData);
+      parts.push({ vertexData, material: mesh.material ?? null, sideOrientation: mesh.sideOrientation });
     }
-    if (vertexDatas.length === 0) return null;
-    if (vertexDatas.length === 1) return vertexDatas[0];
-    return vertexDatas[0].merge(vertexDatas.slice(1), true);
+    return parts;
   }
 
   /** 更新 thinInstance 矩阵 buffer；格口越界的记录直接跳过，不做位置兜底。 */
@@ -292,20 +309,18 @@ export class LocatorFetchRuntime {
       if (worldMatrix) matrices.push(worldMatrix);
     }
 
-    if (matrices.length === 0) {
-      batch.mesh.setEnabled(false);
-      return;
-    }
-
-    batch.mesh.setEnabled(true);
+    const enabled = matrices.length > 0;
     const buffer = new Float32Array(matrices.length * 16);
     for (let index = 0; index < matrices.length; index += 1) {
       matrices[index].copyToArray(buffer, index * 16);
     }
-
-    batch.mesh.thinInstanceSetBuffer('matrix', buffer, 16, true);
-    batch.mesh.thinInstanceEnablePicking = true;
-    batch.mesh.thinInstanceRefreshBoundingInfo?.(true);
+    for (const mesh of batch.meshes) {
+      mesh.setEnabled(enabled);
+      if (!enabled) continue;
+      mesh.thinInstanceSetBuffer('matrix', buffer, 16, true);
+      mesh.thinInstanceEnablePicking = true;
+      mesh.thinInstanceRefreshBoundingInfo?.(true);
+    }
   }
 
   /** 清空全部 thinInstance batch；退出运行预览回编辑态时调用，runtime 本身保留复用 */
@@ -349,7 +364,8 @@ export class LocatorFetchRuntime {
   private disposeBatch(signature: string): void {
     const batch = this.batches.get(signature);
     if (!batch) return;
-    batch.mesh.dispose();
+    for (const mesh of batch.meshes) mesh.dispose();
+    for (const material of batch.materials) material.dispose();
     this.batches.delete(signature);
   }
 
