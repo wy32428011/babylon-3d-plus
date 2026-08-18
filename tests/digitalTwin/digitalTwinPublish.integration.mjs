@@ -1002,7 +1002,10 @@ async function run() {
     assert.deepEqual(selectedSourceScene.scene.fetchConfig, PUBLISHED_FETCH_CONFIG);
     const selectedDistEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'DIST'));
     const selectedDistScene = JSON.parse(selectedDistEntries.get('project/scene.json').toString('utf8'));
-    assert.deepEqual(selectedDistScene.scene.fetchConfig, PUBLISHED_FETCH_CONFIG);
+    assert.deepEqual(selectedDistScene.scene.fetchConfig, {
+      url: PUBLISHED_FETCH_CONFIG.url,
+      apiKey: '',
+    });
     const selectedProjectBinding = await bindingModule.readDataPlatformBinding(projectRoot);
     assert.equal(selectedProjectBinding?.workspaceRoot, path.resolve(workspaceRoot));
     assert.equal(selectedProjectBinding?.projectId, PROJECT_ID);
@@ -1481,7 +1484,7 @@ async function run() {
         'unbound-scene-project-detail-identity',
         'unbound-scene-overwrite-confirmation-before-binding',
         'unbound-scene-project-selection-and-binding',
-        'fetch-config-with-api-key-published-to-source-and-dist',
+        'fetch-config-published-with-public-dist-api-key-stripped',
         'runtime-config-save-before-publish',
         'runtime-config-save-failure-blocks-publish',
         'version-conflict-does-not-change-runtime-config',

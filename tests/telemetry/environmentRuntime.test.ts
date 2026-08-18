@@ -62,10 +62,11 @@ test('环境聚焦移动高差较大的 Target 时保持 ArcRotate 观察方向'
   try {
     focusArcRotateCameraOnBounds(camera, engine, {
       center: { x: 0, y: 2800, z: 0 },
-      radiusMeters: 37000,
-    });
+      radiusMeters: 3700,
+    }, Number.POSITIVE_INFINITY, false);
     assert.equal(camera.alpha, alpha);
     assert.equal(camera.beta, beta);
+    assert.ok(camera.radius > 5000, '环境聚焦应按完整包围盒取景，不能应用 3m 上限');
     camera.getViewMatrix(true);
     assert.ok(camera.position.y > camera.target.y, '保持上方视角，不能翻到地面下方');
   } finally {

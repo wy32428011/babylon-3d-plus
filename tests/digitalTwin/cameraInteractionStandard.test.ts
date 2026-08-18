@@ -8,6 +8,8 @@ import {
   applyDigitalTwinCameraControlStandard,
   attachDigitalTwinCameraControl,
   applyDigitalTwinCameraSensitivity,
+  resolveDigitalTwinCameraFocusRadius,
+  resolveDigitalTwinCameraFocusBeta,
   clampDigitalTwinCameraRadius,
   hasDigitalTwinCameraPoseChanged,
   hasPendingDigitalTwinCameraInput,
@@ -173,6 +175,49 @@ test('透视相机缩远时动态提高近裁剪面，正交和近景仍保留 2
   }
 });
 
+test('聚焦约束：聚焦相机始终从模型斜上方 45° 看向中心', () => {
+  const fixture = createCamera();
+  try {
+    const { defaultBetaRadians } = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.focus;
+    assertClose(defaultBetaRadians, Math.PI / 4, '聚焦必须使用斜上方 45° 视角');
+    assertClose(resolveDigitalTwinCameraFocusBeta(), defaultBetaRadians);
+    const belowGroundBeta = resolveDigitalTwinCameraFocusBeta();
+    assertClose(belowGroundBeta, defaultBetaRadians);
+    fixture.camera.target.set(0, 0, 0);
+    fixture.camera.radius = 2;
+    fixture.camera.beta = resolveDigitalTwinCameraFocusBeta();
+    fixture.camera.getViewMatrix(true);
+    const horizontalDistance = Math.hypot(fixture.camera.position.x, fixture.camera.position.z);
+    assertClose(
+      Math.atan2(fixture.camera.position.y, horizontalDistance),
+      Math.PI / 4,
+      '聚焦相机应位于模型斜上方 45°',
+    );
+  } finally {
+    disposeCamera(fixture);
+  }
+});
+
+test('聚焦约束：以模型中心为 Target，常规距离使用 2m 且任何模型最大不超过 3m', () => {
+  const { preferredRadiusMeters, maxRadiusMeters } = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.focus;
+  assert.equal(resolveDigitalTwinCameraFocusRadius(1.2, 0), preferredRadiusMeters);
+  assert.equal(resolveDigitalTwinCameraFocusRadius(2.5, 0), 2.5);
+  assert.equal(
+    resolveDigitalTwinCameraFocusRadius(8, 0),
+    maxRadiusMeters,
+    '链条机等大模型改参后，聚焦距离也不得超过 3m',
+  );
+  assert.equal(resolveDigitalTwinCameraFocusRadius(preferredRadiusMeters, -5), maxRadiusMeters);
+  assert.equal(
+    resolveDigitalTwinCameraFocusRadius(8, 0, Number.POSITIVE_INFINITY),
+    8,
+    '环境等特殊聚焦可显式取消 3m 模型距离上限',
+  );
+  assert.equal(
+    resolveDigitalTwinCameraFocusRadius(Number.NaN, 0),
+    DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters,
+  );
+});
 test('模型表面上的真实相机输入或位姿变化会被识别为视角拖拽', () => {
   const fixture = createCamera();
   const pose: DigitalTwinCameraPose = {

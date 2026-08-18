@@ -267,7 +267,7 @@ test('唯一可见且几何就绪的模型开始聚焦时才暂停巡检并在�
     dispatch(f.bus, focusCommand('request-1', ' DDJ2 '));
     assert.equal(runtime.pauseCount, 1);
     assert.equal(runtime.focusCalls.length, 1);
-    assert.equal(runtime.focusCalls[0].options.durationMs, 450);
+    assert.equal(runtime.focusCalls[0].options.animate, false, '发布后的模型聚焦必须立即进入约束位姿');
     assert.deepEqual(runtime.highlightedEntityIds, [['entity_1']]);
     assert.equal(f.posted.length, 0);
 

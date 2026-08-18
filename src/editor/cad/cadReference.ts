@@ -28,6 +28,11 @@ const SUPPORTED_DXF_ENTITY_TYPES = new Set([
   'SPLINE',
   'LWPOLYLINE',
   'POLYLINE',
+  'HATCH',
+  'SOLID',
+  'TRACE',
+  '3DFACE',
+  'LEADER',
 ]);
 const CAD_REFERENCE_ARC_SEGMENT_RADIANS = (5 / 180) * Math.PI;
 const CAD_REFERENCE_CIRCLE_SEGMENT_COUNT = 72;
@@ -145,6 +150,20 @@ type DxfSplineEntityRecord = DxfEntityRecord & {
   closed?: unknown;
 };
 
+type DxfHatchEntityRecord = DxfEntityRecord & {
+  boundary?: unknown;
+};
+
+type DxfSolidEntityRecord = DxfEntityRecord & {
+  corners?: unknown;
+  points?: unknown;
+  vertices?: unknown;
+};
+
+type DxfLeaderEntityRecord = DxfEntityRecord & {
+  vertices?: unknown;
+};
+
 type DxfVertexRecord = {
   x?: unknown;
   y?: unknown;
@@ -193,43 +212,51 @@ export function convertParsedCadReferenceDxf(parsed: ParsedDXF, options: CadRefe
   traverseDxfEntities(parsed, (entity, traversal) => {
     if (!isSupportedDxfEntity(entity)) return;
 
-    const rawPoints = convertDxfEntityToPolyline(entity, traversal.blockBasePoint);
-    if (rawPoints.length < 2) return;
-
-    let points = transformCadPolyline(rawPoints, traversal.transforms);
-    if (points.length < 2) return;
-
-    if (geometryBudget) {
-      if (polylineCount >= geometryBudget.maxPolylines) {
-        budgetLimited = true;
-        return false;
-      }
-
-      const remainingPointCount = geometryBudget.maxPoints - pointCount;
-      if (remainingPointCount < 2) {
-        budgetLimited = true;
-        return false;
-      }
-      if (points.length > remainingPointCount) {
-        points = sampleCadPolyline(points, remainingPointCount);
-        budgetLimited = true;
-      }
-    }
-
     const layerName = traversal.layerOverride ?? readDxfEntityLayerName(entity);
-    const layer = readOrCreateRawLayer(rawLayerMap, layerName);
-    layer.polylinePointCounts.push(points.length);
-    layer.entityCount += 1;
-    layer.polylineCount += 1;
-    layer.pointCount += points.length;
+    let reachedGeometryBudget = false;
+    for (const rawPoints of convertDxfEntityToPolylines(entity, traversal.blockBasePoint)) {
+      if (rawPoints.length < 2) continue;
 
-    polylineCount += 1;
-    pointCount += points.length;
+      let points = transformCadPolyline(rawPoints, traversal.transforms);
+      if (points.length < 2) continue;
 
-    for (const point of points) {
-      layer.coordinates.push(point.x, point.y);
-      originalBounds = expandBounds2D(originalBounds, point);
+      if (geometryBudget) {
+        if (polylineCount >= geometryBudget.maxPolylines) {
+          budgetLimited = true;
+          reachedGeometryBudget = true;
+          break;
+        }
+
+        const remainingPointCount = geometryBudget.maxPoints - pointCount;
+        if (remainingPointCount < 2) {
+          budgetLimited = true;
+          reachedGeometryBudget = true;
+          break;
+        }
+        if (points.length > remainingPointCount) {
+          points = sampleCadPolyline(points, remainingPointCount);
+          budgetLimited = true;
+          reachedGeometryBudget = true;
+        }
+      }
+
+      const layer = readOrCreateRawLayer(rawLayerMap, layerName);
+      layer.polylinePointCounts.push(points.length);
+      layer.entityCount += 1;
+      layer.polylineCount += 1;
+      layer.pointCount += points.length;
+
+      polylineCount += 1;
+      pointCount += points.length;
+
+      for (const point of points) {
+        layer.coordinates.push(point.x, point.y);
+        originalBounds = expandBounds2D(originalBounds, point);
+      }
+
+      if (reachedGeometryBudget) break;
     }
+    return reachedGeometryBudget ? false : undefined;
   }, () => {
     budgetLimited = true;
   });
@@ -542,6 +569,14 @@ function readOrCreateRawLayer(rawLayerMap: Map<string, CadRawLayer>, layerName: 
 }
 
 /** 按实体类型把二维 CAD 图元折线化为局部 DXF 坐标点。 */
+function convertDxfEntityToPolylines(entity: DxfEntityRecord, blockBasePoint: CadReferencePoint2D): CadReferencePoint2D[][] {
+  if (entity.type === 'HATCH') return convertDxfHatchToPolylines(entity as DxfHatchEntityRecord, blockBasePoint);
+
+  const points = convertDxfEntityToPolyline(entity, blockBasePoint);
+  return points.length >= 2 ? [points] : [];
+}
+
+/** 将单路径 CAD 图元折线化；多边界 HATCH 由 convertDxfEntityToPolylines 单独处理。 */
 function convertDxfEntityToPolyline(entity: DxfEntityRecord, blockBasePoint: CadReferencePoint2D): CadReferencePoint2D[] {
   switch (entity.type) {
     case 'LINE':
@@ -557,9 +592,69 @@ function convertDxfEntityToPolyline(entity: DxfEntityRecord, blockBasePoint: Cad
     case 'LWPOLYLINE':
     case 'POLYLINE':
       return convertDxfPolylineToPolyline(entity as DxfPolylineEntityRecord, blockBasePoint);
+    case 'SOLID':
+    case 'TRACE':
+    case '3DFACE':
+      return convertDxfSolidToPolyline(entity as DxfSolidEntityRecord, blockBasePoint);
+    case 'LEADER':
+      return convertDxfLeaderToPolyline(entity as DxfLeaderEntityRecord, blockBasePoint);
     default:
       return [];
   }
+}
+
+/** 保留 HATCH 的全部边界环，避免填充图案遮罩导致建筑轮廓在参考图中消失。 */
+function convertDxfHatchToPolylines(entity: DxfHatchEntityRecord, blockBasePoint: CadReferencePoint2D): CadReferencePoint2D[][] {
+  if (!isRecord(entity.boundary) || !Array.isArray(entity.boundary.loops)) return [];
+
+  const polylines: CadReferencePoint2D[][] = [];
+  for (const loop of entity.boundary.loops) {
+    if (!isRecord(loop) || !Array.isArray(loop.entities)) continue;
+    for (const boundaryEntity of loop.entities) {
+      if (!isRecord(boundaryEntity)) continue;
+      const boundaryType = typeof boundaryEntity.type === 'string' ? boundaryEntity.type : '';
+      const normalized = boundaryType === 'POLYLINE'
+        ? { ...boundaryEntity, type: 'LWPOLYLINE', vertices: boundaryEntity.points }
+        : boundaryEntity;
+      const points = convertDxfEntityToPolyline(normalized as DxfEntityRecord, blockBasePoint);
+      if (points.length >= 2) polylines.push(points);
+    }
+  }
+
+  return polylines;
+}
+
+/** 将 SOLID、TRACE 和 3DFACE 的外轮廓转换为闭合折线。 */
+function convertDxfSolidToPolyline(entity: DxfSolidEntityRecord, blockBasePoint: CadReferencePoint2D): CadReferencePoint2D[] {
+  const sourcePoints = Array.isArray(entity.corners)
+    ? entity.corners
+    : Array.isArray(entity.points)
+      ? entity.points
+      : entity.vertices;
+  if (!Array.isArray(sourcePoints)) return [];
+
+  const points = sourcePoints
+    .filter(isRecord)
+    .map((point) => readPoint2D(point, blockBasePoint))
+    .filter((point): point is CadReferencePoint2D => Boolean(point));
+  if (points.length < 3) return [];
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (first.x !== last.x || first.y !== last.y) points.push({ ...first });
+  return applyEntityExtrusion(points, entity);
+}
+
+/** 将标注引线转换为普通折线，保留其定位关系。 */
+function convertDxfLeaderToPolyline(entity: DxfLeaderEntityRecord, blockBasePoint: CadReferencePoint2D): CadReferencePoint2D[] {
+  if (!Array.isArray(entity.vertices)) return [];
+  return applyEntityExtrusion(
+    entity.vertices
+      .filter(isRecord)
+      .map((point) => readPoint2D(point, blockBasePoint))
+      .filter((point): point is CadReferencePoint2D => Boolean(point)),
+    entity,
+  );
 }
 
 /** 将 LINE 转成两个端点。 */

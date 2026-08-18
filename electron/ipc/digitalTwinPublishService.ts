@@ -241,6 +241,7 @@ export async function publishDigitalTwin(
   let remoteTask: DigitalTwinPublishTask | null = null;
   let commitStarted = false;
   const warnings: string[] = [];
+  const viewerSceneContent = createPublicViewerSceneContent(validated.sceneContent);
 
   try {
     const skyboxCacheContext = await loadDeploymentSkyboxCacheContext(signal);
@@ -285,7 +286,7 @@ export async function publishDigitalTwin(
     const distPackage = await buildDigitalTwinDistPackage({
       projectId: current.metadata.projectId,
       publishName: validated.publishName,
-      sceneContent: validated.sceneContent,
+      sceneContent: viewerSceneContent,
       outputRoot: taskRoot,
       signal,
       skyboxCacheContext,
@@ -535,6 +536,28 @@ function normalizePublishBaseUrl(value: string): string {
   url.search = '';
   url.hash = '';
   return url.toString().replace(/\/+$/, '');
+}
+
+/**
+ * SOURCE 工程包仍保留编辑器配置以支持回编辑；公开可访问的 Viewer DIST 不得携带长期 API Key。
+ * 发布 Viewer 只使用场景 URL 或数据中台的项目级地址覆盖，鉴权应由同源会话或服务端代理承担。
+ */
+function createPublicViewerSceneContent(sceneContent: string): string {
+  const parsed = JSON.parse(sceneContent) as unknown;
+  if (!isPlainObject(parsed) || !isPlainObject(parsed.scene) || !isPlainObject(parsed.scene.fetchConfig)) {
+    return sceneContent;
+  }
+
+  return `${JSON.stringify({
+    ...parsed,
+    scene: {
+      ...parsed.scene,
+      fetchConfig: {
+        ...parsed.scene.fetchConfig,
+        apiKey: '',
+      },
+    },
+  }, null, 2)}\n`;
 }
 
 async function saveCurrentScene(

@@ -6408,7 +6408,10 @@ export class SceneRuntime {
     }
     if (!model.assetHandle || !model.measurementReady) return;
 
-    const sourceMeshes = model.meshes.filter((mesh) => (
+    // 必须与聚焦/测量共用同一份有效可见几何：参数脚本关闭部件后，隐藏 Mesh 不能继续留在阵列批次中。
+    // 有效集合变化会同步改变 sourceSignature，避免参数快速路径复用包含旧几何的批次。
+    const sourceMeshes = model.meshes.filter((mesh) => this.isModelBoundsMesh(model, mesh));
+    const hasSourceGeometry = model.meshes.some((mesh) => (
       !mesh.isDisposed() && mesh.getTotalVertices() > 0
     ));
     // 批次 Geometry 与脚本宿主隔离；参数或脚本输入变化时必须重建，才能复制最新顶点数据。
@@ -6418,6 +6421,13 @@ export class SceneRuntime {
     const failureSignature = `${options.variantKey ?? 'base'}:${sourceSignature}:${totalInstanceCount}`;
 
     if (sourceMeshes.length === 0) {
+      // 全部原始几何仍存在但被参数脚本隐藏时，旧批次会与聚焦 bounds 脱节，必须立即移除。
+      if (hasSourceGeometry) {
+        this.disposeModelArrayBatch(model);
+        this.suspendModelArrayHost(model);
+        model.modelArrayFailureSignature = '';
+        return;
+      }
       if (model.modelArrayBatch) this.suspendModelArrayHost(model);
       else if (options.variantKey) this.suspendModelArrayHost(model);
       else this.applyModelInteractivity(model, entity.id);

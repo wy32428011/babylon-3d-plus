@@ -1775,7 +1775,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           ? SKYBOX_FOCUS_VIEW_DISTANCE_METERS
           : currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX,
       );
-      viewport.focusOnBounds(bounds);
+      viewport.focusOnBounds(
+        bounds,
+        containsSkybox
+          ? { animate: false, maxRadiusMeters: Number.POSITIVE_INFINITY, useModelFocusAngle: false }
+          : undefined,
+      );
       sceneFocusPerformanceRef.current = {
         ...bounds,
         focusedAt: new Date().toISOString(),
@@ -1800,7 +1805,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         Math.max(sceneDocument.sceneSettings.camera.viewDistance, Math.ceil(bounds.radiusMeters * 4)),
       );
       viewport.setViewDistance(requiredViewDistance);
-      viewport.focusOnBounds(bounds);
+      viewport.focusOnBounds(bounds, {
+        animate: false,
+        maxRadiusMeters: Number.POSITIVE_INFINITY,
+        useModelFocusAngle: false,
+      });
     }
     consumeEnvironmentFocusRequest(environmentFocusRequest.id);
   }, [
