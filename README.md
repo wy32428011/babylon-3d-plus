@@ -240,7 +240,7 @@ Stacker payload 使用通用 `data[]` 数组承载点位，DDJ2 堆垛机数据�
 | `front_x`、`front_y`、`front_z` | 前载货台当前位置。 |
 | `to_x`、`to_y`、`to_z` | 目标位坐标。 |
 
-DDJ2 运动编码按第一版运行时规则解释：`movement_x = 0/1/2` 分别表示静止、前进、后退；`movement_y = 0/1/2` 分别表示原位、上升、下降；`front_movement_z/back_movement_z = 1/2/3/4` 分别表示右伸、左缩、左伸、右缩。`rpm_*` 为正值时换算为速度参考，否则使用模型默认速度；`normal = false`、`errorCode != 0`、`front_command = 8` 或 `back_command = 8` 会进入故障/急停状态，暂停目标追踪和连续运动。
+DDJ2 运动编码按第一版运行时规则解释：`movement_x = 0/1/2` 分别表示静止、前进、后退；`movement_y = 0/1/2` 分别表示原位、上升、下降；`front_movement_z/back_movement_z = 1/3` 表示伸出、`2/4` 表示收回——伸出方向由当前货格几何决定（朝目标货格一侧伸），不再区分 1/3 的左右编码；无货格可解析时回退 1 右伸、3 左伸的旧语义。`rpm_*` 为正值时换算为速度参考，否则使用模型默认速度；`normal = false`、`errorCode != 0`、`front_command = 8` 或 `back_command = 8` 会进入故障/急停状态，暂停目标追踪和连续运动。
 
 `to_x`、`to_y`、`to_z` 三个值非零有效时，运行时生成目标位 ID `${to_x}-${to_y}-${to_z}`，并查找场景中的 `locator.assetId`，例如 `1-1-1`。目标位存在时模型追踪该 locator；三者全为 `0` 时不查目标位，模型按 `movement_*` 字段持续运动。
 

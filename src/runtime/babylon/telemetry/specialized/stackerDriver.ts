@@ -417,7 +417,8 @@ export class StackerTelemetryDriver {
     if (faulted) return this.clampForkOffset(currentOffset, stroke.total);
 
     if (movement === 1 || movement === 3) {
-      const direction = movement === 1 ? 1 : -1;
+      // 伸出方向由目标货格几何决定：1/3 不再区分左右编码；无货格或货格正对叉中心时回退编码语义
+      const direction = this.resolveForkExtendDirection(model, side, cell) ?? (movement === 1 ? 1 : -1);
       const target = this.resolveForkTargetOffset(model, side, direction, cell, stroke);
       if (side === 'front') state.frontForkTargetOffset = target;
       else state.backForkTargetOffset = target;
@@ -431,6 +432,33 @@ export class StackerTelemetryDriver {
     }
 
     return this.clampForkOffset(currentOffset, stroke.total);
+  }
+
+  /**
+   * 按货格几何求伸出方向：货格支撑位相对叉收回位中心在货叉轴上的投影符号。
+   * 参照点减去当前偏移还原收回原位，伸出过程中保持恒定（不会中途掉头）；
+   * 无货格、叉节点不可投影或货格正对叉中心（方向无意义）时返回 null，由调用方回退编码语义。
+   */
+  private resolveForkExtendDirection(
+    model: ModelRuntimeEntry,
+    side: StackerForkSide,
+    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
+  ): number | null {
+    if (!cell) return null;
+    const forkAxis = getModelAxis(model.root, 'x');
+    const groups = this.findStackerForkNodeGroups(model);
+    const stageTwoNodes = side === 'front' ? groups.frontStageTwoNodes : groups.backStageTwoNodes;
+    const stageOneNodes = side === 'front' ? groups.frontStageOneNodes : groups.backStageOneNodes;
+    const allNodes = side === 'front' ? groups.frontNodes : groups.backNodes;
+    const nodes = stageTwoNodes.length > 0 ? stageTwoNodes : (stageOneNodes.length > 0 ? stageOneNodes : allNodes);
+    const projected = getNodesProjectedBounds(nodes, forkAxis);
+    if (!projected) return null;
+    const state = model.stackerTelemetry;
+    const offset = side === 'front' ? state.frontForkOffset : state.backForkOffset;
+    const homeCenter = (projected.max + projected.min) / 2 - offset;
+    const diff = Vector3.Dot(cell.supportPosition, forkAxis) - homeCenter;
+    if (!Number.isFinite(diff) || Math.abs(diff) < 1e-6) return null;
+    return Math.sign(diff);
   }
 
   /**

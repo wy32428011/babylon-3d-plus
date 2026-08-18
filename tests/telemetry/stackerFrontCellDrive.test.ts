@@ -346,3 +346,42 @@ test('front_ 变化时快速收尾：货叉加速收回原点后才允许平移'
     h.dispose();
   }
 });
+
+test('伸叉方向由货格几何决定：货格在 +x 侧时 movement 3（旧"左伸"码）也必须朝 +x 伸', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    // 列沿世界 +X 排布：列 10（列下标 9）支撑位在 (20, 2, 0)，叉收回位中心 x=0
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(11, 2, 0), rootRotationY: 0 });
+    h.apply(POSITION_FRAME, 0.1, 10);
+
+    h.apply({ ...POSITION_FRAME, front_movement_z: 3 }, 0.1, 60);
+    const extended = h.model.stackerTelemetry.frontForkOffset;
+    assert.ok(Math.abs(extended - 0.8) < 1e-6, `movement 3 必须按几何朝 +x 伸到满行程 0.8，实际 ${extended}`);
+
+    // 收回与方向无关：movement 2/4 均归 0
+    h.apply({ ...POSITION_FRAME, front_movement_z: 4 }, 0.1, 60);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('伸叉方向由货格几何决定：货格在 −x 侧时 movement 1（旧"右伸"码）也必须朝 −x 伸', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    // 列沿世界 +X 排布但货格在负侧：列 10 支撑位在 (−20, 2, 0)
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(-29, 2, 0), rootRotationY: 0 });
+    h.apply(POSITION_FRAME, 0.1, 10);
+
+    h.apply({ ...POSITION_FRAME, front_movement_z: 1 }, 0.1, 60);
+    const extended = h.model.stackerTelemetry.frontForkOffset;
+    assert.ok(Math.abs(extended + 0.8) < 1e-6, `movement 1 必须按几何朝 −x 伸到满行程 −0.8，实际 ${extended}`);
+
+    h.apply({ ...POSITION_FRAME, front_movement_z: 2 }, 0.1, 60);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0);
+  } finally {
+    h.dispose();
+  }
+});
