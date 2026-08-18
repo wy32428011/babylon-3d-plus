@@ -16,6 +16,7 @@ function collectCadGeometryTransferables(result: CadReferenceParseResult): Trans
   for (const layer of result.layers) {
     if (layer.positions.buffer instanceof ArrayBuffer) transferables.push(layer.positions.buffer);
     if (layer.polylinePointCounts.buffer instanceof ArrayBuffer) transferables.push(layer.polylinePointCounts.buffer);
+    if (layer.instanceMatrices?.buffer instanceof ArrayBuffer) transferables.push(layer.instanceMatrices.buffer);
   }
   return transferables;
 }

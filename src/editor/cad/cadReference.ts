@@ -40,7 +40,7 @@ const CAD_REFERENCE_SPLINE_MIN_SEGMENT_COUNT = 8;
 const CAD_REFERENCE_SPLINE_MAX_SEGMENT_COUNT = 96;
 const CAD_REFERENCE_SPLINE_SEGMENTS_PER_CONTROL_POINT = 3;
 
-type CadReferencePoint2D = {
+export type CadReferencePoint2D = {
   x: number;
   y: number;
 };
@@ -49,6 +49,8 @@ export type CadReferenceGeometryLayer = {
   name: string;
   positions: Float32Array;
   polylinePointCounts: Uint32Array;
+  instanceMatrices?: Float32Array;
+  instanceCount?: number;
   entityCount: number;
   polylineCount: number;
   pointCount: number;
@@ -89,13 +91,13 @@ type Bounds2D = {
   maxY: number;
 };
 
-type DxfEntityRecord = DxfEntity & {
+export type DxfEntityRecord = DxfEntity & {
   type?: unknown;
   layer?: unknown;
   extrusionZ?: unknown;
 };
 
-type DxfInsertEntityRecord = DxfEntityRecord & {
+export type DxfInsertEntityRecord = DxfEntityRecord & {
   block?: unknown;
   x?: unknown;
   y?: unknown;
@@ -543,12 +545,12 @@ function computeInsertArrayVectors(insert: DxfInsertEntityRecord): { rowVec: Cad
 }
 
 /** 判断当前 DXF 图元是否属于首版承诺显示的线稿类型。 */
-function isSupportedDxfEntity(entity: DxfEntityRecord): boolean {
+export function isSupportedDxfEntity(entity: DxfEntityRecord): boolean {
   return typeof entity.type === 'string' && SUPPORTED_DXF_ENTITY_TYPES.has(entity.type);
 }
 
 /** 从 DXF 图元读取图层名称，缺失时回退到默认 0 图层。 */
-function readDxfEntityLayerName(entity: DxfEntityRecord | undefined): string {
+export function readDxfEntityLayerName(entity: DxfEntityRecord | undefined): string {
   return typeof entity?.layer === 'string' && entity.layer.trim() ? entity.layer.trim() : '0';
 }
 
@@ -569,7 +571,7 @@ function readOrCreateRawLayer(rawLayerMap: Map<string, CadRawLayer>, layerName: 
 }
 
 /** 按实体类型把二维 CAD 图元折线化为局部 DXF 坐标点。 */
-function convertDxfEntityToPolylines(entity: DxfEntityRecord, blockBasePoint: CadReferencePoint2D): CadReferencePoint2D[][] {
+export function convertDxfEntityToPolylines(entity: DxfEntityRecord, blockBasePoint: CadReferencePoint2D): CadReferencePoint2D[][] {
   if (entity.type === 'HATCH') return convertDxfHatchToPolylines(entity as DxfHatchEntityRecord, blockBasePoint);
 
   const points = convertDxfEntityToPolyline(entity, blockBasePoint);

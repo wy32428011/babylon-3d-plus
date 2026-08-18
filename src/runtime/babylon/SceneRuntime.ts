@@ -5244,6 +5244,7 @@ export class SceneRuntime {
               batchIndex,
               layer.positions.slice(chunkPointOffset * 3, (chunkPointOffset + chunkPointCount) * 3),
               new Uint32Array([chunkPointCount]),
+              layer.instanceMatrices,
             );
             batchIndex += 1;
             await this.waitForCadReferenceRenderFrame();
@@ -5287,6 +5288,7 @@ export class SceneRuntime {
           batchIndex,
           layer.positions.slice(batchPointOffset * 3, (batchPointOffset + batchPointCount) * 3),
           layer.polylinePointCounts.slice(batchPolylineIndex, batchPolylineIndex + batchPolylineCount),
+          layer.instanceMatrices,
         );
         batchIndex += 1;
         await this.waitForCadReferenceRenderFrame();
@@ -5314,6 +5316,7 @@ export class SceneRuntime {
     batchIndex: number,
     positions: Float32Array,
     polylinePointCounts: Uint32Array,
+    instanceMatrices?: Float32Array,
   ): void {
     let segmentCount = 0;
     for (const pointCount of polylinePointCounts) {
@@ -5345,6 +5348,10 @@ export class SceneRuntime {
     vertexData.positions = positions;
     vertexData.indices = indices;
     vertexData.applyToMesh(lineMesh, false);
+    if (instanceMatrices && instanceMatrices.length >= 16) {
+      lineMesh.thinInstanceSetBuffer('matrix', instanceMatrices, 16, true);
+      lineMesh.thinInstanceRefreshBoundingInfo(true);
+    }
     lineMesh.parent = cadReference.root;
     lineMesh.isPickable = false;
     lineMesh.metadata = { ...(lineMesh.metadata ?? {}), cadReferenceLayer: layerName };

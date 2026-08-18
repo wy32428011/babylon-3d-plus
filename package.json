@@ -25,7 +25,7 @@
     "test:model-array": "node scripts/model-array-test.mjs",
     "test:builtin-slot": "node scripts/builtin-slot-test.mjs",
     "smoke:units": "node scripts/smoke-meter-unit-contract.mjs && npm run smoke:cad && npm run smoke:model-measurement && npm run smoke:model-array && npm run smoke:model-parameters",
-    "smoke:cad": "node scripts/smoke-cad-geometry-fidelity.mjs",
+    "smoke:cad": "node scripts/smoke-cad-geometry-fidelity.mjs && node scripts/smoke-cad-block-instances.mjs && node scripts/smoke-cad-extended-geometry.mjs",
     "smoke:model-measurement": "node scripts/smoke-model-measurement.mjs",
     "smoke:model-array": "node scripts/smoke-model-array.mjs",
     "smoke:model-array-packages": "node scripts/smoke-parametric-model-array-packages.mjs",

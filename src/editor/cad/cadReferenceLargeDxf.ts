@@ -1,7 +1,7 @@
 import type { ParsedDXF } from '@linkiez/dxf-renew';
+import { convertParsedCadReferenceDxfInstanced } from './cadReferenceInstances';
 import {
   CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET,
-  convertParsedCadReferenceDxf,
   type CadReferenceGeometryBudget,
   type CadReferenceParseOptions,
   type CadReferenceParseResult,
@@ -108,7 +108,7 @@ export function parseLargeCadReferenceDxf(
   options: Omit<CadReferenceParseOptions, 'geometryBudget'> = {},
 ): CadReferenceParseResult {
   const parsed = scanLargeDxfDocument(content);
-  return convertParsedCadReferenceDxf(parsed as unknown as ParsedDXF, { ...options, geometryBudget: budget });
+  return convertParsedCadReferenceDxfInstanced(parsed as unknown as ParsedDXF, { ...options, geometryBudget: budget });
 }
 
 /** 扫描 DXF 文档的 HEADER、BLOCKS 与 ENTITIES 三个关键区段。 */
