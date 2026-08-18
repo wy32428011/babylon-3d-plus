@@ -3181,6 +3181,11 @@ export class SceneRuntime {
     const signature = this.createLocatorSignature(locator, bindingSteps);
 
     let runtimeLocator = this.locators.get(entity.id);
+    if (runtimeLocator && runtimeLocator.root.isDisposed()) {
+      // 模型重载会递归销毁挂在模型根下的货格节点；条目仍在但节点已死，必须整体重建（重挂 parent 无法复活）。
+      this.locators.delete(entity.id);
+      runtimeLocator = undefined;
+    }
     if (!runtimeLocator) {
       runtimeLocator = this.createLocator(entity.id, locator, bindingSteps);
       runtimeLocator.signature = signature;
