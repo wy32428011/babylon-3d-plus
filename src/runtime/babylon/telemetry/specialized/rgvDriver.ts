@@ -641,6 +641,7 @@ export class RgvTelemetryDriver {
       fallback: null,
       generatorEntityId: null,
       handoff: null,
+      axialLengthCache: null,
     };
     this.state.rgvCargoMeshes.set(key, entry);
     return entry;

@@ -14,6 +14,7 @@ import {
   transformWorldBounds,
 } from '../../runtimeNodeGeometry';
 import { isPlainRecord, sanitizeBabylonName } from '../../runtimeValueUtils';
+import { isMeasurableModelMesh } from '../../modelMeasurement';
 import {
   readBooleanField,
   readIntegerField,
@@ -255,10 +256,11 @@ export class ConveyorTelemetryDriver {
         if (!hasUpstream && model.telemetryBinding?.cargoOriginDevice === true) {
           // 起点设备：探测点未触及上游且无注册上游时允许自行创建货箱
           // 刷出端由运行方向决定：正转刷在轨迹起点向终点移动，反转刷在轨迹终点向起点移动。
+          // 刷出瞬间货箱模板尚未加载，按内置长度计算行程；模板就绪后下一帧 clamp 自动收敛到实测端点。
           const plan = this.resolveConveyorTravelPlan(model);
           state.pendingTask = null;
           state.waitingTask = null;
-          state.cargoTravelOffset = -probeDirection * plan.forwardSign * plan.travelHalfRange;
+          state.cargoTravelOffset = -probeDirection * plan.forwardSign * this.resolveTravelHalfRangeMeters(null, plan);
           state.cargoCode = CONVEYOR_CARGO_IDENTITY;
           this.createConveyorCargoForTask(model, snapshot, state.cargoCode);
           if (movementDirection === 0) state.selfDriveDirection = 1;
@@ -290,8 +292,9 @@ export class ConveyorTelemetryDriver {
     if (!snapshot.faulted && cargoDirection !== 0) {
       state.cargoTravelOffset += cargoDirection * plan.forwardSign * cargoSpeed * deltaSeconds;
     }
-    // 每帧按当前行程钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
-    state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, -plan.travelHalfRange, plan.travelHalfRange);
+    // 每帧按当前货箱实测模板长度钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
+    const travelHalfRange = this.resolveTravelHalfRangeMeters(cargo, plan);
+    state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, -travelHalfRange, travelHalfRange);
 
     this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));
     const pose = resolveCargoHandoffPose(
@@ -616,7 +619,8 @@ export class ConveyorTelemetryDriver {
 
     const plan = this.resolveConveyorTravelPlan(subscriber);
     subscriberState.cargoCode = CONVEYOR_CARGO_IDENTITY;
-    subscriberState.cargoTravelOffset = -direction * plan.forwardSign * plan.travelHalfRange;
+    // 交接货箱已在上游渲染完毕，模板长度实测可用，直接按实测端点重置偏移。
+    subscriberState.cargoTravelOffset = -direction * plan.forwardSign * this.resolveTravelHalfRangeMeters(cargo, plan);
     subscriberState.pendingTask = null;
     subscriberState.waitingTask = null;
     // 承接即走行：登记自驱方向，快照断流期间由帧调度继续驱动，新消息到达即恢复字段驱动。
@@ -693,14 +697,15 @@ export class ConveyorTelemetryDriver {
     return assetCode ? this.findModelByAssetCode(assetCode) : null;
   }
 
-  /** 探测点世界坐标：轨迹端点沿走行方向向外延伸一个货箱长度（复用刷出端偏移公式）。 */
+  /** 探测点世界坐标：轨迹端点沿走行方向向外延伸一个货箱长度（复用刷出端偏移公式）。邻居拓扑探测与货箱实测长度无关，且探测解析时货箱可能尚未渲染，这里固定用内置长度。 */
   private resolveProbePoint(model: ModelRuntimeEntry, direction: number): Vector3 {
     const plan = this.resolveConveyorTravelPlan(model);
     const cargoAxialLength = CONVEYOR_CARGO_SIZE[plan.travelContext.travelAxisName];
+    const travelHalfRange = resolveConveyorCargoTravelHalfRange(plan.travelContext.spanMeters ?? 0, cargoAxialLength);
     return this.getConveyorCargoPosition(
       model,
       plan.travelContext,
-      -direction * plan.forwardSign * (plan.travelHalfRange + cargoAxialLength),
+      -direction * plan.forwardSign * (travelHalfRange + cargoAxialLength),
     );
   }
 
@@ -828,6 +833,7 @@ export class ConveyorTelemetryDriver {
       fallback: null,
       generatorEntityId: null,
       handoff: null,
+      axialLengthCache: null,
     };
     this.state.conveyorCargoMeshes.set(key, entry);
     return entry;
@@ -868,21 +874,60 @@ export class ConveyorTelemetryDriver {
   }
 
   /**
-   * 行程规划（带缓存）：走行上下文、行程半径与轨迹符号首次使用时计算并缓存在遥测状态上。
+   * 行程规划（带缓存）：走行上下文与轨迹符号首次使用时计算并缓存在遥测状态上。
    * 预览期间模型不动，缓存安全（与 probeNeighbors 同一假设）；reset 时随状态清空重算。
+   * 行程半径不进缓存——按当前货箱实测模板长度每帧动态计算，见 resolveTravelHalfRangeMeters。
    */
   private resolveConveyorTravelPlan(model: ModelRuntimeEntry): ConveyorCargoTravelPlan {
     const state = model.conveyorTelemetry;
     if (state.travelPlan) return state.travelPlan;
     const travelContext = this.resolveConveyorCargoTravelContext(model);
-    const cargoAxialLength = CONVEYOR_CARGO_SIZE[travelContext.travelAxisName];
     const plan: ConveyorCargoTravelPlan = {
       travelContext,
-      travelHalfRange: resolveConveyorCargoTravelHalfRange(travelContext.spanMeters ?? 0, cargoAxialLength),
       forwardSign: this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxisName),
     };
     state.travelPlan = plan;
     return plan;
+  }
+
+  /**
+   * 实测货箱沿行走轴的模板长度（米）：生成器输出就绪后按世界包围盒在行走轴上的投影测量，
+   * 按模板 target 签名缓存避免每帧重测；内置立方体/加载中/无货箱一律回退 CONVEYOR_CARGO_SIZE。
+   */
+  private resolveCargoAxialLengthMeters(
+    cargo: ConveyorCargoRuntimeEntry | null,
+    travelContext: ConveyorCargoTravelPlan['travelContext'],
+  ): number {
+    const fallbackLength = CONVEYOR_CARGO_SIZE[travelContext.travelAxisName];
+    const owner = cargo?.outputOwner ?? null;
+    const output = owner?.output ?? null;
+    if (!cargo || !owner || !output) return fallbackLength;
+
+    const cacheKey = `${owner.activeTargetSignature ?? ''}:${travelContext.travelAxisName}`;
+    if (cargo.axialLengthCache?.key === cacheKey) return cargo.axialLengthCache.lengthMeters;
+
+    const nodes = output.kind === 'mesh'
+      ? [output.mesh]
+      : output.model.contentRoot.getChildMeshes(false).filter(isMeasurableModelMesh);
+    if (nodes.length === 0) return fallbackLength;
+
+    cargo.root.computeWorldMatrix(true);
+    const bounds = getNodesWorldBounds(nodes);
+    const projected = bounds ? projectWorldBoundsOntoAxis(bounds, travelContext.travelAxis) : null;
+    const lengthMeters = projected && projected.max > projected.min ? projected.max - projected.min : fallbackLength;
+    cargo.axialLengthCache = { key: cacheKey, lengthMeters };
+    return lengthMeters;
+  }
+
+  /** 行程半径 = 输送线跨度/2 − 当前货箱实测半长：货箱前沿到达输送线末端即停住。 */
+  private resolveTravelHalfRangeMeters(
+    cargo: ConveyorCargoRuntimeEntry | null,
+    plan: ConveyorCargoTravelPlan,
+  ): number {
+    return resolveConveyorCargoTravelHalfRange(
+      plan.travelContext.spanMeters ?? 0,
+      this.resolveCargoAxialLengthMeters(cargo, plan.travelContext),
+    );
   }
 
   /** 货箱行程上下文：支撑中心、竖直轴、行走轴、行走跨度与支撑面抬升量，供货物定位与探测点共用一份包围盒计算。 */

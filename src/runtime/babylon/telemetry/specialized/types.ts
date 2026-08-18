@@ -163,6 +163,8 @@ export type GeneratedCargoRuntimeEntry = {
   generatorEntityId: string | null;
   /** 跨设备接管时的视觉过渡；null 表示无交接插值。 */
   handoff: CargoHandoffState | null;
+  /** conveyor 专用：按模板 target 签名缓存的实测沿行走轴长度（米），避免每帧重测包围盒。 */
+  axialLengthCache: { key: string; lengthMeters: number } | null;
 };
 
 export type StackerCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
@@ -250,7 +252,7 @@ export type ConveyorExternalPull = {
   direction: number;
 };
 
-/** 输送线行程规划缓存：走行上下文/行程半径/轨迹符号，预览期间模型不动可安全缓存，reset 时清空重算。 */
+/** 输送线行程规划缓存：走行上下文与轨迹符号，预览期间模型不动可安全缓存，reset 时清空重算。行程半径不缓存——按货箱实测模板长度每帧动态计算。 */
 export type ConveyorCargoTravelPlan = {
   readonly travelContext: {
     readonly center: Vector3;
@@ -261,7 +263,6 @@ export type ConveyorCargoTravelPlan = {
     /** 支撑面抬升量（米）：center 沿 upAxis 到设备包围盒上表面的距离 + dataDriven.cargo.surfaceOffset 微调。 */
     readonly surfaceLiftMeters: number;
   };
-  readonly travelHalfRange: number;
   readonly forwardSign: 1 | -1;
 };
 

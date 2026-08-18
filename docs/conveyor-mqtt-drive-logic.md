@@ -41,7 +41,7 @@
 
 - **行走轴**：脚本 `cargo.travel.axis` 声明（x/z），缺省 x；conveyor 本体无自主动画，`motion` 块已废弃
 - **跨度**：`cargo.travel.nodes` 精确名节点（兜底 `fallbackPattern` 正则，再兜底通用命名正则/整机包围盒）投影到行走轴的长度
-- **行程半径** `halfRange = span/2 − 货箱轴向长度/2`，货箱尺寸 `CONVEYOR_CARGO_SIZE=(0.72, 0.34, 0.72)`
+- **行程半径** `halfRange = span/2 − 货箱轴向长度/2`；货箱轴向长度取生成器模板实测（输出世界包围盒在行走轴上的投影，按模板 target 签名缓存），内置立方体/模板未就绪/探测点场景回退 `CONVEYOR_CARGO_SIZE=(0.72, 0.34, 0.72)`
 - **轨迹方向** `forwardSign`：`telemetryBinding.trajectoryDirection`（x/-x/z/-z，缺省 x）为**模型本地坐标**方向；其轴与行走轴名一致时取配置正负号（±1），轴向不一致（缺省/错配）回退 1
 - **刷出端偏移** `spawnOffset = −direction × forwardSign × halfRange`：正转刷在轨迹起点向终点走，反转反之
 - **探测点偏移** `probeOffset = −direction × forwardSign × (halfRange + 货箱轴向长度)`：复用刷出端公式，自轨迹端点沿走行方向**向外多延伸一个货箱长度**；正转探测点对应 movement_x 0/1，反转探测点对应 movement_x 2

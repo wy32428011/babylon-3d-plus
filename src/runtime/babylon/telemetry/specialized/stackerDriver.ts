@@ -896,6 +896,7 @@ export class StackerTelemetryDriver {
       fallback: null,
       generatorEntityId: null,
       handoff: null,
+      axialLengthCache: null,
     };
     this.state.stackerCargoMeshes.set(key, entry);
     return entry;
