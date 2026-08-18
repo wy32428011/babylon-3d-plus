@@ -1522,10 +1522,14 @@ function createDuplicatedRuntimeEntity(
   if (components.autoPatrol) {
     components.autoPatrol = { ...components.autoPatrol, autoStart: false };
   }
-  if (components.locator && overrides.assetNumber?.kind === 'locator') {
+  if (components.locator) {
     components.locator = {
       ...components.locator,
-      assetId: overrides.assetNumber.value,
+      // 复制定位线框必须生成唯一资产编号，否则运行时按 assetId 去重会丢弃副本（设备定位失效）
+      assetId:
+        overrides.assetNumber?.kind === 'locator'
+          ? overrides.assetNumber.value
+          : createModelAssetCode(extractModelAssetCodePrefix(components.locator.assetId), id),
     };
   }
 
