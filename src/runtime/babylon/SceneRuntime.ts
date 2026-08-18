@@ -636,6 +636,8 @@ export class SceneRuntime {
     node: TransformNode;
   } | null = null;
   private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
+  /** 场景级默认模型生成器实体 ID，syncDocument 时从文档快照刷新。 */
+  private defaultCargoGeneratorId: string | null = null;
   private readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
   /** fetch 数据驱动的定位线框渲染运行时，按定位线框实体组织。 */
   private readonly locatorFetchRuntimes = new Map<string, LocatorFetchRuntime>();
@@ -932,7 +934,10 @@ export class SceneRuntime {
     const fetchRuntime = this.locatorFetchRuntimes.get(target.entityId);
     if (!fetchRuntime) return;
 
-    const generatorId = target.locatorComponent.fetchDrive?.cargoGeneratorId;
+    const boundGeneratorId = target.locatorComponent.fetchDrive?.cargoGeneratorId;
+    const generatorId = boundGeneratorId && this.modelGenerators.has(boundGeneratorId)
+      ? boundGeneratorId
+      : this.defaultCargoGeneratorId ?? undefined;
     const generatorComponent = generatorId
       ? this.modelGenerators.get(generatorId)?.component ?? null
       : null;
@@ -2422,6 +2427,7 @@ export class SceneRuntime {
 
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
+    this.defaultCargoGeneratorId = document.sceneSettings.defaultCargoGeneratorId ?? null;
     const previousEntityStates = new Map(this.entityStates);
     const previousHighlightedEntityIds = mergeSceneRuntimeHighlightEntityIds(
       this.selectedEntityIds,
@@ -2699,18 +2705,28 @@ export class SceneRuntime {
     this.pushLog(message);
   }
 
-  /** 读取设备绑定的模型生成器运行时条目；绑定失效时回退内置几何体并提示一次。 */
+  /** 读取设备绑定的模型生成器运行时条目；未绑定或绑定失效时回退场景默认，最终回退内置几何体。 */
   private resolveCargoGeneratorForModel(model: ModelRuntimeEntry): ModelGeneratorRuntimeEntry | null {
-    const generatorId = model.telemetryBinding?.cargoGeneratorId?.trim();
-    if (!generatorId) return null;
-    const generator = this.modelGenerators.get(generatorId) ?? null;
-    if (!generator) {
+    const boundId = model.telemetryBinding?.cargoGeneratorId?.trim();
+    if (boundId) {
+      const bound = this.modelGenerators.get(boundId) ?? null;
+      if (bound) return bound;
       this.reportCargoIssue(
-        `cargo-generator-missing:${model.assetCode}:${generatorId}`,
-        `设备 ${model.assetCode} 绑定的模型生成器已被删除，货箱回退内置几何体。`,
+        `cargo-generator-missing:${model.assetCode}:${boundId}`,
+        `设备 ${model.assetCode} 绑定的模型生成器已被删除，货箱回退场景默认或内置几何体。`,
       );
     }
-    return generator;
+
+    const defaultId = this.defaultCargoGeneratorId;
+    if (!defaultId) return null;
+    const fallback = this.modelGenerators.get(defaultId) ?? null;
+    if (!fallback) {
+      this.reportCargoIssue(
+        `cargo-generator-default-missing:${defaultId}`,
+        `场景默认模型生成器已被删除，货箱回退内置几何体。`,
+      );
+    }
+    return fallback;
   }
 
   /** 按实体 ID 解析 RGV 列接驳位实体的世界位姿：依次查模型、定位线框、基础网格和合批阵列实例。 */

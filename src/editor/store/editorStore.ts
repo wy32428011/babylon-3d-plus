@@ -18,6 +18,7 @@ import {
   renameEntityCommand,
   updateCadReferenceCommand,
   updateSceneDocumentCommand,
+  updateSceneDefaultCargoGeneratorCommand,
   updateSceneEnvironmentCommand,
   updateEntityLockCommand,
   updateEntityVisibilityCommand,
@@ -442,6 +443,7 @@ type EditorState = {
   setCameraViewDistance: (viewDistance: number) => void;
   updateSensitivitySetting: (key: SceneSensitivitySettingKey, value: number) => void;
   updateEnvironmentConfig: (environment: SceneEnvironmentSettings | null) => void;
+  setDefaultCargoGenerator: (generatorId: string | null) => void;
   requestEnvironmentApply: (
     environment: SceneEnvironmentSettings,
     options?: EnvironmentApplyOptions,
@@ -2010,11 +2012,19 @@ function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[]): Scene
       ? scene.selectedEntityId
       : selectedReplacement;
 
+  const defaultCargoGeneratorId =
+    scene.sceneSettings.defaultCargoGeneratorId && deletingIds.has(scene.sceneSettings.defaultCargoGeneratorId)
+      ? null
+      : scene.sceneSettings.defaultCargoGeneratorId;
+
   return {
     ...scene,
     entityIds: scene.entityIds.filter((entityId) => !deletingIds.has(entityId)),
     entities,
     selectedEntityId,
+    sceneSettings: defaultCargoGeneratorId === scene.sceneSettings.defaultCargoGeneratorId
+      ? scene.sceneSettings
+      : { ...scene.sceneSettings, defaultCargoGeneratorId },
   };
 }
 
@@ -2685,6 +2695,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           ? state.environmentRuntimeSnapshot
           : createIdleEnvironmentRuntimeSnapshot(),
         logs: prependLog(state.logs, nextEnvironment ? '环境模型已更新。' : '环境模型已清除。'),
+      };
+    });
+  },
+  setDefaultCargoGenerator: (generatorId) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改默认模型生成器');
+      const before = state.scene.sceneSettings.defaultCargoGeneratorId;
+      const after = generatorId?.trim() || null;
+      if (before === after) return state;
+
+      const command = updateSceneDefaultCargoGeneratorCommand(before, after);
+      const result = executeCommand(state.scene, state.history, command);
+
+      return {
+        ...result,
+        logs: prependLog(state.logs, after ? '默认模型生成器已更新。' : '默认模型生成器已清除。'),
       };
     });
   },

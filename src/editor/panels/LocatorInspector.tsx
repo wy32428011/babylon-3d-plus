@@ -38,6 +38,13 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
   const cargoGeneratorMissing = Boolean(
     fetchDrive?.cargoGeneratorId && !generatorOptions.some((option) => option.id === fetchDrive.cargoGeneratorId),
   );
+  const sceneDefaultGeneratorId = scene.sceneSettings.defaultCargoGeneratorId;
+  const sceneDefaultGeneratorName = sceneDefaultGeneratorId
+    ? scene.entities[sceneDefaultGeneratorId]?.name ?? null
+    : null;
+  const unboundLabel = sceneDefaultGeneratorName
+    ? `未绑定（跟随场景默认：${sceneDefaultGeneratorName}）`
+    : '未绑定（内置立方体）';
   const builtInBinding = component.builtInBinding;
 
   function handleDimensionChange(field: LocatorDimensionField, rawValue: string) {
@@ -208,13 +215,13 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
           value={fetchDrive?.cargoGeneratorId || '__none__'}
           onChange={(event) => updateFetchDrive(fetchDrive?.enabled === true, event.target.value !== '__none__' ? event.target.value : undefined)}
         >
-          <option value="__none__">未绑定（内置立方体）</option>
+          <option value="__none__">{unboundLabel}</option>
           {generatorOptions.map((option) => (
             <option key={option.id} value={option.id}>{option.name}</option>
           ))}
         </select>
       </label>
-      {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退内置立方体。</p> : null}
+      {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退场景默认或内置立方体。</p> : null}
     </fieldset>
     </>
   );

@@ -174,7 +174,7 @@ export const dataDriven = { device: { devType: 'conveyor' }, cargo: { travel: { 
 
 | 方法 | 说明 |
 |---|---|
-| `resolveCargoGeneratorForModel()` | 由 `telemetryBinding.cargoGeneratorId` 找生成器运行时；未绑定/已删除 → null |
+| `resolveCargoGeneratorForModel()` | 由 `telemetryBinding.cargoGeneratorId` 找生成器运行时；未绑定/已删除 → 回退场景默认 `sceneSettings.defaultCargoGeneratorId`，仍无 → null |
 | `syncGeneratedCargoVisual()` | 总入口：有生成器走模板解析，无生成器直接回退 |
 | `resolveModelGeneratorTargetFromSnapshot()`（`modelGeneratorRuntime.ts`） | 以本设备当前快照逐条匹配 `rules[]`（attributeName/attributeValue），命中用规则目标，否则 `defaultTarget` |
 | `syncModelGeneratorResolvedTarget()` | 目标签名比对：命中复用，未命中异步 `ImportMesh` 加载 GLB（含单位换算 + .model.ts 脚本）挂到货箱 root |
@@ -197,7 +197,7 @@ export const dataDriven = { device: { devType: 'conveyor' }, cargo: { travel: { 
 | 现象 | 先查 |
 |---|---|
 | 设备完全不动 | topic `assetCode` 与绑定是否严格一致；`collectSpecializedTelemetryConflictKeys` 是否报冲突 |
-| 货箱是立方体 | 设备未配 `cargoGeneratorId`，或生成器规则未命中且 `defaultTarget` 为空（Console 有一次性提示） |
+| 货箱是立方体 | 设备未配 `cargoGeneratorId` 且场景设置未配默认模型生成器（`sceneSettings.defaultCargoGeneratorId`），或生成器规则未命中且 `defaultTarget` 为空（Console 有一次性提示） |
 | 货箱不出现 | 设备快照是否带 `containerCode` 或 `container_quantity>0`；topic `assetCode` 与绑定是否一致 |
 | 停止后姿态没恢复 | `telemetryPreviewBaseline` 捕获/恢复路径 |
 | 脚本参数不生效 | 运行组件属性名与参数 key 是否同名；meta.json 是否由 sync 脚本重新生成 |

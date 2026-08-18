@@ -182,6 +182,29 @@ export function updateSceneEnvironmentCommand(
   };
 }
 
+/** 场景级默认模型生成器修改，显式 before/after 支持撤销。 */
+export function updateSceneDefaultCargoGeneratorCommand(
+  before: string | null,
+  after: string | null,
+): Command {
+  const replaceDefault = (
+    scene: SceneDocument,
+    defaultCargoGeneratorId: string | null,
+  ): SceneDocument => ({
+    ...scene,
+    sceneSettings: {
+      ...scene.sceneSettings,
+      defaultCargoGeneratorId,
+    },
+  });
+
+  return {
+    label: '更新默认模型生成器',
+    execute: (scene) => replaceDefault(scene, after),
+    undo: (scene) => replaceDefault(scene, before),
+  };
+}
+
 /** 批量移动实体或完整文件夹子树到目标文件夹/根层级，并拒绝形成层级循环。 */
 export function moveEntitiesToFolderCommand(entityIds: string[], targetFolderId: string | null): Command {
   let previousScene: SceneDocument | null = null;

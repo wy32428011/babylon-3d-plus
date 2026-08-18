@@ -153,6 +153,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const setCameraViewDistance = useEditorStore((state) => state.setCameraViewDistance);
   const updateSensitivitySetting = useEditorStore((state) => state.updateSensitivitySetting);
   const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
+  const setDefaultCargoGenerator = useEditorStore((state) => state.setDefaultCargoGenerator);
   const requestEnvironmentApply = useEditorStore((state) => state.requestEnvironmentApply);
   const updateEnvironmentDisplay = useEditorStore((state) => state.updateEnvironmentDisplay);
   const setEnvironmentAdjustmentActive = useEditorStore((state) => state.setEnvironmentAdjustmentActive);
@@ -175,6 +176,14 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
 
   const environment = scene.sceneSettings.environment;
   const skybox = getSceneSkyboxSettings(scene);
+  const cargoGeneratorOptions = scene.entityIds
+    .map((entityId) => scene.entities[entityId])
+    .filter((entity) => entity?.components.modelGenerator)
+    .map((entity) => ({ id: entity!.id, name: entity!.name }));
+  const defaultCargoGeneratorId = scene.sceneSettings.defaultCargoGeneratorId;
+  const defaultCargoGeneratorMissing = Boolean(
+    defaultCargoGeneratorId && !cargoGeneratorOptions.some((option) => option.id === defaultCargoGeneratorId),
+  );
   const minimumViewDistance = skybox ? SCENE_SKYBOX_VIEW_DISTANCE_MIN : SCENE_VIEW_DISTANCE_MIN;
   const presetVariant = environment?.variants[0] ?? null;
   const customVariants = environment?.variants.slice(1) ?? [];
@@ -875,6 +884,27 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
               : <p className="muted">暂无自定义效果</p>}
           </div>
         </div>
+      </fieldset>
+
+      <fieldset className="transform-fieldset">
+        <legend>货箱生成器</legend>
+        <label className="inspector-row">
+          <span>默认模板来源</span>
+          <select
+            disabled={props.readOnly}
+            value={defaultCargoGeneratorId ?? '__none__'}
+            onChange={(event) => setDefaultCargoGenerator(event.target.value !== '__none__' ? event.target.value : null)}
+          >
+            <option value="__none__">无（内置立方体）</option>
+            {cargoGeneratorOptions.map((option) => (
+              <option key={option.id} value={option.id}>{option.name}</option>
+            ))}
+          </select>
+        </label>
+        {defaultCargoGeneratorMissing ? (
+          <p className="telemetry-runtime-error">默认模型生成器已被删除，未绑定的设备将回退内置立方体。</p>
+        ) : null}
+        <p className="muted">遥测设备与定位线框未单独绑定模型生成器时，统一使用此默认模板渲染货箱。</p>
       </fieldset>
 
       {skyboxDialogOpen ? (

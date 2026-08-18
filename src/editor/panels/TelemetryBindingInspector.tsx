@@ -102,6 +102,13 @@ export function CargoGeneratorInspector(props: {
   const cargoGeneratorMissing = Boolean(
     props.binding?.cargoGeneratorId && !generatorOptions.some((option) => option.id === props.binding?.cargoGeneratorId),
   );
+  const sceneDefaultGeneratorId = scene.sceneSettings.defaultCargoGeneratorId;
+  const sceneDefaultGeneratorName = sceneDefaultGeneratorId
+    ? scene.entities[sceneDefaultGeneratorId]?.name ?? null
+    : null;
+  const unboundLabel = sceneDefaultGeneratorName
+    ? `未绑定（跟随场景默认：${sceneDefaultGeneratorName}）`
+    : '未绑定（内置立方体）';
 
   /** 无遥测绑定的模型直接创建默认绑定再写入 cargoGeneratorId。 */
   function handleGeneratorChange(generatorId: string | undefined): void {
@@ -122,14 +129,14 @@ export function CargoGeneratorInspector(props: {
           value={props.binding?.cargoGeneratorId || '__none__'}
           onChange={(event) => handleGeneratorChange(event.target.value !== '__none__' ? event.target.value : undefined)}
         >
-          <option value="__none__">未绑定（内置立方体）</option>
+          <option value="__none__">{unboundLabel}</option>
           {generatorOptions.map((option) => (
             <option key={option.id} value={option.id}>{option.name}</option>
           ))}
         </select>
       </label>
-      {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退内置立方体。</p> : null}
-      <p className="muted">堆垛机/输送线/RGV 取放货时按所选模型生成器渲染货箱。</p>
+      {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退场景默认或内置立方体。</p> : null}
+      <p className="muted">堆垛机/输送线/RGV 取放货时按所选模型生成器渲染货箱；未绑定时跟随场景设置中的默认模板。</p>
     </fieldset>
   );
 }

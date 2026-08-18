@@ -165,6 +165,8 @@ export type SceneSettings = {
   sensitivity: SceneSensitivitySettings;
   environment: SceneEnvironmentSettings | null;
   skybox: SceneSkyboxSettings | null;
+  /** 场景级默认模型生成器实体 ID；设备/定位线框未单独绑定时回退到它，仍为空才用内置立方体。 */
+  defaultCargoGeneratorId: string | null;
 };
 
 export type FetchConfig = {
@@ -233,6 +235,7 @@ export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
   },
   environment: null,
   skybox: null,
+  defaultCargoGeneratorId: null,
 };
 
 /** 将数值约束在指定范围内，非法输入直接回退到默认值。 */
@@ -645,7 +648,15 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
     },
     environment: sanitizeSceneEnvironment(settings.environment),
     skybox: sanitizeSceneSkybox(settings.skybox),
+    defaultCargoGeneratorId: sanitizeDefaultCargoGeneratorId(settings.defaultCargoGeneratorId),
   };
+}
+
+/** 场景默认模型生成器 ID：非字符串或 trim 后为空一律回退 null。 */
+function sanitizeDefaultCargoGeneratorId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().slice(0, 128);
+  return trimmed || null;
 }
 
 /** 创建一份新的默认场景设置，避免共享 DEFAULT_SCENE_SETTINGS 的嵌套引用。 */

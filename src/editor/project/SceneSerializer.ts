@@ -307,6 +307,10 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
     },
     environment: normalizeSceneEnvironmentSettings(settings.environment),
     skybox: normalizeSceneSkyboxSettings(settings.skybox),
+    // 旧场景文件没有该字段；宽松读取，缺失/非法一律 null，不阻断打开。
+    defaultCargoGeneratorId: typeof settings.defaultCargoGeneratorId === 'string'
+      ? settings.defaultCargoGeneratorId
+      : null,
   });
 }
 
