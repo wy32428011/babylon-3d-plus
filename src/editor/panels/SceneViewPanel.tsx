@@ -12,6 +12,7 @@ import {
   type SceneModelSelectionPointerSnapshot,
 } from '../../shared/sceneModelSelectionPointer';
 import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
+import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import { createEntityGroupRotationDeltaMatrix } from '../../runtime/babylon/EntityGroupRotationPreview';
@@ -635,6 +636,25 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           selectionClick.clientY,
           event.currentTarget,
         ) ?? null;
+    // 货架被点中时顺带反解内置货格命中格，输出 排-列-层 方便对照泊位；不改变任何选中行为。
+    if (pickedEntityId) {
+      const state = useEditorStore.getState();
+      const locatorEntityId = findBuiltInSlotEntityId(state.scene, pickedEntityId);
+      const cell = locatorEntityId
+        ? runtimeRef.current?.pickLocatorCellAtCanvasPoint(
+            selectionClick.clientX,
+            selectionClick.clientY,
+            event.currentTarget,
+            locatorEntityId,
+          ) ?? null
+        : null;
+      if (cell) {
+        const host = state.scene.entities[pickedEntityId];
+        const assetCode = host?.components.modelAsset?.assetCode;
+        const hostLabel = `${host?.name ?? pickedEntityId}${assetCode ? `（${assetCode}）` : ''}`;
+        state.pushLog(`命中货格：${hostLabel} ${cell.row}-${cell.column}-${cell.layer}（排-列-层）`);
+      }
+    }
     if (selectionClick.toggleSelection) {
       if (!pickedEntityId) return;
       const state = useEditorStore.getState();

@@ -1586,6 +1586,48 @@ export class SceneRuntime {
     return this.pickSceneEntityIdAtCanvasPoint(clientX, clientY, canvas, 'runtime-model');
   }
 
+  /** 在画布客户端坐标位置反解指定货格被命中的格子，返回业务 排-列-层；未命中货格区域时返回 null。 */
+  pickLocatorCellAtCanvasPoint(
+    clientX: number,
+    clientY: number,
+    canvas: HTMLCanvasElement,
+    locatorEntityId: string,
+  ): { row: number; column: number; layer: number } | null {
+    const point = this.getCanvasPickPoint(clientX, clientY, canvas);
+    if (!point) return null;
+    const entry = this.locators.get(locatorEntityId);
+    // 运行预览会隐藏货格线框，但反解仍需生效；自定义 predicate 的 pick 不受显隐影响，故不检查 isEnabled。
+    if (!entry || entry.fillMesh.isDisposed()) return null;
+
+    const inverseWorld = entry.root.getWorldMatrix().invert();
+    let local: Vector3 | null = null;
+    // 定向拾取货格填充盒（连续=单大盒，离散=thinInstance 格盒）；自定义 predicate 跳过默认 isPickable 检查。
+    const pick = this.scene.pick(point.x, point.y, (mesh) => mesh === entry.fillMesh);
+    if (pick?.hit && pick.pickedPoint) {
+      local = Vector3.TransformCoordinates(pick.pickedPoint, inverseWorld);
+    } else {
+      // 有间隔时点击立柱/横梁会让射线从格子间隙穿过；退化为射线与货格根节点 z=0 平面的交点，就近归格。
+      const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
+      if (!camera) return null;
+      const ray = this.scene.createPickingRay(point.x, point.y, Matrix.Identity(), camera);
+      const origin = Vector3.TransformCoordinates(ray.origin, inverseWorld);
+      const direction = Vector3.TransformNormal(ray.direction, inverseWorld);
+      if (Math.abs(direction.z) < 1e-8) return null;
+      const t = -origin.z / direction.z;
+      if (t <= 0) return null;
+      local = origin.add(direction.scale(t));
+    }
+
+    // 与 buildLocatorGridMeshes 的格子中心公式同源：中心 (col*stepX, height/2 + layer*stepY, 0)。
+    const columnIndex = Math.min(entry.columns - 1, Math.max(0, Math.round(local.x / entry.cellSteps.columnStepX)));
+    const layerIndex = Math.min(entry.layers - 1, Math.max(0, Math.round((local.y - entry.cellSize.height / 2) / entry.cellSteps.layerStepY)));
+    return {
+      row: entry.rowNumber,
+      column: entry.startColumn + columnIndex,
+      layer: entry.startLayer + layerIndex,
+    };
+  }
+
   /** 按编辑或运行态策略执行最近可见实体拾取，并统一处理 thinInstance 与模型显示范围兜底。 */
   private pickSceneEntityIdAtCanvasPoint(
     clientX: number,
