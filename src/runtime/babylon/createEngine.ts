@@ -17,6 +17,8 @@ import {
   DIGITAL_TWIN_CAMERA_CONTROL_STANDARD,
   applyDigitalTwinCameraSensitivity,
   attachDigitalTwinCameraControl,
+  resolveDigitalTwinCameraFocusBeta,
+  resolveDigitalTwinCameraFocusRadius,
   clampDigitalTwinCameraRadius,
   syncDigitalTwinCameraPanScale,
 } from './cameraControlStandard';
@@ -76,11 +78,18 @@ export type BabylonViewportOptions = {
   onLog?: (message: string) => void;
 };
 
+export type BabylonFocusOptions = CameraViewTransitionOptions & {
+  /** 普通模型默认为 3m；环境等特殊目标可传入 Infinity。 */
+  maxRadiusMeters?: number;
+  /** 普通模型默认使用斜上方 45° 聚焦；环境、天空盒等非模型目标可保留当前观察方向。 */
+  useModelFocusAngle?: boolean;
+};
+
 export type BabylonViewport = {
   engine: Engine;
   scene: Scene;
   camera: ArcRotateCamera;
-  focusOnBounds: (bounds: EditorWorldBounds, options?: CameraViewTransitionOptions) => void;
+  focusOnBounds: (bounds: EditorWorldBounds, options?: BabylonFocusOptions) => void;
   cancelCameraTransition: (reason?: CameraTransitionCancelReason) => boolean;
   setViewDistance: (meters: number) => void;
   setSensitivity: (settings: SceneSensitivitySettings) => void;
@@ -153,11 +162,17 @@ function probeHardwareAccelerationAvailable(): boolean {
 }
 
 /**
- * 根据包围球、相机 FOV 与实际画布宽高比计算完整取景距离。
+ * 根据包围球、相机 FOV 与实际画布宽高比计算几何取景距离。
  * 旧的固定 2.2 倍半径在窄画布或超长场景中会把左右边缘裁出视野；这里取水平/垂直较窄半角，
- * 以包围球切线距离保证相机旋转到任意方位时仍能看到完整模型，并保留少量编辑边距。
+ * 先得到带少量编辑边距的完整显示距离；普通模型再由聚焦规则硬钳制到 3m，非模型目标保留原有完整取景规则。
  */
-function getFocusCameraRadius(bounds: EditorWorldBounds, camera: ArcRotateCamera, engine: Engine): number {
+function getFocusCameraRadius(
+  bounds: EditorWorldBounds,
+  camera: ArcRotateCamera,
+  engine: Engine,
+  maxRadiusMeters?: number,
+  useModelFocusAngle: boolean = true,
+): number {
   const radiusMeters = Number.isFinite(bounds.radiusMeters) ? Math.max(bounds.radiusMeters, 0.5) : 1;
   const renderWidth = Math.max(1, engine.getRenderWidth());
   const renderHeight = Math.max(1, engine.getRenderHeight());
@@ -171,23 +186,78 @@ function getFocusCameraRadius(bounds: EditorWorldBounds, camera: ArcRotateCamera
     : Math.atan(Math.tan(configuredHalfFov) * aspectRatio);
   const limitingHalfFov = Math.max(0.01, Math.min(verticalHalfFov, horizontalHalfFov));
   const fitDistance = radiusMeters / Math.sin(limitingHalfFov);
-  return clampDigitalTwinCameraRadius(Math.max(fitDistance * 1.08, 2.5));
+  if (!useModelFocusAngle) {
+    const requestedRadiusMeters = Math.max(fitDistance * 1.08, 2.5);
+    return clampDigitalTwinCameraRadius(Math.min(maxRadiusMeters ?? Number.POSITIVE_INFINITY, requestedRadiusMeters));
+  }
+  return resolveDigitalTwinCameraFocusRadius(fitDistance * 1.08, bounds.center.y, maxRadiusMeters);
+}
+
+/** 只计算聚焦位姿，供同步聚焦与相机控制器动画共用同一套距离和位置规则。 */
+function getFocusCameraPose(
+  camera: ArcRotateCamera,
+  engine: Engine,
+  bounds: EditorWorldBounds,
+  maxRadiusMeters?: number,
+  useModelFocusAngle: boolean = true,
+): SceneCameraPose {
+  const target = { x: bounds.center.x, y: bounds.center.y, z: bounds.center.z };
+  const radius = getFocusCameraRadius(bounds, camera, engine, maxRadiusMeters, useModelFocusAngle);
+  return {
+    alpha: camera.alpha,
+    beta: useModelFocusAngle ? resolveDigitalTwinCameraFocusBeta() : camera.beta,
+    radius,
+    target,
+  };
 }
 
 
-/** 聚焦包围盒并保持 ArcRotate 当前观察方向，避免 Target 高差导致相机翻面。 */
+/**
+ * 聚焦包围盒中心。普通模型使用斜上方 45° 且距离最大 3m；非模型目标可显式保留当前观察方向。
+ */
 export function focusArcRotateCameraOnBounds(
   camera: ArcRotateCamera,
   engine: Engine,
   bounds: EditorWorldBounds,
+  maxRadiusMeters?: number,
+  useModelFocusAngle: boolean = true,
 ): void {
-  const alpha = camera.alpha;
-  const beta = camera.beta;
-  camera.setTarget(new Vector3(bounds.center.x, bounds.center.y, bounds.center.z));
-  camera.alpha = alpha;
-  camera.beta = beta;
-  camera.radius = getFocusCameraRadius(bounds, camera, engine);
+  const pose = getFocusCameraPose(camera, engine, bounds, maxRadiusMeters, useModelFocusAngle);
+  const target = new Vector3(pose.target.x, pose.target.y, pose.target.z);
+  camera.setTarget(target);
+  camera.alpha = pose.alpha;
+  camera.beta = pose.beta;
+  camera.radius = pose.radius;
   syncDigitalTwinCameraPanScale(camera);
+}
+
+/**
+ * 通过统一相机控制器执行聚焦；无选项时保持编辑器同步行为，并解除此前的六面标准视角锁。
+ */
+export function focusArcRotateCameraViewOnBounds(
+  cameraViewController: ArcRotateCameraViewController,
+  camera: ArcRotateCamera,
+  engine: Engine,
+  bounds: EditorWorldBounds,
+  options?: BabylonFocusOptions,
+): void {
+  const useModelFocusAngle = options?.useModelFocusAngle !== false;
+  // 环境和天空盒要求保留当前观察方向；同步调用直接写相机，避免控制器解除六面标准视角锁。
+  if (!useModelFocusAngle && options?.animate === false) {
+    focusArcRotateCameraOnBounds(camera, engine, bounds, options.maxRadiusMeters, false);
+    options.onCompleted?.();
+    return;
+  }
+  const pose = getFocusCameraPose(camera, engine, bounds, options?.maxRadiusMeters, useModelFocusAngle);
+  const transitionOptions: CameraViewTransitionOptions = options
+    ? {
+        animate: options.animate,
+        durationMs: options.durationMs,
+        onCompleted: options.onCompleted,
+        onCancelled: options.onCancelled,
+      }
+    : { animate: false };
+  cameraViewController.applyCameraPose(pose, transitionOptions);
 }
 
 const CAMERA_FLY_KEY_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyC']);
@@ -418,16 +488,7 @@ export function createBabylonViewport(
     scene,
     camera,
     focusOnBounds: (bounds, transitionOptions) => {
-      if (!transitionOptions) {
-        focusArcRotateCameraOnBounds(camera, engine, bounds);
-        return;
-      }
-      cameraViewController.applyCameraPose({
-        alpha: camera.alpha,
-        beta: camera.beta,
-        radius: getFocusCameraRadius(bounds, camera, engine),
-        target: { x: bounds.center.x, y: bounds.center.y, z: bounds.center.z },
-      }, transitionOptions);
+      focusArcRotateCameraViewOnBounds(cameraViewController, camera, engine, bounds, transitionOptions);
     },
     cancelCameraTransition: (reason) => cameraViewController.cancelTransition(reason),
     setViewDistance: (meters) => {

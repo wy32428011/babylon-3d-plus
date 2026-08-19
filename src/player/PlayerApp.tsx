@@ -33,6 +33,7 @@ import {
 import { AutoPatrolControls, type AutoPatrolControlAction } from '../shared/ui/AutoPatrolControls';
 import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
 import { computePlayerLoadingProgress, PLAYER_SCENE_LOADING_TIMEOUT_MS } from './playerLoadingProgress';
+import { resolvePublishedFetchConfig, startPublishedFetchDrive } from './publishedFetchDrive';
 import './player.css';
 
 type PlayerPhase = 'loading' | 'ready' | 'blocked';
@@ -222,8 +223,10 @@ export function PlayerApp() {
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
         const digitalTwinAssetIndex = buildDigitalTwinAssetIndex(sceneDocument);
+        if (parsedConfig.digitalTwin) {
+          sceneDocument.fetchConfig = resolvePublishedFetchConfig(sceneDocument.fetchConfig, projectRuntimeConfig);
+        }
         if (projectRuntimeConfig) {
-          sceneDocument.fetchConfig = { url: projectRuntimeConfig.apiBaseUrl ?? '', apiKey: '' };
           (globalThis as typeof globalThis & { __ZENDING_DIGITAL_TWIN_CONFIG__?: Record<string, unknown> })
             .__ZENDING_DIGITAL_TWIN_CONFIG__ = projectRuntimeConfig.config;
         }
@@ -284,6 +287,9 @@ export function PlayerApp() {
         if (disposed) return;
         setStartupPercent(50);
         runtime.beginTelemetryPreview();
+        if (parsedConfig.digitalTwin) {
+          void startPublishedFetchDrive(runtime, sceneDocument.fetchConfig, abortController.signal);
+        }
 
         const patrolRoutes = collectAutoPatrolPlaybackRoutes(sceneDocument);
         autoPatrolPlayback = new AutoPatrolPlaybackController({

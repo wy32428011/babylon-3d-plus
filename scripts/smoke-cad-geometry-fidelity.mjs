@@ -56,13 +56,36 @@ function assertSameGeometry(actual, expected) {
   assert.equal(actual.pointCount, expected.pointCount);
   assert.deepEqual(actual.bounds, expected.bounds);
   assert.equal(actual.layers.length, expected.layers.length);
-  for (let index = 0; index < actual.layers.length; index += 1) {
-    const actualLayer = actual.layers[index];
-    const expectedLayer = expected.layers[index];
+  for (const actualLayer of actual.layers) {
+    const expectedLayer = expected.layers.find((layer) => layer.name === actualLayer.name);
+    assert.ok(expectedLayer, `精确解析结果缺少图层 ${actualLayer.name}`);
     assert.equal(actualLayer.name, expectedLayer.name);
-    assert.deepEqual(Array.from(actualLayer.polylinePointCounts), Array.from(expectedLayer.polylinePointCounts));
-    assert.deepEqual(Array.from(actualLayer.positions), Array.from(expectedLayer.positions));
+    const instanceCount = actualLayer.instanceCount ?? 1;
+    assert.deepEqual(
+      Array.from({ length: instanceCount }, () => Array.from(actualLayer.polylinePointCounts)).flat(),
+      Array.from(expectedLayer.polylinePointCounts),
+    );
+    assert.deepEqual(expandLayerPositions(actualLayer), Array.from(expectedLayer.positions));
   }
+}
+
+function expandLayerPositions(layer) {
+  if (!layer.instanceMatrices) return Array.from(layer.positions);
+  const expanded = [];
+  for (let matrixOffset = 0; matrixOffset < layer.instanceMatrices.length; matrixOffset += 16) {
+    const matrix = layer.instanceMatrices.subarray(matrixOffset, matrixOffset + 16);
+    for (let pointOffset = 0; pointOffset < layer.positions.length; pointOffset += 3) {
+      const x = layer.positions[pointOffset];
+      const y = layer.positions[pointOffset + 1];
+      const z = layer.positions[pointOffset + 2];
+      expanded.push(
+        matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
+        matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
+        matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14],
+      );
+    }
+  }
+  return expanded;
 }
 
 let server;
@@ -107,9 +130,11 @@ try {
     'DXF 正 Y 必须映射到 Babylon 正 Z，避免俯视图上下镜像',
   );
 
-  const limited = largeModule.parseLargeCadReferenceDxf(content, { maxPolylines: 10, maxPoints: 20 });
-  assert.equal(limited.budgetLimited, true, '显式低预算仍必须提供极端文件保护');
-  assert.ok(limited.polylineCount <= 10 && limited.pointCount <= 20);
+  assert.throws(
+    () => largeModule.parseLargeCadReferenceDxf(content, { maxPolylines: 10, maxPoints: 20 }),
+    /唯一原型几何超过安全上限/,
+    '显式低预算必须拒绝不完整导入，不能静默截断图元',
+  );
 
   console.log(JSON.stringify({
     ok: true,

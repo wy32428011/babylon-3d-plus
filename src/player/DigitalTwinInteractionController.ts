@@ -65,7 +65,6 @@ type ActiveFocusRequest = {
 
 const GEOMETRY_READY_TIMEOUT_MS = 5_000;
 const GEOMETRY_POLL_INTERVAL_MS = 50;
-const CAMERA_FOCUS_DURATION_MS = 450;
 const EXTERNAL_HIGHLIGHT_DURATION_MS = 3_000;
 
 const FAILURE_MESSAGES: Record<DigitalTwinViewerErrorCode, string> = {
@@ -324,8 +323,8 @@ export class DigitalTwinInteractionController {
       }, EXTERNAL_HIGHLIGHT_DURATION_MS);
 
       runtime.focusOnBounds(bounds, {
-        animate: true,
-        durationMs: CAMERA_FOCUS_DURATION_MS,
+        // 模型聚焦是位置约束，不应在过渡帧暴露旧的距离或观察方向。
+        animate: false,
         onCompleted: () => this.finishSuccess(request),
         onCancelled: () => {
           if (this.activeRequest === request) this.finishFailure(request, 'COMMAND_CANCELLED');

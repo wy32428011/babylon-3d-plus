@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
+  ArcRotateCamera,
   LoadAssetContainerAsync,
   MeshBuilder,
   NullEngine,
@@ -98,7 +99,7 @@ const MODEL_SPECS = [
     script: 'chain-conveyor.model.ts',
     lengthUnit: 'centimeter',
     linearKeys: ['length', 'width', 'heightA', 'heightB', 'motorDistance'],
-    customValues: { length: 2.2, width: 1.5, heightA: 0.8, heightB: 1, motorDistance: 0.7 },
+    customValues: { length: 20, width: 10, heightA: 5, heightB: 5, motorDistance: 0.7 },
   },
   {
     name: 'box',
@@ -387,6 +388,24 @@ function normalizeModelContentOrigin(root) {
   }
 }
 
+/** 按 SceneRuntime 的真实可见 Mesh 规则汇总世界 AABB，供改参后聚焦集成回归。 */
+function measureModelWorldBounds(contentRoot) {
+  let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+  let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+  for (const mesh of contentRoot.getChildMeshes(false)) {
+    if (!isActiveModelGeometry(mesh)) continue;
+    mesh.refreshBoundingInfo();
+    mesh.computeWorldMatrix(true);
+    const box = mesh.getBoundingInfo().boundingBox;
+    minimum = Vector3.Minimize(minimum, box.minimumWorld);
+    maximum = Vector3.Maximize(maximum, box.maximumWorld);
+  }
+  if (!Number.isFinite(minimum.x) || !Number.isFinite(maximum.x)) return null;
+  const center = minimum.add(maximum).scale(0.5);
+  const size = maximum.subtract(minimum);
+  return { center, size, radiusMeters: size.length() / 2 };
+}
+
 /** 读取所有有效 mesh 在实体根米空间 Z 轴上的极值来源。 */
 function collectMeterZExtremes(root, contentRoot) {
   const inverseRoot = root.computeWorldMatrix(true).clone().invert();
@@ -535,7 +554,17 @@ function assertMetadataContract(spec, metadata) {
 }
 
 /** 创建并运行一个模型参数化场景，返回默认、自定义及重复自定义尺寸。 */
-async function runModelScenario({ spec, metadata, glbPath, scriptPath, rootTransform, ExternalModelScriptRuntime, measureModelSizeMeters, engine }) {
+async function runModelScenario({
+  spec,
+  metadata,
+  glbPath,
+  scriptPath,
+  rootTransform,
+  ExternalModelScriptRuntime,
+  measureModelSizeMeters,
+  focusArcRotateCameraOnBounds,
+  engine,
+}) {
   const scene = new Scene(engine);
   const root = new TransformNode(`${spec.name}_entityRoot`, scene);
   root.position.copyFromFloats(rootTransform.position.x, rootTransform.position.y, rootTransform.position.z);
@@ -588,10 +617,13 @@ async function runModelScenario({ spec, metadata, glbPath, scriptPath, rootTrans
     await runtime.start();
     runtime.update();
     const defaultSize = measureModelSizeMeters(root, contentRoot);
+    const verifyFocusRegression = spec.name === '链条机' && spec.verifyFocusRegression !== false;
+    const defaultWorldBounds = verifyFocusRegression ? measureModelWorldBounds(contentRoot) : null;
     const defaultMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
 
     updateRuntimeValues(runtime, contentRoot, metadata, customValues, assetCode);
     const customSizeFirst = measureModelSizeMeters(root, contentRoot);
+    const customWorldBounds = verifyFocusRegression ? measureModelWorldBounds(contentRoot) : null;
     const customMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
     updateRuntimeValues(runtime, contentRoot, metadata, defaults, assetCode);
     const resetMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
@@ -612,7 +644,81 @@ async function runModelScenario({ spec, metadata, glbPath, scriptPath, rootTrans
       assert.ok(hasMeaningfulSizeDifference(defaultSize, customSizeFirst), `${spec.name} 自定义参数未产生可观察尺寸变化`);
     }
     assertVectorClose(customSizeSecond, customSizeFirst, `${spec.name} 重复参数更新不得累计漂移`, 1e-5);
-    const scenarioResult = { baselineSize, defaultSize, customSize: customSizeFirst, generatedBounds: collectGeneratedMeterBounds(root, contentRoot), zExtremes: collectMeterZExtremes(root, contentRoot), contentRootScaling: { x: contentRoot.scaling.x, y: contentRoot.scaling.y, z: contentRoot.scaling.z }, contentRootPosition: { x: contentRoot.position.x, y: contentRoot.position.y, z: contentRoot.position.z } };
+    let focusResult = null;
+    if (verifyFocusRegression) {
+      assert.ok(defaultWorldBounds && customWorldBounds, '链条机改参前后必须具有真实世界包围盒');
+      assert.ok(
+        customWorldBounds.radiusMeters > defaultWorldBounds.radiusMeters,
+        '链条机改大参数后世界包围球必须同步增大',
+      );
+      const focusCamera = new ArcRotateCamera(
+        `${spec.name}_focusCamera`,
+        Math.PI / 4,
+        Math.PI * 0.62,
+        10,
+        Vector3.Zero(),
+        scene,
+      );
+      focusArcRotateCameraOnBounds(focusCamera, engine, {
+        center: customWorldBounds.center,
+        radiusMeters: customWorldBounds.radiusMeters,
+      });
+      focusCamera.getViewMatrix(true);
+      assertVectorClose(
+        focusCamera.getTarget(),
+        customWorldBounds.center,
+        '链条机改参后聚焦 Target 必须使用新包围盒中心',
+        1e-6,
+      );
+      assertClose(focusCamera.beta, Math.PI / 4, '链条机改参后聚焦必须使用斜上方 45° 视角', 1e-6);
+      const focusOffset = focusCamera.position.subtract(customWorldBounds.center);
+      assert.ok(focusOffset.y > 0, '链条机改参后相机必须位于 Target 上方');
+      assertClose(
+        Math.atan2(focusOffset.y, Math.hypot(focusOffset.x, focusOffset.z)),
+        Math.PI / 4,
+        '链条机改参后相机仰角必须为 45°',
+        1e-6,
+      );
+      assert.equal(focusCamera.radius, 3, '20m 链条机聚焦距离也不得超过 3m');
+      assert.ok(
+        Vector3.Distance(focusCamera.position, customWorldBounds.center) <= 3 + 1e-6,
+        '20m 链条机相机位置到真实包围盒中心的距离不得超过 3m',
+      );
+      focusResult = {
+        center: {
+          x: customWorldBounds.center.x,
+          y: customWorldBounds.center.y,
+          z: customWorldBounds.center.z,
+        },
+        sizeMeters: {
+          x: customWorldBounds.size.x,
+          y: customWorldBounds.size.y,
+          z: customWorldBounds.size.z,
+        },
+        radiusMeters: customWorldBounds.radiusMeters,
+        cameraRadiusMeters: focusCamera.radius,
+        cameraBetaRadians: focusCamera.beta,
+      };
+      focusCamera.dispose();
+    }
+    const scenarioResult = {
+      baselineSize,
+      defaultSize,
+      customSize: customSizeFirst,
+      focusResult,
+      generatedBounds: collectGeneratedMeterBounds(root, contentRoot),
+      zExtremes: collectMeterZExtremes(root, contentRoot),
+      contentRootScaling: {
+        x: contentRoot.scaling.x,
+        y: contentRoot.scaling.y,
+        z: contentRoot.scaling.z,
+      },
+      contentRootPosition: {
+        x: contentRoot.position.x,
+        y: contentRoot.position.y,
+        z: contentRoot.position.z,
+      },
+    };
     if (spec.colorKey) {
       assert.ok(baselineMaterialSnapshot && defaultMaterialSnapshot && customMaterialSnapshot && resetMaterialSnapshot && invalidMaterialSnapshot && repeatedMaterialSnapshot);
       assertMaterialColorPresent(defaultMaterialSnapshot, spec.defaultColor, `${spec.name} 默认外观颜色`);
@@ -769,9 +875,10 @@ try {
     server: { middlewareMode: true, hmr: false },
     optimizeDeps: { noDiscovery: true },
   });
-  const [{ ExternalModelScriptRuntime }, { measureModelSizeMeters }] = await Promise.all([
+  const [{ ExternalModelScriptRuntime }, { measureModelSizeMeters }, { focusArcRotateCameraOnBounds }] = await Promise.all([
     loadSsrModuleWithTimeout(server, '/src/runtime/babylon/ExternalModelScriptRuntime.ts'),
     loadSsrModuleWithTimeout(server, '/src/runtime/babylon/modelMeasurement.ts'),
+    loadSsrModuleWithTimeout(server, '/src/runtime/babylon/createEngine.ts'),
   ]);
 
   const summaries = [];
@@ -800,6 +907,7 @@ try {
         const caseSpec = {
           ...spec,
           expectSizeChange: false,
+          verifyFocusRegression: false,
           customValues: { [key]: value, ...(spec.name === 'YZJ' ? { showDirectionArrow: false } : {}) },
         };
         const caseUnit = await runModelScenario({
@@ -814,6 +922,7 @@ try {
           },
           ExternalModelScriptRuntime,
           measureModelSizeMeters,
+          focusArcRotateCameraOnBounds,
           engine,
         });
         const caseRotated = await runModelScenario({
@@ -828,6 +937,7 @@ try {
           },
           ExternalModelScriptRuntime,
           measureModelSizeMeters,
+          focusArcRotateCameraOnBounds,
           engine,
         });
         console.log(JSON.stringify({ key, value, unit: caseUnit.customSize, rotated: caseRotated.customSize, unitGenerated: caseUnit.generatedBounds, rotatedGenerated: caseRotated.generatedBounds, unitZ: caseUnit.zExtremes, rotatedZ: caseRotated.zExtremes }));
@@ -846,6 +956,7 @@ try {
       },
       ExternalModelScriptRuntime,
       measureModelSizeMeters,
+      focusArcRotateCameraOnBounds,
       engine,
     });
     const rotatedScenario = await runModelScenario({
@@ -860,6 +971,7 @@ try {
       },
       ExternalModelScriptRuntime,
       measureModelSizeMeters,
+      focusArcRotateCameraOnBounds,
       engine,
     });
     const scaledScenario = await runModelScenario({
@@ -874,6 +986,7 @@ try {
       },
       ExternalModelScriptRuntime,
       measureModelSizeMeters,
+      focusArcRotateCameraOnBounds,
       engine,
     });
     const transformedScenario = await runModelScenario({
@@ -888,6 +1001,7 @@ try {
       },
       ExternalModelScriptRuntime,
       measureModelSizeMeters,
+      focusArcRotateCameraOnBounds,
       engine,
     });
     if (MODEL_FILTER) console.log(JSON.stringify({ spec: spec.name, unitScenario, rotatedScenario, scaledScenario, transformedScenario }, null, 2));

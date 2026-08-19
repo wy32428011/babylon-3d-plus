@@ -45,6 +45,12 @@ export const DIGITAL_TWIN_CAMERA_CONTROL_STANDARD = {
     minZMeters: 0.02,
     perspectiveMinZRadiusRatio: 0.001,
   },
+  focus: {
+    minCameraHeightMeters: 0.05,
+    maxRadiusMeters: 3,
+    preferredRadiusMeters: 2,
+    defaultBetaRadians: Math.PI / 4,
+  },
   sensitivity: {
     min: 1,
     max: 20,
@@ -72,6 +78,29 @@ function getSensitivityMultiplier(value: number): number {
 export function clampDigitalTwinCameraRadius(radiusMeters: number): number {
   if (!Number.isFinite(radiusMeters)) return DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters;
   return Math.max(radiusMeters, DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters);
+}
+
+/**
+ * 计算聚焦半径：以模型中心为 Target，常规模型优先使用 2 m，所有模型硬性限制在 3 m 内。
+ * 环境等非模型目标可显式传入 Infinity 取消该上限。
+ */
+export function resolveDigitalTwinCameraFocusRadius(
+  fitDistanceMeters: number,
+  targetYMeters: number,
+  maxRadiusMeters: number = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.focus.maxRadiusMeters,
+): number {
+  const { minCameraHeightMeters, preferredRadiusMeters, defaultBetaRadians } =
+    DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.focus;
+  const heightRadiusMeters = Math.max(0, (minCameraHeightMeters - targetYMeters) / Math.cos(defaultBetaRadians));
+  const requestedRadiusMeters = Math.max(preferredRadiusMeters, fitDistanceMeters, heightRadiusMeters);
+  return clampDigitalTwinCameraRadius(Math.min(maxRadiusMeters, requestedRadiusMeters));
+}
+
+/**
+ * 聚焦时把相机置于模型斜上方 45°；alpha 保留当前水平方向，beta=π/4 表示 45° 仰角。
+ */
+export function resolveDigitalTwinCameraFocusBeta(): number {
+  return DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.focus.defaultBetaRadians;
 }
 
 /**

@@ -59,6 +59,17 @@
 
 动态近裁剪既保留贴近模型时的 2 cm 观察能力，也会在缩远到大尺度场景时提高深度缓冲精度，避免相邻外壳表面出现条纹、闪烁或缺面；该规则不随灵敏度改变。
 
+### 3.5 聚焦约束
+
+模型聚焦操作（编辑器场景聚焦和发布 Viewer 的设备聚焦）统一通过 `createBabylonViewport().focusOnBounds()` 或 `focusArcRotateCameraOnBounds()` 完成，结果相机位姿必须满足：
+
+- 聚焦中心与位置：始终以模型最新世界包围盒中心作为 Target，保留当前水平方向并从模型斜上方 `45°` 看向中心（`beta=π/4`）；
+- 聚焦距离：常规模型聚焦半径优先为 `2 m`，按包围盒适配在 `2–3 m` 内；包括改大后的链条机在内，模型中心到相机的距离硬性限制为最大 `3 m`，不再为完整显示大模型而突破上限。环境全景等非模型目标可显式取消该上限并保留当前观察方向。近距保护（最小半径 `0.2 m`）继续生效。
+
+常量统一放在 `DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.focus`（`minCameraHeightMeters`、`preferredRadiusMeters`、`maxRadiusMeters`、`defaultBetaRadians`），编辑态、运行预览和发布 Viewer 使用同一实现。
+
+发布 Viewer 接收 `focusAsset` 命令时不播放相机过渡动画，命令触发后立即进入上述模型聚焦位姿，避免中间帧短暂保留旧模型的距离或观察方向。
+
 ## 4. 模型表面的视角操作
 
 “模型视角穿透”指相机输入不被模型拾取层阻断，不是模型透明或网格物理碰撞：
@@ -91,6 +102,8 @@
 9. 默认滚轮步长为当前距离的 `5%`；
 10. 编辑器、运行预览和发布 Viewer 的结果一致；
 11. Gizmo 拖拽结束后中键平移仍然有效；
-12. 透视相机缩远时近裁剪面随半径提高，正交视图与贴近模型的近景仍保持 `0.02 m` 下限。
+12. 透视相机缩远时近裁剪面随半径提高，正交视图与贴近模型的近景仍保持 `0.02 m` 下限；
+13. 模型聚焦以最新世界包围盒中心为 Target，保留当前水平方向并使用斜上方 `45°` 视角；
+14. 模型距离优先为 `2 m`、按包围盒适配在 `2–3 m` 内，任何模型的中心到相机距离均不得超过 `3 m`；环境全景可显式取消该模型上限并保留当前观察方向。
 
-自动契约测试位于 `tests/digitalTwin/cameraInteractionStandard.test.ts`。
+自动契约测试位于 `tests/digitalTwin/cameraInteractionStandard.test.ts`、`tests/digitalTwin/assetFocusCameraTransition.test.ts` 与 `tests/telemetry/environmentRuntime.test.ts`。

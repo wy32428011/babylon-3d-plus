@@ -1,7 +1,7 @@
 import type { ParsedDXF } from '@linkiez/dxf-renew';
+import { convertParsedCadReferenceDxfInstanced } from './cadReferenceInstances';
 import {
   CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET,
-  convertParsedCadReferenceDxf,
   type CadReferenceGeometryBudget,
   type CadReferenceParseOptions,
   type CadReferenceParseResult,
@@ -108,7 +108,7 @@ export function parseLargeCadReferenceDxf(
   options: Omit<CadReferenceParseOptions, 'geometryBudget'> = {},
 ): CadReferenceParseResult {
   const parsed = scanLargeDxfDocument(content);
-  return convertParsedCadReferenceDxf(parsed as unknown as ParsedDXF, { ...options, geometryBudget: budget });
+  return convertParsedCadReferenceDxfInstanced(parsed as unknown as ParsedDXF, { ...options, geometryBudget: budget });
 }
 
 /** 扫描 DXF 文档的 HEADER、BLOCKS 与 ENTITIES 三个关键区段。 */
@@ -208,6 +208,7 @@ function skipCurrentSection(reader: DxfGroupReader): void {
 /** 按实体类型分派轻量读取逻辑。 */
 function readEntityAfterType(reader: DxfGroupReader, type: string): ScannedDxfEntity | null {
   if (type === 'POLYLINE') return readPolylineEntity(reader);
+  if (type === 'HATCH') return readHatchEntity(reader);
   if (!isSupportedScannedEntityType(type)) {
     skipUnsupportedEntity(reader);
     return null;
@@ -270,6 +271,48 @@ function readPolylineVertex(reader: DxfGroupReader): ScannedDxfVertex | null {
   return Number.isFinite(vertex.x) && Number.isFinite(vertex.y) ? vertex : null;
 }
 
+function readHatchEntity(reader: DxfGroupReader): ScannedDxfEntity {
+  const entity: ScannedDxfEntity = { type: 'HATCH', boundary: { loops: [] } };
+  const loops = (entity.boundary as { loops: Array<{ entities: Array<Record<string, unknown>> }> }).loops;
+  let activePolyline: { type: 'POLYLINE'; points: ScannedDxfVertex[]; closed?: boolean } | null = null;
+  let activeVertex: ScannedDxfVertex | null = null;
+
+  for (let group = reader.next(); group; group = reader.next()) {
+    if (group.code === 0) {
+      reader.unread(group);
+      break;
+    }
+    if (group.code === 8) {
+      entity.layer = group.value || '0';
+      continue;
+    }
+    if (group.code === 92) {
+      activePolyline = null;
+      activeVertex = null;
+      if ((readDxfInteger(group.value, 0) & 2) !== 0) {
+        activePolyline = { type: 'POLYLINE', points: [] };
+        loops.push({ entities: [activePolyline] });
+      }
+      continue;
+    }
+    if (!activePolyline) continue;
+    if (group.code === 10) {
+      activeVertex = { x: readDxfNumber(group.value, Number.NaN), y: Number.NaN, bulge: 0 };
+      activePolyline.points.push(activeVertex);
+      continue;
+    }
+    if (group.code === 20 && activeVertex) activeVertex.y = readDxfNumber(group.value, Number.NaN);
+    if (group.code === 42 && activeVertex) activeVertex.bulge = readDxfNumber(group.value, 0);
+    if (group.code === 73) activePolyline.closed = readDxfInteger(group.value, 0) !== 0;
+    if (group.code === 97) {
+      activePolyline = null;
+      activeVertex = null;
+    }
+  }
+
+  return entity;
+}
+
 /** 跳过不参与显示的实体记录。 */
 function skipUnsupportedEntity(reader: DxfGroupReader): void {
   for (let group = reader.next(); group; group = reader.next()) {
@@ -305,6 +348,8 @@ function applyEntityGroup(entity: ScannedDxfEntity, group: DxfGroupPair, current
   if (entity.type === 'ELLIPSE') applyEllipseGroup(entity, group);
   if (entity.type === 'SPLINE') return applySplineGroup(entity, group, currentVertex);
   if (entity.type === 'LWPOLYLINE') return applyLightweightPolylineGroup(entity, group, currentVertex);
+  if (entity.type === 'SOLID' || entity.type === 'TRACE' || entity.type === '3DFACE') applySolidGroup(entity, group);
+  if (entity.type === 'LEADER') return applyLeaderGroup(entity, group, currentVertex);
   if (entity.type === 'INSERT') applyInsertGroup(entity, group);
 
   return currentVertex;
@@ -376,6 +421,35 @@ function applyLightweightPolylineGroup(entity: ScannedDxfEntity, group: DxfGroup
   return currentVertex;
 }
 
+function applySolidGroup(entity: ScannedDxfEntity, group: DxfGroupPair): void {
+  if (!Array.isArray(entity.corners)) entity.corners = [{}, {}, {}, {}];
+  const corners = entity.corners as Array<Record<string, number>>;
+  const coordinate = group.code === 10 || group.code === 20 ? [0, group.code === 10 ? 'x' : 'y']
+    : group.code === 11 || group.code === 21 ? [1, group.code === 11 ? 'x' : 'y']
+      : group.code === 12 || group.code === 22 ? [2, group.code === 12 ? 'x' : 'y']
+        : group.code === 13 || group.code === 23 ? [3, group.code === 13 ? 'x' : 'y']
+          : null;
+  if (!coordinate) return;
+  const [index, axis] = coordinate as [number, 'x' | 'y'];
+  corners[index][axis] = readDxfNumber(group.value, Number.NaN);
+}
+
+function applyLeaderGroup(
+  entity: ScannedDxfEntity,
+  group: DxfGroupPair,
+  currentVertex: ScannedDxfVertex | null,
+): ScannedDxfVertex | null {
+  if (!Array.isArray(entity.vertices)) entity.vertices = [];
+  const vertices = entity.vertices as ScannedDxfVertex[];
+  if (group.code === 10) {
+    const vertex: ScannedDxfVertex = { x: readDxfNumber(group.value, Number.NaN), y: Number.NaN };
+    vertices.push(vertex);
+    return vertex;
+  }
+  if (group.code === 20 && currentVertex) currentVertex.y = readDxfNumber(group.value, Number.NaN);
+  return currentVertex;
+}
+
 /** 应用 INSERT 块引用字段，字段名对齐现有展开逻辑。 */
 function applyInsertGroup(entity: ScannedDxfEntity, group: DxfGroupPair): void {
   if (group.code === 2) entity.block = group.value;
@@ -408,6 +482,10 @@ function isSupportedScannedEntityType(type: string): boolean {
     || type === 'ELLIPSE'
     || type === 'SPLINE'
     || type === 'LWPOLYLINE'
+    || type === 'SOLID'
+    || type === 'TRACE'
+    || type === '3DFACE'
+    || type === 'LEADER'
     || type === 'INSERT';
 }
 
