@@ -32,6 +32,9 @@ import {
   SCENE_ENVIRONMENT_SCALE_MIN,
   SCENE_SENSITIVITY_MAX,
   SCENE_SENSITIVITY_MIN,
+  SCENE_SHADOW_CONCENTRATION_PERCENT_MAX,
+  SCENE_SHADOW_CONCENTRATION_PERCENT_MIN,
+  SCENE_SHADOW_QUALITIES,
   SCENE_SKYBOX_INTENSITY_MAX,
   SCENE_SKYBOX_INTENSITY_MIN,
   SCENE_SKYBOX_RESOLUTIONS,
@@ -40,8 +43,11 @@ import {
   SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   SCENE_VIEW_DISTANCE_MAX,
   SCENE_VIEW_DISTANCE_MIN,
+  sceneShadowConcentrationPercentToDarkness,
+  sceneShadowDarknessToConcentrationPercent,
   type SceneEnvironmentTransform,
   type SceneEnvironmentVariant,
+  type SceneShadowQuality,
   type SceneSkyboxResolution,
 } from '../model/SceneDocument';
 import {
@@ -152,6 +158,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const requestCameraPoseSave = useEditorStore((state) => state.requestCameraPoseSave);
   const setCameraViewDistance = useEditorStore((state) => state.setCameraViewDistance);
   const updateSensitivitySetting = useEditorStore((state) => state.updateSensitivitySetting);
+  const updateShadowSettings = useEditorStore((state) => state.updateShadowSettings);
   const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
   const setDefaultCargoGenerator = useEditorStore((state) => state.setDefaultCargoGenerator);
   const requestEnvironmentApply = useEditorStore((state) => state.requestEnvironmentApply);
@@ -175,6 +182,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const [skyboxDropActive, setSkyboxDropActive] = useState(false);
 
   const environment = scene.sceneSettings.environment;
+  const shadows = scene.sceneSettings.shadows;
+  const shadowConcentration = sceneShadowDarknessToConcentrationPercent(shadows.darkness);
   const skybox = getSceneSkyboxSettings(scene);
   const cargoGeneratorOptions = scene.entityIds
     .map((entityId) => scene.entities[entityId])
@@ -289,6 +298,18 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
     const nextValue = parseFiniteNumber(rawValue);
     if (nextValue === null) return;
     updateSensitivitySetting(key, nextValue);
+  }
+
+  function handleShadowConcentrationChange(rawValue: string): void {
+    if (props.readOnly) return;
+    const nextValue = parseFiniteNumber(rawValue);
+    if (nextValue === null) return;
+    updateShadowSettings({ darkness: sceneShadowConcentrationPercentToDarkness(nextValue) });
+  }
+
+  function handleShadowQualityChange(value: string): void {
+    if (props.readOnly || !SCENE_SHADOW_QUALITIES.includes(value as SceneShadowQuality)) return;
+    updateShadowSettings({ quality: value as SceneShadowQuality });
   }
 
   async function handleSelectEnvironmentAsset(asset: ProjectModelAssetEntry): Promise<void> {
@@ -584,6 +605,61 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             />
           </label>
         ))}
+      </fieldset>
+
+      <fieldset className="transform-fieldset">
+        <legend>阴影</legend>
+        <label className="inspector-row environment-visible-row">
+          <span>启用阴影</span>
+          <input
+            type="checkbox"
+            disabled={props.readOnly}
+            checked={shadows.enabled}
+            onChange={(event) => updateShadowSettings({ enabled: event.target.checked })}
+          />
+        </label>
+        <label className="inspector-row">
+          <span>阴影质量</span>
+          <select
+            disabled={props.readOnly || !shadows.enabled}
+            value={shadows.quality}
+            onChange={(event) => handleShadowQualityChange(event.target.value)}
+          >
+            <option value="performance">性能</option>
+            <option value="balanced">均衡</option>
+            <option value="quality">高质量</option>
+          </select>
+        </label>
+        <label className="scene-slider-row">
+          <span>阴影浓度</span>
+          <input
+            min={SCENE_SHADOW_CONCENTRATION_PERCENT_MIN}
+            max={SCENE_SHADOW_CONCENTRATION_PERCENT_MAX}
+            step="1"
+            type="range"
+            disabled={props.readOnly || !shadows.enabled}
+            value={shadowConcentration}
+            onChange={(event) => handleShadowConcentrationChange(event.target.value)}
+          />
+          <input
+            min={SCENE_SHADOW_CONCENTRATION_PERCENT_MIN}
+            max={SCENE_SHADOW_CONCENTRATION_PERCENT_MAX}
+            step="1"
+            type="number"
+            disabled={props.readOnly || !shadows.enabled}
+            value={shadowConcentration}
+            onChange={(event) => handleShadowConcentrationChange(event.target.value)}
+          />
+        </label>
+        <label className="inspector-row environment-visible-row">
+          <span>阴影地面</span>
+          <input
+            type="checkbox"
+            disabled={props.readOnly || !shadows.enabled}
+            checked={shadows.catcherEnabled}
+            onChange={(event) => updateShadowSettings({ catcherEnabled: event.target.checked })}
+          />
+        </label>
       </fieldset>
 
       <fieldset className="transform-fieldset">

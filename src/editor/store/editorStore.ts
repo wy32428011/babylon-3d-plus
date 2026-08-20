@@ -115,6 +115,8 @@ import {
   sanitizeSceneEnvironment,
   sanitizeSceneSkybox,
   sanitizeSceneSensitivityValue,
+  sanitizeSceneShadowSettings,
+  isSceneShadowSettingsEqual,
   sanitizeSceneViewDistance,
   SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   type SceneCameraPose,
@@ -124,6 +126,7 @@ import {
   type SceneEnvironmentTransform,
   type SceneSkyboxSettings,
   type SceneSensitivitySettings,
+  type SceneShadowSettings,
   type SceneDocument,
 } from '../model/SceneDocument';
 import type { Vector3Data } from '../model/math';
@@ -442,6 +445,7 @@ type EditorState = {
   resetSceneToBlank: () => void;
   setCameraViewDistance: (viewDistance: number) => void;
   updateSensitivitySetting: (key: SceneSensitivitySettingKey, value: number) => void;
+  updateShadowSettings: (patch: Partial<SceneShadowSettings>) => void;
   updateEnvironmentConfig: (environment: SceneEnvironmentSettings | null) => void;
   setDefaultCargoGenerator: (generatorId: string | null) => void;
   requestEnvironmentApply: (
@@ -2672,6 +2676,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
               ...state.scene.sceneSettings.sensitivity,
               [key]: nextValue,
             },
+          },
+        },
+      };
+    });
+  },
+  updateShadowSettings: (patch) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改场景阴影');
+      const before = state.scene.sceneSettings.shadows;
+      const next = sanitizeSceneShadowSettings({ ...before, ...patch });
+      if (isSceneShadowSettingsEqual(before, next)) return state;
+
+      return {
+        scene: {
+          ...state.scene,
+          sceneSettings: {
+            ...state.scene.sceneSettings,
+            shadows: next,
           },
         },
       };

@@ -8,6 +8,7 @@ import {
   TmpVectors,
   Vector3,
 } from '@babylonjs/core';
+import { EDITOR_FILL_LIGHT_INTENSITY, EDITOR_FILL_LIGHT_NAME } from './SceneShadowRuntime';
 import {
   createEditorGroundGrid,
   DEFAULT_EDITOR_GRID_SETTINGS,
@@ -416,8 +417,9 @@ export function createBabylonViewport(
   camera.maxZ = SCENE_VIEW_DISTANCE_DEFAULT;
   camera.upperRadiusLimit = SCENE_VIEW_DISTANCE_DEFAULT;
 
-  const light = new HemisphericLight('EditorLight', new Vector3(0, 1, 0), scene);
-  light.intensity = 0.8;
+  /** 半球补光不投影；SceneShadowRuntime 在主阴影光就绪后会压低强度。 */
+  const light = new HemisphericLight(EDITOR_FILL_LIGHT_NAME, new Vector3(0, 1, 0), scene);
+  light.intensity = EDITOR_FILL_LIGHT_INTENSITY;
 
   const editorGround = createEditorGroundGrid(scene, camera, engine, {
     ...DEFAULT_EDITOR_GRID_SETTINGS,
