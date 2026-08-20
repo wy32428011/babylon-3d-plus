@@ -19,6 +19,7 @@ import {
   moveNumberTowards,
   moveVectorTowards,
   projectPointOntoAxis,
+  projectWorldBoundsOntoAxis,
   uniqueTransformNodes,
   worldDeltaToParentLocalDelta,
 } from '../../runtimeNodeGeometry';
@@ -56,7 +57,6 @@ import {
   STACKER_MAX_CATCH_UP_SPEED_METERS_PER_SECOND,
   STACKER_RPM_TO_METERS_PER_SECOND,
   STACKER_TARGET_SPEED_METERS_PER_SECOND,
-  STACKER_CARGO_SIZE,
 } from './types';
 
 export class StackerTelemetryDriver {
@@ -675,7 +675,7 @@ export class StackerTelemetryDriver {
     const frontX = readIntegerField(snapshot.fields, 'front_x');
     const frontY = readIntegerField(snapshot.fields, 'front_y');
     if (frontX !== null && frontY !== null) this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY);
-    const holdPosition = targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator);
+    const holdPosition = this.resolveCellCargoHoldPosition(model, targetLocator, targetPosition);
     const holdPose = getNodeWorldPosePreservingMirror(targetLocator.root);
     if (side === 'front') {
       state.frontCargoKey = this.getStackerCargoKey(model.assetCode, side);
@@ -741,7 +741,7 @@ export class StackerTelemetryDriver {
     if (!this.getStackerForkCargoKey(model, side) || !targetLocator) return;
     const bound = side === 'front' ? state.frontCargoBoundToFork : state.backCargoBoundToFork;
     if (!bound) return;
-    const holdPosition = targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator);
+    const holdPosition = this.resolveCellCargoHoldPosition(model, targetLocator, targetPosition);
     const holdPose = getNodeWorldPosePreservingMirror(targetLocator.root);
     if (side === 'front') {
       state.frontCargoBoundToFork = false;
@@ -837,7 +837,7 @@ export class StackerTelemetryDriver {
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, bound ? null : holdScaling);
   }
 
-  /** 货物跟随二段叉节点包围盒中心（无二段时回退一段叉中心），确保定位在货叉实际载货位置。 */
+  /** 货物底面锚定二段叉包围盒顶面 + 可配竖直间隙（无二段时回退一段/全叉），确保定位在货叉实际载货位置。 */
   private getStackerForkCargoPosition(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 {
     const forkGroups = this.findStackerForkNodeGroups(model);
     const stageTwoNodes = side === 'front' ? forkGroups.frontStageTwoNodes : forkGroups.backStageTwoNodes;
@@ -848,11 +848,24 @@ export class StackerTelemetryDriver {
     if (!bounds) return model.root.getAbsolutePosition();
 
     const upAxis = getModelAxis(model.root, 'y');
-    const legacyCenter = bounds.minimum
-      .add(bounds.maximum)
-      .scale(0.5)
-      .add(upAxis.scale(STACKER_CARGO_SIZE.y * 0.75));
-    return legacyCenter.subtract(upAxis.scale(STACKER_CARGO_SIZE.y / 2));
+    const center = bounds.minimum.add(bounds.maximum).scale(0.5);
+    const topOffset = projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis);
+    return center.add(upAxis.scale(topOffset + this.resolveStackerCargoGapY(model)));
+  }
+
+  /** 货物竖直间隙（telemetryBinding.stackerCargoGapY，允许负值）；叉面锚点与货格支撑位共用，保证取/放交接无高差跳变。 */
+  private resolveStackerCargoGapY(model: ModelRuntimeEntry): number {
+    return model.telemetryBinding?.stackerCargoGapY ?? 0;
+  }
+
+  /** 货格内货物的支撑位：箱位底面中心 + 货物竖直间隙（与叉面锚点同源，伸叉交接丝滑）。 */
+  private resolveCellCargoHoldPosition(
+    model: ModelRuntimeEntry,
+    targetLocator: LocatorRuntimeEntry,
+    targetPosition: Vector3 | null,
+  ): Vector3 {
+    const base = targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator);
+    return base.add(getModelAxis(model.root, 'y').scale(this.resolveStackerCargoGapY(model)));
   }
 
   /** 读取某侧货叉当前货物键（JSON.stringify([assetCode, side])），null 表示叉上无货。 */

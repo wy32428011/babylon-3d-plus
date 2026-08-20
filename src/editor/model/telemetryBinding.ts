@@ -53,6 +53,8 @@ export type TelemetryBindingComponent = {
   cargoAutoDispose?: boolean;
   /** 输送线专用：起点设备——探测点未触及上游设备时允许自行创建货箱；缺省关闭。 */
   cargoOriginDevice?: boolean;
+  /** 堆垛机专用：货物底面相对叉面/货格支撑位的竖直间隙（米），允许负值（货物下沉贴合）；缺省 0。 */
+  stackerCargoGapY?: number;
 };
 
 type PlainObject = Record<string, unknown>;
@@ -226,5 +228,6 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     ...(normalizeTrajectoryDirection(value.trajectoryDirection) ? { trajectoryDirection: value.trajectoryDirection as TelemetryBindingComponent['trajectoryDirection'] } : {}),
     ...(typeof value.cargoAutoDispose === 'boolean' ? { cargoAutoDispose: value.cargoAutoDispose } : {}),
     ...(typeof value.cargoOriginDevice === 'boolean' ? { cargoOriginDevice: value.cargoOriginDevice } : {}),
+    ...(typeof value.stackerCargoGapY === 'number' ? { stackerCargoGapY: normalizeFiniteNumber(value.stackerCargoGapY, 0, -1, 1) } : {}),
   };
 }

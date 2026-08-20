@@ -4260,10 +4260,6 @@ export class SceneRuntime {
     owner.component = component;
     owner.activeSnapshot = snapshot;
     const targetSignature = createModelGeneratorTargetSignature(resolution.target);
-    // 临时诊断（排查货物整体闪烁）：运动中模板目标在消息间反复切换会导致输出卸载重载，货物整箱闪现
-    if (owner.activeTargetSignature !== null && owner.activeTargetSignature !== targetSignature) {
-      this.pushLog(`[货物闪烁诊断] 货物(${cargo.assetCode}/${cargo.containerCode})模板目标切换：${owner.activeTargetSignature} -> ${targetSignature}`);
-    }
     if (!owner.failedTargetSignatures.has(targetSignature)) {
       this.disposeGeneratedCargoFallback(cargo);
     }
