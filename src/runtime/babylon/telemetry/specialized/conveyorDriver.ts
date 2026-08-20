@@ -23,7 +23,8 @@ import {
   type DeviceTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
 import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
-import type { ModelRuntimeEntry } from '../../SceneRuntime';
+import { resolveLocatorCellSupportWorldPosition } from '../stackerStorageLocation';
+import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
 import { readConveyorCargoSignalFields, readConveyorCargoSurfaceOffset, readConveyorCargoTravelConfig, isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
@@ -124,6 +125,11 @@ export class ConveyorTelemetryDriver {
    *   → 销毁当前货物等传递；否则复用滞留箱盖新 task。
    * - 外部持货（stacker/RGV）：无链路能力，订阅传播触达时由相邻 conveyor 登记 externalPulls，
    *   facade 帧尾扫描其持货，命中即代交付（同样直达最终订阅者）。
+   * - 站台（模型脚本声明的内置 1×1 货格）：conveyor↔stacker 双向交接缓冲，locator 事件驱动、不经链路。
+   *   上游来货恒以站台为终点（按交付流向钳制收敛到站台支撑位，与站台在 A/B 端无关）；stacker 对站台
+   *   货格取货时无视 task 直接接管本机持货（发 taken 波）；放货完成后货物落座站台成为本机滞留货物
+   *   （不销毁、不自动驶离），已挂起的等待 task 立即由其兑现，后续到达的 task 走滞留箱复用驶离；
+   *   线首（无上游）站台机新 task 到达时不自建也不订阅，等待 stacker 放入。
    * - 防环：消息携带 visited 设备链，命中即丢弃；hops 逐跳 +1。
    * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向，
    * 取**模型本地坐标**（x/-x/z/-z，缺省 x），模型旋转后仍跟随本地轴：
@@ -241,6 +247,8 @@ export class ConveyorTelemetryDriver {
           // 滞留箱复用：保持位置，盖上新 task；旧 task 货物视为消失，新 task 货物通知下游
           const oldTask = heldCargo.task;
           heldCargo.task = state.pendingTask;
+          // 复用后货物可驶离（含从站台出发），不再按上游来货钳制终点
+          state.platformInboundCargo = false;
           const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
           heldCargo.containerCode = containerCode || heldCargo.containerCode;
           state.pendingTask = null;
@@ -253,7 +261,11 @@ export class ConveyorTelemetryDriver {
         }
       } else if (state.waitingTask === null) {
         const hasUpstream = this.resolveProbeNeighbor(model, probeDirection) !== null || state.upstreamLinks.size > 0;
-        if (!hasUpstream && model.telemetryBinding?.cargoOriginDevice === true) {
+        if (!hasUpstream && this.resolvePlatformLocator(model)) {
+          // 线首站台机：货物只能由 stacker 放入站台（acceptPlatformPlacedCargo 事件满足），
+          // 不自建货箱也不发订阅；无需勾选起点设备/货物自动销毁。
+          state.waitingTask = state.pendingTask;
+        } else if (!hasUpstream && model.telemetryBinding?.cargoOriginDevice === true) {
           // 起点设备：探测点未触及上游且无注册上游时允许自行创建货箱
           // 刷出端由运行方向决定：正转刷在轨迹起点向终点移动，反转刷在轨迹终点向起点移动。
           // 刷出瞬间货箱模板尚未加载，按内置长度计算行程；模板就绪后下一帧 clamp 自动收敛到实测端点。
@@ -262,6 +274,7 @@ export class ConveyorTelemetryDriver {
           state.waitingTask = null;
           state.cargoTravelOffset = -probeDirection * plan.forwardSign * this.resolveTravelHalfRangeMeters(null, plan);
           state.cargoCode = CONVEYOR_CARGO_IDENTITY;
+          state.platformInboundCargo = false;
           this.createConveyorCargoForTask(model, snapshot, state.cargoCode);
           if (movementDirection === 0) state.selfDriveDirection = 1;
           this.notifyAvailable(model, state.currentTask ?? '', probeDirection);
@@ -294,7 +307,22 @@ export class ConveyorTelemetryDriver {
     }
     // 每帧按当前货箱实测模板长度钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
     const travelHalfRange = this.resolveTravelHalfRangeMeters(cargo, plan);
-    state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, -travelHalfRange, travelHalfRange);
+    // 上游来货恒以站台为终点：按交付流向把终点收敛到站台支撑位，与站台在 A/B 端无关；
+    // stacker 放货/滞留箱复用的持货不钳站台（platformInboundCargo=false），可正常驶离。
+    let minOffset = -travelHalfRange;
+    let maxOffset = travelHalfRange;
+    if (state.platformInboundCargo) {
+      const platform = this.resolvePlatformLocator(model);
+      const platformOffset = platform ? this.resolvePlatformTravelOffset(plan.travelContext, platform) : null;
+      if (platformOffset !== null) {
+        if (state.platformInboundDirection * plan.forwardSign >= 0) {
+          maxOffset = Math.min(platformOffset, travelHalfRange);
+        } else {
+          minOffset = Math.max(platformOffset, -travelHalfRange);
+        }
+      }
+    }
+    state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, minOffset, maxOffset);
 
     this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));
     const pose = resolveCargoHandoffPose(
@@ -625,6 +653,9 @@ export class ConveyorTelemetryDriver {
     subscriberState.waitingTask = null;
     // 承接即走行：登记自驱方向，快照断流期间由帧调度继续驱动，新消息到达即恢复字段驱动。
     subscriberState.selfDriveDirection = direction;
+    // 上游来货恒以站台为终点：记录交付流向，走行钳制按流向收敛到站台支撑位（无站台则不钳）。
+    subscriberState.platformInboundCargo = this.resolvePlatformLocator(subscriber) !== null;
+    subscriberState.platformInboundDirection = direction;
     this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(subscriber.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
 
     this.sendUnsubscribe(subscriber, task, direction);
@@ -671,6 +702,22 @@ export class ConveyorTelemetryDriver {
   private resolveFlowDirection(model: ModelRuntimeEntry, fallback = 1): number {
     const direction = model.conveyorTelemetry?.lastMovementDirection ?? 0;
     return direction !== 0 ? direction : fallback;
+  }
+
+  /** 本机的内置站台货格（模型脚本声明 enablePlatform 并生成绑定时存在）；阵列代理等无实体快照时返回 null。 */
+  private resolvePlatformLocator(model: ModelRuntimeEntry): LocatorRuntimeEntry | null {
+    const entityId = model.entitySnapshot?.id;
+    return entityId ? this.host.findBuiltInSlotLocatorForHostModel(entityId) : null;
+  }
+
+  /** 站台支撑位（1×1 货格 boxIndex=0）在行走轴上相对行程中心的投影偏移；站台在预览隐藏态也可解析。 */
+  private resolvePlatformTravelOffset(
+    travelContext: { center: Vector3; travelAxis: Vector3 },
+    platform: LocatorRuntimeEntry,
+  ): number | null {
+    const supportWorld = resolveLocatorCellSupportWorldPosition(platform, 0);
+    if (!supportWorld) return null;
+    return Vector3.Dot(supportWorld.subtract(travelContext.center), travelContext.travelAxis);
   }
 
   /** 按资产编号查找模型：帧内懒构建索引一次，链路消息逐链路查找不再全量扫描。 */
@@ -857,10 +904,58 @@ export class ConveyorTelemetryDriver {
       const cargoCode = model.conveyorTelemetry.cargoCode;
       if (cargoCode !== null && this.getConveyorCargoKey(model.assetCode, cargoCode) === key) {
         model.conveyorTelemetry.cargoCode = null;
+        model.conveyorTelemetry.platformInboundCargo = false;
       }
     }
     this.state.conveyorCargoMeshes.delete(key);
     return cargo;
+  }
+
+  /** stacker 从本机站台取货：无视 task 取出本机当前持货（不销毁），并向下游发 taken 波；无货返回 null。 */
+  adoptPlatformCargoForStacker(model: ModelRuntimeEntry, stackerAssetCode: string): ConveyorCargoRuntimeEntry | null {
+    const state = model.conveyorTelemetry;
+    if (state.cargoCode === null) return null;
+    const cargo = this.detachClaimedCargoByKey(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
+    if (!cargo) return null;
+    this.notifyTaken(model, cargo.task, stackerAssetCode, this.resolveFlowDirection(model));
+    return cargo;
+  }
+
+  /**
+   * stacker 向本机站台放货完成：货物落座站台成为本机滞留货物（不销毁、不自动驶离），由本机继续维护；
+   * 本机正等待的 task 立即由该货物兑现，未等待则保留货物随附 task，后续新 task 边沿走滞留箱复用驶离。
+   * 本机已有货或站台偏移不可解析时返回 false（调用方走原销毁路径）。
+   */
+  acceptPlatformPlacedCargo(
+    model: ModelRuntimeEntry,
+    platform: LocatorRuntimeEntry,
+    cargo: GeneratedCargoRuntimeEntry,
+  ): boolean {
+    const state = model.conveyorTelemetry;
+    if (state.cargoCode !== null) return false;
+    const plan = this.resolveConveyorTravelPlan(model);
+    const platformOffset = this.resolvePlatformTravelOffset(plan.travelContext, platform);
+    if (platformOffset === null) return false;
+
+    cargo.assetCode = model.assetCode;
+    cargo.handoff = createCargoHandoffState(cargo);
+    this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(model.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
+    state.cargoCode = CONVEYOR_CARGO_IDENTITY;
+    state.cargoTravelOffset = platformOffset;
+    state.platformInboundCargo = false;
+    // 等待中的 task 由放入货物立即兑现（线首站台未发订阅，退订为无害空操作）
+    if (state.waitingTask !== null) {
+      cargo.task = state.waitingTask;
+      this.sendUnsubscribe(model, state.waitingTask, this.resolveFlowDirection(model));
+      state.waitingTask = null;
+    }
+    state.pendingTask = null;
+    if (cargo.task) {
+      state.currentTask = cargo.task;
+      state.lastTask = cargo.task;
+    }
+    this.notifyAvailable(model, cargo.task, this.resolveFlowDirection(model));
+    return true;
   }
 
   /** 释放单个输送线运行时货物的模板、回退 Box 和支撑点根节点。 */

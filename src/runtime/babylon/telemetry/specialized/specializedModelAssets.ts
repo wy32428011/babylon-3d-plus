@@ -242,6 +242,8 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     selfDriveDirection: 0,
     lastSnapshotReceivedAt: 0,
     cargoTravelOffset: 0,
+    platformInboundCargo: false,
+    platformInboundDirection: 1,
   };
 }
 
@@ -262,6 +264,8 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.selfDriveDirection = 0;
   model.conveyorTelemetry.lastSnapshotReceivedAt = 0;
   model.conveyorTelemetry.cargoTravelOffset = 0;
+  model.conveyorTelemetry.platformInboundCargo = false;
+  model.conveyorTelemetry.platformInboundDirection = 1;
 }
 
 /** 创建 stacker 遥测运行态，所有偏移都只保存在内存中。 */

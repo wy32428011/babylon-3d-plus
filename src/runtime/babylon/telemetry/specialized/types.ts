@@ -295,6 +295,10 @@ export type ConveyorModelTelemetryState = {
   /** 最近一次应用的快照 receivedAt：识别新消息到达并结束自驱；断流重放时保持不变。 */
   lastSnapshotReceivedAt: number;
   cargoTravelOffset: number;
+  /** 当前持货为上游交付来货且以站台为终点：true 时按 platformInboundDirection 把终点钳制收敛到站台支撑位；stacker 放货/滞留箱复用后为 false（不钳，可驶离）。 */
+  platformInboundCargo: boolean;
+  /** 交付流向（settleCargoTransfer 的 direction，±1）：×forwardSign 得偏移空间的站台钳制方向。 */
+  platformInboundDirection: number;
 };
 
 export type ConveyorCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
@@ -389,6 +393,10 @@ export interface SpecializedTelemetryHost {
   /** models + modelArrayParameterVariants 的合并视图（entityId 用 representativeEntityId）。 */
   collectModels(): Iterable<{ entityId: string; model: ModelRuntimeEntry }>;
   findLocatorByDevice(assetCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
+  /** 按宿主实体 ID 找其内置货格运行时条目（无绑定返回 null）。 */
+  findBuiltInSlotLocatorForHostModel(hostEntityId: string): LocatorRuntimeEntry | null;
+  /** 反查内置货格的宿主模型与其货格条目（非内置货格返回 null）。 */
+  resolveBuiltInSlotHost(locatorEntityId: string): { model: ModelRuntimeEntry; locator: LocatorRuntimeEntry } | null;
   /** 返回设备绑定的全部 Locator（所有排），无绑定返回空数组；用于区分「未绑定」与「坐标越界」。 */
   findLocatorsByDevice(assetCode: string): LocatorRuntimeEntry[];
   resolveCargoGeneratorForModel(model: ModelRuntimeEntry): ModelGeneratorRuntimeEntry | null;
@@ -448,4 +456,8 @@ export interface SpecializedTelemetryDriverContext {
    * 未找到返回 null。输送线探测点推送用。
    */
   detachClaimedCargoByReference(cargo: GeneratedCargoRuntimeEntry): GeneratedCargoRuntimeEntry | null;
+  /** stacker 从 conveyor 站台取货：无视 task 接管该 conveyor 当前持货（无货或非站台货格返回 null）。 */
+  adoptConveyorPlatformCargo(locatorEntityId: string, stackerAssetCode: string): GeneratedCargoRuntimeEntry | null;
+  /** stacker 向 conveyor 站台放货完成：货物交接给该 conveyor（conveyor 已有货或非站台货格返回 false）。 */
+  placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
 }

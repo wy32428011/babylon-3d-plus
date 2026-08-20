@@ -270,6 +270,26 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     return null;
   }
 
+  /** stacker 从 conveyor 站台取货：解析货格宿主为 conveyor 后无视 task 接管其当前持货。 */
+  adoptConveyorPlatformCargo(locatorEntityId: string, stackerAssetCode: string): GeneratedCargoRuntimeEntry | null {
+    const resolved = this.host.resolveBuiltInSlotHost(locatorEntityId);
+    if (!resolved || !isConveyorRuntimeModel(resolved.model)) return null;
+    return this.conveyorDriver.adoptPlatformCargoForStacker(resolved.model, stackerAssetCode);
+  }
+
+  /** stacker 向 conveyor 站台放货完成：取出货物交接给该 conveyor；失败时货物放回原表，由调用方走原销毁路径。 */
+  placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean {
+    const resolved = this.host.resolveBuiltInSlotHost(locatorEntityId);
+    if (!resolved || !isConveyorRuntimeModel(resolved.model)) return false;
+    const cargo = this.stackerDriver.detachClaimedCargoByKey(cargoKey);
+    if (!cargo) return false;
+    if (!this.conveyorDriver.acceptPlatformPlacedCargo(resolved.model, resolved.locator, cargo)) {
+      this.state.stackerCargoMeshes.set(cargoKey, cargo);
+      return false;
+    }
+    return true;
+  }
+
   // ===== 帧内私有方法 =====
 
   /** 收集最终选择当前专用类型的模型，并把实例绑定归一成完整遥测主键。 */

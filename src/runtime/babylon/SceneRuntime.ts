@@ -762,6 +762,8 @@ export class SceneRuntime {
       },
       findLocatorByDevice: (assetCode, x, y, z) => this.findLocatorByDevice(assetCode, x, y, z),
       findLocatorsByDevice: (assetCode) => this.findLocatorsByDevice(assetCode),
+      findBuiltInSlotLocatorForHostModel: (hostEntityId) => this.findBuiltInSlotLocatorForHostModel(hostEntityId),
+      resolveBuiltInSlotHost: (locatorEntityId) => this.resolveBuiltInSlotHost(locatorEntityId),
       resolveCargoGeneratorForModel: (model) => this.resolveCargoGeneratorForModel(model),
       resolveColumnTargetPose: (entityId) => this.resolveColumnTargetPose(entityId),
       resolveFetchDriveRowForLocator: (locator) => this.resolveFetchDriveRowForLocator(locator),
@@ -3112,6 +3114,27 @@ export class SceneRuntime {
     const result: LocatorRuntimeEntry[] = [];
     for (const list of rowMap.values()) result.push(...list);
     return result;
+  }
+
+  /** 按宿主实体 ID 找其内置货格运行时条目（无绑定返回 null）。 */
+  private findBuiltInSlotLocatorForHostModel(hostEntityId: string): LocatorRuntimeEntry | null {
+    for (const entry of this.locators.values()) {
+      const binding = this.syncedEntities.get(entry.entityId)?.components.locator?.builtInBinding;
+      if (binding?.hostEntityId === hostEntityId) return entry;
+    }
+    return null;
+  }
+
+  /** 反查内置货格的宿主模型与其货格条目（非内置货格或宿主非模型时返回 null）。 */
+  private resolveBuiltInSlotHost(
+    locatorEntityId: string,
+  ): { model: ModelRuntimeEntry; locator: LocatorRuntimeEntry } | null {
+    const locator = this.locators.get(locatorEntityId);
+    if (!locator) return null;
+    const hostEntityId = this.syncedEntities.get(locatorEntityId)?.components.locator?.builtInBinding?.hostEntityId;
+    if (!hostEntityId) return null;
+    const model = this.models.get(hostEntityId);
+    return model ? { model, locator } : null;
   }
 
   /** 在 Locator 的 boxes 网格中根据列/层定位具体 box 的世界矩阵，平移对齐 box 底面中心（货物支撑位）。 */

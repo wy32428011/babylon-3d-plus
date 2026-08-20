@@ -33,6 +33,7 @@ import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime'
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   createCargoHandoffState,
+  type GeneratedCargoRuntimeEntry,
   normalizeCargoTask,
   resolveCargoHandoffPose,
   type SpecializedTelemetryDriverContext,
@@ -667,7 +668,14 @@ export class StackerTelemetryDriver {
     if (!targetLocator) return;
 
     this.getOrCreateStackerCargo(model.assetCode, side);
-    this.adoptOrCreateStackerCargo(model, snapshot, side);
+    // 目标是 conveyor 站台（内置 1×1 货格）：无视 task 直接接管该 conveyor 的滞留持货；
+    // 未命中（普通库位/对方无货）回退按 task 全局接管或自建。
+    const platformAdopted = this.context.adoptConveyorPlatformCargo(targetLocator.entityId, model.assetCode);
+    if (platformAdopted) {
+      this.finalizeAdoptedStackerCargo(model, snapshot, side, platformAdopted);
+    } else {
+      this.adoptOrCreateStackerCargo(model, snapshot, side);
+    }
     const frontX = readIntegerField(snapshot.fields, 'front_x');
     const frontY = readIntegerField(snapshot.fields, 'front_y');
     const fetchRow = frontX !== null && frontY !== null
@@ -779,7 +787,10 @@ export class StackerTelemetryDriver {
     if (this.host.keepCargoForFetchRowSync(fetchRow, model.assetCode, side)) {
       this.host.handleFetchRowSync(fetchRow as number);
     } else if (fetchRow === null) {
-      this.disposeStackerCargoByKey(cargoKey);
+      // 目标是 conveyor 站台：货物交接给该 conveyor 继续流转；非站台或交接被拒（对方已有货）走原销毁路径
+      if (!targetLocator || !this.context.placeCargoIntoConveyorPlatform(targetLocator.entityId, cargoKey)) {
+        this.disposeStackerCargoByKey(cargoKey);
+      }
     }
     this.clearStackerForkCargoState(model, side);
   }
@@ -887,22 +898,34 @@ export class StackerTelemetryDriver {
   ): void {
     const cargoKey = this.getStackerCargoKey(model.assetCode, side);
     const task = normalizeCargoTask(readIntegerField(snapshot.fields, `${side}_task`));
-    const containerCode = readStringField(snapshot.fields, `${side}_containerCode`)?.trim() ?? '';
     const adopted = this.context.adoptGlobalCargoByTask(task, cargoKey);
     if (adopted) {
-      const placeholder = this.state.stackerCargoMeshes.get(cargoKey);
-      if (placeholder && placeholder !== adopted) this.disposeStackerCargoByKey(cargoKey);
-      adopted.assetCode = model.assetCode;
-      adopted.task = task;
-      adopted.containerCode = containerCode || adopted.containerCode;
-      adopted.handoff = createCargoHandoffState(adopted);
-      this.state.stackerCargoMeshes.set(cargoKey, adopted);
+      this.finalizeAdoptedStackerCargo(model, snapshot, side, adopted);
       return;
     }
     const cargo = this.state.stackerCargoMeshes.get(cargoKey);
     if (!cargo) return;
     cargo.task = task;
-    cargo.containerCode = containerCode;
+    cargo.containerCode = readStringField(snapshot.fields, `${side}_containerCode`)?.trim() ?? '';
+  }
+
+  /** 接管收尾：销毁本侧占位条目（从未渲染），货物身份换绑本机、记录交接插值起点并登记到本侧货叉键。 */
+  private finalizeAdoptedStackerCargo(
+    model: ModelRuntimeEntry,
+    snapshot: StackerTelemetrySnapshot,
+    side: StackerForkSide,
+    adopted: GeneratedCargoRuntimeEntry,
+  ): void {
+    const cargoKey = this.getStackerCargoKey(model.assetCode, side);
+    const task = normalizeCargoTask(readIntegerField(snapshot.fields, `${side}_task`));
+    const containerCode = readStringField(snapshot.fields, `${side}_containerCode`)?.trim() ?? '';
+    const placeholder = this.state.stackerCargoMeshes.get(cargoKey);
+    if (placeholder && placeholder !== adopted) this.disposeStackerCargoByKey(cargoKey);
+    adopted.assetCode = model.assetCode;
+    adopted.task = task;
+    adopted.containerCode = containerCode || adopted.containerCode;
+    adopted.handoff = createCargoHandoffState(adopted);
+    this.state.stackerCargoMeshes.set(cargoKey, adopted);
   }
 
   /** 创建或复用某侧货叉的堆垛机运行时货物。 */
