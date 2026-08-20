@@ -3133,8 +3133,17 @@ export class SceneRuntime {
     if (!locator) return null;
     const hostEntityId = this.syncedEntities.get(locatorEntityId)?.components.locator?.builtInBinding?.hostEntityId;
     if (!hostEntityId) return null;
-    const model = this.models.get(hostEntityId);
+    // 宿主可能是常规模型、合批阵列的遥测代理或参数变体代表机：三张注册表都要查，否则阵列输送线站台取/放交接失效
+    const model = this.models.get(hostEntityId)
+      ?? this.modelArrayTelemetryProxies.get(hostEntityId)
+      ?? this.resolveModelArrayVariantRepresentativeModel(hostEntityId);
     return model ? { model, locator } : null;
+  }
+
+  /** 按代表实例实体 ID 反查参数变体宿主模型（非代表实例或未映射变体返回 null）。 */
+  private resolveModelArrayVariantRepresentativeModel(entityId: string): ModelRuntimeEntry | null {
+    const variant = this.modelArrayParameterVariantByEntityId.get(entityId);
+    return variant && variant.representativeEntityId === entityId ? variant.model : null;
   }
 
   /** 在 Locator 的 boxes 网格中根据列/层定位具体 box 的世界矩阵，平移对齐 box 底面中心（货物支撑位）。 */
@@ -4251,6 +4260,10 @@ export class SceneRuntime {
     owner.component = component;
     owner.activeSnapshot = snapshot;
     const targetSignature = createModelGeneratorTargetSignature(resolution.target);
+    // 临时诊断（排查货物整体闪烁）：运动中模板目标在消息间反复切换会导致输出卸载重载，货物整箱闪现
+    if (owner.activeTargetSignature !== null && owner.activeTargetSignature !== targetSignature) {
+      this.pushLog(`[货物闪烁诊断] 货物(${cargo.assetCode}/${cargo.containerCode})模板目标切换：${owner.activeTargetSignature} -> ${targetSignature}`);
+    }
     if (!owner.failedTargetSignatures.has(targetSignature)) {
       this.disposeGeneratedCargoFallback(cargo);
     }

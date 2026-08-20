@@ -148,7 +148,7 @@ export class StackerTelemetryDriver {
   /**
    * front_ 库位键跟踪：
    * - 首条有效库位：行走/升降直接吸附到上报库位，避免从原点缓慢追赶期间消息已经推进；
-   * - 后续跳变：记录变化间隔（供自适应追赶速度估算），货叉已伸出或取/放动作未完结时进入 catch-up 并立即补齐动作语义。
+   * - 后续跳变：记录变化间隔（供自适应追赶速度估算），货叉已伸出或仍有货物滞留货格（未绑定）时进入 catch-up 并立即补齐动作语义。
    */
   private trackStackerFrontCellChange(
     model: ModelRuntimeEntry,
@@ -179,10 +179,10 @@ export class StackerTelemetryDriver {
     const frontCommand = readIntegerField(snapshot.fields, 'front_command');
     const backCommand = readIntegerField(snapshot.fields, 'back_command');
     const forkDeployed = Math.abs(state.frontForkOffset) > 1e-3 || Math.abs(state.backForkOffset) > 1e-3;
-    const frontMidAction = state.frontCargoKey !== null
-      && (!state.frontCargoBoundToFork || frontCommand === 1 || frontCommand === 3 || frontCommand === 4);
-    const backMidAction = state.backCargoKey !== null
-      && (!state.backCargoBoundToFork || backCommand === 1 || backCommand === 3 || backCommand === 4);
+    // 已绑定货物随叉随行是正常搬运，库位连续更新（真实 WCS 行走期间持续上报）不算动作未完结；
+    // 仅滞留货格的未绑定货物才需在转场跳变时补齐取/放语义
+    const frontMidAction = state.frontCargoKey !== null && !state.frontCargoBoundToFork;
+    const backMidAction = state.backCargoKey !== null && !state.backCargoBoundToFork;
     if (!forkDeployed && !frontMidAction && !backMidAction) return;
 
     state.forkCatchUp = true;

@@ -121,6 +121,8 @@ function makeHarness() {
     getOrCreateStackerCargo: () => { throw new Error('not used'); },
     getOrCreateConveyorCargo: () => { throw new Error('not used'); },
     adoptGlobalCargoByTask: () => null,
+    adoptConveyorPlatformCargo: () => null,
+    placeCargoIntoConveyorPlatform: () => false,
   };
   const driver = new StackerTelemetryDriver(context as never);
   return {
@@ -346,6 +348,38 @@ test('front_ 变化时快速收尾：货叉加速收回原点后才允许平移'
     h.dispose();
   }
 });
+
+test('取货绑定后 command 1→3 伴随库位跳变不销毁货物：已绑定货物随叉随行不算动作未完结', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const FETCH_FRAME = { ...POSITION_FRAME, front_command: 1, front_task: 7001 };
+
+    // 到位后在列 10 取货：伸叉刷货 → 到位绑定 → 收叉带回
+    h.apply(FETCH_FRAME, 0.1, 10);
+    h.apply({ ...FETCH_FRAME, front_movement_z: 1 }, 0.1, 60);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '伸叉取货必须刷出货物');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '伸叉到位必须绑定货物上叉');
+    h.apply({ ...FETCH_FRAME, front_movement_z: 2 }, 0.1, 60);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '收叉必须归零');
+
+    // 真实 WCS 模式：command 直接 1→3 且 front_ 同帧跳到新列（行走开始），已绑定货物不得被中途放货收尾销毁
+    h.apply({ ...FETCH_FRAME, front_command: 3, front_x: 5, front_movement_z: 0 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.forkCatchUp, false, '已绑定货物随行不得进入 catch-up');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '库位跳变不得销毁已绑定货物');
+    assert.notEqual(h.model.stackerTelemetry.frontCargoKey, null, '货物引用必须保留');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '货物必须保持绑定随叉随行');
+
+    // 行走途中持续 command=3 + 库位连续更新：货物始终存活
+    h.apply({ ...FETCH_FRAME, front_command: 3, front_x: 4, front_movement_z: 0 }, 0.1, 1);
+    h.apply({ ...FETCH_FRAME, front_command: 3, front_x: 3, front_movement_z: 0 }, 0.1, 1);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '放货行走途中货物必须存活');
+  } finally {
+    h.dispose();
+  }
+});
+
 
 test('伸叉方向由货格几何决定：货格在 +x 侧时 movement 3（旧"左伸"码）也必须朝 +x 伸', () => {
   const h = makeHarness();
