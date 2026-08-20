@@ -281,6 +281,8 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean {
     const resolved = this.host.resolveBuiltInSlotHost(locatorEntityId);
     if (!resolved || !isConveyorRuntimeModel(resolved.model)) return false;
+    // 先预检再拆引用：拒绝时 stacker 侧货物状态保持完好，回退到 command 5 销毁路径
+    if (!this.conveyorDriver.canAcceptPlatformPlacedCargo(resolved.model, resolved.locator)) return false;
     const cargo = this.stackerDriver.detachClaimedCargoByKey(cargoKey);
     if (!cargo) return false;
     if (!this.conveyorDriver.acceptPlatformPlacedCargo(resolved.model, resolved.locator, cargo)) {

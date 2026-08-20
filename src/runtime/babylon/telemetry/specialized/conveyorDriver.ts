@@ -921,6 +921,14 @@ export class ConveyorTelemetryDriver {
     return cargo;
   }
 
+  /** 站台放货预检：本机空闲且站台偏移可解析才允许交接；纯读无副作用，供调用方在拆除原持货引用前判定。 */
+  canAcceptPlatformPlacedCargo(model: ModelRuntimeEntry, platform: LocatorRuntimeEntry): boolean {
+    const state = model.conveyorTelemetry;
+    if (state.cargoCode !== null) return false;
+    const plan = this.resolveConveyorTravelPlan(model);
+    return this.resolvePlatformTravelOffset(plan.travelContext, platform) !== null;
+  }
+
   /**
    * stacker 向本机站台放货完成：货物落座站台成为本机滞留货物（不销毁、不自动驶离），由本机继续维护；
    * 本机正等待的 task 立即由该货物兑现，未等待则保留货物随附 task，后续新 task 边沿走滞留箱复用驶离。

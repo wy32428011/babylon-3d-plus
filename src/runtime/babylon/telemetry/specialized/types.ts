@@ -197,7 +197,7 @@ export type StackerModelTelemetryState = {
   /** 箱位朝向含镜像（负缩放）时的缩放分量；null 表示无镜像，按单位缩放渲染。 */
   frontCargoHoldScaling: Vector3 | null;
   backCargoHoldScaling: Vector3 | null;
-  /** 取货时锁定的源排号，取货完成（command 2）用于触发 fetch 单排同步。 */
+  /** 放货时锁定的目标排号，放货完成（command 5）用于 fetch 保留与单排同步；取货不留存排号。 */
   frontCargoFetchRow: number | null;
   backCargoFetchRow: number | null;
   /** command 边沿检测：取货/放货完成只触发一次。 */
@@ -458,6 +458,6 @@ export interface SpecializedTelemetryDriverContext {
   detachClaimedCargoByReference(cargo: GeneratedCargoRuntimeEntry): GeneratedCargoRuntimeEntry | null;
   /** stacker 从 conveyor 站台取货：无视 task 接管该 conveyor 当前持货（无货或非站台货格返回 null）。 */
   adoptConveyorPlatformCargo(locatorEntityId: string, stackerAssetCode: string): GeneratedCargoRuntimeEntry | null;
-  /** stacker 向 conveyor 站台放货完成：货物交接给该 conveyor（conveyor 已有货或非站台货格返回 false）。 */
+  /** stacker 落货到 conveyor 站台时交接货物给该 conveyor；conveyor 已有货或非站台货格返回 false，此时不拆除原持货引用。 */
   placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
 }
