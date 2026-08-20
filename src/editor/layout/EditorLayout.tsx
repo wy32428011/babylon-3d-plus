@@ -13,6 +13,7 @@ import { useEditorStore, type TransformTool } from '../store/editorStore';
 import { Toolbar } from '../ui/Toolbar';
 import { ScenePreparationOverlay } from '../loading/ScenePreparationOverlay';
 import { isScenePreparationActive } from '../loading/scenePreparationProgress';
+import { getReturnToHomePageBlockMessage } from '../home/returnToHomePage';
 import styles from './EditorLayout.module.css';
 
 const TOOL_SHORTCUTS: Record<string, TransformTool> = {
@@ -31,7 +32,11 @@ function isKeyboardEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
-export function EditorLayout() {
+type EditorLayoutProps = {
+  onBackToHome: () => void;
+};
+
+export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   const [isConsoleDialogOpen, setConsoleDialogOpen] = useState(false);
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
   const [isDeploymentExportDialogOpen, setDeploymentExportDialogOpen] = useState(false);
@@ -245,9 +250,26 @@ export function EditorLayout() {
     updateFetchConfig(config);
   }
 
+  /** 忙碌任务未结束时留在编辑器，避免卸载工作台中断进行中的导入/导出/发布。 */
+  function handleBackToHome(): void {
+    const blockMessage = getReturnToHomePageBlockMessage({
+      scenePreparationActive: isScenePreparationActive(),
+      publishActive: digitalTwinPublish.isBusy,
+      deploymentExportBusy: deploymentExport.isBusy,
+      cadImportActive: Boolean(cadImportProgress?.active),
+    });
+    if (blockMessage) {
+      window.alert(blockMessage);
+      return;
+    }
+
+    onBackToHome();
+  }
+
   return (
     <div className={styles.editorShell}>
       <Toolbar
+        onBackToHome={handleBackToHome}
         transformTool={transformTool}
         transformSpace={transformSpace}
         snapSettings={snapSettings}

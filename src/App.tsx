@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import stackerMqttDemoSceneContent from '../examples/scenes/stacker-mqtt-demo.scene.json?raw';
 import { HomePage } from './editor/home/HomePage';
+import {
+  getReturnToHomePageBlockMessage,
+  RETURN_TO_HOME_PAGE_UNSAVED_CONFIRM,
+} from './editor/home/returnToHomePage';
 import { EditorLayout } from './editor/layout/EditorLayout';
 import { useEditorStore } from './editor/store/editorStore';
 
@@ -24,6 +28,7 @@ export default function App() {
   const [view, setView] = useState<AppView>('home');
   const demoSceneLoadedRef = useRef(false);
   const deepLinkOpeningRef = useRef(false);
+  const returningHomeRef = useRef(false);
 
   useEffect(() => {
     if (demoSceneLoadedRef.current) return;
@@ -113,6 +118,33 @@ export default function App() {
     return loaded;
   }
 
+  /** 从编辑器工作台返回首页，发布中阻断，未保存修改需确认。 */
+  async function handleBackToHome(): Promise<void> {
+    if (returningHomeRef.current) return;
+    returningHomeRef.current = true;
+
+    try {
+      const publishContext = await window.editorApi?.getDigitalTwinPublishContext?.().catch(() => null);
+      const blockMessage = getReturnToHomePageBlockMessage({
+        publishActive: Boolean(publishContext?.publishActive),
+      });
+      if (blockMessage) {
+        window.alert(blockMessage);
+        return;
+      }
+
+      if (useEditorStore.getState().hasUnsavedChanges()) {
+        const confirmed = window.confirm(RETURN_TO_HOME_PAGE_UNSAVED_CONFIRM);
+        if (!confirmed) return;
+      }
+
+      useEditorStore.getState().stopRuntimePreview();
+      setView('home');
+    } finally {
+      returningHomeRef.current = false;
+    }
+  }
+
   if (view === 'home') {
     return (
       <HomePage
@@ -125,5 +157,5 @@ export default function App() {
     );
   }
 
-  return <EditorLayout />;
+  return <EditorLayout onBackToHome={() => void handleBackToHome()} />;
 }

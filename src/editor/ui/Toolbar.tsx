@@ -42,6 +42,7 @@ import {
 } from '../deployment/deploymentExport';
 import { ToolbarTaskProgress } from '../deployment/ToolbarTaskProgress';
 import { APPLICATION_NAME, BrandLogo } from './BrandLogo';
+import { RETURN_TO_HOME_PAGE_LABEL } from '../home/returnToHomePage';
 
 const TRANSFORM_TOOL_LABELS: Record<TransformTool, string> = {
   translate: '移动 (E)',
@@ -72,6 +73,7 @@ const TOOLBAR_ICONS = {
   cad: '▧',
   mqtt: 'MQ',
   fetch: '⤓',
+  home: '←',
 } as const;
 
 const STACKER_SIMULATION_SCENARIO_LABELS: Record<StackerSimulationScenario, string> = {
@@ -131,6 +133,7 @@ function createPreviewTopic(topicFilter: string, config: MqttConfig, subscriptio
 }
 
 type ToolbarProps = {
+  onBackToHome: () => void;
   transformTool: TransformTool;
   transformSpace: TransformSpace;
   snapSettings: TransformSnapSettings;
@@ -514,6 +517,19 @@ export function Toolbar(props: ToolbarProps) {
 
   return (
     <header className="toolbar">
+      <button
+        aria-label={RETURN_TO_HOME_PAGE_LABEL}
+        className="toolbar-button toolbar-home-button"
+        onClick={(event) => {
+          props.onBackToHome();
+          event.currentTarget.blur();
+        }}
+        title={RETURN_TO_HOME_PAGE_LABEL}
+        type="button"
+      >
+        <span aria-hidden="true">{TOOLBAR_ICONS.home}</span>
+        返回
+      </button>
       <strong aria-label={APPLICATION_NAME} className="toolbar-title">
         <BrandLogo className="toolbar-brand-logo" surface="dark" />
         <span className="toolbar-product-name">3D EDITOR</span>
