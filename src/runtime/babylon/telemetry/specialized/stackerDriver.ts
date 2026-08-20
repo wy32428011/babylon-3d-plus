@@ -1074,8 +1074,6 @@ export class StackerTelemetryDriver {
     this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(this.findStackerLiftNodes(model)), liftWorldOffset);
     this.addStackerForkStageOffsets(offsets, frontStageOneNodes, frontStageTwoNodes, forkAxis, frontOffset);
     this.addStackerForkStageOffsets(offsets, backStageOneNodes, backStageTwoNodes, forkAxis, backOffset);
-    this.setStackerForkStageTwoNodesEnabled(frontStageTwoNodes, Math.abs(frontOffset.stageTwoOffset) > 0.001);
-    this.setStackerForkStageTwoNodesEnabled(backStageTwoNodes, Math.abs(backOffset.stageTwoOffset) > 0.001);
     this.offsetNodesFromBaselineByWorldOffsets(model, offsets);
   }
 
@@ -1094,14 +1092,6 @@ export class StackerTelemetryDriver {
 
     this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(stageOneNodes), forkAxis.scale(offset.stageOneOffset));
     this.addStackerWorldOffset(offsets, filterTopLevelMotionNodes(stageTwoNodes), forkAxis.scale(offset.totalOffset));
-  }
-
-  /** 第二段收纳时隐藏克隆件，避免与第一段重叠产生闪烁；非 _stage2 标记的节点不参与显隐切换。 */
-  private setStackerForkStageTwoNodesEnabled(nodes: TransformNode[], enabled: boolean): void {
-    for (const node of nodes) {
-      if (!this.isStackerForkStageTwoNode(node)) continue;
-      node.setEnabled(enabled);
-    }
   }
 
   /** 查找随水平行走机构移动的节点；优先使用模型脚本 dataDriven 声明，缺失时回退当前 Stacker GLB 名称。 */
@@ -1268,47 +1258,31 @@ export class StackerTelemetryDriver {
       };
     }
 
-    const exactFrontStageOneNodes = findModelNodesByName(model, this.scene, ['huocha.9']).filter((node) => !this.isStackerForkStageTwoNode(node));
-    const exactBackStageOneNodes = findModelNodesByName(model, this.scene, ['huocha2.10']).filter((node) => !this.isStackerForkStageTwoNode(node));
-    const exactFrontStageTwoNodes = findModelNodesByName(model, this.scene, ['huocha.9_stage2']);
-    const exactBackStageTwoNodes = findModelNodesByName(model, this.scene, ['huocha2.10_stage2']);
-    if (exactFrontStageOneNodes.length > 0 || exactBackStageOneNodes.length > 0) {
-      const hasStageTwoClones = exactFrontStageTwoNodes.length > 0 || exactBackStageTwoNodes.length > 0;
-      if (!hasStageTwoClones) {
-        // 无 _stage2 克隆件：huocha.9 两段都参与得 totalOffset，huocha2.10 只参与一段得 stageOneOffset
-        const frontMainNodes = exactFrontStageOneNodes;
-        const frontAuxNodes = exactBackStageOneNodes;
-        return {
-          frontNodes: uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
-          backNodes: uniqueTransformNodes([...frontMainNodes, ...frontAuxNodes]),
-          frontStageOneNodes: frontAuxNodes,
-          frontStageTwoNodes: frontMainNodes,
-          backStageOneNodes: [],
-          backStageTwoNodes: [],
-        };
-      }
+    // 当前 Stacker GLB：huocha2.10 为一段叉（得 stageOneOffset），huocha.9 为二段叉（得 totalOffset）；后叉与前叉共享
+    const exactStageOneNodes = findModelNodesByName(model, this.scene, ['huocha2.10']);
+    const exactStageTwoNodes = findModelNodesByName(model, this.scene, ['huocha.9']);
+    if (exactStageOneNodes.length > 0 || exactStageTwoNodes.length > 0) {
+      const frontNodes = uniqueTransformNodes([...exactStageOneNodes, ...exactStageTwoNodes]);
       return {
-        frontNodes: uniqueTransformNodes([...exactFrontStageOneNodes, ...exactFrontStageTwoNodes]),
-        backNodes: uniqueTransformNodes([...exactBackStageOneNodes, ...exactBackStageTwoNodes]),
-        frontStageOneNodes: exactFrontStageOneNodes,
-        frontStageTwoNodes: exactFrontStageTwoNodes,
-        backStageOneNodes: exactBackStageOneNodes,
-        backStageTwoNodes: exactBackStageTwoNodes,
+        frontNodes,
+        backNodes: frontNodes,
+        frontStageOneNodes: exactStageOneNodes,
+        frontStageTwoNodes: exactStageTwoNodes,
+        backStageOneNodes: [],
+        backStageTwoNodes: [],
       };
     }
 
     const forkNodes = findModelNodes(model, this.scene, this.readStackerMotionFallbackPattern(model, 'fork', /fork|叉|huocha|cha\d*/i));
-    const stageOneNodes = forkNodes.filter((node) => !this.isStackerForkStageTwoNode(node));
-    const stageTwoNodes = forkNodes.filter((node) => this.isStackerForkStageTwoNode(node));
-    const frontStageOneNodes = stageOneNodes.slice(0, 1);
-    const backStageOneNodes = stageOneNodes.slice(1, 2);
+    const frontStageOneNodes = forkNodes.slice(0, 1);
+    const backStageOneNodes = forkNodes.slice(1, 2);
     return {
-      frontNodes: uniqueTransformNodes([...frontStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'front')]),
-      backNodes: uniqueTransformNodes([...backStageOneNodes, ...stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'back')]),
+      frontNodes: frontStageOneNodes,
+      backNodes: backStageOneNodes,
       frontStageOneNodes,
-      frontStageTwoNodes: stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'front'),
+      frontStageTwoNodes: [],
       backStageOneNodes,
-      backStageTwoNodes: stageTwoNodes.filter((node) => this.readStackerForkSide(node) === 'back'),
+      backStageTwoNodes: [],
     };
   }
 
@@ -1326,22 +1300,6 @@ export class StackerTelemetryDriver {
       }
     }
 
-    return null;
-  }
-
-  /** 判断节点是否为参数脚本生成的第二段货叉。 */
-  private isStackerForkStageTwoNode(node: TransformNode): boolean {
-    const metadata = isPlainRecord(node.metadata) ? node.metadata : {};
-    return metadata.stackerForkStage === 2 || String(node.name ?? '').endsWith('_stage2');
-  }
-
-  /** 读取第二段货叉所属侧，元数据缺失时按节点名称兜底。 */
-  private readStackerForkSide(node: TransformNode): StackerForkSide | null {
-    const metadata = isPlainRecord(node.metadata) ? node.metadata : {};
-    if (metadata.stackerForkSide === 'front' || metadata.stackerForkSide === 'back') return metadata.stackerForkSide;
-    const name = String(node.name ?? '').toLowerCase();
-    if (name.includes('huocha2') || name.includes('back')) return 'back';
-    if (name.includes('huocha') || name.includes('front')) return 'front';
     return null;
   }
 

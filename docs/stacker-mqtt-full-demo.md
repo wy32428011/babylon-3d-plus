@@ -274,7 +274,7 @@ node scripts/publish-stacker-full-demo.mjs --locations 1-1-1,1-2-1
 
 - 目标库位的世界位置是否在货叉投影方向上超出 `forkStageOneReach`（默认 0.8m）；
 - Stacker 参数 `forkStageTwoReach > 0`；
-- 模型包已生成 `huocha.9_stage2` / `huocha2.10_stage2`；
+- 模型包 dataDriven 已声明 `motion.fork.frontStageOneNodes` / `frontStageTwoNodes`（如 `huocha2.10` 一段、`huocha.9` 二段），且节点名与 GLB 实际一致；
 - MQTT 的 `to_x/to_y/to_z` 能正确找到目标库位。
 
 ### 本机 Broker 返回 Not authorized
