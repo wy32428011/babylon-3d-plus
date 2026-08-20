@@ -240,6 +240,33 @@ export class ArcRotateCameraViewController {
     }, { ...options, lockStandardOrientation: false });
   }
 
+  /** 只改变观察中心和缩放距离，保留当前轨道方向及六面标准视角硬锁。 */
+  applyCameraPosePreservingOrientation(
+    pose: Pick<SceneCameraPose, 'radius' | 'target'>,
+    options: CameraViewTransitionOptions = {},
+  ): void {
+    if (this.disposed) return;
+
+    const alpha = this.camera.alpha;
+    const beta = this.camera.beta;
+    const orientationSnapshot = this.orientation;
+    const lockSnapshot = this.standardViewLock;
+    this.startTransition({
+      alpha,
+      beta,
+      radius: pose.radius,
+      target: new Vector3(pose.target.x, pose.target.y, pose.target.z),
+    }, options, () => {
+      if (
+        lockSnapshot
+        && this.orientation === orientationSnapshot
+        && this.standardViewLock === lockSnapshot
+      ) {
+        lockCameraAngles(this.camera, alpha, beta);
+      }
+    });
+  }
+
   applyCameraView(settings: SceneCameraSettings, options: CameraViewApplicationOptions = {}): void {
     if (this.disposed) return;
 
