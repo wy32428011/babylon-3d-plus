@@ -176,6 +176,7 @@ type DigitalTwinPublishRequest = {
   sceneContent: string;
   projectId: string | null;
   overwriteExisting: boolean;
+  forceOverwrite: boolean;
   confirmResourceBindings: boolean;
   allowedParentOrigins: string[];
 };

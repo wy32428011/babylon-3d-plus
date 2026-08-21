@@ -216,7 +216,7 @@ export async function publishDigitalTwin(
     });
   }
 
-  if (!context.versionConflict) {
+  if (!context.versionConflict || validated.forceOverwrite) {
     emit(onProgress, validated.requestId, 'saving', '正在保存大屏嵌入配置…', 1);
     const savedRuntimeConfig = await client.saveRuntimeConfig(
       buildDigitalTwinRuntimeConfigSavePayload(remote.runtimeConfig, validated.allowedParentOrigins),
@@ -272,7 +272,7 @@ export async function publishDigitalTwin(
     });
     appendUniqueWarnings(warnings, sourcePackage.warnings);
 
-    if (context.versionConflict) {
+    if (context.versionConflict && !validated.forceOverwrite) {
       const conflictCopyPath = await preserveConflictPackage(workspaceRoot, current.metadata.projectId, sourcePackage.filePath, 'version-conflict');
       return createTerminalResult(validated.requestId, 'conflict', {
         errorCode: 'DIGITAL_TWIN_VERSION_CONFLICT',
@@ -315,6 +315,7 @@ export async function publishDigitalTwin(
         projectId: current.metadata.projectId,
         baseVersionId: current.metadata.latestVersionId,
         overwriteExisting: validated.overwriteExisting,
+        forceOverwrite: validated.forceOverwrite,
         publishName: validated.publishName,
         remark: validated.remark || null,
         entryScenePath: sourcePackage.entryScenePath,
@@ -640,6 +641,7 @@ function validatePublishRequest(request: DigitalTwinPublishRequest): DigitalTwin
     sceneContent: request.sceneContent,
     projectId: normalizeOptionalProjectId(request.projectId),
     overwriteExisting: request.overwriteExisting === true,
+    forceOverwrite: request.forceOverwrite === true,
     confirmResourceBindings: request.confirmResourceBindings === true,
     allowedParentOrigins: normalizeDigitalTwinAllowedParentOrigins(request.allowedParentOrigins),
   };

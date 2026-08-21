@@ -26,6 +26,7 @@ export type StartDigitalTwinPublishOptions = {
   publishName: string;
   remark: string;
   overwriteExisting: boolean;
+  forceOverwrite: boolean;
   confirmResourceBindings: boolean;
   allowedParentOrigins: string[];
 };
@@ -116,6 +117,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
         sceneContent,
         projectId: options.projectId,
         overwriteExisting: options.overwriteExisting,
+        forceOverwrite: options.forceOverwrite,
         confirmResourceBindings: options.confirmResourceBindings,
         allowedParentOrigins: options.allowedParentOrigins,
       });

@@ -80,6 +80,7 @@ export type DigitalTwinPreparePayload = {
   projectId: string;
   baseVersionId: string | null;
   overwriteExisting: boolean;
+  forceOverwrite: boolean;
   publishName: string;
   remark: string | null;
   entryScenePath: string;
@@ -366,11 +367,14 @@ function assertPreparedPublishTask(payload: DigitalTwinPreparePayload, task: Dig
   if (task.requestId !== payload.requestId || task.projectId !== payload.projectId) {
     throw new Error('数字孪生 prepare 响应与原发布请求不匹配。');
   }
-  if (payload.baseVersionId !== null && task.baseVersionId !== payload.baseVersionId) {
+  if (!payload.forceOverwrite && payload.baseVersionId !== null && task.baseVersionId !== payload.baseVersionId) {
     throw new Error('数字孪生 prepare 响应基础版本不匹配。');
   }
-  if (payload.baseVersionId === null && !payload.overwriteExisting && task.baseVersionId !== null) {
+  if (!payload.forceOverwrite && payload.baseVersionId === null && !payload.overwriteExisting && task.baseVersionId !== null) {
     throw new Error('数字孪生 prepare 响应包含意外的基础版本。');
+  }
+  if (payload.forceOverwrite && task.baseVersionId === null) {
+    throw new Error('数字孪生强制覆盖 prepare 响应缺少实际基础版本。');
   }
   if (
     task.publishName !== payload.publishName.trim()
