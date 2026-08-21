@@ -242,6 +242,8 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     selfDriveDirection: 0,
     lastSnapshotReceivedAt: 0,
     cargoTravelOffset: 0,
+    platformInboundCargo: false,
+    platformInboundDirection: 1,
   };
 }
 
@@ -262,6 +264,8 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.selfDriveDirection = 0;
   model.conveyorTelemetry.lastSnapshotReceivedAt = 0;
   model.conveyorTelemetry.cargoTravelOffset = 0;
+  model.conveyorTelemetry.platformInboundCargo = false;
+  model.conveyorTelemetry.platformInboundDirection = 1;
 }
 
 /** 创建 stacker 遥测运行态，所有偏移都只保存在内存中。 */
@@ -290,6 +294,8 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backCargoFetchRow: null,
     frontLastCommand: null,
     backLastCommand: null,
+    frontLastMovementZ: null,
+    backLastMovementZ: null,
     nodeBaselines: new Map(),
     lastTargetKey: null,
     lastFrontCellKey: null,
@@ -327,6 +333,8 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backCargoFetchRow = null;
   model.stackerTelemetry.frontLastCommand = null;
   model.stackerTelemetry.backLastCommand = null;
+  model.stackerTelemetry.frontLastMovementZ = null;
+  model.stackerTelemetry.backLastMovementZ = null;
   model.stackerTelemetry.nodeBaselines.clear();
   model.stackerTelemetry.lastTargetKey = null;
   model.stackerTelemetry.lastFrontCellKey = null;

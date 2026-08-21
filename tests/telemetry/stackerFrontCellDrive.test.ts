@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
+import { MeshBuilder, NullEngine, Quaternion, Scene, TransformNode, Vector3 } from '@babylonjs/core';
 
 import type { DeviceTelemetrySnapshot } from '../../src/runtime/mqtt/deviceTelemetry';
 import { StackerTelemetryDriver } from '../../src/runtime/babylon/telemetry/specialized/stackerDriver';
@@ -108,7 +108,12 @@ function makeHarness() {
     ensureGeneratedCargoFallback: () => undefined,
     ensureGeneratedCargoOutputOwner: () => null,
     syncGeneratedCargoVisual: () => undefined,
-    setGeneratedCargoRootPose: () => undefined,
+    // 与 SceneRuntime.setGeneratedCargoRootPose 同语义：位姿真正落到货物根节点，供朝向/位置断言
+    setGeneratedCargoRootPose: (cargo: { root: TransformNode }, position: Vector3, rotation: Quaternion, scaling?: Vector3 | null) => {
+      cargo.root.position.copyFrom(position);
+      cargo.root.rotationQuaternion = rotation.clone();
+      cargo.root.scaling.copyFrom(scaling ?? Vector3.OneReadOnly);
+    },
     disposeGeneratedCargo: () => undefined,
     getModelWorldBounds: () => ({ minimum: new Vector3(-0.5, 0, -0.5), maximum: new Vector3(0.5, 3, 0.5) }),
   };
@@ -121,6 +126,8 @@ function makeHarness() {
     getOrCreateStackerCargo: () => { throw new Error('not used'); },
     getOrCreateConveyorCargo: () => { throw new Error('not used'); },
     adoptGlobalCargoByTask: () => null,
+    adoptConveyorPlatformCargo: () => null,
+    placeCargoIntoConveyorPlatform: () => false,
   };
   const driver = new StackerTelemetryDriver(context as never);
   return {
@@ -342,6 +349,134 @@ test('front_ 变化时快速收尾：货叉加速收回原点后才允许平移'
     // 退出 catch-up 后向新当前位（列 5，支撑位 z=15）平移
     h.apply({ ...POSITION_FRAME, front_x: 5 }, 0.1, 200);
     assert.ok(Math.abs(h.model.stackerTelemetry.rootPosition!.z - 15) < 1e-6, `收叉完成后必须走到新货格 z=15，实际 ${h.model.stackerTelemetry.rootPosition!.z}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('取货绑定后 command 1→3 伴随库位跳变不销毁货物：已绑定货物随叉随行不算动作未完结', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const FETCH_FRAME = { ...POSITION_FRAME, front_command: 1, front_task: 7001 };
+
+    // 到位后在列 10 取货：伸叉刷货 → 到位绑定 → 收叉带回
+    h.apply(FETCH_FRAME, 0.1, 10);
+    h.apply({ ...FETCH_FRAME, front_movement_z: 1 }, 0.1, 60);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '伸叉取货必须刷出货物');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '伸叉到位必须绑定货物上叉');
+    h.apply({ ...FETCH_FRAME, front_movement_z: 2 }, 0.1, 60);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '收叉必须归零');
+
+    // 真实 WCS 模式：command 直接 1→3 且 front_ 同帧跳到新列（行走开始），已绑定货物不得被中途放货收尾销毁
+    h.apply({ ...FETCH_FRAME, front_command: 3, front_x: 5, front_movement_z: 0 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.forkCatchUp, false, '已绑定货物随行不得进入 catch-up');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '库位跳变不得销毁已绑定货物');
+    assert.notEqual(h.model.stackerTelemetry.frontCargoKey, null, '货物引用必须保留');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '货物必须保持绑定随叉随行');
+
+    // 行走途中持续 command=3 + 库位连续更新：货物始终存活
+    h.apply({ ...FETCH_FRAME, front_command: 3, front_x: 4, front_movement_z: 0 }, 0.1, 1);
+    h.apply({ ...FETCH_FRAME, front_command: 3, front_x: 3, front_movement_z: 0 }, 0.1, 1);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '放货行走途中货物必须存活');
+  } finally {
+    h.dispose();
+  }
+});
+
+
+test('取货绑定全程保持货物世界朝向：货叉托举不改变货物姿态（不 snap 到机体朝向）', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    // locator 默认 root 绕 Y 转 -90°（本地 +X 映射到世界 +Z），与机体 identity 朝向可区分
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const FETCH_FRAME = { ...POSITION_FRAME, front_command: 1, front_task: 7001 };
+
+    h.apply({ ...FETCH_FRAME, front_movement_z: 1 }, 0.1, 1);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '伸叉取货必须刷出货物');
+    const cargo = [...h.state.stackerCargoMeshes.values()][0];
+    const beforeBind = cargo.root.rotationQuaternion!.clone();
+    assert.ok(
+      Math.abs(Quaternion.Dot(beforeBind, Quaternion.Identity())) < 0.999,
+      '未绑定货物必须取货格朝向而非机体 identity 朝向',
+    );
+
+    // 伸叉到位触发绑定：朝向必须保持（旧实现 snap 到机体 identity）
+    h.apply({ ...FETCH_FRAME, front_movement_z: 1 }, 0.1, 60);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '伸叉到位必须绑定货物上叉');
+    assert.ok(
+      Math.abs(Quaternion.Dot(cargo.root.rotationQuaternion!, beforeBind)) > 0.999,
+      '绑定后货物朝向必须保持绑定前朝向',
+    );
+
+    // 收叉 + command 1→3 行走：朝向仍保持
+    h.apply({ ...FETCH_FRAME, front_movement_z: 2 }, 0.1, 60);
+    h.apply({ ...FETCH_FRAME, front_command: 3, front_x: 9, front_movement_z: 0 }, 0.1, 3);
+    assert.ok(
+      Math.abs(Quaternion.Dot(cargo.root.rotationQuaternion!, beforeBind)) > 0.999,
+      '搬运全程货物朝向必须保持',
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('放货叉未达行程时收叉边沿即解绑落货：货物不随叉带回', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const PLACE_FRAME = { ...POSITION_FRAME, front_command: 3, front_task: 7002 };
+
+    // 放货相位补建叉上货物并立即绑定
+    h.apply(PLACE_FRAME, 0.1, 1);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '放货相位必须补建叉上货物');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '放货补建货物必须立即绑定');
+
+    // 伸出 2 帧（约 0.05m，远未达满行程 0.8m）：到位判定不触发，货物保持绑定
+    h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 2);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '未达行程前货物必须保持绑定');
+
+    // 收叉边沿：按到达动作点立即解绑落货，货物留在目标箱位支撑位
+    h.apply({ ...PLACE_FRAME, front_movement_z: 2 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '收叉边沿必须立即解绑落货');
+    assert.notEqual(h.model.stackerTelemetry.frontCargoHoldPosition, null, '解绑后货物必须留存目标箱位支撑位');
+
+    // 继续收叉至归零：货物静止于箱位，不随叉带回
+    h.apply({ ...PLACE_FRAME, front_movement_z: 2 }, 0.1, 60);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '收叉必须归零');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '货物不得随叉带回');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '货物必须留存在箱位');
+    const cargo = [...h.state.stackerCargoMeshes.values()][0];
+    assert.ok(
+      Vector3.Distance(cargo.root.position, new Vector3(0, 2, 20)) < 1e-6,
+      `货物必须静止于目标箱位支撑位 (0,2,20)，实际 ${cargo.root.position}`,
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('取货叉未达行程时收叉边沿即绑定上叉：货物随叉带回', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const FETCH_FRAME = { ...POSITION_FRAME, front_command: 1, front_task: 7003 };
+
+    h.apply({ ...FETCH_FRAME, front_movement_z: 1 }, 0.1, 2);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '伸叉取货必须刷出货物');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '未达行程前货物不得绑定');
+
+    h.apply({ ...FETCH_FRAME, front_movement_z: 2 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '收叉边沿必须立即绑定上叉');
+
+    h.apply({ ...FETCH_FRAME, front_movement_z: 2 }, 0.1, 60);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '收叉必须归零');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '货物必须随叉带回');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '货物必须存活');
   } finally {
     h.dispose();
   }

@@ -14,7 +14,7 @@ import {
   type ConveyorCargoRuntimeEntry,
 } from '../../src/runtime/babylon/telemetry/specialized/types';
 import { resolveConveyorCargoTravelHalfRange } from '../../src/runtime/babylon/telemetry/conveyorCargoTravel';
-import type { ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
+import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
 
 /**
  * 输送线链路流转协议测试的几何约定（与 harness bounds 对齐）：
@@ -65,6 +65,8 @@ type HarnessDeviceConfig = {
   trajectoryDirection?: string;
   /** 合批遥测代理：无自身几何，包围盒/行程经宿主模型按相对位姿换算（值为宿主 assetCode）。 */
   proxyOf?: string;
+  /** 内置站台货格：沿行走轴相对行程中心的偏移（米），正值 = 行走轴正端。 */
+  platformOffset?: number;
 };
 
 /** 多设备 harness：共享货物表与 collectModels 视图，帧函数镜像 facade（applyToModel 后执行帧尾外部拉取扫描）。 */
@@ -73,6 +75,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
   const scene = new Scene(engine);
   const state = createSpecializedTelemetrySharedState();
   const models = new Map<string, ModelRuntimeEntry>();
+  const platformLocators = new Map<string, LocatorRuntimeEntry>();
   const logs: string[] = [];
 
   for (const [assetCode, config] of Object.entries(layout)) {
@@ -94,8 +97,23 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       conveyorTelemetry: createConveyorTelemetryState(),
       telemetryBinding: Object.keys(binding).length > 0 ? binding : null,
       externalScriptRuntime: null,
+      // 站台解析经 entitySnapshot.id 反查货格：与 collectModels 的 entityId 约定保持一致
+      entitySnapshot: { id: `e_${assetCode}` },
     } as unknown as ModelRuntimeEntry;
     models.set(assetCode, model);
+    if (config.platformOffset !== undefined) {
+      // 镜像真实运行时：货格根节点挂在宿主模型根下，位置即站台支撑位
+      const locatorRoot = new TransformNode(`e_${assetCode}_platformRoot`, scene);
+      locatorRoot.parent = root;
+      locatorRoot.position.x = config.centerX + config.platformOffset;
+      platformLocators.set(`e_${assetCode}`, {
+        entityId: `e_${assetCode}_platform`,
+        root: locatorRoot,
+        columns: 1,
+        layers: 1,
+        cellSteps: { columnStepX: CARGO_AXIAL, layerStepY: 0.34 },
+      } as unknown as LocatorRuntimeEntry);
+    }
   }
   for (const [assetCode, config] of Object.entries(layout)) {
     if (!config.proxyOf) continue;
@@ -109,6 +127,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     collectModels: () => [...models.values()].map((model) => ({ entityId: `e_${model.assetCode}`, model })),
     findLocatorByDevice: () => null,
     findLocatorsByDevice: () => [],
+    findBuiltInSlotLocatorForHostModel: (hostEntityId: string) => platformLocators.get(hostEntityId) ?? null,
     resolveCargoGeneratorForModel: () => null,
     resolveColumnTargetPose: () => null,
     resolveFetchDriveRowForLocator: () => null,
@@ -176,6 +195,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     driver,
     state,
     logs,
+    scene,
     models: Object.fromEntries(models),
     dispose: () => { scene.dispose(); engine.dispose(); },
     /** 镜像 facade 帧调度：应用快照后执行帧尾外部持货拉取扫描（与快照新旧无关）。 */
@@ -221,6 +241,8 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     },
     /** 仅执行帧尾外部持货拉取扫描（不驱动任何设备帧）。 */
     scan: () => driver.pullExternalHolderCargo(),
+    /** 取设备的内置站台货格（未配置返回 null）。 */
+    platformOf: (assetCode: string) => platformLocators.get(`e_${assetCode}`) ?? null,
   };
 }
 
@@ -839,6 +861,111 @@ test('货物支撑点落在设备包围盒上表面（harness 包围盒 y∈[0,1
     const cargo = onlyCargo(h.state);
     assert.ok(Math.abs(cargo.root.position.y - 1) < 1e-6,
       `货物底部必须贴包围盒上表面 y=1，实际 y=${cargo.root.position.y}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('上架站台：上游交付的货物从入口端走行并停在站台支撑位，不冲到线体端部', () => {
+  // A 在 0，站台在行走轴 +1.5（B 端侧，行程半径 1.64 内）；UP 在 -4 持货
+  const h = makeHarness({ UP: { centerX: -4, origin: true }, A: { centerX: 0, platformOffset: 1.5 } });
+  try {
+    h.apply('A', { task: 7, movement_x: 1 });
+    assert.equal(h.models.A.conveyorTelemetry.waitingTask, '7', '有上游必须走订阅等待，而非等 stacker');
+    h.apply('UP', { task: 7, movement_x: 1 });
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, 'cargo', '上游持货必须当帧交付到 A');
+    assert.ok(Math.abs(h.models.A.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE)) < 1e-6,
+      `货物必须从 A 入口端（${-HALF_RANGE}）开始走行，实际 ${h.models.A.conveyorTelemetry.cargoTravelOffset}`);
+    h.apply('A', { task: 7, movement_x: 1 }, 0.1, 200);
+    const offset = h.models.A.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(Math.abs(offset - 1.5) < 1e-6, `货物必须钳制停在站台偏移 1.5，实际 ${offset}`);
+    const cargo = onlyCargo(h.state);
+    assert.ok(Math.abs(cargo.root.position.x - 1.5) < 1e-6,
+      `货物世界位置必须停在站台 x=1.5，实际 x=${cargo.root.position.x}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('线首站台：新 task 不自建不订阅等待 stacker；放货落座站台成为滞留货物，不自动驶离', () => {
+  // A 在 0，站台在行走轴 −1.5（A 端=线首上游侧），无上游邻居
+  const h = makeHarness({ A: { centerX: 0, platformOffset: -1.5 } });
+  try {
+    h.apply('A', { task: 9, movement_x: 1 });
+    assert.equal(h.models.A.conveyorTelemetry.waitingTask, '9', '线首站台机必须挂起等待 stacker');
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, null, '不得自建货箱');
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '货物表必须为空');
+
+    const cargoRoot = new TransformNode('stk_cargo_root', h.scene);
+    const cargo = {
+      assetCode: 'STK1', containerCode: '', task: '', root: cargoRoot,
+      outputOwner: null, fallback: null, generatorEntityId: null, handoff: null, axialLengthCache: null,
+    } as unknown as ConveyorCargoRuntimeEntry;
+    const platform = h.platformOf('A');
+    assert.ok(platform, '站台货格必须存在');
+    assert.ok(h.driver.acceptPlatformPlacedCargo(h.models.A, platform!, cargo), '站台放货必须被接收');
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, 'cargo', '放货后登记为本机持货');
+    assert.ok(Math.abs(h.models.A.conveyorTelemetry.cargoTravelOffset - (-1.5)) < 1e-6,
+      `货物必须落座站台偏移 −1.5，实际 ${h.models.A.conveyorTelemetry.cargoTravelOffset}`);
+    assert.equal(h.models.A.conveyorTelemetry.waitingTask, null, '放货后退出等待');
+    assert.equal(cargo.task, '9', '等待中的 task 必须由放入货物兑现');
+    assert.equal(h.models.A.conveyorTelemetry.selfDriveDirection, 0, '放货后不得自动驶离，货物滞留站台');
+
+    // 滞留货物随字段驱动正常驶离站台走向出口
+    h.apply('A', { task: 9, movement_x: 1 }, 0.1, 200);
+    const offset = h.models.A.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(Math.abs(offset - HALF_RANGE) < 1e-6,
+      `站台滞留货物必须随 movement 走向出口端（${HALF_RANGE}），实际 ${offset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('上架站台：站台在入口侧时上游来货仍恒以站台为终点（不冲到对侧端部）', () => {
+  // 回归 test3 场景：A 在 0，站台在行走轴 +1.5（与上游同侧=入口侧）；UP 在 +4 持货，流向 -X（movement_x=2）
+  const h = makeHarness({ UP: { centerX: 4, origin: true }, A: { centerX: 0, platformOffset: 1.5 } });
+  try {
+    h.apply('A', { task: 7, movement_x: 2 });
+    assert.equal(h.models.A.conveyorTelemetry.waitingTask, '7', '有上游必须走订阅等待');
+    h.apply('UP', { task: 7, movement_x: 2 });
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, 'cargo', '上游持货必须当帧交付到 A');
+    assert.ok(Math.abs(h.models.A.conveyorTelemetry.cargoTravelOffset - HALF_RANGE) < 1e-6,
+      `货物必须从 A 入口端（${HALF_RANGE}）开始走行，实际 ${h.models.A.conveyorTelemetry.cargoTravelOffset}`);
+    h.apply('A', { task: 7, movement_x: 2 }, 0.1, 200);
+    const offset = h.models.A.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(Math.abs(offset - 1.5) < 1e-6,
+      `站台虽在入口侧，货物仍必须停在站台偏移 1.5，实际 ${offset}`);
+    const cargo = onlyCargo(h.state);
+    assert.ok(Math.abs(cargo.root.position.x - 1.5) < 1e-6,
+      `货物世界位置必须停在站台 x=1.5，实际 x=${cargo.root.position.x}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('线首站台：无等待 task 时放货成为滞留货物，后续新 task 复用该货物驶离', () => {
+  // A 在 0，站台在 −1.5，无上游；stacker 先在站台放货（A 尚无 task），随后 A 接到新 task
+  const h = makeHarness({ A: { centerX: 0, platformOffset: -1.5 } });
+  try {
+    const cargoRoot = new TransformNode('stk_cargo_root', h.scene);
+    const cargo = {
+      assetCode: 'STK1', containerCode: '', task: '', root: cargoRoot,
+      outputOwner: null, fallback: null, generatorEntityId: null, handoff: null, axialLengthCache: null,
+    } as unknown as ConveyorCargoRuntimeEntry;
+    const platform = h.platformOf('A');
+    assert.ok(platform, '站台货格必须存在');
+    assert.ok(h.driver.acceptPlatformPlacedCargo(h.models.A, platform!, cargo), '站台放货必须被接收');
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, 'cargo', '放货后登记为本机持货');
+    assert.ok(Math.abs(h.models.A.conveyorTelemetry.cargoTravelOffset - (-1.5)) < 1e-6,
+      `货物必须落座站台偏移 −1.5，实际 ${h.models.A.conveyorTelemetry.cargoTravelOffset}`);
+    assert.equal(h.models.A.conveyorTelemetry.selfDriveDirection, 0, '放货后不得自动驶离');
+
+    h.apply('A', { task: 5, movement_x: 1 }, 0.1, 200);
+    assert.equal(cargo.task, '5', '后续新 task 必须复用站台滞留货物（盖 task）');
+    assert.equal(h.models.A.conveyorTelemetry.waitingTask, null, '有滞留货物不得转入等待');
+    const offset = h.models.A.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(Math.abs(offset - HALF_RANGE) < 1e-6,
+      `复用后货物必须走向出口端（${HALF_RANGE}），实际 ${offset}`);
   } finally {
     h.dispose();
   }

@@ -388,6 +388,18 @@ function RgvColumnBindingsEditor(props: {
           </label>
         </>
       ) : null}
+      {binding.deviceType === 'stacker' ? (
+        <label className="number-row">
+          <span>货物竖直间隙(m)</span>
+          <input
+            type="number"
+            disabled={props.disabled}
+            step="0.005"
+            value={binding.stackerCargoGapY ?? 0}
+            onChange={(event) => commit({ stackerCargoGapY: Number(event.target.value) })}
+          />
+        </label>
+      ) : null}
       <TelemetryRuntimeDiagnosticsView entityId={props.entityId} binding={binding} modelAssetCode={props.modelAssetCode} />
       <SpecializedDataDrivenSummary config={props.dataDrivenConfig} />
     </fieldset>
