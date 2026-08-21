@@ -44,6 +44,30 @@ export const SCENE_SHADOW_DARKNESS_MAX = 0.85;
 export const SCENE_SHADOW_DARKNESS_DEFAULT = 0.32;
 export const SCENE_SHADOW_CONCENTRATION_PERCENT_MIN = 15;
 export const SCENE_SHADOW_CONCENTRATION_PERCENT_MAX = 100;
+export const SCENE_SHADOW_SUN_AZIMUTH_MIN = 0;
+export const SCENE_SHADOW_SUN_AZIMUTH_MAX = 360;
+export const SCENE_SHADOW_SUN_AZIMUTH_DEFAULT = 56;
+export const SCENE_SHADOW_SUN_ELEVATION_MIN = 5;
+export const SCENE_SHADOW_SUN_ELEVATION_MAX = 85;
+export const SCENE_SHADOW_SUN_ELEVATION_DEFAULT = 63;
+export const SCENE_SHADOW_SUN_INTENSITY_MIN = 0.2;
+export const SCENE_SHADOW_SUN_INTENSITY_MAX = 3;
+export const SCENE_SHADOW_SUN_INTENSITY_DEFAULT = 1.05;
+export const SCENE_SHADOW_DISTANCE_MIN = 0;
+export const SCENE_SHADOW_DISTANCE_MAX = 800;
+export const SCENE_SHADOW_DISTANCE_DEFAULT = 0;
+export const SCENE_SHADOW_BIAS_MIN = 0;
+export const SCENE_SHADOW_BIAS_MAX = 0.02;
+export const SCENE_SHADOW_BIAS_DEFAULT = 0.002;
+export const SCENE_SHADOW_NORMAL_BIAS_MIN = 0;
+export const SCENE_SHADOW_NORMAL_BIAS_MAX = 0.2;
+export const SCENE_SHADOW_NORMAL_BIAS_DEFAULT = 0.03;
+export const SCENE_SHADOW_FILL_INTENSITY_MIN = 0;
+export const SCENE_SHADOW_FILL_INTENSITY_MAX = 1;
+export const SCENE_SHADOW_FILL_INTENSITY_DEFAULT = 0.2;
+export const SCENE_SHADOW_IBL_INTENSITY_MAX_MIN = 0.1;
+export const SCENE_SHADOW_IBL_INTENSITY_MAX_MAX = 1;
+export const SCENE_SHADOW_IBL_INTENSITY_MAX_DEFAULT = 0.45;
 export const SCENE_SKYBOX_ROTATION_MIN = 0;
 export const SCENE_SKYBOX_ROTATION_MAX = 360;
 export const SCENE_SKYBOX_INTENSITY_MIN = 0;
@@ -106,6 +130,20 @@ export type SceneShadowSettings = {
   quality: SceneShadowQuality;
   darkness: number;
   catcherEnabled: boolean;
+  /** 自动太阳光方位角，0 为正北，顺时针增加。有可见方向光时不生效。 */
+  sunAzimuthDegrees: number;
+  /** 自动太阳光高度角。 */
+  sunElevationDegrees: number;
+  /** 自动太阳光强度。 */
+  sunIntensity: number;
+  /** 主阴影覆盖距离；0 表示按相机自动计算。 */
+  distanceMeters: number;
+  bias: number;
+  normalBias: number;
+  /** 阴影开启时编辑器半球补光强度。 */
+  fillIntensity: number;
+  /** 阴影开启时天空盒环境光强度上限。 */
+  iblIntensityMax: number;
 };
 
 export const DEFAULT_SCENE_SHADOW_SETTINGS: SceneShadowSettings = {
@@ -113,6 +151,14 @@ export const DEFAULT_SCENE_SHADOW_SETTINGS: SceneShadowSettings = {
   quality: SCENE_SHADOW_QUALITY_DEFAULT,
   darkness: SCENE_SHADOW_DARKNESS_DEFAULT,
   catcherEnabled: true,
+  sunAzimuthDegrees: SCENE_SHADOW_SUN_AZIMUTH_DEFAULT,
+  sunElevationDegrees: SCENE_SHADOW_SUN_ELEVATION_DEFAULT,
+  sunIntensity: SCENE_SHADOW_SUN_INTENSITY_DEFAULT,
+  distanceMeters: SCENE_SHADOW_DISTANCE_DEFAULT,
+  bias: SCENE_SHADOW_BIAS_DEFAULT,
+  normalBias: SCENE_SHADOW_NORMAL_BIAS_DEFAULT,
+  fillIntensity: SCENE_SHADOW_FILL_INTENSITY_DEFAULT,
+  iblIntensityMax: SCENE_SHADOW_IBL_INTENSITY_MAX_DEFAULT,
 };
 
 export type SceneSkyboxFormat = SkyboxFormat;
@@ -259,12 +305,7 @@ export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
     pan: SCENE_SENSITIVITY_DEFAULT,
     rotate: SCENE_SENSITIVITY_DEFAULT,
   },
-  shadows: {
-    enabled: DEFAULT_SCENE_SHADOW_SETTINGS.enabled,
-    quality: DEFAULT_SCENE_SHADOW_SETTINGS.quality,
-    darkness: DEFAULT_SCENE_SHADOW_SETTINGS.darkness,
-    catcherEnabled: DEFAULT_SCENE_SHADOW_SETTINGS.catcherEnabled,
-  },
+  shadows: { ...DEFAULT_SCENE_SHADOW_SETTINGS },
   environment: null,
   skybox: null,
   defaultCargoGeneratorId: null,
@@ -330,10 +371,105 @@ export function isSceneShadowSettingsEqual(a: SceneShadowSettings, b: SceneShado
   return a.enabled === b.enabled
     && a.quality === b.quality
     && a.darkness === b.darkness
-    && a.catcherEnabled === b.catcherEnabled;
+    && a.catcherEnabled === b.catcherEnabled
+    && a.sunAzimuthDegrees === b.sunAzimuthDegrees
+    && a.sunElevationDegrees === b.sunElevationDegrees
+    && a.sunIntensity === b.sunIntensity
+    && a.distanceMeters === b.distanceMeters
+    && a.bias === b.bias
+    && a.normalBias === b.normalBias
+    && a.fillIntensity === b.fillIntensity
+    && a.iblIntensityMax === b.iblIntensityMax;
 }
 
 /** 旧场景缺字段时回填默认阴影，非法值落到安全边界。 */
+export function sanitizeSceneShadowSunAzimuth(value: number): number {
+  return clampFiniteNumber(
+    value,
+    SCENE_SHADOW_SUN_AZIMUTH_MIN,
+    SCENE_SHADOW_SUN_AZIMUTH_MAX,
+    SCENE_SHADOW_SUN_AZIMUTH_DEFAULT,
+  );
+}
+
+export function sanitizeSceneShadowSunElevation(value: number): number {
+  return clampFiniteNumber(
+    value,
+    SCENE_SHADOW_SUN_ELEVATION_MIN,
+    SCENE_SHADOW_SUN_ELEVATION_MAX,
+    SCENE_SHADOW_SUN_ELEVATION_DEFAULT,
+  );
+}
+
+export function sanitizeSceneShadowSunIntensity(value: number): number {
+  return clampFiniteNumber(
+    value,
+    SCENE_SHADOW_SUN_INTENSITY_MIN,
+    SCENE_SHADOW_SUN_INTENSITY_MAX,
+    SCENE_SHADOW_SUN_INTENSITY_DEFAULT,
+  );
+}
+
+export function sanitizeSceneShadowDistance(value: number): number {
+  return clampFiniteNumber(
+    value,
+    SCENE_SHADOW_DISTANCE_MIN,
+    SCENE_SHADOW_DISTANCE_MAX,
+    SCENE_SHADOW_DISTANCE_DEFAULT,
+  );
+}
+
+export function sanitizeSceneShadowBias(value: number): number {
+  return clampFiniteNumber(
+    value,
+    SCENE_SHADOW_BIAS_MIN,
+    SCENE_SHADOW_BIAS_MAX,
+    SCENE_SHADOW_BIAS_DEFAULT,
+  );
+}
+
+export function sanitizeSceneShadowNormalBias(value: number): number {
+  return clampFiniteNumber(
+    value,
+    SCENE_SHADOW_NORMAL_BIAS_MIN,
+    SCENE_SHADOW_NORMAL_BIAS_MAX,
+    SCENE_SHADOW_NORMAL_BIAS_DEFAULT,
+  );
+}
+
+export function sanitizeSceneShadowFillIntensity(value: number): number {
+  return clampFiniteNumber(
+    value,
+    SCENE_SHADOW_FILL_INTENSITY_MIN,
+    SCENE_SHADOW_FILL_INTENSITY_MAX,
+    SCENE_SHADOW_FILL_INTENSITY_DEFAULT,
+  );
+}
+
+export function sanitizeSceneShadowIblIntensityMax(value: number): number {
+  return clampFiniteNumber(
+    value,
+    SCENE_SHADOW_IBL_INTENSITY_MAX_MIN,
+    SCENE_SHADOW_IBL_INTENSITY_MAX_MAX,
+    SCENE_SHADOW_IBL_INTENSITY_MAX_DEFAULT,
+  );
+}
+
+/** 由方位角/高度角生成自动太阳光方向。0 度方位为正北，角度顺时针增加。 */
+export function sceneShadowSunDirectionFromAngles(
+  azimuthDegrees: number,
+  elevationDegrees: number,
+): { x: number; y: number; z: number } {
+  const azimuth = sanitizeSceneShadowSunAzimuth(azimuthDegrees) * Math.PI / 180;
+  const elevation = sanitizeSceneShadowSunElevation(elevationDegrees) * Math.PI / 180;
+  const horizontal = Math.cos(elevation);
+  return {
+    x: -Math.sin(azimuth) * horizontal,
+    y: -Math.sin(elevation),
+    z: -Math.cos(azimuth) * horizontal,
+  };
+}
+
 export function sanitizeSceneShadowSettings(
   value?: Partial<SceneShadowSettings> | null,
 ): SceneShadowSettings {
@@ -346,6 +482,42 @@ export function sanitizeSceneShadowSettings(
     catcherEnabled: typeof value?.catcherEnabled === 'boolean'
       ? value.catcherEnabled
       : DEFAULT_SCENE_SHADOW_SETTINGS.catcherEnabled,
+    sunAzimuthDegrees: sanitizeSceneShadowSunAzimuth(
+      typeof value?.sunAzimuthDegrees === 'number'
+        ? value.sunAzimuthDegrees
+        : DEFAULT_SCENE_SHADOW_SETTINGS.sunAzimuthDegrees,
+    ),
+    sunElevationDegrees: sanitizeSceneShadowSunElevation(
+      typeof value?.sunElevationDegrees === 'number'
+        ? value.sunElevationDegrees
+        : DEFAULT_SCENE_SHADOW_SETTINGS.sunElevationDegrees,
+    ),
+    sunIntensity: sanitizeSceneShadowSunIntensity(
+      typeof value?.sunIntensity === 'number'
+        ? value.sunIntensity
+        : DEFAULT_SCENE_SHADOW_SETTINGS.sunIntensity,
+    ),
+    distanceMeters: sanitizeSceneShadowDistance(
+      typeof value?.distanceMeters === 'number'
+        ? value.distanceMeters
+        : DEFAULT_SCENE_SHADOW_SETTINGS.distanceMeters,
+    ),
+    bias: sanitizeSceneShadowBias(
+      typeof value?.bias === 'number' ? value.bias : DEFAULT_SCENE_SHADOW_SETTINGS.bias,
+    ),
+    normalBias: sanitizeSceneShadowNormalBias(
+      typeof value?.normalBias === 'number' ? value.normalBias : DEFAULT_SCENE_SHADOW_SETTINGS.normalBias,
+    ),
+    fillIntensity: sanitizeSceneShadowFillIntensity(
+      typeof value?.fillIntensity === 'number'
+        ? value.fillIntensity
+        : DEFAULT_SCENE_SHADOW_SETTINGS.fillIntensity,
+    ),
+    iblIntensityMax: sanitizeSceneShadowIblIntensityMax(
+      typeof value?.iblIntensityMax === 'number'
+        ? value.iblIntensityMax
+        : DEFAULT_SCENE_SHADOW_SETTINGS.iblIntensityMax,
+    ),
   };
 }
 
