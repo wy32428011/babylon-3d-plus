@@ -642,6 +642,7 @@ export class RgvTelemetryDriver {
       generatorEntityId: null,
       handoff: null,
       axialLengthCache: null,
+      placedWorldRotation: null,
     };
     this.state.rgvCargoMeshes.set(key, entry);
     return entry;

@@ -581,8 +581,8 @@ export class StackerTelemetryDriver {
 
   /**
    * 单侧货叉的货物状态机：command 决定取/放阶段；取货货物在伸叉开始瞬间于当前货格刷出，
-   * 货叉伸出到位（伸叉动画完结）执行绑定/解绑；伸出窗口结束（收叉边沿）但叉未达计算行程时
-   * 按到达动作点兜底补齐绑定/解绑，避免放货货物随叉带回。
+   * 货叉伸出到位（伸叉动画完结）执行绑定/解绑；伸出窗口结束（收叉阶段）但叉未达计算行程时
+   * 每帧按到达动作点幂等重试绑定/解绑，避免放货货物随叉带回。
    * command 语义：1 取货中 / 2 取货完成 / 3、4 放货中 / 5 放货完成；
    * 完成确认值（2/5）可能缺失，完成逻辑统一在离开对应 command 相位时执行（completeStackerCargoOnPhaseExit）。
    */
@@ -605,10 +605,13 @@ export class StackerTelemetryDriver {
         this.beginStackerFetch(model, snapshot, targetLocator, targetPosition, side);
       }
       // 放货阶段：未经历取货直接放货（如开机即放货）时叉上补建货物并绑定叉尖；
+      // 补建仅限本相位尚未伸叉（伸出标记为空）：伸叉后落货交接会摘除 cargoKey，
+      // 此时再补建会在叉上刷出第二个货物，与站台上的交接货物重叠；
       // 同时接管目标格口渲染使其保持为空，货物全程由 stacker 渲染；
       // 锁定目标排号：放货完成时当前位字段可能已变化，排号必须提前留存
       if ((command === 3 || command === 4) && targetLocator) {
-        if (!this.getStackerForkCargoKey(model, side)) {
+        const placeExtendSeen = side === 'front' ? state.frontLastMovementZ !== null : state.backLastMovementZ !== null;
+        if (!this.getStackerForkCargoKey(model, side) && !placeExtendSeen) {
           this.beginStackerPlaceWithCargo(model, snapshot, side);
         }
         const lockedRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
@@ -627,11 +630,14 @@ export class StackerTelemetryDriver {
         if (command === 1 || command === 2) this.bindStackerCargo(model, side);
         else if (command === 3 || command === 4) this.unbindStackerCargo(model, targetLocator, targetPosition, side);
       }
-      // 收叉边沿兜底：伸出窗口结束（1/3→2/4）但叉未达计算行程时，上面的到位判定永不触发，
-      // 在收叉开始瞬间按到达动作点补齐绑定/解绑（真实 WCS 伸出窗口可短于计算行程，两者幂等不冲突）
+      // 收叉阶段补齐：伸出窗口结束（伸 1/3 → 收 2/4）但叉未达计算行程时，上面的到位判定永不触发；
+      // 收叉期间每帧按到达动作点重试绑定/解绑（两者幂等：已绑定/已解绑直接早退），
+      // 覆盖伸出窗口短于计算行程、首条收叉消息丢失、收叉首帧恰逢库位上报抖动解析失败等情形；
+      // 伸出标记只在伸出（1/3）时写入，收叉（2/4）与停止（0）帧均不覆盖，保证重试在整个收叉阶段有效
       const lastMovement = side === 'front' ? state.frontLastMovementZ : state.backLastMovementZ;
-      const retractEdge = (lastMovement === 1 || lastMovement === 3) && (movement === 2 || movement === 4);
-      if (!state.forkCatchUp && retractEdge) {
+      const extendSeen = lastMovement === 1 || lastMovement === 3;
+      const retracting = movement === 2 || movement === 4;
+      if (!state.forkCatchUp && extendSeen && retracting) {
         if (command === 1 || command === 2) this.bindStackerCargo(model, side);
         else if (command === 3 || command === 4) this.unbindStackerCargo(model, targetLocator, targetPosition, side);
       }
@@ -641,10 +647,10 @@ export class StackerTelemetryDriver {
 
     if (side === 'front') {
       state.frontLastCommand = command;
-      state.frontLastMovementZ = movement;
+      if (movement === 1 || movement === 3) state.frontLastMovementZ = movement;
     } else {
       state.backLastCommand = command;
-      state.backLastMovementZ = movement;
+      if (movement === 1 || movement === 3) state.backLastMovementZ = movement;
     }
   }
 
@@ -794,10 +800,15 @@ export class StackerTelemetryDriver {
     const lastCommand = side === 'front' ? state.frontLastCommand : state.backLastCommand;
     if (lastCommand === 1 && command !== 1) {
       this.completeStackerFetch(model, side);
+      // 相位结束清零伸出标记，避免上一任务的伸出记录串到下一任务的收叉补齐（如放货行程中 mz=2 被误判）
+      if (side === 'front') state.frontLastMovementZ = null;
+      else state.backLastMovementZ = null;
       return;
     }
     if ((lastCommand === 3 || lastCommand === 4) && command !== 3 && command !== 4) {
       this.completeStackerPlace(model, cell?.locator ?? null, cell?.supportPosition ?? null, side);
+      if (side === 'front') state.frontLastMovementZ = null;
+      else state.backLastMovementZ = null;
     }
   }
 
@@ -992,6 +1003,7 @@ export class StackerTelemetryDriver {
       generatorEntityId: null,
       handoff: null,
       axialLengthCache: null,
+      placedWorldRotation: null,
     };
     this.state.stackerCargoMeshes.set(key, entry);
     return entry;

@@ -165,6 +165,8 @@ export type GeneratedCargoRuntimeEntry = {
   handoff: CargoHandoffState | null;
   /** conveyor 专用：按模板 target 签名缓存的实测沿行走轴长度（米），避免每帧重测包围盒。 */
   axialLengthCache: { key: string; lengthMeters: number } | null;
+  /** conveyor 专用：stacker/RGV 落货交接的货物保持落货时世界朝向（落站台不自转）；交付下游输送机时清除，恢复对齐机体朝向。 */
+  placedWorldRotation: Quaternion | null;
 };
 
 export type StackerCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
@@ -203,7 +205,7 @@ export type StackerModelTelemetryState = {
   /** command 边沿检测：取货/放货完成只触发一次。 */
   frontLastCommand: number | null;
   backLastCommand: number | null;
-  /** movement_z 边沿检测：伸出（1/3）跳变到收回（2/4）时按到达动作点补齐绑定/解绑。 */
+  /** 伸出标记：仅在 movement_z 伸出（1/3）时写入，收叉（2/4）期间保持有效并每帧幂等重试绑定/解绑；command 相位退出时清零，防止跨任务串扰。 */
   frontLastMovementZ: number | null;
   backLastMovementZ: number | null;
   nodeBaselines: Map<TransformNode, Vector3>;

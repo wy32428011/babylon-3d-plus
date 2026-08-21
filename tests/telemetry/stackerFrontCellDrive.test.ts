@@ -127,7 +127,7 @@ function makeHarness() {
     getOrCreateConveyorCargo: () => { throw new Error('not used'); },
     adoptGlobalCargoByTask: () => null,
     adoptConveyorPlatformCargo: () => null,
-    placeCargoIntoConveyorPlatform: () => false,
+    placeCargoIntoConveyorPlatform: (_locatorEntityId: string, _cargoKey: string) => false,
   };
   const driver = new StackerTelemetryDriver(context as never);
   return {
@@ -137,6 +137,7 @@ function makeHarness() {
     logs,
     scene,
     ref,
+    context,
     dispose: () => { scene.dispose(); engine.dispose(); },
     apply: (fields: Record<string, unknown>, deltaSeconds = 0.1, frames = 1) => {
       for (let i = 0; i < frames; i += 1) {
@@ -439,6 +440,10 @@ test('放货叉未达行程时收叉边沿即解绑落货：货物不随叉带�
     h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 2);
     assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '未达行程前货物必须保持绑定');
 
+    // 真实 WCS 时序：伸出与收回之间隔有停止（0）帧，边沿检测不得被其冲掉
+    h.apply({ ...PLACE_FRAME, front_movement_z: 0 }, 0.1, 3);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '停止帧期间货物必须保持绑定');
+
     // 收叉边沿：按到达动作点立即解绑落货，货物留在目标箱位支撑位
     h.apply({ ...PLACE_FRAME, front_movement_z: 2 }, 0.1, 1);
     assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '收叉边沿必须立即解绑落货');
@@ -470,6 +475,10 @@ test('取货叉未达行程时收叉边沿即绑定上叉：货物随叉带回',
     assert.equal(h.state.stackerCargoMeshes.size, 1, '伸叉取货必须刷出货物');
     assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '未达行程前货物不得绑定');
 
+    // 真实 WCS 时序：伸出与收回之间隔有停止（0）帧，边沿检测不得被其冲掉
+    h.apply({ ...FETCH_FRAME, front_movement_z: 0 }, 0.1, 3);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '停止帧期间货物不得绑定');
+
     h.apply({ ...FETCH_FRAME, front_movement_z: 2 }, 0.1, 1);
     assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '收叉边沿必须立即绑定上叉');
 
@@ -477,6 +486,86 @@ test('取货叉未达行程时收叉边沿即绑定上叉：货物随叉带回',
     assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '收叉必须归零');
     assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '货物必须随叉带回');
     assert.equal(h.state.stackerCargoMeshes.size, 1, '货物必须存活');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('放货收叉首帧库位解析失败不解绑，后续收叉帧解析恢复即重试落货', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const PLACE_FRAME = { ...POSITION_FRAME, front_command: 3, front_task: 7004 };
+
+    h.apply(PLACE_FRAME, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '放货补建货物必须立即绑定');
+    h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 2);
+
+    // 收叉首帧恰逢库位上报抖动解析失败（live WCS 常见）：当帧无法落货，但必须保持绑定等下帧重试
+    h.ref.locator = null;
+    h.apply({ ...PLACE_FRAME, front_movement_z: 2 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '解析失败帧不得误销毁/误落货，必须保持绑定');
+
+    // 解析恢复后的收叉帧：幂等重试立即解绑落货
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    h.apply({ ...PLACE_FRAME, front_movement_z: 2 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '解析恢复后收叉重试必须解绑落货');
+    assert.notEqual(h.model.stackerTelemetry.frontCargoHoldPosition, null, '解绑后货物必须留存目标箱位支撑位');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('放货落货交接成功后不得补建第二个货物：command 未退出前叉上保持为空', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    // 模拟交接成功：与 SpecializedTelemetryRuntime.placeCargoIntoConveyorPlatform 同语义，摘除货物并清理货叉引用
+    h.context.placeCargoIntoConveyorPlatform = (_locatorEntityId: string, cargoKey: string) => {
+      h.driver.detachClaimedCargoByKey(cargoKey);
+      return true;
+    };
+    const PLACE_FRAME = { ...POSITION_FRAME, front_command: 3, front_task: 7007 };
+
+    h.apply(PLACE_FRAME, 0.1, 1);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '放货相位必须补建叉上货物');
+    h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 2);
+    h.apply({ ...PLACE_FRAME, front_movement_z: 0 }, 0.1, 2);
+
+    // 收叉：重试解绑落货并交接成功，货物离开 stacker 货物表
+    h.apply({ ...PLACE_FRAME, front_movement_z: 2 }, 0.1, 1);
+    assert.equal(h.state.stackerCargoMeshes.size, 0, '交接成功后货物必须离开 stacker 货物表');
+    assert.equal(h.model.stackerTelemetry.frontCargoKey, null, '交接成功后货叉引用必须清空');
+
+    // command 仍为 3 的后续收叉帧：不得因 cargoKey 为空而补建第二个货物
+    h.apply({ ...PLACE_FRAME, front_movement_z: 2 }, 0.1, 5);
+    assert.equal(h.state.stackerCargoMeshes.size, 0, '交接成功后不得补建第二个货物');
+    assert.equal(h.model.stackerTelemetry.frontCargoKey, null, '货叉必须保持为空');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '叉上不得再有绑定货物');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('command 相位退出后伸出标记清零：下一任务行程中收叉不误判落货', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const FETCH_FRAME = { ...POSITION_FRAME, front_command: 1, front_task: 7005 };
+
+    // 取货伸叉后收叉消息整体丢失（lastMovementZ 停留在伸出 1），command 直接跳到放货
+    h.apply({ ...FETCH_FRAME, front_movement_z: 1 }, 0.1, 2);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '伸叉取货必须刷出货物');
+    h.apply({ ...POSITION_FRAME, front_command: 3, front_task: 7006, front_movement_z: 0 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '取货相位退出必须兜底绑定');
+
+    // 放货行程中上一任务残留的收叉上报（mz=2，本任务并未伸出）：不得误判为放货收叉而在半路落货
+    h.apply({ ...POSITION_FRAME, front_command: 3, front_task: 7006, front_movement_z: 2 }, 0.1, 3);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '跨任务收叉不得误触发放货解绑');
+    assert.equal(h.model.stackerTelemetry.frontCargoHoldPosition, null, '货物不得半路落货');
   } finally {
     h.dispose();
   }

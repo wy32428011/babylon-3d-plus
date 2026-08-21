@@ -899,7 +899,7 @@ test('线首站台：新 task 不自建不订阅等待 stacker；放货落座站
     const cargoRoot = new TransformNode('stk_cargo_root', h.scene);
     const cargo = {
       assetCode: 'STK1', containerCode: '', task: '', root: cargoRoot,
-      outputOwner: null, fallback: null, generatorEntityId: null, handoff: null, axialLengthCache: null,
+      outputOwner: null, fallback: null, generatorEntityId: null, handoff: null, axialLengthCache: null, placedWorldRotation: null,
     } as unknown as ConveyorCargoRuntimeEntry;
     const platform = h.platformOf('A');
     assert.ok(platform, '站台货格必须存在');
@@ -950,7 +950,7 @@ test('线首站台：无等待 task 时放货成为滞留货物，后续新 task
     const cargoRoot = new TransformNode('stk_cargo_root', h.scene);
     const cargo = {
       assetCode: 'STK1', containerCode: '', task: '', root: cargoRoot,
-      outputOwner: null, fallback: null, generatorEntityId: null, handoff: null, axialLengthCache: null,
+      outputOwner: null, fallback: null, generatorEntityId: null, handoff: null, axialLengthCache: null, placedWorldRotation: null,
     } as unknown as ConveyorCargoRuntimeEntry;
     const platform = h.platformOf('A');
     assert.ok(platform, '站台货格必须存在');

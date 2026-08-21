@@ -328,7 +328,7 @@ export class ConveyorTelemetryDriver {
     const pose = resolveCargoHandoffPose(
       cargo,
       this.getConveyorCargoPosition(model, plan.travelContext, state.cargoTravelOffset),
-      getNodeWorldRotation(model.root),
+      cargo.placedWorldRotation ?? getNodeWorldRotation(model.root),
       deltaSeconds,
     );
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation);
@@ -644,6 +644,8 @@ export class ConveyorTelemetryDriver {
     cargo.assetCode = subscriber.assetCode;
     cargo.task = task;
     cargo.handoff = createCargoHandoffState(cargo, CARGO_HANDOFF_SECONDS / Math.max(hops, 1));
+    // 交付下游输送机：落货朝向保留仅限落货本机，下游恢复对齐机体朝向（与既有交付语义一致）
+    cargo.placedWorldRotation = null;
 
     const plan = this.resolveConveyorTravelPlan(subscriber);
     subscriberState.cargoCode = CONVEYOR_CARGO_IDENTITY;
@@ -881,6 +883,7 @@ export class ConveyorTelemetryDriver {
       generatorEntityId: null,
       handoff: null,
       axialLengthCache: null,
+      placedWorldRotation: null,
     };
     this.state.conveyorCargoMeshes.set(key, entry);
     return entry;
@@ -947,6 +950,8 @@ export class ConveyorTelemetryDriver {
 
     cargo.assetCode = model.assetCode;
     cargo.handoff = createCargoHandoffState(cargo);
+    // 落货保持叉上朝向：站台落货不改变货物姿态，货物随线走行也不自转
+    cargo.placedWorldRotation = cargo.root.rotationQuaternion?.clone() ?? null;
     this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(model.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
     state.cargoCode = CONVEYOR_CARGO_IDENTITY;
     state.cargoTravelOffset = platformOffset;
