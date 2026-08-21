@@ -1,6 +1,9 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { PlayerApp } from './PlayerApp';
+import { installRandomUuidFallback } from '../shared/randomUuid';
+
+installRandomUuidFallback();
 
 /** 获取 Viewer 挂载节点，缺失时显式阻断而不是静默白屏。 */
 function getRootElement(): HTMLElement {
