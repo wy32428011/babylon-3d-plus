@@ -1068,11 +1068,29 @@ export class ConveyorTelemetryDriver {
     const travelAxis = getHorizontalModelAxis(model.root, travelAxisName);
     const projected = bounds ? projectWorldBoundsOntoAxis(bounds, travelAxis) : null;
     const spanMeters = projected ? Math.max(0, projected.max - projected.min) : null;
-    // 支撑面 = 包围盒沿竖直轴的上表面（投影最高点到 center 的抬升量），surfaceOffset 微调贴合真实台面。
-    const surfaceLiftMeters = (bounds
-      ? projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis)
-      : 0) + readConveyorCargoSurfaceOffset(model);
+    // 支撑面优先取模型脚本实测链面顶（conveyorSurfaceY metadata，与站台货格同一链面口径）；
+    // 缺失时回退到节点包围盒上表面（合并 mesh 场景会含挡板/电机等更高件）。
+    const measuredSurfaceY = this.readConveyorChainSurfaceY(geometryHost, model.telemetryProxySource ? model : null);
+    const surfaceLiftMeters = (measuredSurfaceY !== null
+      ? measuredSurfaceY - Vector3.Dot(center, upAxis)
+      : (bounds ? projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis) : 0)
+    ) + readConveyorCargoSurfaceOffset(model);
     return { center, upAxis, travelAxis, travelAxisName, spanMeters, surfaceLiftMeters };
+  }
+
+  /** 读取模型脚本写入 contentRoot metadata 的链面顶高（实体根局部米空间 y），换算到世界系竖直投影；无该字段返回 null。 */
+  private readConveyorChainSurfaceY(geometryHost: ModelRuntimeEntry, proxy: ModelRuntimeEntry | null): number | null {
+    const metadata: unknown = geometryHost.contentRoot?.metadata;
+    if (!metadata || typeof metadata !== 'object') return null;
+    const value = (metadata as Record<string, unknown>).conveyorSurfaceY;
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    geometryHost.root.computeWorldMatrix(true);
+    let worldPoint = Vector3.TransformCoordinates(new Vector3(0, value, 0), geometryHost.root.getWorldMatrix());
+    if (proxy) {
+      const relativeMatrix = computeRootRelativeWorldMatrix(geometryHost.root, proxy.root);
+      if (relativeMatrix) worldPoint = Vector3.TransformCoordinates(worldPoint, relativeMatrix);
+    }
+    return Vector3.Dot(worldPoint, getModelAxis((proxy ?? geometryHost).root, 'y'));
   }
 
   /** 基于输送线行程上下文计算货物底部支撑点：落在设备包围盒上表面，并沿输送方向加入给定行程偏移。 */
