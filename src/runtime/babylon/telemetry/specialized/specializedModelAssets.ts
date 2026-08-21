@@ -294,6 +294,8 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backCargoFetchRow: null,
     frontLastCommand: null,
     backLastCommand: null,
+    frontLastMovementZ: null,
+    backLastMovementZ: null,
     nodeBaselines: new Map(),
     lastTargetKey: null,
     lastFrontCellKey: null,
@@ -331,6 +333,8 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backCargoFetchRow = null;
   model.stackerTelemetry.frontLastCommand = null;
   model.stackerTelemetry.backLastCommand = null;
+  model.stackerTelemetry.frontLastMovementZ = null;
+  model.stackerTelemetry.backLastMovementZ = null;
   model.stackerTelemetry.nodeBaselines.clear();
   model.stackerTelemetry.lastTargetKey = null;
   model.stackerTelemetry.lastFrontCellKey = null;

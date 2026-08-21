@@ -191,7 +191,7 @@ export type StackerModelTelemetryState = {
   backCargoBoundToFork: boolean;
   frontCargoHoldPosition: Vector3 | null;
   backCargoHoldPosition: Vector3 | null;
-  /** 未绑定时货物在箱位中的朝向（取货=源库位，放货=目标库位）。 */
+  /** 货物朝向：未绑定时为所在箱位朝向；绑定瞬间锁定为货物当前世界朝向，随叉全程保持（货叉托举不改变货物姿态）。 */
   frontCargoHoldRotation: Quaternion | null;
   backCargoHoldRotation: Quaternion | null;
   /** 箱位朝向含镜像（负缩放）时的缩放分量；null 表示无镜像，按单位缩放渲染。 */
@@ -203,6 +203,9 @@ export type StackerModelTelemetryState = {
   /** command 边沿检测：取货/放货完成只触发一次。 */
   frontLastCommand: number | null;
   backLastCommand: number | null;
+  /** movement_z 边沿检测：伸出（1/3）跳变到收回（2/4）时按到达动作点补齐绑定/解绑。 */
+  frontLastMovementZ: number | null;
+  backLastMovementZ: number | null;
   nodeBaselines: Map<TransformNode, Vector3>;
   lastTargetKey: string | null;
   /** 上一帧 front_x/front_y/front_z 组成的库位键；变化时触发动作收尾（catch-up）。 */
