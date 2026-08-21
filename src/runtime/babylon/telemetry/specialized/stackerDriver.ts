@@ -450,24 +450,30 @@ export class StackerTelemetryDriver {
   ): number | null {
     if (!cell) return null;
     const forkAxis = getModelAxis(model.root, 'x');
-    const groups = this.findStackerForkNodeGroups(model);
-    const stageTwoNodes = side === 'front' ? groups.frontStageTwoNodes : groups.backStageTwoNodes;
-    const stageOneNodes = side === 'front' ? groups.frontStageOneNodes : groups.backStageOneNodes;
-    const allNodes = side === 'front' ? groups.frontNodes : groups.backNodes;
-    const nodes = stageTwoNodes.length > 0 ? stageTwoNodes : (stageOneNodes.length > 0 ? stageOneNodes : allNodes);
-    const projected = getNodesProjectedBounds(nodes, forkAxis);
-    if (!projected) return null;
-    const state = model.stackerTelemetry;
-    const offset = side === 'front' ? state.frontForkOffset : state.backForkOffset;
-    const homeCenter = (projected.max + projected.min) / 2 - offset;
+    const homeCenter = this.resolveForkCenterHomeCoordinate(model, side, forkAxis);
+    if (homeCenter === null) return null;
     const diff = Vector3.Dot(cell.supportPosition, forkAxis) - homeCenter;
     if (!Number.isFinite(diff) || Math.abs(diff) < 1e-6) return null;
     return Math.sign(diff);
   }
 
+  /** 锚点叉中心在货叉完全收回（offset=0）时沿货叉轴的坐标；当前投影中点减去当前偏移还原原位。 */
+  private resolveForkCenterHomeCoordinate(
+    model: ModelRuntimeEntry,
+    side: StackerForkSide,
+    forkAxis: Vector3,
+  ): number | null {
+    const projected = getNodesProjectedBounds(this.resolveForkAnchorNodes(model, side), forkAxis);
+    if (!projected) return null;
+    const state = model.stackerTelemetry;
+    const offset = side === 'front' ? state.frontForkOffset : state.backForkOffset;
+    return (projected.max + projected.min) / 2 - offset;
+  }
+
   /**
-   * 按货格几何求单侧货叉目标行程（带方向符号）：叉尖需覆盖货格整个底部，即抵达货格远端；
-   * 超出自身行程则夹到上限。无货格（输送线侧）或货格不在伸出方向上时回退全行程。
+   * 按货格几何求单侧货叉目标行程（带方向符号）：锚点叉中心对准货格中心即停，
+   * 绑定时货物锚点（叉顶面中心）与货格支撑位重合，交接无跳变；
+   * 货格纵深超过自身行程则夹到上限。无货格（输送线侧）或货格不在伸出方向上时回退全行程。
    */
   private resolveForkTargetOffset(
     model: ModelRuntimeEntry,
@@ -480,47 +486,13 @@ export class StackerTelemetryDriver {
     if (!cell) return direction * stroke.total;
 
     const forkAxis = getModelAxis(model.root, 'x');
-    const tipHome = this.resolveForkTipHomeCoordinate(model, side, direction, forkAxis);
-    if (tipHome === null) return direction * stroke.total;
+    const centerHome = this.resolveForkCenterHomeCoordinate(model, side, forkAxis);
+    if (centerHome === null) return direction * stroke.total;
 
-    const halfDepth = this.resolveLocatorCellHalfDepthAlongAxis(cell.locator, forkAxis);
-    const farEdge = Vector3.Dot(cell.supportPosition, forkAxis) + direction * halfDepth;
-    const needed = direction * (farEdge - tipHome);
-    if (!Number.isFinite(needed) || needed <= 0) return direction * stroke.total;
+    // needed 贴近 0 仅出现于货格正对叉中心的退化布局（真实货格恒在叉侧向），回退全行程保持旧语义
+    const needed = direction * (Vector3.Dot(cell.supportPosition, forkAxis) - centerHome);
+    if (!Number.isFinite(needed) || needed <= 0.001) return direction * stroke.total;
     return direction * Math.min(needed, stroke.total);
-  }
-
-  /** 叉尖在货叉完全收回（offset=0）时沿伸出方向的轴坐标；当前投影坐标减去当前偏移还原原位。 */
-  private resolveForkTipHomeCoordinate(
-    model: ModelRuntimeEntry,
-    side: StackerForkSide,
-    direction: number,
-    forkAxis: Vector3,
-  ): number | null {
-    const state = model.stackerTelemetry;
-    const groups = this.findStackerForkNodeGroups(model);
-    const stageTwoNodes = side === 'front' ? groups.frontStageTwoNodes : groups.backStageTwoNodes;
-    const stageOneNodes = side === 'front' ? groups.frontStageOneNodes : groups.backStageOneNodes;
-    const allNodes = side === 'front' ? groups.frontNodes : groups.backNodes;
-    const nodes = stageTwoNodes.length > 0 ? stageTwoNodes : (stageOneNodes.length > 0 ? stageOneNodes : allNodes);
-    const projected = getNodesProjectedBounds(nodes, forkAxis);
-    if (!projected) return null;
-    const offset = side === 'front' ? state.frontForkOffset : state.backForkOffset;
-    return (direction > 0 ? projected.max : projected.min) - offset;
-  }
-
-  /** 货格沿货叉轴的半深度：格子本地三轴半尺寸在货叉轴上的投影之和，任意货架摆向下都成立。 */
-  private resolveLocatorCellHalfDepthAlongAxis(locator: LocatorRuntimeEntry, forkAxis: Vector3): number {
-    locator.root.computeWorldMatrix(true);
-    const worldMatrix = locator.root.getWorldMatrix();
-    const axisX = Vector3.TransformNormal(new Vector3(1, 0, 0), worldMatrix);
-    const axisY = Vector3.TransformNormal(new Vector3(0, 1, 0), worldMatrix);
-    const axisZ = Vector3.TransformNormal(new Vector3(0, 0, 1), worldMatrix);
-    return (
-      Math.abs(Vector3.Dot(axisX, forkAxis)) * locator.cellSize.length
-      + Math.abs(Vector3.Dot(axisY, forkAxis)) * locator.cellSize.height
-      + Math.abs(Vector3.Dot(axisZ, forkAxis)) * locator.cellSize.width
-    ) / 2;
   }
 
   /** 单侧货叉行程上限：一段/二段节点几何沿货叉轴的实测长度，缓存于遥测状态；无一段节点时回退该侧全部叉节点。 */
@@ -864,11 +836,7 @@ export class StackerTelemetryDriver {
 
   /** 货物底面锚定二段叉包围盒顶面 + 可配竖直间隙（无二段时回退一段/全叉），确保定位在货叉实际载货位置。 */
   private getStackerForkCargoPosition(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 {
-    const forkGroups = this.findStackerForkNodeGroups(model);
-    const stageTwoNodes = side === 'front' ? forkGroups.frontStageTwoNodes : forkGroups.backStageTwoNodes;
-    const stageOneNodes = side === 'front' ? forkGroups.frontStageOneNodes : forkGroups.backStageOneNodes;
-    const allNodes = side === 'front' ? forkGroups.frontNodes : forkGroups.backNodes;
-    const nodes = stageTwoNodes.length > 0 ? stageTwoNodes : (stageOneNodes.length > 0 ? stageOneNodes : allNodes);
+    const nodes = this.resolveForkAnchorNodes(model, side);
     const bounds = getNodesWorldBounds(nodes);
     if (!bounds) return model.root.getAbsolutePosition();
 
@@ -876,6 +844,15 @@ export class StackerTelemetryDriver {
     const center = bounds.minimum.add(bounds.maximum).scale(0.5);
     const topOffset = projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis);
     return center.add(upAxis.scale(topOffset + this.resolveStackerCargoGapY(model)));
+  }
+
+  /** 货物锚点/伸出方向/目标行程共用的叉节点选择链：二段优先，回退一段，再回退该侧全部叉节点。 */
+  private resolveForkAnchorNodes(model: ModelRuntimeEntry, side: StackerForkSide): TransformNode[] {
+    const forkGroups = this.findStackerForkNodeGroups(model);
+    const stageTwoNodes = side === 'front' ? forkGroups.frontStageTwoNodes : forkGroups.backStageTwoNodes;
+    const stageOneNodes = side === 'front' ? forkGroups.frontStageOneNodes : forkGroups.backStageOneNodes;
+    const allNodes = side === 'front' ? forkGroups.frontNodes : forkGroups.backNodes;
+    return stageTwoNodes.length > 0 ? stageTwoNodes : (stageOneNodes.length > 0 ? stageOneNodes : allNodes);
   }
 
   /** 货物竖直间隙（telemetryBinding.stackerCargoGapY，允许负值）；叉面锚点与货格支撑位共用，保证取/放交接无高差跳变。 */
@@ -1028,21 +1005,28 @@ export class StackerTelemetryDriver {
     return JSON.stringify([assetCode, side]);
   }
 
-  /** 读取并缓存前后一段货叉的初始世界中心，缺失货叉时回退到载货台。 */
+  /**
+   * 读取并缓存货叉收回位的顶面中心（前/后锚点叉节点并集），作为行走/升降定位参考：
+   * 定位后叉顶面与货格支撑位同高，货物在叉锚点与货格支撑位间交接无竖直跳变；缺失货叉时回退到载货台。
+   */
   getStackerTargetReferencePosition(model: ModelRuntimeEntry): Vector3 {
     const state = model.stackerTelemetry;
     if (state.targetReferencePosition) return state.targetReferencePosition;
 
-    const forkGroups = this.findStackerForkNodeGroups(model);
-    const forkNodes = uniqueTransformNodes([
-      ...forkGroups.frontStageOneNodes,
-      ...forkGroups.backStageOneNodes,
+    const anchorNodes = uniqueTransformNodes([
+      ...this.resolveForkAnchorNodes(model, 'front'),
+      ...this.resolveForkAnchorNodes(model, 'back'),
     ]);
-    const bounds = getNodesWorldBounds(forkNodes)
+    const bounds = getNodesWorldBounds(anchorNodes)
       ?? getNodesWorldBounds(this.findStackerPlatformNodes(model));
-    state.targetReferencePosition = bounds
-      ? bounds.minimum.add(bounds.maximum).scale(0.5)
-      : state.rootBasePosition.clone();
+    if (!bounds) {
+      state.targetReferencePosition = state.rootBasePosition.clone();
+      return state.targetReferencePosition;
+    }
+    const upAxis = getModelAxis(model.root, 'y');
+    const center = bounds.minimum.add(bounds.maximum).scale(0.5);
+    const topOffset = projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis);
+    state.targetReferencePosition = center.add(upAxis.scale(topOffset));
     return state.targetReferencePosition;
   }
 
