@@ -17,9 +17,11 @@ import {
   sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneSettings,
+  sanitizeSceneShadowSettings,
   sanitizeSceneSkybox,
   sanitizeSceneViewDistance,
   isSceneCameraOrientation,
+  isSceneShadowQuality,
   SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   type MqttConfig,
   type SceneCameraOrientation,
@@ -292,6 +294,7 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
   const settings = assertPlainObject(value);
   const camera = assertPlainObject(settings.camera);
   const sensitivity = assertPlainObject(settings.sensitivity);
+  const shadows = settings.shadows === undefined ? undefined : assertPlainObject(settings.shadows);
 
   return sanitizeSceneSettings({
     camera: {
@@ -305,6 +308,12 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
       pan: assertFiniteNumber(sensitivity.pan),
       rotate: assertFiniteNumber(sensitivity.rotate),
     },
+    shadows: sanitizeSceneShadowSettings(shadows ? {
+      enabled: typeof shadows.enabled === 'boolean' ? shadows.enabled : undefined,
+      quality: isSceneShadowQuality(shadows.quality) ? shadows.quality : undefined,
+      darkness: typeof shadows.darkness === 'number' ? shadows.darkness : undefined,
+      catcherEnabled: typeof shadows.catcherEnabled === 'boolean' ? shadows.catcherEnabled : undefined,
+    } : undefined),
     environment: normalizeSceneEnvironmentSettings(settings.environment),
     skybox: normalizeSceneSkyboxSettings(settings.skybox),
     // 旧场景文件没有该字段；宽松读取，缺失/非法一律 null，不阻断打开。

@@ -76,10 +76,18 @@ try {
     ssr: { noExternal: ['@linkiez/dxf-renew'] },
   });
 
+  // 避免 Store 异步同步访问未定义的浏览器全局，并满足 Babylon NullEngine 的释放约定。
+  globalThis.window = globalThis.window ?? {
+    addEventListener() {},
+    removeEventListener() {},
+  };
   const { useEditorStore } = await loadModule(server, '/src/editor/store/editorStore.ts');
   const { createEmptySceneDocument } = await loadModule(server, '/src/editor/model/SceneDocument.ts');
   const { serializeScene } = await loadModule(server, '/src/editor/project/SceneSerializer.ts');
-  const { applySavedCameraPose } = await loadModule(server, '/src/runtime/babylon/createEngine.ts');
+  const { applySavedCameraPose, focusArcRotateCameraViewOnBounds } = await loadModule(
+    server,
+    '/src/runtime/babylon/createEngine.ts',
+  );
   const { ArcRotateCameraViewController } = await loadModule(server, '/src/runtime/babylon/ArcRotateCameraViewController.ts');
   verifySavedPoseApplication(applySavedCameraPose);
 
@@ -146,6 +154,34 @@ try {
     assert.equal(controller.getCameraOrientation(), 'front', '编辑器恢复标准画面后必须重新建立硬锁');
     assert.equal(controllerCamera.lowerAlphaLimit, controllerCamera.upperAlphaLimit);
     assert.equal(controllerCamera.lowerBetaLimit, controllerCamera.upperBetaLimit);
+
+    const orthographicFocusAngles = {
+      alpha: controllerCamera.alpha,
+      beta: controllerCamera.beta,
+    };
+    focusArcRotateCameraViewOnBounds(
+      controller,
+      controllerCamera,
+      controllerEngine,
+      {
+        center: new Vector3(20, 6, -15),
+        radiusMeters: 4,
+        sizeMeters: { x: 8, y: 6, z: 5 },
+        geometryReady: true,
+      },
+    );
+    assert.equal(controller.getCameraOrientation(), 'front', '正交聚焦不得退出当前标准视角硬锁');
+    assert.equal(controllerCamera.alpha, orthographicFocusAngles.alpha, '正交聚焦不得改变当前 alpha');
+    assert.equal(controllerCamera.beta, orthographicFocusAngles.beta, '正交聚焦不得改变当前 beta');
+    assert.equal(controllerCamera.lowerAlphaLimit, controllerCamera.alpha, '正交聚焦后必须保留 alpha 硬锁');
+    assert.equal(controllerCamera.upperAlphaLimit, controllerCamera.alpha, '正交聚焦后必须保留 alpha 硬锁');
+    assert.equal(controllerCamera.lowerBetaLimit, controllerCamera.beta, '正交聚焦后必须保留 beta 硬锁');
+    assert.equal(controllerCamera.upperBetaLimit, controllerCamera.beta, '正交聚焦后必须保留 beta 硬锁');
+    assert.deepEqual(
+      controllerCamera.target.asArray(),
+      [20, 6, -15],
+      '正交聚焦仍应移动观察中心到目标包围盒中心',
+    );
   } finally {
     controller.dispose();
     controllerScene.dispose();

@@ -2472,6 +2472,7 @@ export class SceneRuntime {
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
     this.defaultCargoGeneratorId = document.sceneSettings.defaultCargoGeneratorId ?? null;
+    this.shadowRuntime.applySettings(document.sceneSettings.shadows);
     const previousEntityStates = new Map(this.entityStates);
     const previousHighlightedEntityIds = mergeSceneRuntimeHighlightEntityIds(
       this.selectedEntityIds,
@@ -2728,7 +2729,10 @@ export class SceneRuntime {
     }
 
     const light = this.lights.get(entity.id);
-    light?.setEnabled(this.isEntityVisible(entity.id));
+    if (light) {
+      light.setEnabled(this.isEntityVisible(entity.id));
+      this.shadowRuntime.syncLight(entity.id, light);
+    }
     if (light && entity.components.light) {
       this.lightMarkerRuntime.syncPresentation(
         entity.id,
@@ -2847,6 +2851,11 @@ export class SceneRuntime {
   /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
   syncEnvironment(environment: SceneEnvironmentSettings | null): void {
     this.environmentRuntime.sync(environment);
+  }
+
+  /** 单独同步场景级阴影，避免 Inspector 调参触发全场实体重建。 */
+  syncShadows(settings: SceneDocument['sceneSettings']['shadows']): void {
+    this.shadowRuntime.applySettings(settings);
   }
 
   /** 事务式加载候选环境；成功前保留当前有效环境。 */
@@ -4022,9 +4031,9 @@ export class SceneRuntime {
       this.lights.set(entity.id, light);
     }
 
-    this.shadowRuntime.syncLight(entity.id, light);
     light.intensity = lightComponent.intensity;
     light.setEnabled(this.isEntityVisible(entity.id));
+    this.shadowRuntime.syncLight(entity.id, light);
     this.lightMarkerRuntime.sync(
       entity,
       selected,

@@ -8,6 +8,7 @@ import {
   TmpVectors,
   Vector3,
 } from '@babylonjs/core';
+import { EDITOR_FILL_LIGHT_INTENSITY, EDITOR_FILL_LIGHT_NAME } from './SceneShadowRuntime';
 import {
   createEditorGroundGrid,
   DEFAULT_EDITOR_GRID_SETTINGS,
@@ -81,7 +82,7 @@ export type BabylonViewportOptions = {
 export type BabylonFocusOptions = CameraViewTransitionOptions & {
   /** 普通模型默认为 3m；环境等特殊目标可传入 Infinity。 */
   maxRadiusMeters?: number;
-  /** 普通模型默认使用斜上方 45° 聚焦；环境、天空盒等非模型目标可保留当前观察方向。 */
+  /** 透视模式下普通模型默认使用斜上方 45°；正交模式及特殊目标保留当前观察方向。 */
   useModelFocusAngle?: boolean;
 };
 
@@ -213,7 +214,7 @@ function getFocusCameraPose(
 
 
 /**
- * 聚焦包围盒中心。普通模型使用斜上方 45° 且距离最大 3m；非模型目标可显式保留当前观察方向。
+ * 聚焦包围盒中心。透视模式下普通模型使用斜上方 45° 且距离最大 3m；正交模式保留当前方向。
  */
 export function focusArcRotateCameraOnBounds(
   camera: ArcRotateCamera,
@@ -222,7 +223,8 @@ export function focusArcRotateCameraOnBounds(
   maxRadiusMeters?: number,
   useModelFocusAngle: boolean = true,
 ): void {
-  const pose = getFocusCameraPose(camera, engine, bounds, maxRadiusMeters, useModelFocusAngle);
+  const shouldUseModelFocusAngle = camera.mode !== Camera.ORTHOGRAPHIC_CAMERA && useModelFocusAngle;
+  const pose = getFocusCameraPose(camera, engine, bounds, maxRadiusMeters, shouldUseModelFocusAngle);
   const target = new Vector3(pose.target.x, pose.target.y, pose.target.z);
   camera.setTarget(target);
   camera.alpha = pose.alpha;
@@ -241,13 +243,11 @@ export function focusArcRotateCameraViewOnBounds(
   bounds: EditorWorldBounds,
   options?: BabylonFocusOptions,
 ): void {
-  const useModelFocusAngle = options?.useModelFocusAngle !== false;
-  // 环境和天空盒要求保留当前观察方向；同步调用直接写相机，避免控制器解除六面标准视角锁。
-  if (!useModelFocusAngle && options?.animate === false) {
-    focusArcRotateCameraOnBounds(camera, engine, bounds, options.maxRadiusMeters, false);
-    options.onCompleted?.();
-    return;
-  }
+  // 正交投影只允许平移观察中心和缩放，不能因模型聚焦切换方向或解除六面硬锁。
+  const preserveOrientation =
+    camera.mode === Camera.ORTHOGRAPHIC_CAMERA
+    || options?.useModelFocusAngle === false;
+  const useModelFocusAngle = !preserveOrientation;
   const pose = getFocusCameraPose(camera, engine, bounds, options?.maxRadiusMeters, useModelFocusAngle);
   const transitionOptions: CameraViewTransitionOptions = options
     ? {
@@ -257,6 +257,10 @@ export function focusArcRotateCameraViewOnBounds(
         onCancelled: options.onCancelled,
       }
     : { animate: false };
+  if (preserveOrientation) {
+    cameraViewController.applyCameraPosePreservingOrientation(pose, transitionOptions);
+    return;
+  }
   cameraViewController.applyCameraPose(pose, transitionOptions);
 }
 
@@ -416,8 +420,9 @@ export function createBabylonViewport(
   camera.maxZ = SCENE_VIEW_DISTANCE_DEFAULT;
   camera.upperRadiusLimit = SCENE_VIEW_DISTANCE_DEFAULT;
 
-  const light = new HemisphericLight('EditorLight', new Vector3(0, 1, 0), scene);
-  light.intensity = 0.8;
+  /** 半球补光不投影；SceneShadowRuntime 在主阴影光就绪后会压低强度。 */
+  const light = new HemisphericLight(EDITOR_FILL_LIGHT_NAME, new Vector3(0, 1, 0), scene);
+  light.intensity = EDITOR_FILL_LIGHT_INTENSITY;
 
   const editorGround = createEditorGroundGrid(scene, camera, engine, {
     ...DEFAULT_EDITOR_GRID_SETTINGS,

@@ -1722,6 +1722,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
     viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
+    runtime.syncShadows(sceneDocument.sceneSettings.shadows);
     runtime.syncSkybox(sceneDocument);
     if (!environmentApplyRequest && !environmentAdjustmentActive) {
       runtime.syncEnvironment(sceneDocument.sceneSettings.environment);

@@ -171,6 +171,24 @@ select {
   cursor: not-allowed;
 }
 
+.toolbar .toolbar-home-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  height: 32px;
+  min-width: 58px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.toolbar .toolbar-home-button span {
+  font-size: 14px;
+  line-height: 1;
+}
+
 .toolbar-title {
   display: inline-flex;
   align-items: flex-end;

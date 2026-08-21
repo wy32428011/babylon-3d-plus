@@ -37,6 +37,13 @@ export const SCENE_VIEW_DISTANCE_DEFAULT = 12000;
 export const SCENE_SENSITIVITY_MIN = 1;
 export const SCENE_SENSITIVITY_MAX = 20;
 export const SCENE_SENSITIVITY_DEFAULT = 10;
+export const SCENE_SHADOW_QUALITIES = ['performance', 'balanced', 'quality'] as const;
+export const SCENE_SHADOW_QUALITY_DEFAULT = 'balanced';
+export const SCENE_SHADOW_DARKNESS_MIN = 0;
+export const SCENE_SHADOW_DARKNESS_MAX = 0.85;
+export const SCENE_SHADOW_DARKNESS_DEFAULT = 0.32;
+export const SCENE_SHADOW_CONCENTRATION_PERCENT_MIN = 15;
+export const SCENE_SHADOW_CONCENTRATION_PERCENT_MAX = 100;
 export const SCENE_SKYBOX_ROTATION_MIN = 0;
 export const SCENE_SKYBOX_ROTATION_MAX = 360;
 export const SCENE_SKYBOX_INTENSITY_MIN = 0;
@@ -88,6 +95,24 @@ export type SceneSensitivitySettings = {
   zoom: number;
   pan: number;
   rotate: number;
+};
+
+/** 场景级阴影质量档。改 mapSize 时 runtime 会重建 ShadowGenerator。 */
+export type SceneShadowQuality = (typeof SCENE_SHADOW_QUALITIES)[number];
+
+/** 场景级阴影。darkness 与 Babylon ShadowGenerator.darkness 一致：0 最深，1 无阴影。 */
+export type SceneShadowSettings = {
+  enabled: boolean;
+  quality: SceneShadowQuality;
+  darkness: number;
+  catcherEnabled: boolean;
+};
+
+export const DEFAULT_SCENE_SHADOW_SETTINGS: SceneShadowSettings = {
+  enabled: true,
+  quality: SCENE_SHADOW_QUALITY_DEFAULT,
+  darkness: SCENE_SHADOW_DARKNESS_DEFAULT,
+  catcherEnabled: true,
 };
 
 export type SceneSkyboxFormat = SkyboxFormat;
@@ -163,6 +188,7 @@ export type SceneEnvironmentSettingsInput = Omit<
 export type SceneSettings = {
   camera: SceneCameraSettings;
   sensitivity: SceneSensitivitySettings;
+  shadows: SceneShadowSettings;
   environment: SceneEnvironmentSettings | null;
   skybox: SceneSkyboxSettings | null;
   /** 场景级默认模型生成器实体 ID；设备/定位线框未单独绑定时回退到它，仍为空才用内置立方体。 */
@@ -233,6 +259,12 @@ export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
     pan: SCENE_SENSITIVITY_DEFAULT,
     rotate: SCENE_SENSITIVITY_DEFAULT,
   },
+  shadows: {
+    enabled: DEFAULT_SCENE_SHADOW_SETTINGS.enabled,
+    quality: DEFAULT_SCENE_SHADOW_SETTINGS.quality,
+    darkness: DEFAULT_SCENE_SHADOW_SETTINGS.darkness,
+    catcherEnabled: DEFAULT_SCENE_SHADOW_SETTINGS.catcherEnabled,
+  },
   environment: null,
   skybox: null,
   defaultCargoGeneratorId: null,
@@ -262,6 +294,59 @@ export function sanitizeSceneViewDistance(
 /** 归一化相机操作灵敏度，滑杆值越大代表操作响应越快。 */
 export function sanitizeSceneSensitivityValue(value: number): number {
   return clampFiniteNumber(value, SCENE_SENSITIVITY_MIN, SCENE_SENSITIVITY_MAX, SCENE_SENSITIVITY_DEFAULT);
+}
+
+export function isSceneShadowQuality(value: unknown): value is SceneShadowQuality {
+  return (SCENE_SHADOW_QUALITIES as readonly string[]).includes(value as string);
+}
+
+/** 将阴影浓度限制在可看见但不至于全黑的范围内。 */
+export function sanitizeSceneShadowDarkness(value: number): number {
+  return clampFiniteNumber(
+    value,
+    SCENE_SHADOW_DARKNESS_MIN,
+    SCENE_SHADOW_DARKNESS_MAX,
+    SCENE_SHADOW_DARKNESS_DEFAULT,
+  );
+}
+
+/** 生成器 darkness 转 Inspector 百分比：数值越大影子越实。 */
+export function sceneShadowDarknessToConcentrationPercent(darkness: number): number {
+  return Math.round((1 - sanitizeSceneShadowDarkness(darkness)) * 100);
+}
+
+/** Inspector 百分比转生成器 darkness。 */
+export function sceneShadowConcentrationPercentToDarkness(percent: number): number {
+  const safePercent = clampFiniteNumber(
+    percent,
+    SCENE_SHADOW_CONCENTRATION_PERCENT_MIN,
+    SCENE_SHADOW_CONCENTRATION_PERCENT_MAX,
+    sceneShadowDarknessToConcentrationPercent(SCENE_SHADOW_DARKNESS_DEFAULT),
+  );
+  return sanitizeSceneShadowDarkness(Math.round((1 - safePercent / 100) * 100) / 100);
+}
+
+export function isSceneShadowSettingsEqual(a: SceneShadowSettings, b: SceneShadowSettings): boolean {
+  return a.enabled === b.enabled
+    && a.quality === b.quality
+    && a.darkness === b.darkness
+    && a.catcherEnabled === b.catcherEnabled;
+}
+
+/** 旧场景缺字段时回填默认阴影，非法值落到安全边界。 */
+export function sanitizeSceneShadowSettings(
+  value?: Partial<SceneShadowSettings> | null,
+): SceneShadowSettings {
+  return {
+    enabled: typeof value?.enabled === 'boolean' ? value.enabled : DEFAULT_SCENE_SHADOW_SETTINGS.enabled,
+    quality: isSceneShadowQuality(value?.quality) ? value.quality : DEFAULT_SCENE_SHADOW_SETTINGS.quality,
+    darkness: sanitizeSceneShadowDarkness(
+      typeof value?.darkness === 'number' ? value.darkness : DEFAULT_SCENE_SHADOW_SETTINGS.darkness,
+    ),
+    catcherEnabled: typeof value?.catcherEnabled === 'boolean'
+      ? value.catcherEnabled
+      : DEFAULT_SCENE_SHADOW_SETTINGS.catcherEnabled,
+  };
 }
 
 /** 拷贝 Vector3 数据，保证场景设置不会共享可变引用。 */
@@ -648,6 +733,7 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
     },
     environment: sanitizeSceneEnvironment(settings.environment),
     skybox: sanitizeSceneSkybox(settings.skybox),
+    shadows: sanitizeSceneShadowSettings(settings.shadows),
     defaultCargoGeneratorId: sanitizeDefaultCargoGeneratorId(settings.defaultCargoGeneratorId),
   };
 }
