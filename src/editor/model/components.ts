@@ -51,6 +51,8 @@ export type LocatorComponent = {
   layers: number;
   startColumn: number;
   startLayer: number;
+  /** 列反向：true 时靠近原点侧为大数列（仅翻转列号映射，几何不变）。 */
+  columnReversed: boolean;
   columnGap: number;
   layerGap: number;
   deviceAssetCode: string;

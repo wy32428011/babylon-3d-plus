@@ -9,6 +9,7 @@ import {
   Color3,
   CreateGreasedLine,
   DirectionalLight,
+  DynamicTexture,
   GreasedLineMeshColorDistributionType,
   GreasedLineMeshMaterialType,
   type GreasedLineSimpleMaterial,
@@ -245,6 +246,10 @@ const MODEL_GENERATOR_MARKER_ALPHA = 0.65;
 const LOCATOR_SURFACE_ALPHA = 0.025;
 const SELECTED_LOCATOR_SURFACE_ALPHA = 0.08;
 const LOCATOR_CONTIGUOUS_EPSILON = 1e-6;
+/** 列号标签纹理边长与尺寸夹取范围（米）；标签仅在选中高亮时创建内容。 */
+const LOCATOR_COLUMN_LABEL_TEXTURE_SIZE = 128;
+const LOCATOR_COLUMN_LABEL_MIN_SIZE = 0.12;
+const LOCATOR_COLUMN_LABEL_MAX_SIZE = 0.8;
 const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
 const CHAIN_CONVEYOR_MODEL_KEYS = new Set(['chain-conveyor', 'newchain-conveyor']);
 const CHAIN_CONVEYOR_SCRIPT_FILENAMES = new Set([
@@ -408,6 +413,13 @@ type ResolvedModelGeneratorTarget = {
 type ModelParameterRuntimeTarget = AbstractMesh | TransformNode | Material;
 type ModelParameterBaselineValue = boolean | number | string | Vector3Data | Texture | null;
 
+/** 定位线框单个列号标签的渲染资源；texture 在 NullEngine 等无 canvas 环境为 null（不创建标签）。 */
+type LocatorColumnLabel = {
+  mesh: Mesh;
+  material: StandardMaterial;
+  texture: DynamicTexture;
+};
+
 export type LocatorRuntimeEntry = {
   entityId: string;
   root: TransformNode;
@@ -415,6 +427,10 @@ export type LocatorRuntimeEntry = {
   fillMesh: Mesh;
   /** 全部货格边线合并的线框网格（12 边 × 格数），仅描边不拾取。 */
   edgeLines: LinesMesh;
+  /** 列号标签的挂载节点（locator root 子级），选中高亮时整体启用。 */
+  columnLabelsRoot: TransformNode;
+  /** 各列顶部的列号标签；内容随网格重建，显隐由选中态控制。 */
+  columnLabels: LocatorColumnLabel[];
   /** 构建网格时实际使用的步距；解析格子世界坐标必须与渲染公式同源。 */
   cellSteps: LocatorBindingSteps;
   /** 单个货格的尺寸（米）：length=列向，height=层向，width=深度方向。 */
@@ -426,6 +442,8 @@ export type LocatorRuntimeEntry = {
   layers: number;
   startColumn: number;
   startLayer: number;
+  /** 列反向：true 时大数列映射到靠近原点的几何索引 0；仅影响编号换算，不改几何。 */
+  columnReversed: boolean;
   deviceAssetCode: string;
   rowNumber: number;
   storageDepth: LocatorStorageDepth;
@@ -1634,7 +1652,7 @@ export class SceneRuntime {
     const layerIndex = Math.min(entry.layers - 1, Math.max(0, Math.round((local.y - entry.cellSize.height / 2) / entry.cellSteps.layerStepY)));
     return {
       row: entry.rowNumber,
-      column: entry.startColumn + columnIndex,
+      column: entry.startColumn + (entry.columnReversed ? entry.columns - 1 - columnIndex : columnIndex),
       layer: entry.startLayer + layerIndex,
     };
   }
@@ -3171,6 +3189,7 @@ export class SceneRuntime {
       startLayer: locator.startLayer,
       columns: locator.columns,
       layers: locator.layers,
+      columnReversed: locator.columnReversed,
       toX,
       toY,
     });
@@ -3347,6 +3366,7 @@ export class SceneRuntime {
     runtimeLocator.layers = locator.layers;
     runtimeLocator.startColumn = locator.startColumn;
     runtimeLocator.startLayer = locator.startLayer;
+    runtimeLocator.columnReversed = locator.columnReversed;
     runtimeLocator.storageDepth = locator.storageDepth;
     runtimeLocator.cellSize = { length: locator.length, height: locator.height, width: locator.width };
 
@@ -3361,9 +3381,11 @@ export class SceneRuntime {
       };
       runtimeLocator.fillMesh.dispose(false, false);
       runtimeLocator.edgeLines.dispose(false, false);
+      this.disposeLocatorColumnLabels(runtimeLocator);
       const rebuilt = this.buildLocatorGridMeshes(entity.id, locator, runtimeLocator.root, runtimeLocator.material, cellSteps);
       runtimeLocator.fillMesh = rebuilt.fillMesh;
       runtimeLocator.edgeLines = rebuilt.edgeLines;
+      runtimeLocator.columnLabels = this.buildLocatorColumnLabels(entity.id, locator, cellSteps, runtimeLocator.columnLabelsRoot);
       runtimeLocator.cellSteps = cellSteps;
       runtimeLocator.signature = signature;
     }
@@ -4420,7 +4442,12 @@ export class SceneRuntime {
     };
     const { fillMesh, edgeLines } = this.buildLocatorGridMeshes(entityId, locator, root, material, cellSteps);
 
-    return { entityId, root, fillMesh, edgeLines, cellSteps, cellSize: { length: locator.length, height: locator.height, width: locator.width }, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
+    const columnLabelsRoot = new TransformNode(`${entityId}_locatorColumnLabelsRoot`, this.scene);
+    columnLabelsRoot.parent = root;
+    columnLabelsRoot.setEnabled(false);
+    const columnLabels = this.buildLocatorColumnLabels(entityId, locator, cellSteps, columnLabelsRoot);
+
+    return { entityId, root, fillMesh, edgeLines, columnLabelsRoot, columnLabels, cellSteps, cellSize: { length: locator.length, height: locator.height, width: locator.width }, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, columnReversed: locator.columnReversed, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
   }
 
   /**
@@ -4520,6 +4547,72 @@ export class SceneRuntime {
     return { fillMesh, edgeLines: edgeLinesMesh };
   }
 
+  /**
+   * 为每列顶部创建列号标签（billboard 平面 + 数字纹理），仅在选中高亮时由 applyLocatorStyle 启用。
+   * 位置公式与格子中心同源（列 × 列步距），合批/薄实例两种渲染模式共用一套坐标；
+   * 列号文案按 columnReversed 换算业务列号。无 canvas 环境（NullEngine 测试）直接返回空数组。
+   */
+  private buildLocatorColumnLabels(
+    entityId: string,
+    locator: LocatorComponent,
+    cellSteps: LocatorBindingSteps,
+    labelsRoot: TransformNode,
+  ): LocatorColumnLabel[] {
+    if (typeof document === 'undefined' && typeof OffscreenCanvas === 'undefined') return [];
+
+    const { length, height, columns, layers, startColumn, columnReversed } = locator;
+    const topY = (layers - 1) * cellSteps.layerStepY + height;
+    const size = Math.min(
+      LOCATOR_COLUMN_LABEL_MAX_SIZE,
+      Math.max(LOCATOR_COLUMN_LABEL_MIN_SIZE, Math.min(Math.abs(cellSteps.columnStepX), length) * 0.8),
+    );
+    const labels: LocatorColumnLabel[] = [];
+    for (let col = 0; col < columns; col += 1) {
+      const businessColumn = startColumn + (columnReversed ? columns - 1 - col : col);
+      const text = String(businessColumn);
+      const texture = new DynamicTexture(
+        `${entityId}_locatorColumnLabel_${col}`,
+        { width: LOCATOR_COLUMN_LABEL_TEXTURE_SIZE, height: LOCATOR_COLUMN_LABEL_TEXTURE_SIZE },
+        this.scene,
+        false,
+      );
+      texture.hasAlpha = true;
+      const context = texture.getContext() as unknown as CanvasRenderingContext2D;
+      const fontSize = text.length >= 3 ? 44 : text.length === 2 ? 56 : 68;
+      context.font = `700 ${fontSize}px sans-serif`;
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillStyle = SELECTED_MATERIAL_COLOR;
+      context.fillText(text, LOCATOR_COLUMN_LABEL_TEXTURE_SIZE / 2, LOCATOR_COLUMN_LABEL_TEXTURE_SIZE / 2 + 3);
+      // 保持默认 invertY 翻转：canvas y 向下，不翻转会贴到平面上数字上下颠倒。
+      texture.update();
+
+      const material = new StandardMaterial(`${entityId}_locatorColumnLabelMat_${col}`, this.scene);
+      material.disableLighting = true;
+      material.backFaceCulling = false;
+      material.diffuseTexture = texture;
+      material.opacityTexture = texture;
+      material.emissiveColor = Color3.White();
+
+      const plane = MeshBuilder.CreatePlane(`${entityId}_locatorColumnLabelPlane_${col}`, { size }, this.scene);
+      plane.parent = labelsRoot;
+      plane.position.set(col * cellSteps.columnStepX, topY + size * 0.6, 0);
+      plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
+      plane.material = material;
+      plane.isPickable = false;
+      labels.push({ mesh: plane, material, texture });
+    }
+    return labels;
+  }
+
+  /** 销毁列号标签网格及其独立材质纹理；labelsRoot 本身随 locator root 统一销毁。 */
+  private disposeLocatorColumnLabels(entry: LocatorRuntimeEntry): void {
+    for (const label of entry.columnLabels) {
+      label.mesh.dispose(false, true);
+    }
+    entry.columnLabels = [];
+  }
+
   /** 读取货架脚本写入 contentRoot metadata 的内置货格实测布局；字段缺失或非有限数字时视为未就绪。 */
   private readBuiltInSlotLayout(metadata: unknown): BuiltInSlotLayoutInfo | null {
     if (!isPlainRecord(metadata)) return null;
@@ -4544,6 +4637,9 @@ export class SceneRuntime {
       locator.width.toFixed(3),
       String(locator.columns),
       String(locator.layers),
+      // 起始列与列反向只影响列号标签文案，不影响网格几何；纳入签名触发标签重建。
+      String(locator.startColumn),
+      locator.columnReversed ? 'rev' : 'fwd',
       locator.columnGap.toFixed(3),
       locator.layerGap.toFixed(3),
       bindingSteps ? `${bindingSteps.columnStepX.toFixed(3)}|${bindingSteps.layerStepY.toFixed(3)}` : 'free',
@@ -4769,6 +4865,7 @@ export class SceneRuntime {
     this.disposeLocatorFetchRuntime(entityId);
     locator.fillMesh.dispose(false, false);
     locator.edgeLines.dispose(false, false);
+    this.disposeLocatorColumnLabels(locator);
     locator.material.dispose();
     locator.root.dispose(false, true);
     this.locators.delete(entityId);
@@ -5220,6 +5317,7 @@ export class SceneRuntime {
   ): void {
     this.applyMeshInteractivity(locator.fillMesh, entity.id);
     locator.edgeLines.isVisible = this.isEntityVisible(entity.id);
+    locator.columnLabelsRoot.isVisible = locator.edgeLines.isVisible;
     if (entity.components.locator?.builtInBinding) {
       locator.root.setEnabled(this.computeBuiltInSlotRenderable(entity, highlightSet));
     }
@@ -5492,7 +5590,7 @@ export class SceneRuntime {
     }
   }
 
-  /** 根据选中状态更新 locator 填充面与边线颜色。 */
+  /** 根据选中状态更新 locator 填充面与边线颜色；列号标签仅在选中高亮且非运行预览时启用。 */
   private applyLocatorStyle(entry: LocatorRuntimeEntry, selected: boolean): void {
     const color = selected ? SELECTED_MATERIAL_COLOR : LOCATOR_EDGE_COLOR;
     const color3 = Color3.FromHexString(color);
@@ -5501,6 +5599,7 @@ export class SceneRuntime {
     entry.material.diffuseColor = color3;
     entry.material.emissiveColor = color3;
     entry.edgeLines.color = color3;
+    entry.columnLabelsRoot.setEnabled(selected && !this.telemetryPreviewActive);
   }
 
   /** 读取材质颜色，非法颜色回退到默认编辑器颜色。 */

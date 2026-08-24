@@ -52,6 +52,8 @@ function makeLocator(
   return {
     entityId: 'loc1',
     root,
+    columnLabelsRoot: new TransformNode('loc1_labels_root', scene),
+    columnLabels: [],
     cellSteps: options.cellSteps ?? { columnStepX: 1, layerStepY: 1 },
     cellSize: { length: 1, height: 1, width: 1 },
     material: null,
@@ -61,6 +63,7 @@ function makeLocator(
     layers: options.layers,
     startColumn: options.startColumn,
     startLayer: options.startLayer ?? 1,
+    columnReversed: false,
     deviceAssetCode: 'STK1',
     rowNumber: 2,
     storageDepth: 'near',

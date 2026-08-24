@@ -1179,6 +1179,7 @@ export function createLocatorEntity(position: Vector3Data = vector3()): Entity {
         layers: 1,
         startColumn: 1,
         startLayer: 1,
+        columnReversed: false,
         columnGap: 0,
         layerGap: 0,
         deviceAssetCode: '',

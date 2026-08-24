@@ -34,16 +34,19 @@ export type LocatorBoxIndexInput = {
   startLayer: number;
   columns: number;
   layers: number;
+  /** 列反向：true 时大数列映射到靠近原点的几何索引 0。 */
+  columnReversed: boolean;
   toX: number;
   toY: number;
 };
 
 /** 把 MQTT 目标列/层换算为 Locator boxes 数组下标；越界返回 null，调用方回退 locator 根节点。 */
 export function resolveLocatorBoxIndex(input: LocatorBoxIndexInput): number | null {
-  const columnIndex = input.toX - input.startColumn;
+  const rawColumnIndex = input.toX - input.startColumn;
   const layerIndex = input.toY - input.startLayer;
-  if (columnIndex < 0 || columnIndex >= input.columns) return null;
+  if (rawColumnIndex < 0 || rawColumnIndex >= input.columns) return null;
   if (layerIndex < 0 || layerIndex >= input.layers) return null;
+  const columnIndex = input.columnReversed ? input.columns - 1 - rawColumnIndex : rawColumnIndex;
   return layerIndex * input.columns + columnIndex;
 }
 

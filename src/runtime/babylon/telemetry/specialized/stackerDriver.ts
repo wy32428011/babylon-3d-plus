@@ -277,6 +277,7 @@ export class StackerTelemetryDriver {
       startLayer: locator.startLayer,
       columns: locator.columns,
       layers: locator.layers,
+      columnReversed: locator.columnReversed,
       toX,
       toY,
     });

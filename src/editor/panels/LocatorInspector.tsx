@@ -162,6 +162,16 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
           }}
         />
       </label>
+      <label className="inspector-row">
+        <span>列反向</span>
+        <input
+          type="checkbox"
+          disabled={disabled}
+          checked={component.columnReversed}
+          onChange={(event) => updateSelectedLocator({ columnReversed: event.target.checked })}
+          title="勾选后靠近原点侧为大数列，仅翻转列号映射，线框几何不变"
+        />
+      </label>
       {locatorDimensionFields.map(({ key, label, min, max, step }) => (
         <label className="inspector-row" key={key}>
           <span>{label}</span>
