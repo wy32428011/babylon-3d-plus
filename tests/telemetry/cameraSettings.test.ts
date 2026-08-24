@@ -52,6 +52,31 @@ test('完整相机视角可随场景文件序列化往返', () => {
   });
 });
 
+test('场景鼠标灵敏度可随场景文件序列化往返', () => {
+  const scene = createEmptySceneDocument('鼠标灵敏度');
+  scene.sceneSettings.sensitivity = { zoom: 6, pan: 4, rotate: 8 };
+
+  const restored = deserializeScene(serializeScene(scene));
+
+  assert.deepEqual(restored.sceneSettings.sensitivity, { zoom: 6, pan: 4, rotate: 8 });
+});
+
+test('旧场景缺少灵敏度字段时回填默认值', () => {
+  const scene = createEmptySceneDocument('旧灵敏度');
+  const sceneFile = JSON.parse(serializeScene(scene)) as {
+    scene: { sceneSettings: { sensitivity?: unknown } };
+  };
+  delete sceneFile.scene.sceneSettings.sensitivity;
+
+  const restored = deserializeScene(JSON.stringify(sceneFile));
+
+  assert.deepEqual(restored.sceneSettings.sensitivity, {
+    zoom: 10,
+    pan: 10,
+    rotate: 10,
+  });
+});
+
 test('全部轨道和六面朝向都属于稳定场景枚举并可序列化', () => {
   assert.deepEqual(SCENE_CAMERA_ORIENTATIONS, ['orbit', 'top', 'bottom', 'front', 'back', 'left', 'right']);
   assert.deepEqual(STANDARD_SCENE_CAMERA_ORIENTATIONS, ['top', 'bottom', 'front', 'back', 'left', 'right']);

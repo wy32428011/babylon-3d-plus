@@ -22,6 +22,7 @@ import {
   sanitizeSceneViewDistance,
   isSceneCameraOrientation,
   isSceneShadowQuality,
+  SCENE_SENSITIVITY_DEFAULT,
   SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   type MqttConfig,
   type SceneCameraOrientation,
@@ -293,7 +294,7 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
 
   const settings = assertPlainObject(value);
   const camera = assertPlainObject(settings.camera);
-  const sensitivity = assertPlainObject(settings.sensitivity);
+  const sensitivity = settings.sensitivity === undefined ? undefined : assertPlainObject(settings.sensitivity);
   const shadows = settings.shadows === undefined ? undefined : assertPlainObject(settings.shadows);
 
   return sanitizeSceneSettings({
@@ -304,9 +305,9 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
       viewDistance: assertFiniteNumber(camera.viewDistance),
     },
     sensitivity: {
-      zoom: assertFiniteNumber(sensitivity.zoom),
-      pan: assertFiniteNumber(sensitivity.pan),
-      rotate: assertFiniteNumber(sensitivity.rotate),
+      zoom: typeof sensitivity?.zoom === 'number' ? sensitivity.zoom : SCENE_SENSITIVITY_DEFAULT,
+      pan: typeof sensitivity?.pan === 'number' ? sensitivity.pan : SCENE_SENSITIVITY_DEFAULT,
+      rotate: typeof sensitivity?.rotate === 'number' ? sensitivity.rotate : SCENE_SENSITIVITY_DEFAULT,
     },
     shadows: sanitizeSceneShadowSettings(shadows ? {
       enabled: typeof shadows.enabled === 'boolean' ? shadows.enabled : undefined,

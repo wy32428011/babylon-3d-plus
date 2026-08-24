@@ -807,6 +807,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       viewport = createBabylonViewport(canvasRef.current, handleRuntimeStatus, {
         requireHardwareAcceleration: true,
         onLog: pushLog,
+        initialSensitivity: useEditorStore.getState().scene.sceneSettings.sensitivity,
       });
       runtime = new SceneRuntime(
         viewport.scene,
@@ -1114,7 +1115,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const initializedPerformanceMonitor = performanceMonitor;
     const canvas = canvasRef.current;
     // Project 内容会改变中列 auto 行高；元素自身尺寸变化不会触发 window.resize。
-    const resize = () => initializedViewport.engine.resize();
+    const resize = () => initializedViewport.resize();
     const resizeObserver = typeof ResizeObserver === 'undefined'
       ? null
       : new ResizeObserver(resize);

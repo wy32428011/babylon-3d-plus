@@ -77,6 +77,8 @@ export type BabylonViewportOptions = {
   requireHardwareAcceleration?: boolean;
   /** 可选日志回调，用于向上层控制台输出 GPU renderer 诊断信息。 */
   onLog?: (message: string) => void;
+  /** 创建视口时立即应用的场景灵敏度，避免首次 attach/resize 使用默认 10。 */
+  initialSensitivity?: SceneSensitivitySettings;
 };
 
 export type BabylonFocusOptions = CameraViewTransitionOptions & {
@@ -94,6 +96,8 @@ export type BabylonViewport = {
   cancelCameraTransition: (reason?: CameraTransitionCancelReason) => boolean;
   setViewDistance: (meters: number) => void;
   setSensitivity: (settings: SceneSensitivitySettings) => void;
+  /** 按画布实际尺寸刷新引擎，并重新应用场景灵敏度，避免小画布把平移放大。 */
+  resize: () => void;
   getCameraPose: () => SceneCameraPose;
   applyCameraPose: (pose: SceneCameraPose | null, options?: CameraViewTransitionOptions) => void;
   applyCameraView: (settings: SceneCameraSettings, options?: CameraViewApplicationOptions) => void;
@@ -400,11 +404,13 @@ export function createBabylonViewport(
   );
   const allowCameraControl = options.allowCameraControl ?? true;
   const defaultSensitivity = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.sensitivity.default;
-  let cameraSensitivity: SceneSensitivitySettings = {
-    zoom: defaultSensitivity,
-    pan: defaultSensitivity,
-    rotate: defaultSensitivity,
-  };
+  let cameraSensitivity: SceneSensitivitySettings = options.initialSensitivity
+    ? { ...options.initialSensitivity }
+    : {
+      zoom: defaultSensitivity,
+      pan: defaultSensitivity,
+      rotate: defaultSensitivity,
+    };
   let cameraControlAttached = false;
   const attachCameraControl = (): void => {
     if (!allowCameraControl || cameraControlAttached) return;
@@ -505,6 +511,10 @@ export function createBabylonViewport(
     },
     setSensitivity: (settings) => {
       cameraSensitivity = { ...settings };
+      applyDigitalTwinCameraSensitivity(camera, cameraSensitivity);
+    },
+    resize: () => {
+      engine.resize();
       applyDigitalTwinCameraSensitivity(camera, cameraSensitivity);
     },
     getCameraPose: () => cameraViewController.getCameraPose(),
