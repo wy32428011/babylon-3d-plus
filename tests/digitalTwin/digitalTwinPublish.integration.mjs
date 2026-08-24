@@ -18,6 +18,7 @@ const MISSING_CONFIRM_REQUEST_ID = 'missing-resource-confirm';
 const RESOURCE_CONFLICT_REQUEST_ID = 'resource-revision-conflict';
 const COMMIT_CONFLICT_REQUEST_ID = 'commit-version-conflict';
 const VERSION_CONFLICT_REQUEST_ID = 'version-conflict';
+const FORCE_OVERWRITE_REQUEST_ID = 'force-version-overwrite';
 const CANCEL_REQUEST_ID = 'cancel-upload';
 const UPLOAD_FAILURE_REQUEST_ID = 'permanent-upload-failure';
 const MISMATCHED_PREPARE_REQUEST_ID = 'mismatched-prepare-response';
@@ -236,6 +237,7 @@ function createPublishRequest(requestId, sceneContent, overrides = {}) {
     sceneContent,
     projectId: null,
     overwriteExisting: true,
+    forceOverwrite: false,
     confirmResourceBindings: false,
     allowedParentOrigins: PUBLISH_PARENT_ORIGINS,
     ...overrides,
@@ -493,7 +495,7 @@ class DigitalTwinMockServer {
       requestId: body.requestId,
       projectId: body.projectId,
       editorProjectId: EDITOR_PROJECT_ID,
-      baseVersionId: body.baseVersionId,
+      baseVersionId: body.forceOverwrite === true ? this.remoteStatus.latestVersionId : body.baseVersionId,
       projectResourceRevision: body.requestId === SUCCESS_REQUEST_ID && body.confirmResourceBindings === true
         ? NEW_RESOURCE_REVISION
         : body.resourceRevision,
@@ -840,6 +842,7 @@ async function run() {
         projectId: PROJECT_ID,
         baseVersionId: BASE_VERSION_ID,
         overwriteExisting: true,
+        forceOverwrite: false,
         publishName: '身份校验测试',
         remark: null,
         entryScenePath: 'Scenes/main.scene.json',
@@ -1337,6 +1340,7 @@ async function run() {
     ));
     assert.ok(successPrepare);
     assert.equal(successPrepare.body.overwriteExisting, true);
+    assert.equal(successPrepare.body.forceOverwrite, false);
     assert.equal(successPrepare.body.confirmResourceBindings, true);
     assert.equal(successPrepare.body.projectId, PROJECT_ID);
     assert.equal(successPrepare.body.baseVersionId, BASE_VERSION_ID);
@@ -1404,10 +1408,30 @@ async function run() {
     assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
 
     await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus({ latestVersionId: NEW_VERSION_ID, latestVersionNumber: 2 }));
+    mock.resetRequests();
+    const forceOverwriteResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(FORCE_OVERWRITE_REQUEST_ID, sceneContent, { forceOverwrite: true }),
+      new AbortController().signal,
+      () => undefined,
+    );
+    assert.equal(forceOverwriteResult.status, 'completed');
+    const forceOverwritePrepare = mock.requests.find((request) => (
+      request.path.endsWith('/publish-tasks/prepare') && request.body.requestId === FORCE_OVERWRITE_REQUEST_ID
+    ));
+    assert.ok(forceOverwritePrepare);
+    assert.equal(forceOverwritePrepare.body.forceOverwrite, true);
+    assert.equal(forceOverwritePrepare.body.baseVersionId, BASE_VERSION_ID);
+    const forceOverwriteTask = [...mock.tasks.values()].find((record) => (
+      record.task.requestId === FORCE_OVERWRITE_REQUEST_ID
+    ));
+    assert.equal(forceOverwriteTask.task.baseVersionId, NEW_VERSION_ID);
+
+    await resetBinding();
     mock.setRemoteStatus(createRemoteStatus());
     mock.resetRequests();
     const resourceConflictResult = await publishModule.publishDigitalTwin(
-      createPublishRequest(RESOURCE_CONFLICT_REQUEST_ID, sceneContent),
+      createPublishRequest(RESOURCE_CONFLICT_REQUEST_ID, sceneContent, { forceOverwrite: true }),
       new AbortController().signal,
       () => undefined,
     );
@@ -1419,12 +1443,14 @@ async function run() {
     });
     assert.ok(resourceConflictResult.conflictCopyPath);
     assert.equal((await readFile(resourceConflictResult.conflictCopyPath)).subarray(0, 2).toString('ascii'), 'PK');
+    const resourceConflictPrepare = mock.requests.find((request) => request.path.endsWith('/publish-tasks/prepare'));
+    assert.equal(resourceConflictPrepare.body.forceOverwrite, true);
 
     await resetBinding();
     mock.setRemoteStatus(createRemoteStatus());
     mock.resetRequests();
     const commitConflictResult = await publishModule.publishDigitalTwin(
-      createPublishRequest(COMMIT_CONFLICT_REQUEST_ID, sceneContent),
+      createPublishRequest(COMMIT_CONFLICT_REQUEST_ID, sceneContent, { forceOverwrite: true }),
       new AbortController().signal,
       () => undefined,
     );
@@ -1434,6 +1460,8 @@ async function run() {
     assert.ok(commitConflictResult.conflictCopyPath);
     assert.equal((await readFile(commitConflictResult.conflictCopyPath)).subarray(0, 2).toString('ascii'), 'PK');
     assert.ok(mock.requests.some((request) => request.path.endsWith('/publish-tasks/commit')));
+    const commitConflictPrepare = mock.requests.find((request) => request.path.endsWith('/publish-tasks/prepare'));
+    assert.equal(commitConflictPrepare.body.forceOverwrite, true);
 
     await resetBinding();
     mock.setRemoteStatus(createRemoteStatus());
@@ -1500,6 +1528,9 @@ async function run() {
         'post-commit-status-refresh-fallback',
         'missing-resource-binding-confirmation',
         'version-conflict-copy',
+        'force-version-overwrite',
+        'force-overwrite-resource-revision-conflict',
+        'force-overwrite-commit-version-conflict',
         'resource-revision-conflict-copy',
         'commit-version-conflict-copy',
         'cancel-remote-task',

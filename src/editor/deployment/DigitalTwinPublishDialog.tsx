@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'rea
 import { createDeploymentSceneSummary } from './deploymentExport';
 import { analyzeDigitalTwinAssetCodes } from '../../shared/digitalTwinAssetCodes';
 import { createDigitalTwinPublishAssetWarningView } from './digitalTwinPublishAssetWarnings';
+import { validateDigitalTwinForceOverwrite } from './digitalTwinForceOverwrite';
 import type { DigitalTwinPublishController } from './useDigitalTwinPublish';
 import { useEditorStore } from '../store/editorStore';
 import { normalizeDigitalTwinAllowedParentOrigins } from '../../../electron/shared/digitalTwinRuntimeConfig';
@@ -25,6 +26,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   const [publishName, setPublishName] = useState('');
   const [remark, setRemark] = useState('');
   const [overwriteExisting, setOverwriteExisting] = useState(false);
+  const [forceOverwrite, setForceOverwrite] = useState(false);
   const [confirmResourceBindings, setConfirmResourceBindings] = useState(false);
   const [confirmAssetWarnings, setConfirmAssetWarnings] = useState(false);
   const [allowedParentOrigins, setAllowedParentOrigins] = useState<string[]>([]);
@@ -73,6 +75,10 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   }, [context?.overwriteConfirmationRequired]);
 
   useEffect(() => {
+    if (props.open) setForceOverwrite(false);
+  }, [context?.projectId, context?.remoteLatestVersionId, props.open]);
+
+  useEffect(() => {
     if (!props.open || !context?.available) return;
     setAllowedParentOrigins(context.allowedParentOrigins);
   }, [context?.allowedParentOrigins, context?.projectId, props.open]);
@@ -110,6 +116,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
     setSelectedProjectId(projectId);
     setPublishName('');
     setOverwriteExisting(false);
+    setForceOverwrite(false);
     setConfirmResourceBindings(false);
     setAllowedParentOrigins([]);
     setValidationError(null);
@@ -126,8 +133,9 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
       setValidationError(requiresProjectSelection ? '所选业务项目发布上下文尚未就绪。' : '当前工程未绑定数据中台业务项目。');
       return;
     }
-    if (context.versionConflict) {
-      setValidationError('远端已经产生新版本，请重新打开最新工程后再发布。');
+    const forceOverwriteError = validateDigitalTwinForceOverwrite(context.versionConflict, forceOverwrite);
+    if (forceOverwriteError) {
+      setValidationError(forceOverwriteError);
       return;
     }
     const normalizedName = publishName.trim();
@@ -160,6 +168,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
       publishName: normalizedName,
       remark,
       overwriteExisting,
+      forceOverwrite,
       confirmResourceBindings,
       allowedParentOrigins: normalizedParentOrigins,
     });
@@ -172,6 +181,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
     setPublishName('');
     setRemark('');
     setOverwriteExisting(false);
+    setForceOverwrite(false);
     setConfirmResourceBindings(false);
     setConfirmAssetWarnings(false);
     setAllowedParentOrigins([]);
@@ -255,7 +265,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
             <div className="digital-twin-publish-context-wide"><dt>入口场景</dt><dd>{context?.entryScenePath ?? `${scene.name}.scene.json（发布时创建）`}</dd></div>
           </dl>
           {context?.versionConflict ? (
-            <p className="deployment-export-error" role="alert">远端工程已产生新版本，禁止覆盖发布。请重新打开最新工程；当前发布尝试会保留冲突副本。</p>
+            <p className="deployment-export-error" role="alert">远端工程已产生新版本。默认发布会保留冲突副本；确认强制覆盖后，可将当前本地内容创建为下一版本。</p>
           ) : null}
         </section>
 
@@ -399,6 +409,23 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
               <span><strong>确认覆盖目标项目当前数字孪生工程</strong><small>沿用原 Editor 工程创建下一版本，不删除历史版本。</small></span>
             </label>
           ) : null}
+          {context?.versionConflict ? (
+            <label className="digital-twin-publish-confirmation digital-twin-publish-confirmation-warning">
+              <input
+                checked={forceOverwrite}
+                disabled={isBusy}
+                onChange={(event) => {
+                  setForceOverwrite(event.target.checked);
+                  setValidationError(null);
+                }}
+                type="checkbox"
+              />
+              <span>
+                <strong>强制使用本地版本覆盖远端最新版本</strong>
+                <small>本地内容将创建为下一版本，历史版本保留；项目资源修订仍会严格校验。</small>
+              </span>
+            </label>
+          ) : null}
           {requiresResourceConfirmation ? (
             <label className="digital-twin-publish-confirmation digital-twin-publish-confirmation-warning">
               <input
@@ -460,10 +487,16 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
           {!completed ? (
             <button
               className="deployment-export-primary-button"
-              disabled={isBusy || !context?.available || Boolean(context.versionConflict) || (requiresProjectSelection && !selectedProjectId)}
+              disabled={isBusy || !context?.available || (requiresProjectSelection && !selectedProjectId)}
               type="submit"
             >
-              {state.status === 'publishing' ? '发布中…' : requiresResourceConfirmation ? '确认关联并重试发布' : '确认发布'}
+              {state.status === 'publishing'
+                ? '发布中…'
+                : context?.versionConflict
+                  ? '确认强制覆盖并发布'
+                  : requiresResourceConfirmation
+                    ? '确认关联并重试发布'
+                    : '确认发布'}
             </button>
           ) : null}
         </div>

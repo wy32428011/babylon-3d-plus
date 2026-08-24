@@ -6,13 +6,17 @@ import {
   HemisphericLight,
   type Light,
   LinesMesh,
+  Material,
   Mesh,
   MeshBuilder,
+  MultiMaterial,
+  RenderTargetTexture,
   type Nullable,
   type Observer,
   type Scene,
   ShadowGenerator,
   StandardMaterial,
+  type TransformNode,
   Vector3,
 } from '@babylonjs/core';
 import type { SceneShadowQuality, SceneShadowSettings } from '../../editor/model/SceneDocument';
@@ -23,40 +27,48 @@ export const EDITOR_FILL_LIGHT_NAME = 'EditorLight';
 export const EDITOR_FILL_LIGHT_INTENSITY = 0.8;
 export const EDITOR_FILL_LIGHT_SHADOW_INTENSITY = 0.2;
 
-const SHADOW_BIAS = 0.002;
-const SHADOW_NORMAL_BIAS = 0.03;
-const IBL_SHADOW_INTENSITY_MAX = 0.45;
-const AUTO_SUN_INTENSITY = 1.05;
-const CATCHER_MIN_SIZE_METERS = 60;
-const CATCHER_MAX_SIZE_METERS = 600;
-const CATCHER_PADDING_METERS = 12;
-const CATCHER_Y_OFFSET_METERS = -0.03;
-const AUTO_SUN_DIRECTION = new Vector3(-0.42, -1, -0.28).normalize();
+/** 与 SceneDocument.DEFAULT_SCENE_SHADOW_SETTINGS 保持同值，避免运行时单测加载场景文档模块。 */
 const DEFAULT_SHADOW_SETTINGS: SceneShadowSettings = {
   enabled: true,
   quality: 'balanced',
   darkness: 0.32,
   catcherEnabled: true,
+  sunAzimuthDegrees: 56,
+  sunElevationDegrees: 63,
+  sunIntensity: 1.05,
+  distanceMeters: 0,
+  bias: 0.002,
+  normalBias: 0.03,
+  fillIntensity: 0.2,
+  iblIntensityMax: 0.45,
 };
+const CATCHER_MIN_SIZE_METERS = 60;
+const CATCHER_MAX_SIZE_METERS = 600;
+const CATCHER_PADDING_METERS = 12;
+const CATCHER_Y_OFFSET_METERS = -0.03;
 const SHADOW_QUALITY_CONFIG: Record<SceneShadowQuality, {
   mapSize: number;
   cascadeCount: number;
   filteringQuality: number;
+  cached: boolean;
 }> = {
   performance: {
     mapSize: 1024,
     cascadeCount: 3,
     filteringQuality: ShadowGenerator.QUALITY_LOW,
+    cached: true,
   },
   balanced: {
     mapSize: 1024,
     cascadeCount: 4,
     filteringQuality: ShadowGenerator.QUALITY_MEDIUM,
+    cached: false,
   },
   quality: {
     mapSize: 2048,
     cascadeCount: 4,
     filteringQuality: ShadowGenerator.QUALITY_HIGH,
+    cached: false,
   },
 };
 const NON_SHADOW_PARENT_SUFFIXES = [
@@ -83,10 +95,31 @@ function isShadowCaster(mesh: AbstractMesh): boolean {
   return isShadowSurface(mesh);
 }
 
-/** 阴影接收地面只收光，不作为投射体。 */
+/** 模型、环境和阴影地面都接收阴影；缓存档不能只留给专用地面，否则厂房地板会把影子完全挡住。 */
 function isShadowReceiver(mesh: AbstractMesh): boolean {
   if (mesh.name === SCENE_SHADOW_CATCHER_NAME) return true;
   return isShadowSurface(mesh);
+}
+
+/** 收集 Mesh 自身及 MultiMaterial 子材质，供冻结材质短暂解冻后重编阴影采样。 */
+function collectMeshMaterials(mesh: AbstractMesh): Material[] {
+  const material = mesh.material;
+  if (!material) return [];
+  if (!(material instanceof MultiMaterial)) return [material];
+  const materials: Material[] = [material];
+  for (const subMaterial of material.subMaterials) {
+    if (subMaterial) materials.push(subMaterial);
+  }
+  return materials;
+}
+
+/** 写入 receiveShadows；环境等冻结材质必须先解冻，否则不会重编阴影采样。 */
+function applyReceiveShadows(mesh: AbstractMesh, enabled: boolean): void {
+  if (mesh.receiveShadows === enabled) return;
+  const frozenMaterials = collectMeshMaterials(mesh).filter((material) => material.isFrozen);
+  for (const material of frozenMaterials) material.unfreeze();
+  mesh.receiveShadows = enabled;
+  for (const material of frozenMaterials) material.freeze();
 }
 
 /** 编辑器辅助网格和天空盒不应写入阴影贴图，否则会遮蔽整个数字孪生场景。 */
@@ -106,11 +139,12 @@ function engineSupportsCascadedShadows(scene: Scene): boolean {
   return engine._features?.supportCSM === true;
 }
 
-/** 集中管理数字孪生场景的主方向光级联阴影、接收地面和补光压制。 */
+/** 集中管理数字孪生场景的缓存/级联阴影、接收地面和补光压制。 */
 export class SceneShadowRuntime {
   private readonly scene: Scene;
   private readonly entityDirectionals = new Map<string, DirectionalLight>();
   private readonly knownMeshes = new Set<AbstractMesh>();
+  private readonly meshTransformObservers = new Map<AbstractMesh, Observer<TransformNode>>();
   private readonly meshSyncObserver: Nullable<Observer<Scene>>;
   private readonly catcher: Mesh;
   private autoSun: DirectionalLight | null = null;
@@ -119,6 +153,7 @@ export class SceneShadowRuntime {
   private meshCollectionSignature = '';
   private originalEditorLightIntensity: number | null = null;
   private originalEnvironmentIntensity: number | null = null;
+  private appliedEnvironmentIntensityLimit: number | null = null;
   private settings: SceneShadowSettings = { ...DEFAULT_SHADOW_SETTINGS };
   private disposed = false;
 
@@ -130,7 +165,7 @@ export class SceneShadowRuntime {
     this.syncSceneMeshes(true);
     this.meshSyncObserver = scene.onBeforeRenderObservable.add(() => {
       this.syncSceneMeshes();
-      this.updateCascadeDistance();
+      if (!this.isCachedProfile()) this.updateShadowDistance();
       this.applyFillLightPolicy();
     });
   }
@@ -148,6 +183,7 @@ export class SceneShadowRuntime {
     }
 
     this.refreshPrimary();
+    this.invalidateCachedShadow();
   }
 
   /** 应用场景级阴影设置；只有质量档变化需要重建 GPU 阴影贴图。 */
@@ -155,10 +191,10 @@ export class SceneShadowRuntime {
     if (this.disposed) return;
     const qualityChanged = settings.quality !== this.settings.quality;
     const enabledChanged = settings.enabled !== this.settings.enabled;
-    this.settings = { ...settings };
-    this.catcher.setEnabled(settings.enabled && settings.catcherEnabled);
+    this.settings = { ...DEFAULT_SHADOW_SETTINGS, ...settings };
+    this.catcher.setEnabled(this.settings.enabled && this.settings.catcherEnabled);
 
-    if (!settings.enabled) {
+    if (!this.settings.enabled) {
       this.disposePrimaryGenerator();
       this.disposeAutoSun();
       this.restoreFillLightPolicy();
@@ -175,8 +211,11 @@ export class SceneShadowRuntime {
       this.refreshPrimary();
     }
 
-    if (this.primaryGenerator) this.primaryGenerator.darkness = settings.darkness;
+    this.applyGeneratorTuning();
+    this.updateShadowDistance();
+    this.updateAutoSunPose();
     this.syncSceneMeshes(true);
+    this.invalidateCachedShadow();
     this.applyFillLightPolicy();
   }
 
@@ -199,7 +238,17 @@ export class SceneShadowRuntime {
     this.catcher.material?.dispose();
     this.catcher.dispose();
     this.entityDirectionals.clear();
+    for (const [mesh, observer] of this.meshTransformObservers) {
+      mesh.onAfterWorldMatrixUpdateObservable.remove(observer);
+    }
+    this.meshTransformObservers.clear();
     this.knownMeshes.clear();
+  }
+
+  /** 缓存档只在场景内容确实变化时重绘一帧阴影贴图。 */
+  invalidateCachedShadow(): void {
+    if (!this.isCachedProfile()) return;
+    this.primaryGenerator?.getShadowMap()?.resetRefreshCounter();
   }
 
   /**
@@ -218,6 +267,9 @@ export class SceneShadowRuntime {
     for (const knownMesh of this.knownMeshes) {
       if (currentMeshes.has(knownMesh)) continue;
       this.primaryGenerator?.removeShadowCaster(knownMesh, false);
+      const observer = this.meshTransformObservers.get(knownMesh);
+      if (observer) knownMesh.onAfterWorldMatrixUpdateObservable.remove(observer);
+      this.meshTransformObservers.delete(knownMesh);
       this.knownMeshes.delete(knownMesh);
     }
 
@@ -228,11 +280,16 @@ export class SceneShadowRuntime {
 
     this.updateCatcherBounds();
     this.updateAutoSunPose();
+    this.invalidateCachedShadow();
   }
 
-  /** 新增和异步加载 Mesh 共用该入口；接收地面只收阴影，不投射。 */
+  /** 新增和异步加载 Mesh 共用该入口；模型与环境接收阴影，专用地面只收不投。 */
   private registerMesh(mesh: AbstractMesh): void {
-    mesh.receiveShadows = isShadowReceiver(mesh);
+    applyReceiveShadows(mesh, isShadowReceiver(mesh));
+    if (this.isCachedProfile() && !this.meshTransformObservers.has(mesh) && isShadowCaster(mesh)) {
+      const observer = mesh.onAfterWorldMatrixUpdateObservable.add(() => this.invalidateCachedShadow());
+      this.meshTransformObservers.set(mesh, observer);
+    }
     if (!this.primaryGenerator) return;
 
     if (isShadowCaster(mesh)) {
@@ -275,9 +332,11 @@ export class SceneShadowRuntime {
     this.syncSceneMeshes(true);
   }
 
-  /** WebGL 引擎优先使用级联阴影；NullEngine 等不支持 CSM 的环境回退到单张阴影贴图。 */
+  /** WebGL 引擎优先使用级联阴影；性能缓存档和 NullEngine 回退到单张阴影贴图。 */
   private createPrimaryGenerator(light: DirectionalLight): ShadowGenerator {
-    if (engineSupportsCascadedShadows(this.scene)) return this.createCascadeGenerator(light);
+    if (!this.isCachedProfile() && engineSupportsCascadedShadows(this.scene)) {
+      return this.createCascadeGenerator(light);
+    }
     return this.createBasicGenerator(light);
   }
 
@@ -295,12 +354,13 @@ export class SceneShadowRuntime {
     generator.stabilizeCascades = true;
     generator.autoCalcDepthBounds = true;
     generator.depthClamp = true;
-    generator.bias = SHADOW_BIAS;
-    generator.normalBias = SHADOW_NORMAL_BIAS;
+    generator.bias = this.settings.bias;
+    generator.normalBias = this.settings.normalBias;
     generator.darkness = this.settings.darkness;
     generator.usePercentageCloserFiltering = true;
     generator.filteringQuality = quality.filteringQuality;
     generator.shadowMaxZ = this.resolveShadowDistance();
+    this.configureShadowMapRefresh(generator);
     return generator;
   }
 
@@ -310,20 +370,33 @@ export class SceneShadowRuntime {
     light.autoUpdateExtends = true;
     light.autoCalcShadowZBounds = true;
     const generator = new ShadowGenerator(quality.mapSize, light);
-    generator.bias = SHADOW_BIAS;
-    generator.normalBias = SHADOW_NORMAL_BIAS;
+    generator.bias = this.settings.bias;
+    generator.normalBias = this.settings.normalBias;
     generator.darkness = this.settings.darkness;
     generator.usePercentageCloserFiltering = true;
     generator.filteringQuality = quality.filteringQuality;
     light.shadowMaxZ = this.resolveShadowDistance();
+    this.configureShadowMapRefresh(generator);
     return generator;
+  }
+
+  private configureShadowMapRefresh(generator: ShadowGenerator): void {
+    const shadowMap = generator.getShadowMap();
+    if (!shadowMap) return;
+    shadowMap.refreshRate = this.isCachedProfile()
+      ? RenderTargetTexture.REFRESHRATE_RENDER_ONCE
+      : RenderTargetTexture.REFRESHRATE_RENDER_ONEVERYFRAME;
+  }
+
+  private isCachedProfile(): boolean {
+    return SHADOW_QUALITY_CONFIG[this.settings.quality].cached;
   }
 
   private ensureAutoSun(): DirectionalLight {
     if (this.autoSun && !this.autoSun.isDisposed()) return this.autoSun;
 
-    const light = new DirectionalLight(SCENE_SHADOW_SUN_NAME, AUTO_SUN_DIRECTION.clone(), this.scene);
-    light.intensity = AUTO_SUN_INTENSITY;
+    const light = new DirectionalLight(SCENE_SHADOW_SUN_NAME, this.resolveAutoSunDirection(), this.scene);
+    light.intensity = this.settings.sunIntensity;
     light.diffuse = Color3.FromHexString('#fff4e5');
     light.specular = Color3.FromHexString('#efe4d2');
     this.autoSun = light;
@@ -395,15 +468,19 @@ export class SceneShadowRuntime {
     if (!this.autoSun || this.autoSun.isDisposed()) return;
     const center = this.catcher.position;
     const radius = Math.max(this.catcher.scaling.x, this.catcher.scaling.z, CATCHER_MIN_SIZE_METERS) * 0.6;
-    this.autoSun.direction.copyFrom(AUTO_SUN_DIRECTION);
+    const direction = this.resolveAutoSunDirection();
+    this.autoSun.direction.copyFrom(direction);
+    this.autoSun.intensity = this.settings.sunIntensity;
     this.autoSun.position.set(
-      center.x - AUTO_SUN_DIRECTION.x * radius,
-      Math.max(center.y - AUTO_SUN_DIRECTION.y * radius, 20),
-      center.z - AUTO_SUN_DIRECTION.z * radius,
+      center.x - direction.x * radius,
+      Math.max(center.y - direction.y * radius, 20),
+      center.z - direction.z * radius,
     );
   }
 
   private resolveShadowDistance(): number {
+    if (this.settings.distanceMeters > 0) return this.settings.distanceMeters;
+
     const camera = this.scene.activeCamera;
     let distance = 140;
     const radius = camera ? (camera as { radius?: number }).radius : undefined;
@@ -415,7 +492,25 @@ export class SceneShadowRuntime {
     return Math.min(400, Math.max(50, distance));
   }
 
-  private updateCascadeDistance(): void {
+  private resolveAutoSunDirection(): Vector3 {
+    const azimuth = this.settings.sunAzimuthDegrees * Math.PI / 180;
+    const elevation = this.settings.sunElevationDegrees * Math.PI / 180;
+    const horizontal = Math.cos(elevation);
+    return new Vector3(
+      -Math.sin(azimuth) * horizontal,
+      -Math.sin(elevation),
+      -Math.cos(azimuth) * horizontal,
+    );
+  }
+
+  private applyGeneratorTuning(): void {
+    if (!this.primaryGenerator) return;
+    this.primaryGenerator.darkness = this.settings.darkness;
+    this.primaryGenerator.bias = this.settings.bias;
+    this.primaryGenerator.normalBias = this.settings.normalBias;
+  }
+
+  private updateShadowDistance(): void {
     const distance = this.resolveShadowDistance();
     if (this.primaryGenerator instanceof CascadedShadowGenerator) {
       this.primaryGenerator.shadowMaxZ = distance;
@@ -436,14 +531,26 @@ export class SceneShadowRuntime {
       if (this.originalEditorLightIntensity == null) {
         this.originalEditorLightIntensity = editorLight.intensity;
       }
-      editorLight.intensity = EDITOR_FILL_LIGHT_SHADOW_INTENSITY;
+      editorLight.intensity = this.settings.fillIntensity;
     }
 
-    if (this.scene.environmentTexture && this.scene.environmentIntensity > IBL_SHADOW_INTENSITY_MAX) {
-      this.originalEnvironmentIntensity = this.scene.environmentIntensity;
-      this.scene.environmentIntensity = IBL_SHADOW_INTENSITY_MAX;
-    } else if (this.scene.environmentIntensity !== IBL_SHADOW_INTENSITY_MAX) {
-      this.originalEnvironmentIntensity = null;
+    if (this.scene.environmentTexture) {
+      const currentIntensity = this.scene.environmentIntensity;
+      const wasLimited = this.appliedEnvironmentIntensityLimit != null
+        && currentIntensity === this.appliedEnvironmentIntensityLimit;
+      const sourceIntensity = wasLimited && this.originalEnvironmentIntensity != null
+        ? this.originalEnvironmentIntensity
+        : currentIntensity;
+
+      if (sourceIntensity > this.settings.iblIntensityMax) {
+        this.originalEnvironmentIntensity = sourceIntensity;
+        this.appliedEnvironmentIntensityLimit = this.settings.iblIntensityMax;
+        this.scene.environmentIntensity = this.settings.iblIntensityMax;
+      } else {
+        this.scene.environmentIntensity = sourceIntensity;
+        this.originalEnvironmentIntensity = null;
+        this.appliedEnvironmentIntensityLimit = null;
+      }
     }
   }
 
@@ -453,6 +560,7 @@ export class SceneShadowRuntime {
       this.scene.environmentIntensity = this.originalEnvironmentIntensity;
     }
     this.originalEnvironmentIntensity = null;
+    this.appliedEnvironmentIntensityLimit = null;
   }
 
   private restoreEditorLightIntensity(): void {

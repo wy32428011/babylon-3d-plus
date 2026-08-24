@@ -32,9 +32,25 @@ import {
   SCENE_ENVIRONMENT_SCALE_MIN,
   SCENE_SENSITIVITY_MAX,
   SCENE_SENSITIVITY_MIN,
+  SCENE_SHADOW_BIAS_MAX,
+  SCENE_SHADOW_BIAS_MIN,
   SCENE_SHADOW_CONCENTRATION_PERCENT_MAX,
   SCENE_SHADOW_CONCENTRATION_PERCENT_MIN,
+  SCENE_SHADOW_DISTANCE_MAX,
+  SCENE_SHADOW_DISTANCE_MIN,
+  SCENE_SHADOW_FILL_INTENSITY_MAX,
+  SCENE_SHADOW_FILL_INTENSITY_MIN,
+  SCENE_SHADOW_IBL_INTENSITY_MAX_MAX,
+  SCENE_SHADOW_IBL_INTENSITY_MAX_MIN,
+  SCENE_SHADOW_NORMAL_BIAS_MAX,
+  SCENE_SHADOW_NORMAL_BIAS_MIN,
   SCENE_SHADOW_QUALITIES,
+  SCENE_SHADOW_SUN_AZIMUTH_MAX,
+  SCENE_SHADOW_SUN_AZIMUTH_MIN,
+  SCENE_SHADOW_SUN_ELEVATION_MAX,
+  SCENE_SHADOW_SUN_ELEVATION_MIN,
+  SCENE_SHADOW_SUN_INTENSITY_MAX,
+  SCENE_SHADOW_SUN_INTENSITY_MIN,
   SCENE_SKYBOX_INTENSITY_MAX,
   SCENE_SKYBOX_INTENSITY_MIN,
   SCENE_SKYBOX_RESOLUTIONS,
@@ -48,6 +64,7 @@ import {
   type SceneEnvironmentTransform,
   type SceneEnvironmentVariant,
   type SceneShadowQuality,
+  type SceneShadowSettings,
   type SceneSkyboxResolution,
 } from '../model/SceneDocument';
 import {
@@ -78,6 +95,26 @@ const SENSITIVITY_ROWS: Array<{ key: SceneSensitivitySettingKey; label: string }
   { key: 'zoom', label: '缩放灵敏度' },
   { key: 'pan', label: '移动灵敏度' },
   { key: 'rotate', label: '旋转灵敏度' },
+];
+
+type SceneShadowSliderKey = Extract<keyof SceneShadowSettings, 'sunAzimuthDegrees' | 'sunElevationDegrees' | 'sunIntensity' | 'distanceMeters' | 'bias' | 'normalBias' | 'fillIntensity' | 'iblIntensityMax'>;
+
+const SHADOW_SLIDER_ROWS: Array<{
+  key: SceneShadowSliderKey;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  title: string;
+}> = [
+  { key: 'sunAzimuthDegrees', label: '太阳方位', min: SCENE_SHADOW_SUN_AZIMUTH_MIN, max: SCENE_SHADOW_SUN_AZIMUTH_MAX, step: 1, title: '自动太阳光方位角，0 为正北，顺时针增加' },
+  { key: 'sunElevationDegrees', label: '太阳高度', min: SCENE_SHADOW_SUN_ELEVATION_MIN, max: SCENE_SHADOW_SUN_ELEVATION_MAX, step: 1, title: '自动太阳光高度角，数值越大光线越接近垂直' },
+  { key: 'sunIntensity', label: '太阳强度', min: SCENE_SHADOW_SUN_INTENSITY_MIN, max: SCENE_SHADOW_SUN_INTENSITY_MAX, step: 0.05, title: '自动太阳光强度；场景中有可见方向光时由该灯光接管' },
+  { key: 'distanceMeters', label: '阴影距离', min: SCENE_SHADOW_DISTANCE_MIN, max: SCENE_SHADOW_DISTANCE_MAX, step: 10, title: '主阴影覆盖距离，0 表示按相机自动计算' },
+  { key: 'bias', label: '阴影偏移', min: SCENE_SHADOW_BIAS_MIN, max: SCENE_SHADOW_BIAS_MAX, step: 0.001, title: '减小阴影痤疮；过大时影子会脱离模型' },
+  { key: 'normalBias', label: '法线偏移', min: SCENE_SHADOW_NORMAL_BIAS_MIN, max: SCENE_SHADOW_NORMAL_BIAS_MAX, step: 0.001, title: '按法线再偏移阴影，适合厂房尺度模型' },
+  { key: 'fillIntensity', label: '补光强度', min: SCENE_SHADOW_FILL_INTENSITY_MIN, max: SCENE_SHADOW_FILL_INTENSITY_MAX, step: 0.05, title: '阴影开启时压低编辑器半球补光，让方向光阴影更清楚' },
+  { key: 'iblIntensityMax', label: '环境上限', min: SCENE_SHADOW_IBL_INTENSITY_MAX_MIN, max: SCENE_SHADOW_IBL_INTENSITY_MAX_MAX, step: 0.05, title: '阴影开启时限制天空盒环境光强度上限' },
 ];
 
 function parseFiniteNumber(rawValue: string): number | null {
@@ -310,6 +347,13 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   function handleShadowQualityChange(value: string): void {
     if (props.readOnly || !SCENE_SHADOW_QUALITIES.includes(value as SceneShadowQuality)) return;
     updateShadowSettings({ quality: value as SceneShadowQuality });
+  }
+
+  function handleShadowSliderChange(key: SceneShadowSliderKey, rawValue: string): void {
+    if (props.readOnly) return;
+    const nextValue = parseFiniteNumber(rawValue);
+    if (nextValue === null) return;
+    updateShadowSettings({ [key]: nextValue });
   }
 
   async function handleSelectEnvironmentAsset(asset: ProjectModelAssetEntry): Promise<void> {
@@ -625,9 +669,9 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             value={shadows.quality}
             onChange={(event) => handleShadowQualityChange(event.target.value)}
           >
-            <option value="performance">性能</option>
-            <option value="balanced">均衡</option>
-            <option value="quality">高质量</option>
+            <option value="performance">性能（缓存）</option>
+            <option value="balanced">均衡（实时）</option>
+            <option value="quality">高质量（实时）</option>
           </select>
         </label>
         <label className="scene-slider-row">
@@ -660,6 +704,31 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             onChange={(event) => updateShadowSettings({ catcherEnabled: event.target.checked })}
           />
         </label>
+        {SHADOW_SLIDER_ROWS.map((row) => (
+          <label className="scene-slider-row" key={row.key} title={row.title}>
+            <span>{row.label}</span>
+            <input
+              min={row.min}
+              max={row.max}
+              step={row.step}
+              type="range"
+              disabled={props.readOnly || !shadows.enabled}
+              value={shadows[row.key]}
+              onChange={(event) => handleShadowSliderChange(row.key, event.target.value)}
+            />
+            <input
+              min={row.min}
+              max={row.max}
+              step={row.step}
+              type="number"
+              disabled={props.readOnly || !shadows.enabled}
+              value={shadows[row.key]}
+              onChange={(event) => handleShadowSliderChange(row.key, event.target.value)}
+              title={row.title}
+            />
+          </label>
+        ))}
+        <p className="muted">模型、环境和地面都会接收阴影。性能档缓存阴影贴图；均衡/高质量档使用实时级联阴影。没有可见方向光时使用自动太阳光。</p>
       </fieldset>
 
       <fieldset className="transform-fieldset">
