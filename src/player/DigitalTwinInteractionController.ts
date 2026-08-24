@@ -2,7 +2,12 @@ import type {
   CameraTransitionCancelReason,
   CameraViewTransitionOptions,
 } from '../runtime/babylon/ArcRotateCameraViewController';
-import { findDigitalTwinAsset, type DigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
+import { type DigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
+import {
+  findDigitalTwinFocusTarget,
+  type DigitalTwinSlotCoordinate,
+  type DigitalTwinSlotIndex,
+} from '../shared/digitalTwinSlotCodes';
 import {
   DIGITAL_TWIN_BRIDGE_CHANNEL,
   DIGITAL_TWIN_BRIDGE_VERSION,
@@ -32,10 +37,12 @@ export type DigitalTwinPatrolPhase = 'idle' | 'moving' | 'dwelling' | 'paused' |
 
 export type DigitalTwinInteractionRuntime = {
   assetIndex: DigitalTwinAssetIndex;
-  getEntityBounds: (entityId: string) => DigitalTwinFocusBounds | null;
+  slotIndex: DigitalTwinSlotIndex;
+  getFocusBounds: (entityId: string, slot?: DigitalTwinSlotCoordinate) => DigitalTwinFocusBounds | null;
   focusOnBounds: (bounds: DigitalTwinFocusBounds, options: CameraViewTransitionOptions) => void;
   cancelCameraTransition: (reason?: CameraTransitionCancelReason) => boolean;
   setExternalHighlightEntityIds: (entityIds: readonly string[]) => void;
+  setExternalSlotHighlight: (entityId: string, coordinate: DigitalTwinSlotCoordinate | null) => void;
   clearExternalHighlight: () => void;
   getPatrolPhase: () => DigitalTwinPatrolPhase;
   pausePatrol: () => void;
@@ -58,6 +65,7 @@ type ActiveFocusRequest = {
   requestId: string;
   assetCode: string;
   entityId: string;
+  slot?: DigitalTwinSlotCoordinate;
   geometryDeadlineMs: number;
   geometryTimer: unknown | null;
   focusStarted: boolean;
@@ -69,9 +77,9 @@ const EXTERNAL_HIGHLIGHT_DURATION_MS = 3_000;
 
 const FAILURE_MESSAGES: Record<DigitalTwinViewerErrorCode, string> = {
   INVALID_ASSET_CODE: '资产编号无效',
-  ASSET_NOT_FOUND: '当前入口场景中未找到该资产编号',
+  ASSET_NOT_FOUND: '当前入口场景中未找到该资产编号或货格',
   ASSET_CODE_AMBIGUOUS: '当前入口场景中存在重复资产编号',
-  ASSET_NOT_VISIBLE: '目标模型当前不可见',
+  ASSET_NOT_VISIBLE: '目标模型或货格当前不可见',
   ASSET_GEOMETRY_NOT_READY: '目标模型几何在限定时间内未就绪',
   COMMAND_CANCELLED: '资产聚焦请求已取消',
   UNSUPPORTED_COMMAND: '当前 Viewer 不支持该命令',
@@ -243,7 +251,7 @@ export class DigitalTwinInteractionController {
     const cancelledPrevious = this.cancelActiveRequest('replaced', true);
     if (!cancelledPrevious) this.clearHighlight();
 
-    const lookup = findDigitalTwinAsset(runtime.assetIndex, rawAssetCode);
+    const lookup = findDigitalTwinFocusTarget(runtime.assetIndex, runtime.slotIndex, rawAssetCode);
     switch (lookup.status) {
       case 'invalid':
         this.postFailure(requestId, 'INVALID_ASSET_CODE');
@@ -267,6 +275,7 @@ export class DigitalTwinInteractionController {
       requestId,
       assetCode: lookup.assetCode,
       entityId: lookup.entityId,
+      slot: 'slot' in lookup ? lookup.slot : undefined,
       geometryDeadlineMs: this.now() + GEOMETRY_READY_TIMEOUT_MS,
       geometryTimer: null,
       focusStarted: false,
@@ -281,7 +290,7 @@ export class DigitalTwinInteractionController {
 
     let bounds: DigitalTwinFocusBounds | null;
     try {
-      bounds = runtime.getEntityBounds(request.entityId);
+      bounds = runtime.getFocusBounds(request.entityId, request.slot);
     } catch {
       this.finishFailure(request, 'INTERNAL_ERROR');
       return;
@@ -315,7 +324,9 @@ export class DigitalTwinInteractionController {
     try {
       const patrolPhase = runtime.getPatrolPhase();
       if (patrolPhase === 'moving' || patrolPhase === 'dwelling') runtime.pausePatrol();
-      runtime.setExternalHighlightEntityIds([request.entityId]);
+      // 货格搜索只画单格 overlay，避免整面连续网格被选中色刷掉。
+      runtime.setExternalHighlightEntityIds(request.slot ? [] : [request.entityId]);
+      runtime.setExternalSlotHighlight(request.entityId, request.slot ?? null);
       this.highlightRequestId = request.requestId;
       this.highlightTimer = this.setTimer(() => {
         this.highlightTimer = null;

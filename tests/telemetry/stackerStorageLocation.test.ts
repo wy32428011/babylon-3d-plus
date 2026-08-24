@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { resolveLocatorBoxIndex, resolveStackerStorageTargetOffsets } from '../../src/runtime/babylon/telemetry/stackerStorageLocation';
+import { resolveLocatorBoxIndex, resolveLocatorCellLocalBounds, resolveLocatorCellLocalIndex, resolveStackerStorageTargetOffsets } from '../../src/runtime/babylon/telemetry/stackerStorageLocation';
 
 test('目标库位世界坐标必须相对货叉初始锚点换算行走与升降偏移', () => {
   assert.equal(typeof resolveStackerStorageTargetOffsets, 'function');
@@ -40,4 +40,68 @@ test('起始层偏移参与下标换算，可以为 0', () => {
 test('单格口 Locator 只接受第一列第一层', () => {
   assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 1, columns: 1, layers: 1, toX: 1, toY: 1 }), 0);
   assert.equal(resolveLocatorBoxIndex({ startColumn: 1, startLayer: 1, columns: 1, layers: 1, toX: 2, toY: 1 }), null);
+});
+
+test('业务坐标排-列-层换算为 boxes 下标，排不匹配返回 null', () => {
+  const locator = { startColumn: 1, startLayer: 1, rowNumber: 2, columns: 4, layers: 3 };
+  assert.equal(resolveLocatorCellLocalIndex(locator, { row: 2, column: 1, layer: 1 }), 0);
+  assert.equal(resolveLocatorCellLocalIndex(locator, { row: 2, column: 4, layer: 2 }), 7);
+  assert.equal(resolveLocatorCellLocalIndex(locator, { row: 1, column: 1, layer: 1 }), null);
+  assert.equal(resolveLocatorCellLocalIndex(locator, { row: 2, column: 5, layer: 1 }), null);
+});
+
+test('单格本地 AABB 与渲染网格同源：底面中心=(列*步距, 层*步距, 0)', () => {
+  const locator = {
+    columns: 4,
+    layers: 3,
+    cellSteps: { columnStepX: 1.2, layerStepY: 0.8 },
+    cellSize: { length: 1, height: 0.6, width: 0.9 },
+  };
+  const first = resolveLocatorCellLocalBounds(locator, 0);
+  assert.ok(first);
+  assert.deepEqual(first.center, { x: 0, y: 0.3, z: 0 });
+  assert.deepEqual(first.min, { x: -0.5, y: 0, z: -0.45 });
+  assert.deepEqual(first.max, { x: 0.5, y: 0.6, z: 0.45 });
+
+  const cell = resolveLocatorCellLocalBounds(locator, 7);
+  assert.ok(cell);
+  assert.equal(cell.columnIndex, 3);
+  assert.equal(cell.layerIndex, 1);
+  assert.ok(Math.abs(cell.center.x - 3.6) < 1e-9);
+  assert.ok(Math.abs(cell.center.y - 1.1) < 1e-9);
+  assert.equal(cell.center.z, 0);
+  assert.ok(Math.abs(cell.min.x - 3.1) < 1e-9);
+  assert.equal(cell.min.y, 0.8);
+  assert.equal(cell.min.z, -0.45);
+  assert.ok(Math.abs(cell.max.x - 4.1) < 1e-9);
+  assert.ok(Math.abs(cell.max.y - 1.4) < 1e-9);
+  assert.equal(cell.max.z, 0.45);
+});
+
+test('负向列步距仍输出合法 min/max AABB', () => {
+  const locator = {
+    columns: 3,
+    layers: 1,
+    cellSteps: { columnStepX: -1.5, layerStepY: 1 },
+    cellSize: { length: 1, height: 0.8, width: 1.2 },
+  };
+  const cell = resolveLocatorCellLocalBounds(locator, 2);
+  assert.ok(cell);
+  assert.deepEqual(cell.center, { x: -3, y: 0.4, z: 0 });
+  assert.equal(cell.min.x, -3.5);
+  assert.equal(cell.max.x, -2.5);
+  assert.equal(cell.min.y, 0);
+  assert.equal(cell.max.y, 0.8);
+});
+
+test('单格本地 AABB 越界返回 null', () => {
+  const locator = {
+    columns: 2,
+    layers: 2,
+    cellSteps: { columnStepX: 1, layerStepY: 1 },
+    cellSize: { length: 1, height: 1, width: 1 },
+  };
+  assert.equal(resolveLocatorCellLocalBounds(locator, -1), null);
+  assert.equal(resolveLocatorCellLocalBounds(locator, 4), null);
+  assert.equal(resolveLocatorCellLocalBounds(locator, 1.5), null);
 });

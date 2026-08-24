@@ -204,6 +204,10 @@ export function applyDigitalTwinCameraSensitivity(
   camera.panningSensibility = 1;
   camera.wheelDeltaPercentage = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.wheel.radiusPercentagePerStepAtDefault
     * zoomMultiplier;
+  // 像素灵敏度已经写进 inputMap；运动层保持 1，避免再乘一次把发布 Viewer 拖拽放大。
+  camera.movement.rotationXSpeed = 1;
+  camera.movement.rotationYSpeed = 1;
+  camera.movement.zoomSpeed = 1;
   panSensitivityMultiplierByCamera.set(camera, panMultiplier);
   syncDigitalTwinCameraPanScale(camera);
 }

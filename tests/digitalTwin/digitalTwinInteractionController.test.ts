@@ -3,6 +3,7 @@ import test, { after } from 'node:test';
 import { createServer } from 'vite';
 
 import type { DigitalTwinAssetIndex } from '../../src/shared/digitalTwinAssetCodes.ts';
+import type { DigitalTwinSlotCoordinate, DigitalTwinSlotIndex } from '../../src/shared/digitalTwinSlotCodes.ts';
 import type {
   CameraTransitionCancelReason,
   CameraViewTransitionOptions,
@@ -86,19 +87,26 @@ class FakeMessageBus {
 
 class FakeRuntime implements DigitalTwinInteractionRuntime {
   readonly assetIndex: DigitalTwinAssetIndex;
-  boundsFactory: (entityId: string) => DigitalTwinFocusBounds | null;
+  slotIndex: DigitalTwinSlotIndex;
+  boundsFactory: (entityId: string, slot?: DigitalTwinSlotCoordinate) => DigitalTwinFocusBounds | null;
   focusCalls: Array<{ bounds: DigitalTwinFocusBounds; options: CameraViewTransitionOptions }> = [];
   pauseCount = 0;
   cameraChangedWhilePausedCount = 0;
   highlightedEntityIds: string[][] = [];
+  slotHighlights: Array<{ entityId: string; coordinate: DigitalTwinSlotCoordinate | null }> = [];
   clearHighlightCount = 0;
   patrolPhase: 'idle' | 'moving' | 'dwelling' | 'paused' | 'completed' | 'returning' = 'idle';
   private activeTransition: CameraViewTransitionOptions | null = null;
 
-  constructor(entries: Array<{ assetCode: string; entityIds: string[]; visible?: boolean }>, boundsFactory?: (entityId: string) => DigitalTwinFocusBounds | null) {
+  constructor(entries: Array<{ assetCode: string; entityIds: string[]; visible?: boolean }>, boundsFactory?: (entityId: string, slot?: DigitalTwinSlotCoordinate) => DigitalTwinFocusBounds | null) {
     this.assetIndex = {
       entityIdsByAssetCode: new Map(entries.map((entry) => [entry.assetCode, [...entry.entityIds]])),
       effectiveVisibilityByEntityId: new Map(entries.flatMap((entry) => entry.entityIds.map((id) => [id, entry.visible !== false]))),
+    };
+    this.slotIndex = {
+      locators: [],
+      standaloneEntityIdsByAssetId: new Map(),
+      effectiveVisibilityByEntityId: new Map(),
     };
     this.boundsFactory = boundsFactory ?? (() => ({
       center: { x: 1, y: 2, z: 3 },
@@ -110,7 +118,7 @@ class FakeRuntime implements DigitalTwinInteractionRuntime {
     }));
   }
 
-  getEntityBounds = (entityId: string): DigitalTwinFocusBounds | null => this.boundsFactory(entityId);
+  getFocusBounds = (entityId: string, slot?: DigitalTwinSlotCoordinate): DigitalTwinFocusBounds | null => this.boundsFactory(entityId, slot);
 
   focusOnBounds = (bounds: DigitalTwinFocusBounds, options: CameraViewTransitionOptions): void => {
     this.focusCalls.push({ bounds, options });
@@ -133,6 +141,10 @@ class FakeRuntime implements DigitalTwinInteractionRuntime {
 
   setExternalHighlightEntityIds = (entityIds: readonly string[]): void => {
     this.highlightedEntityIds.push([...entityIds]);
+  };
+
+  setExternalSlotHighlight = (entityId: string, coordinate: DigitalTwinSlotCoordinate | null): void => {
+    this.slotHighlights.push({ entityId, coordinate });
   };
 
   clearExternalHighlight = (): void => {
@@ -475,4 +487,99 @@ test('dispose 移除监听器并清理所有定时任务', () => {
   f.controller.dispose();
   assert.equal(f.bus.listenerCount(), 0);
   assert.equal(f.scheduler.pendingCount(), 0);
+});
+
+test('货格坐标命中后聚焦单格包围盒并设置格子 overlay', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([]);
+  runtime.slotIndex = {
+    locators: [{
+      entityId: 'entity_locator',
+      assetId: 'SHELF-01',
+      rowNumber: 1,
+      startColumn: 1,
+      startLayer: 1,
+      columns: 10,
+      layers: 5,
+      builtIn: true,
+      hostEntityId: 'entity_shelf',
+    }],
+    standaloneEntityIdsByAssetId: new Map(),
+    effectiveVisibilityByEntityId: new Map([
+      ['entity_locator', true],
+      ['entity_shelf', true],
+    ]),
+  };
+  runtime.boundsFactory = (_entityId, slot) => ({
+    center: { x: slot?.column ?? 0, y: slot?.layer ?? 0, z: slot?.row ?? 0 },
+    radiusMeters: 0.5,
+    geometryReady: true,
+    requestedEntityCount: 1,
+    resolvedEntityCount: 1,
+    geometryReadyEntityCount: 1,
+  });
+  runtime.patrolPhase = 'moving';
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    f.posted.length = 0;
+    dispatch(f.bus, focusCommand('request-slot', '1-5-3'));
+    assert.equal(runtime.pauseCount, 1);
+    assert.deepEqual(runtime.highlightedEntityIds, [[]]);
+    assert.deepEqual(runtime.slotHighlights, [{
+      entityId: 'entity_locator',
+      coordinate: { row: 1, column: 5, layer: 3 },
+    }]);
+    assert.deepEqual(runtime.focusCalls[0].bounds.center, { x: 5, y: 3, z: 1 });
+    runtime.completeFocus();
+    const result = f.posted[0].message;
+    assert.equal(result.type, 'command.result');
+    if (result.type === 'command.result') {
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.deepEqual(result.payload, { assetCode: '1-5-3', entityIds: ['entity_locator'] });
+      }
+    }
+  } finally {
+    f.controller.dispose();
+  }
+});
+
+test('内置货格 assetId 不能作为搜索键，模型编号仍命中模型', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([{ assetCode: 'SHELF-01', entityIds: ['entity_shelf'] }]);
+  runtime.slotIndex = {
+    locators: [{
+      entityId: 'entity_locator',
+      assetId: 'SHELF-01',
+      rowNumber: 1,
+      startColumn: 1,
+      startLayer: 1,
+      columns: 10,
+      layers: 5,
+      builtIn: true,
+      hostEntityId: 'entity_shelf',
+    }],
+    standaloneEntityIdsByAssetId: new Map(),
+    effectiveVisibilityByEntityId: new Map([
+      ['entity_locator', true],
+      ['entity_shelf', true],
+    ]),
+  };
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    f.posted.length = 0;
+    dispatch(f.bus, focusCommand('request-shelf', 'SHELF-01'));
+    assert.deepEqual(runtime.highlightedEntityIds, [['entity_shelf']]);
+    assert.equal(runtime.slotHighlights.at(-1)?.coordinate, null);
+    runtime.completeFocus();
+    const result = f.posted[0].message;
+    assert.equal(result.type, 'command.result');
+    if (result.type === 'command.result' && result.ok) {
+      assert.deepEqual(result.payload, { assetCode: 'SHELF-01', entityIds: ['entity_shelf'] });
+    }
+  } finally {
+    f.controller.dispose();
+  }
 });

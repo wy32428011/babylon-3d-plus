@@ -6,6 +6,7 @@ import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../runtime/babylon/cameraControlStandard';
 import { SceneRuntime, type SceneRuntimeModelLoadProgress } from '../runtime/babylon/SceneRuntime';
 import { buildDigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
+import { buildDigitalTwinSlotIndex } from '../shared/digitalTwinSlotCodes';
 import { bindSceneModelSelectionPointer } from '../shared/sceneModelSelectionPointer';
 import {
   AutoPatrolPlaybackController,
@@ -168,6 +169,7 @@ export function PlayerApp() {
     let removeModelSelectionListeners: (() => void) | null = null;
     let mqttClient: MqttStackerTelemetryClient | null = null;
     let resize: (() => void) | null = null;
+    let canvasResizeObserver: ResizeObserver | null = null;
 
     /** 处理 WebGL 丢失和渲染异常，恢复事件只清除对应运行时阻断。 */
     const handleRuntimeStatus = (status: BabylonViewportRuntimeStatus): void => {
@@ -223,6 +225,7 @@ export function PlayerApp() {
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
         const digitalTwinAssetIndex = buildDigitalTwinAssetIndex(sceneDocument);
+        const digitalTwinSlotIndex = buildDigitalTwinSlotIndex(sceneDocument);
         if (parsedConfig.digitalTwin) {
           sceneDocument.fetchConfig = resolvePublishedFetchConfig(sceneDocument.fetchConfig, projectRuntimeConfig);
         }
@@ -237,6 +240,7 @@ export function PlayerApp() {
           showGrid: parsedConfig.viewer.showGrid,
           allowCameraControl: parsedConfig.viewer.allowCameraControl,
           requireHardwareAcceleration: true,
+          initialSensitivity: sceneDocument.sceneSettings.sensitivity,
         });
         applySceneBackground(viewport, parsedConfig.page.backgroundColor);
         viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
@@ -245,6 +249,7 @@ export function PlayerApp() {
           animate: false,
           lockStandardOrientation: false,
         });
+        viewport.resize();
 
         runtime = new SceneRuntime(
           viewport.scene,
@@ -358,10 +363,14 @@ export function PlayerApp() {
 
         interactionController.markViewerReady({
           assetIndex: digitalTwinAssetIndex,
-          getEntityBounds: (entityId) => runtime!.getEntitiesWorldBounds([entityId]),
+          slotIndex: digitalTwinSlotIndex,
+          getFocusBounds: (entityId, slot) => slot
+            ? runtime!.getLocatorCellWorldBounds(entityId, slot)
+            : runtime!.getEntitiesWorldBounds([entityId]),
           focusOnBounds: (bounds, options) => viewport!.focusOnBounds(bounds, options),
           cancelCameraTransition: (reason) => viewport!.cancelCameraTransition(reason),
           setExternalHighlightEntityIds: (entityIds) => runtime!.setExternalHighlightEntityIds(entityIds),
+          setExternalSlotHighlight: (entityId, coordinate) => runtime!.setExternalSlotHighlight(entityId, coordinate),
           clearExternalHighlight: () => runtime!.clearExternalHighlight(),
           getPatrolPhase: () => autoPatrolPlayback!.getSnapshot().phase,
           pausePatrol: () => { autoPatrolPlayback!.pause(false); },
@@ -370,9 +379,16 @@ export function PlayerApp() {
 
         mqttClient = new MqttStackerTelemetryClient((logMessage) => console.info(`[Viewer MQTT] ${logMessage}`));
         mqttClient.updateConfig(parsedConfig.mqtt);
-        resize = () => viewport?.engine.resize();
+        resize = () => viewport?.resize();
+        if (typeof ResizeObserver !== 'undefined') {
+          canvasResizeObserver = new ResizeObserver(resize);
+          canvasResizeObserver.observe(canvas);
+        }
         window.addEventListener('resize', resize);
         resize();
+        requestAnimationFrame(() => {
+          if (!disposed) resize?.();
+        });
         setPhase('ready');
       } catch (error) {
         if (disposed || abortController.signal.aborted) return;
@@ -387,6 +403,9 @@ export function PlayerApp() {
         unsubscribeAutoPatrolSnapshot?.();
         autoPatrolPlayback?.dispose();
         autoPatrolPlaybackRef.current = null;
+        canvasResizeObserver?.disconnect();
+        canvasResizeObserver = null;
+        if (resize) window.removeEventListener('resize', resize);
         runtime?.dispose();
         viewport?.dispose();
         clearDeploymentAssetManifest();
@@ -397,6 +416,8 @@ export function PlayerApp() {
     return () => {
       disposed = true;
       abortController.abort();
+      canvasResizeObserver?.disconnect();
+      canvasResizeObserver = null;
       if (resize) window.removeEventListener('resize', resize);
       interactionController?.dispose();
       interactionController = null;

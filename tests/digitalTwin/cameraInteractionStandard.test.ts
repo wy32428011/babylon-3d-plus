@@ -120,6 +120,9 @@ test('旋转角度、屏幕空间平移幅度和滚轮缩放按统一基准及�
     assertClose(rotateEntry?.sensitivityX ?? Number.NaN, defaultRadiansPerPixel);
     assertClose(rotateEntry?.sensitivityY ?? Number.NaN, defaultRadiansPerPixel);
     assert.equal(fixture.camera.wheelDeltaPercentage, 0.05);
+    assert.equal(fixture.camera.movement.rotationXSpeed, 1);
+    assert.equal(fixture.camera.movement.rotationYSpeed, 1);
+    assert.equal(fixture.camera.movement.zoomSpeed, 1);
     assertClose(fixture.camera.movement.panSpeed, defaultWorldUnitsPerPixel);
 
     applyDigitalTwinCameraSensitivity(fixture.camera, { zoom: 20, pan: 5, rotate: 20 });
@@ -141,6 +144,29 @@ test('旋转角度、屏幕空间平移幅度和滚轮缩放按统一基准及�
     assert.equal(clampDigitalTwinCameraRadius(0.001), DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minRadiusMeters);
   } finally {
     disposeCamera(fixture);
+  }
+});
+
+test('画布变高后平移幅度按屏幕像素同比变慢，旋转仍使用场景灵敏度', () => {
+  const shortCanvas = createCamera();
+  const tallEngine = new NullEngine({ renderWidth: 1280, renderHeight: 1440 });
+  const tallScene = new Scene(tallEngine);
+  const tallCamera = new ArcRotateCamera('TallCanvasCamera', Math.PI / 4, Math.PI / 3, 20, Vector3.Zero(), tallScene);
+  try {
+    const sensitivity = { zoom: 4, pan: 4, rotate: 4 };
+    applyDigitalTwinCameraControlStandard(shortCanvas.camera, sensitivity);
+    applyDigitalTwinCameraControlStandard(tallCamera, sensitivity);
+
+    const rotateEntry = tallCamera.movement.input.getEntry('pointer', 'rotate', { button: 2 });
+    assertClose(
+      rotateEntry?.sensitivityX ?? Number.NaN,
+      DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.rotation.radiansPerPixelAtDefault * 0.4,
+    );
+    assertClose(tallCamera.movement.panSpeed, shortCanvas.camera.movement.panSpeed / 2);
+  } finally {
+    disposeCamera(shortCanvas);
+    tallScene.dispose();
+    tallEngine.dispose();
   }
 });
 

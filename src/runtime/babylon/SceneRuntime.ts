@@ -128,7 +128,13 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from './telemetry/specializedTelemetryBinding';
-import { resolveLocatorBoxIndex, resolveLocatorCellSupportWorldPosition } from './telemetry/stackerStorageLocation';
+import {
+  resolveLocatorBoxIndex,
+  resolveLocatorCellLocalBounds,
+  resolveLocatorCellLocalIndex,
+  resolveLocatorCellSupportWorldPosition,
+  resolveLocatorCellWorldBounds,
+} from './telemetry/stackerStorageLocation';
 import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from './runtimeValueUtils';
 import {
   clampNumber,
@@ -245,6 +251,8 @@ const MODEL_GENERATOR_MARKER_ALPHA = 0.65;
 const LOCATOR_SURFACE_ALPHA = 0.025;
 const SELECTED_LOCATOR_SURFACE_ALPHA = 0.08;
 const LOCATOR_CONTIGUOUS_EPSILON = 1e-6;
+const SLOT_HIGHLIGHT_SIZE_SCALE = 1.04;
+const SLOT_HIGHLIGHT_SURFACE_ALPHA = 0.18;
 const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
 const CHAIN_CONVEYOR_MODEL_KEYS = new Set(['chain-conveyor', 'newchain-conveyor']);
 const CHAIN_CONVEYOR_SCRIPT_FILENAMES = new Set([
@@ -429,6 +437,14 @@ export type LocatorRuntimeEntry = {
   deviceAssetCode: string;
   rowNumber: number;
   storageDepth: LocatorStorageDepth;
+};
+
+type LocatorSlotHighlightOverlay = {
+  entityId: string;
+  coordinate: { row: number; column: number; layer: number };
+  fillMesh: Mesh;
+  edgeLines: LinesMesh;
+  material: StandardMaterial;
 };
 
 /** 绑定货格渲染网格时使用的实测步距；缺省时回退货格自身 长度+间隔 公式。 */
@@ -672,6 +688,8 @@ export class SceneRuntime {
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private readonly reportedOverlappingLocatorRanges = new Set<string>();
   private telemetryPreviewActive = false;
+  private externalSlotHighlight: { entityId: string; coordinate: { row: number; column: number; layer: number } } | null = null;
+  private slotHighlightOverlay: LocatorSlotHighlightOverlay | null = null;
   private modelArrayIdentityMode: SceneRuntimeModelArrayIdentityMode = 'device';
   private readonly reportedCargoIssues = new Set<string>();
   private outlinedModelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
@@ -1997,6 +2015,45 @@ export class SceneRuntime {
     };
   }
 
+  /** 按货格「排-列-层」返回单格世界包围盒，供发布 Viewer 搜索聚焦；找不到格子时返回 null。 */
+  getLocatorCellWorldBounds(entityId: string, coordinate: { row: number; column: number; layer: number }): {
+    center: Vector3Data;
+    sizeMeters: Vector3Data;
+    radiusMeters: number;
+    geometryReady: boolean;
+    requestedEntityCount: number;
+    resolvedEntityCount: number;
+    geometryReadyEntityCount: number;
+    missingEntityCount: number;
+    notReadyEntityCount: number;
+    missingEntityIds: string[];
+    notReadyEntityIds: string[];
+  } | null {
+    const locator = this.locators.get(entityId);
+    if (!locator || locator.root.isDisposed()) return null;
+    const bounds = resolveLocatorCellWorldBounds(locator, coordinate);
+    if (!bounds) return null;
+
+    const hostEntityId = this.syncedEntities.get(entityId)?.components.locator?.builtInBinding?.hostEntityId;
+    const hostReady = !hostEntityId || this.isEntityWorldBoundsReady(hostEntityId);
+    const center = bounds.minimum.add(bounds.maximum).scale(0.5);
+    const size = bounds.maximum.subtract(bounds.minimum);
+    const radiusMeters = Math.max(0.5, size.length() / 2);
+    return {
+      center: { x: center.x, y: center.y, z: center.z },
+      sizeMeters: { x: size.x, y: size.y, z: size.z },
+      radiusMeters,
+      geometryReady: hostReady,
+      requestedEntityCount: 1,
+      resolvedEntityCount: 1,
+      geometryReadyEntityCount: hostReady ? 1 : 0,
+      missingEntityCount: 0,
+      notReadyEntityCount: hostReady ? 0 : 1,
+      missingEntityIds: [],
+      notReadyEntityIds: hostReady || !hostEntityId ? [] : [hostEntityId],
+    };
+  }
+
   /** 设置发布 Viewer 的本地持久选区，不影响编辑器权威选区和外部定位高亮。 */
   setLocalHighlightEntityIds(entityIds: readonly string[]): void {
     this.setTransientHighlightEntityIds('local', entityIds);
@@ -2014,7 +2071,23 @@ export class SceneRuntime {
 
   /** 清除外部临时描边，同时保留编辑器和 Viewer 本地选区。 */
   clearExternalHighlight(): void {
+    this.setExternalSlotHighlight('', null);
     this.setExternalHighlightEntityIds([]);
+  }
+
+  /** 高亮单个货格格子；coordinate 为 null 时只清除格子 overlay，不影响实体描边。 */
+  setExternalSlotHighlight(
+    entityId: string,
+    coordinate: { row: number; column: number; layer: number } | null,
+  ): void {
+    const previousEntityId = this.externalSlotHighlight?.entityId ?? null;
+    const next = coordinate && entityId
+      ? { entityId, coordinate: { row: coordinate.row, column: coordinate.column, layer: coordinate.layer } }
+      : null;
+    this.externalSlotHighlight = next;
+    this.refreshSlotHighlightOverlay();
+    if (previousEntityId && previousEntityId !== next?.entityId) this.refreshLocatorPresentation(previousEntityId);
+    if (next) this.refreshLocatorPresentation(next.entityId);
   }
 
   /** 差量替换指定临时高亮来源，并只刷新前后变化实体的表现。 */
@@ -2891,6 +2964,8 @@ export class SceneRuntime {
   }
 
   dispose(): void {
+    this.disposeSlotHighlightOverlay();
+    this.externalSlotHighlight = null;
     this.clearEntityArrayPreview();
     this.cancelFolderGroupTransforms();
     this.entityGroupGizmoProxy?.node.dispose(false, false);
@@ -2974,6 +3049,7 @@ export class SceneRuntime {
     this.selectedEntityIds.clear();
     this.localHighlightedEntityIds.clear();
     this.externalHighlightedEntityIds.clear();
+    this.externalSlotHighlight = null;
     this.reportedCargoIssues.clear();
     this.outlinedModelArrayBatches.clear();
   }
@@ -3366,6 +3442,12 @@ export class SceneRuntime {
       runtimeLocator.edgeLines = rebuilt.edgeLines;
       runtimeLocator.cellSteps = cellSteps;
       runtimeLocator.signature = signature;
+      if (this.externalSlotHighlight?.entityId === entity.id) this.refreshSlotHighlightOverlay();
+    } else if (
+      this.externalSlotHighlight?.entityId === entity.id
+      && this.slotHighlightOverlay?.entityId !== entity.id
+    ) {
+      this.refreshSlotHighlightOverlay();
     }
 
     runtimeLocator.fillMesh.metadata = { ...(runtimeLocator.fillMesh.metadata ?? {}), storageLocation: locatorMetadata };
@@ -4767,6 +4849,8 @@ export class SceneRuntime {
   private disposeLocator(entityId: string, locator: LocatorRuntimeEntry): void {
     this.clearEntityArrayPreviewIfSource(entityId);
     this.disposeLocatorFetchRuntime(entityId);
+    if (this.slotHighlightOverlay?.entityId === entityId) this.disposeSlotHighlightOverlay();
+    if (this.externalSlotHighlight?.entityId === entityId) this.externalSlotHighlight = null;
     locator.fillMesh.dispose(false, false);
     locator.edgeLines.dispose(false, false);
     locator.material.dispose();
@@ -5186,21 +5270,28 @@ export class SceneRuntime {
   }
 
   /**
-   * 计算绑定货格当前是否应渲染：编辑态仅当眼睛开关开启且宿主或货格自身被选中时显示；
-   * 运行预览与发布模式一律隐藏。非绑定货格返回 true，不受管控。
+   * 计算绑定货格当前是否应渲染：眼睛开关开启且宿主或货格自身被高亮时显示。
+   * 运行预览/发布 Viewer 默认仍隐藏内置货格，但外部搜索高亮宿主或货格时需要露出线框。
+   * 非绑定货格返回 true，不受管控。
    */
   private computeBuiltInSlotRenderable(
     entity: Entity,
     selectedEntityIds: ReadonlySet<string> = this.selectedEntityIds,
   ): boolean {
-    if (this.telemetryPreviewActive) return false;
     const binding = entity.components.locator?.builtInBinding;
     if (!binding) return true;
     const hostState = this.entityStates.get(binding.hostEntityId);
     if (!hostState || hostState.visible === false) return false;
     if (!this.isEntityVisible(entity.id)) return false;
-    return this.isEntityHighlighted(binding.hostEntityId, selectedEntityIds)
-      || this.isEntityHighlighted(entity.id, selectedEntityIds);
+    const highlighted = this.isEntityHighlighted(binding.hostEntityId, selectedEntityIds)
+      || this.isEntityHighlighted(entity.id, selectedEntityIds)
+      || this.externalSlotHighlight?.entityId === entity.id;
+    if (this.telemetryPreviewActive) {
+      // 发布 Viewer / 运行预览默认隐藏内置货格；只有外部搜索描边或单格 overlay 才露出线框。
+      return this.externalHighlightedEntityIds.has(entity.id)
+        || this.externalSlotHighlight?.entityId === entity.id;
+    }
+    return highlighted;
   }
 
   /** 预览开关切换时全量重算绑定货格显隐；幂等，未创建的 locator 条目直接跳过。 */
@@ -5490,6 +5581,93 @@ export class SceneRuntime {
       lineMesh.color = color;
       lineMesh.alpha = alpha;
     }
+  }
+
+  /** 刷新单个 locator 的选中样式与显隐，用于外部货格高亮切换。 */
+  private refreshLocatorPresentation(entityId: string): void {
+    const entity = this.syncedEntities.get(entityId);
+    const locator = this.locators.get(entityId);
+    if (!entity?.components.locator || !locator) return;
+    this.applyLocatorStyle(locator, this.isEntityHighlighted(entityId));
+    this.applyLocatorInteractivity(locator, entity);
+  }
+
+  /** 释放外部搜索产生的单格 overlay。 */
+  private disposeSlotHighlightOverlay(): void {
+    const overlay = this.slotHighlightOverlay;
+    if (!overlay) return;
+    overlay.fillMesh.parent = null;
+    overlay.edgeLines.parent = null;
+    overlay.fillMesh.dispose(false, false);
+    overlay.edgeLines.dispose(false, false);
+    overlay.material.dispose();
+    this.slotHighlightOverlay = null;
+  }
+
+  /** 按当前外部货格坐标重建略微放大的单格填充盒与 12 边线框。 */
+  private refreshSlotHighlightOverlay(): void {
+    const highlight = this.externalSlotHighlight;
+    this.disposeSlotHighlightOverlay();
+    if (!highlight) return;
+    const locator = this.locators.get(highlight.entityId);
+    if (!locator || locator.root.isDisposed()) return;
+    const boxIndex = resolveLocatorCellLocalIndex(locator, highlight.coordinate);
+    if (boxIndex === null) return;
+    const local = resolveLocatorCellLocalBounds(locator, boxIndex);
+    if (!local) return;
+
+    const material = new StandardMaterial(`${highlight.entityId}_slotHighlightMat`, this.scene);
+    material.disableLighting = true;
+    material.alpha = SLOT_HIGHLIGHT_SURFACE_ALPHA;
+    const color3 = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
+    material.diffuseColor = color3;
+    material.emissiveColor = color3;
+
+    const sizeX = local.size.x * SLOT_HIGHLIGHT_SIZE_SCALE;
+    const sizeY = local.size.y * SLOT_HIGHLIGHT_SIZE_SCALE;
+    const sizeZ = local.size.z * SLOT_HIGHLIGHT_SIZE_SCALE;
+    const fillMesh = MeshBuilder.CreateBox(`${highlight.entityId}_slotHighlightFill`, {
+      width: sizeX,
+      height: sizeY,
+      depth: sizeZ,
+    }, this.scene);
+    fillMesh.parent = locator.root;
+    fillMesh.position.set(local.center.x, local.center.y, local.center.z);
+    fillMesh.material = material;
+    fillMesh.isPickable = false;
+
+    const hx = sizeX / 2;
+    const hy = sizeY / 2;
+    const hz = sizeZ / 2;
+    const edgeLines = MeshBuilder.CreateLineSystem(`${highlight.entityId}_slotHighlightEdges`, {
+      lines: [
+        [new Vector3(-hx, -hy, -hz), new Vector3(hx, -hy, -hz)],
+        [new Vector3(hx, -hy, -hz), new Vector3(hx, -hy, hz)],
+        [new Vector3(hx, -hy, hz), new Vector3(-hx, -hy, hz)],
+        [new Vector3(-hx, -hy, hz), new Vector3(-hx, -hy, -hz)],
+        [new Vector3(-hx, hy, -hz), new Vector3(hx, hy, -hz)],
+        [new Vector3(hx, hy, -hz), new Vector3(hx, hy, hz)],
+        [new Vector3(hx, hy, hz), new Vector3(-hx, hy, hz)],
+        [new Vector3(-hx, hy, hz), new Vector3(-hx, hy, -hz)],
+        [new Vector3(-hx, -hy, -hz), new Vector3(-hx, hy, -hz)],
+        [new Vector3(hx, -hy, -hz), new Vector3(hx, hy, -hz)],
+        [new Vector3(hx, -hy, hz), new Vector3(hx, hy, hz)],
+        [new Vector3(-hx, -hy, hz), new Vector3(-hx, hy, hz)],
+      ],
+    }, this.scene);
+    edgeLines.parent = locator.root;
+    edgeLines.position.set(local.center.x, local.center.y, local.center.z);
+    edgeLines.color = color3;
+    edgeLines.alpha = 1;
+    edgeLines.isPickable = false;
+
+    this.slotHighlightOverlay = {
+      entityId: highlight.entityId,
+      coordinate: highlight.coordinate,
+      fillMesh,
+      edgeLines,
+      material,
+    };
   }
 
   /** 根据选中状态更新 locator 填充面与边线颜色。 */
