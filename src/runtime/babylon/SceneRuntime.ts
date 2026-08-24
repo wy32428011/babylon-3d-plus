@@ -885,17 +885,17 @@ export class SceneRuntime {
     })();
   }
 
-  /** 统一发 fetch 库存请求：rows 为空数组时服务端返回全量数据；失败时记日志并返回 null。 */
+  /** 统一发 fetch 库存请求：dataflow 接口忽略 rows 始终全量返回，按排过滤在客户端完成；失败时记日志并返回 null。 */
   private async fetchInventoryRecords(fetchConfig: FetchConfig, rows: string[]): Promise<FetchContainerRecord[] | null> {
     if (!fetchConfig.url) return null;
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (fetchConfig.apiKey) headers['X-API-Key'] = fetchConfig.apiKey;
+
       const response = await fetch(fetchConfig.url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': fetchConfig.apiKey,
-        },
+        headers,
         body: JSON.stringify({ rows }),
       });
 
@@ -904,8 +904,17 @@ export class SceneRuntime {
         return null;
       }
 
-      const data: { records: FetchContainerRecord[] } = (await response.json())?.data;
-      return data?.records ?? [];
+      // dataflow 响应结构：data.records 为结果分组数组，货物记录在每组的 result 里
+      const groups: Array<{ result?: FetchContainerRecord[] }> = (await response.json())?.data?.records;
+      if (!Array.isArray(groups)) {
+        this.pushLog('Fetch 响应缺少 data.records。');
+        return null;
+      }
+      const records: FetchContainerRecord[] = [];
+      for (const group of groups) {
+        if (Array.isArray(group?.result)) records.push(...group.result);
+      }
+      return records;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.pushLog(`Fetch 处理异常：${message}`);

@@ -7,9 +7,9 @@ import { LocatorFetchRuntime, type FetchContainerRecord } from '../../src/runtim
 import type { LocatorRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
 import type { LocatorComponent, ModelGeneratorComponent, ModelGeneratorTarget } from '../../src/editor/model/components';
 
-function createRecord(column: number, layer: number): FetchContainerRecord {
+function createRecord(column: number, layer: number, overrides: Partial<FetchContainerRecord> = {}): FetchContainerRecord {
   return {
-    containerCode: [`C_${column}_${layer}`],
+    containerCode: `C_${column}_${layer}`,
     containerType: 'box',
     isEmpty: false,
     locType: '',
@@ -17,9 +17,10 @@ function createRecord(column: number, layer: number): FetchContainerRecord {
     column,
     layer,
     tier: 0,
-    stackingRow: 0,
-    stackingColumn: 0,
-    stackingLayer: 0,
+    stackingRow: '1',
+    stackingColumn: column,
+    stackingLayer: layer,
+    ...overrides,
   };
 }
 
@@ -56,6 +57,30 @@ test('内置立方体目标：批次几何底部中心锚定原点，实例矩�
     const translation = batchMesh.thinInstanceGetWorldMatrices()[0].getTranslation();
     assert.ok(Vector3.Distance(translation, new Vector3(10, 2, 5)) < 1e-6,
       `实例平移必须即格口底面中心 (10,2,5)，实际 (${translation})`);
+    runtime.dispose();
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
+test('isEmpty 空货位不渲染货物', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const runtime = new LocatorFetchRuntime(scene, 'loc1');
+    await runtime.applyRecords(
+      [createRecord(1, 1), createRecord(2, 1, { isEmpty: true }), createRecord(3, 1, { isEmpty: true })],
+      locatorEntry,
+      locatorComponent,
+      null,
+      () => Matrix.Identity(),
+      () => Promise.reject(new Error('内置几何体目标不应走模型模板加载')),
+    );
+
+    const batchMeshes = findBatchMeshes(scene);
+    assert.equal(batchMeshes.length, 1);
+    assert.equal(batchMeshes[0].thinInstanceCount, 1, '3 条记录中 2 条 isEmpty，只渲染 1 个实例');
     runtime.dispose();
   } finally {
     scene.dispose();

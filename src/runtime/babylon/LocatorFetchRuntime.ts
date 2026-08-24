@@ -12,9 +12,9 @@ import type { LocatorComponent, ModelGeneratorComponent, ModelGeneratorRule, Mod
 import type { LocatorRuntimeEntry } from './SceneRuntime';
 import { createMeshModelGeneratorTarget, createModelGeneratorTargetSignature } from '../../editor/model/modelGenerator';
 
-/** fetch 响应中的单条货物记录 */
+/** fetch 响应中的单条货物记录（dataflow API：data.records[].result[]） */
 export type FetchContainerRecord = {
-  containerCode: string[];
+  containerCode: string;
   containerType: string;
   isEmpty: boolean;
   locType: string;
@@ -22,7 +22,7 @@ export type FetchContainerRecord = {
   column: number;
   layer: number;
   tier: number;
-  stackingRow: number;
+  stackingRow: string;
   stackingColumn: number;
   stackingLayer: number;
 };
@@ -108,6 +108,7 @@ export class LocatorFetchRuntime {
     const rowKey = String(locatorComponent.rowNumber).trim();
     const ownRecords = records.filter(
       (record) => String(record.row ?? '').trim() === rowKey
+        && !record.isEmpty
         && !this.suppressedCellKeys.has(createFetchCellKey(record.column, record.layer)),
     );
 
@@ -122,7 +123,7 @@ export class LocatorFetchRuntime {
       if (!target) continue;
 
       nextInstances.push({
-        cargoCode: record.containerCode?.[0] ?? `${record.containerType}_${record.column}_${record.layer}`,
+        cargoCode: record.containerCode || `${record.containerType}_${record.column}_${record.layer}`,
         targetSignature: createModelGeneratorTargetSignature(target),
         target,
         column: record.column,
