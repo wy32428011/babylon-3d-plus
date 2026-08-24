@@ -752,6 +752,14 @@ export class StackerTelemetryDriver {
 
     const fetchRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
     if (fetchRow === null) {
+      // 货物网格位姿落后叉状态一帧：交接前对齐到持货位，
+      // 否则 conveyor 交接插值以滞后位姿起步，放货后多出一段本不存在的滑行动画
+      const cargo = this.state.stackerCargoMeshes.get(cargoKey);
+      if (cargo) {
+        const rotation = (side === 'front' ? state.frontCargoHoldRotation : state.backCargoHoldRotation)
+          ?? currentRotation ?? holdPose.rotation;
+        this.host.setGeneratedCargoRootPose(cargo, holdPosition, rotation, null);
+      }
       this.context.placeCargoIntoConveyorPlatform(targetLocator.entityId, cargoKey);
     }
   }
