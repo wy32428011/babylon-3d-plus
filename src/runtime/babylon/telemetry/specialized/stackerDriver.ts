@@ -667,15 +667,18 @@ export class StackerTelemetryDriver {
     if (frontX !== null && frontY !== null) this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY);
     const holdPosition = this.resolveCellCargoHoldPosition(model, targetLocator, targetPosition);
     const holdPose = getNodeWorldPosePreservingMirror(targetLocator.root);
+    // 接管货保持来货世界朝向（交接只平移）；fresh 刷出取货格朝向
+    const holdRotation = this.state.stackerCargoMeshes.get(this.getStackerCargoKey(model.assetCode, side))?.lockedWorldRotation
+      ?? holdPose.rotation;
     if (side === 'front') {
       state.frontCargoKey = this.getStackerCargoKey(model.assetCode, side);
       state.frontCargoHoldPosition = holdPosition;
-      state.frontCargoHoldRotation = holdPose.rotation;
+      state.frontCargoHoldRotation = holdRotation;
       state.frontCargoHoldScaling = holdPose.scaling;
     } else {
       state.backCargoKey = this.getStackerCargoKey(model.assetCode, side);
       state.backCargoHoldPosition = holdPosition;
-      state.backCargoHoldRotation = holdPose.rotation;
+      state.backCargoHoldRotation = holdRotation;
       state.backCargoHoldScaling = holdPose.scaling;
     }
   }
@@ -837,7 +840,7 @@ export class StackerTelemetryDriver {
     const targetPosition = bound || !holdPosition
       ? this.getStackerForkCargoPosition(model, side)
       : holdPosition;
-    const targetRotation = holdRotation ?? getNodeWorldRotation(model.root);
+    const targetRotation = holdRotation ?? cargo.lockedWorldRotation ?? getNodeWorldRotation(model.root);
     // 跨设备接管的货物从原世界位姿插值接入本机锚点，目标位姿每帧动态追踪（如叉尖随叉移动）
     const pose = resolveCargoHandoffPose(cargo, targetPosition, targetRotation, deltaSeconds);
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, bound ? null : holdScaling);
@@ -989,7 +992,7 @@ export class StackerTelemetryDriver {
       generatorEntityId: null,
       handoff: null,
       axialLengthCache: null,
-      placedWorldRotation: null,
+      lockedWorldRotation: null,
     };
     this.state.stackerCargoMeshes.set(key, entry);
     return entry;

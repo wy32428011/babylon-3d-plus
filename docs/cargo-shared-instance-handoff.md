@@ -29,6 +29,7 @@
 - `resolveCargoHandoffPose(cargo, targetPosition, targetRotation, deltaSeconds)`：三个 `update*CargoPose` 算出各自最终目标位姿后统一过一层 lerp/slerp，progress 到 1 自动清除。
 - 关键性质：**目标位姿每帧动态计算**（stacker 叉尖随叉移动、conveyor 行程位置、rgv 工位），插值天然追踪动态目标；两设备交替接管同 task 时过渡反复重启，但起点永远是当前世界位姿，视觉连续无跳变。
 - RGV 自身的 `RGV_CARGO_TRANSFER_SECONDS` 状态机插值（列↔车）与 handoff 层叠加互不干扰。
+- **朝向全程锁定**：`lockedWorldRotation` 于首次位姿写入时建立（`setGeneratedCargoRootPose` 单点 `??=`），三个驱动的每帧目标朝向均取锁定值（fresh 货缺省回退各自机体/货格朝向，与刷出视觉一致）；handoff 的 slerp 因此恒为恒等，直角交接处货箱只平移不旋转。后续物理旋转台逻辑经改写锁定字段接入。
 
 ### 3. 各设备刷出时机与锁
 

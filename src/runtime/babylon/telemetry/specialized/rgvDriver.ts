@@ -395,7 +395,12 @@ export class RgvTelemetryDriver {
     this.getOrCreateRgvCargo(model.assetCode, side);
     const cargoKey = this.getRgvCargoKey(model.assetCode, side);
     this.adoptOrCreateRgvCargo(model, side, task, containerCode);
-    const edgePose = this.getRgvTransferEdgePose(model, side, pose.position);
+    const edgePose = this.getRgvTransferEdgePose(
+      model,
+      side,
+      pose.position,
+      this.state.rgvCargoMeshes.get(cargoKey)?.lockedWorldRotation ?? null,
+    );
     if (side === 'front') {
       state.frontCargoKey = cargoKey;
       state.frontCargoHoldPosition = edgePose.position;
@@ -413,7 +418,8 @@ export class RgvTelemetryDriver {
 
   /** 放货起转锁列：以车体朝向列设备一侧的侧缘作为货箱移出终点；车上无货时忽略。 */
   private beginRgvPlaceTransfer(model: ModelRuntimeEntry, side: RgvForkSide, column: number | null): void {
-    if (!this.getRgvForkCargoKey(model, side)) return;
+    const cargoKey = this.getRgvForkCargoKey(model, side);
+    if (!cargoKey) return;
     if (column === null) {
       this.reportRgvIssueOnce(
         `rgv-place-no-column:${model.assetCode}:${side}`,
@@ -426,7 +432,12 @@ export class RgvTelemetryDriver {
     if (!pose) return;
 
     const state = model.rgvTelemetry;
-    const edgePose = this.getRgvTransferEdgePose(model, side, pose.position);
+    const edgePose = this.getRgvTransferEdgePose(
+      model,
+      side,
+      pose.position,
+      this.state.rgvCargoMeshes.get(cargoKey)?.lockedWorldRotation ?? null,
+    );
     if (side === 'front') {
       state.frontCargoHoldPosition = edgePose.position;
       state.frontCargoHoldRotation = edgePose.rotation;
@@ -512,7 +523,7 @@ export class RgvTelemetryDriver {
     const progress = side === 'front' ? state.frontTransferProgress : state.backTransferProgress;
 
     this.host.syncGeneratedCargoVisual(cargo, 'rgv', snapshot, this.host.resolveCargoGeneratorForModel(model));
-    const station = this.getRgvStationPose(model, side);
+    const station = this.getRgvStationPose(model, side, cargo.lockedWorldRotation);
     let targetPosition = station.position;
     let targetRotation = station.rotation;
     if (!onBoard && holdPosition && progress < 1) {
@@ -529,11 +540,11 @@ export class RgvTelemetryDriver {
   /**
    * 车工位锚点：配置了该侧 cargo.frontNodes/backNodes 时取其台面节点包围盒中心；
    * 未配置回退整体台面包围盒沿行走轴的四分位点（前=+Z 侧，后=-Z 侧）。
-   * 高度取台面包围盒顶面，货箱刷在台面上方。
+   * 高度取台面包围盒顶面，货箱刷在台面上方；朝向取货箱锁定朝向，缺省（fresh 刷出）回退机体朝向。
    */
-  private getRgvStationPose(model: ModelRuntimeEntry, side: RgvForkSide): { position: Vector3; rotation: Quaternion } {
+  private getRgvStationPose(model: ModelRuntimeEntry, side: RgvForkSide, lockedRotation: Quaternion | null): { position: Vector3; rotation: Quaternion } {
     const state = model.rgvTelemetry;
-    const rotation = getNodeWorldRotation(model.root);
+    const rotation = lockedRotation ?? getNodeWorldRotation(model.root);
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
 
     const sideBounds = this.getRgvCargoDeckSideBounds(model, side);
@@ -565,8 +576,9 @@ export class RgvTelemetryDriver {
     model: ModelRuntimeEntry,
     side: RgvForkSide,
     columnPosition: Vector3,
+    lockedRotation: Quaternion | null,
   ): { position: Vector3; rotation: Quaternion } {
-    const station = this.getRgvStationPose(model, side);
+    const station = this.getRgvStationPose(model, side, lockedRotation);
     const bounds = this.getRgvCargoDeckSideBounds(model, side) ?? this.getRgvCargoDeckBounds(model);
     if (!bounds) return station;
 
@@ -583,7 +595,7 @@ export class RgvTelemetryDriver {
 
   // ===== 列绑定解析 =====
 
-  /** 解析列号绑定的场景实体世界位姿；未绑定或实体已删除时一次性告警并返回 null。 */
+  /** 解析列号绑定的场景实体世界位姿：列为 conveyor 时对齐基准取其载货面中心而非实体 root 原点；未绑定或实体已删除时一次性告警并返回 null。 */
   private resolveRgvColumnPose(model: ModelRuntimeEntry, column: number): { position: Vector3; rotation: Quaternion } | null {
     const entityId = model.telemetryBinding?.columnBindings?.[String(column)];
     if (!entityId) {
@@ -601,7 +613,8 @@ export class RgvTelemetryDriver {
       );
       return null;
     }
-    return pose;
+    const deckCenter = this.context.resolveConveyorDeckCenterWorld(entityId);
+    return deckCenter ? { position: deckCenter, rotation: pose.rotation } : pose;
   }
 
   /** 读取有效列号：正整数才合法，0/负值/缺失视为无列。 */
@@ -642,7 +655,7 @@ export class RgvTelemetryDriver {
       generatorEntityId: null,
       handoff: null,
       axialLengthCache: null,
-      placedWorldRotation: null,
+      lockedWorldRotation: null,
     };
     this.state.rgvCargoMeshes.set(key, entry);
     return entry;

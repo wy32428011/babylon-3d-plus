@@ -4408,10 +4408,11 @@ export class SceneRuntime {
     cargo.root.dispose();
   }
 
-  /** 设置普通自动货物世界支撑点、朝向和缩放（箱位含镜像时缩放保留负号）；root 无父级，不受 POI Transform 影响。 */
+  /** 设置普通自动货物世界支撑点、朝向和缩放（箱位含镜像时缩放保留负号）；root 无父级，不受 POI Transform 影响。首次写入建立全生命周期朝向锁定，之后转运/交接只平移不旋转。 */
   private setGeneratedCargoRootPose(cargo: GeneratedCargoRuntimeEntry, position: Vector3, rotation: Quaternion, scaling?: Vector3 | null): void {
     cargo.root.position.copyFrom(position);
     cargo.root.rotationQuaternion = rotation.clone();
+    cargo.lockedWorldRotation ??= rotation.clone();
     cargo.root.scaling.copyFrom(scaling ?? Vector3.OneReadOnly);
     cargo.root.computeWorldMatrix(true);
     cargo.outputOwner && this.applyGeneratedOutputPresentation(cargo.outputOwner);

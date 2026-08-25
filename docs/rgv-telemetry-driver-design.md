@@ -102,6 +102,8 @@ resolveColumnTargetPose(entityId: string): { position: Vector3; rotation: Quater
 
 由 `SceneRuntime` 实现：查实体运行时节点的世界位姿（模型实体用 contentRoot/包围盒中心，普通实体用 root）。支撑位约定：**实体 root 世界位置 + root 朝向**；若实际站台需要高度偏移，后续在列绑定条目上扩展 per-column offset（初版不做）。
 
+对齐基准修正（2026-08）：列绑定实体为 conveyor 时，`resolveRgvColumnPose` 改经 `SpecializedTelemetryDriverContext.resolveConveyorDeckCenterWorld(entityId)` 取**该 conveyor 载货面中心**（`cargo.travel.nodes` 包围盒中心，facade 委托 `ConveyorTelemetryDriver.resolveCargoDeckCenterWorld`），与 RGV 自身 `cargo.frontNodes/backNodes` 台面中心在行走轴投影上对齐；非 conveyor 列仍回退 root 位姿。
+
 ## 5. 坐标系与投影规则
 
 ### 5.1 模型局部坐标约定（来自 `rgv.model.ts` 头部注释）

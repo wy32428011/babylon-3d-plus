@@ -328,7 +328,7 @@ export class ConveyorTelemetryDriver {
     const pose = resolveCargoHandoffPose(
       cargo,
       this.getConveyorCargoPosition(model, plan.travelContext, state.cargoTravelOffset),
-      cargo.placedWorldRotation ?? getNodeWorldRotation(model.root),
+      cargo.lockedWorldRotation ?? getNodeWorldRotation(model.root),
       deltaSeconds,
     );
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation);
@@ -644,8 +644,6 @@ export class ConveyorTelemetryDriver {
     cargo.assetCode = subscriber.assetCode;
     cargo.task = task;
     cargo.handoff = createCargoHandoffState(cargo, CARGO_HANDOFF_SECONDS / Math.max(hops, 1));
-    // 交付下游输送机：落货朝向保留仅限落货本机，下游恢复对齐机体朝向（与既有交付语义一致）
-    cargo.placedWorldRotation = null;
 
     const plan = this.resolveConveyorTravelPlan(subscriber);
     subscriberState.cargoCode = CONVEYOR_CARGO_IDENTITY;
@@ -883,7 +881,7 @@ export class ConveyorTelemetryDriver {
       generatorEntityId: null,
       handoff: null,
       axialLengthCache: null,
-      placedWorldRotation: null,
+      lockedWorldRotation: null,
     };
     this.state.conveyorCargoMeshes.set(key, entry);
     return entry;
@@ -924,6 +922,11 @@ export class ConveyorTelemetryDriver {
     return cargo;
   }
 
+  /** RGV 列接驳对齐用：本机载货面中心（cargo.travel.nodes 包围盒中心，未配置回退整机包围盒/根点）。 */
+  resolveCargoDeckCenterWorld(model: ModelRuntimeEntry): Vector3 {
+    return this.resolveConveyorCargoTravelContext(model).center;
+  }
+
   /** 站台放货预检：本机空闲且站台偏移可解析才允许交接；纯读无副作用，供调用方在拆除原持货引用前判定。 */
   canAcceptPlatformPlacedCargo(model: ModelRuntimeEntry, platform: LocatorRuntimeEntry): boolean {
     const state = model.conveyorTelemetry;
@@ -950,8 +953,6 @@ export class ConveyorTelemetryDriver {
 
     cargo.assetCode = model.assetCode;
     cargo.handoff = createCargoHandoffState(cargo);
-    // 落货保持叉上朝向：站台落货不改变货物姿态，货物随线走行也不自转
-    cargo.placedWorldRotation = cargo.root.rotationQuaternion?.clone() ?? null;
     this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(model.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
     state.cargoCode = CONVEYOR_CARGO_IDENTITY;
     state.cargoTravelOffset = platformOffset;

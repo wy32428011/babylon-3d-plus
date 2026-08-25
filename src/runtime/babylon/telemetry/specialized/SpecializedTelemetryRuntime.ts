@@ -1,4 +1,4 @@
-import type { Scene } from '@babylonjs/core';
+import type { Scene, Vector3 } from '@babylonjs/core';
 import type { ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
 import {
@@ -290,6 +290,15 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       return false;
     }
     return true;
+  }
+
+  /** RGV 列接驳对齐用：列绑定实体为 conveyor 时返回其载货面中心；非 conveyor 或实体不存在返回 null（调用方回退 root 位姿）。 */
+  resolveConveyorDeckCenterWorld(entityId: string): Vector3 | null {
+    for (const { entityId: id, model } of this.host.collectModels()) {
+      if (id !== entityId) continue;
+      return isConveyorRuntimeModel(model) ? this.conveyorDriver.resolveCargoDeckCenterWorld(model) : null;
+    }
+    return null;
   }
 
   // ===== 帧内私有方法 =====

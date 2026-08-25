@@ -165,8 +165,8 @@ export type GeneratedCargoRuntimeEntry = {
   handoff: CargoHandoffState | null;
   /** conveyor 专用：按模板 target 签名缓存的实测沿行走轴长度（米），避免每帧重测包围盒。 */
   axialLengthCache: { key: string; lengthMeters: number } | null;
-  /** conveyor 专用：stacker/RGV 落货交接的货物保持落货时世界朝向（落站台不自转）；交付下游输送机时清除，恢复对齐机体朝向。 */
-  placedWorldRotation: Quaternion | null;
+  /** 货箱全生命周期锁定的世界朝向：首次位姿写入时建立，转运/交接只平移不旋转；后续物理旋转设备经改写此字段接入。 */
+  lockedWorldRotation: Quaternion | null;
 };
 
 export type StackerCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
@@ -465,4 +465,6 @@ export interface SpecializedTelemetryDriverContext {
   adoptConveyorPlatformCargo(locatorEntityId: string, stackerAssetCode: string): GeneratedCargoRuntimeEntry | null;
   /** stacker 落货到 conveyor 站台时交接货物给该 conveyor；conveyor 已有货或非站台货格返回 false，此时不拆除原持货引用。 */
   placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
+  /** RGV 列接驳对齐用：列绑定实体为 conveyor 时返回其载货面中心（cargo.travel.nodes 包围盒中心）；非 conveyor 或实体不存在返回 null。 */
+  resolveConveyorDeckCenterWorld(entityId: string): Vector3 | null;
 }
