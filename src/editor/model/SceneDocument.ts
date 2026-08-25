@@ -1293,6 +1293,27 @@ export function createAutoPatrolEntity(position: Vector3Data = vector3()): Entit
   };
 }
 
+/** 创建全场唯一的手动漫游出生点；Transform.position 表示人物脚底世界坐标。 */
+export function createManualRoamSpawnEntity(position: Vector3Data = vector3()): Entity {
+  const id = createId('entity');
+  return {
+    id,
+    name: '手动漫游初始位置',
+    visible: true,
+    locked: false,
+    parentId: null,
+    childrenIds: [],
+    components: {
+      transform: {
+        position: vector3(position.x, position.y, position.z),
+        rotation: vector3(),
+        scale: vector3(1, 1, 1),
+      },
+      manualRoamSpawn: {},
+    },
+  };
+}
+
 /** 创建一个 POI 内置 EFF 实体，默认在编辑态持续播放并支持完整 Transform。 */
 export function createPoiEffectEntity(effectKind: PoiEffectKind, position: Vector3Data = vector3()): Entity {
   const id = createId('entity');

@@ -260,6 +260,9 @@ export type AutoPatrolComponent = {
   waypoints: AutoPatrolWaypoint[];
 };
 
+/** 手动漫游出生点只保存实体 Transform；空组件用于稳定标识全场唯一对象。 */
+export type ManualRoamSpawnComponent = Record<string, never>;
+
 export type EntityComponents = {
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
@@ -276,4 +279,5 @@ export type EntityComponents = {
   light?: LightComponent;
   poiEffect?: PoiEffectComponent;
   autoPatrol?: AutoPatrolComponent;
+  manualRoamSpawn?: ManualRoamSpawnComponent;
 };
