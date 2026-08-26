@@ -19,10 +19,12 @@ import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from '../../r
 import { readIntegerField, readStringField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
+import { isConveyorRuntimeModel } from './specializedModelAssets';
 import {
   createCargoHandoffState,
   normalizeCargoTask,
   resolveCargoHandoffPose,
+  type GeneratedCargoRuntimeEntry,
   type RgvCargoRuntimeEntry,
   type RgvForkSide,
   type RgvTravelConstraint,
@@ -34,11 +36,16 @@ import {
   type SpecializedTelemetrySharedState,
 } from './types';
 
+/** 列候选仲裁偏好：取货对齐持有该 task 货物的 conveyor，放货对齐正在等待该 task 的 conveyor。 */
+type RgvColumnPreference = { task: string; mode: 'fetch' | 'place' };
+
 /**
  * RGV（有轨穿梭车）遥测驱动：列号(front_y/back_y) → 列绑定实体投影定位车体；
  * movement_z 起转边沿锁定交接列，command 决定取货(列→车)/放货(车→列)方向。
  * 协议无完成码，command 回落 0 作为完成兜底；
  * task（front_task/back_task）只参与全局货物唯一接管（同 task 货箱实例移交本机），不参与本机流程。
+ * 同列允许绑定多台 conveyor：取货对齐持有该 task 货物的一台，放货交付给正在等待该 task 的一台
+ * （conveyor task 订阅/广播状态仲裁）；无等待方时保持停转销毁语义。
  */
 export class RgvTelemetryDriver {
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
@@ -94,9 +101,10 @@ export class RgvTelemetryDriver {
         ? backColumn
         : frontColumn ?? backColumn;
 
-    // 列号边沿：解析列绑定实体，让载货台面该侧工位的行走轴投影与列投影对齐
+    // 列号边沿：解析列绑定实体，让载货台面该侧工位的行走轴投影与列投影对齐；
+    // 同列多台 conveyor 时按 command 语义取偏好（取货对齐持货方/放货对齐等待方），无匹配回退首个绑定。
     if (!snapshot.faulted && authoritativeColumn !== null && authoritativeColumn !== state.travelTargetColumn) {
-      const pose = this.resolveRgvColumnPose(model, authoritativeColumn);
+      const pose = this.resolveRgvColumnPose(model, authoritativeColumn, this.resolveTravelAlignPreference(snapshot, authoritativeSide, frontCommand, backCommand));
       if (pose) {
         state.travelTargetColumn = authoritativeColumn;
         state.travelTargetPosition = this.constrainRgvTravelPosition(
@@ -347,9 +355,11 @@ export class RgvTelemetryDriver {
         if (command === 1 || command === 3) this.advanceRgvTransfer(model, side, 1, deltaSeconds);
         else if (command === 2) this.advanceRgvTransfer(model, side, -1, deltaSeconds);
       }
-      // movement_z 非0→0 停转边沿：放货交接完成，销毁货箱（之后由列设备侧渲染）
+      // movement_z 非0→0 停转边沿：放货交接完成，先按订阅仲裁交付给该列等待方 conveyor，无等待方保持销毁
       if (command === 2 && movementZ === 0 && lastMovementZ !== null && lastMovementZ !== 0) {
-        this.disposeRgvForkCargo(model, side);
+        if (!this.tryDeliverRgvPlaceCargo(model, side, column ?? state.travelTargetColumn)) {
+          this.disposeRgvForkCargo(model, side);
+        }
       }
       // command 1/3→0 边沿：取货完成，兜底绑定上车
       if (command === 0 && (lastCommand === 1 || lastCommand === 3)) {
@@ -359,9 +369,11 @@ export class RgvTelemetryDriver {
         }
         this.completeRgvFetch(model, side);
       }
-      // command 2→0 边沿：停转边沿被稀疏遥测跳过时兜底销毁
+      // command 2→0 边沿：停转边沿被稀疏遥测跳过时兜底交付/销毁
       if (command === 0 && lastCommand === 2) {
-        this.disposeRgvForkCargo(model, side);
+        if (!this.tryDeliverRgvPlaceCargo(model, side, column ?? state.travelTargetColumn)) {
+          this.disposeRgvForkCargo(model, side);
+        }
       }
     }
 
@@ -389,7 +401,7 @@ export class RgvTelemetryDriver {
       return;
     }
 
-    const pose = this.resolveRgvColumnPose(model, column);
+    const pose = this.resolveRgvColumnPose(model, column, task ? { task, mode: 'fetch' } : undefined);
     if (!pose) return;
 
     this.getOrCreateRgvCargo(model.assetCode, side);
@@ -428,7 +440,8 @@ export class RgvTelemetryDriver {
       return;
     }
 
-    const pose = this.resolveRgvColumnPose(model, column);
+    const cargoTask = this.state.rgvCargoMeshes.get(cargoKey)?.task ?? '';
+    const pose = this.resolveRgvColumnPose(model, column, cargoTask ? { task: cargoTask, mode: 'place' } : undefined);
     if (!pose) return;
 
     const state = model.rgvTelemetry;
@@ -507,6 +520,35 @@ export class RgvTelemetryDriver {
     if (!cargoKey) return;
     this.disposeRgvCargoByKey(cargoKey);
     this.clearRgvForkCargoState(model, side);
+  }
+
+  /**
+   * 放货完成的订阅仲裁交付：该列绑定中正在等待本货 task 的 conveyor 接收货物（进入链路自驱+广播）；
+   * 无等待方或交付预检不过返回 false，调用方走原销毁路径。匿名货（无 task）不参与仲裁。
+   */
+  private tryDeliverRgvPlaceCargo(model: ModelRuntimeEntry, side: RgvForkSide, column: number | null): boolean {
+    const cargoKey = this.getRgvForkCargoKey(model, side);
+    if (!cargoKey || column === null) return false;
+    const task = this.state.rgvCargoMeshes.get(cargoKey)?.task ?? '';
+    if (!task) return false;
+    for (const candidate of this.resolveRgvColumnCandidates(model, column)) {
+      if (this.context.deliverRgvCargoToConveyorColumn(candidate.entityId, cargoKey, task)) return true;
+    }
+    return false;
+  }
+
+  /** 外部拉取就绪门控：仅当持货侧处于放货流程（command 2）且车体已到位（无未达行走目标）时允许 pull 摘除，防止行车中途摘货。 */
+  isRgvCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean {
+    for (const { model } of this.host.collectModels()) {
+      const state = model.rgvTelemetry;
+      if (state.frontCargoKey && this.state.rgvCargoMeshes.get(state.frontCargoKey) === cargo) {
+        return state.frontLastCommand === 2 && state.travelTargetPosition === null;
+      }
+      if (state.backCargoKey && this.state.rgvCargoMeshes.get(state.backCargoKey) === cargo) {
+        return state.backLastCommand === 2 && state.travelTargetPosition === null;
+      }
+    }
+    return false;
   }
 
   /** 每帧刷新货箱外观与位姿：车上跟随工位锚点，交接中在列支撑位与工位间插值；跨设备接管货物再叠加 handoff 过渡。 */
@@ -595,26 +637,98 @@ export class RgvTelemetryDriver {
 
   // ===== 列绑定解析 =====
 
-  /** 解析列号绑定的场景实体世界位姿：列为 conveyor 时对齐基准取其载货面中心而非实体 root 原点；未绑定或实体已删除时一次性告警并返回 null。 */
-  private resolveRgvColumnPose(model: ModelRuntimeEntry, column: number): { position: Vector3; rotation: Quaternion } | null {
-    const entityId = model.telemetryBinding?.columnBindings?.[String(column)];
-    if (!entityId) {
+  /**
+   * 解析列号绑定的全部候选实体世界位姿：列为 conveyor 时对齐基准取其载货面中心而非实体 root 原点；
+   * 未绑定或实体已删除时一次性告警并从候选中剔除，全部失效返回空数组。
+   */
+  private resolveRgvColumnCandidates(model: ModelRuntimeEntry, column: number): { entityId: string; pose: { position: Vector3; rotation: Quaternion } }[] {
+    const bindings = model.telemetryBinding?.columnBindings?.[String(column)];
+    if (!bindings || bindings.length === 0) {
       this.reportRgvIssueOnce(
         `rgv-column-unbound:${model.assetCode}:${column}`,
         `RGV ${model.assetCode} 列 ${column} 未绑定场景实体，已忽略该列定位。`,
       );
-      return null;
+      return [];
     }
-    const pose = this.host.resolveColumnTargetPose(entityId);
-    if (!pose) {
-      this.reportRgvIssueOnce(
-        `rgv-column-missing:${model.assetCode}:${column}:${entityId}`,
-        `RGV ${model.assetCode} 列 ${column} 绑定的实体已不存在，已忽略该列定位。`,
-      );
-      return null;
+    const candidates: { entityId: string; pose: { position: Vector3; rotation: Quaternion } }[] = [];
+    for (const entityId of bindings) {
+      const pose = this.host.resolveColumnTargetPose(entityId);
+      if (!pose) {
+        this.reportRgvIssueOnce(
+          `rgv-column-missing:${model.assetCode}:${column}:${entityId}`,
+          `RGV ${model.assetCode} 列 ${column} 绑定的实体已不存在，已忽略该实体定位。`,
+        );
+        continue;
+      }
+      const deckCenter = this.context.resolveConveyorDeckCenterWorld(entityId);
+      candidates.push({ entityId, pose: deckCenter ? { position: deckCenter, rotation: pose.rotation } : pose });
     }
-    const deckCenter = this.context.resolveConveyorDeckCenterWorld(entityId);
-    return deckCenter ? { position: deckCenter, rotation: pose.rotation } : pose;
+    return candidates;
+  }
+
+  /**
+   * 解析列定位位姿：同列多台候选时按偏好仲裁（fetch 对齐持有该 task 货物的 conveyor，
+   * place 对齐正在等待该 task 的 conveyor）；无偏好或无匹配回退首个候选，保持单绑定兼容。
+   */
+  private resolveRgvColumnPose(
+    model: ModelRuntimeEntry,
+    column: number,
+    preference?: RgvColumnPreference,
+  ): { position: Vector3; rotation: Quaternion } | null {
+    const candidates = this.resolveRgvColumnCandidates(model, column);
+    if (candidates.length === 0) return null;
+    if (preference) {
+      const matched = this.selectRgvColumnCandidateByPreference(candidates, preference);
+      if (matched) return matched.pose;
+    }
+    return candidates[0].pose;
+  }
+
+  /** 按偏好在候选中找交接对象：place 匹配 conveyor 订阅等待态，fetch 匹配其持货 task；候选非 conveyor 跳过。 */
+  private selectRgvColumnCandidateByPreference(
+    candidates: { entityId: string; pose: { position: Vector3; rotation: Quaternion } }[],
+    preference: RgvColumnPreference,
+  ): { entityId: string; pose: { position: Vector3; rotation: Quaternion } } | null {
+    if (!preference.task) return null;
+    for (const candidate of candidates) {
+      const conveyor = this.findConveyorModelByEntityId(candidate.entityId);
+      if (!conveyor) continue;
+      if (preference.mode === 'place') {
+        const state = conveyor.conveyorTelemetry;
+        if (state.cargoCode === null && (state.pendingTask === preference.task || state.waitingTask === preference.task)) {
+          return candidate;
+        }
+        continue;
+      }
+      for (const cargo of this.state.conveyorCargoMeshes.values()) {
+        if (cargo.assetCode === conveyor.assetCode && cargo.task === preference.task) return candidate;
+      }
+    }
+    return null;
+  }
+
+  /** 按实体 ID 找 conveyor 模型：命中非 conveyor 或实体不存在返回 null。 */
+  private findConveyorModelByEntityId(entityId: string): ModelRuntimeEntry | null {
+    for (const entry of this.host.collectModels()) {
+      if (entry.entityId !== entityId) continue;
+      return isConveyorRuntimeModel(entry.model) ? entry.model : null;
+    }
+    return null;
+  }
+
+  /** 行走对齐偏好：活跃侧 command 语义（1/3 取货对齐持货方，2 放货对齐等待方）+ 该侧 task；无 task 或无活动 command 不偏好。 */
+  private resolveTravelAlignPreference(
+    snapshot: DeviceTelemetrySnapshot,
+    side: RgvForkSide,
+    frontCommand: number | null,
+    backCommand: number | null,
+  ): RgvColumnPreference | undefined {
+    const command = side === 'front' ? frontCommand : backCommand;
+    const task = normalizeCargoTask(readIntegerField(snapshot.fields, side === 'front' ? 'front_task' : 'back_task'));
+    if (!task || command === null) return undefined;
+    if (command === 2) return { task, mode: 'place' };
+    if (command === 1 || command === 3) return { task, mode: 'fetch' };
+    return undefined;
   }
 
   /** 读取有效列号：正整数才合法，0/负值/缺失视为无列。 */

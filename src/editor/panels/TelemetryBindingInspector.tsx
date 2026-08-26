@@ -196,7 +196,7 @@ function TelemetryRuntimeDiagnosticsView(props: Pick<Props, 'entityId' | 'bindin
   );
 }
 
-/** RGV 列绑定编辑：协议列号(front_y/back_y) → 场景实体，运行时把实体位姿投影到车体行走轴。 */
+/** RGV 列绑定编辑：协议列号(front_y/back_y) → 场景实体，运行时把实体位姿投影到车体行走轴；同列可绑多台 conveyor，交接对象按 task 订阅状态仲裁。 */
 function RgvColumnBindingsEditor(props: {
   entityId: string;
   binding: TelemetryBindingComponent;
@@ -212,24 +212,24 @@ function RgvColumnBindingsEditor(props: {
     })
     .map((entityId) => ({ id: entityId, name: scene.entities[entityId]?.name ?? entityId }));
   const entries = Object.entries(props.binding.columnBindings ?? {})
-    .map(([column, targetId]) => ({ column: Number(column), targetId }))
+    .flatMap(([column, targetIds]) => (Array.isArray(targetIds) ? targetIds : [targetIds]).map((targetId) => ({ column: Number(column), targetId })))
     .filter((entry) => Number.isInteger(entry.column) && entry.column > 0)
     .sort((a, b) => a.column - b.column);
   const hasMissingTarget = entries.some((entry) => !entityOptions.some((option) => option.id === entry.targetId));
 
-  /** 以完整表提交，统一走 normalize 丢弃非法行；空表按删除字段处理。 */
+  /** 以完整表提交，统一走 normalize 丢弃非法行；同列多台按行序分组成数组，空表按删除字段处理。 */
   function commitEntries(next: { column: number; targetId: string }[]): void {
-    const columnBindings: Record<string, string> = {};
+    const columnBindings: Record<string, string[]> = {};
     for (const entry of next) {
       if (!Number.isInteger(entry.column) || entry.column <= 0 || !entry.targetId) continue;
-      columnBindings[String(entry.column)] = entry.targetId;
+      const key = String(entry.column);
+      columnBindings[key] = [...(columnBindings[key] ?? []), entry.targetId];
     }
     props.commit({ columnBindings: Object.keys(columnBindings).length > 0 ? columnBindings : undefined });
   }
 
   function handleColumnChange(index: number, column: number): void {
     if (!Number.isInteger(column) || column <= 0) return;
-    if (entries.some((entry, other) => other !== index && entry.column === column)) return;
     commitEntries(entries.map((entry, other) => (other === index ? { ...entry, column } : entry)));
   }
 
@@ -244,14 +244,18 @@ function RgvColumnBindingsEditor(props: {
   function handleAdd(): void {
     const firstOption = entityOptions[0];
     if (!firstOption) return;
+    // 新增行取第一个未占用列号；同列多台由用户把列号改成已有列号（handleColumnChange 已允许重复）
     let column = 1;
     while (entries.some((entry) => entry.column === column)) column += 1;
-    commitEntries([...entries, { column, targetId: firstOption.id }]);
+    // 目标设备避让同列重复：选未被任何绑定使用的设备，都被占用时退回首个（同列重复由归一化去重兜底）
+    const usedTargetIds = new Set(entries.map((entry) => entry.targetId));
+    const target = entityOptions.find((option) => !usedTargetIds.has(option.id)) ?? firstOption;
+    commitEntries([...entries, { column, targetId: target.id }]);
   }
 
   return (
     <div className="rgv-column-bindings">
-      <p className="muted">协议列号(front_y/back_y) → 场景实体，运行时把实体位姿投影到 RGV 行走轴并作为货箱交接点。</p>
+      <p className="muted">协议列号(front_y/back_y) → 场景实体，运行时把实体位姿投影到 RGV 行走轴并作为货箱交接点。同列可绑多台 conveyor，交接对象由 task 订阅状态仲裁。</p>
 
       <div className="model-generator-section-header">
         <span>列绑定</span>
@@ -272,7 +276,7 @@ function RgvColumnBindingsEditor(props: {
       {entries.map((entry, index) => {
         const missing = !entityOptions.some((option) => option.id === entry.targetId);
         return (
-          <div className="model-generator-rule-card" key={entry.column}>
+          <div className="model-generator-rule-card" key={index}>
             <div className="model-generator-card-header">
               <span>列 {entry.column}</span>
               <span className="model-generator-inline-actions">

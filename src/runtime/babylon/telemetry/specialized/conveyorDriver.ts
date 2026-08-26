@@ -354,6 +354,8 @@ export class ConveyorTelemetryDriver {
         }
         const cargo = this.findHeldCargoByTask(pull.holderAssetCode, pull.task);
         if (!cargo) continue;
+        // RGV 持货门控：仅放货到位才允许摘除，防止行车中途摘货（stacker 持货语义不变）
+        if (this.isRgvHeldCargo(cargo) && !this.context.isRgvCargoReadyForExternalPull(cargo)) continue;
         state.externalPulls.delete(subscriberCode);
         const detached = this.context.detachClaimedCargoByReference(cargo);
         if (!detached) continue;
@@ -698,6 +700,14 @@ export class ConveyorTelemetryDriver {
     return null;
   }
 
+  /** 判断货物当前是否由 RGV 持有（决定外部拉取是否需要 RGV 就绪门控）。 */
+  private isRgvHeldCargo(cargo: GeneratedCargoRuntimeEntry): boolean {
+    for (const entry of this.state.rgvCargoMeshes.values()) {
+      if (entry === cargo) return true;
+    }
+    return false;
+  }
+
   /** 本机有效流向：最近非 0 运行方向，缺省回退（正转）。 */
   private resolveFlowDirection(model: ModelRuntimeEntry, fallback = 1): number {
     const direction = model.conveyorTelemetry?.lastMovementDirection ?? 0;
@@ -969,6 +979,30 @@ export class ConveyorTelemetryDriver {
       state.lastTask = cargo.task;
     }
     this.notifyAvailable(model, cargo.task, this.resolveFlowDirection(model));
+    return true;
+  }
+
+  /** RGV 列放货预检：本机空闲且正在等待该 task（pendingTask/waitingTask 匹配）才允许接收；纯读无副作用。 */
+  canAcceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, task: string): boolean {
+    if (!task) return false;
+    const state = model.conveyorTelemetry;
+    if (state.cargoCode !== null) return false;
+    return state.pendingTask === task || state.waitingTask === task;
+  }
+
+  /**
+   * RGV 列放货交付（订阅仲裁）：货物落地本机进入端并自驱，等价的 taken/available 波接入链路广播，
+   * 本机下游若已有订阅者则继续接力。预检由 canAcceptRgvColumnPlacedCargo 承担（调用方先预检再拆原引用）。
+   */
+  acceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry, task: string): boolean {
+    if (!this.canAcceptRgvColumnPlacedCargo(model, task)) return false;
+    const holderAssetCode = cargo.assetCode;
+    const direction = this.resolveFlowDirection(model);
+    this.settleCargoTransfer(cargo, model, task, 1, direction);
+    // 以接收方为波起点、原持货方记 RGV：沿下行链清除 upstreamLinks 中 holder=RGV 的残留登记
+    this.sendTakenWave(model, holderAssetCode, task, model.assetCode, direction);
+    this.notifyAvailable(model, task, direction);
+    this.tryDeliverHeldCargo(model);
     return true;
   }
 

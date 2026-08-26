@@ -190,6 +190,10 @@ unsubscribe 沿同样的上行目标传递，沿途摘除 `downstreamLinks[订�
 
 stacker/RGV 无链路能力（不收发消息）：subscribe 上行触达时由相邻 conveyor 登记 `externalPulls[订阅者] = {holderAssetCode, task, hops, direction}`。facade 帧尾 `pullExternalHolderCargo()` 扫描全部登记：持有方三张货物表中有该 task 货 → 代交付（同样直达最终订阅者、hops 加速），并由相邻 conveyor 代发 taken 波；登记失配（订阅者已持货/不再等待）即自愈摘除。
 
+**RGV 就绪门控**：探测邻居按初始位姿静态缓存，RGV 是行车设备，登记可能在其行至他列时仍存在；货物在 rgv 货物表时要求持货侧 `command === 2`（放货意图）且车已到位（无未达行走目标）才允许摘除，防止行车中途摘货。stacker 持货不设门控。
+
+**RGV 列放货推送交付**：RGV 列绑定的 conveyor 不参与上行订阅传播（行车后订阅无法触达 RGV），改由 RGV 停转边沿主动推送：该列绑定中 `cargoCode===null && (pendingTask|waitingTask)===task` 的 conveyor 经 `deliverRgvCargoToConveyorColumn` 接收货物——settle（进入端+自驱+清等待）后以接收方为波起点发 taken（原持货方记 RGV）+ available，本机下游已有订阅者时继续接力。无等待方保持停转销毁。
+
 ## 8. 接管自驱（断流不停货）
 
 问题：帧调度默认不驱动断流设备；边缘触发发布的承接方被交付后若无新消息，快照断流后若不做处理，货箱会静止到下一条消息。

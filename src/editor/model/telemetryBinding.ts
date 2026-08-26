@@ -45,8 +45,8 @@ export type TelemetryBindingComponent = {
   staleAfterMs: number;
   /** 货箱模板来源：场景内模型生成器实体 ID；缺省回退内置立方体。 */
   cargoGeneratorId?: string;
-  /** RGV 专用：协议列号(十进制正整数字符串) → 场景实体 ID；仅 deviceType === 'rgv' 时有意义。 */
-  columnBindings?: Record<string, string>;
+  /** RGV 专用：协议列号(十进制正整数字符串) → 场景实体 ID 列表；同列可绑多台 conveyor，交接对象按 task 订阅状态仲裁；仅 deviceType === 'rgv' 时有意义。 */
+  columnBindings?: Record<string, string[]>;
   /** 输送线专用：货物运行轨迹方向（仅编辑态可视化, 非运行时遥测）。 */
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
   /** 输送线专用：停线且光电无货时自动销毁货物；未勾选时货物滞留，等下游订阅推送取走或新 task 复用。缺省关闭。 */
@@ -138,16 +138,21 @@ function normalizeTrajectoryDirection(value: unknown): string | undefined {
     : undefined;
 }
 
-/** 清理 RGV 列绑定表：列号必须为正整数，实体 ID 必须为非空字符串；非法条目丢弃。 */
-function normalizeColumnBindings(value: unknown): Record<string, string> | undefined {
+/** 清理 RGV 列绑定表：列号必须为正整数，实体 ID 必须为非空字符串；兼容旧版单实体值（string 归一为单元素数组）；同列多台按数组序保留，非法条目丢弃。 */
+function normalizeColumnBindings(value: unknown): Record<string, string[]> | undefined {
   if (!isPlainObject(value)) return undefined;
-  const result: Record<string, string> = {};
+  const result: Record<string, string[]> = {};
   for (const [key, item] of Object.entries(value)) {
     const column = Number(key);
     if (!Number.isInteger(column) || column <= 0) continue;
-    const entityId = normalizeOptionalString(item);
-    if (!entityId) continue;
-    result[String(column)] = entityId;
+    const rawIds = Array.isArray(item) ? item : [item];
+    const entityIds: string[] = [];
+    for (const rawId of rawIds) {
+      const entityId = normalizeOptionalString(rawId);
+      if (entityId && !entityIds.includes(entityId)) entityIds.push(entityId);
+    }
+    if (entityIds.length === 0) continue;
+    result[String(column)] = entityIds;
     if (Object.keys(result).length >= TELEMETRY_COLLECTION_MAX_ITEMS) break;
   }
   return Object.keys(result).length > 0 ? result : undefined;

@@ -73,13 +73,13 @@ Topic 沿用现有约定：`dt/factory/logistics/rgv/{assetCode}/twindatadriven/
 `TelemetryBindingComponent`（`telemetryBinding.ts:26-35`）追加可选字段：
 
 ```ts
-/** RGV 专用：列号(十进制字符串) → 场景实体 ID。仅 deviceType === 'rgv' 时有意义。 */
-columnBindings?: Record<string, string>;
+/** RGV 专用：列号(十进制字符串) → 场景实体 ID 列表；同列可绑多台 conveyor，交接对象按 task 订阅状态仲裁。仅 deviceType === 'rgv' 时有意义。 */
+columnBindings?: Record<string, string[]>;
 ```
 
-- 序列化：随 `telemetryBinding` 组件进入 `.scene.json` v3，无需迁移（可选字段，旧场景缺省为空）。
-- 归一化：`normalizeTelemetryBindingComponent` 内处理——key 必须为正整数字符串、value 为非空实体 ID 字符串、去重、条目数受 `TELEMETRY_COLLECTION_MAX_ITEMS`(128) 限制；非法条目丢弃。
-- 语义：列号是设备协议中的逻辑列（`front_y/back_y` 的值），实体是场景中代表该列接驳位（站台/接驳口/货架端头）的任意实体。货箱交接位 = 该实体的世界位姿。
+- 序列化：随 `telemetryBinding` 组件进入 `.scene.json` v3，无需迁移（可选字段；旧版单实体 string 值读取时归一为单元素数组）。
+- 归一化：`normalizeTelemetryBindingComponent` 内处理——key 必须为正整数字符串、value 为非空实体 ID 数组（兼容单实体 string）、数组内去重、条目数受 `TELEMETRY_COLLECTION_MAX_ITEMS`(128) 限制；非法条目丢弃。
+- 语义：列号是设备协议中的逻辑列（`front_y/back_y` 的值），实体是场景中代表该列接驳位（站台/接驳口/货架端头）的任意实体。货箱交接位 = 该实体的世界位姿。**同列允许绑定多台 conveyor**（多工位/多深位）：取货时对齐持有该 task 货物的一台，放货时交付给正在等待该 task 的一台（conveyor task 订阅/广播状态仲裁），均无匹配回退首个绑定。
 
 选择挂在 `telemetryBinding` 而非新建组件的理由：与 `cargoGeneratorId` 同一先例（设备实例级绑定配置），归一化/undo/redo/序列化通道全部复用，侵入最小。
 
@@ -88,7 +88,7 @@ columnBindings?: Record<string, string>;
 `TelemetryBindingInspector.tsx` 内新增独立 fieldset「列绑定」，仅当 `binding.deviceType === 'rgv'` 时显示：
 
 - 表格行：`列号(number input)` + `场景实体(下拉，列出场景全部实体，显示名称)` + 删除按钮；底部"添加列"。
-- 校验提示：列号重复、实体已删除（参照 `CargoGeneratorInspector` 的 missing 提示模式）、未绑定任何列时提示运行时无法定位。
+- 校验提示：列号允许重复（同列多台按 task 订阅仲裁）；实体已删除（参照 `CargoGeneratorInspector` 的 missing 提示模式）、未绑定任何列时提示运行时无法定位。
 - 写入路径与现有 `commit()` 一致（clone → patch → `normalizeTelemetryBindingComponent` → `onChange`）。
 
 ### 4.3 运行时解析
@@ -103,6 +103,8 @@ resolveColumnTargetPose(entityId: string): { position: Vector3; rotation: Quater
 由 `SceneRuntime` 实现：查实体运行时节点的世界位姿（模型实体用 contentRoot/包围盒中心，普通实体用 root）。支撑位约定：**实体 root 世界位置 + root 朝向**；若实际站台需要高度偏移，后续在列绑定条目上扩展 per-column offset（初版不做）。
 
 对齐基准修正（2026-08）：列绑定实体为 conveyor 时，`resolveRgvColumnPose` 改经 `SpecializedTelemetryDriverContext.resolveConveyorDeckCenterWorld(entityId)` 取**该 conveyor 载货面中心**（`cargo.travel.nodes` 包围盒中心，facade 委托 `ConveyorTelemetryDriver.resolveCargoDeckCenterWorld`），与 RGV 自身 `cargo.frontNodes/backNodes` 台面中心在行走轴投影上对齐；非 conveyor 列仍回退 root 位姿。
+
+同列多台仲裁（2026-08）：`resolveRgvColumnPose` 接受可选偏好——`fetch`（取货）匹配持有该 task 货物的 conveyor，`place`（放货）匹配 `cargoCode===null && (pendingTask|waitingTask)===task` 的 conveyor；行走对齐按活跃侧 command 语义（1/3→fetch、2→place）+ 该侧 task 构造偏好，无匹配回退首个绑定。放货不走上行订阅传播：`probeNeighbors` 是初始位姿的静态几何缓存，RGV 行车后任意列的订阅无法触达它，故改由 RGV 侧停转边沿主动推送交付（仲裁依据仍是订阅状态）。
 
 ## 5. 坐标系与投影规则
 
@@ -212,7 +214,7 @@ export type RgvCargoRuntimeEntry = GeneratedCargoRuntimeEntry;  // 复用现有�
 | 起始 | `command` 0→2 边沿 | 若车位无货箱（开机即放货）按生成器默认模板补建并置 `onBoard=true` 随车；车继续跟随列信号行走 |
 | 起转锁列 | `command` 为 2 且 `movement_z` 0→非 0 边沿 | 锁定交接列并解析记录支撑位；列无绑定或实体缺失 → 诊断告警、中止移出 |
 | 移出 | `movement_z` 非 0 期间 | `transferProgress` 按速度递减，货箱从车工位沿侧向插值到列支撑位；`movement_z` 回 0 而 `command` 未回落时暂停保持 |
-| 完成 | `command` 2→0 边沿 | 兜底 `transferProgress=0`，`onBoard=false`，货箱留在列接驳位渲染并登记占用（若起转边沿从未出现，按当前列解析支撑位直接落货）；同列下次取货时先清理旧货箱再新建 |
+| 完成 | `movement_z` 非0→0 停转边沿（`command` 2→0 为兜底） | 先按订阅仲裁交付：该列绑定中正在等待本货 task 的 conveyor 接收货物（settle 语义：进入端自驱 + 对下游 available 广播 + 接力），实例不销毁；无等待方保持销毁语义（之后由列设备侧凭自身遥测渲染） |
 
 **每帧位姿**（对齐 `updateStackerCargoPose`）：`onBoard` 时货箱位姿 = 车工位锚点世界位姿（root 位姿 × 工位局部偏移）；否则 = `holdPosition/holdRotation` 与插值结果。统一经 `host.setGeneratedCargoRootPose` 写入。
 
@@ -222,7 +224,7 @@ export type RgvCargoRuntimeEntry = GeneratedCargoRuntimeEntry;  // 复用现有�
 
 - stacker 用"伸叉到位"作为绑定/解绑时机；rgv 用 `movement_z` 非 0 期间驱动插值（正反转不区分出入方向，方向由 `command` 决定），`command` 回落 0 作为完成兜底（协议无完成码）。
 - stacker 的目标位由 `to_x/to_y/to_z` 预先给出（行走目标与交接时机解耦）；rgv 没有独立目标列字段，`front_y/back_y` 是**当前列**、行走中持续变化，因此交接列必须在 `movement_z` 起转边沿锁定，不能取 command 边沿时的瞬时值。
-- stacker 放货完成即销毁或交还 locator fetch 渲染；rgv 的列实体是任意场景实例、无 fetch 接管机制，放货完成后**保留渲染**直至同列复用或预览停止。
+- stacker 放货完成即销毁或交还 locator fetch 渲染；rgv 的列实体为 conveyor 时，放货完成按 task 订阅仲裁交付给等待方（货物进入 conveyor 链路自驱+广播），无等待方销毁；列实体非 conveyor 时保持销毁，由列设备侧凭自身遥测渲染。
 - stacker 用托盘条码做货箱 identity 与生成器规则匹配；rgv **不依赖 `containerCode`**（现场数据不稳定）：货箱键 = `[assetCode, side]`，外观一律取生成器默认模板，有货状态完全由 command 状态机（边沿 + `onBoard`）维护。
 
 ## 7. 模型包改动（`Assets/Models/RGV/`）
@@ -276,4 +278,4 @@ export const dataDriven = {
 
 1. **工位布局假设**：假设前/后叉 = 车上前后两个载位、列间距 ≈ 工位间距，需用真实现场布局验证 `front_y` 与 `back_y` 的关系（恒等还是恒差 1）。
 2. **列实体形态**：列绑定目标实体的形态（接驳站台模型？货架端头？空节点？）决定支撑位是否直接可用 root 位姿，可能需要 per-column 高度/侧向偏移扩展。
-3. **放货后货箱归属**：初版保留渲染直至同列复用；若列实体本身也是 conveyor 等受驱设备，后续需定义货箱交接（rgv → conveyor cargo）的转交协议。
+3. **放货后货箱归属**：已落地（2026-08）——列实体为 conveyor 时按 task 订阅仲裁交付（rgv → conveyor cargo 转交协议 = `deliverRgvCargoToConveyorColumn` + `acceptRgvColumnPlacedCargo`），无等待方销毁。

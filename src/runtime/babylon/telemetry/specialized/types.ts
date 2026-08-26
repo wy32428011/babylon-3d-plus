@@ -467,4 +467,8 @@ export interface SpecializedTelemetryDriverContext {
   placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
   /** RGV 列接驳对齐用：列绑定实体为 conveyor 时返回其载货面中心（cargo.travel.nodes 包围盒中心）；非 conveyor 或实体不存在返回 null。 */
   resolveConveyorDeckCenterWorld(entityId: string): Vector3 | null;
+  /** RGV 列放货订阅仲裁交付：列绑定实体为等待该 task 的 conveyor 时把货物交付给它（settle+广播）；预检不过返回 false，不拆除 RGV 侧引用。 */
+  deliverRgvCargoToConveyorColumn(entityId: string, cargoKey: string, task: string): boolean;
+  /** RGV 持货外部拉取就绪门控：仅放货意图（command 2）且车已到位时允许 pull 摘除，防止行车中途摘货。 */
+  isRgvCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean;
 }

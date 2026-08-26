@@ -128,6 +128,29 @@ test('遥测绑定 stale 默认值来自 expectedIntervalMs 的安全倍数', ()
   });
 });
 
+test('RGV 列绑定归一化：同列多台保留数组序，旧版单实体值迁移为数组，非法条目丢弃', () => {
+  const binding = normalizeTelemetryBindingComponent({
+    enabled: true,
+    sourceId: 'plc',
+    deviceType: 'rgv',
+    columnBindings: {
+      // 旧版格式：列号 → 单实体字符串
+      '3': 'e_old',
+      // 新版格式：同列多台 conveyor
+      '5': ['e_a', 'e_b', 'e_a', '  ', 'e_b'],
+      '0': ['e_zero'],
+      '-2': ['e_neg'],
+      abc: ['e_nan'],
+      '7': [],
+    },
+  });
+
+  assert.deepEqual(binding?.columnBindings, {
+    '3': ['e_old'],
+    '5': ['e_a', 'e_b'],
+  });
+});
+
 test('模型实体根据 dataDriven devType 创建默认 telemetryBinding 且 assetCode 不重复保存', () => {
   const entity = createModelEntity(
     'model.glb',
