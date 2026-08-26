@@ -3,6 +3,7 @@ import { executeCommand, type CommandHistory } from './CommandHistory';
 import type {
   AutoPatrolComponent,
   CadReferenceComponent,
+  ClickEventBindingComponent,
   LightComponent,
   LocatorComponent,
   MeshRendererComponent,
@@ -595,6 +596,20 @@ export function updateModelGeneratorCommand(
   };
 }
 
+/** 更新点击事件绑定完整配置，所有 Inspector 编辑都通过同一条可撤销命令提交。 */
+export function updateClickEventBindingCommand(
+  entityId: string,
+  before: ClickEventBindingComponent,
+  after: ClickEventBindingComponent,
+  label = '更新点击事件绑定',
+): Command {
+  return {
+    label,
+    execute: (scene) => updateClickEventBinding(scene, entityId, after),
+    undo: (scene) => updateClickEventBinding(scene, entityId, before),
+  };
+}
+
 function moveEntitiesToFolder(scene: SceneDocument, entityIds: string[], targetFolderId: string | null): SceneDocument {
   const targetFolder = targetFolderId ? scene.entities[targetFolderId] : null;
   if (targetFolderId && !targetFolder?.isFolder) return scene;
@@ -1097,6 +1112,30 @@ function updateModelGenerator(
         components: {
           ...entity.components,
           modelGenerator,
+        },
+      },
+    },
+  };
+}
+
+/** 将点击事件绑定组件替换为已校验的不可变快照。 */
+function updateClickEventBinding(
+  scene: SceneDocument,
+  entityId: string,
+  clickEventBinding: ClickEventBindingComponent,
+): SceneDocument {
+  const entity = scene.entities[entityId];
+  if (!entity?.components.clickEventBinding) return scene;
+
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [entityId]: {
+        ...entity,
+        components: {
+          ...entity.components,
+          clickEventBinding,
         },
       },
     },

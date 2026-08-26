@@ -100,6 +100,7 @@ import { SceneShadowRuntime } from './SceneShadowRuntime';
 import { EditorLightMarkerRuntime } from './EditorLightMarkerRuntime';
 import { EditorAutoPatrolRuntime, type AutoPatrolMarkerPick } from './EditorAutoPatrolRuntime';
 import { EditorManualRoamSpawnRuntime } from './EditorManualRoamSpawnRuntime';
+import { EditorClickEventBindingRuntime } from './EditorClickEventBindingRuntime';
 import {
   SceneEnvironmentRuntime,
   type SceneEnvironmentApplyOptions,
@@ -687,6 +688,7 @@ export class SceneRuntime {
   private readonly lightMarkerRuntime: EditorLightMarkerRuntime;
   private readonly autoPatrolMarkerRuntime: EditorAutoPatrolRuntime;
   private readonly manualRoamSpawnRuntime: EditorManualRoamSpawnRuntime;
+  private readonly clickEventBindingRuntime: EditorClickEventBindingRuntime;
   private readonly entityStates = new Map<string, EntityRuntimeState>();
   private readonly syncedEntities = new Map<string, Entity>();
   private selectedEntityIds = new Set<string>();
@@ -751,6 +753,7 @@ export class SceneRuntime {
     this.lightMarkerRuntime = new EditorLightMarkerRuntime(scene);
     this.autoPatrolMarkerRuntime = new EditorAutoPatrolRuntime(scene);
     this.manualRoamSpawnRuntime = new EditorManualRoamSpawnRuntime(scene, this.pushLog);
+    this.clickEventBindingRuntime = new EditorClickEventBindingRuntime(scene);
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
       // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
@@ -1059,6 +1062,7 @@ export class SceneRuntime {
     this.lightMarkerRuntime.setPreviewActive(true);
     this.autoPatrolMarkerRuntime.setPreviewActive(true);
     this.manualRoamSpawnRuntime.setPreviewActive(true);
+    this.clickEventBindingRuntime.setPreviewActive(true);
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('runtime', null);
     this.clearModelGeneratorLoadFailureCache();
@@ -1079,6 +1083,7 @@ export class SceneRuntime {
     this.lightMarkerRuntime.setPreviewActive(false);
     this.autoPatrolMarkerRuntime.setPreviewActive(false);
     this.manualRoamSpawnRuntime.setPreviewActive(false);
+    this.clickEventBindingRuntime.setPreviewActive(false);
     this.specializedTelemetryRuntime.disposeAllCargo();
     for (const fetchRuntime of this.locatorFetchRuntimes.values()) {
       fetchRuntime.clearAllBatches();
@@ -1137,6 +1142,11 @@ export class SceneRuntime {
     this.manualRoamSpawnRuntime.disable();
   }
 
+  /** 发布 Viewer 在首次同步前禁用点击事件绑定标记。 */
+  disableEditorClickEventBindingMarkers(): void {
+    this.clickEventBindingRuntime.disable();
+  }
+
   /** 同步路线与节点子选区；节点 ID 是编辑器 transient 状态，不写入场景文档。 */
   setAutoPatrolSelection(routeId: string | null, waypointId: string | null): void {
     this.autoPatrolMarkerRuntime.setSelection(routeId, waypointId);
@@ -1179,6 +1189,7 @@ export class SceneRuntime {
       this.lightMarkerRuntime.getGizmoTarget(entityId) ??
       this.autoPatrolMarkerRuntime.getRouteGizmoTarget(entityId) ??
       this.manualRoamSpawnRuntime.getGizmoTarget(entityId) ??
+      this.clickEventBindingRuntime.getGizmoTarget(entityId) ??
       null
     );
   }
@@ -1491,6 +1502,7 @@ export class SceneRuntime {
       ?? this.modelGenerators.get(entityId)?.markerRoot
       ?? this.poiEffectRuntime.getGizmoTarget(entityId)
       ?? this.manualRoamSpawnRuntime.getTransformTarget(entityId)
+      ?? this.clickEventBindingRuntime.getTransformTarget(entityId)
       ?? null
     );
     if (node && !node.isDisposed()) {
@@ -1544,6 +1556,7 @@ export class SceneRuntime {
       ?? this.modelGenerators.get(entityId)?.markerRoot
       ?? this.poiEffectRuntime.getGizmoTarget(entityId)
       ?? this.manualRoamSpawnRuntime.getTransformTarget(entityId)
+      ?? this.clickEventBindingRuntime.getTransformTarget(entityId)
       ?? null
     );
     if (node && !node.isDisposed()) {
@@ -2245,6 +2258,17 @@ export class SceneRuntime {
       if (mergedBounds) return mergedBounds;
     }
 
+    const clickEventBindingMeshes = this.clickEventBindingRuntime.getWorldBoundsMeshes(entityId);
+    if (clickEventBindingMeshes.length > 0) {
+      let mergedBounds: RuntimeWorldBounds | null = null;
+      for (const mesh of clickEventBindingMeshes) {
+        const bounds = getMeshWorldBounds(mesh);
+        if (!bounds) continue;
+        mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
+      }
+      if (mergedBounds) return mergedBounds;
+    }
+
     const poiEffectMeshes = this.poiEffectRuntime.getWorldBoundsMeshes(entityId);
     if (poiEffectMeshes.length > 0) {
       let mergedBounds: RuntimeWorldBounds | null = null;
@@ -2649,6 +2673,9 @@ export class SceneRuntime {
     const manualRoamSpawnIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.manualRoamSpawn)),
     );
+    const clickEventBindingIds = new Set(
+      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.clickEventBinding)),
+    );
     const previewSourceId = this.entityArrayPreview?.sourceEntityId;
     if (previewSourceId && this.poiEffectRuntime.has(previewSourceId) && !poiEffectIds.has(previewSourceId)) {
       this.clearEntityArrayPreview();
@@ -2656,6 +2683,7 @@ export class SceneRuntime {
     this.poiEffectRuntime.disposeMissing(poiEffectIds);
     this.autoPatrolMarkerRuntime.disposeMissing(autoPatrolIds);
     this.manualRoamSpawnRuntime.disposeMissing(manualRoamSpawnIds);
+    this.clickEventBindingRuntime.disposeMissing(clickEventBindingIds);
 
     for (const [entityId, mesh] of this.meshes.entries()) {
       if (!primitiveMeshIds.has(entityId)) {
@@ -2781,6 +2809,7 @@ export class SceneRuntime {
     if (entity.components.light && !this.lightMarkerRuntime.isComplete(entity)) return false;
     if (entity.components.autoPatrol && !this.autoPatrolMarkerRuntime.isComplete(entity)) return false;
     if (entity.components.manualRoamSpawn && !this.manualRoamSpawnRuntime.isComplete(entity)) return false;
+    if (entity.components.clickEventBinding && !this.clickEventBindingRuntime.isComplete(entity)) return false;
     return true;
   }
 
@@ -2859,6 +2888,15 @@ export class SceneRuntime {
 
     if (entity.components.manualRoamSpawn) {
       this.manualRoamSpawnRuntime.syncPresentation(
+        entity,
+        selected,
+        this.isEntityVisible(entity.id),
+        this.isEntityScenePickable(entity.id),
+      );
+    }
+
+    if (entity.components.clickEventBinding) {
+      this.clickEventBindingRuntime.syncPresentation(
         entity,
         selected,
         this.isEntityVisible(entity.id),
@@ -3077,6 +3115,7 @@ export class SceneRuntime {
     this.lightMarkerRuntime.dispose();
     this.autoPatrolMarkerRuntime.dispose();
     this.manualRoamSpawnRuntime.dispose();
+    this.clickEventBindingRuntime.dispose();
     this.shadowRuntime.dispose();
     this.skyboxRuntime.dispose();
     this.sharedModelAssetCache.dispose();
@@ -3163,6 +3202,15 @@ export class SceneRuntime {
 
     if (entity.components.manualRoamSpawn) {
       this.manualRoamSpawnRuntime.sync(
+        entity,
+        selected,
+        this.isEntityVisible(entity.id),
+        this.isEntityScenePickable(entity.id),
+      );
+    }
+
+    if (entity.components.clickEventBinding) {
+      this.clickEventBindingRuntime.sync(
         entity,
         selected,
         this.isEntityVisible(entity.id),
@@ -5376,6 +5424,7 @@ export class SceneRuntime {
         || this.lightMarkerRuntime.has(entityId)
         || this.autoPatrolMarkerRuntime.has(entityId)
         || this.manualRoamSpawnRuntime.has(entityId)
+        || this.clickEventBindingRuntime.has(entityId)
         || this.skyboxRuntime.hasEntity(entityId)
       )
       ? entityId
