@@ -54,6 +54,10 @@ import {
 } from '../runtime/roam/manualRoamCollisionBounds';
 import { computePlayerLoadingProgress, PLAYER_SCENE_LOADING_TIMEOUT_MS } from './playerLoadingProgress';
 import { resolvePublishedFetchConfig, startPublishedFetchDrive } from './publishedFetchDrive';
+import {
+  createPublishedSkyboxCameraBoundsControllerForDocument,
+  type PublishedSkyboxCameraBoundsController,
+} from './publishedSkyboxCameraBounds';
 import './player.css';
 
 type PlayerPhase = 'loading' | 'ready' | 'blocked';
@@ -185,6 +189,7 @@ export function PlayerApp() {
     let runtime: SceneRuntime | null = null;
     let autoPatrolPlayback: AutoPatrolPlaybackController | null = null;
     let manualRoam: ManualRoamRuntime | null = null;
+    let skyboxCameraBounds: PublishedSkyboxCameraBoundsController | null = null;
     let interactionController: DigitalTwinInteractionController | null = null;
     let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
     let unsubscribeManualRoamSnapshot: (() => void) | null = null;
@@ -272,6 +277,11 @@ export function PlayerApp() {
           animate: false,
           lockStandardOrientation: false,
         });
+        skyboxCameraBounds = createPublishedSkyboxCameraBoundsControllerForDocument(
+          viewport.scene,
+          viewport.camera,
+          sceneDocument,
+        );
         viewport.resize();
 
         runtime = new SceneRuntime(
@@ -468,6 +478,8 @@ export function PlayerApp() {
         canvasResizeObserver?.disconnect();
         canvasResizeObserver = null;
         if (resize) window.removeEventListener('resize', resize);
+        skyboxCameraBounds?.dispose();
+        skyboxCameraBounds = null;
         runtime?.dispose();
         viewport?.dispose();
         clearDeploymentAssetManifest();
@@ -492,6 +504,8 @@ export function PlayerApp() {
       unsubscribeAutoPatrolSnapshot?.();
       autoPatrolPlayback?.dispose();
       autoPatrolPlaybackRef.current = null;
+      skyboxCameraBounds?.dispose();
+      skyboxCameraBounds = null;
       runtime?.dispose();
       viewport?.dispose();
       clearDeploymentAssetManifest();

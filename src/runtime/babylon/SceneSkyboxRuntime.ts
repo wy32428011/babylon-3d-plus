@@ -10,7 +10,12 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import type { TransformComponent } from '../../editor/model/components';
-import { normalizeSkyboxSphereScale, SKYBOX_SPHERE_DIAMETER_METERS, type SceneSkyboxSettings } from '../../editor/model/SceneDocument';
+import {
+  normalizeSkyboxSphereScale,
+  SKYBOX_SPHERE_DIAMETER_METERS,
+  SKYBOX_SPHERE_SEGMENTS,
+  type SceneSkyboxSettings,
+} from '../../editor/model/SceneDocument';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 import {
   clearSceneSelectionHighlight,
@@ -143,7 +148,7 @@ export class SceneSkyboxRuntime {
       entityId ? `${entityId}_skyboxSphere` : 'LegacySceneSkyboxSphere',
       {
         diameter: SKYBOX_SPHERE_DIAMETER_METERS,
-        segments: 48,
+        segments: SKYBOX_SPHERE_SEGMENTS,
         sideOrientation: Mesh.DOUBLESIDE,
       },
       this.scene,

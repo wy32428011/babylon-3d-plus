@@ -12,13 +12,22 @@ import {
   resolveProceduralStrideInfluences,
   type ProceduralLimbSelection,
   type ProceduralStridePivots,
+  type ProceduralStrideRotationOffsets,
 } from './proceduralAvatarAnimation';
 
 type MorphPair = {
   mesh: AbstractMesh;
   manager: MorphTargetManager;
+  neutral: MorphTarget;
   forward: MorphTarget;
   backward: MorphTarget;
+};
+
+type LocalPoint = { x: number; y: number; z: number };
+type LocalLimbSegment = { pivot: LocalPoint; distal: LocalPoint };
+type MeshLocalGaitPose = {
+  pivots: Partial<ProceduralStridePivots>;
+  neutralRotationOffsets: Partial<ProceduralStrideRotationOffsets>;
 };
 
 /** 为静态人物网格安装 GPU Morph Target 步态，避免每帧重传顶点。 */
@@ -32,16 +41,22 @@ export class ProceduralAvatarMorphAnimator {
       const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
       if (!limbSelection || !indices || !positions) continue;
       const limbMask = createConnectedLimbMask(positions, indices, limbSelection);
+      const localPose = resolveMeshLocalGaitPose(scene, mesh);
       const strideTargets = createProceduralStrideTargets(positions, {
         limbMask,
         normals: mesh.getVerticesData(VertexBuffer.NormalKind),
         tangents: mesh.getVerticesData(VertexBuffer.TangentKind),
-        pivots: resolveMeshLocalPivots(scene, mesh),
+        pivots: localPose.pivots,
+        neutralRotationOffsets: localPose.neutralRotationOffsets,
       });
       if (!strideTargets) continue;
 
       const manager = new MorphTargetManager(scene, mesh.name);
       manager.numMaxInfluencers = 2;
+      const neutral = new MorphTarget(`${mesh.name}_manual_roam_stride_neutral`, 1, scene, manager);
+      neutral.setPositions(strideTargets.neutral);
+      neutral.setNormals(strideTargets.neutralNormals);
+      neutral.setTangents(strideTargets.neutralTangents);
       const forward = new MorphTarget(`${mesh.name}_manual_roam_stride_forward`, 0, scene, manager);
       forward.setPositions(strideTargets.forward);
       forward.setNormals(strideTargets.forwardNormals);
@@ -50,10 +65,11 @@ export class ProceduralAvatarMorphAnimator {
       backward.setPositions(strideTargets.backward);
       backward.setNormals(strideTargets.backwardNormals);
       backward.setTangents(strideTargets.backwardTangents);
+      manager.addTarget(neutral);
       manager.addTarget(forward);
       manager.addTarget(backward);
       mesh.morphTargetManager = manager;
-      pairs.push({ mesh, manager, forward, backward });
+      pairs.push({ mesh, manager, neutral, forward, backward });
     }
     return pairs.length > 0 ? new ProceduralAvatarMorphAnimator(pairs) : null;
   }
@@ -67,6 +83,7 @@ export class ProceduralAvatarMorphAnimator {
   update(phase: number, movementAmount: number, airborne: boolean): void {
     const influences = resolveProceduralStrideInfluences(phase, movementAmount, airborne);
     for (const pair of this.pairs) {
+      pair.neutral.influence = influences.neutral;
       pair.forward.influence = influences.forward;
       pair.backward.influence = influences.backward;
     }
@@ -92,20 +109,58 @@ function resolveLimbSelection(materialName: string): ProceduralLimbSelection | n
   return null;
 }
 
-function resolveMeshLocalPivots(scene: Scene, mesh: AbstractMesh): Partial<ProceduralStridePivots> {
+function resolveMeshLocalGaitPose(scene: Scene, mesh: AbstractMesh): MeshLocalGaitPose {
   mesh.computeWorldMatrix(true);
   const inverseWorld = mesh.getWorldMatrix().clone().invert();
-  const resolve = (name: string): { x: number; y: number; z: number } | undefined => {
+  const resolve = (name: string): LocalPoint | undefined => {
     const node = scene.getTransformNodeByName(name);
     if (!node) return undefined;
     node.computeWorldMatrix(true);
     const local = Vector3.TransformCoordinates(node.getAbsolutePosition(), inverseWorld);
     return { x: local.x, y: local.y, z: local.z };
   };
-  return {
-    leftArm: resolve('Character1_LeftArm'),
-    rightArm: resolve('Character1_RightArm'),
-    leftLeg: resolve('Character1_LeftUpLeg'),
-    rightLeg: resolve('Character1_RightUpLeg'),
+
+  const resolveSegment = (pivotName: string, distalName: string): LocalLimbSegment | null => {
+    const pivot = resolve(pivotName);
+    const distal = resolve(distalName);
+    return pivot && distal ? { pivot, distal } : null;
   };
+  const arms = orderSegmentsByLocalX([
+    resolveSegment('Character1_LeftArm', 'Character1_LeftForeArm'),
+    resolveSegment('Character1_RightArm', 'Character1_RightForeArm'),
+  ]);
+  const legs = orderSegmentsByLocalX([
+    resolveSegment('Character1_LeftUpLeg', 'Character1_LeftLeg'),
+    resolveSegment('Character1_RightUpLeg', 'Character1_RightLeg'),
+  ]);
+
+  return {
+    pivots: {
+      leftArm: arms[0]?.pivot,
+      rightArm: arms[1]?.pivot,
+      leftLeg: legs[0]?.pivot,
+      rightLeg: legs[1]?.pivot,
+    },
+    neutralRotationOffsets: {
+      leftArm: resolveNeutralRotationOffset(arms[0]),
+      rightArm: resolveNeutralRotationOffset(arms[1]),
+      leftLeg: resolveNeutralRotationOffset(legs[0]),
+      rightLeg: resolveNeutralRotationOffset(legs[1]),
+    },
+  };
+}
+
+function orderSegmentsByLocalX(segments: Array<LocalLimbSegment | null>): LocalLimbSegment[] {
+  const validSegments = segments
+    .filter((segment): segment is LocalLimbSegment => Boolean(segment))
+    .sort((left, right) => left.pivot.x - right.pivot.x);
+  return validSegments.length === 2 ? validSegments : [];
+}
+
+function resolveNeutralRotationOffset(segment: LocalLimbSegment | undefined): number | undefined {
+  if (!segment) return undefined;
+  const relativeY = segment.distal.y - segment.pivot.y;
+  const relativeZ = segment.distal.z - segment.pivot.z;
+  if (Math.hypot(relativeY, relativeZ) <= 1e-6) return undefined;
+  return Math.atan2(relativeZ, -relativeY);
 }

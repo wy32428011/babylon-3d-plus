@@ -22,26 +22,44 @@ export type ProceduralStridePivots = {
   rightLeg: ProceduralPoint3;
 };
 
+export type ProceduralStrideRotationOffsets = {
+  leftArm: number;
+  rightArm: number;
+  leftLeg: number;
+  rightLeg: number;
+};
+
 export type ProceduralStrideTargetOptions = {
   limbMask?: ArrayLike<number>;
   normals?: ArrayLike<number> | null;
   tangents?: ArrayLike<number> | null;
   pivots?: Partial<ProceduralStridePivots>;
+  neutralRotationOffsets?: Partial<ProceduralStrideRotationOffsets>;
 };
 
 export type ProceduralStrideTargets = {
+  neutral: Float32Array;
   forward: Float32Array;
   backward: Float32Array;
+  neutralNormals: Float32Array | null;
   forwardNormals: Float32Array | null;
   backwardNormals: Float32Array | null;
+  neutralTangents: Float32Array | null;
   forwardTangents: Float32Array | null;
   backwardTangents: Float32Array | null;
   changedVertexCount: number;
 };
 
 export type ProceduralStrideInfluences = {
+  neutral: number;
   forward: number;
   backward: number;
+};
+
+export type ProceduralGaitState = {
+  phase: number;
+  amount: number;
+  active: boolean;
 };
 
 export type ProceduralBodyMotion = {
@@ -60,10 +78,17 @@ type PositionBounds = {
   centerZ: number;
 };
 
-const LEG_SWING_RADIANS = 0.34;
-const ARM_SWING_RADIANS = 0.28;
-const BODY_BOB_AMPLITUDE_METERS = 0.006;
-const BODY_SWAY_AMPLITUDE_RADIANS = 0.008;
+const LEG_SWING_RADIANS = 0.17;
+const ARM_SWING_RADIANS = 0.14;
+const BODY_BOB_AMPLITUDE_METERS = 0.003;
+const BODY_SWAY_AMPLITUDE_RADIANS = 0.004;
+const WALK_CADENCE_RADIANS_PER_SECOND = 6;
+const RUN_CADENCE_RADIANS_PER_SECOND = 9;
+const GAIT_START_RESPONSE = 10;
+const GAIT_STOP_RESPONSE = 7;
+const GAIT_MOVEMENT_DEAD_ZONE = 0.05;
+const GAIT_FULL_STRIDE_INPUT = 0.35;
+const MAX_NEUTRAL_ROTATION_OFFSET = 0.65;
 
 /**
  * 按索引拓扑划分独立肢体，避免仅凭包围盒误带动躯干或腰胯。
@@ -146,13 +171,22 @@ export function createProceduralStrideTargets(
   if (limbMask.length < vertexCount) return null;
 
   const pivots = resolvePivots(bounds, options.pivots);
+  const neutralRotationOffsets = resolveNeutralRotationOffsets(
+    positions,
+    limbMask,
+    pivots,
+    options.neutralRotationOffsets,
+  );
+  const neutral = Float32Array.from(positions);
   const forward = Float32Array.from(positions);
   const backward = Float32Array.from(positions);
   const hasNormals = options.normals?.length === positions.length;
+  const neutralNormals = hasNormals ? Float32Array.from(options.normals!) : null;
   const forwardNormals = hasNormals ? Float32Array.from(options.normals!) : null;
   const backwardNormals = hasNormals ? Float32Array.from(options.normals!) : null;
   const tangentStride = options.tangents?.length === vertexCount * 4 ? 4 : 3;
   const hasTangents = options.tangents?.length === vertexCount * tangentStride;
+  const neutralTangents = hasTangents ? new Float32Array(vertexCount * 3) : null;
   const forwardTangents = hasTangents ? new Float32Array(vertexCount * 3) : null;
   const backwardTangents = hasTangents ? new Float32Array(vertexCount * 3) : null;
   let changedVertexCount = 0;
@@ -164,33 +198,42 @@ export function createProceduralStrideTargets(
     const z = positions[positionIndex + 2];
     const limb = sanitizeLimb(limbMask[vertexIndex]);
     if (limb === PROCEDURAL_LIMB.fixed) {
-      copyTangent(options.tangents, tangentStride, vertexIndex, forwardTangents, backwardTangents);
+      copyTangent(
+        options.tangents,
+        tangentStride,
+        vertexIndex,
+        neutralTangents,
+        forwardTangents,
+        backwardTangents,
+      );
       continue;
     }
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
 
     const pivot = resolveLimbPivot(limb, pivots);
-    const forwardAngle = resolveLimbAngle(limb, 1);
-    const backwardAngle = resolveLimbAngle(limb, -1);
+    const neutralAngle = resolveLimbRotationOffset(limb, neutralRotationOffsets);
+    const forwardAngle = neutralAngle + resolveLimbAngle(limb, 1);
+    const backwardAngle = neutralAngle + resolveLimbAngle(limb, -1);
+    writeRotatedPosition(neutral, positionIndex, x, y, z, pivot, neutralAngle);
     writeRotatedPosition(forward, positionIndex, x, y, z, pivot, forwardAngle);
     writeRotatedPosition(backward, positionIndex, x, y, z, pivot, backwardAngle);
-    if (forwardNormals && backwardNormals && options.normals) {
-      writeRotatedDirection(
-        options.normals,
-        positionIndex,
-        forwardNormals,
-        backwardNormals,
-        forwardAngle,
-        backwardAngle,
-      );
+    if (neutralNormals && forwardNormals && backwardNormals && options.normals) {
+      const normalX = options.normals[positionIndex];
+      const normalY = options.normals[positionIndex + 1];
+      const normalZ = options.normals[positionIndex + 2];
+      writeDirection(neutralNormals, positionIndex, normalX, normalY, normalZ, neutralAngle);
+      writeDirection(forwardNormals, positionIndex, normalX, normalY, normalZ, forwardAngle);
+      writeDirection(backwardNormals, positionIndex, normalX, normalY, normalZ, backwardAngle);
     }
-    if (forwardTangents && backwardTangents && options.tangents) {
+    if (neutralTangents && forwardTangents && backwardTangents && options.tangents) {
       writeRotatedTangent(
         options.tangents,
         tangentStride,
         vertexIndex,
+        neutralTangents,
         forwardTangents,
         backwardTangents,
+        neutralAngle,
         forwardAngle,
         backwardAngle,
       );
@@ -200,10 +243,13 @@ export function createProceduralStrideTargets(
 
   return changedVertexCount > 0
     ? {
+      neutral,
       forward,
       backward,
+      neutralNormals,
       forwardNormals,
       backwardNormals,
+      neutralTangents,
       forwardTangents,
       backwardTangents,
       changedVertexCount,
@@ -216,13 +262,50 @@ export function resolveProceduralStrideInfluences(
   movementAmount: number,
   airborne: boolean,
 ): ProceduralStrideInfluences {
-  if (airborne) return { forward: 0, backward: 0 };
+  if (airborne) return { neutral: 1, forward: 0, backward: 0 };
   const amount = clamp01(movementAmount);
   const wave = Math.sin(Number.isFinite(phase) ? phase : 0) * amount;
   return {
+    neutral: 1 - Math.abs(wave),
     forward: Math.max(0, wave),
     backward: Math.max(0, -wave),
   };
+}
+
+export function createInitialProceduralGaitState(): ProceduralGaitState {
+  return { phase: 0, amount: 0, active: false };
+}
+
+/** 平滑收敛步态强度；停止输入后冻结相位，避免人物在原地继续换步。 */
+export function stepProceduralGaitState(
+  state: Readonly<ProceduralGaitState>,
+  movementAmount: number,
+  sprinting: boolean,
+  airborne: boolean,
+  deltaSeconds: number,
+): ProceduralGaitState {
+  const delta = clampFinite(deltaSeconds, 0, 0.05);
+  const movement = airborne ? 0 : clamp01(movementAmount);
+  const active = movement > GAIT_MOVEMENT_DEAD_ZONE;
+  const settledTarget = active
+    ? clamp01(
+      (movement - GAIT_MOVEMENT_DEAD_ZONE)
+      / (GAIT_FULL_STRIDE_INPUT - GAIT_MOVEMENT_DEAD_ZONE),
+    )
+    : 0;
+  const currentAmount = clamp01(state.amount);
+  const response = active ? GAIT_START_RESPONSE : GAIT_STOP_RESPONSE;
+  const blend = 1 - Math.exp(-response * delta);
+  let amount = currentAmount + (settledTarget - currentAmount) * blend;
+  if (!active && amount < 0.001) amount = 0;
+
+  let phase = Number.isFinite(state.phase) ? state.phase : 0;
+  if (active) {
+    phase += delta * (sprinting ? RUN_CADENCE_RADIANS_PER_SECOND : WALK_CADENCE_RADIANS_PER_SECOND);
+  } else if (amount === 0) {
+    phase = 0;
+  }
+  return { phase, amount, active };
 }
 
 /** 为程序化步态提供轻微身体重心变化，避免根节点起伏看起来像连续跳跃。 */
@@ -236,7 +319,7 @@ export function resolveProceduralBodyMotion(
   if (amount === 0) return { verticalOffsetMeters: 0, rollRadians: 0 };
   const wave = Math.sin(Number.isFinite(phase) ? phase : 0);
   return {
-    verticalOffsetMeters: wave * wave * BODY_BOB_AMPLITUDE_METERS * amount,
+    verticalOffsetMeters: -wave * wave * BODY_BOB_AMPLITUDE_METERS * amount,
     rollRadians: wave * BODY_SWAY_AMPLITUDE_RADIANS * amount,
   };
 }
@@ -293,11 +376,64 @@ function resolvePivots(
   };
 }
 
+function resolveNeutralRotationOffsets(
+  positions: ArrayLike<number>,
+  limbMask: ArrayLike<number>,
+  pivots: ProceduralStridePivots,
+  custom: Partial<ProceduralStrideRotationOffsets> | undefined,
+): ProceduralStrideRotationOffsets {
+  const resolve = (limb: ProceduralLimb, override: number | undefined): number => {
+    if (Number.isFinite(override)) {
+      return clampFinite(override!, -MAX_NEUTRAL_ROTATION_OFFSET, MAX_NEUTRAL_ROTATION_OFFSET);
+    }
+
+    const pivot = resolveLimbPivot(limb, pivots);
+    let weightedY = 0;
+    let weightedZ = 0;
+    let totalWeight = 0;
+    for (let vertexIndex = 0; vertexIndex < limbMask.length; vertexIndex += 1) {
+      if (sanitizeLimb(limbMask[vertexIndex]) !== limb) continue;
+      const positionIndex = vertexIndex * 3;
+      const relativeY = positions[positionIndex + 1] - pivot.y;
+      const relativeZ = positions[positionIndex + 2] - pivot.z;
+      if (!Number.isFinite(relativeY) || !Number.isFinite(relativeZ) || relativeY >= -1e-5) continue;
+      // 远离关节的顶点更能代表整条肢体朝向，避免袖口/裤脚厚度扰动中立角度。
+      const weight = relativeY * relativeY;
+      weightedY += relativeY * weight;
+      weightedZ += relativeZ * weight;
+      totalWeight += weight;
+    }
+    if (totalWeight <= 1e-8) return 0;
+    return clampFinite(
+      Math.atan2(weightedZ / totalWeight, -(weightedY / totalWeight)),
+      -MAX_NEUTRAL_ROTATION_OFFSET,
+      MAX_NEUTRAL_ROTATION_OFFSET,
+    );
+  };
+
+  return {
+    leftArm: resolve(PROCEDURAL_LIMB.leftArm, custom?.leftArm),
+    rightArm: resolve(PROCEDURAL_LIMB.rightArm, custom?.rightArm),
+    leftLeg: resolve(PROCEDURAL_LIMB.leftLeg, custom?.leftLeg),
+    rightLeg: resolve(PROCEDURAL_LIMB.rightLeg, custom?.rightLeg),
+  };
+}
+
 function resolveLimbPivot(limb: ProceduralLimb, pivots: ProceduralStridePivots): ProceduralPoint3 {
   if (limb === PROCEDURAL_LIMB.leftArm) return pivots.leftArm;
   if (limb === PROCEDURAL_LIMB.rightArm) return pivots.rightArm;
   if (limb === PROCEDURAL_LIMB.leftLeg) return pivots.leftLeg;
   return pivots.rightLeg;
+}
+
+function resolveLimbRotationOffset(
+  limb: ProceduralLimb,
+  offsets: ProceduralStrideRotationOffsets,
+): number {
+  if (limb === PROCEDURAL_LIMB.leftArm) return offsets.leftArm;
+  if (limb === PROCEDURAL_LIMB.rightArm) return offsets.rightArm;
+  if (limb === PROCEDURAL_LIMB.leftLeg) return offsets.leftLeg;
+  return offsets.rightLeg;
 }
 
 function resolveLimbAngle(limb: ProceduralLimb, direction: number): number {
@@ -324,27 +460,14 @@ function writeRotatedPosition(
   target[index + 2] = pivot.z + relativeY * sine + relativeZ * cosine;
 }
 
-function writeRotatedDirection(
-  source: ArrayLike<number>,
-  index: number,
-  forward: Float32Array,
-  backward: Float32Array,
-  forwardAngle: number,
-  backwardAngle: number,
-): void {
-  const x = source[index];
-  const y = source[index + 1];
-  const z = source[index + 2];
-  writeDirection(forward, index, x, y, z, forwardAngle);
-  writeDirection(backward, index, x, y, z, backwardAngle);
-}
-
 function writeRotatedTangent(
   source: ArrayLike<number>,
   sourceStride: number,
   vertexIndex: number,
+  neutral: Float32Array,
   forward: Float32Array,
   backward: Float32Array,
+  neutralAngle: number,
   forwardAngle: number,
   backwardAngle: number,
 ): void {
@@ -353,6 +476,7 @@ function writeRotatedTangent(
   const x = source[sourceIndex];
   const y = source[sourceIndex + 1];
   const z = source[sourceIndex + 2];
+  writeDirection(neutral, targetIndex, x, y, z, neutralAngle);
   writeDirection(forward, targetIndex, x, y, z, forwardAngle);
   writeDirection(backward, targetIndex, x, y, z, backwardAngle);
 }
@@ -361,13 +485,15 @@ function copyTangent(
   source: ArrayLike<number> | null | undefined,
   sourceStride: number,
   vertexIndex: number,
+  neutral: Float32Array | null,
   forward: Float32Array | null,
   backward: Float32Array | null,
 ): void {
-  if (!source || !forward || !backward) return;
+  if (!source || !neutral || !forward || !backward) return;
   const sourceIndex = vertexIndex * sourceStride;
   const targetIndex = vertexIndex * 3;
   for (let offset = 0; offset < 3; offset += 1) {
+    neutral[targetIndex + offset] = source[sourceIndex + offset];
     forward[targetIndex + offset] = source[sourceIndex + offset];
     backward[targetIndex + offset] = source[sourceIndex + offset];
   }
@@ -457,4 +583,9 @@ function readFiniteBounds(positions: ArrayLike<number>): PositionBounds | null {
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));
+}
+
+function clampFinite(value: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return minimum;
+  return Math.min(maximum, Math.max(minimum, value));
 }
