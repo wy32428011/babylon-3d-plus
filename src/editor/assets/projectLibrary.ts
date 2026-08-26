@@ -52,6 +52,7 @@ export type ProjectLibrary = {
 export type BuiltInProjectLibraryAction =
   | { kind: 'model-generator' }
   | { kind: 'auto-patrol' }
+  | { kind: 'manual-roam-spawn' }
   | { kind: 'poi-effect'; effectKind: (typeof POI_EFFECT_DEFINITIONS)[number]['kind'] }
   | { kind: 'mesh'; meshKind: MeshKind }
   | { kind: 'locator'; locatorKind: 'box-wire' }
@@ -96,7 +97,7 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
       { id: 'poi-chart-marker', name: '图表立标', icon: 'marker' },
       { id: 'poi-panel', name: '图表面板', icon: 'panel' },
       { id: 'poi-alarm', name: '报警管理器', icon: 'cube' },
-      { id: 'poi-roam', name: '手动漫游', icon: 'person' },
+      { id: 'poi-roam', name: '手动漫游', icon: 'person', subtitle: '初始位置', builtIn: { kind: 'manual-roam-spawn' } },
     ],
   },
   {

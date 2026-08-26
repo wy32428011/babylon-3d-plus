@@ -20,6 +20,7 @@
     "typecheck": "tsc -b",
     "test:light-editor": "node --experimental-strip-types --test tests/editor/lightEditor.test.ts",
     "test:auto-patrol": "node --experimental-strip-types --test tests/editor/autoPatrol.test.ts tests/editor/autoPatrolPlayback.test.ts",
+    "test:manual-roam": "node --experimental-strip-types --test tests/roam/*.test.ts tests/runtime/manualRoamAvatarAsset.test.ts",
     "preview": "vite preview --host 127.0.0.1",
     "test:telemetry": "node scripts/telemetry-test.mjs",
     "test:model-array": "node scripts/model-array-test.mjs",

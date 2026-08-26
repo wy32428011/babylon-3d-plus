@@ -735,6 +735,7 @@ select {
   height: 100%;
   outline: none;
   background: #151515;
+  touch-action: none;
 }
 
 .scene-viewport {

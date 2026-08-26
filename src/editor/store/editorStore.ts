@@ -99,6 +99,7 @@ import {
   createFolderEntity,
   createLightEntity,
   createLocatorEntity,
+  createManualRoamSpawnEntity,
   createMeshEntity,
   createModelEntity,
   createModelGeneratorEntity,
@@ -129,6 +130,10 @@ import {
   type SceneShadowSettings,
   type SceneDocument,
 } from '../model/SceneDocument';
+import {
+  containsManualRoamSpawnEntity,
+  findManualRoamSpawnEntity,
+} from '../model/manualRoamSpawn';
 import type { Vector3Data } from '../model/math';
 import {
   AUTO_PATROL_MAX_WAYPOINTS,
@@ -496,6 +501,7 @@ type EditorState = {
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
   createModelGenerator: (placementPosition?: Vector3Data) => void;
   createAutoPatrol: (placementPosition?: Vector3Data) => void;
+  createManualRoamSpawn: (placementPosition?: Vector3Data) => void;
   createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
@@ -745,12 +751,33 @@ function cloneTransform(transform: TransformComponent): TransformComponent {
   };
 }
 
-/** 对实体 Transform 应用组件级不变量；天空盒始终保持 0.1-1.0 的等比球形缩放。 */
+/** 对实体 Transform 应用组件级不变量；特殊编辑标记不允许产生无效缩放或倾斜。 */
 function normalizeTransformForEntity(entity: Entity, transform: TransformComponent): TransformComponent {
   const normalized = cloneTransform(transform);
   if (entity.components.skybox) normalized.scale = normalizeSkyboxSphereScale(normalized.scale);
   if (entity.components.autoPatrol) normalized.scale = { x: 1, y: 1, z: 1 };
+  if (entity.components.manualRoamSpawn) {
+    normalized.rotation = { x: 0, y: normalized.rotation.y, z: 0 };
+    normalized.scale = { x: 1, y: 1, z: 1 };
+  }
   return normalized;
+}
+
+/** 群组事务写入前逐实体收敛 Transform，确保撤销基线和目标值都遵守组件约束。 */
+function normalizeGroupRotationTransforms(
+  scene: SceneDocument,
+  entityIds: readonly string[],
+  transforms: Readonly<Record<string, TransformComponent>>,
+): Record<string, TransformComponent> {
+  const normalizedTransforms = { ...transforms };
+  for (const entityId of entityIds) {
+    const entity = scene.entities[entityId];
+    const transform = transforms[entityId];
+    if (entity && transform) {
+      normalizedTransforms[entityId] = normalizeTransformForEntity(entity, transform);
+    }
+  }
+  return normalizedTransforms;
 }
 
 function cloneMeshRenderer(meshRenderer: MeshRendererComponent): MeshRendererComponent {
@@ -1280,7 +1307,8 @@ function resolveSelectionTransformMode(
   const requestedSpace = state.groupTransformModeRestore?.space ?? state.transformSpace;
   const selectedEntity = scene.selectedEntityId ? scene.entities[scene.selectedEntityId] : null;
   const lightKind = selectedEntity?.components.light?.lightKind;
-  const transformTool = selectedEntity?.components.autoPatrol && requestedTool === 'scale'
+  const transformTool = (selectedEntity?.components.autoPatrol || selectedEntity?.components.manualRoamSpawn)
+    && requestedTool === 'scale'
     ? 'translate'
     : lightKind
       ? resolveLightTransformTool(lightKind, requestedTool)
@@ -1341,6 +1369,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     ...(entity.components.telemetryBinding ? { telemetryBinding: cloneJsonValue(entity.components.telemetryBinding) } : {}),
     ...(entity.components.poiEffect ? { poiEffect: { ...entity.components.poiEffect } } : {}),
     ...(entity.components.autoPatrol ? { autoPatrol: cloneAutoPatrolComponent(entity.components.autoPatrol) } : {}),
+    ...(entity.components.manualRoamSpawn ? { manualRoamSpawn: {} } : {}),
     ...(entity.components.camera ? { camera: { ...entity.components.camera } } : {}),
     ...(entity.components.light ? { light: cloneLight(entity.components.light) } : {}),
   };
@@ -2149,11 +2178,12 @@ function prepareResolvedEntityArray(
       && !source.isFolder
       && !source.components.modelGenerator
       && !source.components.skybox
+      && !source.components.manualRoamSpawn
       && !isEntityEffectivelyLocked(state.scene.entities, source),
     );
   });
   if (sourceIds.length === 0 || sourceIds.length !== requestedSourceIds.length) {
-    return { ok: false, error: '原选区已失效、被锁定或包含不支持阵列的模型生成器/天空盒。' };
+    return { ok: false, error: '原选区已失效、被锁定或包含不支持阵列的模型生成器/天空盒/手动漫游初始位置。' };
   }
 
   const copyCount = input.copyCount;
@@ -3285,6 +3315,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             : '群组空间信息修改已取消：当前不再是群组选区。';
         return { logs: prependLog(state.logs, message) };
       }
+      if (
+        field === 'rotation'
+        && axis !== 'y'
+        && containsManualRoamSpawnEntity(state.scene, selection.entityIds)
+      ) {
+        return {
+          groupInspectorTransformRequest: null,
+          logs: prependLog(state.logs, '含手动漫游初始位置的群组仅允许绕 Y 轴旋转。'),
+        };
+      }
 
       return {
         groupInspectorTransformRequest: {
@@ -3364,6 +3404,68 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         selectedAutoPatrolWaypointId: null,
         ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
+      };
+    });
+  },
+  /** 手动漫游初始位置全场唯一；重复放置只移动并选中已有实体。 */
+  createManualRoamSpawn: (placementPosition) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '设置手动漫游初始位置');
+
+      const existing = findManualRoamSpawnEntity(state.scene);
+      if (existing) {
+        const hierarchySelectionIds = [existing.id];
+        const selectedScene = { ...state.scene, selectedEntityId: existing.id };
+        if (!placementPosition) {
+          return {
+            scene: selectedScene,
+            hierarchySelectionIds,
+            ...resolveSelectionTransformMode(state, selectedScene, hierarchySelectionIds),
+          };
+        }
+        if (isEntityEffectivelyLocked(state.scene.entities, existing)) {
+          return {
+            scene: selectedScene,
+            hierarchySelectionIds,
+            logs: prependLog(state.logs, '手动漫游初始位置已锁定，无法移动。'),
+            ...resolveSelectionTransformMode(state, selectedScene, hierarchySelectionIds),
+          };
+        }
+
+        const before = cloneTransform(existing.components.transform);
+        const after = normalizeTransformForEntity(existing, {
+          ...before,
+          position: sanitizeVector3(placementPosition),
+        });
+        if (areTransformsEqual(before, after)) {
+          return {
+            scene: selectedScene,
+            hierarchySelectionIds,
+            ...resolveSelectionTransformMode(state, selectedScene, hierarchySelectionIds),
+          };
+        }
+
+        const command = updateTransformCommand(existing.id, before, after);
+        const result = executeCommand(state.scene, state.history, command);
+        const movedScene = { ...result.scene, selectedEntityId: existing.id };
+        return {
+          ...result,
+          scene: movedScene,
+          hierarchySelectionIds,
+          ...resolveSelectionTransformMode(state, movedScene, hierarchySelectionIds),
+          logs: prependLog(state.logs, '移动手动漫游初始位置'),
+        };
+      }
+
+      const entity = createManualRoamSpawnEntity(sanitizeVector3(placementPosition));
+      const command = createEntityCommand(entity);
+      const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
+      return {
+        ...result,
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        logs: prependLog(state.logs, '创建手动漫游初始位置'),
       };
     });
   },
@@ -3784,6 +3886,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (containsSkybox) {
         return { logs: prependLog(state.logs, '球形天空盒是场景唯一对象，不能复制或随文件夹复制。') };
       }
+      const containsManualRoamSpawn = getTopLevelHierarchyEntityIds(state.scene.entities, selectedIds).some((rootId) => (
+        collectEntitySubtreeIds(state.scene.entities, rootId)
+          .some((entityId) => Boolean(state.scene.entities[entityId]?.components.manualRoamSpawn))
+      ));
+      if (containsManualRoamSpawn) {
+        return { logs: prependLog(state.logs, '手动漫游初始位置是场景唯一对象，不能复制或随文件夹复制。') };
+      }
       const snapshot = createEntityClipboardSnapshot(state.scene, selectedIds);
       if (snapshot.entries.length === 0) return state;
 
@@ -3806,6 +3915,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!clipboard || clipboard.entries.length === 0) return state;
       if (clipboard.entries.some((entry) => entry.entities.some((entity) => Boolean(entity.components.skybox)))) {
         return { logs: prependLog(state.logs, '剪贴板包含球形天空盒，已拒绝创建重复天空盒。') };
+      }
+      if (clipboard.entries.some((entry) => entry.entities.some((entity) => Boolean(entity.components.manualRoamSpawn)))) {
+        return { logs: prependLog(state.logs, '剪贴板包含手动漫游初始位置，已拒绝创建重复出生点。') };
       }
 
       const selectedEntity = getSelectedEntity(state);
@@ -4613,11 +4725,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         return guardRuntimePreviewMutation(state, '旋转文件夹对象');
       }
 
+      const normalizedInput = {
+        ...input,
+        beforeTransforms: normalizeGroupRotationTransforms(
+          state.scene,
+          input.entityIds,
+          input.beforeTransforms,
+        ),
+        afterTransforms: normalizeGroupRotationTransforms(
+          state.scene,
+          input.entityIds,
+          input.afterTransforms,
+        ),
+      };
       const result = commitFolderGroupRotationState(
         state.scene,
         state.history,
         state.hierarchySelectionIds,
-        input,
+        normalizedInput,
       );
       committed = result.committed;
       if (!result.committed) {
@@ -4673,7 +4798,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         state.scene,
         state.history,
         state.hierarchySelectionIds,
-        input,
+        {
+          ...input,
+          beforeTransforms: normalizeGroupRotationTransforms(
+            state.scene,
+            input.entityIds,
+            input.beforeTransforms,
+          ),
+          afterTransforms: normalizeGroupRotationTransforms(
+            state.scene,
+            input.entityIds,
+            input.afterTransforms,
+          ),
+        },
       );
       committed = result.committed;
       if (!result.committed) {

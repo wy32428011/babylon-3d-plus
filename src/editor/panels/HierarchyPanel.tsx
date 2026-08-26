@@ -144,9 +144,13 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const activeSelectionEntities = activeSelectionIds.map((entityId) => entities[entityId]).filter((entity): entity is Entity => Boolean(entity));
   const hasSelection = activeSelectionIds.length > 0;
   const canMutateSelection = !props.readOnly && activeSelectionEntities.some((entity) => !isEntityEffectivelyLocked(entities, entity));
+  const hasManualRoamSpawnSelection = activeSelectionEntities.some((entity) => Boolean(entity.components.manualRoamSpawn));
   const canMutateRuntimeSelection = activeSelectionEntities.some(
-    (entity) => !props.readOnly && !entity.isFolder && !isEntityEffectivelyLocked(entities, entity),
-  );
+    (entity) => !props.readOnly
+      && !entity.isFolder
+      && !entity.components.manualRoamSpawn
+      && !isEntityEffectivelyLocked(entities, entity),
+  ) && !hasManualRoamSpawnSelection;
   const canRenameSelection = activeSelectionIds.length === 1 && canMutateSelection;
   const canLibraryFocus = Boolean(contextEntity?.components.modelAsset);
   const canPaste = !props.readOnly && Boolean(entityClipboard && entityClipboard.entries.length > 0);
@@ -155,7 +159,10 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     && !isEntityEffectivelyLocked(entities, entity)
   ));
   const arraySourceEntities = activeSelectionEntities.filter(
-    (entity) => !entity.isFolder && !entity.components.skybox && !isEntityEffectivelyLocked(entities, entity),
+    (entity) => !entity.isFolder
+      && !entity.components.skybox
+      && !entity.components.manualRoamSpawn
+      && !isEntityEffectivelyLocked(entities, entity),
   );
   const assetNumberedArraySourceCount = arraySourceEntities.filter(
     (entity) => Boolean(entity.components.modelAsset || entity.components.locator),
@@ -686,7 +693,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
           </button>
           <button
             className="hierarchy-context-menu-item"
-            disabled={props.readOnly || !hasSelection}
+            disabled={props.readOnly || !hasSelection || hasManualRoamSpawnSelection}
             onClick={() => runContextMenuAction(copySelectedEntities)}
             role="menuitem"
             type="button"

@@ -99,6 +99,7 @@ import { SceneSkyboxRuntime } from './SceneSkyboxRuntime';
 import { SceneShadowRuntime } from './SceneShadowRuntime';
 import { EditorLightMarkerRuntime } from './EditorLightMarkerRuntime';
 import { EditorAutoPatrolRuntime, type AutoPatrolMarkerPick } from './EditorAutoPatrolRuntime';
+import { EditorManualRoamSpawnRuntime } from './EditorManualRoamSpawnRuntime';
 import {
   SceneEnvironmentRuntime,
   type SceneEnvironmentApplyOptions,
@@ -685,6 +686,7 @@ export class SceneRuntime {
   private readonly lights = new Map<string, Light>();
   private readonly lightMarkerRuntime: EditorLightMarkerRuntime;
   private readonly autoPatrolMarkerRuntime: EditorAutoPatrolRuntime;
+  private readonly manualRoamSpawnRuntime: EditorManualRoamSpawnRuntime;
   private readonly entityStates = new Map<string, EntityRuntimeState>();
   private readonly syncedEntities = new Map<string, Entity>();
   private selectedEntityIds = new Set<string>();
@@ -748,6 +750,7 @@ export class SceneRuntime {
     this.shadowRuntime = new SceneShadowRuntime(scene);
     this.lightMarkerRuntime = new EditorLightMarkerRuntime(scene);
     this.autoPatrolMarkerRuntime = new EditorAutoPatrolRuntime(scene);
+    this.manualRoamSpawnRuntime = new EditorManualRoamSpawnRuntime(scene, this.pushLog);
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
       // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
@@ -1055,6 +1058,7 @@ export class SceneRuntime {
     this.telemetryPreviewActive = true;
     this.lightMarkerRuntime.setPreviewActive(true);
     this.autoPatrolMarkerRuntime.setPreviewActive(true);
+    this.manualRoamSpawnRuntime.setPreviewActive(true);
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('runtime', null);
     this.clearModelGeneratorLoadFailureCache();
@@ -1074,6 +1078,7 @@ export class SceneRuntime {
     this.telemetryPreviewActive = false;
     this.lightMarkerRuntime.setPreviewActive(false);
     this.autoPatrolMarkerRuntime.setPreviewActive(false);
+    this.manualRoamSpawnRuntime.setPreviewActive(false);
     this.specializedTelemetryRuntime.disposeAllCargo();
     for (const fetchRuntime of this.locatorFetchRuntimes.values()) {
       fetchRuntime.clearAllBatches();
@@ -1127,6 +1132,11 @@ export class SceneRuntime {
     this.autoPatrolMarkerRuntime.disable();
   }
 
+  /** 发布 Viewer 在首次同步前禁用手动漫游初始人物标记。 */
+  disableEditorManualRoamSpawnMarkers(): void {
+    this.manualRoamSpawnRuntime.disable();
+  }
+
   /** 同步路线与节点子选区；节点 ID 是编辑器 transient 状态，不写入场景文档。 */
   setAutoPatrolSelection(routeId: string | null, waypointId: string | null): void {
     this.autoPatrolMarkerRuntime.setSelection(routeId, waypointId);
@@ -1168,6 +1178,7 @@ export class SceneRuntime {
       this.poiEffectRuntime.getGizmoTarget(entityId) ??
       this.lightMarkerRuntime.getGizmoTarget(entityId) ??
       this.autoPatrolMarkerRuntime.getRouteGizmoTarget(entityId) ??
+      this.manualRoamSpawnRuntime.getGizmoTarget(entityId) ??
       null
     );
   }
@@ -1479,6 +1490,7 @@ export class SceneRuntime {
       ?? this.models.get(entityId)?.root
       ?? this.modelGenerators.get(entityId)?.markerRoot
       ?? this.poiEffectRuntime.getGizmoTarget(entityId)
+      ?? this.manualRoamSpawnRuntime.getTransformTarget(entityId)
       ?? null
     );
     if (node && !node.isDisposed()) {
@@ -1531,6 +1543,7 @@ export class SceneRuntime {
       ?? this.models.get(entityId)?.root
       ?? this.modelGenerators.get(entityId)?.markerRoot
       ?? this.poiEffectRuntime.getGizmoTarget(entityId)
+      ?? this.manualRoamSpawnRuntime.getTransformTarget(entityId)
       ?? null
     );
     if (node && !node.isDisposed()) {
@@ -2221,6 +2234,17 @@ export class SceneRuntime {
       return createPointWorldBounds(new Vector3(position.x, position.y, position.z));
     }
 
+    const manualRoamSpawnMeshes = this.manualRoamSpawnRuntime.getWorldBoundsMeshes(entityId);
+    if (manualRoamSpawnMeshes.length > 0) {
+      let mergedBounds: RuntimeWorldBounds | null = null;
+      for (const mesh of manualRoamSpawnMeshes) {
+        const bounds = getMeshWorldBounds(mesh);
+        if (!bounds) continue;
+        mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
+      }
+      if (mergedBounds) return mergedBounds;
+    }
+
     const poiEffectMeshes = this.poiEffectRuntime.getWorldBoundsMeshes(entityId);
     if (poiEffectMeshes.length > 0) {
       let mergedBounds: RuntimeWorldBounds | null = null;
@@ -2622,12 +2646,16 @@ export class SceneRuntime {
     const autoPatrolIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.autoPatrol)),
     );
+    const manualRoamSpawnIds = new Set(
+      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.manualRoamSpawn)),
+    );
     const previewSourceId = this.entityArrayPreview?.sourceEntityId;
     if (previewSourceId && this.poiEffectRuntime.has(previewSourceId) && !poiEffectIds.has(previewSourceId)) {
       this.clearEntityArrayPreview();
     }
     this.poiEffectRuntime.disposeMissing(poiEffectIds);
     this.autoPatrolMarkerRuntime.disposeMissing(autoPatrolIds);
+    this.manualRoamSpawnRuntime.disposeMissing(manualRoamSpawnIds);
 
     for (const [entityId, mesh] of this.meshes.entries()) {
       if (!primitiveMeshIds.has(entityId)) {
@@ -2752,6 +2780,7 @@ export class SceneRuntime {
     if (entity.components.light && !this.lights.has(entity.id)) return false;
     if (entity.components.light && !this.lightMarkerRuntime.isComplete(entity)) return false;
     if (entity.components.autoPatrol && !this.autoPatrolMarkerRuntime.isComplete(entity)) return false;
+    if (entity.components.manualRoamSpawn && !this.manualRoamSpawnRuntime.isComplete(entity)) return false;
     return true;
   }
 
@@ -2821,6 +2850,15 @@ export class SceneRuntime {
 
     if (entity.components.autoPatrol) {
       this.autoPatrolMarkerRuntime.syncPresentation(
+        entity,
+        selected,
+        this.isEntityVisible(entity.id),
+        this.isEntityScenePickable(entity.id),
+      );
+    }
+
+    if (entity.components.manualRoamSpawn) {
+      this.manualRoamSpawnRuntime.syncPresentation(
         entity,
         selected,
         this.isEntityVisible(entity.id),
@@ -3038,6 +3076,7 @@ export class SceneRuntime {
     }
     this.lightMarkerRuntime.dispose();
     this.autoPatrolMarkerRuntime.dispose();
+    this.manualRoamSpawnRuntime.dispose();
     this.shadowRuntime.dispose();
     this.skyboxRuntime.dispose();
     this.sharedModelAssetCache.dispose();
@@ -3115,6 +3154,15 @@ export class SceneRuntime {
 
     if (entity.components.autoPatrol) {
       this.autoPatrolMarkerRuntime.sync(
+        entity,
+        selected,
+        this.isEntityVisible(entity.id),
+        this.isEntityScenePickable(entity.id),
+      );
+    }
+
+    if (entity.components.manualRoamSpawn) {
+      this.manualRoamSpawnRuntime.sync(
         entity,
         selected,
         this.isEntityVisible(entity.id),
@@ -5327,6 +5375,7 @@ export class SceneRuntime {
         || this.poiEffectRuntime.has(entityId)
         || this.lightMarkerRuntime.has(entityId)
         || this.autoPatrolMarkerRuntime.has(entityId)
+        || this.manualRoamSpawnRuntime.has(entityId)
         || this.skyboxRuntime.hasEntity(entityId)
       )
       ? entityId

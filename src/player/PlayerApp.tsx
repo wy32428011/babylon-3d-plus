@@ -26,13 +26,32 @@ import {
   type PlayerRuntimeConfig,
 } from './runtimeConfig';
 import { DigitalTwinInteractionController } from './DigitalTwinInteractionController';
+import { resolveManualRoamSpawnPose } from '../editor/model/manualRoamSpawn';
 import {
   bindStatusOverlayPointerChordToggle,
   resolveInitialPlayerStatusOverlayVisibility,
   shouldShowPlayerStatusOverlay,
 } from './statusOverlayControls';
 import { AutoPatrolControls, type AutoPatrolControlAction } from '../shared/ui/AutoPatrolControls';
+import { ManualRoamControls } from '../shared/ui/ManualRoamControls';
 import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
+import {
+  createInitialManualRoamSnapshot,
+  ManualRoamRuntime,
+  type ManualRoamSnapshot,
+  type ManualRoamTouchAction,
+} from '../runtime/roam/ManualRoamRuntime';
+import type {
+  ManualRoamConfig,
+  ManualRoamLocomotionMode,
+  ManualRoamViewMode,
+} from '../runtime/roam/manualRoamCore';
+import {
+  combineManualRoamCollisionBoundsResolvers,
+  createManualRoamModelArrayCollisionBoundsResolver,
+  createManualRoamThinInstanceCollisionBoundsResolver,
+  isManualRoamModelArrayThinInstanceMesh,
+} from '../runtime/roam/manualRoamCollisionBounds';
 import { computePlayerLoadingProgress, PLAYER_SCENE_LOADING_TIMEOUT_MS } from './playerLoadingProgress';
 import { resolvePublishedFetchConfig, startPublishedFetchDrive } from './publishedFetchDrive';
 import './player.css';
@@ -122,9 +141,11 @@ function applySceneBackground(viewport: BabylonViewport, color: string): void {
 export function PlayerApp() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
+  const manualRoamRef = useRef<ManualRoamRuntime | null>(null);
   const [phase, setPhase] = useState<PlayerPhase>('loading');
   const [autoPatrolRoutes, setAutoPatrolRoutes] = useState<AutoPatrolPlaybackRoute[]>([]);
   const [autoPatrolSnapshot, setAutoPatrolSnapshot] = useState<AutoPatrolPlaybackSnapshot>(IDLE_AUTO_PATROL_SNAPSHOT);
+  const [manualRoamSnapshot, setManualRoamSnapshot] = useState<ManualRoamSnapshot>(createInitialManualRoamSnapshot);
   const [message, setMessage] = useState('场景加载中...');
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
   const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
@@ -163,8 +184,10 @@ export function PlayerApp() {
     let viewport: BabylonViewport | null = null;
     let runtime: SceneRuntime | null = null;
     let autoPatrolPlayback: AutoPatrolPlaybackController | null = null;
+    let manualRoam: ManualRoamRuntime | null = null;
     let interactionController: DigitalTwinInteractionController | null = null;
     let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
+    let unsubscribeManualRoamSnapshot: (() => void) | null = null;
     let removeAutoPatrolManualInputListeners: (() => void) | null = null;
     let removeModelSelectionListeners: (() => void) | null = null;
     let mqttClient: MqttStackerTelemetryClient | null = null;
@@ -281,6 +304,7 @@ export function PlayerApp() {
         );
         runtime.disableEditorLightMarkers();
         runtime.disableEditorAutoPatrolMarkers();
+        runtime.disableEditorManualRoamSpawnMarkers();
         runtime.sync(sceneDocument);
         setStartupPercent(36);
         const environment = sceneDocument.sceneSettings.environment;
@@ -318,6 +342,38 @@ export function PlayerApp() {
           autoPatrolPlayback?.notifyManualInput();
           autoPatrolPlayback?.notifyCameraChangedWhilePaused();
         };
+        if (parsedConfig.viewer.allowCameraControl) {
+          manualRoam = new ManualRoamRuntime({
+            scene: viewport.scene,
+            engine: viewport.engine,
+            camera: viewport.camera,
+            canvas,
+            resolveSpawnPose: () => resolveManualRoamSpawnPose(sceneDocument),
+            resolveCollisionBounds: combineManualRoamCollisionBoundsResolvers([
+              createManualRoamModelArrayCollisionBoundsResolver({
+                getSceneDocument: () => sceneDocument,
+                getRuntime: () => runtime,
+              }),
+              createManualRoamThinInstanceCollisionBoundsResolver({
+                getMeshes: () => viewport!.scene.meshes,
+                excludeMesh: isManualRoamModelArrayThinInstanceMesh,
+              }),
+            ]),
+            setOrbitControlsEnabled: viewport.setCameraControlsEnabled,
+            onActivated: () => {
+              viewport?.cancelCameraTransition('manual-input');
+              autoPatrolPlayback?.stop();
+              interactionController?.notifyManualCameraInput();
+            },
+            onManualInput: notifyManualInput,
+            onLog: (logMessage) => console.info(`[Viewer Roam] ${logMessage}`),
+          });
+          unsubscribeManualRoamSnapshot = manualRoam.subscribe(() => {
+            if (!disposed && manualRoam) setManualRoamSnapshot(manualRoam.getSnapshot());
+          });
+          manualRoamRef.current = manualRoam;
+          setManualRoamSnapshot(manualRoam.getSnapshot());
+        }
         removeModelSelectionListeners = bindSceneModelSelectionPointer(canvas, {
           clickTolerancePx: DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx,
           onSelectionClick: ({ clientX, clientY }) => {
@@ -367,7 +423,10 @@ export function PlayerApp() {
           getFocusBounds: (entityId, slot) => slot
             ? runtime!.getLocatorCellWorldBounds(entityId, slot)
             : runtime!.getEntitiesWorldBounds([entityId]),
-          focusOnBounds: (bounds, options) => viewport!.focusOnBounds(bounds, options),
+          focusOnBounds: (bounds, options) => {
+            manualRoam?.setEnabled(false);
+            viewport!.focusOnBounds(bounds, options);
+          },
           cancelCameraTransition: (reason) => viewport!.cancelCameraTransition(reason),
           setExternalHighlightEntityIds: (entityIds) => runtime!.setExternalHighlightEntityIds(entityIds),
           setExternalSlotHighlight: (entityId, coordinate) => runtime!.setExternalSlotHighlight(entityId, coordinate),
@@ -398,6 +457,9 @@ export function PlayerApp() {
         interactionController?.dispose();
         interactionController = null;
         mqttClient?.dispose();
+        unsubscribeManualRoamSnapshot?.();
+        manualRoam?.dispose();
+        manualRoamRef.current = null;
         removeModelSelectionListeners?.();
         removeAutoPatrolManualInputListeners?.();
         unsubscribeAutoPatrolSnapshot?.();
@@ -422,6 +484,9 @@ export function PlayerApp() {
       interactionController?.dispose();
       interactionController = null;
       mqttClient?.dispose();
+      unsubscribeManualRoamSnapshot?.();
+      manualRoam?.dispose();
+      manualRoamRef.current = null;
       removeModelSelectionListeners?.();
       removeAutoPatrolManualInputListeners?.();
       unsubscribeAutoPatrolSnapshot?.();
@@ -447,6 +512,7 @@ export function PlayerApp() {
     const controller = autoPatrolPlaybackRef.current;
     if (!controller) return;
     let result: { ok: true } | { ok: false; error: string } | null = null;
+    if (action === 'start' || action === 'resume') manualRoamRef.current?.setEnabled(false);
     switch (action) {
       case 'start':
         result = routeId ? controller.start(routeId) : { ok: false, error: '未选择巡检路线。' };
@@ -465,6 +531,26 @@ export function PlayerApp() {
         break;
     }
     if (result && !result.ok) setRuntimeMessage(result.error);
+  }
+
+  function handleManualRoamEnabled(enabled: boolean): void {
+    manualRoamRef.current?.setEnabled(enabled);
+  }
+
+  function handleManualRoamViewMode(viewMode: ManualRoamViewMode): void {
+    manualRoamRef.current?.setViewMode(viewMode);
+  }
+
+  function handleManualRoamLocomotionMode(mode: ManualRoamLocomotionMode): void {
+    manualRoamRef.current?.setLocomotionMode(mode);
+  }
+
+  function handleManualRoamConfig(patch: Partial<ManualRoamConfig>): void {
+    manualRoamRef.current?.updateConfig(patch);
+  }
+
+  function handleManualRoamTouchAction(action: ManualRoamTouchAction, pressed: boolean): void {
+    manualRoamRef.current?.setTouchAction(action, pressed);
   }
 
   const backgroundColor = config?.page.backgroundColor ?? '#141414';
@@ -486,7 +572,21 @@ export function PlayerApp() {
   return (
     <main className="player-root" style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
-      {phase === 'ready' && autoPatrolRoutes.length > 0 ? (
+      {phase === 'ready' && config?.viewer.allowCameraControl ? (
+        <ManualRoamControls
+          snapshot={manualRoamSnapshot}
+          onConfigChange={handleManualRoamConfig}
+          onDebugCollidersChange={(visible) => manualRoamRef.current?.setDebugColliders(visible)}
+          onEnabledChange={handleManualRoamEnabled}
+          onLocomotionModeChange={handleManualRoamLocomotionMode}
+          onPointerLock={() => manualRoamRef.current?.requestPointerLock()}
+          onReset={() => manualRoamRef.current?.reset()}
+          onTouchAction={handleManualRoamTouchAction}
+          onViewModeChange={handleManualRoamViewMode}
+          onVirtualMove={(right, forward) => manualRoamRef.current?.setVirtualMovement(right, forward)}
+        />
+      ) : null}
+      {phase === 'ready' && autoPatrolRoutes.length > 0 && !manualRoamSnapshot.enabled ? (
         <AutoPatrolControls
           routes={autoPatrolRoutes}
           snapshot={autoPatrolSnapshot}

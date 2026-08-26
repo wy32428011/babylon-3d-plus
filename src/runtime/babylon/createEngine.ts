@@ -96,6 +96,8 @@ export type BabylonViewport = {
   cancelCameraTransition: (reason?: CameraTransitionCancelReason) => boolean;
   setViewDistance: (meters: number) => void;
   setSensitivity: (settings: SceneSensitivitySettings) => void;
+  /** 在轨道相机与人物漫游之间移交输入所有权。 */
+  setCameraControlsEnabled: (enabled: boolean) => void;
   /** 按画布实际尺寸刷新引擎，并重新应用场景灵敏度，避免小画布把平移放大。 */
   resize: () => void;
   getCameraPose: () => SceneCameraPose;
@@ -283,10 +285,12 @@ function createCameraFlyKeyControls(
   engine: Engine,
   scene: Scene,
   getNavigationMode: () => CameraNavigationMode,
-): () => void {
+  isEnabled: () => boolean,
+): { clear: () => void; dispose: () => void } {
   const pressedKeys = new Set<string>();
 
   const handleKeyDown = (event: KeyboardEvent): void => {
+    if (!isEnabled()) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (!CAMERA_FLY_KEY_CODES.has(event.code)) return;
     const active = document.activeElement;
@@ -314,7 +318,7 @@ function createCameraFlyKeyControls(
   window.addEventListener('blur', handleWindowBlur, true);
 
   const observer = scene.onBeforeRenderObservable.add(() => {
-    if (pressedKeys.size === 0) return;
+    if (!isEnabled() || pressedKeys.size === 0) return;
     const navigationMode = getNavigationMode();
     if (navigationMode === 'transition') return;
 
@@ -351,11 +355,14 @@ function createCameraFlyKeyControls(
     camera.target.addInPlace(move);
   });
 
-  return () => {
-    window.removeEventListener('keydown', handleKeyDown, true);
-    window.removeEventListener('keyup', handleKeyUp, true);
-    window.removeEventListener('blur', handleWindowBlur, true);
-    scene.onBeforeRenderObservable.remove(observer);
+  return {
+    clear: handleWindowBlur,
+    dispose: () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('keyup', handleKeyUp, true);
+      window.removeEventListener('blur', handleWindowBlur, true);
+      scene.onBeforeRenderObservable.remove(observer);
+    },
   };
 }
 
@@ -411,9 +418,10 @@ export function createBabylonViewport(
       pan: defaultSensitivity,
       rotate: defaultSensitivity,
     };
+  let cameraControlsEnabled = allowCameraControl;
   let cameraControlAttached = false;
   const attachCameraControl = (): void => {
-    if (!allowCameraControl || cameraControlAttached) return;
+    if (!allowCameraControl || !cameraControlsEnabled || cameraControlAttached) return;
     attachDigitalTwinCameraControl(camera, cameraSensitivity);
     cameraControlAttached = true;
   };
@@ -441,11 +449,12 @@ export function createBabylonViewport(
   const cameraPanScaleObserver = scene.onBeforeRenderObservable.add(() => {
     syncDigitalTwinCameraPanScale(camera);
   });
-  const disposeFlyControls = createCameraFlyKeyControls(
+  const flyControls = createCameraFlyKeyControls(
     camera,
     engine,
     scene,
     () => cameraViewController.getNavigationMode(),
+    () => cameraControlsEnabled,
   );
   let disposed = false;
   let contextLost = false;
@@ -513,6 +522,14 @@ export function createBabylonViewport(
       cameraSensitivity = { ...settings };
       applyDigitalTwinCameraSensitivity(camera, cameraSensitivity);
     },
+    setCameraControlsEnabled: (enabled) => {
+      cameraControlsEnabled = allowCameraControl && enabled;
+      if (cameraControlsEnabled) attachCameraControl();
+      else {
+        flyControls.clear();
+        detachCameraControl();
+      }
+    },
     resize: () => {
       engine.resize();
       applyDigitalTwinCameraSensitivity(camera, cameraSensitivity);
@@ -533,7 +550,7 @@ export function createBabylonViewport(
     setGridSettings: editorGround.setSettings,
     dispose: () => {
       disposed = true;
-      disposeFlyControls();
+      flyControls.dispose();
       scene.onBeforeRenderObservable.remove(cameraPanScaleObserver);
       cameraViewController.dispose();
       engine.onContextLostObservable.remove(contextLostObserver);

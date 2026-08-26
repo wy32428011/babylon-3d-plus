@@ -33,7 +33,7 @@ import {
   type SceneSettings,
   type SceneSkyboxSettings,
 } from '../model/SceneDocument';
-import type { AutoPatrolComponent, EntityComponents, LightKind, LocatorComponent, LocatorStorageDepth, MeshKind, PoiEffectComponent } from '../model/components';
+import type { AutoPatrolComponent, EntityComponents, LightKind, LocatorComponent, LocatorStorageDepth, ManualRoamSpawnComponent, MeshKind, PoiEffectComponent } from '../model/components';
 import {
   MODEL_GENERATOR_MAX_RULES,
   sanitizeModelGeneratorComponent,
@@ -204,6 +204,7 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     migratedSkybox.entityIds,
     migratedSkybox.entities,
   );
+  validateSingleManualRoamSpawn(migratedSkybox.entityIds, normalizedPatrolEntities);
   validateEntityHierarchy(migratedSkybox.entityIds, normalizedPatrolEntities);
   validateModelArrayInstanceReferences(migratedSkybox.entityIds, migratedSkybox.entities);
 
@@ -559,6 +560,15 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
     normalized.autoPatrol = normalizeAutoPatrol(components.autoPatrol);
     normalized.transform = {
       ...normalized.transform,
+      scale: { x: 1, y: 1, z: 1 },
+    };
+  }
+
+  if ('manualRoamSpawn' in components && components.manualRoamSpawn !== undefined) {
+    normalized.manualRoamSpawn = normalizeManualRoamSpawn(components.manualRoamSpawn);
+    normalized.transform = {
+      ...normalized.transform,
+      rotation: { x: 0, y: normalized.transform.rotation.y, z: 0 },
       scale: { x: 1, y: 1, z: 1 },
     };
   }
@@ -1125,6 +1135,24 @@ function normalizeAutoPatrol(value: unknown): AutoPatrolComponent {
   return normalized;
 }
 
+function normalizeManualRoamSpawn(value: unknown): ManualRoamSpawnComponent {
+  assertPlainObject(value);
+  return {};
+}
+
+/** 手动漫游只有一个权威出生点；重复数据说明场景文件已损坏或被非法修改。 */
+function validateSingleManualRoamSpawn(
+  entityIds: readonly string[],
+  entities: Readonly<Record<string, Entity>>,
+): void {
+  let found = false;
+  for (const entityId of entityIds) {
+    if (!entities[entityId]?.components.manualRoamSpawn) continue;
+    if (found) throwUnsupportedSceneFileError();
+    found = true;
+  }
+}
+
 /** 宽容处理外部场景中的重复自动启动标记，只保留 Hierarchy 顺序中的第一条。 */
 function enforceSingleAutoStartPatrol(
   entityIds: readonly string[],
@@ -1243,6 +1271,7 @@ function hasRuntimeComponent(components: EntityComponents): boolean {
     components.modelGenerator ||
     components.poiEffect ||
     components.autoPatrol ||
+    components.manualRoamSpawn ||
     components.camera ||
     components.light,
   );

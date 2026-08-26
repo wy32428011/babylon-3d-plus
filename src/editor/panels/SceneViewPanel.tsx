@@ -47,6 +47,11 @@ import {
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import { getLightEditorCapabilities } from '../model/lightEditor';
 import { getAutoPatrolWaypointWorldPose } from '../model/autoPatrol';
+import {
+  containsManualRoamSpawnEntity,
+  resolveManualRoamGroupRotationReference,
+  resolveManualRoamSpawnPose,
+} from '../model/manualRoamSpawn';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
 import {
   getSceneSkyboxSettings,
@@ -78,6 +83,24 @@ import {
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 import { ViewportOrientationCompass } from '../ui/ViewportOrientationCompass';
 import { AutoPatrolControls } from '../../shared/ui/AutoPatrolControls';
+import { ManualRoamControls } from '../../shared/ui/ManualRoamControls';
+import {
+  createInitialManualRoamSnapshot,
+  ManualRoamRuntime,
+  type ManualRoamSnapshot,
+  type ManualRoamTouchAction,
+} from '../../runtime/roam/ManualRoamRuntime';
+import type {
+  ManualRoamConfig,
+  ManualRoamLocomotionMode,
+  ManualRoamViewMode,
+} from '../../runtime/roam/manualRoamCore';
+import {
+  combineManualRoamCollisionBoundsResolvers,
+  createManualRoamModelArrayCollisionBoundsResolver,
+  createManualRoamThinInstanceCollisionBoundsResolver,
+  isManualRoamModelArrayThinInstanceMesh,
+} from '../../runtime/roam/manualRoamCollisionBounds';
 import {
   beginScenePreparation,
   countExpectedSceneBatchedEntities,
@@ -216,11 +239,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const runtimeRef = useRef<SceneRuntime | null>(null);
   const gizmoRef = useRef<TransformGizmoController | null>(null);
   const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
+  const manualRoamRef = useRef<ManualRoamRuntime | null>(null);
   const mqttTelemetryClientRef = useRef<MqttStackerTelemetryClient | null>(null);
   const performanceMonitorRef = useRef<ScenePerformanceMonitor | null>(null);
   const sceneFocusPerformanceRef = useRef<SceneFocusPerformanceMetrics | null>(null);
   const clickSnapshotRef = useRef<SceneModelSelectionPointerSnapshot | null>(null);
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
+  const editRuntimeSceneDocumentRef = useRef<SceneDocument | null>(null);
   const editModeThinInstancePlanRef = useRef<EditModeModelThinInstancePlan | null>(null);
   const editModeThinInstancePlanPerformanceRef = useRef<EditModeThinInstancePlanPerformanceMetrics>({
     planCount: 0,
@@ -247,8 +272,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
   const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
   const [performanceHudExpanded, setPerformanceHudExpanded] = useState(false);
+  const [manualRoamSnapshot, setManualRoamSnapshot] = useState<ManualRoamSnapshot>(createInitialManualRoamSnapshot);
   const sceneDocument = useEditorStore((state) => state.scene);
   const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
+  const manualRoamSceneSessionIdRef = useRef(sceneSessionId);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
   const selectedEntityId = useEditorStore((state) => state.scene.selectedEntityId);
@@ -278,6 +305,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const createLight = useEditorStore((state) => state.createLight);
   const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
   const createAutoPatrol = useEditorStore((state) => state.createAutoPatrol);
+  const createManualRoamSpawn = useEditorStore((state) => state.createManualRoamSpawn);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const placeSkybox = useEditorStore((state) => state.placeSkybox);
@@ -366,10 +394,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       return;
     }
 
-    const referenceEntityId = groupSelection.entityIds[0] ?? null;
-    const rotation = referenceEntityId
-      ? state.scene.entities[referenceEntityId]?.components.transform.rotation
-      : null;
+    const rotation = resolveManualRoamGroupRotationReference(state.scene, groupSelection.entityIds);
     setSelectedGroupSpatialInfo({
       groupId: groupSelection.groupId,
       rotation: rotation ? { ...rotation } : { x: 0, y: 0, z: 0 },
@@ -408,12 +433,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const groupSelection = resolveHierarchyGroupTransformSelection(state.scene, state.hierarchySelectionIds);
     if (groupSelection.status === 'ready') {
       const groupTool = state.transformTool === 'rotate' ? 'rotate' : 'translate';
+      const containsManualRoamSpawn = containsManualRoamSpawnEntity(state.scene, groupSelection.entityIds);
       const target = runtime.getFolderGroupGizmoTarget(
         groupSelection.groupId,
         groupSelection.entityIds,
         groupTool,
       );
-      gizmo.attachToGroupTarget(target, groupSelection.groupId);
+      gizmo.attachToGroupTarget(target, groupSelection.groupId, {
+        rotationAxes: containsManualRoamSpawn ? ['y'] : undefined,
+      });
       return;
     }
     if (groupSelection.status !== 'unavailable') {
@@ -445,10 +473,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const target = runtime.getGizmoTargetByEntityId(selectedEntityId);
     gizmo.attachToTarget(target, selectedEntityId, {
       uniformScaleOnly: Boolean(selectedEntity?.components.skybox),
-      supportedTools: selectedEntity?.components.autoPatrol
+      supportedTools: selectedEntity?.components.autoPatrol || selectedEntity?.components.manualRoamSpawn
         ? ['translate', 'rotate']
         : lightCapabilities?.supportedTools,
-      entityArrayEnabled: lightCapabilities === null && !selectedEntity?.components.autoPatrol,
+      entityArrayEnabled: lightCapabilities === null
+        && !selectedEntity?.components.autoPatrol
+        && !selectedEntity?.components.manualRoamSpawn,
+      rotationAxes: selectedEntity?.components.manualRoamSpawn ? ['y'] : undefined,
     });
     runtime.clearFolderGroupGizmoTarget();
   }, []);
@@ -508,6 +539,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       entityId: modelParameterSyncEntityId,
     };
     sceneDocumentRef.current = sceneDocument;
+    editRuntimeSceneDocumentRef.current = editRuntimeSceneDocument;
     selectedEntityIdRef.current = selectedEntityId;
     entityArrayDialogRef.current = entityArrayDialog;
   }, [
@@ -743,6 +775,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       return;
     }
 
+    if (builtInAsset.kind === 'manual-roam-spawn') {
+      createManualRoamSpawn(placementPosition);
+      return;
+    }
+
     if (builtInAsset.kind === 'model-generator') {
       createModelGenerator(placementPosition);
       return;
@@ -777,7 +814,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     let runtime: SceneRuntime | null = null;
     let gizmo: TransformGizmoController | null = null;
     let autoPatrolPlayback: AutoPatrolPlaybackController | null = null;
+    let manualRoam: ManualRoamRuntime | null = null;
     let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
+    let unsubscribeManualRoamSnapshot: (() => void) | null = null;
     let mqttTelemetryClient: MqttStackerTelemetryClient | null = null;
     let performanceMonitor: ScenePerformanceMonitor | null = null;
 
@@ -843,6 +882,46 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         );
       });
       useEditorStore.getState().setAutoPatrolPlaybackSnapshot(autoPatrolPlayback.getSnapshot());
+      manualRoam = new ManualRoamRuntime({
+        scene: viewport.scene,
+        engine: viewport.engine,
+        camera: viewport.camera,
+        canvas: canvasRef.current,
+        resolveSpawnPose: () => resolveManualRoamSpawnPose(
+          sceneDocumentRef.current ?? useEditorStore.getState().scene,
+        ),
+        resolveCollisionBounds: combineManualRoamCollisionBoundsResolvers([
+          createManualRoamModelArrayCollisionBoundsResolver({
+            getSceneDocument: () => editRuntimeSceneDocumentRef.current ?? useEditorStore.getState().scene,
+            getRuntime: () => runtime,
+          }),
+          createManualRoamThinInstanceCollisionBoundsResolver({
+            getMeshes: () => viewport!.scene.meshes,
+            excludeMesh: isManualRoamModelArrayThinInstanceMesh,
+          }),
+        ]),
+        setOrbitControlsEnabled: viewport.setCameraControlsEnabled,
+        onActivated: () => {
+          viewport!.cancelCameraTransition('manual-input');
+          viewport!.setCameraOrientation('orbit', { animate: false });
+          autoPatrolPlayback?.stop();
+          autoPatrolPreviewStartedRef.current = false;
+        },
+        onDeactivated: () => {
+          const state = useEditorStore.getState();
+          viewport!.setCameraProjection(state.cameraProjection);
+          viewport!.setCameraOrientation(state.cameraOrientation, { animate: false });
+        },
+        onManualInput: () => {
+          autoPatrolPlayback?.notifyManualInput();
+          autoPatrolPlayback?.notifyCameraChangedWhilePaused();
+        },
+        onLog: pushLog,
+      });
+      unsubscribeManualRoamSnapshot = manualRoam.subscribe(() => {
+        if (manualRoam) setManualRoamSnapshot(manualRoam.getSnapshot());
+      });
+      setManualRoamSnapshot(manualRoam.getSnapshot());
       gizmo = new TransformGizmoController(viewport.scene, {
         previewTransform: previewEntityTransform,
         commitTransform: commitEntityTransform,
@@ -1075,6 +1154,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     } catch (error) {
       console.error('Scene View 渲染引擎初始化失败。', error);
       mqttTelemetryClient?.dispose();
+      unsubscribeManualRoamSnapshot?.();
+      manualRoam?.dispose();
       unsubscribeAutoPatrolSnapshot?.();
       autoPatrolPlayback?.dispose();
       gizmo?.dispose();
@@ -1090,13 +1171,16 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const initializedRuntime = runtime;
     const initializedGizmo = gizmo;
     const initializedAutoPatrolPlayback = autoPatrolPlayback;
+    const initializedManualRoam = manualRoam;
     const initializedUnsubscribeAutoPatrolSnapshot = unsubscribeAutoPatrolSnapshot;
+    const initializedUnsubscribeManualRoamSnapshot = unsubscribeManualRoamSnapshot;
     const initializedMqttTelemetryClient = mqttTelemetryClient;
     viewportRef.current = viewport;
     setViewportCamera(viewport.camera);
     runtimeRef.current = runtime;
     gizmoRef.current = gizmo;
     autoPatrolPlaybackRef.current = autoPatrolPlayback;
+    manualRoamRef.current = manualRoam;
     mqttTelemetryClientRef.current = mqttTelemetryClient;
 
     try {
@@ -1131,6 +1215,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       window.removeEventListener('blur', cancelActiveGizmoDrag);
       initializedPerformanceMonitor?.dispose();
       initializedMqttTelemetryClient?.dispose();
+      initializedUnsubscribeManualRoamSnapshot?.();
+      initializedManualRoam?.dispose();
       initializedUnsubscribeAutoPatrolSnapshot?.();
       initializedAutoPatrolPlayback?.dispose();
       initializedGizmo.dispose();
@@ -1141,6 +1227,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       runtimeRef.current = null;
       gizmoRef.current = null;
       autoPatrolPlaybackRef.current = null;
+      manualRoamRef.current = null;
       mqttTelemetryClientRef.current = null;
       performanceMonitorRef.current = null;
       setPerformanceSnapshot(null);
@@ -1161,6 +1248,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     setSelectedModelMeasurement,
     stopRuntimePreview,
   ]);
+
+  useEffect(() => {
+    if (manualRoamSceneSessionIdRef.current === sceneSessionId) return;
+    manualRoamSceneSessionIdRef.current = sceneSessionId;
+    manualRoamRef.current?.invalidateSpawn();
+  }, [sceneSessionId]);
 
   /** 执行 Store 发起的候选环境事务；旧环境会保留到候选加载成功。 */
   useEffect(() => {
@@ -1445,8 +1538,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         pushLog('群组旋转修改已阻止：选中对象仍在加载或缺少运行时旋转目标。');
         return;
       }
-      const referenceEntityId = selection.entityIds[0];
-      const currentRotation = state.scene.entities[referenceEntityId]?.components.transform.rotation;
+      const currentRotation = resolveManualRoamGroupRotationReference(state.scene, selection.entityIds);
       if (!currentRotation) {
         pushLog('群组旋转修改已取消：无法读取参考对象旋转。');
         return;
@@ -1507,6 +1599,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     // 运行模式只切换脚本、动画和遥测生命周期，保留已完成的 Geometry 合批及逻辑实体参数。
     if (!isRuntimePreview) {
+      manualRoamRef.current?.setEnabled(false);
       client.dispose();
       gizmo.cancelActiveDrag();
       runtime.endTelemetryPreview();
@@ -1602,6 +1695,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       item.id === autoPatrolCameraRequest.waypointId
     ));
     if (viewport && entity && waypoint) {
+      manualRoamRef.current?.setEnabled(false);
       autoPatrolPlaybackRef.current?.stop();
       viewport.applyCameraPose(
         getAutoPatrolWaypointWorldPose(waypoint, entity.components.transform),
@@ -1620,6 +1714,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     let result: { ok: true } | { ok: false; error: string } | null = null;
     switch (autoPatrolPlaybackRequest.action) {
       case 'start':
+        manualRoamRef.current?.setEnabled(false);
         result = autoPatrolPlaybackRequest.routeId
           ? controller.start(autoPatrolPlaybackRequest.routeId)
           : { ok: false, error: '未选择巡检路线。' };
@@ -1628,6 +1723,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         result = controller.pause(false);
         break;
       case 'resume':
+        manualRoamRef.current?.setEnabled(false);
         result = controller.resume();
         break;
       case 'stop':
@@ -1658,6 +1754,26 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const result = controller.start(route.entityId);
     if (!result.ok) pushLog(result.error);
   }, [autoPatrolRoutes, isRuntimePreview, pushLog]);
+
+  function handleManualRoamEnabled(enabled: boolean): void {
+    manualRoamRef.current?.setEnabled(enabled);
+  }
+
+  function handleManualRoamViewMode(viewMode: ManualRoamViewMode): void {
+    manualRoamRef.current?.setViewMode(viewMode);
+  }
+
+  function handleManualRoamLocomotionMode(mode: ManualRoamLocomotionMode): void {
+    manualRoamRef.current?.setLocomotionMode(mode);
+  }
+
+  function handleManualRoamConfig(patch: Partial<ManualRoamConfig>): void {
+    manualRoamRef.current?.updateConfig(patch);
+  }
+
+  function handleManualRoamTouchAction(action: ManualRoamTouchAction, pressed: boolean): void {
+    manualRoamRef.current?.setTouchAction(action, pressed);
+  }
 
   /** F1 只在非输入态、编辑模式且选中巡检路线时录制或覆盖当前相机视角。 */
   useEffect(() => {
@@ -1736,14 +1852,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
   /** 复位请求由原子视角应用负责，普通切换则先同步投影再驱动方向动画。 */
   useEffect(() => {
-    if (cameraResetRequest) return;
+    if (cameraResetRequest || manualRoamSnapshot.enabled) return;
     viewportRef.current?.setCameraProjection(cameraProjection);
-  }, [cameraProjection, cameraResetRequest]);
+  }, [cameraProjection, cameraResetRequest, manualRoamSnapshot.enabled]);
 
   useEffect(() => {
-    if (cameraResetRequest) return;
+    if (cameraResetRequest || manualRoamSnapshot.enabled) return;
     viewportRef.current?.setCameraOrientation(cameraOrientation);
-  }, [cameraOrientation, cameraResetRequest]);
+  }, [cameraOrientation, cameraResetRequest, manualRoamSnapshot.enabled]);
 
   useEffect(() => {
     if (!cameraPoseSaveRequest) return;
@@ -1756,13 +1872,23 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
   useEffect(() => {
     if (!cameraResetRequest) return;
+    if (manualRoamSnapshot.enabled) {
+      consumeCameraResetRequest(cameraResetRequest.id);
+      manualRoamRef.current?.reset();
+      return;
+    }
 
     const viewport = viewportRef.current;
     if (!viewport) return;
 
     applySavedSceneCameraView(viewport, sceneDocument.sceneSettings.camera);
     consumeCameraResetRequest(cameraResetRequest.id);
-  }, [cameraResetRequest, consumeCameraResetRequest, sceneDocument.sceneSettings.camera]);
+  }, [
+    cameraResetRequest,
+    consumeCameraResetRequest,
+    manualRoamSnapshot.enabled,
+    sceneDocument.sceneSettings.camera,
+  ]);
 
   useEffect(() => {
     if (!entityArrayRequest) return;
@@ -1788,6 +1914,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     const bounds = runtime.getEntitiesWorldBounds(sceneFocusRequest.entityIds);
     if (bounds) {
+      manualRoamRef.current?.setEnabled(false);
       const currentScene = sceneDocumentRef.current;
       const containsSkybox = sceneFocusRequest.entityIds.some((entityId) => (
         Boolean(currentScene?.entities[entityId]?.components.skybox)
@@ -1822,6 +1949,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     const bounds = runtime.getEnvironmentWorldBounds();
     if (bounds) {
+      manualRoamRef.current?.setEnabled(false);
       const requiredViewDistance = Math.min(
         SCENE_VIEW_DISTANCE_MAX,
         Math.max(sceneDocument.sceneSettings.camera.viewDistance, Math.ceil(bounds.radiusMeters * 4)),
@@ -1945,12 +2073,26 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         />
         <ViewportOrientationCompass
           camera={viewportCamera}
-          disabled={Boolean(viewportError)}
+          disabled={Boolean(viewportError) || (isRuntimePreview && manualRoamSnapshot.enabled)}
           onReset={requestCameraReset}
           onToggleStandardView={toggleCameraStandardView}
           orientation={cameraOrientation}
         />
-        {isRuntimePreview && autoPatrolRoutes.length > 0 ? (
+        {isRuntimePreview ? (
+          <ManualRoamControls
+            snapshot={manualRoamSnapshot}
+            onConfigChange={handleManualRoamConfig}
+            onDebugCollidersChange={(visible) => manualRoamRef.current?.setDebugColliders(visible)}
+            onEnabledChange={handleManualRoamEnabled}
+            onLocomotionModeChange={handleManualRoamLocomotionMode}
+            onPointerLock={() => manualRoamRef.current?.requestPointerLock()}
+            onReset={() => manualRoamRef.current?.reset()}
+            onTouchAction={handleManualRoamTouchAction}
+            onViewModeChange={handleManualRoamViewMode}
+            onVirtualMove={(right, forward) => manualRoamRef.current?.setVirtualMovement(right, forward)}
+          />
+        ) : null}
+        {isRuntimePreview && autoPatrolRoutes.length > 0 && !manualRoamSnapshot.enabled ? (
           <AutoPatrolControls
             routes={autoPatrolRoutes}
             snapshot={autoPatrolPlaybackSnapshot}

@@ -19,6 +19,7 @@ import {
   isEntityEffectivelyLocked,
   resolveHierarchyGroupTransformSelection,
 } from '../model/entityHierarchy';
+import { containsManualRoamSpawnEntity } from '../model/manualRoamSpawn';
 import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
 import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
 import { useEditorStore } from '../store/editorStore';
@@ -153,6 +154,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const requestRevealHierarchyEntity = useEditorStore((state) => state.requestRevealHierarchyEntity);
   const selectedEntity = scene.selectedEntityId ? scene.entities[scene.selectedEntityId] : null;
   const groupSelection = resolveHierarchyGroupTransformSelection(scene, hierarchySelectionIds);
+  const groupContainsManualRoamSpawn = groupSelection.status === 'ready'
+    && containsManualRoamSpawnEntity(scene, groupSelection.entityIds);
   const groupSpatialInfo = groupSelection.groupId && selectedGroupSpatialInfo?.groupId === groupSelection.groupId
     ? selectedGroupSpatialInfo
     : null;
@@ -294,7 +297,11 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   <span>{axis.toUpperCase()}</span>
                   <GroupSpatialAxisInput
                     ariaLabel={`群组旋转 ${axis.toUpperCase()}`}
-                    disabled={props.readOnly === true || groupSelection.status !== 'ready'}
+                    disabled={
+                      props.readOnly === true
+                      || groupSelection.status !== 'ready'
+                      || (groupContainsManualRoamSpawn && axis !== 'y')
+                    }
                     step="1"
                     value={formatRotationDegrees(radiansToDegrees(groupSpatialInfo.rotation[axis]))}
                     onCommit={(value) => handleGroupTransformCommit('rotation', axis, value)}
@@ -352,19 +359,22 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const modelGenerator = selectedEntity.components.modelGenerator;
   const poiEffect = selectedEntity.components.poiEffect;
   const autoPatrol = selectedEntity.components.autoPatrol;
-  const isCompactModelInspector = Boolean(modelAsset || meshRenderer || skybox || modelGenerator || poiEffect || autoPatrol || locator);
+  const manualRoamSpawn = selectedEntity.components.manualRoamSpawn;
+  const isCompactModelInspector = Boolean(
+    modelAsset || meshRenderer || skybox || modelGenerator || poiEffect || autoPatrol || manualRoamSpawn || locator,
+  );
   const isBuiltInBound = Boolean(locator?.builtInBinding);
   const builtInSlotEntityId = modelAsset ? findBuiltInSlotEntityId(scene, selectedEntity.id) : null;
   const transformDisabled = isLocked || isBuiltInBound;
   const transformFields: readonly TransformField[] = light
     ? getLightEditorCapabilities(light.lightKind).transformFields
-    : skybox || autoPatrol
+    : skybox || autoPatrol || manualRoamSpawn
       ? fields.filter((field) => field !== 'scale')
       : fields;
 
   return (
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
-      <h2>{modelGenerator ? '模型生成器' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : 'Inspector'}</h2>
+      <h2>{modelGenerator ? '模型生成器' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : manualRoamSpawn ? '手动漫游' : 'Inspector'}</h2>
       <label className="inspector-row">
         <span>{poiEffect ? '特效名称' : modelGenerator || autoPatrol ? 'POI名称' : '名称'}</span>
         <input
@@ -384,7 +394,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
               <span>{axis.toUpperCase()}</span>
               <input
                 type="number"
-                disabled={transformDisabled}
+                disabled={transformDisabled || Boolean(manualRoamSpawn && field === 'rotation' && axis !== 'y')}
                 step={getTransformInputStep(field)}
                 value={getTransformInputValue(field, transform[field][axis])}
                 onChange={(event) => handleTransformChange(field, axis, event.target.value)}
@@ -394,6 +404,12 @@ export function InspectorPanel(props: InspectorPanelProps) {
           {isBuiltInBound && field === 'position' ? <p className="muted">位置由货架驱动，解绑后可编辑。</p> : null}
         </fieldset>
       ))}
+      {manualRoamSpawn ? (
+        <fieldset className="transform-fieldset" aria-label="手动漫游初始位置提示">
+          <legend>初始姿态</legend>
+          <p className="muted">位置表示人物脚底的世界坐标，旋转 Y 表示开始漫游时的水平朝向。</p>
+        </fieldset>
+      ) : null}
       {modelGenerator ? (
         <fieldset className="transform-fieldset" aria-label="模型生成器标记提示">
           <legend>重要提示</legend>

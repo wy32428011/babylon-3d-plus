@@ -333,12 +333,20 @@ export class TransformGizmoController {
   }
 
   /** 将移动或旋转 Gizmo 绑定到文件夹整组的不可见中心代理。 */
-  attachToGroupTarget(target: TransformNode | null, folderId: string | null): void {
+  attachToGroupTarget(
+    target: TransformNode | null,
+    folderId: string | null,
+    options: Pick<TransformGizmoTargetOptions, 'rotationAxes'> = {},
+  ): void {
     const nextGroupId = target ? folderId : null;
+    const nextRotationAxes = new Set<TransformGizmoAxis>(
+      target ? options.rotationAxes ?? ALL_TRANSFORM_AXES : ALL_TRANSFORM_AXES,
+    );
     if (
       this.attachedTarget === target
       && this.attachedGroupId === nextGroupId
       && this.attachedEntityId === null
+      && areRotationAxisSetsEqual(this.attachedRotationAxes, nextRotationAxes)
     ) return;
 
     this.cancelActiveDrag();
@@ -350,7 +358,7 @@ export class TransformGizmoController {
     this.attachedUniformScaleOnly = false;
     this.attachedSupportedTools = new Set<TransformTool>(['translate', 'rotate']);
     this.attachedEntityArrayEnabled = false;
-    this.attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_TRANSFORM_AXES);
+    this.attachedRotationAxes = nextRotationAxes;
     this.currentTool = this.currentTool === 'rotate' ? 'rotate' : 'translate';
     this.setTool(this.currentTool);
     this.transformSpace = 'global';
