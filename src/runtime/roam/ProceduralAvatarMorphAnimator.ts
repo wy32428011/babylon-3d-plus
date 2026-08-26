@@ -11,6 +11,7 @@ import {
   createProceduralStrideTargets,
   resolveProceduralStrideInfluences,
   type ProceduralLimbSelection,
+  type ProceduralStrideLimbLengths,
   type ProceduralStridePivots,
   type ProceduralStrideRotationOffsets,
 } from './proceduralAvatarAnimation';
@@ -27,7 +28,9 @@ type LocalPoint = { x: number; y: number; z: number };
 type LocalLimbSegment = { pivot: LocalPoint; distal: LocalPoint };
 type MeshLocalGaitPose = {
   pivots: Partial<ProceduralStridePivots>;
+  distals: Partial<ProceduralStridePivots>;
   neutralRotationOffsets: Partial<ProceduralStrideRotationOffsets>;
+  limbLengths: Partial<ProceduralStrideLimbLengths>;
 };
 
 /** 为静态人物网格安装 GPU Morph Target 步态，避免每帧重传顶点。 */
@@ -47,7 +50,9 @@ export class ProceduralAvatarMorphAnimator {
         normals: mesh.getVerticesData(VertexBuffer.NormalKind),
         tangents: mesh.getVerticesData(VertexBuffer.TangentKind),
         pivots: localPose.pivots,
+        distals: localPose.distals,
         neutralRotationOffsets: localPose.neutralRotationOffsets,
+        limbLengths: localPose.limbLengths,
       });
       if (!strideTargets) continue;
 
@@ -141,11 +146,23 @@ function resolveMeshLocalGaitPose(scene: Scene, mesh: AbstractMesh): MeshLocalGa
       leftLeg: legs[0]?.pivot,
       rightLeg: legs[1]?.pivot,
     },
+    distals: {
+      leftArm: arms[0]?.distal,
+      rightArm: arms[1]?.distal,
+      leftLeg: legs[0]?.distal,
+      rightLeg: legs[1]?.distal,
+    },
     neutralRotationOffsets: {
       leftArm: resolveNeutralRotationOffset(arms[0]),
       rightArm: resolveNeutralRotationOffset(arms[1]),
       leftLeg: resolveNeutralRotationOffset(legs[0]),
       rightLeg: resolveNeutralRotationOffset(legs[1]),
+    },
+    limbLengths: {
+      leftArm: resolveSegmentLength(arms[0]),
+      rightArm: resolveSegmentLength(arms[1]),
+      leftLeg: resolveSegmentLength(legs[0]),
+      rightLeg: resolveSegmentLength(legs[1]),
     },
   };
 }
@@ -163,4 +180,13 @@ function resolveNeutralRotationOffset(segment: LocalLimbSegment | undefined): nu
   const relativeZ = segment.distal.z - segment.pivot.z;
   if (Math.hypot(relativeY, relativeZ) <= 1e-6) return undefined;
   return Math.atan2(relativeZ, -relativeY);
+}
+
+function resolveSegmentLength(segment: LocalLimbSegment | undefined): number | undefined {
+  if (!segment) return undefined;
+  return Math.hypot(
+    segment.distal.x - segment.pivot.x,
+    segment.distal.y - segment.pivot.y,
+    segment.distal.z - segment.pivot.z,
+  );
 }

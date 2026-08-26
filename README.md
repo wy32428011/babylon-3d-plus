@@ -15,7 +15,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 ## 当前功能
 
 - Electron 桌面窗口：通过 Electron 主进程启动独立桌面应用窗口。
-- 首页启动台：进入五面板编辑器前会先显示首页；左侧“最近项目”通过 Electron 主进程从可配置的数据中台 `POST /api/v1/projects/query` 拉取业务项目列表，支持按项目名称进行服务端搜索，并打开该业务项目当前绑定的数字孪生工程；右侧继续显示本地最近场景，并保留新建场景、打开项目目录和打开场景文件等入口。本地最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
+- 首页启动台：进入五面板编辑器前会先显示首页；左侧“最近项目”通过 Electron 主进程从可配置的数据中台 `POST /api/v1/projects/query` 拉取业务项目列表，支持按项目名称进行服务端搜索，展示数字孪生工程版本、项目更新时间和最新发布时间，并打开该业务项目当前绑定的数字孪生工程；右侧继续显示本地最近场景，并保留新建场景、打开项目目录和打开场景文件等入口。本地最近记录由主进程保存到 `recent-workspaces.json`，并兼容旧版单项目 `recent-project.json`。
 - 数据中台发布：Toolbar 提供 `发布到数据中台`，桌面端是数字孪生工程编辑和版本发布的唯一入口。发布会先对当前场景生成一次幂等合批快照并保存，再由同一份场景内容生成包含全部场景与实际引用资源的 SOURCE ZIP、自包含 Viewer DIST ZIP，不会在各阶段重复规划合批；随后按分片断点上传并在数据中台创建工程版本、发布记录及 nginx 部署。数字孪生 SOURCE/DIST 发布包会跳过 CAD 参考图和 DXF 文件，避免跨机器原图路径失效阻断发布，本地场景与独立 Web 部署导出仍保留 CAD；已绑定场景会自动使用所属业务项目，不再重复选择；未绑定场景可在发布弹窗选择业务项目，并在首次发布时建立本地绑定；目标业务项目已有当前数字孪生工程时必须显式确认覆盖，并沿用原 `editorProjectId` 创建下一版本；本地基础版本落后时可额外确认强制覆盖，以远端最新版本为基线把本地内容创建为下一版本；发布后的数字孪生 Viewer 在场景就绪后直接消费已持久化的 `modelArrayInstance` 关系，并默认隐藏“场景运行中”状态层，同时按下鼠标左键和右键可切换显示或隐藏，加载、阻断和真实运行异常仍自动显示。
 - Electron 启动诊断：开发启动时会输出 renderer 加载、preload 与渲染进程退出日志；React 与 Scene View 初始化异常会显示可读错误页或错误面板，避免窗口内容区静默空白。
 - GPU/WebGL 硬件加速：Electron 在 ready 前请求高性能 GPU，并在主窗口明确启用 WebGL；Windows 正式打包版按企业部署策略额外关闭 GPU sandbox。编辑器 Scene View 和发布后的独立 Web Viewer 都使用 `high-performance` 上下文、设置 `failIfMajorPerformanceCaveat=true`，并拒绝 SwiftShader、WARP 等软件 renderer，避免页面静默退回 CPU 模拟渲染；Viewer 无法获得硬件 WebGL 时会显示阻断原因和浏览器 GPU 排查建议。模型文件读取与格式解析仍由 CPU/Worker 执行，几何和纹理上传后由 GPU 完成绘制、Shader、纹理采样与画面合成。

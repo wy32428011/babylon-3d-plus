@@ -3148,6 +3148,10 @@ select {
   grid-template-columns: minmax(88px, 0.7fr) minmax(150px, 1.3fr);
 }
 
+.home-data-platform-publish-meta {
+  grid-column: 1 / -1;
+}
+
 .home-status {
   min-height: 28px;
   padding: 6px 20px;

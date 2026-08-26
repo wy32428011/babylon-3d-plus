@@ -29,12 +29,21 @@ export type ProceduralStrideRotationOffsets = {
   rightLeg: number;
 };
 
+export type ProceduralStrideLimbLengths = {
+  leftArm: number;
+  rightArm: number;
+  leftLeg: number;
+  rightLeg: number;
+};
+
 export type ProceduralStrideTargetOptions = {
   limbMask?: ArrayLike<number>;
   normals?: ArrayLike<number> | null;
   tangents?: ArrayLike<number> | null;
   pivots?: Partial<ProceduralStridePivots>;
+  distals?: Partial<ProceduralStridePivots>;
   neutralRotationOffsets?: Partial<ProceduralStrideRotationOffsets>;
+  limbLengths?: Partial<ProceduralStrideLimbLengths>;
 };
 
 export type ProceduralStrideTargets = {
@@ -89,6 +98,8 @@ const GAIT_STOP_RESPONSE = 7;
 const GAIT_MOVEMENT_DEAD_ZONE = 0.05;
 const GAIT_FULL_STRIDE_INPUT = 0.35;
 const MAX_NEUTRAL_ROTATION_OFFSET = 0.65;
+const JOINT_FIXED_LENGTH_RATIO = 0.5;
+const JOINT_FULL_ROTATION_LENGTH_RATIO = 1;
 
 /**
  * 按索引拓扑划分独立肢体，避免仅凭包围盒误带动躯干或腰胯。
@@ -177,6 +188,14 @@ export function createProceduralStrideTargets(
     pivots,
     options.neutralRotationOffsets,
   );
+  const limbLengths = resolveLimbLengths(
+    positions,
+    limbMask,
+    pivots,
+    options.distals,
+    options.limbLengths,
+  );
+  const limbAxes = resolveLimbAxes(pivots, options.distals, neutralRotationOffsets);
   const neutral = Float32Array.from(positions);
   const forward = Float32Array.from(positions);
   const backward = Float32Array.from(positions);
@@ -211,9 +230,18 @@ export function createProceduralStrideTargets(
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
 
     const pivot = resolveLimbPivot(limb, pivots);
-    const neutralAngle = resolveLimbRotationOffset(limb, neutralRotationOffsets);
-    const forwardAngle = neutralAngle + resolveLimbAngle(limb, 1);
-    const backwardAngle = neutralAngle + resolveLimbAngle(limb, -1);
+    const rotationWeight = resolveLimbRotationWeight(
+      x,
+      y,
+      z,
+      pivot,
+      resolveLimbPoint(limb, limbAxes),
+      resolveLimbLength(limb, limbLengths),
+    );
+    const rotationOffset = resolveLimbRotationOffset(limb, neutralRotationOffsets);
+    const neutralAngle = rotationOffset * rotationWeight;
+    const forwardAngle = (rotationOffset + resolveLimbAngle(limb, 1)) * rotationWeight;
+    const backwardAngle = (rotationOffset + resolveLimbAngle(limb, -1)) * rotationWeight;
     writeRotatedPosition(neutral, positionIndex, x, y, z, pivot, neutralAngle);
     writeRotatedPosition(forward, positionIndex, x, y, z, pivot, forwardAngle);
     writeRotatedPosition(backward, positionIndex, x, y, z, pivot, backwardAngle);
@@ -434,6 +462,138 @@ function resolveLimbRotationOffset(
   if (limb === PROCEDURAL_LIMB.rightArm) return offsets.rightArm;
   if (limb === PROCEDURAL_LIMB.leftLeg) return offsets.leftLeg;
   return offsets.rightLeg;
+}
+
+function resolveLimbLengths(
+  positions: ArrayLike<number>,
+  limbMask: ArrayLike<number>,
+  pivots: ProceduralStridePivots,
+  distals: Partial<ProceduralStridePivots> | undefined,
+  custom: Partial<ProceduralStrideLimbLengths> | undefined,
+): ProceduralStrideLimbLengths {
+  const lengths: ProceduralStrideLimbLengths = {
+    leftArm: 0,
+    rightArm: 0,
+    leftLeg: 0,
+    rightLeg: 0,
+  };
+  for (let vertexIndex = 0; vertexIndex < limbMask.length; vertexIndex += 1) {
+    const limb = sanitizeLimb(limbMask[vertexIndex]);
+    if (limb === PROCEDURAL_LIMB.fixed) continue;
+    const positionIndex = vertexIndex * 3;
+    const x = positions[positionIndex];
+    const y = positions[positionIndex + 1];
+    const z = positions[positionIndex + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    const pivot = resolveLimbPivot(limb, pivots);
+    const distance = Math.hypot(x - pivot.x, y - pivot.y, z - pivot.z);
+    if (limb === PROCEDURAL_LIMB.leftArm) lengths.leftArm = Math.max(lengths.leftArm, distance);
+    else if (limb === PROCEDURAL_LIMB.rightArm) lengths.rightArm = Math.max(lengths.rightArm, distance);
+    else if (limb === PROCEDURAL_LIMB.leftLeg) lengths.leftLeg = Math.max(lengths.leftLeg, distance);
+    else lengths.rightLeg = Math.max(lengths.rightLeg, distance);
+  }
+  return {
+    leftArm: resolvePositiveLength(
+      custom?.leftArm,
+      resolvePointDistance(pivots.leftArm, distals?.leftArm),
+      lengths.leftArm,
+    ),
+    rightArm: resolvePositiveLength(
+      custom?.rightArm,
+      resolvePointDistance(pivots.rightArm, distals?.rightArm),
+      lengths.rightArm,
+    ),
+    leftLeg: resolvePositiveLength(
+      custom?.leftLeg,
+      resolvePointDistance(pivots.leftLeg, distals?.leftLeg),
+      lengths.leftLeg,
+    ),
+    rightLeg: resolvePositiveLength(
+      custom?.rightLeg,
+      resolvePointDistance(pivots.rightLeg, distals?.rightLeg),
+      lengths.rightLeg,
+    ),
+  };
+}
+
+function resolveLimbAxes(
+  pivots: ProceduralStridePivots,
+  distals: Partial<ProceduralStridePivots> | undefined,
+  offsets: ProceduralStrideRotationOffsets,
+): ProceduralStridePivots {
+  const resolve = (limb: ProceduralLimb): ProceduralPoint3 => {
+    const pivot = resolveLimbPivot(limb, pivots);
+    const distal = resolveLimbPoint(limb, distals);
+    if (distal) {
+      const x = distal.x - pivot.x;
+      const y = distal.y - pivot.y;
+      const z = distal.z - pivot.z;
+      const length = Math.hypot(x, y, z);
+      if (length > 1e-8) return { x: x / length, y: y / length, z: z / length };
+    }
+
+    const offset = resolveLimbRotationOffset(limb, offsets);
+    return { x: 0, y: -Math.cos(offset), z: Math.sin(offset) };
+  };
+
+  return {
+    leftArm: resolve(PROCEDURAL_LIMB.leftArm),
+    rightArm: resolve(PROCEDURAL_LIMB.rightArm),
+    leftLeg: resolve(PROCEDURAL_LIMB.leftLeg),
+    rightLeg: resolve(PROCEDURAL_LIMB.rightLeg),
+  };
+}
+
+function resolveLimbLength(limb: ProceduralLimb, lengths: ProceduralStrideLimbLengths): number {
+  if (limb === PROCEDURAL_LIMB.leftArm) return lengths.leftArm;
+  if (limb === PROCEDURAL_LIMB.rightArm) return lengths.rightArm;
+  if (limb === PROCEDURAL_LIMB.leftLeg) return lengths.leftLeg;
+  return lengths.rightLeg;
+}
+
+function resolveLimbPoint(
+  limb: ProceduralLimb,
+  points: Partial<ProceduralStridePivots> | undefined,
+): ProceduralPoint3 | undefined {
+  if (limb === PROCEDURAL_LIMB.leftArm) return points?.leftArm;
+  if (limb === PROCEDURAL_LIMB.rightArm) return points?.rightArm;
+  if (limb === PROCEDURAL_LIMB.leftLeg) return points?.leftLeg;
+  return points?.rightLeg;
+}
+
+function resolveLimbRotationWeight(
+  x: number,
+  y: number,
+  z: number,
+  pivot: ProceduralPoint3,
+  axis: ProceduralPoint3 | undefined,
+  limbLength: number,
+): number {
+  if (!axis || limbLength <= 1e-8) return 0;
+  const axialDistance = Math.max(
+    0,
+    (x - pivot.x) * axis.x + (y - pivot.y) * axis.y + (z - pivot.z) * axis.z,
+  );
+  const distanceRatio = axialDistance / limbLength;
+  const progress = clamp01(
+    (distanceRatio - JOINT_FIXED_LENGTH_RATIO)
+    / (JOINT_FULL_ROTATION_LENGTH_RATIO - JOINT_FIXED_LENGTH_RATIO),
+  );
+  return progress * progress * (3 - 2 * progress);
+}
+
+function resolvePointDistance(
+  first: ProceduralPoint3,
+  second: ProceduralPoint3 | undefined,
+): number {
+  if (!second) return 0;
+  return Math.hypot(second.x - first.x, second.y - first.y, second.z - first.z);
+}
+
+function resolvePositiveLength(...candidates: Array<number | undefined>): number {
+  return candidates.find((value): value is number => (
+    typeof value === 'number' && Number.isFinite(value) && value > 1e-8
+  )) ?? 0;
 }
 
 function resolveLimbAngle(limb: ProceduralLimb, direction: number): number {

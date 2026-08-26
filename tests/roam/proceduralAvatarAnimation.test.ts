@@ -109,8 +109,8 @@ test('原始跨步姿态先校正为中立站姿，再生成克制的对称摆�
 
 test('肢体连接点保持固定，并在远离关节后平滑恢复完整摆幅', () => {
   const positions = new Float32Array([
-    -0.2, 1, 0, // 髋部连接点
-    -0.2, 0.95, 0, // 髋部下方过渡区
+    -0.2, 1, 0.14, // 横向厚度超过半段肢体长度的髋部连接点
+    -0.2, 0.85, 0, // 髋部下方过渡区
     -0.2, 0, 0, // 小腿末端
     0.2, 1, 0, // 固定参照点
   ]);
@@ -124,14 +124,28 @@ test('肢体连接点保持固定，并在远离关节后平滑恢复完整摆�
     pivots: {
       leftLeg: { x: -0.2, y: 1, z: 0 },
     },
+    distals: {
+      leftLeg: { x: -0.2, y: 0.8, z: 0 },
+    },
+    neutralRotationOffsets: {
+      leftLeg: 0,
+    },
+    limbLengths: {
+      leftLeg: 0.2,
+    },
   });
 
   assert.ok(targets);
-  assert.equal(targets.forward[2], 0);
-  assert.ok(targets.forward[5] > 0);
-  assert.ok(targets.forward[5] < targets.forward[8] * 0.2);
-  assert.ok(targets.forward[8] > 0.12);
-  assert.ok(targets.forward[8] < 0.18);
+  for (const target of [targets.neutral, targets.forward, targets.backward]) {
+    assertVertexClose(target, 0, positions, 0);
+  }
+
+  const transitionDisplacement = readVertexDisplacement(targets.forward, positions, 1);
+  const distalDisplacement = readVertexDisplacement(targets.forward, positions, 2);
+  assert.ok(transitionDisplacement > 0);
+  assert.ok(transitionDisplacement < distalDisplacement * 0.2);
+  assert.ok(distalDisplacement > 0.16);
+  assert.ok(distalDisplacement < 0.18);
 });
 
 test('连通分量掩码只选择外侧衣袖和低位裤腿，躯干与腰胯保持固定', () => {
@@ -159,6 +173,45 @@ test('连通分量掩码只选择外侧衣袖和低位裤腿，躯干与腰胯�
     0, 0, 0, 0, 0, 0, 0, 0, 0,
     -1, -1, -1, 1, 1, 1, 0, 0, 0,
   ]);
+});
+
+test('重合衣袖接缝保持闭合，同时远端衣袖仍可摆动', () => {
+  const positions = new Float32Array([
+    -2, 5, 0.8, -2, 3, 0, -2.2, 3, 0, // 独立衣袖组件 0..2
+    -2, 5, 0.8, 2, 5, 0, 0, 7, 0, // 固定躯干组件 3..5，顶点 3 与顶点 0 重合
+  ]);
+  const mask = createConnectedLimbMask(
+    positions,
+    new Uint16Array([0, 1, 2, 3, 4, 5]),
+    'outerArms',
+  );
+
+  assert.equal(mask[0], PROCEDURAL_LIMB.leftArm);
+  assert.equal(mask[1], PROCEDURAL_LIMB.leftArm);
+  assert.equal(mask[2], PROCEDURAL_LIMB.leftArm);
+  assert.deepEqual([...mask.slice(3)], [0, 0, 0]);
+
+  const targets = createProceduralStrideTargets(positions, {
+    limbMask: mask,
+    pivots: {
+      leftArm: { x: -2, y: 5.1, z: 0 },
+    },
+    distals: {
+      leftArm: { x: -2, y: 4.1, z: 0 },
+    },
+    neutralRotationOffsets: {
+      leftArm: 0,
+    },
+    limbLengths: {
+      leftArm: 1,
+    },
+  });
+
+  assert.ok(targets);
+  for (const target of [targets.neutral, targets.forward, targets.backward]) {
+    assertVertexClose(target, 0, target, 3);
+  }
+  assert.ok(readVertexDisplacement(targets.forward, positions, 1) > 0.2);
 });
 
 test('步态权重按相位交替且在静止或腾空时回到中立姿态', () => {
@@ -240,3 +293,33 @@ test('行走身体起伏限制在毫米级，静止或腾空时不产生额外�
     rollRadians: 0,
   });
 });
+
+function assertVertexClose(
+  actual: ArrayLike<number>,
+  actualVertexIndex: number,
+  expected: ArrayLike<number>,
+  expectedVertexIndex: number,
+  tolerance = 1e-7,
+): void {
+  const actualIndex = actualVertexIndex * 3;
+  const expectedIndex = expectedVertexIndex * 3;
+  for (let component = 0; component < 3; component += 1) {
+    assert.ok(
+      Math.abs(actual[actualIndex + component] - expected[expectedIndex + component]) <= tolerance,
+      `vertex ${actualVertexIndex} component ${component} must remain within ${tolerance}`,
+    );
+  }
+}
+
+function readVertexDisplacement(
+  target: ArrayLike<number>,
+  source: ArrayLike<number>,
+  vertexIndex: number,
+): number {
+  const index = vertexIndex * 3;
+  return Math.hypot(
+    target[index] - source[index],
+    target[index + 1] - source[index + 1],
+    target[index + 2] - source[index + 2],
+  );
+}
