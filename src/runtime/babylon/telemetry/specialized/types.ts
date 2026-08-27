@@ -12,7 +12,6 @@ import type { RuntimeWorldBounds } from '../../runtimeNodeGeometry';
 import type { DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ResolvedSpecializedTelemetryBinding } from '../specializedTelemetryBinding';
 
-export const STACKER_TARGET_SPEED_METERS_PER_SECOND = 1.2;
 export const STACKER_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND = 0.8;
 export const STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND = 0.3;
 export const STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND = 0.25;
@@ -24,6 +23,8 @@ export const STACKER_CATCH_UP_MAX_WINDOW_SECONDS = 2;
 /** 自适应追赶速度上限（m/s），防止极端间隔下速度爆炸。 */
 export const STACKER_MAX_CATCH_UP_SPEED_METERS_PER_SECOND = 8;
 export const STACKER_RPM_TO_METERS_PER_SECOND = 0.01;
+/** mode==4 时 front/back_signalBits 中「货箱内有货物」的位（2^17）：伸叉起点有货=放货，无货=取货。 */
+export const STACKER_CARGO_PRESENT_SIGNAL_BIT = 131072;
 export const STACKER_CARGO_COLOR = '#d8a03a';
 export const STACKER_CARGO_EMISSIVE_COLOR = '#3a2508';
 export const STACKER_CARGO_SIZE = new Vector3(0.8, 0.42, 0.8);
@@ -205,6 +206,15 @@ export type StackerModelTelemetryState = {
   /** command 边沿检测：取货/放货完成只触发一次。 */
   frontLastCommand: number | null;
   backLastCommand: number | null;
+  /** mode==4 时按 signalBits 在伸叉起点锁存的动作（command 此时不可靠）；保持到该侧货叉收叉回零。 */
+  frontSignalAction: 'fetch' | 'place' | null;
+  backSignalAction: 'fetch' | 'place' | null;
+  /** 锁存动作期间货叉是否已真正伸出过；仅伸过再收叉回零才清除锁存（放货下一时序货箱已空但仍是放货）。 */
+  frontSignalExtended: boolean;
+  backSignalExtended: boolean;
+  /** signalBits 第 17 位的前一帧样本：伸叉帧与有货翻位可能同帧到达，取/放判定须用前一帧；null 表示尚无样本。 */
+  frontSignalCargoPresent: boolean | null;
+  backSignalCargoPresent: boolean | null;
   /** 伸出标记：仅在 movement_z 伸出（1/3）时写入，收叉（2/4）期间保持有效并每帧幂等重试绑定/解绑；command 相位退出时清零，防止跨任务串扰。 */
   frontLastMovementZ: number | null;
   backLastMovementZ: number | null;
@@ -214,7 +224,7 @@ export type StackerModelTelemetryState = {
   lastFrontCellKey: string | null;
   /** true 表示正在快速收尾：货叉加速收回，收回前冻结平移/升降。 */
   forkCatchUp: boolean;
-  /** 按节点几何实测的前叉一段/二段行程上限；null 表示尚未测量。 */
+  /** 按节点几何实测的前叉一段/二段行程（仅作无货格时的默认全行程回退，不再钳位）；null 表示尚未测量。 */
   frontForkStroke: StackerForkReachConfig | null;
   backForkStroke: StackerForkReachConfig | null;
   /** 当前货格要求的前叉目标行程（有符号，沿伸出方向）；由库位几何每帧求解。 */

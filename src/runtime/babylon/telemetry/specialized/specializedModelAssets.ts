@@ -294,6 +294,12 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backCargoFetchRow: null,
     frontLastCommand: null,
     backLastCommand: null,
+    frontSignalAction: null,
+    backSignalAction: null,
+    frontSignalExtended: false,
+    backSignalExtended: false,
+    frontSignalCargoPresent: null,
+    backSignalCargoPresent: null,
     frontLastMovementZ: null,
     backLastMovementZ: null,
     nodeBaselines: new Map(),
@@ -333,6 +339,12 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backCargoFetchRow = null;
   model.stackerTelemetry.frontLastCommand = null;
   model.stackerTelemetry.backLastCommand = null;
+  model.stackerTelemetry.frontSignalAction = null;
+  model.stackerTelemetry.backSignalAction = null;
+  model.stackerTelemetry.frontSignalExtended = false;
+  model.stackerTelemetry.backSignalExtended = false;
+  model.stackerTelemetry.frontSignalCargoPresent = null;
+  model.stackerTelemetry.backSignalCargoPresent = null;
   model.stackerTelemetry.frontLastMovementZ = null;
   model.stackerTelemetry.backLastMovementZ = null;
   model.stackerTelemetry.nodeBaselines.clear();
