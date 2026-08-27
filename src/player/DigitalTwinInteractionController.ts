@@ -12,9 +12,13 @@ import {
   DIGITAL_TWIN_BRIDGE_CHANNEL,
   DIGITAL_TWIN_BRIDGE_VERSION,
   DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
+  DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY,
+  DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY,
   parseDigitalTwinBridgeMessage,
   type DigitalTwinBridgeMessage,
+  type DigitalTwinCapability,
   type DigitalTwinCommandFailureResult,
+  type DigitalTwinRuntimeAction,
   type DigitalTwinViewerErrorCode,
 } from './digitalTwinInteractionProtocol';
 
@@ -47,6 +51,8 @@ export type DigitalTwinInteractionRuntime = {
   getPatrolPhase: () => DigitalTwinPatrolPhase;
   pausePatrol: () => void;
   notifyCameraChangedWhilePaused: () => void;
+  startAutoPatrol?: () => void;
+  startManualRoam?: () => void;
 };
 
 export type DigitalTwinInteractionControllerOptions = {
@@ -83,7 +89,7 @@ const FAILURE_MESSAGES: Record<DigitalTwinViewerErrorCode, string> = {
   ASSET_GEOMETRY_NOT_READY: '目标模型几何在限定时间内未就绪',
   COMMAND_CANCELLED: '资产聚焦请求已取消',
   UNSUPPORTED_COMMAND: '当前 Viewer 不支持该命令',
-  INTERNAL_ERROR: 'Viewer 执行资产聚焦时发生内部异常',
+  INTERNAL_ERROR: 'Viewer 执行命令时发生内部异常',
 };
 
 function defaultSetTimer(callback: () => void, delayMs: number): unknown {
@@ -198,6 +204,16 @@ export class DigitalTwinInteractionController {
 
     if (message.type === 'command.cancelFocusAsset') {
       this.cancelFocusAsset(message.requestId);
+      return;
+    }
+
+    if (message.type === 'command.startAutoPatrol') {
+      this.startRuntimeAction(message.requestId, DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY);
+      return;
+    }
+
+    if (message.type === 'command.startManualRoam') {
+      this.startRuntimeAction(message.requestId, DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY);
     }
   };
 
@@ -229,6 +245,9 @@ export class DigitalTwinInteractionController {
 
   private postViewerReady(): void {
     if (!this.runtime || !this.activeSessionId || !this.activeParentOrigin) return;
+    const capabilities: DigitalTwinCapability[] = [DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY];
+    if (this.runtime.startAutoPatrol) capabilities.push(DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY);
+    if (this.runtime.startManualRoam) capabilities.push(DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY);
     this.post({
       channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
       version: DIGITAL_TWIN_BRIDGE_VERSION,
@@ -236,8 +255,41 @@ export class DigitalTwinInteractionController {
       type: 'viewer.ready',
       payload: {
         ...(this.options.projectId ? { projectId: this.options.projectId } : {}),
-        capabilities: [DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY],
+        capabilities,
       },
+    });
+  }
+
+  private startRuntimeAction(requestId: string, action: DigitalTwinRuntimeAction): void {
+    const runtime = this.runtime;
+    const handler = action === DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY
+      ? runtime?.startAutoPatrol
+      : runtime?.startManualRoam;
+    if (!handler) {
+      this.postFailure(requestId, 'UNSUPPORTED_COMMAND');
+      return;
+    }
+
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    const cancelledPrevious = this.cancelActiveRequest('replaced', true);
+    if (!cancelledPrevious) this.clearHighlight();
+
+    try {
+      handler();
+    } catch {
+      this.postFailure(requestId, 'INTERNAL_ERROR', sessionId);
+      return;
+    }
+
+    this.post({
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId,
+      type: 'command.result',
+      requestId,
+      ok: true,
+      payload: { action },
     });
   }
 

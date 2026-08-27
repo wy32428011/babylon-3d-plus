@@ -47,3 +47,19 @@ export function configureLocalBabylonDecoders(): void {
   };
   (globalThis as typeof globalThis & { KTX2DECODER?: typeof KTX2DecoderModule }).KTX2DECODER = KTX2DecoderModule;
 }
+
+let decoderWarmup: Promise<void> | null = null;
+
+/**
+ * 预编译 Draco WASM，避免打开带环境 GLB 的场景时才第一次拉起 worker。
+ * 预热失败只记日志，后续加载仍会按需初始化解码器。
+ */
+export function warmupLocalBabylonDecoders(): Promise<void> {
+  configureLocalBabylonDecoders();
+  if (typeof window === 'undefined') return Promise.resolve();
+  decoderWarmup ??= DracoCompression.Default.whenReadyAsync().catch((error) => {
+    decoderWarmup = null;
+    console.warn('[Babylon] Draco 解码器预热失败。', error);
+  });
+  return decoderWarmup;
+}

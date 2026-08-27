@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   createDefaultManualRoamConfig,
   createInitialRoamKinematicState,
+  resolveRoamHorizontalSpeed,
   resolveRoamKinematicStep,
   sanitizeManualRoamConfig,
 } from '../../src/runtime/roam/manualRoamCore.ts';
@@ -162,6 +163,39 @@ test('视角增量按独立灵敏度更新并限制俯仰角', () => {
   const step = resolveRoamKinematicStep(state, input, config, 0.016, 'ground');
   assert.ok(step.yaw > 0);
   assert.equal(step.pitch, -config.maxPitchDegrees * Math.PI / 180);
+});
+
+test('半幅摇杆输入只产生一半水平位移', () => {
+  const config = createDefaultManualRoamConfig();
+  const state = createInitialRoamKinematicState({ x: 0, y: 0, z: 0 });
+  const input = createEmptyRoamInputFrame();
+  input.forward = 0.5;
+
+  const step = resolveRoamKinematicStep(state, input, config, 0.016, 'ground');
+  assert.equal(step.horizontalSpeed, config.walkSpeed * 0.5);
+  assert.ok(Math.abs(Math.hypot(step.displacement.x, step.displacement.z) - config.walkSpeed * 0.008) < 1e-9);
+});
+
+test('水平移动速度按输入幅度缩放，奔跑时使用奔跑上限', () => {
+  const config = createDefaultManualRoamConfig();
+  const walkInput = createEmptyRoamInputFrame();
+  walkInput.forward = 1;
+  assert.equal(resolveRoamHorizontalSpeed(walkInput, config), config.walkSpeed);
+
+  const analogInput = createEmptyRoamInputFrame();
+  analogInput.forward = 0.5;
+  analogInput.right = 0;
+  analogInput.sprint = false;
+  assert.equal(resolveRoamHorizontalSpeed(analogInput, config), config.walkSpeed * 0.5);
+
+  const sprintInput = createEmptyRoamInputFrame();
+  sprintInput.forward = 1;
+  sprintInput.sprint = true;
+  assert.equal(resolveRoamHorizontalSpeed(sprintInput, config), config.runSpeed);
+
+  const idleInput = createEmptyRoamInputFrame();
+  idleInput.sprint = true;
+  assert.equal(resolveRoamHorizontalSpeed(idleInput, config), 0);
 });
 
 test('异常或超长帧间隔不会产生无界位移', () => {

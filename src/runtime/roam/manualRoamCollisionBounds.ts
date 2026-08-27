@@ -5,6 +5,7 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
+import { resolveManualRoamCollisionStyle } from './manualRoamCollisionPolicy.ts';
 
 export type ManualRoamPoint = { x: number; y: number; z: number };
 
@@ -59,10 +60,40 @@ export type ManualRoamThinInstanceCollisionBoundsResolverOptions = {
   maxColliders?: number;
 };
 
+export type ManualRoamCompactMeshCollisionBoundsResolverOptions = {
+  getMeshes: () => readonly AbstractMesh[];
+  maxColliders?: number;
+};
+
 const DEFAULT_MAX_COLLIDERS = 128;
 const DEFAULT_CENTER_PREFILTER_MARGIN_METERS = 40;
 const CANDIDATE_MULTIPLIER = 4;
 const MIN_COLLIDER_SIZE_METERS = 0.01;
+
+export type ManualRoamDefaultCollisionBoundsResolverOptions = {
+  getSceneDocument: () => Pick<SceneDocument, 'entities' | 'entityIds'>;
+  getRuntime: () => ManualRoamBoundsRuntime | null;
+  getMeshes: () => readonly AbstractMesh[];
+};
+
+/** 组合阵列、thin instance 与紧凑高模 AABB 查询，编辑器和 Viewer 共用同一碰撞邻域。 */
+export function createDefaultManualRoamCollisionBoundsResolver(
+  options: ManualRoamDefaultCollisionBoundsResolverOptions,
+): ManualRoamCollisionBoundsResolver {
+  return combineManualRoamCollisionBoundsResolvers([
+    createManualRoamModelArrayCollisionBoundsResolver({
+      getSceneDocument: options.getSceneDocument,
+      getRuntime: options.getRuntime,
+    }),
+    createManualRoamThinInstanceCollisionBoundsResolver({
+      getMeshes: options.getMeshes,
+      excludeMesh: isManualRoamModelArrayThinInstanceMesh,
+    }),
+    createManualRoamCompactMeshCollisionBoundsResolver({
+      getMeshes: options.getMeshes,
+    }),
+  ]);
+}
 
 export function combineManualRoamCollisionBoundsResolvers(
   resolvers: readonly ManualRoamCollisionBoundsResolver[],
@@ -202,6 +233,51 @@ export function createManualRoamThinInstanceCollisionBoundsResolver(
       }
     }
 
+    return nearest.sort(compareRankedCollisionBounds).map(({ bounds }) => bounds);
+  };
+}
+
+/**
+ * 把中小型高模的世界 AABB 交给代理池，避免椭球对整份三角网格逐面检测。
+ * 厂区地面等可走进内部的超大网格不走这里，由局部三角碰撞器处理。
+ */
+export function createManualRoamCompactMeshCollisionBoundsResolver(
+  options: ManualRoamCompactMeshCollisionBoundsResolverOptions,
+): ManualRoamCollisionBoundsResolver {
+  const maxColliders = normalizePositiveInteger(options.maxColliders, DEFAULT_MAX_COLLIDERS);
+  return (position, radiusMeters) => {
+    if (!isFinitePoint(position) || !Number.isFinite(radiusMeters) || radiusMeters <= 0) return [];
+    const radiusSquared = radiusMeters * radiusMeters;
+    const nearest: Array<{ bounds: ManualRoamCollisionBounds; distanceSquared: number }> = [];
+    for (const mesh of options.getMeshes()) {
+      if (resolveManualRoamCollisionStyle(mesh) !== 'aabb-proxy') continue;
+      if (
+        mesh.isDisposed()
+        || !mesh.isEnabled()
+        || !mesh.isVisible
+        || mesh.visibility <= 0
+      ) continue;
+      mesh.computeWorldMatrix();
+      const box = mesh.getBoundingInfo().boundingBox;
+      const distanceSquared = distanceSquaredToBounds(position, box.minimumWorld, box.maximumWorld);
+      if (distanceSquared > radiusSquared) continue;
+      keepNearestCollisionBounds(nearest, {
+        bounds: {
+          id: `mesh:${mesh.uniqueId}`,
+          minimum: {
+            x: box.minimumWorld.x,
+            y: box.minimumWorld.y,
+            z: box.minimumWorld.z,
+          },
+          maximum: {
+            x: box.maximumWorld.x,
+            y: box.maximumWorld.y,
+            z: box.maximumWorld.z,
+          },
+        },
+        distanceSquared,
+      }, maxColliders);
+    }
     return nearest.sort(compareRankedCollisionBounds).map(({ bounds }) => bounds);
   };
 }

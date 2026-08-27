@@ -2,6 +2,7 @@ import {
   type AbstractMesh,
   Camera,
   Color3,
+  Curve3,
   DynamicTexture,
   LinesMesh,
   Mesh,
@@ -14,18 +15,18 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
-import type { AutoPatrolWaypoint, TransformComponent } from '../../editor/model/components';
+import type { AutoPatrolTriggerRegion, AutoPatrolWaypoint, TransformComponent } from '../../editor/model/components';
 import {
   getAutoPatrolWaypointView,
   sampleAutoPatrolWorldPath,
-} from '../../editor/model/autoPatrol';
+} from '../../editor/model/autoPatrolInspection';
 
-const ROUTE_COLOR = '#20b9d4';
-const ROUTE_SELECTED_COLOR = '#68e9ff';
-const WAYPOINT_COLOR = '#25c6da';
+const ROUTE_COLOR = '#d52e36';
+const ROUTE_SELECTED_COLOR = '#ff5a61';
+const WAYPOINT_COLOR = '#ff353f';
 const WAYPOINT_SELECTED_COLOR = '#fff1a6';
 const WAYPOINT_PLAYBACK_COLOR = '#77f28c';
-const PATH_COLOR = '#36c9e8';
+const PATH_COLOR = '#ff3038';
 const DETAIL_COLOR = '#ffd66d';
 const TARGET_COLOR = '#8fe9ff';
 const ROUTE_TARGET_PIXELS = 34;
@@ -45,10 +46,18 @@ type WaypointEntry = {
   index: number;
   root: TransformNode;
   visualRoot: TransformNode;
+  markerSphere: Mesh;
+  markerMaterial: StandardMaterial;
   numberPlane: Mesh;
   numberMaterial: StandardMaterial;
   numberTexture: DynamicTexture | null;
   textureState: string;
+};
+
+type TriggerRegionEntry = {
+  region: AutoPatrolTriggerRegion;
+  mesh: Mesh;
+  material: StandardMaterial;
 };
 
 type RouteEntry = {
@@ -60,6 +69,7 @@ type RouteEntry = {
   waypoints: Map<string, WaypointEntry>;
   pathMesh: LinesMesh | null;
   detailMeshes: LinesMesh[];
+  triggerRegions: Map<string, TriggerRegionEntry>;
   selected: boolean;
   selectedWaypointId: string | null;
   visible: boolean;
@@ -250,6 +260,7 @@ export class EditorAutoPatrolRuntime {
     if (!entry) return;
     this.disposePath(entry);
     this.disposeDetails(entry);
+    this.disposeTriggerRegions(entry);
     for (const waypoint of entry.waypoints.values()) this.disposeWaypoint(waypoint);
     entry.waypoints.clear();
     for (const mesh of entry.originMeshes) mesh.dispose(false, false);
@@ -300,6 +311,7 @@ export class EditorAutoPatrolRuntime {
       waypoints: new Map(),
       pathMesh: null,
       detailMeshes: [],
+      triggerRegions: new Map(),
       selected: false,
       selectedWaypointId: null,
       visible: true,
@@ -312,6 +324,7 @@ export class EditorAutoPatrolRuntime {
     if (!component || !entry.selected) {
       this.disposePath(entry);
       this.disposeDetails(entry);
+      this.disposeTriggerRegions(entry);
       for (const waypoint of entry.waypoints.values()) this.disposeWaypoint(waypoint);
       entry.waypoints.clear();
       return;
@@ -334,6 +347,8 @@ export class EditorAutoPatrolRuntime {
       waypointEntry.index = index;
       this.applyWaypointTransform(waypointEntry, waypoint, entry.entity.components.transform);
     });
+
+    this.syncTriggerRegions(entry);
 
     this.rebuildPath(entry);
     this.rebuildSelectedWaypointDetails(entry);
@@ -369,6 +384,26 @@ export class EditorAutoPatrolRuntime {
       numberMaterial.opacityTexture = numberTexture;
     }
     numberMaterial.emissiveColor = Color3.White();
+    const markerMaterial = new StandardMaterial(
+      `${entityId}_${waypoint.id}_autoPatrolWaypointSphereMaterial`,
+      this.scene,
+    );
+    markerMaterial.disableLighting = true;
+    markerMaterial.backFaceCulling = false;
+    markerMaterial.alpha = 0.38;
+    const markerSphere = MeshBuilder.CreateSphere(
+      `${entityId}_${waypoint.id}_autoPatrolWaypointSphere`,
+      { diameter: 0.72, segments: 16 },
+      this.scene,
+    );
+    markerSphere.parent = visualRoot;
+    markerSphere.material = markerMaterial;
+    markerSphere.renderingGroupId = 2;
+    markerSphere.metadata = {
+      editorEntityId: entityId,
+      editorAutoPatrolMarker: true,
+      editorAutoPatrolWaypointId: waypoint.id,
+    } satisfies AutoPatrolMeshMetadata;
     const numberPlane = MeshBuilder.CreatePlane(
       `${entityId}_${waypoint.id}_autoPatrolWaypointMarker`,
       { size: 1.15 },
@@ -389,6 +424,8 @@ export class EditorAutoPatrolRuntime {
       index,
       root,
       visualRoot,
+      markerSphere,
+      markerMaterial,
       numberPlane,
       numberMaterial,
       numberTexture,
@@ -458,9 +495,12 @@ export class EditorAutoPatrolRuntime {
       waypoint.root.setEnabled(showDetails);
       waypoint.numberPlane.isVisible = showDetails;
       waypoint.numberPlane.isPickable = showDetails && entry.pickable;
+      waypoint.markerSphere.isVisible = showDetails;
+      waypoint.markerSphere.isPickable = showDetails && entry.pickable;
     }
     if (entry.pathMesh) entry.pathMesh.isVisible = showDetails;
     for (const mesh of entry.detailMeshes) mesh.isVisible = showDetails;
+    for (const region of entry.triggerRegions.values()) region.mesh.isVisible = showDetails;
     this.updateWaypointTextureStates(entry);
   }
 
@@ -474,6 +514,10 @@ export class EditorAutoPatrolRuntime {
         : selected
           ? WAYPOINT_SELECTED_COLOR
           : WAYPOINT_COLOR;
+      const markerColor = Color3.FromHexString(color);
+      waypoint.markerMaterial.diffuseColor = markerColor;
+      waypoint.markerMaterial.emissiveColor = markerColor;
+      waypoint.markerMaterial.alpha = selected || playback ? 0.58 : 0.38;
       this.drawWaypointTexture(waypoint, color, selected || playback);
     }
   }
@@ -529,10 +573,15 @@ export class EditorAutoPatrolRuntime {
     this.disposePath(entry);
     const component = entry.entity.components.autoPatrol;
     if (!component || !entry.selected || component.waypoints.length < 2) return;
-    const points = component.waypoints
+    let points = component.waypoints
       .map((waypoint) => entry.waypoints.get(waypoint.id)?.root.position.clone())
       .filter((point): point is Vector3 => Boolean(point));
-    if (component.playbackMode === 'loop' && points.length > 1) points.push(points[0].clone());
+    const closed = component.playbackMode === 'loop';
+    if (component.pathType === 'smooth' && points.length >= 2) {
+      points = Curve3.CreateCatmullRomSpline(points, 16, closed).getPoints();
+    } else if (closed && points.length > 1) {
+      points.push(points[0].clone());
+    }
     if (points.length < 2) return;
     const pathMesh = MeshBuilder.CreateLines(`${entry.entity.id}_autoPatrolPathPreview`, { points }, this.scene);
     pathMesh.color = Color3.FromHexString(PATH_COLOR);
@@ -614,7 +663,76 @@ export class EditorAutoPatrolRuntime {
     entry.detailMeshes = [];
   }
 
+  private syncTriggerRegions(entry: RouteEntry): void {
+    const component = entry.entity.components.autoPatrol;
+    if (!component || !entry.selected) {
+      this.disposeTriggerRegions(entry);
+      return;
+    }
+
+    const currentIds = new Set((component.triggerRegions ?? []).map((region) => region.id));
+    for (const [regionId, regionEntry] of entry.triggerRegions.entries()) {
+      if (currentIds.has(regionId)) continue;
+      this.disposeTriggerRegion(regionEntry);
+      entry.triggerRegions.delete(regionId);
+    }
+
+    for (const region of component.triggerRegions ?? []) {
+      const shape = region.shape ?? 'box';
+      let regionEntry = entry.triggerRegions.get(region.id);
+      if (regionEntry && (regionEntry.region.shape ?? 'box') !== shape) {
+        this.disposeTriggerRegion(regionEntry);
+        entry.triggerRegions.delete(region.id);
+        regionEntry = undefined;
+      }
+      if (!regionEntry) {
+        const material = new StandardMaterial(`${entry.entity.id}_${region.id}_autoPatrolRegionMaterial`, this.scene);
+        material.disableLighting = true;
+        material.backFaceCulling = false;
+        const mesh = shape === 'sphere'
+          ? MeshBuilder.CreateSphere(`${entry.entity.id}_${region.id}_autoPatrolRegion`, { diameter: 1, segments: 24 }, this.scene)
+          : MeshBuilder.CreateBox(`${entry.entity.id}_${region.id}_autoPatrolRegion`, { size: 1 }, this.scene);
+        mesh.parent = entry.root;
+        mesh.material = material;
+        mesh.isPickable = false;
+        mesh.renderingGroupId = 1;
+        mesh.metadata = { editorAutoPatrolMarker: true } satisfies AutoPatrolMeshMetadata;
+        regionEntry = { region, mesh, material };
+        entry.triggerRegions.set(region.id, regionEntry);
+      }
+      regionEntry.region = region;
+      const color = Color3.FromHexString(region.color);
+      regionEntry.material.diffuseColor = color;
+      regionEntry.material.emissiveColor = color.scale(0.45);
+      regionEntry.material.alpha = region.enabled ? 0.2 : 0.08;
+      regionEntry.mesh.position.copyFromFloats(region.center.x, region.center.y, region.center.z);
+      if (shape === 'sphere') {
+        const radius = Math.max(0.01, region.radiusMeters ?? Math.max(region.size.x, region.size.y, region.size.z) / 2);
+        regionEntry.mesh.scaling.setAll(radius * 2);
+      } else {
+        regionEntry.mesh.scaling.copyFromFloats(
+          Math.max(0.01, Math.abs(region.size.x)),
+          Math.max(0.01, Math.abs(region.size.y)),
+          Math.max(0.01, Math.abs(region.size.z)),
+        );
+      }
+      regionEntry.mesh.isVisible = entry.visible && !this.previewActive && region.enabled;
+    }
+  }
+
+  private disposeTriggerRegions(entry: RouteEntry): void {
+    for (const region of entry.triggerRegions.values()) this.disposeTriggerRegion(region);
+    entry.triggerRegions.clear();
+  }
+
+  private disposeTriggerRegion(entry: TriggerRegionEntry): void {
+    entry.mesh.dispose(false, false);
+    entry.material.dispose(false, false);
+  }
+
   private disposeWaypoint(entry: WaypointEntry): void {
+    entry.markerSphere.dispose(false, false);
+    entry.markerMaterial.dispose(false, false);
     entry.numberPlane.dispose(false, false);
     entry.numberMaterial.dispose(false, false);
     entry.numberTexture?.dispose();

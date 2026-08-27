@@ -198,6 +198,23 @@ export function sanitizeManualRoamSpawnPose(
 }
 
 /**
+ * 按输入幅度和行走/奔跑上限计算当前水平速度。
+ * 模拟摇杆半幅时速度减半，使位移与步频使用同一速度。
+ */
+export function resolveRoamHorizontalSpeed(
+  input: Readonly<RoamInputFrame>,
+  rawConfig: Readonly<ManualRoamConfig>,
+): number {
+  const config = sanitizeManualRoamConfig(rawConfig);
+  const forwardInput = clamp(finiteOrZero(input.forward), -1, 1);
+  const rightInput = clamp(finiteOrZero(input.right), -1, 1);
+  const inputMagnitude = Math.min(1, Math.hypot(forwardInput, rightInput));
+  if (inputMagnitude <= 0) return 0;
+  const maxSpeed = input.sprint ? config.runSpeed : config.walkSpeed;
+  return inputMagnitude * maxSpeed;
+}
+
+/**
  * 计算单帧期望位移。场景碰撞、贴地和最终位置由 Babylon 适配层处理。
  */
 export function resolveRoamKinematicStep(
@@ -220,10 +237,10 @@ export function resolveRoamKinematicStep(
   const forwardInput = clamp(finiteOrZero(input.forward), -1, 1);
   const rightInput = clamp(finiteOrZero(input.right), -1, 1);
   const inputMagnitude = Math.hypot(forwardInput, rightInput);
-  const normalizedScale = inputMagnitude > 1 ? 1 / inputMagnitude : 1;
+  const normalizedScale = inputMagnitude > 1e-8 ? 1 / inputMagnitude : 0;
   const localForward = forwardInput * normalizedScale;
   const localRight = rightInput * normalizedScale;
-  const horizontalSpeed = input.sprint ? config.runSpeed : config.walkSpeed;
+  const horizontalSpeed = resolveRoamHorizontalSpeed(input, config);
   const sinYaw = Math.sin(yaw);
   const cosYaw = Math.cos(yaw);
   const displacementX = (localForward * sinYaw + localRight * cosYaw) * horizontalSpeed * delta;
@@ -253,7 +270,7 @@ export function resolveRoamKinematicStep(
     yaw,
     pitch,
     verticalVelocity,
-    horizontalSpeed: inputMagnitude > 0 ? horizontalSpeed : 0,
+    horizontalSpeed,
     jumped,
   };
 }

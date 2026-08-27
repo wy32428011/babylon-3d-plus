@@ -11,6 +11,7 @@ import {
 } from '@babylonjs/core';
 import {
   combineManualRoamCollisionBoundsResolvers,
+  createManualRoamCompactMeshCollisionBoundsResolver,
   createManualRoamModelArrayCollisionBoundsResolver,
   createManualRoamThinInstanceCollisionBoundsResolver,
   isManualRoamModelArrayThinInstanceMesh,
@@ -201,6 +202,32 @@ test('模型阵列 thin instance 可由实体级代理独占，避免重复创�
     excludeMesh: isManualRoamModelArrayThinInstanceMesh,
   });
   assert.deepEqual(resolver({ x: 0, y: 0, z: 0 }, 4), []);
+
+  scene.dispose();
+  engine.dispose();
+});
+
+test('紧凑高模按世界 AABB 进入邻域代理，厂区级地面不走实心盒子', () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const machine = MeshBuilder.CreateSphere('compact-machine', { diameter: 2, segments: 48 }, scene);
+  machine.position.x = 3;
+  machine.computeWorldMatrix(true);
+  const floor = MeshBuilder.CreateGround('factory-floor', {
+    width: 80,
+    height: 80,
+    subdivisions: 64,
+  }, scene);
+  floor.computeWorldMatrix(true);
+  const resolver = createManualRoamCompactMeshCollisionBoundsResolver({
+    getMeshes: () => scene.meshes,
+  });
+
+  const nearby = resolver({ x: 0, y: 1, z: 0 }, 8);
+  assert.equal(nearby.length, 1);
+  assert.equal(nearby[0].id, `mesh:${machine.uniqueId}`);
+  assert.deepEqual(resolver({ x: 40, y: 1, z: 40 }, 4), []);
+  assert.ok(floor.getBoundingInfo().boundingBox.maximumWorld.x - floor.getBoundingInfo().boundingBox.minimumWorld.x > 8);
 
   scene.dispose();
   engine.dispose();

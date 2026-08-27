@@ -136,12 +136,14 @@ import {
 } from '../model/manualRoamSpawn';
 import type { Vector3Data } from '../model/math';
 import {
+  AUTO_PATROL_EYE_HEIGHT_METERS,
   AUTO_PATROL_MAX_WAYPOINTS,
   cloneAutoPatrolComponent,
   createAutoPatrolWaypointFromWorldPose,
   sanitizeAutoPatrolComponent,
   updateAutoPatrolWaypointView,
-} from '../model/autoPatrol';
+  validateAutoPatrolRoute,
+} from '../model/autoPatrolInspection';
 import type { AutoPatrolPlaybackSnapshot } from '../../runtime/babylon/AutoPatrolPlaybackController';
 import { vector3 } from '../model/math';
 import {
@@ -275,8 +277,20 @@ export type AutoPatrolCameraRequest =
 
 export type AutoPatrolPlaybackRequest = {
   id: string;
-  action: 'start' | 'pause' | 'resume' | 'stop' | 'return';
+  action:
+    | 'start'
+    | 'pause'
+    | 'resume'
+    | 'skip'
+    | 'stop'
+    | 'emergency-stop'
+    | 'return'
+    | 'set-rate'
+    | 'set-view'
+    | 'resume-auto-view'
+    | 'trigger-event';
   routeId: string | null;
+  payload?: string | number | null;
 };
 
 /** 当前 Inspector 选中模型的运行时米制测量快照；该状态不进入场景持久化或撤销历史。 */
@@ -352,6 +366,13 @@ const AUTO_PATROL_IDLE_PLAYBACK_SNAPSHOT: AutoPatrolPlaybackSnapshot = {
   waypointCount: 0,
   pausedByManualInput: false,
   canReturnToStart: false,
+  playbackRate: 1,
+  viewMode: 'orbit',
+  automaticViewMode: 'orbit',
+  manualCameraOverride: false,
+  taskId: null,
+  eventCount: 0,
+  lastEvent: null,
 };
 
 const LOCATOR_MIN_DIMENSION = 0.01;
@@ -490,8 +511,12 @@ type EditorState = {
   selectAutoPatrolWaypoint: (waypointId: string | null) => void;
   requestAutoPatrolCapture: () => void;
   requestAutoPatrolFocus: (waypointId: string) => void;
-  consumeAutoPatrolCameraRequest: (requestId: string, pose?: SceneCameraPose) => void;
-  requestAutoPatrolPlayback: (action: AutoPatrolPlaybackRequest['action'], routeId?: string | null) => void;
+  consumeAutoPatrolCameraRequest: (requestId: string, pose?: SceneCameraPose, captureError?: string) => void;
+  requestAutoPatrolPlayback: (
+    action: AutoPatrolPlaybackRequest['action'],
+    routeId?: string | null,
+    payload?: AutoPatrolPlaybackRequest['payload'],
+  ) => void;
   consumeAutoPatrolPlaybackRequest: (requestId: string) => void;
   setAutoPatrolPlaybackSnapshot: (snapshot: AutoPatrolPlaybackSnapshot) => void;
   setCameraOrientation: (orientation: CameraOrientation) => void;
@@ -3254,11 +3279,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  consumeAutoPatrolCameraRequest: (requestId, pose) => {
+  consumeAutoPatrolCameraRequest: (requestId, pose, captureError) => {
     set((state) => {
       const request = state.autoPatrolCameraRequest;
       if (!request || request.id !== requestId) return state;
       if (request.kind === 'focus') return { autoPatrolCameraRequest: null };
+      if (captureError) {
+        return {
+          autoPatrolCameraRequest: null,
+          logs: prependLog(state.logs, captureError),
+        };
+      }
       if (!pose) {
         return {
           autoPatrolCameraRequest: null,
@@ -3276,6 +3307,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         pose,
         entity.components.transform,
         request.waypointId ?? undefined,
+        { eyeHeightMeters: AUTO_PATROL_EYE_HEIGHT_METERS },
       );
       let selectedWaypointId = captured.id;
       let waypoints: AutoPatrolWaypoint[];
@@ -3289,7 +3321,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           id: existing.id,
           travelDurationSeconds: existing.travelDurationSeconds,
           dwellSeconds: existing.dwellSeconds,
-          arrivalActions: [],
+          arrivalActions: [...existing.arrivalActions],
         };
         waypoints = current.waypoints.map((waypoint, index) => index === existingIndex ? replacement : waypoint);
         selectedWaypointId = existing.id;
@@ -3301,6 +3333,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           };
         }
         waypoints = [...current.waypoints, captured];
+        const previousWaypoint = current.waypoints.at(-1);
+        if (previousWaypoint) {
+          const proximityIssue = validateAutoPatrolRoute(
+            { waypoints: [previousWaypoint, captured] },
+            entity.components.transform,
+          ).find((issue) => issue.code === 'waypoints-too-close');
+          if (proximityIssue) {
+            return {
+              autoPatrolCameraRequest: null,
+              logs: prependLog(state.logs, `无法添加点位：${proximityIssue.message}`),
+            };
+          }
+        }
       }
       const after = sanitizeAutoPatrolComponent({ ...current, waypoints });
       if (!after) return { autoPatrolCameraRequest: null };
@@ -3316,7 +3361,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  requestAutoPatrolPlayback: (action, routeId) => {
+  requestAutoPatrolPlayback: (action, routeId, payload) => {
     set((state) => {
       let resolvedRouteId = routeId ?? null;
       if (action === 'start' && !resolvedRouteId) {
@@ -3333,6 +3378,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           id: createId('patrol_playback'),
           action,
           routeId: resolvedRouteId,
+          payload,
         },
       };
     });
@@ -4545,7 +4591,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const before = cloneAutoPatrolComponent(current);
       if (areJsonValuesEqual(before, after)) return state;
 
-      const command = after.autoStart
+      const command = after.autoStart || after.isDefault
         ? updateSceneDocumentCommand(label, (scene) => {
             const entities = { ...scene.entities };
             for (const entityId of scene.entityIds) {
@@ -4554,8 +4600,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
               if (!candidatePatrol) continue;
               const nextPatrol = entityId === entity.id
                 ? after
-                : candidatePatrol.autoStart
-                  ? { ...candidatePatrol, autoStart: false }
+                : candidatePatrol.autoStart || candidatePatrol.isDefault
+                  ? {
+                      ...candidatePatrol,
+                      ...(after.autoStart && candidatePatrol.autoStart ? { autoStart: false } : {}),
+                      ...(after.isDefault && candidatePatrol.isDefault ? { isDefault: false } : {}),
+                    }
                   : candidatePatrol;
               if (nextPatrol === candidatePatrol) continue;
               entities[entityId] = {

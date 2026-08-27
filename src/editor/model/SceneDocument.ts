@@ -5,7 +5,7 @@ import type { Vector3Data } from './math';
 import type { ModelParameterConfig } from './modelParameters';
 import { createDefaultModelGeneratorComponent } from './modelGenerator';
 import { createDefaultPoiEffectComponent, getPoiEffectDefinition } from './poiEffect';
-import { createDefaultAutoPatrolComponent } from './autoPatrol';
+import { createDefaultAutoPatrolComponent } from './autoPatrolInspection';
 import { createDefaultModelParameterValues } from './modelParameters';
 import {
   DEFAULT_MODEL_LENGTH_UNIT_INFO,

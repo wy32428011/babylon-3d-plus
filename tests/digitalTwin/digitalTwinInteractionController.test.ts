@@ -95,6 +95,8 @@ class FakeRuntime implements DigitalTwinInteractionRuntime {
   highlightedEntityIds: string[][] = [];
   slotHighlights: Array<{ entityId: string; coordinate: DigitalTwinSlotCoordinate | null }> = [];
   clearHighlightCount = 0;
+  startAutoPatrolCount = 0;
+  startManualRoamCount = 0;
   patrolPhase: 'idle' | 'moving' | 'dwelling' | 'paused' | 'completed' | 'returning' = 'idle';
   private activeTransition: CameraViewTransitionOptions | null = null;
 
@@ -161,6 +163,15 @@ class FakeRuntime implements DigitalTwinInteractionRuntime {
   notifyCameraChangedWhilePaused = (): void => {
     this.cameraChangedWhilePausedCount += 1;
   };
+
+  startAutoPatrol: (() => void) | undefined = () => {
+    this.startAutoPatrolCount += 1;
+    this.patrolPhase = 'moving' as const;
+  };
+
+  startManualRoam: (() => void) | undefined = () => {
+    this.startManualRoamCount += 1;
+  };
 }
 
 const parentWindow = { name: 'parent' };
@@ -189,6 +200,16 @@ function focusCommand(requestId: string, assetCode: string) {
     type: 'command.focusAsset',
     requestId,
     payload: { assetCode },
+  });
+}
+
+function runtimeActionCommand(requestId: string, action: 'startAutoPatrol' | 'startManualRoam') {
+  return message({
+    channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+    version: DIGITAL_TWIN_BRIDGE_VERSION,
+    sessionId,
+    type: `command.${action}`,
+    requestId,
   });
 }
 
@@ -230,9 +251,92 @@ test('只接受父窗口和允许 Origin，并按 bridge.ready -> viewer.ready �
     if (viewerReady.type === 'viewer.ready') {
       assert.deepEqual(viewerReady.payload, {
         projectId: '2051942646011785218',
-        capabilities: ['focusAsset'],
+        capabilities: ['focusAsset', 'startAutoPatrol', 'startManualRoam'],
       });
     }
+  } finally {
+    f.controller.dispose();
+  }
+});
+
+test('自动巡检和手动漫游命令分别调用运行时并立即返回成功', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([]);
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    f.posted.length = 0;
+
+    dispatch(f.bus, runtimeActionCommand('request-patrol', 'startAutoPatrol'));
+    dispatch(f.bus, runtimeActionCommand('request-roam', 'startManualRoam'));
+
+    assert.equal(runtime.startAutoPatrolCount, 1);
+    assert.equal(runtime.startManualRoamCount, 1);
+    assert.deepEqual(f.posted.map((entry) => entry.message), [
+      {
+        channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+        version: DIGITAL_TWIN_BRIDGE_VERSION,
+        sessionId,
+        type: 'command.result',
+        requestId: 'request-patrol',
+        ok: true,
+        payload: { action: 'startAutoPatrol' },
+      },
+      {
+        channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+        version: DIGITAL_TWIN_BRIDGE_VERSION,
+        sessionId,
+        type: 'command.result',
+        requestId: 'request-roam',
+        ok: true,
+        payload: { action: 'startManualRoam' },
+      },
+    ]);
+  } finally {
+    f.controller.dispose();
+  }
+});
+
+test('只声明运行时实际支持的能力，并为缺失或执行异常的动作返回错误', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([]);
+  runtime.startAutoPatrol = undefined;
+  runtime.startManualRoam = () => {
+    throw new Error('manual roam failed');
+  };
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    const viewerReady = f.posted.at(-1)?.message;
+    assert.equal(viewerReady?.type, 'viewer.ready');
+    if (viewerReady?.type === 'viewer.ready') {
+      assert.deepEqual(viewerReady.payload.capabilities, ['focusAsset', 'startManualRoam']);
+    }
+    f.posted.length = 0;
+
+    dispatch(f.bus, runtimeActionCommand('request-patrol', 'startAutoPatrol'));
+    dispatch(f.bus, runtimeActionCommand('request-roam', 'startManualRoam'));
+
+    assert.deepEqual(f.posted.map((entry) => entry.message), [
+      {
+        channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+        version: DIGITAL_TWIN_BRIDGE_VERSION,
+        sessionId,
+        type: 'command.result',
+        requestId: 'request-patrol',
+        ok: false,
+        error: { code: 'UNSUPPORTED_COMMAND', message: '当前 Viewer 不支持该命令' },
+      },
+      {
+        channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+        version: DIGITAL_TWIN_BRIDGE_VERSION,
+        sessionId,
+        type: 'command.result',
+        requestId: 'request-roam',
+        ok: false,
+        error: { code: 'INTERNAL_ERROR', message: 'Viewer 执行命令时发生内部异常' },
+      },
+    ]);
   } finally {
     f.controller.dispose();
   }

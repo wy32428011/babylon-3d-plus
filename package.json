@@ -12,6 +12,7 @@
     "demo:stacker:mqtt": "node scripts/publish-stacker-full-demo.mjs",
     "demo:stacker:mqtt:legacy": "node scripts/simulate-stacker-mqtt.mjs",
     "refresh:model-assets": "node scripts/refresh-model-asset-index.mjs",
+    "optimize:environment-glb": "node scripts/optimize-environment-glb.mjs",
     "wait:renderer": "node scripts/wait-for-vite-renderer.mjs",
     "build": "tsc -b && vite build && npm run build:viewer && npm run build:electron",
     "build:viewer": "vite build --config vite.viewer.config.ts",
@@ -61,7 +62,7 @@
     "smoke:folder-group-move": "node scripts/smoke-folder-group-move.mjs",
     "smoke:folder-group-runtime": "node scripts/smoke-folder-group-runtime.mjs",
     "smoke:transform-gizmo": "node scripts/smoke-transform-gizmo.mjs",
-    "test:digital-twin:unit": "node --experimental-strip-types --test tests/digitalTwin/*.test.ts",
+    "test:digital-twin:unit": "node --experimental-strip-types --test tests/digitalTwin/*.test.ts tests/runtime/environmentAssetContainerCache.test.ts",
     "test:digital-twin:integration": "npm run build:electron && node scripts/run-digital-twin-publish-integration.mjs"
   },
   "engines": {

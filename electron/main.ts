@@ -12,6 +12,7 @@ import { disposeAllDeploymentExportTasks, registerDeploymentExportIpc } from './
 import { disposeAllDigitalTwinPublishTasks, registerDigitalTwinPublishIpc } from './ipc/digitalTwinPublishIpc.js';
 import { disposeAllMqttIpcClients, registerMqttIpc } from './ipc/mqttIpc.js';
 import { registerProjectIpc } from './ipc/projectIpc.js';
+import { resolveEditorAssetProtocolResponse } from './ipc/editorAssetCacheHeaders.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -218,13 +219,17 @@ function registerEditorAssetProtocol(): void {
     }
 
     const stat = await fs.stat(filePath);
-    const body = Readable.toWeb(createReadStream(filePath)) as ReadableStream<Uint8Array>;
-    return new Response(body, {
-      headers: {
-        'Cache-Control': 'no-store',
-        'Content-Length': String(stat.size),
-      },
+    const decision = resolveEditorAssetProtocolResponse({
+      filePath,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ifNoneMatch: request.headers.get('If-None-Match'),
     });
+    if (decision.status === 304) {
+      return new Response(null, { status: 304, headers: decision.headers });
+    }
+    const body = Readable.toWeb(createReadStream(filePath)) as ReadableStream<Uint8Array>;
+    return new Response(body, { headers: decision.headers });
   });
 }
 

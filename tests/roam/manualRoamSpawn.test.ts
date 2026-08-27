@@ -19,6 +19,7 @@ const {
 } = await viteServer.ssrLoadModule('/src/editor/model/SceneDocument.ts') as typeof import('../../src/editor/model/SceneDocument.ts');
 const {
   findManualRoamSpawnEntity,
+  hasManualRoamSpawnEntity,
   resolveManualRoamGroupRotationReference,
   resolveManualRoamSpawnPose,
 } = await viteServer.ssrLoadModule('/src/editor/model/manualRoamSpawn.ts') as typeof import('../../src/editor/model/manualRoamSpawn.ts');
@@ -43,16 +44,18 @@ test('漫游出生点使用脚底世界坐标和实体 Y 轴朝向', () => {
   scene.entities = { [spawn.id]: spawn };
 
   assert.equal(findManualRoamSpawnEntity(scene)?.id, spawn.id);
+  assert.equal(hasManualRoamSpawnEntity(scene), true);
   assert.deepEqual(resolveManualRoamSpawnPose(scene), {
     position: { x: 12, y: 3.5, z: -8 },
     yaw: Math.PI / 2,
   });
 });
 
-test('旧场景没有漫游出生点时保持空值，供运行时继续使用相机回退', () => {
+test('旧场景没有漫游出生点时保持空值，运行预览和 Viewer 不开放漫游功能', () => {
   const scene = createEmptySceneDocument('旧场景');
 
   assert.equal(findManualRoamSpawnEntity(scene), null);
+  assert.equal(hasManualRoamSpawnEntity(scene), false);
   assert.equal(resolveManualRoamSpawnPose(scene), null);
   assert.equal(deserializeScene(serializeScene(scene)).entityIds.length, 0);
 });

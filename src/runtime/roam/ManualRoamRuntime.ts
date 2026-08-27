@@ -21,6 +21,7 @@ import { resolveDefaultManualRoamAvatarUrl } from '../assets/manualRoamAvatarAss
 import {
   createDefaultManualRoamConfig,
   createInitialRoamKinematicState,
+  resolveRoamHorizontalSpeed,
   resolveRoamKinematicStep,
   sanitizeManualRoamConfig,
   sanitizeManualRoamSpawnPose,
@@ -37,11 +38,16 @@ import {
   mergeRoamInputFrames,
   resolveKeyboardRoamInput,
 } from './manualRoamInput';
-import type { ManualRoamCollisionBoundsResolver } from './manualRoamCollisionBounds';
+import type { ManualRoamCollisionBoundsResolver } from './manualRoamCollisionBounds.ts';
 import {
   MANUAL_ROAM_COLLISION_PROXY_PREFIX,
   ManualRoamCollisionProxyPool,
-} from './ManualRoamCollisionProxyPool';
+} from './ManualRoamCollisionProxyPool.ts';
+import { ManualRoamLocalTriangleCollider } from './ManualRoamLocalTriangleCollider.ts';
+import {
+  isManualRoamPointNearWorldAabb,
+  resolveManualRoamCollisionStyle,
+} from './manualRoamCollisionPolicy.ts';
 import { ProceduralAvatarMorphAnimator } from './ProceduralAvatarMorphAnimator';
 import {
   createInitialProceduralGaitState,
@@ -146,7 +152,8 @@ export function createInitialManualRoamSnapshot(): ManualRoamSnapshot {
 
 /**
  * 编辑器运行预览与发布 Viewer 共用的人物漫游运行时。
- * Babylon 椭球碰撞负责防穿透，向下射线负责贴地、坡度判断和小台阶辅助。
+ * 廉价网格用椭球对三角防穿透，中小型高模和阵列走邻域 AABB 代理，
+ * 厂区环境等高模只提交人物附近三角；向下射线负责贴地、坡度判断和小台阶辅助。
  */
 export class ManualRoamRuntime {
   private readonly listeners = new Set<() => void>();
@@ -161,6 +168,8 @@ export class ManualRoamRuntime {
   private readonly avatarVisualRoot: TransformNode;
   private readonly fallbackGround: Mesh;
   private readonly collisionProxyPool: ManualRoamCollisionProxyPool | null;
+  private readonly localTriangleCollider: ManualRoamLocalTriangleCollider;
+  private collisionWorldDirty = false;
   private readonly beforeRenderObserver: Nullable<Observer<Scene>>;
   private readonly meshAddedObserver: Nullable<Observer<AbstractMesh>>;
   private snapshot = createInitialManualRoamSnapshot();
@@ -245,12 +254,13 @@ export class ManualRoamRuntime {
     this.collisionProxyPool = options.resolveCollisionBounds
       ? new ManualRoamCollisionProxyPool(scene, options.resolveCollisionBounds)
       : null;
+    this.localTriangleCollider = new ManualRoamLocalTriangleCollider(scene);
 
     this.collider.setEnabled(false);
     this.facingRoot.setEnabled(false);
     this.meshAddedObserver = scene.onNewMeshAddedObservable.add((mesh) => {
       if (!this.snapshot.enabled) return;
-      this.registerCollisionMesh(mesh);
+      this.observeCollisionMesh(mesh);
       this.disableFallbackGroundWhenSceneFloorIsReady();
     });
     this.beforeRenderObserver = scene.onBeforeRenderObservable.add(() => this.update());
@@ -301,6 +311,7 @@ export class ManualRoamRuntime {
     this.facingRoot.setEnabled(false);
     this.fallbackGround.setEnabled(false);
     this.collisionProxyPool?.deactivate();
+    this.localTriangleCollider.deactivate();
     this.deactivateCollisionWorld();
     this.options.camera.minZ = this.previousCameraMinZ;
     this.options.camera.mode = this.previousCameraMode;
@@ -321,6 +332,7 @@ export class ManualRoamRuntime {
     this.lastCollisionMeshReconcileMs = Number.NEGATIVE_INFINITY;
     this.fallbackGround.setEnabled(false);
     this.collisionProxyPool?.deactivate();
+    this.localTriangleCollider.deactivate();
     this.spawnPosition.setAll(0);
     this.spawnYaw = 0;
     this.spawnPitch = -0.2;
@@ -354,6 +366,7 @@ export class ManualRoamRuntime {
     if (this.snapshot.debugColliders === debugColliders) return;
     this.collider.isVisible = debugColliders && this.snapshot.enabled;
     this.collisionProxyPool?.setDebugVisible(debugColliders);
+    this.localTriangleCollider.setDebugVisible(debugColliders);
     if (debugColliders) {
       this.collisionBoundingBoxDefaults.clear();
       for (const mesh of this.collisionMeshDefaults.keys()) {
@@ -424,6 +437,8 @@ export class ManualRoamRuntime {
     this.avatarContainer?.dispose();
     this.avatarContainer = null;
     this.collisionProxyPool?.dispose();
+    this.localTriangleCollider.dispose();
+    this.collider.surroundingMeshes = null;
     const colliderMaterial = this.collider.material;
     this.collider.dispose(false, false);
     colliderMaterial?.dispose();
@@ -868,19 +883,21 @@ export class ManualRoamRuntime {
     this.options.camera.setPosition(position);
   }
 
+  /** 用实际水平速度驱动程序化步态或内置走/跑片段，使步频与位移同步。 */
   private updateAvatarAnimation(input: Readonly<RoamInputFrame>, deltaSeconds: number): void {
     const horizontalAmount = Math.hypot(input.forward, input.right);
+    const horizontalSpeed = resolveRoamHorizontalSpeed(input, this.snapshot.config);
     const airborne = this.snapshot.locomotionMode === 'ground' && !this.kinematicState.grounded;
     const animationName = airborne ? 'jump' : horizontalAmount > 0.05 ? input.sprint ? 'run' : 'walk' : 'idle';
     if (this.animationGroups.length > 0) {
-      this.playEmbeddedAnimation(animationName);
+      this.playEmbeddedAnimation(animationName, horizontalSpeed);
       return;
     }
     this.stopCurrentAnimation();
     this.proceduralGaitState = stepProceduralGaitState(
       this.proceduralGaitState,
       horizontalAmount,
-      input.sprint,
+      horizontalSpeed,
       airborne,
       deltaSeconds,
     );
@@ -892,7 +909,11 @@ export class ManualRoamRuntime {
     this.avatarVisualRoot.rotation.z = bodyMotion.rollRadians;
   }
 
-  private playEmbeddedAnimation(kind: 'idle' | 'walk' | 'run' | 'jump'): void {
+  /** 按当前水平速度缩放内置走/跑片段，避免滑步或原地碎步。 */
+  private playEmbeddedAnimation(
+    kind: 'idle' | 'walk' | 'run' | 'jump',
+    horizontalSpeed: number,
+  ): void {
     const patterns: Record<typeof kind, RegExp[]> = {
       idle: [/idle/i, /stand/i],
       walk: [/walk/i, /move/i],
@@ -904,9 +925,10 @@ export class ManualRoamRuntime {
       .find((group): group is AnimationGroup => Boolean(group))
       ?? this.animationGroups[0]
       ?? null;
-    if (!next || next === this.currentAnimation) return;
+    if (!next) return;
+    next.speedRatio = resolveEmbeddedAnimationSpeedRatio(kind, horizontalSpeed, this.snapshot.config);
+    if (next === this.currentAnimation) return;
     this.stopCurrentAnimation();
-    next.speedRatio = kind === 'run' ? 1.25 : 1;
     next.play(kind !== 'jump');
     this.currentAnimation = next;
   }
@@ -1030,6 +1052,12 @@ export class ManualRoamRuntime {
     }
   }
 
+  private observeCollisionMesh(mesh: AbstractMesh): void {
+    this.localTriangleCollider.observe(mesh);
+    this.registerCollisionMesh(mesh);
+    this.collisionWorldDirty = true;
+  }
+
   private registerCollisionMesh(mesh: AbstractMesh): void {
     if (this.collisionMeshDefaults.has(mesh) || !this.shouldRegisterCollisionMesh(mesh)) return;
     this.collisionMeshDefaults.set(mesh, mesh.checkCollisions);
@@ -1055,6 +1083,8 @@ export class ManualRoamRuntime {
     this.previousSceneCollisionsEnabled = this.options.scene.collisionsEnabled;
     this.options.scene.collisionsEnabled = true;
     this.lastCollisionMeshReconcileMs = Number.NEGATIVE_INFINITY;
+    this.collisionWorldDirty = true;
+    this.localTriangleCollider.captureScene(this.options.scene.meshes);
     for (const mesh of this.options.scene.meshes) this.registerCollisionMesh(mesh);
     if (this.fallbackGroundRequired) this.fallbackGround.setEnabled(true);
     this.disableFallbackGroundWhenSceneFloorIsReady();
@@ -1062,55 +1092,43 @@ export class ManualRoamRuntime {
 
   private deactivateCollisionWorld(): void {
     this.collisionProxyPool?.deactivate();
+    this.localTriangleCollider.deactivate();
     this.lastCollisionMeshReconcileMs = Number.NEGATIVE_INFINITY;
     this.restoreCollisionBoundingBoxes();
     for (const [mesh, original] of this.collisionMeshDefaults) {
       if (!mesh.isDisposed()) mesh.checkCollisions = original;
     }
     this.collisionMeshDefaults.clear();
+    this.collider.surroundingMeshes = null;
+    this.collisionWorldDirty = false;
     this.options.scene.collisionsEnabled = this.previousSceneCollisionsEnabled;
   }
 
   private shouldRegisterCollisionMesh(mesh: AbstractMesh): boolean {
     if (mesh === this.collider || mesh === this.fallbackGround || this.avatarMeshes.has(mesh)) return false;
     if (mesh.name.startsWith(MANUAL_ROAM_COLLISION_PROXY_PREFIX)) return false;
-    if (
-      mesh instanceof Mesh
-      && mesh.thinInstanceCount > 0
-    ) return false;
-    if (mesh.isDisposed() || mesh.getTotalVertices() <= 0 || mesh.infiniteDistance) return false;
-    if (mesh.getClassName() === 'LinesMesh') return false;
-    const metadata = mesh.metadata as Record<string, unknown> | null;
-    if (
-      metadata?.manualRoamAvatar
-      || metadata?.manualRoamCollider
-      || metadata?.manualRoamCollisionProxy
-      || metadata?.modelArraySourceEntityId
-      || metadata?.editorGroundGrid
-      || metadata?.editorAutoPatrolMarker
-      || metadata?.editorManualRoamSpawn
-      || metadata?.editorShadowCatcher
-      || metadata?.editorSkyboxSphere
-    ) return false;
-    const name = mesh.name.toLowerCase();
-    return !name.includes('skybox')
-      && !name.includes('gizmo')
-      && !name.includes('marker')
-      && !name.includes('trajectory')
-      && !name.includes('highlight');
+    return resolveManualRoamCollisionStyle(mesh) === 'native-triangle';
   }
 
   private isCollisionCandidate(mesh: AbstractMesh, includeFallback = true): boolean {
-    return (includeFallback && mesh === this.fallbackGround && mesh.isEnabled())
-      || Boolean(this.collisionProxyPool?.has(mesh) && mesh.isEnabled())
-      || (
-        mesh !== this.collider
-        && mesh !== this.fallbackGround
-        && !this.avatarMeshes.has(mesh)
-        && this.collisionMeshDefaults.has(mesh)
-        && mesh.checkCollisions
-        && mesh.isEnabled()
-      );
+    if (includeFallback && mesh === this.fallbackGround && mesh.isEnabled()) return true;
+    if (this.collisionProxyPool?.has(mesh) && mesh.isEnabled()) return true;
+    if (this.localTriangleCollider.has(mesh) && mesh.isEnabled()) return true;
+    if (
+      mesh === this.collider
+      || mesh === this.fallbackGround
+      || this.avatarMeshes.has(mesh)
+      || !this.collisionMeshDefaults.has(mesh)
+      || !mesh.checkCollisions
+      || !mesh.isEnabled()
+    ) return false;
+    const box = mesh.getBoundingInfo().boundingBox;
+    return isManualRoamPointNearWorldAabb(
+      this.collider.position,
+      box.minimumWorld,
+      box.maximumWorld,
+      COLLISION_PROXY_QUERY_RADIUS_METERS,
+    );
   }
 
   private disableFallbackGroundWhenSceneFloorIsReady(): void {
@@ -1137,29 +1155,66 @@ export class ManualRoamRuntime {
   }
 
   private reconcileCollisionMeshes(nowMs: number, force = false): void {
-    if (!this.collisionProxyPool) return;
     if (
       !force
       && nowMs - this.lastCollisionMeshReconcileMs < COLLISION_MESH_RECONCILE_INTERVAL_MS
     ) return;
     this.lastCollisionMeshReconcileMs = nowMs;
+    this.localTriangleCollider.captureScene(this.options.scene.meshes);
     for (const mesh of [...this.collisionMeshDefaults.keys()]) {
       if (!this.shouldRegisterCollisionMesh(mesh)) this.unregisterCollisionMesh(mesh);
     }
+    for (const mesh of this.options.scene.meshes) this.registerCollisionMesh(mesh);
+    this.collisionWorldDirty = true;
   }
 
   private syncCollisionProxies(position: Readonly<Vector3>, force = false): void {
     const nowMs = nowMilliseconds();
     this.reconcileCollisionMeshes(nowMs, force);
-    const refreshed = this.collisionProxyPool?.sync(
-      { x: position.x, y: position.y, z: position.z },
+    const queryPosition = { x: position.x, y: position.y, z: position.z };
+    const proxyRefreshed = this.collisionProxyPool?.sync(
+      queryPosition,
+      COLLISION_PROXY_QUERY_RADIUS_METERS,
+      nowMs,
+      force,
+    ) ?? false;
+    const triangleRefreshed = this.localTriangleCollider.sync(
+      queryPosition,
       COLLISION_PROXY_QUERY_RADIUS_METERS,
       nowMs,
       force,
     );
-    if (refreshed && this.fallbackGround.isEnabled()) {
+    if (proxyRefreshed || triangleRefreshed || this.collisionWorldDirty) {
+      this.updateColliderNeighborhood(queryPosition);
+      this.collisionWorldDirty = false;
+    }
+    if ((proxyRefreshed || triangleRefreshed) && this.fallbackGround.isEnabled()) {
       this.disableFallbackGroundWhenSceneFloorIsReady();
     }
+  }
+
+  /**
+   * 把人物碰撞扫描限制在邻域廉价网格、AABB 代理和局部三角代理内。
+   * Babylon 默认会遍历场景全部 checkCollisions 网格，厂区环境 GLB 会把 CPU 打满。
+   */
+  private updateColliderNeighborhood(position: { x: number; y: number; z: number }): void {
+    const nearby: AbstractMesh[] = [];
+    if (this.fallbackGround.isEnabled()) nearby.push(this.fallbackGround);
+    for (const mesh of this.collisionProxyPool?.getActiveMeshes() ?? []) {
+      if (mesh.isEnabled()) nearby.push(mesh);
+    }
+    for (const mesh of this.localTriangleCollider.getActiveMeshes()) {
+      if (mesh.isEnabled()) nearby.push(mesh);
+    }
+    for (const mesh of this.collisionMeshDefaults.keys()) {
+      if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.checkCollisions) continue;
+      const box = mesh.getBoundingInfo().boundingBox;
+      if (!isManualRoamPointNearWorldAabb(position, box.minimumWorld, box.maximumWorld, COLLISION_PROXY_QUERY_RADIUS_METERS)) {
+        continue;
+      }
+      nearby.push(mesh);
+    }
+    this.collider.surroundingMeshes = nearby;
   }
 
   private adjustThirdPersonDistance(delta: number): void {
@@ -1237,6 +1292,19 @@ function collectBoundsRelativeToNode(
     }
   }
   return minimum && maximum ? { minimum, maximum } : null;
+}
+
+/** 按当前水平速度相对走/跑参考速度缩放内置片段播放倍率。 */
+function resolveEmbeddedAnimationSpeedRatio(
+  kind: 'idle' | 'walk' | 'run' | 'jump',
+  horizontalSpeed: number,
+  config: ManualRoamConfig,
+): number {
+  if (kind === 'idle' || kind === 'jump') return 1;
+  const referenceSpeed = kind === 'run' ? config.runSpeed : config.walkSpeed;
+  if (!(referenceSpeed > 1e-8)) return 1;
+  const ratio = Math.max(0, horizontalSpeed) / referenceSpeed;
+  return Math.max(0.01, ratio);
 }
 
 function vectorToRoam(vector: Vector3): { x: number; y: number; z: number } {

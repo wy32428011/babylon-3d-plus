@@ -41,7 +41,9 @@
         "payload": {
           "projectId": "2051942646011785218",
           "capabilities": [
-            "focusAsset"
+            "focusAsset",
+            "startAutoPatrol",
+            "startManualRoam"
           ]
         }
       }
@@ -67,6 +69,26 @@
         "sessionId": "runtime-1:session-1",
         "type": "command.cancelFocusAsset",
         "requestId": "request-1"
+      }
+    },
+    {
+      "name": "start auto patrol",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.startAutoPatrol",
+        "requestId": "request-2"
+      }
+    },
+    {
+      "name": "start manual roam",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.startManualRoam",
+        "requestId": "request-3"
       }
     },
     {
@@ -98,6 +120,20 @@
         "error": {
           "code": "ASSET_NOT_FOUND",
           "message": "当前入口场景中未找到该资产编号"
+        }
+      }
+    },
+    {
+      "name": "successful runtime action result",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.result",
+        "requestId": "request-2",
+        "ok": true,
+        "payload": {
+          "action": "startAutoPatrol"
         }
       }
     }
