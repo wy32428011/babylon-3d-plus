@@ -211,13 +211,13 @@ test('front_ 变化间隔已知时按窗口剩余时间自适应提速，上限 
     const z = h.model.stackerTelemetry.rootPosition!.z;
     assert.ok(Math.abs(z - (20 - 8 * 0.1)) < 1e-6, `自适应提速后单帧必须走 0.8m（8 m/s 上限），实际 z=${z}`);
 
-    // 缺省（无变化间隔）时保持默认 1.2 m/s → 单帧走 0.12m
+    // 缺省（无变化间隔）时保持默认 0.8 m/s → 单帧走 0.08m
     h.model.stackerTelemetry.frontCellChangeIntervalMs = null;
     h.model.stackerTelemetry.lastFrontCellChangedAtMs = null;
     h.model.stackerTelemetry.rootPosition!.z = 20;
     h.apply({ ...POSITION_FRAME, front_x: 5 }, 0.1, 1);
     const z2 = h.model.stackerTelemetry.rootPosition!.z;
-    assert.ok(Math.abs(z2 - (20 - 1.2 * 0.1)) < 1e-6, `无间隔信息时必须退回默认速度 1.2 m/s，实际 z=${z2}`);
+    assert.ok(Math.abs(z2 - (20 - 0.8 * 0.1)) < 1e-6, `无间隔信息时必须退回默认速度 0.8 m/s，实际 z=${z2}`);
   } finally {
     h.dispose();
   }
@@ -439,7 +439,7 @@ test('放货叉未达行程时收叉边沿即解绑落货：货物不随叉带�
     assert.equal(h.state.stackerCargoMeshes.size, 1, '放货相位必须补建叉上货物');
     assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '放货补建货物必须立即绑定');
 
-    // 伸出 2 帧（约 0.05m，远未达满行程 0.8m）：到位判定不触发，货物保持绑定
+    // 伸出 2 帧（约 0.05m，远未达目标行程）：到位判定不触发，货物保持绑定
     h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 2);
     assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '未达行程前货物必须保持绑定');
 
@@ -574,7 +574,7 @@ test('command 相位退出后伸出标记清零：下一任务行程中收叉不
   }
 });
 
-test('伸叉方向由货格几何决定：货格在 +x 侧时 movement 3（旧"左伸"码）也必须朝 +x 伸', () => {
+test('伸叉方向由货格几何决定：货格在 +x 侧时 movement 3（旧"左伸"码）也必须朝 +x 伸，行程不钳位允许悬空', () => {
   const h = makeHarness();
   try {
     makeStackerGeometry(h);
@@ -582,19 +582,24 @@ test('伸叉方向由货格几何决定：货格在 +x 侧时 movement 3（旧"�
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(11, 2, 0), rootRotationY: 0 });
     h.apply(POSITION_FRAME, 0.1, 10);
 
+    // 60 帧 × 0.25 m/s × 0.1s = 1.5m：越过旧满行程 0.8m（叉模型两段总长）继续伸出
     h.apply({ ...POSITION_FRAME, front_movement_z: 3 }, 0.1, 60);
     const extended = h.model.stackerTelemetry.frontForkOffset;
-    assert.ok(Math.abs(extended - 0.8) < 1e-6, `movement 3 必须按几何朝 +x 伸到满行程 0.8，实际 ${extended}`);
+    assert.ok(Math.abs(extended - 1.5) < 1e-6, `movement 3 必须按几何朝 +x 伸出并越过旧行程上限 0.8，实际 ${extended}`);
+
+    // 继续伸出直至叉中心对准货格中心（20m，悬空）
+    h.apply({ ...POSITION_FRAME, front_movement_z: 3 }, 0.1, 800);
+    assert.ok(Math.abs(h.model.stackerTelemetry.frontForkOffset - 20) < 1e-6, `最终必须伸到货格中心 20m，实际 ${h.model.stackerTelemetry.frontForkOffset}`);
 
     // 收回与方向无关：movement 2/4 均归 0
-    h.apply({ ...POSITION_FRAME, front_movement_z: 4 }, 0.1, 60);
+    h.apply({ ...POSITION_FRAME, front_movement_z: 4 }, 0.1, 900);
     assert.equal(h.model.stackerTelemetry.frontForkOffset, 0);
   } finally {
     h.dispose();
   }
 });
 
-test('伸叉方向由货格几何决定：货格在 −x 侧时 movement 1（旧"右伸"码）也必须朝 −x 伸', () => {
+test('伸叉方向由货格几何决定：货格在 −x 侧时 movement 1（旧"右伸"码）也必须朝 −x 伸，行程不钳位允许悬空', () => {
   const h = makeHarness();
   try {
     makeStackerGeometry(h);
@@ -604,10 +609,140 @@ test('伸叉方向由货格几何决定：货格在 −x 侧时 movement 1（旧
 
     h.apply({ ...POSITION_FRAME, front_movement_z: 1 }, 0.1, 60);
     const extended = h.model.stackerTelemetry.frontForkOffset;
-    assert.ok(Math.abs(extended + 0.8) < 1e-6, `movement 1 必须按几何朝 −x 伸到满行程 −0.8，实际 ${extended}`);
+    assert.ok(Math.abs(extended + 1.5) < 1e-6, `movement 1 必须按几何朝 −x 伸出并越过旧行程上限 −0.8，实际 ${extended}`);
 
-    h.apply({ ...POSITION_FRAME, front_movement_z: 2 }, 0.1, 60);
+    h.apply({ ...POSITION_FRAME, front_movement_z: 1 }, 0.1, 800);
+    assert.ok(Math.abs(h.model.stackerTelemetry.frontForkOffset + 20) < 1e-6, `最终必须伸到货格中心 −20m，实际 ${h.model.stackerTelemetry.frontForkOffset}`);
+
+    h.apply({ ...POSITION_FRAME, front_movement_z: 2 }, 0.1, 900);
     assert.equal(h.model.stackerTelemetry.frontForkOffset, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('mode==4 且 signalBits 第 17 位为 0 时伸叉按取货处理：货格刷货、伸足绑定、收叉回零收尾', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    // mode 4 下 front_command 不可靠（恒 0），front_signalBits 无第 17 位 = 货箱内无货 → 伸叉即取货
+    const FETCH_FRAME = { ...POSITION_FRAME, front_signalBits: 0, front_movement_z: 1, front_task: 8001 };
+
+    h.apply(FETCH_FRAME, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontSignalAction, 'fetch', '伸叉起点无货信号必须锁存为取货');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '取货伸叉开始必须刷出货物');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '未达行程前货物不得绑定');
+
+    // 伸足（目标行程为无纵深货格的回退全行程 0.8m）后绑定上叉
+    h.apply(FETCH_FRAME, 0.1, 40);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '伸叉到位必须绑定货物上叉');
+
+    // 收叉回零：锁存清除产生相位离开边沿，取货收尾后货物保留在叉上
+    h.apply({ ...POSITION_FRAME, front_signalBits: 0, front_movement_z: 2, front_task: 8001 }, 0.1, 40);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '收叉必须归零');
+    assert.equal(h.model.stackerTelemetry.frontSignalAction, null, '收叉回零后锁存必须清除');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '取货收尾后货物必须随叉带回');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '取货收尾后货物必须存活');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('mode==4 且 signalBits 第 17 位为 1 时伸叉按放货处理：叉上补货、伸足解绑落货、收叉回零收尾', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    // 第 17 位置 1（131072）= 货箱内有货 → 伸叉即放货
+    const PLACE_FRAME = { ...POSITION_FRAME, front_signalBits: 131072, front_movement_z: 1, front_task: 8002 };
+
+    h.apply(PLACE_FRAME, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontSignalAction, 'place', '伸叉起点有货信号必须锁存为放货');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '放货相位必须补建叉上货物');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '放货补建货物必须立即绑定');
+
+    // 伸足后解绑落货到目标箱位
+    h.apply(PLACE_FRAME, 0.1, 40);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '放货伸足必须解绑落货');
+    assert.notEqual(h.model.stackerTelemetry.frontCargoHoldPosition, null, '解绑后货物必须留存目标箱位支撑位');
+
+    // 收叉回零：锁存清除触发放货收尾，非 fetch 保留路径货物销毁（交接给货格渲染）
+    h.apply({ ...POSITION_FRAME, front_signalBits: 131072, front_movement_z: 2, front_task: 8002 }, 0.1, 40);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '收叉必须归零');
+    assert.equal(h.model.stackerTelemetry.frontSignalAction, null, '收叉回零后锁存必须清除');
+    assert.equal(h.state.stackerCargoMeshes.size, 0, '放货收尾后叉上货物必须销毁');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('mode==4 放货锁存不随信号位跳变：伸叉途中第 17 位翻 0（货已到叉上）仍按放货解绑', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const PLACE_FRAME = { ...POSITION_FRAME, front_signalBits: 131072, front_movement_z: 1, front_task: 8003 };
+
+    h.apply(PLACE_FRAME, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontSignalAction, 'place');
+
+    // 伸叉途中（0.25m，未达 0.8m 行程）信号位翻 0：放货的下一时序货箱已空、货在叉上，锁存必须保持
+    h.apply(PLACE_FRAME, 0.1, 10);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true);
+    h.apply({ ...PLACE_FRAME, front_signalBits: 0 }, 0.1, 5);
+    assert.equal(h.model.stackerTelemetry.frontSignalAction, 'place', '伸叉途中信号位翻 0 不得改判为取货');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '信号位跳变不得中途解绑');
+
+    // 继续伸足：仍按放货解绑落货（若被改判取货，此处会幂等绑定保持 boundToFork=true）
+    h.apply({ ...PLACE_FRAME, front_signalBits: 0 }, 0.1, 40);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '锁存保持放货，伸足必须解绑落货');
+    assert.notEqual(h.model.stackerTelemetry.frontCargoHoldPosition, null, '货物必须落入目标箱位');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('mode==4 取放按前一帧信号位判定：伸叉帧与翻位同帧到达时仍按前一帧有货锁存为放货', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+
+    // 前一帧（空闲）：货箱内有货
+    h.apply({ ...POSITION_FRAME, front_signalBits: 131072, front_movement_z: 0 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontSignalCargoPresent, true, '有货位样本必须每帧跟踪');
+
+    // 伸叉帧：货已转移到叉上，同帧信号位已翻 0；若按当前帧采样会误判取货
+    h.apply({ ...POSITION_FRAME, front_signalBits: 0, front_movement_z: 1, front_task: 8005 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontSignalAction, 'place', '伸叉起点必须按前一帧有货锁存为放货');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '放货相位必须补建叉上货物');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '放货补建货物必须立即绑定（取货则保持未绑定）');
+
+    // 全程信号位保持 0（货在叉上），伸足仍按放货解绑落货
+    h.apply({ ...POSITION_FRAME, front_signalBits: 0, front_movement_z: 1, front_task: 8005 }, 0.1, 40);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '锁存保持放货，伸足必须解绑落货');
+    assert.notEqual(h.model.stackerTelemetry.frontCargoHoldPosition, null, '货物必须落入目标箱位');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('mode!=4 时忽略 signalBits：仍按 front_command 判定取放', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    // mode 1 + command 1 = 取货；signalBits 带第 17 位（mode 4 下会误判放货）必须被忽略
+    const FETCH_FRAME = { ...POSITION_FRAME, mode: 1, front_command: 1, front_signalBits: 131072, front_movement_z: 1, front_task: 8004 };
+
+    h.apply(FETCH_FRAME, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontSignalAction, null, 'mode!=4 不得触碰 signalBits 锁存');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '取货伸叉必须刷出货物');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '取货未达行程前不得绑定（放货补建会立即绑定）');
+
+    h.apply(FETCH_FRAME, 0.1, 40);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '取货伸足必须绑定上叉');
   } finally {
     h.dispose();
   }
