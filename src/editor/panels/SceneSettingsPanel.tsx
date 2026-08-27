@@ -359,9 +359,11 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   async function handleSelectEnvironmentAsset(asset: ProjectModelAssetEntry): Promise<void> {
     if (props.readOnly) return;
     if (asset.libraryKind !== 'environment') return;
+    const expectedSceneSessionId = useEditorStore.getState().sceneSessionId;
 
     try {
       const environmentConfig = await loadEnvironmentFromAsset(asset);
+      if (useEditorStore.getState().sceneSessionId !== expectedSceneSessionId) return;
       if (!environmentConfig) {
         setEnvironmentStatus('环境模型配置无效，未更新场景环境。');
         return;
@@ -372,6 +374,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         focusAfterLoad: true,
         commandLabel: '应用环境模型',
         successMessage: `环境模型已应用：${getEnvironmentDisplayName(environmentConfig.packagePath, environmentConfig.displayName)}`,
+        runtimeEnvironment: environmentConfig,
+        expectedSceneSessionId,
       });
       if (!requestId) {
         setEnvironmentStatus('环境模型未能开始加载，请查看 Console 日志。');
@@ -669,8 +673,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             value={shadows.quality}
             onChange={(event) => handleShadowQualityChange(event.target.value)}
           >
-            <option value="performance">性能（缓存）</option>
-            <option value="balanced">均衡（实时）</option>
+            <option value="performance">性能（缓存地面）</option>
+            <option value="balanced">均衡（缓存地面）</option>
             <option value="quality">高质量（实时）</option>
           </select>
         </label>
@@ -728,7 +732,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             />
           </label>
         ))}
-        <p className="muted">模型、环境和地面都会接收阴影。性能档缓存阴影贴图；均衡/高质量档使用实时级联阴影。没有可见方向光时使用自动太阳光。</p>
+        <p className="muted">默认性能/均衡档缓存一张阴影贴图：模型只投射，环境和阴影地面接收。高质量档才对全部模型做实时级联阴影。没有可见方向光时使用自动太阳光。</p>
       </fieldset>
 
       <fieldset className="transform-fieldset">

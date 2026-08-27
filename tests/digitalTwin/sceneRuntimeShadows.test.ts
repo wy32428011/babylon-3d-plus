@@ -78,7 +78,7 @@ function assertAnyShadowGenerator(generator: unknown, message: string): asserts 
   assert.ok(generator instanceof ShadowGenerator, message);
 }
 
-test('无方向光时自动创建太阳光，模型和阴影地面都接收阴影', () => {
+test('无方向光时自动创建太阳光，模型投射、地面接收缓存阴影', () => {
   const fixture = createRuntimeFixture();
   try {
     const cube = MeshBuilder.CreateBox('Cube', { size: 1 }, fixture.scene);
@@ -88,8 +88,8 @@ test('无方向光时自动创建太阳光，模型和阴影地面都接收阴�
     const autoSun = fixture.scene.getLightByName(SCENE_SHADOW_SUN_NAME);
     assert.ok(autoSun instanceof DirectionalLight);
     const shadowGenerator = autoSun.getShadowGenerator();
-    assertPrimaryShadowGenerator(shadowGenerator, '主阴影光必须创建阴影生成器');
-    assert.equal(cube.receiveShadows, true, '默认均衡档必须让模型接收阴影');
+    assertAnyShadowGenerator(shadowGenerator, '主阴影光必须创建阴影生成器');
+    assert.equal(cube.receiveShadows, false, '默认缓存档模型只投射不采样，避免全场材质开销');
     assert.ok(shadowGenerator.getShadowMap()?.renderList?.includes(cube));
 
     const catcher = fixture.scene.getMeshByName(SCENE_SHADOW_CATCHER_NAME);
@@ -102,48 +102,42 @@ test('无方向光时自动创建太阳光，模型和阴影地面都接收阴�
   }
 });
 
-test('默认均衡档使用实时阴影贴图，稳定帧仍会刷新', () => {
+test('默认均衡档缓存阴影贴图，稳定帧不重复提交投射物', () => {
   const fixture = createRuntimeFixture();
   try {
     MeshBuilder.CreateBox('BalancedShadowCaster', { size: 1 }, fixture.scene);
     flushScene(fixture.scene);
 
     const generator = getActiveShadowGenerator(fixture.scene);
-    assertPrimaryShadowGenerator(generator, '默认状态必须存在阴影生成器');
+    assertAnyShadowGenerator(generator, '默认状态必须存在阴影生成器');
     const shadowMap = generator.getShadowMap();
     assert.ok(shadowMap);
 
-    assert.equal(shadowMap.refreshRate, 1, '默认均衡档必须使用逐帧实时阴影');
+    assert.equal(shadowMap.refreshRate, 0, '默认均衡档必须使用只渲染一次模式');
     shadowMap.resetRefreshCounter();
     assert.equal(shadowMap._shouldRender(), true);
-    assert.equal(shadowMap._shouldRender(), true, '实时档稳定帧仍应刷新阴影贴图');
+    assert.equal(shadowMap._shouldRender(), false, '静态场景的下一帧不得重绘阴影贴图');
+    assert.equal(shadowMap._shouldRender(), false, '后续稳定帧也不得重绘阴影贴图');
   } finally {
     disposeRuntimeFixture(fixture);
   }
 });
 
-test('性能档缓存阴影贴图，模型仍接收阴影', () => {
+test('环境 Mesh 在缓存档接收阴影，普通模型不接收', () => {
   const fixture = createRuntimeFixture();
   try {
-    fixture.runtime.applySettings({
-      ...DEFAULT_SHADOW_SETTINGS,
-      quality: 'performance',
-    });
-    const cube = MeshBuilder.CreateBox('CachedShadowCaster', { size: 1 }, fixture.scene);
+    const environment = MeshBuilder.CreateGround('FactoryFloor', { width: 20, height: 20 }, fixture.scene);
+    environment.metadata = { editorEnvironmentMesh: true };
+    const cube = MeshBuilder.CreateBox('Equipment', { size: 1 }, fixture.scene);
     cube.position.y = 0.5;
     flushScene(fixture.scene);
 
     const generator = getActiveShadowGenerator(fixture.scene);
-    assertAnyShadowGenerator(generator, '性能档必须存在阴影生成器');
-    const shadowMap = generator.getShadowMap();
-    assert.ok(shadowMap);
-    assert.equal(cube.receiveShadows, true, '性能缓存档也不能关掉模型接收阴影');
-    assert.ok(shadowMap.renderList?.includes(cube));
-    assert.equal(shadowMap.refreshRate, 0, '性能档阴影贴图必须使用只渲染一次模式');
-    shadowMap.resetRefreshCounter();
-    assert.equal(shadowMap._shouldRender(), true);
-    assert.equal(shadowMap._shouldRender(), false, '静态场景的下一帧不得重绘阴影贴图');
-    assert.equal(shadowMap._shouldRender(), false, '后续稳定帧也不得重绘阴影贴图');
+    assertAnyShadowGenerator(generator, '缓存档必须存在阴影生成器');
+    assert.equal(environment.receiveShadows, true, '厂房地板必须接收模型影子');
+    assert.equal(cube.receiveShadows, false, '设备模型不得承担阴影采样');
+    assert.ok(generator.getShadowMap()?.renderList?.includes(cube));
+    assert.ok(generator.getShadowMap()?.renderList?.includes(environment));
   } finally {
     disposeRuntimeFixture(fixture);
   }
@@ -163,9 +157,9 @@ test('点光不建立方阴影，场景继续使用自动太阳光', () => {
     const autoSun = fixture.scene.getLightByName(SCENE_SHADOW_SUN_NAME);
     assert.ok(autoSun instanceof DirectionalLight);
     const shadowGenerator = autoSun.getShadowGenerator();
-    assertPrimaryShadowGenerator(shadowGenerator, '主阴影光必须创建阴影生成器');
+    assertAnyShadowGenerator(shadowGenerator, '主阴影光必须创建阴影生成器');
     for (const mesh of [ground, cube]) {
-      assert.equal(mesh.receiveShadows, true, `${mesh.name} 必须接收阴影`);
+      assert.equal(mesh.receiveShadows, false, `${mesh.name} 在缓存档不应承担阴影采样成本`);
       assert.ok(shadowGenerator.getShadowMap()?.renderList?.includes(mesh), `${mesh.name} 必须加入阴影投射列表`);
     }
   } finally {
@@ -185,10 +179,10 @@ test('方向光会接管主阴影并释放自动太阳光', () => {
 
     assert.equal(fixture.scene.getLightByName(SCENE_SHADOW_SUN_NAME), null);
     const shadowGenerator = light.getShadowGenerator();
-    assertPrimaryShadowGenerator(shadowGenerator, '方向光必须创建主阴影生成器');
+    assertAnyShadowGenerator(shadowGenerator, '方向光必须创建主阴影生成器');
     const renderList = shadowGenerator.getShadowMap()?.renderList ?? [];
     for (const mesh of [ground, cube]) {
-      assert.equal(mesh.receiveShadows, true, `${mesh.name} 必须接收阴影`);
+      assert.equal(mesh.receiveShadows, false, `${mesh.name} 在缓存档不应承担阴影采样成本`);
       assert.ok(renderList.includes(mesh), `${mesh.name} 必须加入阴影投射列表`);
     }
   } finally {
@@ -207,7 +201,7 @@ test('零强度方向光不接管主阴影', () => {
     assert.equal(light.getShadowGenerator(), null);
     const autoSun = fixture.scene.getLightByName(SCENE_SHADOW_SUN_NAME);
     assert.ok(autoSun instanceof DirectionalLight);
-    assertPrimaryShadowGenerator(autoSun.getShadowGenerator(), '零强度方向光不得替换自动主阴影光');
+    assertAnyShadowGenerator(autoSun.getShadowGenerator(), '零强度方向光不得替换自动主阴影光');
   } finally {
     disposeRuntimeFixture(fixture);
   }
@@ -218,19 +212,19 @@ test('方向光隐藏时回退自动太阳光，再次显示后重新接管', ()
   try {
     const light = new DirectionalLight('VisibilityDirectional', new Vector3(0, -1, 0), fixture.scene);
     fixture.runtime.syncLight(light.name, light);
-    assertPrimaryShadowGenerator(light.getShadowGenerator(), '显示的方向光必须接管主阴影');
+    assertAnyShadowGenerator(light.getShadowGenerator(), '显示的方向光必须接管主阴影');
 
     light.setEnabled(false);
     fixture.runtime.syncLight(light.name, light);
     assert.equal(light.getShadowGenerator(), null);
     const autoSun = fixture.scene.getLightByName(SCENE_SHADOW_SUN_NAME);
     assert.ok(autoSun instanceof DirectionalLight);
-    assertPrimaryShadowGenerator(autoSun.getShadowGenerator(), '方向光隐藏后必须回退自动主阴影光');
+    assertAnyShadowGenerator(autoSun.getShadowGenerator(), '方向光隐藏后必须回退自动主阴影光');
 
     light.setEnabled(true);
     fixture.runtime.syncLight(light.name, light);
     assert.equal(fixture.scene.getLightByName(SCENE_SHADOW_SUN_NAME), null);
-    assertPrimaryShadowGenerator(light.getShadowGenerator(), '方向光再次显示后必须重新接管主阴影');
+    assertAnyShadowGenerator(light.getShadowGenerator(), '方向光再次显示后必须重新接管主阴影');
   } finally {
     disposeRuntimeFixture(fixture);
   }
@@ -246,7 +240,7 @@ test('灯光创建后异步加入场景的 Mesh 也会自动参与阴影', () =>
 
     const lateMesh = MeshBuilder.CreateBox('AsyncLoadedMesh', { size: 1 }, fixture.scene);
     flushScene(fixture.scene);
-    assert.equal(lateMesh.receiveShadows, true);
+    assert.equal(lateMesh.receiveShadows, false);
     assert.ok(shadowGenerator.getShadowMap()?.renderList?.includes(lateMesh));
   } finally {
     disposeRuntimeFixture(fixture);
@@ -306,7 +300,7 @@ test('半球光保持环境补光，不创建 Babylon 不支持的阴影生成�
     const light = new HemisphericLight('Hemispheric', new Vector3(0, 1, 0), fixture.scene);
     fixture.runtime.syncLight(light.name, light);
     assert.equal(light.getShadowGenerator(), null);
-    assertPrimaryShadowGenerator(getActiveShadowGenerator(fixture.scene), '主阴影光必须创建阴影生成器');
+    assertAnyShadowGenerator(getActiveShadowGenerator(fixture.scene), '主阴影光必须创建阴影生成器');
   } finally {
     disposeRuntimeFixture(fixture);
   }
@@ -317,13 +311,13 @@ test('删除方向光后回退自动太阳光并释放原生成器', () => {
   try {
     const light = new DirectionalLight('Directional', new Vector3(0, -1, 0), fixture.scene);
     fixture.runtime.syncLight('entity-light', light);
-    assertPrimaryShadowGenerator(light.getShadowGenerator(), '方向光必须创建主阴影生成器');
+    assertAnyShadowGenerator(light.getShadowGenerator(), '方向光必须创建主阴影生成器');
 
     fixture.runtime.removeLight('entity-light');
     assert.equal(light.getShadowGenerator(), null);
     const autoSun = fixture.scene.getLightByName(SCENE_SHADOW_SUN_NAME);
     assert.ok(autoSun instanceof DirectionalLight);
-    assertPrimaryShadowGenerator(autoSun.getShadowGenerator(), '主阴影光必须创建阴影生成器');
+    assertAnyShadowGenerator(autoSun.getShadowGenerator(), '主阴影光必须创建阴影生成器');
   } finally {
     disposeRuntimeFixture(fixture);
   }
@@ -393,7 +387,7 @@ test('阴影接收地面可独立隐藏且不影响主阴影生成器', () => {
       catcherEnabled: false,
     });
 
-    assertPrimaryShadowGenerator(getActiveShadowGenerator(fixture.scene), '关闭接收地面后仍应保留阴影生成器');
+    assertAnyShadowGenerator(getActiveShadowGenerator(fixture.scene), '关闭接收地面后仍应保留阴影生成器');
     assert.equal(fixture.scene.getMeshByName(SCENE_SHADOW_CATCHER_NAME)?.isEnabled(), false);
   } finally {
     disposeRuntimeFixture(fixture);
@@ -404,7 +398,7 @@ test('只修改阴影浓度时复用现有生成器', () => {
   const fixture = createRuntimeFixture();
   try {
     const generator = getActiveShadowGenerator(fixture.scene);
-    assertPrimaryShadowGenerator(generator, '初始状态必须存在阴影生成器');
+    assertAnyShadowGenerator(generator, '初始状态必须存在阴影生成器');
 
     fixture.runtime.applySettings({
       ...DEFAULT_SHADOW_SETTINGS,
@@ -418,18 +412,38 @@ test('只修改阴影浓度时复用现有生成器', () => {
   }
 });
 
-test('冻结材质的模型切换接收阴影后仍会打开 receiveShadows', () => {
+test('冻结材质的环境 Mesh 在缓存档仍会打开 receiveShadows', () => {
   const fixture = createRuntimeFixture();
   try {
-    const cube = MeshBuilder.CreateBox('FrozenShadowReceiver', { size: 1 }, fixture.scene);
-    cube.position.y = 0.5;
-    const material = new StandardMaterial('FrozenShadowReceiverMaterial', fixture.scene);
-    cube.material = material;
+    const floor = MeshBuilder.CreateGround('FrozenFactoryFloor', { width: 20, height: 20 }, fixture.scene);
+    floor.metadata = { editorEnvironmentMesh: true };
+    const material = new StandardMaterial('FrozenFactoryFloorMaterial', fixture.scene);
+    floor.material = material;
     material.freeze();
     flushScene(fixture.scene);
 
-    assert.equal(cube.receiveShadows, true, '冻结材质的模型也必须接收阴影');
+    assert.equal(floor.receiveShadows, true, '冻结材质的环境地面也必须接收阴影');
     assert.equal(material.isFrozen, true, '写入阴影标志后应恢复材质冻结');
+  } finally {
+    disposeRuntimeFixture(fixture);
+  }
+});
+
+test('高质量档让模型接收实时阴影', () => {
+  const fixture = createRuntimeFixture();
+  try {
+    const cube = MeshBuilder.CreateBox('QualityShadowReceiver', { size: 1 }, fixture.scene);
+    cube.position.y = 0.5;
+    fixture.runtime.applySettings({
+      ...DEFAULT_SHADOW_SETTINGS,
+      quality: 'quality',
+    });
+    flushScene(fixture.scene);
+
+    assert.equal(cube.receiveShadows, true, '高质量档必须让模型接收阴影');
+    const generator = getActiveShadowGenerator(fixture.scene);
+    assertPrimaryShadowGenerator(generator, '高质量档必须使用实时阴影生成器');
+    assert.equal(generator.getShadowMap()?.refreshRate, 1);
   } finally {
     disposeRuntimeFixture(fixture);
   }
@@ -439,7 +453,7 @@ test('切换高质量档时重建 2048 阴影贴图', () => {
   const fixture = createRuntimeFixture();
   try {
     const original = getActiveShadowGenerator(fixture.scene);
-    assertPrimaryShadowGenerator(original, '初始状态必须存在阴影生成器');
+    assertAnyShadowGenerator(original, '初始状态必须存在阴影生成器');
 
     fixture.runtime.applySettings({
       ...DEFAULT_SHADOW_SETTINGS,
@@ -545,7 +559,7 @@ test('手动阴影距离会写入生成器 shadowMaxZ', () => {
     });
 
     const generator = getActiveShadowGenerator(fixture.scene);
-    assertPrimaryShadowGenerator(generator, '设置距离后必须保留阴影生成器');
+    assertAnyShadowGenerator(generator, '设置距离后必须保留阴影生成器');
     if (generator instanceof CascadedShadowGenerator) {
       assert.equal(generator.shadowMaxZ, 260);
     } else {
@@ -562,7 +576,7 @@ test('只修改阴影偏移时复用现有生成器并热更新 bias', () => {
   const fixture = createRuntimeFixture();
   try {
     const generator = getActiveShadowGenerator(fixture.scene);
-    assertPrimaryShadowGenerator(generator, '初始状态必须存在阴影生成器');
+    assertAnyShadowGenerator(generator, '初始状态必须存在阴影生成器');
 
     fixture.runtime.applySettings({
       ...DEFAULT_SHADOW_SETTINGS,

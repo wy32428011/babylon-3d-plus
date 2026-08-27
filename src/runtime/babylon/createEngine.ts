@@ -44,6 +44,7 @@ import {
   type CameraViewApplicationOptions,
   type CameraViewTransitionOptions,
 } from './ArcRotateCameraViewController';
+import { createBackgroundFrameRequester } from './backgroundFrameRequester';
 
 export { EDITOR_GRID_CELL_SIZES, DEFAULT_EDITOR_GRID_SETTINGS } from './EditorGroundGrid';
 export { applySavedCameraPose } from './ArcRotateCameraViewController';
@@ -79,6 +80,8 @@ export type BabylonViewportOptions = {
   onLog?: (message: string) => void;
   /** 创建视口时立即应用的场景灵敏度，避免首次 attach/resize 使用默认 10。 */
   initialSensitivity?: SceneSensitivitySettings;
+  /** 发布 Viewer 使用 Worker 帧节拍，避免隐藏标签暂停基于渲染帧的运行逻辑。 */
+  keepRenderingInBackground?: boolean;
 };
 
 export type BabylonFocusOptions = CameraViewTransitionOptions & {
@@ -397,6 +400,13 @@ export function createBabylonViewport(
   } catch (error) {
     throw new Error('Babylon Engine 创建失败：' + getErrorMessage(error));
   }
+  const backgroundFrameRequester = options.keepRenderingInBackground
+    ? createBackgroundFrameRequester()
+    : null;
+  if (backgroundFrameRequester) {
+    engine.customAnimationFrameRequester = backgroundFrameRequester;
+    engine.renderEvenInBackground = true;
+  }
 
   const scene = new Scene(engine);
   scene.clearColor.set(0.08, 0.08, 0.09, 1);
@@ -557,6 +567,7 @@ export function createBabylonViewport(
       engine.onContextRestoredObservable.remove(contextRestoredObserver);
       editorGround.dispose();
       engine.dispose();
+      backgroundFrameRequester?.dispose();
     },
   };
 }

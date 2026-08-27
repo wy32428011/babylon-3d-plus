@@ -287,7 +287,7 @@ export function parsePlayerRuntimeConfig(value: unknown): PlayerRuntimeConfig {
   return {
     version: config.version as 1 | 2,
     page: {
-      title: assertString(page.title, 'runtime-config.page.title', 200),
+      title: assertString(page.title, 'runtime-config.page.title', 256),
       loadingText: assertString(page.loadingText, 'runtime-config.page.loadingText', 200),
       backgroundColor,
     },

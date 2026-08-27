@@ -153,6 +153,8 @@ import {
 } from '../model/builtInSlotBinding';
 import {
   createIdleEnvironmentRuntimeSnapshot,
+  hasManagedEnvironmentCacheReference,
+  resolveEnvironmentRuntimeSettings,
   type EnvironmentApplyRequest,
   type EnvironmentApplyResult,
   type EnvironmentRuntimeSnapshot,
@@ -314,6 +316,11 @@ export type EnvironmentApplyOptions = {
   successMessage?: string;
   persistSceneChange?: boolean;
   runtimeEnvironment?: SceneEnvironmentSettings;
+  expectedSceneSessionId?: string;
+  expectedEnvironmentState?: {
+    environment: SceneEnvironmentSettings | null;
+    applyRequestId: string | null;
+  };
 };
 
 export type EnvironmentDisplayPatch = Partial<Pick<
@@ -413,6 +420,8 @@ type EditorState = {
   entityArrayRequest: EntityArrayRequest | null;
   sceneFocusRequest: SceneFocusRequest | null;
   environmentApplyRequest: EnvironmentApplyRequest | null;
+  environmentRuntimeOverride: SceneEnvironmentSettings | null;
+  environmentStartupRelinkSessionId: string | null;
   environmentRuntimeSnapshot: EnvironmentRuntimeSnapshot;
   environmentAdjustmentActive: boolean;
   environmentFocusRequest: { id: string } | null;
@@ -592,10 +601,11 @@ function prependLog(logs: EditorLog[], message: string): EditorLog[] {
 /** 生成切换场景后的统一状态，避免旧场景的历史、选区和剪贴板泄漏到新场景。 */
 function createLoadedSceneState(state: EditorState, scene: SceneDocument, message: string): Partial<EditorState> {
   const camera = scene.sceneSettings.camera;
+  const sceneSessionId = createId('scene_session');
 
   return {
     scene,
-    sceneSessionId: createId('scene_session'),
+    sceneSessionId,
     persistedSceneContent: serializeScene(scene),
     history: createCommandHistory(),
     hierarchySelectionIds: [],
@@ -603,6 +613,10 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     entityArrayRequest: null,
     sceneFocusRequest: null,
     environmentApplyRequest: null,
+    environmentRuntimeOverride: null,
+    environmentStartupRelinkSessionId: hasManagedEnvironmentCacheReference(scene.sceneSettings.environment)
+      ? sceneSessionId
+      : null,
     environmentRuntimeSnapshot: createIdleEnvironmentRuntimeSnapshot(),
     environmentAdjustmentActive: false,
     environmentFocusRequest: null,
@@ -624,7 +638,7 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
   };
 }
 
-/** 打开任意场景或新建空白场景后异步同步环境模型；旧缓存继续可用，不阻塞编辑。 */
+/** 打开任意场景或新建空白场景后异步同步环境模型。 */
 async function syncDataPlatformEnvironmentsAfterWorkspaceOpen(pushLog: (message: string) => void): Promise<void> {
   if (!window.editorApi?.syncDataPlatformEnvironments) return;
 
@@ -636,6 +650,7 @@ async function syncDataPlatformEnvironmentsAfterWorkspaceOpen(pushLog: (message:
         : undefined,
     });
     if (started) pushLog('编辑工作区已打开，正在后台同步数据中台环境模型。');
+    else pushLog('编辑工作区已打开，但环境模型同步未启动；已阻止加载未重关联的旧缓存路径。');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     pushLog(`编辑工作区已打开，但启动环境模型同步失败：${message}`);
@@ -2440,6 +2455,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   entityArrayRequest: null,
   sceneFocusRequest: null,
   environmentApplyRequest: null,
+  environmentRuntimeOverride: null,
+  environmentStartupRelinkSessionId: null,
   environmentRuntimeSnapshot: createIdleEnvironmentRuntimeSnapshot(),
   environmentAdjustmentActive: false,
   environmentFocusRequest: null,
@@ -2471,6 +2488,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ok: false,
         code: 'environment-load-active',
         message: '请等待环境模型加载完成。',
+      };
+      set((state) => ({ logs: prependLog(state.logs, `运行预览已阻止：${readiness.message}`) }));
+      return readiness;
+    }
+    if (currentState.environmentStartupRelinkSessionId === currentState.sceneSessionId) {
+      const readiness: RuntimePreviewReadiness = {
+        ok: false,
+        code: 'environment-relink-active',
+        message: '请等待环境模型完成当前缓存重关联，或重新选择/清除环境模型。',
       };
       set((state) => ({ logs: prependLog(state.logs, `运行预览已阻止：${readiness.message}`) }));
       return readiness;
@@ -2738,12 +2764,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const nextEnvironment = sanitizeSceneEnvironment(environment);
       if (isSceneEnvironmentEqual(before, nextEnvironment)) return state;
 
-      const command = updateSceneEnvironmentCommand('更新环境模型', before, nextEnvironment);
+      const historyBefore = resolveEnvironmentRuntimeSettings(
+        before,
+        state.environmentRuntimeOverride,
+        { deferManagedCacheLoad: state.environmentStartupRelinkSessionId === state.sceneSessionId },
+      );
+      const command = updateSceneEnvironmentCommand('更新环境模型', historyBefore, nextEnvironment);
       const result = executeCommand(state.scene, state.history, command);
 
       return {
         ...result,
         environmentApplyRequest: null,
+        environmentRuntimeOverride: null,
+        environmentStartupRelinkSessionId: null,
         environmentAdjustmentActive: false,
         environmentRuntimeSnapshot: nextEnvironment
           ? state.environmentRuntimeSnapshot
@@ -2772,10 +2805,46 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     let requestId: string | null = null;
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '加载环境模型');
+      if (options.expectedSceneSessionId && options.expectedSceneSessionId !== state.sceneSessionId) return state;
+      if (
+        options.expectedEnvironmentState
+        && (
+          !isSceneEnvironmentEqual(
+            state.scene.sceneSettings.environment,
+            options.expectedEnvironmentState.environment,
+          )
+          || (state.environmentApplyRequest?.id ?? null) !== options.expectedEnvironmentState.applyRequestId
+        )
+      ) return state;
       const normalized = sanitizeSceneEnvironment(environment);
       if (!normalized) {
         return { logs: prependLog(state.logs, '环境模型配置无效，未开始加载。') };
       }
+
+      const explicitRuntimeEnvironment = options.runtimeEnvironment
+        ? sanitizeSceneEnvironment(options.runtimeEnvironment)
+        : null;
+      if (options.runtimeEnvironment && !explicitRuntimeEnvironment) {
+        return { logs: prependLog(state.logs, '环境模型当前缓存配置无效，未开始加载。') };
+      }
+      if (
+        state.environmentStartupRelinkSessionId === state.sceneSessionId
+        && hasManagedEnvironmentCacheReference(normalized)
+        && !explicitRuntimeEnvironment
+      ) {
+        return {
+          logs: prependLog(state.logs, '环境模型正在重关联当前缓存，已阻止加载旧机器路径。'),
+        };
+      }
+
+      const resolvedRuntimeEnvironment = explicitRuntimeEnvironment
+        ? explicitRuntimeEnvironment
+        : resolveEnvironmentRuntimeSettings(normalized, state.environmentRuntimeOverride);
+      const runtimeEnvironment = explicitRuntimeEnvironment
+        ? explicitRuntimeEnvironment
+        : resolvedRuntimeEnvironment && !isSceneEnvironmentEqual(normalized, resolvedRuntimeEnvironment)
+          ? resolvedRuntimeEnvironment
+          : undefined;
 
       requestId = createId('environment-load');
       const request: EnvironmentApplyRequest = {
@@ -2786,7 +2855,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         commandLabel: options.commandLabel?.trim() || '更新环境模型',
         successMessage: options.successMessage?.trim() || '环境模型已更新。',
         persistSceneChange: options.persistSceneChange !== false,
-        runtimeEnvironment: options.runtimeEnvironment ? sanitizeSceneEnvironment(options.runtimeEnvironment) ?? undefined : undefined,
+        runtimeEnvironment,
       };
       return {
         environmentApplyRequest: request,
@@ -2795,7 +2864,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           ...state.environmentRuntimeSnapshot,
           phase: 'loading',
           requestId,
-          sourceUrl: normalized.activeVariantUrl,
+          sourceUrl: runtimeEnvironment?.activeVariantUrl ?? normalized.activeVariantUrl,
           message: '环境模型正在加载...',
         },
       };
@@ -2820,13 +2889,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const before = state.scene.sceneSettings.environment;
-      const command = updateSceneEnvironmentCommand(request.commandLabel, before, nextEnvironment);
+      const historyBefore = request.persistSceneChange
+        ? resolveEnvironmentRuntimeSettings(
+          before,
+          state.environmentRuntimeOverride,
+          { deferManagedCacheLoad: state.environmentStartupRelinkSessionId === state.sceneSessionId },
+        )
+        : before;
+      const command = updateSceneEnvironmentCommand(request.commandLabel, historyBefore, nextEnvironment);
       const result = !request.persistSceneChange || isSceneEnvironmentEqual(before, nextEnvironment)
         ? { scene: state.scene, history: state.history }
         : executeCommand(state.scene, state.history, command);
       return {
         ...result,
         environmentApplyRequest: null,
+        environmentRuntimeOverride: request.persistSceneChange ? null : nextEnvironment,
+        environmentStartupRelinkSessionId: null,
         environmentRuntimeSnapshot: applyResult.snapshot,
         environmentAdjustmentActive: false,
         environmentFocusRequest: request.focusAfterLoad ? { id: createId('environment-focus') } : state.environmentFocusRequest,
@@ -2858,7 +2936,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   updateEnvironmentDisplay: (patch, label) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
-      const before = state.scene.sceneSettings.environment;
+      const before = resolveEnvironmentRuntimeSettings(
+        state.scene.sceneSettings.environment,
+        state.environmentRuntimeOverride,
+        { deferManagedCacheLoad: state.environmentStartupRelinkSessionId === state.sceneSessionId },
+      );
       if (!before) return state;
       const after = sanitizeSceneEnvironment({ ...before, ...patch });
       if (!after || isSceneEnvironmentEqual(before, after)) return state;
@@ -2867,6 +2949,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const result = executeCommand(state.scene, state.history, command);
       return {
         ...result,
+        environmentRuntimeOverride: null,
+        environmentStartupRelinkSessionId: null,
         environmentAdjustmentActive: after.visible && after.opacity > 0 ? state.environmentAdjustmentActive : false,
         logs: prependLog(state.logs, label),
       };
@@ -2875,7 +2959,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   previewEnvironmentTransform: (transform) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '预览环境变换');
-      const environment = state.scene.sceneSettings.environment;
+      const environment = resolveEnvironmentRuntimeSettings(
+        state.scene.sceneSettings.environment,
+        state.environmentRuntimeOverride,
+        { deferManagedCacheLoad: state.environmentStartupRelinkSessionId === state.sceneSessionId },
+      );
       if (!environment || environment.placementMode !== 'scene-base') return state;
       const nextEnvironment = sanitizeSceneEnvironment({ ...environment, transform });
       if (!nextEnvironment || isSceneEnvironmentEqual(environment, nextEnvironment)) return state;
@@ -2887,13 +2975,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             environment: nextEnvironment,
           },
         },
+        environmentRuntimeOverride: null,
+        environmentStartupRelinkSessionId: null,
       };
     });
   },
   commitEnvironmentTransform: (beforeTransform, afterTransform) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '提交环境变换');
-      const current = state.scene.sceneSettings.environment;
+      const current = resolveEnvironmentRuntimeSettings(
+        state.scene.sceneSettings.environment,
+        state.environmentRuntimeOverride,
+        { deferManagedCacheLoad: state.environmentStartupRelinkSessionId === state.sceneSessionId },
+      );
       if (!current || current.placementMode !== 'scene-base') return state;
       const before = sanitizeSceneEnvironment({ ...current, transform: beforeTransform });
       const after = sanitizeSceneEnvironment({ ...current, transform: afterTransform });
@@ -2903,6 +2997,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const result = executeCommand(state.scene, state.history, command);
       return {
         ...result,
+        environmentRuntimeOverride: null,
+        environmentStartupRelinkSessionId: null,
         logs: prependLog(state.logs, '环境模型 Transform 已更新。'),
       };
     });

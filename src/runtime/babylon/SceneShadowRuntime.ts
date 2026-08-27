@@ -53,20 +53,20 @@ const SHADOW_QUALITY_CONFIG: Record<SceneShadowQuality, {
   cached: boolean;
 }> = {
   performance: {
-    mapSize: 1024,
-    cascadeCount: 3,
+    mapSize: 512,
+    cascadeCount: 1,
     filteringQuality: ShadowGenerator.QUALITY_LOW,
     cached: true,
   },
   balanced: {
     mapSize: 1024,
-    cascadeCount: 4,
-    filteringQuality: ShadowGenerator.QUALITY_MEDIUM,
-    cached: false,
+    cascadeCount: 1,
+    filteringQuality: ShadowGenerator.QUALITY_LOW,
+    cached: true,
   },
   quality: {
     mapSize: 2048,
-    cascadeCount: 4,
+    cascadeCount: 3,
     filteringQuality: ShadowGenerator.QUALITY_HIGH,
     cached: false,
   },
@@ -95,10 +95,28 @@ function isShadowCaster(mesh: AbstractMesh): boolean {
   return isShadowSurface(mesh);
 }
 
-/** 模型、环境和阴影地面都接收阴影；缓存档不能只留给专用地面，否则厂房地板会把影子完全挡住。 */
-function isShadowReceiver(mesh: AbstractMesh): boolean {
+/** 环境底座 Mesh 由 SceneEnvironmentRuntime 标记，缓存档只让这些表面采样阴影。 */
+function isEnvironmentShadowReceiver(mesh: AbstractMesh): boolean {
+  const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
+  if (metadata?.editorEnvironmentMesh === true || metadata?.editorShadowReceiver === true) return true;
+
+  let parent = mesh.parent;
+  while (parent) {
+    const parentName = parent.name;
+    if (parentName.startsWith('EnvironmentRoot_') || parentName.startsWith('EnvironmentContentRoot_')) return true;
+    parent = parent.parent;
+  }
+  return false;
+}
+
+/**
+ * 缓存档只让环境底座和专用地面接收阴影，避免全场 PBR 逐像素采样把 FPS 砍半。
+ * 高质量实时档才让模型互相接收阴影。
+ */
+function isShadowReceiver(mesh: AbstractMesh, realtime: boolean): boolean {
   if (mesh.name === SCENE_SHADOW_CATCHER_NAME) return true;
-  return isShadowSurface(mesh);
+  if (realtime) return isShadowSurface(mesh);
+  return isEnvironmentShadowReceiver(mesh);
 }
 
 /** 收集 Mesh 自身及 MultiMaterial 子材质，供冻结材质短暂解冻后重编阴影采样。 */
@@ -283,10 +301,20 @@ export class SceneShadowRuntime {
     this.invalidateCachedShadow();
   }
 
-  /** 新增和异步加载 Mesh 共用该入口；模型与环境接收阴影，专用地面只收不投。 */
+  /** 新增和异步加载 Mesh 共用该入口；缓存档模型只投射，环境/地面才接收。 */
   private registerMesh(mesh: AbstractMesh): void {
-    applyReceiveShadows(mesh, isShadowReceiver(mesh));
-    if (this.isCachedProfile() && !this.meshTransformObservers.has(mesh) && isShadowCaster(mesh)) {
+    applyReceiveShadows(mesh, isShadowReceiver(mesh, !this.isCachedProfile()));
+    if (!this.isCachedProfile()) {
+      const leftover = this.meshTransformObservers.get(mesh);
+      if (leftover) {
+        mesh.onAfterWorldMatrixUpdateObservable.remove(leftover);
+        this.meshTransformObservers.delete(mesh);
+      }
+    } else if (
+      !this.meshTransformObservers.has(mesh)
+      && isShadowCaster(mesh)
+      && !isEnvironmentShadowReceiver(mesh)
+    ) {
       const observer = mesh.onAfterWorldMatrixUpdateObservable.add(() => this.invalidateCachedShadow());
       this.meshTransformObservers.set(mesh, observer);
     }
@@ -437,7 +465,7 @@ export class SceneShadowRuntime {
 
     for (const mesh of this.knownMeshes) {
       if (mesh === this.catcher || mesh.isDisposed() || !mesh.isEnabled()) continue;
-      if (!isShadowCaster(mesh) && !isShadowReceiver(mesh)) continue;
+      if (!isShadowCaster(mesh) && !isShadowReceiver(mesh, !this.isCachedProfile())) continue;
       mesh.computeWorldMatrix(true);
       const boundingBox = mesh.getBoundingInfo().boundingBox;
       const minimum = boundingBox.minimumWorld;

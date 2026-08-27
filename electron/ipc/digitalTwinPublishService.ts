@@ -285,7 +285,7 @@ export async function publishDigitalTwin(
     emit(onProgress, validated.requestId, 'dist-package', '正在生成自包含 Viewer dist 包…', 30);
     const distPackage = await buildDigitalTwinDistPackage({
       projectId: current.metadata.projectId,
-      publishName: validated.publishName,
+      publishName: current.metadata.projectName,
       sceneContent: viewerSceneContent,
       outputRoot: taskRoot,
       signal,

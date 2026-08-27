@@ -221,7 +221,11 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
 
     if (!readiness.ok) {
       setRuntimePreviewError(readiness.message);
-      if (readiness.code !== 'cad-import-active') setMqttConfigDialogOpen(true);
+      if (![
+        'cad-import-active',
+        'environment-load-active',
+        'environment-relink-active',
+      ].includes(readiness.code)) setMqttConfigDialogOpen(true);
       return;
     }
 

@@ -107,3 +107,98 @@ test('新版数据中台环境模型只按 sourceKey + resourceId 精确关联',
   assert.equal(findImportedAssetForPackagePath('C:\\old\\same-name', indexes, { sourceKey: sourceKeyA, resourceId: '1' }), assetA);
   assert.equal(findImportedAssetForPackagePath(packageA, indexes, { sourceKey: sourceKeyA, resourceId: '999' }), null);
 });
+
+test('旧 sourceKey 可按当前资源库中唯一 resourceId 重新关联环境', () => {
+  const oldSourceKey = 'c'.repeat(64);
+  const currentSourceKey = 'd'.repeat(64);
+  const packagePath = 'D:\\workspace\\cache\\environments\\current\\2088100088037199873\\revision';
+  const currentAsset = {
+    ...createModelAsset(`${packagePath}\\model.glb`, packagePath, 'environment'),
+    source: 'data-platform' as const,
+    dataPlatformResourceId: '2088100088037199873',
+    dataPlatformSourceKey: currentSourceKey,
+    dataPlatformRevision: '7645194092844337573',
+  };
+  const indexes = createImportedAssetIndexes([currentAsset]);
+
+  assert.equal(
+    findImportedAssetForPackagePath('D:\\old-cache\\environment', indexes, {
+      sourceKey: oldSourceKey,
+      resourceId: '2088100088037199873',
+      revision: '7645194092844337573',
+    }),
+    currentAsset,
+  );
+});
+
+test('跨 sourceKey 的 resourceId 存在多个候选时拒绝自动关联', () => {
+  const resourceId = '2088100088037199873';
+  const firstSourceKey = 'e'.repeat(64);
+  const secondSourceKey = 'f'.repeat(64);
+  const oldSourceKey = '0'.repeat(64);
+  const firstPackage = 'D:\\workspace\\cache\\environments\\first\\resource\\revision';
+  const secondPackage = 'D:\\workspace\\cache\\environments\\second\\resource\\revision';
+  const indexes = createImportedAssetIndexes([
+    {
+      ...createModelAsset(`${firstPackage}\\model.glb`, firstPackage, 'environment'),
+      source: 'data-platform' as const,
+      dataPlatformResourceId: resourceId,
+      dataPlatformSourceKey: firstSourceKey,
+      dataPlatformRevision: '7645194092844337573',
+    },
+    {
+      ...createModelAsset(`${secondPackage}\\model.glb`, secondPackage, 'environment'),
+      source: 'data-platform' as const,
+      dataPlatformResourceId: resourceId,
+      dataPlatformSourceKey: secondSourceKey,
+      dataPlatformRevision: '7645194092844337573',
+    },
+  ]);
+
+  assert.equal(
+    findImportedAssetForPackagePath('D:\\old-cache\\environment', indexes, {
+      sourceKey: oldSourceKey,
+      resourceId,
+      revision: '7645194092844337573',
+    }),
+    null,
+  );
+});
+
+test('缺少稳定身份的旧环境缓存路径也可按唯一 resourceId 重新关联', () => {
+  const resourceId = '2088100088037199873';
+  const oldPackage = `D:\\DT\\ZD\\SharedResources\\.babylon-editor\\data-platform-cache\\environments\\${'1'.repeat(64)}\\${resourceId}\\2092171410874761217`;
+  const currentPackage = `D:\\zd-babylon-projects\\SharedResources\\.babylon-editor\\data-platform-cache\\environments\\${'2'.repeat(64)}\\${resourceId}\\2092171410874761217`;
+  const currentAsset = {
+    ...createModelAsset(`${currentPackage}\\model.glb`, currentPackage, 'environment'),
+    source: 'data-platform' as const,
+    dataPlatformResourceId: resourceId,
+    dataPlatformSourceKey: '2'.repeat(64),
+  };
+  const indexes = createImportedAssetIndexes([currentAsset]);
+
+  assert.equal(findImportedAssetForPackagePath(oldPackage, indexes), currentAsset);
+});
+
+test('跨 sourceKey 的 resourceId 相同但 revision 不同时拒绝自动关联', () => {
+  const resourceId = '2088100088037199873';
+  const currentSourceKey = '9'.repeat(64);
+  const packagePath = 'D:\\workspace\\cache\\environments\\current\\resource\\revision';
+  const currentAsset = {
+    ...createModelAsset(`${packagePath}\\model.glb`, packagePath, 'environment'),
+    source: 'data-platform' as const,
+    dataPlatformResourceId: resourceId,
+    dataPlatformSourceKey: currentSourceKey,
+    dataPlatformRevision: '7645194092844337574',
+  };
+  const indexes = createImportedAssetIndexes([currentAsset]);
+
+  assert.equal(
+    findImportedAssetForPackagePath('D:\\old-cache\\environment', indexes, {
+      sourceKey: '8'.repeat(64),
+      resourceId,
+      revision: '7645194092844337573',
+    }),
+    null,
+  );
+});

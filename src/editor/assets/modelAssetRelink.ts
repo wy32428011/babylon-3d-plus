@@ -7,6 +7,8 @@ export type ImportedAssetIndexes = {
   uniqueByPackagePath: Map<string, AssetEntry>;
   uniqueByDataPlatformPackage: Map<string, AssetEntry>;
   uniqueByDataPlatformIdentity: Map<string, AssetEntry>;
+  uniqueByDataPlatformResourceId: Map<string, AssetEntry>;
+  uniqueByDataPlatformResourceRevision: Map<string, AssetEntry>;
   uniqueByDataPlatformLogicalPackage: Map<string, AssetEntry>;
   uniqueByPortablePackage: Map<string, AssetEntry>;
 };
@@ -60,6 +62,23 @@ function getDataPlatformIdentityKey(sourceKey: unknown, resourceId: unknown): st
       : '';
 }
 
+function getDataPlatformResourceIdKey(resourceId: unknown): string {
+  return typeof resourceId === 'string' && /^[1-9]\d{0,63}$/.test(resourceId) ? resourceId : '';
+}
+
+function getDataPlatformResourceRevisionKey(resourceId: unknown, revision: unknown): string {
+  const resourceIdKey = getDataPlatformResourceIdKey(resourceId);
+  return resourceIdKey && typeof revision === 'string' && /^[1-9]\d{0,63}$/.test(revision)
+    ? `${resourceIdKey}:${revision}`
+    : '';
+}
+
+function getDataPlatformEnvironmentCacheResourceId(packagePath: string | undefined): string {
+  const normalizedPath = (packagePath ?? '').trim().replace(/\\/g, '/');
+  const match = /(?:^|\/)\.babylon-editor\/data-platform-cache\/environments\/[0-9a-f]{64}\/([1-9]\d{0,63})\/[1-9]\d{0,63}(?:\/|$)/i.exec(normalizedPath);
+  return match?.[1] ?? '';
+}
+
 /**
  * 去除数据中台实例内数据库 ID，只保留资源类型和模型名称。
  * 同一模型迁移到不同数据中台后 ID 可能变化，但同步目录中的名称部分仍可作为唯一兜底键。
@@ -88,6 +107,8 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
   const packageAssetLists = new Map<string, AssetEntry[]>();
   const dataPlatformPackageAssetLists = new Map<string, AssetEntry[]>();
   const dataPlatformIdentityAssetLists = new Map<string, AssetEntry[]>();
+  const dataPlatformResourceIdAssetLists = new Map<string, AssetEntry[]>();
+  const dataPlatformResourceRevisionAssetLists = new Map<string, AssetEntry[]>();
   const dataPlatformLogicalPackageAssetLists = new Map<string, AssetEntry[]>();
   const portablePackageAssetLists = new Map<string, AssetEntry[]>();
 
@@ -110,6 +131,23 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
       const identityAssets = dataPlatformIdentityAssetLists.get(dataPlatformIdentityKey) ?? [];
       identityAssets.push(asset);
       dataPlatformIdentityAssetLists.set(dataPlatformIdentityKey, identityAssets);
+    }
+
+    const dataPlatformResourceIdKey = getDataPlatformResourceIdKey(asset.dataPlatformResourceId);
+    if (asset.source === 'data-platform' && dataPlatformResourceIdKey) {
+      const resourceAssets = dataPlatformResourceIdAssetLists.get(dataPlatformResourceIdKey) ?? [];
+      resourceAssets.push(asset);
+      dataPlatformResourceIdAssetLists.set(dataPlatformResourceIdKey, resourceAssets);
+
+      const resourceRevisionKey = getDataPlatformResourceRevisionKey(
+        asset.dataPlatformResourceId,
+        asset.dataPlatformRevision,
+      );
+      if (resourceRevisionKey) {
+        const revisionAssets = dataPlatformResourceRevisionAssetLists.get(resourceRevisionKey) ?? [];
+        revisionAssets.push(asset);
+        dataPlatformResourceRevisionAssetLists.set(resourceRevisionKey, revisionAssets);
+      }
     }
 
     const dataPlatformPackageKey = getDataPlatformPackageMatchKey(asset.path, asset.packagePath);
@@ -140,6 +178,8 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
     uniqueByPackagePath: createUniqueAssetIndex(packageAssetLists),
     uniqueByDataPlatformPackage: createUniqueAssetIndex(dataPlatformPackageAssetLists),
     uniqueByDataPlatformIdentity: createUniqueAssetIndex(dataPlatformIdentityAssetLists),
+    uniqueByDataPlatformResourceId: createUniqueAssetIndex(dataPlatformResourceIdAssetLists),
+    uniqueByDataPlatformResourceRevision: createUniqueAssetIndex(dataPlatformResourceRevisionAssetLists),
     uniqueByDataPlatformLogicalPackage: createUniqueAssetIndex(dataPlatformLogicalPackageAssetLists),
     uniqueByPortablePackage: createUniqueAssetIndex(portablePackageAssetLists),
   };
@@ -149,10 +189,26 @@ export function createImportedAssetIndexes(assets: AssetEntry[]): ImportedAssetI
 export function findImportedAssetForPackagePath(
   packagePath: string | undefined,
   indexes: ImportedAssetIndexes,
-  remoteIdentity?: { sourceKey?: string; resourceId?: string },
+  remoteIdentity?: { sourceKey?: string; resourceId?: string; revision?: string },
 ): AssetEntry | null {
-  const remoteIdentityKey = getDataPlatformIdentityKey(remoteIdentity?.sourceKey, remoteIdentity?.resourceId);
-  if (remoteIdentityKey) return indexes.uniqueByDataPlatformIdentity.get(remoteIdentityKey) ?? null;
+  if (remoteIdentity) {
+    const remoteIdentityKey = getDataPlatformIdentityKey(remoteIdentity.sourceKey, remoteIdentity.resourceId);
+    const identityMatch = remoteIdentityKey
+      ? indexes.uniqueByDataPlatformIdentity.get(remoteIdentityKey)
+      : undefined;
+    if (identityMatch) return identityMatch;
+
+    const resourceRevisionKey = getDataPlatformResourceRevisionKey(
+      remoteIdentity.resourceId,
+      remoteIdentity.revision,
+    );
+    return resourceRevisionKey
+      ? indexes.uniqueByDataPlatformResourceRevision.get(resourceRevisionKey) ?? null
+      : null;
+  }
+
+  const cacheResourceId = getDataPlatformEnvironmentCacheResourceId(packagePath);
+  if (cacheResourceId) return indexes.uniqueByDataPlatformResourceId.get(cacheResourceId) ?? null;
 
   const packageMatch = indexes.uniqueByPackagePath.get(normalizeAssetMatchPath(packagePath));
   if (packageMatch) return packageMatch;

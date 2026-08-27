@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [engineSource, playerSource, sceneViewSource] = await Promise.all([
+const [engineSource, playerSource, sceneViewSource, backgroundRequesterSource, backgroundWorkerSource] = await Promise.all([
   readFile('src/runtime/babylon/createEngine.ts', 'utf8'),
   readFile('src/player/PlayerApp.tsx', 'utf8'),
   readFile('src/editor/panels/SceneViewPanel.tsx', 'utf8'),
+  readFile('src/runtime/babylon/backgroundFrameRequester.ts', 'utf8'),
+  readFile('src/runtime/babylon/backgroundFrameWorker.ts', 'utf8'),
 ]);
 
 const viewportFactoryStart = engineSource.indexOf('export function createBabylonViewport');
@@ -18,6 +20,11 @@ assert.match(
   playerViewportCall,
   /requireHardwareAcceleration:\s*true/,
   '发布 Web Viewer 必须声明硬件加速诉求（探测成功时强制 GPU）',
+);
+assert.match(
+  playerViewportCall,
+  /keepRenderingInBackground:\s*true/,
+  '发布 Web Viewer 必须显式启用后台帧调度',
 );
 assert.match(
   sceneViewSource,
@@ -69,6 +76,41 @@ assert.match(
   viewportFactorySource,
   /engine\.runRenderLoop\(/,
   'Viewer 必须继续使用 Babylon 的显示帧同步渲染循环',
+);
+assert.match(
+  viewportFactorySource,
+  /createBackgroundFrameRequester/,
+  '发布 Viewer 必须为隐藏标签安装后台帧请求器',
+);
+assert.match(
+  viewportFactorySource,
+  /engine\.renderEvenInBackground\s*=\s*true/,
+  'Babylon Engine 必须显式允许后台渲染',
+);
+assert.match(
+  backgroundRequesterSource,
+  /new Worker\(new URL\(['"]\.\/backgroundFrameWorker\.ts['"], import\.meta\.url\)/,
+  '后台帧 Worker 必须使用 Vite 打包后的同源脚本，兼容仅允许 worker-src self 的 CSP',
+);
+assert.match(
+  backgroundRequesterSource,
+  /type:\s*['"]module['"]/,
+  '后台帧 Worker 必须以模块 Worker 加载',
+);
+assert.doesNotMatch(
+  backgroundRequesterSource,
+  /createObjectURL|new Blob/,
+  '后台帧 Worker 不得依赖 CSP 可能禁止的 blob URL',
+);
+assert.match(
+  backgroundWorkerSource,
+  /message\.type === ['"]schedule['"]/,
+  '后台 Worker 必须处理帧调度消息',
+);
+assert.match(
+  backgroundWorkerSource,
+  /message\.type === ['"]cancel['"]/,
+  '后台 Worker 必须处理帧取消消息',
 );
 
 console.log(JSON.stringify({

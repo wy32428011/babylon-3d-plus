@@ -45,7 +45,7 @@ const EMPTY_DATA_PLATFORM_CONFIG: DataPlatformConfig = {
   usesDefaultWorkspace: true,
 };
 
-/** 格式化最近更新时间，缺失时显示占位，失败时保留原始字符串便于排查。 */
+/** 格式化首页时间，缺失时显示占位，失败时保留原始字符串便于排查。 */
 function formatRecentTime(value: string | null | undefined): string {
   if (!value) return '—';
 
@@ -699,6 +699,12 @@ export function HomePage({
                     <div>
                       <dt>更新时间</dt>
                       <dd>{formatRecentTime(project.updatedAt)}</dd>
+                    </div>
+                    <div className="home-data-platform-publish-meta">
+                      <dt>最新发布时间</dt>
+                      <dd title={formatRecentTime(project.digitalTwinLastPublishedAt)}>
+                        {formatRecentTime(project.digitalTwinLastPublishedAt)}
+                      </dd>
                     </div>
                   </dl>
                   <div className="home-recent-actions">

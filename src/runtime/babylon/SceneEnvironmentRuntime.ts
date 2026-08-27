@@ -361,7 +361,13 @@ export class SceneEnvironmentRuntime {
       }
 
       const renderMeshes = container.meshes.filter((mesh) => mesh.getTotalVertices() > 0);
-      for (const mesh of container.meshes) mesh.isPickable = false;
+      for (const mesh of container.meshes) {
+        mesh.isPickable = false;
+        const metadata = (mesh.metadata && typeof mesh.metadata === 'object')
+          ? mesh.metadata as Record<string, unknown>
+          : {};
+        mesh.metadata = { ...metadata, editorEnvironmentMesh: true };
+      }
       const transformNodes = [...new Set<TransformNode>([root, contentRoot, ...allImportedNodes])];
       const materialBaselines = container.materials.map((material) => ({
         material,

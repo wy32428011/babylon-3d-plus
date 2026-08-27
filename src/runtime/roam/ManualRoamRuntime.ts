@@ -43,7 +43,12 @@ import {
   ManualRoamCollisionProxyPool,
 } from './ManualRoamCollisionProxyPool';
 import { ProceduralAvatarMorphAnimator } from './ProceduralAvatarMorphAnimator';
-import { resolveProceduralBodyMotion } from './proceduralAvatarAnimation';
+import {
+  createInitialProceduralGaitState,
+  resolveProceduralBodyMotion,
+  stepProceduralGaitState,
+  type ProceduralGaitState,
+} from './proceduralAvatarAnimation';
 
 export type ManualRoamAvatarAnimationMode = 'loading' | 'embedded' | 'procedural' | 'error';
 
@@ -175,7 +180,7 @@ export class ManualRoamRuntime {
   private previousGamepadJumpPressed = false;
   private currentAnimation: AnimationGroup | null = null;
   private animationGroups: AnimationGroup[] = [];
-  private animationClockSeconds = 0;
+  private proceduralGaitState: ProceduralGaitState = createInitialProceduralGaitState();
   private proceduralAnimator: ProceduralAvatarMorphAnimator | null = null;
   private visualBasePosition = Vector3.Zero();
   private avatarContainer: Awaited<ReturnType<typeof SceneLoader.LoadAssetContainerAsync>> | null = null;
@@ -264,6 +269,7 @@ export class ManualRoamRuntime {
   setEnabled(enabled: boolean): void {
     if (this.disposed || this.snapshot.enabled === enabled) return;
     if (enabled) {
+      this.proceduralGaitState = createInitialProceduralGaitState();
       this.activateCollisionWorld();
       const explicitSpawn = this.resolveExplicitSpawnPose();
       if (explicitSpawn) {
@@ -318,6 +324,7 @@ export class ManualRoamRuntime {
     this.spawnPosition.setAll(0);
     this.spawnYaw = 0;
     this.spawnPitch = -0.2;
+    this.proceduralGaitState = createInitialProceduralGaitState();
     this.collider.position.setAll(0);
     this.kinematicState = createInitialRoamKinematicState({ x: 0, y: 0, z: 0 });
   }
@@ -388,6 +395,7 @@ export class ManualRoamRuntime {
   reset(): void {
     if (!this.spawnInitialized) this.ensureSpawnInitialized();
     this.clearInputs();
+    this.proceduralGaitState = createInitialProceduralGaitState();
     this.resetTransition = {
       fromPosition: this.collider.position.clone(),
       fromYaw: this.kinematicState.yaw,
@@ -869,10 +877,16 @@ export class ManualRoamRuntime {
       return;
     }
     this.stopCurrentAnimation();
-    this.animationClockSeconds += deltaSeconds * (input.sprint ? 11 : 7);
-    const amount = Math.min(1, horizontalAmount / 0.35);
-    this.proceduralAnimator?.update(this.animationClockSeconds, amount, airborne);
-    const bodyMotion = resolveProceduralBodyMotion(this.animationClockSeconds, amount, airborne);
+    this.proceduralGaitState = stepProceduralGaitState(
+      this.proceduralGaitState,
+      horizontalAmount,
+      input.sprint,
+      airborne,
+      deltaSeconds,
+    );
+    const { phase, amount } = this.proceduralGaitState;
+    this.proceduralAnimator?.update(phase, amount, airborne);
+    const bodyMotion = resolveProceduralBodyMotion(phase, amount, airborne);
     this.avatarVisualRoot.position.copyFrom(this.visualBasePosition);
     this.avatarVisualRoot.position.y += bodyMotion.verticalOffsetMeters;
     this.avatarVisualRoot.rotation.z = bodyMotion.rollRadians;

@@ -9,7 +9,7 @@ const viteServer = await createServer({
   server: { middlewareMode: true, hmr: false },
   optimizeDeps: { noDiscovery: true },
 });
-const { parseDigitalTwinAllowedParentOrigins } = await viteServer.ssrLoadModule(
+const { parseDigitalTwinAllowedParentOrigins, parsePlayerRuntimeConfig } = await viteServer.ssrLoadModule(
   '/src/player/runtimeConfig.ts',
 ) as typeof import('../../src/player/runtimeConfig.ts');
 after(async () => {
@@ -71,4 +71,48 @@ test('Origin 白名单拒绝非数组和超量配置', () => {
     }),
     /allowedParentOrigins/,
   );
+});
+
+test('Viewer 标题支持数据中台项目名称的 256 字符上限', () => {
+  const originalDocument = globalThis.document;
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: { baseURI: 'https://viewer.example.test/' },
+  });
+  const title = '项'.repeat(256);
+  const createRuntimeConfig = (pageTitle: string) => ({
+    version: 1,
+    page: { title: pageTitle, loadingText: '场景加载中...', backgroundColor: '#141414' },
+    paths: {
+      scene: './project/scene.json',
+      assetManifest: './project/asset-manifest.json',
+      assetBase: './project/assets/',
+    },
+    viewer: { showGrid: false, allowCameraControl: true, showStatusOverlay: true },
+    mqtt: {
+      enabled: false,
+      ip: '',
+      address: '',
+      topic: '',
+      subscriptions: [],
+      simulatorEnabled: false,
+      simulatorAssetCode: '',
+      simulatorScenario: 'cycle',
+      simulatorIntervalMs: 500,
+    },
+  });
+
+  try {
+    assert.equal(parsePlayerRuntimeConfig(createRuntimeConfig(title)).page.title, title);
+    assert.throws(
+      () => parsePlayerRuntimeConfig(createRuntimeConfig(`${title}目`)),
+      /runtime-config\.page\.title/,
+    );
+  } finally {
+    if (originalDocument) {
+      Object.defineProperty(globalThis, 'document', { configurable: true, value: originalDocument });
+    } else {
+      delete (globalThis as typeof globalThis & { document?: Document }).document;
+    }
+  }
 });

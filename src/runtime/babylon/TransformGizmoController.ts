@@ -249,6 +249,9 @@ export class TransformGizmoController {
     const resolvedTool = this.resolveSupportedTool(tool);
     if (this.currentTool !== resolvedTool) this.cancelActiveDrag();
     this.currentTool = resolvedTool;
+    // Babylon 9.12 的 PlaneRotationGizmo.isEnabled 只继承 attachedMesh；先更新轴开关，
+    // 再由 GizmoManager 绑定 attachedNode，避免 TransformNode 目标的旋转手柄被重新禁用。
+    this.updateRotationGizmoHandles();
     this.gizmoManager.positionGizmoEnabled = resolvedTool === 'translate'
       && this.attachedSupportedTools.has('translate');
     this.gizmoManager.rotationGizmoEnabled = resolvedTool === 'rotate'
@@ -256,7 +259,6 @@ export class TransformGizmoController {
     this.gizmoManager.scaleGizmoEnabled = resolvedTool === 'scale'
       && this.attachedSupportedTools.has('scale');
     this.updateScaleGizmoHandles();
-    this.updateRotationGizmoHandles();
   }
 
   /** 将 Gizmo 轴向切换为世界坐标或对象局部坐标。 */
