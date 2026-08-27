@@ -266,7 +266,7 @@ export type ManualRoamSpawnComponent = Record<string, never>;
 /** 点击事件绑定支持的事件类型；click-cell（货架虚拟货格单元格）预留，UI 暂禁用。 */
 export type ClickEventBindingEventType = 'click' | 'click-cell';
 
-/** 点击命中后执行的效果，可同时勾选多个。 */
+/** 点击命中后执行的效果类型，单个事件内同类效果只保留一条。 */
 export type ClickEventBindingEffect = 'highlight' | 'focus';
 
 /** 绑定的设备类型条目，以模型包 sourceUrl 作为运行态匹配主键。 */
@@ -287,11 +287,17 @@ export type ClickEventBindingDeviceSlot = {
   deviceType: ClickEventBindingDeviceType | null;
 };
 
-/** 点击事件绑定组件，仅在运行预览态生效；命中的设备按 effects 执行高亮与相机聚焦。 */
-export type ClickEventBindingComponent = {
-  deviceSlots: ClickEventBindingDeviceSlot[];
+/** 单条事件配置：事件类型 + 命中后执行的效果列表。 */
+export type ClickEventBindingEvent = {
+  id: string;
   eventType: ClickEventBindingEventType;
   effects: ClickEventBindingEffect[];
+};
+
+/** 点击事件绑定组件，仅在运行预览态生效；事件列表中同类型事件取第一条匹配。 */
+export type ClickEventBindingComponent = {
+  deviceSlots: ClickEventBindingDeviceSlot[];
+  events: ClickEventBindingEvent[];
 };
 
 export type EntityComponents = {

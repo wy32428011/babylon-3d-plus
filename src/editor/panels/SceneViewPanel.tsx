@@ -13,7 +13,7 @@ import {
 } from '../../shared/sceneModelSelectionPointer';
 import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
 import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
-import { findClickEventBindingForEntity } from '../model/clickEventBinding';
+import { CLICK_EVENT_FOCUS_DURATION_MS, resolveClickEventBindingClick } from '../model/clickEventBinding';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import { createEntityGroupRotationDeltaMatrix } from '../../runtime/babylon/EntityGroupRotationPreview';
@@ -692,17 +692,25 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         state.pushLog(`命中货格：${hostLabel} ${cell.row}-${cell.column}-${cell.layer}（排-列-层）`);
       }
     }
-    // 运行预览下命中点击事件绑定的设备类型时由绑定接管点击行为：勾选高亮才选中、勾选聚焦才相机动画。
-    if (isRuntimePreview && pickedEntityId && !selectionClick.toggleSelection) {
+    // 运行预览下场景存在已注册设备类型的点击事件绑定时点击行为全接管：
+    // 命中注册设备按事件效果执行，点未注册模型无效果，点空白清除选中；Ctrl 多选同样被吞。
+    if (isRuntimePreview) {
       const state = useEditorStore.getState();
-      const bindingHit = findClickEventBindingForEntity(state.scene, pickedEntityId);
-      if (bindingHit) {
-        state.setEnvironmentAdjustmentActive(false);
-        if (bindingHit.component.effects.includes('highlight')) {
-          state.selectEntity(pickedEntityId);
-        }
-        if (bindingHit.component.effects.includes('focus')) {
-          state.requestSceneFocusForSelection([pickedEntityId]);
+      const resolution = resolveClickEventBindingClick(state.scene, pickedEntityId);
+      if (resolution.kind !== 'pass-through') {
+        if (resolution.kind === 'trigger') {
+          state.setEnvironmentAdjustmentActive(false);
+          if (resolution.effects.includes('highlight')) {
+            state.selectEntity(resolution.entityId);
+          }
+          if (resolution.effects.includes('focus')) {
+            state.requestSceneFocusForSelection([resolution.entityId], {
+              animate: true,
+              durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
+            });
+          }
+        } else if (resolution.kind === 'clear') {
+          state.selectEntity(null);
         }
         return;
       }
@@ -1960,7 +1968,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         bounds,
         containsSkybox
           ? { animate: false, maxRadiusMeters: Number.POSITIVE_INFINITY, useModelFocusAngle: false }
-          : undefined,
+          : sceneFocusRequest.transition,
       );
       sceneFocusPerformanceRef.current = {
         ...bounds,

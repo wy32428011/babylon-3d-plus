@@ -254,9 +254,16 @@ export type EntityArrayCommitResult =
   | { ok: true; duplicatedIds: string[]; modelArrayItemIds: string[]; createdCount: number }
   | { ok: false; error: string };
 
+/** 聚焦请求的相机动画选项；缺省保持即时跳变。 */
+export type SceneFocusTransition = {
+  animate: boolean;
+  durationMs?: number;
+};
+
 export type SceneFocusRequest = {
   id: string;
   entityIds: string[];
+  transition?: SceneFocusTransition;
 };
 
 export type ProjectAssetFocusRequest = {
@@ -539,7 +546,7 @@ type EditorState = {
   commitResolvedEntityArray: (input: ResolvedEntityArrayInput) => EntityArrayCommitResult;
   groupSelectedEntities: () => void;
   ungroupSelectedEntities: () => void;
-  requestSceneFocusForSelection: (entityIds?: string[]) => void;
+  requestSceneFocusForSelection: (entityIds?: string[], transition?: SceneFocusTransition) => void;
   requestProjectAssetFocusForEntity: (entityId: string | null) => void;
   consumeSceneFocusRequest: (requestId: string) => void;
   requestRevealHierarchyEntity: (entityId: string) => void;
@@ -4254,7 +4261,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  requestSceneFocusForSelection: (entityIds) => {
+  requestSceneFocusForSelection: (entityIds, transition) => {
     set((state) => {
       const focusIds = resolveSceneFocusEntityIds(
         state.scene,
@@ -4266,6 +4273,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         sceneFocusRequest: {
           id: createId('scene_focus'),
           entityIds: focusIds,
+          ...(transition ? { transition } : {}),
         },
         logs: prependLog(state.logs, `场景聚焦: ${focusIds.length} 个对象`),
       };

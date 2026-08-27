@@ -1,4 +1,4 @@
-import type { ClickEventBindingComponent, ClickEventBindingDeviceSlot, ClickEventBindingDeviceType, ClickEventBindingEffect, ClickEventBindingEventType } from './components';
+import type { ClickEventBindingComponent, ClickEventBindingDeviceSlot, ClickEventBindingDeviceType, ClickEventBindingEffect, ClickEventBindingEvent, ClickEventBindingEventType } from './components';
 import type { SceneDocument } from './SceneDocument';
 import { createId } from '../../shared/ids';
 
@@ -17,6 +17,12 @@ type ClickEventBindingSourceAsset = {
 
 /** 单个绑定允许配置的最大设备类型数。 */
 export const CLICK_EVENT_BINDING_MAX_DEVICE_TYPES = 64;
+
+/** 单个绑定允许配置的最大事件数。 */
+export const CLICK_EVENT_BINDING_MAX_EVENTS = 16;
+
+/** 绑定触发的聚焦动画时长（毫秒），比相机默认 200ms 更有推进感。 */
+export const CLICK_EVENT_FOCUS_DURATION_MS = 600;
 
 const AUTHORIZED_CLICK_EVENT_ASSET_URL_PREFIX = 'editor-asset://local/';
 const CLICK_EVENT_BINDING_TEXT_MAX_LENGTH = 256;
@@ -40,12 +46,20 @@ function cloneJsonValue<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 }
 
-/** 创建一份空点击事件绑定组件，默认事件为点击、效果为高亮加聚焦。 */
+/** 创建一条事件配置，默认点击 + 高亮。 */
+export function createClickEventBindingEvent(): ClickEventBindingEvent {
+  return {
+    id: createId('click_event'),
+    eventType: 'click',
+    effects: ['highlight'],
+  };
+}
+
+/** 创建一份空点击事件绑定组件，默认带一条 点击 + 高亮/聚焦 事件。 */
 export function createDefaultClickEventBindingComponent(): ClickEventBindingComponent {
   return {
     deviceSlots: [],
-    eventType: 'click',
-    effects: ['highlight', 'focus'],
+    events: [{ ...createClickEventBindingEvent(), effects: ['highlight', 'focus'] }],
   };
 }
 
@@ -105,7 +119,26 @@ function sanitizeClickEventBindingDeviceSlot(value: unknown): ClickEventBindingD
   return { id, deviceType: sanitizeClickEventBindingDeviceType(value.deviceType) };
 }
 
-/** 清理点击事件绑定组件，非法槽位与枚举值会被过滤并回退默认。 */
+/** 清理单条事件配置；非法事件类型回退 click，效果数组限枚举且去重。 */
+function sanitizeClickEventBindingEvent(value: unknown): ClickEventBindingEvent | null {
+  if (!isPlainObject(value)) return null;
+  const eventType = CLICK_EVENT_BINDING_EVENT_TYPES.includes(value.eventType as ClickEventBindingEventType)
+    ? value.eventType as ClickEventBindingEventType
+    : 'click';
+  const effects = Array.isArray(value.effects)
+    ? CLICK_EVENT_BINDING_EFFECTS.filter((effect) => (value.effects as unknown[]).includes(effect))
+    : [];
+  return {
+    id: sanitizeText(value.id, CLICK_EVENT_BINDING_ID_MAX_LENGTH) || createId('click_event'),
+    eventType,
+    effects,
+  };
+}
+
+/**
+ * 清理点击事件绑定组件，非法槽位与事件会被过滤。
+ * 兼容旧版单事件格式：无 events 但存在顶层 eventType/effects 时迁移为单条事件。
+ */
 export function sanitizeClickEventBindingComponent(value: unknown): ClickEventBindingComponent {
   if (!isPlainObject(value)) return createDefaultClickEventBindingComponent();
 
@@ -116,15 +149,19 @@ export function sanitizeClickEventBindingComponent(value: unknown): ClickEventBi
         .filter((item): item is ClickEventBindingDeviceSlot => item !== null)
     : [];
 
-  const eventType = CLICK_EVENT_BINDING_EVENT_TYPES.includes(value.eventType as ClickEventBindingEventType)
-    ? value.eventType as ClickEventBindingEventType
-    : 'click';
+  let events: ClickEventBindingEvent[];
+  if (Array.isArray(value.events)) {
+    events = value.events
+      .slice(0, CLICK_EVENT_BINDING_MAX_EVENTS)
+      .map(sanitizeClickEventBindingEvent)
+      .filter((item): item is ClickEventBindingEvent => item !== null);
+  } else if (value.eventType !== undefined || value.effects !== undefined) {
+    events = [sanitizeClickEventBindingEvent(value)].filter((item): item is ClickEventBindingEvent => item !== null);
+  } else {
+    events = [];
+  }
 
-  const effects = Array.isArray(value.effects)
-    ? CLICK_EVENT_BINDING_EFFECTS.filter((effect) => (value.effects as unknown[]).includes(effect))
-    : [];
-
-  return { deviceSlots, eventType, effects };
+  return { deviceSlots, events };
 }
 
 /** 深拷贝点击事件绑定组件，避免设备类型数组被外部直接修改。 */
@@ -151,4 +188,33 @@ export function findClickEventBindingForEntity(
     }
   }
   return null;
+}
+
+/** 运行/发布态点击决策：场景存在已注册设备类型的绑定时点击行为全接管。 */
+export type ClickEventBindingClickResolution =
+  | { kind: 'pass-through' }
+  | { kind: 'clear' }
+  | { kind: 'ignore' }
+  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[] };
+
+/**
+ * 判定一次运行/发布态点击的行为：
+ * 场景无有效注册（无绑定或全部空槽）→ pass-through 走默认点击；
+ * 接管中点空白 → clear 清除高亮；点未注册模型 → ignore 无任何效果；
+ * 命中注册设备且配了 click 事件 → trigger 按事件效果执行。
+ */
+export function resolveClickEventBindingClick(
+  scene: SceneDocument,
+  pickedEntityId: string | null,
+): ClickEventBindingClickResolution {
+  const takeoverActive = Object.values(scene.entities).some((entity) => (
+    entity.components.clickEventBinding?.deviceSlots.some((slot) => slot.deviceType !== null) ?? false
+  ));
+  if (!takeoverActive) return { kind: 'pass-through' };
+  if (!pickedEntityId) return { kind: 'clear' };
+
+  const hit = findClickEventBindingForEntity(scene, pickedEntityId);
+  const matchedEvent = hit?.component.events.find((event) => event.eventType === 'click');
+  if (!hit || !matchedEvent) return { kind: 'ignore' };
+  return { kind: 'trigger', entityId: pickedEntityId, effects: matchedEvent.effects };
 }

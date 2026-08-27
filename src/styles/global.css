@@ -3802,18 +3802,32 @@ select {
   align-self: center;
 }
 
-.click-event-binding-effects {
+.click-event-binding-event-card {
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  padding: 6px;
+  margin-bottom: 6px;
   display: flex;
-  gap: 12px;
-  align-items: center;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.click-event-binding-effect-option {
+.click-event-binding-effect-row {
   display: flex;
   gap: 4px;
   align-items: center;
-  color: #c8c8c8;
-  font-size: 11px;
+}
+
+.click-event-binding-effect-row select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #555;
+  color: #d7d7d7;
+  background: #1e1e1e;
+}
+
+.click-event-binding-add-effect {
+  align-self: flex-start;
 }
 
 .model-generator-clear-button {

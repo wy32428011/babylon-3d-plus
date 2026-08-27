@@ -7,11 +7,14 @@ import type {
   ClickEventBindingComponent,
   ClickEventBindingDeviceSlot,
   ClickEventBindingEffect,
+  ClickEventBindingEvent,
   ClickEventBindingEventType,
 } from '../model/components';
 import {
   CLICK_EVENT_BINDING_MAX_DEVICE_TYPES,
+  CLICK_EVENT_BINDING_MAX_EVENTS,
   createClickEventBindingDeviceTypeFromAsset,
+  createClickEventBindingEvent,
 } from '../model/clickEventBinding';
 import { useEditorStore } from '../store/editorStore';
 import { createId } from '../../shared/ids';
@@ -22,7 +25,7 @@ type ClickEventBindingInspectorProps = {
 };
 
 const EFFECT_OPTIONS: readonly { value: ClickEventBindingEffect; label: string }[] = [
-  { value: 'highlight', label: '高亮' },
+  { value: 'highlight', label: '高亮选中' },
   { value: 'focus', label: '聚焦动画' },
 ];
 
@@ -94,17 +97,44 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
     if (activeDropZone === dropZoneId) setActiveDropZone(null);
   }
 
-  /** 更新事件类型。 */
-  function handleEventTypeChange(eventType: ClickEventBindingEventType): void {
-    commitComponent({ ...component, eventType }, '更新事件类型');
+  /** 追加一条事件（默认点击 + 高亮）。 */
+  function addBindingEvent(): void {
+    if (component.events.length >= CLICK_EVENT_BINDING_MAX_EVENTS) return;
+    commitComponent({ ...component, events: [...component.events, createClickEventBindingEvent()] }, '添加事件');
   }
 
-  /** 切换事件效果勾选状态。 */
-  function toggleEffect(effect: ClickEventBindingEffect, checked: boolean): void {
-    const effects = checked
-      ? [...component.effects, effect]
-      : component.effects.filter((item) => item !== effect);
-    commitComponent({ ...component, effects }, '更新事件效果');
+  /** 删除整条事件。 */
+  function removeBindingEvent(eventIndex: number): void {
+    commitComponent(
+      { ...component, events: component.events.filter((_, index) => index !== eventIndex) },
+      '删除事件',
+    );
+  }
+
+  /** 更新指定事件，label 进入撤销历史。 */
+  function updateBindingEvent(eventIndex: number, nextEvent: ClickEventBindingEvent, label: string): void {
+    const events = component.events.map((item, index) => (index === eventIndex ? nextEvent : item));
+    commitComponent({ ...component, events }, label);
+  }
+
+  /** 为事件追加一个尚未启用的效果类型。 */
+  function addEffect(eventIndex: number): void {
+    const bindingEvent = component.events[eventIndex];
+    if (!bindingEvent) return;
+    const nextEffect = EFFECT_OPTIONS.find((option) => !bindingEvent.effects.includes(option.value));
+    if (!nextEffect) return;
+    updateBindingEvent(eventIndex, { ...bindingEvent, effects: [...bindingEvent.effects, nextEffect.value] }, '添加事件效果');
+  }
+
+  /** 删除事件中的一条效果。 */
+  function removeEffect(eventIndex: number, effectIndex: number): void {
+    const bindingEvent = component.events[eventIndex];
+    if (!bindingEvent) return;
+    updateBindingEvent(
+      eventIndex,
+      { ...bindingEvent, effects: bindingEvent.effects.filter((_, index) => index !== effectIndex) },
+      '删除事件效果',
+    );
   }
 
   /** 渲染可接收模型库卡片的设备类型槽位。 */
@@ -201,37 +231,103 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
       {component.deviceSlots.map((slot, index) => renderDeviceSlot(slot, index))}
 
       <div className="model-generator-section-header">
-        <span>事件绑定</span>
-      </div>
-
-      <label className="inspector-row">
-        <span>事件类型</span>
-        <select
-          disabled={disabled}
-          value={component.eventType}
-          onChange={(event) => handleEventTypeChange(event.target.value as ClickEventBindingEventType)}
+        <span>事件列表</span>
+        <button
+          disabled={disabled || component.events.length >= CLICK_EVENT_BINDING_MAX_EVENTS}
+          onClick={addBindingEvent}
+          title="添加事件"
+          type="button"
         >
-          <option value="click">点击</option>
-          <option value="click-cell" disabled>点击单元（后续版本）</option>
-        </select>
-      </label>
-
-      <div className="inspector-row">
-        <span>事件效果</span>
-        <span className="click-event-binding-effects">
-          {EFFECT_OPTIONS.map((option) => (
-            <label className="click-event-binding-effect-option" key={option.value}>
-              <input
-                checked={component.effects.includes(option.value)}
-                disabled={disabled}
-                onChange={(event) => toggleEffect(option.value, event.target.checked)}
-                type="checkbox"
-              />
-              <span>{option.label}</span>
-            </label>
-          ))}
-        </span>
+          +
+        </button>
       </div>
+
+      {component.events.length === 0 ? (
+        <p className="muted model-generator-empty-hint">暂无事件；点击 + 添加事件。</p>
+      ) : null}
+
+      {component.events.map((bindingEvent, eventIndex) => (
+        <div className="click-event-binding-event-card" key={bindingEvent.id}>
+          <div className="model-generator-section-header">
+            <span>事件 {eventIndex + 1}</span>
+            <button
+              aria-label={'删除事件 ' + (eventIndex + 1)}
+              className="model-generator-clear-button"
+              disabled={disabled}
+              onClick={() => removeBindingEvent(eventIndex)}
+              title="删除该事件"
+              type="button"
+            >
+              −
+            </button>
+          </div>
+
+          <label className="inspector-row">
+            <span>事件类型</span>
+            <select
+              disabled={disabled}
+              value={bindingEvent.eventType}
+              onChange={(event) => updateBindingEvent(
+                eventIndex,
+                { ...bindingEvent, eventType: event.target.value as ClickEventBindingEventType },
+                '更新事件类型',
+              )}
+            >
+              <option value="click">点击</option>
+              <option value="click-cell" disabled>点击单元（后续版本）</option>
+            </select>
+          </label>
+
+          <div className="inspector-row">
+            <span>事件效果</span>
+          </div>
+
+          {bindingEvent.effects.map((effect, effectIndex) => (
+            <div className="click-event-binding-effect-row" key={effect}>
+              <select
+                aria-label={'事件 ' + (eventIndex + 1) + ' 效果 ' + (effectIndex + 1)}
+                disabled={disabled}
+                value={effect}
+                onChange={(changeEvent) => {
+                  const nextEffects = bindingEvent.effects.map((item, index) => (
+                    index === effectIndex ? changeEvent.target.value as ClickEventBindingEffect : item
+                  ));
+                  updateBindingEvent(eventIndex, { ...bindingEvent, effects: nextEffects }, '更新事件效果');
+                }}
+              >
+                {EFFECT_OPTIONS.map((option) => (
+                  <option
+                    disabled={option.value !== effect && bindingEvent.effects.includes(option.value)}
+                    key={option.value}
+                    value={option.value}
+                  >
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                aria-label={'删除效果 ' + (EFFECT_OPTIONS.find((option) => option.value === effect)?.label ?? effect)}
+                className="model-generator-clear-button"
+                disabled={disabled}
+                onClick={() => removeEffect(eventIndex, effectIndex)}
+                title="删除该效果"
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+
+          <button
+            className="click-event-binding-add-effect"
+            disabled={disabled || bindingEvent.effects.length >= EFFECT_OPTIONS.length}
+            onClick={() => addEffect(eventIndex)}
+            type="button"
+          >
+            + 添加效果
+          </button>
+        </div>
+      ))}
     </fieldset>
   );
 }

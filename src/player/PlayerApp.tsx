@@ -27,6 +27,7 @@ import {
 } from './runtimeConfig';
 import { DigitalTwinInteractionController } from './DigitalTwinInteractionController';
 import { resolveManualRoamSpawnPose } from '../editor/model/manualRoamSpawn';
+import { CLICK_EVENT_FOCUS_DURATION_MS, resolveClickEventBindingClick } from '../editor/model/clickEventBinding';
 import {
   bindStatusOverlayPointerChordToggle,
   resolveInitialPlayerStatusOverlayVisibility,
@@ -391,7 +392,27 @@ export function PlayerApp() {
           onSelectionClick: ({ clientX, clientY }) => {
             if (disposed || !runtime) return;
             const entityId = runtime.pickRuntimeModelEntityIdAtCanvasPoint(clientX, clientY, canvas);
-            runtime.setLocalHighlightEntityIds(entityId ? [entityId] : []);
+            // 场景存在已注册设备类型的点击事件绑定时点击行为全接管：
+            // 命中注册设备按事件效果执行，点未注册模型无效果，点空白清除高亮。
+            const resolution = resolveClickEventBindingClick(sceneDocument, entityId);
+            if (resolution.kind === 'pass-through') {
+              runtime.setLocalHighlightEntityIds(entityId ? [entityId] : []);
+              return;
+            }
+            if (resolution.kind === 'clear') {
+              runtime.setLocalHighlightEntityIds([]);
+              return;
+            }
+            if (resolution.kind === 'ignore') return;
+            if (resolution.effects.includes('highlight')) {
+              runtime.setLocalHighlightEntityIds([resolution.entityId]);
+            }
+            if (resolution.effects.includes('focus')) {
+              const bounds = runtime.getEntitiesWorldBounds([resolution.entityId]);
+              if (bounds && viewport) {
+                viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS });
+              }
+            }
           },
           onDragStarted: () => {
             if (parsedConfig.viewer.allowCameraControl) notifyManualInput();
