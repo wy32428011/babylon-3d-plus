@@ -1,7 +1,7 @@
-import { BasisToolsOptions } from '@babylonjs/core/Misc/basis';
-import { DracoCompression } from '@babylonjs/core/Meshes/Compression/dracoCompression';
-import { MeshoptCompression } from '@babylonjs/core/Meshes/Compression/meshoptCompression';
-import { KhronosTextureContainer2 } from '@babylonjs/core/Misc/khronosTextureContainer2';
+import { BasisToolsOptions } from '@babylonjs/core/Misc/basis.js';
+import { DracoCompression } from '@babylonjs/core/Meshes/Compression/dracoCompression.js';
+import { MeshoptCompression } from '@babylonjs/core/Meshes/Compression/meshoptCompression.js';
+import { KhronosTextureContainer2 } from '@babylonjs/core/Misc/khronosTextureContainer2.js';
 import * as KTX2DecoderModule from '@babylonjs/ktx2decoder';
 
 let configured = false;

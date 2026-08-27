@@ -142,7 +142,7 @@ function makeHarness() {
       cargo.root.rotationQuaternion = rotation.clone();
       cargo.root.scaling.copyFrom(scaling ?? Vector3.OneReadOnly);
     },
-    disposeGeneratedCargo: () => undefined,
+    disposeGeneratedCargo: (_cargo: GeneratedCargoRuntimeEntry) => undefined,
     getModelWorldBounds: (model: ModelRuntimeEntry) =>
       model.assetCode === '1005'
         ? { minimum: new Vector3(3, 0, -0.5), maximum: new Vector3(7, 1, 0.5) }
