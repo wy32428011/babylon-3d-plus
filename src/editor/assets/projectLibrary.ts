@@ -53,6 +53,7 @@ export type BuiltInProjectLibraryAction =
   | { kind: 'model-generator' }
   | { kind: 'auto-patrol' }
   | { kind: 'manual-roam-spawn' }
+  | { kind: 'click-event-binding' }
   | { kind: 'poi-effect'; effectKind: (typeof POI_EFFECT_DEFINITIONS)[number]['kind'] }
   | { kind: 'mesh'; meshKind: MeshKind }
   | { kind: 'locator'; locatorKind: 'box-wire' }
@@ -94,6 +95,7 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     items: [
       { id: 'poi-auto-patrol', name: '自动巡检', icon: 'ring', subtitle: '内置POI', thumbnailUrl: autoPatrolThumbnailUrl, builtIn: { kind: 'auto-patrol' } },
       { id: 'poi-model-generator', name: '模型生成器', icon: 'ring', subtitle: '内置POI', builtIn: { kind: 'model-generator' } },
+      { id: 'poi-click-event-binding', name: '点击事件绑定', icon: 'marker', subtitle: '内置POI', builtIn: { kind: 'click-event-binding' } },
       { id: 'poi-chart-marker', name: '图表立标', icon: 'marker' },
       { id: 'poi-panel', name: '图表面板', icon: 'panel' },
       { id: 'poi-alarm', name: '报警管理器', icon: 'cube' },

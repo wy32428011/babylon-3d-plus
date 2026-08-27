@@ -6,6 +6,7 @@ import type { ModelParameterConfig } from './modelParameters';
 import { createDefaultModelGeneratorComponent } from './modelGenerator';
 import { createDefaultPoiEffectComponent, getPoiEffectDefinition } from './poiEffect';
 import { createDefaultAutoPatrolComponent } from './autoPatrol';
+import { createDefaultClickEventBindingComponent } from './clickEventBinding';
 import { createDefaultModelParameterValues } from './modelParameters';
 import {
   DEFAULT_MODEL_LENGTH_UNIT_INFO,
@@ -1315,6 +1316,28 @@ export function createManualRoamSpawnEntity(position: Vector3Data = vector3()): 
         scale: vector3(1, 1, 1),
       },
       manualRoamSpawn: {},
+    },
+  };
+}
+
+/** 创建点击事件绑定 POI；纯逻辑组件，运行预览态按设备类型匹配点击命中并执行效果。 */
+export function createClickEventBindingEntity(position: Vector3Data = vector3()): Entity {
+  const id = createId('entity');
+
+  return {
+    id,
+    name: '点击事件绑定',
+    visible: true,
+    locked: false,
+    parentId: null,
+    childrenIds: [],
+    components: {
+      transform: {
+        position: vector3(position.x, position.y, position.z),
+        rotation: vector3(),
+        scale: vector3(1, 1, 1),
+      },
+      clickEventBinding: createDefaultClickEventBindingComponent(),
     },
   };
 }

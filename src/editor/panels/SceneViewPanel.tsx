@@ -13,6 +13,7 @@ import {
 } from '../../shared/sceneModelSelectionPointer';
 import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
 import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
+import { findClickEventBindingForEntity } from '../model/clickEventBinding';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import { createEntityGroupRotationDeltaMatrix } from '../../runtime/babylon/EntityGroupRotationPreview';
@@ -310,6 +311,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const createAutoPatrol = useEditorStore((state) => state.createAutoPatrol);
   const createManualRoamSpawn = useEditorStore((state) => state.createManualRoamSpawn);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
+  const createClickEventBinding = useEditorStore((state) => state.createClickEventBinding);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const placeSkybox = useEditorStore((state) => state.placeSkybox);
   const previewEntityTransform = useEditorStore((state) => state.previewEntityTransform);
@@ -690,6 +692,21 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         state.pushLog(`命中货格：${hostLabel} ${cell.row}-${cell.column}-${cell.layer}（排-列-层）`);
       }
     }
+    // 运行预览下命中点击事件绑定的设备类型时由绑定接管点击行为：勾选高亮才选中、勾选聚焦才相机动画。
+    if (isRuntimePreview && pickedEntityId && !selectionClick.toggleSelection) {
+      const state = useEditorStore.getState();
+      const bindingHit = findClickEventBindingForEntity(state.scene, pickedEntityId);
+      if (bindingHit) {
+        state.setEnvironmentAdjustmentActive(false);
+        if (bindingHit.component.effects.includes('highlight')) {
+          state.selectEntity(pickedEntityId);
+        }
+        if (bindingHit.component.effects.includes('focus')) {
+          state.requestSceneFocusForSelection([pickedEntityId]);
+        }
+        return;
+      }
+    }
     if (selectionClick.toggleSelection) {
       if (!pickedEntityId) return;
       const state = useEditorStore.getState();
@@ -785,6 +802,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     if (builtInAsset.kind === 'model-generator') {
       createModelGenerator(placementPosition);
+      return;
+    }
+
+    if (builtInAsset.kind === 'click-event-binding') {
+      createClickEventBinding(placementPosition);
       return;
     }
 

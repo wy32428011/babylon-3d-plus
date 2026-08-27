@@ -3786,6 +3786,36 @@ select {
   text-align: center;
 }
 
+.click-event-binding-device-row {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.click-event-binding-device-row .model-generator-target-slot {
+  flex: 1;
+  min-width: 0;
+}
+
+.click-event-binding-device-row > button {
+  align-self: center;
+}
+
+.click-event-binding-effects {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.click-event-binding-effect-option {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  color: #c8c8c8;
+  font-size: 11px;
+}
+
 .model-generator-clear-button {
   min-width: 20px;
   height: 20px;

@@ -198,6 +198,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const createAutoPatrol = useEditorStore((state) => state.createAutoPatrol);
   const createManualRoamSpawn = useEditorStore((state) => state.createManualRoamSpawn);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
+  const createClickEventBinding = useEditorStore((state) => state.createClickEventBinding);
   const projectAssetFocusRequest = useEditorStore((state) => state.projectAssetFocusRequest);
   const consumeProjectAssetFocusRequest = useEditorStore((state) => state.consumeProjectAssetFocusRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
@@ -1157,6 +1158,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
       if (item.builtIn.kind === 'model-generator') {
         createModelGenerator();
+        return;
+      }
+
+      if (item.builtIn.kind === 'click-event-binding') {
+        createClickEventBinding();
         return;
       }
 

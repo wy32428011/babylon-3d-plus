@@ -316,6 +316,7 @@ export function PlayerApp() {
         runtime.disableEditorLightMarkers();
         runtime.disableEditorAutoPatrolMarkers();
         runtime.disableEditorManualRoamSpawnMarkers();
+        runtime.disableEditorClickEventBindingMarkers();
         runtime.sync(sceneDocument);
         setStartupPercent(36);
         const environment = sceneDocument.sceneSettings.environment;

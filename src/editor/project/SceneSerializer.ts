@@ -33,12 +33,13 @@ import {
   type SceneSettings,
   type SceneSkyboxSettings,
 } from '../model/SceneDocument';
-import type { AutoPatrolComponent, EntityComponents, LightKind, LocatorComponent, LocatorStorageDepth, ManualRoamSpawnComponent, MeshKind, PoiEffectComponent } from '../model/components';
+import type { AutoPatrolComponent, ClickEventBindingComponent, EntityComponents, LightKind, LocatorComponent, LocatorStorageDepth, ManualRoamSpawnComponent, MeshKind, PoiEffectComponent } from '../model/components';
 import {
   MODEL_GENERATOR_MAX_RULES,
   sanitizeModelGeneratorComponent,
   sanitizeModelGeneratorTarget,
 } from '../model/modelGenerator';
+import { sanitizeClickEventBindingComponent } from '../model/clickEventBinding';
 import type { Vector3Data } from '../model/math';
 import { ENTITY_NAME_MAX_LENGTH, MODEL_ARRAY_ITEM_COUNT_MAX } from '../model/modelArray';
 import { isPoiEffectHexColor, isPoiEffectKind, sanitizePoiEffectComponent } from '../model/poiEffect';
@@ -605,6 +606,10 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
       rotation: { x: 0, y: normalized.transform.rotation.y, z: 0 },
       scale: { x: 1, y: 1, z: 1 },
     };
+  }
+
+  if ('clickEventBinding' in components && components.clickEventBinding !== undefined) {
+    normalized.clickEventBinding = normalizeClickEventBinding(components.clickEventBinding);
   }
 
   return normalized;
@@ -1174,6 +1179,12 @@ function normalizeManualRoamSpawn(value: unknown): ManualRoamSpawnComponent {
   return {};
 }
 
+/** 点击事件绑定为 v3 新增组件，无旧版字段；非法条目宽容过滤而不判定文件损坏。 */
+function normalizeClickEventBinding(value: unknown): ClickEventBindingComponent {
+  assertPlainObject(value);
+  return sanitizeClickEventBindingComponent(value);
+}
+
 /** 手动漫游只有一个权威出生点；重复数据说明场景文件已损坏或被非法修改。 */
 function validateSingleManualRoamSpawn(
   entityIds: readonly string[],
@@ -1306,6 +1317,7 @@ function hasRuntimeComponent(components: EntityComponents): boolean {
     components.poiEffect ||
     components.autoPatrol ||
     components.manualRoamSpawn ||
+    components.clickEventBinding ||
     components.camera ||
     components.light,
   );

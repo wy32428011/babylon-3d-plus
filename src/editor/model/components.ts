@@ -263,6 +263,37 @@ export type AutoPatrolComponent = {
 /** 手动漫游出生点只保存实体 Transform；空组件用于稳定标识全场唯一对象。 */
 export type ManualRoamSpawnComponent = Record<string, never>;
 
+/** 点击事件绑定支持的事件类型；click-cell（货架虚拟货格单元格）预留，UI 暂禁用。 */
+export type ClickEventBindingEventType = 'click' | 'click-cell';
+
+/** 点击命中后执行的效果，可同时勾选多个。 */
+export type ClickEventBindingEffect = 'highlight' | 'focus';
+
+/** 绑定的设备类型条目，以模型包 sourceUrl 作为运行态匹配主键。 */
+export type ClickEventBindingDeviceType = {
+  id: string;
+  /** 资产索引条目 ID，仅编辑期展示与追溯使用。 */
+  assetId: string;
+  displayName: string;
+  thumbnailUrl?: string;
+  sourcePath: string;
+  sourceUrl: string;
+  assetRevision?: string;
+};
+
+/** 设备类型列表单元；deviceType 为 null 表示待配置的空槽，从模型库拖入后填充。 */
+export type ClickEventBindingDeviceSlot = {
+  id: string;
+  deviceType: ClickEventBindingDeviceType | null;
+};
+
+/** 点击事件绑定组件，仅在运行预览态生效；命中的设备按 effects 执行高亮与相机聚焦。 */
+export type ClickEventBindingComponent = {
+  deviceSlots: ClickEventBindingDeviceSlot[];
+  eventType: ClickEventBindingEventType;
+  effects: ClickEventBindingEffect[];
+};
+
 export type EntityComponents = {
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
@@ -280,4 +311,5 @@ export type EntityComponents = {
   poiEffect?: PoiEffectComponent;
   autoPatrol?: AutoPatrolComponent;
   manualRoamSpawn?: ManualRoamSpawnComponent;
+  clickEventBinding?: ClickEventBindingComponent;
 };

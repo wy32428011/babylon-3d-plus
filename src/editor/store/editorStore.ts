@@ -27,6 +27,7 @@ import {
   updateMeshRendererCommand,
   updateModelAssetCodeCommand,
   updateModelGeneratorCommand,
+  updateClickEventBindingCommand,
   updatePoiEffectCommand,
   updateModelParameterValuesCommand,
   updateTelemetryBindingCommand,
@@ -52,6 +53,7 @@ import type {
   AutoPatrolComponent,
   AutoPatrolWaypoint,
   CadReferenceComponent,
+  ClickEventBindingComponent,
   LightComponent,
   LightKind,
   LocatorComponent,
@@ -96,6 +98,7 @@ import {
   createEmptySceneDocument,
   createAutoPatrolEntity,
   createCadReferenceEntity,
+  createClickEventBindingEntity,
   createFolderEntity,
   createLightEntity,
   createLocatorEntity,
@@ -183,6 +186,10 @@ import {
   createModelGeneratorTargetFromAsset,
   sanitizeModelGeneratorComponent,
 } from '../model/modelGenerator';
+import {
+  cloneClickEventBindingComponent,
+  sanitizeClickEventBindingComponent,
+} from '../model/clickEventBinding';
 import {
   createDefaultTelemetryBinding,
   hasModelDataDrivenMotionKey,
@@ -512,6 +519,7 @@ type EditorState = {
   createAutoPatrol: (placementPosition?: Vector3Data) => void;
   createManualRoamSpawn: (placementPosition?: Vector3Data) => void;
   createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data) => void;
+  createClickEventBinding: (placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
   refreshModelInstancesFromAssets: (assets: AssetEntry[]) => number;
@@ -531,7 +539,7 @@ type EditorState = {
   commitResolvedEntityArray: (input: ResolvedEntityArrayInput) => EntityArrayCommitResult;
   groupSelectedEntities: () => void;
   ungroupSelectedEntities: () => void;
-  requestSceneFocusForSelection: () => void;
+  requestSceneFocusForSelection: (entityIds?: string[]) => void;
   requestProjectAssetFocusForEntity: (entityId: string | null) => void;
   consumeSceneFocusRequest: (requestId: string) => void;
   requestRevealHierarchyEntity: (entityId: string) => void;
@@ -546,6 +554,7 @@ type EditorState = {
   updateSelectedLight: (patch: Partial<LightComponent>) => void;
   updateSelectedModelAssetCode: (assetCode: string) => void;
   updateSelectedModelGenerator: (component: ModelGeneratorComponent, label?: string) => void;
+  updateSelectedClickEventBinding: (component: ClickEventBindingComponent, label?: string) => void;
   updateSelectedPoiEffect: (component: PoiEffectComponent, label?: string) => void;
   updateSelectedAutoPatrol: (component: AutoPatrolComponent, label?: string) => void;
   commitSelectedAutoPatrolWaypointTransform: (waypointId: string, transform: TransformComponent) => void;
@@ -1381,6 +1390,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
       ? { modelArrayInstance: { ...entity.components.modelArrayInstance } }
       : {}),
     ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
+    ...(entity.components.clickEventBinding ? { clickEventBinding: cloneClickEventBindingComponent(entity.components.clickEventBinding) } : {}),
     ...(entity.components.telemetryBinding ? { telemetryBinding: cloneJsonValue(entity.components.telemetryBinding) } : {}),
     ...(entity.components.poiEffect ? { poiEffect: { ...entity.components.poiEffect } } : {}),
     ...(entity.components.autoPatrol ? { autoPatrol: cloneAutoPatrolComponent(entity.components.autoPatrol) } : {}),
@@ -1456,16 +1466,20 @@ function sanitizeSelectedAutoPatrolWaypointId(
   return waypoints?.some((waypoint) => waypoint.id === waypointId) ? waypointId : null;
 }
 
-/** 生成不重复的模型生成器名称：模型生成器、模型生成器 2、… */
-function createNextModelGeneratorName(scene: SceneDocument): string {
+/** 生成不重复的实体名称：X、X 2、… */
+function createNextEntityName(scene: SceneDocument, baseName: string): string {
   const existingNames = new Set(Object.values(scene.entities).map((entity) => entity.name));
-  const baseName = '模型生成器';
   if (!existingNames.has(baseName)) return baseName;
   for (let index = 2; index < 1000; index += 1) {
     const candidate = `${baseName} ${index}`;
     if (!existingNames.has(candidate)) return candidate;
   }
   return `${baseName} ${Date.now()}`;
+}
+
+/** 生成不重复的模型生成器名称：模型生成器、模型生成器 2、… */
+function createNextModelGeneratorName(scene: SceneDocument): string {
+  return createNextEntityName(scene, '模型生成器');
 }
 
 /** 创建与场景实体隔离的剪贴板快照，并按当前子树归一化层级字段。 */
@@ -3582,6 +3596,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
+  createClickEventBinding: (placementPosition) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建点击事件绑定');
+
+      const baseEntity = createClickEventBindingEntity(sanitizeVector3(placementPosition));
+      const entity = { ...baseEntity, name: createNextEntityName(state.scene, '点击事件绑定') };
+      const command = createEntityCommand(entity);
+      const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
+      return {
+        ...result,
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        logs: prependLog(state.logs, command.label),
+      };
+    });
+  },
   /** 创建可撤销的 POI 内置 EFF 实体，并把新实体设为当前选择。 */
   createPoiEffect: (effectKind, placementPosition) => {
     const entity = createPoiEffectEntity(effectKind, sanitizeVector3(placementPosition));
@@ -4223,9 +4254,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  requestSceneFocusForSelection: () => {
+  requestSceneFocusForSelection: (entityIds) => {
     set((state) => {
-      const focusIds = resolveSceneFocusEntityIds(state.scene, getActiveHierarchySelectionIds(state));
+      const focusIds = resolveSceneFocusEntityIds(
+        state.scene,
+        entityIds ?? getActiveHierarchySelectionIds(state),
+      );
       if (focusIds.length === 0) return state;
 
       return {
@@ -4509,6 +4543,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (areJsonValuesEqual(before, after)) return state;
 
       const command = updateModelGeneratorCommand(entity.id, before, after, label);
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
+    });
+  },
+  /** 更新选中点击事件绑定的完整配置快照，并通过命令历史支持撤销和重做。 */
+  updateSelectedClickEventBinding: (component, label = '更新点击事件绑定') => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
+      const entity = getSelectedEntity(state);
+      const current = entity?.components.clickEventBinding;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !current) return state;
+
+      const normalized = sanitizeClickEventBindingComponent(component);
+      const before = cloneClickEventBindingComponent(current);
+      const after = cloneClickEventBindingComponent(normalized);
+      if (areJsonValuesEqual(before, after)) return state;
+
+      const command = updateClickEventBindingCommand(entity.id, before, after, label);
       const result = executeCommand(state.scene, state.history, command);
       return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
     });
