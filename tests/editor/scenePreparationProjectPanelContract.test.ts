@@ -10,7 +10,7 @@ test('初始项目资源加载在 StrictMode 清理后不会再调度模型发�
 
   assert.match(
     source,
-    /useEffect\(\(\) => \{\s*let active = true;[\s\S]*?void loadProjectAssets\(\)\.then\(\(initialLoad\) => \{\s*if \(!active \|\| sceneSessionIdRef\.current !== sceneSessionId\) return;/,
+    /useEffect\(\(\) => \{\s*let active = true;[\s\S]*?const refreshStartupEnvironment = [^;]+;\s*void loadProjectAssets\(false, refreshStartupEnvironment\)\.then\(\(initialLoad\) => \{\s*if \(!active \|\| sceneSessionIdRef\.current !== sceneSessionId\) return;/,
   );
   assert.match(
     source,

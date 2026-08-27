@@ -60,6 +60,7 @@
     "smoke:reimport-performance": "npm run build && node scripts/smoke-real-scene-reimport-performance.mjs",
     "smoke:folder-group-move": "node scripts/smoke-folder-group-move.mjs",
     "smoke:folder-group-runtime": "node scripts/smoke-folder-group-runtime.mjs",
+    "smoke:transform-gizmo": "node scripts/smoke-transform-gizmo.mjs",
     "test:digital-twin:unit": "node --experimental-strip-types --test tests/digitalTwin/*.test.ts",
     "test:digital-twin:integration": "npm run build:electron && node scripts/run-digital-twin-publish-integration.mjs"
   },

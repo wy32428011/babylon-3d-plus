@@ -11,12 +11,18 @@ import type {
   DeploymentSkyboxValidationCache,
   ResolvedDeploymentSkyboxReference,
 } from './deploymentSkyboxCache.js';
+import type { SourceEnvironmentPackageIntegrity } from './digitalTwinSourceEnvironmentRelink.js';
 
 const require = createRequire(import.meta.url);
 const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
 type DeploymentExportFileSystemModule = typeof import('./deploymentExportFileSystem.js');
 type DeploymentSkyboxCacheModule = typeof import('./deploymentSkyboxCache.js');
+type DigitalTwinSourceEnvironmentRelinkModule = typeof import('./digitalTwinSourceEnvironmentRelink.js');
 const { copyDeploymentFiles } = require(`./deploymentExportFileSystem${runtimeExtension}`) as DeploymentExportFileSystemModule;
+const {
+  assertTrustedPathWithinRoot,
+  prepareSourceSceneEnvironments,
+} = require(`./digitalTwinSourceEnvironmentRelink${runtimeExtension}`) as DigitalTwinSourceEnvironmentRelinkModule;
 const {
   createDataPlatformSkyboxIntegrityLabel,
   createDataPlatformSkyboxOrphanedWarning,
@@ -94,11 +100,24 @@ type ResourceBundle = {
   sourcePath: string;
   destinationRelativePath: string;
   copyFile?: DeploymentCopyFile;
+  integrityFiles?: readonly ResourceFileIntegrity[];
+};
+
+type ResourceFileIntegrity = {
+  relativePath: string;
+  expectedSize: number;
+  expectedSha256: string;
+  label: string;
 };
 
 /** 数据中台同步图片在源工程中的便携资源映射，reference 为场景内稳定引用。 */
 type PlatformImageBundle = ResourceBundle & {
   reference: string;
+};
+
+type DataPlatformEnvironmentCachePath = {
+  resourceId: string;
+  revisionEndIndex: number;
 };
 
 /** 构建可重新编辑的多场景源工程 ZIP，仅包含场景实际引用的资源包。 */
@@ -139,6 +158,11 @@ export async function buildDigitalTwinSourcePackage(
     const platformImageBundleMap = scenesResult.platformImageBundleMap;
     const entryScene = scenes.find((scene) => path.resolve(scene.sourcePath) === entrySceneFilePath);
     if (!entryScene) throw new Error('入口场景不在当前项目 Scenes 目录中。');
+    const sourceEnvironmentPackages = await prepareSourceSceneEnvironments(
+      scenes.map((scene) => scene.parsed),
+      sharedResourcesRoot,
+      options.signal,
+    );
 
     const warnings: string[] = [];
     const warnedOrphanedSkyboxIds = new Set<string>();
@@ -157,11 +181,8 @@ export async function buildDigitalTwinSourcePackage(
         options.signal,
         options.skyboxCacheDependencies,
       );
-      scene.portableContent = `${JSON.stringify(
-        rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap),
-        null,
-        2,
-      )}
+      const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap);
+      scene.portableContent = `${JSON.stringify(portableScene, null, 2)}
 `;
     }
 
@@ -172,7 +193,9 @@ export async function buildDigitalTwinSourcePackage(
       platformImageBundleMap,
       stableSkyboxObjects,
       stableSkyboxBundles,
+      sourceEnvironmentPackages,
     );
+    await validateResourceBundleSourcePaths(bundles, projectRoot, sharedResourcesRoot, options.signal);
     const estimatedFiles = scenes.length + bundles.length + 1;
     options.onProgress?.('正在复制源工程场景…', 0, estimatedFiles);
 
@@ -215,7 +238,7 @@ export async function buildDigitalTwinSourcePackage(
           if (copiedBytes + bytes > MAX_SOURCE_BYTES) throw new Error('源工程资源总量超过 8 GB 安全上限。');
           resourceFileCount += 1;
           copiedBytes += bytes;
-        });
+        }, bundle.integrityFiles);
       }
       completed += 1;
       options.onProgress?.(`已复制资源：${bundle.destinationRelativePath}`, completed, estimatedFiles);
@@ -258,7 +281,7 @@ export async function buildDigitalTwinSourcePackage(
       sceneCount: scenes.length,
       resourceFileCount,
       manifestJson,
-      sceneContents: scenes.map((scene) => scene.content),
+      sceneContents: scenes.map((scene) => scene.portableContent),
       warnings,
     };
   } catch (error) {
@@ -498,10 +521,22 @@ function collectResourceBundles(
   platformImageBundleMap: ReadonlyMap<string, PlatformImageBundle>,
   stableSkyboxObjects: WeakSet<object>,
   stableSkyboxBundles: ReadonlyMap<string, ResourceBundle>,
+  sourceEnvironmentPackages: readonly SourceEnvironmentPackageIntegrity[],
 ): ResourceBundle[] {
   const bundles = new Map<string, ResourceBundle>();
+  const sourceEnvironmentPackagesByPath = new Map(
+    sourceEnvironmentPackages.map((item) => [createPathKey(item.sourcePath), item]),
+  );
   const registerBundle = (bundle: ResourceBundle): void => {
-    const key = bundle.destinationRelativePath.toLowerCase();
+    const key = normalizeResourceDestinationKey(bundle.destinationRelativePath);
+    for (const [existingKey, existingBundle] of bundles.entries()) {
+      if (existingKey === key) continue;
+      if (existingKey.startsWith(`${key}/`) || key.startsWith(`${existingKey}/`)) {
+        throw new Error(
+          `源工程资源目标冲突：${existingBundle.destinationRelativePath} 与 ${bundle.destinationRelativePath}`,
+        );
+      }
+    }
     const existing = bundles.get(key);
     if (existing && path.resolve(existing.sourcePath) !== path.resolve(bundle.sourcePath)) {
       throw new Error(`源工程资源目标冲突：${bundle.destinationRelativePath}`);
@@ -528,7 +563,12 @@ function collectResourceBundles(
       );
       const isImageAssetReference = isPortableImageAssetReference(value);
       if (!isResourceReference && !isImageAssetReference) return;
-      const bundle = resolveResourceBundle(value, projectRoot, sharedResourcesRoot);
+      const bundle = resolveResourceBundle(
+        value,
+        projectRoot,
+        sharedResourcesRoot,
+        sourceEnvironmentPackagesByPath,
+      );
       if (!bundle) return;
       registerBundle(bundle);
       return;
@@ -550,10 +590,35 @@ function collectResourceBundles(
   return [...bundles.values()].sort((left, right) => left.destinationRelativePath.localeCompare(right.destinationRelativePath, 'en'));
 }
 
+/** 复制前校验资源包从项目/共享根到源路径的完整 realpath 链，阻止祖先 Junction 逃逸。 */
+async function validateResourceBundleSourcePaths(
+  bundles: readonly ResourceBundle[],
+  projectRoot: string,
+  sharedResourcesRoot: string,
+  signal: AbortSignal,
+): Promise<void> {
+  for (const bundle of bundles) {
+    throwIfAborted(signal);
+    if (bundle.copyFile) continue;
+    const allowedRoot = isPathInsideOrEqual(projectRoot, bundle.sourcePath)
+      ? projectRoot
+      : isPathInsideOrEqual(sharedResourcesRoot, bundle.sourcePath)
+        ? sharedResourcesRoot
+        : null;
+    if (!allowedRoot) throw new Error(`源工程资源不在允许目录内：${bundle.destinationRelativePath}`);
+    await assertTrustedPathWithinRoot(
+      allowedRoot,
+      bundle.sourcePath,
+      `源工程资源 ${bundle.destinationRelativePath}`,
+    );
+  }
+}
+
 function resolveResourceBundle(
   rawValue: string,
   projectRoot: string,
   sharedResourcesRoot: string,
+  sourceEnvironmentPackagesByPath: ReadonlyMap<string, SourceEnvironmentPackageIntegrity>,
 ): ResourceBundle | null {
   let candidate = rawValue.trim();
   if (!candidate) return null;
@@ -562,15 +627,41 @@ function resolveResourceBundle(
       const url = new URL(candidate);
       candidate = decodeURIComponent(url.pathname.slice(1));
     } catch {
-      return null;
+      throw new Error('场景中的本地资源 URL 格式无效。');
     }
   }
+  parseDataPlatformEnvironmentCachePath(candidate.replace(/\\/g, '/').split('/').filter(Boolean));
   if (!path.isAbsolute(candidate)) {
     const portable = candidate.replace(/\\/g, '/');
     if (!portable.toLowerCase().startsWith('assets/')) return null;
     candidate = path.resolve(projectRoot, ...portable.split('/'));
   }
   const normalized = path.resolve(candidate);
+  const nativeSegments = normalized.slice(path.parse(normalized).root.length).split(path.sep).filter(Boolean);
+  const environmentCachePath = parseDataPlatformEnvironmentCachePath(nativeSegments);
+  if (environmentCachePath) {
+    const sourceRoot = path.resolve(
+      path.parse(normalized).root,
+      ...nativeSegments.slice(0, environmentCachePath.revisionEndIndex),
+    );
+    if (!isPathInsideOrEqual(projectRoot, sourceRoot) && !isPathInsideOrEqual(sharedResourcesRoot, sourceRoot)) {
+      throw new Error(`场景引用的资源不在当前项目或共享资源缓存内：${rawValue}`);
+    }
+    const integrity = sourceEnvironmentPackagesByPath.get(createPathKey(sourceRoot));
+    if (!integrity) {
+      throw new Error(`场景引用的数据中台环境未通过当前共享缓存 Sidecar 校验：${rawValue}`);
+    }
+    return {
+      sourcePath: path.join(sourceRoot, integrity.modelRelativePath),
+      destinationRelativePath: `${createPortableEnvironmentPackagePath(environmentCachePath.resourceId)}/${integrity.modelRelativePath}`,
+      integrityFiles: [{
+        relativePath: integrity.modelRelativePath,
+        expectedSize: integrity.expectedModelSize,
+        expectedSha256: integrity.expectedModelSha256,
+        label: integrity.integrityLabel,
+      }],
+    };
+  }
   const segments = normalized.replace(/\\/g, '/').split('/').filter(Boolean);
   const assetsIndex = segments.findIndex((segment) => segment.toLowerCase() === 'assets');
   if (assetsIndex < 0 || assetsIndex + 1 >= segments.length) return null;
@@ -640,12 +731,49 @@ function toPortableAssetReference(value: string): string | null {
     try {
       normalized = decodeURIComponent(new URL(normalized).pathname.slice(1));
     } catch {
-      return null;
+      throw new Error('场景中的本地资源 URL 格式无效。');
     }
   }
   normalized = normalized.replace(/\\/g, '/');
+  const segments = normalized.split('/').filter(Boolean);
+  const environmentCachePath = parseDataPlatformEnvironmentCachePath(segments);
+  if (environmentCachePath) {
+    const packagePath = createPortableEnvironmentPackagePath(environmentCachePath.resourceId);
+    const relativePath = segments.slice(environmentCachePath.revisionEndIndex).join('/');
+    return relativePath ? `${packagePath}/${relativePath}` : packagePath;
+  }
   const match = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images)(?:\/.*|$))/i.exec(normalized);
   return match ? path.posix.normalize(match[1]) : null;
+}
+
+function parseDataPlatformEnvironmentCachePath(
+  segments: readonly string[],
+): DataPlatformEnvironmentCachePath | null {
+  const cacheStartIndex = segments.findIndex((segment, index) => (
+    segment.toLowerCase() === '.babylon-editor'
+    && segments[index + 1]?.toLowerCase() === 'data-platform-cache'
+    && segments[index + 2]?.toLowerCase() === 'environments'
+  ));
+  if (cacheStartIndex < 0) return null;
+  if (segments.some((segment) => segment === '.' || segment === '..')) {
+    throw new Error('场景中的数据中台环境缓存引用包含不安全路径片段。');
+  }
+
+  const sourceKey = segments[cacheStartIndex + 3] ?? '';
+  const resourceId = segments[cacheStartIndex + 4] ?? '';
+  const fileRevision = segments[cacheStartIndex + 5] ?? '';
+  if (!/^[0-9a-f]{64}$/i.test(sourceKey) || !/^[1-9]\d{0,63}$/.test(resourceId) || !/^[1-9]\d{0,63}$/.test(fileRevision)) {
+    throw new Error('场景中的数据中台环境缓存引用身份格式无效。');
+  }
+  return { resourceId, revisionEndIndex: cacheStartIndex + 6 };
+}
+
+function createPortableEnvironmentPackagePath(resourceId: string): string {
+  return `Assets/Environments/Env-${resourceId}`;
+}
+
+function normalizeResourceDestinationKey(value: string): string {
+  return path.posix.normalize(value.replace(/\\/g, '/')).replace(/^\.\//, '').replace(/\/$/, '').toLowerCase();
 }
 
 async function copySafeResource(
@@ -653,13 +781,47 @@ async function copySafeResource(
   destinationPath: string,
   signal: AbortSignal,
   onBytes: (bytes: number) => void,
+  integrityFiles: readonly ResourceFileIntegrity[] = [],
 ): Promise<void> {
+  const pendingIntegrityFiles = new Map<string, ResourceFileIntegrity>();
+  for (const integrity of integrityFiles) {
+    const normalized = path.posix.normalize(integrity.relativePath.replace(/\\/g, '/'));
+    if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) {
+      throw new Error(`${integrity.label}完整性校验路径无效。`);
+    }
+    pendingIntegrityFiles.set(createPortablePathKey(normalized), integrity);
+  }
+  const copyFile = async (
+    source: string,
+    destination: string,
+    sourceStat: { size: number },
+    relativePath: string,
+  ): Promise<void> => {
+    const integrityKey = createPortablePathKey(relativePath);
+    const integrity = pendingIntegrityFiles.get(integrityKey);
+    if (integrity && sourceStat.size !== integrity.expectedSize) {
+      throw new Error(`${integrity.label}缓存文件大小与 Sidecar 索引不一致。`);
+    }
+    onBytes(sourceStat.size);
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await fs.copyFile(source, destination);
+    if (!integrity) return;
+    const copiedStat = await fs.lstat(destination);
+    if (copiedStat.isSymbolicLink() || !copiedStat.isFile() || copiedStat.size !== integrity.expectedSize) {
+      throw new Error(`${integrity.label}复制文件大小与 Sidecar 索引不一致。`);
+    }
+    const copiedSha256 = await sha256File(destination, signal);
+    if (copiedSha256 !== integrity.expectedSha256) {
+      throw new Error(`${integrity.label}复制文件 SHA-256 与 Sidecar 索引不一致。`);
+    }
+    pendingIntegrityFiles.delete(integrityKey);
+  };
+
   const sourceStat = await fs.lstat(sourcePath);
   if (sourceStat.isSymbolicLink()) throw new Error(`资源路径不能是符号链接或 Junction：${sourcePath}`);
   if (sourceStat.isFile()) {
-    onBytes(sourceStat.size);
-    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-    await fs.copyFile(sourcePath, destinationPath);
+    await copyFile(sourcePath, destinationPath, sourceStat, path.basename(sourcePath));
+    if (pendingIntegrityFiles.size > 0) throw new Error('资源包缺少 Sidecar 要求的完整性校验文件。');
     return;
   }
   if (!sourceStat.isDirectory()) throw new Error(`资源路径不是普通文件或目录：${sourcePath}`);
@@ -678,13 +840,13 @@ async function copySafeResource(
       if (stat.isSymbolicLink()) throw new Error(`资源包包含符号链接或 Junction：${source}`);
       if (stat.isDirectory()) pending.push({ source, destination });
       else if (stat.isFile()) {
-        onBytes(stat.size);
-        await fs.copyFile(source, destination);
+        await copyFile(source, destination, stat, toPortablePath(path.relative(sourcePath, source)));
       } else {
         throw new Error(`资源包包含不支持的特殊文件：${source}`);
       }
     }
   }
+  if (pendingIntegrityFiles.size > 0) throw new Error('资源包缺少 Sidecar 要求的完整性校验文件。');
   return;
 }
 
@@ -745,6 +907,15 @@ function assertPathInsideOrEqual(root: string, candidate: string, label: string)
 function isPathInsideOrEqual(root: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function createPathKey(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function createPortablePathKey(value: string): string {
+  return process.platform === 'win32' ? value.toLowerCase() : value;
 }
 
 function assertNoPathOverlap(left: string, right: string, message: string): void {

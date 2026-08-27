@@ -268,6 +268,7 @@ export function PlayerApp() {
           showGrid: parsedConfig.viewer.showGrid,
           allowCameraControl: parsedConfig.viewer.allowCameraControl,
           requireHardwareAcceleration: true,
+          keepRenderingInBackground: true,
           initialSensitivity: sceneDocument.sceneSettings.sensitivity,
         });
         applySceneBackground(viewport, parsedConfig.page.backgroundColor);

@@ -8,6 +8,7 @@ export type RuntimePreviewReadiness =
         | 'mqtt-disabled'
         | 'cad-import-active'
         | 'environment-load-active'
+        | 'environment-relink-active'
         | 'missing-address'
         | 'missing-subscription'
         | 'unsupported-browser-protocol'

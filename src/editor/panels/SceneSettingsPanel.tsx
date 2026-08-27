@@ -359,9 +359,11 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   async function handleSelectEnvironmentAsset(asset: ProjectModelAssetEntry): Promise<void> {
     if (props.readOnly) return;
     if (asset.libraryKind !== 'environment') return;
+    const expectedSceneSessionId = useEditorStore.getState().sceneSessionId;
 
     try {
       const environmentConfig = await loadEnvironmentFromAsset(asset);
+      if (useEditorStore.getState().sceneSessionId !== expectedSceneSessionId) return;
       if (!environmentConfig) {
         setEnvironmentStatus('环境模型配置无效，未更新场景环境。');
         return;
@@ -372,6 +374,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         focusAfterLoad: true,
         commandLabel: '应用环境模型',
         successMessage: `环境模型已应用：${getEnvironmentDisplayName(environmentConfig.packagePath, environmentConfig.displayName)}`,
+        runtimeEnvironment: environmentConfig,
+        expectedSceneSessionId,
       });
       if (!requestId) {
         setEnvironmentStatus('环境模型未能开始加载，请查看 Console 日志。');

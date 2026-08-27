@@ -206,3 +206,24 @@ test('环境显示字段可序列化往返，旧场景反序列化后仍标记�
   const restoredLegacy = deserializeScene(legacyContent);
   assert.equal(restoredLegacy.sceneSettings.environment?.placementMode, 'legacy-left');
 });
+
+test('数据中台环境稳定身份可序列化往返', () => {
+  const asset: ProjectModelAssetEntry = {
+    ...createEnvironmentAsset('7645194092844337573'),
+    source: 'data-platform',
+    availability: 'active',
+    dataPlatformResourceType: 'ENV_MODEL',
+    dataPlatformResourceId: '2088100088037199873',
+    dataPlatformSourceKey: 'd8b7b05d99f03cdcd06d43a2bcb79a4eebc77d8c1636bd0723401bae08ed3199',
+    dataPlatformRevision: '7645194092844337573',
+  };
+  const environment = createEnvironmentFromAsset(asset, createVariants('7645194092844337573'))!;
+  assert.equal(environment.source, 'data-platform');
+  assert.equal(environment.dataPlatformResourceId, '2088100088037199873');
+  const scene = createEmptySceneDocument('数据中台环境场景');
+  scene.sceneSettings.environment = environment;
+
+  const restored = deserializeScene(serializeScene(scene));
+
+  assert.deepEqual(restored.sceneSettings.environment, scene.sceneSettings.environment);
+});

@@ -1004,6 +1004,8 @@ async function run() {
     const selectedSourceScene = JSON.parse(selectedSourceEntries.get('Scenes/main.scene.json').toString('utf8'));
     assert.deepEqual(selectedSourceScene.scene.fetchConfig, PUBLISHED_FETCH_CONFIG);
     const selectedDistEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'DIST'));
+    const selectedRuntimeConfig = JSON.parse(selectedDistEntries.get('runtime-config.json').toString('utf8'));
+    assert.equal(selectedRuntimeConfig.page.title, '发布集成测试项目');
     const selectedDistScene = JSON.parse(selectedDistEntries.get('project/scene.json').toString('utf8'));
     assert.deepEqual(selectedDistScene.scene.fetchConfig, {
       url: PUBLISHED_FETCH_CONFIG.url,
@@ -1513,6 +1515,7 @@ async function run() {
         'unbound-scene-overwrite-confirmation-before-binding',
         'unbound-scene-project-selection-and-binding',
         'fetch-config-published-with-public-dist-api-key-stripped',
+        'dist-page-title-uses-project-name',
         'runtime-config-save-before-publish',
         'runtime-config-save-failure-blocks-publish',
         'version-conflict-does-not-change-runtime-config',

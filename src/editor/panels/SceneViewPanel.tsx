@@ -59,6 +59,7 @@ import {
   SCENE_VIEW_DISTANCE_MAX,
   type SceneDocument,
 } from '../model/SceneDocument';
+import { resolveEnvironmentRuntimeSettings } from '../model/environmentRuntime';
 import { createSceneSkyboxFromAsset } from '../assets/skyboxAssets';
 import type { Vector3Data } from '../model/math';
 import { createGroupPositionDelta } from '../model/groupSpatialInfo';
@@ -288,6 +289,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const entityArrayRequest = useEditorStore((state) => state.entityArrayRequest);
   const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
   const environmentApplyRequest = useEditorStore((state) => state.environmentApplyRequest);
+  const environmentRuntimeOverride = useEditorStore((state) => state.environmentRuntimeOverride);
+  const environmentStartupRelinkSessionId = useEditorStore((state) => state.environmentStartupRelinkSessionId);
   const environmentAdjustmentActive = useEditorStore((state) => state.environmentAdjustmentActive);
   const environmentRuntimePhase = useEditorStore((state) => state.environmentRuntimeSnapshot.phase);
   const environmentFocusRequest = useEditorStore((state) => state.environmentFocusRequest);
@@ -1842,11 +1845,18 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     runtime.syncShadows(sceneDocument.sceneSettings.shadows);
     runtime.syncSkybox(sceneDocument);
     if (!environmentApplyRequest && !environmentAdjustmentActive) {
-      runtime.syncEnvironment(sceneDocument.sceneSettings.environment);
+      runtime.syncEnvironment(resolveEnvironmentRuntimeSettings(
+        sceneDocument.sceneSettings.environment,
+        environmentRuntimeOverride,
+        { deferManagedCacheLoad: environmentStartupRelinkSessionId === sceneSessionId },
+      ));
     }
   }, [
     environmentAdjustmentActive,
     environmentApplyRequest,
+    environmentRuntimeOverride,
+    environmentStartupRelinkSessionId,
+    sceneSessionId,
     sceneDocument.sceneSettings,
   ]);
 

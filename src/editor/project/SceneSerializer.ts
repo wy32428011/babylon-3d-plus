@@ -419,6 +419,32 @@ function normalizeSceneEnvironmentSettings(value: unknown): SceneEnvironmentSett
     ? undefined
     : assertFiniteNumber(environment.fileSizeBytes);
   if (fileSizeBytes !== undefined && fileSizeBytes <= 0) throwUnsupportedSceneFileError();
+  const sourceField = readOwnDataProperty(environment, 'source');
+  const resourceTypeField = readOwnDataProperty(environment, 'resourceType');
+  const resourceIdField = readOwnDataProperty(environment, 'dataPlatformResourceId');
+  const sourceKeyField = readOwnDataProperty(environment, 'dataPlatformSourceKey');
+  const revisionField = readOwnDataProperty(environment, 'dataPlatformRevision');
+  const source = sourceField.kind === 'data' && sourceField.value === 'data-platform'
+    ? 'data-platform'
+    : undefined;
+  const resourceType = resourceTypeField.kind === 'data' && resourceTypeField.value === 'ENV_MODEL'
+    ? 'ENV_MODEL'
+    : undefined;
+  const dataPlatformResourceId = resourceIdField.kind === 'data'
+    ? normalizeDataPlatformResourceId(resourceIdField.value)
+    : null;
+  const dataPlatformSourceKey = sourceKeyField.kind === 'data' && typeof sourceKeyField.value === 'string'
+    && /^[0-9a-f]{64}$/.test(sourceKeyField.value.trim()) ? sourceKeyField.value.trim() : null;
+  const dataPlatformRevision = revisionField.kind === 'data' && typeof revisionField.value === 'string'
+    && /^[1-9]\d{0,63}$/.test(revisionField.value.trim()) ? revisionField.value.trim() : null;
+  const hasAnyRemoteIdentity = [sourceField, resourceTypeField, resourceIdField, sourceKeyField, revisionField]
+    .some((field) => field.kind !== 'missing');
+  if (hasAnyRemoteIdentity && (!source || !resourceType || !dataPlatformResourceId || !dataPlatformSourceKey || !dataPlatformRevision)) {
+    throwUnsupportedSceneFileError();
+  }
+  const displayNameSnapshot = source && environment.displayNameSnapshot !== undefined
+    ? assertString(environment.displayNameSnapshot).trim()
+    : undefined;
 
   return {
     packagePath: assertString(environment.packagePath),
@@ -427,6 +453,14 @@ function normalizeSceneEnvironmentSettings(value: unknown): SceneEnvironmentSett
     ...(environment.thumbnailUrl === undefined ? {} : { thumbnailUrl: assertString(environment.thumbnailUrl) }),
     ...(environment.displayName === undefined ? {} : { displayName: assertString(environment.displayName) }),
     ...(fileSizeBytes === undefined ? {} : { fileSizeBytes }),
+    ...(source ? {
+      source,
+      resourceType: resourceType!,
+      dataPlatformResourceId: dataPlatformResourceId!,
+      dataPlatformSourceKey: dataPlatformSourceKey!,
+      dataPlatformRevision: dataPlatformRevision!,
+      ...(displayNameSnapshot ? { displayNameSnapshot } : {}),
+    } : {}),
     placementMode,
     transform: transform ?? {
       position: { x: 0, y: 0, z: 0 },

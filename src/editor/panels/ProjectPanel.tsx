@@ -191,7 +191,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const sceneDocument = useEditorStore((state) => state.scene);
   const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
   const currentSkybox = useMemo(() => getSceneSkyboxSettings(sceneDocument), [sceneDocument]);
-  const currentEnvironment = useEditorStore((state) => state.scene.sceneSettings.environment);
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
@@ -203,7 +202,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const consumeProjectAssetFocusRequest = useEditorStore((state) => state.consumeProjectAssetFocusRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
   const resourceCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
-  const currentEnvironmentRef = useRef(currentEnvironment);
   const projectAssetsLoadRequestRef = useRef(0);
   const sceneSessionIdRef = useRef(sceneSessionId);
   sceneSessionIdRef.current = sceneSessionId;
@@ -355,22 +353,35 @@ export function ProjectPanel(props: ProjectPanelProps) {
   /** 当前场景引用同一环境包或同一数据中台环境 ID 时，用新版本配置触发 Babylon 重载。 */
   const refreshCurrentEnvironmentFromAssets = useCallback(async (
     assets: ProjectModelAssetEntry[],
+    expectedSceneSessionId = sceneSessionIdRef.current,
   ): Promise<boolean> => {
-    const environment = currentEnvironmentRef.current;
+    const refreshStartState = useEditorStore.getState();
+    if (refreshStartState.sceneSessionId !== expectedSceneSessionId) return false;
+    const environment = refreshStartState.scene.sceneSettings.environment;
     if (!environment) return false;
+    const expectedEnvironmentState = {
+      environment,
+      applyRequestId: refreshStartState.environmentApplyRequest?.id ?? null,
+    };
+    if (expectedEnvironmentState.applyRequestId) return false;
 
     const environmentAssets = assets.filter((asset) => asset.libraryKind === 'environment');
     const matchedAsset = findImportedAssetForPackagePath(
       environment.packagePath,
       createImportedAssetIndexes(environmentAssets),
       environment.source === 'data-platform'
-        ? { sourceKey: environment.dataPlatformSourceKey, resourceId: environment.dataPlatformResourceId }
+        ? {
+          sourceKey: environment.dataPlatformSourceKey,
+          resourceId: environment.dataPlatformResourceId,
+          revision: environment.dataPlatformRevision,
+        }
         : undefined,
     );
     if (!matchedAsset || matchedAsset.libraryKind !== 'environment') return false;
 
     try {
       const environmentConfig = await loadEnvironmentFromAsset(matchedAsset, environment);
+      if (sceneSessionIdRef.current !== expectedSceneSessionId) return false;
       if (!environmentConfig) {
         pushLog('环境模型资源已更新，但当前场景环境配置无效，未自动刷新。');
         return false;
@@ -384,6 +395,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
           successMessage: '环境模型运行缓存已刷新，并保留场景绑定身份与显示设置。',
           persistSceneChange: false,
           runtimeEnvironment: environmentConfig,
+          expectedSceneSessionId,
+          expectedEnvironmentState,
         });
         return requestId !== null;
       }
@@ -393,6 +406,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
         focusAfterLoad: false,
         commandLabel: '刷新环境模型资源',
         successMessage: '环境模型资源已刷新，并保留当前摆放与显示设置。',
+        runtimeEnvironment: environmentConfig,
+        expectedSceneSessionId,
+        expectedEnvironmentState,
       });
       return requestId !== null;
     } catch (error) {
@@ -401,10 +417,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
       return false;
     }
   }, [pushLog, requestEnvironmentApply]);
-
-  useEffect(() => {
-    currentEnvironmentRef.current = currentEnvironment;
-  }, [currentEnvironment]);
 
   /** 按当前场景身份用稳定 ID 重关联天空盒；只有命令实际生效或配置已相同时才消费同步完成。 */
   const relinkCurrentSkyboxFromAssets = useCallback((
@@ -441,7 +453,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
     useEditorStore.getState().scene.id,
   ) === 'applied', [relinkCurrentSkyboxFromAssets]);
 
-  const loadProjectAssets = useCallback(async (refreshSceneAssets = false): Promise<ProjectAssetsLoadResult> => {
+  const loadProjectAssets = useCallback(async (
+    refreshSceneAssets = false,
+    refreshSceneEnvironment = refreshSceneAssets,
+  ): Promise<ProjectAssetsLoadResult> => {
     if (!window.editorApi?.listProjectAssets) {
       return { ok: false, error: '加载项目资源库需要 Electron 桌面环境。' };
     }
@@ -479,7 +494,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
       );
       if (refreshSceneAssets) {
         refreshModelInstancesFromAssets(result.assets.filter((asset) => asset.libraryKind === 'model'));
-        await refreshCurrentEnvironmentFromAssets(result.assets);
+      }
+      if (refreshSceneEnvironment) {
+        await refreshCurrentEnvironmentFromAssets(result.assets, requestSceneSessionId);
       }
       return { ok: true, skyboxes: loadedSkyboxes };
     } catch (error) {
@@ -515,13 +532,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
     let active = true;
     beginScenePreparation(sceneSessionId);
     lastSceneRefreshModelSyncRunIdRef.current = null;
+    lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
     setIsLoadingProjectAssets(false);
     setProjectRoot(null);
     setSkyboxSyncContextBinding({ sceneSessionId, key: null });
     setProjectAssets([]);
     setSkyboxAssets([]);
     setOrphanedSkyboxAssets([]);
-    void loadProjectAssets().then((initialLoad) => {
+    const refreshStartupEnvironment = useEditorStore.getState().environmentStartupRelinkSessionId === sceneSessionId;
+    void loadProjectAssets(false, refreshStartupEnvironment).then((initialLoad) => {
       if (!active || sceneSessionIdRef.current !== sceneSessionId) return;
       if (modelSyncDiscoveryTimerRef.current !== null) {
         window.clearTimeout(modelSyncDiscoveryTimerRef.current);
@@ -694,11 +713,21 @@ export function ProjectPanel(props: ProjectPanelProps) {
       const label = DATA_PLATFORM_ENVIRONMENT_SYNC_PHASE_LABELS[progress.phase];
       pushLog(`数据中台环境模型同步：${label}${progress.total > 0 ? `（${progress.completed}/${progress.total}）` : ''}${progress.error || progress.message ? `：${progress.error || progress.message}` : ''}`);
       if (progress.phase === 'completed') {
+        const progressSceneSessionId = sceneSessionIdRef.current;
         if (lastSceneRefreshEnvironmentSyncRunIdRef.current !== progress.runId) {
           lastSceneRefreshEnvironmentSyncRunIdRef.current = progress.runId;
           void loadProjectAssets(true).then((loaded) => {
             if (!loaded.ok && lastSceneRefreshEnvironmentSyncRunIdRef.current === progress.runId) {
               lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
+            }
+            const currentState = useEditorStore.getState();
+            if (
+              loaded.ok
+              && sceneSessionIdRef.current === progressSceneSessionId
+              && currentState.environmentStartupRelinkSessionId === progressSceneSessionId
+              && !currentState.environmentApplyRequest
+            ) {
+              pushLog('环境模型同步已完成，但未找到当前场景引用的资源；已阻止加载旧机器缓存路径。');
             }
           });
         }
@@ -980,6 +1009,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
     setImportingLibraryKey(libraryKind);
     setLibraryStatus(libraryKind, { message: '正在导入环境 GLB...', kind: 'info' });
+    const importSceneSessionId = sceneSessionIdRef.current;
 
     try {
       const result = await window.editorApi.importEnvironmentModelFile();
@@ -994,7 +1024,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
       setProjectAssets(result.projectAssets);
       setProjectRoot(result.projectRoot);
-      const refreshedCurrentEnvironment = await refreshCurrentEnvironmentFromAssets([result.importedAsset]);
+      const refreshedCurrentEnvironment = await refreshCurrentEnvironmentFromAssets(
+        [result.importedAsset],
+        importSceneSessionId,
+      );
       const displayName = result.importedAsset.displayName?.trim()
         || result.importedAsset.name.replace(/\.glb$/i, '');
       const projectSuffix = result.projectRoot ? `，已写入项目：${result.projectRoot}` : '';
@@ -1070,9 +1103,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
   async function handleEnvironmentAssetApply(asset: AssetEntry): Promise<void> {
     if (props.readOnly) return;
     if (asset.libraryKind !== 'environment') return;
+    const expectedSceneSessionId = sceneSessionIdRef.current;
 
     try {
       const environmentConfig = await loadEnvironmentFromAsset(asset);
+      if (sceneSessionIdRef.current !== expectedSceneSessionId) return;
       if (!environmentConfig) {
         pushLog('环境模型配置无效，未更新场景环境。');
         return;
@@ -1084,6 +1119,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
         focusAfterLoad: true,
         commandLabel: '应用环境模型',
         successMessage: `环境模型已应用：${displayName}`,
+        runtimeEnvironment: environmentConfig,
+        expectedSceneSessionId,
       });
       if (!requestId) pushLog('环境模型未能开始加载，请查看 Scene View 状态。');
     } catch (error) {
