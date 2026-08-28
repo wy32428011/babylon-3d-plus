@@ -240,6 +240,7 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     transitedTasks: new Set(),
     lastMovementDirection: 0,
     selfDriveDirection: 0,
+    cargoDriveEngaged: false,
     lastSnapshotReceivedAt: 0,
     cargoTravelOffset: 0,
     platformInboundCargo: false,
@@ -262,6 +263,7 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.transitedTasks.clear();
   model.conveyorTelemetry.lastMovementDirection = 0;
   model.conveyorTelemetry.selfDriveDirection = 0;
+  model.conveyorTelemetry.cargoDriveEngaged = false;
   model.conveyorTelemetry.lastSnapshotReceivedAt = 0;
   model.conveyorTelemetry.cargoTravelOffset = 0;
   model.conveyorTelemetry.platformInboundCargo = false;
@@ -292,6 +294,8 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backCargoHoldScaling: null,
     frontCargoFetchRow: null,
     backCargoFetchRow: null,
+    frontCargoPendingPlatformLocatorId: null,
+    backCargoPendingPlatformLocatorId: null,
     frontLastCommand: null,
     backLastCommand: null,
     frontSignalAction: null,
@@ -302,6 +306,8 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backSignalCargoPresent: null,
     frontLastMovementZ: null,
     backLastMovementZ: null,
+    frontPrevRawMovementZ: null,
+    backPrevRawMovementZ: null,
     nodeBaselines: new Map(),
     lastTargetKey: null,
     lastFrontCellKey: null,
@@ -337,6 +343,8 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backCargoHoldScaling = null;
   model.stackerTelemetry.frontCargoFetchRow = null;
   model.stackerTelemetry.backCargoFetchRow = null;
+  model.stackerTelemetry.frontCargoPendingPlatformLocatorId = null;
+  model.stackerTelemetry.backCargoPendingPlatformLocatorId = null;
   model.stackerTelemetry.frontLastCommand = null;
   model.stackerTelemetry.backLastCommand = null;
   model.stackerTelemetry.frontSignalAction = null;
@@ -347,6 +355,8 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backSignalCargoPresent = null;
   model.stackerTelemetry.frontLastMovementZ = null;
   model.stackerTelemetry.backLastMovementZ = null;
+  model.stackerTelemetry.frontPrevRawMovementZ = null;
+  model.stackerTelemetry.backPrevRawMovementZ = null;
   model.stackerTelemetry.nodeBaselines.clear();
   model.stackerTelemetry.lastTargetKey = null;
   model.stackerTelemetry.lastFrontCellKey = null;

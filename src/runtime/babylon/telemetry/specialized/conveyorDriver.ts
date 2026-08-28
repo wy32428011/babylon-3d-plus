@@ -47,6 +47,9 @@ import {
 /** 输送线运行时单货物固定身份键：刷出与走行不依赖光电信号，位置只由 movement_x 方向决定。 */
 const CONVEYOR_CARGO_IDENTITY = 'cargo';
 
+/** 行程终点判定容差（米）：自驱续行登记时认为货箱已抵端点的剩余距离。 */
+const CONVEYOR_TRAVEL_ENDPOINT_EPSILON = 1e-3;
+
 /**
  * 链路消息：available/taken 下行泛洪，subscribe/unsubscribe 上行传递；visited 防环，hops 逐跳递增。
  * 消息处理为同步方法调用，与设备各自 MQTT 快照到达无关（断流设备也能收到链路事件）。
@@ -116,7 +119,7 @@ export class ConveyorTelemetryDriver {
    *   途经设备登记 downstreamLinks（key=最终订阅者，记录 task 与跳数）；持有所订阅 task 货物的设备不再转发，
    *   直接交付给最终订阅者。收到货/变更 task/mode=0/流向翻转时退订，沿链清除登记。
    * - 交付：实例不销毁（交接插值保持视觉连续），越级直达最终订阅者，交接时长 = CARGO_HANDOFF_SECONDS / hops；
-   *   订阅者置刷出端并按订阅方向自驱走行（断流期间由帧调度驱动，新消息到达恢复字段驱动）；
+   *   订阅者置刷出端并按订阅方向自驱走行（断流期间由帧调度驱动，movement 非 0 的新消息才接管为字段驱动）；
    *   收货即退订。级联接力合并下行波：K 跳接力只在终点发一次 taken（原始持货方）+ 一次 available
    *   （最终持有方），中间跳不发波——避免接力放大为链路消息风暴。
    * - 过境标记 transitedTasks：taken 波经过时 pendingTask 匹配且交付对象非本机 → 货已越过，
@@ -146,11 +149,16 @@ export class ConveyorTelemetryDriver {
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
     const mode = readIntegerField(snapshot.fields, 'mode');
 
-    // 接管自驱只活到下一条新消息：receivedAt 变化即恢复字段驱动；断流重放（stale 快照）保持不变。
-    // mode 变 2/0、新 task 边沿等停止语义都随新消息到达，天然由该清零覆盖。
+    // 货物走行的方向与速度取自 dataDriven.cargo.travel（fields+actionMap+speed），脚本未声明时回退 movement_x 默认映射。
+    const travelConfig = readConveyorCargoTravelConfig(model);
+    const movementDirection = this.readConveyorMotionDirection(snapshot, travelConfig);
+
+    // 自驱只被字段显式接管打断（movement 非 0 的新消息）：movement=0 的新消息保持自驱，连贯驶到目标位。
+    // 字段接管结束后（movement 归 0）持货未达流向终点时，走行前检查会重新登记自驱续行。
+    // 停止语义由 mode==2 销货、故障冻结与行程端点/站台钳制承担；断流重放（receivedAt 不变）本就不复位。
     if (snapshot.receivedAt !== state.lastSnapshotReceivedAt) {
       state.lastSnapshotReceivedAt = snapshot.receivedAt;
-      state.selfDriveDirection = 0;
+      if (movementDirection !== 0) state.selfDriveDirection = 0;
     }
 
     // task 语义：数值 0/缺失为无任务；仅新 task 边沿（相对 lastTask 变化）登记。
@@ -173,9 +181,6 @@ export class ConveyorTelemetryDriver {
       }
     }
 
-    // 货物走行的方向与速度取自 dataDriven.cargo.travel（fields+actionMap+speed），脚本未声明时回退 movement_x 默认映射。
-    const travelConfig = readConveyorCargoTravelConfig(model);
-    const movementDirection = this.readConveyorMotionDirection(snapshot, travelConfig);
     // 流向翻转：链路全部失效清空（探测缓存保留），等待中的订阅先退订再以新方向重订。
     const previousDirection = state.lastMovementDirection;
     if (movementDirection !== 0) state.lastMovementDirection = movementDirection;
@@ -256,7 +261,7 @@ export class ConveyorTelemetryDriver {
           if (oldTask && oldTask !== heldCargo.task) this.notifyTaken(model, oldTask, null, flowDirection);
           this.notifyAvailable(model, heldCargo.task, flowDirection);
           this.tryDeliverHeldCargo(model);
-          // movement_x=0 按正转处理：登记自驱从滞留位置继续移向终点（下一条新消息恢复字段驱动）。
+          // movement_x=0 按正转处理：登记自驱从滞留位置继续移向终点（movement 非 0 的新消息才接管字段驱动）。
           if (state.cargoCode !== null && movementDirection === 0) state.selfDriveDirection = 1;
         }
       } else if (state.waitingTask === null) {
@@ -265,8 +270,10 @@ export class ConveyorTelemetryDriver {
           // 线首站台机：货物只能由 stacker 放入站台（acceptPlatformPlacedCargo 事件满足），
           // 不自建货箱也不发订阅；无需勾选起点设备/货物自动销毁。
           state.waitingTask = state.pendingTask;
-        } else if (!hasUpstream && model.telemetryBinding?.cargoOriginDevice === true) {
-          // 起点设备：探测点未触及上游且无注册上游时允许自行创建货箱
+        } else if (!hasUpstream && model.telemetryBinding?.cargoOriginDevice === true && !this.hasExternalHolderForTask(state.pendingTask)) {
+          // 起点设备：探测点未触及上游且无注册上游时允许自行创建货箱。
+          // 例外：stacker/RGV 已持有同 task 实物在途（静态探测缓存找不到行车中的 RGV）时不得刷幻影货，
+          // 否则本机 cargoCode 被占用，真实货物推送交付时被拒收、停转边沿销毁。
           // 刷出端由运行方向决定：正转刷在轨迹起点向终点移动，反转刷在轨迹终点向起点移动。
           // 刷出瞬间货箱模板尚未加载，按内置长度计算行程；模板就绪后下一帧 clamp 自动收敛到实测端点。
           const plan = this.resolveConveyorTravelPlan(model);
@@ -275,6 +282,7 @@ export class ConveyorTelemetryDriver {
           state.cargoTravelOffset = -probeDirection * plan.forwardSign * this.resolveTravelHalfRangeMeters(null, plan);
           state.cargoCode = CONVEYOR_CARGO_IDENTITY;
           state.platformInboundCargo = false;
+          state.cargoDriveEngaged = false;
           this.createConveyorCargoForTask(model, snapshot, state.cargoCode);
           if (movementDirection === 0) state.selfDriveDirection = 1;
           this.notifyAvailable(model, state.currentTask ?? '', probeDirection);
@@ -300,11 +308,6 @@ export class ConveyorTelemetryDriver {
 
     const plan = this.resolveConveyorTravelPlan(model);
     const cargoSpeed = travelConfig.speed;
-    // 快照 movement 为 0 时回退到接管自驱方向：承接货物控制权后立即走行，不等下一条 MQTT 消息。
-    const cargoDirection = movementDirection !== 0 ? movementDirection : state.selfDriveDirection;
-    if (!snapshot.faulted && cargoDirection !== 0) {
-      state.cargoTravelOffset += cargoDirection * plan.forwardSign * cargoSpeed * deltaSeconds;
-    }
     // 每帧按当前货箱实测模板长度钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
     const travelHalfRange = this.resolveTravelHalfRangeMeters(cargo, plan);
     // 上游来货恒以站台为终点：按交付流向把终点收敛到站台支撑位，与站台在 A/B 端无关；
@@ -321,6 +324,24 @@ export class ConveyorTelemetryDriver {
           minOffset = Math.max(platformOffset, -travelHalfRange);
         }
       }
+    }
+    // 字段接管是暂时的：movement 归 0 后持货已被驱动过且未达流向终点则按流向重新登记自驱续行，
+    // 否则接管期间 movement 非 0 消息已清零自驱（见帧首），字段静默后货物会滞留行程中段。
+    // 从未被驱动过的持货（stacker 站台放货落座）不续行，保持滞留停泊等待 task 复用。
+    if (movementDirection === 0 && state.selfDriveDirection === 0 && state.cargoDriveEngaged) {
+      const flowDirection = state.platformInboundCargo && state.platformInboundDirection !== 0
+        ? state.platformInboundDirection
+        : this.resolveFlowDirection(model);
+      const atFlowEnd = flowDirection * plan.forwardSign >= 0
+        ? state.cargoTravelOffset >= maxOffset - CONVEYOR_TRAVEL_ENDPOINT_EPSILON
+        : state.cargoTravelOffset <= minOffset + CONVEYOR_TRAVEL_ENDPOINT_EPSILON;
+      if (!atFlowEnd) state.selfDriveDirection = flowDirection;
+    }
+    // 快照 movement 为 0 时回退到接管自驱方向：承接货物控制权后立即走行，不等下一条 MQTT 消息。
+    const cargoDirection = movementDirection !== 0 ? movementDirection : state.selfDriveDirection;
+    if (!snapshot.faulted && cargoDirection !== 0) {
+      state.cargoTravelOffset += cargoDirection * plan.forwardSign * cargoSpeed * deltaSeconds;
+      state.cargoDriveEngaged = true;
     }
     state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, minOffset, maxOffset);
 
@@ -356,6 +377,8 @@ export class ConveyorTelemetryDriver {
         if (!cargo) continue;
         // RGV 持货门控：仅放货到位才允许摘除，防止行车中途摘货（stacker 持货语义不变）
         if (this.isRgvHeldCargo(cargo) && !this.context.isRgvCargoReadyForExternalPull(cargo)) continue;
+        // stacker mode==4 延后交接门控：落货站台后待收叉完毕的滞留货由推送路径交付，pull 不得提前摘走
+        if (this.context.isStackerCargoPendingPlatformHandoff(cargo)) continue;
         state.externalPulls.delete(subscriberCode);
         const detached = this.context.detachClaimedCargoByReference(cargo);
         if (!detached) continue;
@@ -634,6 +657,8 @@ export class ConveyorTelemetryDriver {
   /**
    * 交付落地（接力每一跳）：换绑订阅者、交接插值（hops 加速）、刷出端+自驱、清等待；
    * 收货即退订（沿订阅路径清除登记）。不发 available/taken 下行波，由接力驱动者在终点统一发。
+   * preserveAxialPosition=true（滞后承接：货物已随交接插值离车）时按货物当前位置在行走轴上的投影落地，
+   * handoff 从当前位姿平滑对齐轨迹后向终点走行，不强制回到进入端。
    */
   private settleCargoTransfer(
     cargo: GeneratedCargoRuntimeEntry,
@@ -641,6 +666,7 @@ export class ConveyorTelemetryDriver {
     task: string,
     hops: number,
     direction: number,
+    preserveAxialPosition = false,
   ): void {
     const subscriberState = subscriber.conveyorTelemetry;
     cargo.assetCode = subscriber.assetCode;
@@ -649,12 +675,21 @@ export class ConveyorTelemetryDriver {
 
     const plan = this.resolveConveyorTravelPlan(subscriber);
     subscriberState.cargoCode = CONVEYOR_CARGO_IDENTITY;
-    // 交接货箱已在上游渲染完毕，模板长度实测可用，直接按实测端点重置偏移。
-    subscriberState.cargoTravelOffset = -direction * plan.forwardSign * this.resolveTravelHalfRangeMeters(cargo, plan);
+    // 交接货箱已在上游渲染完毕，模板长度实测可用，直接按实测端点计算行程。
+    const travelHalfRange = this.resolveTravelHalfRangeMeters(cargo, plan);
+    subscriberState.cargoTravelOffset = preserveAxialPosition
+      ? clampNumber(
+          Vector3.Dot(cargo.root.position.subtract(plan.travelContext.center), plan.travelContext.travelAxis),
+          -travelHalfRange,
+          travelHalfRange,
+        )
+      : -direction * plan.forwardSign * travelHalfRange;
     subscriberState.pendingTask = null;
     subscriberState.waitingTask = null;
-    // 承接即走行：登记自驱方向，快照断流期间由帧调度继续驱动，新消息到达即恢复字段驱动。
+    // 承接即走行：登记自驱方向，快照断流或 movement=0 期间由帧调度继续驱动，movement 非 0 的新消息才接管字段驱动。
     subscriberState.selfDriveDirection = direction;
+    // 新货到达重置驱动履历：首帧走行（字段或自驱）后才允许字段静默续行。
+    subscriberState.cargoDriveEngaged = false;
     // 上游来货恒以站台为终点：记录交付流向，走行钳制按流向收敛到站台支撑位（无站台则不钳）。
     subscriberState.platformInboundCargo = this.resolvePlatformLocator(subscriber) !== null;
     subscriberState.platformInboundDirection = direction;
@@ -686,6 +721,18 @@ export class ConveyorTelemetryDriver {
     if (!task) return false;
     const neighbor = this.resolveProbeNeighbor(model, direction);
     return neighbor !== null && this.findHeldCargoByTask(neighbor.assetCode, task) !== null;
+  }
+
+  /** stacker/RGV（无链路能力、可能被静态探测缓存漏掉的行车中设备）是否正持有该 task 的货物在途。 */
+  private hasExternalHolderForTask(task: string): boolean {
+    if (!task) return false;
+    for (const cargo of this.state.stackerCargoMeshes.values()) {
+      if (cargo.task === task) return true;
+    }
+    for (const cargo of this.state.rgvCargoMeshes.values()) {
+      if (cargo.task === task) return true;
+    }
+    return false;
   }
 
   /** 三张货物表（stacker/conveyor/rgv）中查找指定设备持有的指定 task 货物。 */
@@ -967,6 +1014,8 @@ export class ConveyorTelemetryDriver {
     state.cargoCode = CONVEYOR_CARGO_IDENTITY;
     state.cargoTravelOffset = platformOffset;
     state.platformInboundCargo = false;
+    // 站台落座为滞留停泊：未驱动前不允许字段静默续行，等待 task 复用才驶离。
+    state.cargoDriveEngaged = false;
     // 等待中的 task 由放入货物立即兑现（线首站台未发订阅，退订为无害空操作）
     if (state.waitingTask !== null) {
       cargo.task = state.waitingTask;
@@ -991,14 +1040,15 @@ export class ConveyorTelemetryDriver {
   }
 
   /**
-   * RGV 列放货交付（订阅仲裁）：货物落地本机进入端并自驱，等价的 taken/available 波接入链路广播，
+   * RGV 列放货交付（订阅仲裁）：货物落地本机并自驱，等价的 taken/available 波接入链路广播，
    * 本机下游若已有订阅者则继续接力。预检由 canAcceptRgvColumnPlacedCargo 承担（调用方先预检再拆原引用）。
+   * preserveAxialPosition=true（承接方消息滞后、交接插值已推进）时按货物当前轴向位置落地，不回进入端。
    */
-  acceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry, task: string): boolean {
+  acceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry, task: string, preserveAxialPosition = false): boolean {
     if (!this.canAcceptRgvColumnPlacedCargo(model, task)) return false;
     const holderAssetCode = cargo.assetCode;
     const direction = this.resolveFlowDirection(model);
-    this.settleCargoTransfer(cargo, model, task, 1, direction);
+    this.settleCargoTransfer(cargo, model, task, 1, direction, preserveAxialPosition);
     // 以接收方为波起点、原持货方记 RGV：沿下行链清除 upstreamLinks 中 holder=RGV 的残留登记
     this.sendTakenWave(model, holderAssetCode, task, model.assetCode, direction);
     this.notifyAvailable(model, task, direction);

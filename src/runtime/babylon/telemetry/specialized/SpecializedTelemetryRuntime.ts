@@ -302,14 +302,14 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   }
 
   /** RGV 列放货订阅仲裁交付：先预检再拆引用，任一步失败 RGV 侧货物状态保持完好，由调用方走原销毁路径。 */
-  deliverRgvCargoToConveyorColumn(entityId: string, cargoKey: string, task: string): boolean {
+  deliverRgvCargoToConveyorColumn(entityId: string, cargoKey: string, task: string, preserveAxialPosition = false): boolean {
     for (const { entityId: id, model } of this.host.collectModels()) {
       if (id !== entityId) continue;
       if (!isConveyorRuntimeModel(model)) return false;
       if (!this.conveyorDriver.canAcceptRgvColumnPlacedCargo(model, task)) return false;
       const cargo = this.rgvDriver.detachClaimedCargoByKey(cargoKey);
       if (!cargo) return false;
-      if (!this.conveyorDriver.acceptRgvColumnPlacedCargo(model, cargo, task)) {
+      if (!this.conveyorDriver.acceptRgvColumnPlacedCargo(model, cargo, task, preserveAxialPosition)) {
         this.state.rgvCargoMeshes.set(cargoKey, cargo);
         return false;
       }
@@ -321,6 +321,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   /** RGV 持货外部拉取就绪门控：委托 rgvDriver 判定（放货意图且车已到位才允许摘除）。 */
   isRgvCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean {
     return this.rgvDriver.isRgvCargoReadyForExternalPull(cargo);
+  }
+
+  /** stacker 持货外部拉取门控：委托 stackerDriver 判定（mode==4 待收叉完毕的站台滞留货不允许摘除）。 */
+  isStackerCargoPendingPlatformHandoff(cargo: GeneratedCargoRuntimeEntry): boolean {
+    return this.stackerDriver.isStackerCargoPendingPlatformHandoff(cargo);
   }
 
   // ===== 帧内私有方法 =====

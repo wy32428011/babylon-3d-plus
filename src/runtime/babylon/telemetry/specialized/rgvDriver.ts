@@ -40,12 +40,13 @@ import {
 type RgvColumnPreference = { task: string; mode: 'fetch' | 'place' };
 
 /**
- * RGV（有轨穿梭车）遥测驱动：列号(front_y/back_y) → 列绑定实体投影定位车体；
+ * RGV（有轨穿梭车）遥测驱动：列号 → 列绑定实体投影定位车体；
+ * go_column（WCS 目标列）非 0 时优先于 front_y/back_y 当前列作为行走目标，保证行车动画连续；
  * movement_z 起转边沿锁定交接列，command 决定取货(列→车)/放货(车→列)方向。
  * 协议无完成码，command 回落 0 作为完成兜底；
  * task（front_task/back_task）只参与全局货物唯一接管（同 task 货箱实例移交本机），不参与本机流程。
  * 同列允许绑定多台 conveyor：取货对齐持有该 task 货物的一台，放货交付给正在等待该 task 的一台
- * （conveyor task 订阅/广播状态仲裁）；无等待方时保持停转销毁语义。
+ * （conveyor task 订阅/广播状态仲裁，起转锁列即尝试交付，停转边沿兜底）；无等待方时保持停转销毁语义。
  */
 export class RgvTelemetryDriver {
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
@@ -87,6 +88,10 @@ export class RgvTelemetryDriver {
     const frontMovementZ = readIntegerField(snapshot.fields, 'front_movement_z') ?? 0;
     const backMovementZ = readIntegerField(snapshot.fields, 'back_movement_z') ?? 0;
 
+    // go_column（WCS 下发的目标列）非 0 时优先作为行走目标：任务下发即给出目的列，
+    // 车体动画连续滑向目标，不等当前列（front_y/back_y）到位跳变；为 0/缺失回退当前列驱动
+    const goColumn = this.readPositiveColumn(snapshot, 'go_column');
+
     // 权威列：command 活动侧优先（前后都活动取前），否则前叉列、再退后叉列
     const frontActive = frontCommand === 1 || frontCommand === 2 || frontCommand === 3;
     const backActive = backCommand === 1 || backCommand === 2 || backCommand === 3;
@@ -95,11 +100,12 @@ export class RgvTelemetryDriver {
       : backActive && backColumn !== null
         ? 'back'
         : frontColumn !== null ? 'front' : 'back';
-    const authoritativeColumn = frontActive && frontColumn !== null
+    const fieldColumn = frontActive && frontColumn !== null
       ? frontColumn
       : backActive && backColumn !== null
         ? backColumn
         : frontColumn ?? backColumn;
+    const authoritativeColumn = goColumn ?? fieldColumn;
 
     // 列号边沿：解析列绑定实体，让载货台面该侧工位的行走轴投影与列投影对齐；
     // 同列多台 conveyor 时按 command 语义取偏好（取货对齐持货方/放货对齐等待方），无匹配回退首个绑定。
@@ -347,15 +353,20 @@ export class RgvTelemetryDriver {
       }
       // movement_z 0→非0 起转边沿：只有此时车才真实到达交接列，在此锁定交接列
       if (movementZ !== null && movementZ !== 0 && (lastMovementZ === null || lastMovementZ === 0)) {
-        if (command === 1 || command === 3) this.beginRgvFetchTransfer(model, side, column, task, containerCode);
-        else if (command === 2) this.beginRgvPlaceTransfer(model, side, column);
+        if (command === 1 || command === 3) {
+          this.beginRgvFetchTransfer(model, side, column, task, containerCode);
+        } else if (command === 2) {
+          this.beginRgvPlaceTransfer(model, side, column);
+          // 起转锁列即仲裁交付：等待方已就绪则当场释放货物，不再等停转边沿
+          this.tryDeliverRgvPlaceCargo(model, side, column ?? state.travelTargetColumn);
+        }
       }
       // 交接插值推进：方向由 command 决定（movement_z 正反转不区分出入）
       if (movementZ !== null && movementZ !== 0) {
         if (command === 1 || command === 3) this.advanceRgvTransfer(model, side, 1, deltaSeconds);
         else if (command === 2) this.advanceRgvTransfer(model, side, -1, deltaSeconds);
       }
-      // movement_z 非0→0 停转边沿：放货交接完成，先按订阅仲裁交付给该列等待方 conveyor，无等待方保持销毁
+      // movement_z 非0→0 停转边沿：放货交接完成兜底交付（起转时无等待方、等待方中途出现），仍无等待方保持销毁
       if (command === 2 && movementZ === 0 && lastMovementZ !== null && lastMovementZ !== 0) {
         if (!this.tryDeliverRgvPlaceCargo(model, side, column ?? state.travelTargetColumn)) {
           this.disposeRgvForkCargo(model, side);
@@ -531,8 +542,12 @@ export class RgvTelemetryDriver {
     if (!cargoKey || column === null) return false;
     const task = this.state.rgvCargoMeshes.get(cargoKey)?.task ?? '';
     if (!task) return false;
+    // 交接插值已推进（progress<1，货物在离车途中/已到列侧缘）属承接方消息滞后的兜底交付：
+    // 接收方按货物当前位置投影到行走轴落地，对齐轨迹直接向终点走行；
+    // 起转当场交付（progress 刚置 1，货仍在车上）保持进入端落地。
+    const progress = side === 'front' ? model.rgvTelemetry.frontTransferProgress : model.rgvTelemetry.backTransferProgress;
     for (const candidate of this.resolveRgvColumnCandidates(model, column)) {
-      if (this.context.deliverRgvCargoToConveyorColumn(candidate.entityId, cargoKey, task)) return true;
+      if (this.context.deliverRgvCargoToConveyorColumn(candidate.entityId, cargoKey, task, progress < 1)) return true;
     }
     return false;
   }

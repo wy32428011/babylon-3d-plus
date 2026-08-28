@@ -18,8 +18,9 @@ import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../src/runtime/b
 
 /**
  * stacker 向 conveyor 内置站台放货的端到端复现（中鼎场景 DDJ2 → 1005）：
- * mode==4 下按 signalBits 前一帧锁存放货，伸足解绑后货物应交接给站台 conveyor 并存活，
- * 收叉回零的相位退出不得销毁已交接货物。
+ * mode==4 下按 signalBits 前一帧锁存放货，伸足解绑落货后货物滞留 stacker 侧并登记待交接站台，
+ * 收叉完毕（收叉停止边沿，或收叉动画完结触发相位退出兜底）才交付给站台 conveyor；
+ * 交付后收叉回零的相位退出不得销毁已交接货物。
  */
 
 function makeSnapshot(deviceType: string, assetCode: string, fields: Record<string, unknown>): DeviceTelemetrySnapshot {
@@ -142,7 +143,7 @@ function makeHarness() {
       cargo.root.rotationQuaternion = rotation.clone();
       cargo.root.scaling.copyFrom(scaling ?? Vector3.OneReadOnly);
     },
-    disposeGeneratedCargo: () => undefined,
+    disposeGeneratedCargo: (_cargo: GeneratedCargoRuntimeEntry) => undefined,
     getModelWorldBounds: (model: ModelRuntimeEntry) =>
       model.assetCode === '1005'
         ? { minimum: new Vector3(3, 0, -0.5), maximum: new Vector3(7, 1, 0.5) }
@@ -199,6 +200,8 @@ function makeHarness() {
   context.resolveConveyorDeckCenterWorld = () => null;
   context.deliverRgvCargoToConveyorColumn = () => false;
   context.isRgvCargoReadyForExternalPull = () => false;
+  context.isStackerCargoPendingPlatformHandoff = (cargo: GeneratedCargoRuntimeEntry) =>
+    stackerDriver.isStackerCargoPendingPlatformHandoff(cargo);
 
   let stackerFields: Record<string, unknown> = {};
   let conveyorFields: Record<string, unknown> = {};
@@ -239,7 +242,7 @@ const STACKER_ARRIVED = {
   front_signalBits: 33685504, movement_x: 0, movement_y: 0, normal: true, errorCode: 0,
 };
 
-test('mode==4 放货到 conveyor 站台：伸足解绑交接后货物存活于 conveyor，收叉相位退出不得销毁', () => {
+test('mode==4 放货到 conveyor 站台：伸足落货登记待交接，收叉动画完结（相位退出兜底）才交付', () => {
   const h = makeHarness();
   try {
     // 1005 先跑几帧空闲基线（线首站台：task 边沿挂起等待 stacker 交付）
@@ -254,34 +257,82 @@ test('mode==4 放货到 conveyor 站台：伸足解绑交接后货物存活于 c
 
     // 到位停稳（bit17=1 建立前一帧有货样本）
     h.apply(STACKER_ARRIVED, CONVEYOR_IDLE, 0.1, 5);
-    assert.equal(h.stacker.stackerTelemetry.frontSignalCargoPresent, true, '停稳帧必须建立有货样本');
+    assert.equal(st.frontSignalCargoPresent, true, '停稳帧必须建立有货样本');
 
     // 伸叉放货：同帧信号位已翻 0（货转移到叉上）；前一帧有货 → 锁存放货
     h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 3 }, CONVEYOR_IDLE, 0.1, 1);
-    assert.equal(h.stacker.stackerTelemetry.frontSignalAction, 'place', '伸叉起点必须按前一帧有货锁存为放货');
+    assert.equal(st.frontSignalAction, 'place', '伸叉起点必须按前一帧有货锁存为放货');
 
-    // 继续伸足（目标行程 = 站台支撑位 x=4m，允许悬空）：伸足解绑 + 交接给 1005
+    // 继续伸足（目标行程 = 站台支撑位 x=4m，允许悬空）：解绑落货但 mode==4 不交付，登记待交接站台
     h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 3 }, CONVEYOR_IDLE, 0.1, 200);
-    assert.equal(h.stacker.stackerTelemetry.frontCargoBoundToFork, false, '伸足必须解绑落货');
-    assert.equal(h.state.stackerCargoMeshes.size, 0, '交接成功后 stacker 货物表必须清空');
+    assert.equal(st.frontCargoBoundToFork, false, '伸足必须解绑落货');
+    assert.equal(st.frontCargoPendingPlatformLocatorId, 'slot_1005', 'mode==4 落货必须登记待交接站台');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '收叉完毕前货物必须留在 stacker 侧（待交接）');
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '收叉完毕前不得交付给 1005');
+
+    // 伸出后停帧（上帧是伸出而非收叉）：不得误触发收叉停止边沿交付
+    h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 0 }, CONVEYOR_IDLE, 0.1, 5);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '伸出后停帧不得误触发交付（上帧非收叉）');
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '伸出后停帧 1005 不得收货');
+
+    // 收叉回零：锁存清除产生相位退出边沿 → 兜底交付站台滞留货，货物不得被销毁
+    h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 4 }, CONVEYOR_IDLE, 0.1, 200);
+    assert.equal(st.frontForkOffset, 0, '收叉必须归零');
+    assert.equal(st.frontSignalAction, null, '收叉回零后锁存必须清除');
+    assert.equal(h.state.stackerCargoMeshes.size, 0, '相位退出交付后 stacker 货物表必须清空');
+    assert.equal(st.frontCargoPendingPlatformLocatorId, null, '交付成功后待交接登记必须清除');
     const conveyorCargo = h.state.conveyorCargoMeshes.get(JSON.stringify(['1005', 'cargo']));
-    assert.ok(conveyorCargo, '放货后货物必须由 1005 持有');
+    assert.ok(conveyorCargo, '收叉完毕后货物必须由 1005 持有');
     assert.ok(
       Math.abs(conveyorCargo.root.position.x - PLATFORM_SUPPORT.x) < 0.05,
       `货物必须落在站台支撑位 x=${PLATFORM_SUPPORT.x}，实际 ${conveyorCargo.root.position.x}`,
     );
 
-    // 停帧 + 收叉回零：锁存清除产生相位退出边沿，已交接货物不得被销毁
-    h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 0 }, CONVEYOR_IDLE, 0.1, 5);
-    h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 4 }, CONVEYOR_IDLE, 0.1, 200);
-    assert.equal(h.stacker.stackerTelemetry.frontForkOffset, 0, '收叉必须归零');
-    assert.equal(h.stacker.stackerTelemetry.frontSignalAction, null, '收叉回零后锁存必须清除');
-    assert.equal(h.state.conveyorCargoMeshes.size, 1, '收叉相位退出不得销毁已交接给 1005 的货物');
-    assert.equal(h.state.stackerCargoMeshes.size, 0, 'stacker 侧不得残留货物');
-
     // 1005 接到新 task 驶离：滞留货物复用盖 task 后随行，不得消失
     h.apply(STACKER_ARRIVED, { task: 371, movement_x: 1, signalBits: 0 }, 0.1, 30);
     assert.equal(h.state.conveyorCargoMeshes.size, 1, '1005 新 task 必须复用滞留货物而非销毁');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('mode==4 放货到 conveyor 站台：收叉中途停止（上帧收叉本帧停止）即触发交付，不等收叉动画完结', () => {
+  const h = makeHarness();
+  try {
+    h.apply({ ...STACKER_ARRIVED, front_x: 0, front_y: 0, front_z: 0, front_signalBits: 0, front_task: 0 }, CONVEYOR_IDLE, 0.1, 5);
+
+    const cargo = h.stackerDriver.getOrCreateStackerCargo('DDJ2', 'front');
+    cargo.task = '12279';
+    const st = h.stacker.stackerTelemetry;
+    st.frontCargoKey = JSON.stringify(['DDJ2', 'front']);
+    st.frontCargoBoundToFork = true;
+
+    h.apply(STACKER_ARRIVED, CONVEYOR_IDLE, 0.1, 5);
+    // 伸足落货：登记待交接，货物滞留 stacker 侧
+    h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 3 }, CONVEYOR_IDLE, 0.1, 200);
+    assert.equal(st.frontCargoPendingPlatformLocatorId, 'slot_1005', '落货后必须登记待交接站台');
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '收叉完毕前不得交付');
+
+    // 收叉 3 帧（行程远未走完）后停止：上帧收叉本帧停止 → 信号边沿当场交付
+    h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 4 }, CONVEYOR_IDLE, 0.1, 3);
+    assert.ok(st.frontForkOffset > 0.05, `收叉 3 帧后货叉应仍在行程中，实际 ${st.frontForkOffset}`);
+    h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 0 }, CONVEYOR_IDLE, 0.1, 1);
+    assert.equal(h.state.stackerCargoMeshes.size, 0, '收叉停止边沿必须当场交付站台滞留货');
+    const conveyorCargo = h.state.conveyorCargoMeshes.get(JSON.stringify(['1005', 'cargo']));
+    assert.ok(conveyorCargo, '信号边沿交付后货物必须由 1005 持有');
+    assert.ok(st.frontForkOffset > 0.05, `交付时货叉尚未收完（证明非动画完结路径），实际 ${st.frontForkOffset}`);
+    assert.equal(st.frontCargoPendingPlatformLocatorId, null, '交付成功后待交接登记必须清除');
+    assert.ok(
+      Math.abs(conveyorCargo.root.position.x - PLATFORM_SUPPORT.x) < 0.05,
+      `货物必须落在站台支撑位 x=${PLATFORM_SUPPORT.x}，实际 ${conveyorCargo.root.position.x}`,
+    );
+
+    // 后续收叉回零：货物已交付，锁存清除的相位退出不得销毁
+    h.apply({ ...STACKER_ARRIVED, front_signalBits: 0, front_movement_z: 4 }, CONVEYOR_IDLE, 0.1, 200);
+    assert.equal(st.frontForkOffset, 0, '收叉必须归零');
+    assert.equal(st.frontSignalAction, null, '收叉回零后锁存必须清除');
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '相位退出不得销毁已交接货物');
+    assert.equal(h.state.stackerCargoMeshes.size, 0, 'stacker 侧不得残留货物');
   } finally {
     h.dispose();
   }

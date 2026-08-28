@@ -188,6 +188,8 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       }
       return null;
     },
+    // 本套测试无 mode==4 站台待交接状态，门控恒 false
+    isStackerCargoPendingPlatformHandoff: () => false,
   };
   const driver = new ConveyorTelemetryDriver(context as never);
 
@@ -237,6 +239,22 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       };
       state.conveyorCargoMeshes.set(JSON.stringify([assetCode, 'cargo']), entry as ConveyorCargoRuntimeEntry);
       models.get(assetCode)!.conveyorTelemetry.cargoCode = 'cargo';
+      return entry;
+    },
+    /** 向 RGV 货物表插入持有货物（模拟 RGV 行车中已持有的在途货箱，司机遥测引用由调用方自理）。 */
+    insertRgvCargo: (assetCode: string, task: string) => {
+      const root = new TransformNode(`${assetCode}_cargo_root`, scene);
+      const entry = {
+        assetCode,
+        containerCode: '',
+        task,
+        root,
+        outputOwner: null,
+        fallback: null,
+        generatorEntityId: null,
+        handoff: null,
+      };
+      state.rgvCargoMeshes.set(JSON.stringify([assetCode, 'front']), entry as ConveyorCargoRuntimeEntry);
       return entry;
     },
     /** 仅执行帧尾外部持货拉取扫描（不驱动任何设备帧）。 */
@@ -305,11 +323,13 @@ test('上游持货后事件驱动交付：available 通知触发订阅，当帧�
       Math.abs(selfDrivenOffset - (-HALF_RANGE + CARGO_SPEED * 0.1 * 10)) < 1e-6,
       `断流期间自驱必须推进到 ${-HALF_RANGE + CARGO_SPEED * 0.1 * 10}，实际 ${selfDrivenOffset}`,
     );
-    // 新消息到达（receivedAt 变化）：自驱结束，movement_x=0 即停车
+    // 新消息到达 movement_x=0（receivedAt 变化）：自驱不被打断，货物连贯驶向目标位
     h.apply('CV2', { task: 7, movement_x: 0 }, 0.1, 10, stamp + 1);
-    assert.equal(h.models.CV2.conveyorTelemetry.selfDriveDirection, 0, '新消息必须结束自驱');
-    assert.ok(Math.abs(h.models.CV2.conveyorTelemetry.cargoTravelOffset - selfDrivenOffset) < 1e-6,
-      '新消息 movement_x=0 必须立即停车');
+    assert.equal(h.models.CV2.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 的新消息不得结束自驱');
+    assert.ok(
+      Math.abs(h.models.CV2.conveyorTelemetry.cargoTravelOffset - (selfDrivenOffset + CARGO_SPEED * 0.1 * 10)) < 1e-6,
+      `自驱必须继续推进到 ${selfDrivenOffset + CARGO_SPEED * 0.1 * 10}，实际 ${h.models.CV2.conveyorTelemetry.cargoTravelOffset}`,
+    );
   } finally {
     h.dispose();
   }
@@ -417,6 +437,37 @@ test('探测点无上游时：起点设备自行创建货箱（movement_x=0 按�
     assert.equal(h2.state.conveyorCargoMeshes.size, 0, '非起点设备不得自行创建货箱');
   } finally {
     h2.dispose();
+  }
+});
+
+test('起点设备刷货前检查外部持货：RGV 已持有同 task 在途实物时转为等待，推送交付被正常接收', () => {
+  const h = makeHarness({ CV1: { centerX: 0, origin: true } });
+  try {
+    // RGV 已持有 task=7 货物在途（静态探测缓存找不到行车中的 RGV，探测点视为无上游）
+    h.insertRgvCargo('RGV1', '7');
+    h.apply('CV1', { task: 7, movement_x: 0 });
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '7', '外部持货在途时必须转为等待而非刷幻影货');
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, null, '本机不得占用持货引用');
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '不得自行创建货箱');
+    assert.equal(h.state.rgvCargoMeshes.size, 1, 'RGV 在途货物不受影响');
+
+    // RGV 推送交付（镜像 facade：预检 → 摘除原引用 → 落地）
+    const model = h.models.CV1;
+    assert.equal(h.driver.canAcceptRgvColumnPlacedCargo(model, '7'), true, '等待方必须通过 RGV 列放货预检');
+    const rgvCargo = h.state.rgvCargoMeshes.get(JSON.stringify(['RGV1', 'front']))!;
+    h.state.rgvCargoMeshes.delete(JSON.stringify(['RGV1', 'front']));
+    assert.equal(h.driver.acceptRgvColumnPlacedCargo(model, rgvCargo, '7'), true, '推送交付必须被接收');
+    assert.equal(model.conveyorTelemetry.cargoCode, 'cargo', '交付后必须置持货引用');
+    assert.equal(model.conveyorTelemetry.waitingTask, null, '交付后清等待');
+    const delivered = onlyCargo(h.state);
+    assert.equal(delivered.task, '7');
+    assert.ok(
+      Math.abs(model.conveyorTelemetry.cargoTravelOffset + HALF_RANGE) < 1e-6,
+      `交付瞬间必须落在进入端 -${HALF_RANGE}，实际 ${model.conveyorTelemetry.cargoTravelOffset}`,
+    );
+    assert.equal(model.conveyorTelemetry.selfDriveDirection, 1, '承接后必须登记自驱走行');
+  } finally {
+    h.dispose();
   }
 });
 
@@ -966,6 +1017,75 @@ test('线首站台：无等待 task 时放货成为滞留货物，后续新 task
     const offset = h.models.A.conveyorTelemetry.cargoTravelOffset;
     assert.ok(Math.abs(offset - HALF_RANGE) < 1e-6,
       `复用后货物必须走向出口端（${HALF_RANGE}），实际 ${offset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('RGV 起转交付后 movement 脉冲清零自驱再静默：字段接管结束必须自动续行到行程终点（中鼎 1004 回归）', () => {
+  // 现场序列：RGV 起转当场交付（pendingTask 命中，投影落地）→ conveyor 续报 movement_x=1 清零自驱
+  // → 字段静默（快速回放下字段窗口推进量≈0）→ 自驱必须重新登记，把货物续行到行程终点。
+  const h = makeHarness({ CV1: { centerX: 0 } });
+  try {
+    h.apply('CV1', { task: 101, mode: 2, movement_x: 0 }, 0.1, 1, 1000);
+    assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, '101', 'mode=2 边沿也必须登记 pendingTask');
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, null);
+
+    // 镜像 facade 推送交付：预检 → 摘除原引用 → 落地（起转当场交付 progress<1 → 按当前位置投影）
+    const model = h.models.CV1;
+    assert.equal(h.driver.canAcceptRgvColumnPlacedCargo(model, '101'), true, 'pendingTask 命中必须过预检');
+    const rgvCargoKey = JSON.stringify(['RGV1', 'front']);
+    h.insertRgvCargo('RGV1', '101');
+    const rgvCargo = h.state.rgvCargoMeshes.get(rgvCargoKey)!;
+    rgvCargo.root.position.x = -HALF_RANGE;
+    h.state.rgvCargoMeshes.delete(rgvCargoKey);
+    assert.equal(h.driver.acceptRgvColumnPlacedCargo(model, rgvCargo, '101', true), true);
+    assert.ok(Math.abs(model.conveyorTelemetry.cargoTravelOffset + HALF_RANGE) < 1e-6,
+      `投影落地必须在进入端 ${-HALF_RANGE}，实际 ${model.conveyorTelemetry.cargoTravelOffset}`);
+    assert.equal(model.conveyorTelemetry.selfDriveDirection, 1, '承接即走行必须登记自驱');
+
+    // 字段接管：movement_x=1 新消息清零自驱并字段驱动少许（快速回放下该窗口推进量极小）
+    h.apply('CV1', { task: 101, mode: 3, movement_x: 1 }, 0.1, 3, 2000);
+    assert.equal(model.conveyorTelemetry.selfDriveDirection, 0, 'movement 非 0 新消息必须清零自驱');
+    const stranded = -HALF_RANGE + CARGO_SPEED * 0.1 * 3;
+    assert.ok(Math.abs(model.conveyorTelemetry.cargoTravelOffset - stranded) < 1e-6,
+      `字段驱动必须推进到 ${stranded}，实际 ${model.conveyorTelemetry.cargoTravelOffset}`);
+
+    // 字段静默：movement=0 后自驱必须重新登记，货物续行到行程终点
+    h.apply('CV1', { task: 101, mode: 2, movement_x: 0 }, 0.1, 10, 3000);
+    assert.ok(model.conveyorTelemetry.cargoTravelOffset > stranded + CARGO_SPEED * 0.1 * 9,
+      `字段静默后必须续行，实际 ${model.conveyorTelemetry.cargoTravelOffset}`);
+    h.apply('CV1', { task: 101, mode: 2, movement_x: 0 }, 0.1, 150, 4000);
+    assert.ok(Math.abs(model.conveyorTelemetry.cargoTravelOffset - HALF_RANGE) < 1e-6,
+      `货物必须续行到行程终点 ${HALF_RANGE}，实际 ${model.conveyorTelemetry.cargoTravelOffset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('滞留箱复用登记自驱后 movement 脉冲清零再静默：必须续行到行程终点（中鼎 1005 回归）', () => {
+  // 现场序列：stacker 站台放货成滞留货 → 新 task 复用登记自驱 → conveyor movement_x=1 脉冲清零自驱
+  // → 字段静默 → 自驱必须重新登记，把货物续行到行程终点。
+  const h = makeHarness({ CV1: { centerX: 0 } });
+  try {
+    const held = h.insertConveyorCargo('CV1', '370');
+    h.apply('CV1', { task: 371, mode: 2, movement_x: 0 }, 0.1, 1, 1000);
+    assert.equal(held.task, '371', '滞留箱必须复用盖新 task');
+    assert.equal(h.models.CV1.conveyorTelemetry.selfDriveDirection, 1, '复用必须登记自驱驶离');
+    const afterReuse = CARGO_SPEED * 0.1;
+    assert.ok(Math.abs(h.models.CV1.conveyorTelemetry.cargoTravelOffset - afterReuse) < 1e-6,
+      `复用当帧必须自驱推进到 ${afterReuse}，实际 ${h.models.CV1.conveyorTelemetry.cargoTravelOffset}`);
+
+    // 字段接管脉冲清零自驱
+    h.apply('CV1', { task: 371, mode: 3, movement_x: 1 }, 0.1, 2, 2000);
+    assert.equal(h.models.CV1.conveyorTelemetry.selfDriveDirection, 0);
+    const stranded = afterReuse + CARGO_SPEED * 0.1 * 2;
+    assert.ok(Math.abs(h.models.CV1.conveyorTelemetry.cargoTravelOffset - stranded) < 1e-6);
+
+    // 字段静默后续行到终点
+    h.apply('CV1', { task: 371, mode: 2, movement_x: 0 }, 0.1, 150, 3000);
+    assert.ok(Math.abs(h.models.CV1.conveyorTelemetry.cargoTravelOffset - HALF_RANGE) < 1e-6,
+      `货物必须续行到行程终点 ${HALF_RANGE}，实际 ${h.models.CV1.conveyorTelemetry.cargoTravelOffset}`);
   } finally {
     h.dispose();
   }

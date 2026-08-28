@@ -179,6 +179,59 @@ test('front_x/front_y/front_z 当前位驱动行走与升降到库位支撑位',
   }
 });
 
+test('to_x/to_y/to_z 匹配货格时以目标位为移动终点：当前位未跳变即连续滑向目标，动画不等待', () => {
+  const h = makeHarness();
+  try {
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 3, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    // 设备停在列 10 层 1（支撑位 (0,2,20)）：首帧吸附到位
+    h.apply(POSITION_FRAME, 0.1, 10);
+    assert.ok(Math.abs(h.model.stackerTelemetry.rootPosition!.z - 20) < 1e-6);
+    assert.ok(Math.abs(h.model.stackerTelemetry.liftOffset - 2) < 1e-6);
+
+    // WCS 下发目标列 5 层 2（支撑位 (0,3,15)）：当前位 front_ 保持列 10 层 1（设备刚起步 PLC 尚未跳变），
+    // 行走/升降必须立即以目标格为终点连续移动，不等当前位跳变再追赶
+    const TO_FRAME = { ...POSITION_FRAME, to_x: 5, to_y: 2, to_z: 2 };
+    h.apply(TO_FRAME, 0.1, 1);
+    const zAfter1 = h.model.stackerTelemetry.rootPosition!.z;
+    const yAfter1 = h.model.stackerTelemetry.liftOffset;
+    assert.ok(zAfter1 < 20 && zAfter1 > 15, `目标位驱动必须立即向列 5 连续移动，实际 z=${zAfter1}`);
+    assert.ok(yAfter1 > 2 && yAfter1 < 3, `目标位驱动必须立即向层 2 连续升降，实际 y=${yAfter1}`);
+
+    // 持续上报：最终收敛到目标格支撑位（全程当前位未跳变，证明不依赖 front_ 追赶）
+    h.apply(TO_FRAME, 0.1, 400);
+    assert.ok(Math.abs(h.model.stackerTelemetry.rootPosition!.z - 15) < 1e-6, `必须收敛到目标列 5 支撑位 z=15，实际 ${h.model.stackerTelemetry.rootPosition!.z}`);
+    assert.ok(Math.abs(h.model.stackerTelemetry.liftOffset - 3) < 1e-6, `必须收敛到目标层 2 支撑位 y=3，实际 ${h.model.stackerTelemetry.liftOffset}`);
+
+    // 任务完结 to_ 清零且当前位已跟上（列 5 层 2）：回退当前位驱动，目标相同保持原位
+    h.apply({ ...POSITION_FRAME, front_x: 5, front_y: 2, to_x: 0, to_y: 0, to_z: 0 }, 0.1, 5);
+    assert.ok(Math.abs(h.model.stackerTelemetry.rootPosition!.z - 15) < 1e-6, 'to_ 清零且当前位已跟上时必须保持原位');
+    assert.ok(Math.abs(h.model.stackerTelemetry.liftOffset - 3) < 1e-6, 'to_ 清零且当前位已跟上时升降必须保持原位');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('to_x/to_y/to_z 匹配不到货格时回退当前位驱动并一次性告警', () => {
+  const h = makeHarness();
+  try {
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    h.apply(POSITION_FRAME, 0.1, 10);
+    assert.ok(Math.abs(h.model.stackerTelemetry.rootPosition!.z - 20) < 1e-6);
+
+    // 目标列 99 超出绑定范围：回退当前位（列 10）保持原位，告警只报一次
+    const BAD_TO_FRAME = { ...POSITION_FRAME, to_x: 99, to_y: 1, to_z: 2 };
+    h.apply(BAD_TO_FRAME, 0.1, 10);
+    assert.ok(Math.abs(h.model.stackerTelemetry.rootPosition!.z - 20) < 1e-6, '目标位失配必须回退当前位驱动');
+    assert.equal(
+      h.logs.filter((message) => message.includes('目标位') && message.includes('列99')).length,
+      1,
+      '目标位失配告警必须只报一次',
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
 test('首条 front_ 消息直接吸附到上报库位，不从原点缓慢追赶', () => {
   const h = makeHarness();
   try {
@@ -537,8 +590,13 @@ test('放货落货交接成功后不得补建第二个货物：command 未退出
     h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 2);
     h.apply({ ...PLACE_FRAME, front_movement_z: 0 }, 0.1, 2);
 
-    // 收叉：重试解绑落货并交接成功，货物离开 stacker 货物表
+    // 收叉边沿：重试解绑落货；mode==4 下落货只登记待交接站台，收叉完毕才真正交付
     h.apply({ ...PLACE_FRAME, front_movement_z: 2 }, 0.1, 1);
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '收叉边沿必须解绑落货');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, 'mode==4 落货后收叉完毕前货物必须滞留 stacker 侧');
+
+    // 收叉停止边沿（上帧收叉、本帧停止）：延后交接触发成功，货物离开 stacker 货物表
+    h.apply({ ...PLACE_FRAME, front_movement_z: 0 }, 0.1, 1);
     assert.equal(h.state.stackerCargoMeshes.size, 0, '交接成功后货物必须离开 stacker 货物表');
     assert.equal(h.model.stackerTelemetry.frontCargoKey, null, '交接成功后货叉引用必须清空');
 

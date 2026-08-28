@@ -203,6 +203,9 @@ export type StackerModelTelemetryState = {
   /** 放货时锁定的目标排号，放货完成（command 5）用于 fetch 保留与单排同步；取货不留存排号。 */
   frontCargoFetchRow: number | null;
   backCargoFetchRow: number | null;
+  /** mode==4 放货到 conveyor 站台的延后交接：解绑落货时登记站台货格 entityId，收叉完毕才真正交付。 */
+  frontCargoPendingPlatformLocatorId: string | null;
+  backCargoPendingPlatformLocatorId: string | null;
   /** command 边沿检测：取货/放货完成只触发一次。 */
   frontLastCommand: number | null;
   backLastCommand: number | null;
@@ -218,6 +221,9 @@ export type StackerModelTelemetryState = {
   /** 伸出标记：仅在 movement_z 伸出（1/3）时写入，收叉（2/4）期间保持有效并每帧幂等重试绑定/解绑；command 相位退出时清零，防止跨任务串扰。 */
   frontLastMovementZ: number | null;
   backLastMovementZ: number | null;
+  /** 上一帧原始 movement_z（每帧无条件覆盖）：mode==4 延后交接的收叉停止边沿（上帧收叉 2/4 → 本帧停止 0）检测用。 */
+  frontPrevRawMovementZ: number | null;
+  backPrevRawMovementZ: number | null;
   nodeBaselines: Map<TransformNode, Vector3>;
   lastTargetKey: string | null;
   /** 上一帧 front_x/front_y/front_z 组成的库位键；变化时触发动作收尾（catch-up）。 */
@@ -307,6 +313,12 @@ export type ConveyorModelTelemetryState = {
   lastMovementDirection: number;
   /** 接管货物后的自驱走行方向（±1，0=关闭）：快照断流期间不等新 MQTT 消息直接执行移动动画，新消息到达即清零。 */
   selfDriveDirection: number;
+  /**
+   * 本机持货是否已被驱动过（字段或自驱使货物走行过）：true 时字段静默（movement 归 0）允许重新登记自驱续行到终点；
+   * false（如 stacker 站台放货落座后从未走行）保持滞留停泊，等待 task 复用才驶离。
+   * 货物到达本机的三条路径（settleCargoTransfer / acceptPlatformPlacedCargo / 起点刷出）均复位为 false。
+   */
+  cargoDriveEngaged: boolean;
   /** 最近一次应用的快照 receivedAt：识别新消息到达并结束自驱；断流重放时保持不变。 */
   lastSnapshotReceivedAt: number;
   cargoTravelOffset: number;
@@ -477,8 +489,14 @@ export interface SpecializedTelemetryDriverContext {
   placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
   /** RGV 列接驳对齐用：列绑定实体为 conveyor 时返回其载货面中心（cargo.travel.nodes 包围盒中心）；非 conveyor 或实体不存在返回 null。 */
   resolveConveyorDeckCenterWorld(entityId: string): Vector3 | null;
-  /** RGV 列放货订阅仲裁交付：列绑定实体为等待该 task 的 conveyor 时把货物交付给它（settle+广播）；预检不过返回 false，不拆除 RGV 侧引用。 */
-  deliverRgvCargoToConveyorColumn(entityId: string, cargoKey: string, task: string): boolean;
+  /**
+   * RGV 列放货订阅仲裁交付：列绑定实体为等待该 task 的 conveyor 时把货物交付给它（settle+广播）；预检不过返回 false，不拆除 RGV 侧引用。
+   * preserveAxialPosition=true（承接方消息滞后、交接插值已推进、货物已离车）时按货物当前位置在行走轴上的投影落地，
+   * 对齐轨迹后直接向终点走行，不强制回到进入端。
+   */
+  deliverRgvCargoToConveyorColumn(entityId: string, cargoKey: string, task: string, preserveAxialPosition?: boolean): boolean;
   /** RGV 持货外部拉取就绪门控：仅放货意图（command 2）且车已到位时允许 pull 摘除，防止行车中途摘货。 */
   isRgvCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean;
+  /** stacker 持货外部拉取门控：mode==4 落货站台后待收叉完毕的货物不允许 pull 提前摘除。 */
+  isStackerCargoPendingPlatformHandoff(cargo: GeneratedCargoRuntimeEntry): boolean;
 }

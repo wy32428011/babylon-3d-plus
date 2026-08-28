@@ -262,15 +262,20 @@ test('缺省不勾选自动销毁：新 task 边沿即复用遗留箱，盖上�
       `复用必须从滞留位置继续走行，期望 ${strandedOffset + 0.03}，实际 ${offsetAfterReuse}`,
     );
 
-    // 下一条新消息 movement_x=0：自驱结束，立即停车
+    // 新消息 movement_x=0：自驱不被打断，连贯推进（自驱只被 movement_x 非 0 的字段接管）
     h.apply({ ...STOPPED_EMPTY, task: 2 }, 0.1, 1, 4000);
-    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 0, '新消息必须结束自驱');
-    assert.equal(h.model.conveyorTelemetry.cargoTravelOffset, offsetAfterReuse, '新消息 movement_x=0 必须停车');
-
-    // 线体运行后从滞留位置继续走行
-    h.apply({ ...RUNNING, task: 2 }, 0.1, 1, 5000);
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 的新消息不得结束自驱');
+    const continuedOffset = h.model.conveyorTelemetry.cargoTravelOffset;
     assert.ok(
-      h.model.conveyorTelemetry.cargoTravelOffset > offsetAfterReuse,
+      Math.abs(continuedOffset - (offsetAfterReuse + 0.3 * 0.1)) < 1e-6,
+      `movement_x=0 的新消息下自驱必须继续推进到 ${offsetAfterReuse + 0.03}，实际 ${continuedOffset}`,
+    );
+
+    // 线体运行（movement_x=1）：字段显式接管，自驱清零，货物继续走行
+    h.apply({ ...RUNNING, task: 2 }, 0.1, 1, 5000);
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 0, 'movement_x 非 0 的新消息必须接管字段驱动');
+    assert.ok(
+      h.model.conveyorTelemetry.cargoTravelOffset > continuedOffset,
       '复用后货物必须随线体继续走行',
     );
   } finally {
@@ -325,10 +330,13 @@ test('新 task 边沿即刷出：无旧箱时 movement_x=0 也立即刷在轨迹
       `自驱必须持续推进到 ${spawnedOffset + 0.3}，实际 ${selfDrivenOffset}`,
     );
 
-    // 新消息到达 movement_x=0：自驱结束，立即停车
+    // 新消息到达 movement_x=0：自驱不被打断，继续连贯推进
     h.apply({ task: 5, front_has_goods: 0, back_has_goods: 0, movement_x: 0 }, 0.1, 1, 2000);
-    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 0, '新消息必须结束自驱');
-    assert.equal(h.model.conveyorTelemetry.cargoTravelOffset, selfDrivenOffset, '新消息 movement_x=0 必须停车');
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 的新消息不得结束自驱');
+    assert.ok(
+      Math.abs(h.model.conveyorTelemetry.cargoTravelOffset - (selfDrivenOffset + 0.3 * 0.1)) < 1e-6,
+      `自驱必须在新消息 movement_x=0 时继续推进到 ${selfDrivenOffset + 0.03}，实际 ${h.model.conveyorTelemetry.cargoTravelOffset}`,
+    );
   } finally {
     h.dispose();
   }

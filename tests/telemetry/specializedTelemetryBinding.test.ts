@@ -120,13 +120,15 @@ function createSnapshot(overrides: Partial<DeviceTelemetrySnapshot> = {}): Devic
   };
 }
 
-test('StackerTelemetryDriver 始终由 front_x/front_y/front_z 驱动位置，货叉行程按货格几何解算', () => {
+test('StackerTelemetryDriver 由 front_ 当前位与 to_ 目标位共同驱动位置，货叉行程按货格几何解算', () => {
   const source = readFileSync('src/runtime/babylon/telemetry/specialized/stackerDriver.ts', 'utf8');
-  // 位置唯一驱动源：front_ 三字段匹配当前库位
+  // 当前位驱动源：front_ 三字段匹配当前库位（库位键跟踪/首帧吸附/货叉几何/交接判定）
   assert.match(source, /readIntegerField\(snapshot\.fields, 'front_x'\)/);
   assert.match(source, /readIntegerField\(snapshot\.fields, 'front_z'\)/);
-  // 不再依赖 to_ 目标位与 movement_x/movement_y 兜底
-  assert.doesNotMatch(source, /readIntegerField\(snapshot\.fields, 'to_x'\)/);
+  // 目标位驱动源：to_ 非全 0 且匹配货格时作为行走/升降移动终点（WCS 提前下发，动画连续）
+  assert.match(source, /readIntegerField\(snapshot\.fields, 'to_x'\)/);
+  assert.match(source, /readIntegerField\(snapshot\.fields, 'to_z'\)/);
+  // 不依赖 movement_x/movement_y 兜底
   assert.doesNotMatch(source, /readIntegerField\(snapshot\.fields, 'movement_x'\)/);
   assert.doesNotMatch(source, /readIntegerField\(snapshot\.fields, 'movement_y'\)/);
   // 货叉行程不再读参数，由节点几何实测 + 货格远端覆盖决定

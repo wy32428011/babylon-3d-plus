@@ -75,14 +75,18 @@ export class StackerTelemetryDriver {
     return this.context.host;
   }
 
-  /** 对单台 stacker 应用根节点、载货台和前后叉的遥测驱动；位置始终由 front_x/front_y/front_z 当前库位解算。 */
+  /** 对单台 stacker 应用根节点、载货台和前后叉的遥测驱动；移动目标优先取 to_x/to_y/to_z 目标货格，缺省回退 front_x/front_y/front_z 当前库位。 */
   applyToModel(model: ModelRuntimeEntry, snapshot: StackerTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.stackerTelemetry;
     const frontCell = this.resolveStackerFrontCell(snapshot);
     this.reportStackerRuntimeState(snapshot);
     writeDeviceTelemetryMetadata(model, snapshot);
 
-    const targetOffsets = frontCell.cell ? this.resolveStackerTargetMotionOffsets(model, frontCell.cell.supportPosition) : null;
+    const frontOffsets = frontCell.cell ? this.resolveStackerTargetMotionOffsets(model, frontCell.cell.supportPosition) : null;
+    // to_x/to_y/to_z（WCS 目标货格）非全 0 且能匹配已绑定货格时，以目标格支撑位为行走/升降终点：
+    // 任务下发即给出目的地，本体连续滑向目标，不等当前位 front_ 到位跳变再追赶；全 0/失配回退当前位驱动
+    const toCell = this.resolveStackerToCell(snapshot);
+    const targetOffsets = toCell ? this.resolveStackerTargetMotionOffsets(model, toCell.supportPosition) : frontOffsets;
     // 有效 command 每帧只解析一次（mode==4 时推进 signalBits 锁存机），三处消费点共用同一值
     const frontCommand = this.resolveStackerSideCommand(model, snapshot, 'front');
     const backCommand = this.resolveStackerSideCommand(model, snapshot, 'back');
@@ -90,7 +94,7 @@ export class StackerTelemetryDriver {
     this.completeStackerCargoOnPhaseExit(model, frontCommand, frontCell.cell, 'front');
     this.completeStackerCargoOnPhaseExit(model, backCommand, frontCell.cell, 'back');
     // front_ 跟踪：首帧直接吸附到上报库位；后续跳变表示设备转场，快速收尾取/放动作并收叉，收回前冻结平移/升降
-    this.trackStackerFrontCellChange(model, frontCell.key, frontCell.cell, targetOffsets, frontCommand, backCommand);
+    this.trackStackerFrontCellChange(model, frontCell.key, frontCell.cell, frontOffsets ?? targetOffsets, frontCommand, backCommand);
 
     if (state.forkCatchUp) {
       this.applyStackerForkCatchUpRetract(model, snapshot, deltaSeconds);
@@ -130,6 +134,32 @@ export class StackerTelemetryDriver {
     return supportPosition
       ? { cell: { locator, supportPosition }, mismatch: false, key }
       : { cell: null, mismatch: true, key };
+  }
+
+  /**
+   * to_x/to_y/to_z 目标货格解析：三字段全部缺失或全为 0（无目标/任务完结）返回 null，调用方回退当前位驱动；
+   * 非全 0 但匹配不到已绑定货格（或货格列层越界）时一次性告警并回退当前位驱动。
+   * 目标货格只决定行走/升降的移动终点，货叉几何、库位键跟踪与交接判定仍由 front_ 当前位承担。
+   */
+  private resolveStackerToCell(
+    snapshot: StackerTelemetrySnapshot,
+  ): { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null {
+    const toX = readIntegerField(snapshot.fields, 'to_x');
+    const toY = readIntegerField(snapshot.fields, 'to_y');
+    const toZ = readIntegerField(snapshot.fields, 'to_z');
+    if (!snapshot.assetCode || toX === null || toY === null || toZ === null) return null;
+    if (toX === 0 && toY === 0 && toZ === 0) return null;
+    const locator = this.host.findLocatorByDevice(snapshot.assetCode, toX, toY, toZ);
+    if (!locator) {
+      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:to-cell:${toZ}:${toX}:${toY}`;
+      if (!this.state.reportedMissingTargets.has(reportKey)) {
+        this.state.reportedMissingTargets.add(reportKey);
+        this.host.pushLog(`错误：Stacker ${snapshot.assetCode} 目标位（排${toZ} 列${toX} 层${toY}）未匹配到任何已绑定货格，回退当前位驱动。`);
+      }
+      return null;
+    }
+    const supportPosition = this.resolveLocatorBoxSupportPosition(locator, toX, toY);
+    return supportPosition ? { locator, supportPosition } : null;
   }
 
   /** 当前位匹配失败的两类一次性报错：设备无任何已绑定货格 / 当前位超出已绑定货格的列层范围。 */
@@ -629,6 +659,9 @@ export class StackerTelemetryDriver {
   ): void {
     const state = model.stackerTelemetry;
     const movement = readIntegerField(snapshot.fields, side === 'front' ? 'front_movement_z' : 'back_movement_z');
+    // mode==4 放货站台交接延后到收叉完毕（signalBits 锁存相位没有可靠的 command 5 时序，
+    // 落货当场交付会让 conveyor 在货叉尚未退出时就把货拉走）
+    const deferPlatformHandoff = readIntegerField(snapshot.fields, 'mode') === 4;
 
     if (!snapshot.faulted) {
       // 取货伸叉开始瞬间才在当前货格刷出货物并接管该格口渲染；command 1 本身不刷货，
@@ -660,7 +693,7 @@ export class StackerTelemetryDriver {
       // 伸叉动画完结（偏移到达目标行程）：取货阶段绑定货物上叉，放货阶段解绑落入箱位
       if (!state.forkCatchUp && this.isStackerForkFullyExtended(model, side)) {
         if (command === 1 || command === 2) this.bindStackerCargo(model, side);
-        else if (command === 3 || command === 4) this.unbindStackerCargo(model, targetLocator, targetPosition, side);
+        else if (command === 3 || command === 4) this.unbindStackerCargo(model, targetLocator, targetPosition, side, deferPlatformHandoff);
       }
       // 收叉阶段补齐：伸出窗口结束（伸 1/3 → 收 2/4）但叉未达计算行程时，上面的到位判定永不触发；
       // 收叉期间每帧按到达动作点重试绑定/解绑（两者幂等：已绑定/已解绑直接早退），
@@ -671,7 +704,16 @@ export class StackerTelemetryDriver {
       const retracting = movement === 2 || movement === 4;
       if (!state.forkCatchUp && extendSeen && retracting) {
         if (command === 1 || command === 2) this.bindStackerCargo(model, side);
-        else if (command === 3 || command === 4) this.unbindStackerCargo(model, targetLocator, targetPosition, side);
+        else if (command === 3 || command === 4) this.unbindStackerCargo(model, targetLocator, targetPosition, side, deferPlatformHandoff);
+      }
+      // mode==4 延后交接的收叉停止边沿：上一帧在收叉、本帧货叉停止即视为收叉完毕，当场交付站台滞留货；
+      // 收叉动画完结（锁存清除）路径由 completeStackerPlace 相位退出兜底交付，两者幂等；
+      // 边沿判定必须用逐帧原始值（frontLastMovementZ 是粘性伸出标记，不记录收叉）
+      const pendingLocatorId = side === 'front' ? state.frontCargoPendingPlatformLocatorId : state.backCargoPendingPlatformLocatorId;
+      const prevRawMovement = side === 'front' ? state.frontPrevRawMovementZ : state.backPrevRawMovementZ;
+      if (pendingLocatorId !== null && (prevRawMovement === 2 || prevRawMovement === 4) && movement === 0) {
+        const pendingCargoKey = this.getStackerForkCargoKey(model, side);
+        if (pendingCargoKey) this.context.placeCargoIntoConveyorPlatform(pendingLocatorId, pendingCargoKey);
       }
     }
 
@@ -680,9 +722,11 @@ export class StackerTelemetryDriver {
     if (side === 'front') {
       state.frontLastCommand = command;
       if (movement === 1 || movement === 3) state.frontLastMovementZ = movement;
+      state.frontPrevRawMovementZ = movement;
     } else {
       state.backLastCommand = command;
       if (movement === 1 || movement === 3) state.backLastMovementZ = movement;
+      state.backPrevRawMovementZ = movement;
     }
   }
 
@@ -784,7 +828,8 @@ export class StackerTelemetryDriver {
    * 放货伸叉结束，货物解绑并留在目标箱位支撑位，货叉随后空收。
    * 落货保持搬运朝向（货叉托举/放下均不改变货物姿态）：优先沿用绑定时锁定的朝向，
    * 其次取货物当前世界朝向，最后回退货格朝向；缩放不取货格镜像，避免与保留朝向错配。
-   * 非 fetch 的 conveyor 站台目标在落货当场交接给 conveyor 继续流转，不等 command 5；
+   * 非 fetch 的 conveyor 站台目标：mode==4 时交接延后到收叉完毕（登记待交接站台，由收叉停止边沿
+   * 或相位退出兜底交付），其余模式在落货当场交接给 conveyor 继续流转，不等 command 5；
    * 交接被拒（对方已有货等）保持原位，command 5 走原销毁路径。
    */
   private unbindStackerCargo(
@@ -792,6 +837,7 @@ export class StackerTelemetryDriver {
     targetLocator: LocatorRuntimeEntry | null,
     targetPosition: Vector3 | null,
     side: StackerForkSide,
+    deferPlatformHandoff = false,
   ): void {
     const state = model.stackerTelemetry;
     const cargoKey = this.getStackerForkCargoKey(model, side);
@@ -823,7 +869,13 @@ export class StackerTelemetryDriver {
           ?? currentRotation ?? holdPose.rotation;
         this.host.setGeneratedCargoRootPose(cargo, holdPosition, rotation, null);
       }
-      this.context.placeCargoIntoConveyorPlatform(targetLocator.entityId, cargoKey);
+      if (deferPlatformHandoff) {
+        // mode==4：登记待交接站台，收叉完毕（收叉停止边沿/相位退出兜底）才交付
+        if (side === 'front') state.frontCargoPendingPlatformLocatorId = targetLocator.entityId;
+        else state.backCargoPendingPlatformLocatorId = targetLocator.entityId;
+      } else {
+        this.context.placeCargoIntoConveyorPlatform(targetLocator.entityId, cargoKey);
+      }
     }
   }
 
@@ -861,7 +913,7 @@ export class StackerTelemetryDriver {
     this.bindStackerCargo(model, side);
   }
 
-  /** 放货完成：fetch 库位保留货物至单排同步响应后销毁，其余立即销毁；conveyor 站台交接已在落货时完成。 */
+  /** 放货完成：fetch 库位保留货物至单排同步响应后销毁，其余立即销毁；conveyor 站台交接在落货时（mode==4 延后到收叉完毕）完成。 */
   private completeStackerPlace(
     model: ModelRuntimeEntry,
     targetLocator: LocatorRuntimeEntry | null,
@@ -877,6 +929,13 @@ export class StackerTelemetryDriver {
     if (this.host.keepCargoForFetchRowSync(fetchRow, model.assetCode, side)) {
       this.host.handleFetchRowSync(fetchRow as number);
     } else if (fetchRow === null) {
+      // mode==4 延后交接兜底：收叉动画完结（锁存清除）即相位退出，当场补交付站台滞留货；
+      // 交付成功不销毁，被拒（对方已有货等）保持原销毁路径
+      const pendingLocatorId = side === 'front' ? state.frontCargoPendingPlatformLocatorId : state.backCargoPendingPlatformLocatorId;
+      if (pendingLocatorId !== null && this.context.placeCargoIntoConveyorPlatform(pendingLocatorId, cargoKey)) {
+        this.clearStackerForkCargoState(model, side);
+        return;
+      }
       this.disposeStackerCargoByKey(cargoKey);
     }
     this.clearStackerForkCargoState(model, side);
@@ -956,6 +1015,7 @@ export class StackerTelemetryDriver {
       state.frontCargoHoldRotation = null;
       state.frontCargoHoldScaling = null;
       state.frontCargoFetchRow = null;
+      state.frontCargoPendingPlatformLocatorId = null;
       return;
     }
 
@@ -965,6 +1025,7 @@ export class StackerTelemetryDriver {
     state.backCargoHoldRotation = null;
     state.backCargoHoldScaling = null;
     state.backCargoFetchRow = null;
+    state.backCargoPendingPlatformLocatorId = null;
   }
 
   /** 按键销毁堆垛机运行时货物，map 中不存在时幂等跳过。 */
@@ -988,6 +1049,22 @@ export class StackerTelemetryDriver {
     }
     this.state.stackerCargoMeshes.delete(key);
     return cargo;
+  }
+
+  /**
+   * 货物是否处于 mode==4 延后交接等待期（已落货站台、待收叉完毕交付）：
+   * 外部拉取（订阅链 pull）不得提前摘走，否则货叉尚未退出货物就被下游拉走。
+   */
+  isStackerCargoPendingPlatformHandoff(cargo: GeneratedCargoRuntimeEntry): boolean {
+    for (const { model } of this.host.collectModels()) {
+      const state = model.stackerTelemetry;
+      if (!state) continue;
+      if (state.frontCargoPendingPlatformLocatorId !== null && state.frontCargoKey !== null
+        && this.state.stackerCargoMeshes.get(state.frontCargoKey) === cargo) return true;
+      if (state.backCargoPendingPlatformLocatorId !== null && state.backCargoKey !== null
+        && this.state.stackerCargoMeshes.get(state.backCargoKey) === cargo) return true;
+    }
+    return false;
   }
 
   /**
