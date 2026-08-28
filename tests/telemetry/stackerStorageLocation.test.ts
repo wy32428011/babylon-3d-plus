@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { resolveLocatorBoxIndex, resolveLocatorCellLocalBounds, resolveLocatorCellLocalIndex, resolveStackerStorageTargetOffsets } from '../../src/runtime/babylon/telemetry/stackerStorageLocation';
+import { NullEngine, Scene, TransformNode } from '@babylonjs/core';
+import { resolveLocatorBoxIndex, resolveLocatorCellLocalBounds, resolveLocatorCellLocalIndex, resolveLocatorCellSupportWorldPosition, resolveStackerStorageTargetOffsets } from '../../src/runtime/babylon/telemetry/stackerStorageLocation';
 
 test('目标库位世界坐标必须相对货叉初始锚点换算行走与升降偏移', () => {
   assert.equal(typeof resolveStackerStorageTargetOffsets, 'function');
@@ -113,4 +114,28 @@ test('单格本地 AABB 越界返回 null', () => {
   assert.equal(resolveLocatorCellLocalBounds(locator, -1), null);
   assert.equal(resolveLocatorCellLocalBounds(locator, 4), null);
   assert.equal(resolveLocatorCellLocalBounds(locator, 1.5), null);
+});
+
+test('货格根节点已销毁时支撑位解析返回 null，避免脏世界矩阵误导堆垛机', () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const root = new TransformNode('locator-root', scene);
+    root.position.set(10, 0.3, 5);
+    const locator = {
+      columns: 2,
+      layers: 2,
+      cellSteps: { columnStepX: 1.2, layerStepY: 0.8 },
+      root,
+    };
+    const alive = resolveLocatorCellSupportWorldPosition(locator, 3);
+    assert.ok(alive);
+    assert.ok(Math.abs(alive.x - 11.2) < 1e-9);
+
+    root.dispose();
+    assert.equal(resolveLocatorCellSupportWorldPosition(locator, 3), null);
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
 });

@@ -3481,9 +3481,19 @@ export class SceneRuntime {
 
     let runtimeLocator = this.locators.get(entity.id);
     if (runtimeLocator && runtimeLocator.root.isDisposed()) {
-      // 模型重载会递归销毁挂在模型根下的货格节点；条目仍在但节点已死，必须整体重建（重挂 parent 无法复活）。
-      this.locators.delete(entity.id);
-      runtimeLocator = undefined;
+      // 模型重载会递归销毁挂在模型根下的货格节点（重挂 parent 无法复活）；
+      // 原地替换节点字段而不是换条目对象：locatorTargets/locatorDeviceIndex/fetch 上下文都持有条目引用，
+      // 换对象会让索引滞留死节点直到下一次完整同步，期间遥测按死节点的脏矩阵解算库位。
+      const rebuilt = this.createLocator(entity.id, locator, bindingSteps);
+      runtimeLocator.material.dispose();
+      runtimeLocator.root = rebuilt.root;
+      runtimeLocator.fillMesh = rebuilt.fillMesh;
+      runtimeLocator.edgeLines = rebuilt.edgeLines;
+      runtimeLocator.columnLabelsRoot = rebuilt.columnLabelsRoot;
+      runtimeLocator.columnLabels = rebuilt.columnLabels;
+      runtimeLocator.cellSteps = rebuilt.cellSteps;
+      runtimeLocator.material = rebuilt.material;
+      runtimeLocator.signature = signature;
     }
     if (!runtimeLocator) {
       runtimeLocator = this.createLocator(entity.id, locator, bindingSteps);

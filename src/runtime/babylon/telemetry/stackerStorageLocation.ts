@@ -138,6 +138,8 @@ export function resolveLocatorCellLocalBounds(
  */
 export function resolveLocatorCellSupportWorldPosition(locator: LocatorCellGridShape, boxIndex: number): Vector3 | null {
   if (!Number.isInteger(boxIndex) || boxIndex < 0 || boxIndex >= locator.columns * locator.layers) return null;
+  // 死节点（宿主模型重载递归销毁后）的世界矩阵是脱离父链的脏值，必须让调用方走越界回退而不是静默走错。
+  if (locator.root.isDisposed()) return null;
   const columnIndex = boxIndex % locator.columns;
   const layerIndex = Math.floor(boxIndex / locator.columns);
   locator.root.computeWorldMatrix(true);
