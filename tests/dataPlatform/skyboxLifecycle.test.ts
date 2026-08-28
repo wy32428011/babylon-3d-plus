@@ -20,12 +20,14 @@ type HarnessState = {
   currentBinding: Record<string, unknown> | null;
   currentProjectRoot: string | null;
   currentSharedAssetRoot: string | null;
+  currentSharedEnvironmentRoot: string | null;
   currentSharedSkyboxRoot: string | null;
   projectActivationFailure: Error | null;
   listAssetsFailure: Error | null;
   rememberRecentFailure: Error | null;
   events: string[];
   sharedAssetRoots: Array<string | null>;
+  sharedEnvironmentRoots: Array<string | null>;
   sharedSkyboxRoots: Array<string | null>;
   modelStarts: Array<{ baseUrl: string; editorRoot: string }>;
   skyboxStarts: Array<{ baseUrl: string; editorRoot: string; contextKey: string | null }>;
@@ -71,12 +73,14 @@ function resetHarness(root: string): HarnessState {
     currentBinding: null,
     currentProjectRoot: null,
     currentSharedAssetRoot: null,
+    currentSharedEnvironmentRoot: null,
     currentSharedSkyboxRoot: null,
     projectActivationFailure: null,
     listAssetsFailure: null,
     rememberRecentFailure: null,
     events: [],
     sharedAssetRoots: [],
+    sharedEnvironmentRoots: [],
     sharedSkyboxRoots: [],
     modelStarts: [],
     skyboxStarts: [],
@@ -97,14 +101,12 @@ const harnessPlugin: Plugin = {
   enforce: 'pre',
   resolveId(source, importer) {
     const normalizedImporter = importer?.replace(/\\/g, '/') ?? '';
-    if (source === 'electron') return '\0task4-electron';
 
     if (normalizedImporter.includes('/electron/ipc/dataPlatformProjectService.ts')) {
       if (source === './assetRegistry.js') return '\0task4-asset-registry';
       if (source === './projectAssetStore.js') return '\0task4-project-store';
-      if (source === './modelPackageScanner.js') return '\0task4-model-scanner';
       if (source === './dataPlatformBindingStore.js') return '\0task4-binding-store';
-      if (source === './dataPlatformModelSync.js') return '\0task4-model-sync';
+      if (source === './dataPlatformModelIncrementalSync.js') return '\0task4-model-sync';
       if (source === './dataPlatformImageSync.js') return '\0task4-image-sync';
       if (source === './dataPlatformSkyboxSync.js') return '\0task4-skybox-sync';
       if (source === './dataPlatformTransfer.js') return '\0task4-transfer';
@@ -126,32 +128,6 @@ const harnessPlugin: Plugin = {
   },
   load(id) {
     const stateLookup = `globalThis[${JSON.stringify(HARNESS_STATE_KEY)}]`;
-    if (id === '\0task4-electron') {
-      return `
-        const getState = () => ${stateLookup};
-        export const app = {
-          isPackaged: false,
-          getAppPath: () => getState().appPath,
-          getPath: (name) => name === 'userData' ? getState().userDataRoot : getState().appPath,
-        };
-        export const dialog = {
-          showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
-          showSaveDialog: async () => ({ canceled: true, filePath: undefined }),
-        };
-        export const ipcMain = {
-          handle(channel, handler) {
-            getState().handlers.set(channel, handler);
-          },
-        };
-        export const BrowserWindow = { getAllWindows: () => [] };
-        export const net = {
-          fetch() {
-            getState().networkCalls += 1;
-            throw new Error('测试禁止真实网络请求。');
-          },
-        };
-      `;
-    }
     if (id === '\0task4-asset-registry') {
       return `export const encodeAssetUrl = (filePath) => 'editor-asset://local/' + encodeURIComponent(filePath);`;
     }
@@ -186,6 +162,11 @@ const harnessPlugin: Plugin = {
           getState().sharedAssetRoots.push(root);
           getState().events.push('setAsset:' + root);
         }
+        export function setSharedProjectEnvironmentRoot(root) {
+          getState().currentSharedEnvironmentRoot = root;
+          getState().sharedEnvironmentRoots.push(root);
+          getState().events.push('setEnvironment:' + root);
+        }
         export function setSharedProjectSkyboxRoot(root) {
           getState().currentSharedSkyboxRoot = root;
           getState().sharedSkyboxRoots.push(root);
@@ -209,12 +190,14 @@ const harnessPlugin: Plugin = {
           return {
             currentProjectRoot: getState().currentProjectRoot,
             sharedProjectAssetRoot: getState().currentSharedAssetRoot,
+            sharedProjectEnvironmentRoot: getState().currentSharedEnvironmentRoot,
             sharedProjectSkyboxRoot: getState().currentSharedSkyboxRoot,
           };
         }
         export function restoreProjectAssetStoreState(snapshot) {
           getState().currentProjectRoot = snapshot.currentProjectRoot;
           getState().currentSharedAssetRoot = snapshot.sharedProjectAssetRoot;
+          getState().currentSharedEnvironmentRoot = snapshot.sharedProjectEnvironmentRoot;
           getState().currentSharedSkyboxRoot = snapshot.sharedProjectSkyboxRoot;
           getState().events.push('restoreProjectState');
         }
@@ -231,9 +214,6 @@ const harnessPlugin: Plugin = {
         export async function selectCurrentProjectRootWithDialog() { return null; }
       `;
     }
-    if (id === '\0task4-model-scanner') {
-      return `export async function scanModelPackage() { return { asset: null, skipped: { reason: 'empty' } }; }`;
-    }
     if (id === '\0task4-binding-store') {
       return `
         import path from 'node:path';
@@ -243,6 +223,13 @@ const harnessPlugin: Plugin = {
         export async function readDataPlatformBinding() { return getState().binding; }
         export const resolveDataPlatformProjectRoot = (root, projectId) => path.resolve(root, 'Projects', projectId);
         export const resolveDataPlatformSharedResourcesRoot = (root) => path.resolve(root, 'SharedResources');
+        export function resolveDataPlatformBindingWorkspaceRoot(projectRoot, metadata) {
+          if (metadata?.workspaceRoot) return path.resolve(metadata.workspaceRoot);
+          return path.dirname(path.dirname(path.resolve(projectRoot)));
+        }
+        export function resolveDataPlatformBindingSharedResourcesRoot(projectRoot, metadata) {
+          return path.resolve(resolveDataPlatformBindingWorkspaceRoot(projectRoot, metadata), 'SharedResources');
+        }
         export function setCurrentDataPlatformBinding(projectRoot, metadata) {
           getState().currentBinding = { projectRoot, metadata };
           getState().events.push('setCurrentBinding:' + projectRoot);
@@ -302,6 +289,7 @@ const harnessPlugin: Plugin = {
     if (id === '\0task4-transfer') {
       return `
         export class DataPlatformRollbackError extends Error {}
+        export async function assertDiskWriteCapacity() {}
         export function assertPathInside() {}
         export function isPathInside() { return true; }
         export const MAX_ARCHIVE_COMPRESSED_BYTES = 1024;
@@ -359,7 +347,14 @@ before(async () => {
     root: process.cwd(),
     server: { middlewareMode: true, hmr: false },
     optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['electron'] },
+    resolve: {
+      alias: {
+        electron: path.resolve(process.cwd(), 'tests/dataPlatform/fixtures/electronStub.mjs'),
+        './modelPackageScanner.js': path.resolve(process.cwd(), 'tests/dataPlatform/fixtures/modelPackageScannerStub.mjs'),
+        './dataPlatformEnvironmentIndex.js': path.resolve(process.cwd(), 'tests/dataPlatform/fixtures/dataPlatformEnvironmentIndexStub.mjs'),
+        '../modelUnits.js': path.resolve(process.cwd(), 'tests/dataPlatform/fixtures/modelUnitsStub.mjs'),
+      },
+    },
     plugins: [harnessPlugin],
   });
 });
@@ -753,6 +748,7 @@ test('天空盒 prepare 在项目切换与 dispose 竞态中失效并被等待�
   state.events.length = 0;
   state.sharedSkyboxRoots.length = 0;
   state.skyboxStarts.length = 0;
+  state.currentBinding = null;
   const disposeWorkspaceRoot = path.join(root, 'dispose-workspace');
   const disposeSharedRoot = path.resolve(disposeWorkspaceRoot, 'SharedResources');
   const disposePrepareGate = createDeferred();

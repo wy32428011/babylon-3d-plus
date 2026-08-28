@@ -45,8 +45,8 @@ const IDENTITY_TRANSFORM: TransformComponent = {
 
 class FakePlaybackAdapter implements AutoPatrolPlaybackAdapter {
   nowMs = 0;
-  routeValidationError: string | null = null;
   routeValidationException: Error | null = null;
+  routeValidationCalls = 0;
   pose: SceneCameraPose = createSceneCameraPose({ x: -10, y: 5, z: 0 }, { x: -10, y: 5, z: 10 });
   private frameCallback: (() => void) | null = null;
   events: unknown[] = [];
@@ -81,8 +81,9 @@ class FakePlaybackAdapter implements AutoPatrolPlaybackAdapter {
     this.records.push(structuredClone(record));
   };
   validateRoute = (): string | null => {
+    this.routeValidationCalls += 1;
     if (this.routeValidationException) throw this.routeValidationException;
-    return this.routeValidationError;
+    return null;
   };
   subscribeFrame = (callback: () => void): (() => void) => {
     this.frameCallback = callback;
@@ -169,25 +170,16 @@ test('按 Hierarchy 顺序选择第一条可播放巡检路线', () => {
   assert.equal(findFirstPlayablePatrolRoute([disabled, incomplete]), null);
 });
 
-test('启动前执行运行时路线校验，并将几何错误原样返回给控制端', () => {
+test('启动自动巡检不执行场景几何校验，路线可直接穿过模型', () => {
   const adapter = new FakePlaybackAdapter();
   const controller = new AutoPatrolPlaybackController(adapter);
   const route = createRoute('once');
-  adapter.routeValidationError = '节点 1 到节点 2 的路径被阻挡或不可达。';
+  adapter.routeValidationException = new Error('不应调用场景几何校验');
   controller.setRoutes([route]);
 
-  assert.deepEqual(controller.start(route.entityId), {
-    ok: false,
-    error: adapter.routeValidationError,
-  });
-  assert.equal(controller.getSnapshot().phase, 'idle');
-
-  adapter.routeValidationError = null;
-  adapter.routeValidationException = new Error('场景网格不可用');
-  assert.deepEqual(controller.start(route.entityId), {
-    ok: false,
-    error: '巡检路线校验失败：场景网格不可用',
-  });
+  assert.deepEqual(controller.start(route.entityId), { ok: true });
+  assert.equal(adapter.routeValidationCalls, 0);
+  assert.equal(controller.getSnapshot().phase, 'moving');
   controller.dispose();
 });
 

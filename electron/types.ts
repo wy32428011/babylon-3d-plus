@@ -235,6 +235,10 @@ export type DataPlatformModelSyncProgress = {
   total: number;
   message: string;
   error: string | null;
+  /** 本轮是否实际修改模型资产库；false 时 renderer 不应重复读取资产或刷新场景。 */
+  libraryChanged?: boolean;
+  /** 仅包含运行时内容 revision 变化的普通/组合模型键，例如 model:12、combo:8。 */
+  runtimeChangedResourceKeys?: string[];
 };
 
 export type DataPlatformEnvironmentSyncRequest = {

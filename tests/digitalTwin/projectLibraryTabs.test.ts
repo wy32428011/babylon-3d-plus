@@ -302,7 +302,8 @@ test('天空盒同步订阅委托 controller 清理迟到事件，列表成功�
   assert.ok(source.includes('controller.receiveProgress(progress);'));
   assert.ok(source.includes('unsubscribe?.();'));
   assert.ok(source.includes('controller.dispose();'));
-  assert.ok(source.includes('const result = await loadProjectAssets(false);'));
+  assert.ok(source.includes('if (!await waitForInitialProjectAssetsLoad(reloadSceneSessionId)) {'));
+  assert.ok(source.includes('const result = await loadProjectAssets();'));
   assert.ok(source.includes('applyAssets: (assets, sceneId) => relinkCurrentSkyboxFromAssets(assets, sceneId)'));
   assert.ok(source.includes('updateSkyboxConfig(refreshedSkybox)'));
   assert.match(controllerSource, /await options\.reloadAssets\(\)/);
@@ -311,7 +312,7 @@ test('天空盒同步订阅委托 controller 清理迟到事件，列表成功�
   const loadStart = source.indexOf('const loadProjectAssets = useCallback');
   const loadEnd = source.indexOf('/** 从主进程本地图片索引加载同步图片', loadStart);
   const loadProjectAssetsSource = source.slice(loadStart, loadEnd);
-  assert.ok(loadProjectAssetsSource.includes('refreshSceneAssets'));
+  assert.ok(loadProjectAssetsSource.includes('options.refreshSkybox === true'));
   assert.ok(loadProjectAssetsSource.includes('refreshCurrentSkyboxAfterProjectAssetsLoad('));
 
   const importStart = source.indexOf('async function handleImportSkyboxFile');

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -18,6 +19,15 @@ const GLOBAL_MODEL_ID = '2058110298388180993';
 const PLAIN_MODEL_ID = '2071961332827041794';
 const ENVIRONMENT_MODEL_ID = '2058110298000000001';
 const COMBO_MODEL_ID = '2058110298000000002';
+const INCREMENTAL_MODEL_FILE_NAMES = new Set([
+  'global.glb',
+  'global-meta.json',
+  'global-runtime.ts',
+  'global-thumbnail.png',
+  'plain.glb',
+  'combo.glb',
+  'combo-thumbnail.png',
+]);
 
 async function holdWindowsFileWithoutDeleteSharing(filePath) {
   if (process.platform !== 'win32') {
@@ -97,12 +107,35 @@ async function holdWindowsFileWithoutDeleteSharing(filePath) {
 }
 
 function createMinimalGlb() {
-  const jsonSource = JSON.stringify({ asset: { version: '2.0', generator: 'data-platform-smoke' }, scenes: [{ nodes: [] }], scene: 0 });
+  const positionChunk = Buffer.alloc(9 * Float32Array.BYTES_PER_ELEMENT);
+  [
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+  ].forEach((value, index) => positionChunk.writeFloatLE(value, index * Float32Array.BYTES_PER_ELEMENT));
+  const jsonSource = JSON.stringify({
+    asset: { version: '2.0', generator: 'data-platform-smoke' },
+    buffers: [{ byteLength: positionChunk.length }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: positionChunk.length, target: 34962 }],
+    accessors: [{
+      bufferView: 0,
+      byteOffset: 0,
+      componentType: 5126,
+      count: 3,
+      type: 'VEC3',
+      min: [0, 0, 0],
+      max: [1, 1, 0],
+    }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+    nodes: [{ mesh: 0 }],
+    scenes: [{ nodes: [0] }],
+    scene: 0,
+  });
   const jsonBytes = Buffer.from(jsonSource, 'utf8');
   const paddedLength = Math.ceil(jsonBytes.length / 4) * 4;
   const jsonChunk = Buffer.alloc(paddedLength, 0x20);
   jsonBytes.copy(jsonChunk);
-  const totalLength = 12 + 8 + jsonChunk.length;
+  const totalLength = 12 + 8 + jsonChunk.length + 8 + positionChunk.length;
   const result = Buffer.alloc(totalLength);
   result.write('glTF', 0, 4, 'ascii');
   result.writeUInt32LE(2, 4);
@@ -110,6 +143,10 @@ function createMinimalGlb() {
   result.writeUInt32LE(jsonChunk.length, 12);
   result.writeUInt32LE(0x4e4f534a, 16);
   jsonChunk.copy(result, 20);
+  const binaryChunkOffset = 20 + jsonChunk.length;
+  result.writeUInt32LE(positionChunk.length, binaryChunkOffset);
+  result.writeUInt32LE(0x004e4942, binaryChunkOffset + 4);
+  positionChunk.copy(result, binaryChunkOffset + 8);
   return result;
 }
 
@@ -192,7 +229,7 @@ async function createSceneFixture() {
   return `${JSON.stringify(source, null, 2)}\n`;
 }
 
-async function createLocalSceneFixture(storageRoot) {
+async function createLocalSceneFixture(storageRoot, dataPlatformSourceKey) {
   const source = JSON.parse(await createSceneFixture());
   const entityId = 'entity_data_platform_smoke';
   const entity = source.scene.entities[entityId];
@@ -234,6 +271,12 @@ async function createLocalSceneFixture(storageRoot) {
       packagePath: staleEnvironmentPackagePath,
       lengthUnit: 'meter',
       unitScaleToMeters: 1,
+      source: 'data-platform',
+      resourceType: 'ENV_MODEL',
+      dataPlatformResourceId: ENVIRONMENT_MODEL_ID,
+      dataPlatformSourceKey,
+      dataPlatformRevision: '1',
+      displayNameSnapshot: '同步前环境名称',
       activeVariantUrl: `${staleEnvironmentUrl}?assetRevision=stale-local-environment-revision`,
       variants: [{
         name: '同步前环境',
@@ -247,7 +290,6 @@ async function createLocalSceneFixture(storageRoot) {
 
 async function createFixtures(root, storageRoot) {
   const localScenePath = path.join(root, 'local.scene.json');
-  await writeFile(localScenePath, await createLocalSceneFixture(storageRoot), 'utf8');
 
   const currentRoot = path.join(root, 'current');
   await mkdir(path.join(currentRoot, '.babylon-editor'), { recursive: true });
@@ -372,8 +414,12 @@ async function startMockServer(fixtures) {
     createProject('8', '符号链接工程包项目', 'symlink.zip', 8),
   ];
   let failNextModelFile = false;
+  let modelRevision = 1;
   let activeModelFileDownloads = 0;
   let maxActiveModelFileDownloads = 0;
+  const environmentModelBytes = fixtures.modelFiles.get('environment.glb');
+  assert.ok(environmentModelBytes, '环境模型冒烟夹具缺少 environment.glb');
+  const environmentFileSha256 = createHash('sha256').update(environmentModelBytes).digest('hex');
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
@@ -402,6 +448,7 @@ async function startMockServer(fixtures) {
         thumbnailUrl: 'files/global-thumbnail.png',
         fileName: 'global.glb',
         fileUrl: 'files/global.glb',
+        revision: modelRevision,
         metaFileName: 'meta.json',
         metaFileUrl: 'files/global-meta.json',
         scriptFileName: 'legacy-one.ts\nlegacy-two.ts',
@@ -416,6 +463,7 @@ async function startMockServer(fixtures) {
         modelName: '无脚本普通模型',
         fileName: 'plain.glb',
         fileUrl: 'files/plain.glb',
+        revision: modelRevision,
         scriptFileName: null,
         scriptFileUrl: null,
         scriptFiles: [],
@@ -434,6 +482,45 @@ async function startMockServer(fixtures) {
       return;
     }
 
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/env-models/sync-manifest/query') {
+      sendJson({
+        success: true,
+        data: {
+          protocolVersion: '1',
+          manifestRevision: '1',
+          records: [{
+            id: ENVIRONMENT_MODEL_ID,
+            modelName: '全局环境模型',
+            fileStatus: 'GLB_READY',
+            fileName: 'environment.glb',
+            fileSizeBytes: String(environmentModelBytes.length),
+            fileSha256: environmentFileSha256,
+            lengthUnit: 'centimeter',
+            fileRevision: '1',
+            runtimeRevision: '1',
+            downloadUrl: 'files/environment.glb',
+            updatedAt: '2026-08-28T00:00:00.000Z',
+          }],
+          nextCursorId: null,
+          hasMore: false,
+        },
+      });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/bigscreen-icons/query') {
+      sendJson({
+        success: true,
+        data: {
+          records: [],
+          total: 0,
+          pageNum: body?.pageNum ?? 1,
+          pageSize: body?.pageSize ?? 100,
+        },
+      });
+      return;
+    }
+
     if (request.method === 'POST' && url.pathname === '/platform/api/v1/combo-models/query') {
       sendJson({ success: true, data: { records: body?.pageNum === 1 ? [{
         id: COMBO_MODEL_ID,
@@ -441,6 +528,7 @@ async function startMockServer(fixtures) {
         thumbnailUrl: 'files/combo-thumbnail.png',
         fileName: 'combo.glb',
         fileUrl: 'files/combo.glb',
+        revision: modelRevision,
       }] : [], total: 1, pageNum: body?.pageNum ?? 1, pageSize: 100 } });
       return;
     }
@@ -493,6 +581,14 @@ async function startMockServer(fixtures) {
     failNextModelDownload: () => {
       failNextModelFile = true;
     },
+    bumpModelRevision: () => {
+      modelRevision += 1;
+    },
+    getModelFileDownloadCount: () => requests.filter((item) => (
+      item.method === 'GET'
+      && item.path.startsWith('/platform/files/')
+      && INCREMENTAL_MODEL_FILE_NAMES.has(decodeURIComponent(item.path.slice('/platform/files/'.length)))
+    )).length,
     getMaxConcurrentModelDownloads: () => maxActiveModelFileDownloads,
     close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
   };
@@ -595,6 +691,23 @@ async function retryAndWaitForSync(window) {
     });
     return { retryStarted, finalProgress, events };
   });
+}
+
+async function waitForEnvironmentSync(window, contextKey) {
+  return window.evaluate(async (expectedContextKey) => new Promise((resolve, reject) => {
+    let unsubscribe = () => undefined;
+    const timeout = window.setTimeout(() => {
+      unsubscribe();
+      reject(new Error('等待环境模型同步完成超时'));
+    }, 20000);
+    unsubscribe = window.editorApi.onDataPlatformEnvironmentSyncProgress((progress) => {
+      if (progress.contextKey !== expectedContextKey) return;
+      if (progress.phase !== 'completed' && progress.phase !== 'failed') return;
+      window.clearTimeout(timeout);
+      unsubscribe();
+      resolve(progress);
+    });
+  }), contextKey);
 }
 
 async function expectOpenFailure(window, projectId, expectedText) {
@@ -701,6 +814,12 @@ async function run() {
     const fixtures = await createFixtures(fixtureRoot, storageRoot);
     await writeFile(unwritableRoot, 'file blocks directory usage', 'utf8');
     mock = await startMockServer(fixtures);
+    const dataPlatformSourceKey = createHash('sha256').update(mock.baseUrl, 'utf8').digest('hex');
+    await writeFile(
+      fixtures.localScenePath,
+      await createLocalSceneFixture(storageRoot, dataPlatformSourceKey),
+      'utf8',
+    );
 
     await writeDataPlatformConfig(legacyUserDataRoot, { version: 1, baseUrl: mock.baseUrl });
     legacyLaunched = await launchEditor(null, legacyUserDataRoot, { useStorageOverride: false });
@@ -799,6 +918,11 @@ async function run() {
       window.__localSceneModelSyncUnsubscribe = window.editorApi.onDataPlatformModelSyncProgress((progress) => {
         window.__localSceneModelSyncEvents.push(progress);
       });
+      window.__localSceneEnvironmentSyncEvents = [];
+      window.__localSceneEnvironmentSyncUnsubscribe?.();
+      window.__localSceneEnvironmentSyncUnsubscribe = window.editorApi.onDataPlatformEnvironmentSyncProgress((progress) => {
+        window.__localSceneEnvironmentSyncEvents.push(progress);
+      });
     });
     await mockNextWorkspaceDialog(launched.app, { canceled: false, filePaths: [fixtures.localScenePath] });
     await launched.window.getByRole('button', { name: '打开场景文件', exact: true }).click();
@@ -806,20 +930,35 @@ async function run() {
     await launched.window.waitForFunction(() => (window.__localSceneModelSyncEvents ?? []).some(
       (progress) => progress.phase === 'completed' || progress.phase === 'failed',
     ), undefined, { timeout: 20000 });
-    const localSceneModelSyncProgress = await launched.window.evaluate(() => {
-      const events = window.__localSceneModelSyncEvents ?? [];
-      const finalProgress = [...events].reverse().find(
+    await launched.window.waitForFunction(() => (window.__localSceneEnvironmentSyncEvents ?? []).some(
+      (progress) => progress.phase === 'completed' || progress.phase === 'failed',
+    ), undefined, { timeout: 20000 });
+    const localSceneSyncProgress = await launched.window.evaluate(() => {
+      const modelEvents = window.__localSceneModelSyncEvents ?? [];
+      const environmentEvents = window.__localSceneEnvironmentSyncEvents ?? [];
+      const model = [...modelEvents].reverse().find(
+        (progress) => progress.phase === 'completed' || progress.phase === 'failed',
+      ) ?? null;
+      const environment = [...environmentEvents].reverse().find(
         (progress) => progress.phase === 'completed' || progress.phase === 'failed',
       ) ?? null;
       window.__localSceneModelSyncUnsubscribe?.();
+      window.__localSceneEnvironmentSyncUnsubscribe?.();
       delete window.__localSceneModelSyncUnsubscribe;
       delete window.__localSceneModelSyncEvents;
-      return finalProgress;
+      delete window.__localSceneEnvironmentSyncUnsubscribe;
+      delete window.__localSceneEnvironmentSyncEvents;
+      return { model, environment };
     });
     assert.equal(
-      localSceneModelSyncProgress?.phase,
+      localSceneSyncProgress.model?.phase,
       'completed',
-      localSceneModelSyncProgress?.error ?? localSceneModelSyncProgress?.message,
+      localSceneSyncProgress.model?.error ?? localSceneSyncProgress.model?.message,
+    );
+    assert.equal(
+      localSceneSyncProgress.environment?.phase,
+      'completed',
+      localSceneSyncProgress.environment?.error ?? localSceneSyncProgress.environment?.message,
     );
     assert.ok(
       mock.requests.filter((item) => item.path === '/platform/api/v1/models/query').length
@@ -833,9 +972,12 @@ async function run() {
     assert.equal(localSceneAssets.assets.filter((item) => item.libraryKind === 'model').length, 3);
     assert.equal(localSceneAssets.assets.filter((item) => item.libraryKind === 'environment').length, 1);
     const syncedEnvironmentAsset = localSceneAssets.assets.find((item) => (
-      item.libraryKind === 'environment' && item.packagePath?.includes(`Env-${ENVIRONMENT_MODEL_ID}-`)
+      item.libraryKind === 'environment'
+      && item.source === 'data-platform'
+      && item.dataPlatformResourceId === ENVIRONMENT_MODEL_ID
     ));
     assert.ok(syncedEnvironmentAsset, '同步后的环境模型资产必须存在。');
+    assert.equal(syncedEnvironmentAsset.availability, 'active');
     assert.equal(syncedEnvironmentAsset.lengthUnit, 'centimeter');
     assert.equal(syncedEnvironmentAsset.unitScaleToMeters, 0.01);
     const syncedGlobalAsset = localSceneAssets.assets.find((item) => (
@@ -876,7 +1018,7 @@ async function run() {
       state: 'visible',
       timeout: 20000,
     });
-    await launched.window.locator('.console-log').filter({ hasText: '环境模型资源已刷新，并保留当前摆放与显示设置。' }).waitFor({
+    await launched.window.locator('.console-log').filter({ hasText: '环境模型运行缓存已刷新，并保留场景绑定身份与显示设置。' }).waitFor({
       state: 'visible',
       timeout: 20000,
     });
@@ -889,6 +1031,15 @@ async function run() {
     assert.ok(valid.events.some((item) => item.phase === 'downloading'));
     assert.ok(valid.events.some((item) => item.phase === 'validating'));
     assert.ok(valid.events.some((item) => item.phase === 'promoting'));
+    const validEnvironmentProgress = await waitForEnvironmentSync(
+      launched.window,
+      `${dataPlatformSourceKey}:${process.platform === 'win32' ? sharedResourcesRoot.toLowerCase() : sharedResourcesRoot}`,
+    );
+    assert.equal(
+      validEnvironmentProgress.phase,
+      'completed',
+      validEnvironmentProgress.error ?? validEnvironmentProgress.message,
+    );
 
     const loadedScene = await launched.window.evaluate(async (filePath) => window.editorApi.loadSceneFile({ filePath }), valid.openResult.sceneFilePath);
     assert.equal(loadedScene.canceled, false);
@@ -897,6 +1048,17 @@ async function run() {
     assert.equal(loadedModelPath, path.join(validProjectRoot, 'Assets', 'Models', 'PackageModel', 'PackageModel.glb'));
     assert.ok(!loadedModelPath.includes('old-editor'));
 
+    await launched.window.waitForFunction(async ({ expectedProjectRoot, resourceId }) => {
+      const result = await window.editorApi.listProjectAssets();
+      return result.projectRoot === expectedProjectRoot && result.assets.some((item) => (
+        item.libraryKind === 'environment'
+        && item.source === 'data-platform'
+        && item.dataPlatformResourceId === resourceId
+      ));
+    }, {
+      expectedProjectRoot: validProjectRoot,
+      resourceId: ENVIRONMENT_MODEL_ID,
+    }, { timeout: 20000 });
     const assets = await launched.window.evaluate(() => window.editorApi.listProjectAssets());
     assert.equal(assets.projectRoot, validProjectRoot);
     assert.equal(assets.assets.length, 6);
@@ -915,6 +1077,7 @@ async function run() {
     assert.ok(!mock.requests.some((item) => item.path.endsWith('/not-a-typescript-file.js')));
     assert.ok(!mock.requests.some((item) => item.path.endsWith('/runtime-types.d.ts')));
     assert.ok(!mock.requests.some((item) => item.path.includes('legacy-one.ts')));
+    const modelFileDownloadCountBeforeUiReopen = mock.getModelFileDownloadCount();
 
     await launched.window.reload();
     await launched.window.waitForLoadState('domcontentloaded');
@@ -926,30 +1089,100 @@ async function run() {
       window.__dataPlatformSmokeProgressUnsubscribe = window.editorApi.onDataPlatformModelSyncProgress((progress) => {
         window.__dataPlatformSmokeProgressEvents.push(progress);
       });
+      window.__dataPlatformSmokeEnvironmentProgressEvents = [];
+      window.__dataPlatformSmokeEnvironmentProgressUnsubscribe?.();
+      window.__dataPlatformSmokeEnvironmentProgressUnsubscribe = window.editorApi.onDataPlatformEnvironmentSyncProgress((progress) => {
+        window.__dataPlatformSmokeEnvironmentProgressEvents.push(progress);
+      });
+      window.__dataPlatformSmokeImageProgressEvents = [];
+      window.__dataPlatformSmokeImageProgressUnsubscribe?.();
+      window.__dataPlatformSmokeImageProgressUnsubscribe = window.editorApi.onDataPlatformImageSyncProgress((progress) => {
+        window.__dataPlatformSmokeImageProgressEvents.push(progress);
+      });
     });
     const validProjectCard = launched.window.locator('.home-data-platform-card').filter({ hasText: '有效工程包项目' });
     await validProjectCard.getByRole('button', { name: '打开' }).click();
     await launched.window.locator('.project-library').waitFor({ state: 'visible', timeout: 20000 });
     await launched.window.waitForFunction(() => {
-      const events = window.__dataPlatformSmokeProgressEvents ?? [];
-      const queryingEvent = events.find((item) => item.phase === 'querying');
-      return Boolean(queryingEvent && events.some(
-        (item) => item.runId === queryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed'),
-      ));
+      const modelEvents = window.__dataPlatformSmokeProgressEvents ?? [];
+      const environmentEvents = window.__dataPlatformSmokeEnvironmentProgressEvents ?? [];
+      const imageEvents = window.__dataPlatformSmokeImageProgressEvents ?? [];
+      const modelQueryingEvent = modelEvents.find((item) => item.phase === 'querying');
+      const environmentQueryingEvent = environmentEvents.find((item) => item.phase === 'querying');
+      const imageQueryingEvent = imageEvents.find((item) => item.phase === 'querying');
+      return Boolean(
+        modelQueryingEvent
+        && modelEvents.some((item) => (
+          item.runId === modelQueryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed')
+        ))
+        && environmentQueryingEvent
+        && environmentEvents.some((item) => (
+          item.runId === environmentQueryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed')
+        ))
+        && imageQueryingEvent
+        && imageEvents.some((item) => (
+          item.runId === imageQueryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed')
+        )),
+      );
     }, undefined, { timeout: 20000 });
     const uiSyncProgress = await launched.window.evaluate(() => {
-      const events = window.__dataPlatformSmokeProgressEvents ?? [];
-      const queryingEvent = events.find((item) => item.phase === 'querying');
-      const finalProgress = queryingEvent
-        ? events.find((item) => item.runId === queryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed'))
+      const modelEvents = window.__dataPlatformSmokeProgressEvents ?? [];
+      const environmentEvents = window.__dataPlatformSmokeEnvironmentProgressEvents ?? [];
+      const imageEvents = window.__dataPlatformSmokeImageProgressEvents ?? [];
+      const modelQueryingEvent = modelEvents.find((item) => item.phase === 'querying');
+      const environmentQueryingEvent = environmentEvents.find((item) => item.phase === 'querying');
+      const imageQueryingEvent = imageEvents.find((item) => item.phase === 'querying');
+      const model = modelQueryingEvent
+        ? modelEvents.find((item) => (
+          item.runId === modelQueryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed')
+        ))
+        : null;
+      const environment = environmentQueryingEvent
+        ? environmentEvents.find((item) => (
+          item.runId === environmentQueryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed')
+        ))
+        : null;
+      const image = imageQueryingEvent
+        ? imageEvents.find((item) => (
+          item.runId === imageQueryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed')
+        ))
         : null;
       window.__dataPlatformSmokeProgressUnsubscribe?.();
+      window.__dataPlatformSmokeEnvironmentProgressUnsubscribe?.();
+      window.__dataPlatformSmokeImageProgressUnsubscribe?.();
       delete window.__dataPlatformSmokeProgressUnsubscribe;
       delete window.__dataPlatformSmokeProgressEvents;
-      return finalProgress;
+      delete window.__dataPlatformSmokeEnvironmentProgressUnsubscribe;
+      delete window.__dataPlatformSmokeEnvironmentProgressEvents;
+      delete window.__dataPlatformSmokeImageProgressUnsubscribe;
+      delete window.__dataPlatformSmokeImageProgressEvents;
+      return { model, environment, image };
     });
-    assert.equal(uiSyncProgress?.phase, 'completed', uiSyncProgress?.error ?? uiSyncProgress?.message);
-    await launched.window.locator('.library-sync-status-completed').waitFor({ state: 'detached', timeout: 5000 });
+    assert.equal(
+      uiSyncProgress.model?.phase,
+      'completed',
+      uiSyncProgress.model?.error ?? uiSyncProgress.model?.message,
+    );
+    assert.equal(
+      uiSyncProgress.environment?.phase,
+      'completed',
+      uiSyncProgress.environment?.error ?? uiSyncProgress.environment?.message,
+    );
+    assert.equal(
+      uiSyncProgress.image?.phase,
+      'completed',
+      uiSyncProgress.image?.error ?? uiSyncProgress.image?.message,
+    );
+    assert.equal(
+      mock.getModelFileDownloadCount(),
+      modelFileDownloadCountBeforeUiReopen,
+      '远端模型版本未变化时，重新打开项目不应再次下载模型资源。',
+    );
+    await launched.window.waitForFunction(
+      () => document.querySelectorAll('.library-sync-status-completed').length === 0,
+      undefined,
+      { timeout: 5000 },
+    );
     await launched.window.locator('.resource-card-name', { hasText: '全局普通模型' }).waitFor({ state: 'visible' });
     const visibleModelCards = await launched.window.evaluate(() => {
       const list = document.querySelector('.project-library .resource-card-list');
@@ -1030,6 +1263,7 @@ async function run() {
     assert.equal(layoutAt1180.attemptedScrollTop, 0);
 
     const beforeRetryFailureIndex = await readFile(path.join(sharedResourcesRoot, '.babylon-editor', 'asset-index.json'), 'utf8');
+    mock.bumpModelRevision();
     mock.failNextModelDownload();
     const noPackage = await openAndWaitForSync(launched.window, '2');
     assert.equal(noPackage.openResult.source, 'generated');
@@ -1039,6 +1273,11 @@ async function run() {
     assert.match(noPackage.finalProgress.error, /injected model download failure|HTTP 500/);
     const failedSyncStatus = launched.window.locator('.library-sync-status-failed');
     await failedSyncStatus.waitFor({ state: 'visible' });
+    await launched.window.waitForFunction(
+      () => document.querySelectorAll('.library-sync-status:not(.library-sync-status-failed)').length === 0,
+      undefined,
+      { timeout: 5000 },
+    );
     const failureLayout = await inspectResourceStrip(launched.window);
     assert.equal(failureLayout.cardsFullyVisible, true, '同步失败提示展开时模型卡片被裁切');
     assert.ok(failureLayout.topSpread <= 1);
@@ -1120,12 +1359,21 @@ async function run() {
     const projectRequest = mock.requests.find((item) => item.path === '/platform/api/v1/projects/query');
     assert.equal(projectRequest?.method, 'POST');
     assert.deepEqual(projectRequest?.body, { pageNum: 1, pageSize: 12, projectName: '' });
-    for (const endpoint of ['/platform/api/v1/models/query', '/platform/api/v1/env-models/query', '/platform/api/v1/combo-models/query']) {
+    for (const endpoint of ['/platform/api/v1/models/query', '/platform/api/v1/combo-models/query']) {
       const request = mock.requests.find((item) => item.path === endpoint);
       assert.equal(request?.method, 'POST');
       assert.equal(request?.body?.pageNum, 1);
       assert.equal(request?.body?.pageSize, 100);
     }
+    const environmentManifestRequest = mock.requests.find(
+      (item) => item.path === '/platform/api/v1/env-models/sync-manifest/query',
+    );
+    assert.equal(environmentManifestRequest?.method, 'POST');
+    assert.deepEqual(environmentManifestRequest?.body, {
+      cursorId: null,
+      pageSize: 200,
+      manifestRevision: null,
+    });
     assert.ok(mock.getMaxConcurrentModelDownloads() >= 2, '模型文件下载未形成并发');
     assert.ok(mock.getMaxConcurrentModelDownloads() <= 4, '模型文件下载并发超过 4');
 

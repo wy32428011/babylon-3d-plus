@@ -17,7 +17,6 @@ import {
   type AutoPatrolPlaybackSnapshot,
 } from '../runtime/babylon/AutoPatrolPlaybackController';
 import { AutoPatrolRuntimeIntegration } from '../runtime/patrol/AutoPatrolRuntimeIntegration';
-import { getAutoPatrolRouteGeometryError } from '../runtime/patrol/AutoPatrolRouteGeometryValidator';
 import {
   createSceneCameraPoseFromReplayCamera,
   type AutoPatrolInspectionReplayCamera,
@@ -38,6 +37,9 @@ import { hasManualRoamSpawnEntity, resolveManualRoamSpawnPose } from '../editor/
 import { CLICK_EVENT_FOCUS_DURATION_MS, resolveClickEventBindingClick } from '../editor/model/clickEventBinding';
 import {
   bindStatusOverlayPointerChordToggle,
+  formatPlayerStatusFps,
+  PLAYER_STATUS_FPS_SAMPLE_INTERVAL_MS,
+  resolveInitialAutoPatrolControlsVisibility,
   resolveInitialPlayerStatusOverlayVisibility,
   shouldShowPlayerStatusOverlay,
 } from './statusOverlayControls';
@@ -175,6 +177,8 @@ export function PlayerApp() {
   const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
   const [environmentRuntimeIssue, setEnvironmentRuntimeIssue] = useState(false);
   const [statusOverlayVisible, setStatusOverlayVisible] = useState(false);
+  const [autoPatrolControlsVisible, setAutoPatrolControlsVisible] = useState(true);
+  const [playerFps, setPlayerFps] = useState<number | null>(null);
   const [config, setConfig] = useState<PlayerRuntimeConfig | null>(null);
   const [startupPercent, setStartupPercent] = useState(6);
   const [modelLoadProgress, setModelLoadProgress] = useState<SceneRuntimeModelLoadProgress | null>(null);
@@ -280,6 +284,7 @@ export function PlayerApp() {
           parsedConfig.viewer.showStatusOverlay,
           Boolean(parsedConfig.digitalTwin),
         ));
+        setAutoPatrolControlsVisible(resolveInitialAutoPatrolControlsVisibility(Boolean(parsedConfig.digitalTwin)));
         setMessage(parsedConfig.page.loadingText);
         setStartupPercent(14);
 
@@ -411,9 +416,6 @@ export function PlayerApp() {
             const observer = viewport!.scene.onBeforeRenderObservable.add(callback);
             return () => viewport?.scene.onBeforeRenderObservable.remove(observer);
           },
-          validateRoute: (route) => getAutoPatrolRouteGeometryError(viewport!.scene, route, {
-            initialPose: viewport!.getCameraPose(),
-          }),
           captureScreenshot: autoPatrolIntegration.captureScreenshot,
           onInspectionEvent: autoPatrolIntegration.onInspectionEvent,
           onInspectionScreenshot: autoPatrolIntegration.onInspectionScreenshot,
@@ -653,6 +655,7 @@ export function PlayerApp() {
 
     return bindStatusOverlayPointerChordToggle(canvas, window, () => {
       setStatusOverlayVisible((visible) => !visible);
+      setAutoPatrolControlsVisible((visible) => !visible);
     });
   }, [isDigitalTwin, phase]);
 
@@ -740,6 +743,20 @@ export function PlayerApp() {
     viewportRuntimeIssue || environmentRuntimeIssue || Boolean(mqttStatus.lastError),
   );
 
+  useEffect(() => {
+    if (phase !== 'ready' || !showOverlay) {
+      setPlayerFps(null);
+      return undefined;
+    }
+
+    const sampleFps = (): void => {
+      setPlayerFps(viewportRef.current?.engine.getFps() ?? null);
+    };
+    sampleFps();
+    const timer = window.setInterval(sampleFps, PLAYER_STATUS_FPS_SAMPLE_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [phase, showOverlay]);
+
   // 首次场景加载：启动阶段里程碑 + 模型/环境资源单元进度共同驱动全屏蒙版。
   const loadingMask = computePlayerLoadingProgress({
     phase,
@@ -767,6 +784,7 @@ export function PlayerApp() {
         />
       ) : null}
       {phase === 'ready'
+      && autoPatrolControlsVisible
       && (autoPatrolRoutes.length > 0 || Boolean(autoPatrolHistory?.records.length))
       && !manualRoamSnapshot.enabled ? (
         <AutoPatrolControls
@@ -788,6 +806,7 @@ export function PlayerApp() {
         <section className={`player-status player-status-${phase}`} role={phase === 'blocked' ? 'alert' : 'status'}>
           <strong>{phase === 'loading' ? message : phase === 'blocked' ? '场景已阻断' : '场景运行中'}</strong>
           {phase === 'blocked' ? <p>{message}</p> : null}
+          {phase === 'ready' ? <p aria-hidden="true">FPS：{formatPlayerStatusFps(playerFps)}</p> : null}
           {phase !== 'blocked' ? <p>MQTT：{mqttStatus.state}{mqttStatus.lastError ? `（${mqttStatus.lastError}）` : ''}</p> : null}
           {runtimeMessage ? <p>{runtimeMessage}</p> : null}
         </section>

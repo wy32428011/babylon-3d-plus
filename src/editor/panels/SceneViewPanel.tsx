@@ -25,10 +25,6 @@ import {
 } from '../../runtime/babylon/AutoPatrolPlaybackController';
 import { AutoPatrolRuntimeIntegration } from '../../runtime/patrol/AutoPatrolRuntimeIntegration';
 import {
-  getAutoPatrolRouteGeometryError,
-  inspectAutoPatrolRouteSegment,
-} from '../../runtime/patrol/AutoPatrolRouteGeometryValidator';
-import {
   createSceneCameraPoseFromReplayCamera,
   type AutoPatrolInspectionReplayCamera,
 } from '../../runtime/patrol/AutoPatrolInspectionReplayController';
@@ -61,7 +57,6 @@ import {
   AUTO_PATROL_EYE_HEIGHT_METERS,
   createAutoPatrolWaypointFromWorldPose,
   getAutoPatrolWaypointWorldPose,
-  getSceneCameraPosition,
   validateAutoPatrolRoute,
 } from '../model/autoPatrolInspection';
 import {
@@ -982,9 +977,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           const observer = viewport!.scene.onBeforeRenderObservable.add(callback);
           return () => viewport?.scene.onBeforeRenderObservable.remove(observer);
         },
-        validateRoute: (route) => getAutoPatrolRouteGeometryError(viewport!.scene, route, {
-          initialPose: viewport!.getCameraPose(),
-        }),
         captureScreenshot: autoPatrolIntegration.captureScreenshot,
         onInspectionEvent: autoPatrolIntegration.onInspectionEvent,
         onInspectionScreenshot: autoPatrolIntegration.onInspectionScreenshot,
@@ -1836,18 +1828,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
               undefined,
               `无法添加点位：${proximityIssue.message}`,
             );
-            return;
-          }
-          const inspection = inspectAutoPatrolRouteSegment(
-            viewport.scene,
-            getSceneCameraPosition(getAutoPatrolWaypointWorldPose(previousWaypoint, entity.components.transform)),
-            getSceneCameraPosition(getAutoPatrolWaypointWorldPose(capturedWaypoint, entity.components.transform)),
-          );
-          if (!inspection.reachable) {
-            const detail = inspection.reason === 'blocked'
-              ? `新节点与上一节点之间的路径穿过场景实体${inspection.blockingMeshName ? `（${inspection.blockingMeshName}）` : ''}。`
-              : '新节点与上一节点之间存在不可达区域。';
-            consumeAutoPatrolCameraRequest(autoPatrolCameraRequest.id, undefined, `无法添加点位：${detail}`);
             return;
           }
         }

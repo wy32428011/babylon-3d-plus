@@ -109,7 +109,6 @@ export type AutoPatrolPlaybackAdapter = {
   now: () => number;
   wallNow?: () => number;
   subscribeFrame: (callback: () => void) => () => void;
-  validateRoute?: (route: AutoPatrolPlaybackRoute) => string | null;
   captureScreenshot?: () => Promise<string | null>;
   onInspectionEvent?: (event: AutoPatrolInspectionEvent) => void;
   onInspectionScreenshot?: (
@@ -272,15 +271,6 @@ export class AutoPatrolPlaybackController {
     if (!route.component.enabled) return { ok: false, error: '巡检路线未启用。' };
     if (route.component.waypoints.length < AUTO_PATROL_MIN_WAYPOINTS) {
       return { ok: false, error: '巡检路线至少需要 ' + AUTO_PATROL_MIN_WAYPOINTS + ' 个节点。' };
-    }
-    try {
-      const routeValidationError = this.adapter.validateRoute?.(route)?.trim();
-      if (routeValidationError) return { ok: false, error: routeValidationError };
-    } catch (error) {
-      return {
-        ok: false,
-        error: `巡检路线校验失败：${error instanceof Error ? error.message : String(error)}`,
-      };
     }
 
     this.finishInspectionRecord('stopped');

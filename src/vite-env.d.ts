@@ -237,6 +237,8 @@ type DataPlatformModelSyncProgress = {
   total: number;
   message: string;
   error: string | null;
+  libraryChanged?: boolean;
+  runtimeChangedResourceKeys?: string[];
 };
 
 type DataPlatformEnvironmentSyncRequest = {

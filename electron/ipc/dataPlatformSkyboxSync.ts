@@ -331,17 +331,23 @@ export function startDataPlatformSkyboxSync(
     editorRoot,
     contextKey: normalizeSyncContextKey(contextKey),
   };
-  lastSkyboxSyncContext = { ...context };
 
   if (activeSkyboxSync) {
     if (activeSkyboxSync.contextKey === context.contextKey) {
-      queuedSkyboxSyncContext = activeSkyboxSync.controller.signal.aborted ? context : null;
+      if (activeSkyboxSync.controller.signal.aborted) {
+        queuedSkyboxSyncContext = context;
+        lastSkyboxSyncContext = { ...context };
+      } else {
+        queuedSkyboxSyncContext = null;
+      }
       return true;
     }
     queuedSkyboxSyncContext = context;
+    lastSkyboxSyncContext = { ...context };
     activeSkyboxSync.controller.abort();
     return true;
   }
+  lastSkyboxSyncContext = { ...context };
   return launchDataPlatformSkyboxSync(context);
 }
 

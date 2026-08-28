@@ -21,6 +21,6 @@ test('每个场景会话都会重新处理当前模型同步完成快照', async
 
   assert.match(
     projectPanelSource,
-    /beginScenePreparation\(sceneSessionId\);\s*lastSceneRefreshModelSyncRunIdRef\.current = null;/,
+    /beginScenePreparation\(sceneSessionId\);\s*skipSceneModelSync\(sceneSessionId, null\);\s*lastSceneRefreshModelSyncRunIdRef\.current = null;/,
   );
 });

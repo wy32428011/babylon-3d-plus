@@ -2,6 +2,7 @@ import { app } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { getHeapStatistics } from 'node:v8';
 import type {
   DataPlatformEnvironmentSyncProgress,
   DataPlatformImageSyncProgress,
@@ -45,7 +46,7 @@ import {
   getLatestDataPlatformModelSyncProgress,
   retryDataPlatformModelSync,
   startDataPlatformModelSync,
-} from './dataPlatformModelSync.js';
+} from './dataPlatformModelIncrementalSync.js';
 import {
   clearDataPlatformEnvironmentSyncRetryContext,
   createDataPlatformSourceKey,
@@ -70,12 +71,12 @@ import {
   startDataPlatformSkyboxSync,
 } from './dataPlatformSkyboxSync.js';
 import {
+  assertDiskWriteCapacity,
   assertPathInside,
   DataPlatformRollbackError,
   downloadRemoteFile,
   extractZipSecurely,
   isPathInside,
-  MAX_ARCHIVE_COMPRESSED_BYTES,
 } from './dataPlatformTransfer.js';
 
 const PROJECT_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
@@ -88,6 +89,8 @@ const SCENE_URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl']
 const SCENE_PATH_ARRAY_KEYS = new Set(['scriptPaths']);
 const DIGITAL_TWIN_SOURCE_MANIFEST_PATH = '.babylon-editor/digital-twin-source-manifest.json';
 const MAX_PROJECT_SCENE_FILES = 1_000;
+const PROJECT_TEXT_HEAP_EXPANSION_FACTOR = 16n;
+const MIN_FREE_HEAP_RESERVE_BYTES = 128n * 1024n * 1024n;
 
 let dataPlatformProjectServiceShuttingDown = false;
 const openTaskControllers = new Set<AbortController>();
@@ -115,6 +118,13 @@ type PackageDetection =
       entrySceneRelativePath: string;
     }
   | { kind: 'incompatible'; reason: string };
+
+class ProjectPackageCapacityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProjectPackageCapacityError';
+  }
+}
 
 type PromotionItem = {
   type: 'file' | 'directory';
@@ -523,7 +533,6 @@ async function openDataPlatformProjectInternal(
         baseUrl,
         remoteUrl: project.latestEditorProjectPackageUrl,
         destinationPath: archivePath,
-        maxBytes: MAX_ARCHIVE_COMPRESSED_BYTES,
         signal,
         timeoutMs: PROJECT_DOWNLOAD_TIMEOUT_MS,
         context: `下载项目“${project.projectName}”工程包`,
@@ -725,12 +734,13 @@ async function inspectPackageCandidate(packageRoot: string): Promise<PackageDete
 
   for (const sceneFilePath of sceneFilePaths) {
     try {
-      const parsed = JSON.parse(await fs.readFile(sceneFilePath, 'utf-8')) as unknown;
+      const parsed = await readProjectPackageJson(sceneFilePath, '工程包场景');
       const sceneVersion = isPlainObject(parsed) ? parsed.version : null;
       if (!isPlainObject(parsed) || (sceneVersion !== 1 && sceneVersion !== 2 && sceneVersion !== 3) || !isPlainObject(parsed.scene)) {
         return { kind: 'incompatible', reason: `工程包中的场景文件不是当前编辑器场景格式：${path.basename(sceneFilePath)}` };
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof ProjectPackageCapacityError) throw error;
       return { kind: 'incompatible', reason: `工程包中的场景文件不是有效 JSON：${path.basename(sceneFilePath)}` };
     }
   }
@@ -739,7 +749,7 @@ async function inspectPackageCandidate(packageRoot: string): Promise<PackageDete
   let entryScenePath = sceneFilePaths[0];
   if (await isFile(manifestPath)) {
     try {
-      const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf-8')) as unknown;
+      const manifest = await readProjectPackageJson(manifestPath, '数字孪生源工程 manifest');
       if (!isPlainObject(manifest) || manifest.version !== 1 || typeof manifest.entryScenePath !== 'string') {
         return { kind: 'incompatible', reason: '数字孪生源工程 manifest 结构无效' };
       }
@@ -752,7 +762,8 @@ async function inspectPackageCandidate(packageRoot: string): Promise<PackageDete
         return { kind: 'incompatible', reason: '数字孪生源工程入口场景不存在' };
       }
       entryScenePath = candidate;
-    } catch {
+    } catch (error) {
+      if (error instanceof ProjectPackageCapacityError) throw error;
       return { kind: 'incompatible', reason: '数字孪生源工程 manifest 不是有效 JSON' };
     }
   } else if (sceneFilePaths.length !== 1) {
@@ -787,8 +798,6 @@ async function materializeCurrentProjectPackage(options: {
   const targetAssetsRoot = path.join(options.editorRoot, 'Assets');
   const backupAssetsRoot = path.join(backupRoot, 'Assets');
   assertPathInside(options.editorRoot, targetAssetsRoot, '工程包资产目标');
-  await fs.cp(sourceAssetsRoot, stagedAssetsRoot, { recursive: true, errorOnExist: true, force: false });
-  promotionItems.push(createPromotionItem('directory', targetAssetsRoot, stagedAssetsRoot, backupAssetsRoot));
 
   const stagedScenesRoot = path.join(stagedRoot, 'Scenes');
   const targetScenesRoot = path.join(options.editorRoot, 'Scenes');
@@ -810,9 +819,17 @@ async function materializeCurrentProjectPackage(options: {
     assertPathInside(stagedRoot, stagedScenePath, '工程包场景暂存路径');
     assertPathInside(options.editorRoot, targetScenePath, '工程包场景目标');
     await fs.mkdir(path.dirname(stagedScenePath), { recursive: true });
-    await fs.writeFile(stagedScenePath, await rewriteSceneForEditorRoot(sceneSourcePath, options.editorRoot), 'utf-8');
+    const rewrittenSceneContent = await rewriteSceneForEditorRoot(sceneSourcePath, options.editorRoot);
+    await assertDiskWriteCapacity(
+      stagedRoot,
+      BigInt(Buffer.byteLength(rewrittenSceneContent, 'utf8')),
+      `写入工程包场景“${path.basename(sceneSourcePath)}”`,
+    );
+    await fs.writeFile(stagedScenePath, rewrittenSceneContent, 'utf-8');
     sceneTargets.set(path.resolve(sceneSourcePath), targetScenePath);
   }
+  await fs.rename(sourceAssetsRoot, stagedAssetsRoot);
+  promotionItems.push(createPromotionItem('directory', targetAssetsRoot, stagedAssetsRoot, backupAssetsRoot));
   promotionItems.push(createPromotionItem('directory', targetScenesRoot, stagedScenesRoot, backupScenesRoot));
   const entrySceneTargetPath = sceneTargets.get(path.resolve(options.entrySceneSourcePath));
   if (!entrySceneTargetPath) throw new Error('工程包入口场景未能物化。');
@@ -825,11 +842,13 @@ async function materializeCurrentProjectPackage(options: {
     const indexTargetPath = getProjectAssetIndexPath(options.editorRoot);
     const indexBackupPath = path.join(backupRoot, '.babylon-editor', 'asset-index.json');
     await fs.mkdir(path.dirname(stagedIndexPath), { recursive: true });
-    await fs.writeFile(
-      stagedIndexPath,
-      `${JSON.stringify({ version: 2, assets: rebuilt.assets } satisfies ProjectAssetIndex, null, 2)}\n`,
-      'utf-8',
+    const indexContent = `${JSON.stringify({ version: 2, assets: rebuilt.assets } satisfies ProjectAssetIndex, null, 2)}\n`;
+    await assertDiskWriteCapacity(
+      stagedRoot,
+      BigInt(Buffer.byteLength(indexContent, 'utf8')),
+      '写入工程资产索引',
     );
+    await fs.writeFile(stagedIndexPath, indexContent, 'utf-8');
     const indexItem = createPromotionItem('file', indexTargetPath, stagedIndexPath, indexBackupPath);
     promotionItems.push(indexItem);
     await promoteItem(indexItem);
@@ -852,9 +871,32 @@ async function materializeCurrentProjectPackage(options: {
   }
 }
 async function rewriteSceneForEditorRoot(sceneSourcePath: string, editorRoot: string): Promise<string> {
-  const parsed = JSON.parse(await fs.readFile(sceneSourcePath, 'utf-8')) as unknown;
+  const parsed = await readProjectPackageJson(sceneSourcePath, '工程包场景');
   const rewritten = rewriteSceneValue(parsed, null, editorRoot);
   return `${JSON.stringify(rewritten, null, 2)}\n`;
+}
+
+async function readProjectPackageJson(filePath: string, label: string): Promise<unknown> {
+  const fileSize = await readProjectPackageTextFileSize(filePath, label);
+  assertProjectPackageHeapCapacity(fileSize, `${label}“${path.basename(filePath)}”`);
+  return JSON.parse(await fs.readFile(filePath, 'utf-8')) as unknown;
+}
+
+async function readProjectPackageTextFileSize(filePath: string, label: string): Promise<bigint> {
+  const stat = await fs.stat(filePath);
+  if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
+    throw new Error(`${label}文件无效：${path.basename(filePath)}`);
+  }
+  return BigInt(stat.size);
+}
+
+function assertProjectPackageHeapCapacity(sourceBytes: bigint, label: string): void {
+  const heap = getHeapStatistics();
+  const availableHeapBytes = BigInt(Math.max(0, Math.floor(heap.heap_size_limit - heap.used_heap_size)));
+  const estimatedRequiredBytes = sourceBytes * PROJECT_TEXT_HEAP_EXPANSION_FACTOR;
+  if (estimatedRequiredBytes + MIN_FREE_HEAP_RESERVE_BYTES > availableHeapBytes) {
+    throw new ProjectPackageCapacityError(`${label}超出当前可用内存。`);
+  }
 }
 
 function rewriteSceneValue(value: unknown, key: string | null, editorRoot: string): unknown {
@@ -922,6 +964,7 @@ async function scanCurrentModelLibrary(editorRoot: string): Promise<{ assets: Pr
 
   for (const candidate of candidates) {
     try {
+      await assertModelPackageScanCapacity(candidate.packagePath);
       const result = await scanModelPackage(candidate.packagePath);
       if (result.asset) {
         assets.push({
@@ -934,11 +977,44 @@ async function scanCurrentModelLibrary(editorRoot: string): Promise<{ assets: Pr
         skipped.push(`${path.basename(candidate.packagePath)}：${result.skipped.reason}`);
       }
     } catch (error) {
+      if (error instanceof ProjectPackageCapacityError) throw error;
       skipped.push(`${path.basename(candidate.packagePath)}：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   return { assets, skipped };
+}
+
+/** 模型扫描会同时保留 meta.json 解析结果并读取一个脚本，按实际峰值做动态堆容量检查。 */
+async function assertModelPackageScanCapacity(packagePath: string): Promise<void> {
+  const entries = await fs.readdir(packagePath, { withFileTypes: true });
+  let metadataBytes = 0n;
+  let largestScriptBytes = 0n;
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const normalizedName = entry.name.toLowerCase();
+    const isMetadata = process.platform === 'win32'
+      ? normalizedName === 'meta.json'
+      : entry.name === 'meta.json';
+    const isRuntimeScript = normalizedName.endsWith('.ts') && !normalizedName.endsWith('.d.ts');
+    if (!isMetadata && !isRuntimeScript) continue;
+
+    const fileSize = await readProjectPackageTextFileSize(
+      path.join(packagePath, entry.name),
+      isMetadata ? '模型包元数据' : '模型包脚本',
+    );
+    if (isMetadata) metadataBytes = fileSize;
+    else if (fileSize > largestScriptBytes) largestScriptBytes = fileSize;
+  }
+
+  const estimatedSourceBytes = metadataBytes + largestScriptBytes;
+  if (estimatedSourceBytes > 0n) {
+    assertProjectPackageHeapCapacity(
+      estimatedSourceBytes,
+      `模型包元数据或脚本“${path.basename(packagePath)}”`,
+    );
+  }
 }
 
 async function ensureGeneratedProjectMetadata(editorRoot: string): Promise<void> {

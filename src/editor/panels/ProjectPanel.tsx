@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } fro
 import {
   beginSceneModelAssetRefresh,
   beginScenePreparation,
-  reportSceneModelSyncProgress,
   settleSceneModelAssetRefresh,
   skipSceneModelSync,
 } from '../loading/scenePreparationProgress';
@@ -39,6 +38,10 @@ import {
 } from '../assets/skyboxSyncController';
 import { createImportedAssetIndexes, findImportedAssetForPackagePath } from '../assets/modelAssetRelink';
 import {
+  filterProjectModelsForSyncRefresh,
+  shouldRefreshProjectModelsAfterSync,
+} from '../assets/modelSyncRefreshPolicy';
+import {
   BUILT_IN_MODEL_LIBRARY_ITEMS,
   PROJECT_LIBRARIES,
   createImageLibraryItems,
@@ -74,6 +77,13 @@ type ProjectAssetsLoadResult =
   | { ok: true; skyboxes: ProjectSkyboxAssetEntry[] }
   | { ok: false; error: string };
 
+type ProjectAssetsLoadOptions = {
+  refreshModels?: boolean;
+  modelResourceKeys?: readonly string[] | null;
+  refreshEnvironment?: boolean;
+  refreshSkybox?: boolean;
+};
+
 type DataPlatformModelSyncProgress = {
   runId: string;
   phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
@@ -81,6 +91,10 @@ type DataPlatformModelSyncProgress = {
   total: number;
   message: string;
   error: string | null;
+  libraryChanged?: boolean;
+  runtimeChangedResourceKeys?: string[];
+  changedResourceIds?: string[];
+  changedCount?: number;
 };
 
 type DataPlatformModelSyncApi = {
@@ -213,7 +227,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const lastSceneRefreshEnvironmentSyncRunIdRef = useRef<string | null>(null);
   const imageSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshImageSyncRunIdRef = useRef<string | null>(null);
-  const modelSyncDiscoveryTimerRef = useRef<number | null>(null);
+  const initialProjectAssetsLoadPromiseRef = useRef<Promise<ProjectAssetsLoadResult> | null>(null);
+  const waitForInitialProjectAssetsLoad = useCallback(async (
+    expectedSceneSessionId: string,
+  ): Promise<boolean> => {
+    const initialLoadPromise = initialProjectAssetsLoadPromiseRef.current;
+    await initialLoadPromise;
+    return initialProjectAssetsLoadPromiseRef.current === initialLoadPromise
+      && sceneSessionIdRef.current === expectedSceneSessionId;
+  }, []);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
   const [libraryFilterText, setLibraryFilterText] = useState('');
   const [modelDeviceTypeFilter, setModelDeviceTypeFilter] = useState('');
@@ -455,8 +477,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   ) === 'applied', [relinkCurrentSkyboxFromAssets]);
 
   const loadProjectAssets = useCallback(async (
-    refreshSceneAssets = false,
-    refreshSceneEnvironment = refreshSceneAssets,
+    options: ProjectAssetsLoadOptions = {},
   ): Promise<ProjectAssetsLoadResult> => {
     if (!window.editorApi?.listProjectAssets) {
       return { ok: false, error: '加载项目资源库需要 Electron 桌面环境。' };
@@ -489,14 +510,19 @@ export function ProjectPanel(props: ProjectPanelProps) {
       }
 
       refreshCurrentSkyboxAfterProjectAssetsLoad(
-        refreshSceneAssets,
+        options.refreshSkybox === true,
         loadedSkyboxes,
         refreshCurrentSkyboxFromAssets,
       );
-      if (refreshSceneAssets) {
-        refreshModelInstancesFromAssets(result.assets.filter((asset) => asset.libraryKind === 'model'));
+      if (options.refreshModels) {
+        const modelAssets = result.assets.filter((asset) => asset.libraryKind === 'model');
+        const assetsToRefresh = filterProjectModelsForSyncRefresh(
+          modelAssets,
+          options.modelResourceKeys === undefined ? null : options.modelResourceKeys,
+        );
+        if (assetsToRefresh.length > 0) refreshModelInstancesFromAssets(assetsToRefresh);
       }
-      if (refreshSceneEnvironment) {
+      if (options.refreshEnvironment) {
         await refreshCurrentEnvironmentFromAssets(result.assets, requestSceneSessionId);
       }
       return { ok: true, skyboxes: loadedSkyboxes };
@@ -532,6 +558,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   useEffect(() => {
     let active = true;
     beginScenePreparation(sceneSessionId);
+    skipSceneModelSync(sceneSessionId, null);
     lastSceneRefreshModelSyncRunIdRef.current = null;
     lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
     setIsLoadingProjectAssets(false);
@@ -541,32 +568,27 @@ export function ProjectPanel(props: ProjectPanelProps) {
     setSkyboxAssets([]);
     setOrphanedSkyboxAssets([]);
     const refreshStartupEnvironment = useEditorStore.getState().environmentStartupRelinkSessionId === sceneSessionId;
-    void loadProjectAssets(false, refreshStartupEnvironment).then((initialLoad) => {
+    const refreshId = crypto.randomUUID();
+    beginSceneModelAssetRefresh(sceneSessionId, refreshId);
+    const initialLoadPromise = loadProjectAssets({
+      refreshModels: true,
+      refreshEnvironment: refreshStartupEnvironment,
+      refreshSkybox: true,
+    });
+    initialProjectAssetsLoadPromiseRef.current = initialLoadPromise;
+    void initialLoadPromise.then((initialLoad) => {
       if (!active || sceneSessionIdRef.current !== sceneSessionId) return;
-      if (modelSyncDiscoveryTimerRef.current !== null) {
-        window.clearTimeout(modelSyncDiscoveryTimerRef.current);
-      }
-      modelSyncDiscoveryTimerRef.current = window.setTimeout(() => {
-        modelSyncDiscoveryTimerRef.current = null;
-        if (!active || sceneSessionIdRef.current !== sceneSessionId) return;
-        if (!skipSceneModelSync(sceneSessionId, initialLoad.ok ? null : initialLoad.error)) return;
-        const refreshId = crypto.randomUUID();
-        beginSceneModelAssetRefresh(sceneSessionId, refreshId);
-        void loadProjectAssets(true).then((refreshed) => {
-          settleSceneModelAssetRefresh(
-            sceneSessionId,
-            refreshed.ok ? null : `场景内模型刷新失败：${refreshed.error}`,
-            refreshId,
-          );
-        });
-      }, 350);
+      settleSceneModelAssetRefresh(
+        sceneSessionId,
+        initialLoad.ok ? null : `本地模型资源关联失败：${initialLoad.error}`,
+        refreshId,
+      );
     });
     void loadSyncedImages();
     return () => {
       active = false;
-      if (modelSyncDiscoveryTimerRef.current !== null) {
-        window.clearTimeout(modelSyncDiscoveryTimerRef.current);
-        modelSyncDiscoveryTimerRef.current = null;
+      if (initialProjectAssetsLoadPromiseRef.current === initialLoadPromise) {
+        initialProjectAssetsLoadPromiseRef.current = null;
       }
       projectAssetsLoadRequestRef.current += 1;
     };
@@ -582,39 +604,46 @@ export function ProjectPanel(props: ProjectPanelProps) {
       modelSyncCompletedDismissTimerRef.current = null;
     };
 
-    const refreshSceneModelsForSyncRun = (runId: string, progressSceneSessionId: string): void => {
+    const refreshSceneModelsForSyncRun = (
+      progress: DataPlatformModelSyncProgress,
+      progressSceneSessionId: string,
+    ): void => {
+      const runId = progress.runId;
       if (lastSceneRefreshModelSyncRunIdRef.current === runId) return;
       lastSceneRefreshModelSyncRunIdRef.current = runId;
-      const refreshId = crypto.randomUUID();
-      beginSceneModelAssetRefresh(progressSceneSessionId, refreshId);
-      void loadProjectAssets(true).then((loaded) => {
-        settleSceneModelAssetRefresh(
-          progressSceneSessionId,
-          loaded.ok ? null : `场景内模型刷新失败：${loaded.error}`,
-          refreshId,
-        );
+      void (async () => {
+        const initialLoadPromise = initialProjectAssetsLoadPromiseRef.current;
+        await initialLoadPromise;
+        if (
+          initialProjectAssetsLoadPromiseRef.current !== initialLoadPromise
+          || sceneSessionIdRef.current !== progressSceneSessionId
+          || lastSceneRefreshModelSyncRunIdRef.current !== runId
+        ) return;
+        const runtimeChangedResourceKeys = progress.runtimeChangedResourceKeys ?? null;
+        const loaded = await loadProjectAssets({
+          refreshModels: runtimeChangedResourceKeys === null || runtimeChangedResourceKeys.length > 0,
+          modelResourceKeys: runtimeChangedResourceKeys,
+        });
         if (!loaded.ok && lastSceneRefreshModelSyncRunIdRef.current === runId) {
           lastSceneRefreshModelSyncRunIdRef.current = null;
         }
-      });
+      })();
     };
 
     const unsubscribe = dataPlatformModelSyncApi.onDataPlatformModelSyncProgress((progress) => {
-      if (modelSyncDiscoveryTimerRef.current !== null) {
-        window.clearTimeout(modelSyncDiscoveryTimerRef.current);
-        modelSyncDiscoveryTimerRef.current = null;
-      }
       clearCompletedDismissTimer();
       setModelSyncProgress(progress);
       const progressSceneSessionId = sceneSessionIdRef.current;
-      reportSceneModelSyncProgress(progressSceneSessionId, progress);
       const phaseLabel = DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS[progress.phase];
       const countLabel = progress.total > 0 ? `（${progress.completed}/${progress.total}）` : '';
       const detail = progress.error || progress.message;
       pushLog(`数据中台模型同步：${phaseLabel}${countLabel}${detail ? `：${detail}` : ''}`);
 
-      if (progress.phase === 'completed' || progress.phase === 'failed') {
-        refreshSceneModelsForSyncRun(progress.runId, progressSceneSessionId);
+      if (
+        progress.phase === 'completed'
+        && shouldRefreshProjectModelsAfterSync(progress)
+      ) {
+        refreshSceneModelsForSyncRun(progress, progressSceneSessionId);
       }
       if (progress.phase === 'completed') {
         modelSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
@@ -649,7 +678,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
         return api.retryDataPlatformSkyboxSync();
       },
       reloadAssets: async () => {
-        const result = await loadProjectAssets(false);
+        const reloadSceneSessionId = sceneSessionIdRef.current;
+        if (!await waitForInitialProjectAssetsLoad(reloadSceneSessionId)) {
+          throw new Error('场景已切换，已取消天空盒资源重载。');
+        }
+        const result = await loadProjectAssets();
         if (!result.ok) throw new Error(result.error);
         return result.skyboxes;
       },
@@ -689,6 +722,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     relinkCurrentSkyboxFromAssets,
     sceneSessionId,
     skyboxSyncContextKey,
+    waitForInitialProjectAssetsLoad,
   ]);
 
   useEffect(() => {
@@ -717,7 +751,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
         const progressSceneSessionId = sceneSessionIdRef.current;
         if (lastSceneRefreshEnvironmentSyncRunIdRef.current !== progress.runId) {
           lastSceneRefreshEnvironmentSyncRunIdRef.current = progress.runId;
-          void loadProjectAssets(true).then((loaded) => {
+          void (async () => {
+            if (
+              !await waitForInitialProjectAssetsLoad(progressSceneSessionId)
+              || lastSceneRefreshEnvironmentSyncRunIdRef.current !== progress.runId
+            ) return;
+            const loaded = await loadProjectAssets({ refreshEnvironment: true });
             if (!loaded.ok && lastSceneRefreshEnvironmentSyncRunIdRef.current === progress.runId) {
               lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
             }
@@ -730,7 +769,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
             ) {
               pushLog('环境模型同步已完成，但未找到当前场景引用的资源；已阻止加载旧机器缓存路径。');
             }
-          });
+          })();
         }
         environmentSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
           environmentSyncCompletedDismissTimerRef.current = null;
@@ -742,7 +781,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       clearCompletedTimer();
       unsubscribe();
     };
-  }, [loadProjectAssets, pushLog]);
+  }, [loadProjectAssets, pushLog, waitForInitialProjectAssetsLoad]);
 
   useEffect(() => {
     const dataPlatformImageSyncApi = getDataPlatformImageSyncApi();

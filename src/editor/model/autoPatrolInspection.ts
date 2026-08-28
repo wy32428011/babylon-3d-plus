@@ -54,7 +54,7 @@ export type ResolvedAutoPatrolComponent = AutoPatrolComponent & {
 };
 
 export type AutoPatrolRouteValidationIssue = {
-  code: 'too-few-waypoints' | 'waypoints-too-close' | 'unreachable-segment';
+  code: 'too-few-waypoints' | 'waypoints-too-close';
   message: string;
   waypointIndex?: number;
   previousWaypointIndex?: number;
@@ -329,13 +329,12 @@ export function intersectWorldSegmentWithAutoPatrolRegion(
   });
 }
 
-/** 对路线执行可持久化的基础校验；运行时可注入场景碰撞判定补充穿墙/不可达检查。 */
+/** 对路线执行可持久化的基础校验；巡检播放不依赖场景碰撞或可达性。 */
 export function validateAutoPatrolRoute(
   component: Pick<AutoPatrolComponent, 'waypoints'>,
   routeTransform: TransformComponent,
   options: {
     minimumWaypointDistanceMeters?: number;
-    isSegmentReachable?: (from: Vector3Data, to: Vector3Data, waypointIndex: number) => boolean;
   } = {},
 ): AutoPatrolRouteValidationIssue[] {
   if (component.waypoints.length < 2) {
@@ -364,14 +363,6 @@ export function validateAutoPatrolRoute(
         previousWaypointIndex: index - 1,
       });
       continue;
-    }
-    if (options.isSegmentReachable && !options.isSegmentReachable(previous, current, index)) {
-      issues.push({
-        code: 'unreachable-segment',
-        message: `节点 ${index} 到节点 ${index + 1} 的路径被阻挡或不可达。`,
-        waypointIndex: index,
-        previousWaypointIndex: index - 1,
-      });
     }
   }
   return issues;

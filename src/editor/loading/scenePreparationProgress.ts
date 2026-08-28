@@ -250,7 +250,7 @@ function deriveScenePreparationState(
     phase = 'completed';
     percent = 100;
     label = '场景准备完成';
-    detail = state.warnings.length > 0 ? `已完成，存在 ${state.warnings.length} 条警告` : '模型已同步、刷新并完成合批';
+    detail = state.warnings.length > 0 ? `已完成，存在 ${state.warnings.length} 条警告` : '本地模型已关联并完成合批';
   }
 
   const completed = phase === 'completed';

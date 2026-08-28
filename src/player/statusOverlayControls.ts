@@ -1,6 +1,9 @@
 /** MouseEvent.buttons 中主键与次键的位掩码。 */
 const PRIMARY_AND_SECONDARY_BUTTONS_MASK = 1 | 2;
 
+/** 运行状态层低频刷新 FPS，避免为只读指标触发高频 React 渲染。 */
+export const PLAYER_STATUS_FPS_SAMPLE_INTERVAL_MS = 1_000;
+
 export type PlayerStatusOverlayPhase = 'loading' | 'ready' | 'blocked';
 
 export type StatusOverlayChordTransition = {
@@ -14,6 +17,11 @@ export function resolveInitialPlayerStatusOverlayVisibility(
   isDigitalTwin: boolean,
 ): boolean {
   return isDigitalTwin ? false : configuredVisible;
+}
+
+/** 数字孪生发布 Viewer 默认隐藏自动巡检面板；普通独立部署保持原有显示行为。 */
+export function resolveInitialAutoPatrolControlsVisibility(isDigitalTwin: boolean): boolean {
+  return !isDigitalTwin;
 }
 
 /**
@@ -31,7 +39,7 @@ export function getStatusOverlayChordTransition(
   };
 }
 
-/** 绑定发布 Viewer 的鼠标组合键，并返回完整清理函数。 */
+/** 绑定发布 Viewer 覆盖层的鼠标组合键，并返回完整清理函数。 */
 export function bindStatusOverlayPointerChordToggle(
   canvas: EventTarget,
   windowTarget: EventTarget,
@@ -76,4 +84,11 @@ export function shouldShowPlayerStatusOverlay(
   hasRuntimeIssue: boolean,
 ): boolean {
   return phase !== 'ready' || requestedVisible || hasRuntimeIssue;
+}
+
+/** 状态层只显示整数 FPS；引擎尚未产出有效采样时使用稳定占位符。 */
+export function formatPlayerStatusFps(fps: number | null | undefined): string {
+  return typeof fps === 'number' && Number.isFinite(fps) && fps >= 0
+    ? String(Math.round(fps))
+    : '--';
 }

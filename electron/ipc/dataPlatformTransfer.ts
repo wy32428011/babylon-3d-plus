@@ -9,16 +9,15 @@ const require = createRequire(import.meta.url);
 
 const MAX_ERROR_RESPONSE_BYTES = 32 * 1024;
 const MAX_JSON_RESPONSE_BYTES = 5 * 1024 * 1024;
-export const MAX_ARCHIVE_COMPRESSED_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRY_COUNT = 100_000;
-const MAX_ARCHIVE_ENTRY_BYTES = 100 * 1024 * 1024;
-const MAX_ARCHIVE_EXTRACTED_BYTES = 8 * 1024 * 1024 * 1024;
+const MIN_FREE_DISK_RESERVE_BYTES = 64n * 1024n * 1024n;
+const FILE_SYSTEM_ENTRY_OVERHEAD_BYTES = 16n * 1024n;
 
 export type DownloadRemoteFileOptions = {
   baseUrl: string;
   remoteUrl: string;
   destinationPath: string;
-  maxBytes: number;
+  maxBytes?: number;
   signal: AbortSignal;
   timeoutMs: number;
   context: string;
@@ -176,6 +175,10 @@ export async function requestDataPlatformJson(options: {
 
 /** 以稳定 partial 文件承接远程响应；服务端支持 Range/强 ETag 时可在 24 小时内安全续传。 */
 export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Promise<DownloadRemoteFileResult> {
+  if (options.maxBytes !== undefined && (!Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0)) {
+    throw new Error(`${options.context}文件大小上限无效。`);
+  }
+
   const remoteUrl = resolveDataPlatformRemoteUrl(options.baseUrl, options.remoteUrl);
   const fetchImpl = options.fetchImpl ?? await resolveElectronFetch();
   const requestController = new AbortController();
@@ -236,6 +239,7 @@ export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Pr
     }
 
     if (!response.body) throw new Error(`${options.context}响应没有文件内容。`);
+    const diskWriteBudget = await resolveDiskWriteBudget(partialRoot, options.context);
     const resumedBytes = resumed ? resume!.bytes : 0;
     const declaredLengthHeader = response.headers.get('content-length');
     if (declaredLengthHeader !== null) {
@@ -243,21 +247,27 @@ export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Pr
       if (!Number.isSafeInteger(declaredLength) || declaredLength < 0) {
         throw new Error(`${options.context}响应 Content-Length 无效。`);
       }
-      if (resumedBytes + declaredLength > options.maxBytes) {
+      if (options.maxBytes !== undefined && resumedBytes + declaredLength > options.maxBytes) {
         throw new Error(`${options.context}超过允许大小。`);
       }
+      assertWithinDiskWriteBudget(BigInt(declaredLength), diskWriteBudget, options.context);
     }
-    if (resumedBytes >= options.maxBytes && response.status === 206) {
+    if (options.maxBytes !== undefined && resumedBytes >= options.maxBytes && response.status === 206) {
       throw new Error(`${options.context}续传起点已达到文件大小上限。`);
     }
 
     handle = await fs.open(partialPath, resumed ? 'a' : 'wx');
     let totalBytes = resumedBytes;
+    let streamedBytes = 0n;
     for await (const rawChunk of response.body as unknown as AsyncIterable<Uint8Array>) {
       if (options.signal.aborted) throw createCanceledError();
       const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
       totalBytes += chunk.byteLength;
-      if (totalBytes > options.maxBytes) throw new Error(`${options.context}超过允许大小。`);
+      if (options.maxBytes !== undefined && totalBytes > options.maxBytes) {
+        throw new Error(`${options.context}超过允许大小。`);
+      }
+      streamedBytes += BigInt(chunk.byteLength);
+      assertWithinDiskWriteBudget(streamedBytes, diskWriteBudget, options.context);
       await writeBufferFully(handle, chunk);
       options.onChunk?.(chunk);
       options.onBytes?.(chunk.byteLength);
@@ -306,14 +316,11 @@ async function assertDownloadResponse(response: Response, context: string): Prom
   throw new Error(`${context}返回 HTTP ${response.status}${detail ? `：${detail}` : ''}`);
 }
 
-/** 安全展开 ZIP：预检目录项、路径、符号链接及大小，再逐项流式写入。 */
+/** 安全展开 ZIP：预检目录项、路径和符号链接，再逐项流式写入。 */
 export async function extractZipSecurely(archivePath: string, destinationRoot: string, signal: AbortSignal): Promise<void> {
   if (signal.aborted) throw createCanceledError();
   const archiveStat = await fs.stat(archivePath);
   if (!archiveStat.isFile()) throw new Error('下载的工程包不是文件。');
-  if (archiveStat.size > MAX_ARCHIVE_COMPRESSED_BYTES) {
-    throw new Error('工程包压缩文件超过 2 GB 限制。');
-  }
 
   let directory: UnzipDirectory;
   try {
@@ -329,7 +336,7 @@ export async function extractZipSecurely(archivePath: string, destinationRoot: s
 
   const normalizedEntries: Array<{ entry: UnzipEntry; relativePath: string }> = [];
   const seenPaths = new Set<string>();
-  let declaredTotal = 0;
+  let declaredTotal = 0n;
 
   for (const entry of directory.files) {
     const relativePath = normalizeArchiveEntryPath(entry.path);
@@ -348,22 +355,17 @@ export async function extractZipSecurely(archivePath: string, destinationRoot: s
     if (entry.type !== 'Directory' && entry.type !== 'File') {
       throw new Error(`工程包包含不支持的条目类型：${relativePath}`);
     }
-    if (!Number.isFinite(entry.uncompressedSize) || entry.uncompressedSize < 0) {
+    if (!Number.isSafeInteger(entry.uncompressedSize) || entry.uncompressedSize < 0) {
       throw new Error(`工程包条目大小无效：${relativePath}`);
     }
-    if (entry.uncompressedSize > MAX_ARCHIVE_ENTRY_BYTES) {
-      throw new Error(`工程包单文件超过 100 MB 限制：${relativePath}`);
-    }
-
-    declaredTotal += entry.uncompressedSize;
-    if (declaredTotal > MAX_ARCHIVE_EXTRACTED_BYTES) {
-      throw new Error('工程包展开后总大小超过 8 GB 限制。');
-    }
+    declaredTotal += BigInt(entry.uncompressedSize);
     normalizedEntries.push({ entry, relativePath });
   }
 
   await fs.mkdir(destinationRoot, { recursive: true });
-  let actualTotal = 0;
+  const estimatedExtractedBytes = declaredTotal
+    + BigInt(normalizedEntries.length) * FILE_SYSTEM_ENTRY_OVERHEAD_BYTES;
+  await assertDiskWriteCapacity(destinationRoot, estimatedExtractedBytes, '展开工程包');
 
   for (const { entry, relativePath } of normalizedEntries) {
     if (signal.aborted) throw createCanceledError();
@@ -389,12 +391,8 @@ export async function extractZipSecurely(archivePath: string, destinationRoot: s
         }
         const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
         entryBytes += chunk.byteLength;
-        actualTotal += chunk.byteLength;
-        if (entryBytes > MAX_ARCHIVE_ENTRY_BYTES) {
-          throw new Error(`工程包单文件超过 100 MB 限制：${relativePath}`);
-        }
-        if (actualTotal > MAX_ARCHIVE_EXTRACTED_BYTES) {
-          throw new Error('工程包展开后总大小超过 8 GB 限制。');
+        if (entryBytes > entry.uncompressedSize) {
+          throw new Error(`工程包条目实际大小与目录记录不一致：${relativePath}`);
         }
         await writeBufferFully(handle, chunk);
       }
@@ -511,6 +509,41 @@ function isMatchingContentRange(value: string | null, expectedStart: number): bo
   if (!value) return false;
   const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(value.trim());
   return Boolean(match && Number(match[1]) === expectedStart && Number(match[2]) >= expectedStart);
+}
+
+/** 按目标文件系统的实时余量检查写入容量，不施加固定文件大小上限。 */
+export async function assertDiskWriteCapacity(rootPath: string, requiredBytes: bigint, context: string): Promise<void> {
+  if (requiredBytes < 0n) {
+    throw new Error(`${context}所需磁盘空间无效。`);
+  }
+
+  const diskWriteBudget = await resolveDiskWriteBudget(rootPath, context);
+  assertWithinDiskWriteBudget(
+    requiredBytes + FILE_SYSTEM_ENTRY_OVERHEAD_BYTES,
+    diskWriteBudget,
+    context,
+  );
+}
+
+async function resolveDiskWriteBudget(rootPath: string, context: string): Promise<bigint> {
+  let fileSystem: Awaited<ReturnType<typeof fs.statfs>>;
+  try {
+    fileSystem = await fs.statfs(rootPath, { bigint: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${context}无法检查磁盘可用空间：${message}`);
+  }
+
+  const availableBytes = fileSystem.bavail * fileSystem.bsize;
+  return availableBytes > MIN_FREE_DISK_RESERVE_BYTES
+    ? availableBytes - MIN_FREE_DISK_RESERVE_BYTES
+    : 0n;
+}
+
+function assertWithinDiskWriteBudget(requiredBytes: bigint, diskWriteBudget: bigint, context: string): void {
+  if (requiredBytes > diskWriteBudget) {
+    throw new Error(`${context}所需磁盘空间不足。`);
+  }
 }
 
 async function writeBufferFully(handle: Awaited<ReturnType<typeof fs.open>>, buffer: Buffer): Promise<void> {
