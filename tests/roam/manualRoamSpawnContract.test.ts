@@ -12,6 +12,7 @@ const [
   runtimeSource,
   spawnMarkerRuntimeSource,
   roamRuntimeSource,
+  roamCollisionPolicySource,
 ] = await Promise.all([
   readFile(new URL('../../src/editor/assets/projectLibrary.ts', import.meta.url), 'utf8'),
   readFile(new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url), 'utf8'),
@@ -20,6 +21,7 @@ const [
   readFile(new URL('../../src/runtime/babylon/SceneRuntime.ts', import.meta.url), 'utf8'),
   readFile(new URL('../../src/runtime/babylon/EditorManualRoamSpawnRuntime.ts', import.meta.url), 'utf8'),
   readFile(new URL('../../src/runtime/roam/ManualRoamRuntime.ts', import.meta.url), 'utf8'),
+  readFile(new URL('../../src/runtime/roam/manualRoamCollisionPolicy.ts', import.meta.url), 'utf8'),
 ]);
 
 function assertSourceMatches(source: string, pattern: RegExp, message: string): void {
@@ -62,6 +64,34 @@ test('项目库中的手动漫游条目可点击并可拖放到编辑场景', ()
     sceneViewSource,
     /builtInAsset\.kind === 'manual-roam-spawn'[\s\S]*?createManualRoamSpawn\(placementPosition\)/,
     '拖放资源卡片应按场景拾取坐标创建或移动出生点。',
+  );
+});
+
+test('没有手动漫游 POI 时运行预览和 Viewer 不显示漫游功能', () => {
+  assertSourceMatches(
+    sceneViewSource,
+    /hasManualRoamSpawnEntity\(sceneDocument\)/,
+    '编辑器应按场景出生点判断是否开放手动漫游。',
+  );
+  assertSourceMatches(
+    sceneViewSource,
+    /isRuntimePreview && hasManualRoamSpawn \? \(/,
+    '运行预览只有摆放手动漫游 POI 后才显示漫游面板。',
+  );
+  assertSourceMatches(
+    playerSource,
+    /hasManualRoamSpawnEntity\(sceneDocument\)/,
+    'Viewer 应按发布场景出生点判断是否开放手动漫游。',
+  );
+  assertSourceMatches(
+    playerSource,
+    /allowCameraControl && sceneHasManualRoamSpawn/,
+    'Viewer 没有手动漫游 POI 时不应创建漫游运行时。',
+  );
+  assertSourceMatches(
+    playerSource,
+    /allowCameraControl && hasManualRoamSpawn \? \(/,
+    'Viewer 只有摆放手动漫游 POI 后才显示漫游面板。',
   );
 });
 
@@ -142,7 +172,7 @@ test('编辑态出生点辅助人物纳入 SceneRuntime，并在运行预览和 
 
 test('编辑态出生点辅助人物不会参与手动漫游静态碰撞', () => {
   assertSourceMatches(
-    roamRuntimeSource,
+    roamCollisionPolicySource,
     /metadata\?\.editorManualRoamSpawn/,
     '手动漫游碰撞注册应排除编辑态出生点辅助人物。',
   );

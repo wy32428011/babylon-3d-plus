@@ -9,6 +9,7 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import { EDITOR_FILL_LIGHT_INTENSITY, EDITOR_FILL_LIGHT_NAME } from './SceneShadowRuntime';
+import { warmupLocalBabylonDecoders } from './localDecoderConfiguration';
 import {
   createEditorGroundGrid,
   DEFAULT_EDITOR_GRID_SETTINGS,
@@ -410,6 +411,7 @@ export function createBabylonViewport(
 
   const scene = new Scene(engine);
   scene.clearColor.set(0.08, 0.08, 0.09, 1);
+  void warmupLocalBabylonDecoders();
 
   const camera = new ArcRotateCamera(
     'EditorCamera',

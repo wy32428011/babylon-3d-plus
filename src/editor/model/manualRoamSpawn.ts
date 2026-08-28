@@ -12,6 +12,11 @@ export function findManualRoamSpawnEntity(scene: SceneDocument): Entity | null {
   return null;
 }
 
+/** 场景中是否已摆放手动漫游 POI；未摆放时运行预览和 Viewer 不开放漫游功能。 */
+export function hasManualRoamSpawnEntity(scene: SceneDocument): boolean {
+  return findManualRoamSpawnEntity(scene) !== null;
+}
+
 /** 判断指定实体集合是否包含手动漫游出生点，供群组编辑能力统一收敛。 */
 export function containsManualRoamSpawnEntity(
   scene: Pick<SceneDocument, 'entities'>,

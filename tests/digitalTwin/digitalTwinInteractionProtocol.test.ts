@@ -6,6 +6,8 @@ import {
   DIGITAL_TWIN_BRIDGE_CHANNEL,
   DIGITAL_TWIN_BRIDGE_VERSION,
   DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
+  DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY,
+  DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY,
   DIGITAL_TWIN_VIEWER_ERROR_CODES,
   parseDigitalTwinBridgeMessage,
 } from '../../src/player/digitalTwinInteractionProtocol.ts';
@@ -27,6 +29,32 @@ test('Viewer 协议常量与 v1 合同夹具保持一致', () => {
   assert.equal(fixture.channel, DIGITAL_TWIN_BRIDGE_CHANNEL);
   assert.deepEqual(fixture.viewerErrorCodes, [...DIGITAL_TWIN_VIEWER_ERROR_CODES]);
   assert.equal(DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY, 'focusAsset');
+  assert.equal(DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY, 'startAutoPatrol');
+  assert.equal(DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY, 'startManualRoam');
+});
+
+test('v1 协议解析自动巡检、手动漫游命令及无资产结果', () => {
+  for (const action of ['startAutoPatrol', 'startManualRoam'] as const) {
+    const command = {
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: 'session',
+      type: `command.${action}`,
+      requestId: `request-${action}`,
+    };
+    assert.deepEqual(parseDigitalTwinBridgeMessage(command), command);
+
+    const result = {
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: 'session',
+      type: 'command.result',
+      requestId: `request-${action}`,
+      ok: true,
+      payload: { action },
+    };
+    assert.deepEqual(parseDigitalTwinBridgeMessage(result), result);
+  }
 });
 
 test('v1 合同中的合法消息均可严格解析', () => {

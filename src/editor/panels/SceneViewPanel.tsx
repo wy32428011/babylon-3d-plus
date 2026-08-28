@@ -23,6 +23,16 @@ import {
   findAutoStartPatrolRoute,
   type AutoPatrolPlaybackRoute,
 } from '../../runtime/babylon/AutoPatrolPlaybackController';
+import { AutoPatrolRuntimeIntegration } from '../../runtime/patrol/AutoPatrolRuntimeIntegration';
+import {
+  getAutoPatrolRouteGeometryError,
+  inspectAutoPatrolRouteSegment,
+} from '../../runtime/patrol/AutoPatrolRouteGeometryValidator';
+import {
+  createSceneCameraPoseFromReplayCamera,
+  type AutoPatrolInspectionReplayCamera,
+} from '../../runtime/patrol/AutoPatrolInspectionReplayController';
+import type { AutoPatrolInspectionRecordStore } from '../../runtime/patrol/AutoPatrolInspectionRecordStore';
 import {
   ScenePerformanceMonitor,
   type EditModeThinInstancePlanPerformanceMetrics,
@@ -47,9 +57,16 @@ import {
 } from '../store/editorStore';
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import { getLightEditorCapabilities } from '../model/lightEditor';
-import { getAutoPatrolWaypointWorldPose } from '../model/autoPatrol';
+import {
+  AUTO_PATROL_EYE_HEIGHT_METERS,
+  createAutoPatrolWaypointFromWorldPose,
+  getAutoPatrolWaypointWorldPose,
+  getSceneCameraPosition,
+  validateAutoPatrolRoute,
+} from '../model/autoPatrolInspection';
 import {
   containsManualRoamSpawnEntity,
+  hasManualRoamSpawnEntity,
   resolveManualRoamGroupRotationReference,
   resolveManualRoamSpawnPose,
 } from '../model/manualRoamSpawn';
@@ -85,6 +102,7 @@ import {
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 import { ViewportOrientationCompass } from '../ui/ViewportOrientationCompass';
 import { AutoPatrolControls } from '../../shared/ui/AutoPatrolControls';
+import { useAutoPatrolInspectionHistory } from '../../shared/ui/useAutoPatrolInspectionHistory';
 import { ManualRoamControls } from '../../shared/ui/ManualRoamControls';
 import {
   createInitialManualRoamSnapshot,
@@ -97,12 +115,7 @@ import type {
   ManualRoamLocomotionMode,
   ManualRoamViewMode,
 } from '../../runtime/roam/manualRoamCore';
-import {
-  combineManualRoamCollisionBoundsResolvers,
-  createManualRoamModelArrayCollisionBoundsResolver,
-  createManualRoamThinInstanceCollisionBoundsResolver,
-  isManualRoamModelArrayThinInstanceMesh,
-} from '../../runtime/roam/manualRoamCollisionBounds';
+import { createDefaultManualRoamCollisionBoundsResolver } from '../../runtime/roam/manualRoamCollisionBounds';
 import {
   beginScenePreparation,
   countExpectedSceneBatchedEntities,
@@ -275,6 +288,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
   const [performanceHudExpanded, setPerformanceHudExpanded] = useState(false);
   const [manualRoamSnapshot, setManualRoamSnapshot] = useState<ManualRoamSnapshot>(createInitialManualRoamSnapshot);
+  const [autoPatrolRecordStore, setAutoPatrolRecordStore] = useState<AutoPatrolInspectionRecordStore | null>(null);
   const sceneDocument = useEditorStore((state) => state.scene);
   const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
   const manualRoamSceneSessionIdRef = useRef(sceneSessionId);
@@ -338,11 +352,31 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const requestAutoPatrolPlayback = useEditorStore((state) => state.requestAutoPatrolPlayback);
   const setSelectedModelMeasurement = useEditorStore((state) => state.setSelectedModelMeasurement);
   const setSelectedGroupSpatialInfo = useEditorStore((state) => state.setSelectedGroupSpatialInfo);
+
   const groupInspectorTransformRequest = useEditorStore((state) => state.groupInspectorTransformRequest);
   const consumeGroupInspectorTransformRequest = useEditorStore((state) => state.consumeGroupInspectorTransformRequest);
   const pushLog = useEditorStore((state) => state.pushLog);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
   const isRuntimePreview = runtimeMode === 'preview';
+  const applyHistoryReplayCamera = useCallback((camera: AutoPatrolInspectionReplayCamera): void => {
+    viewportRef.current?.applyCameraPose(createSceneCameraPoseFromReplayCamera(camera), { animate: false });
+  }, []);
+  const beginHistoryReplay = useCallback((): void => {
+    manualRoamRef.current?.setEnabled(false);
+    autoPatrolPlaybackRef.current?.stop();
+    viewportRef.current?.cancelCameraTransition('manual-input');
+  }, []);
+  const {
+    history: autoPatrolHistory,
+    handleHistoryAction,
+    pauseReplay: pauseHistoryReplay,
+  } = useAutoPatrolInspectionHistory({
+    recordStore: autoPatrolRecordStore,
+    scopeId: sceneDocument.id,
+    applyCamera: applyHistoryReplayCamera,
+    onReplayStart: beginHistoryReplay,
+    onError: pushLog,
+  });
   const editModeThinInstancePlanComputation = useMemo(() => {
     const startedAt = readScenePanelTimestampMs();
     const previousPlan = editModeThinInstancePlanRef.current;
@@ -372,6 +406,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   );
   const autoPatrolRoutes = useMemo<AutoPatrolPlaybackRoute[]>(
     () => collectAutoPatrolPlaybackRoutes(sceneDocument),
+    [sceneDocument.entityIds, sceneDocument.entities],
+  );
+  /** 未摆放手动漫游 POI 时不展示运行预览漫游面板。 */
+  const hasManualRoamSpawn = useMemo(
+    () => hasManualRoamSpawnEntity(sceneDocument),
     [sceneDocument.entityIds, sceneDocument.entities],
   );
   const hierarchyGroupTransformSelection = useMemo(
@@ -605,6 +644,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     });
     if (clickSnapshotRef.current) return;
 
+    pauseHistoryReplay();
     autoPatrolPlaybackRef.current?.notifyManualInput();
     autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
   }
@@ -618,6 +658,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     clickSnapshotRef.current = nextSnapshot;
     const clickTolerancePx = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx;
     if (snapshot.maxTravelDistancePx <= clickTolerancePx && nextSnapshot.maxTravelDistancePx > clickTolerancePx) {
+      pauseHistoryReplay();
       autoPatrolPlaybackRef.current?.notifyManualInput();
       autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
     }
@@ -636,6 +677,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx,
     );
     if (!selectionClick) return;
+    pauseHistoryReplay();
 
     if (!isRuntimePreview) {
       const patrolPick = runtimeRef.current?.pickAutoPatrolAtCanvasPoint(
@@ -730,6 +772,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     }
 
     if (pickedEntityId) useEditorStore.getState().setEnvironmentAdjustmentActive(false);
+    if (isRuntimePreview && pickedEntityId) {
+      autoPatrolPlaybackRef.current?.triggerManualEventsForTarget(pickedEntityId);
+    }
     selectEntity(pickedEntityId);
   }
   /** 指针流程被浏览器取消时丢弃点击快照，并取消尚未完成的 Shift 阵列拖拽。 */
@@ -740,6 +785,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
   /** 滚轮缩放属于手动相机接管，立即暂停自动巡检。 */
   function handleCanvasWheel(_event: WheelEvent<HTMLCanvasElement>): void {
+    pauseHistoryReplay();
     autoPatrolPlaybackRef.current?.notifyManualInput();
     autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
   }
@@ -847,6 +893,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     let runtime: SceneRuntime | null = null;
     let gizmo: TransformGizmoController | null = null;
     let autoPatrolPlayback: AutoPatrolPlaybackController | null = null;
+    let autoPatrolIntegration: AutoPatrolRuntimeIntegration | null = null;
     let manualRoam: ManualRoamRuntime | null = null;
     let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
     let unsubscribeManualRoamSnapshot: (() => void) | null = null;
@@ -895,14 +942,55 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         },
         setEnvironmentRuntimeSnapshot,
       );
+      autoPatrolIntegration = new AutoPatrolRuntimeIntegration({
+        engine: viewport.engine,
+        scopeId: (sceneDocumentRef.current ?? useEditorStore.getState().scene).id,
+        getCamera: () => viewport?.camera ?? null,
+        getInspectionContext: () => {
+          const snapshot = autoPatrolPlayback?.getSnapshot();
+          return {
+            taskId: snapshot?.taskId ?? null,
+            routeId: snapshot?.routeId ?? null,
+            routeName: snapshot?.routeName ?? null,
+          };
+        },
+        setHighlightedEntityIds: (entityIds) => {
+          if (entityIds.length > 0) {
+            runtime?.setLocalHighlightEntityIds(entityIds);
+            return;
+          }
+          const state = useEditorStore.getState();
+          const selectedIds = state.hierarchySelectionIds.length > 0
+            ? state.hierarchySelectionIds.filter((entityId) => Boolean(state.scene.entities[entityId]))
+            : state.scene.selectedEntityId
+              ? [state.scene.selectedEntityId]
+              : [];
+          runtime?.setLocalHighlightEntityIds(selectedIds);
+        },
+        onError: (message, error) => {
+          console.error(message, error);
+          pushLog(message);
+        },
+      });
+      setAutoPatrolRecordStore(autoPatrolIntegration.recordStore);
       autoPatrolPlayback = new AutoPatrolPlaybackController({
         readPose: () => viewport!.getCameraPose(),
         writePose: (pose) => viewport!.applyCameraPose(pose, { animate: false }),
         now: readScenePanelTimestampMs,
+        wallNow: Date.now,
         subscribeFrame: (callback) => {
           const observer = viewport!.scene.onBeforeRenderObservable.add(callback);
           return () => viewport?.scene.onBeforeRenderObservable.remove(observer);
         },
+        validateRoute: (route) => getAutoPatrolRouteGeometryError(viewport!.scene, route, {
+          initialPose: viewport!.getCameraPose(),
+        }),
+        captureScreenshot: autoPatrolIntegration.captureScreenshot,
+        onInspectionEvent: autoPatrolIntegration.onInspectionEvent,
+        onInspectionScreenshot: autoPatrolIntegration.onInspectionScreenshot,
+        onInspectionStart: autoPatrolIntegration.onInspectionStart,
+        onInspectionTrajectory: autoPatrolIntegration.onInspectionTrajectory,
+        onInspectionRecord: autoPatrolIntegration.onInspectionRecord,
       });
       autoPatrolPlayback.setRoutes(collectAutoPatrolPlaybackRoutes(sceneDocumentRef.current ?? useEditorStore.getState().scene));
       unsubscribeAutoPatrolSnapshot = autoPatrolPlayback.subscribe(() => {
@@ -923,16 +1011,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         resolveSpawnPose: () => resolveManualRoamSpawnPose(
           sceneDocumentRef.current ?? useEditorStore.getState().scene,
         ),
-        resolveCollisionBounds: combineManualRoamCollisionBoundsResolvers([
-          createManualRoamModelArrayCollisionBoundsResolver({
-            getSceneDocument: () => editRuntimeSceneDocumentRef.current ?? useEditorStore.getState().scene,
-            getRuntime: () => runtime,
-          }),
-          createManualRoamThinInstanceCollisionBoundsResolver({
-            getMeshes: () => viewport!.scene.meshes,
-            excludeMesh: isManualRoamModelArrayThinInstanceMesh,
-          }),
-        ]),
+        resolveCollisionBounds: createDefaultManualRoamCollisionBoundsResolver({
+          getSceneDocument: () => editRuntimeSceneDocumentRef.current ?? useEditorStore.getState().scene,
+          getRuntime: () => runtime,
+          getMeshes: () => viewport!.scene.meshes,
+        }),
         setOrbitControlsEnabled: viewport.setCameraControlsEnabled,
         onActivated: () => {
           viewport!.cancelCameraTransition('manual-input');
@@ -1191,6 +1274,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       manualRoam?.dispose();
       unsubscribeAutoPatrolSnapshot?.();
       autoPatrolPlayback?.dispose();
+      autoPatrolIntegration?.dispose();
+      setAutoPatrolRecordStore(null);
       gizmo?.dispose();
       runtime?.dispose();
       viewport?.dispose();
@@ -1204,6 +1289,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const initializedRuntime = runtime;
     const initializedGizmo = gizmo;
     const initializedAutoPatrolPlayback = autoPatrolPlayback;
+    const initializedAutoPatrolIntegration = autoPatrolIntegration;
     const initializedManualRoam = manualRoam;
     const initializedUnsubscribeAutoPatrolSnapshot = unsubscribeAutoPatrolSnapshot;
     const initializedUnsubscribeManualRoamSnapshot = unsubscribeManualRoamSnapshot;
@@ -1252,6 +1338,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       initializedManualRoam?.dispose();
       initializedUnsubscribeAutoPatrolSnapshot?.();
       initializedAutoPatrolPlayback?.dispose();
+      initializedAutoPatrolIntegration?.dispose();
+      setAutoPatrolRecordStore(null);
       initializedGizmo.dispose();
       initializedRuntime.dispose();
       initializedViewport.dispose();
@@ -1287,6 +1375,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     manualRoamSceneSessionIdRef.current = sceneSessionId;
     manualRoamRef.current?.invalidateSpawn();
   }, [sceneSessionId]);
+
+  /** 运行预览中删除出生点后立即退出漫游，避免面板已隐藏但相机仍被占用。 */
+  useEffect(() => {
+    if (hasManualRoamSpawn) return;
+    if (!manualRoamRef.current?.getSnapshot().enabled) return;
+    manualRoamRef.current.setEnabled(false);
+  }, [hasManualRoamSpawn]);
 
   /** 执行 Store 发起的候选环境事务；旧环境会保留到候选加载成功。 */
   useEffect(() => {
@@ -1719,7 +1814,45 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!autoPatrolCameraRequest) return;
     const viewport = viewportRef.current;
     if (autoPatrolCameraRequest.kind === 'capture') {
-      consumeAutoPatrolCameraRequest(autoPatrolCameraRequest.id, viewport?.getCameraPose());
+      const pose = viewport?.getCameraPose();
+      const entity = sceneDocument.entities[autoPatrolCameraRequest.entityId];
+      const component = entity?.components.autoPatrol;
+      if (viewport && pose && entity && component && !autoPatrolCameraRequest.waypointId) {
+        const previousWaypoint = component.waypoints.at(-1);
+        if (previousWaypoint) {
+          const capturedWaypoint = createAutoPatrolWaypointFromWorldPose(
+            pose,
+            entity.components.transform,
+            undefined,
+            { eyeHeightMeters: AUTO_PATROL_EYE_HEIGHT_METERS },
+          );
+          const proximityIssue = validateAutoPatrolRoute(
+            { waypoints: [previousWaypoint, capturedWaypoint] },
+            entity.components.transform,
+          ).find((issue) => issue.code === 'waypoints-too-close');
+          if (proximityIssue) {
+            consumeAutoPatrolCameraRequest(
+              autoPatrolCameraRequest.id,
+              undefined,
+              `无法添加点位：${proximityIssue.message}`,
+            );
+            return;
+          }
+          const inspection = inspectAutoPatrolRouteSegment(
+            viewport.scene,
+            getSceneCameraPosition(getAutoPatrolWaypointWorldPose(previousWaypoint, entity.components.transform)),
+            getSceneCameraPosition(getAutoPatrolWaypointWorldPose(capturedWaypoint, entity.components.transform)),
+          );
+          if (!inspection.reachable) {
+            const detail = inspection.reason === 'blocked'
+              ? `新节点与上一节点之间的路径穿过场景实体${inspection.blockingMeshName ? `（${inspection.blockingMeshName}）` : ''}。`
+              : '新节点与上一节点之间存在不可达区域。';
+            consumeAutoPatrolCameraRequest(autoPatrolCameraRequest.id, undefined, `无法添加点位：${detail}`);
+            return;
+          }
+        }
+      }
+      consumeAutoPatrolCameraRequest(autoPatrolCameraRequest.id, pose);
       return;
     }
 
@@ -1743,6 +1876,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!autoPatrolPlaybackRequest) return;
     const controller = autoPatrolPlaybackRef.current;
     if (!controller) return;
+    pauseHistoryReplay();
 
     let result: { ok: true } | { ok: false; error: string } | null = null;
     switch (autoPatrolPlaybackRequest.action) {
@@ -1759,16 +1893,47 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         manualRoamRef.current?.setEnabled(false);
         result = controller.resume();
         break;
+      case 'skip':
+        result = controller.skipCurrentWaypoint();
+        break;
       case 'stop':
         controller.stop();
+        break;
+      case 'emergency-stop':
+        controller.emergencyStop();
         break;
       case 'return':
         result = controller.returnToStart();
         break;
+      case 'set-rate':
+        result = controller.setPlaybackRate(
+          typeof autoPatrolPlaybackRequest.payload === 'number'
+            ? autoPatrolPlaybackRequest.payload
+            : Number.NaN,
+        );
+        break;
+      case 'set-view': {
+        const viewMode = autoPatrolPlaybackRequest.payload;
+        if (viewMode === 'first-person' || viewMode === 'third-person' || viewMode === 'orbit') {
+          manualRoamRef.current?.setEnabled(false);
+          result = controller.setManualViewMode(viewMode);
+        } else {
+          result = { ok: false, error: '巡检视角参数无效。' };
+        }
+        break;
+      }
+      case 'resume-auto-view':
+        result = controller.resumeAutomaticView();
+        break;
+      case 'trigger-event':
+        result = typeof autoPatrolPlaybackRequest.payload === 'string'
+          ? controller.triggerManualEvent(autoPatrolPlaybackRequest.payload)
+          : { ok: false, error: '手动巡检事件参数无效。' };
+        break;
     }
     if (result && !result.ok) pushLog(result.error);
     consumeAutoPatrolPlaybackRequest(autoPatrolPlaybackRequest.id);
-  }, [autoPatrolPlaybackRequest, consumeAutoPatrolPlaybackRequest, pushLog]);
+  }, [autoPatrolPlaybackRequest, consumeAutoPatrolPlaybackRequest, pauseHistoryReplay, pushLog]);
 
   /** 每次进入运行预览只尝试一次自动启动；退出时停止且保留当前视角。 */
   useEffect(() => {
@@ -1788,7 +1953,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!result.ok) pushLog(result.error);
   }, [autoPatrolRoutes, isRuntimePreview, pushLog]);
 
+  /** 启用或关闭运行预览手动漫游；场景没有出生点 POI 时拒绝启用。 */
   function handleManualRoamEnabled(enabled: boolean): void {
+    if (enabled && !hasManualRoamSpawn) return;
+    if (enabled) pauseHistoryReplay();
     manualRoamRef.current?.setEnabled(enabled);
   }
 
@@ -1836,12 +2004,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const interactiveControlFocused = target instanceof HTMLElement
         && Boolean(target.closest('button, a, [role="button"]'));
       if (interactiveControlFocused) return;
+      pauseHistoryReplay();
       autoPatrolPlaybackRef.current?.notifyManualInput();
       autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
     };
     window.addEventListener('keydown', handleKeyDown, true);
     return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [requestAutoPatrolCapture]);
+  }, [pauseHistoryReplay, requestAutoPatrolCapture]);
 
   /** Esc 随时结束环境临时调整，不影响当前普通实体选择。 */
   useEffect(() => {
@@ -2114,11 +2283,21 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         <ViewportOrientationCompass
           camera={viewportCamera}
           disabled={Boolean(viewportError) || (isRuntimePreview && manualRoamSnapshot.enabled)}
-          onReset={requestCameraReset}
-          onToggleStandardView={toggleCameraStandardView}
+          onReset={() => {
+            pauseHistoryReplay();
+            autoPatrolPlaybackRef.current?.notifyManualInput();
+            autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
+            requestCameraReset();
+          }}
+          onToggleStandardView={(orientation) => {
+            pauseHistoryReplay();
+            autoPatrolPlaybackRef.current?.notifyManualInput();
+            autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
+            toggleCameraStandardView(orientation);
+          }}
           orientation={cameraOrientation}
         />
-        {isRuntimePreview ? (
+        {isRuntimePreview && hasManualRoamSpawn ? (
           <ManualRoamControls
             snapshot={manualRoamSnapshot}
             onConfigChange={handleManualRoamConfig}
@@ -2132,11 +2311,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
             onVirtualMove={(right, forward) => manualRoamRef.current?.setVirtualMovement(right, forward)}
           />
         ) : null}
-        {isRuntimePreview && autoPatrolRoutes.length > 0 && !manualRoamSnapshot.enabled ? (
+        {isRuntimePreview
+          && (autoPatrolRoutes.length > 0 || Boolean(autoPatrolHistory?.records.length))
+          && !manualRoamSnapshot.enabled ? (
           <AutoPatrolControls
             routes={autoPatrolRoutes}
             snapshot={autoPatrolPlaybackSnapshot}
-            onAction={(action, routeId) => requestAutoPatrolPlayback(action, routeId)}
+            onAction={(action, routeId, payload) => requestAutoPatrolPlayback(action, routeId, payload)}
+            history={autoPatrolHistory}
+            onHistoryAction={handleHistoryAction}
           />
         ) : null}
         {performanceSnapshot && props.performanceHudVisible ? (

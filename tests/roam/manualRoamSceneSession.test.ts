@@ -28,15 +28,13 @@ test('运行时低频清理后来转为 thin instance 的原生碰撞登记', ()
     runtimeSource,
     /reconcileCollisionMeshes\(nowMs: number, force = false\): void \{[\s\S]*?this\.lastCollisionMeshReconcileMs = nowMs;[\s\S]*?this\.unregisterCollisionMesh\(mesh\);/,
   );
+  assert.match(runtimeSource, /resolveManualRoamCollisionStyle\(mesh\) === 'native-triangle'/);
+  assert.match(runtimeSource, /this\.collider\.surroundingMeshes = nearby;/);
+  assert.match(runtimeSource, /this\.localTriangleCollider\.sync\(/);
+  assert.match(sceneViewSource, /createDefaultManualRoamCollisionBoundsResolver\(/);
   assert.match(
     runtimeSource,
-    /mesh instanceof Mesh[\s\S]*?mesh\.thinInstanceCount > 0/,
-  );
-  assert.match(runtimeSource, /metadata\?\.modelArraySourceEntityId/);
-  assert.match(runtimeSource, /metadata\?\.manualRoamCollisionProxy/);
-  assert.match(
-    runtimeSource,
-    /const refreshed = this\.collisionProxyPool\?\.sync\([\s\S]*?if \(refreshed && this\.fallbackGround\.isEnabled\(\)\) \{[\s\S]*?this\.disableFallbackGroundWhenSceneFloorIsReady\(\);/,
+    /if \(\(proxyRefreshed \|\| triangleRefreshed\) && this\.fallbackGround\.isEnabled\(\)\) \{[\s\S]*?this\.disableFallbackGroundWhenSceneFloorIsReady\(\);/,
   );
 });
 

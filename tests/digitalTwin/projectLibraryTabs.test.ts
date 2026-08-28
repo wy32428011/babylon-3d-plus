@@ -70,7 +70,7 @@ test('模型库空状态只由普通模型资产决定', () => {
   );
 });
 
-test('特效库紧跟 POI 库并承载全部内置 EFF，POI 库仅保留六个指定入口', () => {
+test('特效库紧跟 POI 库并承载全部内置 EFF，POI 库仅保留七个指定入口', () => {
   const source = readFileSync(PROJECT_LIBRARY_PATH, 'utf8');
   const poiLibrary = readProjectLibraryDefinition(source, 'poi');
   const effectLibrary = readProjectLibraryDefinition(source, 'effect');
@@ -81,7 +81,7 @@ test('特效库紧跟 POI 库并承载全部内置 EFF，POI 库仅保留六个�
   assert.ok(poiIndex < effectIndex && effectIndex < themeIndex, '特效库应位于 POI 库与主题库之间');
   assert.deepEqual(
     [...poiLibrary.matchAll(/id: '(poi-[^']+)'/g)].map((match) => match[1]),
-    ['poi-auto-patrol', 'poi-model-generator', 'poi-chart-marker', 'poi-panel', 'poi-alarm', 'poi-roam'],
+    ['poi-auto-patrol', 'poi-model-generator', 'poi-click-event-binding', 'poi-chart-marker', 'poi-panel', 'poi-alarm', 'poi-roam'],
   );
   assert.ok(!poiLibrary.includes('createPoiEffectLibraryItems()'));
   assert.ok(effectLibrary.includes("label: '特效库'"));
@@ -95,7 +95,7 @@ test('特效 Inspector 使用独立于 POI 的用户可见术语', () => {
   const effectInspectorSource = readFileSync(POI_EFFECT_INSPECTOR_PATH, 'utf8');
 
   assert.ok(inspectorSource.includes("poiEffect ? '特效名称'"));
-  assert.ok(inspectorSource.includes("modelGenerator || autoPatrol ? 'POI名称'"));
+  assert.ok(inspectorSource.includes("modelGenerator || clickEventBinding || autoPatrol ? 'POI名称'"));
   assert.ok(effectInspectorSource.includes('<legend>特效</legend>'));
   assert.ok(!effectInspectorSource.includes('POI 特效'));
 });

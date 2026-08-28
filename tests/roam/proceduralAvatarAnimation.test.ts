@@ -7,6 +7,7 @@ import {
   createProceduralStrideTargets,
   PROCEDURAL_LIMB,
   resolveProceduralBodyMotion,
+  resolveProceduralGaitCadence,
   resolveProceduralStrideInfluences,
   stepProceduralGaitState,
 } from '../../src/runtime/roam/proceduralAvatarAnimation.ts';
@@ -239,17 +240,17 @@ test('步态权重按相位交替且在静止或腾空时回到中立姿态', ()
 
 test('程序化步态从中立相位平滑启动，并在停止时冻结相位后渐隐', () => {
   let state = createInitialProceduralGaitState();
-  state = stepProceduralGaitState(state, 0, false, false, 0.5);
+  state = stepProceduralGaitState(state, 0, 0, false, 0.5);
   assert.deepEqual(state, { phase: 0, amount: 0, active: false });
 
-  state = stepProceduralGaitState(state, 1, false, false, 1 / 60);
+  state = stepProceduralGaitState(state, 1, 1.6, false, 1 / 60);
   assert.ok(state.phase > 0 && state.phase < 0.2);
   assert.ok(state.amount > 0 && state.amount < 0.25);
   assert.equal(state.active, true);
 
-  const movingState = stepProceduralGaitState(state, 1, false, false, 1 / 60);
+  const movingState = stepProceduralGaitState(state, 1, 1.6, false, 1 / 60);
   assert.ok(movingState.phase > state.phase);
-  const stoppingState = stepProceduralGaitState(movingState, 0, false, false, 1 / 60);
+  const stoppingState = stepProceduralGaitState(movingState, 0, 0, false, 1 / 60);
   assert.equal(stoppingState.phase, movingState.phase);
   assert.ok(stoppingState.amount < movingState.amount);
   assert.ok(stoppingState.amount > 0);
@@ -259,23 +260,40 @@ test('程序化步态从中立相位平滑启动，并在停止时冻结相位�
 test('低于移动阈值的摇杆漂移不会让人物停在偏步姿势', () => {
   let state = { phase: Math.PI / 2, amount: 0.5, active: true };
   for (let frame = 0; frame < 120; frame += 1) {
-    state = stepProceduralGaitState(state, 0.04, false, false, 1 / 60);
+    state = stepProceduralGaitState(state, 0.04, 0.064, false, 1 / 60);
   }
 
   assert.deepEqual(state, { phase: 0, amount: 0, active: false });
 });
 
 test('真实输入幅度先经过死区判断，再映射为完整步幅', () => {
-  const belowDeadZone = stepProceduralGaitState(createInitialProceduralGaitState(), 0.04, false, false, 1 / 60);
+  const belowDeadZone = stepProceduralGaitState(createInitialProceduralGaitState(), 0.04, 0.064, false, 1 / 60);
   assert.deepEqual(belowDeadZone, { phase: 0, amount: 0, active: false });
 
-  const walking = stepProceduralGaitState(createInitialProceduralGaitState(), 0.35, false, false, 1 / 60);
+  const walking = stepProceduralGaitState(createInitialProceduralGaitState(), 0.35, 1.6, false, 1 / 60);
   assert.equal(walking.active, true);
   assert.ok(walking.amount > 0.1 && walking.amount < 0.2);
 
-  const slightMovement = stepProceduralGaitState(createInitialProceduralGaitState(), 0.06, false, false, 1 / 60);
+  const slightMovement = stepProceduralGaitState(createInitialProceduralGaitState(), 0.06, 0.096, false, 1 / 60);
   assert.equal(slightMovement.active, true);
   assert.ok(slightMovement.amount > 0 && slightMovement.amount < 0.01);
+});
+
+test('步态相位按水平速度成比例推进，使步频与走动速度保持一致', () => {
+  const delta = 1 / 60;
+  const rest = stepProceduralGaitState(createInitialProceduralGaitState(), 1, 0, false, delta);
+  assert.equal(rest.phase, 0);
+  assert.equal(resolveProceduralGaitCadence(0), 0);
+
+  const walk = stepProceduralGaitState(createInitialProceduralGaitState(), 1, 1.6, false, delta);
+  const halfWalk = stepProceduralGaitState(createInitialProceduralGaitState(), 1, 0.8, false, delta);
+  const run = stepProceduralGaitState(createInitialProceduralGaitState(), 1, 3.2, false, delta);
+
+  assert.ok(walk.phase > 0);
+  assert.ok(Math.abs(halfWalk.phase * 2 - walk.phase) < 1e-9);
+  assert.ok(Math.abs(run.phase - walk.phase * 2) < 1e-9);
+  assert.ok(Math.abs(walk.phase - resolveProceduralGaitCadence(1.6) * delta) < 1e-9);
+  assert.ok(Math.abs(resolveProceduralGaitCadence(3.2) - resolveProceduralGaitCadence(1.6) * 2) < 1e-9);
 });
 
 test('行走身体起伏限制在毫米级，静止或腾空时不产生额外跳动', () => {

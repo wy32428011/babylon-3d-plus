@@ -4513,11 +4513,11 @@ select {
   width: 24px;
   height: 24px;
   place-items: center;
-  border: 1px solid #22bad5;
+  border: 1px solid #ff4b54;
   border-radius: 50%;
-  color: #95efff;
+  color: #ffd8da;
   font-weight: 700;
-  background: #123943;
+  background: #5b1e23;
 }
 
 .auto-patrol-waypoint-actions {
@@ -4549,6 +4549,144 @@ select {
   justify-content: flex-end;
 }
 
+.auto-patrol-inline-switch,
+.auto-patrol-file-message,
+.auto-patrol-validation-ok {
+  margin: 0;
+}
+
+.auto-patrol-settings-section,
+.auto-patrol-definition-section {
+  min-width: 0;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #242424;
+}
+
+.auto-patrol-settings-section > summary {
+  padding: 7px 8px;
+  cursor: pointer;
+  color: #ddd;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.auto-patrol-settings-section[open] {
+  display: grid;
+  gap: 6px;
+  padding-bottom: 7px;
+}
+
+.auto-patrol-settings-section[open] > :not(summary) {
+  margin-right: 7px;
+  margin-left: 7px;
+}
+
+.auto-patrol-route-file-actions,
+.auto-patrol-section-heading,
+.auto-patrol-definition-card-header,
+.auto-patrol-event-responses {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.auto-patrol-route-file-actions,
+.auto-patrol-event-responses {
+  flex-wrap: wrap;
+}
+
+.auto-patrol-route-file-actions button,
+.auto-patrol-section-heading button,
+.auto-patrol-definition-card-header button {
+  min-height: 25px;
+  border: 1px solid #515151;
+  border-radius: 3px;
+  color: #ddd;
+  background: #292929;
+}
+
+.auto-patrol-hidden-file-input {
+  display: none;
+}
+
+.auto-patrol-validation-list {
+  display: grid;
+  gap: 3px;
+  margin: 2px 0;
+  padding-left: 18px;
+  color: #ffb36c;
+  font-size: 11px;
+}
+
+.auto-patrol-validation-ok {
+  color: #73d99a;
+  font-size: 11px;
+}
+
+.auto-patrol-definition-section {
+  display: grid;
+  gap: 7px;
+  padding: 7px;
+}
+
+.auto-patrol-section-heading,
+.auto-patrol-definition-card-header {
+  justify-content: space-between;
+}
+
+.auto-patrol-definition-list {
+  display: grid;
+  gap: 7px;
+}
+
+.auto-patrol-definition-card {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid #484848;
+  border-radius: 4px;
+  background: #2b2b2b;
+}
+
+.auto-patrol-definition-card .transform-fieldset {
+  margin: 0;
+}
+
+.auto-patrol-inspector > .number-row,
+.auto-patrol-settings-section .number-row,
+.auto-patrol-definition-card > .number-row {
+  grid-template-columns: 112px minmax(0, 1fr);
+}
+
+.auto-patrol-event-responses > label {
+  flex: 1 1 42%;
+}
+
+.auto-patrol-business-data-field {
+  display: grid;
+  gap: 4px;
+  color: #bbb;
+  font-size: 11px;
+}
+
+.auto-patrol-business-data-field textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.auto-patrol-definition-card-header button {
+  width: 25px;
+  padding: 0;
+}
+
+.auto-patrol-vector-fieldset .number-row {
+  grid-template-columns: 28px minmax(0, 1fr);
+}
+
 @media (max-width: 1180px) {
   .auto-patrol-waypoint-summary {
     align-items: stretch;
@@ -4558,4 +4696,5 @@ select {
   .auto-patrol-waypoint-actions {
     justify-content: flex-end;
   }
+
 }

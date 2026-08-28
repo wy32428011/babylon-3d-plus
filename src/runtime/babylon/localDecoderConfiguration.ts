@@ -1,7 +1,7 @@
-import { BasisToolsOptions } from '@babylonjs/core/Misc/basis';
-import { DracoCompression } from '@babylonjs/core/Meshes/Compression/dracoCompression';
-import { MeshoptCompression } from '@babylonjs/core/Meshes/Compression/meshoptCompression';
-import { KhronosTextureContainer2 } from '@babylonjs/core/Misc/khronosTextureContainer2';
+import { BasisToolsOptions } from '@babylonjs/core/Misc/basis.js';
+import { DracoCompression } from '@babylonjs/core/Meshes/Compression/dracoCompression.js';
+import { MeshoptCompression } from '@babylonjs/core/Meshes/Compression/meshoptCompression.js';
+import { KhronosTextureContainer2 } from '@babylonjs/core/Misc/khronosTextureContainer2.js';
 import * as KTX2DecoderModule from '@babylonjs/ktx2decoder';
 
 let configured = false;
@@ -46,4 +46,20 @@ export function configureLocalBabylonDecoders(): void {
     wasmZSTDDecoder: resolveDecoderUrl('ktx2/zstddec.wasm'),
   };
   (globalThis as typeof globalThis & { KTX2DECODER?: typeof KTX2DecoderModule }).KTX2DECODER = KTX2DecoderModule;
+}
+
+let decoderWarmup: Promise<void> | null = null;
+
+/**
+ * 预编译 Draco WASM，避免打开带环境 GLB 的场景时才第一次拉起 worker。
+ * 预热失败只记日志，后续加载仍会按需初始化解码器。
+ */
+export function warmupLocalBabylonDecoders(): Promise<void> {
+  configureLocalBabylonDecoders();
+  if (typeof window === 'undefined') return Promise.resolve();
+  decoderWarmup ??= DracoCompression.Default.whenReadyAsync().catch((error) => {
+    decoderWarmup = null;
+    console.warn('[Babylon] Draco 解码器预热失败。', error);
+  });
+  return decoderWarmup;
 }

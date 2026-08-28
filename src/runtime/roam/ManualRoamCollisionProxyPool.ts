@@ -71,6 +71,11 @@ export class ManualRoamCollisionProxyPool {
     return this.proxySet.has(mesh);
   }
 
+  /** 返回当前启用的 AABB 代理，供人物 surroundingMeshes 收窄碰撞扫描。 */
+  getActiveMeshes(): readonly Mesh[] {
+    return this.proxies.slice(0, this.currentActiveCount);
+  }
+
   sync(
     position: Readonly<ManualRoamPoint>,
     radiusMeters: number,

@@ -91,8 +91,8 @@ const LEG_SWING_RADIANS = 0.17;
 const ARM_SWING_RADIANS = 0.14;
 const BODY_BOB_AMPLITUDE_METERS = 0.003;
 const BODY_SWAY_AMPLITUDE_RADIANS = 0.004;
-const WALK_CADENCE_RADIANS_PER_SECOND = 6;
-const RUN_CADENCE_RADIANS_PER_SECOND = 9;
+/** 一个完整左右换步周期对应的水平位移，使步频与移动速度成正比。 */
+export const GAIT_CYCLE_DISTANCE_METERS = 1.6;
 const GAIT_START_RESPONSE = 10;
 const GAIT_STOP_RESPONSE = 7;
 const GAIT_MOVEMENT_DEAD_ZONE = 0.05;
@@ -304,11 +304,22 @@ export function createInitialProceduralGaitState(): ProceduralGaitState {
   return { phase: 0, amount: 0, active: false };
 }
 
-/** 平滑收敛步态强度；停止输入后冻结相位，避免人物在原地继续换步。 */
+/**
+ * 按水平速度换算步态角频率。
+ * 速度加倍则换步频率加倍，保持单周期跨步距离不变。
+ */
+export function resolveProceduralGaitCadence(horizontalSpeedMetersPerSecond: number): number {
+  if (!Number.isFinite(horizontalSpeedMetersPerSecond) || horizontalSpeedMetersPerSecond <= 0) {
+    return 0;
+  }
+  return horizontalSpeedMetersPerSecond / GAIT_CYCLE_DISTANCE_METERS * Math.PI * 2;
+}
+
+/** 平滑收敛步态强度；相位按实际水平速度推进，停止输入后冻结相位。 */
 export function stepProceduralGaitState(
   state: Readonly<ProceduralGaitState>,
   movementAmount: number,
-  sprinting: boolean,
+  horizontalSpeedMetersPerSecond: number,
   airborne: boolean,
   deltaSeconds: number,
 ): ProceduralGaitState {
@@ -329,7 +340,7 @@ export function stepProceduralGaitState(
 
   let phase = Number.isFinite(state.phase) ? state.phase : 0;
   if (active) {
-    phase += delta * (sprinting ? RUN_CADENCE_RADIANS_PER_SECOND : WALK_CADENCE_RADIANS_PER_SECOND);
+    phase += delta * resolveProceduralGaitCadence(horizontalSpeedMetersPerSecond);
   } else if (amount === 0) {
     phase = 0;
   }

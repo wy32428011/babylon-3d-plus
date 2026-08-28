@@ -235,6 +235,56 @@ export type AutoPatrolPathType = 'smooth' | 'linear';
 
 export type AutoPatrolPlaybackMode = 'once' | 'loop' | 'ping-pong';
 
+export type AutoPatrolViewMode = 'first-person' | 'third-person' | 'orbit';
+
+export type AutoPatrolEventResponse = 'panel' | 'highlight' | 'screenshot' | 'pause' | 'report';
+
+export type AutoPatrolTriggerRegionShape = 'box' | 'sphere';
+
+export type AutoPatrolEventTrigger =
+  | { kind: 'waypoint'; waypointId: string }
+  | { kind: 'distance'; waypointId: string; radiusMeters: number }
+  | { kind: 'region-enter' | 'region-leave'; regionId: string }
+  | { kind: 'manual' };
+
+export type AutoPatrolEventDefinition = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** 是否计入本次巡检的异常事件汇总。 */
+  anomaly?: boolean;
+  trigger: AutoPatrolEventTrigger;
+  responses: AutoPatrolEventResponse[];
+  targetEntityId: string | null;
+  cooldownSeconds: number;
+  oncePerPatrol: boolean;
+  businessData: Record<string, string | number | boolean | null>;
+};
+
+/** 触发区域坐标相对于巡检路线实体，运行时按路线 Transform 转换为有向包围盒。 */
+export type AutoPatrolTriggerRegion = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** 旧场景缺少该字段时按 box 处理。 */
+  shape?: AutoPatrolTriggerRegionShape;
+  center: Vector3Data;
+  size: Vector3Data;
+  /** 球形区域半径；旧数据缺失时取 size 最大边的一半。 */
+  radiusMeters?: number;
+  color: string;
+  alert: boolean;
+};
+
+export type AutoPatrolCameraConfig = {
+  eyeHeightMeters: number;
+  thirdPersonDistanceMeters: number;
+  thirdPersonHeightMeters: number;
+  thirdPersonRotationOffsetDegrees: number;
+  approachDistanceMeters: number;
+  transitionSeconds: number;
+};
+
 /** 自动巡检节点内部保存完整 ArcRotateCamera 位姿；坐标相对于巡检实体原点。 */
 export type AutoPatrolCameraPose = {
   alpha: number;
@@ -243,20 +293,28 @@ export type AutoPatrolCameraPose = {
   target: Vector3Data;
 };
 
-/** 到达动作在首期只保留空数组扩展位，避免提前固化不完整的通用事件协议。 */
+/** 保留到达动作 ID，事件定义统一存放在路线 events 中。 */
 export type AutoPatrolWaypoint = {
   id: string;
   pose: AutoPatrolCameraPose;
   travelDurationSeconds: number;
   dwellSeconds: number;
-  arrivalActions: [];
+  arrivalActions: string[];
 };
 
 export type AutoPatrolComponent = {
   enabled: boolean;
   autoStart: boolean;
+  isDefault?: boolean;
+  tags?: string[];
   pathType: AutoPatrolPathType;
   playbackMode: AutoPatrolPlaybackMode;
+  useRouteSpeed?: boolean;
+  speedMetersPerSecond?: number;
+  automaticViewSwitching?: boolean;
+  camera?: AutoPatrolCameraConfig;
+  triggerRegions?: AutoPatrolTriggerRegion[];
+  events?: AutoPatrolEventDefinition[];
   waypoints: AutoPatrolWaypoint[];
 };
 
