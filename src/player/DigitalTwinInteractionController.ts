@@ -18,6 +18,7 @@ import {
   type DigitalTwinBridgeMessage,
   type DigitalTwinCapability,
   type DigitalTwinCommandFailureResult,
+  type DigitalTwinInitialLoadPhase,
   type DigitalTwinRuntimeAction,
   type DigitalTwinViewerErrorCode,
 } from './digitalTwinInteractionProtocol';
@@ -119,6 +120,7 @@ export class DigitalTwinInteractionController {
   private readonly setTimer: (callback: () => void, delayMs: number) => unknown;
   private readonly clearTimer: (timer: unknown) => void;
   private runtime: DigitalTwinInteractionRuntime | null = null;
+  private initialLoadPhase: DigitalTwinInitialLoadPhase | null = null;
   private activeSessionId: string | null = null;
   private activeParentOrigin: string | null = null;
   private activeRequest: ActiveFocusRequest | null = null;
@@ -159,6 +161,18 @@ export class DigitalTwinInteractionController {
     if (this.disposed) return;
     this.runtime = runtime;
     this.postViewerReady();
+  }
+
+  markInitialLoadStarted(): void {
+    if (this.disposed || this.initialLoadPhase !== null) return;
+    this.initialLoadPhase = 'loading';
+    this.postInitialLoadState();
+  }
+
+  markInitialLoadComplete(): void {
+    if (this.disposed || this.initialLoadPhase === 'complete') return;
+    this.initialLoadPhase = 'complete';
+    this.postInitialLoadState();
   }
 
   notifyManualCameraInput(): void {
@@ -233,6 +247,7 @@ export class DigitalTwinInteractionController {
       sessionId,
       type: 'bridge.ready',
     });
+    this.postInitialLoadState();
     this.postViewerReady();
   }
 
@@ -257,6 +272,17 @@ export class DigitalTwinInteractionController {
         ...(this.options.projectId ? { projectId: this.options.projectId } : {}),
         capabilities,
       },
+    });
+  }
+
+  private postInitialLoadState(): void {
+    if (!this.initialLoadPhase || !this.activeSessionId || !this.activeParentOrigin) return;
+    this.post({
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.activeSessionId,
+      type: 'viewer.initialLoadState',
+      payload: { phase: this.initialLoadPhase },
     });
   }
 

@@ -124,6 +124,30 @@
       }
     },
     {
+      "name": "viewer initial load loading",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "viewer.initialLoadState",
+        "payload": {
+          "phase": "loading"
+        }
+      }
+    },
+    {
+      "name": "viewer initial load complete",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "viewer.initialLoadState",
+        "payload": {
+          "phase": "complete"
+        }
+      }
+    },
+    {
       "name": "successful runtime action result",
       "message": {
         "channel": "zending.digital-twin.bridge",
@@ -226,6 +250,18 @@
         "payload": {
           "assetCode": "DDJ2",
           "animate": false
+        }
+      }
+    },
+    {
+      "name": "unknown initial load phase",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "viewer.initialLoadState",
+        "payload": {
+          "phase": "ready"
         }
       }
     }

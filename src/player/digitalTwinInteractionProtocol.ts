@@ -3,6 +3,7 @@ export const DIGITAL_TWIN_BRIDGE_VERSION = 1 as const;
 export const DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY = 'focusAsset' as const;
 export const DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY = 'startAutoPatrol' as const;
 export const DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY = 'startManualRoam' as const;
+export const DIGITAL_TWIN_INITIAL_LOAD_PHASES = ['loading', 'complete'] as const;
 
 export const DIGITAL_TWIN_RUNTIME_ACTIONS = [
   DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY,
@@ -22,6 +23,7 @@ export const DIGITAL_TWIN_VIEWER_ERROR_CODES = [
 
 export type DigitalTwinViewerErrorCode = (typeof DIGITAL_TWIN_VIEWER_ERROR_CODES)[number];
 export type DigitalTwinRuntimeAction = (typeof DIGITAL_TWIN_RUNTIME_ACTIONS)[number];
+export type DigitalTwinInitialLoadPhase = (typeof DIGITAL_TWIN_INITIAL_LOAD_PHASES)[number];
 export type DigitalTwinCapability =
   | typeof DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY
   | DigitalTwinRuntimeAction;
@@ -48,6 +50,16 @@ export type DigitalTwinViewerReadyMessage = {
   payload: {
     projectId?: string;
     capabilities: DigitalTwinCapability[];
+  };
+};
+
+export type DigitalTwinViewerInitialLoadStateMessage = {
+  channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
+  version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
+  sessionId: string;
+  type: 'viewer.initialLoadState';
+  payload: {
+    phase: DigitalTwinInitialLoadPhase;
   };
 };
 
@@ -128,6 +140,7 @@ export type DigitalTwinBridgeMessage =
   | DigitalTwinHostHelloMessage
   | DigitalTwinBridgeReadyMessage
   | DigitalTwinViewerReadyMessage
+  | DigitalTwinViewerInitialLoadStateMessage
   | DigitalTwinFocusAssetCommand
   | DigitalTwinCancelFocusAssetCommand
   | DigitalTwinRuntimeActionCommand
@@ -147,6 +160,7 @@ const CAPABILITY_SET = new Set<string>([
   ...DIGITAL_TWIN_RUNTIME_ACTIONS,
 ]);
 const RUNTIME_ACTION_SET = new Set<string>(DIGITAL_TWIN_RUNTIME_ACTIONS);
+const INITIAL_LOAD_PHASE_SET = new Set<string>(DIGITAL_TWIN_INITIAL_LOAD_PHASES);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -184,6 +198,15 @@ function isViewerReadyPayload(value: unknown): value is DigitalTwinViewerReadyMe
   if (!isRecord(value) || !hasAllowedKeys(value, ['projectId', 'capabilities'])) return false;
   if (!Object.hasOwn(value, 'capabilities') || !isCapabilities(value.capabilities)) return false;
   return value.projectId === undefined || isBoundedString(value.projectId, MAX_PROJECT_ID_LENGTH);
+}
+
+function isViewerInitialLoadStatePayload(
+  value: unknown,
+): value is DigitalTwinViewerInitialLoadStateMessage['payload'] {
+  return isRecord(value)
+    && hasOnlyKeys(value, ['phase'])
+    && typeof value.phase === 'string'
+    && INITIAL_LOAD_PHASE_SET.has(value.phase);
 }
 
 function isFocusAssetPayload(value: unknown): value is DigitalTwinFocusAssetCommand['payload'] {
@@ -226,6 +249,11 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'payload'])
         && isViewerReadyPayload(value.payload)
         ? value as DigitalTwinViewerReadyMessage
+        : null;
+    case 'viewer.initialLoadState':
+      return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'payload'])
+        && isViewerInitialLoadStatePayload(value.payload)
+        ? value as DigitalTwinViewerInitialLoadStateMessage
         : null;
     case 'command.focusAsset':
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'requestId', 'payload'])

@@ -297,6 +297,46 @@ test('自动巡检和手动漫游命令分别调用运行时并立即返回成�
   }
 });
 
+test('首次场景加载状态在握手时重放，并在加载完成后只发送一次 complete', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([]);
+  try {
+    f.controller.markInitialLoadStarted();
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+
+    assert.deepEqual(f.posted.map((entry) => entry.message.type), [
+      'bridge.ready',
+      'viewer.initialLoadState',
+      'viewer.ready',
+    ]);
+    assert.deepEqual(f.posted[1].message, {
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId,
+      type: 'viewer.initialLoadState',
+      payload: { phase: 'loading' },
+    });
+
+    f.controller.markInitialLoadComplete();
+    f.controller.markInitialLoadComplete();
+    assert.deepEqual(f.posted.at(-1)?.message, {
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId,
+      type: 'viewer.initialLoadState',
+      payload: { phase: 'complete' },
+    });
+    assert.equal(
+      f.posted.filter((entry) => entry.message.type === 'viewer.initialLoadState'
+        && entry.message.payload.phase === 'complete').length,
+      1,
+    );
+  } finally {
+    f.controller.dispose();
+  }
+});
+
 test('只声明运行时实际支持的能力，并为缺失或执行异常的动作返回错误', () => {
   const f = createFixture();
   const runtime = new FakeRuntime([]);

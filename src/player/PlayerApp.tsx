@@ -65,6 +65,7 @@ import type {
 } from '../runtime/roam/manualRoamCore';
 import { createDefaultManualRoamCollisionBoundsResolver } from '../runtime/roam/manualRoamCollisionBounds';
 import { computePlayerLoadingProgress, PLAYER_SCENE_LOADING_TIMEOUT_MS } from './playerLoadingProgress';
+import { PlayerInitialLoadGate } from './playerInitialLoadState';
 import { resolvePublishedFetchConfig, startPublishedFetchDrive } from './publishedFetchDrive';
 import {
   createPublishedSkyboxCameraBoundsControllerForDocument,
@@ -185,6 +186,7 @@ export function PlayerApp() {
   const [modelLoadProgress, setModelLoadProgress] = useState<SceneRuntimeModelLoadProgress | null>(null);
   /** 首次场景加载全部结算后置位：后续按需加载（如 MQTT 货物模板）不再重新弹出全屏蒙版。 */
   const initialLoadCompletedRef = useRef(false);
+  const completeInitialLoadRef = useRef<(() => void) | null>(null);
   /** 首次场景加载是否仍在途：驱动超时兜底与蒙版显示。 */
   const modelLoadingInProgress = modelLoadProgress?.loading === true
     && modelLoadProgress.totalCount > 0
@@ -193,7 +195,7 @@ export function PlayerApp() {
   useEffect(() => {
     if (!modelLoadingInProgress) return undefined;
     const timer = window.setTimeout(() => {
-      initialLoadCompletedRef.current = true;
+      completeInitialLoadRef.current?.();
       setRuntimeMessage('部分场景资源加载超时，场景可能尚未完整显示。');
     }, PLAYER_SCENE_LOADING_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
@@ -235,6 +237,14 @@ export function PlayerApp() {
     let manualRoam: ManualRoamRuntime | null = null;
     let skyboxCameraBounds: PublishedSkyboxCameraBoundsController | null = null;
     let interactionController: DigitalTwinInteractionController | null = null;
+    initialLoadCompletedRef.current = false;
+    setModelLoadProgress(null);
+    const initialLoadGate = new PlayerInitialLoadGate(() => {
+      initialLoadCompletedRef.current = true;
+      interactionController?.markInitialLoadComplete();
+    });
+    const forceCompleteInitialLoad = () => initialLoadGate.forceComplete();
+    completeInitialLoadRef.current = forceCompleteInitialLoad;
     let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
     let unsubscribeManualRoamSnapshot: (() => void) | null = null;
     let removeAutoPatrolManualInputListeners: (() => void) | null = null;
@@ -279,6 +289,7 @@ export function PlayerApp() {
         interactionController.setAllowedParentOrigins(
           projectRuntimeConfig ? parseDigitalTwinAllowedParentOrigins(projectRuntimeConfig.config) : [],
         );
+        interactionController.markInitialLoadStarted();
         document.title = parsedConfig.page.title;
         setConfig(parsedConfig);
         setStatusOverlayVisible(resolveInitialPlayerStatusOverlayVisibility(
@@ -353,16 +364,15 @@ export function PlayerApp() {
           },
           (progress) => {
             if (disposed) return;
+            initialLoadGate.update(progress);
             setModelLoadProgress(progress);
-            if (!progress.loading && progress.totalCount > 0) {
-              initialLoadCompletedRef.current = true;
-            }
           },
         );
         runtime.disableEditorLightMarkers();
         runtime.disableEditorAutoPatrolMarkers();
         runtime.disableEditorManualRoamSpawnMarkers();
         runtime.disableEditorClickEventBindingMarkers();
+        initialLoadGate.startTracking();
         runtime.sync(sceneDocument);
         setStartupPercent(36);
         const environment = sceneDocument.sceneSettings.environment;
@@ -600,6 +610,10 @@ export function PlayerApp() {
         setMessage(`Web Viewer 启动失败：${getErrorMessage(error)}`);
         interactionController?.dispose();
         interactionController = null;
+        initialLoadGate.dispose();
+        if (completeInitialLoadRef.current === forceCompleteInitialLoad) {
+          completeInitialLoadRef.current = null;
+        }
         mqttClient?.dispose();
         unsubscribeManualRoamSnapshot?.();
         manualRoam?.dispose();
@@ -632,6 +646,10 @@ export function PlayerApp() {
       if (resize) window.removeEventListener('resize', resize);
       interactionController?.dispose();
       interactionController = null;
+      initialLoadGate.dispose();
+      if (completeInitialLoadRef.current === forceCompleteInitialLoad) {
+        completeInitialLoadRef.current = null;
+      }
       mqttClient?.dispose();
       unsubscribeManualRoamSnapshot?.();
       manualRoam?.dispose();
