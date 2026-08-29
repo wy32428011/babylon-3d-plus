@@ -39,9 +39,10 @@ import {
   bindStatusOverlayPointerChordToggle,
   formatPlayerStatusFps,
   PLAYER_STATUS_FPS_SAMPLE_INTERVAL_MS,
-  resolveInitialAutoPatrolControlsVisibility,
   resolveInitialPlayerStatusOverlayVisibility,
+  shouldShowPlayerFloatingControl,
   shouldShowPlayerStatusOverlay,
+  type PlayerFloatingControl,
 } from './statusOverlayControls';
 import {
   AutoPatrolControls,
@@ -177,7 +178,7 @@ export function PlayerApp() {
   const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
   const [environmentRuntimeIssue, setEnvironmentRuntimeIssue] = useState(false);
   const [statusOverlayVisible, setStatusOverlayVisible] = useState(false);
-  const [autoPatrolControlsVisible, setAutoPatrolControlsVisible] = useState(true);
+  const [openedDigitalTwinFloatingControl, setOpenedDigitalTwinFloatingControl] = useState<PlayerFloatingControl | null>(null);
   const [playerFps, setPlayerFps] = useState<number | null>(null);
   const [config, setConfig] = useState<PlayerRuntimeConfig | null>(null);
   const [startupPercent, setStartupPercent] = useState(6);
@@ -284,7 +285,6 @@ export function PlayerApp() {
           parsedConfig.viewer.showStatusOverlay,
           Boolean(parsedConfig.digitalTwin),
         ));
-        setAutoPatrolControlsVisible(resolveInitialAutoPatrolControlsVisibility(Boolean(parsedConfig.digitalTwin)));
         setMessage(parsedConfig.page.loadingText);
         setStartupPercent(14);
 
@@ -563,6 +563,7 @@ export function PlayerApp() {
           notifyCameraChangedWhilePaused: () => autoPatrolPlayback!.notifyCameraChangedWhilePaused(),
           ...(preferredPatrolRoute ? {
             startAutoPatrol: () => {
+              setOpenedDigitalTwinFloatingControl('auto-patrol');
               manualRoamRuntime?.setEnabled(false);
               const patrolController = autoPatrolPlayback!;
               const result = patrolController.getSnapshot().phase === 'paused'
@@ -572,7 +573,10 @@ export function PlayerApp() {
             },
           } : {}),
           ...(manualRoamRuntime ? {
-            startManualRoam: () => manualRoamRuntime.setEnabled(true),
+            startManualRoam: () => {
+              setOpenedDigitalTwinFloatingControl('manual-roam');
+              manualRoamRuntime.setEnabled(true);
+            },
           } : {}),
         });
 
@@ -655,7 +659,6 @@ export function PlayerApp() {
 
     return bindStatusOverlayPointerChordToggle(canvas, window, () => {
       setStatusOverlayVisible((visible) => !visible);
-      setAutoPatrolControlsVisible((visible) => !visible);
     });
   }, [isDigitalTwin, phase]);
 
@@ -737,6 +740,16 @@ export function PlayerApp() {
   }
 
   const backgroundColor = config?.page.backgroundColor ?? '#141414';
+  const manualRoamControlsVisible = shouldShowPlayerFloatingControl(
+    isDigitalTwin,
+    openedDigitalTwinFloatingControl,
+    'manual-roam',
+  );
+  const autoPatrolControlsVisible = shouldShowPlayerFloatingControl(
+    isDigitalTwin,
+    openedDigitalTwinFloatingControl,
+    'auto-patrol',
+  );
   const showOverlay = shouldShowPlayerStatusOverlay(
     phase,
     statusOverlayVisible,
@@ -769,7 +782,7 @@ export function PlayerApp() {
   return (
     <main className="player-root" style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
-      {phase === 'ready' && config?.viewer.allowCameraControl && hasManualRoamSpawn ? (
+      {phase === 'ready' && manualRoamControlsVisible && config?.viewer.allowCameraControl && hasManualRoamSpawn ? (
         <ManualRoamControls
           snapshot={manualRoamSnapshot}
           onConfigChange={handleManualRoamConfig}

@@ -6,6 +6,8 @@ export const PLAYER_STATUS_FPS_SAMPLE_INTERVAL_MS = 1_000;
 
 export type PlayerStatusOverlayPhase = 'loading' | 'ready' | 'blocked';
 
+export type PlayerFloatingControl = 'auto-patrol' | 'manual-roam';
+
 export type StatusOverlayChordTransition = {
   chordPressed: boolean;
   shouldToggle: boolean;
@@ -19,9 +21,13 @@ export function resolveInitialPlayerStatusOverlayVisibility(
   return isDigitalTwin ? false : configuredVisible;
 }
 
-/** 数字孪生发布 Viewer 默认隐藏自动巡检面板；普通独立部署保持原有显示行为。 */
-export function resolveInitialAutoPatrolControlsVisibility(isDigitalTwin: boolean): boolean {
-  return !isDigitalTwin;
+/** 普通 Viewer 继续显示运行控制；数字孪生只显示已由大屏命令打开的浮窗。 */
+export function shouldShowPlayerFloatingControl(
+  isDigitalTwin: boolean,
+  openedDigitalTwinControl: PlayerFloatingControl | null,
+  control: PlayerFloatingControl,
+): boolean {
+  return !isDigitalTwin || openedDigitalTwinControl === control;
 }
 
 /**

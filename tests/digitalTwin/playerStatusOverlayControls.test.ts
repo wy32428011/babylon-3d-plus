@@ -7,8 +7,8 @@ import {
   formatPlayerStatusFps,
   getStatusOverlayChordTransition,
   PLAYER_STATUS_FPS_SAMPLE_INTERVAL_MS,
-  resolveInitialAutoPatrolControlsVisibility,
   resolveInitialPlayerStatusOverlayVisibility,
+  shouldShowPlayerFloatingControl,
   shouldShowPlayerStatusOverlay,
 } from '../../src/player/statusOverlayControls.ts';
 
@@ -21,9 +21,15 @@ test('数字孪生发布 Viewer 默认隐藏运行状态层，普通部署仍遵
   assert.equal(resolveInitialPlayerStatusOverlayVisibility(false, false), false);
 });
 
-test('数字孪生发布 Viewer 默认隐藏自动巡检面板，普通部署保持显示', () => {
-  assert.equal(resolveInitialAutoPatrolControlsVisibility(true), false);
-  assert.equal(resolveInitialAutoPatrolControlsVisibility(false), true);
+test('数字孪生只显示大屏命令打开的单个浮窗，普通部署继续显示运行控制', () => {
+  assert.equal(shouldShowPlayerFloatingControl(true, null, 'auto-patrol'), false);
+  assert.equal(shouldShowPlayerFloatingControl(true, null, 'manual-roam'), false);
+  assert.equal(shouldShowPlayerFloatingControl(true, 'auto-patrol', 'auto-patrol'), true);
+  assert.equal(shouldShowPlayerFloatingControl(true, 'auto-patrol', 'manual-roam'), false);
+  assert.equal(shouldShowPlayerFloatingControl(true, 'manual-roam', 'auto-patrol'), false);
+  assert.equal(shouldShowPlayerFloatingControl(true, 'manual-roam', 'manual-roam'), true);
+  assert.equal(shouldShowPlayerFloatingControl(false, null, 'auto-patrol'), true);
+  assert.equal(shouldShowPlayerFloatingControl(false, null, 'manual-roam'), true);
 });
 
 test('鼠标左右键组合每次完整按压只触发一次发布覆盖层切换', () => {
@@ -103,14 +109,34 @@ test('发布覆盖层绑定器通过 pointermove 捕获追加鼠标键并在释�
   assert.equal(toggleCount, 2);
 });
 
-test('PlayerApp 将数字孪生默认值和左右键组合接入自动巡检面板渲染门控', () => {
+test('PlayerApp 的数字孪生浮窗只能由大屏命令打开并保持互斥', () => {
   assert.match(
     playerSource,
-    /setAutoPatrolControlsVisible\(resolveInitialAutoPatrolControlsVisibility\(Boolean\(parsedConfig\.digitalTwin\)\)\)/,
+    /const \[openedDigitalTwinFloatingControl, setOpenedDigitalTwinFloatingControl\] = useState<PlayerFloatingControl \| null>\(null\)/,
   );
   assert.match(
     playerSource,
-    /bindStatusOverlayPointerChordToggle\([\s\S]*?setStatusOverlayVisible\(\(visible\) => !visible\);[\s\S]*?setAutoPatrolControlsVisible\(\(visible\) => !visible\);/,
+    /return bindStatusOverlayPointerChordToggle\(canvas, window, \(\) => \{\s*setStatusOverlayVisible\(\(visible\) => !visible\);\s*\}\);/,
+  );
+  assert.match(
+    playerSource,
+    /startAutoPatrol: \(\) => \{[\s\S]*?setOpenedDigitalTwinFloatingControl\('auto-patrol'\);[\s\S]*?patrolController/,
+  );
+  assert.match(
+    playerSource,
+    /startManualRoam: \(\) => \{[\s\S]*?setOpenedDigitalTwinFloatingControl\('manual-roam'\);[\s\S]*?manualRoamRuntime\.setEnabled\(true\);[\s\S]*?\}/,
+  );
+  assert.match(
+    playerSource,
+    /phase === 'ready' && manualRoamControlsVisible && config\?\.viewer\.allowCameraControl && hasManualRoamSpawn/,
+  );
+  assert.match(
+    playerSource,
+    /const manualRoamControlsVisible = shouldShowPlayerFloatingControl\([\s\S]*?'manual-roam',[\s\S]*?\);/,
+  );
+  assert.match(
+    playerSource,
+    /const autoPatrolControlsVisible = shouldShowPlayerFloatingControl\([\s\S]*?'auto-patrol',[\s\S]*?\);/,
   );
   assert.match(
     playerSource,
