@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { prepareSourceSceneEnvironment } from '../../electron/ipc/digitalTwinSourceEnvironmentRelink.ts';
 import { buildDigitalTwinSourcePackage } from '../../electron/ipc/digitalTwinSourcePackage.ts';
 
 const require = createRequire(import.meta.url);
@@ -678,14 +679,15 @@ test('受管便携环境即使稳定身份被删除，缺少 Sidecar 仍拒绝�
   }
 });
 
-test('便携 SOURCE 二次发布时按当前 Sidecar 刷新受管环境与稳定身份', async () => {
+test('便携 SOURCE 二次发布时按路径资源 ID 刷新已变更来源的受管环境', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'zending-source-portable-environment-relink-'));
   const projectRoot = path.join(root, 'Projects', '42');
   const sharedRoot = path.join(root, 'SharedResources');
   const tempRoot = path.join(root, 'temp');
   const scenePath = path.join(projectRoot, 'Scenes', 'main.scene.json');
   const resourceId = '2088100088037199873';
-  const sourceKey = 'd8b7b05d99f03cdcd06d43a2bcb79a4eebc77d8c1636bd0723401bae08ed3199';
+  const oldSourceKey = 'd8b7b05d99f03cdcd06d43a2bcb79a4eebc77d8c1636bd0723401bae08ed3199';
+  const currentSourceKey = 'aa45e7400c925369a484dcf740cb335a59e8d3cd036e7a07d52381ae4c65d5df';
   const oldRuntimeRevision = '7645194092844337573';
   const currentRuntimeRevision = '7645194092844337574';
   const currentFileRevision = '2092171410874761217';
@@ -701,7 +703,7 @@ test('便携 SOURCE 二次发布时按当前 Sidecar 刷新受管环境与稳定
     '.babylon-editor',
     'data-platform-cache',
     'environments',
-    sourceKey,
+    currentSourceKey,
     resourceId,
     currentFileRevision,
     'model.glb',
@@ -717,7 +719,7 @@ test('便携 SOURCE 二次发布时按当前 Sidecar 刷新受管环境与稳定
     await writeFile(currentModelPath, currentModelContent, 'utf8');
     await writeEnvironmentIndex({
       sharedRoot,
-      sourceKey,
+      sourceKey: currentSourceKey,
       resourceId,
       fileRevision: currentFileRevision,
       runtimeRevision: currentRuntimeRevision,
@@ -734,7 +736,7 @@ test('便携 SOURCE 二次发布时按当前 Sidecar 刷新受管环境与稳定
             source: 'data-platform',
             resourceType: 'ENV_MODEL',
             dataPlatformResourceId: resourceId,
-            dataPlatformSourceKey: sourceKey,
+            dataPlatformSourceKey: oldSourceKey,
             dataPlatformRevision: oldRuntimeRevision,
             displayNameSnapshot: '园区环境',
             activeVariantUrl: legacyPortableModelUrl,
@@ -772,17 +774,73 @@ test('便携 SOURCE 二次发布时按当前 Sidecar 刷新受管环境与稳定
     assert.equal(environment.source, 'data-platform');
     assert.equal(environment.resourceType, 'ENV_MODEL');
     assert.equal(environment.dataPlatformResourceId, resourceId);
-    assert.equal(environment.dataPlatformSourceKey, sourceKey);
+    assert.equal(environment.dataPlatformSourceKey, currentSourceKey);
     assert.equal(environment.dataPlatformRevision, currentRuntimeRevision);
     assert.equal(environment.displayNameSnapshot, '园区环境');
     assert.equal(environment.packagePath, portablePackagePath);
     assert.equal(environment.activeVariantUrl, portableModelUrl);
     const publishedEnvironment = JSON.parse(result.sceneContents[0]).scene.sceneSettings.environment;
     assert.equal(publishedEnvironment.dataPlatformResourceId, resourceId);
-    assert.equal(publishedEnvironment.dataPlatformSourceKey, sourceKey);
+    assert.equal(publishedEnvironment.dataPlatformSourceKey, currentSourceKey);
     assert.equal(publishedEnvironment.dataPlatformRevision, currentRuntimeRevision);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('旧稳定身份仅允许按相同受管路径资源 ID 回退匹配', async () => {
+  const resourceId = '2088100088037199873';
+  const currentSourceKey = 'aa45e7400c925369a484dcf740cb335a59e8d3cd036e7a07d52381ae4c65d5df';
+  const cacheEntry = {
+    sourceKey: currentSourceKey,
+    resourceId,
+    runtimeRevision: '7645194092844337574',
+    relativePath: `.babylon-editor/data-platform-cache/environments/${currentSourceKey}/${resourceId}/2092171410874761217/model.glb`,
+    fileSizeBytes: 1,
+    fileSha256: '0'.repeat(64),
+  };
+  const indexes = {
+    byIdentity: new Map(),
+    uniqueByResourceRevision: new Map(),
+    uniqueByResourceId: new Map([[resourceId, cacheEntry]]),
+  };
+  const stableIdentity = {
+    source: 'data-platform',
+    resourceType: 'ENV_MODEL',
+    dataPlatformResourceId: resourceId,
+    dataPlatformSourceKey: 'd8b7b05d99f03cdcd06d43a2bcb79a4eebc77d8c1636bd0723401bae08ed3199',
+    dataPlatformRevision: '7645194092844337573',
+  };
+  const unsafeReferences = [
+    {
+      label: '受管路径中的资源 ID 与稳定身份不一致',
+      environment: { packagePath: 'Assets/Environments/Env-2088100088037199874' },
+    },
+    {
+      label: '普通本地环境路径不能按资源 ID 回退',
+      environment: { packagePath: 'Assets/Environments/Local-Campus' },
+    },
+    {
+      label: '多个受管引用指向不同资源 ID 时不能回退',
+      environment: {
+        packagePath: `Assets/Environments/Env-${resourceId}`,
+        activeVariantUrl: `editor-asset://local/${encodeURIComponent('Assets/Environments/Env-2088100088037199874/model.glb')}`,
+      },
+    },
+  ];
+
+  for (const reference of unsafeReferences) {
+    await assert.rejects(
+      prepareSourceSceneEnvironment({
+        scene: {
+          sceneSettings: {
+            environment: { ...stableIdentity, ...reference.environment },
+          },
+        },
+      }, 'unused-shared-root', indexes, new AbortController().signal),
+      /不存在或无法唯一匹配/,
+      reference.label,
+    );
   }
 });
 

@@ -266,11 +266,23 @@ function findSourceEnvironmentCacheEntry(
       || !sourceKey || !resourceId || !runtimeRevision) {
       throw new Error('场景中的数据中台环境稳定身份不完整或无效。');
     }
-    return indexes.byIdentity.get(`${sourceKey}:${resourceId}`)
-      ?? indexes.uniqueByResourceRevision.get(`${resourceId}:${runtimeRevision}`)
-      ?? null;
+    const exactEntry = indexes.byIdentity.get(`${sourceKey}:${resourceId}`)
+      ?? indexes.uniqueByResourceRevision.get(`${resourceId}:${runtimeRevision}`);
+    if (exactEntry) return exactEntry;
+
+    // 来源和修订同时变更时，只信任与稳定身份一致的唯一受管路径。
+    const referencedResourceId = findUniqueManagedEnvironmentResourceId(environment);
+    if (referencedResourceId !== resourceId) return null;
+    return indexes.uniqueByResourceId.get(resourceId) ?? null;
   }
 
+  const referencedResourceId = findUniqueManagedEnvironmentResourceId(environment);
+  return referencedResourceId
+    ? indexes.uniqueByResourceId.get(referencedResourceId) ?? null
+    : null;
+}
+
+function findUniqueManagedEnvironmentResourceId(environment: PlainObject): string | null {
   const cacheResourceIds = new Set<string>();
   for (const reference of collectSourceEnvironmentReferences(environment)) {
     const managedReference = parseDataPlatformEnvironmentCacheReference(reference)
@@ -278,7 +290,7 @@ function findSourceEnvironmentCacheEntry(
     if (managedReference) cacheResourceIds.add(managedReference.resourceId);
   }
   if (cacheResourceIds.size !== 1) return null;
-  return indexes.uniqueByResourceId.get([...cacheResourceIds][0]) ?? null;
+  return [...cacheResourceIds][0];
 }
 
 function getSourceSceneEnvironment(sceneFile: PlainObject): PlainObject | null {
