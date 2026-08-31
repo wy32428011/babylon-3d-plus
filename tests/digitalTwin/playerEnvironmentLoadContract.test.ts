@@ -11,7 +11,7 @@ const decoderSource = await readFile(
 const engineSource = await readFile(new URL('../../src/runtime/babylon/createEngine.ts', import.meta.url), 'utf8');
 const mainSource = await readFile(new URL('../../electron/main.ts', import.meta.url), 'utf8');
 
-test('发布 Viewer 不阻塞等待环境模型，设备场景可先进入就绪', () => {
+test('发布 Viewer 并行加载环境模型，但首次加载进度仍等待环境结算', () => {
   assert.match(
     playerSource,
     /void runtime\.applyEnvironment\(environment, \{ requestId: null, autoAlign: false \}\)/,
@@ -19,6 +19,10 @@ test('发布 Viewer 不阻塞等待环境模型，设备场景可先进入就绪
   assert.doesNotMatch(
     playerSource,
     /await runtime\.applyEnvironment\(/,
+  );
+  assert.match(
+    runtimeSource,
+    /loadEnvironmentAssetContainer\([\s\S]*?beginModelLoadProgressUnit\(fileName\)[\s\S]*?environmentLoadScheduler\.run\([\s\S]*?settleModelLoadProgressUnit\(loadSequence\)/,
   );
 });
 
@@ -29,7 +33,7 @@ test('环境 GLB 走独立调度器和会话级源容器缓存，不再挤占设
   assert.match(runtimeSource, /this\.environmentLoadScheduler\.run\(/);
   assert.match(
     runtimeSource,
-    /loadAssetContainer: \(rootUrl, fileName, signal\) => \{\s*\/\/[^\n]*\s*return this\.loadEnvironmentAssetContainer\(rootUrl, fileName, signal\);/,
+    /loadAssetContainer: \(rootUrl, fileName, signal\) => \{\s*return this\.loadEnvironmentAssetContainer\(rootUrl, fileName, signal\);/,
   );
 });
 

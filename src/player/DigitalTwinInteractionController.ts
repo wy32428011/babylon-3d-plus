@@ -12,6 +12,7 @@ import {
   DIGITAL_TWIN_BRIDGE_CHANNEL,
   DIGITAL_TWIN_BRIDGE_VERSION,
   DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
+  DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
   DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY,
   DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY,
   parseDigitalTwinBridgeMessage,
@@ -41,6 +42,7 @@ export type DigitalTwinFocusBounds = {
 export type DigitalTwinPatrolPhase = 'idle' | 'moving' | 'dwelling' | 'paused' | 'completed' | 'returning';
 
 export type DigitalTwinInteractionRuntime = {
+  hardwareGpuVerified: true;
   assetIndex: DigitalTwinAssetIndex;
   slotIndex: DigitalTwinSlotIndex;
   getFocusBounds: (entityId: string, slot?: DigitalTwinSlotCoordinate) => DigitalTwinFocusBounds | null;
@@ -159,6 +161,9 @@ export class DigitalTwinInteractionController {
 
   markViewerReady(runtime: DigitalTwinInteractionRuntime): void {
     if (this.disposed) return;
+    if (runtime.hardwareGpuVerified !== true) {
+      throw new Error('Viewer 必须先通过硬件 GPU 校验才能进入 ready 状态');
+    }
     this.runtime = runtime;
     this.postViewerReady();
   }
@@ -260,7 +265,10 @@ export class DigitalTwinInteractionController {
 
   private postViewerReady(): void {
     if (!this.runtime || !this.activeSessionId || !this.activeParentOrigin) return;
-    const capabilities: DigitalTwinCapability[] = [DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY];
+    const capabilities: DigitalTwinCapability[] = [
+      DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
+      DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
+    ];
     if (this.runtime.startAutoPatrol) capabilities.push(DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY);
     if (this.runtime.startManualRoam) capabilities.push(DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY);
     this.post({

@@ -320,9 +320,10 @@ function inspectRenderer(webSocketDebuggerUrl, dataPlatformBaseUrl) {
                     ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL)
                     : gl.getParameter(gl.VENDOR);
                   const contextAttributes = gl.getContextAttributes();
-                  const softwareRenderer =
-                    /swiftshader|llvmpipe|lavapipe|softpipe|software (?:adapter|rasterizer|renderer)|microsoft basic render driver|(?:direct3d|d3d)\\s*warp/i
-                      .test(String(renderer ?? ''));
+                  const rendererText = String(renderer ?? '').trim();
+                  const softwareRenderer = !rendererText
+                    || /swiftshader|llvmpipe|lavapipe|softpipe|software (?:adapter|rasterizer|renderer)|microsoft basic render driver|\\bwarp\\b|^unknown(?:\\s+renderer)?$/i
+                      .test(rendererText);
 
                   result.hardwareWebGlAvailable = !softwareRenderer;
                   result.webGlContextType = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext

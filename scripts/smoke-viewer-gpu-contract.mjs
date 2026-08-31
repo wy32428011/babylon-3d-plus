@@ -19,7 +19,7 @@ const playerViewportCall = playerSource.match(
 assert.match(
   playerViewportCall,
   /requireHardwareAcceleration:\s*true/,
-  '发布 Web Viewer 必须声明硬件加速诉求（探测成功时强制 GPU）',
+  '发布 Web Viewer 必须要求硬件加速，不能静默进入软件 WebGL',
 );
 assert.match(
   playerViewportCall,
@@ -29,33 +29,28 @@ assert.match(
 assert.match(
   sceneViewSource,
   /requireHardwareAcceleration:\s*true/,
-  '编辑器 Scene View 必须声明硬件加速诉求（探测成功时强制 GPU）',
+  '编辑器 Scene View 必须要求硬件加速，不能静默进入软件 WebGL',
 );
 
 assert.match(
   viewportFactorySource,
-  /probeHardwareAccelerationAvailable/,
-  '视口必须保留离屏画布硬件加速探测',
+  /const requireHardwareAcceleration = options\.requireHardwareAcceleration \?\? false/,
+  '视口必须保留明确的硬件加速要求变量',
 );
 assert.match(
   viewportFactorySource,
-  /const useHardwareAcceleration = requestedHardwareAcceleration && probeHardwareAccelerationAvailable\(\)/,
-  '硬件加速必须经离屏探测确认后才强制启用',
+  /const requireHardwareAcceleration = options\.requireHardwareAcceleration \?\? false;\s*if \(!requireHardwareAcceleration\) assertWebGLSupported\(\);/,
+  '严格 GPU 模式不得先创建允许软件回退的 WebGL 探测上下文',
 );
 assert.match(
   viewportFactorySource,
-  /failIfMajorPerformanceCaveat:\s*useHardwareAcceleration/,
-  '仅探测到硬件可用时才禁止重大性能降级和软件实现回退',
+  /failIfMajorPerformanceCaveat:\s*requireHardwareAcceleration/,
+  '硬件加速模式必须禁止重大性能降级和软件实现回退',
 );
 assert.doesNotMatch(
   viewportFactorySource,
-  /failIfMajorPerformanceCaveat:\s*requireHardwareAcceleration/,
-  '不得未经探测直接禁止软件渲染回退',
-);
-assert.match(
-  viewportFactorySource,
-  /已降级为软件渲染/,
-  '硬件加速不可用时必须降级软件渲染并输出日志，不得直接报错',
+  /probeHardwareAccelerationAvailable|已降级为软件渲染/,
+  'requireHardwareAcceleration 不得在探测失败后静默降级为软件渲染',
 );
 assert.match(
   viewportFactorySource,
@@ -69,8 +64,18 @@ assert.match(
 );
 assert.match(
   viewportFactorySource,
-  /if \(useHardwareAcceleration\) assertHardwareAcceleratedWebGL\(engine, options\.onLog\)/,
+  /if \(requireHardwareAcceleration\) assertHardwareAcceleratedWebGL\(candidate, options\.onLog\)/,
   '硬件加速模式必须校验实际 renderer，而不是只依赖上下文创建成功',
+);
+assert.match(
+  engineSource,
+  /const renderer = info\.renderer\.trim\(\);\s*if \(!renderer \|\| UNKNOWN_WEBGL_RENDERER_PATTERN\.test\(renderer\)\)/,
+  '无法识别 renderer 时必须阻断，不能把未知实现当作硬件 GPU',
+);
+assert.match(
+  viewportFactorySource,
+  /onContextRestoredObservable\.add\([\s\S]*?if \(requireHardwareAcceleration\) assertHardwareAcceleratedWebGL\(engine, options\.onLog\)/,
+  'WebGL 上下文恢复后必须重新校验硬件 renderer',
 );
 assert.match(
   viewportFactorySource,
@@ -115,8 +120,8 @@ assert.match(
 
 console.log(JSON.stringify({
   status: 'PASS',
-  viewerPrefersHardwareAcceleration: true,
-  probesHardwareBeforeEnforcing: true,
-  degradesToSoftwareRendererWithLog: true,
+  viewerRequiresHardwareAcceleration: true,
+  rejectsMajorPerformanceCaveat: true,
+  rejectsSoftwareRenderer: true,
   desynchronized: false,
 }, null, 2));

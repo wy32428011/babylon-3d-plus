@@ -8,6 +8,7 @@ import {
   getStatusOverlayChordTransition,
   PLAYER_STATUS_FPS_SAMPLE_INTERVAL_MS,
   resolveInitialPlayerStatusOverlayVisibility,
+  resolvePlayerFloatingControlToggle,
   shouldShowPlayerFloatingControl,
   shouldShowPlayerStatusOverlay,
 } from '../../src/player/statusOverlayControls.ts';
@@ -30,6 +31,14 @@ test('数字孪生只显示大屏命令打开的单个浮窗，普通部署继�
   assert.equal(shouldShowPlayerFloatingControl(true, 'manual-roam', 'manual-roam'), true);
   assert.equal(shouldShowPlayerFloatingControl(false, null, 'auto-patrol'), true);
   assert.equal(shouldShowPlayerFloatingControl(false, null, 'manual-roam'), true);
+});
+
+test('大屏同一运行按钮再次点击关闭浮窗，点击另一按钮则互斥切换', () => {
+  assert.equal(resolvePlayerFloatingControlToggle(null, 'auto-patrol'), 'auto-patrol');
+  assert.equal(resolvePlayerFloatingControlToggle('auto-patrol', 'auto-patrol'), null);
+  assert.equal(resolvePlayerFloatingControlToggle('manual-roam', 'manual-roam'), null);
+  assert.equal(resolvePlayerFloatingControlToggle('manual-roam', 'auto-patrol'), 'auto-patrol');
+  assert.equal(resolvePlayerFloatingControlToggle('auto-patrol', 'manual-roam'), 'manual-roam');
 });
 
 test('鼠标左右键组合每次完整按压只触发一次发布覆盖层切换', () => {
@@ -116,15 +125,23 @@ test('PlayerApp 的数字孪生浮窗只能由大屏命令打开并保持互斥'
   );
   assert.match(
     playerSource,
+    /const openedDigitalTwinFloatingControlRef = useRef<PlayerFloatingControl \| null>\(null\)/,
+  );
+  assert.match(
+    playerSource,
+    /const updateOpenedDigitalTwinFloatingControl = useCallback\([\s\S]*?openedDigitalTwinFloatingControlRef\.current = control;[\s\S]*?setOpenedDigitalTwinFloatingControl\(control\);/,
+  );
+  assert.match(
+    playerSource,
     /return bindStatusOverlayPointerChordToggle\(canvas, window, \(\) => \{\s*setStatusOverlayVisible\(\(visible\) => !visible\);\s*\}\);/,
   );
   assert.match(
     playerSource,
-    /startAutoPatrol: \(\) => \{[\s\S]*?setOpenedDigitalTwinFloatingControl\('auto-patrol'\);[\s\S]*?patrolController/,
+    /startAutoPatrol: \(\) => \{[\s\S]*?resolvePlayerFloatingControlToggle\([\s\S]*?'auto-patrol'[\s\S]*?if \(nextControl === null\) \{[\s\S]*?cancelPending\(\);[\s\S]*?autoPatrolPlayback\?\.stop\(\);[\s\S]*?updateOpenedDigitalTwinFloatingControl\(null\);[\s\S]*?return;[\s\S]*?updateOpenedDigitalTwinFloatingControl\('auto-patrol'\);[\s\S]*?openedDigitalTwinFloatingControlRef\.current !== 'auto-patrol'/,
   );
   assert.match(
     playerSource,
-    /startManualRoam: \(\) => \{[\s\S]*?setOpenedDigitalTwinFloatingControl\('manual-roam'\);[\s\S]*?manualRoamRuntime\.setEnabled\(true\);[\s\S]*?\}/,
+    /startManualRoam: \(\) => \{[\s\S]*?resolvePlayerFloatingControlToggle\([\s\S]*?'manual-roam'[\s\S]*?if \(nextControl === null\) \{[\s\S]*?manualRoamRuntime\.setEnabled\(false\);[\s\S]*?updateOpenedDigitalTwinFloatingControl\(null\);[\s\S]*?return;[\s\S]*?autoPatrolPlayback\?\.stop\(\);[\s\S]*?manualRoamRuntime\.setEnabled\(true\);[\s\S]*?updateOpenedDigitalTwinFloatingControl\('manual-roam'\);/,
   );
   assert.match(
     playerSource,

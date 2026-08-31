@@ -278,6 +278,61 @@ test('同步或合批失败会记录警告并解除永久阻塞', () => {
   assert.deepEqual(state.warnings, ['网络不可用', '部分模型无法完成合批']);
 });
 
+test('运行时超时仅解除蒙版，后续自然稳定后才解除巡检门控', () => {
+  let state = createScenePreparationState('scene-timeout');
+  state = reduceScenePreparationState(state, { type: 'model-sync-skipped', error: null });
+  state = reduceScenePreparationState(state, {
+    type: 'asset-refresh-started',
+    refreshId: 'refresh-scene-timeout',
+  });
+  state = reduceScenePreparationState(state, {
+    type: 'asset-refresh-settled',
+    refreshId: 'refresh-scene-timeout',
+    error: null,
+  });
+  state = reduceScenePreparationState(state, {
+    type: 'runtime-progress',
+    generation: 'scene-timeout:runtime',
+    totalModels: 2,
+    settledModels: 1,
+    expectedBatchedEntities: 4,
+    batchedEntities: 2,
+    stable: false,
+  });
+  state = reduceScenePreparationState(state, {
+    type: 'runtime-settled-with-warning',
+    warning: '运行时准备超时',
+  });
+
+  assert.equal(state.completed, true);
+  assert.equal(state.runtime.forcedSettled, true);
+
+  state = reduceScenePreparationState(state, {
+    type: 'runtime-progress',
+    generation: 'scene-timeout:runtime',
+    totalModels: 2,
+    settledModels: 2,
+    expectedBatchedEntities: 4,
+    batchedEntities: 4,
+    stable: false,
+  });
+  assert.equal(state.completed, true);
+  assert.equal(state.runtime.forcedSettled, true);
+
+  state = reduceScenePreparationState(state, {
+    type: 'runtime-progress',
+    generation: 'scene-timeout:runtime',
+    totalModels: 2,
+    settledModels: 2,
+    expectedBatchedEntities: 4,
+    batchedEntities: 4,
+    stable: true,
+  });
+  assert.equal(state.completed, true);
+  assert.equal(state.runtime.forcedSettled, false);
+  assert.equal(state.runtime.stable, true);
+});
+
 test('完成后的普通场景更新不会重新打开蒙版，资产刷新会重新建立运行时门控', () => {
   let state = createScenePreparationState('scene-e');
   state = reduceScenePreparationState(state, { type: 'model-sync-skipped', error: null });

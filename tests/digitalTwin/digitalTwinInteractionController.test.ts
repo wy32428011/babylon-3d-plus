@@ -16,6 +16,7 @@ import type {
 import {
   DIGITAL_TWIN_BRIDGE_CHANNEL,
   DIGITAL_TWIN_BRIDGE_VERSION,
+  DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
   type DigitalTwinBridgeMessage,
 } from '../../src/player/digitalTwinInteractionProtocol.ts';
 
@@ -86,6 +87,7 @@ class FakeMessageBus {
 }
 
 class FakeRuntime implements DigitalTwinInteractionRuntime {
+  readonly hardwareGpuVerified = true;
   readonly assetIndex: DigitalTwinAssetIndex;
   slotIndex: DigitalTwinSlotIndex;
   boundsFactory: (entityId: string, slot?: DigitalTwinSlotCoordinate) => DigitalTwinFocusBounds | null;
@@ -234,6 +236,22 @@ function dispatch(bus: FakeMessageBus, data: unknown, origin = sameOrigin, sourc
   bus.dispatch({ data, origin, source });
 }
 
+test('未通过硬件 GPU 校验的运行时不能进入 viewer.ready', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([{ assetCode: 'DDJ2', entityIds: ['entity_1'] }]);
+  Object.defineProperty(runtime, 'hardwareGpuVerified', { value: false });
+  try {
+    assert.throws(
+      () => f.controller.markViewerReady(runtime),
+      /必须先通过硬件 GPU 校验/,
+    );
+    dispatch(f.bus, hostHello());
+    assert.deepEqual(f.posted.map((entry) => entry.message.type), ['bridge.ready']);
+  } finally {
+    f.controller.dispose();
+  }
+});
+
 test('只接受父窗口和允许 Origin，并按 bridge.ready -> viewer.ready 顺序握手', () => {
   const f = createFixture();
   const runtime = new FakeRuntime([{ assetCode: 'DDJ2', entityIds: ['entity_1'] }]);
@@ -251,7 +269,12 @@ test('只接受父窗口和允许 Origin，并按 bridge.ready -> viewer.ready �
     if (viewerReady.type === 'viewer.ready') {
       assert.deepEqual(viewerReady.payload, {
         projectId: '2051942646011785218',
-        capabilities: ['focusAsset', 'startAutoPatrol', 'startManualRoam'],
+        capabilities: [
+          DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
+          'focusAsset',
+          'startAutoPatrol',
+          'startManualRoam',
+        ],
       });
     }
   } finally {
@@ -350,7 +373,11 @@ test('只声明运行时实际支持的能力，并为缺失或执行异常的�
     const viewerReady = f.posted.at(-1)?.message;
     assert.equal(viewerReady?.type, 'viewer.ready');
     if (viewerReady?.type === 'viewer.ready') {
-      assert.deepEqual(viewerReady.payload.capabilities, ['focusAsset', 'startManualRoam']);
+      assert.deepEqual(viewerReady.payload.capabilities, [
+        DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
+        'focusAsset',
+        'startManualRoam',
+      ]);
     }
     f.posted.length = 0;
 

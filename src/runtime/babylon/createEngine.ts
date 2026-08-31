@@ -75,7 +75,7 @@ export type BabylonViewportRuntimeStatusCallback = (status: BabylonViewportRunti
 export type BabylonViewportOptions = {
   showGrid?: boolean;
   allowCameraControl?: boolean;
-  /** 设为 true 时优先硬件 WebGL 并校验实际 renderer；离屏探测不可用时降级软件渲染并通过 onLog 输出提示。 */
+  /** 设为 true 时要求真实硬件 WebGL，并拒绝 SwiftShader、WARP 等软件 renderer 回退。 */
   requireHardwareAcceleration?: boolean;
   /** 可选日志回调，用于向上层控制台输出 GPU renderer 诊断信息。 */
   onLog?: (message: string) => void;
@@ -120,8 +120,9 @@ const SOFTWARE_WEBGL_RENDERER_PATTERNS = [
   /softpipe/i,
   /software (?:adapter|rasterizer|renderer)/i,
   /microsoft basic render driver/i,
-  /(?:direct3d|d3d)\s*warp/i,
+  /\bwarp\b/i,
 ];
+const UNKNOWN_WEBGL_RENDERER_PATTERN = /^unknown(?:\s+renderer)?$/i;
 /** 将未知异常转换成可读消息，便于向上层 UI 呈现 Babylon 初始化失败原因。 */
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -135,9 +136,13 @@ function isSoftwareWebGLRenderer(renderer: string): boolean {
 /** 校验 Babylon 已连接真实 GPU，并记录可用于现场诊断的 WebGL 后端。 */
 function assertHardwareAcceleratedWebGL(engine: Engine, onLog?: (message: string) => void): void {
   const info = engine.getGlInfo();
-  if (isSoftwareWebGLRenderer(info.renderer)) {
+  const renderer = info.renderer.trim();
+  if (!renderer || UNKNOWN_WEBGL_RENDERER_PATTERN.test(renderer)) {
+    throw new Error('无法识别 WebGL renderer，当前 3D 视口无法确认硬件 GPU，已阻止加载。');
+  }
+  if (isSoftwareWebGLRenderer(renderer)) {
     throw new Error(
-      '检测到软件 WebGL 渲染器（' + info.renderer + '）。当前 3D 视口要求显卡硬件加速，禁止使用软件 renderer。',
+      '检测到软件 WebGL 渲染器（' + renderer + '）。当前 3D 视口要求显卡硬件加速，禁止使用软件 renderer。',
     );
   }
 
@@ -147,7 +152,7 @@ function assertHardwareAcceleratedWebGL(engine: Engine, onLog?: (message: string
     '; vendor=' +
     info.vendor +
     '; renderer=' +
-    info.renderer;
+    renderer;
   console.info(message);
   onLog?.(message);
 }
@@ -157,19 +162,6 @@ function assertWebGLSupported(): void {
   if (Engine.isSupported()) return;
 
   throw new Error('当前运行环境不支持 WebGL，无法创建 Babylon 3D 视口。');
-}
-
-/** 在离屏画布上探测硬件加速 WebGL 是否可用，不可用时返回 false 而非抛错。 */
-function probeHardwareAccelerationAvailable(): boolean {
-  const probeCanvas = document.createElement('canvas');
-  probeCanvas.width = 1;
-  probeCanvas.height = 1;
-  const gl =
-    probeCanvas.getContext('webgl2', { failIfMajorPerformanceCaveat: true }) ??
-    probeCanvas.getContext('webgl', { failIfMajorPerformanceCaveat: true });
-  if (!gl) return false;
-  gl.getExtension('WEBGL_lose_context')?.loseContext();
-  return true;
 }
 
 /**
@@ -375,31 +367,31 @@ export function createBabylonViewport(
   onRuntimeStatus?: BabylonViewportRuntimeStatusCallback,
   options: BabylonViewportOptions = {},
 ): BabylonViewport {
-  assertWebGLSupported();
-
-  // 硬件加速先离屏探测：可用时严格校验实际 renderer；不可用时降级软件渲染并输出日志，不再直接报错。
-  const requestedHardwareAcceleration = options.requireHardwareAcceleration ?? false;
-  const useHardwareAcceleration = requestedHardwareAcceleration && probeHardwareAccelerationAvailable();
-  if (requestedHardwareAcceleration) {
-    const probeMessage = useHardwareAcceleration
-      ? '[Babylon] 硬件加速 WebGL 已启用。'
-      : '[Babylon] 硬件加速 WebGL 不可用，已降级为软件渲染。建议更新显卡驱动或配置"高性能"图形模式。';
-    console.info(probeMessage);
-    options.onLog?.(probeMessage);
-  }
+  const requireHardwareAcceleration = options.requireHardwareAcceleration ?? false;
+  if (!requireHardwareAcceleration) assertWebGLSupported();
 
   let engine: Engine;
   try {
-    engine = new Engine(canvas, true, {
+    const candidate = new Engine(canvas, true, {
       preserveDrawingBuffer: false,
       stencil: true,
       powerPreference: 'high-performance',
-      failIfMajorPerformanceCaveat: useHardwareAcceleration,
+      failIfMajorPerformanceCaveat: requireHardwareAcceleration,
       desynchronized: false,
     });
-    if (useHardwareAcceleration) assertHardwareAcceleratedWebGL(engine, options.onLog);
+    try {
+      if (requireHardwareAcceleration) assertHardwareAcceleratedWebGL(candidate, options.onLog);
+      engine = candidate;
+    } catch (error) {
+      candidate.dispose();
+      throw error;
+    }
   } catch (error) {
-    throw new Error('Babylon Engine 创建失败：' + getErrorMessage(error));
+    const mode = requireHardwareAcceleration ? '硬件加速 WebGL' : 'WebGL';
+    const guidance = requireHardwareAcceleration
+      ? ' 请确认浏览器或桌面应用已启用硬件加速并重启，同时检查显卡驱动与系统图形策略是否允许当前程序使用 GPU。'
+      : '';
+    throw new Error('Babylon Engine ' + mode + ' 创建失败：' + getErrorMessage(error) + guidance);
   }
   const backgroundFrameRequester = options.keepRenderingInBackground
     ? createBackgroundFrameRequester()
@@ -481,8 +473,21 @@ export function createBabylonViewport(
     });
   });
 
-  /** 在 Babylon 完成上下文资源恢复后继续绘制，并通知外层面板清除错误遮罩。 */
+  /** 上下文恢复后重新校验 renderer，避免 GPU 异常后静默切换到软件后端。 */
   const contextRestoredObserver = engine.onContextRestoredObservable.add(() => {
+    try {
+      if (requireHardwareAcceleration) assertHardwareAcceleratedWebGL(engine, options.onLog);
+    } catch (error) {
+      contextLost = true;
+      renderFailed = true;
+      onRuntimeStatus?.({
+        type: 'render-error',
+        message: `Scene View 硬件加速 WebGL 恢复失败：${getErrorMessage(error)}`,
+        error,
+      });
+      return;
+    }
+
     contextLost = false;
     renderFailed = false;
     onRuntimeStatus?.({

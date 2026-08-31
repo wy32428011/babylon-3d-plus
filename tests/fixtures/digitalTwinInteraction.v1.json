@@ -41,6 +41,7 @@
         "payload": {
           "projectId": "2051942646011785218",
           "capabilities": [
+            "hardwareGpu",
             "focusAsset",
             "startAutoPatrol",
             "startManualRoam"

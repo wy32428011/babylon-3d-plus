@@ -6,7 +6,7 @@ import { _electron as electron } from 'playwright';
 
 const WORKSPACE_ROOT = process.cwd();
 const SOFTWARE_RENDERER_PATTERN =
-  /swiftshader|llvmpipe|lavapipe|softpipe|software (?:adapter|rasterizer|renderer)|microsoft basic render driver|(?:direct3d|d3d)\s*warp/i;
+  /swiftshader|llvmpipe|lavapipe|softpipe|software (?:adapter|rasterizer|renderer)|microsoft basic render driver|\bwarp\b|^unknown(?:\s+renderer)?$/i;
 
 function isEnabledFeature(status) {
   return typeof status === 'string' && status.startsWith('enabled');
@@ -123,6 +123,7 @@ await withEditor([], async (launched) => {
     assert.equal(await performanceDetails.isVisible(), true, 'Toolbar 恢复显示后应恢复原有详情展开状态');
     assert.equal(renderer.attributes?.powerPreference, 'high-performance', 'WebGL 未请求 high-performance GPU');
     assert.equal(renderer.attributes?.failIfMajorPerformanceCaveat, true, 'WebGL 仍允许重大性能降级');
+    assert.notEqual(String(renderer.renderer ?? '').trim(), '', 'WebGL renderer 为空，无法确认硬件 GPU');
     assert.equal(
       SOFTWARE_RENDERER_PATTERN.test(renderer.renderer ?? ''),
       false,

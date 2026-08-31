@@ -11,9 +11,11 @@ function createGateFixture() {
   const cancelled: number[] = [];
   let nextHandle = 1;
   let completedCount = 0;
+  let settledCount = 0;
   const gate = new PlayerInitialLoadGate(
     () => { completedCount += 1; },
     {
+      onSettled: () => { settledCount += 1; },
       schedule: (callback) => {
         const handle = nextHandle;
         nextHandle += 1;
@@ -32,6 +34,7 @@ function createGateFixture() {
     scheduled,
     cancelled,
     getCompletedCount: () => completedCount,
+    getSettledCount: () => settledCount,
     flushNext: () => {
       const entry = scheduled.entries().next().value as [number, () => void] | undefined;
       if (!entry) return;
@@ -96,4 +99,19 @@ test('超时可强制完成，dispose 会取消未执行的稳定检查', () => 
   assert.deepEqual(disposedFixture.cancelled, [1]);
   disposedFixture.gate.forceComplete();
   assert.equal(disposedFixture.getCompletedCount(), 0);
+});
+
+test('超时只放行加载界面，资源真实结算后才触发 settled', () => {
+  const fixture = createGateFixture();
+  fixture.gate.update({ loading: true, totalCount: 2 });
+  fixture.gate.startTracking();
+
+  fixture.gate.forceComplete();
+  assert.equal(fixture.getCompletedCount(), 1);
+  assert.equal(fixture.getSettledCount(), 0);
+
+  fixture.gate.update({ loading: false, totalCount: 2 });
+  fixture.flushNext();
+  assert.equal(fixture.getCompletedCount(), 1);
+  assert.equal(fixture.getSettledCount(), 1);
 });

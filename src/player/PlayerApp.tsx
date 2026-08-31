@@ -40,6 +40,7 @@ import {
   formatPlayerStatusFps,
   PLAYER_STATUS_FPS_SAMPLE_INTERVAL_MS,
   resolveInitialPlayerStatusOverlayVisibility,
+  resolvePlayerFloatingControlToggle,
   shouldShowPlayerFloatingControl,
   shouldShowPlayerStatusOverlay,
   type PlayerFloatingControl,
@@ -65,6 +66,7 @@ import type {
 } from '../runtime/roam/manualRoamCore';
 import { createDefaultManualRoamCollisionBoundsResolver } from '../runtime/roam/manualRoamCollisionBounds';
 import { computePlayerLoadingProgress, PLAYER_SCENE_LOADING_TIMEOUT_MS } from './playerLoadingProgress';
+import { DeferredAutoPatrolStartGate } from './deferredAutoPatrolStartGate';
 import { PlayerInitialLoadGate } from './playerInitialLoadState';
 import { resolvePublishedFetchConfig, startPublishedFetchDrive } from './publishedFetchDrive';
 import {
@@ -166,6 +168,7 @@ export function PlayerApp() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<BabylonViewport | null>(null);
   const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
+  const autoPatrolStartGateRef = useRef<DeferredAutoPatrolStartGate | null>(null);
   const manualRoamRef = useRef<ManualRoamRuntime | null>(null);
   const [phase, setPhase] = useState<PlayerPhase>('loading');
   const [autoPatrolRoutes, setAutoPatrolRoutes] = useState<AutoPatrolPlaybackRoute[]>([]);
@@ -179,6 +182,7 @@ export function PlayerApp() {
   const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
   const [environmentRuntimeIssue, setEnvironmentRuntimeIssue] = useState(false);
   const [statusOverlayVisible, setStatusOverlayVisible] = useState(false);
+  const openedDigitalTwinFloatingControlRef = useRef<PlayerFloatingControl | null>(null);
   const [openedDigitalTwinFloatingControl, setOpenedDigitalTwinFloatingControl] = useState<PlayerFloatingControl | null>(null);
   const [playerFps, setPlayerFps] = useState<number | null>(null);
   const [config, setConfig] = useState<PlayerRuntimeConfig | null>(null);
@@ -208,7 +212,12 @@ export function PlayerApp() {
   const applyHistoryReplayCamera = useCallback((camera: AutoPatrolInspectionReplayCamera): void => {
     viewportRef.current?.applyCameraPose(createSceneCameraPoseFromReplayCamera(camera), { animate: false });
   }, []);
+  const updateOpenedDigitalTwinFloatingControl = useCallback((control: PlayerFloatingControl | null): void => {
+    openedDigitalTwinFloatingControlRef.current = control;
+    setOpenedDigitalTwinFloatingControl(control);
+  }, []);
   const beginHistoryReplay = useCallback((): void => {
+    autoPatrolStartGateRef.current?.cancelPending();
     manualRoamRef.current?.setEnabled(false);
     autoPatrolPlaybackRef.current?.stop();
     viewportRef.current?.cancelCameraTransition('manual-input');
@@ -237,11 +246,16 @@ export function PlayerApp() {
     let manualRoam: ManualRoamRuntime | null = null;
     let skyboxCameraBounds: PublishedSkyboxCameraBoundsController | null = null;
     let interactionController: DigitalTwinInteractionController | null = null;
+    const autoPatrolStartGate = new DeferredAutoPatrolStartGate();
+    autoPatrolStartGateRef.current = autoPatrolStartGate;
     initialLoadCompletedRef.current = false;
     setModelLoadProgress(null);
     const initialLoadGate = new PlayerInitialLoadGate(() => {
       initialLoadCompletedRef.current = true;
       interactionController?.markInitialLoadComplete();
+    }, {
+      // 超时只结束蒙版和握手；真实资源结算后才放行最新巡检启动请求。
+      onSettled: () => autoPatrolStartGate.markReady(),
     });
     const forceCompleteInitialLoad = () => initialLoadGate.forceComplete();
     completeInitialLoadRef.current = forceCompleteInitialLoad;
@@ -543,8 +557,11 @@ export function PlayerApp() {
 
         const autoStartRoute = findAutoStartPatrolRoute(patrolRoutes);
         if (autoStartRoute) {
-          const result = autoPatrolPlayback.start(autoStartRoute.entityId);
-          if (!result.ok) setRuntimeMessage(result.error);
+          autoPatrolStartGate.request(() => {
+            if (disposed || !autoPatrolPlayback) return;
+            const result = autoPatrolPlayback.start(autoStartRoute.entityId);
+            if (!result.ok) setRuntimeMessage(result.error);
+          });
         }
 
         const preferredPatrolRoute = patrolRoutes.find((route) => (
@@ -555,6 +572,7 @@ export function PlayerApp() {
         const manualRoamRuntime = manualRoam;
 
         interactionController.markViewerReady({
+          hardwareGpuVerified: true,
           assetIndex: digitalTwinAssetIndex,
           slotIndex: digitalTwinSlotIndex,
           getFocusBounds: (entityId, slot) => slot
@@ -573,19 +591,55 @@ export function PlayerApp() {
           notifyCameraChangedWhilePaused: () => autoPatrolPlayback!.notifyCameraChangedWhilePaused(),
           ...(preferredPatrolRoute ? {
             startAutoPatrol: () => {
-              setOpenedDigitalTwinFloatingControl('auto-patrol');
+              const nextControl = resolvePlayerFloatingControlToggle(
+                openedDigitalTwinFloatingControlRef.current,
+                'auto-patrol',
+              );
+              if (nextControl === null) {
+                autoPatrolStartGate.cancelPending();
+                autoPatrolPlayback?.stop();
+                updateOpenedDigitalTwinFloatingControl(null);
+                return;
+              }
+
+              updateOpenedDigitalTwinFloatingControl('auto-patrol');
               manualRoamRuntime?.setEnabled(false);
-              const patrolController = autoPatrolPlayback!;
-              const result = patrolController.getSnapshot().phase === 'paused'
-                ? patrolController.resume()
-                : patrolController.start(preferredPatrolRoute.entityId);
-              if (!result.ok) throw new Error(result.error);
+              let startError: string | null = null;
+              autoPatrolStartGate.request(() => {
+                if (
+                  disposed
+                  || !autoPatrolPlayback
+                  || openedDigitalTwinFloatingControlRef.current !== 'auto-patrol'
+                ) return;
+                const patrolController = autoPatrolPlayback;
+                const result = patrolController.getSnapshot().phase === 'paused'
+                  ? patrolController.resume()
+                  : patrolController.start(preferredPatrolRoute.entityId);
+                if (!result.ok) {
+                  startError = result.error;
+                  updateOpenedDigitalTwinFloatingControl(null);
+                  setRuntimeMessage(result.error);
+                }
+              });
+              if (startError) throw new Error(startError);
             },
           } : {}),
           ...(manualRoamRuntime ? {
             startManualRoam: () => {
-              setOpenedDigitalTwinFloatingControl('manual-roam');
+              const nextControl = resolvePlayerFloatingControlToggle(
+                openedDigitalTwinFloatingControlRef.current,
+                'manual-roam',
+              );
+              if (nextControl === null) {
+                manualRoamRuntime.setEnabled(false);
+                updateOpenedDigitalTwinFloatingControl(null);
+                return;
+              }
+
+              autoPatrolStartGate.cancelPending();
+              autoPatrolPlayback?.stop();
               manualRoamRuntime.setEnabled(true);
+              updateOpenedDigitalTwinFloatingControl('manual-roam');
             },
           } : {}),
         });
@@ -611,6 +665,10 @@ export function PlayerApp() {
         interactionController?.dispose();
         interactionController = null;
         initialLoadGate.dispose();
+        autoPatrolStartGate.dispose();
+        if (autoPatrolStartGateRef.current === autoPatrolStartGate) {
+          autoPatrolStartGateRef.current = null;
+        }
         if (completeInitialLoadRef.current === forceCompleteInitialLoad) {
           completeInitialLoadRef.current = null;
         }
@@ -647,6 +705,10 @@ export function PlayerApp() {
       interactionController?.dispose();
       interactionController = null;
       initialLoadGate.dispose();
+      autoPatrolStartGate.dispose();
+      if (autoPatrolStartGateRef.current === autoPatrolStartGate) {
+        autoPatrolStartGateRef.current = null;
+      }
       if (completeInitialLoadRef.current === forceCompleteInitialLoad) {
         completeInitialLoadRef.current = null;
       }
@@ -689,14 +751,30 @@ export function PlayerApp() {
     const controller = autoPatrolPlaybackRef.current;
     if (!controller) return;
     let result: { ok: true } | { ok: false; error: string } | null = null;
-    if (action === 'start' || action === 'resume' || action === 'set-view') {
+    if (action === 'resume' || action === 'set-view') {
       manualRoamRef.current?.setEnabled(false);
     }
     switch (action) {
-      case 'start':
-        result = routeId ? controller.start(routeId) : { ok: false, error: '未选择巡检路线。' };
+      case 'start': {
+        const startGate = autoPatrolStartGateRef.current;
+        if (!routeId) {
+          result = { ok: false, error: '未选择巡检路线。' };
+          break;
+        }
+        if (!startGate) {
+          result = { ok: false, error: '场景加载状态尚未就绪。' };
+          break;
+        }
+        startGate.request(() => {
+          manualRoamRef.current?.setEnabled(false);
+          const startResult = controller.start(routeId);
+          if (!startResult.ok) setRuntimeMessage(startResult.error);
+        });
+        result = { ok: true };
         break;
+      }
       case 'pause':
+        autoPatrolStartGateRef.current?.cancelPending();
         result = controller.pause(false);
         break;
       case 'resume':
@@ -706,12 +784,15 @@ export function PlayerApp() {
         result = controller.skipCurrentWaypoint();
         break;
       case 'stop':
+        autoPatrolStartGateRef.current?.cancelPending();
         controller.stop();
         break;
       case 'emergency-stop':
+        autoPatrolStartGateRef.current?.cancelPending();
         controller.emergencyStop();
         break;
       case 'return':
+        autoPatrolStartGateRef.current?.cancelPending();
         result = controller.returnToStart();
         break;
       case 'set-rate':
@@ -737,7 +818,10 @@ export function PlayerApp() {
   /** 启用或关闭 Viewer 手动漫游；场景没有出生点 POI 时拒绝启用。 */
   function handleManualRoamEnabled(enabled: boolean): void {
     if (enabled && !hasManualRoamSpawn) return;
-    if (enabled) pauseHistoryReplay();
+    if (enabled) {
+      autoPatrolStartGateRef.current?.cancelPending();
+      pauseHistoryReplay();
+    }
     manualRoamRef.current?.setEnabled(enabled);
   }
 

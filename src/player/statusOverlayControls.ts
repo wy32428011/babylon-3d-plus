@@ -13,6 +13,14 @@ export type StatusOverlayChordTransition = {
   shouldToggle: boolean;
 };
 
+/** 同一大屏运行按钮再次点击时关闭浮窗，切换按钮时打开新的浮窗。 */
+export function resolvePlayerFloatingControlToggle(
+  currentControl: PlayerFloatingControl | null,
+  requestedControl: PlayerFloatingControl,
+): PlayerFloatingControl | null {
+  return currentControl === requestedControl ? null : requestedControl;
+}
+
 /** 数字孪生发布 Viewer 固定从隐藏状态启动；普通部署继续遵循 runtime-config。 */
 export function resolveInitialPlayerStatusOverlayVisibility(
   configuredVisible: boolean,

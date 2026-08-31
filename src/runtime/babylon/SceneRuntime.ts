@@ -761,7 +761,6 @@ export class SceneRuntime {
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
       // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
       loadAssetContainer: (rootUrl, fileName, signal) => {
-        // 环境进度走 snapshot 文案，不占用设备模型加载蒙版，避免厂区 GLB 挡住场景就绪。
         return this.loadEnvironmentAssetContainer(rootUrl, fileName, signal);
       },
       onSnapshot: onEnvironmentSnapshot,
@@ -7742,14 +7741,18 @@ export class SceneRuntime {
     loadSignal?: AbortSignal,
     onProgress?: (event: ISceneLoaderProgressEvent) => void,
   ): Promise<AssetContainer> {
+    const loadSequence = this.beginModelLoadProgressUnit(fileName);
     return this.environmentLoadScheduler.run(
       () => this.environmentAssetCache.acquireWorkingContainer({
         cacheKey: `${rootUrl}${fileName}`,
         scene: this.scene,
-        loadSource: () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, onProgress),
+        loadSource: () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, (event) => {
+          this.updateModelLoadProgressUnit(loadSequence, event);
+          onProgress?.(event);
+        }),
       }),
       loadSignal,
-    );
+    ).finally(() => this.settleModelLoadProgressUnit(loadSequence));
   }
 
   /** 把完整资源 URL 拆成 Babylon SceneLoader 需要的 rootUrl 和 fileName。 */

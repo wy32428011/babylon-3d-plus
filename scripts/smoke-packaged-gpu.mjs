@@ -18,7 +18,7 @@ const defaultExecutablePath = path.join(
 );
 const executablePath = path.resolve(process.argv[2] ?? defaultExecutablePath);
 const SOFTWARE_RENDERER_PATTERN =
-  /swiftshader|llvmpipe|lavapipe|softpipe|software (?:adapter|rasterizer|renderer)|microsoft basic render driver|(?:direct3d|d3d)\s*warp/i;
+  /swiftshader|llvmpipe|lavapipe|softpipe|software (?:adapter|rasterizer|renderer)|microsoft basic render driver|\bwarp\b|^unknown(?:\s+renderer)?$/i;
 
 /** 判断 Electron GPU feature 状态是否为硬件启用。 */
 function isEnabledFeature(status) {
@@ -139,6 +139,7 @@ try {
   assert.equal(renderer.contextLost, false, '生产 Scene View 渲染立方体后 WebGL 上下文已丢失');
   assert.equal(renderer.attributes?.powerPreference, 'high-performance', '生产 WebGL 未请求 high-performance GPU');
   assert.equal(renderer.attributes?.failIfMajorPerformanceCaveat, true, '生产 WebGL 仍允许重大性能降级');
+  assert.notEqual(String(renderer.renderer ?? '').trim(), '', '生产 WebGL renderer 为空，无法确认硬件 GPU');
   assert.equal(
     SOFTWARE_RENDERER_PATTERN.test(renderer.renderer ?? ''),
     false,

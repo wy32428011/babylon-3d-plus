@@ -1,5 +1,6 @@
 export const DIGITAL_TWIN_BRIDGE_CHANNEL = 'zending.digital-twin.bridge' as const;
 export const DIGITAL_TWIN_BRIDGE_VERSION = 1 as const;
+export const DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY = 'hardwareGpu' as const;
 export const DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY = 'focusAsset' as const;
 export const DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY = 'startAutoPatrol' as const;
 export const DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY = 'startManualRoam' as const;
@@ -25,6 +26,7 @@ export type DigitalTwinViewerErrorCode = (typeof DIGITAL_TWIN_VIEWER_ERROR_CODES
 export type DigitalTwinRuntimeAction = (typeof DIGITAL_TWIN_RUNTIME_ACTIONS)[number];
 export type DigitalTwinInitialLoadPhase = (typeof DIGITAL_TWIN_INITIAL_LOAD_PHASES)[number];
 export type DigitalTwinCapability =
+  | typeof DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY
   | typeof DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY
   | DigitalTwinRuntimeAction;
 
@@ -156,6 +158,7 @@ const MAX_ENTITY_COUNT = 64;
 const MAX_ERROR_MESSAGE_LENGTH = 1024;
 const VIEWER_ERROR_CODE_SET = new Set<string>(DIGITAL_TWIN_VIEWER_ERROR_CODES);
 const CAPABILITY_SET = new Set<string>([
+  DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
   DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
   ...DIGITAL_TWIN_RUNTIME_ACTIONS,
 ]);

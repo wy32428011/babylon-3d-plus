@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent, type WheelEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type DragEvent,
+  type PointerEvent,
+  type WheelEvent,
+} from 'react';
 import {
   createBabylonViewport,
   type BabylonViewport,
@@ -272,6 +282,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const sceneRuntimeTimeoutLoggedRef = useRef(false);
   const selectedEntityIdRef = useRef<string | null>(null);
   const autoPatrolPreviewStartedRef = useRef(false);
+  const autoPatrolPreviewAutoStartCancelledRef = useRef(false);
   const runtimeModeRef = useRef<EditorRuntimeMode>('edit');
   const entityArrayDialogRef = useRef<EntityArrayDialogState | null>(null);
   const hierarchyGroupTranslationRef = useRef<HierarchyGroupTranslationSession | null>(null);
@@ -282,6 +293,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
   const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
   const [performanceHudExpanded, setPerformanceHudExpanded] = useState(false);
+  const [sceneRuntimeNaturallyReady, setSceneRuntimeNaturallyReady] = useState(false);
   const [manualRoamSnapshot, setManualRoamSnapshot] = useState<ManualRoamSnapshot>(createInitialManualRoamSnapshot);
   const [autoPatrolRecordStore, setAutoPatrolRecordStore] = useState<AutoPatrolInspectionRecordStore | null>(null);
   const sceneDocument = useEditorStore((state) => state.scene);
@@ -357,6 +369,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     viewportRef.current?.applyCameraPose(createSceneCameraPoseFromReplayCamera(camera), { animate: false });
   }, []);
   const beginHistoryReplay = useCallback((): void => {
+    autoPatrolPreviewAutoStartCancelledRef.current = true;
+    const pendingRequest = useEditorStore.getState().autoPatrolPlaybackRequest;
+    if (pendingRequest?.action === 'start' || pendingRequest?.action === 'resume') {
+      useEditorStore.getState().consumeAutoPatrolPlaybackRequest(pendingRequest.id);
+    }
     manualRoamRef.current?.setEnabled(false);
     autoPatrolPlaybackRef.current?.stop();
     viewportRef.current?.cancelCameraTransition('manual-input');
@@ -414,6 +431,18 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   );
 
   const sceneRuntimeReadinessGeneration = sceneSessionId;
+  const preparationState = useSyncExternalStore(
+    subscribeScenePreparation,
+    getScenePreparationSnapshot,
+    getScenePreparationSnapshot,
+  );
+  const scenePreparationNaturallyCompleted = (
+    preparationState.completed && !preparationState.runtime.forcedSettled
+  ) || sceneRuntimeNaturallyReady;
+  const sceneReadyForAutoPatrol = preparationState.sceneSessionId === sceneSessionId
+    && preparationState.assetRefreshStatus === 'settled'
+    && scenePreparationNaturallyCompleted
+    && (!sceneDocument.sceneSettings.environment || environmentRuntimePhase === 'ready');
 
   /** 发布当前单模型尺寸和 Hierarchy 群组世界包围盒，二者都只进入临时 Inspector 状态。 */
   const publishSelectedInspectorSpatialInfo = useCallback((runtime: SceneRuntime, entityId: string | null): void => {
@@ -1441,6 +1470,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
    */
   useEffect(() => {
     beginScenePreparation(sceneSessionId);
+    setSceneRuntimeNaturallyReady(false);
     sceneRuntimeReadinessStableSamplesRef.current = 0;
     sceneRuntimeReadinessStartedAtRef.current = readScenePanelTimestampMs();
     sceneRuntimeTimeoutLoggedRef.current = false;
@@ -1465,11 +1495,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const sampleReadiness = (): void => {
       if (!active) return;
       const preparationState = getScenePreparationSnapshot();
-      if (preparationState.sceneSessionId !== sceneSessionId || preparationState.completed) {
+      if (
+        preparationState.sceneSessionId !== sceneSessionId
+        || (preparationState.completed && !preparationState.runtime.forcedSettled)
+      ) {
         stopReadinessPolling();
         return;
       }
       if (preparationState.assetRefreshStatus !== 'settled') {
+        setSceneRuntimeNaturallyReady(false);
         sceneRuntimeReadinessStableSamplesRef.current = 0;
         sceneRuntimeReadinessStartedAtRef.current = readScenePanelTimestampMs();
         sceneRuntimeTimeoutLoggedRef.current = false;
@@ -1522,6 +1556,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         : readyNow ? 1 : 0;
       lastSignature = signature;
       const stable = sceneRuntimeReadinessStableSamplesRef.current >= 2;
+      if (stable) setSceneRuntimeNaturallyReady(true);
 
       reportSceneRuntimeProgress(sceneSessionId, {
         generation: sceneRuntimeReadinessGeneration,
@@ -1531,6 +1566,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         batchedEntities,
         stable,
       });
+      if (stable && preparationState.runtime.forcedSettled) stopReadinessPolling();
 
       if (
         !stable
@@ -1549,7 +1585,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (
         active
         && preparationState.sceneSessionId === sceneSessionId
-        && !preparationState.completed
+        && (!preparationState.completed || preparationState.runtime.forcedSettled)
       ) {
         intervalId = window.setInterval(sampleReadiness, 250);
       }
@@ -1557,7 +1593,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     const unsubscribeScenePreparation = subscribeScenePreparation(() => {
       const preparationState = getScenePreparationSnapshot();
-      if (preparationState.sceneSessionId !== sceneSessionId || preparationState.completed) {
+      if (
+        preparationState.sceneSessionId !== sceneSessionId
+        || (preparationState.completed && !preparationState.runtime.forcedSettled)
+      ) {
         stopReadinessPolling();
         return;
       }
@@ -1856,6 +1895,29 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!autoPatrolPlaybackRequest) return;
     const controller = autoPatrolPlaybackRef.current;
     if (!controller) return;
+    if (
+      (autoPatrolPlaybackRequest.action === 'start'
+        || autoPatrolPlaybackRequest.action === 'resume')
+      && !isRuntimePreview
+    ) {
+      consumeAutoPatrolPlaybackRequest(autoPatrolPlaybackRequest.id);
+      return;
+    }
+    if (
+      (autoPatrolPlaybackRequest.action === 'start'
+        || autoPatrolPlaybackRequest.action === 'resume')
+      && !sceneReadyForAutoPatrol
+    ) return;
+    if (
+      autoPatrolPlaybackRequest.action === 'start'
+      || autoPatrolPlaybackRequest.action === 'resume'
+      || autoPatrolPlaybackRequest.action === 'pause'
+      || autoPatrolPlaybackRequest.action === 'stop'
+      || autoPatrolPlaybackRequest.action === 'emergency-stop'
+      || autoPatrolPlaybackRequest.action === 'return'
+    ) {
+      autoPatrolPreviewAutoStartCancelledRef.current = true;
+    }
     pauseHistoryReplay();
 
     let result: { ok: true } | { ok: false; error: string } | null = null;
@@ -1913,7 +1975,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     }
     if (result && !result.ok) pushLog(result.error);
     consumeAutoPatrolPlaybackRequest(autoPatrolPlaybackRequest.id);
-  }, [autoPatrolPlaybackRequest, consumeAutoPatrolPlaybackRequest, pauseHistoryReplay, pushLog]);
+  }, [
+    autoPatrolPlaybackRequest,
+    consumeAutoPatrolPlaybackRequest,
+    isRuntimePreview,
+    pauseHistoryReplay,
+    pushLog,
+    sceneReadyForAutoPatrol,
+  ]);
 
   /** 每次进入运行预览只尝试一次自动启动；退出时停止且保留当前视角。 */
   useEffect(() => {
@@ -1922,21 +1991,31 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!isRuntimePreview) {
       if (autoPatrolPreviewStartedRef.current) controller.stop();
       autoPatrolPreviewStartedRef.current = false;
+      autoPatrolPreviewAutoStartCancelledRef.current = false;
       return;
     }
     if (autoPatrolPreviewStartedRef.current) return;
+    if (autoPatrolPreviewAutoStartCancelledRef.current) return;
+    if (!sceneReadyForAutoPatrol) return;
     autoPatrolPreviewStartedRef.current = true;
     controller.setRoutes(autoPatrolRoutes);
     const route = findAutoStartPatrolRoute(autoPatrolRoutes);
     if (!route) return;
     const result = controller.start(route.entityId);
     if (!result.ok) pushLog(result.error);
-  }, [autoPatrolRoutes, isRuntimePreview, pushLog]);
+  }, [autoPatrolRoutes, isRuntimePreview, pushLog, sceneReadyForAutoPatrol]);
 
   /** 启用或关闭运行预览手动漫游；场景没有出生点 POI 时拒绝启用。 */
   function handleManualRoamEnabled(enabled: boolean): void {
     if (enabled && !hasManualRoamSpawn) return;
-    if (enabled) pauseHistoryReplay();
+    if (enabled) {
+      autoPatrolPreviewAutoStartCancelledRef.current = true;
+      const pendingRequest = useEditorStore.getState().autoPatrolPlaybackRequest;
+      if (pendingRequest?.action === 'start' || pendingRequest?.action === 'resume') {
+        consumeAutoPatrolPlaybackRequest(pendingRequest.id);
+      }
+      pauseHistoryReplay();
+    }
     manualRoamRef.current?.setEnabled(enabled);
   }
 
