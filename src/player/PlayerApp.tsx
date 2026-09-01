@@ -34,7 +34,13 @@ import {
 } from './runtimeConfig';
 import { DigitalTwinInteractionController } from './DigitalTwinInteractionController';
 import { hasManualRoamSpawnEntity, resolveManualRoamSpawnPose } from '../editor/model/manualRoamSpawn';
-import { CLICK_EVENT_FOCUS_DURATION_MS, resolveClickEventBindingClick } from '../editor/model/clickEventBinding';
+import { findBuiltInSlotEntityId } from '../editor/model/builtInSlotBinding';
+import {
+  CLICK_EVENT_FOCUS_DURATION_MS,
+  CLICK_EVENT_FOCUS_RADIUS_SCALE,
+  resolveClickEventBindingClick,
+  type ClickEventBindingPickedCell,
+} from '../editor/model/clickEventBinding';
 import {
   bindStatusOverlayPointerChordToggle,
   formatPlayerStatusFps,
@@ -497,10 +503,22 @@ export function PlayerApp() {
             if (disposed || !runtime) return;
             pauseHistoryReplay();
             const entityId = runtime.pickRuntimeModelEntityIdAtCanvasPoint(clientX, clientY, canvas);
+            // 命中货架时顺带反解内置货格命中格，供点击单元事件决议使用。
+            let pickedCell: ClickEventBindingPickedCell | null = null;
+            if (entityId) {
+              const locatorEntityId = findBuiltInSlotEntityId(sceneDocument, entityId);
+              const cell = locatorEntityId
+                ? runtime.pickLocatorCellAtCanvasPoint(clientX, clientY, canvas, locatorEntityId)
+                : null;
+              if (locatorEntityId && cell) {
+                pickedCell = { locatorEntityId, row: cell.row, column: cell.column, layer: cell.layer };
+              }
+            }
             // 场景存在已注册设备类型的点击事件绑定时点击行为全接管：
-            // 命中注册设备按事件效果执行，点未注册模型无效果，点空白清除高亮。
+            // 命中注册设备按事件效果执行（点击单元优先于点击，命中货格只高亮单格线框），
+            // 点未注册模型无效果，点空白清除高亮。
             // 巡检手动事件（triggerManualEventsForTarget）与绑定系统正交，命中有效目标时照常触发。
-            const resolution = resolveClickEventBindingClick(sceneDocument, entityId);
+            const resolution = resolveClickEventBindingClick(sceneDocument, entityId, pickedCell);
             if (resolution.kind === 'pass-through') {
               localHighlightedEntityIds = entityId ? [entityId] : [];
               runtime.setLocalHighlightEntityIds(localHighlightedEntityIds);
@@ -510,9 +528,28 @@ export function PlayerApp() {
             if (resolution.kind === 'clear') {
               localHighlightedEntityIds = [];
               runtime.setLocalHighlightEntityIds([]);
+              runtime.setLocalSlotHighlight('', null);
               return;
             }
             if (resolution.kind === 'ignore') return;
+            if (resolution.kind === 'trigger-cell') {
+              if (resolution.effects.includes('highlight')) {
+                localHighlightedEntityIds = [];
+                runtime.setLocalHighlightEntityIds([]);
+                runtime.setLocalSlotHighlight(resolution.locatorEntityId, resolution.cell);
+                autoPatrolPlayback?.triggerManualEventsForTarget(resolution.entityId);
+              } else {
+                runtime.setLocalSlotHighlight('', null);
+              }
+              if (resolution.effects.includes('focus')) {
+                const bounds = runtime.getLocatorCellWorldBounds(resolution.locatorEntityId, resolution.cell);
+                if (bounds && viewport) {
+                  viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS, useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE });
+                }
+              }
+              return;
+            }
+            runtime.setLocalSlotHighlight('', null);
             if (resolution.effects.includes('highlight')) {
               localHighlightedEntityIds = [resolution.entityId];
               runtime.setLocalHighlightEntityIds(localHighlightedEntityIds);
@@ -521,7 +558,7 @@ export function PlayerApp() {
             if (resolution.effects.includes('focus')) {
               const bounds = runtime.getEntitiesWorldBounds([resolution.entityId]);
               if (bounds && viewport) {
-                viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS });
+                viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS, useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE });
               }
             }
           },

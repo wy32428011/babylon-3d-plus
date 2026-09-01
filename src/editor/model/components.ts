@@ -321,11 +321,11 @@ export type AutoPatrolComponent = {
 /** 手动漫游出生点只保存实体 Transform；空组件用于稳定标识全场唯一对象。 */
 export type ManualRoamSpawnComponent = Record<string, never>;
 
-/** 点击事件绑定支持的事件类型；click-cell（货架虚拟货格单元格）预留，UI 暂禁用。 */
+/** 点击事件绑定支持的事件类型；click-cell 命中货架虚拟货格单元格时触发，同一绑定中优先于 click。 */
 export type ClickEventBindingEventType = 'click' | 'click-cell';
 
-/** 点击命中后执行的效果类型，单个事件内同类效果只保留一条。 */
-export type ClickEventBindingEffect = 'highlight' | 'focus';
+/** 点击命中后执行的效果类型，单个事件内同类效果只保留一条；show-chart 展示图表功能尚未实现，目前仅作配置占位。 */
+export type ClickEventBindingEffect = 'highlight' | 'focus' | 'show-chart';
 
 /** 绑定的设备类型条目，以模型包 sourceUrl 作为运行态匹配主键。 */
 export type ClickEventBindingDeviceType = {

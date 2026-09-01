@@ -27,6 +27,7 @@ type ClickEventBindingInspectorProps = {
 const EFFECT_OPTIONS: readonly { value: ClickEventBindingEffect; label: string }[] = [
   { value: 'highlight', label: '高亮选中' },
   { value: 'focus', label: '聚焦动画' },
+  { value: 'show-chart', label: '展示图表' },
 ];
 
 /** 判断拖拽事件是否包含模型库可用于设备类型槽位的载荷；内置基础网格没有模型包来源，不接受。 */
@@ -274,7 +275,7 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
               )}
             >
               <option value="click">点击</option>
-              <option value="click-cell" disabled>点击单元（后续版本）</option>
+              <option value="click-cell">点击单元</option>
             </select>
           </label>
 

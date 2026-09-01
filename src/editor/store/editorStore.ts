@@ -260,6 +260,10 @@ export type EntityArrayCommitResult =
 export type SceneFocusTransition = {
   animate: boolean;
   durationMs?: number;
+  /** false 时保持当前观察方向，只平移聚焦居中（点击事件绑定聚焦用）。 */
+  useModelFocusAngle?: boolean;
+  /** 聚焦距离倍率，>1 时离目标更远一些。 */
+  radiusScale?: number;
 };
 
 export type SceneFocusRequest = {
@@ -2569,6 +2573,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (state.runtimeMode === 'preview') return state;
       return {
         runtimeMode: 'preview',
+        // 进入运行态前清掉编辑态选区，避免遗留的选中高亮与预览内点击高亮叠加。
+        scene: state.scene.selectedEntityId
+          ? { ...state.scene, selectedEntityId: null }
+          : state.scene,
+        hierarchySelectionIds: [],
         environmentAdjustmentActive: false,
         cameraPoseSaveRequest: null,
         autoPatrolCameraRequest: null,

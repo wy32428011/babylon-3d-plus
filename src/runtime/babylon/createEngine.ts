@@ -90,6 +90,8 @@ export type BabylonFocusOptions = CameraViewTransitionOptions & {
   maxRadiusMeters?: number;
   /** 透视模式下普通模型默认使用斜上方 45°；正交模式及特殊目标保留当前观察方向。 */
   useModelFocusAngle?: boolean;
+  /** 聚焦距离倍率，>1 时比恰好容纳更远一些（点击事件聚焦默认 1.4，避免贴脸）。 */
+  radiusScale?: number;
 };
 
 export type BabylonViewport = {
@@ -251,6 +253,10 @@ export function focusArcRotateCameraViewOnBounds(
     || options?.useModelFocusAngle === false;
   const useModelFocusAngle = !preserveOrientation;
   const pose = getFocusCameraPose(camera, engine, bounds, options?.maxRadiusMeters, useModelFocusAngle);
+  const radiusScale = options?.radiusScale;
+  if (typeof radiusScale === 'number' && Number.isFinite(radiusScale) && radiusScale > 0) {
+    pose.radius *= radiusScale;
+  }
   const transitionOptions: CameraViewTransitionOptions = options
     ? {
         animate: options.animate,

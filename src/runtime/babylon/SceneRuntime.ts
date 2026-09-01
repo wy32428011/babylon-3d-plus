@@ -7,6 +7,7 @@ import {
   type AnimationGroup,
   AssetContainer,
   Color3,
+  Constants,
   CreateGreasedLine,
   DirectionalLight,
   DynamicTexture,
@@ -247,7 +248,7 @@ import {
 } from './sceneSelectionHighlight';
 import { isRuntimeModelSelectionCandidate } from './sceneRuntimeSelection';
 
-const SELECTED_MATERIAL_COLOR = '#f7d774';
+const SELECTED_MATERIAL_COLOR = '#f0a500';
 const FALLBACK_MATERIAL_COLOR = '#8ab4f8';
 const LOCATOR_EDGE_COLOR = '#19c7d4';
 const MODEL_GENERATOR_MARKER_COLOR = '#19c7d4';
@@ -260,7 +261,9 @@ const LOCATOR_COLUMN_LABEL_TEXTURE_SIZE = 128;
 const LOCATOR_COLUMN_LABEL_MIN_SIZE = 0.12;
 const LOCATOR_COLUMN_LABEL_MAX_SIZE = 0.8;
 const SLOT_HIGHLIGHT_SIZE_SCALE = 1.04;
-const SLOT_HIGHLIGHT_SURFACE_ALPHA = 0.18;
+const SLOT_HIGHLIGHT_SURFACE_ALPHA = 0.22;
+// WebGL 线宽恒为 1px，货格高亮框改用细盒体实现真实厚度（3cm）。
+const SLOT_HIGHLIGHT_EDGE_THICKNESS = 0.03;
 const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
 const CHAIN_CONVEYOR_MODEL_KEYS = new Set(['chain-conveyor', 'newchain-conveyor']);
 const CHAIN_CONVEYOR_SCRIPT_FILENAMES = new Set([
@@ -460,12 +463,19 @@ export type LocatorRuntimeEntry = {
   storageDepth: LocatorStorageDepth;
 };
 
+/** 单格高亮状态：entityId 为货格（虚拟定位线框）实体，coordinate 为业务 排-列-层。 */
+type LocatorSlotHighlightState = {
+  entityId: string;
+  coordinate: { row: number; column: number; layer: number };
+};
+
 type LocatorSlotHighlightOverlay = {
   entityId: string;
   coordinate: { row: number; column: number; layer: number };
   fillMesh: Mesh;
-  edgeLines: LinesMesh;
+  edgeFrame: TransformNode;
   material: StandardMaterial;
+  edgeMaterial: StandardMaterial;
 };
 
 /** 绑定货格渲染网格时使用的实测步距；缺省时回退货格自身 长度+间隔 公式。 */
@@ -713,8 +723,11 @@ export class SceneRuntime {
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private readonly reportedOverlappingLocatorRanges = new Set<string>();
   private telemetryPreviewActive = false;
-  private externalSlotHighlight: { entityId: string; coordinate: { row: number; column: number; layer: number } } | null = null;
-  private slotHighlightOverlay: LocatorSlotHighlightOverlay | null = null;
+  /** 本地交互（点击单元事件）产生的单格高亮，与外部搜索高亮各自独立互不覆盖。 */
+  private localSlotHighlight: LocatorSlotHighlightState | null = null;
+  private externalSlotHighlight: LocatorSlotHighlightState | null = null;
+  private localSlotHighlightOverlay: LocatorSlotHighlightOverlay | null = null;
+  private externalSlotHighlightOverlay: LocatorSlotHighlightOverlay | null = null;
   private modelArrayIdentityMode: SceneRuntimeModelArrayIdentityMode = 'device';
   private readonly reportedCargoIssues = new Set<string>();
   private outlinedModelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
@@ -1079,6 +1092,8 @@ export class SceneRuntime {
     this.autoPatrolMarkerRuntime.setPreviewActive(false);
     this.manualRoamSpawnRuntime.setPreviewActive(false);
     this.clickEventBindingRuntime.setPreviewActive(false);
+    // 点击单元产生的单格高亮属于预览交互产物，随预览结束一并清除。
+    this.setLocalSlotHighlight('', null);
     this.specializedTelemetryRuntime.disposeAllCargo();
     for (const fetchRuntime of this.locatorFetchRuntimes.values()) {
       fetchRuntime.clearAllBatches();
@@ -2100,6 +2115,7 @@ export class SceneRuntime {
 
   /** 清除发布 Viewer 的本地持久选区。 */
   clearLocalHighlight(): void {
+    this.setLocalSlotHighlight('', null);
     this.setLocalHighlightEntityIds([]);
   }
 
@@ -2114,17 +2130,35 @@ export class SceneRuntime {
     this.setExternalHighlightEntityIds([]);
   }
 
-  /** 高亮单个货格格子；coordinate 为 null 时只清除格子 overlay，不影响实体描边。 */
+  /** 高亮单个货格格子（本地交互，如点击单元事件）；coordinate 为 null 时只清除本地格子 overlay，不影响实体描边与外部高亮。 */
+  setLocalSlotHighlight(
+    entityId: string,
+    coordinate: { row: number; column: number; layer: number } | null,
+  ): void {
+    this.setSlotHighlight('local', entityId, coordinate);
+  }
+
+  /** 高亮单个货格格子（外部搜索定位）；coordinate 为 null 时只清除格子 overlay，不影响实体描边。 */
   setExternalSlotHighlight(
     entityId: string,
     coordinate: { row: number; column: number; layer: number } | null,
   ): void {
-    const previousEntityId = this.externalSlotHighlight?.entityId ?? null;
+    this.setSlotHighlight('external', entityId, coordinate);
+  }
+
+  /** 差量更新指定来源的单格高亮，并只刷新前后变化实体的表现。 */
+  private setSlotHighlight(
+    source: 'local' | 'external',
+    entityId: string,
+    coordinate: { row: number; column: number; layer: number } | null,
+  ): void {
+    const previousEntityId = (source === 'local' ? this.localSlotHighlight : this.externalSlotHighlight)?.entityId ?? null;
     const next = coordinate && entityId
       ? { entityId, coordinate: { row: coordinate.row, column: coordinate.column, layer: coordinate.layer } }
       : null;
-    this.externalSlotHighlight = next;
-    this.refreshSlotHighlightOverlay();
+    if (source === 'local') this.localSlotHighlight = next;
+    else this.externalSlotHighlight = next;
+    this.refreshSlotHighlightOverlay(source);
     if (previousEntityId && previousEntityId !== next?.entityId) this.refreshLocatorPresentation(previousEntityId);
     if (next) this.refreshLocatorPresentation(next.entityId);
   }
@@ -3053,7 +3087,9 @@ export class SceneRuntime {
   }
 
   dispose(): void {
-    this.disposeSlotHighlightOverlay();
+    this.disposeSlotHighlightOverlay('local');
+    this.disposeSlotHighlightOverlay('external');
+    this.localSlotHighlight = null;
     this.externalSlotHighlight = null;
     this.clearEntityArrayPreview();
     this.cancelFolderGroupTransforms();
@@ -3142,6 +3178,7 @@ export class SceneRuntime {
     this.selectedEntityIds.clear();
     this.localHighlightedEntityIds.clear();
     this.externalHighlightedEntityIds.clear();
+    this.localSlotHighlight = null;
     this.externalSlotHighlight = null;
     this.reportedCargoIssues.clear();
     this.outlinedModelArrayBatches.clear();
@@ -3567,12 +3604,18 @@ export class SceneRuntime {
       runtimeLocator.columnLabels = this.buildLocatorColumnLabels(entity.id, locator, cellSteps, runtimeLocator.columnLabelsRoot);
       runtimeLocator.cellSteps = cellSteps;
       runtimeLocator.signature = signature;
-      if (this.externalSlotHighlight?.entityId === entity.id) this.refreshSlotHighlightOverlay();
+      if (this.localSlotHighlight?.entityId === entity.id) this.refreshSlotHighlightOverlay('local');
+      if (this.externalSlotHighlight?.entityId === entity.id) this.refreshSlotHighlightOverlay('external');
+    } else if (
+      this.localSlotHighlight?.entityId === entity.id
+      && this.localSlotHighlightOverlay?.entityId !== entity.id
+    ) {
+      this.refreshSlotHighlightOverlay('local');
     } else if (
       this.externalSlotHighlight?.entityId === entity.id
-      && this.slotHighlightOverlay?.entityId !== entity.id
+      && this.externalSlotHighlightOverlay?.entityId !== entity.id
     ) {
-      this.refreshSlotHighlightOverlay();
+      this.refreshSlotHighlightOverlay('external');
     }
 
     runtimeLocator.fillMesh.metadata = { ...(runtimeLocator.fillMesh.metadata ?? {}), storageLocation: locatorMetadata };
@@ -5049,7 +5092,9 @@ export class SceneRuntime {
   private disposeLocator(entityId: string, locator: LocatorRuntimeEntry): void {
     this.clearEntityArrayPreviewIfSource(entityId);
     this.disposeLocatorFetchRuntime(entityId);
-    if (this.slotHighlightOverlay?.entityId === entityId) this.disposeSlotHighlightOverlay();
+    if (this.localSlotHighlightOverlay?.entityId === entityId) this.disposeSlotHighlightOverlay('local');
+    if (this.externalSlotHighlightOverlay?.entityId === entityId) this.disposeSlotHighlightOverlay('external');
+    if (this.localSlotHighlight?.entityId === entityId) this.localSlotHighlight = null;
     if (this.externalSlotHighlight?.entityId === entityId) this.externalSlotHighlight = null;
     locator.fillMesh.dispose(false, false);
     locator.edgeLines.dispose(false, false);
@@ -5490,9 +5535,11 @@ export class SceneRuntime {
       || this.isEntityHighlighted(entity.id, selectedEntityIds)
       || this.externalSlotHighlight?.entityId === entity.id;
     if (this.telemetryPreviewActive) {
-      // 发布 Viewer / 运行预览默认隐藏内置货格；只有外部搜索描边或单格 overlay 才露出线框。
+      // 发布 Viewer / 运行预览默认隐藏内置货格；外部搜索描边露出整架线框，
+      // 点击单元的单格高亮仅启用 root 供 overlay 渲染，货格自身线框在 applyLocatorInteractivity 中隐藏。
       return this.externalHighlightedEntityIds.has(entity.id)
-        || this.externalSlotHighlight?.entityId === entity.id;
+        || this.externalSlotHighlight?.entityId === entity.id
+        || this.localSlotHighlight?.entityId === entity.id;
     }
     return highlighted;
   }
@@ -5515,6 +5562,13 @@ export class SceneRuntime {
     this.applyMeshInteractivity(locator.fillMesh, entity.id);
     locator.edgeLines.isVisible = this.isEntityVisible(entity.id);
     locator.columnLabelsRoot.isVisible = locator.edgeLines.isVisible;
+    if (this.localSlotHighlight?.entityId === entity.id) {
+      // 点击单元高亮时隐藏货格自身蓝色线框/填充/列号，只呈现独立的单格 overlay。
+      locator.fillMesh.isVisible = false;
+      locator.fillMesh.isPickable = false;
+      locator.edgeLines.isVisible = false;
+      locator.columnLabelsRoot.isVisible = false;
+    }
     if (entity.components.locator?.builtInBinding) {
       locator.root.setEnabled(this.computeBuiltInSlotRenderable(entity, highlightSet));
     }
@@ -5796,22 +5850,24 @@ export class SceneRuntime {
     this.applyLocatorInteractivity(locator, entity);
   }
 
-  /** 释放外部搜索产生的单格 overlay。 */
-  private disposeSlotHighlightOverlay(): void {
-    const overlay = this.slotHighlightOverlay;
+  /** 释放指定来源产生的单格 overlay。 */
+  private disposeSlotHighlightOverlay(source: 'local' | 'external'): void {
+    const overlay = source === 'local' ? this.localSlotHighlightOverlay : this.externalSlotHighlightOverlay;
     if (!overlay) return;
     overlay.fillMesh.parent = null;
-    overlay.edgeLines.parent = null;
+    overlay.edgeFrame.parent = null;
     overlay.fillMesh.dispose(false, false);
-    overlay.edgeLines.dispose(false, false);
+    overlay.edgeFrame.dispose(false, false);
     overlay.material.dispose();
-    this.slotHighlightOverlay = null;
+    overlay.edgeMaterial.dispose();
+    if (source === 'local') this.localSlotHighlightOverlay = null;
+    else this.externalSlotHighlightOverlay = null;
   }
 
-  /** 按当前外部货格坐标重建略微放大的单格填充盒与 12 边线框。 */
-  private refreshSlotHighlightOverlay(): void {
-    const highlight = this.externalSlotHighlight;
-    this.disposeSlotHighlightOverlay();
+  /** 按指定来源当前的货格坐标重建略微放大的单格填充盒与 12 边线框。 */
+  private refreshSlotHighlightOverlay(source: 'local' | 'external'): void {
+    const highlight = source === 'local' ? this.localSlotHighlight : this.externalSlotHighlight;
+    this.disposeSlotHighlightOverlay(source);
     if (!highlight) return;
     const locator = this.locators.get(highlight.entityId);
     if (!locator || locator.root.isDisposed()) return;
@@ -5820,17 +5876,19 @@ export class SceneRuntime {
     const local = resolveLocatorCellLocalBounds(locator, boxIndex);
     if (!local) return;
 
-    const material = new StandardMaterial(`${highlight.entityId}_slotHighlightMat`, this.scene);
+    const material = new StandardMaterial(`${source}_${highlight.entityId}_slotHighlightMat`, this.scene);
     material.disableLighting = true;
     material.alpha = SLOT_HIGHLIGHT_SURFACE_ALPHA;
     const color3 = Color3.FromHexString(SELECTED_MATERIAL_COLOR);
     material.diffuseColor = color3;
     material.emissiveColor = color3;
+    // 高亮 overlay 不做深度测试，始终画在最上层不被货架/货物遮挡。
+    material.depthFunction = Constants.ALWAYS;
 
     const sizeX = local.size.x * SLOT_HIGHLIGHT_SIZE_SCALE;
     const sizeY = local.size.y * SLOT_HIGHLIGHT_SIZE_SCALE;
     const sizeZ = local.size.z * SLOT_HIGHLIGHT_SIZE_SCALE;
-    const fillMesh = MeshBuilder.CreateBox(`${highlight.entityId}_slotHighlightFill`, {
+    const fillMesh = MeshBuilder.CreateBox(`${source}_${highlight.entityId}_slotHighlightFill`, {
       width: sizeX,
       height: sizeY,
       depth: sizeZ,
@@ -5839,39 +5897,58 @@ export class SceneRuntime {
     fillMesh.position.set(local.center.x, local.center.y, local.center.z);
     fillMesh.material = material;
     fillMesh.isPickable = false;
+    fillMesh.renderingGroupId = 1;
 
     const hx = sizeX / 2;
     const hy = sizeY / 2;
     const hz = sizeZ / 2;
-    const edgeLines = MeshBuilder.CreateLineSystem(`${highlight.entityId}_slotHighlightEdges`, {
-      lines: [
-        [new Vector3(-hx, -hy, -hz), new Vector3(hx, -hy, -hz)],
-        [new Vector3(hx, -hy, -hz), new Vector3(hx, -hy, hz)],
-        [new Vector3(hx, -hy, hz), new Vector3(-hx, -hy, hz)],
-        [new Vector3(-hx, -hy, hz), new Vector3(-hx, -hy, -hz)],
-        [new Vector3(-hx, hy, -hz), new Vector3(hx, hy, -hz)],
-        [new Vector3(hx, hy, -hz), new Vector3(hx, hy, hz)],
-        [new Vector3(hx, hy, hz), new Vector3(-hx, hy, hz)],
-        [new Vector3(-hx, hy, hz), new Vector3(-hx, hy, -hz)],
-        [new Vector3(-hx, -hy, -hz), new Vector3(-hx, hy, -hz)],
-        [new Vector3(hx, -hy, -hz), new Vector3(hx, hy, -hz)],
-        [new Vector3(hx, -hy, hz), new Vector3(hx, hy, hz)],
-        [new Vector3(-hx, -hy, hz), new Vector3(-hx, hy, hz)],
-      ],
-    }, this.scene);
-    edgeLines.parent = locator.root;
-    edgeLines.position.set(local.center.x, local.center.y, local.center.z);
-    edgeLines.color = color3;
-    edgeLines.alpha = 1;
-    edgeLines.isPickable = false;
+    const t = SLOT_HIGHLIGHT_EDGE_THICKNESS;
+    const edgeMaterial = new StandardMaterial(`${source}_${highlight.entityId}_slotHighlightEdgeMat`, this.scene);
+    edgeMaterial.disableLighting = true;
+    edgeMaterial.diffuseColor = color3;
+    edgeMaterial.emissiveColor = color3;
+    edgeMaterial.depthFunction = Constants.ALWAYS;
 
-    this.slotHighlightOverlay = {
+    const edgeFrame = new TransformNode(`${source}_${highlight.entityId}_slotHighlightEdges`, this.scene);
+    edgeFrame.parent = locator.root;
+    edgeFrame.position.set(local.center.x, local.center.y, local.center.z);
+    const edgeSpecs: { size: [number, number, number]; center: [number, number, number] }[] = [
+      { size: [sizeX, t, t], center: [0, -hy, -hz] },
+      { size: [sizeX, t, t], center: [0, -hy, hz] },
+      { size: [sizeX, t, t], center: [0, hy, -hz] },
+      { size: [sizeX, t, t], center: [0, hy, hz] },
+      { size: [t, sizeY, t], center: [-hx, 0, -hz] },
+      { size: [t, sizeY, t], center: [hx, 0, -hz] },
+      { size: [t, sizeY, t], center: [-hx, 0, hz] },
+      { size: [t, sizeY, t], center: [hx, 0, hz] },
+      { size: [t, t, sizeZ], center: [-hx, -hy, 0] },
+      { size: [t, t, sizeZ], center: [hx, -hy, 0] },
+      { size: [t, t, sizeZ], center: [-hx, hy, 0] },
+      { size: [t, t, sizeZ], center: [hx, hy, 0] },
+    ];
+    edgeSpecs.forEach((spec, index) => {
+      const edge = MeshBuilder.CreateBox(`${source}_${highlight.entityId}_slotHighlightEdge_${index}`, {
+        width: spec.size[0],
+        height: spec.size[1],
+        depth: spec.size[2],
+      }, this.scene);
+      edge.parent = edgeFrame;
+      edge.position.set(spec.center[0], spec.center[1], spec.center[2]);
+      edge.material = edgeMaterial;
+      edge.isPickable = false;
+      edge.renderingGroupId = 1;
+    });
+
+    const overlay: LocatorSlotHighlightOverlay = {
       entityId: highlight.entityId,
       coordinate: highlight.coordinate,
       fillMesh,
-      edgeLines,
+      edgeFrame,
       material,
+      edgeMaterial,
     };
+    if (source === 'local') this.localSlotHighlightOverlay = overlay;
+    else this.externalSlotHighlightOverlay = overlay;
   }
 
   /** 根据选中状态更新 locator 填充面与边线颜色；列号标签仅在选中高亮且非运行预览时启用。 */

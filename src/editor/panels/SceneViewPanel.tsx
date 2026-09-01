@@ -23,7 +23,12 @@ import {
 } from '../../shared/sceneModelSelectionPointer';
 import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
 import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
-import { CLICK_EVENT_FOCUS_DURATION_MS, resolveClickEventBindingClick } from '../model/clickEventBinding';
+import {
+  CLICK_EVENT_FOCUS_DURATION_MS,
+  CLICK_EVENT_FOCUS_RADIUS_SCALE,
+  resolveClickEventBindingClick,
+  type ClickEventBindingPickedCell,
+} from '../model/clickEventBinding';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import { createEntityGroupRotationDeltaMatrix } from '../../runtime/babylon/EntityGroupRotationPreview';
@@ -740,6 +745,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           event.currentTarget,
         ) ?? null;
     // 货架被点中时顺带反解内置货格命中格，输出 排-列-层 方便对照泊位；不改变任何选中行为。
+    let pickedCell: ClickEventBindingPickedCell | null = null;
     if (pickedEntityId) {
       const state = useEditorStore.getState();
       const locatorEntityId = findBuiltInSlotEntityId(state.scene, pickedEntityId);
@@ -751,7 +757,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
             locatorEntityId,
           ) ?? null
         : null;
-      if (cell) {
+      if (locatorEntityId && cell) {
+        pickedCell = { locatorEntityId, row: cell.row, column: cell.column, layer: cell.layer };
         const host = state.scene.entities[pickedEntityId];
         const assetCode = host?.components.modelAsset?.assetCode;
         const hostLabel = `${host?.name ?? pickedEntityId}${assetCode ? `（${assetCode}）` : ''}`;
@@ -759,12 +766,28 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       }
     }
     // 运行预览下场景存在已注册设备类型的点击事件绑定时点击行为全接管：
-    // 命中注册设备按事件效果执行，点未注册模型无效果，点空白清除选中；Ctrl 多选同样被吞。
+    // 命中注册设备按事件效果执行（点击单元优先于点击，命中货格只高亮单格线框），
+    // 点未注册模型无效果，点空白清除选中与单格高亮；Ctrl 多选同样被吞。
     if (isRuntimePreview) {
       const state = useEditorStore.getState();
-      const resolution = resolveClickEventBindingClick(state.scene, pickedEntityId);
+      const resolution = resolveClickEventBindingClick(state.scene, pickedEntityId, pickedCell);
       if (resolution.kind !== 'pass-through') {
-        if (resolution.kind === 'trigger') {
+        if (resolution.kind === 'trigger-cell') {
+          state.setEnvironmentAdjustmentActive(false);
+          if (resolution.effects.includes('highlight')) {
+            runtimeRef.current?.setLocalSlotHighlight(resolution.locatorEntityId, resolution.cell);
+          } else {
+            runtimeRef.current?.setLocalSlotHighlight('', null);
+          }
+          if (resolution.effects.includes('focus')) {
+            const bounds = runtimeRef.current?.getLocatorCellWorldBounds(resolution.locatorEntityId, resolution.cell);
+            if (bounds) {
+              manualRoamRef.current?.setEnabled(false);
+              viewportRef.current?.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS, useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE });
+            }
+          }
+        } else if (resolution.kind === 'trigger') {
+          runtimeRef.current?.setLocalSlotHighlight('', null);
           state.setEnvironmentAdjustmentActive(false);
           if (resolution.effects.includes('highlight')) {
             state.selectEntity(resolution.entityId);
@@ -773,9 +796,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
             state.requestSceneFocusForSelection([resolution.entityId], {
               animate: true,
               durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
+              useModelFocusAngle: false,
+              radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE,
             });
           }
         } else if (resolution.kind === 'clear') {
+          runtimeRef.current?.setLocalSlotHighlight('', null);
           state.selectEntity(null);
         }
         return;

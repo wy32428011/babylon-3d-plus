@@ -24,12 +24,15 @@ export const CLICK_EVENT_BINDING_MAX_EVENTS = 16;
 /** 绑定触发的聚焦动画时长（毫秒），比相机默认 200ms 更有推进感。 */
 export const CLICK_EVENT_FOCUS_DURATION_MS = 600;
 
+/** 点击事件聚焦距离倍率：恰好容纳目标的基础上再退远约一格，避免相机贴脸。 */
+export const CLICK_EVENT_FOCUS_RADIUS_SCALE = 1.4;
+
 const AUTHORIZED_CLICK_EVENT_ASSET_URL_PREFIX = 'editor-asset://local/';
 const CLICK_EVENT_BINDING_TEXT_MAX_LENGTH = 256;
 const CLICK_EVENT_BINDING_ID_MAX_LENGTH = 128;
 
 const CLICK_EVENT_BINDING_EVENT_TYPES: readonly ClickEventBindingEventType[] = ['click', 'click-cell'];
-const CLICK_EVENT_BINDING_EFFECTS: readonly ClickEventBindingEffect[] = ['highlight', 'focus'];
+const CLICK_EVENT_BINDING_EFFECTS: readonly ClickEventBindingEffect[] = ['highlight', 'focus', 'show-chart'];
 
 /** 判断值是否为普通 JSON 对象，避免带原型对象进入场景状态。 */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -190,22 +193,50 @@ export function findClickEventBindingForEntity(
   return null;
 }
 
+/** 命中货格反解结果：locatorEntityId 为内置货格（虚拟定位线框）实体，坐标为业务 排-列-层。 */
+export type ClickEventBindingPickedCell = {
+  locatorEntityId: string;
+  row: number;
+  column: number;
+  layer: number;
+};
+
 /** 运行/发布态点击决策：场景存在已注册设备类型的绑定时点击行为全接管。 */
 export type ClickEventBindingClickResolution =
   | { kind: 'pass-through' }
   | { kind: 'clear' }
   | { kind: 'ignore' }
-  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[] };
+  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[] }
+  | {
+    kind: 'trigger-cell';
+    entityId: string;
+    locatorEntityId: string;
+    cell: { row: number; column: number; layer: number };
+    effects: ClickEventBindingEffect[];
+  };
+
+/**
+ * 只有货架类宿主的内置货格才算可点击单元：其绑定声明了列+层维度映射（多格货位）；
+ * conveyor 类模型的站台（如 enablePlatform）也是内置绑定但只有单一台面，不算单元。
+ */
+function isShelfCellLocator(scene: SceneDocument, locatorEntityId: string): boolean {
+  const hostEntityId = scene.entities[locatorEntityId]?.components.locator?.builtInBinding?.hostEntityId;
+  if (!hostEntityId) return false;
+  const config = scene.entities[hostEntityId]?.components.modelAsset?.builtInSlotBindingConfig;
+  return Boolean(config?.dimensionMapping.columns && config.dimensionMapping.layers);
+}
 
 /**
  * 判定一次运行/发布态点击的行为：
  * 场景无有效注册（无绑定或全部空槽）→ pass-through 走默认点击；
  * 接管中点空白 → clear 清除高亮；点未注册模型 → ignore 无任何效果；
- * 命中注册设备且配了 click 事件 → trigger 按事件效果执行。
+ * 命中注册设备时点击单元优先：配了 click-cell 且反解到货架类货格 → trigger-cell 按事件效果执行；
+ * 否则配了 click → trigger 按事件效果执行；两者都没配 → ignore。
  */
 export function resolveClickEventBindingClick(
   scene: SceneDocument,
   pickedEntityId: string | null,
+  pickedCell?: ClickEventBindingPickedCell | null,
 ): ClickEventBindingClickResolution {
   const takeoverActive = Object.values(scene.entities).some((entity) => (
     entity.components.clickEventBinding?.deviceSlots.some((slot) => slot.deviceType !== null) ?? false
@@ -214,7 +245,20 @@ export function resolveClickEventBindingClick(
   if (!pickedEntityId) return { kind: 'clear' };
 
   const hit = findClickEventBindingForEntity(scene, pickedEntityId);
-  const matchedEvent = hit?.component.events.find((event) => event.eventType === 'click');
-  if (!hit || !matchedEvent) return { kind: 'ignore' };
+  if (!hit) return { kind: 'ignore' };
+
+  const cellEvent = hit.component.events.find((event) => event.eventType === 'click-cell');
+  if (cellEvent && pickedCell && isShelfCellLocator(scene, pickedCell.locatorEntityId)) {
+    return {
+      kind: 'trigger-cell',
+      entityId: pickedEntityId,
+      locatorEntityId: pickedCell.locatorEntityId,
+      cell: { row: pickedCell.row, column: pickedCell.column, layer: pickedCell.layer },
+      effects: cellEvent.effects,
+    };
+  }
+
+  const matchedEvent = hit.component.events.find((event) => event.eventType === 'click');
+  if (!matchedEvent) return { kind: 'ignore' };
   return { kind: 'trigger', entityId: pickedEntityId, effects: matchedEvent.effects };
 }
