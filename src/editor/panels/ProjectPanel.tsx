@@ -60,6 +60,12 @@ import {
   createModelDeviceTypeOptions,
   matchesModelDeviceType,
 } from '../assets/modelLibraryDeviceTypeFilter';
+import {
+  createDataPlatformChartLibraryItems,
+  isDataPlatformChartLibraryItem,
+  matchesDataPlatformChartLibrarySearch,
+  type DataPlatformChartAssetEntry,
+} from '../assets/dataPlatformChartLibrary';
 import { setSyncedImageAssets } from '../../assets/syncedImageAssets';
 import { useEditorStore } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
@@ -132,6 +138,31 @@ type DataPlatformImageSyncApi = {
   retryDataPlatformImageSync?: () => Promise<boolean>;
 };
 
+type DataPlatformChartLibrarySnapshot = {
+  contextKey: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  syncedAt: string | null;
+  charts: DataPlatformChartAssetEntry[];
+};
+
+type DataPlatformChartSyncProgress = {
+  runId: string;
+  contextKey: string;
+  phase: 'querying' | 'parsing' | 'promoting' | 'completed' | 'failed';
+  completed: number;
+  total: number;
+  message: string;
+  error: string | null;
+};
+
+type DataPlatformChartSyncApi = {
+  listDataPlatformCharts?: () => Promise<DataPlatformChartLibrarySnapshot>;
+  syncDataPlatformCharts?: () => Promise<boolean>;
+  retryDataPlatformChartSync?: () => Promise<boolean>;
+  onDataPlatformChartSyncProgress?: (listener: (progress: DataPlatformChartSyncProgress) => void) => () => void;
+};
+
 type DataPlatformSkyboxSyncProgress = SkyboxSyncProgress;
 
 type DataPlatformSkyboxSyncApi = {
@@ -177,6 +208,18 @@ const DATA_PLATFORM_IMAGE_SYNC_PHASE_LABELS: Record<DataPlatformImageSyncProgres
 
 function getDataPlatformImageSyncApi(): DataPlatformImageSyncApi {
   return (window.editorApi ?? {}) as DataPlatformImageSyncApi;
+}
+
+const DATA_PLATFORM_CHART_SYNC_PHASE_LABELS: Record<DataPlatformChartSyncProgress['phase'], string> = {
+  querying: '查询项目大屏',
+  parsing: '整理大屏资源',
+  promoting: '写入大屏资源',
+  completed: '大屏同步完成',
+  failed: '大屏同步失败',
+};
+
+function getDataPlatformChartSyncApi(): DataPlatformChartSyncApi {
+  return (window.editorApi ?? {}) as DataPlatformChartSyncApi;
 }
 
 const DATA_PLATFORM_SKYBOX_SYNC_PHASE_LABELS: Record<DataPlatformSkyboxSyncProgress['phase'], string> = {
@@ -227,6 +270,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const lastSceneRefreshEnvironmentSyncRunIdRef = useRef<string | null>(null);
   const imageSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshImageSyncRunIdRef = useRef<string | null>(null);
+  const chartLibraryLoadRequestRef = useRef(0);
+  const chartSyncContextKeyRef = useRef<string | null>(null);
+  const autoChartSyncContextKeyRef = useRef<string | null>(null);
+  const chartSyncCompletedDismissTimerRef = useRef<number | null>(null);
+  const lastChartSyncReloadRunIdRef = useRef<string | null>(null);
   const initialProjectAssetsLoadPromiseRef = useRef<Promise<ProjectAssetsLoadResult> | null>(null);
   const waitForInitialProjectAssetsLoad = useCallback(async (
     expectedSceneSessionId: string,
@@ -251,6 +299,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const skyboxSyncContextKey = skyboxSyncContextBinding.sceneSessionId === sceneSessionId
     ? skyboxSyncContextBinding.key
     : null;
+  const chartSyncContextKey = skyboxSyncContextKey;
+  chartSyncContextKeyRef.current = chartSyncContextKey;
   const [importingLibraryKey, setImportingLibraryKey] = useState<ImportableProjectLibraryKey | null>(null);
   const [isLoadingProjectAssets, setIsLoadingProjectAssets] = useState(false);
   const [libraryStatuses, setLibraryStatuses] = useState<LibraryStatusMap>({ model: null, environment: null, skybox: null });
@@ -269,6 +319,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const [syncedImages, setSyncedImages] = useState<SyncedImageAssetEntry[]>([]);
   const [imageSyncProgress, setImageSyncProgress] = useState<DataPlatformImageSyncProgress | null>(null);
   const [isRetryingImageSync, setIsRetryingImageSync] = useState(false);
+  const [syncedCharts, setSyncedCharts] = useState<DataPlatformChartAssetEntry[]>([]);
+  const [isLoadingSyncedCharts, setIsLoadingSyncedCharts] = useState(false);
+  const [chartSyncProgress, setChartSyncProgress] = useState<DataPlatformChartSyncProgress | null>(null);
+  const [isStartingChartSync, setIsStartingChartSync] = useState(false);
+  const [isRetryingChartSync, setIsRetryingChartSync] = useState(false);
 
   const modelAssets = useMemo(
     () => projectAssets.filter((asset) => asset.libraryKind === 'model'),
@@ -325,6 +380,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
       return createSkyboxLibraryItems(skyboxAssets);
     }
 
+    if (activeLibrary.key === 'chart') {
+      return createDataPlatformChartLibraryItems(syncedCharts);
+    }
+
     if (activeLibrary.key === 'image') {
       return [
         ...createImageLibraryItems(),
@@ -333,7 +392,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
 
     return activeLibrary.items;
-  }, [activeLibrary, environmentAssets, modelAssets, skyboxAssets, syncedImages]);
+  }, [activeLibrary, environmentAssets, modelAssets, skyboxAssets, syncedCharts, syncedImages]);
 
   const normalizedLibraryFilter = libraryFilterText.trim().toLowerCase();
   const hasActiveLibraryFilter = Boolean(normalizedLibraryFilter)
@@ -343,7 +402,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
     return activeItems.filter((item) => {
       const matchesName = !normalizedLibraryFilter
-        || item.name.toLowerCase().includes(normalizedLibraryFilter)
+        || (isDataPlatformChartLibraryItem(item)
+          ? matchesDataPlatformChartLibrarySearch(item, normalizedLibraryFilter)
+          : item.name.toLowerCase().includes(normalizedLibraryFilter))
         || (isSyncedImageProjectLibraryItem(item)
           && `${item.syncedImage.iconKey} ${item.syncedImage.category ?? ''}`
             .toLowerCase()
@@ -555,18 +616,65 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
   }, [pushLog]);
 
+  /** 只接受当前场景和绑定上下文的大屏快照，避免项目切换后的迟到结果污染列表。 */
+  const loadDataPlatformCharts = useCallback(async (
+    expectedSceneSessionId: string,
+    expectedContextKey: string,
+  ): Promise<boolean> => {
+    const api = getDataPlatformChartSyncApi();
+    if (!api.listDataPlatformCharts) return false;
+
+    const requestId = chartLibraryLoadRequestRef.current + 1;
+    chartLibraryLoadRequestRef.current = requestId;
+    setIsLoadingSyncedCharts(true);
+    try {
+      const snapshot = await api.listDataPlatformCharts();
+      if (
+        requestId !== chartLibraryLoadRequestRef.current
+        || sceneSessionIdRef.current !== expectedSceneSessionId
+        || chartSyncContextKeyRef.current !== expectedContextKey
+      ) return false;
+      if (snapshot.contextKey !== expectedContextKey || snapshot.projectId === null) {
+        pushLog('加载数据中台大屏资源失败：返回结果与当前绑定项目不匹配。');
+        return false;
+      }
+      setSyncedCharts(snapshot.charts);
+      return true;
+    } catch (error) {
+      if (
+        requestId !== chartLibraryLoadRequestRef.current
+        || sceneSessionIdRef.current !== expectedSceneSessionId
+        || chartSyncContextKeyRef.current !== expectedContextKey
+      ) return false;
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`加载数据中台大屏资源失败：${message}`);
+      return false;
+    } finally {
+      if (requestId === chartLibraryLoadRequestRef.current) setIsLoadingSyncedCharts(false);
+    }
+  }, [pushLog]);
+
   useEffect(() => {
     let active = true;
     beginScenePreparation(sceneSessionId);
     skipSceneModelSync(sceneSessionId, null);
     lastSceneRefreshModelSyncRunIdRef.current = null;
     lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
+    lastChartSyncReloadRunIdRef.current = null;
+    chartLibraryLoadRequestRef.current += 1;
+    chartSyncContextKeyRef.current = null;
+    autoChartSyncContextKeyRef.current = null;
     setIsLoadingProjectAssets(false);
     setProjectRoot(null);
     setSkyboxSyncContextBinding({ sceneSessionId, key: null });
     setProjectAssets([]);
     setSkyboxAssets([]);
     setOrphanedSkyboxAssets([]);
+    setSyncedCharts([]);
+    setIsLoadingSyncedCharts(false);
+    setChartSyncProgress(null);
+    setIsStartingChartSync(false);
+    setIsRetryingChartSync(false);
     const refreshStartupEnvironment = useEditorStore.getState().environmentStartupRelinkSessionId === sceneSessionId;
     const refreshId = crypto.randomUUID();
     beginSceneModelAssetRefresh(sceneSessionId, refreshId);
@@ -593,6 +701,32 @@ export function ProjectPanel(props: ProjectPanelProps) {
       projectAssetsLoadRequestRef.current += 1;
     };
   }, [loadProjectAssets, loadSyncedImages, sceneSessionId]);
+
+  useEffect(() => {
+    const expectedContextKey = chartSyncContextKey;
+    chartLibraryLoadRequestRef.current += 1;
+    lastChartSyncReloadRunIdRef.current = null;
+    setSyncedCharts([]);
+    setIsLoadingSyncedCharts(false);
+    setChartSyncProgress(null);
+    setIsStartingChartSync(false);
+    setIsRetryingChartSync(false);
+    if (!expectedContextKey) autoChartSyncContextKeyRef.current = null;
+    if (!expectedContextKey) return;
+    void loadDataPlatformCharts(sceneSessionId, expectedContextKey);
+    if (props.readOnly || autoChartSyncContextKeyRef.current === expectedContextKey) return;
+    autoChartSyncContextKeyRef.current = expectedContextKey;
+    const api = getDataPlatformChartSyncApi();
+    if (!api.syncDataPlatformCharts) return;
+    void api.syncDataPlatformCharts().catch((error: unknown) => {
+      if (
+        sceneSessionIdRef.current !== sceneSessionId
+        || chartSyncContextKeyRef.current !== expectedContextKey
+      ) return;
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`自动同步数据中台大屏失败：${message}`);
+    });
+  }, [chartSyncContextKey, loadDataPlatformCharts, props.readOnly, pushLog, sceneSessionId]);
 
   useEffect(() => {
     const dataPlatformModelSyncApi = getDataPlatformModelSyncApi();
@@ -822,6 +956,46 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }, [loadSyncedImages, pushLog]);
 
   useEffect(() => {
+    const api = getDataPlatformChartSyncApi();
+    if (!api.onDataPlatformChartSyncProgress) return undefined;
+
+    const clearCompletedDismissTimer = () => {
+      if (chartSyncCompletedDismissTimerRef.current === null) return;
+      window.clearTimeout(chartSyncCompletedDismissTimerRef.current);
+      chartSyncCompletedDismissTimerRef.current = null;
+    };
+    const unsubscribe = api.onDataPlatformChartSyncProgress((progress) => {
+      if (!chartSyncContextKeyRef.current || progress.contextKey !== chartSyncContextKeyRef.current) return;
+      clearCompletedDismissTimer();
+      setChartSyncProgress(progress);
+      const phaseLabel = DATA_PLATFORM_CHART_SYNC_PHASE_LABELS[progress.phase];
+      const countLabel = progress.total > 0 ? `（${progress.completed}/${progress.total}）` : '';
+      const detail = progress.error || progress.message;
+      pushLog(`数据中台大屏同步：${phaseLabel}${countLabel}${detail ? `：${detail}` : ''}`);
+
+      if (progress.phase === 'completed') {
+        const expectedSceneSessionId = sceneSessionIdRef.current;
+        const expectedContextKey = progress.contextKey;
+        if (lastChartSyncReloadRunIdRef.current !== progress.runId) {
+          lastChartSyncReloadRunIdRef.current = progress.runId;
+          void loadDataPlatformCharts(expectedSceneSessionId, expectedContextKey);
+        }
+        chartSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
+          chartSyncCompletedDismissTimerRef.current = null;
+          setChartSyncProgress((current) =>
+            current?.runId === progress.runId && current.phase === 'completed' ? null : current,
+          );
+        }, 2200);
+      }
+    });
+
+    return () => {
+      clearCompletedDismissTimer();
+      unsubscribe();
+    };
+  }, [chartSyncContextKey, loadDataPlatformCharts, pushLog]);
+
+  useEffect(() => {
     if (!projectAssetFocusRequest) return;
 
     const matchedAsset = modelAssets.find((asset) =>
@@ -980,6 +1154,88 @@ export function ProjectPanel(props: ProjectPanelProps) {
     if (imageSyncProgress?.phase !== 'failed') return;
     setIsRetryingImageSync(false);
     setImageSyncProgress(null);
+  }
+
+  async function handleSyncDataPlatformCharts(): Promise<void> {
+    const expectedSceneSessionId = sceneSessionIdRef.current;
+    const expectedContextKey = chartSyncContextKeyRef.current;
+    if (props.readOnly || !expectedContextKey) return;
+    const api = getDataPlatformChartSyncApi();
+    if (!api.syncDataPlatformCharts) {
+      pushLog('同步数据中台大屏需要 Electron 桌面环境。');
+      return;
+    }
+
+    setIsStartingChartSync(true);
+    try {
+      const started = await api.syncDataPlatformCharts();
+      if (
+        sceneSessionIdRef.current !== expectedSceneSessionId
+        || chartSyncContextKeyRef.current !== expectedContextKey
+      ) return;
+      if (!started) pushLog('数据中台大屏同步未能启动，请确认当前工程已绑定数据中台项目。');
+    } catch (error) {
+      if (
+        sceneSessionIdRef.current !== expectedSceneSessionId
+        || chartSyncContextKeyRef.current !== expectedContextKey
+      ) return;
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`启动数据中台大屏同步失败：${message}`);
+    } finally {
+      if (
+        sceneSessionIdRef.current === expectedSceneSessionId
+        && chartSyncContextKeyRef.current === expectedContextKey
+      ) setIsStartingChartSync(false);
+    }
+  }
+
+  async function handleRetryDataPlatformChartSync(): Promise<void> {
+    const expectedSceneSessionId = sceneSessionIdRef.current;
+    const expectedContextKey = chartSyncContextKeyRef.current;
+    if (
+      props.readOnly
+      || chartSyncProgress?.phase !== 'failed'
+      || chartSyncProgress.contextKey !== expectedContextKey
+    ) return;
+    const api = getDataPlatformChartSyncApi();
+    if (!api.retryDataPlatformChartSync) {
+      pushLog('重试数据中台大屏同步需要 Electron 桌面环境。');
+      return;
+    }
+
+    setIsRetryingChartSync(true);
+    try {
+      const retryStarted = await api.retryDataPlatformChartSync();
+      if (
+        sceneSessionIdRef.current !== expectedSceneSessionId
+        || chartSyncContextKeyRef.current !== expectedContextKey
+      ) return;
+      setChartSyncProgress({
+        ...chartSyncProgress,
+        phase: retryStarted ? 'querying' : 'failed',
+        message: retryStarted ? '已提交重试，正在重新查询项目大屏...' : '当前没有可重试的大屏同步任务。',
+        error: retryStarted ? null : '当前没有可重试的大屏同步任务。',
+      });
+    } catch (error) {
+      if (
+        sceneSessionIdRef.current !== expectedSceneSessionId
+        || chartSyncContextKeyRef.current !== expectedContextKey
+      ) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setChartSyncProgress({ ...chartSyncProgress, error: message });
+      pushLog(`重试数据中台大屏同步失败：${message}`);
+    } finally {
+      if (
+        sceneSessionIdRef.current === expectedSceneSessionId
+        && chartSyncContextKeyRef.current === expectedContextKey
+      ) setIsRetryingChartSync(false);
+    }
+  }
+
+  function handleDismissDataPlatformChartSyncFailure(): void {
+    if (chartSyncProgress?.phase !== 'failed') return;
+    setIsRetryingChartSync(false);
+    setChartSyncProgress(null);
   }
 
   async function handleImportModelFolder(): Promise<void> {
@@ -1183,6 +1439,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   function handleResourceCardClick(item: ProjectLibraryItem): void {
     if (props.readOnly) return;
+    if (isDataPlatformChartLibraryItem(item)) return;
 
     if (isBuiltInProjectLibraryItem(item)) {
       if (item.builtIn.kind === 'auto-patrol') {
@@ -1247,6 +1504,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   function handleResourceCardDragStart(event: DragEvent<HTMLButtonElement>, item: ProjectLibraryItem): void {
     if (props.readOnly) {
+      event.preventDefault();
+      return;
+    }
+
+    if (isDataPlatformChartLibraryItem(item)) {
       event.preventDefault();
       return;
     }
@@ -1361,6 +1623,16 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const isImageSyncActive = imageSyncProgress !== null
     && imageSyncProgress.phase !== 'completed'
     && imageSyncProgress.phase !== 'failed';
+  const chartSyncPhaseLabel = chartSyncProgress
+    ? DATA_PLATFORM_CHART_SYNC_PHASE_LABELS[chartSyncProgress.phase]
+    : null;
+  const chartSyncCountLabel = chartSyncProgress && chartSyncProgress.total > 0
+    ? `${chartSyncProgress.completed}/${chartSyncProgress.total}`
+    : null;
+  const chartSyncMessage = chartSyncProgress?.error || chartSyncProgress?.message || '等待大屏同步进度...';
+  const isChartSyncActive = chartSyncProgress !== null
+    && chartSyncProgress.phase !== 'completed'
+    && chartSyncProgress.phase !== 'failed';
 
   return (
     <section className="panel project-library" aria-label="Project 资源库">
@@ -1445,6 +1717,16 @@ export function ProjectPanel(props: ProjectPanelProps) {
             {isStartingSkyboxSync ? '启动同步...' : isSkyboxSyncActive ? '同步中...' : '同步数据中台天空盒'}
           </button>
         ) : null}
+        {activeLibrary.key === 'chart' ? (
+          <button
+            className="library-import-button"
+            disabled={props.readOnly || !chartSyncContextKey || isStartingChartSync || isChartSyncActive || isRetryingChartSync}
+            onClick={() => void handleSyncDataPlatformCharts()}
+            type="button"
+          >
+            {isStartingChartSync ? '启动同步...' : isChartSyncActive ? '同步中...' : '同步数据中台大屏'}
+          </button>
+        ) : null}
         {activeLibrary.key === 'image' ? (
           <button
             className="library-import-button"
@@ -1473,7 +1755,16 @@ export function ProjectPanel(props: ProjectPanelProps) {
         {activeLibrary.key === 'skybox' && skyboxAssets.length === 0 ? (
           <p className="library-empty-state">请先导入 HDR 或 EXR 天空盒</p>
         ) : null}
-        {filteredItems.length === 0 && hasActiveLibraryFilter ? (
+        {activeLibrary.key === 'chart' && !chartSyncContextKey ? (
+          <p className="library-empty-state">当前工程未绑定数据中台项目</p>
+        ) : null}
+        {activeLibrary.key === 'chart' && chartSyncContextKey && isLoadingSyncedCharts && syncedCharts.length === 0 ? (
+          <p className="library-empty-state">正在加载当前绑定项目的大屏...</p>
+        ) : null}
+        {activeLibrary.key === 'chart' && chartSyncContextKey && !isLoadingSyncedCharts && syncedCharts.length === 0 && !hasActiveLibraryFilter ? (
+          <p className="library-empty-state">当前绑定项目暂无可同步的大屏</p>
+        ) : null}
+        {activeItems.length > 0 && filteredItems.length === 0 && hasActiveLibraryFilter ? (
           <p className="library-empty-state">未找到符合当前筛选条件的资源</p>
         ) : null}
         {filteredItems.map((item) => {
@@ -1482,7 +1773,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
           const isImportedAsset = isImportedProjectLibraryItem(item);
           const isEnvironmentLibrary = activeLibrary.key === 'environment';
           const isSyncedImage = isSyncedImageProjectLibraryItem(item);
-          const isActionableItem = (!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset;
+          const isSyncedChart = isDataPlatformChartLibraryItem(item);
+          const isActionableItem = !isSyncedChart
+            && ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset);
 
           return (
             <ResourceCard
@@ -1505,6 +1798,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
               title={
                 isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`
+                  : isSyncedChart
+                    ? `同步自数据中台的大屏：${item.name}`
                   : isBuiltInImage || isSyncedImage
                     ? `拖拽到模型 texture 属性：${item.name}`
                     : isImportedAsset
@@ -1561,6 +1856,35 @@ export function ProjectPanel(props: ProjectPanelProps) {
                 aria-label="关闭天空盒同步失败提示"
                 className="library-sync-status-close-button"
                 onClick={handleDismissDataPlatformSkyboxSyncFailure}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {activeLibrary.key === 'chart' && chartSyncProgress ? (
+        <div className={`library-sync-status library-sync-status-${chartSyncProgress.phase}`} role="status" aria-live="polite">
+          <div className="library-sync-status-heading">
+            <strong>{chartSyncPhaseLabel}</strong>
+            {chartSyncCountLabel ? <span>{chartSyncCountLabel}</span> : null}
+          </div>
+          <p>{chartSyncMessage}</p>
+          {chartSyncProgress.phase === 'failed' ? (
+            <div className="library-sync-status-actions">
+              <button
+                disabled={props.readOnly || !chartSyncContextKey || isRetryingChartSync}
+                onClick={() => void handleRetryDataPlatformChartSync()}
+                type="button"
+              >
+                {isRetryingChartSync ? '重试中...' : '重试大屏同步'}
+              </button>
+              <button
+                aria-label="关闭大屏同步失败提示"
+                className="library-sync-status-close-button"
+                onClick={handleDismissDataPlatformChartSyncFailure}
                 type="button"
               >
                 关闭

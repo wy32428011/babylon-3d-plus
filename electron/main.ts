@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
 import { registerDataPlatformIpc } from './ipc/dataPlatformIpc.js';
+import { disposeDataPlatformChartSync } from './ipc/dataPlatformChartSync.js';
 import { findDataPlatformDeepLink, parseDataPlatformDeepLink, type DataPlatformDeepLink } from './deepLink.js';
 import { disposeDataPlatformProjectTasks } from './ipc/dataPlatformProjectService.js';
 import { disposeAllDeploymentExportTasks, registerDeploymentExportIpc } from './ipc/deploymentExportIpc.js';
@@ -271,6 +272,7 @@ app.on('before-quit', (event) => {
   disposeAllMqttIpcClients();
   void Promise.allSettled([
     disposeAllDigitalTwinPublishTasks(),
+    disposeDataPlatformChartSync(),
     disposeDataPlatformProjectTasks(),
   ]).then((results) => {
     for (const result of results) {

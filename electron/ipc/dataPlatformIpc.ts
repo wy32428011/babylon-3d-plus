@@ -36,6 +36,15 @@ import {
   syncDataPlatformSkyboxesForWorkspace,
   getCurrentDataPlatformImageSyncProgress,
 } from './dataPlatformProjectService.js';
+import {
+  clearDataPlatformChartSyncRetryContext,
+  getCurrentDataPlatformChartSyncProgress,
+  listCurrentDataPlatformCharts,
+  retryDataPlatformChartSync,
+  startDataPlatformChartSync,
+  type DataPlatformChartLibrarySnapshot,
+  type DataPlatformChartSyncProgress,
+} from './dataPlatformChartSync.js';
 import { requestDataPlatformJson } from './dataPlatformTransfer.js';
 
 const DATA_PLATFORM_CONFIG_FILE = 'data-platform-config.json';
@@ -86,6 +95,7 @@ export function registerDataPlatformIpc(): void {
       trustedProjectsById.clear();
       trustedProjectsBaseUrl = '';
       clearDataPlatformProjectServiceRetryContext();
+      clearDataPlatformChartSyncRetryContext();
       return config;
     },
   );
@@ -98,6 +108,7 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle('data-platform:resetWorkspace', async (): Promise<DataPlatformConfig> => {
     const config = await resetDataPlatformWorkspace();
     clearDataPlatformProjectServiceRetryContext();
+    clearDataPlatformChartSyncRetryContext();
     return config;
   });
 
@@ -215,6 +226,24 @@ export function registerDataPlatformIpc(): void {
       if (!config.baseUrl) return [];
       return listSyncedImagesForWorkspace(config.workspaceRoot);
     },
+  );
+
+  ipcMain.handle('data-platform:syncCharts', async (): Promise<boolean> => {
+    return startDataPlatformChartSync();
+  });
+
+  ipcMain.handle('data-platform:retryChartSync', async (): Promise<boolean> => {
+    return retryDataPlatformChartSync();
+  });
+
+  ipcMain.handle(
+    'data-platform:getChartLibrary',
+    async (): Promise<DataPlatformChartLibrarySnapshot> => listCurrentDataPlatformCharts(),
+  );
+
+  ipcMain.handle(
+    'data-platform:getChartSyncProgress',
+    async (): Promise<DataPlatformChartSyncProgress | null> => getCurrentDataPlatformChartSyncProgress(),
   );
 }
 
@@ -350,6 +379,7 @@ async function selectDataPlatformWorkspace(): Promise<DataPlatformWorkspaceSelec
     customWorkspaceRoot: workspaceRoot,
   });
   clearDataPlatformProjectServiceRetryContext();
+  clearDataPlatformChartSyncRetryContext();
   return { canceled: false, config };
 }
 
