@@ -66,6 +66,7 @@ import {
   matchesDataPlatformChartLibrarySearch,
   type DataPlatformChartAssetEntry,
 } from '../assets/dataPlatformChartLibrary';
+import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE } from '../assets/dataPlatformScreenDrag';
 import { setSyncedImageAssets } from '../../assets/syncedImageAssets';
 import { useEditorStore } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
@@ -255,6 +256,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const createAutoPatrol = useEditorStore((state) => state.createAutoPatrol);
   const createManualRoamSpawn = useEditorStore((state) => state.createManualRoamSpawn);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
+  const createChartMarker = useEditorStore((state) => state.createChartMarker);
   const createClickEventBinding = useEditorStore((state) => state.createClickEventBinding);
   const projectAssetFocusRequest = useEditorStore((state) => state.projectAssetFocusRequest);
   const consumeProjectAssetFocusRequest = useEditorStore((state) => state.consumeProjectAssetFocusRequest);
@@ -1462,6 +1464,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
         return;
       }
 
+      if (item.builtIn.kind === 'chart-marker') {
+        createChartMarker();
+        return;
+      }
+
       if (item.builtIn.kind === 'poi-effect') {
         createPoiEffect(item.builtIn.effectKind);
         return;
@@ -1509,7 +1516,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
 
     if (isDataPlatformChartLibraryItem(item)) {
-      event.preventDefault();
+      event.dataTransfer.effectAllowed = 'copy';
+      event.dataTransfer.setData(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, JSON.stringify(item.syncedChart));
+      event.dataTransfer.setData('text/plain', item.name);
       return;
     }
 
@@ -1774,7 +1783,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
           const isEnvironmentLibrary = activeLibrary.key === 'environment';
           const isSyncedImage = isSyncedImageProjectLibraryItem(item);
           const isSyncedChart = isDataPlatformChartLibraryItem(item);
-          const isActionableItem = ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset);
+          const isActionableItem = ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset || isSyncedChart);
 
           return (
             <ResourceCard
@@ -1798,7 +1807,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
                 isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`
                   : isSyncedChart
-                    ? `数据中台同步大屏：${item.name}`
+                    ? `数据中台同步大屏：${item.name}，拖到图表立标或其大屏槽位`
                   : isBuiltInImage || isSyncedImage
                     ? `拖拽到模型 texture 属性：${item.name}`
                     : isImportedAsset

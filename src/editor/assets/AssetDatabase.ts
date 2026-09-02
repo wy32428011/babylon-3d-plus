@@ -83,6 +83,7 @@ export type BuiltInAssetDragPayload =
   | { kind: 'auto-patrol' }
   | { kind: 'manual-roam-spawn' }
   | { kind: 'click-event-binding' }
+  | { kind: 'chart-marker' }
   | { kind: 'poi-effect'; effectKind: PoiEffectKind }
   | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
   | { kind: 'locator'; locatorKind: 'box-wire' }
@@ -389,6 +390,8 @@ export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetD
     if (payload.kind === 'click-event-binding') {
       return { kind: 'click-event-binding' };
     }
+
+    if (payload.kind === 'chart-marker') return { kind: 'chart-marker' };
 
     if (payload.kind === 'poi-effect') {
       return isPoiEffectKind(payload.effectKind)

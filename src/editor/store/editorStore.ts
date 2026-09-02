@@ -93,6 +93,10 @@ import {
   MODEL_ARRAY_ITEM_COUNT_MAX,
   normalizeModelArrayDirection,
 } from '../model/modelArray';
+import { createChartMarkerEntity } from '../model/chartMarker';
+import { createDataPlatformScreenComponent } from '../model/dataPlatformScreen';
+import { normalizeChartMarkerScreenSource } from '../assets/dataPlatformScreenDrag';
+import type { DataPlatformChartAssetEntry } from '../assets/dataPlatformChartLibrary';
 import {
   MODEL_ASSET_CODE_MAX_LENGTH,
   createDefaultSceneEnvironmentTransform,
@@ -556,6 +560,8 @@ type EditorState = {
   createAutoPatrol: (placementPosition?: Vector3Data) => void;
   createManualRoamSpawn: (placementPosition?: Vector3Data) => void;
   createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data) => void;
+  createChartMarker: (placementPosition?: Vector3Data) => void;
+  bindChartMarkerScreen: (entityId: string, source: DataPlatformChartAssetEntry | null) => boolean;
   createClickEventBinding: (placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
@@ -1411,6 +1417,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     transform: cloneTransform(entity.components.transform),
     ...(entity.components.meshRenderer ? { meshRenderer: cloneMeshRenderer(entity.components.meshRenderer) } : {}),
     ...(entity.components.dataPlatformScreen ? { dataPlatformScreen: cloneJsonValue(entity.components.dataPlatformScreen) } : {}),
+    ...(entity.components.chartMarker ? { chartMarker: { ...entity.components.chartMarker } } : {}),
     ...(entity.components.skybox ? { skybox: cloneJsonValue(entity.components.skybox) } : {}),
     ...(entity.components.locator ? { locator: cloneLocator(entity.components.locator) } : {}),
     ...(entity.components.cadReference ? { cadReference: cloneCadReference(entity.components.cadReference) } : {}),
@@ -3677,6 +3684,44 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         logs: prependLog(state.logs, command.label),
       };
     });
+  },
+  createChartMarker: (placementPosition) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建图表立标');
+      const baseEntity = createChartMarkerEntity(sanitizeVector3(placementPosition));
+      const entity = { ...baseEntity, name: createNextEntityName(state.scene, '图表立标') };
+      const command = createEntityCommand(entity);
+      const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
+      return {
+        ...result,
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        logs: prependLog(state.logs, command.label),
+      };
+    });
+  },
+  bindChartMarkerScreen: (entityId, source) => {
+    const screenSource = source === null ? null : normalizeChartMarkerScreenSource(source);
+    if (source !== null && !screenSource) return false;
+    let accepted = false;
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '绑定图表立标大屏');
+      const entity = state.scene.entities[entityId];
+      if (!isRuntimeEntityEditable(state.scene, entity) || !entity.components.chartMarker) return state;
+      const components = { ...entity.components, chartMarker: screenSource ? { screenName: screenSource.name } : {} };
+      if (screenSource) components.dataPlatformScreen = createDataPlatformScreenComponent(screenSource);
+      else delete components.dataPlatformScreen;
+      accepted = true;
+      if (JSON.stringify(components) === JSON.stringify(entity.components)) return state;
+      const command = updateSceneDocumentCommand(screenSource ? '绑定图表立标大屏' : '清空图表立标大屏', (scene) => ({
+        ...scene,
+        entities: { ...scene.entities, [entityId]: { ...scene.entities[entityId], components } },
+      }));
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, `${command.label}: ${entity.name}`) };
+    });
+    return accepted;
   },
   /** 创建可撤销的 POI 内置 EFF 实体，并把新实体设为当前选择。 */
   createPoiEffect: (effectKind, placementPosition) => {

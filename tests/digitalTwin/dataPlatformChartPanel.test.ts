@@ -46,7 +46,7 @@ test('场景切换清空旧图表且迟到结果和进度不能覆盖新项目',
   assert.ok(source.includes('progress.contextKey !== chartSyncContextKeyRef.current'));
 });
 
-test('同步大屏卡片仅展示，不可点击创建或拖入 Scene/视窗', () => {
+test('同步大屏只拖入图表立标，不直接创建实体或覆盖相机视窗', () => {
   const projectSource = readFileSync(PROJECT_PANEL_PATH, 'utf8');
   const sceneSource = readFileSync(SCENE_VIEW_PANEL_PATH, 'utf8');
 
@@ -54,9 +54,10 @@ test('同步大屏卡片仅展示，不可点击创建或拖入 Scene/视窗', (
   assert.ok(projectSource.includes('matchesDataPlatformChartLibrarySearch(item, normalizedLibraryFilter)'));
   assert.ok(projectSource.includes('数据中台同步大屏：${item.name}'));
   assert.ok(projectSource.includes('const isActionableItem ='));
-  assert.equal(projectSource.includes('DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE'), false);
+  assert.equal(projectSource.includes('DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE'), true);
   assert.equal(projectSource.includes('setViewportDataPlatformScreen'), false);
-  assert.equal(sceneSource.includes('DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE'), false);
-  assert.equal(sceneSource.includes('decodeDataPlatformScreenDragPayload'), false);
+  assert.equal(sceneSource.includes('DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE'), true);
+  assert.equal(sceneSource.includes('decodeDataPlatformScreenDragPayload'), true);
+  assert.ok(sceneSource.includes('bindChartMarkerScreen(entityId, source)'));
   assert.equal(sceneSource.includes('setViewportDataPlatformScreen'), false);
 });

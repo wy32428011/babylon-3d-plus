@@ -1,3 +1,4 @@
+import { ChartMarkerInspector } from './ChartMarkerInspector';
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import { getBuiltInMeshMeterDescription } from '../model/builtInMeshGeometry';
 import type { DataPlatformScreenRenderMode, LightKind, MeshKind } from '../model/components';
@@ -447,7 +448,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
           transform={transform}
         />
       ) : null}
-      {meshRenderer ? (
+      {selectedEntity.components.chartMarker ? <ChartMarkerInspector key={selectedEntity.id} entity={selectedEntity} disabled={isLocked} /> : null}
+      {meshRenderer && !selectedEntity.components.chartMarker ? (
         <fieldset className="transform-fieldset">
           <legend>Mesh Renderer</legend>
           <label className="inspector-row">
@@ -462,7 +464,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
           <p className="muted">{getBuiltInMeshMeterDescription(meshRenderer.meshKind)}</p>
         </fieldset>
       ) : null}
-      {dataPlatformScreen ? (
+      {dataPlatformScreen && !selectedEntity.components.chartMarker ? (
         <fieldset className="transform-fieldset">
           <legend>数据中台大屏</legend>
           <label className="inspector-row">

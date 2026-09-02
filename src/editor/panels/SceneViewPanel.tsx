@@ -65,6 +65,7 @@ import {
   useEditorStore,
   type EntityArrayDirection,
 } from '../store/editorStore';
+import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import { getLightEditorCapabilities } from '../model/lightEditor';
 import {
@@ -340,6 +341,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const createAutoPatrol = useEditorStore((state) => state.createAutoPatrol);
   const createManualRoamSpawn = useEditorStore((state) => state.createManualRoamSpawn);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
+  const createChartMarker = useEditorStore((state) => state.createChartMarker);
   const createClickEventBinding = useEditorStore((state) => state.createClickEventBinding);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const placeSkybox = useEditorStore((state) => state.placeSkybox);
@@ -892,6 +894,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   function handleCanvasDragOver(event: DragEvent<HTMLCanvasElement>): void {
     if (isRuntimePreview) return;
 
+    if (event.dataTransfer.types.includes(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE)) {
+      event.preventDefault();
+      const entityId = runtimeRef.current?.pickEntityIdAtCanvasPoint(event.clientX, event.clientY, event.currentTarget);
+      const marker = entityId ? useEditorStore.getState().scene.entities[entityId]?.components.chartMarker : null;
+      event.dataTransfer.dropEffect = marker ? 'copy' : 'none';
+      return;
+    }
+
     const hasSupportedPayload =
       event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE) ||
       event.dataTransfer.types.includes(SKYBOX_ASSET_DRAG_MIME_TYPE) ||
@@ -907,6 +917,18 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (isRuntimePreview) {
       event.preventDefault();
       clickSnapshotRef.current = null;
+      return;
+    }
+
+    if (event.dataTransfer.types.includes(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE)) {
+      event.preventDefault();
+      clickSnapshotRef.current = null;
+      const source = decodeDataPlatformScreenDragPayload(event.dataTransfer.getData(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE));
+      const entityId = runtimeRef.current?.pickEntityIdAtCanvasPoint(event.clientX, event.clientY, event.currentTarget);
+      const state = useEditorStore.getState();
+      if (!source || !entityId || !state.bindChartMarkerScreen(entityId, source)) {
+        state.pushLog('请将有效大屏拖到未锁定的图表立标，或选中立标后拖到右侧大屏槽位。');
+      } else state.selectEntity(entityId);
       return;
     }
 
@@ -959,6 +981,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     if (builtInAsset.kind === 'click-event-binding') {
       createClickEventBinding(placementPosition);
+      return;
+    }
+
+    if (builtInAsset.kind === 'chart-marker') {
+      createChartMarker(placementPosition);
       return;
     }
 

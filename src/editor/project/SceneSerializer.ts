@@ -569,6 +569,14 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
     normalized.dataPlatformScreen = normalizeDataPlatformScreen(components.dataPlatformScreen);
   }
 
+  if ('chartMarker' in components && components.chartMarker !== undefined) {
+    if (normalized.meshRenderer?.meshKind !== 'plane') throwUnsupportedSceneFileError();
+    const marker = assertPlainObject(components.chartMarker);
+    normalized.chartMarker = marker.screenName === undefined
+      ? {}
+      : { screenName: assertString(marker.screenName).trim().slice(0, 128) };
+  }
+
   if ('skybox' in components && components.skybox !== undefined) {
     normalized.skybox = normalizeSkyboxComponent(components.skybox);
     normalized.transform = {

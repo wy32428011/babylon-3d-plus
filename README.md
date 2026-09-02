@@ -494,7 +494,7 @@ npm run build
 - 大场景共享只对明确安全的重复资产生效：普通无脚本模型可共享源几何/材质，Shelf 使用独立验证过的脚本化共享路径；自动 thinInstance 另允许 8 个已核对参数脚本按完整结构模板签名合批，并在保存、发布和部署导出快照中持久化直接源引用。未列入白名单的动态脚本继续独占容器，因此不同资产、动态脚本和高面数贴图本身仍受 GPU 能力限制；本轮不会用降分辨率、LOD 或纹理降采样换取容量。
 - CAD/DXF 导入属于布局参考层能力：承诺常见二维线稿实体 `LINE`、`ARC`、`CIRCLE`、`ELLIPSE`、`SPLINE`、`LWPOLYLINE`、`POLYLINE`、`HATCH` 边界、`SOLID/TRACE/3DFACE` 外轮廓与 `LEADER`，并完整保留 BLOCK、嵌套/阵列 INSERT 的几何实例；不承诺完整 TEXT/MTEXT 字形、Paper Space、多布局、实体填充、3D Solid 曲面或可编辑 CAD 图元。普通图纸保持精确解析，`64 MB` 及以上图纸使用后台轻量扫描和实例化原型预算。DXF 合法 `$INSUNITS` 0–24 会换算为米；无单位图纸只能依据 `$MEASUREMENT` 或毫米 fallback，建议源 CAD 明确写入单位。超过 `±1e15` 的异常原始坐标会被过滤。
 - 参数化模型依赖模型包中稳定的节点、网格或材质名称；安全 DSL 只支持 JSON AST 中的白名单运算和白名单属性绑定，不执行任意 JavaScript/TypeScript。贴图参数允许编辑器登记过的内置 `editor-image://` 逻辑引用，或模型包内 `.png`、`.jpg`、`.jpeg`、`.webp` 相对路径；仍不支持绝对路径、网络 URL、`data:`、反斜杠路径、未登记逻辑引用或 `../` 路径逃逸。重新导入模型包后，场景实例会使用新的 `modelParameters` 与 TypeScript 脚本元数据清洗参数：同名且仍合法的实例值会保留，新增参数使用新默认值，删除或非法参数会移除。
-- Project 资源库中模型库、环境库、天空盒库、图表库和图片库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/`，天空盒 HDR/EXR 保存到 `Assets/Skyboxes/<安全化文件名>/` 独立包，数据中台同步大屏索引保存到当前绑定工程的 `.babylon-editor/data-platform-charts.json`，数据中台同步图片保存到 `Assets/Images/<iconKey>.<ext>`。新导入或从数据中台同步且未显式声明 `lengthUnit` 的环境模型默认按 `centimeter`（`×0.01 m`）解释，普通模型仍默认 `meter`，旧场景兼容语义不变。POI 库已接入模型生成器和自动巡检，运行预览与 Viewer 已接入手动漫游控制器，特效库已接入 16 种内置 EFF；图表立标、图表面板、报警管理器以及主题、组合仍为占位；图片库已接入内置方向箭头、数据中台同步图片和 texture 参数拖放，支持按名称、图标 Key 与分类搜索。
+- Project 资源库中模型库、环境库、天空盒库、图表库和图片库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/`，天空盒 HDR/EXR 保存到 `Assets/Skyboxes/<安全化文件名>/` 独立包，数据中台同步大屏索引保存到当前绑定工程的 `.babylon-editor/data-platform-charts.json`，数据中台同步图片保存到 `Assets/Images/<iconKey>.<ext>`。新导入或从数据中台同步且未显式声明 `lengthUnit` 的环境模型默认按 `centimeter`（`×0.01 m`）解释，普通模型仍默认 `meter`，旧场景兼容语义不变。POI 库已接入模型生成器、自动巡检和图表立标，运行预览与 Viewer 已接入手动漫游控制器，特效库已接入 16 种内置 EFF；图表面板、报警管理器以及主题、组合仍为占位；图片库已接入内置方向箭头、数据中台同步图片和 texture 参数拖放，支持按名称、图标 Key 与分类搜索。
 - 首页数据中台配置、远程项目列表、项目打开和最近场景都依赖 Electron preload IPC；普通 Vite 浏览器页面会显示降级提示，并仅保留进入空白编辑器、新建场景等不依赖桌面权限的基础入口。当前不包含身份令牌配置或数据中台项目详情交互。
 - 主布局自适应当前只包含随窗口尺寸自动调整、左右面板贯通到底部、Project/Console 限定为中间 Scene 同宽以及底部 Console 弹窗入口，不包含拖拽分隔条、其它面板折叠或用户自定义布局保存；小于约 `1024×640` 的窗口会继续尽量收缩，但不保证所有内容舒适可读。
 - 图片库当前登记内置方向箭头和数据中台同步图片；用户手动导入本地图片、更多图片类型与分类管理仍待扩展。
@@ -684,7 +684,7 @@ npm run build
 - 图表库同步只认当前工程目录中的数据中台项目绑定。绑定存在时，通过 `POST /api/v1/projects/{projectId}/config/screens/query` 分页读取该项目关联的大屏；未绑定的本地工程不访问数据中台，并显示空图表库。
 - 每个绑定大屏只保留项目 ID、大屏 ID、名称和编码等卡片元数据，不读取或保存 `jsonContent`，也不解析其中的 widget 图表配置。
 - 同步索引按项目隔离并原子替换；任一分页请求或返回数据校验失败时整批失败，继续使用该项目上一次成功同步的图表库。项目切换后，旧任务的迟到进度和结果不会覆盖当前项目。
- - 当前图表库同步绑定项目的完整大屏，并以不可操作的资源卡片展示；不把大屏拖入 Scene View 或相机视窗。已有场景中的 `viewportScreen` 和 `dataPlatformScreen` 数据仍按兼容逻辑读取，以避免旧场景文件失效。这里不新增数据中台授权、Token 或代理接口。
+- 当前图表库同步绑定项目的完整大屏，卡片可以拖入 POI 图表立标或其 Inspector 大屏槽位。拖到场景空白处不会创建大屏或覆盖相机视窗。已有场景中的 `viewportScreen` 和 `dataPlatformScreen` 数据继续兼容；沿用现有数据中台访问权限。
 - 大屏与三维对象通过 `postMessage` 双向联动：大屏可发送 `zending.data-platform-screen.bridge` v1 的 `screen.selectEntity`、`screen.focusEntity` 或 `screen.clearSelection`，目标可使用 `entityId` 或唯一 `assetCode`；Viewer 将三维点击结果回传为 `viewer.selectionChanged`。消息仅接受来自对应大屏 URL origin 且 source 为对应 iframe 的事件，不把 `jsonContent` 或内部 widget 配置写入场景。
 
 ## 数据中台天空盒同步
@@ -765,3 +765,15 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 - 验证结束后只关闭本次启动的进程树，并清理临时用户数据目录。
 
 当前安装包未配置商业代码签名证书。首次运行时 Windows SmartScreen 可能显示“未知发布者”，这不影响本地功能；正式对外分发时应使用受信任的 Windows 代码签名证书签署安装程序和主程序。
+
+
+## POI 图表立标
+
+1. 在 `POI库` 点击“图表立标”，或拖到 Scene 画布，生成默认 `4 m × 2.25 m` 的竖直标牌。
+2. 切换 `图表库`，把已同步的大屏拖到场景中的立标上，或选中立标后拖到 Inspector 的“大屏内容”槽位。需要当前工程已绑定数据中台项目，且大屏具有可访问的 HTTP(S) 页面地址。
+3. 标牌实时嵌入完整大屏，编辑态继续允许选中和调整 Transform；进入运行预览或打开发布 Viewer 后可以操作大屏内容。绑定、替换、清空、复制、移动、显隐与锁定沿用场景实体规则，保存重开会恢复绑定。
+4. 大屏数据更新频率由大屏自身数据源/远程数据的轮询设置决定；修改大屏设计后，点击 Inspector 的“刷新内容”重新加载。页面加载超时提供提示和可用缩略图，隐藏/删除立标会释放嵌入页面；再次显示时重新加载。
+
+立标使用场景中的平面及跟随透视投影的网页层，网页层不参与三维逐像素深度遮挡。未绑定时显示拖入提示；清空只移除大屏绑定，保留立标。大屏内部若再次嵌入数字孪生场景，四层及以上宿主页会停止继续加载立标页面，避免无限循环。场景版本保持 `5`，旧大屏与相机视窗大屏保持兼容。
+
+验证：`node --test tests/editor/chartMarker.test.mjs tests/editor/chartMarkerDrag.test.mjs tests/editor/chartMarkerRuntime.test.mjs`；`npm run build` 后执行 `node scripts/smoke-chart-marker.mjs`，使用本地实时页面夹具和 Chrome 验证拖放、数据更新、运行预览交互、清空/撤销、刷新及构建后的独立 Viewer，截图保存到 `output/playwright/chart-marker/`。

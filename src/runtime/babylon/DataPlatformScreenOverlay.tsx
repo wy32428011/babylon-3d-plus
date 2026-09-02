@@ -1,3 +1,4 @@
+import { canEmbedChartMarkerScreen, CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import { useEffect, useRef } from 'react';
 import { Matrix, Scene, Vector3, type Mesh } from '@babylonjs/core';
 import type { SceneRuntime, DataPlatformScreenOverlayItem } from './SceneRuntime';
@@ -103,6 +104,7 @@ function projectScreenCorners(
   canvas: HTMLCanvasElement,
   root: HTMLElement,
   mesh: Mesh,
+  readableBothSides = false,
 ): [CssProjectivePoint, CssProjectivePoint, CssProjectivePoint, CssProjectivePoint] | null {
   const camera = scene.activeCamera;
   const engine = scene.getEngine();
@@ -127,107 +129,124 @@ function projectScreenCorners(
     };
   });
   if (points.some((point) => point === null)) return null;
-  return points as [CssProjectivePoint, CssProjectivePoint, CssProjectivePoint, CssProjectivePoint];
+  const corners = points as [CssProjectivePoint, CssProjectivePoint, CssProjectivePoint, CssProjectivePoint];
+  // 从背面观察时交换左右角，保持标牌文字可读；不改动实体或 Gizmo 的旋转。
+  const winding = (corners[1].x - corners[0].x) * (corners[3].y - corners[0].y)
+    - (corners[1].y - corners[0].y) * (corners[3].x - corners[0].x);
+  return readableBothSides && winding < 0
+    ? [corners[1], corners[0], corners[3], corners[2]]
+    : corners;
 }
 
 type OverlayEntry = {
   host: HTMLDivElement;
-  iframe: HTMLIFrameElement;
-  fallback: HTMLImageElement;
+  iframe: HTMLIFrameElement | null;
   item: DataPlatformScreenOverlayItem;
   screenOrigin: string;
-  screenUrl: string;
+  screenUrl?: string;
   thumbnailUrl?: string;
   lastSelectionSignature: string | null;
-  timeoutId: number;
-  onLoad: () => void;
-  onError: () => void;
+  width: number;
+  height: number;
+  dispose: () => void;
 };
 
-function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayItem, interactive: boolean): OverlayEntry {
-  const screenOrigin = new URL(item.screenUrl, window.location.href).origin;
-  let entry!: OverlayEntry;
+function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayItem): OverlayEntry {
+  const width = item.chartMarker ? 1920 : OVERLAY_BASE_SIZE_PX;
+  const height = item.chartMarker ? 1080 : OVERLAY_BASE_SIZE_PX;
   const host = document.createElement('div');
-  host.style.position = 'absolute';
-  host.style.left = '0';
-  host.style.top = '0';
-  host.style.width = `${OVERLAY_BASE_SIZE_PX}px`;
-  host.style.height = `${OVERLAY_BASE_SIZE_PX}px`;
-  host.style.transformOrigin = '0 0';
-  host.style.overflow = 'hidden';
-  host.style.pointerEvents = interactive ? 'auto' : 'none';
-  host.style.background = '#101827';
+  host.dataset.screenEntityId = item.entityId;
+  host.style.cssText = `position:absolute;left:0;top:0;width:${width}px;height:${height}px;transform-origin:0 0;overflow:hidden;background:#101827;pointer-events:none`;
+  if (item.chartMarker) host.style.boxShadow = 'inset 0 0 0 12px #58b9dc';
 
+  const content = document.createElement('div');
+  content.style.cssText = `position:absolute;inset:${item.chartMarker ? 16 : 0}px;overflow:hidden`;
   const fallback = document.createElement('img');
   fallback.alt = '';
   fallback.draggable = false;
+  fallback.style.cssText = 'width:100%;height:100%;object-fit:contain;pointer-events:none';
   fallback.style.display = item.thumbnailUrl ? 'block' : 'none';
-  fallback.style.width = '100%';
-  fallback.style.height = '100%';
-  fallback.style.objectFit = 'fill';
-  fallback.style.pointerEvents = 'none';
   if (item.thumbnailUrl) fallback.src = item.thumbnailUrl;
 
-  const iframe = document.createElement('iframe');
-  iframe.title = item.entityId;
-  iframe.src = item.screenUrl;
-  iframe.loading = 'eager';
-  iframe.style.position = 'absolute';
-  iframe.style.inset = '0';
-  iframe.style.width = '100%';
-  iframe.style.height = '100%';
-  iframe.style.border = '0';
-  iframe.style.background = 'transparent';
-  iframe.style.pointerEvents = interactive ? 'auto' : 'none';
+  const status = document.createElement('div');
+  status.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:28px;color:#b7e7fa;background:#101827c9;font:32px sans-serif;text-align:center;padding:60px;pointer-events:none';
+  const title = document.createElement('strong');
+  title.style.cssText = 'font-size:56px;overflow-wrap:anywhere';
+  title.textContent = item.name || '图表立标';
+  const message = document.createElement('span');
+  status.append(title, message);
+  content.append(fallback, status);
+  host.append(content);
+  root.append(host);
 
+  let iframe: HTMLIFrameElement | null = null;
+  let timeoutId: number | undefined;
   let loaded = false;
+  const canEmbed = !item.chartMarker || canEmbedChartMarkerScreen();
   const showFallback = (): void => {
     if (loaded) return;
-    iframe.style.display = 'none';
-    fallback.style.display = item.thumbnailUrl ? 'block' : 'none';
+    if (iframe) iframe.style.visibility = 'hidden';
+    status.style.display = 'flex';
+    message.textContent = '大屏暂未加载，请检查网络或页面访问权限后刷新内容';
   };
   const onLoad = (): void => {
     loaded = true;
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     entry.lastSelectionSignature = null;
-    iframe.style.display = 'block';
+    if (iframe) iframe.style.visibility = 'visible';
     fallback.style.display = 'none';
+    status.style.display = 'none';
   };
-  const onError = (): void => showFallback();
-  iframe.addEventListener('load', onLoad);
-  iframe.addEventListener('error', onError);
-  const timeoutId = window.setTimeout(showFallback, IFRAME_FALLBACK_TIMEOUT_MS);
+  if (item.screenUrl && canEmbed) {
+    iframe = document.createElement('iframe');
+    iframe.title = item.name || item.entityId;
+    iframe.src = item.screenUrl;
+    iframe.loading = 'eager';
+    iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;pointer-events:none;visibility:hidden';
+    iframe.addEventListener('load', onLoad);
+    iframe.addEventListener('error', showFallback);
+    message.textContent = '大屏加载中…';
+    content.append(iframe);
+    timeoutId = window.setTimeout(showFallback, IFRAME_FALLBACK_TIMEOUT_MS);
+  } else if (!canEmbed) {
+    message.textContent = '已停止重复嵌套大屏，请检查大屏中的数字孪生组件';
+  } else if (item.thumbnailUrl) {
+    status.style.display = 'none';
+  } else {
+    message.textContent = '将图表库大屏拖到此立标，或拖到右侧大屏槽位';
+  }
 
-  host.append(fallback, iframe);
-  root.append(host);
-  entry = {
+  const entry: OverlayEntry = {
     host,
     iframe,
-    fallback,
     item,
-    screenOrigin,
+    screenOrigin: item.screenUrl ? new URL(item.screenUrl).origin : '',
     screenUrl: item.screenUrl,
     thumbnailUrl: item.thumbnailUrl,
     lastSelectionSignature: null,
-    timeoutId,
-    onLoad,
-    onError,
+    width,
+    height,
+    dispose: () => {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      iframe?.removeEventListener('load', onLoad);
+      iframe?.removeEventListener('error', showFallback);
+      host.remove();
+    },
   };
   return entry;
 }
 
 function postSelectionToScreen(entry: OverlayEntry, selectedEntityIds: readonly string[]): void {
+  if (!entry.iframe?.contentWindow) return;
   const message = createDataPlatformScreenSelectionMessage(selectedEntityIds, selectedEntityIds[0] ?? null);
   const signature = JSON.stringify(message.payload);
-  if (entry.lastSelectionSignature === signature || !entry.iframe.contentWindow) return;
+  if (entry.lastSelectionSignature === signature) return;
   entry.iframe.contentWindow.postMessage(message, entry.screenOrigin);
   entry.lastSelectionSignature = signature;
 }
 
 function disposeOverlayEntry(entry: OverlayEntry): void {
-  window.clearTimeout(entry.timeoutId);
-  entry.iframe.removeEventListener('load', entry.onLoad);
-  entry.iframe.removeEventListener('error', entry.onError);
-  entry.host.remove();
+  entry.dispose();
 }
 
 export type DataPlatformScreenOverlayProps = {
@@ -252,6 +271,8 @@ export function DataPlatformScreenOverlay({
   const entriesRef = useRef<Map<string, OverlayEntry>>(new Map());
   const selectedEntityIdsRef = useRef<readonly string[]>(selectedEntityIds);
   const onCommandRef = useRef(onCommand);
+  const interactiveRef = useRef(interactive);
+  interactiveRef.current = interactive;
   selectedEntityIdsRef.current = selectedEntityIds;
   onCommandRef.current = onCommand;
 
@@ -261,14 +282,24 @@ export function DataPlatformScreenOverlay({
     const entries = entriesRef.current;
 
     const handleMessage = (event: MessageEvent<unknown>): void => {
+      if (!interactiveRef.current) return;
       for (const entry of entries.values()) {
-        if (event.source !== entry.iframe.contentWindow || event.origin !== entry.screenOrigin) continue;
+        if (event.source !== entry.iframe?.contentWindow || event.origin !== entry.screenOrigin) continue;
         const command = parseDataPlatformScreenCommand(event.data);
         if (command) onCommandRef.current?.(entry.item, command);
         return;
       }
     };
     window.addEventListener('message', handleMessage);
+    const handleRefresh = (event: Event): void => {
+      const entityId: unknown = (event as CustomEvent<unknown>).detail;
+      if (typeof entityId !== 'string') return;
+      const entry = entries.get(entityId);
+      if (!entry?.item.chartMarker) return;
+      disposeOverlayEntry(entry);
+      entries.delete(entityId);
+    };
+    window.addEventListener(CHART_MARKER_REFRESH_EVENT, handleRefresh);
 
     const update = (): void => {
       const items = runtime.getDataPlatformScreenOverlayItems();
@@ -293,18 +324,22 @@ export function DataPlatformScreenOverlay({
           entry = undefined;
         }
         if (!entry) {
-          entry = createOverlayEntry(root, item, interactive);
+          entry = createOverlayEntry(root, item);
           entries.set(item.entityId, entry);
         } else {
           entry.item = item;
         }
+        if (entry.iframe) {
+          entry.iframe.style.pointerEvents = interactiveRef.current ? 'auto' : 'none';
+          entry.iframe.title = item.name || item.entityId;
+        }
         postSelectionToScreen(entry, selectedEntityIdsRef.current);
-        const corners = projectScreenCorners(scene, canvas, root, item.mesh);
+        const corners = projectScreenCorners(scene, canvas, root, item.mesh, item.chartMarker);
         if (!corners) {
           entry.host.style.display = 'none';
           continue;
         }
-        const transform = createCssProjectiveMatrix(OVERLAY_BASE_SIZE_PX, OVERLAY_BASE_SIZE_PX, corners);
+        const transform = createCssProjectiveMatrix(entry.width, entry.height, corners);
         entry.host.style.display = transform ? 'block' : 'none';
         if (transform) entry.host.style.transform = transform;
       }
@@ -315,10 +350,11 @@ export function DataPlatformScreenOverlay({
     return () => {
       scene.onAfterRenderObservable.remove(observer);
       window.removeEventListener('message', handleMessage);
+      window.removeEventListener(CHART_MARKER_REFRESH_EVENT, handleRefresh);
       for (const entry of entries.values()) disposeOverlayEntry(entry);
       entries.clear();
     };
-  }, [canvas, interactive, runtime, scene]);
+  }, [canvas, runtime, scene]);
 
   return <div aria-hidden={!interactive} ref={rootRef} style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none', zIndex: 3 }} />;
 }
