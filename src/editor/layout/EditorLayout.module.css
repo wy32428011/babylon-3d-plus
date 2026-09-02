@@ -11,6 +11,28 @@
   color: #d7d7d7;
 }
 
+.editorShell:fullscreen,
+.editorShell:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  background: #1e1e1e;
+}
+
+/* 场景全屏时只保留 Toolbar 与 Scene 画布，运行预览仍可点停止/退出全屏。 */
+.editorShellFullscreen .workspace {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.editorShellFullscreen .leftColumn,
+.editorShellFullscreen .rightColumn,
+.editorShellFullscreen .bottomWorkspace {
+  display: none;
+}
+
+.editorShellFullscreen .centerColumn {
+  grid-template-rows: minmax(0, 1fr);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: clamp(180px, 22vw, 260px) minmax(360px, 1fr) clamp(220px, 26vw, 320px);

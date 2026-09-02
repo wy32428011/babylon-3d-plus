@@ -67,6 +67,8 @@ type RecentWorkspacesResult = {
 
 type DataPlatformConfig = {
   baseUrl: string;
+  webBaseUrl: string;
+  frontendPort: number | null;
   workspaceRoot: string;
   usesDefaultWorkspace: boolean;
 };
@@ -78,6 +80,8 @@ type DataPlatformWorkspaceSelectionResult = {
 
 type SaveDataPlatformConfigRequest = {
   baseUrl: string;
+  webBaseUrl?: string;
+  frontendPort?: number | null;
 };
 
 type DataPlatformProjectEntry = {
@@ -116,6 +120,7 @@ type OpenDataPlatformProjectRequest = {
 
 type DataPlatformBindingSummary = {
   baseUrl: string;
+  webBaseUrl: string;
   projectId: string;
   projectName: string;
   editorProjectId: string | null;
@@ -140,6 +145,7 @@ type DataPlatformProjectOpenResult = {
 
 type DataPlatformDeepLink = {
   baseUrl: string;
+  webBaseUrl?: string;
   projectId: string;
 };
 

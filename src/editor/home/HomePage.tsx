@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { APPLICATION_NAME, BrandLogo } from '../ui/BrandLogo';
 
@@ -30,6 +30,8 @@ type DataPlatformProjectOpenApi = {
   openDataPlatformProject?: (request: { projectId: string }) => Promise<DataPlatformProjectOpenResult>;
 };
 
+type DataPlatformEditorConfig = Pick<DataPlatformConfig, 'baseUrl' | 'workspaceRoot' | 'usesDefaultWorkspace'>;
+
 function getDataPlatformProjectOpenApi(): DataPlatformProjectOpenApi {
   return (window.editorApi ?? {}) as DataPlatformProjectOpenApi;
 }
@@ -39,7 +41,7 @@ const EMPTY_RECENT_WORKSPACES: RecentWorkspacesResult = {
   scenes: [],
 };
 
-const EMPTY_DATA_PLATFORM_CONFIG: DataPlatformConfig = {
+const EMPTY_DATA_PLATFORM_CONFIG: DataPlatformEditorConfig = {
   baseUrl: '',
   workspaceRoot: '',
   usesDefaultWorkspace: true,
@@ -84,7 +86,7 @@ async function requestRecentWorkspaces(): Promise<RecentWorkspacesResult> {
 }
 
 /** 从主进程读取持久化的数据中台配置。 */
-async function requestDataPlatformConfig(): Promise<DataPlatformConfig> {
+async function requestDataPlatformConfig(): Promise<DataPlatformEditorConfig> {
   if (!window.editorApi?.getDataPlatformConfig) {
     throw new Error('数据中台配置需要 Electron 桌面环境。');
   }
@@ -121,7 +123,7 @@ export function HomePage({
 }: HomePageProps) {
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspacesResult>(EMPTY_RECENT_WORKSPACES);
   const [isLoadingRecent, setIsLoadingRecent] = useState(true);
-  const [dataPlatformConfig, setDataPlatformConfig] = useState<DataPlatformConfig>(EMPTY_DATA_PLATFORM_CONFIG);
+  const [dataPlatformConfig, setDataPlatformConfig] = useState<DataPlatformEditorConfig>(EMPTY_DATA_PLATFORM_CONFIG);
   const [dataPlatformProjects, setDataPlatformProjects] = useState<DataPlatformProjectEntry[]>([]);
   const [dataPlatformProjectTotal, setDataPlatformProjectTotal] = useState(0);
   const [isLoadingDataPlatformConfig, setIsLoadingDataPlatformConfig] = useState(true);
@@ -135,6 +137,8 @@ export function HomePage({
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [status, setStatus] = useState<HomeStatus | null>(null);
+  const isConfigDialogOpenRef = useRef(false);
+  const configDraftsDirtyRef = useRef(false);
   const isOpeningDataPlatformProject = busyActionId?.startsWith('data-platform-project:') ?? false;
   const isChangingDataPlatformWorkspace = busyActionId === 'select-data-platform-workspace'
     || busyActionId === 'reset-data-platform-workspace';
@@ -169,7 +173,9 @@ export function HomePage({
         const config = await requestDataPlatformConfig();
         if (!isMounted) return;
         setDataPlatformConfig(config);
-        setConfigDraft(config.baseUrl);
+        if (!isConfigDialogOpenRef.current || !configDraftsDirtyRef.current) {
+          setConfigDraft(config.baseUrl);
+        }
 
         if (!config.baseUrl) {
           setDataPlatformProjects([]);
@@ -210,8 +216,7 @@ export function HomePage({
     /** Escape 仅关闭当前未提交的配置弹窗，保存过程中避免重复操作。 */
     function handleKeyDown(event: KeyboardEvent): void {
       if (event.key === 'Escape' && !isSavingConfig) {
-        setIsConfigDialogOpen(false);
-        setConfigDialogError(null);
+        closeDataPlatformConfigDialog();
       }
     }
 
@@ -452,6 +457,8 @@ export function HomePage({
 
   /** 打开配置弹窗并回填当前持久化地址。 */
   function openDataPlatformConfigDialog(): void {
+    isConfigDialogOpenRef.current = true;
+    configDraftsDirtyRef.current = false;
     setConfigDraft(dataPlatformConfig.baseUrl);
     setConfigDialogError(null);
     setIsConfigDialogOpen(true);
@@ -460,6 +467,8 @@ export function HomePage({
   /** 关闭配置弹窗，保存过程中禁止通过遮罩或按钮中断。 */
   function closeDataPlatformConfigDialog(): void {
     if (isSavingConfig) return;
+    isConfigDialogOpenRef.current = false;
+    configDraftsDirtyRef.current = false;
     setIsConfigDialogOpen(false);
     setConfigDialogError(null);
   }
@@ -476,11 +485,15 @@ export function HomePage({
     setConfigDialogError(null);
 
     try {
-      const savedConfig = await window.editorApi.saveDataPlatformConfig({ baseUrl: configDraft });
+      const savedConfig = await window.editorApi.saveDataPlatformConfig({
+        baseUrl: configDraft,
+      });
       setDataPlatformConfig(savedConfig);
       setConfigDraft(savedConfig.baseUrl);
+      configDraftsDirtyRef.current = false;
       setProjectSearchDraft('');
       setActiveProjectSearch('');
+      isConfigDialogOpenRef.current = false;
       setIsConfigDialogOpen(false);
 
       if (!savedConfig.baseUrl) {
@@ -788,13 +801,14 @@ export function HomePage({
             aria-labelledby="home-data-platform-dialog-title"
             aria-modal="true"
             className="home-config-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => void handleSaveDataPlatformConfig(event)}
             role="dialog"
           >
             <header>
               <div>
                 <h2 id="home-data-platform-dialog-title">数据中台配置</h2>
-                <p>配置项目启动台读取业务项目列表的服务地址。</p>
+                <p>配置项目启动台读取业务项目列表的 API 服务地址。</p>
               </div>
               <button
                 aria-label="关闭数据中台配置"
@@ -811,7 +825,10 @@ export function HomePage({
               <input
                 autoFocus
                 disabled={isSavingConfig}
-                onChange={(event) => setConfigDraft(event.target.value)}
+                onChange={(event) => {
+                  configDraftsDirtyRef.current = true;
+                  setConfigDraft(event.target.value);
+                }}
                 placeholder="http://127.0.0.1:8080"
                 spellCheck={false}
                 value={configDraft}

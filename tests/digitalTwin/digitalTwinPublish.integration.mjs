@@ -829,6 +829,30 @@ async function run() {
       /chunkSize 超过 64 MiB/,
     );
 
+    const largePackageUploadId = mock.allocateId();
+    const largePackageFileSize = 2 * 1024 * 1024 * 1024 + 1;
+    const largePackageChunkSize = 64 * 1024 * 1024;
+    mock.sessions.set(largePackageUploadId, {
+      requestId: 'large-package-session',
+      uploadId: largePackageUploadId,
+      packageType: 'SOURCE',
+      fileName: 'large-package.zip',
+      fileSize: largePackageFileSize,
+      sha256: 'b'.repeat(64),
+      chunkSize: largePackageChunkSize,
+      totalChunks: Math.ceil(largePackageFileSize / largePackageChunkSize),
+      uploadedChunks: new Set(),
+      completedFileId: null,
+      status: 'UPLOADING',
+      attempts: new Map(),
+      chunkBodies: new Map(),
+    });
+    const largePackageSession = await redirectClient.uploadDetail(
+      largePackageUploadId,
+      new AbortController().signal,
+    );
+    assert.equal(largePackageSession.fileSize, largePackageFileSize);
+
     mock.setRemoteStatus(createRemoteStatus({ projectId: '2054201280000000999' }));
     await assert.rejects(
       redirectClient.projectStatus(PROJECT_ID, new AbortController().signal),
@@ -1544,6 +1568,7 @@ async function run() {
         'data-platform-download-redirect-rejected',
         'publish-api-redirect-rejected',
         'oversized-upload-chunk-rejected',
+        'large-upload-package-over-2gib-accepted',
         'project-status-identity-mismatch-rejected',
         'prepare-task-identity-mismatch-rejected',
         'indexed-skybox-offline-package',

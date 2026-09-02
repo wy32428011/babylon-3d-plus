@@ -36,6 +36,8 @@ function screen(overrides: Record<string, unknown> = {}): Record<string, unknown
     screenId: '2054201280000000200',
     screenName: '设备总览',
     screenCode: 'SCREEN-OVERVIEW',
+    screenUrl: '#/bigscreen-designer/published/2054201280000000200',
+    thumbnailUrl: '/api/v1/files/2054201280000000300/content',
     jsonContent: JSON.stringify({
       version: 1,
       widgets: [
@@ -54,6 +56,7 @@ test('项目大屏同步按字符串保留 Long ID，并且只同步完整大屏
   try {
     const requests: Array<{ pageNum: number; pageSize: number }> = [];
     const result = await executeDataPlatformChartSync({
+      baseUrl: 'http://127.0.0.1:8086',
       projectId: PROJECT_ID,
       projectRoot,
       syncedAt: '2026-09-01T08:00:00.000Z',
@@ -77,6 +80,51 @@ test('项目大屏同步按字符串保留 Long ID，并且只同步完整大屏
   }
 });
 
+test('项目大屏同步将 hash-only 展示地址解析到页面地址，API 资源仍解析到服务地址', async () => {
+  const projectRoot = await mkdtemp(path.join(tmpdir(), 'zending-chart-page-url-'));
+  try {
+    const result = await executeDataPlatformChartSync({
+      baseUrl: 'http://127.0.0.1:8086',
+      webBaseUrl: 'http://127.0.0.1:8001',
+      projectId: PROJECT_ID,
+      projectRoot,
+      requestPage: async () => page([screen()]),
+    });
+
+    assert.equal(
+      result.charts[0]?.screenUrl,
+      'http://127.0.0.1:8001/#/bigscreen-designer/published/2054201280000000200',
+    );
+    assert.equal(
+      result.charts[0]?.thumbnailUrl,
+      'http://127.0.0.1:8086/api/v1/files/2054201280000000300/content',
+    );
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test('大屏缺少展示地址时按页面地址和 screenId 生成预览页', async () => {
+  const projectRoot = await mkdtemp(path.join(tmpdir(), 'zending-chart-default-screen-url-'));
+  try {
+    const result = await executeDataPlatformChartSync({
+      baseUrl: 'http://192.168.50.34:8086',
+      webBaseUrl: 'http://192.168.50.34:8001',
+      projectId: PROJECT_ID,
+      projectRoot,
+      requestPage: async () => page([screen({ screenUrl: null, thumbnailUrl: null })]),
+    });
+
+    assert.equal(
+      result.charts[0]?.screenUrl,
+      'http://192.168.50.34:8001/#/bigscreen-designer/preview/2054201280000000200',
+    );
+    assert.equal(result.charts[0]?.thumbnailUrl, undefined);
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
 test('兼容数据中台 PageResult 将分页 Long 字段序列化为字符串', async () => {
   const projectRoot = await mkdtemp(path.join(tmpdir(), 'zending-chart-string-page-'));
   try {
@@ -89,6 +137,56 @@ test('兼容数据中台 PageResult 将分页 Long 字段序列化为字符串',
 
     assert.equal(result.charts.length, 1);
     assert.equal(result.charts[0]?.chartType, 'SCREEN');
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test('兼容项目大屏响应省略分页回显字段', async () => {
+  const projectRoot = await mkdtemp(path.join(tmpdir(), 'zending-chart-missing-page-fields-'));
+  try {
+    const result = await executeDataPlatformChartSync({
+      baseUrl: 'http://127.0.0.1:8086',
+      projectId: PROJECT_ID,
+      projectRoot,
+      syncedAt: '2026-09-01T08:00:00.000Z',
+      requestPage: async () => ({
+        success: true,
+        data: {
+          records: [screen()],
+          total: '1',
+        },
+      }),
+    });
+
+    assert.equal(result.charts.length, 1);
+    assert.equal(result.charts[0]?.screenUrl, 'http://127.0.0.1:8001/#/bigscreen-designer/published/2054201280000000200');
+    assert.equal(result.charts[0]?.thumbnailUrl, 'http://127.0.0.1:8086/api/v1/files/2054201280000000300/content');
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test('兼容 MyBatis Page 使用 current 和 size 回显分页字段', async () => {
+  const projectRoot = await mkdtemp(path.join(tmpdir(), 'zending-chart-mybatis-page-fields-'));
+  try {
+    const result = await executeDataPlatformChartSync({
+      projectId: PROJECT_ID,
+      projectRoot,
+      syncedAt: '2026-09-01T08:00:00.000Z',
+      requestPage: async () => ({
+        success: true,
+        data: {
+          records: [screen()],
+          total: '1',
+          current: '1',
+          size: '100',
+        },
+      }),
+    });
+
+    assert.equal(result.charts.length, 1);
+    assert.equal(result.charts[0]?.projectId, PROJECT_ID);
   } finally {
     await rm(projectRoot, { recursive: true, force: true });
   }
@@ -117,6 +215,7 @@ test('大屏索引只保存卡片元数据，不解析或落盘内部图表配�
   const projectRoot = await mkdtemp(path.join(tmpdir(), 'zending-chart-minimal-index-'));
   try {
     const result = await executeDataPlatformChartSync({
+      baseUrl: 'http://127.0.0.1:8086',
       projectId: PROJECT_ID,
       projectRoot,
       syncedAt: '2026-09-01T08:00:00.000Z',
@@ -141,6 +240,9 @@ test('大屏索引只保存卡片元数据，不解析或落盘内部图表配�
     assert.equal(result.charts.length, 1);
     const persisted = await readFile(getDataPlatformChartIndexPath(projectRoot), 'utf8');
     assert.doesNotMatch(persisted, /line-private|Authorization|should-not-be-persisted|api\.example\.com/);
+    assert.match(persisted, /screenUrl/);
+    assert.match(persisted, /thumbnailUrl/);
+    assert.doesNotMatch(persisted, /jsonContent/);
   } finally {
     await rm(projectRoot, { recursive: true, force: true });
   }
@@ -257,6 +359,47 @@ test('读取旧索引时过滤内部图表，仅保留完整大屏', async () =>
     const index = await readDataPlatformChartIndex(projectRoot, PROJECT_ID);
     assert.deepEqual(index.charts.map((chart) => chart.chartType), ['SCREEN']);
     assert.deepEqual(index.charts.map((chart) => chart.name), ['旧大屏']);
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test('读取旧索引时按当前页面地址修正历史 hash-only 大屏 URL', async () => {
+  const projectRoot = await mkdtemp(path.join(tmpdir(), 'zending-chart-legacy-url-'));
+  try {
+    const indexPath = getDataPlatformChartIndexPath(projectRoot);
+    await mkdir(path.dirname(indexPath), { recursive: true });
+    await writeFile(indexPath, `${JSON.stringify({
+      version: 1,
+      baseUrl: 'http://127.0.0.1:8086',
+      projectId: PROJECT_ID,
+      syncedAt: '2026-08-31T08:00:00.000Z',
+      charts: [{
+        id: `data-platform-screen:${PROJECT_ID}:101`,
+        projectId: PROJECT_ID,
+        screenId: '101',
+        screenName: '旧大屏',
+        screenUrl: 'http://127.0.0.1:8086/#/bigscreen-designer/published/101',
+        thumbnailUrl: 'http://127.0.0.1:8086/api/v1/files/101.png',
+        name: '旧大屏',
+        chartType: 'SCREEN',
+      }],
+    }, null, 2)}\n`, 'utf8');
+
+    const index = await readDataPlatformChartIndex(
+      projectRoot,
+      PROJECT_ID,
+      'http://127.0.0.1:8086',
+      'http://127.0.0.1:8001',
+    );
+    assert.equal(
+      index.charts[0]?.screenUrl,
+      'http://127.0.0.1:8001/#/bigscreen-designer/published/101',
+    );
+    assert.equal(
+      index.charts[0]?.thumbnailUrl,
+      'http://127.0.0.1:8086/api/v1/files/101.png',
+    );
   } finally {
     await rm(projectRoot, { recursive: true, force: true });
   }

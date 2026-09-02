@@ -19,6 +19,7 @@ import {
   type SafeSourceFile,
 } from './deploymentExportFileSystem.js';
 import { stripCadReferencesFromSceneFile } from './sceneCadReferenceSanitizer.js';
+import { removeOptionalEditorOnlyUrls } from './deploymentSceneSanitizer.js';
 import { findSyncedImageForReference, isPlatformImageReference } from './dataPlatformImageSync.js';
 import { getCurrentDataPlatformBinding, resolveDataPlatformBindingSharedResourcesRoot } from './dataPlatformBindingStore.js';
 import type { DataPlatformSkyboxIndexEntry } from './dataPlatformSkyboxIndex.js';
@@ -266,7 +267,7 @@ function createManifestAssetPath(destinationRelativePath: string): string {
   return `./${normalizedPath.slice(assetRootPrefix.length)}`;
 }
 
-/** 解析并确认顶层场景文件为编辑器支持的 version 1/2/3。 */
+/** 解析并确认顶层场景文件为编辑器支持的 version 1/2/3/4/5。 */
 function parseSceneFile(content: string): PlainObject {
   if (typeof content !== 'string' || content.length === 0) throw new Error('导出场景内容不能为空。');
   if (Buffer.byteLength(content, 'utf8') > MAX_SCENE_CONTENT_BYTES) {
@@ -282,10 +283,10 @@ function parseSceneFile(content: string): PlainObject {
 
   const sceneFile = requirePlainObject(parsed, '场景文件');
   if (
-    (sceneFile.version !== 1 && sceneFile.version !== 2 && sceneFile.version !== 3)
+    (sceneFile.version !== 1 && sceneFile.version !== 2 && sceneFile.version !== 3 && sceneFile.version !== 4 && sceneFile.version !== 5)
     || !isPlainObject(sceneFile.scene)
   ) {
-    throw new Error('仅支持导出 version=1、version=2 或 version=3 的场景文件。');
+    throw new Error('仅支持导出 version=1、version=2、version=3、version=4 或 version=5 的场景文件。');
   }
   return sceneFile;
 }
@@ -1227,17 +1228,6 @@ function isSafeBrowserMqttAddress(address: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** 删除仅供编辑器资产面板使用的缩略图 URL，避免残留本机路径。 */
-function removeOptionalEditorOnlyUrls(value: unknown): void {
-  if (Array.isArray(value)) {
-    for (const item of value) removeOptionalEditorOnlyUrls(item);
-    return;
-  }
-  if (!isPlainObject(value)) return;
-  delete value.thumbnailUrl;
-  for (const child of Object.values(value)) removeOptionalEditorOnlyUrls(child);
 }
 
 /** 递归确认 scene.json 中不存在 Windows、UNC、file:// 或绝对 editor-asset 本机路径。 */

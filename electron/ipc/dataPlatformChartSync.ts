@@ -2,13 +2,15 @@ import { BrowserWindow } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { DataPlatformBindingMetadata } from './dataPlatformBindingStore.js';
-import { getCurrentDataPlatformBinding } from './dataPlatformBindingStore.js';
+import {
+  getCurrentDataPlatformBinding,
+  inferDataPlatformWebBaseUrl,
+} from './dataPlatformBindingStore.js';
 import {
   executeDataPlatformChartSync,
   readDataPlatformChartIndex,
   type SyncedDataPlatformChart,
 } from './dataPlatformChartStore.js';
-import { getCurrentDataPlatformSkyboxSyncContextKey } from './dataPlatformProjectService.js';
 import { requestDataPlatformJson } from './dataPlatformTransfer.js';
 
 const CHART_QUERY_PAGE_SIZE = 100;
@@ -42,10 +44,18 @@ export type DataPlatformChartLibrarySnapshot = {
 
 type DataPlatformChartSyncContext = {
   baseUrl: string;
+  webBaseUrl: string;
   projectId: string;
   projectName: string;
   projectRoot: string;
   contextKey: string;
+};
+
+export type DataPlatformChartSyncSource = {
+  /** 当前配置的数据中台 API 地址；所有大屏查询必须使用此地址。 */
+  baseUrl: string;
+  /** 当前配置的大屏页面地址，仅用于解析/展示大屏页面。 */
+  webBaseUrl?: string;
 };
 
 type ActiveDataPlatformChartSync = {
@@ -61,12 +71,12 @@ let lastChartSyncContext: DataPlatformChartSyncContext | null = null;
 let chartSyncShuttingDown = false;
 
 /** 仅为当前已绑定的数据中台项目启动大屏资源同步。 */
-export async function startDataPlatformChartSync(): Promise<boolean> {
+export async function startDataPlatformChartSync(source?: DataPlatformChartSyncSource): Promise<boolean> {
   if (chartSyncShuttingDown) return false;
   const binding = getCurrentDataPlatformBinding();
   if (!binding) return false;
 
-  const context = createChartSyncContext(binding.projectRoot, binding.metadata);
+  const context = createChartSyncContext(binding.projectRoot, binding.metadata, source);
   if (!context) return false;
   if (!isCurrentChartSyncContext(context.contextKey)) return false;
   if (activeChartSync?.context.contextKey === context.contextKey) return false;
@@ -78,7 +88,7 @@ export async function startDataPlatformChartSync(): Promise<boolean> {
     if (chartSyncShuttingDown) return false;
     const currentBinding = getCurrentDataPlatformBinding();
     const currentContext = currentBinding
-      ? createChartSyncContext(currentBinding.projectRoot, currentBinding.metadata)
+      ? createChartSyncContext(currentBinding.projectRoot, currentBinding.metadata, source)
       : null;
     if (!currentContext || currentContext.contextKey !== context.contextKey) return false;
     if (activeChartSync) return false;
@@ -110,10 +120,10 @@ export async function startDataPlatformChartSync(): Promise<boolean> {
 }
 
 /** 仅允许在仍处于同一绑定项目时重试最近一次同步。 */
-export async function retryDataPlatformChartSync(): Promise<boolean> {
+export async function retryDataPlatformChartSync(source?: DataPlatformChartSyncSource): Promise<boolean> {
   if (activeChartSync || chartSyncShuttingDown || !lastChartSyncContext) return false;
   if (!isCurrentChartSyncContext(lastChartSyncContext.contextKey)) return false;
-  return startDataPlatformChartSync();
+  return startDataPlatformChartSync(source);
 }
 
 /** 返回当前绑定项目的最近进度；项目切换后不暴露旧项目快照。 */
@@ -127,7 +137,7 @@ export function getCurrentDataPlatformChartSyncProgress(): DataPlatformChartSync
 }
 
 /** 读取当前绑定项目的本地大屏索引；未绑定时明确返回空图表库。 */
-export async function listCurrentDataPlatformCharts(): Promise<DataPlatformChartLibrarySnapshot> {
+export async function listCurrentDataPlatformCharts(source?: DataPlatformChartSyncSource): Promise<DataPlatformChartLibrarySnapshot> {
   const binding = getCurrentDataPlatformBinding();
   if (!binding) {
     return {
@@ -139,7 +149,7 @@ export async function listCurrentDataPlatformCharts(): Promise<DataPlatformChart
     };
   }
 
-  const context = createChartSyncContext(binding.projectRoot, binding.metadata);
+  const context = createChartSyncContext(binding.projectRoot, binding.metadata, source);
   if (!context) {
     return {
       contextKey: null,
@@ -152,7 +162,8 @@ export async function listCurrentDataPlatformCharts(): Promise<DataPlatformChart
   const index = await readDataPlatformChartIndex(
     binding.projectRoot,
     binding.metadata.projectId,
-    binding.metadata.baseUrl,
+    context.baseUrl,
+    context.webBaseUrl,
   );
   return {
     contextKey: context.contextKey,
@@ -166,6 +177,8 @@ export async function listCurrentDataPlatformCharts(): Promise<DataPlatformChart
 /** 配置变化后禁止使用旧绑定上下文发起重试。 */
 export function clearDataPlatformChartSyncRetryContext(): void {
   lastChartSyncContext = null;
+  latestChartSyncProgress = null;
+  activeChartSync?.controller.abort();
 }
 
 /** 应用退出时取消并等待在途请求，避免退出过程中继续写索引。 */
@@ -197,6 +210,7 @@ async function runDataPlatformChartSync(
 
   const index = await executeDataPlatformChartSync({
     baseUrl: context.baseUrl,
+    webBaseUrl: context.webBaseUrl,
     projectId: context.projectId,
     projectRoot: context.projectRoot,
     requestPage: async (pageNum, pageSize) => {
@@ -264,8 +278,20 @@ async function runDataPlatformChartSync(
 function createChartSyncContext(
   projectRoot: string,
   metadata: DataPlatformBindingMetadata,
+  source?: DataPlatformChartSyncSource,
 ): DataPlatformChartSyncContext | null {
-  const normalizedBaseUrl = new URL(metadata.baseUrl).toString().replace(/\/$/, '');
+  let normalizedBindingBaseUrl: string;
+  let normalizedBaseUrl: string;
+  let normalizedWebBaseUrl: string;
+  try {
+    normalizedBindingBaseUrl = new URL(metadata.baseUrl).toString().replace(/\/$/, '');
+    normalizedBaseUrl = new URL(source?.baseUrl ?? normalizedBindingBaseUrl).toString().replace(/\/$/, '');
+    normalizedWebBaseUrl = new URL(
+      source?.webBaseUrl || metadata.webBaseUrl || inferDataPlatformWebBaseUrl(normalizedBaseUrl),
+    ).toString().replace(/\/$/, '');
+  } catch {
+    return null;
+  }
   const normalizedProjectId = metadata.projectId.trim();
   if (!/^[1-9]\d{0,63}$/.test(normalizedProjectId)) return null;
   const absoluteProjectRoot = path.resolve(projectRoot);
@@ -273,10 +299,12 @@ function createChartSyncContext(
     ? absoluteProjectRoot.toLowerCase()
     : absoluteProjectRoot;
   const contextKey = createHash('sha256')
-    .update(`${normalizedBaseUrl}\n${normalizedProjectId}\n${normalizedProjectRoot}`, 'utf8')
+    // contextKey 标识绑定项目，不把展示页面地址或当前请求源混入身份 key。
+    .update(`${normalizedBindingBaseUrl}\n${normalizedProjectId}\n${normalizedProjectRoot}`, 'utf8')
     .digest('hex');
   return {
     baseUrl: normalizedBaseUrl,
+    webBaseUrl: normalizedWebBaseUrl,
     projectId: normalizedProjectId,
     projectName: metadata.projectName,
     projectRoot: absoluteProjectRoot,
@@ -285,7 +313,9 @@ function createChartSyncContext(
 }
 
 function isCurrentChartSyncContext(expectedContextKey: string): boolean {
-  return getCurrentDataPlatformSkyboxSyncContextKey() === expectedContextKey;
+  const binding = getCurrentDataPlatformBinding();
+  if (!binding) return false;
+  return createChartSyncContext(binding.projectRoot, binding.metadata)?.contextKey === expectedContextKey;
 }
 
 function isDataPlatformChartSyncTerminalPhase(phase: DataPlatformChartSyncPhase): boolean {

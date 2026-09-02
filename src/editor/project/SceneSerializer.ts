@@ -52,7 +52,21 @@ import {
   normalizeTelemetryBindingComponent,
 } from '../model/telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig, normalizeLocatorBuiltInBinding } from '../model/builtInSlotBinding';
-import { logLegacySceneMigrationSummary, logSceneV2ToV3MigrationSummary, migrateLegacySceneV1ToV2, migrateSceneV2ToV3 } from './sceneMigration';
+import {
+  normalizeDataPlatformScreenComponent,
+  normalizeDataPlatformViewportScreen,
+} from '../model/dataPlatformScreen';
+import type { DataPlatformScreenComponent } from '../model/components';
+import {
+  logLegacySceneMigrationSummary,
+  logSceneV2ToV3MigrationSummary,
+  logSceneV3ToV4MigrationSummary,
+  logSceneV4ToV5MigrationSummary,
+  migrateLegacySceneV1ToV2,
+  migrateSceneV2ToV3,
+  migrateSceneV3ToV4,
+  migrateSceneV4ToV5,
+} from './sceneMigration';
 
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
 const INVALID_SKYBOX_RESOURCE_ID_ERROR = '场景文件格式不受支持：dataPlatformResourceId 必须是 trim 后 1-64 位正十进制字符串。';
@@ -80,7 +94,7 @@ type PlainObject = Record<string, unknown>;
 
 export function serializeScene(scene: SceneDocument): string {
   const snapshot = createSerializableSceneSnapshot(createPersistedModelThinInstanceScene(scene));
-  return JSON.stringify({ version: 3, units: { length: SCENE_LENGTH_UNIT }, scene: snapshot }, null, 2);
+  return JSON.stringify({ version: 5, units: { length: SCENE_LENGTH_UNIT }, scene: snapshot }, null, 2);
 }
 
 /** 保存前只替换天空盒嵌套对象，保留其它场景引用并确保不修改输入。 */
@@ -126,6 +140,12 @@ export function deserializeScene(content: string): SceneDocument {
     if (sceneFile.version <= 2) {
       logSceneV2ToV3MigrationSummary(migrateSceneV2ToV3(rawScene));
     }
+    if (sceneFile.version <= 3) {
+      logSceneV3ToV4MigrationSummary(migrateSceneV3ToV4(rawScene));
+    }
+    if (sceneFile.version <= 4) {
+      logSceneV4ToV5MigrationSummary(migrateSceneV4ToV5(rawScene));
+    }
     return normalizeSceneDocument(rawScene);
   } catch (error) {
     if (error instanceof Error && (
@@ -145,7 +165,13 @@ function assertSceneFileDocument(value: unknown): SceneFileDocument {
   const hasLegacyShape = keys.length === 2 && keys.includes('version') && keys.includes('scene');
   const hasUnitsShape = keys.length === 3 && keys.includes('version') && keys.includes('units') && keys.includes('scene');
 
-  if ((!hasLegacyShape && !hasUnitsShape) || (document.version !== 1 && document.version !== 2 && document.version !== 3)) {
+  if ((!hasLegacyShape && !hasUnitsShape) || (
+    document.version !== 1
+    && document.version !== 2
+    && document.version !== 3
+    && document.version !== 4
+    && document.version !== 5
+  )) {
     throwUnsupportedSceneFileError();
   }
 
@@ -331,6 +357,7 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
     defaultCargoGeneratorId: typeof settings.defaultCargoGeneratorId === 'string'
       ? settings.defaultCargoGeneratorId
       : null,
+    viewportScreen: normalizeDataPlatformViewportScreen(settings.viewportScreen),
   });
 }
 
@@ -535,6 +562,11 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
 
   if ('meshRenderer' in components && components.meshRenderer !== undefined) {
     normalized.meshRenderer = normalizeMeshRenderer(components.meshRenderer);
+  }
+
+  if ('dataPlatformScreen' in components && components.dataPlatformScreen !== undefined) {
+    if (normalized.meshRenderer?.meshKind !== 'plane') throwUnsupportedSceneFileError();
+    normalized.dataPlatformScreen = normalizeDataPlatformScreen(components.dataPlatformScreen);
   }
 
   if ('skybox' in components && components.skybox !== undefined) {
@@ -831,6 +863,12 @@ function normalizeMeshRenderer(value: unknown): EntityComponents['meshRenderer']
     meshKind: meshKind as MeshKind,
     materialColor: assertString(meshRenderer.materialColor),
   };
+}
+
+function normalizeDataPlatformScreen(value: unknown): DataPlatformScreenComponent {
+  const normalized = normalizeDataPlatformScreenComponent(value);
+  if (!normalized) throwUnsupportedSceneFileError();
+  return normalized;
 }
 
 /** 严格读取 POI EFF 配置，再通过共享边界约束数值范围。 */
@@ -1309,6 +1347,7 @@ function validateEntityHierarchy(entityIds: string[], entities: Record<string, E
 function hasRuntimeComponent(components: EntityComponents): boolean {
   return Boolean(
     components.meshRenderer ||
+    components.dataPlatformScreen ||
     components.skybox ||
     components.locator ||
     components.cadReference ||

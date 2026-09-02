@@ -1774,8 +1774,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
           const isEnvironmentLibrary = activeLibrary.key === 'environment';
           const isSyncedImage = isSyncedImageProjectLibraryItem(item);
           const isSyncedChart = isDataPlatformChartLibraryItem(item);
-          const isActionableItem = !isSyncedChart
-            && ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset);
+          const isActionableItem = ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset);
 
           return (
             <ResourceCard
@@ -1799,7 +1798,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
                 isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`
                   : isSyncedChart
-                    ? `同步自数据中台的大屏：${item.name}`
+                    ? `数据中台同步大屏：${item.name}`
                   : isBuiltInImage || isSyncedImage
                     ? `拖拽到模型 texture 属性：${item.name}`
                     : isImportedAsset

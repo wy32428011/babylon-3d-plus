@@ -396,9 +396,9 @@ function authorizeSceneSkyboxFile(value: unknown): void {
   if (sourcePath.toLowerCase().endsWith(expectedExtension)) authorizeAssetFile(sourcePath);
 }
 
-/** 与 renderer SceneSerializer 支持的版本保持一致（v1 原始版、v2 绑定反转、v3 fetchDrive）；版本不符时不做资源授权。 */
+/** 与 renderer SceneSerializer 支持的版本保持一致（v1 原始版、v2 绑定反转、v3 fetchDrive、v4 数据中台大屏、v5 视窗大屏）；版本不符时不做资源授权。 */
 function isSupportedSceneFileVersion(version: unknown): boolean {
-  return version === 1 || version === 2 || version === 3;
+  return version === 1 || version === 2 || version === 3 || version === 4 || version === 5;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -17,6 +17,19 @@ export type MeshRendererComponent = {
   materialColor: string;
 };
 
+export type DataPlatformScreenRenderMode = 'iframe' | 'texture';
+
+/** 数据中台大屏的场景绑定；screenUrl 用于交互 Overlay，thumbnailUrl 用于纹理降级。 */
+export type DataPlatformScreenComponent = {
+  projectId: string;
+  screenId: string;
+  screenUrl?: string;
+  thumbnailUrl?: string;
+  renderMode: DataPlatformScreenRenderMode;
+  widthMeters: number;
+  heightMeters: number;
+};
+
 export type SkyboxFormat = 'hdr' | 'exr';
 export type SkyboxResolution = 256 | 512 | 1024;
 
@@ -361,6 +374,7 @@ export type ClickEventBindingComponent = {
 export type EntityComponents = {
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
+  dataPlatformScreen?: DataPlatformScreenComponent;
   skybox?: SkyboxComponent;
   locator?: LocatorComponent;
   cadReference?: CadReferenceComponent;

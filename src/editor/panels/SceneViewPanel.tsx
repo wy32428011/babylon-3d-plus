@@ -25,7 +25,7 @@ import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView
 import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
 import { CLICK_EVENT_FOCUS_DURATION_MS, resolveClickEventBindingClick } from '../model/clickEventBinding';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
-import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
+import { SceneRuntime, type DataPlatformScreenOverlayItem } from '../../runtime/babylon/SceneRuntime';
 import { createEntityGroupRotationDeltaMatrix } from '../../runtime/babylon/EntityGroupRotationPreview';
 import {
   AutoPatrolPlaybackController,
@@ -107,6 +107,10 @@ import {
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 import { ViewportOrientationCompass } from '../ui/ViewportOrientationCompass';
 import { AutoPatrolControls } from '../../shared/ui/AutoPatrolControls';
+import { DataPlatformScreenOverlay } from '../../runtime/babylon/DataPlatformScreenOverlay';
+import { DataPlatformViewportScreenOverlay } from '../../runtime/babylon/DataPlatformViewportScreenOverlay';
+import type { DataPlatformScreenCommand } from '../../runtime/babylon/dataPlatformScreenBridge';
+import { buildDigitalTwinAssetIndex, findDigitalTwinAsset } from '../../shared/digitalTwinAssetCodes';
 import { useAutoPatrolInspectionHistory } from '../../shared/ui/useAutoPatrolInspectionHistory';
 import { ManualRoamControls } from '../../shared/ui/ManualRoamControls';
 import {
@@ -365,6 +369,41 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const pushLog = useEditorStore((state) => state.pushLog);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
   const isRuntimePreview = runtimeMode === 'preview';
+  const handleDataPlatformScreenCommand = useCallback((
+    _item: DataPlatformScreenOverlayItem | null,
+    command: DataPlatformScreenCommand,
+  ): void => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+    if (command.type === 'screen.clearSelection') {
+      runtime.clearExternalHighlight();
+      return;
+    }
+
+    const entityId = command.payload.entityId
+      ?? (command.payload.assetCode
+        ? (() => {
+          const lookup = findDigitalTwinAsset(buildDigitalTwinAssetIndex(sceneDocument), command.payload.assetCode);
+          return lookup.status === 'found' ? lookup.entityId : null;
+        })()
+        : null);
+    if (!entityId || !sceneDocument.entities[entityId]) {
+      pushLog('大屏联动目标不存在或资产编号不唯一。');
+      return;
+    }
+
+    runtime.setExternalHighlightEntityIds([entityId]);
+    if (command.type !== 'screen.focusEntity') return;
+    const bounds = runtime.getEntitiesWorldBounds([entityId]);
+    if (!bounds || !viewportRef.current) {
+      pushLog('大屏联动目标的三维几何尚未就绪。');
+      return;
+    }
+    viewportRef.current.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS });
+  }, [pushLog, sceneDocument]);
+  const handleViewportDataPlatformScreenCommand = useCallback((command: DataPlatformScreenCommand): void => {
+    handleDataPlatformScreenCommand(null, command);
+  }, [handleDataPlatformScreenCommand]);
   const applyHistoryReplayCamera = useCallback((camera: AutoPatrolInspectionReplayCamera): void => {
     viewportRef.current?.applyCameraPose(createSceneCameraPoseFromReplayCamera(camera), { animate: false });
   }, []);
@@ -814,7 +853,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
   }
 
-  /** 仅当拖拽数据是模型资产或内置资源时允许浏览器在 Scene 画布触发 drop。 */
+  /** 仅当拖拽数据是可创建场景实体的资源时允许浏览器在 Scene 画布触发 drop。 */
   function handleCanvasDragOver(event: DragEvent<HTMLCanvasElement>): void {
     if (isRuntimePreview) return;
 
@@ -2324,6 +2363,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     }
   }
 
+  const overlayViewport = viewportRef.current;
+  const overlayRuntime = runtimeRef.current;
+
   return (
     <section className={isRuntimePreview ? 'scene-panel scene-panel-preview' : 'scene-panel'}>
       <h2>Scene</h2>
@@ -2338,6 +2380,30 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           onPointerUp={handleCanvasPointerUp}
           onPointerCancelCapture={handleCanvasPointerCancel}
           onWheel={handleCanvasWheel}
+        />
+        {overlayViewport && overlayRuntime ? (
+          <DataPlatformScreenOverlay
+            canvas={canvasRef.current}
+            interactive={isRuntimePreview}
+            onCommand={handleDataPlatformScreenCommand}
+            runtime={overlayRuntime}
+            selectedEntityIds={hierarchySelectionIds.length > 0
+              ? hierarchySelectionIds
+              : selectedEntityId
+                ? [selectedEntityId]
+                : []}
+            scene={overlayViewport.scene}
+          />
+        ) : null}
+        <DataPlatformViewportScreenOverlay
+          interactive={isRuntimePreview}
+          onCommand={handleViewportDataPlatformScreenCommand}
+          screen={sceneDocument.sceneSettings.viewportScreen}
+          selectedEntityIds={hierarchySelectionIds.length > 0
+            ? hierarchySelectionIds
+            : selectedEntityId
+              ? [selectedEntityId]
+              : []}
         />
         <ViewportOrientationCompass
           camera={viewportCamera}

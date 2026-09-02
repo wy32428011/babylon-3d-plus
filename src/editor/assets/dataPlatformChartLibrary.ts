@@ -6,6 +6,8 @@ export type DataPlatformChartAssetEntry = {
   screenId: string;
   screenName: string;
   screenCode?: string;
+  screenUrl?: string;
+  thumbnailUrl?: string;
   name: string;
   chartType: DataPlatformChartType;
 };
@@ -15,6 +17,7 @@ export type DataPlatformChartLibraryItem = {
   name: string;
   icon: string;
   subtitle: string;
+  thumbnailUrl?: string;
   syncedChart: DataPlatformChartAssetEntry;
 };
 
@@ -29,6 +32,7 @@ export function createDataPlatformChartLibraryItems(
       name: chart.name,
       icon: 'panel',
       subtitle: `大屏 · ${chart.screenCode ?? '已绑定项目'}`,
+      ...(chart.thumbnailUrl ? { thumbnailUrl: chart.thumbnailUrl } : {}),
       syncedChart: chart,
     }));
 }

@@ -15,6 +15,8 @@ const charts = [
     screenId: '200',
     screenName: '设备总览',
     screenCode: 'SCREEN-OVERVIEW',
+    screenUrl: 'http://127.0.0.1:8086/#/bigscreen-designer/published/200',
+    thumbnailUrl: 'http://127.0.0.1:8086/api/v1/files/300/content',
     name: '设备总览',
     chartType: 'SCREEN',
   },
@@ -56,11 +58,13 @@ test('图表库只把完整大屏转换为资源卡片，并忽略旧内部图�
     name: item.name,
     icon: item.icon,
     subtitle: item.subtitle,
+    thumbnailUrl: item.thumbnailUrl,
   })), [{
     id: charts[0]?.id,
     name: '设备总览',
     icon: 'panel',
     subtitle: '大屏 · SCREEN-OVERVIEW',
+    thumbnailUrl: 'http://127.0.0.1:8086/api/v1/files/300/content',
   }]);
   assert.ok(items.every(isDataPlatformChartLibraryItem));
 });

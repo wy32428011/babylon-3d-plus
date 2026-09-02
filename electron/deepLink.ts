@@ -1,5 +1,6 @@
 export type DataPlatformDeepLink = {
   baseUrl: string;
+  webBaseUrl?: string;
   projectId: string;
 };
 
@@ -18,14 +19,30 @@ export function parseDataPlatformDeepLink(value: string): DataPlatformDeepLink |
     const baseUrlValue = url.searchParams.get('baseUrl')?.trim() ?? '';
     if (!PROJECT_ID_PATTERN.test(projectId) || !baseUrlValue) return null;
 
-    const baseUrl = new URL(baseUrlValue);
-    if ((baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') || baseUrl.username || baseUrl.password) {
+    const normalizedBaseUrl = normalizeDeepLinkHttpRoot(baseUrlValue);
+    if (!normalizedBaseUrl) return null;
+    const webBaseUrlValue = url.searchParams.get('webBaseUrl')?.trim() ?? '';
+    const normalizedWebBaseUrl = webBaseUrlValue ? normalizeDeepLinkHttpRoot(webBaseUrlValue) : null;
+    if (webBaseUrlValue && !normalizedWebBaseUrl) return null;
+    return {
+      baseUrl: normalizedBaseUrl,
+      ...(normalizedWebBaseUrl ? { webBaseUrl: normalizedWebBaseUrl } : {}),
+      projectId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeDeepLinkHttpRoot(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username || parsed.password) {
       return null;
     }
-    baseUrl.hash = '';
-    baseUrl.search = '';
-    const normalizedBaseUrl = baseUrl.toString().replace(/\/+$/, '');
-    return { baseUrl: normalizedBaseUrl, projectId };
+    parsed.hash = '';
+    parsed.search = '';
+    return parsed.toString().replace(/\/+$/, '');
   } catch {
     return null;
   }

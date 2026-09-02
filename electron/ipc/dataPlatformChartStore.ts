@@ -18,6 +18,8 @@ export type SyncedDataPlatformChart = {
   screenId: string;
   screenName: string;
   screenCode?: string;
+  screenUrl?: string;
+  thumbnailUrl?: string;
   name: string;
   chartType: DataPlatformChartType;
 };
@@ -25,6 +27,8 @@ export type SyncedDataPlatformChart = {
 export type DataPlatformChartIndex = {
   version: 1;
   baseUrl?: string;
+  /** 大屏页面地址；开发环境可与 API 服务地址不同。 */
+  webBaseUrl?: string;
   projectId: string;
   syncedAt: string;
   charts: SyncedDataPlatformChart[];
@@ -32,6 +36,7 @@ export type DataPlatformChartIndex = {
 
 export type ExecuteDataPlatformChartSyncOptions = {
   baseUrl?: string;
+  webBaseUrl?: string;
   projectId: string;
   projectRoot: string;
   syncedAt?: string;
@@ -61,6 +66,9 @@ export async function executeDataPlatformChartSync(
   const projectId = normalizePositiveIdentifier(options.projectId, '数据中台项目 ID');
   const projectRoot = normalizeProjectRoot(options.projectRoot);
   const baseUrl = options.baseUrl === undefined ? undefined : normalizeBaseUrl(options.baseUrl);
+  const webBaseUrl = options.webBaseUrl === undefined
+    ? (baseUrl ? inferDataPlatformWebBaseUrl(baseUrl) : undefined)
+    : normalizeBaseUrl(options.webBaseUrl);
   const syncedAt = normalizeTimestamp(options.syncedAt ?? new Date().toISOString());
   const pageSize = normalizePageSize(options.pageSize ?? DEFAULT_PAGE_SIZE);
   const charts: SyncedDataPlatformChart[] = [];
@@ -85,7 +93,13 @@ export async function executeDataPlatformChartSync(
     }
 
     page.records.forEach((screen, index) => {
-      const chart = createScreenEntry(screen, projectId, receivedScreenCount - page.records.length + index);
+      const chart = createScreenEntry(
+        screen,
+        projectId,
+        receivedScreenCount - page.records.length + index,
+        baseUrl,
+        webBaseUrl,
+      );
       if (chartIds.has(chart.id)) {
         throw new Error(`项目大屏稳定 ID 重复或冲突：${chart.id}`);
       }
@@ -107,6 +121,7 @@ export async function executeDataPlatformChartSync(
   const index = normalizeDataPlatformChartIndex({
     version: 1,
     ...(baseUrl === undefined ? {} : { baseUrl }),
+    ...(webBaseUrl === undefined ? {} : { webBaseUrl }),
     projectId,
     syncedAt,
     charts,
@@ -140,17 +155,28 @@ export async function readDataPlatformChartIndex(
   projectRoot: string,
   expectedProjectId: string,
   expectedBaseUrl?: string,
+  expectedWebBaseUrl?: string,
 ): Promise<DataPlatformChartIndex> {
   const projectId = normalizePositiveIdentifier(expectedProjectId, '数据中台项目 ID');
   const baseUrl = expectedBaseUrl === undefined ? undefined : normalizeBaseUrl(expectedBaseUrl);
+  const webBaseUrl = expectedWebBaseUrl === undefined
+    ? (baseUrl ? inferDataPlatformWebBaseUrl(baseUrl) : undefined)
+    : normalizeBaseUrl(expectedWebBaseUrl);
   try {
     const parsed = JSON.parse(await fs.readFile(getDataPlatformChartIndexPath(projectRoot), 'utf8')) as unknown;
-    const normalized = normalizeDataPlatformChartIndex(parsed);
+    const normalized = rebaseLegacyScreenUrls(
+      normalizeDataPlatformChartIndex(parsed),
+      baseUrl,
+      webBaseUrl,
+    );
     if (normalized.projectId !== projectId) {
       throw new Error(`图表索引项目不匹配：期望 ${projectId}，实际 ${normalized.projectId}。`);
     }
     if (baseUrl !== undefined && normalized.baseUrl !== baseUrl) {
       throw new Error('图表索引数据中台地址与当前项目绑定不匹配。');
+    }
+    if (webBaseUrl !== undefined && normalized.webBaseUrl !== undefined && normalized.webBaseUrl !== webBaseUrl) {
+      return createStaleDataPlatformChartIndex(projectId, baseUrl, webBaseUrl);
     }
     return normalized;
   } catch (error) {
@@ -158,6 +184,7 @@ export async function readDataPlatformChartIndex(
       return {
         version: 1,
         ...(baseUrl === undefined ? {} : { baseUrl }),
+        ...(webBaseUrl === undefined ? {} : { webBaseUrl }),
         projectId,
         syncedAt: new Date(0).toISOString(),
         charts: [],
@@ -175,11 +202,14 @@ export function normalizeDataPlatformChartIndex(value: unknown): DataPlatformCha
 
   const projectId = normalizePositiveIdentifier(value.projectId, '图表索引 projectId');
   const baseUrl = value.baseUrl === undefined ? undefined : normalizeBaseUrl(value.baseUrl);
+  const webBaseUrl = value.webBaseUrl === undefined
+    ? (baseUrl ? inferDataPlatformWebBaseUrl(baseUrl) : undefined)
+    : normalizeBaseUrl(value.webBaseUrl);
   const chartIds = new Set<string>();
   const charts: SyncedDataPlatformChart[] = [];
   value.charts.forEach((chart, index) => {
     if (isPlainObject(chart) && isLegacyWidgetChartType(chart.chartType)) return;
-    const normalized = normalizeChartEntry(chart, projectId, index);
+    const normalized = normalizeChartEntry(chart, projectId, index, baseUrl, webBaseUrl);
     if (chartIds.has(normalized.id)) throw new Error(`图表索引存在重复稳定 ID：${normalized.id}`);
     chartIds.add(normalized.id);
     charts.push(normalized);
@@ -189,6 +219,7 @@ export function normalizeDataPlatformChartIndex(value: unknown): DataPlatformCha
   return {
     version: 1,
     ...(baseUrl === undefined ? {} : { baseUrl }),
+    ...(webBaseUrl === undefined ? {} : { webBaseUrl }),
     projectId,
     syncedAt: normalizeTimestamp(value.syncedAt),
     charts,
@@ -204,8 +235,16 @@ function normalizeScreenPage(value: unknown, expectedPageNum: number, expectedPa
     throw new Error('数据中台项目大屏响应缺少 data.records。');
   }
 
-  const pageNum = normalizeNonNegativeInteger(value.data.pageNum, '项目大屏响应 pageNum');
-  const pageSize = normalizeNonNegativeInteger(value.data.pageSize, '项目大屏响应 pageSize');
+  const pageNum = normalizeOptionalPageEcho(
+    value.data.pageNum ?? value.data.current,
+    expectedPageNum,
+    '项目大屏响应 pageNum',
+  );
+  const pageSize = normalizeOptionalPageEcho(
+    value.data.pageSize ?? value.data.size,
+    expectedPageSize,
+    '项目大屏响应 pageSize',
+  );
   if (pageNum !== expectedPageNum) {
     throw new Error(`项目大屏响应页码 pageNum 不一致：期望 ${expectedPageNum}，实际 ${pageNum}。`);
   }
@@ -226,22 +265,34 @@ function createScreenEntry(
   screen: Record<string, unknown>,
   projectId: string,
   screenIndex: number,
+  baseUrl?: string,
+  webBaseUrl?: string,
 ): SyncedDataPlatformChart {
   const screenId = normalizePositiveIdentifier(screen.screenId, `第 ${screenIndex + 1} 项 screenId（大屏 ID）`);
   const screenName = normalizeRequiredText(screen.screenName, `第 ${screenIndex + 1} 项大屏名称`, 256);
   const screenCode = normalizeOptionalText(screen.screenCode, 256);
+  const screenUrl = normalizeScreenUrlOrDefault(screen.screenUrl, screenId, baseUrl, webBaseUrl);
+  const thumbnailUrl = normalizeOptionalHttpUrl(screen.thumbnailUrl, baseUrl);
   return {
     id: `${SCREEN_ID_PREFIX}${projectId}:${screenId}`,
     projectId,
     screenId,
     screenName,
     ...(screenCode === undefined ? {} : { screenCode }),
+    ...(screenUrl === undefined ? {} : { screenUrl }),
+    ...(thumbnailUrl === undefined ? {} : { thumbnailUrl }),
     name: screenName,
     chartType: 'SCREEN',
   };
 }
 
-function normalizeChartEntry(value: unknown, projectId: string, index: number): SyncedDataPlatformChart {
+function normalizeChartEntry(
+  value: unknown,
+  projectId: string,
+  index: number,
+  baseUrl?: string,
+  webBaseUrl?: string,
+): SyncedDataPlatformChart {
   if (!isPlainObject(value)) throw new Error(`图表索引第 ${index + 1} 项不是对象。`);
   const entryProjectId = normalizePositiveIdentifier(value.projectId, `图表索引第 ${index + 1} 项 projectId`);
   if (entryProjectId !== projectId) throw new Error(`图表索引第 ${index + 1} 项所属项目不匹配。`);
@@ -253,6 +304,8 @@ function normalizeChartEntry(value: unknown, projectId: string, index: number): 
   const expectedId = `${SCREEN_ID_PREFIX}${projectId}:${screenId}`;
   if (value.id !== expectedId) throw new Error(`图表索引第 ${index + 1} 项稳定 ID 无效。`);
   const screenCode = normalizeOptionalText(value.screenCode, 256);
+  const screenUrl = normalizeScreenUrlOrDefault(value.screenUrl, screenId, baseUrl, webBaseUrl);
+  const thumbnailUrl = normalizeOptionalHttpUrl(value.thumbnailUrl, baseUrl);
 
   return {
     id: expectedId,
@@ -260,9 +313,104 @@ function normalizeChartEntry(value: unknown, projectId: string, index: number): 
     screenId,
     screenName: normalizeRequiredText(value.screenName, `图表索引第 ${index + 1} 项 screenName`, 256),
     ...(screenCode === undefined ? {} : { screenCode }),
+    ...(screenUrl === undefined ? {} : { screenUrl }),
+    ...(thumbnailUrl === undefined ? {} : { thumbnailUrl }),
     name: normalizeRequiredText(value.name, `图表索引第 ${index + 1} 项 name`, 256),
     chartType: 'SCREEN',
   };
+}
+
+/**
+ * 旧版本已把 hash-only 大屏地址错误地固化到 API 根地址；读取时按当前绑定的页面地址即时修正，
+ * 让用户无需等待网络同步完成即可拖拽历史卡片。只有 URL 的路径、来源与旧根地址完全一致且仅携带
+ * `#/...` 片段时才迁移，避免改写用户明确填写的外部完整地址。
+ */
+function rebaseLegacyScreenUrls(
+  index: DataPlatformChartIndex,
+  expectedBaseUrl?: string,
+  expectedWebBaseUrl?: string,
+): DataPlatformChartIndex {
+  if (!expectedWebBaseUrl) return index;
+  if (index.webBaseUrl === expectedWebBaseUrl) return index;
+
+  const sourceBaseUrl = index.webBaseUrl ?? index.baseUrl ?? expectedBaseUrl;
+  const charts = index.charts.map((chart) => {
+    if (!sourceBaseUrl) return chart;
+    const rebasedUrl = rebaseLegacyHashScreenUrl(chart.screenUrl, sourceBaseUrl, expectedWebBaseUrl);
+    if (!rebasedUrl || rebasedUrl === chart.screenUrl) return chart;
+    return { ...chart, screenUrl: rebasedUrl };
+  });
+  const staleScreenUrl = charts.some((chart, indexInCharts) => {
+    const originalUrl = index.charts[indexInCharts]?.screenUrl;
+    if (!originalUrl) return false;
+    return chart.screenUrl === originalUrl && !isHashScreenUrlOnBase(originalUrl, expectedWebBaseUrl);
+  });
+  if (staleScreenUrl) {
+    return createStaleDataPlatformChartIndex(index.projectId, expectedBaseUrl ?? index.baseUrl, expectedWebBaseUrl);
+  }
+
+  return {
+    ...index,
+    webBaseUrl: expectedWebBaseUrl,
+    charts,
+  };
+}
+
+function createStaleDataPlatformChartIndex(
+  projectId: string,
+  baseUrl: string | undefined,
+  webBaseUrl: string,
+): DataPlatformChartIndex {
+  return {
+    version: 1,
+    ...(baseUrl === undefined ? {} : { baseUrl }),
+    webBaseUrl,
+    projectId,
+    syncedAt: new Date(0).toISOString(),
+    charts: [],
+  };
+}
+
+/** 判断大屏地址是否只是指定根地址上的 hash-only 页面，用于识别可安全迁移的历史 URL。 */
+function isHashScreenUrlOnBase(screenUrl: string, baseUrl: string): boolean {
+  try {
+    const parsed = new URL(screenUrl);
+    const root = new URL(`${baseUrl.replace(/\/+$/, '')}/`);
+    const normalizePath = (value: string): string => value.replace(/\/+$/, '') || '/';
+    return parsed.origin === root.origin
+      && normalizePath(parsed.pathname) === normalizePath(root.pathname)
+      && !parsed.search
+      && parsed.hash.startsWith('#/');
+  } catch {
+    return false;
+  }
+}
+
+function rebaseLegacyHashScreenUrl(
+  screenUrl: string | undefined,
+  sourceBaseUrl: string,
+  targetBaseUrl: string,
+): string | undefined {
+  if (!screenUrl) return undefined;
+
+  try {
+    const source = new URL(screenUrl);
+    const sourceRoot = new URL(`${sourceBaseUrl.replace(/\/+$/, '')}/`);
+    const targetRoot = new URL(`${targetBaseUrl.replace(/\/+$/, '')}/`);
+    const normalizePath = (value: string): string => value.replace(/\/+$/, '') || '/';
+
+    if (
+      source.origin !== sourceRoot.origin
+      || normalizePath(source.pathname) !== normalizePath(sourceRoot.pathname)
+      || source.search
+      || !source.hash.startsWith('#/')
+    ) return undefined;
+
+    targetRoot.hash = source.hash;
+    return targetRoot.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function isLegacyWidgetChartType(value: unknown): boolean {
@@ -303,6 +451,33 @@ function normalizeBaseUrl(value: unknown): string {
   return parsed.toString().replace(/\/+$/, '');
 }
 
+/** 源码单测会直接加载本模块，因此在此保持无本地模块依赖的兼容推导。 */
+function inferDataPlatformWebBaseUrl(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl.trim());
+    if (isPrivateOrLocalHostname(url.hostname) && (url.port === '8086' || url.port === '18087')) {
+      url.port = '8001';
+    }
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return baseUrl.trim().replace(/\/+$/, '');
+  }
+}
+
+function isPrivateOrLocalHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  if (normalized === 'localhost' || normalized === '::1' || normalized === '[::1]') return true;
+  if (/^127\.(?:\d{1,3}\.){2}\d{1,3}$/.test(normalized)) return true;
+  if (/^10\.(?:\d{1,3}\.){2}\d{1,3}$/.test(normalized)) return true;
+  if (/^192\.168\.(?:\d{1,3}\.)\d{1,3}$/.test(normalized)) return true;
+  const private172 = normalized.match(/^172\.(\d{1,3})\.(?:\d{1,3}\.)\d{1,3}$/);
+  if (!private172) return false;
+  const secondOctet = Number(private172[1]);
+  return secondOctet >= 16 && secondOctet <= 31;
+}
+
 function normalizeTimestamp(value: unknown): string {
   if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) throw new Error('图表同步时间无效。');
   return new Date(value).toISOString();
@@ -323,6 +498,90 @@ function normalizeNonNegativeInteger(value: unknown, label: string): number {
   }
   if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${label} 必须是非负安全整数。`);
   return value as number;
+}
+
+/** 兼容旧版项目关系接口不回显分页字段，以及 MyBatis Page 的 current/size 字段。 */
+function normalizeOptionalPageEcho(value: unknown, fallback: number, label: string): number {
+  return value === undefined || value === null
+    ? fallback
+    : normalizeNonNegativeInteger(value, label);
+}
+
+/** 将中台返回的相对地址固化为绝对 HTTP(S) URL，非法地址只降级为无预览元数据。 */
+function normalizeOptionalHttpUrl(value: unknown, baseUrl?: string): string | undefined {
+  const normalized = normalizeOptionalText(value, 2048);
+  if (!normalized) return undefined;
+
+  let parsed: URL;
+  try {
+    parsed = baseUrl
+      ? new URL(normalized, `${baseUrl.replace(/\/+$/, '')}/`)
+      : new URL(normalized);
+  } catch {
+    return undefined;
+  }
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username || parsed.password) {
+    return undefined;
+  }
+  return parsed.toString();
+}
+
+/** 将大屏页面地址解析到 Web 根；若历史数据把 hash 页面写成 API 根地址，则迁移到页面根。 */
+function normalizeScreenUrl(
+  value: unknown,
+  apiBaseUrl?: string,
+  webBaseUrl?: string,
+): string | undefined {
+  const normalized = normalizeOptionalText(value, 2048);
+  if (!normalized) return undefined;
+
+  let parsed: URL;
+  try {
+    parsed = webBaseUrl
+      ? new URL(normalized, `${webBaseUrl.replace(/\/+$/, '')}/`)
+      : apiBaseUrl
+        ? new URL(normalized, `${apiBaseUrl.replace(/\/+$/, '')}/`)
+        : new URL(normalized);
+  } catch {
+    return undefined;
+  }
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username || parsed.password) {
+    return undefined;
+  }
+
+  const resolved = parsed.toString();
+  if (!apiBaseUrl || !webBaseUrl || apiBaseUrl === webBaseUrl || !parsed.hash.startsWith('#/')) {
+    return resolved;
+  }
+
+  return rebaseLegacyHashScreenUrl(resolved, apiBaseUrl, webBaseUrl) ?? resolved;
+}
+
+/** 中台未回显页面地址时，按已校验的大屏 ID生成预览页；显式非法地址仍保持无预览。 */
+function normalizeScreenUrlOrDefault(
+  value: unknown,
+  screenId: string,
+  apiBaseUrl?: string,
+  webBaseUrl?: string,
+): string | undefined {
+  const normalized = normalizeScreenUrl(value, apiBaseUrl, webBaseUrl);
+  if (normalized !== undefined) return normalized;
+  if (value !== undefined && value !== null && (typeof value !== 'string' || value.trim() !== '')) return undefined;
+
+  const pageBaseUrl = webBaseUrl ?? apiBaseUrl;
+  if (!pageBaseUrl) return undefined;
+  try {
+    const generated = new URL(
+      `${pageBaseUrl.replace(/\/+$/, '')}/#/bigscreen-designer/preview/${screenId}`,
+    );
+    return (generated.protocol === 'http:' || generated.protocol === 'https:')
+      && !generated.username
+      && !generated.password
+      ? generated.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeRequiredText(value: unknown, label: string, maxLength: number): string {

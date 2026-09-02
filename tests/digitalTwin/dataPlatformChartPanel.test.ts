@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const PROJECT_PANEL_PATH = 'src/editor/panels/ProjectPanel.tsx';
+const SCENE_VIEW_PANEL_PATH = 'src/editor/panels/SceneViewPanel.tsx';
 
 test('图表库只展示当前绑定项目大屏并支持名称和编码筛选', () => {
   const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
@@ -45,13 +46,17 @@ test('场景切换清空旧图表且迟到结果和进度不能覆盖新项目',
   assert.ok(source.includes('progress.contextKey !== chartSyncContextKeyRef.current'));
 });
 
-test('同步图表卡片保持只读，不进入点击或拖拽创建链路', () => {
-  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+test('同步大屏卡片仅展示，不可点击创建或拖入 Scene/视窗', () => {
+  const projectSource = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const sceneSource = readFileSync(SCENE_VIEW_PANEL_PATH, 'utf8');
 
-  assert.ok(source.includes('const isSyncedChart = isDataPlatformChartLibraryItem(item)'));
-  assert.ok(source.includes('if (isDataPlatformChartLibraryItem(item)) return;'));
-  assert.ok(source.includes('if (isDataPlatformChartLibraryItem(item)) {'));
-  assert.ok(source.includes('const isActionableItem = !isSyncedChart'));
-  assert.ok(source.includes('同步自数据中台的大屏'));
-  assert.equal(source.includes("item.syncedChart.chartType === 'SCREEN'"), false);
+  assert.ok(projectSource.includes('createDataPlatformChartLibraryItems(syncedCharts)'));
+  assert.ok(projectSource.includes('matchesDataPlatformChartLibrarySearch(item, normalizedLibraryFilter)'));
+  assert.ok(projectSource.includes('数据中台同步大屏：${item.name}'));
+  assert.ok(projectSource.includes('const isActionableItem ='));
+  assert.equal(projectSource.includes('DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE'), false);
+  assert.equal(projectSource.includes('setViewportDataPlatformScreen'), false);
+  assert.equal(sceneSource.includes('DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE'), false);
+  assert.equal(sceneSource.includes('decodeDataPlatformScreenDragPayload'), false);
+  assert.equal(sceneSource.includes('setViewportDataPlatformScreen'), false);
 });

@@ -45,7 +45,18 @@ test('图表库快照按当前绑定上下文读取并在未绑定时返回空�
   assert.ok(source.includes('readDataPlatformChartIndex('));
   assert.ok(source.includes('binding.projectRoot'));
   assert.ok(source.includes('binding.metadata.projectId'));
-  assert.ok(source.includes('binding.metadata.baseUrl'));
+  assert.ok(source.includes('context.baseUrl'));
+  assert.ok(source.includes('context.webBaseUrl'));
+});
+
+test('图表同步 IPC 入口始终使用当前持久化配置地址', () => {
+  const source = readFileSync(DATA_PLATFORM_IPC_PATH, 'utf8');
+
+  assert.ok(source.includes("const config = await readDataPlatformConfig();"));
+  assert.ok(source.includes("return startDataPlatformChartSync({"));
+  assert.ok(source.includes("return retryDataPlatformChartSync({"));
+  assert.ok(source.includes('baseUrl: config.baseUrl'));
+  assert.ok(source.includes('webBaseUrl: config.webBaseUrl || config.baseUrl'));
 });
 
 test('IPC 与两个 preload 入口暴露图表同步、重试、快照和进度订阅', () => {
