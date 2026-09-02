@@ -34,7 +34,6 @@ import {
 } from './runtimeConfig';
 import { DigitalTwinInteractionController } from './DigitalTwinInteractionController';
 import { hasManualRoamSpawnEntity, resolveManualRoamSpawnPose } from '../editor/model/manualRoamSpawn';
-import { findBuiltInSlotEntityId } from '../editor/model/builtInSlotBinding';
 import {
   CLICK_EVENT_FOCUS_DURATION_MS,
   CLICK_EVENT_FOCUS_RADIUS_SCALE,
@@ -502,17 +501,14 @@ export function PlayerApp() {
           onSelectionClick: ({ clientX, clientY }) => {
             if (disposed || !runtime) return;
             pauseHistoryReplay();
-            const entityId = runtime.pickRuntimeModelEntityIdAtCanvasPoint(clientX, clientY, canvas);
-            // 命中货架时顺带反解内置货格命中格，供点击单元事件决议使用。
+            const modelHit = runtime.pickRuntimeModelHitAtCanvasPoint(clientX, clientY, canvas);
+            // 货格反解对所有内置货格填充体做射线检测取最近命中，避免透过前排货架空格穿透到另一排。
+            const cellHit = runtime.pickBuiltInSlotCellAtCanvasPoint(clientX, clientY, canvas);
+            let entityId = modelHit?.entityId ?? null;
             let pickedCell: ClickEventBindingPickedCell | null = null;
-            if (entityId) {
-              const locatorEntityId = findBuiltInSlotEntityId(sceneDocument, entityId);
-              const cell = locatorEntityId
-                ? runtime.pickLocatorCellAtCanvasPoint(clientX, clientY, canvas, locatorEntityId)
-                : null;
-              if (locatorEntityId && cell) {
-                pickedCell = { locatorEntityId, row: cell.row, column: cell.column, layer: cell.layer };
-              }
+            if (cellHit && (!modelHit || !modelHit.precise || modelHit.entityId === cellHit.hostEntityId || cellHit.distance < modelHit.distance)) {
+              entityId = cellHit.hostEntityId;
+              pickedCell = { locatorEntityId: cellHit.locatorEntityId, row: cellHit.row, column: cellHit.column, layer: cellHit.layer };
             }
             // 场景存在已注册设备类型的点击事件绑定时点击行为全接管：
             // 命中注册设备按事件效果执行（点击单元优先于点击，命中货格只高亮单格线框），

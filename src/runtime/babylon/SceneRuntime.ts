@@ -1657,7 +1657,7 @@ export class SceneRuntime {
 
   /** 在画布客户端坐标位置拾取可编辑 Mesh，并把 thinInstanceIndex 还原为具体阵列实体 ID。 */
   pickEntityIdAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): string | null {
-    return this.pickSceneEntityIdAtCanvasPoint(clientX, clientY, canvas, 'editable');
+    return this.pickSceneEntityHitAtCanvasPoint(clientX, clientY, canvas, 'editable')?.entityId ?? null;
   }
 
   /** 运行预览和发布 Viewer 只读拾取真实业务模型；locked 不影响查看，但隐藏和辅助对象仍被过滤。 */
@@ -1666,58 +1666,146 @@ export class SceneRuntime {
     clientY: number,
     canvas: HTMLCanvasElement,
   ): string | null {
-    return this.pickSceneEntityIdAtCanvasPoint(clientX, clientY, canvas, 'runtime-model');
+    return this.pickSceneEntityHitAtCanvasPoint(clientX, clientY, canvas, 'runtime-model')?.entityId ?? null;
   }
 
-  /** 在画布客户端坐标位置反解指定货格被命中的格子，返回业务 排-列-层；未命中货格区域时返回 null。 */
-  pickLocatorCellAtCanvasPoint(
+  /** 同 pickRuntimeModelEntityIdAtCanvasPoint，附带命中距离用于与货格填充体命中做前后比较。 */
+  pickRuntimeModelHitAtCanvasPoint(
     clientX: number,
     clientY: number,
     canvas: HTMLCanvasElement,
-    locatorEntityId: string,
-  ): { row: number; column: number; layer: number } | null {
+  ): { entityId: string; distance: number; precise: boolean } | null {
+    return this.pickSceneEntityHitAtCanvasPoint(clientX, clientY, canvas, 'runtime-model');
+  }
+
+  /**
+   * 对所有内置绑定货格做解析射线拾取，返回最近命中格（业务 排-列-层）、宿主与命中距离。
+   * 不用网格拾取：预览里货格 root 被禁用，拾取不稳定；且货架是框架，模型拾取会透过空格命中后排。
+   * 改为在货格局部空间做射线与网格范围盒的 slab 求交，进入点直接归格：
+   * 前/背/侧面进入时进入点即点击格面；顶/底面进入（近似俯视/仰视）时视线落在顶/底面上，
+   * 用户看到的就是最顶/底层，进入点同时给出正确列与层。
+   * 相机在盒内（飞行穿行）时改用射线朝向前方的前/背表面平面交点归格。
+   * 多排竞争按射线真实命中盒体的先后排序，避免穿透到另一排。
+   */
+  pickBuiltInSlotCellAtCanvasPoint(
+    clientX: number,
+    clientY: number,
+    canvas: HTMLCanvasElement,
+  ): { locatorEntityId: string; hostEntityId: string; row: number; column: number; layer: number; distance: number } | null {
     const point = this.getCanvasPickPoint(clientX, clientY, canvas);
     if (!point) return null;
-    const entry = this.locators.get(locatorEntityId);
-    // 运行预览会隐藏货格线框，但反解仍需生效；自定义 predicate 的 pick 不受显隐影响，故不检查 isEnabled。
-    if (!entry || entry.fillMesh.isDisposed()) return null;
+    const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
+    if (!camera) return null;
+    const ray = this.scene.createPickingRay(point.x, point.y, Matrix.Identity(), camera);
 
-    const inverseWorld = entry.root.getWorldMatrix().invert();
-    let local: Vector3 | null = null;
-    // 定向拾取货格填充盒（连续=单大盒，离散=thinInstance 格盒）；自定义 predicate 跳过默认 isPickable 检查。
-    const pick = this.scene.pick(point.x, point.y, (mesh) => mesh === entry.fillMesh);
-    if (pick?.hit && pick.pickedPoint) {
-      local = Vector3.TransformCoordinates(pick.pickedPoint, inverseWorld);
-    } else {
-      // 有间隔时点击立柱/横梁会让射线从格子间隙穿过；退化为射线与货格根节点 z=0 平面的交点，就近归格。
-      const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
-      if (!camera) return null;
-      const ray = this.scene.createPickingRay(point.x, point.y, Matrix.Identity(), camera);
+    let bestEntityId: string | null = null;
+    let bestEntry: LocatorRuntimeEntry | null = null;
+    let bestLocal: Vector3 | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const [entityId, entry] of this.locators) {
+      if (entry.fillMesh.isDisposed()) continue;
+      // 只有内置绑定货格参与点击单元拾取；独立摆放的货格线框不算单元。
+      const hostEntityId = this.syncedEntities.get(entityId)?.components.locator?.builtInBinding?.hostEntityId;
+      if (!hostEntityId) continue;
+
+      const worldMatrix = entry.root.getWorldMatrix();
+      // Matrix.invert() 原地修改，而 getWorldMatrix() 返回节点内部矩阵引用，
+      // 原地逆转会腐蚀该节点世界矩阵并使下方 worldPoint 计算失真；必须用静态版生成新矩阵。
+      const inverseWorld = Matrix.Invert(worldMatrix);
       const origin = Vector3.TransformCoordinates(ray.origin, inverseWorld);
       const direction = Vector3.TransformNormal(ray.direction, inverseWorld);
-      if (Math.abs(direction.z) < 1e-8) return null;
-      const t = -origin.z / direction.z;
-      if (t <= 0) return null;
-      local = origin.add(direction.scale(t));
+
+      // 网格范围盒：列向 x、层向 y、进深 z；与 buildLocatorGridMeshes 的中心公式同源。
+      const { length, height, width } = entry.cellSize;
+      const spanMinX = Math.min(0, (entry.columns - 1) * entry.cellSteps.columnStepX);
+      const spanMaxX = Math.max(0, (entry.columns - 1) * entry.cellSteps.columnStepX);
+      const minX = spanMinX - length / 2;
+      const maxX = spanMaxX + length / 2;
+      const minY = 0;
+      const maxY = (entry.layers - 1) * entry.cellSteps.layerStepY + height;
+      const minZ = -width / 2;
+      const maxZ = width / 2;
+
+      const slabs = [
+        { o: origin.x, d: direction.x, min: minX, max: maxX },
+        { o: origin.y, d: direction.y, min: minY, max: maxY },
+        { o: origin.z, d: direction.z, min: minZ, max: maxZ },
+      ];
+      let tEnter = -Infinity;
+      let tExit = Infinity;
+      let intersects = true;
+      for (const slab of slabs) {
+        if (Math.abs(slab.d) < 1e-8) {
+          if (slab.o < slab.min || slab.o > slab.max) { intersects = false; break; }
+          continue;
+        }
+        let t0 = (slab.min - slab.o) / slab.d;
+        let t1 = (slab.max - slab.o) / slab.d;
+        if (t0 > t1) [t0, t1] = [t1, t0];
+        if (t0 > tEnter) tEnter = t0;
+        tExit = Math.min(tExit, t1);
+        if (tEnter > tExit) { intersects = false; break; }
+      }
+      if (!intersects || tExit <= 0) continue;
+
+      let local: Vector3;
+      let tHit: number;
+      if (tEnter > 0) {
+        // 前/背/侧面进入：进入点即点击格面。顶/底面进入（近似俯视/仰视）时视线落在顶/底面上，
+        // 用户看到的就是最顶/底层，进入点同时给出正确列与层 —— 不能改用前表面平面交点，
+        // 近垂直视线下该交点会沿列向飞出网格，被钳制到起始/终结列。
+        local = origin.add(direction.scale(tEnter));
+        tHit = tEnter;
+      } else {
+        // 相机在盒内：按射线朝向取前方的前/背表面平面交点（列准确，层按该面投影）。
+        const faceZ = direction.z >= 0 ? maxZ : minZ;
+        if (Math.abs(direction.z) < 1e-8) continue;
+        const tFace = (faceZ - origin.z) / direction.z;
+        if (tFace <= 0) continue;
+        local = origin.add(direction.scale(tFace));
+        tHit = tFace;
+      }
+
+      // 前表面平面交点可能超出网格范围（如在盒子上方），钳制回范围后就近归格。
+      const clamped = new Vector3(
+        Math.min(maxX, Math.max(minX, local.x)),
+        Math.min(maxY, Math.max(minY, local.y)),
+        local.z,
+      );
+      // 多排竞争按射线真实命中盒体的先后排序；钳制后的点可能偏离射线，不能用于距离比较。
+      const worldPoint = Vector3.TransformCoordinates(origin.add(direction.scale(tHit)), worldMatrix);
+      const distance = Vector3.Distance(ray.origin, worldPoint);
+      if (distance >= bestDistance) continue;
+      bestEntityId = entityId;
+      bestEntry = entry;
+      bestLocal = clamped;
+      bestDistance = distance;
     }
+    if (!bestEntry || !bestEntityId || !bestLocal) return null;
+    const hostEntityId = this.syncedEntities.get(bestEntityId)?.components.locator?.builtInBinding?.hostEntityId;
+    if (!hostEntityId) return null;
 
     // 与 buildLocatorGridMeshes 的格子中心公式同源：中心 (col*stepX, height/2 + layer*stepY, 0)。
-    const columnIndex = Math.min(entry.columns - 1, Math.max(0, Math.round(local.x / entry.cellSteps.columnStepX)));
-    const layerIndex = Math.min(entry.layers - 1, Math.max(0, Math.round((local.y - entry.cellSize.height / 2) / entry.cellSteps.layerStepY)));
+    const columnIndex = Math.min(bestEntry.columns - 1, Math.max(0, Math.round(bestLocal.x / bestEntry.cellSteps.columnStepX)));
+    const layerIndex = Math.min(bestEntry.layers - 1, Math.max(0, Math.round((bestLocal.y - bestEntry.cellSize.height / 2) / bestEntry.cellSteps.layerStepY)));
     return {
-      row: entry.rowNumber,
-      column: entry.startColumn + (entry.columnReversed ? entry.columns - 1 - columnIndex : columnIndex),
-      layer: entry.startLayer + layerIndex,
+      locatorEntityId: bestEntityId,
+      hostEntityId,
+      row: bestEntry.rowNumber,
+      column: bestEntry.startColumn + (bestEntry.columnReversed ? bestEntry.columns - 1 - columnIndex : columnIndex),
+      layer: bestEntry.startLayer + layerIndex,
+      distance: bestDistance,
     };
   }
 
   /** 按编辑或运行态策略执行最近可见实体拾取，并统一处理 thinInstance 与模型显示范围兜底。 */
-  private pickSceneEntityIdAtCanvasPoint(
+  private pickSceneEntityHitAtCanvasPoint(
     clientX: number,
     clientY: number,
     canvas: HTMLCanvasElement,
     mode: 'editable' | 'runtime-model',
-  ): string | null {
+  ): { entityId: string; distance: number; precise: boolean } | null {
     const point = this.getCanvasPickPoint(clientX, clientY, canvas);
     if (!point) return null;
     const isCandidate = (entityId: string): boolean => mode === 'runtime-model'
@@ -1741,7 +1829,7 @@ export class SceneRuntime {
         picked.pickedMesh ?? null,
         typeof picked.thinInstanceIndex === 'number' ? picked.thinInstanceIndex : null,
       );
-      if (entityId && isCandidate(entityId)) return entityId;
+      if (entityId && isCandidate(entityId)) return { entityId, distance: picked.distance, precise: true };
     }
 
     const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
@@ -1762,7 +1850,7 @@ export class SceneRuntime {
       nearestDistance = distance;
     }
 
-    return nearestEntityId;
+    return nearestEntityId ? { entityId: nearestEntityId, distance: nearestDistance, precise: false } : null;
   }
   /** 将画布客户端坐标投射到世界 y=0 地面平面，用于拖拽释放时按鼠标位置放置模型。 */
   getGroundPointAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): Vector3Data | null {

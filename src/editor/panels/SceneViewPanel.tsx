@@ -22,7 +22,6 @@ import {
   type SceneModelSelectionPointerSnapshot,
 } from '../../shared/sceneModelSelectionPointer';
 import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
-import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
 import {
   CLICK_EVENT_FOCUS_DURATION_MS,
   CLICK_EVENT_FOCUS_RADIUS_SCALE,
@@ -733,37 +732,47 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       }
     }
 
-    const pickedEntityId = isRuntimePreview
-      ? runtimeRef.current?.pickRuntimeModelEntityIdAtCanvasPoint(
+    const previewModelHit = isRuntimePreview
+      ? runtimeRef.current?.pickRuntimeModelHitAtCanvasPoint(
           selectionClick.clientX,
           selectionClick.clientY,
           event.currentTarget,
         ) ?? null
+      : null;
+    let pickedEntityId = isRuntimePreview
+      ? previewModelHit?.entityId ?? null
       : runtimeRef.current?.pickEntityIdAtCanvasPoint(
           selectionClick.clientX,
           selectionClick.clientY,
           event.currentTarget,
         ) ?? null;
-    // 货架被点中时顺带反解内置货格命中格，输出 排-列-层 方便对照泊位；不改变任何选中行为。
+    // 货格反解改为对所有内置货格填充体做射线检测取最近命中：货架是框架，透过前排空格时
+    // 模型拾取会命中后排货架（穿透到另一排），填充体深度比较保证最近一排的格子胜出。
+    const cellHit = runtimeRef.current?.pickBuiltInSlotCellAtCanvasPoint(
+      selectionClick.clientX,
+      selectionClick.clientY,
+      event.currentTarget,
+    ) ?? null;
     let pickedCell: ClickEventBindingPickedCell | null = null;
-    if (pickedEntityId) {
-      const state = useEditorStore.getState();
-      const locatorEntityId = findBuiltInSlotEntityId(state.scene, pickedEntityId);
-      const cell = locatorEntityId
-        ? runtimeRef.current?.pickLocatorCellAtCanvasPoint(
-            selectionClick.clientX,
-            selectionClick.clientY,
-            event.currentTarget,
-            locatorEntityId,
-          ) ?? null
-        : null;
-      if (locatorEntityId && cell) {
-        pickedCell = { locatorEntityId, row: cell.row, column: cell.column, layer: cell.layer };
+    if (isRuntimePreview) {
+      // 包围盒兜底命中（precise=false）是穿过框架空隙后的保守估计，不得压过货格解析命中：
+      // 否则端面点击会先被货架前方巷道设备的包围盒截获，开口空洞永远点不中。
+      if (cellHit && (!previewModelHit || !previewModelHit.precise || previewModelHit.entityId === cellHit.hostEntityId || cellHit.distance < previewModelHit.distance)) {
+        pickedEntityId = cellHit.hostEntityId;
+        pickedCell = { locatorEntityId: cellHit.locatorEntityId, row: cellHit.row, column: cellHit.column, layer: cellHit.layer };
+        const state = useEditorStore.getState();
         const host = state.scene.entities[pickedEntityId];
         const assetCode = host?.components.modelAsset?.assetCode;
         const hostLabel = `${host?.name ?? pickedEntityId}${assetCode ? `（${assetCode}）` : ''}`;
-        state.pushLog(`命中货格：${hostLabel} ${cell.row}-${cell.column}-${cell.layer}（排-列-层）`);
+        state.pushLog(`命中货格：${hostLabel} ${cellHit.row}-${cellHit.column}-${cellHit.layer}（排-列-层）`);
       }
+    } else if (cellHit && pickedEntityId && cellHit.hostEntityId === pickedEntityId) {
+      pickedCell = { locatorEntityId: cellHit.locatorEntityId, row: cellHit.row, column: cellHit.column, layer: cellHit.layer };
+      const state = useEditorStore.getState();
+      const host = state.scene.entities[pickedEntityId];
+      const assetCode = host?.components.modelAsset?.assetCode;
+      const hostLabel = `${host?.name ?? pickedEntityId}${assetCode ? `（${assetCode}）` : ''}`;
+      state.pushLog(`命中货格：${hostLabel} ${cellHit.row}-${cellHit.column}-${cellHit.layer}（排-列-层）`);
     }
     // 运行预览下场景存在已注册设备类型的点击事件绑定时点击行为全接管：
     // 命中注册设备按事件效果执行（点击单元优先于点击，命中货格只高亮单格线框），
