@@ -5,7 +5,10 @@ import { createBabylonViewport, type BabylonViewport, type BabylonViewportRuntim
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../runtime/babylon/cameraControlStandard';
 import { SceneRuntime, type SceneRuntimeModelLoadProgress } from '../runtime/babylon/SceneRuntime';
-import { buildDigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
+import { DataPlatformScreenOverlay } from '../runtime/babylon/DataPlatformScreenOverlay';
+import { DataPlatformViewportScreenOverlay } from '../runtime/babylon/DataPlatformViewportScreenOverlay';
+import type { DataPlatformScreenOverlayItem } from '../runtime/babylon/SceneRuntime';
+import { findDigitalTwinAsset, buildDigitalTwinAssetIndex, type DigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
 import { buildDigitalTwinSlotIndex } from '../shared/digitalTwinSlotCodes';
 import { bindSceneModelSelectionPointer } from '../shared/sceneModelSelectionPointer';
 import {
@@ -33,6 +36,9 @@ import {
   type PlayerRuntimeConfig,
 } from './runtimeConfig';
 import { DigitalTwinInteractionController } from './DigitalTwinInteractionController';
+import type { DataPlatformScreenCommand } from '../runtime/babylon/dataPlatformScreenBridge';
+import type { DataPlatformViewportScreenComponent } from '../editor/model/dataPlatformScreen';
+import type { SceneDocument } from '../editor/model/SceneDocument';
 import { hasManualRoamSpawnEntity, resolveManualRoamSpawnPose } from '../editor/model/manualRoamSpawn';
 import {
   CLICK_EVENT_FOCUS_DURATION_MS,
@@ -58,6 +64,8 @@ import {
 import { ManualRoamControls } from '../shared/ui/ManualRoamControls';
 import { useAutoPatrolInspectionHistory } from '../shared/ui/useAutoPatrolInspectionHistory';
 import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
+import { FullscreenGlyph } from '../shared/ui/FullscreenGlyph';
+import { useElementFullscreen } from '../shared/ui/useElementFullscreen';
 import {
   createInitialManualRoamSnapshot,
   ManualRoamRuntime,
@@ -170,12 +178,21 @@ function applySceneBackground(viewport: BabylonViewport, color: string): void {
 
 /** 独立 Web Viewer 根组件，负责配置、资源、场景、遥测和完整释放生命周期。 */
 export function PlayerApp() {
+  const playerRootRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const sceneFullscreen = useElementFullscreen(playerRootRef);
   const viewportRef = useRef<BabylonViewport | null>(null);
+  const runtimeRef = useRef<SceneRuntime | null>(null);
   const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
   const autoPatrolStartGateRef = useRef<DeferredAutoPatrolStartGate | null>(null);
   const manualRoamRef = useRef<ManualRoamRuntime | null>(null);
+  const dataPlatformScreenContextRef = useRef<{
+    sceneDocument: SceneDocument;
+    assetIndex: DigitalTwinAssetIndex;
+  } | null>(null);
   const [phase, setPhase] = useState<PlayerPhase>('loading');
+  const [viewerSelectedEntityIds, setViewerSelectedEntityIds] = useState<string[]>([]);
+  const [viewportScreen, setViewportScreen] = useState<DataPlatformViewportScreenComponent | null>(null);
   const [autoPatrolRoutes, setAutoPatrolRoutes] = useState<AutoPatrolPlaybackRoute[]>([]);
   const [autoPatrolSnapshot, setAutoPatrolSnapshot] = useState<AutoPatrolPlaybackSnapshot>(IDLE_AUTO_PATROL_SNAPSHOT);
   const [autoPatrolRecordStore, setAutoPatrolRecordStore] = useState<AutoPatrolInspectionRecordStore | null>(null);
@@ -227,6 +244,43 @@ export function PlayerApp() {
     autoPatrolPlaybackRef.current?.stop();
     viewportRef.current?.cancelCameraTransition('manual-input');
   }, []);
+  const handleDataPlatformScreenCommand = useCallback((
+    _item: DataPlatformScreenOverlayItem | null,
+    command: DataPlatformScreenCommand,
+  ): void => {
+    const runtime = runtimeRef.current;
+    const context = dataPlatformScreenContextRef.current;
+    if (!runtime || !context) return;
+    if (command.type === 'screen.clearSelection') {
+      runtime.clearExternalHighlight();
+      return;
+    }
+
+    const entityId = command.payload.entityId
+      ?? (command.payload.assetCode
+        ? (() => {
+          const lookup = findDigitalTwinAsset(context.assetIndex, command.payload.assetCode);
+          return lookup.status === 'found' ? lookup.entityId : null;
+        })()
+        : null);
+    if (!entityId || !context.sceneDocument.entities[entityId]) {
+      setRuntimeMessage('大屏联动目标不存在或资产编号不唯一。');
+      return;
+    }
+
+    runtime.setExternalHighlightEntityIds([entityId]);
+    if (command.type !== 'screen.focusEntity') return;
+    const bounds = runtime.getEntitiesWorldBounds([entityId]);
+    const viewport = viewportRef.current;
+    if (!bounds || !viewport) {
+      setRuntimeMessage('大屏联动目标的三维几何尚未就绪。');
+      return;
+    }
+    viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS });
+  }, []);
+  const handleViewportDataPlatformScreenCommand = useCallback((command: DataPlatformScreenCommand): void => {
+    handleDataPlatformScreenCommand(null, command);
+  }, [handleDataPlatformScreenCommand]);
   const {
     history: autoPatrolHistory,
     handleHistoryAction,
@@ -327,8 +381,10 @@ export function PlayerApp() {
 
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
+        setViewportScreen(sceneDocument.sceneSettings.viewportScreen);
         const digitalTwinAssetIndex = buildDigitalTwinAssetIndex(sceneDocument);
         const digitalTwinSlotIndex = buildDigitalTwinSlotIndex(sceneDocument);
+        dataPlatformScreenContextRef.current = { sceneDocument, assetIndex: digitalTwinAssetIndex };
         if (parsedConfig.digitalTwin) {
           sceneDocument.fetchConfig = resolvePublishedFetchConfig(sceneDocument.fetchConfig, projectRuntimeConfig);
         }
@@ -387,6 +443,7 @@ export function PlayerApp() {
             setModelLoadProgress(progress);
           },
         );
+        runtimeRef.current = runtime;
         runtime.disableEditorLightMarkers();
         runtime.disableEditorAutoPatrolMarkers();
         runtime.disableEditorManualRoamSpawnMarkers();
@@ -500,6 +557,12 @@ export function PlayerApp() {
           clickTolerancePx: DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx,
           onSelectionClick: ({ clientX, clientY }) => {
             if (disposed || !runtime) return;
+            const updateViewerSelection = (entityIds: readonly string[]): void => {
+              const nextEntityIds = [...entityIds];
+              localHighlightedEntityIds = nextEntityIds;
+              setViewerSelectedEntityIds(nextEntityIds);
+              runtime!.setLocalHighlightEntityIds(nextEntityIds);
+            };
             pauseHistoryReplay();
             const modelHit = runtime.pickRuntimeModelHitAtCanvasPoint(clientX, clientY, canvas);
             // 货格反解对所有内置货格填充体做射线检测取最近命中，避免透过前排货架空格穿透到另一排。
@@ -516,22 +579,19 @@ export function PlayerApp() {
             // 巡检手动事件（triggerManualEventsForTarget）与绑定系统正交，命中有效目标时照常触发。
             const resolution = resolveClickEventBindingClick(sceneDocument, entityId, pickedCell);
             if (resolution.kind === 'pass-through') {
-              localHighlightedEntityIds = entityId ? [entityId] : [];
-              runtime.setLocalHighlightEntityIds(localHighlightedEntityIds);
+              updateViewerSelection(entityId ? [entityId] : []);
               if (entityId) autoPatrolPlayback?.triggerManualEventsForTarget(entityId);
               return;
             }
             if (resolution.kind === 'clear') {
-              localHighlightedEntityIds = [];
-              runtime.setLocalHighlightEntityIds([]);
+              updateViewerSelection([]);
               runtime.setLocalSlotHighlight('', null);
               return;
             }
             if (resolution.kind === 'ignore') return;
             if (resolution.kind === 'trigger-cell') {
               if (resolution.effects.includes('highlight')) {
-                localHighlightedEntityIds = [];
-                runtime.setLocalHighlightEntityIds([]);
+                updateViewerSelection([]);
                 runtime.setLocalSlotHighlight(resolution.locatorEntityId, resolution.cell);
                 autoPatrolPlayback?.triggerManualEventsForTarget(resolution.entityId);
               } else {
@@ -547,8 +607,7 @@ export function PlayerApp() {
             }
             runtime.setLocalSlotHighlight('', null);
             if (resolution.effects.includes('highlight')) {
-              localHighlightedEntityIds = [resolution.entityId];
-              runtime.setLocalHighlightEntityIds(localHighlightedEntityIds);
+              updateViewerSelection([resolution.entityId]);
               autoPatrolPlayback?.triggerManualEventsForTarget(resolution.entityId);
             }
             if (resolution.effects.includes('focus')) {
@@ -716,6 +775,9 @@ export function PlayerApp() {
         autoPatrolIntegration?.dispose();
         setAutoPatrolRecordStore(null);
         autoPatrolPlaybackRef.current = null;
+        dataPlatformScreenContextRef.current = null;
+        setViewportScreen(null);
+        runtimeRef.current = null;
         viewportRef.current = null;
         canvasResizeObserver?.disconnect();
         canvasResizeObserver = null;
@@ -756,6 +818,9 @@ export function PlayerApp() {
       autoPatrolIntegration?.dispose();
       setAutoPatrolRecordStore(null);
       autoPatrolPlaybackRef.current = null;
+      dataPlatformScreenContextRef.current = null;
+      setViewportScreen(null);
+      runtimeRef.current = null;
       viewportRef.current = null;
       skyboxCameraBounds?.dispose();
       skyboxCameraBounds = null;
@@ -914,9 +979,50 @@ export function PlayerApp() {
     message,
   });
 
+  useEffect(() => {
+    /** Viewer 用 F11 切换场景全屏，避免浏览器默认把整页（含外层壳）拉全屏。 */
+    function handleWindowKeyDown(event: KeyboardEvent): void {
+      if (event.key.toLowerCase() !== 'f11') return;
+      event.preventDefault();
+      void sceneFullscreen.toggle();
+    }
+
+    window.addEventListener('keydown', handleWindowKeyDown, true);
+    return () => window.removeEventListener('keydown', handleWindowKeyDown, true);
+  }, [sceneFullscreen]);
+
   return (
-    <main className="player-root" style={{ backgroundColor }}>
+    <main className="player-root" ref={playerRootRef} style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
+      {phase === 'ready' && viewportRef.current && runtimeRef.current ? (
+        <DataPlatformScreenOverlay
+          canvas={canvasRef.current}
+          runtime={runtimeRef.current}
+          onCommand={handleDataPlatformScreenCommand}
+          selectedEntityIds={viewerSelectedEntityIds}
+          scene={viewportRef.current.scene}
+        />
+      ) : null}
+      {phase === 'ready' ? (
+        <DataPlatformViewportScreenOverlay
+          interactive
+          onCommand={handleViewportDataPlatformScreenCommand}
+          screen={viewportScreen}
+          selectedEntityIds={viewerSelectedEntityIds}
+        />
+      ) : null}
+      {phase !== 'blocked' ? (
+        <button
+          aria-label={sceneFullscreen.isFullscreen ? '退出全屏' : '全屏显示场景'}
+          aria-pressed={sceneFullscreen.isFullscreen}
+          className="player-fullscreen-button"
+          onClick={() => void sceneFullscreen.toggle()}
+          title={sceneFullscreen.isFullscreen ? '退出全屏 (F11)' : '全屏显示场景 (F11)'}
+          type="button"
+        >
+          <FullscreenGlyph exit={sceneFullscreen.isFullscreen} />
+        </button>
+      ) : null}
       {phase === 'ready' && manualRoamControlsVisible && config?.viewer.allowCameraControl && hasManualRoamSpawn ? (
         <ManualRoamControls
           snapshot={manualRoamSnapshot}

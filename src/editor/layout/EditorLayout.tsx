@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { DeploymentExportDialog } from '../deployment/DeploymentExportDialog';
 import { DigitalTwinPublishDialog } from '../deployment/DigitalTwinPublishDialog';
 import { useDeploymentExport } from '../deployment/useDeploymentExport';
@@ -14,6 +14,8 @@ import { Toolbar } from '../ui/Toolbar';
 import { ScenePreparationOverlay } from '../loading/ScenePreparationOverlay';
 import { isScenePreparationActive } from '../loading/scenePreparationProgress';
 import { getReturnToHomePageBlockMessage } from '../home/returnToHomePage';
+import { getFullscreenElement } from '../../shared/ui/elementFullscreen';
+import { useElementFullscreen } from '../../shared/ui/useElementFullscreen';
 import styles from './EditorLayout.module.css';
 
 const TOOL_SHORTCUTS: Record<string, TransformTool> = {
@@ -32,11 +34,23 @@ function isKeyboardEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
+/** 全屏时 Esc 先让可见弹窗处理，避免把 MQTT/Fetch/发布/阵列等层一起关掉。 */
+function hasVisibleEditorOverlay(): boolean {
+  return Boolean(
+    document.querySelector('.mqtt-config-dialog-backdrop')
+    || document.querySelector('.fetch-config-dialog-backdrop')
+    || document.querySelector('.console-dialog-backdrop')
+    || document.querySelector('[role="dialog"]'),
+  );
+}
+
 type EditorLayoutProps = {
   onBackToHome: () => void;
 };
 
 export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
+  const editorShellRef = useRef<HTMLDivElement>(null);
+  const sceneFullscreen = useElementFullscreen(editorShellRef, { fallbackToLayoutMaximize: true });
   const [isConsoleDialogOpen, setConsoleDialogOpen] = useState(false);
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
   const [isDeploymentExportDialogOpen, setDeploymentExportDialogOpen] = useState(false);
@@ -84,6 +98,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   const undo = useEditorStore((state) => state.undo);
   const redo = useEditorStore((state) => state.redo);
   const isRuntimePreview = runtimeMode === 'preview';
+  const environmentAdjustmentActive = useEditorStore((state) => state.environmentAdjustmentActive);
   const canDelete = useEditorStore((state) => {
     const selectedEntityId = state.scene.selectedEntityId;
     const selectedEntity = selectedEntityId ? state.scene.entities[selectedEntityId] : null;
@@ -91,6 +106,14 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   });
   const canUndo = useEditorStore((state) => state.history.undoStack.length > 0);
   const canRedo = useEditorStore((state) => state.history.redoStack.length > 0);
+
+  /** 进入全屏前收起 Console 弹窗，避免底栏被隐藏后对话框仍占着 Esc。 */
+  const handleToggleSceneFullscreen = useCallback(async (): Promise<void> => {
+    if (!sceneFullscreen.isFullscreen) {
+      setConsoleDialogOpen(false);
+    }
+    await sceneFullscreen.toggle();
+  }, [sceneFullscreen]);
 
   useEffect(() => {
     /** 处理编辑器全局快捷键，保持和菜单/Toolbar 共用同一条 store 更新路径。 */
@@ -100,9 +123,29 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         event.stopImmediatePropagation();
         return;
       }
-      if (event.altKey || isKeyboardEditableTarget(event.target)) return;
 
       const key = event.key.toLowerCase();
+      // F11 走场景全屏，而不是浏览器默认的整页全屏。
+      if (key === 'f11') {
+        event.preventDefault();
+        void handleToggleSceneFullscreen();
+        return;
+      }
+
+      if (
+        key === 'escape'
+        && sceneFullscreen.isFullscreen
+        && !getFullscreenElement()
+        && !environmentAdjustmentActive
+        && !hasVisibleEditorOverlay()
+      ) {
+        event.preventDefault();
+        void sceneFullscreen.exit();
+        return;
+      }
+
+      if (event.altKey || isKeyboardEditableTarget(event.target)) return;
+
       const isCommandKey = event.ctrlKey || event.metaKey;
 
       if (isRuntimePreview) {
@@ -190,11 +233,14 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   }, [
     copySelectedEntities,
     deleteSelectedEntity,
+    environmentAdjustmentActive,
     groupSelectedEntities,
     hideSelectedEntities,
     lockSelectedEntities,
     pasteEntityClipboard,
+    handleToggleSceneFullscreen,
     requestSceneFocusForSelection,
+    sceneFullscreen,
     setTransformTool,
     undo,
     ungroupSelectedEntities,
@@ -254,8 +300,8 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
     updateFetchConfig(config);
   }
 
-  /** 忙碌任务未结束时留在编辑器，避免卸载工作台中断进行中的导入/导出/发布。 */
-  function handleBackToHome(): void {
+  /** 忙碌任务未结束时留在编辑器；允许返回时先退出场景全屏，避免首页仍占着系统全屏。 */
+  async function handleBackToHome(): Promise<void> {
     const blockMessage = getReturnToHomePageBlockMessage({
       scenePreparationActive: isScenePreparationActive(),
       publishActive: digitalTwinPublish.isBusy,
@@ -267,11 +313,16 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
       return;
     }
 
+    await sceneFullscreen.exit();
     onBackToHome();
   }
 
   return (
-    <div className={styles.editorShell}>
+    <div
+      className={sceneFullscreen.isFullscreen ? `${styles.editorShell} ${styles.editorShellFullscreen}` : styles.editorShell}
+      data-scene-fullscreen={sceneFullscreen.isFullscreen ? 'true' : undefined}
+      ref={editorShellRef}
+    >
       <Toolbar
         onBackToHome={handleBackToHome}
         transformTool={transformTool}
@@ -317,6 +368,8 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         readOnly={isRuntimePreview}
         onStartRuntimePreview={handleStartRuntimePreview}
         onStopRuntimePreview={handleStopRuntimePreview}
+        sceneFullscreen={sceneFullscreen.isFullscreen}
+        onToggleSceneFullscreen={() => void handleToggleSceneFullscreen()}
         cadImportProgress={cadImportProgress}
         canDelete={!isRuntimePreview && canDelete}
         canUndo={!isRuntimePreview && canUndo}

@@ -41,6 +41,7 @@ import type { Entity } from '../../editor/model/Entity';
 import { collectFolderRuntimeEntityIds, createEntityHierarchyStateMap } from '../../editor/model/entityHierarchy';
 import type {
   CadReferenceComponent,
+  DataPlatformScreenComponent,
   LightComponent,
   LocatorComponent,
   LocatorStorageDepth,
@@ -266,6 +267,16 @@ const SLOT_HIGHLIGHT_SURFACE_ALPHA = 0.22;
 const SLOT_HIGHLIGHT_EDGE_THICKNESS = 0.03;
 const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
 const CHAIN_CONVEYOR_MODEL_KEYS = new Set(['chain-conveyor', 'newchain-conveyor']);
+
+export type DataPlatformScreenOverlayItem = {
+  entityId: string;
+  projectId: string;
+  screenId: string;
+  mesh: Mesh;
+  screenUrl: string;
+  thumbnailUrl?: string;
+  renderMode: DataPlatformScreenComponent['renderMode'];
+};
 const CHAIN_CONVEYOR_SCRIPT_FILENAMES = new Set([
   'chain-conveyor.model.ts',
   'newchain-conveyor.model.ts',
@@ -654,6 +665,7 @@ function isChainConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
 
 export class SceneRuntime {
   private readonly meshes = new Map<string, Mesh>();
+  private readonly dataPlatformScreenTextures = new Map<string, { url: string; texture: Texture }>();
   private readonly locators = new Map<string, LocatorRuntimeEntry>();
   private readonly locatorTargets = new Map<string, LocatorRuntimeEntry>();
   private readonly locatorDeviceIndex = new Map<string, Map<number, LocatorRuntimeEntry[]>>();
@@ -1852,6 +1864,7 @@ export class SceneRuntime {
 
     return nearestEntityId ? { entityId: nearestEntityId, distance: nearestDistance, precise: false } : null;
   }
+
   /** 将画布客户端坐标投射到世界 y=0 地面平面，用于拖拽释放时按鼠标位置放置模型。 */
   getGroundPointAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): Vector3Data | null {
     const point = this.getCanvasPickPoint(clientX, clientY, canvas);
@@ -2689,6 +2702,26 @@ export class SceneRuntime {
     }
   }
 
+  /** 返回需要在 Babylon 画布上方挂载 iframe 的大屏平面。 */
+  getDataPlatformScreenOverlayItems(): DataPlatformScreenOverlayItem[] {
+    const items: DataPlatformScreenOverlayItem[] = [];
+    for (const [entityId, entity] of this.syncedEntities.entries()) {
+      const screen = entity.components.dataPlatformScreen;
+      const mesh = this.meshes.get(entityId);
+      if (!screen || screen.renderMode !== 'iframe' || !screen.screenUrl || !mesh) continue;
+      items.push({
+        entityId,
+        projectId: screen.projectId,
+        screenId: screen.screenId,
+        mesh,
+        screenUrl: screen.screenUrl,
+        ...(screen.thumbnailUrl ? { thumbnailUrl: screen.thumbnailUrl } : {}),
+        renderMode: screen.renderMode,
+      });
+    }
+    return items;
+  }
+
   /** 返回 Scene View HUD 使用的低频运行时同步指标快照。 */
   getPerformanceMetrics(): SceneRuntimePerformanceMetrics {
     const modelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
@@ -2801,7 +2834,14 @@ export class SceneRuntime {
     this.autoPatrolMarkerRuntime.disposeMissing(autoPatrolIds);
     this.manualRoamSpawnRuntime.disposeMissing(manualRoamSpawnIds);
     this.clickEventBindingRuntime.disposeMissing(clickEventBindingIds);
-
+    const dataPlatformScreenIds = new Set(
+      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.dataPlatformScreen)),
+    );
+    for (const [entityId, entry] of this.dataPlatformScreenTextures.entries()) {
+      if (dataPlatformScreenIds.has(entityId)) continue;
+      entry.texture.dispose();
+      this.dataPlatformScreenTextures.delete(entityId);
+    }
     for (const [entityId, mesh] of this.meshes.entries()) {
       if (!primitiveMeshIds.has(entityId)) {
         this.disposeMesh(entityId, mesh);
@@ -3270,6 +3310,8 @@ export class SceneRuntime {
     this.externalSlotHighlight = null;
     this.reportedCargoIssues.clear();
     this.outlinedModelArrayBatches.clear();
+    for (const entry of this.dataPlatformScreenTextures.values()) entry.texture.dispose();
+    this.dataPlatformScreenTextures.clear();
   }
 
   /** 按组件类型同步单个实体的运行时表现。 */
@@ -3281,6 +3323,10 @@ export class SceneRuntime {
     this.clearEntityArrayPreviewIfSource(entity.id);
     if (entity.components.meshRenderer) {
       this.syncPrimitiveMeshEntity(entity, selected);
+    }
+
+    if (entity.components.dataPlatformScreen) {
+      this.syncDataPlatformScreenEntity(entity);
     }
 
     if (entity.components.skybox) {
@@ -3556,6 +3602,40 @@ export class SceneRuntime {
     this.applyMeshInteractivity(mesh, entity.id);
 
     this.applyPrimitiveMeshAppearance(mesh, meshRenderer, selected);
+  }
+
+  /** 将大屏缩略图挂到平面材质上；iframe 模式也保留纹理作为 Overlay 加载失败时的底图。 */
+  private syncDataPlatformScreenEntity(entity: Entity): void {
+    const screen = entity.components.dataPlatformScreen;
+    const mesh = this.meshes.get(entity.id);
+    if (!screen || !mesh || mesh.metadata?.editorMeshKind !== 'plane') return;
+
+    const thumbnailUrl = screen.thumbnailUrl;
+    let textureEntry = this.dataPlatformScreenTextures.get(entity.id);
+    if (textureEntry?.url !== thumbnailUrl) {
+      textureEntry?.texture.dispose();
+      this.dataPlatformScreenTextures.delete(entity.id);
+      textureEntry = undefined;
+    }
+    if (thumbnailUrl && !textureEntry) {
+      const texture = new Texture(
+        thumbnailUrl,
+        this.scene,
+        true,
+        false,
+        Texture.TRILINEAR_SAMPLINGMODE,
+      );
+      textureEntry = { url: thumbnailUrl, texture };
+      this.dataPlatformScreenTextures.set(entity.id, textureEntry);
+    }
+
+    const material = mesh.material instanceof StandardMaterial
+      ? mesh.material
+      : new StandardMaterial(`${mesh.name}_screen_mat`, this.scene);
+    material.diffuseTexture = textureEntry?.texture ?? null;
+    material.diffuseColor = textureEntry ? Color3.White() : this.readColor('#101827');
+    material.emissiveColor = Color3.Black();
+    mesh.material = material;
   }
 
   /** 刷新基础 Mesh 原始材质；选中反馈统一由选择高亮层绘制，不改写模型表面。 */

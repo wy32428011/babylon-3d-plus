@@ -7,7 +7,6 @@ import type { DigitalTwinRuntimeConfigSavePayload } from '../shared/digitalTwinR
 const REQUEST_TIMEOUT_MS = 30_000;
 const COMMIT_TIMEOUT_MS = 10 * 60_000;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
-const MAX_UPLOAD_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
 const RETRY_DELAYS_MS = [500, 1_000, 2_000] as const;
 
@@ -455,7 +454,6 @@ function normalizeUploadSession(value: unknown): DigitalTwinUploadSession {
   const packageType = session.packageType;
   if (packageType !== 'SOURCE' && packageType !== 'DIST') throw new Error('数字孪生上传会话 packageType 无效。');
   const fileSize = safeNonNegativeInteger(session.fileSize, 'fileSize');
-  if (fileSize > MAX_UPLOAD_PACKAGE_BYTES) throw new Error('数字孪生上传会话 fileSize 超过 2 GiB 限制。');
   const chunkSize = positiveSafeInteger(session.chunkSize, 'chunkSize');
   if (chunkSize > MAX_UPLOAD_CHUNK_BYTES) throw new Error('数字孪生上传会话 chunkSize 超过 64 MiB 限制。');
   const totalChunks = safeNonNegativeInteger(session.totalChunks, 'totalChunks');

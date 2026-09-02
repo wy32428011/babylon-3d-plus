@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
 import type {
   CameraOrientation,
   CameraProjection,
@@ -43,6 +43,7 @@ import {
 import { ToolbarTaskProgress } from '../deployment/ToolbarTaskProgress';
 import { APPLICATION_NAME, BrandLogo } from './BrandLogo';
 import { RETURN_TO_HOME_PAGE_LABEL } from '../home/returnToHomePage';
+import { FullscreenGlyph } from '../../shared/ui/FullscreenGlyph';
 
 const TRANSFORM_TOOL_LABELS: Record<TransformTool, string> = {
   translate: '移动 (E)',
@@ -181,20 +182,26 @@ type ToolbarProps = {
   readOnly: boolean;
   onStartRuntimePreview: () => void;
   onStopRuntimePreview: () => void;
+  /** 当前是否处于场景全屏（系统全屏或窗口内最大化）。 */
+  sceneFullscreen: boolean;
+  /** 切换 Scene 画布全屏显示。 */
+  onToggleSceneFullscreen: () => void;
 };
 
 type ToolbarIconButtonProps = {
   active?: boolean;
   disabled?: boolean;
-  icon: string;
+  icon: ReactNode;
   label: string;
   onClick: () => void;
 };
 
+/** Toolbar 图标按钮：完成后立刻失焦，避免快捷键被按钮抢走。 */
 function ToolbarIconButton(props: ToolbarIconButtonProps) {
   return (
     <button
       aria-label={props.label}
+      aria-pressed={props.active}
       className={props.active ? 'toolbar-button toolbar-icon-button active' : 'toolbar-button toolbar-icon-button'}
       disabled={props.disabled}
       onClick={(event) => {
@@ -683,6 +690,12 @@ export function Toolbar(props: ToolbarProps) {
       >
         {isPreview ? MQTT_STATUS_LABELS[mqttRuntimeStatus.state] : '编辑中'}
       </span>
+      <ToolbarIconButton
+        active={props.sceneFullscreen}
+        icon={<FullscreenGlyph exit={props.sceneFullscreen} />}
+        label={props.sceneFullscreen ? '退出全屏 (F11)' : '全屏显示场景 (F11)'}
+        onClick={props.onToggleSceneFullscreen}
+      />
       <ToolbarIconButton
         disabled={props.readOnly || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy}
         icon={TOOLBAR_ICONS.cad}

@@ -196,3 +196,73 @@ export function logSceneV2ToV3MigrationSummary(summary: SceneV2ToV3MigrationSumm
     console.warn(`[场景迁移] ${warning}`);
   }
 }
+
+type SceneV3ToV4MigrationSummary = {
+  migratedScreens: number;
+  warnings: string[];
+};
+
+/**
+ * 将早期试验版大屏组件字段迁移到 v4 的稳定命名：mode → renderMode、width/height → widthMeters/heightMeters。
+ * 迁移只处理明确存在的字段，不为普通实体补造大屏组件。
+ */
+export function migrateSceneV3ToV4(scene: PlainObject): SceneV3ToV4MigrationSummary {
+  const summary: SceneV3ToV4MigrationSummary = { migratedScreens: 0, warnings: [] };
+  if (!isPlainObject(scene.entities)) return summary;
+
+  for (const rawEntity of Object.values(scene.entities)) {
+    if (!isPlainObject(rawEntity) || !isPlainObject(rawEntity.components)) continue;
+    const screen = rawEntity.components.dataPlatformScreen;
+    if (!isPlainObject(screen)) continue;
+
+    let migrated = false;
+    if (screen.renderMode === undefined && (screen.mode === 'iframe' || screen.mode === 'texture')) {
+      screen.renderMode = screen.mode;
+      migrated = true;
+    }
+    if (screen.widthMeters === undefined && typeof screen.width === 'number') {
+      screen.widthMeters = screen.width;
+      migrated = true;
+    }
+    if (screen.heightMeters === undefined && typeof screen.height === 'number') {
+      screen.heightMeters = screen.height;
+      migrated = true;
+    }
+
+    if (migrated) summary.migratedScreens += 1;
+    delete screen.mode;
+    delete screen.width;
+    delete screen.height;
+  }
+
+  return summary;
+}
+
+/** 输出 v3 → v4 大屏组件迁移摘要。 */
+export function logSceneV3ToV4MigrationSummary(summary: SceneV3ToV4MigrationSummary): void {
+  if (summary.migratedScreens === 0 && summary.warnings.length === 0) return;
+  console.info(`[场景迁移] v3 → v4：迁移数据中台大屏组件 ${summary.migratedScreens} 个。`);
+  for (const warning of summary.warnings) console.warn(`[场景迁移] ${warning}`);
+}
+
+type SceneV4ToV5MigrationSummary = {
+  defaultedViewportScreen: boolean;
+  warnings: string[];
+};
+
+/** v4 没有视窗级完整大屏配置；升级时显式补齐关闭状态，避免旧场景依赖 undefined。 */
+export function migrateSceneV4ToV5(scene: PlainObject): SceneV4ToV5MigrationSummary {
+  const summary: SceneV4ToV5MigrationSummary = { defaultedViewportScreen: false, warnings: [] };
+  if (!isPlainObject(scene.sceneSettings)) return summary;
+  if (scene.sceneSettings.viewportScreen !== undefined) return summary;
+  scene.sceneSettings.viewportScreen = null;
+  summary.defaultedViewportScreen = true;
+  return summary;
+}
+
+/** 输出 v4 → v5 视窗大屏配置迁移摘要。 */
+export function logSceneV4ToV5MigrationSummary(summary: SceneV4ToV5MigrationSummary): void {
+  if (!summary.defaultedViewportScreen && summary.warnings.length === 0) return;
+  if (summary.defaultedViewportScreen) console.info('[场景迁移] v4 → v5：已补齐视窗级大屏配置（默认关闭）。');
+  for (const warning of summary.warnings) console.warn(`[场景迁移] ${warning}`);
+}

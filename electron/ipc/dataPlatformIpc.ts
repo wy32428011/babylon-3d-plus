@@ -36,6 +36,22 @@ import {
   syncDataPlatformSkyboxesForWorkspace,
   getCurrentDataPlatformImageSyncProgress,
 } from './dataPlatformProjectService.js';
+import {
+  clearDataPlatformChartSyncRetryContext,
+  getCurrentDataPlatformChartSyncProgress,
+  listCurrentDataPlatformCharts,
+  retryDataPlatformChartSync,
+  startDataPlatformChartSync,
+  type DataPlatformChartLibrarySnapshot,
+  type DataPlatformChartSyncProgress,
+} from './dataPlatformChartSync.js';
+import {
+  inferDataPlatformFrontendPort,
+  inferDataPlatformWebBaseUrl,
+  normalizeDataPlatformFrontendPort,
+  resolveDataPlatformWebBaseUrl,
+  resolveSavedDataPlatformPageConfig,
+} from './dataPlatformBindingStore.js';
 import { requestDataPlatformJson } from './dataPlatformTransfer.js';
 
 const DATA_PLATFORM_CONFIG_FILE = 'data-platform-config.json';
@@ -56,16 +72,23 @@ type PersistedDataPlatformConfigV1 = {
 type PersistedDataPlatformConfigV2 = {
   version: 2;
   baseUrl: string;
+  /** 可选页面地址；旧 v2 配置缺失时按 API 地址推导。 */
+  webBaseUrl?: string;
+  /** 可选大屏前端端口；提供后按 API 主机重建页面地址。 */
+  frontendPort?: number | null;
   workspaceRoot: string | null;
 };
 
 type StoredDataPlatformConfig = {
   baseUrl: string;
+  webBaseUrl: string;
+  frontendPort: number | null;
   customWorkspaceRoot: string | null;
 };
 
 export type DataPlatformPublishProjectContext = {
   baseUrl: string;
+  webBaseUrl: string;
   workspaceRoot: string;
   project: DataPlatformProjectEntry;
 };
@@ -86,6 +109,7 @@ export function registerDataPlatformIpc(): void {
       trustedProjectsById.clear();
       trustedProjectsBaseUrl = '';
       clearDataPlatformProjectServiceRetryContext();
+      clearDataPlatformChartSyncRetryContext();
       return config;
     },
   );
@@ -98,6 +122,7 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle('data-platform:resetWorkspace', async (): Promise<DataPlatformConfig> => {
     const config = await resetDataPlatformWorkspace();
     clearDataPlatformProjectServiceRetryContext();
+    clearDataPlatformChartSyncRetryContext();
     return config;
   });
 
@@ -144,7 +169,7 @@ export function registerDataPlatformIpc(): void {
       if (config.baseUrl !== trustedProjectsBaseUrl) {
         throw new Error('数据中台地址已变化，请刷新项目列表后再打开。');
       }
-      return openDataPlatformProject(project, config.baseUrl, config.workspaceRoot);
+      return openDataPlatformProject(project, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl);
     },
   );
 
@@ -216,12 +241,55 @@ export function registerDataPlatformIpc(): void {
       return listSyncedImagesForWorkspace(config.workspaceRoot);
     },
   );
+
+  ipcMain.handle('data-platform:syncCharts', async (): Promise<boolean> => {
+    const config = await readDataPlatformConfig();
+    if (!config.baseUrl) return false;
+    return startDataPlatformChartSync({
+      baseUrl: config.baseUrl,
+      webBaseUrl: config.webBaseUrl || config.baseUrl,
+    });
+  });
+
+  ipcMain.handle('data-platform:retryChartSync', async (): Promise<boolean> => {
+    const config = await readDataPlatformConfig();
+    if (!config.baseUrl) return false;
+    return retryDataPlatformChartSync({
+      baseUrl: config.baseUrl,
+      webBaseUrl: config.webBaseUrl || config.baseUrl,
+    });
+  });
+
+  ipcMain.handle(
+    'data-platform:getChartLibrary',
+    async (): Promise<DataPlatformChartLibrarySnapshot> => {
+      const config = await readDataPlatformConfig();
+      return listCurrentDataPlatformCharts(config.baseUrl ? {
+        baseUrl: config.baseUrl,
+        webBaseUrl: config.webBaseUrl || config.baseUrl,
+      } : undefined);
+    },
+  );
+
+  ipcMain.handle(
+    'data-platform:getChartSyncProgress',
+    async (): Promise<DataPlatformChartSyncProgress | null> => getCurrentDataPlatformChartSyncProgress(),
+  );
 }
 
-/** 规范化数据中台地址，空字符串表示主动清除配置。 */
+/** 规范化数据中台 API 地址，空字符串表示主动清除配置。 */
 export function normalizeDataPlatformBaseUrl(value: unknown): string {
+  return normalizeDataPlatformUrl(value, '数据中台地址');
+}
+
+/** 规范化大屏页面地址；开发环境可与 API 地址分离。 */
+export function normalizeDataPlatformWebBaseUrl(value: unknown): string {
+  return normalizeDataPlatformUrl(value, '大屏页面地址');
+}
+
+function normalizeDataPlatformUrl(value: unknown, label: '数据中台地址' | '大屏页面地址'): string {
   if (typeof value !== 'string') {
-    throw new Error('数据中台地址必须是字符串。');
+    throw new Error(`${label}必须是字符串。`);
   }
 
   const trimmed = value.trim();
@@ -231,19 +299,19 @@ export function normalizeDataPlatformBaseUrl(value: unknown): string {
   try {
     parsed = new URL(trimmed);
   } catch {
-    throw new Error('数据中台地址格式不正确。');
+    throw new Error(`${label}格式不正确。`);
   }
 
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('数据中台地址仅支持 http:// 或 https://。');
+    throw new Error(`${label}仅支持 http:// 或 https://。`);
   }
 
   if (parsed.username || parsed.password) {
-    throw new Error('数据中台地址不能包含账号或密码。');
+    throw new Error(`${label}不能包含账号或密码。`);
   }
 
   if (parsed.search || parsed.hash) {
-    throw new Error('数据中台地址不能包含 query 或 hash。');
+    throw new Error(`${label}不能包含 query 或 hash。`);
   }
 
   const normalizedPath = parsed.pathname.replace(/\/+$/, '');
@@ -262,8 +330,11 @@ async function readStoredDataPlatformConfig(): Promise<StoredDataPlatformConfig>
 
     if (parsed.version === 1) {
       const legacy = parsed as PersistedDataPlatformConfigV1;
+      const baseUrl = normalizeDataPlatformBaseUrl(legacy.baseUrl);
+      const page = resolveStoredDataPlatformPageConfig(baseUrl, undefined, undefined, false);
       return {
-        baseUrl: normalizeDataPlatformBaseUrl(legacy.baseUrl),
+        baseUrl,
+        ...page,
         customWorkspaceRoot: null,
       };
     }
@@ -273,13 +344,21 @@ async function readStoredDataPlatformConfig(): Promise<StoredDataPlatformConfig>
     }
 
     const current = parsed as PersistedDataPlatformConfigV2;
+    const baseUrl = normalizeDataPlatformBaseUrl(current.baseUrl);
+    const page = resolveStoredDataPlatformPageConfig(
+      baseUrl,
+      current.webBaseUrl,
+      current.frontendPort,
+      Object.prototype.hasOwnProperty.call(current, 'frontendPort'),
+    );
     return {
-      baseUrl: normalizeDataPlatformBaseUrl(current.baseUrl),
+      baseUrl,
+      ...page,
       customWorkspaceRoot: normalizePersistedWorkspaceRoot(current.workspaceRoot),
     };
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {
-      return { baseUrl: '', customWorkspaceRoot: null };
+      return { baseUrl: '', webBaseUrl: '', frontendPort: null, customWorkspaceRoot: null };
     }
 
     if (error instanceof SyntaxError) {
@@ -294,6 +373,8 @@ async function readStoredDataPlatformConfig(): Promise<StoredDataPlatformConfig>
 function toDataPlatformConfig(stored: StoredDataPlatformConfig): DataPlatformConfig {
   return {
     baseUrl: stored.baseUrl,
+    webBaseUrl: stored.webBaseUrl,
+    frontendPort: stored.frontendPort,
     workspaceRoot: getDataPlatformEditorRoot(stored.customWorkspaceRoot),
     usesDefaultWorkspace: stored.customWorkspaceRoot === null,
   };
@@ -309,6 +390,8 @@ async function writeStoredDataPlatformConfig(stored: StoredDataPlatformConfig): 
   const persisted: PersistedDataPlatformConfigV2 = {
     version: 2,
     baseUrl: stored.baseUrl,
+    webBaseUrl: stored.webBaseUrl,
+    frontendPort: stored.frontendPort,
     workspaceRoot: stored.customWorkspaceRoot,
   };
   const configPath = getDataPlatformConfigPath();
@@ -321,10 +404,70 @@ async function writeStoredDataPlatformConfig(stored: StoredDataPlatformConfig): 
 /** 写入经过校验的数据中台服务地址，并保留工作区配置。 */
 async function saveDataPlatformConfig(request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> {
   const stored = await readStoredDataPlatformConfig();
+  const baseUrl = normalizeDataPlatformBaseUrl(request.baseUrl);
+
+  if (!baseUrl) {
+    return writeStoredDataPlatformConfig({
+      ...stored,
+      baseUrl: '',
+      webBaseUrl: '',
+      frontendPort: null,
+    });
+  }
+
   return writeStoredDataPlatformConfig({
     ...stored,
-    baseUrl: normalizeDataPlatformBaseUrl(request.baseUrl),
+    baseUrl,
+    ...resolveSavedDataPlatformPageConfig({
+      baseUrl,
+      storedBaseUrl: stored.baseUrl,
+      storedWebBaseUrl: stored.webBaseUrl,
+      storedFrontendPort: stored.frontendPort,
+      requestedWebBaseUrl: request.webBaseUrl,
+      requestedFrontendPort: request.frontendPort,
+      hasRequestedWebBaseUrl: Object.prototype.hasOwnProperty.call(request, 'webBaseUrl'),
+      hasRequestedFrontendPort: Object.prototype.hasOwnProperty.call(request, 'frontendPort'),
+    }),
   });
+}
+
+/** 读取已持久化配置时保留用户写过的页面地址，缺省字段才按端口或 API 地址推导。 */
+function resolveStoredDataPlatformPageConfig(
+  baseUrl: string,
+  configuredWebBaseUrl: unknown,
+  configuredFrontendPort: unknown,
+  hasConfiguredFrontendPort: boolean,
+): Pick<StoredDataPlatformConfig, 'webBaseUrl' | 'frontendPort'> {
+  if (!baseUrl) return { webBaseUrl: '', frontendPort: null };
+
+  const frontendPort = hasConfiguredFrontendPort
+    ? normalizeDataPlatformFrontendPort(configuredFrontendPort)
+    : null;
+  const configuredWebBaseUrlValue = configuredWebBaseUrl === undefined
+    ? ''
+    : normalizeDataPlatformWebBaseUrl(configuredWebBaseUrl);
+
+  if (configuredWebBaseUrlValue) {
+    return {
+      webBaseUrl: configuredWebBaseUrlValue,
+      frontendPort: hasConfiguredFrontendPort
+        ? frontendPort
+        : inferDataPlatformFrontendPort(configuredWebBaseUrlValue),
+    };
+  }
+
+  if (frontendPort !== null) {
+    return {
+      webBaseUrl: resolveDataPlatformWebBaseUrl(baseUrl, frontendPort),
+      frontendPort,
+    };
+  }
+
+  const inferredWebBaseUrl = inferDataPlatformWebBaseUrl(baseUrl);
+  return {
+    webBaseUrl: inferredWebBaseUrl,
+    frontendPort: inferDataPlatformFrontendPort(inferredWebBaseUrl),
+  };
 }
 
 /** 由主进程选择并验证工作区，renderer 无法直接提交任意文件系统路径。 */
@@ -350,6 +493,7 @@ async function selectDataPlatformWorkspace(): Promise<DataPlatformWorkspaceSelec
     customWorkspaceRoot: workspaceRoot,
   });
   clearDataPlatformProjectServiceRetryContext();
+  clearDataPlatformChartSyncRetryContext();
   return { canceled: false, config };
 }
 
@@ -373,6 +517,7 @@ export async function resolveDataPlatformPublishProjectContext(
   if (!config.baseUrl) throw new Error('尚未配置数据中台地址。');
   return {
     baseUrl: config.baseUrl,
+    webBaseUrl: config.webBaseUrl || config.baseUrl,
     workspaceRoot: config.workspaceRoot,
     project: await requestDataPlatformProject(config.baseUrl, normalizedProjectId),
   };
@@ -493,8 +638,15 @@ function validateSaveRequest(value: unknown): SaveDataPlatformConfigRequest {
     throw new Error('数据中台配置请求格式不正确。');
   }
 
+  const frontendPort = value.frontendPort === undefined
+    ? undefined
+    : normalizeDataPlatformFrontendPort(value.frontendPort);
   return {
     baseUrl: normalizeDataPlatformBaseUrl(value.baseUrl),
+    ...(value.webBaseUrl === undefined
+      ? {}
+      : { webBaseUrl: normalizeDataPlatformWebBaseUrl(value.webBaseUrl) }),
+    ...(frontendPort === undefined ? {} : { frontendPort }),
   };
 }
 

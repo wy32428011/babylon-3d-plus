@@ -64,7 +64,10 @@ export default function App() {
             if (!confirmed) return;
           }
 
-          await window.editorApi.saveDataPlatformConfig({ baseUrl: deepLink.baseUrl });
+          await window.editorApi.saveDataPlatformConfig({
+            baseUrl: deepLink.baseUrl,
+            ...(deepLink.webBaseUrl ? { webBaseUrl: deepLink.webBaseUrl } : {}),
+          });
           const project = await window.editorApi.getDataPlatformProject({ projectId: deepLink.projectId });
           const result = await window.editorApi.openDataPlatformProject({ projectId: project.id });
           if (result.sceneFilePath) {

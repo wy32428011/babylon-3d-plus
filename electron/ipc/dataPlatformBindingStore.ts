@@ -6,10 +6,14 @@ const BINDING_FILE_NAME = 'data-platform-binding.json';
 const PROJECT_ID_PATTERN = /^[1-9]\d{0,63}$/;
 const NON_NEGATIVE_INTEGER_PATTERN = /^\d{1,64}$/;
 const POSITIVE_ID_PATTERN = /^[1-9]\d{0,63}$/;
+const DATA_PLATFORM_FRONTEND_PORT_MIN = 1;
+const DATA_PLATFORM_FRONTEND_PORT_MAX = 65_535;
 
 export type DataPlatformBindingMetadata = {
   version: 1;
   baseUrl: string;
+  /** 大屏页面所在的 Web 地址；旧绑定缺失时按 API 地址推导。 */
+  webBaseUrl: string;
   workspaceRoot: string | null;
   projectId: string;
   projectName: string;
@@ -21,7 +25,8 @@ export type DataPlatformBindingMetadata = {
   syncedAt: string;
 };
 
-export type CreateDataPlatformBindingInput = Omit<DataPlatformBindingMetadata, 'version' | 'workspaceRoot'> & {
+export type CreateDataPlatformBindingInput = Omit<DataPlatformBindingMetadata, 'version' | 'workspaceRoot' | 'webBaseUrl'> & {
+  webBaseUrl?: string;
   workspaceRoot?: string | null;
 };
 
@@ -77,6 +82,7 @@ export function createDataPlatformBinding(input: CreateDataPlatformBindingInput)
   return {
     version: 1,
     baseUrl: normalizeBaseUrl(input.baseUrl),
+    webBaseUrl: normalizeBaseUrl(input.webBaseUrl ?? inferDataPlatformWebBaseUrl(input.baseUrl)),
     workspaceRoot: normalizeWorkspaceRoot(input.workspaceRoot),
     projectId: normalizeProjectId(input.projectId),
     projectName: normalizeProjectName(input.projectName),
@@ -116,6 +122,7 @@ export async function readDataPlatformBinding(projectRoot: string): Promise<Data
     if (!isPlainObject(parsed) || parsed.version !== 1) throw new Error('本地数据中台绑定文件版本或结构无效。');
     return createDataPlatformBinding({
       baseUrl: parsed.baseUrl as string,
+      webBaseUrl: (parsed.webBaseUrl ?? inferDataPlatformWebBaseUrl(parsed.baseUrl as string)) as string,
       workspaceRoot: (parsed.workspaceRoot ?? null) as string | null,
       projectId: parsed.projectId as string,
       projectName: parsed.projectName as string,
@@ -181,6 +188,126 @@ function normalizeBaseUrl(value: string): string {
   url.hash = '';
   url.search = '';
   return url.toString().replace(/\/+$/, '');
+}
+
+/** 校验数据中台前端端口；空值表示按 API 地址自动推导。 */
+export function normalizeDataPlatformFrontendPort(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    if (!normalized) return null;
+    if (!/^\d+$/.test(normalized)) throw new Error('数据中台前端端口必须是 1-65535 的整数。');
+    value = Number(normalized);
+  }
+  if (
+    typeof value !== 'number'
+    || !Number.isSafeInteger(value)
+    || value < DATA_PLATFORM_FRONTEND_PORT_MIN
+    || value > DATA_PLATFORM_FRONTEND_PORT_MAX
+  ) {
+    throw new Error('数据中台前端端口必须是 1-65535 的整数。');
+  }
+  return value;
+}
+
+/** 从已归一化的大屏页面地址回填端口，默认协议端口返回 null。 */
+export function inferDataPlatformFrontendPort(webBaseUrl: string): number | null {
+  try {
+    const url = new URL(webBaseUrl.trim());
+    return url.port ? normalizeDataPlatformFrontendPort(url.port) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 按 API 主机生成大屏页面根地址；显式前端端口优先于历史自动推导规则。 */
+export function resolveDataPlatformWebBaseUrl(baseUrl: string, frontendPort?: number | null): string {
+  const normalizedPort = normalizeDataPlatformFrontendPort(frontendPort);
+  try {
+    const url = new URL(baseUrl.trim());
+    if (normalizedPort !== null) {
+      url.port = String(normalizedPort);
+    } else if (isPrivateOrLocalHostname(url.hostname) && (url.port === '8086' || url.port === '18087')) {
+      url.port = '8001';
+    }
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return baseUrl.trim().replace(/\/+$/, '');
+  }
+}
+
+/** 旧配置只保存 API 地址时，为本地开发端口补齐大屏页面地址。 */
+export function inferDataPlatformWebBaseUrl(baseUrl: string): string {
+  return resolveDataPlatformWebBaseUrl(baseUrl);
+}
+
+/**
+ * 保存弹窗里的大屏地址和前端端口。
+ * 用户明确填写的页面地址必须原样保留；端口只在页面地址为空时用来按 API 主机推导。
+ */
+export function resolveSavedDataPlatformPageConfig(draft: {
+  baseUrl: string;
+  storedBaseUrl: string;
+  storedWebBaseUrl: string;
+  storedFrontendPort: number | null;
+  requestedWebBaseUrl?: string;
+  requestedFrontendPort?: number | null;
+  hasRequestedWebBaseUrl: boolean;
+  hasRequestedFrontendPort: boolean;
+}): { webBaseUrl: string; frontendPort: number | null } {
+  if (!draft.baseUrl) return { webBaseUrl: '', frontendPort: null };
+
+  const frontendPort = draft.hasRequestedFrontendPort
+    ? normalizeDataPlatformFrontendPort(draft.requestedFrontendPort)
+    : draft.storedFrontendPort;
+  const requestedWebBaseUrl = draft.hasRequestedWebBaseUrl
+    ? normalizeOptionalPageUrl(draft.requestedWebBaseUrl)
+    : undefined;
+
+  if (requestedWebBaseUrl) {
+    return { webBaseUrl: requestedWebBaseUrl, frontendPort };
+  }
+
+  if (frontendPort !== null) {
+    return {
+      webBaseUrl: resolveDataPlatformWebBaseUrl(draft.baseUrl, frontendPort),
+      frontendPort,
+    };
+  }
+
+  if (!draft.hasRequestedWebBaseUrl && draft.baseUrl === draft.storedBaseUrl && draft.storedWebBaseUrl) {
+    return {
+      webBaseUrl: draft.storedWebBaseUrl,
+      frontendPort: draft.storedFrontendPort,
+    };
+  }
+
+  const inferredWebBaseUrl = inferDataPlatformWebBaseUrl(draft.baseUrl);
+  return {
+    webBaseUrl: inferredWebBaseUrl,
+    frontendPort: inferDataPlatformFrontendPort(inferredWebBaseUrl),
+  };
+}
+
+/** 页面地址允许留空表示改回自动推导，非空时走与绑定相同的 HTTP(S) 校验。 */
+function normalizeOptionalPageUrl(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') throw new Error('大屏页面地址必须是字符串。');
+  return value.trim() ? normalizeBaseUrl(value) : '';
+}
+
+function isPrivateOrLocalHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  if (normalized === 'localhost' || normalized === '::1' || normalized === '[::1]') return true;
+  if (/^127\.(?:\d{1,3}\.){2}\d{1,3}$/.test(normalized)) return true;
+  if (/^10\.(?:\d{1,3}\.){2}\d{1,3}$/.test(normalized)) return true;
+  if (/^192\.168\.(?:\d{1,3}\.)\d{1,3}$/.test(normalized)) return true;
+  const private172 = normalized.match(/^172\.(\d{1,3})\.(?:\d{1,3}\.)\d{1,3}$/);
+  if (!private172) return false;
+  const secondOctet = Number(private172[1]);
+  return secondOctet >= 16 && secondOctet <= 31;
 }
 
 function normalizeWorkspaceRoot(value: string | null | undefined): string | null {

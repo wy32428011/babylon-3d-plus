@@ -153,6 +153,7 @@ export async function prepareDataPlatformProjectForPublish(
   project: DataPlatformProjectEntry,
   baseUrl: string,
   workspaceRoot: string,
+  webBaseUrl: string = baseUrl,
 ): Promise<DataPlatformProjectOpenResult> {
   if (dataPlatformProjectServiceShuttingDown) {
     throw new Error('应用正在退出，无法绑定数字孪生发布项目。');
@@ -182,6 +183,7 @@ export async function prepareDataPlatformProjectForPublish(
 
   const binding = createDataPlatformBinding({
     baseUrl,
+    webBaseUrl,
     workspaceRoot,
     projectId: project.id,
     projectName: project.projectName,
@@ -215,6 +217,7 @@ export async function openDataPlatformProject(
   project: DataPlatformProjectEntry,
   baseUrl: string,
   workspaceRoot: string,
+  webBaseUrl: string = baseUrl,
 ): Promise<DataPlatformProjectOpenResult> {
   if (dataPlatformProjectServiceShuttingDown) {
     throw new Error('应用正在退出，无法打开数据中台项目。');
@@ -222,7 +225,7 @@ export async function openDataPlatformProject(
 
   const controller = new AbortController();
   openTaskControllers.add(controller);
-  const task = openDataPlatformProjectInternal(project, baseUrl, workspaceRoot, controller.signal);
+  const task = openDataPlatformProjectInternal(project, baseUrl, workspaceRoot, webBaseUrl, controller.signal);
   openTasks.add(task);
 
   try {
@@ -485,6 +488,7 @@ async function openDataPlatformProjectInternal(
   project: DataPlatformProjectEntry,
   baseUrl: string,
   workspaceRoot: string,
+  webBaseUrl: string,
   signal: AbortSignal,
 ): Promise<DataPlatformProjectOpenResult> {
   // 先校验用户配置的工作区本身，避免子目录创建失败时只暴露晦涩的 ENOTDIR。
@@ -576,6 +580,7 @@ async function openDataPlatformProjectInternal(
   const entryScenePath = sceneFilePath ? toProjectRelativePath(projectRoot, sceneFilePath) : null;
   const binding = createDataPlatformBinding({
     baseUrl,
+    webBaseUrl,
     workspaceRoot,
     projectId: project.id,
     projectName: project.projectName,

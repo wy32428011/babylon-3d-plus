@@ -35,7 +35,6 @@ const MAX_SCENE_FILES = 1_000;
 const MAX_SCENE_BYTES = 64 * 1024 * 1024;
 const MAX_SOURCE_FILES = 200_000;
 const MAX_SOURCE_BYTES = 8 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024;
 const PATH_KEYS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path']);
 const URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl']);
 const PATH_ARRAY_KEYS = new Set(['scriptPaths']);
@@ -267,8 +266,8 @@ export async function buildDigitalTwinSourcePackage(
     options.onProgress?.('正在压缩源工程 ZIP…', estimatedFiles, estimatedFiles);
     await archiveDirectoryContents(stagingRoot, archivePath, options.signal);
     const stat = await fs.stat(archivePath);
-    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_ARCHIVE_BYTES) {
-      throw new Error('源工程 ZIP 大小无效或超过 2 GB 限制。');
+    if (!stat.isFile() || stat.size <= 0) {
+      throw new Error('源工程 ZIP 大小无效。');
     }
 
     return {
@@ -323,7 +322,7 @@ async function readSceneSnapshots(
     } catch {
       throw new Error(`场景文件不是有效 JSON：${sourcePath}`);
     }
-    if (!isPlainObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) || !isPlainObject(parsed.scene)) {
+    if (!isPlainObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5) || !isPlainObject(parsed.scene)) {
       throw new Error(`场景文件格式不受支持：${sourcePath}`);
     }
     const skippedCadCount = skipCadReferences ? stripCadReferencesFromSourceScene(parsed) : 0;

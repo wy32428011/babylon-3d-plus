@@ -65,6 +65,10 @@ export type RecentWorkspacesResult = {
 
 export type DataPlatformConfig = {
   baseUrl: string;
+  /** 大屏页面所在的 Web 地址；开发环境可与 API 服务地址不同。 */
+  webBaseUrl: string;
+  /** 大屏前端端口；为空时按页面地址或 API 地址自动推导。 */
+  frontendPort: number | null;
   workspaceRoot: string;
   usesDefaultWorkspace: boolean;
 };
@@ -76,6 +80,10 @@ export type DataPlatformWorkspaceSelectionResult = {
 
 export type SaveDataPlatformConfigRequest = {
   baseUrl: string;
+  /** 未提供时兼容旧调用，按 baseUrl 处理或保留同一配置中的页面地址。 */
+  webBaseUrl?: string;
+  /** 大屏前端端口；提供后优先按 API 主机和该端口生成大屏页面地址。 */
+  frontendPort?: number | null;
 };
 
 export type DataPlatformProjectEntry = {
@@ -114,6 +122,7 @@ export type OpenDataPlatformProjectRequest = {
 
 export type DataPlatformBindingSummary = {
   baseUrl: string;
+  webBaseUrl: string;
   projectId: string;
   projectName: string;
   editorProjectId: string | null;
@@ -138,6 +147,7 @@ export type DataPlatformProjectOpenResult = {
 
 export type DataPlatformDeepLink = {
   baseUrl: string;
+  webBaseUrl?: string;
   projectId: string;
 };
 

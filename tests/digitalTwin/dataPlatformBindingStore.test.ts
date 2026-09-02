@@ -8,7 +8,11 @@ import {
   createDataPlatformBinding,
   getCurrentDataPlatformBinding,
   getDataPlatformBindingPath,
+  inferDataPlatformFrontendPort,
+  resolveSavedDataPlatformPageConfig,
   readDataPlatformBinding,
+  normalizeDataPlatformFrontendPort,
+  resolveDataPlatformWebBaseUrl,
   resolveDataPlatformBindingSharedResourcesRoot,
   resolveDataPlatformBindingWorkspaceRoot,
   resolveDataPlatformProjectRoot,
@@ -17,6 +21,50 @@ import {
   updateDataPlatformBinding,
   writeDataPlatformBinding,
 } from '../../electron/ipc/dataPlatformBindingStore.ts';
+
+test('数据中台前端端口按 1-65535 整数校验，并支持空值自动推导', () => {
+  assert.equal(normalizeDataPlatformFrontendPort(undefined), null);
+  assert.equal(normalizeDataPlatformFrontendPort(null), null);
+  assert.equal(normalizeDataPlatformFrontendPort(''), null);
+  assert.equal(normalizeDataPlatformFrontendPort(' 8001 '), 8001);
+  assert.equal(normalizeDataPlatformFrontendPort(65535), 65535);
+  assert.throws(() => normalizeDataPlatformFrontendPort(0), /1-65535/);
+  assert.throws(() => normalizeDataPlatformFrontendPort(65536), /1-65535/);
+  assert.throws(() => normalizeDataPlatformFrontendPort('8001.5'), /1-65535/);
+});
+
+test('保存配置保留用户填写的大屏页面地址，端口只在地址为空时推导', () => {
+  assert.deepEqual(resolveSavedDataPlatformPageConfig({
+    baseUrl: 'http://127.0.0.1:8086',
+    storedBaseUrl: 'http://127.0.0.1:8086',
+    storedWebBaseUrl: 'http://127.0.0.1:8001',
+    storedFrontendPort: 8001,
+    requestedWebBaseUrl: 'http://192.168.50.34:9001',
+    requestedFrontendPort: 8001,
+    hasRequestedWebBaseUrl: true,
+    hasRequestedFrontendPort: true,
+  }), {
+    webBaseUrl: 'http://192.168.50.34:9001',
+    frontendPort: 8001,
+  });
+});
+
+test('前端端口优先覆盖 API 端口，并可从页面地址回填端口', () => {
+  assert.equal(
+    resolveDataPlatformWebBaseUrl('http://192.168.50.34:8086', 8001),
+    'http://192.168.50.34:8001',
+  );
+  assert.equal(
+    resolveDataPlatformWebBaseUrl('https://twin.example.com/platform', 9443),
+    'https://twin.example.com:9443/platform',
+  );
+  assert.throws(
+    () => resolveDataPlatformWebBaseUrl('http://127.0.0.1:8086', 65536),
+    /1-65535/,
+  );
+  assert.equal(inferDataPlatformFrontendPort('http://192.168.50.34:8001'), 8001);
+  assert.equal(inferDataPlatformFrontendPort('https://twin.example.com'), null);
+});
 
 test('数据中台工作区按项目与共享资源隔离', () => {
   const root = path.resolve(tmpdir(), 'workspace-contract');
@@ -45,6 +93,7 @@ test('本地绑定元数据原子写入并按字符串保留 Long 精度', async
   try {
     const binding = createDataPlatformBinding({
       baseUrl: 'https://twin.example.com/platform/',
+      webBaseUrl: 'https://console.example.com/',
       workspaceRoot: workspace,
       projectId: '2054201280000000001',
       projectName: '一号工程',
@@ -59,6 +108,7 @@ test('本地绑定元数据原子写入并按字符串保留 Long 精度', async
     assert.deepEqual(await readDataPlatformBinding(projectRoot), binding);
     const persisted = JSON.parse(await readFile(getDataPlatformBindingPath(projectRoot), 'utf8'));
     assert.equal(persisted.workspaceRoot, path.resolve(workspace));
+    assert.equal(persisted.webBaseUrl, 'https://console.example.com');
     assert.equal(persisted.resourceRevision, '9007199254740993');
     assert.equal(persisted.latestVersionId, '2054201280000000003');
   } finally {
@@ -89,6 +139,7 @@ test('旧版绑定缺少 workspaceRoot 时仍可从规范项目目录恢复工�
 
     const binding = await readDataPlatformBinding(projectRoot);
     assert.equal(binding?.workspaceRoot, null);
+    assert.equal(binding?.webBaseUrl, 'https://twin.example.com/platform');
     assert.equal(resolveDataPlatformBindingWorkspaceRoot(projectRoot, binding!), path.resolve(workspace));
   } finally {
     await rm(workspace, { recursive: true, force: true });
@@ -113,6 +164,8 @@ test('定向更新发布项目绑定不会污染后来切换的当前项目', as
   try {
     const first = createBinding('101', '项目 A');
     const second = createBinding('202', '项目 B');
+    assert.equal(first.webBaseUrl, 'http://127.0.0.1:8001');
+    assert.equal(second.webBaseUrl, 'http://127.0.0.1:8001');
     await writeDataPlatformBinding(firstRoot, first);
     await writeDataPlatformBinding(secondRoot, second);
     setCurrentDataPlatformBinding(secondRoot, second);

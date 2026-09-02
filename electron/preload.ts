@@ -52,6 +52,10 @@ import type {
   SaveSceneResult,
   SelectProjectDirectoryResult,
 } from './types.js';
+import type {
+  DataPlatformChartLibrarySnapshot,
+  DataPlatformChartSyncProgress,
+} from './ipc/dataPlatformChartSync.js';
 
 /** sandbox preload 不能加载相对模块，因此实时优先 gate 必须在入口内联。 */
 function createRealtimeFirstProgressGate<T>(handler: (payload: T) => void) {
@@ -164,6 +168,21 @@ contextBridge.exposeInMainWorld('editorApi', {
     return () => {
       active = false;
       ipcRenderer.removeListener('data-platform:imageSyncProgress', listener);
+    };
+  },
+  syncDataPlatformCharts: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncCharts'),
+  retryDataPlatformChartSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryChartSync'),
+  listDataPlatformCharts: (): Promise<DataPlatformChartLibrarySnapshot> => ipcRenderer.invoke('data-platform:getChartLibrary'),
+  onDataPlatformChartSyncProgress: (handler: (progress: DataPlatformChartSyncProgress) => void): (() => void) => {
+    const progressGate = createRealtimeFirstProgressGate(handler);
+    const listener = (_event: IpcRendererEvent, payload: DataPlatformChartSyncProgress) => progressGate.handleRealtime(payload);
+    ipcRenderer.on('data-platform:chartSyncProgress', listener);
+    void ipcRenderer.invoke('data-platform:getChartSyncProgress').then((payload: DataPlatformChartSyncProgress | null) => {
+      progressGate.handleSnapshot(payload);
+    }).catch(() => undefined);
+    return () => {
+      progressGate.dispose();
+      ipcRenderer.removeListener('data-platform:chartSyncProgress', listener);
     };
   },
   listProjectAssets: (): Promise<ProjectListAssetsResult> => ipcRenderer.invoke('project:listAssets'),

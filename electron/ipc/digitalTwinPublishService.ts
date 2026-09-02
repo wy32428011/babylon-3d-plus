@@ -82,7 +82,7 @@ export async function getDigitalTwinPublishContext(
 
   const target = await resolveDataPlatformPublishProjectContext(selectedProjectId);
   const remote = await new DigitalTwinUploadClient(target.baseUrl).projectStatus(target.project.id, signal);
-  const metadata = createPublishMetadata(target.project, target.baseUrl, target.workspaceRoot, remote);
+  const metadata = createPublishMetadata(target.project, target.baseUrl, target.webBaseUrl, target.workspaceRoot, remote);
   const projectRoot = getCurrentProjectRoot() ?? resolveDataPlatformProjectRoot(target.workspaceRoot, target.project.id);
   return createPublishContext(projectRoot, metadata, remote, false);
 }
@@ -119,11 +119,13 @@ function mountDataPlatformBindingResources(projectRoot: string, metadata: DataPl
 function createPublishMetadata(
   project: Awaited<ReturnType<typeof resolveDataPlatformPublishProjectContext>>['project'],
   baseUrl: string,
+  webBaseUrl: string,
   workspaceRoot: string,
   remote: DigitalTwinProjectStatus,
 ): DataPlatformBindingMetadata {
   return createDataPlatformBinding({
     baseUrl,
+    webBaseUrl,
     workspaceRoot,
     projectId: project.id,
     projectName: project.projectName,
@@ -188,7 +190,7 @@ export async function publishDigitalTwin(
     const target = await resolveDataPlatformPublishProjectContext(validated.projectId);
     client = new DigitalTwinUploadClient(target.baseUrl);
     remote = await client.projectStatus(target.project.id, signal);
-    const previewMetadata = createPublishMetadata(target.project, target.baseUrl, target.workspaceRoot, remote);
+    const previewMetadata = createPublishMetadata(target.project, target.baseUrl, target.webBaseUrl, target.workspaceRoot, remote);
     const previewProjectRoot = getCurrentProjectRoot() ?? resolveDataPlatformProjectRoot(target.workspaceRoot, target.project.id);
     context = createPublishContext(previewProjectRoot, previewMetadata, remote, true);
     if (context.overwriteConfirmationRequired && !validated.overwriteExisting) {
@@ -202,7 +204,7 @@ export async function publishDigitalTwin(
       latestEditorProjectId: remote.editorProjectId,
       latestEditorProjectVersionId: remote.latestVersionId,
       latestEditorProjectVersionNumber: remote.latestVersionNumber,
-    }, target.baseUrl, target.workspaceRoot);
+    }, target.baseUrl, target.workspaceRoot, target.webBaseUrl);
     current = getCurrentDataPlatformBinding();
     if (!current || current.metadata.projectId !== validated.projectId) {
       throw new Error('当前场景绑定数据中台业务项目失败。');
@@ -573,7 +575,7 @@ async function saveCurrentScene(
   } catch {
     throw new Error('当前场景不是有效 JSON。');
   }
-  if (!isPlainObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) || !isPlainObject(parsed.scene)) {
+  if (!isPlainObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5) || !isPlainObject(parsed.scene)) {
     throw new Error('当前场景格式不受支持。');
   }
   const sceneName = typeof parsed.scene.name === 'string' && parsed.scene.name.trim() ? parsed.scene.name.trim() : 'main';

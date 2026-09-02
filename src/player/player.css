@@ -18,6 +18,49 @@ body,
 .player-root {
   position: relative;
 }
+.player-root:fullscreen,
+.player-root:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  background: #141414;
+}
+.player-fullscreen-button {
+  position: absolute;
+  z-index: 5;
+  top: 16px;
+  right: 16px;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 8px;
+  color: #f5f7fa;
+  background: rgb(12 16 22 / 86%);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 28%);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+.player-fullscreen-button:hover,
+.player-fullscreen-button:focus-visible {
+  border-color: rgb(247 215 116 / 58%);
+  color: #f7d774;
+}
+.player-fullscreen-button:focus-visible {
+  outline: 2px solid #f7d774;
+  outline-offset: 2px;
+}
+.player-fullscreen-button[aria-pressed='true'] {
+  border-color: #f7d774;
+  color: #1e1e1e;
+  background: #f7d774;
+}
+.player-fullscreen-button svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
 .player-canvas {
   display: block;
   width: 100%;
@@ -27,6 +70,7 @@ body,
 }
 .player-status {
   position: absolute;
+  z-index: 2;
   top: 16px;
   left: 16px;
   max-width: min(520px, calc(100vw - 32px));

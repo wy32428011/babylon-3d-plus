@@ -1,6 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import { getBuiltInMeshMeterDescription } from '../model/builtInMeshGeometry';
-import type { LightKind, MeshKind } from '../model/components';
+import type { DataPlatformScreenRenderMode, LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
 import { getLightEditorCapabilities, getLightTransformFieldLabel } from '../model/lightEditor';
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
@@ -146,6 +146,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const renameSelectedEntity = useEditorStore((state) => state.renameSelectedEntity);
   const updateSelectedTransform = useEditorStore((state) => state.updateSelectedTransform);
   const updateSelectedMaterialColor = useEditorStore((state) => state.updateSelectedMaterialColor);
+  const updateSelectedDataPlatformScreen = useEditorStore((state) => state.updateSelectedDataPlatformScreen);
   const updateSelectedSkybox = useEditorStore((state) => state.updateSelectedSkybox);
   const updateSelectedCadReference = useEditorStore((state) => state.updateSelectedCadReference);
   const updateSelectedLight = useEditorStore((state) => state.updateSelectedLight);
@@ -352,6 +353,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
 
   const transform = selectedEntity.components.transform;
   const meshRenderer = selectedEntity.components.meshRenderer;
+  const dataPlatformScreen = selectedEntity.components.dataPlatformScreen;
   const skybox = selectedEntity.components.skybox;
   const locator = selectedEntity.components.locator;
   const cadReference = selectedEntity.components.cadReference;
@@ -458,6 +460,25 @@ export function InspectorPanel(props: InspectorPanelProps) {
             />
           </label>
           <p className="muted">{getBuiltInMeshMeterDescription(meshRenderer.meshKind)}</p>
+        </fieldset>
+      ) : null}
+      {dataPlatformScreen ? (
+        <fieldset className="transform-fieldset">
+          <legend>数据中台大屏</legend>
+          <label className="inspector-row">
+            <span>显示模式</span>
+            <select
+              disabled={isLocked}
+              value={dataPlatformScreen.renderMode}
+              onChange={(event) => updateSelectedDataPlatformScreen({
+                renderMode: event.target.value as DataPlatformScreenRenderMode,
+              })}
+            >
+              <option value="iframe">iframe Overlay（交互）</option>
+              <option value="texture">纹理截图（遮挡/失败降级）</option>
+            </select>
+          </label>
+          <p className="muted">iframe 适合交互；纹理模式适合跨域限制或三维对象遮挡较强的场景。</p>
         </fieldset>
       ) : null}
       {skybox ? (

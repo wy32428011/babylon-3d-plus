@@ -54,6 +54,7 @@ import type {
   AutoPatrolWaypoint,
   CadReferenceComponent,
   ClickEventBindingComponent,
+  DataPlatformScreenComponent,
   LightComponent,
   LightKind,
   LocatorComponent,
@@ -585,6 +586,7 @@ type EditorState = {
   deleteSelectedEntity: () => void;
   updateSelectedTransform: (field: TransformField, axis: keyof Vector3Data, value: number) => void;
   updateSelectedMaterialColor: (materialColor: string) => void;
+  updateSelectedDataPlatformScreen: (patch: Partial<Pick<DataPlatformScreenComponent, 'renderMode'>>) => void;
   updateSelectedLocator: (patch: Partial<LocatorComponent>) => void;
   updateSelectedCadReference: (patch: Partial<Pick<CadReferenceComponent, 'lineColor' | 'opacity'>>) => void;
   updateSelectedLight: (patch: Partial<LightComponent>) => void;
@@ -1408,6 +1410,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
   return {
     transform: cloneTransform(entity.components.transform),
     ...(entity.components.meshRenderer ? { meshRenderer: cloneMeshRenderer(entity.components.meshRenderer) } : {}),
+    ...(entity.components.dataPlatformScreen ? { dataPlatformScreen: cloneJsonValue(entity.components.dataPlatformScreen) } : {}),
     ...(entity.components.skybox ? { skybox: cloneJsonValue(entity.components.skybox) } : {}),
     ...(entity.components.locator ? { locator: cloneLocator(entity.components.locator) } : {}),
     ...(entity.components.cadReference ? { cadReference: cloneCadReference(entity.components.cadReference) } : {}),
@@ -4479,6 +4482,41 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const before = cloneMeshRenderer(meshRenderer);
       const after = { ...before, materialColor };
       const command = updateMeshRendererCommand(entity.id, before, after);
+      const result = executeCommand(state.scene, state.history, command);
+
+      return {
+        ...result,
+        logs: prependLog(state.logs, `${command.label}: ${entity.name}`),
+      };
+    });
+  },
+  updateSelectedDataPlatformScreen: (patch) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改大屏显示模式');
+      const entity = getSelectedEntity(state);
+      const screen = entity?.components.dataPlatformScreen;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !screen) return state;
+
+      if (patch.renderMode !== 'iframe' && patch.renderMode !== 'texture') return state;
+      const renderMode = patch.renderMode;
+      if (screen.renderMode === renderMode) return state;
+
+      const command = updateSceneDocumentCommand('更新大屏显示模式', (scene) => ({
+        ...scene,
+        entities: {
+          ...scene.entities,
+          [entity.id]: {
+            ...scene.entities[entity.id],
+            components: {
+              ...scene.entities[entity.id].components,
+              dataPlatformScreen: {
+                ...screen,
+                renderMode,
+              },
+            },
+          },
+        },
+      }));
       const result = executeCommand(state.scene, state.history, command);
 
       return {

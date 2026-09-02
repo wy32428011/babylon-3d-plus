@@ -21,6 +21,10 @@ import {
   normalizeModelDataDrivenConfig,
 } from './telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig } from './builtInSlotBinding';
+import {
+  normalizeDataPlatformViewportScreen,
+  type DataPlatformViewportScreenComponent,
+} from './dataPlatformScreen';
 
 export const MODEL_ASSET_CODE_MAX_LENGTH = 128;
 
@@ -245,6 +249,8 @@ export type SceneSettings = {
   skybox: SceneSkyboxSettings | null;
   /** 场景级默认模型生成器实体 ID；设备/定位线框未单独绑定时回退到它，仍为空才用内置立方体。 */
   defaultCargoGeneratorId: string | null;
+  /** 相机视窗级完整大屏；宿主会挖空中间 sceneWindow，页面最好使用透明 HUD/embed 模式。 */
+  viewportScreen: DataPlatformViewportScreenComponent | null;
 };
 
 export type FetchConfig = {
@@ -315,6 +321,7 @@ export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
   environment: null,
   skybox: null,
   defaultCargoGeneratorId: null,
+  viewportScreen: null,
 };
 
 /** 将数值约束在指定范围内，非法输入直接回退到默认值。 */
@@ -913,6 +920,7 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
     skybox: sanitizeSceneSkybox(settings.skybox),
     shadows: sanitizeSceneShadowSettings(settings.shadows),
     defaultCargoGeneratorId: sanitizeDefaultCargoGeneratorId(settings.defaultCargoGeneratorId),
+    viewportScreen: normalizeDataPlatformViewportScreen(settings.viewportScreen),
   };
 }
 
