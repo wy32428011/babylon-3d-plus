@@ -26,6 +26,7 @@ export type DigitalTwinSlotLocatorRecord = {
 
 export type DigitalTwinSlotIndex = {
   locators: DigitalTwinSlotLocatorRecord[];
+  /** 保留旧版独立单格索引；完整资产编号查找使用 locators。 */
   standaloneEntityIdsByAssetId: Map<string, string[]>;
   effectiveVisibilityByEntityId: Map<string, boolean>;
 };
@@ -81,7 +82,7 @@ function resolveLocatorVisibility(
   index: DigitalTwinSlotIndex,
   assetCode: string,
   locators: DigitalTwinSlotLocatorRecord[],
-  coordinate: DigitalTwinSlotCoordinate,
+  coordinate?: DigitalTwinSlotCoordinate,
 ): DigitalTwinFocusLookupResult {
   if (locators.length > 1) {
     return { status: 'ambiguous', assetCode, entityIds: locators.map((locator) => locator.entityId) };
@@ -95,7 +96,7 @@ function resolveLocatorVisibility(
     status: 'found',
     assetCode,
     entityId: locator.entityId,
-    slot: coordinate,
+    ...(coordinate ? { slot: coordinate } : {}),
   };
 }
 
@@ -147,27 +148,23 @@ function findCoveringSlot(
   return resolveLocatorVisibility(index, assetCode, covering, coordinate);
 }
 
-function findStandaloneSlot(
+function findSlotByAssetId(
   index: DigitalTwinSlotIndex,
   assetCode: string,
 ): DigitalTwinFocusLookupResult {
-  const entityIds = index.standaloneEntityIdsByAssetId.get(assetCode);
-  if (!entityIds?.length) return { status: 'not-found', assetCode };
-  const locators = entityIds
-    .map((entityId) => index.locators.find((locator) => locator.entityId === entityId))
-    .filter((locator): locator is DigitalTwinSlotLocatorRecord => Boolean(locator));
+  const locators = index.locators.filter((locator) => locator.assetId === assetCode);
   if (locators.length === 0) return { status: 'not-found', assetCode };
   const locator = locators[0];
-  return resolveLocatorVisibility(index, assetCode, locators, {
-    row: locator.rowNumber,
-    column: locator.startColumn,
-    layer: locator.startLayer,
-  });
+  // 单格可定位具体坐标，多格资产编号表示整个虚拟货格实体。
+  const coordinate = locator.columns === 1 && locator.layers === 1
+    ? { row: locator.rowNumber, column: locator.startColumn, layer: locator.startLayer }
+    : undefined;
+  return resolveLocatorVisibility(index, assetCode, locators, coordinate);
 }
 
 /**
  * 发布 Viewer 搜索入口：模型资产编号优先，未命中后再查货格。
- * 货格先按「排-列-层」覆盖范围匹配，再回退到非内置单格 locator.assetId。
+ * 货格按 locator.assetId 精确匹配，未命中时兼容「排-列-层」覆盖范围查询。
  */
 export function findDigitalTwinFocusTarget(
   assetIndex: DigitalTwinAssetIndex,
@@ -182,11 +179,14 @@ export function findDigitalTwinFocusTarget(
     return { status: 'invalid', assetCode };
   }
 
+  const slotLookup = findSlotByAssetId(slotIndex, assetCode);
+  if (slotLookup.status !== 'not-found') return slotLookup;
+
   const coordinate = parseDigitalTwinSlotCoordinate(assetCode);
   if (coordinate) {
     const covering = findCoveringSlot(slotIndex, assetCode, coordinate);
     if (covering.status !== 'not-found') return covering;
   }
 
-  return findStandaloneSlot(slotIndex, assetCode);
+  return { status: 'not-found', assetCode };
 }

@@ -3,6 +3,7 @@ import test, { after } from 'node:test';
 import { createServer } from 'vite';
 
 import type { DigitalTwinAssetIndex } from '../../src/shared/digitalTwinAssetCodes.ts';
+import type { SceneDocument } from '../../src/editor/model/SceneDocument.ts';
 import type { DigitalTwinSlotCoordinate, DigitalTwinSlotIndex } from '../../src/shared/digitalTwinSlotCodes.ts';
 import type {
   CameraTransitionCancelReason,
@@ -31,6 +32,7 @@ const viteServer = await createServer({
 const { DigitalTwinInteractionController } = await viteServer.ssrLoadModule(
   '/src/player/DigitalTwinInteractionController.ts',
 ) as typeof import('../../src/player/DigitalTwinInteractionController.ts');
+const { createViewerModelClickHandler } = await viteServer.ssrLoadModule('/src/player/viewerModelClick.ts') as typeof import('../../src/player/viewerModelClick.ts');
 after(async () => {
   await viteServer.close();
 });
@@ -92,6 +94,7 @@ class FakeRuntime implements DigitalTwinInteractionRuntime {
   slotIndex: DigitalTwinSlotIndex;
   boundsFactory: (entityId: string, slot?: DigitalTwinSlotCoordinate) => DigitalTwinFocusBounds | null;
   focusCalls: Array<{ bounds: DigitalTwinFocusBounds; options: CameraViewTransitionOptions }> = [];
+  clickCalls: Array<{ entityId: string; slot?: DigitalTwinSlotCoordinate }> = [];
   pauseCount = 0;
   cameraChangedWhilePausedCount = 0;
   highlightedEntityIds: string[][] = [];
@@ -123,6 +126,10 @@ class FakeRuntime implements DigitalTwinInteractionRuntime {
   }
 
   getFocusBounds = (entityId: string, slot?: DigitalTwinSlotCoordinate): DigitalTwinFocusBounds | null => this.boundsFactory(entityId, slot);
+
+  triggerTargetClick = (entityId: string, slot?: DigitalTwinSlotCoordinate): void => {
+    this.clickCalls.push({ entityId, slot });
+  };
 
   focusOnBounds = (bounds: DigitalTwinFocusBounds, options: CameraViewTransitionOptions): void => {
     this.focusCalls.push({ bounds, options });
@@ -475,6 +482,43 @@ test('唯一可见且几何就绪的模型开始聚焦时才暂停巡检并在�
   }
 });
 
+test('搜索聚焦完成后只触发一次目标点击，失败或取消请求不触发', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([{ assetCode: 'DDJ2', entityIds: ['entity_1'] }]);
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    dispatch(f.bus, focusCommand('missing', 'missing'));
+    dispatch(f.bus, focusCommand('cancelled', 'DDJ2'));
+    const cancelledCompletion = runtime.focusCalls[0].options.onCompleted;
+    dispatch(f.bus, focusCommand('latest', 'DDJ2'));
+    cancelledCompletion?.();
+    assert.deepEqual(runtime.clickCalls, []);
+    const completion = runtime.focusCalls[1].options.onCompleted;
+    runtime.completeFocus();
+    completion?.();
+    assert.deepEqual(runtime.clickCalls, [{ entityId: 'entity_1', slot: undefined }]);
+  } finally {
+    f.controller.dispose();
+  }
+});
+
+test('目标点击处理异常返回 INTERNAL_ERROR，不把异常回调当作聚焦成功', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([{ assetCode: 'DDJ2', entityIds: ['entity_1'] }]);
+  runtime.triggerTargetClick = () => { throw new Error('click failed'); };
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    dispatch(f.bus, focusCommand('click-error', 'DDJ2'));
+    assert.doesNotThrow(() => runtime.completeFocus());
+    const result = f.posted.at(-1)?.message;
+    assert.equal(result?.type === 'command.result' && !result.ok ? result.error.code : '', 'INTERNAL_ERROR');
+  } finally {
+    f.controller.dispose();
+  }
+});
+
 test('几何等待期间不暂停巡检，几何 ready 后才开始聚焦', () => {
   const f = createFixture();
   const runtime = new FakeRuntime(
@@ -703,6 +747,7 @@ test('货格坐标命中后聚焦单格包围盒并设置格子 overlay', () => 
     }]);
     assert.deepEqual(runtime.focusCalls[0].bounds.center, { x: 5, y: 3, z: 1 });
     runtime.completeFocus();
+    assert.deepEqual(runtime.clickCalls, [{ entityId: 'entity_locator', slot: { row: 1, column: 5, layer: 3 } }]);
     const result = f.posted[0].message;
     assert.equal(result.type, 'command.result');
     if (result.type === 'command.result') {
@@ -716,7 +761,7 @@ test('货格坐标命中后聚焦单格包围盒并设置格子 overlay', () => 
   }
 });
 
-test('内置货格 assetId 不能作为搜索键，模型编号仍命中模型', () => {
+test('内置货格与宿主同号时优先命中模型', () => {
   const f = createFixture();
   const runtime = new FakeRuntime([{ assetCode: 'SHELF-01', entityIds: ['entity_shelf'] }]);
   runtime.slotIndex = {
@@ -750,6 +795,52 @@ test('内置货格 assetId 不能作为搜索键，模型编号仍命中模型',
     if (result.type === 'command.result' && result.ok) {
       assert.deepEqual(result.payload, { assetCode: 'SHELF-01', entityIds: ['entity_shelf'] });
     }
+  } finally {
+    f.controller.dispose();
+  }
+});
+
+test('库位资产编号消息贯通聚焦与宿主点击单元事件', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([]);
+  const sourceUrl = 'editor-asset://local/shelf.glb';
+  const scene = { entities: {
+    shelf: { id: 'shelf', components: { modelAsset: {
+      sourceUrl,
+      builtInSlotBindingConfig: { dimensionMapping: { columns: 'columns', layers: 'layers' } },
+    } } },
+    slot: { id: 'slot', components: { locator: { builtInBinding: { hostEntityId: 'shelf' } } } },
+    binding: { id: 'binding', components: { clickEventBinding: {
+      deviceSlots: [{ deviceType: { sourceUrl } }],
+      events: [{ eventType: 'click-cell', effects: ['highlight', 'focus'] }],
+    } } },
+  } } as unknown as SceneDocument;
+  const selected: string[][] = [];
+  const events: string[] = [];
+  const highlighted: unknown[] = [];
+  const click = createViewerModelClickHandler(scene, {
+    updateSelection: (ids) => selected.push([...ids]),
+    setSlotHighlight: (entityId, cell) => highlighted.push({ entityId, cell }),
+    focusTarget: () => assert.fail('点击事件不能再次覆盖搜索聚焦'),
+    triggerManualEvents: (id) => events.push(id),
+  });
+  runtime.slotIndex.locators.push({
+    entityId: 'slot', assetId: '0001-A', rowNumber: 2, startColumn: 3, startLayer: 4,
+    columns: 1, layers: 1, builtIn: true, hostEntityId: 'shelf',
+  });
+  runtime.triggerTargetClick = (id, cell) => click(id, cell ? { locatorEntityId: id, ...cell } : null, { focus: false });
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    dispatch(f.bus, focusCommand('slot-code', ' 0001-A '));
+    assert.equal(runtime.focusCalls.length, 1);
+    assert.deepEqual(events, []);
+    runtime.completeFocus();
+    assert.deepEqual(selected, [[]]);
+    assert.deepEqual(events, ['shelf']);
+    assert.deepEqual(highlighted, [{ entityId: 'slot', cell: { row: 2, column: 3, layer: 4 } }]);
+    const result = f.posted.at(-1)?.message;
+    assert.equal(result?.type === 'command.result' && result.ok, true);
   } finally {
     f.controller.dispose();
   }
