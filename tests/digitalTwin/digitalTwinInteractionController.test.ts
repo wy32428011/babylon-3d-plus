@@ -845,3 +845,57 @@ test('库位资产编号消息贯通聚焦与宿主点击单元事件', () => {
     f.controller.dispose();
   }
 });
+
+test('命中 show-chart 绑定时向宿主发送 event.assetClicked，未握手时静默丢弃', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([]);
+  const sourceUrl = 'editor-asset://local/shelf.glb';
+  const scene = { entities: {
+    shelf: { id: 'shelf', components: { modelAsset: {
+      sourceUrl,
+      assetCode: 'SHELF-01',
+      builtInSlotBindingConfig: { dimensionMapping: { columns: 'columns', layers: 'layers' } },
+    } } },
+    slot: { id: 'slot', components: { locator: { builtInBinding: { hostEntityId: 'shelf' } } } },
+    binding: { id: 'binding', components: { clickEventBinding: {
+      deviceSlots: [{ deviceType: { sourceUrl } }],
+      events: [
+        { eventType: 'click', effects: ['show-chart'], chart: { id: 'chart-click', name: '点击大屏' } },
+        { eventType: 'click-cell', effects: ['highlight', 'show-chart'], chart: { id: 'chart-cell', name: '单元大屏' } },
+      ],
+    } } },
+  } } as unknown as SceneDocument;
+  const click = createViewerModelClickHandler(scene, {
+    updateSelection: () => {},
+    setSlotHighlight: () => {},
+    focusTarget: () => {},
+    triggerManualEvents: () => {},
+    emitAssetClicked: (payload) => f.controller.notifyAssetClicked(payload),
+  });
+  try {
+    f.controller.markViewerReady(runtime);
+    // 未握手：事件被静默丢弃。
+    click('shelf');
+    assert.deepEqual(f.posted.map((entry) => entry.message.type), []);
+
+    dispatch(f.bus, hostHello());
+    const handshakeCount = f.posted.length;
+
+    click('shelf');
+    click('slot', { locatorEntityId: 'slot', row: 2, column: 3, layer: 4 });
+    const events = f.posted.slice(handshakeCount);
+    assert.deepEqual(events.map((entry) => entry.message.type), ['event.assetClicked', 'event.assetClicked']);
+    assert.ok(events.every((entry) => entry.targetOrigin === sameOrigin));
+    assert.deepEqual(events[0].message.type === 'event.assetClicked' && events[0].message.payload, {
+      assetCode: 'SHELF-01',
+      chartId: 'chart-click',
+    });
+    assert.deepEqual(events[1].message.type === 'event.assetClicked' && events[1].message.payload, {
+      assetCode: 'SHELF-01',
+      slot: { row: 2, column: 3, layer: 4 },
+      chartId: 'chart-cell',
+    });
+  } finally {
+    f.controller.dispose();
+  }
+});

@@ -11,6 +11,7 @@ import {
 } from 'react';
 import {
   createBabylonViewport,
+  isSoftwareWebGLFallbackAllowed,
   type BabylonViewport,
   type BabylonViewportRuntimeStatus,
 } from '../../runtime/babylon/createEngine';
@@ -23,11 +24,17 @@ import {
 } from '../../shared/sceneModelSelectionPointer';
 import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
 import {
+  buildClickEventAssetClickedPayload,
   CLICK_EVENT_FOCUS_DURATION_MS,
   CLICK_EVENT_FOCUS_RADIUS_SCALE,
   resolveClickEventBindingClick,
   type ClickEventBindingPickedCell,
 } from '../model/clickEventBinding';
+import {
+  DIGITAL_TWIN_BRIDGE_CHANNEL,
+  DIGITAL_TWIN_BRIDGE_VERSION,
+  DIGITAL_TWIN_EDITOR_PREVIEW_SESSION_ID,
+} from '../../player/digitalTwinInteractionProtocol';
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime, type DataPlatformScreenOverlayItem } from '../../runtime/babylon/SceneRuntime';
 import { createEntityGroupRotationDeltaMatrix } from '../../runtime/babylon/EntityGroupRotationPreview';
@@ -822,6 +829,26 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const state = useEditorStore.getState();
       const resolution = resolveClickEventBindingClick(state.scene, pickedEntityId, pickedCell);
       if (resolution.kind !== 'pass-through') {
+        // 命中 show-chart 效果时向宿主页面发送点击事件；编辑器无握手流程，用固定会话标识 + 通配 origin（仅开发预览）。
+        const assetClickedPayload = buildClickEventAssetClickedPayload(state.scene, resolution);
+        if (assetClickedPayload) {
+          const slotText = assetClickedPayload.slot
+            ? `，库位 ${assetClickedPayload.slot.row}-${assetClickedPayload.slot.column}-${assetClickedPayload.slot.layer}`
+            : '';
+          const framed = window.parent !== window;
+          state.pushLog(
+            `点击事件绑定：展示图表事件（资产编号 ${assetClickedPayload.assetCode ?? '未设置'}${slotText}，图表id ${assetClickedPayload.chartId ?? '未配置'}）${framed ? '已发送至宿主页面' : '未嵌入宿主页面，仅记录'}`,
+          );
+          if (framed) {
+            window.parent.postMessage({
+              channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+              version: DIGITAL_TWIN_BRIDGE_VERSION,
+              sessionId: DIGITAL_TWIN_EDITOR_PREVIEW_SESSION_ID,
+              type: 'event.assetClicked',
+              payload: assetClickedPayload,
+            }, '*');
+          }
+        }
         if (resolution.kind === 'trigger-cell') {
           state.setEnvironmentAdjustmentActive(false);
           if (resolution.effects.includes('highlight')) {
@@ -1049,7 +1076,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     try {
       viewport = createBabylonViewport(canvasRef.current, handleRuntimeStatus, {
-        requireHardwareAcceleration: true,
+        requireHardwareAcceleration: !isSoftwareWebGLFallbackAllowed(),
         onLog: pushLog,
         initialSensitivity: useEditorStore.getState().scene.sceneSettings.sensitivity,
       });

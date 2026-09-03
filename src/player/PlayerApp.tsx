@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { deserializeScene } from '../editor/project/SceneSerializer';
 import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '../runtime/assets/editorAssetUrl';
-import { createBabylonViewport, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
+import { createBabylonViewport, isSoftwareWebGLFallbackAllowed, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../runtime/babylon/cameraControlStandard';
 import { SceneRuntime, type SceneRuntimeModelLoadProgress } from '../runtime/babylon/SceneRuntime';
@@ -398,7 +398,7 @@ export function PlayerApp() {
         viewport = createBabylonViewport(canvas, handleRuntimeStatus, {
           showGrid: parsedConfig.viewer.showGrid,
           allowCameraControl: parsedConfig.viewer.allowCameraControl,
-          requireHardwareAcceleration: true,
+          requireHardwareAcceleration: !isSoftwareWebGLFallbackAllowed(),
           keepRenderingInBackground: true,
           initialSensitivity: sceneDocument.sceneSettings.sensitivity,
         });
@@ -570,6 +570,7 @@ export function PlayerApp() {
             }
           },
           triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
+          emitAssetClicked: (payload) => interactionController?.notifyAssetClicked(payload),
         });
         removeModelSelectionListeners = bindSceneModelSelectionPointer(canvas, {
           clickTolerancePx: DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx,

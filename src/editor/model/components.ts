@@ -337,8 +337,15 @@ export type ManualRoamSpawnComponent = Record<string, never>;
 /** 点击事件绑定支持的事件类型；click-cell 命中货架虚拟货格单元格时触发，同一绑定中优先于 click。 */
 export type ClickEventBindingEventType = 'click' | 'click-cell';
 
-/** 点击命中后执行的效果类型，单个事件内同类效果只保留一条；show-chart 展示图表功能尚未实现，目前仅作配置占位。 */
+/** 点击命中后执行的效果类型，单个事件内同类效果只保留一条；show-chart 命中后通过 postMessage 通知宿主页面展示图表。 */
 export type ClickEventBindingEffect = 'highlight' | 'focus' | 'show-chart';
+
+/** show-chart 效果绑定的图表库条目引用；id 为图表库条目主键（发送给宿主页面的图表id），name/thumbnailUrl 仅用于 Inspector 展示。 */
+export type ClickEventBindingChartRef = {
+  id: string;
+  name: string;
+  thumbnailUrl?: string;
+};
 
 /** 绑定的设备类型条目，以模型包 sourceUrl 作为运行态匹配主键。 */
 export type ClickEventBindingDeviceType = {
@@ -358,11 +365,13 @@ export type ClickEventBindingDeviceSlot = {
   deviceType: ClickEventBindingDeviceType | null;
 };
 
-/** 单条事件配置：事件类型 + 命中后执行的效果列表。 */
+/** 单条事件配置：事件类型 + 命中后执行的效果列表；chart 为 show-chart 效果的参数。 */
 export type ClickEventBindingEvent = {
   id: string;
   eventType: ClickEventBindingEventType;
   effects: ClickEventBindingEffect[];
+  /** show-chart 效果参数：图表库中的图表引用；effects 不含 show-chart 时不保留。 */
+  chart?: ClickEventBindingChartRef;
 };
 
 /** 点击事件绑定组件，仅在运行预览态生效；事件列表中同类型事件取第一条匹配。 */

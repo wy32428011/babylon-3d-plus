@@ -35,7 +35,7 @@ function fixture(effects?: ClickEventBindingEffect[], cellEvent = false) {
     focusTarget: (id, cell) => focuses.push({ id, cell }),
     triggerManualEvents: (id) => events.push(id),
   });
-  return { handler, selections, highlights, focuses, events };
+  return { handler, selections, highlights, focuses, events, scene };
 }
 
 test('搜索和鼠标点击共用选中与手动事件，搜索不重复覆盖相机聚焦', () => {
@@ -69,4 +69,52 @@ test('无绑定沿用默认点击；接管时未注册目标忽略，空白清�
   bound.handler(null);
   assert.deepEqual(bound.selections, [[]]);
   assert.deepEqual(bound.highlights, [{ id: '', cell: null }]);
+});
+
+test('命中 show-chart 效果时向宿主页面发送点击事件载荷', () => {
+  const sourceUrl = 'editor-asset://local/shelf.glb';
+  const scene = {
+    entities: {
+      model: { id: 'model', components: { modelAsset: { sourceUrl, assetCode: '001005', builtInSlotBindingConfig: { dimensionMapping: { columns: 'columns', layers: 'layers' } } } } },
+      locator: { id: 'locator', components: { locator: { builtInBinding: { hostEntityId: 'model' } } } },
+      binding: { id: 'binding', components: { clickEventBinding: {
+        deviceSlots: [{ deviceType: { sourceUrl } }],
+        events: [
+          { eventType: 'click', effects: ['highlight', 'show-chart'], chart: { id: 'chart-click', name: '点击大屏' } },
+          { eventType: 'click-cell', effects: ['show-chart'], chart: { id: 'chart-cell', name: '单元大屏' } },
+        ],
+      } } },
+    },
+  } as unknown as SceneDocument;
+  const emitted: unknown[] = [];
+  const handler = createViewerModelClickHandler(scene, {
+    updateSelection: () => {},
+    setSlotHighlight: () => {},
+    focusTarget: () => {},
+    triggerManualEvents: () => {},
+    emitAssetClicked: (payload) => emitted.push(payload),
+  });
+
+  handler('model', null, { focus: false });
+  assert.deepEqual(emitted, [{ assetCode: '001005', chartId: 'chart-click' }]);
+
+  handler('locator', { locatorEntityId: 'locator', row: 2, column: 3, layer: 1 }, { focus: false });
+  assert.deepEqual(emitted, [
+    { assetCode: '001005', chartId: 'chart-click' },
+    { assetCode: '001005', slot: { row: 2, column: 3, layer: 1 }, chartId: 'chart-cell' },
+  ]);
+});
+
+test('效果不含 show-chart 时不发送宿主事件', () => {
+  const f = fixture(['highlight']);
+  const emitted: unknown[] = [];
+  const handler = createViewerModelClickHandler(f.scene, {
+    updateSelection: () => {},
+    setSlotHighlight: () => {},
+    focusTarget: () => {},
+    triggerManualEvents: () => {},
+    emitAssetClicked: (payload) => emitted.push(payload),
+  });
+  handler('model');
+  assert.deepEqual(emitted, []);
 });

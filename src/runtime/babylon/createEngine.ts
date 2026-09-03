@@ -167,6 +167,20 @@ function assertWebGLSupported(): void {
 }
 
 /**
+ * 仅开发环境生效的临时逃生门：本机无可用 GPU（如虚拟机、远程桌面）时，
+ * 在 devtools 执行 localStorage.setItem('editor.allowSoftwareWebGL','1') 后刷新，允许软件 WebGL 回退。
+ * 发布构建中 import.meta.env.DEV 恒为 false，此路径被静态消除，不影响发布结果。
+ */
+export function isSoftwareWebGLFallbackAllowed(): boolean {
+  if (!import.meta.env.DEV) return false;
+  try {
+    return globalThis.localStorage?.getItem('editor.allowSoftwareWebGL') === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 根据包围球、相机 FOV 与实际画布宽高比计算几何取景距离。
  * 旧的固定 2.2 倍半径在窄画布或超长场景中会把左右边缘裁出视野；这里取水平/垂直较窄半角，
  * 先得到带少量编辑边距的完整显示距离；普通模型再由聚焦规则硬钳制到 3m，非模型目标保留原有完整取景规则。
@@ -405,6 +419,11 @@ export function createBabylonViewport(
   if (backgroundFrameRequester) {
     engine.customAnimationFrameRequester = backgroundFrameRequester;
     engine.renderEvenInBackground = true;
+  }
+  if (!requireHardwareAcceleration && isSoftwareWebGLFallbackAllowed()) {
+    const message = '[Babylon] 已按开发环境配置允许软件 WebGL 回退：renderer=' + engine.getGlInfo().renderer;
+    console.warn(message);
+    options.onLog?.(message);
   }
 
   const scene = new Scene(engine);

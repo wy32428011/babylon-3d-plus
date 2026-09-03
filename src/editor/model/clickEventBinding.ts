@@ -1,4 +1,5 @@
 import type { ClickEventBindingComponent, ClickEventBindingDeviceSlot, ClickEventBindingDeviceType, ClickEventBindingEffect, ClickEventBindingEvent, ClickEventBindingEventType } from './components';
+import { normalizeDataPlatformScreenUrl } from './dataPlatformScreen';
 import type { SceneDocument } from './SceneDocument';
 import { createId } from '../../shared/ids';
 
@@ -122,7 +123,7 @@ function sanitizeClickEventBindingDeviceSlot(value: unknown): ClickEventBindingD
   return { id, deviceType: sanitizeClickEventBindingDeviceType(value.deviceType) };
 }
 
-/** 清理单条事件配置；非法事件类型回退 click，效果数组限枚举且去重。 */
+/** 清理单条事件配置；非法事件类型回退 click，效果数组限枚举且去重。chart 仅在含 show-chart 效果时保留。 */
 function sanitizeClickEventBindingEvent(value: unknown): ClickEventBindingEvent | null {
   if (!isPlainObject(value)) return null;
   const eventType = CLICK_EVENT_BINDING_EVENT_TYPES.includes(value.eventType as ClickEventBindingEventType)
@@ -131,10 +132,23 @@ function sanitizeClickEventBindingEvent(value: unknown): ClickEventBindingEvent 
   const effects = Array.isArray(value.effects)
     ? CLICK_EVENT_BINDING_EFFECTS.filter((effect) => (value.effects as unknown[]).includes(effect))
     : [];
+  let chart: ClickEventBindingEvent['chart'];
+  if (effects.includes('show-chart') && isPlainObject(value.chart)) {
+    const chartId = sanitizeText(value.chart.id, CLICK_EVENT_BINDING_ID_MAX_LENGTH);
+    if (chartId) {
+      const thumbnailUrl = normalizeDataPlatformScreenUrl(value.chart.thumbnailUrl);
+      chart = {
+        id: chartId,
+        name: sanitizeText(value.chart.name) || '数据中台大屏',
+        ...(thumbnailUrl ? { thumbnailUrl } : {}),
+      };
+    }
+  }
   return {
     id: sanitizeText(value.id, CLICK_EVENT_BINDING_ID_MAX_LENGTH) || createId('click_event'),
     eventType,
     effects,
+    ...(chart ? { chart } : {}),
   };
 }
 
@@ -201,18 +215,19 @@ export type ClickEventBindingPickedCell = {
   layer: number;
 };
 
-/** 运行/发布态点击决策：场景存在已注册设备类型的绑定时点击行为全接管。 */
+/** 运行/发布态点击决策：场景存在已注册设备类型的绑定时点击行为全接管。chartId 为命中事件中 show-chart 效果的图表参数。 */
 export type ClickEventBindingClickResolution =
   | { kind: 'pass-through' }
   | { kind: 'clear' }
   | { kind: 'ignore' }
-  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[] }
+  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[]; chartId?: string }
   | {
     kind: 'trigger-cell';
     entityId: string;
     locatorEntityId: string;
     cell: { row: number; column: number; layer: number };
     effects: ClickEventBindingEffect[];
+    chartId?: string;
   };
 
 /**
@@ -255,10 +270,41 @@ export function resolveClickEventBindingClick(
       locatorEntityId: pickedCell.locatorEntityId,
       cell: { row: pickedCell.row, column: pickedCell.column, layer: pickedCell.layer },
       effects: cellEvent.effects,
+      ...(cellEvent.chart ? { chartId: cellEvent.chart.id } : {}),
     };
   }
 
   const matchedEvent = hit.component.events.find((event) => event.eventType === 'click');
   if (!matchedEvent) return { kind: 'ignore' };
-  return { kind: 'trigger', entityId: pickedEntityId, effects: matchedEvent.effects };
+  return {
+    kind: 'trigger',
+    entityId: pickedEntityId,
+    effects: matchedEvent.effects,
+    ...(matchedEvent.chart ? { chartId: matchedEvent.chart.id } : {}),
+  };
+}
+
+/** 命中后需通知宿主页面的点击事件载荷：模型资产编号、货格库位（点击单元时的 排-列-层）与 show-chart 图表id。 */
+export type ClickEventAssetClickedPayload = {
+  assetCode?: string;
+  slot?: { row: number; column: number; layer: number };
+  chartId?: string;
+};
+
+/**
+ * 由点击决策构造发送给宿主页面的 show-chart 事件载荷；
+ * 仅在 trigger/trigger-cell 且效果含 show-chart 时返回载荷，其余情况返回 null。
+ */
+export function buildClickEventAssetClickedPayload(
+  scene: SceneDocument,
+  resolution: ClickEventBindingClickResolution,
+): ClickEventAssetClickedPayload | null {
+  if (resolution.kind !== 'trigger' && resolution.kind !== 'trigger-cell') return null;
+  if (!resolution.effects.includes('show-chart')) return null;
+  const assetCode = scene.entities[resolution.entityId]?.components.modelAsset?.assetCode?.trim();
+  return {
+    ...(assetCode ? { assetCode } : {}),
+    ...(resolution.kind === 'trigger-cell' ? { slot: { ...resolution.cell } } : {}),
+    ...(resolution.chartId ? { chartId: resolution.chartId } : {}),
+  };
 }

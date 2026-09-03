@@ -161,6 +161,36 @@
           "action": "startAutoPatrol"
         }
       }
+    },
+    {
+      "name": "asset clicked with slot and chart",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "event.assetClicked",
+        "payload": {
+          "assetCode": "001005",
+          "slot": {
+            "row": 2,
+            "column": 3,
+            "layer": 1
+          },
+          "chartId": "data-platform-screen:project-1:screen-9"
+        }
+      }
+    },
+    {
+      "name": "asset clicked with asset code only",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "event.assetClicked",
+        "payload": {
+          "assetCode": "001005"
+        }
+      }
     }
   ],
   "invalid": [
@@ -263,6 +293,49 @@
         "type": "viewer.initialLoadState",
         "payload": {
           "phase": "ready"
+        }
+      }
+    },
+    {
+      "name": "asset clicked rejects negative slot coordinate",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "event.assetClicked",
+        "payload": {
+          "assetCode": "001005",
+          "slot": {
+            "row": -1,
+            "column": 3,
+            "layer": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "asset clicked rejects unknown payload key",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "event.assetClicked",
+        "payload": {
+          "assetCode": "001005",
+          "entityId": "entity-1"
+        }
+      }
+    },
+    {
+      "name": "asset clicked rejects empty chart id",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "event.assetClicked",
+        "payload": {
+          "assetCode": "001005",
+          "chartId": "  "
         }
       }
     }

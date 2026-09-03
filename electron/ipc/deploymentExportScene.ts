@@ -117,6 +117,9 @@ type ResolvedSkyboxReference = MutableSkyboxReference & {
 
 type MutableCadReference = { cad: PlainObject };
 
+/** 点击事件绑定设备类型只参与 URL 改写：匹配的实体已进入模型引用列表，绑定自身不引入新资源。 */
+type MutableClickEventBindingReference = { slot: PlainObject; deviceType: PlainObject };
+
 type ResolvedCadReference = MutableCadReference & {
   sourcePath: string;
   bundle: ResourceBundle;
@@ -221,6 +224,7 @@ export async function prepareDeploymentExport(
   );
 
   rewriteModelReferences(resolvedModels, sourceUrlMap);
+  rewriteClickEventBindingReferences(references.clickEventBindings, sourceUrlMap, warnings);
   rewriteEnvironmentReferences(resolvedEnvironments, sourceUrlMap);
   rewriteSkyboxReferences(resolvedSkyboxes, sourceUrlMap);
   rewriteCadReferences(resolvedCadReferences, sourceUrlMap);
@@ -297,11 +301,13 @@ function collectSceneReferences(scene: PlainObject): {
   environments: MutableEnvironmentReference[];
   skyboxes: MutableSkyboxReference[];
   cadReferences: MutableCadReference[];
+  clickEventBindings: MutableClickEventBindingReference[];
 } {
   const entities = requirePlainObject(scene.entities, 'scene.entities');
   const models: MutableModelReference[] = [];
   const skyboxes: MutableSkyboxReference[] = [];
   const cadReferences: MutableCadReference[] = [];
+  const clickEventBindings: MutableClickEventBindingReference[] = [];
 
   for (const [entityId, entityValue] of Object.entries(entities)) {
     const entity = requirePlainObject(entityValue, `实体 ${entityId}`);
@@ -311,6 +317,13 @@ function collectSceneReferences(scene: PlainObject): {
     }
     if (components.modelGenerator !== undefined) {
       collectModelGeneratorReferences(requirePlainObject(components.modelGenerator, `实体 ${entityId} modelGenerator`), models, entityId);
+    }
+    if (components.clickEventBinding !== undefined) {
+      collectClickEventBindingReferences(
+        requirePlainObject(components.clickEventBinding, `实体 ${entityId} clickEventBinding`),
+        clickEventBindings,
+        entityId,
+      );
     }
     if (components.skybox !== undefined) {
       skyboxes.push({ skybox: requirePlainObject(components.skybox, `实体 ${entityId} skybox`) });
@@ -333,7 +346,21 @@ function collectSceneReferences(scene: PlainObject): {
       skyboxes.push({ skybox: requirePlainObject(sceneSettings.skybox, 'scene.sceneSettings.skybox') });
     }
   }
-  return { models, environments, skyboxes, cadReferences };
+  return { models, environments, skyboxes, cadReferences, clickEventBindings };
+}
+
+/** 收集点击事件绑定中已填设备类型的引用，供导出时与场景模型同步改写部署 URL。 */
+function collectClickEventBindingReferences(
+  binding: PlainObject,
+  output: MutableClickEventBindingReference[],
+  entityId: string,
+): void {
+  if (binding.deviceSlots === undefined) return;
+  const slots = requireObjectArray(binding.deviceSlots, `实体 ${entityId} clickEventBinding.deviceSlots`);
+  for (const [index, slot] of slots.entries()) {
+    if (slot.deviceType === null || slot.deviceType === undefined) continue;
+    output.push({ slot, deviceType: requirePlainObject(slot.deviceType, `实体 ${entityId} 设备类型槽位 ${index + 1}`) });
+  }
 }
 
 /** 收集模型生成器默认目标和每条规则中的 model 目标。 */
@@ -916,6 +943,46 @@ function rewriteModelReferences(references: ResolvedModelReference[], sourceUrlM
       const imageUrl = requireMappedUrl(sourceUrlMap, imagePath, '贴图资源');
       replaceParameterValueStrings(reference.asset.parameterValues, originalValue, imageUrl);
     }
+  }
+}
+
+/**
+ * 将点击事件绑定设备类型的 sourcePath/sourceUrl 改写为部署虚拟 URL，保证发布态仍能按 URL 匹配场景实体。
+ * 引用模型未进入发布包（场景中无对应实体或生成目标）或路径无效时清空槽位并告警：
+ * 部署场景禁止残留本机路径（assertNoLocalMachinePaths），且该槽位在发布态本就不会命中。
+ */
+function rewriteClickEventBindingReferences(
+  references: MutableClickEventBindingReference[],
+  sourceUrlMap: Map<string, string>,
+  warnings: string[],
+): void {
+  const warnedDeviceTypes = new Set<string>();
+  const dropDeviceType = (reference: MutableClickEventBindingReference, reason: string): void => {
+    const displayName = typeof reference.deviceType.displayName === 'string' && reference.deviceType.displayName.trim()
+      ? reference.deviceType.displayName.trim()
+      : '未命名设备类型';
+    if (warnedDeviceTypes.add(displayName)) {
+      warnings.push(`点击事件绑定设备类型「${displayName}」${reason}，发布包已清空该槽位。`);
+    }
+    reference.slot.deviceType = null;
+  };
+
+  for (const reference of references) {
+    let sourcePath: string;
+    try {
+      sourcePath = resolveLocalAssetPath(reference.deviceType.sourcePath, reference.deviceType.sourceUrl, '点击事件绑定设备类型');
+    } catch {
+      dropDeviceType(reference, '资源路径无效');
+      continue;
+    }
+    const mappedUrl = sourceUrlMap.get(toLocalPathKey(sourcePath));
+    if (!mappedUrl) {
+      dropDeviceType(reference, '引用的模型不在场景中');
+      continue;
+    }
+    reference.deviceType.sourcePath = mappedUrl;
+    reference.deviceType.sourceUrl = mappedUrl;
+    delete reference.deviceType.thumbnailUrl;
   }
 }
 

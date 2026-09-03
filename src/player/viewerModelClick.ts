@@ -1,5 +1,7 @@
 import {
+  buildClickEventAssetClickedPayload,
   resolveClickEventBindingClick,
+  type ClickEventAssetClickedPayload,
   type ClickEventBindingPickedCell,
 } from '../editor/model/clickEventBinding';
 import type { SceneDocument } from '../editor/model/SceneDocument';
@@ -10,6 +12,8 @@ type ViewerModelClickEffects = {
   setSlotHighlight: (entityId: string, cell: DigitalTwinSlotCoordinate | null) => void;
   focusTarget: (entityId: string, cell?: DigitalTwinSlotCoordinate) => void;
   triggerManualEvents: (entityId: string) => void;
+  /** 命中 show-chart 效果时向宿主页面发送点击事件。 */
+  emitAssetClicked?: (payload: ClickEventAssetClickedPayload) => void;
 };
 
 /** 鼠标拾取与搜索共用点击绑定；搜索已完成聚焦，可跳过事件中的二次相机移动。 */
@@ -22,6 +26,8 @@ export function createViewerModelClickHandler(scene: SceneDocument, effects: Vie
     const entityId = (targetEntityId && scene.entities[targetEntityId]?.components.locator?.builtInBinding?.hostEntityId)
       || targetEntityId;
     const resolution = resolveClickEventBindingClick(scene, entityId, pickedCell);
+    const assetClickedPayload = buildClickEventAssetClickedPayload(scene, resolution);
+    if (assetClickedPayload) effects.emitAssetClicked?.(assetClickedPayload);
     if (resolution.kind === 'pass-through') {
       effects.updateSelection(entityId ? [entityId] : []);
       if (entityId) effects.triggerManualEvents(entityId);

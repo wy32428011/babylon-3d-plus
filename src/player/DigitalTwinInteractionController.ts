@@ -16,6 +16,7 @@ import {
   DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY,
   DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY,
   parseDigitalTwinBridgeMessage,
+  type DigitalTwinAssetClickedEvent,
   type DigitalTwinBridgeMessage,
   type DigitalTwinCapability,
   type DigitalTwinCommandFailureResult,
@@ -513,6 +514,18 @@ export class DigitalTwinInteractionController {
       error: { code, message: FAILURE_MESSAGES[code] },
     };
     this.post(result);
+  }
+
+  /** Viewer 内部点击命中 show-chart 效果时向宿主页面发送点击事件；未完成握手时静默丢弃。 */
+  notifyAssetClicked(payload: DigitalTwinAssetClickedEvent['payload']): void {
+    if (this.disposed || !this.activeSessionId) return;
+    this.post({
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.activeSessionId,
+      type: 'event.assetClicked',
+      payload,
+    });
   }
 
   private post(message: DigitalTwinBridgeMessage): void {

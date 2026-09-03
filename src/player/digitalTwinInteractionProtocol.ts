@@ -138,6 +138,29 @@ export type DigitalTwinCommandFailureResult = {
 
 export type DigitalTwinCommandResult = DigitalTwinCommandSuccessResult | DigitalTwinCommandFailureResult;
 
+/** 点击单元时货格的库位坐标（排-列-层）。 */
+export type DigitalTwinAssetClickedSlot = {
+  row: number;
+  column: number;
+  layer: number;
+};
+
+/** Viewer 内部点击命中 show-chart 效果时发送给宿主页面的点击事件。 */
+export type DigitalTwinAssetClickedEvent = {
+  channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
+  version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
+  sessionId: string;
+  type: 'event.assetClicked';
+  payload: {
+    assetCode?: string;
+    slot?: DigitalTwinAssetClickedSlot;
+    chartId?: string;
+  };
+};
+
+/** 编辑器运行预览发送事件时使用的固定会话标识；编辑器无握手流程，仅供宿主页面识别来源。 */
+export const DIGITAL_TWIN_EDITOR_PREVIEW_SESSION_ID = 'editor-preview' as const;
+
 export type DigitalTwinBridgeMessage =
   | DigitalTwinHostHelloMessage
   | DigitalTwinBridgeReadyMessage
@@ -146,7 +169,8 @@ export type DigitalTwinBridgeMessage =
   | DigitalTwinFocusAssetCommand
   | DigitalTwinCancelFocusAssetCommand
   | DigitalTwinRuntimeActionCommand
-  | DigitalTwinCommandResult;
+  | DigitalTwinCommandResult
+  | DigitalTwinAssetClickedEvent;
 
 const MAX_IDENTIFIER_LENGTH = 256;
 const MAX_PROJECT_ID_LENGTH = 64;
@@ -156,6 +180,8 @@ const MAX_ASSET_CODE_LENGTH = 128;
 const MAX_ENTITY_ID_LENGTH = 256;
 const MAX_ENTITY_COUNT = 64;
 const MAX_ERROR_MESSAGE_LENGTH = 1024;
+const MAX_CHART_ID_LENGTH = 256;
+const MAX_SLOT_COORDINATE = 100_000;
 const VIEWER_ERROR_CODE_SET = new Set<string>(DIGITAL_TWIN_VIEWER_ERROR_CODES);
 const CAPABILITY_SET = new Set<string>([
   DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
@@ -238,6 +264,23 @@ function isFailureError(value: unknown): value is DigitalTwinCommandFailureResul
     && isBoundedString(value.message, MAX_ERROR_MESSAGE_LENGTH);
 }
 
+function isAssetClickedSlot(value: unknown): value is DigitalTwinAssetClickedSlot {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['row', 'column', 'layer'])) return false;
+  return [value.row, value.column, value.layer].every((coordinate) => (
+    typeof coordinate === 'number'
+    && Number.isInteger(coordinate)
+    && coordinate >= 0
+    && coordinate <= MAX_SLOT_COORDINATE
+  ));
+}
+
+function isAssetClickedPayload(value: unknown): value is DigitalTwinAssetClickedEvent['payload'] {
+  if (!isRecord(value) || !hasAllowedKeys(value, ['assetCode', 'slot', 'chartId'])) return false;
+  if (value.assetCode !== undefined && !isBoundedString(value.assetCode, MAX_ASSET_CODE_LENGTH)) return false;
+  if (value.chartId !== undefined && !isBoundedString(value.chartId, MAX_CHART_ID_LENGTH)) return false;
+  return value.slot === undefined || isAssetClickedSlot(value.slot);
+}
+
 /** 严格解析宿主与发布 Viewer 的 v1 交互消息；非法或未知消息返回 null。 */
 export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridgeMessage | null {
   if (!isRecord(value) || !isBaseEnvelope(value) || typeof value.type !== 'string') return null;
@@ -288,6 +331,11 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
         ? value as DigitalTwinCommandFailureResult
         : null;
     }
+    case 'event.assetClicked':
+      return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'payload'])
+        && isAssetClickedPayload(value.payload)
+        ? value as DigitalTwinAssetClickedEvent
+        : null;
     default:
       return null;
   }

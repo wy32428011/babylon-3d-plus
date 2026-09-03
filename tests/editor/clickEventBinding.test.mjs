@@ -58,6 +58,7 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
   t.after(async () => server.close());
 
   const {
+    buildClickEventAssetClickedPayload,
     createDefaultClickEventBindingComponent,
     resolveClickEventBindingClick,
     sanitizeClickEventBindingComponent,
@@ -166,5 +167,54 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
     assert.deepEqual(component.events[0].effects, ['highlight', 'focus']);
     assert.equal(component.events[1].eventType, 'click');
     assert.deepEqual(component.events[1].effects, []);
+  });
+
+  await t.test('sanitize 仅在含 show-chart 效果时保留图表参数', () => {
+    const component = sanitizeClickEventBindingComponent({
+      deviceSlots: [],
+      events: [
+        { id: 'with-chart', eventType: 'click', effects: ['show-chart'], chart: { id: ' chart-1 ', name: ' 吞吐大屏 ', thumbnailUrl: 'https://data-platform.example.com/thumb.png' } },
+        { id: 'no-effect', eventType: 'click', effects: ['highlight'], chart: { id: 'chart-2', name: '应被丢弃' } },
+        { id: 'empty-id', eventType: 'click', effects: ['show-chart'], chart: { id: '  ', name: '空id' } },
+        { id: 'bad-thumb', eventType: 'click', effects: ['show-chart'], chart: { id: 'chart-3', name: '非法缩略图', thumbnailUrl: 'file:///C:/fake.png' } },
+      ],
+    });
+    assert.deepEqual(component.events[0].chart, { id: 'chart-1', name: '吞吐大屏', thumbnailUrl: 'https://data-platform.example.com/thumb.png' });
+    assert.equal('chart' in component.events[1], false);
+    assert.equal('chart' in component.events[2], false);
+    assert.deepEqual(component.events[3].chart, { id: 'chart-3', name: '非法缩略图' });
+  });
+
+  await t.test('点击决策透传命中事件的图表id', () => {
+    const scene = createScene(
+      createModelEntity('stacker-1', REGISTERED_URL),
+      createBindingEntity('binding-1', createBindingComponent({
+        deviceSlots: [registeredSlot(REGISTERED_URL)],
+        events: [{ id: 'event-1', eventType: 'click', effects: ['highlight', 'show-chart'], chart: { id: 'chart-9', name: '演示大屏' } }],
+      })),
+    );
+    const resolution = resolveClickEventBindingClick(scene, 'stacker-1');
+    assert.equal(resolution.kind, 'trigger');
+    if (resolution.kind !== 'trigger') return;
+    assert.equal(resolution.chartId, 'chart-9');
+  });
+
+  await t.test('show-chart 载荷：资产编号 + 图表id；非 show-chart 或无绑定返回 null', () => {
+    const scene = createScene(
+      { id: 'stacker-1', name: 'stacker-1', components: { modelAsset: { sourceUrl: REGISTERED_URL, assetCode: '001005' } } },
+      createBindingEntity('binding-1', createBindingComponent({
+        deviceSlots: [registeredSlot(REGISTERED_URL)],
+        events: [{ id: 'event-1', eventType: 'click', effects: ['show-chart'], chart: { id: 'chart-9', name: '演示大屏' } }],
+      })),
+    );
+    const trigger = resolveClickEventBindingClick(scene, 'stacker-1');
+    assert.deepEqual(buildClickEventAssetClickedPayload(scene, trigger), { assetCode: '001005', chartId: 'chart-9' });
+    assert.equal(buildClickEventAssetClickedPayload(scene, { kind: 'clear' }), null);
+
+    const noChartScene = createScene(
+      createModelEntity('stacker-1', REGISTERED_URL),
+      createBindingEntity('binding-1', createBindingComponent({ deviceSlots: [registeredSlot(REGISTERED_URL)] })),
+    );
+    assert.equal(buildClickEventAssetClickedPayload(noChartScene, resolveClickEventBindingClick(noChartScene, 'stacker-1')), null);
   });
 });

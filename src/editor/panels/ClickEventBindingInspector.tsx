@@ -3,6 +3,10 @@ import {
   decodeModelAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
+import {
+  DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE,
+  decodeDataPlatformScreenDragPayload,
+} from '../assets/dataPlatformScreenDrag';
 import type {
   ClickEventBindingComponent,
   ClickEventBindingDeviceSlot,
@@ -41,6 +45,23 @@ function readDeviceTypeFromDrop(event: DragEvent<HTMLElement>): ClickEventBindin
   const modelAsset = modelPayload ? decodeModelAssetDragPayload(modelPayload) : null;
   if (modelAsset?.libraryKind !== 'model') return null;
   return createClickEventBindingDeviceTypeFromAsset(modelAsset);
+}
+
+/** 判断拖拽事件是否包含图表库可用于 show-chart 效果参数的载荷。 */
+function hasChartPayload(event: DragEvent<HTMLElement>): boolean {
+  return event.dataTransfer.types.includes(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE);
+}
+
+/** 从图表库拖拽数据读取图表条目，只接受大屏类型。 */
+function readChartFromDrop(event: DragEvent<HTMLElement>): ClickEventBindingEvent['chart'] | null {
+  const payload = event.dataTransfer.getData(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE);
+  const chartEntry = payload ? decodeDataPlatformScreenDragPayload(payload) : null;
+  if (!chartEntry) return null;
+  return {
+    id: chartEntry.id,
+    name: chartEntry.name,
+    ...(chartEntry.thumbnailUrl ? { thumbnailUrl: chartEntry.thumbnailUrl } : {}),
+  };
 }
 
 /** 渲染并编辑点击事件绑定；仅在运行预览态生效，命中的设备按勾选效果执行高亮与相机聚焦。 */
@@ -127,15 +148,52 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
     updateBindingEvent(eventIndex, { ...bindingEvent, effects: [...bindingEvent.effects, nextEffect.value] }, '添加事件效果');
   }
 
-  /** 删除事件中的一条效果。 */
+  /** 删除事件中的一条效果；移除 show-chart 时同步清空其图表参数。 */
   function removeEffect(eventIndex: number, effectIndex: number): void {
     const bindingEvent = component.events[eventIndex];
     if (!bindingEvent) return;
-    updateBindingEvent(
-      eventIndex,
-      { ...bindingEvent, effects: bindingEvent.effects.filter((_, index) => index !== effectIndex) },
-      '删除事件效果',
-    );
+    const nextEvent: ClickEventBindingEvent = {
+      ...bindingEvent,
+      effects: bindingEvent.effects.filter((_, index) => index !== effectIndex),
+    };
+    if (!nextEvent.effects.includes('show-chart')) delete nextEvent.chart;
+    updateBindingEvent(eventIndex, nextEvent, '删除事件效果');
+  }
+
+  /** 更新事件中的效果类型；show-chart 被改走时同步清空图表参数。 */
+  function changeEffect(eventIndex: number, effectIndex: number, nextEffect: ClickEventBindingEffect): void {
+    const bindingEvent = component.events[eventIndex];
+    if (!bindingEvent) return;
+    const nextEvent: ClickEventBindingEvent = {
+      ...bindingEvent,
+      effects: bindingEvent.effects.map((item, index) => (index === effectIndex ? nextEffect : item)),
+    };
+    if (!nextEvent.effects.includes('show-chart')) delete nextEvent.chart;
+    updateBindingEvent(eventIndex, nextEvent, '更新事件效果');
+  }
+
+  /** 配置或清空 show-chart 效果的图表参数。 */
+  function updateEventChart(eventIndex: number, chart: ClickEventBindingEvent['chart'] | null, label: string): void {
+    const bindingEvent = component.events[eventIndex];
+    if (!bindingEvent) return;
+    const nextEvent: ClickEventBindingEvent = { ...bindingEvent };
+    if (chart) {
+      nextEvent.chart = chart;
+    } else {
+      delete nextEvent.chart;
+    }
+    updateBindingEvent(eventIndex, nextEvent, label);
+  }
+
+  /** 接收图表库拖放并填充 show-chart 图表参数。 */
+  function handleChartDrop(event: DragEvent<HTMLDivElement>, eventIndex: number): void {
+    if (disabled || !hasChartPayload(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setActiveDropZone(null);
+
+    const chart = readChartFromDrop(event);
+    if (chart) updateEventChart(eventIndex, chart, '配置展示图表');
   }
 
   /** 渲染可接收模型库卡片的设备类型槽位。 */
@@ -176,7 +234,7 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
               </span>
               <span className="model-generator-target-text">
                 <strong>{deviceType.displayName}</strong>
-                <small>{deviceType.sourcePath}</small>
+                <small>项目模型</small>
               </span>
               <button
                 aria-label={'清空设备类型 ' + deviceType.displayName}
@@ -203,6 +261,63 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
         >
           −
         </button>
+      </div>
+    );
+  }
+
+  /** 渲染 show-chart 效果的图表参数槽位，可接收图表库大屏卡片拖放。 */
+  function renderChartSlot(bindingEvent: ClickEventBindingEvent, eventIndex: number): ReactElement {
+    const dropZoneId = 'click-event-chart-' + bindingEvent.id;
+    const className = activeDropZone === dropZoneId
+      ? 'model-generator-target-slot model-generator-target-slot-active'
+      : 'model-generator-target-slot';
+    const chart = bindingEvent.chart;
+
+    return (
+      <div
+        className={className}
+        onDragEnter={(event) => {
+          if (disabled || !hasChartPayload(event)) return;
+          event.preventDefault();
+          setActiveDropZone(dropZoneId);
+        }}
+        onDragLeave={(event) => handleSlotDragLeave(event, dropZoneId)}
+        onDragOver={(event) => {
+          if (disabled || !hasChartPayload(event)) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+          setActiveDropZone(dropZoneId);
+        }}
+        onDrop={(event) => handleChartDrop(event, eventIndex)}
+        title={chart ? '图表id：' + chart.id : '从图表库拖入大屏'}
+      >
+        {chart ? (
+          <>
+            <span className="model-generator-target-preview" aria-hidden="true">
+              {chart.thumbnailUrl ? (
+                <img alt="" src={chart.thumbnailUrl} />
+              ) : (
+                <span>Chart</span>
+              )}
+            </span>
+            <span className="model-generator-target-text">
+              <strong>{chart.name}</strong>
+              <small>数据中台大屏</small>
+            </span>
+            <button
+              aria-label={'清空展示图表 ' + chart.name}
+              className="model-generator-clear-button"
+              disabled={disabled}
+              onClick={() => updateEventChart(eventIndex, null, '清空展示图表')}
+              title="清空展示图表"
+              type="button"
+            >
+              ×
+            </button>
+          </>
+        ) : (
+          <span className="model-generator-target-empty">从图表库拖入大屏</span>
+        )}
       </div>
     );
   }
@@ -289,12 +404,11 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
                 aria-label={'事件 ' + (eventIndex + 1) + ' 效果 ' + (effectIndex + 1)}
                 disabled={disabled}
                 value={effect}
-                onChange={(changeEvent) => {
-                  const nextEffects = bindingEvent.effects.map((item, index) => (
-                    index === effectIndex ? changeEvent.target.value as ClickEventBindingEffect : item
-                  ));
-                  updateBindingEvent(eventIndex, { ...bindingEvent, effects: nextEffects }, '更新事件效果');
-                }}
+                onChange={(changeEvent) => changeEffect(
+                  eventIndex,
+                  effectIndex,
+                  changeEvent.target.value as ClickEventBindingEffect,
+                )}
               >
                 {EFFECT_OPTIONS.map((option) => (
                   <option
@@ -318,6 +432,15 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
               </button>
             </div>
           ))}
+
+          {bindingEvent.effects.includes('show-chart') ? (
+            <>
+              <div className="inspector-row">
+                <span>图表参数</span>
+              </div>
+              {renderChartSlot(bindingEvent, eventIndex)}
+            </>
+          ) : null}
 
           <button
             className="click-event-binding-add-effect"

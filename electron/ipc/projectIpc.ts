@@ -14,7 +14,7 @@ import type {
   SaveSceneResult,
   SelectProjectDirectoryResult,
 } from '../types.js';
-import { authorizeAssetFile, authorizeSceneFile, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
+import { authorizeAssetFile, authorizeSceneFile, decodeAssetUrl, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
 import { isSupportedSceneFilePath } from './sceneFilePath.js';
 import {
   assertRecentSceneFile,
@@ -318,6 +318,7 @@ function authorizeModelAssetsFromSceneContent(content: string): void {
         authorizeSceneModelAsset(entity.components.modelAsset);
         authorizeSceneModelGenerator(entity.components.modelGenerator);
         authorizeSceneSkyboxFile(entity.components.skybox);
+        authorizeSceneClickEventBinding(entity.components.clickEventBinding);
 
         const cadReference = entity.components.cadReference as SceneCadReferenceShape | undefined;
         if (!isPlainObject(cadReference) || typeof cadReference.sourcePath !== 'string') continue;
@@ -341,6 +342,22 @@ function authorizeModelAssetsFromSceneContent(content: string): void {
     }
   } catch {
     // 场景内容的完整格式校验由 renderer 的 SceneSerializer 负责；这里失败时只是不额外授权资源文件。
+  }
+}
+
+/** 登记点击事件绑定设备类型的模型文件与缩略图；缩略图以 editor-asset://local/ URL 存储，需解码回本地路径。 */
+function authorizeSceneClickEventBinding(value: unknown): void {
+  if (!isPlainObject(value) || !Array.isArray(value.deviceSlots)) return;
+  for (const slot of value.deviceSlots) {
+    if (!isPlainObject(slot) || !isPlainObject(slot.deviceType)) continue;
+    const deviceType = slot.deviceType;
+    if (typeof deviceType.sourcePath === 'string') authorizeSceneModelFile(deviceType.sourcePath);
+    if (typeof deviceType.thumbnailUrl !== 'string') continue;
+    try {
+      authorizeAssetFile(decodeAssetUrl(deviceType.thumbnailUrl));
+    } catch {
+      // 非 editor-asset://local/ 的缩略图 URL 不予授权。
+    }
   }
 }
 
