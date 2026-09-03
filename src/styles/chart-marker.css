@@ -84,3 +84,15 @@
 .chart-marker-theme-label { display: block; margin-bottom: 8px; font-size: 12px; color: #aebfcd; }
 .chart-marker-theme-slot { padding: 12px 10px; }
 .chart-marker-theme-slot img { width: 100%; max-height: 110px; object-fit: contain; border-radius: 3px; }
+
+/* 棋盘格仅用于 Inspector 提示透明，场景中不绘制该底纹。 */
+.chart-marker-background-preview,
+.chart-marker-color-swatch {
+  background-image: conic-gradient(#30343a 25%, #22262c 0 50%, #30343a 0 75%, #22262c 0);
+  background-size: 16px 16px;
+}
+.chart-marker-color-picker { display: flex; align-items: center; gap: 6px; }
+.chart-marker-color-swatch { position: relative; display: block; flex: 1; height: 26px; border: 1px solid #526172; border-radius: 3px; overflow: hidden; }
+.chart-marker-color-swatch input[type="color"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.chart-marker-color-swatch:focus-within { outline: 2px solid #60d5ff; outline-offset: 2px; }
+.chart-marker-color-picker button[aria-pressed="true"] { border-color: #60d5ff; color: #a4eaff; }

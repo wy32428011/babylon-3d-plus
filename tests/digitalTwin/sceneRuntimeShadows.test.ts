@@ -78,6 +78,46 @@ function assertAnyShadowGenerator(generator: unknown, message: string): asserts 
   assert.ok(generator instanceof ShadowGenerator, message);
 }
 
+test('只有图表立标时不生成可见阴影地面，立标不影响普通模型的地面边界', () => {
+  const fixture = createRuntimeFixture();
+  try {
+    const marker = MeshBuilder.CreatePlane('ChartMarker', { size: 4 }, fixture.scene);
+    const stem = MeshBuilder.CreateCylinder('ChartMarkerIndicator', { height: 2 }, fixture.scene);
+    const base = MeshBuilder.CreateTorus('ChartMarkerBase', { diameter: 1 }, fixture.scene);
+    for (const mesh of [marker, stem, base]) {
+      mesh.metadata = { editorChartMarker: true };
+      mesh.position.set(100, 30, 100);
+    }
+    flushScene(fixture.scene);
+    const catcher = fixture.scene.getMeshByName(SCENE_SHADOW_CATCHER_NAME)!;
+    assert.equal(catcher.isEnabled(), false, '拖入立标及指示器不能出现一块阴影地面');
+    for (const quality of ['balanced', 'quality'] as const) {
+      fixture.runtime.applySettings({ ...DEFAULT_SHADOW_SETTINGS, quality });
+      const list = getActiveShadowGenerator(fixture.scene)?.getShadowMap()?.renderList ?? [];
+      for (const mesh of [marker, stem, base]) {
+        assert.equal(list.includes(mesh), false, '立标不是物理阴影投射物');
+        assert.equal(mesh.receiveShadows, false);
+      }
+      assert.equal(catcher.isEnabled(), false);
+    }
+    const model = MeshBuilder.CreateBox('Equipment', { size: 2 }, fixture.scene);
+    model.position.y = 1;
+    flushScene(fixture.scene);
+    assert.equal(catcher.isEnabled(), true, '普通模型的阴影地面继续按场景配置显示');
+    assert.deepEqual(catcher.position.asArray(), [0, -0.03, 0], '远处悬浮立标不能抬高或移走地面');
+    assert.equal(catcher.scaling.x, 60, '立标不能扩大模型的地面');
+    fixture.runtime.applySettings({ ...DEFAULT_SHADOW_SETTINGS, catcherEnabled: false });
+    assert.equal(catcher.isEnabled(), false);
+    fixture.runtime.applySettings(DEFAULT_SHADOW_SETTINGS);
+    assert.equal(catcher.isEnabled(), true);
+    model.dispose();
+    flushScene(fixture.scene);
+    assert.equal(catcher.isEnabled(), false, '删除最后一个模型后仅有立标，不应残留地面');
+  } finally {
+    disposeRuntimeFixture(fixture);
+  }
+});
+
 test('无方向光时自动创建太阳光，模型投射、地面接收缓存阴影', () => {
   const fixture = createRuntimeFixture();
   try {

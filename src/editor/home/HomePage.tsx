@@ -139,6 +139,7 @@ export function HomePage({
   const [status, setStatus] = useState<HomeStatus | null>(null);
   const isConfigDialogOpenRef = useRef(false);
   const configDraftsDirtyRef = useRef(false);
+  const dataPlatformRequestIdRef = useRef(0);
   const isOpeningDataPlatformProject = busyActionId?.startsWith('data-platform-project:') ?? false;
   const isChangingDataPlatformWorkspace = busyActionId === 'select-data-platform-workspace'
     || busyActionId === 'reset-data-platform-workspace';
@@ -166,12 +167,13 @@ export function HomePage({
 
     /** 首页加载时读取数据中台配置，并在已配置时自动拉取项目列表。 */
     async function loadDataPlatform(): Promise<void> {
+      const requestId = ++dataPlatformRequestIdRef.current;
       setIsLoadingDataPlatformConfig(true);
       setDataPlatformError(null);
 
       try {
         const config = await requestDataPlatformConfig();
-        if (!isMounted) return;
+        if (!isMounted || requestId !== dataPlatformRequestIdRef.current) return;
         setDataPlatformConfig(config);
         if (!isConfigDialogOpenRef.current || !configDraftsDirtyRef.current) {
           setConfigDraft(config.baseUrl);
@@ -185,17 +187,17 @@ export function HomePage({
 
         setIsLoadingDataPlatformProjects(true);
         const result = await requestDataPlatformProjects('');
-        if (!isMounted) return;
+        if (!isMounted || requestId !== dataPlatformRequestIdRef.current) return;
         setDataPlatformProjects(result.records);
         setDataPlatformProjectTotal(result.total);
       } catch (error) {
-        if (!isMounted) return;
+        if (!isMounted || requestId !== dataPlatformRequestIdRef.current) return;
         const message = getHomeErrorMessage(error);
         setDataPlatformProjects([]);
         setDataPlatformProjectTotal(0);
         setDataPlatformError(message);
       } finally {
-        if (isMounted) {
+        if (isMounted && requestId === dataPlatformRequestIdRef.current) {
           setIsLoadingDataPlatformConfig(false);
           setIsLoadingDataPlatformProjects(false);
         }
@@ -207,6 +209,7 @@ export function HomePage({
 
     return () => {
       isMounted = false;
+      dataPlatformRequestIdRef.current += 1;
     };
   }, []);
 
@@ -360,6 +363,7 @@ export function HomePage({
     baseUrl = dataPlatformConfig.baseUrl,
   ): Promise<void> {
     if (isOpeningDataPlatformProject) return;
+    const requestId = ++dataPlatformRequestIdRef.current;
 
     if (!baseUrl) {
       setDataPlatformProjects([]);
@@ -373,6 +377,7 @@ export function HomePage({
 
     try {
       const result = await requestDataPlatformProjects(projectName);
+      if (requestId !== dataPlatformRequestIdRef.current) return;
       setDataPlatformProjects(result.records);
       setDataPlatformProjectTotal(result.total);
       setStatus({
@@ -382,12 +387,13 @@ export function HomePage({
           : `已从数据中台加载 ${result.records.length} 个项目。`,
       });
     } catch (error) {
+      if (requestId !== dataPlatformRequestIdRef.current) return;
       const message = getHomeErrorMessage(error);
       setDataPlatformProjects([]);
       setDataPlatformProjectTotal(0);
       setDataPlatformError(message);
     } finally {
-      setIsLoadingDataPlatformProjects(false);
+      if (requestId === dataPlatformRequestIdRef.current) setIsLoadingDataPlatformProjects(false);
     }
   }
 
@@ -476,6 +482,7 @@ export function HomePage({
   /** 保存数据中台地址，并使用新配置立即刷新左侧项目列表。 */
   async function handleSaveDataPlatformConfig(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    if (isSavingConfig) return;
     if (!window.editorApi?.saveDataPlatformConfig) {
       setConfigDialogError('保存数据中台配置需要 Electron 桌面环境。');
       return;
@@ -488,6 +495,10 @@ export function HomePage({
       const savedConfig = await window.editorApi.saveDataPlatformConfig({
         baseUrl: configDraft,
       });
+      // 保存成功后旧地址的请求失效，列表刷新不应继续锁住地址输入。
+      dataPlatformRequestIdRef.current += 1;
+      setIsLoadingDataPlatformConfig(false);
+      setIsLoadingDataPlatformProjects(false);
       setDataPlatformConfig(savedConfig);
       setConfigDraft(savedConfig.baseUrl);
       configDraftsDirtyRef.current = false;
@@ -505,7 +516,7 @@ export function HomePage({
       }
 
       setStatus({ kind: 'info', message: '数据中台地址已保存，正在刷新项目列表...' });
-      await refreshDataPlatformProjects('', savedConfig.baseUrl);
+      void refreshDataPlatformProjects('', savedConfig.baseUrl);
     } catch (error) {
       const message = getHomeErrorMessage(error);
       setConfigDialogError(message);

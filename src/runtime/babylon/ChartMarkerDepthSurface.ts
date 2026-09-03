@@ -1,4 +1,5 @@
-import { Material, Mesh, Scene, ShaderMaterial } from '@babylonjs/core';
+import { DynamicTexture, Material, Mesh, Scene, ShaderMaterial, Texture } from '@babylonjs/core';
+import type { ChartMarkerTextureFrame } from './chartMarkerContent';
 
 export type ScreenPolygon = readonly { x: number; y: number }[];
 type PixelRect = { x: number; y: number; width: number; height: number };
@@ -33,11 +34,12 @@ export class ChartMarkerDepthSurface {
   readonly root: HTMLDivElement;
   private readonly material: ShaderMaterial;
   private readonly originals = new Map<Mesh, Material | null>();
+  private readonly transparentMaterials = new Map<Mesh, { material: ShaderMaterial; texture: DynamicTexture; revision: number; width: number; height: number; canvas: HTMLCanvasElement }>();
   private readonly bitmap = document.createElement('canvas');
   private readonly context = this.bitmap.getContext('2d', { willReadFrequently: true })!;
   private readonly originalStyle: Pick<CSSStyleDeclaration, 'position' | 'zIndex' | 'background' | 'clipPath'>;
 
-  constructor(scene: Scene, private readonly canvas: HTMLCanvasElement) {
+  constructor(private readonly scene: Scene, private readonly canvas: HTMLCanvasElement) {
     this.originalStyle = {
       position: canvas.style.position, zIndex: canvas.style.zIndex,
       background: canvas.style.background, clipPath: canvas.style.clipPath,
@@ -56,18 +58,56 @@ export class ChartMarkerDepthSurface {
     this.material.transparencyMode = Material.MATERIAL_OPAQUE;
   }
 
-  beginFrame(meshes: readonly Mesh[]): void {
+  beginFrame(meshes: readonly Mesh[], transparentContents: ReadonlyMap<Mesh, ChartMarkerTextureFrame> = new Map()): void {
     this.endFrame();
+    for (const [mesh, entry] of this.transparentMaterials) {
+      if (transparentContents.has(mesh) && !mesh.isDisposed()) continue;
+      entry.material.dispose();
+      entry.texture.dispose();
+      this.transparentMaterials.delete(mesh);
+    }
     for (const mesh of meshes) {
       if (mesh.isDisposed()) continue;
       this.originals.set(mesh, mesh.material);
-      mesh.material = this.material;
+      const content = transparentContents.get(mesh);
+      mesh.material = content ? this.getTransparentMaterial(mesh, content) : this.material;
     }
+  }
+
+  private getTransparentMaterial(mesh: Mesh, content: ChartMarkerTextureFrame): ShaderMaterial {
+    const { width, height } = content.canvas;
+    let entry = this.transparentMaterials.get(mesh);
+    if (entry && (entry.width !== width || entry.height !== height || entry.canvas !== content.canvas)) {
+      entry.material.dispose();
+      entry.texture.dispose();
+      this.transparentMaterials.delete(mesh);
+      entry = undefined;
+    }
+    if (!entry) {
+      const texture = new DynamicTexture('chart-marker-transparent-content', content.canvas, this.scene, false, Texture.BILINEAR_SAMPLINGMODE);
+      texture.hasAlpha = true;
+      texture.wrapU = texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+      const material = new ShaderMaterial('chart-marker-transparent-content', this.scene, {
+        vertexSource: 'precision highp float; attribute vec3 position; attribute vec2 uv; uniform mat4 worldViewProjection; varying vec2 vUV; void main(){vUV=uv;gl_Position=worldViewProjection*vec4(position,1.0);}',
+        fragmentSource: 'precision highp float; varying vec2 vUV; uniform sampler2D content; void main(){vec2 p=vec2(gl_FrontFacing?1.0-vUV.x:vUV.x,1.0-vUV.y);vec4 color=texture2D(content,p);if(color.a==0.0)discard;gl_FragColor=color;}',
+      }, { attributes: ['position', 'uv'], uniforms: ['worldViewProjection'], samplers: ['content'], needAlphaBlending: true });
+      material.backFaceCulling = false;
+      material.disableDepthWrite = true;
+      material.transparencyMode = Material.MATERIAL_ALPHABLEND;
+      material.setTexture('content', texture);
+      entry = { material, texture, revision: -1, width, height, canvas: content.canvas };
+      this.transparentMaterials.set(mesh, entry);
+    }
+    if (entry.revision !== content.revision) {
+      entry.texture.update(true);
+      entry.revision = content.revision;
+    }
+    return entry.material;
   }
 
   endFrame(): void {
     for (const [mesh, material] of this.originals) {
-      if (!mesh.isDisposed() && mesh.material === this.material) mesh.material = material;
+      if (!mesh.isDisposed() && (mesh.material === this.material || mesh.material === this.transparentMaterials.get(mesh)?.material)) mesh.material = material;
     }
     this.originals.clear();
   }
@@ -138,6 +178,8 @@ export class ChartMarkerDepthSurface {
   dispose(): void {
     this.endFrame();
     this.material.dispose();
+    for (const entry of this.transparentMaterials.values()) { entry.material.dispose(); entry.texture.dispose(); }
+    this.transparentMaterials.clear();
     this.root.remove();
     this.bitmap.width = this.bitmap.height = 0;
     Object.assign(this.canvas.style, this.originalStyle);

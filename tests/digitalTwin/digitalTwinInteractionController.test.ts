@@ -222,12 +222,13 @@ function runtimeActionCommand(requestId: string, action: 'startAutoPatrol' | 'st
   });
 }
 
-function createFixture() {
+function createFixture(onReady?: () => void) {
   const scheduler = new FakeScheduler();
   const bus = new FakeMessageBus();
   const posted: Array<{ message: DigitalTwinBridgeMessage; targetOrigin: string }> = [];
   const controller = new DigitalTwinInteractionController({
     parentWindow,
+    onReady,
     viewerOrigin: sameOrigin,
     subscribeToMessages: bus.subscribe,
     postToParent: (postedMessage, targetOrigin) => posted.push({ message: postedMessage, targetOrigin }),
@@ -936,4 +937,39 @@ test('错误来源或窗口不能借主题动作建立宿主会话', () => {
     assert.equal(f.controller.showScreen({ projectId: '2051942646011785218', screenId: '3' }), false);
     assert.deepEqual(f.posted, []);
   } finally { f.controller.dispose(); }
+});
+
+
+test('报警主题在 Viewer 和合法宿主都就绪后发送，重复握手不会重发已消费主题', () => {
+  const theme = { projectId: '2051942646011785218', screenId: '2051942646011785220' };
+  let pending = true;
+  const f = createFixture(() => {
+    if (pending) pending = !f.controller.showScreen(theme);
+  });
+  try {
+    f.controller.markViewerReady(new FakeRuntime([]));
+    assert.equal(pending, true);
+    dispatch(f.bus, hostHello(), 'https://untrusted.example.com');
+    assert.equal(pending, true);
+    dispatch(f.bus, hostHello());
+    assert.equal(pending, false);
+    dispatch(f.bus, hostHello());
+    const shown = f.posted.filter(entry => entry.message.type === 'viewer.showScreen');
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].targetOrigin, sameOrigin);
+    assert.equal(f.controller.showScreen({ ...theme, projectId: '999' }), false);
+  } finally { f.controller.dispose(); }
+});
+
+test('宿主先握手时仍等待 Viewer ready，dispose 后不执行就绪回调', () => {
+  let readyCount = 0;
+  const f = createFixture(() => { readyCount += 1; });
+  dispatch(f.bus, hostHello());
+  assert.equal(readyCount, 0);
+  f.controller.markViewerReady(new FakeRuntime([]));
+  assert.equal(readyCount, 1);
+  f.controller.dispose();
+  dispatch(f.bus, hostHello());
+  f.controller.markViewerReady(new FakeRuntime([]));
+  assert.equal(readyCount, 1);
 });

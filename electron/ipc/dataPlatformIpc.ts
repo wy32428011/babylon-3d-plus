@@ -9,6 +9,7 @@ import type {
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
   SyncedImageAssetEntry,
+  SyncedImageReadResult,
   DataPlatformProjectEntry,
   DataPlatformProjectListRequest,
   DataPlatformProjectListResult,
@@ -53,6 +54,7 @@ import {
   resolveSavedDataPlatformPageConfig,
 } from './dataPlatformBindingStore.js';
 import { requestDataPlatformJson } from './dataPlatformTransfer.js';
+import { readRegisteredSyncedImage } from './syncedImageRead.js';
 
 const DATA_PLATFORM_CONFIG_FILE = 'data-platform-config.json';
 const PROJECT_QUERY_PATH = 'api/v1/projects/query';
@@ -63,6 +65,7 @@ const PROJECT_REQUEST_TIMEOUT_MS = 10_000;
 let registered = false;
 const trustedProjectsById = new Map<string, DataPlatformProjectEntry>();
 let trustedProjectsBaseUrl = '';
+let projectListRequestId = 0;
 
 type PersistedDataPlatformConfigV1 = {
   version: 1;
@@ -106,6 +109,7 @@ export function registerDataPlatformIpc(): void {
     'data-platform:saveConfig',
     async (_event, request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> => {
       const config = await saveDataPlatformConfig(validateSaveRequest(request));
+      projectListRequestId += 1;
       trustedProjectsById.clear();
       trustedProjectsBaseUrl = '';
       clearDataPlatformProjectServiceRetryContext();
@@ -130,12 +134,15 @@ export function registerDataPlatformIpc(): void {
     'data-platform:listProjects',
     async (_event, request?: DataPlatformProjectListRequest): Promise<DataPlatformProjectListResult> => {
       const query = validateProjectListRequest(request);
+      const requestId = ++projectListRequestId;
       const config = await readDataPlatformConfig();
       if (!config.baseUrl) {
         throw new Error('尚未配置数据中台地址。');
       }
 
       const result = await requestDataPlatformProjects(config.baseUrl, query.projectName);
+      // 地址修改或更新的查询发起后，旧响应不能覆盖当前可打开项目的缓存。
+      if (requestId !== projectListRequestId) return result;
       trustedProjectsById.clear();
       trustedProjectsBaseUrl = config.baseUrl;
       for (const project of result.records) trustedProjectsById.set(project.id, project);
@@ -239,6 +246,18 @@ export function registerDataPlatformIpc(): void {
       const config = await readDataPlatformConfig();
       if (!config.baseUrl) return [];
       return listSyncedImagesForWorkspace(config.workspaceRoot);
+    },
+  );
+
+  ipcMain.handle(
+    'data-platform:readSyncedImage',
+    async (event, reference: unknown): Promise<SyncedImageReadResult> => {
+      if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame) {
+        throw new Error('仅编辑器主页面可以读取同步图片。');
+      }
+      const config = await readDataPlatformConfig();
+      const images = await listSyncedImagesForWorkspace(config.workspaceRoot);
+      return readRegisteredSyncedImage(reference, images);
     },
   );
 

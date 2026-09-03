@@ -317,6 +317,11 @@ function authorizeModelAssetsFromSceneContent(content: string): void {
         if (!isPlainObject(entity) || !isPlainObject(entity.components)) continue;
         authorizeSceneModelAsset(entity.components.modelAsset);
         authorizeSceneModelGenerator(entity.components.modelGenerator);
+        const alarm = entity.components.alarmManager;
+        if (isPlainObject(alarm)) {
+          authorizeSceneModelGeneratorTarget(alarm.appearanceModel);
+          if (Array.isArray(alarm.targets)) for (const slot of alarm.targets) if (isPlainObject(slot)) authorizeSceneModelGeneratorTarget(slot.model);
+        }
         authorizeSceneSkyboxFile(entity.components.skybox);
         authorizeSceneClickEventBinding(entity.components.clickEventBinding);
 

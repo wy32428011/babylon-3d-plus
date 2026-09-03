@@ -1,3 +1,5 @@
+import { AlarmManagerRuntime, type AlarmActivation } from './AlarmManagerRuntime';
+import { collectAlarmIndependentEntityIds } from '../../editor/model/alarmManager';
 import { getChartMarkerClickEvents } from '../../editor/model/chartMarker';
 import { ChartMarkerPresentation, getChartMarkerStyle, getChartMarkerText } from './ChartMarkerPresentation';
 import '@babylonjs/loaders';
@@ -275,6 +277,7 @@ export type DataPlatformScreenOverlayItem = {
   entityId: string;
   name?: string;
   chartMarker?: boolean;
+  alarmMediaType?: 'video' | 'third-party';
   markerStyle?: Required<ChartMarkerComponent>;
   markerText?: string;
   projectId?: string;
@@ -673,6 +676,10 @@ function isChainConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
 export class SceneRuntime {
   private readonly meshes = new Map<string, Mesh>();
   private readonly chartMarkerPresentation = new ChartMarkerPresentation();
+  private readonly alarmRuntime: AlarmManagerRuntime;
+  onAlarmActivated?: (event: AlarmActivation) => void;
+  isAlarmActive(managerId: string, targetId: string): boolean { return this.alarmRuntime.isActive(managerId, targetId); }
+  private readonly alarmManagerIds = new Set<string>();
   private readonly dataPlatformScreenTextures = new Map<string, { url: string; texture: Texture }>();
   private readonly locators = new Map<string, LocatorRuntimeEntry>();
   private readonly locatorTargets = new Map<string, LocatorRuntimeEntry>();
@@ -790,6 +797,11 @@ export class SceneRuntime {
     this.autoPatrolMarkerRuntime = new EditorAutoPatrolRuntime(scene);
     this.manualRoamSpawnRuntime = new EditorManualRoamSpawnRuntime(scene, this.pushLog);
     this.clickEventBindingRuntime = new EditorClickEventBindingRuntime(scene);
+    this.alarmRuntime = new AlarmManagerRuntime(scene, {
+      meshes: id => this.models.get(id)?.meshes ?? (this.meshes.has(id) ? [this.meshes.get(id)!] : []),
+      bounds: id => this.getEntityWorldBounds(id), visible: id => this.isEntityVisible(id),
+      activate: event => this.onAlarmActivated?.(event), report: message => this.pushLog(message),
+    });
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
       // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
@@ -1108,6 +1120,8 @@ export class SceneRuntime {
     if (!hadPreviewState) return;
 
     this.telemetryPreviewActive = false;
+    this.alarmRuntime.reset();
+    for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(this.isEntityVisible(id));
     this.lightMarkerRuntime.setPreviewActive(false);
     this.autoPatrolMarkerRuntime.setPreviewActive(false);
     this.manualRoamSpawnRuntime.setPreviewActive(false);
@@ -2765,6 +2779,7 @@ export class SceneRuntime {
         } : {}),
       });
     }
+    if (this.telemetryPreviewActive) items.push(...this.alarmRuntime.getOverlayItems());
     return items;
   }
 
@@ -2815,6 +2830,16 @@ export class SceneRuntime {
 
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
+    const alarmIds = collectAlarmIndependentEntityIds(document);
+    const overrides = [...alarmIds].filter(id => document.entities[id]?.components.modelArrayInstance);
+    if (overrides.length) {
+      const entities = { ...document.entities };
+      for (const id of overrides) { const components = { ...entities[id].components }; delete components.modelArrayInstance; entities[id] = { ...entities[id], components }; }
+      document = { ...document, entities };
+    }
+    this.alarmRuntime.sync(document);
+    this.alarmManagerIds.clear();
+    for (const id of document.entityIds) if (document.entities[id]?.components.alarmManager) this.alarmManagerIds.add(id);
     this.defaultCargoGeneratorId = document.sceneSettings.defaultCargoGeneratorId ?? null;
     this.shadowRuntime.applySettings(document.sceneSettings.shadows);
     const previousEntityStates = new Map(this.entityStates);
@@ -3327,6 +3352,7 @@ export class SceneRuntime {
     this.autoPatrolMarkerRuntime.dispose();
     this.manualRoamSpawnRuntime.dispose();
     this.clickEventBindingRuntime.dispose();
+    this.alarmRuntime.dispose();
     this.shadowRuntime.dispose();
     this.skyboxRuntime.dispose();
     this.sharedModelAssetCache.dispose();
@@ -4544,6 +4570,8 @@ export class SceneRuntime {
     this.captureReadyTelemetryPreviewBaselines();
     const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
     this.specializedTelemetryRuntime.applyFrame(deltaSeconds);
+    for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(false);
+    this.alarmRuntime.update();
   }
 
   /** 为已加载且 ready 的模型捕获本次预览基线，异步 GLB 后续 ready 时会在首个驱动帧前补捕获。 */

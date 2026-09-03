@@ -55,6 +55,7 @@ export type BuiltInProjectLibraryAction =
   | { kind: 'manual-roam-spawn' }
   | { kind: 'click-event-binding' }
   | { kind: 'chart-marker' }
+  | { kind: 'alarm-manager' }
   | { kind: 'poi-effect'; effectKind: (typeof POI_EFFECT_DEFINITIONS)[number]['kind'] }
   | { kind: 'mesh'; meshKind: MeshKind }
   | { kind: 'locator'; locatorKind: 'box-wire' }
@@ -99,7 +100,7 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
       { id: 'poi-click-event-binding', name: '点击事件绑定', icon: 'marker', subtitle: '内置POI', builtIn: { kind: 'click-event-binding' } },
       { id: 'poi-chart-marker', name: '图表立标', icon: 'marker', subtitle: '拖入大屏实时展示', builtIn: { kind: 'chart-marker' } },
       { id: 'poi-panel', name: '图表面板', icon: 'panel' },
-      { id: 'poi-alarm', name: '报警管理器', icon: 'cube' },
+      { id: 'poi-alarm', name: '报警管理器', icon: 'cube', subtitle: '设备 / 火警监听', builtIn: { kind: 'alarm-manager' } },
       { id: 'poi-roam', name: '手动漫游', icon: 'person', subtitle: '初始位置', builtIn: { kind: 'manual-roam-spawn' } },
     ],
   },

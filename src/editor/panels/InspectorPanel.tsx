@@ -1,3 +1,4 @@
+import { AlarmManagerInspector } from './AlarmManagerInspector';
 import { ChartMarkerInspector } from './ChartMarkerInspector';
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import { getBuiltInMeshMeterDescription } from '../model/builtInMeshGeometry';
@@ -382,7 +383,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
       <h2>{modelGenerator ? '模型生成器' : clickEventBinding ? '点击事件绑定' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : manualRoamSpawn ? '手动漫游' : 'Inspector'}</h2>
       <label className="inspector-row">
-        <span>{poiEffect ? '特效名称' : modelGenerator || clickEventBinding || autoPatrol || selectedEntity.components.chartMarker ? 'POI名称' : '名称'}</span>
+        <span>{selectedEntity.components.alarmManager ? 'POI名称' : poiEffect ? '特效名称' : modelGenerator || clickEventBinding || autoPatrol || selectedEntity.components.chartMarker ? 'POI名称' : '名称'}</span>
         <input
           type="text"
           disabled={isLocked}
@@ -417,6 +418,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
           <p className="muted">位置表示人物脚底的世界坐标，旋转 Y 表示开始漫游时的水平朝向。</p>
         </fieldset>
       ) : null}
+      {selectedEntity.components.alarmManager ? <AlarmManagerInspector key={selectedEntity.id} entity={selectedEntity} disabled={isLocked} /> : null}
       {modelGenerator ? (
         <fieldset className="transform-fieldset" aria-label="模型生成器标记提示">
           <legend>重要提示</legend>
@@ -451,7 +453,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         />
       ) : null}
       {selectedEntity.components.chartMarker ? <ChartMarkerInspector key={selectedEntity.id} entity={selectedEntity} disabled={isLocked} /> : null}
-      {meshRenderer && !selectedEntity.components.chartMarker ? (
+      {meshRenderer && !selectedEntity.components.chartMarker && !selectedEntity.components.alarmManager ? (
         <fieldset className="transform-fieldset">
           <legend>Mesh Renderer</legend>
           <label className="inspector-row">

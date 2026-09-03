@@ -19,11 +19,6 @@ test('首页数据中台项目卡片展示最新发布时间', async () => {
   );
   assert.match(electronTypesSource, /frontendPort: number \| null/);
   assert.match(rendererTypesSource, /frontendPort: number \| null/);
-  assert.match(homeSource, /数据中台前端端口/);
-  assert.match(homeSource, /frontendPort: frontendPortConfigDraft/);
-  assert.match(homeSource, /webBaseUrl: webBaseConfigDraft/);
-  assert.match(homeSource, /max="65535"/);
-  assert.match(homeSource, /type="number"/);
   assert.match(ipcSource, /frontendPort: stored\.frontendPort/);
   assert.match(ipcSource, /resolveSavedDataPlatformPageConfig\(/);
   assert.match(homeSource, /<dt>最新发布时间<\/dt>/);

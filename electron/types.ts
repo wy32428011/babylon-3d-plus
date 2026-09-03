@@ -316,6 +316,12 @@ export type SyncedImageAssetEntry = {
   fileSizeBytes?: number;
 };
 
+/** 主进程校验登记后返回的图片字节，不暴露新的文件读取权限。 */
+export type SyncedImageReadResult = {
+  bytes: Uint8Array;
+  contentType: string;
+};
+
 /** 本地同步图片索引文件结构。 */
 export type SyncedImageIndex = {
   version: 1;

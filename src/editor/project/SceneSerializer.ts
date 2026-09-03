@@ -1,5 +1,6 @@
+import { normalizeAlarmManager } from '../model/alarmManager';
 import type { Entity } from '../model/Entity';
-import { normalizeChartMarker } from '../model/chartMarker';
+import { convertLegacyChartMarkerTransform, normalizeChartMarker } from '../model/chartMarker';
 import { createPersistedModelThinInstanceScene } from '../model/editModeModelThinInstances';
 import { createLegacyCadReferenceUnitInfo, normalizeCadReferenceUnitInfo } from '../cad/cadUnits';
 import {
@@ -574,6 +575,10 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
   if ('chartMarker' in components && components.chartMarker !== undefined) {
     if (normalized.meshRenderer?.meshKind !== 'plane') throwUnsupportedSceneFileError();
     normalized.chartMarker = normalizeChartMarker(components.chartMarker);
+    if (normalized.chartMarker.geometryBasis !== 'upright') {
+      normalized.transform = convertLegacyChartMarkerTransform(normalized.transform);
+      normalized.chartMarker = { ...normalized.chartMarker, geometryBasis: 'upright' };
+    }
   }
 
   if ('skybox' in components && components.skybox !== undefined) {
@@ -646,6 +651,8 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
       scale: { x: 1, y: 1, z: 1 },
     };
   }
+
+  if (components.alarmManager !== undefined) normalized.alarmManager = normalizeAlarmManager(components.alarmManager);
 
   if ('clickEventBinding' in components && components.clickEventBinding !== undefined) {
     normalized.clickEventBinding = normalizeClickEventBinding(components.clickEventBinding);
@@ -1372,6 +1379,7 @@ function hasRuntimeComponent(components: EntityComponents): boolean {
     components.poiEffect ||
     components.autoPatrol ||
     components.manualRoamSpawn ||
+    components.alarmManager ||
     components.clickEventBinding ||
     components.camera ||
     components.light,

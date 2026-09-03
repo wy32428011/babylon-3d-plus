@@ -11,6 +11,7 @@ import type {
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
   SyncedImageAssetEntry,
+  SyncedImageReadResult,
   DataPlatformProjectListRequest,
   DataPlatformProjectEntry,
   DataPlatformProjectListResult,
@@ -162,6 +163,7 @@ contextBridge.exposeInMainWorld('editorApi', {
   syncDataPlatformImages: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncImages'),
   retryDataPlatformImageSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryImageSync'),
   listSyncedImages: (): Promise<SyncedImageAssetEntry[]> => ipcRenderer.invoke('data-platform:listSyncedImages'),
+  readSyncedImage: (reference: string): Promise<SyncedImageReadResult> => ipcRenderer.invoke('data-platform:readSyncedImage', reference),
   onDataPlatformImageSyncProgress: (handler: (progress: DataPlatformImageSyncProgress) => void): (() => void) => {
     let active = true;
     const listener = (_event: IpcRendererEvent, payload: DataPlatformImageSyncProgress) => handler(payload);

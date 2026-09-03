@@ -6,6 +6,7 @@ import { deviceTelemetryStore } from '../mqtt/deviceTelemetry';
 
 const styles = new WeakMap<ChartMarkerComponent, Required<ChartMarkerComponent>>();
 const cornersByMesh = new WeakMap<Mesh, readonly Vector3[]>();
+const UPRIGHT_BASIS = Matrix.RotationX(Math.PI / 2);
 const LOCAL_CORNERS = [new Vector3(-1, 0, -1), new Vector3(1, 0, -1), new Vector3(1, 0, 1), new Vector3(-1, 0, 1)];
 
 export function getChartMarkerStyle(component: ChartMarkerComponent): Required<ChartMarkerComponent> {
@@ -46,19 +47,21 @@ type Entry = { original: number[]; signature: string; stem?: Mesh; base?: Mesh; 
 export class ChartMarkerPresentation {
   private readonly entries = new Map<Mesh, Entry>();
 
-  update(mesh: Mesh, component: ChartMarkerComponent, visible: boolean): void {
+  update(mesh: Mesh, component: ChartMarkerComponent, visible: boolean, polygonal = false): void {
     const style = getChartMarkerStyle(component);
     let entry = this.entries.get(mesh);
     if (!entry) {
       entry = { original: Array.from(mesh.getVerticesData(VertexBuffer.PositionKind) ?? []), signature: '' };
       this.entries.set(mesh, entry);
+      // 立标属于显示辅助内容，不应触发或抬高场景的物理阴影地面。
+      mesh.metadata = { ...mesh.metadata, editorChartMarker: true };
     }
     entry.stem?.setEnabled(visible && style.appearance !== 'none');
     entry.base?.setEnabled(visible && style.appearance !== 'none');
     if (!visible) return;
     const world = mesh.computeWorldMatrix(true);
     const camera = mesh.getScene().activeCamera;
-    const signature = [style.width, style.height, style.floatHeight, style.faceCamera, style.appearance, style.indicatorSize,
+    const signature = [style.geometryBasis, style.width, style.height, style.floatHeight, style.faceCamera, style.appearance, style.indicatorSize,
       style.appearanceColor, ...world.asArray(), ...(style.faceCamera && camera ? camera.getWorldMatrix().asArray() : [])].join(',');
     if (entry.signature === signature) return;
     entry.signature = signature;
@@ -66,7 +69,9 @@ export class ChartMarkerPresentation {
     const inverse = Matrix.Invert(world);
     const scale = new Vector3(), center = new Vector3();
     let rotation = new Quaternion();
-    world.decompose(scale, rotation, center);
+    // Ground 顶点/UV 仍按原 XZ 基准绘制；立起操作仅作用于几何，不污染实体或 Gizmo 的局部轴。
+    const geometryWorld = style.geometryBasis === 'upright' ? UPRIGHT_BASIS.multiply(world) : world;
+    geometryWorld.decompose(scale, rotation, center);
     center.y += style.floatHeight;
     if (style.faceCamera && camera) {
       // 保持屏幕竖直方向与相机一致，俯视时也不出现退化的朝向。
@@ -93,12 +98,16 @@ export class ChartMarkerPresentation {
     if (!entry.material) {
       entry.material = new StandardMaterial(`${mesh.name}_indicator_material`, mesh.getScene());
       entry.material.disableLighting = true;
-      entry.stem = MeshBuilder.CreateCylinder(`${mesh.name}_indicator`, { height: 1, diameter: 1, tessellation: 16 }, mesh.getScene());
+      entry.stem = MeshBuilder.CreateCylinder(`${mesh.name}_indicator`, { height: 1, diameter: 1, tessellation: polygonal && style.appearance === 'column' ? 4 : 16 }, mesh.getScene());
       entry.base = MeshBuilder.CreateTorus(`${mesh.name}_indicator_base`, { diameter: 1, thickness: 0.06, tessellation: 32 }, mesh.getScene());
-      for (const part of [entry.stem, entry.base]) { part.material = entry.material; part.isPickable = false; }
+      for (const part of [entry.stem, entry.base]) {
+        part.material = entry.material;
+        part.isPickable = false;
+        part.metadata = { editorChartMarker: true };
+      }
     }
     entry.material.emissiveColor = Color3.FromHexString(style.appearanceColor);
-    const anchor = Vector3.TransformCoordinates(new Vector3(0, 0, 1), world);
+    const anchor = Vector3.TransformCoordinates(new Vector3(0, 0, 1), geometryWorld);
     const bottom = Vector3.TransformCoordinates(new Vector3(0, 0, 1), displayWorld);
     const delta = bottom.subtract(anchor);
     const length = delta.length();
@@ -115,6 +124,7 @@ export class ChartMarkerPresentation {
   remove(mesh: Mesh): void {
     const entry = this.entries.get(mesh);
     if (!entry) return;
+    if (mesh.metadata) delete mesh.metadata.editorChartMarker;
     if (!mesh.isDisposed()) {
       mesh.setVerticesData(VertexBuffer.PositionKind, entry.original, true);
       mesh.refreshBoundingInfo();

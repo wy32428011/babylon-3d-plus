@@ -84,6 +84,7 @@ export type BuiltInAssetDragPayload =
   | { kind: 'manual-roam-spawn' }
   | { kind: 'click-event-binding' }
   | { kind: 'chart-marker' }
+  | { kind: 'alarm-manager' }
   | { kind: 'poi-effect'; effectKind: PoiEffectKind }
   | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
   | { kind: 'locator'; locatorKind: 'box-wire' }
@@ -391,6 +392,7 @@ export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetD
       return { kind: 'click-event-binding' };
     }
 
+    if (payload.kind === 'alarm-manager') return { kind: 'alarm-manager' };
     if (payload.kind === 'chart-marker') return { kind: 'chart-marker' };
 
     if (payload.kind === 'poi-effect') {

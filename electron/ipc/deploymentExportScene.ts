@@ -319,6 +319,11 @@ function collectSceneReferences(scene: PlainObject): {
       const spawn = requirePlainObject(components.manualRoamSpawn, '实体 ' + entityId + ' manualRoamSpawn');
       if (spawn.avatar !== undefined) models.push({ asset: requirePlainObject(spawn.avatar, '实体 ' + entityId + ' 人物模型') });
     }
+    if (components.alarmManager !== undefined) {
+      const alarm = requirePlainObject(components.alarmManager, '实体 ' + entityId + ' alarmManager');
+      collectModelGeneratorTarget(alarm.appearanceModel, alarm, models, '报警外观模型');
+      for (const slot of requireObjectArray(alarm.targets, '报警目标')) collectModelGeneratorTarget(slot.model, slot, models, '报警目标模型');
+    }
     if (components.modelGenerator !== undefined) {
       collectModelGeneratorReferences(requirePlainObject(components.modelGenerator, `实体 ${entityId} modelGenerator`), models, entityId);
     }
@@ -987,8 +992,8 @@ function rewriteClickEventBindingReferences(
     reference.deviceType.sourcePath = mappedUrl;
     reference.deviceType.sourceUrl = mappedUrl;
     delete reference.deviceType.thumbnailUrl;
-    // assetId 仅编辑期追溯用；部分模型库以本机路径作为条目 ID，部署场景禁止残留。
-    delete reference.deviceType.assetId;
+    // 部分模型库以本机路径作为条目 ID；发布时替换为稳定标识，避免加载器将设备槽位判为空。
+    reference.deviceType.assetId = `deployment-model:${createHash('sha256').update(mappedUrl).digest('hex').slice(0, 24)}`;
   }
 }
 

@@ -1,3 +1,4 @@
+import type { AlarmManagerComponent } from './alarmManager';
 import type { Vector3Data } from './math';
 import type { BuiltInSlotBindingConfig, LocatorBuiltInBinding } from './builtInSlotBinding';
 import type { ModelParameterConfig, ModelParameterValues } from './modelParameters';
@@ -406,6 +407,8 @@ export type ChartMarkerClickEvent = {
 
 /** 图表立标的外观、内容和行为；可选字段兼容旧场景的空图表槽。 */
 export type ChartMarkerComponent = {
+  /** 缺省 ground 为旧版 XZ 平面；upright 将立起面板的旋转放入几何，实体保持标准 XYZ 轴。 */
+  geometryBasis?: 'ground' | 'upright';
   screenName?: string;
   contentType?: 'builtin' | 'screen';
   text?: string;
@@ -436,6 +439,7 @@ export type EntityComponents = {
   dataPlatformScreen?: DataPlatformScreenComponent;
   /** POI 图表立标；面板直接绑定的大屏由 dataPlatformScreen 保存。 */
   chartMarker?: ChartMarkerComponent;
+  alarmManager?: AlarmManagerComponent;
   skybox?: SkyboxComponent;
   locator?: LocatorComponent;
   cadReference?: CadReferenceComponent;

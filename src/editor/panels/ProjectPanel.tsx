@@ -1464,6 +1464,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         return;
       }
 
+      if (item.builtIn.kind === 'alarm-manager') { useEditorStore.getState().createAlarmManager(); return; }
       if (item.builtIn.kind === 'chart-marker') {
         createChartMarker();
         return;

@@ -71,6 +71,38 @@ test('图表立标运行时与保存重开边界', async (context) => {
     return { runtime, scene, dispose };
   };
 
+  await context.test('新建立标的局部 XYZ 方向与普通模型一致', async (t) => {
+    const { runtime, scene } = setup(t);
+    const { TransformGizmoController } = await server.ssrLoadModule('/src/runtime/babylon/TransformGizmoController.ts');
+    scene.activeCamera = new FreeCamera('axes-camera', new Vector3(8, 6, -12), scene);
+    scene.activeCamera.setTarget(Vector3.Zero());
+    const marker = makeMarker();
+    runtime.sync(makeDocument([marker]));
+    const ordinary = MeshBuilder.CreateBox('ordinary-model', { size: 1 }, scene);
+    const controller = new TransformGizmoController(scene, {
+      previewTransform() {}, commitTransform() {}, previewEnvironmentTransform() {}, commitEnvironmentTransform() {},
+      beginEntityArrayDrag() { return null; }, previewEntityArrayDrag() {}, completeEntityArrayDrag() {}, cancelEntityArrayDrag() {},
+    });
+    t.after(() => controller.dispose());
+    const directions = target => {
+      controller.attachToTarget(target, target.id);
+      controller.setTransformSpace('local');
+      controller.setTool('translate');
+      const gizmo = controller.gizmoManager.gizmos.positionGizmo;
+      return [Vector3.Right(), Vector3.Up(), Vector3.Forward()].map((axis, index) => {
+        const handle = gizmo[['xGizmo', 'yGizmo', 'zGizmo'][index]];
+        handle._update();
+        return Vector3.TransformNormal(axis, handle._rootMesh.computeWorldMatrix(true)).normalize();
+      });
+    };
+    const expected = directions(ordinary);
+    const actual = directions(runtime.getGizmoTargetByEntityId(marker.id));
+    for (let i = 0; i < 3; i++) {
+      assert.ok(Vector3.Distance(actual[i], expected[i]) < 1e-6,
+        `${'XYZ'[i]} 轴应与普通模型一致，实际 ${actual[i].toString()}，预期 ${expected[i].toString()}`);
+    }
+  });
+
   await context.test('空立标具有可拾取平面和待绑定 Overlay，保存重开后仍存在', (t) => {
     const { runtime } = setup(t);
     const marker = makeMarker();
@@ -98,12 +130,37 @@ test('图表立标运行时与保存重开边界', async (context) => {
     const document = deserializeScene(serializeScene(makeDocument([marker])));
     runtime.sync(document);
     const [item] = runtime.getDataPlatformScreenOverlayItems();
-    assert.deepEqual(document.entities[marker.id].components.chartMarker, {});
+    assert.deepEqual(document.entities[marker.id].components.chartMarker, { geometryBasis: 'upright' });
     assert.equal(item.markerStyle.contentType, 'screen');
     assert.equal(item.markerStyle.floatHeight, 0);
     assert.equal(item.markerStyle.faceCamera, false);
     assert.equal(item.markerStyle.appearance, 'none');
     assert.equal(scene.getMeshByName(`${item.mesh.name}_indicator`), null);
+  });
+
+  await context.test('旧立标转换坐标基准后保持面板角点、面向摄像机和指示器落点', (t) => {
+    const { runtime, scene } = setup(t);
+    const camera = new FreeCamera('migration-camera', new Vector3(9, 8, -13), scene);
+    camera.setTarget(new Vector3(3, 2, -5));
+    camera.getViewMatrix(true);
+    for (const faceCamera of [false, true]) {
+      const marker = makeMarker();
+      marker.components.chartMarker = { ...marker.components.chartMarker, geometryBasis: 'ground', faceCamera };
+      marker.components.transform.rotation = { x: 1.3, y: 0.6, z: -0.4 };
+      marker.components.transform.scale = { x: 2.7, y: 0.8, z: 1.4 };
+      const legacy = makeDocument([marker]);
+      const snapshot = document => {
+        runtime.sync(document);
+        const [{ mesh }] = runtime.getDataPlatformScreenOverlayItems();
+        const world = mesh.computeWorldMatrix(true);
+        return { corners: getChartMarkerCorners(mesh).map(point => Vector3.TransformCoordinates(point, world)),
+          anchor: scene.getMeshByName(mesh.name + '_indicator_base').position.clone() };
+      };
+      const before = snapshot(legacy);
+      const after = snapshot(deserializeScene(serializeScene(legacy)));
+      before.corners.forEach((point, index) => assert.ok(Vector3.Distance(point, after.corners[index]) < 1e-5, '旧立标世界角点不能变化'));
+      assert.ok(Vector3.Distance(before.anchor, after.anchor) < 1e-5, '指示器落点不能偏移');
+    }
   });
 
   await context.test('尺寸和悬浮高度更新真实边界与投影角点，保留 Transform 和 Gizmo 根', (t) => {

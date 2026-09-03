@@ -770,11 +770,11 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 
 ## POI 图表立标
 
-1. 在 `POI库` 点击“图表立标”，或拖到 Scene 画布，生成内置样式标牌：面板默认 `320 × 180 px`（对应 `4 m × 2.25 m`），悬浮高度 `1 m`，默认面向摄像机。
+1. 在 `POI库` 点击“图表立标”，或拖到 Scene 画布，生成内置样式标牌：面板默认 `320 × 180 px`（对应 `4 m × 2.25 m`），悬浮高度 `1 m`，默认面向摄像机。 立标面板与指示器不参与物理阴影地面的生成；只有立标时不显示额外地面。新建实体旋转为零，X/Y/Z 变换轴与普通模型一致；面板宽度沿 X、高度沿 Y，立起面板仅改变显示几何。旧场景打开时自动转换坐标基准，保留原位置、朝向和尺寸，重复保存重开不会再次转换。
 2. 切换 `图表库`，把已同步的大屏拖到场景中的立标上，或选中立标后拖到 Inspector 的“大屏内容”槽位。需要当前工程已绑定数据中台项目，且大屏具有可访问的 HTTP(S) 页面地址。
 3. 标牌实时嵌入完整大屏，编辑态继续允许选中和调整 Transform；进入运行预览或打开发布 Viewer 后可以操作大屏内容。绑定、替换、清空、复制、移动、显隐与锁定沿用场景实体规则，保存重开会恢复绑定。
 4. 大屏数据更新频率由大屏自身数据源/远程数据的轮询设置决定；修改大屏设计后，点击 Inspector 的“刷新内容”重新加载。页面加载超时提供提示和可用缩略图，隐藏/删除立标会释放嵌入页面；再次显示时重新加载。
-5. “图表面板”可配置文本内容、字号、跑马灯、背景图片/颜色、线形/柱形/无指示器、指示器大小/颜色、面板尺寸、悬浮高度与面向摄像机。尺寸与实体缩放共同决定实际大小；悬浮和朝向只影响显示几何，空间信息与 Gizmo 的 Transform 保持独立。背景图片可从图片库直接拖入背景区域（支持内置与已同步图片），也可选择本地 PNG/JPEG/WebP（最大 2 MB、4096×4096）；库内 SVG/GIF 固化为静态 PNG。图片内嵌进场景，保存和导出无额外文件依赖，也可恢复默认全息背景。
+5. “图表面板”可配置文本内容、字号、跑马灯、背景图片/颜色、线形/柱形/无指示器、指示器大小/颜色、面板尺寸、悬浮高度与面向摄像机。尺寸与实体缩放共同决定实际大小；悬浮和朝向只影响显示几何，空间信息与 Gizmo 的 Transform 保持独立。背景颜色默认“无色”（透明），颜色选择器可随时选择“无色”；透明区域显示后方场景模型，旧立标已保存的颜色保持不变。背景图片支持图片库内所有内置及已同步图片（PNG/JPEG/WebP/GIF/SVG），同步本地图片经桌面主进程读取。库内图片按同步上限 20 MB 读取，超大图片自动缩放或压缩至 2 MB、最长边 4096 像素，保留透明通道，SVG/GIF 固化为静态背景；本地上传仍支持 PNG/JPEG/WebP（最大 2 MB、4096×4096）。图片内嵌进场景，保存和导出无额外文件依赖，“恢复默认”清除背景图片并保留所选背景颜色。
 6. 数据驱动选择 DATA DRIVEN、模型来源及遥测字段名（支持点路径），运行预览/Viewer 显示该模型最新字段值。按资产编号、设备类型和数据源匹配；字段缺失、过期或来源被删除时恢复文本内容。大屏模式继续使用大屏自身的数据源。
 7. 点击事件支持增删“鼠标左键点击”事件及多个顺序动作，可配置对象聚焦、主题展示、选中物体和刷新内容。聚焦与选中可分别指定场景对象，目标失效会提示并跳过该动作；每个立标最多 16 个事件，每事件最多 32 个动作。立标不显示额外的事件按钮；运行预览/Viewer 中短按左键点击内置面板触发，右键与相机拖拽不触发；绑定大屏时可点击立标边框触发，大屏内部交互保持独立。选择“主题展示”后，将图表库完整大屏拖入该动作的“目标主题”槽位，支持替换、清空并显示已绑定名称。从数据中台大屏嵌入的数字孪生中触发时，按动作顺序请求外层数据中台切换到绑定的大屏内容；同项目中优先切换对应的引用页，保留公共层中的三维场景。目标未被当前大屏引用时，由数据中台在相同的预览或发布模式打开目标大屏；跨项目目标不执行。单独打开编辑器或 Viewer、未连接数据中台宿主时会提示主题展示不可用。未绑定主题会提示并跳过，继续执行其他动作。
 8. 外观及事件配置支持复制、撤销重做、保存重开与独立 Viewer；同批复制的目标引用重映射到新对象，批外目标保留。绑定/替换/清空大屏保留外观和事件设置。旧场景缺省属性保留原朝向、尺寸与无悬浮行为，旧单动作聚焦立标/刷新内容自动兼容。
@@ -783,4 +783,20 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 
 验证：`node --test tests/editor/chartMarker.test.mjs tests/editor/chartMarkerClick.test.mjs tests/editor/chartMarkerDrag.test.mjs tests/editor/chartMarkerRuntime.test.mjs`；`npm run build` 后执行 `node scripts/smoke-chart-marker.mjs`，使用本地实时页面夹具和 Chrome 验证拖放、数据更新、运行预览交互、清空/撤销、刷新及构建后的独立 Viewer，主题动作覆盖拖放替换/清空、非法输入、保存恢复和无宿主提示。构建数据中台前端后执行 `node scripts/smoke-chart-marker-host.mjs <数据中台frontend目录>`，验证预览/发布模式下真实 Viewer 点击切换外层引用页或目标路由，并确认公共三维实例保留、Viewer 内未加载主题。浏览器测试使用接口夹具，截图保存到 `output/playwright/chart-marker/`。
 
+坐标轴回归：`node --test tests/editor/chartMarkerTransform.test.mjs tests/editor/chartMarkerRuntime.test.mjs`；`node tests/editor/chartMarkerGizmo.integration.mjs` 验证真实浏览器 XYZ 拖动、撤销重做、Y 轴高度缩放及 Local/Global 切换，截图保存到 `output/playwright/chart-marker-gizmo/`。
+
+背景回归：`node --test tests/editor/chartMarkerBackground.test.mjs tests/digitalTwin/syncedImageRead.test.mjs`；`npm run build:electron` 后执行 `node tests/editor/chartMarkerBackground.integration.mjs`，使用真实 Electron preload/主进程读取夹具验证各格式拖入、无色切换、撤销重做和保存重开；`node tests/editor/chartMarkerTransparency.integration.mjs` 验证透明背景、半透明图片、前后模型遮挡及动态内容。截图保存到 `output/playwright/chart-marker-background/` 和 `output/playwright/chart-marker-transparency/`。
+
 遮挡回归：`node --experimental-strip-types --test tests/editor/chartMarkerVisibility.test.mjs`；`node scripts/smoke-chart-marker-occlusion.mjs` 验证部分/完全遮挡、模型前后关系、视角变化、交叉立标、跨域点击阻挡、空牌交互及分散立标像素读取范围，截图保存到 `output/playwright/chart-marker-occlusion/`。
+
+## POI 报警管理器
+
+1. 在 POI 库点击“报警管理器”或拖入 Scene，选中后配置 `POIAlarmSpawnerComponent`。目标 `Size` 支持 0–64 个槽位，调整数量保留已有槽位；从模型库拖入设备模型。`ENTITY` 可再限定具体场景设备，未限定时监听该模型全部实例；`MODEL` 始终监听该模型全部实例。不会因配置目标而创建新的设备。
+2. `RUNNING STATE` 监听离线、空闲、运行、报警。沿用目标设备的 MQTT 资产编号、设备类型、数据源与超时配置，读取遥测 `fields.runningState`（兼容 `running_state`、`state`、`status`）；支持英文状态、中文状态和 `0/1/2/3`（离线/空闲/运行/报警）。遥测 `faulted` 为真时优先视为报警；收到过数据后超时视为离线，从未收到数据或设备绑定已禁用时不触发。
+3. `CUSTOM PROPERTY` 监听火警，默认字段 `fireAlarm`、触发值 `true`；可以按现场遥测改字段与触发值，支持点路径，布尔 `true/false` 与 `1/0` 对应。启用“仓库告警”后，还监听新鲜快照中的 `warehouseAlarm=true/1` 或配置的火警条件，优先展示仓库告警主题；关闭后仍保留所选监听属性本身的功能。
+4. 报警时覆盖目标模型颜色，显示所选外观模型；外观模型为空时显示内置火焰。“摄像机聚焦”开启时，新报警触发一次设备聚焦。报警解除、隐藏目标、停止预览或删除管理器后，清除派生效果并恢复原材质。共享模型中的其它设备不会被染色；受监控设备及其原有批次伙伴会独立渲染，大批量监控时需留意绘制调用增加。
+5. “告警主题”“仓库告警主题”可选择已同步的图表库大屏，也支持拖入大屏卡片。发布 Viewer 从同项目的数据中台大屏打开后，通过现有宿主协议展示主题；首条报警早于握手时，保留最新主题，握手完成后仅在报警仍有效时发送。独立打开 Viewer 会提示需要连接数据中台宿主，不会在本地擅自打开主题页面。
+6. 启用“显示图表立标”后，可配置分类、图表库/第三方/视频/内置样式、背景图片与颜色、线形/多面体型/图标型、指示器大小与颜色、尺寸、悬浮高度及面向摄像机。图表库嵌入已选大屏；第三方支持 HTTP(S) 嵌入页面，视频使用浏览器原生视频格式，页面嵌入与播放能力取决于内容服务器和浏览器。立标随报警出现和清除，沿用场景深度遮挡。
+7. 配置支持撤销重做、复制、保存重开；同批复制的具体设备引用会重映射。发布包和源工程包收集目标模型、外观模型及关联资源，保留主题引用与内嵌背景图片，不依赖编辑电脑的绝对模型路径。旧场景无报警组件时保持原行为。
+
+验证：`node --test tests/editor/alarmManager.test.mjs`；`npm run build:electron` 后执行 `node_modules/.bin/electron.cmd tests/digitalTwin/alarmManagerPublish.integration.mjs` 验证部署资源与源工程包；`node scripts/smoke-alarm-manager.mjs` 在 Edge 中验证真实 WebGL 颜色隔离、火焰、立标可见像素、解除恢复和 GLB 外观加载，截图位于 `output/playwright/alarm-manager/`。真实现场 MQTT 与数据中台在线大屏需使用项目实际连接配置联调。

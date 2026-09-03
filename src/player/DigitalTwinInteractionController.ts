@@ -69,6 +69,7 @@ export type DigitalTwinInteractionControllerOptions = {
   setTimer?: (callback: () => void, delayMs: number) => unknown;
   clearTimer?: (timer: unknown) => void;
   projectId?: string;
+  onReady?: () => void;
 };
 
 type ActiveFocusRequest = {
@@ -298,6 +299,7 @@ export class DigitalTwinInteractionController {
         capabilities,
       },
     });
+    this.options.onReady?.();
   }
 
   private postInitialLoadState(): void {

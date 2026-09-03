@@ -78,6 +78,21 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
     assert.deepEqual(resolveClickEventBindingClick(scene, 'stacker-1'), { kind: 'pass-through' });
   });
 
+  await t.test('旧发布包缺少 assetId 仍保留设备，但不能绕过资源 URL 校验', () => {
+    const device = registeredSlot(REGISTERED_URL).deviceType;
+    delete device.assetId;
+    const normalizeDevice = (overrides = {}) => sanitizeClickEventBindingComponent({
+      ...createBindingComponent(),
+      deviceSlots: [{ id: 'slot', deviceType: { ...device, ...overrides } }],
+    }).deviceSlots[0].deviceType;
+    assert.equal(normalizeDevice().assetId, device.id);
+    assert.equal(normalizeDevice().sourceUrl, REGISTERED_URL);
+    for (const sourceUrl of ['', 'https://example.com/model.glb', 'file:///C:/model.glb', 'javascript:alert(1)']) {
+      assert.equal(normalizeDevice({ sourceUrl }), null);
+    }
+    assert.equal(normalizeDevice({ sourcePath: '' }), null);
+  });
+
   await t.test('接管激活后点空白 → clear', () => {
     const scene = createScene(
       createModelEntity('stacker-1', REGISTERED_URL),

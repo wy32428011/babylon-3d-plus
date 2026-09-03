@@ -141,6 +141,11 @@ export function createDeploymentSceneSummary(scene: SceneDocument): DeploymentSc
       if (cadKey) cadResources.add(cadKey);
     }
 
+    const alarm = entity.components.alarmManager;
+    if (alarm) {
+      registerGeneratorTarget(alarm.appearanceModel, modelResources, scriptResources);
+      for (const slot of alarm.targets) registerGeneratorTarget(slot.model, modelResources, scriptResources);
+    }
     const modelGenerator = entity.components.modelGenerator;
     if (modelGenerator) {
       registerGeneratorTarget(modelGenerator.defaultTarget, modelResources, scriptResources);

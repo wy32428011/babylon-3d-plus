@@ -115,6 +115,7 @@ function isEnvironmentShadowReceiver(mesh: AbstractMesh): boolean {
  */
 function isShadowReceiver(mesh: AbstractMesh, realtime: boolean): boolean {
   if (mesh.name === SCENE_SHADOW_CATCHER_NAME) return true;
+  if (mesh.metadata?.editorChartMarker === true) return false;
   if (realtime) return isShadowSurface(mesh);
   return isEnvironmentShadowReceiver(mesh);
 }
@@ -148,6 +149,7 @@ function isShadowSurface(mesh: AbstractMesh): boolean {
 
   const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
   return metadata?.editorSkyboxSphere !== true
+    && metadata?.editorChartMarker !== true
     && metadata?.editorAutoPatrolMarker !== true
     && metadata?.editorShadowCatcher !== true;
 }
@@ -210,9 +212,8 @@ export class SceneShadowRuntime {
     const qualityChanged = settings.quality !== this.settings.quality;
     const enabledChanged = settings.enabled !== this.settings.enabled;
     this.settings = { ...DEFAULT_SHADOW_SETTINGS, ...settings };
-    this.catcher.setEnabled(this.settings.enabled && this.settings.catcherEnabled);
-
     if (!this.settings.enabled) {
+      this.catcher.setEnabled(false);
       this.disposePrimaryGenerator();
       this.disposeAutoSun();
       this.restoreFillLightPolicy();
@@ -451,7 +452,7 @@ export class SceneShadowRuntime {
     mesh.material = material;
     mesh.position.y = CATCHER_Y_OFFSET_METERS;
     mesh.scaling.set(CATCHER_MIN_SIZE_METERS, 1, CATCHER_MIN_SIZE_METERS);
-    mesh.setEnabled(this.settings.enabled && this.settings.catcherEnabled);
+    mesh.setEnabled(false);
     return mesh;
   }
 
@@ -478,6 +479,8 @@ export class SceneShadowRuntime {
       found = true;
     }
 
+    // 没有物理模型时保留空场景；POI 显示内容不需要一块实心接收地面。
+    this.catcher.setEnabled(found && this.settings.enabled && this.settings.catcherEnabled);
     if (!found) {
       this.catcher.position.set(0, CATCHER_Y_OFFSET_METERS, 0);
       this.catcher.scaling.set(CATCHER_MIN_SIZE_METERS, 1, CATCHER_MIN_SIZE_METERS);

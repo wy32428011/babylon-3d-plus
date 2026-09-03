@@ -34,7 +34,8 @@ test('图表立标创建、绑定与持久化', async (t) => {
   const marker = () => store.getState().scene.entities[id];
   const transform = structuredClone(marker().components.transform);
   assert.deepEqual(transform.position, { x: 3, y: 1.125, z: 4 }, '标牌底部落地');
-  assert.equal(transform.rotation.x, Math.PI / 2);
+  assert.deepEqual(transform.rotation, { x: 0, y: 0, z: 0 });
+  assert.deepEqual(transform.scale, { x: 2, y: 1.125, z: 1 });
   assert.equal(marker().components.meshRenderer.meshKind, 'plane');
   assert.deepEqual(marker().components.chartMarker, CHART_MARKER_DEFAULTS);
   assert.deepEqual(deserializeScene(serializeScene(store.getState().scene)).entities[id].components.chartMarker, CHART_MARKER_DEFAULTS);
@@ -44,12 +45,26 @@ test('图表立标创建、绑定与持久化', async (t) => {
       const scene = structuredClone(store.getState().scene);
       scene.entities[id].components.chartMarker = component;
       const restored = deserializeScene(serializeScene(scene)).entities[id].components.chartMarker;
-      assert.deepEqual(restored, component);
+      assert.deepEqual(restored, { ...component, geometryBasis: 'upright' });
       assert.equal(resolveChartMarker(restored).contentType, 'screen');
       assert.equal(resolveChartMarker(restored).floatHeight, 0);
       assert.equal(resolveChartMarker(restored).faceCamera, false);
       assert.equal(resolveChartMarker(restored).appearance, 'none');
     }
+  });
+
+  await t.test('新建背景无色，显式颜色与透明可撤销重做并保存重开', () => {
+    assert.equal(CHART_MARKER_DEFAULTS.backgroundColor, 'transparent');
+    assert.equal(resolveChartMarker({}).backgroundColor, '#101827', '旧场景缺省保持兼容');
+    assert.equal(resolveChartMarker({ backgroundColor: '#112233' }).backgroundColor, '#112233');
+    store.getState().updateChartMarker(id, { backgroundColor: '#123456' });
+    store.getState().updateChartMarker(id, { backgroundColor: 'transparent' });
+    assert.equal(marker().components.chartMarker.backgroundColor, 'transparent');
+    store.getState().undo();
+    assert.equal(marker().components.chartMarker.backgroundColor, '#123456');
+    store.getState().redo();
+    assert.equal(deserializeScene(serializeScene(store.getState().scene)).entities[id].components.chartMarker.backgroundColor, 'transparent');
+    assert.throws(() => normalizeChartMarker({ appearanceColor: 'transparent' }), /图表立标/);
   });
 
   await t.test('图表面板的全部属性可编辑、撤销重做、持久化，重复更新不新增历史', () => {

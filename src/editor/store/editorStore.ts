@@ -1,3 +1,4 @@
+import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../model/alarmManager';
 import { create } from 'zustand';
 import type { ManualRoamAvatar } from '../model/components';
 import {
@@ -564,6 +565,8 @@ type EditorState = {
   setManualRoamAvatar: (entityId: string, avatar: ManualRoamAvatar | null) => void;
   createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data) => void;
   createChartMarker: (placementPosition?: Vector3Data) => void;
+  createAlarmManager: (placementPosition?: Vector3Data) => void;
+  updateAlarmManager: (entityId: string, patch: Partial<AlarmManagerComponent>) => void;
   updateChartMarker: (entityId: string, patch: Partial<ChartMarkerComponent>) => void;
   bindChartMarkerScreen: (entityId: string, source: DataPlatformChartAssetEntry | null) => boolean;
   createClickEventBinding: (placementPosition?: Vector3Data) => void;
@@ -1296,6 +1299,21 @@ function refreshSceneModelAssetsFromImportedAssets(
       }
     }
 
+    const alarmManager = entity.components.alarmManager;
+    if (alarmManager) {
+      const appearance = refreshModelGeneratorTargetFromImportedAssets(alarmManager.appearanceModel, indexes);
+      let alarmRefreshCount = appearance.refreshedCount;
+      const targets = alarmManager.targets.map(slot => {
+        const result = refreshModelGeneratorTargetFromImportedAssets(slot.model, indexes);
+        alarmRefreshCount += result.refreshedCount;
+        return result.refreshedCount ? { ...slot, model: result.target } : slot;
+      });
+      if (alarmRefreshCount) {
+        components = { ...components, alarmManager: { ...alarmManager, appearanceModel: appearance.target, targets } };
+        refreshedCount += alarmRefreshCount;
+        entityChanged = true;
+      }
+    }
     const avatar = entity.components.manualRoamSpawn?.avatar;
     if (avatar) {
       const importedAsset = findImportedAssetForModelAsset(avatar, indexes);
@@ -1452,6 +1470,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     ...(entity.components.modelArrayInstance
       ? { modelArrayInstance: { ...entity.components.modelArrayInstance } }
       : {}),
+    ...(entity.components.alarmManager ? { alarmManager: cloneJsonValue(entity.components.alarmManager) } : {}),
     ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
     ...(entity.components.clickEventBinding ? { clickEventBinding: cloneClickEventBindingComponent(entity.components.clickEventBinding) } : {}),
     ...(entity.components.telemetryBinding ? { telemetryBinding: cloneJsonValue(entity.components.telemetryBinding) } : {}),
@@ -1806,6 +1825,9 @@ function prepareEntityClipboardPaste(
   // 所有剪贴板根条目均生成 ID 后再处理引用，支持跨根对象及指向自身的动作。
   // 未随本批复制的目标仍引用场景中的原对象。
   for (const entity of entities) {
+    for (const slot of entity.components.alarmManager?.targets ?? []) {
+      slot.entityId = duplicatedIdBySourceId.get(slot.entityId) ?? slot.entityId;
+    }
     const events = entity.components.chartMarker?.clickEvents;
     if (!events) continue;
     for (const event of events) {
@@ -3718,6 +3740,45 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, command.label),
       };
+    });
+  },
+  createAlarmManager: (placementPosition) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建报警管理器');
+      const baseEntity = createAlarmManagerEntity(sanitizeVector3(placementPosition));
+      const entity = { ...baseEntity, name: createNextEntityName(state.scene, '报警管理器') };
+      const command = createEntityCommand(entity);
+      const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
+      return {
+        ...result,
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        logs: prependLog(state.logs, command.label),
+      };
+    });
+  },
+  updateAlarmManager: (entityId, patch) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改报警管理器');
+      const entity = state.scene.entities[entityId];
+      if (!isRuntimeEntityEditable(state.scene, entity) || !entity.components.alarmManager) return state;
+      let alarmManager: AlarmManagerComponent;
+      try {
+        alarmManager = normalizeAlarmManager({ ...entity.components.alarmManager, ...patch });
+      } catch (error) {
+        return { logs: prependLog(state.logs, '修改报警管理器失败: ' + (error instanceof Error ? error.message : String(error))) };
+      }
+      if (areJsonValuesEqual(alarmManager, entity.components.alarmManager)) return state;
+      const command = updateSceneDocumentCommand('修改报警管理器', (scene) => ({
+        ...scene,
+        entities: {
+          ...scene.entities,
+          [entityId]: { ...scene.entities[entityId], components: { ...scene.entities[entityId].components, alarmManager } },
+        },
+      }));
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
     });
   },
   createChartMarker: (placementPosition) => {

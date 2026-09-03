@@ -301,6 +301,11 @@ type SyncedImageAssetEntry = {
   fileSizeBytes?: number;
 };
 
+type SyncedImageReadResult = {
+  bytes: Uint8Array;
+  contentType: string;
+};
+
 type DataPlatformImageSyncPhase =
   | 'querying'
   | 'downloading'
@@ -607,6 +612,7 @@ interface Window {
     syncDataPlatformImages: () => Promise<boolean>;
     retryDataPlatformImageSync: () => Promise<boolean>;
     listSyncedImages: () => Promise<SyncedImageAssetEntry[]>;
+    readSyncedImage: (reference: string) => Promise<SyncedImageReadResult>;
     onDataPlatformImageSyncProgress: (handler: (progress: DataPlatformImageSyncProgress) => void) => () => void;
     listProjectAssets: () => Promise<ProjectListAssetsResult>;
     openRecentProject: (request: OpenRecentProjectRequest) => Promise<ProjectListAssetsResult>;

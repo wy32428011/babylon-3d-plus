@@ -48,3 +48,12 @@ test('ETag 命中时返回 304，文件替换后必须重新传输', () => {
   assert.equal(replaced.body, 'stream');
   assert.notEqual(replaced.headers.ETag, etag);
 });
+
+test('图片库所有支持格式均返回图片类型，包括大小写扩展名', () => {
+  for (const [extension, contentType] of Object.entries({
+    PNG: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml',
+  })) {
+    const response = resolveEditorAssetProtocolResponse({ filePath: `C:/Assets/Images/background.${extension}`, size: 32, mtimeMs: 100 });
+    assert.equal(response.headers['Content-Type'], contentType, extension);
+  }
+});

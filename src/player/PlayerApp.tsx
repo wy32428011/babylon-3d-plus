@@ -1,3 +1,4 @@
+import type { AlarmActivation } from '../runtime/babylon/AlarmManagerRuntime';
 import { executeChartMarkerClick } from '../runtime/babylon/chartMarkerClick';
 import { CHART_MARKER_REFRESH_EVENT } from '../shared/chartMarkerEmbed';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -309,6 +310,14 @@ export function PlayerApp() {
     let manualRoam: ManualRoamRuntime | null = null;
     let skyboxCameraBounds: PublishedSkyboxCameraBoundsController | null = null;
     let interactionController: DigitalTwinInteractionController | null = null;
+    // 宿主握手可能晚于首条遥测；仅保留最新主题，在 ready 后确认报警仍有效再发送。
+    let pendingAlarmTheme: AlarmActivation | null = null;
+    const flushAlarmTheme = (): void => {
+      const pending = pendingAlarmTheme;
+      if (!pending?.theme || disposed) return;
+      if (!runtime?.isAlarmActive(pending.managerId, pending.targetId)) { pendingAlarmTheme = null; return; }
+      if (interactionController?.showScreen(pending.theme)) { pendingAlarmTheme = null; setChartMarkerError(''); }
+    };
     const autoPatrolStartGate = new DeferredAutoPatrolStartGate();
     autoPatrolStartGateRef.current = autoPatrolStartGate;
     initialLoadCompletedRef.current = false;
@@ -351,6 +360,7 @@ export function PlayerApp() {
           parentWindow: window.parent,
           viewerOrigin: window.location.origin,
           projectId: parsedConfig.digitalTwin?.projectId,
+          onReady: flushAlarmTheme,
           subscribeToMessages: (listener) => {
             const handleMessage = (event: MessageEvent<unknown>) => listener({
               data: event.data,
@@ -577,6 +587,18 @@ export function PlayerApp() {
           triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
           emitAssetClicked: (payload) => interactionController?.notifyAssetClicked(payload),
         });
+        runtime.onAlarmActivated = event => {
+          if (disposed || !runtime) return;
+          if (event.focusCamera) {
+            const bounds = runtime.getEntitiesWorldBounds([event.targetId]);
+            if (bounds && viewport) { manualRoam?.setEnabled(false); notifyManualInput(); viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS }); }
+          }
+          if (event.theme) {
+            pendingAlarmTheme = event;
+            flushAlarmTheme();
+            if (pendingAlarmTheme) setChartMarkerError('告警主题等待连接：请在同项目的数据中台大屏中打开数字孪生。');
+          }
+        };
         chartMarkerClickRef.current = (markerId) => {
           if (disposed || !runtime) return false;
           pauseHistoryReplay();

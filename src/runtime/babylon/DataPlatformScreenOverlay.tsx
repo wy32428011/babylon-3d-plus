@@ -1,5 +1,5 @@
 import { getChartMarkerCorners } from './ChartMarkerPresentation';
-import { createChartMarkerContent } from './chartMarkerContent';
+import { createChartMarkerContent, type ChartMarkerTextureFrame } from './chartMarkerContent';
 import { canEmbedChartMarkerScreen, CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import { useEffect, useRef } from 'react';
 import { Matrix, Scene, Vector3, type Mesh } from '@babylonjs/core';
@@ -153,6 +153,7 @@ type OverlayEntry = {
   host: HTMLDivElement;
   clipHost: HTMLDivElement;
   iframe: HTMLIFrameElement | null;
+  video?: HTMLVideoElement;
   item: DataPlatformScreenOverlayItem;
   screenOrigin: string;
   screenUrl?: string;
@@ -200,12 +201,14 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
   const builtin = builtinMode ? createChartMarkerContent(host) : undefined;
   if (builtin) content.style.display = 'none';
   let iframe: HTMLIFrameElement | null = null;
+  let video: HTMLVideoElement | undefined;
   let timeoutId: number | undefined;
   let loaded = false;
   const canEmbed = !item.chartMarker || canEmbedChartMarkerScreen();
   const showFallback = (): void => {
     if (loaded) return;
     if (iframe) iframe.style.visibility = 'hidden';
+    if (video) video.style.visibility = 'hidden';
     status.style.display = 'flex';
     message.textContent = '大屏暂未加载，请检查网络或页面访问权限后刷新内容';
   };
@@ -214,12 +217,24 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
     if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     entry.lastSelectionSignature = null;
     if (iframe) iframe.style.visibility = 'visible';
+    if (video) video.style.visibility = 'visible';
     fallback.style.display = 'none';
     status.style.display = 'none';
   };
-  if (item.screenUrl && canEmbed) {
+  if (item.screenUrl && item.alarmMediaType === 'video') {
+    video = document.createElement('video');
+    video.src = item.screenUrl;
+    video.controls = true; video.autoplay = true; video.muted = true; video.loop = true; video.playsInline = true;
+    video.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;visibility:hidden';
+    video.addEventListener('loadeddata', onLoad);
+    video.addEventListener('error', showFallback);
+    message.textContent = '视频加载中…';
+    content.append(video);
+    timeoutId = window.setTimeout(showFallback, IFRAME_FALLBACK_TIMEOUT_MS);
+  } else if (item.screenUrl && canEmbed) {
     iframe = document.createElement('iframe');
     iframe.title = item.name || item.entityId;
+    if (item.alarmMediaType === 'third-party') iframe.setAttribute('sandbox', 'allow-scripts allow-forms');
     iframe.src = item.screenUrl;
     iframe.loading = 'eager';
     iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;pointer-events:none;visibility:hidden';
@@ -241,6 +256,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
     builtin,
     clipHost,
     iframe,
+    video,
     item,
     screenOrigin: item.screenUrl ? new URL(item.screenUrl).origin : '',
     screenUrl: item.screenUrl,
@@ -252,6 +268,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       iframe?.removeEventListener('load', onLoad);
       iframe?.removeEventListener('error', showFallback);
+      if (video) { video.pause(); video.removeEventListener('loadeddata', onLoad); video.removeEventListener('error', showFallback); video.removeAttribute('src'); video.load(); }
       builtin?.dispose();
       clipHost.remove();
     },
@@ -260,7 +277,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
 }
 
 function postSelectionToScreen(entry: OverlayEntry, selectedEntityIds: readonly string[]): void {
-  if (!entry.iframe?.contentWindow) return;
+  if (!entry.iframe?.contentWindow || entry.item.alarmMediaType) return;
   const message = createDataPlatformScreenSelectionMessage(selectedEntityIds, selectedEntityIds[0] ?? null);
   const signature = JSON.stringify(message.payload);
   if (entry.lastSelectionSignature === signature) return;
@@ -305,11 +322,13 @@ export function DataPlatformScreenOverlay({
     const entries = entriesRef.current;
     let depthSurface: ChartMarkerDepthSurface | undefined;
     let visibleMarkerMeshes: Mesh[] = [];
+    const transparentContents = new Map<Mesh, ChartMarkerTextureFrame>();
     let markerPolygons: ScreenPolygon[] = [];
 
     const handleMessage = (event: MessageEvent<unknown>): void => {
       if (!interactiveRef.current) return;
       for (const entry of entries.values()) {
+        if (entry.item.alarmMediaType) continue;
         if (event.source !== entry.iframe?.contentWindow || event.origin !== entry.screenOrigin) continue;
         const command = parseDataPlatformScreenCommand(event.data);
         if (command) onCommandRef.current?.(entry.item, command);
@@ -339,6 +358,7 @@ export function DataPlatformScreenOverlay({
 
       if (items.some(item => item.chartMarker) && !depthSurface) depthSurface = new ChartMarkerDepthSurface(scene, canvas);
       visibleMarkerMeshes = [];
+      transparentContents.clear();
       markerPolygons = [];
       const projectedMarkers: { id: string; corners: ProjectedScreenPoint[] }[] = [];
       const contentPolygons = new Map<string, ScreenPolygon>();
@@ -346,6 +366,7 @@ export function DataPlatformScreenOverlay({
         let entry = entries.get(item.entityId);
         if (entry && (
           entry.screenUrl !== item.screenUrl
+          || entry.item.alarmMediaType !== item.alarmMediaType
           || entry.item.chartMarker !== item.chartMarker
           || entry.item.markerStyle?.contentType !== item.markerStyle?.contentType
           || entry.thumbnailUrl !== item.thumbnailUrl
@@ -369,7 +390,7 @@ export function DataPlatformScreenOverlay({
           entry.height = style.height * factor;
           entry.host.style.width = entry.width + 'px';
           entry.host.style.height = entry.height + 'px';
-          entry.host.style.backgroundColor = style.contentType === 'builtin' ? '#061b2b' : style.backgroundColor;
+          entry.host.style.backgroundColor = style.contentType === 'builtin' && style.backgroundColor !== 'transparent' ? '#061b2b' : style.backgroundColor;
           entry.host.style.boxShadow = style.contentType === 'builtin' ? 'none' : ('inset 0 0 0 12px ' + style.appearanceColor);
           entry.builtin?.update(style, item.markerText ?? style.text);
         }
@@ -377,6 +398,7 @@ export function DataPlatformScreenOverlay({
           entry.iframe.style.pointerEvents = interactiveRef.current ? 'auto' : 'none';
           entry.iframe.title = item.name || item.entityId;
         }
+        if (entry.video) entry.video.style.pointerEvents = interactiveRef.current ? 'auto' : 'none';
         postSelectionToScreen(entry, selectedEntityIdsRef.current);
         const corners = projectScreenCorners(scene, canvas, root, item.mesh, item.chartMarker);
         if (!corners) {
@@ -389,9 +411,16 @@ export function DataPlatformScreenOverlay({
           entry.host.style.transform = transform;
           if (item.chartMarker) {
             visibleMarkerMeshes.push(item.mesh);
+            if (item.markerStyle?.backgroundColor === 'transparent' && entry.builtin) {
+              const frame = entry.builtin.textureFrame();
+              if (frame) transparentContents.set(item.mesh, frame);
+              // 透明内置内容直接参与三维混合，避免 DOM 重叠及整块打孔丢失后方模型。
+              entry.host.style.display = 'none';
+              continue;
+            }
             projectedMarkers.push({ id: item.entityId, corners });
             // 空牌、错误提示和边框仍由 canvas 接收相机操作；只放行已加载网页的内容区。
-            if (interactiveRef.current && entry.iframe?.style.visibility === 'visible') {
+            if (interactiveRef.current && (entry.iframe?.style.visibility === 'visible' || entry.video?.style.visibility === 'visible')) {
               const contentCorners = projectScreenCorners(scene, canvas, root, item.mesh, true, 16 / entry.width, 16 / entry.height);
               if (contentCorners) contentPolygons.set(item.entityId, contentCorners);
             }
@@ -419,7 +448,7 @@ export function DataPlatformScreenOverlay({
 
     const beforeObserver = scene.onBeforeCameraRenderObservable.add(() => {
       update();
-      depthSurface?.beginFrame(visibleMarkerMeshes);
+      depthSurface?.beginFrame(visibleMarkerMeshes, transparentContents);
     });
     const observer = scene.onAfterRenderObservable.add(() => {
       depthSurface?.endFrame();

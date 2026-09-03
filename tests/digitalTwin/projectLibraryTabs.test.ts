@@ -95,7 +95,7 @@ test('特效 Inspector 使用独立于 POI 的用户可见术语', () => {
   const effectInspectorSource = readFileSync(POI_EFFECT_INSPECTOR_PATH, 'utf8');
 
   assert.ok(inspectorSource.includes("poiEffect ? '特效名称'"));
-  assert.ok(inspectorSource.includes("modelGenerator || clickEventBinding || autoPatrol ? 'POI名称'"));
+  assert.ok(inspectorSource.includes("modelGenerator || clickEventBinding || autoPatrol || selectedEntity.components.chartMarker ? 'POI名称'"));
   assert.ok(effectInspectorSource.includes('<legend>特效</legend>'));
   assert.ok(!effectInspectorSource.includes('POI 特效'));
 });

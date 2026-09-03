@@ -58,6 +58,7 @@
     "smoke:data-platform-skybox": "npm run build && npm run smoke:data-platform-skybox:built",
     "smoke:data-platform": "npm run build && npm run test:data-platform-relink && node scripts/smoke-data-platform-project.mjs && npm run smoke:data-platform-skybox:built",
     "test:digital-twin": "npm run test:digital-twin:unit && npm run test:digital-twin:integration",
+    "test:click-events:integration": "npm run build:electron && electron tests/digitalTwin/clickEventBindingPublish.integration.mjs",
     "smoke:editor-performance": "node scripts/smoke-editor-large-scene-performance.mjs && node scripts/smoke-hierarchy-virtualization.mjs",
     "smoke:reimport-performance": "npm run build && node scripts/smoke-real-scene-reimport-performance.mjs",
     "smoke:folder-group-move": "node scripts/smoke-folder-group-move.mjs",

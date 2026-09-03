@@ -7,7 +7,7 @@ import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { useEditorStore } from '../store/editorStore';
 import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
 import { IMAGE_ASSET_DRAG_MIME_TYPE } from '../assets/AssetDatabase';
-import { CHART_MARKER_BACKGROUND_MAX_BYTES, CHART_MARKER_BACKGROUND_RASTER_TYPES, loadChartMarkerLibraryBackground } from '../assets/chartMarkerBackground';
+import { CHART_MARKER_BACKGROUND_MAX_BYTES, CHART_MARKER_LIBRARY_IMAGE_MAX_BYTES, CHART_MARKER_BACKGROUND_RASTER_TYPES, loadChartMarkerLibraryBackground } from '../assets/chartMarkerBackground';
 import { CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import '../../styles/chart-marker.css';
 
@@ -54,7 +54,7 @@ function ChartMarkerNumberField({ label, value, min, max, step = 1, onCommit }: 
   );
 }
 
-export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; disabled: boolean }) {
+export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false }: { entity: Entity; disabled: boolean; alarmAppearance?: boolean }) {
   const [dragOver, setDragOver] = useState(false);
   const [backgroundDragOver, setBackgroundDragOver] = useState(false);
   const [error, setError] = useState('');
@@ -65,9 +65,16 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
   const bind = useEditorStore((state) => state.bindChartMarkerScreen);
-  const update = useEditorStore((state) => state.updateChartMarker);
+  const updateMarker = useEditorStore((state) => state.updateChartMarker);
+  const updateAlarm = useEditorStore((state) => state.updateAlarmManager);
+  function update(id: string, patch: Partial<ChartMarkerComponent>): void {
+    if (alarmAppearance) {
+      const current = useEditorStore.getState().scene.entities[id]?.components.alarmManager;
+      if (current) updateAlarm(id, { marker: { ...current.marker, ...patch } });
+    } else updateMarker(id, patch);
+  }
   const entities = useEditorStore((state) => state.scene.entities);
-  const marker = resolveChartMarker(entity.components.chartMarker ?? {});
+  const marker = resolveChartMarker((alarmAppearance ? entity.components.alarmManager?.marker : entity.components.chartMarker) ?? {});
   const screen = entity.components.dataPlatformScreen;
   const modelSources = Object.values(entities).filter((item) => item.components.modelAsset);
   const hasSelectedSource = modelSources.some((item) => item.id === marker.dataSourceEntityId);
@@ -92,7 +99,7 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
     const state = useEditorStore.getState();
     const current = state.scene.entities[entity.id];
     return request === imageRequest.current && !disabledRef.current
-      && state.scene.selectedEntityId === entity.id && !!current?.components.chartMarker
+      && state.scene.selectedEntityId === entity.id && !!(alarmAppearance ? current?.components.alarmManager : current?.components.chartMarker)
       && !isEntityEffectivelyLocked(state.scene.entities, current);
   }
 
@@ -108,11 +115,13 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
 
   function readBackgroundBlob(file: Blob, request: number, fromLibrary = false): void {
     if (!BACKGROUND_MIME_TYPES.includes(file.type) && !(fromLibrary && ['image/svg+xml', 'image/gif'].includes(file.type))) {
+      setReadingImage(false);
       setError('背景图片仅支持 PNG、JPEG 或 WebP 格式。');
       return;
     }
-    if (!file.size || file.size > MAX_BACKGROUND_BYTES) {
-      setError('请选择非空且不超过 2 MB 的背景图片。');
+    if (!file.size || file.size > (fromLibrary ? CHART_MARKER_LIBRARY_IMAGE_MAX_BYTES : MAX_BACKGROUND_BYTES)) {
+      setReadingImage(false);
+      setError(fromLibrary ? '请选择非空且不超过 20 MB 的图片库背景。' : '请选择非空且不超过 2 MB 的背景图片。');
       return;
     }
     const reader = new FileReader();
@@ -133,18 +142,27 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
         image.src = dataUrl;
         await image.decode();
         if (!isImageRequestCurrent(request)) return;
-        if (!image.naturalWidth || !image.naturalHeight || image.naturalWidth > MAX_BACKGROUND_EDGE || image.naturalHeight > MAX_BACKGROUND_EDGE) {
+        if (!image.naturalWidth || !image.naturalHeight || (!fromLibrary && (image.naturalWidth > MAX_BACKGROUND_EDGE || image.naturalHeight > MAX_BACKGROUND_EDGE))) {
           throw new Error('背景图片宽高必须在 1 至 4096 像素之间。');
         }
-        if (!BACKGROUND_MIME_TYPES.includes(file.type)) {
-          // SVG/GIF 从库拖入时固化为静态 PNG，沿用场景内嵌背景格式。
+        if (!BACKGROUND_MIME_TYPES.includes(file.type) || file.size > MAX_BACKGROUND_BYTES || image.naturalWidth > MAX_BACKGROUND_EDGE || image.naturalHeight > MAX_BACKGROUND_EDGE) {
+          // 库内图片自动适配场景内嵌预算；PNG/WebP 保留透明通道，SVG/GIF 固化为静态背景。
           const canvas = document.createElement('canvas');
-          canvas.width = image.naturalWidth;
-          canvas.height = image.naturalHeight;
+          const scale = Math.min(1, MAX_BACKGROUND_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
+          canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
           const context = canvas.getContext('2d');
           if (!context) throw new Error('背景图片转换失败。');
-          context.drawImage(image, 0, 0);
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
           dataUrl = canvas.toDataURL('image/png');
+          for (let attempt = 0; (dataUrl.length - dataUrl.indexOf(',') - 1) * 3 / 4 > MAX_BACKGROUND_BYTES && attempt < 6; attempt++) {
+            if (attempt > 0) {
+              canvas.width = Math.max(1, Math.round(canvas.width * 0.75));
+              canvas.height = Math.max(1, Math.round(canvas.height * 0.75));
+              context.drawImage(image, 0, 0, canvas.width, canvas.height);
+            }
+            dataUrl = canvas.toDataURL('image/webp', 0.85);
+          }
           canvas.width = canvas.height = 0;
           if ((dataUrl.length - dataUrl.indexOf(',') - 1) * 3 / 4 > MAX_BACKGROUND_BYTES) throw new Error('背景图片转换后超过 2 MB，请使用较小的图片。');
         }
@@ -222,13 +240,13 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
     <>
       <fieldset className="transform-fieldset chart-marker-fieldset" disabled={disabled}>
         <legend>图表面板</legend>
-        <label className="inspector-row">
+        {!alarmAppearance ? <label className="inspector-row">
           <span>关联类型</span>
           <select value={marker.contentType} onChange={(event) => commit({ contentType: event.target.value as ChartMarkerComponent['contentType'] })}>
             <option value="builtin">内置样式</option>
             <option value="screen">数据中台大屏</option>
           </select>
-        </label>
+        </label> : null}
         <label className="inspector-row">
           <span>文本内容</span>
           <input type="text" maxLength={4096} value={marker.text} onChange={(event) => commit({ text: event.target.value })} />
@@ -255,8 +273,8 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
           onDrop={(event) => { void handleBackgroundDrop(event); }}
         >
           <span>背景图片</span>
-          <div className="chart-marker-background-preview" style={{ color: marker.backgroundColor, backgroundColor: marker.backgroundImage ? marker.backgroundColor : undefined }}>
-            {marker.backgroundImage ? <img src={marker.backgroundImage} alt="图表立标背景预览" draggable={false} /> : <div className="chart-marker-default-background" aria-label="默认全息背景预览"><i /><i /><i /></div>}
+          <div className="chart-marker-background-preview" style={{ color: marker.backgroundColor, backgroundColor: marker.backgroundColor, backgroundImage: marker.backgroundColor === 'transparent' ? undefined : 'none' }}>
+            {marker.backgroundImage ? <img src={marker.backgroundImage} alt="图表立标背景预览" draggable={false} /> : marker.backgroundColor === 'transparent' ? <span className="muted">无背景 · 透明</span> : <div className="chart-marker-default-background" aria-label="默认全息背景预览"><i /><i /><i /></div>}
           </div>
           <div className="chart-marker-actions">
             <label className="chart-marker-file-button">
@@ -265,18 +283,23 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
             </label>
             <button type="button" onClick={restoreBackground} disabled={!marker.backgroundImage && !readingImage}>恢复默认</button>
           </div>
-          <p className="muted">可从图片库拖入，也可选择本地 PNG、JPEG、WebP。最大 2 MB，宽高不超过 4096 像素；库内 SVG、GIF 作为静态背景。</p>
+          <p className="muted">支持图片库全部图片，较大图片自动适配尺寸与体积，SVG、GIF 作为静态背景。也可选择本地 PNG、JPEG、WebP（最大 2 MB、4096 像素）。</p>
+        </div>
+        <div className="inspector-row">
+          <span>背景颜色</span>
+          <div className="chart-marker-color-picker" role="group" aria-label="背景颜色选择器">
+            <label className="chart-marker-color-swatch" style={{ backgroundColor: marker.backgroundColor, backgroundImage: marker.backgroundColor === 'transparent' ? undefined : 'none' }}>
+              <input aria-label="背景颜色" type="color" value={marker.backgroundColor === 'transparent' ? '#00cbe6' : marker.backgroundColor} onChange={(event) => commit({ backgroundColor: event.target.value })} />
+            </label>
+            <button type="button" aria-pressed={marker.backgroundColor === 'transparent'} onClick={() => commit({ backgroundColor: 'transparent' })}>无色</button>
+          </div>
         </div>
         <label className="inspector-row">
-          <span>背景颜色</span>
-          <input type="color" value={marker.backgroundColor} onChange={(event) => commit({ backgroundColor: event.target.value })} />
-        </label>
-        <label className="inspector-row">
           <span>外观样式</span>
-          <select value={marker.appearance} onChange={(event) => commit({ appearance: event.target.value as ChartMarkerComponent['appearance'] })}>
+          <select aria-label="外观样式" value={marker.appearance} onChange={(event) => commit({ appearance: event.target.value as ChartMarkerComponent['appearance'] })}>
             <option value="line">线形</option>
-            <option value="column">柱形</option>
-            <option value="none">无</option>
+            <option value="column">{alarmAppearance ? '多面体型' : '柱形'}</option>
+            <option value="none">{alarmAppearance ? '图标型' : '无'}</option>
           </select>
         </label>
         <ChartMarkerNumberField label="指示器大小" value={marker.indicatorSize} min={0.01} max={100} step={0.1} onCommit={(indicatorSize) => commit({ indicatorSize })} />
@@ -291,7 +314,7 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
           <span>面向摄像机</span>
           <input type="checkbox" checked={marker.faceCamera} onChange={(event) => commit({ faceCamera: event.target.checked })} />
         </label>
-        <div
+        {!alarmAppearance ? <div
           className={`chart-marker-screen-slot${dragOver ? ' is-drag-over' : ''}`}
           aria-label="图表立标大屏槽位"
           aria-disabled={disabled}
@@ -307,8 +330,8 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
         >
           <strong>{screen ? marker.screenName || '已绑定大屏' : '将图表库大屏拖到这里'}</strong>
           <span>{screen ? '拖入其他大屏可替换内容' : '拖入后自动切换为数据中台大屏'}</span>
-        </div>
-        {screen ? (
+        </div> : null}
+        {!alarmAppearance && screen ? (
           <div className="chart-marker-actions">
             <button type="button" onClick={() => window.dispatchEvent(new CustomEvent(CHART_MARKER_REFRESH_EVENT, { detail: entity.id }))}>刷新内容</button>
             <button type="button" onClick={() => { bind(entity.id, null); setError(''); }}>清空大屏</button>
@@ -317,7 +340,7 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
         {marker.contentType === 'screen' ? <p className="muted">大屏按自身数据源配置刷新，文本与跑马灯用于内置样式。修改大屏设计后可点击“刷新内容”重新加载。</p> : null}
         {error ? <p className="chart-marker-error" role="alert">{error}</p> : null}
       </fieldset>
-      <fieldset className="transform-fieldset chart-marker-fieldset" disabled={disabled}>
+      {!alarmAppearance ? <><fieldset className="transform-fieldset chart-marker-fieldset" disabled={disabled}>
         <legend>数据驱动</legend>
         <label className="inspector-row">
           <span>驱动方式</span>
@@ -344,7 +367,7 @@ export function ChartMarkerInspector({ entity, disabled }: { entity: Entity; dis
           </>
         ) : null}
       </fieldset>
-      <ChartMarkerEventsInspector entity={entity} disabled={disabled} />
+      <ChartMarkerEventsInspector entity={entity} disabled={disabled} /></> : null}
     </>
   );
 }

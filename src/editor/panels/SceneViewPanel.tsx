@@ -1046,6 +1046,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       return;
     }
 
+    if (builtInAsset.kind === 'alarm-manager') { useEditorStore.getState().createAlarmManager(placementPosition); return; }
     if (builtInAsset.kind === 'chart-marker') {
       createChartMarker(placementPosition);
       return;
@@ -1481,6 +1482,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const initializedMqttTelemetryClient = mqttTelemetryClient;
     viewportRef.current = viewport;
     setViewportCamera(viewport.camera);
+    runtime.onAlarmActivated = event => {
+      if (event.focusCamera) {
+        const bounds = runtime?.getEntitiesWorldBounds([event.targetId]);
+        if (bounds) { manualRoam?.setEnabled(false); viewport?.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS }); }
+      }
+      if (event.theme) pushLog('告警主题“' + event.theme.name + '”已触发，发布后在数据中台大屏中展示。');
+    };
     runtimeRef.current = runtime;
     gizmoRef.current = gizmo;
     autoPatrolPlaybackRef.current = autoPatrolPlayback;

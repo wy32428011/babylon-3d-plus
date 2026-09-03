@@ -1,5 +1,15 @@
 import path from 'node:path';
 
+const IMAGE_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml',
+};
+
+/** 已登记图片按文件类型声明响应 MIME，供图片解码和受控读取共用。 */
+export function resolveEditorAssetImageContentType(filePath: string): string | undefined {
+  return IMAGE_CONTENT_TYPES[path.extname(filePath).toLowerCase()];
+}
+
 const CACHEABLE_EDITOR_ASSET_EXTENSIONS = new Set([
   '.glb',
   '.gltf',
@@ -44,9 +54,11 @@ export function resolveEditorAssetProtocolResponse(
 ): EditorAssetProtocolResponse {
   const cacheControl = resolveEditorAssetCacheControl(input.filePath);
   const etag = createEditorAssetEtag(input.size, input.mtimeMs);
+  const contentType = resolveEditorAssetImageContentType(input.filePath);
   const headers: Record<string, string> = {
     'Cache-Control': cacheControl,
     ETag: etag,
+    ...(contentType ? { 'Content-Type': contentType } : {}),
   };
   if (
     cacheControl !== 'no-store'

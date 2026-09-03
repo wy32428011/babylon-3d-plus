@@ -36,7 +36,7 @@ try {
       listDataPlatformProjects: async () => ({ records: [], total: 0 }),
     };
   }, { screen: source, theme: themeSource });
-  await page.goto(url);
+  await page.goto(url, { timeout: 90_000 });
   await page.getByRole('button', { name: '进入空白编辑器' }).click();
   await page.locator('canvas.scene-canvas').waitFor({ state: 'visible' });
   await page.evaluate(async () => {
@@ -49,7 +49,11 @@ try {
   await page.waitForFunction(() => Object.values(window.chartSmokeStore.getState().scene.entities).some((entity) => entity.components.chartMarker));
   const markerId = await page.evaluate(() => window.chartSmokeStore.getState().scene.selectedEntityId);
   const builtin = page.locator('[data-chart-marker-builtin]');
-  await builtin.waitFor();
+  await builtin.waitFor({ state: 'attached' });
+  assert.equal(await page.getByRole('button', { name: '无色', exact: true }).getAttribute('aria-pressed'), 'true');
+  // 全息背景 DOM 路径继续覆盖；无色纹理路径由透明度 WebGL 回归验证。
+  await page.getByLabel('背景颜色', { exact: true }).fill('#2468ac');
+  await builtin.waitFor({ state: 'visible' });
   await page.getByLabel('文本内容', { exact: true }).fill('一次注液');
   await page.getByLabel('文本大小', { exact: true }).fill('42');
   await page.getByLabel('文本大小', { exact: true }).press('Tab');

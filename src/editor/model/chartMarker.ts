@@ -1,20 +1,22 @@
+import { Quaternion } from '@babylonjs/core/Maths/math.vector';
 import type { Entity } from './Entity';
-import type { ChartMarkerClickAction, ChartMarkerClickEvent, ChartMarkerComponent, ChartMarkerThemeScreen } from './components';
+import type { ChartMarkerClickAction, ChartMarkerClickEvent, ChartMarkerComponent, ChartMarkerThemeScreen, TransformComponent } from './components';
 import type { Vector3Data } from './math';
 import { createId } from '../../shared/ids';
 import { DATA_PLATFORM_SCREEN_DEFAULT_HEIGHT_METERS, DATA_PLATFORM_SCREEN_DEFAULT_WIDTH_METERS } from './dataPlatformScreen';
 
 export const CHART_MARKER_MAX_IMAGE_LENGTH = 3 * 1024 * 1024;
 
-/** 新建使用截图中的内置样式；旧场景的缺省行为由 resolveChartMarker 单独维护。 */
+/** 新建立标使用无色背景；旧场景的缺省行为由 resolveChartMarker 单独维护。 */
 export const CHART_MARKER_DEFAULTS: Readonly<Required<ChartMarkerComponent>> = Object.freeze({
+  geometryBasis: 'upright',
   screenName: '',
   contentType: 'builtin',
   text: '图表立标',
   fontSize: 36,
   marquee: false,
   backgroundImage: '',
-  backgroundColor: '#00cbe6',
+  backgroundColor: 'transparent',
   appearance: 'line',
   indicatorSize: 1,
   appearanceColor: '#00cbe6',
@@ -31,6 +33,7 @@ export const CHART_MARKER_DEFAULTS: Readonly<Required<ChartMarkerComponent>> = O
 
 const LEGACY_CHART_MARKER_DEFAULTS: Required<ChartMarkerComponent> = {
   ...CHART_MARKER_DEFAULTS,
+  geometryBasis: 'ground',
   contentType: 'screen',
   backgroundColor: '#101827',
   appearanceColor: '#58b9dc',
@@ -149,6 +152,7 @@ const NUMBER_LIMITS = {
   fontSize: [8, 256], indicatorSize: [0.01, 100], width: [16, 4096], height: [16, 4096], floatHeight: [0, 10000],
 } as const;
 const ENUM_VALUES = {
+  geometryBasis: ['ground', 'upright'],
   contentType: ['builtin', 'screen'], appearance: ['line', 'column', 'none'],
   driveMode: ['none', 'data'], clickAction: ['none', 'focus', 'refresh'],
 } as const;
@@ -179,7 +183,7 @@ export function normalizeChartMarker(value: unknown): ChartMarkerComponent {
     } else if (key in ENUM_VALUES) {
       valid = typeof field === 'string' && (ENUM_VALUES[key as keyof typeof ENUM_VALUES] as readonly string[]).includes(field);
     } else if (key === 'backgroundColor' || key === 'appearanceColor') {
-      valid = typeof field === 'string' && /^#[0-9a-f]{6}$/i.test(field);
+      valid = typeof field === 'string' && (/^#[0-9a-f]{6}$/i.test(field) || (key === 'backgroundColor' && field === 'transparent'));
     } else if (key === 'backgroundImage') {
       valid = typeof field === 'string' && (field === '' || (
         field.length <= CHART_MARKER_MAX_IMAGE_LENGTH
@@ -196,6 +200,18 @@ export function normalizeChartMarker(value: unknown): ChartMarkerComponent {
   return normalized;
 }
 
+/** 旧 XZ 平面改为直立几何基准，保留任意组合旋转、非等比缩放及世界位置。 */
+export function convertLegacyChartMarkerTransform(transform: TransformComponent): TransformComponent {
+  const { rotation, scale } = transform;
+  const uprightRotation = Quaternion.RotationYawPitchRoll(rotation.y, rotation.x, rotation.z)
+    .multiply(Quaternion.RotationYawPitchRoll(0, -Math.PI / 2, 0)).toEulerAngles();
+  return {
+    position: { ...transform.position },
+    rotation: { x: uprightRotation.x, y: uprightRotation.y, z: uprightRotation.z },
+    scale: { x: scale.x, y: scale.z, z: scale.y },
+  };
+}
+
 /** 空立标也具有完整实体身份，底边落在拖入场景的地面点。 */
 export function createChartMarkerEntity(position: Vector3Data): Entity {
   return {
@@ -208,8 +224,8 @@ export function createChartMarkerEntity(position: Vector3Data): Entity {
     components: {
       transform: {
         position: { ...position, y: position.y + DATA_PLATFORM_SCREEN_DEFAULT_HEIGHT_METERS / 2 },
-        rotation: { x: Math.PI / 2, y: 0, z: 0 },
-        scale: { x: DATA_PLATFORM_SCREEN_DEFAULT_WIDTH_METERS / 2, y: 1, z: DATA_PLATFORM_SCREEN_DEFAULT_HEIGHT_METERS / 2 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: DATA_PLATFORM_SCREEN_DEFAULT_WIDTH_METERS / 2, y: DATA_PLATFORM_SCREEN_DEFAULT_HEIGHT_METERS / 2, z: 1 },
       },
       meshRenderer: { meshKind: 'plane', materialColor: '#101827' },
       chartMarker: { ...CHART_MARKER_DEFAULTS, clickEvents: [] },

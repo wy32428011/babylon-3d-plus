@@ -91,14 +91,15 @@ export function createClickEventBindingDeviceTypeFromAsset(
 /** 清理单个设备类型条目；缺失匹配主键 sourceUrl 的条目会被过滤。 */
 function sanitizeClickEventBindingDeviceType(value: unknown): ClickEventBindingDeviceType | null {
   if (!isPlainObject(value)) return null;
-  const assetId = sanitizeText(value.assetId, CLICK_EVENT_BINDING_ID_MAX_LENGTH);
   const sourcePath = sanitizeText(value.sourcePath, 1024);
   const sourceUrl = sanitizeText(value.sourceUrl, 1024);
-  if (!assetId || !sourcePath || !sourceUrl || !sourceUrl.startsWith(AUTHORIZED_CLICK_EVENT_ASSET_URL_PREFIX)) {
+  if (!sourcePath || !sourceUrl || !sourceUrl.startsWith(AUTHORIZED_CLICK_EVENT_ASSET_URL_PREFIX)) {
     return null;
   }
 
   const id = sanitizeText(value.id, CLICK_EVENT_BINDING_ID_MAX_LENGTH) || createId('click_event_device');
+  // 旧发布包会移除仅用于编辑期追溯的 assetId；点击匹配以 sourceUrl 为准，不能因此丢弃整个绑定。
+  const assetId = sanitizeText(value.assetId, CLICK_EVENT_BINDING_ID_MAX_LENGTH) || id;
   const thumbnailUrl = sanitizeText(value.thumbnailUrl, 1024);
   const assetRevision = sanitizeText(value.assetRevision, 128);
 
