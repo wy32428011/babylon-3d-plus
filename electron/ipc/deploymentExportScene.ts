@@ -987,6 +987,8 @@ function rewriteClickEventBindingReferences(
     reference.deviceType.sourcePath = mappedUrl;
     reference.deviceType.sourceUrl = mappedUrl;
     delete reference.deviceType.thumbnailUrl;
+    // assetId 仅编辑期追溯用；部分模型库以本机路径作为条目 ID，部署场景禁止残留。
+    delete reference.deviceType.assetId;
   }
 }
 
