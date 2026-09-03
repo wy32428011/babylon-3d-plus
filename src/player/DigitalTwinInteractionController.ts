@@ -47,6 +47,7 @@ export type DigitalTwinInteractionRuntime = {
   slotIndex: DigitalTwinSlotIndex;
   getFocusBounds: (entityId: string, slot?: DigitalTwinSlotCoordinate) => DigitalTwinFocusBounds | null;
   focusOnBounds: (bounds: DigitalTwinFocusBounds, options: CameraViewTransitionOptions) => void;
+  triggerTargetClick: (entityId: string, slot?: DigitalTwinSlotCoordinate) => void;
   cancelCameraTransition: (reason?: CameraTransitionCancelReason) => boolean;
   setExternalHighlightEntityIds: (entityIds: readonly string[]) => void;
   setExternalSlotHighlight: (entityId: string, coordinate: DigitalTwinSlotCoordinate | null) => void;
@@ -436,6 +437,14 @@ export class DigitalTwinInteractionController {
     if (this.activeRequest !== request) return;
     this.clearGeometryTimer(request);
     this.activeRequest = null;
+    try {
+      // 仅聚焦成功的最新请求触发点击；先结束请求，避免完成回调重入时重复执行事件。
+      this.runtime!.triggerTargetClick(request.entityId, request.slot);
+    } catch {
+      if (this.highlightRequestId === request.requestId) this.clearHighlight();
+      this.postFailure(request.requestId, 'INTERNAL_ERROR', request.sessionId);
+      return;
+    }
     this.post({
       channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
       version: DIGITAL_TWIN_BRIDGE_VERSION,

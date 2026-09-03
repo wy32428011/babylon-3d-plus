@@ -36,6 +36,7 @@ import {
   type PlayerRuntimeConfig,
 } from './runtimeConfig';
 import { DigitalTwinInteractionController } from './DigitalTwinInteractionController';
+import { createViewerModelClickHandler } from './viewerModelClick';
 import type { DataPlatformScreenCommand } from '../runtime/babylon/dataPlatformScreenBridge';
 import type { DataPlatformViewportScreenComponent } from '../editor/model/dataPlatformScreen';
 import type { SceneDocument } from '../editor/model/SceneDocument';
@@ -43,7 +44,6 @@ import { hasManualRoamSpawnEntity, resolveManualRoamSpawnPose } from '../editor/
 import {
   CLICK_EVENT_FOCUS_DURATION_MS,
   CLICK_EVENT_FOCUS_RADIUS_SCALE,
-  resolveClickEventBindingClick,
   type ClickEventBindingPickedCell,
 } from '../editor/model/clickEventBinding';
 import {
@@ -553,16 +553,28 @@ export function PlayerApp() {
           manualRoamRef.current = manualRoam;
           setManualRoamSnapshot(manualRoam.getSnapshot());
         }
+        const handleModelClick = createViewerModelClickHandler(sceneDocument, {
+          updateSelection: (entityIds) => {
+            const nextEntityIds = [...entityIds];
+            localHighlightedEntityIds = nextEntityIds;
+            setViewerSelectedEntityIds(nextEntityIds);
+            runtime!.setLocalHighlightEntityIds(nextEntityIds);
+          },
+          setSlotHighlight: (entityId, cell) => runtime!.setLocalSlotHighlight(entityId, cell),
+          focusTarget: (entityId, cell) => {
+            const bounds = cell
+              ? runtime!.getLocatorCellWorldBounds(entityId, cell)
+              : runtime!.getEntitiesWorldBounds([entityId]);
+            if (bounds && viewport) {
+              viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS, useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE });
+            }
+          },
+          triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
+        });
         removeModelSelectionListeners = bindSceneModelSelectionPointer(canvas, {
           clickTolerancePx: DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx,
           onSelectionClick: ({ clientX, clientY }) => {
             if (disposed || !runtime) return;
-            const updateViewerSelection = (entityIds: readonly string[]): void => {
-              const nextEntityIds = [...entityIds];
-              localHighlightedEntityIds = nextEntityIds;
-              setViewerSelectedEntityIds(nextEntityIds);
-              runtime!.setLocalHighlightEntityIds(nextEntityIds);
-            };
             pauseHistoryReplay();
             const modelHit = runtime.pickRuntimeModelHitAtCanvasPoint(clientX, clientY, canvas);
             // 货格反解对所有内置货格填充体做射线检测取最近命中，避免透过前排货架空格穿透到另一排。
@@ -573,49 +585,7 @@ export function PlayerApp() {
               entityId = cellHit.hostEntityId;
               pickedCell = { locatorEntityId: cellHit.locatorEntityId, row: cellHit.row, column: cellHit.column, layer: cellHit.layer };
             }
-            // 场景存在已注册设备类型的点击事件绑定时点击行为全接管：
-            // 命中注册设备按事件效果执行（点击单元优先于点击，命中货格只高亮单格线框），
-            // 点未注册模型无效果，点空白清除高亮。
-            // 巡检手动事件（triggerManualEventsForTarget）与绑定系统正交，命中有效目标时照常触发。
-            const resolution = resolveClickEventBindingClick(sceneDocument, entityId, pickedCell);
-            if (resolution.kind === 'pass-through') {
-              updateViewerSelection(entityId ? [entityId] : []);
-              if (entityId) autoPatrolPlayback?.triggerManualEventsForTarget(entityId);
-              return;
-            }
-            if (resolution.kind === 'clear') {
-              updateViewerSelection([]);
-              runtime.setLocalSlotHighlight('', null);
-              return;
-            }
-            if (resolution.kind === 'ignore') return;
-            if (resolution.kind === 'trigger-cell') {
-              if (resolution.effects.includes('highlight')) {
-                updateViewerSelection([]);
-                runtime.setLocalSlotHighlight(resolution.locatorEntityId, resolution.cell);
-                autoPatrolPlayback?.triggerManualEventsForTarget(resolution.entityId);
-              } else {
-                runtime.setLocalSlotHighlight('', null);
-              }
-              if (resolution.effects.includes('focus')) {
-                const bounds = runtime.getLocatorCellWorldBounds(resolution.locatorEntityId, resolution.cell);
-                if (bounds && viewport) {
-                  viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS, useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE });
-                }
-              }
-              return;
-            }
-            runtime.setLocalSlotHighlight('', null);
-            if (resolution.effects.includes('highlight')) {
-              updateViewerSelection([resolution.entityId]);
-              autoPatrolPlayback?.triggerManualEventsForTarget(resolution.entityId);
-            }
-            if (resolution.effects.includes('focus')) {
-              const bounds = runtime.getEntitiesWorldBounds([resolution.entityId]);
-              if (bounds && viewport) {
-                viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS, useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE });
-              }
-            }
+            handleModelClick(entityId, pickedCell);
           },
           onDragStarted: () => {
             if (parsedConfig.viewer.allowCameraControl) notifyManualInput();
@@ -673,6 +643,10 @@ export function PlayerApp() {
           focusOnBounds: (bounds, options) => {
             manualRoam?.setEnabled(false);
             viewport!.focusOnBounds(bounds, options);
+          },
+          triggerTargetClick: (entityId, slot) => {
+            pauseHistoryReplay();
+            handleModelClick(entityId, slot ? { locatorEntityId: entityId, ...slot } : null, { focus: false });
           },
           cancelCameraTransition: (reason) => viewport!.cancelCameraTransition(reason),
           setExternalHighlightEntityIds: (entityIds) => runtime!.setExternalHighlightEntityIds(entityIds),

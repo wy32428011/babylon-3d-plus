@@ -375,6 +375,8 @@ export type EntityComponents = {
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
   dataPlatformScreen?: DataPlatformScreenComponent;
+  /** POI 图表立标；大屏引用由 dataPlatformScreen 保存，未绑定时保留空槽。 */
+  chartMarker?: { screenName?: string };
   skybox?: SkyboxComponent;
   locator?: LocatorComponent;
   cadReference?: CadReferenceComponent;

@@ -1,0 +1,18 @@
+.chart-marker-screen-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px 12px;
+  border: 1px dashed #44718f;
+  border-radius: 6px;
+  background: #102334;
+  color: #b7d9ee;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.chart-marker-screen-slot span { font-size: 12px; color: #90a7b8; }
+.chart-marker-screen-slot.is-drag-over { border-color: #60d5ff; background: #17374b; }
+.chart-marker-screen-slot[aria-disabled="true"] { opacity: 0.6; }
+.chart-marker-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.chart-marker-error { color: #ffad9e; font-size: 12px; }

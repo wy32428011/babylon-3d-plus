@@ -270,12 +270,14 @@ const CHAIN_CONVEYOR_MODEL_KEYS = new Set(['chain-conveyor', 'newchain-conveyor'
 
 export type DataPlatformScreenOverlayItem = {
   entityId: string;
-  projectId: string;
-  screenId: string;
+  name?: string;
+  chartMarker?: boolean;
+  projectId?: string;
+  screenId?: string;
   mesh: Mesh;
-  screenUrl: string;
+  screenUrl?: string;
   thumbnailUrl?: string;
-  renderMode: DataPlatformScreenComponent['renderMode'];
+  renderMode?: DataPlatformScreenComponent['renderMode'];
 };
 const CHAIN_CONVEYOR_SCRIPT_FILENAMES = new Set([
   'chain-conveyor.model.ts',
@@ -2708,15 +2710,20 @@ export class SceneRuntime {
     for (const [entityId, entity] of this.syncedEntities.entries()) {
       const screen = entity.components.dataPlatformScreen;
       const mesh = this.meshes.get(entityId);
-      if (!screen || screen.renderMode !== 'iframe' || !screen.screenUrl || !mesh) continue;
+      if (!mesh || !this.isEntityVisible(entityId)) continue;
+      if (!entity.components.chartMarker && (!screen || screen.renderMode !== 'iframe' || !screen.screenUrl)) continue;
       items.push({
         entityId,
-        projectId: screen.projectId,
-        screenId: screen.screenId,
+        name: entity.components.chartMarker?.screenName || entity.name,
+        chartMarker: Boolean(entity.components.chartMarker),
         mesh,
-        screenUrl: screen.screenUrl,
-        ...(screen.thumbnailUrl ? { thumbnailUrl: screen.thumbnailUrl } : {}),
-        renderMode: screen.renderMode,
+        ...(screen ? {
+          projectId: screen.projectId,
+          screenId: screen.screenId,
+          screenUrl: screen.renderMode === 'iframe' ? screen.screenUrl : undefined,
+          thumbnailUrl: screen.thumbnailUrl,
+          renderMode: screen.renderMode,
+        } : {}),
       });
     }
     return items;
@@ -2839,6 +2846,10 @@ export class SceneRuntime {
     );
     for (const [entityId, entry] of this.dataPlatformScreenTextures.entries()) {
       if (dataPlatformScreenIds.has(entityId)) continue;
+      const material = this.meshes.get(entityId)?.material;
+      if (material instanceof StandardMaterial && material.diffuseTexture === entry.texture) {
+        material.diffuseTexture = null;
+      }
       entry.texture.dispose();
       this.dataPlatformScreenTextures.delete(entityId);
     }

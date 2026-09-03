@@ -126,7 +126,7 @@ test('模型资产编号优先于同形货格坐标', () => {
   });
 });
 
-test('覆盖范围内的排-列-层命中货格，不把内置货格 assetId 当搜索键', () => {
+test('覆盖范围内的排-列-层命中货格，内置货格同号仍优先命中宿主模型', () => {
   const scene = sceneWith(
     modelEntity('entity_shelf', 'SHELF-01'),
     locatorEntity(
@@ -189,7 +189,7 @@ test('内置货格宿主隐藏或货格实体隐藏返回 not-visible', () => {
   });
 });
 
-test('非内置 1x1 locator.assetId 可作为回退搜索键，多格 assetId 不能回退', () => {
+test('虚拟货格资产编号定位单格坐标或多格整体', () => {
   const scene = sceneWith(
     locatorEntity('entity_single', { assetId: 'SLOT-A', rowNumber: 2, startColumn: 4, startLayer: 6, columns: 1, layers: 1 }),
     locatorEntity('entity_grid', { assetId: 'GRID-A', rowNumber: 3, startColumn: 1, startLayer: 1, columns: 4, layers: 2 }),
@@ -200,7 +200,7 @@ test('非内置 1x1 locator.assetId 可作为回退搜索键，多格 assetId �
     entityId: 'entity_single',
     slot: { row: 2, column: 4, layer: 6 },
   });
-  assert.deepEqual(lookup(scene, 'GRID-A'), { status: 'not-found', assetCode: 'GRID-A' });
+  assert.deepEqual(lookup(scene, 'GRID-A'), { status: 'found', assetCode: 'GRID-A', entityId: 'entity_grid' });
 });
 
 test('3-2-1 按排-列-层解释，不会按旧 MQTT 列-层-排误命中', () => {
@@ -222,4 +222,62 @@ test('空查询和超长查询仍走模型校验返回 invalid', () => {
   );
   assert.deepEqual(lookup(scene, '   '), { status: 'invalid', assetCode: '' });
   assert.deepEqual(lookup(scene, '1'.repeat(129)), { status: 'invalid', assetCode: '1'.repeat(129) });
+});
+
+test('虚拟货格资产编号优先于同形排-列-层，保留前导零', () => {
+  const scene = sceneWith(
+    locatorEntity('entity_numbered', { assetId: '01-05-03', rowNumber: 2, startColumn: 4, startLayer: 6, columns: 1, layers: 1 }),
+    locatorEntity('entity_coordinate', { assetId: 'GRID-A', rowNumber: 1, startColumn: 1, startLayer: 1, columns: 10, layers: 5 }),
+  );
+  assert.deepEqual(lookup(scene, '01-05-03'), {
+    status: 'found', assetCode: '01-05-03', entityId: 'entity_numbered',
+    slot: { row: 2, column: 4, layer: 6 },
+  });
+  assert.deepEqual(lookup(scene, '1-5-3'), {
+    status: 'found', assetCode: '1-5-3', entityId: 'entity_coordinate',
+    slot: { row: 1, column: 5, layer: 3 },
+  });
+});
+
+test('虚拟货格资产编号 trim 后精确匹配，保留大小写和前导零', () => {
+  const scene = sceneWith(
+    locatorEntity('entity_numbered', { assetId: '  Slot-001  ', rowNumber: 2, startColumn: 4, startLayer: 6, columns: 2, layers: 1 }),
+  );
+  assert.deepEqual(lookup(scene, ' Slot-001 '), {
+    status: 'found', assetCode: 'Slot-001', entityId: 'entity_numbered',
+  });
+  assert.deepEqual(lookup(scene, 'slot-001'), { status: 'not-found', assetCode: 'slot-001' });
+  assert.deepEqual(lookup(scene, 'Slot-1'), { status: 'not-found', assetCode: 'Slot-1' });
+});
+
+test('资产编号命中的隐藏货格或重复货格不能回退到同形坐标', () => {
+  const coordinateLocator = locatorEntity('entity_coordinate', {
+    assetId: 'GRID-A', rowNumber: 1, startColumn: 1, startLayer: 1, columns: 10, layers: 5,
+  });
+  const hiddenLocator = locatorEntity('entity_hidden', {
+    assetId: '1-5-3', rowNumber: 2, startColumn: 1, startLayer: 1, columns: 2, layers: 1,
+  }, { visible: false });
+  assert.deepEqual(lookup(sceneWith(hiddenLocator, coordinateLocator), '1-5-3'), {
+    status: 'not-visible', assetCode: '1-5-3', entityId: 'entity_hidden',
+  });
+  const duplicateLocator = locatorEntity('entity_duplicate', {
+    assetId: '1-5-3', rowNumber: 3, startColumn: 1, startLayer: 1, columns: 1, layers: 1,
+  });
+  assert.deepEqual(lookup(sceneWith(hiddenLocator, duplicateLocator, coordinateLocator), '1-5-3'), {
+    status: 'ambiguous', assetCode: '1-5-3', entityIds: ['entity_hidden', 'entity_duplicate'],
+  });
+});
+
+test('内置货格不同于宿主编号时按自身资产编号查找，并继承宿主隐藏状态', () => {
+  for (const visible of [true, false]) {
+    const scene = sceneWith(
+      modelEntity('entity_shelf', 'SHELF-01', { visible }),
+      locatorEntity('entity_builtin', {
+        assetId: 'SLOT-001', rowNumber: 1, startColumn: 1, startLayer: 1, columns: 2, layers: 1,
+      }, { hostEntityId: 'entity_shelf' }),
+    );
+    assert.deepEqual(lookup(scene, 'SLOT-001'), {
+      status: visible ? 'found' : 'not-visible', assetCode: 'SLOT-001', entityId: 'entity_builtin',
+    });
+  }
 });
