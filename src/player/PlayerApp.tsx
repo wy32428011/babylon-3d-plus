@@ -1,3 +1,5 @@
+import { executeChartMarkerClick } from '../runtime/babylon/chartMarkerClick';
+import { CHART_MARKER_REFRESH_EVENT } from '../shared/chartMarkerEmbed';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { deserializeScene } from '../editor/project/SceneSerializer';
 import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '../runtime/assets/editorAssetUrl';
@@ -182,6 +184,7 @@ export function PlayerApp() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneFullscreen = useElementFullscreen(playerRootRef);
   const viewportRef = useRef<BabylonViewport | null>(null);
+  const chartMarkerClickRef = useRef<((entityId: string) => boolean) | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
   const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
   const autoPatrolStartGateRef = useRef<DeferredAutoPatrolStartGate | null>(null);
@@ -201,6 +204,7 @@ export function PlayerApp() {
   const [hasManualRoamSpawn, setHasManualRoamSpawn] = useState(false);
   const [message, setMessage] = useState('场景加载中...');
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
+  const [chartMarkerError, setChartMarkerError] = useState('');
   const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
   const [environmentRuntimeIssue, setEnvironmentRuntimeIssue] = useState(false);
   const [statusOverlayVisible, setStatusOverlayVisible] = useState(false);
@@ -572,11 +576,41 @@ export function PlayerApp() {
           },
           triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
         });
+        chartMarkerClickRef.current = (markerId) => {
+          if (disposed || !runtime) return false;
+          pauseHistoryReplay();
+          setChartMarkerError('');
+          return executeChartMarkerClick(sceneDocument, markerId, {
+            focusEntity: (targetId) => {
+              const bounds = runtime!.getEntitiesWorldBounds([targetId]);
+              if (!bounds || !viewport) return false;
+              manualRoam?.setEnabled(false);
+              notifyManualInput();
+              viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS });
+              return true;
+            },
+            selectEntity: (targetId) => {
+              localHighlightedEntityIds = [targetId];
+              setViewerSelectedEntityIds([targetId]);
+              runtime!.setLocalSlotHighlight('', null);
+              runtime!.setLocalHighlightEntityIds([targetId]);
+            },
+            refreshMarker: (entityId) => window.dispatchEvent(new CustomEvent(CHART_MARKER_REFRESH_EVENT, { detail: entityId })),
+            showTheme: (screen) => {
+              if (!interactionController?.showScreen(screen)) {
+                setChartMarkerError('主题展示未发送：请从数据中台大屏中打开当前数字孪生，并确认主题与当前项目一致。');
+              }
+            },
+            reportError: setChartMarkerError,
+          });
+        };
         removeModelSelectionListeners = bindSceneModelSelectionPointer(canvas, {
           clickTolerancePx: DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx,
           onSelectionClick: ({ clientX, clientY }) => {
             if (disposed || !runtime) return;
             pauseHistoryReplay();
+            const markerId = runtime.pickChartMarkerAtCanvasPoint(clientX, clientY, canvas);
+            if (markerId && chartMarkerClickRef.current?.(markerId)) return;
             const modelHit = runtime.pickRuntimeModelHitAtCanvasPoint(clientX, clientY, canvas);
             // 货格反解对所有内置货格填充体做射线检测取最近命中，避免透过前排货架空格穿透到另一排。
             const cellHit = runtime.pickBuiltInSlotCellAtCanvasPoint(clientX, clientY, canvas);
@@ -751,6 +785,7 @@ export function PlayerApp() {
         setAutoPatrolRecordStore(null);
         autoPatrolPlaybackRef.current = null;
         dataPlatformScreenContextRef.current = null;
+        chartMarkerClickRef.current = null;
         setViewportScreen(null);
         runtimeRef.current = null;
         viewportRef.current = null;
@@ -794,6 +829,7 @@ export function PlayerApp() {
       setAutoPatrolRecordStore(null);
       autoPatrolPlaybackRef.current = null;
       dataPlatformScreenContextRef.current = null;
+      chartMarkerClickRef.current = null;
       setViewportScreen(null);
       runtimeRef.current = null;
       viewportRef.current = null;
@@ -1031,7 +1067,13 @@ export function PlayerApp() {
           percent={loadingMask.percent}
         />
       ) : null}
-      {showOverlay ? (
+      {chartMarkerError ? (
+        <section className="player-status" role="alert" style={{ pointerEvents: 'auto' }}>
+          <strong>点击事件未完成</strong>
+          <p>{chartMarkerError}</p>
+          <button type="button" onClick={() => setChartMarkerError('')}>关闭提示</button>
+        </section>
+      ) : showOverlay ? (
         <section className={`player-status player-status-${phase}`} role={phase === 'blocked' ? 'alert' : 'status'}>
           <strong>{phase === 'loading' ? message : phase === 'blocked' ? '场景已阻断' : '场景运行中'}</strong>
           {phase === 'blocked' ? <p>{message}</p> : null}

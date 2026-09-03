@@ -55,6 +55,7 @@ import type {
   AutoPatrolWaypoint,
   CadReferenceComponent,
   ClickEventBindingComponent,
+  ChartMarkerComponent,
   DataPlatformScreenComponent,
   LightComponent,
   LightKind,
@@ -94,7 +95,7 @@ import {
   MODEL_ARRAY_ITEM_COUNT_MAX,
   normalizeModelArrayDirection,
 } from '../model/modelArray';
-import { createChartMarkerEntity } from '../model/chartMarker';
+import { createChartMarkerEntity, normalizeChartMarker } from '../model/chartMarker';
 import { createDataPlatformScreenComponent } from '../model/dataPlatformScreen';
 import { normalizeChartMarkerScreenSource } from '../assets/dataPlatformScreenDrag';
 import type { DataPlatformChartAssetEntry } from '../assets/dataPlatformChartLibrary';
@@ -563,6 +564,7 @@ type EditorState = {
   setManualRoamAvatar: (entityId: string, avatar: ManualRoamAvatar | null) => void;
   createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data) => void;
   createChartMarker: (placementPosition?: Vector3Data) => void;
+  updateChartMarker: (entityId: string, patch: Partial<ChartMarkerComponent>) => void;
   bindChartMarkerScreen: (entityId: string, source: DataPlatformChartAssetEntry | null) => boolean;
   createClickEventBinding: (placementPosition?: Vector3Data) => void;
   createFolder: () => void;
@@ -1432,7 +1434,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     transform: cloneTransform(entity.components.transform),
     ...(entity.components.meshRenderer ? { meshRenderer: cloneMeshRenderer(entity.components.meshRenderer) } : {}),
     ...(entity.components.dataPlatformScreen ? { dataPlatformScreen: cloneJsonValue(entity.components.dataPlatformScreen) } : {}),
-    ...(entity.components.chartMarker ? { chartMarker: { ...entity.components.chartMarker } } : {}),
+    ...(entity.components.chartMarker ? { chartMarker: cloneJsonValue(entity.components.chartMarker) } : {}),
     ...(entity.components.skybox ? { skybox: cloneJsonValue(entity.components.skybox) } : {}),
     ...(entity.components.locator ? { locator: cloneLocator(entity.components.locator) } : {}),
     ...(entity.components.cadReference ? { cadReference: cloneCadReference(entity.components.cadReference) } : {}),
@@ -1627,6 +1629,12 @@ function createDuplicatedRuntimeEntity(
 ): Entity {
   const id = overrides.id ?? createId('entity');
   const components = cloneEntityComponents(source);
+  // 显式指向自身的动作随副本重新绑定，保持旧版“聚焦立标”在普通阵列中的行为。
+  for (const event of components.chartMarker?.clickEvents ?? []) {
+    for (const action of event.actions) {
+      if ((action.type === 'focus' || action.type === 'select') && action.targetEntityId === source.id) action.targetEntityId = id;
+    }
+  }
   if (offset) {
     components.transform = {
       ...components.transform,
@@ -1793,6 +1801,18 @@ function prepareEntityClipboardPaste(
 
     const duplicatedRootId = duplicatedIdBySourceId.get(entry.rootId);
     if (duplicatedRootId) rootEntityIds.push(duplicatedRootId);
+  }
+
+  // 所有剪贴板根条目均生成 ID 后再处理引用，支持跨根对象及指向自身的动作。
+  // 未随本批复制的目标仍引用场景中的原对象。
+  for (const entity of entities) {
+    const events = entity.components.chartMarker?.clickEvents;
+    if (!events) continue;
+    for (const event of events) {
+      for (const action of event.actions) {
+        if (action.type === 'focus' || action.type === 'select') action.targetEntityId = duplicatedIdBySourceId.get(action.targetEntityId) ?? action.targetEntityId;
+      }
+    }
   }
 
   // 内置货格资产编号跟随宿主货架副本的编号（宿主粘贴时会生成新编号）
@@ -3716,6 +3736,29 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
+  updateChartMarker: (entityId, patch) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改图表立标');
+      const entity = state.scene.entities[entityId];
+      if (!isRuntimeEntityEditable(state.scene, entity) || !entity.components.chartMarker) return state;
+      let chartMarker: ChartMarkerComponent;
+      try {
+        chartMarker = normalizeChartMarker({ ...entity.components.chartMarker, ...normalizeChartMarker(patch) });
+      } catch (error) {
+        return { logs: prependLog(state.logs, '修改图表立标失败: ' + (error instanceof Error ? error.message : String(error))) };
+      }
+      if (areJsonValuesEqual(chartMarker, entity.components.chartMarker)) return state;
+      const command = updateSceneDocumentCommand('修改图表立标', (scene) => ({
+        ...scene,
+        entities: {
+          ...scene.entities,
+          [entityId]: { ...scene.entities[entityId], components: { ...scene.entities[entityId].components, chartMarker } },
+        },
+      }));
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
+    });
+  },
   bindChartMarkerScreen: (entityId, source) => {
     const screenSource = source === null ? null : normalizeChartMarkerScreenSource(source);
     if (source !== null && !screenSource) return false;
@@ -3724,7 +3767,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '绑定图表立标大屏');
       const entity = state.scene.entities[entityId];
       if (!isRuntimeEntityEditable(state.scene, entity) || !entity.components.chartMarker) return state;
-      const components = { ...entity.components, chartMarker: screenSource ? { screenName: screenSource.name } : {} };
+      const chartMarker: ChartMarkerComponent = { ...entity.components.chartMarker, contentType: 'screen' };
+      if (screenSource) chartMarker.screenName = screenSource.name;
+      else delete chartMarker.screenName;
+      const components = { ...entity.components, chartMarker };
       if (screenSource) components.dataPlatformScreen = createDataPlatformScreenComponent(screenSource);
       else delete components.dataPlatformScreen;
       accepted = true;

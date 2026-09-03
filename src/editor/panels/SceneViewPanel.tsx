@@ -1,3 +1,5 @@
+import { executeChartMarkerClick } from '../../runtime/babylon/chartMarkerClick';
+import { CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import {
   useCallback,
   useEffect,
@@ -435,6 +437,32 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     onReplayStart: beginHistoryReplay,
     onError: pushLog,
   });
+  const handleChartMarkerClick = useCallback((entityId: string): boolean => {
+    const state = useEditorStore.getState();
+    const runtime = runtimeRef.current;
+    if (state.runtimeMode !== 'preview' || !runtime) return false;
+    pauseHistoryReplay();
+    return executeChartMarkerClick(state.scene, entityId, {
+      focusEntity: (targetId) => {
+        const bounds = runtime.getEntitiesWorldBounds([targetId]);
+        if (!bounds || !viewportRef.current) return false;
+        manualRoamRef.current?.setEnabled(false);
+        autoPatrolPlaybackRef.current?.notifyManualInput();
+        viewportRef.current.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS });
+        return true;
+      },
+      selectEntity: (targetId) => {
+        runtime.setLocalSlotHighlight('', null);
+        state.setEnvironmentAdjustmentActive(false);
+        state.selectEntity(targetId);
+      },
+      refreshMarker: (markerId) => window.dispatchEvent(new CustomEvent(CHART_MARKER_REFRESH_EVENT, { detail: markerId })),
+      showTheme: () => {
+        state.pushLog('主题展示需从数据中台大屏中嵌入的数字孪生触发，编辑器预览未连接大屏宿主。');
+      },
+      reportError: state.pushLog,
+    });
+  }, [pauseHistoryReplay]);
   const editModeThinInstancePlanComputation = useMemo(() => {
     const startedAt = readScenePanelTimestampMs();
     const previousPlan = editModeThinInstancePlanRef.current;
@@ -774,6 +802,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       }
     }
 
+    if (isRuntimePreview) {
+      const markerId = runtimeRef.current?.pickChartMarkerAtCanvasPoint(
+        selectionClick.clientX, selectionClick.clientY, event.currentTarget,
+      );
+      if (markerId && handleChartMarkerClick(markerId)) return;
+    }
     const previewModelHit = isRuntimePreview
       ? runtimeRef.current?.pickRuntimeModelHitAtCanvasPoint(
           selectionClick.clientX,

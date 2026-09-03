@@ -1,3 +1,5 @@
+import { getChartMarkerCorners } from './ChartMarkerPresentation';
+import { createChartMarkerContent } from './chartMarkerContent';
 import { canEmbedChartMarkerScreen, CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import { useEffect, useRef } from 'react';
 import { Matrix, Scene, Vector3, type Mesh } from '@babylonjs/core';
@@ -123,8 +125,11 @@ function projectScreenCorners(
   const transform = scene.getTransformMatrix();
   const canvasRect = canvas.getBoundingClientRect();
   const rootRect = root.getBoundingClientRect();
+  const localCorners = readableBothSides ? getChartMarkerCorners(mesh) : SCREEN_LOCAL_CORNERS;
   const points = SCREEN_LOCAL_CORNERS.map((corner) => {
-    const localPoint = new Vector3(corner.x * (1 - 2 * insetX), corner.y, corner.z * (1 - 2 * insetY));
+    const u = corner.x < 0 ? insetX : 1 - insetX;
+    const v = corner.z < 0 ? insetY : 1 - insetY;
+    const localPoint = Vector3.Lerp(Vector3.Lerp(localCorners[0], localCorners[1], u), Vector3.Lerp(localCorners[3], localCorners[2], u), v);
     const worldPoint = Vector3.TransformCoordinates(localPoint, worldMatrix);
     const projected = Vector3.Project(worldPoint, Matrix.Identity(), transform, viewport);
     if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y) || projected.z < 0 || projected.z > 1) return null;
@@ -155,12 +160,15 @@ type OverlayEntry = {
   lastSelectionSignature: string | null;
   width: number;
   height: number;
+  builtin?: ReturnType<typeof createChartMarkerContent>;
   dispose: () => void;
 };
 
 function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayItem): OverlayEntry {
-  const width = item.chartMarker ? 1920 : OVERLAY_BASE_SIZE_PX;
-  const height = item.chartMarker ? 1080 : OVERLAY_BASE_SIZE_PX;
+  const builtinMode = item.markerStyle?.contentType === 'builtin';
+  const factor = builtinMode ? 1 : 6;
+  const width = item.markerStyle ? item.markerStyle.width * factor : item.chartMarker ? 1920 : OVERLAY_BASE_SIZE_PX;
+  const height = item.markerStyle ? item.markerStyle.height * factor : item.chartMarker ? 1080 : OVERLAY_BASE_SIZE_PX;
   const host = document.createElement('div');
   host.dataset.screenEntityId = item.entityId;
   host.style.cssText = `position:absolute;left:0;top:0;width:${width}px;height:${height}px;transform-origin:0 0;overflow:hidden;background:#101827;pointer-events:none`;
@@ -189,6 +197,8 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
   clipHost.append(host);
   root.append(clipHost);
 
+  const builtin = builtinMode ? createChartMarkerContent(host) : undefined;
+  if (builtin) content.style.display = 'none';
   let iframe: HTMLIFrameElement | null = null;
   let timeoutId: number | undefined;
   let loaded = false;
@@ -228,6 +238,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
 
   const entry: OverlayEntry = {
     host,
+    builtin,
     clipHost,
     iframe,
     item,
@@ -241,6 +252,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       iframe?.removeEventListener('load', onLoad);
       iframe?.removeEventListener('error', showFallback);
+      builtin?.dispose();
       clipHost.remove();
     },
   };
@@ -335,6 +347,7 @@ export function DataPlatformScreenOverlay({
         if (entry && (
           entry.screenUrl !== item.screenUrl
           || entry.item.chartMarker !== item.chartMarker
+          || entry.item.markerStyle?.contentType !== item.markerStyle?.contentType
           || entry.thumbnailUrl !== item.thumbnailUrl
           || entry.item.projectId !== item.projectId
           || entry.item.screenId !== item.screenId
@@ -348,6 +361,17 @@ export function DataPlatformScreenOverlay({
           entries.set(item.entityId, entry);
         } else {
           entry.item = item;
+        }
+        if (item.markerStyle) {
+          const style = item.markerStyle;
+          const factor = style.contentType === 'builtin' ? 1 : 6;
+          entry.width = style.width * factor;
+          entry.height = style.height * factor;
+          entry.host.style.width = entry.width + 'px';
+          entry.host.style.height = entry.height + 'px';
+          entry.host.style.backgroundColor = style.contentType === 'builtin' ? '#061b2b' : style.backgroundColor;
+          entry.host.style.boxShadow = style.contentType === 'builtin' ? 'none' : ('inset 0 0 0 12px ' + style.appearanceColor);
+          entry.builtin?.update(style, item.markerText ?? style.text);
         }
         if (entry.iframe) {
           entry.iframe.style.pointerEvents = interactiveRef.current ? 'auto' : 'none';

@@ -181,6 +181,21 @@ export class DigitalTwinInteractionController {
     this.postInitialLoadState();
   }
 
+  /** 仅向当前已握手的宿主请求切换大屏，不在 Viewer 内加载主题页面。 */
+  showScreen(screen: { projectId: string; screenId: string }): boolean {
+    if (this.disposed || !this.runtime || !this.activeSessionId || !this.activeParentOrigin) return false;
+    const message = parseDigitalTwinBridgeMessage({
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.activeSessionId,
+      type: 'viewer.showScreen',
+      payload: { projectId: screen.projectId, screenId: screen.screenId },
+    });
+    if (!message || (this.options.projectId && screen.projectId !== this.options.projectId)) return false;
+    this.post(message);
+    return true;
+  }
+
   notifyManualCameraInput(): void {
     if (this.disposed || !this.runtime) return;
     const focusHadStarted = this.activeRequest?.focusStarted === true || this.highlightRequestId !== null;

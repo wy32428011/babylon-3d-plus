@@ -382,7 +382,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
       <h2>{modelGenerator ? '模型生成器' : clickEventBinding ? '点击事件绑定' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : manualRoamSpawn ? '手动漫游' : 'Inspector'}</h2>
       <label className="inspector-row">
-        <span>{poiEffect ? '特效名称' : modelGenerator || clickEventBinding || autoPatrol ? 'POI名称' : '名称'}</span>
+        <span>{poiEffect ? '特效名称' : modelGenerator || clickEventBinding || autoPatrol || selectedEntity.components.chartMarker ? 'POI名称' : '名称'}</span>
         <input
           type="text"
           disabled={isLocked}

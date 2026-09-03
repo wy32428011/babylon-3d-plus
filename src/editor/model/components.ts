@@ -376,12 +376,57 @@ export type ClickEventBindingComponent = {
   events: ClickEventBindingEvent[];
 };
 
+/** 主题展示动作绑定的图表库大屏；运行时从 HTTP(S) 地址加载完整内容。 */
+export type ChartMarkerThemeScreen = {
+  projectId: string;
+  screenId: string;
+  name: string;
+  screenUrl: string;
+  thumbnailUrl?: string;
+};
+
+export type ChartMarkerClickAction =
+  | { type: 'focus' | 'select'; targetEntityId: string }
+  | { type: 'refresh' }
+  | { type: 'theme'; screen?: ChartMarkerThemeScreen };
+
+export type ChartMarkerClickEvent = {
+  type: 'left-click';
+  actions: ChartMarkerClickAction[];
+};
+
+/** 图表立标的外观、内容和行为；可选字段兼容旧场景的空图表槽。 */
+export type ChartMarkerComponent = {
+  screenName?: string;
+  contentType?: 'builtin' | 'screen';
+  text?: string;
+  fontSize?: number;
+  marquee?: boolean;
+  /** 仅保存有限大小的 PNG、JPEG 或 WebP 内嵌图片。 */
+  backgroundImage?: string;
+  backgroundColor?: string;
+  appearance?: 'line' | 'column' | 'none';
+  indicatorSize?: number;
+  appearanceColor?: string;
+  /** 面板尺寸单位为像素，与实体 Transform 缩放共同作用。 */
+  width?: number;
+  height?: number;
+  /** 面板相对原位置的向上偏移，单位为米。 */
+  floatHeight?: number;
+  faceCamera?: boolean;
+  driveMode?: 'none' | 'data';
+  dataSourceEntityId?: string;
+  dataField?: string;
+  clickAction?: 'none' | 'focus' | 'refresh';
+  clickEvents?: ChartMarkerClickEvent[];
+};
+
 export type EntityComponents = {
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
   dataPlatformScreen?: DataPlatformScreenComponent;
-  /** POI 图表立标；大屏引用由 dataPlatformScreen 保存，未绑定时保留空槽。 */
-  chartMarker?: { screenName?: string };
+  /** POI 图表立标；面板直接绑定的大屏由 dataPlatformScreen 保存。 */
+  chartMarker?: ChartMarkerComponent;
   skybox?: SkyboxComponent;
   locator?: LocatorComponent;
   cadReference?: CadReferenceComponent;

@@ -98,3 +98,17 @@ test('协议解析器拒绝超长标识、资产编号和错误消息', () => {
     error: { code: 'INTERNAL_ERROR', message: 'x'.repeat(1025) },
   }), null);
 });
+
+
+test('主题展示只传递有界项目和大屏标识，拒绝 URL 和多余字段', () => {
+  const base = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+    sessionId: 'session', type: 'viewer.showScreen', payload: { projectId: '1', screenId: '3' } };
+  assert.deepEqual(parseDigitalTwinBridgeMessage(base), base);
+  for (const payload of [
+    { projectId: '1' }, { projectId: '1', screenId: '' },
+    { projectId: '1', screenId: 3 }, { projectId: ' '.repeat(3), screenId: '3' },
+    { projectId: '1'.repeat(65), screenId: '3' }, { projectId: '1', screenId: '3'.repeat(129) },
+    { ...base.payload, screenUrl: 'https://unexpected.example' },
+  ]) assert.equal(parseDigitalTwinBridgeMessage({ ...base, payload }), null);
+  assert.equal(parseDigitalTwinBridgeMessage({ ...base, requestId: 'unexpected' }), null);
+});

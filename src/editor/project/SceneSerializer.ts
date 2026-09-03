@@ -1,4 +1,5 @@
 import type { Entity } from '../model/Entity';
+import { normalizeChartMarker } from '../model/chartMarker';
 import { createPersistedModelThinInstanceScene } from '../model/editModeModelThinInstances';
 import { createLegacyCadReferenceUnitInfo, normalizeCadReferenceUnitInfo } from '../cad/cadUnits';
 import {
@@ -117,14 +118,15 @@ function createSerializableSceneSnapshot(scene: SceneDocument): SceneDocument {
   };
 }
 
-/** 实体天空盒使用加载入口同一套严格规范化，避免保存无法重新打开的组件。 */
+/** 可编辑资源组件使用加载入口同一套严格规范化，避免保存无法重新打开的配置。 */
 function createSerializableEntitySnapshot(entity: Entity): Entity {
-  if (!entity.components.skybox) return entity;
+  if (!entity.components.skybox && !entity.components.chartMarker) return entity;
   return {
     ...entity,
     components: {
       ...entity.components,
-      skybox: normalizeSkyboxComponent(entity.components.skybox),
+      ...(entity.components.skybox ? { skybox: normalizeSkyboxComponent(entity.components.skybox) } : {}),
+      ...(entity.components.chartMarker ? { chartMarker: normalizeChartMarker(entity.components.chartMarker) } : {}),
     },
   };
 }
@@ -571,10 +573,7 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
 
   if ('chartMarker' in components && components.chartMarker !== undefined) {
     if (normalized.meshRenderer?.meshKind !== 'plane') throwUnsupportedSceneFileError();
-    const marker = assertPlainObject(components.chartMarker);
-    normalized.chartMarker = marker.screenName === undefined
-      ? {}
-      : { screenName: assertString(marker.screenName).trim().slice(0, 128) };
+    normalized.chartMarker = normalizeChartMarker(components.chartMarker);
   }
 
   if ('skybox' in components && components.skybox !== undefined) {
