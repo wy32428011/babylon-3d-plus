@@ -379,6 +379,7 @@ export function createBabylonViewport(
   let engine: Engine;
   try {
     const candidate = new Engine(canvas, true, {
+      alpha: true,
       preserveDrawingBuffer: false,
       stencil: true,
       powerPreference: 'high-performance',

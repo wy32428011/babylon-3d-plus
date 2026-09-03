@@ -2,6 +2,8 @@ import { canEmbedChartMarkerScreen, CHART_MARKER_REFRESH_EVENT } from '../../sha
 import { useEffect, useRef } from 'react';
 import { Matrix, Scene, Vector3, type Mesh } from '@babylonjs/core';
 import type { SceneRuntime, DataPlatformScreenOverlayItem } from './SceneRuntime';
+import { ChartMarkerDepthSurface, type ScreenPolygon } from './ChartMarkerDepthSurface';
+import { getVisibleChartMarkerPolygons, intersectScreenPolygons, type ProjectedScreenPoint } from './chartMarkerVisibility';
 import {
   createDataPlatformScreenSelectionMessage,
   parseDataPlatformScreenCommand,
@@ -105,7 +107,9 @@ function projectScreenCorners(
   root: HTMLElement,
   mesh: Mesh,
   readableBothSides = false,
-): [CssProjectivePoint, CssProjectivePoint, CssProjectivePoint, CssProjectivePoint] | null {
+  insetX = 0,
+  insetY = 0,
+): [ProjectedScreenPoint, ProjectedScreenPoint, ProjectedScreenPoint, ProjectedScreenPoint] | null {
   const camera = scene.activeCamera;
   const engine = scene.getEngine();
   if (!camera) return null;
@@ -120,16 +124,18 @@ function projectScreenCorners(
   const canvasRect = canvas.getBoundingClientRect();
   const rootRect = root.getBoundingClientRect();
   const points = SCREEN_LOCAL_CORNERS.map((corner) => {
-    const worldPoint = Vector3.TransformCoordinates(corner, worldMatrix);
+    const localPoint = new Vector3(corner.x * (1 - 2 * insetX), corner.y, corner.z * (1 - 2 * insetY));
+    const worldPoint = Vector3.TransformCoordinates(localPoint, worldMatrix);
     const projected = Vector3.Project(worldPoint, Matrix.Identity(), transform, viewport);
     if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y) || projected.z < 0 || projected.z > 1) return null;
     return {
       x: canvasRect.left - rootRect.left + projected.x / renderWidth * canvasRect.width,
       y: canvasRect.top - rootRect.top + projected.y / renderHeight * canvasRect.height,
+      depth: projected.z,
     };
   });
   if (points.some((point) => point === null)) return null;
-  const corners = points as [CssProjectivePoint, CssProjectivePoint, CssProjectivePoint, CssProjectivePoint];
+  const corners = points as [ProjectedScreenPoint, ProjectedScreenPoint, ProjectedScreenPoint, ProjectedScreenPoint];
   // 从背面观察时交换左右角，保持标牌文字可读；不改动实体或 Gizmo 的旋转。
   const winding = (corners[1].x - corners[0].x) * (corners[3].y - corners[0].y)
     - (corners[1].y - corners[0].y) * (corners[3].x - corners[0].x);
@@ -140,6 +146,7 @@ function projectScreenCorners(
 
 type OverlayEntry = {
   host: HTMLDivElement;
+  clipHost: HTMLDivElement;
   iframe: HTMLIFrameElement | null;
   item: DataPlatformScreenOverlayItem;
   screenOrigin: string;
@@ -177,7 +184,10 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
   status.append(title, message);
   content.append(fallback, status);
   host.append(content);
-  root.append(host);
+  const clipHost = document.createElement('div');
+  clipHost.style.cssText = 'position:absolute;inset:0;pointer-events:none';
+  clipHost.append(host);
+  root.append(clipHost);
 
   let iframe: HTMLIFrameElement | null = null;
   let timeoutId: number | undefined;
@@ -218,6 +228,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
 
   const entry: OverlayEntry = {
     host,
+    clipHost,
     iframe,
     item,
     screenOrigin: item.screenUrl ? new URL(item.screenUrl).origin : '',
@@ -230,7 +241,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       iframe?.removeEventListener('load', onLoad);
       iframe?.removeEventListener('error', showFallback);
-      host.remove();
+      clipHost.remove();
     },
   };
   return entry;
@@ -258,7 +269,7 @@ export type DataPlatformScreenOverlayProps = {
   onCommand?: (item: DataPlatformScreenOverlayItem, command: DataPlatformScreenCommand) => void;
 };
 
-/** 在画布上方管理大屏 iframe；没有 URL 或 iframe 超时则自动显示缩略图。 */
+/** 图表立标网页置于深度打孔画布下方；旧大屏保持原有覆盖层行为。 */
 export function DataPlatformScreenOverlay({
   scene,
   runtime,
@@ -280,6 +291,9 @@ export function DataPlatformScreenOverlay({
     const root = rootRef.current;
     if (!root || !canvas) return undefined;
     const entries = entriesRef.current;
+    let depthSurface: ChartMarkerDepthSurface | undefined;
+    let visibleMarkerMeshes: Mesh[] = [];
+    let markerPolygons: ScreenPolygon[] = [];
 
     const handleMessage = (event: MessageEvent<unknown>): void => {
       if (!interactiveRef.current) return;
@@ -311,10 +325,16 @@ export function DataPlatformScreenOverlay({
         }
       }
 
+      if (items.some(item => item.chartMarker) && !depthSurface) depthSurface = new ChartMarkerDepthSurface(scene, canvas);
+      visibleMarkerMeshes = [];
+      markerPolygons = [];
+      const projectedMarkers: { id: string; corners: ProjectedScreenPoint[] }[] = [];
+      const contentPolygons = new Map<string, ScreenPolygon>();
       for (const item of items) {
         let entry = entries.get(item.entityId);
         if (entry && (
           entry.screenUrl !== item.screenUrl
+          || entry.item.chartMarker !== item.chartMarker
           || entry.thumbnailUrl !== item.thumbnailUrl
           || entry.item.projectId !== item.projectId
           || entry.item.screenId !== item.screenId
@@ -324,7 +344,7 @@ export function DataPlatformScreenOverlay({
           entry = undefined;
         }
         if (!entry) {
-          entry = createOverlayEntry(root, item);
+          entry = createOverlayEntry(item.chartMarker && depthSurface ? depthSurface.root : root, item);
           entries.set(item.entityId, entry);
         } else {
           entry.item = item;
@@ -341,14 +361,51 @@ export function DataPlatformScreenOverlay({
         }
         const transform = createCssProjectiveMatrix(entry.width, entry.height, corners);
         entry.host.style.display = transform ? 'block' : 'none';
-        if (transform) entry.host.style.transform = transform;
+        if (transform) {
+          entry.host.style.transform = transform;
+          if (item.chartMarker) {
+            visibleMarkerMeshes.push(item.mesh);
+            projectedMarkers.push({ id: item.entityId, corners });
+            // 空牌、错误提示和边框仍由 canvas 接收相机操作；只放行已加载网页的内容区。
+            if (interactiveRef.current && entry.iframe?.style.visibility === 'visible') {
+              const contentCorners = projectScreenCorners(scene, canvas, root, item.mesh, true, 16 / entry.width, 16 / entry.height);
+              if (contentCorners) contentPolygons.set(item.entityId, contentCorners);
+            }
+          }
+        }
+      }
+      // 多块倾斜或相交立标不能仅按中心排序；各网页只占据自己深度最近的区域。
+      const visiblePolygons = getVisibleChartMarkerPolygons(projectedMarkers);
+      for (const [id, polygons] of visiblePolygons) {
+        const entry = entries.get(id)!;
+        const path = polygons.map(polygon => polygon.map((p, i) => `${i ? 'L' : 'M'}${p.x} ${p.y}`).join('') + 'Z').join('');
+        entry.clipHost.style.clipPath = path ? `path("${path}")` : 'inset(100%)';
+        const content = contentPolygons.get(id);
+        if (content) {
+          const rootRect = root.getBoundingClientRect(), canvasRect = canvas.getBoundingClientRect();
+          for (const polygon of polygons) {
+            const visibleContent = intersectScreenPolygons(polygon, content);
+            if (visibleContent.length) markerPolygons.push(visibleContent.map(p => ({
+              x: p.x + rootRect.left - canvasRect.left, y: p.y + rootRect.top - canvasRect.top,
+            })));
+          }
+        }
       }
     };
 
-    const observer = scene.onAfterRenderObservable.add(update);
+    const beforeObserver = scene.onBeforeCameraRenderObservable.add(() => {
+      update();
+      depthSurface?.beginFrame(visibleMarkerMeshes);
+    });
+    const observer = scene.onAfterRenderObservable.add(() => {
+      depthSurface?.endFrame();
+      depthSurface?.updateInteraction(markerPolygons, interactiveRef.current);
+    });
     update();
     return () => {
+      scene.onBeforeCameraRenderObservable.remove(beforeObserver);
       scene.onAfterRenderObservable.remove(observer);
+      depthSurface?.dispose();
       window.removeEventListener('message', handleMessage);
       window.removeEventListener(CHART_MARKER_REFRESH_EVENT, handleRefresh);
       for (const entry of entries.values()) disposeOverlayEntry(entry);

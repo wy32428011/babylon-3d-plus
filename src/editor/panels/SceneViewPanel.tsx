@@ -79,6 +79,7 @@ import {
   hasManualRoamSpawnEntity,
   resolveManualRoamGroupRotationReference,
   resolveManualRoamSpawnPose,
+  resolveManualRoamAvatarSource,
 } from '../model/manualRoamSpawn';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
 import {
@@ -1130,6 +1131,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         engine: viewport.engine,
         camera: viewport.camera,
         canvas: canvasRef.current,
+        avatarUrl: resolveManualRoamAvatarSource(useEditorStore.getState().scene),
         resolveSpawnPose: () => resolveManualRoamSpawnPose(
           sceneDocumentRef.current ?? useEditorStore.getState().scene,
         ),
@@ -1504,6 +1506,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!manualRoamRef.current?.getSnapshot().enabled) return;
     manualRoamRef.current.setEnabled(false);
   }, [hasManualRoamSpawn]);
+
+  useEffect(() => {
+    manualRoamRef.current?.setAvatarUrl(resolveManualRoamAvatarSource(sceneDocument));
+  }, [sceneDocument]);
 
   /** 执行 Store 发起的候选环境事务；旧环境会保留到候选加载成功。 */
   useEffect(() => {

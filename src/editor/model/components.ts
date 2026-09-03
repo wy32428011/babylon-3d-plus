@@ -331,8 +331,13 @@ export type AutoPatrolComponent = {
   waypoints: AutoPatrolWaypoint[];
 };
 
-/** 手动漫游出生点只保存实体 Transform；空组件用于稳定标识全场唯一对象。 */
-export type ManualRoamSpawnComponent = Record<string, never>;
+/** 人物只引用模型文件，不执行模型库中的设备脚本。 */
+export type ManualRoamAvatar = Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl' | 'assetRevision'> & {
+  name: string;
+};
+
+/** 缺省 avatar 兼容旧场景，继续使用内置人物。 */
+export type ManualRoamSpawnComponent = { avatar?: ManualRoamAvatar };
 
 /** 点击事件绑定支持的事件类型；click-cell 命中货架虚拟货格单元格时触发，同一绑定中优先于 click。 */
 export type ClickEventBindingEventType = 'click' | 'click-cell';

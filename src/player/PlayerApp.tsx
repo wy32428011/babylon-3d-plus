@@ -40,7 +40,7 @@ import { createViewerModelClickHandler } from './viewerModelClick';
 import type { DataPlatformScreenCommand } from '../runtime/babylon/dataPlatformScreenBridge';
 import type { DataPlatformViewportScreenComponent } from '../editor/model/dataPlatformScreen';
 import type { SceneDocument } from '../editor/model/SceneDocument';
-import { hasManualRoamSpawnEntity, resolveManualRoamSpawnPose } from '../editor/model/manualRoamSpawn';
+import { hasManualRoamSpawnEntity, resolveManualRoamSpawnPose, resolveManualRoamAvatarSource } from '../editor/model/manualRoamSpawn';
 import {
   CLICK_EVENT_FOCUS_DURATION_MS,
   CLICK_EVENT_FOCUS_RADIUS_SCALE,
@@ -531,6 +531,7 @@ export function PlayerApp() {
             engine: viewport.engine,
             camera: viewport.camera,
             canvas,
+            avatarUrl: resolveManualRoamAvatarSource(sceneDocument),
             resolveSpawnPose: () => resolveManualRoamSpawnPose(sceneDocument),
             resolveCollisionBounds: createDefaultManualRoamCollisionBoundsResolver({
               getSceneDocument: () => sceneDocument,

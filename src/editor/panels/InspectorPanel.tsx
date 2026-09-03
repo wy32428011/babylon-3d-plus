@@ -32,6 +32,7 @@ import { ModelParametersInspector } from './ModelParametersInspector';
 import { TelemetryBindingInspector, CargoGeneratorInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
 import { AutoPatrolInspector } from './AutoPatrolInspector';
+import { ManualRoamAvatarInspector } from './ManualRoamAvatarInspector';
 
 type TransformField = 'position' | 'rotation' | 'scale';
 const axes: Array<keyof Vector3Data> = ['x', 'y', 'z'];
@@ -409,6 +410,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
           {isBuiltInBound && field === 'position' ? <p className="muted">位置由货架驱动，解绑后可编辑。</p> : null}
         </fieldset>
       ))}
+      {manualRoamSpawn ? <ManualRoamAvatarInspector key={selectedEntity.id} entityId={selectedEntity.id} component={manualRoamSpawn} disabled={isLocked} /> : null}
       {manualRoamSpawn ? (
         <fieldset className="transform-fieldset" aria-label="手动漫游初始位置提示">
           <legend>初始姿态</legend>

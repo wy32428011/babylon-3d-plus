@@ -454,6 +454,12 @@ export type ImportModelFolderResult = {
 };
 
 /** 直接导入单个环境 GLB 后返回项目内资产和完整项目资源快照。 */
+export type ImportManualRoamAvatarResult = {
+  canceled: boolean;
+  projectRoot: string | null;
+  importedAsset: ProjectModelAssetEntry | null;
+};
+
 export type ImportEnvironmentModelFileResult = {
   canceled: boolean;
   filePath: string | null;

@@ -92,7 +92,7 @@ function createResourceKey(kind: string, sourcePath?: string, sourceUrl?: string
 
 /** 把模型模板及其外置脚本登记到场景资源摘要。 */
 function registerModelAsset(
-  modelAsset: ModelAssetTemplate,
+  modelAsset: Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl' | 'scriptAssets'>,
   modelResources: Set<string>,
   scriptResources: Set<string>,
 ): void {
@@ -126,6 +126,8 @@ export function createDeploymentSceneSummary(scene: SceneDocument): DeploymentSc
   for (const entity of Object.values(scene.entities)) {
     const modelAsset = entity.components.modelAsset;
     if (modelAsset) registerModelAsset(modelAsset, modelResources, scriptResources);
+    const avatar = entity.components.manualRoamSpawn?.avatar;
+    if (avatar) registerModelAsset(avatar, modelResources, scriptResources);
 
     const skybox = entity.components.skybox;
     if (skybox) {

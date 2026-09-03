@@ -1221,8 +1221,17 @@ function normalizeAutoPatrol(value: unknown): AutoPatrolComponent {
 }
 
 function normalizeManualRoamSpawn(value: unknown): ManualRoamSpawnComponent {
-  assertPlainObject(value);
-  return {};
+  const component = assertPlainObject(value);
+  if (component.avatar === undefined) return {};
+  const avatar = assertPlainObject(component.avatar);
+  const name = assertString(avatar.name).trim();
+  const sourcePath = assertString(avatar.sourcePath).trim();
+  const sourceUrl = assertString(avatar.sourceUrl).trim();
+  if (!name || !sourcePath || !sourceUrl) throwUnsupportedSceneFileError();
+  return { avatar: {
+    name, sourcePath, sourceUrl,
+    ...(avatar.assetRevision === undefined ? {} : { assetRevision: assertString(avatar.assetRevision) }),
+  } };
 }
 
 /** 点击事件绑定为 v3 新增组件，无旧版字段；非法条目宽容过滤而不判定文件损坏。 */

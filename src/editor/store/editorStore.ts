@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { ManualRoamAvatar } from '../model/components';
 import {
   createCommandHistory,
   executeCommand,
@@ -559,6 +560,7 @@ type EditorState = {
   createModelGenerator: (placementPosition?: Vector3Data) => void;
   createAutoPatrol: (placementPosition?: Vector3Data) => void;
   createManualRoamSpawn: (placementPosition?: Vector3Data) => void;
+  setManualRoamAvatar: (entityId: string, avatar: ManualRoamAvatar | null) => void;
   createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data) => void;
   createChartMarker: (placementPosition?: Vector3Data) => void;
   bindChartMarkerScreen: (entityId: string, source: DataPlatformChartAssetEntry | null) => boolean;
@@ -1292,6 +1294,19 @@ function refreshSceneModelAssetsFromImportedAssets(
       }
     }
 
+    const avatar = entity.components.manualRoamSpawn?.avatar;
+    if (avatar) {
+      const importedAsset = findImportedAssetForModelAsset(avatar, indexes);
+      if (importedAsset && (avatar.sourcePath !== importedAsset.path || avatar.sourceUrl !== importedAsset.sourceUrl
+        || avatar.assetRevision !== importedAsset.assetRevision)) {
+        components = { ...components, manualRoamSpawn: { avatar: {
+          ...avatar, sourcePath: importedAsset.path, sourceUrl: importedAsset.sourceUrl,
+          assetRevision: importedAsset.assetRevision,
+        } } };
+        refreshedCount += 1;
+        entityChanged = true;
+      }
+    }
     const modelGenerator = entity.components.modelGenerator;
     if (modelGenerator) {
       const generatorResult = refreshModelGeneratorFromImportedAssets(modelGenerator, indexes);
@@ -1440,7 +1455,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     ...(entity.components.telemetryBinding ? { telemetryBinding: cloneJsonValue(entity.components.telemetryBinding) } : {}),
     ...(entity.components.poiEffect ? { poiEffect: { ...entity.components.poiEffect } } : {}),
     ...(entity.components.autoPatrol ? { autoPatrol: cloneAutoPatrolComponent(entity.components.autoPatrol) } : {}),
-    ...(entity.components.manualRoamSpawn ? { manualRoamSpawn: {} } : {}),
+    ...(entity.components.manualRoamSpawn ? { manualRoamSpawn: cloneJsonValue(entity.components.manualRoamSpawn) } : {}),
     ...(entity.components.camera ? { camera: { ...entity.components.camera } } : {}),
     ...(entity.components.light ? { light: cloneLight(entity.components.light) } : {}),
   };
@@ -4726,6 +4741,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const command = updatePoiEffectCommand(entity.id, before, after, label);
       const result = executeCommand(state.scene, state.history, command);
       return { ...result, logs: prependLog(state.logs, `${command.label}: ${entity.name}`) };
+    });
+  },
+  setManualRoamAvatar: (entityId, avatar) => {
+    set((state) => {
+      const label = '更换漫游人物';
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
+      const entity = state.scene.entities[entityId];
+      if (!isRuntimeEntityEditable(state.scene, entity) || !entity.components.manualRoamSpawn) return state;
+      if (avatar && (!avatar.name.trim() || !avatar.sourcePath.trim() || !avatar.sourceUrl.trim())) return state;
+      const after = avatar ? { avatar: { ...avatar } } : {};
+      if (areJsonValuesEqual(entity.components.manualRoamSpawn, after)) return state;
+      const command = updateSceneDocumentCommand(label, (scene) => ({
+        ...scene,
+        entities: { ...scene.entities, [entityId]: {
+          ...scene.entities[entityId],
+          components: { ...scene.entities[entityId].components, manualRoamSpawn: after },
+        } },
+      }));
+      return { ...executeCommand(state.scene, state.history, command), logs: prependLog(state.logs, label) };
     });
   },
   updateSelectedAutoPatrol: (component, label = '更新自动巡检') => {
