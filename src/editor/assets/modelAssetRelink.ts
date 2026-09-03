@@ -229,7 +229,7 @@ export function findImportedAssetForPackagePath(
  * 优先按本机精确路径/URL 匹配；数据中台先按业务 ID、再按跨中台唯一逻辑包名关联，其他场景再按便携包标识关联。
  */
 export function findImportedAssetForModelAsset(
-  modelAsset: ModelAssetTemplate,
+  modelAsset: Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl'>,
   indexes: ImportedAssetIndexes,
 ): AssetEntry | null {
   const pathMatch = indexes.byPath.get(normalizeAssetMatchPath(modelAsset.sourcePath));

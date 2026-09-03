@@ -1,3 +1,5 @@
+import { getChartMarkerClickEvents } from '../../editor/model/chartMarker';
+import { ChartMarkerPresentation, getChartMarkerStyle, getChartMarkerText } from './ChartMarkerPresentation';
 import '@babylonjs/loaders';
 import { configureLocalBabylonDecoders } from './localDecoderConfiguration';
 
@@ -40,6 +42,7 @@ import {
 import type { Entity } from '../../editor/model/Entity';
 import { collectFolderRuntimeEntityIds, createEntityHierarchyStateMap } from '../../editor/model/entityHierarchy';
 import type {
+  ChartMarkerComponent,
   CadReferenceComponent,
   DataPlatformScreenComponent,
   LightComponent,
@@ -272,6 +275,8 @@ export type DataPlatformScreenOverlayItem = {
   entityId: string;
   name?: string;
   chartMarker?: boolean;
+  markerStyle?: Required<ChartMarkerComponent>;
+  markerText?: string;
   projectId?: string;
   screenId?: string;
   mesh: Mesh;
@@ -667,6 +672,7 @@ function isChainConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
 
 export class SceneRuntime {
   private readonly meshes = new Map<string, Mesh>();
+  private readonly chartMarkerPresentation = new ChartMarkerPresentation();
   private readonly dataPlatformScreenTextures = new Map<string, { url: string; texture: Texture }>();
   private readonly locators = new Map<string, LocatorRuntimeEntry>();
   private readonly locatorTargets = new Map<string, LocatorRuntimeEntry>();
@@ -1692,6 +1698,32 @@ export class SceneRuntime {
     return this.pickSceneEntityHitAtCanvasPoint(clientX, clientY, canvas, 'runtime-model');
   }
 
+  /** 运行态点击立标正文：按真实几何深度拾取，前景模型和其他立标都能阻挡点击。 */
+  pickChartMarkerAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): string | null {
+    // 没有已配置动作的可见立标时，不为普通模型点击增加一次全场景射线检测。
+    let hasClickEvents = false;
+    for (const entityId of this.meshes.keys()) {
+      const component = this.syncedEntities.get(entityId)?.components.chartMarker;
+      if (component && this.isEntityVisible(entityId)
+        && getChartMarkerClickEvents(component, entityId).some(event => event.actions.length > 0)) {
+        hasClickEvents = true;
+        break;
+      }
+    }
+    if (!hasClickEvents) return null;
+    const point = this.getCanvasPickPoint(clientX, clientY, canvas);
+    const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
+    if (!point || !camera) return null;
+    const pick = this.scene.pick(point.x, point.y, (mesh) => (
+      !mesh.isDisposed() && mesh.isEnabled() && mesh.isVisible && mesh.visibility > 0
+      && (mesh.layerMask & camera.layerMask) !== 0 && (mesh.material?.alpha ?? 1) > 0
+    ), false, camera);
+    if (!pick?.hit || !pick.pickedMesh) return null;
+    const entityId = this.readEntityIdFromMesh(pick.pickedMesh, pick.thinInstanceIndex);
+    if (!entityId || !this.isEntityVisible(entityId) || this.meshes.get(entityId) !== pick.pickedMesh) return null;
+    return this.syncedEntities.get(entityId)?.components.chartMarker ? entityId : null;
+  }
+
   /**
    * 对所有内置绑定货格做解析射线拾取，返回最近命中格（业务 排-列-层）、宿主与命中距离。
    * 不用网格拾取：预览里货格 root 被禁用，拾取不稳定；且货架是框架，模型拾取会透过空格命中后排。
@@ -2710,14 +2742,21 @@ export class SceneRuntime {
     for (const [entityId, entity] of this.syncedEntities.entries()) {
       const screen = entity.components.dataPlatformScreen;
       const mesh = this.meshes.get(entityId);
-      if (!mesh || !this.isEntityVisible(entityId)) continue;
+      if (!mesh) continue;
+      const marker = entity.components.chartMarker;
+      const markerStyle = marker ? getChartMarkerStyle(marker) : undefined;
+      const visible = this.isEntityVisible(entityId);
+      if (marker) this.chartMarkerPresentation.update(mesh, marker, visible);
+      if (!visible) continue;
       if (!entity.components.chartMarker && (!screen || screen.renderMode !== 'iframe' || !screen.screenUrl)) continue;
       items.push({
         entityId,
         name: entity.components.chartMarker?.screenName || entity.name,
         chartMarker: Boolean(entity.components.chartMarker),
+        markerStyle,
+        markerText: markerStyle ? getChartMarkerText(markerStyle, this.syncedEntities.get(markerStyle.dataSourceEntityId), this.telemetryPreviewActive) : undefined,
         mesh,
-        ...(screen ? {
+        ...(screen && markerStyle?.contentType !== 'builtin' ? {
           projectId: screen.projectId,
           screenId: screen.screenId,
           screenUrl: screen.renderMode === 'iframe' ? screen.screenUrl : undefined,
@@ -3613,6 +3652,8 @@ export class SceneRuntime {
     this.applyMeshInteractivity(mesh, entity.id);
 
     this.applyPrimitiveMeshAppearance(mesh, meshRenderer, selected);
+    if (entity.components.chartMarker) this.chartMarkerPresentation.update(mesh, entity.components.chartMarker, this.isEntityVisible(entity.id));
+    else this.chartMarkerPresentation.remove(mesh);
   }
 
   /** 将大屏缩略图挂到平面材质上；iframe 模式也保留纹理作为 Overlay 加载失败时的底图。 */
@@ -5261,6 +5302,7 @@ export class SceneRuntime {
 
   /** 释放实体对应的 Mesh 与材质资源。 */
   private disposeMesh(entityId: string, mesh: Mesh): void {
+    this.chartMarkerPresentation.remove(mesh);
     this.clearEntityArrayPreviewIfSource(entityId);
     mesh.material?.dispose();
     mesh.dispose();

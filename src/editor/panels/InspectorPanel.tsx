@@ -32,6 +32,7 @@ import { ModelParametersInspector } from './ModelParametersInspector';
 import { TelemetryBindingInspector, CargoGeneratorInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
 import { AutoPatrolInspector } from './AutoPatrolInspector';
+import { ManualRoamAvatarInspector } from './ManualRoamAvatarInspector';
 
 type TransformField = 'position' | 'rotation' | 'scale';
 const axes: Array<keyof Vector3Data> = ['x', 'y', 'z'];
@@ -381,7 +382,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
       <h2>{modelGenerator ? '模型生成器' : clickEventBinding ? '点击事件绑定' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : manualRoamSpawn ? '手动漫游' : 'Inspector'}</h2>
       <label className="inspector-row">
-        <span>{poiEffect ? '特效名称' : modelGenerator || clickEventBinding || autoPatrol ? 'POI名称' : '名称'}</span>
+        <span>{poiEffect ? '特效名称' : modelGenerator || clickEventBinding || autoPatrol || selectedEntity.components.chartMarker ? 'POI名称' : '名称'}</span>
         <input
           type="text"
           disabled={isLocked}
@@ -409,6 +410,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
           {isBuiltInBound && field === 'position' ? <p className="muted">位置由货架驱动，解绑后可编辑。</p> : null}
         </fieldset>
       ))}
+      {manualRoamSpawn ? <ManualRoamAvatarInspector key={selectedEntity.id} entityId={selectedEntity.id} component={manualRoamSpawn} disabled={isLocked} /> : null}
       {manualRoamSpawn ? (
         <fieldset className="transform-fieldset" aria-label="手动漫游初始位置提示">
           <legend>初始姿态</legend>

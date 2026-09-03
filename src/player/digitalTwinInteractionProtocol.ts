@@ -65,6 +65,15 @@ export type DigitalTwinViewerInitialLoadStateMessage = {
   };
 };
 
+/** 主题内容由数据中台宿主加载，Viewer 只发送项目和大屏标识。 */
+export type DigitalTwinShowScreenMessage = {
+  channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
+  version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
+  sessionId: string;
+  type: 'viewer.showScreen';
+  payload: { projectId: string; screenId: string };
+};
+
 export type DigitalTwinFocusAssetCommand = {
   channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
   version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
@@ -166,6 +175,7 @@ export type DigitalTwinBridgeMessage =
   | DigitalTwinBridgeReadyMessage
   | DigitalTwinViewerReadyMessage
   | DigitalTwinViewerInitialLoadStateMessage
+  | DigitalTwinShowScreenMessage
   | DigitalTwinFocusAssetCommand
   | DigitalTwinCancelFocusAssetCommand
   | DigitalTwinRuntimeActionCommand
@@ -300,6 +310,14 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'payload'])
         && isViewerInitialLoadStatePayload(value.payload)
         ? value as DigitalTwinViewerInitialLoadStateMessage
+        : null;
+    case 'viewer.showScreen':
+      return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'payload'])
+        && isRecord(value.payload)
+        && hasOnlyKeys(value.payload, ['projectId', 'screenId'])
+        && isBoundedString(value.payload.projectId, MAX_PROJECT_ID_LENGTH)
+        && isBoundedString(value.payload.screenId, 128)
+        ? value as DigitalTwinShowScreenMessage
         : null;
     case 'command.focusAsset':
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'requestId', 'payload'])

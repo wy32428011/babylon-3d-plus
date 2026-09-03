@@ -35,6 +35,47 @@ after(async () => {
   await viteServer.close();
 });
 
+test('自定义人物随场景保存重开，缺省配置保持默认人物', () => {
+  const scene = createEmptySceneDocument('人物持久化');
+  const spawn = createManualRoamSpawnEntity();
+  const avatar = { name: '工人', sourcePath: 'Assets/Models/worker/worker.glb', sourceUrl: './Assets/Models/worker/worker.glb' };
+  spawn.components.manualRoamSpawn = { avatar };
+  scene.entityIds = [spawn.id];
+  scene.entities = { [spawn.id]: spawn };
+  assert.deepEqual(deserializeScene(serializeScene(scene)).entities[spawn.id].components.manualRoamSpawn, { avatar });
+  spawn.components.manualRoamSpawn = {};
+  assert.deepEqual(deserializeScene(serializeScene(scene)).entities[spawn.id].components.manualRoamSpawn, {});
+  spawn.components.manualRoamSpawn = { avatar: { ...avatar, sourceUrl: '' } };
+  assert.throws(() => deserializeScene(serializeScene(scene)), /场景文件格式不受支持/);
+});
+
+test('更换人物支持撤销重做、删除恢复和跨目录重新关联', async () => {
+  const globalWithWindow = globalThis as typeof globalThis & { window?: Record<string, unknown> };
+  globalWithWindow.window ??= {};
+  const { useEditorStore } = await viteServer.ssrLoadModule('/src/editor/store/editorStore.ts') as typeof import('../../src/editor/store/editorStore.ts');
+  const store = () => useEditorStore.getState();
+  store().loadSceneFromContent(serializeScene(createEmptySceneDocument('切换人物')), 'avatar-test');
+  store().createManualRoamSpawn();
+  const id = findManualRoamSpawnEntity(store().scene)!.id;
+  const avatar = { name: '工人', sourcePath: 'C:/old/Assets/Models/RoamAvatar-worker/worker.glb', sourceUrl: 'editor-asset://local/old-worker.glb' };
+  store().setManualRoamAvatar(id, avatar);
+  store().setManualRoamAvatar(id, null);
+  assert.deepEqual(store().scene.entities[id].components.manualRoamSpawn, {});
+  store().undo();
+  assert.deepEqual(store().scene.entities[id].components.manualRoamSpawn, { avatar });
+  store().redo();
+  assert.deepEqual(store().scene.entities[id].components.manualRoamSpawn, {});
+  store().undo();
+  store().deleteSelectedEntity();
+  store().undo();
+  assert.deepEqual(store().scene.entities[id].components.manualRoamSpawn, { avatar });
+  const newPath = 'D:/new/Assets/Models/RoamAvatar-worker/worker.glb';
+  assert.equal(store().refreshModelInstancesFromAssets([{
+    id: 'worker', name: 'worker', kind: 'model', libraryKind: 'model', path: newPath, sourceUrl: 'editor-asset://local/new-worker.glb',
+  }]), 1);
+  assert.equal(store().scene.entities[id].components.manualRoamSpawn?.avatar?.sourcePath, newPath);
+});
+
 test('漫游出生点使用脚底世界坐标和实体 Y 轴朝向', () => {
   const scene = createEmptySceneDocument('漫游出生点');
   const spawn = createManualRoamSpawnEntity({ x: 12, y: 3.5, z: -8 });

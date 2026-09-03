@@ -899,3 +899,41 @@ test('命中 show-chart 绑定时向宿主发送 event.assetClicked，未握手�
     f.controller.dispose();
   }
 });
+
+test('主题动作仅在就绪且完成握手后向当前宿主发送同项目大屏标识', () => {
+  const f = createFixture();
+  const screen = { projectId: '2051942646011785218', screenId: '2051942646011785300' };
+  try {
+    assert.equal(f.controller.showScreen(screen), false);
+    dispatch(f.bus, hostHello());
+    assert.equal(f.controller.showScreen(screen), false);
+    f.controller.markViewerReady(new FakeRuntime([]));
+    f.posted.length = 0;
+    assert.equal(f.controller.showScreen({ ...screen, projectId: 'other' }), false);
+    assert.equal(f.controller.showScreen({ ...screen, screenId: '' }), false);
+    assert.equal(f.controller.showScreen({ ...screen, screenId: 'x'.repeat(129) }), false);
+    assert.deepEqual(f.posted, []);
+    assert.equal(f.controller.showScreen({ ...screen, screenUrl: 'https://unused.example' } as typeof screen), true);
+    assert.deepEqual(f.posted, [{ targetOrigin: sameOrigin, message: {
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId, type: 'viewer.showScreen', payload: screen,
+    } }]);
+    const nextSessionId = 'runtime-1:session-2';
+    dispatch(f.bus, { ...hostHello(), sessionId: nextSessionId });
+    assert.equal(f.controller.showScreen(screen), true);
+    assert.equal(f.posted.at(-1)?.message.sessionId, nextSessionId);
+    f.controller.dispose();
+    assert.equal(f.controller.showScreen(screen), false);
+  } finally { f.controller.dispose(); }
+});
+
+test('错误来源或窗口不能借主题动作建立宿主会话', () => {
+  const f = createFixture();
+  try {
+    f.controller.markViewerReady(new FakeRuntime([]));
+    dispatch(f.bus, hostHello(), 'https://untrusted.example');
+    dispatch(f.bus, hostHello(), sameOrigin, otherWindow);
+    assert.equal(f.controller.showScreen({ projectId: '2051942646011785218', screenId: '3' }), false);
+    assert.deepEqual(f.posted, []);
+  } finally { f.controller.dispose(); }
+});

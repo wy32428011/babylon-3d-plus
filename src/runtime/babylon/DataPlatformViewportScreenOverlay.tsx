@@ -72,6 +72,7 @@ export function DataPlatformViewportScreenOverlay({
   onCommand,
 }: DataPlatformViewportScreenOverlayProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const iframeTimeoutRef = useRef<number | undefined>(undefined);
   const clipPathId = useId().replace(/:/g, '');
   const selectedEntityIdsSignature = JSON.stringify(selectedEntityIds);
   const screenKey = screen
@@ -98,7 +99,11 @@ export function DataPlatformViewportScreenOverlay({
     setNativeEmbedReady(false);
     if (!screen || screen.renderMode !== 'iframe' || !iframeSrc) return undefined;
     const timeoutId = window.setTimeout(() => setIframeFailed(true), IFRAME_FALLBACK_TIMEOUT_MS);
-    return () => window.clearTimeout(timeoutId);
+    iframeTimeoutRef.current = timeoutId;
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (iframeTimeoutRef.current === timeoutId) iframeTimeoutRef.current = undefined;
+    };
   }, [iframeSrc, screenKey, screen?.renderMode]);
 
   useEffect(() => {
@@ -188,8 +193,14 @@ export function DataPlatformViewportScreenOverlay({
             ref={iframeRef}
             title={`数据中台大屏 ${screen.screenId}`}
             src={iframeSrc}
-            onError={() => setIframeFailed(true)}
+            onError={() => {
+              window.clearTimeout(iframeTimeoutRef.current);
+              iframeTimeoutRef.current = undefined;
+              setIframeFailed(true);
+            }}
             onLoad={() => {
+              window.clearTimeout(iframeTimeoutRef.current);
+              iframeTimeoutRef.current = undefined;
               setIframeReady(true);
               setIframeFailed(false);
             }}

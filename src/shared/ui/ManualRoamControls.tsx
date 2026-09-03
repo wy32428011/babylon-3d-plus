@@ -120,9 +120,11 @@ export function ManualRoamControls(props: ManualRoamControlsProps) {
     ? '模型动画'
     : snapshot.avatarAnimationMode === 'procedural'
       ? '程序步态'
-      : snapshot.avatarAnimationMode === 'loading'
-        ? '模型加载中'
-        : '模型异常';
+      : snapshot.avatarAnimationMode === 'static'
+        ? '静态人物'
+        : snapshot.avatarAnimationMode === 'loading'
+          ? '模型加载中'
+          : '模型异常';
 
   return (
     <>

@@ -26,6 +26,7 @@ import type {
   DigitalTwinPublishResult,
   ImportCadFileResult,
   ImportEnvironmentModelFileResult,
+  ImportManualRoamAvatarResult,
   ImportModelFolderRequest,
   ImportModelFolderResult,
   ImportSkyboxFileResult,
@@ -195,6 +196,8 @@ contextBridge.exposeInMainWorld('editorApi', {
   importCadFile: (): Promise<ImportCadFileResult> => ipcRenderer.invoke('assets:importCadFile'),
   /** 透传普通模型文件夹导入请求。 */
   importModelFolder: (request: ImportModelFolderRequest): Promise<ImportModelFolderResult> => ipcRenderer.invoke('assets:importModelFolder', request),
+  /** 透传人物单 GLB 文件导入请求。 */
+  importManualRoamAvatar: (): Promise<ImportManualRoamAvatarResult> => ipcRenderer.invoke('assets:importManualRoamAvatar'),
   /** 透传环境模型单 GLB 文件导入请求。 */
   importEnvironmentModelFile: (): Promise<ImportEnvironmentModelFileResult> => ipcRenderer.invoke('assets:importEnvironmentModelFile'),
   /** 透传项目级 HDR/EXR 天空盒导入请求。 */

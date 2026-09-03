@@ -1,4 +1,6 @@
 import { dialog, ipcMain } from 'electron';
+import { importManualRoamAvatarIntoProject } from './manualRoamAvatarStore.js';
+import type { ImportManualRoamAvatarResult } from '../types.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
@@ -121,7 +123,21 @@ export function registerAssetIpc(): void {
     };
   });
 
-  /** 导入单个环境 GLB：用户选择文件，项目内仍保存为独立单文件环境包。 */
+  /** 主进程选择并持久化人物 GLB，渲染进程不能提交任意文件路径。 */
+  ipcMain.handle('assets:importManualRoamAvatar', async (): Promise<ImportManualRoamAvatarResult> => {
+    const projectRoot = await ensureCurrentProjectRootWithDialog();
+    if (!projectRoot) return { canceled: true, projectRoot: null, importedAsset: null };
+    const result = await dialog.showOpenDialog({
+      title: '上传漫游人物模型', properties: ['openFile'],
+      filters: [{ name: 'GLB 人物模型', extensions: ['glb'] }],
+    });
+    const filePath = result.filePaths[0];
+    if (result.canceled || !filePath) return { canceled: true, projectRoot, importedAsset: null };
+    if (getCurrentProjectRoot() !== projectRoot) throw new Error('项目已切换，请在当前项目重新上传人物。');
+    const importedAsset = await importManualRoamAvatarIntoProject(projectRoot, filePath);
+    return { canceled: false, projectRoot, importedAsset };
+  });
+
   ipcMain.handle('assets:importEnvironmentModelFile', async (): Promise<ImportEnvironmentModelFileResult> => {
     const projectRoot = await ensureCurrentProjectRootWithDialog();
 

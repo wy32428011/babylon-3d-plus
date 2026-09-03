@@ -18,6 +18,7 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import { resolveDefaultManualRoamAvatarUrl } from '../assets/manualRoamAvatarAsset';
+import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 import {
   createDefaultManualRoamConfig,
   createInitialRoamKinematicState,
@@ -56,7 +57,7 @@ import {
   type ProceduralGaitState,
 } from './proceduralAvatarAnimation';
 
-export type ManualRoamAvatarAnimationMode = 'loading' | 'embedded' | 'procedural' | 'error';
+export type ManualRoamAvatarAnimationMode = 'loading' | 'embedded' | 'procedural' | 'static' | 'error';
 
 export type ManualRoamSnapshot = {
   enabled: boolean;
@@ -193,6 +194,8 @@ export class ManualRoamRuntime {
   private proceduralAnimator: ProceduralAvatarMorphAnimator | null = null;
   private visualBasePosition = Vector3.Zero();
   private avatarContainer: Awaited<ReturnType<typeof SceneLoader.LoadAssetContainerAsync>> | null = null;
+  private avatarUrl: string | null = null;
+  private avatarLoadGeneration = 0;
   private resetTransition: ResetTransition | null = null;
   private previousCameraMode = Camera.PERSPECTIVE_CAMERA;
   private previousCameraMinZ: number;
@@ -266,7 +269,7 @@ export class ManualRoamRuntime {
     this.beforeRenderObserver = scene.onBeforeRenderObservable.add(() => this.update());
     this.kinematicState = createInitialRoamKinematicState({ x: 0, y: 0, z: 0 });
     this.bindInputEvents();
-    void this.loadAvatar();
+    this.setAvatarUrl(this.options.avatarUrl);
   }
 
   getSnapshot = (): ManualRoamSnapshot => this.snapshot;
@@ -571,16 +574,40 @@ export class ManualRoamRuntime {
     document.removeEventListener('pointerlockchange', this.handlePointerLockChange);
   }
 
-  private async loadAvatar(): Promise<void> {
-    const avatarUrl = this.options.avatarUrl ?? resolveDefaultManualRoamAvatarUrl();
+  /** 更换资源时失效旧请求，避免慢请求覆盖新人物或场景卸载后泄漏。 */
+  setAvatarUrl(sourceUrl?: string): void {
+    if (this.disposed) return;
+    const avatarUrl = resolveRuntimeAssetUrl(sourceUrl ?? resolveDefaultManualRoamAvatarUrl());
+    if (this.avatarUrl === avatarUrl) return;
+    this.avatarUrl = avatarUrl;
+    this.stopCurrentAnimation();
+    this.animationGroups = [];
+    this.proceduralAnimator?.dispose();
+    this.proceduralAnimator = null;
+    this.avatarContainer?.dispose();
+    this.avatarContainer = null;
+    this.avatarMeshes.clear();
+    this.avatarVisualRoot.position.setAll(0);
+    this.avatarVisualRoot.rotation.setAll(0);
+    this.avatarVisualRoot.scaling.setAll(1);
+    this.visualBasePosition.setAll(0);
+    this.publish({ avatarAnimationMode: 'loading', statusMessage: '人物模型加载中...' });
+    void this.loadAvatar(avatarUrl, ++this.avatarLoadGeneration, !sourceUrl);
+  }
+
+  private async loadAvatar(avatarUrl: string, generation: number, isDefaultAvatar: boolean): Promise<void> {
     const { rootUrl, fileName } = splitAssetUrl(avatarUrl);
     let container: Awaited<ReturnType<typeof SceneLoader.LoadAssetContainerAsync>> | null = null;
     try {
-      container = await SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.options.scene);
-      if (this.disposed) {
+      container = await SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.options.scene, undefined, '.glb');
+      if (this.disposed || generation !== this.avatarLoadGeneration) {
         container.dispose();
         return;
       }
+      if (!container.meshes.some((mesh) => mesh.getTotalVertices() > 0)) throw new Error('人物模型没有可渲染网格。');
+      for (const group of container.animationGroups) group.stop();
+      for (const camera of [...container.cameras]) camera.dispose();
+      for (const light of [...container.lights]) light.dispose();
       for (const mesh of container.meshes) {
         this.unregisterCollisionMesh(mesh);
         mesh.isPickable = false;
@@ -593,24 +620,25 @@ export class ManualRoamRuntime {
       for (const node of container.rootNodes) node.parent = this.avatarVisualRoot;
       this.normalizeAvatar(container.meshes);
       this.animationGroups = [...container.animationGroups];
-      this.proceduralAnimator = this.animationGroups.length === 0
+      this.proceduralAnimator = isDefaultAvatar && this.animationGroups.length === 0
         ? ProceduralAvatarMorphAnimator.create(this.options.scene, container.meshes)
         : null;
       this.avatarContainer = container;
       const avatarAnimationMode: ManualRoamAvatarAnimationMode = this.animationGroups.length > 0
         ? 'embedded'
-        : 'procedural';
+        : this.proceduralAnimator ? 'procedural' : 'static';
       this.applyAvatarVisibility(this.snapshot.enabled, this.snapshot.viewMode);
       this.publish({
         avatarAnimationMode,
         statusMessage: avatarAnimationMode === 'procedural'
           ? '当前人物模型无骨骼动画，已启用程序化步态。'
-          : null,
+          : avatarAnimationMode === 'static' ? '人物模型无内置动画，保留原始姿态。' : null,
       });
       this.options.onLog?.(
         avatarAnimationMode === 'embedded'
           ? `人物模型加载完成，检测到 ${this.animationGroups.length} 个动画片段。`
-          : `人物模型加载完成；未检测到蒙皮动画，已为 ${this.proceduralAnimator?.meshCount ?? 0} 个网格启用程序化四肢步态。`,
+          : avatarAnimationMode === 'static' ? '人物模型加载完成，保留原始姿态。'
+            : `人物模型加载完成；未检测到蒙皮动画，已为 ${this.proceduralAnimator?.meshCount ?? 0} 个网格启用程序化四肢步态。`,
       );
     } catch (error) {
       if (container) {
@@ -618,7 +646,7 @@ export class ManualRoamRuntime {
         if (this.avatarContainer === container) this.avatarContainer = null;
         container.dispose();
       }
-      if (this.disposed) return;
+      if (this.disposed || generation !== this.avatarLoadGeneration) return;
       const message = `人物模型加载失败：${getErrorMessage(error)}`;
       this.publish({ avatarAnimationMode: 'error', statusMessage: message });
       this.options.onLog?.(message);
@@ -885,6 +913,7 @@ export class ManualRoamRuntime {
 
   /** 用实际水平速度驱动程序化步态或内置走/跑片段，使步频与位移同步。 */
   private updateAvatarAnimation(input: Readonly<RoamInputFrame>, deltaSeconds: number): void {
+    if (this.snapshot.avatarAnimationMode === 'static') return;
     const horizontalAmount = Math.hypot(input.forward, input.right);
     const horizontalSpeed = resolveRoamHorizontalSpeed(input, this.snapshot.config);
     const airborne = this.snapshot.locomotionMode === 'ground' && !this.kinematicState.grounded;
@@ -1254,6 +1283,7 @@ export class ManualRoamRuntime {
     if (!enabled) return this.snapshot.statusMessage;
     if (this.snapshot.avatarAnimationMode === 'loading') return '人物模型加载中，漫游控制已可用。';
     if (this.snapshot.avatarAnimationMode === 'procedural') return '人物模型无骨骼动画，当前使用程序化步态。';
+    if (this.snapshot.avatarAnimationMode === 'static') return '人物模型无内置动画，保留原始姿态。';
     if (this.snapshot.avatarAnimationMode === 'error') return this.snapshot.statusMessage;
     return null;
   }

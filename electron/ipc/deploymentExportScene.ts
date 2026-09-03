@@ -315,6 +315,10 @@ function collectSceneReferences(scene: PlainObject): {
     if (components.modelAsset !== undefined) {
       models.push({ asset: requirePlainObject(components.modelAsset, `实体 ${entityId} modelAsset`) });
     }
+    if (components.manualRoamSpawn !== undefined) {
+      const spawn = requirePlainObject(components.manualRoamSpawn, '实体 ' + entityId + ' manualRoamSpawn');
+      if (spawn.avatar !== undefined) models.push({ asset: requirePlainObject(spawn.avatar, '实体 ' + entityId + ' 人物模型') });
+    }
     if (components.modelGenerator !== undefined) {
       collectModelGeneratorReferences(requirePlainObject(components.modelGenerator, `实体 ${entityId} modelGenerator`), models, entityId);
     }

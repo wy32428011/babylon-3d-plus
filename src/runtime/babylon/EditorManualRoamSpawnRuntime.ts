@@ -1,4 +1,5 @@
 import '@babylonjs/loaders';
+import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 import {
   type AbstractMesh,
   Color3,
@@ -58,6 +59,10 @@ export class EditorManualRoamSpawnRuntime {
     }
 
     let entry = this.entries.get(entity.id);
+    if (entry && entry.entity.components.manualRoamSpawn?.avatar?.sourceUrl !== entity.components.manualRoamSpawn.avatar?.sourceUrl) {
+      this.disposeEntity(entity.id);
+      entry = undefined;
+    }
     if (!entry) {
       entry = this.createEntry(entity);
       this.entries.set(entity.id, entry);
@@ -224,16 +229,20 @@ export class EditorManualRoamSpawnRuntime {
   private async loadAvatar(entry: SpawnEntry): Promise<void> {
     const generation = entry.loadGeneration + 1;
     entry.loadGeneration = generation;
-    const avatarUrl = resolveDefaultManualRoamAvatarUrl();
+    const avatarUrl = resolveRuntimeAssetUrl(entry.entity.components.manualRoamSpawn?.avatar?.sourceUrl ?? resolveDefaultManualRoamAvatarUrl());
     const { rootUrl, fileName } = splitAssetUrl(avatarUrl);
     let container: Awaited<ReturnType<typeof SceneLoader.LoadAssetContainerAsync>> | null = null;
     try {
-      container = await SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene);
+      container = await SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, undefined, '.glb');
       const current = this.entries.get(entry.entity.id);
       if (!current || current !== entry || entry.loadGeneration !== generation || !this.editorEnabled) {
         container.dispose();
         return;
       }
+      if (!container.meshes.some((mesh) => mesh.getTotalVertices() > 0)) throw new Error('人物模型没有可渲染网格。');
+      for (const group of container.animationGroups) group.stop();
+      for (const camera of [...container.cameras]) camera.dispose();
+      for (const light of [...container.lights]) light.dispose();
       for (const mesh of container.meshes) {
         mesh.metadata = {
           ...(mesh.metadata ?? {}),
@@ -241,7 +250,8 @@ export class EditorManualRoamSpawnRuntime {
           editorManualRoamSpawn: true,
         } satisfies ManualRoamSpawnMeshMetadata;
         mesh.receiveShadows = false;
-        mesh.renderingGroupId = 2;
+        // 与场景模型共享深度，避免切换渲染组清空深度后人物穿透遮挡物。
+        mesh.renderingGroupId = 0;
       }
       container.addAllToScene();
       for (const node of container.rootNodes) node.parent = entry.visualRoot;
@@ -266,7 +276,8 @@ export class EditorManualRoamSpawnRuntime {
     mesh.parent = parent;
     mesh.material = material;
     mesh.receiveShadows = false;
-    mesh.renderingGroupId = 2;
+    // 占位人物和出生点标记也应接受场景模型的遮挡。
+    mesh.renderingGroupId = 0;
     mesh.metadata = {
       editorEntityId: entityId,
       editorManualRoamSpawn: true,

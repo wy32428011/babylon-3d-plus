@@ -42,6 +42,11 @@ export function resolveManualRoamGroupRotationReference(
   return fallbackRotation;
 }
 
+/** 统一编辑器预览和 Viewer 的人物来源；缺省继续使用内置资源。 */
+export function resolveManualRoamAvatarSource(scene: SceneDocument): string | undefined {
+  return findManualRoamSpawnEntity(scene)?.components.manualRoamSpawn?.avatar?.sourceUrl;
+}
+
 /** 将出生点实体转换为人物脚底位置和水平朝向，忽略缩放及 X/Z 旋转。 */
 export function resolveManualRoamSpawnPose(scene: SceneDocument): ManualRoamSpawnPose | null {
   const entity = findManualRoamSpawnEntity(scene);
