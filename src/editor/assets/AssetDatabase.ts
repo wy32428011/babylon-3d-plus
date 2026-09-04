@@ -87,6 +87,7 @@ export type BuiltInAssetDragPayload =
   | { kind: 'alarm-manager' }
   | { kind: 'poi-effect'; effectKind: PoiEffectKind }
   | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
+  | { kind: 'virtual-conveyor' }
   | { kind: 'locator'; locatorKind: 'box-wire' }
   | { kind: 'light'; lightKind: 'hemispheric' | 'directional' | 'point' };
 
@@ -405,6 +406,10 @@ export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetD
       const meshKind = payload.meshKind;
       if (meshKind !== 'cube' && meshKind !== 'sphere' && meshKind !== 'plane') return null;
       return { kind: 'mesh', meshKind };
+    }
+
+    if (payload.kind === 'virtual-conveyor') {
+      return { kind: 'virtual-conveyor' };
     }
 
     if (payload.kind === 'locator') {

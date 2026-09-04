@@ -20,6 +20,7 @@ import {
   type ProjectSkyboxAssetEntry,
 } from '../assets/AssetDatabase';
 import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
+import { ensureVirtualConveyorAsset } from '../assets/virtualConveyorAsset';
 import { getSceneSkyboxSettings } from '../model/SceneDocument';
 import {
   createSceneSkyboxFromAsset,
@@ -1439,6 +1440,21 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
   }
 
+  /** 放置虚拟输送线：首次使用自动把内置模型包导入项目模型库，再创建模型实体。 */
+  async function placeVirtualConveyor(): Promise<void> {
+    if (props.readOnly) return;
+    const result = await ensureVirtualConveyorAsset();
+    if (!result.asset) {
+      pushLog(result.error ?? '虚拟输送线模型包不可用。');
+      return;
+    }
+    if (result.imported) {
+      setProjectAssets(result.projectAssets);
+      pushLog('已自动导入内置模型包：虚拟输送线。');
+    }
+    importModelAsset(result.asset);
+  }
+
   function handleResourceCardClick(item: ProjectLibraryItem): void {
     if (props.readOnly) return;
     if (isDataPlatformChartLibraryItem(item)) return;
@@ -1477,6 +1493,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
       if (item.builtIn.kind === 'mesh') {
         createMesh(item.builtIn.meshKind);
+        return;
+      }
+
+      if (item.builtIn.kind === 'virtual-conveyor') {
+        void placeVirtualConveyor();
         return;
       }
 

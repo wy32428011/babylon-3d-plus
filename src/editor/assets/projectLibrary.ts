@@ -58,6 +58,7 @@ export type BuiltInProjectLibraryAction =
   | { kind: 'alarm-manager' }
   | { kind: 'poi-effect'; effectKind: (typeof POI_EFFECT_DEFINITIONS)[number]['kind'] }
   | { kind: 'mesh'; meshKind: MeshKind }
+  | { kind: 'virtual-conveyor' }
   | { kind: 'locator'; locatorKind: 'box-wire' }
   | { kind: 'light'; lightKind: LightKind };
 
@@ -71,6 +72,7 @@ export const BUILT_IN_MODEL_LIBRARY_ITEMS: BuiltInProjectLibraryItem[] = [
   },
   { id: 'builtin-sphere', name: '球体', icon: 'ring', subtitle: formatBuiltInMeshBaseDimensionsMeters('sphere'), builtIn: { kind: 'mesh', meshKind: 'sphere' } },
   { id: 'builtin-plane', name: '地面', icon: 'panel', subtitle: formatBuiltInMeshBaseDimensionsMeters('plane'), builtIn: { kind: 'mesh', meshKind: 'plane' } },
+  { id: 'builtin-virtual-conveyor', name: '虚拟输送线', icon: 'panel', subtitle: '输送设备 · 内置', builtIn: { kind: 'virtual-conveyor' } },
   { id: 'builtin-box-wire-locator', name: '虚拟定位线框', icon: 'cube', subtitle: '基础对象', builtIn: { kind: 'locator', locatorKind: 'box-wire' } },
   { id: 'builtin-hemispheric-light', name: '半球光', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'hemispheric' } },
   { id: 'builtin-directional-light', name: '方向光', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'directional' } },

@@ -1,10 +1,12 @@
-import { dialog, ipcMain } from 'electron';
+import { app, dialog, ipcMain } from 'electron';
 import { importManualRoamAvatarIntoProject } from './manualRoamAvatarStore.js';
 import type { ImportManualRoamAvatarResult } from '../types.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
   AssetEntry,
+  ImportBuiltinModelPackageRequest,
+  ImportBuiltinModelPackageResult,
   ImportCadFileResult,
   ImportEnvironmentModelFileResult,
   ImportModelFolderRequest,
@@ -14,7 +16,7 @@ import type {
   ModelPackageVariant,
 } from '../types.js';
 import { authorizeAssetFile, authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
-import { listModelPackageVariants, scanModelFolder } from './modelPackageScanner.js';
+import { listModelPackageVariants, scanModelFolder, scanModelPackage } from './modelPackageScanner.js';
 import {
   ensureCurrentProjectRootWithDialog,
   getCurrentProjectRoot,
@@ -241,6 +243,60 @@ export function registerAssetIpc(): void {
       skipped: [...scanSkipped, ...copySkipped],
     };
   });
+
+  /**
+   * 导入编辑器内置模型包（随应用分发的 builtin-model-packages）到当前项目模型库。
+   * 来源目录由主进程解析，不接受渲染进程任意路径。
+   */
+  ipcMain.handle(
+    'assets:importBuiltinModelPackage',
+    async (_event, request: ImportBuiltinModelPackageRequest): Promise<ImportBuiltinModelPackageResult> => {
+      const emptyResult: ImportBuiltinModelPackageResult = {
+        canceled: true,
+        projectRoot: null,
+        importedAssets: [],
+        projectAssets: [],
+        skipped: [],
+      };
+      const packageName = typeof request?.packageName === 'string' ? path.basename(request.packageName.trim()) : '';
+      if (!packageName || packageName !== request?.packageName?.trim()) {
+        throw new Error('内置模型包名称不合法。');
+      }
+
+      const builtinRoot = app.isPackaged
+        ? path.join(process.resourcesPath, 'builtin-model-packages')
+        : path.resolve('public', 'builtin-model-packages');
+      const sourcePackagePath = path.join(builtinRoot, packageName);
+      const stat = await fs.stat(sourcePackagePath).catch(() => null);
+      if (!stat?.isDirectory()) {
+        throw new Error(`未找到内置模型包：${packageName}`);
+      }
+
+      const projectRoot = await ensureCurrentProjectRootWithDialog();
+      if (!projectRoot) {
+        return emptyResult;
+      }
+
+      const scanned = await scanModelPackage(sourcePackagePath);
+      if (!scanned.asset) {
+        return {
+          ...emptyResult,
+          canceled: false,
+          projectRoot,
+          skipped: [scanned.skipped].filter((item): item is NonNullable<typeof item> => Boolean(item)),
+        };
+      }
+
+      const { importedAssets, projectAssets, skipped } = await importModelPackagesIntoProject([scanned.asset], 'model');
+      return {
+        canceled: false,
+        projectRoot: getCurrentProjectRoot(),
+        importedAssets,
+        projectAssets,
+        skipped,
+      };
+    },
+  );
 
   /** 只允许枚举已由用户选择或项目加载授权过的模型包目录。 */
   ipcMain.handle(

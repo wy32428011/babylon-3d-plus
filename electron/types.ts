@@ -459,6 +459,20 @@ export type ImportModelFolderResult = {
   skipped: ImportModelFolderSkippedEntry[];
 };
 
+/** 导入编辑器内置模型包（如虚拟输送线）到当前项目模型库。 */
+export type ImportBuiltinModelPackageRequest = {
+  packageName: string;
+};
+
+/** 内置模型包导入结果：未选择项目时 canceled，否则返回本次导入资产与项目完整快照。 */
+export type ImportBuiltinModelPackageResult = {
+  canceled: boolean;
+  projectRoot: string | null;
+  importedAssets: ProjectModelAssetEntry[];
+  projectAssets: ProjectModelAssetEntry[];
+  skipped: ImportModelFolderSkippedEntry[];
+};
+
 /** 直接导入单个环境 GLB 后返回项目内资产和完整项目资源快照。 */
 export type ImportManualRoamAvatarResult = {
   canceled: boolean;

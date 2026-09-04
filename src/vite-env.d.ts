@@ -416,6 +416,14 @@ type ImportModelFolderResult = {
   skipped: ImportModelFolderSkippedEntry[];
 };
 
+type ImportBuiltinModelPackageResult = {
+  canceled: boolean;
+  projectRoot: string | null;
+  importedAssets: ProjectModelAssetEntry[];
+  projectAssets: ProjectModelAssetEntry[];
+  skipped: ImportModelFolderSkippedEntry[];
+};
+
 type ImportManualRoamAvatarResult = {
   canceled: boolean;
   projectRoot: string | null;
@@ -620,6 +628,7 @@ interface Window {
     selectProjectDirectory: () => Promise<SelectProjectDirectoryResult>;
     importCadFile: () => Promise<ImportCadFileResult>;
     importModelFolder: (request: ImportModelFolderRequest) => Promise<ImportModelFolderResult>;
+    importBuiltinModelPackage: (request: { packageName: string }) => Promise<ImportBuiltinModelPackageResult>;
     importManualRoamAvatar: () => Promise<ImportManualRoamAvatarResult>;
     importEnvironmentModelFile: () => Promise<ImportEnvironmentModelFileResult>;
     importSkyboxFile: () => Promise<ImportSkyboxFileResult>;

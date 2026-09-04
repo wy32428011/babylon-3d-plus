@@ -11,6 +11,8 @@
     "demo:stacker:scene": "node scripts/create-stacker-mqtt-demo-scene.mjs",
     "demo:stacker:mqtt": "node scripts/publish-stacker-full-demo.mjs",
     "demo:stacker:mqtt:legacy": "node scripts/simulate-stacker-mqtt.mjs",
+    "demo:conveyor:scene": "node scripts/create-virtual-conveyor-demo-scene.mjs",
+    "demo:conveyor:mqtt": "node scripts/publish-virtual-conveyor-demo.mjs",
     "refresh:model-assets": "node scripts/refresh-model-asset-index.mjs",
     "optimize:environment-glb": "node scripts/optimize-environment-glb.mjs",
     "wait:renderer": "node scripts/wait-for-vite-renderer.mjs",
@@ -25,6 +27,7 @@
     "test:manual-roam:integration": "npm run build:electron && electron tests/roam/manualRoamAvatar.integration.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "test:telemetry": "node scripts/telemetry-test.mjs",
+    "test:virtual-conveyor": "node --test tests/runtime/virtualConveyorPackage.test.mjs",
     "test:model-array": "node scripts/model-array-test.mjs",
     "test:builtin-slot": "node scripts/builtin-slot-test.mjs",
     "smoke:units": "node scripts/smoke-meter-unit-contract.mjs && npm run smoke:cad && npm run smoke:model-measurement && npm run smoke:model-array && npm run smoke:model-parameters",
@@ -126,6 +129,13 @@
       {
         "from": "dist-viewer-template",
         "to": "export-viewer",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "public/builtin-model-packages",
+        "to": "builtin-model-packages",
         "filter": [
           "**/*"
         ]

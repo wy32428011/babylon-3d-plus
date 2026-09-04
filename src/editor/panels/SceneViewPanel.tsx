@@ -99,6 +99,7 @@ import {
 } from '../model/SceneDocument';
 import { resolveEnvironmentRuntimeSettings } from '../model/environmentRuntime';
 import { createSceneSkyboxFromAsset } from '../assets/skyboxAssets';
+import { ensureVirtualConveyorAsset } from '../assets/virtualConveyorAsset';
 import type { Vector3Data } from '../model/math';
 import { createGroupPositionDelta } from '../model/groupSpatialInfo';
 import {
@@ -1063,6 +1064,18 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         ...placementPosition,
         y: placementPosition.y + groundOffsetMeters,
       });
+      return;
+    }
+
+    if (builtInAsset.kind === 'virtual-conveyor') {
+      void (async () => {
+        const result = await ensureVirtualConveyorAsset();
+        if (!result.asset) {
+          pushLog(result.error ?? '虚拟输送线模型包不可用。');
+          return;
+        }
+        importModelAsset(result.asset, placementPosition);
+      })();
       return;
     }
 

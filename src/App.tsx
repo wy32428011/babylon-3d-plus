@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import stackerMqttDemoSceneContent from '../examples/scenes/stacker-mqtt-demo.scene.json?raw';
+import virtualConveyorMqttDemoSceneContent from '../examples/scenes/virtual-conveyor-mqtt-demo.scene.json?raw';
 import { HomePage } from './editor/home/HomePage';
 import {
   getReturnToHomePageBlockMessage,
@@ -14,6 +15,10 @@ const DEMO_SCENES: Record<string, { label: string; content: string }> = {
   'stacker-mqtt': {
     label: 'Stacker MQTT 模拟演示场景',
     content: stackerMqttDemoSceneContent,
+  },
+  'virtual-conveyor': {
+    label: '虚拟输送线 MQTT 演示场景',
+    content: virtualConveyorMqttDemoSceneContent,
   },
 };
 

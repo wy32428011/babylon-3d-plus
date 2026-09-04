@@ -97,6 +97,13 @@ fetch (LocatorFetchRuntime, 事件驱动) ────────────�
 ### 扩展点
 新 MQTT 字段 → `applyConveyorCargoMotion`(:141) 内 read 系列；新配置键 → specializedModelAssets.ts 读取器 + `ConveyorCargoTravelConfig`（types.ts:375-382）；新交接对象 → `SpecializedTelemetryDriverContext`（types.ts:467-502）加方法经门面接入。
 
+### 变体：虚拟输送线（内置模型包）
+针对复杂复合模型承载多个上报设备的拆分场景，编辑器内置「虚拟输送线」：长方形平面（GLB 1×0.05×1 m，单 mesh `VCConveyorBelt`），运行时行为与真实 conveyor 完全一致（conveyorDriver 零改动）。详见 `docs/virtual-conveyor-design.md`。
+- **来源与分发**：模板 `public/builtin-model-packages/virtual-conveyor/`（随编辑器分发，打包经 extraResources）；首次放置时 IPC `assets:importBuiltinModelPackage` 自动导入项目 `Assets/Models`；前端入口 `ensureVirtualConveyorAsset`（src/editor/assets/virtualConveyorAsset.ts，模型库卡片与场景拖拽共用）。
+- **设备识别**：meta.json `dataDriven.device.devType='conveyor'` + `defaultAssetCode='VirtualConveyor'`（assetCode 含 "conveyor" 命中 `isConveyorModelAsset`）→ 自动解锁 Inspector 绑定区（TelemetryBindingInspector / CargoGeneratorInspector / ModelParametersInspector）。
+- **参数**：`length`（x 向长度，默认 2 m）、`width`（z 向宽度，默认 1 m）、`color`（材质色，默认 #8a97a5）；厚度固定 0.05 m。参数化脚本绕底面中心原点缩放 + 乘色（rememberBaseMaterial 快照基线）。
+- **与真实 conveyor 的差异**：`cargo.travel.nodes` 留空 → 行程回退整机包围盒（板面即行程区）；支撑面走包围盒顶面兜底（板顶 0.05 m 精确）；无专属滚筒/链条动画（虚拟输送线本无动画节点），仅货物运动。
+
 ---
 
 ## 2. RGV 有轨穿梭车
