@@ -128,6 +128,6 @@ test('Toolbar、EditorLayout 和 Player 接上场景全屏入口', async () => {
   assert.match(globalCss, /\[data-scene-fullscreen='true'\] \.scene-viewport/);
 
   assert.match(playerSource, /className="player-fullscreen-button"/);
-  assert.match(playerSource, /useElementFullscreen\(playerRootRef\)/);
+  assert.match(playerSource, /useDigitalTwinFullscreen\(playerRootRef\)/);
   assert.match(playerCss, /\.player-fullscreen-button/);
 });

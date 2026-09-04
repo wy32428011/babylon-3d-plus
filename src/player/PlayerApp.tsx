@@ -68,7 +68,7 @@ import { ManualRoamControls } from '../shared/ui/ManualRoamControls';
 import { useAutoPatrolInspectionHistory } from '../shared/ui/useAutoPatrolInspectionHistory';
 import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
 import { FullscreenGlyph } from '../shared/ui/FullscreenGlyph';
-import { useElementFullscreen } from '../shared/ui/useElementFullscreen';
+import { useDigitalTwinFullscreen } from './useDigitalTwinFullscreen';
 import {
   createInitialManualRoamSnapshot,
   ManualRoamRuntime,
@@ -183,7 +183,7 @@ function applySceneBackground(viewport: BabylonViewport, color: string): void {
 export function PlayerApp() {
   const playerRootRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const sceneFullscreen = useElementFullscreen(playerRootRef);
+  const sceneFullscreen = useDigitalTwinFullscreen(playerRootRef);
   const viewportRef = useRef<BabylonViewport | null>(null);
   const chartMarkerClickRef = useRef<((entityId: string) => boolean) | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
@@ -1014,7 +1014,7 @@ export function PlayerApp() {
   });
 
   useEffect(() => {
-    /** Viewer 用 F11 切换场景全屏，避免浏览器默认把整页（含外层壳）拉全屏。 */
+    /** 独立 Viewer 切换场景全屏；内嵌 Viewer 交由宿主把完整大屏作为一个整体全屏。 */
     function handleWindowKeyDown(event: KeyboardEvent): void {
       if (event.key.toLowerCase() !== 'f11') return;
       event.preventDefault();
@@ -1024,6 +1024,12 @@ export function PlayerApp() {
     window.addEventListener('keydown', handleWindowKeyDown, true);
     return () => window.removeEventListener('keydown', handleWindowKeyDown, true);
   }, [sceneFullscreen]);
+
+  const fullscreenLabel = sceneFullscreen.isFullscreen
+    ? '退出全屏'
+    : sceneFullscreen.isEmbedded
+      ? '全屏显示大屏'
+      : '全屏显示场景';
 
   return (
     <main className="player-root" ref={playerRootRef} style={{ backgroundColor }}>
@@ -1047,11 +1053,11 @@ export function PlayerApp() {
       ) : null}
       {phase !== 'blocked' ? (
         <button
-          aria-label={sceneFullscreen.isFullscreen ? '退出全屏' : '全屏显示场景'}
+          aria-label={fullscreenLabel}
           aria-pressed={sceneFullscreen.isFullscreen}
           className="player-fullscreen-button"
           onClick={() => void sceneFullscreen.toggle()}
-          title={sceneFullscreen.isFullscreen ? '退出全屏 (F11)' : '全屏显示场景 (F11)'}
+          title={`${fullscreenLabel} (F11)`}
           type="button"
         >
           <FullscreenGlyph exit={sceneFullscreen.isFullscreen} />

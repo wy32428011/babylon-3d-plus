@@ -79,6 +79,10 @@ try {
       await page.route('https://theme.example.test/**', route => { internalThemeLoads += 1; return route.fulfill({ body: '错误：主题不能加载在 Viewer 内' }); });
       if (mode === 'preview' && referenced) {
         await page.goto(origin + '/__viewer__/index.html');
+        await page.getByRole('button', { name: '全屏显示场景' }).click();
+        await page.waitForFunction(() => document.fullscreenElement?.classList.contains('player-root'));
+        await page.getByRole('button', { name: '退出全屏' }).click();
+        await page.waitForFunction(() => document.fullscreenElement === null);
         const standaloneBody = page.locator('[data-screen-entity-id="' + fixture.builtinId + '"] [data-chart-marker-text]');
         await standaloneBody.waitFor();
         const standaloneBox = await standaloneBody.boundingBox();
@@ -112,6 +116,28 @@ try {
         assert.equal(await viewer.evaluate(() => window.viewerInstance), instance, '引用内容页切换必须保留公共三维实例');
         assert.equal(await viewer.locator('[data-data-platform-viewport-screen]').count(), 0);
         assert.equal(await viewer.locator(`[data-screen-entity-id="${fixture.builtinId}"] [data-chart-marker-text]`).textContent(), '内置面板导出验证');
+        if (mode === 'published') {
+          const themeTextBox = await page.getByText(themeText, { exact: true }).boundingBox();
+          assert.ok(themeTextBox && themeTextBox.width > 0 && themeTextBox.height > 0);
+          await viewer.getByRole('button', { name: '全屏显示大屏' }).click();
+          await page.waitForFunction(() => document.fullscreenElement !== null);
+          assert.equal(
+            await page.evaluate(() => document.fullscreenElement === document.documentElement),
+            true,
+            '数据中台宿主文档必须作为完整大屏进入全屏',
+          );
+          const visibleTextAtCenter = await page.evaluate(({ x, y, expectedText }) => {
+            const target = document.elementFromPoint(x, y);
+            return target?.textContent?.includes(expectedText) ?? false;
+          }, {
+            x: themeTextBox.x + themeTextBox.width / 2,
+            y: themeTextBox.y + themeTextBox.height / 2,
+            expectedText: themeText,
+          });
+          assert.equal(visibleTextAtCenter, true, '数字孪生全屏不得遮蔽数据中台发布大屏内容');
+          await viewer.getByRole('button', { name: '退出全屏' }).click();
+          await page.waitForFunction(() => document.fullscreenElement === null);
+        }
       } else {
         assert.equal(page.url(), `${origin}/#/bigscreen-designer/${mode}/3`);
         await iframe.waitFor({ state: 'detached' });
