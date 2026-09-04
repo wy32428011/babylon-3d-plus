@@ -31,6 +31,7 @@ export const CLICK_EVENT_FOCUS_RADIUS_SCALE = 1.4;
 const AUTHORIZED_CLICK_EVENT_ASSET_URL_PREFIX = 'editor-asset://local/';
 const CLICK_EVENT_BINDING_TEXT_MAX_LENGTH = 256;
 const CLICK_EVENT_BINDING_ID_MAX_LENGTH = 128;
+const DATA_PLATFORM_SCREEN_CHART_ID_PREFIX = 'data-platform-screen:';
 
 const CLICK_EVENT_BINDING_EVENT_TYPES: readonly ClickEventBindingEventType[] = ['click', 'click-cell'];
 const CLICK_EVENT_BINDING_EFFECTS: readonly ClickEventBindingEffect[] = ['highlight', 'focus', 'show-chart'];
@@ -48,6 +49,16 @@ function sanitizeText(value: unknown, maxLength = CLICK_EVENT_BINDING_TEXT_MAX_L
 /** 深拷贝可序列化 JSON 值，用于阻断 UI 与场景文档之间的可变引用。 */
 function cloneJsonValue<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
+}
+
+/** 旧版点击绑定只保存图表库稳定 ID，从受管大屏 ID 中恢复项目与大屏标识。 */
+function parseLegacyDataPlatformScreenChartId(chartId: string): { projectId: string; screenId: string } | null {
+  if (!chartId.startsWith(DATA_PLATFORM_SCREEN_CHART_ID_PREFIX)) return null;
+  const identifiers = chartId.slice(DATA_PLATFORM_SCREEN_CHART_ID_PREFIX.length).split(':');
+  if (identifiers.length !== 2) return null;
+  const projectId = sanitizeText(identifiers[0], CLICK_EVENT_BINDING_ID_MAX_LENGTH);
+  const screenId = sanitizeText(identifiers[1], CLICK_EVENT_BINDING_ID_MAX_LENGTH);
+  return projectId && screenId ? { projectId, screenId } : null;
 }
 
 /** 创建一条事件配置，默认点击 + 高亮。 */
@@ -137,9 +148,15 @@ function sanitizeClickEventBindingEvent(value: unknown): ClickEventBindingEvent 
   if (effects.includes('show-chart') && isPlainObject(value.chart)) {
     const chartId = sanitizeText(value.chart.id, CLICK_EVENT_BINDING_ID_MAX_LENGTH);
     if (chartId) {
+      const projectId = sanitizeText(value.chart.projectId, CLICK_EVENT_BINDING_ID_MAX_LENGTH);
+      const screenId = sanitizeText(value.chart.screenId, CLICK_EVENT_BINDING_ID_MAX_LENGTH);
+      const screen = projectId && screenId
+        ? { projectId, screenId }
+        : parseLegacyDataPlatformScreenChartId(chartId);
       const thumbnailUrl = normalizeDataPlatformScreenUrl(value.chart.thumbnailUrl);
       chart = {
         id: chartId,
+        ...(screen ?? {}),
         name: sanitizeText(value.chart.name) || '数据中台大屏',
         ...(thumbnailUrl ? { thumbnailUrl } : {}),
       };
@@ -216,12 +233,12 @@ export type ClickEventBindingPickedCell = {
   layer: number;
 };
 
-/** 运行/发布态点击决策：场景存在已注册设备类型的绑定时点击行为全接管。chartId 为命中事件中 show-chart 效果的图表参数。 */
+/** 运行/发布态点击决策：场景存在已注册设备类型的绑定时点击行为全接管。screen 为发布 Viewer 可请求宿主切换的大屏标识。 */
 export type ClickEventBindingClickResolution =
   | { kind: 'pass-through' }
   | { kind: 'clear' }
   | { kind: 'ignore' }
-  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[]; chartId?: string }
+  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[]; chartId?: string; screen?: { projectId: string; screenId: string } }
   | {
     kind: 'trigger-cell';
     entityId: string;
@@ -229,6 +246,7 @@ export type ClickEventBindingClickResolution =
     cell: { row: number; column: number; layer: number };
     effects: ClickEventBindingEffect[];
     chartId?: string;
+    screen?: { projectId: string; screenId: string };
   };
 
 /**
@@ -272,6 +290,9 @@ export function resolveClickEventBindingClick(
       cell: { row: pickedCell.row, column: pickedCell.column, layer: pickedCell.layer },
       effects: cellEvent.effects,
       ...(cellEvent.chart ? { chartId: cellEvent.chart.id } : {}),
+      ...(cellEvent.chart?.projectId && cellEvent.chart.screenId
+        ? { screen: { projectId: cellEvent.chart.projectId, screenId: cellEvent.chart.screenId } }
+        : {}),
     };
   }
 
@@ -282,6 +303,9 @@ export function resolveClickEventBindingClick(
     entityId: pickedEntityId,
     effects: matchedEvent.effects,
     ...(matchedEvent.chart ? { chartId: matchedEvent.chart.id } : {}),
+    ...(matchedEvent.chart?.projectId && matchedEvent.chart.screenId
+      ? { screen: { projectId: matchedEvent.chart.projectId, screenId: matchedEvent.chart.screenId } }
+      : {}),
   };
 }
 

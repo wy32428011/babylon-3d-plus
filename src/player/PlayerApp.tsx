@@ -70,6 +70,10 @@ import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
 import { FullscreenGlyph } from '../shared/ui/FullscreenGlyph';
 import { useDigitalTwinFullscreen } from './useDigitalTwinFullscreen';
 import {
+  parseDigitalTwinHostRenderPixelRatioState,
+  syncDigitalTwinViewerRenderSize,
+} from './digitalTwinDisplayBridge';
+import {
   createInitialManualRoamSnapshot,
   ManualRoamRuntime,
   type ManualRoamSnapshot,
@@ -339,6 +343,23 @@ export function PlayerApp() {
     let resize: (() => void) | null = null;
     let canvasResizeObserver: ResizeObserver | null = null;
     let localHighlightedEntityIds: string[] = [];
+    let hostRenderPixelRatio: number | undefined;
+
+    resize = () => {
+      if (!viewport) return;
+      syncDigitalTwinViewerRenderSize(viewport, {
+        devicePixelRatio: window.devicePixelRatio || 1,
+        hostRenderPixelRatio,
+      });
+    };
+    const handleHostDisplayMessage = (event: MessageEvent<unknown>): void => {
+      if (window.parent === window || event.source !== window.parent) return;
+      const state = parseDigitalTwinHostRenderPixelRatioState(event.data);
+      if (!state) return;
+      hostRenderPixelRatio = state.renderPixelRatio;
+      resize?.();
+    };
+    window.addEventListener('message', handleHostDisplayMessage);
 
     /** 处理 WebGL 丢失和渲染异常，恢复事件只清除对应运行时阻断。 */
     const handleRuntimeStatus = (status: BabylonViewportRuntimeStatus): void => {
@@ -346,6 +367,7 @@ export function PlayerApp() {
       const recovered = status.type === 'context-restored' || status.type === 'render-recovered';
       setViewportRuntimeIssue(!recovered);
       setRuntimeMessage(recovered ? null : status.message);
+      if (status.type === 'context-restored') resize?.();
     };
 
     /** 按部署契约顺序启动 Viewer，manifest 必须先于场景反序列化安装。 */
@@ -429,7 +451,7 @@ export function PlayerApp() {
           viewport.camera,
           sceneDocument,
         );
-        viewport.resize();
+        resize();
 
         runtime = new SceneRuntime(
           viewport.scene,
@@ -586,6 +608,13 @@ export function PlayerApp() {
           },
           triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
           emitAssetClicked: (payload) => interactionController?.notifyAssetClicked(payload),
+          showScreen: (screen) => {
+            if (interactionController?.showScreen(screen)) {
+              setChartMarkerError('');
+            } else {
+              setChartMarkerError('大屏展示未发送：请从同项目的数据中台大屏中打开当前数字孪生。');
+            }
+          },
         });
         runtime.onAlarmActivated = event => {
           if (disposed || !runtime) return;
@@ -770,7 +799,6 @@ export function PlayerApp() {
 
         mqttClient = new MqttStackerTelemetryClient((logMessage) => console.info(`[Viewer MQTT] ${logMessage}`));
         mqttClient.updateConfig(parsedConfig.mqtt);
-        resize = () => viewport?.resize();
         if (typeof ResizeObserver !== 'undefined') {
           canvasResizeObserver = new ResizeObserver(resize);
           canvasResizeObserver.observe(canvas);
@@ -815,6 +843,7 @@ export function PlayerApp() {
         canvasResizeObserver?.disconnect();
         canvasResizeObserver = null;
         if (resize) window.removeEventListener('resize', resize);
+        window.removeEventListener('message', handleHostDisplayMessage);
         skyboxCameraBounds?.dispose();
         skyboxCameraBounds = null;
         runtime?.dispose();
@@ -830,6 +859,7 @@ export function PlayerApp() {
       canvasResizeObserver?.disconnect();
       canvasResizeObserver = null;
       if (resize) window.removeEventListener('resize', resize);
+      window.removeEventListener('message', handleHostDisplayMessage);
       interactionController?.dispose();
       interactionController = null;
       initialLoadGate.dispose();

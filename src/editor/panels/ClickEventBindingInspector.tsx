@@ -59,12 +59,14 @@ function readChartFromDrop(event: DragEvent<HTMLElement>): ClickEventBindingEven
   if (!chartEntry) return null;
   return {
     id: chartEntry.id,
+    projectId: chartEntry.projectId,
+    screenId: chartEntry.screenId,
     name: chartEntry.name,
     ...(chartEntry.thumbnailUrl ? { thumbnailUrl: chartEntry.thumbnailUrl } : {}),
   };
 }
 
-/** 渲染并编辑点击事件绑定；仅在运行预览态生效，命中的设备按勾选效果执行高亮与相机聚焦。 */
+/** 渲染并编辑点击事件绑定；运行/发布态命中的设备执行高亮、聚焦和大屏展示效果。 */
 export function ClickEventBindingInspector({ component, disabled = false }: ClickEventBindingInspectorProps) {
   const updateSelectedClickEventBinding = useEditorStore((state) => state.updateSelectedClickEventBinding);
   const [activeDropZone, setActiveDropZone] = useState<string | null>(null);
@@ -326,7 +328,7 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
     <fieldset className="transform-fieldset model-generator-fieldset">
       <legend>点击事件绑定</legend>
 
-      <p className="muted">仅在运行预览时生效；运行态点击列表中设备类型的任意实例时，对该设备执行勾选的效果。</p>
+      <p className="muted">在运行预览或发布 Viewer 中，点击列表中设备类型的任意实例时，对该设备执行勾选的效果。</p>
 
       <div className="model-generator-section-header">
         <span>设备类型</span>

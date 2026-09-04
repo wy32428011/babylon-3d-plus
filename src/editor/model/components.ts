@@ -346,9 +346,11 @@ export type ClickEventBindingEventType = 'click' | 'click-cell';
 /** 点击命中后执行的效果类型，单个事件内同类效果只保留一条；show-chart 命中后通过 postMessage 通知宿主页面展示图表。 */
 export type ClickEventBindingEffect = 'highlight' | 'focus' | 'show-chart';
 
-/** show-chart 效果绑定的图表库条目引用；id 为图表库条目主键（发送给宿主页面的图表id），name/thumbnailUrl 仅用于 Inspector 展示。 */
+/** show-chart 效果绑定的数据中台大屏引用；projectId/screenId 供发布 Viewer 请求宿主切换大屏，id 兼容旧图表事件。 */
 export type ClickEventBindingChartRef = {
   id: string;
+  projectId?: string;
+  screenId?: string;
   name: string;
   thumbnailUrl?: string;
 };

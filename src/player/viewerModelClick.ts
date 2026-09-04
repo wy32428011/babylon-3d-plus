@@ -14,6 +14,8 @@ type ViewerModelClickEffects = {
   triggerManualEvents: (entityId: string) => void;
   /** 命中 show-chart 效果时向宿主页面发送点击事件。 */
   emitAssetClicked?: (payload: ClickEventAssetClickedPayload) => void;
+  /** 绑定包含数据中台大屏标识时，请求已握手的宿主切换大屏。 */
+  showScreen?: (screen: { projectId: string; screenId: string }) => void;
 };
 
 /** 鼠标拾取与搜索共用点击绑定；搜索已完成聚焦，可跳过事件中的二次相机移动。 */
@@ -28,6 +30,9 @@ export function createViewerModelClickHandler(scene: SceneDocument, effects: Vie
     const resolution = resolveClickEventBindingClick(scene, entityId, pickedCell);
     const assetClickedPayload = buildClickEventAssetClickedPayload(scene, resolution);
     if (assetClickedPayload) effects.emitAssetClicked?.(assetClickedPayload);
+    if ((resolution.kind === 'trigger' || resolution.kind === 'trigger-cell') && resolution.screen) {
+      effects.showScreen?.(resolution.screen);
+    }
     if (resolution.kind === 'pass-through') {
       effects.updateSelection(entityId ? [entityId] : []);
       if (entityId) effects.triggerManualEvents(entityId);

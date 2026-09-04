@@ -34,7 +34,7 @@ try {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   for (const mode of ['preview', 'published']) {
     for (const referenced of [true, false]) {
-      page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+      page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
       page.setDefaultTimeout(45_000);
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -117,6 +117,20 @@ try {
         assert.equal(await viewer.locator('[data-data-platform-viewport-screen]').count(), 0);
         assert.equal(await viewer.locator(`[data-screen-entity-id="${fixture.builtinId}"] [data-chart-marker-text]`).textContent(), '内置面板导出验证');
         if (mode === 'published') {
+          const renderResolution = await viewer.locator('canvas').evaluate((canvas) => {
+            const rect = canvas.getBoundingClientRect();
+            return {
+              backingWidth: canvas.width,
+              backingHeight: canvas.height,
+              expectedWidth: Math.round(rect.width * window.devicePixelRatio),
+              expectedHeight: Math.round(rect.height * window.devicePixelRatio),
+            };
+          });
+          assert.ok(
+            renderResolution.backingWidth >= renderResolution.expectedWidth
+              && renderResolution.backingHeight >= renderResolution.expectedHeight,
+            `发布大屏中的数字孪生必须按实际显示尺寸和 DPR 高分辨率渲染：${JSON.stringify(renderResolution)}`,
+          );
           const themeTextBox = await page.getByText(themeText, { exact: true }).boundingBox();
           assert.ok(themeTextBox && themeTextBox.width > 0 && themeTextBox.height > 0);
           await viewer.getByRole('button', { name: '全屏显示大屏' }).click();

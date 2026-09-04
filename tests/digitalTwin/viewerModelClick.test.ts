@@ -80,28 +80,35 @@ test('命中 show-chart 效果时向宿主页面发送点击事件载荷', () =>
       binding: { id: 'binding', components: { clickEventBinding: {
         deviceSlots: [{ deviceType: { sourceUrl } }],
         events: [
-          { eventType: 'click', effects: ['highlight', 'show-chart'], chart: { id: 'chart-click', name: '点击大屏' } },
-          { eventType: 'click-cell', effects: ['show-chart'], chart: { id: 'chart-cell', name: '单元大屏' } },
+          { eventType: 'click', effects: ['highlight', 'show-chart'], chart: { id: 'chart-click', projectId: 'project-1', screenId: 'screen-click', name: '点击大屏' } },
+          { eventType: 'click-cell', effects: ['show-chart'], chart: { id: 'chart-cell', projectId: 'project-1', screenId: 'screen-cell', name: '单元大屏' } },
         ],
       } } },
     },
   } as unknown as SceneDocument;
   const emitted: unknown[] = [];
+  const shownScreens: unknown[] = [];
   const handler = createViewerModelClickHandler(scene, {
     updateSelection: () => {},
     setSlotHighlight: () => {},
     focusTarget: () => {},
     triggerManualEvents: () => {},
     emitAssetClicked: (payload) => emitted.push(payload),
+    showScreen: (screen) => shownScreens.push(screen),
   });
 
   handler('model', null, { focus: false });
   assert.deepEqual(emitted, [{ assetCode: '001005', chartId: 'chart-click' }]);
+  assert.deepEqual(shownScreens, [{ projectId: 'project-1', screenId: 'screen-click' }]);
 
   handler('locator', { locatorEntityId: 'locator', row: 2, column: 3, layer: 1 }, { focus: false });
   assert.deepEqual(emitted, [
     { assetCode: '001005', chartId: 'chart-click' },
     { assetCode: '001005', slot: { row: 2, column: 3, layer: 1 }, chartId: 'chart-cell' },
+  ]);
+  assert.deepEqual(shownScreens, [
+    { projectId: 'project-1', screenId: 'screen-click' },
+    { projectId: 'project-1', screenId: 'screen-cell' },
   ]);
 });
 
