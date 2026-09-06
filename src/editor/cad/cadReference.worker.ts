@@ -1,6 +1,7 @@
 import { CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET, type CadReferenceParseResult } from './cadReference';
 import { parseLargeCadReferenceDxf } from './cadReferenceLargeDxf';
 import type { CadReferenceDxfWorkerMessage, CadReferenceDxfWorkerRequest } from './cadReferenceWorkerMessages';
+import { decodeCadDxfBytes } from './cadTextEncoding';
 
 /** 向主线程发送 CAD 大文件解析进度；完成消息会转移紧凑几何缓冲区，避免复制数十 MB 数据。 */
 function postCadWorkerMessage(message: CadReferenceDxfWorkerMessage, transferables: Transferable[] = []): void {
@@ -92,17 +93,6 @@ function concatenateCadDxfChunks(chunks: Uint8Array[], totalBytes: number): Uint
     offset += chunk.byteLength;
   }
   return bytes;
-}
-
-/** 按 DXF 声明的中文代码页解码图层/块名称，几何数值仍保持 ASCII 兼容。 */
-function decodeCadDxfBytes(bytes: Uint8Array): string {
-  const headerPreview = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.byteLength, 16 * 1024)));
-  const encoding = /\$DWGCODEPAGE[\s\S]{0,80}ANSI_936/i.test(headerPreview) ? 'gb18030' : 'utf-8';
-  try {
-    return new TextDecoder(encoding).decode(bytes);
-  } catch {
-    return new TextDecoder().decode(bytes);
-  }
 }
 
 /** 执行单次 CAD 大文件完整扫描，并用高水位安全预算防止异常文件耗尽内存。 */

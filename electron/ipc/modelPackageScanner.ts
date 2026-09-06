@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, normalizeModelLengthUnit, type ModelLengthUnitInfo } from '../modelUnits.js';
 import type { AssetEntry, ImportModelFolderSkippedEntry, ModelPackageVariant } from '../types.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
@@ -532,7 +533,7 @@ async function readModelPackageMetadata(
   const metadataPath = path.join(packagePath, 'meta.json');
 
   try {
-    const content = await fs.readFile(metadataPath, 'utf-8');
+    const content = await readUtf8File(metadataPath, '模型包 meta.json');
     const parsed = JSON.parse(content) as unknown;
     const lengthUnitValue = isPlainObject(parsed) ? parsed.lengthUnit : undefined;
     // 模型包单位只来自 meta.lengthUnit；缺失或空值按米兜底，避免参数脚本尺寸被误当作源模型单位。
@@ -587,7 +588,7 @@ function findModelScripts(
 async function readDefaultAssetCodeFromScripts(scriptPaths: string[]): Promise<string | undefined> {
   for (const scriptPath of scriptPaths) {
     try {
-      const sourceText = await fs.readFile(scriptPath, 'utf-8');
+      const sourceText = await readUtf8File(scriptPath, '模型包脚本');
       const match = sourceText.match(/\bdefaultAssetCode\s*:\s*["'`]([^"'`]{1,128})["'`]/);
       const defaultAssetCode = match?.[1]?.trim();
       if (defaultAssetCode) return defaultAssetCode;

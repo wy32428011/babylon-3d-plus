@@ -47,6 +47,8 @@ export type SceneEnvironmentRuntimeOptions = {
     signal?: AbortSignal,
   ) => Promise<AssetContainer>;
   resolveAssetUrl?: (sourceUrl: string) => string;
+  waitForRenderReady?: (signal?: AbortSignal) => Promise<void>;
+  onAssetContainerSettled?: (container: AssetContainer) => void;
   onSnapshot?: (snapshot: EnvironmentRuntimeSnapshot) => void;
   pushLog?: (message: string) => void;
 };
@@ -307,6 +309,8 @@ export class SceneEnvironmentRuntime {
       this.freezeEntry(candidate);
 
       if (sequence !== this.loadSequence) throw createAbortError();
+      await this.options.waitForRenderReady?.(signal);
+      if (sequence !== this.loadSequence) throw createAbortError();
       const previous = this.current;
       this.current = candidate;
       candidate = null;
@@ -324,6 +328,8 @@ export class SceneEnvironmentRuntime {
       if (candidate) this.disposeEntry(candidate);
       else container.dispose();
       throw error;
+    } finally {
+      this.options.onAssetContainerSettled?.(container);
     }
   }
 

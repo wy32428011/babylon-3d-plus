@@ -497,6 +497,16 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       : { ...sceneDocument, entities: editModeThinInstancePlan.entities },
     [editModeThinInstancePlan.entities, sceneDocument],
   );
+  const resolvedSceneRuntimeEnvironment = resolveEnvironmentRuntimeSettings(
+    sceneDocument.sceneSettings.environment,
+    environmentRuntimeOverride,
+    { deferManagedCacheLoad: environmentStartupRelinkSessionId === sceneSessionId },
+  );
+  const sceneRuntimeEnvironmentSourceUrl = (
+    environmentApplyRequest?.runtimeEnvironment
+    ?? environmentApplyRequest?.environment
+    ?? resolvedSceneRuntimeEnvironment
+  )?.activeVariantUrl ?? null;
   const autoPatrolRoutes = useMemo<AutoPatrolPlaybackRoute[]>(
     () => collectAutoPatrolPlaybackRoutes(sceneDocument),
     [sceneDocument.entityIds, sceneDocument.entities],
@@ -1654,6 +1664,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const entity = editRuntimeSceneDocument.entities[entityId];
       return Boolean(entity?.components.modelAsset && !entity.components.modelArrayInstance);
     });
+    const totalSceneModels = modelEntityIds.length + (sceneRuntimeEnvironmentSourceUrl ? 1 : 0);
     const expectedBatchedEntities = countExpectedSceneBatchedEntities(
       sceneDocument.entityIds,
       editRuntimeSceneDocument.entities,
@@ -1703,7 +1714,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (!runtime) {
         reportSceneRuntimeProgress(sceneSessionId, {
           generation: sceneRuntimeReadinessGeneration,
-          totalModels: modelEntityIds.length,
+          totalModels: totalSceneModels,
           settledModels: 0,
           expectedBatchedEntities,
           batchedEntities: 0,
@@ -1722,11 +1733,23 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       for (const entityId of modelEntityIds) {
         if (runtime.getModelMeasurement(entityId).status !== 'loading') settledModels += 1;
       }
+      const environmentSnapshot = useEditorStore.getState().environmentRuntimeSnapshot;
+      const environmentReady = sceneRuntimeEnvironmentSourceUrl === null || (
+        environmentSnapshot.phase === 'ready'
+        && environmentSnapshot.sourceUrl === sceneRuntimeEnvironmentSourceUrl
+      );
+      if (sceneRuntimeEnvironmentSourceUrl && environmentReady) settledModels += 1;
       const runtimeMetrics = runtime.getPerformanceMetrics();
       const batchedEntities = Math.min(expectedBatchedEntities, runtimeMetrics.modelArrayBatchEntityCount);
-      const readyNow = settledModels >= modelEntityIds.length
+      const readyNow = settledModels >= totalSceneModels
         && batchedEntities >= expectedBatchedEntities;
-      const signature = `${settledModels}:${batchedEntities}:${runtimeMetrics.modelArrayBatchMeshCount}`;
+      const signature = [
+        settledModels,
+        batchedEntities,
+        runtimeMetrics.modelArrayBatchMeshCount,
+        environmentSnapshot.phase,
+        environmentSnapshot.sourceUrl ?? '',
+      ].join(':');
       sceneRuntimeReadinessStableSamplesRef.current = readyNow && signature === lastSignature
         ? sceneRuntimeReadinessStableSamplesRef.current + 1
         : readyNow ? 1 : 0;
@@ -1736,7 +1759,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
       reportSceneRuntimeProgress(sceneSessionId, {
         generation: sceneRuntimeReadinessGeneration,
-        totalModels: modelEntityIds.length,
+        totalModels: totalSceneModels,
         settledModels,
         expectedBatchedEntities,
         batchedEntities,
@@ -1789,6 +1812,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   }, [
     editRuntimeSceneDocument.entities,
     sceneDocument.entityIds,
+    sceneRuntimeEnvironmentSourceUrl,
     sceneRuntimeReadinessGeneration,
     sceneSessionId,
     pushLog,

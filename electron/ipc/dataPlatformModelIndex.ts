@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
+import { readUtf8File } from '../shared/strictUtf8.js';
 
 export const DATA_PLATFORM_MODEL_INDEX_VERSION = 1 as const;
 
@@ -75,7 +76,7 @@ export function createDataPlatformModelResourceKey(
 
 export async function readDataPlatformModelIndex(editorRoot: string): Promise<DataPlatformModelIndex> {
   try {
-    const content = await fs.readFile(getDataPlatformModelIndexPath(editorRoot), 'utf8');
+    const content = await readUtf8File(getDataPlatformModelIndexPath(editorRoot), '数据中台模型索引');
     return normalizeDataPlatformModelIndex(JSON.parse(content) as unknown);
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {
@@ -340,7 +341,7 @@ function compareResourceKeys(left: string, right: string): number {
 }
 
 async function hashRuntimeMetadata(metadataPath: string): Promise<string> {
-  const parsed = JSON.parse(await fs.readFile(metadataPath, 'utf8')) as unknown;
+  const parsed = JSON.parse(await readUtf8File(metadataPath, '模型包元数据')) as unknown;
   if (!isPlainObject(parsed)) throw new Error('数据中台模型 meta.json 根节点必须是对象。');
   const runtimeMetadata = { ...parsed };
   delete runtimeMetadata.thumbnail;

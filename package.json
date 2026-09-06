@@ -19,6 +19,7 @@
     "build:electron": "tsc -p tsconfig.node.json",
     "build:yzj:visual": "node scripts/build-yzj-direction-arrow-visual.mjs",
     "typecheck": "tsc -b",
+    "test:encoding": "node --test tests/encoding/utf8Integrity.test.mjs && node --experimental-strip-types --test tests/encoding/utf8Transport.test.ts tests/encoding/cadTextEncoding.test.ts",
     "test:light-editor": "node --experimental-strip-types --test tests/editor/lightEditor.test.ts",
     "test:auto-patrol": "node --experimental-strip-types --test tests/editor/autoPatrol.test.ts tests/editor/autoPatrolPlayback.test.ts",
     "test:manual-roam": "node --experimental-strip-types --test tests/roam/*.test.ts tests/runtime/manualRoamAvatarAsset.test.ts",

@@ -14,6 +14,7 @@ import type { DataPlatformScreenOverlayItem } from '../runtime/babylon/SceneRunt
 import { findDigitalTwinAsset, buildDigitalTwinAssetIndex, type DigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
 import { buildDigitalTwinSlotIndex } from '../shared/digitalTwinSlotCodes';
 import { bindSceneModelSelectionPointer } from '../shared/sceneModelSelectionPointer';
+import { readUtf8ResponseText } from '../shared/text/strictUtf8';
 import {
   AutoPatrolPlaybackController,
   collectAutoPatrolPlaybackRoutes,
@@ -88,6 +89,7 @@ import { createDefaultManualRoamCollisionBoundsResolver } from '../runtime/roam/
 import { computePlayerLoadingProgress, PLAYER_SCENE_LOADING_TIMEOUT_MS } from './playerLoadingProgress';
 import { DeferredAutoPatrolStartGate } from './deferredAutoPatrolStartGate';
 import { PlayerInitialLoadGate } from './playerInitialLoadState';
+import { restorePlayerGlobalOverview } from './playerGlobalOverview';
 import { resolvePublishedFetchConfig, startPublishedFetchDrive } from './publishedFetchDrive';
 import {
   createPublishedSkyboxCameraBoundsControllerForDocument,
@@ -123,7 +125,7 @@ function getErrorMessage(error: unknown): string {
 async function fetchJson(url: URL, signal: AbortSignal): Promise<unknown> {
   const response = await fetch(url, { cache: 'no-store', signal });
   if (!response.ok) throw new Error(`读取 ${url.pathname} 失败：HTTP ${response.status}。`);
-  return JSON.parse(await response.text()) as unknown;
+  return JSON.parse(await readUtf8ResponseText(response, `文件 ${url.pathname}`)) as unknown;
 }
 
 /** 数字孪生部署每次启动都从数据中台读取项目级配置，因此回滚版本不会回滚运行配置。 */
@@ -139,13 +141,15 @@ async function fetchDigitalTwinRuntimeConfig(
     headers: {
       Accept: 'application/json',
       'Cache-Control': 'no-store',
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json; charset=utf-8',
     },
     body: JSON.stringify({ projectId: config.digitalTwin.projectId }),
     signal,
   });
   if (!response.ok) throw new Error(`读取项目运行配置失败：HTTP ${response.status}。`);
-  const runtimeConfig = parseDigitalTwinProjectRuntimeConfig(JSON.parse(await response.text()) as unknown);
+  const runtimeConfig = parseDigitalTwinProjectRuntimeConfig(JSON.parse(
+    await readUtf8ResponseText(response, '项目运行配置响应'),
+  ) as unknown);
   if (runtimeConfig.projectId !== config.digitalTwin.projectId) throw new Error('项目运行配置与部署项目不匹配。');
   return runtimeConfig;
 }
@@ -170,7 +174,7 @@ function applyDigitalTwinRuntimeConfig(
 async function fetchText(url: URL, signal: AbortSignal): Promise<string> {
   const response = await fetch(url, { cache: 'no-store', signal });
   if (!response.ok) throw new Error(`读取 ${url.pathname} 失败：HTTP ${response.status}。`);
-  return response.text();
+  return readUtf8ResponseText(response, `文件 ${url.pathname}`);
 }
 
 /** 把 #RRGGBB 同步到 Babylon 清屏色。 */
@@ -742,6 +746,29 @@ export function PlayerApp() {
           getPatrolPhase: () => autoPatrolPlayback!.getSnapshot().phase,
           pausePatrol: () => { autoPatrolPlayback!.pause(false); },
           notifyCameraChangedWhilePaused: () => autoPatrolPlayback!.notifyCameraChangedWhilePaused(),
+          globalOverview: () => restorePlayerGlobalOverview({
+            cancelPendingAutoPatrol: () => autoPatrolStartGate.cancelPending(),
+            stopHistoryReplay: pauseHistoryReplay,
+            stopAutoPatrol: () => autoPatrolPlayback?.stop(),
+            disableManualRoam: () => manualRoamRuntime?.setEnabled(false),
+            closeFloatingControls: () => updateOpenedDigitalTwinFloatingControl(null),
+            cancelCameraTransition: () => { viewport?.cancelCameraTransition('replaced'); },
+            clearSelection: () => {
+              localHighlightedEntityIds = [];
+              setViewerSelectedEntityIds([]);
+              runtime?.clearLocalHighlight();
+              runtime?.clearExternalHighlight();
+              setChartMarkerError('');
+            },
+            resetStatusOverlay: () => setStatusOverlayVisible(resolveInitialPlayerStatusOverlayVisibility(
+              parsedConfig.viewer.showStatusOverlay,
+              Boolean(parsedConfig.digitalTwin),
+            )),
+            restoreInitialCamera: () => applySavedSceneCameraView(viewport!, sceneDocument.sceneSettings.camera, {
+              animate: true,
+              lockStandardOrientation: false,
+            }),
+          }),
           ...(preferredPatrolRoute ? {
             startAutoPatrol: () => {
               const nextControl = resolvePlayerFloatingControlToggle(

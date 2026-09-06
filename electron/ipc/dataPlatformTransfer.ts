@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
+import { decodeUtf8Text, readUtf8File } from '../shared/strictUtf8.js';
 
 const require = createRequire(import.meta.url);
 
@@ -144,7 +145,7 @@ export async function requestDataPlatformJson(options: {
       headers: {
         Accept: 'application/json',
         'Cache-Control': 'no-store',
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json; charset=utf-8',
       },
       body: JSON.stringify(options.body),
       signal: requestController.signal,
@@ -449,7 +450,7 @@ async function readResponseTextWithLimit(response: Response, maxBytes: number, c
     chunks.push(chunk);
   }
 
-  return Buffer.concat(chunks).toString('utf-8');
+  return decodeUtf8Text(Buffer.concat(chunks), `${context}响应`);
 }
 
 function readResponseMessage(responseText: string): string {
@@ -480,7 +481,7 @@ async function readResumeMetadata(
   try {
     const [stat, parsed] = await Promise.all([
       fs.stat(partialPath),
-      fs.readFile(metadataPath, 'utf8').then((content) => JSON.parse(content) as unknown),
+      readUtf8File(metadataPath, '下载续传元数据').then((content) => JSON.parse(content) as unknown),
     ]);
     const etag = isPlainObject(parsed) ? normalizeStrongEtag(parsed.etag) : null;
     if (!stat.isFile() || !isPlainObject(parsed) || parsed.url !== expectedUrl || typeof parsed.updatedAt !== 'string' || !etag) {

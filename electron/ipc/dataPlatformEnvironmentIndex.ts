@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { ProjectModelAssetEntry } from '../types.js';
 import { DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO } from '../modelUnits.js';
 import type { DataPlatformEnvironmentRecord } from './dataPlatformEnvironmentContract.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 
 const require = createRequire(import.meta.url);
 type AssetRegistryModule = typeof import('./assetRegistry.js');
@@ -145,7 +146,7 @@ export async function readDataPlatformEnvironmentIndex(editorRoot: string): Prom
   const indexPath = getDataPlatformEnvironmentIndexPath(editorRoot);
   await assertTrustedEnvironmentPath(editorRoot, indexPath, '环境模型 Sidecar 索引');
   try {
-    const parsed = JSON.parse(await fs.readFile(indexPath, 'utf8')) as unknown;
+    const parsed = JSON.parse(await readUtf8File(indexPath, '数据中台环境资源索引')) as unknown;
     return normalizeDataPlatformEnvironmentIndex(parsed);
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {

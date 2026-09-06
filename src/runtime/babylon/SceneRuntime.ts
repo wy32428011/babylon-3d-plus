@@ -84,6 +84,7 @@ import {
 } from '../../editor/model/SceneDocument';
 import { LocatorFetchRuntime, type FetchContainerRecord } from './LocatorFetchRuntime';
 import { createId } from '../../shared/ids';
+import { readUtf8ResponseText } from '../../shared/text/strictUtf8';
 import type { TelemetryBindingComponent } from '../../editor/model/telemetryBinding';
 import {
   createModelGeneratorTargetSignature,
@@ -97,6 +98,7 @@ import {
   type CadReferenceParseResult,
 } from '../../editor/cad/cadReference';
 import { createCadReferenceDxfWorkerTask } from '../../editor/cad/cadReferenceWorkerClient';
+import { decodeCadDxfBytes } from '../../editor/cad/cadTextEncoding';
 import {
   ExternalModelScriptRuntime,
   type ExternalModelScriptRuntimeMode,
@@ -112,6 +114,7 @@ import {
   SceneEnvironmentRuntime,
   type SceneEnvironmentApplyOptions,
 } from './SceneEnvironmentRuntime';
+import { waitForSceneRenderReady } from './sceneRenderReadiness';
 import type {
   EnvironmentApplyResult,
   EnvironmentRuntimeSnapshot,
@@ -782,6 +785,8 @@ export class SceneRuntime {
     total: number;
     reportedAt: number;
   }>();
+  /** 环境容器必须等加入场景并完成首帧渲染后，才能结算对应的统一进度单元。 */
+  private readonly environmentLoadProgressUnits = new WeakMap<AssetContainer, number>();
 
   constructor(
     private readonly scene: Scene,
@@ -808,6 +813,8 @@ export class SceneRuntime {
       loadAssetContainer: (rootUrl, fileName, signal) => {
         return this.loadEnvironmentAssetContainer(rootUrl, fileName, signal);
       },
+      waitForRenderReady: (signal) => this.waitForEnvironmentRenderReady(signal),
+      onAssetContainerSettled: (container) => this.settleEnvironmentAssetContainerLoad(container),
       onSnapshot: onEnvironmentSnapshot,
       pushLog: this.pushLog,
     });
@@ -972,7 +979,7 @@ export class SceneRuntime {
     if (!fetchConfig.url) return null;
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const headers: Record<string, string> = { 'Content-Type': 'application/json; charset=utf-8' };
       if (fetchConfig.apiKey) headers['X-API-Key'] = fetchConfig.apiKey;
 
       const response = await fetch(fetchConfig.url, {
@@ -987,7 +994,10 @@ export class SceneRuntime {
       }
 
       // dataflow 响应结构：data.records 为结果分组数组，货物记录在每组的 result 里
-      const groups: Array<{ result?: FetchContainerRecord[] }> = (await response.json())?.data?.records;
+      const payload = JSON.parse(await readUtf8ResponseText(response, 'Fetch 响应')) as {
+        data?: { records?: Array<{ result?: FetchContainerRecord[] }> };
+      };
+      const groups = payload.data?.records;
       if (!Array.isArray(groups)) {
         this.pushLog('Fetch 响应缺少 data.records。');
         return null;
@@ -3952,7 +3962,7 @@ export class SceneRuntime {
       geometryPromise = fetch(resolveRuntimeAssetUrl(cadReference.sourceUrl), { signal: abortController.signal })
         .then(async (response) => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const content = await response.text();
+          const content = decodeCadDxfBytes(new Uint8Array(await response.arrayBuffer()));
           return parseCadReferenceDxf(content, { unitScaleToMeters: cadReference.unitScaleToMeters });
         });
     }
@@ -8061,24 +8071,44 @@ export class SceneRuntime {
    * 环境 GLB 使用独立并发窗口和会话级源缓存。
    * 避免 20 MB 厂区底座与设备模型抢同一条 4 路队列，同场景再次打开时不再重复 Draco/PNG 解析。
    */
-  private loadEnvironmentAssetContainer(
+  private async loadEnvironmentAssetContainer(
     rootUrl: string,
     fileName: string,
     loadSignal?: AbortSignal,
     onProgress?: (event: ISceneLoaderProgressEvent) => void,
   ): Promise<AssetContainer> {
     const loadSequence = this.beginModelLoadProgressUnit(fileName);
-    return this.environmentLoadScheduler.run(
-      () => this.environmentAssetCache.acquireWorkingContainer({
-        cacheKey: `${rootUrl}${fileName}`,
-        scene: this.scene,
-        loadSource: () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, (event) => {
-          this.updateModelLoadProgressUnit(loadSequence, event);
-          onProgress?.(event);
+    try {
+      const container = await this.environmentLoadScheduler.run(
+        () => this.environmentAssetCache.acquireWorkingContainer({
+          cacheKey: `${rootUrl}${fileName}`,
+          scene: this.scene,
+          loadSource: () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, (event) => {
+            this.updateModelLoadProgressUnit(loadSequence, event);
+            onProgress?.(event);
+          }),
         }),
-      }),
-      loadSignal,
-    ).finally(() => this.settleModelLoadProgressUnit(loadSequence));
+        loadSignal,
+      );
+      this.environmentLoadProgressUnits.set(container, loadSequence);
+      return container;
+    } catch (error) {
+      this.settleModelLoadProgressUnit(loadSequence);
+      throw error;
+    }
+  }
+
+  /** 等待环境材质/纹理就绪，并确认环境已实际进入一帧场景渲染。 */
+  private waitForEnvironmentRenderReady(loadSignal?: AbortSignal): Promise<void> {
+    return waitForSceneRenderReady(this.scene, loadSignal);
+  }
+
+  /** 成功、失败或取消都只结算一次环境加载单元。 */
+  private settleEnvironmentAssetContainerLoad(container: AssetContainer): void {
+    const loadSequence = this.environmentLoadProgressUnits.get(container);
+    if (loadSequence === undefined) return;
+    this.environmentLoadProgressUnits.delete(container);
+    this.settleModelLoadProgressUnit(loadSequence);
   }
 
   /** 把完整资源 URL 拆成 Babylon SceneLoader 需要的 rootUrl 和 fileName。 */

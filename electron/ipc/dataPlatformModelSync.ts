@@ -7,6 +7,7 @@ import type {
   ProjectAssetIndex,
   ProjectModelAssetEntry,
 } from '../types.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import {
   DEFAULT_MODEL_LENGTH_UNIT_INFO,
 } from '../modelUnits.js';
@@ -577,7 +578,7 @@ async function validatePreparedPackages(
 async function normalizeLocalMetadata(prepared: PreparedPackage): Promise<void> {
   let metadata: Record<string, unknown> = {};
   try {
-    const content = await fs.readFile(prepared.metadataPath, 'utf-8');
+    const content = await readUtf8File(prepared.metadataPath, '模型资源断点元数据');
     const parsed = JSON.parse(content) as unknown;
     if (!isPlainObject(parsed)) throw new Error('meta.json 根节点必须是对象。');
     metadata = parsed;
@@ -611,7 +612,7 @@ async function validateModelFile(filePath: string): Promise<void> {
   }
 
   try {
-    const parsed = JSON.parse(await fs.readFile(filePath, 'utf-8')) as unknown;
+    const parsed = JSON.parse(await readUtf8File(filePath, '模型资源元数据')) as unknown;
     if (!isPlainObject(parsed) || !isPlainObject(parsed.asset)) throw new Error('缺少 glTF asset 节点。');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -931,4 +932,3 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
-

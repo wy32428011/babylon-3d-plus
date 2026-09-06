@@ -1,6 +1,6 @@
 :root {
   color: #f5f7fa;
-  font-family: Inter, "Microsoft YaHei", system-ui, sans-serif;
+  font-family: Inter, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
   background: #141414;
 }
 * {

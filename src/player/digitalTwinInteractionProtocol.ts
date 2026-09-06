@@ -2,11 +2,13 @@ export const DIGITAL_TWIN_BRIDGE_CHANNEL = 'zending.digital-twin.bridge' as cons
 export const DIGITAL_TWIN_BRIDGE_VERSION = 1 as const;
 export const DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY = 'hardwareGpu' as const;
 export const DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY = 'focusAsset' as const;
+export const DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY = 'globalOverview' as const;
 export const DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY = 'startAutoPatrol' as const;
 export const DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY = 'startManualRoam' as const;
 export const DIGITAL_TWIN_INITIAL_LOAD_PHASES = ['loading', 'complete'] as const;
 
 export const DIGITAL_TWIN_RUNTIME_ACTIONS = [
+  DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY,
   DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY,
   DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY,
 ] as const;
@@ -93,6 +95,14 @@ export type DigitalTwinCancelFocusAssetCommand = {
   requestId: string;
 };
 
+export type DigitalTwinGlobalOverviewCommand = {
+  channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
+  version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
+  sessionId: string;
+  type: 'command.globalOverview';
+  requestId: string;
+};
+
 export type DigitalTwinStartAutoPatrolCommand = {
   channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
   version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
@@ -110,6 +120,7 @@ export type DigitalTwinStartManualRoamCommand = {
 };
 
 export type DigitalTwinRuntimeActionCommand =
+  | DigitalTwinGlobalOverviewCommand
   | DigitalTwinStartAutoPatrolCommand
   | DigitalTwinStartManualRoamCommand;
 
@@ -330,6 +341,7 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
         && isBoundedString(value.requestId, MAX_IDENTIFIER_LENGTH)
         ? value as DigitalTwinCancelFocusAssetCommand
         : null;
+    case 'command.globalOverview':
     case 'command.startAutoPatrol':
     case 'command.startManualRoam':
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'requestId'])

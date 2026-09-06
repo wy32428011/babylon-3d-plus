@@ -6,6 +6,7 @@ import {
   DIGITAL_TWIN_BRIDGE_CHANNEL,
   DIGITAL_TWIN_BRIDGE_VERSION,
   DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
+  DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY,
   DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
   DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY,
   DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY,
@@ -31,12 +32,13 @@ test('Viewer 协议常量与 v1 合同夹具保持一致', () => {
   assert.deepEqual(fixture.viewerErrorCodes, [...DIGITAL_TWIN_VIEWER_ERROR_CODES]);
   assert.equal(DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY, 'hardwareGpu');
   assert.equal(DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY, 'focusAsset');
+  assert.equal(DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY, 'globalOverview');
   assert.equal(DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY, 'startAutoPatrol');
   assert.equal(DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY, 'startManualRoam');
 });
 
-test('v1 协议解析自动巡检、手动漫游命令及无资产结果', () => {
-  for (const action of ['startAutoPatrol', 'startManualRoam'] as const) {
+test('v1 协议解析全局概览、自动巡检、手动漫游命令及无资产结果', () => {
+  for (const action of ['globalOverview', 'startAutoPatrol', 'startManualRoam'] as const) {
     const command = {
       channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
       version: DIGITAL_TWIN_BRIDGE_VERSION,

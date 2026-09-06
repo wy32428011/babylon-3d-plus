@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { createPendingChunkIndexes } from './digitalTwinPublishProtocol.js';
 import { resolveDataPlatformRemoteUrl } from './dataPlatformTransfer.js';
 import type { DigitalTwinRuntimeConfigSavePayload } from '../shared/digitalTwinRuntimeConfig.js';
+import { decodeUtf8Text } from '../shared/strictUtf8.js';
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const COMMIT_TIMEOUT_MS = 10 * 60_000;
@@ -256,7 +257,7 @@ export class DigitalTwinUploadClient {
         headers: {
           Accept: 'application/json',
           'Cache-Control': 'no-store',
-          ...(binaryBody ? { 'Content-Type': 'application/octet-stream' } : method === 'GET' ? {} : { 'Content-Type': 'application/json' }),
+          ...(binaryBody ? { 'Content-Type': 'application/octet-stream' } : method === 'GET' ? {} : { 'Content-Type': 'application/json; charset=utf-8' }),
         },
         ...(requestBody === undefined ? {} : { body: requestBody }),
         signal: controller.signal,
@@ -330,7 +331,7 @@ async function readResponseText(response: Response, maxBytes: number): Promise<s
     if (total > maxBytes) throw new Error('数字孪生接口响应过大，已停止读取。');
     chunks.push(chunk);
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return decodeUtf8Text(Buffer.concat(chunks), '数字孪生接口响应');
 }
 
 function normalizePublishTask(value: unknown): DigitalTwinPublishTask {

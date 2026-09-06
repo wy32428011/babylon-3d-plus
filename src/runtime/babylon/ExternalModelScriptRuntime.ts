@@ -5,6 +5,7 @@ import type { ModelAssetComponent, ModelScriptAsset } from '../../editor/model/c
 import type { ModelParameterDefinition, ModelParameterValue, ModelParameterValues } from '../../editor/model/modelParameters';
 import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
+import { readUtf8ResponseText } from '../../shared/text/strictUtf8';
 
 type ExternalModelScriptInstance = {
   onStart?: () => void;
@@ -244,7 +245,7 @@ async function fetchScriptText(scriptAsset: ModelScriptAsset, assetRevision: str
   if (!response.ok) {
     throw new Error(`无法读取脚本：${response.status}`);
   }
-  return response.text();
+  return readUtf8ResponseText(response, `模型脚本 ${scriptAsset.name}`);
 }
 
 /** 外置脚本跟随模型包导入版本追加查询参数，避免重新导入后仍读取旧脚本文本。 */

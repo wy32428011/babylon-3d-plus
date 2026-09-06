@@ -14,6 +14,7 @@ import type {
   ProjectAssetIndex,
   ProjectModelAssetEntry,
 } from '../types.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 import {
   activateProjectRoot,
@@ -884,7 +885,7 @@ async function rewriteSceneForEditorRoot(sceneSourcePath: string, editorRoot: st
 async function readProjectPackageJson(filePath: string, label: string): Promise<unknown> {
   const fileSize = await readProjectPackageTextFileSize(filePath, label);
   assertProjectPackageHeapCapacity(fileSize, `${label}“${path.basename(filePath)}”`);
-  return JSON.parse(await fs.readFile(filePath, 'utf-8')) as unknown;
+  return JSON.parse(await readUtf8File(filePath, '数据中台工程 JSON 文件')) as unknown;
 }
 
 async function readProjectPackageTextFileSize(filePath: string, label: string): Promise<bigint> {

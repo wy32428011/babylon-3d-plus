@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { ProjectSkyboxAssetEntry } from '../types.js';
 import type { DataPlatformSkyboxRecord } from './dataPlatformSkyboxContract.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 
 // 源码测试直接执行 .ts，Electron 构建产物执行 .js；按当前扩展名复用 Task1 契约，避免复制校验逻辑。
 const require = createRequire(import.meta.url);
@@ -128,7 +129,7 @@ export function resolveSkyboxIndexEntryPath(editorRoot: string, relativePath: st
 export async function readDataPlatformSkyboxIndex(editorRoot: string): Promise<DataPlatformSkyboxIndex> {
   const indexPath = getDataPlatformSkyboxIndexPath(editorRoot);
   try {
-    const content = await fs.readFile(indexPath, 'utf8');
+    const content = await readUtf8File(indexPath, '数据中台天空盒索引');
     let parsed: unknown;
     try {
       parsed = JSON.parse(content) as unknown;
