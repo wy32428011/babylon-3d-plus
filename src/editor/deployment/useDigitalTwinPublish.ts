@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { serializeScene } from '../project/SceneSerializer';
+import { getSceneShadowBakeError } from '../model/sceneShadowBake';
 import { useEditorStore } from '../store/editorStore';
 
 export type DigitalTwinPublishStatus =
@@ -90,6 +91,12 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
 
   const start = useCallback(async (options: StartDigitalTwinPublishOptions): Promise<DigitalTwinPublishResult | null> => {
     if (!window.editorApi?.publishDigitalTwin) return null;
+    const shadowError = getSceneShadowBakeError(useEditorStore.getState().scene);
+    if (shadowError) {
+      setState((current) => ({ ...current, status: 'error', error: shadowError }));
+      pushLog(shadowError);
+      return null;
+    }
     const requestId = crypto.randomUUID();
     const sceneContent = serializeScene(useEditorStore.getState().scene);
     contextRequestIdRef.current += 1;

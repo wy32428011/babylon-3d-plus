@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { serializeScene } from '../project/SceneSerializer';
+import { getSceneShadowBakeError } from '../model/sceneShadowBake';
 import { useEditorStore } from '../store/editorStore';
 import {
   createDeploymentSceneSummary,
@@ -263,6 +264,8 @@ export function useDeploymentExport(): DeploymentExportController {
 
     try {
       const exportWebProject = window.editorApi?.exportWebProject;
+      const shadowError = getSceneShadowBakeError(sceneSnapshot);
+      if (shadowError) throw new Error(shadowError);
       if (!exportWebProject) {
         throw new Error('当前环境未提供部署导出能力，请使用 Electron 桌面编辑器。');
       }

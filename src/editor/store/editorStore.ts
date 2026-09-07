@@ -1,5 +1,6 @@
 import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../model/alarmManager';
 import { create } from 'zustand';
+import { getSceneShadowBakeSignature, sanitizeSceneShadowBake, type SceneShadowBakeSnapshot } from '../model/sceneShadowBake';
 import type { ManualRoamAvatar } from '../model/components';
 import {
   createCommandHistory,
@@ -508,6 +509,11 @@ type EditorState = {
   setCameraViewDistance: (viewDistance: number) => void;
   updateSensitivitySetting: (key: SceneSensitivitySettingKey, value: number) => void;
   updateShadowSettings: (patch: Partial<SceneShadowSettings>) => void;
+  shadowBakeRequest: { id: string; signature: string } | null;
+  shadowBakeStatus: { phase: 'idle' | 'baking' | 'error'; message: string | null };
+  requestShadowBake: () => void;
+  completeShadowBake: (requestId: string, snapshot: SceneShadowBakeSnapshot) => void;
+  failShadowBake: (requestId: string, message: string) => void;
   updateEnvironmentConfig: (environment: SceneEnvironmentSettings | null) => void;
   setDefaultCargoGenerator: (generatorId: string | null) => void;
   requestEnvironmentApply: (
@@ -667,6 +673,8 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
   return {
     scene,
     sceneSessionId,
+    shadowBakeRequest: null,
+    shadowBakeStatus: { phase: 'idle', message: null },
     persistedSceneContent: serializeScene(scene),
     history: createCommandHistory(),
     hierarchySelectionIds: [],
@@ -2866,14 +2874,66 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
+  shadowBakeRequest: null,
+  shadowBakeStatus: { phase: 'idle', message: null },
+  requestShadowBake: () => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '更新静态阴影');
+      if (state.shadowBakeRequest) return state;
+      if (!state.scene.sceneSettings.shadows.enabled || state.scene.sceneSettings.shadows.mode === 'realtime') return state;
+      if (!state.scene.sceneSettings.environment) return {
+        shadowBakeStatus: { phase: 'error', message: '请先添加环境模型作为阴影接收面。' },
+      };
+      return {
+        shadowBakeRequest: { id: createId('shadow_bake'), signature: getSceneShadowBakeSignature(state.scene) },
+        shadowBakeStatus: { phase: 'baking', message: '正在生成静态阴影，请稍候…' },
+      };
+    });
+  },
+  completeShadowBake: (requestId, snapshot) => {
+    set((state) => {
+      const request = state.shadowBakeRequest;
+      if (request?.id !== requestId) return state;
+      const bake = sanitizeSceneShadowBake(snapshot);
+      if (!bake || bake.signature !== request.signature
+        || request.signature !== getSceneShadowBakeSignature(state.scene)
+        || isRuntimePreviewState(state)) return {
+        shadowBakeRequest: null,
+        shadowBakeStatus: { phase: 'error', message: '烘焙期间场景已变化或结果无效，请重新更新阴影。' },
+      };
+      const command = updateSceneDocumentCommand('更新静态阴影', (scene) => ({
+        ...scene,
+        sceneSettings: { ...scene.sceneSettings, shadows: { ...scene.sceneSettings.shadows, bake } },
+      }));
+      return {
+        ...executeCommand(state.scene, state.history, command),
+        shadowBakeRequest: null,
+        shadowBakeStatus: { phase: 'idle', message: '静态阴影已更新。' },
+        logs: prependLog(state.logs, `静态阴影已更新：${bake.surfaces.length} 个环境表面。`),
+      };
+    });
+  },
+  failShadowBake: (requestId, message) => {
+    set((state) => state.shadowBakeRequest?.id !== requestId ? state : {
+      shadowBakeRequest: null,
+      shadowBakeStatus: { phase: 'error', message },
+      logs: prependLog(state.logs, `更新静态阴影失败：${message}`),
+    });
+  },
   updateShadowSettings: (patch) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改场景阴影');
       const before = state.scene.sceneSettings.shadows;
-      const next = sanitizeSceneShadowSettings({ ...before, ...patch });
+      // 调整滑块不重复扫描数十 MiB 的已验证 PNG；只有替换快照时重新校验。
+      const next = sanitizeSceneShadowSettings({ ...before, ...patch, bake: patch.bake ?? null });
+      if (!Object.prototype.hasOwnProperty.call(patch, 'bake')) next.bake = before.bake ?? null;
       if (isSceneShadowSettingsEqual(before, next)) return state;
 
       return {
+        ...(state.shadowBakeRequest ? {
+          shadowBakeRequest: null,
+          shadowBakeStatus: { phase: 'idle' as const, message: '阴影设置已更改，当前烘焙已取消，请重新更新阴影。' },
+        } : {}),
         scene: {
           ...state.scene,
           sceneSettings: {

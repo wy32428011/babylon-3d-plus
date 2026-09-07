@@ -1,4 +1,5 @@
 import { createId } from '../../shared/ids';
+import { sanitizeSceneShadowBake, type SceneShadowBakeSnapshot } from './sceneShadowBake';
 import type { CadReferenceComponent, LightKind, MeshKind, PoiEffectKind, SkyboxComponent, SkyboxFormat, SkyboxResolution } from './components';
 import type { Entity } from './Entity';
 import type { Vector3Data } from './math';
@@ -137,6 +138,9 @@ export type SceneShadowQuality = (typeof SCENE_SHADOW_QUALITIES)[number];
 /** 场景级阴影。darkness 与 Babylon ShadowGenerator.darkness 一致：0 最深，1 无阴影。 */
 export type SceneShadowSettings = {
   enabled: boolean;
+  /** 缺省使用静态烘焙；实时阴影由用户显式选择。 */
+  mode?: 'baked' | 'realtime';
+  bake?: SceneShadowBakeSnapshot | null;
   quality: SceneShadowQuality;
   darkness: number;
   catcherEnabled: boolean;
@@ -158,6 +162,8 @@ export type SceneShadowSettings = {
 
 export const DEFAULT_SCENE_SHADOW_SETTINGS: SceneShadowSettings = {
   enabled: true,
+  mode: 'baked',
+  bake: null,
   quality: SCENE_SHADOW_QUALITY_DEFAULT,
   darkness: SCENE_SHADOW_DARKNESS_DEFAULT,
   catcherEnabled: true,
@@ -382,6 +388,9 @@ export function sceneShadowConcentrationPercentToDarkness(percent: number): numb
 
 export function isSceneShadowSettingsEqual(a: SceneShadowSettings, b: SceneShadowSettings): boolean {
   return a.enabled === b.enabled
+    && (a.mode ?? 'baked') === (b.mode ?? 'baked')
+    && a.bake?.signature === b.bake?.signature
+    && a.bake?.createdAt === b.bake?.createdAt
     && a.quality === b.quality
     && a.darkness === b.darkness
     && a.catcherEnabled === b.catcherEnabled
@@ -488,6 +497,8 @@ export function sanitizeSceneShadowSettings(
 ): SceneShadowSettings {
   return {
     enabled: typeof value?.enabled === 'boolean' ? value.enabled : DEFAULT_SCENE_SHADOW_SETTINGS.enabled,
+    mode: value?.mode === 'realtime' ? 'realtime' : 'baked',
+    bake: sanitizeSceneShadowBake(value?.bake),
     quality: isSceneShadowQuality(value?.quality) ? value.quality : DEFAULT_SCENE_SHADOW_SETTINGS.quality,
     darkness: sanitizeSceneShadowDarkness(
       typeof value?.darkness === 'number' ? value.darkness : DEFAULT_SCENE_SHADOW_SETTINGS.darkness,

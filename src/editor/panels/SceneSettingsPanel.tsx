@@ -1,3 +1,4 @@
+import { getSceneShadowBakeSignature } from '../model/sceneShadowBake';
 import {
   useEffect,
   useMemo,
@@ -196,6 +197,9 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const setCameraViewDistance = useEditorStore((state) => state.setCameraViewDistance);
   const updateSensitivitySetting = useEditorStore((state) => state.updateSensitivitySetting);
   const updateShadowSettings = useEditorStore((state) => state.updateShadowSettings);
+  const requestShadowBake = useEditorStore((state) => state.requestShadowBake);
+  const shadowBakeStatus = useEditorStore((state) => state.shadowBakeStatus);
+  const runtimeMode = useEditorStore((state) => state.runtimeMode);
   const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
   const setDefaultCargoGenerator = useEditorStore((state) => state.setDefaultCargoGenerator);
   const requestEnvironmentApply = useEditorStore((state) => state.requestEnvironmentApply);
@@ -220,6 +224,12 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
 
   const environment = scene.sceneSettings.environment;
   const shadows = scene.sceneSettings.shadows;
+  const bakedMode = shadows.mode !== 'realtime';
+  const shadowBakeSignature = useMemo(() => getSceneShadowBakeSignature(scene), [scene.entities,
+    scene.sceneSettings.environment, shadows.sunAzimuthDegrees, shadows.sunElevationDegrees,
+    shadows.darkness, shadows.bias, shadows.normalBias]);
+  const shadowBakeLabel = !shadows.bake ? '未烘焙'
+    : shadows.bake.signature === shadowBakeSignature ? '可用' : '已过期';
   const shadowConcentration = sceneShadowDarknessToConcentrationPercent(shadows.darkness);
   const skybox = getSceneSkyboxSettings(scene);
   const cargoGeneratorOptions = scene.entityIds
@@ -655,7 +665,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         ))}
       </fieldset>
 
-      <fieldset className="transform-fieldset">
+      <fieldset className="transform-fieldset" disabled={shadowBakeStatus.phase === 'baking' || runtimeMode === 'preview'}>
         <legend>阴影</legend>
         <label className="inspector-row environment-visible-row">
           <span>启用阴影</span>
@@ -667,6 +677,25 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
           />
         </label>
         <label className="inspector-row">
+          <span>阴影模式</span>
+          <select value={shadows.mode ?? 'baked'} disabled={props.readOnly || runtimeMode === 'preview'}
+            onChange={(event) => updateShadowSettings({ mode: event.target.value === 'realtime' ? 'realtime' : 'baked' })}>
+            <option value="baked">静态烘焙（FPS 优先）</option>
+            <option value="realtime">实时阴影（高级）</option>
+          </select>
+        </label>
+        {bakedMode && <>
+          <div className="inspector-row"><span>烘焙状态</span><span role="status">{shadowBakeStatus.phase === 'baking' ? '正在烘焙' : shadowBakeStatus.phase === 'error' ? '更新失败' : shadowBakeLabel}</span></div>
+          <button type="button" disabled={props.readOnly || runtimeMode === 'preview' || !shadows.enabled
+            || !environment || shadowBakeStatus.phase === 'baking'} onClick={requestShadowBake}>
+            {shadowBakeStatus.phase === 'baking' ? '正在更新阴影…' : '更新阴影'}
+          </button>
+          <p className="muted" role={shadowBakeStatus.phase === 'error' ? 'alert' : undefined}
+            style={shadowBakeStatus.phase === 'error' ? { color: '#ff6b6b' } : undefined}>
+            {!environment ? '请先添加环境模型作为阴影接收面。' : shadowBakeStatus.message}</p>
+          <p className="muted">静态设备及已识别的固定货架、围栏、框架可参与烘焙；运动设备不留下静态影子。地面平铺纹理会保留，必要时共用静态阴影遮罩，不重新计算实时阴影。布局或太阳方向变化后需更新阴影。</p>
+        </>}
+        {!bakedMode && <label className="inspector-row">
           <span>阴影质量</span>
           <select
             disabled={props.readOnly || !shadows.enabled}
@@ -677,7 +706,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             <option value="balanced">均衡（缓存地面）</option>
             <option value="quality">高质量（实时）</option>
           </select>
-        </label>
+        </label>}
         <label className="scene-slider-row">
           <span>阴影浓度</span>
           <input
@@ -699,7 +728,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             onChange={(event) => handleShadowConcentrationChange(event.target.value)}
           />
         </label>
-        <label className="inspector-row environment-visible-row">
+        {!bakedMode && <label className="inspector-row environment-visible-row">
           <span>阴影地面</span>
           <input
             type="checkbox"
@@ -707,8 +736,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             checked={shadows.catcherEnabled}
             onChange={(event) => updateShadowSettings({ catcherEnabled: event.target.checked })}
           />
-        </label>
-        {SHADOW_SLIDER_ROWS.map((row) => (
+        </label>}
+        {SHADOW_SLIDER_ROWS.filter((row) => !bakedMode || row.key === 'sunAzimuthDegrees' || row.key === 'sunElevationDegrees').map((row) => (
           <label className="scene-slider-row" key={row.key} title={row.title}>
             <span>{row.label}</span>
             <input
@@ -732,7 +761,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             />
           </label>
         ))}
-        <p className="muted">默认性能/均衡档缓存一张阴影贴图：模型只投射，环境和阴影地面接收。高质量档才对全部模型做实时级联阴影。没有可见方向光时使用自动太阳光。</p>
+        {!bakedMode && <p className="muted">实时阴影会增加 CPU/GPU 开销。性能/均衡档缓存阴影贴图，运动设备触发更新；高质量档使用实时级联阴影。没有可见方向光时使用自动太阳光。</p>}
       </fieldset>
 
       <fieldset className="transform-fieldset">

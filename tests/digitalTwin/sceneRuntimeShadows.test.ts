@@ -27,6 +27,7 @@ import {
 
 const DEFAULT_SHADOW_SETTINGS = {
   enabled: true,
+  mode: 'realtime' as const,
   quality: 'balanced' as const,
   darkness: 0.32,
   catcherEnabled: true,
@@ -46,6 +47,7 @@ function createRuntimeFixture(): { engine: NullEngine; scene: Scene; runtime: Sc
   const camera = new FreeCamera('ShadowTestCamera', new Vector3(0, 8, -12), scene);
   scene.activeCamera = camera;
   const runtime = new SceneShadowRuntime(scene);
+  runtime.applySettings(DEFAULT_SHADOW_SETTINGS);
   return { engine, scene, runtime };
 }
 

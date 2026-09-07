@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { getSceneShadowBakeErrorContract, getSceneShadowBakeSignatureContract } from '../shared/sceneShadowBakeContract.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { readUtf8File } from '../shared/strictUtf8.js';
@@ -176,6 +177,13 @@ export async function prepareDeploymentExport(
     if (skippedCadCount > 0) warnings.push(`发布包已跳过 ${skippedCadCount} 个 CAD 参考图及其 DXF 文件。`);
   }
   const scene = requirePlainObject(sceneFile.scene, '场景内容');
+  const shadowBakeError = getSceneShadowBakeErrorContract(scene);
+  if (shadowBakeError) throw new Error(shadowBakeError);
+  const shadowSettings = isPlainObject(scene.sceneSettings) && isPlainObject(scene.sceneSettings.shadows)
+    ? scene.sceneSettings.shadows : null;
+  const validBake = shadowSettings && isPlainObject(shadowSettings.bake)
+    && shadowSettings.bake.signature === getSceneShadowBakeSignatureContract(scene)
+    ? shadowSettings.bake : null;
   const references = collectSceneReferences(scene);
   const projectContext = await loadProjectAssetContext(signal, warnings, options.skyboxCacheContext);
   const bundles = new Map<string, ResourceBundle>();
@@ -234,6 +242,8 @@ export async function prepareDeploymentExport(
   scene.mqttConfig = createDisabledSceneMqttConfig();
   const runtimeMqttConfig = createRuntimeMqttConfig(originalMqttConfig, warnings);
   removeOptionalEditorOnlyUrls(scene);
+  // 只迁移已验证结果的签名；资源 URL 换成部署路径不代表几何或布局发生变化。
+  if (validBake) validBake.signature = getSceneShadowBakeSignatureContract(scene);
   assertNoLocalMachinePaths(sceneFile);
 
   return {

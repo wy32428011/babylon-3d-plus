@@ -20,6 +20,7 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import type { SceneShadowQuality, SceneShadowSettings } from '../../editor/model/SceneDocument';
+import { setEnvironmentShadowGenerator } from './EnvironmentShadowMaterialPlugin.ts';
 
 export const SCENE_SHADOW_SUN_NAME = '__SceneShadowSun';
 export const SCENE_SHADOW_CATCHER_NAME = '__SceneShadowCatcher';
@@ -30,6 +31,7 @@ export const EDITOR_FILL_LIGHT_SHADOW_INTENSITY = 0.2;
 /** 与 SceneDocument.DEFAULT_SCENE_SHADOW_SETTINGS 保持同值，避免运行时单测加载场景文档模块。 */
 const DEFAULT_SHADOW_SETTINGS: SceneShadowSettings = {
   enabled: true,
+  mode: 'baked',
   quality: 'balanced',
   darkness: 0.32,
   catcherEnabled: true,
@@ -90,7 +92,7 @@ function hasNonShadowAncestor(mesh: AbstractMesh): boolean {
 }
 
 /** 编辑器辅助网格、天空盒和阴影接收地面不应写入阴影贴图。 */
-function isShadowCaster(mesh: AbstractMesh): boolean {
+export function isShadowCaster(mesh: AbstractMesh): boolean {
   if (mesh.name === SCENE_SHADOW_CATCHER_NAME) return false;
   return isShadowSurface(mesh);
 }
@@ -184,6 +186,7 @@ export class SceneShadowRuntime {
     this.applyFillLightPolicy();
     this.syncSceneMeshes(true);
     this.meshSyncObserver = scene.onBeforeRenderObservable.add(() => {
+      if (!this.settings.enabled || this.settings.mode !== 'realtime') return;
       this.syncSceneMeshes();
       if (!this.isCachedProfile()) this.updateShadowDistance();
       this.applyFillLightPolicy();
@@ -212,11 +215,16 @@ export class SceneShadowRuntime {
     const qualityChanged = settings.quality !== this.settings.quality;
     const enabledChanged = settings.enabled !== this.settings.enabled;
     this.settings = { ...DEFAULT_SHADOW_SETTINGS, ...settings };
-    if (!this.settings.enabled) {
+    if (!this.settings.enabled || this.settings.mode !== 'realtime') {
       this.catcher.setEnabled(false);
       this.disposePrimaryGenerator();
       this.disposeAutoSun();
       this.restoreFillLightPolicy();
+      for (const [mesh, observer] of this.meshTransformObservers) mesh.onAfterWorldMatrixUpdateObservable.remove(observer);
+      this.meshTransformObservers.clear();
+      for (const mesh of this.knownMeshes) applyReceiveShadows(mesh, false);
+      this.knownMeshes.clear();
+      this.meshCollectionSignature = '';
       return;
     }
 
@@ -231,6 +239,7 @@ export class SceneShadowRuntime {
     }
 
     this.applyGeneratorTuning();
+    setEnvironmentShadowGenerator(this.scene, this.primaryGenerator);
     this.updateShadowDistance();
     this.updateAutoSunPose();
     this.syncSceneMeshes(true);
@@ -276,6 +285,7 @@ export class SceneShadowRuntime {
    */
   private syncSceneMeshes(force = false): void {
     if (this.disposed) return;
+    if (!this.settings.enabled || this.settings.mode !== 'realtime') return;
     const meshes = this.scene.meshes;
     const lastMeshId = meshes.length > 0 ? meshes[meshes.length - 1].uniqueId : 0;
     const signature = String(meshes.length) + ':' + lastMeshId;
@@ -332,7 +342,7 @@ export class SceneShadowRuntime {
 
   private refreshPrimary(): void {
     if (this.disposed) return;
-    if (!this.settings.enabled) return;
+    if (!this.settings.enabled || this.settings.mode !== 'realtime') return;
     const entityLight = this.firstEnabledDirectional();
     if (entityLight) {
       if (this.autoSun && this.autoSun !== entityLight) this.disposeAutoSun();
@@ -358,6 +368,7 @@ export class SceneShadowRuntime {
     this.disposePrimaryGenerator();
     this.primaryLight = light;
     this.primaryGenerator = this.createPrimaryGenerator(light);
+    setEnvironmentShadowGenerator(this.scene, this.primaryGenerator);
     this.syncSceneMeshes(true);
   }
 
@@ -553,7 +564,7 @@ export class SceneShadowRuntime {
   /** 压低不投影的半球补光和过强 IBL，让方向光阴影有足够对比。 */
   private applyFillLightPolicy(): void {
     if (this.disposed) return;
-    if (!this.settings.enabled) {
+    if (!this.settings.enabled || this.settings.mode !== 'realtime') {
       this.restoreFillLightPolicy();
       return;
     }
@@ -603,6 +614,7 @@ export class SceneShadowRuntime {
   }
 
   private disposePrimaryGenerator(): void {
+    setEnvironmentShadowGenerator(this.scene, null);
     if (!this.primaryGenerator) {
       this.primaryLight = null;
       return;

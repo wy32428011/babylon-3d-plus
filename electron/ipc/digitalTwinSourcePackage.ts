@@ -194,6 +194,7 @@ export async function buildDigitalTwinSourcePackage(
       stableSkyboxObjects,
       stableSkyboxBundles,
       sourceEnvironmentPackages,
+      warnings,
     );
     await validateResourceBundleSourcePaths(bundles, projectRoot, sharedResourcesRoot, options.signal);
     const estimatedFiles = scenes.length + bundles.length + 1;
@@ -522,8 +523,16 @@ function collectResourceBundles(
   stableSkyboxObjects: WeakSet<object>,
   stableSkyboxBundles: ReadonlyMap<string, ResourceBundle>,
   sourceEnvironmentPackages: readonly SourceEnvironmentPackageIntegrity[],
+  warnings: string[],
 ): ResourceBundle[] {
   const bundles = new Map<string, ResourceBundle>();
+  const skippedRoots = new Set<string>();
+  const warnSkippedResource = (sourceRoot: string): void => {
+    const key = createPathKey(sourceRoot);
+    if (skippedRoots.has(key)) return;
+    skippedRoots.add(key);
+    warnings.push(`场景引用的资源不在当前项目或共享资源缓存内：${sourceRoot}；源工程包已跳过该资源，继续发布。重新打开源工程时可能需要重新导入该资源。`);
+  };
   const sourceEnvironmentPackagesByPath = new Map(
     sourceEnvironmentPackages.map((item) => [createPathKey(item.sourcePath), item]),
   );
@@ -568,6 +577,7 @@ function collectResourceBundles(
         projectRoot,
         sharedResourcesRoot,
         sourceEnvironmentPackagesByPath,
+        warnSkippedResource,
       );
       if (!bundle) return;
       registerBundle(bundle);
@@ -619,6 +629,7 @@ function resolveResourceBundle(
   projectRoot: string,
   sharedResourcesRoot: string,
   sourceEnvironmentPackagesByPath: ReadonlyMap<string, SourceEnvironmentPackageIntegrity>,
+  warnSkippedResource: (sourceRoot: string) => void,
 ): ResourceBundle | null {
   let candidate = rawValue.trim();
   if (!candidate) return null;
@@ -645,7 +656,8 @@ function resolveResourceBundle(
       ...nativeSegments.slice(0, environmentCachePath.revisionEndIndex),
     );
     if (!isPathInsideOrEqual(projectRoot, sourceRoot) && !isPathInsideOrEqual(sharedResourcesRoot, sourceRoot)) {
-      throw new Error(`场景引用的资源不在当前项目或共享资源缓存内：${rawValue}`);
+      warnSkippedResource(sourceRoot);
+      return null;
     }
     const integrity = sourceEnvironmentPackagesByPath.get(createPathKey(sourceRoot));
     if (!integrity) {
@@ -686,7 +698,8 @@ function resolveResourceBundle(
     sourceRoot = path.resolve(pathRoot, ...prefixSegments.slice(0, prefixAssetsIndex + (bundleEnd - assetsIndex)));
   }
   if (!isPathInsideOrEqual(projectRoot, sourceRoot) && !isPathInsideOrEqual(sharedResourcesRoot, sourceRoot)) {
-    throw new Error(`场景引用的资源不在当前项目或共享资源缓存内：${rawValue}`);
+    warnSkippedResource(sourceRoot);
+    return null;
   }
   return {
     sourcePath: sourceRoot,

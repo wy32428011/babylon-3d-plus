@@ -123,6 +123,48 @@ test('源工程包保留多场景且只复制场景实际引用的共享资源',
   }
 });
 
+test('源工程包对项目和共享缓存外的资源仅警告并继续打包有效资源', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'zending-source-external-warning-'));
+  const projectRoot = path.join(root, 'project');
+  const sharedRoot = path.join(root, 'shared');
+  const scenePath = path.join(projectRoot, 'Scenes', 'main.scene.json');
+  const validPath = path.join(sharedRoot, 'Assets', 'Models', 'Valid', 'main.glb');
+  const externalPath = path.join(root, 'old-project', 'Assets', 'Models', '链条机', 'main.glb');
+  try {
+    await mkdir(path.dirname(scenePath), { recursive: true });
+    await mkdir(path.dirname(validPath), { recursive: true });
+    await mkdir(path.dirname(externalPath), { recursive: true });
+    await writeFile(validPath, 'valid-model');
+    await writeFile(externalPath, 'external-model-must-not-be-copied');
+    await writeFile(scenePath, JSON.stringify({ version: 3, scene: {
+      name: '外部资源警告', entities: {
+        valid: { components: { modelAsset: { sourcePath: validPath } } },
+        external: { components: { modelAsset: { sourcePath: externalPath, sourceUrl: `editor-asset://local/${encodeURIComponent(externalPath)}` } } },
+        missing: { components: { modelAsset: { sourcePath: path.join(root, 'missing', 'Assets', 'Models', 'Missing', 'main.glb') } } },
+      },
+    } }));
+    const result = await buildDigitalTwinSourcePackage({
+      projectRoot, sharedResourcesRoot: sharedRoot, entrySceneFilePath: scenePath,
+      outputRoot: path.join(root, 'output'),
+      manifest: { projectId: '42', projectName: '测试', editorProjectId: null, baseVersionId: null, resourceRevision: '7' },
+      signal: new AbortController().signal,
+      isPlatformImageReference: () => false,
+      findSyncedImageForReference: async () => null,
+      skyboxCacheDependencies: NO_SKYBOX_CACHE,
+    });
+    assert.ok(result.warnings.some((warning) => warning.includes('链条机') && warning.includes('已跳过')));
+    assert.ok(result.warnings.some((warning) => warning.includes('Missing')));
+    assert.equal(result.warnings.filter((warning) => warning.includes('链条机')).length, 1);
+    const archive = await unzipper.Open.file(result.filePath);
+    const paths = archive.files.map((entry) => entry.path.replace(/\\/g, '/'));
+    assert.ok(paths.includes('Assets/Models/Valid/main.glb'));
+    assert.ok(paths.includes('Scenes/main.scene.json'));
+    assert.ok(!paths.some((entry) => entry.includes('链条机') || entry.includes('Missing')));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('源工程包允许场景携带 Fetch 配置并原样保留', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'zending-source-api-key-'));
   const projectRoot = path.join(root, 'Projects', '42');

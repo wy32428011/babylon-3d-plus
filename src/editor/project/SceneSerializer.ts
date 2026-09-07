@@ -1,4 +1,5 @@
 import { normalizeAlarmManager } from '../model/alarmManager';
+import { sanitizeSceneShadowBake } from '../model/sceneShadowBake';
 import type { Entity } from '../model/Entity';
 import { convertLegacyChartMarkerTransform, normalizeChartMarker } from '../model/chartMarker';
 import { createPersistedModelThinInstanceScene } from '../model/editModeModelThinInstances';
@@ -342,6 +343,8 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
     },
     shadows: sanitizeSceneShadowSettings(shadows ? {
       enabled: typeof shadows.enabled === 'boolean' ? shadows.enabled : undefined,
+      mode: shadows.mode === 'realtime' ? 'realtime' : 'baked',
+      bake: sanitizeSceneShadowBake(shadows.bake),
       quality: isSceneShadowQuality(shadows.quality) ? shadows.quality : undefined,
       darkness: typeof shadows.darkness === 'number' ? shadows.darkness : undefined,
       catcherEnabled: typeof shadows.catcherEnabled === 'boolean' ? shadows.catcherEnabled : undefined,

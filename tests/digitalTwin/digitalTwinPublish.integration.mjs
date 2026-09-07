@@ -1326,6 +1326,17 @@ async function run() {
     mock.setRemoteStatus(createRemoteStatus());
     mock.resetRequests();
     const successProgress = [];
+    await writeFile(path.join(projectRoot, 'Scenes', 'external-resource.scene.json'), JSON.stringify({
+      version: 3,
+      scene: {
+        name: '保留旧机器资源引用的备用场景',
+        entities: {
+          model: { components: { modelAsset: {
+            sourcePath: path.join(testRoot, 'old-project', 'Assets', 'Models', 'OldChain', 'main.glb'),
+          } } },
+        },
+      },
+    }));
     const successResult = await publishModule.publishDigitalTwin(
       createPublishRequest(SUCCESS_REQUEST_ID, sceneContent, { confirmResourceBindings: true }),
       new AbortController().signal,
@@ -1338,6 +1349,7 @@ async function run() {
     assert.match(successResult.stableUrl, /\/digital-twin\/projects\//);
     assert.match(successResult.releaseUrl, /\/digital-twin\/releases\//);
     assert.ok(successResult.warnings.some((warning) => warning.includes('CAD 参考图')));
+    assert.ok(successResult.warnings.some((warning) => warning.includes('OldChain') && warning.includes('已跳过')));
     assert.ok(successResult.warnings.some((warning) => warning.includes('刷新远端项目状态失败')));
     for (const phase of ['saving', 'source-package', 'dist-package', 'prepare', 'upload-source', 'upload-dist', 'commit', 'completed']) {
       assert.ok(successProgress.some((progress) => progress.phase === phase), `缺少发布进度阶段：${phase}`);

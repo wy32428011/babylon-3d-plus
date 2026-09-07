@@ -105,7 +105,9 @@ import {
   type ExternalModelScriptTelemetrySnapshot,
 } from './ExternalModelScriptRuntime';
 import { SceneSkyboxRuntime } from './SceneSkyboxRuntime';
-import { SceneShadowRuntime } from './SceneShadowRuntime';
+import { SceneShadowRuntime, isShadowCaster } from './SceneShadowRuntime';
+import { bakeEnvironmentShadows } from './EnvironmentShadowBake';
+import { getSceneShadowBakeSignature, isStaticShadowEntity, type SceneShadowBakeSnapshot } from '../../editor/model/sceneShadowBake';
 import { EditorLightMarkerRuntime } from './EditorLightMarkerRuntime';
 import { EditorAutoPatrolRuntime, type AutoPatrolMarkerPick } from './EditorAutoPatrolRuntime';
 import { EditorManualRoamSpawnRuntime } from './EditorManualRoamSpawnRuntime';
@@ -677,6 +679,8 @@ function isChainConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
 }
 
 export class SceneRuntime {
+  private shadowDocument: SceneDocument | null = null;
+  private shadowBakeRunning = false;
   private readonly meshes = new Map<string, Mesh>();
   private readonly chartMarkerPresentation = new ChartMarkerPresentation();
   private readonly alarmRuntime: AlarmManagerRuntime;
@@ -2840,6 +2844,7 @@ export class SceneRuntime {
 
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
+    this.shadowDocument = document;
     const alarmIds = collectAlarmIndependentEntityIds(document);
     const overrides = [...alarmIds].filter(id => document.entities[id]?.components.modelArrayInstance);
     if (overrides.length) {
@@ -2851,7 +2856,7 @@ export class SceneRuntime {
     this.alarmManagerIds.clear();
     for (const id of document.entityIds) if (document.entities[id]?.components.alarmManager) this.alarmManagerIds.add(id);
     this.defaultCargoGeneratorId = document.sceneSettings.defaultCargoGeneratorId ?? null;
-    this.shadowRuntime.applySettings(document.sceneSettings.shadows);
+    this.syncShadows(document.sceneSettings.shadows, document);
     const previousEntityStates = new Map(this.entityStates);
     const previousHighlightedEntityIds = mergeSceneRuntimeHighlightEntityIds(
       this.selectedEntityIds,
@@ -3272,8 +3277,56 @@ export class SceneRuntime {
   }
 
   /** 单独同步场景级阴影，避免 Inspector 调参触发全场实体重建。 */
-  syncShadows(settings: SceneDocument['sceneSettings']['shadows']): void {
+  syncShadows(settings: SceneDocument['sceneSettings']['shadows'], document = this.shadowDocument): void {
+    if (document) this.shadowDocument = document;
+    if (this.shadowBakeRunning) return;
     this.shadowRuntime.applySettings(settings);
+    const effective = settings.mode !== 'realtime' && settings.bake && document
+      && settings.bake.signature !== getSceneShadowBakeSignature(document) ? { ...settings, bake: null } : settings;
+    void this.environmentRuntime.syncShadows(effective).catch(error => {
+      this.pushLog(`环境阴影显示失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
+  /** 仅在显式编辑操作中烘焙；运动设备及其整个实例批次不得留下静态影子。 */
+  async bakeStaticShadows(document: SceneDocument, signal?: AbortSignal, progress?: (message: string) => void): Promise<SceneShadowBakeSnapshot> {
+    if (this.shadowBakeRunning) throw new Error('已有阴影烘焙正在进行。');
+    if (this.activeModelLoadProgress.size || this.environmentRuntime.getSnapshot().phase === 'loading') {
+      throw new Error('场景模型尚未全部加载完成，请稍后更新阴影。');
+    }
+    if ([...this.models.values()].some(model => model.externalScriptStarting || model.cancelLoad)) {
+      throw new Error('参数模型仍在生成几何，请完成加载后再次更新阴影。');
+    }
+    if (!document.sceneSettings.environment?.visible) throw new Error('请先显示环境模型，再更新静态阴影。');
+    const surfaces = this.environmentRuntime.getShadowBakeSurfaces();
+    const environmentMeshes = new Set(surfaces.map(surface => surface.mesh));
+    const casters = this.scene.meshes.filter(mesh => {
+      if (!mesh.isEnabled() || !mesh.isVisible || mesh.getTotalVertices() === 0) return false;
+      if (!isShadowCaster(mesh)) return false;
+      if (environmentMeshes.has(mesh)) return true;
+      const batch = this.modelArrayBatchByMeshUniqueId.get(mesh.uniqueId);
+      if (batch) return batch.getEntityIds().every(id => isStaticShadowEntity(document, id));
+      const id = this.readEntityIdFromMesh(mesh);
+      return Boolean(id && isStaticShadowEntity(document, id));
+    });
+    this.shadowBakeRunning = true;
+    let displayed = false;
+    try {
+      const snapshot = await bakeEnvironmentShadows(this.scene, surfaces, casters, document.sceneSettings.shadows,
+        getSceneShadowBakeSignature(document), signal, progress);
+      const isCurrent = () => !signal?.aborted
+        && snapshot.signature === getSceneShadowBakeSignature(this.shadowDocument ?? document);
+      if (!isCurrent()) throw new Error('烘焙期间场景已变化，请重新更新阴影。');
+      progress?.('阴影已生成，正在应用到地面并等待画面显示…');
+      await this.environmentRuntime.syncShadows({ ...document.sceneSettings.shadows, bake: snapshot });
+      await this.waitForEnvironmentRenderReady(signal);
+      if (!isCurrent()) throw new Error('烘焙期间场景已变化，请重新更新阴影。');
+      displayed = true;
+      return snapshot;
+    } finally {
+      this.shadowBakeRunning = false;
+      if (!displayed) this.syncShadows(this.shadowDocument?.sceneSettings.shadows ?? document.sceneSettings.shadows);
+    }
   }
 
   /** 事务式加载候选环境；成功前保留当前有效环境。 */

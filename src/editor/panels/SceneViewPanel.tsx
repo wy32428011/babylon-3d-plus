@@ -331,6 +331,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const entityArrayRequest = useEditorStore((state) => state.entityArrayRequest);
   const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
   const environmentApplyRequest = useEditorStore((state) => state.environmentApplyRequest);
+  const shadowBakeRequest = useEditorStore((state) => state.shadowBakeRequest);
   const environmentRuntimeOverride = useEditorStore((state) => state.environmentRuntimeOverride);
   const environmentStartupRelinkSessionId = useEditorStore((state) => state.environmentStartupRelinkSessionId);
   const environmentAdjustmentActive = useEditorStore((state) => state.environmentAdjustmentActive);
@@ -1630,6 +1631,27 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     };
   }, [environmentApplyRequest, completeEnvironmentApply, failEnvironmentApply]);
 
+  useEffect(() => {
+    if (!shadowBakeRequest) return;
+    const runtime = runtimeRef.current;
+    const state = useEditorStore.getState();
+    if (!runtime || isRuntimePreview) {
+      state.failShadowBake(shadowBakeRequest.id, '请在场景编辑就绪后更新静态阴影。');
+      return;
+    }
+    const controller = new AbortController();
+    let active = true;
+    void runtime.bakeStaticShadows(state.scene, controller.signal, message => {
+      if (active) useEditorStore.setState(current => current.shadowBakeRequest?.id === shadowBakeRequest.id
+        ? { shadowBakeStatus: { phase: 'baking', message } } : {});
+    }).then(snapshot => {
+      if (active) useEditorStore.getState().completeShadowBake(shadowBakeRequest.id, snapshot);
+    }).catch(error => {
+      if (active) useEditorStore.getState().failShadowBake(shadowBakeRequest.id, error instanceof Error ? error.message : String(error));
+    });
+    return () => { active = false; controller.abort(); };
+  }, [shadowBakeRequest, isRuntimePreview, sceneSessionId]);
+
   /** 参数值变化走单实体同步；其它文档内容变化才进入完整 SceneRuntime 同步。 */
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -2313,7 +2335,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
     viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
-    runtime.syncShadows(sceneDocument.sceneSettings.shadows);
+    runtime.syncShadows(sceneDocument.sceneSettings.shadows, sceneDocument);
     runtime.syncSkybox(sceneDocument);
     if (!environmentApplyRequest && !environmentAdjustmentActive) {
       runtime.syncEnvironment(resolveEnvironmentRuntimeSettings(
