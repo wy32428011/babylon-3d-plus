@@ -16,6 +16,7 @@ import type {
 } from '../types.js';
 import { authorizeAssetFile, authorizeSceneFile, decodeAssetUrl, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
 import { isSupportedSceneFilePath } from './sceneFilePath.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import {
   assertRecentSceneFile,
   commitRecentProjectActivation,
@@ -190,7 +191,7 @@ export function registerProjectIpc(): void {
       return { canceled: true, filePath: null, content: null };
     }
 
-    const content = await fs.readFile(filePath, 'utf-8');
+    const content = await readUtf8File(filePath, '场景文件');
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(filePath);
@@ -201,7 +202,7 @@ export function registerProjectIpc(): void {
   ipcMain.handle('scene:loadFile', async (_event, request: LoadSceneFileRequest): Promise<LoadSceneResult> => {
     const loadRequest = validateLoadSceneFileRequest(request);
     const filePath = await assertRecentSceneFile(loadRequest.filePath);
-    const content = await fs.readFile(filePath, 'utf-8');
+    const content = await readUtf8File(filePath, '场景文件');
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(filePath);
@@ -211,7 +212,7 @@ export function registerProjectIpc(): void {
 
   ipcMain.handle('file:readText', async (_event, request: ReadTextFileRequest): Promise<ReadTextFileResult> => {
     const readRequest = validateReadTextFileRequest(request);
-    const content = await fs.readFile(readRequest.filePath, 'utf-8');
+    const content = await readUtf8File(readRequest.filePath, '文本文件');
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(readRequest.filePath);
 

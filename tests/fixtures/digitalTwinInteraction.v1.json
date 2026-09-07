@@ -43,6 +43,7 @@
           "capabilities": [
             "hardwareGpu",
             "focusAsset",
+            "globalOverview",
             "startAutoPatrol",
             "startManualRoam"
           ]
@@ -70,6 +71,16 @@
         "sessionId": "runtime-1:session-1",
         "type": "command.cancelFocusAsset",
         "requestId": "request-1"
+      }
+    },
+    {
+      "name": "global overview",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.globalOverview",
+        "requestId": "request-overview"
       }
     },
     {
@@ -145,6 +156,20 @@
         "type": "viewer.initialLoadState",
         "payload": {
           "phase": "complete"
+        }
+      }
+    },
+    {
+      "name": "successful global overview result",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "command.result",
+        "requestId": "request-overview",
+        "ok": true,
+        "payload": {
+          "action": "globalOverview"
         }
       }
     },

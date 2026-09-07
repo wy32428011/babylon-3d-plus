@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { readUtf8File } from '../shared/strictUtf8.js';
 
 const BINDING_FILE_NAME = 'data-platform-binding.json';
 const PROJECT_ID_PATTERN = /^[1-9]\d{0,63}$/;
@@ -118,7 +119,7 @@ export async function writeDataPlatformBinding(
 export async function readDataPlatformBinding(projectRoot: string): Promise<DataPlatformBindingMetadata | null> {
   const bindingPath = getDataPlatformBindingPath(projectRoot);
   try {
-    const parsed = JSON.parse(await fs.readFile(bindingPath, 'utf8')) as unknown;
+    const parsed = JSON.parse(await readUtf8File(bindingPath, '数据中台项目绑定文件')) as unknown;
     if (!isPlainObject(parsed) || parsed.version !== 1) throw new Error('本地数据中台绑定文件版本或结构无效。');
     return createDataPlatformBinding({
       baseUrl: parsed.baseUrl as string,

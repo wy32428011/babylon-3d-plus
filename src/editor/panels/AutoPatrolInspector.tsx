@@ -33,6 +33,7 @@ import {
   validateAutoPatrolRoute,
 } from '../model/autoPatrolInspection';
 import { useEditorStore } from '../store/editorStore';
+import { decodeUtf8Text } from '../../shared/text/strictUtf8';
 
 const POSITION_AXES = ['x', 'y', 'z'] as const;
 const EVENT_RESPONSES: Array<{ value: AutoPatrolEventResponse; label: string }> = [
@@ -280,7 +281,8 @@ export function AutoPatrolInspector({
       if (file.size > AUTO_PATROL_ROUTE_JSON_MAX_BYTES) {
         throw new Error('自动巡检路线 JSON 不能超过 1 MB。');
       }
-      const imported = importAutoPatrolRouteJson(await file.text());
+      const routeJson = decodeUtf8Text(new Uint8Array(await file.arrayBuffer()), '自动巡检路线 JSON');
+      const imported = importAutoPatrolRouteJson(routeJson);
       if (useEditorStore.getState().scene.selectedEntityId !== entityId) {
         throw new Error('选中的巡检路线已变化，请重新导入。');
       }

@@ -8,6 +8,7 @@ import type {
   SyncedImageAssetEntry,
   SyncedImageIndex,
 } from '../types.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import { authorizeAssetFile, encodeAssetUrl } from './assetRegistry.js';
 import { getProjectImagesRoot } from './projectAssetStore.js';
 import {
@@ -169,7 +170,7 @@ function getImageIndexPath(editorRoot: string): string {
 
 async function readImageIndex(editorRoot: string): Promise<SyncedImageIndex> {
   try {
-    const content = await fs.readFile(getImageIndexPath(editorRoot), 'utf-8');
+    const content = await readUtf8File(getImageIndexPath(editorRoot), '数据中台图片索引');
     const parsed = JSON.parse(content) as unknown;
     if (!isPlainObject(parsed) || parsed.version !== 1 || !Array.isArray(parsed.images)) {
       throw new Error('本地图片同步索引格式不正确。');

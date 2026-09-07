@@ -102,6 +102,7 @@ class FakeRuntime implements DigitalTwinInteractionRuntime {
   clearHighlightCount = 0;
   startAutoPatrolCount = 0;
   startManualRoamCount = 0;
+  globalOverviewCount = 0;
   patrolPhase: 'idle' | 'moving' | 'dwelling' | 'paused' | 'completed' | 'returning' = 'idle';
   private activeTransition: CameraViewTransitionOptions | null = null;
 
@@ -181,6 +182,10 @@ class FakeRuntime implements DigitalTwinInteractionRuntime {
   startManualRoam: (() => void) | undefined = () => {
     this.startManualRoamCount += 1;
   };
+
+  globalOverview: (() => void) | undefined = () => {
+    this.globalOverviewCount += 1;
+  };
 }
 
 const parentWindow = { name: 'parent' };
@@ -212,7 +217,7 @@ function focusCommand(requestId: string, assetCode: string) {
   });
 }
 
-function runtimeActionCommand(requestId: string, action: 'startAutoPatrol' | 'startManualRoam') {
+function runtimeActionCommand(requestId: string, action: 'globalOverview' | 'startAutoPatrol' | 'startManualRoam') {
   return message({
     channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
     version: DIGITAL_TWIN_BRIDGE_VERSION,
@@ -280,6 +285,7 @@ test('只接受父窗口和允许 Origin，并按 bridge.ready -> viewer.ready �
         capabilities: [
           DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
           'focusAsset',
+          'globalOverview',
           'startAutoPatrol',
           'startManualRoam',
         ],
@@ -290,7 +296,7 @@ test('只接受父窗口和允许 Origin，并按 bridge.ready -> viewer.ready �
   }
 });
 
-test('自动巡检和手动漫游命令分别调用运行时并立即返回成功', () => {
+test('全局概览、自动巡检和手动漫游命令分别调用运行时并立即返回成功', () => {
   const f = createFixture();
   const runtime = new FakeRuntime([]);
   try {
@@ -298,12 +304,23 @@ test('自动巡检和手动漫游命令分别调用运行时并立即返回成�
     dispatch(f.bus, hostHello());
     f.posted.length = 0;
 
+    dispatch(f.bus, runtimeActionCommand('request-overview', 'globalOverview'));
     dispatch(f.bus, runtimeActionCommand('request-patrol', 'startAutoPatrol'));
     dispatch(f.bus, runtimeActionCommand('request-roam', 'startManualRoam'));
 
+    assert.equal(runtime.globalOverviewCount, 1);
     assert.equal(runtime.startAutoPatrolCount, 1);
     assert.equal(runtime.startManualRoamCount, 1);
     assert.deepEqual(f.posted.map((entry) => entry.message), [
+      {
+        channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+        version: DIGITAL_TWIN_BRIDGE_VERSION,
+        sessionId,
+        type: 'command.result',
+        requestId: 'request-overview',
+        ok: true,
+        payload: { action: 'globalOverview' },
+      },
       {
         channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
         version: DIGITAL_TWIN_BRIDGE_VERSION,
@@ -384,6 +401,7 @@ test('只声明运行时实际支持的能力，并为缺失或执行异常的�
       assert.deepEqual(viewerReady.payload.capabilities, [
         DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
         'focusAsset',
+        'globalOverview',
         'startManualRoam',
       ]);
     }

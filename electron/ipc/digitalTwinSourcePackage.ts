@@ -4,6 +4,7 @@ import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { SyncedImageAssetEntry } from '../types.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import type { DeploymentCopyFile } from './deploymentExportFileSystem.js';
 import type {
   DeploymentSkyboxCacheDependencies,
@@ -315,7 +316,7 @@ async function readSceneSnapshots(
     const stat = await fs.lstat(sourcePath);
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`场景文件不是安全普通文件：${sourcePath}`);
     if (stat.size <= 0 || stat.size > MAX_SCENE_BYTES) throw new Error(`场景文件大小无效：${sourcePath}`);
-    const content = await fs.readFile(sourcePath, 'utf8');
+    const content = await readUtf8File(sourcePath, '数字孪生 SOURCE 场景文件');
     let parsed: unknown;
     try {
       parsed = JSON.parse(content) as unknown;

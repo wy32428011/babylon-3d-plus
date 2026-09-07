@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DataPlatformEnvironmentSyncProgress } from '../types.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import {
   normalizeDataPlatformSourceUrl,
   normalizeEnvironmentManifestResponse,
@@ -359,7 +360,10 @@ async function readReusablePartialBytes(
   expectedUrl: string,
 ): Promise<number> {
   try {
-    const [stat, metadataText] = await Promise.all([fs.lstat(partialPath), fs.readFile(metadataPath, 'utf8')]);
+    const [stat, metadataText] = await Promise.all([
+      fs.lstat(partialPath),
+      readUtf8File(metadataPath, '环境资源断点元数据'),
+    ]);
     const metadata = JSON.parse(metadataText) as unknown;
     if (stat.isSymbolicLink() || !stat.isFile() || typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) return 0;
     const record = metadata as Record<string, unknown>;

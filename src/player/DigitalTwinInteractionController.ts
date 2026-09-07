@@ -12,6 +12,7 @@ import {
   DIGITAL_TWIN_BRIDGE_CHANNEL,
   DIGITAL_TWIN_BRIDGE_VERSION,
   DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
+  DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY,
   DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
   DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY,
   DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY,
@@ -56,6 +57,7 @@ export type DigitalTwinInteractionRuntime = {
   getPatrolPhase: () => DigitalTwinPatrolPhase;
   pausePatrol: () => void;
   notifyCameraChangedWhilePaused: () => void;
+  globalOverview?: () => void;
   startAutoPatrol?: () => void;
   startManualRoam?: () => void;
 };
@@ -244,6 +246,11 @@ export class DigitalTwinInteractionController {
       return;
     }
 
+    if (message.type === 'command.globalOverview') {
+      this.startRuntimeAction(message.requestId, DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY);
+      return;
+    }
+
     if (message.type === 'command.startAutoPatrol') {
       this.startRuntimeAction(message.requestId, DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY);
       return;
@@ -287,6 +294,7 @@ export class DigitalTwinInteractionController {
       DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
       DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
     ];
+    if (this.runtime.globalOverview) capabilities.push(DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY);
     if (this.runtime.startAutoPatrol) capabilities.push(DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY);
     if (this.runtime.startManualRoam) capabilities.push(DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY);
     this.post({
@@ -315,9 +323,11 @@ export class DigitalTwinInteractionController {
 
   private startRuntimeAction(requestId: string, action: DigitalTwinRuntimeAction): void {
     const runtime = this.runtime;
-    const handler = action === DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY
-      ? runtime?.startAutoPatrol
-      : runtime?.startManualRoam;
+    const handler = action === DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY
+      ? runtime?.globalOverview
+      : action === DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY
+        ? runtime?.startAutoPatrol
+        : runtime?.startManualRoam;
     if (!handler) {
       this.postFailure(requestId, 'UNSUPPORTED_COMMAND');
       return;

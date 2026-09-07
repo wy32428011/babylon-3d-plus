@@ -1,6 +1,7 @@
 import { app, dialog, ipcMain } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import type {
   DataPlatformConfig,
   DataPlatformEnvironmentSyncProgress,
@@ -340,7 +341,7 @@ function normalizeDataPlatformUrl(value: unknown, label: '数据中台地址' | 
 /** 读取配置文件并兼容仅包含服务地址的 v1 格式。 */
 async function readStoredDataPlatformConfig(): Promise<StoredDataPlatformConfig> {
   try {
-    const content = await fs.readFile(getDataPlatformConfigPath(), 'utf-8');
+    const content = await readUtf8File(getDataPlatformConfigPath(), '数据中台配置文件');
     const parsed = JSON.parse(content) as unknown;
 
     if (!isPlainObject(parsed)) {

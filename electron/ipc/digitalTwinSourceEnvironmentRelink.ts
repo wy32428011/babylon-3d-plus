@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { readUtf8File } from '../shared/strictUtf8.js';
 
 const MAX_ENVIRONMENT_INDEX_BYTES = 128 * 1024 * 1024;
 const MAX_ENVIRONMENT_INDEX_ENTRIES = 100_000;
@@ -115,7 +116,7 @@ export async function loadSourceEnvironmentCacheIndexes(
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await fs.readFile(indexPath, 'utf8')) as unknown;
+    parsed = JSON.parse(await readUtf8File(indexPath, '数字孪生 SOURCE 环境资源索引')) as unknown;
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error('环境模型 Sidecar 索引不是有效 JSON。');
     throw error;

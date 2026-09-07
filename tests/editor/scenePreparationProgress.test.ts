@@ -278,7 +278,7 @@ test('同步或合批失败会记录警告并解除永久阻塞', () => {
   assert.deepEqual(state.warnings, ['网络不可用', '部分模型无法完成合批']);
 });
 
-test('运行时超时仅解除蒙版，后续自然稳定后才解除巡检门控', () => {
+test('运行时超时只记录警告，模型与渲染自然稳定后才完成场景准备', () => {
   let state = createScenePreparationState('scene-timeout');
   state = reduceScenePreparationState(state, { type: 'model-sync-skipped', error: null });
   state = reduceScenePreparationState(state, {
@@ -304,8 +304,10 @@ test('运行时超时仅解除蒙版，后续自然稳定后才解除巡检门�
     warning: '运行时准备超时',
   });
 
-  assert.equal(state.completed, true);
+  assert.equal(state.completed, false);
+  assert.ok(state.percent < 100);
   assert.equal(state.runtime.forcedSettled, true);
+  assert.deepEqual(state.warnings, ['运行时准备超时']);
 
   state = reduceScenePreparationState(state, {
     type: 'runtime-progress',
@@ -316,8 +318,9 @@ test('运行时超时仅解除蒙版，后续自然稳定后才解除巡检门�
     batchedEntities: 4,
     stable: false,
   });
-  assert.equal(state.completed, true);
-  assert.equal(state.runtime.forcedSettled, true);
+  assert.equal(state.completed, false);
+  assert.ok(state.percent < 100);
+  assert.equal(state.runtime.forcedSettled, false);
 
   state = reduceScenePreparationState(state, {
     type: 'runtime-progress',

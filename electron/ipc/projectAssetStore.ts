@@ -14,6 +14,7 @@ import type {
   RecentSceneEntry,
   RecentWorkspacesResult,
 } from '../types.js';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import {
   DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO,
   DEFAULT_MODEL_LENGTH_UNIT_INFO,
@@ -181,7 +182,7 @@ async function isFilePath(filePath: string): Promise<boolean> {
 
 async function readLegacyRecentProjectIndex(): Promise<RecentWorkspaceIndex> {
   try {
-    const content = await fs.readFile(getRecentProjectFilePath(), 'utf-8');
+    const content = await readUtf8File(getRecentProjectFilePath(), '最近项目文件');
     const parsed = JSON.parse(content) as unknown;
     if (!isPlainObject(parsed) || typeof parsed.projectRoot !== 'string' || !parsed.projectRoot.trim()) {
       return createEmptyRecentWorkspaceIndex();
@@ -202,7 +203,7 @@ async function readLegacyRecentProjectIndex(): Promise<RecentWorkspaceIndex> {
 
 async function readRecentWorkspaceIndex(): Promise<RecentWorkspaceIndex> {
   try {
-    const content = await fs.readFile(getRecentWorkspacesFilePath(), 'utf-8');
+    const content = await readUtf8File(getRecentWorkspacesFilePath(), '最近工作区文件');
     return normalizeRecentWorkspaceIndex(JSON.parse(content) as unknown);
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {
@@ -733,7 +734,7 @@ export async function ensureProjectDirectories(projectRoot: string): Promise<voi
 /** 读取项目资产索引，兼容 v1 并返回 v2 内存结构，不在读取时写回。 */
 export async function readProjectAssetIndex(projectRoot: string): Promise<ProjectAssetIndex> {
   try {
-    const content = await fs.readFile(getProjectAssetIndexPath(projectRoot), 'utf-8');
+    const content = await readUtf8File(getProjectAssetIndexPath(projectRoot), '项目资源索引');
     return normalizeProjectAssetIndex(JSON.parse(content) as unknown);
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {

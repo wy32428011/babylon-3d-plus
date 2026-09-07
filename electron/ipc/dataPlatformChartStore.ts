@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { readUtf8File } from '../shared/strictUtf8.js';
 
 const INDEX_FILE_NAME = 'data-platform-charts.json';
 const DEFAULT_PAGE_SIZE = 100;
@@ -163,7 +164,7 @@ export async function readDataPlatformChartIndex(
     ? (baseUrl ? inferDataPlatformWebBaseUrl(baseUrl) : undefined)
     : normalizeBaseUrl(expectedWebBaseUrl);
   try {
-    const parsed = JSON.parse(await fs.readFile(getDataPlatformChartIndexPath(projectRoot), 'utf8')) as unknown;
+    const parsed = JSON.parse(await readUtf8File(getDataPlatformChartIndexPath(projectRoot), '数据中台大屏索引')) as unknown;
     const normalized = rebaseLegacyScreenUrls(
       normalizeDataPlatformChartIndex(parsed),
       baseUrl,

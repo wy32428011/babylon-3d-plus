@@ -5,11 +5,13 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
+    "allowJs": true,
+    "checkJs": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "outDir": "dist-electron",
     "rootDir": "electron",
     "types": ["node"]
   },
-  "include": ["electron/**/*.ts", "electron/**/*.cts"]
+  "include": ["electron/**/*.ts", "electron/**/*.cts", "electron/**/*.js"]
 }

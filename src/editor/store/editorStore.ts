@@ -214,6 +214,7 @@ import {
   sanitizeCadReferenceDisplayPatch,
 } from '../cad/cadReference';
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
+import { decodeCadDxfBytes } from '../cad/cadTextEncoding';
 import { parseCadReferenceDxfForImport } from '../cad/cadReferenceWorkerClient';
 
 type EditorLog = {
@@ -784,13 +785,12 @@ async function readCadResponseText(
 
   if (!reader) {
     onProgress(38, '正在读取 CAD 文件...');
-    const content = await response.text();
+    const content = decodeCadDxfBytes(new Uint8Array(await response.arrayBuffer()));
     onProgress(68, 'CAD 文件读取完成。');
     return content;
   }
 
-  const decoder = new TextDecoder();
-  const chunks: string[] = [];
+  const chunks: Uint8Array[] = [];
   let receivedBytes = 0;
 
   while (true) {
@@ -799,7 +799,7 @@ async function readCadResponseText(
     if (!value) continue;
 
     receivedBytes += value.byteLength;
-    chunks.push(decoder.decode(value, { stream: true }));
+    chunks.push(value);
 
     const readRatio = totalBytes > 0 ? Math.min(1, receivedBytes / totalBytes) : 0;
     const percent = totalBytes > 0 ? 18 + readRatio * 50 : Math.min(68, 18 + Math.log2(receivedBytes + 1) * 3);
@@ -809,9 +809,14 @@ async function readCadResponseText(
     onProgress(percent, detail);
   }
 
-  chunks.push(decoder.decode());
+  const bytes = new Uint8Array(receivedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
   onProgress(68, 'CAD 文件读取完成。');
-  return chunks.join('');
+  return decodeCadDxfBytes(bytes);
 }
 
 function cloneVector3(vector: Vector3Data): Vector3Data {

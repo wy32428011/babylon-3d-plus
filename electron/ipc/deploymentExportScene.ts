@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { readUtf8File } from '../shared/strictUtf8.js';
 import type { ProjectModelAssetEntry } from '../types.js';
 import { decodeAssetUrl, isAuthorizedAssetFile, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { getCurrentProjectRoot, readProjectAssetIndex } from './projectAssetStore.js';
@@ -657,7 +658,7 @@ async function readGltfDependencies(gltfPath: string, packageRoot: string, signa
 
   let document: unknown;
   try {
-    document = JSON.parse(await fs.readFile(gltfPath, 'utf8')) as unknown;
+    document = JSON.parse(await readUtf8File(gltfPath, 'glTF 文件')) as unknown;
   } catch {
     throw new Error('glTF JSON 无法解析。');
   }
