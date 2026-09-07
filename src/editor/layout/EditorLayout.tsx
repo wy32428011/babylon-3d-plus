@@ -12,7 +12,8 @@ import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { useEditorStore, type TransformTool } from '../store/editorStore';
 import { Toolbar } from '../ui/Toolbar';
 import { ScenePreparationOverlay } from '../loading/ScenePreparationOverlay';
-import { getScenePreparationSnapshot, isScenePreparationActive } from '../loading/scenePreparationProgress';
+import { isScenePreparationActive } from '../loading/scenePreparationProgress';
+import { cancelProjectLoading } from '../home/projectLoadingCancellation';
 import { getReturnToHomePageBlockMessage } from '../home/returnToHomePage';
 import { getFullscreenElement } from '../../shared/ui/elementFullscreen';
 import { useElementFullscreen } from '../../shared/ui/useElementFullscreen';
@@ -45,11 +46,13 @@ function hasVisibleEditorOverlay(): boolean {
 }
 
 type EditorLayoutProps = {
-  onBackToHome: () => void;
+  onBackToHome: (beforeLeave?: () => Promise<void>) => Promise<void>;
 };
 
 export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   const editorShellRef = useRef<HTMLDivElement>(null);
+  const returningHomeRef = useRef(false);
+  const [isCancellingLoading, setIsCancellingLoading] = useState(false);
   const sceneFullscreen = useElementFullscreen(editorShellRef, { fallbackToLayoutMaximize: true });
   const [isConsoleDialogOpen, setConsoleDialogOpen] = useState(false);
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
@@ -308,9 +311,9 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
 
   /** 忙碌任务未结束时留在编辑器；允许返回时先退出场景全屏，避免首页仍占着系统全屏。 */
   async function handleBackToHome(cancelRuntimeLoading = false): Promise<void> {
-    const canCancel = cancelRuntimeLoading && getScenePreparationSnapshot().assetRefreshStatus === 'settled';
+    if (returningHomeRef.current) return;
     const blockMessage = getReturnToHomePageBlockMessage({
-      scenePreparationActive: isScenePreparationActive() && !canCancel,
+      scenePreparationActive: isScenePreparationActive() && !cancelRuntimeLoading,
       publishActive: digitalTwinPublish.isBusy,
       deploymentExportBusy: deploymentExport.isBusy,
       cadImportActive: Boolean(cadImportProgress?.active),
@@ -320,8 +323,19 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
       return;
     }
 
-    await sceneFullscreen.exit();
-    onBackToHome();
+    returningHomeRef.current = true;
+    setIsCancellingLoading(cancelRuntimeLoading);
+    try {
+      await onBackToHome(async () => {
+        if (cancelRuntimeLoading) await cancelProjectLoading(window.editorApi?.cancelDataPlatformProjectLoading);
+        await sceneFullscreen.exit();
+      });
+    } catch (error) {
+      window.alert(`返回首页失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      returningHomeRef.current = false;
+      setIsCancellingLoading(false);
+    }
   }
 
   return (
@@ -411,7 +425,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
           <InspectorPanel readOnly={isRuntimePreview} />
         </aside>
       </div>
-      <ScenePreparationOverlay onCancel={() => void handleBackToHome(true)} />
+      <ScenePreparationOverlay cancelling={isCancellingLoading} onCancel={() => void handleBackToHome(true)} />
     </div>
   );
 }

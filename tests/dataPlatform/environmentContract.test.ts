@@ -1,11 +1,26 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
+import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
+const [{
   normalizeDataPlatformSourceUrl,
   normalizeEnvironmentManifestResponse,
-} from '../../electron/ipc/dataPlatformEnvironmentContract.ts';
+}] = await importIsolatedTypeScriptModules<[typeof import('../../electron/ipc/dataPlatformEnvironmentContract')]>(
+  ['electron/ipc/dataPlatformEnvironmentContract.ts'],
+);
 
 const SHA = 'a'.repeat(64);
+
+test('按需清单跳过未引用坏资源，同时严格检查必需环境', () => {
+  const item = { id: '1', modelName: '当前环境', fileStatus: 'GLB_READY', fileName: 'scene.glb',
+    fileSizeBytes: '805306368', fileSha256: SHA, lengthUnit: 'meter', fileRevision: '1', runtimeRevision: '1', downloadUrl: '/scene.glb' };
+  const manifest = { success: true, data: { protocolVersion: '1', manifestRevision: '1',
+    records: [item, { ...item, id: '2', fileSizeBytes: '4294967296' }], nextCursorId: null, hasMore: false } };
+  const required = normalizeEnvironmentManifestResponse(manifest, new Set(['1']));
+  assert.deepEqual(required.records.map((entry) => entry.id), ['1']);
+  assert.equal(required.records[0].fileSizeBytes, 768 * 1024 * 1024);
+  assert.throws(() => normalizeEnvironmentManifestResponse(manifest, new Set(['2'])));
+  assert.throws(() => normalizeEnvironmentManifestResponse(manifest));
+});
 
 test('环境模型清单严格保留 Long 字符串并解析 GLB_READY', () => {
   const result = normalizeEnvironmentManifestResponse({

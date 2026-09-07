@@ -237,6 +237,7 @@ type DataPlatformModelSyncPhase =
   | 'failed';
 
 type DataPlatformModelSyncProgress = {
+  download?: import('../electron/shared/remoteDownloadProgress').RemoteDownloadProgress;
   runId: string;
   phase: DataPlatformModelSyncPhase;
   completed: number;
@@ -248,6 +249,7 @@ type DataPlatformModelSyncProgress = {
 };
 
 type DataPlatformEnvironmentSyncRequest = {
+  requiredResourceIds?: string[];
   expectedSourceKey?: string;
 };
 
@@ -260,6 +262,7 @@ type DataPlatformEnvironmentSyncPhase =
   | 'failed';
 
 type DataPlatformEnvironmentSyncProgress = {
+  download?: import('../electron/shared/remoteDownloadProgress').RemoteDownloadProgress;
   runId: string;
   contextKey: string;
   phase: DataPlatformEnvironmentSyncPhase;
@@ -465,6 +468,8 @@ type ImportCadFileResult = {
 };
 
 type ProjectListAssetsResult = {
+  dataPlatformSourceKey?: string;
+  environmentSyncPending?: boolean;
   projectRoot: string | null;
   skyboxSyncContextKey: string | null;
   environmentSyncContextKey: string | null;
@@ -607,6 +612,7 @@ interface Window {
     resetDataPlatformWorkspace: () => Promise<DataPlatformConfig>;
     listDataPlatformProjects: (request?: DataPlatformProjectListRequest) => Promise<DataPlatformProjectListResult>;
     openDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectOpenResult>;
+    cancelDataPlatformProjectLoading?: () => Promise<boolean>;
     getDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectEntry>;
     syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;

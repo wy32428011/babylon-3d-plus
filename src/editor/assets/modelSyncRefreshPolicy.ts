@@ -50,3 +50,21 @@ export function filterProjectModelsForSyncRefresh<T extends ProjectModelSyncAsse
     return key !== null && changed.has(key);
   });
 }
+
+/** 同会话后续资源刷新沿用已覆盖文件的加载键，不能退回覆盖前的容器缓存。 */
+export function createModelSyncRevisionTracker() {
+  const revisions = new Map<string, { revision: string | undefined; runId: string }>();
+  return {
+    clear: () => revisions.clear(),
+    refresh<T extends ProjectModelSyncAsset & { assetRevision?: string; dataPlatformSourceKey?: string }>(assets: T[], runId?: string): T[] {
+      return assets.map((asset) => {
+        const key = `${asset.dataPlatformSourceKey ?? ''}:${getProjectModelSyncResourceKey(asset) ?? asset.path.replace(/\\/g, '/').toLowerCase()}`;
+        if (runId) revisions.set(key, { revision: asset.assetRevision, runId });
+        const applied = revisions.get(key);
+        return applied && applied.revision === asset.assetRevision
+          ? { ...asset, assetRevision: `${asset.assetRevision ?? ''}:${applied.runId}` }
+          : asset;
+      });
+    },
+  };
+}

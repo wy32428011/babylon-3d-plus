@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import type { RemoteDownloadProgress } from '../../../electron/shared/remoteDownloadProgress';
+import { RemoteDownloadDetail } from '../loading/RemoteDownloadDetail';
+import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
+import { getRequiredEnvironmentResourceIds } from '../../../electron/shared/sceneEnvironmentReferences';
+import { environmentForSyncRun, findAuthoritativeEnvironmentAsset } from '../assets/environmentSyncAuthority';
+import { isRemoteDownloadVisible, remoteSyncLogKey, sceneRemoteDownloadStore } from '../loading/sceneRemoteDownloadProgress';
 import {
   beginSceneModelAssetRefresh,
   beginScenePreparation,
@@ -40,6 +46,7 @@ import {
 import { createImportedAssetIndexes, findImportedAssetForPackagePath } from '../assets/modelAssetRelink';
 import {
   filterProjectModelsForSyncRefresh,
+  createModelSyncRevisionTracker,
   shouldRefreshProjectModelsAfterSync,
 } from '../assets/modelSyncRefreshPolicy';
 import {
@@ -88,11 +95,14 @@ type ProjectAssetsLoadResult =
 type ProjectAssetsLoadOptions = {
   refreshModels?: boolean;
   modelResourceKeys?: readonly string[] | null;
+  modelSyncRunId?: string;
   refreshEnvironment?: boolean;
+  environmentSyncRunId?: string;
   refreshSkybox?: boolean;
 };
 
 type DataPlatformModelSyncProgress = {
+  download?: RemoteDownloadProgress;
   runId: string;
   phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
   completed: number;
@@ -111,6 +121,7 @@ type DataPlatformModelSyncApi = {
 };
 
 type DataPlatformEnvironmentSyncProgress = {
+  download?: RemoteDownloadProgress;
   runId: string;
   contextKey: string;
   phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
@@ -249,6 +260,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const placeSkybox = useEditorStore((state) => state.placeSkybox);
   const sceneDocument = useEditorStore((state) => state.scene);
   const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
+  const environmentRuntimeSnapshot = useEditorStore((state) => state.environmentRuntimeSnapshot);
   const currentSkybox = useMemo(() => getSceneSkyboxSettings(sceneDocument), [sceneDocument]);
   const createMesh = useEditorStore((state) => state.createMesh);
   const createLocator = useEditorStore((state) => state.createLocator);
@@ -264,6 +276,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const pushLog = useEditorStore((state) => state.pushLog);
   const resourceCardRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const projectAssetsLoadRequestRef = useRef(0);
+  const modelSyncRevisionsRef = useRef(createModelSyncRevisionTracker());
   const sceneSessionIdRef = useRef(sceneSessionId);
   sceneSessionIdRef.current = sceneSessionId;
   const skyboxSyncControllerRef = useRef<SkyboxSyncController | null>(null);
@@ -441,6 +454,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const refreshCurrentEnvironmentFromAssets = useCallback(async (
     assets: ProjectModelAssetEntry[],
     expectedSceneSessionId = sceneSessionIdRef.current,
+    authoritativeSourceKey?: string,
+    syncRunId?: string,
   ): Promise<boolean> => {
     const refreshStartState = useEditorStore.getState();
     if (refreshStartState.sceneSessionId !== expectedSceneSessionId) return false;
@@ -453,10 +468,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
     if (expectedEnvironmentState.applyRequestId) return false;
 
     const environmentAssets = assets.filter((asset) => asset.libraryKind === 'environment');
-    const matchedAsset = findImportedAssetForPackagePath(
+    const resourceId = getRequiredEnvironmentResourceIds(refreshStartState.scene)?.[0];
+    const matchedAsset = authoritativeSourceKey && resourceId
+      ? findAuthoritativeEnvironmentAsset(environmentAssets, authoritativeSourceKey, resourceId)
+      : findImportedAssetForPackagePath(
       environment.packagePath,
-      createImportedAssetIndexes(environmentAssets),
-      environment.source === 'data-platform'
+      createImportedAssetIndexes(authoritativeSourceKey && !resourceId
+        ? environmentAssets.filter((asset) => asset.source !== 'data-platform')
+        : environmentAssets),
+      environment.source === 'data-platform' && resourceId
         ? {
           sourceKey: environment.dataPlatformSourceKey,
           resourceId: environment.dataPlatformResourceId,
@@ -467,21 +487,26 @@ export function ProjectPanel(props: ProjectPanelProps) {
     if (!matchedAsset || matchedAsset.libraryKind !== 'environment') return false;
 
     try {
+      const authorityChanged = Boolean(authoritativeSourceKey && resourceId && environment.dataPlatformSourceKey !== authoritativeSourceKey);
       const environmentConfig = await loadEnvironmentFromAsset(matchedAsset, environment);
       if (sceneSessionIdRef.current !== expectedSceneSessionId) return false;
       if (!environmentConfig) {
         pushLog('环境模型资源已更新，但当前场景环境配置无效，未自动刷新。');
+        environmentPreparationStore.fail(expectedSceneSessionId, '环境模型配置无效，请重新上传完整环境模型后重试。');
         return false;
       }
 
       if (environment.source === 'data-platform') {
-        const requestId = requestEnvironmentApply(environment, {
+        const effectiveSyncRunId = syncRunId ?? lastSceneRefreshEnvironmentSyncRunIdRef.current ?? undefined;
+        const runtimeEnvironment = environmentForSyncRun(environmentConfig, effectiveSyncRunId);
+        const requestId = requestEnvironmentApply(authorityChanged ? environmentConfig : environment, {
           autoAlign: false,
           focusAfterLoad: false,
           commandLabel: '刷新环境模型资源',
-          successMessage: '环境模型运行缓存已刷新，并保留场景绑定身份与显示设置。',
-          persistSceneChange: false,
-          runtimeEnvironment: environmentConfig,
+          successMessage: authorityChanged ? '环境模型已替换为当前数据中台资源，保留摆放与显示设置。' : '环境模型运行缓存已刷新，并保留场景绑定身份与显示设置。',
+          persistSceneChange: authorityChanged,
+          preserveSceneResourceUrls: authorityChanged && Boolean(effectiveSyncRunId),
+          runtimeEnvironment,
           expectedSceneSessionId,
           expectedEnvironmentState,
         });
@@ -501,6 +526,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       pushLog(`环境模型资源已更新，但当前场景自动刷新失败：${message}`);
+      environmentPreparationStore.fail(expectedSceneSessionId, `环境模型关联失败：${message}`);
       return false;
     }
   }, [pushLog, requestEnvironmentApply]);
@@ -584,10 +610,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
           modelAssets,
           options.modelResourceKeys === undefined ? null : options.modelResourceKeys,
         );
-        if (assetsToRefresh.length > 0) refreshModelInstancesFromAssets(assetsToRefresh);
+        const freshAssets = modelSyncRevisionsRef.current.refresh(assetsToRefresh, options.modelSyncRunId);
+        if (freshAssets.length > 0) refreshModelInstancesFromAssets(freshAssets);
       }
-      if (options.refreshEnvironment) {
-        await refreshCurrentEnvironmentFromAssets(result.assets, requestSceneSessionId);
+      if (options.refreshEnvironment && !result.environmentSyncPending) {
+        await refreshCurrentEnvironmentFromAssets(result.assets, requestSceneSessionId, result.dataPlatformSourceKey, options.environmentSyncRunId);
       }
       return { ok: true, skyboxes: loadedSkyboxes };
     } catch (error) {
@@ -658,6 +685,23 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }, [pushLog]);
 
   useEffect(() => {
+    sceneRemoteDownloadStore.begin(sceneSessionId);
+    modelSyncRevisionsRef.current.clear();
+    environmentPreparationStore.begin(sceneSessionId, async () => {
+      const api = getDataPlatformEnvironmentSyncApi();
+      if (!api.retryDataPlatformEnvironmentSync) throw new Error('当前编辑器不支持重试环境同步，请更新编辑器。');
+      lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
+      return api.retryDataPlatformEnvironmentSync();
+    });
+    setModelSyncProgress(null);
+    setEnvironmentSyncProgress(null);
+    return () => {
+      sceneRemoteDownloadStore.clear(sceneSessionId);
+      environmentPreparationStore.clear(sceneSessionId);
+    };
+  }, [sceneSessionId]);
+
+  useEffect(() => {
     let active = true;
     beginScenePreparation(sceneSessionId);
     skipSceneModelSync(sceneSessionId, null);
@@ -704,6 +748,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
       projectAssetsLoadRequestRef.current += 1;
     };
   }, [loadProjectAssets, loadSyncedImages, sceneSessionId]);
+
+  useEffect(() => {
+    if (environmentRuntimeSnapshot.phase === 'error' && useEditorStore.getState().scene.sceneSettings.environment?.source === 'data-platform') {
+      environmentPreparationStore.fail(sceneSessionId, environmentRuntimeSnapshot.message || '环境模型初始化失败，请重试或返回首页。');
+    }
+  }, [environmentRuntimeSnapshot, sceneSessionId]);
 
   useEffect(() => {
     const expectedContextKey = chartSyncContextKey;
@@ -760,6 +810,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         const loaded = await loadProjectAssets({
           refreshModels: runtimeChangedResourceKeys === null || runtimeChangedResourceKeys.length > 0,
           modelResourceKeys: runtimeChangedResourceKeys,
+          modelSyncRunId: progress.runId,
         });
         if (!loaded.ok && lastSceneRefreshModelSyncRunIdRef.current === runId) {
           lastSceneRefreshModelSyncRunIdRef.current = null;
@@ -767,14 +818,21 @@ export function ProjectPanel(props: ProjectPanelProps) {
       })();
     };
 
+    let lastLogKey = '';
     const unsubscribe = dataPlatformModelSyncApi.onDataPlatformModelSyncProgress((progress) => {
+      if (sceneSessionIdRef.current !== sceneSessionId) return;
+      const showDownload = sceneRemoteDownloadStore.receive(sceneSessionId, 'model', progress);
       clearCompletedDismissTimer();
-      setModelSyncProgress(progress);
+      setModelSyncProgress(showDownload ? progress : { ...progress, download: undefined });
       const progressSceneSessionId = sceneSessionIdRef.current;
       const phaseLabel = DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS[progress.phase];
       const countLabel = progress.total > 0 ? `（${progress.completed}/${progress.total}）` : '';
       const detail = progress.error || progress.message;
-      pushLog(`数据中台模型同步：${phaseLabel}${countLabel}${detail ? `：${detail}` : ''}`);
+      const logKey = remoteSyncLogKey(progress);
+      if (lastLogKey !== logKey) {
+        lastLogKey = logKey;
+        pushLog(`数据中台模型同步：${phaseLabel}${countLabel}${detail ? `：${detail}` : ''}`);
+      }
 
       if (
         progress.phase === 'completed'
@@ -879,11 +937,24 @@ export function ProjectPanel(props: ProjectPanelProps) {
       window.clearTimeout(environmentSyncCompletedDismissTimerRef.current);
       environmentSyncCompletedDismissTimerRef.current = null;
     };
+    let lastLogKey = '';
     const unsubscribe = environmentSyncApi.onDataPlatformEnvironmentSyncProgress((progress) => {
+      if (sceneSessionIdRef.current !== sceneSessionId) return;
+      const showDownload = sceneRemoteDownloadStore.receive(sceneSessionId, 'environment', progress);
+      if (!showDownload) return;
       clearCompletedTimer();
-      setEnvironmentSyncProgress(progress);
+      setEnvironmentSyncProgress(showDownload ? progress : { ...progress, download: undefined });
+      if (progress.phase === 'failed') {
+        environmentPreparationStore.fail(sceneSessionId, progress.error || progress.message || '环境模型同步失败，请重试。');
+      } else if (progress.phase !== 'completed') {
+        environmentPreparationStore.clearError(sceneSessionId);
+      }
       const label = DATA_PLATFORM_ENVIRONMENT_SYNC_PHASE_LABELS[progress.phase];
-      pushLog(`数据中台环境模型同步：${label}${progress.total > 0 ? `（${progress.completed}/${progress.total}）` : ''}${progress.error || progress.message ? `：${progress.error || progress.message}` : ''}`);
+      const logKey = remoteSyncLogKey(progress);
+      if (lastLogKey !== logKey) {
+        lastLogKey = logKey;
+        pushLog(`数据中台环境模型同步：${label}${progress.total > 0 ? `（${progress.completed}/${progress.total}）` : ''}${progress.error || progress.message ? `：${progress.error || progress.message}` : ''}`);
+      }
       if (progress.phase === 'completed') {
         const progressSceneSessionId = sceneSessionIdRef.current;
         if (lastSceneRefreshEnvironmentSyncRunIdRef.current !== progress.runId) {
@@ -893,9 +964,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
               !await waitForInitialProjectAssetsLoad(progressSceneSessionId)
               || lastSceneRefreshEnvironmentSyncRunIdRef.current !== progress.runId
             ) return;
-            const loaded = await loadProjectAssets({ refreshEnvironment: true });
+            const loaded = await loadProjectAssets({ refreshEnvironment: true, environmentSyncRunId: progress.runId });
             if (!loaded.ok && lastSceneRefreshEnvironmentSyncRunIdRef.current === progress.runId) {
               lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
+              environmentPreparationStore.fail(progressSceneSessionId, `环境资源关联失败：${loaded.error}`);
             }
             const currentState = useEditorStore.getState();
             if (
@@ -905,6 +977,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
               && !currentState.environmentApplyRequest
             ) {
               pushLog('环境模型同步已完成，但未找到当前场景引用的资源；已阻止加载旧机器缓存路径。');
+              if (!environmentPreparationStore.getSnapshot().error) {
+                environmentPreparationStore.fail(progressSceneSessionId, '同步完成后仍未找到当前场景引用的环境资源，请确认环境资源已上传并重试。已阻止加载旧机器缓存路径。');
+              }
+            } else if (loaded.ok) {
+              environmentPreparationStore.clearError(progressSceneSessionId);
             }
           })();
         }
@@ -918,7 +995,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       clearCompletedTimer();
       unsubscribe();
     };
-  }, [loadProjectAssets, pushLog, waitForInitialProjectAssetsLoad]);
+  }, [loadProjectAssets, pushLog, sceneSessionId, waitForInitialProjectAssetsLoad]);
 
   useEffect(() => {
     const dataPlatformImageSyncApi = getDataPlatformImageSyncApi();
@@ -1931,6 +2008,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
             {environmentSyncCountLabel ? <span>{environmentSyncCountLabel}</span> : null}
           </div>
           <p>{environmentSyncMessage}</p>
+          {isRemoteDownloadVisible(environmentSyncProgress) && environmentSyncProgress.download
+            ? <RemoteDownloadDetail label="环境模型远程下载" download={environmentSyncProgress.download} /> : null}
           {environmentSyncProgress.phase === 'failed' ? (
             <div className="library-sync-status-actions">
               <button disabled={isRetryingEnvironmentSync} onClick={() => void handleRetryDataPlatformEnvironmentSync()} type="button">
@@ -1951,6 +2030,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
             {modelSyncCountLabel ? <span>{modelSyncCountLabel}</span> : null}
           </div>
           <p>{modelSyncMessage}</p>
+          {isRemoteDownloadVisible(modelSyncProgress) && modelSyncProgress.download
+            ? <RemoteDownloadDetail label="模型远程下载" download={modelSyncProgress.download} /> : null}
           {modelSyncProgress.phase === 'failed' ? (
             <div className="library-sync-status-actions">
               <button

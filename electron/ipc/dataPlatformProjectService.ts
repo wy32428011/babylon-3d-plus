@@ -15,6 +15,10 @@ import type {
   ProjectModelAssetEntry,
 } from '../types.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
+import { getRequiredEnvironmentResourceIds } from '../shared/sceneEnvironmentReferences.js';
+import { cancelDataPlatformModelSync } from './dataPlatformModelIncrementalSync.js';
+import { cancelDataPlatformEnvironmentSync } from './dataPlatformEnvironmentSync.js';
+import { disposeEnvironmentFileValidation } from './environmentFileValidation.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 import {
   activateProjectRoot,
@@ -237,6 +241,15 @@ export async function openDataPlatformProject(
   }
 }
 
+/** 取消当前打开及其主要资源下载，保留同步器可重试状态。 */
+export function cancelDataPlatformProjectLoading(): boolean {
+  let requested = false;
+  for (const controller of openTaskControllers) { controller.abort(); requested = true; }
+  const environment = cancelDataPlatformEnvironmentSync();
+  const models = cancelDataPlatformModelSync();
+  return requested || environment || models;
+}
+
 /** 本地场景加载后只刷新共享资源缓存，不切换当前业务工程根目录。 */
 export async function syncDataPlatformModelsForWorkspace(
   baseUrl: string,
@@ -265,6 +278,7 @@ export async function syncDataPlatformEnvironmentsForWorkspace(
   baseUrl: string,
   workspaceRoot: string,
   expectedSourceKey?: string,
+  requiredResourceIds?: readonly string[],
 ): Promise<boolean> {
   if (dataPlatformProjectServiceShuttingDown) return false;
   const binding = getCurrentDataPlatformBinding();
@@ -279,7 +293,9 @@ export async function syncDataPlatformEnvironmentsForWorkspace(
     sourceBaseUrl,
     sharedResourcesRoot,
     createDataPlatformEnvironmentSyncContextKey(sourceBaseUrl, sharedResourcesRoot),
-    expectedSourceKey,
+    // 已绑定的数据中台项目以当前服务器为准，旧场景来源不能阻止覆盖缓存。
+    binding ? undefined : expectedSourceKey,
+    requiredResourceIds,
   );
 }
 
@@ -483,6 +499,7 @@ export async function disposeDataPlatformProjectTasks(): Promise<void> {
   await disposeDataPlatformEnvironmentSync();
   await disposeDataPlatformImageSync();
   await disposeDataPlatformSkyboxSync();
+  await disposeEnvironmentFileValidation();
 }
 
 async function openDataPlatformProjectInternal(
@@ -570,6 +587,7 @@ async function openDataPlatformProjectInternal(
     warning = '该项目没有可用工程包，已在本地创建当前格式空项目。';
   }
 
+  if (signal.aborted) throw new Error('打开数据中台项目已取消。');
   if (source === 'generated') {
     await ensureGeneratedProjectMetadata(projectRoot);
     await activateProjectRoot(projectRoot);
@@ -597,11 +615,17 @@ async function openDataPlatformProjectInternal(
   invalidateDataPlatformSkyboxSyncPrepareContext();
   setSharedProjectSkyboxRoot(sharedResourcesRoot);
 
-  const modelSyncStarted = startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
+  const requiredEnvironmentIds = sceneFilePath
+    ? getRequiredEnvironmentResourceIds(await readProjectPackageJson(sceneFilePath, '场景环境引用')) : [];
+  if (signal.aborted) throw new Error('打开数据中台项目已取消。');
+  const modelSyncStarted = startDataPlatformModelSync(baseUrl, sharedResourcesRoot, true);
   const envModelSyncStarted = startDataPlatformEnvironmentSync(
     baseUrl,
     sharedResourcesRoot,
     createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedResourcesRoot),
+    undefined,
+    requiredEnvironmentIds,
+    true,
   );
   const skyboxSyncStarted = startDataPlatformSkyboxSync(
     baseUrl,

@@ -34,6 +34,8 @@ import {
 } from './dataPlatformSkyboxIndex.js';
 import { importSkyboxFileIntoRoot, listSkyboxAssetsInRoot } from './skyboxAssetStore.js';
 import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
+import { getCurrentDataPlatformBinding } from './dataPlatformBindingStore.js';
+import { createDataPlatformSourceKey, isDataPlatformEnvironmentSyncPending } from './dataPlatformEnvironmentSync.js';
 
 const PROJECT_METADATA_DIRECTORY = '.babylon-editor';
 const PROJECT_ASSET_INDEX_FILE = 'asset-index.json';
@@ -898,7 +900,13 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   }
 
   const { skyboxes, orphanedSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
-  return { projectRoot, skyboxSyncContextKey: null, environmentSyncContextKey, assets, skyboxes, orphanedSkyboxes };
+  const binding = getCurrentDataPlatformBinding();
+  const dataPlatformSourceKey = binding && normalizeFilePath(binding.projectRoot).toLowerCase() === normalizeFilePath(projectRoot).toLowerCase()
+    ? createDataPlatformSourceKey(binding.metadata.baseUrl) : undefined;
+  const environmentSyncPending = Boolean(dataPlatformSourceKey && sharedProjectEnvironmentRoot
+    && isDataPlatformEnvironmentSyncPending(`${dataPlatformSourceKey}:${path.resolve(sharedProjectEnvironmentRoot).toLowerCase()}`));
+  return { projectRoot, dataPlatformSourceKey, environmentSyncPending,
+    skyboxSyncContextKey: null, environmentSyncContextKey, assets, skyboxes, orphanedSkyboxes };
 }
 
 async function loadProjectSkyboxAssets(

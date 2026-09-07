@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
 const [{
@@ -13,7 +13,7 @@ const [{
   listIndexedDataPlatformEnvironments,
 }] = await importIsolatedTypeScriptModules<[
   typeof import('../../electron/ipc/dataPlatformEnvironmentIndex'),
-]>(['electron/ipc/dataPlatformEnvironmentIndex.ts']);
+]>(['electron/ipc/dataPlatformEnvironmentIndex.ts'], { deferCleanup: (cleanup) => after(cleanup) });
 
 const SOURCE_KEY = 'b'.repeat(64);
 const SHA = 'a'.repeat(64);

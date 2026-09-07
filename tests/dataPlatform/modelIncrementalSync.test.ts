@@ -13,6 +13,24 @@ const SOURCE_URL = 'https://example.com/platform';
 const OTHER_SOURCE_URL = 'https://other.example.com/platform';
 const SYNCED_AT = '2026-08-28T08:00:00.000Z';
 
+test('数据中台强制刷新忽略相同修订缓存，并覆盖被本地修改的模型', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    const model = { id: '1', name: '权威模型', url: '/files/model.glb', revision: '1' };
+    const bytes = createGlb(1);
+    const calls: string[] = [];
+    const options = { baseUrl: SOURCE_URL, editorRoot, dependencies: {
+      requestJson: createRequestJson([model]), downloadFile: createDownload(new Map([[model.url, bytes]]), calls),
+      readAssetIndex: readProjectAssetIndexForTest,
+    } };
+    await executeDataPlatformModelSync(options);
+    const filePath = (await readAssetIndex(editorRoot)).assets[0].path;
+    await fs.writeFile(filePath, createGlb(9));
+    await executeDataPlatformModelSync({ ...options, forceRefresh: true });
+    assert.equal(calls.length, 2, '强制打开必须重新获取当前中台模型');
+    assert.deepEqual(await fs.readFile(filePath), bytes, '相同远端修订也必须覆盖本地改动');
+  });
+});
+
 function createGlb(marker = 0): Buffer {
   const document = {
     asset: { version: '2.0' },

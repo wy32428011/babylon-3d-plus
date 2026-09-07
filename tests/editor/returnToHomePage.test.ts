@@ -43,11 +43,14 @@ test('Toolbar、EditorLayout 和 App 接上返回首页入口', async () => {
     '返回按钮必须固定在滚动区外',
   );
 
-  assert.match(layoutSource, /onBackToHome=\{handleBackToHome\}/);
+  assert.match(layoutSource, /onBackToHome=\{\(\) => void handleBackToHome\(\)\}/);
   assert.match(layoutSource, /getReturnToHomePageBlockMessage/);
   assert.match(layoutSource, /export function EditorLayout\(\{ onBackToHome \}: EditorLayoutProps\)/);
 
-  assert.match(appSource, /<EditorLayout onBackToHome=\{\(\) => void handleBackToHome\(\)\} \/>/);
+  assert.match(appSource, /<EditorLayout onBackToHome=\{handleBackToHome\} \/>/);
+  assert.ok(appSource.indexOf('if (!confirmed) return;', appSource.indexOf('async function handleBackToHome')) < appSource.indexOf('await beforeLeave?.();'));
+  assert.match(layoutSource, /scenePreparationActive: isScenePreparationActive\(\) && !cancelRuntimeLoading/);
+  assert.match(layoutSource, /cancelProjectLoading\(window.editorApi\?\.cancelDataPlatformProjectLoading\)/);
   assert.match(appSource, /setView\('home'\)/);
   assert.match(appSource, /stopRuntimePreview\(\)/);
   assert.match(appSource, /RETURN_TO_HOME_PAGE_UNSAVED_CONFIRM/);

@@ -37,6 +37,7 @@ export type EnvironmentApplyRequest = {
   successMessage: string;
   persistSceneChange: boolean;
   runtimeEnvironment?: SceneEnvironmentSettings;
+  preserveSceneResourceUrls?: boolean;
 };
 
 export type EnvironmentApplyResult = {
@@ -57,6 +58,7 @@ export function createIdleEnvironmentRuntimeSnapshot(): EnvironmentRuntimeSnapsh
 
 export type ResolveEnvironmentRuntimeSettingsOptions = {
   deferManagedCacheLoad?: boolean;
+  deferEnvironmentLoad?: boolean;
 };
 
 const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
@@ -97,6 +99,7 @@ export function resolveEnvironmentRuntimeSettings(
   options: ResolveEnvironmentRuntimeSettingsOptions = {},
 ): SceneEnvironmentSettings | null {
   if (!sceneEnvironment) return null;
+  if (options.deferEnvironmentLoad) return null;
   if (options.deferManagedCacheLoad && hasManagedEnvironmentCacheReference(sceneEnvironment)) return null;
   if (!runtimeOverride) return sceneEnvironment;
   const hasSameResourceId = Boolean(

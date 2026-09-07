@@ -3,12 +3,12 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
 const [{ executeDataPlatformEnvironmentSync, createDataPlatformSourceKey }] = await importIsolatedTypeScriptModules<[
   typeof import('../../electron/ipc/dataPlatformEnvironmentSync'),
-]>(['electron/ipc/dataPlatformEnvironmentSync.ts']);
+]>(['electron/ipc/dataPlatformEnvironmentSync.ts'], { deferCleanup: (cleanup) => after(cleanup) });
 
 const SOURCE_URL = 'https://example.com/platform';
 const SOURCE_KEY = createDataPlatformSourceKey(SOURCE_URL);

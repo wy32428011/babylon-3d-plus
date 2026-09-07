@@ -4,10 +4,11 @@ import { DEFAULT_MODEL_LENGTH_UNIT_INFO, normalizeModelLengthUnit, type ModelLen
 import type { AssetEntry, ImportModelFolderSkippedEntry, ModelPackageVariant } from '../types.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
 import { encodeAssetUrl } from './assetRegistry.js';
+import { MAX_GLB_FILE_BYTES, GLB_FILE_SIZE_LIMIT_MESSAGE } from '../shared/glbFilePolicy.js';
 
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
 const MODEL_THUMBNAIL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
-export const MAX_GLB_MODEL_FILE_BYTES = 512 * 1024 * 1024;
+export const MAX_GLB_MODEL_FILE_BYTES = MAX_GLB_FILE_BYTES;
 const MAX_GLB_JSON_CHUNK_BYTES = 64 * 1024 * 1024;
 const GLB_JSON_CHUNK_TYPE = 0x4e4f534a;
 const GLB_BINARY_CHUNK_TYPE = 0x004e4942;
@@ -168,7 +169,7 @@ async function parseGlbContainer(modelFilePath: string): Promise<ParsedGlbDocume
   const stat = await fs.lstat(modelFilePath);
   if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('GLB 路径必须是普通文件。');
   if (stat.size < 20 || stat.size > MAX_GLB_MODEL_FILE_BYTES) {
-    throw new Error('GLB 文件大小必须在 20 字节到 512 MiB 之间。');
+    throw new Error(`GLB 文件必须至少有20字节，且不能${GLB_FILE_SIZE_LIMIT_MESSAGE}。`);
   }
 
   const handle = await fs.open(modelFilePath, 'r');
@@ -221,7 +222,7 @@ async function parseGlbContainer(modelFilePath: string): Promise<ParsedGlbDocume
 
 /**
  * 以有界读取校验环境 GLB 的结构、自包含 URI、必需扩展和可渲染 Mesh。
- * 二进制主体不会整体载入内存，适用于 512 MiB 环境模型重复校验。
+ * 二进制主体不会整体载入内存，文件边界遵循统一GLB容器策略。
  */
 export async function inspectGlbModelFile(modelFilePath: string): Promise<GlbModelInspection> {
   const parsed = await parseGlbContainer(modelFilePath);

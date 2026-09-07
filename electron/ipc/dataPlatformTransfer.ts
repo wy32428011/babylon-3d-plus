@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { decodeUtf8Text, readUtf8File } from '../shared/strictUtf8.js';
+import type { FileDownloadProgress } from '../shared/remoteDownloadProgress.js';
 
 const require = createRequire(import.meta.url);
 
@@ -27,6 +28,8 @@ export type DownloadRemoteFileOptions = {
   partialTtlMs?: number;
   onChunk?: (chunk: Uint8Array) => void;
   onBytes?: (bytes: number) => void;
+  /** 写入完成后的文件绝对字节进度，包含续传前缀；总大小未知时为null。 */
+  onProgress?: (progress: FileDownloadProgress) => void;
   fetchImpl?: typeof globalThis.fetch;
 };
 
@@ -243,6 +246,7 @@ export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Pr
     const diskWriteBudget = await resolveDiskWriteBudget(partialRoot, options.context);
     const resumedBytes = resumed ? resume!.bytes : 0;
     const declaredLengthHeader = response.headers.get('content-length');
+    let expectedTotalBytes: number | null = null;
     if (declaredLengthHeader !== null) {
       const declaredLength = Number(declaredLengthHeader);
       if (!Number.isSafeInteger(declaredLength) || declaredLength < 0) {
@@ -252,14 +256,23 @@ export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Pr
         throw new Error(`${options.context}超过允许大小。`);
       }
       assertWithinDiskWriteBudget(BigInt(declaredLength), diskWriteBudget, options.context);
+      const encoding = response.headers.get('content-encoding');
+      if (!encoding || encoding.toLowerCase() === 'identity') expectedTotalBytes = resumedBytes + declaredLength;
     }
     if (options.maxBytes !== undefined && resumedBytes >= options.maxBytes && response.status === 206) {
       throw new Error(`${options.context}续传起点已达到文件大小上限。`);
+    }
+    const rangeTotal = response.status === 206 ? response.headers.get('content-range')?.match(/\/(\d+)$/)?.[1] : undefined;
+    const contentEncoding = response.headers.get('content-encoding');
+    if (rangeTotal && (!contentEncoding || contentEncoding.toLowerCase() === 'identity')) {
+      const total = Number(rangeTotal);
+      if (Number.isSafeInteger(total) && total >= resumedBytes) expectedTotalBytes = total;
     }
 
     handle = await fs.open(partialPath, resumed ? 'a' : 'wx');
     let totalBytes = resumedBytes;
     let streamedBytes = 0n;
+    options.onProgress?.({ downloadedBytes: totalBytes, totalBytes: expectedTotalBytes });
     for await (const rawChunk of response.body as unknown as AsyncIterable<Uint8Array>) {
       if (options.signal.aborted) throw createCanceledError();
       const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
@@ -272,6 +285,8 @@ export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Pr
       await writeBufferFully(handle, chunk);
       options.onChunk?.(chunk);
       options.onBytes?.(chunk.byteLength);
+      options.onProgress?.({ downloadedBytes: totalBytes,
+        totalBytes: expectedTotalBytes !== null && totalBytes <= expectedTotalBytes ? expectedTotalBytes : null });
     }
     await handle.sync();
     await handle.close();
@@ -279,6 +294,7 @@ export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Pr
     await fs.rm(options.destinationPath, { force: true });
     await fs.rename(partialPath, options.destinationPath);
     await fs.rm(metadataPath, { force: true });
+    options.onProgress?.({ downloadedBytes: totalBytes, totalBytes });
     return {
       bytes: totalBytes,
       contentType: response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ?? '',

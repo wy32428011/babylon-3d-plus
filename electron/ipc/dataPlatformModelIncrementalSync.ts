@@ -7,6 +7,7 @@ import type {
   ProjectModelAssetEntry,
 } from '../types.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
+import { RemoteDownloadTracker } from '../shared/remoteDownloadProgress.js';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO } from '../modelUnits.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 import { normalizeDataPlatformSourceUrl } from './dataPlatformEnvironmentContract.js';
@@ -65,11 +66,13 @@ type ModelSyncContext = {
   baseUrl: string;
   editorRoot: string;
   contextKey: string;
+  forceRefresh?: boolean;
 };
 
 type ActiveModelSync = {
   runId: string;
   contextKey: string;
+  forceRefresh?: boolean;
   controller: AbortController;
   promise: Promise<void>;
 };
@@ -158,6 +161,7 @@ export type ExecuteDataPlatformModelSyncOptions = {
   editorRoot: string;
   runId?: string;
   signal?: AbortSignal;
+  forceRefresh?: boolean;
   dependencies?: Partial<ModelSyncDependencies>;
 };
 
@@ -187,15 +191,21 @@ let modelSyncShuttingDown = false;
 let browserWindowLoader: (() => Promise<typeof import('electron').BrowserWindow>) | null = null;
 
 /** 启动普通/组合模型后台增量同步；切换工作区时取消旧任务并排队最新上下文。 */
-export function startDataPlatformModelSync(baseUrl: string, editorRoot: string): boolean {
+export function startDataPlatformModelSync(baseUrl: string, editorRoot: string, forceRefresh = false): boolean {
   if (modelSyncShuttingDown) return false;
-  const context = createModelSyncContext(baseUrl, editorRoot);
+  const context = { ...createModelSyncContext(baseUrl, editorRoot), forceRefresh };
+  // 自动刷新不能把同一工作区已排队的显式覆盖降级为缓存复用。
+  if (queuedModelSyncContext?.contextKey === context.contextKey && queuedModelSyncContext.forceRefresh) context.forceRefresh = true;
   lastModelSyncContext = { ...context };
   if (activeModelSync) {
     if (
       activeModelSync.contextKey === context.contextKey
       && !activeModelSync.controller.signal.aborted
-    ) return true;
+      && (!context.forceRefresh || activeModelSync.forceRefresh)
+    ) {
+      lastModelSyncContext = { ...context, forceRefresh: activeModelSync.forceRefresh };
+      return true;
+    }
     queuedModelSyncContext = context;
     if (!activeModelSync.controller.signal.aborted) activeModelSync.controller.abort();
     return true;
@@ -231,6 +241,13 @@ export async function disposeDataPlatformModelSync(): Promise<void> {
   await active.promise;
 }
 
+export function cancelDataPlatformModelSync(): boolean {
+  const requested = activeModelSync !== null || queuedModelSyncContext !== null;
+  queuedModelSyncContext = null;
+  activeModelSync?.controller.abort();
+  return requested;
+}
+
 function launchModelSync(context: ModelSyncContext): boolean {
   if (modelSyncShuttingDown || activeModelSync) return false;
   const runId = randomUUID();
@@ -238,6 +255,7 @@ function launchModelSync(context: ModelSyncContext): boolean {
   const promise = executeDataPlatformModelSync({
     baseUrl: context.baseUrl,
     editorRoot: context.editorRoot,
+    forceRefresh: context.forceRefresh,
     runId,
     signal: controller.signal,
   })
@@ -249,7 +267,7 @@ function launchModelSync(context: ModelSyncContext): boolean {
       queuedModelSyncContext = null;
       if (!modelSyncShuttingDown && queued) launchModelSync(queued);
     });
-  activeModelSync = { runId, contextKey: context.contextKey, controller, promise };
+  activeModelSync = { runId, contextKey: context.contextKey, forceRefresh: context.forceRefresh, controller, promise };
   return true;
 }
 
@@ -266,6 +284,7 @@ export async function executeDataPlatformModelSync(
   let preserveStaging = false;
   let completedDownloads = 0;
   let totalDownloads = 0;
+  let downloadTracker: RemoteDownloadTracker | null = null;
 
   updateModelSyncProgress({
     runId,
@@ -320,7 +339,7 @@ export async function executeDataPlatformModelSync(
       sourceKey,
       remote: descriptors,
       current: currentModelIndex,
-      existingPackagePaths,
+      existingPackagePaths: options.forceRefresh ? new Set<string>() : existingPackagePaths,
       existingAssetKeys: existingAssetAvailability.runtimeKeys,
       existingThumbnailKeys: existingAssetAvailability.thumbnailKeys,
       syncedAt,
@@ -336,12 +355,19 @@ export async function executeDataPlatformModelSync(
     const jobs = createDownloadJobs(prepared);
     totalDownloads = jobs.length;
     let downloadedBytes = 0;
+    const tracker = new RemoteDownloadTracker(jobs.map((job) => ({ id: job.destinationPath, fileName: job.label })), (download) => {
+      updateModelSyncProgress({ runId, phase: 'downloading', completed: completedDownloads, total: jobs.length,
+        message: `正在下载 ${completedDownloads}/${jobs.length} 个模型文件…`, error: null, download,
+        libraryChanged: false, runtimeChangedResourceKeys: [] });
+    });
+    downloadTracker = tracker;
     const downloadProgressStep = Math.max(1, Math.ceil(Math.max(1, jobs.length) / 100));
     updateModelSyncProgress({
       runId,
       phase: 'downloading',
       completed: 0,
       total: jobs.length,
+      download: jobs.length ? tracker.snapshot() : undefined,
       message: jobs.length === 0
         ? `模型缓存已命中 ${plan.reused.length} 个资源包，无需下载。`
         : `正在下载 ${prepared.length} 个变化或待校验的模型资源包…`,
@@ -352,6 +378,7 @@ export async function executeDataPlatformModelSync(
 
     await runWithConcurrency(jobs, MAX_CONCURRENT_DOWNLOADS, async (job) => {
       assertNotAborted(signal);
+      tracker.start(job.destinationPath);
       const result = await dependencies.downloadFile({
         baseUrl,
         remoteUrl: job.remoteUrl,
@@ -360,6 +387,7 @@ export async function executeDataPlatformModelSync(
         signal,
         timeoutMs: FILE_DOWNLOAD_TIMEOUT_MS,
         context: `下载${job.label}`,
+        onProgress: (progress) => tracker.update(job.destinationPath, progress),
         onBytes: (bytes) => {
           downloadedBytes += bytes;
           if (downloadedBytes > MAX_SYNC_DOWNLOAD_BYTES) {
@@ -367,6 +395,7 @@ export async function executeDataPlatformModelSync(
           }
         },
       });
+      tracker.finish(job.destinationPath, result.bytes);
 
       if (job.kind === 'thumbnail') {
         job.preparedPackage.thumbnailPath = await finalizeThumbnailPath(
@@ -383,6 +412,7 @@ export async function executeDataPlatformModelSync(
           phase: 'downloading',
           completed: completedDownloads,
           total: jobs.length,
+          download: tracker.snapshot(),
           message: `已下载 ${completedDownloads}/${jobs.length} 个模型文件。`,
           error: null,
           libraryChanged: false,
@@ -391,6 +421,7 @@ export async function executeDataPlatformModelSync(
       }
     });
 
+    tracker.close();
     updateModelSyncProgress({
       runId,
       phase: 'validating',
@@ -425,7 +456,7 @@ export async function executeDataPlatformModelSync(
         && currentAsset !== undefined
         && existingPackagePaths.has(previousEntry.packageRelativePath)
         && existingAssetAvailability.runtimeKeys.has(key);
-      const runtimeChanged = !cachedRuntimeAvailable
+      const runtimeChanged = options.forceRefresh === true || !cachedRuntimeAvailable
         || previousEntry.runtimeRevision !== item.indexEntry.runtimeRevision
         || currentAsset.assetRevision !== item.indexEntry.runtimeRevision;
       const thumbnailChanged = !previousEntry
@@ -544,6 +575,8 @@ export async function executeDataPlatformModelSync(
       runtimeChangedResourceKeys: [],
     });
     throw normalized;
+  } finally {
+    downloadTracker?.close();
   }
 }
 

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { readUtf8File } from '../shared/strictUtf8.js';
+import { MAX_GLB_FILE_BYTES } from '../shared/glbFilePolicy.js';
 
 const MAX_ENVIRONMENT_INDEX_BYTES = 128 * 1024 * 1024;
 const MAX_ENVIRONMENT_INDEX_ENTRIES = 100_000;
@@ -208,7 +209,7 @@ function normalizeSourceEnvironmentCacheEntry(value: unknown): SourceEnvironment
   const runtimeRevision = readSourceEnvironmentRevision(value.runtimeRevision, '运行修订');
   const fileSizeBytes = value.fileSizeBytes;
   if (typeof fileSizeBytes !== 'number' || !Number.isSafeInteger(fileSizeBytes)
-    || fileSizeBytes <= 0 || fileSizeBytes > 512 * 1024 * 1024) {
+    || fileSizeBytes <= 0 || fileSizeBytes > MAX_GLB_FILE_BYTES) {
     throw new Error('环境模型 Sidecar 文件大小无效。');
   }
   const fileSha256 = typeof value.fileSha256 === 'string' ? value.fileSha256.trim() : '';

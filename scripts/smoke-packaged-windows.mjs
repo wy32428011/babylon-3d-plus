@@ -461,10 +461,10 @@ async function runPackagedSmoke() {
       && renderer.dataPlatformProjectListCount === 1
       && renderer.dataPlatformProjectOpened
       && renderer.dataPlatformModelSyncCompleted
-      && path.resolve(renderer.dataPlatformProjectRoot) === path.resolve(expectedDataPlatformRoot)
-      && existsSync(path.join(expectedDataPlatformRoot, '.babylon-editor', 'asset-index.json'))
-      && existsSync(path.join(expectedDataPlatformRoot, 'Assets', 'Models'))
-      && existsSync(path.join(expectedDataPlatformRoot, 'Assets', 'Environments'))
+      && path.resolve(renderer.dataPlatformProjectRoot) === path.join(expectedDataPlatformRoot, 'Projects', PACKAGED_SMOKE_PROJECT_ID)
+      && existsSync(path.join(expectedDataPlatformRoot, 'Projects', PACKAGED_SMOKE_PROJECT_ID, '.babylon-editor', 'asset-index.json'))
+      && existsSync(path.join(expectedDataPlatformRoot, 'SharedResources', 'Assets', 'Models'))
+      && existsSync(path.join(expectedDataPlatformRoot, 'Projects', PACKAGED_SMOKE_PROJECT_ID, 'Assets', 'Environments'))
       && renderer.ipcRoundTripAvailable
       && renderer.hardwareWebGlAvailable
       && renderer.webGlPowerPreference === 'high-performance'

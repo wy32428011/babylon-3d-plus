@@ -504,13 +504,17 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const resolvedSceneRuntimeEnvironment = resolveEnvironmentRuntimeSettings(
     sceneDocument.sceneSettings.environment,
     environmentRuntimeOverride,
-    { deferManagedCacheLoad: environmentStartupRelinkSessionId === sceneSessionId },
+    { deferEnvironmentLoad: environmentStartupRelinkSessionId === sceneSessionId },
   );
   const sceneRuntimeEnvironmentSourceUrl = (
     environmentApplyRequest?.runtimeEnvironment
     ?? environmentApplyRequest?.environment
     ?? resolvedSceneRuntimeEnvironment
   )?.activeVariantUrl ?? null;
+  // 待远程重关联时运行时URL为空，但场景要求的环境仍须参与就绪门控。
+  const sceneRuntimeEnvironmentExpected = Boolean(
+    environmentApplyRequest?.environment ?? sceneDocument.sceneSettings.environment,
+  );
   const autoPatrolRoutes = useMemo<AutoPatrolPlaybackRoute[]>(
     () => collectAutoPatrolPlaybackRoutes(sceneDocument),
     [sceneDocument.entityIds, sceneDocument.entities],
@@ -1702,7 +1706,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const entity = editRuntimeSceneDocument.entities[entityId];
       return Boolean(entity?.components.modelAsset && !entity.components.modelArrayInstance);
     });
-    const totalSceneModels = modelEntityIds.length + (sceneRuntimeEnvironmentSourceUrl ? 1 : 0);
+    const totalSceneModels = modelEntityIds.length + (sceneRuntimeEnvironmentExpected ? 1 : 0);
     const expectedBatchedEntities = countExpectedSceneBatchedEntities(
       sceneDocument.entityIds,
       editRuntimeSceneDocument.entities,
@@ -1782,8 +1786,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         if (runtime.isModelReady(entityId)) settledModels += 1;
       }
       const environmentSnapshot = useEditorStore.getState().environmentRuntimeSnapshot;
-      const environmentReady = sceneRuntimeEnvironmentSourceUrl === null || (
-        environmentSnapshot.phase === 'ready'
+      const environmentReady = !sceneRuntimeEnvironmentExpected || (
+        sceneRuntimeEnvironmentSourceUrl !== null
+        && environmentSnapshot.phase === 'ready'
         && environmentSnapshot.sourceUrl === sceneRuntimeEnvironmentSourceUrl
       );
       if (sceneRuntimeEnvironmentSourceUrl && environmentReady) settledModels += 1;
@@ -1880,6 +1885,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     editRuntimeSceneDocument.entities,
     sceneDocument.entityIds,
     sceneRuntimeEnvironmentSourceUrl,
+    sceneRuntimeEnvironmentExpected,
     sceneRuntimeReadinessGeneration,
     sceneSessionId,
     pushLog,
@@ -2374,7 +2380,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       runtime.syncEnvironment(resolveEnvironmentRuntimeSettings(
         sceneDocument.sceneSettings.environment,
         environmentRuntimeOverride,
-        { deferManagedCacheLoad: environmentStartupRelinkSessionId === sceneSessionId },
+        { deferEnvironmentLoad: environmentStartupRelinkSessionId === sceneSessionId },
       ));
     }
   }, [

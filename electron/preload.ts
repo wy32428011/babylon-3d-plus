@@ -128,6 +128,7 @@ contextBridge.exposeInMainWorld('editorApi', {
   },
   syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => ipcRenderer.invoke('data-platform:syncEnvironments', request),
   retryDataPlatformEnvironmentSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryEnvironmentSync'),
+  cancelDataPlatformProjectLoading: (): Promise<boolean> => ipcRenderer.invoke('data-platform:cancelProjectLoading'),
   onDataPlatformEnvironmentSyncProgress: (handler: (progress: DataPlatformEnvironmentSyncProgress) => void): (() => void) => {
     let active = true;
     const progressGate = createRealtimeFirstProgressGate(handler);

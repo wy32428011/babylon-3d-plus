@@ -120,14 +120,16 @@ export default function App() {
   }
 
   /** 通过最近场景路径加载场景，成功后切换到编辑器。 */
-  async function handleOpenRecentScene(filePath: string): Promise<boolean> {
-    const loaded = await useEditorStore.getState().loadSceneFromFile(filePath);
+  async function handleOpenRecentScene(filePath: string, isCurrent: () => boolean = () => true, deferEnvironmentUntilSync = false): Promise<boolean> {
+    if (!isCurrent()) return false;
+    const loaded = await useEditorStore.getState().loadSceneFromFile(filePath, isCurrent, deferEnvironmentUntilSync);
+    if (!isCurrent()) return false;
     if (loaded) setView('editor');
     return loaded;
   }
 
   /** 从编辑器工作台返回首页，发布中阻断，未保存修改需确认。 */
-  async function handleBackToHome(): Promise<void> {
+  async function handleBackToHome(beforeLeave?: () => Promise<void>): Promise<void> {
     if (returningHomeRef.current) return;
     returningHomeRef.current = true;
 
@@ -146,6 +148,7 @@ export default function App() {
         if (!confirmed) return;
       }
 
+      await beforeLeave?.();
       useEditorStore.getState().stopRuntimePreview();
       setView('home');
     } finally {
@@ -165,5 +168,5 @@ export default function App() {
     );
   }
 
-  return <EditorLayout onBackToHome={() => void handleBackToHome()} />;
+  return <EditorLayout onBackToHome={handleBackToHome} />;
 }

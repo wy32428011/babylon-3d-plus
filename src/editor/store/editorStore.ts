@@ -1,5 +1,6 @@
 import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../model/alarmManager';
 import { create } from 'zustand';
+import { getRequiredEnvironmentResourceIds } from '../../../electron/shared/sceneEnvironmentReferences';
 import { getSceneShadowBakeSignature, sanitizeSceneShadowBake, type SceneShadowBakeSnapshot } from '../model/sceneShadowBake';
 import type { ManualRoamAvatar } from '../model/components';
 import {
@@ -352,6 +353,7 @@ export type TransformSnapSettingKey = 'position' | 'rotationDegrees' | 'scale';
 export type SceneSensitivitySettingKey = keyof SceneSensitivitySettings;
 
 export type EnvironmentApplyOptions = {
+  preserveSceneResourceUrls?: boolean;
   autoAlign?: boolean;
   focusAfterLoad?: boolean;
   commandLabel?: string;
@@ -638,7 +640,7 @@ type EditorState = {
   markScenePersisted: (content?: string) => void;
   saveScene: () => Promise<boolean>;
   loadScene: () => Promise<boolean>;
-  loadSceneFromFile: (filePath: string) => Promise<boolean>;
+  loadSceneFromFile: (filePath: string, isCurrent?: () => boolean, deferEnvironmentUntilSync?: boolean) => Promise<boolean>;
   loadSceneFromContent: (content: string, sourceName: string) => boolean;
   pushLog: (message: string) => void;
 };
@@ -714,6 +716,7 @@ async function syncDataPlatformEnvironmentsAfterWorkspaceOpen(pushLog: (message:
   try {
     const currentEnvironment = useEditorStore.getState().scene.sceneSettings.environment;
     const started = await window.editorApi.syncDataPlatformEnvironments({
+      requiredResourceIds: getRequiredEnvironmentResourceIds(useEditorStore.getState().scene),
       expectedSourceKey: currentEnvironment?.source === 'data-platform'
         ? currentEnvironment.dataPlatformSourceKey
         : undefined,
@@ -3042,6 +3045,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         commandLabel: options.commandLabel?.trim() || '更新环境模型',
         successMessage: options.successMessage?.trim() || '环境模型已更新。',
         persistSceneChange: options.persistSceneChange !== false,
+        preserveSceneResourceUrls: options.preserveSceneResourceUrls === true,
         runtimeEnvironment,
       };
       return {
@@ -3083,14 +3087,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           { deferManagedCacheLoad: state.environmentStartupRelinkSessionId === state.sceneSessionId },
         )
         : before;
-      const command = updateSceneEnvironmentCommand(request.commandLabel, historyBefore, nextEnvironment);
-      const result = !request.persistSceneChange || isSceneEnvironmentEqual(before, nextEnvironment)
+      const persistedEnvironment = request.preserveSceneResourceUrls
+        ? { ...nextEnvironment, activeVariantUrl: request.environment.activeVariantUrl, variants: request.environment.variants }
+        : nextEnvironment;
+      const command = updateSceneEnvironmentCommand(request.commandLabel, historyBefore, persistedEnvironment);
+      const result = !request.persistSceneChange || isSceneEnvironmentEqual(before, persistedEnvironment)
         ? { scene: state.scene, history: state.history }
         : executeCommand(state.scene, state.history, command);
       return {
         ...result,
         environmentApplyRequest: null,
-        environmentRuntimeOverride: request.persistSceneChange ? null : nextEnvironment,
+        environmentRuntimeOverride: request.persistSceneChange && !request.preserveSceneResourceUrls ? null : nextEnvironment,
         environmentStartupRelinkSessionId: null,
         environmentRuntimeSnapshot: applyResult.snapshot,
         environmentAdjustmentActive: false,
@@ -5503,7 +5510,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return false;
     }
   },
-  loadSceneFromFile: async (filePath) => {
+  loadSceneFromFile: async (filePath, isCurrent = () => true, deferEnvironmentUntilSync = false) => {
+    if (!isCurrent()) return false;
     if (get().runtimeMode === 'preview') {
       set((state) => guardRuntimePreviewMutation(state, '加载最近场景'));
       return false;
@@ -5515,6 +5523,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const result = await window.editorApi.loadSceneFile({ filePath });
+      if (!isCurrent()) return false;
 
       if (result.canceled || result.content === null) {
         set((state) => ({ logs: prependLog(state.logs, '已取消加载场景。') }));
@@ -5522,13 +5531,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const scene = deserializeScene(result.content);
-      set((state) => createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`));
+      set((state) => {
+        const loaded = createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`);
+        return deferEnvironmentUntilSync && scene.sceneSettings.environment
+          ? { ...loaded, environmentStartupRelinkSessionId: loaded.sceneSessionId }
+          : loaded;
+      });
       void syncDataPlatformModelsAfterLocalSceneLoad((message) => get().pushLog(message));
       void syncDataPlatformEnvironmentsAfterWorkspaceOpen((message) => get().pushLog(message));
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (!isCurrent()) return false;
       set((state) => ({ logs: prependLog(state.logs, `加载最近场景失败：${message}`) }));
       return false;
     }

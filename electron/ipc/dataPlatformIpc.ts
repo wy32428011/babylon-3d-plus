@@ -35,6 +35,7 @@ import {
   syncDataPlatformImagesForWorkspace,
   syncDataPlatformModelsForWorkspace,
   syncDataPlatformEnvironmentsForWorkspace,
+  cancelDataPlatformProjectLoading,
   syncDataPlatformSkyboxesForWorkspace,
   getCurrentDataPlatformImageSyncProgress,
 } from './dataPlatformProjectService.js';
@@ -199,12 +200,13 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle('data-platform:syncEnvironments', async (_event, request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => {
     const config = await readDataPlatformConfig();
     if (!config.baseUrl) return false;
-    return syncDataPlatformEnvironmentsForWorkspace(config.baseUrl, config.workspaceRoot, request?.expectedSourceKey);
+    return syncDataPlatformEnvironmentsForWorkspace(config.baseUrl, config.workspaceRoot, request?.expectedSourceKey, request?.requiredResourceIds);
   });
 
   ipcMain.handle('data-platform:retryEnvironmentSync', async (): Promise<boolean> => {
     return retryLatestDataPlatformEnvironmentSync();
   });
+  ipcMain.handle('data-platform:cancelProjectLoading', (): boolean => cancelDataPlatformProjectLoading());
 
   ipcMain.handle(
     'data-platform:getEnvironmentSyncProgress',

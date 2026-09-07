@@ -1,0 +1,19 @@
+.detail {
+  min-width: 0;
+  margin-top: 8px;
+  color: #b7cbdc;
+  font-size: 12px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.summary {
+  overflow-wrap: anywhere;
+}
+
+.file {
+  overflow: hidden;
+  color: #91a6b9;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -693,23 +693,6 @@ async function retryAndWaitForSync(window) {
   });
 }
 
-async function waitForEnvironmentSync(window, contextKey) {
-  return window.evaluate(async (expectedContextKey) => new Promise((resolve, reject) => {
-    let unsubscribe = () => undefined;
-    const timeout = window.setTimeout(() => {
-      unsubscribe();
-      reject(new Error('等待环境模型同步完成超时'));
-    }, 20000);
-    unsubscribe = window.editorApi.onDataPlatformEnvironmentSyncProgress((progress) => {
-      if (progress.contextKey !== expectedContextKey) return;
-      if (progress.phase !== 'completed' && progress.phase !== 'failed') return;
-      window.clearTimeout(timeout);
-      unsubscribe();
-      resolve(progress);
-    });
-  }), contextKey);
-}
-
 async function expectOpenFailure(window, projectId, expectedText) {
   const message = await window.evaluate(async ({ id, expected }) => {
     try {
@@ -1024,6 +1007,12 @@ async function run() {
     });
     await launched.window.getByRole('button', { name: '关闭 Console' }).click();
 
+    // 本地场景缓存位于storageRoot，业务项目缓存位于SharedResources；切换前卸载旧编辑页，
+    // 防止旧场景同步效果与下面直接调用主进程open并发改写共享根目录。
+    await launched.window.reload();
+    await launched.window.waitForLoadState('domcontentloaded');
+    await launched.window.locator('.home-data-platform-card').filter({ hasText: '有效工程包项目' }).waitFor({ state: 'visible' });
+    const environmentDownloadsBeforeEmptyProject = mock.requests.filter((item) => item.path.endsWith('/files/environment.glb')).length;
     const valid = await openAndWaitForSync(launched.window, VALID_PROJECT_ID);
     assert.equal(valid.openResult.source, 'package');
     assert.ok(valid.openResult.sceneFilePath?.endsWith('.scene.json'));
@@ -1031,15 +1020,8 @@ async function run() {
     assert.ok(valid.events.some((item) => item.phase === 'downloading'));
     assert.ok(valid.events.some((item) => item.phase === 'validating'));
     assert.ok(valid.events.some((item) => item.phase === 'promoting'));
-    const validEnvironmentProgress = await waitForEnvironmentSync(
-      launched.window,
-      `${dataPlatformSourceKey}:${process.platform === 'win32' ? sharedResourcesRoot.toLowerCase() : sharedResourcesRoot}`,
-    );
-    assert.equal(
-      validEnvironmentProgress.phase,
-      'completed',
-      validEnvironmentProgress.error ?? validEnvironmentProgress.message,
-    );
+    // 此工程入口没有环境引用，不应把其他工作区已有的环境隐式下载到业务共享库。
+    assert.equal(valid.openResult.envModelSyncStarted, false);
 
     const loadedScene = await launched.window.evaluate(async (filePath) => window.editorApi.loadSceneFile({ filePath }), valid.openResult.sceneFilePath);
     assert.equal(loadedScene.canceled, false);
@@ -1048,22 +1030,18 @@ async function run() {
     assert.equal(loadedModelPath, path.join(validProjectRoot, 'Assets', 'Models', 'PackageModel', 'PackageModel.glb'));
     assert.ok(!loadedModelPath.includes('old-editor'));
 
-    await launched.window.waitForFunction(async ({ expectedProjectRoot, resourceId }) => {
-      const result = await window.editorApi.listProjectAssets();
-      return result.projectRoot === expectedProjectRoot && result.assets.some((item) => (
-        item.libraryKind === 'environment'
-        && item.source === 'data-platform'
-        && item.dataPlatformResourceId === resourceId
-      ));
-    }, {
-      expectedProjectRoot: validProjectRoot,
-      resourceId: ENVIRONMENT_MODEL_ID,
-    }, { timeout: 20000 });
     const assets = await launched.window.evaluate(() => window.editorApi.listProjectAssets());
     assert.equal(assets.projectRoot, validProjectRoot);
-    assert.equal(assets.assets.length, 6);
+    assert.equal(assets.assets.length, 5, JSON.stringify(assets));
     assert.equal(assets.assets.filter((item) => item.libraryKind === 'model').length, 4);
-    assert.equal(assets.assets.filter((item) => item.libraryKind === 'environment').length, 2);
+    const packageEnvironments = assets.assets.filter((item) => item.libraryKind === 'environment');
+    assert.equal(packageEnvironments.length, 1);
+    assert.equal(packageEnvironments[0].path, path.join(validProjectRoot, 'Assets', 'Environments', 'PackageEnv', 'PackageEnv.glb'));
+    assert.equal(assets.assets.some((item) => item.dataPlatformResourceId === ENVIRONMENT_MODEL_ID), false);
+    assert.equal(mock.requests.filter((item) => item.path.endsWith('/files/environment.glb')).length, environmentDownloadsBeforeEmptyProject);
+    assert.ok(syncedEnvironmentAsset.path.startsWith(storageRoot));
+    assert.ok(!syncedEnvironmentAsset.path.startsWith(sharedResourcesRoot));
+    assert.equal((await stat(syncedEnvironmentAsset.path)).isFile(), true, '切换到无环境引用项目不能删除另一工作区的有效环境缓存');
     assert.ok(assets.assets.every((item) => (
       item.path.startsWith(validProjectRoot) || item.path.startsWith(sharedResourcesRoot)
     )));
@@ -1078,6 +1056,12 @@ async function run() {
     assert.ok(!mock.requests.some((item) => item.path.endsWith('/runtime-types.d.ts')));
     assert.ok(!mock.requests.some((item) => item.path.includes('legacy-one.ts')));
     const modelFileDownloadCountBeforeUiReopen = mock.getModelFileDownloadCount();
+    const authoritativeModelPath = path.join(sharedResourcesRoot, 'Assets', 'Models', `Model-${GLOBAL_MODEL_ID}-全局普通模型`, 'global.glb');
+    const localModelOverride = Buffer.from(await readFile(authoritativeModelPath));
+    localModelOverride[localModelOverride.length - 1] ^= 0xff;
+    await writeFile(authoritativeModelPath, localModelOverride);
+    const authoritativeScriptPath = path.join(path.dirname(authoritativeModelPath), 'global-runtime.ts');
+    await writeFile(authoritativeScriptPath, '// 本地旧脚本，应在显式打开中台项目时被权威资源覆盖。\n', 'utf8');
 
     await launched.window.reload();
     await launched.window.waitForLoadState('domcontentloaded');
@@ -1105,19 +1089,13 @@ async function run() {
     await launched.window.locator('.project-library').waitFor({ state: 'visible', timeout: 20000 });
     await launched.window.waitForFunction(() => {
       const modelEvents = window.__dataPlatformSmokeProgressEvents ?? [];
-      const environmentEvents = window.__dataPlatformSmokeEnvironmentProgressEvents ?? [];
       const imageEvents = window.__dataPlatformSmokeImageProgressEvents ?? [];
       const modelQueryingEvent = modelEvents.find((item) => item.phase === 'querying');
-      const environmentQueryingEvent = environmentEvents.find((item) => item.phase === 'querying');
       const imageQueryingEvent = imageEvents.find((item) => item.phase === 'querying');
       return Boolean(
         modelQueryingEvent
         && modelEvents.some((item) => (
           item.runId === modelQueryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed')
-        ))
-        && environmentQueryingEvent
-        && environmentEvents.some((item) => (
-          item.runId === environmentQueryingEvent.runId && (item.phase === 'completed' || item.phase === 'failed')
         ))
         && imageQueryingEvent
         && imageEvents.some((item) => (
@@ -1163,21 +1141,19 @@ async function run() {
       'completed',
       uiSyncProgress.model?.error ?? uiSyncProgress.model?.message,
     );
-    assert.equal(
-      uiSyncProgress.environment?.phase,
-      'completed',
-      uiSyncProgress.environment?.error ?? uiSyncProgress.environment?.message,
-    );
+    assert.equal(uiSyncProgress.environment, null, 'UI重开无环境引用场景不应启动环境整库同步');
+    assert.equal(mock.requests.filter((item) => item.path.endsWith('/files/environment.glb')).length, environmentDownloadsBeforeEmptyProject);
     assert.equal(
       uiSyncProgress.image?.phase,
       'completed',
       uiSyncProgress.image?.error ?? uiSyncProgress.image?.message,
     );
-    assert.equal(
-      mock.getModelFileDownloadCount(),
-      modelFileDownloadCountBeforeUiReopen,
-      '远端模型版本未变化时，重新打开项目不应再次下载模型资源。',
-    );
+    assert.ok(mock.getModelFileDownloadCount() > modelFileDownloadCountBeforeUiReopen,
+      '显式打开中台项目必须重新获取权威模型，即使远端版本号未变化。');
+    assert.deepEqual(await readFile(authoritativeModelPath), fixtures.modelFiles.get('global.glb'),
+      '同版本本地模型内容也必须被当前中台文件覆盖。');
+    assert.equal(await readFile(authoritativeScriptPath, 'utf8'), 'export const dataDriven = { device: { defaultAssetCode: "GLOBAL" } };\n',
+      '显式重新打开项目必须恢复当前中台脚本。');
     await launched.window.waitForFunction(
       () => document.querySelectorAll('.library-sync-status-completed').length === 0,
       undefined,

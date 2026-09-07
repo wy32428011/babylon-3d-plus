@@ -3,6 +3,9 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DataPlatformEnvironmentSyncProgress } from '../types.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
+import { RemoteDownloadTracker } from '../shared/remoteDownloadProgress.js';
+import { MAX_GLB_FILE_BYTES } from '../shared/glbFilePolicy.js';
+import { validateEnvironmentFile } from './environmentFileValidation.js';
 import {
   normalizeDataPlatformSourceUrl,
   normalizeEnvironmentManifestResponse,
@@ -32,7 +35,7 @@ const ENVIRONMENT_MANIFEST_QUERY_PATH = 'api/v1/env-models/sync-manifest/query';
 const MANIFEST_PAGE_SIZE = 200;
 const MAX_MANIFEST_PAGES = 1_000;
 const MAX_MANIFEST_RECORDS = 100_000;
-const MAX_ENVIRONMENT_FILE_BYTES = 512 * 1024 * 1024;
+const MAX_ENVIRONMENT_FILE_BYTES = MAX_GLB_FILE_BYTES;
 const MAX_SYNC_DOWNLOAD_BYTES = 8 * 1024 * 1024 * 1024;
 const DEFAULT_CACHE_LIMIT_BYTES = 20 * 1024 * 1024 * 1024;
 const MIN_FREE_DISK_BYTES = 2 * 1024 * 1024 * 1024;
@@ -49,11 +52,16 @@ type EnvironmentSyncContext = {
   editorRoot: string;
   contextKey: string;
   expectedSourceKey?: string;
+  /** undefined为用户显式全库同步，数组为当前场景真正引用的环境。 */
+  requiredResourceIds?: readonly string[];
+  forceRefresh?: boolean;
 };
 
 type ActiveEnvironmentSync = {
   runId: string;
   contextKey: string;
+  scopeKey: string;
+  forceRefresh?: boolean;
   controller: AbortController;
   promise: Promise<void>;
 };
@@ -107,24 +115,54 @@ export async function executeDataPlatformEnvironmentSync(
   const baseUrl = normalizeDataPlatformSourceUrl(options.baseUrl);
   const sourceKey = createDataPlatformSourceKey(baseUrl);
   const expectedSourceKey = options.expectedSourceKey?.trim();
-  if (expectedSourceKey && expectedSourceKey !== sourceKey) {
-    throw new Error('当前数据中台地址与已打开场景的环境模型来源不一致，已拒绝同步。');
-  }
   const contextKey = normalizeContextKey(options.contextKey);
   const runId = normalizeRunId(options.runId ?? dependencies.randomId());
   const signal = options.signal ?? new AbortController().signal;
   let stagingRoot: string | null = null;
+  let downloadTracker: RemoteDownloadTracker | null = null;
   let completed = 0;
   let total = 0;
 
   updateEnvironmentSyncProgress({ runId, contextKey, phase: 'querying', completed: 0, total: 0, message: '正在读取环境模型同步清单…', error: null });
   try {
-    const manifest = await queryEnvironmentManifestSnapshot(baseUrl, signal, dependencies.requestJson);
+    if (expectedSourceKey && expectedSourceKey !== sourceKey) {
+      throw new Error('当前数据中台地址与已打开场景的环境模型来源不一致，已拒绝同步。');
+    }
+    const requestedIds = normalizeRequiredIds(options.requiredResourceIds);
+    const requiredIds = requestedIds === undefined ? undefined : new Set(requestedIds);
+    const manifest = await queryEnvironmentManifestSnapshot(baseUrl, signal, dependencies.requestJson, requiredIds);
     assertNotAborted(signal);
+    if (requiredIds) {
+      for (const id of requiredIds) {
+        if (!/^[1-9]\d{0,63}$/.test(id)) throw new Error('场景环境资源ID无效。');
+        const record = manifest.records.find((item) => item.id === id);
+        if (!record || record.fileStatus !== 'GLB_READY') {
+          throw new Error(`当前场景引用的环境 ${id} 在远端不可用：${record?.warning ?? record?.fileStatus ?? '清单中不存在'}。`);
+        }
+      }
+    }
     const environmentIndexPath = getDataPlatformEnvironmentIndexPath(editorRoot);
     await assertTrustedEnvironmentPath(editorRoot, environmentIndexPath, '环境模型 Sidecar 索引');
     const current = await readDataPlatformEnvironmentIndex(editorRoot);
     const existingPaths = await collectExistingPaths(editorRoot, current.entries.map((entry) => entry.relativePath));
+    // 显式从数据中台打开时，以远端为准，不能因相同修订而复用本地文件。
+    if (options.forceRefresh) {
+      for (const entry of current.entries) {
+        if (!requiredIds || requiredIds.has(entry.resourceId)) existingPaths.delete(entry.relativePath);
+      }
+    }
+    for (const entry of current.entries) {
+      if (entry.sourceKey !== sourceKey || (requiredIds && !requiredIds.has(entry.resourceId)) || !existingPaths.has(entry.relativePath)) continue;
+      try {
+        await validateEnvironmentFile(resolveEnvironmentIndexEntryPath(editorRoot, entry.relativePath), {
+          expectedSize: entry.fileSizeBytes, expectedSha256: entry.fileSha256, signal,
+        });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        // 不删除旧缓存；让正常下载/校验/事务提交修复损坏文件，失败仍有明确错误。
+        existingPaths.delete(entry.relativePath);
+      }
+    }
     const syncedAt = dependencies.now().toISOString();
     const plan = buildDataPlatformEnvironmentPlan({
       sourceKey,
@@ -133,6 +171,7 @@ export async function executeDataPlatformEnvironmentSync(
       records: manifest.records,
       current,
       existingPaths,
+      requiredResourceIds: requiredIds,
       syncedAt,
     });
     total = plan.downloads.length;
@@ -144,16 +183,24 @@ export async function executeDataPlatformEnvironmentSync(
     await removeTrustedEnvironmentPath(editorRoot, stagingRoot, '环境模型同步暂存目录', true);
     await ensureTrustedEnvironmentDirectory(editorRoot, stagingRoot, '环境模型同步暂存目录');
 
+    const stagedDownloads = createStagedDownloads(stagingRoot, plan.downloads);
+    const tracker = new RemoteDownloadTracker(stagedDownloads.map((item) => ({ id: item.stagedPath,
+      fileName: item.plan.record.displayName, totalBytes: item.plan.record.fileSizeBytes })), (download) => {
+      updateEnvironmentSyncProgress({ runId, contextKey, phase: download.activeFiles ? 'downloading' : 'validating',
+        completed, total, message: download.activeFiles ? '正在下载环境模型…' : '环境下载结束，正在校验…', error: null, download });
+    });
+    downloadTracker = tracker;
     updateEnvironmentSyncProgress({
       runId, contextKey, phase: 'downloading', completed: 0, total,
       message: total === 0 ? '环境模型缓存无需下载。' : `正在下载 ${total} 个环境 GLB…`, error: null,
+      download: total > 0 ? tracker.snapshot() : undefined,
     });
-    const stagedDownloads = createStagedDownloads(stagingRoot, plan.downloads);
     const successfulDownloads: StagedDownload[] = [];
     const failedDownloads = new Map<string, string>();
     let downloadedBytes = 0;
     await runWithConcurrency(stagedDownloads, MAX_CONCURRENT_DOWNLOADS, async (item) => {
       assertNotAborted(signal);
+      tracker.start(item.stagedPath);
       try {
         const partialDirectoryPath = getEnvironmentPartialDirectory(editorRoot, sourceKey, item.plan.record.id, item.plan.record.fileRevision!);
         await ensureTrustedEnvironmentDirectory(editorRoot, partialDirectoryPath, '环境模型续传目录');
@@ -166,6 +213,7 @@ export async function executeDataPlatformEnvironmentSync(
           signal,
           timeoutMs: DOWNLOAD_TIMEOUT_MS,
           context: `下载环境模型“${item.plan.record.displayName}”`,
+          onProgress: (progress) => tracker.update(item.stagedPath, progress),
           resumeKey: 'model-glb',
           partialDirectoryPath,
           partialTtlMs: PARTIAL_TTL_MS,
@@ -175,13 +223,15 @@ export async function executeDataPlatformEnvironmentSync(
           },
         });
         downloadedBytes += result.resumedBytes;
+        tracker.finish(item.stagedPath, result.bytes);
         if (downloadedBytes > MAX_SYNC_DOWNLOAD_BYTES) throw new Error('环境模型本轮下载总量超过 8 GiB 上限。');
         await assertTrustedEnvironmentPath(editorRoot, item.stagedPath, '环境模型 staging 文件');
-        const actualSha256 = await hashFileSha256(item.stagedPath);
-        assertDownloadedMetadata(item.plan.record, result, actualSha256);
+        updateEnvironmentSyncProgress({ runId, contextKey, phase: 'validating', completed, total, message: `正在校验环境模型“${item.plan.record.displayName}”…`, error: null, download: tracker.snapshot() });
+        const inspection = options.dependencies?.inspectFile
+          ? { ...await dependencies.inspectFile(item.stagedPath), fileSha256: await hashFileSha256(item.stagedPath) }
+          : await validateEnvironmentFile(item.stagedPath, { expectedSize: item.plan.record.fileSizeBytes!, expectedSha256: item.plan.record.fileSha256!, signal });
+        assertDownloadedMetadata(item.plan.record, result, inspection.fileSha256);
         await removeTrustedEnvironmentPath(editorRoot, partialDirectoryPath, '环境模型续传目录', true);
-        updateEnvironmentSyncProgress({ runId, contextKey, phase: 'validating', completed, total, message: `正在校验环境模型“${item.plan.record.displayName}”…`, error: null });
-        const inspection = await dependencies.inspectFile(item.stagedPath);
         if (inspection.fileSizeBytes !== item.plan.record.fileSizeBytes) throw new Error(`环境模型“${item.plan.record.displayName}”校验大小不一致。`);
         successfulDownloads.push(item);
       } catch (error) {
@@ -189,10 +239,12 @@ export async function executeDataPlatformEnvironmentSync(
         failedDownloads.set(item.plan.record.id, toErrorMessage(error));
         await removeTrustedEnvironmentPath(editorRoot, item.stagedPath, '失败的环境模型 staging 文件', false).catch(() => undefined);
       } finally {
+        tracker.stop(item.stagedPath);
         completed += 1;
-        updateEnvironmentSyncProgress({ runId, contextKey, phase: 'validating', completed, total, message: `已处理 ${completed}/${total} 个环境模型。`, error: null });
+        updateEnvironmentSyncProgress({ runId, contextKey, phase: 'validating', completed, total, message: `已处理 ${completed}/${total} 个环境模型。`, error: null, download: tracker.snapshot() });
       }
     });
+    tracker.close();
 
     if (failedDownloads.size > 0) applyDownloadFailures(plan.nextIndex.entries, current.entries, failedDownloads, syncedAt);
     const stagedIndexPath = path.join(stagingRoot, 'index', 'data-platform-environment-index.json');
@@ -203,6 +255,10 @@ export async function executeDataPlatformEnvironmentSync(
     await promoteEnvironmentBatch({ editorRoot, stagingRoot, stagedDownloads: successfulDownloads, stagedIndexPath, signal });
     await removeTrustedEnvironmentPath(editorRoot, stagingRoot, '环境模型同步暂存目录', true);
     stagingRoot = null;
+    const requiredFailures = [...failedDownloads].filter(([id]) => requiredIds?.has(id));
+    if (requiredFailures.length) {
+      throw new Error(`当前场景环境同步失败：${requiredFailures.map(([id, message]) => `${id}：${message}`).join('；')}`);
+    }
     updateEnvironmentSyncProgress({
       runId, contextKey, phase: 'completed', completed: total, total,
       message: `环境模型同步完成：清单 ${manifest.records.length} 项，成功下载 ${successfulDownloads.length} 项，下载失败 ${failedDownloads.size} 项，异常缓存 ${plan.nextIndex.entries.filter((entry) => entry.status !== 'active').length} 项。`, error: null,
@@ -212,6 +268,8 @@ export async function executeDataPlatformEnvironmentSync(
     const normalized = signal.aborted ? new Error('数据中台环境模型同步已取消。') : error;
     updateEnvironmentSyncProgress({ runId, contextKey, phase: 'failed', completed, total, message: '数据中台环境模型同步失败，已保留原缓存。', error: toErrorMessage(normalized) });
     throw normalized;
+  } finally {
+    downloadTracker?.close();
   }
 }
 
@@ -220,6 +278,8 @@ export function startDataPlatformEnvironmentSync(
   editorRoot: string,
   contextKey: string,
   expectedSourceKey?: string,
+  requiredResourceIds?: readonly string[],
+  forceRefresh = false,
 ): boolean {
   if (environmentSyncShuttingDown) return false;
   const context = {
@@ -227,10 +287,21 @@ export function startDataPlatformEnvironmentSync(
     editorRoot: path.resolve(editorRoot),
     contextKey: normalizeContextKey(contextKey),
     expectedSourceKey: expectedSourceKey?.trim() || undefined,
+    requiredResourceIds: normalizeRequiredIds(requiredResourceIds),
+    forceRefresh,
   };
+  // 同范围强制打开已排队时，后续自动刷新继续保留覆盖要求。
+  if (queuedEnvironmentSyncContext && queuedEnvironmentSyncContext.forceRefresh
+    && environmentScopeKey(queuedEnvironmentSyncContext) === environmentScopeKey(context)) context.forceRefresh = true;
   lastEnvironmentSyncContext = { ...context };
+  if (context.requiredResourceIds?.length === 0) {
+    cancelDataPlatformEnvironmentSync();
+    return false;
+  }
   if (activeEnvironmentSync) {
-    if (activeEnvironmentSync.contextKey === context.contextKey) {
+    if (activeEnvironmentSync.scopeKey === environmentScopeKey(context)
+      && (!context.forceRefresh || activeEnvironmentSync.forceRefresh)) {
+      lastEnvironmentSyncContext = { ...context, forceRefresh: activeEnvironmentSync.forceRefresh };
       queuedEnvironmentSyncContext = activeEnvironmentSync.controller.signal.aborted ? context : null;
       return true;
     }
@@ -248,11 +319,43 @@ export function retryDataPlatformEnvironmentSync(): boolean {
     lastEnvironmentSyncContext.editorRoot,
     lastEnvironmentSyncContext.contextKey,
     lastEnvironmentSyncContext.expectedSourceKey,
+    lastEnvironmentSyncContext.requiredResourceIds,
+    lastEnvironmentSyncContext.forceRefresh,
   );
 }
 
 export function getLatestDataPlatformEnvironmentSyncProgress(): DataPlatformEnvironmentSyncProgress | null {
   return latestEnvironmentSyncProgress ? { ...latestEnvironmentSyncProgress } : null;
+}
+
+export function isDataPlatformEnvironmentSyncPending(contextKey: string): boolean {
+  if (queuedEnvironmentSyncContext?.contextKey === contextKey) return true;
+  return activeEnvironmentSync?.contextKey === contextKey
+    && latestEnvironmentSyncProgress?.runId === activeEnvironmentSync.runId
+    && latestEnvironmentSyncProgress.phase !== 'completed'
+    && latestEnvironmentSyncProgress.phase !== 'failed';
+}
+
+/** 用户取消当前打开，不进入shutdown态，保留后续重试所需的同步范围。 */
+export function cancelDataPlatformEnvironmentSync(): boolean {
+  queuedEnvironmentSyncContext = null;
+  if (!activeEnvironmentSync) return false;
+  activeEnvironmentSync.controller.abort();
+  return true;
+}
+
+function environmentScopeKey(context: EnvironmentSyncContext): string {
+  const mismatch = context.expectedSourceKey && context.expectedSourceKey !== createDataPlatformSourceKey(context.baseUrl)
+    ? context.expectedSourceKey : '';
+  return `${context.contextKey}:${mismatch}:${context.requiredResourceIds === undefined ? '*' : JSON.stringify([...new Set(context.requiredResourceIds)].sort())}`;
+}
+
+function normalizeRequiredIds(ids: readonly string[] | undefined): string[] | undefined {
+  if (ids === undefined) return undefined;
+  if (!Array.isArray(ids) || ids.length > 1000 || ids.some((id) => typeof id !== 'string' || !/^[1-9]\d{0,63}$/.test(id))) {
+    throw new Error('场景环境资源ID列表无效。');
+  }
+  return [...new Set(ids)].sort();
 }
 
 export function clearDataPlatformEnvironmentSyncRetryContext(): void {
@@ -277,6 +380,7 @@ async function queryEnvironmentManifestSnapshot(
   baseUrl: string,
   signal: AbortSignal,
   requestJson: EnvironmentSyncDependencies['requestJson'],
+  requiredResourceIds?: ReadonlySet<string>,
 ): Promise<{ protocolVersion: string; manifestRevision: string; records: DataPlatformEnvironmentRecord[] }> {
   let expectedRevision: string | null = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -295,14 +399,16 @@ async function queryEnvironmentManifestSnapshot(
         timeoutMs: QUERY_TIMEOUT_MS,
         context: '查询数据中台环境模型同步清单',
       });
-      const page = normalizeEnvironmentManifestResponse(payload);
+      const page = normalizeEnvironmentManifestResponse(payload, requiredResourceIds);
       if (manifestRevision === null) manifestRevision = page.manifestRevision;
       if (page.manifestRevision !== manifestRevision) { expectedRevision = page.manifestRevision; restart = true; break; }
       if (protocolVersion === null) protocolVersion = page.protocolVersion;
       else if (page.protocolVersion !== protocolVersion) throw new Error('环境模型同步协议版本在分页过程中发生变化。');
       records.push(...page.records);
       if (records.length > MAX_MANIFEST_RECORDS) throw new Error('环境模型同步清单超过 100000 项上限。');
-      if (!page.hasMore) return { protocolVersion, manifestRevision, records };
+      if (!page.hasMore || (requiredResourceIds && [...requiredResourceIds].every((id) => records.some((item) => item.id === id)))) {
+        return { protocolVersion, manifestRevision, records };
+      }
       cursorId = page.nextCursorId;
     }
     if (!restart) throw new Error(`环境模型同步清单超过 ${MAX_MANIFEST_PAGES} 页上限。`);
@@ -322,7 +428,7 @@ function launchEnvironmentSync(context: EnvironmentSyncContext): boolean {
       queuedEnvironmentSyncContext = null;
       if (!environmentSyncShuttingDown && queued) launchEnvironmentSync(queued);
     });
-  activeEnvironmentSync = { runId, contextKey: context.contextKey, controller, promise };
+  activeEnvironmentSync = { runId, contextKey: context.contextKey, scopeKey: environmentScopeKey(context), forceRefresh: context.forceRefresh, controller, promise };
   return true;
 }
 
@@ -423,7 +529,7 @@ function readCacheLimitBytes(): number {
   if (!configured) return DEFAULT_CACHE_LIMIT_BYTES;
   if (!/^\d+$/.test(configured)) throw new Error('ZENDING_ENV_CACHE_MAX_BYTES 必须是正整数字节数。');
   const parsed = Number(configured);
-  if (!Number.isSafeInteger(parsed) || parsed < MAX_ENVIRONMENT_FILE_BYTES) {
+  if (!Number.isSafeInteger(parsed) || parsed < 512 * 1024 * 1024) {
     throw new Error('ZENDING_ENV_CACHE_MAX_BYTES 不能小于 512 MiB。');
   }
   return parsed;

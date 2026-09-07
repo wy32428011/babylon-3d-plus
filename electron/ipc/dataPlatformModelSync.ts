@@ -8,6 +8,7 @@ import type {
   ProjectModelAssetEntry,
 } from '../types.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
+import { RemoteDownloadTracker } from '../shared/remoteDownloadProgress.js';
 import {
   DEFAULT_MODEL_LENGTH_UNIT_INFO,
 } from '../modelUnits.js';
@@ -204,12 +205,17 @@ async function runDataPlatformModelSync(
   await fs.rm(stagingRoot, { recursive: true, force: true });
 
   let preserveStaging = false;
+  let downloadTracker: RemoteDownloadTracker | null = null;
   try {
     const prepared = await prepareDownloadPlan(stagingRoot, records);
     const jobs = createDownloadJobs(prepared);
     let completedDownloads = 0;
     let downloadedBytes = 0;
-    const downloadProgressStep = Math.max(1, Math.ceil(jobs.length / 100));
+    const tracker = new RemoteDownloadTracker(jobs.map((job) => ({ id: job.destinationPath, fileName: job.label })), (download) => {
+      updateModelSyncProgress({ runId, phase: 'downloading', completed: completedDownloads, total: jobs.length,
+        message: `正在下载 ${completedDownloads}/${jobs.length} 个模型文件…`, error: null, download });
+    });
+    downloadTracker = tracker;
 
     updateModelSyncProgress({
       runId,
@@ -218,9 +224,11 @@ async function runDataPlatformModelSync(
       total: jobs.length,
       message: `正在下载 ${records.length} 个模型资源包…`,
       error: null,
+      download: jobs.length > 0 ? tracker.snapshot() : undefined,
     });
 
     await runWithConcurrency(jobs, MAX_CONCURRENT_DOWNLOADS, async (job) => {
+      tracker.start(job.destinationPath);
       const result = await downloadRemoteFile({
         baseUrl: context.baseUrl,
         remoteUrl: job.remoteUrl,
@@ -229,6 +237,7 @@ async function runDataPlatformModelSync(
         signal,
         timeoutMs: FILE_DOWNLOAD_TIMEOUT_MS,
         context: `下载${job.label}`,
+        onProgress: (progress) => tracker.update(job.destinationPath, progress),
         onBytes: (bytes) => {
           downloadedBytes += bytes;
           if (downloadedBytes > MAX_SYNC_DOWNLOAD_BYTES) {
@@ -246,17 +255,9 @@ async function runDataPlatformModelSync(
       }
 
       completedDownloads += 1;
-      if (completedDownloads === jobs.length || completedDownloads % downloadProgressStep === 0) {
-        updateModelSyncProgress({
-          runId,
-          phase: 'downloading',
-          completed: completedDownloads,
-          total: jobs.length,
-          message: `已下载 ${completedDownloads}/${jobs.length} 个模型文件。`,
-          error: null,
-        });
-      }
+      tracker.finish(job.destinationPath, result.bytes);
     });
+    tracker.close();
 
     updateModelSyncProgress({
       runId,
@@ -303,6 +304,7 @@ async function runDataPlatformModelSync(
     preserveStaging = error instanceof DataPlatformRollbackError;
     throw error;
   } finally {
+    downloadTracker?.close();
     if (!preserveStaging) {
       await fs.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
     }

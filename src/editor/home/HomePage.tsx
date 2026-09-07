@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { APPLICATION_NAME, BrandLogo } from '../ui/BrandLogo';
+import { cancelProjectLoading, createProjectOpenSession } from './projectLoadingCancellation';
 
 type HomePageProps = {
   onEnterBlankEditor: () => void;
   onEnterProjectEditor: () => void;
   onNewScene: () => void;
   onOpenSceneDialog: () => Promise<boolean>;
-  onOpenRecentScene: (filePath: string) => Promise<boolean>;
+  onOpenRecentScene: (filePath: string, isCurrent?: () => boolean, deferEnvironmentUntilSync?: boolean) => Promise<boolean>;
 };
 
 type HomeStatus = {
@@ -137,12 +138,17 @@ export function HomePage({
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [busyActionId, setBusyActionId] = useState<string | null>(null);
   const [status, setStatus] = useState<HomeStatus | null>(null);
+  const [isCancellingProjectOpen, setIsCancellingProjectOpen] = useState(false);
+  const [canCancelProjectOpen, setCanCancelProjectOpen] = useState(false);
+  const projectOpenSession = useRef(createProjectOpenSession());
   const isConfigDialogOpenRef = useRef(false);
   const configDraftsDirtyRef = useRef(false);
   const dataPlatformRequestIdRef = useRef(0);
   const isOpeningDataPlatformProject = busyActionId?.startsWith('data-platform-project:') ?? false;
   const isChangingDataPlatformWorkspace = busyActionId === 'select-data-platform-workspace'
     || busyActionId === 'reset-data-platform-workspace';
+
+  useEffect(() => () => projectOpenSession.current.invalidate(), []);
 
   useEffect(() => {
     let isMounted = true;
@@ -421,12 +427,16 @@ export function HomePage({
     if (isOpeningDataPlatformProject || isChangingDataPlatformWorkspace) return;
 
     const actionId = `data-platform-project:${project.id}`;
+    const openRequest = projectOpenSession.current.begin();
+    setCanCancelProjectOpen(true);
     setBusyActionId(actionId);
     setDataPlatformError(null);
     setStatus({ kind: 'info', message: `正在准备数据中台项目：${project.projectName}` });
 
     try {
       const result = await requestOpenDataPlatformProject(project.id);
+      if (!projectOpenSession.current.isCurrent(openRequest)) return;
+      setCanCancelProjectOpen(false);
       const sharedResourceSyncStarted = result.modelSyncStarted || result.skyboxSyncStarted;
       if (result.warning) {
         const syncNotice = sharedResourceSyncStarted ? '；共享资源同步已开始。' : '';
@@ -445,7 +455,8 @@ export function HomePage({
       }
 
       if (result.sceneFilePath) {
-        const loaded = await onOpenRecentScene(result.sceneFilePath);
+        const loaded = await onOpenRecentScene(result.sceneFilePath, () => projectOpenSession.current.isCurrent(openRequest), true);
+        if (!projectOpenSession.current.isCurrent(openRequest)) return;
         if (!loaded) {
           setStatus({ kind: 'error', message: `数据中台项目场景加载失败：${result.sceneFilePath}` });
         }
@@ -454,10 +465,34 @@ export function HomePage({
 
       onEnterProjectEditor();
     } catch (error) {
+      if (!projectOpenSession.current.isCurrent(openRequest)) return;
       const message = getHomeErrorMessage(error);
       setStatus({ kind: 'error', message: `打开数据中台项目失败：${message}` });
     } finally {
+      if (projectOpenSession.current.isCurrent(openRequest)) {
+        setBusyActionId(null);
+        setCanCancelProjectOpen(false);
+      }
+    }
+  }
+
+  async function handleCancelDataPlatformProjectOpen(): Promise<void> {
+    if (!canCancelProjectOpen || isCancellingProjectOpen) return;
+    if (!window.editorApi?.cancelDataPlatformProjectLoading) {
+      setStatus({ kind: 'error', message: '当前编辑器不支持取消远程加载，请更新编辑器。' });
+      return;
+    }
+    projectOpenSession.current.invalidate();
+    setIsCancellingProjectOpen(true);
+    try {
+      await cancelProjectLoading(window.editorApi.cancelDataPlatformProjectLoading);
+      setStatus({ kind: 'info', message: '已请求取消项目加载，后台任务正在停止。可重新打开项目。' });
       setBusyActionId(null);
+      setCanCancelProjectOpen(false);
+    } catch (error) {
+      setStatus({ kind: 'error', message: `取消项目加载失败：${getHomeErrorMessage(error)}` });
+    } finally {
+      setIsCancellingProjectOpen(false);
     }
   }
 
@@ -547,23 +582,23 @@ export function HomePage({
           <p>项目启动台</p>
         </div>
         <div className="home-actions" aria-label="首页操作">
-          <button onClick={onNewScene} type="button">新建场景</button>
+          <button disabled={isOpeningDataPlatformProject} onClick={onNewScene} type="button">新建场景</button>
           <button
-            disabled={busyActionId === 'open-scene-dialog'}
+            disabled={isOpeningDataPlatformProject || busyActionId === 'open-scene-dialog'}
             onClick={() => void handleOpenSceneDialog()}
             type="button"
           >
             打开场景文件
           </button>
           <button
-            disabled={busyActionId === 'select-project'}
+            disabled={isOpeningDataPlatformProject || busyActionId === 'select-project'}
             onClick={() => void handleSelectProjectDirectory()}
             type="button"
           >
             打开项目目录
           </button>
-          <button onClick={openDataPlatformConfigDialog} type="button">数据中台配置</button>
-          <button onClick={onEnterBlankEditor} type="button">进入空白编辑器</button>
+          <button disabled={isOpeningDataPlatformProject} onClick={openDataPlatformConfigDialog} type="button">数据中台配置</button>
+          <button disabled={isOpeningDataPlatformProject} onClick={onEnterBlankEditor} type="button">进入空白编辑器</button>
         </div>
       </header>
 
@@ -739,6 +774,11 @@ export function HomePage({
                     >
                       {busyActionId === `data-platform-project:${project.id}` ? '准备中...' : '打开'}
                     </button>
+                    {busyActionId === `data-platform-project:${project.id}` && canCancelProjectOpen ? (
+                      <button disabled={isCancellingProjectOpen} onClick={() => void handleCancelDataPlatformProjectOpen()} type="button">
+                        {isCancellingProjectOpen ? '正在取消…' : '取消加载'}
+                      </button>
+                    ) : null}
                   </div>
                 </article>
               ))
@@ -774,7 +814,7 @@ export function HomePage({
                 {scene.projectRoot ? <p className="home-recent-subline" title={scene.projectRoot}>项目：{scene.projectRoot}</p> : null}
                 <div className="home-recent-actions">
                   <button
-                    disabled={!scene.exists || busyActionId === `scene:${scene.filePath}`}
+                    disabled={isOpeningDataPlatformProject || !scene.exists || busyActionId === `scene:${scene.filePath}`}
                     onClick={() => void handleOpenRecentScene(scene)}
                     type="button"
                   >

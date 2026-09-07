@@ -6,13 +6,13 @@ import type { ProjectModelAssetEntry } from '../types.js';
 import { DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO } from '../modelUnits.js';
 import type { DataPlatformEnvironmentRecord } from './dataPlatformEnvironmentContract.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
+import { MAX_GLB_FILE_BYTES } from '../shared/glbFilePolicy.js';
+import { validateEnvironmentFile } from './environmentFileValidation.js';
 
 const require = createRequire(import.meta.url);
 type AssetRegistryModule = typeof import('./assetRegistry.js');
-type ModelPackageScannerModule = typeof import('./modelPackageScanner.js');
 const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
 const { encodeAssetUrl } = require(`./assetRegistry${runtimeExtension}`) as AssetRegistryModule;
-const { inspectGlbModelFile } = require(`./modelPackageScanner${runtimeExtension}`) as ModelPackageScannerModule;
 
 export const DATA_PLATFORM_ENVIRONMENT_INDEX_VERSION = 1 as const;
 const INDEX_FILE_NAME = 'data-platform-environment-index.json';
@@ -181,9 +181,7 @@ export async function listIndexedDataPlatformEnvironments(
       const stat = await fs.lstat(filePath);
       if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('缓存路径不是普通文件。');
       if (stat.size !== entry.fileSizeBytes) throw new Error('缓存文件大小与索引不一致。');
-      const [inspection, actualSha256] = await Promise.all([inspectGlbModelFile(filePath), hashFileSha256(filePath)]);
-      if (inspection.fileSizeBytes !== entry.fileSizeBytes) throw new Error('GLB 校验大小与索引不一致。');
-      if (actualSha256 !== entry.fileSha256) throw new Error('缓存文件 SHA-256 与索引不一致。');
+      await validateEnvironmentFile(filePath, { expectedSize: entry.fileSizeBytes, expectedSha256: entry.fileSha256 });
       const asset = createEnvironmentAsset(entry, filePath);
       if (entry.status === 'active') assets.push(asset);
       else staleAssets.push(asset);
@@ -203,6 +201,7 @@ export function buildDataPlatformEnvironmentPlan(options: {
   records: readonly DataPlatformEnvironmentRecord[];
   current: DataPlatformEnvironmentIndex;
   existingPaths: ReadonlySet<string>;
+  requiredResourceIds?: ReadonlySet<string>;
   syncedAt?: string;
 }): DataPlatformEnvironmentPlan {
   const sourceKey = options.sourceKey;
@@ -233,6 +232,11 @@ export function buildDataPlatformEnvironmentPlan(options: {
       && previous.fileSizeBytes === next.fileSizeBytes
       && previous.relativePath === relativePath
       && options.existingPaths.has(relativePath);
+    if (options.requiredResourceIds && !options.requiredResourceIds.has(record.id) && !hasContent) {
+      // 未引用资源不下载；只保留已有兼容缓存，不把不存在的新文件写成active。
+      if (previous) entries.push({ ...previous, status: 'stale', warning: '当前场景未引用，远端新修订尚未同步。' });
+      continue;
+    }
     if (!hasContent) downloads.push({ record: { ...record }, relativePath });
     if (!previous || !hasSameSemanticState(previous, next)) changedResourceIds.push(record.id);
     entries.push(next);
@@ -240,6 +244,10 @@ export function buildDataPlatformEnvironmentPlan(options: {
 
   for (const previous of currentEntries) {
     if (remoteIds.has(previous.resourceId)) continue;
+    if (options.requiredResourceIds && !options.requiredResourceIds.has(previous.resourceId)) {
+      entries.push({ ...previous });
+      continue;
+    }
     entries.push({ ...previous, status: 'deleted', syncedAt, warning: '远端资源已删除。' });
     deletedResourceIds.push(previous.resourceId);
     if (previous.status !== 'deleted') changedResourceIds.push(previous.resourceId);
@@ -349,7 +357,7 @@ function normalizeIndexEntry(value: unknown): DataPlatformEnvironmentIndexEntry 
   const status = value.status;
   if (status !== 'active' && status !== 'stale' && status !== 'deleted') throw new Error('环境模型索引 status 无效。');
   const fileSizeValue = value.fileSizeBytes;
-  if (typeof fileSizeValue !== 'number' || !Number.isSafeInteger(fileSizeValue) || fileSizeValue <= 0 || fileSizeValue > 512 * 1024 * 1024) throw new Error('环境模型索引文件大小无效。');
+  if (typeof fileSizeValue !== 'number' || !Number.isSafeInteger(fileSizeValue) || fileSizeValue <= 0 || fileSizeValue > MAX_GLB_FILE_BYTES) throw new Error('环境模型索引文件大小无效。');
   const fileSizeBytes = fileSizeValue;
   if (typeof value.fileSha256 !== 'string' || !SHA256_PATTERN.test(value.fileSha256)) throw new Error('环境模型索引 SHA-256 无效。');
   const lengthUnit = value.lengthUnit;

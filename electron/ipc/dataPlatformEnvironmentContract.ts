@@ -28,7 +28,7 @@ export type DataPlatformEnvironmentManifestPage = {
   hasMore: boolean;
 };
 
-const MAX_ENVIRONMENT_FILE_BYTES = 512 * 1024 * 1024;
+import { MAX_GLB_FILE_BYTES, GLB_FILE_SIZE_LIMIT_MESSAGE } from '../shared/glbFilePolicy.js';
 const MAX_MANIFEST_PAGE_SIZE = 200;
 const RESOURCE_ID_PATTERN = /^[1-9]\d{0,63}$/;
 const NON_NEGATIVE_DECIMAL_PATTERN = /^\d{1,64}$/;
@@ -60,7 +60,7 @@ export function normalizeDataPlatformSourceUrl(value: string): string {
   return url.toString().replace(/\/+$/, '');
 }
 
-export function normalizeEnvironmentManifestResponse(value: unknown): DataPlatformEnvironmentManifestPage {
+export function normalizeEnvironmentManifestResponse(value: unknown, requiredResourceIds?: ReadonlySet<string>): DataPlatformEnvironmentManifestPage {
   if (!isPlainObject(value)) throw new Error('环境模型同步清单响应结构不正确。');
   if (value.success !== true) {
     throw new Error(readOptionalString(value.message) ?? '查询环境模型同步清单失败。');
@@ -72,7 +72,12 @@ export function normalizeEnvironmentManifestResponse(value: unknown): DataPlatfo
 
   const protocolVersion = readRequiredString(data.protocolVersion, 'protocolVersion');
   const manifestRevision = readDecimalString(data.manifestRevision, 'manifestRevision', false);
-  const records = data.records.map((record, index) => normalizeEnvironmentRecord(record, index));
+  const relevant = requiredResourceIds === undefined ? data.records : data.records.filter((item) => {
+    if (!isPlainObject(item)) return false;
+    const id = typeof item.id === 'string' ? item.id : Number.isSafeInteger(item.id) ? String(item.id) : '';
+    return requiredResourceIds.has(id);
+  });
+  const records = relevant.map((record, index) => normalizeEnvironmentRecord(record, index));
   const seen = new Set<string>();
   for (const record of records) {
     if (seen.has(record.id)) throw new Error(`环境模型同步清单单页存在重复 ID：${record.id}`);
@@ -160,7 +165,7 @@ function readOptionalSha256(value: unknown, label: string): string | null {
 function readBoundedSize(value: unknown, label: string): number {
   const normalized = readDecimalString(value, label, true);
   const parsed = BigInt(normalized);
-  if (parsed > BigInt(MAX_ENVIRONMENT_FILE_BYTES)) throw new Error(`${label}超过 512 MiB 上限。`);
+  if (parsed > BigInt(MAX_GLB_FILE_BYTES)) throw new Error(`${label}${GLB_FILE_SIZE_LIMIT_MESSAGE}。`);
   return Number(parsed);
 }
 

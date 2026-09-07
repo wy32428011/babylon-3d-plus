@@ -239,6 +239,7 @@ export type DataPlatformModelSyncPhase =
   | 'failed';
 
 export type DataPlatformModelSyncProgress = {
+  download?: import('./shared/remoteDownloadProgress.js').RemoteDownloadProgress;
   runId: string;
   phase: DataPlatformModelSyncPhase;
   completed: number;
@@ -253,6 +254,7 @@ export type DataPlatformModelSyncProgress = {
 
 export type DataPlatformEnvironmentSyncRequest = {
   expectedSourceKey?: string;
+  requiredResourceIds?: string[];
 };
 
 export type DataPlatformEnvironmentSyncPhase =
@@ -264,6 +266,7 @@ export type DataPlatformEnvironmentSyncPhase =
   | 'failed';
 
 export type DataPlatformEnvironmentSyncProgress = {
+  download?: import('./shared/remoteDownloadProgress.js').RemoteDownloadProgress;
   runId: string;
   contextKey: string;
   phase: DataPlatformEnvironmentSyncPhase;
@@ -511,6 +514,8 @@ export type ProjectAssetIndex = {
 
 export type ProjectListAssetsResult = {
   projectRoot: string | null;
+  dataPlatformSourceKey?: string;
+  environmentSyncPending?: boolean;
   skyboxSyncContextKey: string | null;
   environmentSyncContextKey: string | null;
   assets: ProjectModelAssetEntry[];

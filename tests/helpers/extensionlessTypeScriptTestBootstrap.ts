@@ -20,6 +20,7 @@ const MODULE_SPECIFIER_PATTERN = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(['"])
  */
 export async function importIsolatedTypeScriptModules<TModules extends readonly unknown[]>(
   projectRelativeEntries: readonly string[],
+  options: { deferCleanup?: (cleanup: () => void) => void } = {},
 ): Promise<TModules> {
   const projectRoot = resolve(process.cwd());
   const entryPaths = projectRelativeEntries.map((entry) => resolve(projectRoot, entry));
@@ -39,6 +40,7 @@ export async function importIsolatedTypeScriptModules<TModules extends readonly 
       {
         compilerOptions: {
           target: 'ES2022',
+          allowJs: true,
           lib: ['DOM', 'DOM.Iterable', 'ES2022'],
           module: 'ESNext',
           moduleResolution: 'Bundler',
@@ -61,6 +63,7 @@ export async function importIsolatedTypeScriptModules<TModules extends readonly 
     ),
   );
 
+  let deferred = false;
   try {
     compileTypeScriptProject(projectRoot, tsconfigPath);
     rewriteCompiledModuleSpecifiers(outDir);
@@ -68,9 +71,13 @@ export async function importIsolatedTypeScriptModules<TModules extends readonly 
       const outputPath = join(outDir, relative(projectRoot, entryPath)).replace(/\.ts$/i, '.js');
       return import(pathToFileURL(outputPath).href);
     }));
+    if (options.deferCleanup) {
+      options.deferCleanup(() => rmSync(tempRoot, { recursive: true, force: true }));
+      deferred = true;
+    }
     return modules as unknown as TModules;
   } finally {
-    rmSync(tempRoot, { recursive: true, force: true });
+    if (!deferred) rmSync(tempRoot, { recursive: true, force: true });
   }
 }
 

@@ -254,7 +254,47 @@ Scene View 被准备蒙版覆盖且不处于运行预览时，每 200 ms 绘制�
 
 现有普通模型并发保持 4，环境使用独立的 1 路窗口。保留动态模型独占容器的边界，不把可能修改几何或材质的脚本模型强制共享。未根据单次测量提高并发或扩大驻留缓存。
 
-### 验证命令
+### 数据中台远程模型下载进度
+
+从数据中台打开工程并同步普通模型或环境模型时，Project 资源面板和全屏场景准备蒙版会显示独立的“模型远程下载”“环境模型远程下载”明细，包括已下载 KB、总大小、下载百分比和当前文件。此处统一按 `1 KB = 1024 B` 换算，保留一位小数。多文件任务的总大小只有在可确定时展示；无法确定时显示“已下载 … KB（总大小未知）”，不推测百分比。
+
+下载字节只反映远程文件传输，不代表模型解析、材质准备或 GPU 首帧已经完成；即使下载显示 `100.0%`，场景总体进度及蒙版仍由原有完整渲染就绪条件控制。单个文件进入校验时，如果仍有其他文件并行下载，继续展示下载明细；所有传输结束并进入校验、完成或失败阶段后隐藏字节明细，新任务和场景切换清理旧下载数据。高频字节事件更新界面，但不会重复输出相同业务阶段的 Console 日志。
+
+相关回归命令：`node --experimental-strip-types --test tests/editor/sceneRemoteDownloadProgress.test.ts tests/editor/remoteDownloadUiContract.test.ts tests/editor/scenePreparationProgress.test.ts`。UI 验收使用真实蒙版组件与隔离的本地模拟下载事件；这只能验证进度展示与首帧门控独立性，不能替代实际服务端传输或超大环境加载性能验收。
+
+### 异机打开数据中台项目：远程环境同步与加载
+
+按后续确认的覆盖策略：**从数据中台打开项目时，以当前项目绑定的数据中台为权威来源，重新下载并覆盖对应模型和必需环境缓存，即使远端修订号没有变化。** 旧场景的环境来源不再阻止此类打开；同步成功后按稳定资源 ID 关联当前来源，保留环境摆放、显隐和透明度。覆盖仍先下载、校验，再事务提交，失败可重试。普通未绑定本地场景继续保留来源一致性校验。
+
+因此，“从数据中台再次打开项目”不再以零下载为验收目标；零下载缓存复用只适用于普通增量刷新。强制覆盖会增加再次打开时的网络传输量。界面自动刷新会加入已有同步，不把一次打开变成重复的强制下载；同路径、同修订的覆盖也会刷新运行时资源键，防止 Babylon 复用旧容器。环境覆盖完成之前保持加载等待，不先显示旧环境。
+
+执行顺序为：读取入口场景的环境身份 → 同步所需资源 → 在独立线程校验本地文件 → 关联本机缓存 → Babylon 加载 → 等待完整首帧。环境始终是必须完成的加载项；异机尚无本地 URL 时也计入待加载数量。
+
+| 阶段 | 已实现行为 | 验收条件 |
+| --- | --- | --- |
+| 范围确定 | 按 `dataPlatformResourceId`，或受管缓存路径中的稳定 ID 同步当前场景环境；无环境时不启动环境下载；无法识别身份的旧场景保留全库兼容路径 | 不下载未引用的大环境；必需 ID 不存在时明确报错 |
+| 远程传输 | 流式落盘、独立环境同步窗口、已有 Range/If-Range 续传、来源和修订隔离、SHA-256 校验后提交；损坏缓存重下修复 | 断线重试续传，热缓存零下载，来源错误拒绝，旧缓存不被失败任务替换 |
+| 大文件检查 | 清单、缓存索引、导入与源工程重关联统一 GLB 容器大小边界；取消原环境 512 MiB 限制；结构检查仅读取必要头部与受限 JSON | 768 MiB 稀疏 GLB 可检查，截断文件拒绝 |
+| 校验响应 | 结构解析和流式 SHA 放入 Worker；同时最多 1 个线程、64 个排队任务、128 项会话校验缓存；文件变化使缓存失效 | 哈希期间主线程定时器继续响应，排队/运行中取消正常，ASAR 内 Worker 正常 |
+| 加载反馈 | 普通模型实际增量入口及环境均提供 KB 明细；下载、校验和渲染分别表达；失败可重试、取消可返回首页 | 旧任务事件不污染新场景；下载 100% 不等于场景 100%；缺失环境不能提前完成 |
+
+GLB 容器允许的总长度上限为 `0xffff_fffc` 字节（约 4 GiB，四字节对齐），这是文件格式边界，**不是承诺任意大小模型都能在任意电脑流畅解析或渲染**。仍保留受限 JSON、大批次下载和磁盘缓存容量检查。校验会话缓存不会跨进程保留；重启后首次列出已有大型环境库仍可能等待串行校验，界面消息循环可响应，但列表未必立即返回。
+
+远程部署时需更新发生问题的电脑上的编辑器，并配置该电脑可访问的数据中台地址与可写本地缓存目录。现有后端环境文件接口已支持 GET/HEAD、Range 和 If-Range，本轮未修改服务器；实际反向代理的范围请求转发、超时和带宽仍需在目标环境验证。旧电脑不会因为本机源代码更新而自动获得修复。
+
+本轮自动化使用隔离空目录、本地 HTTP 模拟远端、真实 Electron/Worker；768 MiB 用例使用稀疏文件检查格式和长度，不代表已传输或 GPU 渲染 768 MiB 的真实生产环境。目标电脑验收应记录实际文件大小、下载耗时、校验耗时、解析/首帧耗时及内存/显存峰值，并逐项确认：冷缓存正常下载、断线重试、二次打开缓存复用、环境实际可见、取消后不再回到旧场景。若瓶颈仍在 Babylon 解析或显存容量，应继续针对实际资产实施纹理去重/压缩或完整环境分块；本轮没有实施分块渲染，不能把下载优化当作 GPU 容量问题的解决证明。
+
+新增定向验收命令：
+
+```powershell
+node --experimental-strip-types --test tests/dataPlatform/environmentRemoteHttp.test.ts tests/dataPlatform/environmentLargeGlb.test.ts
+node --test tests/dataPlatform/environmentFileValidation.integration.mjs
+node tests/dataPlatform/environmentFileValidation.asar.mjs
+node scripts/test-model-download-progress.mjs
+node --experimental-strip-types --test tests/editor/deferredEnvironmentReadiness.test.ts tests/editor/environmentPreparationFailure.test.ts tests/editor/projectLoadingCancellation.test.ts
+```
+
+以下命令用于原有场景加载性能回归：
 
 ```powershell
 node --experimental-strip-types --test tests/runtime/sceneLoadDiagnostics.test.ts tests/editor/scenePreparationTimings.test.ts tests/editor/scenePreparationProgress.test.ts tests/runtime/sceneRenderReadiness.test.ts
