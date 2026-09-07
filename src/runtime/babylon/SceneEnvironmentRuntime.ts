@@ -200,7 +200,7 @@ export class SceneEnvironmentRuntime {
     const copies = new Map<Material, Material>();
     const bakedSources = new Map<Material, NonNullable<SceneShadowSettings['bake']>['surfaces'][number]>();
     const maskTextures = new Map<string, Texture>();
-    const maskMaterialSources = new Map<Material, string>();
+    const maskCopies = new Map<Material, Map<Texture, Material>>();
     const baselines = new Map<Material, EnvironmentMaterialBaseline>();
     const recordBaseline = (material: Material, source: Material) => {
       const baseline = entry.materialBaselines.find(item => item.material === source);
@@ -222,10 +222,12 @@ export class SceneEnvironmentRuntime {
       return material;
     };
     const cloneMaskMaterial = (source: Material, texture: Texture): Material => {
-      const existing = copies.get(source); if (existing) return existing;
+      const variants = maskCopies.get(source) ?? new Map<Texture, Material>();
+      const existing = variants.get(texture); if (existing) return existing;
       const material = source instanceof MultiMaterial ? new MultiMaterial(`${source.name}-static-shadow`, this.scene) : cloneEnvironmentMaterial(source, `${source.name}-static-shadow`);
       if (!material) throw new Error(`无法复制地面材质「${source.name}」。`);
-      copies.set(source, material); materials.push(material); recordBaseline(material, source);
+      variants.set(texture, material); maskCopies.set(source, variants);
+      materials.push(material); recordBaseline(material, source);
       if (source instanceof MultiMaterial && material instanceof MultiMaterial) {
         material.subMaterials = source.subMaterials.map(child => child ? cloneMaskMaterial(child, texture) : null);
       } else if (material instanceof PBRMaterial || material instanceof StandardMaterial) {
@@ -249,9 +251,6 @@ export class SceneEnvironmentRuntime {
             if (!surface.material) throw new Error(`地面「${surface.mesh.name}」缺少材质。`);
             const dataUrl = baked.textureRef ? bakedByKey.get(baked.textureRef)?.dataUrl : baked.dataUrl;
             if (!dataUrl) throw new Error('静态阴影遮罩引用无效，请重新更新阴影。');
-            const previousUrl = maskMaterialSources.get(surface.material);
-            if (previousUrl && previousUrl !== dataUrl) throw new Error('共享地面材质不能引用不同遮罩，请重新更新阴影。');
-            maskMaterialSources.set(surface.material, dataUrl);
             let texture = maskTextures.get(dataUrl);
             if (!texture) {
               await new Promise<void>((resolve, reject) => {
@@ -260,6 +259,7 @@ export class SceneEnvironmentRuntime {
                 textures.push(texture);
               });
               texture!.gammaSpace = false; texture!.coordinatesIndex = 2;
+              texture!.anisotropicFilteringLevel = Math.min(16, this.scene.getEngine().getCaps().maxAnisotropy);
               texture!.wrapU = Texture.CLAMP_ADDRESSMODE; texture!.wrapV = Texture.CLAMP_ADDRESSMODE;
               maskTextures.set(dataUrl, texture!);
             }

@@ -46,7 +46,7 @@
     "smoke:light-editor": "node scripts/smoke-light-editor.mjs",
     "smoke:environment-light": "node scripts/smoke-environment-light-isolation.mjs",
     "smoke:environment-shadows": "node scripts/smoke-environment-shadows.mjs",
-    "smoke:static-shadows": "node scripts/smoke-static-shadow-settings.mjs && node scripts/smoke-static-shadows.mjs && node scripts/smoke-multilevel-static-shadows.mjs && node scripts/smoke-static-shadow-ui.mjs",
+    "smoke:static-shadows": "node scripts/smoke-static-shadow-settings.mjs && node scripts/smoke-static-shadows.mjs && node scripts/smoke-multilevel-static-shadows.mjs && node scripts/smoke-shadow-quality.mjs && node scripts/smoke-static-shadow-ui.mjs",
     "smoke:auto-patrol": "node scripts/smoke-auto-patrol.mjs",
     "smoke:camera-view": "node scripts/smoke-camera-view.mjs",
     "smoke:shelf-instancing": "node scripts/smoke-shelf-shared-instancing.mjs",

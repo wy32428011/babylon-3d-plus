@@ -2,7 +2,7 @@
 
 日期：2026-07-17
 
-更新：2026-08-14
+更新：2026-09-07
 
 ## 目标
 
@@ -237,3 +237,49 @@ npm run smoke:installer:gpu
 - 运行预览不得增加完整同步次数、模型源加载次数或把已合批模型展开为逐设备 `ModelRuntimeEntry`；
 - 选择变化走 `syncSelection()`，不读取 `entityIds`、不增加完整同步次数且不重新收集未修改模型子 Mesh；
 - 删除最后一个实例时源容器只释放一次。
+
+## 2026-09-07 场景加载诊断与无损资产处理
+
+Scene View 的“复制性能报告”现在包含 `scenePreparation` 和每个运行时样本的 `runtime.loading`：
+
+- `scenePreparation` 是当前场景准备代次的阶段墙钟时间，完成后停止计时；`runtimeStable` 与 `forcedSettled` 区分自然完成和超时告警。
+- `runtime.loading.stages` 分别记录普通模型/环境的排队、资源读取及解析、模型初始化、脚本就绪刷新、环境首帧等待和进度通知。`assetReadDecode` 包含 Babylon 加载器完整资源阶段，不能把它解释为纯磁盘时间或纯解码时间。
+- `active` 表示仍未结束的异步阶段；`slowestAssets` 最多保留 12 条，只有经过 URL 解码与路径清理的文件名。`modelCache`、`environmentCache` 记录命中、未命中、实例化或克隆次数及耗时。
+- `failedModelAcquisitions` 覆盖源读取成功后实例创建失败的情况，验收还要求各阶段 `failedCount=0`，避免失败实体移出运行时后被误判为全部完成。就绪轮询直接读取实体加载状态，不再重复测量所有模型包围盒。
+- 运行时指标以 `runtime-lifetime` 为范围，多个并行任务的累计时间不能相加当作打开场景时间；比较重复打开时应使用前后差值，或者启动独立进程。
+
+同批进度事件合并至微任务，最后一个加载单元结算仍立即通知；异步模型就绪后的轮廓/群组刷新合并，直接选择和拖拽保持同步。运行时释放后不再发送排队通知。超时只提示仍在等待，不能把缺失批次或尚未稳定的场景置为 100%。运行时加载阶段提供“取消加载并返回首页”，沿用未保存修改确认，取消不会把场景标为完成。
+
+Scene View 被准备蒙版覆盖且不处于运行预览时，每 200 ms 绘制一次完整 3D 帧，把主线程时间让给加载任务；模型、几何、贴图、分辨率和每帧画质均保持不变。几何稳定后再显式等待全场景材质就绪和完整首帧，之后立即恢复正常绘制频率。该帧预算仅由编辑器准备状态启用，正常编辑、运行预览和未提供准备回调的 Viewer 不受限制。
+
+现有普通模型并发保持 4，环境使用独立的 1 路窗口。保留动态模型独占容器的边界，不把可能修改几何或材质的脚本模型强制共享。未根据单次测量提高并发或扩大驻留缓存。
+
+### 验证命令
+
+```powershell
+node --experimental-strip-types --test tests/runtime/sceneLoadDiagnostics.test.ts tests/editor/scenePreparationTimings.test.ts tests/editor/scenePreparationProgress.test.ts tests/runtime/sceneRenderReadiness.test.ts
+node scripts/smoke-scene-load-diagnostics.mjs
+node --test tests/runtime/environmentAssetOptimization.test.mjs
+npm run build
+node scripts/smoke-scene-open-performance.mjs "完整场景路径.scene.json" "output/playwright/scene-open-performance/report.json" 2
+```
+
+加载 smoke 使用已构建的 Electron，每轮独立 userData 与场景副本，原场景按 SHA256 复核。它记录蒙版阶段、实际准备状态、环境与模型状态、硬件 renderer、加载错误和截图。仅蒙版消失不算成功；操作系统文件缓存不清空，因此多轮属于新进程打开测试，不冒充断电后的物理冷缓存。
+
+### 环境模型优化副本
+
+```powershell
+# 默认无损，仅去除内容相同的纹理；输入、输出必须显式指定，输出必须不存在。
+npm run optimize:environment-glb -- "输入.glb" "输出.dedup.glb"
+
+# 可选编码方案，处理所有材质纹理槽；需先安装 KTX-Software >=4.3.0。
+npm run optimize:environment-glb -- "输入.glb" "输出.ktx2.glb" --mode ktx2
+```
+
+工具复用已安装或 npm 缓存中的 `@gltf-transform/cli@4.4.2`，也可用 `ZENDING_GLTF_TRANSFORM_CLI` 指定其包目录或 `bin/cli.js`；不会自动联网安装。缺少工具时按错误提示准备固定版本后重试。
+
+输出前会核对模型结构、材质和纹理参数，以及实际几何/骨骼/动画 accessor 引用的数据哈希；无损模式还要求图片原始字节保持不变。转换报告写入 `<output>.report.json`，原资产保持不变。未知扩展或外部资源会明确拒绝处理，避免未经校验的数据丢失。KTX2/UASTC 是可选有损编码，不能直接视为无损提速；未在目标设备验证画面前应继续使用无损副本。
+
+验收通过后可在场景环境配置中使用输出副本。若要让发布 Viewer 使用优化资产，需要从更新后的场景重新导出/发布；旧部署包不会自动改变。
+
+KTX2 模式编码并发限制为 2，质量等级为 2，关闭 RDO，Zstd 等级为 5。为避免编码器自动重采样，尺寸不满足 4 像素块要求的图片保留原格式，报告列出跳过原因。文件大小与加载速度分别验收，不能把减少图片数量或文件体积直接当成提速证据。

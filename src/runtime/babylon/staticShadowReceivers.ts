@@ -1,5 +1,6 @@
 import { type AbstractMesh, Matrix, Mesh, MultiMaterial, PBRMaterial, StandardMaterial, Vector3, VertexBuffer } from '@babylonjs/core';
 import type { ShadowBakeSurface } from './EnvironmentShadowBake';
+import { projectedShadowBounds } from './staticShadowQuality.ts';
 
 export type GroundShadowReceiver = { surface: ShadowBakeSurface; min: Vector3; max: Vector3; area: number; triangles: Vector3[][] };
 
@@ -92,17 +93,16 @@ export function inspectGroundReceiver(surface: ShadowBakeSurface): GroundShadowR
   return { surface, min, max, area: horizontal / 2, triangles };
 }
 
-/** 只选设备附近、位于设备底部之下的地面，玻璃窗、屋顶与深埋底板不占用烘焙预算。 */
-export function selectGroundShadowReceivers(surfaces: ShadowBakeSurface[], deviceCasters: AbstractMesh[]): GroundShadowReceiver[] {
+/** 按太阳投影选择接收面；悬空设备不再因为离地超过三米而被漏掉。 */
+export function selectGroundShadowReceivers(surfaces: ShadowBakeSurface[], deviceCasters: AbstractMesh[], direction = Vector3.Down()): GroundShadowReceiver[] {
   const candidates = surfaces.map(inspectGroundReceiver).filter((value): value is GroundShadowReceiver => value !== null);
   const selected = new Set<GroundShadowReceiver>();
   for (const caster of deviceCasters) {
-    caster.computeWorldMatrix(true);
-    const bounds = caster.getBoundingInfo().boundingBox;
-    const nearby = candidates.filter(candidate => candidate.max.y <= bounds.minimumWorld.y + 0.75
-      && candidate.max.y >= bounds.minimumWorld.y - 3
-      && candidate.max.x >= bounds.minimumWorld.x - 2 && candidate.min.x <= bounds.maximumWorld.x + 2
-      && candidate.max.z >= bounds.minimumWorld.z - 2 && candidate.min.z <= bounds.maximumWorld.z + 2);
+    const nearby = candidates.filter(candidate => {
+      const projected = projectedShadowBounds(caster, candidate.max.y, direction);
+      return projected && candidate.max.x >= projected[0] - 0.25 && candidate.min.x <= projected[2] + 0.25
+        && candidate.max.z >= projected[1] - 0.25 && candidate.min.z <= projected[3] + 0.25;
+    });
     if (!nearby.length) continue;
     // 同一厂区室内地坪和室外道路可能有小高差；两者都要保留，后续按真实投影检查楼层重叠。
     for (const candidate of nearby) selected.add(candidate);

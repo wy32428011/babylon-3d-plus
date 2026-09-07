@@ -10,6 +10,7 @@ import {
 } from '@babylonjs/core';
 import { EDITOR_FILL_LIGHT_INTENSITY, EDITOR_FILL_LIGHT_NAME } from './SceneShadowRuntime';
 import { warmupLocalBabylonDecoders } from './localDecoderConfiguration';
+import { ScenePreparationFrameBudget } from './scenePreparationFrameBudget';
 import {
   createEditorGroundGrid,
   DEFAULT_EDITOR_GRID_SETTINGS,
@@ -83,6 +84,8 @@ export type BabylonViewportOptions = {
   initialSensitivity?: SceneSensitivitySettings;
   /** 发布 Viewer 使用 Worker 帧节拍，避免隐藏标签暂停基于渲染帧的运行逻辑。 */
   keepRenderingInBackground?: boolean;
+  /** 仅在不可交互的准备蒙版下节流绘制；就绪后立即恢复完整渲染频率。 */
+  isScenePreparing?: () => boolean;
 };
 
 export type BabylonFocusOptions = CameraViewTransitionOptions & {
@@ -522,8 +525,10 @@ export function createBabylonViewport(
     });
   });
 
+  const preparationFrameBudget = new ScenePreparationFrameBudget();
   engine.runRenderLoop(() => {
     if (disposed || contextLost) return;
+    if (!preparationFrameBudget.shouldRender(options.isScenePreparing?.() === true, performance.now())) return;
 
     try {
       scene.render();

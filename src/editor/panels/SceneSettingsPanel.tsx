@@ -693,7 +693,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
           <p className="muted" role={shadowBakeStatus.phase === 'error' ? 'alert' : undefined}
             style={shadowBakeStatus.phase === 'error' ? { color: '#ff6b6b' } : undefined}>
             {!environment ? '请先添加环境模型作为阴影接收面。' : shadowBakeStatus.message}</p>
-          <p className="muted">静态设备及已识别的固定货架、围栏、框架可参与烘焙；运动设备不留下静态影子。地面平铺纹理会保留，必要时共用静态阴影遮罩，不重新计算实时阴影。布局或太阳方向变化后需更新阴影。</p>
+          <p className="muted">所有可见实体模型（包括脚本、参数和遥测设备）均按点击更新时的姿态烘焙。保留地面平铺纹理，运行时使用已生成的阴影贴图；模型移动、参数或太阳方向变化后需重新更新阴影。</p>
         </>}
         {!bakedMode && <label className="inspector-row">
           <span>阴影质量</span>

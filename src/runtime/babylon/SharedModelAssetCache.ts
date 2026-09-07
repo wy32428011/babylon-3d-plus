@@ -21,6 +21,15 @@ type SharedModelSourceEntry = {
 export class SharedModelAssetCache {
   private readonly entries = new Map<string, SharedModelSourceEntry>();
   private disposed = false;
+  private hits = 0;
+  private misses = 0;
+  private instantiationCount = 0;
+  private instantiationMs = 0;
+
+  getMetrics() {
+    return { hits: this.hits, misses: this.misses, entries: this.entries.size,
+      instantiationCount: this.instantiationCount, instantiationMs: this.instantiationMs };
+  }
 
   /** 获取共享源容器并创建一个独立实体实例。 */
   async instantiate(
@@ -39,11 +48,14 @@ export class SharedModelAssetCache {
         throw new Error('共享模型源资源在实例创建前已失效。');
       }
 
+      const startedAt = performance.now();
       const instantiatedEntries = container.instantiateModelsToScene(
         nameFunction,
         false,
         { doNotInstantiate: false },
       );
+      this.instantiationCount += 1;
+      this.instantiationMs += performance.now() - startedAt;
       let instanceDisposed = false;
 
       return {
@@ -81,10 +93,12 @@ export class SharedModelAssetCache {
   private acquireEntry(key: string, loader: () => Promise<AssetContainer>): SharedModelSourceEntry {
     const cached = this.entries.get(key);
     if (cached && !cached.disposed) {
+      this.hits += 1;
       cached.referenceCount += 1;
       return cached;
     }
 
+    this.misses += 1;
     const entry: SharedModelSourceEntry = {
       promise: Promise.resolve(null as unknown as AssetContainer),
       container: null,

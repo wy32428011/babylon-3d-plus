@@ -58,7 +58,7 @@ window.runFactoryBake=async()=>{
   const after=Array.from(await engine.readPixels(0,0,512,512));let darker=0,brighter=0;
   for(let i=0;i<before.length;i+=4){if(after[i]<before[i]-5)darker++;if(after[i]>before[i]+5)brighter++;}
   window.factoryImage=document.querySelector('canvas').toDataURL('image/png');
-  const result={environmentSurfaces:surfaces.length,devicePositions:devices.length,receivers:snapshot.surfaces.length,mask:snapshot.surfaces.every(item=>item.kind==='shadow-mask'),uniqueTextures:new Set(snapshot.surfaces.map(item=>item.dataUrl).filter(Boolean)).size,resolution:snapshot.surfaces[0].width,darker,brighter,noGenerator:scene.lights.every(light=>!light.getShadowGenerator())};
+  const result={environmentSurfaces:surfaces.length,devicePositions:devices.length,receivers:snapshot.surfaces.length,mask:snapshot.surfaces.every(item=>item.kind==='shadow-mask'),uniqueTextures:new Set(snapshot.surfaces.map(item=>item.dataUrl).filter(Boolean)).size,resolution:snapshot.surfaces[0].width,minPixelsPerMeter:Math.min(...snapshot.surfaces.map(surface=>surface.width/(surface.uvBounds[2]-surface.uvBounds[0]))),darker,brighter,noGenerator:scene.lights.every(light=>!light.getShadowGenerator())};
   console.log('factory-bake: '+JSON.stringify(result));return result;
  }finally{runtime.dispose();scene.dispose();engine.dispose();}
 };
@@ -78,5 +78,5 @@ try{
  const result=await page.evaluate(()=>window.runFactoryBake());await writeFile(path.join(output,'result.json'),JSON.stringify(result,null,2));
  const image=await page.evaluate(()=>window.factoryImage);await writeFile(path.join(output,'baked.png'),Buffer.from(image.split(',')[1],'base64'));
  if(errors.length){await writeFile(path.join(output,'errors.log'),errors.join('\n'));throw new Error(errors.filter(item=>/SHADER ERROR|Offending/.test(item)).join('\n').slice(0,3000));}
- assert.ok(result.darker>30,'实际厂区环境必须显示阴影');assert.ok(result.brighter<100,'静态遮罩不得破坏地面原色');assert.equal(result.mask,true);assert.equal(result.uniqueTextures,1);assert.equal(result.noGenerator,true);
+ assert.ok(result.darker>30,'实际厂区环境必须显示阴影');assert.ok(result.brighter<100,'静态遮罩不得破坏地面原色');assert.equal(result.mask,true);assert.ok(result.uniqueTextures>=1);assert.equal(result.noGenerator,true);
 }catch(error){await writeFile(path.join(output,'errors.log'),errors.join('\n'));throw error;}finally{await browser?.close();await server.close();}

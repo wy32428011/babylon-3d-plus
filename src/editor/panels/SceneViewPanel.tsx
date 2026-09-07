@@ -148,10 +148,12 @@ import {
   hasScenePreparationRuntimeTimedOut,
   isScenePreparationActive,
   reportSceneRuntimeProgress,
+  getScenePreparationTimings,
   settleSceneRuntimeWithWarning,
   subscribeScenePreparation,
 } from '../loading/scenePreparationProgress';
 import '../../styles/scene-performance.css';
+import { waitForSceneRenderReady } from '../../runtime/babylon/sceneRenderReadiness';
 
 type EntityArrayDialogState = {
   sourceEntityId: string;
@@ -163,7 +165,7 @@ type EntityArrayDialogState = {
   commitError: string | null;
 };
 
-const SCENE_PREPARATION_RUNTIME_TIMEOUT_WARNING = '模型加载或 Geometry 合批超过 120 秒，已解除蒙版，请在 Console 检查失败模型。';
+const SCENE_PREPARATION_RUNTIME_TIMEOUT_WARNING = '模型加载或 Geometry 合批超过 120 秒，仍在等待全部模型渲染就绪，请查看加载性能报告。';
 
 type HierarchyGroupTranslationSession = HierarchyGroupTransformReadySelection & {
   sourceSceneDocument: SceneDocument;
@@ -1139,6 +1141,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         requireHardwareAcceleration: !isSoftwareWebGLFallbackAllowed(),
         onLog: pushLog,
         initialSensitivity: useEditorStore.getState().scene.sceneSettings.sensitivity,
+        isScenePreparing: () => isScenePreparationActive() && useEditorStore.getState().runtimeMode !== 'preview',
       });
       runtime = new SceneRuntime(
         viewport.scene,
@@ -1707,6 +1710,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     let active = true;
     let lastSignature = '';
     let intervalId: number | null = null;
+    let renderedSignature: string | null = null;
+    let renderWait: { signature: string; controller: AbortController } | null = null;
+
+    const resetRenderWait = (): void => {
+      renderWait?.controller.abort();
+      renderWait = null;
+      renderedSignature = null;
+    };
 
     const stopReadinessPolling = (): void => {
       if (intervalId === null) return;
@@ -1725,6 +1736,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         return;
       }
       if (preparationState.assetRefreshStatus !== 'settled') {
+        resetRenderWait();
         setSceneRuntimeNaturallyReady(false);
         sceneRuntimeReadinessStableSamplesRef.current = 0;
         sceneRuntimeReadinessStartedAtRef.current = readScenePanelTimestampMs();
@@ -1733,6 +1745,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         return;
       }
       if (preparationState.runtime.generation !== sceneRuntimeReadinessGeneration) {
+        resetRenderWait();
         sceneRuntimeReadinessStableSamplesRef.current = 0;
         sceneRuntimeReadinessStartedAtRef.current = readScenePanelTimestampMs();
         sceneRuntimeTimeoutLoggedRef.current = false;
@@ -1766,7 +1779,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
       let settledModels = 0;
       for (const entityId of modelEntityIds) {
-        if (runtime.getModelMeasurement(entityId).status !== 'loading') settledModels += 1;
+        if (runtime.isModelReady(entityId)) settledModels += 1;
       }
       const environmentSnapshot = useEditorStore.getState().environmentRuntimeSnapshot;
       const environmentReady = sceneRuntimeEnvironmentSourceUrl === null || (
@@ -1789,7 +1802,25 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         ? sceneRuntimeReadinessStableSamplesRef.current + 1
         : readyNow ? 1 : 0;
       lastSignature = signature;
-      const stable = sceneRuntimeReadinessStableSamplesRef.current >= 2;
+      const geometryStable = sceneRuntimeReadinessStableSamplesRef.current >= 2;
+      if (!geometryStable) resetRenderWait();
+      const currentScene = viewportRef.current?.scene;
+      if (geometryStable && currentScene && renderedSignature !== signature && renderWait?.signature !== signature) {
+        resetRenderWait();
+        const controller = new AbortController();
+        renderWait = { signature, controller };
+        // 最终脚本/批次稳定后再等材质就绪及完整首帧，不能用采样间隔推测已经显示。
+        void waitForSceneRenderReady(currentScene, controller.signal).then(() => {
+          if (!active || controller.signal.aborted || lastSignature !== signature) return;
+          renderedSignature = signature;
+          renderWait = null;
+          sampleReadiness();
+        }).catch((error) => {
+          if (!active || controller.signal.aborted) return;
+          pushLog(`场景首帧等待失败：${getErrorMessage(error)}`);
+        });
+      }
+      const stable = geometryStable && renderedSignature === signature;
       if (stable) setSceneRuntimeNaturallyReady(true);
 
       reportSceneRuntimeProgress(sceneSessionId, {
@@ -1841,6 +1872,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     startReadinessPolling();
     return () => {
       active = false;
+      resetRenderWait();
       unsubscribeScenePreparation();
       stopReadinessPolling();
     };
@@ -2274,6 +2306,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (isScenePreparationActive()) {
+        if (event.target instanceof Element && event.target.closest('[data-scene-loading-action]')) return;
         event.preventDefault();
         return;
       }
@@ -2552,7 +2585,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     }
 
     try {
-      await copyScenePerformanceReport(monitor.createReport());
+      const report = JSON.parse(monitor.createReport());
+      report.scenePreparation = getScenePreparationTimings();
+      await copyScenePerformanceReport(JSON.stringify(report, null, 2));
       pushLog('Scene View 性能报告已复制到剪贴板。');
     } catch (error) {
       pushLog(`Scene View 性能报告复制失败：${getErrorMessage(error)}`);

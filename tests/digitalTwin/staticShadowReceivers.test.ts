@@ -3,6 +3,27 @@ import test from 'node:test';
 import { MeshBuilder, NullEngine, PBRMaterial, RawTexture, Scene, StandardMaterial, Vector3, VertexBuffer } from '@babylonjs/core';
 import { cloneEnvironmentMaterial } from '../../src/runtime/babylon/cloneEnvironmentMaterial.ts';
 import { groundReceiversOverlapXZ, inspectGroundReceiver, partitionGroundShadowLayers, selectGroundShadowReceivers, type GroundShadowReceiver } from '../../src/runtime/babylon/staticShadowReceivers.ts';
+import { planGroundShadowLayer } from '../../src/runtime/babylon/staticShadowQuality.ts';
+
+test('悬空模型和长阴影能选中远处接收面，贴图精度不受地面空白面积影响', () => {
+  const engine = new NullEngine(), scene = new Scene(engine);
+  try {
+    const floor = MeshBuilder.CreateGround('floor', { width: 1000, height: 1000 }, scene);
+    floor.material = new StandardMaterial('ground', scene);
+    const caster = MeshBuilder.CreateBox('suspended', { size: 1 }, scene); caster.position.y = 10;
+    const direction = new Vector3(-1, -1, 0).normalize();
+    const receivers = selectGroundShadowReceivers([{ key: 'floor', mesh: floor, material: floor.material }], [caster], direction);
+    assert.equal(receivers.length, 1);
+    const plan = planGroundShadowLayer(receivers, [caster], direction, 8192)!;
+    assert.ok(plan.bounds[0] < -10 && plan.bounds[2] > -10);
+    assert.ok(plan.width / (plan.bounds[2] - plan.bounds[0]) >= 128);
+    assert.ok(plan.width < 1024, '千米地面的空白区域不能占用整张阴影贴图');
+    floor.position.x = -20;
+    floor.scaling.set(.002, 1, .002);
+    caster.position.y = 20;
+    assert.equal(selectGroundShadowReceivers([{ key: 'floor', mesh: floor, material: floor.material }], [caster], direction).length, 1);
+  } finally { scene.dispose(); engine.dispose(); }
+});
 
 test('环境副本保留 Detail Map、原纹理引用和平铺参数，不遗留重复纹理', () => {
   const engine = new NullEngine(), scene = new Scene(engine);
@@ -39,7 +60,7 @@ test('地面包围盒只使用 primitive 索引，忽略共享缓冲区内其它
   } finally { scene.dispose(); engine.dispose(); }
 });
 
-test('选择设备下方地面，不把屋顶和深埋底板纳入烘焙', () => {
+test('选择所有可能接收投影的可见楼层，不按设备足点或楼层间距裁掉阴影', () => {
   const engine = new NullEngine(), scene = new Scene(engine);
   try {
     const material = new StandardMaterial('ground', scene);
@@ -49,7 +70,9 @@ test('选择设备下方地面，不把屋顶和深埋底板纳入烘焙', () =>
       return { key: mesh.name, mesh, material };
     });
     const cube = MeshBuilder.CreateBox('device', { size: 2 }, scene); cube.position.y = 1;
-    assert.deepEqual(selectGroundShadowReceivers(surfaces, [cube]).map(receiver => receiver.surface.key), ['floor-0']);
+    assert.deepEqual(selectGroundShadowReceivers(surfaces, [cube]).map(receiver => receiver.surface.key), ['floor--30', 'floor-0']);
+    cube.scaling.y = 20;
+    assert.deepEqual(selectGroundShadowReceivers(surfaces, [cube]).map(receiver => receiver.surface.key), ['floor--30', 'floor-0', 'floor-10']);
   } finally { scene.dispose(); engine.dispose(); }
 });
 

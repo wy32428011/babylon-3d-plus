@@ -9,6 +9,8 @@ import type { SceneShadowBakeSnapshot } from '../../editor/model/sceneShadowBake
 import { EnvironmentShadowMaterialPlugin, setEnvironmentShadowGenerator } from './EnvironmentShadowMaterialPlugin';
 import { partitionGroundShadowLayers, selectGroundShadowReceivers, type GroundShadowReceiver } from './staticShadowReceivers';
 import { cloneEnvironmentMaterial } from './cloneEnvironmentMaterial';
+import { planGroundShadowLayer, type ShadowBounds } from './staticShadowQuality';
+import { SCENE_SHADOW_BAKE_MAX_PIXELS } from '../../../electron/shared/sceneShadowBakeContract';
 
 export type ShadowBakeSurface = { key: string; mesh: AbstractMesh; material: Material | null; useVertexColors?: boolean; sourceAlpha?: number };
 type BakeMaterial = PBRMaterial | StandardMaterial;
@@ -253,13 +255,12 @@ async function bakeUvEnvironmentShadows(
 
 /** 每个高度层单独渲染，避免深度测试覆盖下层的阴影结果。 */
 async function renderGroundShadowLayer(scene: Scene, receivers: GroundShadowReceiver[], casters: AbstractMesh[],
-  settings: SceneShadowSettings, size: number, signal?: AbortSignal): Promise<{ pixels: Uint8ClampedArray<ArrayBuffer>; bounds: UvBounds }> {
+  settings: SceneShadowSettings, bounds: ShadowBounds, width: number, height: number, signal?: AbortSignal): Promise<Uint8ClampedArray<ArrayBuffer>> {
   cancelled(signal);
   // 连续离屏烘焙需要独立渲染批次，否则 Babylon 会跳过上一层已投射过的 subMesh。
   scene.incrementRenderId();
   const min = new Vector3(Infinity, Infinity, Infinity), max = new Vector3(-Infinity, -Infinity, -Infinity);
   for (const receiver of receivers) { min.minimizeInPlace(receiver.min); max.maximizeInPlace(receiver.max); }
-  const bounds: UvBounds = [min.x - 2, min.z - 2, max.x + 2, max.z + 2];
   const engine = scene.getEngine();
   const loops = [...engine.activeRenderLoops];
   const previousShadows = scene.shadowsEnabled;
@@ -267,9 +268,9 @@ async function renderGroundShadowLayer(scene: Scene, receivers: GroundShadowRece
   const light = new DirectionalLight('__StaticGroundBakeSun', Vector3.Down(), scene);
   const azimuth = settings.sunAzimuthDegrees * Math.PI / 180, elevation = settings.sunElevationDegrees * Math.PI / 180;
   light.direction.set(-Math.sin(azimuth) * Math.cos(elevation), -Math.sin(elevation), -Math.cos(azimuth) * Math.cos(elevation));
-  light.position.copyFrom(min.add(max).scale(0.5).subtract(light.direction.scale(Math.max(size / 8, 100))));
+  light.position.copyFrom(new Vector3((bounds[0] + bounds[2]) / 2, (min.y + max.y) / 2, (bounds[1] + bounds[3]) / 2).subtract(light.direction.scale(1000)));
   light.intensity = 0; light.autoCalcShadowZBounds = true; light.autoUpdateExtends = true;
-  const generator = new ShadowGenerator(size, light);
+  const generator = new ShadowGenerator(Math.min(2048, engine.getCaps().maxTextureSize), light);
   // 大面积共面地面需要最低偏移，避免旧场景的零偏移把整块地面误当作自阴影。
   generator.bias = Math.max(settings.bias, 0.0001); generator.normalBias = Math.max(settings.normalBias, 0.005);
   generator.darkness = settings.darkness; generator.usePercentageCloserFiltering = true;
@@ -290,10 +291,21 @@ async function renderGroundShadowLayer(scene: Scene, receivers: GroundShadowRece
     const box = caster.getBoundingInfo().boundingBox; includeBounds(box.minimumWorld, box.maximumWorld);
   }
   light.autoCalcShadowZBounds = false; light.shadowMinZ = minDepth - 2; light.shadowMaxZ = maxDepth + 2;
+  // 深度图仅覆盖当前图块，远处模型仍可投射长阴影，但不会扩大 XY 范围稀释细节。
+  light.customProjectionMatrixBuilder = (view, _renderList, result) => {
+    const minimum = new Vector3(Infinity, Infinity, Infinity), maximum = new Vector3(-Infinity, -Infinity, -Infinity);
+    for (const x of [bounds[0], bounds[2]]) for (const y of [min.y, max.y]) for (const z of [bounds[1], bounds[3]]) {
+      const point = Vector3.TransformCoordinates(new Vector3(x, y, z), view);
+      minimum.minimizeInPlace(point); maximum.maximizeInPlace(point);
+    }
+    const near = light.shadowMinZ!, far = light.shadowMaxZ!;
+    Matrix.OrthoOffCenterLHToRef(minimum.x - 0.05, maximum.x + 0.05, minimum.y - 0.05, maximum.y + 0.05,
+      engine.useReverseDepthBuffer ? far : near, engine.useReverseDepthBuffer ? near : far, result, engine.isNDCHalfZRange);
+  };
   const material = new PBRMaterial('__StaticGroundMask', scene);
   material.unlit = true; material.disableLighting = true; material.backFaceCulling = false;
   material.depthFunction = Constants.LEQUAL;
-  const target = new RenderTargetTexture('__StaticGroundMaskTarget', size, scene, false);
+  const target = new RenderTargetTexture('__StaticGroundMaskTarget', { width, height }, scene, false);
   target.renderList = meshes; target.clearColor = new Color4(1, 1, 1, 1);
   target.activeCamera = scene.activeCamera; target.ignoreCameraViewport = true;
   target.renderParticles = false; target.renderSprites = false;
@@ -310,7 +322,7 @@ async function renderGroundShadowLayer(scene: Scene, receivers: GroundShadowRece
     target.setMaterialForRendering(meshes, material); await renderReadyTarget(target, signal);
     const readback = await target.readPixels(); cancelled(signal);
     if (!readback) throw new Error('无法读取静态阴影遮罩，请检查显卡状态。');
-    return { pixels: new Uint8ClampedArray(new Uint8Array(readback.buffer)), bounds };
+    return new Uint8ClampedArray(new Uint8Array(readback.buffer));
   } finally {
     target.setMaterialForRendering(meshes, undefined); target.dispose(); material.dispose(false, false);
     generator.dispose(); light.dispose(); setEnvironmentShadowGenerator(scene, null);
@@ -320,48 +332,55 @@ async function renderGroundShadowLayer(scene: Scene, receivers: GroundShadowRece
   }
 }
 
-/** 自动分层烘焙后合成单张图集，共享原材质不拆批，纹理总像素仍不超过 16M。 */
+/** 各楼层独立贴图；分块高精度计算仅发生在更新期间，运行时只采样静态 lightmap。 */
 async function bakeGroundShadowMask(scene: Scene, receivers: GroundShadowReceiver[], casters: AbstractMesh[],
-  settings: SceneShadowSettings, signature: string, signal?: AbortSignal): Promise<SceneShadowBakeSnapshot> {
-  const layers = partitionGroundShadowLayers(receivers);
-  const columns = Math.ceil(Math.sqrt(layers.length)), rows = Math.ceil(layers.length / columns);
+  settings: SceneShadowSettings, signature: string, signal?: AbortSignal,
+  progress?: (message: string) => void): Promise<SceneShadowBakeSnapshot> {
   const engine = scene.getEngine();
-  const maxSide = Math.min(4096, engine.getCaps().maxTextureSize);
-  const slotLimit = Math.floor(maxSide / Math.max(columns, rows));
-  const padding = layers.length > 1 ? Math.min(8, Math.floor(slotLimit / 4)) : 0;
-  const desired = Math.max(...layers.map(layer => {
-    const width = Math.max(...layer.map(r => r.max.x)) - Math.min(...layer.map(r => r.min.x));
-    const depth = Math.max(...layer.map(r => r.max.z)) - Math.min(...layer.map(r => r.min.z));
-    return Math.max(512, 2 ** Math.ceil(Math.log2(Math.max(width, depth) * 16)));
-  }));
-  const size = Math.max(1, Math.min(desired, slotLimit - padding * 2));
-  const slot = size + padding * 2, width = columns * slot, height = rows * slot;
-  const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
-  const context = canvas.getContext('2d'); if (!context) throw new Error('无法编码静态阴影遮罩。');
-  context.fillStyle = '#ffffff'; context.fillRect(0, 0, width, height);
+  const azimuth = settings.sunAzimuthDegrees * Math.PI / 180, elevation = settings.sunElevationDegrees * Math.PI / 180;
+  const direction = new Vector3(-Math.sin(azimuth) * Math.cos(elevation), -Math.sin(elevation), -Math.cos(azimuth) * Math.cos(elevation));
+  const plans = partitionGroundShadowLayers(receivers)
+    .map(layer => planGroundShadowLayer(layer, casters, direction, Math.min(8192, engine.getCaps().maxTextureSize)))
+    .filter((plan): plan is NonNullable<typeof plan> => plan !== null);
+  if (plans.reduce((sum, plan) => sum + plan.width * plan.height, 0) > SCENE_SHADOW_BAKE_MAX_PIXELS) {
+    throw new Error('高精度阴影纹理超过 128M 像素显存预算，本次结果未保存。');
+  }
   const surfaces: SceneShadowBakeSnapshot['surfaces'] = [];
   const loops = [...engine.activeRenderLoops];
-  let hasShadow = false;
+  let hasShadow = false, dataLength = 0, completed = 0;
+  const tileSize = 1024, padding = 4;
+  const total = plans.reduce((sum, plan) => sum + Math.ceil(plan.width / tileSize) * Math.ceil(plan.height / tileSize), 0);
   try {
     loops.forEach(loop => engine.stopRenderLoop(loop));
-    for (let index = 0; index < layers.length; index++) {
-      cancelled(signal);
-      const layer = layers[index];
-      const result = await renderGroundShadowLayer(scene, layer, casters, settings, size, signal);
-      const x = (index % columns) * slot + padding, y = Math.floor(index / columns) * slot + padding;
-      context.putImageData(new ImageData(result.pixels, size, size), x, y);
-      hasShadow ||= result.pixels.some((value, offset) => offset % 4 === 0 && value < 245);
-      // 将世界坐标归一化到各自图块；仍由现有 UV3 应用路径处理，无需运行时分层着色器。
-      const spanX = result.bounds[2] - result.bounds[0], spanZ = result.bounds[3] - result.bounds[1];
-      const minX = result.bounds[0] - x / size * spanX, minZ = result.bounds[1] - y / size * spanZ;
-      const uvBounds: UvBounds = [minX, minZ, minX + width / size * spanX, minZ + height / size * spanZ];
-      for (const receiver of layer) surfaces.push({ key: receiver.surface.key, kind: 'shadow-mask', dataUrl: '', width, height, uvBounds });
+    for (const plan of plans) {
+      const { width, height, bounds } = plan;
+      const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+      const context = canvas.getContext('2d'); if (!context) throw new Error('无法编码静态阴影遮罩。');
+      context.fillStyle = '#ffffff'; context.fillRect(0, 0, width, height);
+      const dx = (bounds[2] - bounds[0]) / width, dz = (bounds[3] - bounds[1]) / height;
+      for (let y = 0; y < height; y += tileSize) for (let x = 0; x < width; x += tileSize) {
+        cancelled(signal);
+        const w = Math.min(tileSize, width - x), h = Math.min(tileSize, height - y);
+        const tileBounds: ShadowBounds = [bounds[0] + (x - padding) * dx, bounds[1] + (y - padding) * dz,
+          bounds[0] + (x + w + padding) * dx, bounds[1] + (y + h + padding) * dz];
+        progress?.('正在高精度烘焙阴影：' + (++completed) + '/' + total + ' 个图块…');
+        const pixels = await renderGroundShadowLayer(scene, plan.receivers, casters, settings, tileBounds, w + padding * 2, h + padding * 2, signal);
+        // 相邻图块保留采样重叠，写入时只取内部，避免 PCF 在接缝处丢失遮挡。
+        context.putImageData(new ImageData(pixels, w + padding * 2, h + padding * 2), x - padding, y - padding, padding, padding, w, h);
+        hasShadow ||= pixels.some((value, offset) => offset % 4 === 0 && value < 245);
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+      }
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, width, 1); context.fillRect(0, height - 1, width, 1);
+      context.fillRect(0, 0, 1, height); context.fillRect(width - 1, 0, 1, height);
+      const dataUrl = canvas.toDataURL('image/png'); dataLength += dataUrl.length;
+      if (dataLength > MAX_DATA_LENGTH) throw new Error('高精度阴影遮罩的场景数据超过 32 MiB 预算。');
+      const firstKey = plan.receivers[0].surface.key;
+      for (const [index, receiver] of plan.receivers.entries()) surfaces.push({ key: receiver.surface.key, kind: 'shadow-mask',
+        dataUrl: index === 0 ? dataUrl : '', ...(index === 0 ? {} : { textureRef: firstKey }), width, height, uvBounds: bounds });
+      canvas.width = 0; canvas.height = 0;
     }
-    if (!hasShadow) throw new Error('没有检测到设备落在地面上的阴影，请检查设备位置和太阳方向。');
-    const dataUrl = canvas.toDataURL('image/png');
-    if (dataUrl.length > MAX_DATA_LENGTH) throw new Error('共享阴影遮罩的场景数据超过 32 MiB 预算。');
-    surfaces[0].dataUrl = dataUrl;
-    for (const surface of surfaces.slice(1)) surface.textureRef = surfaces[0].key;
+    if (!hasShadow) throw new Error('没有检测到模型落在地面上的阴影，请检查模型位置和太阳方向。');
     return { version: 1, signature, createdAt: new Date().toISOString(), surfaces };
   } finally {
     if (!engine.isDisposed) loops.forEach(loop => engine.runRenderLoop(loop));
@@ -374,29 +393,18 @@ export async function bakeEnvironmentShadows(scene: Scene, surfaces: ShadowBakeS
   progress?.('正在筛选设备附近的阴影接收地面…');
   const environmentMeshes = new Set(surfaces.map(surface => surface.mesh));
   const devices = casters.filter(mesh => !environmentMeshes.has(mesh) && mesh.getTotalVertices() > 0);
-  if (!devices.length) throw new Error('没有可参与静态烘焙的设备，未生成空白阴影；请检查模型的运动或脚本配置。');
+  if (!devices.length) throw new Error('没有可参与烘焙的可见模型，未生成空白阴影。');
   for (const mesh of devices) if (mesh instanceof Mesh && mesh.hasThinInstances) mesh.thinInstanceRefreshBoundingInfo(true);
-  const ground = selectGroundShadowReceivers(surfaces, devices);
+  const azimuth = settings.sunAzimuthDegrees * Math.PI / 180, elevation = settings.sunElevationDegrees * Math.PI / 180;
+  const direction = new Vector3(-Math.sin(azimuth) * Math.cos(elevation), -Math.sin(elevation), -Math.cos(azimuth) * Math.cos(elevation));
+  const ground = selectGroundShadowReceivers(surfaces, devices, direction);
   const selected = ground.length ? ground.map(receiver => receiver.surface) : surfaces;
-  let canUseColor = true;
-  try {
-    const plans = groupSurfaces(selected);
-    canUseColor = plans.reduce((sum, plan) => sum + plan.width * plan.height * plan.surfaces.length, 0) <= MAX_PIXELS;
-  } catch { canUseColor = false; }
-  if (ground.length && !canUseColor) {
-    progress?.(`正在生成共享静态遮罩：${ground.length} 个地面表面，${devices.length} 个投射网格…`);
-    return bakeGroundShadowMask(scene, ground, devices, settings, signature, signal);
+  if (ground.length) {
+    return bakeGroundShadowMask(scene, ground, devices, settings, signature, signal, progress);
   }
-  try {
-    progress?.(`正在合成静态阴影：${selected.length} 个地面表面…`);
-    return await bakeUvEnvironmentShadows(scene, selected, [...devices, ...selected.map(surface => surface.mesh)], settings, signature, signal);
-  } catch (error) {
-    if (!signal?.aborted && ground.length && error instanceof Error && /UV 重叠/.test(error.message)) {
-      progress?.('地面存在重复 UV，正在生成共享静态遮罩并保留原纹理…');
-      return bakeGroundShadowMask(scene, ground, devices, settings, signature, signal);
-    }
-    throw error;
-  }
+
+  progress?.('正在合成静态阴影…');
+  return bakeUvEnvironmentShadows(scene, selected, [...devices, ...selected.map(surface => surface.mesh)], settings, signature, signal);
 }
 
 export function createBakedEnvironmentMaterial(source: BakeMaterial, texture: Texture): BakeMaterial {

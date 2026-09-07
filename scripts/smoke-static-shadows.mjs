@@ -110,7 +110,7 @@ try{
     assert.deepEqual(result.restoredOriginal,{darker:0,brighter:0},kind+': 关闭阴影恢复原色');
     assert.deepEqual(result.countsAfter,result.countsBefore,kind+': 不增加几何或绘制对象');
     assert.equal(result.bakedPerf.drawCalls,result.baselinePerf.drawCalls,kind+': 不增加每帧绘制次数');
-    assert.equal(result.maskUsed,kind.includes('tiled'),kind+': 平铺UV采用静态遮罩且保留原纹理');
+    assert.equal(result.maskUsed,true,kind+': 地面采用独立高精度静态遮罩且保留原纹理');
     for(const key of ['noShadowCode','noGenerator','noPlugin','noGeneratorAfterMotion','opacityWorks','repeatMatches','overlapRejected'])assert.equal(result[key],true,kind+'/'+key);
   }
   await page.evaluate(()=>window.disposeStaticFixture());

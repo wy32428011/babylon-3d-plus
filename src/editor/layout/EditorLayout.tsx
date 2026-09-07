@@ -12,7 +12,7 @@ import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { useEditorStore, type TransformTool } from '../store/editorStore';
 import { Toolbar } from '../ui/Toolbar';
 import { ScenePreparationOverlay } from '../loading/ScenePreparationOverlay';
-import { isScenePreparationActive } from '../loading/scenePreparationProgress';
+import { getScenePreparationSnapshot, isScenePreparationActive } from '../loading/scenePreparationProgress';
 import { getReturnToHomePageBlockMessage } from '../home/returnToHomePage';
 import { getFullscreenElement } from '../../shared/ui/elementFullscreen';
 import { useElementFullscreen } from '../../shared/ui/useElementFullscreen';
@@ -119,6 +119,12 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
     /** 处理编辑器全局快捷键，保持和菜单/Toolbar 共用同一条 store 更新路径。 */
     function handleWindowKeyDown(event: KeyboardEvent): void {
       if (isScenePreparationActive()) {
+        // 加载取消按钮保持键盘可用，Tab 不得穿透到底层编辑器。
+        if (event.target instanceof Element && event.target.closest('[data-scene-loading-action]')
+          && ['Tab', 'Enter', ' '].includes(event.key)) {
+          if (event.key === 'Tab') event.preventDefault();
+          return;
+        }
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
@@ -301,9 +307,10 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   }
 
   /** 忙碌任务未结束时留在编辑器；允许返回时先退出场景全屏，避免首页仍占着系统全屏。 */
-  async function handleBackToHome(): Promise<void> {
+  async function handleBackToHome(cancelRuntimeLoading = false): Promise<void> {
+    const canCancel = cancelRuntimeLoading && getScenePreparationSnapshot().assetRefreshStatus === 'settled';
     const blockMessage = getReturnToHomePageBlockMessage({
-      scenePreparationActive: isScenePreparationActive(),
+      scenePreparationActive: isScenePreparationActive() && !canCancel,
       publishActive: digitalTwinPublish.isBusy,
       deploymentExportBusy: deploymentExport.isBusy,
       cadImportActive: Boolean(cadImportProgress?.active),
@@ -324,7 +331,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
       ref={editorShellRef}
     >
       <Toolbar
-        onBackToHome={handleBackToHome}
+        onBackToHome={() => void handleBackToHome()}
         transformTool={transformTool}
         transformSpace={transformSpace}
         snapSettings={snapSettings}
@@ -404,7 +411,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
           <InspectorPanel readOnly={isRuntimePreview} />
         </aside>
       </div>
-      <ScenePreparationOverlay />
+      <ScenePreparationOverlay onCancel={() => void handleBackToHome(true)} />
     </div>
   );
 }

@@ -50,6 +50,10 @@ try{
  await page.waitForFunction(()=>window.bakeUiStore?.getState().environmentRuntimeSnapshot.phase==='ready',null,{timeout:180000});
  const mode=page.getByRole('combobox').filter({has:page.locator('option[value="baked"]')});
  assert.equal(await mode.inputValue(),'baked');
+ await page.evaluate(()=>{
+   const store=window.bakeUiStore,state=store.getState(),id=window.bakeUiEntityId;
+   store.setState({scene:{...state.scene,entities:{...state.scene.entities,[id]:{...state.scene.entities[id],components:{...state.scene.entities[id].components,telemetryBinding:{enabled:true}}}}}});
+ });
  await page.getByRole('button',{name:'更新阴影',exact:true}).click();
  await page.waitForFunction(()=>window.bakeUiStore.getState().shadowBakeStatus.phase!=='baking',null,{timeout:90000});
  let state=await page.evaluate(()=>({status:window.bakeUiStore.getState().shadowBakeStatus,baked:!!window.bakeUiStore.getState().scene.sceneSettings.shadows.bake}));
@@ -72,7 +76,7 @@ try{
  assert.equal(state.status.phase,'idle',JSON.stringify(state));
  await page.evaluate(()=>window.bakeUiStore.setState(current=>({scene:{...current.scene,entityIds:[],entities:{}}})));
  await page.getByRole('button',{name:'更新阴影',exact:true}).click();
- await page.getByRole('alert').filter({hasText:'没有可参与静态烘焙的设备'}).waitFor();
+ await page.getByRole('alert').filter({hasText:'没有可参与烘焙的可见模型'}).waitFor();
  await page.getByText('更新失败',{exact:true}).waitFor();
  assert.deepEqual(errors,[]);
  console.log('真实设置面板、平铺UV环境、更新阴影、过期提示、模式切换、无投射物错误反馈均通过。');

@@ -228,7 +228,7 @@ test('场景资产刷新后分别展示模型加载和 Geometry 合批进度', (
   assert.equal(state.percent, 100);
 });
 
-test('同步或合批失败会记录警告并解除永久阻塞', () => {
+test('同步或合批警告保留原因，缺失批次不能被超时标记为100%', () => {
   let state = createScenePreparationState('scene-d');
   state = reduceScenePreparationState(state, {
     type: 'model-sync-progress',
@@ -273,9 +273,15 @@ test('同步或合批失败会记录警告并解除永久阻塞', () => {
     warning: '部分模型无法完成合批',
   });
 
+  assert.equal(state.completed, false);
+  assert.ok(state.percent < 100);
+  assert.deepEqual(state.warnings, ['网络不可用', '部分模型无法完成合批']);
+  state = reduceScenePreparationState(state, {
+    type: 'runtime-progress', generation: 'scene-d:runtime-1', totalModels: 2,
+    settledModels: 2, expectedBatchedEntities: 5, batchedEntities: 5, stable: true,
+  });
   assert.equal(state.completed, true);
   assert.equal(state.percent, 100);
-  assert.deepEqual(state.warnings, ['网络不可用', '部分模型无法完成合批']);
 });
 
 test('运行时超时只记录警告，模型与渲染自然稳定后才完成场景准备', () => {

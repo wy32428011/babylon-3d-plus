@@ -1,4 +1,4 @@
-import { forwardRef, type CSSProperties, type HTMLAttributes } from 'react';
+import { forwardRef, type CSSProperties, type HTMLAttributes, type ReactNode } from 'react';
 import zendingLogoUrl from '../../assets/branding/zending-scene-loading-logo.png';
 import styles from './SceneLoadingMask.module.css';
 
@@ -15,11 +15,12 @@ export type SceneLoadingMaskProps = {
   detail?: string | null;
   /** 场景准备阶段标识，仅用于数据属性调试（编辑器使用）。 */
   phase?: string | null;
+  action?: ReactNode;
 } & Omit<HTMLAttributes<HTMLDivElement>, 'aria-busy' | 'children' | 'className' | 'role'>;
 
 /** 编辑器与发布 Viewer 共用的品牌加载蒙版：Logo 蓝色填充 + 进度条 + 百分数。 */
 export const SceneLoadingMask = forwardRef<HTMLDivElement, SceneLoadingMaskProps>(
-  function SceneLoadingMask({ percent, label, detail, phase, ...overlayProps }, forwardedRef) {
+  function SceneLoadingMask({ percent, label, detail, phase, action, ...overlayProps }, forwardedRef) {
     const clampedPercent = Math.max(0, Math.min(100, Math.round(percent)));
     const progressStyle: ProgressStyle = {
       '--scene-loading-progress': `${clampedPercent}%`,
@@ -55,6 +56,7 @@ export const SceneLoadingMask = forwardRef<HTMLDivElement, SceneLoadingMaskProps
           </div>
           <p aria-live="polite" id="scene-loading-mask-detail">{detail ?? ''}</p>
         </section>
+        {action ? <div className={styles.action} data-scene-loading-action>{action}</div> : null}
       </div>
     );
   },

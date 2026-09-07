@@ -124,3 +124,21 @@
     transition: none;
   }
 }
+
+.action {
+  position: absolute;
+  left: 50%;
+  bottom: 32px;
+  transform: translateX(-50%);
+}
+
+.action button {
+  padding: 8px 16px;
+  border: 1px solid #58758e;
+  border-radius: 4px;
+  color: #e2edf6;
+  background: #162b3b;
+  cursor: pointer;
+}
+
+.action button:focus-visible { outline: 2px solid #73c7ff; outline-offset: 3px; }

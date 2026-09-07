@@ -28,6 +28,15 @@ type CachedEnvironmentSource = {
 export class EnvironmentAssetContainerCache {
   private readonly entries = new Map<string, CachedEnvironmentSource>();
   private disposed = false;
+  private hits = 0;
+  private misses = 0;
+  private cloneCount = 0;
+  private cloneMs = 0;
+
+  getMetrics() {
+    return { hits: this.hits, misses: this.misses, entries: this.entries.size,
+      cloneCount: this.cloneCount, cloneMs: this.cloneMs };
+  }
 
   /**
    * 取得可加入场景的环境工作容器。
@@ -38,7 +47,11 @@ export class EnvironmentAssetContainerCache {
   ): Promise<AssetContainer> {
     if (this.disposed) throw new Error('环境资源缓存已释放，无法加载环境模型。');
     const source = await this.acquireSource(options);
-    return createWorkingContainer(options.scene, source);
+    const startedAt = performance.now();
+    const working = createWorkingContainer(options.scene, source);
+    this.cloneCount += 1;
+    this.cloneMs += performance.now() - startedAt;
+    return working;
   }
 
   /** 释放全部源容器。工作副本仍由 SceneEnvironmentRuntime 各自 dispose。 */
@@ -56,8 +69,12 @@ export class EnvironmentAssetContainerCache {
     options: AcquireEnvironmentWorkingContainerOptions,
   ): Promise<AssetContainer> {
     const cached = this.entries.get(options.cacheKey);
-    if (cached) return cached.promise;
+    if (cached) {
+      this.hits += 1;
+      return cached.promise;
+    }
 
+    this.misses += 1;
     const entry: CachedEnvironmentSource = {
       promise: Promise.resolve().then(async () => {
         try {

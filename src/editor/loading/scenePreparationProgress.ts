@@ -185,7 +185,7 @@ function getModelSyncPercent(progress: ScenePreparationModelSyncProgress | null)
 }
 
 function isRuntimeSettled(runtime: ScenePreparationRuntimeProgress): boolean {
-  if (runtime.forcedSettled) return true;
+  if (runtime.forcedSettled) return false;
   return runtime.stable
     && runtime.settledModels >= runtime.totalModels
     && runtime.batchedEntities >= runtime.expectedBatchedEntities;
@@ -399,9 +399,39 @@ type ScenePreparationListener = () => void;
 
 let currentScenePreparationState = createScenePreparationState('initial');
 const scenePreparationListeners = new Set<ScenePreparationListener>();
+let preparationStartedAt = performance.now();
+let preparationPhaseStartedAt = preparationStartedAt;
+let preparationEndedAt: number | null = null;
+let preparationPhaseDurations: Partial<Record<ScenePreparationPhase, number>> = {};
+
+/** 当前场景准备代次的阶段墙钟时间；与运行时并发任务累计耗时分别报告。 */
+export function getScenePreparationTimings() {
+  const now = preparationEndedAt ?? performance.now();
+  const phases = { ...preparationPhaseDurations };
+  if (preparationEndedAt === null) {
+    const phase = currentScenePreparationState.phase;
+    phases[phase] = (phases[phase] ?? 0) + now - preparationPhaseStartedAt;
+  }
+  return { completed: preparationEndedAt !== null, totalMs: now - preparationStartedAt, phases,
+    runtimeStable: currentScenePreparationState.runtime.stable,
+    forcedSettled: currentScenePreparationState.runtime.forcedSettled };
+}
 
 function publishScenePreparationState(nextState: ScenePreparationState): void {
   if (nextState === currentScenePreparationState) return;
+  const now = performance.now();
+  if (nextState.sceneSessionId !== currentScenePreparationState.sceneSessionId
+    || (currentScenePreparationState.completed && !nextState.completed)) {
+    preparationStartedAt = now;
+    preparationPhaseStartedAt = now;
+    preparationEndedAt = null;
+    preparationPhaseDurations = {};
+  } else if (preparationEndedAt === null && nextState.phase !== currentScenePreparationState.phase) {
+    const previousPhase = currentScenePreparationState.phase;
+    preparationPhaseDurations[previousPhase] = (preparationPhaseDurations[previousPhase] ?? 0) + now - preparationPhaseStartedAt;
+    preparationPhaseStartedAt = now;
+  }
+  if (nextState.completed && preparationEndedAt === null) preparationEndedAt = now;
   currentScenePreparationState = nextState;
   for (const listener of scenePreparationListeners) listener();
 }

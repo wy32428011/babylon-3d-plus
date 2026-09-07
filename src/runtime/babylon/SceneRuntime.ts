@@ -107,7 +107,7 @@ import {
 import { SceneSkyboxRuntime } from './SceneSkyboxRuntime';
 import { SceneShadowRuntime, isShadowCaster } from './SceneShadowRuntime';
 import { bakeEnvironmentShadows } from './EnvironmentShadowBake';
-import { getSceneShadowBakeSignature, isStaticShadowEntity, type SceneShadowBakeSnapshot } from '../../editor/model/sceneShadowBake';
+import { createShadowBakeEntityPredicate, getSceneShadowBakeSignature, type SceneShadowBakeSnapshot } from '../../editor/model/sceneShadowBake';
 import { EditorLightMarkerRuntime } from './EditorLightMarkerRuntime';
 import { EditorAutoPatrolRuntime, type AutoPatrolMarkerPick } from './EditorAutoPatrolRuntime';
 import { EditorManualRoamSpawnRuntime } from './EditorManualRoamSpawnRuntime';
@@ -195,6 +195,7 @@ import {
 import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticStatus } from '../mqtt/telemetryRuntimeDiagnostics';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 import { AssetLoadScheduler } from './AssetLoadScheduler';
+import { SceneLoadDiagnostics } from './SceneLoadDiagnostics';
 import { EnvironmentAssetContainerCache } from './environmentAssetContainerCache';
 import {
   resolveModelAssetSharedInstancingPolicy,
@@ -584,6 +585,13 @@ export type SceneRuntimeModelLoadProgress = {
 };
 
 export type SceneRuntimePerformanceMetrics = {
+  loading: ReturnType<SceneLoadDiagnostics['snapshot']> & {
+    environmentPhase: EnvironmentRuntimeSnapshot['phase'];
+    pendingModelCount: number;
+    failedModelAcquisitions: number;
+    modelCache: ReturnType<SharedModelAssetCache['getMetrics']>;
+    environmentCache: ReturnType<EnvironmentAssetContainerCache['getMetrics']>;
+  };
   fullSyncCount: number;
   selectionSyncCount: number;
   lastFullSyncDurationMs: number;
@@ -742,6 +750,11 @@ export class SceneRuntime {
   private hierarchySelectionIds: string[] | null = null;
   private readonly modelSelectionOutlineLayer: SceneSelectionHighlightLayer;
   private readonly assetLoadScheduler = new AssetLoadScheduler();
+  private readonly loadDiagnostics = new SceneLoadDiagnostics();
+  private disposed = false;
+  private progressNotificationPending = false;
+  private modelPresentationRefreshPending = false;
+  private failedModelAcquisitions = 0;
   private readonly environmentLoadScheduler = new AssetLoadScheduler(1);
   private readonly environmentAssetCache = new EnvironmentAssetContainerCache();
   private readonly sharedModelAssetCache = new SharedModelAssetCache();
@@ -2829,6 +2842,12 @@ export class SceneRuntime {
       maxSelectionSyncDurationMs: this.maxSelectionSyncDurationMs,
       lastSelectionChangedEntityCount: this.lastSelectionChangedEntityCount,
       modelRuntimeCount: this.models.size,
+      loading: { ...this.loadDiagnostics.snapshot(),
+        environmentPhase: this.environmentRuntime.getSnapshot().phase,
+        pendingModelCount: [...this.models.values()].filter((model) => !model.measurementReady).length,
+        failedModelAcquisitions: this.failedModelAcquisitions,
+        modelCache: this.sharedModelAssetCache.getMetrics(),
+        environmentCache: this.environmentAssetCache.getMetrics() },
       modelArrayInstanceEntityCount: this.modelArrayInstanceEntities.size,
       modelArrayParameterVariantCount: this.modelArrayParameterVariants.size,
       modelArrayBatchCount: modelArrayBatches.size,
@@ -3288,7 +3307,7 @@ export class SceneRuntime {
     });
   }
 
-  /** 仅在显式编辑操作中烘焙；运动设备及其整个实例批次不得留下静态影子。 */
+  /** 显式更新时记录所有可见模型的当前姿态；移动后需重新烘焙。 */
   async bakeStaticShadows(document: SceneDocument, signal?: AbortSignal, progress?: (message: string) => void): Promise<SceneShadowBakeSnapshot> {
     if (this.shadowBakeRunning) throw new Error('已有阴影烘焙正在进行。');
     if (this.activeModelLoadProgress.size || this.environmentRuntime.getSnapshot().phase === 'loading') {
@@ -3300,14 +3319,26 @@ export class SceneRuntime {
     if (!document.sceneSettings.environment?.visible) throw new Error('请先显示环境模型，再更新静态阴影。');
     const surfaces = this.environmentRuntime.getShadowBakeSurfaces();
     const environmentMeshes = new Set(surfaces.map(surface => surface.mesh));
+    const canBakeEntity = createShadowBakeEntityPredicate(document);
+    const modelOwners = new Map<number, string>();
+    for (const [id, model] of this.models) {
+      modelOwners.set(model.root.uniqueId, id);
+      modelOwners.set(model.contentRoot.uniqueId, id);
+    }
     const casters = this.scene.meshes.filter(mesh => {
       if (!mesh.isEnabled() || !mesh.isVisible || mesh.getTotalVertices() === 0) return false;
       if (!isShadowCaster(mesh)) return false;
       if (environmentMeshes.has(mesh)) return true;
       const batch = this.modelArrayBatchByMeshUniqueId.get(mesh.uniqueId);
-      if (batch) return batch.getEntityIds().every(id => isStaticShadowEntity(document, id));
+      if (batch) return batch.getEntityIds().some(canBakeEntity);
       const id = this.readEntityIdFromMesh(mesh);
-      return Boolean(id && isStaticShadowEntity(document, id));
+      if (id) return canBakeEntity(id);
+      // 参数脚本新建的子网格可能尚无拾取元数据，仍属于模型当前可见几何。
+      for (let parent = mesh.parent; parent; parent = parent.parent) {
+        const owner = modelOwners.get(parent.uniqueId);
+        if (owner) return canBakeEntity(owner);
+      }
+      return false;
     });
     this.shadowBakeRunning = true;
     let displayed = false;
@@ -3353,6 +3384,10 @@ export class SceneRuntime {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.progressNotificationPending = false;
+    this.modelPresentationRefreshPending = false;
     this.disposeSlotHighlightOverlay('local');
     this.disposeSlotHighlightOverlay('external');
     this.localSlotHighlight = null;
@@ -4151,7 +4186,7 @@ export class SceneRuntime {
     this.applyModelInteractivity(pending, entity.id);
 
     void this.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal)
-      .then((loadedAssets) => {
+      .then((loadedAssets) => this.loadDiagnostics.measure('modelInitialize', () => {
         const activeEntry = this.models.get(entity.id);
         if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.assetSignature !== assetSignature) {
           loadedAssets.handle.dispose();
@@ -4176,10 +4211,9 @@ export class SceneRuntime {
         this.syncExternalModelScripts(latestEntity, activeEntry);
         this.applyModelSelection(activeEntry, activeEntry.highlighted);
         this.applyModelInteractivity(activeEntry, latestEntity.id);
-        this.rebuildModelSelectionOutline();
         this.syncConveyorTrajectory(latestEntity, activeEntry);
-        this.refreshGroupTransformPreviewTargets();
-      })
+        this.scheduleModelPresentationRefresh();
+      }))
       .catch((error) => {
         const activeEntry = this.models.get(entity.id);
         if (activeEntry?.loadToken === loadToken) {
@@ -4241,6 +4275,9 @@ export class SceneRuntime {
         container.dispose();
         throw error;
       }
+    } catch (error) {
+      if (!(error instanceof Error && error.name === 'AbortError')) this.failedModelAcquisitions += 1;
+      throw error;
     } finally {
       this.settleModelLoadProgressUnit(loadSequence);
     }
@@ -4280,8 +4317,43 @@ export class SceneRuntime {
 
   /** 有订阅方时重新计算并推送模型加载进度快照。 */
   private notifyModelLoadProgressChanged(): void {
-    if (!this.onModelLoadProgress) return;
-    this.onModelLoadProgress(this.computeModelLoadProgress());
+    if (!this.onModelLoadProgress || this.disposed) return;
+    if (this.activeModelLoadProgress.size === 0) {
+      this.progressNotificationPending = false;
+      this.loadDiagnostics.measure('progressNotify', () => this.onModelLoadProgress?.(this.computeModelLoadProgress()));
+      return;
+    }
+    if (this.progressNotificationPending) return;
+    this.progressNotificationPending = true;
+    queueMicrotask(() => {
+      if (!this.progressNotificationPending || this.disposed) return;
+      this.progressNotificationPending = false;
+      this.loadDiagnostics.measure('progressNotify', () => this.onModelLoadProgress?.(this.computeModelLoadProgress()));
+    });
+  }
+
+  /** 加载门控只查询源实体状态，不为每次轮询重复计算全模型包围盒；失败或已删除的模型不会被计为就绪。 */
+  isModelReady(entityId: string): boolean {
+    const model = this.models.get(entityId);
+    return Boolean(model?.assetHandle && model.measurementReady);
+  }
+
+  /** 同批异步模型就绪只刷新一次选区与分组目标；直接选择/拖拽路径仍同步执行。 */
+  private scheduleModelPresentationRefresh(): void {
+    if (this.disposed || this.modelPresentationRefreshPending) return;
+    this.modelPresentationRefreshPending = true;
+    queueMicrotask(() => {
+      if (!this.modelPresentationRefreshPending || this.disposed) return;
+      this.modelPresentationRefreshPending = false;
+      try {
+        this.loadDiagnostics.measure('presentationRefresh', () => {
+          this.rebuildModelSelectionOutline();
+          this.refreshGroupTransformPreviewTargets();
+        });
+      } catch (error) {
+        this.pushLog(`模型选择与分组呈现刷新失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
   }
 
   /** 按单元数汇总已结算与在途单元，生成 0-1 的总体进度；在途单元按当前文件字节折算。 */
@@ -6395,18 +6467,17 @@ export class SceneRuntime {
   private syncExternalModelScripts(entity: Entity, model: ModelRuntimeEntry): void {
     const modelAsset = entity.components.modelAsset;
     if (!modelAsset) return;
-    this.syncModelAssetExternalScripts(modelAsset, model, (current) => {
+    this.syncModelAssetExternalScripts(modelAsset, model, (current) => this.loadDiagnostics.measure('modelScriptRefresh', () => {
       const latestEntity = current.entitySnapshot ?? entity;
       this.refreshModelEntityMeshes(latestEntity, current);
       this.syncModelArrayBatch(latestEntity, current);
       this.applyModelInteractivity(current, latestEntity.id);
       this.applyModelSelection(current, current.highlighted);
-      this.rebuildModelSelectionOutline();
       this.onModelMeasurementChanged(latestEntity.id);
       this.syncConveyorTrajectory(latestEntity, current);
       this.refreshBuiltInSlotBindings(latestEntity.id);
-      this.refreshGroupTransformPreviewTargets();
-    });
+      this.scheduleModelPresentationRefresh();
+    }));
   }
 
   /** 同步生成模型外置脚本；只注入生成器快照，不注册独立遥测运动实体。 */
@@ -8114,8 +8185,13 @@ export class SceneRuntime {
     loadSignal?: AbortSignal,
     onProgress?: (event: ISceneLoaderProgressEvent) => void,
   ): Promise<AssetContainer> {
+    const queuedAt = readRuntimeTimestampMs();
     return this.assetLoadScheduler.run(
-      () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, onProgress),
+      () => {
+        this.loadDiagnostics.record('assetQueue', readRuntimeTimestampMs() - queuedAt);
+        return this.loadDiagnostics.measureAsync('assetReadDecode',
+          () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, onProgress), fileName);
+      },
       loadSignal,
     );
   }
@@ -8131,16 +8207,20 @@ export class SceneRuntime {
     onProgress?: (event: ISceneLoaderProgressEvent) => void,
   ): Promise<AssetContainer> {
     const loadSequence = this.beginModelLoadProgressUnit(fileName);
+    const queuedAt = readRuntimeTimestampMs();
     try {
       const container = await this.environmentLoadScheduler.run(
-        () => this.environmentAssetCache.acquireWorkingContainer({
+        () => {
+          this.loadDiagnostics.record('environmentQueue', readRuntimeTimestampMs() - queuedAt);
+          return this.environmentAssetCache.acquireWorkingContainer({
           cacheKey: `${rootUrl}${fileName}`,
           scene: this.scene,
-          loadSource: () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, (event) => {
+          loadSource: () => this.loadDiagnostics.measureAsync('environmentReadDecode', () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.scene, (event) => {
             this.updateModelLoadProgressUnit(loadSequence, event);
             onProgress?.(event);
-          }),
-        }),
+          }), fileName),
+        });
+        },
         loadSignal,
       );
       this.environmentLoadProgressUnits.set(container, loadSequence);
@@ -8153,7 +8233,7 @@ export class SceneRuntime {
 
   /** 等待环境材质/纹理就绪，并确认环境已实际进入一帧场景渲染。 */
   private waitForEnvironmentRenderReady(loadSignal?: AbortSignal): Promise<void> {
-    return waitForSceneRenderReady(this.scene, loadSignal);
+    return this.loadDiagnostics.measureAsync('environmentRenderReady', () => waitForSceneRenderReady(this.scene, loadSignal));
   }
 
   /** 成功、失败或取消都只结算一次环境加载单元。 */

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  createShadowBakeEntityPredicateContract,
   getSceneShadowBakeErrorContract,
   getSceneShadowBakeSignatureContract,
   isStaticShadowEntityContract,
@@ -24,7 +25,7 @@ function fixture() {
   };
 }
 
-test('静态签名忽略相机、选择、阴影开关和运动设备及其子实体的位置', () => {
+test('烘焙签名忽略相机、选择和阴影开关，但覆盖运动模型及其子实体的位置', () => {
   const scene = fixture();
   const before = getSceneShadowBakeSignatureContract(scene);
   scene.selectedEntityId = 'moving';
@@ -32,11 +33,14 @@ test('静态签名忽略相机、选择、阴影开关和运动设备及其子�
   scene.sceneSettings.shadows.enabled = false;
   scene.sceneSettings.shadows.mode = 'realtime';
   scene.sceneSettings.shadows.bake = { arbitrary: true };
-  scene.entities.moving.components.transform.position.x = 99;
-  scene.entities.child.components.transform.position.z = 100;
   assert.equal(getSceneShadowBakeSignatureContract(scene), before);
-  assert.equal(isStaticShadowEntityContract(scene, 'moving'), false);
-  assert.equal(isStaticShadowEntityContract(scene, 'child'), false);
+  scene.entities.moving.components.transform.position.x = 99;
+  assert.notEqual(getSceneShadowBakeSignatureContract(scene), before);
+  const moved = getSceneShadowBakeSignatureContract(scene);
+  scene.entities.child.components.transform.position.z = 100;
+  assert.notEqual(getSceneShadowBakeSignatureContract(scene), moved);
+  assert.equal(isStaticShadowEntityContract(scene, 'moving'), true);
+  assert.equal(isStaticShadowEntityContract(scene, 'child'), true);
   assert.equal(isStaticShadowEntityContract(scene, 'static'), true);
 });
 
@@ -59,16 +63,19 @@ test('静态布局、环境修订和太阳方向变更使签名失效，JSON属�
   assert.equal(getSceneShadowBakeSignatureContract(scene), getSceneShadowBakeSignatureContract({ ...scene, entities: Object.fromEntries(Object.entries(scene.entities).reverse()) }));
 });
 
-test('保守排除脚本、动画、motion、参数模型和手动漫游，不允许层级循环通过', () => {
+test('脚本、动画、motion、参数模型和漫游模型当前姿态准入，不允许失效关联和循环通过', () => {
   const scene = fixture();
   for (const modelAsset of [
     { scriptAssets: [{}] }, { animationScriptMetadata: [{}] }, { parameterScriptMetadata: [{}] },
     { parameterConfig: {} }, { dataDrivenConfig: { motion: true } },
   ]) {
-    assert.equal(isStaticShadowEntityContract({ ...scene, entities: { dynamic: { components: { modelAsset } } } }, 'dynamic'), false);
+    assert.equal(isStaticShadowEntityContract({ ...scene, entities: { dynamic: { components: { modelAsset } } } }, 'dynamic'), true);
   }
-  assert.equal(isStaticShadowEntityContract({ entities: { avatar: { components: { manualRoamSpawn: {} } } } }, 'avatar'), false);
+  assert.equal(isStaticShadowEntityContract({ entities: { avatar: { components: { manualRoamSpawn: {} } } } }, 'avatar'), true);
   assert.equal(isStaticShadowEntityContract({ entities: { cycle: { parentId: 'cycle', components: {} } } }, 'cycle'), false);
+  assert.equal(isStaticShadowEntityContract(scene, 'missing'), false);
+  assert.equal(isStaticShadowEntityContract({ entities: { child: { parentId: 'missing' } } }, 'child'), false);
+  assert.equal(isStaticShadowEntityContract({ entities: { array: { components: { modelArrayInstance: { sourceEntityId: 'array' } } } } }, 'array'), false);
 });
 
 function staticShelfAsset() {
@@ -98,7 +105,7 @@ test('固定参数货架参与静态烘焙，参数和参数默认值改变使�
   assert.notEqual(getSceneShadowBakeSignatureContract(scene), before);
 });
 
-test('固定围栏和框架参与烘焙，额外遥测组件仍禁止准入', () => {
+test('围栏和框架无论是否附带遥测组件均参与烘焙', () => {
   for (const [scriptFilename, modelFilename] of [['fence.model.ts', '围栏.glb'], ['frame.model.ts', '框架.glb']]) {
     const modelAsset = {
       sourcePath: `assets/${modelFilename}`, scriptAssets: [{ name: scriptFilename }], parameterValues: { height: 2 },
@@ -106,11 +113,11 @@ test('固定围栏和框架参与烘焙，额外遥测组件仍禁止准入', ()
       animationScriptMetadata: [{ scriptFilename, modelFilename, className: 'ParametricModelRuntimeComponent', values: {}, fields: [] }],
     };
     assert.equal(isStaticShadowEntityContract({ entities: { model: { components: { modelAsset } } } }, 'model'), true);
-    assert.equal(isStaticShadowEntityContract({ entities: { model: { components: { modelAsset, telemetryBinding: { enabled: true } } } } }, 'model'), false);
+    assert.equal(isStaticShadowEntityContract({ entities: { model: { components: { modelAsset, telemetryBinding: { enabled: true } } } } }, 'model'), true);
   }
 });
 
-test('已核对的静态参数模型仍拒绝未知脚本、动画、motion和动态祖先或阵列源', () => {
+test('任意脚本、动画、motion模型以及运动祖先和阵列源都不会导致漏烘焙', () => {
   for (const override of [
     { scriptAssets: [{ name: 'custom.model.ts' }] },
     { scriptAssets: [{ name: 'newshelf.model.ts', path: 'C:/models/custom.model.ts' }] },
@@ -121,28 +128,53 @@ test('已核对的静态参数模型仍拒绝未知脚本、动画、motion和�
     { dataDrivenConfig: { specializedMotion: {} } },
   ]) {
     const scene = { entities: { shelf: { components: { modelAsset: { ...staticShelfAsset(), ...override } } } } };
-    assert.equal(isStaticShadowEntityContract(scene, 'shelf'), false, JSON.stringify(override));
+    assert.equal(isStaticShadowEntityContract(scene, 'shelf'), true, JSON.stringify(override));
   }
   for (const relation of [{ parentId: 'moving' }, { components: { modelAsset: staticShelfAsset(), modelArrayInstance: { sourceEntityId: 'moving' } } }]) {
     const scene = { entities: {
       moving: { components: { telemetryBinding: { enabled: true } } },
       shelf: { components: { modelAsset: staticShelfAsset() }, ...relation },
     } };
-    assert.equal(isStaticShadowEntityContract(scene, 'shelf'), false);
+    assert.equal(isStaticShadowEntityContract(scene, 'shelf'), true);
   }
 });
 
-test('静态参数模型资源改写为发布相对路径后仍准入，脚本路径不进入几何签名', () => {
+test('模型脚本资源变化使结果过期，发布相对路径仍可烘焙', () => {
   const asset = staticShelfAsset();
   const scene = { entities: { shelf: { components: { modelAsset: asset } } } };
   const before = getSceneShadowBakeSignatureContract(scene);
   asset.scriptAssets[0].path = 'assets/models/shelf/newshelf.model.ts';
   asset.scriptAssets[0].sourceUrl = 'assets/models/shelf/newshelf.model.ts';
-  assert.equal(getSceneShadowBakeSignatureContract(scene), before);
+  assert.notEqual(getSceneShadowBakeSignatureContract(scene), before);
   asset.sourcePath = 'assets/models/shelf/Shelf_横梁货架_修改.glb';
   asset.sourceUrl = 'assets/models/shelf/Shelf_%E6%A8%AA%E6%A2%81%E8%B4%A7%E6%9E%B6_%E4%BF%AE%E6%94%B9.glb';
   assert.equal(isStaticShadowEntityContract(scene, 'shelf'), true);
   assert.equal(getSceneShadowBakeSignatureContract(scene), getSceneShadowBakeSignatureContract(JSON.parse(JSON.stringify(scene))));
+});
+
+test('模型动画参数、数据驱动配置、生成器和阵列源变更均使已有阴影过期', () => {
+  for (const [key, first, second] of [
+    ['modelAsset', { animationScriptMetadata: [{ values: { height: 1 } }] }, { animationScriptMetadata: [{ values: { height: 2 } }] }],
+    ['modelAsset', { dataDrivenConfig: { motion: { initialPosition: 1 } } }, { dataDrivenConfig: { motion: { initialPosition: 2 } } }],
+    ['modelArrayInstance', { sourceEntityId: 'source-a' }, { sourceEntityId: 'source-b' }],
+    ['modelGenerator', { target: { kind: 'mesh', meshKind: 'cube' } }, { target: { kind: 'mesh', meshKind: 'sphere' } }],
+  ] as const) {
+    const components: Record<string, unknown> = { [key]: first };
+    const scene = { entities: { model: { components }, 'source-a': { components: {} }, 'source-b': { components: {} } } };
+    const before = getSceneShadowBakeSignatureContract(scene);
+    components[key] = second;
+    assert.notEqual(getSceneShadowBakeSignatureContract(scene), before, key);
+  }
+});
+
+test('同一批次可复用资格缓存，隐藏的源模型不排除仍可见的阵列实例', () => {
+  const scene = { entities: {
+    source: { visible: false, components: { modelAsset: { scriptAssets: [{ name: 'moving.ts' }] } } },
+    first: { components: { modelArrayInstance: { sourceEntityId: 'source' } } },
+    second: { components: { modelArrayInstance: { sourceEntityId: 'source' }, telemetryBinding: {} } },
+  } };
+  const canBake = createShadowBakeEntityPredicateContract(scene);
+  assert.deepEqual(['source', 'first', 'second', 'first', 'missing'].map(canBake), [true, true, true, true, false]);
 });
 
 test('发布阻止未烘焙和过期结果，空场景/关闭/实时模式可继续', () => {
@@ -173,10 +205,30 @@ test('烘焙快照拒绝重复表面、伪造PNG尺寸、总像素和数据预�
   const bake = { version: 1, signature: getSceneShadowBakeSignatureContract(fixture()), createdAt: new Date().toISOString(), surfaces: [surface] };
   assert.ok(sanitizeSceneShadowBake(bake));
   assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [surface, surface] }), null);
-  assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [surface, { ...surface, key: 'b', dataUrl: `${surface.dataUrl}AAAA` }] }), null);
+  assert.ok(sanitizeSceneShadowBake({ ...bake, surfaces: [surface, { ...surface, key: 'b', dataUrl: `${surface.dataUrl}AAAA` }] }));
   assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [{ ...surface, width: 1 }] }), null);
   assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [{ ...surface, dataUrl: `data:image/png;base64,${'A'.repeat(32 * 1024 * 1024)}` }] }), null);
   assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [{ ...surface, uvBounds: [0, 0, 0, 1] }] }), null);
+});
+
+test('高精度分页允许8192纹理，拒绝超出128M像素总预算或单纹理尺寸上限', () => {
+  const makeSurface = (key: string, width: number, height: number) => {
+    const header = Buffer.alloc(24);
+    Buffer.from('\x89PNG\r\n\x1a\n', 'binary').copy(header);
+    header.write('IHDR', 12, 'ascii');
+    header.writeUInt32BE(width, 16);
+    header.writeUInt32BE(height, 20);
+    return { key, kind: 'shadow-mask', width, height, uvBounds: [0, 0, 1, 1],
+      dataUrl: `data:image/png;base64,${Buffer.concat([header, Buffer.from(key)]).toString('base64')}` };
+  };
+  const first = makeSurface('first', 8192, 8192);
+  const second = makeSurface('second', 8192, 8192);
+  const bake = { version: 1, signature: getSceneShadowBakeSignatureContract(fixture()), createdAt: new Date().toISOString(), surfaces: [first, second] };
+  assert.ok(sanitizeSceneShadowBake(bake));
+  assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [...bake.surfaces, makeSurface('over', 1, 1)] }), null);
+  assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [makeSurface('wide', 8193, 1)] }), null);
+  assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [makeSurface('tall', 1, 8193)] }), null);
+  assert.ok(sanitizeSceneShadowBake({ ...bake, surfaces: [first, second, { ...first, key: 'reference', dataUrl: '', textureRef: first.key }] }));
 });
 
 test('共享静态遮罩只计一次纹理像素，仍按每个表面累计序列化数据预算', () => {
@@ -191,7 +243,7 @@ test('共享静态遮罩只计一次纹理像素，仍按每个表面累计序�
   assert.ok(clean);
   assert.equal(clean.surfaces.length, 2);
   assert.deepEqual(clean.surfaces, bake.surfaces);
-  assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [surface, { ...surface, key: 'wall', dataUrl: `${surface.dataUrl}AAAA` }] }), null);
+  assert.ok(sanitizeSceneShadowBake({ ...bake, surfaces: [surface, { ...surface, key: 'wall', dataUrl: `${surface.dataUrl}AAAA` }] }));
   const largeSurface = { ...surface, dataUrl: `${surface.dataUrl}${'A'.repeat(12 * 1024 * 1024)}` };
   assert.equal(sanitizeSceneShadowBake({ ...bake, surfaces: [largeSurface, { ...largeSurface, key: 'wall' }, { ...largeSurface, key: 'roof' }] }), null);
 });

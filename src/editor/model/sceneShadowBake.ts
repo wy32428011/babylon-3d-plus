@@ -1,5 +1,6 @@
 import type { SceneDocument } from './SceneDocument';
 import {
+  createShadowBakeEntityPredicateContract,
   getSceneShadowBakeErrorContract,
   getSceneShadowBakeSignatureContract,
   isStaticShadowEntityContract,
@@ -11,6 +12,11 @@ export function getSceneShadowBakeSignature(document: SceneDocument): string {
   return getSceneShadowBakeSignatureContract(document);
 }
 
+export function createShadowBakeEntityPredicate(document: SceneDocument): (entityId: string) => boolean {
+  return createShadowBakeEntityPredicateContract(document);
+}
+
+/** 兼容旧名称，运动模型也按当前姿态参与烘焙。 */
 export function isStaticShadowEntity(document: SceneDocument, entityId: string): boolean {
   return isStaticShadowEntityContract(document, entityId);
 }
