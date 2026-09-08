@@ -120,10 +120,14 @@ export type ModelScriptAsset = {
   name: string;
 };
 
+/** 发布工程包固定的完整模型包内容版本，后台同步不得替换。 */
+export type ModelSourceSnapshot = { contentSha256: string };
+
 /** 可复用的模型资产模板，不包含实例级 assetCode。 */
 export type ModelAssetTemplate = {
   sourcePath: string;
   sourceUrl: string;
+  sourceSnapshot?: ModelSourceSnapshot;
   assetRevision?: string;
   lengthUnit: ModelSourceLengthUnit;
   unitScaleToMeters: number;
@@ -333,7 +337,7 @@ export type AutoPatrolComponent = {
 };
 
 /** 人物只引用模型文件，不执行模型库中的设备脚本。 */
-export type ManualRoamAvatar = Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl' | 'assetRevision'> & {
+export type ManualRoamAvatar = Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl' | 'assetRevision' | 'sourceSnapshot'> & {
   name: string;
 };
 

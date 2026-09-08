@@ -1,0 +1,131 @@
+import assert from 'node:assert/strict';
+import { createWriteStream } from 'node:fs';
+import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import path from 'node:path';
+import { ZipArchive } from 'archiver';
+import { app } from 'electron';
+
+const root = process.env.ZENDING_WORKSPACE_OPEN_TEST_ROOT;
+if (!root) throw new Error('请通过 workspaceProjectOpen.test.ts 运行隔离测试。');
+await mkdir(path.join(root, 'user-data'));
+app.setPath('userData', path.join(root, 'user-data'));
+app.disableHardwareAcceleration();
+
+async function createPackage(version, scene = { entities: {}, entityIds: [] }) {
+  const archivePath = path.join(root, `v${version}.zip`);
+  await new Promise((resolve, reject) => {
+    const output = createWriteStream(archivePath);
+    const archive = new ZipArchive();
+    output.once('close', resolve);
+    output.once('error', reject);
+    archive.once('error', reject);
+    archive.pipe(output);
+    for (const directory of ['.babylon-editor/', 'Assets/Models/', 'Assets/Environments/']) {
+      archive.append('', { name: directory });
+    }
+    archive.append(JSON.stringify({ version, scene }), { name: 'Scenes/工厂.scene.json' });
+    void archive.finalize().catch(reject);
+  });
+  return readFile(archivePath);
+}
+
+async function run() {
+  const service = await import('../../dist-electron/ipc/dataPlatformProjectService.js');
+  const archiveByPath = new Map();
+  let downloads = 0;
+  const server = createServer((request, response) => {
+    request.resume();
+    if (request.url === '/failed.zip') { response.writeHead(503); response.end('unavailable'); return; }
+    const archive = archiveByPath.get(request.url);
+    if (archive) {
+      downloads += 1;
+      response.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': archive.length });
+      response.end(archive);
+    } else {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ success: true, data: { records: [], total: 0 } }));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const oldWorkspace = path.join(root, '原工作区');
+  const newWorkspace = path.join(root, '新工作区');
+  try {
+    for (const version of [1, 2, 3, 4, 5]) {
+      const oldModelPath = path.join(oldWorkspace, 'Projects', String(version), 'Assets', 'Models', '设备', 'model.glb');
+      const scene = { entities: {}, entityIds: [], sourcePath: oldModelPath, sourceUrl: `editor-asset://local/${encodeURIComponent(oldModelPath)}` };
+      archiveByPath.set(`/v${version}.zip`, await createPackage(version, scene));
+      const project = {
+        id: String(version), projectName: `工作区工程 v${version}`,
+        latestEditorProjectId: '100', latestEditorProjectVersionId: String(version),
+        latestEditorProjectVersionNumber: version, latestEditorProjectPackageUrl: `/v${version}.zip`,
+        currentResourceRevision: '0',
+      };
+      const original = await service.openDataPlatformProject(project, baseUrl, oldWorkspace);
+      assert.equal(original.source, 'package', `v${version}: ${original.warning}`);
+      assert.ok(original.sceneFilePath);
+      const originalContent = await readFile(original.sceneFilePath, 'utf8');
+      const markerPath = path.join(original.projectRoot, 'local-only.txt');
+      await writeFile(markerPath, '保留本地未发布内容');
+
+      const opened = await service.openDataPlatformProject(project, baseUrl, newWorkspace);
+      assert.equal(opened.source, 'package', `切换工作区后 v${version}: ${opened.warning}`);
+      assert.equal(opened.projectRoot, path.join(newWorkspace, 'Projects', project.id));
+      assert.equal(opened.binding.workspaceRoot, newWorkspace);
+      const loaded = JSON.parse(await readFile(opened.sceneFilePath, 'utf8'));
+      assert.equal(loaded.version, version);
+      assert.equal(loaded.scene.sourcePath, path.join(opened.projectRoot, 'Assets', 'Models', '设备', 'model.glb'));
+      assert.equal(decodeURIComponent(new URL(loaded.scene.sourceUrl).pathname.slice(1)), loaded.scene.sourcePath);
+      assert.equal(await readFile(original.sceneFilePath, 'utf8'), originalContent);
+      assert.equal(await readFile(markerPath, 'utf8'), '保留本地未发布内容');
+      const failedPublishScene = JSON.parse(originalContent);
+      failedPublishScene.scene.name = '发布失败留下的本地修改';
+      await writeFile(original.sceneFilePath, JSON.stringify(failedPublishScene));
+      const localDraft = path.join(original.projectRoot, 'Scenes', '未发布草稿.scene.json');
+      await writeFile(localDraft, JSON.stringify(failedPublishScene));
+      const localAsset = path.join(original.projectRoot, 'Assets', 'Models', '未发布资源.txt');
+      await writeFile(localAsset, 'local-asset');
+      const downloadsBeforeReuse = downloads;
+      const reused = await service.openDataPlatformProject(project, baseUrl, oldWorkspace);
+      assert.equal(reused.source, 'package', '中台入口必须重新获取远端工程，不能复用发布失败的本地修改');
+      assert.equal(downloads, downloadsBeforeReuse + 1);
+      assert.equal(await readFile(reused.sceneFilePath, 'utf8'), originalContent);
+      assert.deepEqual(await readdir(path.join(reused.projectRoot, 'Scenes')), ['工厂.scene.json']);
+      assert.ok(reused.conflictCopyPath, '不同于远端的本地内容须保留副本');
+      assert.equal(JSON.parse(await readFile(path.join(reused.conflictCopyPath, 'Scenes', '工厂.scene.json'), 'utf8')).scene.name, failedPublishScene.scene.name);
+      assert.equal(await readFile(path.join(reused.conflictCopyPath, 'Assets', 'Models', '未发布资源.txt'), 'utf8'), 'local-asset');
+      const unchanged = await service.openDataPlatformProject(project, baseUrl, oldWorkspace);
+      assert.equal(unchanged.source, 'package');
+      assert.equal(unchanged.conflictCopyPath, null, '本地内容完全等于远端时不重复备份');
+
+      await writeFile(reused.sceneFilePath, JSON.stringify(failedPublishScene));
+      await assert.rejects(service.openDataPlatformProject({ ...project, latestEditorProjectPackageUrl: '/failed.zip' }, baseUrl, oldWorkspace), /503/);
+      assert.equal(JSON.parse(await readFile(reused.sceneFilePath, 'utf8')).scene.name, failedPublishScene.scene.name, '远端失败时保留本地文件但不得成功回退');
+      const empty = await service.openDataPlatformProject({ ...project, latestEditorProjectId: null, latestEditorProjectVersionId: null,
+        latestEditorProjectVersionNumber: null, latestEditorProjectPackageUrl: null }, baseUrl, oldWorkspace);
+      assert.equal(empty.source, 'generated');
+      assert.equal(empty.sceneFilePath, null);
+      assert.deepEqual(await readdir(path.join(empty.projectRoot, 'Scenes')), []);
+      assert.ok(empty.conflictCopyPath, '远端无工程时仍保留旧本地内容');
+    }
+    for (const [id, version, scene] of [['6', 6, {}], ['7', 5, []]]) {
+      archiveByPath.set(`/${id}.zip`, await createPackage(version, scene));
+      await assert.rejects(service.openDataPlatformProject({
+        id, projectName: id, latestEditorProjectPackageUrl: `/${id}.zip`,
+        latestEditorProjectId: '100', latestEditorProjectVersionId: id,
+        latestEditorProjectVersionNumber: version, currentResourceRevision: '0',
+      }, baseUrl, newWorkspace), /不是当前编辑器场景格式/);
+    }
+    console.log('PASS: v1-v5 remote authority, same-version failed-publish recovery, local backups, no fallback, remote empty and invalid package rejection');
+  } finally {
+    await service.disposeDataPlatformProjectTasks();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+app.whenReady().then(run).then(() => app.exit(0), (error) => {
+  console.error(error);
+  app.exit(1);
+});

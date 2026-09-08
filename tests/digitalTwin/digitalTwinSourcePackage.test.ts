@@ -57,6 +57,8 @@ test('SOURCE往返保留全部场景内容和有效烘焙，资源搬迁不应�
     const expected = structuredClone(scene);
     expected.entities.pump.components.modelAsset.sourcePath = portable(modelPath);
     expected.entities.pump.components.modelAsset.sourceUrl = url(portable(modelPath));
+    assert.match(packaged.entities.pump.components.modelAsset.sourceSnapshot.contentSha256, /^[0-9a-f]{64}$/);
+    expected.entities.pump.components.modelAsset.sourceSnapshot = packaged.entities.pump.components.modelAsset.sourceSnapshot;
     expected.entities.cad.components.cadReference.sourcePath = portable(cadPath);
     expected.entities.cad.components.cadReference.sourceUrl = url(portable(cadPath));
     expected.metadata.customImage = url(portable(imagePath));
@@ -75,7 +77,9 @@ test('SOURCE往返保留全部场景内容和有效烘焙，资源搬迁不应�
     assert.deepEqual(reopened.sceneSettings.shadows.bake.surfaces, scene.sceneSettings.shadows.bake.surfaces);
     assert.equal(reopened.entities.cad.components.cadReference.sourcePath, path.join(root, 'another-computer', 'Assets', 'Cad', 'drawing.dxf'));
     assert.equal(reopened.metadata.customImage, url(path.join(root, 'another-computer', 'Assets', 'Images', 'marker.png')));
-    assert.deepEqual((relocateDataPlatformScene({ scene: reopened }, projectRoot) as any).scene, scene, '迁回原工作区后完整场景应逐字段一致');
+    const expectedReopened = structuredClone(scene);
+    expectedReopened.entities.pump.components.modelAsset.sourceSnapshot = packaged.entities.pump.components.modelAsset.sourceSnapshot;
+    assert.deepEqual((relocateDataPlatformScene({ scene: reopened }, projectRoot) as any).scene, expectedReopened, '迁回原工作区后完整场景与新增快照身份应逐字段一致');
     const stale = structuredClone(scene); stale.entities.pump.components.transform.position.x++;
     const staleSignature = stale.sceneSettings.shadows.bake.signature;
     const staleReopened = (relocateDataPlatformScene({ scene: stale }, path.join(root, 'stale')) as any).scene;
@@ -454,6 +458,9 @@ test('源工程包复制数据中台环境缓存并将场景引用改写为便�
     assert.ok(sceneEntry);
     const sceneContent = (await sceneEntry!.buffer()).toString('utf8');
     const environment = JSON.parse(sceneContent).scene.sceneSettings.environment;
+    const runtimeEnvironment = JSON.parse(result.entrySceneContent).scene.sceneSettings.environment;
+    assert.equal(runtimeEnvironment.variants[0].sourcePath, modelPath, 'DIST 必须使用 SOURCE 完成定位后的同一受管资源');
+    assert.ok(result.resourceFiles.some(file => path.resolve(file.sourcePath) === path.resolve(runtimeEnvironment.variants[0].sourcePath)));
     assert.equal(environment.packagePath, portablePackagePath);
     assert.equal(environment.activeVariantUrl, portableModelUrl);
     assert.equal(environment.variants.length, 1);

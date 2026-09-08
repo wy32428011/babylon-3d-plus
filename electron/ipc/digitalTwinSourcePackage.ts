@@ -13,6 +13,7 @@ import type {
   ResolvedDeploymentSkyboxReference,
 } from './deploymentSkyboxCache.js';
 import type { SourceEnvironmentPackageIntegrity } from './digitalTwinSourceEnvironmentRelink.js';
+import type { SourceResourcePlan, SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
 
 const require = createRequire(import.meta.url);
 const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
@@ -20,7 +21,8 @@ type DeploymentExportFileSystemModule = typeof import('./deploymentExportFileSys
 type DeploymentSkyboxCacheModule = typeof import('./deploymentSkyboxCache.js');
 type DigitalTwinSourceEnvironmentRelinkModule = typeof import('./digitalTwinSourceEnvironmentRelink.js');
 type SceneShadowBakeContractModule = typeof import('../shared/sceneShadowBakeContract.js');
-const { captureSceneShadowBakeRelocation } = require(`../shared/sceneShadowBakeContract${runtimeExtension}`) as SceneShadowBakeContractModule;
+const { captureSceneShadowBakeRelocation, getSceneShadowBakeSignatureContract } = require(`../shared/sceneShadowBakeContract${runtimeExtension}`) as SceneShadowBakeContractModule;
+const { createSourceResourcePlan } = require(`./digitalTwinSourceResourcePlan${runtimeExtension}`) as typeof import('./digitalTwinSourceResourcePlan.js');
 const { copyDeploymentFiles } = require(`./deploymentExportFileSystem${runtimeExtension}`) as DeploymentExportFileSystemModule;
 const {
   assertTrustedPathWithinRoot,
@@ -86,6 +88,10 @@ export type DigitalTwinSourcePackageResult = {
   sceneContents: string[];
   warnings: string[];
   omittedResources: string[];
+  /** SOURCE 已锁定的文件版本，DIST 必须按此校验复制结果。仅主进程内传递。 */
+  resourceFiles: SourceResourceFile[];
+  /** 完成受管资源定位后的入口快照；DIST 必须使用同一版本，而不是重新使用请求中的旧缓存路径。 */
+  entrySceneContent: string;
 };
 
 type SceneSnapshot = {
@@ -186,16 +192,9 @@ export async function buildDigitalTwinSourcePackage(
         options.signal,
         options.skyboxCacheDependencies,
       );
-      const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap);
-      const restoreBake = restoreRelocatedBakes.get(scene);
-      if (isPlainObject(portableScene) && restoreBake && !restoreBake(portableScene.scene)) {
-        throw new Error(`场景「${scene.name}」的资源版本在源工程准备过程中发生变化，无法保留有效烘焙；请更新资源并重新烘焙后发布。`);
-      }
-      scene.portableContent = `${JSON.stringify(portableScene, null, 2)}
-`;
     }
 
-    const bundles = collectResourceBundles(
+    const candidates = collectResourceBundles(
       scenes.map((scene) => scene.parsed),
       projectRoot,
       sharedResourcesRoot,
@@ -206,7 +205,27 @@ export async function buildDigitalTwinSourcePackage(
       warnings,
       omittedResources,
     );
-    await validateResourceBundleSourcePaths(bundles, projectRoot, sharedResourcesRoot, options.signal);
+    await validateResourceBundleSourcePaths(candidates, projectRoot, sharedResourcesRoot, options.signal);
+    const resourcePlan = await createSourceResourcePlan(candidates, projectRoot, options.signal);
+    const bundles = resourcePlan.bundles;
+    for (const scene of scenes) {
+      resourcePlan.validateModelReferences(scene.parsed, scene.relativePath);
+      const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap, resourcePlan);
+      const restoreBake = restoreRelocatedBakes.get(scene);
+      if (isPlainObject(portableScene) && restoreBake) {
+        // 内容指纹已确认版本；先逆向验证本次目标分配，再更新纯位置变化后的签名。
+        const originalTargets = mapSceneReferenceStrings(portableScene, resourcePlan.originalReference) as PlainObject;
+        restoreSnapshotAnnotations(scene.parsed, originalTargets);
+        if (!restoreBake(originalTargets.scene)) throw new Error(`场景「${scene.name}」的资源版本在源工程准备过程中发生变化，无法保留有效烘焙；请更新资源并重新烘焙后发布。`);
+        const settings = (portableScene.scene as PlainObject).sceneSettings as PlainObject;
+        const shadows = settings.shadows as PlainObject;
+        shadows.bake = { ...(shadows.bake as PlainObject), signature: getSceneShadowBakeSignatureContract(portableScene.scene) };
+        const runtimeSettings = (scene.parsed.scene as PlainObject).sceneSettings as PlainObject;
+        const runtimeShadows = runtimeSettings.shadows as PlainObject;
+        runtimeShadows.bake = { ...(runtimeShadows.bake as PlainObject), signature: getSceneShadowBakeSignatureContract(scene.parsed.scene) };
+      }
+      scene.portableContent = `${JSON.stringify(portableScene, null, 2)}\n`;
+    }
     const estimatedFiles = scenes.length + bundles.length + 1;
     options.onProgress?.('正在复制源工程场景…', 0, estimatedFiles);
 
@@ -295,6 +314,8 @@ export async function buildDigitalTwinSourcePackage(
       sceneContents: scenes.map((scene) => scene.portableContent),
       warnings,
       omittedResources,
+      resourceFiles: resourcePlan.files,
+      entrySceneContent: JSON.stringify(entryScene.parsed),
     };
   } catch (error) {
     await fs.rm(archivePath, { force: true }).catch(() => undefined);
@@ -550,19 +571,9 @@ function collectResourceBundles(
     sourceEnvironmentPackages.map((item) => [createPathKey(item.sourcePath), item]),
   );
   const registerBundle = (bundle: ResourceBundle): void => {
-    const key = normalizeResourceDestinationKey(bundle.destinationRelativePath);
-    for (const [existingKey, existingBundle] of bundles.entries()) {
-      if (existingKey === key) continue;
-      if (existingKey.startsWith(`${key}/`) || key.startsWith(`${existingKey}/`)) {
-        throw new Error(
-          `源工程资源目标冲突：${existingBundle.destinationRelativePath} 与 ${bundle.destinationRelativePath}`,
-        );
-      }
-    }
+    // 来源身份保留到内容校验完成，目标同名不意味着资源版本冲突。
+    const key = `${createPathKey(bundle.sourcePath)}\n${normalizeResourceDestinationKey(bundle.destinationRelativePath)}`;
     const existing = bundles.get(key);
-    if (existing && path.resolve(existing.sourcePath) !== path.resolve(bundle.sourcePath)) {
-      throw new Error(`源工程资源目标冲突：${bundle.destinationRelativePath}`);
-    }
     if (!existing || bundle.copyFile || !existing.copyFile) bundles.set(key, bundle);
   };
 
@@ -732,11 +743,24 @@ function rewriteSceneToPortableAssets(
   value: unknown,
   key: string | null = null,
   platformImageBundleMap: ReadonlyMap<string, PlatformImageBundle> = new Map(),
+  resourcePlan?: SourceResourcePlan,
 ): unknown {
   if (typeof value === 'string') {
+    const isReference = value.startsWith(LOCAL_ASSET_URL_PREFIX)
+      || Boolean(key && (PATH_KEYS.has(key) || URL_KEYS.has(key) || PATH_ARRAY_KEYS.has(key)))
+      || isPortableImageAssetReference(value);
+    if (!isReference) return value;
     const platformBundle = platformImageBundleMap.get(value);
     if (platformBundle) {
-      return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(platformBundle.destinationRelativePath)}`;
+      const target = resourcePlan?.reference(platformBundle.sourcePath)?.destination ?? platformBundle.destinationRelativePath;
+      return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(target)}`;
+    }
+    const planned = resourcePlan?.reference(value);
+    if (planned) {
+      // 受管环境沿用便携 SOURCE 不携带缓存查询修订的契约；普通模型 URL 保留查询和片段。
+      const suffix = /^Assets\/Environments\//i.test(planned.destination) && !planned.bundle.isDirectory ? '' : planned.suffix;
+      return value.startsWith(LOCAL_ASSET_URL_PREFIX) || Boolean(key && URL_KEYS.has(key)) || isPortableImageAssetReference(value)
+        ? `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(planned.destination)}${suffix}` : planned.destination;
     }
     const portablePath = toPortableAssetReference(value);
     if (!portablePath) return value;
@@ -748,15 +772,39 @@ function rewriteSceneToPortableAssets(
   }
   if (Array.isArray(value)) {
     if (key && PATH_ARRAY_KEYS.has(key)) {
-      return value.map((item) => typeof item === 'string' ? toPortableAssetReference(item) ?? item : item);
+      return value.map((item) => rewriteSceneToPortableAssets(item, key, platformImageBundleMap, resourcePlan));
     }
-    return value.map((item) => rewriteSceneToPortableAssets(item, key, platformImageBundleMap));
+    return value.map((item) => rewriteSceneToPortableAssets(item, key, platformImageBundleMap, resourcePlan));
   }
   if (!isPlainObject(value)) return value;
-  return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+  const rewritten = Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
     childKey,
-    rewriteSceneToPortableAssets(childValue, childKey, platformImageBundleMap),
+    rewriteSceneToPortableAssets(childValue, childKey, platformImageBundleMap, resourcePlan),
   ]));
+  const model = typeof value.sourcePath === 'string' ? resourcePlan?.reference(value.sourcePath) : null;
+  if (model && /^Assets\/Models\//i.test(model.destination) && /\.(glb|gltf)$/i.test(model.destination)) {
+    rewritten.sourceSnapshot = { contentSha256: model.bundle.contentSha256 };
+  }
+  return rewritten;
+}
+
+function mapSceneReferenceStrings(value: unknown, transform: (value: string) => string): unknown {
+  if (typeof value === 'string') return transform(value);
+  if (Array.isArray(value)) return value.map(item => mapSceneReferenceStrings(item, transform));
+  if (isPlainObject(value)) return Object.fromEntries(Object.entries(value).map(([name, child]) => [name, mapSceneReferenceStrings(child, transform)]));
+  return value;
+}
+
+/** 新增快照身份不改变几何；验证烘焙时只还原本轮添加的身份字段，其余内容仍严格比较。 */
+function restoreSnapshotAnnotations(original: unknown, rewritten: unknown): void {
+  if (!original || typeof original !== 'object' || !rewritten || typeof rewritten !== 'object') return;
+  const source = original as PlainObject;
+  const target = rewritten as PlainObject;
+  if (target.sourceSnapshot !== undefined) {
+    if (source.sourceSnapshot === undefined) delete target.sourceSnapshot;
+    else target.sourceSnapshot = source.sourceSnapshot;
+  }
+  for (const [name, child] of Object.entries(source)) restoreSnapshotAnnotations(child, target[name]);
 }
 
 function toPortableAssetReference(value: string): string | null {
@@ -833,6 +881,7 @@ async function copySafeResource(
   ): Promise<void> => {
     const integrityKey = createPortablePathKey(relativePath);
     const integrity = pendingIntegrityFiles.get(integrityKey);
+    if (!integrity) throw new Error(`源工程资源清单形成后出现新增或重复文件：${relativePath}`);
     if (integrity && sourceStat.size !== integrity.expectedSize) {
       throw new Error(`${integrity.label}缓存文件大小与 Sidecar 索引不一致。`);
     }

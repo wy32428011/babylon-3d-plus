@@ -60,6 +60,7 @@
     "smoke:packaged:gpu": "node scripts/smoke-packaged-gpu.mjs",
     "smoke:installer:gpu": "npm run dist:win && npm run smoke:packaged:gpu",
     "test:data-platform-relink": "node --experimental-strip-types --test tests/dataPlatform/*.test.ts",
+    "test:source-resource-plan": "npm run build:electron && node --test tests/digitalTwin/sourceResourcePlan.test.mjs",
     "test:data-platform-skybox": "node --experimental-strip-types --test tests/dataPlatform/preloadProgressGate.test.ts tests/dataPlatform/skyboxContract.test.ts tests/dataPlatform/skyboxLifecycle.test.ts tests/dataPlatform/skyboxIndex.test.ts tests/dataPlatform/skyboxRelink.test.ts tests/digitalTwin/dataPlatformSkyboxSync.test.ts tests/digitalTwin/projectLibraryTabs.test.ts tests/digitalTwin/skyboxSyncController.test.ts",
     "smoke:data-platform-skybox:built": "node scripts/smoke-data-platform-skybox.mjs",
     "smoke:data-platform-skybox": "npm run build && npm run smoke:data-platform-skybox:built",

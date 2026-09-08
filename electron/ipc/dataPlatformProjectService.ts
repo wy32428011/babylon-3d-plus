@@ -1,6 +1,6 @@
 import { app } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { getHeapStatistics } from 'node:v8';
 import type {
@@ -522,24 +522,16 @@ async function openDataPlatformProjectInternal(
   let warning: string | null = null;
   let conflictCopyPath: string | null = null;
   const existingBinding = await readDataPlatformBinding(projectRoot);
-  let sceneFilePath = await resolveLocalEntryScenePath(projectRoot, existingBinding?.entryScenePath ?? null);
+  let sceneFilePath: string | null = null;
   const remoteVersionId = project.latestEditorProjectVersionId;
-  const canReuseLocalProject = Boolean(
-    sceneFilePath
-    && existingBinding
-    && existingBinding.projectId === project.id
-    && existingBinding.baseUrl === baseUrl
-    && existingBinding.latestVersionId === remoteVersionId,
-  );
-
-  if (canReuseLocalProject || (!project.latestEditorProjectPackageUrl && sceneFilePath)) {
-    source = 'local';
-  } else if (project.latestEditorProjectPackageUrl) {
-    if (sceneFilePath) {
+  const preserveLocalChanges = async (stagedRoot: string): Promise<void> => {
+    if (await hasDifferentLocalProjectContent(projectRoot, stagedRoot, signal)) {
       conflictCopyPath = await createLocalConflictCopy(workspaceRoot, projectRoot, project.id, existingBinding?.latestVersionId ?? null);
-      warning = '检测到远端工程版本变化，已保留当前本地工程冲突副本，未执行自动合并。';
+      warning = `已按数据中台工程恢复；原本地内容与远端不同，已保留副本：${conflictCopyPath}`;
     }
-
+  };
+  // 工作目录是可编辑副本。发布失败也会先写入本地文件，绑定版本号不能作为内容一致的依据。
+  if (project.latestEditorProjectPackageUrl) {
     const openRoot = path.join(projectRoot, '.babylon-editor', `data-platform-open-${randomUUID()}`);
     const archivePath = path.join(openRoot, 'project-package.zip');
     const extractRoot = path.join(openRoot, 'extracted');
@@ -568,12 +560,14 @@ async function openDataPlatformProjectInternal(
           entrySceneSourcePath: detection.sceneFilePath,
           project,
           openRoot,
+          beforePromote: preserveLocalChanges,
+          signal,
         });
         source = 'package';
         sceneFilePath = materialized.sceneFilePath;
         warning = [warning, materialized.warning].filter(Boolean).join('；') || null;
       } else {
-        warning = [warning, `${detection.reason}，已在本地创建当前格式空项目。`].filter(Boolean).join('；');
+        throw new Error(`数据中台工程包无法打开：${detection.reason}。未回退到本地工程。`);
       }
     } catch (error) {
       preserveOpenRoot = error instanceof DataPlatformRollbackError;
@@ -582,7 +576,20 @@ async function openDataPlatformProjectInternal(
       if (!preserveOpenRoot) await fs.rm(openRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   } else {
-    warning = '该项目没有可用工程包，已在本地创建当前格式空项目。';
+    const openRoot = path.join(projectRoot, '.babylon-editor', `data-platform-open-${randomUUID()}`);
+    const emptyPackageRoot = path.join(openRoot, 'empty');
+    let preserveOpenRoot = false;
+    try {
+      await ensureProjectDirectories(emptyPackageRoot);
+      await materializeCurrentProjectPackage({ editorRoot: projectRoot, packageRoot: emptyPackageRoot,
+        sceneSourcePaths: [], entrySceneSourcePath: null, project, openRoot, beforePromote: preserveLocalChanges, signal });
+      warning = [warning, '数据中台项目没有可用工程包，已打开空项目，未复用本地场景。'].filter(Boolean).join('；');
+    } catch (error) {
+      preserveOpenRoot = error instanceof DataPlatformRollbackError;
+      throw error;
+    } finally {
+      if (!preserveOpenRoot) await fs.rm(openRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   if (signal.aborted) throw new Error('打开数据中台项目已取消。');
@@ -642,17 +649,7 @@ async function openDataPlatformProjectInternal(
     binding,
   };
 }
-/** 优先读取绑定入口场景，缺失时回退到项目中的第一份场景。 */
-async function resolveLocalEntryScenePath(projectRoot: string, entryScenePath: string | null): Promise<string | null> {
-  if (entryScenePath) {
-    const candidate = path.resolve(projectRoot, ...entryScenePath.split('/'));
-    if (isPathInside(projectRoot, candidate) && await isFile(candidate)) return candidate;
-  }
-  const sceneFiles = await findSceneFiles(projectRoot);
-  return sceneFiles.sort((left, right) => left.localeCompare(right, 'en'))[0] ?? null;
-}
-
-/** 远端版本变化时保留完整本地源工程副本，不尝试自动合并。 */
+/** 恢复远端前保留不同的本地内容，不尝试自动合并。 */
 async function createLocalConflictCopy(
   workspaceRoot: string,
   projectRoot: string,
@@ -661,7 +658,7 @@ async function createLocalConflictCopy(
 ): Promise<string> {
   const conflictParent = path.join(path.resolve(workspaceRoot), 'Conflicts', projectId);
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const conflictRoot = path.join(conflictParent, `${timestamp}-version-${versionId ?? 'local'}`);
+  const conflictRoot = path.join(conflictParent, `${timestamp}-version-${versionId ?? 'local'}-${randomUUID()}`);
   assertPathInside(path.resolve(workspaceRoot), conflictRoot, '本地冲突副本目录');
   await fs.mkdir(conflictParent, { recursive: true });
   await fs.cp(projectRoot, conflictRoot, {
@@ -675,6 +672,49 @@ async function createLocalConflictCopy(
     },
   });
   return conflictRoot;
+}
+
+/** 比较刚下载并重定位的远端内容，避免以版本号或 mtime 推测本地是否有修改。空目录不构成修改。 */
+async function hasDifferentLocalProjectContent(projectRoot: string, stagedRoot: string, signal: AbortSignal): Promise<boolean> {
+  const collectFiles = async (root: string): Promise<Map<string, string>> => {
+    const files = new Map<string, string>();
+    for (const directory of ['Scenes', 'Assets']) {
+      const pending = [path.join(root, directory)];
+      while (pending.length) {
+        signal.throwIfAborted();
+        const current = pending.pop()!;
+        const entries = await fs.readdir(current, { withFileTypes: true }).catch(error => {
+          if (isNodeError(error) && error.code === 'ENOENT' && current === path.join(root, directory)) return [];
+          throw error;
+        });
+        for (const entry of entries) {
+          const filePath = path.join(current, entry.name);
+          if (entry.isDirectory() && !entry.isSymbolicLink()) pending.push(filePath);
+          else files.set(path.relative(root, filePath).replace(/\\/g, '/'), filePath);
+          if (files.size + pending.length > 200_000) throw new Error('本地工程文件数量过大，无法安全比较并保留副本。');
+        }
+      }
+    }
+    return files;
+  };
+  const local = await collectFiles(projectRoot);
+  if (local.size === 0) return false;
+  const remote = await collectFiles(stagedRoot);
+  if (local.size !== remote.size) return true;
+  const hashFile = async (filePath: string): Promise<string> => {
+    const digest = createHash('sha256');
+    for await (const chunk of createReadStream(filePath, { signal })) digest.update(chunk);
+    return digest.digest('hex');
+  };
+  for (const [relative, localPath] of local) {
+    signal.throwIfAborted();
+    const remotePath = remote.get(relative);
+    if (!remotePath) return true;
+    const [localStat, remoteStat] = await Promise.all([fs.lstat(localPath), fs.lstat(remotePath)]);
+    if (!localStat.isFile() || localStat.isSymbolicLink() || localStat.size !== remoteStat.size) return true;
+    if (await hashFile(localPath) !== await hashFile(remotePath)) return true;
+  }
+  return false;
 }
 
 function toProjectRelativePath(projectRoot: string, filePath: string): string {
@@ -764,7 +804,8 @@ async function inspectPackageCandidate(packageRoot: string): Promise<PackageDete
     try {
       const parsed = await readProjectPackageJson(sceneFilePath, '工程包场景');
       const sceneVersion = isPlainObject(parsed) ? parsed.version : null;
-      if (!isPlainObject(parsed) || (sceneVersion !== 1 && sceneVersion !== 2 && sceneVersion !== 3) || !isPlainObject(parsed.scene)) {
+      // 与场景加载器及 SOURCE 发布入口保持一致，避免新工作区把 v4/v5 工程误判为空项目。
+      if (!isPlainObject(parsed) || (sceneVersion !== 1 && sceneVersion !== 2 && sceneVersion !== 3 && sceneVersion !== 4 && sceneVersion !== 5) || !isPlainObject(parsed.scene)) {
         return { kind: 'incompatible', reason: `工程包中的场景文件不是当前编辑器场景格式：${path.basename(sceneFilePath)}` };
       }
     } catch (error) {
@@ -810,10 +851,12 @@ async function materializeCurrentProjectPackage(options: {
   editorRoot: string;
   packageRoot: string;
   sceneSourcePaths: string[];
-  entrySceneSourcePath: string;
+  entrySceneSourcePath: string | null;
   project: DataPlatformProjectEntry;
   openRoot: string;
-}): Promise<{ sceneFilePath: string; warning: string | null }> {
+  beforePromote: (stagedRoot: string) => Promise<void>;
+  signal: AbortSignal;
+}): Promise<{ sceneFilePath: string | null; warning: string | null }> {
   const transactionRoot = path.join(options.openRoot, 'materialize');
   const stagedRoot = path.join(transactionRoot, 'staged');
   const backupRoot = path.join(transactionRoot, 'backup');
@@ -832,6 +875,7 @@ async function materializeCurrentProjectPackage(options: {
   const backupScenesRoot = path.join(backupRoot, 'Scenes');
   const sceneTargets = new Map<string, string>();
   const usedRelativePaths = new Set<string>();
+  await fs.mkdir(stagedScenesRoot, { recursive: true });
   for (const sceneSourcePath of options.sceneSourcePaths) {
     const packageRelative = path.relative(options.packageRoot, sceneSourcePath).replace(/\\/g, '/');
     const targetRelative = packageRelative.toLowerCase().startsWith('scenes/')
@@ -859,8 +903,11 @@ async function materializeCurrentProjectPackage(options: {
   await fs.rename(sourceAssetsRoot, stagedAssetsRoot);
   promotionItems.push(createPromotionItem('directory', targetAssetsRoot, stagedAssetsRoot, backupAssetsRoot));
   promotionItems.push(createPromotionItem('directory', targetScenesRoot, stagedScenesRoot, backupScenesRoot));
-  const entrySceneTargetPath = sceneTargets.get(path.resolve(options.entrySceneSourcePath));
-  if (!entrySceneTargetPath) throw new Error('工程包入口场景未能物化。');
+  const entrySceneTargetPath = options.entrySceneSourcePath ? sceneTargets.get(path.resolve(options.entrySceneSourcePath)) : null;
+  if (options.entrySceneSourcePath && !entrySceneTargetPath) throw new Error('工程包入口场景未能物化。');
+  options.signal.throwIfAborted();
+  await options.beforePromote(stagedRoot);
+  options.signal.throwIfAborted();
 
   try {
     for (const item of promotionItems) await promoteItem(item);
@@ -882,7 +929,7 @@ async function materializeCurrentProjectPackage(options: {
     await promoteItem(indexItem);
 
     return {
-      sceneFilePath: entrySceneTargetPath,
+      sceneFilePath: entrySceneTargetPath ?? null,
       warning: rebuilt.skipped.length > 0
         ? `工程已打开，但有 ${rebuilt.skipped.length} 个本地模型包未通过扫描：${rebuilt.skipped.slice(0, 3).join('；')}`
         : null,

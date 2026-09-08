@@ -14,6 +14,7 @@ import {
 } from './deploymentExportFileSystem.js';
 import { createAssetManifestContent, prepareDeploymentExport } from './deploymentExportScene.js';
 import type { DeploymentSkyboxCacheContext, DeploymentSkyboxValidationCache } from './deploymentSkyboxCache.js';
+import { bindSourceResourceIntegrity, type SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
 
 const COPY_CONCURRENCY = 4;
 const MAX_DIST_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -32,6 +33,7 @@ export type BuildDigitalTwinDistPackageOptions = {
   signal: AbortSignal;
   skyboxCacheContext?: DeploymentSkyboxCacheContext;
   skyboxValidationCache?: DeploymentSkyboxValidationCache;
+  sourceResourceFiles?: readonly SourceResourceFile[];
   onProgress?: (detail: string, percent: number) => void;
 };
 
@@ -73,6 +75,7 @@ export async function buildDigitalTwinDistPackage(
         skyboxValidationCache: options.skyboxValidationCache,
       },
     );
+    if (options.sourceResourceFiles) prepared.assetFiles = bindSourceResourceIntegrity(prepared.assetFiles, options.sourceResourceFiles);
     assertNoCopyPlanCollisions(templateFiles, prepared.assetFiles);
 
     options.onProgress?.('正在复制 Viewer 模板…', 12);

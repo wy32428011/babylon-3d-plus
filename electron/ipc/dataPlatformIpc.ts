@@ -57,6 +57,7 @@ import {
 } from './dataPlatformBindingStore.js';
 import { requestDataPlatformJson } from './dataPlatformTransfer.js';
 import { readRegisteredSyncedImage } from './syncedImageRead.js';
+import { DigitalTwinUploadClient } from './digitalTwinUploadClient.js';
 
 const DATA_PLATFORM_CONFIG_FILE = 'data-platform-config.json';
 const PROJECT_QUERY_PATH = 'api/v1/projects/query';
@@ -68,6 +69,8 @@ let registered = false;
 const trustedProjectsById = new Map<string, DataPlatformProjectEntry>();
 let trustedProjectsBaseUrl = '';
 let projectListRequestId = 0;
+let projectConfigRevision = 0;
+const projectMetadataControllers = new Set<AbortController>();
 
 type PersistedDataPlatformConfigV1 = {
   version: 1;
@@ -110,6 +113,7 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle(
     'data-platform:saveConfig',
     async (_event, request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> => {
+      projectConfigRevision += 1;
       const config = await saveDataPlatformConfig(validateSaveRequest(request));
       projectListRequestId += 1;
       trustedProjectsById.clear();
@@ -158,7 +162,10 @@ export function registerDataPlatformIpc(): void {
       const detailRequest = validateOpenProjectRequest(request);
       const config = await readDataPlatformConfig();
       if (!config.baseUrl) throw new Error('尚未配置数据中台地址。');
-      const project = await requestDataPlatformProject(config.baseUrl, detailRequest.projectId);
+      const revision = projectConfigRevision;
+      const project = await requestCurrentDataPlatformProject(config.baseUrl, detailRequest.projectId);
+      await assertProjectOpenConfigUnchanged(config, revision);
+      if (trustedProjectsBaseUrl !== config.baseUrl) trustedProjectsById.clear();
       trustedProjectsById.set(project.id, project);
       trustedProjectsBaseUrl = config.baseUrl;
       return project;
@@ -178,7 +185,17 @@ export function registerDataPlatformIpc(): void {
       if (config.baseUrl !== trustedProjectsBaseUrl) {
         throw new Error('数据中台地址已变化，请刷新项目列表后再打开。');
       }
-      return openDataPlatformProject(project, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl);
+      const revision = projectConfigRevision;
+      const controller = new AbortController();
+      projectMetadataControllers.add(controller);
+      try {
+        const currentProject = await requestCurrentDataPlatformProject(config.baseUrl, project.id, controller.signal);
+        await assertProjectOpenConfigUnchanged(config, revision);
+        controller.signal.throwIfAborted();
+        return openDataPlatformProject(currentProject, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl);
+      } finally {
+        projectMetadataControllers.delete(controller);
+      }
     },
   );
 
@@ -206,7 +223,11 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle('data-platform:retryEnvironmentSync', async (): Promise<boolean> => {
     return retryLatestDataPlatformEnvironmentSync();
   });
-  ipcMain.handle('data-platform:cancelProjectLoading', (): boolean => cancelDataPlatformProjectLoading());
+  ipcMain.handle('data-platform:cancelProjectLoading', (): boolean => {
+    const metadataPending = projectMetadataControllers.size > 0;
+    for (const controller of projectMetadataControllers) controller.abort();
+    return cancelDataPlatformProjectLoading() || metadataPending;
+  });
 
   ipcMain.handle(
     'data-platform:getEnvironmentSyncProgress',
@@ -510,6 +531,7 @@ async function selectDataPlatformWorkspace(): Promise<DataPlatformWorkspaceSelec
   const workspaceRoot = path.resolve(selectedPath);
   await ensureWritableEditorRoot(workspaceRoot);
 
+  projectConfigRevision += 1;
   const config = await writeStoredDataPlatformConfig({
     ...stored,
     customWorkspaceRoot: workspaceRoot,
@@ -521,6 +543,7 @@ async function selectDataPlatformWorkspace(): Promise<DataPlatformWorkspaceSelec
 
 /** 清除自定义路径并恢复当前运行环境的默认工作区。 */
 async function resetDataPlatformWorkspace(): Promise<DataPlatformConfig> {
+  projectConfigRevision += 1;
   const stored = await readStoredDataPlatformConfig();
   const defaultWorkspaceRoot = getDataPlatformEditorRoot(null);
   await ensureWritableEditorRoot(defaultWorkspaceRoot);
@@ -546,12 +569,14 @@ export async function resolveDataPlatformPublishProjectContext(
 }
 
 /** 按项目 ID 查询详情，供外部深链绕过分页列表精确打开目标工程。 */
-export async function requestDataPlatformProject(baseUrl: string, projectId: string): Promise<DataPlatformProjectEntry> {
+export async function requestDataPlatformProject(
+  baseUrl: string, projectId: string, signal = new AbortController().signal,
+): Promise<DataPlatformProjectEntry> {
   const payload = await requestDataPlatformJson({
     baseUrl,
     endpointPath: PROJECT_DETAIL_PATH,
     body: { id: projectId },
-    signal: new AbortController().signal,
+    signal,
     timeoutMs: PROJECT_REQUEST_TIMEOUT_MS,
     context: '查询数据中台项目详情',
   });
@@ -562,6 +587,77 @@ export async function requestDataPlatformProject(baseUrl: string, projectId: str
   const project = normalizeProjectEntry(payload.data, 0);
   if (project.id !== projectId) throw new Error('数据中台项目详情响应与请求项目不匹配。');
   return project;
+}
+
+/** 中台入口每次解析服务器当前版本，列表缓存只用于校验可打开的项目身份。 */
+export async function requestCurrentDataPlatformProject(
+  baseUrl: string, projectId: string, signal = new AbortController().signal,
+): Promise<DataPlatformProjectEntry> {
+  signal.throwIfAborted();
+  const project = await requestDataPlatformProject(baseUrl, projectId, signal);
+  const remote = await new DigitalTwinUploadClient(baseUrl).projectStatus(projectId, signal);
+  signal.throwIfAborted();
+  if (remote.latestVersionId) {
+    if (!remote.editorProjectId || remote.latestVersionNumber === null) {
+      throw new Error('数据中台当前工程版本信息不完整，无法打开。');
+    }
+    return {
+      ...project,
+      latestEditorProjectId: remote.editorProjectId,
+      latestEditorProjectVersionId: remote.latestVersionId,
+      latestEditorProjectVersionNumber: remote.latestVersionNumber,
+      latestEditorProjectName: null,
+      latestEditorProjectPackageFileName: null,
+      latestEditorProjectPackageUrl: `api/v1/editor/projects/${encodeURIComponent(remote.editorProjectId)}/versions/${encodeURIComponent(remote.latestVersionId)}/package/export`,
+      digitalTwinStatus: remote.status,
+      onlineDigitalTwinVersionId: remote.onlineVersionId,
+      onlineDigitalTwinVersionNumber: remote.onlineVersionNumber,
+      digitalTwinStableUrl: remote.stableUrl,
+      digitalTwinReleaseUrl: remote.releaseUrl,
+      digitalTwinLastPublishedAt: remote.lastPublishedAt,
+    };
+  }
+  // 普通导入工程可能还未建立数字孪生绑定，使用实时列表聚合值兼容此类工程。
+  // 详情接口不聚合 SOURCE 信息，不能据其空值认定远端没有工程包。
+  if (remote.status !== 'UNBOUND') {
+    throw new Error('数据中台已绑定数字孪生但缺少当前工程版本，请检查远端项目状态。');
+  }
+  for (let pageNum = 1; pageNum <= 100; pageNum += 1) {
+    const payload = await requestDataPlatformJson({
+      baseUrl, endpointPath: PROJECT_QUERY_PATH,
+      body: { pageNum, pageSize: 100, projectName: '' },
+      signal, timeoutMs: PROJECT_REQUEST_TIMEOUT_MS,
+      context: '查询数据中台当前工程包',
+    });
+    if (!isPlainObject(payload) || payload.success !== true || !isPlainObject(payload.data)
+      || !Array.isArray(payload.data.records)) {
+      throw new Error('数据中台当前工程包查询失败，无法确认远端版本。');
+    }
+    signal.throwIfAborted();
+    const records = payload.data.records.map((record, index) => normalizeProjectEntry(record, index));
+    const current = records.find((record) => record.id === projectId);
+    if (current) {
+      if (current.latestEditorProjectVersionId && !current.latestEditorProjectPackageUrl) {
+        throw new Error('数据中台当前工程版本缺少 SOURCE 地址，无法确认远端工程。');
+      }
+      return current;
+    }
+    const { total, pageSize, pageNum: returnedPage } = payload.data;
+    if (!Number.isSafeInteger(total) || (total as number) < 0
+      || !Number.isSafeInteger(pageSize) || (pageSize as number) <= 0 || returnedPage !== pageNum) {
+      throw new Error('数据中台工程列表分页信息不完整，无法确认远端版本。');
+    }
+    if (records.length === 0 || pageNum * (pageSize as number) >= (total as number)) break;
+  }
+  throw new Error('无法在数据中台当前项目列表中确认该项目，请刷新后重试。');
+}
+
+async function assertProjectOpenConfigUnchanged(config: DataPlatformConfig, revision: number): Promise<void> {
+  const current = await readDataPlatformConfig();
+  if (revision !== projectConfigRevision || current.baseUrl !== config.baseUrl
+    || current.workspaceRoot !== config.workspaceRoot || current.webBaseUrl !== config.webBaseUrl) {
+    throw new Error('数据中台地址或工作区已变化，请重新打开项目。');
+  }
 }
 /** 通过统一受限请求读取数据中台业务项目列表。 */
 async function requestDataPlatformProjects(baseUrl: string, projectName: string): Promise<DataPlatformProjectListResult> {

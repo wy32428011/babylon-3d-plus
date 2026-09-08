@@ -17,3 +17,4 @@ output/
 .codex-remote-env
 .tmp-download-ui
 .remote-audit-temp
+.tmp-source-resource-fix

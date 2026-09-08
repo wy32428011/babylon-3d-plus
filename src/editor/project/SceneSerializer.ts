@@ -1,4 +1,5 @@
 import { normalizeAlarmManager } from '../model/alarmManager';
+import { normalizeModelSourceSnapshot } from '../model/modelSourceSnapshot';
 import { sanitizeSceneShadowBake } from '../model/sceneShadowBake';
 import type { Entity } from '../model/Entity';
 import { convertLegacyChartMarkerTransform, normalizeChartMarker } from '../model/chartMarker';
@@ -1074,6 +1075,8 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
   const sourcePath = assertString(modelAsset.sourcePath);
   const sourceUrl = assertString(modelAsset.sourceUrl);
   const assetRevision = normalizeOptionalString(modelAsset.assetRevision);
+  const sourceSnapshot = normalizeModelSourceSnapshot(modelAsset.sourceSnapshot);
+  if (modelAsset.sourceSnapshot !== undefined && !sourceSnapshot) throwUnsupportedSceneFileError();
 
   if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) {
     throwUnsupportedSceneFileError();
@@ -1107,6 +1110,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     sourcePath,
     sourceUrl,
     ...(assetRevision ? { assetRevision } : {}),
+    ...(sourceSnapshot ? { sourceSnapshot } : {}),
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(scriptAssets.length ? { scriptAssets } : {}),
@@ -1237,8 +1241,11 @@ function normalizeManualRoamSpawn(value: unknown): ManualRoamSpawnComponent {
   const sourcePath = assertString(avatar.sourcePath).trim();
   const sourceUrl = assertString(avatar.sourceUrl).trim();
   if (!name || !sourcePath || !sourceUrl) throwUnsupportedSceneFileError();
+  const sourceSnapshot = normalizeModelSourceSnapshot(avatar.sourceSnapshot);
+  if (avatar.sourceSnapshot !== undefined && !sourceSnapshot) throwUnsupportedSceneFileError();
   return { avatar: {
     name, sourcePath, sourceUrl,
+    ...(sourceSnapshot ? { sourceSnapshot } : {}),
     ...(avatar.assetRevision === undefined ? {} : { assetRevision: assertString(avatar.assetRevision) }),
   } };
 }

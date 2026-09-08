@@ -52,6 +52,7 @@ import {
 } from '../../runtime/babylon/createEngine';
 import type { AssetEntry } from '../assets/AssetDatabase';
 import { createImportedAssetIndexes, findImportedAssetForModelAsset } from '../assets/modelAssetRelink';
+import { normalizeModelSourceSnapshot } from '../model/modelSourceSnapshot';
 import { createId } from '../../shared/ids';
 import type {
   AutoPatrolComponent,
@@ -1235,6 +1236,7 @@ function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetCompone
     left.sourcePath === right.sourcePath &&
     left.sourceUrl === right.sourceUrl &&
     (left.assetRevision ?? '') === (right.assetRevision ?? '') &&
+    areJsonValuesEqual(left.sourceSnapshot, right.sourceSnapshot) &&
     left.lengthUnit === right.lengthUnit &&
     left.unitScaleToMeters === right.unitScaleToMeters &&
     areJsonValuesEqual(left.scriptAssets, right.scriptAssets) &&
@@ -1249,10 +1251,12 @@ function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetCompone
 
 /** 区分启动路径恢复与用户明确更新资源，避免索引修订覆盖完整场景快照。 */
 function findAssetForSceneRefresh(
-  modelAsset: Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl'>,
+  modelAsset: Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl' | 'sourceSnapshot'>,
   indexes: ReturnType<typeof createImportedAssetIndexes>,
   preserveResolvedSnapshots: boolean,
 ): AssetEntry | null {
+  // 打开工程已将包内路径重定位；后台候选可能仅包含共享新版，不能按同 ID 替换固定版本。
+  if (preserveResolvedSnapshots && normalizeModelSourceSnapshot(modelAsset.sourceSnapshot)) return null;
   const asset = findImportedAssetForModelAsset(modelAsset, indexes);
   if (!asset || !preserveResolvedSnapshots) return asset;
   const normalizePath = (value: string) => value.trim().replace(/\\/g, '/').toLowerCase();
@@ -1351,10 +1355,11 @@ function refreshSceneModelAssetsFromImportedAssets(
     if (avatar) {
       const importedAsset = findAssetForSceneRefresh(avatar, indexes, preserveResolvedSnapshots);
       if (importedAsset && (avatar.sourcePath !== importedAsset.path || avatar.sourceUrl !== importedAsset.sourceUrl
-        || avatar.assetRevision !== importedAsset.assetRevision)) {
+        || avatar.assetRevision !== importedAsset.assetRevision || avatar.sourceSnapshot !== undefined)) {
         components = { ...components, manualRoamSpawn: { avatar: {
           ...avatar, sourcePath: importedAsset.path, sourceUrl: importedAsset.sourceUrl,
           assetRevision: importedAsset.assetRevision,
+          sourceSnapshot: undefined,
         } } };
         refreshedCount += 1;
         entityChanged = true;

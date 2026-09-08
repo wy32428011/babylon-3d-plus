@@ -12,6 +12,7 @@ import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanit
 import { createModelLengthUnitInfo, normalizeModelLengthUnitInfo } from './sceneUnits';
 import { normalizeModelDataDrivenConfig } from './telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig } from './builtInSlotBinding';
+import { normalizeModelSourceSnapshot } from './modelSourceSnapshot';
 
 /** 模型生成器从项目资源库读取的最小资产快照，避免领域模型反向依赖带图片资源的 UI 资产模块。 */
 type ModelGeneratorSourceAsset = {
@@ -143,11 +144,14 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
   const parameterScriptMetadata = sanitizeJsonArray(value.parameterScriptMetadata);
   const animationScriptMetadata = sanitizeJsonArray(value.animationScriptMetadata);
   const assetRevision = sanitizeText(value.assetRevision, 128);
+  const sourceSnapshot = normalizeModelSourceSnapshot(value.sourceSnapshot);
+  if (value.sourceSnapshot !== undefined && !sourceSnapshot) return null;
 
   return {
     sourcePath,
     sourceUrl,
     ...(assetRevision ? { assetRevision } : {}),
+    ...(sourceSnapshot ? { sourceSnapshot } : {}),
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(scriptAssets ? { scriptAssets } : {}),

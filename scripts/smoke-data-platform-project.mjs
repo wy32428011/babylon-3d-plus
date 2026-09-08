@@ -434,6 +434,23 @@ async function startMockServer(fixtures) {
       response.end(JSON.stringify(payload));
     };
 
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/projects/detail') {
+      const project = projects.find((item) => item.id === body?.id);
+      sendJson(project ? { success: true, data: { id: project.id, projectName: project.projectName } }
+        : { success: false, message: '项目不存在' });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/platform/api/v1/digital-twin/projects/status') {
+      // 这些夹具属于普通工程导入，尚未建立数字孪生发布绑定。
+      sendJson({ success: true, data: {
+        projectId: body?.projectId, editorProjectId: null, latestVersionId: null,
+        latestVersionNumber: null, status: 'UNBOUND',
+        runtimeConfig: { projectId: body?.projectId, runtimeEnabled: true },
+      } });
+      return;
+    }
+
     if (request.method === 'POST' && url.pathname === '/platform/api/v1/projects/query') {
       const projectName = typeof body?.projectName === 'string' ? body.projectName : '';
       const records = projectName ? projects.filter((item) => item.projectName.includes(projectName)) : projects;
@@ -1313,15 +1330,8 @@ async function run() {
     }
     assert.equal(retried.finalProgress.phase, 'completed', retried.finalProgress.error ?? retried.finalProgress.message);
 
-    const oldPackage = await openAndWaitForSync(launched.window, '3');
-    assert.equal(oldPackage.openResult.source, 'generated');
-    assert.match(oldPackage.openResult.warning, /project\.bjseditor/);
-    assert.equal(oldPackage.finalProgress.phase, 'completed');
-
-    const incompatible = await openAndWaitForSync(launched.window, '4');
-    assert.equal(incompatible.openResult.source, 'generated');
-    assert.match(incompatible.openResult.warning, /只能包含一个 \.scene\.json|当前发现 0 个/);
-    assert.equal(incompatible.finalProgress.phase, 'completed');
+    await expectOpenFailure(launched.window, '3', 'project.bjseditor');
+    await expectOpenFailure(launched.window, '4', '当前发现 0 个');
 
     const indexPath = path.join(sharedResourcesRoot, '.babylon-editor', 'asset-index.json');
     const beforeFailureIndex = await readFile(indexPath, 'utf8');
@@ -1378,7 +1388,7 @@ async function run() {
         'scene-path-relocation',
         'no-package-fallback',
         'legacy-package-fallback',
-        'incompatible-package-fallback',
+        'incompatible-package-rejected-without-local-fallback',
         'normal-environment-combo-sync',
         'optional-any-ts-script-download-and-runtime-registration',
         'local-scene-opens-and-syncs-model-library',

@@ -243,7 +243,6 @@ export async function publishDigitalTwin(
   let remoteTask: DigitalTwinPublishTask | null = null;
   let commitStarted = false;
   const warnings: string[] = [];
-  const viewerSceneContent = createPublicViewerSceneContent(validated.sceneContent);
 
   try {
     const skyboxCacheContext = await loadDeploymentSkyboxCacheContext(signal);
@@ -292,7 +291,8 @@ export async function publishDigitalTwin(
     const distPackage = await buildDigitalTwinDistPackage({
       projectId: current.metadata.projectId,
       publishName: current.metadata.projectName,
-      sceneContent: viewerSceneContent,
+      sceneContent: createPublicViewerSceneContent(sourcePackage.entrySceneContent),
+      sourceResourceFiles: sourcePackage.resourceFiles,
       outputRoot: taskRoot,
       signal,
       skyboxCacheContext,
