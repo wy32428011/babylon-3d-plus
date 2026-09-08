@@ -7,6 +7,7 @@ import {
   type StackerTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
 import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticStatus } from '../../../mqtt/telemetryRuntimeDiagnostics';
+import { areFlatTelemetryFieldsEqual, areTelemetryStringArraysEqual } from '../../../mqtt/telemetryValueComparison';
 import {
   collectSpecializedTelemetryConflictKeys,
   resolveSpecializedTelemetryBinding,
@@ -39,6 +40,21 @@ type SpecializedDriverRegistration = {
   readonly applyWhenStale?: (model: ModelRuntimeEntry) => boolean;
 };
 
+type ModelBindingCacheEntry = {
+  entityId: string;
+  modelAssetCode: string;
+  deviceType: SpecializedTelemetryDeviceType;
+  enabled: boolean | undefined;
+  sourceId: string | undefined;
+  configuredType: string | undefined;
+  assetCode: string | undefined;
+  staleAfterMs: number | undefined;
+  candidate: SpecializedTelemetryRuntimeEntry | null;
+};
+type CandidateGroup = { candidates: SpecializedTelemetryRuntimeEntry[]; conflictKeys: Set<string>; count: number; changed: boolean };
+const EMPTY_DIAGNOSTIC_VALUES: string[] = [];
+const EMPTY_TELEMETRY_FIELDS = {};
+
 /** 专用遥测运行时的门面类：组合各专用 Driver，并承担帧级调度与诊断状态管理。 */
 export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverContext {
   readonly scene: Scene;
@@ -49,6 +65,13 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   private readonly rgvDriver: RgvTelemetryDriver;
   /** 驱动注册表，数组顺序即无实例绑定时的默认优先级（Stacker 优先）。 */
   private readonly drivers: readonly SpecializedDriverRegistration[];
+  private bindingCache = new WeakMap<ModelRuntimeEntry, ModelBindingCacheEntry>();
+  private contextCache = new WeakMap<DeviceTelemetrySnapshot, {
+    context: ExternalModelScriptTelemetrySnapshot; keys: string[]; signature: string;
+  }>();
+  private readonly candidateGroups = new Map<SpecializedTelemetryDeviceType, CandidateGroup>();
+  private injectedModels = new WeakMap<ModelRuntimeEntry, string>();
+  private readonly performanceMetrics = { frames: 0, candidateRebuilds: 0, contextSignatureBuilds: 0, diagnosticWrites: 0 };
 
   constructor(scene: Scene, host: SpecializedTelemetryHost) {
     this.scene = scene;
@@ -77,30 +100,34 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         apply: (model, snapshot, deltaSeconds) => this.rgvDriver.applyToModel(model, snapshot, deltaSeconds),
       },
     ];
+    for (const driver of this.drivers) {
+      this.candidateGroups.set(driver.deviceType, { candidates: [], conflictKeys: new Set(), count: 0, changed: false });
+    }
   }
 
   /** 每帧把最新 MQTT 专用遥测应用到完整主键匹配且无冲突的模型实例；断流设备默认停摆，仅驱动声明 applyWhenStale 的例外（输送线接管自驱）。 */
   applyFrame(deltaSeconds: number): void {
+    this.performanceMetrics.frames++;
     const nowMs = Date.now();
     for (const driver of this.drivers) {
-      const candidates = this.collectSpecializedTelemetryModels(driver.deviceType);
-      const conflictKeys = collectSpecializedTelemetryConflictKeys(
-        candidates.map((candidate) => candidate.binding),
-      );
+      this.prepareFrameCandidates(driver.deviceType);
+      const { candidates, conflictKeys } = this.candidateGroups.get(driver.deviceType)!;
       for (const candidate of candidates) {
         const frame = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
         // 断流快照默认不驱动；驱动声明 applyWhenStale（如输送线接管自驱）时仍用缓存快照推进。
         const snapshot = frame && (!frame.stale || (driver.applyWhenStale?.(candidate.model) ?? false))
           ? frame.snapshot
           : null;
-        const context = snapshot ? this.createExternalScriptTelemetrySnapshot(snapshot) : null;
+        const cachedContext = snapshot ? this.getScriptContext(snapshot) : null;
+        const context = cachedContext?.context ?? null;
         // 上下文不含 receivedAt：字段未变即签名不变。签名不变时跳过注入与阵列刷新（含阵列批次重建），
         // 避免非断流设备每帧全量执行脚本 onUpdate/阵列刷新——设备全部在线时该成本随设备数线性增长直至卡死；
         // driver.apply 不受门控，货物走行/自驱仍按帧推进。
-        const contextSignature = context ? JSON.stringify(context) : null;
+        const contextSignature = cachedContext?.signature ?? null;
         const scriptRuntime = candidate.model.externalScriptRuntime;
         const lastContext = this.state.lastInjectedScriptContexts.get(candidate.entityId);
-        const contextUnchanged = lastContext?.signature === contextSignature && lastContext?.runtime === scriptRuntime;
+        const contextUnchanged = lastContext?.signature === contextSignature && lastContext?.runtime === scriptRuntime
+          && this.injectedModels.get(candidate.model) === candidate.entityId;
         if (!snapshot && contextUnchanged) {
           continue;
         }
@@ -109,6 +136,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
           : this.host.updateExternalScriptContext(candidate.model, context);
         if (!contextUnchanged) {
           this.state.lastInjectedScriptContexts.set(candidate.entityId, { signature: contextSignature, runtime: scriptRuntime });
+          this.injectedModels.set(candidate.model, candidate.entityId);
         }
         if (snapshot) {
           driver.apply(candidate.model, snapshot, deltaSeconds);
@@ -126,6 +154,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   /** 清理已不存在有效专用绑定的模型诊断，避免 Inspector 展示过期状态。 */
   clearInactiveDiagnostics(): void {
     this.clearInactiveSpecializedTelemetryDiagnostics();
+  }
+
+  /** 生命周期累计计数；只复制数值，不暴露遥测内容。 */
+  getPerformanceMetrics(): Readonly<typeof this.performanceMetrics> {
+    return { ...this.performanceMetrics };
   }
 
   /** 为同时命中多种专用能力的模型选择唯一驱动类型，实例绑定优先、无绑定时按注册表顺序。 */
@@ -150,6 +183,10 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
 
   /** 清空 SceneRuntime 级别的预览诊断、metadata 和已上报状态，不影响模型注册或编译绑定。 */
   clearReportedState(): void {
+    this.contextCache = new WeakMap();
+    this.bindingCache = new WeakMap();
+    this.injectedModels = new WeakMap();
+    this.clearCandidateGroups();
     this.state.reportedMissingTargets.clear();
     this.state.reportedFaults.clear();
     this.state.reportedStatuses.clear();
@@ -212,6 +249,17 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   /** 释放门面持有的全部运行时资源。 */
   dispose(): void {
     this.disposeAllCargo();
+    this.contextCache = new WeakMap();
+    this.bindingCache = new WeakMap();
+    this.injectedModels = new WeakMap();
+    this.clearCandidateGroups();
+  }
+
+  private clearCandidateGroups(): void {
+    for (const group of this.candidateGroups.values()) {
+      group.candidates.length = 0;
+      group.conflictKeys.clear();
+    }
   }
 
   // ===== SpecializedTelemetryDriverContext 实现 =====
@@ -330,26 +378,42 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
 
   // ===== 帧内私有方法 =====
 
-  /** 收集最终选择当前专用类型的模型，并把实例绑定归一成完整遥测主键。 */
-  private collectSpecializedTelemetryModels(
-    deviceType: SpecializedTelemetryDeviceType,
-  ): SpecializedTelemetryRuntimeEntry[] {
-    const candidates: SpecializedTelemetryRuntimeEntry[] = [];
-    const appendCandidate = (entityId: string, model: ModelRuntimeEntry): void => {
-      if (!model.assetHandle || !model.stackerTelemetryReady) return;
-      if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) return;
-      const binding = resolveSpecializedTelemetryBinding({
-        modelAssetCode: model.assetCode,
-        deviceType,
-        binding: model.telemetryBinding,
-      });
-      if (binding) candidates.push({ entityId, model, binding });
-    };
-
+  /** 保留每种驱动之前的检查边界，使同步订阅回调的绑定修改当帧生效；稳定帧复用候选与冲突集合。 */
+  private prepareFrameCandidates(deviceType: SpecializedTelemetryDeviceType): void {
+    const group = this.candidateGroups.get(deviceType)!;
+    group.count = 0;
+    group.changed = false;
     for (const { entityId, model } of this.host.collectModels()) {
-      appendCandidate(entityId, model);
+      if (!model.assetHandle || !model.stackerTelemetryReady) continue;
+      if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) continue;
+      const candidate = this.getCachedCandidate(entityId, model, deviceType);
+      if (!candidate) continue;
+      if (group.candidates[group.count] !== candidate) {
+        group.candidates[group.count] = candidate;
+        group.changed = true;
+      }
+      group.count++;
     }
-    return candidates;
+    if (group.candidates.length !== group.count) group.changed = true;
+    group.candidates.length = group.count;
+    if (!group.changed) return;
+    group.conflictKeys = collectSpecializedTelemetryConflictKeys(group.candidates.map((candidate) => candidate.binding));
+    this.performanceMetrics.candidateRebuilds++;
+  }
+
+  private getCachedCandidate(entityId: string, model: ModelRuntimeEntry, deviceType: SpecializedTelemetryDeviceType): SpecializedTelemetryRuntimeEntry | null {
+    const binding = model.telemetryBinding;
+    const cached = this.bindingCache.get(model);
+    if (cached && cached.entityId === entityId && cached.modelAssetCode === model.assetCode
+      && cached.deviceType === deviceType && cached.enabled === binding?.enabled
+      && cached.sourceId === binding?.sourceId && cached.configuredType === binding?.deviceType
+      && cached.assetCode === binding?.assetCode && cached.staleAfterMs === binding?.staleAfterMs) return cached.candidate;
+    const resolved = resolveSpecializedTelemetryBinding({ modelAssetCode: model.assetCode, deviceType, binding });
+    const candidate = resolved ? { entityId, model, binding: resolved } : null;
+    this.bindingCache.set(model, { entityId, modelAssetCode: model.assetCode, deviceType, enabled: binding?.enabled,
+      sourceId: binding?.sourceId, configuredType: binding?.deviceType, assetCode: binding?.assetCode,
+      staleAfterMs: binding?.staleAfterMs, candidate });
+    return candidate;
   }
 
   /** 为同时命中多种专用能力的模型选择唯一驱动类型，实例绑定优先、无绑定时按注册表顺序取首个可用驱动。 */
@@ -412,7 +476,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         faulted: false,
         conflict: false,
         lastReceivedAt: null,
-        errors: [],
+        errors: EMPTY_DIAGNOSTIC_VALUES,
       });
       return null;
     }
@@ -424,7 +488,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       faulted: snapshot.faulted,
       conflict: false,
       lastReceivedAt: snapshot.receivedAt,
-      errors: [],
+      errors: EMPTY_DIAGNOSTIC_VALUES,
     }, snapshot);
     return { snapshot, stale };
   }
@@ -437,24 +501,34 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     status: TelemetryRuntimeDiagnosticStatus,
     snapshot?: DeviceTelemetrySnapshot,
   ): void {
-    const runtimeMetadata = { ...status, errors: [...status.errors] };
-    for (const node of [model.root, model.contentRoot]) {
-      node.metadata = { ...(node.metadata ?? {}), telemetryRuntime: runtimeMetadata };
-    }
-    telemetryRuntimeDiagnosticsStore.upsert(entityId, {
-      ...runtimeMetadata,
+    const input = {
+      ...status,
       sourceId: snapshot?.sourceId ?? binding.sourceId,
       deviceType: snapshot?.deviceType ?? binding.deviceType,
       assetCode: snapshot?.assetCode ?? binding.assetCode,
       topic: snapshot?.topic ?? null,
       sequence: snapshot?.sequence ?? null,
       sourceTimestamp: snapshot?.sourceTimestamp ?? null,
-      fields: snapshot?.fields ?? {},
+      fields: snapshot?.fields ?? EMPTY_TELEMETRY_FIELDS,
       message: snapshot?.message ?? '',
-      nodeTargets: [],
-      boneTargets: [],
-      animationTargets: [],
-    });
+      nodeTargets: EMPTY_DIAGNOSTIC_VALUES,
+      boneTargets: EMPTY_DIAGNOSTIC_VALUES,
+      animationTargets: EMPTY_DIAGNOSTIC_VALUES,
+    };
+    const metadataMatches = (metadata: TelemetryRuntimeDiagnosticStatus | undefined): boolean => !!metadata
+      && metadata.online === status.online && metadata.stale === status.stale
+      && metadata.faulted === status.faulted && metadata.conflict === status.conflict
+      && metadata.lastReceivedAt === status.lastReceivedAt && Array.isArray(metadata.errors)
+      && areTelemetryStringArraysEqual(metadata.errors, status.errors);
+    const metadataChanged = !metadataMatches(model.root.metadata?.telemetryRuntime)
+      || !metadataMatches(model.contentRoot.metadata?.telemetryRuntime);
+    if (metadataChanged) {
+      const runtimeMetadata = { ...status, errors: [...status.errors] };
+      model.root.metadata = { ...(model.root.metadata ?? {}), telemetryRuntime: runtimeMetadata };
+      model.contentRoot.metadata = { ...(model.contentRoot.metadata ?? {}), telemetryRuntime: runtimeMetadata };
+    }
+    const changed = telemetryRuntimeDiagnosticsStore.upsert(entityId, input);
+    if (changed || metadataChanged) this.performanceMetrics.diagnosticWrites++;
   }
 
   /** 清理禁用或类型错配的专用绑定诊断，避免 Inspector 展示过期状态。 */
@@ -462,6 +536,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     telemetryRuntimeDiagnosticsStore.delete(entityId);
     for (const node of [model.root, model.contentRoot]) {
       if (!node.metadata || typeof node.metadata !== 'object') continue;
+      if (!Object.hasOwn(node.metadata, 'telemetryRuntime')) continue;
       const metadata = { ...(node.metadata as Record<string, unknown>) };
       delete metadata.telemetryRuntime;
       node.metadata = metadata;
@@ -489,5 +564,18 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       faulted: snapshot.faulted,
       fields: { ...snapshot.fields },
     };
+  }
+
+  /** 同一快照的标量字段沿用签名；复杂值和原位字段修改仍执行原比较路径。 */
+  private getScriptContext(snapshot: DeviceTelemetrySnapshot) {
+    const cached = this.contextCache.get(snapshot);
+    if (cached && cached.context.deviceType === snapshot.deviceType && cached.context.assetCode === snapshot.assetCode
+      && cached.context.faulted === snapshot.faulted
+      && areFlatTelemetryFieldsEqual(snapshot.fields, cached.context.fields, cached.keys)) return cached;
+    const context = this.createExternalScriptTelemetrySnapshot(snapshot);
+    const next = { context, keys: Object.keys(context.fields), signature: JSON.stringify(context) };
+    this.contextCache.set(snapshot, next);
+    this.performanceMetrics.contextSignatureBuilds++;
+    return next;
   }
 }

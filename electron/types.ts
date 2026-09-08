@@ -227,6 +227,16 @@ export type DigitalTwinPublishResult = {
   warnings: string[];
 };
 
+/** 发布前先恢复模型，结果由 renderer 原子回写场景后再提交同一份快照。 */
+export type DigitalTwinModelRecoveryRequest = {
+  requestId: string;
+  projectId: string | null;
+  sceneContent: string;
+};
+export type DigitalTwinModelRecoveryResult = {
+  replacements: Array<{ sourceUrls: string[]; asset: ProjectModelAssetEntry }>;
+};
+
 export type DigitalTwinPublishCancelRequest = {
   requestId: string;
 };

@@ -171,6 +171,13 @@ select {
   height: 16px;
 }
 
+.toolbar .toolbar-performance-run {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: #8fd6ff;
+  font-size: 12px;
+}
+
 .toolbar button:disabled,
 .panel button:disabled {
   color: #777;

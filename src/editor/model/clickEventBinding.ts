@@ -2,6 +2,7 @@ import type { ClickEventBindingComponent, ClickEventBindingDeviceSlot, ClickEven
 import { normalizeDataPlatformScreenUrl } from './dataPlatformScreen';
 import type { SceneDocument } from './SceneDocument';
 import { createId } from '../../shared/ids';
+import { getClickEventModelResourceKey } from '../../../electron/shared/clickEventModelIdentity';
 
 /** 点击事件绑定从项目资源库读取的最小资产快照，避免领域模型反向依赖带图片资源的 UI 资产模块。 */
 type ClickEventBindingSourceAsset = {
@@ -205,7 +206,7 @@ export function cloneClickEventBindingComponent(component: ClickEventBindingComp
 }
 
 /**
- * 运行态查找命中的点击事件绑定：按模型包 sourceUrl 匹配被点击实体，
+ * 运行态查找命中的点击事件绑定：精确 URL 或同一中台资源的包内模型路径均可命中，
  * 多个绑定覆盖同一设备类型时按场景实体顺序取第一个。
  */
 export function findClickEventBindingForEntity(
@@ -214,11 +215,15 @@ export function findClickEventBindingForEntity(
 ): { bindingEntityId: string; component: ClickEventBindingComponent } | null {
   const sourceUrl = scene.entities[entityId]?.components.modelAsset?.sourceUrl;
   if (!sourceUrl) return null;
+  const resourceKey = getClickEventModelResourceKey(sourceUrl);
 
   for (const entity of Object.values(scene.entities)) {
     const component = entity.components.clickEventBinding;
     if (!component) continue;
-    if (component.deviceSlots.some((slot) => slot.deviceType?.sourceUrl === sourceUrl)) {
+    if (component.deviceSlots.some((slot) => slot.deviceType && (
+      slot.deviceType.sourceUrl === sourceUrl
+      || (resourceKey !== null && getClickEventModelResourceKey(slot.deviceType.sourceUrl) === resourceKey)
+    ))) {
       return { bindingEntityId: entity.id, component };
     }
   }

@@ -18,3 +18,5 @@ output/
 .tmp-download-ui
 .remote-audit-temp
 .tmp-source-resource-fix
+.tmp-editor-performance-entry
+.tmp-telemetry-performance

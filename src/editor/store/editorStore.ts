@@ -466,6 +466,8 @@ type EditorState = {
   sceneSessionId: string;
   persistedSceneContent: string;
   runtimeMode: EditorRuntimeMode;
+  /** 仅本次编辑器运行预览使用，不写入场景文件或撤销历史。 */
+  runtimePerformanceEnabled: boolean;
   history: CommandHistory;
   hierarchySelectionIds: string[];
   entityClipboard: EntityClipboard | null;
@@ -498,7 +500,7 @@ type EditorState = {
   snapSettings: TransformSnapSettings;
   gridSettings: EditorGridSettings;
   trajectoryVisible: boolean;
-  startRuntimePreview: () => RuntimePreviewReadiness;
+  startRuntimePreview: (options?: { performance?: boolean }) => RuntimePreviewReadiness;
   stopRuntimePreview: () => void;
   setTransformTool: (tool: TransformTool) => void;
   setTransformSpace: (space: TransformSpace) => void;
@@ -676,6 +678,7 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
   return {
     scene,
     sceneSessionId,
+    runtimePerformanceEnabled: false,
     shadowBakeRequest: null,
     shadowBakeStatus: { phase: 'idle', message: null },
     persistedSceneContent: serializeScene(scene),
@@ -2606,6 +2609,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   sceneSessionId: createId('scene_session'),
   persistedSceneContent: serializeScene(initialEditorScene),
   runtimeMode: 'edit',
+  runtimePerformanceEnabled: false,
   history: createCommandHistory(),
   hierarchySelectionIds: [],
   entityClipboard: null,
@@ -2638,7 +2642,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   snapSettings: DEFAULT_SNAP_SETTINGS,
   gridSettings: DEFAULT_EDITOR_GRID_SETTINGS,
   trajectoryVisible: false,
-  startRuntimePreview: () => {
+  startRuntimePreview: (options) => {
     const currentState = get();
     if (currentState.environmentApplyRequest || currentState.environmentRuntimeSnapshot.phase === 'loading') {
       const readiness: RuntimePreviewReadiness = {
@@ -2680,6 +2684,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (state.runtimeMode === 'preview') return state;
       return {
         runtimeMode: 'preview',
+        runtimePerformanceEnabled: options?.performance === true,
         // 进入运行态前清掉编辑态选区，避免遗留的选中高亮与预览内点击高亮叠加。
         scene: state.scene.selectedEntityId
           ? { ...state.scene, selectedEntityId: null }
@@ -2689,7 +2694,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         cameraPoseSaveRequest: null,
         autoPatrolCameraRequest: null,
         selectedAutoPatrolWaypointId: null,
-        logs: prependLog(state.logs, '已进入运行预览模式。'),
+        logs: prependLog(state.logs, options?.performance === true ? '已进入性能运行，正在记录本次运行指标。' : '已进入运行预览模式。'),
       };
     });
     return readiness;
@@ -2699,6 +2704,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (state.runtimeMode === 'edit') return state;
       return {
         runtimeMode: 'edit',
+        runtimePerformanceEnabled: false,
         logs: prependLog(state.logs, '已停止运行预览模式。'),
       };
     });

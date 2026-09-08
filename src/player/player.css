@@ -24,43 +24,6 @@ body,
   height: 100vh;
   background: #141414;
 }
-.player-fullscreen-button {
-  position: absolute;
-  z-index: 5;
-  top: 16px;
-  right: 16px;
-  display: inline-grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  border: 1px solid rgb(255 255 255 / 16%);
-  border-radius: 8px;
-  color: #f5f7fa;
-  background: rgb(12 16 22 / 86%);
-  box-shadow: 0 8px 28px rgb(0 0 0 / 28%);
-  backdrop-filter: blur(8px);
-  cursor: pointer;
-}
-.player-fullscreen-button:hover,
-.player-fullscreen-button:focus-visible {
-  border-color: rgb(247 215 116 / 58%);
-  color: #f7d774;
-}
-.player-fullscreen-button:focus-visible {
-  outline: 2px solid #f7d774;
-  outline-offset: 2px;
-}
-.player-fullscreen-button[aria-pressed='true'] {
-  border-color: #f7d774;
-  color: #1e1e1e;
-  background: #f7d774;
-}
-.player-fullscreen-button svg {
-  display: block;
-  width: 16px;
-  height: 16px;
-}
 .player-canvas {
   display: block;
   width: 100%;
@@ -97,4 +60,52 @@ body,
 .player-status-blocked {
   border-color: rgb(255 92 92 / 58%);
   background: rgb(72 18 22 / 92%);
+}
+.player-performance {
+  position: absolute;
+  z-index: 6;
+  top: 64px;
+  right: 16px;
+  width: min(340px, calc(100vw - 32px));
+  max-height: calc(100% - 80px);
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid rgb(255 255 255 / 24%);
+  border-radius: 8px;
+  color: #f5f7fa;
+  background: rgb(12 16 22 / 94%);
+  font-size: 13px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+.player-performance-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.player-performance p {
+  margin: 7px 0;
+  overflow-wrap: anywhere;
+}
+.player-performance button {
+  padding: 4px 8px;
+  border: 1px solid #778391;
+  border-radius: 4px;
+  color: inherit;
+  background: #253140;
+  cursor: pointer;
+}
+.player-performance button:focus-visible,
+.player-performance textarea:focus-visible {
+  outline: 2px solid #f7d774;
+  outline-offset: 2px;
+}
+.player-performance textarea {
+  display: block;
+  width: 100%;
+  height: 140px;
+  color: inherit;
+  background: #141b24;
+  resize: vertical;
 }

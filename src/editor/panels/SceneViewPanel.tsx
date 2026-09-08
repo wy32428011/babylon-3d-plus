@@ -59,6 +59,11 @@ import {
   type ScenePerformanceSnapshot,
 } from '../../runtime/babylon/ScenePerformanceMonitor';
 import {
+  createEditorPerformanceRunSession,
+  type EditorPerformanceRunSession,
+  type EditorPerformanceRunSnapshot,
+} from '../runtime/editorPerformanceRunSession';
+import {
   TransformGizmoController,
   type EntityArrayDragUpdate,
 } from '../../runtime/babylon/TransformGizmoController';
@@ -284,6 +289,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const manualRoamRef = useRef<ManualRoamRuntime | null>(null);
   const mqttTelemetryClientRef = useRef<MqttStackerTelemetryClient | null>(null);
   const performanceMonitorRef = useRef<ScenePerformanceMonitor | null>(null);
+  const performanceRunSessionRef = useRef<EditorPerformanceRunSession | null>(null);
   const sceneFocusPerformanceRef = useRef<SceneFocusPerformanceMetrics | null>(null);
   const clickSnapshotRef = useRef<SceneModelSelectionPointerSnapshot | null>(null);
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
@@ -315,14 +321,18 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
   const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
   const [performanceHudExpanded, setPerformanceHudExpanded] = useState(false);
+  const [performanceRunHudExpanded, setPerformanceRunHudExpanded] = useState(true);
+  const [performanceRunSnapshot, setPerformanceRunSnapshot] = useState<EditorPerformanceRunSnapshot | null>(null);
   const [sceneRuntimeNaturallyReady, setSceneRuntimeNaturallyReady] = useState(false);
   const [manualRoamSnapshot, setManualRoamSnapshot] = useState<ManualRoamSnapshot>(createInitialManualRoamSnapshot);
   const [autoPatrolRecordStore, setAutoPatrolRecordStore] = useState<AutoPatrolInspectionRecordStore | null>(null);
   const sceneDocument = useEditorStore((state) => state.scene);
   const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
+  const performanceRunSceneSessionIdRef = useRef(sceneSessionId);
   const manualRoamSceneSessionIdRef = useRef(sceneSessionId);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
+  const runtimePerformanceEnabled = useEditorStore((state) => state.runtimePerformanceEnabled);
   const selectedEntityId = useEditorStore((state) => state.scene.selectedEntityId);
   const hierarchySelectionIds = useEditorStore((state) => state.hierarchySelectionIds);
   const transformTool = useEditorStore((state) => state.transformTool);
@@ -389,6 +399,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const pushLog = useEditorStore((state) => state.pushLog);
   const stopRuntimePreview = useEditorStore((state) => state.stopRuntimePreview);
   const isRuntimePreview = runtimeMode === 'preview';
+  const isPerformanceRun = isRuntimePreview && runtimePerformanceEnabled;
+  const isPerformanceHudExpanded = isPerformanceRun ? performanceRunHudExpanded : performanceHudExpanded;
+  const showPerformanceHud = Boolean(performanceSnapshot && (props.performanceHudVisible || isPerformanceRun));
+  const hasStoppedPerformanceReport = !isPerformanceRun && performanceRunSnapshot?.phase === 'stopped';
   const handleDataPlatformScreenCommand = useCallback((
     _item: DataPlatformScreenOverlayItem | null,
     command: DataPlatformScreenCommand,
@@ -926,8 +940,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
             state.requestSceneFocusForSelection([resolution.entityId], {
               animate: true,
               durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
-              useModelFocusAngle: false,
-              radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE,
             });
           }
         } else if (resolution.kind === 'clear') {
@@ -1533,7 +1545,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         getSceneFocusMetrics: () => sceneFocusPerformanceRef.current,
       });
       performanceMonitorRef.current = performanceMonitor;
-      performanceMonitor.start(setPerformanceSnapshot);
+      performanceMonitor.start((snapshot) => {
+        setPerformanceSnapshot(snapshot);
+        const state = useEditorStore.getState();
+        const session = performanceRunSessionRef.current;
+        if (!session || !state.runtimePerformanceEnabled || state.runtimeMode !== 'preview') return;
+        session.record(snapshot, initializedRuntime.getTelemetryPerformanceMetrics());
+        setPerformanceRunSnapshot(session.getSnapshot());
+      });
     } catch (error) {
       console.warn('Scene View 性能监控初始化失败，渲染功能不受影响。', error);
       pushLog(`Scene View 性能监控初始化失败：${getErrorMessage(error)}`);
@@ -1556,6 +1575,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
       window.removeEventListener('blur', cancelActiveGizmoDrag);
+      performanceRunSessionRef.current?.stop(initializedRuntime.getTelemetryPerformanceMetrics());
+      initializedRuntime.setTelemetryPerformanceTimingEnabled(false);
       initializedPerformanceMonitor?.dispose();
       initializedMqttTelemetryClient?.dispose();
       initializedUnsubscribeManualRoamSnapshot?.();
@@ -2056,6 +2077,27 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       stopRuntimePreview();
     }
   }, [attachCurrentSelectionGizmo, runtimeMode, isRuntimePreview, mqttConfig, publishSelectedInspectorSpatialInfo, pushLog, stopRuntimePreview]);
+
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    const state = useEditorStore.getState();
+    if (performanceRunSceneSessionIdRef.current !== sceneSessionId) {
+      performanceRunSceneSessionIdRef.current = sceneSessionId;
+      performanceRunSessionRef.current = null;
+      setPerformanceRunSnapshot(null);
+    }
+    if (!runtime || !isPerformanceRun || !state.runtimePerformanceEnabled || state.runtimeMode !== 'preview') return;
+    runtime.setTelemetryPerformanceTimingEnabled(true);
+    const session = createEditorPerformanceRunSession(runtime.getTelemetryPerformanceMetrics());
+    performanceRunSessionRef.current = session;
+    setPerformanceRunSnapshot(session.getSnapshot());
+    setPerformanceRunHudExpanded(true);
+    return () => {
+      session.stop(runtime.getTelemetryPerformanceMetrics());
+      runtime.setTelemetryPerformanceTimingEnabled(false);
+      setPerformanceRunSnapshot(session.getSnapshot());
+    };
+  }, [isPerformanceRun, sceneSessionId]);
 
   useEffect(() => {
     if (!isRuntimePreview) return;
@@ -2600,6 +2642,20 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     }
   }
 
+  async function handleCopyPerformanceRunReport(): Promise<void> {
+    const session = performanceRunSessionRef.current;
+    if (!session) {
+      pushLog('性能运行报告尚未就绪。');
+      return;
+    }
+    try {
+      await copyScenePerformanceReport(session.createReport());
+      pushLog('性能运行报告已复制到剪贴板。');
+    } catch (error) {
+      pushLog(`性能运行报告复制失败：${getErrorMessage(error)}`);
+    }
+  }
+
   const overlayViewport = viewportRef.current;
   const overlayRuntime = runtimeRef.current;
 
@@ -2684,12 +2740,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
             onHistoryAction={handleHistoryAction}
           />
         ) : null}
-        {performanceSnapshot && props.performanceHudVisible ? (
-          <div className={performanceHudExpanded ? 'scene-performance-hud expanded' : 'scene-performance-hud'}>
+        {showPerformanceHud || hasStoppedPerformanceReport ? (
+          <div className={showPerformanceHud && isPerformanceHudExpanded ? 'scene-performance-hud expanded' : 'scene-performance-hud'}>
+            {performanceSnapshot && showPerformanceHud ? <>
             <button
-              aria-expanded={performanceHudExpanded}
+              aria-expanded={isPerformanceHudExpanded}
               className="scene-performance-summary"
-              onClick={() => setPerformanceHudExpanded((expanded) => !expanded)}
+              onClick={() => isPerformanceRun
+                ? setPerformanceRunHudExpanded((expanded) => !expanded)
+                : setPerformanceHudExpanded((expanded) => !expanded)}
               title="展开或收起 Scene View 性能指标"
               type="button"
             >
@@ -2697,8 +2756,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
               <span>{formatPerformanceMetric(performanceSnapshot.frameTimeMs)} ms</span>
               <span>{performanceSnapshot.drawCalls} DC</span>
             </button>
-            {performanceHudExpanded ? (
+            {isPerformanceHudExpanded ? (
               <div className="scene-performance-details" role="status">
+                {isPerformanceRun ? (
+                  <p className="scene-performance-run-status">
+                    {performanceRunSnapshot?.phase === 'running'
+                      ? `性能运行 · 已保留 ${performanceRunSnapshot.sampleCount} 个样本`
+                      : '性能运行 · 等待完整采样窗口（约 2 秒）'}
+                  </p>
+                ) : null}
                 <dl>
                   <div><dt>Frame / Render</dt><dd>{formatPerformanceMetric(performanceSnapshot.frameTimeMs)} / {formatPerformanceMetric(performanceSnapshot.renderTimeMs)} ms</dd></div>
                   <div><dt>GPU frame</dt><dd>{performanceSnapshot.gpuFrameTimeMs === null ? 'N/A' : `${formatPerformanceMetric(performanceSnapshot.gpuFrameTimeMs)} ms`}</dd></div>
@@ -2717,16 +2783,29 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
                   <div><dt>选择同步</dt><dd>{formatPerformanceMetric(performanceSnapshot.runtime.lastSelectionSyncDurationMs)} ms / {performanceSnapshot.runtime.lastSelectionChangedEntityCount} 个</dd></div>
                   <div><dt>编辑态分组</dt><dd>{formatPerformanceMetric(performanceSnapshot.editThinInstancePlan.lastDurationMs)} ms / {performanceSnapshot.editThinInstancePlan.entityCount.toLocaleString()} 个</dd></div>
                   <div><dt>Long Task</dt><dd>{performanceSnapshot.longTaskCount} / {formatPerformanceMetric(performanceSnapshot.longTaskDurationMs)} ms</dd></div>
+                  {isPerformanceRun && performanceRunSnapshot ? <>
+                    <div><dt>遥测帧 / 峰值</dt><dd>{performanceRunSnapshot.telemetry.lastFrameTimeMs === null ? 'N/A' : formatPerformanceMetric(performanceRunSnapshot.telemetry.lastFrameTimeMs, 2)} / {performanceRunSnapshot.telemetry.maxFrameTimeMs === null ? 'N/A' : formatPerformanceMetric(performanceRunSnapshot.telemetry.maxFrameTimeMs, 2)} ms</dd></div>
+                    <div><dt>候选重建（本次）</dt><dd>{performanceRunSnapshot.telemetry.candidateRebuilds.toLocaleString()}</dd></div>
+                    <div><dt>签名计算（本次）</dt><dd>{performanceRunSnapshot.telemetry.contextSignatureBuilds.toLocaleString()}</dd></div>
+                    <div><dt>诊断写入（本次）</dt><dd>{performanceRunSnapshot.telemetry.diagnosticWrites.toLocaleString()}</dd></div>
+                  </> : null}
                 </dl>
-                <button className="scene-performance-copy" onClick={() => void handleCopyPerformanceReport()} type="button">
-                  复制最近一分钟报告
+                {isPerformanceRun ? <p className="scene-performance-run-note">1 Hz 采样，CPU 为秒级均值；报告保留本次最近一分钟。</p> : null}
+                <button className="scene-performance-copy" onClick={() => void (isPerformanceRun ? handleCopyPerformanceRunReport() : handleCopyPerformanceReport())} type="button">
+                  {isPerformanceRun ? '复制本次性能运行报告' : '复制最近一分钟报告'}
                 </button>
               </div>
+            ) : null}
+            </> : null}
+            {hasStoppedPerformanceReport ? (
+              <button className="scene-performance-copy scene-performance-retained-report" onClick={() => void handleCopyPerformanceRunReport()} type="button">
+                复制上次性能运行报告（{performanceRunSnapshot.sampleCount} 个样本）
+              </button>
             ) : null}
           </div>
         ) : null}
         {isRuntimePreview ? (
-          <span aria-live="polite" className="scene-preview-badge" role="status">运行预览</span>
+          <span aria-live="polite" className="scene-preview-badge" role="status">{isPerformanceRun ? '性能运行' : '运行预览'}</span>
         ) : null}
         {!isRuntimePreview && environmentAdjustmentActive ? (
           <span aria-live="polite" className="scene-environment-adjustment-badge" role="status">

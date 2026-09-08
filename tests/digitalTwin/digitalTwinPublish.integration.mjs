@@ -40,6 +40,13 @@ const PUBLISHED_FETCH_CONFIG = Object.freeze({
   url: 'https://fetch.example.test/inventory',
   apiKey: 'integration-test-api-key',
 });
+const CAD_SOURCE_PATH = 'Assets/CAD/publish-reference.dxf';
+const CAD_DXF_CONTENT = [
+  '0', 'SECTION', '2', 'HEADER', '9', '$INSUNITS', '70', '6', '0', 'ENDSEC',
+  '0', 'SECTION', '2', 'ENTITIES',
+  '0', 'LINE', '8', '0', '10', '0', '20', '0', '30', '0', '11', '2', '21', '1', '31', '0',
+  '0', 'ENDSEC', '0', 'EOF', '',
+].join('\n');
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -163,7 +170,7 @@ async function readZipFileEntries(filePath) {
   return entries;
 }
 
-function createSceneContent() {
+function createSceneContent(cadSourcePath) {
   return `${JSON.stringify({
     version: 3,
     scene: {
@@ -174,7 +181,9 @@ function createSceneContent() {
       entities: {
         'cad-reference': {
           id: 'cad-reference',
-          name: '源工程保留的 CAD',
+          name: '发布后保留的 CAD',
+          parentId: null,
+          childrenIds: [],
           components: {
             transform: {
               position: { x: 0, y: 0, z: 0 },
@@ -182,7 +191,26 @@ function createSceneContent() {
               scale: { x: 1, y: 1, z: 1 },
             },
             cadReference: {
-              geometry: { lines: [[0, 0, 1, 1]] },
+              sourcePath: cadSourcePath,
+              sourceUrl: `editor-asset://local/${encodeURIComponent(cadSourcePath)}`,
+              sourceFileSizeBytes: Buffer.byteLength(CAD_DXF_CONTENT, 'utf8'),
+              importMode: 'exact',
+              sourceUnitCode: 6,
+              sourceUnitName: 'meter',
+              unitDetection: 'insunits',
+              unitScaleToMeters: 1,
+              originMode: 'center',
+              lineColor: '#38bdf8',
+              opacity: 0.65,
+              layerStats: [{ name: '0', entityCount: 1, polylineCount: 1, pointCount: 2 }],
+              bounds: {
+                min: { x: -1, y: 0.01, z: -0.5 },
+                max: { x: 1, y: 0.01, z: 0.5 },
+                size: { x: 2, y: 0, z: 1 },
+                center: { x: 0, y: 0.01, z: 0 },
+              },
+              polylineCount: 1,
+              pointCount: 2,
             },
           },
         },
@@ -721,7 +749,8 @@ async function run() {
   const projectRoot = path.join(workspaceRoot, 'Projects', PROJECT_ID);
   const sharedResourcesRoot = path.join(workspaceRoot, 'SharedResources');
   const scenePath = path.join(projectRoot, 'Scenes', 'main.scene.json');
-  const sceneContent = createSceneContent();
+  const cadSourcePath = path.join(projectRoot, CAD_SOURCE_PATH);
+  const sceneContent = createSceneContent(cadSourcePath);
   const mock = new DigitalTwinMockServer();
   let originalGetAppPath = null;
   let clearCurrentDataPlatformBinding = () => undefined;
@@ -747,6 +776,7 @@ async function run() {
     const transferModule = await import('../../dist-electron/ipc/dataPlatformTransfer.js');
     const uploadClientModule = await import('../../dist-electron/ipc/digitalTwinUploadClient.js');
     const projectAssetModule = await import('../../dist-electron/ipc/projectAssetStore.js');
+    const { authorizeAssetFile } = await import('../../dist-electron/ipc/assetRegistry.js');
     const deploymentSceneModule = await import('../../dist-electron/ipc/deploymentExportScene.js');
     const publishModule = await import('../../dist-electron/ipc/digitalTwinPublishService.js');
     clearCurrentDataPlatformBinding = bindingModule.clearCurrentDataPlatformBinding;
@@ -884,6 +914,10 @@ async function run() {
 
     await projectAssetModule.ensureProjectDirectories(projectRoot);
     await projectAssetModule.ensureProjectDirectories(sharedResourcesRoot);
+    await mkdir(path.dirname(cadSourcePath), { recursive: true });
+    await writeFile(cadSourcePath, CAD_DXF_CONTENT, 'utf8');
+    // 与 CAD 文件选择/场景加载一致，只授权此 fixture 文件，保留发布资源边界校验。
+    authorizeAssetFile(cadSourcePath);
     await mkdir(path.dirname(scenePath), { recursive: true });
     await writeFile(scenePath, sceneContent, 'utf8');
     await writeFile(
@@ -1025,13 +1059,44 @@ async function run() {
     assert.equal(selectedProjectResult.status, 'completed');
     const selectedSourceEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'SOURCE'));
     const selectedSourceScene = JSON.parse(selectedSourceEntries.get('Scenes/main.scene.json').toString('utf8'));
-    assert.deepEqual(selectedSourceScene.scene.entities['cad-reference'], JSON.parse(sceneContent).scene.entities['cad-reference'],
-      '发布SOURCE必须保留CAD编辑内容，不能沿用Viewer裁剪策略');
+    const originalCadEntity = JSON.parse(sceneContent).scene.entities['cad-reference'];
+    const originalCadReference = originalCadEntity.components.cadReference;
+    assert.deepEqual(selectedSourceScene.scene.entities['cad-reference'], {
+      ...originalCadEntity,
+      components: {
+        ...originalCadEntity.components,
+        cadReference: {
+          ...originalCadReference,
+          sourcePath: CAD_SOURCE_PATH,
+          sourceUrl: `editor-asset://local/${encodeURIComponent(CAD_SOURCE_PATH)}`,
+        },
+      },
+    }, '发布 SOURCE 必须保留 CAD 编辑内容并将引用改写为包内路径。');
+    assert.deepEqual(selectedSourceEntries.get(CAD_SOURCE_PATH), Buffer.from(CAD_DXF_CONTENT, 'utf8'));
     assert.deepEqual(selectedSourceScene.scene.fetchConfig, PUBLISHED_FETCH_CONFIG);
     const selectedDistEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'DIST'));
     const selectedRuntimeConfig = JSON.parse(selectedDistEntries.get('runtime-config.json').toString('utf8'));
     assert.equal(selectedRuntimeConfig.page.title, '发布集成测试项目');
     const selectedDistScene = JSON.parse(selectedDistEntries.get('project/scene.json').toString('utf8'));
+    const selectedDistManifest = JSON.parse(selectedDistEntries.get('project/asset-manifest.json').toString('utf8'));
+    const cadAssets = selectedDistManifest.assets.filter((asset) => asset.kind === 'cad');
+    assert.equal(cadAssets.length, 1, '发布 DIST 必须包含场景引用的 CAD 文件。');
+    const cadAsset = cadAssets[0];
+    assert.match(cadAsset.path, /^\.\/cad\/[^/]+\/publish-reference\.dxf$/);
+    assert.deepEqual(selectedDistScene.scene.entities['cad-reference'], {
+      ...originalCadEntity,
+      components: {
+        ...originalCadEntity.components,
+        cadReference: {
+          ...originalCadReference,
+          sourcePath: cadAsset.logicalUrl,
+          sourceUrl: cadAsset.logicalUrl,
+        },
+      },
+    }, '发布 DIST 必须保留 CAD 组件及样式，并使用可解析的运行资源引用。');
+    assert.deepEqual(selectedDistEntries.get(`project/assets/${cadAsset.path.slice(2)}`), Buffer.from(CAD_DXF_CONTENT, 'utf8'));
+    assert.equal(cadAsset.size, Buffer.byteLength(CAD_DXF_CONTENT, 'utf8'));
+    assert.equal(cadAsset.sha256, sha256(CAD_DXF_CONTENT));
     assert.deepEqual(selectedDistScene.scene.fetchConfig, {
       url: PUBLISHED_FETCH_CONFIG.url,
       apiKey: '',
@@ -1357,7 +1422,8 @@ async function run() {
     assert.equal(successResult.editorProjectVersionNumber, 2);
     assert.match(successResult.stableUrl, /\/digital-twin\/projects\//);
     assert.match(successResult.releaseUrl, /\/digital-twin\/releases\//);
-    assert.ok(successResult.warnings.some((warning) => warning.includes('CAD 参考图')));
+    assert.equal(successResult.warnings.some((warning) => warning.includes('跳过') && warning.includes('CAD')), false,
+      '完整发布不应再跳过 CAD 参考图。');
     assert.ok(successResult.warnings.some((warning) => warning.includes('刷新远端项目状态失败')));
     for (const phase of ['saving', 'source-package', 'dist-package', 'prepare', 'upload-source', 'upload-dist', 'commit', 'completed']) {
       assert.ok(successProgress.some((progress) => progress.phase === phase), `缺少发布进度阶段：${phase}`);
@@ -1566,7 +1632,7 @@ async function run() {
         'local-active-state-without-network',
         'overwrite-confirmation',
         'prepare-source-dist',
-        'source-cad-preserved-and-dist-runtime-trimmed',
+        'source-and-dist-cad-component-and-dxf-preserved',
         'incomplete-source-blocked-before-upload',
         'resume-uploaded-chunks',
         'transient-chunk-retry',

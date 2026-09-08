@@ -70,7 +70,7 @@ export async function buildDigitalTwinDistPackage(
       options.signal,
       (detail) => options.onProgress?.(detail, 8),
       {
-        skipCadReferences: true,
+        skipCadReferences: false,
         skyboxCacheContext: options.skyboxCacheContext,
         skyboxValidationCache: options.skyboxValidationCache,
       },

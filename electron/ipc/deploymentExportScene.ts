@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
 import { getSceneShadowBakeErrorContract, getSceneShadowBakeSignatureContract } from '../shared/sceneShadowBakeContract.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -119,8 +120,8 @@ type ResolvedSkyboxReference = MutableSkyboxReference & {
 
 type MutableCadReference = { cad: PlainObject };
 
-/** 点击事件绑定设备类型只参与 URL 改写：匹配的实体已进入模型引用列表，绑定自身不引入新资源。 */
-type MutableClickEventBindingReference = { slot: PlainObject; deviceType: PlainObject };
+type MutableClickEventBindingReference = { deviceType: PlainObject };
+type ResolvedClickEventBindingReference = MutableClickEventBindingReference & { sourcePath: string };
 
 type ResolvedCadReference = MutableCadReference & {
   sourcePath: string;
@@ -194,6 +195,10 @@ export async function prepareDeploymentExport(
     resolvedModels.push(await resolveModelReference(reference, projectContext, bundles, signal));
   }
 
+  const resolvedClickEventBindings = await resolveClickEventBindingReferences(
+    references.clickEventBindings, resolvedModels, projectContext, bundles, signal,
+  );
+
   const resolvedEnvironments: ResolvedEnvironmentReference[] = [];
   for (const reference of references.environments) {
     resolvedEnvironments.push(await resolveEnvironmentReference(reference, projectContext, bundles, signal));
@@ -233,7 +238,7 @@ export async function prepareDeploymentExport(
   );
 
   rewriteModelReferences(resolvedModels, sourceUrlMap);
-  rewriteClickEventBindingReferences(references.clickEventBindings, sourceUrlMap, warnings);
+  rewriteClickEventBindingReferences(resolvedClickEventBindings, sourceUrlMap);
   rewriteEnvironmentReferences(resolvedEnvironments, sourceUrlMap);
   rewriteSkyboxReferences(resolvedSkyboxes, sourceUrlMap);
   rewriteCadReferences(resolvedCadReferences, sourceUrlMap);
@@ -379,7 +384,7 @@ function collectClickEventBindingReferences(
   const slots = requireObjectArray(binding.deviceSlots, `实体 ${entityId} clickEventBinding.deviceSlots`);
   for (const [index, slot] of slots.entries()) {
     if (slot.deviceType === null || slot.deviceType === undefined) continue;
-    output.push({ slot, deviceType: requirePlainObject(slot.deviceType, `实体 ${entityId} 设备类型槽位 ${index + 1}`) });
+    output.push({ deviceType: requirePlainObject(slot.deviceType, `实体 ${entityId} 设备类型槽位 ${index + 1}`) });
   }
 }
 
@@ -517,7 +522,9 @@ async function resolveModelBundle(
     }
   }
 
-  const sourceDirectory = path.dirname(sourcePath);
+  // 无索引的包内子模型也保留 Model/Combo 资源目录，发布后才能继续匹配同设备的多个快照。
+  const platformPackageRoot = /^(.+?[\\/](?:model|combo)-[1-9]\d{0,63}(?:-[^\\/]+)?)[\\/]/i.exec(sourcePath)?.[1];
+  const sourceDirectory = platformPackageRoot ?? path.dirname(sourcePath);
   return getOrCreateBundle(bundles, 'models', sourceDirectory, await isTrustedCompletePackageRoot(sourceDirectory));
 }
 
@@ -966,40 +973,50 @@ function rewriteModelReferences(references: ResolvedModelReference[], sourceUrlM
   }
 }
 
-/**
- * 将点击事件绑定设备类型的 sourcePath/sourceUrl 改写为部署虚拟 URL，保证发布态仍能按 URL 匹配场景实体。
- * 引用模型未进入发布包（场景中无对应实体或生成目标）或路径无效时清空槽位并告警：
- * 部署场景禁止残留本机路径（assertNoLocalMachinePaths），且该槽位在发布态本就不会命中。
- */
-function rewriteClickEventBindingReferences(
+/** 在改写 URL 前匹配场景实际快照；只有绑定引用的模型也进入资源计划，不能静默清空配置。 */
+async function resolveClickEventBindingReferences(
   references: MutableClickEventBindingReference[],
-  sourceUrlMap: Map<string, string>,
-  warnings: string[],
-): void {
-  const warnedDeviceTypes = new Set<string>();
-  const dropDeviceType = (reference: MutableClickEventBindingReference, reason: string): void => {
-    const displayName = typeof reference.deviceType.displayName === 'string' && reference.deviceType.displayName.trim()
-      ? reference.deviceType.displayName.trim()
-      : '未命名设备类型';
-    if (warnedDeviceTypes.add(displayName)) {
-      warnings.push(`点击事件绑定设备类型「${displayName}」${reason}，发布包已清空该槽位。`);
-    }
-    reference.slot.deviceType = null;
+  models: ResolvedModelReference[],
+  projectContext: ProjectAssetContext | null,
+  bundles: Map<string, ResourceBundle>,
+  signal: AbortSignal,
+): Promise<ResolvedClickEventBindingReference[]> {
+  const byUrl = new Map<unknown, ResolvedModelReference>();
+  const byResourceKey = new Map<string, ResolvedModelReference>();
+  const indexModel = (model: ResolvedModelReference): void => {
+    if (typeof model.asset.sourceUrl === 'string') byUrl.set(model.asset.sourceUrl, model);
+    const key = getClickEventModelResourceKey(model.asset.sourceUrl);
+    if (key && !byResourceKey.has(key)) byResourceKey.set(key, model);
   };
-
+  models.forEach(indexModel);
+  const resolved: ResolvedClickEventBindingReference[] = [];
   for (const reference of references) {
-    let sourcePath: string;
-    try {
-      sourcePath = resolveLocalAssetPath(reference.deviceType.sourcePath, reference.deviceType.sourceUrl, '点击事件绑定设备类型');
-    } catch {
-      dropDeviceType(reference, '资源路径无效');
-      continue;
+    throwIfDeploymentExportAborted(signal);
+    const key = getClickEventModelResourceKey(reference.deviceType.sourceUrl);
+    let model = byUrl.get(reference.deviceType.sourceUrl) ?? (key ? byResourceKey.get(key) : undefined);
+    if (!model) {
+      try {
+        model = await resolveModelReference({ asset: reference.deviceType }, projectContext, bundles, signal);
+      } catch (error) {
+        throwIfDeploymentExportAborted(signal);
+        const name = reference.deviceType.displayName ?? '未命名设备类型';
+        throw new Error(`点击事件绑定设备类型「${name}」无法完整发布：${error instanceof Error ? error.message : String(error)}`);
+      }
+      models.push(model);
+      indexModel(model);
     }
-    const mappedUrl = sourceUrlMap.get(toLocalPathKey(sourcePath));
-    if (!mappedUrl) {
-      dropDeviceType(reference, '引用的模型不在场景中');
-      continue;
-    }
+    resolved.push({ ...reference, sourcePath: model.sourcePath });
+  }
+  return resolved;
+}
+
+/** 将绑定改写为已打包模型的 URL；不同历史快照仍可通过保留在部署目录中的资源 ID 匹配。 */
+function rewriteClickEventBindingReferences(
+  references: ResolvedClickEventBindingReference[],
+  sourceUrlMap: Map<string, string>,
+): void {
+  for (const reference of references) {
+    const mappedUrl = requireMappedUrl(sourceUrlMap, reference.sourcePath, '点击事件绑定设备类型');
     reference.deviceType.sourcePath = mappedUrl;
     reference.deviceType.sourceUrl = mappedUrl;
     delete reference.deviceType.thumbnailUrl;

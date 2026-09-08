@@ -643,6 +643,7 @@ interface Window {
     importSkyboxFile: () => Promise<ImportSkyboxFileResult>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
     getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest) => Promise<DigitalTwinPublishContext>;
+    recoverDigitalTwinModels: (request: import('../electron/types').DigitalTwinModelRecoveryRequest) => Promise<import('../electron/types').DigitalTwinModelRecoveryResult>;
     publishDigitalTwin: (request: DigitalTwinPublishRequest) => Promise<DigitalTwinPublishResult>;
     cancelDigitalTwinPublish: (request: DigitalTwinPublishCancelRequest) => Promise<boolean>;
     onDigitalTwinPublishProgress: (handler: (progress: DigitalTwinPublishProgress) => void) => () => void;

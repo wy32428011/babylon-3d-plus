@@ -770,6 +770,9 @@ export class SceneRuntime {
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private readonly reportedOverlappingLocatorRanges = new Set<string>();
   private telemetryPreviewActive = false;
+  private telemetryPerformanceTimingEnabled = false;
+  private telemetryFrameTimeMs: number | null = null;
+  private telemetryMaxFrameTimeMs: number | null = null;
   /** 本地交互（点击单元事件）产生的单格高亮，与外部搜索高亮各自独立互不覆盖。 */
   private localSlotHighlight: LocatorSlotHighlightState | null = null;
   private externalSlotHighlight: LocatorSlotHighlightState | null = null;
@@ -4041,7 +4044,7 @@ export class SceneRuntime {
     );
     let geometryPromise: Promise<CadReferenceParseResult>;
     if (shouldUseLargeDxfWorker) {
-      const workerTask = createCadReferenceDxfWorkerTask(cadReference.sourceUrl, undefined, cadReference.unitScaleToMeters);
+      const workerTask = createCadReferenceDxfWorkerTask(resolveRuntimeAssetUrl(cadReference.sourceUrl), undefined, cadReference.unitScaleToMeters);
       pending.cancelLoad = workerTask.cancel;
       geometryPromise = workerTask.promise;
     } else {
@@ -4698,15 +4701,40 @@ export class SceneRuntime {
     }
   }
 
+  /** 仅显式开启发布诊断时采集帧级耗时，正常运行不读取高精度时钟。 */
+  setTelemetryPerformanceTimingEnabled(enabled: boolean): void {
+    if (enabled && !this.telemetryPerformanceTimingEnabled) {
+      this.telemetryFrameTimeMs = null;
+      this.telemetryMaxFrameTimeMs = null;
+    }
+    this.telemetryPerformanceTimingEnabled = enabled;
+  }
+
+  getTelemetryPerformanceMetrics() {
+    return {
+      ...this.specializedTelemetryRuntime.getPerformanceMetrics(),
+      lastFrameTimeMs: this.telemetryFrameTimeMs,
+      maxFrameTimeMs: this.telemetryMaxFrameTimeMs,
+    };
+  }
+
   /** 每帧把最新 MQTT 设备遥测分发到对应设备运行时。 */
   private applyDeviceTelemetryFrame(): void {
     if (!this.telemetryPreviewActive) return;
-    this.specializedTelemetryRuntime.clearInactiveDiagnostics();
-    this.captureReadyTelemetryPreviewBaselines();
-    const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
-    this.specializedTelemetryRuntime.applyFrame(deltaSeconds);
-    for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(false);
-    this.alarmRuntime.update();
+    const startedAt = this.telemetryPerformanceTimingEnabled ? performance.now() : null;
+    try {
+      this.specializedTelemetryRuntime.clearInactiveDiagnostics();
+      this.captureReadyTelemetryPreviewBaselines();
+      const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
+      this.specializedTelemetryRuntime.applyFrame(deltaSeconds);
+      for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(false);
+      this.alarmRuntime.update();
+    } finally {
+      if (startedAt !== null) {
+        this.telemetryFrameTimeMs = performance.now() - startedAt;
+        this.telemetryMaxFrameTimeMs = Math.max(this.telemetryMaxFrameTimeMs ?? 0, this.telemetryFrameTimeMs);
+      }
+    }
   }
 
   /** 为已加载且 ready 的模型捕获本次预览基线，异步 GLB 后续 ready 时会在首个驱动帧前补捕获。 */

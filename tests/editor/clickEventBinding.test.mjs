@@ -64,6 +64,40 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
     sanitizeClickEventBindingComponent,
   } = await server.ssrLoadModule('/src/editor/model/clickEventBinding.ts');
 
+  await t.test('共享库绑定命中工程快照、不同修订与发布路径中的同一模型资源', () => {
+    const url = (path) => `editor-asset://local/${encodeURIComponent(path)}`;
+    const registered = url('D:/workspace/SharedResources/Assets/Models/Model-2080101858762530818-双立柱堆垛机/stacker.glb');
+    const paths = [
+      'D:/workspace/Projects/123/Assets/Models/Model-2080101858762530818-双立柱堆垛机/stacker.glb',
+      'E:/import/Assets/Models/Model-2080101858762530818-新名称__zsrc-123456/stacker.glb',
+      'project/assets/models/Model-2080101858762530818-双立柱堆垛机-abcdef/stacker.glb',
+    ];
+    for (const path of paths) {
+      const scene = createScene(
+        createModelEntity('stacker-1', url(path)),
+        createBindingEntity('binding-1', createBindingComponent({ deviceSlots: [registeredSlot(registered)] })),
+      );
+      assert.equal(resolveClickEventBindingClick(scene, 'stacker-1').kind, 'trigger', path);
+    }
+  });
+
+  await t.test('跨目录匹配不能把同名的不同资源或同包不同模型误认成已绑定设备', () => {
+    const url = (path) => `editor-asset://local/${encodeURIComponent(path)}`;
+    const registered = url('D:/shared/Model-2080101858762530818-堆垛机/stacker.glb');
+    for (const path of [
+      'D:/project/Model-2080101858762530819-堆垛机/stacker.glb',
+      'D:/project/Model-2080101858762530818-堆垛机/other.glb',
+      'D:/project/Model-2080101858762530818-堆垛机/sub/stacker.glb',
+      'D:/project/local-copy/stacker.glb',
+    ]) {
+      const scene = createScene(
+        createModelEntity('other', url(path)),
+        createBindingEntity('binding-1', createBindingComponent({ deviceSlots: [registeredSlot(registered)] })),
+      );
+      assert.equal(resolveClickEventBindingClick(scene, 'other').kind, 'ignore', path);
+    }
+  });
+
   await t.test('场景无点击事件绑定时 pass-through，走默认点击行为', () => {
     const scene = createScene(createModelEntity('stacker-1', REGISTERED_URL));
     assert.deepEqual(resolveClickEventBindingClick(scene, 'stacker-1'), { kind: 'pass-through' });

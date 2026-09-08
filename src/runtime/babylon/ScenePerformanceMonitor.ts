@@ -159,6 +159,8 @@ type ScenePerformanceMonitorOptions = {
   getRuntimeMetrics: () => SceneRuntimePerformanceMetrics;
   getEditThinInstancePlanMetrics: () => EditModeThinInstancePlanPerformanceMetrics;
   getSceneFocusMetrics?: () => SceneFocusPerformanceMetrics | null;
+  /** 发布诊断可省略材质、包围盒与资源名称明细；基础 CPU/GPU 计数和几何总量仍正常采集。 */
+  collectDetailedGpuWorkloads?: boolean;
 };
 
 /** 将性能计数器的最近一秒均值转换为稳定 HUD 数值。 */
@@ -309,7 +311,7 @@ function accumulateMaterialTotals(
 }
 
 /** 按实际 Active Mesh 估算 GPU 顶点/三角形调用量，识别 thinInstance 批次过大或缺少空间裁剪。 */
-function collectActiveGpuWorkload(scene: Scene): ActiveGpuWorkloadSummary {
+function collectActiveGpuWorkload(scene: Scene, collectDetails = true): ActiveGpuWorkloadSummary {
   const activeMeshes = scene.getActiveMeshes();
   const workloads: ScenePerformanceGpuWorkload[] = [];
   let activeThinInstances = 0;
@@ -330,7 +332,7 @@ function collectActiveGpuWorkload(scene: Scene): ActiveGpuWorkloadSummary {
     const trianglesPerInstance = Math.floor((indicesPerInstance > 0 ? indicesPerInstance : verticesPerInstance) / 3);
     const estimatedVertexInvocations = verticesPerInstance * instanceMultiplier;
     const estimatedTriangleInvocations = trianglesPerInstance * instanceMultiplier;
-    const material = collectMaterialWorkload(mesh.material, mesh);
+    const material = collectDetails ? collectMaterialWorkload(mesh.material, mesh) : null;
     accumulateMaterialTotals(gpuMaterialTotals, material, estimatedVertexInvocations);
     // 正式批次已在提交矩阵前执行逐实例保守视锥裁剪，因此当前 GPU 实例数就是视锥可见数。
     const frustumVisibleInstanceMultiplier = instanceMultiplier;
@@ -343,7 +345,7 @@ function collectActiveGpuWorkload(scene: Scene): ActiveGpuWorkloadSummary {
     estimatedFrustumVisibleVertexInvocations += meshEstimatedFrustumVisibleVertexInvocations;
     estimatedFrustumVisibleTriangleInvocations += meshEstimatedFrustumVisibleTriangleInvocations;
 
-    if (estimatedVertexInvocations <= 0) continue;
+    if (!collectDetails || estimatedVertexInvocations <= 0) continue;
     const bounds = mesh.getBoundingInfo().boundingBox;
     const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
     const sourceEntityId = readMetadataString(metadata, 'modelArraySourceEntityId')
@@ -512,7 +514,7 @@ export class ScenePerformanceMonitor {
   /** 返回最近一次实时快照并把它加入有界历史。 */
   sample(): ScenePerformanceSnapshot {
     const gpuFrameTimeNanoseconds = readCounterValue(this.engineInstrumentation.gpuFrameTimeCounter);
-    const activeGpuWorkload = collectActiveGpuWorkload(this.scene);
+    const activeGpuWorkload = collectActiveGpuWorkload(this.scene, this.options.collectDetailedGpuWorkloads !== false);
     const snapshot: ScenePerformanceSnapshot = {
       sampledAt: new Date().toISOString(),
       fps: normalizeMetric(this.engine.getFps()),

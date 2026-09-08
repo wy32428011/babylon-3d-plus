@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
-const [{ executeDataPlatformModelSync, createDataPlatformModelSourceKey }] = await importIsolatedTypeScriptModules<[
+const [{ executeDataPlatformModelSync, recoverDataPlatformModelAssets, createDataPlatformModelSourceKey }] = await importIsolatedTypeScriptModules<[
   typeof import('../../electron/ipc/dataPlatformModelIncrementalSync'),
 ]>(['electron/ipc/dataPlatformModelIncrementalSync.ts']);
 
@@ -713,5 +713,201 @@ test('增量同步保留多个非数据中台资产且不会把本地路径当�
     assert.ok(paths.includes(localPathA));
     assert.ok(paths.includes(localPathB));
     assert.equal(paths.length, 3);
+  });
+});
+
+
+function createDetailRequest(records: Record<string, unknown>, calls: string[] = []) {
+  return async (options: { endpointPath: string; body: unknown }) => {
+    const id = (options.body as { id: string }).id;
+    const kind = options.endpointPath.includes('combo-models') ? 'combo' : 'model';
+    assert.match(options.endpointPath, /\/detail$/);
+    calls.push(kind + ':' + id);
+    return { success: true, data: records[kind + ':' + id] ?? null };
+  };
+}
+
+test('发布恢复按稳定 ID 下载普通模型与组合模型并保留其它模型包', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    const existing = { id: '9', name: '保留设备', url: '/files/keep.glb', revision: '1' };
+    await executeDataPlatformModelSync({ baseUrl: SOURCE_URL, editorRoot, dependencies: {
+      requestJson: createRequestJson([existing]),
+      downloadFile: createDownload(new Map([[existing.url, createGlb(9)]]), []),
+      readAssetIndex: readProjectAssetIndexForTest,
+    } });
+    const before = (await readAssetIndex(editorRoot)).assets[0];
+    const previousMtime = (await fs.stat(before.path)).mtimeMs;
+    const calls: string[] = [];
+    const downloads: string[] = [];
+    const progress: string[] = [];
+    const assets = await recoverDataPlatformModelAssets({
+      baseUrl: SOURCE_URL, sharedResourcesRoot: editorRoot,
+      resources: [{ kind: 'model', resourceId: '1' }, { kind: 'combo', resourceId: '1' }, { kind: 'model', resourceId: '1' }],
+      onProgress: (message) => progress.push(message),
+      dependencies: {
+        requestJson: createDetailRequest({
+          'model:1': { id: '1', modelName: '恢复设备', fileUrl: '/files/recovered.glb', metaFileUrl: '/files/meta.json', scriptFiles: [{ fileName: 'behavior.ts', fileUrl: '/files/behavior.ts' }] },
+          'combo:1': { id: '1', comboModelName: '恢复组合', fileUrl: '/files/combo.glb' },
+        }, calls),
+        downloadFile: createDownload(new Map([
+          ['/files/recovered.glb', createGlb(1)], ['/files/combo.glb', createGlb(2)],
+          ['/files/meta.json', Buffer.from('{"lengthUnit":"meter"}')], ['/files/behavior.ts', Buffer.from('export default {};')],
+        ]), downloads),
+        readAssetIndex: readProjectAssetIndexForTest,
+      },
+    });
+    assert.deepEqual(calls.sort(), ['combo:1', 'model:1']);
+    assert.equal(assets.length, 2);
+    assert.equal((await readAssetIndex(editorRoot)).assets.length, 3);
+    assert.deepEqual((await readAssetIndex(editorRoot)).assets.find((asset) => asset.path === before.path), before);
+    assert.equal((await fs.stat(before.path)).mtimeMs, previousMtime);
+    assert.ok(assets.find((asset) => asset.displayName === '恢复设备')?.scriptPaths?.length);
+    assert.ok(progress.length > 0);
+    assert.equal(downloads.length, 4);
+  });
+});
+
+test('发布恢复重新拉取相同修订且不复用被损坏的本地模型', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    const bytes = createGlb(1);
+    const calls: string[] = [];
+    const options = { baseUrl: SOURCE_URL, sharedResourcesRoot: editorRoot,
+      resources: [{ kind: 'model' as const, resourceId: '1' }], dependencies: {
+        requestJson: createDetailRequest({ 'model:1': { id: '1', modelName: '设备', fileUrl: '/files/model.glb', revision: 'stable' } }),
+        downloadFile: createDownload(new Map([['/files/model.glb', bytes]]), calls), readAssetIndex: readProjectAssetIndexForTest,
+      } };
+    const [first] = await recoverDataPlatformModelAssets(options);
+    await fs.writeFile(first.path, 'broken');
+    const [second] = await recoverDataPlatformModelAssets(options);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(await fs.readFile(second.path), bytes);
+  });
+});
+
+test('发布恢复拒绝缺失详情或返回错误稳定 ID，并保留原索引', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    for (const record of [null, { id: '2', modelName: '错误设备', fileUrl: '/files/model.glb' }]) {
+      await assert.rejects(recoverDataPlatformModelAssets({
+        baseUrl: SOURCE_URL, sharedResourcesRoot: editorRoot, resources: [{ kind: 'model', resourceId: '1' }],
+        dependencies: { requestJson: createDetailRequest({ 'model:1': record }),
+          downloadFile: async () => { throw new Error('不得下载错误资源'); }, readAssetIndex: readProjectAssetIndexForTest },
+      }), /详情|ID/);
+      assert.deepEqual((await readProjectAssetIndexForTest(editorRoot)).assets, []);
+    }
+  });
+});
+
+test('发布恢复取消和非法资源 ID 不会发起网络请求', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    const controller = new AbortController(); controller.abort();
+    const options = { baseUrl: SOURCE_URL, sharedResourcesRoot: editorRoot,
+      resources: [{ kind: 'model' as const, resourceId: '1' }], dependencies: {
+        requestJson: async () => { throw new Error('不得请求'); }, readAssetIndex: readProjectAssetIndexForTest,
+      } };
+    await assert.rejects(recoverDataPlatformModelAssets({ ...options, signal: controller.signal }), /取消/);
+    await assert.rejects(recoverDataPlatformModelAssets({ ...options, resources: [{ kind: 'model', resourceId: '../1' }] }), /id|标识/i);
+    assert.deepEqual(await recoverDataPlatformModelAssets({ ...options, resources: [] }), []);
+  });
+});
+
+test('发布恢复禁止把另一数据中台来源合并进现有模型缓存', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    await executeDataPlatformModelSync({ baseUrl: SOURCE_URL, editorRoot, dependencies: {
+      requestJson: createRequestJson([{ id: '9', name: '保留', url: '/files/keep.glb', revision: '1' }]),
+      downloadFile: createDownload(new Map([['/files/keep.glb', createGlb(9)]]), []), readAssetIndex: readProjectAssetIndexForTest,
+    } });
+    const before = await readAssetIndex(editorRoot);
+    await assert.rejects(recoverDataPlatformModelAssets({ baseUrl: OTHER_SOURCE_URL, sharedResourcesRoot: editorRoot,
+      resources: [{ kind: 'model', resourceId: '1' }], dependencies: {
+        requestJson: createDetailRequest({ 'model:1': { id: '1', modelName: '设备', fileUrl: '/files/model.glb' } }),
+        downloadFile: async () => { throw new Error('不得下载跨来源资源'); }, readAssetIndex: readProjectAssetIndexForTest,
+      } }), /来源/);
+    assert.deepEqual(await readAssetIndex(editorRoot), before);
+  });
+});
+
+
+test('并发发布恢复依次合并索引，取消排队恢复不会启动下载', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const calls: string[] = [];
+    const shared = { baseUrl: SOURCE_URL, sharedResourcesRoot: editorRoot, dependencies: {
+      requestJson: async (options: { endpointPath: string; body: unknown }) => {
+        const id = (options.body as { id: string }).id;
+        calls.push(id);
+        if (id === '1') { started(); await gate; }
+        return { success: true, data: { id, modelName: '设备' + id, fileUrl: '/files/' + id + '.glb' } };
+      },
+      downloadFile: createDownload(new Map([['/files/1.glb', createGlb(1)], ['/files/2.glb', createGlb(2)]]), []),
+      readAssetIndex: readProjectAssetIndexForTest,
+    } };
+    const first = recoverDataPlatformModelAssets({ ...shared, resources: [{ kind: 'model', resourceId: '1' }] });
+    await ready;
+    const second = recoverDataPlatformModelAssets({ ...shared, resources: [{ kind: 'model', resourceId: '2' }] });
+    const controller = new AbortController();
+    const canceled = recoverDataPlatformModelAssets({ ...shared, signal: controller.signal, resources: [{ kind: 'model', resourceId: '3' }] });
+    const cancellation = assert.rejects(canceled, /取消/);
+    controller.abort();
+    await cancellation;
+    assert.deepEqual(calls, ['1']);
+    release();
+    const [firstAssets, secondAssets] = await Promise.all([first, second]);
+    assert.equal(firstAssets.length, 1);
+    assert.equal(secondAssets.length, 1);
+    assert.equal((await readAssetIndex(editorRoot)).assets.length, 2);
+    assert.deepEqual(calls, ['1', '2']);
+  });
+});
+
+test('发布恢复模型校验失败保留已有模型文件及两份索引', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    const shared = { baseUrl: SOURCE_URL, sharedResourcesRoot: editorRoot, resources: [{ kind: 'model' as const, resourceId: '1' }] };
+    const requestJson = createDetailRequest({ 'model:1': { id: '1', modelName: '设备', fileUrl: '/files/model.glb' } });
+    const [asset] = await recoverDataPlatformModelAssets({ ...shared, dependencies: {
+      requestJson, downloadFile: createDownload(new Map([['/files/model.glb', createGlb(1)]]), []), readAssetIndex: readProjectAssetIndexForTest,
+    } });
+    const beforeFile = await fs.readFile(asset.path);
+    const assetIndexPath = path.join(editorRoot, '.babylon-editor', 'asset-index.json');
+    const modelIndexPath = path.join(editorRoot, '.babylon-editor', 'data-platform-model-index.json');
+    const beforeAssetIndex = await fs.readFile(assetIndexPath, 'utf8');
+    const beforeModelIndex = await fs.readFile(modelIndexPath, 'utf8');
+    await assert.rejects(recoverDataPlatformModelAssets({ ...shared, dependencies: {
+      requestJson, downloadFile: createDownload(new Map([['/files/model.glb', Buffer.from('broken')]]), []), readAssetIndex: readProjectAssetIndexForTest,
+    } }), /GLB/);
+    assert.deepEqual(await fs.readFile(asset.path), beforeFile);
+    assert.equal(await fs.readFile(assetIndexPath, 'utf8'), beforeAssetIndex);
+    assert.equal(await fs.readFile(modelIndexPath, 'utf8'), beforeModelIndex);
+    assert.equal((await fs.readdir(path.join(editorRoot, '.babylon-editor'))).some((entry) => entry.startsWith('data-platform-model-sync-')), false);
+  });
+});
+
+
+test('发布恢复已启动时取消会等待任务清理完成再返回', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const pending = recoverDataPlatformModelAssets({ baseUrl: SOURCE_URL, sharedResourcesRoot: editorRoot,
+      resources: [{ kind: 'model', resourceId: '1' }], signal: controller.signal,
+      dependencies: {
+        requestJson: async () => { started(); await gate; return { success: true, data: { id: '1', fileUrl: '/model.glb' } }; },
+        readAssetIndex: readProjectAssetIndexForTest,
+      },
+    });
+    let settled = false;
+    const checked = assert.rejects(pending, /取消/).finally(() => { settled = true; });
+    await ready;
+    controller.abort();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const returnedBeforeCleanup = settled;
+    release();
+    await checked;
+    assert.equal(returnedBeforeCleanup, false);
+    assert.deepEqual((await readProjectAssetIndexForTest(editorRoot)).assets, []);
   });
 });

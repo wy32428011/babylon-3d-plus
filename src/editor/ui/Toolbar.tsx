@@ -181,6 +181,8 @@ type ToolbarProps = {
   runtimePreviewError: string | null;
   readOnly: boolean;
   onStartRuntimePreview: () => void;
+  onStartPerformanceRuntimePreview: () => void;
+  runtimePerformanceEnabled: boolean;
   onStopRuntimePreview: () => void;
   /** 当前是否处于场景全屏（系统全屏或窗口内最大化）。 */
   sceneFullscreen: boolean;
@@ -610,11 +612,12 @@ export function Toolbar(props: ToolbarProps) {
         />
         网格
       </label>
-      <label className="toolbar-checkbox" title="显示或隐藏 Scene View 性能监控">
+      <label className="toolbar-checkbox" title={isPreview && props.runtimePerformanceEnabled ? '性能运行期间保持显示，停止后恢复原显示设置' : '显示或隐藏 Scene View 性能监控'}>
         <input
           aria-label="性能监控"
           type="checkbox"
-          checked={props.performanceHudVisible}
+          checked={props.performanceHudVisible || (isPreview && props.runtimePerformanceEnabled)}
+          disabled={isPreview && props.runtimePerformanceEnabled}
           onChange={(event) => props.onSetPerformanceHudVisible(event.target.checked)}
         />
         性能
@@ -682,6 +685,20 @@ export function Toolbar(props: ToolbarProps) {
         label="运行"
         onClick={props.onStartRuntimePreview}
       />
+      <button
+        aria-label="性能运行"
+        aria-pressed={isPreview && props.runtimePerformanceEnabled}
+        className={isPreview && props.runtimePerformanceEnabled ? 'toolbar-button toolbar-performance-run active' : 'toolbar-button toolbar-performance-run'}
+        disabled={isPreview || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy}
+        onClick={(event) => {
+          props.onStartPerformanceRuntimePreview();
+          event.currentTarget.blur();
+        }}
+        title="在编辑器中运行当前场景并记录性能，停止后可复制本次报告"
+        type="button"
+      >
+        <span aria-hidden="true">▶</span> 性能运行
+      </button>
       <ToolbarIconButton disabled={!isPreview} icon="■" label="停止" onClick={props.onStopRuntimePreview} />
       <span
         aria-live="polite"

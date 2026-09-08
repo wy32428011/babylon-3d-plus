@@ -102,7 +102,7 @@ test('exitElementFullscreen 只退出属于指定元素的系统全屏', async (
   }
 });
 
-test('Toolbar、EditorLayout 和 Player 接上场景全屏入口', async () => {
+test('编辑器保留全屏入口，发布 Player 仅保留全屏快捷键而不显示按钮', async () => {
   const [toolbarSource, layoutSource, layoutCss, globalCss, playerSource, playerCss] = await Promise.all([
     readFile(new URL('../../src/editor/ui/Toolbar.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../../src/editor/layout/EditorLayout.tsx', import.meta.url), 'utf8'),
@@ -127,7 +127,8 @@ test('Toolbar、EditorLayout 和 Player 接上场景全屏入口', async () => {
   assert.match(layoutCss, /\.editorShellFullscreen/);
   assert.match(globalCss, /\[data-scene-fullscreen='true'\] \.scene-viewport/);
 
-  assert.match(playerSource, /className="player-fullscreen-button"/);
+  assert.doesNotMatch(playerSource, /player-fullscreen-button|FullscreenGlyph|fullscreenLabel/);
   assert.match(playerSource, /useDigitalTwinFullscreen\(playerRootRef\)/);
-  assert.match(playerCss, /\.player-fullscreen-button/);
+  assert.match(playerSource, /event\.key\.toLowerCase\(\) !== 'f11'/);
+  assert.doesNotMatch(playerCss, /\.player-fullscreen-button/);
 });

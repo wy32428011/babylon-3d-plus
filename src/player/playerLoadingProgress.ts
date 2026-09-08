@@ -30,6 +30,17 @@ export type PlayerLoadingProgress = {
   detail: string | null;
 };
 
+/** 仅格式化加载详情；先移除 URL 后缀，避免误删文件名中编码后的 ? 或 #。 */
+function formatLoadingFileName(currentFile: string | null): string {
+  const fileName = (currentFile ?? '').split(/[?#]/, 1)[0];
+  try {
+    return decodeURIComponent(fileName);
+  } catch {
+    // 旧资源可能含有裸 % 或不完整转义，保留原名，避免显示文案异常阻断场景加载。
+    return fileName;
+  }
+}
+
 /**
  * 计算发布 Viewer 首次加载蒙版的状态。
  * 启动阶段按固定里程碑推进，模型/环境资源加载开始后由实际进度单元接管剩余百分比。
@@ -46,9 +57,10 @@ export function computePlayerLoadingProgress(
     && modelLoadProgress.totalCount > 0
     && !initialLoadCompleted;
   const visible = (phase !== 'ready' && phase !== 'blocked') || loadingInProgress;
+  const currentFile = loadingInProgress ? formatLoadingFileName(modelLoadProgress.currentFile) : '';
   const detail = loadingInProgress
     ? `模型 ${modelLoadProgress.completedCount}/${modelLoadProgress.totalCount}`
-      + (modelLoadProgress.currentFile ? ` · ${modelLoadProgress.currentFile}` : '')
+      + (currentFile ? ` · ${currentFile}` : '')
     : null;
   return {
     visible,

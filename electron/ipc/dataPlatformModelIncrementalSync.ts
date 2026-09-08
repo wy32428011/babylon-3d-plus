@@ -165,6 +165,25 @@ export type ExecuteDataPlatformModelSyncOptions = {
   dependencies?: Partial<ModelSyncDependencies>;
 };
 
+export type DataPlatformModelRecoveryResource = {
+  kind: 'model' | 'combo';
+  resourceId: string;
+};
+
+export type RecoverDataPlatformModelAssetsOptions = {
+  baseUrl: string;
+  sharedResourcesRoot: string;
+  resources: readonly DataPlatformModelRecoveryResource[];
+  signal?: AbortSignal;
+  onProgress?: (message: string) => void;
+  dependencies?: Partial<ModelSyncDependencies>;
+};
+
+type TargetedModelSyncOptions = ExecuteDataPlatformModelSyncOptions & {
+  requiredResources?: readonly DataPlatformModelRecoveryResource[];
+  onProgress?: (message: string) => void;
+};
+
 export type DataPlatformModelSyncSummary = {
   libraryChanged: boolean;
   runtimeChangedResourceKeys: string[];
@@ -183,6 +202,7 @@ const DEFAULT_DEPENDENCIES: ModelSyncDependencies = {
   randomId: randomUUID,
 };
 
+let modelSyncExecutionQueue: Promise<void> = Promise.resolve();
 let activeModelSync: ActiveModelSync | null = null;
 let queuedModelSyncContext: ModelSyncContext | null = null;
 let latestModelSyncProgress: DataPlatformModelSyncProgress | null = null;
@@ -271,8 +291,89 @@ function launchModelSync(context: ModelSyncContext): boolean {
   return true;
 }
 
+/** 后台同步和发布补拉共用提交队列，避免同一索引被交错读取后覆盖。 */
+function queueModelSync<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  let started = false;
+  const result = modelSyncExecutionQueue.then(() => {
+    if (signal) assertNotAborted(signal);
+    started = true;
+    return run();
+  });
+  modelSyncExecutionQueue = result.then(() => undefined, () => undefined);
+  if (!signal) return result;
+  return new Promise<T>((resolve, reject) => {
+    // 已启动的事务必须等待取消清理/回滚完成，应用退出才能安全释放资源。
+    const onAbort = () => {
+      if (!started) reject(new Error('数据中台模型同步已取消。'));
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    result.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 export async function executeDataPlatformModelSync(
   options: ExecuteDataPlatformModelSyncOptions,
+): Promise<DataPlatformModelSyncSummary> {
+  return queueModelSync(() => runDataPlatformModelSync(options), options.signal);
+}
+
+/** 发布前按稳定 ID 重新下载缺失引用所需模型，仅更新共享缓存，不写工程场景或广播全库刷新。 */
+export async function recoverDataPlatformModelAssets(
+  options: RecoverDataPlatformModelAssetsOptions,
+): Promise<ProjectModelAssetEntry[]> {
+  const unique = new Map<string, DataPlatformModelRecoveryResource>();
+  if (options.resources.length > 1_000) throw new Error('发布模型恢复资源数量超过 1000 项限制。');
+  for (const resource of options.resources) {
+    if (resource.kind !== 'model' && resource.kind !== 'combo') throw new Error('发布模型恢复资源类型无效。');
+    const resourceId = normalizeRequiredId(resource.resourceId, '发布恢复模型', unique.size);
+    const normalized = { kind: resource.kind, resourceId };
+    unique.set(resourceKey(normalized), normalized);
+  }
+  if (unique.size === 0) return [];
+  return queueModelSync(async () => {
+    await runDataPlatformModelSync({
+      baseUrl: options.baseUrl, editorRoot: options.sharedResourcesRoot,
+      requiredResources: [...unique.values()], forceRefresh: true,
+      signal: options.signal, onProgress: options.onProgress, dependencies: options.dependencies,
+    });
+    const readAssetIndex = options.dependencies?.readAssetIndex ?? DEFAULT_DEPENDENCIES.readAssetIndex;
+    const index = await readAssetIndex(options.sharedResourcesRoot);
+    const recovered = index.assets.filter((asset) => {
+      const key = getManagedAssetResourceKey(asset);
+      return key !== null && unique.has(key);
+    });
+    if (recovered.length !== unique.size) throw new Error('发布模型恢复后的共享资产索引不完整。');
+    return recovered;
+  }, options.signal);
+}
+
+async function queryRequiredModels(
+  baseUrl: string,
+  resources: readonly DataPlatformModelRecoveryResource[],
+  signal: AbortSignal,
+  requestJson: ModelSyncDependencies['requestJson'],
+): Promise<SyncModelRecord[]> {
+  const records: SyncModelRecord[] = [];
+  await runWithConcurrency([...resources], MAX_CONCURRENT_DOWNLOADS, async (resource) => {
+    assertNotAborted(signal);
+    const endpointPath = resource.kind === 'model' ? 'api/v1/models/detail' : 'api/v1/combo-models/detail';
+    const response = await requestJson({ baseUrl, endpointPath, body: { id: resource.resourceId }, signal,
+      timeoutMs: QUERY_TIMEOUT_MS, context: '查询发布恢复模型 ' + resourceKey(resource) });
+    if (!isPlainObject(response) || response.success !== true || !isPlainObject(response.data)) {
+      throw new Error('数据中台模型 ' + resourceKey(resource) + ' 详情不可用，无法恢复发布事件引用。');
+    }
+    const record = resource.kind === 'model'
+      ? normalizeNormalModelRecord(response.data, records.length)
+      : normalizeComboModelRecord(response.data, records.length);
+    if (record.id !== resource.resourceId) throw new Error('数据中台返回的模型详情 ID 与发布恢复请求不一致。');
+    records.push(record);
+  });
+  return records;
+}
+
+async function runDataPlatformModelSync(
+  options: TargetedModelSyncOptions,
 ): Promise<DataPlatformModelSyncSummary> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
   const baseUrl = normalizeDataPlatformSourceUrl(options.baseUrl);
@@ -285,8 +386,15 @@ export async function executeDataPlatformModelSync(
   let completedDownloads = 0;
   let totalDownloads = 0;
   let downloadTracker: RemoteDownloadTracker | null = null;
+  const requiredKeys = options.requiredResources
+    ? new Set(options.requiredResources.map(resourceKey))
+    : null;
+  const reportProgress = (progress: DataPlatformModelSyncProgress) => {
+    options.onProgress?.(progress.message);
+    if (!requiredKeys) updateModelSyncProgress(progress);
+  };
 
-  updateModelSyncProgress({
+  reportProgress({
     runId,
     phase: 'querying',
     completed: 0,
@@ -298,19 +406,21 @@ export async function executeDataPlatformModelSync(
   });
 
   try {
-    const normalModels = await queryAllNormalModels(baseUrl, signal, dependencies.requestJson);
-    updateModelSyncProgress({
-      runId,
-      phase: 'querying',
-      completed: 0,
-      total: 0,
-      message: `已查询 ${normalModels.length} 个普通模型，正在查询组合模型…`,
-      error: null,
-      libraryChanged: false,
-      runtimeChangedResourceKeys: [],
-    });
-    const comboModels = await queryAllComboModels(baseUrl, signal, dependencies.requestJson);
-    const records: SyncModelRecord[] = [...normalModels, ...comboModels];
+    assertNotAborted(signal);
+    let records: SyncModelRecord[];
+    if (options.requiredResources) {
+      records = await queryRequiredModels(baseUrl, options.requiredResources, signal, dependencies.requestJson);
+    } else {
+      const queriedNormalModels = await queryAllNormalModels(baseUrl, signal, dependencies.requestJson);
+      reportProgress({
+        runId, phase: 'querying', completed: 0, total: 0,
+        message: `已查询 ${queriedNormalModels.length} 个普通模型，正在查询组合模型…`,
+        error: null, libraryChanged: false, runtimeChangedResourceKeys: [],
+      });
+      records = [...queriedNormalModels, ...await queryAllComboModels(baseUrl, signal, dependencies.requestJson)];
+    }
+    const normalModels = records.filter((record) => record.kind === 'model');
+    const comboModels = records.filter((record) => record.kind === 'combo');
     assertUniqueModelRecords(records);
     assertNotAborted(signal);
 
@@ -318,6 +428,9 @@ export async function executeDataPlatformModelSync(
       readDataPlatformModelIndex(editorRoot),
       dependencies.readAssetIndex(editorRoot),
     ]);
+    if (requiredKeys && currentModelIndex.sourceKey && currentModelIndex.sourceKey !== sourceKey) {
+      throw new Error('发布模型恢复的数据中台来源与共享模型缓存不一致，请重新打开对应工作区。');
+    }
     const currentEntries = currentModelIndex.sourceKey === sourceKey
       ? currentModelIndex.entries
       : [];
@@ -338,7 +451,9 @@ export async function executeDataPlatformModelSync(
     const plan = buildDataPlatformModelPlan({
       sourceKey,
       remote: descriptors,
-      current: currentModelIndex,
+      current: requiredKeys
+        ? { ...currentModelIndex, entries: currentEntries.filter((entry) => requiredKeys.has(resourceKey(entry))) }
+        : currentModelIndex,
       existingPackagePaths: options.forceRefresh ? new Set<string>() : existingPackagePaths,
       existingAssetKeys: existingAssetAvailability.runtimeKeys,
       existingThumbnailKeys: existingAssetAvailability.thumbnailKeys,
@@ -356,13 +471,13 @@ export async function executeDataPlatformModelSync(
     totalDownloads = jobs.length;
     let downloadedBytes = 0;
     const tracker = new RemoteDownloadTracker(jobs.map((job) => ({ id: job.destinationPath, fileName: job.label })), (download) => {
-      updateModelSyncProgress({ runId, phase: 'downloading', completed: completedDownloads, total: jobs.length,
+      reportProgress({ runId, phase: 'downloading', completed: completedDownloads, total: jobs.length,
         message: `正在下载 ${completedDownloads}/${jobs.length} 个模型文件…`, error: null, download,
         libraryChanged: false, runtimeChangedResourceKeys: [] });
     });
     downloadTracker = tracker;
     const downloadProgressStep = Math.max(1, Math.ceil(Math.max(1, jobs.length) / 100));
-    updateModelSyncProgress({
+    reportProgress({
       runId,
       phase: 'downloading',
       completed: 0,
@@ -407,7 +522,7 @@ export async function executeDataPlatformModelSync(
 
       completedDownloads += 1;
       if (completedDownloads === jobs.length || completedDownloads % downloadProgressStep === 0) {
-        updateModelSyncProgress({
+        reportProgress({
           runId,
           phase: 'downloading',
           completed: completedDownloads,
@@ -422,7 +537,7 @@ export async function executeDataPlatformModelSync(
     });
 
     tracker.close();
-    updateModelSyncProgress({
+    reportProgress({
       runId,
       phase: 'validating',
       completed: completedDownloads,
@@ -483,10 +598,17 @@ export async function executeDataPlatformModelSync(
       if (runtimeChanged) runtimeChangedKeys.add(key);
     }
 
+    // 定向恢复只对选中的稳定 ID 提交变化，其余共享模型和项目自有资源保持原样。
+    if (requiredKeys) {
+      finalEntries.push(...currentEntries.filter((entry) => !requiredKeys.has(resourceKey(entry))));
+    }
     finalEntries.sort(compareIndexEntries);
     finalManagedAssets.sort(compareProjectAssets);
     const unmanagedAssets = currentAssetIndex.assets
-      .filter((asset) => getManagedAssetResourceKey(asset) === null)
+      .filter((asset) => {
+        const key = getManagedAssetResourceKey(asset);
+        return key === null || (requiredKeys !== null && !requiredKeys.has(key));
+      })
       .sort(compareProjectAssets);
     const finalAssetIndex: ProjectAssetIndex = {
       version: 2,
@@ -512,7 +634,7 @@ export async function executeDataPlatformModelSync(
       await writeDataPlatformModelIndexFile(stagedModelIndexPath, finalModelIndex);
     }
 
-    updateModelSyncProgress({
+    reportProgress({
       runId,
       phase: 'promoting',
       completed: completedDownloads,
@@ -543,7 +665,7 @@ export async function executeDataPlatformModelSync(
       downloadedPackageCount: prepared.length,
       reusedPackageCount: plan.reused.length + reusedAfterDownloadCount,
     };
-    updateModelSyncProgress({
+    reportProgress({
       runId,
       phase: 'completed',
       completed: jobs.length,
@@ -564,7 +686,7 @@ export async function executeDataPlatformModelSync(
     const normalized = signal.aborted
       ? new Error('数据中台模型同步已取消。')
       : error;
-    updateModelSyncProgress({
+    reportProgress({
       runId,
       phase: 'failed',
       completed: completedDownloads,

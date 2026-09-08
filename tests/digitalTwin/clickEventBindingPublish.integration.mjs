@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -14,6 +14,7 @@ async function run() {
   const { importManualRoamAvatarIntoProject } = await import('../../dist-electron/ipc/manualRoamAvatarStore.js');
   const { setCurrentProjectRoot } = await import('../../dist-electron/ipc/projectAssetStore.js');
   const { prepareDeploymentExport } = await import('../../dist-electron/ipc/deploymentExportScene.js');
+  const { authorizeAssetFile, encodeAssetUrl } = await import('../../dist-electron/ipc/assetRegistry.js');
   // 使用构建产物覆盖发布态模块加载，避免 Electron 内动态 SSR 加载长时间挂起。
   const moduleRoot = await mkdtemp(path.resolve('node_modules/.click-publish-'));
   try {
@@ -62,7 +63,7 @@ async function run() {
     scene.entities = { [model.id]: model, [binding.id]: binding, [locator.id]: locator };
     const content = serializeScene(scene);
 
-    function assertClick(loaded, label) {
+    function assertClick(loaded, label, clickedModelId = model.id) {
       const selections = [], focuses = [], messages = [], highlights = [], shownScreens = [];
       const handler = createViewerModelClickHandler(loaded, {
         updateSelection: ids => selections.push([...ids]),
@@ -72,11 +73,11 @@ async function run() {
         emitAssetClicked: payload => messages.push(payload),
         showScreen: screen => shownScreens.push(screen),
       });
-      handler(model.id);
+      handler(clickedModelId);
       assert.deepEqual(messages, [{ assetCode: 'DEVICE-001', chartId: 'data-platform-screen:project-001:screen-model' }], `${label}必须识别模型点击并发送图表事件`);
       assert.deepEqual(shownScreens, [{ projectId: 'project-001', screenId: 'screen-model' }], `${label}必须请求宿主展示模型绑定大屏`);
-      assert.deepEqual(selections, [[model.id]], `${label}必须高亮模型`);
-      assert.deepEqual(focuses, [{ id: model.id, cell: undefined }], `${label}必须聚焦模型`);
+      assert.deepEqual(selections, [[clickedModelId]], `${label}必须高亮模型`);
+      assert.deepEqual(focuses, [{ id: clickedModelId, cell: undefined }], `${label}必须聚焦模型`);
       const cell = { row: 2, column: 3, layer: 4 };
       handler(locator.id, { locatorEntityId: locator.id, ...cell });
       assert.deepEqual(messages[1], { assetCode: 'DEVICE-001', slot: cell, chartId: 'data-platform-screen:project-001:screen-cell' }, `${label}必须识别货格点击并发送坐标`);
@@ -108,7 +109,67 @@ async function run() {
     const repeated = await prepareDeploymentExport(content, '发布点击回归', [], new AbortController().signal, () => {});
     assert.equal(JSON.parse(repeated.sceneContent).scene.entities[binding.id].components.clickEventBinding.deviceSlots[0].deviceType.assetId, exportedDevice.assetId, '重复发布的设备标识必须稳定');
     assert.equal(binding.components.clickEventBinding.deviceSlots[0].deviceType.assetId, asset.path, '发布不能修改编辑器中的原始绑定');
-    console.log('PASS: 真实发布和 Viewer 加载后的模型/货格点击、高亮、聚焦、绑定大屏切换、图表事件、旧包兼容及本机路径清理。');
+
+    // 复现实际工程：场景保留工程旧快照，绑定从共享资源库选择了同一设备的新修订。
+    const packageName = 'Model-2080101858762530818-双立柱堆垛机';
+    const snapshotPath = path.join(projectRoot, 'Assets', 'Models', packageName, 'parts', 'stacker.glb');
+    const sharedPath = path.join(root, 'SharedResources', 'Assets', 'Models', packageName, 'parts', 'stacker.glb');
+    await mkdir(path.dirname(snapshotPath), { recursive: true });
+    await copyFile(asset.path, snapshotPath);
+    authorizeAssetFile(snapshotPath);
+    const snapshotScene = deserializeScene(content);
+    Object.assign(snapshotScene.entities[model.id].components.modelAsset, {
+      sourcePath: snapshotPath, sourceUrl: encodeAssetUrl(snapshotPath), assetRevision: 'old-snapshot',
+    });
+    Object.assign(snapshotScene.entities[binding.id].components.clickEventBinding.deviceSlots[0].deviceType, {
+      sourcePath: sharedPath, sourceUrl: encodeAssetUrl(sharedPath), assetRevision: 'new-library-revision',
+    });
+    const secondSnapshotPath = path.join(projectRoot, 'Assets', 'Models', `${packageName}__zsrc-0123456789`, 'parts', 'stacker.glb');
+    await mkdir(path.dirname(secondSnapshotPath), { recursive: true });
+    await copyFile(asset.path, secondSnapshotPath);
+    authorizeAssetFile(secondSnapshotPath);
+    const secondModel = structuredClone(snapshotScene.entities[model.id]);
+    secondModel.id = 'second-snapshot-model';
+    Object.assign(secondModel.components.modelAsset, {
+      sourcePath: secondSnapshotPath, sourceUrl: encodeAssetUrl(secondSnapshotPath), assetRevision: 'another-snapshot',
+    });
+    snapshotScene.entityIds.push(secondModel.id);
+    snapshotScene.entities[secondModel.id] = secondModel;
+    // 故意不创建共享库文件：发布必须使用场景内已有快照，不能要求重新下载最新模型。
+    const snapshotContent = serializeScene(snapshotScene);
+    const snapshotDeployment = await prepareDeploymentExport(snapshotContent, '共享库与工程快照', [], new AbortController().signal, () => {});
+    const snapshotLoaded = deserializeScene(snapshotDeployment.sceneContent);
+    assert.ok(snapshotLoaded.entities[binding.id].components.clickEventBinding.deviceSlots[0].deviceType,
+      '同一设备的工程快照存在时，发布不能把共享库点击绑定清空');
+    assertClick(snapshotLoaded, '共享库绑定与工程快照发布后');
+    assertClick(snapshotLoaded, '同一设备另一历史快照发布后', secondModel.id);
+    assertClick(deserializeScene(snapshotContent), '共享库绑定与工程快照编辑预览');
+    assertClick(deserializeScene(serializeScene(snapshotLoaded)), '发布包再次保存加载后', secondModel.id);
+    assert.equal(snapshotDeployment.warnings.some((warning) => warning.includes('清空该槽位')), false);
+    assert.equal(snapshotDeployment.assetFiles.some((file) => file.sourcePath === sharedPath), false);
+    assert.deepEqual(snapshotLoaded.entityIds, snapshotScene.entityIds, '发布必须保留全部场景实体');
+    for (const id of snapshotScene.entityIds) {
+      assert.deepEqual(Object.keys(snapshotLoaded.entities[id].components).sort(), Object.keys(snapshotScene.entities[id].components).sort(),
+        `发布不能遗漏实体 ${id} 的组件`);
+    }
+
+    const bindingOnlyScene = deserializeScene(content);
+    bindingOnlyScene.entityIds = [binding.id];
+    bindingOnlyScene.entities = { [binding.id]: bindingOnlyScene.entities[binding.id] };
+    const bindingOnly = await prepareDeploymentExport(serializeScene(bindingOnlyScene), '仅绑定引用模型', [], new AbortController().signal, () => {});
+    const bindingOnlyDevice = deserializeScene(bindingOnly.sceneContent).entities[binding.id].components.clickEventBinding.deviceSlots[0].deviceType;
+    assert.ok(bindingOnlyDevice, '没有模型实体时也必须保留合法的设备绑定');
+    assert.ok(bindingOnly.assetFiles.some((file) => file.logicalUrl === bindingOnlyDevice.sourceUrl), '绑定单独引用的模型必须进入资源清单');
+    const invalidBinding = JSON.parse(serializeScene(bindingOnlyScene));
+    Object.assign(invalidBinding.scene.entities[binding.id].components.clickEventBinding.deviceSlots[0].deviceType, {
+      sourcePath: 'https://example.com/model.glb', sourceUrl: 'https://example.com/model.glb',
+    });
+    await assert.rejects(
+      prepareDeploymentExport(JSON.stringify(invalidBinding), '非法绑定资源', [], new AbortController().signal, () => {}),
+      /点击事件绑定设备类型.+无法完整发布/,
+      '无法打包的绑定必须明确报错，不能发布一个已清空绑定的残缺场景',
+    );
+    console.log('PASS: 真实发布和 Viewer 重载后的模型/货格点击、高亮、聚焦、大屏事件、共享库与多版本工程快照、独立绑定资源、旧包兼容、组件完整性及本机路径清理。');
   } finally {
     if (path.dirname(moduleRoot) !== path.resolve('node_modules') || !path.basename(moduleRoot).startsWith('.click-publish-')) throw new Error('测试模块目录范围无效');
     await rm(moduleRoot, { recursive: true, force: true });

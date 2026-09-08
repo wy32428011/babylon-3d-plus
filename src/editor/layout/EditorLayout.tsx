@@ -70,6 +70,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const fetchConfig = useEditorStore((state) => state.scene.fetchConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
+  const runtimePerformanceEnabled = useEditorStore((state) => state.runtimePerformanceEnabled);
   const setTransformTool = useEditorStore((state) => state.setTransformTool);
   const setTransformSpace = useEditorStore((state) => state.setTransformSpace);
   const setSnapEnabled = useEditorStore((state) => state.setSnapEnabled);
@@ -257,7 +258,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   ]);
 
   /** 运行按钮先校验 MQTT/模拟器配置，失败时保持编辑态并打开配置弹窗。 */
-  function handleStartRuntimePreview(): void {
+  function handleStartRuntimePreview(performance = false): void {
     if (deploymentExport.isBusy) {
       const message = '请等待部署工程导出完成。';
       setRuntimePreviewError(message);
@@ -272,7 +273,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
       return;
     }
 
-    const readiness = startRuntimePreview();
+    const readiness = startRuntimePreview({ performance });
 
     if (!readiness.ok) {
       setRuntimePreviewError(readiness.message);
@@ -387,7 +388,9 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         runtimeMode={runtimeMode}
         runtimePreviewError={runtimePreviewError}
         readOnly={isRuntimePreview}
-        onStartRuntimePreview={handleStartRuntimePreview}
+        onStartRuntimePreview={() => handleStartRuntimePreview()}
+        onStartPerformanceRuntimePreview={() => handleStartRuntimePreview(true)}
+        runtimePerformanceEnabled={runtimePerformanceEnabled}
         onStopRuntimePreview={handleStopRuntimePreview}
         sceneFullscreen={sceneFullscreen.isFullscreen}
         onToggleSceneFullscreen={() => void handleToggleSceneFullscreen()}

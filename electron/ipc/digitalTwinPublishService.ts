@@ -1,3 +1,4 @@
+import { assertPublishSceneModelsReady } from './digitalTwinModelRecovery.js';
 import { app } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -174,6 +175,7 @@ export async function publishDigitalTwin(
   onProgress: DigitalTwinPublishProgressHandler,
 ): Promise<DigitalTwinPublishResult> {
   const validated = validatePublishRequest(request);
+  await assertPublishSceneModelsReady(validated.sceneContent, signal);
   let current = await resolveCurrentDataPlatformBinding();
   let client: DigitalTwinUploadClient;
   let remote: DigitalTwinProjectStatus;

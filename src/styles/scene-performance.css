@@ -6,6 +6,8 @@
   display: grid;
   width: max-content;
   max-width: min(320px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  overflow-y: auto;
   color: #e8f4ff;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -107,4 +109,19 @@
   border-color: #77bbff;
   background: #2c6088;
   outline: none;
+}
+
+.scene-performance-run-status {
+  margin: 0 0 7px;
+  color: #8fd1ff;
+}
+
+.scene-performance-run-note {
+  margin: 8px 0 0;
+  color: #a9bdce;
+  line-height: 1.5;
+}
+
+.scene-performance-retained-report {
+  padding: 4px 8px;
 }

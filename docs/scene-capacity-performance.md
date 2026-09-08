@@ -174,6 +174,26 @@ Scene View 左上角显示低频性能摘要，点击后展开详细 HUD。Toolb
 
 “复制最近一分钟报告”会输出 renderer、60 个有界采样和摘要 JSON，便于在 Intel、NVIDIA、AMD 设备上对比。GPU 使用率低不等于 GPU 未启用：如果 GPU frame time 较低而 CPU frame time、完整同步、分组、Long Task 或 Draw Call 偏高，瓶颈在主线程、场景遍历或提交阶段；如果 GPU frame time 接近或超过 frame time，则应继续检查材质、像素填充、阴影和后处理。
 
+### 编辑器性能运行
+
+Toolbar 的“运行”旁新增“性能运行”。它复用当前 SceneRuntime、原运行预检、MQTT/本地模拟和动画生命周期，直接在编辑器中观察优化后的效果，不需要发布。普通运行同样使用当前优化；性能运行额外启用遥测耗时记录，自动显示并展开原有性能 HUD，不创建第二套监控或采样定时器。
+
+HUD 除 FPS、CPU/GPU、Draw Call 等指标外，还显示遥测帧/本次峰值，以及本次运行的候选重建、签名计算、诊断写入增量。前 2 秒仍显示实时指标，但不收入运行报告，避免秒级计数器残留的编辑/加载数据混入结果；报告保留本次运行最近一分钟、最多 60 个样本，分位数仅代表 1 Hz 样本。
+
+运行中可点击“复制本次性能运行报告”。点击原“停止”后关闭额外遥测计时、恢复原 HUD 显示与展开偏好，并保留“复制上次性能运行报告”入口；普通运行不会继续写入它，再次性能运行开始新会话，切换场景清除旧报告。诊断开关和报告均不写入场景文件或撤销历史。MQTT 配置无效、环境加载中或 CAD 导入中仍沿用原阻断提示，不会自动修改连接配置。
+
+入口回归：`node --test tests/editor/editorPerformanceRunEntry.test.mjs`。会话回归：`node --experimental-strip-types --test tests/editor/editorPerformanceRunSession.test.ts`。
+
+### 发布 Viewer 遥测性能诊断
+
+发布页面 URL 增加 `?performance=1`（已有查询参数时追加 `&performance=1`），场景就绪后显示每秒采样的诊断面板，可查看 FPS、CPU/GPU 帧耗时、活动网格评估、Draw Call、Mesh、长任务和遥测帧耗时。点击“复制最近一分钟报告”导出最多 60 个样本；浏览器禁止自动复制时显示可手动选择的报告。点击“关闭”立即停止采样并释放 Instrumentation。默认页面不创建此监控，也不开启额外遥测计时。
+
+发布报告仅包含固定数值指标，不包含 MQTT 配置、点位值或模型资源路径。GPU 计时不受支持时为 `null`；`p95SampleFrameTimeMs` / `p99SampleFrameTimeMs` 是每秒计数器样本的分位数，不是逐帧 P95/P99。遥测 `frames`、`candidateRebuilds`、`contextSignatureBuilds`、`diagnosticWrites` 是本次 Runtime 生命周期累计计数，`maxFrameTimeMs` 是本次开启诊断后的遥测峰值；比较不同阶段时应取计数差值。
+
+运行时复用未变化的专用设备候选、绑定、冲突结果和标量上下文签名，稳定诊断避免重复 JSON 序列化与字段复制。每个驱动组之前仍即时检查模型能力和绑定，保证同步回调的修改当帧生效；相同消息的在线时间、断流自驱、取放货边沿、脚本更新次数和驱动逐帧调用保持原语义。复杂点位对象沿用原 JSON 比较方式。模型参数化脚本、动画驱动、模型 Geometry、材质和分辨率不做改变。
+
+验收应在同一实际发布场景、设备、相机和分辨率下分别采集未接数据、静止在线和持续动作阶段，并检查取放货与交接一致性。隔离测试的序列化次数、NullEngine 动作回归或简单 WebGL 场景只能证明对应逻辑，不代表生产场景已达到目标 FPS。定向回归包含 `tests/telemetry/telemetryFrameCaching.test.ts`（随 `npm run test:telemetry` 执行）及 `tests/digitalTwin/playerPerformanceDiagnostics.test.ts`、`playerPerformanceMonitor.test.ts`。
+
 ## 加载峰值控制
 
 `AssetLoadScheduler` 默认最多并行执行 4 个 `LoadAssetContainerAsync`：

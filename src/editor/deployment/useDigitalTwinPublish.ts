@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { repairPublishSceneModels } from './repairPublishSceneModels';
+import { executeCommand } from '../commands/CommandHistory';
+import { updateSceneDocumentCommand } from '../commands/entityCommands';
 import { serializeScene } from '../project/SceneSerializer';
 import { getSceneShadowBakeError } from '../model/sceneShadowBake';
 import { useEditorStore } from '../store/editorStore';
@@ -89,16 +92,14 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     }
   }, [pushLog]);
 
+  const canceledRequestIdRef = useRef<string | null>(null);
+
   const start = useCallback(async (options: StartDigitalTwinPublishOptions): Promise<DigitalTwinPublishResult | null> => {
     if (!window.editorApi?.publishDigitalTwin) return null;
-    const shadowError = getSceneShadowBakeError(useEditorStore.getState().scene);
-    if (shadowError) {
-      setState((current) => ({ ...current, status: 'error', error: shadowError }));
-      pushLog(shadowError);
-      return null;
-    }
+    if (activeRequestIdRef.current) return null;
     const requestId = crypto.randomUUID();
-    const sceneContent = serializeScene(useEditorStore.getState().scene);
+    let sceneContent: string;
+    canceledRequestIdRef.current = null;
     contextRequestIdRef.current += 1;
     activeRequestIdRef.current = requestId;
     setState((current) => ({
@@ -117,6 +118,31 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     }));
 
     try {
+      if (typeof window.editorApi.recoverDigitalTwinModels !== 'function') {
+        throw new Error('当前窗口尚未加载模型恢复接口，请先保存场景，再完全退出并重新启动编辑器后发布。');
+      }
+      const originalScene = useEditorStore.getState().scene;
+      const recovery = await window.editorApi.recoverDigitalTwinModels({
+        requestId, projectId: options.projectId, sceneContent: serializeScene(originalScene),
+      });
+      if (canceledRequestIdRef.current === requestId) throw new Error('模型恢复已取消。');
+      const repaired = repairPublishSceneModels(originalScene, recovery);
+      useEditorStore.setState((current) => {
+        if (current.scene !== originalScene) throw new Error('恢复模型期间场景已修改，请重新发布以包含最新编辑内容。');
+        if (repaired.scene === originalScene) return current;
+        if (current.runtimeMode === 'preview') throw new Error('请先退出运行预览，再恢复发布模型。');
+        return executeCommand(current.scene, current.history, updateSceneDocumentCommand('恢复发布模型与点击事件绑定', () => repaired.scene));
+      });
+      if (repaired.scene !== originalScene) {
+        pushLog(
+          '发布前已恢复 ' + repaired.restoredCount + ' 个模型引用，新增 ' + repaired.addedCount
+          + ' 个场景模型，重新关联 ' + repaired.reboundCount + ' 个点击设备槽位。'
+          + (repaired.addedCount ? ' 新模型放在场景原点，可调整位置与业务资产编号。' : ''),
+        );
+      }
+      const shadowError = getSceneShadowBakeError(repaired.scene);
+      if (shadowError) throw new Error(shadowError);
+      sceneContent = serializeScene(repaired.scene);
       const result = await window.editorApi.publishDigitalTwin({
         requestId,
         publishName: options.publishName,
@@ -148,8 +174,9 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
       return result;
     } catch (error) {
       const message = getErrorMessage(error);
-      setState((current) => ({ ...current, status: 'error', error: message }));
-      pushLog(`数字孪生发布失败：${message}`);
+      const canceled = canceledRequestIdRef.current === requestId;
+      setState((current) => ({ ...current, status: canceled ? 'canceled' : 'error', error: canceled ? null : message }));
+      pushLog(canceled ? '数字孪生发布已取消。' : '数字孪生发布失败：' + message);
       return null;
     } finally {
       activeRequestIdRef.current = null;
@@ -159,6 +186,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
   const cancel = useCallback(async (): Promise<void> => {
     const requestId = activeRequestIdRef.current;
     if (!requestId || !window.editorApi?.cancelDigitalTwinPublish) return;
+    canceledRequestIdRef.current = requestId;
     await window.editorApi.cancelDigitalTwinPublish({ requestId }).catch(() => false);
   }, []);
 

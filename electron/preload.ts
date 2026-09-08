@@ -211,6 +211,8 @@ contextBridge.exposeInMainWorld('editorApi', {
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
   getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest): Promise<DigitalTwinPublishContext> =>
     ipcRenderer.invoke('digital-twin-publish:getContext', request),
+  recoverDigitalTwinModels: (request: import('./types.js').DigitalTwinModelRecoveryRequest): Promise<import('./types.js').DigitalTwinModelRecoveryResult> =>
+    ipcRenderer.invoke('digital-twin-publish:recoverModels', request),
   publishDigitalTwin: (request: DigitalTwinPublishRequest): Promise<DigitalTwinPublishResult> =>
     ipcRenderer.invoke('digital-twin-publish:start', request),
   cancelDigitalTwinPublish: (request: DigitalTwinPublishCancelRequest): Promise<boolean> =>

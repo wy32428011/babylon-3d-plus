@@ -8,6 +8,7 @@ import { createBabylonViewport, isSoftwareWebGLFallbackAllowed, type BabylonView
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../runtime/babylon/cameraControlStandard';
 import { SceneRuntime, type SceneRuntimeModelLoadProgress } from '../runtime/babylon/SceneRuntime';
+import { ScenePerformanceMonitor } from '../runtime/babylon/ScenePerformanceMonitor';
 import { DataPlatformScreenOverlay } from '../runtime/babylon/DataPlatformScreenOverlay';
 import { DataPlatformViewportScreenOverlay } from '../runtime/babylon/DataPlatformViewportScreenOverlay';
 import type { DataPlatformScreenOverlayItem } from '../runtime/babylon/SceneRuntime';
@@ -68,7 +69,6 @@ import {
 import { ManualRoamControls } from '../shared/ui/ManualRoamControls';
 import { useAutoPatrolInspectionHistory } from '../shared/ui/useAutoPatrolInspectionHistory';
 import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
-import { FullscreenGlyph } from '../shared/ui/FullscreenGlyph';
 import { useDigitalTwinFullscreen } from './useDigitalTwinFullscreen';
 import {
   parseDigitalTwinHostRenderPixelRatioState,
@@ -90,6 +90,12 @@ import { computePlayerLoadingProgress, PLAYER_SCENE_LOADING_TIMEOUT_MS } from '.
 import { DeferredAutoPatrolStartGate } from './deferredAutoPatrolStartGate';
 import { PlayerInitialLoadGate } from './playerInitialLoadState';
 import { restorePlayerGlobalOverview } from './playerGlobalOverview';
+import {
+  isPlayerPerformanceEnabled,
+  startPlayerPerformanceSession,
+  type PlayerPerformanceSession,
+  type PlayerPerformanceSample,
+} from './playerPerformanceDiagnostics';
 import { resolvePublishedFetchConfig, startPublishedFetchDrive } from './publishedFetchDrive';
 import {
   createPublishedSkyboxCameraBoundsControllerForDocument,
@@ -195,6 +201,7 @@ export function PlayerApp() {
   const viewportRef = useRef<BabylonViewport | null>(null);
   const chartMarkerClickRef = useRef<((entityId: string) => boolean) | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
+  const performanceSessionRef = useRef<PlayerPerformanceSession | null>(null);
   const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
   const autoPatrolStartGateRef = useRef<DeferredAutoPatrolStartGate | null>(null);
   const manualRoamRef = useRef<ManualRoamRuntime | null>(null);
@@ -220,6 +227,10 @@ export function PlayerApp() {
   const openedDigitalTwinFloatingControlRef = useRef<PlayerFloatingControl | null>(null);
   const [openedDigitalTwinFloatingControl, setOpenedDigitalTwinFloatingControl] = useState<PlayerFloatingControl | null>(null);
   const [playerFps, setPlayerFps] = useState<number | null>(null);
+  const [performanceEnabled, setPerformanceEnabled] = useState(() => isPlayerPerformanceEnabled(window.location.search));
+  const [performanceSnapshot, setPerformanceSnapshot] = useState<PlayerPerformanceSample | null>(null);
+  const [performanceMessage, setPerformanceMessage] = useState('');
+  const [manualPerformanceReport, setManualPerformanceReport] = useState('');
   const [config, setConfig] = useState<PlayerRuntimeConfig | null>(null);
   const [startupPercent, setStartupPercent] = useState(6);
   const [modelLoadProgress, setModelLoadProgress] = useState<SceneRuntimeModelLoadProgress | null>(null);
@@ -607,7 +618,11 @@ export function PlayerApp() {
               ? runtime!.getLocatorCellWorldBounds(entityId, cell)
               : runtime!.getEntitiesWorldBounds([entityId]);
             if (bounds && viewport) {
-              viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS, useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE });
+              viewport.focusOnBounds(bounds, {
+                animate: true,
+                durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
+                ...(cell ? { useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE } : {}),
+              });
             }
           },
           triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
@@ -873,6 +888,9 @@ export function PlayerApp() {
         window.removeEventListener('message', handleHostDisplayMessage);
         skyboxCameraBounds?.dispose();
         skyboxCameraBounds = null;
+        performanceSessionRef.current?.dispose();
+        performanceSessionRef.current = null;
+        runtime?.setTelemetryPerformanceTimingEnabled(false);
         runtime?.dispose();
         viewport?.dispose();
         clearDeploymentAssetManifest();
@@ -915,6 +933,9 @@ export function PlayerApp() {
       viewportRef.current = null;
       skyboxCameraBounds?.dispose();
       skyboxCameraBounds = null;
+      performanceSessionRef.current?.dispose();
+      performanceSessionRef.current = null;
+      runtime?.setTelemetryPerformanceTimingEnabled(false);
       runtime?.dispose();
       viewport?.dispose();
       clearDeploymentAssetManifest();
@@ -1061,6 +1082,51 @@ export function PlayerApp() {
     return () => window.clearInterval(timer);
   }, [phase, showOverlay]);
 
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const runtime = runtimeRef.current;
+    if (!performanceEnabled || phase !== 'ready' || !viewport || !runtime) return undefined;
+    let session: PlayerPerformanceSession | null = null;
+    try {
+      runtime.setTelemetryPerformanceTimingEnabled(true);
+      session = startPlayerPerformanceSession(true, () => new ScenePerformanceMonitor(viewport.engine, viewport.scene, {
+        getRuntimeMetrics: () => runtime.getPerformanceMetrics(),
+        getEditThinInstancePlanMetrics: () => ({
+          planCount: 0, lastDurationMs: 0, maxDurationMs: 0,
+          entityCount: 0, groupCount: 0, thinInstanceEntityCount: 0,
+        }),
+        collectDetailedGpuWorkloads: false,
+      }), setPerformanceSnapshot, Date.now, () => runtime.getTelemetryPerformanceMetrics());
+      performanceSessionRef.current = session;
+    } catch (error) {
+      runtime.setTelemetryPerformanceTimingEnabled(false);
+      console.warn('Viewer 性能诊断初始化失败。', error);
+      setPerformanceMessage('性能采样未能启动，请查看浏览器控制台。');
+    }
+    return () => {
+      session?.dispose();
+      runtime.setTelemetryPerformanceTimingEnabled(false);
+      if (performanceSessionRef.current === session) performanceSessionRef.current = null;
+    };
+  }, [performanceEnabled, phase]);
+
+  async function copyPerformanceReport(): Promise<void> {
+    const session = performanceSessionRef.current;
+    if (!session) return;
+    const report = session.createReport();
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(report);
+      if (performanceSessionRef.current !== session) return;
+      setManualPerformanceReport('');
+      setPerformanceMessage('最近一分钟的性能报告已复制。');
+    } catch {
+      if (performanceSessionRef.current !== session) return;
+      setManualPerformanceReport(report);
+      setPerformanceMessage('浏览器未允许自动复制，请选中下方报告手动复制。');
+    }
+  }
+
   // 首次场景加载：启动阶段里程碑 + 模型/环境资源单元进度共同驱动全屏蒙版。
   const loadingMask = computePlayerLoadingProgress({
     phase,
@@ -1082,12 +1148,6 @@ export function PlayerApp() {
     return () => window.removeEventListener('keydown', handleWindowKeyDown, true);
   }, [sceneFullscreen]);
 
-  const fullscreenLabel = sceneFullscreen.isFullscreen
-    ? '退出全屏'
-    : sceneFullscreen.isEmbedded
-      ? '全屏显示大屏'
-      : '全屏显示场景';
-
   return (
     <main className="player-root" ref={playerRootRef} style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
@@ -1107,18 +1167,6 @@ export function PlayerApp() {
           screen={viewportScreen}
           selectedEntityIds={viewerSelectedEntityIds}
         />
-      ) : null}
-      {phase !== 'blocked' ? (
-        <button
-          aria-label={fullscreenLabel}
-          aria-pressed={sceneFullscreen.isFullscreen}
-          className="player-fullscreen-button"
-          onClick={() => void sceneFullscreen.toggle()}
-          title={`${fullscreenLabel} (F11)`}
-          type="button"
-        >
-          <FullscreenGlyph exit={sceneFullscreen.isFullscreen} />
-        </button>
       ) : null}
       {phase === 'ready' && manualRoamControlsVisible && config?.viewer.allowCameraControl && hasManualRoamSpawn ? (
         <ManualRoamControls
@@ -1152,6 +1200,36 @@ export function PlayerApp() {
           label={loadingMask.label}
           percent={loadingMask.percent}
         />
+      ) : null}
+      {performanceEnabled && phase === 'ready' ? (
+        <section className="player-performance" aria-label="场景性能诊断">
+          <div className="player-performance-heading">
+            <strong>性能诊断 · 每秒采样</strong>
+            <button type="button" onClick={() => setPerformanceEnabled(false)} aria-label="停止性能采样">关闭</button>
+          </div>
+          {performanceSnapshot ? (
+            <>
+              <p>FPS {formatPlayerStatusFps(performanceSnapshot.fps)} · CPU 帧 {performanceSnapshot.frameTimeMs.toFixed(2)} ms</p>
+              <p>绘制 {performanceSnapshot.renderTimeMs.toFixed(2)} ms · GPU {performanceSnapshot.gpuFrameTimeMs === null ? '不可用' : `${performanceSnapshot.gpuFrameTimeMs.toFixed(2)} ms`}</p>
+              <p>活动网格评估 {performanceSnapshot.activeMeshesEvaluationMs.toFixed(2)} ms</p>
+              <p>Draw Call {performanceSnapshot.drawCalls} · Mesh {performanceSnapshot.activeMeshes}/{performanceSnapshot.totalMeshes}</p>
+              <p>长任务 {performanceSnapshot.longTaskCount} 次 / {performanceSnapshot.longTaskDurationMs.toFixed(1)} ms</p>
+              {performanceSnapshot.telemetry ? (
+                <p>遥测帧 {performanceSnapshot.telemetry.lastFrameTimeMs?.toFixed(2) ?? '--'} ms · 本次峰值 {performanceSnapshot.telemetry.maxFrameTimeMs?.toFixed(2) ?? '--'} ms</p>
+              ) : null}
+              <button type="button" onClick={() => void copyPerformanceReport()}>复制最近一分钟报告</button>
+            </>
+          ) : <p>等待采样…</p>}
+          {performanceMessage ? <p role="status">{performanceMessage}</p> : null}
+          {manualPerformanceReport ? (
+            <textarea
+              aria-label="可手动复制的性能报告"
+              readOnly
+              value={manualPerformanceReport}
+              onFocus={(event) => event.currentTarget.select()}
+            />
+          ) : null}
+        </section>
       ) : null}
       {chartMarkerError ? (
         <section className="player-status" role="alert" style={{ pointerEvents: 'auto' }}>

@@ -1,4 +1,5 @@
 import type { DeviceTelemetryFields } from './deviceTelemetry';
+import { areFlatTelemetryFieldsEqual, areTelemetryStringArraysEqual } from './telemetryValueComparison';
 
 export type TelemetryRuntimeDiagnosticStatus = {
   online: boolean;
@@ -32,9 +33,11 @@ type TelemetryRuntimeDiagnosticsListener = () => void;
 export class TelemetryRuntimeDiagnosticsStore {
   private readonly snapshots = new Map<string, TelemetryRuntimeDiagnosticSnapshot>();
   private readonly listeners = new Set<TelemetryRuntimeDiagnosticsListener>();
+  private readonly fieldKeys = new WeakMap<TelemetryRuntimeDiagnosticSnapshot, string[]>();
 
   /** 写入指定实体的诊断快照；内容未变化时不通知订阅者。 */
   upsert(entityId: string, input: TelemetryRuntimeDiagnosticInput): boolean {
+    if (this.isUnchanged(entityId, input)) return false;
     const snapshot: TelemetryRuntimeDiagnosticSnapshot = {
       entityId,
       ...input,
@@ -44,12 +47,17 @@ export class TelemetryRuntimeDiagnosticsStore {
       boneTargets: [...input.boneTargets],
       animationTargets: [...input.animationTargets],
     };
-    const current = this.snapshots.get(entityId);
-    if (current && createDiagnosticSignature(current) === createDiagnosticSignature(snapshot)) return false;
-
+    this.fieldKeys.set(snapshot, Object.keys(snapshot.fields));
     this.snapshots.set(entityId, snapshot);
     this.emitChange();
     return true;
+  }
+
+  /** 未变化的点位在构造快照前返回。 */
+  private isUnchanged(entityId: string, input: TelemetryRuntimeDiagnosticInput): boolean {
+    const current = this.snapshots.get(entityId);
+    return !!current && (areDiagnosticValuesEqual(current, input, this.fieldKeys.get(current)!)
+      || createDiagnosticSignature(current) === createDiagnosticSignature(input));
   }
 
   /** 按实体 ID 读取最新诊断；没有运行时诊断时返回 null。 */
@@ -86,7 +94,7 @@ export class TelemetryRuntimeDiagnosticsStore {
 export const telemetryRuntimeDiagnosticsStore = new TelemetryRuntimeDiagnosticsStore();
 
 /** 生成稳定内容签名，用于避免重复诊断触发无意义重渲染。 */
-function createDiagnosticSignature(snapshot: TelemetryRuntimeDiagnosticSnapshot): string {
+function createDiagnosticSignature(snapshot: TelemetryRuntimeDiagnosticInput): string {
   return JSON.stringify({
     online: snapshot.online,
     stale: snapshot.stale,
@@ -106,4 +114,23 @@ function createDiagnosticSignature(snapshot: TelemetryRuntimeDiagnosticSnapshot)
     boneTargets: snapshot.boneTargets,
     animationTargets: snapshot.animationTargets,
   });
+}
+
+/** 相同的标量点位直接返回；复杂字段保留既有 JSON 比较语义。 */
+function areDiagnosticValuesEqual(
+  current: TelemetryRuntimeDiagnosticSnapshot,
+  next: TelemetryRuntimeDiagnosticInput,
+  keys: readonly string[],
+): boolean {
+  return current.online === next.online && current.stale === next.stale
+    && current.faulted === next.faulted && current.conflict === next.conflict
+    && current.lastReceivedAt === next.lastReceivedAt && current.sourceId === next.sourceId
+    && current.deviceType === next.deviceType && current.assetCode === next.assetCode
+    && current.topic === next.topic && current.sequence === next.sequence
+    && current.sourceTimestamp === next.sourceTimestamp && current.message === next.message
+    && areTelemetryStringArraysEqual(current.errors, next.errors)
+    && areTelemetryStringArraysEqual(current.nodeTargets, next.nodeTargets)
+    && areTelemetryStringArraysEqual(current.boneTargets, next.boneTargets)
+    && areTelemetryStringArraysEqual(current.animationTargets, next.animationTargets)
+    && areFlatTelemetryFieldsEqual(next.fields, current.fields, keys);
 }
