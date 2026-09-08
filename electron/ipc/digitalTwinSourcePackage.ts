@@ -19,6 +19,8 @@ const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
 type DeploymentExportFileSystemModule = typeof import('./deploymentExportFileSystem.js');
 type DeploymentSkyboxCacheModule = typeof import('./deploymentSkyboxCache.js');
 type DigitalTwinSourceEnvironmentRelinkModule = typeof import('./digitalTwinSourceEnvironmentRelink.js');
+type SceneShadowBakeContractModule = typeof import('../shared/sceneShadowBakeContract.js');
+const { captureSceneShadowBakeRelocation } = require(`../shared/sceneShadowBakeContract${runtimeExtension}`) as SceneShadowBakeContractModule;
 const { copyDeploymentFiles } = require(`./deploymentExportFileSystem${runtimeExtension}`) as DeploymentExportFileSystemModule;
 const {
   assertTrustedPathWithinRoot,
@@ -83,6 +85,7 @@ export type DigitalTwinSourcePackageResult = {
   manifestJson: string;
   sceneContents: string[];
   warnings: string[];
+  omittedResources: string[];
 };
 
 type SceneSnapshot = {
@@ -155,6 +158,7 @@ export async function buildDigitalTwinSourcePackage(
       options.findSyncedImageForReference,
     );
     const scenes = scenesResult.snapshots;
+    const restoreRelocatedBakes = new Map(scenes.map(scene => [scene, captureSceneShadowBakeRelocation(scene.parsed.scene)]));
     const platformImageBundleMap = scenesResult.platformImageBundleMap;
     const entryScene = scenes.find((scene) => path.resolve(scene.sourcePath) === entrySceneFilePath);
     if (!entryScene) throw new Error('入口场景不在当前项目 Scenes 目录中。');
@@ -165,6 +169,7 @@ export async function buildDigitalTwinSourcePackage(
     );
 
     const warnings: string[] = [];
+    const omittedResources: string[] = [];
     const warnedOrphanedSkyboxIds = new Set<string>();
     const validationCache = options.skyboxValidationCache ?? createDeploymentSkyboxValidationCache();
     const stableSkyboxObjects = new WeakSet<object>();
@@ -182,6 +187,10 @@ export async function buildDigitalTwinSourcePackage(
         options.skyboxCacheDependencies,
       );
       const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap);
+      const restoreBake = restoreRelocatedBakes.get(scene);
+      if (isPlainObject(portableScene) && restoreBake && !restoreBake(portableScene.scene)) {
+        throw new Error(`场景「${scene.name}」的资源版本在源工程准备过程中发生变化，无法保留有效烘焙；请更新资源并重新烘焙后发布。`);
+      }
       scene.portableContent = `${JSON.stringify(portableScene, null, 2)}
 `;
     }
@@ -195,6 +204,7 @@ export async function buildDigitalTwinSourcePackage(
       stableSkyboxBundles,
       sourceEnvironmentPackages,
       warnings,
+      omittedResources,
     );
     await validateResourceBundleSourcePaths(bundles, projectRoot, sharedResourcesRoot, options.signal);
     const estimatedFiles = scenes.length + bundles.length + 1;
@@ -284,6 +294,7 @@ export async function buildDigitalTwinSourcePackage(
       manifestJson,
       sceneContents: scenes.map((scene) => scene.portableContent),
       warnings,
+      omittedResources,
     };
   } catch (error) {
     await fs.rm(archivePath, { force: true }).catch(() => undefined);
@@ -524,6 +535,7 @@ function collectResourceBundles(
   stableSkyboxBundles: ReadonlyMap<string, ResourceBundle>,
   sourceEnvironmentPackages: readonly SourceEnvironmentPackageIntegrity[],
   warnings: string[],
+  omittedResources: string[],
 ): ResourceBundle[] {
   const bundles = new Map<string, ResourceBundle>();
   const skippedRoots = new Set<string>();
@@ -531,6 +543,7 @@ function collectResourceBundles(
     const key = createPathKey(sourceRoot);
     if (skippedRoots.has(key)) return;
     skippedRoots.add(key);
+    omittedResources.push(sourceRoot);
     warnings.push(`场景引用的资源不在当前项目或共享资源缓存内：${sourceRoot}；源工程包已跳过该资源，继续发布。重新打开源工程时可能需要重新导入该资源。`);
   };
   const sourceEnvironmentPackagesByPath = new Map(
@@ -571,13 +584,14 @@ function collectResourceBundles(
         && (PATH_KEYS.has(fieldName) || URL_KEYS.has(fieldName) || PATH_ARRAY_KEYS.has(fieldName)),
       );
       const isImageAssetReference = isPortableImageAssetReference(value);
-      if (!isResourceReference && !isImageAssetReference) return;
+      if (!isResourceReference && !isImageAssetReference && !value.startsWith(LOCAL_ASSET_URL_PREFIX)) return;
       const bundle = resolveResourceBundle(
         value,
         projectRoot,
         sharedResourcesRoot,
         sourceEnvironmentPackagesByPath,
         warnSkippedResource,
+        value.startsWith(LOCAL_ASSET_URL_PREFIX) || Boolean(fieldName && fieldName !== 'path'),
       );
       if (!bundle) return;
       registerBundle(bundle);
@@ -630,6 +644,7 @@ function resolveResourceBundle(
   sharedResourcesRoot: string,
   sourceEnvironmentPackagesByPath: ReadonlyMap<string, SourceEnvironmentPackageIntegrity>,
   warnSkippedResource: (sourceRoot: string) => void,
+  reportUnsupportedReference: boolean,
 ): ResourceBundle | null {
   let candidate = rawValue.trim();
   if (!candidate) return null;
@@ -644,7 +659,10 @@ function resolveResourceBundle(
   parseDataPlatformEnvironmentCachePath(candidate.replace(/\\/g, '/').split('/').filter(Boolean));
   if (!path.isAbsolute(candidate)) {
     const portable = candidate.replace(/\\/g, '/');
-    if (!portable.toLowerCase().startsWith('assets/')) return null;
+    if (!portable.toLowerCase().startsWith('assets/')) {
+      if (rawValue.startsWith(LOCAL_ASSET_URL_PREFIX)) warnSkippedResource(candidate);
+      return null;
+    }
     candidate = path.resolve(projectRoot, ...portable.split('/'));
   }
   const normalized = path.resolve(candidate);
@@ -676,7 +694,10 @@ function resolveResourceBundle(
   }
   const segments = normalized.replace(/\\/g, '/').split('/').filter(Boolean);
   const assetsIndex = segments.findIndex((segment) => segment.toLowerCase() === 'assets');
-  if (assetsIndex < 0 || assetsIndex + 1 >= segments.length) return null;
+  if (assetsIndex < 0 || assetsIndex + 1 >= segments.length) {
+    if (reportUnsupportedReference) warnSkippedResource(normalized);
+    return null;
+  }
 
   const library = segments[assetsIndex + 1]?.toLowerCase();
   let bundleEnd = segments.length;
@@ -685,7 +706,7 @@ function resolveResourceBundle(
   } else if (library === 'environments' || library === 'skyboxes') {
     bundleEnd = assetsIndex + 3;
   }
-  if (bundleEnd > segments.length) return null;
+  if (bundleEnd > segments.length) { warnSkippedResource(normalized); return null; }
 
   const pathRoot = path.parse(normalized).root;
   const assetRelativeSegments = segments.slice(assetsIndex, bundleEnd);

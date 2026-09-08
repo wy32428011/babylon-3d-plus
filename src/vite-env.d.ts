@@ -474,6 +474,9 @@ type ProjectListAssetsResult = {
   skyboxSyncContextKey: string | null;
   environmentSyncContextKey: string | null;
   assets: ProjectModelAssetEntry[];
+  /** 实际存在的工程包本地资产，供打开场景时保留发布快照。 */
+  localAssets?: ProjectModelAssetEntry[];
+  localSkyboxes?: ProjectSkyboxAssetEntry[];
   skyboxes: ProjectSkyboxAssetEntry[];
   orphanedSkyboxes: ProjectSkyboxAssetEntry[];
 };

@@ -74,9 +74,11 @@ test('强制覆盖同路径同revision后改变加载键，不更改远端revisi
   assert.equal(environmentForSyncRun(current), current);
 });
 
-test('ProjectPanel等待权威同步完成再应用，并传入完成runId刷新环境加载键', async () => {
+test('ProjectPanel等待权威同步后刷新缓存，工程包环境可独立加载且保留发布快照', async () => {
   const source = await readFile(new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url), 'utf8');
-  assert.match(source, /options.refreshEnvironment && !result.environmentSyncPending/);
+  assert.match(source, /options.refreshEnvironment && \(!result.environmentSyncPending \|\| options.preservePackagedEnvironment\)/);
+  assert.match(source, /result.environmentSyncPending \? \[\] : result.assets/);
+  assert.match(source, /runtimeEnvironment: environment, expectedSceneSessionId, expectedEnvironmentState/);
   assert.match(source, /environmentSyncRunId: progress.runId/);
   assert.match(source, /persistSceneChange: authorityChanged/);
   assert.match(source, /authorityChanged \? environmentConfig : environment/);

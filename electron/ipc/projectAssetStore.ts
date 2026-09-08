@@ -877,6 +877,15 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   authorizeProjectAssetRoots(projectRoot);
 
   const localIndex = await readProjectAssetIndex(projectRoot);
+  // 共享库仍用于显式更新；单独返回存在的本地文件，避免首次打开用最新共享元数据覆盖发布快照。
+  const localAssets: ProjectModelAssetEntry[] = [];
+  for (const asset of localIndex.assets) {
+    try {
+      if ((await fs.stat(asset.path)).isFile()) localAssets.push(asset);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
   let assets = localIndex.assets;
   if (sharedProjectAssetRoot && normalizeFilePath(sharedProjectAssetRoot) !== normalizeFilePath(projectRoot)) {
     await ensureProjectDirectories(sharedProjectAssetRoot);
@@ -899,19 +908,19 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     for (const scriptAsset of asset.scriptAssets ?? []) authorizeAssetFile(scriptAsset.path);
   }
 
-  const { skyboxes, orphanedSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
+  const { skyboxes, orphanedSkyboxes, localSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
   const binding = getCurrentDataPlatformBinding();
   const dataPlatformSourceKey = binding && normalizeFilePath(binding.projectRoot).toLowerCase() === normalizeFilePath(projectRoot).toLowerCase()
     ? createDataPlatformSourceKey(binding.metadata.baseUrl) : undefined;
   const environmentSyncPending = Boolean(dataPlatformSourceKey && sharedProjectEnvironmentRoot
     && isDataPlatformEnvironmentSyncPending(`${dataPlatformSourceKey}:${path.resolve(sharedProjectEnvironmentRoot).toLowerCase()}`));
   return { projectRoot, dataPlatformSourceKey, environmentSyncPending,
-    skyboxSyncContextKey: null, environmentSyncContextKey, assets, skyboxes, orphanedSkyboxes };
+    skyboxSyncContextKey: null, environmentSyncContextKey, assets, localAssets, skyboxes, localSkyboxes, orphanedSkyboxes };
 }
 
 async function loadProjectSkyboxAssets(
   projectRoot: string,
-): Promise<Pick<ProjectListAssetsResult, 'skyboxes' | 'orphanedSkyboxes'>> {
+): Promise<Pick<ProjectListAssetsResult, 'skyboxes' | 'orphanedSkyboxes' | 'localSkyboxes'>> {
   const localSkyboxes = await listSkyboxAssetsInRoot(getProjectSkyboxesRoot(projectRoot));
   let skyboxes = localSkyboxes;
   let orphanedSkyboxes: ProjectSkyboxAssetEntry[] = [];
@@ -924,7 +933,7 @@ async function loadProjectSkyboxAssets(
   }
 
   for (const skybox of [...skyboxes, ...orphanedSkyboxes]) authorizeAssetFile(skybox.path);
-  return { skyboxes, orphanedSkyboxes };
+  return { skyboxes, orphanedSkyboxes, localSkyboxes };
 }
 
 function reportDataPlatformSkyboxDiagnostics(errors: readonly DataPlatformSkyboxAssetDiagnostic[]): void {

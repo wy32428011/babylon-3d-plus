@@ -94,6 +94,8 @@ type ProjectAssetsLoadResult =
 
 type ProjectAssetsLoadOptions = {
   refreshModels?: boolean;
+  preserveResolvedSnapshots?: boolean;
+  preservePackagedEnvironment?: boolean;
   modelResourceKeys?: readonly string[] | null;
   modelSyncRunId?: string;
   refreshEnvironment?: boolean;
@@ -280,6 +282,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const sceneSessionIdRef = useRef(sceneSessionId);
   sceneSessionIdRef.current = sceneSessionId;
   const skyboxSyncControllerRef = useRef<SkyboxSyncController | null>(null);
+  const packagedSkyboxesRef = useRef<ProjectSkyboxAssetEntry[]>([]);
+  const preservePackagedSkyboxRef = useRef(true);
   const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshModelSyncRunIdRef = useRef<string | null>(null);
   const environmentSyncCompletedDismissTimerRef = useRef<number | null>(null);
@@ -456,6 +460,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     expectedSceneSessionId = sceneSessionIdRef.current,
     authoritativeSourceKey?: string,
     syncRunId?: string,
+    packagedAssets: ProjectModelAssetEntry[] = [],
   ): Promise<boolean> => {
     const refreshStartState = useEditorStore.getState();
     if (refreshStartState.sceneSessionId !== expectedSceneSessionId) return false;
@@ -466,6 +471,20 @@ export function ProjectPanel(props: ProjectPanelProps) {
       applyRequestId: refreshStartState.environmentApplyRequest?.id ?? null,
     };
     if (expectedEnvironmentState.applyRequestId) return false;
+
+    // 自动打开/后台同步使用工程包内已存在的原始环境，显式资源更新仍走下方刷新路径。
+    const normalizePath = (value: string) => value.replace(/\\/g, '/').toLowerCase();
+    const packagedEnvironment = packagedAssets.find(asset => asset.libraryKind === 'environment'
+      && /(?:^|\/)Assets\/Environments\//i.test(asset.path.replace(/\\/g, '/'))
+      && normalizePath(asset.packagePath ?? asset.path) === normalizePath(environment.packagePath));
+    if (packagedEnvironment) {
+      if (refreshStartState.environmentStartupRelinkSessionId !== expectedSceneSessionId) return true;
+      return requestEnvironmentApply(environment, {
+        autoAlign: false, focusAfterLoad: false, persistSceneChange: false,
+        runtimeEnvironment: environment, expectedSceneSessionId, expectedEnvironmentState,
+        successMessage: '已加载工程包中的环境，保留发布时的场景内容与烘焙阴影。',
+      }) !== null;
+    }
 
     const environmentAssets = assets.filter((asset) => asset.libraryKind === 'environment');
     const resourceId = getRequiredEnvironmentResourceIds(refreshStartState.scene)?.[0];
@@ -535,11 +554,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const relinkCurrentSkyboxFromAssets = useCallback((
     assets: ProjectSkyboxAssetEntry[],
     expectedSceneId: string,
+    preservePackagedSnapshot = false,
   ): SkyboxSyncApplyResult => {
     const beforeState = useEditorStore.getState();
     if (beforeState.scene.id !== expectedSceneId) return 'blocked';
     const activeSkybox = getSceneSkyboxSettings(beforeState.scene);
     if (!activeSkybox) return 'not-found';
+    if (preservePackagedSnapshot && packagedSkyboxesRef.current.some(asset =>
+      asset.path.replace(/\\/g, '/').toLowerCase() === activeSkybox.sourcePath.replace(/\\/g, '/').toLowerCase()
+      && asset.sourceUrl === activeSkybox.sourceUrl)) return 'unchanged';
     const matchedAsset = findSkyboxAssetForSettings(activeSkybox, assets);
     if (!matchedAsset) return 'not-found';
 
@@ -585,6 +608,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       }
 
       const loadedSkyboxes = result.skyboxes ?? [];
+      packagedSkyboxesRef.current = result.localSkyboxes ?? [];
       setProjectRoot(result.projectRoot);
       setSkyboxSyncContextBinding({
         sceneSessionId: requestSceneSessionId,
@@ -602,19 +626,25 @@ export function ProjectPanel(props: ProjectPanelProps) {
       refreshCurrentSkyboxAfterProjectAssetsLoad(
         options.refreshSkybox === true,
         loadedSkyboxes,
-        refreshCurrentSkyboxFromAssets,
+        assets => relinkCurrentSkyboxFromAssets(assets, useEditorStore.getState().scene.id,
+          options.preserveResolvedSnapshots === true) === 'applied',
       );
       if (options.refreshModels) {
-        const modelAssets = result.assets.filter((asset) => asset.libraryKind === 'model');
+        const modelAssets = (options.preserveResolvedSnapshots
+          ? [...result.assets, ...(result.localAssets ?? [])] : result.assets).filter((asset) => asset.libraryKind === 'model');
         const assetsToRefresh = filterProjectModelsForSyncRefresh(
           modelAssets,
           options.modelResourceKeys === undefined ? null : options.modelResourceKeys,
         );
         const freshAssets = modelSyncRevisionsRef.current.refresh(assetsToRefresh, options.modelSyncRunId);
-        if (freshAssets.length > 0) refreshModelInstancesFromAssets(freshAssets);
+        if (freshAssets.length > 0) refreshModelInstancesFromAssets(freshAssets, {
+          preserveResolvedSnapshots: options.preserveResolvedSnapshots,
+        });
       }
-      if (options.refreshEnvironment && !result.environmentSyncPending) {
-        await refreshCurrentEnvironmentFromAssets(result.assets, requestSceneSessionId, result.dataPlatformSourceKey, options.environmentSyncRunId);
+      if (options.refreshEnvironment && (!result.environmentSyncPending || options.preservePackagedEnvironment)) {
+        await refreshCurrentEnvironmentFromAssets(result.environmentSyncPending ? [] : result.assets,
+          requestSceneSessionId, result.dataPlatformSourceKey, options.environmentSyncRunId,
+          options.preservePackagedEnvironment ? result.localAssets : undefined);
       }
       return { ok: true, skyboxes: loadedSkyboxes };
     } catch (error) {
@@ -629,7 +659,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         setIsLoadingProjectAssets(false);
       }
     }
-  }, [pushLog, refreshCurrentEnvironmentFromAssets, refreshCurrentSkyboxFromAssets, refreshModelInstancesFromAssets]);
+  }, [pushLog, refreshCurrentEnvironmentFromAssets, relinkCurrentSkyboxFromAssets, refreshModelInstancesFromAssets]);
 
   /** 从主进程本地图片索引加载同步图片并登记，供图片库展示与拖拽校验使用。 */
   const loadSyncedImages = useCallback(async (): Promise<boolean> => {
@@ -716,6 +746,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
     setSkyboxSyncContextBinding({ sceneSessionId, key: null });
     setProjectAssets([]);
     setSkyboxAssets([]);
+    packagedSkyboxesRef.current = [];
+    preservePackagedSkyboxRef.current = true;
     setOrphanedSkyboxAssets([]);
     setSyncedCharts([]);
     setIsLoadingSyncedCharts(false);
@@ -727,6 +759,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
     beginSceneModelAssetRefresh(sceneSessionId, refreshId);
     const initialLoadPromise = loadProjectAssets({
       refreshModels: true,
+      preserveResolvedSnapshots: true,
+      preservePackagedEnvironment: true,
       refreshEnvironment: refreshStartupEnvironment,
       refreshSkybox: true,
     });
@@ -809,6 +843,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         const runtimeChangedResourceKeys = progress.runtimeChangedResourceKeys ?? null;
         const loaded = await loadProjectAssets({
           refreshModels: runtimeChangedResourceKeys === null || runtimeChangedResourceKeys.length > 0,
+          preserveResolvedSnapshots: true,
           modelResourceKeys: runtimeChangedResourceKeys,
           modelSyncRunId: progress.runId,
         });
@@ -881,7 +916,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         if (!result.ok) throw new Error(result.error);
         return result.skyboxes;
       },
-      applyAssets: (assets, sceneId) => relinkCurrentSkyboxFromAssets(assets, sceneId),
+      applyAssets: (assets, sceneId) => relinkCurrentSkyboxFromAssets(assets, sceneId, preservePackagedSkyboxRef.current),
       onStateChange: setSkyboxSyncState,
       onProgressLog: (progress) => {
         const phaseLabel = DATA_PLATFORM_SKYBOX_SYNC_PHASE_LABELS[progress.phase];
@@ -964,7 +999,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
               !await waitForInitialProjectAssetsLoad(progressSceneSessionId)
               || lastSceneRefreshEnvironmentSyncRunIdRef.current !== progress.runId
             ) return;
-            const loaded = await loadProjectAssets({ refreshEnvironment: true, environmentSyncRunId: progress.runId });
+            const loaded = await loadProjectAssets({ refreshEnvironment: true, environmentSyncRunId: progress.runId,
+              preservePackagedEnvironment: true });
             if (!loaded.ok && lastSceneRefreshEnvironmentSyncRunIdRef.current === progress.runId) {
               lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
               environmentPreparationStore.fail(progressSceneSessionId, `环境资源关联失败：${loaded.error}`);
@@ -1113,6 +1149,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   async function handleSyncDataPlatformSkyboxes(): Promise<void> {
     if (props.readOnly) return;
+    preservePackagedSkyboxRef.current = false;
     await skyboxSyncControllerRef.current?.start();
   }
 

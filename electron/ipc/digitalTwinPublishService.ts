@@ -264,7 +264,7 @@ export async function publishDigitalTwin(
       signal,
       skyboxCacheContext,
       skyboxValidationCache,
-      skipCadReferences: true,
+      skipCadReferences: false,
       isPlatformImageReference,
       findSyncedImageForReference,
       onProgress: (detail, completedFiles, totalFiles) => {
@@ -273,6 +273,10 @@ export async function publishDigitalTwin(
       },
     });
     appendUniqueWarnings(warnings, sourcePackage.warnings);
+    const omittedSourceResources = sourcePackage.omittedResources;
+    if (omittedSourceResources.length) {
+      throw new Error(`源工程包含未能打包的资源，无法完整保留编辑内容。请将这些资源导入当前项目后再发布：\n${omittedSourceResources.join('\n')}`);
+    }
 
     if (context.versionConflict && !validated.forceOverwrite) {
       const conflictCopyPath = await preserveConflictPackage(workspaceRoot, current.metadata.projectId, sourcePackage.filePath, 'version-conflict');

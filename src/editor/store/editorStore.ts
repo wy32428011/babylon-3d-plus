@@ -581,7 +581,7 @@ type EditorState = {
   createClickEventBinding: (placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
-  refreshModelInstancesFromAssets: (assets: AssetEntry[]) => number;
+  refreshModelInstancesFromAssets: (assets: AssetEntry[], options?: { preserveResolvedSnapshots?: boolean }) => number;
   importCadReference: () => Promise<void>;
   loadSceneAsset: (asset: AssetEntry) => Promise<void>;
   selectEntity: (entityId: string | null) => void;
@@ -1247,14 +1247,29 @@ function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetCompone
   );
 }
 
+/** 区分启动路径恢复与用户明确更新资源，避免索引修订覆盖完整场景快照。 */
+function findAssetForSceneRefresh(
+  modelAsset: Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl'>,
+  indexes: ReturnType<typeof createImportedAssetIndexes>,
+  preserveResolvedSnapshots: boolean,
+): AssetEntry | null {
+  const asset = findImportedAssetForModelAsset(modelAsset, indexes);
+  if (!asset || !preserveResolvedSnapshots) return asset;
+  const normalizePath = (value: string) => value.trim().replace(/\\/g, '/').toLowerCase();
+  // 打开工程只恢复失效路径，保留已解析文件对应的完整编辑快照和烘焙版本。
+  return normalizePath(modelAsset.sourcePath) === normalizePath(asset.path)
+    && modelAsset.sourceUrl === asset.sourceUrl ? null : asset;
+}
+
 /** 使用本轮导入资产刷新单个生成目标；内置 Mesh 和未匹配目标保持原值。 */
 function refreshModelGeneratorTargetFromImportedAssets(
   target: ModelGeneratorTarget | null,
   indexes: ReturnType<typeof createImportedAssetIndexes>,
+  preserveResolvedSnapshots = false,
 ): { target: ModelGeneratorTarget | null; refreshedCount: number } {
   if (!target || target.kind !== 'model') return { target, refreshedCount: 0 };
 
-  const importedAsset = findImportedAssetForModelAsset(target.modelAsset, indexes);
+  const importedAsset = findAssetForSceneRefresh(target.modelAsset, indexes, preserveResolvedSnapshots);
   if (!importedAsset) return { target, refreshedCount: 0 };
 
   const refreshedTarget = createModelGeneratorTargetFromAsset(importedAsset);
@@ -1266,11 +1281,12 @@ function refreshModelGeneratorTargetFromImportedAssets(
 function refreshModelGeneratorFromImportedAssets(
   modelGenerator: ModelGeneratorComponent,
   indexes: ReturnType<typeof createImportedAssetIndexes>,
+  preserveResolvedSnapshots = false,
 ): { modelGenerator: ModelGeneratorComponent; refreshedCount: number } {
-  const defaultResult = refreshModelGeneratorTargetFromImportedAssets(modelGenerator.defaultTarget, indexes);
+  const defaultResult = refreshModelGeneratorTargetFromImportedAssets(modelGenerator.defaultTarget, indexes, preserveResolvedSnapshots);
   let refreshedCount = defaultResult.refreshedCount;
   const rules = modelGenerator.rules.map((rule) => {
-    const result = refreshModelGeneratorTargetFromImportedAssets(rule.target, indexes);
+    const result = refreshModelGeneratorTargetFromImportedAssets(rule.target, indexes, preserveResolvedSnapshots);
     refreshedCount += result.refreshedCount;
     return result.target === rule.target ? rule : { ...rule, target: result.target };
   });
@@ -1290,6 +1306,7 @@ function refreshModelGeneratorFromImportedAssets(
 function refreshSceneModelAssetsFromImportedAssets(
   scene: SceneDocument,
   assets: AssetEntry[],
+  preserveResolvedSnapshots = false,
 ): { scene: SceneDocument; refreshedCount: number; detachedMotionInstanceCount: number } {
   const indexes = createImportedAssetIndexes(assets);
   let refreshedCount = 0;
@@ -1304,7 +1321,7 @@ function refreshSceneModelAssetsFromImportedAssets(
     let entityChanged = false;
     const modelAsset = entity.components.modelAsset;
     if (modelAsset) {
-      const importedAsset = findImportedAssetForModelAsset(modelAsset, indexes);
+      const importedAsset = findAssetForSceneRefresh(modelAsset, indexes, preserveResolvedSnapshots);
       if (importedAsset) {
         const refreshedModelAsset = createRefreshedModelAsset(modelAsset, importedAsset);
         if (!areModelAssetsEqual(modelAsset, refreshedModelAsset)) {
@@ -1317,10 +1334,10 @@ function refreshSceneModelAssetsFromImportedAssets(
 
     const alarmManager = entity.components.alarmManager;
     if (alarmManager) {
-      const appearance = refreshModelGeneratorTargetFromImportedAssets(alarmManager.appearanceModel, indexes);
+      const appearance = refreshModelGeneratorTargetFromImportedAssets(alarmManager.appearanceModel, indexes, preserveResolvedSnapshots);
       let alarmRefreshCount = appearance.refreshedCount;
       const targets = alarmManager.targets.map(slot => {
-        const result = refreshModelGeneratorTargetFromImportedAssets(slot.model, indexes);
+        const result = refreshModelGeneratorTargetFromImportedAssets(slot.model, indexes, preserveResolvedSnapshots);
         alarmRefreshCount += result.refreshedCount;
         return result.refreshedCount ? { ...slot, model: result.target } : slot;
       });
@@ -1332,7 +1349,7 @@ function refreshSceneModelAssetsFromImportedAssets(
     }
     const avatar = entity.components.manualRoamSpawn?.avatar;
     if (avatar) {
-      const importedAsset = findImportedAssetForModelAsset(avatar, indexes);
+      const importedAsset = findAssetForSceneRefresh(avatar, indexes, preserveResolvedSnapshots);
       if (importedAsset && (avatar.sourcePath !== importedAsset.path || avatar.sourceUrl !== importedAsset.sourceUrl
         || avatar.assetRevision !== importedAsset.assetRevision)) {
         components = { ...components, manualRoamSpawn: { avatar: {
@@ -1345,7 +1362,7 @@ function refreshSceneModelAssetsFromImportedAssets(
     }
     const modelGenerator = entity.components.modelGenerator;
     if (modelGenerator) {
-      const generatorResult = refreshModelGeneratorFromImportedAssets(modelGenerator, indexes);
+      const generatorResult = refreshModelGeneratorFromImportedAssets(modelGenerator, indexes, preserveResolvedSnapshots);
       if (generatorResult.refreshedCount > 0) {
         refreshedCount += generatorResult.refreshedCount;
         components = { ...components, modelGenerator: generatorResult.modelGenerator };
@@ -1363,6 +1380,8 @@ function refreshSceneModelAssetsFromImportedAssets(
     if (!entity || !sourceEntityId) continue;
 
     const sourceEntity = entities[sourceEntityId];
+    if (preserveResolvedSnapshots && entity === scene.entities[entityId]
+      && sourceEntity === scene.entities[sourceEntityId]) continue;
     if (
       !hasModelDataDrivenMotionKey(entity.components.modelAsset?.dataDrivenConfig)
       && !hasModelDataDrivenMotionKey(sourceEntity?.components.modelAsset?.dataDrivenConfig)
@@ -3989,12 +4008,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  refreshModelInstancesFromAssets: (assets) => {
+  refreshModelInstancesFromAssets: (assets, options = {}) => {
     let refreshedCount = 0;
 
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '刷新模型实例');
-      const refreshResult = refreshSceneModelAssetsFromImportedAssets(state.scene, assets);
+      const refreshResult = refreshSceneModelAssetsFromImportedAssets(state.scene, assets, options.preserveResolvedSnapshots);
       refreshedCount = refreshResult.refreshedCount;
       if (refreshResult.scene === state.scene) return state;
 

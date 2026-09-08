@@ -14,3 +14,6 @@ dist-viewer-template/
 output/
 .babylon-editor
 /Assets/
+.codex-remote-env
+.tmp-download-ui
+.remote-audit-temp

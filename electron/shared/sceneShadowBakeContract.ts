@@ -46,6 +46,10 @@ function stableJson(value: unknown): string {
 
 /** 双 32 位摘要用于变更检测；完整资源路径和修订参与摘要，防止同名资源被误复用。 */
 export function getSceneShadowBakeSignatureContract(value: unknown): string {
+  return computeSceneShadowBakeSignature(value, false);
+}
+
+function computeSceneShadowBakeSignature(value: unknown, portableReferences: boolean): string {
   const document = object(value);
   const settings = object(document.sceneSettings);
   const shadows = object(settings.shadows);
@@ -80,7 +84,7 @@ export function getSceneShadowBakeSignatureContract(value: unknown): string {
       light: components.light,
     };
   }).filter(Boolean);
-  const source = stableJson({
+  const signatureInput = {
     version: 2,
     environment: settings.environment ? {
       packagePath: environment.packagePath, activeVariantUrl: environment.activeVariantUrl,
@@ -94,7 +98,8 @@ export function getSceneShadowBakeSignatureContract(value: unknown): string {
     sunAzimuthDegrees: shadows.sunAzimuthDegrees, sunElevationDegrees: shadows.sunElevationDegrees,
     darkness: shadows.darkness,
     bias: shadows.bias, normalBias: shadows.normalBias,
-  });
+  };
+  const source = stableJson(portableReferences ? normalizeShadowAssetLocations(signatureInput) : signatureInput);
   let first = 0x811c9dc5;
   let second = 0x9e3779b9;
   for (let index = 0; index < source.length; index += 1) {
@@ -103,6 +108,41 @@ export function getSceneShadowBakeSignatureContract(value: unknown): string {
     second = Math.imul(second ^ code, 0x85ebca6b);
   }
   return `shadow-v1-${(first >>> 0).toString(16).padStart(8, '0')}${(second >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+/** 仅供受控的工程搬迁调用；旧结果有效、资源身份和全部阴影相关配置相同才迁移签名。 */
+export function captureSceneShadowBakeRelocation(value: unknown): ((relocated: unknown) => boolean) | null {
+  const settings = object(object(value).sceneSettings);
+  const bake = sanitizeSceneShadowBake(object(settings.shadows).bake);
+  if (!bake || bake.signature !== getSceneShadowBakeSignatureContract(value)) return null;
+  const expectedSignature = computeSceneShadowBakeSignature(value, true);
+  return (relocated) => {
+    const shadows = object(object(object(relocated).sceneSettings).shadows);
+    const targetBake = object(shadows.bake);
+    if (targetBake.signature !== bake.signature || targetBake.createdAt !== bake.createdAt
+      || computeSceneShadowBakeSignature(relocated, true) !== expectedSignature) return false;
+    shadows.bake = { ...targetBake, signature: getSceneShadowBakeSignatureContract(relocated) };
+    return true;
+  };
+}
+
+/** 便携 Assets 路径保留包名和文件名；共享环境缓存按稳定资源 ID 对应到 SOURCE 内目录。 */
+function normalizeShadowAssetLocations(value: unknown): unknown {
+  if (typeof value === 'string') {
+    let reference = value;
+    if (reference.startsWith('editor-asset://local/')) {
+      try { reference = decodeURIComponent(new URL(reference).pathname.slice(1)); } catch { return value; }
+    } else if (/^[a-z][a-z\d+.-]*:/i.test(reference) && !/^[a-z]:[\\/]/i.test(reference)) return value;
+    reference = reference.replace(/\\/g, '/').replace(/\/$/, '');
+    const cache = /(?:^|\/)\.babylon-editor\/data-platform-cache\/environments\/[^/]+\/([^/]+)\/[^/]+(?:\/(.*))?$/i.exec(reference);
+    if (cache) return `Assets/Environments/Env-${cache[1]}${cache[2] ? `/${cache[2]}` : ''}`;
+    const asset = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images)(?:\/.*|$))/i.exec(reference);
+    return asset ? asset[1] : value;
+  }
+  if (Array.isArray(value)) return value.map(normalizeShadowAssetLocations);
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value)
+    .map(([key, child]) => [key, normalizeShadowAssetLocations(child)]));
+  return value;
 }
 
 /** 没有环境接收面的场景无需烘焙；显式实时模式沿用现有发布路径。 */

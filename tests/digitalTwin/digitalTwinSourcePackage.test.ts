@@ -8,9 +8,89 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { prepareSourceSceneEnvironment } from '../../electron/ipc/digitalTwinSourceEnvironmentRelink.ts';
 import { buildDigitalTwinSourcePackage } from '../../electron/ipc/digitalTwinSourcePackage.ts';
+import { captureSceneShadowBakeRelocation, getSceneShadowBakeSignatureContract, getSceneShadowBakeErrorContract } from '../../electron/shared/sceneShadowBakeContract.ts';
+import { relocateDataPlatformScene } from '../../electron/ipc/dataPlatformSceneRelocation.ts';
 
 const require = createRequire(import.meta.url);
 const NO_SKYBOX_CACHE = { getSharedProjectSkyboxRoot: () => null };
+
+test('SOURCE往返保留全部场景内容和有效烘焙，资源搬迁不应使阴影过期', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'zending-source-shadow-roundtrip-'));
+  const projectRoot = path.join(root, 'original');
+  const scenePath = path.join(projectRoot, 'Scenes', 'main.scene.json');
+  const modelPath = path.join(projectRoot, 'Assets', 'Models', 'Pump', 'main.glb');
+  const envPath = path.join(projectRoot, 'Assets', 'Environments', 'Floor', 'floor.glb');
+  const cadPath = path.join(projectRoot, 'Assets', 'Cad', 'drawing.dxf');
+  const imagePath = path.join(projectRoot, 'Assets', 'Images', 'marker.png');
+  const url = (value: string) => `editor-asset://local/${encodeURIComponent(value)}`;
+  const dataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5i8AAAAASUVORK5CYII=';
+  const scene: any = {
+    name: '包含完整编辑内容的场景', entityIds: ['pump', 'cad'], selectedEntityId: 'pump',
+    entities: {
+      pump: { id: 'pump', components: { transform: { position: { x: 1, y: 2, z: 3 } },
+        modelAsset: { sourcePath: modelPath, sourceUrl: url(modelPath), assetRevision: 'saved-revision', parameterValues: { length: 9, custom: '保留' } },
+        telemetryBinding: { enabled: true }, clickEventBinding: { action: 'saved-action' } } },
+      cad: { id: 'cad', components: { cadReference: { name: '参考图', sourcePath: cadPath, sourceUrl: url(cadPath), geometry: { lines: [[0, 0, 1, 1]] } } } },
+    },
+    sceneSettings: { environment: { packagePath: path.dirname(envPath), activeVariantUrl: url(envPath),
+      variants: [{ name: 'floor', sourcePath: envPath, sourceUrl: url(envPath) }] },
+      shadows: { enabled: true, mode: 'baked', darkness: .4 }, camera: { savedPose: { position: [1, 2, 3] } } },
+    metadata: { futureEditorContent: { enabled: true, values: ['不会被字段白名单丢弃'] }, customImage: url(imagePath) },
+  };
+  scene.sceneSettings.shadows.bake = { version: 1, signature: getSceneShadowBakeSignatureContract(scene), createdAt: '2026-09-08T00:00:00Z', surfaces: [
+    { key: '0:floor', kind: 'shadow-mask', dataUrl, width: 1, height: 1, uvBounds: [0, 0, 1, 1] },
+    { key: '1:floor', kind: 'shadow-mask', textureRef: '0:floor', dataUrl: '', width: 1, height: 1, uvBounds: [1, 0, 2, 1] },
+  ] };
+  try {
+    for (const file of [scenePath, modelPath, envPath, cadPath, imagePath]) await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(modelPath, 'model'); await writeFile(envPath, 'environment');
+    await writeFile(cadPath, 'cad'); await writeFile(imagePath, 'image');
+    await writeFile(scenePath, JSON.stringify({ version: 3, scene }));
+    const result = await buildDigitalTwinSourcePackage({ projectRoot, sharedResourcesRoot: path.join(root, 'shared'), entrySceneFilePath: scenePath,
+      outputRoot: path.join(root, 'output'), manifest: { projectId: '42', projectName: '保留场景', editorProjectId: null, baseVersionId: null, resourceRevision: '1' },
+      signal: new AbortController().signal, isPlatformImageReference: () => false, findSyncedImageForReference: async () => null, skyboxCacheDependencies: NO_SKYBOX_CACHE });
+    const archive = await unzipper.Open.file(result.filePath);
+    const packaged = JSON.parse((await archive.files.find(file => file.path.replace(/\\/g, '/') === 'Scenes/main.scene.json')!.buffer()).toString('utf8')).scene;
+    assert.equal(getSceneShadowBakeErrorContract(packaged), null, '纯路径转换不能使已烘焙阴影失效');
+    assert.deepEqual(packaged.sceneSettings.shadows.bake.surfaces, scene.sceneSettings.shadows.bake.surfaces);
+    const portable = (value: string) => value.replace(/\\/g, '/').slice(value.replace(/\\/g, '/').indexOf('Assets/'));
+    const expected = structuredClone(scene);
+    expected.entities.pump.components.modelAsset.sourcePath = portable(modelPath);
+    expected.entities.pump.components.modelAsset.sourceUrl = url(portable(modelPath));
+    expected.entities.cad.components.cadReference.sourcePath = portable(cadPath);
+    expected.entities.cad.components.cadReference.sourceUrl = url(portable(cadPath));
+    expected.metadata.customImage = url(portable(imagePath));
+    expected.sceneSettings.environment.packagePath = portable(path.dirname(envPath));
+    expected.sceneSettings.environment.activeVariantUrl = url(portable(envPath));
+    expected.sceneSettings.environment.variants[0].sourcePath = portable(envPath);
+    expected.sceneSettings.environment.variants[0].sourceUrl = url(portable(envPath));
+    expected.sceneSettings.shadows.bake.signature = getSceneShadowBakeSignatureContract(expected);
+    assert.deepEqual(packaged, expected, '除了资源位置和对应签名，SOURCE必须保留完整场景对象');
+    assert.deepEqual(packaged.entities.pump.components.modelAsset.parameterValues, scene.entities.pump.components.modelAsset.parameterValues);
+    assert.deepEqual(packaged.sceneSettings.camera, scene.sceneSettings.camera);
+    assert.ok(archive.files.some(file => file.path.replace(/\\/g, '/') === 'Assets/Cad/drawing.dxf'));
+    assert.ok(archive.files.some(file => file.path.replace(/\\/g, '/') === 'Assets/Images/marker.png'));
+    const reopened = (relocateDataPlatformScene({ version: 3, scene: packaged }, path.join(root, 'another-computer')) as any).scene;
+    assert.equal(getSceneShadowBakeErrorContract(reopened), null, '同步打开到不同工作区后烘焙必须仍有效');
+    assert.deepEqual(reopened.sceneSettings.shadows.bake.surfaces, scene.sceneSettings.shadows.bake.surfaces);
+    assert.equal(reopened.entities.cad.components.cadReference.sourcePath, path.join(root, 'another-computer', 'Assets', 'Cad', 'drawing.dxf'));
+    assert.equal(reopened.metadata.customImage, url(path.join(root, 'another-computer', 'Assets', 'Images', 'marker.png')));
+    assert.deepEqual((relocateDataPlatformScene({ scene: reopened }, projectRoot) as any).scene, scene, '迁回原工作区后完整场景应逐字段一致');
+    const stale = structuredClone(scene); stale.entities.pump.components.transform.position.x++;
+    const staleSignature = stale.sceneSettings.shadows.bake.signature;
+    const staleReopened = (relocateDataPlatformScene({ scene: stale }, path.join(root, 'stale')) as any).scene;
+    assert.equal(staleReopened.sceneSettings.shadows.bake.signature, staleSignature, '过期烘焙不得因换目录被洗成有效');
+    for (const change of ['revision', 'parameter', 'resource', 'sun']) {
+      const restore = captureSceneShadowBakeRelocation(scene), changed = structuredClone(reopened);
+      changed.sceneSettings.shadows.bake.signature = scene.sceneSettings.shadows.bake.signature;
+      if (change === 'revision') changed.entities.pump.components.modelAsset.assetRevision = 'new-version';
+      if (change === 'parameter') changed.entities.pump.components.modelAsset.parameterValues.length++;
+      if (change === 'resource') changed.entities.pump.components.modelAsset.sourcePath = 'Assets/Models/Other/main.glb';
+      if (change === 'sun') changed.sceneSettings.shadows.sunAzimuthDegrees = 90;
+      assert.equal(restore!(changed), false, `${change}变化不能复用旧烘焙`);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 const unzipper = require('unzipper') as { Open: { file: (filePath: string) => Promise<{ files: Array<{ path: string; buffer: () => Promise<Buffer> }> }> } };
 
@@ -141,6 +221,7 @@ test('源工程包对项目和共享缓存外的资源仅警告并继续打包�
         valid: { components: { modelAsset: { sourcePath: validPath } } },
         external: { components: { modelAsset: { sourcePath: externalPath, sourceUrl: `editor-asset://local/${encodeURIComponent(externalPath)}` } } },
         missing: { components: { modelAsset: { sourcePath: path.join(root, 'missing', 'Assets', 'Models', 'Missing', 'main.glb') } } },
+        unbundled: { components: { modelAsset: { sourcePath: path.join(root, 'external', 'device.glb') } } },
       },
     } }));
     const result = await buildDigitalTwinSourcePackage({
@@ -154,6 +235,7 @@ test('源工程包对项目和共享缓存外的资源仅警告并继续打包�
     });
     assert.ok(result.warnings.some((warning) => warning.includes('链条机') && warning.includes('已跳过')));
     assert.ok(result.warnings.some((warning) => warning.includes('Missing')));
+    assert.ok(result.omittedResources.some(resource => resource.endsWith('device.glb')), 'Assets目录之外的明确本地模型也必须计入遗漏资源');
     assert.equal(result.warnings.filter((warning) => warning.includes('链条机')).length, 1);
     const archive = await unzipper.Open.file(result.filePath);
     const paths = archive.files.map((entry) => entry.path.replace(/\\/g, '/'));
@@ -337,7 +419,15 @@ test('源工程包复制数据中台环境缓存并将场景引用改写为便�
         },
       },
     }), 'utf8');
-    const result = await buildDigitalTwinSourcePackage({
+    const bakedInput = JSON.parse(await readFile(scenePath, 'utf8'));
+    Object.assign(bakedInput.scene.sceneSettings.environment, { source: 'data-platform', resourceType: 'ENV_MODEL',
+      dataPlatformSourceKey: sourceKey, dataPlatformResourceId: resourceId, dataPlatformRevision: runtimeRevision });
+    bakedInput.scene.sceneSettings.shadows = { enabled: true, mode: 'baked' };
+    bakedInput.scene.sceneSettings.shadows.bake = { version: 1, signature: getSceneShadowBakeSignatureContract(bakedInput.scene), createdAt: '2026-09-08T00:00:00Z', surfaces: [
+      { key: '0:floor', kind: 'shadow-mask', dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5i8AAAAASUVORK5CYII=', width: 1, height: 1, uvBounds: [0, 0, 1, 1] },
+    ] };
+    await writeFile(scenePath, JSON.stringify(bakedInput));
+    const build = () => buildDigitalTwinSourcePackage({
       projectRoot,
       sharedResourcesRoot: sharedRoot,
       entrySceneFilePath: scenePath,
@@ -355,6 +445,7 @@ test('源工程包复制数据中台环境缓存并将场景引用改写为便�
       skyboxCacheDependencies: NO_SKYBOX_CACHE,
     });
 
+    const result = await build();
     const archive = await unzipper.Open.file(result.filePath);
     const paths = archive.files.map((entry) => entry.path.replace(/\\/g, '/'));
     assert.ok(paths.includes(portableModelPath));
@@ -374,6 +465,14 @@ test('源工程包复制数据中台环境缓存并将场景引用改写为便�
     assert.equal(environment.dataPlatformResourceId, resourceId);
     assert.equal(environment.dataPlatformSourceKey, sourceKey);
     assert.equal(environment.dataPlatformRevision, runtimeRevision);
+    const portableScene = JSON.parse(sceneContent).scene;
+    assert.equal(getSceneShadowBakeErrorContract(portableScene), null, '共享缓存转为包内资源后保持有效烘焙');
+    const relocated = relocateDataPlatformScene({ scene: portableScene }, path.join(root, 'reopened')) as any;
+    assert.equal(getSceneShadowBakeErrorContract(relocated.scene), null);
+    bakedInput.scene.sceneSettings.environment.dataPlatformRevision = '7645194092844337572';
+    bakedInput.scene.sceneSettings.shadows.bake.signature = getSceneShadowBakeSignatureContract(bakedInput.scene);
+    await writeFile(scenePath, JSON.stringify(bakedInput));
+    await assert.rejects(build(), /资源版本在源工程准备过程中发生变化/, '准备阶段真实资源变更不能偷偷发布失效烘焙');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

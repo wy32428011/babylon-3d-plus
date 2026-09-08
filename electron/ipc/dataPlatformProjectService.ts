@@ -16,6 +16,7 @@ import type {
 } from '../types.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
 import { getRequiredEnvironmentResourceIds } from '../shared/sceneEnvironmentReferences.js';
+import { relocateDataPlatformScene } from './dataPlatformSceneRelocation.js';
 import { cancelDataPlatformModelSync } from './dataPlatformModelIncrementalSync.js';
 import { cancelDataPlatformEnvironmentSync } from './dataPlatformEnvironmentSync.js';
 import { disposeEnvironmentFileValidation } from './environmentFileValidation.js';
@@ -89,9 +90,6 @@ const DATA_PLATFORM_WORKSPACE_DIRECTORY = 'data-platform-workspace';
 const TEST_STORAGE_ROOT_ENV = 'ZENDING_EDITOR_STORAGE_ROOT';
 const TEST_STORAGE_OVERRIDE_GUARD_ENV = 'ZENDING_ALLOW_STORAGE_ROOT_OVERRIDE';
 const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
-const SCENE_PATH_KEYS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path']);
-const SCENE_URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl']);
-const SCENE_PATH_ARRAY_KEYS = new Set(['scriptPaths']);
 const DIGITAL_TWIN_SOURCE_MANIFEST_PATH = '.babylon-editor/digital-twin-source-manifest.json';
 const MAX_PROJECT_SCENE_FILES = 1_000;
 const PROJECT_TEXT_HEAP_EXPANSION_FACTOR = 16n;
@@ -902,7 +900,7 @@ async function materializeCurrentProjectPackage(options: {
 }
 async function rewriteSceneForEditorRoot(sceneSourcePath: string, editorRoot: string): Promise<string> {
   const parsed = await readProjectPackageJson(sceneSourcePath, '工程包场景');
-  const rewritten = rewriteSceneValue(parsed, null, editorRoot);
+  const rewritten = relocateDataPlatformScene(parsed, editorRoot);
   return `${JSON.stringify(rewritten, null, 2)}\n`;
 }
 
@@ -929,47 +927,6 @@ function assertProjectPackageHeapCapacity(sourceBytes: bigint, label: string): v
   }
 }
 
-function rewriteSceneValue(value: unknown, key: string | null, editorRoot: string): unknown {
-  if (typeof value === 'string') {
-    if (key && SCENE_URL_KEYS.has(key)) return rewriteSceneAssetUrl(value, editorRoot);
-    if (key && SCENE_PATH_KEYS.has(key)) return rewriteSceneAssetPath(value, editorRoot) ?? value;
-    return value;
-  }
-  if (Array.isArray(value)) {
-    if (key && SCENE_PATH_ARRAY_KEYS.has(key)) {
-      return value.map((item) => typeof item === 'string' ? rewriteSceneAssetPath(item, editorRoot) ?? item : item);
-    }
-    return value.map((item) => rewriteSceneValue(item, key, editorRoot));
-  }
-  if (!isPlainObject(value)) return value;
-
-  const rewritten: Record<string, unknown> = {};
-  for (const [childKey, childValue] of Object.entries(value)) {
-    rewritten[childKey] = rewriteSceneValue(childValue, childKey, editorRoot);
-  }
-  return rewritten;
-}
-
-function rewriteSceneAssetUrl(value: string, editorRoot: string): string {
-  if (!value.startsWith(LOCAL_ASSET_URL_PREFIX)) return value;
-  try {
-    const decoded = decodeURIComponent(value.slice(LOCAL_ASSET_URL_PREFIX.length));
-    const rewrittenPath = rewriteSceneAssetPath(decoded, editorRoot);
-    return rewrittenPath ? encodeAssetUrl(rewrittenPath) : value;
-  } catch {
-    return value;
-  }
-}
-
-function rewriteSceneAssetPath(value: string, editorRoot: string): string | null {
-  const normalized = value.trim().replace(/\\/g, '/');
-  const match = normalized.match(/(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes)(?:\/.*|$))/i);
-  if (!match) return null;
-  const relativeAssetPath = path.posix.normalize(match[1]);
-  if (!/^Assets\/(?:Models|Environments|Skyboxes)(?:\/|$)/i.test(relativeAssetPath)) return null;
-  const targetPath = path.resolve(editorRoot, ...relativeAssetPath.split('/'));
-  return isPathInside(editorRoot, targetPath) ? targetPath : null;
-}
 
 async function scanCurrentModelLibrary(editorRoot: string): Promise<{ assets: ProjectModelAssetEntry[]; skipped: string[] }> {
   const assets: ProjectModelAssetEntry[] = [];

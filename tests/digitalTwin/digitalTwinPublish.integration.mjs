@@ -174,7 +174,7 @@ function createSceneContent() {
       entities: {
         'cad-reference': {
           id: 'cad-reference',
-          name: '发布时跳过的 CAD',
+          name: '源工程保留的 CAD',
           components: {
             transform: {
               position: { x: 0, y: 0, z: 0 },
@@ -182,8 +182,7 @@ function createSceneContent() {
               scale: { x: 1, y: 1, z: 1 },
             },
             cadReference: {
-              sourcePath: 'C:\\missing-digital-twin-cad\\layout.dxf',
-              sourceUrl: 'editor-asset://local/C%3A%5Cmissing-digital-twin-cad%5Clayout.dxf',
+              geometry: { lines: [[0, 0, 1, 1]] },
             },
           },
         },
@@ -1026,6 +1025,8 @@ async function run() {
     assert.equal(selectedProjectResult.status, 'completed');
     const selectedSourceEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'SOURCE'));
     const selectedSourceScene = JSON.parse(selectedSourceEntries.get('Scenes/main.scene.json').toString('utf8'));
+    assert.deepEqual(selectedSourceScene.scene.entities['cad-reference'], JSON.parse(sceneContent).scene.entities['cad-reference'],
+      '发布SOURCE必须保留CAD编辑内容，不能沿用Viewer裁剪策略');
     assert.deepEqual(selectedSourceScene.scene.fetchConfig, PUBLISHED_FETCH_CONFIG);
     const selectedDistEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'DIST'));
     const selectedRuntimeConfig = JSON.parse(selectedDistEntries.get('runtime-config.json').toString('utf8'));
@@ -1337,6 +1338,14 @@ async function run() {
         },
       },
     }));
+    await assert.rejects(publishModule.publishDigitalTwin(
+      createPublishRequest('incomplete-source-must-stop', sceneContent, { confirmResourceBindings: true }),
+      new AbortController().signal,
+      () => undefined,
+    ), /无法完整保留编辑内容/);
+    assert.equal(mock.requests.some(request => request.path.endsWith('/publish-tasks/prepare')), false,
+      '无法完整打包的工程必须在上传前停止');
+    await rm(path.join(projectRoot, 'Scenes', 'external-resource.scene.json'));
     const successResult = await publishModule.publishDigitalTwin(
       createPublishRequest(SUCCESS_REQUEST_ID, sceneContent, { confirmResourceBindings: true }),
       new AbortController().signal,
@@ -1349,7 +1358,6 @@ async function run() {
     assert.match(successResult.stableUrl, /\/digital-twin\/projects\//);
     assert.match(successResult.releaseUrl, /\/digital-twin\/releases\//);
     assert.ok(successResult.warnings.some((warning) => warning.includes('CAD 参考图')));
-    assert.ok(successResult.warnings.some((warning) => warning.includes('OldChain') && warning.includes('已跳过')));
     assert.ok(successResult.warnings.some((warning) => warning.includes('刷新远端项目状态失败')));
     for (const phase of ['saving', 'source-package', 'dist-package', 'prepare', 'upload-source', 'upload-dist', 'commit', 'completed']) {
       assert.ok(successProgress.some((progress) => progress.phase === phase), `缺少发布进度阶段：${phase}`);
@@ -1558,7 +1566,8 @@ async function run() {
         'local-active-state-without-network',
         'overwrite-confirmation',
         'prepare-source-dist',
-        'skip-missing-cad',
+        'source-cad-preserved-and-dist-runtime-trimmed',
+        'incomplete-source-blocked-before-upload',
         'resume-uploaded-chunks',
         'transient-chunk-retry',
         'permanent-upload-failure-cancel',
