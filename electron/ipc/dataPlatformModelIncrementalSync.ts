@@ -179,8 +179,16 @@ export type RecoverDataPlatformModelAssetsOptions = {
   dependencies?: Partial<ModelSyncDependencies>;
 };
 
+export type SyncSceneDataPlatformModelAssetsOptions = RecoverDataPlatformModelAssetsOptions;
+
+export type SceneSyncedModelAsset = ProjectModelAssetEntry & {
+  dataPlatformSourceKey: string;
+  dataPlatformResourceId: string;
+};
+
 type TargetedModelSyncOptions = ExecuteDataPlatformModelSyncOptions & {
   requiredResources?: readonly DataPlatformModelRecoveryResource[];
+  queriedRecords?: SyncModelRecord[];
   onProgress?: (message: string) => void;
 };
 
@@ -250,6 +258,15 @@ export function getLatestDataPlatformModelSyncProgress(): DataPlatformModelSyncP
 export function clearDataPlatformModelSyncRetryContext(): void {
   lastModelSyncContext = null;
   queuedModelSyncContext = null;
+}
+
+/** 退出项目时等待旧同步释放并清空进度，允许下一项目重新启动同步。 */
+export async function resetDataPlatformModelSyncSession(): Promise<void> {
+  clearDataPlatformModelSyncRetryContext();
+  const active = activeModelSync;
+  active?.controller.abort();
+  if (active) await active.promise;
+  latestModelSyncProgress = null;
 }
 
 export async function disposeDataPlatformModelSync(): Promise<void> {
@@ -348,6 +365,122 @@ export async function recoverDataPlatformModelAssets(
   }, options.signal);
 }
 
+/** 打开场景时定向更新模型，并返回不可变的版本副本，保留旧场景引用的文件。 */
+export async function syncSceneDataPlatformModelAssets(
+  options: SyncSceneDataPlatformModelAssetsOptions,
+): Promise<SceneSyncedModelAsset[]> {
+  const unique = new Map<string, DataPlatformModelRecoveryResource>();
+  if (options.resources.length > 1_000) throw new Error('场景模型同步资源数量超过 1000 项限制。');
+  for (const resource of options.resources) {
+    if (resource.kind !== 'model' && resource.kind !== 'combo') throw new Error('场景模型同步资源类型无效。');
+    const resourceId = normalizeRequiredId(resource.resourceId, '场景同步模型', unique.size);
+    const normalized = { kind: resource.kind, resourceId };
+    unique.set(resourceKey(normalized), normalized);
+  }
+  const signal = options.signal ?? new AbortController().signal;
+  assertNotAborted(signal);
+  if (!unique.size) return [];
+  const baseUrl = normalizeDataPlatformSourceUrl(options.baseUrl);
+  const sourceKey = createDataPlatformModelSourceKey(baseUrl);
+  const sharedRoot = path.resolve(options.sharedResourcesRoot);
+  const cacheRoot = path.join(sharedRoot, '.babylon-editor', 'scene-model-sync', sourceKey);
+  const versionRoot = path.join(sharedRoot, '.babylon-editor', 'scene-model-versions', sourceKey);
+  assertPathInside(sharedRoot, cacheRoot, '场景模型同步缓存');
+  assertPathInside(sharedRoot, versionRoot, '场景模型版本缓存');
+  const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+  const requiredResources = [...unique.values()];
+  return queueModelSync(async () => {
+    const before = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
+    await runDataPlatformModelSync({
+      baseUrl, editorRoot: cacheRoot, requiredResources, queriedRecords: before,
+      signal, onProgress: options.onProgress, dependencies,
+    });
+    const after = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
+    // 包括无修订字段的旧接口：至少拒绝下载期间可观察到的 URL、文件名和脚本定义变化。
+    const beforeByKey = new Map(before.map((record) => [resourceKey(record), hashFingerprint(record)]));
+    if (after.some((record) => beforeByKey.get(resourceKey(record)) !== hashFingerprint(record))) {
+      throw new Error('数据中台模型在同步期间版本或资源描述发生变化，请重试。');
+    }
+    assertNotAborted(signal);
+    const [assetIndex, modelIndex] = await Promise.all([
+      dependencies.readAssetIndex(cacheRoot), readDataPlatformModelIndex(cacheRoot),
+    ]);
+    const assets = createManagedAssetMap(assetIndex.assets);
+    const entries = new Map(modelIndex.entries.map((entry) => [resourceKey(entry), entry]));
+    const result: SceneSyncedModelAsset[] = [];
+    for (const resource of requiredResources) {
+      assertNotAborted(signal);
+      const key = resourceKey(resource);
+      const asset = assets.get(key);
+      const entry = entries.get(key);
+      if (!asset || !entry) throw new Error(`场景模型同步后的资产索引不完整：${key}`);
+      const pinned = await pinSceneModelVersion(asset, entry, cacheRoot, versionRoot, signal);
+      result.push({ ...pinned, dataPlatformSourceKey: sourceKey, dataPlatformResourceId: resource.resourceId });
+    }
+    assertNotAborted(signal);
+    return result;
+  }, signal);
+}
+
+async function pinSceneModelVersion(
+  asset: ProjectModelAssetEntry,
+  entry: DataPlatformModelIndexEntry,
+  cacheRoot: string,
+  versionRoot: string,
+  signal: AbortSignal,
+): Promise<ProjectModelAssetEntry> {
+  const sourcePackage = resolvePackageRelativePath(cacheRoot, entry.packageRelativePath);
+  // 运行内容修订不含主文件名称与缩略图，布局或缩略图变化也不能覆盖旧场景的固定包。
+  const layoutKey = hashFingerprint({
+    mainFile: path.basename(asset.path),
+    thumbnailPath: asset.thumbnailPath ? path.relative(sourcePackage, asset.thumbnailPath).replace(/\\/g, '/') : null,
+    thumbnailRevision: entry.thumbnailRevision,
+  }).slice(0, 12);
+  const targetPackage = path.join(versionRoot, entry.runtimeRevision, 'Assets', 'Models', `${path.basename(sourcePackage)}-${layoutKey}`);
+  assertPathInside(versionRoot, targetPackage, '固定模型版本目录');
+  const pinned = relocateAssetEntry(asset, sourcePackage, targetPackage, entry);
+  const verify = async (candidate: ProjectModelAssetEntry) => {
+    assertNotAborted(signal);
+    if (!candidate.metadataPath) throw new Error(`场景模型缺少元数据：${entry.displayName}`);
+    const packageFiles = [candidate.path, candidate.metadataPath, ...(candidate.scriptPaths ?? []),
+      ...(candidate.thumbnailPath ? [candidate.thumbnailPath] : [])];
+    if (!await arePackageFilesAvailable(candidate.packagePath!, packageFiles)) {
+      throw new Error(`场景模型版本文件不完整：${entry.displayName}`);
+    }
+    const revision = await createDataPlatformModelRuntimeRevision({
+      modelPath: candidate.path, metadataPath: candidate.metadataPath,
+      scriptPaths: candidate.scriptPaths ?? [], thumbnailPath: candidate.thumbnailPath ?? null,
+    });
+    if (revision.runtimeRevision !== entry.runtimeRevision || revision.thumbnailRevision !== entry.thumbnailRevision) {
+      throw new Error(`场景模型缓存内容与版本不一致：${entry.displayName}`);
+    }
+  };
+  await verify(asset);
+  if (await pathExists(targetPackage)) {
+    await verify(pinned);
+    return pinned;
+  }
+  const stagingPackage = `${targetPackage}.pending-${randomUUID()}`;
+  assertPathInside(versionRoot, stagingPackage, '固定模型版本暂存目录');
+  try {
+    await fs.mkdir(path.dirname(targetPackage), { recursive: true });
+    await fs.cp(sourcePackage, stagingPackage, {
+      recursive: true, force: false, errorOnExist: true,
+      filter: async (source) => {
+        assertNotAborted(signal);
+        if ((await fs.lstat(source)).isSymbolicLink()) throw new Error('场景模型包不能包含符号链接。');
+        return true;
+      },
+    });
+    await verify(relocateAssetEntry(asset, sourcePackage, stagingPackage, entry));
+    assertNotAborted(signal);
+    await renamePathWithWindowsRetry(stagingPackage, targetPackage);
+    return pinned;
+  } finally {
+    await fs.rm(stagingPackage, { recursive: true, force: true });
+  }
+}
+
 async function queryRequiredModels(
   baseUrl: string,
   resources: readonly DataPlatformModelRecoveryResource[],
@@ -359,14 +492,14 @@ async function queryRequiredModels(
     assertNotAborted(signal);
     const endpointPath = resource.kind === 'model' ? 'api/v1/models/detail' : 'api/v1/combo-models/detail';
     const response = await requestJson({ baseUrl, endpointPath, body: { id: resource.resourceId }, signal,
-      timeoutMs: QUERY_TIMEOUT_MS, context: '查询发布恢复模型 ' + resourceKey(resource) });
+      timeoutMs: QUERY_TIMEOUT_MS, context: '查询数据中台模型 ' + resourceKey(resource) });
     if (!isPlainObject(response) || response.success !== true || !isPlainObject(response.data)) {
-      throw new Error('数据中台模型 ' + resourceKey(resource) + ' 详情不可用，无法恢复发布事件引用。');
+      throw new Error('数据中台模型 ' + resourceKey(resource) + ' 详情不可用，无法同步场景引用。');
     }
     const record = resource.kind === 'model'
       ? normalizeNormalModelRecord(response.data, records.length)
       : normalizeComboModelRecord(response.data, records.length);
-    if (record.id !== resource.resourceId) throw new Error('数据中台返回的模型详情 ID 与发布恢复请求不一致。');
+    if (record.id !== resource.resourceId) throw new Error('数据中台返回的模型详情 ID 与请求不一致。');
     records.push(record);
   });
   return records;
@@ -408,7 +541,9 @@ async function runDataPlatformModelSync(
   try {
     assertNotAborted(signal);
     let records: SyncModelRecord[];
-    if (options.requiredResources) {
+    if (options.queriedRecords) {
+      records = options.queriedRecords;
+    } else if (options.requiredResources) {
       records = await queryRequiredModels(baseUrl, options.requiredResources, signal, dependencies.requestJson);
     } else {
       const queriedNormalModels = await queryAllNormalModels(baseUrl, signal, dependencies.requestJson);
@@ -571,7 +706,9 @@ async function runDataPlatformModelSync(
         && currentAsset !== undefined
         && existingPackagePaths.has(previousEntry.packageRelativePath)
         && existingAssetAvailability.runtimeKeys.has(key);
-      const runtimeChanged = options.forceRefresh === true || !cachedRuntimeAvailable
+      const sceneMainFileRenamed = options.queriedRecords !== undefined && currentAsset !== undefined
+        && path.basename(currentAsset.path) !== path.basename(item.stagedAsset.path);
+      const runtimeChanged = options.forceRefresh === true || sceneMainFileRenamed || !cachedRuntimeAvailable
         || previousEntry.runtimeRevision !== item.indexEntry.runtimeRevision
         || currentAsset.assetRevision !== item.indexEntry.runtimeRevision;
       const thumbnailChanged = !previousEntry

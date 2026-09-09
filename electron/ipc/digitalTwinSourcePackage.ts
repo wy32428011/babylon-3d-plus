@@ -22,6 +22,7 @@ type DeploymentSkyboxCacheModule = typeof import('./deploymentSkyboxCache.js');
 type DigitalTwinSourceEnvironmentRelinkModule = typeof import('./digitalTwinSourceEnvironmentRelink.js');
 type SceneShadowBakeContractModule = typeof import('../shared/sceneShadowBakeContract.js');
 const { captureSceneShadowBakeRelocation, getSceneShadowBakeSignatureContract } = require(`../shared/sceneShadowBakeContract${runtimeExtension}`) as SceneShadowBakeContractModule;
+const { stripCadReferencesFromSceneFile } = require(`./sceneCadReferenceSanitizer${runtimeExtension}`) as typeof import('./sceneCadReferenceSanitizer.js');
 const { createSourceResourcePlan } = require(`./digitalTwinSourceResourcePlan${runtimeExtension}`) as typeof import('./digitalTwinSourceResourcePlan.js');
 const { copyDeploymentFiles } = require(`./deploymentExportFileSystem${runtimeExtension}`) as DeploymentExportFileSystemModule;
 const {
@@ -59,6 +60,10 @@ export type DigitalTwinSourceManifestInput = {
 export type BuildDigitalTwinSourcePackageOptions = {
   projectRoot: string;
   sharedResourcesRoot: string;
+  /** 仅由主进程传入已配置工作区，兼容早期直接存于工作区 Assets 的同步资源。 */
+  legacyWorkspaceRoot?: string;
+  /** 仅对场景明确引用的外部 CAD 单文件授权，不扩展目录权限。 */
+  isAuthorizedCadFile?: (filePath: string) => boolean;
   entrySceneFilePath: string;
   outputRoot: string;
   manifest: DigitalTwinSourceManifestInput;
@@ -137,10 +142,12 @@ export async function buildDigitalTwinSourcePackage(
   const projectRoot = path.resolve(options.projectRoot);
   const sharedResourcesRoot = path.resolve(options.sharedResourcesRoot);
   const outputRoot = path.resolve(options.outputRoot);
+  const legacyWorkspaceRoot = options.legacyWorkspaceRoot ? path.resolve(options.legacyWorkspaceRoot) : null;
   const entrySceneFilePath = path.resolve(options.entrySceneFilePath);
   assertPathInsideOrEqual(projectRoot, entrySceneFilePath, '入口场景');
   assertNoPathOverlap(outputRoot, projectRoot, '源工程输出目录与项目目录不能重叠。');
   assertNoPathOverlap(outputRoot, sharedResourcesRoot, '源工程输出目录与共享资源目录不能重叠。');
+  if (legacyWorkspaceRoot) assertNoPathOverlap(outputRoot, path.join(legacyWorkspaceRoot, 'Assets'), '源工程输出目录与旧工作区资源目录不能重叠。');
 
   await fs.mkdir(outputRoot, { recursive: true });
   const token = randomUUID();
@@ -164,6 +171,8 @@ export async function buildDigitalTwinSourcePackage(
       options.findSyncedImageForReference,
     );
     const scenes = scenesResult.snapshots;
+    const cadBundleMap = await prepareSourceSceneCadFiles(scenes.map(scene => scene.parsed),
+      projectRoot, sharedResourcesRoot, legacyWorkspaceRoot, options.signal, options.isAuthorizedCadFile);
     const restoreRelocatedBakes = new Map(scenes.map(scene => [scene, captureSceneShadowBakeRelocation(scene.parsed.scene)]));
     const platformImageBundleMap = scenesResult.platformImageBundleMap;
     const entryScene = scenes.find((scene) => path.resolve(scene.sourcePath) === entrySceneFilePath);
@@ -204,8 +213,10 @@ export async function buildDigitalTwinSourcePackage(
       sourceEnvironmentPackages,
       warnings,
       omittedResources,
+      legacyWorkspaceRoot,
+      cadBundleMap,
     );
-    await validateResourceBundleSourcePaths(candidates, projectRoot, sharedResourcesRoot, options.signal);
+    await validateResourceBundleSourcePaths(candidates, projectRoot, sharedResourcesRoot, options.signal, legacyWorkspaceRoot);
     const resourcePlan = await createSourceResourcePlan(candidates, projectRoot, options.signal);
     const bundles = resourcePlan.bundles;
     for (const scene of scenes) {
@@ -359,7 +370,7 @@ async function readSceneSnapshots(
     if (!isPlainObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5) || !isPlainObject(parsed.scene)) {
       throw new Error(`场景文件格式不受支持：${sourcePath}`);
     }
-    const skippedCadCount = skipCadReferences ? stripCadReferencesFromSourceScene(parsed) : 0;
+    const skippedCadCount = skipCadReferences ? stripCadReferencesFromSceneFile(parsed) : 0;
     const snapshotContent = skippedCadCount > 0 ? `${JSON.stringify(parsed, null, 2)}\n` : content;
     const relativeFromScenes = path.relative(scenesRoot, sourcePath);
     if (!relativeFromScenes || relativeFromScenes.startsWith('..') || path.isAbsolute(relativeFromScenes)) {
@@ -547,6 +558,68 @@ function registerStableSourceSkyboxBundle(
   bundles.set(key, bundle);
 }
 
+/** 历史 CAD 可以位于项目外；只接受明确授权的单个原图，不扫描它的父目录。 */
+async function prepareSourceSceneCadFiles(
+  sceneFiles: readonly PlainObject[],
+  projectRoot: string,
+  sharedResourcesRoot: string,
+  legacyWorkspaceRoot: string | null,
+  signal: AbortSignal,
+  isAuthorizedCadFile?: (filePath: string) => boolean,
+): Promise<ReadonlyMap<string, ResourceBundle>> {
+  const references: PlainObject[] = [];
+  let visited = 0;
+  const visit = (value: unknown): void => {
+    if (++visited > 1_000_000) throw new Error('场景结构过大，无法完成 CAD 资源扫描。');
+    if (Array.isArray(value)) { for (const child of value) visit(child); return; }
+    if (!isPlainObject(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'cadReference' && isPlainObject(child)) references.push(child);
+      else visit(child);
+    }
+  };
+  for (const scene of sceneFiles) visit(scene);
+  const bundles = new Map<string, ResourceBundle>();
+  for (const cad of references) {
+    throwIfAborted(signal);
+    const rawPath = typeof cad.sourcePath === 'string' ? cad.sourcePath.trim() : '';
+    const rawUrl = typeof cad.sourceUrl === 'string' ? cad.sourceUrl.trim() : '';
+    let urlPath = '';
+    if (rawUrl.startsWith(LOCAL_ASSET_URL_PREFIX)) {
+      try { urlPath = decodeURIComponent(new URL(rawUrl).pathname.slice(1)); }
+      catch { throw new Error('CAD 原图的本地资源 URL 无效。'); }
+    }
+    const resolvePath = (value: string) => path.isAbsolute(value) ? path.resolve(value) : path.resolve(projectRoot, value);
+    if (rawPath && urlPath && createPathKey(resolvePath(rawPath)) !== createPathKey(resolvePath(urlPath))) {
+      throw new Error('CAD 原图路径与资源 URL 不一致，请重新导入原图后发布。');
+    }
+    if (!rawPath && !urlPath) throw new Error('CAD 原图缺少本地文件引用，请重新导入原图后发布。');
+    const sourcePath = resolvePath(rawPath || urlPath);
+    if (path.extname(sourcePath).toLowerCase() !== '.dxf') throw new Error('CAD 原图必须是 DXF 文件。');
+    const stat = await fs.lstat(sourcePath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(`CAD 原图文件不存在：${sourcePath}。该文件不能通过数据中台模型同步恢复，请重新导入原图后发布。`);
+      }
+      throw error;
+    });
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`CAD 原图不是安全普通文件：${sourcePath}`);
+    const insideKnownRoot = isPathInsideOrEqual(projectRoot, sourcePath) || isPathInsideOrEqual(sharedResourcesRoot, sourcePath)
+      || Boolean(legacyWorkspaceRoot && isPathInsideOrEqual(path.join(legacyWorkspaceRoot, 'Assets'), sourcePath));
+    const insidePortableAssets = [projectRoot, sharedResourcesRoot, legacyWorkspaceRoot].some(root =>
+      root !== null && isPathInsideOrEqual(path.join(root, 'Assets'), sourcePath));
+    if (insidePortableAssets) continue;
+    if (!insideKnownRoot && !isAuthorizedCadFile?.(sourcePath)) throw new Error(`CAD 原图未获得文件授权，请重新导入后发布：${sourcePath}`);
+    await assertTrustedPathWithinRoot(path.parse(sourcePath).root, sourcePath, 'CAD 原图');
+    const destinationRelativePath = `Assets/Cad/${path.basename(sourcePath)}`;
+    const bundle: ResourceBundle = { sourcePath, destinationRelativePath, copyFile: {
+      sourcePath, destinationRelativePath, relativePath: path.basename(sourcePath), size: stat.size, mtimeMs: stat.mtimeMs, kind: 'cad',
+    } };
+    if (rawPath) bundles.set(rawPath, bundle);
+    if (rawUrl) bundles.set(rawUrl, bundle);
+  }
+  return bundles;
+}
+
 function collectResourceBundles(
   sceneValues: readonly unknown[],
   projectRoot: string,
@@ -557,6 +630,8 @@ function collectResourceBundles(
   sourceEnvironmentPackages: readonly SourceEnvironmentPackageIntegrity[],
   warnings: string[],
   omittedResources: string[],
+  legacyWorkspaceRoot: string | null,
+  cadBundleMap: ReadonlyMap<string, ResourceBundle>,
 ): ResourceBundle[] {
   const bundles = new Map<string, ResourceBundle>();
   const skippedRoots = new Set<string>();
@@ -577,6 +652,7 @@ function collectResourceBundles(
     if (!existing || bundle.copyFile || !existing.copyFile) bundles.set(key, bundle);
   };
 
+  for (const cadBundle of cadBundleMap.values()) registerBundle(cadBundle);
   for (const platformBundle of platformImageBundleMap.values()) registerBundle(platformBundle);
   for (const skyboxBundle of stableSkyboxBundles.values()) registerBundle(skyboxBundle);
 
@@ -585,7 +661,7 @@ function collectResourceBundles(
     visited += 1;
     if (visited > 1_000_000) throw new Error('场景结构过大，无法完成源工程资源扫描。');
     if (typeof value === 'string') {
-      const platformBundle = platformImageBundleMap.get(value);
+      const platformBundle = cadBundleMap.get(value) ?? platformImageBundleMap.get(value);
       if (platformBundle) {
         registerBundle(platformBundle);
         return;
@@ -603,6 +679,7 @@ function collectResourceBundles(
         sourceEnvironmentPackagesByPath,
         warnSkippedResource,
         value.startsWith(LOCAL_ASSET_URL_PREFIX) || Boolean(fieldName && fieldName !== 'path'),
+        legacyWorkspaceRoot,
       );
       if (!bundle) return;
       registerBundle(bundle);
@@ -631,6 +708,7 @@ async function validateResourceBundleSourcePaths(
   projectRoot: string,
   sharedResourcesRoot: string,
   signal: AbortSignal,
+  legacyWorkspaceRoot: string | null,
 ): Promise<void> {
   for (const bundle of bundles) {
     throwIfAborted(signal);
@@ -639,7 +717,8 @@ async function validateResourceBundleSourcePaths(
       ? projectRoot
       : isPathInsideOrEqual(sharedResourcesRoot, bundle.sourcePath)
         ? sharedResourcesRoot
-        : null;
+        : legacyWorkspaceRoot && isPathInsideOrEqual(path.join(legacyWorkspaceRoot, 'Assets'), bundle.sourcePath)
+          ? legacyWorkspaceRoot : null;
     if (!allowedRoot) throw new Error(`源工程资源不在允许目录内：${bundle.destinationRelativePath}`);
     await assertTrustedPathWithinRoot(
       allowedRoot,
@@ -656,6 +735,7 @@ function resolveResourceBundle(
   sourceEnvironmentPackagesByPath: ReadonlyMap<string, SourceEnvironmentPackageIntegrity>,
   warnSkippedResource: (sourceRoot: string) => void,
   reportUnsupportedReference: boolean,
+  legacyWorkspaceRoot: string | null,
 ): ResourceBundle | null {
   let candidate = rawValue.trim();
   if (!candidate) return null;
@@ -729,7 +809,8 @@ function resolveResourceBundle(
     const prefixAssetsIndex = prefixSegments.findIndex((segment) => segment.toLowerCase() === 'assets');
     sourceRoot = path.resolve(pathRoot, ...prefixSegments.slice(0, prefixAssetsIndex + (bundleEnd - assetsIndex)));
   }
-  if (!isPathInsideOrEqual(projectRoot, sourceRoot) && !isPathInsideOrEqual(sharedResourcesRoot, sourceRoot)) {
+  if (!isPathInsideOrEqual(projectRoot, sourceRoot) && !isPathInsideOrEqual(sharedResourcesRoot, sourceRoot)
+    && !(legacyWorkspaceRoot && isPathInsideOrEqual(path.join(legacyWorkspaceRoot, 'Assets'), sourceRoot))) {
     warnSkippedResource(sourceRoot);
     return null;
   }
@@ -1015,19 +1096,6 @@ function throwIfAborted(signal: AbortSignal): void {
     error.name = 'AbortError';
     throw error;
   }
-}
-
-/** 源工程单元测试直接加载本模块，因此在此保持无本地运行时依赖。 */
-function stripCadReferencesFromSourceScene(sceneFile: Record<string, unknown>): number {
-  if (!isPlainObject(sceneFile.scene) || !isPlainObject(sceneFile.scene.entities)) return 0;
-  let removedCount = 0;
-  for (const entity of Object.values(sceneFile.scene.entities)) {
-    if (!isPlainObject(entity) || !isPlainObject(entity.components)) continue;
-    if (!Object.prototype.hasOwnProperty.call(entity.components, 'cadReference')) continue;
-    delete entity.components.cadReference;
-    removedCount += 1;
-  }
-  return removedCount;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

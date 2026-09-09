@@ -36,6 +36,7 @@ type ExternalModelScriptClass = new (node: TransformNode) => ExternalModelScript
 type CompiledExternalModelScript = {
   classes: Record<string, ExternalModelScriptClass | undefined>;
   dataDriven?: unknown;
+  initializationError?: string;
 };
 
 type ImportBinding = {
@@ -64,6 +65,7 @@ export class ExternalModelScriptRuntime {
   private runtimeContext: ExternalModelScriptRuntimeContext = { mode: 'edit', telemetry: null };
   private disposed = false;
   private started = false;
+  private initializationError: string | null = null;
 
   /** 创建本地可信模型脚本运行器。 */
   constructor(
@@ -86,6 +88,11 @@ export class ExternalModelScriptRuntime {
   /** 读取模型脚本导出的 dataDriven 配置，供遥测运行时按模型包声明查找运动节点。 */
   getDataDrivenConfigs(): readonly unknown[] {
     return this.dataDrivenConfigs;
+  }
+
+  /** 严格场景同步读取已被本地容错捕获的错误；同一脚本运行代次保留首次失败。 */
+  getInitializationError(): string | null {
+    return this.initializationError;
   }
 
   /** 将 Inspector 参数实时注入所有已启动脚本实例。 */
@@ -148,6 +155,7 @@ export class ExternalModelScriptRuntime {
     try {
       const compiledScript = await loadCompiledExternalModelScript(scriptAsset, this.modelAsset.assetRevision);
       if (this.disposed) return;
+      this.initializationError ??= compiledScript.initializationError ?? null;
       if (compiledScript.dataDriven !== undefined) {
         this.dataDrivenConfigs.push(compiledScript.dataDriven);
       }
@@ -162,6 +170,9 @@ export class ExternalModelScriptRuntime {
         this.callLifecycle(instance, 'onStart');
       }
     } catch (error) {
+      if (!this.disposed) {
+        this.initializationError ??= `脚本 ${scriptAsset.name} 加载失败：${error instanceof Error ? error.message : String(error)}`;
+      }
       console.warn(`模型脚本加载失败：${scriptAsset.name}`, error);
     }
   }
@@ -219,6 +230,9 @@ export class ExternalModelScriptRuntime {
     try {
       instance[methodName]?.();
     } catch (error) {
+      if (!this.disposed && methodName !== 'onStop') {
+        this.initializationError ??= `脚本 ${methodName} 失败：${error instanceof Error ? error.message : String(error)}`;
+      }
       console.warn(`模型脚本生命周期执行失败：${methodName}`, error);
     }
   }
@@ -266,6 +280,7 @@ async function compileExternalModelScript(sourceText: string): Promise<CompiledE
   const preparedSource = `${importPrelude}\n${exportTransform.sourceText}`;
   const classNames = collectClassNames(preparedSource);
   const transpiled = ts.transpileModule(preparedSource, {
+    reportDiagnostics: true,
     compilerOptions: {
       target: ts.ScriptTarget.ES2020,
       module: ts.ModuleKind.None,
@@ -281,7 +296,10 @@ async function compileExternalModelScript(sourceText: string): Promise<CompiledE
     `${transpiled.outputText}\n${returnStatement}`,
   ) as (babylon: typeof BabylonCore, decorator: () => PropertyDecorator) => CompiledExternalModelScript;
 
-  return factory(BabylonCore, createNoopDecorator);
+  // 仅报告脚本源码诊断，编译器选项弃用提示不属于模型初始化失败。
+  const diagnostic = transpiled.diagnostics?.find(item => item.file && item.category === ts.DiagnosticCategory.Error);
+  const initializationError = diagnostic ? ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n') : undefined;
+  return { ...factory(BabylonCore, createNoopDecorator), ...(initializationError ? { initializationError } : {}) };
 }
 
 /** 延迟加载 TypeScript 编译器，避免 Electron 首屏启动时预构建整个 compiler 包。 */

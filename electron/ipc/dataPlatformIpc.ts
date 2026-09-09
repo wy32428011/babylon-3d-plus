@@ -1,4 +1,6 @@
-import { app, dialog, ipcMain } from 'electron';
+import { app, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { clearProjectAssetStoreSession } from './projectAssetStore.js';
+import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { readUtf8File } from '../shared/strictUtf8.js';
@@ -6,6 +8,8 @@ import type {
   DataPlatformConfig,
   DataPlatformEnvironmentSyncProgress,
   DataPlatformEnvironmentSyncRequest,
+  LocalSceneResourceSyncRequest,
+  LocalSceneResourceSyncResult,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
@@ -21,6 +25,7 @@ import type {
 } from '../types.js';
 import {
   clearDataPlatformProjectServiceRetryContext,
+  resetDataPlatformProjectSession,
   ensureWritableEditorRoot,
   getCurrentDataPlatformModelSyncProgress,
   getCurrentDataPlatformEnvironmentSyncProgress,
@@ -34,6 +39,7 @@ import {
   retryLatestDataPlatformImageSync,
   syncDataPlatformImagesForWorkspace,
   syncDataPlatformModelsForWorkspace,
+  prepareLocalSceneResources,
   syncDataPlatformEnvironmentsForWorkspace,
   cancelDataPlatformProjectLoading,
   syncDataPlatformSkyboxesForWorkspace,
@@ -41,6 +47,7 @@ import {
 } from './dataPlatformProjectService.js';
 import {
   clearDataPlatformChartSyncRetryContext,
+  resetDataPlatformChartSyncSession,
   getCurrentDataPlatformChartSyncProgress,
   listCurrentDataPlatformCharts,
   retryDataPlatformChartSync,
@@ -49,6 +56,7 @@ import {
   type DataPlatformChartSyncProgress,
 } from './dataPlatformChartSync.js';
 import {
+  clearCurrentDataPlatformBinding,
   inferDataPlatformFrontendPort,
   inferDataPlatformWebBaseUrl,
   normalizeDataPlatformFrontendPort,
@@ -66,6 +74,33 @@ const PROJECT_PAGE_SIZE = 12;
 const PROJECT_REQUEST_TIMEOUT_MS = 10_000;
 
 let registered = false;
+let projectClosing = false;
+const projectSessionTasks = new Set<Promise<unknown>>();
+
+export function isDataPlatformProjectClosing(): boolean {
+  return projectClosing;
+}
+
+/** 跟踪项目打开/同步入口，关闭期间拒绝新任务并等待已接收的调用退出。 */
+function registerProjectSessionHandler<T>(
+  channel: string,
+  handler: (event: IpcMainInvokeEvent, request: T) => unknown,
+): void {
+  ipcMain.handle(channel, async (event, request: T) => {
+    if (projectClosing) throw new Error('正在关闭当前项目，请稍后重试。');
+    const task = Promise.resolve().then(() => {
+      if (projectClosing) throw new Error('正在关闭当前项目，请稍后重试。');
+      return handler(event, request);
+    });
+    projectSessionTasks.add(task);
+    try {
+      return await task;
+    } finally {
+      projectSessionTasks.delete(task);
+    }
+  });
+}
+
 const trustedProjectsById = new Map<string, DataPlatformProjectEntry>();
 let trustedProjectsBaseUrl = '';
 let projectListRequestId = 0;
@@ -171,7 +206,7 @@ export function registerDataPlatformIpc(): void {
       return project;
     },
   );
-  ipcMain.handle(
+  registerProjectSessionHandler(
     'data-platform:openProject',
     async (_event, request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectOpenResult> => {
       const openRequest = validateOpenProjectRequest(request);
@@ -185,6 +220,7 @@ export function registerDataPlatformIpc(): void {
       if (config.baseUrl !== trustedProjectsBaseUrl) {
         throw new Error('数据中台地址已变化，请刷新项目列表后再打开。');
       }
+      if (projectClosing) throw new Error('正在关闭当前项目，请稍后重试。');
       const revision = projectConfigRevision;
       const controller = new AbortController();
       projectMetadataControllers.add(controller);
@@ -192,20 +228,29 @@ export function registerDataPlatformIpc(): void {
         const currentProject = await requestCurrentDataPlatformProject(config.baseUrl, project.id, controller.signal);
         await assertProjectOpenConfigUnchanged(config, revision);
         controller.signal.throwIfAborted();
-        return openDataPlatformProject(currentProject, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl);
+        return await openDataPlatformProject(currentProject, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl);
       } finally {
         projectMetadataControllers.delete(controller);
       }
     },
   );
 
-  ipcMain.handle('data-platform:syncModels', async (): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:syncModels', async (): Promise<boolean> => {
     const config = await readDataPlatformConfig();
     if (!config.baseUrl) return false;
     return syncDataPlatformModelsForWorkspace(config.baseUrl, config.workspaceRoot);
   });
 
-  ipcMain.handle('data-platform:retryModelSync', async (): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:prepareLocalSceneResources', async (_event, request: LocalSceneResourceSyncRequest): Promise<LocalSceneResourceSyncResult> => {
+    const config = await readDataPlatformConfig();
+    if (request?.mode === 'data-platform-latest') {
+      return prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
+    }
+    if (!config.baseUrl) return { configured: false, sourceKey: null, modelAssets: [], environmentAssets: [] };
+    return prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
+  });
+
+  registerProjectSessionHandler('data-platform:retryModelSync', async (): Promise<boolean> => {
     return retryLatestDataPlatformModelSync();
   });
 
@@ -214,15 +259,34 @@ export function registerDataPlatformIpc(): void {
     async (): Promise<DataPlatformModelSyncProgress | null> => getCurrentDataPlatformModelSyncProgress(),
   );
 
-  ipcMain.handle('data-platform:syncEnvironments', async (_event, request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:syncEnvironments', async (_event, request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => {
     const config = await readDataPlatformConfig();
     if (!config.baseUrl) return false;
     return syncDataPlatformEnvironmentsForWorkspace(config.baseUrl, config.workspaceRoot, request?.expectedSourceKey, request?.requiredResourceIds);
   });
 
-  ipcMain.handle('data-platform:retryEnvironmentSync', async (): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:retryEnvironmentSync', async (): Promise<boolean> => {
     return retryLatestDataPlatformEnvironmentSync();
   });
+  ipcMain.handle('data-platform:closeProject', async (): Promise<void> => {
+    if (isDigitalTwinPublishActive()) throw new Error('数字孪生发布正在进行，完成或取消发布后才能返回首页。');
+    if (projectClosing) throw new Error('正在关闭当前项目，请稍后重试。');
+    projectClosing = true;
+    try {
+      for (const controller of projectMetadataControllers) controller.abort();
+      cancelDataPlatformProjectLoading();
+      clearDataPlatformProjectServiceRetryContext();
+      clearDataPlatformChartSyncRetryContext();
+      await Promise.allSettled([...projectSessionTasks]);
+      await resetDataPlatformProjectSession();
+      await resetDataPlatformChartSyncSession();
+      clearCurrentDataPlatformBinding();
+      clearProjectAssetStoreSession();
+    } finally {
+      projectClosing = false;
+    }
+  });
+
   ipcMain.handle('data-platform:cancelProjectLoading', (): boolean => {
     const metadataPending = projectMetadataControllers.size > 0;
     for (const controller of projectMetadataControllers) controller.abort();
@@ -234,13 +298,13 @@ export function registerDataPlatformIpc(): void {
     async (): Promise<DataPlatformEnvironmentSyncProgress | null> => getCurrentDataPlatformEnvironmentSyncProgress(),
   );
 
-  ipcMain.handle('data-platform:syncSkyboxes', async (): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:syncSkyboxes', async (): Promise<boolean> => {
     const config = await readDataPlatformConfig();
     if (!config.baseUrl) throw new Error('尚未配置数据中台地址。');
     return syncDataPlatformSkyboxesForWorkspace(config.baseUrl, config.workspaceRoot);
   });
 
-  ipcMain.handle('data-platform:retrySkyboxSync', async (): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:retrySkyboxSync', async (): Promise<boolean> => {
     return retryLatestDataPlatformSkyboxSync();
   });
 
@@ -249,13 +313,13 @@ export function registerDataPlatformIpc(): void {
     async (): Promise<DataPlatformSkyboxSyncProgress | null> => getCurrentDataPlatformSkyboxSyncProgress(),
   );
 
-  ipcMain.handle('data-platform:syncImages', async (): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:syncImages', async (): Promise<boolean> => {
     const config = await readDataPlatformConfig();
     if (!config.baseUrl) return false;
     return syncDataPlatformImagesForWorkspace(config.baseUrl, config.workspaceRoot);
   });
 
-  ipcMain.handle('data-platform:retryImageSync', async (): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:retryImageSync', async (): Promise<boolean> => {
     return retryLatestDataPlatformImageSync();
   });
 
@@ -285,7 +349,7 @@ export function registerDataPlatformIpc(): void {
     },
   );
 
-  ipcMain.handle('data-platform:syncCharts', async (): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:syncCharts', async (): Promise<boolean> => {
     const config = await readDataPlatformConfig();
     if (!config.baseUrl) return false;
     return startDataPlatformChartSync({
@@ -294,7 +358,7 @@ export function registerDataPlatformIpc(): void {
     });
   });
 
-  ipcMain.handle('data-platform:retryChartSync', async (): Promise<boolean> => {
+  registerProjectSessionHandler('data-platform:retryChartSync', async (): Promise<boolean> => {
     const config = await readDataPlatformConfig();
     if (!config.baseUrl) return false;
     return retryDataPlatformChartSync({

@@ -76,7 +76,7 @@ export default function App() {
           const project = await window.editorApi.getDataPlatformProject({ projectId: deepLink.projectId });
           const result = await window.editorApi.openDataPlatformProject({ projectId: project.id });
           if (result.sceneFilePath) {
-            const loaded = await useEditorStore.getState().loadSceneFromFile(result.sceneFilePath);
+            const loaded = await useEditorStore.getState().loadSceneFromFile(result.sceneFilePath, undefined, true);
             if (!loaded) throw new Error('数据中台项目入口场景加载失败。');
           } else {
             useEditorStore.getState().newScene();
@@ -149,7 +149,12 @@ export default function App() {
       }
 
       await beforeLeave?.();
+      if (window.editorApi) {
+        if (!window.editorApi.closeDataPlatformProject) throw new Error('当前编辑器不支持项目清理，请更新编辑器后重试。');
+        await window.editorApi.closeDataPlatformProject();
+      }
       useEditorStore.getState().stopRuntimePreview();
+      useEditorStore.getState().resetSceneToBlank();
       setView('home');
     } finally {
       returningHomeRef.current = false;

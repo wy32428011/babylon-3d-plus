@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { APPLICATION_NAME, BrandLogo } from '../ui/BrandLogo';
-import { cancelProjectLoading, createProjectOpenSession } from './projectLoadingCancellation';
+import { createProjectOpenSession } from './projectLoadingCancellation';
 
 type HomePageProps = {
   onEnterBlankEditor: () => void;
@@ -478,15 +478,15 @@ export function HomePage({
 
   async function handleCancelDataPlatformProjectOpen(): Promise<void> {
     if (!canCancelProjectOpen || isCancellingProjectOpen) return;
-    if (!window.editorApi?.cancelDataPlatformProjectLoading) {
+    if (!window.editorApi?.closeDataPlatformProject) {
       setStatus({ kind: 'error', message: '当前编辑器不支持取消远程加载，请更新编辑器。' });
       return;
     }
     projectOpenSession.current.invalidate();
     setIsCancellingProjectOpen(true);
     try {
-      await cancelProjectLoading(window.editorApi.cancelDataPlatformProjectLoading);
-      setStatus({ kind: 'info', message: '已请求取消项目加载，后台任务正在停止。可重新打开项目。' });
+      await window.editorApi.closeDataPlatformProject();
+      setStatus({ kind: 'info', message: '已取消项目加载并清理当前项目状态，可重新打开项目。' });
       setBusyActionId(null);
       setCanCancelProjectOpen(false);
     } catch (error) {

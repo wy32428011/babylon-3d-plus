@@ -1,3 +1,4 @@
+import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
 import { executeChartMarkerClick } from '../../runtime/babylon/chartMarkerClick';
 import { CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import {
@@ -1752,6 +1753,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     const sampleReadiness = (): void => {
       if (!active) return;
+      const currentEditor = useEditorStore.getState();
+      if (currentEditor.sceneSessionId !== sceneSessionId
+        || (currentEditor.sceneResourcePolicy === 'data-platform-refresh' && currentEditor.scene !== sceneDocument)) {
+        resetRenderWait();
+        stopReadinessPolling();
+        return;
+      }
       const preparationState = getScenePreparationSnapshot();
       if (
         preparationState.sceneSessionId !== sceneSessionId
@@ -1780,6 +1788,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const settleRuntimeAfterTimeout = (): void => {
         if (sceneRuntimeTimeoutLoggedRef.current) return;
         sceneRuntimeTimeoutLoggedRef.current = true;
+        if (useEditorStore.getState().sceneResourcePolicy === 'data-platform-refresh') {
+          const error = '新版场景模型未能在规定时间内完成加载与首帧渲染，请重新同步或取消返回首页。';
+          useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument, error);
+          environmentPreparationStore.fail(sceneSessionId, error);
+          stopReadinessPolling();
+          return;
+        }
         pushLog(SCENE_PREPARATION_RUNTIME_TIMEOUT_WARNING);
         settleSceneRuntimeWithWarning(sceneSessionId, SCENE_PREPARATION_RUNTIME_TIMEOUT_WARNING);
       };
@@ -1802,6 +1817,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         return;
       }
 
+      if (useEditorStore.getState().sceneResourcePolicy === 'data-platform-refresh') {
+        const error = sceneDocument.entityIds.map(id => runtime.getModelReadinessError(id)).find(Boolean);
+        if (error) {
+          useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument, error);
+          environmentPreparationStore.fail(sceneSessionId, error);
+          stopReadinessPolling();
+          return;
+        }
+      }
       let settledModels = 0;
       for (const entityId of modelEntityIds) {
         if (runtime.isModelReady(entityId)) settledModels += 1;
@@ -1847,7 +1871,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         });
       }
       const stable = geometryStable && renderedSignature === signature;
-      if (stable) setSceneRuntimeNaturallyReady(true);
+      if (stable) {
+        setSceneRuntimeNaturallyReady(true);
+        useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument);
+      }
 
       reportSceneRuntimeProgress(sceneSessionId, {
         generation: sceneRuntimeReadinessGeneration,
@@ -1904,6 +1931,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     };
   }, [
     editRuntimeSceneDocument.entities,
+    sceneDocument,
     sceneDocument.entityIds,
     sceneRuntimeEnvironmentSourceUrl,
     sceneRuntimeEnvironmentExpected,

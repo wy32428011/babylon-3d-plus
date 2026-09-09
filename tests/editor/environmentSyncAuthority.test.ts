@@ -24,12 +24,12 @@ test('当前绑定来源按稳定ID覆盖旧来源和旧revision，不能回退�
 
 test('绑定工程内无中台ID的包内环境仍按当前本地包路径选中，不被远程同名环境替换', async () => {
   const source = await readFile(new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url), 'utf8');
-  const start = source.indexOf('const matchedAsset = authoritativeSourceKey');
+  const start = source.indexOf('const matchedAsset = localMatch');
   const end = source.indexOf('\n    if (!matchedAsset', start);
   const selection = source.slice(start, end);
   const local = { ...asset('local'), source: undefined, dataPlatformSourceKey: undefined, dataPlatformResourceId: undefined };
   const matched = runInNewContext(`(() => { ${selection} return matchedAsset; })()`, {
-    authoritativeSourceKey: 'current', resourceId: undefined,
+    localMatch: null, authoritativeSourceKey: 'current', resourceId: undefined,
     environment: { packagePath: 'local/env', source: undefined },
     environmentAssets: [asset('current'), local],
     findAuthoritativeEnvironmentAsset, createImportedAssetIndexes, findImportedAssetForPackagePath,

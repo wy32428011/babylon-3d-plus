@@ -7,6 +7,8 @@ import type {
   DataPlatformConfig,
   DataPlatformEnvironmentSyncProgress,
   DataPlatformEnvironmentSyncRequest,
+  LocalSceneResourceSyncRequest,
+  LocalSceneResourceSyncResult,
   DataPlatformImageSyncProgress,
   DataPlatformModelSyncProgress,
   DataPlatformSkyboxSyncProgress,
@@ -129,8 +131,10 @@ contextBridge.exposeInMainWorld('editorApi', {
       ipcRenderer.removeListener('data-platform:modelSyncProgress', listener);
     };
   },
+  prepareLocalSceneResources: (request: LocalSceneResourceSyncRequest): Promise<LocalSceneResourceSyncResult> => ipcRenderer.invoke('data-platform:prepareLocalSceneResources', request),
   syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => ipcRenderer.invoke('data-platform:syncEnvironments', request),
   retryDataPlatformEnvironmentSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryEnvironmentSync'),
+  closeDataPlatformProject: (): Promise<void> => ipcRenderer.invoke('data-platform:closeProject'),
   cancelDataPlatformProjectLoading: (): Promise<boolean> => ipcRenderer.invoke('data-platform:cancelProjectLoading'),
   onDataPlatformEnvironmentSyncProgress: (handler: (progress: DataPlatformEnvironmentSyncProgress) => void): (() => void) => {
     let active = true;

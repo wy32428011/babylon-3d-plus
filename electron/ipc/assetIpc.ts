@@ -1,5 +1,6 @@
 import { app, dialog, ipcMain } from 'electron';
 import { importManualRoamAvatarIntoProject } from './manualRoamAvatarStore.js';
+import { importCadFileIntoProject } from './projectCadAssetStore.js';
 import type { ImportManualRoamAvatarResult } from '../types.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -94,6 +95,8 @@ export function registerAssetIpc(): void {
   });
 
   ipcMain.handle('assets:importCadFile', async (): Promise<ImportCadFileResult> => {
+    const projectRoot = await ensureCurrentProjectRootWithDialog();
+    if (!projectRoot) return { canceled: true, filePath: null, sourceUrl: null, fileSizeBytes: 0 };
     const result = await dialog.showOpenDialog({
       title: '选择 CAD DXF 图纸',
       properties: ['openFile'],
@@ -106,23 +109,8 @@ export function registerAssetIpc(): void {
       return { canceled: true, filePath: null, sourceUrl: null, fileSizeBytes: 0 };
     }
 
-    if (path.extname(filePath).toLowerCase() !== '.dxf') {
-      throw new Error('仅支持导入 .dxf CAD 图纸。');
-    }
-
-    const stat = await fs.stat(filePath);
-    if (!stat.isFile()) {
-      throw new Error('请选择有效的 DXF 文件。');
-    }
-
-    authorizeAssetFile(filePath);
-
-    return {
-      canceled: false,
-      filePath,
-      sourceUrl: encodeAssetUrl(filePath),
-      fileSizeBytes: stat.size,
-    };
+    if (getCurrentProjectRoot() !== projectRoot) throw new Error('项目已切换，请在当前项目重新导入 CAD。');
+    return { canceled: false, ...await importCadFileIntoProject(projectRoot, filePath) };
   });
 
   /** 主进程选择并持久化人物 GLB，渲染进程不能提交任意文件路径。 */

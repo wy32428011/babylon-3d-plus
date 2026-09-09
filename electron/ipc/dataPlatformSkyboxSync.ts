@@ -372,6 +372,15 @@ export function clearDataPlatformSkyboxSyncRetryContext(): void {
   queuedSkyboxSyncContext = null;
 }
 
+/** 退出项目时等待旧同步释放并清空进度，允许下一项目重新启动同步。 */
+export async function resetDataPlatformSkyboxSyncSession(): Promise<void> {
+  clearDataPlatformSkyboxSyncRetryContext();
+  const active = activeSkyboxSync;
+  active?.controller.abort();
+  if (active) await active.promise;
+  latestSkyboxSyncProgress = null;
+}
+
 /** 取消并等待活动任务完全释放。 */
 export async function disposeDataPlatformSkyboxSync(): Promise<void> {
   skyboxSyncShuttingDown = true;

@@ -248,6 +248,20 @@ type DataPlatformModelSyncProgress = {
   runtimeChangedResourceKeys?: string[];
 };
 
+type LocalSceneResourceSyncRequest = {
+  mode?: 'data-platform-latest';
+  sceneContent?: string;
+  environment?: { resourceId?: string; displayName?: string };
+};
+
+type LocalSceneResourceSyncResult = {
+  modelReplacements?: Array<{ sourceUrls: string[]; asset: ProjectModelAssetEntry }>;
+  configured: boolean;
+  sourceKey: string | null;
+  modelAssets: ProjectModelAssetEntry[];
+  environmentAssets: ProjectModelAssetEntry[];
+};
+
 type DataPlatformEnvironmentSyncRequest = {
   requiredResourceIds?: string[];
   expectedSourceKey?: string;
@@ -615,11 +629,13 @@ interface Window {
     resetDataPlatformWorkspace: () => Promise<DataPlatformConfig>;
     listDataPlatformProjects: (request?: DataPlatformProjectListRequest) => Promise<DataPlatformProjectListResult>;
     openDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectOpenResult>;
+    closeDataPlatformProject: () => Promise<void>;
     cancelDataPlatformProjectLoading?: () => Promise<boolean>;
     getDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectEntry>;
     syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
+    prepareLocalSceneResources: (request: LocalSceneResourceSyncRequest) => Promise<LocalSceneResourceSyncResult>;
     syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest) => Promise<boolean>;
     retryDataPlatformEnvironmentSync: () => Promise<boolean>;
     onDataPlatformEnvironmentSyncProgress: (handler: (progress: DataPlatformEnvironmentSyncProgress) => void) => () => void;

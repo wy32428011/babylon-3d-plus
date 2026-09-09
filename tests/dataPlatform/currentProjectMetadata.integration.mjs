@@ -19,6 +19,7 @@ async function run() {
   ipc.registerDataPlatformIpc();
   const call = (name, request) => handlers.get(`data-platform:${name}`)({}, request);
   let latestVersionId = '200';
+  let latestVersionNumber = 2;
   let listPackage = 'files/legacy.zip';
   let listVersionId = '100';
   let statusError = false;
@@ -43,7 +44,7 @@ async function run() {
     if (request.url === '/api/v1/digital-twin/projects/status') {
       const send = () => json(statusError ? { success: false, message: '远端查询失败' } : { success: true, data: {
         projectId: body.projectId, editorProjectId: latestVersionId ? '10' : null,
-        latestVersionId, latestVersionNumber: latestVersionId ? 2 : null, status: latestVersionId ? 'ONLINE' : 'UNBOUND',
+        latestVersionId, latestVersionNumber: latestVersionId ? latestVersionNumber : null, status: latestVersionId ? 'ONLINE' : 'UNBOUND',
         runtimeConfig: { projectId: body.projectId, runtimeEnabled: true },
       } });
       if (deferredStatus) { deferredStatus(send); statusStarted(); return; }
@@ -60,9 +61,21 @@ async function run() {
     assert.equal(current.latestEditorProjectPackageUrl, 'api/v1/editor/projects/10/versions/200/package/export');
     await call('listProjects');
     latestVersionId = '300';
+    latestVersionNumber = 3;
     await assert.rejects(call('openProject', { projectId: '1' }));
     assert.ok(requests.some((request) => request.url === '/api/v1/editor/projects/10/versions/300/package/export'), '打开时重新获取版本，不能使用列表的100版');
     assert.ok(!requests.some((request) => request.url === '/files/legacy.zip'));
+    assert.equal((await call('getProject', { projectId: '1' })).latestEditorProjectVersionNumber, 3);
+    const requestsBeforeRollback = requests.length;
+    latestVersionId = '200';
+    latestVersionNumber = 2;
+    await assert.rejects(call('openProject', { projectId: '1' }), /503/);
+    assert.deepEqual(requests.slice(requestsBeforeRollback)
+      .filter((request) => request.url.includes('/package/export')).map((request) => request.url),
+    ['/api/v1/editor/projects/10/versions/200/package/export'], '发布中心回滚后必须下载旧版 SOURCE，不能复用缓存的300版');
+    const rolledBack = await call('getProject', { projectId: '1' });
+    assert.equal(rolledBack.latestEditorProjectVersionId, '200');
+    assert.equal(rolledBack.latestEditorProjectVersionNumber, 2);
     statusError = true;
     await assert.rejects(call('openProject', { projectId: '1' }), /远端查询失败/);
     statusError = false;
@@ -94,7 +107,7 @@ async function run() {
     release();
     await assert.rejects(pending, /地址或工作区已变化/);
     await assert.rejects(call('openProject', { projectId: '1' }), /最近一次数据中台列表/);
-    console.log('current-project-metadata: 当前版本、重新获取、远端失败、普通导入、移除、取消及配置竞争通过');
+    console.log('current-project-metadata: 当前版本、回滚版本、重新获取、远端失败、普通导入、移除、取消及配置竞争通过');
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));

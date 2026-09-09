@@ -181,6 +181,15 @@ export function clearDataPlatformChartSyncRetryContext(): void {
   activeChartSync?.controller.abort();
 }
 
+/** 退出项目时等待旧同步释放并清空进度，允许下一项目重新启动同步。 */
+export async function resetDataPlatformChartSyncSession(): Promise<void> {
+  clearDataPlatformChartSyncRetryContext();
+  const active = activeChartSync;
+  active?.controller.abort();
+  if (active) await active.promise;
+  latestChartSyncProgress = null;
+}
+
 /** 应用退出时取消并等待在途请求，避免退出过程中继续写索引。 */
 export async function disposeDataPlatformChartSync(): Promise<void> {
   chartSyncShuttingDown = true;

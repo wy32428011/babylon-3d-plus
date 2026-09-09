@@ -109,6 +109,39 @@ async function run() {
       assert.deepEqual(await readdir(path.join(empty.projectRoot, 'Scenes')), []);
       assert.ok(empty.conflictCopyPath, '远端无工程时仍保留旧本地内容');
     }
+    const rollbackProject = {
+      id: '8', projectName: '发布中心回滚工程', latestEditorProjectId: '100',
+      latestEditorProjectVersionId: '300', latestEditorProjectVersionNumber: 3,
+      latestEditorProjectPackageUrl: '/rollback-v3.zip', currentResourceRevision: '0',
+    };
+    const newerScene = { entities: {}, entityIds: [], name: '后一次发布的场景' };
+    const olderScene = { entities: {}, entityIds: [], name: '发布中心选中的回滚场景' };
+    archiveByPath.set('/rollback-v3.zip', await createPackage(5, newerScene));
+    archiveByPath.set('/rollback-v2.zip', await createPackage(5, olderScene));
+    const newer = await service.openDataPlatformProject(rollbackProject, baseUrl, oldWorkspace);
+    const newerContent = await readFile(newer.sceneFilePath, 'utf8');
+    assert.deepEqual(JSON.parse(newerContent).scene, newerScene);
+    const newerAsset = path.join('Assets', 'Models', '新版工作区资源.txt');
+    await writeFile(path.join(newer.projectRoot, newerAsset), '新版资源应随冲突副本保留');
+    const downloadsBeforeRollback = downloads;
+    const rolledBack = await service.openDataPlatformProject({ ...rollbackProject,
+      latestEditorProjectVersionId: '200', latestEditorProjectVersionNumber: 2,
+      latestEditorProjectPackageUrl: '/rollback-v2.zip',
+    }, baseUrl, oldWorkspace);
+    assert.equal(rolledBack.projectRoot, newer.projectRoot, '回滚必须替换同一项目工作区');
+    assert.equal(rolledBack.source, 'package');
+    assert.equal(downloads, downloadsBeforeRollback + 1, '回滚版本号更小时仍须下载远端 SOURCE');
+    assert.deepEqual(JSON.parse(await readFile(rolledBack.sceneFilePath, 'utf8')).scene, olderScene);
+    assert.equal(rolledBack.binding.latestVersionId, '200');
+    assert.equal(rolledBack.binding.latestVersionNumber, 2);
+    const persistedBinding = JSON.parse(await readFile(path.join(rolledBack.projectRoot,
+      '.babylon-editor', 'data-platform-binding.json'), 'utf8'));
+    assert.equal(persistedBinding.latestVersionId, '200', '后续发布使用的持久化基线也必须是回滚版本');
+    assert.equal(persistedBinding.latestVersionNumber, 2);
+    assert.ok(rolledBack.conflictCopyPath, '回滚前本地新版工程必须保留副本');
+    assert.equal(await readFile(path.join(rolledBack.conflictCopyPath, 'Scenes', '工厂.scene.json'), 'utf8'), newerContent);
+    assert.equal(await readFile(path.join(rolledBack.conflictCopyPath, newerAsset), 'utf8'), '新版资源应随冲突副本保留');
+    assert.ok(!(await readdir(path.join(rolledBack.projectRoot, 'Assets', 'Models'))).includes('新版工作区资源.txt'));
     for (const [id, version, scene] of [['6', 6, {}], ['7', 5, []]]) {
       archiveByPath.set(`/${id}.zip`, await createPackage(version, scene));
       await assert.rejects(service.openDataPlatformProject({
@@ -117,7 +150,7 @@ async function run() {
         latestEditorProjectVersionNumber: version, currentResourceRevision: '0',
       }, baseUrl, newWorkspace), /不是当前编辑器场景格式/);
     }
-    console.log('PASS: v1-v5 remote authority, same-version failed-publish recovery, local backups, no fallback, remote empty and invalid package rejection');
+    console.log('PASS: v1-v5 remote authority, rollback SOURCE and binding, same-version failed-publish recovery, local backups, no fallback, remote empty and invalid package rejection');
   } finally {
     await service.disposeDataPlatformProjectTasks();
     server.closeAllConnections();

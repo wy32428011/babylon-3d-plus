@@ -13,7 +13,7 @@ test('模型同步订阅使用 realtime-first gate 丢弃迟到的旧快照', as
   assert.match(cjsSource, contract);
 });
 
-test('每个场景会话都会重新处理当前模型同步完成快照', async () => {
+test('本地场景保留同步门控，其他入口继续处理当前同步完成快照', async () => {
   const projectPanelSource = await readFile(
     new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url),
     'utf8',
@@ -21,6 +21,6 @@ test('每个场景会话都会重新处理当前模型同步完成快照', async
 
   assert.match(
     projectPanelSource,
-    /beginScenePreparation\(sceneSessionId\);\s*skipSceneModelSync\(sceneSessionId, null\);\s*lastSceneRefreshModelSyncRunIdRef\.current = null;/,
+    /beginScenePreparation\(sceneSessionId\);\s*if \(sceneResourcePolicy !== 'local-refresh'\) skipSceneModelSync\(sceneSessionId, null\);\s*lastSceneRefreshModelSyncRunIdRef\.current = null;/,
   );
 });

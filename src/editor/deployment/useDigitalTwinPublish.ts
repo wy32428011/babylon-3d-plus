@@ -1,3 +1,5 @@
+import { getScenePreparationSnapshot } from '../loading/scenePreparationProgress';
+import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { repairPublishSceneModels } from './repairPublishSceneModels';
 import { executeCommand } from '../commands/CommandHistory';
@@ -55,6 +57,7 @@ const INITIAL_STATE: DigitalTwinPublishState = {
 /** 管理桌面端数字孪生发布 IPC、进度、确认重试和场景保存基线。 */
 export function useDigitalTwinPublish(): DigitalTwinPublishController {
   const [state, setState] = useState<DigitalTwinPublishState>(INITIAL_STATE);
+  const [isRefreshingPublishContext, setIsRefreshingPublishContext] = useState(false);
   const activeRequestIdRef = useRef<string | null>(null);
   const contextRequestIdRef = useRef(0);
   const pushLog = useEditorStore((store) => store.pushLog);
@@ -100,7 +103,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     const requestId = crypto.randomUUID();
     let sceneContent: string;
     canceledRequestIdRef.current = null;
-    contextRequestIdRef.current += 1;
+    const contextRequestId = ++contextRequestIdRef.current;
     activeRequestIdRef.current = requestId;
     setState((current) => ({
       ...current,
@@ -118,6 +121,10 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     }));
 
     try {
+      const editorState = useEditorStore.getState();
+      if (editorState.sceneResourcePolicy === 'data-platform-refresh' && (
+        !getScenePreparationSnapshot().completed || editorState.latestSceneResourceTransaction
+        || environmentPreparationStore.getSnapshot().error)) throw new Error('请先完成场景模型同步与渲染，再发布当前版本。');
       if (typeof window.editorApi.recoverDigitalTwinModels !== 'function') {
         throw new Error('当前窗口尚未加载模型恢复接口，请先保存场景，再完全退出并重新启动编辑器后发布。');
       }
@@ -161,6 +168,8 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
           : result.status === 'conflict'
             ? 'conflict'
             : 'canceled';
+      const refreshContext = result.status === 'conflict' || result.status === 'confirmation-required';
+      if (refreshContext) setIsRefreshingPublishContext(true);
       setState((current) => ({ ...current, status, result, error: null }));
       for (const warning of result.warnings) pushLog(`数字孪生发布提示：${warning}`);
       if (result.status === 'completed') {
@@ -171,6 +180,22 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
       } else if (result.status === 'confirmation-required') {
         pushLog(`数字孪生发布需要确认：${result.message}`);
       }
+      if (refreshContext) {
+        // 保留冲突副本、确认结果和进度；刷新期间仍禁用重试，避免按钮可点而请求锁尚未释放。
+        try {
+          if (!window.editorApi.getDigitalTwinPublishContext) throw new Error('当前编辑器不支持读取发布上下文。');
+          const context = await window.editorApi.getDigitalTwinPublishContext({ projectId: options.projectId });
+          if (activeRequestIdRef.current === requestId && contextRequestIdRef.current === contextRequestId) {
+            setState((current) => ({ ...current, context, error: null }));
+          }
+        } catch (error) {
+          if (activeRequestIdRef.current === requestId && contextRequestIdRef.current === contextRequestId) {
+            const message = `发布结果已保留，但刷新发布上下文失败：${getErrorMessage(error)}`;
+            setState((current) => ({ ...current, error: message }));
+            pushLog(message);
+          }
+        }
+      }
       return result;
     } catch (error) {
       const message = getErrorMessage(error);
@@ -179,7 +204,10 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
       pushLog(canceled ? '数字孪生发布已取消。' : '数字孪生发布失败：' + message);
       return null;
     } finally {
-      activeRequestIdRef.current = null;
+      if (activeRequestIdRef.current === requestId) {
+        activeRequestIdRef.current = null;
+        setIsRefreshingPublishContext(false);
+      }
     }
   }, [pushLog]);
 
@@ -196,7 +224,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     setState(INITIAL_STATE);
   }, []);
 
-  const isBusy = state.status === 'loading-context' || state.status === 'publishing';
+  const isBusy = isRefreshingPublishContext || state.status === 'loading-context' || state.status === 'publishing';
   return useMemo(() => ({ state, isBusy, loadContext, start, cancel, reset }), [cancel, isBusy, loadContext, reset, start, state]);
 }
 

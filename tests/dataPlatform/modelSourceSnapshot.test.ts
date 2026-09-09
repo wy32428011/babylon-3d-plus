@@ -135,3 +135,37 @@ test('非法工程包指纹拒绝进入模型模板或保存场景', () => {
   assert.throws(() => deserializeScene(serializeScene(scene)), /场景文件格式不受支持/);
   assert.equal(sanitizeModelAssetTemplate(model.components.modelAsset), null);
 });
+
+test('本地打开同步当前中台候选，覆盖模型和间接引用快照并保留实例身份与摆放', async () => {
+  const { scene, model, generator, avatar } = fixture();
+  model.components.transform.position = { x: 3, y: 4, z: 5 };
+  model.components.modelAsset.assetCode = 'LOCAL-DEVICE';
+  const content = serializeScene(scene);
+  const previousApi = (globalThis as any).window.editorApi;
+  (globalThis as any).window.editorApi = {
+    loadScene: async () => ({ canceled: false, content }),
+    loadSceneFile: async () => ({ canceled: false, content }),
+  };
+  try {
+    for (const open of [() => useEditorStore.getState().loadScene(), () => useEditorStore.getState().loadSceneFromFile('local.scene.json')]) {
+      assert.equal(await open(), true);
+      assert.equal(useEditorStore.getState().sceneResourcePolicy, 'local-refresh');
+      // 对应本地初始化单次统一 refresh，即使缓存本轮没有变化也应用全部当前中台候选。
+      assert.equal(useEditorStore.getState().refreshModelInstancesFromAssets([sharedAsset], { preserveResolvedSnapshots: false }), 3);
+      const updated = useEditorStore.getState().scene;
+      assert.equal(updated.entities[model.id].components.modelAsset.sourcePath, sharedAsset.path);
+      assert.equal(updated.entities[generator.id].components.modelGenerator.defaultTarget.modelAsset.sourcePath, sharedAsset.path);
+      assert.equal(updated.entities[avatar.id].components.manualRoamSpawn.avatar.sourcePath, sharedAsset.path);
+      assert.equal(updated.entities[model.id].components.modelAsset.assetCode, 'LOCAL-DEVICE');
+      assert.deepEqual(updated.entities[model.id].components.transform.position, { x: 3, y: 4, z: 5 });
+      assert.equal(updated.entities[model.id].components.modelAsset.sourceSnapshot, undefined);
+      assert.deepEqual(updated.entities[model.id].components.modelAsset.scriptAssets, sharedAsset.scriptAssets);
+      assert.equal(JSON.stringify(JSON.parse(serializeScene(updated))).includes('sceneResourcePolicy'), false);
+    }
+    await useEditorStore.getState().loadSceneFromFile('source.scene.json', undefined, true);
+    assert.equal(useEditorStore.getState().sceneResourcePolicy, 'data-platform-refresh');
+    assert.equal(useEditorStore.getState().refreshModelInstancesFromAssets([sharedAsset], { preserveResolvedSnapshots: true }), 0);
+    useEditorStore.getState().resetSceneToBlank();
+    assert.equal(useEditorStore.getState().sceneResourcePolicy, 'preserve-snapshot');
+  } finally { (globalThis as any).window.editorApi = previousApi; }
+});

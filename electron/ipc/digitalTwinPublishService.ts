@@ -1,4 +1,5 @@
 import { assertPublishSceneModelsReady } from './digitalTwinModelRecovery.js';
+import { isAuthorizedAssetFile } from './assetRegistry.js';
 import { app } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -13,11 +14,11 @@ import { authorizeSceneFile } from './assetRegistry.js';
 import {
   clearCurrentDataPlatformBinding,
   createDataPlatformBinding,
+  assertDataPlatformBindingTarget,
   getCurrentDataPlatformBinding,
   readDataPlatformBinding,
   resolveDataPlatformBindingSharedResourcesRoot,
   resolveDataPlatformBindingWorkspaceRoot,
-  resolveDataPlatformProjectRoot,
   resolveDataPlatformSharedResourcesRoot,
   setCurrentDataPlatformBinding,
   type DataPlatformBindingMetadata,
@@ -43,7 +44,7 @@ import {
 } from './projectAssetStore.js';
 import { createDeploymentSkyboxValidationCache, loadDeploymentSkyboxCacheContext } from './deploymentSkyboxCache.js';
 import { resolveDataPlatformPublishProjectContext } from './dataPlatformIpc.js';
-import { prepareDataPlatformProjectForPublish } from './dataPlatformProjectService.js';
+import { prepareDataPlatformProjectForPublish, resolveDataPlatformPublishProjectRoot } from './dataPlatformProjectService.js';
 import {
   buildDigitalTwinRuntimeConfigSavePayload,
   createDefaultDigitalTwinAllowedParentOrigins,
@@ -83,8 +84,10 @@ export async function getDigitalTwinPublishContext(
 
   const target = await resolveDataPlatformPublishProjectContext(selectedProjectId);
   const remote = await new DigitalTwinUploadClient(target.baseUrl).projectStatus(target.project.id, signal);
-  const metadata = createPublishMetadata(target.project, target.baseUrl, target.webBaseUrl, target.workspaceRoot, remote);
-  const projectRoot = getCurrentProjectRoot() ?? resolveDataPlatformProjectRoot(target.workspaceRoot, target.project.id);
+  const projectRoot = resolveDataPlatformPublishProjectRoot(target.workspaceRoot, target.project.id);
+  const existingBinding = await readDataPlatformBinding(projectRoot);
+  if (existingBinding) assertDataPlatformBindingTarget(existingBinding, target.project.id, target.baseUrl);
+  const metadata = existingBinding ?? createPublishMetadata(target.project, target.baseUrl, target.webBaseUrl, target.workspaceRoot, remote);
   return createPublishContext(projectRoot, metadata, remote, false);
 }
 
@@ -101,6 +104,9 @@ async function resolveCurrentDataPlatformBinding(): Promise<ResolvedDataPlatform
   if (!currentProjectRoot) return current;
 
   const metadata = await readDataPlatformBinding(currentProjectRoot);
+  // 磁盘读取期间可能已返回首页或打开另一项目，旧预检不能重新挂载原项目。
+  const activeRoot = getCurrentProjectRoot();
+  if (!activeRoot || !isSameFilePath(activeRoot, currentProjectRoot)) return null;
   if (!metadata) {
     if (current) clearCurrentDataPlatformBinding();
     return null;
@@ -192,8 +198,10 @@ export async function publishDigitalTwin(
     const target = await resolveDataPlatformPublishProjectContext(validated.projectId);
     client = new DigitalTwinUploadClient(target.baseUrl);
     remote = await client.projectStatus(target.project.id, signal);
-    const previewMetadata = createPublishMetadata(target.project, target.baseUrl, target.webBaseUrl, target.workspaceRoot, remote);
-    const previewProjectRoot = getCurrentProjectRoot() ?? resolveDataPlatformProjectRoot(target.workspaceRoot, target.project.id);
+    const previewProjectRoot = resolveDataPlatformPublishProjectRoot(target.workspaceRoot, target.project.id);
+    const existingBinding = await readDataPlatformBinding(previewProjectRoot);
+    if (existingBinding) assertDataPlatformBindingTarget(existingBinding, target.project.id, target.baseUrl);
+    const previewMetadata = existingBinding ?? createPublishMetadata(target.project, target.baseUrl, target.webBaseUrl, target.workspaceRoot, remote);
     context = createPublishContext(previewProjectRoot, previewMetadata, remote, true);
     if (context.overwriteConfirmationRequired && !validated.overwriteExisting) {
       return createTerminalResult(validated.requestId, 'confirmation-required', {
@@ -201,13 +209,13 @@ export async function publishDigitalTwin(
         message: '目标业务项目已经有当前数字孪生工程，请确认覆盖后再发布。',
       });
     }
-    await prepareDataPlatformProjectForPublish({
+    const prepared = await prepareDataPlatformProjectForPublish({
       ...target.project,
       latestEditorProjectId: remote.editorProjectId,
       latestEditorProjectVersionId: remote.latestVersionId,
       latestEditorProjectVersionNumber: remote.latestVersionNumber,
-    }, target.baseUrl, target.workspaceRoot, target.webBaseUrl);
-    current = getCurrentDataPlatformBinding();
+    }, target.baseUrl, target.workspaceRoot, target.webBaseUrl, signal);
+    current = { projectRoot: prepared.projectRoot, metadata: prepared.binding };
     if (!current || current.metadata.projectId !== validated.projectId) {
       throw new Error('当前场景绑定数据中台业务项目失败。');
     }
@@ -253,6 +261,8 @@ export async function publishDigitalTwin(
     sourcePackage = await buildDigitalTwinSourcePackage({
       projectRoot: current.projectRoot,
       sharedResourcesRoot,
+      legacyWorkspaceRoot: workspaceRoot,
+      isAuthorizedCadFile: isAuthorizedAssetFile,
       entrySceneFilePath: savedScene.filePath,
       outputRoot: taskRoot,
       manifest: {
@@ -265,7 +275,7 @@ export async function publishDigitalTwin(
       signal,
       skyboxCacheContext,
       skyboxValidationCache,
-      skipCadReferences: false,
+      skipCadReferences: true,
       isPlatformImageReference,
       findSyncedImageForReference,
       onProgress: (detail, completedFiles, totalFiles) => {

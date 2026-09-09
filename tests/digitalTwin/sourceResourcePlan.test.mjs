@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import unzipper from 'unzipper';
@@ -166,4 +166,109 @@ test('同名不同内容图片保留扩展名；大小写路径别名和URL查�
   const asset = portable.scene.entities.a.components.modelAsset;
   assert.equal(decodeURIComponent(new URL(asset.sourceUrl).pathname.slice(1)), asset.sourcePath);
   assert.equal(result.resourceFileCount, 5);
+}));
+
+
+test('首次发布切换工程根目录后，已同步的工作区根模型仍应完整打包', async () => fixture(async ({ root, scene, options, save }) => {
+  const packageRoot = path.join(root, 'Assets', 'Models', 'Model-1001-货架');
+  await mkdir(packageRoot, { recursive: true });
+  await writeFile(path.join(packageRoot, 'model.glb'), 'synced-model');
+  scene.scene.entities.a.components.modelAsset = { sourcePath: path.join(packageRoot, 'model.glb'), sourceUrl: url(path.join(packageRoot, 'model.glb')) };
+  await save();
+  const result = await buildDigitalTwinSourcePackage({ ...options, legacyWorkspaceRoot: root });
+  assert.deepEqual(result.omittedResources, [], '有效的工作区同步资源不应误报为外部资源');
+}));
+
+
+test('历史外部 CAD 只打包已授权的精确 DXF 文件并保留显示配置', async () => fixture(async ({ root, scene, options, save }) => {
+  const folder = path.join(root, 'external'); await mkdir(folder);
+  const dxf = path.join(folder, '施工图.dxf'); await writeFile(dxf, '0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n');
+  await writeFile(path.join(folder, 'unrelated.txt'), 'private-neighbor');
+  scene.scene.entities.cad = { components: { cadReference: { name: '施工图', sourcePath: dxf, sourceUrl: url(dxf), sourceLengthUnit: 'millimeter', opacity: 0.3 } } };
+  await save();
+  const result = await buildDigitalTwinSourcePackage({ ...options, isAuthorizedCadFile: file => file === dxf });
+  assert.deepEqual(result.omittedResources, []);
+  const cad = JSON.parse(result.sceneContents[0]).scene.entities.cad.components.cadReference;
+  assert.match(cad.sourcePath, /^Assets\/Cad\//);
+  assert.equal(cad.opacity, 0.3); assert.equal(cad.sourceLengthUnit, 'millimeter');
+  const archive = await unzipper.Open.file(result.filePath);
+  assert.deepEqual(await archive.files.find(file => file.path === cad.sourcePath).buffer(), await readFile(dxf));
+  assert.equal(archive.files.some(file => file.path.includes('unrelated.txt')), false);
+}));
+
+test('外部 CAD 未授权、缺失原图时明确阻断，不当作中台模型缓存处理', async () => fixture(async ({ root, scene, options, save }) => {
+  const dxf = path.join(root, 'private.dxf'); await writeFile(dxf, 'drawing');
+  scene.scene.entities.cad = { components: { cadReference: { name: '施工图', sourcePath: dxf, sourceUrl: url(dxf) } } };
+  await save();
+  await assert.rejects(buildDigitalTwinSourcePackage({ ...options, isAuthorizedCadFile: () => false }), /CAD.*授权/);
+  await rm(dxf);
+  await assert.rejects(buildDigitalTwinSourcePackage({ ...options, isAuthorizedCadFile: () => true }), /CAD.*不存在.*重新导入/s);
+}));
+
+
+test('项目 Drawings 中的历史 CAD 也按单文件打包，不要求原路径含 Assets', async () => fixture(async ({ scene, options, save }) => {
+  const folder = path.join(options.projectRoot, 'Drawings'); await mkdir(folder);
+  const file = path.join(folder, 'layout.dxf'); await writeFile(file, 'legacy-project-cad');
+  scene.scene.entities.cad = { components: { cadReference: { sourcePath: file, sourceUrl: url(file) } } };
+  await save();
+  const result = await buildDigitalTwinSourcePackage(options);
+  assert.deepEqual(result.omittedResources, []);
+  const cad = JSON.parse(result.sceneContents[0]).scene.entities.cad.components.cadReference;
+  assert.equal(cad.sourcePath, 'Assets/Cad/layout.dxf');
+}));
+
+test('兼容工作区 Assets 不放行工作区其它目录或兄弟项目资源', async () => fixture(async ({ root, scene, options, save }) => {
+  const other = path.join(root, 'other-project', 'Assets', 'Models', 'Private');
+  await mkdir(other, { recursive: true }); await writeFile(path.join(other, 'private.glb'), 'private');
+  scene.scene.entities.a.components.modelAsset = { sourcePath: path.join(other, 'private.glb') };
+  await save();
+  const result = await buildDigitalTwinSourcePackage({ ...options, legacyWorkspaceRoot: root });
+  assert.deepEqual(result.omittedResources, [other]);
+}));
+
+
+test('旧工作区缓存兼容仍拒绝 Assets 祖先 Junction 逃逸', async () => fixture(async ({ root, scene, options, save }) => {
+  const external = path.join(root, 'private-target');
+  await mkdir(path.join(external, 'Private'), { recursive: true });
+  await writeFile(path.join(external, 'Private', 'model.glb'), 'must-not-package');
+  const assets = path.join(root, 'Assets'); await mkdir(assets);
+  await symlink(external, path.join(assets, 'Models'), process.platform === 'win32' ? 'junction' : 'dir');
+  scene.scene.entities.a.components.modelAsset = { sourcePath: path.join(assets, 'Models', 'Private', 'model.glb') };
+  await save();
+  await assert.rejects(buildDigitalTwinSourcePackage({ ...options, legacyWorkspaceRoot: root }), /符号|Junction|链接|逃逸|真实路径/);
+}));
+
+
+test('旧工作区资源目录不能与 SOURCE 输出目录重叠', async () => fixture(async ({ root, options, save }) => {
+  await save();
+  await assert.rejects(buildDigitalTwinSourcePackage({ ...options, legacyWorkspaceRoot: root,
+    outputRoot: path.join(root, 'Assets', 'Models', 'Output') }), /旧工作区资源目录不能重叠/);
+}));
+
+
+test('发布忽略 CAD 保留有效模型烘焙与本地 CAD 引用', async () => fixture(async ({ root, scene, options, save }) => {
+  const env = path.join(options.projectRoot, 'Assets', 'Environments', 'Floor', 'floor.glb');
+  await mkdir(path.dirname(env), { recursive: true }); await writeFile(env, 'floor');
+  scene.scene.entities.cad = { components: { transform: { position: { x: 1, y: 0, z: 2 } },
+    cadReference: { sourcePath: path.join(root, 'missing.dxf'), sourceUrl: url(path.join(root, 'missing.dxf')) } } };
+  scene.scene.entityIds.push('cad');
+  const settings = scene.scene.sceneSettings;
+  settings.environment = { packagePath: path.dirname(env), activeVariantUrl: url(env), variants: [{ sourcePath: env, sourceUrl: url(env) }] };
+  settings.shadows = { enabled: true, mode: 'baked', darkness: .4 };
+  settings.shadows.bake = { version: 1, signature: getSceneShadowBakeSignatureContract(scene.scene), createdAt: '2026-09-09T00:00:00Z', surfaces: [
+    { key: '0:floor', kind: 'shadow-mask', dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5i8AAAAASUVORK5CYII=', width: 1, height: 1, uvBounds: [0, 0, 1, 1] },
+  ] };
+  await save();
+  const before = await readFile(options.entrySceneFilePath, 'utf8');
+  const result = await buildDigitalTwinSourcePackage({ ...options, skipCadReferences: true });
+  const published = JSON.parse(result.entrySceneContent);
+  assert.equal(published.scene.entities.cad.components.cadReference, undefined);
+  assert.equal(getSceneShadowBakeErrorContract(published.scene), null);
+  assert.deepEqual(published.scene.sceneSettings.shadows.bake.surfaces, settings.shadows.bake.surfaces);
+  assert.equal(await readFile(options.entrySceneFilePath, 'utf8'), before);
+  assert.deepEqual(result.omittedResources, []);
+  settings.shadows.bake.signature = 'stale-bake-signature';
+  await save();
+  const stale = await buildDigitalTwinSourcePackage({ ...options, skipCadReferences: true, outputRoot: path.join(root, 'stale-output') });
+  assert.notEqual(getSceneShadowBakeErrorContract(JSON.parse(stale.entrySceneContent).scene), null, '不能把原有过期阴影重新签成有效');
 }));

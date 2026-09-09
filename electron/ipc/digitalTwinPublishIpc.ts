@@ -1,3 +1,4 @@
+import { isDataPlatformProjectClosing } from './dataPlatformIpc.js';
 import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -58,7 +59,7 @@ export async function disposeAllDigitalTwinPublishTasks(): Promise<void> {
   registered = false;
 }
 
-function isDigitalTwinPublishActive(): boolean {
+export function isDigitalTwinPublishActive(): boolean {
   return activeTasks.size > 0;
 }
 
@@ -67,6 +68,7 @@ async function handleGetContext(
   request?: DigitalTwinPublishContextRequest,
 ): Promise<DigitalTwinPublishContext> {
   const { sender } = assertTrustedSender(event);
+  if (isDataPlatformProjectClosing()) throw new Error('正在关闭当前项目，请稍后重试。');
   const publishActive = activeTasks.has(sender.id) || isDigitalTwinPublishActive();
   if (publishActive) return getLocalDigitalTwinPublishContext(true);
   return getDigitalTwinPublishContext(validateOptionalProjectId(request?.projectId));
@@ -77,6 +79,7 @@ async function handleStartPublish(
   request: DigitalTwinPublishRequest,
 ): Promise<DigitalTwinPublishResult> {
   const { sender } = assertTrustedSender(event);
+  if (isDataPlatformProjectClosing()) throw new Error('正在关闭当前项目，请稍后重试。');
   if (shuttingDown) throw new Error('应用正在退出，无法开始数字孪生发布。');
   bindSenderCleanup(sender);
   if (activeTasks.has(sender.id)) throw new Error('当前窗口已有数字孪生发布任务正在执行。');
@@ -101,6 +104,7 @@ async function handleRecoverModels(
   request: import('../types.js').DigitalTwinModelRecoveryRequest,
 ): Promise<import('../types.js').DigitalTwinModelRecoveryResult> {
   const { sender } = assertTrustedSender(event);
+  if (isDataPlatformProjectClosing()) throw new Error('正在关闭当前项目，请稍后重试。');
   if (shuttingDown || isDigitalTwinPublishActive()) throw new Error('当前已有发布任务或应用正在退出，无法恢复模型。');
   const requestId = validateRequestId(request?.requestId);
   const projectId = validateOptionalProjectId(request?.projectId);

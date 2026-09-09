@@ -3,6 +3,7 @@ import { SceneLoadingMask } from '../../shared/ui/SceneLoadingMask';
 import { RemoteDownloadDetail } from './RemoteDownloadDetail';
 import { sceneRemoteDownloadStore } from './sceneRemoteDownloadProgress';
 import { environmentPreparationStore } from './environmentPreparationProgress';
+import { useEditorStore } from '../store/editorStore';
 import {
   getScenePreparationSnapshot,
   subscribeScenePreparation,
@@ -11,6 +12,7 @@ import {
 /** 覆盖整个编辑器的场景准备蒙版，直到同步、刷新、加载和合批全部落定。 */
 export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCancel: () => void; cancelling?: boolean }) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const localScene = useEditorStore(state => state.sceneResourcePolicy !== 'preserve-snapshot');
   const environment = useSyncExternalStore(
     environmentPreparationStore.subscribe,
     environmentPreparationStore.getSnapshot,
@@ -40,13 +42,13 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
     };
   }, [state.completed, state.sceneSessionId, state.assetRefreshStatus]);
 
-  if (state.completed) return null;
   const environmentError = environment.sceneSessionId === state.sceneSessionId ? environment.error : null;
+  if (state.completed && !environmentError) return null;
 
   return (
     <SceneLoadingMask
       detail={environmentError ?? state.detail}
-      label={environmentError ? '环境模型加载失败' : state.label}
+      label={environmentError ? (localScene ? '场景资源加载失败' : '环境模型加载失败') : state.label}
       percent={state.percent}
       phase={state.phase}
       downloadDetail={downloads.sceneSessionId === state.sceneSessionId ? <>
@@ -56,7 +58,7 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
       ref={overlayRef}
       tabIndex={-1}
       action={<>
-          {environmentError ? <button disabled={environment.retrying} onClick={() => void environmentPreparationStore.retry()} type="button">重试环境模型同步</button> : null}
+          {environmentError ? <button disabled={environment.retrying} onClick={() => void environmentPreparationStore.retry()} type="button">{localScene ? '重新同步场景资源' : '重试环境模型同步'}</button> : null}
           <button disabled={cancelling} onClick={onCancel} type="button">{cancelling ? '正在请求取消…' : '取消加载并返回首页'}</button>
         </>}
     />

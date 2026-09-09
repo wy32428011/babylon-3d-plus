@@ -10,27 +10,33 @@ const electronPath = require('electron');
 const __filename = fileURLToPath(import.meta.url);
 const workspaceRoot = path.resolve(path.dirname(__filename), '..');
 const testRoot = await fs.mkdtemp(path.join(tmpdir(), 'zending-digital-twin-publish-integration-'));
-const testEntry = path.join(workspaceRoot, 'tests', 'digitalTwin', 'digitalTwinPublish.integration.mjs');
+const testEntries = [
+  path.join(workspaceRoot, 'tests', 'digitalTwin', 'digitalTwinPublish.integration.mjs'),
+  path.join(workspaceRoot, 'tests', 'digitalTwin', 'publishBindingRecovery.integration.mjs'),
+];
 let exitCode = 1;
 
 try {
-  exitCode = await new Promise((resolve, reject) => {
-    const child = spawn(electronPath, [testEntry], {
-      cwd: workspaceRoot,
-      env: {
-        ...process.env,
-        ELECTRON_DISABLE_SECURITY_WARNINGS: 'true',
-        ZENDING_DIGITAL_TWIN_PUBLISH_TEST_ROOT: testRoot,
-      },
-      stdio: 'inherit',
-      windowsHide: true,
+  for (const testEntry of testEntries) {
+    exitCode = await new Promise((resolve, reject) => {
+      const child = spawn(electronPath, [testEntry], {
+        cwd: workspaceRoot,
+        env: {
+          ...process.env,
+          ELECTRON_DISABLE_SECURITY_WARNINGS: 'true',
+          ZENDING_DIGITAL_TWIN_PUBLISH_TEST_ROOT: testRoot,
+        },
+        stdio: 'inherit',
+        windowsHide: true,
+      });
+      child.once('error', reject);
+      child.once('exit', (code, signal) => {
+        if (signal) reject(new Error(`数字孪生发布集成测试被信号终止：${signal}`));
+        else resolve(code ?? 1);
+      });
     });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (signal) reject(new Error(`数字孪生发布集成测试被信号终止：${signal}`));
-      else resolve(code ?? 1);
-    });
-  });
+    if (exitCode !== 0) break;
+  }
 } finally {
   await removeWithRetry(testRoot);
 }

@@ -141,6 +141,20 @@ export async function readDataPlatformBinding(projectRoot: string): Promise<Data
   }
 }
 
+/** 已存在绑定只能由同一业务项目和数据中台复用，禁止通过重试隐式改绑。 */
+export function assertDataPlatformBindingTarget(
+  metadata: DataPlatformBindingMetadata,
+  projectId: string,
+  baseUrl: string,
+): void {
+  if (metadata.projectId !== normalizeProjectId(projectId)) {
+    throw new Error(`本地工程已绑定业务项目「${metadata.projectName}（${metadata.projectId}）」，与本次选择的项目不一致。请打开正确项目后发布。`);
+  }
+  if (metadata.baseUrl !== normalizeBaseUrl(baseUrl)) {
+    throw new Error('本地工程绑定的数据中台地址与当前选择不一致，请切换到原数据中台或打开对应工程后发布。');
+  }
+}
+
 export function setCurrentDataPlatformBinding(projectRoot: string, metadata: DataPlatformBindingMetadata): void {
   currentBinding = { projectRoot: path.resolve(projectRoot), metadata: createDataPlatformBinding(metadata) };
 }

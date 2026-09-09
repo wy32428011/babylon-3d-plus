@@ -377,6 +377,8 @@ export type ModelRuntimeEntry = {
   externalScriptSignature: string;
   externalScriptStarting: boolean;
   measurementReady: boolean;
+  /** 本地允许显示基础几何，但严格场景同步仍须拒绝失败的脚本初始化。 */
+  readinessError?: string;
   stackerTelemetry: StackerModelTelemetryState;
   conveyorTelemetry: ConveyorModelTelemetryState;
   rgvTelemetry: RgvModelTelemetryState;
@@ -436,6 +438,7 @@ export type GeneratedOutputOwnerRuntimeEntry = {
   activeSnapshot: DeviceTelemetrySnapshot | null;
   metadata: Record<string, unknown>;
   onTerminalLoadFailure?: () => void;
+  readinessError?: string;
 };
 
 export type ModelGeneratorRuntimeEntry = GeneratedOutputOwnerRuntimeEntry & {
@@ -703,6 +706,8 @@ export class SceneRuntime {
   private readonly conveyorTrajectories = new Map<string, ConveyorTrajectoryRuntimeEntry>();
   private _trajectoryVisible = false;
   private readonly models = new Map<string, ModelRuntimeEntry>();
+  /** acquire 失败会销毁条目，错误需保留到该实体下一次加载尝试。 */
+  private readonly modelReadinessErrors = new Map<string, { entityIds: string[]; error: string }>();
   /** 阵列副本保留完整 Scene Entity；相同参数组合共享一个脚本宿主，而不是逐实体加载模型。 */
   private readonly modelArrayInstanceEntities = new Map<string, Entity>();
   private readonly modelArrayParameterVariants = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
@@ -2867,6 +2872,9 @@ export class SceneRuntime {
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
     this.shadowDocument = document;
+    for (const [key, failure] of this.modelReadinessErrors) {
+      if (!failure.entityIds.some(entityId => document.entities[entityId]?.components.modelAsset)) this.modelReadinessErrors.delete(key);
+    }
     const alarmIds = collectAlarmIndependentEntityIds(document);
     const overrides = [...alarmIds].filter(id => document.entities[id]?.components.modelArrayInstance);
     if (overrides.length) {
@@ -3389,6 +3397,7 @@ export class SceneRuntime {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.modelReadinessErrors.clear();
     this.progressNotificationPending = false;
     this.modelPresentationRefreshPending = false;
     this.disposeSlotHighlightOverlay('local');
@@ -4142,6 +4151,7 @@ export class SceneRuntime {
       return;
     }
 
+    this.modelReadinessErrors.delete(entity.id);
     const root = new TransformNode(`${entity.id}_modelRoot`, this.scene);
     const contentRoot = new TransformNode(`${entity.id}_modelContentRoot`, this.scene);
     contentRoot.parent = root;
@@ -4222,6 +4232,7 @@ export class SceneRuntime {
         if (activeEntry?.loadToken === loadToken) {
           this.disposeModel(entity.id, activeEntry);
           const message = error instanceof Error ? error.message : String(error);
+          this.modelReadinessErrors.set(entity.id, { entityIds: [entity.id], error: message });
           this.pushLog(`模型加载失败：${message}`);
         }
       });
@@ -4341,6 +4352,33 @@ export class SceneRuntime {
     return Boolean(model?.assetHandle && model.measurementReady);
   }
 
+  /** 严格加载门控单独读取失败信息，保留本地编辑对基础几何的容错显示。 */
+  getModelReadinessError(entityId: string): string | null {
+    const direct = this.models.get(entityId);
+    const errorFor = (model: ModelRuntimeEntry | undefined): string | null => model?.readinessError
+      ?? model?.externalScriptRuntime?.getInitializationError() ?? null;
+    const directError = errorFor(direct) ?? errorFor(direct?.telemetryProxySource);
+    if (directError) return directError;
+    for (const failure of this.modelReadinessErrors.values()) {
+      if (failure.entityIds.includes(entityId)) return failure.error;
+    }
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      if (variant.sourceEntityId === entityId || variant.entities.some(entity => entity.id === entityId)) {
+        const error = errorFor(variant.model);
+        if (error) return error;
+      }
+    }
+    for (const owner of this.generatedOutputOwners.values()) {
+      if (owner.entityId !== entityId && owner.editorEntityId !== entityId) continue;
+      if (owner.readinessError) return owner.readinessError;
+      if (owner.output?.kind === 'model') {
+        const error = errorFor(owner.output.model);
+        if (error) return error;
+      }
+    }
+    return null;
+  }
+
   /** 同批异步模型就绪只刷新一次选区与分组目标；直接选择/拖拽路径仍同步执行。 */
   private scheduleModelPresentationRefresh(): void {
     if (this.disposed || this.modelPresentationRefreshPending) return;
@@ -4429,6 +4467,7 @@ export class SceneRuntime {
       this.disposeModelGeneratorOutput(runtimeEntry);
       runtimeEntry.activeTargetSignature = null;
       runtimeEntry.activeSnapshot = null;
+      runtimeEntry.readinessError = undefined;
     }
     runtimeEntry.entityName = entity.name;
     runtimeEntry.component = component;
@@ -4442,6 +4481,7 @@ export class SceneRuntime {
   private clearModelGeneratorLoadFailureCache(): void {
     for (const owner of this.generatedOutputOwners.values()) {
       owner.failedTargetSignatures.clear();
+      owner.readinessError = undefined;
     }
   }
 
@@ -4496,6 +4536,7 @@ export class SceneRuntime {
     runtimeEntry.loadToken += 1;
     this.disposeModelGeneratorOutput(runtimeEntry);
     runtimeEntry.activeTargetSignature = targetSignature;
+    runtimeEntry.readinessError = undefined;
 
     if (target.kind === 'mesh') {
       runtimeEntry.output = this.createModelGeneratorMeshOutput(runtimeEntry, target);
@@ -4638,9 +4679,11 @@ export class SceneRuntime {
         role: 'default',
         snapshot: resolution.snapshot,
       });
+      runtimeEntry.readinessError = error instanceof Error ? error.message : String(error);
       return;
     }
 
+    runtimeEntry.readinessError = error instanceof Error ? error.message : String(error);
     runtimeEntry.onTerminalLoadFailure?.();
     this.applyGeneratedOutputPresentation(runtimeEntry);
   }
@@ -5782,6 +5825,9 @@ export class SceneRuntime {
 
   /** 释放导入模型的容器、根节点与所有子资源。 */
   private disposeModel(entityId: string, model: ModelRuntimeEntry): void {
+    for (const [key, failure] of this.modelReadinessErrors) {
+      if (failure.entityIds.includes(entityId)) this.modelReadinessErrors.delete(key);
+    }
     this.clearEntityArrayPreviewIfSource(entityId);
     const trajectory = this.conveyorTrajectories.get(entityId);
     if (trajectory) this.disposeConveyorTrajectory(entityId, trajectory);
@@ -7037,6 +7083,7 @@ export class SceneRuntime {
     assetSignature: string,
     parameterOnlyChangedEntityId?: string,
   ): ModelArrayParameterVariantRuntimeEntry {
+    this.modelReadinessErrors.delete(`variant:${key}`);
     const variantSequence = ++this.modelLoadSequence;
     const root = new TransformNode(`__modelArrayParameterVariant_${sourceEntity.id}_${variantSequence}`, this.scene);
     const contentRoot = new TransformNode(`__modelArrayParameterVariantContent_${sourceEntity.id}_${variantSequence}`, this.scene);
@@ -7129,6 +7176,9 @@ export class SceneRuntime {
         if (!activeVariant || activeVariant.model !== model || model.loadToken !== variantSequence) return;
         this.disposeModelArrayParameterVariant(activeVariant);
         const message = error instanceof Error ? error.message : String(error);
+        this.modelReadinessErrors.set(`variant:${key}`, {
+          entityIds: [sourceEntity.id, ...activeVariant.entities.map(item => item.id)], error: message,
+        });
         this.pushLog(`模型“${representative.name}”阵列参数脚本宿主加载失败：${message}`);
       });
 
@@ -7615,6 +7665,7 @@ export class SceneRuntime {
 
     const scriptAssets = modelAsset.scriptAssets ?? [];
     if (scriptAssets.length === 0) {
+      model.readinessError = undefined;
       model.externalScriptRuntime?.dispose();
       model.externalScriptRuntime = null;
       model.externalScriptSignature = '';
@@ -7641,6 +7692,7 @@ export class SceneRuntime {
 
     const runtimeMode = this.telemetryPreviewActive ? 'runtime' : 'edit';
     if (!model.externalScriptRuntime || model.externalScriptSignature !== signature) {
+      model.readinessError = undefined;
       model.externalScriptStarting = true;
       model.measurementReady = false;
       model.stackerTelemetryReady = false;
@@ -7659,6 +7711,7 @@ export class SceneRuntime {
           if (!current || current.loadToken !== loadToken) return;
           this.updateModelExternalScriptRuntimeContext(current, this.telemetryPreviewActive ? 'runtime' : 'edit', null, true);
           runtime.update();
+          current.readinessError = runtime.getInitializationError() ?? undefined;
           resetStackerTelemetryState(current);
           resetConveyorTelemetryState(current);
           resetRgvTelemetryState(current);
@@ -7677,6 +7730,7 @@ export class SceneRuntime {
           resetRgvTelemetryState(current);
           current.stackerTelemetryReady = true;
           const message = error instanceof Error ? error.message : String(error);
+          current.readinessError = message;
           this.pushLog(`模型脚本初始化失败，已回退基础几何与测量：${message}`);
           settle(current);
         });

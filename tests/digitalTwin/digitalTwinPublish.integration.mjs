@@ -1060,19 +1060,12 @@ async function run() {
     const selectedSourceEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'SOURCE'));
     const selectedSourceScene = JSON.parse(selectedSourceEntries.get('Scenes/main.scene.json').toString('utf8'));
     const originalCadEntity = JSON.parse(sceneContent).scene.entities['cad-reference'];
-    const originalCadReference = originalCadEntity.components.cadReference;
-    assert.deepEqual(selectedSourceScene.scene.entities['cad-reference'], {
-      ...originalCadEntity,
-      components: {
-        ...originalCadEntity.components,
-        cadReference: {
-          ...originalCadReference,
-          sourcePath: CAD_SOURCE_PATH,
-          sourceUrl: `editor-asset://local/${encodeURIComponent(CAD_SOURCE_PATH)}`,
-        },
-      },
-    }, '发布 SOURCE 必须保留 CAD 编辑内容并将引用改写为包内路径。');
-    assert.deepEqual(selectedSourceEntries.get(CAD_SOURCE_PATH), Buffer.from(CAD_DXF_CONTENT, 'utf8'));
+    const expectedPublishedCadEntity = structuredClone(originalCadEntity);
+    delete expectedPublishedCadEntity.components.cadReference;
+    assert.deepEqual(selectedSourceScene.scene.entities['cad-reference'], expectedPublishedCadEntity, 'SOURCE 只去除 CAD 组件，保留实体其余属性');
+    assert.equal([...selectedSourceEntries.keys()].some(file => /\.dxf$/i.test(file)), false, 'SOURCE 不包含 DXF 文件');
+    assert.deepEqual(JSON.parse(await readFile(scenePath, 'utf8')).scene.entities['cad-reference'], originalCadEntity,
+      '发布不能删除本地场景中的 CAD 参考图');
     assert.deepEqual(selectedSourceScene.scene.fetchConfig, PUBLISHED_FETCH_CONFIG);
     const selectedDistEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'DIST'));
     const selectedRuntimeConfig = JSON.parse(selectedDistEntries.get('runtime-config.json').toString('utf8'));
@@ -1080,23 +1073,9 @@ async function run() {
     const selectedDistScene = JSON.parse(selectedDistEntries.get('project/scene.json').toString('utf8'));
     const selectedDistManifest = JSON.parse(selectedDistEntries.get('project/asset-manifest.json').toString('utf8'));
     const cadAssets = selectedDistManifest.assets.filter((asset) => asset.kind === 'cad');
-    assert.equal(cadAssets.length, 1, '发布 DIST 必须包含场景引用的 CAD 文件。');
-    const cadAsset = cadAssets[0];
-    assert.match(cadAsset.path, /^\.\/cad\/[^/]+\/publish-reference\.dxf$/);
-    assert.deepEqual(selectedDistScene.scene.entities['cad-reference'], {
-      ...originalCadEntity,
-      components: {
-        ...originalCadEntity.components,
-        cadReference: {
-          ...originalCadReference,
-          sourcePath: cadAsset.logicalUrl,
-          sourceUrl: cadAsset.logicalUrl,
-        },
-      },
-    }, '发布 DIST 必须保留 CAD 组件及样式，并使用可解析的运行资源引用。');
-    assert.deepEqual(selectedDistEntries.get(`project/assets/${cadAsset.path.slice(2)}`), Buffer.from(CAD_DXF_CONTENT, 'utf8'));
-    assert.equal(cadAsset.size, Buffer.byteLength(CAD_DXF_CONTENT, 'utf8'));
-    assert.equal(cadAsset.sha256, sha256(CAD_DXF_CONTENT));
+    assert.equal(cadAssets.length, 0, 'Viewer DIST 不登记 CAD 资源');
+    assert.deepEqual(selectedDistScene.scene.entities['cad-reference'], expectedPublishedCadEntity, 'Viewer DIST 去除 CAD 组件');
+    assert.equal([...selectedDistEntries.keys()].some(file => /\.dxf$/i.test(file)), false, 'Viewer DIST 不包含 DXF 文件');
     assert.deepEqual(selectedDistScene.scene.fetchConfig, {
       url: PUBLISHED_FETCH_CONFIG.url,
       apiKey: '',
@@ -1411,6 +1390,7 @@ async function run() {
     assert.equal(mock.requests.some(request => request.path.endsWith('/publish-tasks/prepare')), false,
       '无法完整打包的工程必须在上传前停止');
     await rm(path.join(projectRoot, 'Scenes', 'external-resource.scene.json'));
+    await rm(cadSourcePath); // 原图已删除，数字孪生发布仍应成功。
     const successResult = await publishModule.publishDigitalTwin(
       createPublishRequest(SUCCESS_REQUEST_ID, sceneContent, { confirmResourceBindings: true }),
       new AbortController().signal,
@@ -1422,8 +1402,6 @@ async function run() {
     assert.equal(successResult.editorProjectVersionNumber, 2);
     assert.match(successResult.stableUrl, /\/digital-twin\/projects\//);
     assert.match(successResult.releaseUrl, /\/digital-twin\/releases\//);
-    assert.equal(successResult.warnings.some((warning) => warning.includes('跳过') && warning.includes('CAD')), false,
-      '完整发布不应再跳过 CAD 参考图。');
     assert.ok(successResult.warnings.some((warning) => warning.includes('刷新远端项目状态失败')));
     for (const phase of ['saving', 'source-package', 'dist-package', 'prepare', 'upload-source', 'upload-dist', 'commit', 'completed']) {
       assert.ok(successProgress.some((progress) => progress.phase === phase), `缺少发布进度阶段：${phase}`);
@@ -1613,6 +1591,76 @@ async function run() {
     await expectFileMissing(path.join(app.getPath('temp'), 'zending-digital-twin-publish', CANCEL_REQUEST_ID));
 
     assert.equal(sha256(await readFile(scenePath)), sha256(Buffer.from(sceneContent)), '发布保存后的入口场景内容应稳定。');
+    // 本地场景发布保留旧工作区模型，忽略已丢失且未授权的外部 CAD 原图。
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    const legacyModelRoot = path.join(workspaceRoot, 'Assets', 'Models', 'Model-1001-Legacy');
+    await mkdir(legacyModelRoot, { recursive: true });
+    const legacyModelPath = path.join(legacyModelRoot, 'legacy.glb');
+    const modelJson = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, scene: 0,
+      scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }], meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+      buffers: [{ byteLength: 36 }], bufferViews: [{ buffer: 0, byteLength: 36 }],
+      accessors: [{ bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] }] }));
+    const jsonSize = Math.ceil(modelJson.length / 4) * 4;
+    const modelBytes = Buffer.alloc(28 + jsonSize + 36);
+    modelBytes.write('glTF'); modelBytes.writeUInt32LE(2, 4); modelBytes.writeUInt32LE(modelBytes.length, 8);
+    modelBytes.writeUInt32LE(jsonSize, 12); modelBytes.writeUInt32LE(0x4e4f534a, 16);
+    modelBytes.fill(32, 20, 20 + jsonSize); modelJson.copy(modelBytes, 20);
+    modelBytes.writeUInt32LE(36, 20 + jsonSize); modelBytes.writeUInt32LE(0x004e4942, 24 + jsonSize);
+    Buffer.from(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]).buffer).copy(modelBytes, 28 + jsonSize);
+    await writeFile(legacyModelPath, modelBytes);
+    await writeFile(path.join(legacyModelRoot, 'meta.json'), '{"displayName":"Legacy","lengthUnit":"meter"}');
+    authorizeAssetFile(legacyModelPath);
+    const externalCadPath = path.join(testRoot, 'ExternalCad', 'publish-reference.dxf');
+    // 不创建也不授权原图，用真实缺失路径验证发布不读取 CAD。
+    const localPublishScene = JSON.parse(createSceneContent(externalCadPath));
+    localPublishScene.scene.entityIds.push('legacy-device');
+    localPublishScene.scene.entities['legacy-device'] = { id: 'legacy-device', name: '本地同步模型', visible: true,
+      components: { transform: { position: { x: 1, y: 0, z: 2 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+        modelAsset: { sourcePath: legacyModelPath, sourceUrl: `editor-asset://local/${encodeURIComponent(legacyModelPath)}`,
+          lengthUnit: 'meter', unitScaleToMeters: 1, assetCode: 'LOCAL-SYNC-1' } } };
+    const localRequestId = 'legacy-local-scene-publish';
+    const localPublished = await publishModule.publishDigitalTwin(createPublishRequest(localRequestId, JSON.stringify(localPublishScene)),
+      new AbortController().signal, () => undefined);
+    assert.equal(localPublished.status, 'completed');
+    const localSource = await readZipEntries(mock.getUploadedPackage(localRequestId, 'SOURCE'));
+    assert.deepEqual(localSource.get('Assets/Models/Model-1001-Legacy/legacy.glb'), modelBytes);
+    assert.equal([...localSource.keys()].some(file => /\.dxf$/i.test(file)), false);
+    const localDist = await readZipEntries(mock.getUploadedPackage(localRequestId, 'DIST'));
+    assert.ok([...localDist.values()].some(bytes => bytes.equals(modelBytes)), 'DIST 同样保留旧工作区的模型字节');
+    assert.equal([...localDist.keys()].some(file => /\.dxf$/i.test(file)), false, 'DIST 同样忽略缺失 CAD');
+    assert.equal(JSON.parse(await readFile(scenePath, 'utf8')).scene.entities['cad-reference'].components.cadReference.sourcePath, externalCadPath);
+
+    // 返回首页再打开本地场景：workspace 没有绑定，目标 Projects 目录仍保留旧基线。
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus({ latestVersionId: NEW_VERSION_ID, latestVersionNumber: 2, resourceRevision: NEW_RESOURCE_REVISION }));
+    mock.resetRequests();
+    bindingModule.clearCurrentDataPlatformBinding();
+    await projectAssetModule.activateProjectRoot(workspaceRoot);
+    const restoredPreview = await publishModule.getDigitalTwinPublishContext(PROJECT_ID);
+    assert.equal(restoredPreview.projectRoot, projectRoot);
+    assert.equal(restoredPreview.baseVersionId, BASE_VERSION_ID);
+    assert.equal(restoredPreview.resourceRevision, RESOURCE_REVISION);
+    assert.equal(restoredPreview.versionConflict, true, '预检应显示磁盘旧基线与远端最新版本的冲突');
+    assert.equal(bindingModule.getCurrentDataPlatformBinding(), null, '预检只读，不提前建立当前绑定');
+    const reopenedConflict = await publishModule.publishDigitalTwin(createPublishRequest('persisted-binding-retry-conflict', sceneContent,
+      { projectId: PROJECT_ID }), new AbortController().signal, () => undefined);
+    assert.equal(reopenedConflict.status, 'conflict');
+    assert.equal(reopenedConflict.errorCode, 'DIGITAL_TWIN_VERSION_CONFLICT');
+    const preservedBinding = await bindingModule.readDataPlatformBinding(projectRoot);
+    assert.equal(preservedBinding.latestVersionId, BASE_VERSION_ID);
+    assert.equal(preservedBinding.resourceRevision, RESOURCE_REVISION);
+    assert.equal(mock.requests.some(request => request.path.endsWith('/publish-tasks/prepare')), false,
+      '恢复绑定不能绕过版本冲突直接上传');
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.resetRequests();
+    bindingModule.clearCurrentDataPlatformBinding();
+    await projectAssetModule.activateProjectRoot(workspaceRoot);
+    const reopenedSuccess = await publishModule.publishDigitalTwin(createPublishRequest('persisted-binding-retry-success', sceneContent,
+      { projectId: PROJECT_ID }), new AbortController().signal, () => undefined);
+    assert.equal(reopenedSuccess.status, 'completed', '磁盘已绑定的同项目可以重新打开并完整发布');
+
     console.log(JSON.stringify({
       status: 'PASS',
       verified: [
@@ -1624,6 +1672,8 @@ async function run() {
         'unbound-scene-project-detail-identity',
         'unbound-scene-overwrite-confirmation-before-binding',
         'unbound-scene-project-selection-and-binding',
+        'persisted-target-binding-preflight-retains-version-conflict',
+        'persisted-binding-reopen-and-complete-publish',
         'fetch-config-published-with-public-dist-api-key-stripped',
         'dist-page-title-uses-project-name',
         'runtime-config-save-before-publish',
@@ -1632,7 +1682,8 @@ async function run() {
         'local-active-state-without-network',
         'overwrite-confirmation',
         'prepare-source-dist',
-        'source-and-dist-cad-component-and-dxf-preserved',
+        'source-and-dist-skip-cad-local-scene-preserved',
+        'legacy-workspace-model-and-missing-cad-publish',
         'incomplete-source-blocked-before-upload',
         'resume-uploaded-chunks',
         'transient-chunk-retry',

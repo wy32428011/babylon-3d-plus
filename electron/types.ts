@@ -262,6 +262,20 @@ export type DataPlatformModelSyncProgress = {
   runtimeChangedResourceKeys?: string[];
 };
 
+export type LocalSceneResourceSyncRequest = {
+  mode?: 'data-platform-latest';
+  sceneContent?: string;
+  environment?: { resourceId?: string; displayName?: string };
+};
+
+export type LocalSceneResourceSyncResult = {
+  modelReplacements?: Array<{ sourceUrls: string[]; asset: ProjectModelAssetEntry }>;
+  configured: boolean;
+  sourceKey: string | null;
+  modelAssets: ProjectModelAssetEntry[];
+  environmentAssets: ProjectModelAssetEntry[];
+};
+
 export type DataPlatformEnvironmentSyncRequest = {
   expectedSourceKey?: string;
   requiredResourceIds?: string[];

@@ -1,3 +1,4 @@
+import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type {
   MeshKind,
   ModelAssetComponent,
@@ -150,6 +151,7 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
   return {
     sourcePath,
     sourceUrl,
+    ...(value.dataPlatformModel === undefined ? {} : { dataPlatformModel: normalizeDataPlatformModelIdentity(value.dataPlatformModel) }),
     ...(assetRevision ? { assetRevision } : {}),
     ...(sourceSnapshot ? { sourceSnapshot } : {}),
     lengthUnit: unitInfo.lengthUnit,

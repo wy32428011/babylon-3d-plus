@@ -66,6 +66,8 @@
     "smoke:data-platform-skybox": "npm run build && npm run smoke:data-platform-skybox:built",
     "smoke:data-platform": "npm run build && npm run test:data-platform-relink && node scripts/smoke-data-platform-project.mjs && npm run smoke:data-platform-skybox:built",
     "test:digital-twin": "npm run test:digital-twin:unit && npm run test:digital-twin:integration",
+    "test:scene-model-update": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/sceneModelUpdatePlan.test.ts tests/dataPlatform/sceneModelVersionSync.test.ts tests/dataPlatform/sceneModelResourceValidation.test.ts tests/editor/modelAssetUpdateMerge.test.ts tests/editor/sceneLatestModelUpdate.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/runtime/sceneModelReadinessError.test.ts",
+    "smoke:scene-model-update": "npm run build:viewer && npm run build:electron && node scripts/run-scene-model-update-integration.mjs",
     "test:publish-model-recovery": "node --test tests/digitalTwin/publishPreloadBridge.test.mjs && npm run build:electron && node scripts/run-publish-model-recovery-integration.mjs",
     "test:click-events:integration": "npm run build:electron && electron tests/digitalTwin/clickEventBindingPublish.integration.mjs",
     "smoke:editor-performance": "node scripts/smoke-editor-large-scene-performance.mjs && node scripts/smoke-hierarchy-virtualization.mjs",

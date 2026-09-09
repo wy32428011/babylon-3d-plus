@@ -1,3 +1,4 @@
+import type { DataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type { AlarmManagerComponent } from './alarmManager';
 import type { Vector3Data } from './math';
 import type { BuiltInSlotBindingConfig, LocatorBuiltInBinding } from './builtInSlotBinding';
@@ -125,6 +126,8 @@ export type ModelSourceSnapshot = { contentSha256: string };
 
 /** 可复用的模型资产模板，不包含实例级 assetCode。 */
 export type ModelAssetTemplate = {
+  /** 模型版本更新时保留来源和包内身份，避免跨中台误关联。 */
+  dataPlatformModel?: DataPlatformModelIdentity;
   sourcePath: string;
   sourceUrl: string;
   sourceSnapshot?: ModelSourceSnapshot;
@@ -337,7 +340,7 @@ export type AutoPatrolComponent = {
 };
 
 /** 人物只引用模型文件，不执行模型库中的设备脚本。 */
-export type ManualRoamAvatar = Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl' | 'assetRevision' | 'sourceSnapshot'> & {
+export type ManualRoamAvatar = Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl' | 'assetRevision' | 'sourceSnapshot' | 'dataPlatformModel'> & {
   name: string;
 };
 

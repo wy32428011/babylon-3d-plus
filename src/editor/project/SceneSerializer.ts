@@ -1,3 +1,4 @@
+import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import { normalizeAlarmManager } from '../model/alarmManager';
 import { normalizeModelSourceSnapshot } from '../model/modelSourceSnapshot';
 import { sanitizeSceneShadowBake } from '../model/sceneShadowBake';
@@ -1107,6 +1108,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
 
   return {
     assetCode,
+    ...(modelAsset.dataPlatformModel === undefined ? {} : { dataPlatformModel: normalizeDataPlatformModelIdentity(modelAsset.dataPlatformModel) }),
     sourcePath,
     sourceUrl,
     ...(assetRevision ? { assetRevision } : {}),
@@ -1245,6 +1247,7 @@ function normalizeManualRoamSpawn(value: unknown): ManualRoamSpawnComponent {
   if (avatar.sourceSnapshot !== undefined && !sourceSnapshot) throwUnsupportedSceneFileError();
   return { avatar: {
     name, sourcePath, sourceUrl,
+    ...(avatar.dataPlatformModel === undefined ? {} : { dataPlatformModel: normalizeDataPlatformModelIdentity(avatar.dataPlatformModel) }),
     ...(sourceSnapshot ? { sourceSnapshot } : {}),
     ...(avatar.assetRevision === undefined ? {} : { assetRevision: assertString(avatar.assetRevision) }),
   } };

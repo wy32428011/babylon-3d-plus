@@ -6,6 +6,7 @@ import { readUtf8File } from '../shared/strictUtf8.js';
 import { RemoteDownloadTracker } from '../shared/remoteDownloadProgress.js';
 import { MAX_GLB_FILE_BYTES } from '../shared/glbFilePolicy.js';
 import { validateEnvironmentFile } from './environmentFileValidation.js';
+import { findMatchingEnvironmentResource, normalizeEnvironmentResourceReference, type EnvironmentResourceReference } from '../shared/environmentResourceMatch.js';
 import {
   normalizeDataPlatformSourceUrl,
   normalizeEnvironmentManifestResponse,
@@ -75,6 +76,7 @@ type EnvironmentSyncDependencies = {
 };
 
 export type ExecuteDataPlatformEnvironmentSyncOptions = EnvironmentSyncContext & {
+  localSceneEnvironment?: EnvironmentResourceReference;
   runId?: string;
   signal?: AbortSignal;
   dependencies?: Partial<EnvironmentSyncDependencies>;
@@ -109,7 +111,7 @@ let browserWindowLoader: (() => Promise<typeof import('electron').BrowserWindow>
 
 export async function executeDataPlatformEnvironmentSync(
   options: ExecuteDataPlatformEnvironmentSyncOptions,
-): Promise<void> {
+): Promise<{ matchedResourceId: string | null }> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
   const editorRoot = path.resolve(options.editorRoot);
   const baseUrl = normalizeDataPlatformSourceUrl(options.baseUrl);
@@ -122,15 +124,25 @@ export async function executeDataPlatformEnvironmentSync(
   let downloadTracker: RemoteDownloadTracker | null = null;
   let completed = 0;
   let total = 0;
+  let matchedResourceId: string | null = null;
 
   updateEnvironmentSyncProgress({ runId, contextKey, phase: 'querying', completed: 0, total: 0, message: '正在读取环境模型同步清单…', error: null });
   try {
     if (expectedSourceKey && expectedSourceKey !== sourceKey) {
       throw new Error('当前数据中台地址与已打开场景的环境模型来源不一致，已拒绝同步。');
     }
+    const localSceneEnvironment = options.localSceneEnvironment
+      ? normalizeEnvironmentResourceReference(options.localSceneEnvironment) : null;
     const requestedIds = normalizeRequiredIds(options.requiredResourceIds);
-    const requiredIds = requestedIds === undefined ? undefined : new Set(requestedIds);
-    const manifest = await queryEnvironmentManifestSnapshot(baseUrl, signal, dependencies.requestJson, requiredIds);
+    let requiredIds = requestedIds === undefined ? undefined : new Set(requestedIds);
+    const manifest = await queryEnvironmentManifestSnapshot(baseUrl, signal, dependencies.requestJson,
+      localSceneEnvironment ? undefined : requiredIds);
+    if (localSceneEnvironment) {
+      const matched = findMatchingEnvironmentResource(manifest.records, localSceneEnvironment,
+        record => ({ resourceId: record.id, displayName: record.displayName }));
+      matchedResourceId = matched?.id ?? null;
+      requiredIds = new Set(matched ? [matched.id] : []);
+    }
     assertNotAborted(signal);
     if (requiredIds) {
       for (const id of requiredIds) {
@@ -263,6 +275,7 @@ export async function executeDataPlatformEnvironmentSync(
       runId, contextKey, phase: 'completed', completed: total, total,
       message: `环境模型同步完成：清单 ${manifest.records.length} 项，成功下载 ${successfulDownloads.length} 项，下载失败 ${failedDownloads.size} 项，异常缓存 ${plan.nextIndex.entries.filter((entry) => entry.status !== 'active').length} 项。`, error: null,
     });
+    return { matchedResourceId };
   } catch (error) {
     if (stagingRoot) await removeTrustedEnvironmentPath(editorRoot, stagingRoot, '环境模型同步暂存目录', true).catch(() => undefined);
     const normalized = signal.aborted ? new Error('数据中台环境模型同步已取消。') : error;
@@ -363,6 +376,15 @@ export function clearDataPlatformEnvironmentSyncRetryContext(): void {
   queuedEnvironmentSyncContext = null;
 }
 
+/** 退出项目时等待旧同步释放并清空进度，允许下一项目重新启动同步。 */
+export async function resetDataPlatformEnvironmentSyncSession(): Promise<void> {
+  clearDataPlatformEnvironmentSyncRetryContext();
+  const active = activeEnvironmentSync;
+  active?.controller.abort();
+  if (active) await active.promise;
+  latestEnvironmentSyncProgress = null;
+}
+
 export async function disposeDataPlatformEnvironmentSync(): Promise<void> {
   environmentSyncShuttingDown = true;
   queuedEnvironmentSyncContext = null;
@@ -421,6 +443,7 @@ function launchEnvironmentSync(context: EnvironmentSyncContext): boolean {
   const runId = randomUUID();
   const controller = new AbortController();
   const promise = executeDataPlatformEnvironmentSync({ ...context, runId, signal: controller.signal })
+    .then(() => undefined)
     .catch(() => undefined)
     .finally(() => {
       if (activeEnvironmentSync?.runId === runId) activeEnvironmentSync = null;

@@ -1,3 +1,4 @@
+import { mergeModelAssetUpdate } from '../assets/mergeModelAssetUpdate';
 import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../model/alarmManager';
 import { create } from 'zustand';
 import { getRequiredEnvironmentResourceIds } from '../../../electron/shared/sceneEnvironmentReferences';
@@ -469,12 +470,14 @@ type EditorState = {
   /** 仅本次编辑器运行预览使用，不写入场景文件或撤销历史。 */
   runtimePerformanceEnabled: boolean;
   history: CommandHistory;
+  latestSceneResourceTransaction: { before: SceneDocument; history: CommandHistory; after: SceneDocument } | null;
   hierarchySelectionIds: string[];
   entityClipboard: EntityClipboard | null;
   entityArrayRequest: EntityArrayRequest | null;
   sceneFocusRequest: SceneFocusRequest | null;
   environmentApplyRequest: EnvironmentApplyRequest | null;
   environmentRuntimeOverride: SceneEnvironmentSettings | null;
+  sceneResourcePolicy: 'local-refresh' | 'data-platform-refresh' | 'preserve-snapshot';
   environmentStartupRelinkSessionId: string | null;
   environmentRuntimeSnapshot: EnvironmentRuntimeSnapshot;
   environmentAdjustmentActive: boolean;
@@ -584,6 +587,8 @@ type EditorState = {
   createClickEventBinding: (placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
+  finishLatestSceneResources: (sceneSessionId: string, expectedScene: SceneDocument, error?: string) => void;
+  commitLatestSceneResources: (sceneSessionId: string, before: SceneDocument, after: SceneDocument) => boolean;
   refreshModelInstancesFromAssets: (assets: AssetEntry[], options?: { preserveResolvedSnapshots?: boolean }) => number;
   importCadReference: () => Promise<void>;
   loadSceneAsset: (asset: AssetEntry) => Promise<void>;
@@ -683,12 +688,14 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     shadowBakeStatus: { phase: 'idle', message: null },
     persistedSceneContent: serializeScene(scene),
     history: createCommandHistory(),
+    latestSceneResourceTransaction: null,
     hierarchySelectionIds: [],
     entityClipboard: null,
     entityArrayRequest: null,
     sceneFocusRequest: null,
     environmentApplyRequest: null,
     environmentRuntimeOverride: null,
+    sceneResourcePolicy: 'preserve-snapshot',
     environmentStartupRelinkSessionId: hasManagedEnvironmentCacheReference(scene.sceneSettings.environment)
       ? sceneSessionId
       : null,
@@ -730,19 +737,6 @@ async function syncDataPlatformEnvironmentsAfterWorkspaceOpen(pushLog: (message:
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     pushLog(`编辑工作区已打开，但启动环境模型同步失败：${message}`);
-  }
-}
-
-/** 本地场景成功加载后异步同步共享模型库；同步失败不影响已经打开的场景。 */
-async function syncDataPlatformModelsAfterLocalSceneLoad(pushLog: (message: string) => void): Promise<void> {
-  if (!window.editorApi?.syncDataPlatformModels) return;
-
-  try {
-    const started = await window.editorApi.syncDataPlatformModels();
-    if (started) pushLog('本地场景已加载，正在同步数据中台全部模型。');
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    pushLog(`本地场景已加载，但启动数据中台模型同步失败：${message}`);
   }
 }
 
@@ -1206,8 +1200,8 @@ function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: Asset
   const parameterConfig = normalizeModelParameterConfig(asset.parameterConfig) ?? undefined;
   const unitInfo: ModelLengthUnitInfo = createModelLengthUnitInfo(asset.lengthUnit);
 
-  return {
-    assetCode: modelAsset.assetCode,
+  return mergeModelAssetUpdate(modelAsset, {
+
     sourcePath: asset.path,
     sourceUrl: asset.sourceUrl,
     ...(asset.assetRevision ? { assetRevision: asset.assetRevision } : {}),
@@ -1224,7 +1218,7 @@ function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: Asset
           parameterValues: sanitizeModelParameterValues(parameterConfig, modelAsset.parameterValues),
         }
       : {}),
-  };
+  }, modelAsset.assetCode);
 }
 
 /** 比较可序列化元数据，供字段级模型快照比较复用。 */
@@ -1280,8 +1274,11 @@ function refreshModelGeneratorTargetFromImportedAssets(
   if (!importedAsset) return { target, refreshedCount: 0 };
 
   const refreshedTarget = createModelGeneratorTargetFromAsset(importedAsset);
-  if (!refreshedTarget || areJsonValuesEqual(target, refreshedTarget)) return { target, refreshedCount: 0 };
-  return { target: refreshedTarget, refreshedCount: 1 };
+  if (!refreshedTarget) return { target, refreshedCount: 0 };
+  const merged = { ...target, ...refreshedTarget, displayName: target.displayName,
+    modelAsset: mergeModelAssetUpdate(target.modelAsset, refreshedTarget.modelAsset, target.displayName) };
+  if (areJsonValuesEqual(target, merged)) return { target, refreshedCount: 0 };
+  return { target: merged, refreshedCount: 1 };
 }
 
 /** 刷新模型生成器的默认目标和每条规则目标，生成器绑定及规则文本保持不变。 */
@@ -2611,12 +2608,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   runtimeMode: 'edit',
   runtimePerformanceEnabled: false,
   history: createCommandHistory(),
+  latestSceneResourceTransaction: null,
   hierarchySelectionIds: [],
   entityClipboard: null,
   entityArrayRequest: null,
   sceneFocusRequest: null,
   environmentApplyRequest: null,
   environmentRuntimeOverride: null,
+  sceneResourcePolicy: 'preserve-snapshot',
   environmentStartupRelinkSessionId: null,
   environmentRuntimeSnapshot: createIdleEnvironmentRuntimeSnapshot(),
   environmentAdjustmentActive: false,
@@ -4018,6 +4017,33 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         logs: prependLog(state.logs, `导入模型：${asset.name}`),
       };
     });
+  },
+  finishLatestSceneResources: (sceneSessionId, expectedScene, error) => {
+    set(state => {
+      if (state.sceneSessionId !== sceneSessionId || !state.latestSceneResourceTransaction || state.latestSceneResourceTransaction.after !== expectedScene) return state;
+      const transaction = state.latestSceneResourceTransaction;
+      if (error && state.scene === transaction.after) return {
+        scene: transaction.before, history: transaction.history, latestSceneResourceTransaction: null,
+        environmentRuntimeOverride: null, environmentApplyRequest: null,
+        environmentStartupRelinkSessionId: state.scene.sceneSettings.environment ? sceneSessionId : null,
+        logs: prependLog(state.logs, '新版模型未能完成渲染，已恢复更新前的场景：' + error),
+      };
+      return { latestSceneResourceTransaction: null };
+    });
+  },
+  commitLatestSceneResources: (sceneSessionId, before, after) => {
+    let committed = false;
+    set(state => {
+      if (state.sceneSessionId !== sceneSessionId || state.scene !== before || isRuntimePreviewState(state)) return state;
+      const result = after === before ? { scene: before, history: state.history }
+        : executeCommand(before, state.history, updateSceneDocumentCommand('同步场景最新模型并保留参数', () => after));
+      committed = true;
+      return { ...result, latestSceneResourceTransaction: after === before ? null : { before, history: state.history, after },
+        environmentApplyRequest: null, environmentRuntimeOverride: null,
+        environmentStartupRelinkSessionId: null,
+        logs: prependLog(state.logs, after === before ? '场景模型已是当前版本。' : '场景模型资源已更新，实例参数和业务配置已保留。') };
+    });
+    return committed;
   },
   refreshModelInstancesFromAssets: (assets, options = {}) => {
     let refreshedCount = 0;
@@ -5483,6 +5509,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ persistedSceneContent });
   },
   saveScene: async () => {
+    if (get().latestSceneResourceTransaction) {
+      get().pushLog('新版模型尚未完成渲染校验，请等待同步完成后保存。');
+      return false;
+    }
     if (get().runtimeMode === 'preview') {
       set((state) => guardRuntimePreviewMutation(state, '保存场景'));
       return false;
@@ -5529,9 +5559,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       const scene = deserializeScene(result.content);
 
-      set((state) => createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`));
-      void syncDataPlatformModelsAfterLocalSceneLoad((message) => get().pushLog(message));
-      void syncDataPlatformEnvironmentsAfterWorkspaceOpen((message) => get().pushLog(message));
+      set((state) => {
+        const loaded = createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`);
+        return { ...loaded, sceneResourcePolicy: 'local-refresh',
+          environmentStartupRelinkSessionId: scene.sceneSettings.environment ? loaded.sceneSessionId : null };
+      });
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
@@ -5563,12 +5595,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const scene = deserializeScene(result.content);
       set((state) => {
         const loaded = createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`);
-        return deferEnvironmentUntilSync && scene.sceneSettings.environment
-          ? { ...loaded, environmentStartupRelinkSessionId: loaded.sceneSessionId }
-          : loaded;
+        return { ...loaded,
+          sceneResourcePolicy: deferEnvironmentUntilSync ? 'data-platform-refresh' : 'local-refresh',
+          environmentStartupRelinkSessionId: scene.sceneSettings.environment ? loaded.sceneSessionId : null };
       });
-      void syncDataPlatformModelsAfterLocalSceneLoad((message) => get().pushLog(message));
-      void syncDataPlatformEnvironmentsAfterWorkspaceOpen((message) => get().pushLog(message));
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {

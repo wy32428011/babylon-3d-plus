@@ -119,6 +119,15 @@ export function clearDataPlatformImageSyncRetryContext(): void {
   lastImageSyncContext = null;
 }
 
+/** 退出项目时等待旧同步释放并清空进度，允许下一项目重新启动同步。 */
+export async function resetDataPlatformImageSyncSession(): Promise<void> {
+  clearDataPlatformImageSyncRetryContext();
+  const active = activeImageSync;
+  active?.controller.abort();
+  if (active) await active.promise;
+  latestImageSyncProgress = null;
+}
+
 /** 应用退出时取消并等待当前图片同步任务，避免 staging 残留或索引写入中断。 */
 export async function disposeDataPlatformImageSync(): Promise<void> {
   imageSyncShuttingDown = true;

@@ -50,6 +50,7 @@ const MAX_RECENT_WORKSPACE_ITEMS = 12;
 const PROJECT_ASSET_INDEX_ERROR = '项目资产索引格式不正确。';
 
 let currentProjectRoot: string | null = null;
+let projectSessionGeneration = 0;
 let sharedProjectAssetRoot: string | null = null;
 let sharedProjectSkyboxRoot: string | null = null;
 let sharedProjectEnvironmentRoot: string | null = null;
@@ -317,11 +318,13 @@ async function loadRecentProjectRoot(): Promise<string | null> {
   if (hasLoadedRecentProjectRoot) return null;
 
   hasLoadedRecentProjectRoot = true;
+  const generation = projectSessionGeneration;
 
   const recentWorkspaces = await readRecentWorkspaceIndex();
   for (const project of sortRecentEntries(recentWorkspaces.projects)) {
     if (!(await pathExists(project.projectRoot))) continue;
 
+    if (generation !== projectSessionGeneration) return currentProjectRoot;
     setCurrentProjectRoot(project.projectRoot);
     await ensureProjectDirectories(project.projectRoot);
     authorizeProjectAssetRoots(project.projectRoot);
@@ -500,11 +503,23 @@ function normalizeProjectAssetIndex(value: unknown): ProjectAssetIndex {
   };
 }
 
+/** 仅清理会话挂载；最近记录和磁盘工程保留，但本会话不再自动恢复旧项目。 */
+export function clearProjectAssetStoreSession(): void {
+  projectSessionGeneration += 1;
+  hasLoadedRecentProjectRoot = true;
+  currentProjectRoot = null;
+  setSharedProjectAssetRoot(null);
+  setSharedProjectSkyboxRoot(null);
+  setSharedProjectEnvironmentRoot(null);
+}
+
 export function getCurrentProjectRoot(): string | null {
   return currentProjectRoot;
 }
 
 export function setCurrentProjectRoot(projectRoot: string): void {
+  projectSessionGeneration += 1;
+  hasLoadedRecentProjectRoot = true;
   currentProjectRoot = normalizeFilePath(projectRoot);
 }
 
