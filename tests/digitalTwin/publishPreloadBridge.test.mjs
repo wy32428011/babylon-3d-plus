@@ -32,10 +32,14 @@ for (const fileName of ['preload.cts', 'preload.ts']) {
     const { api, calls, listeners, result } = await loadBridge(fileName);
     assert.equal(typeof api.recoverDigitalTwinModels, 'function', '点击发布需要 window.editorApi.recoverDigitalTwinModels');
     const request = { requestId: 'publish-1', projectId: '1', sceneContent: '{"scene":{}}' };
+    assert.equal(await api.prepareDigitalTwinPublishSceneSnapshots(request), result);
+    assert.equal(await api.cancelSceneModelSync({ requestId: request.requestId }), result);
     assert.equal(await api.recoverDigitalTwinModels(request), result);
     assert.equal(await api.publishDigitalTwin(request), result);
     assert.equal(await api.cancelDigitalTwinPublish({ requestId: request.requestId }), result);
     assert.deepEqual(calls, [
+      { channel: 'digital-twin-publish:prepareScenes', request },
+      { channel: 'data-platform:cancelSceneModelSync', request: { requestId: request.requestId } },
       { channel: 'digital-twin-publish:recoverModels', request },
       { channel: 'digital-twin-publish:start', request },
       { channel: 'digital-twin-publish:cancel', request: { requestId: request.requestId } },

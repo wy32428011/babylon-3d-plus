@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import type {
   DataPlatformModelSyncProgress,
@@ -30,6 +30,7 @@ import {
   DataPlatformRollbackError,
   downloadRemoteFile,
   requestDataPlatformJson,
+  resolveDataPlatformRemoteUrl,
   type DownloadRemoteFileOptions,
   type DownloadRemoteFileResult,
 } from './dataPlatformTransfer.js';
@@ -180,7 +181,16 @@ export type RecoverDataPlatformModelAssetsOptions = {
   dependencies?: Partial<ModelSyncDependencies>;
 };
 
-export type SyncSceneDataPlatformModelAssetsOptions = RecoverDataPlatformModelAssetsOptions;
+export type ModelSnapshotExpectedFile = {
+  kind: 'model' | 'combo'; resourceId: string; role: string; fileUrl: string; sha256: string; size: string;
+};
+export class ModelSnapshotIntegrityError extends Error {
+  readonly code = 'DIGITAL_TWIN_RESOURCE_SNAPSHOT_CONFLICT';
+}
+export type SyncSceneDataPlatformModelAssetsOptions = RecoverDataPlatformModelAssetsOptions & {
+  /** 仅主进程可信snapshot传入，下载原始payload后、元数据格式转换前逐项校验。 */
+  expectedFiles?: readonly ModelSnapshotExpectedFile[];
+};
 
 export type SceneSyncedModelAsset = ProjectModelAssetEntry & {
   dataPlatformSourceKey: string;
@@ -188,6 +198,7 @@ export type SceneSyncedModelAsset = ProjectModelAssetEntry & {
 };
 
 type TargetedModelSyncOptions = ExecuteDataPlatformModelSyncOptions & {
+  expectedFiles?: readonly ModelSnapshotExpectedFile[];
   requiredResources?: readonly DataPlatformModelRecoveryResource[];
   queriedRecords?: SyncModelRecord[];
   onProgress?: (message: string) => void;
@@ -406,6 +417,46 @@ export async function syncSceneDataPlatformModelAssets(
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
   return queueModelSync(async () => {
     const before = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
+    if (options.expectedFiles !== undefined) {
+      // 已有URL/修订字段可能完全不变。可信快照必须重新验证原始下载字节，不能命中旧描述缓存。
+      // 更新共享库后renderer再次普通同步也会固定这一版，不会重新选择同描述的旧共享资源。
+      return queueModelSync(async () => {
+        await runDataPlatformModelSync({ baseUrl, editorRoot: sharedRoot, requiredResources, queriedRecords: before,
+          signal, dependencies, onProgress: options.onProgress, forceRefresh: true,
+          expectedFiles: options.expectedFiles!.filter(file => file.kind === resource.kind && file.resourceId === resource.resourceId) });
+        const after = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
+        if (hashFingerprint(before) !== hashFingerprint(after)) throw new ModelSnapshotIntegrityError('快照模型在下载期间资源描述发生变化。');
+        const [index, loaded] = await Promise.all([readDataPlatformModelIndex(sharedRoot), dependencies.readAssetIndex(sharedRoot)]);
+        const entry = index.entries.find(item => resourceKey(item) === resourceKey(resource));
+        const asset = createManagedAssetMap(loaded.assets).get(resourceKey(resource));
+        if (!entry || !asset) throw new Error('快照模型下载后索引不完整。');
+        const pinned = await pinSceneModelVersion(asset, entry, sharedRoot, versionRoot, signal);
+        return [{ ...pinned, dataPlatformSourceKey: sourceKey, dataPlatformResourceId: resource.resourceId }];
+      }, signal);
+    }
+    // 主动全库同步已下载同版资源时，仅固定已校验包；仍查询远端并检查元数据和脚本描述。
+    const sharedPinned = await queueModelSync(async () => {
+      const [sharedIndex, sharedAssets] = await Promise.all([
+        readDataPlatformModelIndex(sharedRoot), dependencies.readAssetIndex(sharedRoot),
+      ]);
+      if (sharedIndex.sourceKey !== sourceKey) return null;
+      const entry = sharedIndex.entries.find(entry => resourceKey(entry) === resourceKey(resource));
+      const record = before[0];
+      if (!entry || !record) return null;
+      const descriptor = createSyncDescriptor(record, entry.packageRelativePath);
+      if (!descriptor.contentFingerprint || descriptor.contentFingerprint !== entry.contentFingerprint
+        || descriptor.thumbnailFingerprint !== entry.thumbnailFingerprint) return null;
+      const asset = createManagedAssetMap(sharedAssets.assets).get(resourceKey(resource));
+      if (!asset) return null;
+      return pinSceneModelVersion(asset, entry, sharedRoot, versionRoot, signal);
+    }, signal);
+    if (sharedPinned) {
+      const after = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
+      if (hashFingerprint(before) !== hashFingerprint(after)) throw new Error('数据中台模型在同步期间版本或资源描述发生变化，请重试。');
+      assertNotAborted(signal);
+      return [{ ...sharedPinned, dataPlatformSourceKey: sourceKey, dataPlatformResourceId: resource.resourceId }];
+    }
+
     await runDataPlatformModelSync({
       baseUrl, editorRoot: cacheRoot, requiredResources, queriedRecords: before,
       signal, onProgress: options.onProgress, dependencies,
@@ -642,6 +693,23 @@ async function runDataPlatformModelSync(
 
     const prepared = await prepareDownloadPlan(stagingRoot, plan.downloads, recordByKey);
     const jobs = createDownloadJobs(prepared);
+    const expectedByJob = new Map<DownloadJob, ModelSnapshotExpectedFile>();
+    if (options.expectedFiles !== undefined) {
+      const matched = new Set<ModelSnapshotExpectedFile>();
+      for (const job of jobs) {
+        const expected = options.expectedFiles.filter(file => file.kind === job.preparedPackage.record.kind
+          && file.resourceId === job.preparedPackage.record.id && file.role === job.kind
+          && resolveDataPlatformRemoteUrl(baseUrl, file.fileUrl).href === resolveDataPlatformRemoteUrl(baseUrl, job.remoteUrl).href);
+        if (expected.length !== 1) {
+          // 未登记的外部缩略图只有URL语义；主文件、脚本和元数据必须有服务端字节证明。
+          if (job.kind === 'thumbnail' && expected.length === 0) continue;
+          throw new ModelSnapshotIntegrityError(`快照缺少唯一的原始文件摘要：${job.label}`);
+        }
+        if (!/^[a-f0-9]{64}$/i.test(expected[0].sha256) || !/^\d+$/.test(expected[0].size)) throw new ModelSnapshotIntegrityError(`快照文件摘要格式无效：${job.label}`);
+        matched.add(expected[0]); expectedByJob.set(job, expected[0]);
+      }
+      if (options.expectedFiles.some(file => !matched.has(file))) throw new ModelSnapshotIntegrityError('快照文件与实际下载文件集合不一致。');
+    }
     totalDownloads = jobs.length;
     let downloadedBytes = 0;
     const tracker = new RemoteDownloadTracker(jobs.map((job) => ({ id: job.destinationPath, fileName: job.label })), (download) => {
@@ -684,6 +752,14 @@ async function runDataPlatformModelSync(
           }
         },
       });
+      const expected = expectedByJob.get(job);
+      if (expected) {
+        const info = await fs.stat(job.destinationPath);
+        if (String(info.size) !== expected.size) throw new ModelSnapshotIntegrityError(`快照原始文件大小不一致：${job.label}`);
+        const digest = createHash('sha256');
+        for await (const chunk of createReadStream(job.destinationPath, { signal })) digest.update(chunk);
+        if (digest.digest('hex') !== expected.sha256.toLowerCase()) throw new ModelSnapshotIntegrityError(`快照原始文件摘要不一致：${job.label}`);
+      }
       tracker.finish(job.destinationPath, result.bytes);
 
       if (job.kind === 'thumbnail') {

@@ -8,6 +8,7 @@ type TextureLoadOptions<T> = {
   transformBlob?: (blob: Blob, signal: AbortSignal) => Promise<Blob>;
   createObjectURL?: (blob: Blob) => string;
   revokeObjectURL?: (url: string) => void;
+  onProgress?: (receivedBytes: number, totalBytes: number | null) => void;
   onStage?: (stage: SkyboxLoadStage, durationMs: number | null) => void;
 };
 export type SkyboxLoadStage = 'reading' | 'decoding' | 'prefiltering';
@@ -20,7 +21,8 @@ function abortError(): Error {
 
 /** 可指定更小的读取额度；任何调用都不能放宽 512 MiB 的天空盒文件上限。 */
 export async function readSkyboxTextureBlob(url: string, signal: AbortSignal,
-  maxBytes = MAX_SKYBOX_DECODE_SOURCE_BYTES): Promise<Blob> {
+  maxBytes = MAX_SKYBOX_DECODE_SOURCE_BYTES,
+  onProgress?: (receivedBytes: number, totalBytes: number | null) => void): Promise<Blob> {
   const limit = Math.min(maxBytes, MAX_SKYBOX_DECODE_SOURCE_BYTES);
   if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('天空盒读取上限必须是正整数。');
   if (signal.aborted) throw abortError();
@@ -34,11 +36,13 @@ export async function readSkyboxTextureBlob(url: string, signal: AbortSignal,
     // 读取已被判定失败时归还上游；即使取消也失败，仍保留原始 HTTP/体积错误。
     try { await response.body?.cancel(earlyError); } finally { throw earlyError; }
   }
+  onProgress?.(0, declaredLength);
   if (url.startsWith('editor-asset://local/') && declaredLength !== null && declaredLength <= limit) {
     // 此协议的长度由主进程对已授权本地文件 stat 得到；原生 Blob 读取不经过繁忙的渲染线程逐块回调。
     const blob = await response.blob();
     if (signal.aborted) throw abortError();
     if (blob.size > limit) throw tooLarge();
+    onProgress?.(blob.size, declaredLength);
     return blob;
   }
   if (!response.body) return response.blob();
@@ -47,6 +51,7 @@ export async function readSkyboxTextureBlob(url: string, signal: AbortSignal,
     transform(chunk, controller) {
       receivedBytes += chunk.byteLength;
       if (receivedBytes > limit) throw tooLarge();
+      onProgress?.(receivedBytes, declaredLength);
       controller.enqueue(chunk);
     },
   }), { signal });
@@ -64,7 +69,9 @@ export async function loadSkyboxTexture<T extends DisposableTexture>(url: string
   if (signal.aborted) throw abortError();
   const readStartedAt = performance.now();
   options.onStage?.('reading', null);
-  let blob = await (options.read ?? readSkyboxTextureBlob)(url, signal);
+  let blob = await (options.read ? options.read(url, signal)
+    : readSkyboxTextureBlob(url, signal, MAX_SKYBOX_DECODE_SOURCE_BYTES, options.onProgress));
+  options.onProgress?.(blob.size, blob.size);
   options.onStage?.('reading', performance.now() - readStartedAt);
   if (signal.aborted) throw abortError();
   const decodeStartedAt = performance.now();

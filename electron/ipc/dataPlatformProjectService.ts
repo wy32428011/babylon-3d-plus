@@ -1,4 +1,5 @@
 import { validateSceneModelResourceReferences } from './sceneModelResourceValidation.js';
+import { includeSceneModelPackageVariants } from './sceneModelPackageVariants.js';
 import { resolveDataPlatformProjectLocation } from './dataPlatformProjectLocation.js';
 import { setBoundScenePublishScope } from './scenePublishScope.js';
 import { recoverLocalSceneResourceTransaction } from './localSceneRecoveryService.js';
@@ -68,6 +69,7 @@ import {
   startDataPlatformModelSync,
   executeDataPlatformModelSync,
   syncSceneDataPlatformModelAssets,
+  pinCachedSceneModelVersion,
 } from './dataPlatformModelIncrementalSync.js';
 import {
   clearDataPlatformEnvironmentSyncRetryContext,
@@ -125,7 +127,7 @@ export function isDataPlatformProjectOpening(): boolean {
 const openTaskControllers = new Set<AbortController>();
 const openTasks = new Set<Promise<unknown>>();
 let publishBindingPreparationQueue: Promise<void> = Promise.resolve();
-let localSceneResourceTask: { controller: AbortController; promise: Promise<LocalSceneResourceSyncResult> } | null = null;
+let localSceneResourceTask: { requestId?: string; controller: AbortController; promise: Promise<LocalSceneResourceSyncResult> } | null = null;
 
 type SkyboxSyncPrepareContext = {
   generation: number;
@@ -304,6 +306,12 @@ export function cancelDataPlatformProjectLoading(): boolean {
 }
 
 /** 本地场景以本轮同步结果为准；等待实际事务结束，避免把旧后台进度当作本轮完成。 */
+export function cancelSceneModelSync(requestId: string): boolean {
+  if (!requestId || localSceneResourceTask?.requestId !== requestId) return false;
+  localSceneResourceTask.controller.abort();
+  return true;
+}
+
 export async function prepareLocalSceneResources(
   baseUrl: string,
   workspaceRoot: string,
@@ -311,16 +319,23 @@ export async function prepareLocalSceneResources(
 ): Promise<LocalSceneResourceSyncResult> {
   if (dataPlatformProjectServiceShuttingDown) throw new Error('应用正在退出，无法同步本地场景资源。');
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('本地场景资源同步请求无效。');
+  if (request.requestId !== undefined && (typeof request.requestId !== 'string'
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$/.test(request.requestId))) throw new Error('场景同步请求标识无效。');
   if (request.mode === 'local-recovery') return prepareRecoveredLocalScene(baseUrl, workspaceRoot, request);
-  const latest = request.mode === 'data-platform-latest';
+  if (request.mode === 'local-latest' && !baseUrl) return prepareRecoveredLocalScene(baseUrl, workspaceRoot, request);
+  const explicit = request.mode === 'scene-latest' || request.mode === 'local-latest';
+  const latest = request.mode === 'data-platform-latest' || explicit;
+  if (request.syncLibrary !== undefined && (!explicit || typeof request.syncLibrary !== 'boolean')) throw new Error('模型库同步选项无效。');
+  const expectedProjectRoot = getCurrentProjectRoot();
   const expectedGeneration = sceneResourceContextGeneration;
   const expectedBinding = latest ? getCurrentDataPlatformBinding() : null;
   const assertSceneContext = () => {
     if (!latest) return;
     const current = getCurrentDataPlatformBinding();
-    if (openingProjectCount || sceneResourceContextGeneration !== expectedGeneration || !current || !expectedBinding
-      || current.projectRoot !== expectedBinding.projectRoot || current.metadata.baseUrl !== expectedBinding.metadata.baseUrl
-      || current.metadata.projectId !== expectedBinding.metadata.projectId) throw new Error('当前项目会话已变化，旧场景模型同步已取消。');
+    if (openingProjectCount || sceneResourceContextGeneration !== expectedGeneration || getCurrentProjectRoot() !== expectedProjectRoot
+      || (!explicit && (!current || !expectedBinding))
+      || current?.projectRoot !== expectedBinding?.projectRoot || current?.metadata.baseUrl !== expectedBinding?.metadata.baseUrl
+      || current?.metadata.projectId !== expectedBinding?.metadata.projectId) throw new Error('当前项目会话已变化，旧场景模型同步已取消。');
   };
   assertSceneContext();
   if (request.mode !== undefined && !latest) throw new Error('场景资源同步模式无效。');
@@ -334,11 +349,19 @@ export async function prepareLocalSceneResources(
     const parsed = JSON.parse(request.sceneContent) as { version?: number; scene?: { sceneSettings?: { environment?: { dataPlatformSourceKey?: string } } } };
     if (![1, 2, 3, 4, 5].includes(parsed.version ?? 0) || !parsed.scene) throw new Error('场景模型更新格式无效。');
     const current = expectedBinding;
-    if (!current) throw new Error('当前数据中台项目会话已关闭，请重新打开项目。');
-    baseUrl = current.metadata.baseUrl;
+    if (!current && !explicit) throw new Error('当前数据中台项目会话已关闭，请重新打开项目。');
+    // 本地文件以当前配置来源为准，不能被上次打开工程残留的旧绑定地址带回旧中台。
+    if (request.mode !== 'local-latest') baseUrl = current?.metadata.baseUrl ?? baseUrl;
+    if (!baseUrl) throw new Error('请先配置数据中台地址。');
     scene = parsed.scene;
     // 从当前项目取得的场景按当前绑定解析资源，历史 URL 哈希不再阻止重新关联。
-    try { environment = getSceneEnvironmentUpdateReference(parsed.scene); }
+    try {
+      environment = getSceneEnvironmentUpdateReference(parsed.scene);
+      const hasBoundSource = expectedBinding && createDataPlatformSourceKey(expectedBinding.metadata.baseUrl) === createDataPlatformSourceKey(baseUrl);
+      if (explicit && !hasBoundSource && environment && parsed.scene.sceneSettings?.environment?.dataPlatformSourceKey !== createDataPlatformSourceKey(baseUrl)) {
+        throw new Error('场景环境模型来源缺失或与当前数据中台不一致，已保留原环境。');
+      }
+    }
     catch (error) {
       environment = undefined;
       issues.push({ resourceKind: 'environment', message: error instanceof Error ? error.message : String(error) });
@@ -361,14 +384,15 @@ export async function prepareLocalSceneResources(
     // 本地打开使用当前配置的数据中台；业务工程根目录和发布绑定仍保持原值。
     const sourceKey = createDataPlatformSourceKey(baseUrl);
     await ensureWritableEditorRoot(sharedRoot);
-    if (!binding) await activateProjectRoot(workspaceRoot);
+    if (!binding && !explicit) await activateProjectRoot(workspaceRoot);
     await ensureProjectDirectories(sharedRoot);
     assertSceneContext();
     setSharedProjectAssetRoot(sharedRoot);
     setSharedProjectEnvironmentRoot(sharedRoot);
     controller.signal.throwIfAborted();
+    const hasBoundSource = expectedBinding && createDataPlatformSourceKey(expectedBinding.metadata.baseUrl) === sourceKey;
     const modelPlan = latest ? planSceneModelUpdates(scene, sourceKey, {
-      allowSourceRebind: true, onIssue: issue => issues.push(issue),
+      allowSourceRebind: !!hasBoundSource, requireSourceIdentity: explicit && !hasBoundSource, onIssue: issue => issues.push(issue),
     }) : [];
     const progressRunId = 'scene-update-' + randomUUID();
     const reportModelProgress = (message: string, phase: DataPlatformModelSyncProgress['phase'] = 'downloading') => {
@@ -384,7 +408,26 @@ export async function prepareLocalSceneResources(
       const modelReplacements: NonNullable<LocalSceneResourceSyncResult['modelReplacements']> = [];
       const environmentAssets: ProjectModelAssetEntry[] = [];
       const checkCurrent = () => { controller.signal.throwIfAborted(); assertSceneContext(); };
+      const libraryErrors: string[] = [];
+      let libraryModelsReady = false;
+      if (explicit && request.syncLibrary) {
+        const libraryResults = await Promise.allSettled([
+          executeDataPlatformModelSync({ baseUrl, editorRoot: sharedRoot, signal: controller.signal }),
+          executeDataPlatformEnvironmentSync({ baseUrl, editorRoot: sharedRoot,
+            contextKey: createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedRoot), signal: controller.signal }),
+        ]);
+        checkCurrent();
+        libraryModelsReady = libraryResults[0].status === 'fulfilled';
+        libraryResults.forEach((result, index) => {
+          if (result.status === 'rejected') libraryErrors.push(`${index === 0 ? '普通/组合模型库' : '环境模型库'}：${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+        });
+      }
+      const libraryIndexes = libraryModelsReady ? await Promise.all([
+        readDataPlatformModelIndex(sharedRoot), readProjectAssetIndex(sharedRoot),
+      ]) : undefined;
+      checkCurrent();
       const preparedModels = new Map<number, typeof modelReplacements>();
+      const modelWarnings = new Map<number, string[]>();
       const modelIssues = new Map<number, (typeof issues)[number]>();
       let nextModelIndex = 0;
       // 每个稳定资源 ID 独立校验，最多同时准备四个资源；环境无需排在设备队列末尾。
@@ -394,15 +437,26 @@ export async function prepareLocalSceneResources(
           const item = modelPlan[itemIndex];
           checkCurrent();
           try {
-            const assets = await syncSceneDataPlatformModelAssets({ baseUrl, sharedResourcesRoot: sharedRoot,
-              resources: [item], signal: controller.signal, onProgress: reportModelProgress });
-            const replacements = matchSceneModelUpdates([item], assets);
-            await validateSceneModelResourceReferences(scene, replacements, controller.signal);
+            let assets: ProjectModelAssetEntry[];
+            if (libraryIndexes && libraryIndexes[0].sourceKey === sourceKey) {
+              const entry = libraryIndexes[0].entries.find(entry => entry.kind === item.kind && entry.resourceId === item.resourceId);
+              const asset = entry && libraryIndexes[1].assets.find(asset => asset.packagePath
+                && isSameFilePath(asset.packagePath, path.resolve(sharedRoot, entry.packageRelativePath)));
+              if (!entry || !asset) throw new Error(`模型库中缺少场景资源：${item.kind}:${item.resourceId}`);
+              assets = [{ ...await pinCachedSceneModelVersion({ asset, entry, cacheRoot: sharedRoot, sourceKey, signal: controller.signal }),
+                dataPlatformSourceKey: sourceKey, dataPlatformResourceId: item.resourceId }];
+            } else {
+              assets = await syncSceneDataPlatformModelAssets({ baseUrl, sharedResourcesRoot: sharedRoot,
+                resources: [item], signal: controller.signal, onProgress: reportModelProgress });
+            }
+            const replacements = matchSceneModelUpdates([item], await includeSceneModelPackageVariants(item, assets, controller.signal));
+            const warnings = await validateSceneModelResourceReferences(scene, replacements, controller.signal);
             checkCurrent();
             for (const replacement of replacements) {
               if (replacement.asset.packagePath) authorizeAssetRoot(replacement.asset.packagePath);
             }
             preparedModels.set(itemIndex, replacements);
+            modelWarnings.set(itemIndex, warnings);
           } catch (error) {
             // 取消或切换项目是整轮失效，不能伪装成可继续打开的资源警告。
             checkCurrent();
@@ -454,7 +508,8 @@ export async function prepareLocalSceneResources(
       reportModelProgress(issues.length ? `场景资源同步结束，${issues.length} 项需处理，已保留原场景配置。`
         : '场景所需模型资源已校验，正在保留参数并准备渲染。', 'completed');
       return { configured: true, sourceKey, modelAssets: modelReplacements.map(item => item.asset),
-        modelReplacements, environmentAssets, issues };
+        modelReplacements, environmentAssets, issues, libraryErrors,
+        warnings: [...new Set(modelPlan.flatMap((_, index) => modelWarnings.get(index) ?? []))] };
     }
     const results = await Promise.allSettled([
       executeDataPlatformModelSync({ baseUrl, editorRoot: sharedRoot, signal: controller.signal }),
@@ -487,7 +542,7 @@ export async function prepareLocalSceneResources(
       environmentAssets: environments.assets.filter(asset => asset.dataPlatformSourceKey === sourceKey
         && asset.dataPlatformResourceId === matchedResourceId) };
   })();
-  localSceneResourceTask = { controller, promise };
+  localSceneResourceTask = { requestId: request.requestId, controller, promise };
   openTasks.add(promise);
   try {
     return await promise;
@@ -533,7 +588,7 @@ async function prepareRecoveredLocalScene(baseUrl: string, workspaceRoot: string
     const { resolvedFiles: _resolvedFiles, ...response } = result;
     return response;
   })();
-  localSceneResourceTask = { controller, promise };
+  localSceneResourceTask = { requestId: request.requestId, controller, promise };
   openTasks.add(promise);
   try { return await promise; }
   finally {

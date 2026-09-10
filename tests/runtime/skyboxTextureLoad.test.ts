@@ -145,3 +145,21 @@ test('读取响应体期间取消会立即中止流并返回 AbortError', async 
     assert.equal(cancelled, 1);
   } finally { globalThis.fetch = previousFetch; }
 });
+
+
+test('HTTP天空盒按实际字节上报进展，未知长度不伪造百分比', async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    for (const known of [false, true]) {
+      const progress: Array<[number, number | null]> = [];
+      const chunks = [new Uint8Array(3), new Uint8Array(2)]; let index = 0;
+      globalThis.fetch = async () => new Response(new ReadableStream<Uint8Array>({ pull(controller) {
+        if (index < chunks.length) controller.enqueue(chunks[index++]); else controller.close();
+      } }), { headers: known ? { 'Content-Length': '5' } : {} });
+      const blob = await readSkyboxTextureBlob('http://example.test/sky.exr', new AbortController().signal, 10,
+        (received, total) => progress.push([received, total]));
+      assert.equal(blob.size, 5);
+      assert.deepEqual(progress, [[0, known ? 5 : null], [3, known ? 5 : null], [5, known ? 5 : null]]);
+    }
+  } finally { globalThis.fetch = previousFetch; }
+});

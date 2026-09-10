@@ -49,7 +49,7 @@ import type { Vector3Data } from '../model/math';
 import { ENTITY_NAME_MAX_LENGTH, MODEL_ARRAY_ITEM_COUNT_MAX } from '../model/modelArray';
 import { isPoiEffectHexColor, isPoiEffectKind, sanitizePoiEffectComponent } from '../model/poiEffect';
 import { sanitizeAutoPatrolComponent } from '../model/autoPatrolInspection';
-import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from '../model/modelParameters';
+import { normalizeModelParameterConfig, restoreModelParameterValues } from '../model/modelParameters';
 import { SCENE_LENGTH_UNIT, normalizeModelLengthUnitInfo, type SceneLengthUnit } from '../model/sceneUnits';
 import {
   createDefaultTelemetryBinding,
@@ -1092,9 +1092,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
 
   const parameterConfig = normalizeModelParameterConfig(modelAsset.parameterConfig);
   const parameterValues = parameterConfig
-    ? 'parameterValues' in modelAsset
-      ? sanitizeModelParameterValues(parameterConfig, modelAsset.parameterValues)
-      : createDefaultModelParameterValues(parameterConfig)
+    ? restoreModelParameterValues(parameterConfig, modelAsset.parameterValues)
     : undefined;
   const scriptAssets = normalizeModelScriptAssets(modelAsset.scriptAssets);
   const parameterScriptMetadata = normalizeOptionalJsonArray(modelAsset.parameterScriptMetadata);

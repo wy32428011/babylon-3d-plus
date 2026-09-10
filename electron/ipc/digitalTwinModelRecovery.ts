@@ -5,7 +5,7 @@ import { collectPublishModelReferences, planPublishModelRecovery, type PublishMo
 import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
 import { authorizeAssetFile, decodeAssetUrl, isAuthorizedAssetFile, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { isPathInsideOrEqual } from './deploymentExportFileSystem.js';
-import { recoverDataPlatformModelAssets } from './dataPlatformModelIncrementalSync.js';
+import { createDataPlatformModelSourceKey, recoverDataPlatformModelAssets } from './dataPlatformModelIncrementalSync.js';
 import { createDataPlatformModelRuntimeRevision } from './dataPlatformModelIndex.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
 import { assertRecoveryPathInsideRoot } from '../shared/recoveryPathBoundary.js';
@@ -57,10 +57,14 @@ export async function recoverPublishSceneModels(
       const key = `${item.kind}:${item.resourceId}:`;
       const asset = assets.find((candidate) => getClickEventModelResourceKey(candidate.sourceUrl)?.startsWith(key));
       if (!asset) throw new Error(`数据中台模型「${item.displayName}」恢复后未返回有效模型，已停止发布。`);
+      const sourceKey = createDataPlatformModelSourceKey(context.baseUrl);
+      if (asset.dataPlatformSourceKey && asset.dataPlatformSourceKey !== sourceKey) throw new Error('恢复模型的来源与当前数据中台不一致。');
       for (const file of [asset.path, asset.metadataPath, asset.thumbnailPath, ...(asset.scriptAssets ?? []).map((script) => script.path)]) {
         if (file) authorizeAssetFile(file);
       }
-      return { sourceUrls: item.sourceUrls, asset };
+      return { sourceUrls: item.sourceUrls, asset: { ...asset,
+        dataPlatformSourceKey: sourceKey, dataPlatformResourceId: item.resourceId,
+      } };
     })],
   };
 }

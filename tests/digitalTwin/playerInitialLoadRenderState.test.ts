@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { PlayerInitialLoadMonitor } from '../../src/player/playerInitialLoadMonitor.ts';
 import { PlayerInitialLoadGate } from '../../src/player/playerInitialLoadState.ts';
 import { computePlayerLoadingProgress } from '../../src/player/playerLoadingProgress.ts';
 
@@ -35,7 +36,7 @@ test('首帧验证成功主动发布完成状态，无 FPS、MQTT 或用户事�
   const onComplete = runInNewContext(`(${completeCallback})`, {
     initialLoadCompletedRef,
     setInitialLoadCompleted: (value: boolean) => { initialLoadCompleted = value; frames.push(render()); },
-    initialLoadTimeoutRef: { current: null }, blockInitialLoad() {},
+    initialLoadMonitorRef: { current: null }, checkInitialLoad() {}, initialLoadCompletedForSession: false, setInitialLoadNotice() {},
     interactionController: { markInitialLoadComplete: () => { handshake += 1; } },
   });
   let nextFrame: (() => void) | undefined;
@@ -67,22 +68,45 @@ test('已经销毁的场景首帧回调不能发布完成状态或发送新场�
   assert.equal(completed, 0);
 });
 
-test('实际 Viewer 超时处理阻断场景并取消首帧等待，不能发送成功握手或启动巡检', () => {
-  const timeoutHandler = variable(source.includes('const blockInitialLoad =') ? 'blockInitialLoad' : 'forceCompleteInitialLoad').initializer?.getText(ast);
-  assert.ok(timeoutHandler);
-  let complete = 0; let settled = 0; let phase = 'ready'; let message = '';
-  const gate = new PlayerInitialLoadGate(() => { complete += 1; }, { onSettled: () => { settled += 1; } });
-  gate.update({ loading: true, totalCount: 98 }); gate.startTracking();
-  const timeout = runInNewContext(`(${timeoutHandler})`, {
-    disposed: false, initialLoadGate: gate, autoPatrolStartGate: { dispose() {} },
-    setPhase: (value: string) => { phase = value; }, setMessage: (value: string) => { message = value; },
-  });
-  timeout();
-  assert.equal(complete, 0, '超时不能以成功握手放行宿主');
-  assert.equal(settled, 0, '超时不能放行巡检');
-  assert.equal(phase, 'blocked');
-  assert.match(message, /120|超时/);
-  gate.update({ loading: false, totalCount: 98 });
-  gate.forceComplete();
-  assert.equal(complete, 0, '已阻断的初始gate不能被迟到事件恢复为成功');
+test('实际 Viewer 120秒缓慢提示保持gate有效，140秒资源与首帧完成只通知一次', async () => {
+  const check = variable('checkInitialLoad').initializer?.getText(ast);
+  assert.ok(check);
+  let now = 0, notice = '', blocked = 0, complete = 0, settled = 0;
+  let frame: (() => void) | undefined;
+  const gate = new PlayerInitialLoadGate(() => complete++, { onSettled: () => settled++,
+    schedule: callback => { frame = callback; return 1; }, cancel: () => { frame = undefined; },
+    verifyReady: async () => undefined });
+  const snapshot = { error: null, progress: { loading: true, totalCount: 164, completedCount: 163, percent: .9, currentFile: 'skybox.exr', filePercent: null },
+    skybox: { stage: 'reading', receivedBytes: 0, totalBytes: 75_640_460 } };
+  gate.update(snapshot.progress); gate.startTracking();
+  const context = { disposed: false, initialLoadFailed: false, initialLoadCompletedForSession: false,
+    runtime: { getInitialLoadSnapshot: () => snapshot }, loadMonitor: new PlayerInitialLoadMonitor(),
+    performance: { now: () => now }, setInitialLoadNotice: (value: string) => { notice = value; },
+    blockInitialLoad: () => { blocked++; gate.dispose(); } };
+  const tick = runInNewContext('(' + check + ')', context);
+  tick(); now = 120_000; snapshot.skybox.receivedBytes = 60_000_000; tick();
+  assert.equal(blocked, 0); assert.match(notice, /缓慢|继续/); assert.equal(complete, 0);
+  now = 140_000; snapshot.progress.loading = false; snapshot.progress.completedCount = 164;
+  snapshot.skybox.stage = ''; tick(); gate.update(snapshot.progress); frame!();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(complete, 1); assert.equal(settled, 1);
+  context.initialLoadCompletedForSession = true; now = 999_999; tick();
+  assert.equal(blocked, 0);
+  gate.dispose();
+});
+
+test('实际 Viewer 真实失败或持续停滞仍阻断，不能被迟到成功恢复', () => {
+  const check = variable('checkInitialLoad').initializer?.getText(ast);
+  assert.ok(check);
+  for (const explicitError of [null, '模型 device：HTTP 404']) {
+    let now = 0, blocked = '', completed = 0;
+    const gate = new PlayerInitialLoadGate(() => completed++);
+    const snapshot = { error: explicitError, progress: { loading: true, totalCount: 1, completedCount: 0, percent: 0, currentFile: 'device', filePercent: null }, skybox: { stage: null, receivedBytes: 0, totalBytes: null } };
+    const tick = runInNewContext('(' + check + ')', { disposed: false, initialLoadFailed: false, initialLoadCompletedForSession: false,
+      runtime: { getInitialLoadSnapshot: () => snapshot }, loadMonitor: new PlayerInitialLoadMonitor(), performance: { now: () => now },
+      setInitialLoadNotice() {}, blockInitialLoad: (detail: string) => { blocked = detail; gate.dispose(); } });
+    tick(); now = 300_000; tick();
+    assert.match(blocked, explicitError ? /HTTP 404/ : /进展|停滞/);
+    gate.forceComplete(); assert.equal(completed, 0);
+  }
 });

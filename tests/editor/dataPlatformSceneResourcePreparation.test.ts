@@ -11,11 +11,12 @@ assert.ok(start >= 0 && end > start);
 const effect = stripTypeScriptTypes(source.slice(start, end));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture(failMerge = false, initialEnvironment: unknown = null) {
+function fixture(failMerge = false, initialEnvironment: unknown = null, modelWarnings: string[] = []) {
   let preparing = false;
   let resolve!: (value: unknown) => void, cleanup!: () => void;
   const promise = new Promise(done => { resolve = done; });
   const events: string[] = [];
+  const logs: string[] = [];
   const state: any = { sceneSessionId: 'A', sceneStartupResourceSessionId: 'A', environmentStartupRelinkSessionId: 'A',
     scene: { sceneSettings: { environment: initialEnvironment } } };
   state.finishSceneStartupResourcePreparation = (sessionId: string) => {
@@ -40,17 +41,28 @@ function fixture(failMerge = false, initialEnvironment: unknown = null) {
     reportSceneModelSyncProgress: (_session: string, progress: any) => events.push(progress.phase),
     beginSceneModelAssetRefresh: () => events.push('refresh'), settleSceneModelAssetRefresh: () => events.push('settled'),
     applyAvailableSceneModelUpdates: (_before: unknown, _replacements: unknown, _source: string, environment: unknown) => {
-      if (failMerge) throw new Error('参数冲突'); return { scene: { sceneSettings: { environment }, updated: true }, issues: [] };
+      if (failMerge) throw new Error('模型资源身份无效'); return { scene: { sceneSettings: { environment }, updated: true }, issues: [], warnings: modelWarnings };
     },
     allowScenePreparationEditing(_session: string, allowed: boolean) { if (allowed) events.push('editing-unlocked'); },
     settleSceneRuntimeWithWarning: () => events.push('editable-warning'),
     environmentPreparationStore: { clearError() {}, fail: (_session: string, error: string) => events.push('error:' + error) },
     loadProjectAssets: () => { throw new Error('禁止按全库候选覆盖场景'); },
-    loadEnvironmentFromAsset() {}, pushLog() {}, requestEnvironmentApply() { events.push('environment-start'); }, crypto: { randomUUID: () => 'refresh' },
+    loadEnvironmentFromAsset() {}, pushLog(message: string) { logs.push(message); }, requestEnvironmentApply() { events.push('environment-start'); }, crypto: { randomUUID: () => 'refresh' },
   });
-  return { resolve, cleanup, state, original, events, request: () => requested, preparing: () => preparing };
+  return { resolve, cleanup, state, original, events, logs, request: () => requested, preparing: () => preparing };
 }
 const result = { configured: true, sourceKey: 'source', modelReplacements: [], modelAssets: [], environmentAssets: [] };
+
+test('参数配置冲突直接提交新版场景，只去重写日志，不进入资源错误或弹窗状态', async () => {
+  const f = fixture(false, null, ['配置已采用新版']); await tick();
+  f.resolve({ ...result, warnings: ['参数 width 类型变化', '配置已采用新版'] });
+  await tick();
+  assert.equal(f.state.scene.updated, true);
+  assert.equal(f.state.committedIssues.length, 0);
+  assert.equal(f.events.filter(event => event.startsWith('error:')).length, 0);
+  assert.deepEqual(f.logs, ['参数 width 类型变化', '配置已采用新版']);
+  f.cleanup();
+});
 
 test('纯本地环境原样保留，不因缺少远端环境返回值制造发布阻断', async () => {
   const f = fixture();
@@ -109,11 +121,11 @@ test('资源查询异常后释放初始运行时门控，保留原始快照交�
   assert.ok(!f.events.includes('editable-warning'));
   f.cleanup();
 });
-test('参数冲突保留原文档并带警告进入编辑，查询期间编辑不会被覆盖', async () => {
+test('模型资源身份无效保留原文档并带警告进入编辑，查询期间编辑不会被覆盖', async () => {
   const f = fixture(true); await tick(); f.resolve(result); await tick();
   assert.equal(f.preparing(), false);
-  assert.equal(f.state.scene, f.original); assert.ok(f.events.includes('error:参数冲突'));
-  assert.ok(!f.events.includes('editable-warning')); assert.equal(f.state.issues.join('\n'), '参数冲突'); f.cleanup();
+  assert.equal(f.state.scene, f.original); assert.ok(f.events.includes('error:模型资源身份无效'));
+  assert.ok(!f.events.includes('editable-warning')); assert.equal(f.state.issues.join('\n'), '模型资源身份无效'); f.cleanup();
   const changed = fixture(); await tick(); const edited = { sceneSettings: { environment: null }, userEdit: true };
   changed.state.scene = edited; changed.resolve(result); await tick();
   assert.equal(changed.state.scene, edited); assert.ok(!changed.events.includes('commit')); changed.cleanup();

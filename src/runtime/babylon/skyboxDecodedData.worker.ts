@@ -1,3 +1,4 @@
+import { hashSkyboxContent } from './skyboxContentHash.ts';
 import babylonPackage from '@babylonjs/core/package.json' with { type: 'json' };
 import { ReadExrDataAsync } from '@babylonjs/core/Materials/Textures/Loaders/exrTextureLoader';
 import { GetExrHeader } from '@babylonjs/core/Materials/Textures/Loaders/EXR/exrLoader.header';
@@ -42,22 +43,15 @@ self.onmessage = async (event: MessageEvent<SkyboxDecodeRequest>) => {
       const header = RGBE_ReadHeader(new Uint8Array(buffer));
       validateSkyboxSourceDimensions(header.width, header.height);
     }
-    let key: string | null = null;
-    if (self.crypto?.subtle) {
-      key = await measure('hash', async () => {
-        const hash = await crypto.subtle.digest('SHA-256', buffer);
-        return `${decoderVersion}:${format}:${size}:${Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')}`;
-      });
-    } else { metrics.cache = 'unavailable'; metrics.warnings.push('当前页面不支持 SHA-256 WebCrypto，仍在 Worker 解码但不写持久缓存。'); }
-    if (key) {
-      try {
-        database = await measure('cache-read', () => openSkyboxDecodedCache());
-        const opened = database;
-        const cached = await measure('cache-read', () => readSkyboxDecodedCache(opened, key!, size));
-        if (cached) { metrics.cache = 'hit'; complete(cached); return; }
-      } catch (error) {
-        metrics.cache = 'unavailable'; metrics.warnings.push(error instanceof Error ? error.message : String(error));
-      }
+    const key = await measure('hash', async () =>
+      `${decoderVersion}:${format}:${size}:${await hashSkyboxContent(new Uint8Array(buffer))}`);
+    try {
+      database = await measure('cache-read', () => openSkyboxDecodedCache());
+      const opened = database;
+      const cached = await measure('cache-read', () => readSkyboxDecodedCache(opened, key, size));
+      if (cached) { metrics.cache = 'hit'; complete(cached); return; }
+    } catch (error) {
+      metrics.cache = 'unavailable'; metrics.warnings.push(error instanceof Error ? error.message : String(error));
     }
     let cube: CubeMapInfo;
     if (format === 'exr') {
@@ -67,8 +61,8 @@ self.onmessage = async (event: MessageEvent<SkyboxDecodeRequest>) => {
     } else {
       cube = await measure('decode', () => GetCubeMapTextureData(buffer, size, false));
     }
-    if (database && key) {
-      try { await measure('cache-write', () => writeSkyboxDecodedCache(database!, key!, cube)); }
+    if (database) {
+      try { await measure('cache-write', () => writeSkyboxDecodedCache(database!, key, cube)); }
       catch (error) { metrics.warnings.push(error instanceof Error ? error.message : String(error)); }
     }
     complete(cube);

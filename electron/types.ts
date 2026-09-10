@@ -182,6 +182,8 @@ export type DigitalTwinPublishContextRequest = {
 
 export type DigitalTwinPublishRequest = {
   targetToken?: string;
+  preparationId?: string;
+  preparedScenes?: DigitalTwinPreparedScene[];
   requestId: string;
   publishName: string;
   remark: string;
@@ -191,6 +193,15 @@ export type DigitalTwinPublishRequest = {
   forceOverwrite: boolean;
   confirmResourceBindings: boolean;
   allowedParentOrigins: string[];
+};
+
+export type DigitalTwinPreparedScene = { sceneId: string; sceneContent: string };
+export type DigitalTwinPublishScenePreparationRequest = {
+  targetToken: string; projectId?: string | null; sceneContent: string; requestId: string;
+};
+export type DigitalTwinPublishScenePreparationResult = {
+  preparationId: string;
+  scenes: Array<DigitalTwinPreparedScene & { name: string; isEntry: boolean }>;
 };
 
 export type DigitalTwinPublishProgressPhase =
@@ -269,7 +280,11 @@ export type DataPlatformModelSyncProgress = {
 };
 
 export type LocalSceneResourceSyncRequest = {
-  mode?: 'data-platform-latest' | 'local-recovery';
+  mode?: 'data-platform-latest' | 'scene-latest' | 'local-latest' | 'local-recovery';
+  /** 同步调用的取消标识，只能取消同一请求。 */
+  requestId?: string;
+  /** 主动更新场景时，同时等待整个模型库同步完成。 */
+  syncLibrary?: boolean;
   sceneContent?: string;
   sceneFilePath?: string;
   acceptEnvironmentRevision?: { resourceId: string; fileRevision: string; sha256: string };
@@ -277,6 +292,9 @@ export type LocalSceneResourceSyncRequest = {
 };
 
 export type LocalSceneResourceSyncResult = {
+  libraryErrors?: string[];
+  /** 可继续应用新版模型的参数或绑定提示，不参与资源失败门控。 */
+  warnings?: string[];
   issues?: Array<{ resourceKind: 'model' | 'combo' | 'environment' | 'skybox' | 'other'; resourceId?: string; sourcePath?: string; message: string }>;
   recoveredSceneContent?: string;
   recoveredReferenceCount?: number;

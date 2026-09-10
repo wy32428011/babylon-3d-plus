@@ -1,4 +1,5 @@
 import { AlarmManagerRuntime, type AlarmActivation } from './AlarmManagerRuntime';
+import { executeModelParameterBindings } from './modelParameterBindingExecution';
 import { collectAlarmIndependentEntityIds } from '../../editor/model/alarmManager';
 import { getChartMarkerClickEvents } from '../../editor/model/chartMarker';
 import { ChartMarkerPresentation, getChartMarkerStyle, getChartMarkerText } from './ChartMarkerPresentation';
@@ -457,6 +458,7 @@ type ResolvedModelGeneratorTarget = {
 };
 
 type ModelParameterRuntimeTarget = AbstractMesh | TransformNode | Material;
+type ParameterTextureAssignment = { texture: Texture | null; previous: ParameterTextureAssignment | null };
 type ModelParameterBaselineValue = boolean | number | string | Vector3Data | Texture | null;
 
 /** 定位线框单个列号标签的渲染资源；texture 在 NullEngine 等无 canvas 环境为 null（不创建标签）。 */
@@ -695,6 +697,9 @@ function isChainConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
 }
 
 export class SceneRuntime {
+  private readonly parameterTextureAssignments = new WeakMap<Material, ParameterTextureAssignment>();
+  private readonly unavailableParameterTextures = new WeakSet<Texture>();
+  private readonly observedParameterTextures = new WeakSet<Texture>();
   private shadowDocument: SceneDocument | null = null;
   private shadowBakeRunning = false;
   private readonly meshes = new Map<string, Mesh>();
@@ -4430,6 +4435,27 @@ export class SceneRuntime {
     return failedEntities.size;
   }
 
+  /** 首次加载的低频诊断；错误独立于已结算计数，避免失败单元被误当成功。 */
+  getInitialLoadSnapshot() {
+    const describe = (id: string, error: string): string => '模型 ' + (this.shadowDocument?.entities[id]?.name ?? id) + '：' + error;
+    const modelError = (model: ModelRuntimeEntry | undefined): string | null => model?.readinessError
+      ?? model?.externalScriptRuntime?.getInitializationError() ?? null;
+    let error: string | null = null;
+    const environment = this.environmentRuntime.getSnapshot();
+    const skybox = this.skyboxRuntime.getReadiness();
+    if (environment.phase === 'error') error = '环境模型加载失败：' + environment.message;
+    else if (skybox.phase === 'error') error = '天空盒加载失败：' + skybox.message;
+    if (!error) for (const failure of this.modelReadinessErrors.values()) { error = describe(failure.entityIds[0], failure.error); break; }
+    if (!error) for (const [id, model] of this.models) { const reason = modelError(model) ?? modelError(model.telemetryProxySource); if (reason) { error = describe(id, reason); break; } }
+    if (!error) for (const variant of this.modelArrayParameterVariants.values()) { const reason = modelError(variant.model); if (reason) { error = describe(variant.sourceEntityId, reason); break; } }
+    if (!error) for (const owner of this.generatedOutputOwners.values()) {
+      const reason = owner.readinessError ?? (owner.output?.kind === 'model' ? modelError(owner.output.model) : null);
+      if (reason) { error = describe(owner.editorEntityId ?? owner.entityId, reason); break; }
+    }
+    const resourceBytes = [...this.activeModelLoadProgress.values()].reduce((sum, item) => sum + item.loaded, 0);
+    return { progress: this.computeModelLoadProgress(), skybox: this.skyboxRuntime.getLoadDiagnostics(), resourceBytes, error };
+  }
+
   /** 严格加载门控单独读取失败信息，保留本地编辑对基础几何的容错显示。 */
   getModelReadinessError(entityId: string): string | null {
     const direct = this.models.get(entityId);
@@ -6573,17 +6599,11 @@ export class SceneRuntime {
 
     this.resetModelParameterTargets(model);
 
-    for (const binding of modelAsset.parameterConfig.bindings) {
-      this.applyModelParameterBinding(binding, modelAsset.parameterValues, modelAsset, model);
-    }
-
-    for (const rule of modelAsset.parameterConfig.rules ?? []) {
-      if (this.evaluateBooleanExpression(rule.when, modelAsset.parameterValues)) {
-        for (const binding of rule.set) {
-          this.applyModelParameterBinding(binding, modelAsset.parameterValues, modelAsset, model);
-        }
-      }
-    }
+    executeModelParameterBindings(modelAsset.parameterConfig, {
+      apply: binding => this.applyModelParameterBinding(binding, modelAsset.parameterValues!, modelAsset, model),
+      evaluateRule: expression => this.evaluateBooleanExpression(expression, modelAsset.parameterValues!),
+      report: message => this.pushLog(`${modelAsset.assetCode || modelAsset.sourcePath}：${message}`),
+    });
 
     model.parameterSignature = signature;
   }
@@ -7895,9 +7915,10 @@ export class SceneRuntime {
     model: ModelRuntimeEntry,
   ): void {
     const value = this.evaluateModelExpression(binding.value, values);
-    if (value === null) return;
+    if (value === null) throw new Error('表达式与已保存参数值不兼容。');
 
     const targets = this.resolveModelParameterTargets(binding, model);
+    if (!targets.length) throw new Error('新版模型中没有匹配的绑定目标。');
     for (const target of targets) {
       this.applyModelParameterValueToTarget(target, binding.property, value, modelAsset, model);
     }
@@ -8032,39 +8053,50 @@ export class SceneRuntime {
     this.rememberModelParameterBaseline(target, property, model);
 
     if (property === 'visible') {
-      if (typeof value !== 'boolean') return;
+      if (typeof value !== 'boolean') throw new Error('显隐绑定需要布尔值。');
       if (target instanceof AbstractMesh) target.isVisible = value;
       if (target instanceof TransformNode) target.setEnabled(value);
       return;
     }
 
     if (property === 'position' || property === 'rotation' || property === 'scaling') {
-      if (!this.isVector3Value(value) || !(target instanceof TransformNode)) return;
+      if (!this.isVector3Value(value) || !(target instanceof TransformNode)) throw new Error('变换绑定需要有效的三维向量和节点。');
       target[property] = new Vector3(value.x, value.y, value.z);
       return;
     }
 
     if (property === 'baseColor' || property === 'emissiveColor') {
-      if (typeof value !== 'string' || !(target instanceof Material)) return;
+      if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value) || !(target instanceof Material)) throw new Error('颜色绑定需要有效的颜色和材质。');
       this.applyMaterialColor(target, property, value);
       return;
     }
 
     if (property === 'alpha') {
-      if (typeof value !== 'number' || !(target instanceof Material)) return;
+      if (typeof value !== 'number' || !Number.isFinite(value) || !(target instanceof Material)) throw new Error('透明度绑定需要有限数字和材质。');
       target.alpha = Math.min(1, Math.max(0, value));
       return;
     }
 
     if (property === 'baseTexture') {
-      if (typeof value !== 'string' || !(target instanceof Material)) return;
+      if (typeof value !== 'string' || !(target instanceof Material)) throw new Error('纹理绑定需要有效的纹理路径和材质。');
       const texture = this.loadOrReuseTexture(value, modelAsset, model);
-      if (texture) this.applyMaterialTexture(target, texture);
+      if (!texture) throw new Error('纹理路径未通过安全校验或无法读取。');
+      const previousTexture = this.readMaterialTexture(target);
+      if (previousTexture === texture) return;
+      const previousAssignment = this.parameterTextureAssignments.get(target);
+      const previous = previousAssignment?.texture === previousTexture ? previousAssignment
+        : { texture: previousTexture, previous: null };
+      this.observeParameterTextureDisposal(previousTexture);
+      this.observeParameterTextureDisposal(texture);
+      this.parameterTextureAssignments.set(target, { texture, previous });
+      this.applyMaterialTexture(target, texture);
     }
   }
 
   private evaluateBooleanExpression(expression: ModelExpression, values: ModelParameterValues): boolean {
-    return this.evaluateModelExpression(expression, values) === true;
+    const value = this.evaluateModelExpression(expression, values);
+    if (typeof value !== 'boolean') throw new Error('规则条件与已保存参数值不兼容。');
+    return value;
   }
 
   private evaluateModelExpression(expression: ModelExpression, values: ModelParameterValues): ModelParameterValue | null {
@@ -8083,6 +8115,10 @@ export class SceneRuntime {
 
     const args = expression.args.map((item) => this.evaluateModelExpression(item, values));
     const numbers = args.filter((arg): arg is number => typeof arg === 'number' && Number.isFinite(arg));
+    if (['add', 'sub', 'mul', 'div', 'min', 'max', 'clamp', 'lerp', 'gt', 'gte', 'lt', 'lte'].includes(expression.op)
+      && numbers.length !== args.length) return null;
+    if (['and', 'or', 'not'].includes(expression.op) && args.some(value => typeof value !== 'boolean')) return null;
+    if (expression.op === 'if' && typeof args[0] !== 'boolean') return null;
 
     switch (expression.op) {
       case 'add': return numbers.reduce((sum, value) => sum + value, 0);
@@ -8176,6 +8212,14 @@ export class SceneRuntime {
     return null;
   }
 
+  /** 释放标记按对象记录，不影响相同 URL 后续重试创建的新纹理。 */
+  private observeParameterTextureDisposal(texture: Texture | null): void {
+    if (!texture || this.observedParameterTextures.has(texture)) return;
+    this.observedParameterTextures.add(texture);
+    const unavailableTextures = this.unavailableParameterTextures;
+    texture.onDisposeObservable.addOnce(() => unavailableTextures.add(texture));
+  }
+
   /** 使用共享贴图解析器加载或复用 Babylon 纹理，保证材质绑定和外置脚本参数语义一致。 */
   private loadOrReuseTexture(reference: string, modelAsset: ModelAssetComponent, model: ModelRuntimeEntry): Texture | null {
     const textureUrl = resolveModelTextureAssetUrl(reference, {
@@ -8187,7 +8231,23 @@ export class SceneRuntime {
     const existing = model.textureCache.get(textureUrl);
     if (existing) return existing;
 
-    const texture = new Texture(textureUrl, this.scene);
+    const texture = new Texture(textureUrl, this.scene, undefined, undefined, undefined, undefined, message => queueMicrotask(() => {
+      // 仅回退本次失败赋值：保留此前成功效果，迟到错误也不能覆盖后来的赋值。
+      if (model.textureCache.get(textureUrl) === texture) model.textureCache.delete(textureUrl);
+      this.unavailableParameterTextures.add(texture);
+      const materials = new Set(model.meshes.map(mesh => mesh.material).filter((material): material is Material => Boolean(material)));
+      for (const material of materials) {
+        if (this.readMaterialTexture(material) !== texture) continue;
+        const current = this.parameterTextureAssignments.get(material);
+        if (current?.texture !== texture) continue;
+        let previous = current.previous;
+        while (previous?.texture && this.unavailableParameterTextures.has(previous.texture)) previous = previous.previous;
+        this.parameterTextureAssignments.set(material, previous ?? { texture: null, previous: null });
+        this.applyMaterialTexture(material, previous?.texture ?? null);
+      }
+      texture.dispose();
+      if (!this.disposed) this.pushLog(`${modelAsset.assetCode || modelAsset.sourcePath}：参数纹理无法读取，已跳过该效果并保留参数值：${reference}${message ? `（${message}）` : ''}`);
+    }));
     model.textureCache.set(textureUrl, texture);
     return texture;
   }

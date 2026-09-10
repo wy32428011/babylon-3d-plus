@@ -1,3 +1,4 @@
+import { shouldValidateSceneModelResources } from '../assets/sceneModelSyncTransaction';
 import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
 import { executeChartMarkerClick } from '../../runtime/babylon/chartMarkerClick';
 import { CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
@@ -1762,7 +1763,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (!active) return;
       const currentEditor = useEditorStore.getState();
       if (currentEditor.sceneSessionId !== sceneSessionId
-        || (currentEditor.sceneResourcePolicy !== 'preserve-snapshot' && currentEditor.scene !== sceneDocument)) {
+        || currentEditor.scene !== sceneDocument) {
         resetRenderWait();
         stopReadinessPolling();
         return;
@@ -1797,7 +1798,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const settleRuntimeAfterTimeout = (): void => {
         if (sceneRuntimeTimeoutLoggedRef.current) return;
         sceneRuntimeTimeoutLoggedRef.current = true;
-        if (useEditorStore.getState().sceneResourcePolicy !== 'preserve-snapshot') {
+        if (shouldValidateSceneModelResources(useEditorStore.getState(), sceneDocument)) {
           const error = useEditorStore.getState().sceneResourcePolicy === 'local-refresh'
             ? '本地场景资源未能在规定时间内完成加载与首帧渲染，请重新检查场景资源。'
             : '部分场景资源未能在规定时间内完成加载与首帧渲染，可继续编辑，发布前请重新同步。';
@@ -1841,7 +1842,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         failedResourceRetrySessionRef.current = sceneSessionId;
         runtime.retrySkyboxLoading();
       }
-      if (useEditorStore.getState().sceneResourcePolicy !== 'preserve-snapshot') {
+      if (shouldValidateSceneModelResources(useEditorStore.getState(), sceneDocument)) {
         const failedEntityIds = sceneDocument.entityIds.filter(id => runtime.getModelReadinessError(id));
         const error = failedEntityIds.map(id => {
           const detail = runtime.getModelReadinessError(id);
@@ -1870,7 +1871,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         if (runtime.isModelReady(entityId)) settledModels += 1;
       }
       const environmentSnapshot = useEditorStore.getState().environmentRuntimeSnapshot;
-      if (currentEditor.sceneResourcePolicy !== 'preserve-snapshot'
+      if (shouldValidateSceneModelResources(currentEditor, sceneDocument)
         && sceneRuntimeEnvironmentExpected && environmentSnapshot.phase === 'error'
         && environmentSnapshot.sourceUrl === sceneRuntimeEnvironmentSourceUrl) {
         const error = environmentSnapshot.message || '场景环境模型加载失败，已保留环境配置，可继续编辑。';
@@ -1926,8 +1927,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (stable) {
         setSceneRuntimeNaturallyReady(true);
         useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument);
-        if (useEditorStore.getState().sceneResourcePolicy !== 'preserve-snapshot'
-          && useEditorStore.getState().sceneResourceIssues.length === 0) {
+        if (useEditorStore.getState().sceneResourceIssues.length === 0) {
           environmentPreparationStore.clearError(sceneSessionId);
         }
       }

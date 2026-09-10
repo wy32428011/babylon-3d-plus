@@ -151,3 +151,10 @@ test('纯内置几何或空场景没有模型加载单元，仍等实际首帧�
     assert.equal(verified.percent, 100);
   }
 });
+
+
+test('下载字节已到100%但资源或首帧未成功，显示最多99%', () => {
+  const progress = computePlayerLoadingProgress({ phase: 'ready', startupPercent: 50, initialLoadCompleted: false, message: '加载中',
+    modelLoadProgress: { loading: true, percent: 1, completedCount: 163, totalCount: 164, currentFile: 'skybox.exr' } });
+  assert.equal(progress.percent, 99); assert.equal(progress.visible, true);
+});

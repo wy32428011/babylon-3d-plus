@@ -1,18 +1,29 @@
 import type { DigitalTwinModelRecoveryResult, ProjectModelAssetEntry } from '../../../electron/types';
 import { collectPublishModelReferences, publishModelMatchKey } from '../../../electron/shared/publishModelRecovery';
 import { createModelEntity, type SceneDocument } from '../model/SceneDocument';
-import { normalizeModelParameterConfig } from '../model/modelParameters';
+import { normalizeModelParameterConfig, restoreModelParameterValues } from '../model/modelParameters';
 import { createModelLengthUnitInfo } from '../model/sceneUnits';
 import { applyPublishModelIdentityReplacements } from '../../../electron/shared/publishResourceIdentityMigration';
+import { mergeSceneModelAssetUpdate } from '../assets/mergeModelAssetUpdate';
+import type { ModelAssetTemplate } from '../model/components';
+import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 
 function createRecoveredModel(asset: ProjectModelAssetEntry) {
-  return createModelEntity(
+  const entity = createModelEntity(
     asset.path, asset.sourceUrl, asset.displayName || asset.name,
     createModelLengthUnitInfo(asset.lengthUnit), undefined,
     normalizeModelParameterConfig(asset.parameterConfig) ?? undefined,
     asset.scriptAssets, asset.parameterScriptMetadata, asset.animationScriptMetadata,
     asset.defaultAssetCode, asset.assetRevision, asset.dataDrivenConfig, asset.builtInSlotBindingConfig,
   );
+  const model = entity.components.modelAsset!;
+  const [kind, resourceId, modelPath] = publishModelMatchKey(asset.sourceUrl).split(':');
+  if (asset.dataPlatformSourceKey && (kind === 'model' || kind === 'combo') && resourceId && modelPath) {
+    model.dataPlatformModel = { sourceKey: asset.dataPlatformSourceKey, kind, resourceId, modelPath };
+  }
+  // 恢复过程采用本次权威默认值；范围冲突交给参数运行时提示，不能在发布准备中改写默认值。
+  if (model.parameterConfig) model.parameterValues = restoreModelParameterValues(model.parameterConfig, {});
+  return entity;
 }
 
 /** 只改声明为资源地址的字段，不递归触碰参数或业务字符串。 */
@@ -25,73 +36,72 @@ function replaceResourcePaths(owner: Record<string, unknown>, asset: ProjectMode
     if (value === undefined) delete owner[field]; else owner[field] = value;
   }
   if (Array.isArray(owner.scriptPaths)) {
-    const scriptPaths = [...new Set([...(asset.scriptPaths ?? []), ...(asset.scriptAssets ?? []).map(script => script.path)])];
-    owner.scriptPaths = owner.scriptPaths.map(value => {
-      if (typeof value !== 'string') throw new Error('模型脚本路径格式无效，已停止发布。');
-      const fileName = value.replace(/\\/g, '/').split('/').at(-1)?.toLowerCase();
-      const candidates = scriptPaths.filter(file => file.replace(/\\/g, '/').split('/').at(-1)?.toLowerCase() === fileName);
-      if (candidates.length !== 1) throw new Error(`恢复模型无法唯一对应原脚本「${fileName}」，已停止发布。`);
-      return candidates[0];
-    });
+    owner.scriptPaths = [...new Set([...(asset.scriptPaths ?? []), ...(asset.scriptAssets ?? []).map(script => script.path)])];
   }
 }
 
 /** 保留实例 ID、位置、参数和事件；只有没有场景目标的设备类型才新增一个真实模型。 */
 export function repairPublishSceneModels(scene: SceneDocument, recovery: DigitalTwinModelRecoveryResult): {
-  scene: SceneDocument; restoredCount: number; addedCount: number; reboundCount: number;
+  scene: SceneDocument; restoredCount: number; addedCount: number; reboundCount: number; warnings: string[];
 } {
   const identityReplacements = recovery.replacements.filter(({ sourceUrls, asset }) => sourceUrls.some(url => {
     const oldKey = publishModelMatchKey(url).split(':').slice(0, 2).join(':');
     const newKey = publishModelMatchKey(asset.sourceUrl).split(':').slice(0, 2).join(':');
     return oldKey !== newKey;
   }));
-  const identityUrls = new Set(identityReplacements.flatMap(item => item.sourceUrls));
-  const identityCount = collectPublishModelReferences(scene).models.filter(reference => identityUrls.has(String(reference.asset.sourceUrl))).length;
+  const identitySource = identityReplacements.length ? structuredClone(scene) : scene;
+  if (identityReplacements.length) {
+    const migratedUrls = new Set(identityReplacements.flatMap(item => item.sourceUrls));
+    for (const reference of collectPublishModelReferences(identitySource).models) {
+      if (!migratedUrls.has(String(reference.asset.sourceUrl))
+        || !('lengthUnit' in reference.asset || 'parameterConfig' in reference.asset)) continue;
+      // 完整模型的脚本清单将由新版模板替换；身份迁移仍校验原 ID、包内主文件和内容修订。
+      for (const owner of [reference.asset, reference.target]) if (owner) {
+        for (const field of ['scriptAssets', 'scriptPaths']) if (Array.isArray(owner[field])) owner[field] = [];
+      }
+    }
+  }
   const next: SceneDocument = identityReplacements.length
-    ? JSON.parse(applyPublishModelIdentityReplacements(JSON.stringify({ scene }), { replacements: identityReplacements })).scene
+    ? JSON.parse(applyPublishModelIdentityReplacements(JSON.stringify({ scene: identitySource }), { replacements: identityReplacements })).scene
     : structuredClone(scene);
   const { models, devices } = collectPublishModelReferences(next);
-  const byOriginalUrl = new Map(recovery.replacements.filter(item => !identityReplacements.includes(item)).flatMap(({ sourceUrls, asset }) => sourceUrls.map((url) => [url, asset] as const)));
+  const byOriginalUrl = new Map(recovery.replacements.flatMap(item => [
+    ...item.sourceUrls, ...(identityReplacements.includes(item) ? [item.asset.sourceUrl] : []),
+  ].map(url => [url, item.asset] as const)));
   const remappedKeys = new Map<string, string>();
-  let restoredCount = identityCount, addedCount = 0, reboundCount = 0;
+  const warnings = new Set<string>();
+  let restoredCount = 0, addedCount = 0, reboundCount = 0;
   for (const reference of models) {
     const asset = byOriginalUrl.get(String(reference.asset.sourceUrl));
     if (!asset) continue;
     const oldKey = publishModelMatchKey(reference.asset.sourceUrl);
     const { assetCode: _defaultAssetCode, ...replacement } = createRecoveredModel(asset).components.modelAsset!;
-    // 参数与遥测属于实例配置，下载的新默认值只补充缺失字段。
     const instance = reference.asset;
-    const oldParameters = instance.parameterValues;
-    const sameVersion = typeof instance.assetRevision === 'string' && /^[a-f\d]{64}$/i.test(instance.assetRevision)
-      && instance.assetRevision.toLowerCase() === replacement.assetRevision?.toLowerCase();
+    if (!replacement.dataPlatformModel && instance.dataPlatformModel !== undefined) {
+      const identity = normalizeDataPlatformModelIdentity(instance.dataPlatformModel);
+      const [kind, resourceId, modelPath] = publishModelMatchKey(replacement.sourceUrl).split(':');
+      const [previousKind, previousId] = oldKey.split(':');
+      if (identity && identity.kind === kind && identity.resourceId === resourceId
+        && previousKind === kind && previousId === resourceId && modelPath) {
+        replacement.dataPlatformModel = { ...identity, modelPath };
+      } else throw new Error('恢复模型的来源身份与已验证资源不一致，已保留原场景。');
+    }
     const resourcePaths: Record<string, unknown> = {
       sourcePath: replacement.sourcePath, sourceUrl: replacement.sourceUrl,
       assetRevision: replacement.assetRevision,
+      ...(replacement.dataPlatformModel ? { dataPlatformModel: replacement.dataPlatformModel } : {}),
     };
-    if (sameVersion) {
-      // 同版只迁移原来启用的脚本引用，不能重新启用被实例移除的脚本或覆盖配置值。
-      if (Array.isArray(instance.scriptAssets)) resourcePaths.scriptAssets = instance.scriptAssets.map((previous) => {
-        const old = previous as Record<string, unknown>;
-        const fileName = String(old.path ?? '').replace(/\\/g, '/').split('/').at(-1);
-        const script = asset.scriptAssets?.find(item => item.name === old.name
-          || item.path.replace(/\\/g, '/').split('/').at(-1) === fileName);
-        if (!script) throw new Error(`同版本模型未包含原脚本「${String(old.name ?? fileName)}」，已停止发布。`);
-        return { ...old, path: script.path, sourceUrl: script.sourceUrl };
-      });
-      Object.assign(instance, resourcePaths);
+    if ('lengthUnit' in instance || 'parameterConfig' in instance) {
+      const merged = mergeSceneModelAssetUpdate(instance as ModelAssetTemplate, replacement,
+        String(instance.assetCode ?? reference.target?.displayName ?? asset.name), warning => warnings.add(warning));
+      for (const field of Object.keys(instance)) delete instance[field];
+      Object.assign(instance, merged);
     } else {
-      Object.assign(instance, { ...replacement, ...instance, ...resourcePaths,
-        scriptAssets: replacement.scriptAssets ?? [],
-        lengthUnit: replacement.lengthUnit, unitScaleToMeters: replacement.unitScaleToMeters,
-        parameterScriptMetadata: replacement.parameterScriptMetadata ?? [],
-        animationScriptMetadata: replacement.animationScriptMetadata ?? [],
-      });
+      // 漫游人物等轻量引用不包含参数模板，仅同步资源身份。
+      Object.assign(instance, resourcePaths);
     }
     replaceResourcePaths(instance, asset);
-    if (!sameVersion && oldParameters && typeof oldParameters === 'object') {
-      instance.parameterValues = { ...replacement.parameterValues, ...oldParameters };
-    }
-    if (!sameVersion) delete instance.sourceSnapshot;
+    delete instance.sourceSnapshot;
     if (reference.target) {
       replaceResourcePaths(reference.target, asset);
       reference.target.assetId = asset.id;
@@ -136,5 +146,5 @@ export function repairPublishSceneModels(scene: SceneDocument, recovery: Digital
       reboundCount += 1;
     }
   }
-  return { scene: restoredCount || addedCount || reboundCount ? next : scene, restoredCount, addedCount, reboundCount };
+  return { scene: restoredCount || addedCount || reboundCount ? next : scene, restoredCount, addedCount, reboundCount, warnings: [...warnings] };
 }

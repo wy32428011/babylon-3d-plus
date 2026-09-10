@@ -25,6 +25,7 @@ const projectName = '安装态远端场景回归';
 const requests = [];
 const checks = [];
 let mode = 'success';
+let modelRevision = '2';
 let browser;
 let electronApp;
 let page;
@@ -53,6 +54,7 @@ function glb(color) {
 
 const oldModel = glb([1, 0, 0]);
 const latestModel = glb([0, 1, 0]);
+const updatedModel = glb([1, 0, 1]);
 const environmentModel = glb([0, 0, 1]);
 const parameterConfig = (latest = false) => ({ schema: 'babylon-editor.model-parameters', version: 1,
   parameters: [{ key: 'width', label: '宽度', type: 'number', defaultValue: 9, min: 0, max: 10 },
@@ -108,12 +110,12 @@ const server = createServer(async (request, response) => {
   try {
     let raw = ''; for await (const chunk of request) raw += chunk;
     const route = new URL(request.url, 'http://fixture').pathname;
-    requests.push({ route, mode, body: raw ? JSON.parse(raw) : null });
+    requests.push({ route, mode, modelRevision, body: raw ? JSON.parse(raw) : null });
     const json = data => { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ success: true, data })); };
     const bytes = (data, type) => { response.setHeader('Content-Type', type); response.end(data); };
     const project = { id: projectId, projectName,
       latestEditorProjectId: '91', latestEditorProjectVersionId: '92', latestEditorProjectVersionNumber: 1,
-      latestEditorProjectPackageUrl: '/source.zip', currentResourceRevision: '2' };
+      latestEditorProjectPackageUrl: '/source.zip', currentResourceRevision: modelRevision };
     if (route === '/api/v1/projects/query') return json({ records: [project], total: 1, pageNum: 1, pageSize: 12 });
     if (route === '/api/v1/projects/detail') return json(project);
     if (route === '/api/v1/digital-twin/projects/status') return json({ projectId, editorProjectId: '91', latestVersionId: '92',
@@ -128,20 +130,21 @@ const server = createServer(async (request, response) => {
       return bytes(environmentModel, 'model/gltf-binary');
     }
     if (route === '/api/v1/models/query') return json({ pageNum: JSON.parse(raw).pageNum, pageSize: JSON.parse(raw).pageSize,
-      total: 2, records: [{ id: '123', modelName: 'fixture', fileName: 'model.glb', fileUrl: '/latest.glb', metaFileUrl: '/latest.json', revision: '2' },
+      total: 2, records: [{ id: '123', modelName: 'fixture', fileName: 'model.glb', fileUrl: `/latest-${modelRevision}.glb`, metaFileUrl: '/latest.json', revision: modelRevision },
         { id: '789', modelName: '未绑定普通模型', fileName: 'unbound.glb', fileUrl: '/unbound.glb', revision: '2' }] });
     if (route === '/api/v1/combo-models/query') return json({ pageNum: JSON.parse(raw).pageNum, pageSize: JSON.parse(raw).pageSize,
       total: 1, records: [{ id: '790', comboModelName: '未绑定组合模型', fileName: 'combo.glb', fileUrl: '/unbound.glb', revision: '2' }] });
     if (route === '/unbound.glb') return bytes(latestModel, 'model/gltf-binary');
     if (route === '/api/v1/models/detail') {
       await new Promise(resolve => setTimeout(resolve, 350));
+      if (String(JSON.parse(raw).id) === '789') return json({ id: '789', modelName: '未绑定普通模型', fileName: 'unbound.glb', fileUrl: '/unbound.glb', revision: '2' });
       if (mode === 'model-404') { response.writeHead(404); response.end('fixture model unavailable'); return; }
-      return json({ id: '123', modelName: 'fixture', fileName: 'model.glb', fileUrl: '/latest.glb',
-        metaFileUrl: '/latest.json', revision: '2' });
+      return json({ id: '123', modelName: 'fixture', fileName: 'model.glb', fileUrl: `/latest-${modelRevision}.glb`,
+        metaFileUrl: '/latest.json', revision: modelRevision });
     }
-    if (route === '/latest.glb') {
+    if (route === '/latest-2.glb' || route === '/latest-3.glb') {
       await new Promise(resolve => setTimeout(resolve, 500));
-      return bytes(latestModel, 'model/gltf-binary');
+      return bytes(route === '/latest-3.glb' ? updatedModel : latestModel, 'model/gltf-binary');
     }
     if (route === '/latest.json') return jsonMetadata(response);
     if (route === '/api/v1/digital-twin/runtime-config/detail') return json({ projectId, runtimeEnabled: false, configJson: '{}' });
@@ -151,14 +154,16 @@ const server = createServer(async (request, response) => {
 });
 function jsonMetadata(response) {
   response.setHeader('Content-Type', 'application/json');
-  response.end(JSON.stringify({ lengthUnit: 'meter', modelParameters: parameterConfig(true) }));
+  const config = parameterConfig(true);
+  if (modelRevision === '3') config.parameters[0] = { ...config.parameters[0], label: '新版默认宽度', defaultValue: 8, max: 20 };
+  response.end(JSON.stringify({ lengthUnit: 'meter', modelParameters: config }));
 }
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const baseUrl = 'http://127.0.0.1:' + server.address().port;
 const expectedSourceKey = createHash('sha256').update(baseUrl).digest('hex');
 const userData = path.join(root, 'user-data');
 const workspaceRoot = path.join(userData, 'data-platform-workspace');
-const localProjectRoot = path.join(workspaceRoot, 'Projects', projectId);
+const localProjectRoot = path.join(workspaceRoot, 'Platforms', expectedSourceKey, 'Projects', projectId);
 if (sourceMode) {
   // 开发启动默认使用仓库工作区；测试预设独立配置，禁止向真实工程写入夹具资源。
   await mkdir(userData, { recursive: true });
@@ -224,7 +229,7 @@ async function openProject() {
   } else {
     await page.getByText('场景已打开，部分资源需要处理', { exact: true }).waitFor({ state: 'visible', timeout: 90000 });
   }
-  await waitRenderedModel(mode === 'success' ? 'green' : 'red');
+  await waitRenderedModel(mode === 'success' ? (modelRevision === '3' ? 'purple' : 'green') : 'red');
   const transitions = await page.evaluate(() => window.__loadingTransitions);
   assert.equal(transitions.filter(event => event.visible).length, 1, '一次打开的加载蒙版只能连续出现一次');
   checks.push({ name: 'continuous-loading-' + mode, passed: true, transitions });
@@ -244,7 +249,8 @@ async function waitRenderedModel(color) {
       const bytes = context.getImageData(0, 0, canvas.width, canvas.height).data;
       let count = 0;
       for (let i = 0; i < bytes.length; i += 4) {
-        if (color === 'green' ? bytes[i + 1] > 150 && bytes[i] < 80 && bytes[i + 2] < 80
+        if (color === 'purple' ? bytes[i] > 150 && bytes[i + 1] < 80 && bytes[i + 2] > 150
+          : color === 'green' ? bytes[i + 1] > 150 && bytes[i] < 80 && bytes[i + 2] < 80
           : bytes[i] > 150 && bytes[i + 1] < 80 && bytes[i + 2] < 80) count++;
       }
       return count;
@@ -260,8 +266,10 @@ function assertInstances(scene, latest) {
   for (const width of [1, 2]) {
     const entity = scene.entities['fixture-model-' + width];
     assert.equal(entity.components.modelAsset.assetCode, 'DEVICE-' + width);
+    assert.equal(entity.id, 'fixture-model-' + width);
+    assert.deepEqual(entity.components.modelAsset.parameterConfig, parameterConfig(latest));
     assert.deepEqual(entity.components.modelAsset.parameterValues, { width, enabled: false, label: '', ...(latest ? { speed: 5 } : {}) });
-    assert.equal(entity.components.transform.position.x, (width - 1) * 4);
+    assert.deepEqual(entity.components.transform, sourceScene().scene.entities[entity.id].components.transform);
   }
   assert.equal(scene.sceneSettings.environment.opacity, 0.75);
 }
@@ -330,24 +338,47 @@ async function main() {
   assertInstances(await page.evaluate(readRenderedScene), true);
   await page.getByRole('button', { name: '环境库', exact: true }).click();
   await page.getByText('未绑定环境', { exact: true }).waitFor({ state: 'visible', timeout: 45000 });
-  const syncNotice = page.getByRole('status', { name: '环境模型同步', exact: true });
-  await page.getByRole('button', { name: '同步模型库', exact: true }).click();
-  await syncNotice.waitFor({ state: 'visible' });
-  await syncNotice.hover();
-  await syncNotice.getByText('环境同步完成', { exact: true }).waitFor();
-  await page.screenshot({ path: path.join(artifactRoot, '01c-environment-notice-close.png') });
-  await syncNotice.getByRole('button', { name: '关闭环境模型同步提示' }).click();
-  await syncNotice.waitFor({ state: 'hidden' });
-  await page.getByRole('button', { name: '同步模型库', exact: true }).click();
-  await syncNotice.waitFor({ state: 'visible' });
-  await page.mouse.move(400, 250);
-  await syncNotice.waitFor({ state: 'hidden', timeout: 10000 });
-  checks.push({ name: 'library-notice-close-new-run-auto-dismiss', passed: true });
-  await page.getByRole('button', { name: '模型库', exact: true }).click();
-  await page.screenshot({ path: path.join(artifactRoot, '01b-full-library.png') });
   assert.equal((await page.evaluate(() => window.__loadingTransitions)).filter(event => event.visible).length, 1,
     '后台全库同步不应重新弹出场景加载蒙版');
   checks.push({ name: 'unbound-model-combo-environment-full-library', passed: true });
+  const beforeManual = await page.evaluate(readRenderedScene);
+  modelRevision = '3';
+  await page.getByRole('button', { name: '同步模型库', exact: true }).click();
+  await page.waitForFunction(`(${readRenderedScene.toString()})()?.entities['fixture-model-1']?.components.modelAsset.assetRevision !== '${beforeManual.entities['fixture-model-1'].components.modelAsset.assetRevision}'`, undefined, { timeout: 90000 });
+  await page.locator('[data-scene-preparation-phase]').waitFor({ state: 'hidden', timeout: 90000 });
+  await waitRenderedModel('purple');
+  const afterManual = await page.evaluate(readRenderedScene);
+  assertInstances(afterManual, true);
+  for (const id of beforeManual.entityIds) {
+    const previous = beforeManual.entities[id].components.modelAsset;
+    const updated = afterManual.entities[id].components.modelAsset;
+    assert.notEqual(updated.sourcePath, previous.sourcePath, '手动全库同步必须替换场景资源路径');
+    assert.notEqual(updated.assetRevision, previous.assetRevision, '资源修订必须实际更新');
+    assert.equal(createHash('sha256').update(await readFile(updated.sourcePath)).digest('hex'), createHash('sha256').update(updatedModel).digest('hex'), '场景引用文件必须是真实新版GLB');
+    assert.deepEqual(updated.parameterConfig, previous.parameterConfig);
+  }
+  await page.screenshot({ path: path.join(artifactRoot, '01c-manual-sync-new-model.png') });
+  checks.push({ name: 'manual-library-sync-replaces-model-preserves-config', passed: true, beforeManual, afterManual });
+
+  // 相同版本再次同步不增加撤销层：一次撤销必须直接回到绿色旧版本。
+  await page.getByRole('button', { name: '同步模型库', exact: true }).click();
+  await page.locator('[data-scene-preparation-phase]').waitFor({ state: 'hidden', timeout: 90000 });
+  await page.getByRole('button', { name: '同步模型库', exact: true }).waitFor({ state: 'visible' });
+  await page.waitForFunction(() => !Array.from(document.querySelectorAll('button')).some(button => button.disabled && button.textContent === '同步模型库'));
+  assert.deepEqual((await page.evaluate(readRenderedScene)).entities, afterManual.entities);
+  await page.locator('canvas.scene-canvas').click({ position: { x: 10, y: 100 } });
+  await page.keyboard.press('Control+z');
+  await waitRenderedModel('green');
+  const undone = await page.evaluate(readRenderedScene);
+  assertInstances(undone, true);
+  for (const id of beforeManual.entityIds) assert.deepEqual(undone.entities[id].components.modelAsset, beforeManual.entities[id].components.modelAsset);
+  await page.getByRole('button', { name: '重做', exact: true }).click();
+  await waitRenderedModel('purple');
+  assertInstances(await page.evaluate(readRenderedScene), true);
+  await page.screenshot({ path: path.join(artifactRoot, '01d-manual-sync-redone.png') });
+  checks.push({ name: 'manual-sync-idempotent-undo-redo', passed: true });
+  await page.getByRole('button', { name: '模型库', exact: true }).click();
+  await page.screenshot({ path: path.join(artifactRoot, '01b-full-library.png') });
 
   await returnHome();
   const localScenePath = path.join(localProjectRoot, 'Scenes', 'fixture.scene.json');
@@ -393,7 +424,7 @@ async function main() {
   checks.push({ name: 'resource-notice-dismiss-and-reopen', passed: true });
   mode = 'success'; await issues.getByRole('button', { name: '重新同步场景资源', exact: true }).click();
   await issues.waitFor({ state: 'hidden', timeout: 90000 });
-  await waitRenderedModel('green');
+  await waitRenderedModel('purple');
   scene = await page.evaluate(readRenderedScene); assertInstances(scene, true);
   checks.push({ name: 'retry-latest-preserves-parameters', passed: true });
   await page.screenshot({ path: path.join(artifactRoot, '04-retry-success.png') });
@@ -417,14 +448,24 @@ async function main() {
   scene = await page.evaluate(readRenderedScene);
   assert.equal(scene.entityIds.length, 3, '从本地重开保存的场景必须保留新放入的模型');
   assert.ok(scene.entityIds.some(id => scene.entities[id].name.includes('未绑定普通模型')));
-  await waitRenderedModel('green');
+  await waitRenderedModel('purple');
   await page.screenshot({ path: path.join(artifactRoot, '05-unbound-model-save-reopen.png') });
   checks.push({ name: 'unbound-model-add-save-local-reopen', passed: true });
+  const beforeLocalSync = await page.evaluate(readRenderedScene);
+  const requestsBeforeLocalSync = requests.length;
+  await page.getByRole('button', { name: '同步场景模型', exact: true }).click();
+  await page.locator('[data-scene-preparation-phase]').waitFor({ state: 'hidden', timeout: 90000 });
+  await page.waitForFunction(() => !Array.from(document.querySelectorAll('button')).some(button => button.disabled && button.textContent === '同步场景模型'));
+  assert.deepEqual((await page.evaluate(readRenderedScene)).entities, beforeLocalSync.entities);
+  assert.ok(requests.slice(requestsBeforeLocalSync).some(request => request.route === '/api/v1/models/detail'), '本地重开后的主动同步必须请求中台最新模型');
+  await waitRenderedModel('purple');
+  checks.push({ name: 'local-reopen-explicit-scene-sync', passed: true });
 }
 
 let error;
 try { await main(); } catch (cause) {
   error = cause instanceof Error ? cause.stack : String(cause);
+  if (page) await writeFile(path.join(artifactRoot, 'failure-scene.json'), JSON.stringify(await page.evaluate(readRenderedScene).catch(() => null), null, 2));
   if (page) await page.screenshot({ path: path.join(artifactRoot, 'failure.png') }).catch(() => undefined);
 } finally {
   await writeFile(path.join(artifactRoot, 'result.json'), JSON.stringify({ passed: !error, executablePath, root, artifactRoot,

@@ -130,6 +130,7 @@ contextBridge.exposeInMainWorld('editorApi', {
     };
   },
   prepareLocalSceneResources: (request: LocalSceneResourceSyncRequest): Promise<LocalSceneResourceSyncResult> => ipcRenderer.invoke('data-platform:prepareLocalSceneResources', request),
+  cancelSceneModelSync: (request: { requestId: string }): Promise<boolean> => ipcRenderer.invoke('data-platform:cancelSceneModelSync', request),
   syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => ipcRenderer.invoke('data-platform:syncEnvironments', request),
   retryDataPlatformEnvironmentSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryEnvironmentSync'),
   closeDataPlatformProject: (): Promise<void> => ipcRenderer.invoke('data-platform:closeProject'),
@@ -216,6 +217,8 @@ contextBridge.exposeInMainWorld('editorApi', {
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
   getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest): Promise<DigitalTwinPublishContext> =>
     ipcRenderer.invoke('digital-twin-publish:getContext', request),
+  prepareDigitalTwinPublishSceneSnapshots: (request: import('./types.js').DigitalTwinPublishScenePreparationRequest): Promise<import('./types.js').DigitalTwinPublishScenePreparationResult> =>
+    ipcRenderer.invoke('digital-twin-publish:prepareScenes', request),
   recoverDigitalTwinModels: (request: import('./types.js').DigitalTwinModelRecoveryRequest): Promise<import('./types.js').DigitalTwinModelRecoveryResult> =>
     ipcRenderer.invoke('digital-twin-publish:recoverModels', request),
   publishDigitalTwin: (request: DigitalTwinPublishRequest): Promise<DigitalTwinPublishResult> =>

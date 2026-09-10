@@ -43,6 +43,7 @@ async function run() {
   const modelBytes = createGlb(10);
   const comboBytes = createGlb(20);
   let mode = 'stable';
+  let failLibraryQuery = false;
   let slowDownloadStarted = false;
   let activeParallelDownloads = 0;
   let maxParallelDownloads = 0;
@@ -93,6 +94,7 @@ async function run() {
       return;
     }
     if (requestUrl.endsWith('/api/v1/models/query') || requestUrl.endsWith('/api/v1/combo-models/query')) {
+      if (failLibraryQuery) { response.writeHead(500); response.end('fixture library query failure'); return; }
       const records = requestUrl.includes('combo-models')
         ? [{ id: '301', comboModelName: '当前组合模型', fileName: 'combo.glb', fileUrl: '/files/combo.glb', revision: '1' }]
         : [{ id: '301', modelName: '当前普通模型', fileName: 'model.glb', fileUrl: '/files/model.glb',
@@ -188,14 +190,39 @@ async function run() {
     assert.equal(cached.modelAssets.length, 2, '无库变更也必须返回全部权威候选');
     checks.push('cache-reuse-still-returns-all-candidates');
 
+    const localLatest = await service.prepareLocalSceneResources(baseUrl, workspaceRoot, { mode: 'local-latest',
+      sceneContent: JSON.stringify({ version: 5, scene: { entities: {}, sceneSettings: { environment: {
+        source: 'data-platform', dataPlatformResourceId: '101', dataPlatformSourceKey: first.sourceKey,
+        dataPlatformRevision: '0',
+      } } } }) });
+    assert.equal(localLatest.environmentAssets.length, 1, '本地打开也应同步当前中台环境');
+    assert.equal(localLatest.environmentAssets[0].dataPlatformResourceId, '101');
+    assert.equal(localLatest.environmentAssets[0].dataPlatformRevision, first.environmentAssets[0].dataPlatformRevision);
+    checks.push('local-latest-environment-authority');
+
+    const savedBinding = bindings.getCurrentDataPlatformBinding();
+    bindings.clearCurrentDataPlatformBinding();
+    await assets.activateProjectRoot(projectRoot);
+    const explicitScene = { version: 5, scene: { entities: [], sceneSettings: {} } };
+    const explicit = await service.prepareLocalSceneResources(baseUrl, workspaceRoot,
+      { mode: 'scene-latest', syncLibrary: true, sceneContent: JSON.stringify(explicitScene) });
+    assert.equal(assets.getCurrentProjectRoot(), projectRoot, '未绑定场景主动同步不能切换工程目录');
+    assert.equal(bindings.getCurrentDataPlatformBinding(), null, '主动同步不能创建发布绑定');
+    assert.deepEqual(explicit.modelReplacements, []);
+    assert.deepEqual(explicit.issues, []);
+    assert.ok(downloads.some(item => item.url.includes('/202/')), '主动全库同步必须等待未引用环境下载完成');
+    bindings.setCurrentDataPlatformBinding(savedBinding.projectRoot, savedBinding.metadata);
+    checks.push('explicit-unbound-library-sync-preserves-project');
+
     mode = 'migrated';
+    const beforeMigratedDownloads = downloads.length;
     const migrated = await service.prepareLocalSceneResources(baseUrl, workspaceRoot, { environment: { resourceId: '101', displayName: ' CAMPUS.glb ' } });
     assert.equal(migrated.environmentAssets.length, 1,
       `迁移后的权威环境候选必须仅含901：${JSON.stringify(migrated.environmentAssets.map(asset => ({ id: asset.dataPlatformResourceId, revision: asset.dataPlatformFileRevision })))}`);
     assert.equal(migrated.environmentAssets[0].dataPlatformResourceId, '901');
     assert.equal(migrated.environmentAssets[0].dataPlatformFileRevision, '3');
     assert.deepEqual(await readFile(migrated.environmentAssets[0].path), createGlb(3));
-    assert.ok(!downloads.some(item => item.url.includes('/202/')));
+    assert.ok(!downloads.slice(beforeMigratedDownloads).some(item => item.url.includes('/202/')));
     checks.push('different-id-unique-name');
 
     mode = 'ambiguous';
@@ -246,6 +273,56 @@ async function run() {
     assert.deepEqual(rebound.issues.map(issue => [issue.resourceKind, issue.resourceId]), [['model', '999']]);
     assert.equal(JSON.stringify(latestScene), remoteBaseline, '准备资源不得篡改中台场景参数');
     checks.push('latest-rebinds-to-current-project', 'latest-partial-model-failure-preserves-success');
+    const explicitRebound = await service.prepareLocalSceneResources(baseUrl, workspaceRoot,
+      { mode: 'scene-latest', sceneContent: JSON.stringify(latestScene) });
+    assert.equal(explicitRebound.modelReplacements.length, 1, '手动同步与项目打开遵循相同的当前绑定来源');
+    assert.equal(explicitRebound.environmentAssets.length, 1);
+    assert.deepEqual(explicitRebound.issues.map(issue => [issue.resourceKind, issue.resourceId]), [['model', '999']]);
+    checks.push('explicit-source-policy-matches-project-open');
+    const compatibleScene = structuredClone(latestScene);
+    delete compatibleScene.scene.entities.missing;
+    compatibleScene.scene.entities.good.components.modelAsset.dataPlatformModel.sourceKey = sourceKey;
+    compatibleScene.scene.sceneSettings.environment.dataPlatformSourceKey = sourceKey;
+    const beforePinned = downloads.length;
+    const pinned = await service.prepareLocalSceneResources(baseUrl, workspaceRoot,
+      { mode: 'scene-latest', syncLibrary: true, sceneContent: JSON.stringify(compatibleScene) });
+    assert.equal(pinned.modelReplacements.length, 1);
+    assert.equal(pinned.modelReplacements[0].asset.dataPlatformSourceKey, sourceKey);
+    assert.equal(pinned.modelReplacements[0].asset.dataPlatformResourceId, '301');
+    assert.ok(pinned.modelReplacements[0].asset.path.includes('scene-model-versions'));
+    assert.deepEqual(pinned.issues, []);
+    assert.deepEqual(pinned.libraryErrors, []);
+    assert.equal(downloads.length, beforePinned, '共享包固定版本复用不得重复下载');
+    checks.push('explicit-pins-validated-library-without-download');
+    failLibraryQuery = true;
+    const libraryFailure = await service.prepareLocalSceneResources(baseUrl, workspaceRoot,
+      { mode: 'scene-latest', syncLibrary: true, sceneContent: JSON.stringify(compatibleScene) });
+    failLibraryQuery = false;
+    assert.equal(libraryFailure.modelReplacements.length, 1, '库查询失败后仍可定向准备当前场景模型');
+    assert.equal(libraryFailure.libraryErrors.length, 1);
+    assert.deepEqual(libraryFailure.issues, [], '无关库失败不能污染场景发布问题');
+    const explicitBinding = bindings.getCurrentDataPlatformBinding();
+    bindings.clearCurrentDataPlatformBinding();
+    const unboundLegacyScene = structuredClone(compatibleScene);
+    delete unboundLegacyScene.scene.entities.good.components.modelAsset.dataPlatformModel;
+    const legacyUnbound = await service.prepareLocalSceneResources(baseUrl, workspaceRoot,
+      { mode: 'scene-latest', sceneContent: JSON.stringify(unboundLegacyScene) });
+    assert.equal(legacyUnbound.modelReplacements.length, 0);
+    assert.ok(legacyUnbound.issues.some(issue => issue.resourceId === '301' && /来源身份/.test(issue.message)));
+    const identifiedUnbound = await service.prepareLocalSceneResources(baseUrl, workspaceRoot,
+      { mode: 'scene-latest', sceneContent: JSON.stringify(compatibleScene) });
+    assert.equal(identifiedUnbound.modelReplacements.length, 1);
+    checks.push('explicit-unbound-requires-source-identity');
+    const unboundPreparing = service.prepareLocalSceneResources(baseUrl, workspaceRoot,
+      { mode: 'scene-latest', sceneContent: JSON.stringify(compatibleScene) });
+    const unboundRejected = assert.rejects(unboundPreparing, /会话.*变化/);
+    await assets.activateProjectRoot(sharedRoot);
+    await unboundRejected;
+    await assets.activateProjectRoot(projectRoot);
+    bindings.setCurrentDataPlatformBinding(explicitBinding.projectRoot, explicitBinding.metadata);
+    checks.push('explicit-library-errors-isolated', 'explicit-unbound-project-switch-cancels');
+
+
 
     mode = 'parallel';
     const parallelScene = { version: 5, scene: { entities: Object.fromEntries(

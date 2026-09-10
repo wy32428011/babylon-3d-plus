@@ -21,13 +21,14 @@ function isInside(root: string, candidate: string): boolean {
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
-/** 在整批场景合并前验证新版实际文件与已声明节点绑定；不执行或推断脚本内容。 */
+/** 实际模型依赖失败仍拒绝；新版参数与绑定冲突仅返回警告，不阻止模型替换。 */
 export async function validateSceneModelResourceReferences(
   scene: unknown,
   replacements: Replacement[],
   signal: AbortSignal,
-): Promise<void> {
+): Promise<string[]> {
   checkCancelled(signal);
+  const warnings: string[] = [];
   const byUrl = new Map<string, { asset: ProjectModelAssetEntry; targets: ModelTargets }>();
   const verifiedFiles = new Set<string>();
   const models = new Map<string, ModelTargets>();
@@ -45,7 +46,7 @@ export async function validateSceneModelResourceReferences(
           if (typeof uri !== 'string' || /^data:/i.test(uri)) continue;
           let decoded: string;
           try { decoded = decodeURIComponent(uri); } catch { throw new Error(`模型外部资源 URI 不安全：${uri}`); }
-          const file = resolvePackageReference(packageRoot, path.dirname(asset.path), decoded, `${field} 外部资源`);
+          const file = resolvePackageReference(packageRoot, path.dirname(asset.path), decoded, `${field} 外部资源`, true);
           await requirePackageFile(packageRoot, file, `${field} 外部资源 ${uri}`, signal, verifiedFiles);
         }
       }
@@ -62,32 +63,107 @@ export async function validateSceneModelResourceReferences(
     const label = String(reference.asset.assetCode ?? reference.target?.displayName ?? asset.displayName ?? asset.name);
     const oldConfig = object(reference.asset.parameterConfig);
     const newConfig = object(asset.parameterConfig);
-    for (const config of [oldConfig, newConfig]) validateBindings(config, targets, label);
+    const effectiveConfig = newConfig;
+    validateBindings(effectiveConfig, targets, label, warnings);
+    // 专用驱动读取新版脚本声明，旧 dataDrivenConfig 只是保留的 Inspector 摘要，不能拿旧节点名误拦新版脚本。
+    validateDataDrivenBindings(object(asset.dataDrivenConfig), targets, label, warnings);
+    validateBuiltInSlotParameters(object(asset.builtInSlotBindingConfig), effectiveConfig, label, warnings);
     const oldDefinitions = new Map(array(oldConfig?.parameters).map((definition) => {
       const value = object(definition);
       return [value?.key, value] as const;
     }));
     const values = object(reference.asset.parameterValues);
-    // 保留规则与场景合并一致：显式旧值 → 旧定义默认值 → 新增参数默认值。
-    const definitions = [...oldDefinitions.values(), ...array(newConfig?.parameters).map(object)];
+    // 参数定义完全采用新版；仅同 key 的显式实例值优先，新默认值填充其余字段，已删除 key 不再读取。
+    const definitions = array(newConfig?.parameters).map(object);
     for (const definition of definitions) {
-      if (definition?.type !== 'texture' || typeof definition.key !== 'string') continue;
+      if (!definition || typeof definition.key !== 'string') continue;
       const key = definition.key;
       const value = values && Object.hasOwn(values, key) ? values[key]
-        : oldDefinitions.get(key)?.defaultValue ?? definition.defaultValue;
-      if (typeof value !== 'string' || !value.trim()) throw new Error(`模型同步冲突 [${label}] 参数 ${key} 纹理引用不安全。`);
-      // 图片库与便携工程图片由已有图片引用规则校验，不按模型包相对路径处理。
-      if (/^(?:editor-image|editor-asset):\/\//.test(value)) continue;
-      const context = `模型同步冲突 [${label}] 参数 ${key} 纹理 ${value}`;
-      if (!/\.(png|jpe?g|webp)$/i.test(value)) throw new Error(`${context} 引用不安全。`);
-      const packageRoot = path.resolve(asset.packagePath ?? path.dirname(asset.path));
-      const file = resolvePackageReference(packageRoot, path.dirname(asset.path), value, context);
-      await requirePackageFile(packageRoot, file, context, signal, verifiedFiles);
+        : definition.defaultValue;
+      const previousDefinition = oldDefinitions.get(key);
+      const explicitPreviousValue = values && Object.hasOwn(values, key);
+      const changedType = explicitPreviousValue && previousDefinition && previousDefinition.type !== definition.type;
+      if (changedType || !matchesParameterType(definition, value)) {
+        warnings.push(`模型更新提示 [${label}] 参数 ${key} 保留值与新版类型不兼容，参数效果已跳过，模型继续替换。`);
+        continue;
+      }
+      if (typeof value === 'number' && ((typeof definition.min === 'number' && value < definition.min)
+        || (typeof definition.max === 'number' && value > definition.max))) {
+        warnings.push(`模型更新提示 [${label}] 参数 ${key} 保留值超出新版范围，参数效果已跳过，模型继续替换。`);
+      }
+      if (definition.type !== 'texture') continue;
+      try {
+        if (typeof value !== 'string' || !value.trim()) throw new Error(`模型参数 [${label}] ${key} 纹理引用不安全。`);
+        // 图片库与便携工程图片由已有图片引用规则校验，不按模型包相对路径处理。
+        if (/^(?:editor-image|editor-asset):\/\//.test(value)) continue;
+        const context = `模型参数 [${label}] ${key} 纹理 ${value}`;
+        if (!/\.(png|jpe?g|webp)$/i.test(value)) throw new Error(`${context} 引用不安全。`);
+        const packageRoot = path.resolve(asset.packagePath ?? path.dirname(asset.path));
+        const file = resolvePackageReference(packageRoot, path.dirname(asset.path), value, context);
+        await requirePackageFile(packageRoot, file, context, signal, verifiedFiles);
+      } catch (error) {
+        checkCancelled(signal);
+        warnings.push(`${error instanceof Error ? error.message : String(error)} 参数效果已跳过，模型继续替换。`);
+      }
+    }
+  }
+  return [...new Set(warnings)];
+}
+
+function matchesParameterType(definition: JsonObject, value: unknown): boolean {
+  switch (definition.type) {
+    case 'number': return typeof value === 'number' && Number.isFinite(value);
+    case 'boolean': return typeof value === 'boolean';
+    case 'texture': case 'string': return typeof value === 'string';
+    case 'color': return typeof value === 'string' && /^#[a-f\d]{6}$/i.test(value);
+    case 'vector3': return Boolean(object(value) && ['x', 'y', 'z'].every(axis => typeof object(value)?.[axis] === 'number' && Number.isFinite(object(value)?.[axis])));
+    case 'enum': return typeof value === 'string' && array(definition.options).some(option => option === value || object(option)?.value === value);
+    default: return true;
+  }
+}
+
+/** 只校验专用驱动实际支持的明确节点清单，不猜测正则、不解析或执行动画脚本。 */
+function validateDataDrivenBindings(config: JsonObject | undefined, targets: ModelTargets, label: string, warnings: string[]): void {
+  if (!config) return;
+  const deviceType = String(object(config.device)?.devType ?? '').trim().toLowerCase();
+  if (!['stacker', 'conveyor', 'rgv'].includes(deviceType)) return;
+  const declarations: Array<[string, unknown]> = [];
+  if (deviceType === 'stacker' || deviceType === 'rgv') declarations.push(['fixedNodes', config.fixedNodes]);
+  const motion = object(config.specializedMotion) ?? object(config.motion);
+  if (deviceType === 'stacker') {
+    for (const key of ['travel', 'lift']) declarations.push([`motion.${key}.nodes`, object(motion?.[key])?.nodes]);
+    const fork = object(motion?.fork);
+    for (const key of ['frontStageOneNodes', 'frontStageTwoNodes', 'backStageOneNodes', 'backStageTwoNodes']) {
+      declarations.push([`motion.fork.${key}`, fork?.[key]]);
+    }
+  }
+  const cargo = object(config.cargo);
+  if (deviceType === 'rgv') for (const key of ['frontNodes', 'backNodes']) declarations.push([`cargo.${key}`, cargo?.[key]]);
+  if (deviceType === 'conveyor') declarations.push(['cargo.travel.nodes', object(cargo?.travel)?.nodes]);
+  for (const [field, values] of declarations) for (const value of array(values)) {
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const name = value.trim();
+    if (!targets.node.has(name) && !targets.mesh.has(name)) {
+      warnings.push(`模型更新提示 [${label}] dataDriven.${field} 节点 "${name}" 在新版模型中不存在，相关动作配置需检查，模型继续替换。`);
     }
   }
 }
 
-function validateBindings(config: JsonObject | undefined, targets: ModelTargets, label: string): void {
+/** 内置货格绑定引用参数 key，而非 GLB 节点；新版无效映射只提示，不阻止应用新模型。 */
+function validateBuiltInSlotParameters(config: JsonObject | undefined, parameters: JsonObject | undefined, label: string, warnings: string[]): void {
+  if (!config) return;
+  const keys = new Set(array(parameters?.parameters).map(definition => object(definition)?.key));
+  const mapping = object(config.dimensionMapping);
+  const references = [config.enabledParam, ...['columns', 'layers', 'length', 'height', 'width'].map(key => mapping?.[key])];
+  for (const value of references) {
+    if (typeof value !== 'string' || !value.trim()) continue;
+    if (!keys.has(value.trim())) {
+      warnings.push(`模型更新提示 [${label}] builtInSlotBinding 参数 "${value.trim()}" 在新版模型中不存在，对应映射已跳过，模型继续替换。`);
+    }
+  }
+}
+
+function validateBindings(config: JsonObject | undefined, targets: ModelTargets, label: string, warnings: string[]): void {
   const bindings = [...array(config?.bindings), ...array(config?.rules).flatMap((rule) => array(object(rule)?.set))];
   for (const binding of bindings) {
     const target = object(object(binding)?.target);
@@ -95,7 +171,7 @@ function validateBindings(config: JsonObject | undefined, targets: ModelTargets,
     const kind = target.kind;
     if (kind !== 'node' && kind !== 'mesh' && kind !== 'material') continue;
     if (!targets[kind].has(target.name)) {
-      throw new Error(`模型同步冲突 [${label}] ${kind} 绑定目标 "${target.name}" 在新版模型中不存在，已保留原场景配置。`);
+      warnings.push(`模型更新提示 [${label}] ${kind} 绑定目标 "${target.name}" 在新版模型中不存在，对应绑定效果已跳过，模型继续替换。`);
     }
   }
 }
@@ -133,8 +209,9 @@ function collectModelTargets(document: JsonObject): ModelTargets {
   return targets;
 }
 
-function resolvePackageReference(root: string, base: string, value: string, label: string): string {
-  if (!value || value.includes('..') || /[\\\x00-\x1f?#]/.test(value) || /^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(value)) {
+function resolvePackageReference(root: string, base: string, value: string, label: string, allowPackageParent = false): string {
+  // glTF 子模型可引用包内兄弟目录，最终范围仍由 resolve + realpath 双重约束；参数纹理保持原规则。
+  if (!value || (!allowPackageParent && value.includes('..')) || /[\\\x00-\x1f?#]/.test(value) || /^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(value)) {
     throw new Error(`${label} 引用不安全：${value}`);
   }
   const candidate = path.resolve(base, value);

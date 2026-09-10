@@ -30,6 +30,11 @@ function fixture() {
     events.push('commit'); state.scene = after; state.sceneStartupResourceSessionId = null; return true;
   };
   state.recordSceneResourceIssues = (_session: string, issues: string[]) => { state.sceneResourceIssues = issues; };
+  state.commitLatestSceneResources = (session: string, before: unknown, after: unknown, issues: string[]) => {
+    const committed = state.commitRecoveredLocalSceneResources(session, before, after);
+    if (committed) state.sceneResourceIssues = issues;
+    return committed;
+  };
   state.setLocalSceneEnvironmentRecoveryChoice = (_session: string, choice: unknown) => {
     state.localSceneEnvironmentRecoveryChoice = choice;
     state.localSceneEnvironmentRecoveryAcceptance = null;
@@ -41,7 +46,13 @@ function fixture() {
     localResourcePreparingRef: { current: false }, initialProjectAssetsLoadPromiseRef: { current: Promise.resolve() },
     setIsPreparingSceneResources() {}, useEditorStore: { getState: () => state },
     serializeScene: JSON.stringify, deserializeScene: JSON.parse,
-    window: { editorApi: { prepareLocalSceneResources: (request: unknown) => { requested = request; events.push('query'); return pending; } } },
+    window: { editorApi: { prepareLocalSceneResources: (request: any) => {
+      requested = request; events.push('query');
+      return request.mode === 'local-recovery' ? Promise.resolve({ recoveredSceneContent: request.sceneContent, issues: [] }) : pending;
+    } } },
+    applyAvailableSceneModelUpdates: (scene: any, replacements: any[]) => ({
+      scene: { ...scene, modelVersion: replacements[0]?.asset.assetRevision }, issues: [], updatedCount: replacements.length,
+    }),
     getRequiredEnvironmentResourceIds: () => [],
     reportSceneModelSyncProgress: (_session: string, progress: any) => events.push(progress.phase),
     beginSceneModelAssetRefresh: () => events.push('refresh'), settleSceneModelAssetRefresh: () => events.push('settled'),
@@ -55,7 +66,7 @@ function fixture() {
 
 test('本地恢复请求携带完整场景和源文件位置，未配置中台也能原子提交恢复结果', async () => {
   const f = fixture(); await tick();
-  assert.equal(f.request().mode, 'local-recovery');
+  assert.equal(f.request().mode, 'local-latest');
   assert.equal(f.request().sceneFilePath, f.state.sceneSourceFilePath);
   assert.deepEqual(JSON.parse(f.request().sceneContent), f.original);
   const after = { ...f.original, recovered: true };
@@ -86,12 +97,27 @@ test('环境缺失返回的候选单独展示，未确认的第一次请求不�
   const f = fixture(); await tick();
   assert.equal(f.request().acceptEnvironmentRevision, undefined);
   const choice = { resourceId: 'env', availableRevision: '2', previousRevision: '1', sha256: 'a'.repeat(64) };
-  f.resolve({ configured: true, environmentRecoveryChoice: choice,
+  f.resolve({ configured: false, recoveredSceneContent: JSON.stringify(f.original), environmentRecoveryChoice: choice,
     issues: [{ resourceKind: 'environment', message: '原版本不存在' }] });
   await tick();
   assert.equal(f.state.localSceneEnvironmentRecoveryChoice, choice);
   assert.equal(f.state.localSceneEnvironmentRecoveryAcceptance, null);
   assert.equal(f.state.scene, f.original);
+});
+
+test('本地打开先替换中台新版模型，再恢复其他依赖并一次提交，保留实例配置', async () => {
+  const f = fixture(); await tick();
+  assert.equal(f.request().mode, 'local-latest');
+  f.resolve({ configured: true, sourceKey: 'current', modelAssets: [], environmentAssets: [],
+    modelReplacements: [{ sourceUrls: ['old'], asset: { assetRevision: 'new' } }] });
+  await tick();
+  assert.equal(f.request().mode, 'local-recovery');
+  assert.equal(JSON.parse(f.request().sceneContent).modelVersion, 'new');
+  assert.equal(f.state.scene.modelVersion, 'new');
+  assert.equal(f.state.scene.entities.m.parameter, 123);
+  assert.equal(f.events.filter(item => item === 'commit').length, 1);
+  assert.equal(f.state.sceneResourceIssues.length, 0);
+  f.cleanup();
 });
 
 test('请求只携带用户已确认的精确环境版本授权', async () => {

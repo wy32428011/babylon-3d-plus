@@ -1,14 +1,28 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
-import { createServer } from 'vite';
+import { build } from 'vite';
+import { mkdtemp, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { NullEngine, Scene, TransformNode } from '@babylonjs/core';
 
-const server = await createServer({ configFile: false, appType: 'custom', server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true }, ssr: { noExternal: ['@linkiez/dxf-renew'] } });
-after(() => server.close());
-const { SceneRuntime } = await server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts');
-const { ExternalModelScriptRuntime } = await server.ssrLoadModule('/src/runtime/babylon/ExternalModelScriptRuntime.ts');
-const telemetry = await server.ssrLoadModule('/src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts');
+// 预编译大模块图，避免按需SSR传输超时掩盖真实运行时断言。
+const output = await mkdtemp(path.resolve('node_modules/.scene-readiness-'));
+const cleanup = async () => {
+  assert.equal(path.dirname(output), path.resolve('node_modules'));
+  assert.ok(path.basename(output).startsWith('.scene-readiness-'));
+  await rm(output, { recursive: true, force: true });
+};
+after(cleanup);
+await build({ configFile: false, logLevel: 'error', ssr: { noExternal: ['@linkiez/dxf-renew', /^lodash\//] },
+  build: { ssr: true, outDir: output, rollupOptions: { input: {
+    runtime: 'src/runtime/babylon/SceneRuntime.ts',
+    external: 'src/runtime/babylon/ExternalModelScriptRuntime.ts',
+    telemetry: 'src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts',
+  }, output: { entryFileNames: '[name].mjs' } } } }).catch(async error => { await cleanup(); throw error; });
+const [{ SceneRuntime }, { ExternalModelScriptRuntime }, telemetry] = await Promise.all(
+  ['runtime', 'external', 'telemetry'].map(name => import(pathToFileURL(path.join(output, name + '.mjs')).href)),
+).catch(async error => { await cleanup(); throw error; });
 const engine = new NullEngine();
 const scene = new Scene(engine);
 after(() => { scene.dispose(); engine.dispose(); });
@@ -203,4 +217,32 @@ test('real fetched scripts expose load, compile, onStart and onUpdate errors des
       model.root.dispose();
     }
   } finally { globalThis.fetch = originalFetch; console.warn = originalWarn; }
+});
+
+
+test('Viewer资源结算全部完成也必须报告模型、参数变体、生成器和环境错误', () => {
+  const runtime = runtimeFixture();
+  runtime.activeModelLoadProgress = new Map();
+  runtime.computeModelLoadProgress = () => ({ loading: false, percent: 1, completedCount: 164, totalCount: 164 });
+  runtime.skyboxRuntime = { getReadiness: () => ({ phase: 'ready' }), getLoadDiagnostics: () => ({ stage: null, receivedBytes: 1, totalBytes: 1 }) };
+  runtime.environmentRuntime = { getSnapshot: () => ({ phase: 'ready' }) };
+  runtime.shadowDocument = { entities: { device: { name: '设备一' } } };
+  assert.equal(runtime.getInitialLoadSnapshot().error, null);
+  runtime.modelReadinessErrors.set('device', { entityIds: ['device'], error: 'HTTP 404' });
+  assert.match(runtime.getInitialLoadSnapshot().error, /设备一.*HTTP 404/);
+  runtime.modelReadinessErrors.clear();
+  runtime.models.set('device', { externalScriptRuntime: { getInitializationError: () => 'script failed' } });
+  assert.match(runtime.getInitialLoadSnapshot().error, /script failed/);
+  runtime.models.clear();
+  runtime.modelArrayParameterVariants.set('v', { sourceEntityId: 'device', model: { readinessError: 'variant failed' } });
+  assert.match(runtime.getInitialLoadSnapshot().error, /variant failed/);
+  runtime.modelArrayParameterVariants.clear();
+  runtime.generatedOutputOwners.set('g', { entityId: 'device', readinessError: 'generator failed' });
+  assert.match(runtime.getInitialLoadSnapshot().error, /generator failed/);
+  runtime.generatedOutputOwners.clear();
+  runtime.environmentRuntime.getSnapshot = () => ({ phase: 'error', message: 'environment failed' });
+  assert.match(runtime.getInitialLoadSnapshot().error, /environment failed/);
+  runtime.environmentRuntime.getSnapshot = () => ({ phase: 'ready' });
+  runtime.skyboxRuntime.getReadiness = () => ({ phase: 'error', message: 'decode failed' });
+  assert.match(runtime.getInitialLoadSnapshot().error, /decode failed/);
 });

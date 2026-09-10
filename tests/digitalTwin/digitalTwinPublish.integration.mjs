@@ -291,6 +291,10 @@ class DigitalTwinMockServer {
     this.redirectNextStatus = false;
     this.missingResourceIds = new Set();
     this.resourceDetailIdOverride = null;
+    this.resourceSnapshotsSupported = false;
+    this.resourceSnapshots = new Map();
+    this.snapshotResourceFixtures = [];
+    this.rawRemoteModelData = null;
   }
 
   allocateId() {
@@ -366,6 +370,28 @@ class DigitalTwinMockServer {
       body,
       headers: { ...request.headers },
     });
+
+    const snapshotAction = /^\/platform\/api\/v1\/digital-twin\/resource-snapshots\/(capture|validate)$/.exec(url.pathname)?.[1];
+    if (request.method === 'POST' && snapshotAction && this.resourceSnapshotsSupported) {
+      if (snapshotAction === 'capture') {
+        const snapshot = { projectId: body.projectId, resourceSnapshotToken: sha256(this.allocateId()),
+          resourceRevision: this.projectDetailOverrides.currentResourceRevision ?? RESOURCE_REVISION, resources: structuredClone(this.snapshotResourceFixtures) };
+        assert.deepEqual([body.modelIds, body.comboModelIds, body.envModelIds], [this.snapshotResourceFixtures.filter(item => item.kind === 'model').map(item => item.resourceId), [], []]);
+        this.resourceSnapshots.set(snapshot.resourceSnapshotToken, snapshot);
+        this.sendSuccess(response, snapshot);
+      } else {
+        const snapshot = this.resourceSnapshots.get(body.resourceSnapshotToken);
+        assert.ok(snapshot, 'validate只能验证capture得到的token');
+        assert.equal(snapshot.projectId, body.projectId);
+        this.sendSuccess(response, snapshot);
+      }
+      return;
+    }
+    if (request.method === 'GET' && url.pathname.endsWith('/fixture-resource.glb') && this.rawRemoteModelData) {
+      response.writeHead(200, { 'content-type': 'model/gltf-binary', 'content-length': this.rawRemoteModelData.length });
+      response.end(this.rawRemoteModelData);
+      return;
+    }
 
     const resourceDetail = /^\/platform\/api\/v1\/(models|combo-models|env-models)\/detail$/.exec(url.pathname);
     if (request.method === 'POST' && resourceDetail) {
@@ -1730,9 +1756,168 @@ async function run() {
       { projectId: PROJECT_ID }), new AbortController().signal, () => undefined);
     assert.equal(reopenedSuccess.status, 'completed', '磁盘已绑定的同项目可以重新打开并完整发布');
 
+    // 通过真实 Electron net.fetch、主进程准备服务、双包生成和分片上传覆盖新快照路径。
+    await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    mock.projectDetailOverrides = {};
+    const preparedOldRoot = path.join(projectRoot, 'Assets', 'Models', 'SnapshotPumpOld');
+    const preparedNewRoot = path.join(projectRoot, 'Assets', 'Models', 'SnapshotPumpNew');
+    for (const root of [preparedOldRoot, preparedNewRoot]) {
+      await mkdir(root, { recursive: true });
+      await writeFile(path.join(root, 'pump.glb'), modelBytes);
+      await writeFile(path.join(root, 'meta.json'), '{"displayName":"Pump","lengthUnit":"meter"}');
+      authorizeAssetFile(path.join(root, 'pump.glb'));
+    }
+    const createPreparedFixture = (name, code) => ({ version: 5, scene: {
+      id: code, name, entityIds: ['pump'], selectedEntityId: null,
+      entities: { pump: { id: 'pump', name: '保留实例', parentId: null, childrenIds: [], components: {
+        transform: { position: { x: 5, y: 0, z: 6 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+        modelAsset: { sourcePath: path.join(preparedOldRoot, 'pump.glb'),
+          sourceUrl: `editor-asset://local/${encodeURIComponent(path.join(preparedOldRoot, 'pump.glb'))}`,
+          lengthUnit: 'meter', unitScaleToMeters: 1, assetCode: code,
+          parameterConfig: { schema: 'babylon-editor.model-parameters', version: 1,
+            parameters: [{ key: 'length', label: '长度', type: 'number', defaultValue: 1 }], bindings: [] },
+          parameterValues: { length: 9 } },
+        telemetryBinding: { field: 'speed' },
+      } } }, sceneSettings: { environment: null, skybox: null },
+    } });
+    const preparedEntryContent = JSON.stringify(createPreparedFixture('准备入口', 'ENTRY-9'));
+    const secondaryPath = path.join(projectRoot, 'Scenes', 'prepared-secondary.scene.json');
+    const secondaryOriginal = JSON.stringify(createPreparedFixture('准备第二场景', 'SECOND-9'));
+    await writeFile(scenePath, preparedEntryContent);
+    await writeFile(secondaryPath, secondaryOriginal);
+    const updatePreparedScenes = snapshot => snapshot.scenes.map(item => {
+      const document = JSON.parse(item.sceneContent);
+      document.scene.entities.pump.components.modelAsset.sourcePath = path.join(preparedNewRoot, 'pump.glb');
+      document.scene.entities.pump.components.modelAsset.sourceUrl = `editor-asset://local/${encodeURIComponent(path.join(preparedNewRoot, 'pump.glb'))}`;
+      document.scene.preparedProof = snapshot.preparationId;
+      return { sceneId: item.sceneId, sceneContent: JSON.stringify(document) };
+    });
+    const prepareNewAttempt = async (requestId, targetToken) => {
+      const snapshot = await publishModule.prepareDigitalTwinPublishSceneSnapshots({ requestId, targetToken,
+        projectId: PROJECT_ID, sceneContent: preparedEntryContent }, new AbortController().signal);
+      assert.equal(snapshot.scenes.length, 2, '必须准备入口和额外场景');
+      const preparedScenes = updatePreparedScenes(snapshot);
+      const entryContent = preparedScenes.find(item => item.sceneId === snapshot.scenes.find(item => item.isEntry).sceneId).sceneContent;
+      return { snapshot, request: createPublishRequest(requestId, entryContent,
+        { targetToken, preparationId: snapshot.preparationId, preparedScenes }) };
+    };
+    mock.resetRequests();
+    const preparationContext = await publishModule.getDigitalTwinPublishContext();
+    const conflictedAttempt = await prepareNewAttempt('prepared-snapshot-attempt-1', preparationContext.targetToken);
+    assert.ok(mock.requests.some(item => item.path.endsWith('/resource-snapshots/capture')), '旧后端也先探测snapshot能力');
+    mock.projectDetailOverrides.currentResourceRevision = NEW_RESOURCE_REVISION;
+    const preparedConflict = await publishModule.publishDigitalTwin(conflictedAttempt.request, new AbortController().signal, () => {});
+    assert.equal(preparedConflict.errorCode, 'DIGITAL_TWIN_RESOURCE_REVISION_CONFLICT');
+    assert.equal(mock.requests.some(item => item.path.endsWith('/publish-tasks/prepare')), false, 'R0/R1冲突必须在上传前返回');
+    assert.equal(await readFile(secondaryPath, 'utf8'), secondaryOriginal);
+
+    const successfulAttempt = await prepareNewAttempt('prepared-snapshot-attempt-2', preparationContext.targetToken);
+    assert.notEqual(successfulAttempt.request.requestId, conflictedAttempt.request.requestId);
+    assert.notEqual(successfulAttempt.snapshot.preparationId, conflictedAttempt.snapshot.preparationId);
+    const preparedSuccess = await publishModule.publishDigitalTwin(successfulAttempt.request, new AbortController().signal, () => {});
+    assert.equal(preparedSuccess.status, 'completed');
+    const preparedPayload = mock.requests.find(item => item.path.endsWith('/publish-tasks/prepare')).body;
+    assert.equal(preparedPayload.resourceRevision, NEW_RESOURCE_REVISION, '验证R1后推进资源基线');
+    assert.equal(preparedPayload.baseVersionId, BASE_VERSION_ID, '不改变工程基线');
+    assert.equal(preparedPayload.resourceSnapshotToken, undefined, '旧服务器走revision保护而非伪造token');
+    assert.equal(await readFile(secondaryPath, 'utf8'), secondaryOriginal, '额外场景不写回磁盘');
+    const preparedSourceZip = await readZipEntries(mock.getUploadedPackage(successfulAttempt.request.requestId, 'SOURCE'));
+    const preparedDistZip = await readZipEntries(mock.getUploadedPackage(successfulAttempt.request.requestId, 'DIST'));
+    const preparedSourceEntry = JSON.parse(preparedSourceZip.get('Scenes/main.scene.json').toString('utf8'));
+    const preparedSourceSecond = JSON.parse(preparedSourceZip.get('Scenes/prepared-secondary.scene.json').toString('utf8'));
+    const preparedDistEntry = JSON.parse(preparedDistZip.get('project/scene.json').toString('utf8'));
+    assert.equal(preparedSourceSecond.scene.preparedProof, successfulAttempt.snapshot.preparationId);
+    assert.equal(preparedSourceEntry.scene.preparedProof, preparedDistEntry.scene.preparedProof, 'SOURCE/DIST使用相同准备快照');
+    for (const document of [preparedSourceEntry, preparedSourceSecond, preparedDistEntry]) {
+      assert.equal(document.scene.entities.pump.components.modelAsset.parameterValues.length, 9);
+      assert.equal(document.scene.entities.pump.components.telemetryBinding.field, 'speed');
+    }
+    assert.ok([...preparedSourceZip.keys()].some(file => file.includes('SnapshotPumpNew')));
+    assert.equal([...preparedSourceZip.keys()].some(file => file.includes('SnapshotPumpOld')), false);
+
+    await resetBinding(); mock.setRemoteStatus(createRemoteStatus()); mock.projectDetailOverrides = {};
+    mock.resourceSnapshotsSupported = true; mock.resetRequests();
+    const tokenContext = await publishModule.getDigitalTwinPublishContext();
+    const tokenAttempt = await prepareNewAttempt('prepared-snapshot-token', tokenContext.targetToken);
+    const tokenResult = await publishModule.publishDigitalTwin(tokenAttempt.request, new AbortController().signal, () => {});
+    assert.equal(tokenResult.status, 'completed');
+    const validateSnapshotCall = mock.requests.find(item => item.path.endsWith('/resource-snapshots/validate'));
+    const tokenPrepareCall = mock.requests.find(item => item.path.endsWith('/publish-tasks/prepare'));
+    assert.match(validateSnapshotCall.body.resourceSnapshotToken, SHA256_PATTERN);
+    assert.equal(tokenPrepareCall.body.resourceSnapshotToken, validateSnapshotCall.body.resourceSnapshotToken);
+    assert.equal(await readFile(secondaryPath, 'utf8'), secondaryOriginal);
+
+    // 服务端元数据和URL均保持不变：新token不能替旧下载字节提供证明。
+    await resetBinding(); mock.setRemoteStatus(createRemoteStatus()); mock.projectDetailOverrides = {};
+    const syncModule = await import('../../dist-electron/ipc/dataPlatformModelIncrementalSync.js');
+    mock.rawRemoteModelData = modelBytes;
+    const managedResources = [{ kind: 'model', resourceId: '1001' }];
+    const [oldManaged] = await syncModule.syncSceneDataPlatformModelAssets({ baseUrl: mock.baseUrl, sharedResourcesRoot, resources: managedResources });
+    authorizeAssetFile(oldManaged.path);
+    const managedScene = createPreparedFixture('中台摘要证明', 'MANAGED-1');
+    Object.assign(managedScene.scene.entities.pump.components.modelAsset, { sourcePath: oldManaged.path,
+      sourceUrl: oldManaged.sourceUrl, assetRevision: oldManaged.assetRevision });
+    delete managedScene.scene.entities.pump.components.modelAsset.parameterConfig;
+    delete managedScene.scene.entities.pump.components.modelAsset.parameterValues;
+    const managedContent = JSON.stringify(managedScene);
+    await writeFile(scenePath, managedContent);
+    const newRemoteBytes = Buffer.from(modelBytes);
+    newRemoteBytes.writeFloatLE(2, newRemoteBytes.length - 24);
+    mock.snapshotResourceFixtures = [{ kind: 'model', resourceId: '1001', revision: 'trusted-new-byte-revision',
+      files: [{ role: 'model', fileName: 'model.glb', fileUrl: '/fixture-resource.glb', fileId: '9001', sha256: sha256(newRemoteBytes), size: String(newRemoteBytes.length) }] }];
+    mock.resetRequests();
+    const managedContext = await publishModule.getDigitalTwinPublishContext();
+    await assert.rejects(publishModule.prepareDigitalTwinPublishSceneSnapshots({ requestId: 'snapshot-stale-http-bytes',
+      targetToken: managedContext.targetToken, sceneContent: managedContent }, new AbortController().signal), /快照.*摘要/);
+    assert.equal(mock.requests.some(item => item.path.endsWith('/publish-tasks/prepare')), false);
+    assert.deepEqual(await readFile(oldManaged.path), modelBytes, '摘要失败保留旧固定版本');
+    mock.rawRemoteModelData = newRemoteBytes;
+    const managedSnapshot = await publishModule.prepareDigitalTwinPublishSceneSnapshots({ requestId: 'snapshot-fresh-http-bytes',
+      targetToken: managedContext.targetToken, sceneContent: managedContent }, new AbortController().signal);
+    const [newManaged] = await syncModule.syncSceneDataPlatformModelAssets({ baseUrl: mock.baseUrl, sharedResourcesRoot, resources: managedResources });
+    authorizeAssetFile(newManaged.path);
+    assert.notEqual(newManaged.assetRevision, oldManaged.assetRevision);
+    const managedPrepared = managedSnapshot.scenes.map(item => {
+      const document = JSON.parse(item.sceneContent);
+      if (item.isEntry) Object.assign(document.scene.entities.pump.components.modelAsset,
+        { sourcePath: newManaged.path, sourceUrl: newManaged.sourceUrl, assetRevision: newManaged.assetRevision });
+      return { sceneId: item.sceneId, sceneContent: JSON.stringify(document) };
+    });
+    const managedRequestId = 'snapshot-proven-managed-publish';
+    const managedResult = await publishModule.publishDigitalTwin(createPublishRequest(managedRequestId,
+      managedPrepared.find(item => item.sceneId === managedSnapshot.scenes.find(item => item.isEntry).sceneId).sceneContent,
+      { targetToken: managedContext.targetToken, preparationId: managedSnapshot.preparationId, preparedScenes: managedPrepared }), new AbortController().signal, () => {});
+    assert.equal(managedResult.status, 'completed');
+    const managedZip = await readZipEntries(mock.getUploadedPackage(managedRequestId, 'SOURCE'));
+    const managedGlb = [...managedZip.entries()].find(([name]) => name.includes('Model-1001') && name.endsWith('.glb'));
+    assert.ok(managedGlb);
+    assert.equal(sha256(managedGlb[1]), sha256(newRemoteBytes), '实际发布字节必须等于服务端快照摘要');
+    assert.equal(await readFile(secondaryPath, 'utf8'), secondaryOriginal);
+    await resetBinding(); mock.setRemoteStatus(createRemoteStatus());
+    const casContext = await publishModule.getDigitalTwinPublishContext();
+    const casContent = await readFile(scenePath, 'utf8');
+    const casSnapshot = await publishModule.prepareDigitalTwinPublishSceneSnapshots({ requestId: 'snapshot-late-save-prepare',
+      targetToken: casContext.targetToken, sceneContent: casContent }, new AbortController().signal);
+    const casScenes = casSnapshot.scenes.map(item => ({ sceneId: item.sceneId, sceneContent: item.sceneContent }));
+    const concurrentSave = JSON.parse(casContent); concurrentSave.scene.name = '下载完成后用户新保存的内容';
+    const concurrentContent = JSON.stringify(concurrentSave);
+    mock.resetRequests();
+    await assert.rejects(publishModule.publishDigitalTwin(createPublishRequest('snapshot-late-save-protected', casContent,
+      { targetToken: casContext.targetToken, preparationId: casSnapshot.preparationId, preparedScenes: casScenes }), new AbortController().signal,
+      progress => { if (progress.phase === 'saving' && progress.percent === 2) writeFileSync(scenePath, concurrentContent); }), /发生变化/);
+    assert.equal(await readFile(scenePath, 'utf8'), concurrentContent, '长时间资源校验后的并发保存不能被发布旧快照覆盖');
+    assert.equal(mock.requests.some(item => item.path.endsWith('/publish-tasks/prepare')), false);
     console.log(JSON.stringify({
       status: 'PASS',
       verified: [
+        'prepared-source-multiple-scenes-and-original-files-preserved',
+        'prepared-source-dist-entry-snapshot-consistent',
+        'snapshot-404-fallback-revision-conflict-and-new-attempt',
+        'snapshot-capture-validate-token-forwarded-to-prepare',
+        'snapshot-rejects-stale-http-bytes-with-unchanged-url-and-metadata',
+        'snapshot-proves-uploaded-managed-model-payload-sha256',
+        'snapshot-late-scene-save-cas-preserves-user-edit',
         'missing-target-resource-blocks-scene-save-runtime-config-package-and-upload',
         'mismatched-target-resource-id-rejected-before-save',
         'publish-target-token-same-target-confirmation-retry',

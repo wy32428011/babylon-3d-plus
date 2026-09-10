@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
-const [{ syncSceneDataPlatformModelAssets, createDataPlatformModelSourceKey }] = await importIsolatedTypeScriptModules<[
+const [{ syncSceneDataPlatformModelAssets, recoverDataPlatformModelAssets, createDataPlatformModelSourceKey }] = await importIsolatedTypeScriptModules<[
   typeof import('../../electron/ipc/dataPlatformModelIncrementalSync'),
 ]>(['electron/ipc/dataPlatformModelIncrementalSync.ts']);
 
@@ -78,6 +79,29 @@ test('场景模型同步固定模型与脚本版本，重复打开零下载，�
   assert.notEqual(updated.assetRevision, first.assetRevision);
   assert.deepEqual(await fs.readFile(first.path), oldBytes);
   await assert.rejects(fs.access(path.join(context.root, '.babylon-editor/asset-index.json')));
+}));
+
+test('服务端快照摘要强制校验同URL原始文件，拒绝旧字节并在新字节到达后统一后续缓存', async () => fixture(async context => {
+  const options = { baseUrl, sharedResourcesRoot: context.root, resources, dependencies: context.dependencies };
+  const [old] = await syncSceneDataPlatformModelAssets(options);
+  const digest = value => createHash('sha256').update(value).digest('hex');
+  const currentModel = JSON.stringify({ asset: { version: '2.0' }, meshes: [{ primitives: [{}] }], extras: { revision: '2' } });
+  const expectedFiles = [
+    { role: 'model', fileUrl: '/model.gltf', bytes: currentModel },
+    { role: 'metadata', fileUrl: '/meta.json', bytes: JSON.stringify({ lengthUnit: 'm' }) },
+    { role: 'script', fileUrl: '/behavior.ts', bytes: 'export default {};' },
+  ].map(file => ({ kind: 'model' as const, resourceId: resources[0].resourceId, role: file.role,
+    fileUrl: file.fileUrl, sha256: digest(file.bytes), size: String(Buffer.byteLength(file.bytes)) }));
+  await assert.rejects(syncSceneDataPlatformModelAssets({ ...options, expectedFiles }), /快照.*摘要|快照.*大小/);
+  // 详情revision和URL完全没变，但远端实际字节从旧版切到了新版。
+  context.version = '2'; context.record.revision = '1';
+  const [updated] = await syncSceneDataPlatformModelAssets({ ...options, expectedFiles });
+  assert.notEqual(updated.assetRevision, old.assetRevision);
+  assert.equal(await fs.readFile(updated.path, 'utf8'), currentModel);
+  const downloadCount = context.downloads.length;
+  const [ordinary] = await syncSceneDataPlatformModelAssets(options);
+  assert.equal(ordinary.assetRevision, updated.assetRevision, '后续renderer普通同步不能再次使用同描述的旧共享包');
+  assert.equal(context.downloads.length, downloadCount);
 }));
 
 test('场景模型同步前后修订变化时拒绝提交且保留旧固定版本', async () => fixture(async (context) => {
@@ -195,5 +219,39 @@ test('固定缩略图缺失或被修改时不返回不完整的资产描述', as
   await fs.rm(asset.thumbnailPath!);
   await assert.rejects(syncSceneDataPlatformModelAssets(options), /文件不完整/);
   await fs.writeFile(asset.thumbnailPath!, 'tampered');
+  await assert.rejects(syncSceneDataPlatformModelAssets(options), /内容与版本不一致/);
+}));
+
+
+test('共享库同步后定向更新复用同修订包，远端模型和元数据变化仍重新下载', async () => fixture(async context => {
+  const options = { baseUrl, sharedResourcesRoot: context.root, resources, dependencies: context.dependencies };
+  await recoverDataPlatformModelAssets(options);
+  const downloaded = context.downloads.length;
+  const [first] = await syncSceneDataPlatformModelAssets(options);
+  assert.equal(context.downloads.length, downloaded, '共享包已校验同版时不得再次下载');
+  context.version = '2';
+  const [second] = await syncSceneDataPlatformModelAssets(options);
+  assert.ok(context.downloads.length > downloaded, '远端版本变化必须下载');
+  assert.notEqual(first.assetRevision, second.assetRevision);
+  context.record.metaFileUrl = '/changed-meta.json';
+  const count = context.downloads.length;
+  await syncSceneDataPlatformModelAssets(options);
+  assert.ok(context.downloads.length > count, '元数据描述变化不能复用旧共享包');
+}));
+
+
+test('共享缓存复用期间远端描述变化拒绝返回旧版，损坏共享包不能绕过修订校验', async () => fixture(async context => {
+  const options = { baseUrl, sharedResourcesRoot: context.root, resources, dependencies: context.dependencies };
+  const [cached] = await recoverDataPlatformModelAssets(options);
+  const requestJson = context.dependencies.requestJson;
+  let calls = 0;
+  context.dependencies.requestJson = async args => {
+    if (++calls === 2) context.record.metaFileUrl = '/changed.json';
+    return requestJson(args);
+  };
+  await assert.rejects(syncSceneDataPlatformModelAssets(options), /同步期间.*变化/);
+  context.dependencies.requestJson = requestJson;
+  delete context.record.metaFileUrl;
+  await fs.writeFile(cached.path, 'tampered');
   await assert.rejects(syncSceneDataPlatformModelAssets(options), /内容与版本不一致/);
 }));

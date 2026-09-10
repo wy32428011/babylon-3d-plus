@@ -52,7 +52,10 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
   }, [state.completed, state.sceneSessionId, state.assetRefreshStatus, state.editingAllowed, remoteScene, transaction]);
 
   const environmentError = environment.sceneSessionId === state.sceneSessionId ? environment.error : null;
-  if (remoteScene && !transaction && isScenePreparationSettled(state)) {
+  // 主动升级与打开模式无关；本地/快照场景局部失败也保留成功组并展示可重试的问题。
+  const explicitModelSync = state.modelSyncRunId?.startsWith('explicit-scene-') === true;
+  const sceneModelUpdate = remoteScene || explicitModelSync || state.modelSyncRunId?.startsWith('local-latest-') === true;
+  if (sceneModelUpdate && !transaction && isScenePreparationSettled(state)) {
     const detail = [...new Set([...issues, ...(environmentError ? [environmentError] : [])])].join('\n');
     if (!detail) return null;
     const noticeKey = JSON.stringify([state.sceneSessionId, state.modelSyncRunId, detail]);
@@ -62,7 +65,7 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
       <button type="button" className={styles.resourceNoticeClose} aria-label="关闭场景资源提示"
         title="关闭提示" onClick={() => setDismissedNotice(noticeKey)}>×</button>
       <strong>{detail ? '场景已打开，部分资源需要处理' : '场景已打开，正在同步最新模型'}</strong>
-      <p>{detail ? '可继续编辑和保存，发布前请解决资源问题。' : '保留当前场景参数，同步完成后应用可用模型。'}</p>
+      <p>{detail ? '可继续编辑和保存，发布时会自动重新同步并校验资源。' : '保留当前场景参数，同步完成后应用可用模型。'}</p>
       <details><summary>查看详情</summary><pre>{detail || state.detail}</pre></details>
       {detail ? <>
         <button type="button" disabled={environment.retrying}
@@ -78,12 +81,12 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
       </> : null}
     </aside>;
   }
-  if (state.completed && !environmentError) return null;
+  if (state.completed && !environmentError && !transaction) return null;
 
   return (
     <SceneLoadingMask
       detail={environmentError ?? state.detail}
-      label={environmentError ? (localScene ? '场景资源加载失败' : '环境模型加载失败') : state.label}
+      label={environmentError ? (localScene || explicitModelSync ? '场景资源加载失败' : '环境模型加载失败') : state.label}
       percent={state.percent}
       phase={state.phase}
       downloadDetail={<>
@@ -117,14 +120,14 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
         }
       }}
       action={<>
-          {environmentError ? <button disabled={environment.retrying} onClick={() => void environmentPreparationStore.retry()} type="button">{localScene ? '重新同步场景资源' : '重试环境模型同步'}</button> : null}
+          {environmentError ? <button disabled={environment.retrying} onClick={() => void environmentPreparationStore.retry()} type="button">{localScene || explicitModelSync ? '重新同步场景资源' : '重试环境模型同步'}</button> : null}
           {environmentError && environmentRecoveryChoice ? <button data-environment-recovery-accept type="button"
             disabled={environment.retrying || cancelling} onClick={() => {
               if (useEditorStore.getState().acceptLocalSceneEnvironmentRecoveryChoice(state.sceneSessionId, environmentRecoveryChoice)) {
                 void environmentPreparationStore.retry();
               }
             }}>使用当前中台环境版本恢复</button> : null}
-          {remoteScene && state.runtime.forcedSettled && !transaction ? <button type="button"
+          {sceneModelUpdate && state.runtime.forcedSettled && !transaction ? <button type="button"
             onClick={() => allowScenePreparationEditing(state.sceneSessionId, true)}>保留资源问题并继续编辑</button> : null}
           <button disabled={cancelling} onClick={onCancel} type="button">{cancelling ? '正在请求取消…' : '取消加载并返回首页'}</button>
         </>}

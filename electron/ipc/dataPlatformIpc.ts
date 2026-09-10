@@ -41,6 +41,7 @@ import {
   syncDataPlatformImagesForWorkspace,
   syncDataPlatformModelsForWorkspace,
   prepareLocalSceneResources,
+  cancelSceneModelSync,
   syncDataPlatformEnvironmentsForWorkspace,
   cancelDataPlatformProjectLoading,
   syncDataPlatformSkyboxesForWorkspace,
@@ -260,11 +261,16 @@ export function registerDataPlatformIpc(): void {
 
   registerProjectSessionHandler('data-platform:prepareLocalSceneResources', async (_event, request: LocalSceneResourceSyncRequest): Promise<LocalSceneResourceSyncResult> => {
     const config = await readDataPlatformConfig();
-    if (request?.mode === 'data-platform-latest' || request?.mode === 'local-recovery') {
+    if (request?.mode === 'data-platform-latest' || request?.mode === 'scene-latest' || request?.mode === 'local-latest' || request?.mode === 'local-recovery') {
       return prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
     }
     if (!config.baseUrl) return { configured: false, sourceKey: null, modelAssets: [], environmentAssets: [] };
     return prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
+  });
+
+  registerProjectSessionHandler('data-platform:cancelSceneModelSync', async (_event, request: { requestId: string }): Promise<boolean> => {
+    if (!request || typeof request.requestId !== 'string') return false;
+    return cancelSceneModelSync(request.requestId);
   });
 
   registerProjectSessionHandler('data-platform:retryModelSync', async (): Promise<boolean> => {

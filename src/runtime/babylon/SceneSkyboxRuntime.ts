@@ -99,6 +99,8 @@ export class SceneSkyboxRuntime {
   private loadToken = 0;
   private loadError: string | null = null;
   private failedTarget: { entityKey: string; signature: string } | null = null;
+  private receivedBytes = 0;
+  private totalBytes: number | null = null;
   private loadStage: SkyboxLoadStage | null = null;
   private loadTimings: Partial<Record<SkyboxLoadStage, number>> = {};
   private decodedDataMetrics: SkyboxDecodeMetrics | null = null;
@@ -176,7 +178,7 @@ export class SceneSkyboxRuntime {
   }
 
   getLoadDiagnostics() {
-    return { stage: this.pending || this.loadError ? this.loadStage : null, timings: { ...this.loadTimings }, decoded: this.decodedDataMetrics };
+    return { receivedBytes: this.receivedBytes, totalBytes: this.totalBytes, stage: this.pending || this.loadError ? this.loadStage : null, timings: { ...this.loadTimings }, decoded: this.decodedDataMetrics };
   }
 
   dispose(): void {
@@ -222,6 +224,8 @@ export class SceneSkyboxRuntime {
     this.failedTarget = null;
     this.loadStage = null;
     this.loadTimings = {};
+    this.receivedBytes = 0;
+    this.totalBytes = null;
     this.decodedDataMetrics = null;
     let preparedData: CubeMapInfo | null = null;
     this.pending = { token, entityKey, signature, controller };
@@ -236,6 +240,12 @@ export class SceneSkyboxRuntime {
         });
         // 预解码子类不再读取原始 EXR，极小的 Blob 仅用于驱动 Babylon 的原有上传回调。
         return preparedData ? new Blob([new Uint8Array(1)]) : blob;
+      },
+      onProgress: (receivedBytes, totalBytes) => {
+        if (controller.signal.aborted || token !== this.loadToken) return;
+        // 下载字节仅供每秒采样，不按网络分块触发 React 或全场景进度计算。
+        this.receivedBytes = receivedBytes;
+        this.totalBytes = totalBytes;
       },
       onStage: (stage, durationMs) => {
         if (controller.signal.aborted || token !== this.loadToken) return;

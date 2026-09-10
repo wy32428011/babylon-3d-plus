@@ -1,122 +1,71 @@
 import assert from 'node:assert/strict';
-import { after, test } from 'node:test';
-import { createServer } from 'vite';
-import type { ModelAssetTemplate } from '../../src/editor/model/components';
-import type { ModelNumberParameterDefinition, ModelParameterDefinition } from '../../src/editor/model/modelParameters';
-
-const server = await createServer({ configFile: false, appType: 'custom', server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true } });
-after(() => server.close());
-const { mergeModelAssetUpdate } = await server.ssrLoadModule('/src/editor/assets/mergeModelAssetUpdate.ts');
-
-const number = (key = 'length'): ModelNumberParameterDefinition => ({ key, label: key, type: 'number', defaultValue: 10 });
-function asset(parameters: ModelParameterDefinition[] = [number()], values = {}): ModelAssetTemplate {
-  return { sourcePath: 'old/model.glb', sourceUrl: 'editor-asset://local/old/model.glb', lengthUnit: 'm', unitScaleToMeters: 1,
-    parameterConfig: { schema: 'babylon-editor.model-parameters', version: 1, parameters, bindings: [] }, parameterValues: values };
-}
-
-test('preserves falsy and vector values while adding only missing defaults without mutating inputs', () => {
-  const definitions: ModelParameterDefinition[] = [number(), { key: 'enabled', label: 'Enabled', type: 'boolean', defaultValue: true },
-    { key: 'text', label: 'Text', type: 'string', defaultValue: 'new' }, { key: 'offset', label: 'Offset', type: 'vector3', defaultValue: { x: 1, y: 1, z: 1 } }];
-  const previous = asset(definitions, { length: 0, enabled: false, text: '', offset: { x: 0, y: 2, z: 3 } });
-  const next = asset([...definitions, number('new')], { length: 999, new: 999 });
-  const before = JSON.stringify([previous, next]);
-  const result = mergeModelAssetUpdate(previous, next);
-  assert.deepEqual(result.parameterValues, { ...previous.parameterValues, new: 10 });
-  assert.equal(JSON.stringify([previous, next]), before);
-  assert.notEqual(result.parameterValues.offset, previous.parameterValues!.offset);
+import test from 'node:test';
+import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
+const [{ mergeModelAssetUpdate, mergeSceneModelAssetUpdate }] = await importIsolatedTypeScriptModules([
+  'src/editor/assets/mergeModelAssetUpdate.ts',
+]) as [typeof import('../../src/editor/assets/mergeModelAssetUpdate')];
+const number = (key = 'length', defaultValue = 10): any => ({ key, label: key, type: 'number', defaultValue });
+const asset = (parameters: any[] = [number()], values: any = {}): any => ({
+  sourcePath: 'old.glb', sourceUrl: 'old-url', lengthUnit: 'meter', unitScaleToMeters: 1,
+  parameterConfig: { schema: 'babylon-editor.model-parameters', version: 1, parameters, bindings: [] }, parameterValues: values,
 });
 
-test('uses previous default when an old instance omitted the saved value', () => {
-  assert.equal(mergeModelAssetUpdate(asset(), asset([{ ...number(), defaultValue: 20 }])).parameterValues.length, 10);
+test('所有合并入口采用同一新版规则，不残留严格冲突分支', () => {
+  assert.equal(mergeModelAssetUpdate, mergeSceneModelAssetUpdate);
 });
-
-test('retains scene extensions and assetCode, replaces known resource fields, and removes stale snapshots', () => {
-  const previous = { ...asset(), assetCode: '000123', sceneExtension: { enabled: false }, sourceSnapshot: { contentSha256: 'old' }, scriptAssets: [{ name: 'old', path: 'old.js', sourceUrl: 'old.js' }], dataDrivenConfig: {} };
-  const next = { ...asset(), sourcePath: 'new/model.glb', assetCode: 'wrong', assetRevision: 'v2' };
-  const result = mergeModelAssetUpdate(previous, next);
-  assert.equal(result.assetCode, '000123');
-  assert.deepEqual(result.sceneExtension, previous.sceneExtension);
-  assert.equal(result.sourcePath, 'new/model.glb');
-  assert.equal(result.assetRevision, 'v2');
-  for (const key of ['sourceSnapshot', 'scriptAssets', 'dataDrivenConfig']) assert.equal(key in result, false);
-  assert.deepEqual(mergeModelAssetUpdate(previous, { ...next, sourceSnapshot: { contentSha256: 'new' } }).sourceSnapshot, { contentSha256: 'new' });
+test('旧实例没有保存值时使用新版默认，不沿用旧定义默认', () => {
+  assert.equal(mergeModelAssetUpdate(asset(), asset([number('length', 20)])).parameterValues!.length, 20);
 });
-
-test('does not introduce an instance assetCode into a template', () => {
-  assert.equal('assetCode' in mergeModelAssetUpdate(asset(), { ...asset(), assetCode: 'wrong' }), false);
+test('参数改key视为删除旧key并新增，不按label推断旧值', () => {
+  const merged = mergeModelAssetUpdate(asset([number('old')], { old: 99 }), asset([{ ...number('new', 3), label: 'old' }]));
+  assert.deepEqual(merged.parameterValues, { new: 3 });
 });
-
-test('rejects removed definitions or orphan stored parameters and includes instance context', () => {
-  assert.throws(() => mergeModelAssetUpdate(asset(), asset([]), '实体 A'), /实体 A.*length.*删除/);
-  assert.throws(() => mergeModelAssetUpdate(asset([], { legacy: 0 }), asset([])), /legacy/);
+test('同key类型、范围、单位、枚举变化保留原显式值并使用新定义', () => {
+  const values = [0, false, '', 100, 'removed-choice', { x: 0, y: 1, z: 2 }];
+  for (const value of values) {
+    const previous = asset([number()], { length: value });
+    const next = asset([{ key: 'length', label: '新版', type: 'enum', options: [{ value: 'a', label: 'A' }], defaultValue: 'a' }]);
+    const warnings: string[] = [];
+    const merged = mergeModelAssetUpdate(previous, next, '实体 A', message => warnings.push(message));
+    assert.deepEqual(merged.parameterValues!.length, value);
+    assert.deepEqual(merged.parameterConfig, next.parameterConfig);
+    assert.ok(warnings.length);
+  }
 });
-
-test('rejects type and parameter unit changes', () => {
-  assert.throws(() => mergeModelAssetUpdate(asset(), asset([{ key: 'length', label: 'Length', type: 'string', defaultValue: '' }])), /length.*类型/);
-  assert.throws(() => mergeModelAssetUpdate(asset([{ ...number(), unit: 'm' }]), asset([{ ...number(), unit: 'cm' }])), /length.*单位/);
+test('新增规则可引用同名保留参数，也可按新版顺序覆盖属性', () => {
+  const previous = asset([number()], { length: 12 }), next = asset([number(), number('new', 3)]);
+  previous.parameterConfig.bindings = [{ target: { kind: 'node', name: 'old' }, property: 'alpha', value: { param: 'length' } }];
+  next.parameterConfig.bindings = [{ target: { kind: 'node', name: 'new' }, property: 'alpha', value: { param: 'new' } }];
+  next.parameterConfig.rules = [{ when: { param: 'length' }, set: next.parameterConfig.bindings }];
+  const merged = mergeModelAssetUpdate(previous, next);
+  assert.deepEqual(merged.parameterConfig, next.parameterConfig);
+  assert.deepEqual(merged.parameterValues, { length: 12, new: 3 });
 });
-
-test('rejects source units or meter scale changes', () => {
-  assert.throws(() => mergeModelAssetUpdate(asset(), { ...asset(), lengthUnit: 'cm', unitScaleToMeters: 0.01 }), /单位/);
-  assert.throws(() => mergeModelAssetUpdate(asset(), { ...asset(), unitScaleToMeters: 2 }), /单位/);
-});
-
-test('rejects number and vector values outside new ranges without clamping', () => {
-  assert.throws(() => mergeModelAssetUpdate(asset([number()], { length: 20 }), asset([{ ...number(), type: 'number', max: 10 }])), /length/);
-  const vector: ModelParameterDefinition = { key: 'offset', label: 'Offset', type: 'vector3', defaultValue: { x: 0, y: 0, z: 0 } };
-  assert.throws(() => mergeModelAssetUpdate(asset([vector], { offset: { x: 0, y: -5, z: 0 } }), asset([{ ...vector, min: 0 }])), /offset/);
-});
-
-test('rejects removed enum choices but permits added choices and changed labels', () => {
-  const definition: ModelParameterDefinition = { key: 'choice', label: 'Choice', type: 'enum', defaultValue: 'a', options: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }] };
-  assert.throws(() => mergeModelAssetUpdate(asset([definition], { choice: 'b' }), asset([{ ...definition, options: [{ value: 'a', label: 'A' }] }])), /choice/);
-  assert.equal(mergeModelAssetUpdate(asset([definition], { choice: 'a' }), asset([{ ...definition, options: [...definition.options, { value: 'c', label: 'C' }] }])).parameterValues.choice, 'a');
-});
-
-test('rejects binding and rule semantic changes while accepting object key reordering', () => {
+test('移除参数同时移除旧常量规则，不要求新版保留旧执行语义', () => {
   const previous = asset();
-  previous.parameterConfig!.bindings = [{ target: { kind: 'node', name: 'part' }, property: 'alpha', value: { param: 'length' } }];
-  const next = structuredClone(previous);
-  next.parameterConfig!.bindings[0].target.name = 'renamed';
-  assert.throws(() => mergeModelAssetUpdate(previous, next), /length.*绑定/);
-  next.parameterConfig!.bindings[0] = { value: { param: 'length' }, property: 'alpha', target: { name: 'part', kind: 'node' } };
-  assert.doesNotThrow(() => mergeModelAssetUpdate(previous, next));
-  previous.parameterConfig!.rules = [{ when: { param: 'length' }, set: previous.parameterConfig!.bindings }];
-  assert.throws(() => mergeModelAssetUpdate(previous, next), /length.*绑定/);
+  previous.parameterConfig.rules = [{ when: true, set: [] }];
+  const next = asset([]), merged = mergeModelAssetUpdate(previous, next);
+  assert.deepEqual(merged.parameterConfig, next.parameterConfig);
+  assert.deepEqual(merged.parameterValues, {});
 });
-
-test('permits bindings for newly introduced parameters', () => {
-  const next = asset([number(), number('new')]);
-  next.parameterConfig!.bindings = [{ target: { kind: 'mesh', name: 'part' }, property: 'alpha', value: { param: 'new' } }];
-  assert.doesNotThrow(() => mergeModelAssetUpdate(asset(), next));
+test('更新资源身份脚本配置、删除旧快照，保留实例assetCode与扩展', () => {
+  const previous = { ...asset(), assetCode: '000123', sceneExtension: { enabled: false }, sourceSnapshot: { contentSha256: 'old' } };
+  const next = { ...asset(), sourceUrl: 'new', assetRevision: 'v2', assetCode: 'wrong', scriptAssets: [{ name: 'new', path: 'new.ts', sourceUrl: 'new.ts' }] };
+  const merged = mergeModelAssetUpdate(previous, next);
+  assert.equal(merged.assetCode, '000123');
+  assert.deepEqual(merged.sceneExtension, previous.sceneExtension);
+  assert.equal(merged.sourceUrl, 'new');
+  assert.equal(merged.assetRevision, 'v2');
+  assert.equal('sourceSnapshot' in merged, false);
+  assert.deepEqual(merged.scriptAssets, next.scriptAssets);
+  assert.equal('assetCode' in mergeModelAssetUpdate(asset(), next), false);
 });
-
-test('rejects changed constant bindings even when they do not mention a parameter', () => {
-  const previous = asset();
-  previous.parameterConfig!.bindings = [{ target: { kind: 'node', name: 'part' }, property: 'alpha', value: 0.5 }];
-  const next = structuredClone(previous);
-  next.parameterConfig!.bindings[0].value = 1;
-  assert.throws(() => mergeModelAssetUpdate(previous, next), /绑定/);
-});
-
-test('keeps independent instances independent and adopts only the new resource identity', () => {
-  const next = { ...asset(), dataPlatformModel: { sourceKey: 'server', kind: 'model' as const, resourceId: '999', modelPath: 'model.glb' } };
-  const first = { ...asset([number()], { length: 1 }), dataPlatformModel: { sourceKey: 'old', kind: 'model' as const, resourceId: '999', modelPath: 'old.glb' } };
-  const second = asset([number()], { length: 2 });
-  assert.equal(mergeModelAssetUpdate(first, next).parameterValues.length, 1);
-  assert.equal(mergeModelAssetUpdate(second, next).parameterValues.length, 2);
-  assert.deepEqual(mergeModelAssetUpdate(first, next).dataPlatformModel, next.dataPlatformModel);
-  assert.equal('dataPlatformModel' in mergeModelAssetUpdate(first, asset()), false);
-});
-
-test('rejects invalid texture extensions and removed declared package texture choices', () => {
-  const texture: ModelParameterDefinition = { key: 'texture', label: 'Texture', type: 'texture', defaultValue: 'textures/a.png', options: [{ value: 'textures/a.png', label: 'A' }] };
-  assert.throws(() => mergeModelAssetUpdate(asset([texture]), asset([{ ...texture, allowedExtensions: ['.jpg'] }])), /texture/);
-  assert.throws(() => mergeModelAssetUpdate(asset([texture]), asset([{ ...texture, options: [{ value: 'textures/b.png', label: 'B' }] }])), /texture/);
-});
-
-test('rejects invalid retained values and invalid new defaults instead of silently replacing them', () => {
-  assert.throws(() => mergeModelAssetUpdate(asset([number()], { length: 'bad' }), asset()), /length/);
-  assert.throws(() => mergeModelAssetUpdate(asset([]), asset([{ ...number(), defaultValue: Number.NaN }])), /length/);
-  assert.throws(() => mergeModelAssetUpdate(asset([]), asset([number(), number()])), /重复/);
+test('key为原型属性时也只创建自有参数，不污染其他实例', () => {
+  const values = JSON.parse('{"__proto__": 4, "constructor": 8}');
+  const merged = mergeModelAssetUpdate(asset(), asset([number('__proto__'), number('constructor')]));
+  assert.equal(Object.hasOwn(merged.parameterValues!, '__proto__'), true);
+  const kept = mergeModelAssetUpdate(asset([], values), asset([number('__proto__'), number('constructor')]));
+  assert.equal(kept.parameterValues!.__proto__, 4);
+  assert.equal(kept.parameterValues!.constructor, 8);
+  assert.equal(Object.getPrototypeOf(kept.parameterValues), Object.prototype);
 });

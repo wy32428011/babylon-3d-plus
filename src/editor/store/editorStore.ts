@@ -1,4 +1,4 @@
-import { mergeModelAssetUpdate } from '../assets/mergeModelAssetUpdate';
+import { mergeSceneModelAssetUpdate as mergeModelAssetUpdate } from '../assets/mergeModelAssetUpdate';
 import { restoreFailedSceneResources, type FailedSceneResources } from '../assets/restoreFailedSceneResources';
 import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../model/alarmManager';
 import { create } from 'zustand';
@@ -183,7 +183,8 @@ import {
   findModelParameterDefinition,
   normalizeModelParameterConfig,
   sanitizeModelParameterValue,
-  sanitizeModelParameterValues,
+  restoreModelParameterValues,
+  sanitizeEditedModelParameterValues,
   type ModelParameterValue,
   type ModelParameterValues,
 } from '../model/modelParameters';
@@ -1234,7 +1235,7 @@ function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: Asset
     ...(parameterConfig
       ? {
           parameterConfig,
-          parameterValues: sanitizeModelParameterValues(parameterConfig, modelAsset.parameterValues),
+          parameterValues: restoreModelParameterValues(parameterConfig, modelAsset.parameterValues),
         }
       : {}),
   }, modelAsset.assetCode);
@@ -4080,7 +4081,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set(state => {
       if (state.sceneSessionId !== sceneSessionId || state.scene !== before || isRuntimePreviewState(state)) return state;
       const result = after === before ? { scene: before, history: state.history }
-        : executeCommand(before, state.history, updateSceneDocumentCommand('同步场景最新模型并保留参数', () => after));
+        : executeCommand(before, state.history, updateSceneDocumentCommand('同步新版模型与参数配置', () => after));
       committed = true;
       return { ...result, latestSceneResourceTransaction: { before, history: state.history, after, issues },
         sceneStartupResourceSessionId: null,
@@ -4088,7 +4089,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         sceneResourceIssues: [...new Set([...state.sceneResourceIssues, ...issues])],
         environmentApplyRequest: null, environmentRuntimeOverride: null,
         environmentStartupRelinkSessionId: null,
-        logs: prependLog(state.logs, after === before ? '场景模型已是当前版本。' : '场景模型资源已更新，实例参数和业务配置已保留。') };
+        logs: prependLog(state.logs, after === before ? '场景模型已是当前版本。' : '场景模型资源和参数定义已更新，同名参数值和业务绑定已保留。') };
     });
     return committed;
   },
@@ -5289,8 +5290,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const modelAsset = entity?.components.modelAsset;
       if (!isRuntimeEntityEditable(state.scene, entity) || !modelAsset?.parameterConfig) return state;
 
-      const sanitizedBefore = sanitizeModelParameterValues(modelAsset.parameterConfig, before);
-      const sanitizedAfter = sanitizeModelParameterValues(modelAsset.parameterConfig, after);
+      const sanitizedBefore = restoreModelParameterValues(modelAsset.parameterConfig, before);
+      const sanitizedAfter = sanitizeEditedModelParameterValues(modelAsset.parameterConfig, before, after);
       if (areModelParameterValuesEqual(sanitizedBefore, sanitizedAfter)) return state;
 
       const command = getBuiltInSlotBindingConfig(entity)

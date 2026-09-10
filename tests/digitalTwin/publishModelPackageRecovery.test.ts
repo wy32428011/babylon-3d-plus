@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createServer } from 'node:http';
 import { registerHooks } from 'node:module';
@@ -105,5 +106,8 @@ test('跨工作区资源按稳定 ID 直接从中台补全到当前 shared，原
   assert.deepEqual(requests, ['/api/v1/models/detail', '/model.glb']);
   assert.ok(result.replacements[0].asset.path.startsWith(f.scope.sharedResourcesRoot + path.sep));
   assert.deepEqual(await fs.readFile(result.replacements[0].asset.path), bytes);
+  assert.equal(result.replacements[0].asset.dataPlatformSourceKey,
+    createHash('sha256').update(`http://127.0.0.1:${address.port}`).digest('hex'));
+  assert.equal(result.replacements[0].asset.dataPlatformResourceId, '12');
   assert.deepEqual(await fs.readFile(external.sourcePath), bytes);
 });

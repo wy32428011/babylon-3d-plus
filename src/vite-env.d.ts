@@ -177,18 +177,7 @@ type DigitalTwinPublishContextRequest = {
   projectId: string | null;
 };
 
-type DigitalTwinPublishRequest = {
-  targetToken?: string;
-  requestId: string;
-  publishName: string;
-  remark: string;
-  sceneContent: string;
-  projectId: string | null;
-  overwriteExisting: boolean;
-  forceOverwrite: boolean;
-  confirmResourceBindings: boolean;
-  allowedParentOrigins: string[];
-};
+type DigitalTwinPublishRequest = import('../electron/types').DigitalTwinPublishRequest;
 
 type DigitalTwinPublishProgressPhase =
   | 'saving'
@@ -251,23 +240,9 @@ type DataPlatformModelSyncProgress = {
   runtimeChangedResourceKeys?: string[];
 };
 
-type LocalSceneResourceSyncRequest = {
-  mode?: 'data-platform-latest' | 'local-recovery';
-  sceneContent?: string;
-  sceneFilePath?: string;
-  acceptEnvironmentRevision?: { resourceId: string; fileRevision: string; sha256: string };
-  environment?: { resourceId?: string; displayName?: string };
-};
+type LocalSceneResourceSyncRequest = import('../electron/types').LocalSceneResourceSyncRequest;
 
-type LocalSceneResourceSyncResult = {
-  issues?: Array<{ resourceKind: 'model' | 'combo' | 'environment' | 'skybox' | 'other'; resourceId?: string; sourcePath?: string; message: string }>;
-  recoveredSceneContent?: string;
-  recoveredReferenceCount?: number;
-  environmentRecoveryChoice?: { resourceId: string; displayName: string; previousRevision: string;
-    availableRevision: string; previousSize: number | null; availableSize: number; sha256: string };
-  modelReplacements?: Array<{ sourceUrls: string[]; asset: ProjectModelAssetEntry }>;
-  configured: boolean;
-  sourceKey: string | null;
+type LocalSceneResourceSyncResult = Omit<import('../electron/types').LocalSceneResourceSyncResult, 'modelAssets' | 'environmentAssets'> & {
   modelAssets: ProjectModelAssetEntry[];
   environmentAssets: ProjectModelAssetEntry[];
 };
@@ -647,6 +622,7 @@ interface Window {
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;
     prepareLocalSceneResources: (request: LocalSceneResourceSyncRequest) => Promise<LocalSceneResourceSyncResult>;
+    cancelSceneModelSync: (request: { requestId: string }) => Promise<boolean>;
     syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest) => Promise<boolean>;
     retryDataPlatformEnvironmentSync: () => Promise<boolean>;
     onDataPlatformEnvironmentSyncProgress: (handler: (progress: DataPlatformEnvironmentSyncProgress) => void) => () => void;
@@ -670,6 +646,7 @@ interface Window {
     importSkyboxFile: () => Promise<ImportSkyboxFileResult>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
     getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest) => Promise<DigitalTwinPublishContext>;
+    prepareDigitalTwinPublishSceneSnapshots: (request: import('../electron/types').DigitalTwinPublishScenePreparationRequest) => Promise<import('../electron/types').DigitalTwinPublishScenePreparationResult>;
     recoverDigitalTwinModels: (request: import('../electron/types').DigitalTwinModelRecoveryRequest) => Promise<import('../electron/types').DigitalTwinModelRecoveryResult>;
     publishDigitalTwin: (request: DigitalTwinPublishRequest) => Promise<DigitalTwinPublishResult>;
     cancelDigitalTwinPublish: (request: DigitalTwinPublishCancelRequest) => Promise<boolean>;

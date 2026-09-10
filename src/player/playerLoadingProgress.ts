@@ -1,8 +1,5 @@
 import type { SceneRuntimeModelLoadProgress } from '../runtime/babylon/SceneRuntime';
 
-/** 发布 Viewer 首次资源与首帧验证的最长等待时间；超时后显示阻断错误。 */
-export const PLAYER_SCENE_LOADING_TIMEOUT_MS = 120_000;
-
 export type PlayerLoadingProgressInput = {
   /** 当前启动阶段。 */
   phase: 'loading' | 'ready' | 'blocked';
@@ -65,7 +62,7 @@ export function computePlayerLoadingProgress(
     : null;
   return {
     visible,
-    percent: Math.max(0, Math.min(verifyingRender ? 99 : 100, percent)),
+    percent: Math.max(0, Math.min(initialLoadCompleted ? 100 : 99, percent)),
     label: verifyingRender ? '正在验证场景首帧' : loadingInProgress ? '正在加载场景模型' : message,
     detail: verifyingRender ? '模型资源已准备，等待材质与实际渲染完成…' : detail,
   };

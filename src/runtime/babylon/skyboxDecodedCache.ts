@@ -1,3 +1,4 @@
+import { hashSkyboxContent, createSkyboxCacheGeneration } from './skyboxContentHash.ts';
 import type { CubeMapInfo } from '@babylonjs/core/Misc/HighDynamicRange/panoramaToCubemap';
 
 export const SKYBOX_CACHE_DATABASE = 'zending-skybox-decoded-v1';
@@ -49,12 +50,10 @@ export function getSkyboxCubeBytes(cube: CubeMapInfo): number {
 
 /** digest 必须在 IndexedDB 事务之外执行；只读六面精确字节，不改浮点值。 */
 export async function hashSkyboxCubeFaces(cube: CubeMapInfo): Promise<SkyboxCubeChecksums> {
-  if (!globalThis.crypto?.subtle) throw new Error('天空盒缓存校验需要 SHA-256 WebCrypto。');
   return Object.fromEntries(await Promise.all(SKYBOX_CUBE_FACES.map(async face => {
     const data = cube[face]!;
     const bytes = new Uint8Array(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
-    const hash = await crypto.subtle.digest('SHA-256', bytes);
-    return [face, Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')];
+    return [face, await hashSkyboxContent(bytes)];
   }))) as SkyboxCubeChecksums;
 }
 
@@ -128,7 +127,7 @@ export async function writeSkyboxDecodedCache(database: IDBDatabase, key: string
   const next = { key, byteLength: getSkyboxCubeBytes(cube), lastUsed: Date.now() };
   if (next.byteLength > maxBytes || maxEntries < 1) return false;
   const checksums = await hashSkyboxCubeFaces(cube);
-  const generation = crypto.randomUUID();
+  const generation = createSkyboxCacheGeneration();
   return new Promise((resolve, reject) => {
     const transaction = database.transaction(['metadata', 'cubemaps'], 'readwrite');
     const metadata = transaction.objectStore('metadata');

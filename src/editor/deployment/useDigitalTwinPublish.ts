@@ -1,12 +1,12 @@
-import { getScenePreparationSnapshot } from '../loading/scenePreparationProgress';
-import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
+import { synchronizePublishScene, waitForPublishRuntime, preparePublishShadowBake } from './preparePublishScene';
+import { commitPublishRecovery, publishWithResourceRetry } from './publishOrchestration';
+import { beginSceneModelAssetRefresh, settleSceneModelAssetRefresh } from '../loading/scenePreparationProgress';
+import { preparePublishSceneSnapshot } from './preparePublishSceneSnapshots';
+import { acquireSceneModelPublishOperation } from '../assets/sceneModelSyncTransaction';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { repairPublishSceneModels } from './repairPublishSceneModels';
 import { repairPublishSceneSkyboxes } from './repairPublishSceneSkyboxes';
-import { executeCommand } from '../commands/CommandHistory';
-import { updateSceneDocumentCommand } from '../commands/entityCommands';
 import { serializeScene } from '../project/SceneSerializer';
-import { getSceneShadowBakeError } from '../model/sceneShadowBake';
 import { useEditorStore } from '../store/editorStore';
 
 export type DigitalTwinPublishStatus =
@@ -106,14 +106,16 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     if (!window.editorApi?.publishDigitalTwin) return null;
     if (activeRequestIdRef.current) return null;
     const prepared = contextRef.current;
-    if (!prepared?.context.available || prepared.sceneSessionId !== useEditorStore.getState().sceneSessionId
+    if (!prepared?.context.available || !prepared.context.targetToken || prepared.sceneSessionId !== useEditorStore.getState().sceneSessionId
       || (options.projectId && options.projectId !== prepared.context.projectId)) {
       setState((current) => ({ ...current, context: null, status: 'error', error: '发布目标已变化或尚未就绪，请重新打开发布窗口选择目标。' }));
       return null;
     }
     const targetToken = prepared.context.targetToken;
-    const requestId = crypto.randomUUID();
+    let requestId = crypto.randomUUID();
     let sceneContent: string;
+    let preparationId: string | undefined;
+    let preparedScenes: Array<{ sceneId: string; sceneContent: string }> = [];
     canceledRequestIdRef.current = null;
     const contextRequestId = ++contextRequestIdRef.current;
     activeRequestIdRef.current = requestId;
@@ -132,56 +134,99 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
       error: null,
     }));
 
+    let releasePublishOperation: (() => void) | undefined;
     try {
-      const editorState = useEditorStore.getState();
-      if ((editorState.sceneResourcePolicy === 'data-platform-refresh' || editorState.sceneResourcePolicy === 'local-refresh') && (
-        !getScenePreparationSnapshot().completed || editorState.latestSceneResourceTransaction
-        || editorState.sceneResourceIssues.length > 0
-        || getScenePreparationSnapshot().runtime.forcedSettled
-        || environmentPreparationStore.getSnapshot().error)) throw new Error('当前场景仍有资源同步或加载问题，请在资源提示中重新同步并完成校验后发布。');
-      if (typeof window.editorApi.recoverDigitalTwinModels !== 'function') {
-        throw new Error('当前窗口尚未加载模型恢复接口，请先保存场景，再完全退出并重新启动编辑器后发布。');
-      }
-      const originalScene = useEditorStore.getState().scene;
-      const recovery = await window.editorApi.recoverDigitalTwinModels({
-        requestId, projectId: options.projectId, targetToken, sceneContent: serializeScene(originalScene),
+      releasePublishOperation = acquireSceneModelPublishOperation(prepared.sceneSessionId);
+      const assertCurrent = () => {
+        if (canceledRequestIdRef.current) throw new Error('发布已取消。');
+        if (prepared.sceneSessionId !== useEditorStore.getState().sceneSessionId || contextRequestIdRef.current !== contextRequestId) {
+          throw new Error('发布期间场景或目标已变化，旧发布准备已停止。');
+        }
+      };
+      const outcome = await publishWithResourceRetry({
+        assertCurrent,
+        createRequestId: () => {
+          requestId = crypto.randomUUID();
+          activeRequestIdRef.current = requestId;
+          setState(current => ({ ...current, progress: { requestId, phase: 'saving', detail: '正在自动同步模型并准备一致发布快照…', percent: 0, uploadedBytes: 0, totalBytes: 0 } }));
+          return requestId;
+        },
+        prepare: async () => {
+          if (!window.editorApi?.prepareDigitalTwinPublishSceneSnapshots) throw new Error('当前编辑器不支持完整场景发布快照，请更新编辑器。');
+          const snapshot = await window.editorApi.prepareDigitalTwinPublishSceneSnapshots({ requestId, projectId: options.projectId, targetToken,
+            sceneContent: serializeScene(useEditorStore.getState().scene) });
+          assertCurrent();
+          preparationId = snapshot.preparationId;
+          preparedScenes = [];
+          await synchronizePublishScene(prepared.sceneSessionId, assertCurrent, pushLog);
+          if (typeof window.editorApi.recoverDigitalTwinModels !== 'function') {
+            throw new Error('当前窗口尚未加载模型恢复接口，请先保存场景，再完全退出并重新启动编辑器后发布。');
+          }
+          const originalScene = useEditorStore.getState().scene;
+          const recovery = await window.editorApi.recoverDigitalTwinModels({
+            requestId, projectId: options.projectId, targetToken, sceneContent: serializeScene(originalScene),
+          });
+          if (canceledRequestIdRef.current === requestId) throw new Error('模型恢复已取消。');
+          if (prepared.sceneSessionId !== useEditorStore.getState().sceneSessionId || contextRequestIdRef.current !== contextRequestId) {
+            throw new Error('模型恢复期间场景或发布目标已变化，请重新选择发布目标。');
+          }
+          const repaired = repairPublishSceneModels(originalScene, recovery);
+          const repairedSkyboxes = repairPublishSceneSkyboxes(repaired.scene, recovery);
+          const restoredScene = repairedSkyboxes.scene;
+          if (useEditorStore.getState().scene !== originalScene) throw new Error('恢复模型期间场景已修改，请重新发布以包含最新编辑内容。');
+          if (restoredScene !== originalScene) {
+            const refreshId = crypto.randomUUID();
+            commitPublishRecovery({
+              beginRefresh: () => beginSceneModelAssetRefresh(prepared.sceneSessionId, refreshId),
+              commit: () => useEditorStore.getState().commitLatestSceneResources(prepared.sceneSessionId, originalScene, restoredScene),
+              settleRefresh: error => settleSceneModelAssetRefresh(prepared.sceneSessionId, error, refreshId),
+            });
+          }
+          if (repaired.scene !== originalScene) {
+            for (const warning of repaired.warnings ?? []) pushLog(warning);
+            pushLog(
+              '发布前已恢复 ' + repaired.restoredCount + ' 个模型引用，新增 ' + repaired.addedCount
+              + ' 个场景模型，重新关联 ' + repaired.reboundCount + ' 个点击设备槽位。'
+              + (repaired.addedCount ? ' 新模型放在场景原点，可调整位置与业务资产编号。' : ''),
+            );
+          }
+          if (repairedSkyboxes.restoredCount) pushLog(`发布前已恢复 ${repairedSkyboxes.restoredCount} 个天空盒引用，保留原有强度和旋转参数。`);
+          await waitForPublishRuntime(prepared.sceneSessionId, assertCurrent);
+          await preparePublishShadowBake(assertCurrent);
+          assertCurrent();
+          const entryContent = serializeScene(useEditorStore.getState().scene);
+          const entryScene = useEditorStore.getState().scene;
+          const assertEntryCurrent = () => {
+            assertCurrent();
+            if (useEditorStore.getState().scene !== entryScene) throw new Error('准备其他场景期间当前场景已修改，请重新发布以包含最新内容。');
+          };
+          for (const item of snapshot.scenes) {
+            assertEntryCurrent();
+            const content = item.isEntry ? entryContent : await preparePublishSceneSnapshot(item.sceneContent, assertEntryCurrent,
+              message => pushLog(`发布场景「${item.name}」：${message}`));
+            preparedScenes.push({ sceneId: item.sceneId, sceneContent: content });
+          }
+          assertCurrent();
+          if (useEditorStore.getState().scene !== entryScene) throw new Error('准备其他场景期间当前场景已修改，请重新发布以包含最新内容。');
+          return entryContent;
+        },
+        publish: (attemptId, content) => window.editorApi!.publishDigitalTwin({
+          requestId: attemptId,
+          targetToken,
+          publishName: options.publishName,
+          remark: options.remark,
+          sceneContent: content,
+          projectId: options.projectId,
+          overwriteExisting: options.overwriteExisting,
+          forceOverwrite: options.forceOverwrite,
+          confirmResourceBindings: options.confirmResourceBindings,
+          allowedParentOrigins: options.allowedParentOrigins,
+          preparationId,
+          preparedScenes,
+        }),
       });
-      if (canceledRequestIdRef.current === requestId) throw new Error('模型恢复已取消。');
-      if (prepared.sceneSessionId !== useEditorStore.getState().sceneSessionId || contextRequestIdRef.current !== contextRequestId) {
-        throw new Error('模型恢复期间场景或发布目标已变化，请重新选择发布目标。');
-      }
-      const repaired = repairPublishSceneModels(originalScene, recovery);
-      const repairedSkyboxes = repairPublishSceneSkyboxes(repaired.scene, recovery);
-      const restoredScene = repairedSkyboxes.scene;
-      useEditorStore.setState((current) => {
-        if (current.scene !== originalScene) throw new Error('恢复模型期间场景已修改，请重新发布以包含最新编辑内容。');
-        if (restoredScene === originalScene) return current;
-        if (current.runtimeMode === 'preview') throw new Error('请先退出运行预览，再恢复发布模型。');
-        return executeCommand(current.scene, current.history, updateSceneDocumentCommand('恢复发布模型、天空盒与点击事件绑定', () => restoredScene));
-      });
-      if (repaired.scene !== originalScene) {
-        pushLog(
-          '发布前已恢复 ' + repaired.restoredCount + ' 个模型引用，新增 ' + repaired.addedCount
-          + ' 个场景模型，重新关联 ' + repaired.reboundCount + ' 个点击设备槽位。'
-          + (repaired.addedCount ? ' 新模型放在场景原点，可调整位置与业务资产编号。' : ''),
-        );
-      }
-      if (repairedSkyboxes.restoredCount) pushLog(`发布前已恢复 ${repairedSkyboxes.restoredCount} 个天空盒引用，保留原有强度和旋转参数。`);
-      const shadowError = getSceneShadowBakeError(restoredScene);
-      if (shadowError) throw new Error(shadowError);
-      sceneContent = serializeScene(restoredScene);
-      const result = await window.editorApi.publishDigitalTwin({
-        requestId,
-        targetToken,
-        publishName: options.publishName,
-        remark: options.remark,
-        sceneContent,
-        projectId: options.projectId,
-        overwriteExisting: options.overwriteExisting,
-        forceOverwrite: options.forceOverwrite,
-        confirmResourceBindings: options.confirmResourceBindings,
-        allowedParentOrigins: options.allowedParentOrigins,
-      });
+      const result = outcome.result;
+      sceneContent = outcome.sceneContent;
       const status: DigitalTwinPublishStatus = result.status === 'completed'
         ? 'completed'
         : result.status === 'confirmation-required'
@@ -228,12 +273,13 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     } catch (error) {
       const message = getErrorMessage(error);
       const canceled = canceledRequestIdRef.current === requestId;
-      if (contextRequestIdRef.current === contextRequestId) {
+      if (contextRequestIdRef.current === contextRequestId && useEditorStore.getState().sceneSessionId === prepared.sceneSessionId) {
         setState((current) => ({ ...current, status: canceled ? 'canceled' : 'error', error: canceled ? null : message }));
       }
       pushLog(canceled ? '数字孪生发布已取消。' : '数字孪生发布失败：' + message);
       return null;
     } finally {
+      releasePublishOperation?.();
       if (activeRequestIdRef.current === requestId) {
         activeRequestIdRef.current = null;
         setIsRefreshingPublishContext(false);

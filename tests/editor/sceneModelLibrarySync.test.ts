@@ -14,6 +14,7 @@ function fixture(ready = true) {
   const session = { current: 'A' };
   const scope: any = {
     useCallback: (fn: unknown) => fn, props: {}, pushLog: (message: string) => calls.push(message),
+    getSceneModelPublishSession: () => null,
     sceneSessionIdRef: session, localResourcePreparingRef: { current: false },
     startingLibrarySyncSessionRef: { current: null },
     getScenePreparationSnapshot: () => ({ sceneSessionId: session.current, completed: ready }),
@@ -26,15 +27,20 @@ function fixture(ready = true) {
     } }),
     setIsStartingLibrarySync: (value: boolean) => calls.push(`starting:${value}`),
     setLibraryStatuses: () => calls.push('status'),
+    startExplicitSceneModelSync: async (syncLibrary: boolean) => calls.push(`scene-sync:${syncLibrary}`),
   };
   runInNewContext(stripTypeScriptTypes(source.slice(start, end)) + '\nglobalThis.start = startModelLibrarySync;', scope);
-  return { calls, scope, session, run: () => scope.start() };
+  return { calls, scope, session, run: (automatic = true) => scope.start(automatic) };
 }
 
-test('全库同步调用普通/组合与环境全量入口，不改当前场景', async () => {
+test('后台全库同步与手动同步共用完整替换事务', async () => {
   const f = fixture(); await f.run();
-  assert.ok(f.calls.includes('all-models'));
-  assert.ok(f.calls.includes('all-environments'));
+  assert.deepEqual(f.calls, ['starting:true', 'scene-sync:true', 'starting:false']);
+});
+
+test('主动同步进入完整场景事务，不把后台启动成功当作替换完成', async () => {
+  const f = fixture(); await f.run(false);
+  assert.deepEqual(f.calls, ['starting:true', 'scene-sync:true', 'starting:false']);
 });
 
 test('场景必需资源未就绪时不启动后台全库任务', async () => {
@@ -45,7 +51,7 @@ test('场景必需资源未就绪时不启动后台全库任务', async () => {
 test('启动中重复点击不会重复提交全库任务', async () => {
   const f = fixture();
   await Promise.all([f.run(), f.run()]);
-  assert.equal(f.calls.filter(x => x === 'all-models').length, 1);
+  assert.equal(f.calls.filter(x => x === 'scene-sync:true').length, 1);
 });
 
 test('上一轮库启动仍在退出时推迟自动同步，结束后继续补齐全库', () => {
@@ -59,6 +65,7 @@ test('上一轮库启动仍在退出时推迟自动同步，结束后继续补�
     preparation: { sceneSessionId: 'A', completed: true },
     isScenePreparationSettled: (state: any) => state.completed,
     latestSceneResourceTransaction: null, props: {},
+    publishingSceneSessionId: null,
     startModelLibrarySync: (automatic: boolean) => calls.push(automatic),
     setModelSyncProgress() {}, setEnvironmentSyncProgress() {},
   };
@@ -111,4 +118,22 @@ test('本地打开的初始目录扫描不改模型、环境和天空盒，完�
   assert.equal(options.refreshModels, false);
   assert.equal(options.refreshEnvironment, false);
   assert.equal(options.refreshSkybox, false);
+});
+
+test('切换快照场景清除主动同步占用，新场景可再次同步', () => {
+  const effectStart = source.indexOf('  useEffect(() => {\n    sceneRemoteDownloadStore.begin(sceneSessionId);');
+  const effectEnd = source.indexOf('\n\n  useEffect(', effectStart + 1);
+  assert.ok(effectStart >= 0 && effectEnd > effectStart);
+  const effects: any = {
+    useEffect: (run: () => void) => run(), sceneSessionId: 'B', sceneResourcePolicy: 'preserve-snapshot',
+    sceneRemoteDownloadStore: { begin() {} }, modelSyncRevisionsRef: { current: { clear() {} } },
+    environmentPreparationStore: { begin() {} }, autoLibrarySyncSessionRef: { current: 'A' },
+    startingLibrarySyncSessionRef: { current: 'A' }, explicitSceneSyncRef: { current: 'old-run' },
+    localResourcePreparingRef: { current: true }, setIsPreparingSceneResources: (value: boolean) => { effects.preparing = value; },
+    setModelSyncProgress() {}, setEnvironmentSyncProgress() {}, setIsStartingLibrarySync() {},
+  };
+  runInNewContext(stripTypeScriptTypes(source.slice(effectStart, effectEnd)), effects);
+  assert.equal(effects.explicitSceneSyncRef.current, null);
+  assert.equal(effects.localResourcePreparingRef.current, false);
+  assert.equal(effects.preparing, false);
 });

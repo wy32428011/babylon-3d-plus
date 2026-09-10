@@ -11,12 +11,13 @@ import type {
   DigitalTwinPublishRequest,
   DigitalTwinPublishResult,
 } from '../types.js';
-import { getDigitalTwinPublishContext, getLocalDigitalTwinPublishContext, publishDigitalTwin, resolveDigitalTwinPublishTarget } from './digitalTwinPublishService.js';
+import { getDigitalTwinPublishContext, getLocalDigitalTwinPublishContext, prepareDigitalTwinPublishSceneSnapshots, publishDigitalTwin, resolveDigitalTwinPublishTarget } from './digitalTwinPublishService.js';
 
 import { recoverPublishSceneResources } from './digitalTwinPublishResourceRecovery.js';
 import { resolveDataPlatformBindingSharedResourcesRoot, resolveDataPlatformBindingWorkspaceRoot } from './dataPlatformBindingStore.js';
 
 const RECOVER_CHANNEL = 'digital-twin-publish:recoverModels';
+const SCENES_CHANNEL = 'digital-twin-publish:prepareScenes';
 const CONTEXT_CHANNEL = 'digital-twin-publish:getContext';
 const START_CHANNEL = 'digital-twin-publish:start';
 const CANCEL_CHANNEL = 'digital-twin-publish:cancel';
@@ -43,6 +44,7 @@ export function registerDigitalTwinPublishIpc(): void {
   ipcMain.handle(CONTEXT_CHANNEL, handleGetContext);
   ipcMain.handle(START_CHANNEL, handleStartPublish);
   ipcMain.handle(RECOVER_CHANNEL, handleRecoverModels);
+  ipcMain.handle(SCENES_CHANNEL, handlePrepareScenes);
   ipcMain.handle(CANCEL_CHANNEL, handleCancelPublish);
 }
 
@@ -56,6 +58,7 @@ export async function disposeAllDigitalTwinPublishTasks(): Promise<void> {
   ipcMain.removeHandler(CONTEXT_CHANNEL);
   ipcMain.removeHandler(START_CHANNEL);
   ipcMain.removeHandler(RECOVER_CHANNEL);
+  ipcMain.removeHandler(SCENES_CHANNEL);
   ipcMain.removeHandler(CANCEL_CHANNEL);
   registered = false;
 }
@@ -133,6 +136,26 @@ async function handleRecoverModels(
     await resolveDigitalTwinPublishTarget(request?.targetToken, projectId);
     return result;
   } finally {
+    activeTaskPromises.delete(completion);
+    if (activeTasks.get(sender.id) === task) activeTasks.delete(sender.id);
+  }
+}
+
+async function handlePrepareScenes(event: IpcMainInvokeEvent,
+  request: import('../types.js').DigitalTwinPublishScenePreparationRequest,
+): Promise<import('../types.js').DigitalTwinPublishScenePreparationResult> {
+  const { sender } = assertTrustedSender(event);
+  if (isDataPlatformProjectClosing() || isDataPlatformProjectOpening()) throw new Error('项目正在切换，请完成加载后再发布。');
+  if (shuttingDown || isDigitalTwinPublishActive()) throw new Error('已有发布任务或应用正在退出，无法准备场景快照。');
+  const requestId = validateRequestId(request?.requestId);
+  validateOptionalProjectId(request?.projectId);
+  bindSenderCleanup(sender);
+  const task: ActivePublishTask = { requestId, targetToken: request?.targetToken, sender, controller: new AbortController() };
+  activeTasks.set(sender.id, task);
+  const completion = prepareDigitalTwinPublishSceneSnapshots(request, task.controller.signal);
+  activeTaskPromises.add(completion);
+  try { return await completion; }
+  finally {
     activeTaskPromises.delete(completion);
     if (activeTasks.get(sender.id) === task) activeTasks.delete(sender.id);
   }

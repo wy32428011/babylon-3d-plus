@@ -69,6 +69,8 @@ export type BuildDigitalTwinSourcePackageOptions = {
   manifest: DigitalTwinSourceManifestInput;
   signal: AbortSignal;
   skipCadReferences?: boolean;
+  /** 主进程校验过的运行时准备结果，只写入发布暂存包，不覆盖其它原场景。 */
+  preparedSceneContents?: ReadonlyMap<string, string>;
   /** 数据中台图片引用判定与本地解析注入，避免打包模块直接依赖同步模块。 */
   isPlatformImageReference: (value: string) => boolean;
   findSyncedImageForReference: (editorRoots: readonly string[], reference: string) => Promise<SyncedImageAssetEntry | null>;
@@ -169,6 +171,7 @@ export async function buildDigitalTwinSourcePackage(
       options.skipCadReferences === true,
       options.isPlatformImageReference,
       options.findSyncedImageForReference,
+      options.preparedSceneContents,
     );
     const scenes = scenesResult.snapshots;
     const cadBundleMap = await prepareSourceSceneCadFiles(scenes.map(scene => scene.parsed),
@@ -344,6 +347,7 @@ async function readSceneSnapshots(
   skipCadReferences: boolean,
   isPlatformImageReference: (value: string) => boolean,
   findSyncedImageForReference: (editorRoots: readonly string[], reference: string) => Promise<SyncedImageAssetEntry | null>,
+  preparedSceneContents?: ReadonlyMap<string, string>,
 ): Promise<{ snapshots: SceneSnapshot[]; platformImageBundleMap: ReadonlyMap<string, PlatformImageBundle> }> {
   const scenesRoot = path.join(projectRoot, 'Scenes');
   const scenePaths = await findSceneFiles(scenesRoot, signal);
@@ -353,6 +357,10 @@ async function readSceneSnapshots(
   if (!scenePaths.some((scenePath) => path.resolve(scenePath) === entrySceneFilePath)) {
     throw new Error('入口场景不在当前项目 Scenes 目录中。');
   }
+  if (preparedSceneContents && (preparedSceneContents.size !== scenePaths.length
+    || scenePaths.some(file => !preparedSceneContents.has(path.resolve(file))))) {
+    throw new Error('SOURCE 场景集合在准备后发生变化，请重新准备发布。');
+  }
 
   const snapshots: SceneSnapshot[] = [];
   for (const sourcePath of scenePaths) {
@@ -360,7 +368,8 @@ async function readSceneSnapshots(
     const stat = await fs.lstat(sourcePath);
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`场景文件不是安全普通文件：${sourcePath}`);
     if (stat.size <= 0 || stat.size > MAX_SCENE_BYTES) throw new Error(`场景文件大小无效：${sourcePath}`);
-    const content = await readUtf8File(sourcePath, '数字孪生 SOURCE 场景文件');
+    const content = preparedSceneContents?.get(path.resolve(sourcePath)) ?? await readUtf8File(sourcePath, '数字孪生 SOURCE 场景文件');
+    if (Buffer.byteLength(content) > MAX_SCENE_BYTES) throw new Error(`准备后的场景文件大小无效：${sourcePath}`);
     let parsed: unknown;
     try {
       parsed = JSON.parse(content) as unknown;
