@@ -69,6 +69,7 @@ import {
 import { ManualRoamControls } from '../shared/ui/ManualRoamControls';
 import { useAutoPatrolInspectionHistory } from '../shared/ui/useAutoPatrolInspectionHistory';
 import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
+import { waitForSceneRenderReady } from '../runtime/babylon/sceneRenderReadiness';
 import { useDigitalTwinFullscreen } from './useDigitalTwinFullscreen';
 import {
   parseDigitalTwinHostRenderPixelRatioState,
@@ -235,21 +236,19 @@ export function PlayerApp() {
   const [startupPercent, setStartupPercent] = useState(6);
   const [modelLoadProgress, setModelLoadProgress] = useState<SceneRuntimeModelLoadProgress | null>(null);
   /** 首次场景加载全部结算后置位：后续按需加载（如 MQTT 货物模板）不再重新弹出全屏蒙版。 */
-  const initialLoadCompletedRef = useRef(false);
-  const completeInitialLoadRef = useRef<(() => void) | null>(null);
+  const [initialLoadCompleted, setInitialLoadCompleted] = useState(false);
+  const initialLoadTimeoutRef = useRef<(() => void) | null>(null);
   /** 首次场景加载是否仍在途：驱动超时兜底与蒙版显示。 */
-  const modelLoadingInProgress = modelLoadProgress?.loading === true
-    && modelLoadProgress.totalCount > 0
-    && !initialLoadCompletedRef.current;
+  const initialLoadingInProgress = phase !== 'blocked' && !initialLoadCompleted
+    && (phase === 'ready' || modelLoadProgress !== null);
 
   useEffect(() => {
-    if (!modelLoadingInProgress) return undefined;
+    if (!initialLoadingInProgress) return undefined;
     const timer = window.setTimeout(() => {
-      completeInitialLoadRef.current?.();
-      setRuntimeMessage('部分场景资源加载超时，场景可能尚未完整显示。');
+      initialLoadTimeoutRef.current?.();
     }, PLAYER_SCENE_LOADING_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
-  }, [modelLoadingInProgress]);
+  }, [initialLoadingInProgress]);
   const mqttStatus = useSyncExternalStore(
     mqttRuntimeStatusStore.subscribe,
     mqttRuntimeStatusStore.getSnapshot,
@@ -339,17 +338,33 @@ export function PlayerApp() {
     };
     const autoPatrolStartGate = new DeferredAutoPatrolStartGate();
     autoPatrolStartGateRef.current = autoPatrolStartGate;
-    initialLoadCompletedRef.current = false;
+    setInitialLoadCompleted(false);
     setModelLoadProgress(null);
     const initialLoadGate = new PlayerInitialLoadGate(() => {
-      initialLoadCompletedRef.current = true;
+      setInitialLoadCompleted(true);
+      if (initialLoadTimeoutRef.current === blockInitialLoad) initialLoadTimeoutRef.current = null;
       interactionController?.markInitialLoadComplete();
     }, {
-      // 超时只结束蒙版和握手；真实资源结算后才放行最新巡检启动请求。
+      // 只有真实资源及首帧结算成功后才放行巡检，超时进入明确阻断状态。
       onSettled: () => autoPatrolStartGate.markReady(),
+      verifyReady: async signal => {
+        if (!viewport) throw new Error('场景视图尚未创建。');
+        await waitForSceneRenderReady(viewport.scene, signal);
+      },
+      onError: error => {
+        if (disposed) return;
+        setPhase('blocked');
+        setMessage(`场景首帧验证失败：${getErrorMessage(error)}`);
+      },
     });
-    const forceCompleteInitialLoad = () => initialLoadGate.forceComplete();
-    completeInitialLoadRef.current = forceCompleteInitialLoad;
+    const blockInitialLoad = () => {
+      if (disposed) return;
+      initialLoadGate.dispose();
+      autoPatrolStartGate.dispose();
+      setPhase('blocked');
+      setMessage('场景资源加载或首帧验证超过 120 秒，场景尚未完整显示，请刷新页面重试。');
+    };
+    initialLoadTimeoutRef.current = blockInitialLoad;
     let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
     let unsubscribeManualRoamSnapshot: (() => void) | null = null;
     let removeAutoPatrolManualInputListeners: (() => void) | null = null;
@@ -490,6 +505,15 @@ export function PlayerApp() {
           },
           (progress) => {
             if (disposed) return;
+            const skybox = runtime?.getSkyboxReadiness();
+            if (skybox?.phase === 'error') {
+              const detail = `天空盒加载失败：${skybox.message || '资源未就绪'}`;
+              initialLoadGate.dispose();
+              setModelLoadProgress(progress);
+              setMessage(detail);
+              setPhase('blocked');
+              return;
+            }
             initialLoadGate.update(progress);
             setModelLoadProgress(progress);
           },
@@ -850,6 +874,8 @@ export function PlayerApp() {
         requestAnimationFrame(() => {
           if (!disposed) resize?.();
         });
+        const skyboxReadiness = runtime.getSkyboxReadiness();
+        if (skyboxReadiness.phase === 'error') throw new Error(`天空盒加载失败：${skyboxReadiness.message}`);
         setPhase('ready');
       } catch (error) {
         if (disposed || abortController.signal.aborted) return;
@@ -863,8 +889,8 @@ export function PlayerApp() {
         if (autoPatrolStartGateRef.current === autoPatrolStartGate) {
           autoPatrolStartGateRef.current = null;
         }
-        if (completeInitialLoadRef.current === forceCompleteInitialLoad) {
-          completeInitialLoadRef.current = null;
+        if (initialLoadTimeoutRef.current === blockInitialLoad) {
+          initialLoadTimeoutRef.current = null;
         }
         mqttClient?.dispose();
         unsubscribeManualRoamSnapshot?.();
@@ -912,8 +938,8 @@ export function PlayerApp() {
       if (autoPatrolStartGateRef.current === autoPatrolStartGate) {
         autoPatrolStartGateRef.current = null;
       }
-      if (completeInitialLoadRef.current === forceCompleteInitialLoad) {
-        completeInitialLoadRef.current = null;
+      if (initialLoadTimeoutRef.current === blockInitialLoad) {
+        initialLoadTimeoutRef.current = null;
       }
       mqttClient?.dispose();
       unsubscribeManualRoamSnapshot?.();
@@ -1132,7 +1158,7 @@ export function PlayerApp() {
     phase,
     startupPercent,
     modelLoadProgress,
-    initialLoadCompleted: initialLoadCompletedRef.current,
+    initialLoadCompleted,
     message,
   });
 

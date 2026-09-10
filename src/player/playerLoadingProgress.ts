@@ -1,6 +1,6 @@
 import type { SceneRuntimeModelLoadProgress } from '../runtime/babylon/SceneRuntime';
 
-/** 发布 Viewer 首次场景加载的最长等待时间；超时后强制收起蒙版避免永久阻塞。 */
+/** 发布 Viewer 首次资源与首帧验证的最长等待时间；超时后显示阻断错误。 */
 export const PLAYER_SCENE_LOADING_TIMEOUT_MS = 120_000;
 
 export type PlayerLoadingProgressInput = {
@@ -56,7 +56,8 @@ export function computePlayerLoadingProgress(
   const loadingInProgress = modelLoadProgress?.loading === true
     && modelLoadProgress.totalCount > 0
     && !initialLoadCompleted;
-  const visible = (phase !== 'ready' && phase !== 'blocked') || loadingInProgress;
+  const verifyingRender = phase === 'ready' && !initialLoadCompleted && !loadingInProgress;
+  const visible = phase !== 'blocked' && (phase !== 'ready' || loadingInProgress || verifyingRender);
   const currentFile = loadingInProgress ? formatLoadingFileName(modelLoadProgress.currentFile) : '';
   const detail = loadingInProgress
     ? `模型 ${modelLoadProgress.completedCount}/${modelLoadProgress.totalCount}`
@@ -64,8 +65,8 @@ export function computePlayerLoadingProgress(
     : null;
   return {
     visible,
-    percent: Math.max(0, Math.min(100, percent)),
-    label: loadingInProgress ? '正在加载场景模型' : message,
-    detail,
+    percent: Math.max(0, Math.min(verifyingRender ? 99 : 100, percent)),
+    label: verifyingRender ? '正在验证场景首帧' : loadingInProgress ? '正在加载场景模型' : message,
+    detail: verifyingRender ? '模型资源已准备，等待材质与实际渲染完成…' : detail,
   };
 }

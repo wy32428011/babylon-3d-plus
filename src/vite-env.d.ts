@@ -19,6 +19,7 @@ type LoadSceneResult = {
   canceled: boolean;
   filePath: string | null;
   content: string | null;
+  sceneOpenToken?: number;
 };
 
 type ReadTextFileRequest = {
@@ -150,6 +151,7 @@ type DataPlatformDeepLink = {
 };
 
 type DigitalTwinPublishContext = {
+  targetToken?: string;
   available: boolean;
   projectRoot: string | null;
   baseUrl: string | null;
@@ -176,6 +178,7 @@ type DigitalTwinPublishContextRequest = {
 };
 
 type DigitalTwinPublishRequest = {
+  targetToken?: string;
   requestId: string;
   publishName: string;
   remark: string;
@@ -249,12 +252,19 @@ type DataPlatformModelSyncProgress = {
 };
 
 type LocalSceneResourceSyncRequest = {
-  mode?: 'data-platform-latest';
+  mode?: 'data-platform-latest' | 'local-recovery';
   sceneContent?: string;
+  sceneFilePath?: string;
+  acceptEnvironmentRevision?: { resourceId: string; fileRevision: string; sha256: string };
   environment?: { resourceId?: string; displayName?: string };
 };
 
 type LocalSceneResourceSyncResult = {
+  issues?: Array<{ resourceKind: 'model' | 'combo' | 'environment' | 'skybox' | 'other'; resourceId?: string; sourcePath?: string; message: string }>;
+  recoveredSceneContent?: string;
+  recoveredReferenceCount?: number;
+  environmentRecoveryChoice?: { resourceId: string; displayName: string; previousRevision: string;
+    availableRevision: string; previousSize: number | null; availableSize: number; sha256: string };
   modelReplacements?: Array<{ sourceUrls: string[]; asset: ProjectModelAssetEntry }>;
   configured: boolean;
   sourceKey: string | null;
@@ -620,6 +630,7 @@ interface Window {
     saveScene: (request: SaveSceneRequest) => Promise<SaveSceneResult>;
     loadScene: () => Promise<LoadSceneResult>;
     loadSceneFile: (request: LoadSceneFileRequest) => Promise<LoadSceneResult>;
+    confirmSceneOpen: (request: { sceneOpenToken: number }) => Promise<boolean>;
     readTextFile: (request: ReadTextFileRequest) => Promise<ReadTextFileResult>;
     scanAssets: () => Promise<AssetEntry[]>;
     getRecentWorkspaces: () => Promise<RecentWorkspacesResult>;

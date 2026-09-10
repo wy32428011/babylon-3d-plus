@@ -45,7 +45,7 @@ test('环境模型进入首个可渲染帧后才允许结算首次加载进度',
     runtimeSource,
     /waitForRenderReady: \(signal\) => this\.waitForEnvironmentRenderReady\(signal\)/,
   );
-  assert.match(runtimeSource, /return waitForSceneRenderReady\(this\.scene, loadSignal\)/);
+  assert.match(runtimeSource, /return this\.loadDiagnostics\.measureAsync\('environmentRenderReady', \(\) => waitForSceneRenderReady\(this\.scene, loadSignal\)\)/);
   assert.ok(renderReadyWait >= 0, '环境模型提交前必须等待首个可渲染帧');
   assert.ok(readySnapshot > renderReadyWait, '首帧完成前不能发布 ready 快照');
   assert.ok(progressSettled > readySnapshot, '发布 ready 后才能结算环境进度单元');

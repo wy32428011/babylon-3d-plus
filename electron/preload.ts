@@ -98,6 +98,7 @@ contextBridge.exposeInMainWorld('editorApi', {
   saveScene: (request: SaveSceneRequest): Promise<SaveSceneResult> => ipcRenderer.invoke('scene:save', request),
   loadScene: (): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:load'),
   loadSceneFile: (request: LoadSceneFileRequest): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:loadFile', request),
+  confirmSceneOpen: (request: { sceneOpenToken: number }): Promise<boolean> => ipcRenderer.invoke('scene:confirmOpen', request),
   readTextFile: (request: ReadTextFileRequest): Promise<ReadTextFileResult> => ipcRenderer.invoke('file:readText', request),
   scanAssets: (): Promise<AssetEntry[]> => ipcRenderer.invoke('assets:scan'),
   getRecentWorkspaces: (): Promise<RecentWorkspacesResult> => ipcRenderer.invoke('project:getRecentWorkspaces'),

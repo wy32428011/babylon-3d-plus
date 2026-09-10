@@ -6,6 +6,7 @@ export type ScenePreparationPhase =
   | 'refreshing-scene-models'
   | 'loading-scene-models'
   | 'batching-scene-models'
+  | 'partial'
   | 'completed';
 
 export type ScenePreparationModelSyncPhase =
@@ -36,6 +37,7 @@ export type ScenePreparationRuntimeProgress = {
   batchedEntities: number;
   stable: boolean;
   forcedSettled: boolean;
+  waitingResource?: string | null;
 };
 
 export type ScenePreparationState = {
@@ -45,6 +47,7 @@ export type ScenePreparationState = {
   label: string;
   detail: string;
   completed: boolean;
+  editingAllowed: boolean;
   warnings: string[];
   modelSyncStatus: ModelSyncStatus;
   modelSyncRunId: string | null;
@@ -60,7 +63,8 @@ export type ScenePreparationEvent =
   | { type: 'asset-refresh-started'; refreshId: string }
   | { type: 'asset-refresh-settled'; refreshId: string; error: string | null }
   | ({ type: 'runtime-progress' } & Omit<ScenePreparationRuntimeProgress, 'forcedSettled'>)
-  | { type: 'runtime-settled-with-warning'; warning: string };
+  | { type: 'runtime-settled-with-warning'; warning: string; allowEditing?: boolean }
+  | { type: 'editing-allowed'; allowed: boolean };
 
 const EMPTY_RUNTIME_PROGRESS: ScenePreparationRuntimeProgress = {
   generation: '',
@@ -138,6 +142,7 @@ export function createScenePreparationState(sceneSessionId: string): ScenePrepar
     label: '正在准备场景',
     detail: '正在确认模型同步状态…',
     completed: false,
+    editingAllowed: false,
     warnings: [],
     modelSyncStatus: 'pending',
     modelSyncRunId: null,
@@ -222,6 +227,11 @@ function deriveScenePreparationState(
     detail = state.assetRefreshStatus === 'active'
       ? '正在重新关联场景模型与最新资源…'
       : '模型同步完成，等待刷新场景资源…';
+  } else if (state.runtime.forcedSettled && state.editingAllowed) {
+    phase = 'partial';
+    percent = state.percent;
+    label = '场景已打开，部分资源需要处理';
+    detail = state.warnings.join('\n');
   } else if (
     !state.runtime.stable
     && !state.runtime.forcedSettled
@@ -254,6 +264,10 @@ function deriveScenePreparationState(
   }
 
   const completed = phase === 'completed';
+  if (!completed && phase !== 'partial' && state.runtime.waitingResource) {
+    label = '正在准备场景资源';
+    detail = state.runtime.waitingResource;
+  }
   return {
     ...state,
     phase,
@@ -273,6 +287,11 @@ export function reduceScenePreparationState(
   let previousPercent = state.percent;
 
   switch (event.type) {
+    case 'editing-allowed':
+      // 只有明确的失败/超时结果允许继续编辑，查询开始不能绕过首帧门控。
+      if (event.allowed && !state.runtime.forcedSettled) return state;
+      nextState = { ...state, editingAllowed: event.allowed };
+      break;
     case 'model-sync-progress': {
       const progress = {
         ...event.progress,
@@ -296,7 +315,10 @@ export function reduceScenePreparationState(
         };
         break;
       }
-      if (isNewRun) previousPercent = 2;
+      if (isNewRun) {
+        previousPercent = 2;
+        state = { ...state, editingAllowed: false, warnings: [], runtime: { ...EMPTY_RUNTIME_PROGRESS } };
+      }
       if (progress.phase === 'failed') {
         nextState = {
           ...state,
@@ -348,6 +370,7 @@ export function reduceScenePreparationState(
         assetRefreshStatus: 'active',
         assetRefreshId: event.refreshId,
         completed: false,
+        editingAllowed: false,
         runtime: { ...EMPTY_RUNTIME_PROGRESS },
       };
       break;
@@ -360,7 +383,7 @@ export function reduceScenePreparationState(
       };
       break;
     case 'runtime-progress': {
-      if (state.completed) return state;
+      if (isScenePreparationSettled(state)) return state;
       // 资源热刷新落定前的采样仍属于旧运行时，不能用于解除新资源的准备门控。
       if (state.assetRefreshStatus !== 'settled') return state;
       nextState = {
@@ -374,6 +397,7 @@ export function reduceScenePreparationState(
           batchedEntities: normalizeCount(event.batchedEntities),
           stable: event.stable,
           forcedSettled: false,
+          waitingResource: event.waitingResource ?? null,
         },
       };
       break;
@@ -382,6 +406,7 @@ export function reduceScenePreparationState(
       if (state.assetRefreshStatus !== 'settled') return state;
       nextState = {
         ...state,
+        editingAllowed: event.allowEditing ?? state.editingAllowed,
         runtime: {
           ...state.runtime,
           stable: true,
@@ -412,7 +437,7 @@ export function getScenePreparationTimings() {
     const phase = currentScenePreparationState.phase;
     phases[phase] = (phases[phase] ?? 0) + now - preparationPhaseStartedAt;
   }
-  return { completed: preparationEndedAt !== null, totalMs: now - preparationStartedAt, phases,
+  return { completed: currentScenePreparationState.completed, settled: preparationEndedAt !== null, totalMs: now - preparationStartedAt, phases,
     runtimeStable: currentScenePreparationState.runtime.stable,
     forcedSettled: currentScenePreparationState.runtime.forcedSettled };
 }
@@ -421,7 +446,7 @@ function publishScenePreparationState(nextState: ScenePreparationState): void {
   if (nextState === currentScenePreparationState) return;
   const now = performance.now();
   if (nextState.sceneSessionId !== currentScenePreparationState.sceneSessionId
-    || (currentScenePreparationState.completed && !nextState.completed)) {
+    || (isScenePreparationSettled(currentScenePreparationState) && !isScenePreparationSettled(nextState))) {
     preparationStartedAt = now;
     preparationPhaseStartedAt = now;
     preparationEndedAt = null;
@@ -431,7 +456,7 @@ function publishScenePreparationState(nextState: ScenePreparationState): void {
     preparationPhaseDurations[previousPhase] = (preparationPhaseDurations[previousPhase] ?? 0) + now - preparationPhaseStartedAt;
     preparationPhaseStartedAt = now;
   }
-  if (nextState.completed && preparationEndedAt === null) preparationEndedAt = now;
+  if (isScenePreparationSettled(nextState) && preparationEndedAt === null) preparationEndedAt = now;
   currentScenePreparationState = nextState;
   for (const listener of scenePreparationListeners) listener();
 }
@@ -480,8 +505,12 @@ export function reportSceneRuntimeProgress(
   dispatchScenePreparationEvent(sceneSessionId, { type: 'runtime-progress', ...progress });
 }
 
-export function settleSceneRuntimeWithWarning(sceneSessionId: string, warning: string): void {
-  dispatchScenePreparationEvent(sceneSessionId, { type: 'runtime-settled-with-warning', warning });
+export function settleSceneRuntimeWithWarning(sceneSessionId: string, warning: string, allowEditing = false): void {
+  dispatchScenePreparationEvent(sceneSessionId, { type: 'runtime-settled-with-warning', warning, allowEditing });
+}
+
+export function allowScenePreparationEditing(sceneSessionId: string, allowed: boolean): void {
+  dispatchScenePreparationEvent(sceneSessionId, { type: 'editing-allowed', allowed });
 }
 
 export function getScenePreparationSnapshot(): ScenePreparationState {
@@ -490,7 +519,12 @@ export function getScenePreparationSnapshot(): ScenePreparationState {
 
 /** 全局键盘入口通过同一快照判断是否应阻止编辑操作。 */
 export function isScenePreparationActive(): boolean {
-  return !currentScenePreparationState.completed;
+  return !currentScenePreparationState.completed && !currentScenePreparationState.editingAllowed;
+}
+
+/** 成功与带问题继续打开都是本轮终态，但只有成功可以显示 100%。 */
+export function isScenePreparationSettled(state: ScenePreparationState): boolean {
+  return state.completed || state.phase === 'partial';
 }
 
 export function subscribeScenePreparation(listener: ScenePreparationListener): () => void {

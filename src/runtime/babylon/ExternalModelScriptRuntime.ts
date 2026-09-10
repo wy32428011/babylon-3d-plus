@@ -6,6 +6,7 @@ import type { ModelParameterDefinition, ModelParameterValue, ModelParameterValue
 import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 import { readUtf8ResponseText } from '../../shared/text/strictUtf8';
+import { modelInitializationScheduler } from './modelInitializationScheduler';
 
 type ExternalModelScriptInstance = {
   onStart?: () => void;
@@ -54,7 +55,18 @@ const DEFAULT_RUNTIME_CLASS_NAMES = [
 const SCRIPT_IMPORT_PATTERN = /^\s*import\s+(type\s+)?(.+?)\s+from\s+["']([^"']+)["'];?\s*$/gm;
 const VISIBLE_DECORATOR_PATTERN = /^\s*@visibleAs[A-Za-z]+\([^)]*\)\s*$/;
 const compiledScriptCache = new Map<string, CompiledExternalModelScript>();
+const scriptTextRequests = new Map<string, Promise<string>>();
+const compiledScriptRequests = new Map<string, Promise<CompiledExternalModelScript>>();
+const scriptLoadDiagnostics = { readRequests: 0, sharedReads: 0, compileRequests: 0, sharedCompiles: 0,
+  compiledCacheHits: 0, compileElapsedMs: 0 };
 let typescriptModulePromise: Promise<typeof TypeScriptModule> | null = null;
+
+/** 只读 renderer 会话计数；编译耗时包含首次等待 TypeScript 模块的时间。 */
+export function getExternalModelScriptLoadDiagnostics() {
+  return Object.freeze({ scope: 'renderer-session' as const, ...scriptLoadDiagnostics,
+    pendingReads: scriptTextRequests.size, pendingCompiles: compiledScriptRequests.size,
+    cachedCompiles: compiledScriptCache.size });
+}
 
 /** 管理单个导入模型上的外置参数化脚本生命周期。 */
 export class ExternalModelScriptRuntime {
@@ -160,15 +172,18 @@ export class ExternalModelScriptRuntime {
         this.dataDrivenConfigs.push(compiledScript.dataDriven);
       }
 
-      for (const className of this.getRuntimeClassNamesForAsset(scriptAsset)) {
-        const ScriptClass = compiledScript.classes[className];
-        if (!ScriptClass) continue;
+      await modelInitializationScheduler.run(() => {
+        if (this.disposed) return;
+        for (const className of this.getRuntimeClassNamesForAsset(scriptAsset)) {
+          const ScriptClass = compiledScript.classes[className];
+          if (!ScriptClass) continue;
 
-        const instance = new ScriptClass(this.node);
-        this.assignParameterValues(instance);
-        this.instances.push(instance);
-        this.callLifecycle(instance, 'onStart');
-      }
+          const instance = new ScriptClass(this.node);
+          this.assignParameterValues(instance);
+          this.instances.push(instance);
+          this.callLifecycle(instance, 'onStart');
+        }
+      });
     } catch (error) {
       if (!this.disposed) {
         this.initializationError ??= `脚本 ${scriptAsset.name} 加载失败：${error instanceof Error ? error.message : String(error)}`;
@@ -246,20 +261,52 @@ async function loadCompiledExternalModelScript(
   const sourceText = await fetchScriptText(scriptAsset, assetRevision);
   const cacheKey = `${scriptAsset.sourceUrl}:${hashText(sourceText)}`;
   const cachedScript = compiledScriptCache.get(cacheKey);
-  if (cachedScript) return cachedScript;
+  if (cachedScript) {
+    scriptLoadDiagnostics.compiledCacheHits += 1;
+    return cachedScript;
+  }
+  const pending = compiledScriptRequests.get(cacheKey);
+  if (pending) {
+    scriptLoadDiagnostics.sharedCompiles += 1;
+    return pending;
+  }
 
-  const compiledScript = await compileExternalModelScript(sourceText);
-  compiledScriptCache.set(cacheKey, compiledScript);
-  return compiledScript;
+  // 首次 compiler import 会让多个实例同时等待，在 await 前登记任务才可避免重复转译。
+  scriptLoadDiagnostics.compileRequests += 1;
+  const startedAt = performance.now();
+  const request = compileExternalModelScript(sourceText);
+  compiledScriptRequests.set(cacheKey, request);
+  try {
+    const compiledScript = await request;
+    compiledScriptCache.set(cacheKey, compiledScript);
+    return compiledScript;
+  } finally {
+    if (compiledScriptRequests.get(cacheKey) === request) compiledScriptRequests.delete(cacheKey);
+    scriptLoadDiagnostics.compileElapsedMs += Math.max(0, performance.now() - startedAt);
+  }
 }
 
 /** 从 editor-asset 协议读取模型包内的 TypeScript 源码。 */
 async function fetchScriptText(scriptAsset: ModelScriptAsset, assetRevision: string | undefined): Promise<string> {
-  const response = await fetch(createVersionedRuntimeAssetUrl(scriptAsset.sourceUrl, assetRevision));
-  if (!response.ok) {
-    throw new Error(`无法读取脚本：${response.status}`);
+  const url = createVersionedRuntimeAssetUrl(scriptAsset.sourceUrl, assetRevision);
+  const pending = scriptTextRequests.get(url);
+  if (pending) {
+    scriptLoadDiagnostics.sharedReads += 1;
+    return pending;
   }
-  return readUtf8ResponseText(response, `模型脚本 ${scriptAsset.name}`);
+  scriptLoadDiagnostics.readRequests += 1;
+  const request = (async () => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`无法读取脚本：${response.status}`);
+    return readUtf8ResponseText(response, `模型脚本 ${scriptAsset.name}`);
+  })();
+  scriptTextRequests.set(url, request);
+  try {
+    return await request;
+  } finally {
+    // 只合并进行中的读取；后续请求仍可发现未版本化脚本的修改，失败也可再次读取。
+    if (scriptTextRequests.get(url) === request) scriptTextRequests.delete(url);
+  }
 }
 
 /** 外置脚本跟随模型包导入版本追加查询参数，避免重新导入后仍读取旧脚本文本。 */

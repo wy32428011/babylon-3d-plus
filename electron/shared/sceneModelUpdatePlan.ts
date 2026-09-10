@@ -9,6 +9,7 @@ export type DataPlatformModelIdentity = {
   modelPath: string;
 };
 export type SceneModelUpdateItem = Omit<DataPlatformModelIdentity, 'sourceKey'> & { sourceUrls: string[] };
+export type SceneModelUpdateIssue = { resourceKind: 'model' | 'combo' | 'environment'; resourceId?: string; message: string };
 
 /** 兼容明确的历史 Env-ID 目录；受管环境缺少身份时不能被当作已同步本地环境。 */
 export function getSceneEnvironmentUpdateReference(scene: unknown): { resourceId: string } | undefined {
@@ -48,29 +49,44 @@ export function normalizeDataPlatformModelIdentity(value: unknown): DataPlatform
 }
 
 /** 只查询场景实际引用的中台模型；本地资产不按名称猜测，间接引用也不能漏掉。 */
-export function planSceneModelUpdates(scene: unknown, sourceKey: string): SceneModelUpdateItem[] {
+export function planSceneModelUpdates(scene: unknown, sourceKey: string, options: {
+  allowSourceRebind?: boolean;
+  onIssue?: (issue: SceneModelUpdateIssue) => void;
+} = {}): SceneModelUpdateItem[] {
   const { models, devices } = collectPublishModelReferences(scene);
   const plan = new Map<string, SceneModelUpdateItem>();
+  const blocked = new Set<string>();
   for (const asset of [...models.map(reference => reference.asset), ...devices]) {
-    const identity = normalizeDataPlatformModelIdentity(asset.dataPlatformModel);
-    if (identity && identity.sourceKey !== sourceKey) throw new Error('场景模型的数据中台来源与当前项目不一致，请核对模型来源后同步。');
     const pathKey = getClickEventModelResourceKey(asset.sourceUrl);
-    if (!pathKey) {
-      if (identity || /(?:model|combo)-[1-9]\d*/i.test(String(asset.sourceUrl))) {
-        throw new Error('场景中存在无效的中台模型引用，无法确认资源身份。');
+    const [pathKind, pathId] = pathKey?.split(':') ?? [];
+    const resourceKey = pathKey ? `${pathKind}:${pathId}` : undefined;
+    if (resourceKey && blocked.has(resourceKey)) continue;
+    try {
+      const identity = normalizeDataPlatformModelIdentity(asset.dataPlatformModel);
+      if (identity && identity.sourceKey !== sourceKey && !options.allowSourceRebind) throw new Error('场景模型的数据中台来源与当前项目不一致，请核对模型来源后同步。');
+      if (!pathKey) {
+        if (identity || /(?:model|combo)-[1-9]\d*/i.test(String(asset.sourceUrl))) {
+          throw new Error('场景中存在无效的中台模型引用，无法确认资源身份。');
+        }
+        continue;
       }
-      continue;
+      const [kind, resourceId, modelPath] = pathKey.split(':') as ['model' | 'combo', string, string];
+      if (identity && (identity.kind !== kind || identity.resourceId !== resourceId
+        || identity.modelPath.toLowerCase() !== modelPath)) throw new Error('模型身份与包内引用不一致，已停止更新。');
+      const key = `${kind}:${resourceId}`;
+      const previous = plan.get(key);
+      if (previous && previous.modelPath !== modelPath) throw new Error(`模型 ${key} 引用了多个包内变体，无法自动替换为同一主模型。`);
+      const item = previous ?? { kind, resourceId, modelPath, sourceUrls: [] };
+      const sourceUrl = String(asset.sourceUrl);
+      if (!item.sourceUrls.includes(sourceUrl)) item.sourceUrls.push(sourceUrl);
+      plan.set(key, item);
+    } catch (error) {
+      if (!options.onIssue) throw error;
+      // 同一资源任一引用有歧义时整体保留，后续重复实例也不能重新进入计划。
+      if (resourceKey) { blocked.add(resourceKey); plan.delete(resourceKey); }
+      options.onIssue({ resourceKind: pathKind === 'combo' ? 'combo' : 'model', resourceId: pathId,
+        message: error instanceof Error ? error.message : String(error) });
     }
-    const [kind, resourceId, modelPath] = pathKey.split(':') as ['model' | 'combo', string, string];
-    if (identity && (identity.kind !== kind || identity.resourceId !== resourceId
-      || identity.modelPath.toLowerCase() !== modelPath)) throw new Error('模型身份与包内引用不一致，已停止更新。');
-    const key = `${kind}:${resourceId}`;
-    const previous = plan.get(key);
-    if (previous && previous.modelPath !== modelPath) throw new Error(`模型 ${key} 引用了多个包内变体，无法自动替换为同一主模型。`);
-    const item = previous ?? { kind, resourceId, modelPath, sourceUrls: [] };
-    const sourceUrl = String(asset.sourceUrl);
-    if (!item.sourceUrls.includes(sourceUrl)) item.sourceUrls.push(sourceUrl);
-    plan.set(key, item);
   }
   if (plan.size > 1000) throw new Error('场景引用的模型种类超过 1000 项，请拆分场景后同步。');
   return [...plan.values()];

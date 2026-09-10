@@ -1,4 +1,5 @@
 import { isDataPlatformProjectClosing } from './dataPlatformIpc.js';
+import { isDataPlatformProjectOpening } from './dataPlatformProjectService.js';
 import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,11 +11,10 @@ import type {
   DigitalTwinPublishRequest,
   DigitalTwinPublishResult,
 } from '../types.js';
-import { getDigitalTwinPublishContext, getLocalDigitalTwinPublishContext, publishDigitalTwin } from './digitalTwinPublishService.js';
+import { getDigitalTwinPublishContext, getLocalDigitalTwinPublishContext, publishDigitalTwin, resolveDigitalTwinPublishTarget } from './digitalTwinPublishService.js';
 
-import { getCurrentProjectRoot } from './projectAssetStore.js';
-import { recoverPublishSceneModels } from './digitalTwinModelRecovery.js';
-import { getCurrentDataPlatformBinding, resolveDataPlatformBindingSharedResourcesRoot, resolveDataPlatformSharedResourcesRoot } from './dataPlatformBindingStore.js';
+import { recoverPublishSceneResources } from './digitalTwinPublishResourceRecovery.js';
+import { resolveDataPlatformBindingSharedResourcesRoot, resolveDataPlatformBindingWorkspaceRoot } from './dataPlatformBindingStore.js';
 
 const RECOVER_CHANNEL = 'digital-twin-publish:recoverModels';
 const CONTEXT_CHANNEL = 'digital-twin-publish:getContext';
@@ -24,6 +24,7 @@ const PROGRESS_CHANNEL = 'digital-twin-publish:progress';
 
 type ActivePublishTask = {
   requestId: string;
+  targetToken?: string;
   sender: WebContents;
   controller: AbortController;
 };
@@ -69,8 +70,9 @@ async function handleGetContext(
 ): Promise<DigitalTwinPublishContext> {
   const { sender } = assertTrustedSender(event);
   if (isDataPlatformProjectClosing()) throw new Error('正在关闭当前项目，请稍后重试。');
+  if (isDataPlatformProjectOpening()) throw new Error('正在打开数据中台工程，请完成加载后再发布。');
   const publishActive = activeTasks.has(sender.id) || isDigitalTwinPublishActive();
-  if (publishActive) return getLocalDigitalTwinPublishContext(true);
+  if (publishActive) return getLocalDigitalTwinPublishContext(true, activeTasks.values().next().value?.targetToken);
   return getDigitalTwinPublishContext(validateOptionalProjectId(request?.projectId));
 }
 
@@ -80,13 +82,15 @@ async function handleStartPublish(
 ): Promise<DigitalTwinPublishResult> {
   const { sender } = assertTrustedSender(event);
   if (isDataPlatformProjectClosing()) throw new Error('正在关闭当前项目，请稍后重试。');
+  if (isDataPlatformProjectOpening()) throw new Error('正在打开数据中台工程，请完成加载后再发布。');
   if (shuttingDown) throw new Error('应用正在退出，无法开始数字孪生发布。');
   bindSenderCleanup(sender);
   if (activeTasks.has(sender.id)) throw new Error('当前窗口已有数字孪生发布任务正在执行。');
   if (isDigitalTwinPublishActive()) throw new Error('已有其他窗口正在发布数字孪生工程。');
 
   const requestId = validateRequestId(request?.requestId);
-  const task: ActivePublishTask = { requestId, sender, controller: new AbortController() };
+  if (typeof request?.targetToken !== 'string' || !request.targetToken) throw new Error('请先完成发布目标预检。');
+  const task: ActivePublishTask = { requestId, targetToken: request.targetToken, sender, controller: new AbortController() };
   activeTasks.set(sender.id, task);
   const completion = publishDigitalTwin(request, task.controller.signal, (progress) => sendProgress(task, progress));
   activeTaskPromises.add(completion);
@@ -105,36 +109,28 @@ async function handleRecoverModels(
 ): Promise<import('../types.js').DigitalTwinModelRecoveryResult> {
   const { sender } = assertTrustedSender(event);
   if (isDataPlatformProjectClosing()) throw new Error('正在关闭当前项目，请稍后重试。');
+  if (isDataPlatformProjectOpening()) throw new Error('正在打开数据中台工程，请完成加载后再发布。');
   if (shuttingDown || isDigitalTwinPublishActive()) throw new Error('当前已有发布任务或应用正在退出，无法恢复模型。');
   const requestId = validateRequestId(request?.requestId);
   const projectId = validateOptionalProjectId(request?.projectId);
-  const binding = getCurrentDataPlatformBinding();
-  const projectRoot = getCurrentProjectRoot();
-  if (binding && projectId && binding.metadata.projectId !== projectId) throw new Error('当前场景已绑定其他业务项目。');
   bindSenderCleanup(sender);
-  const task: ActivePublishTask = { requestId, sender, controller: new AbortController() };
+  const task: ActivePublishTask = { requestId, targetToken: request?.targetToken, sender, controller: new AbortController() };
   activeTasks.set(sender.id, task);
-  const completion = recoverPublishSceneModels(request?.sceneContent, async () => {
-    if (binding) return {
-      baseUrl: binding.metadata.baseUrl,
-      sharedResourcesRoot: resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata),
-    };
-    const { readDataPlatformConfig } = await import('./dataPlatformIpc.js');
-    const config = await readDataPlatformConfig();
-    if (!config.baseUrl) throw new Error('尚未配置数据中台地址，无法重新拉取模型。');
-    return { baseUrl: config.baseUrl, sharedResourcesRoot: resolveDataPlatformSharedResourcesRoot(config.workspaceRoot) };
-  }, task.controller.signal, (detail) => sendProgress(task, {
-    requestId, phase: 'saving', detail, percent: 0, uploadedBytes: 0, totalBytes: 0,
-  }));
+  const completion = (async () => {
+    const target = await resolveDigitalTwinPublishTarget(request?.targetToken, projectId);
+    return recoverPublishSceneResources(request?.sceneContent, {
+      baseUrl: target.metadata.baseUrl,
+      projectRoot: target.projectRoot,
+      legacyWorkspaceRoot: resolveDataPlatformBindingWorkspaceRoot(target.projectRoot, target.metadata),
+      sharedResourcesRoot: resolveDataPlatformBindingSharedResourcesRoot(target.projectRoot, target.metadata),
+    }, task.controller.signal, (detail) => sendProgress(task, {
+      requestId, phase: 'saving', detail, percent: 0, uploadedBytes: 0, totalBytes: 0,
+    }));
+  })();
   activeTaskPromises.add(completion);
   try {
     const result = await completion;
-    const currentBinding = getCurrentDataPlatformBinding();
-    if (getCurrentProjectRoot() !== projectRoot || currentBinding?.projectRoot !== binding?.projectRoot
-      || currentBinding?.metadata.projectId !== binding?.metadata.projectId
-      || currentBinding?.metadata.baseUrl !== binding?.metadata.baseUrl) {
-      throw new Error('恢复模型期间业务项目已切换，请重新发布。');
-    }
+    await resolveDigitalTwinPublishTarget(request?.targetToken, projectId);
     return result;
   } finally {
     activeTaskPromises.delete(completion);

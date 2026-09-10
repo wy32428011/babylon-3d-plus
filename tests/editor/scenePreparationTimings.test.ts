@@ -25,3 +25,18 @@ test('准备耗时在自然完成后冻结，新会话清空，超时警告不�
   assert.equal(getScenePreparationTimings().totalMs, 0);
   assert.equal(getScenePreparationTimings().completed, false);
 });
+
+test('明确带问题继续后冻结本轮耗时，但不报告加载成功', context => {
+  let now = 500;
+  context.mock.method(performance, 'now', () => now);
+  beginScenePreparation('timings-partial');
+  skipSceneModelSync('timings-partial', null);
+  beginSceneModelAssetRefresh('timings-partial', 'partial');
+  settleSceneModelAssetRefresh('timings-partial', null, 'partial');
+  now = 700;
+  settleSceneRuntimeWithWarning('timings-partial', '资源不可用', true);
+  assert.equal(getScenePreparationTimings().completed, false);
+  assert.equal(getScenePreparationTimings().settled, true);
+  now = 1200;
+  assert.equal(getScenePreparationTimings().totalMs, 200);
+});

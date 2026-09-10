@@ -17,6 +17,8 @@ export type LoadSceneResult = {
   canceled: boolean;
   filePath: string | null;
   content: string | null;
+  /** 成功读取后由主进程签发，待场景格式校验通过再确认发布归属。 */
+  sceneOpenToken?: number;
 };
 
 export type ReadTextFileRequest = {
@@ -152,6 +154,7 @@ export type DataPlatformDeepLink = {
 };
 
 export type DigitalTwinPublishContext = {
+  targetToken?: string;
   available: boolean;
   projectRoot: string | null;
   baseUrl: string | null;
@@ -178,6 +181,7 @@ export type DigitalTwinPublishContextRequest = {
 };
 
 export type DigitalTwinPublishRequest = {
+  targetToken?: string;
   requestId: string;
   publishName: string;
   remark: string;
@@ -229,12 +233,14 @@ export type DigitalTwinPublishResult = {
 
 /** 发布前先恢复模型，结果由 renderer 原子回写场景后再提交同一份快照。 */
 export type DigitalTwinModelRecoveryRequest = {
+  targetToken?: string;
   requestId: string;
   projectId: string | null;
   sceneContent: string;
 };
 export type DigitalTwinModelRecoveryResult = {
   replacements: Array<{ sourceUrls: string[]; asset: ProjectModelAssetEntry }>;
+  skyboxReplacements?: Array<{ entityId: string | null; sourceUrl: string; skybox: Record<string, unknown> }>;
 };
 
 export type DigitalTwinPublishCancelRequest = {
@@ -263,12 +269,19 @@ export type DataPlatformModelSyncProgress = {
 };
 
 export type LocalSceneResourceSyncRequest = {
-  mode?: 'data-platform-latest';
+  mode?: 'data-platform-latest' | 'local-recovery';
   sceneContent?: string;
+  sceneFilePath?: string;
+  acceptEnvironmentRevision?: { resourceId: string; fileRevision: string; sha256: string };
   environment?: { resourceId?: string; displayName?: string };
 };
 
 export type LocalSceneResourceSyncResult = {
+  issues?: Array<{ resourceKind: 'model' | 'combo' | 'environment' | 'skybox' | 'other'; resourceId?: string; sourcePath?: string; message: string }>;
+  recoveredSceneContent?: string;
+  recoveredReferenceCount?: number;
+  environmentRecoveryChoice?: { resourceId: string; displayName: string; previousRevision: string;
+    availableRevision: string; previousSize: number | null; availableSize: number; sha256: string };
   modelReplacements?: Array<{ sourceUrls: string[]; asset: ProjectModelAssetEntry }>;
   configured: boolean;
   sourceKey: string | null;

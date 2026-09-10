@@ -60,7 +60,11 @@ export function resolveDataPlatformBindingWorkspaceRoot(
   if (path.basename(projectsRoot).toLowerCase() !== 'projects' || path.basename(normalizedProjectRoot) !== metadata.projectId) {
     throw new Error('本地数据中台项目绑定缺少工作区信息，且项目目录结构无法安全反推。');
   }
-  return path.dirname(projectsRoot);
+  const parentRoot = path.dirname(projectsRoot);
+  if (/^[a-f0-9]{64}$/i.test(path.basename(parentRoot)) && path.basename(path.dirname(parentRoot)).toLowerCase() === 'platforms') {
+    return path.dirname(path.dirname(parentRoot));
+  }
+  return parentRoot;
 }
 
 export function resolveDataPlatformBindingSharedResourcesRoot(
@@ -188,6 +192,8 @@ export async function updateDataPlatformBinding(
   }
   return updated;
 }
+
+export { normalizeBaseUrl as normalizeDataPlatformBaseUrl };
 
 function normalizeBaseUrl(value: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error('数据中台地址不能为空。');

@@ -9,6 +9,59 @@ import {
 } from '../../src/editor/loading/scenePreparationProgress.ts';
 import type { Entity } from '../../src/editor/model/Entity.ts';
 
+test('远端场景局部失败可带警告进入编辑，仍保留未通过运行时校验的标记', () => {
+  let state = createScenePreparationState('remote');
+  state = reduceScenePreparationState(state, { type: 'model-sync-skipped', error: null });
+  state = reduceScenePreparationState(state, { type: 'asset-refresh-started', refreshId: 'retry' });
+  state = reduceScenePreparationState(state, { type: 'asset-refresh-settled', refreshId: 'retry', error: '模型下载失败' });
+  state = reduceScenePreparationState(state, { type: 'runtime-settled-with-warning', warning: '模型下载失败', allowEditing: true });
+  assert.equal(state.completed, false);
+  assert.equal(state.phase, 'partial');
+  assert.ok(state.percent < 100);
+  assert.equal(state.runtime.forcedSettled, true);
+  assert.deepEqual(state.warnings, ['模型下载失败']);
+});
+
+test('资源查询期间不能提前解除加载门控；本地原有失败仍保持门控', () => {
+  const initial = createScenePreparationState('remote');
+  const editable = reduceScenePreparationState(initial, { type: 'editing-allowed', allowed: true });
+  assert.equal(editable.editingAllowed, false);
+  assert.equal(editable.completed, false);
+  let local = reduceScenePreparationState(initial, { type: 'model-sync-skipped', error: null });
+  local = reduceScenePreparationState(local, { type: 'asset-refresh-started', refreshId: 'local' });
+  local = reduceScenePreparationState(local, { type: 'asset-refresh-settled', refreshId: 'local', error: null });
+  local = reduceScenePreparationState(local, { type: 'runtime-settled-with-warning', warning: '本地失败' });
+  assert.equal(local.completed, false);
+});
+
+test('带问题继续编辑后重试立即恢复门控，并清除上一轮的终态', () => {
+  let state = createScenePreparationState('retry-partial');
+  state = reduceScenePreparationState(state, { type: 'model-sync-skipped', error: null });
+  state = reduceScenePreparationState(state, { type: 'asset-refresh-started', refreshId: 'first' });
+  state = reduceScenePreparationState(state, { type: 'asset-refresh-settled', refreshId: 'first', error: null });
+  state = reduceScenePreparationState(state, { type: 'runtime-settled-with-warning', warning: '加载失败', allowEditing: true });
+  state = reduceScenePreparationState(state, { type: 'model-sync-progress', progress: {
+    runId: 'retry', phase: 'querying', completed: 0, total: 0, message: '重试', error: null,
+  } });
+  assert.equal(state.editingAllowed, false);
+  assert.equal(state.runtime.forcedSettled, false);
+  assert.equal(state.completed, false);
+  assert.deepEqual(state.warnings, []);
+});
+
+test('模型已全部就绪但天空盒仍在准备时，显示真实等待资源而不是合批完成', () => {
+  let state = createScenePreparationState('skybox-pending');
+  state = reduceScenePreparationState(state, { type: 'model-sync-skipped', error: null });
+  state = reduceScenePreparationState(state, { type: 'asset-refresh-started', refreshId: 'one' });
+  state = reduceScenePreparationState(state, { type: 'asset-refresh-settled', refreshId: 'one', error: null });
+  state = reduceScenePreparationState(state, { type: 'runtime-progress', generation: 'one',
+    totalModels: 98, settledModels: 98, expectedBatchedEntities: 0, batchedEntities: 0,
+    stable: false, waitingResource: '正在准备天空盒 skybox.exr' });
+  assert.equal(state.completed, false);
+  assert.ok(state.percent < 100);
+  assert.equal(state.detail, '正在准备天空盒 skybox.exr');
+});
+
 function createPreparationModelEntity(
   id: string,
   options: {

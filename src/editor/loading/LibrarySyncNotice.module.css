@@ -1,0 +1,20 @@
+.stack { max-height: min(180px, 25vh); overflow-y: auto; flex-shrink: 0; }
+.stack:empty { display: none; }
+:global(.project-library) :global(.library-sync-status).notice { position: relative; padding-right: 42px; }
+:global(.project-library) .notice .close {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+:global(.project-library) .notice .close:hover { background: #ffffff18; }
+:global(.project-library) .notice .close:focus-visible { outline: 2px solid #73c7ff; outline-offset: 1px; }

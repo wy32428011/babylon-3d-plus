@@ -102,6 +102,8 @@ async function run() {
       await writeFile(reused.sceneFilePath, JSON.stringify(failedPublishScene));
       await assert.rejects(service.openDataPlatformProject({ ...project, latestEditorProjectPackageUrl: '/failed.zip' }, baseUrl, oldWorkspace), /503/);
       assert.equal(JSON.parse(await readFile(reused.sceneFilePath, 'utf8')).scene.name, failedPublishScene.scene.name, '远端失败时保留本地文件但不得成功回退');
+      await assert.rejects(service.openDataPlatformProject({ ...project, latestEditorProjectPackageUrl: null }, baseUrl, oldWorkspace), /工程版本.*工程包/);
+      assert.equal(JSON.parse(await readFile(reused.sceneFilePath, 'utf8')).scene.name, failedPublishScene.scene.name, '已存在远端版本却缺少包 URL 时禁止空场景覆盖');
       const empty = await service.openDataPlatformProject({ ...project, latestEditorProjectId: null, latestEditorProjectVersionId: null,
         latestEditorProjectVersionNumber: null, latestEditorProjectPackageUrl: null }, baseUrl, oldWorkspace);
       assert.equal(empty.source, 'generated');

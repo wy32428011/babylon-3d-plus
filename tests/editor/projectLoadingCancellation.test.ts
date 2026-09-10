@@ -33,7 +33,7 @@ test('真实store场景提交边界丢弃取消后的loadSceneFile结果及后�
   let syncs = 0;
   let committed: { environmentStartupRelinkSessionId?: string | null; sceneResourcePolicy?: string } = {};
   const loadSceneFromFile = runInNewContext(`({${source.slice(start, end)}}).loadSceneFromFile`, {
-    window: { editorApi: { loadSceneFile: () => new Promise((done) => { resolve = done; }) } },
+    window: { editorApi: { loadSceneFile: () => new Promise((done) => { resolve = done; }), confirmSceneOpen: async () => true } },
     get: () => ({ runtimeMode: 'edit', pushLog: () => { commits += 1; } }),
     set: (update: (state: object) => object) => { commits += 1; committed = update({}); },
     deserializeScene: JSON.parse,
@@ -51,14 +51,14 @@ test('真实store场景提交边界丢弃取消后的loadSceneFile结果及后�
   assert.equal(commits, 0);
   assert.equal(syncs, 0);
   const normal = loadSceneFromFile('current.scene.json');
-  resolve({ canceled: false, content: '{"name":"current","sceneSettings":{"environment":null}}', filePath: 'current.scene.json' });
+  resolve({ canceled: false, content: '{"name":"current","sceneSettings":{"environment":null}}', filePath: 'current.scene.json', sceneOpenToken: 1 });
   assert.equal(await normal, true);
   assert.equal(commits, 1);
   assert.equal(syncs, 1, '普通/组合与环境由本地准备流程统一启动，仅图片继续后台同步');
   assert.equal(committed.sceneResourcePolicy, 'local-refresh');
   assert.equal(committed.environmentStartupRelinkSessionId, null);
   const remote = loadSceneFromFile('bound.scene.json', () => true, true);
-  resolve({ canceled: false, content: '{"name":"bound","sceneSettings":{"environment":{"packagePath":"D:/old-local/environment"}}}', filePath: 'bound.scene.json' });
+  resolve({ canceled: false, content: '{"name":"bound","sceneSettings":{"environment":{"packagePath":"D:/old-local/environment"}}}', filePath: 'bound.scene.json', sceneOpenToken: 2 });
   assert.equal(await remote, true);
   assert.equal(committed.environmentStartupRelinkSessionId, 'loaded-session');
 });

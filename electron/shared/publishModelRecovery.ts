@@ -51,7 +51,7 @@ export function publishModelMatchKey(sourceUrl: unknown): string {
 /** 保留可用场景快照；缺失文件与没有任何场景目标的绑定都必须先拉取模型。 */
 export async function planPublishModelRecovery(
   scene: unknown,
-  isAvailable: (asset: JsonObject) => Promise<boolean>,
+  isAvailable: (asset: JsonObject, reference?: PublishModelReference) => Promise<boolean>,
 ): Promise<PublishModelRecoveryItem[]> {
   const { models, devices } = collectPublishModelReferences(scene);
   const modelKeys = new Set(models.filter(({ clickTarget }) => clickTarget).map(({ asset }) => publishModelMatchKey(asset.sourceUrl)).filter(Boolean));
@@ -79,12 +79,15 @@ export async function planPublishModelRecovery(
     plan.set(resourceKey, item);
   };
   const availability = new Map<string, boolean>();
-  for (const { asset } of models) {
+  for (const reference of models) {
+    const { asset } = reference;
     // 多个实例共享同一资源时，主文件与脚本的检查只执行一次。
-    const cacheKey = JSON.stringify([asset.sourceUrl, asset.scriptAssets]);
+    const paths = (owner?: JsonObject) => owner && [owner.sourcePath, owner.sourceUrl, owner.packagePath, owner.metadataPath,
+      owner.thumbnailPath, owner.thumbnailUrl, owner.assetRevision, owner.scriptAssets, owner.scriptPaths];
+    const cacheKey = JSON.stringify([paths(asset), paths(reference.target), reference.target?.assetId]);
     let available = availability.get(cacheKey);
     if (available === undefined) {
-      available = await isAvailable(asset);
+      available = await isAvailable(asset, reference);
       availability.set(cacheKey, available);
     }
     if (!available) requireRecovery(asset);

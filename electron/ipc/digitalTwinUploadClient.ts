@@ -1,3 +1,4 @@
+import { formatDigitalTwinPublishErrorMessage } from '../shared/digitalTwinPublishErrorMessage.js';
 import { net } from 'electron';
 import { promises as fs } from 'node:fs';
 import { createPendingChunkIndexes } from './digitalTwinPublishProtocol.js';
@@ -101,7 +102,7 @@ export class DigitalTwinApiError extends Error {
   readonly httpStatus: number;
 
   constructor(code: string, message: string, data: unknown, httpStatus: number) {
-    super(message);
+    super(formatDigitalTwinPublishErrorMessage(code, message, data));
     this.name = 'DigitalTwinApiError';
     this.code = code;
     this.data = data;

@@ -637,11 +637,14 @@ export async function removeRecentWorkspaceItem(kind: 'project' | 'scene', itemP
   });
 }
 
-export async function commitRecentProjectActivation(projectRoot: string): Promise<void> {
+export async function commitRecentProjectActivation(projectRoot: string, assertCanActivate?: () => void): Promise<void> {
+  assertCanActivate?.();
   const normalizedProjectRoot = normalizeFilePath(projectRoot);
   await ensureProjectDirectories(normalizedProjectRoot);
+  assertCanActivate?.();
   authorizeProjectAssetRoots(normalizedProjectRoot);
   await persistCurrentProjectRoot(normalizedProjectRoot);
+  assertCanActivate?.();
   setCurrentProjectRoot(normalizedProjectRoot);
 }
 
@@ -849,13 +852,15 @@ export async function ensureCurrentProjectRootWithDialog(): Promise<string | nul
   return selectCurrentProjectRootWithDialog();
 }
 
-export async function selectCurrentProjectRootWithDialog(): Promise<string | null> {
+export async function selectCurrentProjectRootWithDialog(assertCanActivate?: () => void): Promise<string | null> {
+  assertCanActivate?.();
   const result = await dialog.showOpenDialog({
     title: '选择项目目录',
     properties: ['openDirectory', 'createDirectory'],
   });
 
   const [projectRoot] = result.filePaths;
+  assertCanActivate?.();
 
   if (result.canceled || !projectRoot) {
     return null;
@@ -863,9 +868,12 @@ export async function selectCurrentProjectRootWithDialog(): Promise<string | nul
 
   const selectedProjectRoot = normalizeFilePath(projectRoot);
   await ensureProjectDirectories(selectedProjectRoot);
+  assertCanActivate?.();
   authorizeProjectAssetRoots(selectedProjectRoot);
   await persistCurrentProjectRoot(selectedProjectRoot);
+  assertCanActivate?.();
   await rememberRecentProjectRoot(selectedProjectRoot);
+  assertCanActivate?.();
   setSharedProjectAssetRoot(null);
   setSharedProjectSkyboxRoot(null);
   setSharedProjectEnvironmentRoot(null);

@@ -1,4 +1,5 @@
 import { mergeModelAssetUpdate } from '../assets/mergeModelAssetUpdate';
+import { restoreFailedSceneResources, type FailedSceneResources } from '../assets/restoreFailedSceneResources';
 import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../model/alarmManager';
 import { create } from 'zustand';
 import { getRequiredEnvironmentResourceIds } from '../../../electron/shared/sceneEnvironmentReferences';
@@ -470,7 +471,10 @@ type EditorState = {
   /** 仅本次编辑器运行预览使用，不写入场景文件或撤销历史。 */
   runtimePerformanceEnabled: boolean;
   history: CommandHistory;
-  latestSceneResourceTransaction: { before: SceneDocument; history: CommandHistory; after: SceneDocument } | null;
+  latestSceneResourceTransaction: { before: SceneDocument; history: CommandHistory; after: SceneDocument; issues: string[]; kind?: 'local-recovery' } | null;
+  latestSceneResourceRecovery: { before: SceneDocument; after: SceneDocument } | null;
+  sceneResourceIssues: string[];
+  recordSceneResourceIssues: (sceneSessionId: string, issues: string[]) => void;
   hierarchySelectionIds: string[];
   entityClipboard: EntityClipboard | null;
   entityArrayRequest: EntityArrayRequest | null;
@@ -479,6 +483,10 @@ type EditorState = {
   environmentRuntimeOverride: SceneEnvironmentSettings | null;
   sceneResourcePolicy: 'local-refresh' | 'data-platform-refresh' | 'preserve-snapshot';
   environmentStartupRelinkSessionId: string | null;
+  sceneStartupResourceSessionId: string | null;
+  sceneSourceFilePath: string | null;
+  localSceneEnvironmentRecoveryChoice: NonNullable<LocalSceneResourceSyncResult['environmentRecoveryChoice']> | null;
+  localSceneEnvironmentRecoveryAcceptance: NonNullable<LocalSceneResourceSyncRequest['acceptEnvironmentRevision']> | null;
   environmentRuntimeSnapshot: EnvironmentRuntimeSnapshot;
   environmentAdjustmentActive: boolean;
   environmentFocusRequest: { id: string } | null;
@@ -587,8 +595,13 @@ type EditorState = {
   createClickEventBinding: (placementPosition?: Vector3Data) => void;
   createFolder: () => void;
   importModelAsset: (asset: AssetEntry, placementPosition?: Vector3Data) => void;
-  finishLatestSceneResources: (sceneSessionId: string, expectedScene: SceneDocument, error?: string) => void;
-  commitLatestSceneResources: (sceneSessionId: string, before: SceneDocument, after: SceneDocument) => boolean;
+  finishLatestSceneResources: (sceneSessionId: string, expectedScene: SceneDocument, error?: string, failed?: FailedSceneResources) => void;
+  commitLatestSceneResources: (sceneSessionId: string, before: SceneDocument, after: SceneDocument, issues?: string[]) => boolean;
+  finishSceneStartupResourcePreparation: (sceneSessionId: string) => void;
+  beginLocalSceneResourceRecovery: (sceneSessionId: string) => void;
+  setLocalSceneEnvironmentRecoveryChoice: (sceneSessionId: string, choice: NonNullable<LocalSceneResourceSyncResult['environmentRecoveryChoice']> | null) => void;
+  acceptLocalSceneEnvironmentRecoveryChoice: (sceneSessionId: string, expectedChoice: NonNullable<LocalSceneResourceSyncResult['environmentRecoveryChoice']>) => boolean;
+  commitRecoveredLocalSceneResources: (sceneSessionId: string, before: SceneDocument, after: SceneDocument) => boolean;
   refreshModelInstancesFromAssets: (assets: AssetEntry[], options?: { preserveResolvedSnapshots?: boolean }) => number;
   importCadReference: () => Promise<void>;
   loadSceneAsset: (asset: AssetEntry) => Promise<void>;
@@ -689,6 +702,8 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     persistedSceneContent: serializeScene(scene),
     history: createCommandHistory(),
     latestSceneResourceTransaction: null,
+    latestSceneResourceRecovery: null,
+    sceneResourceIssues: [],
     hierarchySelectionIds: [],
     entityClipboard: null,
     entityArrayRequest: null,
@@ -696,6 +711,10 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     environmentApplyRequest: null,
     environmentRuntimeOverride: null,
     sceneResourcePolicy: 'preserve-snapshot',
+    sceneStartupResourceSessionId: null,
+    sceneSourceFilePath: null,
+    localSceneEnvironmentRecoveryChoice: null,
+    localSceneEnvironmentRecoveryAcceptance: null,
     environmentStartupRelinkSessionId: hasManagedEnvironmentCacheReference(scene.sceneSettings.environment)
       ? sceneSessionId
       : null,
@@ -2609,6 +2628,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   runtimePerformanceEnabled: false,
   history: createCommandHistory(),
   latestSceneResourceTransaction: null,
+  latestSceneResourceRecovery: null,
+  sceneResourceIssues: [],
   hierarchySelectionIds: [],
   entityClipboard: null,
   entityArrayRequest: null,
@@ -2616,6 +2637,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   environmentApplyRequest: null,
   environmentRuntimeOverride: null,
   sceneResourcePolicy: 'preserve-snapshot',
+  sceneStartupResourceSessionId: null,
+  sceneSourceFilePath: null,
+  localSceneEnvironmentRecoveryChoice: null,
+  localSceneEnvironmentRecoveryAcceptance: null,
   environmentStartupRelinkSessionId: null,
   environmentRuntimeSnapshot: createIdleEnvironmentRuntimeSnapshot(),
   environmentAdjustmentActive: false,
@@ -4018,30 +4043,106 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  finishLatestSceneResources: (sceneSessionId, expectedScene, error) => {
-    set(state => {
-      if (state.sceneSessionId !== sceneSessionId || !state.latestSceneResourceTransaction || state.latestSceneResourceTransaction.after !== expectedScene) return state;
-      const transaction = state.latestSceneResourceTransaction;
-      if (error && state.scene === transaction.after) return {
-        scene: transaction.before, history: transaction.history, latestSceneResourceTransaction: null,
-        environmentRuntimeOverride: null, environmentApplyRequest: null,
-        environmentStartupRelinkSessionId: state.scene.sceneSettings.environment ? sceneSessionId : null,
-        logs: prependLog(state.logs, '新版模型未能完成渲染，已恢复更新前的场景：' + error),
-      };
-      return { latestSceneResourceTransaction: null };
+  recordSceneResourceIssues: (sceneSessionId, issues) => {
+    set(state => state.sceneSessionId !== sceneSessionId ? state : {
+      sceneResourceIssues: [...new Set([...state.sceneResourceIssues, ...issues])],
     });
   },
-  commitLatestSceneResources: (sceneSessionId, before, after) => {
+  finishLatestSceneResources: (sceneSessionId, expectedScene, error, failed) => {
+    set(state => {
+      if (state.sceneSessionId !== sceneSessionId || state.scene !== expectedScene) return state;
+      const transaction = state.latestSceneResourceTransaction;
+      if (transaction && transaction.after !== expectedScene) return state;
+      if (error && transaction?.kind === 'local-recovery') {
+        // 恢复后的地址已通过完整依赖校验；运行时失败不能再回滚到旧机器上失效的路径。
+        return { latestSceneResourceTransaction: null, latestSceneResourceRecovery: null,
+          sceneResourceIssues: [...new Set([...state.sceneResourceIssues, error])],
+          logs: prependLog(state.logs, `本地场景资源渲染失败，请重新检查资源：${error}`) };
+      }
+      const recovery = transaction ?? (state.latestSceneResourceRecovery?.after === expectedScene ? state.latestSceneResourceRecovery : null);
+      // 局部运行时失败不回滚已经成功更新的资源组，参数保留，问题持续阻止发布。
+      if (error) {
+        const scene = recovery && failed ? restoreFailedSceneResources(recovery.before, state.scene, failed) : state.scene;
+        return {
+          scene,
+          latestSceneResourceTransaction: null,
+          latestSceneResourceRecovery: recovery ? { before: recovery.before, after: scene } : state.latestSceneResourceRecovery,
+          ...(failed?.environment ? { environmentRuntimeOverride: null, environmentApplyRequest: null, environmentStartupRelinkSessionId: null } : {}),
+          sceneResourceIssues: [...new Set([...state.sceneResourceIssues, ...(transaction?.issues ?? []), error])],
+          logs: prependLog(state.logs, '部分场景资源未能完成加载，可继续编辑，发布前请重新同步：' + error),
+        };
+      }
+      return transaction ? { latestSceneResourceTransaction: null, latestSceneResourceRecovery: null, sceneResourceIssues: transaction.issues } : state;
+    });
+  },
+  commitLatestSceneResources: (sceneSessionId, before, after, issues = []) => {
     let committed = false;
     set(state => {
       if (state.sceneSessionId !== sceneSessionId || state.scene !== before || isRuntimePreviewState(state)) return state;
       const result = after === before ? { scene: before, history: state.history }
         : executeCommand(before, state.history, updateSceneDocumentCommand('同步场景最新模型并保留参数', () => after));
       committed = true;
-      return { ...result, latestSceneResourceTransaction: after === before ? null : { before, history: state.history, after },
+      return { ...result, latestSceneResourceTransaction: { before, history: state.history, after, issues },
+        sceneStartupResourceSessionId: null,
+        latestSceneResourceRecovery: null,
+        sceneResourceIssues: [...new Set([...state.sceneResourceIssues, ...issues])],
         environmentApplyRequest: null, environmentRuntimeOverride: null,
         environmentStartupRelinkSessionId: null,
         logs: prependLog(state.logs, after === before ? '场景模型已是当前版本。' : '场景模型资源已更新，实例参数和业务配置已保留。') };
+    });
+    return committed;
+  },
+  finishSceneStartupResourcePreparation: (sceneSessionId) => {
+    // 查询失败也必须允许原始快照首次加载；显式重试和旧会话不能重置现有运行时。
+    set(state => state.sceneSessionId !== sceneSessionId || state.sceneStartupResourceSessionId !== sceneSessionId ? state : {
+      sceneStartupResourceSessionId: null,
+      environmentStartupRelinkSessionId: null,
+    });
+  },
+  beginLocalSceneResourceRecovery: (sceneSessionId) => {
+    set(state => state.sceneSessionId !== sceneSessionId || state.sceneResourcePolicy !== 'local-refresh' ? state : {
+      sceneStartupResourceSessionId: sceneSessionId,
+    });
+  },
+  setLocalSceneEnvironmentRecoveryChoice: (sceneSessionId, choice) => {
+    set(state => {
+      if (state.sceneSessionId !== sceneSessionId || state.sceneResourcePolicy !== 'local-refresh') return state;
+      const acceptance = state.localSceneEnvironmentRecoveryAcceptance;
+      const sameApprovedVersion = acceptance && choice && acceptance.resourceId === choice.resourceId
+        && acceptance.fileRevision === choice.availableRevision && acceptance.sha256 === choice.sha256;
+      return { localSceneEnvironmentRecoveryChoice: choice,
+        // 其它依赖失败不撤销用户对这个精确版本的授权；候选版本改变时才重新确认。
+        localSceneEnvironmentRecoveryAcceptance: choice && !sameApprovedVersion ? null : acceptance ?? null };
+    });
+  },
+  acceptLocalSceneEnvironmentRecoveryChoice: (sceneSessionId, expectedChoice) => {
+    let accepted = false;
+    set(state => {
+      if (state.sceneSessionId !== sceneSessionId || state.sceneResourcePolicy !== 'local-refresh'
+        || state.localSceneEnvironmentRecoveryChoice !== expectedChoice) return state;
+      accepted = true;
+      return { localSceneEnvironmentRecoveryAcceptance: { resourceId: expectedChoice.resourceId,
+        fileRevision: expectedChoice.availableRevision, sha256: expectedChoice.sha256 } };
+    });
+    return accepted;
+  },
+  commitRecoveredLocalSceneResources: (sceneSessionId, before, after) => {
+    let committed = false;
+    set(state => {
+      if (state.sceneSessionId !== sceneSessionId || state.scene !== before
+        || state.sceneResourcePolicy !== 'local-refresh' || isRuntimePreviewState(state)) return state;
+      committed = true;
+      // 工作区迁移是运行时依赖恢复，不加入撤销历史，避免一次撤销重新引入已失效地址。
+      // persistedSceneContent 保留原文档，另存时仍能提示保存恢复后的资源引用。
+      return { scene: after, history: state.history,
+        localSceneEnvironmentRecoveryChoice: null,
+        localSceneEnvironmentRecoveryAcceptance: null,
+        latestSceneResourceTransaction: { before, history: state.history, after, issues: [], kind: 'local-recovery' as const },
+        latestSceneResourceRecovery: null,
+        sceneStartupResourceSessionId: null,
+        environmentStartupRelinkSessionId: null,
+        environmentApplyRequest: null, environmentRuntimeOverride: null,
+        logs: prependLog(state.logs, '本地场景资源已校验并恢复，正在确认实际首帧。') };
     });
     return committed;
   },
@@ -5549,8 +5650,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return false;
     }
 
+    const openingSceneSessionId = get().sceneSessionId;
     try {
       const result = await window.editorApi.loadScene();
+      if (get().sceneSessionId !== openingSceneSessionId) return false;
 
       if (result.canceled || result.content === null) {
         set((state) => ({ logs: prependLog(state.logs, '已取消加载场景。') }));
@@ -5558,16 +5661,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const scene = deserializeScene(result.content);
+      const sceneOpenToken = result.sceneOpenToken;
+      if (typeof sceneOpenToken !== 'number' || !Number.isSafeInteger(sceneOpenToken) || sceneOpenToken <= 0
+        || !window.editorApi.confirmSceneOpen) throw new Error('当前编辑器缺少场景打开确认能力，请更新编辑器。');
+      if (!await window.editorApi.confirmSceneOpen({ sceneOpenToken })
+        || get().sceneSessionId !== openingSceneSessionId) return false;
 
       set((state) => {
         const loaded = createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`);
         return { ...loaded, sceneResourcePolicy: 'local-refresh',
+          sceneSourceFilePath: result.filePath ?? null,
+          sceneStartupResourceSessionId: loaded.sceneSessionId,
           environmentStartupRelinkSessionId: scene.sceneSettings.environment ? loaded.sceneSessionId : null };
       });
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (get().sceneSessionId !== openingSceneSessionId) return false;
       set((state) => ({ logs: prependLog(state.logs, `加载场景失败：${message}`) }));
       return false;
     }
@@ -5579,13 +5690,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return false;
     }
 
+    const openingSceneSessionId = get().sceneSessionId;
     try {
       if (!window.editorApi?.loadSceneFile) {
         throw new Error('按路径加载场景需要 Electron 桌面环境。');
       }
 
       const result = await window.editorApi.loadSceneFile({ filePath });
-      if (!isCurrent()) return false;
+      if (!isCurrent() || get().sceneSessionId !== openingSceneSessionId) return false;
 
       if (result.canceled || result.content === null) {
         set((state) => ({ logs: prependLog(state.logs, '已取消加载场景。') }));
@@ -5593,17 +5705,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const scene = deserializeScene(result.content);
+      const sceneOpenToken = result.sceneOpenToken;
+      if (typeof sceneOpenToken !== 'number' || !Number.isSafeInteger(sceneOpenToken) || sceneOpenToken <= 0
+        || !window.editorApi.confirmSceneOpen) throw new Error('当前编辑器缺少场景打开确认能力，请更新编辑器。');
+      if (!await window.editorApi.confirmSceneOpen({ sceneOpenToken })
+        || !isCurrent() || get().sceneSessionId !== openingSceneSessionId) return false;
       set((state) => {
         const loaded = createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`);
         return { ...loaded,
           sceneResourcePolicy: deferEnvironmentUntilSync ? 'data-platform-refresh' : 'local-refresh',
+          sceneSourceFilePath: result.filePath ?? filePath,
+          sceneStartupResourceSessionId: loaded.sceneSessionId,
           environmentStartupRelinkSessionId: scene.sceneSettings.environment ? loaded.sceneSessionId : null };
       });
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!isCurrent()) return false;
+      if (!isCurrent() || get().sceneSessionId !== openingSceneSessionId) return false;
       set((state) => ({ logs: prependLog(state.logs, `加载最近场景失败：${message}`) }));
       return false;
     }

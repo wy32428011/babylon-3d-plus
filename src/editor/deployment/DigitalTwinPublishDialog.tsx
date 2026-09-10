@@ -18,6 +18,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   const titleId = useId();
   const descriptionId = useId();
   const scene = useEditorStore((state) => state.scene);
+  const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
   const summary = useMemo(() => createDeploymentSceneSummary(scene), [scene]);
   const assetWarningView = useMemo(
     () => createDigitalTwinPublishAssetWarningView(analyzeDigitalTwinAssetCodes(scene)),
@@ -48,15 +49,24 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   const requiresResourceConfirmation = state.result?.errorCode === 'DIGITAL_TWIN_RESOURCE_BINDING_CONFIRM_REQUIRED';
 
   useEffect(() => {
-    if (!props.open) return;
     projectListRequestRef.current += 1;
+    if (!props.open) {
+      props.controller.reset();
+      return;
+    }
+    setPublishName('');
+    setOverwriteExisting(false);
+    setForceOverwrite(false);
+    setConfirmResourceBindings(false);
+    setConfirmAssetWarnings(false);
+    setValidationError(null);
     setRequiresProjectSelection(false);
     setProjects([]);
     setSelectedProjectId('');
     setIsLoadingProjects(false);
     setProjectListError(null);
     void props.controller.loadContext();
-  }, [props.controller.loadContext, props.open]);
+  }, [props.controller.loadContext, props.controller.reset, props.open, sceneSessionId]);
 
   useEffect(() => {
     if (!props.open || state.status === 'loading-context' || context === null || context.available || requiresProjectSelection) return;
@@ -253,17 +263,24 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
           ) : null}
           {requiresProjectSelection ? (
             <p className="deployment-export-resource-detail">
-              当前场景未绑定业务项目；选择后将按该项目发布，并把当前本地项目绑定到所选业务项目。
+              当前场景未绑定业务项目；选择后将发布到所选数据中台项目，发布成功后保存对应工程绑定。
             </p>
           ) : null}
           {projectListError ? <p className="deployment-export-error" role="alert">{projectListError}</p> : null}
           <dl className="digital-twin-publish-context-grid">
+            <div className="digital-twin-publish-context-wide"><dt>数据中台地址</dt><dd>{context?.baseUrl ?? '等待读取发布目标'}</dd></div>
             <div><dt>业务项目</dt><dd>{context?.projectName ?? (requiresProjectSelection ? '请选择业务项目' : '当前工程未绑定数据中台项目')}</dd></div>
             <div><dt>本地基础版本</dt><dd>{context?.baseVersionNumber ? `v${context.baseVersionNumber}` : '首次发布'}</dd></div>
             <div><dt>远端最新版本</dt><dd>{context?.remoteLatestVersionNumber ? `v${context.remoteLatestVersionNumber}` : '暂无'}</dd></div>
             <div><dt>资源修订</dt><dd>{context?.resourceRevision ?? '-'}</dd></div>
             <div className="digital-twin-publish-context-wide"><dt>入口场景</dt><dd>{context?.entryScenePath ?? `${scene.name}.scene.json（发布时创建）`}</dd></div>
           </dl>
+          {context?.projectRoot ? (
+            <details className="deployment-export-resource-detail">
+              <summary>本地发布工程目录</summary>
+              <p>{context.projectRoot}</p>
+            </details>
+          ) : null}
           {context?.versionConflict ? (
             <p className="deployment-export-error" role="alert">远端工程已产生新版本。默认发布会保留冲突副本；确认强制覆盖后，可将当前本地内容创建为下一版本。</p>
           ) : null}

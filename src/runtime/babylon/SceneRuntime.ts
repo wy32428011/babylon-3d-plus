@@ -101,6 +101,7 @@ import { createCadReferenceDxfWorkerTask } from '../../editor/cad/cadReferenceWo
 import { decodeCadDxfBytes } from '../../editor/cad/cadTextEncoding';
 import {
   ExternalModelScriptRuntime,
+  getExternalModelScriptLoadDiagnostics,
   type ExternalModelScriptRuntimeMode,
   type ExternalModelScriptTelemetrySnapshot,
 } from './ExternalModelScriptRuntime';
@@ -200,6 +201,7 @@ import { EnvironmentAssetContainerCache } from './environmentAssetContainerCache
 import {
   resolveModelAssetSharedInstancingPolicy,
   SharedModelAssetCache,
+  createModelAssetTemplateKey,
 } from './SharedModelAssetCache';
 import {
   prepareInstancedMeshesForSelectionOutline,
@@ -590,6 +592,9 @@ export type SceneRuntimeModelLoadProgress = {
 export type SceneRuntimePerformanceMetrics = {
   loading: ReturnType<SceneLoadDiagnostics['snapshot']> & {
     environmentPhase: EnvironmentRuntimeSnapshot['phase'];
+    skybox: ReturnType<SceneSkyboxRuntime['getReadiness']>;
+    skyboxTiming: ReturnType<SceneSkyboxRuntime['getLoadDiagnostics']>;
+    externalScripts: ReturnType<typeof getExternalModelScriptLoadDiagnostics>;
     pendingModelCount: number;
     failedModelAcquisitions: number;
     modelCache: ReturnType<SharedModelAssetCache['getMetrics']>;
@@ -832,7 +837,7 @@ export class SceneRuntime {
       bounds: id => this.getEntityWorldBounds(id), visible: id => this.isEntityVisible(id),
       activate: event => this.onAlarmActivated?.(event), report: message => this.pushLog(message),
     });
-    this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
+    this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog, () => this.notifyModelLoadProgressChanged());
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
       // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
       loadAssetContainer: (rootUrl, fileName, signal) => {
@@ -2852,6 +2857,9 @@ export class SceneRuntime {
       modelRuntimeCount: this.models.size,
       loading: { ...this.loadDiagnostics.snapshot(),
         environmentPhase: this.environmentRuntime.getSnapshot().phase,
+        skybox: this.getSkyboxReadiness(),
+        skyboxTiming: this.skyboxRuntime.getLoadDiagnostics(),
+        externalScripts: getExternalModelScriptLoadDiagnostics(),
         pendingModelCount: [...this.models.values()].filter((model) => !model.measurementReady).length,
         failedModelAcquisitions: this.failedModelAcquisitions,
         modelCache: this.sharedModelAssetCache.getMetrics(),
@@ -4241,7 +4249,7 @@ export class SceneRuntime {
   /** 按模型资产能力选择独占容器或安全共享实例加载路径。 */
   private async loadModelRuntimeAssets(
     modelAsset: ModelAssetComponent,
-    assetSignature: string,
+    _assetSignature: string,
     loadSignal?: AbortSignal,
   ): Promise<LoadedModelRuntimeAssets> {
     const { rootUrl, fileName } = this.splitAssetUrl(
@@ -4253,11 +4261,12 @@ export class SceneRuntime {
       const instancingPolicy = resolveModelAssetSharedInstancingPolicy(modelAsset);
       if (instancingPolicy.mode === 'shared-instance') {
         const sharedInstance = await this.sharedModelAssetCache.instantiate(
-          assetSignature,
-          () => this.loadAssetContainer(rootUrl, fileName, undefined, (event) => {
+          createModelAssetTemplateKey(modelAsset),
+          (sourceSignal) => this.loadAssetContainer(rootUrl, fileName, sourceSignal, (event) => {
             this.updateModelLoadProgressUnit(loadSequence, event);
           }),
           (sourceName) => sourceName,
+          loadSignal,
         );
         return {
           kind: 'shared-instance',
@@ -4270,9 +4279,13 @@ export class SceneRuntime {
         };
       }
 
-      const container = await this.loadAssetContainer(rootUrl, fileName, loadSignal, (event) => {
-        this.updateModelLoadProgressUnit(loadSequence, event);
-      });
+      const container = await this.sharedModelAssetCache.acquireOwnedContainer(
+        createModelAssetTemplateKey(modelAsset),
+        (sourceSignal) => this.loadAssetContainer(rootUrl, fileName, sourceSignal, (event) => {
+          this.updateModelLoadProgressUnit(loadSequence, event);
+        }),
+        loadSignal,
+      );
       try {
         container.addAllToScene();
         return {
@@ -4352,6 +4365,71 @@ export class SceneRuntime {
     return Boolean(model?.assetHandle && model.measurementReady);
   }
 
+  /** 当前天空盒任务独立报告就绪，已取消旧任务不参与场景加载门控。 */
+  getSkyboxReadiness(): { phase: 'idle' | 'loading' | 'ready' | 'error'; message: string | null; sourceUrl: string | null } {
+    return this.skyboxRuntime.getReadiness();
+  }
+
+  retrySkyboxLoading(): void {
+    this.skyboxRuntime.retry();
+  }
+
+  /** 每轮显式资源恢复后重试失败项；重建脚本宿主以避免在半初始化几何上重复执行 onStart。 */
+  retryFailedSceneResources(document: SceneDocument, hierarchySelectionIds?: readonly string[]): number {
+    if (this.disposed) return 0;
+    const failedEntities = new Set<string>();
+    const failedScript = (model: ModelRuntimeEntry): boolean => !model.externalScriptStarting
+      && Boolean(model.readinessError || model.externalScriptRuntime?.getInitializationError());
+    for (const failure of this.modelReadinessErrors.values()) {
+      for (const entityId of failure.entityIds) {
+        if (document.entities[entityId]?.components.modelAsset) {
+          failedEntities.add(entityId);
+          this.syncedEntities.delete(entityId);
+        }
+      }
+    }
+    for (const [entityId, model] of [...this.models]) {
+      if (!document.entities[entityId]?.components.modelAsset || !failedScript(model)) continue;
+      this.disposeModel(entityId, model);
+      failedEntities.add(entityId);
+      this.syncedEntities.delete(entityId);
+    }
+    for (const variant of [...this.modelArrayParameterVariants.values()]) {
+      if (!document.entities[variant.sourceEntityId]?.components.modelAsset || !failedScript(variant.model)) continue;
+      this.disposeModelArrayParameterVariant(variant);
+      failedEntities.add(variant.sourceEntityId);
+      this.syncedEntities.delete(variant.sourceEntityId);
+    }
+    const failedOwners: GeneratedOutputOwnerRuntimeEntry[] = [];
+    for (const owner of this.generatedOutputOwners.values()) {
+      const entityId = owner.editorEntityId ?? owner.entityId;
+      if (!document.entities[entityId]) continue;
+      const output = owner.output;
+      if (output?.kind === 'model' && output.model.externalScriptStarting) continue;
+      if (!owner.readinessError && owner.failedTargetSignatures.size === 0
+        && !(output?.kind === 'model' && failedScript(output.model))) continue;
+      owner.loadToken += 1;
+      this.disposeModelGeneratorOutput(owner);
+      owner.failedTargetSignatures.clear();
+      owner.reportedLoadFailureKeys.clear();
+      owner.activeTargetSignature = null;
+      owner.readinessError = undefined;
+      failedOwners.push(owner);
+      failedEntities.add(entityId);
+    }
+    if (failedEntities.size === 0) return 0;
+    // 沿用现有增量同步与矩阵身份规则，健康宿主不重新初始化，也不改模型修订和业务参数。
+    this.sync(document, hierarchySelectionIds, { modelArrayIdentityMode: this.modelArrayIdentityMode });
+    for (const owner of failedOwners) {
+      if (this.generatedOutputOwners.get(owner.entityId) !== owner) continue;
+      const resolution = owner.activeSnapshot
+        ? resolveModelGeneratorTargetFromSnapshot(owner.component, owner.activeSnapshot)
+        : { target: owner.component.defaultTarget, role: 'default' as const, snapshot: null };
+      if (resolution) this.syncModelGeneratorResolvedTarget(owner, resolution);
+    }
+    return failedEntities.size;
+  }
+
   /** 严格加载门控单独读取失败信息，保留本地编辑对基础几何的容错显示。 */
   getModelReadinessError(entityId: string): string | null {
     const direct = this.models.get(entityId);
@@ -4399,8 +4477,10 @@ export class SceneRuntime {
 
   /** 按单元数汇总已结算与在途单元，生成 0-1 的总体进度；在途单元按当前文件字节折算。 */
   private computeModelLoadProgress(): SceneRuntimeModelLoadProgress {
-    const totalCount = this.modelLoadProgressStartedCount;
-    const settledCount = this.modelLoadProgressSettledCount;
+    const skyboxPhase = this.skyboxRuntime.getReadiness().phase;
+    const skyboxLoading = skyboxPhase === 'loading';
+    const totalCount = this.modelLoadProgressStartedCount + (skyboxPhase === 'idle' ? 0 : 1);
+    const settledCount = this.modelLoadProgressSettledCount + (skyboxPhase === 'ready' || skyboxPhase === 'error' ? 1 : 0);
     let weightedSettled = settledCount;
     let latestReportedAt = -1;
     let currentFile: string | null = null;
@@ -4416,11 +4496,12 @@ export class SceneRuntime {
         currentFilePercent = progress.total > 0 ? fraction : null;
       }
     }
+    if (skyboxLoading && !currentFile) currentFile = '天空盒纹理';
     const percent = totalCount > 0
       ? Math.min(1, Math.max(0, weightedSettled / totalCount))
       : 1;
     return {
-      loading: this.activeModelLoadProgress.size > 0 || settledCount < totalCount,
+      loading: skyboxLoading || this.activeModelLoadProgress.size > 0 || settledCount < totalCount,
       percent,
       completedCount: settledCount,
       totalCount,

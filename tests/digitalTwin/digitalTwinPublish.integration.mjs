@@ -289,6 +289,8 @@ class DigitalTwinMockServer {
     this.failNextStatus = false;
     this.failNextRuntimeConfigSave = false;
     this.redirectNextStatus = false;
+    this.missingResourceIds = new Set();
+    this.resourceDetailIdOverride = null;
   }
 
   allocateId() {
@@ -364,6 +366,18 @@ class DigitalTwinMockServer {
       body,
       headers: { ...request.headers },
     });
+
+    const resourceDetail = /^\/platform\/api\/v1\/(models|combo-models|env-models)\/detail$/.exec(url.pathname);
+    if (request.method === 'POST' && resourceDetail) {
+      if (this.missingResourceIds.has(String(body.id))) {
+        const code = resourceDetail[1] === 'models' ? 'MODEL_NOT_FOUND' : resourceDetail[1] === 'env-models' ? 'ENV_MODEL_NOT_FOUND' : 'COMBO_MODEL_NOT_FOUND';
+        this.sendJson(response, { success: false, code, message: `发布资源 ${body.id} 不存在`, data: null }, 404);
+      } else {
+        this.sendSuccess(response, { id: this.resourceDetailIdOverride ?? String(body.id), modelName: '已验证模型', comboModelName: '已验证组合', envModelName: '已验证环境',
+          fileName: 'model.glb', fileUrl: '/fixture-resource.glb', revision: '1' });
+      }
+      return;
+    }
 
     if (request.method === 'POST' && url.pathname === '/platform/api/v1/projects/detail') {
       assert.deepEqual(body, { id: PROJECT_ID });
@@ -773,6 +787,7 @@ async function run() {
     );
 
     const bindingModule = await import('../../dist-electron/ipc/dataPlatformBindingStore.js');
+    const scopeModule = await import('../../dist-electron/ipc/scenePublishScope.js');
     const transferModule = await import('../../dist-electron/ipc/dataPlatformTransfer.js');
     const uploadClientModule = await import('../../dist-electron/ipc/digitalTwinUploadClient.js');
     const projectAssetModule = await import('../../dist-electron/ipc/projectAssetStore.js');
@@ -950,6 +965,7 @@ async function run() {
     projectAssetModule.setSharedProjectSkyboxRoot(manualSkyboxRoot);
 
     async function resetBinding(overrides = {}) {
+      scopeModule.resetScenePublishScope();
       const metadata = bindingModule.createDataPlatformBinding({
         baseUrl: mock.baseUrl,
         projectId: PROJECT_ID,
@@ -963,6 +979,7 @@ async function run() {
         ...overrides,
       });
       await bindingModule.writeDataPlatformBinding(projectRoot, metadata);
+      await projectAssetModule.activateProjectRoot(projectRoot, scenePath);
       bindingModule.setCurrentDataPlatformBinding(projectRoot, metadata);
       projectAssetModule.setSharedProjectSkyboxRoot(manualSkyboxRoot);
       return metadata;
@@ -1010,7 +1027,7 @@ async function run() {
         new AbortController().signal,
         () => undefined,
       ),
-      /请先选择发布项目/,
+      /请先选择发布项目|发布预检已失效/,
     );
     mock.projectDetailId = '2054201280000000999';
     mock.setRemoteStatus(createRemoteStatus({ projectId: mock.projectDetailId }));
@@ -1036,9 +1053,25 @@ async function run() {
     assert.equal(selectedProjectContext.editorProjectId, EDITOR_PROJECT_ID);
     assert.equal(selectedProjectContext.baseVersionId, BASE_VERSION_ID);
     assert.equal(selectedProjectContext.versionConflict, false);
+    assert.equal(typeof selectedProjectContext.targetToken, 'string');
+    assert.notEqual(selectedProjectContext.projectRoot, projectRoot, '独立本地发布不能复用无绑定的活动资产目录');
+    const selectedProjectRoot = selectedProjectContext.projectRoot;
+    const configPath = path.join(userDataRoot, 'data-platform-config.json');
+    const originalConfig = await readFile(configPath, 'utf8');
+    try {
+      await writeFile(configPath, JSON.stringify({ version: 2, baseUrl: 'http://127.0.0.1:1/platform', workspaceRoot }), 'utf8');
+      await assert.rejects(publishModule.resolveDigitalTwinPublishTarget(selectedProjectContext.targetToken, PROJECT_ID), /配置已变化/);
+    } finally {
+      await writeFile(configPath, originalConfig, 'utf8');
+    }
+    const sceneInvalidatedContext = await publishModule.getDigitalTwinPublishContext(PROJECT_ID);
+    scopeModule.resetScenePublishScope();
+    await assert.rejects(publishModule.resolveDigitalTwinPublishTarget(sceneInvalidatedContext.targetToken, PROJECT_ID), /场景或发布目标已变化/);
+    const confirmedTarget = await publishModule.getDigitalTwinPublishContext(PROJECT_ID);
     const selectedProjectConfirmation = await publishModule.publishDigitalTwin(
       createPublishRequest(SELECTED_PROJECT_CONFIRM_REQUEST_ID, sceneContent, {
         projectId: PROJECT_ID,
+        targetToken: confirmedTarget.targetToken,
         overwriteExisting: false,
       }),
       new AbortController().signal,
@@ -1046,11 +1079,13 @@ async function run() {
     );
     assert.equal(selectedProjectConfirmation.status, 'confirmation-required');
     assert.equal(await bindingModule.readDataPlatformBinding(projectRoot), null, '确认覆盖前不应写入本地绑定。');
+    assert.equal(await bindingModule.readDataPlatformBinding(selectedProjectRoot), null, '预检和取消确认不能提前绑定隔离目录。');
     assert.equal(bindingModule.getCurrentDataPlatformBinding(), null, '确认覆盖前不应激活当前绑定。');
 
     const selectedProjectResult = await publishModule.publishDigitalTwin(
       createPublishRequest(SELECTED_PROJECT_REQUEST_ID, sceneContent, {
         projectId: PROJECT_ID,
+        targetToken: confirmedTarget.targetToken,
         overwriteExisting: true,
       }),
       new AbortController().signal,
@@ -1058,7 +1093,8 @@ async function run() {
     );
     assert.equal(selectedProjectResult.status, 'completed');
     const selectedSourceEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'SOURCE'));
-    const selectedSourceScene = JSON.parse(selectedSourceEntries.get('Scenes/main.scene.json').toString('utf8'));
+    const selectedProjectBinding = await bindingModule.readDataPlatformBinding(selectedProjectRoot);
+    const selectedSourceScene = JSON.parse(selectedSourceEntries.get(selectedProjectBinding.entryScenePath).toString('utf8'));
     const originalCadEntity = JSON.parse(sceneContent).scene.entities['cad-reference'];
     const expectedPublishedCadEntity = structuredClone(originalCadEntity);
     delete expectedPublishedCadEntity.components.cadReference;
@@ -1080,7 +1116,6 @@ async function run() {
       url: PUBLISHED_FETCH_CONFIG.url,
       apiKey: '',
     });
-    const selectedProjectBinding = await bindingModule.readDataPlatformBinding(projectRoot);
     assert.equal(selectedProjectBinding?.workspaceRoot, path.resolve(workspaceRoot));
     assert.equal(selectedProjectBinding?.projectId, PROJECT_ID);
     assert.equal(selectedProjectBinding?.projectName, '发布集成测试项目');
@@ -1463,8 +1498,9 @@ async function run() {
     await resetBinding();
     mock.setRemoteStatus(createRemoteStatus());
     mock.resetRequests();
+    const missingContext = await publishModule.getDigitalTwinPublishContext();
     const missingResult = await publishModule.publishDigitalTwin(
-      createPublishRequest(MISSING_CONFIRM_REQUEST_ID, sceneContent),
+      createPublishRequest(MISSING_CONFIRM_REQUEST_ID, sceneContent, { targetToken: missingContext.targetToken }),
       new AbortController().signal,
       () => undefined,
     );
@@ -1478,17 +1514,26 @@ async function run() {
     const missingPrepare = mock.requests.find((request) => request.path.endsWith('/publish-tasks/prepare'));
     assert.equal(missingPrepare.body.confirmResourceBindings, false);
     assert.equal(mock.requests.some((request) => request.path.includes('/chunks/')), false);
+    const confirmedMissingResult = await publishModule.publishDigitalTwin(
+      createPublishRequest(MISSING_CONFIRM_REQUEST_ID, sceneContent, {
+        targetToken: missingContext.targetToken, confirmResourceBindings: true,
+      }), new AbortController().signal, () => undefined,
+    );
+    assert.equal(confirmedMissingResult.status, 'completed', '同一目标票据必须支持资源确认后的重试');
 
     await resetBinding();
+    mock.setRemoteStatus(createRemoteStatus());
+    const beforeRemoteAdvance = await publishModule.getDigitalTwinPublishContext();
     mock.setRemoteStatus(createRemoteStatus({ latestVersionId: NEW_VERSION_ID, latestVersionNumber: 2 }));
     mock.resetRequests();
     const versionConflictResult = await publishModule.publishDigitalTwin(
-      createPublishRequest(VERSION_CONFLICT_REQUEST_ID, indexedSkyboxSceneContent),
+      createPublishRequest(VERSION_CONFLICT_REQUEST_ID, indexedSkyboxSceneContent, { targetToken: beforeRemoteAdvance.targetToken }),
       new AbortController().signal,
       () => undefined,
     );
     assert.equal(versionConflictResult.status, 'conflict');
     assert.equal(versionConflictResult.errorCode, 'DIGITAL_TWIN_VERSION_CONFLICT');
+    assert.equal(beforeRemoteAdvance.baseVersionId, BASE_VERSION_ID, '远端新增版本不能刷新掉用户预检时确认的基线');
     assert.ok(versionConflictResult.conflictCopyPath);
     assert.ok(versionConflictResult.conflictCopyPath.startsWith(path.join(workspaceRoot, 'Conflicts', PROJECT_ID)));
     assert.equal((await readFile(versionConflictResult.conflictCopyPath)).subarray(0, 2).toString('ascii'), 'PK');
@@ -1621,6 +1666,26 @@ async function run() {
         modelAsset: { sourcePath: legacyModelPath, sourceUrl: `editor-asset://local/${encodeURIComponent(legacyModelPath)}`,
           lengthUnit: 'meter', unitScaleToMeters: 1, assetCode: 'LOCAL-SYNC-1' } } };
     const localRequestId = 'legacy-local-scene-publish';
+    const beforeMissingResourceScene = await readFile(scenePath);
+    mock.missingResourceIds.add('1001');
+    await assert.rejects(publishModule.publishDigitalTwin(createPublishRequest('missing-target-resource-preflight', JSON.stringify(localPublishScene)),
+      new AbortController().signal, () => undefined), /资源.*不存在|身份|缺失|NOT_FOUND/);
+    assert.equal(mock.requests.some(request => request.path.endsWith('/runtime-config/save')), false,
+      '目标资源不存在时必须在运行配置保存之前阻断');
+    assert.equal(mock.requests.some(request => request.path.endsWith('/publish-tasks/prepare') || request.path.includes('/uploads/')), false,
+      '目标资源不存在时不得准备或上传发布包');
+    assert.deepEqual(await readFile(scenePath), beforeMissingResourceScene, '身份预检失败不保存入口场景');
+    await expectFileMissing(path.join(app.getPath('temp'), 'zending-digital-twin-publish', 'missing-target-resource-preflight'));
+    mock.missingResourceIds.clear();
+    mock.resetRequests();
+    mock.resourceDetailIdOverride = '1002';
+    await assert.rejects(publishModule.publishDigitalTwin(createPublishRequest('mismatched-resource-identity', JSON.stringify(localPublishScene)),
+      new AbortController().signal, () => undefined), /1001/);
+    assert.equal(mock.requests.some(request => request.path.endsWith('/runtime-config/save') || request.path.endsWith('/publish-tasks/prepare')), false,
+      '详情返回其他资源ID时不得保存运行配置或准备发布包');
+    assert.deepEqual(await readFile(scenePath), beforeMissingResourceScene);
+    mock.resourceDetailIdOverride = null;
+    mock.resetRequests();
     const localPublished = await publishModule.publishDigitalTwin(createPublishRequest(localRequestId, JSON.stringify(localPublishScene)),
       new AbortController().signal, () => undefined);
     assert.equal(localPublished.status, 'completed');
@@ -1634,12 +1699,16 @@ async function run() {
 
     // 返回首页再打开本地场景：workspace 没有绑定，目标 Projects 目录仍保留旧基线。
     await resetBinding();
+    await bindingModule.writeDataPlatformBinding(selectedProjectRoot, bindingModule.createDataPlatformBinding({
+      ...selectedProjectBinding, latestVersionId: BASE_VERSION_ID, latestVersionNumber: 1,
+      resourceRevision: RESOURCE_REVISION,
+    }));
     mock.setRemoteStatus(createRemoteStatus({ latestVersionId: NEW_VERSION_ID, latestVersionNumber: 2, resourceRevision: NEW_RESOURCE_REVISION }));
     mock.resetRequests();
     bindingModule.clearCurrentDataPlatformBinding();
     await projectAssetModule.activateProjectRoot(workspaceRoot);
     const restoredPreview = await publishModule.getDigitalTwinPublishContext(PROJECT_ID);
-    assert.equal(restoredPreview.projectRoot, projectRoot);
+    assert.equal(restoredPreview.projectRoot, selectedProjectRoot);
     assert.equal(restoredPreview.baseVersionId, BASE_VERSION_ID);
     assert.equal(restoredPreview.resourceRevision, RESOURCE_REVISION);
     assert.equal(restoredPreview.versionConflict, true, '预检应显示磁盘旧基线与远端最新版本的冲突');
@@ -1648,7 +1717,7 @@ async function run() {
       { projectId: PROJECT_ID }), new AbortController().signal, () => undefined);
     assert.equal(reopenedConflict.status, 'conflict');
     assert.equal(reopenedConflict.errorCode, 'DIGITAL_TWIN_VERSION_CONFLICT');
-    const preservedBinding = await bindingModule.readDataPlatformBinding(projectRoot);
+    const preservedBinding = await bindingModule.readDataPlatformBinding(selectedProjectRoot);
     assert.equal(preservedBinding.latestVersionId, BASE_VERSION_ID);
     assert.equal(preservedBinding.resourceRevision, RESOURCE_REVISION);
     assert.equal(mock.requests.some(request => request.path.endsWith('/publish-tasks/prepare')), false,
@@ -1664,6 +1733,12 @@ async function run() {
     console.log(JSON.stringify({
       status: 'PASS',
       verified: [
+        'missing-target-resource-blocks-scene-save-runtime-config-package-and-upload',
+        'mismatched-target-resource-id-rejected-before-save',
+        'publish-target-token-same-target-confirmation-retry',
+        'publish-target-token-config-and-scene-invalidation',
+        'publish-target-token-preserves-preflight-version-baseline',
+        'selected-project-uses-source-isolated-directory',
         'publish-context-restores-persisted-binding',
         'publish-context-default-parent-origin',
         'bound-scene-project-switch-rejected',

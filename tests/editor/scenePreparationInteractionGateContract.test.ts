@@ -44,5 +44,7 @@ test('场景准备蒙版声明忙碌状态并阻止键盘焦点进入底层编�
   assert.match(overlaySource, /tabIndex=\{-1\}/);
   assert.match(overlaySource, /overlayRef\.current\?\.focus\(\)/);
   assert.match(overlaySource, /取消加载并返回首页/);
-  assert.match(overlaySource, /state\.assetRefreshStatus === 'settled'/);
+  assert.match(overlaySource, /state\.runtime\.forcedSettled && !transaction/);
+  assert.match(overlaySource, /event\.key !== 'Tab'/);
+  assert.match(overlaySource, /event\.preventDefault\(\); first\?\.focus\(\)/);
 });

@@ -58,6 +58,43 @@ test('script failure remains visible to strict readiness while local fallback st
   } finally { ExternalModelScriptRuntime.prototype.start = original; model.root.dispose(); }
 });
 
+test('explicit recovery retries the same script signature on a fresh model host without changing source or parameters', async () => {
+  const runtime = runtimeFixture();
+  runtime.syncedEntities = new Map(); runtime.modelArrayIdentityMode = 'render';
+  const modelAsset = { ...asset('unchanged'), parameterValues: { height: 12 } };
+  const entity = { id: 'entity', name: 'Model', components: { modelAsset, transform: {} } };
+  const document = { entities: { entity }, entityIds: ['entity'] };
+  const serialized = JSON.stringify(document);
+  let attempts = 0;
+  runtime.loadModelRuntimeAssets = async () => ({ kind: 'shared-instance', rootNodes: [], handle: { dispose() {} } });
+  runtime.syncExternalModelScripts = (currentEntity: any, model: any) =>
+    runtime.syncModelAssetExternalScripts(currentEntity.components.modelAsset, model, () => {});
+  runtime.sync = () => runtime.syncModelEntity(entity, false);
+  runtime.disposeModel = (id: string, model: any) => {
+    model.externalScriptRuntime?.dispose(); model.root.dispose(); runtime.models.delete(id);
+  };
+  const original = ExternalModelScriptRuntime.prototype.start;
+  try {
+    ExternalModelScriptRuntime.prototype.start = async () => { if (++attempts === 1) throw new Error('temporary script read failure'); };
+    runtime.syncModelEntity(entity, false);
+    await flush(); await flush();
+    assert.match(runtime.getModelReadinessError('entity'), /temporary script/);
+    const first = runtime.models.get('entity');
+    assert.equal(runtime.retryFailedSceneResources(document, []), 1);
+    await flush(); await flush();
+    assert.equal(attempts, 2);
+    assert.notEqual(runtime.models.get('entity'), first);
+    assert.equal(runtime.getModelReadinessError('entity'), null);
+    assert.equal(runtime.isModelReady('entity'), true);
+    assert.equal(JSON.stringify(document), serialized);
+    assert.equal(runtime.retryFailedSceneResources(document, []), 0);
+    assert.equal(attempts, 2);
+  } finally {
+    ExternalModelScriptRuntime.prototype.start = original;
+    for (const model of runtime.models.values()) { model.externalScriptRuntime?.dispose(); model.root.dispose(); }
+  }
+});
+
 test('failed model acquisition survives entry disposal and resets on the next version attempt', async () => {
   const runtime = runtimeFixture();
   const entity = { id: 'entity', name: 'Model', components: { modelAsset: { ...asset(), scriptAssets: [] }, transform: {} } };

@@ -4,9 +4,10 @@ import test from 'node:test';
 import {
   isPlayerInitialLoadSettled,
   PlayerInitialLoadGate,
+  type PlayerInitialLoadGateOptions,
 } from '../../src/player/playerInitialLoadState.ts';
 
-function createGateFixture() {
+function createGateFixture(options: PlayerInitialLoadGateOptions = {}) {
   const scheduled = new Map<number, () => void>();
   const cancelled: number[] = [];
   let nextHandle = 1;
@@ -27,6 +28,7 @@ function createGateFixture() {
         cancelled.push(numericHandle);
         scheduled.delete(numericHandle);
       },
+      ...options,
     },
   );
   return {
@@ -48,6 +50,34 @@ test('无加载单元或全部结算时首次场景加载完成', () => {
   assert.equal(isPlayerInitialLoadSettled(null), true);
   assert.equal(isPlayerInitialLoadSettled({ loading: false, totalCount: 0 }), true);
   assert.equal(isPlayerInitialLoadSettled({ loading: false, totalCount: 3 }), true);
+});
+
+test('资源计数结算后仍等实际首帧，新的加载会取消旧帧检查', async () => {
+  const checks: Array<{ signal: AbortSignal; resolve: () => void }> = [];
+  const fixture = createGateFixture({ verifyReady: signal => new Promise<void>(resolve => checks.push({signal, resolve})) });
+  fixture.gate.update({loading:false,totalCount:1}); fixture.gate.startTracking(); fixture.flushNext();
+  assert.equal(fixture.getCompletedCount(), 0);
+  fixture.gate.update({loading:true,totalCount:2});
+  assert.equal(checks[0].signal.aborted,true);
+  checks[0].resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.getCompletedCount(),0);
+  fixture.gate.update({loading:false,totalCount:2}); fixture.flushNext();
+  checks[1].resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.getCompletedCount(),1);
+});
+
+test('零资源与空场景也进入真实首帧验证，验证前不能发送完成', async () => {
+  for (const progress of [null, { loading: false, totalCount: 0 }]) {
+    let finish!: () => void;
+    const fixture = createGateFixture({ verifyReady: () => new Promise<void>(resolve => { finish = resolve; }) });
+    if (progress) fixture.gate.update(progress);
+    fixture.gate.startTracking(); fixture.flushNext();
+    assert.equal(typeof finish, 'function');
+    assert.equal(fixture.getCompletedCount(), 0);
+    finish(); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fixture.getCompletedCount(), 1);
+    fixture.gate.dispose();
+  }
 });
 
 test('仍有模型或环境加载单元在途时首次场景加载未完成', () => {

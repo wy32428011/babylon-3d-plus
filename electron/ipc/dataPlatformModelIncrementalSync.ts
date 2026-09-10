@@ -10,6 +10,7 @@ import { readUtf8File } from '../shared/strictUtf8.js';
 import { RemoteDownloadTracker } from '../shared/remoteDownloadProgress.js';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO } from '../modelUnits.js';
 import { encodeAssetUrl } from './assetRegistry.js';
+import { assertRecoveryPathInsideRoot } from '../shared/recoveryPathBoundary.js';
 import { normalizeDataPlatformSourceUrl } from './dataPlatformEnvironmentContract.js';
 import {
   buildDataPlatformModelPlan,
@@ -210,7 +211,7 @@ const DEFAULT_DEPENDENCIES: ModelSyncDependencies = {
   randomId: randomUUID,
 };
 
-let modelSyncExecutionQueue: Promise<void> = Promise.resolve();
+const modelSyncExecutionQueues = new Map<string, Promise<void>>();
 let activeModelSync: ActiveModelSync | null = null;
 let queuedModelSyncContext: ModelSyncContext | null = null;
 let latestModelSyncProgress: DataPlatformModelSyncProgress | null = null;
@@ -308,15 +309,19 @@ function launchModelSync(context: ModelSyncContext): boolean {
   return true;
 }
 
-/** 后台同步和发布补拉共用提交队列，避免同一索引被交错读取后覆盖。 */
-function queueModelSync<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+/** 同一索引的事务串行提交；场景资源使用独立缓存，可与其他资源并行准备。 */
+function queueModelSync<T>(run: () => Promise<T>, signal?: AbortSignal, queueKey = 'shared-model-library'): Promise<T> {
   let started = false;
-  const result = modelSyncExecutionQueue.then(() => {
+  const result = (modelSyncExecutionQueues.get(queueKey) ?? Promise.resolve()).then(() => {
     if (signal) assertNotAborted(signal);
     started = true;
     return run();
   });
-  modelSyncExecutionQueue = result.then(() => undefined, () => undefined);
+  const completion = result.then(() => undefined, () => undefined);
+  modelSyncExecutionQueues.set(queueKey, completion);
+  void completion.then(() => {
+    if (modelSyncExecutionQueues.get(queueKey) === completion) modelSyncExecutionQueues.delete(queueKey);
+  });
   if (!signal) return result;
   return new Promise<T>((resolve, reject) => {
     // 已启动的事务必须等待取消清理/回滚完成，应用退出才能安全释放资源。
@@ -380,15 +385,25 @@ export async function syncSceneDataPlatformModelAssets(
   const signal = options.signal ?? new AbortController().signal;
   assertNotAborted(signal);
   if (!unique.size) return [];
+  const requiredResources = [...unique.values()];
+  if (requiredResources.length > 1) {
+    const results = new Map<string, SceneSyncedModelAsset[]>();
+    await runWithConcurrency(requiredResources, MAX_CONCURRENT_DOWNLOADS, async resource => {
+      results.set(resourceKey(resource), await syncSceneDataPlatformModelAssets({ ...options, signal, resources: [resource] }));
+    });
+    return requiredResources.flatMap(resource => results.get(resourceKey(resource)) ?? []);
+  }
   const baseUrl = normalizeDataPlatformSourceUrl(options.baseUrl);
   const sourceKey = createDataPlatformModelSourceKey(baseUrl);
   const sharedRoot = path.resolve(options.sharedResourcesRoot);
-  const cacheRoot = path.join(sharedRoot, '.babylon-editor', 'scene-model-sync', sourceKey);
+  const resource = requiredResources[0];
+  // 按稳定身份隔离可变索引，固定版本目录保持原结构，历史场景路径继续有效。
+  const cacheRoot = path.join(sharedRoot, '.babylon-editor', 'scene-model-sync', sourceKey,
+    'resources', `${resource.kind}-${resource.resourceId}`);
   const versionRoot = path.join(sharedRoot, '.babylon-editor', 'scene-model-versions', sourceKey);
   assertPathInside(sharedRoot, cacheRoot, '场景模型同步缓存');
   assertPathInside(sharedRoot, versionRoot, '场景模型版本缓存');
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
-  const requiredResources = [...unique.values()];
   return queueModelSync(async () => {
     const before = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
     await runDataPlatformModelSync({
@@ -419,7 +434,25 @@ export async function syncSceneDataPlatformModelAssets(
     }
     assertNotAborted(signal);
     return result;
-  }, signal);
+  }, signal, path.resolve(cacheRoot).toLowerCase());
+}
+
+/** 将已校验的共享库包固定为独立快照，恢复本地场景后后台同步不会改变其内容。 */
+export async function pinCachedSceneModelVersion(options: {
+  asset: ProjectModelAssetEntry; entry: DataPlatformModelIndexEntry; cacheRoot: string;
+  sourceKey: string; signal: AbortSignal;
+}): Promise<ProjectModelAssetEntry> {
+  if (!/^[a-f\d]{64}$/.test(options.sourceKey)) throw new Error('固定模型缓存的来源标识无效。');
+  const versionRoot = path.join(options.cacheRoot, '.babylon-editor', 'scene-model-versions', options.sourceKey);
+  return queueModelSync(async () => {
+    await assertRecoveryPathInsideRoot(options.cacheRoot, path.resolve(options.cacheRoot, options.entry.packageRelativePath));
+    await assertRecoveryPathInsideRoot(options.cacheRoot, versionRoot);
+    await fs.mkdir(versionRoot, { recursive: true });
+    await assertRecoveryPathInsideRoot(options.cacheRoot, versionRoot);
+    const fixed = await pinSceneModelVersion(options.asset, options.entry, options.cacheRoot, versionRoot, options.signal);
+    await assertRecoveryPathInsideRoot(options.cacheRoot, fixed.packagePath!);
+    return fixed;
+  }, options.signal);
 }
 
 async function pinSceneModelVersion(
@@ -430,6 +463,10 @@ async function pinSceneModelVersion(
   signal: AbortSignal,
 ): Promise<ProjectModelAssetEntry> {
   const sourcePackage = resolvePackageRelativePath(cacheRoot, entry.packageRelativePath);
+  const sharedStorageRoot = path.resolve(versionRoot, '..', '..', '..');
+  await assertRecoveryPathInsideRoot(sharedStorageRoot, versionRoot);
+  await fs.mkdir(versionRoot, { recursive: true });
+  await assertRecoveryPathInsideRoot(sharedStorageRoot, versionRoot);
   // 运行内容修订不含主文件名称与缩略图，布局或缩略图变化也不能覆盖旧场景的固定包。
   const layoutKey = hashFingerprint({
     mainFile: path.basename(asset.path),
@@ -438,6 +475,7 @@ async function pinSceneModelVersion(
   }).slice(0, 12);
   const targetPackage = path.join(versionRoot, entry.runtimeRevision, 'Assets', 'Models', `${path.basename(sourcePackage)}-${layoutKey}`);
   assertPathInside(versionRoot, targetPackage, '固定模型版本目录');
+  await assertRecoveryPathInsideRoot(versionRoot, targetPackage);
   const pinned = relocateAssetEntry(asset, sourcePackage, targetPackage, entry);
   const verify = async (candidate: ProjectModelAssetEntry) => {
     assertNotAborted(signal);
@@ -464,6 +502,7 @@ async function pinSceneModelVersion(
   assertPathInside(versionRoot, stagingPackage, '固定模型版本暂存目录');
   try {
     await fs.mkdir(path.dirname(targetPackage), { recursive: true });
+    await assertRecoveryPathInsideRoot(versionRoot, stagingPackage);
     await fs.cp(sourcePackage, stagingPackage, {
       recursive: true, force: false, errorOnExist: true,
       filter: async (source) => {

@@ -17,6 +17,8 @@ import type {
 import { authorizeAssetFile, authorizeSceneFile, decodeAssetUrl, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
 import { isSupportedSceneFilePath } from './sceneFilePath.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
+import { beginScenePublishScopeUpdate, confirmScenePublishScopeFile, stageScenePublishScopeFile } from './scenePublishScope.js';
+import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';
 import {
   assertRecentSceneFile,
   commitRecentProjectActivation,
@@ -76,6 +78,10 @@ type SceneCadReferenceShape = {
   sourcePath?: unknown;
 };
 
+function assertSceneSwitchAllowed(): void {
+  if (isDigitalTwinPublishActive()) throw new Error('数字孪生发布或资源恢复正在进行，完成或取消后才能切换场景和项目。');
+}
+
 export function registerProjectIpc(): void {
   ipcMain.handle('project:getRecentWorkspaces', async (): Promise<RecentWorkspacesResult> => {
     return getRecentWorkspaces();
@@ -90,10 +96,12 @@ export function registerProjectIpc(): void {
   });
 
   ipcMain.handle('project:openRecent', async (_event, request: OpenRecentProjectRequest): Promise<ProjectListAssetsResult> => {
+    assertSceneSwitchAllowed();
     const openRequest = validateOpenRecentProjectRequest(request);
     const projectRoot = await validateRecentProjectRoot(openRequest.projectRoot);
     const projectStateSnapshot = getProjectAssetStoreStateSnapshot();
     const recentWorkspaceSnapshot = await getRecentWorkspaceStateSnapshot();
+    assertSceneSwitchAllowed();
     const bindingSnapshot = getCurrentDataPlatformBinding();
     invalidateDataPlatformSkyboxSyncPrepareContext();
     setSharedProjectAssetRoot(null);
@@ -102,8 +110,9 @@ export function registerProjectIpc(): void {
     clearCurrentDataPlatformBinding();
 
     try {
-      await commitRecentProjectActivation(projectRoot);
+      await commitRecentProjectActivation(projectRoot, assertSceneSwitchAllowed);
       const binding = await readDataPlatformBinding(projectRoot);
+      assertSceneSwitchAllowed();
       let workspaceRoot: string | null = null;
       if (binding) {
         workspaceRoot = resolveDataPlatformBindingWorkspaceRoot(projectRoot, binding);
@@ -114,7 +123,9 @@ export function registerProjectIpc(): void {
       }
 
       const result = await listProjectAssets();
+      assertSceneSwitchAllowed();
       await rememberRecentProjectRoot(projectRoot);
+      assertSceneSwitchAllowed();
       if (binding && workspaceRoot) {
         setCurrentDataPlatformBinding(projectRoot, binding);
         void syncDataPlatformSkyboxesForWorkspace(binding.baseUrl, workspaceRoot).catch((error) => {
@@ -149,7 +160,9 @@ export function registerProjectIpc(): void {
   });
 
   ipcMain.handle('project:selectDirectory', async (): Promise<SelectProjectDirectoryResult> => {
-    const projectRoot = await selectCurrentProjectRootWithDialog();
+    assertSceneSwitchAllowed();
+    const projectRoot = await selectCurrentProjectRootWithDialog(assertSceneSwitchAllowed);
+    assertSceneSwitchAllowed();
     if (projectRoot) {
       invalidateDataPlatformSkyboxSyncPrepareContext();
       setSharedProjectAssetRoot(null);
@@ -180,34 +193,56 @@ export function registerProjectIpc(): void {
   });
 
   ipcMain.handle('scene:load', async (): Promise<LoadSceneResult> => {
+    assertSceneSwitchAllowed();
+    const sceneOpenToken = beginScenePublishScopeUpdate();
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [{ name: 'JSON', extensions: ['json'] }],
     });
 
     const [filePath] = result.filePaths;
+    assertSceneSwitchAllowed();
 
     if (result.canceled || !filePath) {
       return { canceled: true, filePath: null, content: null };
     }
 
     const content = await readUtf8File(filePath, '场景文件');
+    assertSceneSwitchAllowed();
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(filePath);
 
-    return { canceled: false, filePath, content };
+    assertSceneSwitchAllowed();
+    if (!stageScenePublishScopeFile(sceneOpenToken, filePath)) return { canceled: true, filePath: null, content: null };
+    return { canceled: false, filePath, content, sceneOpenToken };
   });
 
   ipcMain.handle('scene:loadFile', async (_event, request: LoadSceneFileRequest): Promise<LoadSceneResult> => {
+    assertSceneSwitchAllowed();
     const loadRequest = validateLoadSceneFileRequest(request);
+    const sceneOpenToken = beginScenePublishScopeUpdate();
     const filePath = await assertRecentSceneFile(loadRequest.filePath);
+    assertSceneSwitchAllowed();
     const content = await readUtf8File(filePath, '场景文件');
+    assertSceneSwitchAllowed();
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(filePath);
 
-    return { canceled: false, filePath, content };
+    assertSceneSwitchAllowed();
+    if (!stageScenePublishScopeFile(sceneOpenToken, filePath)) return { canceled: true, filePath: null, content: null };
+    return { canceled: false, filePath, content, sceneOpenToken };
+  });
+
+  ipcMain.handle('scene:confirmOpen', async (_event, request: { sceneOpenToken?: unknown }): Promise<boolean> => {
+    assertSceneSwitchAllowed();
+    if (!request || !Number.isSafeInteger(request.sceneOpenToken) || Number(request.sceneOpenToken) < 1) {
+      throw new Error('确认场景打开请求格式不正确。');
+    }
+    const confirmed = await confirmScenePublishScopeFile(request.sceneOpenToken as number, assertSceneSwitchAllowed);
+    assertSceneSwitchAllowed();
+    return confirmed;
   });
 
   ipcMain.handle('file:readText', async (_event, request: ReadTextFileRequest): Promise<ReadTextFileResult> => {

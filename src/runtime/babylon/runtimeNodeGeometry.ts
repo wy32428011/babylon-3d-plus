@@ -257,17 +257,14 @@ export function filterTopLevelMotionNodes(nodes: TransformNode[]): TransformNode
   });
 }
 
-/** 汇总模型内容根节点、TransformNode 与 Mesh，过滤模型实体根节点本身。 */
-export function getModelTransformNodes(model: ModelTransformNodeSource, scene: Scene): TransformNode[] {
-  const nodes = [
-    model.contentRoot,
-    ...model.root.getChildTransformNodes(false),
-    ...model.meshes,
-    ...scene.transformNodes,
-    ...scene.meshes,
-  ].filter((node) => node !== model.root && node.isDescendantOf?.(model.root));
-
-  return uniqueTransformNodes(nodes);
+/** 汇总当前模型子树；Babylon 的后代 TransformNode 已包含 Mesh，无需再次扫描全场景。 */
+export function getModelTransformNodes(model: ModelTransformNodeSource, _scene: Scene): TransformNode[] {
+  const nodes = model.root.getChildTransformNodes(false);
+  // contentRoot 保持首位，兼容外置脚本按遍历顺序查找首个同名节点的规则。
+  if (model.contentRoot !== model.root && model.contentRoot.isDescendantOf(model.root)) {
+    return [model.contentRoot, ...nodes.filter(node => node !== model.contentRoot)];
+  }
+  return nodes;
 }
 
 /** 在导入模型子树中按精确名称查找节点。 */

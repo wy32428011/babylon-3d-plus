@@ -11,6 +11,55 @@ import { normalizeModelDataDrivenConfig } from '../model/telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig } from '../model/builtInSlotBinding';
 
 export type SceneModelReplacement = { sourceUrls: string[]; asset: ProjectModelAssetEntry };
+export type SceneModelUpdateIssue = { resourceKind: 'model' | 'combo' | 'environment'; resourceId?: string; message: string };
+
+function createUpdatedTemplate(asset: ProjectModelAssetEntry, sourceKey: string): ModelAssetTemplate {
+  const parameterConfig = normalizeModelParameterConfig(asset.parameterConfig);
+  const dataDrivenConfig = asset.dataDrivenConfig ? normalizeModelDataDrivenConfig(asset.dataDrivenConfig) : undefined;
+  const builtInSlotBindingConfig = asset.builtInSlotBindingConfig ? normalizeBuiltInSlotBindingConfig(asset.builtInSlotBindingConfig) : undefined;
+  if ((asset.parameterConfig !== undefined && !parameterConfig) || (asset.dataDrivenConfig && !dataDrivenConfig)
+    || (asset.builtInSlotBindingConfig && !builtInSlotBindingConfig)) throw new Error(`模型「${asset.name}」的新版元数据无效，已保留原配置。`);
+  const target = createModelGeneratorTargetFromAsset({ ...asset, parameterConfig: parameterConfig ?? undefined,
+    dataDrivenConfig: dataDrivenConfig ?? undefined, builtInSlotBindingConfig: builtInSlotBindingConfig ?? undefined });
+  const key = getClickEventModelResourceKey(asset.sourceUrl);
+  if (!target || !key) throw new Error('新版模型资源或身份无效，原场景保持不变。');
+  const [kind, resourceId, modelPath] = key.split(':') as ['model' | 'combo', string, string];
+  target.modelAsset.dataPlatformModel = { sourceKey, kind, resourceId, modelPath };
+  return target.modelAsset;
+}
+
+/** 同一资源的全部实例及点击引用一起更新；单组冲突不会影响其它资源或清空原参数。 */
+export function applyAvailableSceneModelUpdates(
+  scene: SceneDocument, replacements: SceneModelReplacement[], sourceKey: string,
+  environment?: SceneEnvironmentSettings | null,
+): { scene: SceneDocument; updatedCount: number; issues: SceneModelUpdateIssue[] } {
+  const resourceKey = (asset: ProjectModelAssetEntry) => getClickEventModelResourceKey(asset.sourceUrl)?.split(':').slice(0, 2).join(':') ?? asset.sourceUrl;
+  const byUrl = new Map(replacements.flatMap(replacement => replacement.sourceUrls.map(url => [url, replacement.asset] as const)));
+  const templates = new Map<ProjectModelAssetEntry, ModelAssetTemplate>();
+  const failures = new Map<string, SceneModelUpdateIssue>();
+  const fail = (asset: ProjectModelAssetEntry, error: unknown) => {
+    const key = resourceKey(asset);
+    const [kind, resourceId] = key.split(':');
+    if (!failures.has(key)) failures.set(key, { resourceKind: kind === 'combo' ? 'combo' : 'model',
+      resourceId: /^\d+$/.test(resourceId ?? '') ? resourceId : undefined,
+      message: error instanceof Error ? error.message : String(error) });
+  };
+  for (const { asset } of replacements) {
+    try { templates.set(asset, createUpdatedTemplate(asset, sourceKey)); } catch (error) { fail(asset, error); }
+  }
+  // 预检仅遍历场景一次，避免每个资源组都深拷贝整个大型场景。
+  for (const reference of collectPublishModelReferences(scene).models) {
+    const asset = byUrl.get(String(reference.asset.sourceUrl));
+    if (!asset || failures.has(resourceKey(asset)) || !('lengthUnit' in reference.asset)) continue;
+    try {
+      mergeModelAssetUpdate(reference.asset as ModelAssetTemplate, templates.get(asset)!,
+        String(reference.asset.assetCode ?? reference.target?.displayName ?? asset.name));
+    } catch (error) { fail(asset, error); }
+  }
+  const compatible = replacements.filter(({ asset }) => !failures.has(resourceKey(asset)));
+  if (!compatible.length && environment === undefined) return { scene, updatedCount: 0, issues: [...failures.values()] };
+  return { ...applySceneModelUpdates(scene, compatible, sourceKey, environment), issues: [...failures.values()] };
+}
 
 /** 先在独立文档上检查所有实例，只有整批兼容才返回可提交的场景。 */
 export function applySceneModelUpdates(
@@ -20,25 +69,19 @@ export function applySceneModelUpdates(
   const next = structuredClone(scene);
   const byUrl = new Map(replacements.flatMap(replacement => replacement.sourceUrls.map(url => [url, replacement.asset] as const)));
   const { models, devices } = collectPublishModelReferences(next);
+  const templates = new Map<ProjectModelAssetEntry, ModelAssetTemplate>();
   let updatedCount = 0;
   for (const reference of models) {
     const asset = byUrl.get(String(reference.asset.sourceUrl));
     if (!asset) continue;
-    const target = createModelGeneratorTargetFromAsset({ ...asset,
-      parameterConfig: normalizeModelParameterConfig(asset.parameterConfig) ?? undefined,
-      dataDrivenConfig: asset.dataDrivenConfig ? normalizeModelDataDrivenConfig(asset.dataDrivenConfig) ?? undefined : undefined,
-      builtInSlotBindingConfig: asset.builtInSlotBindingConfig ? normalizeBuiltInSlotBindingConfig(asset.builtInSlotBindingConfig) ?? undefined : undefined,
-    });
-    const key = getClickEventModelResourceKey(asset.sourceUrl);
-    if (!target || !key) throw new Error('新版模型资源或身份无效，原场景保持不变。');
-    const [kind, resourceId, modelPath] = key.split(':') as ['model' | 'combo', string, string];
-    target.modelAsset.dataPlatformModel = { sourceKey, kind, resourceId, modelPath };
+    const template = templates.get(asset) ?? createUpdatedTemplate(asset, sourceKey);
+    templates.set(asset, template);
     const before = JSON.stringify(reference.asset);
     // 漫游人物只有资源引用；完整模型模板才参与参数与脚本契约合并。
     const merged = 'lengthUnit' in reference.asset
-      ? mergeModelAssetUpdate(reference.asset as ModelAssetTemplate, target.modelAsset, String(reference.asset.assetCode ?? reference.target?.displayName ?? asset.name))
+      ? mergeModelAssetUpdate(reference.asset as ModelAssetTemplate, template, String(reference.asset.assetCode ?? reference.target?.displayName ?? asset.name))
       : { ...reference.asset, sourcePath: asset.path, sourceUrl: asset.sourceUrl, assetRevision: asset.assetRevision,
-        dataPlatformModel: target.modelAsset.dataPlatformModel };
+        dataPlatformModel: template.dataPlatformModel };
     for (const field of Object.keys(reference.asset)) delete reference.asset[field];
     Object.assign(reference.asset, merged);
     if (!('lengthUnit' in reference.asset)) delete reference.asset.sourceSnapshot;
@@ -60,8 +103,11 @@ export function applySceneModelUpdates(
     if (JSON.stringify(device) !== before) updatedCount++;
   }
   // 新版新增 motion 时，实体配置不变，但不能继续复用不支持运动的旧合批实例。
+  const updatedUrls = new Set(replacements.map(replacement => replacement.asset.sourceUrl));
   for (const entity of Object.values(next.entities)) {
     const sourceId = entity.components.modelArrayInstance?.sourceEntityId;
+    if (!updatedUrls.has(entity.components.modelAsset?.sourceUrl ?? '')
+      && !updatedUrls.has(sourceId ? next.entities[sourceId]?.components.modelAsset?.sourceUrl ?? '' : '')) continue;
     if (sourceId && (hasModelDataDrivenMotionKey(entity.components.modelAsset?.dataDrivenConfig)
       || hasModelDataDrivenMotionKey(next.entities[sourceId]?.components.modelAsset?.dataDrivenConfig))) {
       delete entity.components.modelArrayInstance;
