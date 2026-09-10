@@ -74,6 +74,13 @@ fetch (LocatorFetchRuntime, 事件驱动) ────────────�
 | `telemetryBinding.cargoAutoDispose` | :209 | 缺省 false；恒 mode:2 且无 hasGoods 的设备勾选后会每帧销毁滞留货（配置陷阱，勿改代码） |
 | `metadata.conveyorSurfaceY` | :1167-1179 | 链面顶高 |
 
+### 编辑态轨迹线（Toolbar「动画」）
+
+- 链路：Toolbar `trajectoryVisible` → `SceneRuntime.syncConveyorTrajectory`（:5577）→ `resolveConveyorTrajectoryContext`（:5632）→ GreasedLine 虚线+箭头（`createConveyorTrajectory` :5675）。
+- 位置口径：中心/面高/行程全部来自 `cargo.travel.nodes` 行程节点包围盒（中心、行走轴投影跨度、顶投影+surfaceOffset），与 conveyorDriver 同源——轨迹线高度即货物支撑面高度。
+- 行程节点选型（辊道输送线 = `["GD_7","GD_4"]`）：GD_7 辊面提供面高、GD_4 主轨提供行程跨度；**勿用父节点 GD**——其下挡板 GD_3 顶（+0.12m）会抬升轨迹线悬浮，电机 DG 拉偏横向中心；`filterTopLevelMotionNodes` 会让 GD 吞掉 GD_7。
+- 注意：`getNodesWorldBounds` 不过滤隐藏/非对称部件（电机、隐藏的克隆源原件、薄实例 host 包围盒），行程节点须选几何干净的对称件。
+
 ### MQTT 消费
 `task`(:167 数值身份)、`mode`（0 空闲退订 / 2 销货 :207）、`movement_x`(:852-872)、光电字段(:148-149)、`containerCode`(:257,:848)。
 
