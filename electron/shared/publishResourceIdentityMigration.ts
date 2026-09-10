@@ -56,7 +56,7 @@ export function applyPublishModelIdentityReplacements(sceneContent: string, reco
       throw new Error('同一点击模型仍保留未迁移的旧身份，无法确定设备目标。');
     }
     migrateOwner(device, replacement, true);
-    if ('dataPlatformModel' in device) device.dataPlatformModel = targetIdentity(replacement);
+    device.dataPlatformModel = targetIdentity(replacement);
     delete device.sourceSnapshot;
   }
   return JSON.stringify(document);

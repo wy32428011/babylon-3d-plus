@@ -87,7 +87,10 @@ export function applySceneModelUpdates(
     const asset = byUrl.get(String(device.sourceUrl));
     if (!asset) continue;
     const before = JSON.stringify(device);
-    Object.assign(device, { assetId: asset.id, sourcePath: asset.path, sourceUrl: asset.sourceUrl, assetRevision: asset.assetRevision });
+    const template = templates.get(asset) ?? createUpdatedTemplate(asset, sourceKey, warning => warnings.add(warning));
+    templates.set(asset, template);
+    Object.assign(device, { assetId: asset.id, sourcePath: asset.path, sourceUrl: asset.sourceUrl, assetRevision: asset.assetRevision,
+      dataPlatformModel: structuredClone(template.dataPlatformModel) });
     if (asset.thumbnailUrl) device.thumbnailUrl = asset.thumbnailUrl;
     else delete device.thumbnailUrl;
     if (JSON.stringify(device) !== before) updatedCount++;

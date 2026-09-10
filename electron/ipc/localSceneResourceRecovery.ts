@@ -325,17 +325,20 @@ class ResourceResolver {
     const normalized = candidate.file.replace(/\\/g, '/');
     const pinned = /\/scene-model-versions\/([a-f\d]{64})\/([a-f\d]{64})\/(Assets\/Models\/(?:ComboModels\/)?(?:Model|Combo)-\d+(?:-[^/]+)?)(?:\/(.*))?$/i.exec(normalized);
     const oldPinned = /\/scene-model-versions\/[a-f\d]{64}\/([a-f\d]{64})\/Assets\/Models\/(?:ComboModels\/)?(?:Model|Combo)-\d+(?:-[^/]+)?(?:\/|$)/i.exec(reference.sourcePath.replace(/\\/g, '/'));
+    let verifiedPackageRoot: string | undefined;
     if (pinned || oldPinned) {
       const packageMatch = /^(.*\/Assets\/Models\/(?:ComboModels\/)?(?:Model|Combo)-\d+(?:-[^/]+)?)(?:\/(.*))?$/i.exec(normalized);
       const packageRoot = packageMatch ? path.resolve(packageMatch[1]) : reference.directory ? candidate.file : path.dirname(candidate.file);
       const verified = await this.verifyPinnedPackage(packageRoot, oldPinned?.[1] ?? pinned![2], candidate.root);
+      verifiedPackageRoot = packageRoot;
       // runtimeRevision 包含主模型、元数据与脚本；不让额外变体借用主模型的指纹。
       if (stat.isFile && reference.required && !verified.files.some(file => identityKey(file) === identityKey(candidate.file))) throw new Error('候选文件不是固定版本指纹覆盖的模型或脚本。');
       const layout = /-([a-f\d]{12})(?:\/|$)/i.exec(reference.sourcePath.replace(/\\/g, '/'));
       if (!reference.required && layout && layout[1].toLowerCase() !== verified.layout) throw new Error('候选缩略图与原固定包布局版本不同。');
     }
     const extension = path.extname(candidate.file).toLowerCase();
-    const supportingFiles = stat.isFile && extension === '.gltf' ? await this.verifyGltf(candidate.file, stat.size) : [];
+    const supportingFiles = stat.isFile && extension === '.gltf'
+      ? await this.verifyGltf(candidate.file, stat.size, verifiedPackageRoot) : [];
     if (stat.isFile && extension === '.glb') {
       let checked = this.models.get(stat.real);
       if (!checked) { checked = validateGlbModelFile(candidate.file).then(ok => { if (!ok) throw new Error('候选 GLB 模型文件结构无效。'); }); this.models.set(stat.real, checked); }
@@ -388,8 +391,10 @@ class ResourceResolver {
     } finally { await handle.close(); }
   }
 
-  private verifyGltf(file: string, size: number): Promise<string[]> {
-    let result = this.gltfFiles.get(file);
+  private verifyGltf(file: string, size: number, verifiedPackageRoot?: string): Promise<string[]> {
+    const boundary = verifiedPackageRoot ?? path.dirname(file);
+    const cacheKey = `${identityKey(file)}\0${identityKey(boundary)}`;
+    let result = this.gltfFiles.get(cacheKey);
     if (!result) {
       result = (async () => {
         if (size > 64 * 1024 * 1024) throw new Error('glTF JSON 超过 64 MiB 限制。');
@@ -400,15 +405,15 @@ class ResourceResolver {
           const uri = object(entry)?.uri;
           if (typeof uri !== 'string' || /^data:/i.test(uri)) continue;
           let decoded: string; try { decoded = decodeURIComponent(uri); } catch { throw new Error(`glTF 依赖 URI 不安全：${uri}`); }
-          if (!decoded || /[\\\x00-\x1f?#]/.test(decoded) || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(decoded)
-            || decoded.split('/').some(part => part === '..')) throw new Error(`glTF 依赖 URI 不安全：${uri}`);
+          if (!decoded || /[\\\x00-\x1f?#]/.test(decoded) || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(decoded)) throw new Error(`glTF 依赖 URI 不安全：${uri}`);
           const dependency = path.resolve(root, decoded);
-          try { await this.requireFile(root, dependency, false); }
+          // 只在已验证的模型包边界内允许 ../；独立 glTF 仍以自身目录为边界，真实越界和 Junction 继续拒绝。
+          try { await this.requireFile(boundary, dependency, false); }
           catch (error) { throw new Error(`glTF 依赖文件不可用（${uri}）：${message(error)}`); }
           dependencies.add(dependency);
         }
         return [...dependencies];
-      })(); this.gltfFiles.set(file, result);
+      })(); this.gltfFiles.set(cacheKey, result);
     }
     return result;
   }

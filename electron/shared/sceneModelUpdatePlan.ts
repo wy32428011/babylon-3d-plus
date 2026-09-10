@@ -10,9 +10,53 @@ export type DataPlatformModelIdentity = {
 };
 export type SceneModelUpdateItem = Omit<DataPlatformModelIdentity, 'sourceKey'> & {
   sourceUrls: string[];
+  /** 历史来源或缺失身份只作为查询线索，需当前中台确认成功后再回填。 */
+  sourceMigration?: boolean;
   variants?: Array<{ modelPath: string; sourceUrls: string[] }>;
 };
 export type SceneModelUpdateIssue = { resourceKind: 'model' | 'combo' | 'environment'; resourceId?: string; message: string };
+export type SceneModelCatalogEntry = { kind: 'model' | 'combo'; resourceId: string; name: string; fileName: string };
+
+/** 同步落盘和历史名称匹配共用，避免非法字符、长名称或 Windows 保留名造成关联失败。 */
+export function sanitizeSceneModelPackageName(value: string): string {
+  const normalized = value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, ' ').trim().replace(/[. ]+$/g, '').slice(0, 80) || '未命名';
+  const stem = normalized.split('.', 1)[0]?.toUpperCase() ?? '';
+  return /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem) ? `_${normalized}` : normalized;
+}
+
+function normalizeResourceName(value: string): string {
+  return value.normalize('NFKC').trim().replace(/\.(?:glb|gltf)$/i, '')
+    .replace(/[-_\s]+场景保留版$/, '').trim().toLowerCase();
+}
+
+/** 仅原 ID 被中台明确判定不存在时使用；名称和主文件必须共同唯一匹配，不能猜测子模型。 */
+export function findCurrentSceneModelReplacement(item: SceneModelUpdateItem, catalog: readonly SceneModelCatalogEntry[]): SceneModelUpdateItem {
+  const restored = catalog.filter(record => record.kind === item.kind && record.resourceId === item.resourceId);
+  if (restored.length === 1) return item;
+  if (restored.length > 1) throw new Error(`模型 ${item.kind}:${item.resourceId} 在当前中台存在重复 ID。`);
+  const paths = new Set(item.variants?.map(variant => variant.modelPath) ?? [item.modelPath]);
+  if (paths.size !== 1 || item.modelPath.includes('/')) throw new Error(`历史模型 ${item.kind}:${item.resourceId} 已不存在，包内子模型不能自动改绑其他资源。`);
+  const names = new Set<string>();
+  for (const url of item.sourceUrls) {
+    if (!url.startsWith('editor-asset://local/')) continue;
+    let decoded: string;
+    try { decoded = decodeURIComponent(url.slice('editor-asset://local/'.length).split(/[?#]/, 1)[0]).replace(/\\/g, '/'); }
+    catch { continue; }
+    const match = /(?:^|\/)(model|combo)-([1-9]\d{0,63})-([^/]+)\//i.exec(decoded);
+    if (!match || match[1].toLowerCase() !== item.kind || match[2] !== item.resourceId) continue;
+    // 固定版本目录最后的 12 位是编辑器布局哈希，不属于资源名。
+    const name = /\/scene-model-versions\/[a-f0-9]{64}\/[a-f0-9]{64}\//i.test(decoded)
+      ? match[3].replace(/-[a-f0-9]{12}$/i, '') : match[3];
+    const normalized = normalizeResourceName(name);
+    if (normalized) names.add(normalized);
+  }
+  const candidates = catalog.filter(record => record.kind === item.kind
+    && record.name.trim() && names.has(normalizeResourceName(sanitizeSceneModelPackageName(record.name)))
+    && record.fileName.normalize('NFKC').trim().toLowerCase() === item.modelPath.normalize('NFKC').toLowerCase());
+  if (candidates.length !== 1) throw new Error(`历史模型 ${item.kind}:${item.resourceId} 已不存在，当前中台按资源名和主文件匹配到 ${candidates.length} 个候选，不能自动替换。`);
+  return { ...item, resourceId: candidates[0].resourceId, sourceMigration: true };
+}
 
 /** 兼容明确的历史 Env-ID 目录；受管环境缺少身份时不能被当作已同步本地环境。 */
 export function getSceneEnvironmentUpdateReference(scene: unknown): { resourceId: string } | undefined {
@@ -54,15 +98,18 @@ export function normalizeDataPlatformModelIdentity(value: unknown): DataPlatform
 /** 只查询场景实际引用的中台模型；本地资产不按名称猜测，间接引用也不能漏掉。 */
 export function planSceneModelUpdates(scene: unknown, sourceKey: string, options: {
   allowSourceRebind?: boolean;
+  /** 按当前中台查询历史资源 ID；返回候选不等于已完成来源确认。 */
+  resolveAgainstCurrentSource?: boolean;
   /** 未绑定场景无法从项目绑定确认历史资源来源。 */
   requireSourceIdentity?: boolean;
   onIssue?: (issue: SceneModelUpdateIssue) => void;
 } = {}): SceneModelUpdateItem[] {
   const { models, devices } = collectPublishModelReferences(scene);
   const references = [...models.map(reference => reference.asset), ...devices];
+  const requireSourceIdentity = options.requireSourceIdentity === true && !options.resolveAgainstCurrentSource;
   // 点击设备模板没有独立身份字段时，只能借用同一个完整 URL 的明确身份证据。
   const identitiesByUrl = new Map<string, { identity?: DataPlatformModelIdentity; error?: Error }>();
-  if (options.requireSourceIdentity) for (const asset of references) {
+  if (requireSourceIdentity) for (const asset of references) {
     if (asset.dataPlatformModel === undefined) continue;
     const key = String(asset.sourceUrl);
     const proof = identitiesByUrl.get(key) ?? {};
@@ -88,11 +135,11 @@ export function planSceneModelUpdates(scene: unknown, sourceKey: string, options
     const resourceKey = pathKey ? `${pathKind}:${pathId}` : undefined;
     if (resourceKey && blocked.has(resourceKey)) continue;
     try {
-      const proof = options.requireSourceIdentity ? identitiesByUrl.get(String(asset.sourceUrl)) : undefined;
+      const proof = requireSourceIdentity ? identitiesByUrl.get(String(asset.sourceUrl)) : undefined;
       if (proof?.error) throw proof.error;
-      const identity = options.requireSourceIdentity ? proof?.identity : normalizeDataPlatformModelIdentity(asset.dataPlatformModel);
-      if (pathKey && !identity && options.requireSourceIdentity) throw new Error('场景模型缺少数据中台来源身份，无法确认与当前配置同源，已保留原模型。');
-      if (identity && identity.sourceKey !== sourceKey && !options.allowSourceRebind) throw new Error('场景模型的数据中台来源与当前项目不一致，请核对模型来源后同步。');
+      const identity = requireSourceIdentity ? proof?.identity : normalizeDataPlatformModelIdentity(asset.dataPlatformModel);
+      if (pathKey && !identity && requireSourceIdentity) throw new Error('场景模型缺少数据中台来源身份，无法确认与当前配置同源，已保留原模型。');
+      if (identity && identity.sourceKey !== sourceKey && !options.allowSourceRebind && !options.resolveAgainstCurrentSource) throw new Error('场景模型的数据中台来源与当前项目不一致，请核对模型来源后同步。');
       if (!pathKey) {
         if (identity || /(?:model|combo)-[1-9]\d*/i.test(String(asset.sourceUrl))) {
           throw new Error('场景中存在无效的中台模型引用，无法确认资源身份。');
@@ -107,7 +154,8 @@ export function planSceneModelUpdates(scene: unknown, sourceKey: string, options
       if (previous && previous.modelPath !== modelPath && !previous.variants) {
         previous.variants = [{ modelPath: previous.modelPath, sourceUrls: [...previous.sourceUrls] }];
       }
-      const item = previous ?? { kind, resourceId, modelPath, sourceUrls: [] };
+      const item: SceneModelUpdateItem = previous ?? { kind, resourceId, modelPath, sourceUrls: [] };
+      if (options.resolveAgainstCurrentSource && (!identity || identity.sourceKey !== sourceKey)) item.sourceMigration = true;
       const sourceUrl = String(asset.sourceUrl);
       if (item.variants) {
         let variant = item.variants.find(candidate => candidate.modelPath === modelPath);

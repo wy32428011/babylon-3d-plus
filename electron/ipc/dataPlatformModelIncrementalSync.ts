@@ -9,6 +9,7 @@ import type {
 import { readUtf8File } from '../shared/strictUtf8.js';
 import { RemoteDownloadTracker } from '../shared/remoteDownloadProgress.js';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO } from '../modelUnits.js';
+import { sanitizeSceneModelPackageName, type SceneModelCatalogEntry } from '../shared/sceneModelUpdatePlan.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 import { assertRecoveryPathInsideRoot } from '../shared/recoveryPathBoundary.js';
 import { normalizeDataPlatformSourceUrl } from './dataPlatformEnvironmentContract.js';
@@ -28,6 +29,7 @@ import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js
 import {
   assertPathInside,
   DataPlatformRollbackError,
+  DataPlatformHttpError,
   downloadRemoteFile,
   requestDataPlatformJson,
   resolveDataPlatformRemoteUrl,
@@ -186,6 +188,16 @@ export type ModelSnapshotExpectedFile = {
 };
 export class ModelSnapshotIntegrityError extends Error {
   readonly code = 'DIGITAL_TWIN_RESOURCE_SNAPSHOT_CONFLICT';
+}
+export class SceneModelResourceMissingError extends Error {
+  constructor(readonly kind: 'model' | 'combo', readonly resourceId: string) {
+    super(`当前数据中台不存在模型 ${kind}:${resourceId}。`);
+    this.name = 'SceneModelResourceMissingError';
+  }
+}
+
+function isMissingModelCode(code: unknown): boolean {
+  return typeof code === 'string' && /^(?:MODEL|COMBO_MODEL|RESOURCE)_NOT_FOUND$/.test(code.trim().toUpperCase());
 }
 export type SyncSceneDataPlatformModelAssetsOptions = RecoverDataPlatformModelAssetsOptions & {
   /** 仅主进程可信snapshot传入，下载原始payload后、元数据格式转换前逐项校验。 */
@@ -454,7 +466,7 @@ export async function syncSceneDataPlatformModelAssets(
       const after = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
       if (hashFingerprint(before) !== hashFingerprint(after)) throw new Error('数据中台模型在同步期间版本或资源描述发生变化，请重试。');
       assertNotAborted(signal);
-      return [{ ...sharedPinned, dataPlatformSourceKey: sourceKey, dataPlatformResourceId: resource.resourceId }];
+      return [{ ...sharedPinned, displayName: before[0].name, dataPlatformSourceKey: sourceKey, dataPlatformResourceId: resource.resourceId }];
     }
 
     await runDataPlatformModelSync({
@@ -581,8 +593,21 @@ async function queryRequiredModels(
   await runWithConcurrency([...resources], MAX_CONCURRENT_DOWNLOADS, async (resource) => {
     assertNotAborted(signal);
     const endpointPath = resource.kind === 'model' ? 'api/v1/models/detail' : 'api/v1/combo-models/detail';
-    const response = await requestJson({ baseUrl, endpointPath, body: { id: resource.resourceId }, signal,
-      timeoutMs: QUERY_TIMEOUT_MS, context: '查询数据中台模型 ' + resourceKey(resource) });
+    let response: unknown;
+    try {
+      response = await requestJson({ baseUrl, endpointPath, body: { id: resource.resourceId }, signal,
+        timeoutMs: QUERY_TIMEOUT_MS, context: '查询数据中台模型 ' + resourceKey(resource) });
+    } catch (error) {
+      assertNotAborted(signal);
+      if (error instanceof DataPlatformHttpError && error.httpStatus < 500
+        && ![401, 403, 408, 429].includes(error.httpStatus) && isMissingModelCode(error.businessCode)) {
+        throw new SceneModelResourceMissingError(resource.kind, resource.resourceId);
+      }
+      throw error;
+    }
+    if (isPlainObject(response) && response.success === false && isMissingModelCode(response.code ?? response.errorCode)) {
+      throw new SceneModelResourceMissingError(resource.kind, resource.resourceId);
+    }
     if (!isPlainObject(response) || response.success !== true || !isPlainObject(response.data)) {
       throw new Error('数据中台模型 ' + resourceKey(resource) + ' 详情不可用，无法同步场景引用。');
     }
@@ -973,6 +998,21 @@ function createModelSyncContext(baseUrl: string, editorRoot: string): ModelSyncC
   };
 }
 
+/** 旧 ID 不存在时读取当前目录；这里只提供候选，命中项仍需详情与实际下载校验。 */
+export async function queryCurrentSceneModelCatalog(baseUrl: string, kind: 'model' | 'combo', signal: AbortSignal): Promise<SceneModelCatalogEntry[]> {
+  const rows = await queryAllPages(baseUrl, kind === 'model' ? MODEL_QUERY_PATH : COMBO_MODEL_QUERY_PATH,
+    kind === 'model' ? '普通模型' : '组合模型', kind === 'model' ? 'modelName' : 'comboModelName', signal, DEFAULT_DEPENDENCIES.requestJson);
+  const ids = new Set<string>();
+  return rows.map((value, index) => {
+    const record = requireRecord(value, '模型目录', index);
+    const resourceId = normalizeRequiredId(record.id, '模型目录', index);
+    if (ids.has(resourceId)) throw new Error(`当前模型目录包含重复资源 ID：${resourceId}`);
+    ids.add(resourceId);
+    return { kind, resourceId, name: normalizeOptionalString(record[kind === 'model' ? 'modelName' : 'comboModelName']) ?? '',
+      fileName: normalizeOptionalString(record.fileName) ?? '' };
+  });
+}
+
 async function queryAllNormalModels(
   baseUrl: string,
   signal: AbortSignal,
@@ -1240,7 +1280,7 @@ function createThumbnailRemoteFingerprint(record: SyncModelRecord): string | nul
 
 function createPackageRelativePath(record: SyncModelRecord): string {
   const prefix = record.kind === 'model' ? 'Model' : 'Combo';
-  const directoryName = `${prefix}-${record.id}-${sanitizePathSegment(record.name)}`;
+  const directoryName = `${prefix}-${record.id}-${sanitizeSceneModelPackageName(record.name)}`;
   return record.kind === 'combo'
     ? `Assets/Models/ComboModels/${directoryName}`
     : `Assets/Models/${directoryName}`;
@@ -1814,16 +1854,6 @@ function sanitizeFileName(value: string): string {
     .replace(/[. ]+$/g, '')
     .slice(0, 180);
   return avoidWindowsReservedName(normalized);
-}
-
-function sanitizePathSegment(value: string): string {
-  const normalized = value
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[. ]+$/g, '')
-    .slice(0, 80);
-  return avoidWindowsReservedName(normalized || '未命名');
 }
 
 function avoidWindowsReservedName(value: string): string {

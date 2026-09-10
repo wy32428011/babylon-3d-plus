@@ -372,6 +372,8 @@ export type ClickEventBindingDeviceType = {
   sourcePath: string;
   sourceUrl: string;
   assetRevision?: string;
+  /** 经数据中台确认的稳定模型身份；历史场景可缺省，后续同步成功时补齐。 */
+  dataPlatformModel?: DataPlatformModelIdentity;
 };
 
 /** 设备类型列表单元；deviceType 为 null 表示待配置的空槽，从模型库拖入后填充。 */

@@ -136,11 +136,18 @@ export function repairPublishSceneModels(scene: SceneDocument, recovery: Digital
       }
       remappedKeys.set(originalKey, recoveredKey);
     }
-    if (device.sourceUrl !== model.sourceUrl || device.sourcePath !== model.sourcePath || device.assetRevision !== model.assetRevision) {
+    let identity: ReturnType<typeof normalizeDataPlatformModelIdentity> = undefined;
+    try { identity = normalizeDataPlatformModelIdentity(model.dataPlatformModel); } catch {
+      warnings.add(`点击设备「${device.displayName ?? '未命名模型'}」的模型身份暂时不可解析，已保留槽位并等待后续中台同步确认。`);
+    }
+    const identityChanged = identity !== undefined && JSON.stringify(device.dataPlatformModel) !== JSON.stringify(identity);
+    const resourceChanged = device.sourceUrl !== model.sourceUrl || device.sourcePath !== model.sourcePath || device.assetRevision !== model.assetRevision;
+    if (resourceChanged || identityChanged) {
       device.sourcePath = model.sourcePath;
       device.sourceUrl = model.sourceUrl;
+      if (identity) device.dataPlatformModel = identity;
       // 旧缩略图可能仍指向已丢失的共享包，不能让编辑用图片再次阻断 SOURCE 打包。
-      delete device.thumbnailUrl;
+      if (resourceChanged) delete device.thumbnailUrl;
       if (model.assetRevision) device.assetRevision = model.assetRevision;
       else delete device.assetRevision;
       reboundCount += 1;

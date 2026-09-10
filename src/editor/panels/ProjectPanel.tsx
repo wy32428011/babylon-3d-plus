@@ -1074,12 +1074,23 @@ export function ProjectPanel(props: ProjectPanelProps) {
           let finalScene = prepared.scene;
           if (sceneResourcePolicy === 'local-refresh') {
             // 模型先统一到中台版本，再恢复图片、天空盒及其他本地依赖，避免被缺失旧模型挡住。
-            const recovered = await window.editorApi.prepareLocalSceneResources({ mode: 'local-recovery', requestId: runId,
-              sceneContent: serializeScene(finalScene), sceneFilePath: useEditorStore.getState().sceneSourceFilePath ?? undefined });
-            if (!isCurrent()) return;
-            issues.push(...(recovered.issues ?? []).map(describeIssue));
-            warnings.push(...(recovered.warnings ?? []));
-            if (typeof recovered.recoveredSceneContent === 'string') finalScene = deserializeScene(recovered.recoveredSceneContent);
+            try {
+              const recovered = await window.editorApi.prepareLocalSceneResources({ mode: 'local-recovery', requestId: runId,
+                sceneContent: serializeScene(finalScene), sceneFilePath: useEditorStore.getState().sceneSourceFilePath ?? undefined });
+              if (!isCurrent()) return;
+              issues.push(...(recovered.issues ?? []).map(describeIssue));
+              warnings.push(...(recovered.warnings ?? []));
+              if (typeof recovered.recoveredSceneContent !== 'string') throw new Error('本地资源恢复未返回有效场景内容。');
+              finalScene = deserializeScene(recovered.recoveredSceneContent);
+            } catch (error) {
+              if (!isCurrent()) return;
+              const message = error instanceof Error ? error.message : String(error);
+              // 取消和切换不能借局部恢复兜底提交；其它恢复失败保留第一阶段已校验的模型更新。
+              if ((error instanceof Error && error.name === 'AbortError')
+                || /\b(?:AbortError|ABORT_ERR)\b|已取消|已中止|场景会话已变化|当前项目会话已变化/.test(message)) throw error;
+              finalScene = prepared.scene;
+              issues.push(`其余本地资源恢复失败：${message}；已同步的模型更新将保留，相关资源问题仍需处理。`);
+            }
           }
           if (!useEditorStore.getState().commitLatestSceneResources(sceneSessionId, beforeScene, finalScene, issues)) {
             throw new Error('同步期间场景发生变化，请重新同步以保留最新编辑内容。');
