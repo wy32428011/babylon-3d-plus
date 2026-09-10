@@ -72,6 +72,7 @@ import {
 } from '../../editor/model/builtInMeshGeometry';
 import type { Vector3Data } from '../../editor/model/math';
 import { createGroupSpatialInfo, type GroupSpatialInfoResult } from '../../editor/model/groupSpatialInfo';
+import { deriveColumnSplitFromBinding } from '../../editor/model/builtInSlotBinding';
 import { MODEL_ARRAY_COPY_COUNT_MAX, MODEL_ARRAY_MIN_SPAN_METERS } from '../../editor/model/modelArray';
 import {
   createModelAssetCode,
@@ -3870,13 +3871,21 @@ export class SceneRuntime {
         ?? hostEntry?.entitySnapshot?.components.modelAsset?.builtInSlotBindingConfig
         ?? arrayHostRenderEntry?.entitySnapshot?.components.modelAsset?.builtInSlotBindingConfig
       : undefined;
+    const hostParameterValues = bound && binding
+      ? this.syncedEntities.get(binding.hostEntityId)?.components.modelAsset?.parameterValues
+        ?? arrayHostEntity?.components.modelAsset?.parameterValues
+        ?? hostEntry?.entitySnapshot?.components.modelAsset?.parameterValues
+        ?? arrayHostRenderEntry?.entitySnapshot?.components.modelAsset?.parameterValues
+      : undefined;
+    const columnSplit = hostBindingConfig ? deriveColumnSplitFromBinding(hostBindingConfig, hostParameterValues) : 1;
     const columnSign = hostBindingConfig?.columnDirection === '-x' ? -1 : 1;
     const layout = bound
       ? this.readBuiltInSlotLayout(hostEntry?.contentRoot.metadata ?? arrayHostRenderEntry?.contentRoot.metadata)
       : null;
     const bindingSteps = bound
       ? {
-          columnStepX: columnSign * (layout?.columnSpacing ?? locator.length + locator.columnGap),
+          // layout 写的是物理格距，按列向分裂比例细分为逻辑列步距；layout 未就绪时 locator.length 已是派生后的逻辑格宽
+          columnStepX: columnSign * (layout ? layout.columnSpacing / columnSplit : locator.length + locator.columnGap),
           layerStepY: layout?.layerStepY ?? locator.height + locator.layerGap,
         }
       : null;
@@ -3908,7 +3917,8 @@ export class SceneRuntime {
       const offset = binding.originOffset;
       const localPosition = layout
         ? {
-            x: columnSign * layout.firstCellCenterX + offset.x,
+            // 逻辑首格中心 = 物理首格中心向列向反方向退 (物理格宽−逻辑格宽)/2
+            x: columnSign * (layout.firstCellCenterX - layout.columnSpacing * (columnSplit - 1) / (2 * columnSplit)) + offset.x,
             y: layout.firstLayerSurfaceY + offset.y,
             z: layout.depthCenterZ + offset.z,
           }

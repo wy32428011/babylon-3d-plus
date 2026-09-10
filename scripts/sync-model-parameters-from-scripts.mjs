@@ -189,10 +189,13 @@ function normalizeBuiltInSlotBinding(source) {
     }
   }
 
+  const columnSplitParam = typeof source.columnSplitParam === 'string' ? source.columnSplitParam.trim() : '';
+
   return {
     enabledParam,
     dimensionMapping,
     columnDirection: source.columnDirection === '-x' ? '-x' : '+x',
+    ...(columnSplitParam ? { columnSplitParam } : {}),
   };
 }
 

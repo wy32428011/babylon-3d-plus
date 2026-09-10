@@ -203,9 +203,10 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:66
 | `supportLegHeight` | :45 | 0.904 m |
 | `doubleDeepEnabled` / `deepSlotGap` | :52/:55 | false / 0.2（双排深位） |
 | `enableBuiltInSlots` | :58 | false，开启后派生内置货格 |
+| `slotColumnRatio` | :61 | 1（1..8），1 个实物货格列向分裂的逻辑列数：逻辑列数 = columnCount × ratio、逻辑格宽 = cellWidth / ratio，物理结构不变；`to_x` 按连续逻辑列号寻址 |
 | `bodyColor` / `beamColor` | — | 本体/横梁颜色 |
 
-货格 LocatorComponent（components.ts:58-78）：`length/width/height`、`columns/layers`、`startColumn/startLayer`、`columnReversed`、`columnGap/layerGap`、`deviceAssetCode`（绑堆垛机）、`rowNumber`（排号）、`storageDepth:'near'|'far'`、`fetchDrive:{enabled, cargoGeneratorId}`。内置绑定声明 `builtInSlotBinding`（shelf.model.ts:137-150，`dimensionMapping` 派生维度）。
+货格 LocatorComponent（components.ts:58-78）：`length/width/height`、`columns/layers`、`startColumn/startLayer`、`columnReversed`、`columnGap/layerGap`、`deviceAssetCode`（绑堆垛机）、`rowNumber`（排号）、`storageDepth:'near'|'far'`、`fetchDrive:{enabled, cargoGeneratorId}`。内置绑定声明 `builtInSlotBinding`（shelf.model.ts:140-154，`dimensionMapping` 派生维度，`columnSplitParam` 声明列向分裂比例参数）。
 
 **共享实例策略**：带脚本的 shelf 走 **owned-container 独占**（`resolveModelAssetSharedInstancingPolicy`，SharedModelAssetCache.ts:157-180）；仅无脚本纯静态模型才 shared-instance。
 

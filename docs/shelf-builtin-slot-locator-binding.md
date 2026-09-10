@@ -50,8 +50,12 @@ export const builtInSlotBinding = {
   },
   /** 列拓展方向（模型局部轴，与脚本克隆方向一致） */
   columnDirection: '+x',
+  /** 列向分裂比例参数 key（可选）：1 个实物货格分裂为 N 个逻辑列，逻辑列数 = columns × N、逻辑格宽 = length / N；to_x 按连续逻辑列号 */
+  columnSplitParam: 'slotColumnRatio',
 };
 ```
+
+`columnSplitParam` 为后加的可选字段（缺省 = 1，行为不变）：派生层 `deriveLocatorDimensionsFromBinding` 对 columns 乘 N、length 除 N；运行时 `syncLocatorEntity` 把 `columnSpacing / N` 作为列步距、首格中心左移 `(N-1)/(2N) × columnSpacing`。`builtInSlotLayout` metadata 仍写**物理**布局，比例换算全部在绑定层。
 
 ### 运行时布局输出约定
 

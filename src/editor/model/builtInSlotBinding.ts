@@ -19,6 +19,8 @@ export type BuiltInSlotBindingConfig = {
   dimensionMapping: Partial<Record<'columns' | 'layers' | 'length' | 'height' | 'width', string>>;
   /** 列拓展方向（与参数化脚本克隆方向一致），默认 '+x' */
   columnDirection?: BuiltInSlotColumnDirection;
+  /** 列向分裂比例的模型参数 key（可选）：1 个实物货格分裂为 N 个逻辑列，缺省为 1 */
+  columnSplitParam?: string;
 };
 
 /** 货格实体上的绑定标记；hostEntityId 指向声明了绑定的模型实体时视为内置绑定（parentId 不参与绑定身份，仍只用于文件夹分组）。 */
@@ -50,10 +52,13 @@ export function normalizeBuiltInSlotBindingConfig(source: unknown): BuiltInSlotB
     }
   }
 
+  const columnSplitParam = typeof record.columnSplitParam === 'string' ? record.columnSplitParam.trim() : '';
+
   return {
     enabledParam,
     dimensionMapping,
     columnDirection: record.columnDirection === '-x' ? '-x' : '+x',
+    ...(columnSplitParam ? { columnSplitParam } : {}),
   };
 }
 
@@ -79,6 +84,22 @@ export function isBuiltInSlotLocator(entity: Entity | null | undefined): boolean
   return Boolean(entity?.components.locator?.builtInBinding?.hostEntityId);
 }
 
+const MIN_COLUMN_SPLIT = 1;
+const MAX_COLUMN_SPLIT = 8;
+
+/** 读取声明的列向分裂比例参数；缺参/非法值返回 1（不分裂）。 */
+export function deriveColumnSplitFromBinding(
+  config: BuiltInSlotBindingConfig,
+  parameterValues: ModelParameterValues | undefined,
+): number {
+  const paramKey = config.columnSplitParam;
+  if (!paramKey || !parameterValues) return 1;
+  const raw = parameterValues[paramKey];
+  const value = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(MIN_COLUMN_SPLIT, Math.min(MAX_COLUMN_SPLIT, Math.round(value)));
+}
+
 /** 按声明的维度映射从宿主模型参数值派生货格维度。 */
 export function deriveLocatorDimensionsFromBinding(
   config: BuiltInSlotBindingConfig,
@@ -94,6 +115,17 @@ export function deriveLocatorDimensionsFromBinding(
     const value = typeof raw === 'number' ? raw : Number(raw);
     if (!Number.isFinite(value)) continue;
     result[key] = sanitizeDimensionValue(key, value);
+  }
+
+  // 列向分裂：逻辑列数 ×N、逻辑格宽 ÷N；货架物理结构不变
+  const columnSplit = deriveColumnSplitFromBinding(config, parameterValues);
+  if (columnSplit > 1) {
+    if (result.columns !== undefined) {
+      result.columns = Math.max(1, Math.min(100, result.columns * columnSplit));
+    }
+    if (result.length !== undefined) {
+      result.length = Math.max(0.01, result.length / columnSplit);
+    }
   }
   return result;
 }
