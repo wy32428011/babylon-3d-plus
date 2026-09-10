@@ -1,4 +1,5 @@
 import { AlarmManagerRuntime, type AlarmActivation } from './AlarmManagerRuntime';
+import { executeModelParameterBindings } from './modelParameterBindingExecution';
 import { collectAlarmIndependentEntityIds } from '../../editor/model/alarmManager';
 import { getChartMarkerClickEvents } from '../../editor/model/chartMarker';
 import { ChartMarkerPresentation, getChartMarkerStyle, getChartMarkerText } from './ChartMarkerPresentation';
@@ -101,6 +102,7 @@ import { createCadReferenceDxfWorkerTask } from '../../editor/cad/cadReferenceWo
 import { decodeCadDxfBytes } from '../../editor/cad/cadTextEncoding';
 import {
   ExternalModelScriptRuntime,
+  getExternalModelScriptLoadDiagnostics,
   type ExternalModelScriptRuntimeMode,
   type ExternalModelScriptTelemetrySnapshot,
 } from './ExternalModelScriptRuntime';
@@ -200,6 +202,7 @@ import { EnvironmentAssetContainerCache } from './environmentAssetContainerCache
 import {
   resolveModelAssetSharedInstancingPolicy,
   SharedModelAssetCache,
+  createModelAssetTemplateKey,
 } from './SharedModelAssetCache';
 import {
   prepareInstancedMeshesForSelectionOutline,
@@ -455,6 +458,7 @@ type ResolvedModelGeneratorTarget = {
 };
 
 type ModelParameterRuntimeTarget = AbstractMesh | TransformNode | Material;
+type ParameterTextureAssignment = { texture: Texture | null; previous: ParameterTextureAssignment | null };
 type ModelParameterBaselineValue = boolean | number | string | Vector3Data | Texture | null;
 
 /** 定位线框单个列号标签的渲染资源；texture 在 NullEngine 等无 canvas 环境为 null（不创建标签）。 */
@@ -590,6 +594,9 @@ export type SceneRuntimeModelLoadProgress = {
 export type SceneRuntimePerformanceMetrics = {
   loading: ReturnType<SceneLoadDiagnostics['snapshot']> & {
     environmentPhase: EnvironmentRuntimeSnapshot['phase'];
+    skybox: ReturnType<SceneSkyboxRuntime['getReadiness']>;
+    skyboxTiming: ReturnType<SceneSkyboxRuntime['getLoadDiagnostics']>;
+    externalScripts: ReturnType<typeof getExternalModelScriptLoadDiagnostics>;
     pendingModelCount: number;
     failedModelAcquisitions: number;
     modelCache: ReturnType<SharedModelAssetCache['getMetrics']>;
@@ -690,6 +697,9 @@ function isChainConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
 }
 
 export class SceneRuntime {
+  private readonly parameterTextureAssignments = new WeakMap<Material, ParameterTextureAssignment>();
+  private readonly unavailableParameterTextures = new WeakSet<Texture>();
+  private readonly observedParameterTextures = new WeakSet<Texture>();
   private shadowDocument: SceneDocument | null = null;
   private shadowBakeRunning = false;
   private readonly meshes = new Map<string, Mesh>();
@@ -832,7 +842,7 @@ export class SceneRuntime {
       bounds: id => this.getEntityWorldBounds(id), visible: id => this.isEntityVisible(id),
       activate: event => this.onAlarmActivated?.(event), report: message => this.pushLog(message),
     });
-    this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog);
+    this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog, () => this.notifyModelLoadProgressChanged());
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
       // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
       loadAssetContainer: (rootUrl, fileName, signal) => {
@@ -2852,6 +2862,9 @@ export class SceneRuntime {
       modelRuntimeCount: this.models.size,
       loading: { ...this.loadDiagnostics.snapshot(),
         environmentPhase: this.environmentRuntime.getSnapshot().phase,
+        skybox: this.getSkyboxReadiness(),
+        skyboxTiming: this.skyboxRuntime.getLoadDiagnostics(),
+        externalScripts: getExternalModelScriptLoadDiagnostics(),
         pendingModelCount: [...this.models.values()].filter((model) => !model.measurementReady).length,
         failedModelAcquisitions: this.failedModelAcquisitions,
         modelCache: this.sharedModelAssetCache.getMetrics(),
@@ -4241,7 +4254,7 @@ export class SceneRuntime {
   /** 按模型资产能力选择独占容器或安全共享实例加载路径。 */
   private async loadModelRuntimeAssets(
     modelAsset: ModelAssetComponent,
-    assetSignature: string,
+    _assetSignature: string,
     loadSignal?: AbortSignal,
   ): Promise<LoadedModelRuntimeAssets> {
     const { rootUrl, fileName } = this.splitAssetUrl(
@@ -4253,11 +4266,12 @@ export class SceneRuntime {
       const instancingPolicy = resolveModelAssetSharedInstancingPolicy(modelAsset);
       if (instancingPolicy.mode === 'shared-instance') {
         const sharedInstance = await this.sharedModelAssetCache.instantiate(
-          assetSignature,
-          () => this.loadAssetContainer(rootUrl, fileName, undefined, (event) => {
+          createModelAssetTemplateKey(modelAsset),
+          (sourceSignal) => this.loadAssetContainer(rootUrl, fileName, sourceSignal, (event) => {
             this.updateModelLoadProgressUnit(loadSequence, event);
           }),
           (sourceName) => sourceName,
+          loadSignal,
         );
         return {
           kind: 'shared-instance',
@@ -4270,9 +4284,13 @@ export class SceneRuntime {
         };
       }
 
-      const container = await this.loadAssetContainer(rootUrl, fileName, loadSignal, (event) => {
-        this.updateModelLoadProgressUnit(loadSequence, event);
-      });
+      const container = await this.sharedModelAssetCache.acquireOwnedContainer(
+        createModelAssetTemplateKey(modelAsset),
+        (sourceSignal) => this.loadAssetContainer(rootUrl, fileName, sourceSignal, (event) => {
+          this.updateModelLoadProgressUnit(loadSequence, event);
+        }),
+        loadSignal,
+      );
       try {
         container.addAllToScene();
         return {
@@ -4352,6 +4370,92 @@ export class SceneRuntime {
     return Boolean(model?.assetHandle && model.measurementReady);
   }
 
+  /** 当前天空盒任务独立报告就绪，已取消旧任务不参与场景加载门控。 */
+  getSkyboxReadiness(): { phase: 'idle' | 'loading' | 'ready' | 'error'; message: string | null; sourceUrl: string | null } {
+    return this.skyboxRuntime.getReadiness();
+  }
+
+  retrySkyboxLoading(): void {
+    this.skyboxRuntime.retry();
+  }
+
+  /** 每轮显式资源恢复后重试失败项；重建脚本宿主以避免在半初始化几何上重复执行 onStart。 */
+  retryFailedSceneResources(document: SceneDocument, hierarchySelectionIds?: readonly string[]): number {
+    if (this.disposed) return 0;
+    const failedEntities = new Set<string>();
+    const failedScript = (model: ModelRuntimeEntry): boolean => !model.externalScriptStarting
+      && Boolean(model.readinessError || model.externalScriptRuntime?.getInitializationError());
+    for (const failure of this.modelReadinessErrors.values()) {
+      for (const entityId of failure.entityIds) {
+        if (document.entities[entityId]?.components.modelAsset) {
+          failedEntities.add(entityId);
+          this.syncedEntities.delete(entityId);
+        }
+      }
+    }
+    for (const [entityId, model] of [...this.models]) {
+      if (!document.entities[entityId]?.components.modelAsset || !failedScript(model)) continue;
+      this.disposeModel(entityId, model);
+      failedEntities.add(entityId);
+      this.syncedEntities.delete(entityId);
+    }
+    for (const variant of [...this.modelArrayParameterVariants.values()]) {
+      if (!document.entities[variant.sourceEntityId]?.components.modelAsset || !failedScript(variant.model)) continue;
+      this.disposeModelArrayParameterVariant(variant);
+      failedEntities.add(variant.sourceEntityId);
+      this.syncedEntities.delete(variant.sourceEntityId);
+    }
+    const failedOwners: GeneratedOutputOwnerRuntimeEntry[] = [];
+    for (const owner of this.generatedOutputOwners.values()) {
+      const entityId = owner.editorEntityId ?? owner.entityId;
+      if (!document.entities[entityId]) continue;
+      const output = owner.output;
+      if (output?.kind === 'model' && output.model.externalScriptStarting) continue;
+      if (!owner.readinessError && owner.failedTargetSignatures.size === 0
+        && !(output?.kind === 'model' && failedScript(output.model))) continue;
+      owner.loadToken += 1;
+      this.disposeModelGeneratorOutput(owner);
+      owner.failedTargetSignatures.clear();
+      owner.reportedLoadFailureKeys.clear();
+      owner.activeTargetSignature = null;
+      owner.readinessError = undefined;
+      failedOwners.push(owner);
+      failedEntities.add(entityId);
+    }
+    if (failedEntities.size === 0) return 0;
+    // 沿用现有增量同步与矩阵身份规则，健康宿主不重新初始化，也不改模型修订和业务参数。
+    this.sync(document, hierarchySelectionIds, { modelArrayIdentityMode: this.modelArrayIdentityMode });
+    for (const owner of failedOwners) {
+      if (this.generatedOutputOwners.get(owner.entityId) !== owner) continue;
+      const resolution = owner.activeSnapshot
+        ? resolveModelGeneratorTargetFromSnapshot(owner.component, owner.activeSnapshot)
+        : { target: owner.component.defaultTarget, role: 'default' as const, snapshot: null };
+      if (resolution) this.syncModelGeneratorResolvedTarget(owner, resolution);
+    }
+    return failedEntities.size;
+  }
+
+  /** 首次加载的低频诊断；错误独立于已结算计数，避免失败单元被误当成功。 */
+  getInitialLoadSnapshot() {
+    const describe = (id: string, error: string): string => '模型 ' + (this.shadowDocument?.entities[id]?.name ?? id) + '：' + error;
+    const modelError = (model: ModelRuntimeEntry | undefined): string | null => model?.readinessError
+      ?? model?.externalScriptRuntime?.getInitializationError() ?? null;
+    let error: string | null = null;
+    const environment = this.environmentRuntime.getSnapshot();
+    const skybox = this.skyboxRuntime.getReadiness();
+    if (environment.phase === 'error') error = '环境模型加载失败：' + environment.message;
+    else if (skybox.phase === 'error') error = '天空盒加载失败：' + skybox.message;
+    if (!error) for (const failure of this.modelReadinessErrors.values()) { error = describe(failure.entityIds[0], failure.error); break; }
+    if (!error) for (const [id, model] of this.models) { const reason = modelError(model) ?? modelError(model.telemetryProxySource); if (reason) { error = describe(id, reason); break; } }
+    if (!error) for (const variant of this.modelArrayParameterVariants.values()) { const reason = modelError(variant.model); if (reason) { error = describe(variant.sourceEntityId, reason); break; } }
+    if (!error) for (const owner of this.generatedOutputOwners.values()) {
+      const reason = owner.readinessError ?? (owner.output?.kind === 'model' ? modelError(owner.output.model) : null);
+      if (reason) { error = describe(owner.editorEntityId ?? owner.entityId, reason); break; }
+    }
+    const resourceBytes = [...this.activeModelLoadProgress.values()].reduce((sum, item) => sum + item.loaded, 0);
+    return { progress: this.computeModelLoadProgress(), skybox: this.skyboxRuntime.getLoadDiagnostics(), resourceBytes, error };
+  }
+
   /** 严格加载门控单独读取失败信息，保留本地编辑对基础几何的容错显示。 */
   getModelReadinessError(entityId: string): string | null {
     const direct = this.models.get(entityId);
@@ -4399,8 +4503,10 @@ export class SceneRuntime {
 
   /** 按单元数汇总已结算与在途单元，生成 0-1 的总体进度；在途单元按当前文件字节折算。 */
   private computeModelLoadProgress(): SceneRuntimeModelLoadProgress {
-    const totalCount = this.modelLoadProgressStartedCount;
-    const settledCount = this.modelLoadProgressSettledCount;
+    const skyboxPhase = this.skyboxRuntime.getReadiness().phase;
+    const skyboxLoading = skyboxPhase === 'loading';
+    const totalCount = this.modelLoadProgressStartedCount + (skyboxPhase === 'idle' ? 0 : 1);
+    const settledCount = this.modelLoadProgressSettledCount + (skyboxPhase === 'ready' || skyboxPhase === 'error' ? 1 : 0);
     let weightedSettled = settledCount;
     let latestReportedAt = -1;
     let currentFile: string | null = null;
@@ -4416,11 +4522,12 @@ export class SceneRuntime {
         currentFilePercent = progress.total > 0 ? fraction : null;
       }
     }
+    if (skyboxLoading && !currentFile) currentFile = '天空盒纹理';
     const percent = totalCount > 0
       ? Math.min(1, Math.max(0, weightedSettled / totalCount))
       : 1;
     return {
-      loading: this.activeModelLoadProgress.size > 0 || settledCount < totalCount,
+      loading: skyboxLoading || this.activeModelLoadProgress.size > 0 || settledCount < totalCount,
       percent,
       completedCount: settledCount,
       totalCount,
@@ -6492,17 +6599,11 @@ export class SceneRuntime {
 
     this.resetModelParameterTargets(model);
 
-    for (const binding of modelAsset.parameterConfig.bindings) {
-      this.applyModelParameterBinding(binding, modelAsset.parameterValues, modelAsset, model);
-    }
-
-    for (const rule of modelAsset.parameterConfig.rules ?? []) {
-      if (this.evaluateBooleanExpression(rule.when, modelAsset.parameterValues)) {
-        for (const binding of rule.set) {
-          this.applyModelParameterBinding(binding, modelAsset.parameterValues, modelAsset, model);
-        }
-      }
-    }
+    executeModelParameterBindings(modelAsset.parameterConfig, {
+      apply: binding => this.applyModelParameterBinding(binding, modelAsset.parameterValues!, modelAsset, model),
+      evaluateRule: expression => this.evaluateBooleanExpression(expression, modelAsset.parameterValues!),
+      report: message => this.pushLog(`${modelAsset.assetCode || modelAsset.sourcePath}：${message}`),
+    });
 
     model.parameterSignature = signature;
   }
@@ -7814,9 +7915,10 @@ export class SceneRuntime {
     model: ModelRuntimeEntry,
   ): void {
     const value = this.evaluateModelExpression(binding.value, values);
-    if (value === null) return;
+    if (value === null) throw new Error('表达式与已保存参数值不兼容。');
 
     const targets = this.resolveModelParameterTargets(binding, model);
+    if (!targets.length) throw new Error('新版模型中没有匹配的绑定目标。');
     for (const target of targets) {
       this.applyModelParameterValueToTarget(target, binding.property, value, modelAsset, model);
     }
@@ -7951,39 +8053,50 @@ export class SceneRuntime {
     this.rememberModelParameterBaseline(target, property, model);
 
     if (property === 'visible') {
-      if (typeof value !== 'boolean') return;
+      if (typeof value !== 'boolean') throw new Error('显隐绑定需要布尔值。');
       if (target instanceof AbstractMesh) target.isVisible = value;
       if (target instanceof TransformNode) target.setEnabled(value);
       return;
     }
 
     if (property === 'position' || property === 'rotation' || property === 'scaling') {
-      if (!this.isVector3Value(value) || !(target instanceof TransformNode)) return;
+      if (!this.isVector3Value(value) || !(target instanceof TransformNode)) throw new Error('变换绑定需要有效的三维向量和节点。');
       target[property] = new Vector3(value.x, value.y, value.z);
       return;
     }
 
     if (property === 'baseColor' || property === 'emissiveColor') {
-      if (typeof value !== 'string' || !(target instanceof Material)) return;
+      if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value) || !(target instanceof Material)) throw new Error('颜色绑定需要有效的颜色和材质。');
       this.applyMaterialColor(target, property, value);
       return;
     }
 
     if (property === 'alpha') {
-      if (typeof value !== 'number' || !(target instanceof Material)) return;
+      if (typeof value !== 'number' || !Number.isFinite(value) || !(target instanceof Material)) throw new Error('透明度绑定需要有限数字和材质。');
       target.alpha = Math.min(1, Math.max(0, value));
       return;
     }
 
     if (property === 'baseTexture') {
-      if (typeof value !== 'string' || !(target instanceof Material)) return;
+      if (typeof value !== 'string' || !(target instanceof Material)) throw new Error('纹理绑定需要有效的纹理路径和材质。');
       const texture = this.loadOrReuseTexture(value, modelAsset, model);
-      if (texture) this.applyMaterialTexture(target, texture);
+      if (!texture) throw new Error('纹理路径未通过安全校验或无法读取。');
+      const previousTexture = this.readMaterialTexture(target);
+      if (previousTexture === texture) return;
+      const previousAssignment = this.parameterTextureAssignments.get(target);
+      const previous = previousAssignment?.texture === previousTexture ? previousAssignment
+        : { texture: previousTexture, previous: null };
+      this.observeParameterTextureDisposal(previousTexture);
+      this.observeParameterTextureDisposal(texture);
+      this.parameterTextureAssignments.set(target, { texture, previous });
+      this.applyMaterialTexture(target, texture);
     }
   }
 
   private evaluateBooleanExpression(expression: ModelExpression, values: ModelParameterValues): boolean {
-    return this.evaluateModelExpression(expression, values) === true;
+    const value = this.evaluateModelExpression(expression, values);
+    if (typeof value !== 'boolean') throw new Error('规则条件与已保存参数值不兼容。');
+    return value;
   }
 
   private evaluateModelExpression(expression: ModelExpression, values: ModelParameterValues): ModelParameterValue | null {
@@ -8002,6 +8115,10 @@ export class SceneRuntime {
 
     const args = expression.args.map((item) => this.evaluateModelExpression(item, values));
     const numbers = args.filter((arg): arg is number => typeof arg === 'number' && Number.isFinite(arg));
+    if (['add', 'sub', 'mul', 'div', 'min', 'max', 'clamp', 'lerp', 'gt', 'gte', 'lt', 'lte'].includes(expression.op)
+      && numbers.length !== args.length) return null;
+    if (['and', 'or', 'not'].includes(expression.op) && args.some(value => typeof value !== 'boolean')) return null;
+    if (expression.op === 'if' && typeof args[0] !== 'boolean') return null;
 
     switch (expression.op) {
       case 'add': return numbers.reduce((sum, value) => sum + value, 0);
@@ -8095,6 +8212,14 @@ export class SceneRuntime {
     return null;
   }
 
+  /** 释放标记按对象记录，不影响相同 URL 后续重试创建的新纹理。 */
+  private observeParameterTextureDisposal(texture: Texture | null): void {
+    if (!texture || this.observedParameterTextures.has(texture)) return;
+    this.observedParameterTextures.add(texture);
+    const unavailableTextures = this.unavailableParameterTextures;
+    texture.onDisposeObservable.addOnce(() => unavailableTextures.add(texture));
+  }
+
   /** 使用共享贴图解析器加载或复用 Babylon 纹理，保证材质绑定和外置脚本参数语义一致。 */
   private loadOrReuseTexture(reference: string, modelAsset: ModelAssetComponent, model: ModelRuntimeEntry): Texture | null {
     const textureUrl = resolveModelTextureAssetUrl(reference, {
@@ -8106,7 +8231,23 @@ export class SceneRuntime {
     const existing = model.textureCache.get(textureUrl);
     if (existing) return existing;
 
-    const texture = new Texture(textureUrl, this.scene);
+    const texture = new Texture(textureUrl, this.scene, undefined, undefined, undefined, undefined, message => queueMicrotask(() => {
+      // 仅回退本次失败赋值：保留此前成功效果，迟到错误也不能覆盖后来的赋值。
+      if (model.textureCache.get(textureUrl) === texture) model.textureCache.delete(textureUrl);
+      this.unavailableParameterTextures.add(texture);
+      const materials = new Set(model.meshes.map(mesh => mesh.material).filter((material): material is Material => Boolean(material)));
+      for (const material of materials) {
+        if (this.readMaterialTexture(material) !== texture) continue;
+        const current = this.parameterTextureAssignments.get(material);
+        if (current?.texture !== texture) continue;
+        let previous = current.previous;
+        while (previous?.texture && this.unavailableParameterTextures.has(previous.texture)) previous = previous.previous;
+        this.parameterTextureAssignments.set(material, previous ?? { texture: null, previous: null });
+        this.applyMaterialTexture(material, previous?.texture ?? null);
+      }
+      texture.dispose();
+      if (!this.disposed) this.pushLog(`${modelAsset.assetCode || modelAsset.sourcePath}：参数纹理无法读取，已跳过该效果并保留参数值：${reference}${message ? `（${message}）` : ''}`);
+    }));
     model.textureCache.set(textureUrl, texture);
     return texture;
   }

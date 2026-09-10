@@ -230,7 +230,14 @@ function registerEditorAssetProtocol(): void {
       return new Response('Forbidden', { status: 403 });
     }
 
-    const stat = await fs.stat(filePath);
+    let stat;
+    try { stat = await fs.stat(filePath); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return new Response('本地资源文件不存在。', { status: 404 });
+      if (code === 'EACCES' || code === 'EPERM') return new Response('无权限读取本地资源文件。', { status: 403 });
+      throw error;
+    }
     const decision = resolveEditorAssetProtocolResponse({
       filePath,
       size: stat.size,

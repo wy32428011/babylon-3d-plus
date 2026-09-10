@@ -107,6 +107,13 @@ test('启动阻断后蒙版让位于错误提示', () => {
   assert.equal(progress.visible, false);
 });
 
+test('天空盒失败时其他模型仍在加载，普通进度蒙版也不能遮挡错误', () => {
+  const progress = computePlayerLoadingProgress({ phase: 'blocked', startupPercent: 50,
+    initialLoadCompleted: false, message: '天空盒加载失败',
+    modelLoadProgress: { loading: true, percent: .1, completedCount: 5, totalCount: 99, currentFile: 'device.glb' } });
+  assert.equal(progress.visible, false);
+});
+
 test('模型进度越界时百分比裁剪到 0-100', () => {
   const progress = computePlayerLoadingProgress({
     phase: 'ready',
@@ -125,7 +132,7 @@ test('模型进度越界时百分比裁剪到 0-100', () => {
   assert.equal(progress.percent, 100);
 });
 
-test('无模型单元且场景就绪时蒙版消失', () => {
+test('纯内置几何或空场景没有模型加载单元，仍等实际首帧确认后收起蒙版', () => {
   const progress = computePlayerLoadingProgress({
     phase: 'ready',
     startupPercent: 50,
@@ -134,6 +141,20 @@ test('无模型单元且场景就绪时蒙版消失', () => {
     message: '场景加载中...',
   });
 
-  assert.equal(progress.visible, false);
-  assert.equal(progress.percent, 100);
+  assert.equal(progress.visible, true);
+  assert.equal(progress.percent, 99);
+  assert.equal(progress.label, '正在验证场景首帧');
+  for (const modelLoadProgress of [null, { loading: false, percent: 1, completedCount: 0, totalCount: 0, currentFile: null }]) {
+    const verified = computePlayerLoadingProgress({ phase: 'ready', startupPercent: 50,
+      modelLoadProgress, initialLoadCompleted: true, message: '场景加载中...' });
+    assert.equal(verified.visible, false);
+    assert.equal(verified.percent, 100);
+  }
+});
+
+
+test('下载字节已到100%但资源或首帧未成功，显示最多99%', () => {
+  const progress = computePlayerLoadingProgress({ phase: 'ready', startupPercent: 50, initialLoadCompleted: false, message: '加载中',
+    modelLoadProgress: { loading: true, percent: 1, completedCount: 163, totalCount: 164, currentFile: 'skybox.exr' } });
+  assert.equal(progress.percent, 99); assert.equal(progress.visible, true);
 });

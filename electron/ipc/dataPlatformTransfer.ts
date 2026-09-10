@@ -76,6 +76,18 @@ export class DataPlatformRollbackError extends Error {
   }
 }
 
+/** JSON 请求的 HTTP 错误保留现有消息，同时提供无需解析文案的状态与业务错误码。 */
+export class DataPlatformHttpError extends Error {
+  readonly httpStatus: number;
+  readonly businessCode: string | null;
+  constructor(message: string, httpStatus: number, businessCode: string | null) {
+    super(message);
+    this.name = 'DataPlatformHttpError';
+    this.httpStatus = httpStatus;
+    this.businessCode = businessCode;
+  }
+}
+
 /** 按数据中台 Base URL 解析相对下载地址，并拒绝危险协议与内嵌凭据。 */
 export function resolveDataPlatformRemoteUrl(baseUrl: string, value: string): URL {
   if (typeof value !== 'string' || !value.trim()) {
@@ -157,7 +169,8 @@ export async function requestDataPlatformJson(options: {
 
     if (!response.ok) {
       const detail = readResponseMessage(responseText);
-      throw new Error(`${options.context}返回 HTTP ${response.status}${detail ? `：${detail}` : ''}`);
+      throw new DataPlatformHttpError(`${options.context}返回 HTTP ${response.status}${detail ? `：${detail}` : ''}`,
+        response.status, readResponseBusinessCode(responseText));
     }
 
     try {
@@ -480,6 +493,15 @@ function readResponseMessage(responseText: string): string {
     return responseText.trim().slice(0, 300);
   }
   return '';
+}
+
+function readResponseBusinessCode(responseText: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(responseText);
+    if (!isPlainObject(parsed)) return null;
+    const code = parsed.code ?? parsed.errorCode ?? (isPlainObject(parsed.error) ? parsed.error.code : undefined);
+    return typeof code === 'string' && /^[a-z][a-z\d_]{0,95}$/i.test(code.trim()) ? code.trim().toUpperCase() : null;
+  } catch { return null; }
 }
 
 function sanitizeResumeKey(value: string): string {

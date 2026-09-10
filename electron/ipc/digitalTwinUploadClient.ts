@@ -1,3 +1,4 @@
+import { formatDigitalTwinPublishErrorMessage } from '../shared/digitalTwinPublishErrorMessage.js';
 import { net } from 'electron';
 import { promises as fs } from 'node:fs';
 import { createPendingChunkIndexes } from './digitalTwinPublishProtocol.js';
@@ -87,6 +88,7 @@ export type DigitalTwinPreparePayload = {
   entrySceneName: string;
   manifestJson: string;
   resourceRevision: string;
+  resourceSnapshotToken?: string;
   confirmResourceBindings: boolean;
   modelIds: string[];
   envModelIds: string[];
@@ -95,13 +97,21 @@ export type DigitalTwinPreparePayload = {
   distPackage: { fileName: string; fileSize: number; sha256: string };
 };
 
+export type DigitalTwinResourceSnapshot = {
+  resourceSnapshotToken: string; resourceRevision: string;
+  resources: Array<{ kind: 'model' | 'combo' | 'environment'; resourceId: string; revision: string;
+    files: Array<{ role: string; fileName: string; fileUrl: string; fileId: string; sha256: string; size: string }> }>;
+};
+
 export class DigitalTwinApiError extends Error {
   readonly code: string;
   readonly data: unknown;
   readonly httpStatus: number;
 
   constructor(code: string, message: string, data: unknown, httpStatus: number) {
-    super(message);
+    // Electron invoke只保留message；自动重试仍需识别资源冲突，不能依赖自定义Error字段。
+    super(formatDigitalTwinPublishErrorMessage(code,
+      /^DIGITAL_TWIN_RESOURCE_(?:REVISION|SNAPSHOT)_CONFLICT$/.test(code) ? `${code}: ${message}` : message, data));
     this.name = 'DigitalTwinApiError';
     this.code = code;
     this.data = data;
@@ -112,6 +122,22 @@ export class DigitalTwinApiError extends Error {
 /** 数据中台数字孪生发布 API 客户端，Long 主键始终以字符串传输和解析。 */
 export class DigitalTwinUploadClient {
   constructor(private readonly baseUrl: string) {}
+
+  async captureResourceSnapshot(projectId: string, resources: { modelIds: string[]; comboModelIds: string[]; envModelIds: string[] }, signal: AbortSignal): Promise<DigitalTwinResourceSnapshot> {
+    return this.resourceSnapshot('capture', { projectId, ...resources }, signal);
+  }
+
+  async validateResourceSnapshot(projectId: string, resourceSnapshotToken: string, signal: AbortSignal): Promise<DigitalTwinResourceSnapshot> {
+    return this.resourceSnapshot('validate', { projectId, resourceSnapshotToken }, signal);
+  }
+
+  private async resourceSnapshot(action: 'capture' | 'validate', payload: object, signal: AbortSignal): Promise<DigitalTwinResourceSnapshot> {
+    const result = await this.requestJson(`api/v1/digital-twin/resource-snapshots/${action}`, 'POST', payload, signal, COMMIT_TIMEOUT_MS);
+    if (!result || typeof result !== 'object' || typeof (result as DigitalTwinResourceSnapshot).resourceSnapshotToken !== 'string'
+      || !(result as DigitalTwinResourceSnapshot).resourceSnapshotToken || typeof (result as DigitalTwinResourceSnapshot).resourceRevision !== 'string'
+      || !Array.isArray((result as DigitalTwinResourceSnapshot).resources)) throw new Error('数据中台资源快照响应无效。');
+    return result as DigitalTwinResourceSnapshot;
+  }
 
   async prepare(payload: DigitalTwinPreparePayload, signal: AbortSignal): Promise<DigitalTwinPublishTask> {
     const task = normalizePublishTask(await this.requestJson(

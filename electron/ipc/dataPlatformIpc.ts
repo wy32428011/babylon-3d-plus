@@ -1,6 +1,7 @@
 import { app, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import { clearProjectAssetStoreSession } from './projectAssetStore.js';
 import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';
+import { resetScenePublishScope } from './scenePublishScope.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { readUtf8File } from '../shared/strictUtf8.js';
@@ -40,6 +41,7 @@ import {
   syncDataPlatformImagesForWorkspace,
   syncDataPlatformModelsForWorkspace,
   prepareLocalSceneResources,
+  cancelSceneModelSync,
   syncDataPlatformEnvironmentsForWorkspace,
   cancelDataPlatformProjectLoading,
   syncDataPlatformSkyboxesForWorkspace,
@@ -79,6 +81,10 @@ const projectSessionTasks = new Set<Promise<unknown>>();
 
 export function isDataPlatformProjectClosing(): boolean {
   return projectClosing;
+}
+
+function assertSceneSwitchAllowed(): void {
+  if (isDigitalTwinPublishActive()) throw new Error('数字孪生发布或资源恢复正在进行，完成或取消后才能修改中台配置和切换项目。');
 }
 
 /** 跟踪项目打开/同步入口，关闭期间拒绝新任务并等待已接收的调用退出。 */
@@ -148,6 +154,7 @@ export function registerDataPlatformIpc(): void {
   ipcMain.handle(
     'data-platform:saveConfig',
     async (_event, request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> => {
+      assertSceneSwitchAllowed();
       projectConfigRevision += 1;
       const config = await saveDataPlatformConfig(validateSaveRequest(request));
       projectListRequestId += 1;
@@ -161,11 +168,17 @@ export function registerDataPlatformIpc(): void {
 
   ipcMain.handle(
     'data-platform:selectWorkspace',
-    async (): Promise<DataPlatformWorkspaceSelectionResult> => selectDataPlatformWorkspace(),
+    async (): Promise<DataPlatformWorkspaceSelectionResult> => {
+      assertSceneSwitchAllowed();
+      return selectDataPlatformWorkspace();
+    },
   );
 
   ipcMain.handle('data-platform:resetWorkspace', async (): Promise<DataPlatformConfig> => {
+    assertSceneSwitchAllowed();
     const config = await resetDataPlatformWorkspace();
+    assertSceneSwitchAllowed();
+    resetScenePublishScope();
     clearDataPlatformProjectServiceRetryContext();
     clearDataPlatformChartSyncRetryContext();
     return config;
@@ -209,6 +222,7 @@ export function registerDataPlatformIpc(): void {
   registerProjectSessionHandler(
     'data-platform:openProject',
     async (_event, request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectOpenResult> => {
+      assertSceneSwitchAllowed();
       const openRequest = validateOpenProjectRequest(request);
       const project = trustedProjectsById.get(openRequest.projectId);
       if (!project) {
@@ -216,6 +230,7 @@ export function registerDataPlatformIpc(): void {
       }
 
       const config = await readDataPlatformConfig();
+      assertSceneSwitchAllowed();
       if (!config.baseUrl) throw new Error('尚未配置数据中台地址。');
       if (config.baseUrl !== trustedProjectsBaseUrl) {
         throw new Error('数据中台地址已变化，请刷新项目列表后再打开。');
@@ -228,7 +243,10 @@ export function registerDataPlatformIpc(): void {
         const currentProject = await requestCurrentDataPlatformProject(config.baseUrl, project.id, controller.signal);
         await assertProjectOpenConfigUnchanged(config, revision);
         controller.signal.throwIfAborted();
-        return await openDataPlatformProject(currentProject, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl);
+        assertSceneSwitchAllowed();
+        const result = await openDataPlatformProject(currentProject, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl);
+        assertSceneSwitchAllowed();
+        return result;
       } finally {
         projectMetadataControllers.delete(controller);
       }
@@ -243,11 +261,16 @@ export function registerDataPlatformIpc(): void {
 
   registerProjectSessionHandler('data-platform:prepareLocalSceneResources', async (_event, request: LocalSceneResourceSyncRequest): Promise<LocalSceneResourceSyncResult> => {
     const config = await readDataPlatformConfig();
-    if (request?.mode === 'data-platform-latest') {
+    if (request?.mode === 'data-platform-latest' || request?.mode === 'scene-latest' || request?.mode === 'local-latest' || request?.mode === 'local-recovery') {
       return prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
     }
     if (!config.baseUrl) return { configured: false, sourceKey: null, modelAssets: [], environmentAssets: [] };
     return prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
+  });
+
+  registerProjectSessionHandler('data-platform:cancelSceneModelSync', async (_event, request: { requestId: string }): Promise<boolean> => {
+    if (!request || typeof request.requestId !== 'string') return false;
+    return cancelSceneModelSync(request.requestId);
   });
 
   registerProjectSessionHandler('data-platform:retryModelSync', async (): Promise<boolean> => {
@@ -273,6 +296,7 @@ export function registerDataPlatformIpc(): void {
     if (projectClosing) throw new Error('正在关闭当前项目，请稍后重试。');
     projectClosing = true;
     try {
+      resetScenePublishScope();
       for (const controller of projectMetadataControllers) controller.abort();
       cancelDataPlatformProjectLoading();
       clearDataPlatformProjectServiceRetryContext();
@@ -494,6 +518,7 @@ export async function readDataPlatformConfig(): Promise<DataPlatformConfig> {
 
 /** 统一写入 v2 配置，避免修改服务地址时覆盖已经选择的工作区。 */
 async function writeStoredDataPlatformConfig(stored: StoredDataPlatformConfig): Promise<DataPlatformConfig> {
+  assertSceneSwitchAllowed();
   const persisted: PersistedDataPlatformConfigV2 = {
     version: 2,
     baseUrl: stored.baseUrl,
@@ -504,6 +529,7 @@ async function writeStoredDataPlatformConfig(stored: StoredDataPlatformConfig): 
   const configPath = getDataPlatformConfigPath();
 
   await fs.mkdir(path.dirname(configPath), { recursive: true });
+  assertSceneSwitchAllowed();
   await fs.writeFile(configPath, `${JSON.stringify(persisted, null, 2)}\n`, 'utf-8');
   return toDataPlatformConfig(stored);
 }
@@ -579,14 +605,17 @@ function resolveStoredDataPlatformPageConfig(
 
 /** 由主进程选择并验证工作区，renderer 无法直接提交任意文件系统路径。 */
 async function selectDataPlatformWorkspace(): Promise<DataPlatformWorkspaceSelectionResult> {
+  assertSceneSwitchAllowed();
   const stored = await readStoredDataPlatformConfig();
   const currentConfig = toDataPlatformConfig(stored);
+  assertSceneSwitchAllowed();
   const result = await dialog.showOpenDialog({
     title: '选择数据中台工作区',
     defaultPath: currentConfig.workspaceRoot,
     properties: ['openDirectory', 'createDirectory'],
   });
   const [selectedPath] = result.filePaths;
+  assertSceneSwitchAllowed();
 
   if (result.canceled || !selectedPath) {
     return { canceled: true, config: currentConfig };
@@ -594,6 +623,7 @@ async function selectDataPlatformWorkspace(): Promise<DataPlatformWorkspaceSelec
 
   const workspaceRoot = path.resolve(selectedPath);
   await ensureWritableEditorRoot(workspaceRoot);
+  assertSceneSwitchAllowed();
 
   projectConfigRevision += 1;
   const config = await writeStoredDataPlatformConfig({
@@ -607,10 +637,12 @@ async function selectDataPlatformWorkspace(): Promise<DataPlatformWorkspaceSelec
 
 /** 清除自定义路径并恢复当前运行环境的默认工作区。 */
 async function resetDataPlatformWorkspace(): Promise<DataPlatformConfig> {
+  assertSceneSwitchAllowed();
   projectConfigRevision += 1;
   const stored = await readStoredDataPlatformConfig();
   const defaultWorkspaceRoot = getDataPlatformEditorRoot(null);
   await ensureWritableEditorRoot(defaultWorkspaceRoot);
+  assertSceneSwitchAllowed();
   return writeStoredDataPlatformConfig({
     ...stored,
     customWorkspaceRoot: null,

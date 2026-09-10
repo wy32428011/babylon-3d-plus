@@ -9,7 +9,7 @@ import type {
   ModelGeneratorTarget,
   ModelScriptAsset,
 } from './components';
-import { createDefaultModelParameterValues, normalizeModelParameterConfig, sanitizeModelParameterValues } from './modelParameters';
+import { createDefaultModelParameterValues, normalizeModelParameterConfig, restoreModelParameterValues } from './modelParameters';
 import { createModelLengthUnitInfo, normalizeModelLengthUnitInfo } from './sceneUnits';
 import { normalizeModelDataDrivenConfig } from './telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig } from './builtInSlotBinding';
@@ -162,7 +162,7 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
     ...(parameterConfig
       ? {
           parameterConfig,
-          parameterValues: sanitizeModelParameterValues(parameterConfig, value.parameterValues),
+          parameterValues: restoreModelParameterValues(parameterConfig, value.parameterValues),
         }
       : {}),
     ...(dataDrivenConfig ? { dataDrivenConfig } : {}),

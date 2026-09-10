@@ -50,3 +50,18 @@ test('同一模型包的不同文件不能静默合并为同一主模型', async
   const second = model(url('shared').replace('model.glb', 'variant.glb'));
   await assert.rejects(planPublishModelRecovery(scene([first, second], []), async () => false), /多个不同包内模型/);
 });
+
+test('同一健康 sourceUrl 的生成器包目录缺失仍进入计划，不复用普通实体的可用性缓存', async () => {
+  const asset = model(url('project'));
+  const document = scene([asset], []);
+  (document.entities as any).generator = { components: { modelGenerator: {
+    defaultTarget: { kind: 'model', packagePath: 'D:/old/missing', modelAsset: { ...asset } }, rules: [],
+  } } };
+  const checked: unknown[] = [];
+  const plan = await planPublishModelRecovery(document, async (_asset, reference) => {
+    checked.push(reference?.target); return reference?.target?.packagePath !== 'D:/old/missing';
+  });
+  assert.equal(checked.length, 2);
+  assert.equal(plan.length, 1); assert.equal(plan[0].resourceId, '12');
+  assert.deepEqual(plan[0].sourceUrls, [asset.sourceUrl]);
+});

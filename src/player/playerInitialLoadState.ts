@@ -7,6 +7,8 @@ export type PlayerInitialLoadGateOptions = {
   onSettled?: () => void;
   schedule?: (callback: () => void) => unknown;
   cancel?: (handle: unknown) => void;
+  verifyReady?: (signal: AbortSignal) => Promise<void>;
+  onError?: (error: unknown) => void;
 };
 
 export function isPlayerInitialLoadSettled(progress: PlayerInitialLoadProgress | null): boolean {
@@ -25,6 +27,9 @@ export class PlayerInitialLoadGate {
   private completionNotified = false;
   private settled = false;
   private disposed = false;
+  private verification: AbortController | null = null;
+  private readonly verifyReady: PlayerInitialLoadGateOptions['verifyReady'];
+  private readonly onError: (error: unknown) => void;
 
   constructor(
     onComplete: () => void,
@@ -34,10 +39,13 @@ export class PlayerInitialLoadGate {
     this.onSettled = options.onSettled ?? (() => undefined);
     this.schedule = options.schedule ?? ((callback) => globalThis.requestAnimationFrame(callback));
     this.cancel = options.cancel ?? ((handle) => globalThis.cancelAnimationFrame(handle as number));
+    this.verifyReady = options.verifyReady;
+    this.onError = options.onError ?? (() => undefined);
   }
 
   update(progress: PlayerInitialLoadProgress): void {
     if (this.disposed || this.settled) return;
+    if (this.progress?.totalCount !== progress.totalCount) this.cancelScheduledCheck();
     this.progress = progress;
     this.refresh();
   }
@@ -64,12 +72,24 @@ export class PlayerInitialLoadGate {
       this.cancelScheduledCheck();
       return;
     }
-    if (this.scheduledHandle !== null) return;
+    if (this.scheduledHandle !== null || this.verification !== null) return;
 
     this.scheduledHandle = this.schedule(() => {
       this.scheduledHandle = null;
       if (this.disposed || this.settled || !this.tracking || !isPlayerInitialLoadSettled(this.progress)) return;
-      this.finishSettled();
+      if (!this.verifyReady) { this.finishSettled(); return; }
+      const controller = new AbortController();
+      this.verification = controller;
+      void this.verifyReady(controller.signal).then(() => {
+        if (controller.signal.aborted || this.disposed || this.verification !== controller) return;
+        this.verification = null;
+        if (isPlayerInitialLoadSettled(this.progress)) this.finishSettled();
+      }).catch(error => {
+        if (controller.signal.aborted || this.disposed || this.verification !== controller) return;
+        this.verification = null;
+        this.dispose();
+        this.onError(error);
+      });
     });
   }
 
@@ -87,6 +107,8 @@ export class PlayerInitialLoadGate {
   }
 
   private cancelScheduledCheck(): void {
+    this.verification?.abort();
+    this.verification = null;
     if (this.scheduledHandle === null) return;
     this.cancel(this.scheduledHandle);
     this.scheduledHandle = null;

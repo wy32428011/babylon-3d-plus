@@ -14,7 +14,9 @@ test('远程模型与环境字节同时进入 Project 面板和全屏加载蒙�
   assert.match(overlay, /downloads\.sceneSessionId === state\.sceneSessionId/);
   assert.match(mask, /\{downloadDetail\}/);
   assert.match(overlay, /percent=\{state\.percent\}/);
-  assert.match(overlay, /if \(state\.completed\) return null/);
+  assert.match(overlay, /if \(state\.completed && !environmentError\) return null/);
+  assert.match(overlay, /aria-label="场景资源状态"/);
+  assert.match(overlay, /<details><summary>查看详情<\/summary>/);
 });
 
 test('字节更新不重复输出业务阶段日志，下载结束后面板隐藏字节明细', async () => {

@@ -143,8 +143,9 @@ test('本地打开同步当前中台候选，覆盖模型和间接引用快照�
   const content = serializeScene(scene);
   const previousApi = (globalThis as any).window.editorApi;
   (globalThis as any).window.editorApi = {
-    loadScene: async () => ({ canceled: false, content }),
-    loadSceneFile: async () => ({ canceled: false, content }),
+    loadScene: async () => ({ canceled: false, content, sceneOpenToken: 1 }),
+    loadSceneFile: async () => ({ canceled: false, content, sceneOpenToken: 1 }),
+    confirmSceneOpen: async () => true,
   };
   try {
     for (const open of [() => useEditorStore.getState().loadScene(), () => useEditorStore.getState().loadSceneFromFile('local.scene.json')]) {

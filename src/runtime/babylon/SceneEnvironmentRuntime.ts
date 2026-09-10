@@ -34,6 +34,7 @@ import { EnvironmentShadowMaterialPlugin } from './EnvironmentShadowMaterialPlug
 import { createBakedEnvironmentMaterial, type ShadowBakeSurface } from './EnvironmentShadowBake';
 import { applyGroundShadowUv } from './staticShadowReceivers';
 import { cloneEnvironmentMaterial } from './cloneEnvironmentMaterial';
+import { freezeEnvironmentTransforms } from './environmentTransformPreparation';
 import {
   calculateEnvironmentOriginLeftOffset,
   calculateEnvironmentSceneBaseOffset,
@@ -813,11 +814,7 @@ export class SceneEnvironmentRuntime {
 
   private freezeEntry(entry: EnvironmentRuntimeEntry | null): void {
     if (!entry || this.adjustmentActive) return;
-    for (const node of entry.transformNodes) {
-      if (node.isDisposed()) continue;
-      node.computeWorldMatrix(true);
-      node.freezeWorldMatrix();
-    }
+    freezeEnvironmentTransforms(entry.transformNodes);
   }
 
   private unfreezeEntry(entry: EnvironmentRuntimeEntry | null): void {

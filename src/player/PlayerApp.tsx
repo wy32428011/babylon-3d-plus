@@ -69,6 +69,7 @@ import {
 import { ManualRoamControls } from '../shared/ui/ManualRoamControls';
 import { useAutoPatrolInspectionHistory } from '../shared/ui/useAutoPatrolInspectionHistory';
 import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
+import { waitForSceneRenderReady } from '../runtime/babylon/sceneRenderReadiness';
 import { useDigitalTwinFullscreen } from './useDigitalTwinFullscreen';
 import {
   parseDigitalTwinHostRenderPixelRatioState,
@@ -86,7 +87,8 @@ import type {
   ManualRoamViewMode,
 } from '../runtime/roam/manualRoamCore';
 import { createDefaultManualRoamCollisionBoundsResolver } from '../runtime/roam/manualRoamCollisionBounds';
-import { computePlayerLoadingProgress, PLAYER_SCENE_LOADING_TIMEOUT_MS } from './playerLoadingProgress';
+import { computePlayerLoadingProgress } from './playerLoadingProgress';
+import { PlayerInitialLoadMonitor } from './playerInitialLoadMonitor';
 import { DeferredAutoPatrolStartGate } from './deferredAutoPatrolStartGate';
 import { PlayerInitialLoadGate } from './playerInitialLoadState';
 import { restorePlayerGlobalOverview } from './playerGlobalOverview';
@@ -235,21 +237,19 @@ export function PlayerApp() {
   const [startupPercent, setStartupPercent] = useState(6);
   const [modelLoadProgress, setModelLoadProgress] = useState<SceneRuntimeModelLoadProgress | null>(null);
   /** 首次场景加载全部结算后置位：后续按需加载（如 MQTT 货物模板）不再重新弹出全屏蒙版。 */
-  const initialLoadCompletedRef = useRef(false);
-  const completeInitialLoadRef = useRef<(() => void) | null>(null);
+  const [initialLoadCompleted, setInitialLoadCompleted] = useState(false);
+  const [initialLoadNotice, setInitialLoadNotice] = useState('');
+  const initialLoadMonitorRef = useRef<(() => void) | null>(null);
   /** 首次场景加载是否仍在途：驱动超时兜底与蒙版显示。 */
-  const modelLoadingInProgress = modelLoadProgress?.loading === true
-    && modelLoadProgress.totalCount > 0
-    && !initialLoadCompletedRef.current;
+  const initialLoadingInProgress = phase !== 'blocked' && !initialLoadCompleted;
 
   useEffect(() => {
-    if (!modelLoadingInProgress) return undefined;
-    const timer = window.setTimeout(() => {
-      completeInitialLoadRef.current?.();
-      setRuntimeMessage('部分场景资源加载超时，场景可能尚未完整显示。');
-    }, PLAYER_SCENE_LOADING_TIMEOUT_MS);
-    return () => window.clearTimeout(timer);
-  }, [modelLoadingInProgress]);
+    if (!initialLoadingInProgress) return undefined;
+    const timer = window.setInterval(() => {
+      initialLoadMonitorRef.current?.();
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [initialLoadingInProgress]);
   const mqttStatus = useSyncExternalStore(
     mqttRuntimeStatusStore.subscribe,
     mqttRuntimeStatusStore.getSnapshot,
@@ -339,17 +339,61 @@ export function PlayerApp() {
     };
     const autoPatrolStartGate = new DeferredAutoPatrolStartGate();
     autoPatrolStartGateRef.current = autoPatrolStartGate;
-    initialLoadCompletedRef.current = false;
+    setInitialLoadCompleted(false);
+    setInitialLoadNotice('');
     setModelLoadProgress(null);
+    let initialLoadCompletedForSession = false;
+    let initialLoadFailed = false;
+    let startupStage = '读取发布配置';
+    const loadMonitor = new PlayerInitialLoadMonitor();
     const initialLoadGate = new PlayerInitialLoadGate(() => {
-      initialLoadCompletedRef.current = true;
+      initialLoadCompletedForSession = true;
+      setInitialLoadNotice('');
+      setInitialLoadCompleted(true);
+      if (initialLoadMonitorRef.current === checkInitialLoad) initialLoadMonitorRef.current = null;
       interactionController?.markInitialLoadComplete();
     }, {
-      // 超时只结束蒙版和握手；真实资源结算后才放行最新巡检启动请求。
+      // 缓慢加载持续等待；只有真实资源及首帧成功后才放行巡检。
       onSettled: () => autoPatrolStartGate.markReady(),
+      verifyReady: async signal => {
+        if (!viewport || !runtime) throw new Error('场景视图尚未创建。');
+        const before = runtime.getInitialLoadSnapshot().error;
+        if (before) throw new Error(before);
+        await waitForSceneRenderReady(viewport.scene, signal);
+        const after = runtime.getInitialLoadSnapshot().error;
+        if (after) throw new Error(after);
+      },
+      onError: error => {
+        blockInitialLoad(`场景首帧验证失败：${getErrorMessage(error)}`);
+      },
     });
-    const forceCompleteInitialLoad = () => initialLoadGate.forceComplete();
-    completeInitialLoadRef.current = forceCompleteInitialLoad;
+    const blockInitialLoad = (detail: string) => {
+      if (disposed || initialLoadFailed || initialLoadCompletedForSession) return;
+      initialLoadFailed = true;
+      if (!runtime) abortController.abort();
+      initialLoadGate.dispose();
+      autoPatrolStartGate.dispose();
+      setInitialLoadNotice('');
+      setPhase('blocked');
+      setMessage(detail);
+    };
+    const checkInitialLoad = () => {
+      if (disposed || initialLoadFailed || initialLoadCompletedForSession) return;
+      const snapshot = runtime?.getInitialLoadSnapshot() ?? {
+        startupStage, error: null,
+        progress: { loading: true, percent: 0, completedCount: 0, totalCount: 0, currentFile: null, filePercent: null },
+        skybox: { stage: null, receivedBytes: 0, totalBytes: null },
+      };
+      if (snapshot.error) { blockInitialLoad(snapshot.error); return; }
+      const health = loadMonitor.sample(snapshot, performance.now());
+      if (health.kind === 'stalled') {
+        blockInitialLoad('场景加载连续 5 分钟没有资源或阶段进展：' + health.detail + '。请检查资源连接后重试。');
+        return;
+      }
+      setInitialLoadNotice((health.kind === 'slow' ? '加载较慢，仍在继续：' : '') + health.detail);
+    };
+    initialLoadMonitorRef.current = checkInitialLoad;
+    checkInitialLoad();
     let unsubscribeAutoPatrolSnapshot: (() => void) | null = null;
     let unsubscribeManualRoamSnapshot: (() => void) | null = null;
     let removeAutoPatrolManualInputListeners: (() => void) | null = null;
@@ -390,9 +434,10 @@ export function PlayerApp() {
       try {
         const runtimeConfigUrl = new URL('./runtime-config.json', document.baseURI);
         const baseConfig = parsePlayerRuntimeConfig(await fetchJson(runtimeConfigUrl, abortController.signal));
+        startupStage = '读取项目运行配置';
         const projectRuntimeConfig = await fetchDigitalTwinRuntimeConfig(baseConfig, abortController.signal);
         const parsedConfig = applyDigitalTwinRuntimeConfig(baseConfig, projectRuntimeConfig);
-        if (disposed) return;
+        if (disposed || initialLoadFailed) return;
         interactionController = new DigitalTwinInteractionController({
           parentWindow: window.parent,
           viewerOrigin: window.location.origin,
@@ -425,12 +470,14 @@ export function PlayerApp() {
 
         const assetBaseUrl = new URL(parsedConfig.paths.assetBase, document.baseURI);
         const manifestUrl = new URL(parsedConfig.paths.assetManifest, document.baseURI);
+        startupStage = '读取资源清单';
         const manifestMappings = parseDeploymentAssetManifest(await fetchJson(manifestUrl, abortController.signal), assetBaseUrl);
-        if (disposed) return;
+        if (disposed || initialLoadFailed) return;
         installDeploymentAssetManifest(manifestMappings);
         setStartupPercent(20);
 
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
+        startupStage = '读取场景文档';
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
         setViewportScreen(sceneDocument.sceneSettings.viewportScreen);
         const digitalTwinAssetIndex = buildDigitalTwinAssetIndex(sceneDocument);
@@ -443,7 +490,7 @@ export function PlayerApp() {
           (globalThis as typeof globalThis & { __ZENDING_DIGITAL_TWIN_CONFIG__?: Record<string, unknown> })
             .__ZENDING_DIGITAL_TWIN_CONFIG__ = projectRuntimeConfig.config;
         }
-        if (disposed) return;
+        if (disposed || initialLoadFailed) return;
         setStartupPercent(30);
 
         viewport = createBabylonViewport(canvas, handleRuntimeStatus, {
@@ -476,20 +523,28 @@ export function PlayerApp() {
           },
           undefined,
           (snapshot) => {
-            if (disposed) return;
+            if (disposed || initialLoadFailed) return;
             if (snapshot.phase === 'loading') {
               setEnvironmentRuntimeIssue(false);
               setRuntimeMessage(snapshot.message || '环境模型正在加载...');
             } else if (snapshot.phase === 'error') {
               setEnvironmentRuntimeIssue(true);
               setRuntimeMessage(`环境模型加载失败：${snapshot.message || '未知错误'}`);
+              blockInitialLoad(`环境模型加载失败：${snapshot.message || '未知错误'}`);
             } else if (snapshot.phase === 'ready') {
               setEnvironmentRuntimeIssue(false);
               setRuntimeMessage(null);
             }
           },
           (progress) => {
-            if (disposed) return;
+            if (disposed || initialLoadFailed) return;
+            const skybox = runtime?.getSkyboxReadiness();
+            if (skybox?.phase === 'error') {
+              const detail = `天空盒加载失败：${skybox.message || '资源未就绪'}`;
+              blockInitialLoad(detail);
+              setModelLoadProgress(progress);
+              return;
+            }
             initialLoadGate.update(progress);
             setModelLoadProgress(progress);
           },
@@ -505,15 +560,17 @@ export function PlayerApp() {
         const environment = sceneDocument.sceneSettings.environment;
         if (environment) {
           void runtime.applyEnvironment(environment, { requestId: null, autoAlign: false }).catch((error) => {
-            if (disposed) return;
+            if (disposed || initialLoadFailed) return;
             setEnvironmentRuntimeIssue(true);
             setRuntimeMessage(`环境模型加载失败：${getErrorMessage(error)}`);
+            blockInitialLoad(`环境模型加载失败：${getErrorMessage(error)}`);
           });
         } else {
           runtime.syncEnvironment(null);
         }
-        if (disposed) return;
+        if (disposed || initialLoadFailed) return;
         setStartupPercent(50);
+        checkInitialLoad();
         runtime.beginTelemetryPreview();
         if (parsedConfig.digitalTwin) {
           void startPublishedFetchDrive(runtime, sceneDocument.fetchConfig, abortController.signal);
@@ -850,7 +907,9 @@ export function PlayerApp() {
         requestAnimationFrame(() => {
           if (!disposed) resize?.();
         });
-        setPhase('ready');
+        const skyboxReadiness = runtime.getSkyboxReadiness();
+        if (skyboxReadiness.phase === 'error') throw new Error(`天空盒加载失败：${skyboxReadiness.message}`);
+        if (!initialLoadFailed) setPhase('ready');
       } catch (error) {
         if (disposed || abortController.signal.aborted) return;
         console.error('Web Viewer 启动失败。', error);
@@ -863,8 +922,8 @@ export function PlayerApp() {
         if (autoPatrolStartGateRef.current === autoPatrolStartGate) {
           autoPatrolStartGateRef.current = null;
         }
-        if (completeInitialLoadRef.current === forceCompleteInitialLoad) {
-          completeInitialLoadRef.current = null;
+        if (initialLoadMonitorRef.current === checkInitialLoad) {
+          initialLoadMonitorRef.current = null;
         }
         mqttClient?.dispose();
         unsubscribeManualRoamSnapshot?.();
@@ -912,8 +971,8 @@ export function PlayerApp() {
       if (autoPatrolStartGateRef.current === autoPatrolStartGate) {
         autoPatrolStartGateRef.current = null;
       }
-      if (completeInitialLoadRef.current === forceCompleteInitialLoad) {
-        completeInitialLoadRef.current = null;
+      if (initialLoadMonitorRef.current === checkInitialLoad) {
+        initialLoadMonitorRef.current = null;
       }
       mqttClient?.dispose();
       unsubscribeManualRoamSnapshot?.();
@@ -1132,7 +1191,7 @@ export function PlayerApp() {
     phase,
     startupPercent,
     modelLoadProgress,
-    initialLoadCompleted: initialLoadCompletedRef.current,
+    initialLoadCompleted,
     message,
   });
 
@@ -1196,7 +1255,8 @@ export function PlayerApp() {
       ) : null}
       {loadingMask.visible ? (
         <SceneLoadingMask
-          detail={loadingMask.detail}
+          detail={[loadingMask.detail, initialLoadNotice].filter(Boolean).join(' · ')}
+          action={initialLoadNotice.startsWith('加载较慢') ? <button type="button" onClick={() => window.location.reload()}>重新加载场景</button> : undefined}
           label={loadingMask.label}
           percent={loadingMask.percent}
         />
@@ -1240,7 +1300,7 @@ export function PlayerApp() {
       ) : showOverlay ? (
         <section className={`player-status player-status-${phase}`} role={phase === 'blocked' ? 'alert' : 'status'}>
           <strong>{phase === 'loading' ? message : phase === 'blocked' ? '场景已阻断' : '场景运行中'}</strong>
-          {phase === 'blocked' ? <p>{message}</p> : null}
+          {phase === 'blocked' ? <><p>{message}</p><button type="button" style={{ pointerEvents: 'auto' }} onClick={() => window.location.reload()}>重新加载场景</button></> : null}
           {phase === 'ready' ? <p aria-hidden="true">FPS：{formatPlayerStatusFps(playerFps)}</p> : null}
           {phase !== 'blocked' ? <p>MQTT：{mqttStatus.state}{mqttStatus.lastError ? `（${mqttStatus.lastError}）` : ''}</p> : null}
           {runtimeMessage ? <p>{runtimeMessage}</p> : null}

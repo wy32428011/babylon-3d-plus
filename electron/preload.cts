@@ -101,6 +101,7 @@ contextBridge.exposeInMainWorld('editorApi', {
   saveScene: (request: SaveSceneRequest): Promise<SaveSceneResult> => ipcRenderer.invoke('scene:save', request),
   loadScene: (): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:load'),
   loadSceneFile: (request: LoadSceneFileRequest): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:loadFile', request),
+  confirmSceneOpen: (request: { sceneOpenToken: number }): Promise<boolean> => ipcRenderer.invoke('scene:confirmOpen', request),
   readTextFile: (request: ReadTextFileRequest): Promise<ReadTextFileResult> => ipcRenderer.invoke('file:readText', request),
   scanAssets: (): Promise<AssetEntry[]> => ipcRenderer.invoke('assets:scan'),
   getRecentWorkspaces: (): Promise<RecentWorkspacesResult> => ipcRenderer.invoke('project:getRecentWorkspaces'),
@@ -132,6 +133,7 @@ contextBridge.exposeInMainWorld('editorApi', {
     };
   },
   prepareLocalSceneResources: (request: LocalSceneResourceSyncRequest): Promise<LocalSceneResourceSyncResult> => ipcRenderer.invoke('data-platform:prepareLocalSceneResources', request),
+  cancelSceneModelSync: (request: { requestId: string }): Promise<boolean> => ipcRenderer.invoke('data-platform:cancelSceneModelSync', request),
   syncDataPlatformEnvironments: (request?: DataPlatformEnvironmentSyncRequest): Promise<boolean> => ipcRenderer.invoke('data-platform:syncEnvironments', request),
   retryDataPlatformEnvironmentSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryEnvironmentSync'),
   closeDataPlatformProject: (): Promise<void> => ipcRenderer.invoke('data-platform:closeProject'),
@@ -218,6 +220,8 @@ contextBridge.exposeInMainWorld('editorApi', {
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
   getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest): Promise<DigitalTwinPublishContext> =>
     ipcRenderer.invoke('digital-twin-publish:getContext', request),
+  prepareDigitalTwinPublishSceneSnapshots: (request: import('./types.js').DigitalTwinPublishScenePreparationRequest): Promise<import('./types.js').DigitalTwinPublishScenePreparationResult> =>
+    ipcRenderer.invoke('digital-twin-publish:prepareScenes', request),
   recoverDigitalTwinModels: (request: import('./types.js').DigitalTwinModelRecoveryRequest): Promise<import('./types.js').DigitalTwinModelRecoveryResult> =>
     ipcRenderer.invoke('digital-twin-publish:recoverModels', request),
   publishDigitalTwin: (request: DigitalTwinPublishRequest): Promise<DigitalTwinPublishResult> =>

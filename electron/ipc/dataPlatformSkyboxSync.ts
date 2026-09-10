@@ -111,9 +111,35 @@ let queuedSkyboxSyncContext: DataPlatformSkyboxSyncContext | null = null;
 let latestSkyboxSyncProgress: DataPlatformSkyboxSyncProgress | null = null;
 let lastSkyboxSyncContext: DataPlatformSkyboxSyncContext | null = null;
 let skyboxSyncShuttingDown = false;
+const skyboxRootQueues = new Map<string, Promise<void>>();
 
-/** 执行一次完整的查询、下载、校验和原子推广。 */
+/** 所有入口按缓存根串行；防止发布补全与后台同步同时推广同一份索引。 */
 export async function executeDataPlatformSkyboxSync(
+  options: ExecuteDataPlatformSkyboxSyncOptions,
+): Promise<void> {
+  const editorRoot = normalizeEditorRoot(options.editorRoot);
+  const key = process.platform === 'win32' ? editorRoot.toLowerCase() : editorRoot;
+  const signal = options.signal ?? new AbortController().signal;
+  signal.throwIfAborted();
+  let started = false;
+  const task = (skyboxRootQueues.get(key) ?? Promise.resolve()).then(async () => {
+    signal.throwIfAborted();
+    started = true;
+    await executeDataPlatformSkyboxSyncInternal({ ...options, editorRoot, signal });
+  });
+  const settled = task.then(() => undefined, () => undefined);
+  skyboxRootQueues.set(key, settled);
+  void settled.then(() => { if (skyboxRootQueues.get(key) === settled) skyboxRootQueues.delete(key); });
+  await new Promise<void>((resolve, reject) => {
+    const abortQueued = () => { if (!started) reject(signal.reason); };
+    signal.addEventListener('abort', abortQueued, { once: true });
+    task.then(resolve, reject).finally(() => signal.removeEventListener('abort', abortQueued));
+    if (signal.aborted) abortQueued();
+  });
+}
+
+/** 执行一次完整的查询、下载、校验和原子推广，由同根队列独占调用。 */
+async function executeDataPlatformSkyboxSyncInternal(
   options: ExecuteDataPlatformSkyboxSyncOptions,
 ): Promise<void> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };

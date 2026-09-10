@@ -39,6 +39,7 @@ const config = version => ({ schema: 'babylon-editor.model-parameters', version:
   parameters: [{ key: 'width', label: '宽度', type: 'number', defaultValue: version === 1 ? 1 : 9, min: 0, max: 10 },
     { key: 'enabled', label: '开关', type: 'boolean', defaultValue: true },
     { key: 'label', label: '文字', type: 'string', defaultValue: '新版默认' },
+    ...(version === 1 ? [{ key: 'obsolete', label: '旧参数', type: 'number', defaultValue: 13 }] : []),
     ...(version > 1 ? [{ key: 'speed', label: '速度', type: 'number', defaultValue: 5 }] : [])],
   bindings: [{ target: { kind: 'node', name: 'Body' }, property: 'scaling', value: { vector3: [{ param: 'width' }, 1, 1] } }] });
 
@@ -56,9 +57,10 @@ async function run() {
   const { buildDigitalTwinDistPackage } = await import('../../dist-electron/ipc/digitalTwinDistPackage.js');
   await build({ configFile: false, publicDir: false, logLevel: 'warn', build: { ssr: true, outDir: moduleRoot,
     rollupOptions: { input: { apply: 'src/editor/assets/applySceneModelUpdates.ts', document: 'src/editor/model/SceneDocument.ts',
-      serializer: 'src/editor/project/SceneSerializer.ts', click: 'src/player/viewerModelClick.ts' }, output: { entryFileNames: '[name].mjs' } } } });
-  const [{ applySceneModelUpdates }, document, serializer, { createViewerModelClickHandler }] = await Promise.all(
-    ['apply', 'document', 'serializer', 'click'].map(name => import(pathToFileURL(path.join(moduleRoot, name + '.mjs')).href)));
+      serializer: 'src/editor/project/SceneSerializer.ts', click: 'src/player/viewerModelClick.ts',
+      transaction: 'src/editor/assets/sceneModelSyncTransaction.ts' }, output: { entryFileNames: '[name].mjs' } } } });
+  const [{ applySceneModelUpdates }, document, serializer, { createViewerModelClickHandler }, { runSceneModelSyncTransaction }] = await Promise.all(
+    ['apply', 'document', 'serializer', 'click', 'transaction'].map(name => import(pathToFileURL(path.join(moduleRoot, name + '.mjs')).href)));
   let revision = 1, downloads = 0;
   const requests = [], distFiles = new Map();
   server = createServer(async (request, response) => {
@@ -104,10 +106,12 @@ async function run() {
   const oldPath = path.join(projectRoot, 'Assets', 'Models', 'Model-123-fixture', 'model.glb');
   await mkdir(path.dirname(oldPath), { recursive: true }); await writeFile(oldPath, glb(1)); authorizeAssetFile(oldPath);
   const scene = document.createEmptySceneDocument('最新模型参数保留');
+  scene.sceneSettings.camera.savedPose = { alpha: -Math.PI / 2, beta: Math.PI / 2, radius: 15,
+    target: { x: 2.5, y: 1, z: 0 } };
   const models = [1, 2].map((width, index) => {
     const model = document.createModelEntity(oldPath, encodeAssetUrl(oldPath), '设备 ' + index);
     Object.assign(model.components.modelAsset, { assetCode: 'DEVICE-' + index, parameterConfig: config(1),
-      parameterValues: { width, enabled: false, label: '' } });
+      parameterValues: { width, enabled: false, label: '', obsolete: 77 } });
     model.components.transform.position.x = index * 5;
     scene.entityIds.push(model.id); scene.entities[model.id] = model; return model;
   });
@@ -119,24 +123,41 @@ async function run() {
   ipcMain.handle('data-platform:prepareLocalSceneResources', (_event, request) => service.prepareLocalSceneResources(baseUrl, workspaceRoot, request));
   bridge = new BrowserWindow({ show: false, webPreferences: { preload: path.resolve('dist-electron/preload.cjs'), contextIsolation: true, sandbox: true } });
   await bridge.loadURL('data:text/html,<title>同步桥接验证</title>');
-  const prepare = async document => bridge.webContents.executeJavaScript(`window.editorApi.prepareLocalSceneResources(${JSON.stringify({ mode: 'data-platform-latest', sceneContent: serializer.serializeScene(document) })})`);
+  const prepare = async (document, mode = 'data-platform-latest') => bridge.webContents.executeJavaScript(`window.editorApi.prepareLocalSceneResources(${JSON.stringify({ mode, sceneContent: serializer.serializeScene(document) })})`);
   const first = await prepare(scene);
   const firstScene = applySceneModelUpdates(scene, first.modelReplacements, first.sourceKey).scene;
   const firstPath = first.modelAssets[0].path;
   revision = 2;
-  const result = await prepare(firstScene);
+  let currentScene = firstScene;
+  let result;
+  const transaction = await runSceneModelSyncTransaction({ sceneSessionId: 'integration', syncLibrary: false,
+    getSnapshot: () => ({ sceneSessionId: 'integration', scene: currentScene }),
+    prepare: async document => { result = await prepare(document, 'scene-latest'); return result; },
+    apply: async (document, resources) => ({ ...applySceneModelUpdates(document, resources.modelReplacements, resources.sourceKey), issues: [] }),
+    commit: (before, after) => { assert.equal(before, currentScene); currentScene = after; return true; },
+  });
+  assert.ok(transaction.updatedCount >= models.length);
+  assert.ok(transaction.warnings.some(warning => /删除 1 项/.test(warning)), '删除参数只记录日志，不阻断模型替换');
   const fetchedBytes = await bridge.webContents.executeJavaScript(`fetch(${JSON.stringify(result.modelAssets[0].sourceUrl)}).then(async response => { if (!response.ok) throw new Error('模型协议读取失败 ' + response.status); return (await response.arrayBuffer()).byteLength; })`);
   assert.equal(fetchedBytes, glb(2).length, '实际 editor-asset 协议必须允许读取固定模型文件');
   assert.equal(result.modelAssets.length, 1); assert.notEqual(result.modelAssets[0].path, firstPath);
   assert.deepEqual(await readFile(firstPath), glb(1), '同步新版不能覆盖上一版本文件');
-  const updated = applySceneModelUpdates(firstScene, result.modelReplacements, result.sourceKey).scene;
+  const updated = currentScene;
   for (let i = 0; i < models.length; i++) {
     const current = updated.entities[models[i].id];
     assert.deepEqual(current.components.modelAsset.parameterValues, { width: i + 1, enabled: false, label: '', speed: 5 });
     assert.deepEqual(current.components.transform, models[i].components.transform);
     assert.equal(current.components.modelAsset.assetCode, 'DEVICE-' + i);
+    assert.deepEqual(JSON.parse(JSON.stringify(current.components.modelAsset.parameterConfig)), config(2),
+      '参数定义和默认值采用新版，实例已保存值仍独立保留');
+    assert.equal(Object.hasOwn(current.components.modelAsset.parameterValues, 'obsolete'), false);
   }
   const beforeRepeat = downloads;
+  const localLatest = await prepare(firstScene, 'local-latest');
+  const localUpdated = applySceneModelUpdates(firstScene, localLatest.modelReplacements, localLatest.sourceKey).scene;
+  assert.equal(localUpdated.entities[models[0].id].components.modelAsset.sourceUrl, result.modelAssets[0].sourceUrl,
+    '打开本地旧场景也必须应用中台当前模型');
+  assert.deepEqual(localUpdated.entities[models[1].id].components.modelAsset.parameterValues, { width: 2, enabled: false, label: '', speed: 5 });
   const repeat = await prepare(updated);
   assert.equal(downloads, beforeRepeat, '相同资源版本再次打开无需下载');
   assert.equal(applySceneModelUpdates(updated, repeat.modelReplacements, repeat.sourceKey).scene, updated);
@@ -145,6 +166,8 @@ async function run() {
   await writeFile(entrySceneFilePath, serializer.serializeScene(updated));
   const saved = serializer.deserializeScene(await readFile(entrySceneFilePath, 'utf8'));
   assert.deepEqual(saved.entities[models[1].id].components.modelAsset.parameterValues, { width: 2, enabled: false, label: '', speed: 5 });
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.entities[models[1].id].components.modelAsset.parameterConfig)),
+    JSON.parse(JSON.stringify(updated.entities[models[1].id].components.modelAsset.parameterConfig)), '保存重开保留完整可持久化配置');
   const signal = new AbortController().signal;
   const source = await buildDigitalTwinSourcePackage({ projectRoot, sharedResourcesRoot, entrySceneFilePath, outputRoot: path.join(root, 'output'), signal,
     manifest: { projectId: '11', projectName: '同步回归', editorProjectId: null, baseVersionId: null, resourceRevision: '1' },
@@ -156,6 +179,7 @@ async function run() {
   for (const file of zip.files) if (file.type === 'File') distFiles.set(file.path, file);
   const published = serializer.deserializeScene((await distFiles.get('project/scene.json').buffer()).toString());
   assert.deepEqual(published.entities[models[1].id].components.modelAsset.parameterValues, { width: 2, enabled: false, label: '', speed: 5 });
+  assert.deepEqual(published.entities[models[1].id].components.modelAsset.parameterConfig, saved.entities[models[1].id].components.modelAsset.parameterConfig);
   const events = [], screens = [];
   const handler = createViewerModelClickHandler(published, { updateSelection() {}, setSlotHighlight() {}, focusTarget() {}, triggerManualEvents() {},
     emitAssetClicked: event => events.push(event), showScreen: screen => screens.push(screen) });
@@ -176,10 +200,30 @@ async function run() {
   }
   await writeFile(path.join(artifactRoot, 'viewer-latest.png'), screenshot.toPNG());
   assert.ok(greenPixels > 150, `新版绿色模型必须实际渲染，绿色像素 ${greenPixels}；浏览器错误 ${browserErrors.join('; ')}`);
+  // 两实例同深度正面观察，实际渲染宽度应保持参数 1:2，不能只验证序列化值。
+  const bitmap = screenshot.toBitmap(), { width, height } = screenshot.getSize();
+  const spans = [];
+  for (let x = 0; x < width; x++) {
+    let count = 0;
+    for (let y = 0; y < height; y++) {
+      const i = (y * width + x) * 4;
+      if (bitmap[i + 1] > 100 && bitmap[i + 1] > bitmap[i] * 1.5 && bitmap[i + 1] > bitmap[i + 2] * 1.5) count++;
+    }
+    if (count < 6) continue;
+    const span = spans.at(-1);
+    if (span && x === span.end + 1) span.end = x;
+    else spans.push({ start: x, end: x });
+  }
+  const modelWidths = spans.map(span => span.end - span.start + 1).filter(width => width > 15).sort((a, b) => a - b);
+  assert.equal(modelWidths.length, 2, `应实际显示两个独立模型，像素宽度 ${modelWidths}`);
+  const widthRatio = modelWidths[1] / modelWidths[0];
+  assert.ok(widthRatio > 1.8 && widthRatio < 2.2, `原参数应作用于实际模型几何，宽度比例 ${widthRatio}`);
   assert.deepEqual(browserErrors, []);
   await writeFile(path.join(artifactRoot, 'result.json'), JSON.stringify({ passed: true, models: models.length, greenPixels,
-    downloads, sourceFiles: source.resourceFiles.length, checks: ['actual-preload', 'targeted-http', 'immutable-old-version', 'zero-download-repeat',
-      'instance-parameters', 'save-reopen', 'source-dist', 'viewer-click', 'real-viewer-webgl'] }, null, 2));
+    parameterValues: models.map(model => saved.entities[model.id].components.modelAsset.parameterValues),
+    parameterDefaults: Object.fromEntries(saved.entities[models[0].id].components.modelAsset.parameterConfig.parameters.map(parameter => [parameter.key, parameter.defaultValue])),
+    downloads, modelWidths, widthRatio, sourceFiles: source.resourceFiles.length, checks: ['actual-preload', 'explicit-scene-transaction', 'targeted-http', 'immutable-old-version', 'zero-download-repeat',
+      'instance-parameters', 'latest-parameter-config', 'removed-parameter-pruned', 'new-parameter-default', 'save-reopen', 'source-dist', 'viewer-click', 'real-viewer-webgl', 'rendered-parameter-width-ratio'] }, null, 2));
   console.log('PASS: 实际 preload → 定向 HTTP 最新模型 → 多实例参数保留 → 保存重开 → SOURCE/DIST → Viewer 点击与真实绿色模型渲染。');
   console.log('ARTIFACTS=' + artifactRoot);
 }

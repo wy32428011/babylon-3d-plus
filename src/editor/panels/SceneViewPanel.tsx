@@ -1,3 +1,4 @@
+import { shouldValidateSceneModelResources } from '../assets/sceneModelSyncTransaction';
 import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
 import { executeChartMarkerClick } from '../../runtime/babylon/chartMarkerClick';
 import { CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
@@ -156,6 +157,7 @@ import {
   reportSceneRuntimeProgress,
   getScenePreparationTimings,
   settleSceneRuntimeWithWarning,
+  isScenePreparationSettled,
   subscribeScenePreparation,
 } from '../loading/scenePreparationProgress';
 import '../../styles/scene-performance.css';
@@ -309,6 +311,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const sceneRuntimeReadinessStableSamplesRef = useRef(0);
   const sceneRuntimeReadinessStartedAtRef = useRef(0);
   const sceneRuntimeTimeoutLoggedRef = useRef(false);
+  const skyboxResourceRetryKeyRef = useRef<string | null>(null);
+  const failedResourceRetrySessionRef = useRef<string | null>(null);
   const selectedEntityIdRef = useRef<string | null>(null);
   const autoPatrolPreviewStartedRef = useRef(false);
   const autoPatrolPreviewAutoStartCancelledRef = useRef(false);
@@ -329,6 +333,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const [autoPatrolRecordStore, setAutoPatrolRecordStore] = useState<AutoPatrolInspectionRecordStore | null>(null);
   const sceneDocument = useEditorStore((state) => state.scene);
   const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
+  const sceneStartupResourceSessionId = useEditorStore((state) => state.sceneStartupResourceSessionId);
+  const sceneRuntimeStartupDeferred = sceneStartupResourceSessionId === sceneSessionId;
   const performanceRunSceneSessionIdRef = useRef(sceneSessionId);
   const manualRoamSceneSessionIdRef = useRef(sceneSessionId);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
@@ -1687,6 +1693,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const gizmo = gizmoRef.current;
     if (!runtime || !gizmo) return;
     if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
+    if (sceneRuntimeStartupDeferred) return;
 
     gizmo.cancelActiveGroupDrag();
     if (modelParameterSyncEntityId) {
@@ -1709,6 +1716,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     editRuntimeSceneDocument.entityIds,
     editRuntimeSceneDocument.entities,
     modelParameterSyncEntityId,
+    sceneRuntimeStartupDeferred,
     isRuntimePreview,
     attachCurrentSelectionGizmo,
     publishSelectedInspectorSpatialInfo,
@@ -1755,7 +1763,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (!active) return;
       const currentEditor = useEditorStore.getState();
       if (currentEditor.sceneSessionId !== sceneSessionId
-        || (currentEditor.sceneResourcePolicy === 'data-platform-refresh' && currentEditor.scene !== sceneDocument)) {
+        || currentEditor.scene !== sceneDocument) {
         resetRenderWait();
         stopReadinessPolling();
         return;
@@ -1763,12 +1771,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const preparationState = getScenePreparationSnapshot();
       if (
         preparationState.sceneSessionId !== sceneSessionId
-        || (preparationState.completed && !preparationState.runtime.forcedSettled)
+        || isScenePreparationSettled(preparationState)
       ) {
         stopReadinessPolling();
         return;
       }
-      if (preparationState.assetRefreshStatus !== 'settled') {
+      if (preparationState.modelSyncStatus === 'pending' || preparationState.modelSyncStatus === 'active'
+        || preparationState.assetRefreshStatus !== 'settled'
+        || currentEditor.sceneStartupResourceSessionId === sceneSessionId) {
         resetRenderWait();
         setSceneRuntimeNaturallyReady(false);
         sceneRuntimeReadinessStableSamplesRef.current = 0;
@@ -1788,10 +1798,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const settleRuntimeAfterTimeout = (): void => {
         if (sceneRuntimeTimeoutLoggedRef.current) return;
         sceneRuntimeTimeoutLoggedRef.current = true;
-        if (useEditorStore.getState().sceneResourcePolicy === 'data-platform-refresh') {
-          const error = '新版场景模型未能在规定时间内完成加载与首帧渲染，请重新同步或取消返回首页。';
+        if (shouldValidateSceneModelResources(useEditorStore.getState(), sceneDocument)) {
+          const error = useEditorStore.getState().sceneResourcePolicy === 'local-refresh'
+            ? '本地场景资源未能在规定时间内完成加载与首帧渲染，请重新检查场景资源。'
+            : '部分场景资源未能在规定时间内完成加载与首帧渲染，可继续编辑，发布前请重新同步。';
           useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument, error);
           environmentPreparationStore.fail(sceneSessionId, error);
+          settleSceneRuntimeWithWarning(sceneSessionId, error);
           stopReadinessPolling();
           return;
         }
@@ -1817,20 +1830,57 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         return;
       }
 
-      if (useEditorStore.getState().sceneResourcePolicy === 'data-platform-refresh') {
-        const error = sceneDocument.entityIds.map(id => runtime.getModelReadinessError(id)).find(Boolean);
+      const skyboxResourceRefreshKey = JSON.stringify([
+        sceneSessionId, preparationState.modelSyncRunId, preparationState.assetRefreshId,
+      ]);
+      if (skyboxResourceRetryKeyRef.current !== skyboxResourceRefreshKey) {
+        skyboxResourceRetryKeyRef.current = skyboxResourceRefreshKey;
+        // 新会话首次打开不重试；只有该场景后续完整资源检查完成才重建失败宿主。
+        if (failedResourceRetrySessionRef.current === sceneSessionId) {
+          runtime.retryFailedSceneResources(editRuntimeSceneDocument, currentEditor.hierarchySelectionIds);
+        }
+        failedResourceRetrySessionRef.current = sceneSessionId;
+        runtime.retrySkyboxLoading();
+      }
+      if (shouldValidateSceneModelResources(useEditorStore.getState(), sceneDocument)) {
+        const failedEntityIds = sceneDocument.entityIds.filter(id => runtime.getModelReadinessError(id));
+        const error = failedEntityIds.map(id => {
+          const detail = runtime.getModelReadinessError(id);
+          return detail ? `${sceneDocument.entities[id]?.name || id}：${detail}` : null;
+        }).filter(Boolean).join('\n');
         if (error) {
-          useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument, error);
+          useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument, error, { entityIds: failedEntityIds });
           environmentPreparationStore.fail(sceneSessionId, error);
+          settleSceneRuntimeWithWarning(sceneSessionId, error);
           stopReadinessPolling();
           return;
         }
+      }
+      const skyboxReadiness = runtime.getSkyboxReadiness();
+      if (skyboxReadiness.phase === 'error') {
+        const error = skyboxReadiness.message || `天空盒资源加载失败：${skyboxReadiness.sourceUrl || '未知资源'}`;
+        currentEditor.recordSceneResourceIssues(sceneSessionId, [error]);
+        currentEditor.finishLatestSceneResources(sceneSessionId, sceneDocument, error);
+        environmentPreparationStore.fail(sceneSessionId, error);
+        settleSceneRuntimeWithWarning(sceneSessionId, error);
+        stopReadinessPolling();
+        return;
       }
       let settledModels = 0;
       for (const entityId of modelEntityIds) {
         if (runtime.isModelReady(entityId)) settledModels += 1;
       }
       const environmentSnapshot = useEditorStore.getState().environmentRuntimeSnapshot;
+      if (shouldValidateSceneModelResources(currentEditor, sceneDocument)
+        && sceneRuntimeEnvironmentExpected && environmentSnapshot.phase === 'error'
+        && environmentSnapshot.sourceUrl === sceneRuntimeEnvironmentSourceUrl) {
+        const error = environmentSnapshot.message || '场景环境模型加载失败，已保留环境配置，可继续编辑。';
+        currentEditor.finishLatestSceneResources(sceneSessionId, sceneDocument, error, { environment: true });
+        environmentPreparationStore.fail(sceneSessionId, error);
+        settleSceneRuntimeWithWarning(sceneSessionId, error);
+        stopReadinessPolling();
+        return;
+      }
       const environmentReady = !sceneRuntimeEnvironmentExpected || (
         sceneRuntimeEnvironmentSourceUrl !== null
         && environmentSnapshot.phase === 'ready'
@@ -1840,13 +1890,16 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const runtimeMetrics = runtime.getPerformanceMetrics();
       const batchedEntities = Math.min(expectedBatchedEntities, runtimeMetrics.modelArrayBatchEntityCount);
       const readyNow = settledModels >= totalSceneModels
-        && batchedEntities >= expectedBatchedEntities;
+        && batchedEntities >= expectedBatchedEntities
+        && skyboxReadiness.phase !== 'loading';
       const signature = [
         settledModels,
         batchedEntities,
         runtimeMetrics.modelArrayBatchMeshCount,
         environmentSnapshot.phase,
         environmentSnapshot.sourceUrl ?? '',
+        skyboxReadiness.phase,
+        skyboxReadiness.sourceUrl ?? '',
       ].join(':');
       sceneRuntimeReadinessStableSamplesRef.current = readyNow && signature === lastSignature
         ? sceneRuntimeReadinessStableSamplesRef.current + 1
@@ -1874,6 +1927,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (stable) {
         setSceneRuntimeNaturallyReady(true);
         useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument);
+        if (useEditorStore.getState().sceneResourceIssues.length === 0) {
+          environmentPreparationStore.clearError(sceneSessionId);
+        }
       }
 
       reportSceneRuntimeProgress(sceneSessionId, {
@@ -1883,6 +1939,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         expectedBatchedEntities,
         batchedEntities,
         stable,
+        waitingResource: skyboxReadiness.phase === 'loading'
+          ? '正在读取、解码或预过滤天空盒，完成后验证场景首帧…'
+          : !environmentReady
+            ? `正在准备环境模型：${sceneDocument.sceneSettings.environment?.displayName || '场景环境'}`
+            : null,
       });
       if (stable && preparationState.runtime.forcedSettled) stopReadinessPolling();
 
@@ -1903,7 +1964,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (
         active
         && preparationState.sceneSessionId === sceneSessionId
-        && (!preparationState.completed || preparationState.runtime.forcedSettled)
+        && !isScenePreparationSettled(preparationState)
       ) {
         intervalId = window.setInterval(sampleReadiness, 250);
       }
@@ -1913,7 +1974,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const preparationState = getScenePreparationSnapshot();
       if (
         preparationState.sceneSessionId !== sceneSessionId
-        || (preparationState.completed && !preparationState.runtime.forcedSettled)
+        || isScenePreparationSettled(preparationState)
       ) {
         stopReadinessPolling();
         return;
@@ -2444,6 +2505,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
     viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
+    if (sceneRuntimeStartupDeferred) return;
     runtime.syncShadows(sceneDocument.sceneSettings.shadows, sceneDocument);
     runtime.syncSkybox(sceneDocument);
     if (!environmentApplyRequest && !environmentAdjustmentActive) {
@@ -2458,6 +2520,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     environmentApplyRequest,
     environmentRuntimeOverride,
     environmentStartupRelinkSessionId,
+    sceneRuntimeStartupDeferred,
     sceneSessionId,
     sceneDocument.sceneSettings,
   ]);

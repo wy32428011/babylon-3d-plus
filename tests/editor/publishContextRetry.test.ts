@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { repairPublishSceneSkyboxes } from '../../src/editor/deployment/repairPublishSceneSkyboxes.ts';
 
 const source = await readFile(new URL('../../src/editor/deployment/useDigitalTwinPublish.ts', import.meta.url), 'utf8');
 const hookSource = stripTypeScriptTypes(source.replace(/^import .*\r?\n/gm, '')).replace(/^export /gm, '');
@@ -35,6 +36,8 @@ function fixture() {
   const logs: string[] = [];
   const contextCalls: unknown[] = [];
   const publishCalls: unknown[] = [];
+  const recoveryCalls: any[] = [];
+  const commands: string[] = [];
   const cancelCalls: unknown[] = [];
   let progressListener: ((value: unknown) => void) | undefined;
   const initialContext = context();
@@ -44,7 +47,7 @@ function fixture() {
     publish: async (_request: any): Promise<any> => result(),
   };
   const store: any = {
-    scene: { name: '测试场景' }, runtimeMode: 'edit', history: {},
+    scene: { name: '测试场景' }, sceneSessionId: 'session-1', runtimeMode: 'edit', history: {},
     pushLog: (message: string) => logs.push(message),
     markScenePersisted: (content: string) => logs.push(`persisted:${content}`),
   };
@@ -73,19 +76,22 @@ function fixture() {
     useEditorStore,
     serializeScene: JSON.stringify,
     repairPublishSceneModels: (scene: unknown) => ({ scene }),
+    repairPublishSceneSkyboxes,
     getSceneShadowBakeError: () => null,
-    executeCommand() { throw new Error('本测试不应修改场景。'); },
-    updateSceneDocumentCommand() { throw new Error('本测试不应修改场景。'); },
+    getScenePreparationSnapshot: () => ({ completed: false, runtime: {} }),
+    environmentPreparationStore: { getSnapshot: () => ({}) },
+    executeCommand(scene: any, history: any, command: any) { commands.push(command.label); return { scene: command.apply(scene), history }; },
+    updateSceneDocumentCommand(label: string, apply: any) { return { label, apply }; },
     window: { editorApi: {
       onDigitalTwinPublishProgress: (listener: (value: unknown) => void) => { progressListener = listener; return () => { progressListener = undefined; }; },
       getDigitalTwinPublishContext: (request: unknown) => { contextCalls.push(request); return api.context(request); },
-      recoverDigitalTwinModels: () => api.recover(),
+      recoverDigitalTwinModels: (request: any) => { recoveryCalls.push(request); return api.recover(); },
       publishDigitalTwin: (request: any) => { publishCalls.push(request); return api.publish(request); },
       cancelDigitalTwinPublish: async (request: unknown) => { cancelCalls.push(request); return true; },
     } },
   });
   const render = () => { cursor = 0; return useDigitalTwinPublish(); };
-  return { render, api, logs, contextCalls, publishCalls, cancelCalls, initialContext,
+  return { render, api, logs, contextCalls, publishCalls, recoveryCalls, commands, store, cancelCalls, initialContext,
     progress: (value: unknown) => progressListener?.(value) };
 }
 
@@ -182,6 +188,7 @@ for (const fails of [false, true]) {
 
 test('模型恢复期间取消不会继续发布，取消后可以发起新的发布', async () => {
   const f = fixture();
+  await f.render().loadContext();
   const recovery = deferred<any>();
   f.api.recover = () => recovery.promise;
   const publishing = f.render().start(options);
@@ -198,4 +205,87 @@ test('模型恢复期间取消不会继续发布，取消后可以发起新的�
   f.api.publish = async () => result('completed');
   assert.equal((await f.render().start(options)).status, 'completed');
   assert.equal(f.render().isBusy, false);
+});
+
+test('恢复模型和发布使用预检签发的同一个目标票据', async () => {
+  const f = fixture();
+  f.api.context = async () => ({ ...context(), targetToken: 'target-B' });
+  await f.render().loadContext();
+  f.api.publish = async () => result('completed');
+  await f.render().start(options);
+  assert.equal(f.recoveryCalls[0].targetToken, 'target-B');
+  assert.equal((f.publishCalls[0] as any).targetToken, 'target-B');
+});
+
+test('关闭窗口或者更换场景后旧上下文不能启动发布', async () => {
+  for (const reset of [true, false]) {
+    const f = fixture();
+    await f.render().loadContext();
+    if (reset) f.render().reset();
+    else f.store.sceneSessionId = 'session-2';
+    assert.equal(await f.render().start(options), null);
+    assert.equal(f.recoveryCalls.length, 0);
+  }
+});
+
+test('场景切换后迟到的上下文被丢弃', async () => {
+  const f = fixture();
+  const late = deferred<any>();
+  f.api.context = () => late.promise;
+  const loading = f.render().loadContext();
+  f.store.sceneSessionId = 'session-2';
+  late.resolve(context());
+  await loading;
+  assert.equal(f.render().state.context, null);
+});
+
+test('本地恢复尚未完成首帧时不能进入发布恢复接口', async () => {
+  const f = fixture();
+  await f.render().loadContext();
+  f.store.sceneResourcePolicy = 'local-refresh';
+  f.store.sceneResourceIssues = [];
+  assert.equal(await f.render().start(options), null);
+  assert.equal(f.recoveryCalls.length, 0);
+});
+
+test('恢复期间切换场景不会继续发布或者修改新场景', async () => {
+  const f = fixture();
+  await f.render().loadContext();
+  const recovery = deferred<any>();
+  f.api.recover = () => recovery.promise;
+  const publishing = f.render().start(options);
+  f.store.sceneSessionId = 'session-2';
+  recovery.resolve({ replacements: [] });
+  assert.equal(await publishing, null);
+  assert.equal(f.publishCalls.length, 0);
+});
+
+test('发布请求返回前切换场景，不把新场景标记为已保存', async () => {
+  const f = fixture();
+  await f.render().loadContext();
+  const publish = deferred<any>();
+  f.api.publish = () => publish.promise;
+  const publishing = f.render().start(options);
+  await tick();
+  f.store.sceneSessionId = 'session-2';
+  publish.resolve(result('completed'));
+  await publishing;
+  assert.equal(f.logs.some(value => value.startsWith('persisted:')), false);
+});
+
+test('天空盒恢复经一次命令回写，并把恢复后的文档传给发布', async () => {
+  const f = fixture();
+  f.store.scene = { sceneSettings: { skybox: { sourceUrl: 'old', sourcePath: 'D:/sky.exr', intensity: 0.5 } }, entities: {} };
+  f.api.recover = async () => ({ replacements: [], skyboxReplacements: [
+    { entityId: null, sourceUrl: 'old', skybox: { sourceUrl: 'new', sourcePath: 'C:/sky.exr', intensity: 9 } },
+  ] });
+  f.api.publish = async () => result('completed');
+  await f.render().loadContext();
+  await f.render().start(options);
+  assert.equal(f.commands.length, 1);
+  assert.equal(f.store.scene.sceneSettings.skybox.sourceUrl, 'new');
+  const published = JSON.parse((f.publishCalls[0] as any).sceneContent);
+  assert.equal(published.sceneSettings.skybox.sourceUrl, 'new');
+  assert.equal(published.sceneSettings.skybox.intensity, 0.5);
+  assert.ok(f.logs.some(message => message.includes('恢复 1 个天空盒引用')));
 });

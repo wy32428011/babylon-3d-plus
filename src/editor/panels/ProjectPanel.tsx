@@ -1,7 +1,9 @@
-import { getSceneEnvironmentUpdateReference } from '../../../electron/shared/sceneModelUpdatePlan';
-import { applySceneModelUpdates } from '../assets/applySceneModelUpdates';
-import { serializeScene } from '../project/SceneSerializer';
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { applyAvailableSceneModelUpdates } from '../assets/applySceneModelUpdates';
+import { runSceneModelSyncTransaction, getSceneModelPublishSession, subscribeSceneModelPublishOperation } from '../assets/sceneModelSyncTransaction';
+import { deserializeScene, serializeScene } from '../project/SceneSerializer';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent } from 'react';
+import { LibrarySyncNotice } from '../loading/LibrarySyncNotice';
+import syncNoticeStyles from '../loading/LibrarySyncNotice.module.css';
 import type { RemoteDownloadProgress } from '../../../electron/shared/remoteDownloadProgress';
 import { RemoteDownloadDetail } from '../loading/RemoteDownloadDetail';
 import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
@@ -12,9 +14,14 @@ import { environmentForSyncRun, findAuthoritativeEnvironmentAsset } from '../ass
 import { isRemoteDownloadVisible, remoteSyncLogKey, sceneRemoteDownloadStore } from '../loading/sceneRemoteDownloadProgress';
 import {
   beginSceneModelAssetRefresh,
+  allowScenePreparationEditing,
   beginScenePreparation,
+  getScenePreparationSnapshot,
+  subscribeScenePreparation,
+  isScenePreparationSettled,
   reportSceneModelSyncProgress,
   settleSceneModelAssetRefresh,
+  settleSceneRuntimeWithWarning,
   skipSceneModelSync,
 } from '../loading/scenePreparationProgress';
 import {
@@ -53,7 +60,6 @@ import { createImportedAssetIndexes, findImportedAssetForPackagePath } from '../
 import {
   filterProjectModelsForSyncRefresh,
   createModelSyncRevisionTracker,
-  shouldRefreshProjectModelsAfterSync,
 } from '../assets/modelSyncRefreshPolicy';
 import {
   BUILT_IN_MODEL_LIBRARY_ITEMS,
@@ -125,6 +131,7 @@ type DataPlatformModelSyncProgress = {
 };
 
 type DataPlatformModelSyncApi = {
+  syncDataPlatformModels?: () => Promise<boolean>;
   onDataPlatformModelSyncProgress?: (listener: (progress: DataPlatformModelSyncProgress) => void) => () => void;
   retryDataPlatformModelSync?: () => Promise<boolean>;
 };
@@ -141,6 +148,7 @@ type DataPlatformEnvironmentSyncProgress = {
 };
 
 type DataPlatformEnvironmentSyncApi = {
+  syncDataPlatformEnvironments?: () => Promise<boolean>;
   onDataPlatformEnvironmentSyncProgress?: (listener: (progress: DataPlatformEnvironmentSyncProgress) => void) => () => void;
   retryDataPlatformEnvironmentSync?: () => Promise<boolean>;
 };
@@ -270,10 +278,17 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const sceneDocument = useEditorStore((state) => state.scene);
   const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
   const sceneResourcePolicy = useEditorStore((state) => state.sceneResourcePolicy);
+  const publishingSceneSessionId = useSyncExternalStore(subscribeSceneModelPublishOperation, getSceneModelPublishSession, getSceneModelPublishSession);
   const latestSceneResourceTransaction = useEditorStore((state) => state.latestSceneResourceTransaction);
   const [isPreparingSceneResources, setIsPreparingSceneResources] = useState(false);
   const [localResourceRetry, setLocalResourceRetry] = useState(0);
   const localResourcePreparingRef = useRef(false);
+  const explicitSceneSyncRef = useRef<string | null>(null);
+  const explicitSceneSyncHandlerRef = useRef<((syncLibrary?: boolean) => Promise<void>) | null>(null);
+  const preparation = useSyncExternalStore(subscribeScenePreparation, getScenePreparationSnapshot, getScenePreparationSnapshot);
+  const autoLibrarySyncSessionRef = useRef<string | null>(null);
+  const [isStartingLibrarySync, setIsStartingLibrarySync] = useState(false);
+  const startingLibrarySyncSessionRef = useRef<string | null>(null);
   const environmentRuntimeSnapshot = useEditorStore((state) => state.environmentRuntimeSnapshot);
   const currentSkybox = useMemo(() => getSceneSkyboxSettings(sceneDocument), [sceneDocument]);
   const createMesh = useEditorStore((state) => state.createMesh);
@@ -296,9 +311,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const skyboxSyncControllerRef = useRef<SkyboxSyncController | null>(null);
   const packagedSkyboxesRef = useRef<ProjectSkyboxAssetEntry[]>([]);
   const preservePackagedSkyboxRef = useRef(true);
-  const modelSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshModelSyncRunIdRef = useRef<string | null>(null);
-  const environmentSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshEnvironmentSyncRunIdRef = useRef<string | null>(null);
   const imageSyncCompletedDismissTimerRef = useRef<number | null>(null);
   const lastSceneRefreshImageSyncRunIdRef = useRef<string | null>(null);
@@ -348,6 +361,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const [isRetryingModelSync, setIsRetryingModelSync] = useState(false);
   const [environmentSyncProgress, setEnvironmentSyncProgress] = useState<DataPlatformEnvironmentSyncProgress | null>(null);
   const [isRetryingEnvironmentSync, setIsRetryingEnvironmentSync] = useState(false);
+  const isLibrarySyncActive = [modelSyncProgress, environmentSyncProgress]
+    .some(progress => progress && progress.phase !== 'completed' && progress.phase !== 'failed');
   const [syncedImages, setSyncedImages] = useState<SyncedImageAssetEntry[]>([]);
   const [imageSyncProgress, setImageSyncProgress] = useState<DataPlatformImageSyncProgress | null>(null);
   const [isRetryingImageSync, setIsRetryingImageSync] = useState(false);
@@ -580,9 +595,14 @@ export function ProjectPanel(props: ProjectPanelProps) {
     assets: ProjectSkyboxAssetEntry[],
     expectedSceneId: string,
     preservePackagedSnapshot = false,
+    beforeSceneResourceQuery = false,
   ): SkyboxSyncApplyResult => {
     const beforeState = useEditorStore.getState();
     if (beforeState.scene.id !== expectedSceneId) return 'blocked';
+    // 本地恢复保留源文件记录的版本；全库同步和目录扫描不能重新升级已恢复的天空盒。
+    if (beforeState.sceneResourcePolicy === 'local-refresh') return 'unchanged';
+    // 初始目录关联在资源查询前完成；后台同步保留待应用结果，不能使进行中的场景 CAS 失效。
+    if (!beforeSceneResourceQuery && (localResourcePreparingRef.current || beforeState.latestSceneResourceTransaction)) return 'blocked';
     const activeSkybox = getSceneSkyboxSettings(beforeState.scene);
     if (!activeSkybox) return 'not-found';
     if (preservePackagedSnapshot && packagedSkyboxesRef.current.some(asset =>
@@ -628,7 +648,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
     try {
       const result = await window.editorApi.listProjectAssets();
-      if (requestId !== projectAssetsLoadRequestRef.current) {
+      if (requestId !== projectAssetsLoadRequestRef.current || sceneSessionIdRef.current !== requestSceneSessionId) {
         return { ok: false, error: '项目资源库加载请求已被较新的请求取代。' };
       }
 
@@ -652,7 +672,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         options.refreshSkybox === true,
         loadedSkyboxes,
         assets => relinkCurrentSkyboxFromAssets(assets, useEditorStore.getState().scene.id,
-          options.preserveResolvedSnapshots === true) === 'applied',
+          options.preserveResolvedSnapshots === true, true) === 'applied',
       );
       if (options.refreshModels) {
         const modelAssets = (options.localSceneResources?.configured ? options.localSceneResources.modelAssets : options.preserveResolvedSnapshots
@@ -742,10 +762,149 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
   }, [pushLog]);
 
+  const startExplicitSceneModelSync = useCallback(async (syncLibrary = false): Promise<void> => {
+    const state = useEditorStore.getState();
+    const sessionId = state.sceneSessionId;
+    if (props.readOnly || getSceneModelPublishSession() === sessionId || state.runtimeMode !== 'edit' || localResourcePreparingRef.current
+      || state.latestSceneResourceTransaction || explicitSceneSyncRef.current) return;
+    const runId = `explicit-scene-${crypto.randomUUID()}`;
+    const refreshId = crypto.randomUUID();
+    const isCurrent = () => explicitSceneSyncRef.current === runId
+      && useEditorStore.getState().sceneSessionId === sessionId;
+    explicitSceneSyncRef.current = runId;
+    localResourcePreparingRef.current = true;
+    setIsPreparingSceneResources(true);
+    reportSceneModelSyncProgress(sessionId, { runId, phase: 'querying', completed: 0, total: 0, error: null,
+      message: syncLibrary ? '正在同步模型库，完成后应用新版参数配置并保留同名参数值…' : '正在同步场景模型并采用新版参数配置并保留同名参数值…' });
+    environmentPreparationStore.clearError(sessionId);
+    try {
+      const result = await runSceneModelSyncTransaction({
+        sceneSessionId: sessionId, syncLibrary,
+        getSnapshot: () => useEditorStore.getState(),
+        prepare: async (scene, updateLibrary) => {
+          if (!window.editorApi?.prepareLocalSceneResources) throw new Error('当前编辑器不支持场景模型同步，请更新编辑器。');
+          return window.editorApi.prepareLocalSceneResources({ mode: 'scene-latest', syncLibrary: updateLibrary,
+            requestId: runId, sceneContent: serializeScene(scene) });
+        },
+        apply: async (before, resources) => {
+          const warnings = [...(resources.warnings ?? [])];
+          const issues = (resources.issues ?? []).map(issue =>
+            `[${issue.resourceKind}${issue.resourceId ? ` ${issue.resourceId}` : ''}] ${issue.message}`);
+          const environment = before.sceneSettings.environment;
+          let nextEnvironment = environment;
+          const resourceId = getRequiredEnvironmentResourceIds(before)?.[0];
+          if (environment && (resourceId || environment.source === 'data-platform' || resources.environmentAssets.length)) {
+            try {
+              const asset = resources.environmentAssets.find(candidate => candidate.dataPlatformSourceKey === resources.sourceKey
+                && (!resourceId || candidate.dataPlatformResourceId === resourceId));
+              if (!asset) throw new Error('场景环境模型未同步成功，已保留原环境配置。');
+              if (asset.lengthUnit && asset.lengthUnit !== environment.lengthUnit) warnings.push('环境模型单位发生变化，已采用新版资源单位并保留场景摆放。');
+              nextEnvironment = await loadEnvironmentFromAsset(asset, environment);
+              if (!nextEnvironment) throw new Error('新版环境配置无效，已保留原环境配置。');
+            } catch (error) {
+              nextEnvironment = environment;
+              issues.push(error instanceof Error ? error.message : String(error));
+            }
+          }
+          const prepared = applyAvailableSceneModelUpdates(before, resources.modelReplacements!, resources.sourceKey!, nextEnvironment);
+          issues.push(...prepared.issues.map(issue => `[${issue.resourceKind}${issue.resourceId ? ` ${issue.resourceId}` : ''}] ${issue.message}`));
+          return { ...prepared, issues: [...new Set(issues)], warnings: [...new Set([...warnings, ...(prepared.warnings ?? [])])] };
+        },
+        commit: (before, after, issues) => {
+          if (!isCurrent()) return false;
+          reportSceneModelSyncProgress(sessionId, { runId, phase: 'completed', completed: 0, total: 0, error: null,
+            message: '模型资源已校验，正在应用新版参数配置并验证实际首帧。' });
+          beginSceneModelAssetRefresh(sessionId, refreshId);
+          return useEditorStore.getState().commitLatestSceneResources(sessionId, before, after, issues);
+        },
+      });
+      if (!isCurrent() || !result) return;
+      for (const warning of result.warnings ?? []) pushLog(warning);
+      if (result.issues.length) environmentPreparationStore.fail(sessionId, result.issues.join('\n'));
+      settleSceneModelAssetRefresh(sessionId, result.issues.join('\n') || null, refreshId);
+      pushLog(`场景模型同步已应用 ${result.updatedCount} 处引用，采用新版参数配置并保留同名参数值；正在验证实际首帧。`);
+      // 目录刷新只更新资源卡片，不能再次用库默认配置覆盖刚提交的场景。
+      const loaded = await loadProjectAssets({ refreshModels: false, refreshEnvironment: false, refreshSkybox: false });
+      if (!isCurrent()) return;
+      const libraryErrors = [...result.libraryErrors, ...(!loaded.ok ? [loaded.error] : [])];
+      if (libraryErrors.length) {
+        const message = `模型库部分资源未同步：${libraryErrors.join('；')}`;
+        setLibraryStatuses(current => ({ ...current, model: { kind: 'error', message } }));
+        pushLog(message);
+      }
+    } catch (error) {
+      if (!isCurrent()) return;
+      const message = error instanceof Error ? error.message : String(error);
+      useEditorStore.getState().recordSceneResourceIssues(sessionId, [message]);
+      reportSceneModelSyncProgress(sessionId, { runId, phase: 'failed', completed: 0, total: 0, error: message, message });
+      beginSceneModelAssetRefresh(sessionId, refreshId);
+      settleSceneModelAssetRefresh(sessionId, message, refreshId);
+      environmentPreparationStore.fail(sessionId, message);
+      pushLog(`场景模型同步失败，原场景及最新编辑内容已保留：${message}`);
+    } finally {
+      if (isCurrent()) {
+        // 主动全库事务已经完成，无需在首帧后立即再启动同一轮后台全库任务。
+        if (syncLibrary) autoLibrarySyncSessionRef.current = sessionId;
+        explicitSceneSyncRef.current = null;
+        localResourcePreparingRef.current = false;
+        setIsPreparingSceneResources(false);
+      }
+    }
+  }, [loadProjectAssets, props.readOnly, pushLog]);
+
+  explicitSceneSyncHandlerRef.current = startExplicitSceneModelSync;
+
+  const startModelLibrarySync = useCallback(async (_automatic = false): Promise<void> => {
+    const sessionId = sceneSessionIdRef.current;
+    const state = getScenePreparationSnapshot();
+    if (props.readOnly || getSceneModelPublishSession() === sessionId || localResourcePreparingRef.current || state.sceneSessionId !== sessionId
+      || !isScenePreparationSettled(state) || startingLibrarySyncSessionRef.current === sessionId) return;
+    startingLibrarySyncSessionRef.current = sessionId;
+    setIsStartingLibrarySync(true);
+    try {
+      // 自动和手动全库同步都等待资源完成，再以统一事务更新当前场景。
+      await startExplicitSceneModelSync(true);
+    } finally {
+      if (startingLibrarySyncSessionRef.current === sessionId) {
+        startingLibrarySyncSessionRef.current = null;
+        setIsStartingLibrarySync(false);
+      }
+    }
+  }, [props.readOnly, pushLog, startExplicitSceneModelSync]);
+
+  useEffect(() => {
+    if (isPreparingSceneResources && autoLibrarySyncSessionRef.current === sceneSessionId) {
+      // 显式更新会取消后台库同步，本轮场景准备结束后再补齐全库。
+      autoLibrarySyncSessionRef.current = null;
+      setModelSyncProgress(null);
+      setEnvironmentSyncProgress(null);
+    }
+    if (preparation.sceneSessionId !== sceneSessionId || !isScenePreparationSettled(preparation)
+      || isPreparingSceneResources || isStartingLibrarySync || latestSceneResourceTransaction || props.readOnly || publishingSceneSessionId === sceneSessionId
+      || autoLibrarySyncSessionRef.current === sceneSessionId) return;
+    autoLibrarySyncSessionRef.current = sceneSessionId;
+    void startModelLibrarySync(true);
+  }, [preparation, sceneSessionId, isPreparingSceneResources, isStartingLibrarySync, latestSceneResourceTransaction, publishingSceneSessionId, props.readOnly, startModelLibrarySync]);
+
+  useEffect(() => {
+    if (publishingSceneSessionId !== sceneSessionId) return;
+    const previousRun = explicitSceneSyncRef.current;
+    explicitSceneSyncRef.current = null;
+    startingLibrarySyncSessionRef.current = null;
+    localResourcePreparingRef.current = false;
+    setIsPreparingSceneResources(false);
+    setIsStartingLibrarySync(false);
+    if (previousRun) void window.editorApi?.cancelSceneModelSync?.({ requestId: previousRun });
+  }, [publishingSceneSessionId, sceneSessionId]);
+
   useEffect(() => {
     sceneRemoteDownloadStore.begin(sceneSessionId);
     modelSyncRevisionsRef.current.clear();
     environmentPreparationStore.begin(sceneSessionId, async () => {
+      if (getScenePreparationSnapshot().modelSyncRunId?.startsWith('explicit-scene-')) {
+        await explicitSceneSyncHandlerRef.current?.(false);
+        return true;
+      }
       if (sceneResourcePolicy !== 'preserve-snapshot') {
         setLocalResourceRetry(value => value + 1);
         return true;
@@ -757,6 +916,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
     });
     setModelSyncProgress(null);
     setEnvironmentSyncProgress(null);
+    autoLibrarySyncSessionRef.current = null;
+    startingLibrarySyncSessionRef.current = null;
+    explicitSceneSyncRef.current = null;
+    localResourcePreparingRef.current = false;
+    setIsPreparingSceneResources(false);
+    setIsStartingLibrarySync(false);
     return () => {
       sceneRemoteDownloadStore.clear(sceneSessionId);
       environmentPreparationStore.clear(sceneSessionId);
@@ -790,11 +955,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
     const refreshId = crypto.randomUUID();
     beginSceneModelAssetRefresh(sceneSessionId, refreshId);
     const initialLoadPromise = loadProjectAssets({
-      refreshModels: sceneResourcePolicy !== 'data-platform-refresh',
+      refreshModels: sceneResourcePolicy === 'preserve-snapshot',
       preserveResolvedSnapshots: true,
       preservePackagedEnvironment: true,
       refreshEnvironment: sceneResourcePolicy === 'preserve-snapshot' && refreshStartupEnvironment,
-      refreshSkybox: true,
+      refreshSkybox: sceneResourcePolicy !== 'local-refresh',
     });
     initialProjectAssetsLoadPromiseRef.current = initialLoadPromise;
     void initialLoadPromise.then((initialLoad) => {
@@ -821,12 +986,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
     localResourcePreparingRef.current = true;
     setIsPreparingSceneResources(true);
     const runId = `local-scene-${sceneSessionId}-${localResourceRetry}`;
+    const refreshId = crypto.randomUUID();
     const isCurrent = () => active && useEditorStore.getState().sceneSessionId === sceneSessionId;
+    if (sceneResourcePolicy === 'local-refresh') useEditorStore.getState().beginLocalSceneResourceRecovery(sceneSessionId);
     reportSceneModelSyncProgress(sceneSessionId, {
       runId, phase: 'querying', completed: 0, total: 0, error: null,
-      message: '正在查询场景引用模型的最新版本，并同步所需资源…',
+      message: '正在查询场景引用模型的最新版本，保留实例参数并同步所需资源…',
     });
     environmentPreparationStore.clearError(sceneSessionId);
+    // 初次打开先确认最终资源引用，避免旧 SOURCE 与共享缓存先后各初始化一次。
     void (async () => {
       try {
         await initialProjectAssetsLoadPromiseRef.current;
@@ -834,65 +1002,116 @@ export function ProjectPanel(props: ProjectPanelProps) {
         if (!window.editorApi?.prepareLocalSceneResources) throw new Error('当前编辑器不支持本地场景资源同步，请更新编辑器。');
         const beforeScene = useEditorStore.getState().scene;
         const environment = beforeScene.sceneSettings.environment;
+        // 历史引用缺少身份交给主进程恢复或报告局部问题，渲染端不提前阻断整场景。
         const resourceId = sceneResourcePolicy === 'data-platform-refresh'
-          ? getSceneEnvironmentUpdateReference(beforeScene)?.resourceId : getRequiredEnvironmentResourceIds(beforeScene)?.[0];
+          ? environment?.dataPlatformResourceId : getRequiredEnvironmentResourceIds(beforeScene)?.[0];
         const result = await window.editorApi.prepareLocalSceneResources({
-          ...(sceneResourcePolicy === 'data-platform-refresh' ? { mode: 'data-platform-latest' as const, sceneContent: serializeScene(beforeScene) } : {}),
+          mode: sceneResourcePolicy === 'data-platform-refresh' ? 'data-platform-latest' : 'local-latest',
+          requestId: runId,
+          sceneContent: serializeScene(beforeScene),
+          ...(sceneResourcePolicy === 'local-refresh' ? {
+            sceneFilePath: useEditorStore.getState().sceneSourceFilePath ?? undefined,
+            acceptEnvironmentRevision: useEditorStore.getState().localSceneEnvironmentRecoveryAcceptance ?? undefined,
+          } : {}),
           environment: environment ? { resourceId, displayName: environment.displayNameSnapshot || environment.displayName } : undefined,
         });
         if (!isCurrent()) return;
-        // 以本轮 IPC 事务结果为完成依据；同步期间的旧通知只用于展示。
-        reportSceneModelSyncProgress(sceneSessionId, {
-          runId, phase: 'completed', completed: 0, total: 0, error: null,
-          message: result.configured ? '模型同步完成，正在关联当前中台资源。' : '未配置数据中台，正在加载本地资源。',
-        });
-        const refreshId = crypto.randomUUID();
-        beginSceneModelAssetRefresh(sceneSessionId, refreshId);
-        if (sceneResourcePolicy === 'data-platform-refresh') {
-          if (!result.configured || !result.sourceKey || !result.modelReplacements) throw new Error('数据中台未返回完整的场景模型同步结果。');
-          let nextEnvironment = environment;
-          if (resourceId) {
-            const environmentAsset = result.environmentAssets.find(asset => asset.dataPlatformResourceId === resourceId
-              && asset.dataPlatformSourceKey === result.sourceKey);
-            if (!environmentAsset) throw new Error('场景引用的环境模型未同步成功，原场景保持不变。');
-            if (environmentAsset.lengthUnit && environment && environmentAsset.lengthUnit !== environment.lengthUnit) {
-              throw new Error('环境模型单位发生变化，请核对尺寸后更新，原场景保持不变。');
-            }
-            nextEnvironment = await loadEnvironmentFromAsset(environmentAsset, environment);
-            if (!nextEnvironment) throw new Error('新版环境模型配置无效，原场景保持不变。');
+        if (sceneResourcePolicy === 'local-refresh' && typeof result.recoveredSceneContent === 'string') {
+          if (useEditorStore.getState().scene !== beforeScene) {
+            throw new Error('恢复期间场景发生变化，请重新检查资源以保留最新编辑内容。');
           }
-          if (!isCurrent()) return;
-          const prepared = applySceneModelUpdates(beforeScene, result.modelReplacements, result.sourceKey, nextEnvironment);
-          if (!useEditorStore.getState().commitLatestSceneResources(sceneSessionId, beforeScene, prepared.scene)) {
-            throw new Error('同步期间场景发生变化，请重新同步以保留最新编辑内容。');
+          useEditorStore.getState().setLocalSceneEnvironmentRecoveryChoice(sceneSessionId, result.environmentRecoveryChoice ?? null);
+          const issues = (result.issues ?? []).map(issue =>
+            `[${issue.resourceKind}${issue.resourceId ? ` ${issue.resourceId}` : ''}] ${issue.message}`);
+          if (issues.length > 0) throw new Error(issues.join('\n'));
+          if (typeof result.recoveredSceneContent !== 'string') throw new Error('本地资源恢复未返回完整场景，已保留原场景并停止加载。');
+          const recovered = deserializeScene(result.recoveredSceneContent);
+          // 主进程只修正资源引用，保留实体、参数、绑定和脚本；CAS 防止迟到结果覆盖编辑。
+          if (!useEditorStore.getState().commitRecoveredLocalSceneResources(sceneSessionId, beforeScene, recovered)) {
+            throw new Error('恢复期间场景发生变化，请重新检查资源以保留最新编辑内容。');
           }
+          reportSceneModelSyncProgress(sceneSessionId, { runId, phase: 'completed', completed: 0, total: 0, error: null,
+            message: `本地资源校验完成，已恢复 ${result.recoveredReferenceCount ?? 0} 处引用，正在验证场景首帧。` });
+          beginSceneModelAssetRefresh(sceneSessionId, refreshId);
+          allowScenePreparationEditing(sceneSessionId, false);
           environmentPreparationStore.clearError(sceneSessionId);
           settleSceneModelAssetRefresh(sceneSessionId, null, refreshId);
           return;
         }
-        const loaded = await loadProjectAssets({
-          refreshModels: true, refreshEnvironment: true, modelResourceKeys: null,
-          preserveResolvedSnapshots: !result.configured, preservePackagedEnvironment: !result.configured,
-          localSceneResources: result,
+        // 以本轮 IPC 事务结果为完成依据；同步期间的旧通知只用于展示。
+        reportSceneModelSyncProgress(sceneSessionId, {
+          runId: sceneResourcePolicy === 'local-refresh' ? `local-latest-${runId}` : runId,
+          phase: 'completed', completed: 0, total: 0, error: null,
+          message: result.configured ? '模型同步完成，正在关联当前中台资源。' : '未配置数据中台，正在加载本地资源。',
         });
-        if (!isCurrent()) return;
-        if (!loaded.ok) throw new Error(loaded.error);
-        const current = useEditorStore.getState();
-        if (current.environmentStartupRelinkSessionId === sceneSessionId && !current.environmentApplyRequest) {
-          if (environment && !hasManagedEnvironmentCacheReference(environment) && environment.source !== 'data-platform') {
-            requestEnvironmentApply(environment, { runtimeEnvironment: environment, persistSceneChange: false,
-              autoAlign: false, focusAfterLoad: false, expectedSceneSessionId: sceneSessionId });
-          } else if (environment) {
-            throw new Error('未找到可加载的匹配环境模型，请检查数据中台地址及资源后重新同步。');
+        beginSceneModelAssetRefresh(sceneSessionId, refreshId);
+        if (sceneResourcePolicy === 'data-platform-refresh' || sceneResourcePolicy === 'local-refresh') {
+          if (!result.configured || !result.sourceKey || !result.modelReplacements) throw new Error('数据中台未返回完整的场景模型同步结果。');
+          const describeIssue = (issue: { resourceKind: string; resourceId?: string; message: string }) =>
+            `[${issue.resourceKind}${issue.resourceId ? ` ${issue.resourceId}` : ''}] ${issue.message}`;
+          const issues = (result.issues ?? []).map(describeIssue);
+          const warnings = [...(result.warnings ?? [])];
+          let nextEnvironment = environment;
+          if (environment && (result.environmentAssets.length > 0 || resourceId || environment.source === 'data-platform')) {
+            try {
+              const environmentAsset = result.environmentAssets.find(asset => (!resourceId || asset.dataPlatformResourceId === resourceId)
+                && asset.dataPlatformSourceKey === result.sourceKey);
+              if (!environmentAsset) throw new Error('场景环境模型未同步成功，继续使用场景保存的环境配置。');
+              if (environmentAsset.lengthUnit && environmentAsset.lengthUnit !== environment.lengthUnit) {
+                warnings.push('环境模型单位发生变化，已采用新版资源单位并保留场景摆放。');
+              }
+              nextEnvironment = await loadEnvironmentFromAsset(environmentAsset, environment);
+              if (!nextEnvironment) throw new Error('新版环境模型配置无效，继续使用场景保存的环境配置。');
+            } catch (error) {
+              issues.push(error instanceof Error ? error.message : String(error));
+              nextEnvironment = environment;
+            }
           }
+          if (!isCurrent()) return;
+          const prepared = applyAvailableSceneModelUpdates(beforeScene, result.modelReplacements, result.sourceKey, nextEnvironment);
+          warnings.push(...(prepared.warnings ?? []));
+          issues.push(...prepared.issues.map(describeIssue));
+          let finalScene = prepared.scene;
+          if (sceneResourcePolicy === 'local-refresh') {
+            // 模型先统一到中台版本，再恢复图片、天空盒及其他本地依赖，避免被缺失旧模型挡住。
+            const recovered = await window.editorApi.prepareLocalSceneResources({ mode: 'local-recovery', requestId: runId,
+              sceneContent: serializeScene(finalScene), sceneFilePath: useEditorStore.getState().sceneSourceFilePath ?? undefined });
+            if (!isCurrent()) return;
+            issues.push(...(recovered.issues ?? []).map(describeIssue));
+            warnings.push(...(recovered.warnings ?? []));
+            if (typeof recovered.recoveredSceneContent === 'string') finalScene = deserializeScene(recovered.recoveredSceneContent);
+          }
+          if (!useEditorStore.getState().commitLatestSceneResources(sceneSessionId, beforeScene, finalScene, issues)) {
+            throw new Error('同步期间场景发生变化，请重新同步以保留最新编辑内容。');
+          }
+          for (const warning of new Set(warnings)) pushLog(warning);
+          allowScenePreparationEditing(sceneSessionId, false);
+          if (issues.length) environmentPreparationStore.fail(sceneSessionId, issues.join('\n'));
+          else environmentPreparationStore.clearError(sceneSessionId);
+          settleSceneModelAssetRefresh(sceneSessionId, issues.join('\n') || null, refreshId);
+          // 局部更新失败仍等待保留的快照与成功组完成渲染，不能提前结束加载。
+          return;
         }
-        environmentPreparationStore.clearError(sceneSessionId);
-        settleSceneModelAssetRefresh(sceneSessionId, null, refreshId);
       } catch (error) {
         if (!isCurrent()) return;
         const message = error instanceof Error ? error.message : String(error);
         pushLog(`本地场景资源准备失败：${message}`);
         environmentPreparationStore.fail(sceneSessionId, message);
+        if (sceneResourcePolicy === 'local-refresh') {
+          useEditorStore.getState().recordSceneResourceIssues(sceneSessionId, [message]);
+          reportSceneModelSyncProgress(sceneSessionId, { runId, phase: 'failed', completed: 0, total: 0, error: message, message });
+          beginSceneModelAssetRefresh(sceneSessionId, refreshId);
+          settleSceneModelAssetRefresh(sceneSessionId, message, refreshId);
+          // 校验失败时仍保留启动门控；不请求已确认失效的旧机器路径。
+        }
+        if (sceneResourcePolicy === 'data-platform-refresh') {
+          useEditorStore.getState().recordSceneResourceIssues(sceneSessionId, [message]);
+          useEditorStore.getState().finishSceneStartupResourcePreparation(sceneSessionId);
+          reportSceneModelSyncProgress(sceneSessionId, { runId, phase: 'failed', completed: 0, total: 0, error: message, message });
+          beginSceneModelAssetRefresh(sceneSessionId, refreshId);
+          settleSceneModelAssetRefresh(sceneSessionId, message, refreshId);
+          // 查询失败时仍通过当前快照的实际渲染结果结束加载。
+        }
       } finally {
         if (isCurrent()) {
           localResourcePreparingRef.current = false;
@@ -900,17 +1119,23 @@ export function ProjectPanel(props: ProjectPanelProps) {
         }
       }
     })();
-    return () => { active = false; localResourcePreparingRef.current = false; setIsPreparingSceneResources(false); };
+    return () => {
+      active = false; localResourcePreparingRef.current = false; setIsPreparingSceneResources(false);
+      void window.editorApi?.cancelSceneModelSync?.({ requestId: runId });
+    };
   }, [localResourceRetry, loadProjectAssets, pushLog, requestEnvironmentApply, sceneResourcePolicy, sceneSessionId]);
 
   useEffect(() => {
     if (useEditorStore.getState().scene !== sceneDocument) return;
+    if (sceneResourcePolicy !== 'preserve-snapshot' && (getScenePreparationSnapshot().assetRefreshStatus !== 'settled'
+      || useEditorStore.getState().sceneStartupResourceSessionId === sceneSessionId)) return;
     if (environmentRuntimeSnapshot.phase === 'error' && useEditorStore.getState().scene.sceneSettings.environment) {
-      if (sceneResourcePolicy === 'data-platform-refresh' && environmentRuntimeSnapshot.sourceUrl
+      if (sceneResourcePolicy !== 'preserve-snapshot' && environmentRuntimeSnapshot.sourceUrl
         && environmentRuntimeSnapshot.sourceUrl !== sceneDocument.sceneSettings.environment?.activeVariantUrl) return;
       const message = environmentRuntimeSnapshot.message || '环境模型初始化失败，请重试或返回首页。';
-      useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument, message);
+      useEditorStore.getState().finishLatestSceneResources(sceneSessionId, sceneDocument, message, { environment: true });
       environmentPreparationStore.fail(sceneSessionId, message);
+      if (sceneResourcePolicy !== 'preserve-snapshot') settleSceneRuntimeWithWarning(sceneSessionId, message);
     }
   }, [environmentRuntimeSnapshot, sceneDocument, sceneResourcePolicy, sceneSessionId]);
 
@@ -944,18 +1169,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
     const dataPlatformModelSyncApi = getDataPlatformModelSyncApi();
     if (!dataPlatformModelSyncApi.onDataPlatformModelSyncProgress) return undefined;
 
-    const clearCompletedDismissTimer = () => {
-      if (modelSyncCompletedDismissTimerRef.current === null) return;
-      window.clearTimeout(modelSyncCompletedDismissTimerRef.current);
-      modelSyncCompletedDismissTimerRef.current = null;
-    };
-
     const refreshSceneModelsForSyncRun = (
       progress: DataPlatformModelSyncProgress,
       progressSceneSessionId: string,
     ): void => {
-      // 已固定的场景版本仅由显式更新事务替换，库同步不能覆盖实例快照。
-      if (useEditorStore.getState().sceneResourcePolicy === 'data-platform-refresh') return;
       const runId = progress.runId;
       if (lastSceneRefreshModelSyncRunIdRef.current === runId) return;
       lastSceneRefreshModelSyncRunIdRef.current = runId;
@@ -967,9 +1184,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
           || sceneSessionIdRef.current !== progressSceneSessionId
           || lastSceneRefreshModelSyncRunIdRef.current !== runId
         ) return;
+        // 全库完成始终刷新卡片；场景就绪之后的后台任务不触发模型替换。
+        const libraryOnly = useEditorStore.getState().sceneResourcePolicy !== 'preserve-snapshot'
+          || isScenePreparationSettled(getScenePreparationSnapshot());
         const runtimeChangedResourceKeys = progress.runtimeChangedResourceKeys ?? null;
         const loaded = await loadProjectAssets({
-          refreshModels: runtimeChangedResourceKeys === null || runtimeChangedResourceKeys.length > 0,
+          refreshModels: !libraryOnly && (runtimeChangedResourceKeys === null || runtimeChangedResourceKeys.length > 0),
           preserveResolvedSnapshots: true,
           modelResourceKeys: runtimeChangedResourceKeys,
           modelSyncRunId: progress.runId,
@@ -984,7 +1204,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     const unsubscribe = dataPlatformModelSyncApi.onDataPlatformModelSyncProgress((progress) => {
       if (sceneSessionIdRef.current !== sceneSessionId) return;
       const showDownload = sceneRemoteDownloadStore.receive(sceneSessionId, 'model', progress);
-      clearCompletedDismissTimer();
+      if (!showDownload) return;
       setModelSyncProgress(showDownload ? progress : { ...progress, download: undefined });
       const progressSceneSessionId = sceneSessionIdRef.current;
       const phaseLabel = DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS[progress.phase];
@@ -999,22 +1219,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
       if (
         progress.phase === 'completed'
         && !localResourcePreparingRef.current
-        && shouldRefreshProjectModelsAfterSync(progress)
       ) {
         refreshSceneModelsForSyncRun(progress, progressSceneSessionId);
-      }
-      if (progress.phase === 'completed') {
-        modelSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
-          modelSyncCompletedDismissTimerRef.current = null;
-          setModelSyncProgress((current) =>
-            current?.runId === progress.runId && current.phase === 'completed' ? null : current,
-          );
-        }, 2200);
       }
     });
 
     return () => {
-      clearCompletedDismissTimer();
       unsubscribe();
     };
   }, [loadProjectAssets, pushLog, sceneSessionId]);
@@ -1058,7 +1268,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     });
     skyboxSyncControllerRef.current = controller;
     controller.setContext({
-      readOnly: Boolean(props.readOnly),
+      readOnly: Boolean(props.readOnly || localResourcePreparingRef.current || useEditorStore.getState().latestSceneResourceTransaction),
       sceneId: sceneDocument.id,
       contextKey: sceneSessionId,
       syncContextKey: skyboxSyncContextKey,
@@ -1085,31 +1295,25 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   useEffect(() => {
     skyboxSyncControllerRef.current?.setContext({
-      readOnly: Boolean(props.readOnly),
+      readOnly: Boolean(props.readOnly || isPreparingSceneResources || latestSceneResourceTransaction),
       sceneId: sceneDocument.id,
       contextKey: sceneSessionId,
       syncContextKey: skyboxSyncContextKey,
     });
-  }, [props.readOnly, sceneDocument.id, sceneSessionId, skyboxSyncContextKey]);
+  }, [props.readOnly, isPreparingSceneResources, latestSceneResourceTransaction, sceneDocument.id, sceneSessionId, skyboxSyncContextKey]);
 
   useEffect(() => {
     const environmentSyncApi = getDataPlatformEnvironmentSyncApi();
     if (!environmentSyncApi.onDataPlatformEnvironmentSyncProgress) return undefined;
-    const clearCompletedTimer = () => {
-      if (environmentSyncCompletedDismissTimerRef.current === null) return;
-      window.clearTimeout(environmentSyncCompletedDismissTimerRef.current);
-      environmentSyncCompletedDismissTimerRef.current = null;
-    };
     let lastLogKey = '';
     const unsubscribe = environmentSyncApi.onDataPlatformEnvironmentSyncProgress((progress) => {
       if (sceneSessionIdRef.current !== sceneSessionId) return;
       const showDownload = sceneRemoteDownloadStore.receive(sceneSessionId, 'environment', progress);
       if (!showDownload) return;
-      clearCompletedTimer();
       setEnvironmentSyncProgress(showDownload ? progress : { ...progress, download: undefined });
-      if (progress.phase === 'failed') {
+      if (progress.phase === 'failed' && !isScenePreparationSettled(getScenePreparationSnapshot())) {
         environmentPreparationStore.fail(sceneSessionId, progress.error || progress.message || '环境模型同步失败，请重试。');
-      } else if (progress.phase !== 'completed') {
+      } else if (progress.phase !== 'completed' && !isScenePreparationSettled(getScenePreparationSnapshot())) {
         environmentPreparationStore.clearError(sceneSessionId);
       }
       const label = DATA_PLATFORM_ENVIRONMENT_SYNC_PHASE_LABELS[progress.phase];
@@ -1118,8 +1322,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         lastLogKey = logKey;
         pushLog(`数据中台环境模型同步：${label}${progress.total > 0 ? `（${progress.completed}/${progress.total}）` : ''}${progress.error || progress.message ? `：${progress.error || progress.message}` : ''}`);
       }
-      if (progress.phase === 'completed' && !localResourcePreparingRef.current
-        && useEditorStore.getState().sceneResourcePolicy !== 'data-platform-refresh') {
+      if (progress.phase === 'completed' && !localResourcePreparingRef.current) {
         const progressSceneSessionId = sceneSessionIdRef.current;
         if (lastSceneRefreshEnvironmentSyncRunIdRef.current !== progress.runId) {
           lastSceneRefreshEnvironmentSyncRunIdRef.current = progress.runId;
@@ -1128,8 +1331,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
               !await waitForInitialProjectAssetsLoad(progressSceneSessionId)
               || lastSceneRefreshEnvironmentSyncRunIdRef.current !== progress.runId
             ) return;
-            const loaded = await loadProjectAssets({ refreshEnvironment: true, environmentSyncRunId: progress.runId,
+            const libraryOnly = useEditorStore.getState().sceneResourcePolicy !== 'preserve-snapshot'
+              || isScenePreparationSettled(getScenePreparationSnapshot());
+            const loaded = await loadProjectAssets({ refreshEnvironment: !libraryOnly, environmentSyncRunId: progress.runId,
               preservePackagedEnvironment: true });
+            if (libraryOnly) return;
             if (!loaded.ok && lastSceneRefreshEnvironmentSyncRunIdRef.current === progress.runId) {
               lastSceneRefreshEnvironmentSyncRunIdRef.current = null;
               environmentPreparationStore.fail(progressSceneSessionId, `环境资源关联失败：${loaded.error}`);
@@ -1150,14 +1356,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
             }
           })();
         }
-        environmentSyncCompletedDismissTimerRef.current = window.setTimeout(() => {
-          environmentSyncCompletedDismissTimerRef.current = null;
-          setEnvironmentSyncProgress((current) => current?.runId === progress.runId && current.phase === 'completed' ? null : current);
-        }, 2200);
       }
     });
     return () => {
-      clearCompletedTimer();
       unsubscribe();
     };
   }, [loadProjectAssets, pushLog, sceneSessionId, waitForInitialProjectAssetsLoad]);
@@ -1295,12 +1496,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
     skyboxSyncControllerRef.current?.dismissFailure();
   }
 
-  function handleDismissDataPlatformModelSyncFailure(): void {
-    if (modelSyncProgress?.phase !== 'failed') return;
-    setIsRetryingModelSync(false);
-    setModelSyncProgress(null);
-  }
-
   async function handleRetryDataPlatformModelSync(): Promise<void> {
     if (!modelSyncProgress || modelSyncProgress.phase !== 'failed') return;
 
@@ -1326,11 +1521,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
     } finally {
       setIsRetryingModelSync(false);
     }
-  }
-
-  function handleDismissDataPlatformEnvironmentSyncFailure(): void {
-    if (environmentSyncProgress?.phase !== 'failed') return;
-    setEnvironmentSyncProgress(null);
   }
 
   async function handleRetryDataPlatformEnvironmentSync(): Promise<void> {
@@ -1971,13 +2161,30 @@ export function ProjectPanel(props: ProjectPanelProps) {
             <span className="library-project-root" title={projectRoot}>当前项目：{projectRoot}</span>
           ) : null
         ) : null}
-        {sceneResourcePolicy === 'data-platform-refresh' ? (
+        {activeLibrary.key === 'model' || activeLibrary.key === 'environment' ? (
+          <button className="library-import-button" type="button"
+            disabled={props.readOnly || isPreparingSceneResources || Boolean(latestSceneResourceTransaction)
+              || !isScenePreparationSettled(preparation) || isStartingLibrarySync || isLibrarySyncActive}
+            title="同步中台全部普通、组合和环境模型，并替换当前场景中的匹配模型，采用新版参数配置并保留同名参数值"
+            onClick={() => void startModelLibrarySync()}>
+            {isPreparingSceneResources ? '同步并替换中…' : isStartingLibrarySync || isLibrarySyncActive ? '模型库同步中…' : '同步模型库'}
+          </button>
+        ) : null}
+        {sceneResourcePolicy === 'local-refresh' ? (
           <button
             className="library-import-button"
             disabled={props.readOnly || isPreparingSceneResources || Boolean(latestSceneResourceTransaction)}
             onClick={() => setLocalResourceRetry(value => value + 1)}
             type="button"
           >
+            重新检查场景资源
+          </button>
+        ) : null}
+        {activeLibrary.key === 'model' || activeLibrary.key === 'environment' ? (
+          <button className="library-import-button" type="button"
+            disabled={props.readOnly || isPreparingSceneResources || Boolean(latestSceneResourceTransaction)}
+            title="同步并替换当前场景引用的模型，保留各实例原有参数化配置"
+            onClick={() => void startExplicitSceneModelSync(false)}>
             同步场景模型
           </button>
         ) : null}
@@ -2098,6 +2305,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         })}
       </div>
 
+      <div className={syncNoticeStyles.stack}>
       {activeLibrary.key === 'skybox' && orphanedCurrentSkybox ? (
         <div className="library-sync-status library-sync-status-warning" role="status" aria-live="polite">
           <div className="library-sync-status-heading">
@@ -2178,7 +2386,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
       ) : null}
 
       {environmentSyncProgress ? (
-        <div className={`library-sync-status library-sync-status-${environmentSyncProgress.phase}`} role="status" aria-live="polite">
+        <LibrarySyncNotice runId={`${sceneSessionId}:${environmentSyncProgress.runId}`}
+          phase={environmentSyncProgress.phase} label="环境模型同步">
           <div className="library-sync-status-heading">
             <strong>{environmentSyncPhaseLabel}</strong>
             {environmentSyncCountLabel ? <span>{environmentSyncCountLabel}</span> : null}
@@ -2191,16 +2400,14 @@ export function ProjectPanel(props: ProjectPanelProps) {
               <button disabled={isRetryingEnvironmentSync} onClick={() => void handleRetryDataPlatformEnvironmentSync()} type="button">
                 {isRetryingEnvironmentSync ? '重试中...' : '重试环境同步'}
               </button>
-              <button aria-label="关闭环境模型同步失败提示" className="library-sync-status-close-button" onClick={handleDismissDataPlatformEnvironmentSyncFailure} type="button">
-                关闭
-              </button>
             </div>
           ) : null}
-        </div>
+        </LibrarySyncNotice>
       ) : null}
 
       {modelSyncProgress ? (
-        <div className={`library-sync-status library-sync-status-${modelSyncProgress.phase}`} role="status" aria-live="polite">
+        <LibrarySyncNotice runId={`${sceneSessionId}:${modelSyncProgress.runId}`}
+          phase={modelSyncProgress.phase} label="模型同步">
           <div className="library-sync-status-heading">
             <strong>{modelSyncPhaseLabel}</strong>
             {modelSyncCountLabel ? <span>{modelSyncCountLabel}</span> : null}
@@ -2217,17 +2424,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
               >
                 {isRetryingModelSync ? '重试中...' : '重试同步'}
               </button>
-              <button
-                aria-label="关闭同步失败提示"
-                className="library-sync-status-close-button"
-                onClick={handleDismissDataPlatformModelSyncFailure}
-                type="button"
-              >
-                关闭
-              </button>
             </div>
           ) : null}
-        </div>
+        </LibrarySyncNotice>
       ) : null}
 
       {imageSyncProgress ? (
@@ -2259,6 +2458,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         </div>
       ) : null}
 
+      </div>
     </section>
   );
 }

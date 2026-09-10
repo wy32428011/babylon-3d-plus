@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-test('场景自然完成后停止轮询，超时完成或同场景刷新时继续轮询', async () => {
+test('场景自然完成或明确带问题继续后停止轮询，新一轮资源刷新恢复轮询', async () => {
   const source = await readFile(
     new URL('../../src/editor/panels/SceneViewPanel.tsx', import.meta.url),
     'utf8',
@@ -10,14 +10,15 @@ test('场景自然完成后停止轮询，超时完成或同场景刷新时继�
 
   assert.match(
     source,
-    /preparationState\.sceneSessionId !== sceneSessionId[\s\S]*?preparationState\.completed && !preparationState\.runtime\.forcedSettled[\s\S]*?stopReadinessPolling\(\);\s*return;/,
+    /preparationState\.sceneSessionId !== sceneSessionId[\s\S]*?isScenePreparationSettled\(preparationState\)[\s\S]*?stopReadinessPolling\(\);\s*return;/,
   );
   assert.match(source, /subscribeScenePreparation/);
+  assert.match(source, /preparationState\.modelSyncStatus === 'pending' \|\| preparationState\.modelSyncStatus === 'active'/);
   assert.match(
     source,
-    /subscribeScenePreparation\(\(\) => \{[\s\S]*?preparationState\.completed && !preparationState\.runtime\.forcedSettled[\s\S]*?stopReadinessPolling\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?startReadinessPolling\(\);[\s\S]*?\}\)/,
+    /subscribeScenePreparation\(\(\) => \{[\s\S]*?isScenePreparationSettled\(preparationState\)[\s\S]*?stopReadinessPolling\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?startReadinessPolling\(\);[\s\S]*?\}\)/,
   );
-  assert.match(source, /!preparationState\.completed \|\| preparationState\.runtime\.forcedSettled/);
+  assert.match(source, /!isScenePreparationSettled\(preparationState\)/);
   assert.match(source, /sampleReadiness\(\);\s*startReadinessPolling\(\);/);
   assert.match(source, /unsubscribeScenePreparation\(\);/);
 });

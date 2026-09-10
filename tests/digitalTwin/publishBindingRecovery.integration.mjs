@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { app } from 'electron';
@@ -20,6 +20,11 @@ async function run() {
   const project = { id: '42', projectName: '发布重试工程', currentResourceRevision: '5',
     latestEditorProjectId: '100', latestEditorProjectVersionId: '200', latestEditorProjectVersionNumber: 3 };
   const baseUrl = 'http://127.0.0.1:8765';
+  const expectedMismatchRoot = path.join(workspace, 'never-selected');
+  const beforeEntries = await readdir(workspace);
+  await assert.rejects(service.prepareDataPlatformProjectForPublish(project, baseUrl, workspace, baseUrl, undefined, undefined, expectedMismatchRoot), /发布目录已变化/);
+  assert.equal(assets.getCurrentProjectRoot(), workspace, '目标解析变化不得提前切换活动工程');
+  assert.deepEqual(await readdir(workspace), beforeEntries, '目标解析变化不得创建目录或绑定');
   const prepared = await service.prepareDataPlatformProjectForPublish(project, baseUrl, workspace);
   const metadata = await bindings.updateDataPlatformBinding(prepared.projectRoot, '42', {
     latestVersionId: '201', latestVersionNumber: 4, resourceRevision: '6', entryScenePath: 'Scenes/saved.scene.json',
@@ -55,11 +60,17 @@ async function run() {
   assert.equal(await readFile(bindingFile, 'utf8'), before);
 
   const beforeRoot = assets.getCurrentProjectRoot();
-  await assert.rejects(service.prepareDataPlatformProjectForPublish({ ...project, id: '43' }, baseUrl, workspace), /绑定.*项目|项目.*不一致/);
-  await assert.rejects(service.prepareDataPlatformProjectForPublish(project, 'http://127.0.0.1:8766', workspace), /数据中台.*不一致|绑定.*来源/);
+  await assert.rejects(service.prepareDataPlatformProjectForPublish({ ...project, id: '43' }, baseUrl, workspace, baseUrl, undefined, beforeRoot), /绑定.*项目|项目.*不一致/);
+  await assert.rejects(service.prepareDataPlatformProjectForPublish(project, 'http://127.0.0.1:8766', workspace, baseUrl, undefined, beforeRoot), /数据中台.*不一致|绑定.*来源/);
   assert.equal(assets.getCurrentProjectRoot(), beforeRoot);
   assert.deepEqual(bindings.getCurrentDataPlatformBinding().metadata, metadata);
   assert.equal(await readFile(bindingFile, 'utf8'), before);
+
+  const otherSource = await service.prepareDataPlatformProjectForPublish(project, 'http://127.0.0.1:8766', workspace);
+  assert.notEqual(otherSource.projectRoot, prepared.projectRoot, '独立本地场景选择另一来源不能继承活动资源工程');
+  assert.equal(otherSource.binding.baseUrl, 'http://127.0.0.1:8766');
+  assert.equal(otherSource.binding.workspaceRoot, workspace, '来源隔离不改变共享工作区归属');
+  assert.equal(await readFile(bindingFile, 'utf8'), before, '跨来源准备不能改写旧绑定');
 
   bindings.clearCurrentDataPlatformBinding();
   await assets.activateProjectRoot(workspace);

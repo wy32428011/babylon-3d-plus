@@ -1,5 +1,6 @@
 import type { Vector3Data } from './math';
 import { isAllowedTextureReference } from './textureReferences';
+import { reconcileSceneParameterValues } from '../../../electron/shared/sceneModelInstanceConfig';
 
 export type ModelParameterType = 'number' | 'string' | 'color' | 'boolean' | 'enum' | 'vector3' | 'texture';
 
@@ -231,6 +232,23 @@ export function sanitizeModelParameterValues(
     nextValues[definition.key] = sanitizeModelParameterValue(definition, sourceValues[definition.key]);
     return nextValues;
   }, {});
+}
+
+/** 重载已保存实例：新参数补默认、删除旧 key，同 key 原值不受新版范围/类型约束重写。 */
+export function restoreModelParameterValues(config: ModelParameterConfig, values: unknown): ModelParameterValues {
+  return reconcileSceneParameterValues<ModelParameterValue>(config.parameters, values);
+}
+
+/** 只校验用户实际修改的字段；未编辑值及撤销基线继续保留保存时的内容。 */
+export function sanitizeEditedModelParameterValues(config: ModelParameterConfig, before: ModelParameterValues, after: ModelParameterValues): ModelParameterValues {
+  const next = restoreModelParameterValues(config, before);
+  for (const definition of config.parameters) {
+    if (!Object.hasOwn(after, definition.key)) continue;
+    if (!areModelParameterValuesEqual({ value: before[definition.key] }, { value: after[definition.key] })) {
+      next[definition.key] = sanitizeModelParameterValue(definition, after[definition.key]);
+    }
+  }
+  return next;
 }
 
 export function cloneModelParameterValues(values: ModelParameterValues): ModelParameterValues {

@@ -767,6 +767,35 @@ test('发布恢复按稳定 ID 下载普通模型与组合模型并保留其它�
   });
 });
 
+test('全库同步读取全部分页的普通和组合模型，不按场景引用过滤', async () => {
+  await withEditorRoot(async editorRoot => {
+    const normalIds = Array.from({ length: 101 }, (_, index) => String(index + 1));
+    const comboIds = ['201', '202'];
+    const requests: Array<{ kind: string; pageNum: number }> = [];
+    const downloads: string[] = [];
+    const files = new Map([...normalIds, ...comboIds].map(id => [`/files/${id}.glb`, createGlb(Number(id))]));
+    await executeDataPlatformModelSync({ baseUrl: SOURCE_URL, editorRoot, dependencies: {
+      requestJson: async options => {
+        const body = options.body as { pageNum: number; pageSize: number; excludeIds: unknown[] };
+        assert.deepEqual(body.excludeIds, [], '全库查询不得排除未绑定或未引用资源');
+        const combo = options.endpointPath.includes('combo-models');
+        const ids = combo ? comboIds : normalIds;
+        requests.push({ kind: combo ? 'combo' : 'model', pageNum: body.pageNum });
+        return { success: true, data: { records: ids.slice((body.pageNum - 1) * body.pageSize, body.pageNum * body.pageSize)
+          .map(id => ({ id, modelName: `设备${id}`, comboModelName: `组合${id}`, fileName: `${id}.glb`,
+            fileUrl: `/files/${id}.glb`, revision: '1' })), total: ids.length, pageNum: body.pageNum, pageSize: body.pageSize } };
+      },
+      downloadFile: createDownload(files, downloads),
+      readAssetIndex: readProjectAssetIndexForTest,
+    } });
+    assert.deepEqual(requests, [{ kind: 'model', pageNum: 1 }, { kind: 'model', pageNum: 2 }, { kind: 'combo', pageNum: 1 }]);
+    const index = await readAssetIndex(editorRoot);
+    assert.equal(index.assets.length, 103);
+    assert.equal(downloads.length, 103);
+    for (const asset of index.assets) assert.ok(await fs.stat(asset.path));
+  });
+});
+
 test('发布恢复重新拉取相同修订且不复用被损坏的本地模型', async () => {
   await withEditorRoot(async (editorRoot) => {
     const bytes = createGlb(1);

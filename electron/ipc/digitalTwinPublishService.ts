@@ -1,4 +1,5 @@
 import { assertPublishSceneModelsReady } from './digitalTwinModelRecovery.js';
+import { assertPublishResourceIdentities } from './digitalTwinPublishResourceIdentity.js';
 import { isAuthorizedAssetFile } from './assetRegistry.js';
 import { app } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
@@ -9,7 +10,16 @@ import type {
   DigitalTwinPublishProgress,
   DigitalTwinPublishRequest,
   DigitalTwinPublishResult,
+  DigitalTwinPublishScenePreparationRequest,
+  DigitalTwinPublishScenePreparationResult,
+  ProjectModelAssetEntry,
 } from '../types.js';
+import { capturePublishSceneSnapshots, validatePreparedPublishScenes, assertPublishSceneParameterTemplates, type PublishSceneSnapshot } from './publishSceneSnapshots.js';
+import { planSceneModelUpdates, matchSceneModelUpdates, getSceneEnvironmentUpdateReference } from '../shared/sceneModelUpdatePlan.js';
+import { collectPublishModelReferences } from '../shared/publishModelRecovery.js';
+import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
+import { createDataPlatformModelSourceKey, syncSceneDataPlatformModelAssets, ModelSnapshotIntegrityError, type ModelSnapshotExpectedFile } from './dataPlatformModelIncrementalSync.js';
+import { includeSceneModelPackageVariants } from './sceneModelPackageVariants.js';
 import { authorizeSceneFile } from './assetRegistry.js';
 import {
   clearCurrentDataPlatformBinding,
@@ -26,7 +36,8 @@ import {
 } from './dataPlatformBindingStore.js';
 import { buildDigitalTwinDistPackage } from './digitalTwinDistPackage.js';
 import { collectDigitalTwinResourceIds } from './digitalTwinPublishProtocol.js';
-import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
+import { listIndexedDataPlatformEnvironments, readDataPlatformEnvironmentIndex } from './dataPlatformEnvironmentIndex.js';
+import { executeDataPlatformEnvironmentSync } from './dataPlatformEnvironmentSync.js';
 import { buildDigitalTwinSourcePackage, type DigitalTwinSourcePackageResult } from './digitalTwinSourcePackage.js';
 import { findSyncedImageForReference, isPlatformImageReference } from './dataPlatformImageSync.js';
 import {
@@ -34,6 +45,7 @@ import {
   DigitalTwinUploadClient,
   type DigitalTwinPublishTask,
   type DigitalTwinProjectStatus,
+  type DigitalTwinResourceSnapshot,
 } from './digitalTwinUploadClient.js';
 import {
   getCurrentProjectRoot,
@@ -43,8 +55,10 @@ import {
   setSharedProjectSkyboxRoot,
 } from './projectAssetStore.js';
 import { createDeploymentSkyboxValidationCache, loadDeploymentSkyboxCacheContext } from './deploymentSkyboxCache.js';
-import { resolveDataPlatformPublishProjectContext } from './dataPlatformIpc.js';
-import { prepareDataPlatformProjectForPublish, resolveDataPlatformPublishProjectRoot } from './dataPlatformProjectService.js';
+import { readDataPlatformConfig, requestDataPlatformProject, resolveDataPlatformPublishProjectContext } from './dataPlatformIpc.js';
+import { prepareDataPlatformProjectForPublish } from './dataPlatformProjectService.js';
+import { resolveDataPlatformProjectLocation } from './dataPlatformProjectLocation.js';
+import { getScenePublishScope, setBoundScenePublishScope } from './scenePublishScope.js';
 import {
   buildDigitalTwinRuntimeConfigSavePayload,
   createDefaultDigitalTwinAllowedParentOrigins,
@@ -62,33 +76,213 @@ const CONFIRMATION_CODES = new Set([
 const CONFLICT_CODES = new Set([
   'DIGITAL_TWIN_VERSION_CONFLICT',
   'DIGITAL_TWIN_RESOURCE_REVISION_CONFLICT',
+  'DIGITAL_TWIN_RESOURCE_SNAPSHOT_CONFLICT',
 ]);
 
 export type DigitalTwinPublishProgressHandler = (progress: DigitalTwinPublishProgress) => void;
 
-/** 查询当前绑定与远端版本；未绑定场景可按可信项目详情预览发布目标。 */
+type PublishTarget = {
+  projectRoot: string;
+  metadata: DataPlatformBindingMetadata;
+  target?: Awaited<ReturnType<typeof resolveDataPlatformPublishProjectContext>>;
+  generation: number;
+  bindingSnapshot: string;
+  expiresAt: number;
+};
+const publishTargets = new Map<string, PublishTarget>();
+type ScenePreparation = { targetToken: string; expiresAt: number; scenes: PublishSceneSnapshot[];
+  resourceRevision: string; resourceSnapshotToken?: string; resourceSnapshot?: DigitalTwinResourceSnapshot };
+const scenePreparations = new Map<string, ScenePreparation>();
+
+function snapshotModelFiles(snapshot?: DigitalTwinResourceSnapshot): ModelSnapshotExpectedFile[] | undefined {
+  return snapshot?.resources.flatMap(resource => resource.kind === 'environment' ? [] : resource.files.map(file => ({
+    kind: resource.kind as 'model' | 'combo', resourceId: resource.resourceId, role: file.role,
+    fileUrl: file.fileUrl, sha256: file.sha256, size: file.size,
+  })));
+}
+
+async function synchronizeSnapshotModels(baseUrl: string, sharedResourcesRoot: string,
+  resources: Array<{ kind: 'model' | 'combo'; resourceId: string }>, signal: AbortSignal, snapshot?: DigitalTwinResourceSnapshot) {
+  try {
+    return await syncSceneDataPlatformModelAssets({ baseUrl, sharedResourcesRoot, resources, signal, expectedFiles: snapshotModelFiles(snapshot) });
+  } catch (error) {
+    if (error instanceof ModelSnapshotIntegrityError) throw new DigitalTwinApiError(error.code, error.message, null, 409);
+    throw error;
+  }
+}
+
+/** 捕获全部 SOURCE 场景与中台资源基线，之后由 renderer 执行统一替换和实际运行时烘焙。 */
+export async function prepareDigitalTwinPublishSceneSnapshots(request: DigitalTwinPublishScenePreparationRequest,
+  signal: AbortSignal): Promise<DigitalTwinPublishScenePreparationResult> {
+  if (!request || typeof request.targetToken !== 'string' || !REQUEST_ID_PATTERN.test(request.requestId)) throw new Error('发布场景准备请求无效。');
+  const target = await resolveDigitalTwinPublishTarget(request.targetToken, request.projectId ?? null);
+  const entryFile = target.metadata.entryScenePath ? path.resolve(target.projectRoot, target.metadata.entryScenePath) : null;
+  const scenes = await capturePublishSceneSnapshots(target.projectRoot, entryFile, request.sceneContent, signal);
+  const client = new DigitalTwinUploadClient(target.metadata.baseUrl);
+  let resourceRevision: string;
+  let resourceSnapshotToken: string | undefined;
+  let resourceSnapshot: DigitalTwinResourceSnapshot | undefined;
+  try {
+    const snapshot = await client.captureResourceSnapshot(target.metadata.projectId, collectDigitalTwinResourceIds(scenes.map(s => s.sceneContent)), signal);
+    resourceRevision = snapshot.resourceRevision;
+    resourceSnapshotToken = snapshot.resourceSnapshotToken;
+    resourceSnapshot = snapshot;
+  } catch (error) {
+    // 旧服务器没有快照端点时仍严格检查全局修订；业务错误不能退化为兼容路径。
+    if (!(error instanceof DigitalTwinApiError) || error.httpStatus !== 404) throw error;
+    resourceRevision = (await requestDataPlatformProject(target.metadata.baseUrl, target.metadata.projectId, signal)).currentResourceRevision;
+  }
+  if (resourceSnapshot) {
+    await synchronizeSnapshotModels(target.metadata.baseUrl, resolveDataPlatformBindingSharedResourcesRoot(target.projectRoot, target.metadata),
+      resourceSnapshot.resources.flatMap(resource => resource.kind === 'environment' ? []
+        : [{ kind: resource.kind as 'model' | 'combo', resourceId: resource.resourceId }]), signal, resourceSnapshot);
+  }
+  await assertPublishTargetCurrent(target);
+  signal.throwIfAborted();
+  for (const [id, item] of scenePreparations) if (item.expiresAt < Date.now() || item.targetToken === request.targetToken) scenePreparations.delete(id);
+  // 发布任务全局串行，只保留最近一份大型场景快照，避免闲置预检长期占用堆内存。
+  scenePreparations.clear();
+  const preparationId = randomUUID();
+  scenePreparations.set(preparationId, { targetToken: request.targetToken, scenes, resourceRevision, resourceSnapshotToken, resourceSnapshot, expiresAt: Date.now() + 30 * 60_000 });
+  return { preparationId, scenes: scenes.map(({ sceneId, name, sceneContent, isEntry }) => ({ sceneId, name, sceneContent, isEntry })) };
+}
+
+async function validatePublishScenePreparation(request: DigitalTwinPublishRequest, target: PublishTarget, signal: AbortSignal) {
+  if (!request.preparationId) {
+    if (request.preparedScenes !== undefined) throw new Error('发布场景准备凭据缺失。');
+    return undefined;
+  }
+  const preparation = scenePreparations.get(request.preparationId);
+  if (!preparation || preparation.expiresAt < Date.now() || preparation.targetToken !== request.targetToken) throw new Error('发布场景准备已失效，请重试。');
+  const entry = preparation.scenes.find(s => s.isEntry)!;
+  if (!request.preparedScenes || request.preparedScenes.find(s => s.sceneId === entry.sceneId)?.sceneContent !== request.sceneContent) throw new Error('入口场景与发布准备快照不一致。');
+  const overlays = await validatePreparedPublishScenes(preparation.scenes, request.preparedScenes, target.projectRoot,
+    entry.sourcePath ?? path.join(target.projectRoot, 'Scenes', '__entry_prepared__.scene.json'), signal);
+  const contents = [...overlays.values()];
+  if (JSON.stringify(collectDigitalTwinResourceIds(contents)) !== JSON.stringify(collectDigitalTwinResourceIds(preparation.scenes.map(s => s.sceneContent)))) throw new Error('发布准备期间模型资源身份集合发生变化，请重新准备。');
+  for (const content of contents) await assertPublishSceneModelsReady(content, signal, {
+    projectRoot: target.projectRoot,
+    sharedResourcesRoot: resolveDataPlatformBindingSharedResourcesRoot(target.projectRoot, target.metadata),
+    legacyWorkspaceRoot: resolveDataPlatformBindingWorkspaceRoot(target.projectRoot, target.metadata),
+  });
+  const client = new DigitalTwinUploadClient(target.metadata.baseUrl);
+  // 不能只相信 renderer 回传的版本号：再次使用固定缓存完整校验确认所有模型实际已替换。
+  const sourceKey = createDataPlatformModelSourceKey(target.metadata.baseUrl);
+  const plans = contents.map(content => planSceneModelUpdates(JSON.parse(content).scene, sourceKey, { allowSourceRebind: true }));
+  const resources = [...new Map(plans.flat().map(item => [`${item.kind}:${item.resourceId}`, item])).values()];
+  const assets = await synchronizeSnapshotModels(target.metadata.baseUrl,
+    resolveDataPlatformBindingSharedResourcesRoot(target.projectRoot, target.metadata), resources, signal, preparation.resourceSnapshot);
+  for (let index = 0; index < contents.length; index++) {
+    const sceneAssets: ProjectModelAssetEntry[] = [];
+    for (const item of plans[index]) sceneAssets.push(...await includeSceneModelPackageVariants(item,
+      assets.filter(asset => getClickEventModelResourceKey(asset.sourceUrl)?.startsWith(`${item.kind}:${item.resourceId}:`)), signal));
+    const expected = new Map(matchSceneModelUpdates(plans[index], sceneAssets).flatMap(item => item.sourceUrls.map(url => [url, item.asset] as const)));
+    const references = collectPublishModelReferences(JSON.parse(contents[index]).scene);
+    for (const asset of [...references.models.map(reference => reference.asset), ...references.devices]) {
+      const latest = expected.get(String(asset.sourceUrl));
+      if (latest && (asset.assetRevision !== latest.assetRevision || asset.sourceUrl !== latest.sourceUrl)) {
+        throw new DigitalTwinApiError('DIGITAL_TWIN_RESOURCE_SNAPSHOT_CONFLICT', '发布场景仍含旧模型版本，正在重新对齐。', null, 409);
+      }
+    }
+    assertPublishSceneParameterTemplates(preparation.scenes[index].sceneContent, contents[index], expected);
+  }
+  const environments = contents.flatMap(content => {
+    const scene = JSON.parse(content).scene;
+    const reference = getSceneEnvironmentUpdateReference(scene);
+    return reference ? [{ resourceId: reference.resourceId, environment: scene.sceneSettings.environment }] : [];
+  });
+  const sharedRoot = resolveDataPlatformBindingSharedResourcesRoot(target.projectRoot, target.metadata);
+  for (const resourceId of new Set(environments.map(item => item.resourceId))) {
+    await executeDataPlatformEnvironmentSync({ baseUrl: target.metadata.baseUrl, editorRoot: sharedRoot,
+      contextKey: `publish:${target.metadata.projectId}`, localSceneEnvironment: { resourceId }, signal });
+  }
+  if (environments.length) {
+    const index = await readDataPlatformEnvironmentIndex(sharedRoot);
+    const loaded = await listIndexedDataPlatformEnvironments(sharedRoot,
+      { ...index, entries: index.entries.filter(entry => entry.sourceKey === sourceKey && environments.some(item => item.resourceId === entry.resourceId)) });
+    if (loaded.errors.length) throw new Error(`发布环境缓存校验失败：${loaded.errors.join('；')}`);
+    for (const { resourceId, environment } of environments) {
+      const latest = loaded.assets.find(asset => asset.dataPlatformSourceKey === sourceKey && asset.dataPlatformResourceId === resourceId);
+      if (!latest || environment.dataPlatformRevision !== latest.dataPlatformRevision
+        || !isSameFilePath(environment.packagePath, latest.packagePath ?? latest.path)) {
+        throw new DigitalTwinApiError('DIGITAL_TWIN_RESOURCE_SNAPSHOT_CONFLICT', '发布场景仍含旧环境版本，正在重新对齐。', null, 409);
+      }
+      if (preparation.resourceSnapshot) {
+        const files = preparation.resourceSnapshot.resources.find(resource => resource.kind === 'environment' && resource.resourceId === resourceId)?.files.filter(file => file.role === 'model');
+        if (files?.length !== 1 || latest.fileSha256 !== files[0].sha256 || String(latest.fileSizeBytes) !== files[0].size) {
+          throw new DigitalTwinApiError('DIGITAL_TWIN_RESOURCE_SNAPSHOT_CONFLICT', '环境模型实际文件与服务端快照摘要不一致，正在重新对齐。', null, 409);
+        }
+      }
+    }
+  }
+  if (preparation.resourceSnapshotToken) await client.validateResourceSnapshot(target.metadata.projectId, preparation.resourceSnapshotToken, signal);
+  else if ((await requestDataPlatformProject(target.metadata.baseUrl, target.metadata.projectId, signal)).currentResourceRevision !== preparation.resourceRevision) {
+    throw new DigitalTwinApiError('DIGITAL_TWIN_RESOURCE_REVISION_CONFLICT', '数据中台资源在场景准备期间发生变化，正在重新对齐。', null, 409);
+  }
+  await assertPublishTargetCurrent(target);
+  // 仅资源修订完成验证后推进；工程版本基线必须保留原预检值。
+  target.metadata = { ...target.metadata, resourceRevision: preparation.resourceRevision };
+  return { preparation, overlays, entry };
+}
+
+/** 预检只读；保存主进程确认过的目标和版本，不向 renderer 接受路径或服务地址。 */
 export async function getDigitalTwinPublishContext(
   selectedProjectId: string | null = null,
   signal = new AbortController().signal,
 ): Promise<DigitalTwinPublishContext> {
+  const generation = getScenePublishScope().generation;
   const current = await resolveCurrentDataPlatformBinding();
-  if (current) {
-    if (selectedProjectId && selectedProjectId !== current.metadata.projectId) {
-      throw new Error('当前场景已绑定数据中台业务项目，不能在发布时切换项目。');
-    }
-    const client = new DigitalTwinUploadClient(current.metadata.baseUrl);
-    const remote = await client.projectStatus(current.metadata.projectId, signal);
-    return createPublishContext(current.projectRoot, current.metadata, remote, false);
+  if (current && selectedProjectId && selectedProjectId !== current.metadata.projectId) {
+    throw new Error('当前场景已绑定数据中台业务项目，不能在发布时切换项目。');
   }
-  if (!selectedProjectId) return emptyPublishContext();
-
-  const target = await resolveDataPlatformPublishProjectContext(selectedProjectId);
-  const remote = await new DigitalTwinUploadClient(target.baseUrl).projectStatus(target.project.id, signal);
-  const projectRoot = resolveDataPlatformPublishProjectRoot(target.workspaceRoot, target.project.id);
+  if (!current && !selectedProjectId) return emptyPublishContext();
+  const target = current ? undefined : await resolveDataPlatformPublishProjectContext(selectedProjectId!);
+  const baseUrl = current?.metadata.baseUrl ?? target!.baseUrl;
+  const projectId = current?.metadata.projectId ?? target!.project.id;
+  const remote = await new DigitalTwinUploadClient(baseUrl).projectStatus(projectId, signal);
+  const projectRoot = current?.projectRoot ?? (await resolveDataPlatformProjectLocation({
+    workspaceRoot: target!.workspaceRoot, baseUrl, projectId,
+  })).projectRoot;
   const existingBinding = await readDataPlatformBinding(projectRoot);
-  if (existingBinding) assertDataPlatformBindingTarget(existingBinding, target.project.id, target.baseUrl);
-  const metadata = existingBinding ?? createPublishMetadata(target.project, target.baseUrl, target.webBaseUrl, target.workspaceRoot, remote);
-  return createPublishContext(projectRoot, metadata, remote, false);
+  if (existingBinding) assertDataPlatformBindingTarget(existingBinding, projectId, baseUrl);
+  const metadata = current?.metadata ?? existingBinding ?? createPublishMetadata(target!.project, baseUrl, target!.webBaseUrl, target!.workspaceRoot, remote);
+  const ticket: PublishTarget = {
+    projectRoot, metadata: structuredClone(metadata), target, generation,
+    bindingSnapshot: JSON.stringify(existingBinding), expiresAt: Date.now() + 30 * 60_000,
+  };
+  await assertPublishTargetCurrent(ticket);
+  for (const [key, value] of publishTargets) if (value.expiresAt < Date.now()) publishTargets.delete(key);
+  while (publishTargets.size >= 32) publishTargets.delete(publishTargets.keys().next().value!);
+  const targetToken = randomUUID();
+  publishTargets.set(targetToken, ticket);
+  return { ...createPublishContext(projectRoot, metadata, remote, false), targetToken };
+}
+
+async function assertPublishTargetCurrent(target: PublishTarget): Promise<void> {
+  if (target.expiresAt < Date.now() || target.generation !== getScenePublishScope().generation) {
+    throw new Error('场景或发布目标已变化，请重新打开发布窗口进行预检。');
+  }
+  if (target.target) {
+    const config = await readDataPlatformConfig();
+    if (config.baseUrl !== target.target.baseUrl || config.webBaseUrl !== target.target.webBaseUrl
+      || !isSameFilePath(config.workspaceRoot, target.target.workspaceRoot)) {
+      throw new Error('数据中台配置已变化，请重新选择发布目标。');
+    }
+  }
+  const binding = await readDataPlatformBinding(target.projectRoot);
+  if (JSON.stringify(binding) !== target.bindingSnapshot || target.generation !== getScenePublishScope().generation) {
+    throw new Error('场景或本地工程绑定已变化，请重新进行发布预检。');
+  }
+}
+
+export async function resolveDigitalTwinPublishTarget(targetToken: string | undefined, projectId: string | null): Promise<PublishTarget> {
+  if (typeof targetToken !== 'string' || !publishTargets.has(targetToken)) {
+    throw new Error('发布预检已失效，请重新打开发布窗口。');
+  }
+  const target = publishTargets.get(targetToken)!;
+  if (projectId && target.metadata.projectId !== projectId) throw new Error('发布项目与已确认目标不一致。');
+  await assertPublishTargetCurrent(target);
+  return target;
 }
 
 type ResolvedDataPlatformBinding = {
@@ -98,6 +292,14 @@ type ResolvedDataPlatformBinding = {
 
 /** 优先使用当前内存绑定；应用重启后可从当前项目目录恢复持久化绑定。 */
 async function resolveCurrentDataPlatformBinding(): Promise<ResolvedDataPlatformBinding | null> {
+  const scope = getScenePublishScope();
+  if (scope.kind === 'local-file') return null;
+  if (scope.kind === 'bound-project') {
+    const metadata = await readDataPlatformBinding(scope.projectRoot!);
+    if (getScenePublishScope().generation !== scope.generation) throw new Error('场景已切换，请重新发布。');
+    if (!metadata) throw new Error('场景所属工程绑定已丢失，请重新打开工程。');
+    return { projectRoot: scope.projectRoot!, metadata };
+  }
   const currentProjectRoot = getCurrentProjectRoot();
   const current = getCurrentDataPlatformBinding();
   if (current && (!currentProjectRoot || isSameFilePath(current.projectRoot, currentProjectRoot))) return current;
@@ -146,8 +348,8 @@ function createPublishMetadata(
 }
 
 /** 发布活动期间只读取本地绑定，避免网络异常掩盖全局发布锁。 */
-export function getLocalDigitalTwinPublishContext(publishActive: boolean): DigitalTwinPublishContext {
-  const current = getCurrentDataPlatformBinding();
+export function getLocalDigitalTwinPublishContext(publishActive: boolean, targetToken?: string): DigitalTwinPublishContext {
+  const current = (targetToken ? publishTargets.get(targetToken) : null) ?? getCurrentDataPlatformBinding();
   if (!current) return emptyPublishContext(publishActive);
   const metadata = current.metadata;
   const dataPlatformOrigin = resolveDataPlatformParentOrigin(metadata.baseUrl);
@@ -182,52 +384,51 @@ export async function publishDigitalTwin(
 ): Promise<DigitalTwinPublishResult> {
   const validated = validatePublishRequest(request);
   await assertPublishSceneModelsReady(validated.sceneContent, signal);
-  let current = await resolveCurrentDataPlatformBinding();
-  let client: DigitalTwinUploadClient;
-  let remote: DigitalTwinProjectStatus;
-  let context: DigitalTwinPublishContext;
-  if (current) {
-    if (validated.projectId && validated.projectId !== current.metadata.projectId) {
-      throw new Error('当前场景已绑定数据中台业务项目，不能在发布时切换项目。');
-    }
-    client = new DigitalTwinUploadClient(current.metadata.baseUrl);
-    remote = await client.projectStatus(current.metadata.projectId, signal);
-    context = createPublishContext(current.projectRoot, current.metadata, remote, true);
-  } else {
-    if (!validated.projectId) throw new Error('当前场景未绑定数据中台业务项目，请先选择发布项目。');
-    const target = await resolveDataPlatformPublishProjectContext(validated.projectId);
-    client = new DigitalTwinUploadClient(target.baseUrl);
-    remote = await client.projectStatus(target.project.id, signal);
-    const previewProjectRoot = resolveDataPlatformPublishProjectRoot(target.workspaceRoot, target.project.id);
-    const existingBinding = await readDataPlatformBinding(previewProjectRoot);
-    if (existingBinding) assertDataPlatformBindingTarget(existingBinding, target.project.id, target.baseUrl);
-    const previewMetadata = existingBinding ?? createPublishMetadata(target.project, target.baseUrl, target.webBaseUrl, target.workspaceRoot, remote);
-    context = createPublishContext(previewProjectRoot, previewMetadata, remote, true);
-    if (context.overwriteConfirmationRequired && !validated.overwriteExisting) {
-      return createTerminalResult(validated.requestId, 'confirmation-required', {
-        errorCode: 'DIGITAL_TWIN_OVERWRITE_CONFIRM_REQUIRED',
-        message: '目标业务项目已经有当前数字孪生工程，请确认覆盖后再发布。',
-      });
-    }
-    const prepared = await prepareDataPlatformProjectForPublish({
-      ...target.project,
-      latestEditorProjectId: remote.editorProjectId,
-      latestEditorProjectVersionId: remote.latestVersionId,
-      latestEditorProjectVersionNumber: remote.latestVersionNumber,
-    }, target.baseUrl, target.workspaceRoot, target.webBaseUrl, signal);
-    current = { projectRoot: prepared.projectRoot, metadata: prepared.binding };
-    if (!current || current.metadata.projectId !== validated.projectId) {
-      throw new Error('当前场景绑定数据中台业务项目失败。');
-    }
-    context = createPublishContext(current.projectRoot, current.metadata, remote, true);
+  if (!validated.targetToken && !validated.projectId && !await resolveCurrentDataPlatformBinding()) {
+    throw new Error('当前场景未绑定数据中台业务项目，请先选择发布项目。');
   }
+  // 内部调用兼容旧测试；真实 IPC 始终要求预检票据。
+  const token = validated.targetToken ?? (await getDigitalTwinPublishContext(validated.projectId, signal)).targetToken;
+  const selected = await resolveDigitalTwinPublishTarget(token, validated.projectId);
+  let prepared: Awaited<ReturnType<typeof validatePublishScenePreparation>>;
+  try { prepared = await validatePublishScenePreparation(validated, selected, signal); }
+  catch (error) {
+    if (error instanceof DigitalTwinApiError && CONFLICT_CODES.has(error.code)) return createTerminalResult(validated.requestId, 'conflict', { errorCode: error.code, message: error.message, errorData: error.data });
+    throw error;
+  }
+  emit(onProgress, validated.requestId, 'saving', '正在核验目标中台的模型与环境资源 ID…', 0);
+  await assertPublishResourceIdentities([validated.sceneContent], selected.metadata.baseUrl, signal);
+  await assertPublishSceneModelsReady(validated.sceneContent, signal, {
+    projectRoot: selected.projectRoot,
+    legacyWorkspaceRoot: resolveDataPlatformBindingWorkspaceRoot(selected.projectRoot, selected.metadata),
+    sharedResourcesRoot: resolveDataPlatformBindingSharedResourcesRoot(selected.projectRoot, selected.metadata),
+  });
+  const client = new DigitalTwinUploadClient(selected.metadata.baseUrl);
+  const remote = await client.projectStatus(selected.metadata.projectId, signal);
+  await assertPublishTargetCurrent(selected);
+  let current = { projectRoot: selected.projectRoot, metadata: selected.metadata };
+  const context = createPublishContext(current.projectRoot, current.metadata, remote, true);
   if (context.overwriteConfirmationRequired && !validated.overwriteExisting) {
     return createTerminalResult(validated.requestId, 'confirmation-required', {
       errorCode: 'DIGITAL_TWIN_OVERWRITE_CONFIRM_REQUIRED',
       message: '目标业务项目已经有当前数字孪生工程，请确认覆盖后再发布。',
     });
   }
+  if (selected.target) {
+    const target = selected.target;
+    const prepared = await prepareDataPlatformProjectForPublish({
+      ...target.project,
+      latestEditorProjectId: selected.metadata.editorProjectId,
+      latestEditorProjectVersionId: selected.metadata.latestVersionId,
+      latestEditorProjectVersionNumber: selected.metadata.latestVersionNumber,
+    }, target.baseUrl, target.workspaceRoot, target.webBaseUrl, signal, undefined, selected.projectRoot);
+    if (!isSameFilePath(prepared.projectRoot, selected.projectRoot)) throw new Error('发布目录已变化，请重新预检。');
+    selected.bindingSnapshot = JSON.stringify(prepared.binding);
+    // 保留用户预检时确认的基线，远端新增版本仍按冲突处理。
+    current = { projectRoot: prepared.projectRoot, metadata: selected.metadata };
+  }
 
+  await assertPublishTargetCurrent(selected);
   if (!context.versionConflict || validated.forceOverwrite) {
     emit(onProgress, validated.requestId, 'saving', '正在保存大屏嵌入配置…', 1);
     const savedRuntimeConfig = await client.saveRuntimeConfig(
@@ -240,9 +441,20 @@ export async function publishDigitalTwin(
     }
   }
 
+  await assertPublishTargetCurrent(selected);
   emit(onProgress, validated.requestId, 'saving', '正在保存当前场景…', 2);
-  const savedScene = await saveCurrentScene(current.projectRoot, current.metadata.entryScenePath, validated.sceneContent);
-  await updateDataPlatformBinding(current.projectRoot, current.metadata.projectId, { entryScenePath: savedScene.entryScenePath });
+  if (prepared) await validatePreparedPublishScenes(prepared.preparation.scenes, validated.preparedScenes!, current.projectRoot,
+    prepared.entry.sourcePath ?? path.join(current.projectRoot, 'Scenes', '__entry_prepared__.scene.json'), signal);
+  const savedScene = await saveCurrentScene(current.projectRoot, current.metadata.entryScenePath, validated.sceneContent,
+    prepared ? { diskHash: prepared.entry.diskHash } : undefined);
+  const savedBinding = await updateDataPlatformBinding(current.projectRoot, current.metadata.projectId, { entryScenePath: savedScene.entryScenePath,
+    ...(prepared ? { resourceRevision: current.metadata.resourceRevision } : {}) });
+  selected.bindingSnapshot = JSON.stringify(savedBinding);
+  if (prepared) {
+    const previousEntryPath = prepared.entry.sourcePath ?? path.join(current.projectRoot, 'Scenes', '__entry_prepared__.scene.json');
+    prepared.overlays.delete(previousEntryPath);
+    prepared.overlays.set(savedScene.filePath, validated.sceneContent);
+  }
 
   const workspaceRoot = resolveDataPlatformBindingWorkspaceRoot(current.projectRoot, current.metadata);
   const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
@@ -276,6 +488,7 @@ export async function publishDigitalTwin(
       skyboxCacheContext,
       skyboxValidationCache,
       skipCadReferences: true,
+      preparedSceneContents: prepared?.overlays,
       isPlatformImageReference,
       findSyncedImageForReference,
       onProgress: (detail, completedFiles, totalFiles) => {
@@ -318,6 +531,7 @@ export async function publishDigitalTwin(
       ),
     });
     appendUniqueWarnings(warnings, distPackage.warnings);
+    await assertPublishResourceIdentities(sourcePackage.sceneContents, current.metadata.baseUrl, signal);
     const resourceIds = collectDigitalTwinResourceIds(sourcePackage.sceneContents);
     await validateDataPlatformEnvironmentPublishReferences(
       workspaceRoot,
@@ -326,6 +540,7 @@ export async function publishDigitalTwin(
       signal,
     );
 
+    await assertPublishTargetCurrent(selected);
     emit(onProgress, validated.requestId, 'prepare', '正在创建数据中台发布任务…', 50);
     try {
       remoteTask = await client.prepare({
@@ -340,6 +555,7 @@ export async function publishDigitalTwin(
         entrySceneName: sourcePackage.entrySceneName,
         manifestJson: sourcePackage.manifestJson,
         resourceRevision: current.metadata.resourceRevision,
+        resourceSnapshotToken: prepared?.preparation.resourceSnapshotToken,
         confirmResourceBindings: validated.confirmResourceBindings,
         ...resourceIds,
         sourcePackage: {
@@ -393,6 +609,7 @@ export async function publishDigitalTwin(
       emit(onProgress, validated.requestId, 'upload-dist', '正在上传 dist 包…', 69 + ratio * 16, sourceUploaded + distUploaded, totalUploadBytes);
     });
 
+    await assertPublishTargetCurrent(selected);
     emit(onProgress, validated.requestId, 'commit', '正在创建版本并切换线上发布…', 87, totalUploadBytes, totalUploadBytes);
     commitStarted = true;
     let completed: DigitalTwinPublishTask;
@@ -439,6 +656,8 @@ export async function publishDigitalTwin(
       warnings.push(`发布已完成，但刷新本地项目绑定失败：${error instanceof Error ? error.message : String(error)}`);
     }
 
+    if (getScenePublishScope().generation === selected.generation) setBoundScenePublishScope(current.projectRoot, savedScene.filePath);
+    publishTargets.delete(token!);
     emit(onProgress, validated.requestId, 'completed', '数字孪生工程发布完成。', 100, totalUploadBytes, totalUploadBytes);
     return createTerminalResult(validated.requestId, 'completed', {
       message: '数字孪生工程发布完成。',
@@ -463,6 +682,7 @@ export async function publishDigitalTwin(
     emit(onProgress, validated.requestId, 'failed', error instanceof Error ? error.message : String(error), 0);
     throw error;
   } finally {
+    if (validated.preparationId) scenePreparations.delete(validated.preparationId);
     await fs.rm(taskRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
@@ -583,6 +803,7 @@ async function saveCurrentScene(
   projectRoot: string,
   entryScenePath: string | null,
   sceneContent: string,
+  expected?: { diskHash: string | null },
 ): Promise<{ filePath: string; entryScenePath: string }> {
   if (Buffer.byteLength(sceneContent, 'utf8') > MAX_SCENE_CONTENT_BYTES) throw new Error('当前场景超过 64 MiB 发布上限。');
   let parsed: unknown;
@@ -602,6 +823,11 @@ async function saveCurrentScene(
   const temporaryPath = `${filePath}.publish-save-${randomUUID()}`;
   await fs.writeFile(temporaryPath, `${JSON.stringify(parsed, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
   try {
+    if (expected) {
+      const current = await fs.readFile(filePath).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return null; throw error; });
+      const actualHash = current === null ? null : createHash('sha256').update(new TextDecoder('utf-8', { fatal: true }).decode(current)).digest('hex');
+      if (actualHash !== expected.diskHash) throw new Error('入口场景在发布准备后发生变化，已保留最新保存内容，请重新发布。');
+    }
     await replaceFile(temporaryPath, filePath);
   } finally {
     await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
@@ -653,6 +879,9 @@ function validatePublishRequest(request: DigitalTwinPublishRequest): DigitalTwin
   if (typeof request.remark !== 'string' || request.remark.trim().length > 512) throw new Error('发布备注不能超过 512 个字符。');
   if (typeof request.sceneContent !== 'string' || !request.sceneContent) throw new Error('当前场景内容不能为空。');
   return {
+    targetToken: request.targetToken,
+    preparationId: request.preparationId,
+    preparedScenes: request.preparedScenes,
     requestId: request.requestId,
     publishName: request.publishName.trim(),
     remark: request.remark.trim(),

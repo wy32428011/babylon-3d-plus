@@ -14,6 +14,28 @@ import { relocateDataPlatformScene } from '../../electron/ipc/dataPlatformSceneR
 const require = createRequire(import.meta.url);
 const NO_SKYBOX_CACHE = { getSharedProjectSkyboxRoot: () => null };
 
+test('SOURCE使用全部已准备场景并保留原文件，新增未准备场景拒绝混入', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'zending-prepared-source-'));
+  const projectRoot = path.join(root, 'project');
+  const entry = path.join(projectRoot, 'Scenes', 'main.scene.json');
+  const second = path.join(projectRoot, 'Scenes', 'second.scene.json');
+  const content = (name: string) => JSON.stringify({ version: 5, scene: { name, entityIds: [], entities: {}, sceneSettings: {} } });
+  try {
+    await mkdir(path.dirname(entry), { recursive: true });
+    await writeFile(entry, content('old main')); await writeFile(second, content('old second'));
+    const options = { projectRoot, sharedResourcesRoot: path.join(root, 'shared'), entrySceneFilePath: entry,
+      outputRoot: path.join(root, 'output'), manifest: { projectId: '42', projectName: '准备场景', editorProjectId: null, baseVersionId: null, resourceRevision: '7' },
+      signal: new AbortController().signal, isPlatformImageReference: () => false, findSyncedImageForReference: async () => null,
+      skyboxCacheDependencies: NO_SKYBOX_CACHE, preparedSceneContents: new Map([[entry, content('new main')], [second, content('new second')]]) };
+    const result = await buildDigitalTwinSourcePackage(options);
+    assert.deepEqual(result.sceneContents.map(c => JSON.parse(c).scene.name).sort(), ['new main', 'new second']);
+    assert.equal(JSON.parse(result.entrySceneContent).scene.name, 'new main');
+    assert.equal(await readFile(second, 'utf8'), content('old second'));
+    await writeFile(path.join(projectRoot, 'Scenes', 'late.scene.json'), content('late'));
+    await assert.rejects(buildDigitalTwinSourcePackage(options), /场景集合.*变化/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('SOURCE往返保留全部场景内容和有效烘焙，资源搬迁不应使阴影过期', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'zending-source-shadow-roundtrip-'));
   const projectRoot = path.join(root, 'original');

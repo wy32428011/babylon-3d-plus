@@ -10,6 +10,9 @@ import {
   DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO,
 } from '../model/sceneUnits';
 
+// 环境读取不消费设备参数元数据，兼容主进程原始资产与编辑器资产。
+type EnvironmentAsset = Omit<AssetEntry, 'parameterConfig' | 'dataDrivenConfig' | 'builtInSlotBindingConfig'>;
+
 type ModelPackageVariant = {
   name: string;
   path: string;
@@ -31,7 +34,7 @@ function createVersionedEnvironmentSourceUrl(sourceUrl: string, assetRevision: s
 }
 
 /** 根据模型资产生成最小可用的环境效果变体，保证非模型包资产也能作为环境底座使用。 */
-export function createFallbackEnvironmentVariant(asset: AssetEntry): SceneEnvironmentVariant {
+export function createFallbackEnvironmentVariant(asset: EnvironmentAsset): SceneEnvironmentVariant {
   return {
     name: asset.displayName?.trim() || asset.name.replace(/\.(gltf|glb)$/i, '') || '默认预设',
     sourcePath: asset.path,
@@ -41,14 +44,14 @@ export function createFallbackEnvironmentVariant(asset: AssetEntry): SceneEnviro
 
 /** 将项目模型资产和包内变体转换为场景级环境配置，并复用 SceneDocument 的安全归一化规则。 */
 export function createEnvironmentFromAsset(
-  asset: AssetEntry,
+  asset: EnvironmentAsset,
   variants: SceneEnvironmentVariant[],
   previousEnvironment?: SceneEnvironmentSettings | null,
 ): SceneEnvironmentSettings | null {
   const sourceVariants = variants.length > 0 ? variants : [createFallbackEnvironmentVariant(asset)];
   const unitInfo = createModelLengthUnitInfo(
-    previousEnvironment?.lengthUnit
-      ?? asset.lengthUnit
+    asset.lengthUnit
+      ?? previousEnvironment?.lengthUnit
       ?? DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO.lengthUnit,
   );
   const safeVariants = sourceVariants.map((variant) => ({
@@ -97,7 +100,7 @@ export function createEnvironmentFromAsset(
 }
 
 /** 读取模型包内的环境效果变体；读取失败交给调用方展示具体错误。 */
-export async function loadEnvironmentVariantsFromAsset(asset: AssetEntry): Promise<SceneEnvironmentVariant[]> {
+export async function loadEnvironmentVariantsFromAsset(asset: EnvironmentAsset): Promise<SceneEnvironmentVariant[]> {
   if (!asset.packagePath || !window.editorApi?.listModelPackageVariants) {
     return [createFallbackEnvironmentVariant(asset)];
   }
@@ -119,7 +122,7 @@ export async function loadEnvironmentVariantsFromAsset(asset: AssetEntry): Promi
 
 /** 从项目环境资产创建完整环境配置，非 environment 分库资产直接拒绝，形成跨库防御边界。 */
 export async function loadEnvironmentFromAsset(
-  asset: AssetEntry,
+  asset: EnvironmentAsset,
   previousEnvironment?: SceneEnvironmentSettings | null,
 ): Promise<SceneEnvironmentSettings | null> {
   if (asset.libraryKind !== 'environment') return null;

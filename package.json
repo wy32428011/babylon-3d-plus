@@ -1,7 +1,7 @@
 {
   "name": "zending-3d-editor",
   "productName": "ZENDING 3D EDITOR",
-  "version": "0.3.28",
+  "version": "0.3.29",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",
@@ -66,7 +66,8 @@
     "smoke:data-platform-skybox": "npm run build && npm run smoke:data-platform-skybox:built",
     "smoke:data-platform": "npm run build && npm run test:data-platform-relink && node scripts/smoke-data-platform-project.mjs && npm run smoke:data-platform-skybox:built",
     "test:digital-twin": "npm run test:digital-twin:unit && npm run test:digital-twin:integration",
-    "test:scene-model-update": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/sceneModelUpdatePlan.test.ts tests/dataPlatform/sceneModelVersionSync.test.ts tests/dataPlatform/sceneModelResourceValidation.test.ts tests/editor/modelAssetUpdateMerge.test.ts tests/editor/sceneLatestModelUpdate.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/runtime/sceneModelReadinessError.test.ts",
+    "test:unified-model-sync": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/unifiedModelAssetUpdate.test.ts tests/editor/localSceneRecoveryTransaction.test.ts tests/editor/sceneModelSyncTransaction.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/dataPlatform/sceneModelUpdatePlan.test.ts tests/dataPlatform/sceneModelResourceValidation.test.ts tests/digitalTwin/publishOrchestration.test.ts tests/digitalTwin/preparePublishResources.test.ts tests/digitalTwin/publishSceneSnapshots.test.ts tests/digitalTwin/publishPreloadBridge.test.mjs tests/digitalTwin/publishParameterWarnings.test.ts tests/runtime/modelParameterBindingExecution.test.ts tests/editor/modelParameterRestoration.test.mjs tests/editor/publishModelRecovery.test.ts tests/digitalTwin/publishModelPackageRecovery.test.ts",
+    "test:scene-model-update": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/sceneModelUpdatePlan.test.ts tests/dataPlatform/sceneModelVersionSync.test.ts tests/dataPlatform/sceneModelResourceValidation.test.ts tests/editor/modelAssetUpdateMerge.test.ts tests/editor/sceneLatestModelUpdate.test.ts tests/editor/sceneModelSyncTransaction.test.ts tests/editor/sceneModelSyncOverlay.test.mjs tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/editor/restoreFailedSceneResources.test.ts tests/editor/scenePreparationProgress.test.ts",
     "smoke:scene-model-update": "npm run build:viewer && npm run build:electron && node scripts/run-scene-model-update-integration.mjs",
     "test:publish-model-recovery": "node --test tests/digitalTwin/publishPreloadBridge.test.mjs && npm run build:electron && node scripts/run-publish-model-recovery-integration.mjs",
     "test:click-events:integration": "npm run build:electron && electron tests/digitalTwin/clickEventBindingPublish.integration.mjs",
@@ -76,7 +77,10 @@
     "smoke:folder-group-runtime": "node scripts/smoke-folder-group-runtime.mjs",
     "smoke:transform-gizmo": "node scripts/smoke-transform-gizmo.mjs",
     "test:digital-twin:unit": "node --experimental-strip-types --test tests/digitalTwin/*.test.ts tests/runtime/environmentAssetContainerCache.test.ts",
-    "test:digital-twin:integration": "npm run build:electron && node scripts/run-digital-twin-publish-integration.mjs"
+    "test:digital-twin:integration": "npm run build:electron && node scripts/run-digital-twin-publish-integration.mjs",
+    "test:scene-loading": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/scenePreparationProgress.test.ts tests/editor/scenePreparationTimings.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationInteractionGateContract.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/remoteDownloadUiContract.test.ts tests/dataPlatform/sceneModelSyncConcurrency.test.ts tests/runtime/modelLoadingTraversal.test.ts tests/runtime/environmentTransformPreparation.test.ts tests/runtime/environmentAssetContainerCache.test.ts tests/runtime/sceneRenderReadiness.test.ts tests/runtime/sceneLoadDiagnostics.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/runtime/skyboxTextureLoad.test.ts tests/runtime/skyboxRuntimeState.test.ts tests/runtime/skyboxDecodedData.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/digitalTwin/playerInitialLoadState.test.ts tests/digitalTwin/playerLoadingProgress.test.ts tests/runtime/modelInitializationScheduler.test.ts tests/digitalTwin/playerInitialLoadRenderState.test.ts tests/digitalTwin/playerInitialLoadMonitor.test.ts tests/runtime/skyboxContentHash.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/digitalTwin/playerEnvironmentLoadContract.test.ts tests/runtime/skyboxPrefilter.test.ts",
+    "smoke:scene-loading": "npm run build && node scripts/smoke-packaged-remote-scene.mjs --source",
+    "test:local-scene-recovery": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/localSceneResourceRecovery.test.ts tests/dataPlatform/localSceneRecoveryService.test.ts tests/dataPlatform/localSceneRemoteRecovery.test.ts tests/dataPlatform/editorAssetFileError.test.ts tests/editor/localSceneRecoveryTransaction.test.ts tests/editor/localSceneEnvironmentChoice.test.ts tests/runtime/sceneResourceRetry.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/editor/sceneModelLibrarySync.test.ts"
   },
   "engines": {
     "node": ">=22.12.0"
