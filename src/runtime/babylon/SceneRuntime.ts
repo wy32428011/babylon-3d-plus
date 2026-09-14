@@ -787,6 +787,7 @@ export class SceneRuntime {
   private telemetryPreviewActive = false;
   private telemetryPerformanceTimingEnabled = false;
   private telemetryFrameTimeMs: number | null = null;
+  private readonly telemetryOuterStages = { diagnosticsMs: 0, baselineMs: 0, alarmsMs: 0 };
   private telemetryMaxFrameTimeMs: number | null = null;
   /** 本地交互（点击单元事件）产生的单格高亮，与外部搜索高亮各自独立互不覆盖。 */
   private localSlotHighlight: LocatorSlotHighlightState | null = null;
@@ -4856,13 +4857,17 @@ export class SceneRuntime {
     if (enabled && !this.telemetryPerformanceTimingEnabled) {
       this.telemetryFrameTimeMs = null;
       this.telemetryMaxFrameTimeMs = null;
+      this.telemetryOuterStages.diagnosticsMs = this.telemetryOuterStages.baselineMs = this.telemetryOuterStages.alarmsMs = 0;
     }
     this.telemetryPerformanceTimingEnabled = enabled;
+    this.specializedTelemetryRuntime.setPerformanceTimingEnabled(enabled);
   }
 
   getTelemetryPerformanceMetrics() {
+    const metrics = this.specializedTelemetryRuntime.getPerformanceMetrics();
     return {
-      ...this.specializedTelemetryRuntime.getPerformanceMetrics(),
+      ...metrics,
+      stages: metrics.stages ? { ...metrics.stages, ...this.telemetryOuterStages } : null,
       lastFrameTimeMs: this.telemetryFrameTimeMs,
       maxFrameTimeMs: this.telemetryMaxFrameTimeMs,
     };
@@ -4874,11 +4879,16 @@ export class SceneRuntime {
     const startedAt = this.telemetryPerformanceTimingEnabled ? performance.now() : null;
     try {
       this.specializedTelemetryRuntime.clearInactiveDiagnostics();
+      const diagnosticsFinished = startedAt !== null ? performance.now() : null;
+      if (diagnosticsFinished !== null) this.telemetryOuterStages.diagnosticsMs = diagnosticsFinished - startedAt!;
       this.captureReadyTelemetryPreviewBaselines();
+      if (diagnosticsFinished !== null) this.telemetryOuterStages.baselineMs = performance.now() - diagnosticsFinished;
       const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
       this.specializedTelemetryRuntime.applyFrame(deltaSeconds);
+      const alarmsStarted = startedAt !== null ? performance.now() : null;
       for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(false);
       this.alarmRuntime.update();
+      if (alarmsStarted !== null) this.telemetryOuterStages.alarmsMs = performance.now() - alarmsStarted;
     } finally {
       if (startedAt !== null) {
         this.telemetryFrameTimeMs = performance.now() - startedAt;

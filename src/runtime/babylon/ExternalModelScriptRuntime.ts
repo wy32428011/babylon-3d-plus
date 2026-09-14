@@ -58,7 +58,8 @@ const compiledScriptCache = new Map<string, CompiledExternalModelScript>();
 const scriptTextRequests = new Map<string, Promise<string>>();
 const compiledScriptRequests = new Map<string, Promise<CompiledExternalModelScript>>();
 const scriptLoadDiagnostics = { readRequests: 0, sharedReads: 0, compileRequests: 0, sharedCompiles: 0,
-  compiledCacheHits: 0, compileElapsedMs: 0 };
+  compiledCacheHits: 0, compileElapsedMs: 0, initializationCount: 0, initializationQueueMs: 0,
+  initializationMs: 0, maxInitializationMs: 0, cancelledInitializations: 0 };
 let typescriptModulePromise: Promise<typeof TypeScriptModule> | null = null;
 
 /** 只读 renderer 会话计数；编译耗时包含首次等待 TypeScript 模块的时间。 */
@@ -172,16 +173,26 @@ export class ExternalModelScriptRuntime {
         this.dataDrivenConfigs.push(compiledScript.dataDriven);
       }
 
+      const queuedAt = performance.now();
       await modelInitializationScheduler.run(() => {
-        if (this.disposed) return;
-        for (const className of this.getRuntimeClassNamesForAsset(scriptAsset)) {
-          const ScriptClass = compiledScript.classes[className];
-          if (!ScriptClass) continue;
+        if (this.disposed) { scriptLoadDiagnostics.cancelledInitializations += 1; return; }
+        const startedAt = performance.now();
+        scriptLoadDiagnostics.initializationQueueMs += startedAt - queuedAt;
+        try {
+          for (const className of this.getRuntimeClassNamesForAsset(scriptAsset)) {
+            const ScriptClass = compiledScript.classes[className];
+            if (!ScriptClass) continue;
 
-          const instance = new ScriptClass(this.node);
-          this.assignParameterValues(instance);
-          this.instances.push(instance);
-          this.callLifecycle(instance, 'onStart');
+            const instance = new ScriptClass(this.node);
+            this.assignParameterValues(instance);
+            this.instances.push(instance);
+            this.callLifecycle(instance, 'onStart');
+          }
+        } finally {
+          const elapsed = performance.now() - startedAt;
+          scriptLoadDiagnostics.initializationCount += 1;
+          scriptLoadDiagnostics.initializationMs += elapsed;
+          scriptLoadDiagnostics.maxInitializationMs = Math.max(scriptLoadDiagnostics.maxInitializationMs, elapsed);
         }
       });
     } catch (error) {

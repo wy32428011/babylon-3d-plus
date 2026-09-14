@@ -1,4 +1,6 @@
 import type { ScenePerformanceSnapshot } from '../../runtime/babylon/ScenePerformanceMonitor';
+import type { FrameTimingReport } from '../../runtime/babylon/FrameTimingWindow';
+import { copyTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../../runtime/babylon/telemetry/telemetryPerformanceStages.ts';
 
 const SAMPLE_INTERVAL_MS = 1_000;
 const HISTORY_WINDOW_MS = 60_000;
@@ -20,6 +22,7 @@ export type EditorTelemetryPerformanceMetrics = {
   diagnosticWrites: number;
   lastFrameTimeMs: number | null;
   maxFrameTimeMs: number | null;
+  stages?: TelemetryPerformanceStages | null;
 };
 
 type EditorPerformanceSample = EditorPerformanceSourceSnapshot & {
@@ -81,6 +84,7 @@ function telemetryDelta(
     diagnosticWrites: finiteMetric(finiteMetric(metrics.diagnosticWrites) - baseline.diagnosticWrites),
     lastFrameTimeMs: nullableMetric(metrics.lastFrameTimeMs),
     maxFrameTimeMs: nullableMetric(metrics.maxFrameTimeMs),
+    ...(metrics.stages ? { stages: copyTelemetryPerformanceStages(metrics.stages) } : {}),
   };
 }
 
@@ -105,6 +109,7 @@ function summarize(samples: readonly EditorPerformanceSample[]) {
 export function createEditorPerformanceRunSession(
   initialTelemetry: EditorTelemetryPerformanceMetrics,
   now: () => number = Date.now,
+  readFrameTiming: () => FrameTimingReport | null = () => null,
 ): EditorPerformanceRunSession {
   const startedAt = now();
   const baseline = {
@@ -117,6 +122,7 @@ export function createEditorPerformanceRunSession(
   };
   const history: { at: number; sample: EditorPerformanceSample }[] = [];
   let stoppedAt: number | null = null;
+  let stoppedFrameTiming: FrameTimingReport | null = null;
   let recordedSampleCount = 0;
   let telemetry = telemetryDelta(baseline, baseline);
   const prune = (at: number) => {
@@ -137,6 +143,7 @@ export function createEditorPerformanceRunSession(
     stop: (metrics) => {
       if (stoppedAt !== null) return;
       stoppedAt = now();
+      stoppedFrameTiming = readFrameTiming();
       telemetry = telemetryDelta(metrics, baseline);
       prune(stoppedAt);
     },
@@ -160,10 +167,11 @@ export function createEditorPerformanceRunSession(
         warmupWindowMs: WARMUP_WINDOW_MS,
         historyWindowMs: HISTORY_WINDOW_MS,
         recordedSampleCount,
-        counterSemantics: 'Babylon counters use the last-second mean; percentiles describe 1 Hz samples, not individual frames. The first two seconds are excluded. GPU null means unavailable.',
-        telemetrySemantics: 'Counter deltas and telemetry timing cover this performance run, including warmup. Scene timing samples retain the latest minute of this run; a stopped report stays frozen.',
+        counterSemantics: 'Babylon counters use the last-second mean; summary percentiles describe 1 Hz samples, not individual frames. frameTiming separately reports completed-render-frame intervals. The first two seconds are excluded. GPU null means unavailable.',
+        telemetrySemantics: 'Counter deltas and telemetry timing cover this performance run, including warmup. stages are exclusive subspans of the last telemetry frame and must not be added to its total. Callbacks outside the telemetry frame require a CPU profile. Scene timing samples retain the latest minute of this run; a stopped report stays frozen.',
         telemetry,
         summary: summarize(samples),
+        frameTiming: stoppedAt === null ? readFrameTiming() : stoppedFrameTiming,
         samples,
       }, null, 2);
     },

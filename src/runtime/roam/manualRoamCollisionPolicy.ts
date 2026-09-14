@@ -53,7 +53,8 @@ export function resolveManualRoamCollisionStyle(mesh: AbstractMesh): ManualRoamC
 
 /** 读取网格世界 AABB 的最长边，供碰撞策略判断物体是否可走入内部。 */
 export function getMeshWorldMaxExtentMeters(mesh: AbstractMesh): number {
-  mesh.computeWorldMatrix();
+  // 同一渲染帧内刚修改 Transform 时，Babylon 的 renderId 快路径可能仍返回旧矩阵。
+  mesh.computeWorldMatrix(!mesh.isSynchronized());
   const box = mesh.getBoundingInfo().boundingBox;
   return Math.max(
     Math.abs(box.maximumWorld.x - box.minimumWorld.x),

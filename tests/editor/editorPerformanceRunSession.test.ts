@@ -5,6 +5,8 @@ import {
   type EditorPerformanceSourceSnapshot,
   type EditorTelemetryPerformanceMetrics,
 } from '../../src/editor/runtime/editorPerformanceRunSession.ts';
+import { FrameTimingWindow } from '../../src/runtime/babylon/FrameTimingWindow.ts';
+import { createTelemetryPerformanceStages } from '../../src/runtime/babylon/telemetry/telemetryPerformanceStages.ts';
 
 function telemetry(frames = 100): EditorTelemetryPerformanceMetrics {
   return {
@@ -22,6 +24,32 @@ function sample(at: number, fps = 60): EditorPerformanceSourceSnapshot {
     estimatedActiveTriangleInvocations: 300, longTaskCount: 0, longTaskDurationMs: 0,
   };
 }
+
+test('性能运行复制逐帧报告，停止后与秒级历史一起冻结', () => {
+  const window = new FrameTimingWindow();
+  let now = 0;
+  const session = createEditorPerformanceRunSession(telemetry(), () => now, () => window.createReport());
+  window.record(0);
+  window.record(16);
+  now = 2_000;
+  session.record(sample(now), telemetry(101));
+  session.stop(telemetry(101));
+  window.record(100);
+  assert.deepEqual(JSON.parse(session.createReport()).frameTiming.intervalsMs, [16]);
+});
+
+test('阶段计时仅复制固定数值字段，不泄漏点位且不把父级总耗时重复相加', () => {
+  let now = 0;
+  const session = createEditorPerformanceRunSession(telemetry(), () => now);
+  now = 2_000;
+  const stages = { ...createTelemetryPerformanceStages(), driverMs: 3, contextMs: 2, password: 'not-in-report' };
+  session.record(sample(now), { ...telemetry(101), stages, lastFrameTimeMs: 8 });
+  stages.driverMs = 999;
+  const report = JSON.parse(session.createReport());
+  assert.equal(report.samples[0].telemetry.stages.driverMs, 3);
+  assert.equal(report.samples[0].telemetry.lastFrameTimeMs, 8);
+  assert.equal(session.createReport().includes('not-in-report'), false);
+});
 
 test('性能运行仅消费启动后的完整采样窗口，不混入编辑和启动前样本', () => {
   let now = 10_000;

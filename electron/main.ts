@@ -1,7 +1,7 @@
 import { app, BrowserWindow, protocol } from 'electron';
-import { createReadStream, promises as fs } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import { createAssetFileByteStream } from './shared/assetFileByteStream.js';
 import { fileURLToPath } from 'node:url';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
@@ -247,7 +247,7 @@ function registerEditorAssetProtocol(): void {
     if (decision.status === 304) {
       return new Response(null, { status: 304, headers: decision.headers });
     }
-    const body = Readable.toWeb(createReadStream(filePath)) as ReadableStream<Uint8Array>;
+    const body = createAssetFileByteStream(filePath, request.signal, stat.size);
     return new Response(body, { headers: decision.headers });
   });
 }

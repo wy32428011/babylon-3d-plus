@@ -227,7 +227,7 @@ async function openProject() {
       undefined, { timeout: 90000 });
     await page.locator('aside[aria-label="场景资源状态"]').waitFor({ state: 'hidden', timeout: 90000 });
   } else {
-    await page.getByText('场景已打开，部分资源需要处理', { exact: true }).waitFor({ state: 'visible', timeout: 90000 });
+    await page.locator('aside[aria-label="场景资源状态"]').waitFor({ state: 'visible', timeout: 90000 });
   }
   await waitRenderedModel(mode === 'success' ? (modelRevision === '3' ? 'purple' : 'green') : 'red');
   const transitions = await page.evaluate(() => window.__loadingTransitions);
@@ -261,13 +261,21 @@ async function waitRenderedModel(color) {
   throw new Error(`实际模型首帧未显示：${color} pixels=${pixels}`);
 }
 
-function assertInstances(scene, latest) {
+function expectedParameters(latest, revision = modelRevision) {
+  const expected = parameterConfig(latest);
+  if (latest && revision === '3') {
+    expected.parameters[0] = { ...expected.parameters[0], label: '新版默认宽度', defaultValue: 8, max: 20 };
+  }
+  return expected;
+}
+
+function assertInstances(scene, latest, revision = modelRevision) {
   assert.equal(scene.entityIds.length, 2);
   for (const width of [1, 2]) {
     const entity = scene.entities['fixture-model-' + width];
     assert.equal(entity.components.modelAsset.assetCode, 'DEVICE-' + width);
     assert.equal(entity.id, 'fixture-model-' + width);
-    assert.deepEqual(entity.components.modelAsset.parameterConfig, parameterConfig(latest));
+    assert.deepEqual(entity.components.modelAsset.parameterConfig, expectedParameters(latest, revision));
     assert.deepEqual(entity.components.modelAsset.parameterValues, { width, enabled: false, label: '', ...(latest ? { speed: 5 } : {}) });
     assert.deepEqual(entity.components.transform, sourceScene().scene.entities[entity.id].components.transform);
   }
@@ -355,10 +363,10 @@ async function main() {
     assert.notEqual(updated.sourcePath, previous.sourcePath, '手动全库同步必须替换场景资源路径');
     assert.notEqual(updated.assetRevision, previous.assetRevision, '资源修订必须实际更新');
     assert.equal(createHash('sha256').update(await readFile(updated.sourcePath)).digest('hex'), createHash('sha256').update(updatedModel).digest('hex'), '场景引用文件必须是真实新版GLB');
-    assert.deepEqual(updated.parameterConfig, previous.parameterConfig);
+    assert.deepEqual(updated.parameterConfig, expectedParameters(true, '3'));
   }
   await page.screenshot({ path: path.join(artifactRoot, '01c-manual-sync-new-model.png') });
-  checks.push({ name: 'manual-library-sync-replaces-model-preserves-config', passed: true, beforeManual, afterManual });
+  checks.push({ name: 'manual-library-sync-updates-definitions-preserves-values', passed: true, beforeManual, afterManual });
 
   // 相同版本再次同步不增加撤销层：一次撤销必须直接回到绿色旧版本。
   await page.getByRole('button', { name: '同步模型库', exact: true }).click();
@@ -370,7 +378,7 @@ async function main() {
   await page.keyboard.press('Control+z');
   await waitRenderedModel('green');
   const undone = await page.evaluate(readRenderedScene);
-  assertInstances(undone, true);
+  assertInstances(undone, true, '2');
   for (const id of beforeManual.entityIds) assert.deepEqual(undone.entities[id].components.modelAsset, beforeManual.entities[id].components.modelAsset);
   await page.getByRole('button', { name: '重做', exact: true }).click();
   await waitRenderedModel('purple');
@@ -405,7 +413,8 @@ async function main() {
   checks.push({ name: 'remote-overwrites-local-with-backup', passed: true, backupMatches });
   await page.screenshot({ path: path.join(artifactRoot, '02-remote-overwrite.png') });
 
-  await returnHome(); mode = 'model-404'; await openProject();
+  // 同修订的完整缓存允许命中；用未缓存的新修订验证真实下载失败，不删除有效缓存。
+  await returnHome(); modelRevision = '4'; mode = 'model-404'; await openProject();
   scene = await page.evaluate(readRenderedScene);
   assertInstances(scene, false);
   assert.equal(scene.sceneSettings.environment.dataPlatformSourceKey, expectedSourceKey, '模型失败不得阻止独立环境同步');
@@ -422,7 +431,7 @@ async function main() {
   await issues.waitFor({ state: 'visible' });
   assertInstances(await page.evaluate(readRenderedScene), false);
   checks.push({ name: 'resource-notice-dismiss-and-reopen', passed: true });
-  mode = 'success'; await issues.getByRole('button', { name: '重新同步场景资源', exact: true }).click();
+  modelRevision = '3'; mode = 'success'; await issues.getByRole('button', { name: '重新同步场景资源', exact: true }).click();
   await issues.waitFor({ state: 'hidden', timeout: 90000 });
   await waitRenderedModel('purple');
   scene = await page.evaluate(readRenderedScene); assertInstances(scene, true);

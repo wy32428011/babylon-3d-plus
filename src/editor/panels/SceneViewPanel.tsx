@@ -326,6 +326,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
   const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
   const [performanceHudExpanded, setPerformanceHudExpanded] = useState(false);
+  const detailedGpuWorkloadsEnabledRef = useRef(false);
   const [performanceRunHudExpanded, setPerformanceRunHudExpanded] = useState(true);
   const [performanceRunSnapshot, setPerformanceRunSnapshot] = useState<EditorPerformanceRunSnapshot | null>(null);
   const [sceneRuntimeNaturallyReady, setSceneRuntimeNaturallyReady] = useState(false);
@@ -409,6 +410,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const isPerformanceRun = isRuntimePreview && runtimePerformanceEnabled;
   const isPerformanceHudExpanded = isPerformanceRun ? performanceRunHudExpanded : performanceHudExpanded;
   const showPerformanceHud = Boolean(performanceSnapshot && (props.performanceHudVisible || isPerformanceRun));
+  detailedGpuWorkloadsEnabledRef.current = showPerformanceHud && isPerformanceHudExpanded;
   const hasStoppedPerformanceReport = !isPerformanceRun && performanceRunSnapshot?.phase === 'stopped';
   const handleDataPlatformScreenCommand = useCallback((
     _item: DataPlatformScreenOverlayItem | null,
@@ -1244,6 +1246,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         camera: viewport.camera,
         canvas: canvasRef.current,
         avatarUrl: resolveManualRoamAvatarSource(useEditorStore.getState().scene),
+        preloadAvatar: hasManualRoamSpawnEntity(useEditorStore.getState().scene),
         resolveSpawnPose: () => resolveManualRoamSpawnPose(
           sceneDocumentRef.current ?? useEditorStore.getState().scene,
         ),
@@ -1547,6 +1550,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     try {
       performanceMonitor = new ScenePerformanceMonitor(viewport.engine, viewport.scene, {
+        collectDetailedGpuWorkloads: () => detailedGpuWorkloadsEnabledRef.current,
         getRuntimeMetrics: () => runtimeRef.current?.getPerformanceMetrics() ?? initializedRuntime.getPerformanceMetrics(),
         getEditThinInstancePlanMetrics: () => editModeThinInstancePlanPerformanceRef.current,
         getSceneFocusMetrics: () => sceneFocusPerformanceRef.current,
@@ -1636,8 +1640,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   }, [hasManualRoamSpawn]);
 
   useEffect(() => {
+    if (!hasManualRoamSpawn) return;
     manualRoamRef.current?.setAvatarUrl(resolveManualRoamAvatarSource(sceneDocument));
-  }, [sceneDocument]);
+  }, [sceneDocument, hasManualRoamSpawn]);
 
   /** 执行 Store 发起的候选环境事务；旧环境会保留到候选加载成功。 */
   useEffect(() => {
@@ -2177,12 +2182,16 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     }
     if (!runtime || !isPerformanceRun || !state.runtimePerformanceEnabled || state.runtimeMode !== 'preview') return;
     runtime.setTelemetryPerformanceTimingEnabled(true);
-    const session = createEditorPerformanceRunSession(runtime.getTelemetryPerformanceMetrics());
+    const monitor = performanceMonitorRef.current;
+    monitor?.setFrameTimingEnabled(true, 2_000);
+    const session = createEditorPerformanceRunSession(runtime.getTelemetryPerformanceMetrics(), Date.now,
+      () => monitor?.getFrameTimingReport() ?? null);
     performanceRunSessionRef.current = session;
     setPerformanceRunSnapshot(session.getSnapshot());
     setPerformanceRunHudExpanded(true);
     return () => {
       session.stop(runtime.getTelemetryPerformanceMetrics());
+      monitor?.setFrameTimingEnabled(false);
       runtime.setTelemetryPerformanceTimingEnabled(false);
       setPerformanceRunSnapshot(session.getSnapshot());
     };

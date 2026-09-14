@@ -7,10 +7,12 @@ import {
   type Engine,
   type Material,
   type Scene,
+  type Observer,
 } from '@babylonjs/core';
 import { EngineInstrumentation } from '@babylonjs/core/Instrumentation/engineInstrumentation';
 import { SceneInstrumentation } from '@babylonjs/core/Instrumentation/sceneInstrumentation';
 import type { SceneRuntimePerformanceMetrics } from './SceneRuntime';
+import { FrameTimingWindow, type FrameTimingReport } from './FrameTimingWindow';
 
 const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;
 const MAX_HISTORY_SAMPLES = 60;
@@ -160,7 +162,8 @@ type ScenePerformanceMonitorOptions = {
   getEditThinInstancePlanMetrics: () => EditModeThinInstancePlanPerformanceMetrics;
   getSceneFocusMetrics?: () => SceneFocusPerformanceMetrics | null;
   /** 发布诊断可省略材质、包围盒与资源名称明细；基础 CPU/GPU 计数和几何总量仍正常采集。 */
-  collectDetailedGpuWorkloads?: boolean;
+  collectDetailedGpuWorkloads?: boolean | (() => boolean);
+  captureFrameTimings?: boolean;
 };
 
 /** 将性能计数器的最近一秒均值转换为稳定 HUD 数值。 */
@@ -467,6 +470,9 @@ export class ScenePerformanceMonitor {
   private pendingLongTaskDurationMs = 0;
   private gpuFrameTimeCaptureEnabled = false;
   private disposed = false;
+  private frameTimings: FrameTimingWindow | null = null;
+  private frameTimingObserver: Observer<Scene> | null = null;
+  private readonly breakFrameTimingContinuity = () => this.frameTimings?.breakContinuity();
 
   constructor(
     private readonly engine: Engine,
@@ -493,6 +499,36 @@ export class ScenePerformanceMonitor {
       this.glInfo = engine.getInfo();
     }
     this.observeLongTasks();
+    if (options.captureFrameTimings) this.setFrameTimingEnabled(true);
+  }
+
+  /** 仅性能运行启用逐帧采集；关闭后冻结结果，新会话重新开始，普通运行不附加观察器。 */
+  setFrameTimingEnabled(enabled: boolean, warmupMs = 0): void {
+    if (this.disposed) return;
+    if (!enabled) {
+      if (this.frameTimingObserver) this.scene.onAfterRenderObservable.remove(this.frameTimingObserver);
+      this.frameTimingObserver = null;
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.breakFrameTimingContinuity);
+      this.frameTimings?.breakContinuity();
+      return;
+    }
+    if (this.frameTimingObserver) return;
+    this.frameTimings ??= new FrameTimingWindow();
+    this.frameTimings.reset();
+    const readyAt = performance.now() + Math.max(0, warmupMs);
+    this.frameTimingObserver = this.scene.onAfterRenderObservable.add(() => {
+      const now = performance.now();
+      if ((typeof document !== 'undefined' && document.hidden) || now < readyAt) {
+        this.frameTimings?.breakContinuity();
+        return;
+      }
+      this.frameTimings?.record(now);
+    });
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.breakFrameTimingContinuity);
+  }
+
+  getFrameTimingReport(): FrameTimingReport | null {
+    return this.frameTimings?.createReport(this.frameTimingObserver ? performance.now() : undefined) ?? null;
   }
 
   /** 启动低频采样；重复调用会替换旧订阅，不会叠加 interval。 */
@@ -514,7 +550,8 @@ export class ScenePerformanceMonitor {
   /** 返回最近一次实时快照并把它加入有界历史。 */
   sample(): ScenePerformanceSnapshot {
     const gpuFrameTimeNanoseconds = readCounterValue(this.engineInstrumentation.gpuFrameTimeCounter);
-    const activeGpuWorkload = collectActiveGpuWorkload(this.scene, this.options.collectDetailedGpuWorkloads !== false);
+    const details = this.options.collectDetailedGpuWorkloads;
+    const activeGpuWorkload = collectActiveGpuWorkload(this.scene, typeof details === 'function' ? details() : details !== false);
     const snapshot: ScenePerformanceSnapshot = {
       sampledAt: new Date().toISOString(),
       fps: normalizeMetric(this.engine.getFps()),
@@ -555,12 +592,15 @@ export class ScenePerformanceMonitor {
       generatedAt: new Date().toISOString(),
       renderer: this.glInfo,
       summary: summarizeScenePerformance(this.history),
+      frameTiming: this.getFrameTimingReport(),
       samples: this.history,
     }, null, 2);
   }
 
   dispose(): void {
     if (this.disposed) return;
+    this.setFrameTimingEnabled(false);
+    this.frameTimings = null;
     this.disposed = true;
     if (this.sampleTimer) {
       clearInterval(this.sampleTimer);

@@ -82,6 +82,8 @@ export type ManualRoamRuntimeOptions = {
   camera: ArcRotateCamera;
   canvas: HTMLCanvasElement;
   avatarUrl?: string;
+  /** 无出生点的编辑场景暂不加载人物；首次设置资源或启用漫游时仍走完整加载。 */
+  preloadAvatar?: boolean;
   resolveSpawnPose?: () => ManualRoamSpawnPose | null;
   resolveCollisionBounds?: ManualRoamCollisionBoundsResolver;
   setOrbitControlsEnabled: (enabled: boolean) => void;
@@ -189,6 +191,7 @@ export class ManualRoamRuntime {
   private jumpQueued = false;
   private previousGamepadJumpPressed = false;
   private currentAnimation: AnimationGroup | null = null;
+  private pausedAvatarAnimation: AnimationGroup | null = null;
   private animationGroups: AnimationGroup[] = [];
   private proceduralGaitState: ProceduralGaitState = createInitialProceduralGaitState();
   private proceduralAnimator: ProceduralAvatarMorphAnimator | null = null;
@@ -269,7 +272,7 @@ export class ManualRoamRuntime {
     this.beforeRenderObserver = scene.onBeforeRenderObservable.add(() => this.update());
     this.kinematicState = createInitialRoamKinematicState({ x: 0, y: 0, z: 0 });
     this.bindInputEvents();
-    this.setAvatarUrl(this.options.avatarUrl);
+    if (this.options.preloadAvatar !== false) this.setAvatarUrl(this.options.avatarUrl);
   }
 
   getSnapshot = (): ManualRoamSnapshot => this.snapshot;
@@ -282,6 +285,7 @@ export class ManualRoamRuntime {
   setEnabled(enabled: boolean): void {
     if (this.disposed || this.snapshot.enabled === enabled) return;
     if (enabled) {
+      if (this.avatarUrl === null) this.setAvatarUrl(this.options.avatarUrl);
       this.proceduralGaitState = createInitialProceduralGaitState();
       this.activateCollisionWorld();
       const explicitSpawn = this.resolveExplicitSpawnPose();
@@ -301,6 +305,8 @@ export class ManualRoamRuntime {
       this.options.setOrbitControlsEnabled(false);
       this.collider.setEnabled(true);
       this.applyAvatarVisibility(true, this.snapshot.viewMode);
+      if (this.pausedAvatarAnimation === this.currentAnimation) this.pausedAvatarAnimation?.restart();
+      this.pausedAvatarAnimation = null;
       this.options.onActivated?.();
       this.publish({ enabled: true, statusMessage: this.resolveStatusMessage(true) });
       this.updateCamera(1);
@@ -312,6 +318,11 @@ export class ManualRoamRuntime {
     this.exitPointerLock();
     this.collider.setEnabled(false);
     this.facingRoot.setEnabled(false);
+    // 只暂停本控制器正在播放的片段；重进恢复同一实例，不重置进度或重启已结束的跳跃。
+    if (this.currentAnimation?.isPlaying) {
+      this.currentAnimation.pause();
+      this.pausedAvatarAnimation = this.currentAnimation;
+    }
     this.fallbackGround.setEnabled(false);
     this.collisionProxyPool?.deactivate();
     this.localTriangleCollider.deactivate();
@@ -335,7 +346,7 @@ export class ManualRoamRuntime {
     this.lastCollisionMeshReconcileMs = Number.NEGATIVE_INFINITY;
     this.fallbackGround.setEnabled(false);
     this.collisionProxyPool?.deactivate();
-    this.localTriangleCollider.deactivate();
+    this.localTriangleCollider.clearScene();
     this.spawnPosition.setAll(0);
     this.spawnYaw = 0;
     this.spawnPitch = -0.2;
@@ -965,6 +976,7 @@ export class ManualRoamRuntime {
   private stopCurrentAnimation(): void {
     this.currentAnimation?.stop();
     this.currentAnimation = null;
+    this.pausedAvatarAnimation = null;
   }
 
   private updateResetTransition(): void {
