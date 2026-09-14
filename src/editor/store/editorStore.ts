@@ -164,7 +164,8 @@ import type { AutoPatrolPlaybackSnapshot } from '../../runtime/babylon/AutoPatro
 import { vector3 } from '../model/math';
 import {
   deriveLocatorDimensionsFromBinding,
-  findBuiltInSlotEntityId,
+  deriveBuiltInSlotRowCountFromBinding,
+  findBuiltInSlotEntities,
   getBuiltInSlotBindingConfig,
   patchBuiltInSlotDimensions,
   type BuiltInSlotBindingConfig,
@@ -914,7 +915,7 @@ function cloneLocator(locator: LocatorComponent): LocatorComponent {
     rowNumber: locator.rowNumber,
     ...(locator.fetchDrive ? { fetchDrive: { ...locator.fetchDrive } } : {}),
     ...(locator.builtInBinding
-      ? { builtInBinding: { hostEntityId: locator.builtInBinding.hostEntityId, originOffset: { ...locator.builtInBinding.originOffset } } }
+      ? { builtInBinding: { ...locator.builtInBinding, originOffset: { ...locator.builtInBinding.originOffset } } }
       : {}),
   };
 }
@@ -1060,6 +1061,7 @@ function sanitizeLocatorBuiltInBindingPatch(
   );
   return {
     hostEntityId: before.hostEntityId,
+    rowIndex: before.rowIndex,
     originOffset: {
       x: read(value.originOffset?.x, before.originOffset.x),
       y: read(value.originOffset?.y, before.originOffset.y),
@@ -1096,6 +1098,7 @@ function areLocatorBuiltInBindingsEqual(
   if (!left || !right) return left === right;
   return (
     left.hostEntityId === right.hostEntityId &&
+    left.rowIndex === right.rowIndex &&
     left.originOffset.x === right.originOffset.x &&
     left.originOffset.y === right.originOffset.y &&
     left.originOffset.z === right.originOffset.z
@@ -1869,7 +1872,7 @@ function prepareEntityClipboardPaste(
           // 宿主同批粘贴则按 ID 映射重建绑定；宿主不在剪贴板内则解除绑定，避免悬空引用。
           const remappedHostId = duplicatedIdBySourceId.get(binding.hostEntityId);
           const locator = { ...duplicated.components.locator! };
-          if (remappedHostId) locator.builtInBinding = { hostEntityId: remappedHostId, originOffset: { ...binding.originOffset } };
+          if (remappedHostId) locator.builtInBinding = { ...binding, hostEntityId: remappedHostId, originOffset: { ...binding.originOffset } };
           else delete locator.builtInBinding;
           duplicated.components = { ...duplicated.components, locator };
         }
@@ -2099,30 +2102,36 @@ function collectPromotedChildrenIds(
   return result;
 }
 
-/** 为声明了内置货格绑定的宿主实体创建货格实体（幂等，调用方需先确认不存在）。货格与宿主同级，绑定身份记录在 builtInBinding.hostEntityId。 */
+/**
+ * 为声明了内置货格绑定的宿主实体创建第 rowIndex 排货格实体。
+ * 货格与宿主同级，绑定身份记录在 builtInBinding.hostEntityId + rowIndex。调用方需先确认该排不存在。
+ */
 function createBuiltInSlotEntityInScene(
   scene: SceneDocument,
   hostEntityId: string,
   config: BuiltInSlotBindingConfig,
+  rowIndex: number,
 ): SceneDocument {
   const host = scene.entities[hostEntityId];
   if (!host) return scene;
 
   const slotEntity = createLocatorEntity(host.components.transform.position);
-  slotEntity.name = '内置货格';
+  slotEntity.name = `内置货格 第${rowIndex + 1}排`;
   slotEntity.parentId = host.parentId;
   const derived = deriveLocatorDimensionsFromBinding(config, host.components.modelAsset?.parameterValues);
   slotEntity.components.locator = {
     ...slotEntity.components.locator!,
     ...derived,
+    // 排号默认与排索引对齐；之后允许用户单独调整
+    rowNumber: rowIndex + 1,
     // 资产编号由宿主货架驱动，创建即对齐，之后随货架编号同步
     assetId: host.components.modelAsset?.assetCode ?? slotEntity.components.locator!.assetId,
-    builtInBinding: { hostEntityId, originOffset: vector3() },
+    builtInBinding: { hostEntityId, rowIndex, originOffset: vector3() },
   };
 
   const hostIndex = scene.entityIds.indexOf(hostEntityId);
   const entityIds = [...scene.entityIds];
-  entityIds.splice(hostIndex >= 0 ? hostIndex + 1 : entityIds.length, 0, slotEntity.id);
+  entityIds.splice(hostIndex >= 0 ? hostIndex + 1 + rowIndex : entityIds.length, 0, slotEntity.id);
 
   const hostParent = host.parentId ? scene.entities[host.parentId] : null;
   return {
@@ -2139,7 +2148,39 @@ function createBuiltInSlotEntityInScene(
 }
 
 /**
- * 宿主模型参数变化后的内置货格副作用：按启用参数创建/删除货格（幂等），并按声明派生维度。
+ * 把宿主的内置货格对齐到声明的排数：未启用（或声明未启用）时删除全部货格，启用时多删少补（幂等）。
+ * 已有排保留其实体身份与用户改动，只按 rowIndex 增删；末尾统一派生维度。
+ */
+export function reconcileBuiltInSlotEntitiesInScene(
+  scene: SceneDocument,
+  hostEntityId: string,
+  config: BuiltInSlotBindingConfig,
+): SceneDocument {
+  const host = scene.entities[hostEntityId];
+  if (!host) return scene;
+
+  const parameterValues = host.components.modelAsset?.parameterValues;
+  const enabled = parameterValues?.[config.enabledParam] === true;
+  const rowCount = enabled ? deriveBuiltInSlotRowCountFromBinding(config, parameterValues) : 0;
+
+  const seen = new Set<number>();
+  const obsoleteIds: string[] = [];
+  for (const slot of findBuiltInSlotEntities(scene, hostEntityId)) {
+    const rowIndex = slot.components.locator?.builtInBinding?.rowIndex ?? 0;
+    if (rowIndex >= rowCount || seen.has(rowIndex)) obsoleteIds.push(slot.id);
+    else seen.add(rowIndex);
+  }
+
+  let next = obsoleteIds.length > 0 ? deleteEntitiesInScene(scene, obsoleteIds) : scene;
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    if (seen.has(rowIndex)) continue;
+    next = createBuiltInSlotEntityInScene(next, hostEntityId, config, rowIndex);
+  }
+  return patchBuiltInSlotDimensions(next, hostEntityId);
+}
+
+/**
+ * 宿主模型参数变化后的内置货格副作用：按启用参数与排数对账货格（幂等），并按声明派生维度。
  * 仅在提交路径调用；preview 路径只应调用 patchBuiltInSlotDimensions。
  */
 function applyBuiltInSlotSideEffects(scene: SceneDocument, hostEntityId: string): SceneDocument {
@@ -2147,16 +2188,7 @@ function applyBuiltInSlotSideEffects(scene: SceneDocument, hostEntityId: string)
   const config = getBuiltInSlotBindingConfig(host);
   if (!host || !config) return scene;
 
-  const enabled = host.components.modelAsset?.parameterValues?.[config.enabledParam] === true;
-  const slotEntityId = findBuiltInSlotEntityId(scene, hostEntityId);
-
-  let next = scene;
-  if (enabled && !slotEntityId) {
-    next = createBuiltInSlotEntityInScene(scene, hostEntityId, config);
-  } else if (!enabled && slotEntityId) {
-    next = deleteEntitiesInScene(scene, [slotEntityId]);
-  }
-  return patchBuiltInSlotDimensions(next, hostEntityId);
+  return reconcileBuiltInSlotEntitiesInScene(scene, hostEntityId, config);
 }
 
 /** 批量删除实体；文件夹保持非级联语义，未删除内容提升到最近仍存在的父级。 */
@@ -2446,12 +2478,11 @@ function prepareResolvedEntityArray(
         );
         duplicatedEntities.push(copyEntity);
 
-        // 源模型开着内置货格时副本同步生成绑定货格；副本无独立模型宿主，
+        // 源模型开着内置货格时副本同步生成绑定货格（每一排各一个）；副本无独立模型宿主，
         // 运行时经 modelArrayInstanceEntities 解析其渲染源布局后放置。
-        const sourceSlotId = findBuiltInSlotEntityId(state.scene, sourceId);
-        const sourceSlot = sourceSlotId ? state.scene.entities[sourceSlotId] : null;
-        const sourceBinding = sourceSlot?.components.locator?.builtInBinding;
-        if (sourceSlot && sourceBinding) {
+        for (const sourceSlot of findBuiltInSlotEntities(state.scene, sourceId)) {
+          const sourceBinding = sourceSlot.components.locator?.builtInBinding;
+          if (!sourceBinding) continue;
           const slotNameResult = createEntityArrayName(sourceSlot.name, copyIndex);
           if (!slotNameResult.ok) return slotNameResult;
           const slotOverrides: EntityDuplicateOverrides = { name: slotNameResult.name };
@@ -2462,7 +2493,7 @@ function prepareResolvedEntityArray(
               ...slotCopy.components.locator!,
               // 内置货格资产编号跟随宿主货架副本，不按规则独立生成
               assetId: copyEntity.components.modelAsset?.assetCode ?? slotCopy.components.locator!.assetId,
-              builtInBinding: { hostEntityId: copyEntity.id, originOffset: { ...sourceBinding.originOffset } },
+              builtInBinding: { ...sourceBinding, hostEntityId: copyEntity.id, originOffset: { ...sourceBinding.originOffset } },
             },
           };
           duplicatedEntities.push(slotCopy);

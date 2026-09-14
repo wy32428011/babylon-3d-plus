@@ -154,7 +154,11 @@ function validateBuiltInSlotParameters(config: JsonObject | undefined, parameter
   if (!config) return;
   const keys = new Set(array(parameters?.parameters).map(definition => object(definition)?.key));
   const mapping = object(config.dimensionMapping);
-  const references = [config.enabledParam, ...['columns', 'layers', 'length', 'height', 'width'].map(key => mapping?.[key])];
+  const references = [
+    config.enabledParam,
+    config.rowCountParam,
+    ...['columns', 'layers', 'length', 'height', 'width'].map(key => mapping?.[key]),
+  ];
   for (const value of references) {
     if (typeof value !== 'string' || !value.trim()) continue;
     if (!keys.has(value.trim())) {

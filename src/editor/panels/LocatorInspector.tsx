@@ -60,7 +60,7 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
     const nextValue = Number(rawValue);
     if (!Number.isFinite(nextValue)) return;
     updateSelectedLocator({
-      builtInBinding: { hostEntityId: builtInBinding.hostEntityId, originOffset: { ...builtInBinding.originOffset, [axis]: nextValue } },
+      builtInBinding: { ...builtInBinding, originOffset: { ...builtInBinding.originOffset, [axis]: nextValue } },
     });
   }
 

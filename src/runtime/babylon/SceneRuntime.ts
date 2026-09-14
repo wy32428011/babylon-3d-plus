@@ -519,6 +519,12 @@ type LocatorBindingSteps = {
   layerStepY: number;
 };
 
+/** 内置货格单排布局：进深中心 + 该排进深（缺省沿用货格自身宽度）。 */
+type BuiltInSlotRowLayoutInfo = {
+  depthCenterZ: number;
+  depthZ?: number;
+};
+
 /** 货架脚本写入 contentRoot metadata 的内置货格布局，坐标为货架实体根节点局部米空间。 */
 type BuiltInSlotLayoutInfo = {
   firstCellCenterX: number;
@@ -526,6 +532,8 @@ type BuiltInSlotLayoutInfo = {
   columnSpacing: number;
   layerStepY: number;
   depthCenterZ: number;
+  /** 多排布局；缺省表示单排（等价于用 depthCenterZ 与货格自身宽度）。 */
+  rows?: BuiltInSlotRowLayoutInfo[];
 };
 
 type CadReferenceRuntimeEntry = {
@@ -3606,16 +3614,12 @@ export class SceneRuntime {
       if (!assetId || !locator || duplicateAssetIds.has(assetId)) continue;
 
       locator.assetId = assetId;
-      if (this.locatorTargets.has(assetId)) {
-        this.locatorTargets.delete(assetId);
-        duplicateAssetIds.add(assetId);
-        continue;
-      }
-      this.locatorTargets.set(assetId, locator);
+      const isBuiltInSlot = Boolean(locatorComponent?.builtInBinding);
+      const assetIdTaken = this.locatorTargets.has(assetId);
 
-      // 构建设备绑定索引
+      // 构建设备绑定索引：内置货格各排共用宿主资产编号，必须逐排登记，否则堆垛机 to_x/to_y/to_z 只能命中首排。
       const deviceCode = locatorComponent?.deviceAssetCode?.trim();
-      if (deviceCode) {
+      if (deviceCode && (isBuiltInSlot || !assetIdTaken)) {
         const rowNumber = locatorComponent?.rowNumber ?? 1;
         let rowMap = this.locatorDeviceIndex.get(deviceCode);
         if (!rowMap) {
@@ -3626,6 +3630,15 @@ export class SceneRuntime {
         list.push(locator);
         rowMap.set(rowNumber, list);
       }
+
+      if (assetIdTaken) {
+        // 同一宿主的多排内置货格共用资产编号是声明内的布局，不按编号冲突处理。
+        if (isBuiltInSlot) continue;
+        this.locatorTargets.delete(assetId);
+        duplicateAssetIds.add(assetId);
+        continue;
+      }
+      this.locatorTargets.set(assetId, locator);
     }
 
     for (const assetId of duplicateAssetIds) {
@@ -3890,14 +3903,21 @@ export class SceneRuntime {
           layerStepY: layout?.layerStepY ?? locator.height + locator.layerGap,
         }
       : null;
-    const signature = this.createLocatorSignature(locator, bindingSteps);
+    // 多排绑定：按排索引取本排布局（越界落到末排）。排进深可能小于货格自身宽度（例如一个整格沿进深均分），
+    // 此时用该进深覆盖线框宽度，让填充/边线/拾取/遥测解算都按真实格子尺寸走。
+    const layoutRows = layout?.rows;
+    const rowLayout = layoutRows?.[Math.min(binding?.rowIndex ?? 0, layoutRows.length - 1)];
+    const effectiveLocator = rowLayout?.depthZ !== undefined && rowLayout.depthZ !== locator.width
+      ? { ...locator, width: rowLayout.depthZ }
+      : locator;
+    const signature = this.createLocatorSignature(effectiveLocator, bindingSteps);
 
     let runtimeLocator = this.locators.get(entity.id);
     if (runtimeLocator && runtimeLocator.root.isDisposed()) {
       // 模型重载会递归销毁挂在模型根下的货格节点（重挂 parent 无法复活）；
       // 原地替换节点字段而不是换条目对象：locatorTargets/locatorDeviceIndex/fetch 上下文都持有条目引用，
       // 换对象会让索引滞留死节点直到下一次完整同步，期间遥测按死节点的脏矩阵解算库位。
-      const rebuilt = this.createLocator(entity.id, locator, bindingSteps);
+      const rebuilt = this.createLocator(entity.id, effectiveLocator, bindingSteps);
       runtimeLocator.material.dispose();
       runtimeLocator.root = rebuilt.root;
       runtimeLocator.fillMesh = rebuilt.fillMesh;
@@ -3909,7 +3929,7 @@ export class SceneRuntime {
       runtimeLocator.signature = signature;
     }
     if (!runtimeLocator) {
-      runtimeLocator = this.createLocator(entity.id, locator, bindingSteps);
+      runtimeLocator = this.createLocator(entity.id, effectiveLocator, bindingSteps);
       runtimeLocator.signature = signature;
       this.locators.set(entity.id, runtimeLocator);
     }
@@ -3918,10 +3938,11 @@ export class SceneRuntime {
       const offset = binding.originOffset;
       const localPosition = layout
         ? {
-            // 逻辑首格中心 = 物理首格中心向列向反方向退 (物理格宽−逻辑格宽)/2
-            x: columnSign * (layout.firstCellCenterX - layout.columnSpacing * (columnSplit - 1) / (2 * columnSplit)) + offset.x,
+            // 逻辑首格中心 = 物理首格中心沿列向退让 (物理格宽−逻辑格宽)/2；
+            // 退让方向由 columnDirection 决定（'-x' 时改向 +x 退），故符号只作用在退让量上。
+            x: layout.firstCellCenterX - columnSign * layout.columnSpacing * (columnSplit - 1) / (2 * columnSplit) + offset.x,
             y: layout.firstLayerSurfaceY + offset.y,
-            z: layout.depthCenterZ + offset.z,
+            z: (rowLayout?.depthCenterZ ?? layout.depthCenterZ) + offset.z,
           }
         // 布局 metadata 未就绪（脚本尚未运行），先落在货架局部原点，脚本就绪后由 refreshBuiltInSlotBindings 修正。
         : { x: offset.x, y: offset.y, z: offset.z };
@@ -3964,7 +3985,7 @@ export class SceneRuntime {
     runtimeLocator.startLayer = locator.startLayer;
     runtimeLocator.columnReversed = locator.columnReversed;
     runtimeLocator.storageDepth = locator.storageDepth;
-    runtimeLocator.cellSize = { length: locator.length, height: locator.height, width: locator.width };
+    runtimeLocator.cellSize = { length: effectiveLocator.length, height: effectiveLocator.height, width: effectiveLocator.width };
 
     const locatorMetadata = { assetId: locator.assetId };
     runtimeLocator.root.metadata = { ...(runtimeLocator.root.metadata ?? {}), storageLocation: locatorMetadata };
@@ -3972,16 +3993,16 @@ export class SceneRuntime {
     if (runtimeLocator.signature !== signature) {
       // Rebuild grid
       const cellSteps = {
-        columnStepX: bindingSteps?.columnStepX ?? locator.length + locator.columnGap,
-        layerStepY: bindingSteps?.layerStepY ?? locator.height + locator.layerGap,
+        columnStepX: bindingSteps?.columnStepX ?? effectiveLocator.length + effectiveLocator.columnGap,
+        layerStepY: bindingSteps?.layerStepY ?? effectiveLocator.height + effectiveLocator.layerGap,
       };
       runtimeLocator.fillMesh.dispose(false, false);
       runtimeLocator.edgeLines.dispose(false, false);
       this.disposeLocatorColumnLabels(runtimeLocator);
-      const rebuilt = this.buildLocatorGridMeshes(entity.id, locator, runtimeLocator.root, runtimeLocator.material, cellSteps);
+      const rebuilt = this.buildLocatorGridMeshes(entity.id, effectiveLocator, runtimeLocator.root, runtimeLocator.material, cellSteps);
       runtimeLocator.fillMesh = rebuilt.fillMesh;
       runtimeLocator.edgeLines = rebuilt.edgeLines;
-      runtimeLocator.columnLabels = this.buildLocatorColumnLabels(entity.id, locator, cellSteps, runtimeLocator.columnLabelsRoot);
+      runtimeLocator.columnLabels = this.buildLocatorColumnLabels(entity.id, effectiveLocator, cellSteps, runtimeLocator.columnLabelsRoot);
       runtimeLocator.cellSteps = cellSteps;
       runtimeLocator.signature = signature;
       if (this.localSlotHighlight?.entityId === entity.id) this.refreshSlotHighlightOverlay('local');
@@ -5437,7 +5458,18 @@ export class SceneRuntime {
     if (firstCellCenterX === null || firstLayerSurfaceY === null || columnSpacing === null || layerStepY === null || depthCenterZ === null) {
       return null;
     }
-    return { firstCellCenterX, firstLayerSurfaceY, columnSpacing, layerStepY, depthCenterZ };
+    // 多排布局：逐排读进深中心，depthZ 可选（缺省由运行时回退货格自身宽度）；非法项直接丢弃。
+    const rows: BuiltInSlotRowLayoutInfo[] = [];
+    if (Array.isArray(layout.rows)) {
+      for (const raw of layout.rows) {
+        if (!isPlainRecord(raw)) continue;
+        const rowCenterZ = read(raw.depthCenterZ);
+        if (rowCenterZ === null) continue;
+        const rowDepthZ = read(raw.depthZ);
+        rows.push(rowDepthZ === null ? { depthCenterZ: rowCenterZ } : { depthCenterZ: rowCenterZ, depthZ: rowDepthZ });
+      }
+    }
+    return { firstCellCenterX, firstLayerSurfaceY, columnSpacing, layerStepY, depthCenterZ, ...(rows.length > 0 ? { rows } : {}) };
   }
 
   private createLocatorSignature(locator: LocatorComponent, bindingSteps?: LocatorBindingSteps | null): string {

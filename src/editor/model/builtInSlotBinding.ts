@@ -21,12 +21,16 @@ export type BuiltInSlotBindingConfig = {
   columnDirection?: BuiltInSlotColumnDirection;
   /** 列向分裂比例的模型参数 key（可选）：1 个实物货格分裂为 N 个逻辑列，缺省为 1 */
   columnSplitParam?: string;
+  /** 排数的模型参数 key（可选）：一个宿主生成 N 个绑定货格，缺省为 1 排 */
+  rowCountParam?: string;
 };
 
 /** 货格实体上的绑定标记；hostEntityId 指向声明了绑定的模型实体时视为内置绑定（parentId 不参与绑定身份，仍只用于文件夹分组）。 */
 export type LocatorBuiltInBinding = {
   /** 宿主（货架）实体 ID；复制粘贴时按剪贴板 ID 映射重建，宿主不在粘贴集合内则解除绑定 */
   hostEntityId: string;
+  /** 排索引（0 基）：对应宿主脚本写入 builtInSlotLayout 的排数组下标，缺省 0 */
+  rowIndex: number;
   /** 基点微调（米，宿主模型局部米空间，叠加在自动对齐结果上） */
   originOffset: Vector3Data;
 };
@@ -53,12 +57,14 @@ export function normalizeBuiltInSlotBindingConfig(source: unknown): BuiltInSlotB
   }
 
   const columnSplitParam = typeof record.columnSplitParam === 'string' ? record.columnSplitParam.trim() : '';
+  const rowCountParam = typeof record.rowCountParam === 'string' ? record.rowCountParam.trim() : '';
 
   return {
     enabledParam,
     dimensionMapping,
     columnDirection: record.columnDirection === '-x' ? '-x' : '+x',
     ...(columnSplitParam ? { columnSplitParam } : {}),
+    ...(rowCountParam ? { rowCountParam } : {}),
   };
 }
 
@@ -76,7 +82,9 @@ export function normalizeLocatorBuiltInBinding(source: unknown): LocatorBuiltInB
   const offsetSource = record.originOffset;
   const offset = offsetSource && typeof offsetSource === 'object' ? offsetSource as Record<string, unknown> : {};
   const read = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
-  return { hostEntityId, originOffset: { x: read(offset.x), y: read(offset.y), z: read(offset.z) } };
+  const rawRowIndex = record.rowIndex;
+  const rowIndex = typeof rawRowIndex === 'number' && Number.isInteger(rawRowIndex) && rawRowIndex >= 0 ? rawRowIndex : 0;
+  return { hostEntityId, rowIndex, originOffset: { x: read(offset.x), y: read(offset.y), z: read(offset.z) } };
 }
 
 /** 判断实体是否为已启用的内置货格（绑定标记存在且指向有效宿主）。 */
@@ -98,6 +106,21 @@ export function deriveColumnSplitFromBinding(
   const value = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(value)) return 1;
   return Math.max(MIN_COLUMN_SPLIT, Math.min(MAX_COLUMN_SPLIT, Math.round(value)));
+}
+
+/**
+ * 读取声明的排数参数；未声明 rowCountParam 时返回 1（单个货格，现状不变）。
+ * 声明后只认 4 排，其余取值（含空/非数）按 2 排兜底——排数参数只承载 2 / 4 两种语义。
+ */
+export function deriveBuiltInSlotRowCountFromBinding(
+  config: BuiltInSlotBindingConfig,
+  parameterValues: ModelParameterValues | undefined,
+): number {
+  const paramKey = config.rowCountParam;
+  if (!paramKey) return 1;
+  const raw = parameterValues?.[paramKey];
+  const value = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(value) && Math.round(value) === 4 ? 4 : 2;
 }
 
 /** 按声明的维度映射从宿主模型参数值派生货格维度。 */
@@ -137,17 +160,25 @@ function sanitizeDimensionValue(key: DimensionKey, value: number): number {
   return Math.max(0.01, value);
 }
 
-/** 查找绑定到指定宿主的内置货格实体 ID。 */
-export function findBuiltInSlotEntityId(scene: SceneDocument, hostEntityId: string): string | null {
+/** 查找绑定到指定宿主的全部内置货格实体，按排索引升序（排索引相同则保持场景顺序）。 */
+export function findBuiltInSlotEntities(scene: SceneDocument, hostEntityId: string): Entity[] {
+  const matched: Entity[] = [];
   for (const entityId of scene.entityIds) {
     const entity = scene.entities[entityId];
-    if (entity?.components.locator?.builtInBinding?.hostEntityId === hostEntityId) return entity.id;
+    if (entity?.components.locator?.builtInBinding?.hostEntityId === hostEntityId) matched.push(entity);
   }
-  return null;
+  return matched.sort((left, right) => (
+    (left.components.locator?.builtInBinding?.rowIndex ?? 0) - (right.components.locator?.builtInBinding?.rowIndex ?? 0)
+  ));
+}
+
+/** 查找绑定到指定宿主的内置货格实体 ID（取排索引最小的一排）。 */
+export function findBuiltInSlotEntityId(scene: SceneDocument, hostEntityId: string): string | null {
+  return findBuiltInSlotEntities(scene, hostEntityId)[0]?.id ?? null;
 }
 
 /**
- * 把宿主模型参数派生的货格维度写入其内置货格实体。
+ * 把宿主模型参数派生的货格维度写入其全部内置货格实体。
  * 宿主未声明绑定、无绑定货格或维度无变化时返回原 scene。
  */
 export function patchBuiltInSlotDimensions(scene: SceneDocument, hostEntityId: string): SceneDocument {
@@ -155,24 +186,24 @@ export function patchBuiltInSlotDimensions(scene: SceneDocument, hostEntityId: s
   const config = getBuiltInSlotBindingConfig(host);
   if (!host || !config) return scene;
 
-  const slotEntityId = findBuiltInSlotEntityId(scene, hostEntityId);
-  const slotEntity = slotEntityId ? scene.entities[slotEntityId] : null;
-  const locator = slotEntity?.components.locator;
-  if (!slotEntity || !locator) return scene;
+  const slots = findBuiltInSlotEntities(scene, hostEntityId);
+  if (slots.length === 0) return scene;
 
   const derived = deriveLocatorDimensionsFromBinding(config, host.components.modelAsset?.parameterValues);
-  const entries = Object.entries(derived).filter(([key, value]) => locator[key as DimensionKey] !== value);
-  if (entries.length === 0) return scene;
+  let changed = false;
+  const entities = { ...scene.entities };
 
-  const nextLocator: LocatorComponent = { ...locator, ...derived };
-  return {
-    ...scene,
-    entities: {
-      ...scene.entities,
-      [slotEntity.id]: {
-        ...slotEntity,
-        components: { ...slotEntity.components, locator: nextLocator },
-      },
-    },
-  };
+  for (const slotEntity of slots) {
+    const locator = slotEntity.components.locator;
+    if (!locator) continue;
+    const entries = Object.entries(derived).filter(([key, value]) => locator[key as DimensionKey] !== value);
+    if (entries.length === 0) continue;
+    changed = true;
+    entities[slotEntity.id] = {
+      ...slotEntity,
+      components: { ...slotEntity.components, locator: { ...locator, ...derived } },
+    };
+  }
+
+  return changed ? { ...scene, entities } : scene;
 }

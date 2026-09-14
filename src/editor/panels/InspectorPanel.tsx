@@ -23,7 +23,7 @@ import {
 } from '../model/entityHierarchy';
 import { containsManualRoamSpawnEntity } from '../model/manualRoamSpawn';
 import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
-import { findBuiltInSlotEntityId } from '../model/builtInSlotBinding';
+import { findBuiltInSlotEntities } from '../model/builtInSlotBinding';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
 import { ClickEventBindingInspector } from './ClickEventBindingInspector';
@@ -371,7 +371,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     modelAsset || meshRenderer || skybox || modelGenerator || clickEventBinding || poiEffect || autoPatrol || manualRoamSpawn || locator,
   );
   const isBuiltInBound = Boolean(locator?.builtInBinding);
-  const builtInSlotEntityId = modelAsset ? findBuiltInSlotEntityId(scene, selectedEntity.id) : null;
+  const builtInSlotEntities = modelAsset ? findBuiltInSlotEntities(scene, selectedEntity.id) : [];
   const transformDisabled = isLocked || isBuiltInBound;
   const transformFields: readonly TransformField[] = light
     ? getLightEditorCapabilities(light.lightKind).transformFields
@@ -632,18 +632,21 @@ export function InspectorPanel(props: InspectorPanelProps) {
                 )}
               </div>
             </div>
-            {builtInSlotEntityId ? (
-              <label className="inspector-row">
-                <span>内置货格</span>
-                <button
-                  type="button"
-                  disabled={isLocked}
-                  onClick={() => requestRevealHierarchyEntity(builtInSlotEntityId)}
-                >
-                  跳转定位
-                </button>
-              </label>
-            ) : null}
+            {builtInSlotEntities.map((slotEntity) => {
+              const rowIndex = slotEntity.components.locator?.builtInBinding?.rowIndex ?? 0;
+              return (
+                <label className="inspector-row" key={slotEntity.id}>
+                  <span>{builtInSlotEntities.length > 1 ? `内置货格 第${rowIndex + 1}排` : '内置货格'}</span>
+                  <button
+                    type="button"
+                    disabled={isLocked}
+                    onClick={() => requestRevealHierarchyEntity(slotEntity.id)}
+                  >
+                    跳转定位
+                  </button>
+                </label>
+              );
+            })}
           </fieldset>
           {isSpecializedTelemetryDeviceType(modelAsset.dataDrivenConfig?.device.devType) ? (
             <>

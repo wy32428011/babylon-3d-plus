@@ -190,12 +190,14 @@ function normalizeBuiltInSlotBinding(source) {
   }
 
   const columnSplitParam = typeof source.columnSplitParam === 'string' ? source.columnSplitParam.trim() : '';
+  const rowCountParam = typeof source.rowCountParam === 'string' ? source.rowCountParam.trim() : '';
 
   return {
     enabledParam,
     dimensionMapping,
     columnDirection: source.columnDirection === '-x' ? '-x' : '+x',
     ...(columnSplitParam ? { columnSplitParam } : {}),
+    ...(rowCountParam ? { rowCountParam } : {}),
   };
 }
 
