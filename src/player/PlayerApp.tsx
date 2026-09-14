@@ -1155,6 +1155,7 @@ export function PlayerApp() {
           entityCount: 0, groupCount: 0, thinInstanceEntityCount: 0,
         }),
         collectDetailedGpuWorkloads: false,
+        captureFrameTimings: true,
       }), setPerformanceSnapshot, Date.now, () => runtime.getTelemetryPerformanceMetrics());
       performanceSessionRef.current = session;
     } catch (error) {

@@ -19,6 +19,7 @@ import { isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAss
 import { StackerTelemetryDriver } from './stackerDriver';
 import { ConveyorTelemetryDriver } from './conveyorDriver';
 import { RgvTelemetryDriver } from './rgvDriver';
+import { createTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../telemetryPerformanceStages';
 import {
   type ConveyorCargoRuntimeEntry,
   createSpecializedTelemetrySharedState,
@@ -72,6 +73,13 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   private readonly candidateGroups = new Map<SpecializedTelemetryDeviceType, CandidateGroup>();
   private injectedModels = new WeakMap<ModelRuntimeEntry, string>();
   private readonly performanceMetrics = { frames: 0, candidateRebuilds: 0, contextSignatureBuilds: 0, diagnosticWrites: 0 };
+  private performanceTimingEnabled = false;
+  private readonly performanceStages = createTelemetryPerformanceStages();
+
+  setPerformanceTimingEnabled(enabled: boolean): void {
+    if (enabled && !this.performanceTimingEnabled) Object.assign(this.performanceStages, createTelemetryPerformanceStages());
+    this.performanceTimingEnabled = enabled;
+  }
 
   constructor(scene: Scene, host: SpecializedTelemetryHost) {
     this.scene = scene;
@@ -108,11 +116,18 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   /** 每帧把最新 MQTT 专用遥测应用到完整主键匹配且无冲突的模型实例；断流设备默认停摆，仅驱动声明 applyWhenStale 的例外（输送线接管自驱）。 */
   applyFrame(deltaSeconds: number): void {
     this.performanceMetrics.frames++;
+    if (this.performanceTimingEnabled) {
+      this.performanceStages.candidatesMs = this.performanceStages.contextMs = this.performanceStages.driverMs
+        = this.performanceStages.arrayRefreshMs = this.performanceStages.externalCargoMs = 0;
+    }
     const nowMs = Date.now();
     for (const driver of this.drivers) {
+      const candidateStarted = this.performanceTimingEnabled ? performance.now() : null;
       this.prepareFrameCandidates(driver.deviceType);
+      if (candidateStarted !== null) this.performanceStages.candidatesMs += performance.now() - candidateStarted;
       const { candidates, conflictKeys } = this.candidateGroups.get(driver.deviceType)!;
       for (const candidate of candidates) {
+        const contextStarted = this.performanceTimingEnabled ? performance.now() : null;
         const frame = this.resolveSpecializedTelemetryFrameSnapshot(candidate, conflictKeys, nowMs);
         // 断流快照默认不驱动；驱动声明 applyWhenStale（如输送线接管自驱）时仍用缓存快照推进。
         const snapshot = frame && (!frame.stale || (driver.applyWhenStale?.(candidate.model) ?? false))
@@ -129,6 +144,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         const contextUnchanged = lastContext?.signature === contextSignature && lastContext?.runtime === scriptRuntime
           && this.injectedModels.get(candidate.model) === candidate.entityId;
         if (!snapshot && contextUnchanged) {
+          if (contextStarted !== null) this.performanceStages.contextMs += performance.now() - contextStarted;
           continue;
         }
         const preparedArrayHost = contextUnchanged
@@ -138,17 +154,24 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
           this.state.lastInjectedScriptContexts.set(candidate.entityId, { signature: contextSignature, runtime: scriptRuntime });
           this.injectedModels.set(candidate.model, candidate.entityId);
         }
+        if (contextStarted !== null) this.performanceStages.contextMs += performance.now() - contextStarted;
         if (snapshot) {
+          const driverStarted = this.performanceTimingEnabled ? performance.now() : null;
           driver.apply(candidate.model, snapshot, deltaSeconds);
+          if (driverStarted !== null) this.performanceStages.driverMs += performance.now() - driverStarted;
         }
         if (preparedArrayHost) {
+          const arrayStarted = this.performanceTimingEnabled ? performance.now() : null;
           this.host.refreshModelArrayRepresentation(candidate.model);
+          if (arrayStarted !== null) this.performanceStages.arrayRefreshMs += performance.now() - arrayStarted;
         }
       }
     }
     // 帧尾统一执行外部持货拉取：与快照新旧无关，conveyor 间流转已由链路协议事件驱动，
     // 仅 stacker/RGV 等无链路能力设备的持货需要扫描登记目标后代交付。
+    const cargoStarted = this.performanceTimingEnabled ? performance.now() : null;
     this.conveyorDriver.pullExternalHolderCargo();
+    if (cargoStarted !== null) this.performanceStages.externalCargoMs += performance.now() - cargoStarted;
   }
 
   /** 清理已不存在有效专用绑定的模型诊断，避免 Inspector 展示过期状态。 */
@@ -157,8 +180,8 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   }
 
   /** 生命周期累计计数；只复制数值，不暴露遥测内容。 */
-  getPerformanceMetrics(): Readonly<typeof this.performanceMetrics> {
-    return { ...this.performanceMetrics };
+  getPerformanceMetrics(): Readonly<typeof this.performanceMetrics & { stages: TelemetryPerformanceStages | null }> {
+    return { ...this.performanceMetrics, stages: this.performanceTimingEnabled ? { ...this.performanceStages } : null };
   }
 
   /** 为同时命中多种专用能力的模型选择唯一驱动类型，实例绑定优先、无绑定时按注册表顺序。 */

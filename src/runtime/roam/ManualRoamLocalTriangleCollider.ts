@@ -1,6 +1,7 @@
 import {
   type AbstractMesh,
   Color3,
+  type Geometry,
   Mesh,
   type Scene,
   StandardMaterial,
@@ -9,6 +10,7 @@ import {
 } from '@babylonjs/core';
 import type { ManualRoamPoint } from './manualRoamCollisionBounds.ts';
 import { resolveManualRoamCollisionStyle } from './manualRoamCollisionPolicy.ts';
+import { acquireCollisionGeometryRevision } from './collisionGeometryRevision.ts';
 
 export const MANUAL_ROAM_LOCAL_TRIANGLE_COLLIDER_PREFIX = '__manual_roam_local_triangles__';
 
@@ -25,8 +27,20 @@ type IndexedCollisionMesh = {
   mesh: AbstractMesh;
   worldMatrix: Float32Array;
   vertexCount: number;
+  geometry: Geometry | null;
+  geometryRevision: number;
+  revisionObserver: ReturnType<typeof acquireCollisionGeometryRevision> | null;
+  indices: ReturnType<AbstractMesh['getIndices']>;
+  visible: boolean;
   worldPositions: Float32Array;
   cells: Map<string, number[]>;
+};
+
+type NearbyCollisionCell = {
+  key: string;
+  distanceSquared: number;
+  triangleCount: number;
+  parts: Array<{ indexed: IndexedCollisionMesh; triangleIndexes: number[] }>;
 };
 
 const DEFAULT_CELL_SIZE_METERS = 4;
@@ -35,7 +49,6 @@ const DEFAULT_MAX_TRIANGLES = 24_576;
 const DEFAULT_REFRESH_INTERVAL_MS = 180;
 const DEFAULT_REFRESH_DISTANCE_METERS = 0.75;
 const TRIANGLES_PER_MESH = 384;
-const MATRIX_CHANGE_EPSILON = 1e-5;
 
 /**
  * 把厂区环境等高模三角切成空间格子，只把人物邻域内的三角提交给 Babylon 碰撞。
@@ -56,6 +69,18 @@ export class ManualRoamLocalTriangleCollider {
   private lastRefreshMs = Number.NEGATIVE_INFINITY;
   private debugVisible = false;
   private currentActiveCount = 0;
+  private contentRevision = 0;
+  private lastQueryRevision = -1;
+  private lastRadiusMeters = 0;
+  private indexBuildCount = 0;
+  private proxyUploadCount = 0;
+  private lastNearbyCells: NearbyCollisionCell[] | null = null;
+
+  /** 仅返回计数，供性能运行和回归验证；不采集模型名称或顶点内容。 */
+  getPerformanceMetrics() {
+    return { indexedMeshes: this.indexedMeshes.size, activeProxies: this.currentActiveCount,
+      indexBuildCount: this.indexBuildCount, proxyUploadCount: this.proxyUploadCount };
+  }
 
   constructor(scene: Scene, options: ManualRoamLocalTriangleColliderOptions = {}) {
     this.scene = scene;
@@ -103,17 +128,17 @@ export class ManualRoamLocalTriangleCollider {
       if (this.indexedMeshes.has(mesh.uniqueId)) seen.add(mesh.uniqueId);
     }
     for (const uniqueId of [...this.indexedMeshes.keys()]) {
-      if (!seen.has(uniqueId)) this.indexedMeshes.delete(uniqueId);
+      if (!seen.has(uniqueId)) this.removeIndexedMesh(uniqueId);
     }
   }
 
   /** 按碰撞策略决定索引或移除单个网格。 */
   observe(mesh: AbstractMesh): void {
     if (resolveManualRoamCollisionStyle(mesh) !== 'local-triangle') {
-      this.indexedMeshes.delete(mesh.uniqueId);
+      this.removeIndexedMesh(mesh.uniqueId);
       return;
     }
-    this.indexMesh(mesh, false);
+    this.indexMesh(mesh);
   }
 
   sync(
@@ -128,7 +153,17 @@ export class ManualRoamLocalTriangleCollider {
     if (!force && elapsed < this.refreshIntervalMs && movedSquared < this.refreshDistanceSquared) return false;
 
     this.refreshChangedIndexes();
+    if (!force && this.lastQueryRevision === this.contentRevision
+      && this.lastRadiusMeters === radiusMeters && this.lastPosition
+      && squaredDistance(position, this.lastPosition) === 0) {
+      this.lastRefreshMs = nowMs;
+      return false;
+    }
     const cells = this.collectNearbyCells(position, radiusMeters);
+    if (!force && haveSameCollisionCells(this.lastNearbyCells, cells)) {
+      this.rememberQuery(position, radiusMeters, nowMs);
+      return false;
+    }
     let triangleBudget = this.maxTriangles;
     let meshIndex = 0;
     let currentPositions: number[] = [];
@@ -139,7 +174,7 @@ export class ManualRoamLocalTriangleCollider {
         return;
       }
       const proxy = this.getOrCreateProxy(meshIndex);
-      applyWorldTriangles(proxy, currentPositions);
+      if (applyWorldTriangles(proxy, currentPositions)) this.proxyUploadCount += 1;
       proxy.visibility = this.debugVisible ? 0.22 : 0;
       proxy.setEnabled(true);
       proxy.computeWorldMatrix(true);
@@ -148,7 +183,7 @@ export class ManualRoamLocalTriangleCollider {
     };
 
     for (const cell of cells) {
-      const cellTriangles = cell.positions.length / 9;
+      const cellTriangles = cell.triangleCount;
       if (cellTriangles <= 0) continue;
       if (triangleBudget < cellTriangles && currentPositions.length === 0) break;
       if (triangleBudget < cellTriangles) {
@@ -162,7 +197,15 @@ export class ManualRoamLocalTriangleCollider {
         flush();
         if (meshIndex >= this.maxColliderMeshes) break;
       }
-      currentPositions.push(...cell.positions);
+      // 保留原有格子、网格和三角顺序；只有候选变化后才展开坐标，不缓存近似碰撞体。
+      for (const part of cell.parts) {
+        for (const triangleIndex of part.triangleIndexes) {
+          const offset = triangleIndex * 9;
+          for (let component = 0; component < 9; component += 1) {
+            currentPositions.push(part.indexed.worldPositions[offset + component]);
+          }
+        }
+      }
       triangleBudget -= cellTriangles;
       if (currentPositions.length / 9 >= TRIANGLES_PER_MESH) flush();
     }
@@ -172,9 +215,16 @@ export class ManualRoamLocalTriangleCollider {
       this.proxies[index].setEnabled(false);
     }
     this.currentActiveCount = meshIndex;
+    this.lastNearbyCells = cells;
+    this.rememberQuery(position, radiusMeters, nowMs);
+    return true;
+  }
+
+  private rememberQuery(position: Readonly<ManualRoamPoint>, radiusMeters: number, nowMs: number): void {
     this.lastPosition = { ...position };
     this.lastRefreshMs = nowMs;
-    return true;
+    this.lastQueryRevision = this.contentRevision;
+    this.lastRadiusMeters = radiusMeters;
   }
 
   setDebugVisible(visible: boolean): void {
@@ -188,46 +238,76 @@ export class ManualRoamLocalTriangleCollider {
     for (const proxy of this.proxies) proxy.setEnabled(false);
     this.currentActiveCount = 0;
     this.lastPosition = null;
+    this.lastNearbyCells = null;
+    this.lastQueryRevision = -1;
     this.lastRefreshMs = Number.NEGATIVE_INFINITY;
   }
 
   dispose(): void {
-    this.deactivate();
+    this.clearScene();
     for (const proxy of this.proxies) proxy.dispose(false, false);
     this.proxies.length = 0;
     this.proxySet.clear();
-    this.indexedMeshes.clear();
     this.material.dispose();
+  }
+
+  /** 场景代次变化立即释放旧环境索引，不等待用户在新场景再次开启漫游。 */
+  clearScene(): void {
+    this.deactivate();
+    for (const uniqueId of this.indexedMeshes.keys()) this.removeIndexedMesh(uniqueId);
   }
 
   private refreshChangedIndexes(): void {
     for (const indexed of [...this.indexedMeshes.values()]) {
       const mesh = indexed.mesh;
       if (mesh.isDisposed() || resolveManualRoamCollisionStyle(mesh) !== 'local-triangle') {
-        this.indexedMeshes.delete(indexed.uniqueId);
+        this.removeIndexedMesh(indexed.uniqueId);
         continue;
       }
-      this.indexMesh(mesh, true);
+      this.indexMesh(mesh);
     }
   }
 
-  private indexMesh(mesh: AbstractMesh, onlyIfChanged: boolean): void {
+  private removeIndexedMesh(uniqueId: number): void {
+    const indexed = this.indexedMeshes.get(uniqueId);
+    if (!indexed) return;
+    indexed.revisionObserver?.release();
+    this.indexedMeshes.delete(uniqueId);
+    this.lastNearbyCells = null;
+    this.contentRevision += 1;
+  }
+
+  private indexMesh(mesh: AbstractMesh): void {
     const existing = this.indexedMeshes.get(mesh.uniqueId);
-    const worldMatrix = Float32Array.from(mesh.getWorldMatrix().m);
+    const matrix = mesh.computeWorldMatrix(!mesh.isSynchronized()).m;
     const vertexCount = mesh.getTotalVertices();
+    const geometry = mesh.geometry;
+    // Babylon updateIndices 的可更新路径不触发 onGeometryUpdated，但会替换 CPU 索引数组。
+    const indices = mesh.getIndices();
+    const geometryRevision = existing?.geometry === geometry ? existing.revisionObserver?.read() ?? -1 : -1;
+    const visible = mesh.isEnabled() && mesh.isVisible && mesh.visibility > 0;
+    if (existing && existing.visible !== visible) {
+      existing.visible = visible;
+      this.contentRevision += 1;
+    }
     if (
-      onlyIfChanged
-      && existing
+      existing && geometry
+      && existing.geometry === geometry && existing.geometryRevision === geometryRevision
+      && existing.indices === indices
       && existing.vertexCount === vertexCount
-      && !hasMatrixChanged(existing.worldMatrix, worldMatrix)
+      && !hasMatrixChanged(existing.worldMatrix, matrix)
     ) return;
 
     const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
-    const indices = mesh.getIndices();
     if (!positions || !indices || indices.length < 3) {
-      this.indexedMeshes.delete(mesh.uniqueId);
+      this.removeIndexedMesh(mesh.uniqueId);
       return;
     }
+
+    const worldMatrix = Float32Array.from(matrix);
+    const revisionObserver = existing?.geometry === geometry
+      ? existing.revisionObserver : geometry ? acquireCollisionGeometryRevision(geometry) : null;
+    if (existing && existing.revisionObserver !== revisionObserver) existing.revisionObserver?.release();
 
     const triangleCount = Math.floor(indices.length / 3);
     const worldPositions = new Float32Array(triangleCount * 9);
@@ -273,17 +353,24 @@ export class ManualRoamLocalTriangleCollider {
       mesh,
       worldMatrix,
       vertexCount,
+      geometry,
+      geometryRevision: revisionObserver?.read() ?? -1,
+      revisionObserver,
+      indices,
+      visible,
       worldPositions: packedTriangleCount === triangleCount
         ? worldPositions
         : worldPositions.slice(0, packedTriangleCount * 9),
       cells,
     });
+    this.indexBuildCount += 1;
+    this.contentRevision += 1;
   }
 
   private collectNearbyCells(
     position: Readonly<ManualRoamPoint>,
     radiusMeters: number,
-  ): Array<{ distanceSquared: number; positions: number[] }> {
+  ): NearbyCollisionCell[] {
     const cellSize = this.cellSizeMeters;
     const minIx = Math.floor((position.x - radiusMeters) / cellSize);
     const maxIx = Math.floor((position.x + radiusMeters) / cellSize);
@@ -291,7 +378,31 @@ export class ManualRoamLocalTriangleCollider {
     const maxIy = Math.floor((position.y + radiusMeters) / cellSize);
     const minIz = Math.floor((position.z - radiusMeters) / cellSize);
     const maxIz = Math.floor((position.z + radiusMeters) / cellSize);
-    const merged = new Map<string, { distanceSquared: number; positions: number[] }>();
+    const merged = new Map<string, NearbyCollisionCell>();
+    // 通常为固定 24 米邻域，格子 key 只计算一次；异常大的查询仍沿用逐格遍历，避免无界数组。
+    const queryCells: Array<{ key: string; ix: number; iy: number; iz: number }> | null =
+      (maxIx - minIx + 1) * (maxIy - minIy + 1) * (maxIz - minIz + 1) <= 8192 ? [] : null;
+    if (queryCells) {
+      for (let ix = minIx; ix <= maxIx; ix += 1) {
+        for (let iy = minIy; iy <= maxIy; iy += 1) {
+          for (let iz = minIz; iz <= maxIz; iz += 1) queryCells.push({ key: makeCellKey(ix, iy, iz), ix, iy, iz });
+        }
+      }
+    }
+    const append = (indexed: IndexedCollisionMesh, key: string, ix: number, iy: number, iz: number) => {
+      const triangleIndexes = indexed.cells.get(key);
+      if (!triangleIndexes?.length) return;
+      let cell = merged.get(key);
+      if (!cell) {
+        const dx = position.x - (ix + 0.5) * cellSize;
+        const dy = position.y - (iy + 0.5) * cellSize;
+        const dz = position.z - (iz + 0.5) * cellSize;
+        cell = { key, distanceSquared: dx * dx + dy * dy + dz * dz, triangleCount: 0, parts: [] };
+        merged.set(key, cell);
+      }
+      cell.parts.push({ indexed, triangleIndexes });
+      cell.triangleCount += triangleIndexes.length;
+    };
 
     for (const indexed of this.indexedMeshes.values()) {
       if (
@@ -300,24 +411,14 @@ export class ManualRoamLocalTriangleCollider {
         || !indexed.mesh.isVisible
         || indexed.mesh.visibility <= 0
       ) continue;
+      if (queryCells) {
+        for (const cell of queryCells) append(indexed, cell.key, cell.ix, cell.iy, cell.iz);
+        continue;
+      }
       for (let ix = minIx; ix <= maxIx; ix += 1) {
         for (let iy = minIy; iy <= maxIy; iy += 1) {
           for (let iz = minIz; iz <= maxIz; iz += 1) {
-            const key = makeCellKey(ix, iy, iz);
-            const triangleIndexes = indexed.cells.get(key);
-            if (!triangleIndexes || triangleIndexes.length === 0) continue;
-            const centerX = (ix + 0.5) * cellSize;
-            const centerY = (iy + 0.5) * cellSize;
-            const centerZ = (iz + 0.5) * cellSize;
-            const distanceSquared = squaredDistance(position, { x: centerX, y: centerY, z: centerZ });
-            const existing = merged.get(key) ?? { distanceSquared, positions: [] as number[] };
-            if (!merged.has(key)) merged.set(key, existing);
-            for (const triangleIndex of triangleIndexes) {
-              const offset = triangleIndex * 9;
-              for (let component = 0; component < 9; component += 1) {
-                existing.positions.push(indexed.worldPositions[offset + component]);
-              }
-            }
+            append(indexed, makeCellKey(ix, iy, iz), ix, iy, iz);
           }
         }
       }
@@ -343,7 +444,19 @@ export class ManualRoamLocalTriangleCollider {
   }
 }
 
-function applyWorldTriangles(mesh: Mesh, positions: number[]): void {
+function haveSameCollisionCells(previous: readonly NearbyCollisionCell[] | null, current: readonly NearbyCollisionCell[]): boolean {
+  if (!previous || previous.length !== current.length) return false;
+  return current.every((cell, index) => {
+    const old = previous[index];
+    return old.key === cell.key && old.parts.length === cell.parts.length
+      && cell.parts.every((part, partIndex) => part.indexed === old.parts[partIndex].indexed
+        && part.triangleIndexes === old.parts[partIndex].triangleIndexes);
+  });
+}
+
+function applyWorldTriangles(mesh: Mesh, positions: number[]): boolean {
+  const previous = mesh.getVerticesData(VertexBuffer.PositionKind);
+  if (previous?.length === positions.length && positions.every((value, index) => value === previous[index])) return false;
   const vertexCount = Math.floor(positions.length / 3);
   const packedPositions = new Float32Array(vertexCount * 3);
   for (let index = 0; index < packedPositions.length; index += 1) packedPositions[index] = positions[index];
@@ -357,6 +470,7 @@ function applyWorldTriangles(mesh: Mesh, positions: number[]): void {
   vertexData.normals = normals;
   vertexData.applyToMesh(mesh, true);
   mesh.refreshBoundingInfo(true);
+  return true;
 }
 
 function collectTriangleCellKeys(triangle: ArrayLike<number>, cellSize: number): string[] {
@@ -387,9 +501,10 @@ function makeCellKey(ix: number, iy: number, iz: number): string {
   return `${ix}:${iy}:${iz}`;
 }
 
-function hasMatrixChanged(left: Float32Array, right: Float32Array): boolean {
+function hasMatrixChanged(left: Float32Array, right: ArrayLike<number>): boolean {
   for (let index = 0; index < 16; index += 1) {
-    if (Math.abs(left[index] - right[index]) > MATRIX_CHANGE_EPSILON) return true;
+    // 原索引使用 Float32 矩阵；精确比较同一表示，不通过额外容差省略碰撞变换。
+    if (left[index] !== Math.fround(right[index])) return true;
   }
   return false;
 }

@@ -127,6 +127,10 @@ test('共用编译类仍为各模型创建独立脚本实例，参数和资产�
   assert.equal(a.script.constructor, b.script.constructor);
   assert.equal(a.script.assetCode, 'A'); assert.equal(b.script.assetCode, 'B');
   assert.equal(a.script.width, 10); assert.equal(b.script.width, 20);
+  assert.equal(f.diagnostics().initializationCount, 2);
+  assert.ok(f.diagnostics().initializationQueueMs >= 0);
+  assert.ok(f.diagnostics().initializationMs >= 0);
+  assert.ok(f.diagnostics().maxInitializationMs >= 0);
   runtimeA.dispose(); runtimeB.dispose();
 });
 

@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
+import { parseArgs } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
 
 const workspace = process.cwd();
+const { values } = parseArgs({ options: { cycles: { type: 'string', default: '1' } } });
+const cycles = Number(values.cycles);
+assert.ok(Number.isInteger(cycles) && cycles >= 1 && cycles <= 50, 'cycles 必须是 1–50 的整数。');
 const root = await mkdtemp(path.join(tmpdir(), 'zending-session-smoke-'));
 const userData = path.join(root, 'user-data');
 const projectWorkspace = path.join(root, 'workspace');
@@ -47,7 +52,7 @@ try {
   await page.getByRole('button', { name: '进入空白编辑器', exact: true }).waitFor({ state: 'visible', timeout: 120_000 });
   await page.evaluate((baseUrl) => window.editorApi.saveDataPlatformConfig({ baseUrl }), `http://127.0.0.1:${server.address().port}`);
   await page.reload({ waitUntil: 'domcontentloaded' });
-  for (const project of projects) {
+  for (const project of Array.from({ length: cycles }, () => projects).flat()) {
     const card = page.locator('.home-recent-card').filter({ hasText: project.projectName });
     await card.getByRole('button', { name: '打开', exact: true }).click();
     const back = page.getByRole('button', { name: '返回首页', exact: true });
@@ -55,7 +60,8 @@ try {
     await page.waitForFunction(() => !document.querySelector('.scene-preparation-overlay'));
     const context = await page.evaluate(() => window.editorApi.getDigitalTwinPublishContext());
     assert.equal(context.projectId, project.id);
-    assert.equal(path.resolve(context.projectRoot), path.join(projectWorkspace, 'Projects', project.id));
+    const sourceKey = createHash('sha256').update(`http://127.0.0.1:${server.address().port}`).digest('hex');
+    assert.equal(path.resolve(context.projectRoot), path.join(projectWorkspace, 'Platforms', sourceKey, 'Projects', project.id));
     await back.click();
     await page.getByRole('button', { name: '进入空白编辑器', exact: true }).waitFor({ state: 'visible' });
     const cleared = await page.evaluate(async () => ({
@@ -70,7 +76,7 @@ try {
   await page.getByRole('button', { name: '返回首页', exact: true }).waitFor({ state: 'visible' });
   assert.equal((await page.evaluate(() => window.editorApi.getDigitalTwinPublishContext())).projectId, null);
   assert.deepEqual(errors, []);
-  console.log('PASS: rendered Electron A -> home -> B -> home -> blank; publish project/root and assets isolated; no page errors');
+  console.log(`PASS: rendered Electron ${cycles} cycles A -> home -> B -> home -> blank; publish project/root and assets isolated; no page errors`);
 } finally {
   if (app) await app.close();
   server.closeAllConnections();

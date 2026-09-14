@@ -3,6 +3,7 @@ import { normalizeDataPlatformScreenUrl } from './dataPlatformScreen';
 import type { SceneDocument } from './SceneDocument';
 import { createId } from '../../shared/ids';
 import { getClickEventModelResourceKey } from '../../../electron/shared/clickEventModelIdentity';
+import { normalizeDataPlatformModelIdentity, type DataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 
 /** 点击事件绑定从项目资源库读取的最小资产快照，避免领域模型反向依赖带图片资源的 UI 资产模块。 */
 type ClickEventBindingSourceAsset = {
@@ -15,7 +16,14 @@ type ClickEventBindingSourceAsset = {
   assetRevision?: string;
   thumbnailUrl?: string;
   displayName?: string;
+  dataPlatformSourceKey?: string;
+  dataPlatformResourceId?: string;
 };
+
+/** 身份缺失或暂时不可解析不能清空合法历史槽位，留待中台验证后补齐。 */
+function readDeviceModelIdentity(value: unknown): DataPlatformModelIdentity | undefined {
+  try { return normalizeDataPlatformModelIdentity(value); } catch { return undefined; }
+}
 
 /** 单个绑定允许配置的最大设备类型数。 */
 export const CLICK_EVENT_BINDING_MAX_DEVICE_TYPES = 64;
@@ -88,6 +96,9 @@ export function createClickEventBindingDeviceTypeFromAsset(
   const thumbnailUrl = asset.thumbnailUrl?.startsWith(AUTHORIZED_CLICK_EVENT_ASSET_URL_PREFIX)
     ? asset.thumbnailUrl
     : undefined;
+  const [kind, resourceId, modelPath] = getClickEventModelResourceKey(asset.sourceUrl)?.split(':') ?? [];
+  const identity = asset.dataPlatformSourceKey && (!asset.dataPlatformResourceId || asset.dataPlatformResourceId === resourceId)
+    ? readDeviceModelIdentity({ sourceKey: asset.dataPlatformSourceKey, kind, resourceId, modelPath }) : undefined;
 
   return {
     id: createId('click_event_device'),
@@ -97,6 +108,7 @@ export function createClickEventBindingDeviceTypeFromAsset(
     sourceUrl: asset.sourceUrl,
     ...(asset.assetRevision ? { assetRevision: asset.assetRevision } : {}),
     ...(thumbnailUrl ? { thumbnailUrl } : {}),
+    ...(identity ? { dataPlatformModel: identity } : {}),
   };
 }
 
@@ -114,6 +126,7 @@ function sanitizeClickEventBindingDeviceType(value: unknown): ClickEventBindingD
   const assetId = sanitizeText(value.assetId, CLICK_EVENT_BINDING_ID_MAX_LENGTH) || id;
   const thumbnailUrl = sanitizeText(value.thumbnailUrl, 1024);
   const assetRevision = sanitizeText(value.assetRevision, 128);
+  const identity = readDeviceModelIdentity(value.dataPlatformModel);
 
   return {
     id,
@@ -122,6 +135,7 @@ function sanitizeClickEventBindingDeviceType(value: unknown): ClickEventBindingD
     sourcePath,
     sourceUrl,
     ...(assetRevision ? { assetRevision } : {}),
+    ...(identity ? { dataPlatformModel: identity } : {}),
     ...(thumbnailUrl && thumbnailUrl.startsWith(AUTHORIZED_CLICK_EVENT_ASSET_URL_PREFIX) ? { thumbnailUrl } : {}),
   };
 }

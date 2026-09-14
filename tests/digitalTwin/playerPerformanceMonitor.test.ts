@@ -31,12 +31,22 @@ test('发布轻量采样保留几何指标、跳过材质明细，并完整释�
     disconnect() { disconnected += 1; }
   }
   Object.defineProperty(globalThis, 'PerformanceObserver', { configurable: true, value: FakePerformanceObserver });
-  let monitor: { start(callback: (sample: any) => void): void; sample(): any; dispose(): void } | undefined;
+  let monitor: { start(callback: (sample: any) => void): void; sample(): any; dispose(): void;
+    setFrameTimingEnabled(enabled: boolean): void; getFrameTimingReport(): any } | undefined;
   try {
     const module = await server.ssrLoadModule('/src/runtime/babylon/ScenePerformanceMonitor.ts');
     const options = { getRuntimeMetrics: () => ({}), getEditThinInstancePlanMetrics: () => ({}),
       collectDetailedGpuWorkloads: false };
     monitor = new module.ScenePerformanceMonitor(engine, scene, options);
+    assert.equal(monitor!.getFrameTimingReport(), null, '普通监控不应自动开启逐帧采集');
+    monitor!.setFrameTimingEnabled(true);
+    scene.render();
+    await new Promise(resolve => setTimeout(resolve, 1));
+    scene.render();
+    assert.equal(monitor!.getFrameTimingReport().intervalCount, 1);
+    monitor!.setFrameTimingEnabled(false);
+    scene.render();
+    assert.equal(monitor!.getFrameTimingReport().intervalCount, 1, '停止后冻结，不能继续采样');
     let materialReads = 0;
     const originalGetTextures = material.getActiveTextures.bind(material);
     material.getActiveTextures = () => { materialReads += 1; return originalGetTextures(); };

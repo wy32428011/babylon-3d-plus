@@ -1,4 +1,6 @@
 import type { ScenePerformanceSnapshot } from '../runtime/babylon/ScenePerformanceMonitor';
+import type { FrameTimingReport } from '../runtime/babylon/FrameTimingWindow';
+import { copyTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../runtime/babylon/telemetry/telemetryPerformanceStages.ts';
 
 const SAMPLE_INTERVAL_MS = 1_000;
 const HISTORY_WINDOW_MS = 60_000;
@@ -12,6 +14,7 @@ export type PlayerPerformanceSourceSnapshot = Pick<ScenePerformanceSnapshot,
 export type PlayerPerformanceMonitor = {
   start(onSample: (snapshot: PlayerPerformanceSourceSnapshot) => void, intervalMs: number): void;
   dispose(): void;
+  getFrameTimingReport?(): FrameTimingReport | null;
 };
 
 export type PlayerTelemetryPerformanceMetrics = {
@@ -21,6 +24,7 @@ export type PlayerTelemetryPerformanceMetrics = {
   diagnosticWrites: number;
   lastFrameTimeMs: number | null;
   maxFrameTimeMs: number | null;
+  stages?: TelemetryPerformanceStages | null;
 };
 
 export type PlayerPerformanceSample = PlayerPerformanceSourceSnapshot & {
@@ -65,6 +69,7 @@ function selectTelemetryMetrics(metrics: PlayerTelemetryPerformanceMetrics | nul
     diagnosticWrites: metrics.diagnosticWrites,
     lastFrameTimeMs: metrics.lastFrameTimeMs,
     maxFrameTimeMs: metrics.maxFrameTimeMs,
+    ...(metrics.stages ? { stages: copyTelemetryPerformanceStages(metrics.stages) } : {}),
   };
 }
 
@@ -130,9 +135,10 @@ export function startPlayerPerformanceSession(
         generatedAt: new Date(now()).toISOString(),
         sampleIntervalMs: SAMPLE_INTERVAL_MS,
         historyWindowMs: HISTORY_WINDOW_MS,
-        counterSemantics: 'Babylon counters use the last-second mean; percentiles describe samples, not individual frames. GPU null means unavailable.',
-        telemetrySemantics: 'Counters cover the runtime lifetime; lastFrameTimeMs times the last telemetry frame and maxFrameTimeMs covers this diagnostic session. Null timing means unavailable.',
+        counterSemantics: 'Babylon counters use the last-second mean; summary percentiles describe samples, not individual frames. frameTiming separately reports completed-render-frame intervals. GPU null means unavailable.',
+        telemetrySemantics: 'Counters cover the runtime lifetime; lastFrameTimeMs times the last telemetry frame and maxFrameTimeMs covers this diagnostic session. stages are exclusive subspans and must not be added to the total. Callbacks outside this frame require a CPU profile. Null timing means unavailable.',
         summary: summarize(samples),
+        frameTiming: monitor.getFrameTimingReport?.() ?? null,
         samples,
       }, null, 2);
     },

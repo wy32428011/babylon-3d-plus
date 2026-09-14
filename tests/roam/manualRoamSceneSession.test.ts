@@ -12,6 +12,7 @@ const sceneViewSource = await readFile(
 );
 
 test('场景会话切换时结束手动漫游并使旧出生点失效', () => {
+  assert.match(runtimeSource, /invalidateSpawn\(\): void \{[\s\S]*?this\.localTriangleCollider\.clearScene\(\);/);
   assert.match(
     runtimeSource,
     /invalidateSpawn\(\): void \{[\s\S]*?this\.setEnabled\(false\)[\s\S]*?this\.spawnInitialized = false;[\s\S]*?this\.fallbackGroundRequired = false;/,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import { createServer } from 'vite';
-import { AnimationGroup, ArcRotateCamera, AssetContainer, MeshBuilder, NullEngine, Scene, SceneLoader, Vector3 } from '@babylonjs/core';
+import { Animation, AnimationGroup, ArcRotateCamera, AssetContainer, MeshBuilder, NullEngine, Scene, SceneLoader, Vector3 } from '@babylonjs/core';
 
 const server = await createServer({ appType: 'custom', configFile: false, server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true } });
 const { ManualRoamRuntime } = await server.ssrLoadModule('/src/runtime/roam/ManualRoamRuntime.ts');
@@ -102,5 +102,77 @@ test('编辑态切换人物重建显示并丢弃旧模型', async (t) => {
     assert.equal(second.mesh.isDisposed(), true);
   } finally {
     runtime.dispose(); scene.dispose(); engine.dispose();
+  }
+});
+
+test('无漫游人物需求时不加载默认资源，首次显式设置后仍按原异步生命周期加载', async (t) => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const camera = new ArcRotateCamera('camera', 0, 1, 10, Vector3.Zero(), scene);
+  const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true });
+  Object.defineProperty(globalThis, 'document', { value: new EventTarget(), configurable: true });
+  const requests: Array<(container: AssetContainer) => void> = [];
+  t.mock.method(SceneLoader, 'LoadAssetContainerAsync', () => new Promise(resolve => requests.push(resolve)));
+  const runtime = new ManualRoamRuntime({ scene, engine, camera, canvas: new EventTarget(),
+    avatarUrl: 'https://assets.test/default.glb', preloadAvatar: false, setOrbitControlsEnabled: () => {} });
+  try {
+    assert.equal(requests.length, 0);
+    runtime.setAvatarUrl('https://assets.test/custom.glb');
+    runtime.setAvatarUrl('https://assets.test/custom.glb');
+    assert.equal(requests.length, 1);
+    const avatar = createAvatar(scene, 'custom');
+    requests[0](avatar.container);
+    await flush();
+    assert.equal(runtime.getSnapshot().avatarAnimationMode, 'static');
+    runtime.dispose();
+    assert.equal(avatar.mesh.isDisposed(), true);
+  } finally {
+    runtime.dispose(); scene.dispose(); engine.dispose();
+    if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
+
+test('退出漫游暂停真实人物动画求值，重进恢复且反复启停不新增动画实例', async (t) => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const camera = new ArcRotateCamera('camera', 0, 1, 10, Vector3.Zero(), scene);
+  const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true });
+  Object.defineProperty(globalThis, 'document', { value: new EventTarget(), configurable: true });
+  const avatar = createAvatar(scene, 'animated-avatar');
+  const group = new AnimationGroup('Idle', scene);
+  const animation = new Animation('idle-yaw', 'rotation.y', 30, Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CYCLE);
+  animation.setKeys([{ frame: 0, value: 0 }, { frame: 60, value: 1 }]);
+  group.addTargetedAnimation(animation, avatar.mesh);
+  avatar.container.animationGroups.push(group);
+  avatar.container.removeAllFromScene();
+  t.mock.method(SceneLoader, 'LoadAssetContainerAsync', async () => avatar.container);
+  const runtime = new ManualRoamRuntime({ scene, engine, camera, canvas: new EventTarget(),
+    avatarUrl: 'https://assets.test/animated.glb', setOrbitControlsEnabled: () => {} });
+  try {
+    await flush();
+    runtime.setEnabled(true);
+    scene.render();
+    assert.equal(group.isPlaying, true);
+    const animatableCount = group.animatables.length;
+    assert.ok(animatableCount > 0, '动画必须有真实目标，不能用空 AnimationGroup 代替');
+    for (let cycle = 0; cycle < 20; cycle += 1) {
+      runtime.setEnabled(false);
+      assert.equal(group.isPlaying, false, '隐藏人物不能继续求值内置动画');
+      assert.ok(group.animatables.every(animatable => animatable.paused));
+      runtime.setEnabled(true);
+      assert.equal(group.isPlaying, true);
+      assert.equal(group.animatables.length, animatableCount);
+    }
+    runtime.dispose();
+    assert.equal(scene.animationGroups.includes(group), false);
+  } finally {
+    runtime.dispose(); scene.dispose(); engine.dispose();
+    if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
   }
 });

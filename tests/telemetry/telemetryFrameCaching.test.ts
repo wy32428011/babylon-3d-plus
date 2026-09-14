@@ -65,6 +65,30 @@ test('连续帧复用绑定、上下文和诊断，同时每帧保留相同 delt
   } finally { h.dispose(); }
 });
 
+test('分阶段计时仅在性能运行启用，开关不改变驱动和上下文注入次数', (t) => {
+  const h = harness();
+  try {
+    deviceTelemetryStore.upsert(snapshot());
+    let clockReads = 0;
+    t.mock.method(performance, 'now', () => ++clockReads);
+    h.frame();
+    assert.equal(clockReads, 0);
+    h.runtime.setPerformanceTimingEnabled(true);
+    h.frame();
+    const stages = h.runtime.getPerformanceMetrics().stages!;
+    assert.ok(stages.candidatesMs > 0);
+    assert.ok(stages.driverMs > 0);
+    assert.ok(stages.externalCargoMs > 0);
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.injections(), 1);
+    h.runtime.setPerformanceTimingEnabled(false);
+    clockReads = 0;
+    h.frame();
+    assert.equal(clockReads, 0);
+    assert.equal(h.calls.length, 3);
+  } finally { h.dispose(); }
+});
+
 test('同值心跳刷新在线时间，断流与自驱继续遵守原规则', () => {
   const h = harness();
   try {
