@@ -81,6 +81,7 @@ function locatorEntity(
         columnGap: 0,
         layerGap: 0,
         deviceAssetCode: '',
+        aisleCode: '',
         rowNumber: locator.rowNumber,
         ...(options.hostEntityId
           ? { builtInBinding: { hostEntityId: options.hostEntityId, originOffset: { x: 0, y: 0, z: 0 } } }

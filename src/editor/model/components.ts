@@ -71,6 +71,8 @@ export type LocatorComponent = {
   columnGap: number;
   layerGap: number;
   deviceAssetCode: string;
+  /** 关联巷道编号：堆垛机/多穿车等运载设备与站台/内置货格等库位设备共用；当前仅存值，关联逻辑待补。 */
+  aisleCode: string;
   rowNumber: number;
   /** fetch 数据驱动；缺省表示不启用。 */
   fetchDrive?: LocatorFetchDriveConfig;

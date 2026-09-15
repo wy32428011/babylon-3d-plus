@@ -101,6 +101,18 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
         />
       </label>
       <label className="inspector-row">
+        <span>关联巷道</span>
+        <input
+          maxLength={128}
+          type="text"
+          disabled={disabled}
+          value={component.aisleCode}
+          onChange={(event) => updateSelectedLocator({ aisleCode: event.target.value })}
+          placeholder="巷道编号"
+          title="与堆垛机、多穿车等运载设备上的巷道编号对应；一条巷道对应多台运载设备和多个库位"
+        />
+      </label>
+      <label className="inspector-row">
         <span>排号 ({'to_z'})</span>
         <input
           type="number"

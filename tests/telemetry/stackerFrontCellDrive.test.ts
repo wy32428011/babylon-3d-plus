@@ -65,6 +65,7 @@ function makeLocator(
     startLayer: options.startLayer ?? 1,
     columnReversed: false,
     deviceAssetCode: 'STK1',
+    aisleCode: '',
     rowNumber: 2,
     storageDepth: 'near',
   } as unknown as LocatorRuntimeEntry;

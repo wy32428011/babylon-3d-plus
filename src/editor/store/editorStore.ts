@@ -912,6 +912,7 @@ function cloneLocator(locator: LocatorComponent): LocatorComponent {
     columnGap: locator.columnGap,
     layerGap: locator.layerGap,
     deviceAssetCode: locator.deviceAssetCode,
+    aisleCode: locator.aisleCode,
     rowNumber: locator.rowNumber,
     ...(locator.fetchDrive ? { fetchDrive: { ...locator.fetchDrive } } : {}),
     ...(locator.builtInBinding
@@ -1085,6 +1086,7 @@ function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): bool
     left.columnGap === right.columnGap &&
     left.layerGap === right.layerGap &&
     left.deviceAssetCode === right.deviceAssetCode &&
+    left.aisleCode === right.aisleCode &&
     left.rowNumber === right.rowNumber &&
     areLocatorFetchDrivesEqual(left.fetchDrive, right.fetchDrive) &&
     areLocatorBuiltInBindingsEqual(left.builtInBinding, right.builtInBinding)
@@ -4976,6 +4978,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         columnGap: sanitizeLocatorGap(patch.columnGap, before.columnGap),
         layerGap: sanitizeLocatorGap(patch.layerGap, before.layerGap),
         deviceAssetCode: patch.deviceAssetCode !== undefined ? patch.deviceAssetCode.trim().slice(0, 128) : before.deviceAssetCode,
+        aisleCode: patch.aisleCode !== undefined ? patch.aisleCode.trim().slice(0, 128) : before.aisleCode,
         rowNumber: sanitizeLocatorInt(patch.rowNumber, before.rowNumber, 0, 999),
         fetchDrive: sanitizeLocatorFetchDrivePatch(patch.fetchDrive, before.fetchDrive),
         builtInBinding: sanitizeLocatorBuiltInBindingPatch(patch.builtInBinding, before.builtInBinding),

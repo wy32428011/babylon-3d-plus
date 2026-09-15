@@ -73,6 +73,7 @@ function createLocatorEntity(id: string, name: string, assetId: string): Entity 
     columnGap: 0,
     layerGap: 0,
     deviceAssetCode: '',
+    aisleCode: '',
     rowNumber: 1,
   };
   return entity;

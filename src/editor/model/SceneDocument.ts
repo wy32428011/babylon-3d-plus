@@ -1208,6 +1208,7 @@ export function createLocatorEntity(position: Vector3Data = vector3()): Entity {
         columnGap: 0,
         layerGap: 0,
         deviceAssetCode: '',
+        aisleCode: '',
         rowNumber: 1,
       },
     },

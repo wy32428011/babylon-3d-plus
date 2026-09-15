@@ -72,6 +72,7 @@ function createSlotEntity(
         columnGap: 0,
         layerGap: 0,
         deviceAssetCode: '',
+        aisleCode: '',
         rowNumber: rowIndex + 1,
         ...(hostEntityId ? { builtInBinding: { hostEntityId, rowIndex, originOffset: { x: 0, y: 0, z: 0 } } } : {}),
       },

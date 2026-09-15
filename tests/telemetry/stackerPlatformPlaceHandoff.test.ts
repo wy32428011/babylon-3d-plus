@@ -112,6 +112,7 @@ function makeHarness() {
     cellSteps: { columnStepX: 1.3, layerStepY: 0.34 },
     rowNumber: 2,
     deviceAssetCode: 'DDJ2',
+    aisleCode: '',
   } as unknown as LocatorRuntimeEntry;
 
   const host = {
