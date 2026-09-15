@@ -1,6 +1,6 @@
-# 设备运行时驱动指南（conveyor / rgv / stacker / shelf）
+# 设备运行时驱动指南（conveyor / rgv / stacker / shuttle / shelf）
 
-面向设备功能扩展的总览文档。梳理 4 类设备在运行预览时如何被**参数化配置、MQTT 消息、fetch 响应**驱动，覆盖**动画、时序、状态机、设备间交接**四个维度。
+面向设备功能扩展的总览文档。梳理 5 类设备在运行预览时如何被**参数化配置、MQTT 消息、fetch 响应**驱动，覆盖**动画、时序、状态机、设备间交接**四个维度。
 
 > 修改任何一类设备行为前，必须同步更新本文档。行号引用以 master 分支为准，改代码后应立即修正对应条目。
 
@@ -10,16 +10,17 @@
 MQTT broker ──topic 路由──┐
                           ├→ deviceTelemetryStore (快照键 sourceId:deviceType:assetCode)
                           │     └→ SpecializedTelemetryRuntime.applyFrame (每帧)
-参数化 (modelParameters / telemetryBinding / dataDriven) ─┐        ├→ conveyorDriver / rgvDriver / stackerDriver
+参数化 (modelParameters / telemetryBinding / dataDriven) ─┐        ├→ conveyorDriver / rgvDriver / stackerDriver / shuttleDriver
                                                         ├→ 各 driver 的 applyToModel
-fetch (LocatorFetchRuntime, 事件驱动) ────────────────────┘        └→ 货物表 stacker/conveyor/rgvCargoMeshes (全局共享)
+fetch (LocatorFetchRuntime, 事件驱动) ────────────────────┘        └→ 货物表 stacker/conveyor/rgv/shuttleCargoMeshes (全局共享)
                                                                           └→ 门面仲裁交接 adoptGlobalCargoByTask / placeCargoIntoConveyorPlatform / deliverRgvCargoToConveyorColumn
 ```
 
 ### 设备类型识别
 
-- 模型包签名：`specializedModelAssets.ts` 中 `isConveyorModelAsset`(:21)、`isStackerModelAsset`(:39)、`isRgvModelAsset`(:52)，按 assetCode/sourcePath/脚本 metadata 匹配关键字。
-- 运行时判定：`resolveSpecializedTelemetryDeviceType`（SpecializedTelemetryRuntime.ts:356）— 实例 `telemetryBinding.deviceType` 优先，否则按注册顺序 stacker→conveyor→rgv。
+- 模型包签名：`specializedModelAssets.ts` 中 `isConveyorModelAsset`(:21)、`isStackerModelAsset`(:39)、`isRgvModelAsset`(:52)、`isShuttleModelAsset`，按 assetCode/sourcePath/脚本 metadata 匹配关键字。
+- 运行时判定：`resolveSpecializedTelemetryDeviceType`（SpecializedTelemetryRuntime.ts）— 实例 `telemetryBinding.deviceType` 优先，否则按注册顺序 stacker→conveyor→shuttle→rgv。**shuttle 必须排在 rgv 前**：多穿小车脚本 metadata 含「穿梭车」会误中 `isRgvModelAsset`。
+- shuttle 的 `isShuttleRuntimeModel` 仅按脚本 `dataDriven.device.devType==='shuttle'` 判定（该模型必有脚本，不加 ModelRuntimeEntry.capable 标志位）。
 - **shelf 无专用 driver**：是参数化脚本宿主模型 + Locator 组件（`builtInSlotBinding`），由 SceneRuntime 直接驱动渲染。
 
 ### MQTT 链路（deviceTelemetry.ts）
@@ -50,7 +51,7 @@ fetch (LocatorFetchRuntime, 事件驱动) ────────────�
 
 ### 共享状态与交接门面
 
-- `SpecializedTelemetrySharedState`（types.ts:391）：三张全局货物表 `stacker/conveyor/rgvCargoMeshes`，即全局货物注册表。货物条目 `GeneratedCargoRuntimeEntry`（:154），`task` 为全局唯一身份。
+- `SpecializedTelemetrySharedState`（types.ts）：四张全局货物表 `stacker/conveyor/rgv/shuttleCargoMeshes`，即全局货物注册表。货物条目 `GeneratedCargoRuntimeEntry`，`task` 为全局唯一身份。
 - 交接插值统一 `resolveCargoHandoffPose`（types.ts:54-67），时长 `CARGO_HANDOFF_SECONDS=1.0`（types.ts:42）。
 - 交接只平移不旋转：`cargo.lockedWorldRotation` 全生命周期锁定（types.ts:169-170）。
 - 门面方法：`adoptGlobalCargoByTask`(:239)、`placeCargoIntoConveyorPlatform`(:281)、`deliverRgvCargoToConveyorColumn`(:305)。
@@ -185,7 +186,7 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:66
 ### 交接
 - **conveyor→stacker**：取货格为 conveyor 内置站台货格时 `adoptConveyorPlatformCargo`(:761) → 门面 → conveyorDriver `adoptPlatformCargoForStacker`(:973)，无视 task 接管并广播 taken。
 - **stacker→conveyor**：放货解绑 `placeCargoIntoConveyorPlatform`(:877/:935)，预检 `canAcceptPlatformPlacedCargo`（conveyorDriver.ts:988）；mode4 延后到收叉停止边沿(:712-717)。
-- **全局按 task**：`adoptGlobalCargoByTask`(:1081) 扫三张货物表跨设备接管；conveyor 拉货受 `isStackerCargoPendingPlatformHandoff` 门控（conveyorDriver.ts:381）。
+- **全局按 task**：`adoptGlobalCargoByTask`(:1081) 扫全部货物表跨设备接管；conveyor 拉货受 `isStackerCargoPendingPlatformHandoff` 门控（conveyorDriver.ts:381）。
 - 库位键 `JSON.stringify([frontX,frontY,frontZ])`(:127)；排-列-层经 `resolveLocatorBoxIndex`（stackerStorageLocation.ts:45）换算，支撑位=格底面中心世界坐标(:139)，与叉锚点对齐保证交接无跳变。
 
 ### 扩展点
@@ -193,7 +194,53 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:66
 
 ---
 
-## 4. 货架 shelf
+## 4. 多穿小车 shuttle
+
+堆垛机的水平裁剪版：仅 Z 轴走行（无升降），货叉沿模型 X 轴伸缩；**单套货叉共用节点**，front/back 字段仅作协议侧别（活动侧仲裁，front 优先）。**库位匹配走巷道号**：Locator 组件 `aisleCode` ↔ 小车模型参数 `aisleCode`（meta.json modelParameters），与堆垛机的 `deviceAssetCode` 匹配并行为两套独立索引。
+
+### 参数化配置
+| 配置 | 位置 | 语义 |
+|---|---|---|
+| 模型参数 `aisleCode` | 模型包 modelParameters / parameterValues | 巷道编号：与 Locator `aisleCode` 匹配定位货格/站台；空值不匹配任何库位（一次性告警） |
+| Inspector `travelSpeed/forkSpeed` | parameterValues，shuttleDriver `readShuttleInspectorSpeed` | 速度覆盖，优先级最高 |
+| `dataDriven.motion.travel.speed` | 模型包脚本 | 走行速度缺省（rpm_x 缺失时），常量兜底 1.0 m/s |
+| `dataDriven.motion.fork.speed` / `limits.max` | 模型包脚本 | 伸叉速度缺省 0.25 m/s；无货格时的全行程回退（米） |
+| `dataDriven.motion.fork.nodes` / `fallbackPattern` | 模型包脚本 | 叉节点（huocha1/对象001/cha1/cha2）/ 兜底正则 |
+| `dataDriven.fixedNodes` | 模型包脚本（可选） | 固定轨道节点；缺省整车行走、无轨道约束 |
+| MQTT `rpm_x` / `front/back_rpm_z` × `rpmToMetersPerSecond` | shuttleDriver | 实际速度优先（默认 0.01） |
+| Locator `aisleCode/rowNumber/startColumn/startLayer/columns/layers/columnReversed` | SceneRuntime 巷道索引 | 巷道内货格网格 |
+
+### MQTT 消费
+沿用堆垛机字段约定：**不支持 mode==4 signalBits 锁存**（command 始终可靠）。
+- `front_x/front_y/front_z` = 列/层/排当前库位（全 0=空闲）；`to_x/to_y/to_z` = 目标库位，仅决定走行终点。
+- `front/back_command`：1 取货中 / 2 取货完成 / 3,4 放货中 / 5 放货完成 / 8 急停(faulted)。
+- `front/back_movement_z`：1/3 伸、2/4 收（字段名沿用，实际驱动 X 轴货叉）。
+- `front/back_task`、`front/back_containerCode`：货物身份。
+
+### fetch 响应
+与堆垛机一致：放货完成保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排同步 → 清抑制并销毁保留货；取/放期间 `suppressFetchCellForLocator` 抑制该格口 fetch 渲染。
+
+### 动画
+每帧 `applyToModel`（shuttleDriver）。走行为**速度插值**（`moveVectorTowards`），首帧吸附 `snapShuttleToTargetOffset`；**无轨道约束**（整车行走，除非 dataDriven.fixedNodes 声明轨道）。货叉目标行程 = 叉心对准货格支撑位（方向由货格几何相对叉心的 X 投影符号决定），不按叉长钳位、允许悬空，无货格回退 `limits.max` 全行程。**走行与伸叉互斥**：本体移动期间叉收回原点。货物绑定叉尖时锚定叉节点顶面中心。库位跳变触发 catch-up（4 倍速收叉，收完前冻结走行）。
+
+### 时序（取/放节拍）
+command 1 + movement 伸叉开始帧 → 当前格刷货 → 叉到位绑定 → command 相位离开完成取货 → 运载 → command 3/4 伸叉到位解绑落箱位 → 收叉（期间幂等重试绑定/解绑）→ 相位退出完成放货。
+
+### 状态机（ShuttleModelTelemetryState, types.ts）
+单叉单货：`cargoKey`(无货) → 刷货滞留格 → `cargoBoundToFork=true`(随叉) → 解绑 `holdPosition`(箱位)。辅助态：`forkCatchUp`、`mismatch`（库位失配禁伸叉）、`lastMovementZ`（粘性伸出标记）。无 lift/mode4 字段。
+
+### 交接
+- **conveyor→shuttle**：取货格为 conveyor 内置站台货格时 `adoptConveyorPlatformCargo`（门面共用，assetCode 参数通用）。
+- **shuttle→conveyor**：放货解绑 `placeShuttleCargoIntoConveyorPlatform`（镜像 stacker 版，detach 来源为 shuttleCargoMeshes，失败放回）。
+- **全局按 task**：`adoptGlobalCargoByTask` 扫四张货物表；conveyor externalPulls 可拉 shuttle 持货（无额外门控，同 stacker 非 mode4 语义）。
+- 库位键与支撑位公式同 stacker（stackerStorageLocation.ts 复用）。
+
+### 扩展点
+新 MQTT 字段在 `applyToModel` 增消费点（e/p/v 通用解析层不动）；新动作时序改 `applyShuttleForkCargoMotion`；fork 节点/行程经模型包 dataDriven 调整，无需改驱动代码。
+
+---
+
+## 5. 货架 shelf
 
 ### 参数化配置（模型脚本 `shelf.model.ts`）
 | 配置 | 位置 | 默认 |
@@ -237,16 +284,19 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:66
 
 ### 改已有设备行为
 1. 同步更新本文档对应小节（字段表/状态机/交接链）。
-2. 检查是否影响其他设备交接面（4 类设备交接矩阵）：
+2. 检查是否影响其他设备交接面（5 类设备交接矩阵）：
 
 | 交接 | 发起方 | 仲裁/门面 | 接收方 |
 |---|---|---|---|
 | conveyor→conveyor | 链路协议 available/taken | 下行泛洪+越级直达 | conveyorDriver settle |
 | conveyor→stacker | stacker 取货相位 | adoptConveyorPlatformCargo | conveyorDriver:973 |
 | stacker→conveyor | stacker 放货解绑 | placeCargoIntoConveyorPlatform | conveyorDriver:1000 |
+| conveyor→shuttle | shuttle 取货相位 | adoptConveyorPlatformCargo | conveyorDriver |
+| shuttle→conveyor | shuttle 放货解绑 | placeShuttleCargoIntoConveyorPlatform | conveyorDriver |
 | rgv→conveyor 列 | rgv 起转边沿推送 | deliverRgvCargoToConveyorColumn | conveyorDriver:1047 |
-| conveyor→rgv/stacker | conveyor externalPulls 帧尾拉取 | isRgvCargoReadyForExternalPull 等门控 | rgvDriver/stackerDriver |
+| conveyor→rgv/stacker/shuttle | conveyor externalPulls 帧尾拉取 | isRgvCargoReadyForExternalPull 等门控 | rgvDriver/stackerDriver/shuttleDriver |
 | stacker↔shelf 泊位 | stacker 取/放相位 + fetch 单排同步 | suppressFetchCell + keepCargoForFetchRowSync | LocatorFetchRuntime |
+| shuttle↔shelf 泊位 | shuttle 取/放相位 + fetch 单排同步 | suppressFetchCell + keepCargoForFetchRowSync | LocatorFetchRuntime |
 
 3. 检查 fetch 抑制/保留货是否会产生空窗。
 4. 检查结束预览清理（`endTelemetryPreview`）是否覆盖新状态。

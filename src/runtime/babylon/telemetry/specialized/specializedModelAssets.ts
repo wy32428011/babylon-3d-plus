@@ -7,6 +7,7 @@ import {
   type ConveyorModelTelemetryState,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
   type RgvModelTelemetryState,
+  type ShuttleModelTelemetryState,
   type StackerModelTelemetryState,
 } from './types';
 
@@ -59,6 +60,82 @@ export function isRgvModelAsset(modelAsset: ModelAssetComponent): boolean {
   ]).toLowerCase();
 
   return signature.includes('rgv') || signature.includes('穿梭车');
+}
+
+/** 通过模型包脚本、元数据或路径判断当前导入模型是否是多穿小车。 */
+export function isShuttleModelAsset(modelAsset: ModelAssetComponent): boolean {
+  const signature = JSON.stringify([
+    modelAsset.assetCode,
+    modelAsset.sourcePath,
+    modelAsset.sourceUrl,
+    modelAsset.parameterScriptMetadata ?? [],
+    modelAsset.animationScriptMetadata ?? [],
+  ]).toLowerCase();
+
+  return signature.includes('shuttle') || signature.includes('多穿');
+}
+
+/** 判断当前模型是否具备多穿小车驱动能力：仅按脚本声明 devType=shuttle 识别（该模型必有外置脚本，不维护 capable 标志位）。 */
+export function isShuttleRuntimeModel(model: ModelRuntimeEntry): boolean {
+  for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+    if (!isPlainRecord(dataDriven)) continue;
+    const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
+    const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
+    if (devType === 'shuttle') return true;
+  }
+  return false;
+}
+
+/** 创建多穿小车遥测运行态，所有偏移和货物占位只保存在内存中。 */
+export function createShuttleTelemetryState(root: TransformNode): ShuttleModelTelemetryState {
+  return {
+    rootBasePosition: root.position.clone(),
+    rootPosition: null,
+    targetReferencePosition: null,
+    travelConstraint: null,
+    forkOffset: 0,
+    forkTargetOffset: 0,
+    forkStroke: null,
+    forkCatchUp: false,
+    cargoKey: null,
+    cargoBoundToFork: false,
+    cargoHoldPosition: null,
+    cargoHoldRotation: null,
+    cargoHoldScaling: null,
+    cargoFetchRow: null,
+    lastCommand: null,
+    lastMovementZ: null,
+    prevRawMovementZ: null,
+    nodeBaselines: new Map(),
+    lastFrontCellKey: null,
+    lastFrontCellChangedAtMs: null,
+    frontCellChangeIntervalMs: null,
+  };
+}
+
+/** 模型完成归一化和外置脚本初始化后，重新建立多穿小车遥测基线。 */
+export function resetShuttleTelemetryState(model: ModelRuntimeEntry): void {
+  model.shuttleTelemetry.rootBasePosition = model.root.position.clone();
+  model.shuttleTelemetry.rootPosition = null;
+  model.shuttleTelemetry.targetReferencePosition = null;
+  model.shuttleTelemetry.travelConstraint = null;
+  model.shuttleTelemetry.forkOffset = 0;
+  model.shuttleTelemetry.forkTargetOffset = 0;
+  model.shuttleTelemetry.forkStroke = null;
+  model.shuttleTelemetry.forkCatchUp = false;
+  model.shuttleTelemetry.cargoKey = null;
+  model.shuttleTelemetry.cargoBoundToFork = false;
+  model.shuttleTelemetry.cargoHoldPosition = null;
+  model.shuttleTelemetry.cargoHoldRotation = null;
+  model.shuttleTelemetry.cargoHoldScaling = null;
+  model.shuttleTelemetry.cargoFetchRow = null;
+  model.shuttleTelemetry.lastCommand = null;
+  model.shuttleTelemetry.lastMovementZ = null;
+  model.shuttleTelemetry.prevRawMovementZ = null;
+  model.shuttleTelemetry.nodeBaselines.clear();
+  model.shuttleTelemetry.lastFrontCellKey = null;
+  model.shuttleTelemetry.lastFrontCellChangedAtMs = null;
+  model.shuttleTelemetry.frontCellChangeIntervalMs = null;
 }
 
 /** 判断当前模型是否具备 RGV 驱动能力：资产识别命中，或脚本声明 devType=rgv。 */

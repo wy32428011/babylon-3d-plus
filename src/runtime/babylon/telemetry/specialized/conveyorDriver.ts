@@ -723,7 +723,7 @@ export class ConveyorTelemetryDriver {
     return neighbor !== null && this.findHeldCargoByTask(neighbor.assetCode, task) !== null;
   }
 
-  /** stacker/RGV（无链路能力、可能被静态探测缓存漏掉的行车中设备）是否正持有该 task 的货物在途。 */
+  /** stacker/RGV/shuttle（无链路能力、可能被静态探测缓存漏掉的行车中设备）是否正持有该 task 的货物在途。 */
   private hasExternalHolderForTask(task: string): boolean {
     if (!task) return false;
     for (const cargo of this.state.stackerCargoMeshes.values()) {
@@ -732,13 +732,16 @@ export class ConveyorTelemetryDriver {
     for (const cargo of this.state.rgvCargoMeshes.values()) {
       if (cargo.task === task) return true;
     }
+    for (const cargo of this.state.shuttleCargoMeshes.values()) {
+      if (cargo.task === task) return true;
+    }
     return false;
   }
 
-  /** 三张货物表（stacker/conveyor/rgv）中查找指定设备持有的指定 task 货物。 */
+  /** 四张货物表（stacker/conveyor/rgv/shuttle）中查找指定设备持有的指定 task 货物。 */
   private findHeldCargoByTask(holderAssetCode: string, task: string): GeneratedCargoRuntimeEntry | null {
     if (!task) return null;
-    const tables = [this.state.stackerCargoMeshes, this.state.conveyorCargoMeshes, this.state.rgvCargoMeshes];
+    const tables = [this.state.stackerCargoMeshes, this.state.conveyorCargoMeshes, this.state.rgvCargoMeshes, this.state.shuttleCargoMeshes];
     for (const table of tables) {
       for (const cargo of table.values()) {
         if (cargo.assetCode === holderAssetCode && cargo.task === task) return cargo;

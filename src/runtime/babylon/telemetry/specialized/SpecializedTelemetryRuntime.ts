@@ -15,15 +15,17 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from '../specializedTelemetryBinding';
-import { isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
+import { isConveyorRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
 import { StackerTelemetryDriver } from './stackerDriver';
 import { ConveyorTelemetryDriver } from './conveyorDriver';
 import { RgvTelemetryDriver } from './rgvDriver';
+import { ShuttleTelemetryDriver } from './shuttleDriver';
 import { createTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../telemetryPerformanceStages';
 import {
   type ConveyorCargoRuntimeEntry,
   createSpecializedTelemetrySharedState,
   type GeneratedCargoRuntimeEntry,
+  type ShuttleCargoRuntimeEntry,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
   type SpecializedTelemetryRuntimeEntry,
@@ -64,6 +66,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   private readonly stackerDriver: StackerTelemetryDriver;
   private readonly conveyorDriver: ConveyorTelemetryDriver;
   private readonly rgvDriver: RgvTelemetryDriver;
+  private readonly shuttleDriver: ShuttleTelemetryDriver;
   /** 驱动注册表，数组顺序即无实例绑定时的默认优先级（Stacker 优先）。 */
   private readonly drivers: readonly SpecializedDriverRegistration[];
   private bindingCache = new WeakMap<ModelRuntimeEntry, ModelBindingCacheEntry>();
@@ -88,6 +91,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.stackerDriver = new StackerTelemetryDriver(this);
     this.conveyorDriver = new ConveyorTelemetryDriver(this);
     this.rgvDriver = new RgvTelemetryDriver(this);
+    this.shuttleDriver = new ShuttleTelemetryDriver(this);
     this.drivers = [
       {
         deviceType: 'stacker',
@@ -101,6 +105,14 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         isCapable: isConveyorRuntimeModel,
         apply: (model, snapshot, deltaSeconds) => this.conveyorDriver.applyToModel(model, snapshot, deltaSeconds),
         applyWhenStale: (model) => (model.conveyorTelemetry?.selfDriveDirection ?? 0) !== 0,
+      },
+      // shuttle 必须注册在 rgv 之前：多穿小车脚本元数据含「穿梭车」字样会误中 isRgvModelAsset
+      {
+        deviceType: 'shuttle',
+        isCapable: isShuttleRuntimeModel,
+        apply: (model, snapshot, deltaSeconds) => this.shuttleDriver.applyToModel(model, snapshot, deltaSeconds),
+        // 断流时继续朝最后已知库位做确定性插值（同 stacker）
+        applyWhenStale: () => true,
       },
       {
         deviceType: 'rgv',
@@ -219,7 +231,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     telemetryRuntimeDiagnosticsStore.clear();
   }
 
-  /** 清理所有专用 Stacker/Conveyor/RGV 运行时货物，保证结束预览不污染编辑态场景。 */
+  /** 清理所有专用 Stacker/Conveyor/RGV/Shuttle 运行时货物，保证结束预览不污染编辑态场景。 */
   disposeAllCargo(): void {
     for (const cargo of this.state.stackerCargoMeshes.values()) {
       this.disposeStackerCargo(cargo);
@@ -233,6 +245,10 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       this.host.disposeGeneratedCargo(cargo);
     }
     this.state.rgvCargoMeshes.clear();
+    for (const cargo of this.state.shuttleCargoMeshes.values()) {
+      this.host.disposeGeneratedCargo(cargo);
+    }
+    this.state.shuttleCargoMeshes.clear();
   }
 
   /** 删除指定资产编号下的全部专用运行时货物。 */
@@ -240,6 +256,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.stackerDriver.disposeStackerCargoForAssetCode(assetCode);
     this.conveyorDriver.disposeConveyorCargoForAssetCode(assetCode);
     this.rgvDriver.disposeRgvCargoForAssetCode(assetCode);
+    this.shuttleDriver.disposeShuttleCargoForAssetCode(assetCode);
   }
 
   /** 释放指定生成器提供模板的全部运行时货箱。 */
@@ -259,6 +276,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       this.host.disposeGeneratedCargo(cargo);
       this.state.rgvCargoMeshes.delete(key);
     }
+    for (const [key, cargo] of this.state.shuttleCargoMeshes.entries()) {
+      if (cargo.generatorEntityId !== generatorEntityId) continue;
+      this.host.disposeGeneratedCargo(cargo);
+      this.state.shuttleCargoMeshes.delete(key);
+    }
   }
 
   /** 按 key 释放单个堆垛机保留货箱（如 fetch 单排同步后的清理）。 */
@@ -267,6 +289,14 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     if (!cargo) return;
     this.disposeStackerCargo(cargo);
     this.state.stackerCargoMeshes.delete(key);
+  }
+
+  /** 按 key 释放单个多穿小车保留货箱（如 fetch 单排同步后的清理）。 */
+  disposeShuttleCargoByKey(key: string): void {
+    const cargo = this.state.shuttleCargoMeshes.get(key);
+    if (!cargo) return;
+    this.host.disposeGeneratedCargo(cargo);
+    this.state.shuttleCargoMeshes.delete(key);
   }
 
   /** 释放门面持有的全部运行时资源。 */
@@ -295,6 +325,10 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.host.disposeGeneratedCargo(cargo);
   }
 
+  disposeShuttleCargo(cargo: ShuttleCargoRuntimeEntry): void {
+    this.host.disposeGeneratedCargo(cargo);
+  }
+
   getOrCreateStackerCargo(assetCode: string, side: StackerForkSide): StackerCargoRuntimeEntry {
     return this.stackerDriver.getOrCreateStackerCargo(assetCode, side);
   }
@@ -303,8 +337,12 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     return this.conveyorDriver.getOrCreateConveyorCargo(assetCode, containerCode);
   }
 
+  getOrCreateShuttleCargo(assetCode: string): ShuttleCargoRuntimeEntry {
+    return this.shuttleDriver.getOrCreateShuttleCargo(assetCode);
+  }
+
   /**
-   * 按 task 全局接管货物实例：三张货物表即注册表，找到其他设备持有的同 task 货箱时
+   * 按 task 全局接管货物实例：四张货物表即注册表，找到其他设备持有的同 task 货箱时
    * 由其 driver 清理遥测引用并取出条目（不销毁，视觉连续）返回；空 task 不参与，返回 null。
    */
   adoptGlobalCargoByTask(task: string, claimingCargoKey: string): GeneratedCargoRuntimeEntry | null {
@@ -324,10 +362,15 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         return this.rgvDriver.detachClaimedCargoByKey(key);
       }
     }
+    for (const [key, cargo] of [...this.state.shuttleCargoMeshes]) {
+      if (key !== claimingCargoKey && cargo.task === task) {
+        return this.shuttleDriver.detachClaimedCargoByKey(key);
+      }
+    }
     return null;
   }
 
-  /** 按货物实例引用摘除（不销毁）：扫三张货物表定位所属条目，交由对应 driver 清理遥测引用后取出。 */
+  /** 按货物实例引用摘除（不销毁）：扫四张货物表定位所属条目，交由对应 driver 清理遥测引用后取出。 */
   detachClaimedCargoByReference(cargo: GeneratedCargoRuntimeEntry): GeneratedCargoRuntimeEntry | null {
     for (const [key, entry] of [...this.state.stackerCargoMeshes]) {
       if (entry === cargo) return this.stackerDriver.detachClaimedCargoByKey(key);
@@ -337,6 +380,9 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     }
     for (const [key, entry] of [...this.state.rgvCargoMeshes]) {
       if (entry === cargo) return this.rgvDriver.detachClaimedCargoByKey(key);
+    }
+    for (const [key, entry] of [...this.state.shuttleCargoMeshes]) {
+      if (entry === cargo) return this.shuttleDriver.detachClaimedCargoByKey(key);
     }
     return null;
   }
@@ -358,6 +404,21 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     if (!cargo) return false;
     if (!this.conveyorDriver.acceptPlatformPlacedCargo(resolved.model, resolved.locator, cargo)) {
       this.state.stackerCargoMeshes.set(cargoKey, cargo);
+      return false;
+    }
+    return true;
+  }
+
+  /** shuttle 向 conveyor 站台放货完成：取出货物交接给该 conveyor；失败时货物放回原表，由调用方走原销毁路径。 */
+  placeShuttleCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean {
+    const resolved = this.host.resolveBuiltInSlotHost(locatorEntityId);
+    if (!resolved || !isConveyorRuntimeModel(resolved.model)) return false;
+    // 先预检再拆引用：拒绝时 shuttle 侧货物状态保持完好，回退到 command 5 销毁路径
+    if (!this.conveyorDriver.canAcceptPlatformPlacedCargo(resolved.model, resolved.locator)) return false;
+    const cargo = this.shuttleDriver.detachClaimedCargoByKey(cargoKey);
+    if (!cargo) return false;
+    if (!this.conveyorDriver.acceptPlatformPlacedCargo(resolved.model, resolved.locator, cargo)) {
+      this.state.shuttleCargoMeshes.set(cargoKey, cargo);
       return false;
     }
     return true;
@@ -575,6 +636,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       delete metadata.telemetry;
       delete metadata.stackerTelemetry;
       delete metadata.conveyorTelemetry;
+      delete metadata.shuttleTelemetry;
       node.metadata = metadata;
     }
   }

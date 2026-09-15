@@ -33,6 +33,20 @@ export const CONVEYOR_CARGO_EMISSIVE_COLOR = '#09283a';
 export const CONVEYOR_CARGO_SIZE = new Vector3(0.72, 0.34, 0.72);
 export const CONVEYOR_ANONYMOUS_CARGO_CODE = '__anonymous__';
 
+export const SHUTTLE_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND = 1;
+export const SHUTTLE_DEFAULT_FORK_SPEED_METERS_PER_SECOND = 0.25;
+/** front_ 库位跳变触发动作收尾时，货叉收回速度倍率。 */
+export const SHUTTLE_FORK_CATCH_UP_SPEED_MULTIPLIER = 4;
+/** 自适应追赶速度的估算窗口下限/上限（秒）：按 front_ 变化间隔估算。 */
+export const SHUTTLE_CATCH_UP_MIN_WINDOW_SECONDS = 0.25;
+export const SHUTTLE_CATCH_UP_MAX_WINDOW_SECONDS = 2;
+/** 自适应追赶速度上限（m/s），防止极端间隔下速度爆炸。 */
+export const SHUTTLE_MAX_CATCH_UP_SPEED_METERS_PER_SECOND = 8;
+export const SHUTTLE_RPM_TO_METERS_PER_SECOND = 0.01;
+export const SHUTTLE_CARGO_COLOR = '#c9a227';
+export const SHUTTLE_CARGO_EMISSIVE_COLOR = '#3a2f08';
+export const SHUTTLE_CARGO_SIZE = new Vector3(0.6, 0.3, 0.45);
+
 /** 归一化 MQTT task 字段为全局货物身份：null/0 为匿名（空串），不参与全局唯一。 */
 export function normalizeCargoTask(value: number | null): string {
   return value !== null && value !== 0 ? String(value) : '';
@@ -143,7 +157,7 @@ export type StackerForkNodeGroups = {
   backStageTwoNodes: TransformNode[];
 };
 
-export type GeneratedCargoKind = 'stacker' | 'conveyor' | 'rgv';
+export type GeneratedCargoKind = 'stacker' | 'conveyor' | 'rgv' | 'shuttle';
 
 export type GeneratedCargoFallbackRuntimeEntry = {
   mesh: Mesh;
@@ -371,6 +385,56 @@ export type RgvModelTelemetryState = {
 
 export type RgvCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
+export type ShuttleForkSide = 'front' | 'back';
+
+/**
+ * 多穿小车遥测运行态：堆垛机的水平裁剪版——仅 Z 轴走行（无升降）、单套货叉沿 X 伸缩（单偏移量），
+ * front/back 字段仅作协议侧别；无 mode==4 signalBits 锁存。
+ */
+export type ShuttleModelTelemetryState = {
+  rootBasePosition: Vector3;
+  /** 车体的虚拟世界位置；模型根节点保持静止（同 stacker rootPosition 语义）。 */
+  rootPosition: Vector3 | null;
+  /** 货叉未伸出时用于对齐库位的世界坐标锚点（叉心收回位）。 */
+  targetReferencePosition: Vector3 | null;
+  /** 可选轨道约束：仅在 dataDriven.fixedNodes 声明轨道节点时建立。 */
+  travelConstraint: RgvTravelConstraint | null;
+  /** 单套货叉的带符号偏移（沿货叉轴，伸出方向由货格几何决定）。 */
+  forkOffset: number;
+  /** 当前货格要求的货叉目标行程（有符号）；由库位几何每帧求解。 */
+  forkTargetOffset: number;
+  /** 按节点几何实测的货叉全行程（仅作无货格时的回退，不再钳位）；null 表示尚未测量。 */
+  forkStroke: number | null;
+  /** true 表示库位跳变收尾中：货叉加速收回，收回前冻结走行。 */
+  forkCatchUp: boolean;
+  /** 货物键（JSON.stringify([assetCode])，单车单货）；非 null 表示叉上/滞留货格有货。 */
+  cargoKey: string | null;
+  /** 货物是否绑定叉尖；false 时静止于 holdPosition（取货=源箱位，放货=目标箱位）。 */
+  cargoBoundToFork: boolean;
+  cargoHoldPosition: Vector3 | null;
+  /** 货物朝向：未绑定时为所在箱位朝向；绑定瞬间锁定为货物当前世界朝向，随叉全程保持。 */
+  cargoHoldRotation: Quaternion | null;
+  /** 箱位朝向含镜像（负缩放）时的缩放分量；null 表示无镜像。 */
+  cargoHoldScaling: Vector3 | null;
+  /** 放货时锁定的目标排号，放货完成（command 5）用于 fetch 保留与单排同步。 */
+  cargoFetchRow: number | null;
+  /** command 边沿检测：取货/放货完成只触发一次（活动侧仲裁后的有效 command）。 */
+  lastCommand: number | null;
+  /** 伸出标记：仅在 movement 伸出（1/3）时写入，收叉（2/4）期间保持有效并每帧幂等重试绑定/解绑；command 相位退出时清零。 */
+  lastMovementZ: number | null;
+  /** 上一帧原始 movement（每帧无条件覆盖）：收叉停止边沿检测用。 */
+  prevRawMovementZ: number | null;
+  nodeBaselines: Map<TransformNode, Vector3>;
+  /** 上一帧 front_x/front_y/front_z 组成的库位键；变化时触发动作收尾（catch-up）。 */
+  lastFrontCellKey: string | null;
+  /** 最近一次 front_ 库位键变化的时间戳（performance.now()）；null 表示尚未收到过有效库位。 */
+  lastFrontCellChangedAtMs: number | null;
+  /** 最近两次 front_ 变化的间隔（毫秒），用于估算自适应追赶窗口；null 表示尚未观察到变化。 */
+  frontCellChangeIntervalMs: number | null;
+};
+
+export type ShuttleCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
+
 /** conveyor 货物走行配置：由模型脚本 dataDriven.cargo.travel 归一化而来，本体无自主动画。 */
 export type ConveyorCargoTravelConfig = {
   axis: 'x' | 'z';
@@ -392,6 +456,7 @@ export type SpecializedTelemetrySharedState = {
   stackerCargoMeshes: Map<string, StackerCargoRuntimeEntry>;
   conveyorCargoMeshes: Map<string, ConveyorCargoRuntimeEntry>;
   rgvCargoMeshes: Map<string, RgvCargoRuntimeEntry>;
+  shuttleCargoMeshes: Map<string, ShuttleCargoRuntimeEntry>;
   reportedMissingTargets: Set<string>;
   reportedFaults: Map<string, string>;
   reportedStatuses: Map<string, string>;
@@ -406,6 +471,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
     stackerCargoMeshes: new Map(),
     conveyorCargoMeshes: new Map(),
     rgvCargoMeshes: new Map(),
+    shuttleCargoMeshes: new Map(),
     reportedMissingTargets: new Set(),
     reportedFaults: new Map(),
     reportedStatuses: new Map(),
@@ -420,6 +486,10 @@ export interface SpecializedTelemetryHost {
   /** models + modelArrayParameterVariants 的合并视图（entityId 用 representativeEntityId）。 */
   collectModels(): Iterable<{ entityId: string; model: ModelRuntimeEntry }>;
   findLocatorByDevice(assetCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
+  /** 按巷道编号 + 排号 + 列/层范围查找目标 Locator（多穿小车等巷道设备用），语义同 findLocatorByDevice。 */
+  findLocatorByAisle(aisleCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
+  /** 返回巷道绑定的全部 Locator（所有排），无绑定返回空数组；用于区分「未绑定」与「坐标越界」。 */
+  findLocatorsByAisle(aisleCode: string): LocatorRuntimeEntry[];
   /** 按宿主实体 ID 找其内置货格运行时条目（无绑定返回 null）。 */
   findBuiltInSlotLocatorForHostModel(hostEntityId: string): LocatorRuntimeEntry | null;
   /** 反查内置货格的宿主模型与其货格条目（非内置货格返回 null）。 */
@@ -470,8 +540,10 @@ export interface SpecializedTelemetryDriverContext {
   readonly host: SpecializedTelemetryHost;
   disposeStackerCargo(cargo: StackerCargoRuntimeEntry): void;
   disposeConveyorCargo(cargo: ConveyorCargoRuntimeEntry): void;
+  disposeShuttleCargo(cargo: ShuttleCargoRuntimeEntry): void;
   getOrCreateStackerCargo(assetCode: string, side: StackerForkSide): StackerCargoRuntimeEntry;
   getOrCreateConveyorCargo(assetCode: string, containerCode: string): ConveyorCargoRuntimeEntry;
+  getOrCreateShuttleCargo(assetCode: string): ShuttleCargoRuntimeEntry;
   /**
    * 按 task 全局接管货物：找到其他设备持有的同 task 货箱时，由其 driver 清理遥测引用后
    * 取出条目（不销毁）返回给调用方；未找到返回 null，调用方走自建路径。
@@ -487,6 +559,8 @@ export interface SpecializedTelemetryDriverContext {
   adoptConveyorPlatformCargo(locatorEntityId: string, stackerAssetCode: string): GeneratedCargoRuntimeEntry | null;
   /** stacker 落货到 conveyor 站台时交接货物给该 conveyor；conveyor 已有货或非站台货格返回 false，此时不拆除原持货引用。 */
   placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
+  /** shuttle 落货到 conveyor 站台时交接货物给该 conveyor；语义同 placeCargoIntoConveyorPlatform，货物来源为 shuttleCargoMeshes。 */
+  placeShuttleCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
   /** RGV 列接驳对齐用：列绑定实体为 conveyor 时返回其载货面中心（cargo.travel.nodes 包围盒中心）；非 conveyor 或实体不存在返回 null。 */
   resolveConveyorDeckCenterWorld(entityId: string): Vector3 | null;
   /**

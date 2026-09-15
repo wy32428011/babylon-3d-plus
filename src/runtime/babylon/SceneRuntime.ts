@@ -221,15 +221,18 @@ import {
 import {
   createConveyorTelemetryState,
   createRgvTelemetryState,
+  createShuttleTelemetryState,
   createStackerTelemetryState,
   isConveyorModelAsset,
   isConveyorRuntimeModel,
   isRgvModelAsset,
+  isShuttleModelAsset,
   isStackerModelAsset,
   readConveyorCargoSurfaceOffset,
   readConveyorCargoTravelConfig,
   resetConveyorTelemetryState,
   resetRgvTelemetryState,
+  resetShuttleTelemetryState,
   resetStackerTelemetryState,
 } from './telemetry/specialized/specializedModelAssets';
 import {
@@ -246,6 +249,9 @@ import {
   RGV_CARGO_COLOR,
   RGV_CARGO_EMISSIVE_COLOR,
   RGV_CARGO_SIZE,
+  SHUTTLE_CARGO_COLOR,
+  SHUTTLE_CARGO_EMISSIVE_COLOR,
+  SHUTTLE_CARGO_SIZE,
 } from './telemetry/specialized/types';
 import type {
   ConveyorCargoTravelConfig,
@@ -253,6 +259,7 @@ import type {
   GeneratedCargoKind,
   GeneratedCargoRuntimeEntry,
   RgvModelTelemetryState,
+  ShuttleModelTelemetryState,
   StackerModelTelemetryState,
 } from './telemetry/specialized/types';
 import { mergeSceneRuntimeHighlightEntityIds } from './sceneRuntimeHighlight';
@@ -386,6 +393,7 @@ export type ModelRuntimeEntry = {
   stackerTelemetry: StackerModelTelemetryState;
   conveyorTelemetry: ConveyorModelTelemetryState;
   rgvTelemetry: RgvModelTelemetryState;
+  shuttleTelemetry: ShuttleModelTelemetryState;
   stackerTelemetryReady: boolean;
   telemetryPreviewBaseline: ModelTelemetryPreviewBaseline | null;
   /**
@@ -494,6 +502,8 @@ export type LocatorRuntimeEntry = {
   /** 列反向：true 时大数列映射到靠近原点的几何索引 0；仅影响编号换算，不改几何。 */
   columnReversed: boolean;
   deviceAssetCode: string;
+  /** 关联巷道编号：多穿小车按巷道+排+列层定位货格/站台，空串表示不参与巷道索引。 */
+  aisleCode: string;
   rowNumber: number;
   storageDepth: LocatorStorageDepth;
 };
@@ -721,6 +731,8 @@ export class SceneRuntime {
   private readonly locators = new Map<string, LocatorRuntimeEntry>();
   private readonly locatorTargets = new Map<string, LocatorRuntimeEntry>();
   private readonly locatorDeviceIndex = new Map<string, Map<number, LocatorRuntimeEntry[]>>();
+  /** 巷道索引：aisleCode → 排号 → 条目列表，与设备索引同循环构建；多穿小车 front_/to_ 定位的唯一数据源。 */
+  private readonly locatorAisleIndex = new Map<string, Map<number, LocatorRuntimeEntry[]>>();
   private readonly cadReferences = new Map<string, CadReferenceRuntimeEntry>();
   private readonly conveyorTrajectories = new Map<string, ConveyorTrajectoryRuntimeEntry>();
   private _trajectoryVisible = false;
@@ -896,6 +908,8 @@ export class SceneRuntime {
       },
       findLocatorByDevice: (assetCode, x, y, z) => this.findLocatorByDevice(assetCode, x, y, z),
       findLocatorsByDevice: (assetCode) => this.findLocatorsByDevice(assetCode),
+      findLocatorByAisle: (aisleCode, x, y, z) => this.findLocatorByAisle(aisleCode, x, y, z),
+      findLocatorsByAisle: (aisleCode) => this.findLocatorsByAisle(aisleCode),
       findBuiltInSlotLocatorForHostModel: (hostEntityId) => this.findBuiltInSlotLocatorForHostModel(hostEntityId),
       resolveBuiltInSlotHost: (locatorEntityId) => this.resolveBuiltInSlotHost(locatorEntityId),
       resolveCargoGeneratorForModel: (model) => this.resolveCargoGeneratorForModel(model),
@@ -1137,6 +1151,7 @@ export class SceneRuntime {
     this.fetchKeptCargoByRow.delete(rowNumber);
     for (const key of keys) {
       this.specializedTelemetryRuntime.disposeStackerCargoByKey(key);
+      this.specializedTelemetryRuntime.disposeShuttleCargoByKey(key);
     }
   }
 
@@ -1198,6 +1213,7 @@ export class SceneRuntime {
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
       resetRgvTelemetryState(model);
+      resetShuttleTelemetryState(model);
     }
     for (const owner of this.generatedOutputOwners.values()) {
       if (owner.output?.kind !== 'model') continue;
@@ -1209,12 +1225,14 @@ export class SceneRuntime {
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
       resetRgvTelemetryState(model);
+      resetShuttleTelemetryState(model);
     }
     // 合批阵列代表模型同样接受遥测驱动（collectModels 合并视图），退出时必须一并清理
     for (const variant of this.modelArrayParameterVariants.values()) {
       resetStackerTelemetryState(variant.model);
       resetConveyorTelemetryState(variant.model);
       resetRgvTelemetryState(variant.model);
+      resetShuttleTelemetryState(variant.model);
     }
     for (const proxy of this.modelArrayTelemetryProxies.values()) {
       resetConveyorTelemetryState(proxy);
@@ -3604,6 +3622,7 @@ export class SceneRuntime {
   private rebuildLocatorTargetIndex(document: SceneDocument): void {
     this.locatorTargets.clear();
     this.locatorDeviceIndex.clear();
+    this.locatorAisleIndex.clear();
     const duplicateAssetIds = new Set<string>();
 
     for (const entityId of document.entityIds) {
@@ -3631,6 +3650,20 @@ export class SceneRuntime {
         rowMap.set(rowNumber, list);
       }
 
+      // 构建巷道索引：多穿小车按巷道编号+排+列层定位，与设备索引同规则逐排登记。
+      const aisleCode = locatorComponent?.aisleCode?.trim();
+      if (aisleCode && (isBuiltInSlot || !assetIdTaken)) {
+        const rowNumber = locatorComponent?.rowNumber ?? 1;
+        let rowMap = this.locatorAisleIndex.get(aisleCode);
+        if (!rowMap) {
+          rowMap = new Map();
+          this.locatorAisleIndex.set(aisleCode, rowMap);
+        }
+        const list = rowMap.get(rowNumber) ?? [];
+        list.push(locator);
+        rowMap.set(rowNumber, list);
+      }
+
       if (assetIdTaken) {
         // 同一宿主的多排内置货格共用资产编号是声明内的布局，不按编号冲突处理。
         if (isBuiltInSlot) continue;
@@ -3650,26 +3683,33 @@ export class SceneRuntime {
       if (!duplicateAssetIds.has(assetId)) this.reportedDuplicateLocatorTargets.delete(assetId);
     }
 
-    // 同设备同排的列/层范围重叠检测：front_ 定位要求唯一命中，重叠时在编辑期即告警，运行时拒绝定位
+    // 同设备/同巷道同排的列/层范围重叠检测：front_ 定位要求唯一命中，重叠时在编辑期即告警，运行时拒绝定位
     const overlappingPairs = new Set<string>();
-    for (const [deviceCode, rowMap] of this.locatorDeviceIndex) {
-      for (const [rowNumber, list] of rowMap) {
-        for (let i = 0; i < list.length; i += 1) {
-          for (let j = i + 1; j < list.length; j += 1) {
-            const a = list[i];
-            const b = list[j];
-            const columnOverlap = a.startColumn < b.startColumn + b.columns && b.startColumn < a.startColumn + a.columns;
-            const layerOverlap = a.startLayer < b.startLayer + b.layers && b.startLayer < a.startLayer + a.layers;
-            if (!columnOverlap || !layerOverlap) continue;
-            const pairKey = `${deviceCode}:${rowNumber}:${[a.assetId, b.assetId].sort().join('|')}`;
-            overlappingPairs.add(pairKey);
-            if (this.reportedOverlappingLocatorRanges.has(pairKey)) continue;
-            this.reportedOverlappingLocatorRanges.add(pairKey);
-            this.pushLog(`错误：定位线框「${a.assetId}」（列${a.startColumn}-${a.startColumn + a.columns - 1} 层${a.startLayer}-${a.startLayer + a.layers - 1}）与「${b.assetId}」（列${b.startColumn}-${b.startColumn + b.columns - 1} 层${b.startLayer}-${b.startLayer + b.layers - 1}）关联同一设备 ${deviceCode} 排${rowNumber} 且范围重叠，front_ 定位将拒绝命中重叠区域，请调整使范围互不重叠。`);
+    const collectOverlap = (
+      index: Map<string, Map<number, LocatorRuntimeEntry[]>>,
+      describeScope: (code: string) => string,
+    ) => {
+      for (const [code, rowMap] of index) {
+        for (const [rowNumber, list] of rowMap) {
+          for (let i = 0; i < list.length; i += 1) {
+            for (let j = i + 1; j < list.length; j += 1) {
+              const a = list[i];
+              const b = list[j];
+              const columnOverlap = a.startColumn < b.startColumn + b.columns && b.startColumn < a.startColumn + a.columns;
+              const layerOverlap = a.startLayer < b.startLayer + b.layers && b.startLayer < a.startLayer + a.layers;
+              if (!columnOverlap || !layerOverlap) continue;
+              const pairKey = `${describeScope(code)}:${rowNumber}:${[a.assetId, b.assetId].sort().join('|')}`;
+              overlappingPairs.add(pairKey);
+              if (this.reportedOverlappingLocatorRanges.has(pairKey)) continue;
+              this.reportedOverlappingLocatorRanges.add(pairKey);
+              this.pushLog(`错误：定位线框「${a.assetId}」（列${a.startColumn}-${a.startColumn + a.columns - 1} 层${a.startLayer}-${a.startLayer + a.layers - 1}）与「${b.assetId}」（列${b.startColumn}-${b.startColumn + b.columns - 1} 层${b.startLayer}-${b.startLayer + b.layers - 1}）${describeScope(code)} 排${rowNumber} 且范围重叠，front_ 定位将拒绝命中重叠区域，请调整使范围互不重叠。`);
+            }
           }
         }
       }
-    }
+    };
+    collectOverlap(this.locatorDeviceIndex, (code) => `关联同一设备 ${code}`);
+    collectOverlap(this.locatorAisleIndex, (code) => `关联同一巷道 ${code}`);
     for (const key of [...this.reportedOverlappingLocatorRanges]) {
       if (!overlappingPairs.has(key)) this.reportedOverlappingLocatorRanges.delete(key);
     }
@@ -3700,6 +3740,37 @@ export class SceneRuntime {
   /** 返回设备绑定的全部 Locator（所有排），无绑定时返回空数组。 */
   private findLocatorsByDevice(deviceAssetCode: string): LocatorRuntimeEntry[] {
     const rowMap = this.locatorDeviceIndex.get(deviceAssetCode);
+    if (!rowMap) return [];
+    const result: LocatorRuntimeEntry[] = [];
+    for (const list of rowMap.values()) result.push(...list);
+    return result;
+  }
+
+  /** 按巷道编号 + 排号 + 列/层范围查找目标 Locator：多穿小车 front_ 定位要求 (x, y, z) 唯一命中，零个或多个命中都返回 null。 */
+  private findLocatorByAisle(
+    aisleCode: string,
+    toX: number,
+    toY: number,
+    toZ: number,
+  ): LocatorRuntimeEntry | null {
+    const rowMap = this.locatorAisleIndex.get(aisleCode);
+    if (!rowMap) return null;
+    const list = rowMap.get(toZ);
+    if (!list?.length) return null;
+    let matched: LocatorRuntimeEntry | null = null;
+    for (const locator of list) {
+      const covered = toX >= locator.startColumn && toX < locator.startColumn + locator.columns
+        && toY >= locator.startLayer && toY < locator.startLayer + locator.layers;
+      if (!covered) continue;
+      if (matched) return null;
+      matched = locator;
+    }
+    return matched;
+  }
+
+  /** 返回巷道绑定的全部 Locator（所有排），无绑定时返回空数组。 */
+  private findLocatorsByAisle(aisleCode: string): LocatorRuntimeEntry[] {
+    const rowMap = this.locatorAisleIndex.get(aisleCode);
     if (!rowMap) return [];
     const result: LocatorRuntimeEntry[] = [];
     for (const list of rowMap.values()) result.push(...list);
@@ -3978,6 +4049,7 @@ export class SceneRuntime {
     }
     runtimeLocator.assetId = locator.assetId;
     runtimeLocator.deviceAssetCode = locator.deviceAssetCode;
+    runtimeLocator.aisleCode = locator.aisleCode;
     runtimeLocator.rowNumber = locator.rowNumber;
     runtimeLocator.columns = locator.columns;
     runtimeLocator.layers = locator.layers;
@@ -4176,6 +4248,7 @@ export class SceneRuntime {
         resetStackerTelemetryState(current);
         resetConveyorTelemetryState(current);
         resetRgvTelemetryState(current);
+        resetShuttleTelemetryState(current);
       }
       current.assetCode = modelAsset.assetCode;
       current.telemetryBinding = entity.components.telemetryBinding ?? null;
@@ -4236,6 +4309,7 @@ export class SceneRuntime {
       stackerTelemetry: createStackerTelemetryState(root),
       conveyorTelemetry: createConveyorTelemetryState(),
       rgvTelemetry: createRgvTelemetryState(root),
+      shuttleTelemetry: createShuttleTelemetryState(root),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -4740,6 +4814,7 @@ export class SceneRuntime {
       stackerTelemetry: createStackerTelemetryState(modelRoot),
       conveyorTelemetry: createConveyorTelemetryState(),
       rgvTelemetry: createRgvTelemetryState(modelRoot),
+      shuttleTelemetry: createShuttleTelemetryState(modelRoot),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -5029,6 +5104,9 @@ export class SceneRuntime {
     if (kind === 'rgv') {
       return { size: RGV_CARGO_SIZE, color: RGV_CARGO_COLOR, emissiveColor: RGV_CARGO_EMISSIVE_COLOR };
     }
+    if (kind === 'shuttle') {
+      return { size: SHUTTLE_CARGO_SIZE, color: SHUTTLE_CARGO_COLOR, emissiveColor: SHUTTLE_CARGO_EMISSIVE_COLOR };
+    }
     return { size: CONVEYOR_CARGO_SIZE, color: CONVEYOR_CARGO_COLOR, emissiveColor: CONVEYOR_CARGO_EMISSIVE_COLOR };
   }
 
@@ -5278,7 +5356,7 @@ export class SceneRuntime {
     columnLabelsRoot.setEnabled(false);
     const columnLabels = this.buildLocatorColumnLabels(entityId, locator, cellSteps, columnLabelsRoot);
 
-    return { entityId, root, fillMesh, edgeLines, columnLabelsRoot, columnLabels, cellSteps, cellSize: { length: locator.length, height: locator.height, width: locator.width }, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, columnReversed: locator.columnReversed, deviceAssetCode: locator.deviceAssetCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
+    return { entityId, root, fillMesh, edgeLines, columnLabelsRoot, columnLabels, cellSteps, cellSize: { length: locator.length, height: locator.height, width: locator.width }, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, columnReversed: locator.columnReversed, deviceAssetCode: locator.deviceAssetCode, aisleCode: locator.aisleCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
   }
 
   /**
@@ -6865,6 +6943,7 @@ export class SceneRuntime {
       stackerTelemetry: createStackerTelemetryState(root),
       conveyorTelemetry: createConveyorTelemetryState(),
       rgvTelemetry: createRgvTelemetryState(root),
+      shuttleTelemetry: createShuttleTelemetryState(root),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
       telemetryProxySource: host,
@@ -7276,6 +7355,7 @@ export class SceneRuntime {
       stackerTelemetry: createStackerTelemetryState(root),
       conveyorTelemetry: createConveyorTelemetryState(),
       rgvTelemetry: createRgvTelemetryState(root),
+      shuttleTelemetry: createShuttleTelemetryState(root),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -7827,6 +7907,7 @@ export class SceneRuntime {
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
       resetRgvTelemetryState(model);
+      resetShuttleTelemetryState(model);
       model.stackerTelemetryReady = true;
       settle(model);
       return;
@@ -7868,6 +7949,7 @@ export class SceneRuntime {
           resetStackerTelemetryState(current);
           resetConveyorTelemetryState(current);
           resetRgvTelemetryState(current);
+          resetShuttleTelemetryState(current);
           current.externalScriptStarting = false;
           current.measurementReady = true;
           current.stackerTelemetryReady = true;
@@ -7881,6 +7963,7 @@ export class SceneRuntime {
           resetStackerTelemetryState(current);
           resetConveyorTelemetryState(current);
           resetRgvTelemetryState(current);
+          resetShuttleTelemetryState(current);
           current.stackerTelemetryReady = true;
           const message = error instanceof Error ? error.message : String(error);
           current.readinessError = message;

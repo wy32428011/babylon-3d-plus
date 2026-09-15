@@ -29,7 +29,7 @@ export function hasModelDataDrivenMotionKey(config: ModelDataDrivenConfig | null
 }
 
 /** 专用驱动接管的设备类型；新增专用驱动时需同步登记。 */
-export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'rgv'];
+export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv'];
 
 /** 判断归一化后的 devType 是否由 specialized 驱动接管。 */
 export function isSpecializedTelemetryDeviceType(devType: string | undefined): boolean {
