@@ -391,13 +391,13 @@ export class StackerTelemetryDriver {
     return new Vector3(position.x, supportPosition?.y ?? position.y, position.z);
   }
 
-  /** 按货叉初始世界锚点把 Locator 绝对坐标换算成运行时偏移。 */
+  /** 按货叉初始世界锚点把 Locator 绝对坐标换算成运行时偏移；升降目标叠加货物竖直间隙，叉顶面定位到支撑位 + 间隙，整机（含载货）在移动定位时整体偏移。 */
   private resolveStackerTargetMotionOffsets(model: ModelRuntimeEntry, targetPosition: Vector3) {
     const referencePosition = this.getStackerTargetReferencePosition(model);
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
     return resolveStackerStorageTargetOffsets({
       targetTravelCoordinate: Vector3.Dot(targetPosition, travelAxis),
-      targetLiftCoordinate: targetPosition.y,
+      targetLiftCoordinate: targetPosition.y + this.resolveStackerCargoGapY(model),
       referenceTravelCoordinate: Vector3.Dot(referencePosition, travelAxis),
       referenceLiftCoordinate: referencePosition.y,
     });
@@ -964,7 +964,7 @@ export class StackerTelemetryDriver {
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, bound ? null : holdScaling);
   }
 
-  /** 货物底面锚定二段叉包围盒顶面 + 可配竖直间隙（无二段时回退一段/全叉），确保定位在货叉实际载货位置。 */
+  /** 货物底面锚定二段叉包围盒顶面（无二段时回退一段/全叉）；竖直间隙已计入升降瞄准基点，叉面锚点不再叠加，避免绑定瞬间二次偏移。 */
   private getStackerForkCargoPosition(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 {
     const nodes = this.resolveForkAnchorNodes(model, side);
     const bounds = getNodesWorldBounds(nodes);
@@ -973,7 +973,7 @@ export class StackerTelemetryDriver {
     const upAxis = getModelAxis(model.root, 'y');
     const center = bounds.minimum.add(bounds.maximum).scale(0.5);
     const topOffset = projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis);
-    return center.add(upAxis.scale(topOffset + this.resolveStackerCargoGapY(model)));
+    return center.add(upAxis.scale(topOffset));
   }
 
   /** 货物锚点/伸出方向/目标行程共用的叉节点选择链：二段优先，回退一段，再回退该侧全部叉节点。 */
@@ -985,12 +985,12 @@ export class StackerTelemetryDriver {
     return stageTwoNodes.length > 0 ? stageTwoNodes : (stageOneNodes.length > 0 ? stageOneNodes : allNodes);
   }
 
-  /** 货物竖直间隙（telemetryBinding.stackerCargoGapY，允许负值）；叉面锚点与货格支撑位共用，保证取/放交接无高差跳变。 */
+  /** 货物竖直间隙（telemetryBinding.stackerCargoGapY，允许负值）：叠加在升降瞄准基点与货格支撑位上，取/放交接无高差跳变。 */
   private resolveStackerCargoGapY(model: ModelRuntimeEntry): number {
     return model.telemetryBinding?.stackerCargoGapY ?? 0;
   }
 
-  /** 货格内货物的支撑位：箱位底面中心 + 货物竖直间隙（与叉面锚点同源，伸叉交接丝滑）。 */
+  /** 货格内货物的支撑位：箱位底面中心 + 货物竖直间隙（与升降瞄准基点同源，到位后叉顶面与之同高，伸叉交接丝滑）。 */
   private resolveCellCargoHoldPosition(
     model: ModelRuntimeEntry,
     targetLocator: LocatorRuntimeEntry,
@@ -1155,7 +1155,7 @@ export class StackerTelemetryDriver {
 
   /**
    * 读取并缓存货叉收回位的顶面中心（前/后锚点叉节点并集），作为行走/升降定位参考：
-   * 定位后叉顶面与货格支撑位同高，货物在叉锚点与货格支撑位间交接无竖直跳变；缺失货叉时回退到载货台。
+   * 定位后叉顶面对齐货格支撑位 + 货物竖直间隙（间隙在 resolveStackerTargetMotionOffsets 计入），货物在叉锚点与货格支撑位间交接无竖直跳变；缺失货叉时回退到载货台。
    */
   getStackerTargetReferencePosition(model: ModelRuntimeEntry): Vector3 {
     const state = model.stackerTelemetry;

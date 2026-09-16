@@ -2208,6 +2208,33 @@ select {
   white-space: normal;
 }
 
+/* 遥测绑定存在较长中文标签（如 货物竖直间隙(m)），放宽标签列并允许换行。 */
+.telemetry-binding-inspector > .inspector-row,
+.telemetry-binding-inspector > .number-row {
+  grid-template-columns: 108px minmax(0, 1fr);
+}
+
+.telemetry-binding-inspector > .inspector-row > span,
+.telemetry-binding-inspector > .number-row > span {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.inspector-panel-compact-model .telemetry-binding-inspector > .inspector-row,
+.inspector-panel-compact-model .telemetry-binding-inspector > .number-row {
+  grid-template-columns: 108px minmax(0, 1fr);
+}
+
+.inspector-panel-compact-model .telemetry-binding-inspector > .inspector-row > span,
+.inspector-panel-compact-model .telemetry-binding-inspector > .number-row > span {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .inspector-panel-compact-model .model-parameter-vector {
   margin: 4px 0 0;
   padding: 4px 6px 5px;

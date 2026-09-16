@@ -57,7 +57,7 @@ export type TelemetryBindingComponent = {
   cargoAutoDispose?: boolean;
   /** 输送线专用：起点设备——探测点未触及上游设备时允许自行创建货箱；缺省关闭。 */
   cargoOriginDevice?: boolean;
-  /** 堆垛机专用：货物底面相对叉面/货格支撑位的竖直间隙（米），允许负值（货物下沉贴合）；缺省 0。 */
+  /** 堆垛机专用：货叉瞄准基点相对货格支撑位的竖直偏移（米）——计入升降目标，整机定位时整体偏移，叉顶面对齐支撑位 + 间隙；允许负值（下沉贴合）；缺省 0。 */
   stackerCargoGapY?: number;
 };
 
