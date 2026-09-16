@@ -34,3 +34,29 @@
   flex: 1 1 auto;
   min-width: 0;
 }
+
+.alarm-property-diagnostics {
+  margin-top: 12px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.alarm-property-diagnostics summary {
+  cursor: pointer;
+}
+
+.alarm-property-device {
+  display: grid;
+  gap: 5px;
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--border-color, #3b414c);
+  border-radius: 4px;
+}
+
+.alarm-property-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}

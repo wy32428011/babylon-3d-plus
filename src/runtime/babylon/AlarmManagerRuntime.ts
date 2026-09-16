@@ -2,7 +2,7 @@ import { AbstractMesh, AssetContainer, Color3, InstancedMesh, Material, Mesh, Me
 import type { Entity } from '../../editor/model/Entity';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
 import type { ChartMarkerThemeScreen } from '../../editor/model/components';
-import { resolveAlarmTrigger, resolveAlarmTargets, type AlarmTriggerKind } from '../../editor/model/alarmManager';
+import { resolveAlarmTrigger, resolveAlarmTargets, resolveAlarmDeviceBinding, type AlarmTriggerKind } from '../../editor/model/alarmManager';
 import { deviceTelemetryStore } from '../mqtt/deviceTelemetry';
 import { ChartMarkerPresentation, getChartMarkerStyle } from './ChartMarkerPresentation';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
@@ -134,11 +134,8 @@ export class AlarmManagerRuntime {
       let newTrigger: AlarmTriggerKind | undefined;
       for (const target of targets) {
         if (!this.host.visible(target.id)) continue;
-        const asset = target.components.modelAsset!;
-        const binding = target.components.telemetryBinding;
-        const code = binding?.assetCode || asset.assetCode;
-        const type = binding?.deviceType || asset.dataDrivenConfig?.device.devType;
-        const snapshot = type && code ? deviceTelemetryStore.getSnapshot(code, type, binding?.sourceId) : null;
+        const { assetCode, deviceType, sourceId } = resolveAlarmDeviceBinding(target);
+        const snapshot = deviceType && assetCode ? deviceTelemetryStore.getSnapshot(assetCode, deviceType, sourceId) : null;
         const trigger = resolveAlarmTrigger(c, target, snapshot, now);
         if (!trigger) continue;
         const meshes = this.host.meshes(target.id);

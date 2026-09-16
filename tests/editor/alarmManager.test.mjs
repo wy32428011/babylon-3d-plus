@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
-import test, { after } from 'node:test';
-import { createServer } from 'vite';
+import test from 'node:test';
+import { buildAlarmTestModules } from '../helpers/alarmTestModules.mjs';
 
-const server = await createServer({ configFile: false, appType: 'custom', server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true }, ssr: { noExternal: ['@linkiez/dxf-renew'] } });
-after(() => server.close());
+const server = await buildAlarmTestModules(true);
 const alarm = await server.ssrLoadModule('/src/editor/model/alarmManager.ts');
 const { createEmptySceneDocument } = await server.ssrLoadModule('/src/editor/model/SceneDocument.ts');
 const { serializeScene, deserializeScene } = await server.ssrLoadModule('/src/editor/project/SceneSerializer.ts');
@@ -89,11 +88,15 @@ test('Store 创建、属性修改、撤销重做、复制及预览只读', async
     useEditorStore.getState().createAlarmManager({ x: 1, y: 2, z: 3 });
     const id = useEditorStore.getState().scene.selectedEntityId;
     assert.ok(id);
-    useEditorStore.getState().updateAlarmManager(id, { overrideColor: '#009900', targets: alarm.resizeAlarmTargets([], 2) });
+    useEditorStore.getState().updateAlarmManager(id, { overrideColor: '#009900', targets: alarm.resizeAlarmTargets([], 2), listenProperty: 'CUSTOM PROPERTY', customProperty: 'fire.signal', customValue: '1' });
     assert.equal(useEditorStore.getState().scene.entities[id].components.alarmManager.overrideColor, '#009900');
     useEditorStore.getState().undo();
     assert.equal(useEditorStore.getState().scene.entities[id].components.alarmManager.targets.length, 0);
     useEditorStore.getState().redo();
+    assert.equal(useEditorStore.getState().scene.entities[id].components.alarmManager.customProperty, 'fire.signal');
+    assert.equal(useEditorStore.getState().scene.entities[id].components.alarmManager.customValue, '1');
+    const reloaded = deserializeScene(serializeScene(useEditorStore.getState().scene));
+    assert.deepEqual(reloaded.entities[id].components.alarmManager, useEditorStore.getState().scene.entities[id].components.alarmManager);
     useEditorStore.getState().copySelectedEntities(); useEditorStore.getState().pasteEntityClipboard();
     const copied = useEditorStore.getState().scene.selectedEntityId;
     assert.notEqual(copied, id);
@@ -143,5 +146,43 @@ test('运行时报警边沿、颜色隔离、立标与解除清理', async () =>
     runtime.update(1800);
     assert.equal(mesh.material, material); assert.equal(runtime.getOverlayItems().length, 0);
     assert.equal(runtime.isActive(manager.id, model.id), false);
+  } finally { runtime.dispose(); deviceTelemetryStore.clear(); scene.dispose(); engine.dispose(); }
+});
+
+test('CUSTOM PROPERTY 原始 MQTT 多设备边沿、绑定覆盖、隐藏与解除保持一致', async () => {
+  const { NullEngine, Scene, MeshBuilder, StandardMaterial, FreeCamera, Vector3 } = await import('@babylonjs/core');
+  const { AlarmManagerRuntime } = await server.ssrLoadModule('/src/runtime/babylon/AlarmManagerRuntime.ts');
+  const { deviceTelemetryStore, parseDeviceTelemetryMessage } = await server.ssrLoadModule('/src/runtime/mqtt/deviceTelemetry.ts');
+  const engine = new NullEngine(); const scene = new Scene(engine); new FreeCamera('camera', new Vector3(0, 2, -10), scene);
+  const first = structuredClone(model), second = structuredClone(model);
+  first.components.telemetryBinding.assetCode = 'MQTT-A';
+  second.id = 'device-2'; second.components.modelAsset.assetCode = 'MQTT-B';
+  const manager = alarm.createAlarmManagerEntity({ x: 0, y: 0, z: 0 });
+  Object.assign(manager.components.alarmManager, { listenProperty: 'CUSTOM PROPERTY', customProperty: 'sensor.fire', customValue: '1', warehouseAlarm: false, appearanceModel: { kind: 'mesh', meshKind: 'sphere', displayName: '外观', materialColor: '#ff0000' }, targets: [{ id: 'all', model: target, entityId: '' }], showMarker: true, associationType: 'builtin' });
+  const doc = { ...createEmptySceneDocument('mqtt'), entityIds: [manager.id, first.id, second.id], entities: { [manager.id]: manager, [first.id]: first, [second.id]: second } };
+  const material = new StandardMaterial('shared', scene);
+  const meshes = new Map([first, second].map(entity => { const mesh = MeshBuilder.CreateBox(entity.id, {}, scene); mesh.material = material; return [entity.id, mesh]; }));
+  const events = []; const hidden = new Set(); let sequence = 0;
+  const runtime = new AlarmManagerRuntime(scene, { meshes: id => [meshes.get(id)], visible: id => !hidden.has(id), bounds: () => ({ minimum: Vector3.Zero(), maximum: Vector3.One() }), activate: event => events.push(event), report: message => { throw new Error(message); } });
+  const signal = (assetCode, value, now, sourceId = 'default') => {
+    const snapshot = parseDeviceTelemetryMessage('dt/factory/logistics/device/' + assetCode + '/twindatadriven/joint', JSON.stringify({ seq: ++sequence, data: value === undefined ? [{ p: 'temperature', v: 22 }] : [{ e: assetCode, p: 'sensor.fire', v: value }] }), { kind: 'epv', sourceId });
+    deviceTelemetryStore.upsert({ ...snapshot, receivedAt: now }); runtime.update(now);
+  };
+  try {
+    runtime.sync(doc);
+    signal('MQTT-A', 0, 1000); assert.equal(events.length, 0);
+    signal('MQTT-A', 1, 1300, 'other-source'); assert.equal(events.length, 0);
+    signal('MQTT-A', 1, 1600); assert.equal(events.length, 1);
+    assert.equal(runtime.isActive(manager.id, first.id), true); assert.equal(runtime.isActive(manager.id, second.id), false);
+    assert.notEqual(meshes.get(first.id).material, material); assert.equal(meshes.get(second.id).material, material);
+    signal('MQTT-A', 1, 1900); assert.equal(events.length, 1);
+    signal('MQTT-B', 1, 2200); assert.equal(events.length, 2); assert.equal(runtime.getOverlayItems().length, 2);
+    signal('MQTT-A', 0, 2500); assert.equal(runtime.isActive(manager.id, first.id), false);
+    assert.equal(meshes.get(first.id).material, material); assert.equal(runtime.isActive(manager.id, second.id), true);
+    hidden.add(second.id); runtime.update(2800); assert.equal(runtime.getOverlayItems().length, 0);
+    hidden.clear(); signal('MQTT-B', 1, 3100); assert.equal(events.length, 3);
+    signal('MQTT-B', undefined, 3400); assert.equal(runtime.isActive(manager.id, second.id), false);
+    assert.equal(meshes.get(second.id).material, material);
+    signal('MQTT-B', 1, 3700); runtime.update(5000); assert.equal(runtime.isActive(manager.id, second.id), false);
   } finally { runtime.dispose(); deviceTelemetryStore.clear(); scene.dispose(); engine.dispose(); }
 });

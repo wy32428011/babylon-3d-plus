@@ -7,6 +7,7 @@ import { decodeModelAssetDragPayload, MODEL_ASSET_DRAG_MIME_TYPE } from '../asse
 import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
 import { useEditorStore } from '../store/editorStore';
 import { SearchableSelect } from '../ui/SearchableSelect';
+import { AlarmCustomPropertyDiagnostics } from './AlarmCustomPropertyDiagnostics';
 import { ChartMarkerInspector } from './ChartMarkerInspector';
 import type { DataPlatformChartAssetEntry } from '../assets/dataPlatformChartLibrary';
 import '../../styles/alarm-manager.css';
@@ -100,8 +101,11 @@ export function AlarmManagerInspector({ entity, disabled }: { entity: Entity; di
       <legend>POIAlarmSpawnerComponent</legend>
       <label className="inspector-row"><span>监听属性</span><select aria-label="监听属性" value={c.listenProperty} onChange={event => commit({ listenProperty: event.target.value as AlarmManagerComponent['listenProperty'] })}><option>RUNNING STATE</option><option>CUSTOM PROPERTY</option></select></label>
       {c.listenProperty === 'RUNNING STATE' ? <label className="inspector-row"><span>运行状态</span><select aria-label="运行状态" value={c.runningState} onChange={event => commit({ runningState: event.target.value as AlarmManagerComponent['runningState'] })}><option value="offline">离线</option><option value="idle">空闲</option><option value="running">运行</option><option value="alarm">报警</option></select></label> : <>
-        <label className="inspector-row"><span>火警属性</span><input value={c.customProperty} maxLength={256} onChange={event => commit({ customProperty: event.target.value })} /></label>
-        <label className="inspector-row"><span>触发值</span><input value={c.customValue} maxLength={256} onChange={event => commit({ customValue: event.target.value })} /></label>
+        <label className="inspector-row"><span>火警属性</span><input aria-label="火警属性" placeholder="MQTT 的 p，例如 fireAlarm" value={c.customProperty} maxLength={256} onChange={event => commit({ customProperty: event.target.value })} /></label>
+        <label className="inspector-row"><span>触发值</span><input aria-label="触发值" placeholder="该 p 的 v，例如 1 或 true" value={c.customValue} maxLength={256} onChange={event => commit({ customValue: event.target.value })} /></label>
+        <p className="muted">火警属性填写绑定设备 MQTT data 中的 p 名称；当该点位的实时 v 等于触发值时报警。例如 p 为 fireAlarm、v 为 1，则填写 fireAlarm 和 1。</p>
+        <p className="muted">触发值为 true/false 时兼容 1/0；填写 1/0 时仅匹配对应数值或字符串。实时值不会自动改写触发值。</p>
+        {c.warehouseAlarm ? <p className="muted">已启用仓库告警，命中自定义条件时优先使用仓库告警主题；只需普通火警时可关闭仓库告警。</p> : null}
       </>}
       <label className="inspector-row"><span>覆盖颜色</span><input type="color" value={c.overrideColor} onChange={event => commit({ overrideColor: event.target.value })} /></label>
       <div className="inspector-row"><span>外观模型</span><ModelSlot label="报警外观模型" value={c.appearanceModel} disabled={disabled} onChange={appearanceModel => commit({ appearanceModel })} /></div>
@@ -134,5 +138,6 @@ export function AlarmManagerInspector({ entity, disabled }: { entity: Entity; di
       <p className="muted">ENTITY 可限定场景设备；MODEL 监听所选模型的全部实例。设备需配置 MQTT 遥测；未收到数据时不触发，离线按设备超时判断。</p>
       {error ? <p role="alert" className="chart-marker-error">{error}</p> : null}
     </fieldset>
+    {c.listenProperty === 'CUSTOM PROPERTY' ? <AlarmCustomPropertyDiagnostics config={c} /> : null}
   </>;
 }
