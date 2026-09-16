@@ -75,6 +75,7 @@ import {
 } from '../model/sceneUnits';
 import { useEditorStore, type SceneSensitivitySettingKey } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
+import { SearchableSelect } from '../ui/SearchableSelect';
 
 const ENVIRONMENT_LIBRARY: ProjectLibrary = {
   key: 'environment',
@@ -1068,16 +1069,12 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         <legend>货箱生成器</legend>
         <label className="inspector-row">
           <span>默认模板来源</span>
-          <select
+          <SearchableSelect
             disabled={props.readOnly}
+            options={[{ value: '__none__', label: '无（内置立方体）' }, ...cargoGeneratorOptions.map((option) => ({ value: option.id, label: option.name }))]}
             value={defaultCargoGeneratorId ?? '__none__'}
-            onChange={(event) => setDefaultCargoGenerator(event.target.value !== '__none__' ? event.target.value : null)}
-          >
-            <option value="__none__">无（内置立方体）</option>
-            {cargoGeneratorOptions.map((option) => (
-              <option key={option.id} value={option.id}>{option.name}</option>
-            ))}
-          </select>
+            onChange={(value) => setDefaultCargoGenerator(value !== '__none__' ? value : null)}
+          />
         </label>
         {defaultCargoGeneratorMissing ? (
           <p className="telemetry-runtime-error">默认模型生成器已被删除，未绑定的设备将回退内置立方体。</p>

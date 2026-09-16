@@ -6,6 +6,7 @@ import { createModelGeneratorTargetFromAsset } from '../model/modelGenerator';
 import { decodeModelAssetDragPayload, MODEL_ASSET_DRAG_MIME_TYPE } from '../assets/AssetDatabase';
 import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
 import { useEditorStore } from '../store/editorStore';
+import { SearchableSelect } from '../ui/SearchableSelect';
 import { ChartMarkerInspector } from './ChartMarkerInspector';
 import type { DataPlatformChartAssetEntry } from '../assets/dataPlatformChartLibrary';
 import '../../styles/alarm-manager.css';
@@ -122,11 +123,12 @@ export function AlarmManagerInspector({ entity, disabled }: { entity: Entity; di
         <label className="inspector-row"><span>Size</span><input aria-label="目标 Size" type="number" min={0} max={ALARM_MAX_TARGETS} step={1} value={size} onChange={event => setSize(event.target.value)} onBlur={commitSize} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label>
         {c.targets.map((slot, index) => <div key={slot.id} className="click-event-binding-event-card">
           <span>设备类型 {index + 1}</span><ModelSlot label={'设备类型 ' + (index + 1)} value={slot.model} disabled={disabled} onChange={model => commit({ targets: c.targets.map(t => t.id === slot.id ? { ...t, model, entityId: '' } : t) })} />
-          {c.targetType === 'ENTITY' ? <label className="inspector-row"><span>场景设备</span><select value={slot.entityId} onChange={event => commit({ targets: c.targets.map(t => t.id === slot.id ? { ...t, entityId: event.target.value } : t) })}>
-            <option value="">该模型全部实例</option>
-            {slot.entityId && !entities[slot.entityId] ? <option value={slot.entityId}>目标已删除</option> : null}
-            {Object.values(entities).filter(e => e.components.modelAsset && (!slot.model || slot.model.kind === 'model' && e.components.modelAsset.sourceUrl === slot.model.modelAsset.sourceUrl)).map(e => <option key={e.id} value={e.id}>{e.name} · {e.components.modelAsset?.assetCode}</option>)}
-          </select></label> : null}
+          {c.targetType === 'ENTITY' ? <label className="inspector-row"><span>场景设备</span><SearchableSelect
+            missingLabel={() => '目标已删除'}
+            options={[{ value: '', label: '该模型全部实例' }, ...Object.values(entities).filter(e => e.components.modelAsset && (!slot.model || slot.model.kind === 'model' && e.components.modelAsset.sourceUrl === slot.model.modelAsset.sourceUrl)).map(e => ({ value: e.id, label: `${e.name} · ${e.components.modelAsset?.assetCode ?? ''}`, keywords: [e.components.modelAsset?.assetCode ?? ''] }))]}
+            value={slot.entityId}
+            onChange={value => commit({ targets: c.targets.map(t => t.id === slot.id ? { ...t, entityId: value } : t) })}
+          /></label> : null}
         </div>)}
       </details>
       <p className="muted">ENTITY 可限定场景设备；MODEL 监听所选模型的全部实例。设备需配置 MQTT 遥测；未收到数据时不触发，离线按设备超时判断。</p>

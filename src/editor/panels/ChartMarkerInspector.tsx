@@ -5,6 +5,7 @@ import type { ChartMarkerComponent } from '../model/components';
 import { resolveChartMarker } from '../model/chartMarker';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { useEditorStore } from '../store/editorStore';
+import { SearchableSelect } from '../ui/SearchableSelect';
 import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
 import { IMAGE_ASSET_DRAG_MIME_TYPE } from '../assets/AssetDatabase';
 import { CHART_MARKER_BACKGROUND_MAX_BYTES, CHART_MARKER_LIBRARY_IMAGE_MAX_BYTES, CHART_MARKER_BACKGROUND_RASTER_TYPES, loadChartMarkerLibraryBackground } from '../assets/chartMarkerBackground';
@@ -77,7 +78,6 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
   const marker = resolveChartMarker((alarmAppearance ? entity.components.alarmManager?.marker : entity.components.chartMarker) ?? {});
   const screen = entity.components.dataPlatformScreen;
   const modelSources = Object.values(entities).filter((item) => item.components.modelAsset);
-  const hasSelectedSource = modelSources.some((item) => item.id === marker.dataSourceEntityId);
 
   useEffect(() => {
     setReadingImage(false);
@@ -351,11 +351,13 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
         </label>
         <label className="inspector-row">
           <span>数据来源</span>
-          <select disabled={marker.driveMode !== 'data'} value={marker.dataSourceEntityId} onChange={(event) => commit({ dataSourceEntityId: event.target.value })}>
-            <option value="">无</option>
-            {marker.dataSourceEntityId && !hasSelectedSource ? <option value={marker.dataSourceEntityId}>来源已失效</option> : null}
-            {modelSources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
-          </select>
+          <SearchableSelect
+            disabled={marker.driveMode !== 'data'}
+            missingLabel={() => '来源已失效'}
+            options={[{ value: '', label: '无' }, ...modelSources.map((source) => ({ value: source.id, label: source.name }))]}
+            value={marker.dataSourceEntityId}
+            onChange={(value) => commit({ dataSourceEntityId: value })}
+          />
         </label>
         {marker.driveMode === 'data' ? (
           <>

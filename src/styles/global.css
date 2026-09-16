@@ -4765,3 +4765,52 @@ select {
   }
 
 }
+
+/* 可输入过滤的实体选择器：下拉列表悬浮于 Inspector 内容之上，配色对齐右键菜单。 */
+.searchable-select {
+  position: relative;
+  min-width: 0;
+}
+
+.searchable-select__input {
+  width: 100%;
+  border: 1px solid #555;
+  color: #d7d7d7;
+  background: #1e1e1e;
+}
+
+.searchable-select__list {
+  position: absolute;
+  z-index: 1000;
+  top: 100%;
+  right: 0;
+  left: 0;
+  max-height: 200px;
+  margin: 2px 0 0;
+  padding: 2px 0;
+  overflow-y: auto;
+  border: 1px solid #4a4a4a;
+  color: #e2e2e2;
+  background: #252525;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 40%);
+  font-size: 12px;
+  list-style: none;
+}
+
+.searchable-select__option {
+  padding: 4px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.searchable-select__option--active {
+  color: #ffffff;
+  background: #2f5e49;
+}
+
+.searchable-select__empty {
+  padding: 4px 8px;
+  color: #888888;
+}

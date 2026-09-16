@@ -7,6 +7,19 @@ import {
 import { deviceTelemetryStore } from '../../runtime/mqtt/deviceTelemetry';
 import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticSnapshot } from '../../runtime/mqtt/telemetryRuntimeDiagnostics';
 import { useEditorStore } from '../store/editorStore';
+import type { SceneDocument } from '../model/SceneDocument';
+import { SearchableSelect } from '../ui/SearchableSelect';
+
+/** RGV 列绑定/提升机层绑定共用的目标选项：除自身外的 conveyor 设备。 */
+function buildConveyorTargetOptions(scene: SceneDocument, excludeEntityId: string): { id: string; name: string }[] {
+  return scene.entityIds
+    .filter((entityId) => {
+      if (entityId === excludeEntityId) return false;
+      const entity = scene.entities[entityId];
+      return entity?.components.telemetryBinding?.deviceType === 'conveyor';
+    })
+    .map((entityId) => ({ id: entityId, name: scene.entities[entityId]?.name ?? entityId }));
+}
 
 type Props = {
   entityId: string;
@@ -124,16 +137,12 @@ export function CargoGeneratorInspector(props: {
       <legend>货箱生成器</legend>
       <label className="inspector-row">
         <span>模板来源</span>
-        <select
+        <SearchableSelect
           disabled={props.disabled}
+          options={[{ value: '__none__', label: unboundLabel }, ...generatorOptions.map((option) => ({ value: option.id, label: option.name }))]}
           value={props.binding?.cargoGeneratorId || '__none__'}
-          onChange={(event) => handleGeneratorChange(event.target.value !== '__none__' ? event.target.value : undefined)}
-        >
-          <option value="__none__">{unboundLabel}</option>
-          {generatorOptions.map((option) => (
-            <option key={option.id} value={option.id}>{option.name}</option>
-          ))}
-        </select>
+          onChange={(value) => handleGeneratorChange(value !== '__none__' ? value : undefined)}
+        />
       </label>
       {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退场景默认或内置立方体。</p> : null}
       <p className="muted">堆垛机/输送线/RGV/提升机 取放货时按所选模型生成器渲染货箱；未绑定时跟随场景设置中的默认模板。</p>
@@ -204,13 +213,7 @@ function RgvColumnBindingsEditor(props: {
   commit: (patch: Partial<TelemetryBindingComponent>) => void;
 }) {
   const scene = useEditorStore((state) => state.scene);
-  const entityOptions = scene.entityIds
-    .filter((entityId) => {
-      if (entityId === props.entityId) return false;
-      const entity = scene.entities[entityId];
-      return entity?.components.telemetryBinding?.deviceType === 'conveyor';
-    })
-    .map((entityId) => ({ id: entityId, name: scene.entities[entityId]?.name ?? entityId }));
+  const entityOptions = buildConveyorTargetOptions(scene, props.entityId);
   const entries = Object.entries(props.binding.columnBindings ?? {})
     .flatMap(([column, targetIds]) => (Array.isArray(targetIds) ? targetIds : [targetIds]).map((targetId) => ({ column: Number(column), targetId })))
     .filter((entry) => Number.isInteger(entry.column) && entry.column > 0)
@@ -274,7 +277,6 @@ function RgvColumnBindingsEditor(props: {
       ) : null}
 
       {entries.map((entry, index) => {
-        const missing = !entityOptions.some((option) => option.id === entry.targetId);
         return (
           <div className="model-generator-rule-card" key={index}>
             <div className="model-generator-card-header">
@@ -296,12 +298,13 @@ function RgvColumnBindingsEditor(props: {
             </label>
             <label className="inspector-row">
               <span>目标设备</span>
-              <select disabled={props.disabled} value={entry.targetId} onChange={(event) => handleTargetChange(index, event.target.value)}>
-                {missing ? <option value={entry.targetId}>已删除实体（{entry.targetId}）</option> : null}
-                {entityOptions.map((option) => (
-                  <option key={option.id} value={option.id}>{option.name}</option>
-                ))}
-              </select>
+              <SearchableSelect
+                disabled={props.disabled}
+                missingLabel={(value) => `已删除实体（${value}）`}
+                options={entityOptions.map((option) => ({ value: option.id, label: option.name }))}
+                value={entry.targetId}
+                onChange={(value) => handleTargetChange(index, value)}
+              />
             </label>
           </div>
         );
@@ -323,13 +326,7 @@ function LiftLayerBindingsEditor(props: {
   commit: (patch: Partial<TelemetryBindingComponent>) => void;
 }) {
   const scene = useEditorStore((state) => state.scene);
-  const entityOptions = scene.entityIds
-    .filter((entityId) => {
-      if (entityId === props.entityId) return false;
-      const entity = scene.entities[entityId];
-      return entity?.components.telemetryBinding?.deviceType === 'conveyor';
-    })
-    .map((entityId) => ({ id: entityId, name: scene.entities[entityId]?.name ?? entityId }));
+  const entityOptions = buildConveyorTargetOptions(scene, props.entityId);
   const entries = Object.entries(props.binding[props.field] ?? {})
     .flatMap(([layer, targetIds]) => (Array.isArray(targetIds) ? targetIds : [targetIds]).map((targetId) => ({ layer: Number(layer), targetId })))
     .filter((entry) => Number.isInteger(entry.layer) && entry.layer > 0)
@@ -391,7 +388,6 @@ function LiftLayerBindingsEditor(props: {
       ) : null}
 
       {entries.map((entry, index) => {
-        const missing = !entityOptions.some((option) => option.id === entry.targetId);
         return (
           <div className="model-generator-rule-card" key={index}>
             <div className="model-generator-card-header">
@@ -413,12 +409,13 @@ function LiftLayerBindingsEditor(props: {
             </label>
             <label className="inspector-row">
               <span>目标设备</span>
-              <select disabled={props.disabled} value={entry.targetId} onChange={(event) => handleTargetChange(index, event.target.value)}>
-                {missing ? <option value={entry.targetId}>已删除实体（{entry.targetId}）</option> : null}
-                {entityOptions.map((option) => (
-                  <option key={option.id} value={option.id}>{option.name}</option>
-                ))}
-              </select>
+              <SearchableSelect
+                disabled={props.disabled}
+                missingLabel={(value) => `已删除实体（${value}）`}
+                options={entityOptions.map((option) => ({ value: option.id, label: option.name }))}
+                value={entry.targetId}
+                onChange={(value) => handleTargetChange(index, value)}
+              />
             </label>
           </div>
         );

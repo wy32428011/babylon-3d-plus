@@ -1,6 +1,7 @@
 import { SCENE_LENGTH_UNIT_SYMBOL } from '../model/sceneUnits';
 import type { LocatorComponent } from '../model/components';
 import { useEditorStore } from '../store/editorStore';
+import { SearchableSelect } from '../ui/SearchableSelect';
 type LocatorInspectorProps = {
   component: LocatorComponent;
   disabled?: boolean;
@@ -232,16 +233,12 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
       </label>
       <label className="inspector-row">
         <span>货箱生成器</span>
-        <select
+        <SearchableSelect
           disabled={disabled}
+          options={[{ value: '__none__', label: unboundLabel }, ...generatorOptions.map((option) => ({ value: option.id, label: option.name }))]}
           value={fetchDrive?.cargoGeneratorId || '__none__'}
-          onChange={(event) => updateFetchDrive(fetchDrive?.enabled === true, event.target.value !== '__none__' ? event.target.value : undefined)}
-        >
-          <option value="__none__">{unboundLabel}</option>
-          {generatorOptions.map((option) => (
-            <option key={option.id} value={option.id}>{option.name}</option>
-          ))}
-        </select>
+          onChange={(value) => updateFetchDrive(fetchDrive?.enabled === true, value !== '__none__' ? value : undefined)}
+        />
       </label>
       {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退场景默认或内置立方体。</p> : null}
     </fieldset>

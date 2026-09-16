@@ -2,6 +2,7 @@ import type { Entity } from '../model/Entity';
 import type { ChartMarkerClickAction, ChartMarkerClickEvent } from '../model/components';
 import { getChartMarkerClickEvents, CHART_MARKER_MAX_CLICK_EVENTS as MAX_EVENTS, CHART_MARKER_MAX_CLICK_ACTIONS as MAX_ACTIONS } from '../model/chartMarker';
 import { useEditorStore } from '../store/editorStore';
+import { SearchableSelect } from '../ui/SearchableSelect';
 import { ChartMarkerThemeScreenSlot } from './ChartMarkerThemeScreenSlot';
 
 export function ChartMarkerEventsInspector({ entity, disabled }: { entity: Entity; disabled: boolean }) {
@@ -78,11 +79,13 @@ export function ChartMarkerEventsInspector({ entity, disabled }: { entity: Entit
                     <label className="inspector-row">
                       <span>目标对象</span>
                       <span className="chart-marker-target-control">
-                        <select aria-label={label + ' 目标对象'} value={action.targetEntityId} onChange={(change) => updateAction(eventIndex, actionIndex, { ...action, targetEntityId: change.target.value })}>
-                          <option value="">请选择目标对象</option>
-                          {missingTarget ? <option value={action.targetEntityId}>目标已失效（{action.targetEntityId}）</option> : null}
-                          {targets.map((target) => <option key={target.id} value={target.id}>{target.name || target.id}（实体）</option>)}
-                        </select>
+                        <SearchableSelect
+                          ariaLabel={label + ' 目标对象'}
+                          missingLabel={(value) => `目标已失效（${value}）`}
+                          options={[{ value: '', label: '请选择目标对象' }, ...targets.map((target) => ({ value: target.id, label: `${target.name || target.id}（实体）` }))]}
+                          value={action.targetEntityId}
+                          onChange={(value) => updateAction(eventIndex, actionIndex, { ...action, targetEntityId: value })}
+                        />
                         <button type="button" title="清空目标对象" aria-label={'清空' + label + ' 目标对象'} disabled={!action.targetEntityId} onClick={() => updateAction(eventIndex, actionIndex, { ...action, targetEntityId: '' })}>×</button>
                       </span>
                     </label>

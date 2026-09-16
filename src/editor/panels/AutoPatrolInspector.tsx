@@ -33,6 +33,7 @@ import {
   validateAutoPatrolRoute,
 } from '../model/autoPatrolInspection';
 import { useEditorStore } from '../store/editorStore';
+import { SearchableSelect } from '../ui/SearchableSelect';
 import { decodeUtf8Text } from '../../shared/text/strictUtf8';
 
 const POSITION_AXES = ['x', 'y', 'z'] as const;
@@ -913,17 +914,15 @@ export function AutoPatrolInspector({
                 ) : null}
                 <label className="inspector-row">
                   <span>目标设备</span>
-                  <select
+                  <SearchableSelect
                     disabled={disabled}
+                    options={[{ value: '', label: '未指定' }, ...targetEntities.map((entity) => ({ value: entity.id, label: entity.name }))]}
                     value={definition.targetEntityId ?? ''}
-                    onChange={(event) => updateEvent(definition.id, (item) => ({
+                    onChange={(value) => updateEvent(definition.id, (item) => ({
                       ...item,
-                      targetEntityId: event.target.value || null,
+                      targetEntityId: value || null,
                     }), '更新巡检事件目标')}
-                  >
-                    <option value="">未指定</option>
-                    {targetEntities.map((entity) => <option key={entity.id} value={entity.id}>{entity.name}</option>)}
-                  </select>
+                  />
                 </label>
                 <div className="auto-patrol-event-responses">
                   {EVENT_RESPONSES.map((response) => (
