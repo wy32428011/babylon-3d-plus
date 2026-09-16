@@ -29,7 +29,7 @@ export function hasModelDataDrivenMotionKey(config: ModelDataDrivenConfig | null
 }
 
 /** 专用驱动接管的设备类型；新增专用驱动时需同步登记。 */
-export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv'];
+export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'lift'];
 
 /** 判断归一化后的 devType 是否由 specialized 驱动接管。 */
 export function isSpecializedTelemetryDeviceType(devType: string | undefined): boolean {
@@ -47,6 +47,10 @@ export type TelemetryBindingComponent = {
   cargoGeneratorId?: string;
   /** RGV 专用：协议列号(十进制正整数字符串) → 场景实体 ID 列表；同列可绑多台 conveyor，交接对象按 task 订阅状态仲裁；仅 deviceType === 'rgv' 时有意义。 */
   columnBindings?: Record<string, string[]>;
+  /** 提升机专用：来料层号(十进制正整数字符串) → 来料 conveyor 实体 ID 列表；reference_upper_step=1 时按 level_upper 选层；仅 deviceType === 'lift' 时有意义。 */
+  incomingLayerBindings?: Record<string, string[]>;
+  /** 提升机专用：送料层号(十进制正整数字符串) → 送料 conveyor 实体 ID 列表；reference_upper_step=2 时按 level_upper 选层；仅 deviceType === 'lift' 时有意义。 */
+  outgoingLayerBindings?: Record<string, string[]>;
   /** 输送线专用：货物运行轨迹方向（仅编辑态可视化, 非运行时遥测）。 */
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
   /** 输送线专用：停线且光电无货时自动销毁货物；未勾选时货物滞留，等下游订阅推送取走或新 task 复用。缺省关闭。 */
@@ -221,6 +225,8 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
   const assetCode = normalizeOptionalString(value.assetCode);
   const cargoGeneratorId = normalizeOptionalString(value.cargoGeneratorId);
   const columnBindings = normalizeColumnBindings(value.columnBindings);
+  const incomingLayerBindings = normalizeColumnBindings(value.incomingLayerBindings);
+  const outgoingLayerBindings = normalizeColumnBindings(value.outgoingLayerBindings);
   return {
     enabled: typeof value.enabled === 'boolean' ? value.enabled : true,
     sourceId: normalizeString(value.sourceId, 'default'),
@@ -230,6 +236,8 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     staleAfterMs: Math.max(createTelemetryStaleAfterMs(expectedIntervalMs), staleAfterMs),
     ...(cargoGeneratorId ? { cargoGeneratorId } : {}),
     ...(columnBindings ? { columnBindings } : {}),
+    ...(incomingLayerBindings ? { incomingLayerBindings } : {}),
+    ...(outgoingLayerBindings ? { outgoingLayerBindings } : {}),
     ...(normalizeTrajectoryDirection(value.trajectoryDirection) ? { trajectoryDirection: value.trajectoryDirection as TelemetryBindingComponent['trajectoryDirection'] } : {}),
     ...(typeof value.cargoAutoDispose === 'boolean' ? { cargoAutoDispose: value.cargoAutoDispose } : {}),
     ...(typeof value.cargoOriginDevice === 'boolean' ? { cargoOriginDevice: value.cargoOriginDevice } : {}),

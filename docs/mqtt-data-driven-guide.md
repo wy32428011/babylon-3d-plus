@@ -1,6 +1,6 @@
 # MQTT 数据驱动指南
 
-本文说明 Babylon Electron Unity-like Editor 的 MQTT 数据驱动机制：现场设备遥测经统一快照进入运行时，由按设备类型注册的专用驱动（当前内置 `stacker`、`conveyor`）转换为编辑器运行时的只读可视化运动，帮助联调人员确认模型、资产编号、字段映射和驱动行为是否正确。
+本文说明 Babylon Electron Unity-like Editor 的 MQTT 数据驱动机制：现场设备遥测经统一快照进入运行时，由按设备类型注册的专用驱动（当前内置 `stacker`、`conveyor`、`shuttle`、`rgv`、`lift`）转换为编辑器运行时的只读可视化运动，帮助联调人员确认模型、资产编号、字段映射和驱动行为是否正确。
 
 ## 边界
 

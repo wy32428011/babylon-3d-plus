@@ -377,6 +377,8 @@ export class ConveyorTelemetryDriver {
         if (!cargo) continue;
         // RGV 持货门控：仅放货到位才允许摘除，防止行车中途摘货（stacker 持货语义不变）
         if (this.isRgvHeldCargo(cargo) && !this.context.isRgvCargoReadyForExternalPull(cargo)) continue;
+        // lift 持货门控：仅载货台到位且货在台上才允许摘除，防止升降/交接中途摘货
+        if (this.isLiftHeldCargo(cargo) && !this.context.isLiftCargoReadyForExternalPull(cargo)) continue;
         // stacker mode==4 延后交接门控：落货站台后待收叉完毕的滞留货由推送路径交付，pull 不得提前摘走
         if (this.context.isStackerCargoPendingPlatformHandoff(cargo)) continue;
         state.externalPulls.delete(subscriberCode);
@@ -723,7 +725,7 @@ export class ConveyorTelemetryDriver {
     return neighbor !== null && this.findHeldCargoByTask(neighbor.assetCode, task) !== null;
   }
 
-  /** stacker/RGV/shuttle（无链路能力、可能被静态探测缓存漏掉的行车中设备）是否正持有该 task 的货物在途。 */
+  /** stacker/RGV/shuttle/lift（无链路能力、可能被静态探测缓存漏掉的行车中设备）是否正持有该 task 的货物在途。 */
   private hasExternalHolderForTask(task: string): boolean {
     if (!task) return false;
     for (const cargo of this.state.stackerCargoMeshes.values()) {
@@ -735,13 +737,16 @@ export class ConveyorTelemetryDriver {
     for (const cargo of this.state.shuttleCargoMeshes.values()) {
       if (cargo.task === task) return true;
     }
+    for (const cargo of this.state.liftCargoMeshes.values()) {
+      if (cargo.task === task) return true;
+    }
     return false;
   }
 
-  /** 四张货物表（stacker/conveyor/rgv/shuttle）中查找指定设备持有的指定 task 货物。 */
+  /** 五张货物表（stacker/conveyor/rgv/shuttle/lift）中查找指定设备持有的指定 task 货物。 */
   private findHeldCargoByTask(holderAssetCode: string, task: string): GeneratedCargoRuntimeEntry | null {
     if (!task) return null;
-    const tables = [this.state.stackerCargoMeshes, this.state.conveyorCargoMeshes, this.state.rgvCargoMeshes, this.state.shuttleCargoMeshes];
+    const tables = [this.state.stackerCargoMeshes, this.state.conveyorCargoMeshes, this.state.rgvCargoMeshes, this.state.shuttleCargoMeshes, this.state.liftCargoMeshes];
     for (const table of tables) {
       for (const cargo of table.values()) {
         if (cargo.assetCode === holderAssetCode && cargo.task === task) return cargo;
@@ -753,6 +758,14 @@ export class ConveyorTelemetryDriver {
   /** 判断货物当前是否由 RGV 持有（决定外部拉取是否需要 RGV 就绪门控）。 */
   private isRgvHeldCargo(cargo: GeneratedCargoRuntimeEntry): boolean {
     for (const entry of this.state.rgvCargoMeshes.values()) {
+      if (entry === cargo) return true;
+    }
+    return false;
+  }
+
+  /** 判断货物当前是否由 lift 持有（决定外部拉取是否需要 lift 就绪门控）。 */
+  private isLiftHeldCargo(cargo: GeneratedCargoRuntimeEntry): boolean {
+    for (const entry of this.state.liftCargoMeshes.values()) {
       if (entry === cargo) return true;
     }
     return false;
@@ -985,6 +998,12 @@ export class ConveyorTelemetryDriver {
   /** RGV 列接驳对齐用：本机载货面中心（cargo.travel.nodes 包围盒中心，未配置回退整机包围盒/根点）。 */
   resolveCargoDeckCenterWorld(model: ModelRuntimeEntry): Vector3 {
     return this.resolveConveyorCargoTravelContext(model).center;
+  }
+
+  /** lift 层对齐/交接落点用：本机货物支撑点世界坐标（载货面中心 + 竖直轴×支撑面抬升量，与本机货物落点同一口径）。 */
+  resolveCargoDeckSurfacePointWorld(model: ModelRuntimeEntry): Vector3 {
+    const context = this.resolveConveyorCargoTravelContext(model);
+    return context.center.add(context.upAxis.scale(context.surfaceLiftMeters));
   }
 
   /** 站台放货预检：本机空闲且站台偏移可解析才允许交接；纯读无副作用，供调用方在拆除原持货引用前判定。 */

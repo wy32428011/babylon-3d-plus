@@ -5,6 +5,7 @@ import { createModelEntity, sanitizeMqttConfig } from '../../src/editor/model/Sc
 import { deserializeScene, serializeScene } from '../../src/editor/project/SceneSerializer';
 import {
   createDefaultTelemetryBinding,
+  isSpecializedTelemetryDeviceType,
   normalizeModelDataDrivenConfig,
   normalizeTelemetryBindingComponent,
 } from '../../src/editor/model/telemetryBinding';
@@ -149,6 +150,31 @@ test('RGV 列绑定归一化：同列多台保留数组序，旧版单实体值�
     '3': ['e_old'],
     '5': ['e_a', 'e_b'],
   });
+});
+
+test('devType=lift 是 specialized 设备类型，解锁 Inspector 绑定区门控', () => {
+  assert.equal(isSpecializedTelemetryDeviceType('lift'), true);
+});
+
+test('lift 来料/送料层绑定归一化：同层多台保留数组序，非法层号与空绑定丢弃', () => {
+  const binding = normalizeTelemetryBindingComponent({
+    enabled: true,
+    sourceId: 'plc',
+    deviceType: 'lift',
+    incomingLayerBindings: {
+      '1': ['e_in_a', 'e_in_b', 'e_in_a'],
+      '0': ['e_zero'],
+      abc: ['e_nan'],
+    },
+    outgoingLayerBindings: {
+      '2': 'e_out_old',
+      '-1': ['e_neg'],
+      '3': [],
+    },
+  });
+
+  assert.deepEqual(binding?.incomingLayerBindings, { '1': ['e_in_a', 'e_in_b'] });
+  assert.deepEqual(binding?.outgoingLayerBindings, { '2': ['e_out_old'] });
 });
 
 test('模型实体根据 dataDriven devType 创建默认 telemetryBinding 且 assetCode 不重复保存', () => {

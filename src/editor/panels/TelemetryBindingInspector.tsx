@@ -136,7 +136,7 @@ export function CargoGeneratorInspector(props: {
         </select>
       </label>
       {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退场景默认或内置立方体。</p> : null}
-      <p className="muted">堆垛机/输送线/RGV 取放货时按所选模型生成器渲染货箱；未绑定时跟随场景设置中的默认模板。</p>
+      <p className="muted">堆垛机/输送线/RGV/提升机 取放货时按所选模型生成器渲染货箱；未绑定时跟随场景设置中的默认模板。</p>
     </fieldset>
   );
 }
@@ -312,6 +312,123 @@ function RgvColumnBindingsEditor(props: {
   );
 }
 
+/** 提升机层绑定编辑：协议层号(level_upper) → 场景 conveyor 实体，运行时载货台 Y 对齐该层绑定输送线支撑面并自动交接；同层可绑多台。 */
+function LiftLayerBindingsEditor(props: {
+  entityId: string;
+  binding: TelemetryBindingComponent;
+  disabled: boolean;
+  field: 'incomingLayerBindings' | 'outgoingLayerBindings';
+  title: string;
+  description: string;
+  commit: (patch: Partial<TelemetryBindingComponent>) => void;
+}) {
+  const scene = useEditorStore((state) => state.scene);
+  const entityOptions = scene.entityIds
+    .filter((entityId) => {
+      if (entityId === props.entityId) return false;
+      const entity = scene.entities[entityId];
+      return entity?.components.telemetryBinding?.deviceType === 'conveyor';
+    })
+    .map((entityId) => ({ id: entityId, name: scene.entities[entityId]?.name ?? entityId }));
+  const entries = Object.entries(props.binding[props.field] ?? {})
+    .flatMap(([layer, targetIds]) => (Array.isArray(targetIds) ? targetIds : [targetIds]).map((targetId) => ({ layer: Number(layer), targetId })))
+    .filter((entry) => Number.isInteger(entry.layer) && entry.layer > 0)
+    .sort((a, b) => a.layer - b.layer);
+  const hasMissingTarget = entries.some((entry) => !entityOptions.some((option) => option.id === entry.targetId));
+
+  /** 以完整表提交，统一走 normalize 丢弃非法行；同层多台按行序分组成数组，空表按删除字段处理。 */
+  function commitEntries(next: { layer: number; targetId: string }[]): void {
+    const layerBindings: Record<string, string[]> = {};
+    for (const entry of next) {
+      if (!Number.isInteger(entry.layer) || entry.layer <= 0 || !entry.targetId) continue;
+      const key = String(entry.layer);
+      layerBindings[key] = [...(layerBindings[key] ?? []), entry.targetId];
+    }
+    props.commit({ [props.field]: Object.keys(layerBindings).length > 0 ? layerBindings : undefined });
+  }
+
+  function handleLayerChange(index: number, layer: number): void {
+    if (!Number.isInteger(layer) || layer <= 0) return;
+    commitEntries(entries.map((entry, other) => (other === index ? { ...entry, layer } : entry)));
+  }
+
+  function handleTargetChange(index: number, targetId: string): void {
+    commitEntries(entries.map((entry, other) => (other === index ? { ...entry, targetId } : entry)));
+  }
+
+  function handleRemove(index: number): void {
+    commitEntries(entries.filter((_, other) => other !== index));
+  }
+
+  function handleAdd(): void {
+    const firstOption = entityOptions[0];
+    if (!firstOption) return;
+    let layer = 1;
+    while (entries.some((entry) => entry.layer === layer)) layer += 1;
+    const usedTargetIds = new Set(entries.map((entry) => entry.targetId));
+    const target = entityOptions.find((option) => !usedTargetIds.has(option.id)) ?? firstOption;
+    commitEntries([...entries, { layer, targetId: target.id }]);
+  }
+
+  return (
+    <div className="rgv-column-bindings">
+      <p className="muted">{props.description}</p>
+
+      <div className="model-generator-section-header">
+        <span>{props.title}</span>
+        <button
+          disabled={props.disabled || entityOptions.length === 0}
+          onClick={handleAdd}
+          title={`添加${props.title}`}
+          type="button"
+        >
+          +
+        </button>
+      </div>
+
+      {entries.length === 0 ? (
+        <p className="muted model-generator-empty-hint">暂无{props.title}，点击 + 添加。</p>
+      ) : null}
+
+      {entries.map((entry, index) => {
+        const missing = !entityOptions.some((option) => option.id === entry.targetId);
+        return (
+          <div className="model-generator-rule-card" key={index}>
+            <div className="model-generator-card-header">
+              <span>层 {entry.layer}</span>
+              <span className="model-generator-inline-actions">
+                <button disabled={props.disabled} onClick={() => handleRemove(index)} title={`删除${props.title}`} type="button">−</button>
+              </span>
+            </div>
+            <label className="inspector-row">
+              <span>层号</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                disabled={props.disabled}
+                value={entry.layer}
+                onChange={(event) => handleLayerChange(index, Number(event.target.value))}
+              />
+            </label>
+            <label className="inspector-row">
+              <span>目标设备</span>
+              <select disabled={props.disabled} value={entry.targetId} onChange={(event) => handleTargetChange(index, event.target.value)}>
+                {missing ? <option value={entry.targetId}>已删除实体（{entry.targetId}）</option> : null}
+                {entityOptions.map((option) => (
+                  <option key={option.id} value={option.id}>{option.name}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        );
+      })}
+
+      {hasMissingTarget ? <p className="telemetry-runtime-error">存在指向已删除实体的层绑定，运行时对应层信号将被忽略。</p> : null}
+    </div>
+  );
+}
+
 /** 数据驱动 Inspector：编辑实体级 telemetryBinding 基础字段，驱动映射由模型包 .model.ts 声明。 */export function TelemetryBindingInspector(props: Props) {
   const binding = props.binding;
   if (!binding) {
@@ -356,6 +473,28 @@ function RgvColumnBindingsEditor(props: {
       <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>
       {binding.deviceType === 'rgv' ? (
         <RgvColumnBindingsEditor entityId={props.entityId} binding={binding} disabled={props.disabled} commit={commit} />
+      ) : null}
+      {binding.deviceType === 'lift' ? (
+        <>
+          <LiftLayerBindingsEditor
+            entityId={props.entityId}
+            binding={binding}
+            disabled={props.disabled}
+            field="incomingLayerBindings"
+            title="来料层绑定"
+            description="来料层号 → 来料 conveyor 实体；reference_upper_step=1 时按 level_upper 选层，载货台 Y 对齐该层输送线支撑面并自动取货上台。同层可绑多台。"
+            commit={commit}
+          />
+          <LiftLayerBindingsEditor
+            entityId={props.entityId}
+            binding={binding}
+            disabled={props.disabled}
+            field="outgoingLayerBindings"
+            title="送料层绑定"
+            description="送料层号 → 送料 conveyor 实体；reference_upper_step=2 时按 level_upper 选层，载货台 Y 对齐该层输送线支撑面并自动放货下台。同层可绑多台。"
+            commit={commit}
+          />
+        </>
       ) : null}
       {binding.deviceType === 'conveyor' ? (
         <>

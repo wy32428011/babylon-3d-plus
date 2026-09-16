@@ -363,6 +363,19 @@ function createSnapshot(input: Omit<DeviceTelemetrySnapshot, 'receivedAt' | 'cur
 function normalizeDeviceCompatibleFields(deviceType: string, fields: DeviceTelemetryFields): void {
   normalizeStackerCompatibleFields(deviceType, fields);
   normalizeConveyorCompatibleFields(deviceType, fields);
+  normalizeLiftCompatibleFields(deviceType, fields);
+}
+
+/** 提升机目标层字段归一为整数：EPV 点位可能以浮点/字符串数值上报。 */
+function normalizeLiftCompatibleFields(deviceType: string, fields: DeviceTelemetryFields): void {
+  if (deviceType !== 'lift') return;
+
+  for (const key of ['reference_upper_step', 'level_upper'] as const) {
+    const value = readNumberField(fields, key);
+    if (value !== null && Number.isFinite(value)) {
+      fields[key] = Math.trunc(value);
+    }
+  }
 }
 
 /** 将 Stacker 历史拼写和正式字段做兼容归一。 */

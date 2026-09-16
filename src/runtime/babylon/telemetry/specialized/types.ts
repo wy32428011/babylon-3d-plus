@@ -99,6 +99,11 @@ export const RGV_CARGO_TRANSFER_SECONDS = 1.5;
 export const RGV_CARGO_COLOR = '#7db85c';
 export const RGV_CARGO_EMISSIVE_COLOR = '#1e3a14';
 export const RGV_CARGO_SIZE = new Vector3(0.8, 0.42, 0.8);
+/** 提升机载货台升降速度缺省（m/s）：dataDriven.motion.lift.speed 缺失时回退。 */
+export const LIFT_DEFAULT_LIFT_SPEED_METERS_PER_SECOND = 0.3;
+export const LIFT_CARGO_COLOR = '#5cb8b2';
+export const LIFT_CARGO_EMISSIVE_COLOR = '#143a38';
+export const LIFT_CARGO_SIZE = new Vector3(0.8, 0.42, 0.8);
 /** RGV 固定轨道节点（导轨 A45/A46 + 盖板 A37~A44）名称兜底匹配，兼容 GLB 导入的 . / _ 后缀。 */
 export const RGV_FALLBACK_FIXED_NODE_PATTERN = /^A(?:3[7-9]|4[0-6])(?:[._]|$)/i;
 export const STACKER_FALLBACK_FIXED_NODE_NAMES = ['guidaoshang.1', 'guidaoxia.2'];
@@ -157,7 +162,7 @@ export type StackerForkNodeGroups = {
   backStageTwoNodes: TransformNode[];
 };
 
-export type GeneratedCargoKind = 'stacker' | 'conveyor' | 'rgv' | 'shuttle';
+export type GeneratedCargoKind = 'stacker' | 'conveyor' | 'rgv' | 'shuttle' | 'lift';
 
 export type GeneratedCargoFallbackRuntimeEntry = {
   mesh: Mesh;
@@ -385,6 +390,44 @@ export type RgvModelTelemetryState = {
 
 export type RgvCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
+/**
+ * 提升机遥测运行态：RGV 的垂直版——载货台沿模型 Y 轴升降，层绑定分来料/送料两张表。
+ * 单车单货；载货台运动完全由 reference_upper_step（1=来料侧/2=送料侧）+ level_upper 目标层驱动。
+ */
+export type LiftModelTelemetryState = {
+  rootBasePosition: Vector3;
+  /** 载货台当前 Y 偏移（米，世界轴投影；基线 0 = 脚本导入姿态）。 */
+  liftOffset: number;
+  /** 目标层支撑面换算出的 Y 偏移目标；null 表示无有效目标。 */
+  liftTargetOffset: number | null;
+  /** 升降物理行程约束（整机框架 × 载货台基线），与 dataDriven limits 取交集。 */
+  liftConstraint: StackerLiftConstraint | null;
+  /** 当前目标键 `${side}:${layer}`：边沿检测基准，变化时重解析目标层。 */
+  targetKey: string | null;
+  /** 当前目标侧（内部表示）：0=来料（incomingLayerBindings，协议 reference_upper_step=1），1=送料（outgoingLayerBindings，协议=2）。 */
+  targetSide: 0 | 1 | null;
+  /** 当前目标层号（level_upper）。 */
+  targetLayer: number | null;
+  /** 目标层选中的 conveyor 实体 ID（候选仲裁结果），交接与重试共用。 */
+  targetEntityId: string | null;
+  /** 到位锁：liftOffset 到达 liftTargetOffset 后等于 targetKey，防止重复触发交接。 */
+  arrivedTargetKey: string | null;
+  /** 货物键（JSON.stringify([assetCode])，单车单货）；非 null 表示本机持有货箱。 */
+  cargoKey: string | null;
+  /** true=货箱在载货台上随台升降；false=正在交接插值（静止端）。 */
+  cargoOnBoard: boolean;
+  /** 交接插值另一端（输送线侧支撑点世界坐标）。 */
+  cargoHoldPosition: Vector3 | null;
+  cargoHoldRotation: Quaternion | null;
+  /** 0=输送线侧支撑点，1=载货台工位（交接插值进度）。 */
+  transferProgress: number;
+  /** 交接插值进行中。 */
+  transferActive: boolean;
+  nodeBaselines: Map<TransformNode, Vector3>;
+};
+
+export type LiftCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
+
 export type ShuttleForkSide = 'front' | 'back';
 
 /**
@@ -457,6 +500,7 @@ export type SpecializedTelemetrySharedState = {
   conveyorCargoMeshes: Map<string, ConveyorCargoRuntimeEntry>;
   rgvCargoMeshes: Map<string, RgvCargoRuntimeEntry>;
   shuttleCargoMeshes: Map<string, ShuttleCargoRuntimeEntry>;
+  liftCargoMeshes: Map<string, LiftCargoRuntimeEntry>;
   reportedMissingTargets: Set<string>;
   reportedFaults: Map<string, string>;
   reportedStatuses: Map<string, string>;
@@ -472,6 +516,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
     conveyorCargoMeshes: new Map(),
     rgvCargoMeshes: new Map(),
     shuttleCargoMeshes: new Map(),
+    liftCargoMeshes: new Map(),
     reportedMissingTargets: new Set(),
     reportedFaults: new Map(),
     reportedStatuses: new Map(),
@@ -573,4 +618,16 @@ export interface SpecializedTelemetryDriverContext {
   isRgvCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean;
   /** stacker 持货外部拉取门控：mode==4 落货站台后待收叉完毕的货物不允许 pull 提前摘除。 */
   isStackerCargoPendingPlatformHandoff(cargo: GeneratedCargoRuntimeEntry): boolean;
+  /** lift 从来料层 conveyor 取货：无视 task 接管该 conveyor 当前持货（无货返回 null）。 */
+  adoptConveyorCargoForLift(entityId: string, liftAssetCode: string): GeneratedCargoRuntimeEntry | null;
+  /**
+   * lift 向送料层 conveyor 放货：目标 conveyor 等待该 task（或匿名可收）时交付（settle+广播）；
+   * 预检不过返回 false，不拆除 lift 侧引用（货物滞留台上持续重试，不销毁）。
+   * preserveAxialPosition 语义同 RGV 列放货：放货插值已推进（滞后承接）时按货物当前轴向投影落地，不回进入端。
+   */
+  deliverLiftCargoToConveyorLayer(entityId: string, cargoKey: string, task: string, preserveAxialPosition?: boolean): boolean;
+  /** lift 持货外部拉取就绪门控：到位锁 + 货在台上 + 非交接中才允许 pull 摘除，防止升降中途摘货。 */
+  isLiftCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean;
+  /** lift 层对齐/交接落点用：层绑定实体为 conveyor 时返回其货物支撑点世界坐标（deck center + upAxis×surfaceLift）；非 conveyor 或实体不存在返回 null。 */
+  resolveConveyorDeckSurfacePoint(entityId: string): Vector3 | null;
 }

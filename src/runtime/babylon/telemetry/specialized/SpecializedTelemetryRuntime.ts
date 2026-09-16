@@ -15,11 +15,12 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from '../specializedTelemetryBinding';
-import { isConveyorRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
+import { isConveyorRuntimeModel, isLiftRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
 import { StackerTelemetryDriver } from './stackerDriver';
 import { ConveyorTelemetryDriver } from './conveyorDriver';
 import { RgvTelemetryDriver } from './rgvDriver';
 import { ShuttleTelemetryDriver } from './shuttleDriver';
+import { LiftTelemetryDriver } from './liftDriver';
 import { createTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../telemetryPerformanceStages';
 import {
   type ConveyorCargoRuntimeEntry,
@@ -67,6 +68,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   private readonly conveyorDriver: ConveyorTelemetryDriver;
   private readonly rgvDriver: RgvTelemetryDriver;
   private readonly shuttleDriver: ShuttleTelemetryDriver;
+  private readonly liftDriver: LiftTelemetryDriver;
   /** 驱动注册表，数组顺序即无实例绑定时的默认优先级（Stacker 优先）。 */
   private readonly drivers: readonly SpecializedDriverRegistration[];
   private bindingCache = new WeakMap<ModelRuntimeEntry, ModelBindingCacheEntry>();
@@ -92,6 +94,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.conveyorDriver = new ConveyorTelemetryDriver(this);
     this.rgvDriver = new RgvTelemetryDriver(this);
     this.shuttleDriver = new ShuttleTelemetryDriver(this);
+    this.liftDriver = new LiftTelemetryDriver(this);
     this.drivers = [
       {
         deviceType: 'stacker',
@@ -118,6 +121,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         deviceType: 'rgv',
         isCapable: isRgvRuntimeModel,
         apply: (model, snapshot, deltaSeconds) => this.rgvDriver.applyToModel(model, snapshot, deltaSeconds),
+      },
+      {
+        deviceType: 'lift',
+        isCapable: isLiftRuntimeModel,
+        apply: (model, snapshot, deltaSeconds) => this.liftDriver.applyToModel(model, snapshot, deltaSeconds),
       },
     ];
     for (const driver of this.drivers) {
@@ -249,6 +257,10 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       this.host.disposeGeneratedCargo(cargo);
     }
     this.state.shuttleCargoMeshes.clear();
+    for (const cargo of this.state.liftCargoMeshes.values()) {
+      this.host.disposeGeneratedCargo(cargo);
+    }
+    this.state.liftCargoMeshes.clear();
   }
 
   /** 删除指定资产编号下的全部专用运行时货物。 */
@@ -257,6 +269,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.conveyorDriver.disposeConveyorCargoForAssetCode(assetCode);
     this.rgvDriver.disposeRgvCargoForAssetCode(assetCode);
     this.shuttleDriver.disposeShuttleCargoForAssetCode(assetCode);
+    this.liftDriver.disposeLiftCargoForAssetCode(assetCode);
   }
 
   /** 释放指定生成器提供模板的全部运行时货箱。 */
@@ -280,6 +293,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       if (cargo.generatorEntityId !== generatorEntityId) continue;
       this.host.disposeGeneratedCargo(cargo);
       this.state.shuttleCargoMeshes.delete(key);
+    }
+    for (const [key, cargo] of this.state.liftCargoMeshes.entries()) {
+      if (cargo.generatorEntityId !== generatorEntityId) continue;
+      this.host.disposeGeneratedCargo(cargo);
+      this.state.liftCargoMeshes.delete(key);
     }
   }
 
@@ -342,7 +360,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   }
 
   /**
-   * 按 task 全局接管货物实例：四张货物表即注册表，找到其他设备持有的同 task 货箱时
+   * 按 task 全局接管货物实例：五张货物表即注册表，找到其他设备持有的同 task 货箱时
    * 由其 driver 清理遥测引用并取出条目（不销毁，视觉连续）返回；空 task 不参与，返回 null。
    */
   adoptGlobalCargoByTask(task: string, claimingCargoKey: string): GeneratedCargoRuntimeEntry | null {
@@ -367,10 +385,15 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         return this.shuttleDriver.detachClaimedCargoByKey(key);
       }
     }
+    for (const [key, cargo] of [...this.state.liftCargoMeshes]) {
+      if (key !== claimingCargoKey && cargo.task === task) {
+        return this.liftDriver.detachClaimedCargoByKey(key);
+      }
+    }
     return null;
   }
 
-  /** 按货物实例引用摘除（不销毁）：扫四张货物表定位所属条目，交由对应 driver 清理遥测引用后取出。 */
+  /** 按货物实例引用摘除（不销毁）：扫五张货物表定位所属条目，交由对应 driver 清理遥测引用后取出。 */
   detachClaimedCargoByReference(cargo: GeneratedCargoRuntimeEntry): GeneratedCargoRuntimeEntry | null {
     for (const [key, entry] of [...this.state.stackerCargoMeshes]) {
       if (entry === cargo) return this.stackerDriver.detachClaimedCargoByKey(key);
@@ -383,6 +406,9 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     }
     for (const [key, entry] of [...this.state.shuttleCargoMeshes]) {
       if (entry === cargo) return this.shuttleDriver.detachClaimedCargoByKey(key);
+    }
+    for (const [key, entry] of [...this.state.liftCargoMeshes]) {
+      if (entry === cargo) return this.liftDriver.detachClaimedCargoByKey(key);
     }
     return null;
   }
@@ -453,6 +479,47 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   /** RGV 持货外部拉取就绪门控：委托 rgvDriver 判定（放货意图且车已到位才允许摘除）。 */
   isRgvCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean {
     return this.rgvDriver.isRgvCargoReadyForExternalPull(cargo);
+  }
+
+  /** lift 从来料层 conveyor 取货：按实体 ID 解析 conveyor 后无视 task 接管其当前持货（复用 stacker 站台取货语义，向下游发 taken 波）。 */
+  adoptConveyorCargoForLift(entityId: string, liftAssetCode: string): GeneratedCargoRuntimeEntry | null {
+    for (const { entityId: id, model } of this.host.collectModels()) {
+      if (id !== entityId) continue;
+      if (!isConveyorRuntimeModel(model)) return null;
+      return this.conveyorDriver.adoptPlatformCargoForStacker(model, liftAssetCode);
+    }
+    return null;
+  }
+
+  /** lift 向送料层 conveyor 放货交付：先预检再拆引用，任一步失败 lift 侧货物状态保持完好，由调用方保持滞留重试（不销毁）。preserveAxialPosition 语义同 RGV 列放货（滞后承接按当前轴向投影落地）。 */
+  deliverLiftCargoToConveyorLayer(entityId: string, cargoKey: string, task: string, preserveAxialPosition = false): boolean {
+    for (const { entityId: id, model } of this.host.collectModels()) {
+      if (id !== entityId) continue;
+      if (!isConveyorRuntimeModel(model)) return false;
+      if (!this.conveyorDriver.canAcceptRgvColumnPlacedCargo(model, task)) return false;
+      const cargo = this.liftDriver.detachClaimedCargoByKey(cargoKey);
+      if (!cargo) return false;
+      if (!this.conveyorDriver.acceptRgvColumnPlacedCargo(model, cargo, task, preserveAxialPosition)) {
+        this.state.liftCargoMeshes.set(cargoKey, cargo);
+        return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /** lift 持货外部拉取就绪门控：委托 liftDriver 判定（载货台到位、货在台上且非交接中才允许摘除）。 */
+  isLiftCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean {
+    return this.liftDriver.isLiftCargoReadyForExternalPull(cargo);
+  }
+
+  /** lift 层对齐/交接落点用：层绑定实体为 conveyor 时返回其货物支撑点世界坐标；非 conveyor 或实体不存在返回 null。 */
+  resolveConveyorDeckSurfacePoint(entityId: string): Vector3 | null {
+    for (const { entityId: id, model } of this.host.collectModels()) {
+      if (id !== entityId) continue;
+      return isConveyorRuntimeModel(model) ? this.conveyorDriver.resolveCargoDeckSurfacePointWorld(model) : null;
+    }
+    return null;
   }
 
   /** stacker 持货外部拉取门控：委托 stackerDriver 判定（mode==4 待收叉完毕的站台滞留货不允许摘除）。 */

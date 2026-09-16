@@ -6,6 +6,7 @@ import {
   type ConveyorCargoTravelConfig,
   type ConveyorModelTelemetryState,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
+  type LiftModelTelemetryState,
   type RgvModelTelemetryState,
   type ShuttleModelTelemetryState,
   type StackerModelTelemetryState,
@@ -84,6 +85,73 @@ export function isShuttleRuntimeModel(model: ModelRuntimeEntry): boolean {
     if (devType === 'shuttle') return true;
   }
   return false;
+}
+
+/** 通过模型包脚本、元数据或路径判断当前导入模型是否是物料提升机。 */
+export function isLiftModelAsset(modelAsset: ModelAssetComponent): boolean {
+  const signature = JSON.stringify([
+    modelAsset.assetCode,
+    modelAsset.sourcePath,
+    modelAsset.sourceUrl,
+    modelAsset.parameterScriptMetadata ?? [],
+    modelAsset.animationScriptMetadata ?? [],
+  ]).toLowerCase();
+
+  return signature.includes('lift') || signature.includes('提升机');
+}
+
+/** 判断当前模型是否具备提升机驱动能力：仅按脚本声明 devType=lift 识别（同 shuttle 策略，中文签名不进运行时判定，防误接管）。 */
+export function isLiftRuntimeModel(model: ModelRuntimeEntry): boolean {
+  if (model.liftCapable) return true;
+  for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+    if (!isPlainRecord(dataDriven)) continue;
+    const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
+    const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
+    if (devType === 'lift') return true;
+  }
+  return false;
+}
+
+/** 创建提升机遥测运行态，所有偏移和货物占位只保存在内存中。 */
+export function createLiftTelemetryState(root: TransformNode): LiftModelTelemetryState {
+  return {
+    rootBasePosition: root.position.clone(),
+    liftOffset: 0,
+    liftTargetOffset: null,
+    liftConstraint: null,
+    targetKey: null,
+    targetSide: null,
+    targetLayer: null,
+    targetEntityId: null,
+    arrivedTargetKey: null,
+    cargoKey: null,
+    cargoOnBoard: false,
+    cargoHoldPosition: null,
+    cargoHoldRotation: null,
+    transferProgress: 0,
+    transferActive: false,
+    nodeBaselines: new Map(),
+  };
+}
+
+/** 模型完成归一化和外置脚本初始化后，重新建立提升机遥测基线。 */
+export function resetLiftTelemetryState(model: ModelRuntimeEntry): void {
+  model.liftTelemetry.rootBasePosition = model.root.position.clone();
+  model.liftTelemetry.liftOffset = 0;
+  model.liftTelemetry.liftTargetOffset = null;
+  model.liftTelemetry.liftConstraint = null;
+  model.liftTelemetry.targetKey = null;
+  model.liftTelemetry.targetSide = null;
+  model.liftTelemetry.targetLayer = null;
+  model.liftTelemetry.targetEntityId = null;
+  model.liftTelemetry.arrivedTargetKey = null;
+  model.liftTelemetry.cargoKey = null;
+  model.liftTelemetry.cargoOnBoard = false;
+  model.liftTelemetry.cargoHoldPosition = null;
+  model.liftTelemetry.cargoHoldRotation = null;
+  model.liftTelemetry.transferProgress = 0;
+  model.liftTelemetry.transferActive = false;
+  model.liftTelemetry.nodeBaselines.clear();
 }
 
 /** 创建多穿小车遥测运行态，所有偏移和货物占位只保存在内存中。 */
