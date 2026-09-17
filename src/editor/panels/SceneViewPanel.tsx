@@ -358,6 +358,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const environmentRuntimePhase = useEditorStore((state) => state.environmentRuntimeSnapshot.phase);
   const environmentFocusRequest = useEditorStore((state) => state.environmentFocusRequest);
   const cameraPoseSaveRequest = useEditorStore((state) => state.cameraPoseSaveRequest);
+  const regionViewRequest = useEditorStore((state) => state.regionViewRequest);
   const cameraResetRequest = useEditorStore((state) => state.cameraResetRequest);
   const cameraOrientation = useEditorStore((state) => state.cameraOrientation);
   const cameraProjection = useEditorStore((state) => state.cameraProjection);
@@ -2553,6 +2554,35 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     consumeCameraPoseSaveRequest(cameraPoseSaveRequest.id, viewport.getCameraPose());
   }, [cameraPoseSaveRequest, consumeCameraPoseSaveRequest]);
+
+  useEffect(() => {
+    if (!regionViewRequest) return;
+    const state = useEditorStore.getState();
+    if (regionViewRequest.sceneSessionId !== state.sceneSessionId || state.regionViewRequest?.id !== regionViewRequest.id) return;
+    const finish = state.consumeRegionViewRequest;
+    const viewport = viewportRef.current;
+    if (!viewport || isScenePreparationActive()) {
+      finish(regionViewRequest.id, undefined, '场景尚未就绪，请加载完成后重试');
+      return;
+    }
+    if (state.runtimeMode !== 'edit') { finish(regionViewRequest.id); return; }
+    try {
+      if (regionViewRequest.kind === 'save') {
+        if (manualRoamRef.current?.getSnapshot().enabled) throw new Error('请先退出手动漫游，再保存区域视角');
+        finish(regionViewRequest.id, viewport.getCameraView());
+      } else {
+        const view = state.scene.sceneSettings.regionViews.find(item => item.id === regionViewRequest.regionViewId);
+        if (!view) throw new Error('区域视角不存在，可能已被删除');
+        pauseHistoryReplay();
+        autoPatrolPlaybackRef.current?.stop();
+        manualRoamRef.current?.setEnabled(false);
+        viewport.applyCameraView({ ...view.camera, viewDistance: state.scene.sceneSettings.camera.viewDistance }, { animate: false });
+        finish(regionViewRequest.id);
+      }
+    } catch (error) {
+      finish(regionViewRequest.id, undefined, error instanceof Error ? error.message : '区域视角操作失败');
+    }
+  }, [regionViewRequest, pauseHistoryReplay]);
 
   useEffect(() => {
     if (!cameraResetRequest) return;

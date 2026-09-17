@@ -827,6 +827,20 @@ export function PlayerApp() {
           pausePatrol: () => { autoPatrolPlayback!.pause(false); },
           notifyCameraChangedWhilePaused: () => autoPatrolPlayback!.notifyCameraChangedWhilePaused(),
           clearSelection: clearViewerSelection,
+          getRegionViews: () => sceneDocument.sceneSettings.regionViews.map(({ id, name }) => ({ id, name })),
+          applyRegionView: (viewId, options) => {
+            const view = sceneDocument.sceneSettings.regionViews.find(item => item.id === viewId);
+            if (!view) throw new Error('区域视角不存在');
+            autoPatrolStartGate.cancelPending();
+            pauseHistoryReplay();
+            autoPatrolPlayback?.stop();
+            manualRoamRuntime?.setEnabled(false);
+            updateOpenedDigitalTwinFloatingControl(null);
+            viewport!.cancelCameraTransition('replaced');
+            viewport!.applyCameraView({ ...view.camera, viewDistance: sceneDocument.sceneSettings.camera.viewDistance }, {
+              ...options, lockStandardOrientation: false,
+            });
+          },
           globalOverview: () => restorePlayerGlobalOverview({
             cancelPendingAutoPatrol: () => autoPatrolStartGate.cancelPending(),
             stopHistoryReplay: pauseHistoryReplay,

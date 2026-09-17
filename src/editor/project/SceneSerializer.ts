@@ -332,6 +332,8 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
   const shadows = settings.shadows === undefined ? undefined : assertPlainObject(settings.shadows);
 
   return sanitizeSceneSettings({
+    // 统一校验器负责隔离坏项并报告；缺失字段兼容历史场景。
+    regionViews: settings.regionViews as SceneSettings['regionViews'],
     camera: {
       savedPose: normalizeSceneCameraPose(camera.savedPose),
       savedOrientation: normalizeSceneCameraOrientation(camera.savedOrientation),

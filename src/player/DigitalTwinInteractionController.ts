@@ -1,3 +1,4 @@
+import type { DigitalTwinRegionViewItem, DigitalTwinRegionViewError } from './digitalTwinRegionViewProtocol';
 import type {
   CameraTransitionCancelReason,
   CameraViewTransitionOptions,
@@ -59,6 +60,8 @@ export type DigitalTwinInteractionRuntime = {
   pausePatrol: () => void;
   notifyCameraChangedWhilePaused: () => void;
   clearSelection?: () => void;
+  getRegionViews?: () => readonly DigitalTwinRegionViewItem[];
+  applyRegionView?: (viewId: string, options: CameraViewTransitionOptions) => void;
   globalOverview?: () => void;
   startAutoPatrol?: () => void;
   startManualRoam?: () => void;
@@ -133,6 +136,9 @@ export class DigitalTwinInteractionController {
   private activeSessionId: string | null = null;
   private activeParentOrigin: string | null = null;
   private activeRequest: ActiveFocusRequest | null = null;
+  private regionViewsEnabled = false;
+  private activeRegionView: { requestId: string; sessionId: string } | null = null;
+  private appliedRegionView: { requestId: string; sessionId: string } | null = null;
   private highlightTimer: unknown | null = null;
   private highlightRequestId: string | null = null;
   private selectionRevision = 0;
@@ -209,12 +215,16 @@ export class DigitalTwinInteractionController {
   /** 每次设备/货格选择产生新标记，旧弹层的关闭不能清理后来的选择。 */
   beginSelection(): void {
     if (this.disposed) return;
+    this.clearAppliedRegionView();
+    this.cancelActiveRegionView('replaced');
     this.selectionRevision++;
     this.cancelActiveRequest('replaced', true);
   }
 
   notifyManualCameraInput(): void {
     if (this.disposed || !this.runtime) return;
+    this.clearAppliedRegionView();
+    this.cancelActiveRegionView('manual-input');
     const focusHadStarted = this.activeRequest?.focusStarted === true || this.highlightRequestId !== null;
     if (focusHadStarted) this.runtime.notifyCameraChangedWhilePaused();
     const cancelled = this.cancelActiveRequest('manual-input', true);
@@ -223,6 +233,7 @@ export class DigitalTwinInteractionController {
 
   dispose(): void {
     if (this.disposed) return;
+    this.cancelActiveRegionView('disposed');
     this.disposed = true;
     this.cancelActiveRequest('disposed', false);
     this.clearHighlight();
@@ -249,6 +260,22 @@ export class DigitalTwinInteractionController {
       || event.origin !== this.activeParentOrigin
     ) return;
 
+    if (message.type === 'host.regionViews') {
+      if (!this.runtime?.getRegionViews || !this.runtime.applyRegionView) return;
+      this.regionViewsEnabled = true;
+      this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+        sessionId: message.sessionId, requestId: message.requestId, type: 'viewer.regionViews',
+        payload: { views: this.runtime.getRegionViews().map(({ id, name }) => ({ id, name })) } });
+      return;
+    }
+    if (message.type === 'command.regionView') {
+      this.applyRegionView(message.requestId, message.payload.viewId, message.payload.animate);
+      return;
+    }
+    if (message.type === 'command.cancelRegionView') {
+      if (message.requestId === this.activeRegionView?.requestId) this.cancelActiveRegionView('cancelled');
+      return;
+    }
     if (message.type === 'command.clearSelection') {
       this.clearSelection(message.requestId, message.payload.selectionToken);
       return;
@@ -300,6 +327,9 @@ export class DigitalTwinInteractionController {
   }
 
   private resetSession(): void {
+    this.appliedRegionView = null;
+    this.cancelActiveRegionView('cancelled');
+    this.regionViewsEnabled = false;
     this.cancelActiveRequest('cancelled', false);
     this.clearHighlight();
     this.activeSessionId = null;
@@ -376,6 +406,9 @@ export class DigitalTwinInteractionController {
       return;
     }
 
+    this.cancelActiveRegionView('replaced');
+    this.clearAppliedRegionView();
+
     const sessionId = this.activeSessionId;
     if (!sessionId) return;
     const cancelledPrevious = this.cancelActiveRequest('replaced', true);
@@ -401,6 +434,8 @@ export class DigitalTwinInteractionController {
   }
 
   private focusAsset(requestId: string, rawAssetCode: string): void {
+    this.clearAppliedRegionView();
+    this.cancelActiveRegionView('replaced');
     const runtime = this.runtime;
     if (!runtime) {
       this.postFailure(requestId, 'UNSUPPORTED_COMMAND');
@@ -443,6 +478,66 @@ export class DigitalTwinInteractionController {
     };
     this.activeRequest = request;
     this.pollGeometry(request);
+  }
+
+  private applyRegionView(requestId: string, viewId: string, animate: boolean): void {
+    const runtime = this.runtime;
+    this.cancelActiveRegionView('replaced');
+    if (!this.activeSessionId) return;
+    const request = { requestId, sessionId: this.activeSessionId };
+    if (!this.regionViewsEnabled || !runtime?.getRegionViews || !runtime.applyRegionView) {
+      this.postRegionViewFailure(request, 'UNSUPPORTED_COMMAND', '当前 Viewer 不支持区域视角');
+      return;
+    }
+    if (!runtime.getRegionViews().some(view => view.id === viewId)) {
+      this.postRegionViewFailure(request, 'REGION_VIEW_NOT_FOUND', '该区域视角不存在，请重新加载场景');
+      return;
+    }
+    this.cancelActiveRequest('replaced', true);
+    this.activeRegionView = request;
+    try {
+      runtime.applyRegionView(viewId, {
+        animate,
+        onCompleted: () => {
+          if (this.activeRegionView !== request) return;
+          this.activeRegionView = null;
+          this.appliedRegionView = request;
+          this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+            ...request, type: 'viewer.regionViewResult', ok: true, payload: { viewId } });
+        },
+        onCancelled: () => {
+          if (this.activeRegionView !== request) return;
+          this.activeRegionView = null;
+          this.postRegionViewFailure(request, 'COMMAND_CANCELLED', '区域视角切换已取消');
+        },
+      });
+    } catch {
+      if (this.activeRegionView !== request) return;
+      this.activeRegionView = null;
+      runtime.cancelCameraTransition('cancelled');
+      this.postRegionViewFailure(request, 'INTERNAL_ERROR', '区域视角切换失败');
+    }
+  }
+
+  private clearAppliedRegionView(): void {
+    const request = this.appliedRegionView;
+    if (!request) return;
+    this.appliedRegionView = null;
+    this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+      ...request, type: 'viewer.regionViewCleared' });
+  }
+
+  private cancelActiveRegionView(reason: CameraTransitionCancelReason): void {
+    const request = this.activeRegionView;
+    if (!request) return;
+    this.activeRegionView = null;
+    this.runtime?.cancelCameraTransition(reason);
+    this.postRegionViewFailure(request, 'COMMAND_CANCELLED', '区域视角切换已取消或被替换');
+  }
+
+  private postRegionViewFailure(request: { requestId: string; sessionId: string }, code: DigitalTwinRegionViewError, message: string): void {
+    this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+      ...request, type: 'viewer.regionViewResult', ok: false, error: { code, message } });
   }
 
   private pollGeometry(request: ActiveFocusRequest): void {

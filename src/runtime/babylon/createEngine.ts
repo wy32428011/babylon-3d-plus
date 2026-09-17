@@ -112,6 +112,7 @@ export type BabylonViewport = {
   /** 按画布实际尺寸刷新引擎，并重新应用场景灵敏度，避免小画布把平移放大。 */
   resize: () => void;
   getCameraPose: () => SceneCameraPose;
+  getCameraView: () => ReturnType<ArcRotateCameraViewController['getCameraView']>;
   applyCameraPose: (pose: SceneCameraPose | null, options?: CameraViewTransitionOptions) => void;
   applyCameraView: (settings: SceneCameraSettings, options?: CameraViewApplicationOptions) => void;
   setCameraOrientation: (orientation: CameraOrientation, options?: CameraViewTransitionOptions) => void;
@@ -586,6 +587,7 @@ export function createBabylonViewport(
       applyDigitalTwinCameraSensitivity(camera, cameraSensitivity);
     },
     getCameraPose: () => cameraViewController.getCameraPose(),
+    getCameraView: () => cameraViewController.getCameraView(),
     applyCameraPose: (pose, transitionOptions) => {
       cameraViewController.applyCameraPose(pose, transitionOptions);
     },

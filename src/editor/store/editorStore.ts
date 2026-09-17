@@ -5,6 +5,8 @@ import { create } from 'zustand';
 import { getRequiredEnvironmentResourceIds } from '../../../electron/shared/sceneEnvironmentReferences';
 import { getSceneShadowBakeSignature, sanitizeSceneShadowBake, type SceneShadowBakeSnapshot } from '../model/sceneShadowBake';
 import type { ManualRoamAvatar } from '../model/components';
+import { updateSceneRegionViewsCommand } from '../commands/sceneRegionViewCommands';
+import { MAX_SCENE_REGION_VIEWS, normalizeSceneRegionViews, updateRegionView, validateRegionViewName, type SceneRegionCamera } from '../model/sceneRegionViews';
 import {
   createCommandHistory,
   executeCommand,
@@ -305,6 +307,14 @@ export type CameraResetRequest = {
   id: string;
 };
 
+export type RegionViewRequest = {
+  id: string;
+  sceneSessionId: string;
+  kind: 'save' | 'apply';
+  regionViewId?: string;
+  name: string;
+};
+
 export type AutoPatrolCameraRequest =
   | { id: string; kind: 'capture'; entityId: string; waypointId: string | null }
   | { id: string; kind: 'focus'; entityId: string; waypointId: string };
@@ -495,6 +505,8 @@ type EditorState = {
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
   revealHierarchyEntityRequest: { id: string; entityId: string } | null;
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
+  regionViewRequest: RegionViewRequest | null;
+  regionViewMessage: string | null;
   cameraResetRequest: CameraResetRequest | null;
   selectedAutoPatrolWaypointId: string | null;
   autoPatrolCameraRequest: AutoPatrolCameraRequest | null;
@@ -556,6 +568,10 @@ type EditorState = {
   updateSelectedSkybox: (patch: Partial<Pick<SkyboxComponent, 'intensity' | 'resolution'>>) => void;
   setEnvironmentActiveVariant: (sourceUrl: string) => void;
   requestCameraPoseSave: () => void;
+  requestRegionView: (kind: RegionViewRequest['kind'], name: string, regionViewId?: string) => void;
+  consumeRegionViewRequest: (requestId: string, camera?: SceneRegionCamera, error?: string) => void;
+  renameRegionView: (id: string, name: string) => void;
+  deleteRegionView: (id: string) => void;
   consumeCameraPoseSaveRequest: (requestId: string, pose: SceneCameraPose) => void;
   requestCameraReset: () => void;
   consumeCameraResetRequest: (requestId: string) => void;
@@ -726,6 +742,8 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     projectAssetFocusRequest: null,
     revealHierarchyEntityRequest: null,
     cameraPoseSaveRequest: null,
+    regionViewRequest: null,
+    regionViewMessage: null,
     cameraResetRequest: { id: createId('camera_reset') },
     selectedAutoPatrolWaypointId: null,
     autoPatrolCameraRequest: null,
@@ -2682,6 +2700,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   projectAssetFocusRequest: null,
   revealHierarchyEntityRequest: null,
   cameraPoseSaveRequest: null,
+  regionViewRequest: null,
+  regionViewMessage: null,
   cameraResetRequest: null,
   selectedAutoPatrolWaypointId: null,
   autoPatrolCameraRequest: null,
@@ -2750,6 +2770,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         hierarchySelectionIds: [],
         environmentAdjustmentActive: false,
         cameraPoseSaveRequest: null,
+        regionViewRequest: null,
         autoPatrolCameraRequest: null,
         selectedAutoPatrolWaypointId: null,
         logs: prependLog(state.logs, options?.performance === true ? '已进入性能运行，正在记录本次运行指标。' : '已进入运行预览模式。'),
@@ -3426,6 +3447,71 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         successMessage: `切换环境效果：${activeVariant.name}`,
       },
     );
+  },
+  requestRegionView: (kind, name, regionViewId) => {
+    set(state => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '区域视角');
+      const views = state.scene.sceneSettings.regionViews;
+      const target = regionViewId ? views.find(view => view.id === regionViewId) : undefined;
+      const error = regionViewId && !target ? '区域视角不存在，可能已被删除'
+        : kind === 'apply' && !target ? '请选择要定位的区域视角'
+        : kind === 'save' && !regionViewId ? validateRegionViewName(name, views)
+        || (views.length >= MAX_SCENE_REGION_VIEWS ? `最多保存 ${MAX_SCENE_REGION_VIEWS} 个区域视角` : null) : null;
+      if (error) return { regionViewMessage: error };
+      return { regionViewRequest: { id: createId('region_view_request'), sceneSessionId: state.sceneSessionId,
+        kind, name: name.trim(), regionViewId }, regionViewMessage: null };
+    });
+  },
+  consumeRegionViewRequest: (requestId, camera, captureError) => {
+    set(state => {
+      const request = state.regionViewRequest;
+      if (!request || request.id !== requestId || request.sceneSessionId !== state.sceneSessionId) return state;
+      const base = { regionViewRequest: null };
+      if (isRuntimePreviewState(state)) return { ...base, regionViewMessage: '运行预览只读，已取消区域视角操作' };
+      if (captureError) return { ...base, regionViewMessage: captureError, logs: prependLog(state.logs, captureError) };
+      const views = state.scene.sceneSettings.regionViews;
+      const target = request.regionViewId ? views.find(view => view.id === request.regionViewId) : undefined;
+      if (request.regionViewId && !target) return { ...base, regionViewMessage: '区域视角已删除，操作已取消' };
+      if (request.kind === 'apply' && target) return {
+        ...base, cameraOrientation: target.camera.savedOrientation, cameraProjection: target.camera.savedProjection,
+        regionViewMessage: `已定位：${target.name}`,
+      };
+      try {
+        if (!camera) throw new Error('无法读取当前相机视角');
+        const next = target ? updateRegionView(views, target.id, { camera })
+          : normalizeSceneRegionViews([...views, { id: createId('region_view'), name: request.name, camera }]).views;
+        if (!target && next.length !== views.length + 1) throw new Error('保存失败：名称重复、数量超限或相机数据无效');
+        const label = `${target ? '更新' : '保存'}区域视角：${target?.name ?? request.name}`;
+        const result = executeCommand(state.scene, state.history, updateSceneRegionViewsCommand(views, next, label));
+        return { ...base, ...result, regionViewMessage: label, logs: prependLog(state.logs, label) };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '区域视角保存失败';
+        return { ...base, regionViewMessage: message, logs: prependLog(state.logs, message) };
+      }
+    });
+  },
+  renameRegionView: (id, name) => {
+    set(state => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '重命名区域视角');
+      const views = state.scene.sceneSettings.regionViews;
+      const error = validateRegionViewName(name, views, id);
+      if (error) return { regionViewMessage: error };
+      if (views.find(view => view.id === id)?.name === name.trim()) return state;
+      try {
+        const next = updateRegionView(views, id, { name: name.trim() });
+        return { ...executeCommand(state.scene, state.history, updateSceneRegionViewsCommand(views, next, '重命名区域视角')),
+          regionViewMessage: `已重命名：${name.trim()}` };
+      } catch (error) { return { regionViewMessage: error instanceof Error ? error.message : '重命名失败' }; }
+    });
+  },
+  deleteRegionView: id => {
+    set(state => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '删除区域视角');
+      const views = state.scene.sceneSettings.regionViews;
+      if (!views.some(view => view.id === id)) return state;
+      return { ...executeCommand(state.scene, state.history, updateSceneRegionViewsCommand(views, views.filter(view => view.id !== id), '删除区域视角')),
+        regionViewMessage: '区域视角已删除，可撤销恢复' };
+    });
   },
   requestCameraPoseSave: () => {
     set((state) => {

@@ -1,3 +1,4 @@
+import { parseDigitalTwinRegionViewMessage, type DigitalTwinRegionViewMessage } from './digitalTwinRegionViewProtocol.ts';
 export const DIGITAL_TWIN_BRIDGE_CHANNEL = 'zending.digital-twin.bridge' as const;
 export const DIGITAL_TWIN_BRIDGE_VERSION = 1 as const;
 export const DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY = 'hardwareGpu' as const;
@@ -194,6 +195,7 @@ export type DigitalTwinAssetClickedEvent = {
 export const DIGITAL_TWIN_EDITOR_PREVIEW_SESSION_ID = 'editor-preview' as const;
 
 export type DigitalTwinBridgeMessage =
+  | DigitalTwinRegionViewMessage
   | DigitalTwinHostHelloMessage
   | DigitalTwinBridgeReadyMessage
   | DigitalTwinViewerReadyMessage
@@ -324,6 +326,13 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
   if (!isRecord(value) || !isBaseEnvelope(value) || typeof value.type !== 'string') return null;
 
   switch (value.type) {
+    case 'host.regionViews':
+    case 'viewer.regionViews':
+    case 'command.regionView':
+    case 'command.cancelRegionView':
+    case 'viewer.regionViewResult':
+    case 'viewer.regionViewCleared':
+      return parseDigitalTwinRegionViewMessage(value);
     case 'host.hello':
     case 'bridge.ready':
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type'])
