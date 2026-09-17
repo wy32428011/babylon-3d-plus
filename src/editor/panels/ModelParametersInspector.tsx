@@ -63,14 +63,32 @@ export function ModelParametersInspector({ modelAsset, disabled = false, compact
   const commitSelectedModelParameterValues = useEditorStore((state) => state.commitSelectedModelParameterValues);
   const [draftValues, setDraftValues] = useState<DraftValues>({});
   const beforeEditValuesRef = useRef<ModelParameterValues | null>(null);
+  /** rAF 合并的待 flush 预览值（key → 最新值）：连续击键/拖动只生效每帧最后一次，避免每击键全量重建货架。 */
+  const pendingPreviewRef = useRef<Map<string, ModelParameterValue>>(new Map());
+  const previewRafRef = useRef(0);
 
   const config = modelAsset.parameterConfig;
   const values = getParameterValues(modelAsset);
 
+  function cancelPendingPreview(): Map<string, ModelParameterValue> {
+    if (previewRafRef.current) {
+      cancelAnimationFrame(previewRafRef.current);
+      previewRafRef.current = 0;
+    }
+    const pending = pendingPreviewRef.current;
+    pendingPreviewRef.current = new Map();
+    return pending;
+  }
+
   useEffect(() => {
     setDraftValues({});
     beforeEditValuesRef.current = null;
+    cancelPendingPreview();
   }, [modelAsset.sourcePath, config]);
+
+  useEffect(() => () => {
+    cancelPendingPreview();
+  }, []);
 
   if (!config) {
     return <p className="muted">该模型没有参数化配置。</p>;
@@ -87,8 +105,12 @@ export function ModelParametersInspector({ modelAsset, disabled = false, compact
     if (!before) return;
 
     beforeEditValuesRef.current = null;
+    // 丢弃待 flush 的 preview（闭包 values 可能落后于最后一击），由 commit 一次性落终值
+    const pending = cancelPendingPreview();
+    const after = cloneModelParameterValues(values);
+    for (const [key, value] of pending) after[key] = value;
     setDraftValues({});
-    commitSelectedModelParameterValues(before, cloneModelParameterValues(values));
+    commitSelectedModelParameterValues(before, after);
   }
 
   function cancelContinuousEdit() {
@@ -96,6 +118,7 @@ export function ModelParametersInspector({ modelAsset, disabled = false, compact
     if (!before) return;
 
     beforeEditValuesRef.current = null;
+    cancelPendingPreview();
     setDraftValues({});
     for (const [key, value] of Object.entries(before)) {
       previewSelectedModelParameterValue(key, value);
@@ -116,7 +139,14 @@ export function ModelParametersInspector({ modelAsset, disabled = false, compact
 
   function previewValue(definition: ModelParameterDefinition, rawValue: unknown) {
     beginContinuousEdit();
-    previewSelectedModelParameterValue(definition.key, sanitizeModelParameterValue(definition, rawValue));
+    pendingPreviewRef.current.set(definition.key, sanitizeModelParameterValue(definition, rawValue));
+    if (previewRafRef.current) return;
+    previewRafRef.current = requestAnimationFrame(() => {
+      previewRafRef.current = 0;
+      const pending = pendingPreviewRef.current;
+      pendingPreviewRef.current = new Map();
+      for (const [key, value] of pending) previewSelectedModelParameterValue(key, value);
+    });
   }
 
   function renderNumberParameter(definition: ModelParameterDefinition & { type: 'number' }) {
@@ -255,8 +285,10 @@ export function ModelParametersInspector({ modelAsset, disabled = false, compact
                   const nextAxisValue = Number(rawValue);
                   if (!Number.isFinite(nextAxisValue)) return;
 
-                  const vectorValue: Vector3Data = isVector3Value(currentValue)
-                    ? { ...currentValue, [axis]: nextAxisValue }
+                  // 预览经 rAF 合并：闭包 currentValue 可能落后，优先取 pending 中同参数的最新值合成
+                  const baseValue = pendingPreviewRef.current.get(definition.key) ?? currentValue;
+                  const vectorValue: Vector3Data = isVector3Value(baseValue)
+                    ? { ...baseValue, [axis]: nextAxisValue }
                     : { ...definition.defaultValue, [axis]: nextAxisValue };
                   previewValue(definition, vectorValue);
                 }}
