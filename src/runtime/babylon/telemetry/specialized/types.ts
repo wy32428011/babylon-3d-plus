@@ -431,11 +431,10 @@ export type LiftModelTelemetryState = {
 
 export type LiftCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
-export type ShuttleForkSide = 'front' | 'back';
-
 /**
- * 多穿小车遥测运行态：堆垛机的水平裁剪版——仅 Z 轴走行（无升降）、单套货叉沿 X 伸缩（单偏移量），
- * front/back 字段仅作协议侧别；无 mode==4 signalBits 锁存。
+ * 多穿小车遥测运行态：堆垛机的水平裁剪版——仅 Z 轴走行（Y 层变换直接闪现）、
+ * 两段货叉沿 X 比例联动（一段=二段偏移的一半，二段几何中心锚定货箱）。
+ * Status 单字段驱动：0 待机 / 1 装货 / 2 卸货 / 3 移动中。
  */
 export type ShuttleModelTelemetryState = {
   rootBasePosition: Vector3;
@@ -451,6 +450,8 @@ export type ShuttleModelTelemetryState = {
   forkTargetOffset: number;
   /** 按节点几何实测的货叉全行程（仅作无货格时的回退，不再钳位）；null 表示尚未测量。 */
   forkStroke: number | null;
+  /** 载货基准面（cargoDeckNodes 包围盒顶面，缺失时回退二段叉顶面）在无 Y 闪现偏移时的世界高度（首个目标格帧缓存，此时节点尚未施加 Y 偏移）；null 表示尚未测量。 */
+  cargoBaseHomeY: number | null;
   /** true 表示库位跳变收尾中：货叉加速收回，收回前冻结走行。 */
   forkCatchUp: boolean;
   /** 货物键（JSON.stringify([assetCode])，单车单货）；非 null 表示叉上/滞留货格有货。 */
@@ -464,19 +465,19 @@ export type ShuttleModelTelemetryState = {
   cargoHoldScaling: Vector3 | null;
   /** 放货时锁定的目标排号，放货完成（command 5）用于 fetch 保留与单排同步。 */
   cargoFetchRow: number | null;
-  /** command 边沿检测：取货/放货完成只触发一次（活动侧仲裁后的有效 command）。 */
-  lastCommand: number | null;
-  /** 伸出标记：仅在 movement 伸出（1/3）时写入，收叉（2/4）期间保持有效并每帧幂等重试绑定/解绑；command 相位退出时清零。 */
-  lastMovementZ: number | null;
-  /** 上一帧原始 movement（每帧无条件覆盖）：收叉停止边沿检测用。 */
-  prevRawMovementZ: number | null;
+  /** 上一帧原始 Status；相位退出边沿兜底收尾用。 */
+  lastStatus: number | null;
+  /** 货叉相位：idle 收回位 / extending 伸出中 / retracting 收回中。 */
+  forkPhase: 'idle' | 'extending' | 'retracting';
+  /** 当前 Status=1/2 相位的取/放动作已完结：同相位内不再重复触发，Status 变化时复位。 */
+  statusActionDone: boolean;
   nodeBaselines: Map<TransformNode, Vector3>;
-  /** 上一帧 front_x/front_y/front_z 组成的库位键；变化时触发动作收尾（catch-up）。 */
-  lastFrontCellKey: string | null;
-  /** 最近一次 front_ 库位键变化的时间戳（performance.now()）；null 表示尚未收到过有效库位。 */
-  lastFrontCellChangedAtMs: number | null;
-  /** 最近两次 front_ 变化的间隔（毫秒），用于估算自适应追赶窗口；null 表示尚未观察到变化。 */
-  frontCellChangeIntervalMs: number | null;
+  /** 上一帧目标货格键（to_x/to_y/to_Depth 解码）；变化时触发动作收尾（catch-up）。 */
+  lastTargetCellKey: string | null;
+  /** 最近一次目标货格键变化的时间戳（performance.now()）；null 表示尚未收到过有效目标。 */
+  lastTargetCellChangedAtMs: number | null;
+  /** 最近两次目标货格变化的间隔（毫秒），用于估算自适应追赶窗口；null 表示尚未观察到变化。 */
+  targetCellChangeIntervalMs: number | null;
 };
 
 export type ShuttleCargoRuntimeEntry = GeneratedCargoRuntimeEntry;

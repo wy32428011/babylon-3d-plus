@@ -164,6 +164,7 @@ export function createShuttleTelemetryState(root: TransformNode): ShuttleModelTe
     forkOffset: 0,
     forkTargetOffset: 0,
     forkStroke: null,
+    cargoBaseHomeY: null,
     forkCatchUp: false,
     cargoKey: null,
     cargoBoundToFork: false,
@@ -171,13 +172,13 @@ export function createShuttleTelemetryState(root: TransformNode): ShuttleModelTe
     cargoHoldRotation: null,
     cargoHoldScaling: null,
     cargoFetchRow: null,
-    lastCommand: null,
-    lastMovementZ: null,
-    prevRawMovementZ: null,
+    lastStatus: null,
+    forkPhase: 'idle',
+    statusActionDone: false,
     nodeBaselines: new Map(),
-    lastFrontCellKey: null,
-    lastFrontCellChangedAtMs: null,
-    frontCellChangeIntervalMs: null,
+    lastTargetCellKey: null,
+    lastTargetCellChangedAtMs: null,
+    targetCellChangeIntervalMs: null,
   };
 }
 
@@ -190,6 +191,7 @@ export function resetShuttleTelemetryState(model: ModelRuntimeEntry): void {
   model.shuttleTelemetry.forkOffset = 0;
   model.shuttleTelemetry.forkTargetOffset = 0;
   model.shuttleTelemetry.forkStroke = null;
+  model.shuttleTelemetry.cargoBaseHomeY = null;
   model.shuttleTelemetry.forkCatchUp = false;
   model.shuttleTelemetry.cargoKey = null;
   model.shuttleTelemetry.cargoBoundToFork = false;
@@ -197,13 +199,13 @@ export function resetShuttleTelemetryState(model: ModelRuntimeEntry): void {
   model.shuttleTelemetry.cargoHoldRotation = null;
   model.shuttleTelemetry.cargoHoldScaling = null;
   model.shuttleTelemetry.cargoFetchRow = null;
-  model.shuttleTelemetry.lastCommand = null;
-  model.shuttleTelemetry.lastMovementZ = null;
-  model.shuttleTelemetry.prevRawMovementZ = null;
+  model.shuttleTelemetry.lastStatus = null;
+  model.shuttleTelemetry.forkPhase = 'idle';
+  model.shuttleTelemetry.statusActionDone = false;
   model.shuttleTelemetry.nodeBaselines.clear();
-  model.shuttleTelemetry.lastFrontCellKey = null;
-  model.shuttleTelemetry.lastFrontCellChangedAtMs = null;
-  model.shuttleTelemetry.frontCellChangeIntervalMs = null;
+  model.shuttleTelemetry.lastTargetCellKey = null;
+  model.shuttleTelemetry.lastTargetCellChangedAtMs = null;
+  model.shuttleTelemetry.targetCellChangeIntervalMs = null;
 }
 
 /** 判断当前模型是否具备 RGV 驱动能力：资产识别命中，或脚本声明 devType=rgv。 */

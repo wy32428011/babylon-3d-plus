@@ -25,7 +25,6 @@ import {
 import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from '../../runtimeValueUtils';
 import {
   readIntegerField,
-  readNumberField,
   readStringField,
   type DeviceTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
@@ -38,32 +37,43 @@ import {
   resolveCargoHandoffPose,
   type RgvTravelConstraint,
   type ShuttleCargoRuntimeEntry,
-  type ShuttleForkSide,
   SHUTTLE_CATCH_UP_MAX_WINDOW_SECONDS,
   SHUTTLE_CATCH_UP_MIN_WINDOW_SECONDS,
   SHUTTLE_DEFAULT_FORK_SPEED_METERS_PER_SECOND,
   SHUTTLE_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND,
   SHUTTLE_FORK_CATCH_UP_SPEED_MULTIPLIER,
   SHUTTLE_MAX_CATCH_UP_SPEED_METERS_PER_SECOND,
-  SHUTTLE_RPM_TO_METERS_PER_SECOND,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
   type SpecializedTelemetrySharedState,
 } from './types';
 
-/** 活动侧仲裁结果：front/back 字段仅作协议侧别，单套货叉共用节点，front 优先。 */
-type ShuttleActiveSide = {
-  side: ShuttleForkSide;
-  command: number | null;
-  movement: number | null;
-  task: string;
-  containerCode: string;
+/** 遥测解析出的目标货格：to_x/to_y 列层 + to_Depth 位解码出的排号与支撑位世界坐标。 */
+type ShuttleTargetCell = {
+  locator: LocatorRuntimeEntry;
+  supportPosition: Vector3;
+  toX: number;
+  toY: number;
+  row: number;
 };
 
+/** to_Depth 位值 → 排号：1→排1，2→排2，4→排3，8→排4。 */
+function decodeShuttleDepthRow(toDepth: number): number | null {
+  if (toDepth === 1 || toDepth === 2 || toDepth === 4 || toDepth === 8) {
+    return Math.log2(toDepth) + 1;
+  }
+  return null;
+}
+
+/** 走行到位判定余量（米）：Status=1/2 伸叉前要求车体已对准目标格。 */
+const SHUTTLE_TRAVEL_ARRIVE_TOLERANCE_METERS = 0.02;
+
 /**
- * 多穿小车遥测驱动：堆垛机的水平裁剪版——仅 Z 轴水平走行（无升降），单套货叉沿 X 轴伸缩；
- * 货格/站台按巷道编号（模型参数 aisleCode ↔ Locator 组件 aisleCode）+ 排 + 列层范围匹配；
- * front/back_command 仅作协议侧别，活动时仲裁（front 优先）；无 mode==4 signalBits 锁存。
+ * 多穿小车遥测驱动：Status 单字段状态机（0 待机 / 1 装货 / 2 卸货 / 3 移动中）。
+ * - 走行仅 Z 轴（Status=3 向目标格推进），Y 层变换无动画、每帧闪现对齐目标格层高（载货平面顶面与货格底面持平）；
+ * - 目标货格由 to_x/to_y/to_Depth 指向当前阶段动作格，先按绑定设备匹配、再按绑定巷道（aisleCode）匹配；
+ * - 两段货叉沿 X 比例联动：二段偏移 = forkOffset，一段 = forkOffset / 2，同步启动同步到位；
+ * - Status=1 货从格到车（伸满绑定、收回完结），Status=2 货从车到格（伸满解绑落格、收回完结）。
  */
 export class ShuttleTelemetryDriver {
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
@@ -80,35 +90,37 @@ export class ShuttleTelemetryDriver {
     return this.context.host;
   }
 
-  /** 对单台多穿小车应用走行、货叉伸缩和货物状态机的遥测驱动；移动目标优先取 to_x/to_y/to_z 目标货格，缺省回退 front_ 当前库位。 */
+  /** 对单台多穿小车应用走行、货叉伸缩和货物状态机的遥测驱动。 */
   applyToModel(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.shuttleTelemetry;
-    const frontCell = this.resolveShuttleCurrentCell(model, snapshot);
-    this.reportShuttleRuntimeState(snapshot);
+    const status = readIntegerField(snapshot.fields, 'Status');
+    const task = normalizeCargoTask(readIntegerField(snapshot.fields, 'task'));
+    const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
+    this.reportShuttleRuntimeState(snapshot, status);
     writeDeviceTelemetryMetadata(model, snapshot);
 
-    // to_x/to_y/to_z（WCS 目标货格）非全 0 且能匹配巷道货格时，以目标格支撑位为走行终点：任务下发即给出目的地，
-    // 车体连续滑向目标，不等当前位 front_ 到位跳变再追赶；全 0/失配回退当前位驱动
-    const toCell = this.resolveShuttleTargetCell(model, snapshot);
-    const targetCell = toCell ?? frontCell.cell;
-    const active = this.resolveActiveSide(snapshot);
-    // command 相位离开边沿收尾须在 front_ 跳变跟踪之前：同帧「command 跳变 + 库位跳变」时先清滞留状态，避免 catch-up 误判
-    this.completeShuttleCargoOnPhaseExit(model, active.command, frontCell.cell);
-    // front_ 跟踪：首帧直接吸附到上报库位；后续跳变表示设备转场，快速收尾取/放动作并收叉，收回前冻结走行
-    this.trackShuttleFrontCellChange(model, frontCell.key, frontCell.cell, targetCell, active.command);
+    const target = this.resolveShuttleTargetCell(model, snapshot);
+    if (status !== null) {
+      // Status 相位退出边沿收尾须在目标格跳变跟踪之前：同帧「Status 跳变 + 目标格跳变」时先清滞留状态，避免 catch-up 误判
+      this.completeShuttleCargoOnStatusExit(model, status, target.cell);
+      this.trackShuttleTargetCellChange(model, target.key, target.cell, status);
+    }
+
+    const yFlashOffset = this.resolveShuttleYFlashOffset(model, target.cell);
 
     if (state.forkCatchUp) {
-      this.applyShuttleForkCatchUpRetract(model, snapshot, active.side, deltaSeconds);
-    } else {
-      const travelMoving = this.applyShuttleTravelMotion(model, snapshot, targetCell?.supportPosition ?? null, deltaSeconds);
-      this.applyShuttleForkMotion(model, snapshot, active, frontCell.cell, deltaSeconds, travelMoving, frontCell.mismatch);
+      this.applyShuttleForkCatchUpRetract(model, deltaSeconds);
+    } else if (status !== null) {
+      const travel = this.applyShuttleTravelMotion(model, snapshot, status, target.cell, deltaSeconds);
+      this.applyShuttleStatusPhase(model, snapshot, status, task, containerCode, target, travel, deltaSeconds);
     }
-    this.applyShuttleNodeMotionOffsets(model);
-    this.applyShuttleCargoMotion(model, snapshot, active, frontCell.cell?.locator ?? null, frontCell.cell?.supportPosition ?? null, deltaSeconds);
-    this.writeShuttleTelemetryMetadata(model, snapshot, frontCell.cell?.locator ?? null);
+    this.applyShuttleNodeMotionOffsets(model, yFlashOffset);
+    this.updateShuttleCargoPose(model, snapshot, deltaSeconds);
+    this.writeShuttleTelemetryMetadata(model, snapshot, status, target.cell?.locator ?? null);
+    if (status !== null) state.lastStatus = status;
   }
 
-  // ===== 库位解析（巷道匹配） =====
+  // ===== 目标货格解析（绑定设备 → 绑定巷道） =====
 
   /** 读取小车绑定的巷道编号（模型参数 aisleCode）；空串表示未配置，不参与巷道匹配。 */
   private resolveShuttleAisleCode(model: ModelRuntimeEntry): string {
@@ -117,90 +129,68 @@ export class ShuttleTelemetryDriver {
   }
 
   /**
-   * 按 front_x/front_y/front_z 解析当前货格：三字段全部缺失或全为 0（设备回原点空闲姿态）视为未上报（保持原位）；
-   * 任一非零即为真实坐标；有值但巷道匹配不到已绑定货格时一次性报错并冻结走行与伸叉（mismatch）。
-   */
-  private resolveShuttleCurrentCell(
-    model: ModelRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot,
-  ): { cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null; mismatch: boolean; key: string | null } {
-    const frontX = readIntegerField(snapshot.fields, 'front_x');
-    const frontY = readIntegerField(snapshot.fields, 'front_y');
-    const frontZ = readIntegerField(snapshot.fields, 'front_z');
-    if (frontX === null || frontY === null || frontZ === null) {
-      return { cell: null, mismatch: false, key: null };
-    }
-    if (frontX === 0 && frontY === 0 && frontZ === 0) return { cell: null, mismatch: false, key: null };
-    const key = JSON.stringify([frontX, frontY, frontZ]);
-    const aisleCode = this.resolveShuttleAisleCode(model);
-    const locator = aisleCode ? this.host.findLocatorByAisle(aisleCode, frontX, frontY, frontZ) : null;
-    if (!locator) {
-      this.reportShuttleFrontCellMiss(model, snapshot, aisleCode, frontX, frontY, frontZ);
-      // 失配帧不占用库位键：恢复命中后仍能触发首帧吸附/跳变跟踪
-      return { cell: null, mismatch: true, key: null };
-    }
-    const supportPosition = this.resolveLocatorBoxSupportPosition(locator, frontX, frontY);
-    return supportPosition
-      ? { cell: { locator, supportPosition }, mismatch: false, key }
-      : { cell: null, mismatch: true, key: null };
-  }
-
-  /**
-   * to_x/to_y/to_z 目标货格解析：三字段全部缺失或全为 0（无目标/任务完结）返回 null，调用方回退当前位驱动；
-   * 非全 0 但巷道匹配不到已绑定货格时一次性告警并回退当前位驱动。
+   * to_x/to_y/to_Depth 目标货格解析：三字段全部缺失或全为 0（无目标/任务完结）返回无目标；
+   * to_Depth 位值非法、或绑定设备与绑定巷道两路都匹配不到货格时一次性告警并冻结（mismatch）。
    */
   private resolveShuttleTargetCell(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
-  ): { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null {
+  ): { cell: ShuttleTargetCell | null; key: string | null; mismatch: boolean } {
     const toX = readIntegerField(snapshot.fields, 'to_x');
     const toY = readIntegerField(snapshot.fields, 'to_y');
-    const toZ = readIntegerField(snapshot.fields, 'to_z');
-    if (toX === null || toY === null || toZ === null) return null;
-    if (toX === 0 && toY === 0 && toZ === 0) return null;
-    const aisleCode = this.resolveShuttleAisleCode(model);
-    const locator = aisleCode ? this.host.findLocatorByAisle(aisleCode, toX, toY, toZ) : null;
-    if (!locator) {
-      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:to-cell:${toZ}:${toX}:${toY}`;
+    const toDepth = readIntegerField(snapshot.fields, 'to_Depth');
+    if (toX === null || toY === null || toDepth === null) return { cell: null, key: null, mismatch: false };
+    if (toX === 0 && toY === 0 && toDepth === 0) return { cell: null, key: null, mismatch: false };
+
+    const row = decodeShuttleDepthRow(toDepth);
+    if (row === null) {
+      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:depth:${toDepth}`;
       if (!this.state.reportedMissingTargets.has(reportKey)) {
         this.state.reportedMissingTargets.add(reportKey);
-        this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 目标位（巷道${aisleCode || '未配置'} 排${toZ} 列${toX} 层${toY}）未匹配到任何已绑定货格，回退当前位驱动。`);
+        this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} to_Depth=${toDepth} 非法（仅支持 1/2/4/8 对应排 1-4），已冻结移动。`);
       }
-      return null;
+      return { cell: null, key: null, mismatch: true };
+    }
+
+    const aisleCode = this.resolveShuttleAisleCode(model);
+    const locator = this.host.findLocatorByDevice(snapshot.assetCode, toX, toY, row)
+      ?? (aisleCode ? this.host.findLocatorByAisle(aisleCode, toX, toY, row) : null);
+    if (!locator) {
+      this.reportShuttleTargetCellMiss(model, snapshot, aisleCode, toX, toY, row);
+      return { cell: null, key: null, mismatch: true };
     }
     const supportPosition = this.resolveLocatorBoxSupportPosition(locator, toX, toY);
-    return supportPosition ? { locator, supportPosition } : null;
+    if (!supportPosition) return { cell: null, key: null, mismatch: true };
+    return { cell: { locator, supportPosition, toX, toY, row }, key: JSON.stringify([toX, toY, row]), mismatch: false };
   }
 
-  /** 当前位匹配失败的一次性报错：未配置巷道 / 巷道无绑定货格 / 当前位超出货格列层范围。 */
-  private reportShuttleFrontCellMiss(
+  /** 目标位匹配失败的一次性报错：绑定设备与巷道均无货格 / 目标位超出货格列层范围。 */
+  private reportShuttleTargetCellMiss(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
     aisleCode: string,
-    frontX: number,
-    frontY: number,
-    frontZ: number,
+    toX: number,
+    toY: number,
+    row: number,
   ): void {
-    const boundLocators = aisleCode ? this.host.findLocatorsByAisle(aisleCode) : [];
-    const kind = !aisleCode ? 'front-cell-no-aisle' : boundLocators.length > 0 ? 'front-cell-range' : 'front-cell';
-    const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:${kind}:${frontZ}:${frontX}:${frontY}`;
+    const deviceLocators = this.host.findLocatorsByDevice(snapshot.assetCode);
+    const aisleLocators = aisleCode ? this.host.findLocatorsByAisle(aisleCode) : [];
+    const boundLocators = deviceLocators.length > 0 ? deviceLocators : aisleLocators;
+    const kind = boundLocators.length > 0 ? 'target-range' : 'target-cell';
+    const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:${kind}:${row}:${toX}:${toY}`;
     if (this.state.reportedMissingTargets.has(reportKey)) return;
     this.state.reportedMissingTargets.add(reportKey);
-    if (!aisleCode) {
-      this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 未配置巷道编号（模型参数 aisleCode），已忽略移动。`);
-      return;
-    }
     if (boundLocators.length === 0) {
-      this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 当前位（巷道${aisleCode} 排${frontZ} 列${frontX} 层${frontY}）未匹配到任何已绑定货格，已忽略移动。`);
+      this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 目标位（排${row} 列${toX} 层${toY}）未匹配到任何已绑定货格（绑定设备 ${deviceLocators.length} 个，巷道${aisleCode || '未配置'} ${aisleLocators.length} 个），已冻结移动。`);
       return;
     }
     const ranges = boundLocators
       .map((entry) => `排${entry.rowNumber}：列${entry.startColumn}-${entry.startColumn + entry.columns - 1} 层${entry.startLayer}-${entry.startLayer + entry.layers - 1}`)
       .join('；');
-    this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 当前位（巷道${aisleCode} 排${frontZ} 列${frontX} 层${frontY}）超出已绑定货格范围（${ranges}），已忽略移动。`);
+    this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 目标位（排${row} 列${toX} 层${toY}）超出已绑定货格范围（${ranges}），已冻结移动。`);
   }
 
-  /** 解析目标格口的支撑位世界坐标：水平取 box 中心、高度取 box 底面，越界时返回 null 由调用方回退。 */
+  /** 解析目标格口的支撑位世界坐标：水平取 box 中心、高度取 box 底面，越界时返回 null 由调用方冻结。 */
   private resolveLocatorBoxSupportPosition(
     locator: LocatorRuntimeEntry,
     toX: number,
@@ -228,69 +218,51 @@ export class ShuttleTelemetryDriver {
     return supportPosition;
   }
 
-  // ===== 活动侧仲裁 =====
-
-  /** front/back command 活动侧仲裁（front 优先）：输出该侧 command/movement/task/containerCode；双侧空闲回退 front。 */
-  private resolveActiveSide(snapshot: DeviceTelemetrySnapshot): ShuttleActiveSide {
-    const frontCommand = readIntegerField(snapshot.fields, 'front_command');
-    const backCommand = readIntegerField(snapshot.fields, 'back_command');
-    const frontActive = frontCommand !== null && frontCommand !== 0;
-    const backActive = backCommand !== null && backCommand !== 0;
-    const side: ShuttleForkSide = frontActive ? 'front' : backActive ? 'back' : 'front';
-    return {
-      side,
-      command: side === 'front' ? frontCommand : backCommand,
-      movement: readIntegerField(snapshot.fields, side === 'front' ? 'front_movement_z' : 'back_movement_z'),
-      task: normalizeCargoTask(readIntegerField(snapshot.fields, side === 'front' ? 'front_task' : 'back_task')),
-      containerCode: readStringField(snapshot.fields, side === 'front' ? 'front_containerCode' : 'back_containerCode')?.trim() ?? '',
-    };
-  }
-
-  // ===== 库位跳变跟踪与 catch-up =====
+  // ===== 目标格跳变跟踪与 catch-up =====
 
   /**
-   * front_ 库位键跟踪：
-   * - 首条有效库位：走行直接吸附到上报库位，避免从原点缓慢追赶期间消息已经推进；
+   * 目标货格键跟踪：
+   * - 首条有效目标：走行直接吸附到目标格，避免从原点缓慢追赶期间消息已经推进；
    * - 后续跳变：记录变化间隔（供自适应追赶速度估算），货叉已伸出或仍有货物滞留货格（未绑定）时进入 catch-up 并立即补齐动作语义。
    */
-  private trackShuttleFrontCellChange(
+  private trackShuttleTargetCellChange(
     model: ModelRuntimeEntry,
     key: string | null,
-    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
-    targetCell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
-    command: number | null,
+    cell: ShuttleTargetCell | null,
+    status: number,
   ): void {
     const state = model.shuttleTelemetry;
     if (key === null) return;
 
     const nowMs = performance.now();
-    if (state.lastFrontCellKey === null) {
-      state.lastFrontCellKey = key;
-      state.lastFrontCellChangedAtMs = nowMs;
-      const snapTarget = cell ?? targetCell;
-      if (snapTarget) this.snapShuttleToCell(model, snapTarget.supportPosition);
+    if (state.lastTargetCellKey === null) {
+      state.lastTargetCellKey = key;
+      state.lastTargetCellChangedAtMs = nowMs;
+      if (cell) this.snapShuttleToCell(model, cell.supportPosition);
       return;
     }
-    if (key === state.lastFrontCellKey) return;
+    if (key === state.lastTargetCellKey) return;
 
-    if (state.lastFrontCellChangedAtMs !== null) {
-      state.frontCellChangeIntervalMs = nowMs - state.lastFrontCellChangedAtMs;
+    if (state.lastTargetCellChangedAtMs !== null) {
+      state.targetCellChangeIntervalMs = nowMs - state.lastTargetCellChangedAtMs;
     }
-    state.lastFrontCellChangedAtMs = nowMs;
-    state.lastFrontCellKey = key;
+    state.lastTargetCellChangedAtMs = nowMs;
+    state.lastTargetCellKey = key;
     if (state.forkCatchUp) return;
 
     const forkDeployed = Math.abs(state.forkOffset) > 1e-3;
-    // 已绑定货物随叉随行是正常搬运，库位连续更新（真实 WCS 行走期间持续上报）不算动作未完结；
-    // 仅滞留货格的未绑定货物才需在转场跳变时补齐取/放语义
+    // 已绑定货物随叉随行是正常搬运；仅滞留货格的未绑定货物才需在目标跳变时补齐取/放语义
     const midAction = state.cargoKey !== null && !state.cargoBoundToFork;
     if (!forkDeployed && !midAction) return;
 
     state.forkCatchUp = true;
-    this.forceCompleteShuttleForkAction(model, command, cell);
+    state.forkPhase = 'idle';
+    // 目标格已跳变表示设备转场：本相位动作按当前 Status 立即完结，同相位不再重复触发
+    state.statusActionDone = true;
+    this.forceCompleteShuttleForkAction(model, status, cell);
   }
 
-  /** 首帧吸附：走行一步到位对齐上报库位（仍受轨道约束钳制），货叉保持原点。 */
+  /** 首帧吸附：走行一步到位对齐目标格（仍受轨道约束钳制），货叉保持原点。 */
   private snapShuttleToCell(model: ModelRuntimeEntry, supportPosition: Vector3): void {
     const state = model.shuttleTelemetry;
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
@@ -304,7 +276,7 @@ export class ShuttleTelemetryDriver {
   }
 
   /**
-   * 自适应追赶速度：按最近两次 front_ 变化间隔估算本期窗口（夹在 0.25s~2s），
+   * 自适应追赶速度：按最近两次目标格变化间隔估算本期窗口（夹在 0.25s~2s），
    * 速度 = 剩余距离 ÷ 窗口剩余时间，不低于默认速度、不超过上限，保证推送再快也能在下次变化前到位。
    */
   private resolveShuttleCatchUpSpeed(
@@ -313,104 +285,117 @@ export class ShuttleTelemetryDriver {
     defaultSpeed: number,
   ): number {
     const state = model.shuttleTelemetry;
-    if (distance <= 1e-6 || state.frontCellChangeIntervalMs === null || state.lastFrontCellChangedAtMs === null) {
+    if (distance <= 1e-6 || state.targetCellChangeIntervalMs === null || state.lastTargetCellChangedAtMs === null) {
       return defaultSpeed;
     }
     const windowMs = Math.min(
-      Math.max(state.frontCellChangeIntervalMs, SHUTTLE_CATCH_UP_MIN_WINDOW_SECONDS * 1000),
+      Math.max(state.targetCellChangeIntervalMs, SHUTTLE_CATCH_UP_MIN_WINDOW_SECONDS * 1000),
       SHUTTLE_CATCH_UP_MAX_WINDOW_SECONDS * 1000,
     );
-    const remainingSeconds = Math.max(0.05, (windowMs - (performance.now() - state.lastFrontCellChangedAtMs)) / 1000);
+    const remainingSeconds = Math.max(0.05, (windowMs - (performance.now() - state.lastTargetCellChangedAtMs)) / 1000);
     return Math.min(
       SHUTTLE_MAX_CATCH_UP_SPEED_METERS_PER_SECOND,
       Math.max(defaultSpeed, distance / remainingSeconds),
     );
   }
 
-  /** catch-up 进入时按当前 command 补齐取/放语义：取货立即绑定并完成，放货立即解绑落位并完成。 */
+  /** catch-up 进入时按当前 Status 补齐取/放语义：装货立即绑定并完成，卸货立即解绑落位并完成。 */
   private forceCompleteShuttleForkAction(
     model: ModelRuntimeEntry,
-    command: number | null,
-    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
+    status: number,
+    cell: ShuttleTargetCell | null,
   ): void {
     if (!model.shuttleTelemetry.cargoKey) return;
-    if (command === 1 || command === 2) {
+    if (status === 1) {
       this.bindShuttleCargo(model);
       this.completeShuttleFetch(model);
       return;
     }
-    if (command === 3 || command === 4) {
+    if (status === 2) {
       this.unbindShuttleCargo(model, cell?.locator ?? null, cell?.supportPosition ?? null);
       this.completeShuttlePlace(model, cell?.locator ?? null, cell?.supportPosition ?? null);
     }
   }
 
   /** catch-up 期间货叉按倍率速度收回原点，归零后退出 catch-up 放行走行。 */
-  private applyShuttleForkCatchUpRetract(
-    model: ModelRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot,
-    side: ShuttleForkSide,
-    deltaSeconds: number,
-  ): void {
+  private applyShuttleForkCatchUpRetract(model: ModelRuntimeEntry, deltaSeconds: number): void {
     const state = model.shuttleTelemetry;
-    const speed = this.readShuttleForkSpeed(model, snapshot, side) * SHUTTLE_FORK_CATCH_UP_SPEED_MULTIPLIER;
+    const speed = this.readShuttleForkSpeed(model) * SHUTTLE_FORK_CATCH_UP_SPEED_MULTIPLIER;
     state.forkTargetOffset = 0;
     state.forkOffset = moveNumberTowards(state.forkOffset, 0, speed * deltaSeconds);
     if (Math.abs(state.forkOffset) < 1e-4) {
       state.forkOffset = 0;
       state.forkCatchUp = false;
+      state.forkPhase = 'idle';
     }
   }
 
-  // ===== 走行 =====
+  // ===== 走行（仅 Status=3，Z 轴） =====
 
-  /** 有目标库位支撑位时沿走行轴向目标推进，否则保持原位；返回本帧是否在移动。 */
+  /**
+   * Status=3 且有目标格支撑位时沿走行轴向目标推进，其余状态车体停驻；
+   * 返回本帧是否在移动及是否已对准目标格（伸叉前置条件）。
+   */
   private applyShuttleTravelMotion(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
-    targetSupportPosition: Vector3 | null,
+    status: number,
+    cell: ShuttleTargetCell | null,
     deltaSeconds: number,
-  ): boolean {
+  ): { moving: boolean; arrived: boolean } {
     const state = model.shuttleTelemetry;
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
     state.rootPosition ??= state.rootBasePosition.clone();
 
-    let moving = false;
-    if (!snapshot.faulted && targetSupportPosition) {
-      const referenceCoordinate = this.getShuttleTravelReferenceCoordinate(model, travelAxis);
-      const targetTravelOffset = Vector3.Dot(targetSupportPosition, travelAxis) - referenceCoordinate;
-      const rootTargetPosition = this.constrainShuttleTravelPosition(
-        model,
-        state.rootBasePosition.add(travelAxis.scale(targetTravelOffset)),
-        travelAxis,
-      );
-      const defaultSpeed = this.readShuttleInspectorSpeed(model, 'travelSpeed')
-        ?? this.readShuttleDataDrivenNumber(model, ['motion', 'travel', 'speed'])
-        ?? SHUTTLE_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND;
-      const rpmSpeed = this.readShuttleRpmSpeed(model, snapshot, 'rpm_x', defaultSpeed);
-      const targetSpeed = this.resolveShuttleCatchUpSpeed(model, Vector3.Distance(state.rootPosition, rootTargetPosition), rpmSpeed);
-      const previous = state.rootPosition;
-      state.rootPosition = moveVectorTowards(
-        state.rootPosition,
-        rootTargetPosition,
-        targetSpeed * deltaSeconds,
-      );
-      moving = Vector3.DistanceSquared(previous, state.rootPosition) > 1e-12;
+    if (snapshot.faulted || status !== 3 || !cell) {
+      return { moving: false, arrived: this.isShuttleTravelArrived(model, cell, travelAxis) };
     }
 
+    const rootTargetPosition = this.resolveShuttleTravelTargetPosition(model, cell, travelAxis);
+    const defaultSpeed = this.readShuttleInspectorSpeed(model, 'travelSpeed')
+      ?? this.readShuttleDataDrivenNumber(model, ['motion', 'travel', 'speed'])
+      ?? SHUTTLE_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND;
+    const targetSpeed = this.resolveShuttleCatchUpSpeed(model, Vector3.Distance(state.rootPosition, rootTargetPosition), defaultSpeed);
+    const previous = state.rootPosition;
+    state.rootPosition = moveVectorTowards(
+      state.rootPosition,
+      rootTargetPosition,
+      targetSpeed * deltaSeconds,
+    );
     state.rootPosition = this.constrainShuttleTravelPosition(model, state.rootPosition, travelAxis);
-    return moving;
+    const moving = Vector3.DistanceSquared(previous, state.rootPosition) > 1e-12;
+    return { moving, arrived: !moving };
+  }
+
+  /** 车体是否已对准目标格（走行轴投影差在到位余量内）；无目标格时视为未到位。 */
+  private isShuttleTravelArrived(model: ModelRuntimeEntry, cell: ShuttleTargetCell | null, travelAxis: Vector3): boolean {
+    if (!cell) return false;
+    const state = model.shuttleTelemetry;
+    const rootTargetPosition = this.resolveShuttleTravelTargetPosition(model, cell, travelAxis);
+    return Vector3.Distance(state.rootPosition ?? state.rootBasePosition, rootTargetPosition) <= SHUTTLE_TRAVEL_ARRIVE_TOLERANCE_METERS;
+  }
+
+  /** 目标格支撑位换算出的走行虚拟目标位置：叉收回位中心对准货格支撑位即到位（受轨道约束钳制）。 */
+  private resolveShuttleTravelTargetPosition(model: ModelRuntimeEntry, cell: ShuttleTargetCell, travelAxis: Vector3): Vector3 {
+    const state = model.shuttleTelemetry;
+    const referenceCoordinate = this.getShuttleTravelReferenceCoordinate(model, travelAxis);
+    const targetTravelOffset = Vector3.Dot(cell.supportPosition, travelAxis) - referenceCoordinate;
+    return this.constrainShuttleTravelPosition(
+      model,
+      state.rootBasePosition.add(travelAxis.scale(targetTravelOffset)),
+      travelAxis,
+    );
   }
 
   /**
-   * 走行对齐参考坐标：货叉收回位中心在走行轴上的投影（叉心对准货格支撑位即到位）。
+   * 走行对齐参考坐标：二段叉收回位中心在走行轴上的投影（叉心对准货格支撑位即到位）。
    * 参照点投影减去当前走行偏移还原原位，行走期间保持恒定；缓存于遥测状态。
    */
   private getShuttleTravelReferenceCoordinate(model: ModelRuntimeEntry, travelAxis: Vector3): number {
     const state = model.shuttleTelemetry;
     if (state.targetReferencePosition) return Vector3.Dot(state.targetReferencePosition, travelAxis);
 
-    const bounds = getNodesWorldBounds(this.findShuttleForkNodes(model));
+    const bounds = getNodesWorldBounds(this.findShuttleForkStage2Nodes(model));
     const reference = bounds
       ? bounds.minimum.add(bounds.maximum).scale(0.5)
       : state.rootBasePosition.clone();
@@ -456,72 +441,130 @@ export class ShuttleTelemetryDriver {
     return state.travelConstraint;
   }
 
-  // ===== 货叉 =====
+  // ===== Y 层闪现 =====
 
-  /** 根据活动侧 movement 驱动单套货叉伸缩；本体走行期间强制收回原点。 */
-  private applyShuttleForkMotion(
+  /**
+   * Y 层变换无动画：有目标格时每帧计算整车竖直闪现偏移，使载货基准面（载货平面包围盒顶面，
+   * 环抱式机构中货物底面所在高度）与货格底面（支撑位）持平；无目标格回零（回待机层高位）。
+   */
+  private resolveShuttleYFlashOffset(model: ModelRuntimeEntry, cell: ShuttleTargetCell | null): Vector3 {
+    if (!cell) return Vector3.Zero();
+    const upAxis = getModelAxis(model.root, 'y');
+    const cargoBaseHomeY = this.getShuttleCargoBaseHomeY(model, upAxis);
+    if (cargoBaseHomeY === null) return Vector3.Zero();
+    return upAxis.scale(Vector3.Dot(cell.supportPosition, upAxis) - cargoBaseHomeY);
+  }
+
+  /** 载货基准面在无 Y 偏移时的世界高度：首个目标格帧缓存（此时节点尚未施加 Y 偏移，避免自污染）。 */
+  private getShuttleCargoBaseHomeY(model: ModelRuntimeEntry, upAxis: Vector3): number | null {
+    const state = model.shuttleTelemetry;
+    if (state.cargoBaseHomeY !== null) return state.cargoBaseHomeY;
+    const topY = this.getShuttleCargoBaseTopY(model, upAxis);
+    if (topY === null) return null;
+    state.cargoBaseHomeY = topY;
+    return topY;
+  }
+
+  /** 载货基准面顶面高度：优先载货平面节点（cargoDeckNodes）包围盒顶面，未声明时回退二段叉顶面。 */
+  private getShuttleCargoBaseTopY(model: ModelRuntimeEntry, upAxis: Vector3): number | null {
+    const deckBounds = getNodesWorldBounds(this.findShuttleCargoDeckNodes(model));
+    if (deckBounds) return projectWorldBoundsOntoAxis(deckBounds, upAxis).max;
+    const forkBounds = getNodesWorldBounds(this.findShuttleForkStage2Nodes(model));
+    return forkBounds ? projectWorldBoundsOntoAxis(forkBounds, upAxis).max : null;
+  }
+
+  // ===== 货叉（Status 相位状态机，两段比例联动） =====
+
+  /**
+   * Status=1/2 的取/放相位状态机：车到位后自动伸叉（方向按货格几何判定），伸满执行绑定/解绑，
+   * 随后自动收回，归零完结并置 statusActionDone（同相位不再重复）；Status=0/3 或车体移动中强制收叉；
+   * 目标格失配时冻结货叉。
+   */
+  private applyShuttleStatusPhase(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
-    active: ShuttleActiveSide,
-    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
+    status: number,
+    task: string,
+    containerCode: string,
+    target: { cell: ShuttleTargetCell | null; mismatch: boolean },
+    travel: { moving: boolean; arrived: boolean },
     deltaSeconds: number,
-    bodyMoving: boolean,
-    extensionBlocked: boolean,
   ): void {
-    // 当前位匹配失败时禁止伸叉（1/3 归一为静止），收回（2/4）始终可用
-    const rawMovement = active.movement;
-    const movement = extensionBlocked && (rawMovement === 1 || rawMovement === 3) ? null : rawMovement;
-    const forkSpeed = this.readShuttleForkSpeed(model, snapshot, active.side);
     const state = model.shuttleTelemetry;
+    if (snapshot.faulted) return;
+    const forkSpeed = this.readShuttleForkSpeed(model);
 
-    // 走行与货叉伸出互斥：本体移动期间收叉并保持原点
-    if (bodyMoving) {
-      state.forkOffset = moveNumberTowards(state.forkOffset, 0, forkSpeed * deltaSeconds);
+    if (status !== 1 && status !== 2) {
+      this.retractShuttleForkToHome(model, forkSpeed, deltaSeconds);
+      return;
+    }
+    if (state.statusActionDone) {
+      this.retractShuttleForkToHome(model, forkSpeed, deltaSeconds);
+      return;
+    }
+    // 目标位失配/缺失：冻结伸叉（滞留伸出由 Status 离开或目标恢复后的相位逻辑处理）
+    if (target.mismatch || !target.cell) return;
+    // 车未到位不伸叉：走行期间或尚未对准目标格时保持收叉
+    if (travel.moving || !travel.arrived) {
+      this.retractShuttleForkToHome(model, forkSpeed, deltaSeconds);
       return;
     }
 
-    state.forkOffset = this.updateShuttleForkOffset(model, state.forkOffset, movement, forkSpeed, cell, snapshot.faulted, deltaSeconds);
+    const cell = target.cell;
+    if (state.forkPhase === 'idle') {
+      if (status === 1) {
+        // 伸叉开始瞬间在目标格刷出/接管货物并接管该格口渲染；cargoKey 保证一次装货只刷一次
+        if (!state.cargoKey) this.beginShuttleFetch(model, task, containerCode, cell);
+      } else {
+        this.prepareShuttlePlace(model, task, containerCode, cell);
+      }
+      state.forkPhase = 'extending';
+    }
+
+    if (state.forkPhase === 'extending') {
+      const stroke = this.getShuttleForkStroke(model);
+      const direction = this.resolveForkExtendDirection(model, cell) ?? 1;
+      const targetOffset = this.resolveForkTargetOffset(model, direction, cell, stroke);
+      state.forkTargetOffset = targetOffset;
+      state.forkOffset = moveNumberTowards(state.forkOffset, targetOffset, forkSpeed * deltaSeconds);
+      if (this.isShuttleForkFullyExtended(model)) {
+        // 伸叉动画完结：装货绑定货物上叉，卸货解绑落入箱位
+        if (status === 1) this.bindShuttleCargo(model);
+        else this.unbindShuttleCargo(model, cell.locator, cell.supportPosition);
+        state.forkPhase = 'retracting';
+        state.forkTargetOffset = 0;
+      }
+      return;
+    }
+
+    if (this.retractShuttleForkToHome(model, forkSpeed, deltaSeconds)) {
+      state.statusActionDone = true;
+      if (status === 1) this.completeShuttleFetch(model);
+      else this.completeShuttlePlace(model, cell.locator, cell.supportPosition);
+    }
   }
 
-  /** 更新货叉偏移：movement 1/3 向目标行程伸出，2/4 收回原点，其余保持；目标行程由当前货格几何决定，超出叉长允许悬空。 */
-  private updateShuttleForkOffset(
-    model: ModelRuntimeEntry,
-    currentOffset: number,
-    movement: number | null,
-    speed: number,
-    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
-    faulted: boolean,
-    deltaSeconds: number,
-  ): number {
+  /** 货叉向原点收回，归零后相位归 idle；返回本帧是否已在原点。 */
+  private retractShuttleForkToHome(model: ModelRuntimeEntry, speed: number, deltaSeconds: number): boolean {
     const state = model.shuttleTelemetry;
-    const stroke = this.getShuttleForkStroke(model);
-    if (faulted) return currentOffset;
-
-    if (movement === 1 || movement === 3) {
-      // 伸出方向由目标货格几何决定：1/3 不再区分左右编码；无货格或货格正对叉中心时回退编码语义
-      const direction = this.resolveForkExtendDirection(model, cell) ?? (movement === 1 ? 1 : -1);
-      const target = this.resolveForkTargetOffset(model, direction, cell, stroke);
-      state.forkTargetOffset = target;
-      return moveNumberTowards(currentOffset, target, speed * deltaSeconds);
+    state.forkTargetOffset = 0;
+    state.forkOffset = moveNumberTowards(state.forkOffset, 0, speed * deltaSeconds);
+    if (Math.abs(state.forkOffset) < 1e-4) {
+      state.forkOffset = 0;
+      state.forkPhase = 'idle';
+      return true;
     }
-
-    if (movement === 2 || movement === 4) {
-      state.forkTargetOffset = 0;
-      return moveNumberTowards(currentOffset, 0, speed * deltaSeconds);
-    }
-
-    return currentOffset;
+    return false;
   }
 
   /**
-   * 按货格几何求伸出方向：货格支撑位相对叉收回位中心在货叉轴上的投影符号。
-   * 无货格、叉节点不可投影或货格正对叉中心（方向无意义）时返回 null，由调用方回退编码语义。
+   * 按货格几何求伸出方向：货格支撑位相对二段叉收回位中心在货叉轴上的投影符号。
+   * 叉节点不可投影或货格正对叉中心（方向无意义）时返回 null，由调用方回退默认方向。
    */
   private resolveForkExtendDirection(
     model: ModelRuntimeEntry,
-    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
+    cell: ShuttleTargetCell,
   ): number | null {
-    if (!cell) return null;
     const forkAxis = getModelAxis(model.root, 'x');
     const homeCenter = this.resolveForkCenterHomeCoordinate(model, forkAxis);
     if (homeCenter === null) return null;
@@ -530,27 +573,24 @@ export class ShuttleTelemetryDriver {
     return Math.sign(diff);
   }
 
-  /** 叉中心在货叉完全收回（offset=0）时沿货叉轴的坐标；当前投影中点减去当前偏移还原原位。 */
+  /** 二段叉中心在货叉完全收回（offset=0）时沿货叉轴的坐标；当前投影中点减去当前偏移还原原位。 */
   private resolveForkCenterHomeCoordinate(model: ModelRuntimeEntry, forkAxis: Vector3): number | null {
-    const projected = getNodesProjectedBounds(this.findShuttleForkNodes(model), forkAxis);
+    const projected = getNodesProjectedBounds(this.findShuttleForkStage2Nodes(model), forkAxis);
     if (!projected) return null;
     return (projected.max + projected.min) / 2 - model.shuttleTelemetry.forkOffset;
   }
 
   /**
-   * 按货格几何求货叉目标行程（带方向符号）：叉中心对准货格中心即停，
-   * 绑定时货物锚点（叉顶面中心）与货格支撑位重合，交接无跳变；
-   * 行程不按货叉模型长度钳位，货格纵深超过叉长时允许悬空。无货格时回退全行程。
+   * 按货格几何求二段叉目标行程（带方向符号）：叉中心对准货格中心即停，
+   * 绑定时货物锚点（载货平面顶面中心）与货格支撑位重合，交接无跳变；
+   * 行程不按货叉模型长度钳位，货格纵深超过叉长时允许悬空。无货格几何时回退全行程。
    */
   private resolveForkTargetOffset(
     model: ModelRuntimeEntry,
     direction: number,
-    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
+    cell: ShuttleTargetCell,
     stroke: number,
   ): number {
-    // 实测叉长只作无货格/方向不明时的全行程回退；有货格时目标由几何解算，不再受叉长限制
-    if (!cell) return stroke > 0 ? direction * stroke : 0;
-
     const forkAxis = getModelAxis(model.root, 'x');
     const centerHome = this.resolveForkCenterHomeCoordinate(model, forkAxis);
     if (centerHome === null) return direction * stroke;
@@ -561,17 +601,14 @@ export class ShuttleTelemetryDriver {
     return direction * needed;
   }
 
-  /** 货叉几何行程：叉节点沿货叉轴的实测长度，仅作无货格时的默认全行程回退，不再钳位；无节点时回退 dataDriven limits.max。 */
+  /** 二段叉几何行程：叉节点沿货叉轴的实测长度，仅作货格几何不可用时的默认全行程回退，不再钳位；测不出节点时行程为 0（不伸叉）。 */
   private getShuttleForkStroke(model: ModelRuntimeEntry): number {
     const state = model.shuttleTelemetry;
     if (state.forkStroke !== null) return state.forkStroke;
 
     const forkAxis = getModelAxis(model.root, 'x');
-    const projected = getNodesProjectedBounds(this.findShuttleForkNodes(model), forkAxis);
-    const measured = projected ? Math.max(0, projected.max - projected.min) : 0;
-    state.forkStroke = measured > 0
-      ? measured
-      : this.readShuttleDataDrivenNumber(model, ['motion', 'fork', 'limits', 'max']) ?? 0;
+    const projected = getNodesProjectedBounds(this.findShuttleForkStage2Nodes(model), forkAxis);
+    state.forkStroke = projected ? Math.max(0, projected.max - projected.min) : 0;
     return state.forkStroke;
   }
 
@@ -585,75 +622,31 @@ export class ShuttleTelemetryDriver {
   // ===== 货物状态机 =====
 
   /**
-   * 单套货叉的货物状态机：command 决定取/放阶段；取货货物在伸叉开始瞬间于当前货格刷出，
-   * 货叉伸出到位（伸叉动画完结）执行绑定/解绑；伸出窗口结束（收叉阶段）但叉未达计算行程时
-   * 每帧按到达动作点幂等重试绑定/解绑，避免放货货物随叉带回。
-   * command 语义：1 取货中 / 2 取货完成 / 3、4 放货中 / 5 放货完成；完成确认值（2/5）可能缺失，
-   * 完成逻辑统一在离开对应 command 相位时执行（completeShuttleCargoOnPhaseExit）。
+   * Status 相位离开边沿收尾：装货（1）/卸货（2）相位被中断或完结后 Status 跳变时兜底执行完成语义；
+   * Status 变化同时复位 statusActionDone，允许新相位重新动作。
    */
-  private applyShuttleCargoMotion(
+  private completeShuttleCargoOnStatusExit(
     model: ModelRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot,
-    active: ShuttleActiveSide,
-    targetLocator: LocatorRuntimeEntry | null,
-    targetPosition: Vector3 | null,
-    deltaSeconds: number,
+    status: number,
+    cell: ShuttleTargetCell | null,
   ): void {
     const state = model.shuttleTelemetry;
-    const { command, movement } = active;
-
-    if (!snapshot.faulted) {
-      // 取货伸叉开始瞬间才在当前货格刷出货物并接管该格口渲染；command 1 本身不刷货，
-      // 避免货物在设备仍在就位途中时提前出现。cargoKey 保证一次取货只刷一次。
-      if (command === 1 && (movement === 1 || movement === 3) && targetLocator && !state.cargoKey) {
-        this.beginShuttleFetch(model, snapshot, active, targetLocator, targetPosition);
-      }
-      // 放货阶段：未经历取货直接放货（如开机即放货）时叉上补建货物并绑定叉尖；
-      // 补建仅限本相位尚未伸叉（伸出标记为空）：伸叉后落货交接会摘除 cargoKey，
-      // 此时再补建会在叉上刷出第二个货物，与站台上的交接货物重叠；
-      // 锁定目标排号：放货完成时当前位字段可能已变化，排号必须提前留存
-      if ((command === 3 || command === 4) && targetLocator) {
-        if (!state.cargoKey && state.lastMovementZ === null) {
-          this.beginShuttlePlaceWithCargo(model, active);
-        }
-        if (state.cargoFetchRow === null) {
-          const frontX = readIntegerField(snapshot.fields, 'front_x');
-          const frontY = readIntegerField(snapshot.fields, 'front_y');
-          state.cargoFetchRow = frontX !== null && frontY !== null
-            ? this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY)
-            : this.host.resolveFetchDriveRowForLocator(targetLocator);
-        }
-      }
-      // 伸叉动画完结（偏移到达目标行程）：取货阶段绑定货物上叉，放货阶段解绑落入箱位
-      if (!state.forkCatchUp && this.isShuttleForkFullyExtended(model)) {
-        if (command === 1 || command === 2) this.bindShuttleCargo(model);
-        else if (command === 3 || command === 4) this.unbindShuttleCargo(model, targetLocator, targetPosition);
-      }
-      // 收叉阶段补齐：伸出窗口结束（伸 1/3 → 收 2/4）但叉未达计算行程时，上面的到位判定永不触发；
-      // 收叉期间每帧按到达动作点重试绑定/解绑（两者幂等：已绑定/已解绑直接早退）；
-      // 伸出标记只在伸出（1/3）时写入，收叉（2/4）与停止（0）帧均不覆盖，保证重试在整个收叉阶段有效
-      const extendSeen = state.lastMovementZ === 1 || state.lastMovementZ === 3;
-      const retracting = movement === 2 || movement === 4;
-      if (!state.forkCatchUp && extendSeen && retracting) {
-        if (command === 1 || command === 2) this.bindShuttleCargo(model);
-        else if (command === 3 || command === 4) this.unbindShuttleCargo(model, targetLocator, targetPosition);
-      }
+    if (state.lastStatus === null || status === state.lastStatus) return;
+    state.statusActionDone = false;
+    if (state.lastStatus === 1) {
+      this.completeShuttleFetch(model);
+    } else if (state.lastStatus === 2) {
+      this.completeShuttlePlace(model, cell?.locator ?? null, cell?.supportPosition ?? null);
     }
-
-    this.updateShuttleCargoPose(model, snapshot, deltaSeconds);
-
-    state.lastCommand = command;
-    if (movement === 1 || movement === 3) state.lastMovementZ = movement;
-    state.prevRawMovementZ = movement;
+    if (status !== 1 && status !== 2) state.forkPhase = 'idle';
   }
 
-  /** 取货初始化（伸叉开始瞬间触发）：在当前货格支撑位创建货物并抑制该格口 fetch 渲染，货物暂留货格等待伸叉到位绑定。 */
+  /** 装货初始化（伸叉开始瞬间触发）：在目标格支撑位创建货物并抑制该格口 fetch 渲染，货物暂留货格等待伸叉到位绑定。 */
   private beginShuttleFetch(
     model: ModelRuntimeEntry,
-    snapshot: DeviceTelemetrySnapshot,
-    active: ShuttleActiveSide,
-    targetLocator: LocatorRuntimeEntry,
-    targetPosition: Vector3 | null,
+    task: string,
+    containerCode: string,
+    cell: ShuttleTargetCell,
   ): void {
     const state = model.shuttleTelemetry;
     // 旧货物（含 fetch 保留中的滞留项）先销毁，避免新任务复用到已交接的货物
@@ -663,33 +656,45 @@ export class ShuttleTelemetryDriver {
     this.getOrCreateShuttleCargo(model.assetCode);
     // 目标是 conveyor 站台（内置 1×1 货格）：无视 task 直接接管该 conveyor 的滞留持货；
     // 未命中（普通库位/对方无货）回退按 task 全局接管或自建。
-    const platformAdopted = this.context.adoptConveyorPlatformCargo(targetLocator.entityId, model.assetCode);
+    const platformAdopted = this.context.adoptConveyorPlatformCargo(cell.locator.entityId, model.assetCode);
     if (platformAdopted) {
-      this.finalizeAdoptedShuttleCargo(model, active, platformAdopted);
+      this.finalizeAdoptedShuttleCargo(model, task, containerCode, platformAdopted);
     } else {
-      this.adoptOrCreateShuttleCargo(model, active);
+      this.adoptOrCreateShuttleCargo(model, task, containerCode);
     }
-    // 抑制源格口 fetch 渲染（货物改由 shuttle 渲染）；取货不留存排号，fetch 单排同步不由取货完成触发
-    const frontX = readIntegerField(snapshot.fields, 'front_x');
-    const frontY = readIntegerField(snapshot.fields, 'front_y');
-    if (frontX !== null && frontY !== null) this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY);
-    const holdPosition = targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator);
-    const holdPose = getNodeWorldPosePreservingMirror(targetLocator.root);
+    // 抑制源格口 fetch 渲染（货物改由 shuttle 渲染）；装货不留存排号，fetch 单排同步不由装货完成触发
+    this.host.suppressFetchCellForLocator(cell.locator, cell.toX, cell.toY);
+    const holdPose = getNodeWorldPosePreservingMirror(cell.locator.root);
     // 接管货保持来货世界朝向（交接只平移）；fresh 刷出取货格朝向
     const holdRotation = this.state.shuttleCargoMeshes.get(this.getShuttleCargoKey(model.assetCode))?.lockedWorldRotation
       ?? holdPose.rotation;
     state.cargoKey = this.getShuttleCargoKey(model.assetCode);
-    state.cargoHoldPosition = holdPosition;
+    state.cargoHoldPosition = cell.supportPosition;
     state.cargoHoldRotation = holdRotation;
     state.cargoHoldScaling = holdPose.scaling;
   }
 
-  /** 直接进入放货流程时补建叉上货物：初始即绑定叉尖，等待伸叉到位后解绑落入目标箱位。 */
-  private beginShuttlePlaceWithCargo(model: ModelRuntimeEntry, active: ShuttleActiveSide): void {
+  /** 卸货相位入口：未经历装货直接卸货（如开机即卸货）时叉上补建货物并绑定叉尖；锁定目标排号（卸货完成时目标字段可能已变化，排号必须提前留存）。 */
+  private prepareShuttlePlace(
+    model: ModelRuntimeEntry,
+    task: string,
+    containerCode: string,
+    cell: ShuttleTargetCell,
+  ): void {
+    const state = model.shuttleTelemetry;
+    if (!state.cargoKey) this.beginShuttlePlaceWithCargo(model, task, containerCode);
+    if (state.cargoFetchRow === null) {
+      state.cargoFetchRow = this.host.suppressFetchCellForLocator(cell.locator, cell.toX, cell.toY)
+        ?? this.host.resolveFetchDriveRowForLocator(cell.locator);
+    }
+  }
+
+  /** 直接进入卸货流程时补建叉上货物：初始即绑定叉尖，等待伸叉到位后解绑落入目标箱位。 */
+  private beginShuttlePlaceWithCargo(model: ModelRuntimeEntry, task: string, containerCode: string): void {
     this.disposeShuttleCargoByKey(this.getShuttleCargoKey(model.assetCode));
     this.clearShuttleCargoState(model);
     this.getOrCreateShuttleCargo(model.assetCode);
-    this.adoptOrCreateShuttleCargo(model, active);
+    this.adoptOrCreateShuttleCargo(model, task, containerCode);
     const state = model.shuttleTelemetry;
     state.cargoKey = this.getShuttleCargoKey(model.assetCode);
     state.cargoBoundToFork = true;
@@ -707,11 +712,11 @@ export class ShuttleTelemetryDriver {
   }
 
   /**
-   * 放货伸叉结束，货物解绑并留在目标箱位支撑位，货叉随后空收。
+   * 卸货伸叉结束，货物解绑并留在目标箱位支撑位，货叉随后空收。
    * 落货保持搬运朝向（货叉托举/放下均不改变货物姿态）：优先沿用绑定时锁定的朝向，
    * 其次取货物当前世界朝向，最后回退货格朝向；缩放不取货格镜像，避免与保留朝向错配。
-   * 非 fetch 的 conveyor 站台目标在落货当场交接给 conveyor 继续流转，不等 command 5；
-   * 交接被拒（对方已有货等）保持原位，command 5 走原销毁路径。
+   * 非 fetch 的 conveyor 站台目标在落货当场交接给 conveyor 继续流转；
+   * 交接被拒（对方已有货等）保持原位，Status 相位退出走原销毁路径。
    */
   private unbindShuttleCargo(
     model: ModelRuntimeEntry,
@@ -731,7 +736,7 @@ export class ShuttleTelemetryDriver {
 
     if (state.cargoFetchRow === null) {
       // 货物网格位姿落后叉状态一帧：交接前对齐到持货位，
-      // 否则 conveyor 交接插值以滞后位姿起步，放货后多出一段本不存在的滑行动画
+      // 否则 conveyor 交接插值以滞后位姿起步，卸货后多出一段本不存在的滑行动画
       const cargo = this.state.shuttleCargoMeshes.get(cargoKey);
       if (cargo) {
         const rotation = state.cargoHoldRotation ?? currentRotation ?? holdPose.rotation;
@@ -741,35 +746,13 @@ export class ShuttleTelemetryDriver {
     }
   }
 
-  /**
-   * command 相位离开边沿收尾：取/放完成确认值（2/5）可能缺失，统一在离开取货（1）/放货（3、4）
-   * 相位时执行原确认值逻辑；不受 faulted 门控：纯状态簿记，且故障恰好跨越跳变时仍要收尾，避免货物状态滞留。
-   */
-  private completeShuttleCargoOnPhaseExit(
-    model: ModelRuntimeEntry,
-    command: number | null,
-    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
-  ): void {
-    const state = model.shuttleTelemetry;
-    if (state.lastCommand === 1 && command !== 1) {
-      this.completeShuttleFetch(model);
-      // 相位结束清零伸出标记，避免上一任务的伸出记录串到下一任务的收叉补齐
-      state.lastMovementZ = null;
-      return;
-    }
-    if ((state.lastCommand === 3 || state.lastCommand === 4) && command !== 3 && command !== 4) {
-      this.completeShuttlePlace(model, cell?.locator ?? null, cell?.supportPosition ?? null);
-      state.lastMovementZ = null;
-    }
-  }
-
-  /** 取货完成：兜底绑定后交还源库位；fetch 单排同步不在此触发。 */
+  /** 装货完成：兜底绑定后货物随叉收回。 */
   private completeShuttleFetch(model: ModelRuntimeEntry): void {
     if (!model.shuttleTelemetry.cargoKey) return;
     this.bindShuttleCargo(model);
   }
 
-  /** 放货完成：fetch 库位保留货物至单排同步响应后销毁，其余立即销毁；conveyor 站台交接在落货时已完成。 */
+  /** 卸货完成：fetch 库位保留货物至单排同步响应后销毁，其余立即销毁；conveyor 站台交接在落货时已完成。 */
   private completeShuttlePlace(
     model: ModelRuntimeEntry,
     targetLocator: LocatorRuntimeEntry | null,
@@ -788,7 +771,7 @@ export class ShuttleTelemetryDriver {
     this.clearShuttleCargoState(model);
   }
 
-  /** 每帧刷新货物外观与位姿：绑定跟随叉尖，未绑定静止于箱位支撑位；朝向取锁定的世界朝向，缺省回退机体朝向。 */
+  /** 每帧刷新货物外观与位姿：绑定跟随二段叉尖，未绑定静止于箱位支撑位；朝向取锁定的世界朝向，缺省回退机体朝向。 */
   private updateShuttleCargoPose(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.shuttleTelemetry;
     if (!state.cargoKey) return;
@@ -805,14 +788,18 @@ export class ShuttleTelemetryDriver {
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, state.cargoBoundToFork ? null : state.cargoHoldScaling);
   }
 
-  /** 货物底面锚定叉包围盒顶面中心，确保定位在货叉实际载货位置。 */
+  /**
+   * 环抱式载货：货物水平锚定二段叉几何中心（夹抱臂从前后两侧夹住货物），
+   * 竖直底面贴合载货平面（cargoDeckNodes 包围盒顶面，未声明时回退二段叉顶面）。
+   */
   private getShuttleForkCargoPosition(model: ModelRuntimeEntry): Vector3 {
-    const bounds = getNodesWorldBounds(this.findShuttleForkNodes(model));
+    const bounds = getNodesWorldBounds(this.findShuttleForkStage2Nodes(model));
     if (!bounds) return model.root.getAbsolutePosition();
 
     const upAxis = getModelAxis(model.root, 'y');
     const center = bounds.minimum.add(bounds.maximum).scale(0.5);
-    const topOffset = projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis);
+    const baseTopY = this.getShuttleCargoBaseTopY(model, upAxis);
+    const topOffset = (baseTopY ?? projectWorldBoundsOntoAxis(bounds, upAxis).max) - Vector3.Dot(center, upAxis);
     return center.add(upAxis.scale(topOffset));
   }
 
@@ -879,31 +866,32 @@ export class ShuttleTelemetryDriver {
    * 刷出货物时按 task 全局接管或自建：接管成功则以货箱当前世界位姿为起点进入交接插值，
    * 并销毁本侧刚建的占位条目（从未渲染）；无 task 匿名，不参与全局接管。
    */
-  private adoptOrCreateShuttleCargo(model: ModelRuntimeEntry, active: ShuttleActiveSide): void {
+  private adoptOrCreateShuttleCargo(model: ModelRuntimeEntry, task: string, containerCode: string): void {
     const cargoKey = this.getShuttleCargoKey(model.assetCode);
-    const adopted = this.context.adoptGlobalCargoByTask(active.task, cargoKey);
+    const adopted = this.context.adoptGlobalCargoByTask(task, cargoKey);
     if (adopted) {
-      this.finalizeAdoptedShuttleCargo(model, active, adopted);
+      this.finalizeAdoptedShuttleCargo(model, task, containerCode, adopted);
       return;
     }
     const cargo = this.state.shuttleCargoMeshes.get(cargoKey);
     if (!cargo) return;
-    cargo.task = active.task;
-    cargo.containerCode = active.containerCode;
+    cargo.task = task;
+    cargo.containerCode = containerCode;
   }
 
   /** 接管收尾：销毁本侧占位条目（从未渲染），货物身份换绑本机、记录交接插值起点并登记到本机货物键。 */
   private finalizeAdoptedShuttleCargo(
     model: ModelRuntimeEntry,
-    active: ShuttleActiveSide,
+    task: string,
+    containerCode: string,
     adopted: GeneratedCargoRuntimeEntry,
   ): void {
     const cargoKey = this.getShuttleCargoKey(model.assetCode);
     const placeholder = this.state.shuttleCargoMeshes.get(cargoKey);
     if (placeholder && placeholder !== adopted) this.disposeShuttleCargoByKey(cargoKey);
     adopted.assetCode = model.assetCode;
-    adopted.task = active.task;
-    adopted.containerCode = active.containerCode || adopted.containerCode;
+    adopted.task = task;
+    adopted.containerCode = containerCode || adopted.containerCode;
     adopted.handoff = createCargoHandoffState(adopted);
     this.state.shuttleCargoMeshes.set(cargoKey, adopted);
   }
@@ -917,7 +905,7 @@ export class ShuttleTelemetryDriver {
     }
   }
 
-  /** 清空本机的全部货物状态，保留 lastCommand/lastMovementZ 边沿检测基线。 */
+  /** 清空本机的全部货物状态，保留 lastStatus 边沿检测基线。 */
   private clearShuttleCargoState(model: ModelRuntimeEntry): void {
     const state = model.shuttleTelemetry;
     state.cargoKey = null;
@@ -930,16 +918,43 @@ export class ShuttleTelemetryDriver {
 
   // ===== 节点偏移写回 =====
 
-  /** 将走行和货叉伸缩合成为每个节点的一次性世界偏移，避免重叠节点被后续动作覆盖。 */
-  private applyShuttleNodeMotionOffsets(model: ModelRuntimeEntry): void {
+  /** 将走行（含 Y 闪现）和两段货叉伸缩合成为每个节点的一次性世界偏移，避免重叠节点被后续动作覆盖。 */
+  private applyShuttleNodeMotionOffsets(model: ModelRuntimeEntry, yFlashOffset: Vector3): void {
     const state = model.shuttleTelemetry;
-    const travelWorldOffset = (state.rootPosition ?? state.rootBasePosition).subtract(state.rootBasePosition);
-    const forkAxis = getModelAxis(model.root, 'x');
+    const travelWorldOffset = (state.rootPosition ?? state.rootBasePosition)
+      .subtract(state.rootBasePosition)
+      .add(yFlashOffset);
     const offsets = new Map<TransformNode, Vector3>();
 
     this.addShuttleWorldOffset(offsets, filterTopLevelMotionNodes(this.findShuttleTravelNodes(model)), travelWorldOffset);
-    this.addShuttleWorldOffset(offsets, filterTopLevelMotionNodes(this.findShuttleForkNodes(model)), forkAxis.scale(state.forkOffset));
+    this.addShuttleForkMotionOffsets(model, offsets);
     this.offsetNodesFromBaselineByWorldOffsets(model, offsets);
+  }
+
+  /**
+   * 两段货叉比例联动：二段偏移 = forkOffset，一段 = forkOffset / 2（同步启动、同步到位，二段速度两倍）。
+   * 按期望世界偏移逐节点写回，并用最近货叉祖先的期望偏移补偿嵌套层级，一段/二段互为父子时不双倍计位移。
+   */
+  private addShuttleForkMotionOffsets(model: ModelRuntimeEntry, offsets: Map<TransformNode, Vector3>): void {
+    const forkOffset = model.shuttleTelemetry.forkOffset;
+    const forkAxis = getModelAxis(model.root, 'x');
+    const desired = new Map<TransformNode, number>();
+    for (const node of this.findShuttleForkStage1Nodes(model)) desired.set(node, forkOffset / 2);
+    for (const node of this.findShuttleForkStage2Nodes(model)) desired.set(node, forkOffset);
+
+    for (const [node, nodeDesired] of desired) {
+      let inherited = 0;
+      let ancestor = node.parent;
+      while (ancestor) {
+        const ancestorDesired = desired.get(ancestor as TransformNode);
+        if (ancestorDesired !== undefined) {
+          inherited = ancestorDesired;
+          break;
+        }
+        ancestor = ancestor.parent;
+      }
+      this.addShuttleWorldOffset(offsets, [node], forkAxis.scale(nodeDesired - inherited));
+    }
   }
 
   /** 查找随车行走的车体节点：全部模型节点剔除固定轨道节点及其祖先/子孙；未声明 fixedNodes 时整车参与行走。 */
@@ -962,18 +977,33 @@ export class ShuttleTelemetryDriver {
     return configuredNames.length > 0 ? findModelNodesByName(model, this.scene, configuredNames) : [];
   }
 
-  /** 查找货叉节点：优先模型脚本 dataDriven.motion.fork.nodes 声明，缺失时按其 fallbackPattern 回退，再退硬编码正则。 */
-  private findShuttleForkNodes(model: ModelRuntimeEntry): TransformNode[] {
-    const configuredNames = this.readShuttleMotionNodeNames(model, 'fork');
+  /** 查找二段货叉节点（载货段）：优先模型脚本 dataDriven.motion.fork.stage2Nodes 声明，缺失时按其 fallbackPattern 回退，再退硬编码正则。 */
+  private findShuttleForkStage2Nodes(model: ModelRuntimeEntry): TransformNode[] {
+    const configuredNames = this.readShuttleMotionNodeNames(model, 'fork', 'stage2Nodes');
     const configuredNodes = configuredNames.length > 0 ? findModelNodesByName(model, this.scene, configuredNames) : [];
     if (configuredNodes.length > 0) return configuredNodes;
     return findModelNodes(model, this.scene, this.readShuttleMotionFallbackPattern(model, 'fork', /fork|叉|huocha|cha\d*/i));
   }
 
-  /** 读取模型脚本 dataDriven.motion.<key>.nodes 中声明的节点名。 */
-  private readShuttleMotionNodeNames(model: ModelRuntimeEntry, motionKey: string): string[] {
+  /** 查找载货平面节点（环抱机构收回后承载货物底面的台面板件）：仅认模型脚本 dataDriven.motion.cargoDeckNodes 声明，未声明时回退二段叉顶面基准。 */
+  private findShuttleCargoDeckNodes(model: ModelRuntimeEntry): TransformNode[] {
     for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
-      const nodes = readStringArrayPath(dataDriven, ['motion', motionKey, 'nodes']);
+      const nodes = readStringArrayPath(dataDriven, ['motion', 'cargoDeckNodes']);
+      if (nodes.length > 0) return findModelNodesByName(model, this.scene, nodes);
+    }
+    return [];
+  }
+
+  /** 查找一段货叉节点（半行程段）：仅认模型脚本 dataDriven.motion.fork.stage1Nodes 声明，未声明时无一段（退回单段叉）。 */
+  private findShuttleForkStage1Nodes(model: ModelRuntimeEntry): TransformNode[] {
+    const configuredNames = this.readShuttleMotionNodeNames(model, 'fork', 'stage1Nodes');
+    return configuredNames.length > 0 ? findModelNodesByName(model, this.scene, configuredNames) : [];
+  }
+
+  /** 读取模型脚本 dataDriven.motion.<key>.<field> 中声明的节点名。 */
+  private readShuttleMotionNodeNames(model: ModelRuntimeEntry, motionKey: string, field: string): string[] {
+    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+      const nodes = readStringArrayPath(dataDriven, ['motion', motionKey, field]);
       if (nodes.length > 0) return nodes;
     }
     return [];
@@ -1039,20 +1069,11 @@ export class ShuttleTelemetryDriver {
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
   }
 
-  /** 货叉速度：活动侧 rpm_z 优先，缺省回退 Inspector forkSpeed → dataDriven.motion.fork.speed → 常量。 */
-  private readShuttleForkSpeed(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, side: ShuttleForkSide): number {
-    const defaultSpeed = this.readShuttleInspectorSpeed(model, 'forkSpeed')
+  /** 货叉速度（二段速度，一段减半）：Inspector forkSpeed 优先，缺省回退 dataDriven.motion.fork.speed → 常量。 */
+  private readShuttleForkSpeed(model: ModelRuntimeEntry): number {
+    return this.readShuttleInspectorSpeed(model, 'forkSpeed')
       ?? this.readShuttleDataDrivenNumber(model, ['motion', 'fork', 'speed'])
       ?? SHUTTLE_DEFAULT_FORK_SPEED_METERS_PER_SECOND;
-    return this.readShuttleRpmSpeed(model, snapshot, side === 'front' ? 'front_rpm_z' : 'back_rpm_z', defaultSpeed);
-  }
-
-  /** 使用 rpm 字段换算速度；没有有效 rpm 时回退给定默认速度。 */
-  private readShuttleRpmSpeed(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, rpmKey: string, defaultSpeed: number): number {
-    const rpm = readNumberField(snapshot.fields, rpmKey);
-    if (rpm === null || rpm <= 0) return defaultSpeed;
-    const rpmScale = this.readShuttleDataDrivenNumber(model, ['device', 'rpmToMetersPerSecond']) ?? SHUTTLE_RPM_TO_METERS_PER_SECOND;
-    return Math.max(defaultSpeed * 0.25, rpm * rpmScale);
   }
 
   /** 读取模型脚本 dataDriven 配置中的数值字段。 */
@@ -1080,6 +1101,7 @@ export class ShuttleTelemetryDriver {
   private writeShuttleTelemetryMetadata(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
+    status: number | null,
     targetLocator: LocatorRuntimeEntry | null,
   ): void {
     const telemetryMetadata = {
@@ -1088,12 +1110,14 @@ export class ShuttleTelemetryDriver {
       sourceTimestamp: snapshot.sourceTimestamp,
       receivedAt: snapshot.receivedAt,
       aisleCode: this.resolveShuttleAisleCode(model),
+      status,
       targetFound: Boolean(targetLocator),
       faulted: snapshot.faulted,
       message: snapshot.message,
       fields: snapshot.fields,
       forkOffset: model.shuttleTelemetry.forkOffset,
       forkTargetOffset: model.shuttleTelemetry.forkTargetOffset,
+      forkPhase: model.shuttleTelemetry.forkPhase,
     };
 
     model.root.metadata = {
@@ -1106,16 +1130,14 @@ export class ShuttleTelemetryDriver {
     };
   }
 
-  /** 对故障和状态变化做一次性 Console 提示，避免每帧刷屏。 */
-  private reportShuttleRuntimeState(snapshot: DeviceTelemetrySnapshot): void {
+  /** 对故障和 Status 变化做一次性 Console 提示，避免每帧刷屏。 */
+  private reportShuttleRuntimeState(snapshot: DeviceTelemetrySnapshot, status: number | null): void {
     const deviceKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}`;
-    const frontCommand = readIntegerField(snapshot.fields, 'front_command');
-    const backCommand = readIntegerField(snapshot.fields, 'back_command');
-    const statusSignature = JSON.stringify([frontCommand, backCommand, snapshot.message]);
+    const statusSignature = JSON.stringify([status, snapshot.message]);
     if (this.state.reportedStatuses.get(deviceKey) !== statusSignature) {
       this.state.reportedStatuses.set(deviceKey, statusSignature);
       this.host.pushLog(
-        `多穿小车 ${snapshot.assetCode} 状态：front=${frontCommand ?? '未知'}，back=${backCommand ?? '未知'}${snapshot.message ? `，${snapshot.message}` : ''}`,
+        `多穿小车 ${snapshot.assetCode} 状态：${this.describeShuttleStatus(status)}${snapshot.message ? `，${snapshot.message}` : ''}`,
       );
     }
 
@@ -1129,5 +1151,12 @@ export class ShuttleTelemetryDriver {
 
     this.state.reportedFaults.set(deviceKey, faultMessage);
     this.host.pushLog(`多穿小车 ${snapshot.assetCode} 故障/急停：${faultMessage}`);
+  }
+
+  /** Status 值的人类可读描述。 */
+  private describeShuttleStatus(status: number | null): string {
+    if (status === null) return 'Status 未知';
+    const label = ['待机', '装货', '卸货', '移动中'][status];
+    return label ? `Status=${status}（${label}）` : `Status=${status}`;
   }
 }

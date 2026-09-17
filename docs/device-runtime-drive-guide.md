@@ -197,38 +197,39 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:66
 
 ## 4. 多穿小车 shuttle
 
-堆垛机的水平裁剪版：仅 Z 轴走行（无升降），货叉沿模型 X 轴伸缩；**单套货叉共用节点**，front/back 字段仅作协议侧别（活动侧仲裁，front 优先）。**库位匹配走巷道号**：Locator 组件 `aisleCode` ↔ 小车模型参数 `aisleCode`（meta.json modelParameters），与堆垛机的 `deviceAssetCode` 匹配并行为两套独立索引。
+堆垛机的水平裁剪版：仅 Z 轴水平走行（无升降，**层变化直接闪现对齐目标格层高位**），货叉沿模型 X 轴伸缩。**两段式货叉按比例联动**：一段（`stage1Nodes`）行程为总行程一半、二段（`stage2Nodes`）为全行程，同步启动同步到位（二段速度 = 一段 2 倍）。**环抱式载货**（非托起）：夹抱臂从货物前后两侧夹取，货箱几何中心锚定二段叉几何中心（水平），货物底面贴合**载货平面**（`cargoDeckNodes` 包围盒顶面）——载货平面即整车 Y 层对齐基准，与货格支撑位持平，夹取/收回全程货物高度不变。**库位匹配双路**：先按 Locator `deviceAssetCode` ↔ 小车 assetCode（设备绑定），未命中回退 Locator `aisleCode` ↔ 模型参数 `aisleCode`（巷道匹配）。
 
 ### 参数化配置
 | 配置 | 位置 | 语义 |
 |---|---|---|
-| 模型参数 `aisleCode` | 模型包 modelParameters / parameterValues | 巷道编号：与 Locator `aisleCode` 匹配定位货格/站台；空值不匹配任何库位（一次性告警） |
-| Inspector `travelSpeed/forkSpeed` | parameterValues，shuttleDriver `readShuttleInspectorSpeed` | 速度覆盖，优先级最高 |
-| `dataDriven.motion.travel.speed` | 模型包脚本 | 走行速度缺省（rpm_x 缺失时），常量兜底 1.0 m/s |
-| `dataDriven.motion.fork.speed` / `limits.max` | 模型包脚本 | 伸叉速度缺省 0.25 m/s；无货格时的全行程回退（米） |
-| `dataDriven.motion.fork.nodes` / `fallbackPattern` | 模型包脚本 | 叉节点（huocha1/对象001/cha1/cha2）/ 兜底正则 |
+| 模型参数 `aisleCode` | 模型包 modelParameters / parameterValues | 巷道编号：设备绑定货格未命中时的回退匹配；空值不参与巷道匹配（一次性告警） |
+| Inspector `travelSpeed/forkSpeed` | parameterValues，shuttleDriver `readShuttleInspectorSpeed` | 速度覆盖，优先级最高（forkSpeed 为二段速度，一段减半） |
+| `dataDriven.motion.travel.speed` | 模型包脚本 | 走行速度缺省，常量兜底 1.0 m/s |
+| `dataDriven.motion.fork.speed` | 模型包脚本 | 伸叉速度缺省 0.25 m/s |
+| `dataDriven.motion.fork.stage1Nodes` | 模型包脚本 | 一段叉节点（对象004/对象003），行程减半联动 |
+| `dataDriven.motion.fork.stage2Nodes` / `fallbackPattern` | 模型包脚本 | 二段叉节点（对象001/cha1/cha2/huocha1），货箱水平锚点 / 兜底正则 |
+| `dataDriven.motion.cargoDeckNodes` | 模型包脚本 | 载货平面节点（对象020/021/022）：环抱收回后承载货物底面的台面板件，其包围盒顶面为货物竖直基准与 Y 层对齐基准；未声明回退二段叉顶面（托起式） |
 | `dataDriven.fixedNodes` | 模型包脚本（可选） | 固定轨道节点；缺省整车行走、无轨道约束 |
-| MQTT `rpm_x` / `front/back_rpm_z` × `rpmToMetersPerSecond` | shuttleDriver | 实际速度优先（默认 0.01） |
-| Locator `aisleCode/rowNumber/startColumn/startLayer/columns/layers/columnReversed` | SceneRuntime 巷道索引 | 巷道内货格网格 |
+| Locator `deviceAssetCode` 或 `aisleCode` + `rowNumber/startColumn/startLayer/columns/layers/columnReversed` | SceneRuntime 设备/巷道索引 | 货格网格 |
 
 ### MQTT 消费
-沿用堆垛机字段约定：**不支持 mode==4 signalBits 锁存**（command 始终可靠）。
-- `front_x/front_y/front_z` = 列/层/排当前库位（全 0=空闲）；`to_x/to_y/to_z` = 目标库位，仅决定走行终点。
-- `front/back_command`：1 取货中 / 2 取货完成 / 3,4 放货中 / 5 放货完成 / 8 急停(faulted)。
-- `front/back_movement_z`：1/3 伸、2/4 收（字段名沿用，实际驱动 X 轴货叉）。
-- `front/back_task`、`front/back_containerCode`：货物身份。
+Status 单字段状态机，无 command/movement/mode 体系。
+- `x/y` = 当前列/层（仅诊断日志）；`to_x/to_y/to_Depth` = **当前动作阶段的目标货格**（装货时=取货格，卸货时=放货格）；`to_x/to_y` 全 0 或缺失 = 无目标。
+- `to_Depth` 位编码排号：1→排1、2→排2、4→排3、8→排4；非法值一次性告警并忽略本次目标（`to_z` 弃用）。
+- `Status`：0 待机 / 1 装货（货：货格→小车，装完即完结）/ 2 卸货（货：小车→货格）/ 3 移动中。
+- `task`、`containerCode`：货物身份（全局 task 接管用，缺失则匿名自建）。
 
 ### fetch 响应
-与堆垛机一致：放货完成保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排同步 → 清抑制并销毁保留货；取/放期间 `suppressFetchCellForLocator` 抑制该格口 fetch 渲染。
+与堆垛机一致：放货完成保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排同步 → 清抑制并销毁保留货；取/放期间 `suppressFetchCellForLocator` 抑制该格口 fetch 渲染。放货排号取本次 `to_Depth` 解码值。
 
 ### 动画
-每帧 `applyToModel`（shuttleDriver）。走行为**速度插值**（`moveVectorTowards`），首帧吸附 `snapShuttleToTargetOffset`；**无轨道约束**（整车行走，除非 dataDriven.fixedNodes 声明轨道）。货叉目标行程 = 叉心对准货格支撑位（方向由货格几何相对叉心的 X 投影符号决定），不按叉长钳位、允许悬空，无货格回退 `limits.max` 全行程。**走行与伸叉互斥**：本体移动期间叉收回原点。货物绑定叉尖时锚定叉节点顶面中心。库位跳变触发 catch-up（4 倍速收叉，收完前冻结走行）。
+每帧 `applyToModel`（shuttleDriver）。走行为**速度插值**（`moveVectorTowards`），**仅 Status=3 期间**向目标格支撑位推进，首帧吸附；Y 不走动画，有目标格时每帧直接闪现对齐目标格层高位（载货平面顶面与货格底面持平，未声明 `cargoDeckNodes` 时回退货叉顶面）。**无轨道约束**（整车行走，除非 dataDriven.fixedNodes 声明轨道）。货叉目标行程 = 叉心对准货格支撑位（方向由货格几何相对叉心的 X 投影符号决定），不按叉长钳位、允许悬空，无货格几何时回退叉节点实测全行程（测不出则不伸叉）。**走行与伸叉互斥**：Status=3 期间叉强制收回原点；Status=1/2 须车体对准目标格（到位余量 2cm）才伸叉；目标位失配/非法 to_Depth 冻结走行与伸叉。库位跳变触发 catch-up（4 倍速收叉，收完前冻结走行）。
 
 ### 时序（取/放节拍）
-command 1 + movement 伸叉开始帧 → 当前格刷货 → 叉到位绑定 → command 相位离开完成取货 → 运载 → command 3/4 伸叉到位解绑落箱位 → 收叉（期间幂等重试绑定/解绑）→ 相位退出完成放货。
+Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管）→ 两段叉同步伸出 → 伸满绑定（货水平锚定二段叉几何中心、底面贴载货平面顶面，随叉收回）→ 自动收叉完结。Status=3：运载（层变化闪现）。Status=2：无货先补建并绑定 → 两段叉伸出 → 伸满解绑落目标格支撑位（conveyor 站台当场交接）→ 收叉完结。Status 相位退出边沿兜底收尾（防报文丢帧），故障冻结。
 
 ### 状态机（ShuttleModelTelemetryState, types.ts）
-单叉单货：`cargoKey`(无货) → 刷货滞留格 → `cargoBoundToFork=true`(随叉) → 解绑 `holdPosition`(箱位)。辅助态：`forkCatchUp`、`mismatch`（库位失配禁伸叉）、`lastMovementZ`（粘性伸出标记）。无 lift/mode4 字段。
+单叉单货：`cargoKey`(无货) → 刷货滞留格 → `cargoBoundToFork=true`(随叉) → 解绑 `holdPosition`(箱位)。辅助态：`lastStatus`（相位边沿）、`forkPhase`（idle/extending/retracting 内部节拍，替代旧 movement 字段）、`statusActionDone`（相位完结闩锁：同相位不重复刷货/伸叉，Status 变化复位）、`forkCatchUp`、`cargoFetchRow`（放货排号锁定）、`cargoBaseHomeY`（Y 闪现基准：载货平面顶面无偏移世界高度，未声明 cargoDeckNodes 时为二段叉顶面）。`forkOffset` 为二段总行程偏移，一段偏移 = forkOffset/2 派生，不单列状态。
 
 ### 交接
 - **conveyor→shuttle**：取货格为 conveyor 内置站台货格时 `adoptConveyorPlatformCargo`（门面共用，assetCode 参数通用）。
@@ -237,7 +238,7 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 → 叉到位绑定 →
 - 库位键与支撑位公式同 stacker（stackerStorageLocation.ts 复用）。
 
 ### 扩展点
-新 MQTT 字段在 `applyToModel` 增消费点（e/p/v 通用解析层不动）；新动作时序改 `applyShuttleForkCargoMotion`；fork 节点/行程经模型包 dataDriven 调整，无需改驱动代码。
+新 MQTT 字段在 `applyToModel` 增消费点（e/p/v 通用解析层不动）；Status 节拍改 `applyShuttleStatusPhase`；fork 节点分组/行程与载货平面经模型包 dataDriven（`stage1Nodes`/`stage2Nodes`/`cargoDeckNodes`）调整，无需改驱动代码。
 
 ---
 
