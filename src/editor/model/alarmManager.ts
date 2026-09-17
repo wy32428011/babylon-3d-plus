@@ -2,7 +2,7 @@ import type { ChartMarkerComponent, ChartMarkerThemeScreen, ModelGeneratorTarget
 import type { Entity } from './Entity';
 import type { SceneDocument } from './SceneDocument';
 import type { Vector3Data } from './math';
-import type { DeviceTelemetrySnapshot } from '../../runtime/mqtt/deviceTelemetry';
+import { DEFAULT_TELEMETRY_SOURCE_ID, type DeviceTelemetrySnapshot } from '../../runtime/mqtt/deviceTelemetry';
 import { createId } from '../../shared/ids';
 import { CHART_MARKER_DEFAULTS, normalizeChartMarker, normalizeChartMarkerThemeScreen } from './chartMarker';
 import { sanitizeModelGeneratorTarget } from './modelGenerator';
@@ -130,6 +130,17 @@ export function collectAlarmIndependentEntityIds(scene: Pick<SceneDocument, 'ent
   return ids;
 }
 
+/** 面板与报警运行时共用设备身份，避免诊断读到其它实例或数据源。 */
+export function resolveAlarmDeviceBinding(entity: Entity): { assetCode: string; deviceType: string; sourceId: string } {
+  const binding = entity.components.telemetryBinding;
+  const asset = entity.components.modelAsset;
+  return {
+    assetCode: binding?.assetCode || asset?.assetCode || '',
+    deviceType: binding?.deviceType || asset?.dataDrivenConfig?.device.devType || '',
+    sourceId: binding?.sourceId || DEFAULT_TELEMETRY_SOURCE_ID,
+  };
+}
+
 function field(fields: Record<string, unknown>, name: string): unknown {
   let value: unknown = fields;
   for (const key of Object.hasOwn(fields, name) ? [name] : name.split('.')) {
@@ -142,15 +153,39 @@ function scalar(value: unknown): string | null {
   return typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) ? String(value).trim().toLowerCase() : null;
 }
 
+/** 保留旧场景的单向布尔兼容：true/false 接受 1/0，反向不扩大匹配。 */
+function matchesCustomValue(value: unknown, expectedValue: string): boolean {
+  const actual = scalar(value);
+  const expected = scalar(expectedValue);
+  return expected === 'true' ? actual === 'true' || actual === '1'
+    : expected === 'false' ? actual === 'false' || actual === '0' : actual !== null && actual === expected;
+}
+
+export type AlarmCustomPropertyStatus = 'disabled' | 'unbound' | 'unconfigured' | 'waiting' | 'stale' | 'missing' | 'invalid' | 'matched' | 'unmatched';
+
+/** 只读数据条件诊断；字段缺失和过期不等同于设备已确认恢复。 */
+export function getAlarmCustomPropertyDiagnostic(c: AlarmManagerComponent, entity: Entity, snapshot: DeviceTelemetrySnapshot | null, now: number): {
+  status: AlarmCustomPropertyStatus; value: unknown; trigger: AlarmTriggerKind | null;
+} {
+  const binding = resolveAlarmDeviceBinding(entity);
+  const value = snapshot && c.customProperty ? field(snapshot.fields, c.customProperty) : undefined;
+  const status: AlarmCustomPropertyStatus = entity.components.telemetryBinding?.enabled === false ? 'disabled'
+    : !binding.assetCode || !binding.deviceType ? 'unbound'
+    : !c.customProperty ? 'unconfigured'
+    : !snapshot ? 'waiting'
+    : now - snapshot.receivedAt > (entity.components.telemetryBinding?.staleAfterMs ?? 10000) ? 'stale'
+    : value === undefined ? 'missing'
+    : scalar(value) === null ? 'invalid'
+    : matchesCustomValue(value, c.customValue) ? 'matched' : 'unmatched';
+  return { status, value, trigger: status === 'unbound' ? null : resolveAlarmTrigger(c, entity, snapshot, now) };
+}
+
 export type AlarmTriggerKind = 'device' | 'fire' | 'warehouse';
 export function resolveAlarmTrigger(c: AlarmManagerComponent, entity: Entity, snapshot: DeviceTelemetrySnapshot | null, now: number): AlarmTriggerKind | null {
   const binding = entity.components.telemetryBinding;
   if (binding?.enabled === false || !snapshot) return null;
   const stale = now - snapshot.receivedAt > (binding?.staleAfterMs ?? 10000);
-  const actual = c.customProperty ? scalar(field(snapshot.fields, c.customProperty)) : null;
-  const expected = scalar(c.customValue);
-  const customMatch = expected === 'true' ? actual === 'true' || actual === '1'
-    : expected === 'false' ? actual === 'false' || actual === '0' : actual !== null && actual === expected;
+  const customMatch = matchesCustomValue(c.customProperty ? field(snapshot.fields, c.customProperty) : undefined, c.customValue);
   const warehouse = scalar(snapshot.fields.warehouseAlarm);
   if (!stale && c.warehouseAlarm && (warehouse === 'true' || warehouse === '1' || customMatch)) return 'warehouse';
   if (c.listenProperty === 'CUSTOM PROPERTY') {

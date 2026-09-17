@@ -531,7 +531,7 @@ npm run build
 - 大场景共享只对明确安全的重复资产生效：普通无脚本模型可共享源几何/材质，Shelf 使用独立验证过的脚本化共享路径；自动 thinInstance 另允许 8 个已核对参数脚本按完整结构模板签名合批，并在保存、发布和部署导出快照中持久化直接源引用。未列入白名单的动态脚本继续独占容器，因此不同资产、动态脚本和高面数贴图本身仍受 GPU 能力限制；本轮不会用降分辨率、LOD 或纹理降采样换取容量。
 - CAD/DXF 导入属于布局参考层能力：承诺常见二维线稿实体 `LINE`、`ARC`、`CIRCLE`、`ELLIPSE`、`SPLINE`、`LWPOLYLINE`、`POLYLINE`、`HATCH` 边界、`SOLID/TRACE/3DFACE` 外轮廓与 `LEADER`，并完整保留 BLOCK、嵌套/阵列 INSERT 的几何实例；不承诺完整 TEXT/MTEXT 字形、Paper Space、多布局、实体填充、3D Solid 曲面或可编辑 CAD 图元。普通图纸保持精确解析，`64 MB` 及以上图纸使用后台轻量扫描和实例化原型预算。DXF 合法 `$INSUNITS` 0–24 会换算为米；无单位图纸只能依据 `$MEASUREMENT` 或毫米 fallback，建议源 CAD 明确写入单位。超过 `±1e15` 的异常原始坐标会被过滤。
 - 参数化模型依赖模型包中稳定的节点、网格或材质名称；安全 DSL 只支持 JSON AST 中的白名单运算和白名单属性绑定，不执行任意 JavaScript/TypeScript。贴图参数允许编辑器登记过的内置 `editor-image://` 逻辑引用，或模型包内 `.png`、`.jpg`、`.jpeg`、`.webp` 相对路径；仍不支持绝对路径、网络 URL、`data:`、反斜杠路径、未登记逻辑引用或 `../` 路径逃逸。重新导入模型包后，场景实例会使用新的 `modelParameters` 与 TypeScript 脚本元数据清洗参数：同名且仍合法的实例值会保留，新增参数使用新默认值，删除或非法参数会移除。
-- Project 资源库中模型库、环境库、天空盒库、图表库和图片库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/`，天空盒 HDR/EXR 保存到 `Assets/Skyboxes/<安全化文件名>/` 独立包，数据中台同步大屏索引保存到当前绑定工程的 `.babylon-editor/data-platform-charts.json`，数据中台同步图片保存到 `Assets/Images/<iconKey>.<ext>`。新导入或从数据中台同步且未显式声明 `lengthUnit` 的环境模型默认按 `centimeter`（`×0.01 m`）解释，普通模型仍默认 `meter`，旧场景兼容语义不变。POI 库已接入模型生成器、自动巡检和图表立标，运行预览与 Viewer 已接入手动漫游控制器，特效库已接入 16 种内置 EFF；图表面板、报警管理器以及主题、组合仍为占位；图片库已接入内置方向箭头、数据中台同步图片和 texture 参数拖放，支持按名称、图标 Key 与分类搜索。
+- Project 资源库中模型库、环境库、天空盒库、图表库和图片库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/`，天空盒 HDR/EXR 保存到 `Assets/Skyboxes/<安全化文件名>/` 独立包，数据中台同步大屏索引保存到当前绑定工程的 `.babylon-editor/data-platform-charts.json`，数据中台同步图片保存到 `Assets/Images/<iconKey>.<ext>`。新导入或从数据中台同步且未显式声明 `lengthUnit` 的环境模型默认按 `centimeter`（`×0.01 m`）解释，普通模型仍默认 `meter`，旧场景兼容语义不变。POI 库已接入模型生成器、自动巡检和图表立标，运行预览与 Viewer 已接入手动漫游控制器，特效库已接入 16 种内置 EFF；图表面板以及主题、组合仍为占位；图片库已接入内置方向箭头、数据中台同步图片和 texture 参数拖放，支持按名称、图标 Key 与分类搜索。
 - 首页数据中台配置、远程项目列表、项目打开和最近场景都依赖 Electron preload IPC；普通 Vite 浏览器页面会显示降级提示，并仅保留进入空白编辑器、新建场景等不依赖桌面权限的基础入口。当前不包含身份令牌配置或数据中台项目详情交互。
 - 主布局自适应当前只包含随窗口尺寸自动调整、左右面板贯通到底部、Project/Console 限定为中间 Scene 同宽以及底部 Console 弹窗入口，不包含拖拽分隔条、其它面板折叠或用户自定义布局保存；小于约 `1024×640` 的窗口会继续尽量收缩，但不保证所有内容舒适可读。
 - 图片库当前登记内置方向箭头和数据中台同步图片；用户手动导入本地图片、更多图片类型与分类管理仍待扩展。
@@ -832,10 +832,14 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 
 1. 在 POI 库点击“报警管理器”或拖入 Scene，选中后配置 `POIAlarmSpawnerComponent`。目标 `Size` 支持 0–64 个槽位，调整数量保留已有槽位；从模型库拖入设备模型。`ENTITY` 可再限定具体场景设备，未限定时监听该模型全部实例；`MODEL` 始终监听该模型全部实例。不会因配置目标而创建新的设备。
 2. `RUNNING STATE` 监听离线、空闲、运行、报警。沿用目标设备的 MQTT 资产编号、设备类型、数据源与超时配置，读取遥测 `fields.runningState`（兼容 `running_state`、`state`、`status`）；支持英文状态、中文状态和 `0/1/2/3`（离线/空闲/运行/报警）。遥测 `faulted` 为真时优先视为报警；收到过数据后超时视为离线，从未收到数据或设备绑定已禁用时不触发。
-3. `CUSTOM PROPERTY` 监听火警，默认字段 `fireAlarm`、触发值 `true`；可以按现场遥测改字段与触发值，支持点路径，布尔 `true/false` 与 `1/0` 对应。启用“仓库告警”后，还监听新鲜快照中的 `warehouseAlarm=true/1` 或配置的火警条件，优先展示仓库告警主题；关闭后仍保留所选监听属性本身的功能。
+3. `CUSTOM PROPERTY` 监听绑定设备的 MQTT 点位：火警属性填写 `data` 中的 `p` 名称，触发值填写该点位希望命中的 `v`。例如 `data:[{p:"fireAlarm",v:1}]` 对应火警属性 `fireAlarm`、触发值 `1`，无需填写数组下标；实时值不会写回触发值。默认仍为 `fireAlarm` / `true`，同名属性优先精确匹配，保留旧点路径兼容；值按去除首尾空格、忽略大小写的标量文本比较。触发值 `true/false` 兼容相应的布尔值和 `1/0`，触发值 `1/0` 仅匹配对应数值或字符串，保留旧场景的单向兼容。启用“仓库告警”后，还监听新鲜快照中的 `warehouseAlarm=true/1` 或配置的火警条件，优先展示仓库告警主题；只需普通火警时关闭该开关。
 4. 报警时覆盖目标模型颜色，显示所选外观模型；外观模型为空时显示内置火焰。“摄像机聚焦”开启时，新报警触发一次设备聚焦。报警解除、隐藏目标、停止预览或删除管理器后，清除派生效果并恢复原材质。共享模型中的其它设备不会被染色；受监控设备及其原有批次伙伴会独立渲染，大批量监控时需留意绘制调用增加。
 5. “告警主题”“仓库告警主题”可选择已同步的图表库大屏，也支持拖入大屏卡片。发布 Viewer 从同项目的数据中台大屏打开后，通过现有宿主协议展示主题；首条报警早于握手时，保留最新主题，握手完成后仅在报警仍有效时发送。独立打开 Viewer 会提示需要连接数据中台宿主，不会在本地擅自打开主题页面。
 6. 启用“显示图表立标”后，可配置分类、图表库/第三方/视频/内置样式、背景图片与颜色、线形/多面体型/图标型、指示器大小与颜色、尺寸、悬浮高度及面向摄像机。图表库嵌入已选大屏；第三方支持 HTTP(S) 嵌入页面，视频使用浏览器原生视频格式，页面嵌入与播放能力取决于内容服务器和浏览器。立标随报警出现和清除，沿用场景深度遮挡。
 7. 配置支持撤销重做、复制、保存重开；同批复制的具体设备引用会重映射。发布包和源工程包收集目标模型、外观模型及关联资源，保留主题引用与内嵌背景图片，不依赖编辑电脑的绝对模型路径。旧场景无报警组件时保持原行为。
 
-验证：`node --test tests/editor/alarmManager.test.mjs`；`npm run build:electron` 后执行 `node_modules/.bin/electron.cmd tests/digitalTwin/alarmManagerPublish.integration.mjs` 验证部署资源与源工程包；`node scripts/smoke-alarm-manager.mjs` 在 Edge 中验证真实 WebGL 颜色隔离、火焰、立标可见像素、解除恢复和 GLB 外观加载，截图位于 `output/playwright/alarm-manager/`。真实现场 MQTT 与数据中台在线大屏需使用项目实际连接配置联调。
+MQTT 点位诊断按目标设备分别显示资产编号、设备类型、数据源、当前 `v`、触发值、最后接收时间及未触发原因。编辑态可手动配置；运行预览时展开诊断，每 500 ms 更新当前页（每页 10 台设备），收起或离开运行预览后停止刷新。诊断不会产生场景修改或撤销记录，运行预览中仍可翻页。
+
+设备身份沿用 `sourceId + deviceType + assetCode`；同名 `p` 不跨设备或数据源匹配。EPV 消息按整帧替换，下一帧缺少该 `p`、`v` 缺失或数据过期时不保持报警效果，但这不代表设备已确认恢复；现场增量上报须保证每帧携带火警点位，当前不自动累计缺失点位。运行时约每 250 ms 判断最新快照，不保证捕获短于轮询间隔的瞬时脉冲。JSON Path 适配器继续使用映射后的字段名；诊断基于共用标准化快照，并非原始点位目录。
+
+验证：`node --test --test-concurrency=1 tests/editor/alarmCustomProperty.test.mjs tests/editor/alarmManager.test.mjs`；`node scripts/smoke-alarm-custom-property.mjs` 验证真实浏览器表单、只读诊断、超时和分页；`npm run build:electron` 后执行 `node_modules/.bin/electron.cmd tests/digitalTwin/alarmManagerPublish.integration.mjs` 验证部署资源与源工程包；`node scripts/smoke-alarm-manager.mjs` 在 Edge 中验证真实 WebGL 颜色隔离、火焰、立标可见像素、解除恢复和 GLB 外观加载，截图位于 `output/playwright/alarm-manager/`。真实现场 MQTT 与数据中台在线大屏需使用项目实际连接配置联调。

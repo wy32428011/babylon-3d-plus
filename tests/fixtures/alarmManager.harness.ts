@@ -5,7 +5,7 @@ import { createRoot } from 'react-dom/client';
 import { AlarmManagerRuntime } from '/src/runtime/babylon/AlarmManagerRuntime';
 import { createAlarmManagerEntity } from '/src/editor/model/alarmManager';
 import { createEmptySceneDocument } from '/src/editor/model/SceneDocument';
-import { deviceTelemetryStore } from '/src/runtime/mqtt/deviceTelemetry';
+import { deviceTelemetryStore, parseDeviceTelemetryMessage } from '/src/runtime/mqtt/deviceTelemetry';
 import { DataPlatformScreenOverlay } from '/src/runtime/babylon/DataPlatformScreenOverlay';
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
@@ -21,6 +21,8 @@ left.material = right.material = original;
 const manager = createAlarmManagerEntity({ x: 0, y: 0, z: 0 });
 const c = manager.components.alarmManager!;
 c.runningState = 'alarm'; c.showMarker = true; c.focusCamera = false; c.associationType = 'builtin'; c.marker.text = '设备报警';
+// 像素用例固定不透明立标，避免默认透明背景改由 Canvas 绘制后误判 DOM 隐藏。
+c.marker.backgroundColor = '#101827';
 const target = { id: 'device', name: '设备 A', visible: true, parentId: null, childrenIds: [], locked: false, components: {
   transform: { position: { x: -2, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
   modelAsset: { sourceUrl: 'editor-asset://local/test.glb', sourcePath: 'test.glb', assetCode: 'A', lengthUnit: 'm', unitScaleToMeters: 1 },
@@ -41,8 +43,14 @@ let sequence = 0;
 function signal(faulted: boolean) { deviceTelemetryStore.upsert({ sourceId: 'default', topic: 'test', deviceType: 'device', assetCode: 'A', receivedAt: Date.now(), sourceTimestamp: null, sequence: ++sequence, fields: {}, faulted } as never); }
 Object.assign(window, { alarmHarness: {
   signal,
+  custom: () => { deviceTelemetryStore.clear(); c.listenProperty = 'CUSTOM PROPERTY'; c.customProperty = 'fire.signal'; c.customValue = '1'; c.warehouseAlarm = false; runtime.sync(sceneDocument as never); },
+  mqtt: (data: unknown[], assetCode = 'A', sourceId = 'default') => {
+    const snapshot = parseDeviceTelemetryMessage(`dt/factory/logistics/device/${assetCode}/twindatadriven/joint`, JSON.stringify({ seq: ++sequence, data }), { kind: 'epv', sourceId });
+    if (!snapshot) throw new Error('MQTT 测试报文解析失败');
+    deviceTelemetryStore.upsert(snapshot);
+  },
   inspect: () => ({ overridden: left.material !== original, normalUnchanged: right.material === original, particles: scene.particleSystems.length, activeParticles: scene.particleSystems.reduce((sum, p) => sum + p.getActiveCount(), 0), overlays: runtime.getOverlayItems().length, events: events.length, errors, appearance: scene.transformNodes.some(n => n.name.endsWith('_appearance')) }),
-  appearance: () => { c.appearanceModel = { kind: 'model', assetId: 'appearance', displayName: '实际 GLB 外观', modelAsset: { sourcePath: 'manual-roam/EQ_People.glb', sourceUrl: '/manual-roam/EQ_People.glb', lengthUnit: 'm', unitScaleToMeters: 1 } }; runtime.sync(sceneDocument as never); signal(true); },
+  appearance: () => { c.appearanceModel = { kind: 'model', assetId: 'appearance', displayName: '实际 GLB 外观', modelAsset: { sourcePath: 'manual-roam/EQ_People.glb', sourceUrl: '/manual-roam/EQ_People.glb', lengthUnit: 'm', unitScaleToMeters: 1 } }; c.listenProperty = 'RUNNING STATE'; runtime.sync(sceneDocument as never); signal(true); },
   dispose: () => { runtime.dispose(); reactRoot.unmount(); engine.stopRenderLoop(); scene.dispose(); engine.dispose(); },
 } });
 engine.runRenderLoop(() => scene.render());

@@ -10,19 +10,20 @@ const server = await createServer({
   server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false },
 });
 let browser;
+let page;
 const errors = [];
 try {
   await server.listen();
   browser = await chromium.launch({ channel: 'msedge', headless: true });
-  const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+  page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
   page.setDefaultTimeout(60_000);
   page.on('pageerror', error => { errors.push(error.message); console.error(error.message); });
   const html = await server.transformIndexHtml('/__alarm_test__', `<!doctype html><html><head><meta charset="utf-8"><title>报警管理器运行验证</title>
     <style>html,body,#stage{width:100%;height:100%;margin:0;overflow:hidden;background:#152131}#stage{position:relative}canvas{width:100%;height:100%;display:block}#overlay{position:absolute;inset:0;pointer-events:none}</style>
     </head><body><div id="stage"><canvas id="canvas"></canvas><div id="overlay"></div></div><script type="module" src="/tests/fixtures/alarmManager.harness.ts"></script></body></html>`);
   await page.route('**/__alarm_test__', route => route.fulfill({ contentType: 'text/html', body: html }));
-  await page.goto(server.resolvedUrls.local[0] + '__alarm_test__', { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => Boolean(window.alarmHarness));
+  await page.goto(server.resolvedUrls.local[0] + '__alarm_test__', { waitUntil: 'commit' });
+  await page.waitForFunction(() => Boolean(window.alarmHarness), null, { timeout: 180_000 });
   await page.evaluate(() => window.alarmHarness.signal(true));
   await page.waitForFunction(() => window.alarmHarness.inspect().activeParticles > 0 && window.alarmHarness.inspect().overridden);
   await page.locator('[data-chart-marker-builtin]').waitFor({ state: 'visible' });
@@ -54,12 +55,37 @@ try {
   await page.waitForFunction(() => !window.alarmHarness.inspect().overridden && window.alarmHarness.inspect().particles === 0);
   assert.equal((await page.evaluate(() => window.alarmHarness.inspect())).overlays, 0);
   await page.screenshot({ path: path.join(outputDir, 'cleared.png') });
+  await page.evaluate(() => { window.alarmHarness.custom(); window.alarmHarness.mqtt([{ p: 'fire.signal', v: 1 }], 'B'); });
+  await page.waitForTimeout(400);
+  assert.equal((await page.evaluate(() => window.alarmHarness.inspect())).overridden, false, '其它设备同名 p 不应触发');
+  await page.evaluate(() => window.alarmHarness.mqtt([{ p: 'temperature', v: 25 }, { e: 'A', p: 'fire.signal', v: 1 }]));
+  await page.waitForFunction(() => window.alarmHarness.inspect().overridden && window.alarmHarness.inspect().activeParticles > 0);
+  state = await page.evaluate(() => window.alarmHarness.inspect());
+  const customEventCount = state.events;
+  assert.equal(customEventCount, 2);
+  assert.equal(state.normalUnchanged, true);
+  await page.screenshot({ path: path.join(outputDir, 'custom-property-active.png') });
+  await page.evaluate(() => window.alarmHarness.mqtt([{ p: 'fire.signal', v: 1 }]));
+  await page.waitForTimeout(400);
+  assert.equal((await page.evaluate(() => window.alarmHarness.inspect())).events, customEventCount, '持续命中不重复激活');
+  await page.evaluate(() => window.alarmHarness.mqtt([{ p: 'fire.signal', v: 0 }]));
+  await page.waitForFunction(() => !window.alarmHarness.inspect().overridden && window.alarmHarness.inspect().overlays === 0);
+  await page.evaluate(() => window.alarmHarness.mqtt([{ p: 'fire.signal', v: 1 }]));
+  await page.waitForFunction(() => window.alarmHarness.inspect().overridden);
+  await page.evaluate(() => window.alarmHarness.mqtt([{ p: 'temperature', v: 26 }]));
+  await page.waitForFunction(() => !window.alarmHarness.inspect().overridden && window.alarmHarness.inspect().particles === 0);
   await page.evaluate(() => window.alarmHarness.appearance());
   await page.waitForFunction(() => window.alarmHarness.inspect().appearance);
   state = await page.evaluate(() => window.alarmHarness.inspect());
   assert.deepEqual(state.errors, []); assert.deepEqual(errors, []);
   await page.evaluate(() => window.alarmHarness.dispose());
-  console.log('PASS: 报警 WebGL 着色隔离、火焰、立标可见像素、解除恢复、真实 GLB 外观加载与资源释放。');
+  console.log('PASS: 报警 WebGL 着色隔离、火焰、立标可见像素、CUSTOM PROPERTY 原始 p/v 多设备隔离与持续命中、解除恢复、真实 GLB 外观加载与资源释放。');
+} catch (error) {
+  if (page && !page.isClosed()) {
+    await page.screenshot({ path: path.join(outputDir, 'failure.png') }).catch(cause => console.error('失败截图保存失败：', cause.message));
+    console.error('报警运行状态：', await page.evaluate(() => window.alarmHarness?.inspect()).catch(() => null));
+  }
+  throw error;
 } finally {
   await browser?.close();
   await server.close();
