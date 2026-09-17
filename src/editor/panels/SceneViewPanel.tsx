@@ -437,7 +437,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     runtime.setExternalHighlightEntityIds([entityId]);
     if (command.type !== 'screen.focusEntity') return;
-    const bounds = runtime.getEntitiesWorldBounds([entityId]);
+    const bounds = runtime.getEntitiesFocusBounds([entityId]);
     if (!bounds || !viewportRef.current) {
       pushLog('大屏联动目标的三维几何尚未就绪。');
       return;
@@ -478,7 +478,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     pauseHistoryReplay();
     return executeChartMarkerClick(state.scene, entityId, {
       focusEntity: (targetId) => {
-        const bounds = runtime.getEntitiesWorldBounds([targetId]);
+        const bounds = runtime.getEntitiesFocusBounds([targetId]);
         if (!bounds || !viewportRef.current) return false;
         manualRoamRef.current?.setEnabled(false);
         autoPatrolPlaybackRef.current?.notifyManualInput();
@@ -1537,7 +1537,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     setViewportCamera(viewport.camera);
     runtime.onAlarmActivated = event => {
       if (event.focusCamera) {
-        const bounds = runtime?.getEntitiesWorldBounds([event.targetId]);
+        const bounds = runtime?.getEntitiesFocusBounds([event.targetId]);
         if (bounds) { manualRoam?.setEnabled(false); viewport?.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS }); }
       }
       if (event.theme) pushLog('告警主题“' + event.theme.name + '”已触发，发布后在数据中台大屏中展示。');
@@ -2596,7 +2596,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const viewport = viewportRef.current;
     if (!runtime || !viewport) return;
 
-    const bounds = runtime.getEntitiesWorldBounds(sceneFocusRequest.entityIds);
+    const bounds = runtime.getEntitiesFocusBounds(sceneFocusRequest.entityIds);
     if (bounds) {
       manualRoamRef.current?.setEnabled(false);
       const currentScene = sceneDocumentRef.current;

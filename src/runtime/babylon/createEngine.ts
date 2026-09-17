@@ -61,6 +61,8 @@ export type CameraProjection = SceneCameraProjection;
 export type EditorWorldBounds = {
   center: Vector3Data;
   radiusMeters: number;
+  /** 可选的模型专用透视取景；未声明距离上限时沿用普通模型 3m 规则。 */
+  focusView?: Pick<SceneCameraPose, 'target' | 'alpha' | 'beta'> & { maxRadiusMeters?: number };
 };
 
 export type BabylonViewportRuntimeStatus =
@@ -223,11 +225,12 @@ function getFocusCameraPose(
   maxRadiusMeters?: number,
   useModelFocusAngle: boolean = true,
 ): SceneCameraPose {
-  const target = { x: bounds.center.x, y: bounds.center.y, z: bounds.center.z };
-  const radius = getFocusCameraRadius(bounds, camera, engine, maxRadiusMeters, useModelFocusAngle);
+  const modelView = useModelFocusAngle ? bounds.focusView : undefined;
+  const target = modelView ? { ...modelView.target } : { ...bounds.center };
+  const radius = getFocusCameraRadius({ ...bounds, center: target }, camera, engine, maxRadiusMeters ?? modelView?.maxRadiusMeters, useModelFocusAngle);
   return {
-    alpha: camera.alpha,
-    beta: useModelFocusAngle ? resolveDigitalTwinCameraFocusBeta() : camera.beta,
+    alpha: modelView?.alpha ?? camera.alpha,
+    beta: modelView?.beta ?? (useModelFocusAngle ? resolveDigitalTwinCameraFocusBeta() : camera.beta),
     radius,
     target,
   };
@@ -235,7 +238,7 @@ function getFocusCameraPose(
 
 
 /**
- * 聚焦包围盒中心。透视模式下普通模型使用斜上方 45° 且距离最大 3m；正交模式保留当前方向。
+ * 透视默认聚焦包围盒中心并斜上方 45° 观察；模型可指定目标、角度和距离上限（普通 3m、堆垛机 5m）。正交保持当前方向。
  */
 export function focusArcRotateCameraOnBounds(
   camera: ArcRotateCamera,

@@ -294,7 +294,7 @@ export function PlayerApp() {
 
     runtime.setExternalHighlightEntityIds([entityId]);
     if (command.type !== 'screen.focusEntity') return;
-    const bounds = runtime.getEntitiesWorldBounds([entityId]);
+    const bounds = runtime.getEntitiesFocusBounds([entityId]);
     const viewport = viewportRef.current;
     if (!bounds || !viewport) {
       setRuntimeMessage('大屏联动目标的三维几何尚未就绪。');
@@ -673,7 +673,7 @@ export function PlayerApp() {
           focusTarget: (entityId, cell) => {
             const bounds = cell
               ? runtime!.getLocatorCellWorldBounds(entityId, cell)
-              : runtime!.getEntitiesWorldBounds([entityId]);
+              : runtime!.getEntitiesFocusBounds([entityId]);
             if (bounds && viewport) {
               viewport.focusOnBounds(bounds, {
                 animate: true,
@@ -695,7 +695,7 @@ export function PlayerApp() {
         runtime.onAlarmActivated = event => {
           if (disposed || !runtime) return;
           if (event.focusCamera) {
-            const bounds = runtime.getEntitiesWorldBounds([event.targetId]);
+            const bounds = runtime.getEntitiesFocusBounds([event.targetId]);
             if (bounds && viewport) { manualRoam?.setEnabled(false); notifyManualInput(); viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS }); }
           }
           if (event.theme) {
@@ -710,7 +710,7 @@ export function PlayerApp() {
           setChartMarkerError('');
           return executeChartMarkerClick(sceneDocument, markerId, {
             focusEntity: (targetId) => {
-              const bounds = runtime!.getEntitiesWorldBounds([targetId]);
+              const bounds = runtime!.getEntitiesFocusBounds([targetId]);
               if (!bounds || !viewport) return false;
               manualRoam?.setEnabled(false);
               notifyManualInput();
@@ -802,7 +802,7 @@ export function PlayerApp() {
           slotIndex: digitalTwinSlotIndex,
           getFocusBounds: (entityId, slot) => slot
             ? runtime!.getLocatorCellWorldBounds(entityId, slot)
-            : runtime!.getEntitiesWorldBounds([entityId]),
+            : runtime!.getEntitiesFocusBounds([entityId]),
           focusOnBounds: (bounds, options) => {
             manualRoam?.setEnabled(false);
             viewport!.focusOnBounds(bounds, options);
