@@ -216,6 +216,80 @@
           "assetCode": "001005"
         }
       }
+    },
+    {
+      "name": "viewer-ready-clear-selection",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "selection-session",
+        "type": "viewer.ready",
+        "payload": {
+          "projectId": "1",
+          "capabilities": [
+            "hardwareGpu",
+            "focusAsset",
+            "clearSelection"
+          ]
+        }
+      }
+    },
+    {
+      "name": "screen-selection-token",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "selection-session",
+        "type": "viewer.showScreen",
+        "payload": {
+          "projectId": "1",
+          "screenId": "2",
+          "selectionToken": "1"
+        }
+      }
+    },
+    {
+      "name": "clear-selection",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "selection-session",
+        "type": "command.clearSelection",
+        "requestId": "close-1",
+        "payload": {
+          "selectionToken": "1"
+        }
+      }
+    },
+    {
+      "name": "clear-selection-success",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "selection-session",
+        "type": "command.result",
+        "requestId": "close-1",
+        "ok": true,
+        "payload": {
+          "action": "clearSelection",
+          "cleared": true
+        }
+      }
+    },
+    {
+      "name": "clear-selection-stale",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "selection-session",
+        "type": "command.result",
+        "requestId": "close-1",
+        "ok": true,
+        "payload": {
+          "action": "clearSelection",
+          "cleared": false
+        }
+      }
     }
   ],
   "invalid": [
@@ -361,6 +435,45 @@
         "payload": {
           "assetCode": "001005",
           "chartId": "  "
+        }
+      }
+    },
+    {
+      "name": "clear-selection-missing-token",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "selection-session",
+        "type": "command.clearSelection",
+        "requestId": "close-1",
+        "payload": {}
+      }
+    },
+    {
+      "name": "clear-selection-empty-token",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "selection-session",
+        "type": "command.clearSelection",
+        "requestId": "close-1",
+        "payload": {
+          "selectionToken": ""
+        }
+      }
+    },
+    {
+      "name": "clear-selection-invalid-result",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "selection-session",
+        "type": "command.result",
+        "requestId": "close-1",
+        "ok": true,
+        "payload": {
+          "action": "clearSelection",
+          "cleared": "true"
         }
       }
     }

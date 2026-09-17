@@ -1,7 +1,9 @@
+import { parseDigitalTwinRegionViewMessage, type DigitalTwinRegionViewMessage } from './digitalTwinRegionViewProtocol.ts';
 export const DIGITAL_TWIN_BRIDGE_CHANNEL = 'zending.digital-twin.bridge' as const;
 export const DIGITAL_TWIN_BRIDGE_VERSION = 1 as const;
 export const DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY = 'hardwareGpu' as const;
 export const DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY = 'focusAsset' as const;
+export const DIGITAL_TWIN_CLEAR_SELECTION_CAPABILITY = 'clearSelection' as const;
 export const DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY = 'globalOverview' as const;
 export const DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY = 'startAutoPatrol' as const;
 export const DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY = 'startManualRoam' as const;
@@ -30,6 +32,7 @@ export type DigitalTwinInitialLoadPhase = (typeof DIGITAL_TWIN_INITIAL_LOAD_PHAS
 export type DigitalTwinCapability =
   | typeof DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY
   | typeof DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY
+  | typeof DIGITAL_TWIN_CLEAR_SELECTION_CAPABILITY
   | DigitalTwinRuntimeAction;
 
 export type DigitalTwinHostHelloMessage = {
@@ -73,7 +76,16 @@ export type DigitalTwinShowScreenMessage = {
   version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
   sessionId: string;
   type: 'viewer.showScreen';
-  payload: { projectId: string; screenId: string };
+  payload: { projectId: string; screenId: string; selectionToken?: string };
+};
+
+export type DigitalTwinClearSelectionCommand = {
+  channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
+  version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
+  sessionId: string;
+  type: 'command.clearSelection';
+  requestId: string;
+  payload: { selectionToken: string };
 };
 
 export type DigitalTwinFocusAssetCommand = {
@@ -125,6 +137,7 @@ export type DigitalTwinRuntimeActionCommand =
   | DigitalTwinStartManualRoamCommand;
 
 export type DigitalTwinCommandSuccessPayload =
+  | { action: typeof DIGITAL_TWIN_CLEAR_SELECTION_CAPABILITY; cleared: boolean }
   | {
       assetCode: string;
       entityIds: string[];
@@ -182,11 +195,13 @@ export type DigitalTwinAssetClickedEvent = {
 export const DIGITAL_TWIN_EDITOR_PREVIEW_SESSION_ID = 'editor-preview' as const;
 
 export type DigitalTwinBridgeMessage =
+  | DigitalTwinRegionViewMessage
   | DigitalTwinHostHelloMessage
   | DigitalTwinBridgeReadyMessage
   | DigitalTwinViewerReadyMessage
   | DigitalTwinViewerInitialLoadStateMessage
   | DigitalTwinShowScreenMessage
+  | DigitalTwinClearSelectionCommand
   | DigitalTwinFocusAssetCommand
   | DigitalTwinCancelFocusAssetCommand
   | DigitalTwinRuntimeActionCommand
@@ -207,6 +222,7 @@ const VIEWER_ERROR_CODE_SET = new Set<string>(DIGITAL_TWIN_VIEWER_ERROR_CODES);
 const CAPABILITY_SET = new Set<string>([
   DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
   DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
+  DIGITAL_TWIN_CLEAR_SELECTION_CAPABILITY,
   ...DIGITAL_TWIN_RUNTIME_ACTIONS,
 ]);
 const RUNTIME_ACTION_SET = new Set<string>(DIGITAL_TWIN_RUNTIME_ACTIONS);
@@ -267,6 +283,9 @@ function isFocusAssetPayload(value: unknown): value is DigitalTwinFocusAssetComm
 
 function isSuccessPayload(value: unknown): value is DigitalTwinCommandSuccessResult['payload'] {
   if (!isRecord(value)) return false;
+  if (value.action === DIGITAL_TWIN_CLEAR_SELECTION_CAPABILITY) {
+    return hasOnlyKeys(value, ['action', 'cleared']) && typeof value.cleared === 'boolean';
+  }
   if (hasOnlyKeys(value, ['action'])) {
     return typeof value.action === 'string' && RUNTIME_ACTION_SET.has(value.action);
   }
@@ -307,6 +326,13 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
   if (!isRecord(value) || !isBaseEnvelope(value) || typeof value.type !== 'string') return null;
 
   switch (value.type) {
+    case 'host.regionViews':
+    case 'viewer.regionViews':
+    case 'command.regionView':
+    case 'command.cancelRegionView':
+    case 'viewer.regionViewResult':
+    case 'viewer.regionViewCleared':
+      return parseDigitalTwinRegionViewMessage(value);
     case 'host.hello':
     case 'bridge.ready':
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type'])
@@ -325,10 +351,19 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
     case 'viewer.showScreen':
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'payload'])
         && isRecord(value.payload)
-        && hasOnlyKeys(value.payload, ['projectId', 'screenId'])
+        && hasAllowedKeys(value.payload, ['projectId', 'screenId', 'selectionToken'])
+        && (value.payload.selectionToken === undefined || isBoundedString(value.payload.selectionToken, MAX_IDENTIFIER_LENGTH))
         && isBoundedString(value.payload.projectId, MAX_PROJECT_ID_LENGTH)
         && isBoundedString(value.payload.screenId, 128)
         ? value as DigitalTwinShowScreenMessage
+        : null;
+    case 'command.clearSelection':
+      return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'requestId', 'payload'])
+        && isBoundedString(value.requestId, MAX_IDENTIFIER_LENGTH)
+        && isRecord(value.payload)
+        && hasOnlyKeys(value.payload, ['selectionToken'])
+        && isBoundedString(value.payload.selectionToken, MAX_IDENTIFIER_LENGTH)
+        ? value as DigitalTwinClearSelectionCommand
         : null;
     case 'command.focusAsset':
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'requestId', 'payload'])

@@ -1,3 +1,4 @@
+import { createStackerFocusView, getStackerFocusWorldBounds } from './stackerFocusBounds';
 import { AlarmManagerRuntime, type AlarmActivation } from './AlarmManagerRuntime';
 import { executeModelParameterBindings } from './modelParameterBindingExecution';
 import { collectAlarmIndependentEntityIds } from '../../editor/model/alarmManager';
@@ -2301,6 +2302,28 @@ export class SceneRuntime {
       missingEntityIds,
       notReadyEntityIds,
     };
+  }
+
+  /** 单台堆垛机使用运动机身范围；多选及其他用途仍保留完整实体几何。 */
+  getEntitiesFocusBounds(entityIds: string[]): (NonNullable<ReturnType<SceneRuntime['getEntitiesWorldBounds']>> & {
+    focusView?: ReturnType<typeof createStackerFocusView>;
+  }) | null {
+    const complete = this.getEntitiesWorldBounds(entityIds);
+    const uniqueIds = [...new Set(entityIds)];
+    if (!complete?.geometryReady || uniqueIds.length !== 1) return complete;
+    const model = this.models.get(uniqueIds[0]);
+    if (!model) return complete;
+    const bounds = getStackerFocusWorldBounds(model);
+    if (!bounds) return complete;
+    if (model.externalScriptStarting || !model.measurementReady) {
+      return { ...complete, geometryReady: false, geometryReadyEntityCount: 0,
+        notReadyEntityCount: 1, notReadyEntityIds: uniqueIds };
+    }
+    const center = bounds.minimum.add(bounds.maximum).scale(0.5);
+    const size = bounds.maximum.subtract(bounds.minimum);
+    return { ...complete, focusView: createStackerFocusView(model, bounds),
+      center: { x: center.x, y: center.y, z: center.z },
+      sizeMeters: { x: size.x, y: size.y, z: size.z }, radiusMeters: Math.max(0.5, size.length() / 2) };
   }
 
   /** 按货格「排-列-层」返回单格世界包围盒，供发布 Viewer 搜索聚焦；找不到格子时返回 null。 */

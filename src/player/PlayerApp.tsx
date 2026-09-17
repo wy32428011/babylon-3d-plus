@@ -294,7 +294,7 @@ export function PlayerApp() {
 
     runtime.setExternalHighlightEntityIds([entityId]);
     if (command.type !== 'screen.focusEntity') return;
-    const bounds = runtime.getEntitiesWorldBounds([entityId]);
+    const bounds = runtime.getEntitiesFocusBounds([entityId]);
     const viewport = viewportRef.current;
     if (!bounds || !viewport) {
       setRuntimeMessage('大屏联动目标的三维几何尚未就绪。');
@@ -662,7 +662,14 @@ export function PlayerApp() {
           manualRoamRef.current = manualRoam;
           setManualRoamSnapshot(manualRoam.getSnapshot());
         }
+        const clearViewerSelection = (): void => {
+          localHighlightedEntityIds = [];
+          setViewerSelectedEntityIds([]);
+          runtime?.clearLocalHighlight();
+          runtime?.clearExternalHighlight();
+        };
         const handleModelClick = createViewerModelClickHandler(sceneDocument, {
+          beginSelection: () => interactionController?.beginSelection(),
           updateSelection: (entityIds) => {
             const nextEntityIds = [...entityIds];
             localHighlightedEntityIds = nextEntityIds;
@@ -673,7 +680,7 @@ export function PlayerApp() {
           focusTarget: (entityId, cell) => {
             const bounds = cell
               ? runtime!.getLocatorCellWorldBounds(entityId, cell)
-              : runtime!.getEntitiesWorldBounds([entityId]);
+              : runtime!.getEntitiesFocusBounds([entityId]);
             if (bounds && viewport) {
               viewport.focusOnBounds(bounds, {
                 animate: true,
@@ -685,7 +692,7 @@ export function PlayerApp() {
           triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
           emitAssetClicked: (payload) => interactionController?.notifyAssetClicked(payload),
           showScreen: (screen) => {
-            if (interactionController?.showScreen(screen)) {
+            if (interactionController?.showScreen(screen, true)) {
               setChartMarkerError('');
             } else {
               setChartMarkerError('大屏展示未发送：请从同项目的数据中台大屏中打开当前数字孪生。');
@@ -695,7 +702,7 @@ export function PlayerApp() {
         runtime.onAlarmActivated = event => {
           if (disposed || !runtime) return;
           if (event.focusCamera) {
-            const bounds = runtime.getEntitiesWorldBounds([event.targetId]);
+            const bounds = runtime.getEntitiesFocusBounds([event.targetId]);
             if (bounds && viewport) { manualRoam?.setEnabled(false); notifyManualInput(); viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS }); }
           }
           if (event.theme) {
@@ -710,7 +717,7 @@ export function PlayerApp() {
           setChartMarkerError('');
           return executeChartMarkerClick(sceneDocument, markerId, {
             focusEntity: (targetId) => {
-              const bounds = runtime!.getEntitiesWorldBounds([targetId]);
+              const bounds = runtime!.getEntitiesFocusBounds([targetId]);
               if (!bounds || !viewport) return false;
               manualRoam?.setEnabled(false);
               notifyManualInput();
@@ -718,6 +725,7 @@ export function PlayerApp() {
               return true;
             },
             selectEntity: (targetId) => {
+              interactionController?.beginSelection();
               localHighlightedEntityIds = [targetId];
               setViewerSelectedEntityIds([targetId]);
               runtime!.setLocalSlotHighlight('', null);
@@ -802,7 +810,7 @@ export function PlayerApp() {
           slotIndex: digitalTwinSlotIndex,
           getFocusBounds: (entityId, slot) => slot
             ? runtime!.getLocatorCellWorldBounds(entityId, slot)
-            : runtime!.getEntitiesWorldBounds([entityId]),
+            : runtime!.getEntitiesFocusBounds([entityId]),
           focusOnBounds: (bounds, options) => {
             manualRoam?.setEnabled(false);
             viewport!.focusOnBounds(bounds, options);
@@ -818,6 +826,21 @@ export function PlayerApp() {
           getPatrolPhase: () => autoPatrolPlayback!.getSnapshot().phase,
           pausePatrol: () => { autoPatrolPlayback!.pause(false); },
           notifyCameraChangedWhilePaused: () => autoPatrolPlayback!.notifyCameraChangedWhilePaused(),
+          clearSelection: clearViewerSelection,
+          getRegionViews: () => sceneDocument.sceneSettings.regionViews.map(({ id, name }) => ({ id, name })),
+          applyRegionView: (viewId, options) => {
+            const view = sceneDocument.sceneSettings.regionViews.find(item => item.id === viewId);
+            if (!view) throw new Error('区域视角不存在');
+            autoPatrolStartGate.cancelPending();
+            pauseHistoryReplay();
+            autoPatrolPlayback?.stop();
+            manualRoamRuntime?.setEnabled(false);
+            updateOpenedDigitalTwinFloatingControl(null);
+            viewport!.cancelCameraTransition('replaced');
+            viewport!.applyCameraView({ ...view.camera, viewDistance: sceneDocument.sceneSettings.camera.viewDistance }, {
+              ...options, lockStandardOrientation: false,
+            });
+          },
           globalOverview: () => restorePlayerGlobalOverview({
             cancelPendingAutoPatrol: () => autoPatrolStartGate.cancelPending(),
             stopHistoryReplay: pauseHistoryReplay,
@@ -826,10 +849,7 @@ export function PlayerApp() {
             closeFloatingControls: () => updateOpenedDigitalTwinFloatingControl(null),
             cancelCameraTransition: () => { viewport?.cancelCameraTransition('replaced'); },
             clearSelection: () => {
-              localHighlightedEntityIds = [];
-              setViewerSelectedEntityIds([]);
-              runtime?.clearLocalHighlight();
-              runtime?.clearExternalHighlight();
+              clearViewerSelection();
               setChartMarkerError('');
             },
             resetStatusOverlay: () => setStatusOverlayVisible(resolveInitialPlayerStatusOverlayVisibility(

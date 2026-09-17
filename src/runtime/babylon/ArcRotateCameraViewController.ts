@@ -201,6 +201,16 @@ export class ArcRotateCameraViewController {
     return readCameraPose(this.camera);
   }
 
+  /** 位姿、投影和朝向从同一帧读取，避免保存到混合状态。 */
+  getCameraView(): Omit<SceneCameraSettings, 'viewDistance'> & { savedPose: SceneCameraPose } {
+    if (this.transition) throw new Error('相机正在切换，请等待视角定位完成后再保存');
+    return {
+      savedPose: this.getCameraPose(),
+      savedOrientation: this.orientation,
+      savedProjection: this.camera.mode === Camera.ORTHOGRAPHIC_CAMERA ? 'orthographic' : 'perspective',
+    };
+  }
+
   setCameraOrientation(
     orientation: SceneCameraOrientation,
     transitionOptions: CameraViewTransitionOptions = {},

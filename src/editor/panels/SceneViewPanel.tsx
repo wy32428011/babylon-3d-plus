@@ -358,6 +358,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const environmentRuntimePhase = useEditorStore((state) => state.environmentRuntimeSnapshot.phase);
   const environmentFocusRequest = useEditorStore((state) => state.environmentFocusRequest);
   const cameraPoseSaveRequest = useEditorStore((state) => state.cameraPoseSaveRequest);
+  const regionViewRequest = useEditorStore((state) => state.regionViewRequest);
   const cameraResetRequest = useEditorStore((state) => state.cameraResetRequest);
   const cameraOrientation = useEditorStore((state) => state.cameraOrientation);
   const cameraProjection = useEditorStore((state) => state.cameraProjection);
@@ -437,7 +438,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     runtime.setExternalHighlightEntityIds([entityId]);
     if (command.type !== 'screen.focusEntity') return;
-    const bounds = runtime.getEntitiesWorldBounds([entityId]);
+    const bounds = runtime.getEntitiesFocusBounds([entityId]);
     if (!bounds || !viewportRef.current) {
       pushLog('大屏联动目标的三维几何尚未就绪。');
       return;
@@ -478,7 +479,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     pauseHistoryReplay();
     return executeChartMarkerClick(state.scene, entityId, {
       focusEntity: (targetId) => {
-        const bounds = runtime.getEntitiesWorldBounds([targetId]);
+        const bounds = runtime.getEntitiesFocusBounds([targetId]);
         if (!bounds || !viewportRef.current) return false;
         manualRoamRef.current?.setEnabled(false);
         autoPatrolPlaybackRef.current?.notifyManualInput();
@@ -1537,7 +1538,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     setViewportCamera(viewport.camera);
     runtime.onAlarmActivated = event => {
       if (event.focusCamera) {
-        const bounds = runtime?.getEntitiesWorldBounds([event.targetId]);
+        const bounds = runtime?.getEntitiesFocusBounds([event.targetId]);
         if (bounds) { manualRoam?.setEnabled(false); viewport?.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS }); }
       }
       if (event.theme) pushLog('告警主题“' + event.theme.name + '”已触发，发布后在数据中台大屏中展示。');
@@ -2555,6 +2556,35 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   }, [cameraPoseSaveRequest, consumeCameraPoseSaveRequest]);
 
   useEffect(() => {
+    if (!regionViewRequest) return;
+    const state = useEditorStore.getState();
+    if (regionViewRequest.sceneSessionId !== state.sceneSessionId || state.regionViewRequest?.id !== regionViewRequest.id) return;
+    const finish = state.consumeRegionViewRequest;
+    const viewport = viewportRef.current;
+    if (!viewport || isScenePreparationActive()) {
+      finish(regionViewRequest.id, undefined, '场景尚未就绪，请加载完成后重试');
+      return;
+    }
+    if (state.runtimeMode !== 'edit') { finish(regionViewRequest.id); return; }
+    try {
+      if (regionViewRequest.kind === 'save') {
+        if (manualRoamRef.current?.getSnapshot().enabled) throw new Error('请先退出手动漫游，再保存区域视角');
+        finish(regionViewRequest.id, viewport.getCameraView());
+      } else {
+        const view = state.scene.sceneSettings.regionViews.find(item => item.id === regionViewRequest.regionViewId);
+        if (!view) throw new Error('区域视角不存在，可能已被删除');
+        pauseHistoryReplay();
+        autoPatrolPlaybackRef.current?.stop();
+        manualRoamRef.current?.setEnabled(false);
+        viewport.applyCameraView({ ...view.camera, viewDistance: state.scene.sceneSettings.camera.viewDistance }, { animate: false });
+        finish(regionViewRequest.id);
+      }
+    } catch (error) {
+      finish(regionViewRequest.id, undefined, error instanceof Error ? error.message : '区域视角操作失败');
+    }
+  }, [regionViewRequest, pauseHistoryReplay]);
+
+  useEffect(() => {
     if (!cameraResetRequest) return;
     if (manualRoamSnapshot.enabled) {
       consumeCameraResetRequest(cameraResetRequest.id);
@@ -2596,7 +2626,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const viewport = viewportRef.current;
     if (!runtime || !viewport) return;
 
-    const bounds = runtime.getEntitiesWorldBounds(sceneFocusRequest.entityIds);
+    const bounds = runtime.getEntitiesFocusBounds(sceneFocusRequest.entityIds);
     if (bounds) {
       manualRoamRef.current?.setEnabled(false);
       const currentScene = sceneDocumentRef.current;

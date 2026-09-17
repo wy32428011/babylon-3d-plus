@@ -103,6 +103,7 @@ class FakeRuntime implements DigitalTwinInteractionRuntime {
   startAutoPatrolCount = 0;
   startManualRoamCount = 0;
   globalOverviewCount = 0;
+  clearSelection?: () => void;
   patrolPhase: 'idle' | 'moving' | 'dwelling' | 'paused' | 'completed' | 'returning' = 'idle';
   private activeTransition: CameraViewTransitionOptions | null = null;
 
@@ -990,4 +991,88 @@ test('宿主先握手时仍等待 Viewer ready，dispose 后不执行就绪回�
   dispatch(f.bus, hostHello());
   f.controller.markViewerReady(new FakeRuntime([]));
   assert.equal(readyCount, 1);
+});
+
+test('关闭只清理匹配的选择，旧关闭不能清除新设备或改变巡检相机', () => {
+  const { controller, bus, posted } = createFixture();
+  const runtime = new FakeRuntime([{ assetCode: '001', entityIds: ['pump'] }]);
+  let clearCount = 0;
+  runtime.clearSelection = () => { clearCount++; };
+  try {
+    controller.markViewerReady(runtime);
+    dispatch(bus, hostHello());
+    controller.beginSelection();
+    controller.showScreen({ projectId: '2051942646011785218', screenId: '2' }, true);
+    const opened = posted.findLast(entry => entry.message.type === 'viewer.showScreen')!.message;
+    assert.ok(opened.type === 'viewer.showScreen');
+    const token = opened.payload.selectionToken;
+    assert.ok(token);
+    const command = { ...hostHello(), type: 'command.clearSelection', requestId: 'close-a', payload: { selectionToken: token } };
+    dispatch(bus, command, sameOrigin, otherWindow);
+    assert.equal(clearCount, 0);
+    dispatch(bus, command);
+    assert.equal(clearCount, 1);
+    assert.deepEqual(posted.at(-1)?.message, { ...command, type: 'command.result', ok: true, payload: { action: 'clearSelection', cleared: true } });
+    dispatch(bus, command);
+    assert.equal(clearCount, 1);
+    assert.deepEqual(posted.at(-1)?.message, { ...command, type: 'command.result', ok: true, payload: { action: 'clearSelection', cleared: false } });
+    controller.beginSelection();
+    dispatch(bus, command);
+    assert.equal(clearCount, 1);
+    assert.equal(runtime.globalOverviewCount, 0);
+    assert.equal(runtime.startAutoPatrolCount, 0);
+    assert.equal(runtime.startManualRoamCount, 0);
+    assert.equal(runtime.pauseCount, 0);
+    assert.equal(runtime.focusCalls.length, 0);
+  } finally { controller.dispose(); }
+});
+
+test('新定位等待期间旧关闭失效，旧会话与缺失清理能力不执行清理', () => {
+  const { controller, bus, posted, scheduler } = createFixture();
+  const runtime = new FakeRuntime([{ assetCode: '001', entityIds: ['pump'] }], () => null);
+  let clearCount = 0;
+  runtime.clearSelection = () => { clearCount++; };
+  try {
+    controller.markViewerReady(runtime);
+    dispatch(bus, hostHello());
+    controller.beginSelection();
+    controller.showScreen({ projectId: '2051942646011785218', screenId: '2' }, true);
+    const opened = posted.findLast(entry => entry.message.type === 'viewer.showScreen')!.message;
+    assert.ok(opened.type === 'viewer.showScreen');
+    const command = { ...hostHello(), type: 'command.clearSelection', requestId: 'close-a', payload: { selectionToken: opened.payload.selectionToken } };
+    dispatch(bus, { ...command, sessionId: 'old-session' });
+    assert.equal(clearCount, 0);
+    dispatch(bus, focusCommand('new-focus', '001'));
+    dispatch(bus, command);
+    assert.equal(clearCount, 0);
+    assert.ok(scheduler.pendingCount() > 0);
+    runtime.clearSelection = undefined;
+    dispatch(bus, command);
+    const failure = posted.at(-1)?.message;
+    assert.ok(failure?.type === 'command.result' && !failure.ok);
+    assert.equal(failure.error.code, 'UNSUPPORTED_COMMAND');
+  } finally { controller.dispose(); }
+});
+
+test('取消选择清理异常返回失败，修复后同一选择可以重试', () => {
+  const { controller, bus, posted } = createFixture();
+  const runtime = new FakeRuntime([]);
+  runtime.clearSelection = () => { throw new Error('fixture clear failure'); };
+  try {
+    controller.markViewerReady(runtime);
+    dispatch(bus, hostHello());
+    controller.beginSelection();
+    controller.showScreen({ projectId: '2051942646011785218', screenId: '2' }, true);
+    const opened = posted.at(-1)?.message;
+    assert.ok(opened?.type === 'viewer.showScreen');
+    const command = { ...hostHello(), type: 'command.clearSelection', requestId: 'close-retry', payload: { selectionToken: opened.payload.selectionToken } };
+    dispatch(bus, command);
+    const failure = posted.at(-1)?.message;
+    assert.ok(failure?.type === 'command.result' && !failure.ok);
+    assert.equal(failure.error.code, 'INTERNAL_ERROR');
+    let count = 0;
+    runtime.clearSelection = () => { count++; };
+    dispatch(bus, command);
+    assert.equal(count, 1);
+  } finally { controller.dispose(); }
 });

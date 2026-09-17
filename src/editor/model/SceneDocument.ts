@@ -1,4 +1,5 @@
 import { createId } from '../../shared/ids';
+import { normalizeSceneRegionViews, type SceneRegionView } from './sceneRegionViews';
 import { sanitizeSceneShadowBake, type SceneShadowBakeSnapshot } from './sceneShadowBake';
 import type { CadReferenceComponent, LightKind, MeshKind, PoiEffectKind, SkyboxComponent, SkyboxFormat, SkyboxResolution } from './components';
 import type { Entity } from './Entity';
@@ -249,6 +250,7 @@ export type SceneEnvironmentSettingsInput = Omit<
 
 export type SceneSettings = {
   camera: SceneCameraSettings;
+  regionViews: SceneRegionView[];
   sensitivity: SceneSensitivitySettings;
   shadows: SceneShadowSettings;
   environment: SceneEnvironmentSettings | null;
@@ -312,6 +314,7 @@ export const DEFAULT_MQTT_CONFIG: MqttConfig = {
 };
 
 export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
+  regionViews: [],
   camera: {
     savedPose: null,
     savedOrientation: SCENE_CAMERA_ORIENTATION_DEFAULT,
@@ -899,6 +902,8 @@ export function sanitizeSceneEnvironment(
 
 /** 归一化场景级编辑设置，作为 UI、运行时和序列化共同使用的边界。 */
 export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
+  const regionViews = normalizeSceneRegionViews(settings.regionViews);
+  if (regionViews.issues.length) console.warn('[区域视角]', regionViews.issues.join('；'));
   const savedPose = isValidCameraPose(settings.camera.savedPose)
     ? {
         alpha: settings.camera.savedPose.alpha,
@@ -922,6 +927,7 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
       savedProjection,
       viewDistance: sanitizeSceneViewDistance(settings.camera.viewDistance),
     },
+    regionViews: regionViews.views,
     sensitivity: {
       zoom: sanitizeSceneSensitivityValue(settings.sensitivity.zoom),
       pan: sanitizeSceneSensitivityValue(settings.sensitivity.pan),

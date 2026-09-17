@@ -1,4 +1,5 @@
 import { getSceneShadowBakeSignature } from '../model/sceneShadowBake';
+import { RegionViewsPanel } from './RegionViewsPanel';
 import {
   useEffect,
   useMemo,
@@ -635,6 +636,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
           <p className="muted">10 km 天空盒要求可视距离至少为 {SCENE_SKYBOX_VIEW_DISTANCE_MIN} m。</p>
         ) : null}
       </fieldset>
+
+      <RegionViewsPanel readOnly={props.readOnly} />
 
       <fieldset className="transform-fieldset">
         <legend>相机运动幅度（统一标准）</legend>
