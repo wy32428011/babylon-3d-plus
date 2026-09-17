@@ -662,7 +662,14 @@ export function PlayerApp() {
           manualRoamRef.current = manualRoam;
           setManualRoamSnapshot(manualRoam.getSnapshot());
         }
+        const clearViewerSelection = (): void => {
+          localHighlightedEntityIds = [];
+          setViewerSelectedEntityIds([]);
+          runtime?.clearLocalHighlight();
+          runtime?.clearExternalHighlight();
+        };
         const handleModelClick = createViewerModelClickHandler(sceneDocument, {
+          beginSelection: () => interactionController?.beginSelection(),
           updateSelection: (entityIds) => {
             const nextEntityIds = [...entityIds];
             localHighlightedEntityIds = nextEntityIds;
@@ -685,7 +692,7 @@ export function PlayerApp() {
           triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
           emitAssetClicked: (payload) => interactionController?.notifyAssetClicked(payload),
           showScreen: (screen) => {
-            if (interactionController?.showScreen(screen)) {
+            if (interactionController?.showScreen(screen, true)) {
               setChartMarkerError('');
             } else {
               setChartMarkerError('大屏展示未发送：请从同项目的数据中台大屏中打开当前数字孪生。');
@@ -718,6 +725,7 @@ export function PlayerApp() {
               return true;
             },
             selectEntity: (targetId) => {
+              interactionController?.beginSelection();
               localHighlightedEntityIds = [targetId];
               setViewerSelectedEntityIds([targetId]);
               runtime!.setLocalSlotHighlight('', null);
@@ -818,6 +826,7 @@ export function PlayerApp() {
           getPatrolPhase: () => autoPatrolPlayback!.getSnapshot().phase,
           pausePatrol: () => { autoPatrolPlayback!.pause(false); },
           notifyCameraChangedWhilePaused: () => autoPatrolPlayback!.notifyCameraChangedWhilePaused(),
+          clearSelection: clearViewerSelection,
           globalOverview: () => restorePlayerGlobalOverview({
             cancelPendingAutoPatrol: () => autoPatrolStartGate.cancelPending(),
             stopHistoryReplay: pauseHistoryReplay,
@@ -826,10 +835,7 @@ export function PlayerApp() {
             closeFloatingControls: () => updateOpenedDigitalTwinFloatingControl(null),
             cancelCameraTransition: () => { viewport?.cancelCameraTransition('replaced'); },
             clearSelection: () => {
-              localHighlightedEntityIds = [];
-              setViewerSelectedEntityIds([]);
-              runtime?.clearLocalHighlight();
-              runtime?.clearExternalHighlight();
+              clearViewerSelection();
               setChartMarkerError('');
             },
             resetStatusOverlay: () => setStatusOverlayVisible(resolveInitialPlayerStatusOverlayVisibility(

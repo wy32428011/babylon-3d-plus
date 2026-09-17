@@ -9,6 +9,7 @@ import {
   type DigitalTwinSlotIndex,
 } from '../shared/digitalTwinSlotCodes';
 import {
+  DIGITAL_TWIN_CLEAR_SELECTION_CAPABILITY,
   DIGITAL_TWIN_BRIDGE_CHANNEL,
   DIGITAL_TWIN_BRIDGE_VERSION,
   DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
@@ -57,6 +58,7 @@ export type DigitalTwinInteractionRuntime = {
   getPatrolPhase: () => DigitalTwinPatrolPhase;
   pausePatrol: () => void;
   notifyCameraChangedWhilePaused: () => void;
+  clearSelection?: () => void;
   globalOverview?: () => void;
   startAutoPatrol?: () => void;
   startManualRoam?: () => void;
@@ -133,6 +135,7 @@ export class DigitalTwinInteractionController {
   private activeRequest: ActiveFocusRequest | null = null;
   private highlightTimer: unknown | null = null;
   private highlightRequestId: string | null = null;
+  private selectionRevision = 0;
   private disposed = false;
 
   constructor(private readonly options: DigitalTwinInteractionControllerOptions) {
@@ -186,18 +189,28 @@ export class DigitalTwinInteractionController {
   }
 
   /** 仅向当前已握手的宿主请求切换大屏，不在 Viewer 内加载主题页面。 */
-  showScreen(screen: { projectId: string; screenId: string }): boolean {
+  showScreen(screen: { projectId: string; screenId: string }, selectionBound = false): boolean {
     if (this.disposed || !this.runtime || !this.activeSessionId || !this.activeParentOrigin) return false;
     const message = parseDigitalTwinBridgeMessage({
       channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
       version: DIGITAL_TWIN_BRIDGE_VERSION,
       sessionId: this.activeSessionId,
       type: 'viewer.showScreen',
-      payload: { projectId: screen.projectId, screenId: screen.screenId },
+      payload: {
+        projectId: screen.projectId, screenId: screen.screenId,
+        ...(selectionBound ? { selectionToken: String(this.selectionRevision) } : {}),
+      },
     });
     if (!message || (this.options.projectId && screen.projectId !== this.options.projectId)) return false;
     this.post(message);
     return true;
+  }
+
+  /** 每次设备/货格选择产生新标记，旧弹层的关闭不能清理后来的选择。 */
+  beginSelection(): void {
+    if (this.disposed) return;
+    this.selectionRevision++;
+    this.cancelActiveRequest('replaced', true);
   }
 
   notifyManualCameraInput(): void {
@@ -235,6 +248,11 @@ export class DigitalTwinInteractionController {
       || message.sessionId !== this.activeSessionId
       || event.origin !== this.activeParentOrigin
     ) return;
+
+    if (message.type === 'command.clearSelection') {
+      this.clearSelection(message.requestId, message.payload.selectionToken);
+      return;
+    }
 
     if (message.type === 'command.focusAsset') {
       this.focusAsset(message.requestId, message.payload.assetCode);
@@ -294,6 +312,7 @@ export class DigitalTwinInteractionController {
       DIGITAL_TWIN_HARDWARE_GPU_CAPABILITY,
       DIGITAL_TWIN_FOCUS_ASSET_CAPABILITY,
     ];
+    if (this.runtime.clearSelection) capabilities.push(DIGITAL_TWIN_CLEAR_SELECTION_CAPABILITY);
     if (this.runtime.globalOverview) capabilities.push(DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY);
     if (this.runtime.startAutoPatrol) capabilities.push(DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY);
     if (this.runtime.startManualRoam) capabilities.push(DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY);
@@ -321,6 +340,30 @@ export class DigitalTwinInteractionController {
     });
   }
 
+  private clearSelection(requestId: string, selectionToken: string): void {
+    if (!this.runtime?.clearSelection) {
+      this.postFailure(requestId, 'UNSUPPORTED_COMMAND');
+      return;
+    }
+    if (!this.activeSessionId) return;
+    const cleared = selectionToken === String(this.selectionRevision);
+    try {
+      if (cleared) {
+        this.clearHighlight();
+        this.runtime.clearSelection();
+        this.selectionRevision++;
+      }
+    } catch {
+      this.postFailure(requestId, 'INTERNAL_ERROR');
+      return;
+    }
+    this.post({
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.activeSessionId, type: 'command.result', requestId, ok: true,
+      payload: { action: DIGITAL_TWIN_CLEAR_SELECTION_CAPABILITY, cleared },
+    });
+  }
+
   private startRuntimeAction(requestId: string, action: DigitalTwinRuntimeAction): void {
     const runtime = this.runtime;
     const handler = action === DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY
@@ -339,6 +382,7 @@ export class DigitalTwinInteractionController {
     if (!cancelledPrevious) this.clearHighlight();
 
     try {
+      if (action === DIGITAL_TWIN_GLOBAL_OVERVIEW_CAPABILITY) this.selectionRevision++;
       handler();
     } catch {
       this.postFailure(requestId, 'INTERNAL_ERROR', sessionId);
@@ -385,6 +429,8 @@ export class DigitalTwinInteractionController {
     }
 
     if (!this.activeSessionId) return;
+    // 新定位尚在等待几何时，也不能让旧大屏的关闭清除后续选择。
+    this.selectionRevision++;
     const request: ActiveFocusRequest = {
       sessionId: this.activeSessionId,
       requestId,

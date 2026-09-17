@@ -114,3 +114,22 @@ test('主题展示只传递有界项目和大屏标识，拒绝 URL 和多余字
   ]) assert.equal(parseDigitalTwinBridgeMessage({ ...base, payload }), null);
   assert.equal(parseDigitalTwinBridgeMessage({ ...base, requestId: 'unexpected' }), null);
 });
+
+test('取消选择协议携带选择标记且严格校验命令和回执', () => {
+  const base = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION, sessionId: 'session' };
+  const command = { ...base, type: 'command.clearSelection', requestId: 'close-1', payload: { selectionToken: 'selection-1' } };
+  assert.deepEqual(parseDigitalTwinBridgeMessage(command), command);
+  for (const selectionToken of ['', ' ', 1, 'x'.repeat(257), null]) {
+    assert.equal(parseDigitalTwinBridgeMessage({ ...command, payload: { selectionToken } }), null);
+  }
+  assert.equal(parseDigitalTwinBridgeMessage({ ...command, payload: { ...command.payload, unexpected: true } }), null);
+  for (const cleared of [true, false]) {
+    const result = { ...base, type: 'command.result', requestId: 'close-1', ok: true, payload: { action: 'clearSelection', cleared } };
+    assert.deepEqual(parseDigitalTwinBridgeMessage(result), result);
+    assert.equal(parseDigitalTwinBridgeMessage({ ...result, payload: { action: 'clearSelection' } }), null);
+    assert.equal(parseDigitalTwinBridgeMessage({ ...result, payload: { action: 'clearSelection', cleared: 1 } }), null);
+  }
+  const screen = { ...base, type: 'viewer.showScreen', payload: { projectId: '1', screenId: '2', selectionToken: 'selection-1' } };
+  assert.deepEqual(parseDigitalTwinBridgeMessage(screen), screen);
+  assert.equal(parseDigitalTwinBridgeMessage({ ...screen, payload: { ...screen.payload, selectionToken: '' } }), null);
+});

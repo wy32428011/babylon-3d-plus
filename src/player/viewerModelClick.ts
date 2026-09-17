@@ -8,6 +8,7 @@ import type { SceneDocument } from '../editor/model/SceneDocument';
 import type { DigitalTwinSlotCoordinate } from '../shared/digitalTwinSlotCodes';
 
 type ViewerModelClickEffects = {
+  beginSelection?: () => void;
   updateSelection: (entityIds: readonly string[]) => void;
   setSlotHighlight: (entityId: string, cell: DigitalTwinSlotCoordinate | null) => void;
   focusTarget: (entityId: string, cell?: DigitalTwinSlotCoordinate) => void;
@@ -28,6 +29,7 @@ export function createViewerModelClickHandler(scene: SceneDocument, effects: Vie
     const entityId = (targetEntityId && scene.entities[targetEntityId]?.components.locator?.builtInBinding?.hostEntityId)
       || targetEntityId;
     const resolution = resolveClickEventBindingClick(scene, entityId, pickedCell);
+    if (resolution.kind !== 'ignore') effects.beginSelection?.();
     const assetClickedPayload = buildClickEventAssetClickedPayload(scene, resolution);
     if (assetClickedPayload) effects.emitAssetClicked?.(assetClickedPayload);
     if ((resolution.kind === 'trigger' || resolution.kind === 'trigger-cell') && resolution.screen) {
