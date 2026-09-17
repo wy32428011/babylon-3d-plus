@@ -163,7 +163,7 @@ go_column/列号边沿锁行走目标(:112-123) → 滑向目标列 → movement
 | Locator `rowNumber/startColumn/startLayer/columns/layers/columnReversed/cellSteps/cellSize` | SceneRuntime.ts:458-483 | 巷道/列/层网格不在 stacker 配置，在绑定货格 |
 | `travelConstraint` / `liftConstraint` + `dataDriven.motion.lift.limits` | :90,:1344,:1378-1390 | 行走/升降行程钳制 |
 | `dataDriven.motion.*.nodes` / `fixedNodes` / `fallbackPattern` | :1478,:1522,:1505 | 轴节点映射；兜底硬编码 huocha2.10(一段叉)/huocha.9(二段叉)(:1450) |
-| `telemetryBinding.stackerCargoGapY` | telemetryBinding.ts:56,236，读于 :989 | 货叉瞄准基点相对货格支撑位的竖直偏移 -1~1：计入升降目标（:395-404），整机定位时整体偏移，叉顶面对齐支撑位+间隙 |
+| `telemetryBinding.stackerCargoGapY` | telemetryBinding.ts:56,236，读于 :989 | 货叉瞄准基点相对货格支撑位的竖直偏移 -1~1：只计入升降目标（:395-404），叉顶面定位到支撑位+间隙（插入货物底部货槽）；货物落位保持支撑位不变 |
 
 ### MQTT 消费
 - `front_x/front_y/front_z` = 列/层/排当前库位(:120-122，全 0=空闲)；`to_x/to_y/to_z` = 目标库位(:147)，仅决定行走/升降终点。
@@ -176,7 +176,7 @@ go_column/列号边沿锁行走目标(:112-123) → 滑向目标列 → movement
 放货完成 `keepCargoForFetchRowSync` 保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排 POST(SceneRuntime.ts:947-968) → 响应应用后 `clearSuppressedCells` 并销毁保留货(:961-966)，避免网络延迟空窗。取/放期间 `suppressFetchCell` 抑制该格口 fetch 渲染(stackerDriver.ts:770)。
 
 ### 动画
-每帧 `applyToModel`(:79)。行走/升降/叉伸缩均为**速度插值**（非直接定位）：`moveVectorTowards`(:429)、`moveNumberTowards`(:462)；例外：首帧吸附 `snapStackerToTargetOffsets`(:275)、catch-up 强制收尾。货叉总偏移 50/50 拆一/二段(`splitForkOffset` :616)。货物绑定叉尖时每帧锚定二段叉顶面中心（:968-977）；`stackerCargoGapY` 不在叉面锚点叠加，而是计入升降瞄准基点（:395-404）与货格支撑位（:994-1001），叉顶面定位到支撑位+间隙，取/放交接零高差跳变。**本体移动与伸叉互斥**(:492-496)。世界偏移经 `offsetNodesFromBaselineByWorldOffsets` 转父级本地(:1561)。
+每帧 `applyToModel`(:79)。行走/升降/叉伸缩均为**速度插值**（非直接定位）：`moveVectorTowards`(:429)、`moveNumberTowards`(:462)；例外：首帧吸附 `snapStackerToTargetOffsets`(:275)、catch-up 强制收尾。货叉总偏移 50/50 拆一/二段(`splitForkOffset` :616)。货物绑定叉尖时每帧锚定二段叉顶面中心（:968-977）；`stackerCargoGapY` 只计入升降瞄准基点（:395-404），叉顶面定位到支撑位+间隙（插入货物底部货槽），货格落位保持支撑位（:1008-1013，与货架/站台自身渲染同源）。取货绑定时锁存「持货位 − 叉面锚点」偏移、放货携带固定挂槽偏移 −gapY（`bindStackerCargo`/`beginStackerPlaceWithCargo`）：货叉插入货槽不推动货物，绑定/落货全程零跳变。**本体移动与伸叉互斥**(:492-496)。世界偏移经 `offsetNodesFromBaselineByWorldOffsets` 转父级本地(:1561)。
 
 ### 时序（取/放节拍）
 command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:669-671) → 叉到目标行程（余量 2cm :734-740）→ `bindStackerCargo`(:694-696) → command 相位离开 `completeStackerFetch`(:888-902) → 运载 → command 3/4 伸叉到位 → 解绑落入箱位 `unbindStackerCargo`(:696) → 收叉（收叉期叉未到位则每帧幂等重试 :702-708）→ 相位退出 `completeStackerPlace`(:903-907)。模拟器节拍：8s 周期（StackerTelemetrySimulator.ts:273-287）。

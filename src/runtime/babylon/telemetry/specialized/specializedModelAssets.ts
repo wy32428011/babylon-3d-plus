@@ -433,6 +433,8 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backCargoBoundToFork: false,
     frontCargoHoldPosition: null,
     backCargoHoldPosition: null,
+    frontCargoBindOffset: null,
+    backCargoBindOffset: null,
     frontCargoHoldRotation: null,
     backCargoHoldRotation: null,
     frontCargoHoldScaling: null,
@@ -482,6 +484,8 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backCargoBoundToFork = false;
   model.stackerTelemetry.frontCargoHoldPosition = null;
   model.stackerTelemetry.backCargoHoldPosition = null;
+  model.stackerTelemetry.frontCargoBindOffset = null;
+  model.stackerTelemetry.backCargoBindOffset = null;
   model.stackerTelemetry.frontCargoHoldRotation = null;
   model.stackerTelemetry.backCargoHoldRotation = null;
   model.stackerTelemetry.frontCargoHoldScaling = null;

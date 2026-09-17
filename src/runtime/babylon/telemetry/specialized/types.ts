@@ -213,6 +213,9 @@ export type StackerModelTelemetryState = {
   backCargoBoundToFork: boolean;
   frontCargoHoldPosition: Vector3 | null;
   backCargoHoldPosition: Vector3 | null;
+  /** 取货绑定时锁存的「持货位 − 叉面锚点」世界偏移：货叉插入货槽不推动货物，绑定瞬间保持原位，随叉运动后在目的地同源抵消；放货流程直接锚定叉面，为 null。 */
+  frontCargoBindOffset: Vector3 | null;
+  backCargoBindOffset: Vector3 | null;
   /** 货物朝向：未绑定时为所在箱位朝向；绑定瞬间锁定为货物当前世界朝向，随叉全程保持（货叉托举不改变货物姿态）。 */
   frontCargoHoldRotation: Quaternion | null;
   backCargoHoldRotation: Quaternion | null;

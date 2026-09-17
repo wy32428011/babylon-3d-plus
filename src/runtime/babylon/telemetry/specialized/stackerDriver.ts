@@ -768,7 +768,7 @@ export class StackerTelemetryDriver {
     const frontX = readIntegerField(snapshot.fields, 'front_x');
     const frontY = readIntegerField(snapshot.fields, 'front_y');
     if (frontX !== null && frontY !== null) this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY);
-    const holdPosition = this.resolveCellCargoHoldPosition(model, targetLocator, targetPosition);
+    const holdPosition = this.resolveCellCargoHoldPosition(targetLocator, targetPosition);
     const holdPose = getNodeWorldPosePreservingMirror(targetLocator.root);
     // 接管货保持来货世界朝向（交接只平移）；fresh 刷出取货格朝向
     const holdRotation = this.state.stackerCargoMeshes.get(this.getStackerCargoKey(model.assetCode, side))?.lockedWorldRotation
@@ -786,7 +786,7 @@ export class StackerTelemetryDriver {
     }
   }
 
-  /** 直接进入放货流程时补建叉上货物：初始即绑定叉尖，等待伸叉到位后解绑落入目标箱位。 */
+  /** 直接进入放货流程时补建叉上货物：初始即绑定叉尖（挂槽携带：货物底面 = 叉顶面 − 竖直间隙，与取货锁存偏移一致，落货零跳变），等待伸叉到位后解绑落入目标箱位。 */
   private beginStackerPlaceWithCargo(model: ModelRuntimeEntry, snapshot: StackerTelemetrySnapshot, side: StackerForkSide): void {
     this.disposeStackerCargoByKey(this.getStackerCargoKey(model.assetCode, side));
     this.clearStackerForkCargoState(model, side);
@@ -794,16 +794,21 @@ export class StackerTelemetryDriver {
     this.adoptOrCreateStackerCargo(model, snapshot, side);
     const state = model.stackerTelemetry;
     const cargoKey = this.getStackerCargoKey(model.assetCode, side);
+    const slotOffset = getModelAxis(model.root, 'y').scale(-this.resolveStackerCargoGapY(model));
     if (side === 'front') {
       state.frontCargoKey = cargoKey;
       state.frontCargoBoundToFork = true;
+      state.frontCargoBindOffset = slotOffset;
     } else {
       state.backCargoKey = cargoKey;
       state.backCargoBoundToFork = true;
+      state.backCargoBindOffset = slotOffset;
     }
   }
 
-  /** 伸叉结束，货物绑定到叉尖，之后随货叉一同运动；绑定瞬间锁定货物当前世界朝向（货叉托举不改变货物姿态）。 */
+  /** 伸叉结束，货物绑定到叉尖，之后随货叉一同运动；绑定瞬间锁定货物当前世界朝向（货叉托举不改变货物姿态）。
+   *  货叉插入货槽而非从底部托起：绑定时锁存「持货位 − 叉面锚点」偏移，货物保持原位零跳变，
+   *  随叉运动期间偏移保持，目的地放货落位时同源抵消（源/目的货格几何一致即无残余差）。 */
   private bindStackerCargo(model: ModelRuntimeEntry, side: StackerForkSide): void {
     const state = model.stackerTelemetry;
     const cargoKey = this.getStackerForkCargoKey(model, side);
@@ -811,12 +816,18 @@ export class StackerTelemetryDriver {
     const carriedRotation = this.state.stackerCargoMeshes.get(cargoKey)?.root.rotationQuaternion?.clone() ?? null;
     if (side === 'front') {
       if (state.frontCargoBoundToFork) return;
+      state.frontCargoBindOffset = state.frontCargoHoldPosition
+        ? state.frontCargoHoldPosition.subtract(this.getStackerForkCargoPosition(model, side))
+        : null;
       state.frontCargoBoundToFork = true;
       state.frontCargoHoldPosition = null;
       state.frontCargoHoldRotation = carriedRotation ?? state.frontCargoHoldRotation;
       state.frontCargoHoldScaling = null;
     } else {
       if (state.backCargoBoundToFork) return;
+      state.backCargoBindOffset = state.backCargoHoldPosition
+        ? state.backCargoHoldPosition.subtract(this.getStackerForkCargoPosition(model, side))
+        : null;
       state.backCargoBoundToFork = true;
       state.backCargoHoldPosition = null;
       state.backCargoHoldRotation = carriedRotation ?? state.backCargoHoldRotation;
@@ -844,16 +855,18 @@ export class StackerTelemetryDriver {
     if (!cargoKey || !targetLocator) return;
     const bound = side === 'front' ? state.frontCargoBoundToFork : state.backCargoBoundToFork;
     if (!bound) return;
-    const holdPosition = this.resolveCellCargoHoldPosition(model, targetLocator, targetPosition);
+    const holdPosition = this.resolveCellCargoHoldPosition(targetLocator, targetPosition);
     const holdPose = getNodeWorldPosePreservingMirror(targetLocator.root);
     const currentRotation = this.state.stackerCargoMeshes.get(cargoKey)?.root.rotationQuaternion?.clone() ?? null;
     if (side === 'front') {
       state.frontCargoBoundToFork = false;
+      state.frontCargoBindOffset = null;
       state.frontCargoHoldPosition = holdPosition;
       state.frontCargoHoldRotation = state.frontCargoHoldRotation ?? currentRotation ?? holdPose.rotation;
       state.frontCargoHoldScaling = null;
     } else {
       state.backCargoBoundToFork = false;
+      state.backCargoBindOffset = null;
       state.backCargoHoldPosition = holdPosition;
       state.backCargoHoldRotation = state.backCargoHoldRotation ?? currentRotation ?? holdPose.rotation;
       state.backCargoHoldScaling = null;
@@ -941,7 +954,7 @@ export class StackerTelemetryDriver {
     this.clearStackerForkCargoState(model, side);
   }
 
-  /** 每帧刷新货物外观与位姿：绑定跟随叉尖，未绑定静止于箱位支撑位；朝向取锁定的世界朝向，缺省回退机体朝向。 */
+  /** 每帧刷新货物外观与位姿：绑定跟随叉尖 + 绑定锁存偏移，未绑定静止于箱位支撑位；朝向取锁定的世界朝向，缺省回退机体朝向。 */
   private updateStackerCargoPose(model: ModelRuntimeEntry, snapshot: StackerTelemetrySnapshot, side: StackerForkSide, deltaSeconds: number): void {
     const cargoKey = this.getStackerForkCargoKey(model, side);
     if (!cargoKey) return;
@@ -950,14 +963,19 @@ export class StackerTelemetryDriver {
 
     const state = model.stackerTelemetry;
     const bound = side === 'front' ? state.frontCargoBoundToFork : state.backCargoBoundToFork;
+    const bindOffset = side === 'front' ? state.frontCargoBindOffset : state.backCargoBindOffset;
     const holdPosition = side === 'front' ? state.frontCargoHoldPosition : state.backCargoHoldPosition;
     const holdRotation = side === 'front' ? state.frontCargoHoldRotation : state.backCargoHoldRotation;
     const holdScaling = side === 'front' ? state.frontCargoHoldScaling : state.backCargoHoldScaling;
 
     this.host.syncGeneratedCargoVisual(cargo, 'stacker', snapshot, this.host.resolveCargoGeneratorForModel(model));
-    const targetPosition = bound || !holdPosition
-      ? this.getStackerForkCargoPosition(model, side)
-      : holdPosition;
+    let targetPosition: Vector3;
+    if (bound || !holdPosition) {
+      const forkPosition = this.getStackerForkCargoPosition(model, side);
+      targetPosition = bound && bindOffset ? forkPosition.add(bindOffset) : forkPosition;
+    } else {
+      targetPosition = holdPosition;
+    }
     const targetRotation = holdRotation ?? cargo.lockedWorldRotation ?? getNodeWorldRotation(model.root);
     // 跨设备接管的货物从原世界位姿插值接入本机锚点，目标位姿每帧动态追踪（如叉尖随叉移动）
     const pose = resolveCargoHandoffPose(cargo, targetPosition, targetRotation, deltaSeconds);
@@ -985,19 +1003,17 @@ export class StackerTelemetryDriver {
     return stageTwoNodes.length > 0 ? stageTwoNodes : (stageOneNodes.length > 0 ? stageOneNodes : allNodes);
   }
 
-  /** 货物竖直间隙（telemetryBinding.stackerCargoGapY，允许负值）：叠加在升降瞄准基点与货格支撑位上，取/放交接无高差跳变。 */
+  /** 货物竖直间隙（telemetryBinding.stackerCargoGapY，允许负值）：只叠加在升降瞄准基点——叉顶面定位到支撑位 + 间隙，插入货物底部货槽；货物在货格内落位于支撑位，不随间隙移动。 */
   private resolveStackerCargoGapY(model: ModelRuntimeEntry): number {
     return model.telemetryBinding?.stackerCargoGapY ?? 0;
   }
 
-  /** 货格内货物的支撑位：箱位底面中心 + 货物竖直间隙（与升降瞄准基点同源，到位后叉顶面与之同高，伸叉交接丝滑）。 */
+  /** 货格内货物的支撑位：箱位底面中心，与货架/站台自身渲染同源（接管零跳变）；竖直间隙只作用于叉面瞄准（叉插入货槽），不改变货物落位。 */
   private resolveCellCargoHoldPosition(
-    model: ModelRuntimeEntry,
     targetLocator: LocatorRuntimeEntry,
     targetPosition: Vector3 | null,
   ): Vector3 {
-    const base = targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator);
-    return base.add(getModelAxis(model.root, 'y').scale(this.resolveStackerCargoGapY(model)));
+    return targetPosition ?? this.getWarehouseLocatorSupportPosition(targetLocator);
   }
 
   /** 读取某侧货叉当前货物键（JSON.stringify([assetCode, side])），null 表示叉上无货。 */
@@ -1011,6 +1027,7 @@ export class StackerTelemetryDriver {
     if (side === 'front') {
       state.frontCargoKey = null;
       state.frontCargoBoundToFork = false;
+      state.frontCargoBindOffset = null;
       state.frontCargoHoldPosition = null;
       state.frontCargoHoldRotation = null;
       state.frontCargoHoldScaling = null;
@@ -1021,6 +1038,7 @@ export class StackerTelemetryDriver {
 
     state.backCargoKey = null;
     state.backCargoBoundToFork = false;
+    state.backCargoBindOffset = null;
     state.backCargoHoldPosition = null;
     state.backCargoHoldRotation = null;
     state.backCargoHoldScaling = null;
