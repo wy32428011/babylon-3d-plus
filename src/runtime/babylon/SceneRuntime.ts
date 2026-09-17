@@ -4082,6 +4082,15 @@ export class SceneRuntime {
       if (runtimeLocator.root.parent) runtimeLocator.root.parent = null;
       this.applyTransform(runtimeLocator.root, entity.components.transform);
     }
+    // 覆写前捕获旧拓扑：供货格网格增量更新判定（拓扑不变走原地刷新，避免参数调整时数万顶点销毁重建）
+    const previousLocatorTopology = {
+      columns: runtimeLocator.columns,
+      layers: runtimeLocator.layers,
+      startColumn: runtimeLocator.startColumn,
+      columnReversed: runtimeLocator.columnReversed,
+      contiguous: Math.abs(runtimeLocator.cellSteps.columnStepX - runtimeLocator.cellSize.length) < LOCATOR_CONTIGUOUS_EPSILON
+        && Math.abs(runtimeLocator.cellSteps.layerStepY - runtimeLocator.cellSize.height) < LOCATOR_CONTIGUOUS_EPSILON,
+    };
     runtimeLocator.assetId = locator.assetId;
     runtimeLocator.deviceAssetCode = locator.deviceAssetCode;
     runtimeLocator.aisleCode = locator.aisleCode;
@@ -4098,18 +4107,20 @@ export class SceneRuntime {
     runtimeLocator.root.metadata = { ...(runtimeLocator.root.metadata ?? {}), storageLocation: locatorMetadata };
 
     if (runtimeLocator.signature !== signature) {
-      // Rebuild grid
+      // 拓扑不变走原地更新（边线/标签缓冲复用），否则全量重建
       const cellSteps = {
         columnStepX: bindingSteps?.columnStepX ?? effectiveLocator.length + effectiveLocator.columnGap,
         layerStepY: bindingSteps?.layerStepY ?? effectiveLocator.height + effectiveLocator.layerGap,
       };
-      runtimeLocator.fillMesh.dispose(false, false);
-      runtimeLocator.edgeLines.dispose(false, false);
-      this.disposeLocatorColumnLabels(runtimeLocator);
-      const rebuilt = this.buildLocatorGridMeshes(entity.id, effectiveLocator, runtimeLocator.root, runtimeLocator.material, cellSteps);
-      runtimeLocator.fillMesh = rebuilt.fillMesh;
-      runtimeLocator.edgeLines = rebuilt.edgeLines;
-      runtimeLocator.columnLabels = this.buildLocatorColumnLabels(entity.id, effectiveLocator, cellSteps, runtimeLocator.columnLabelsRoot);
+      if (!this.tryUpdateLocatorGridInPlace(entity.id, effectiveLocator, runtimeLocator, cellSteps, previousLocatorTopology)) {
+        runtimeLocator.fillMesh.dispose(false, false);
+        runtimeLocator.edgeLines.dispose(false, false);
+        this.disposeLocatorColumnLabels(runtimeLocator);
+        const rebuilt = this.buildLocatorGridMeshes(entity.id, effectiveLocator, runtimeLocator.root, runtimeLocator.material, cellSteps);
+        runtimeLocator.fillMesh = rebuilt.fillMesh;
+        runtimeLocator.edgeLines = rebuilt.edgeLines;
+        runtimeLocator.columnLabels = this.buildLocatorColumnLabels(entity.id, effectiveLocator, cellSteps, runtimeLocator.columnLabelsRoot);
+      }
       runtimeLocator.cellSteps = cellSteps;
       runtimeLocator.signature = signature;
       if (this.localSlotHighlight?.entityId === entity.id) this.refreshSlotHighlightOverlay('local');
@@ -5279,11 +5290,12 @@ export class SceneRuntime {
     cargo.root.dispose();
   }
 
-  /** 设置普通自动货物世界支撑点、朝向和缩放（箱位含镜像时缩放保留负号）；root 无父级，不受 POI Transform 影响。首次写入建立全生命周期朝向锁定，之后转运/交接只平移不旋转。 */
+  /** 设置普通自动货物世界支撑点、朝向和缩放（箱位含镜像时缩放保留负号）；root 无父级，不受 POI Transform 影响。首个稳定位姿（非交接插值中间态）建立全生命周期朝向锁定，之后转运/交接只平移不旋转。 */
   private setGeneratedCargoRootPose(cargo: GeneratedCargoRuntimeEntry, position: Vector3, rotation: Quaternion, scaling?: Vector3 | null): void {
     cargo.root.position.copyFrom(position);
     cargo.root.rotationQuaternion = rotation.clone();
-    cargo.lockedWorldRotation ??= rotation.clone();
+    // handoff 插值期间不锁定：完结帧 resolveCargoHandoffPose 清除 handoff 并返回精确目标，锁定落到稳定朝向
+    if (!cargo.handoff) cargo.lockedWorldRotation ??= rotation.clone();
     cargo.root.scaling.copyFrom(scaling ?? Vector3.OneReadOnly);
     cargo.root.computeWorldMatrix(true);
     cargo.outputOwner && this.applyGeneratedOutputPresentation(cargo.outputOwner);
@@ -5416,24 +5428,67 @@ export class SceneRuntime {
     material: StandardMaterial,
     cellSteps: LocatorBindingSteps,
   ): { fillMesh: Mesh; edgeLines: LinesMesh } {
-    const { length, height, width, columns, layers } = locator;
-    const cellCount = Math.max(1, columns * layers);
-    const contiguous =
-      Math.abs(cellSteps.columnStepX - length) < LOCATOR_CONTIGUOUS_EPSILON &&
-      Math.abs(cellSteps.layerStepY - height) < LOCATOR_CONTIGUOUS_EPSILON;
+    const fillMesh = this.buildLocatorFillMesh(entityId, locator, cellSteps);
+    fillMesh.parent = root;
+    fillMesh.material = material;
+    fillMesh.metadata = { [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
 
+    const edgeLinesMesh = MeshBuilder.CreateLineSystem(`${entityId}_locatorEdges`, { lines: this.buildLocatorEdgeLinePaths(locator, cellSteps), updatable: true }, this.scene);
+    edgeLinesMesh.parent = root;
+    edgeLinesMesh.color = Color3.FromHexString(LOCATOR_EDGE_COLOR);
+    edgeLinesMesh.alpha = 1;
+    edgeLinesMesh.isPickable = false;
+    return { fillMesh, edgeLines: edgeLinesMesh };
+  }
+
+  /** 货格网格是否为连续模式（步距等于格子尺寸）：合并单覆盖盒 + 通长网格线。 */
+  private isLocatorGridContiguous(locator: LocatorComponent, cellSteps: LocatorBindingSteps): boolean {
+    return (
+      Math.abs(cellSteps.columnStepX - locator.length) < LOCATOR_CONTIGUOUS_EPSILON &&
+      Math.abs(cellSteps.layerStepY - locator.height) < LOCATOR_CONTIGUOUS_EPSILON
+    );
+  }
+
+  /** 创建填充网格（parent/material/metadata 由调用方设置）：连续模式单覆盖盒，否则单格盒 + 薄实例矩阵。 */
+  private buildLocatorFillMesh(
+    entityId: string,
+    locator: LocatorComponent,
+    cellSteps: LocatorBindingSteps,
+  ): Mesh {
+    const { length, height, width, columns, layers } = locator;
+    if (this.isLocatorGridContiguous(locator, cellSteps)) {
+      const spanX = (columns - 1) * cellSteps.columnStepX + length;
+      const spanY = (layers - 1) * cellSteps.layerStepY + height;
+      const fillMesh = MeshBuilder.CreateBox(`${entityId}_locatorFill`, { width: spanX, height: spanY, depth: width }, this.scene);
+      fillMesh.position.set((columns - 1) * cellSteps.columnStepX / 2, spanY / 2, 0);
+      return fillMesh;
+    }
+
+    const cellCount = Math.max(1, columns * layers);
+    const fillMesh = MeshBuilder.CreateBox(`${entityId}_locatorFill`, { width: length, height, depth: width }, this.scene);
+    const matrices = new Float32Array(cellCount * 16);
+    for (let layer = 0; layer < layers; layer += 1) {
+      for (let col = 0; col < columns; col += 1) {
+        const cellIndex = layer * columns + col;
+        Matrix.Translation(col * cellSteps.columnStepX, height / 2 + layer * cellSteps.layerStepY, 0).copyToArray(matrices, cellIndex * 16);
+      }
+    }
+    fillMesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
+    fillMesh.thinInstanceRefreshBoundingInfo(true);
+    return fillMesh;
+  }
+
+  /** 生成全部货格边线的线段路径：连续模式为通长网格线，否则每格 12 边；顶点数由拓扑（列数/层数/模式）决定。 */
+  private buildLocatorEdgeLinePaths(locator: LocatorComponent, cellSteps: LocatorBindingSteps): Vector3[][] {
+    const { length, height, width, columns, layers } = locator;
     const halfLength = length / 2;
     const halfHeight = height / 2;
     const halfWidth = width / 2;
     const edgeLines: Vector3[][] = [];
 
-    let fillMesh: Mesh;
-    if (contiguous) {
+    if (this.isLocatorGridContiguous(locator, cellSteps)) {
       const spanX = (columns - 1) * cellSteps.columnStepX + length;
       const spanY = (layers - 1) * cellSteps.layerStepY + height;
-      fillMesh = MeshBuilder.CreateBox(`${entityId}_locatorFill`, { width: spanX, height: spanY, depth: width }, this.scene);
-      fillMesh.position.set((columns - 1) * cellSteps.columnStepX / 2, spanY / 2, 0);
-
       const minX = -halfLength;
       const maxX = minX + spanX;
       const maxY = spanY;
@@ -5454,51 +5509,78 @@ export class SceneRuntime {
           edgeLines.push([new Vector3(x, y, -halfWidth), new Vector3(x, y, halfWidth)]);
         }
       }
-    } else {
-      fillMesh = MeshBuilder.CreateBox(`${entityId}_locatorFill`, { width: length, height, depth: width }, this.scene);
-      const matrices = new Float32Array(cellCount * 16);
-      for (let layer = 0; layer < layers; layer += 1) {
-        for (let col = 0; col < columns; col += 1) {
-          const cellIndex = layer * columns + col;
-          const centerX = col * cellSteps.columnStepX;
-          const centerY = height / 2 + layer * cellSteps.layerStepY;
-          Matrix.Translation(centerX, centerY, 0).copyToArray(matrices, cellIndex * 16);
-
-          const minX = centerX - halfLength;
-          const maxX = centerX + halfLength;
-          const minY = centerY - halfHeight;
-          const maxY = centerY + halfHeight;
-          const minZ = -halfWidth;
-          const maxZ = halfWidth;
-          edgeLines.push(
-            [new Vector3(minX, minY, minZ), new Vector3(maxX, minY, minZ)],
-            [new Vector3(maxX, minY, minZ), new Vector3(maxX, minY, maxZ)],
-            [new Vector3(maxX, minY, maxZ), new Vector3(minX, minY, maxZ)],
-            [new Vector3(minX, minY, maxZ), new Vector3(minX, minY, minZ)],
-            [new Vector3(minX, maxY, minZ), new Vector3(maxX, maxY, minZ)],
-            [new Vector3(maxX, maxY, minZ), new Vector3(maxX, maxY, maxZ)],
-            [new Vector3(maxX, maxY, maxZ), new Vector3(minX, maxY, maxZ)],
-            [new Vector3(minX, maxY, maxZ), new Vector3(minX, maxY, minZ)],
-            [new Vector3(minX, minY, minZ), new Vector3(minX, maxY, minZ)],
-            [new Vector3(maxX, minY, minZ), new Vector3(maxX, maxY, minZ)],
-            [new Vector3(maxX, minY, maxZ), new Vector3(maxX, maxY, maxZ)],
-            [new Vector3(minX, minY, maxZ), new Vector3(minX, maxY, maxZ)],
-          );
-        }
-      }
-      fillMesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
-      fillMesh.thinInstanceRefreshBoundingInfo(true);
+      return edgeLines;
     }
-    fillMesh.parent = root;
-    fillMesh.material = material;
-    fillMesh.metadata = { [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
 
-    const edgeLinesMesh = MeshBuilder.CreateLineSystem(`${entityId}_locatorEdges`, { lines: edgeLines }, this.scene);
-    edgeLinesMesh.parent = root;
-    edgeLinesMesh.color = Color3.FromHexString(LOCATOR_EDGE_COLOR);
-    edgeLinesMesh.alpha = 1;
-    edgeLinesMesh.isPickable = false;
-    return { fillMesh, edgeLines: edgeLinesMesh };
+    for (let layer = 0; layer < layers; layer += 1) {
+      for (let col = 0; col < columns; col += 1) {
+        const centerX = col * cellSteps.columnStepX;
+        const centerY = height / 2 + layer * cellSteps.layerStepY;
+        const minX = centerX - halfLength;
+        const maxX = centerX + halfLength;
+        const minY = centerY - halfHeight;
+        const maxY = centerY + halfHeight;
+        const minZ = -halfWidth;
+        const maxZ = halfWidth;
+        edgeLines.push(
+          [new Vector3(minX, minY, minZ), new Vector3(maxX, minY, minZ)],
+          [new Vector3(maxX, minY, minZ), new Vector3(maxX, minY, maxZ)],
+          [new Vector3(maxX, minY, maxZ), new Vector3(minX, minY, maxZ)],
+          [new Vector3(minX, minY, maxZ), new Vector3(minX, minY, minZ)],
+          [new Vector3(minX, maxY, minZ), new Vector3(maxX, maxY, minZ)],
+          [new Vector3(maxX, maxY, minZ), new Vector3(maxX, maxY, maxZ)],
+          [new Vector3(maxX, maxY, maxZ), new Vector3(minX, maxY, maxZ)],
+          [new Vector3(minX, maxY, maxZ), new Vector3(minX, maxY, minZ)],
+          [new Vector3(minX, minY, minZ), new Vector3(minX, maxY, minZ)],
+          [new Vector3(minX, minY, maxZ), new Vector3(minX, maxY, maxZ)],
+          [new Vector3(maxX, minY, minZ), new Vector3(maxX, maxY, minZ)],
+          [new Vector3(maxX, minY, maxZ), new Vector3(maxX, maxY, maxZ)],
+        );
+      }
+    }
+    return edgeLines;
+  }
+
+  /**
+   * 拓扑（列数/层数/连续模式）不变时的原地更新：fillMesh 重建（24 顶点盒子便宜），
+   * 边线复用 LinesMesh 缓冲（顶点数由拓扑决定，拓扑不变则数量一致），
+   * 列号标签文案不变时复用纹理仅改位置缩放。返回 false 表示需走全量重建。
+   */
+  private tryUpdateLocatorGridInPlace(
+    entityId: string,
+    locator: LocatorComponent,
+    runtimeLocator: LocatorRuntimeEntry,
+    cellSteps: LocatorBindingSteps,
+    previous: { columns: number; layers: number; startColumn: number; columnReversed: boolean; contiguous: boolean },
+  ): boolean {
+    if (
+      previous.columns !== locator.columns
+      || previous.layers !== locator.layers
+      || previous.contiguous !== this.isLocatorGridContiguous(locator, cellSteps)
+    ) {
+      return false;
+    }
+
+    runtimeLocator.fillMesh.dispose(false, false);
+    const fillMesh = this.buildLocatorFillMesh(entityId, locator, cellSteps);
+    fillMesh.parent = runtimeLocator.root;
+    fillMesh.material = runtimeLocator.material;
+    fillMesh.metadata = { [EDITOR_ENTITY_ID_METADATA_KEY]: entityId };
+    runtimeLocator.fillMesh = fillMesh;
+
+    MeshBuilder.CreateLineSystem(
+      `${entityId}_locatorEdges`,
+      { lines: this.buildLocatorEdgeLinePaths(locator, cellSteps), instance: runtimeLocator.edgeLines },
+      this.scene,
+    );
+
+    if (previous.startColumn === locator.startColumn && previous.columnReversed === locator.columnReversed) {
+      this.syncLocatorColumnLabelsInPlace(locator, cellSteps, runtimeLocator.columnLabels);
+    } else {
+      this.disposeLocatorColumnLabels(runtimeLocator);
+      runtimeLocator.columnLabels = this.buildLocatorColumnLabels(entityId, locator, cellSteps, runtimeLocator.columnLabelsRoot);
+    }
+    return true;
   }
 
   /**
@@ -5548,8 +5630,9 @@ export class SceneRuntime {
       material.opacityTexture = texture;
       material.emissiveColor = Color3.White();
 
-      const plane = MeshBuilder.CreatePlane(`${entityId}_locatorColumnLabelPlane_${col}`, { size }, this.scene);
+      const plane = MeshBuilder.CreatePlane(`${entityId}_locatorColumnLabelPlane_${col}`, { size: 1 }, this.scene);
       plane.parent = labelsRoot;
+      plane.scaling.setAll(size);
       plane.position.set(col * cellSteps.columnStepX, topY + size * 0.6, 0);
       plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
       plane.material = material;
@@ -5557,6 +5640,24 @@ export class SceneRuntime {
       labels.push({ mesh: plane, material, texture });
     }
     return labels;
+  }
+
+  /** 拓扑与文案不变时的列号标签原地更新：复用纹理/材质/网格，仅按新步距刷新位置与缩放。 */
+  private syncLocatorColumnLabelsInPlace(
+    locator: LocatorComponent,
+    cellSteps: LocatorBindingSteps,
+    labels: LocatorColumnLabel[],
+  ): void {
+    if (labels.length !== locator.columns) return;
+    const topY = (locator.layers - 1) * cellSteps.layerStepY + locator.height;
+    const size = Math.min(
+      LOCATOR_COLUMN_LABEL_MAX_SIZE,
+      Math.max(LOCATOR_COLUMN_LABEL_MIN_SIZE, Math.min(Math.abs(cellSteps.columnStepX), locator.length) * 0.8),
+    );
+    labels.forEach((label, col) => {
+      label.mesh.scaling.setAll(size);
+      label.mesh.position.set(col * cellSteps.columnStepX, topY + size * 0.6, 0);
+    });
   }
 
   /** 销毁列号标签网格及其独立材质纹理；labelsRoot 本身随 locator root 统一销毁。 */

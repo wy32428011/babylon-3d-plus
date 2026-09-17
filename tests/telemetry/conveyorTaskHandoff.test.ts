@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
+import { NullEngine, Quaternion, Scene, TransformNode, Vector3 } from '@babylonjs/core';
 
 import type { DeviceTelemetrySnapshot } from '../../src/runtime/mqtt/deviceTelemetry';
 import { ConveyorTelemetryDriver } from '../../src/runtime/babylon/telemetry/specialized/conveyorDriver';
@@ -140,8 +140,10 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     ensureGeneratedCargoFallback: () => undefined,
     ensureGeneratedCargoOutputOwner: () => null,
     syncGeneratedCargoVisual: () => undefined,
-    setGeneratedCargoRootPose: (cargo: ConveyorCargoRuntimeEntry, position: Vector3) => {
+    setGeneratedCargoRootPose: (cargo: ConveyorCargoRuntimeEntry, position: Vector3, rotation?: Quaternion | null) => {
       cargo.root.position.copyFrom(position);
+      // 镜像真实实现写朝向：被驱动过的持货即视为已摆位姿，后续交接才可建插值
+      if (rotation) cargo.root.rotationQuaternion = rotation.clone();
     },
     disposeGeneratedCargo: () => undefined,
     getModelWorldBounds: (model: ModelRuntimeEntry) => {
@@ -211,6 +213,8 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     /** 向 stacker 货物表插入持有货物（模拟堆垛机已持有的货箱）。 */
     insertStackerCargo: (assetCode: string, task: string) => {
       const root = new TransformNode(`${assetCode}_cargo_root`, scene);
+      // 已持货必然已被驱动写过位姿：置 rotationQuaternion 表示已摆位姿，交接才可建插值
+      root.rotationQuaternion = Quaternion.Identity();
       const entry = {
         assetCode,
         containerCode: '',
@@ -227,6 +231,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     /** 向 conveyor 货物表插入持有货物并置 holder 遥测引用（模拟输送线已持有的货箱）。 */
     insertConveyorCargo: (assetCode: string, task: string) => {
       const root = new TransformNode(`${assetCode}_cargo_root`, scene);
+      root.rotationQuaternion = Quaternion.Identity();
       const entry = {
         assetCode,
         containerCode: '',
@@ -244,6 +249,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     /** 向 RGV 货物表插入持有货物（模拟 RGV 行车中已持有的在途货箱，司机遥测引用由调用方自理）。 */
     insertRgvCargo: (assetCode: string, task: string) => {
       const root = new TransformNode(`${assetCode}_cargo_root`, scene);
+      root.rotationQuaternion = Quaternion.Identity();
       const entry = {
         assetCode,
         containerCode: '',
@@ -310,9 +316,9 @@ test('上游持货后事件驱动交付：available 通知触发订阅，当帧�
     assert.ok(Math.abs(h.models.CV2.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE)) < 1e-6,
       `订阅者必须从自身刷出端继续走行，实际 ${h.models.CV2.conveyorTelemetry.cargoTravelOffset}`);
     assert.equal(h.models.CV2.conveyorTelemetry.selfDriveDirection, 1, '被交付必须按订阅方向登记自驱');
-    assert.ok(pushed.handoff, '必须登记交接插值保持视觉连续');
-    assert.ok(Math.abs(pushed.handoff!.durationSeconds - CARGO_HANDOFF_SECONDS) < 1e-6,
-      `单跳交付交接时长必须为 ${CARGO_HANDOFF_SECONDS}s，实际 ${pushed.handoff!.durationSeconds}`);
+    // 起点刷出当帧直达交付的是从未摆位姿的新货：无历史位姿可插值，直接在目标位姿落位
+    // （避免从世界原点飞入/从 Identity 自旋，且首个稳定位姿才建立朝向锁定）
+    assert.equal(pushed.handoff, null, '新刷出货物无历史位姿，不得建交接插值');
     assert.equal(h.models.CV2.conveyorTelemetry.upstreamLinks.size, 0, 'taken 波必须清除该 task 的上位链路');
     assert.equal(h.models.CV1.conveyorTelemetry.downstreamLinks.size, 0, '收货退订必须清除下位链路登记');
 
@@ -672,7 +678,7 @@ test('链式接力：同帧逐级传递，同一货物实例沿链路传到末�
   }
 });
 
-test('多跳直达交付：越级跳过空载中间设备，交接动画按跳数加速（1s/hops）', () => {
+test('多跳直达交付：越级跳过空载中间设备，新刷货物直接落位不插值', () => {
   const h = makeHarness({
     UP: { centerX: -4, origin: true },
     MID: { centerX: 0 },
@@ -684,7 +690,7 @@ test('多跳直达交付：越级跳过空载中间设备，交接动画按跳�
     assert.equal(h.models.MID.conveyorTelemetry.downstreamLinks.get('DOWN')?.hops, 1);
     assert.equal(h.models.UP.conveyorTelemetry.downstreamLinks.get('DOWN')?.hops, 2);
 
-    // UP 起点刷出 → 直达交付 DOWN（MID 全程不持货），hops=2 → 交接时长减半
+    // UP 起点刷出 → 直达交付 DOWN（MID 全程不持货）；新货无历史位姿，不建交接插值直接落位
     h.apply('UP', { task: 7, movement_x: 1 });
     const pushed = onlyCargo(h.state);
     assert.equal(pushed.assetCode, 'DOWN', '货物必须直达交付给最终订阅者');
@@ -696,7 +702,38 @@ test('多跳直达交付：越级跳过空载中间设备，交接动画按跳�
     assert.equal(h.models.DOWN.conveyorTelemetry.selfDriveDirection, 1);
     assert.ok(Math.abs(h.models.DOWN.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE)) < 1e-6,
       `DOWN 必须从自身刷出端接入，实际 ${h.models.DOWN.conveyorTelemetry.cargoTravelOffset}`);
-    assert.ok(pushed.handoff, '必须登记交接插值保持视觉连续');
+    assert.equal(pushed.handoff, null, '新刷出货物无历史位姿，不得建交接插值');
+    // 收货退订沿链清除登记
+    assert.equal(h.models.MID.conveyorTelemetry.downstreamLinks.size, 0, 'MID 必须摘除 DOWN 的登记');
+    assert.equal(h.models.UP.conveyorTelemetry.downstreamLinks.size, 0, 'UP 必须摘除 DOWN 的登记');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('多跳直达交付（已摆位姿持货）：交接动画按跳数加速（1s/hops）', () => {
+  const h = makeHarness({
+    UP: { centerX: -4, origin: true },
+    MID: { centerX: 0 },
+    DOWN: { centerX: 4 },
+  });
+  try {
+    // DOWN 先收 task=7：订阅经 MID 传递到 UP（MID/UP 依次登记 hops=1/2）
+    h.apply('DOWN', { task: 7, movement_x: 1 });
+    assert.equal(h.models.MID.conveyorTelemetry.downstreamLinks.get('DOWN')?.hops, 1);
+    assert.equal(h.models.UP.conveyorTelemetry.downstreamLinks.get('DOWN')?.hops, 2);
+
+    // UP 已摆位姿持货（在途货物被订阅命中）→ 直达交付 DOWN，hops=2 → 交接时长减半。
+    // UP 不带新 task：避免起点设备交付后按无货流程再刷新货。
+    h.insertConveyorCargo('UP', '7');
+    h.apply('UP', { movement_x: 1 });
+    const pushed = onlyCargo(h.state);
+    assert.equal(pushed.assetCode, 'DOWN', '货物必须直达交付给最终订阅者');
+    assert.equal(pushed.task, '7');
+    assert.equal(h.models.UP.conveyorTelemetry.cargoCode, null, 'UP 引用必须清空');
+    assert.equal(h.models.MID.conveyorTelemetry.cargoCode, null, 'MID 全程不得持货');
+    assert.equal(h.models.DOWN.conveyorTelemetry.cargoCode, 'cargo');
+    assert.ok(pushed.handoff, '已摆位姿货物交付必须登记交接插值保持视觉连续');
     assert.ok(Math.abs(pushed.handoff!.durationSeconds - CARGO_HANDOFF_SECONDS / 2) < 1e-6,
       `两跳交付交接时长必须减半为 ${CARGO_HANDOFF_SECONDS / 2}s，实际 ${pushed.handoff!.durationSeconds}`);
     // 收货退订沿链清除登记

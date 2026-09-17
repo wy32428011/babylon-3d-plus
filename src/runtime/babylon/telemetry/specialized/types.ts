@@ -80,14 +80,15 @@ export function resolveCargoHandoffPose(
   return { position, rotation };
 }
 
-/** 以货物当前世界位姿为起点创建交接插值状态（root 无父级，本地位姿即世界位姿）。 */
+/** 以货物当前世界位姿为起点创建交接插值状态（root 无父级，本地位姿即世界位姿）。从未写过位姿的新货物返回 null：避免从世界原点飞入 / 从 Identity 自旋，首次写入直接在目标位姿稳定落位。 */
 export function createCargoHandoffState(
   cargo: { root: TransformNode },
   durationSeconds: number = CARGO_HANDOFF_SECONDS,
-): CargoHandoffState {
+): CargoHandoffState | null {
+  if (!cargo.root.rotationQuaternion) return null;
   return {
     fromPosition: cargo.root.position.clone(),
-    fromRotation: cargo.root.rotationQuaternion?.clone() ?? Quaternion.Identity(),
+    fromRotation: cargo.root.rotationQuaternion.clone(),
     progress: 0,
     durationSeconds: Math.max(durationSeconds, 0.05),
   };

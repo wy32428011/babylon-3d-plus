@@ -53,8 +53,9 @@ fetch (LocatorFetchRuntime, 事件驱动) ────────────�
 ### 共享状态与交接门面
 
 - `SpecializedTelemetrySharedState`（types.ts）：五张全局货物表 `stacker/conveyor/rgv/shuttle/liftCargoMeshes`，即全局货物注册表。货物条目 `GeneratedCargoRuntimeEntry`，`task` 为全局唯一身份。
-- 交接插值统一 `resolveCargoHandoffPose`（types.ts:54-67），时长 `CARGO_HANDOFF_SECONDS=1.0`（types.ts:42）。
-- 交接只平移不旋转：`cargo.lockedWorldRotation` 全生命周期锁定（types.ts:169-170）。
+- 交接插值统一 `resolveCargoHandoffPose`（types.ts），时长 `CARGO_HANDOFF_SECONDS=1.0`。
+- 交接只平移不旋转：`cargo.lockedWorldRotation` 全生命周期锁定，在 `setGeneratedCargoRootPose`（SceneRuntime.ts）首次**稳定**位姿写入时建立——handoff 插值期间不锁定，插值完结帧返回精确目标朝向时才 `??=` 落锁，避免把 slerp 中间角（大 dt 帧下可达 30°~60°）永久锁定。
+- `createCargoHandoffState` 对从未写过位姿的新货物（`root.rotationQuaternion == null`）返回 null 不建插值：新货直接在目标位姿落位，避免从世界原点飞入 / 从 Identity 自旋，同时保证首次写入即稳定位姿。
 - 门面方法：`adoptGlobalCargoByTask`(:239)、`placeCargoIntoConveyorPlatform`(:281)、`deliverRgvCargoToConveyorColumn`(:305)、`adoptConveyorCargoForLift` / `deliverLiftCargoToConveyorLayer` / `resolveConveyorDeckSurfacePoint`（SpecializedTelemetryRuntime.ts）。
 
 ---
