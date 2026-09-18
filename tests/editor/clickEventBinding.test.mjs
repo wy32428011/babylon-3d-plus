@@ -256,6 +256,48 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
     assert.deepEqual(resolution.screen, { projectId: 'project-9', screenId: 'screen-9' });
   });
 
+  await t.test('sanitize 仅在含 highlight 效果且为 true 时保留忽略固定轨道参数', () => {
+    const component = sanitizeClickEventBindingComponent({
+      deviceSlots: [],
+      events: [
+        { id: 'with-highlight', eventType: 'click', effects: ['highlight'], highlight: { excludeFixedTrack: true } },
+        { id: 'false-flag', eventType: 'click', effects: ['highlight'], highlight: { excludeFixedTrack: false } },
+        { id: 'bad-flag', eventType: 'click', effects: ['highlight'], highlight: { excludeFixedTrack: 'yes' } },
+        { id: 'no-effect', eventType: 'click', effects: ['focus'], highlight: { excludeFixedTrack: true } },
+      ],
+    });
+    assert.deepEqual(component.events[0].highlight, { excludeFixedTrack: true });
+    assert.equal('highlight' in component.events[1], false);
+    assert.equal('highlight' in component.events[2], false);
+    assert.equal('highlight' in component.events[3], false);
+  });
+
+  await t.test('点击决策透传命中事件的忽略固定轨道参数', () => {
+    const scene = createScene(
+      createModelEntity('stacker-1', REGISTERED_URL),
+      createBindingEntity('binding-1', createBindingComponent({
+        deviceSlots: [registeredSlot(REGISTERED_URL)],
+        events: [{ id: 'event-1', eventType: 'click', effects: ['highlight'], highlight: { excludeFixedTrack: true } }],
+      })),
+    );
+    const resolution = resolveClickEventBindingClick(scene, 'stacker-1');
+    assert.equal(resolution.kind, 'trigger');
+    if (resolution.kind !== 'trigger') return;
+    assert.equal(resolution.highlightExcludeFixedTrack, true);
+
+    const plainScene = createScene(
+      createModelEntity('stacker-2', REGISTERED_URL),
+      createBindingEntity('binding-2', createBindingComponent({
+        deviceSlots: [registeredSlot(REGISTERED_URL)],
+        events: [{ id: 'event-2', eventType: 'click', effects: ['highlight'] }],
+      })),
+    );
+    const plain = resolveClickEventBindingClick(plainScene, 'stacker-2');
+    assert.equal(plain.kind, 'trigger');
+    if (plain.kind !== 'trigger') return;
+    assert.equal('highlightExcludeFixedTrack' in plain, false);
+  });
+
   await t.test('show-chart 载荷：资产编号 + 图表id；非 show-chart 或无绑定返回 null', () => {
     const scene = createScene(
       { id: 'stacker-1', name: 'stacker-1', components: { modelAsset: { sourceUrl: REGISTERED_URL, assetCode: '001005' } } },

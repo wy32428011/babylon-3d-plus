@@ -665,6 +665,7 @@ export function PlayerApp() {
         const clearViewerSelection = (): void => {
           localHighlightedEntityIds = [];
           setViewerSelectedEntityIds([]);
+          runtime?.setClickHighlightTrackExclusion([]);
           runtime?.clearLocalHighlight();
           runtime?.clearExternalHighlight();
         };
@@ -676,6 +677,7 @@ export function PlayerApp() {
             setViewerSelectedEntityIds(nextEntityIds);
             runtime!.setLocalHighlightEntityIds(nextEntityIds);
           },
+          setHighlightExcludeTrack: (entityIds) => runtime!.setClickHighlightTrackExclusion(entityIds),
           setSlotHighlight: (entityId, cell) => runtime!.setLocalSlotHighlight(entityId, cell),
           focusTarget: (entityId, cell) => {
             const bounds = cell
@@ -729,6 +731,7 @@ export function PlayerApp() {
               localHighlightedEntityIds = [targetId];
               setViewerSelectedEntityIds([targetId]);
               runtime!.setLocalSlotHighlight('', null);
+              runtime!.setClickHighlightTrackExclusion([]);
               runtime!.setLocalHighlightEntityIds([targetId]);
             },
             refreshMarker: (entityId) => window.dispatchEvent(new CustomEvent(CHART_MARKER_REFRESH_EVENT, { detail: entityId })),

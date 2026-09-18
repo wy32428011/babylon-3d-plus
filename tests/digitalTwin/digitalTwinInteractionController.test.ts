@@ -843,6 +843,7 @@ test('库位资产编号消息贯通聚焦与宿主点击单元事件', () => {
     setSlotHighlight: (entityId, cell) => highlighted.push({ entityId, cell }),
     focusTarget: () => assert.fail('点击事件不能再次覆盖搜索聚焦'),
     triggerManualEvents: (id) => events.push(id),
+    setHighlightExcludeTrack: () => {},
   });
   runtime.slotIndex.locators.push({
     entityId: 'slot', assetId: '0001-A', rowNumber: 2, startColumn: 3, startLayer: 4,
@@ -890,6 +891,7 @@ test('命中 show-chart 绑定时向宿主发送 event.assetClicked，未握手�
     setSlotHighlight: () => {},
     focusTarget: () => {},
     triggerManualEvents: () => {},
+    setHighlightExcludeTrack: () => {},
     emitAssetClicked: (payload) => f.controller.notifyAssetClicked(payload),
   });
   try {

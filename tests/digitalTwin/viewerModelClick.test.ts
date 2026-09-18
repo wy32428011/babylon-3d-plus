@@ -29,13 +29,15 @@ function fixture(effects?: ClickEventBindingEffect[], cellEvent = false) {
   const highlights: unknown[] = [];
   const focuses: unknown[] = [];
   const events: string[] = [];
+  const trackExclusions: string[][] = [];
   const handler = createViewerModelClickHandler(scene, {
     updateSelection: (ids) => selections.push([...ids]),
     setSlotHighlight: (id, cell) => highlights.push({ id, cell }),
     focusTarget: (id, cell) => focuses.push({ id, cell }),
     triggerManualEvents: (id) => events.push(id),
+    setHighlightExcludeTrack: (ids) => trackExclusions.push([...ids]),
   });
-  return { handler, selections, highlights, focuses, events, scene };
+  return { handler, selections, highlights, focuses, events, trackExclusions, scene };
 }
 
 test('搜索和鼠标点击共用选中与手动事件，搜索不重复覆盖相机聚焦', () => {
@@ -93,6 +95,7 @@ test('命中 show-chart 效果时向宿主页面发送点击事件载荷', () =>
     setSlotHighlight: () => {},
     focusTarget: () => {},
     triggerManualEvents: () => {},
+    setHighlightExcludeTrack: () => {},
     emitAssetClicked: (payload) => emitted.push(payload),
     showScreen: (screen) => shownScreens.push(screen),
   });
@@ -120,8 +123,39 @@ test('效果不含 show-chart 时不发送宿主事件', () => {
     setSlotHighlight: () => {},
     focusTarget: () => {},
     triggerManualEvents: () => {},
+    setHighlightExcludeTrack: () => {},
     emitAssetClicked: (payload) => emitted.push(payload),
   });
   handler('model');
   assert.deepEqual(emitted, []);
+});
+
+test('highlight 忽略固定轨道参数随点击透传，其余分支清空排除集合', () => {
+  const sourceUrl = 'editor-asset://local/stacker.glb';
+  const scene = {
+    entities: {
+      model: { id: 'model', components: { modelAsset: { sourceUrl } } },
+      binding: { id: 'binding', components: { clickEventBinding: {
+        deviceSlots: [{ deviceType: { sourceUrl } }],
+        events: [{ eventType: 'click', effects: ['highlight'], highlight: { excludeFixedTrack: true } }],
+      } } },
+    },
+  } as unknown as SceneDocument;
+  const trackExclusions: string[][] = [];
+  const handler = createViewerModelClickHandler(scene, {
+    updateSelection: () => {},
+    setSlotHighlight: () => {},
+    focusTarget: () => {},
+    triggerManualEvents: () => {},
+    setHighlightExcludeTrack: (ids) => trackExclusions.push([...ids]),
+  });
+
+  handler('model', null, { focus: false });
+  assert.deepEqual(trackExclusions, [['model']]);
+  handler(null);
+  assert.deepEqual(trackExclusions, [['model'], []]);
+
+  const plain = fixture(['highlight']);
+  plain.handler('model', null, { focus: false });
+  assert.deepEqual(plain.trackExclusions, [[]]);
 });

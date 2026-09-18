@@ -13,6 +13,8 @@ type ViewerModelClickEffects = {
   setSlotHighlight: (entityId: string, cell: DigitalTwinSlotCoordinate | null) => void;
   focusTarget: (entityId: string, cell?: DigitalTwinSlotCoordinate) => void;
   triggerManualEvents: (entityId: string) => void;
+  /** 整体替换「忽略固定轨道」的高亮排除集合；非点击事件触发的高亮路径应传空数组。 */
+  setHighlightExcludeTrack: (entityIds: readonly string[]) => void;
   /** 命中 show-chart 效果时向宿主页面发送点击事件。 */
   emitAssetClicked?: (payload: ClickEventAssetClickedPayload) => void;
   /** 绑定包含数据中台大屏标识时，请求已握手的宿主切换大屏。 */
@@ -36,17 +38,20 @@ export function createViewerModelClickHandler(scene: SceneDocument, effects: Vie
       effects.showScreen?.(resolution.screen);
     }
     if (resolution.kind === 'pass-through') {
+      effects.setHighlightExcludeTrack([]);
       effects.updateSelection(entityId ? [entityId] : []);
       if (entityId) effects.triggerManualEvents(entityId);
       return;
     }
     if (resolution.kind === 'clear') {
+      effects.setHighlightExcludeTrack([]);
       effects.updateSelection([]);
       effects.setSlotHighlight('', null);
       return;
     }
     if (resolution.kind === 'ignore') return;
     if (resolution.kind === 'trigger-cell') {
+      effects.setHighlightExcludeTrack([]);
       if (resolution.effects.includes('highlight')) {
         effects.updateSelection([]);
         effects.setSlotHighlight(resolution.locatorEntityId, resolution.cell);
@@ -60,6 +65,7 @@ export function createViewerModelClickHandler(scene: SceneDocument, effects: Vie
       return;
     }
     effects.setSlotHighlight('', null);
+    effects.setHighlightExcludeTrack(resolution.highlightExcludeFixedTrack ? [resolution.entityId] : []);
     if (resolution.effects.includes('highlight')) {
       effects.updateSelection([resolution.entityId]);
       effects.triggerManualEvents(resolution.entityId);

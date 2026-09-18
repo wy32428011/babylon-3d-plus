@@ -825,6 +825,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     );
     if (!selectionClick) return;
     pauseHistoryReplay();
+    // 任何新点击先清空「忽略固定轨道」排除；点击事件 trigger 分支随后按需重建，避免残留污染手动选中。
+    runtimeRef.current?.setClickHighlightTrackExclusion([]);
 
     if (!isRuntimePreview) {
       const patrolPick = runtimeRef.current?.pickAutoPatrolAtCanvasPoint(
@@ -944,6 +946,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           runtimeRef.current?.setLocalSlotHighlight('', null);
           state.setEnvironmentAdjustmentActive(false);
           if (resolution.effects.includes('highlight')) {
+            runtimeRef.current?.setClickHighlightTrackExclusion(
+              resolution.highlightExcludeFixedTrack ? [resolution.entityId] : [],
+            );
             state.selectEntity(resolution.entityId);
           }
           if (resolution.effects.includes('focus')) {

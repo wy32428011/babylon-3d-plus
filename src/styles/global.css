@@ -3879,10 +3879,25 @@ select {
   gap: 4px;
 }
 
+.click-event-binding-effect-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .click-event-binding-effect-row {
   display: flex;
   gap: 4px;
   align-items: center;
+}
+
+.click-event-binding-effect-param {
+  margin-left: 12px;
+}
+
+/* 效果参数行缩进后宽度更窄，标签列放宽避免「忽略固定轨道」截断 */
+.click-event-binding-effect-param.inspector-row {
+  grid-template-columns: 84px minmax(0, 1fr);
 }
 
 .click-event-binding-effect-row select {

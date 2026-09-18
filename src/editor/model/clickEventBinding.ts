@@ -177,11 +177,16 @@ function sanitizeClickEventBindingEvent(value: unknown): ClickEventBindingEvent 
       };
     }
   }
+  let highlight: ClickEventBindingEvent['highlight'];
+  if (effects.includes('highlight') && isPlainObject(value.highlight) && value.highlight.excludeFixedTrack === true) {
+    highlight = { excludeFixedTrack: true };
+  }
   return {
     id: sanitizeText(value.id, CLICK_EVENT_BINDING_ID_MAX_LENGTH) || createId('click_event'),
     eventType,
     effects,
     ...(chart ? { chart } : {}),
+    ...(highlight ? { highlight } : {}),
   };
 }
 
@@ -257,7 +262,7 @@ export type ClickEventBindingClickResolution =
   | { kind: 'pass-through' }
   | { kind: 'clear' }
   | { kind: 'ignore' }
-  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[]; chartId?: string; screen?: { projectId: string; screenId: string } }
+  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[]; highlightExcludeFixedTrack?: boolean; chartId?: string; screen?: { projectId: string; screenId: string } }
   | {
     kind: 'trigger-cell';
     entityId: string;
@@ -321,6 +326,7 @@ export function resolveClickEventBindingClick(
     kind: 'trigger',
     entityId: pickedEntityId,
     effects: matchedEvent.effects,
+    ...(matchedEvent.highlight?.excludeFixedTrack === true ? { highlightExcludeFixedTrack: true } : {}),
     ...(matchedEvent.chart ? { chartId: matchedEvent.chart.id } : {}),
     ...(matchedEvent.chart?.projectId && matchedEvent.chart.screenId
       ? { screen: { projectId: matchedEvent.chart.projectId, screenId: matchedEvent.chart.screenId } }

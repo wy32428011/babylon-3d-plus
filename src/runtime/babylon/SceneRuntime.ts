@@ -278,6 +278,7 @@ import {
   type SceneSelectionHighlightLayer,
 } from './sceneSelectionHighlight';
 import { isRuntimeModelSelectionCandidate } from './sceneRuntimeSelection';
+import { excludeFixedTrackMeshes, getFixedTrackNodes } from './fixedTrackHighlightNodes';
 
 const SELECTED_MATERIAL_COLOR = '#f0a500';
 const FALLBACK_MATERIAL_COLOR = '#8ab4f8';
@@ -793,6 +794,8 @@ export class SceneRuntime {
   private selectedEntityIds = new Set<string>();
   private localHighlightedEntityIds = new Set<string>();
   private externalHighlightedEntityIds = new Set<string>();
+  /** 点击事件绑定「忽略固定轨道」生效的实体：高亮描边时剔除固定轨道子树网格。 */
+  private clickHighlightExcludeTrackEntityIds = new Set<string>();
   private hierarchySelectionIds: string[] | null = null;
   private readonly modelSelectionOutlineLayer: SceneSelectionHighlightLayer;
   private readonly assetLoadScheduler = new AssetLoadScheduler();
@@ -2370,6 +2373,20 @@ export class SceneRuntime {
     this.setTransientHighlightEntityIds('local', entityIds);
   }
 
+  /**
+   * 整体替换点击事件「忽略固定轨道」的实体集合；集合变化时主动重建描边。
+   * 选区差量刷新在同实体重点击时会跳过重建，排除集合必须自带触发。
+   */
+  setClickHighlightTrackExclusion(entityIds: readonly string[]): void {
+    const next = new Set(entityIds.filter((entityId) => typeof entityId === 'string' && entityId.length > 0));
+    if (next.size === this.clickHighlightExcludeTrackEntityIds.size
+      && [...next].every((entityId) => this.clickHighlightExcludeTrackEntityIds.has(entityId))) {
+      return;
+    }
+    this.clickHighlightExcludeTrackEntityIds = next;
+    this.rebuildModelSelectionOutline();
+  }
+
   /** 清除发布 Viewer 的本地持久选区。 */
   clearLocalHighlight(): void {
     this.setLocalSlotHighlight('', null);
@@ -3568,6 +3585,7 @@ export class SceneRuntime {
     this.selectedEntityIds.clear();
     this.localHighlightedEntityIds.clear();
     this.externalHighlightedEntityIds.clear();
+    this.clickHighlightExcludeTrackEntityIds.clear();
     this.localSlotHighlight = null;
     this.externalSlotHighlight = null;
     this.reportedCargoIssues.clear();
@@ -8603,7 +8621,10 @@ export class SceneRuntime {
       const model = this.models.get(entityId);
       if (model && !model.modelArrayBatch && model.highlighted) {
         const meshes = model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
-        if (meshes.length > 0) selectedModelGroups.push(meshes);
+        const highlightMeshes = this.clickHighlightExcludeTrackEntityIds.has(entityId)
+          ? excludeFixedTrackMeshes(meshes, getFixedTrackNodes(model, this.scene))
+          : meshes;
+        if (highlightMeshes.length > 0) selectedModelGroups.push(highlightMeshes);
       }
 
       const batch = this.resolveModelArrayBatchForEntityId(entityId);

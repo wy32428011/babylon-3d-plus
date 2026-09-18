@@ -150,7 +150,7 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
     updateBindingEvent(eventIndex, { ...bindingEvent, effects: [...bindingEvent.effects, nextEffect.value] }, '添加事件效果');
   }
 
-  /** 删除事件中的一条效果；移除 show-chart 时同步清空其图表参数。 */
+  /** 删除事件中的一条效果；移除 show-chart/highlight 时同步清空其效果参数。 */
   function removeEffect(eventIndex: number, effectIndex: number): void {
     const bindingEvent = component.events[eventIndex];
     if (!bindingEvent) return;
@@ -159,10 +159,11 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
       effects: bindingEvent.effects.filter((_, index) => index !== effectIndex),
     };
     if (!nextEvent.effects.includes('show-chart')) delete nextEvent.chart;
+    if (!nextEvent.effects.includes('highlight')) delete nextEvent.highlight;
     updateBindingEvent(eventIndex, nextEvent, '删除事件效果');
   }
 
-  /** 更新事件中的效果类型；show-chart 被改走时同步清空图表参数。 */
+  /** 更新事件中的效果类型；show-chart/highlight 被改走时同步清空其效果参数。 */
   function changeEffect(eventIndex: number, effectIndex: number, nextEffect: ClickEventBindingEffect): void {
     const bindingEvent = component.events[eventIndex];
     if (!bindingEvent) return;
@@ -171,6 +172,7 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
       effects: bindingEvent.effects.map((item, index) => (index === effectIndex ? nextEffect : item)),
     };
     if (!nextEvent.effects.includes('show-chart')) delete nextEvent.chart;
+    if (!nextEvent.effects.includes('highlight')) delete nextEvent.highlight;
     updateBindingEvent(eventIndex, nextEvent, '更新事件效果');
   }
 
@@ -185,6 +187,19 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
       delete nextEvent.chart;
     }
     updateBindingEvent(eventIndex, nextEvent, label);
+  }
+
+  /** 配置或清空 highlight 效果的「忽略固定轨道」参数。 */
+  function updateEventHighlightExcludeTrack(eventIndex: number, excludeFixedTrack: boolean): void {
+    const bindingEvent = component.events[eventIndex];
+    if (!bindingEvent) return;
+    const nextEvent: ClickEventBindingEvent = { ...bindingEvent };
+    if (excludeFixedTrack) {
+      nextEvent.highlight = { excludeFixedTrack: true };
+    } else {
+      delete nextEvent.highlight;
+    }
+    updateBindingEvent(eventIndex, nextEvent, '更新高亮参数');
   }
 
   /** 接收图表库拖放并填充 show-chart 图表参数。 */
@@ -401,48 +416,61 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
           </div>
 
           {bindingEvent.effects.map((effect, effectIndex) => (
-            <div className="click-event-binding-effect-row" key={effect}>
-              <select
-                aria-label={'事件 ' + (eventIndex + 1) + ' 效果 ' + (effectIndex + 1)}
-                disabled={disabled}
-                value={effect}
-                onChange={(changeEvent) => changeEffect(
-                  eventIndex,
-                  effectIndex,
-                  changeEvent.target.value as ClickEventBindingEffect,
-                )}
-              >
-                {EFFECT_OPTIONS.map((option) => (
-                  <option
-                    disabled={option.value !== effect && bindingEvent.effects.includes(option.value)}
-                    key={option.value}
-                    value={option.value}
-                  >
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                aria-label={'删除效果 ' + (EFFECT_OPTIONS.find((option) => option.value === effect)?.label ?? effect)}
-                className="model-generator-clear-button"
-                disabled={disabled}
-                onClick={() => removeEffect(eventIndex, effectIndex)}
-                title="删除该效果"
-                type="button"
-              >
-                ×
-              </button>
+            <div className="click-event-binding-effect-group" key={effect}>
+              <div className="click-event-binding-effect-row">
+                <select
+                  aria-label={'事件 ' + (eventIndex + 1) + ' 效果 ' + (effectIndex + 1)}
+                  disabled={disabled}
+                  value={effect}
+                  onChange={(changeEvent) => changeEffect(
+                    eventIndex,
+                    effectIndex,
+                    changeEvent.target.value as ClickEventBindingEffect,
+                  )}
+                >
+                  {EFFECT_OPTIONS.map((option) => (
+                    <option
+                      disabled={option.value !== effect && bindingEvent.effects.includes(option.value)}
+                      key={option.value}
+                      value={option.value}
+                    >
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  aria-label={'删除效果 ' + (EFFECT_OPTIONS.find((option) => option.value === effect)?.label ?? effect)}
+                  className="model-generator-clear-button"
+                  disabled={disabled}
+                  onClick={() => removeEffect(eventIndex, effectIndex)}
+                  title="删除该效果"
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+              {effect === 'highlight' ? (
+                <label
+                  className="inspector-row click-event-binding-effect-param"
+                  title="堆垛机/RGV 等轨道设备点击高亮时，固定轨道部分不描边"
+                >
+                  <span>忽略固定轨道</span>
+                  <input
+                    aria-label={'事件 ' + (eventIndex + 1) + ' 忽略固定轨道'}
+                    checked={bindingEvent.highlight?.excludeFixedTrack === true}
+                    disabled={disabled}
+                    type="checkbox"
+                    onChange={(changeEvent) => updateEventHighlightExcludeTrack(eventIndex, changeEvent.target.checked)}
+                  />
+                </label>
+              ) : null}
+              {effect === 'show-chart' ? (
+                <div className="click-event-binding-effect-param">
+                  {renderChartSlot(bindingEvent, eventIndex)}
+                </div>
+              ) : null}
             </div>
           ))}
-
-          {bindingEvent.effects.includes('show-chart') ? (
-            <>
-              <div className="inspector-row">
-                <span>图表参数</span>
-              </div>
-              {renderChartSlot(bindingEvent, eventIndex)}
-            </>
-          ) : null}
 
           <button
             className="click-event-binding-add-effect"

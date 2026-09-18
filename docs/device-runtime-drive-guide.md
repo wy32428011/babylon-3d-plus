@@ -54,6 +54,11 @@ fetch (LocatorFetchRuntime, 事件驱动) ────────────�
 
 - `SpecializedTelemetrySharedState`（types.ts）：五张全局货物表 `stacker/conveyor/rgv/shuttle/liftCargoMeshes`，即全局货物注册表。货物条目 `GeneratedCargoRuntimeEntry`，`task` 为全局唯一身份。
 - 交接插值统一 `resolveCargoHandoffPose`（types.ts），时长 `CARGO_HANDOFF_SECONDS=1.0`。
+
+### 点击事件高亮与固定轨道
+
+- 点击事件绑定的「高亮选中」效果支持「忽略固定轨道」参数（`ClickEventBindingEvent.highlight.excludeFixedTrack`）：命中 stacker/RGV 时轨道子树网格不参与描边，只描设备本体。
+- 轨道识别与遥测驱动同一套语义（`fixedTrackHighlightNodes.ts`）：`dataDriven.fixedNodes` 声明优先，缺失按 capable 标志回退（stacker 固定名 / RGV A37~A46 正则）。modelArrayBatch 薄实例批次路径无法按实体剔除网格，该参数不生效。
 - 交接只平移不旋转：`cargo.lockedWorldRotation` 全生命周期锁定，在 `setGeneratedCargoRootPose`（SceneRuntime.ts）首次**稳定**位姿写入时建立——handoff 插值期间不锁定，插值完结帧返回精确目标朝向时才 `??=` 落锁，避免把 slerp 中间角（大 dt 帧下可达 30°~60°）永久锁定。
 - 刷出初始朝向：恒为货物模板自身朝向（世界恒等，统一 `createCargoSpawnWorldRotation`，types.ts），不继承载体机体/货格旋转——五类司机的 `lockedWorldRotation ?? …` 回退与 stacker/shuttle fresh 刷出的 `holdRotation` 都走该回退，随后由首次稳定位姿落锁。载货面主动旋转货物朝向的设备后续另行建模，当前不存在。
 - `createCargoHandoffState` 对从未写过位姿的新货物（`root.rotationQuaternion == null`）返回 null 不建插值：新货直接在目标位姿落位，避免从世界原点飞入 / 从 Identity 自旋，同时保证首次写入即稳定位姿。

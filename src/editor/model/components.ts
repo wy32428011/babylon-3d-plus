@@ -364,6 +364,11 @@ export type ClickEventBindingChartRef = {
   thumbnailUrl?: string;
 };
 
+/** highlight 效果参数：堆垛机/RGV 等轨道设备点击高亮时可排除固定轨道网格，只描设备本体。 */
+export type ClickEventBindingHighlightOptions = {
+  excludeFixedTrack?: boolean;
+};
+
 /** 绑定的设备类型条目，以模型包 sourceUrl 作为运行态匹配主键。 */
 export type ClickEventBindingDeviceType = {
   id: string;
@@ -384,13 +389,15 @@ export type ClickEventBindingDeviceSlot = {
   deviceType: ClickEventBindingDeviceType | null;
 };
 
-/** 单条事件配置：事件类型 + 命中后执行的效果列表；chart 为 show-chart 效果的参数。 */
+/** 单条事件配置：事件类型 + 命中后执行的效果列表；chart 为 show-chart 效果的参数，highlight 为高亮效果的参数。 */
 export type ClickEventBindingEvent = {
   id: string;
   eventType: ClickEventBindingEventType;
   effects: ClickEventBindingEffect[];
   /** show-chart 效果参数：图表库中的图表引用；effects 不含 show-chart 时不保留。 */
   chart?: ClickEventBindingChartRef;
+  /** highlight 效果参数；effects 不含 highlight 时不保留。 */
+  highlight?: ClickEventBindingHighlightOptions;
 };
 
 /** 点击事件绑定组件，仅在运行预览态生效；事件列表中同类型事件取第一条匹配。 */
