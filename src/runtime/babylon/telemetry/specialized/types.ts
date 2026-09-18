@@ -80,6 +80,11 @@ export function resolveCargoHandoffPose(
   return { position, rotation };
 }
 
+/** 货物刷出初始朝向：恒为货物模板自身朝向（世界恒等），不继承载体机体/货格旋转；载货面主动旋转货物朝向的设备后续另行建模。 */
+export function createCargoSpawnWorldRotation(): Quaternion {
+  return Quaternion.Identity();
+}
+
 /** 以货物当前世界位姿为起点创建交接插值状态（root 无父级，本地位姿即世界位姿）。从未写过位姿的新货物返回 null：避免从世界原点飞入 / 从 Identity 自旋，首次写入直接在目标位姿稳定落位。 */
 export function createCargoHandoffState(
   cargo: { root: TransformNode },

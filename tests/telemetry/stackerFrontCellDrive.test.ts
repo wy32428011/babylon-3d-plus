@@ -444,11 +444,11 @@ test('取货绑定后 command 1→3 伴随库位跳变不销毁货物：已绑�
 });
 
 
-test('取货绑定全程保持货物世界朝向：货叉托举不改变货物姿态（不 snap 到机体朝向）', () => {
+test('取货绑定全程保持货物世界朝向：刷出即货物模板自身朝向（世界恒等），货叉托举不改变货物姿态', () => {
   const h = makeHarness();
   try {
     makeStackerGeometry(h);
-    // locator 默认 root 绕 Y 转 -90°（本地 +X 映射到世界 +Z），与机体 identity 朝向可区分
+    // locator 默认 root 绕 Y 转 -90°（本地 +X 映射到世界 +Z），用于验证刷出朝向不继承货格/机体旋转
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
     const FETCH_FRAME = { ...POSITION_FRAME, front_command: 1, front_task: 7001 };
 
@@ -457,11 +457,11 @@ test('取货绑定全程保持货物世界朝向：货叉托举不改变货物�
     const cargo = [...h.state.stackerCargoMeshes.values()][0];
     const beforeBind = cargo.root.rotationQuaternion!.clone();
     assert.ok(
-      Math.abs(Quaternion.Dot(beforeBind, Quaternion.Identity())) < 0.999,
-      '未绑定货物必须取货格朝向而非机体 identity 朝向',
+      Math.abs(Quaternion.Dot(beforeBind, Quaternion.Identity())) > 0.999,
+      'fresh 刷出货物必须取自身模板朝向（世界恒等），不继承货格/机体旋转',
     );
 
-    // 伸叉到位触发绑定：朝向必须保持（旧实现 snap 到机体 identity）
+    // 伸叉到位触发绑定：朝向必须保持刷出朝向（绑定不 snap）
     h.apply({ ...FETCH_FRAME, front_movement_z: 1 }, 0.1, 60);
     assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '伸叉到位必须绑定货物上叉');
     assert.ok(

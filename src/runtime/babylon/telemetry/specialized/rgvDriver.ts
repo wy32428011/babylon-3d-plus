@@ -9,7 +9,6 @@ import {
   getModelTransformNodes,
   getNodesProjectedBounds,
   getNodesWorldBounds,
-  getNodeWorldRotation,
   moveVectorTowards,
   projectPointOntoAxis,
   projectWorldBoundsOntoAxis,
@@ -22,6 +21,7 @@ import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import { isConveyorRuntimeModel } from './specializedModelAssets';
 import {
   createCargoHandoffState,
+  createCargoSpawnWorldRotation,
   normalizeCargoTask,
   resolveCargoHandoffPose,
   type GeneratedCargoRuntimeEntry,
@@ -597,11 +597,11 @@ export class RgvTelemetryDriver {
   /**
    * 车工位锚点：配置了该侧 cargo.frontNodes/backNodes 时取其台面节点包围盒中心；
    * 未配置回退整体台面包围盒沿行走轴的四分位点（前=+Z 侧，后=-Z 侧）。
-   * 高度取台面包围盒顶面，货箱刷在台面上方；朝向取货箱锁定朝向，缺省（fresh 刷出）回退机体朝向。
+   * 高度取台面包围盒顶面，货箱刷在台面上方；朝向取货箱锁定朝向，未锁定（fresh 刷出）取货物模板自身朝向（世界恒等），不继承机体旋转。
    */
   private getRgvStationPose(model: ModelRuntimeEntry, side: RgvForkSide, lockedRotation: Quaternion | null): { position: Vector3; rotation: Quaternion } {
     const state = model.rgvTelemetry;
-    const rotation = lockedRotation ?? getNodeWorldRotation(model.root);
+    const rotation = lockedRotation ?? createCargoSpawnWorldRotation();
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
 
     const sideBounds = this.getRgvCargoDeckSideBounds(model, side);

@@ -8,7 +8,6 @@ import {
   getHorizontalModelAxis,
   getModelAxis,
   getModelTransformNodes,
-  getNodeWorldRotation,
   getNodesWorldBounds,
   projectWorldBoundsOntoAxis,
   transformWorldBounds,
@@ -36,6 +35,7 @@ import {
   CARGO_HANDOFF_SECONDS,
   CONVEYOR_CARGO_SIZE,
   createCargoHandoffState,
+  createCargoSpawnWorldRotation,
   type GeneratedCargoRuntimeEntry,
   normalizeCargoTask,
   resolveCargoHandoffPose,
@@ -349,7 +349,8 @@ export class ConveyorTelemetryDriver {
     const pose = resolveCargoHandoffPose(
       cargo,
       this.getConveyorCargoPosition(model, plan.travelContext, state.cargoTravelOffset),
-      cargo.lockedWorldRotation ?? getNodeWorldRotation(model.root),
+      // 未锁定时（fresh 刷出）取货物模板自身朝向（世界恒等），不继承机体旋转
+      cargo.lockedWorldRotation ?? createCargoSpawnWorldRotation(),
       deltaSeconds,
     );
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation);

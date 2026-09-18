@@ -8,7 +8,6 @@ import {
   getModelTransformNodes,
   getNodesProjectedBounds,
   getNodesWorldBounds,
-  getNodeWorldRotation,
   moveNumberTowards,
   projectWorldBoundsOntoAxis,
   worldDeltaToParentLocalDelta,
@@ -20,6 +19,7 @@ import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import { isConveyorRuntimeModel } from './specializedModelAssets';
 import {
   createCargoHandoffState,
+  createCargoSpawnWorldRotation,
   resolveCargoHandoffPose,
   type GeneratedCargoRuntimeEntry,
   LIFT_DEFAULT_LIFT_SPEED_METERS_PER_SECOND,
@@ -337,9 +337,9 @@ export class LiftTelemetryDriver {
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, null);
   }
 
-  /** 台工位锚点：载货面节点包围盒顶面中心；朝向取货箱锁定朝向，缺省回退机体朝向。 */
+  /** 台工位锚点：载货面节点包围盒顶面中心；朝向取货箱锁定朝向，未锁定（fresh 刷出）取货物模板自身朝向（世界恒等），不继承机体旋转。 */
   private getLiftStationPose(model: ModelRuntimeEntry, lockedRotation: Quaternion | null): { position: Vector3; rotation: Quaternion } {
-    const rotation = lockedRotation ?? getNodeWorldRotation(model.root);
+    const rotation = lockedRotation ?? createCargoSpawnWorldRotation();
     const bounds = getNodesWorldBounds(this.findLiftCargoDeckNodes(model));
     if (!bounds) {
       const upAxis = getModelAxis(model.root, 'y');

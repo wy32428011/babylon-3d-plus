@@ -15,7 +15,6 @@ import {
   getNodesProjectedBounds,
   getNodesWorldBounds,
   getNodeWorldPosePreservingMirror,
-  getNodeWorldRotation,
   moveNumberTowards,
   moveVectorTowards,
   projectPointOntoAxis,
@@ -32,6 +31,7 @@ import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime'
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   createCargoHandoffState,
+  createCargoSpawnWorldRotation,
   type GeneratedCargoRuntimeEntry,
   normalizeCargoTask,
   resolveCargoHandoffPose,
@@ -665,9 +665,9 @@ export class ShuttleTelemetryDriver {
     // 抑制源格口 fetch 渲染（货物改由 shuttle 渲染）；装货不留存排号，fetch 单排同步不由装货完成触发
     this.host.suppressFetchCellForLocator(cell.locator, cell.toX, cell.toY);
     const holdPose = getNodeWorldPosePreservingMirror(cell.locator.root);
-    // 接管货保持来货世界朝向（交接只平移）；fresh 刷出取货格朝向
+    // 接管货保持来货世界朝向（交接只平移）；fresh 刷出取货物模板自身朝向（世界恒等），不继承货格/机体旋转
     const holdRotation = this.state.shuttleCargoMeshes.get(this.getShuttleCargoKey(model.assetCode))?.lockedWorldRotation
-      ?? holdPose.rotation;
+      ?? createCargoSpawnWorldRotation();
     state.cargoKey = this.getShuttleCargoKey(model.assetCode);
     state.cargoHoldPosition = cell.supportPosition;
     state.cargoHoldRotation = holdRotation;
@@ -771,7 +771,7 @@ export class ShuttleTelemetryDriver {
     this.clearShuttleCargoState(model);
   }
 
-  /** 每帧刷新货物外观与位姿：绑定跟随二段叉尖，未绑定静止于箱位支撑位；朝向取锁定的世界朝向，缺省回退机体朝向。 */
+  /** 每帧刷新货物外观与位姿：绑定跟随二段叉尖，未绑定静止于箱位支撑位；朝向取锁定的世界朝向，未锁定（fresh 刷出）取货物模板自身朝向。 */
   private updateShuttleCargoPose(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.shuttleTelemetry;
     if (!state.cargoKey) return;
@@ -782,7 +782,7 @@ export class ShuttleTelemetryDriver {
     const targetPosition = state.cargoBoundToFork || !state.cargoHoldPosition
       ? this.getShuttleForkCargoPosition(model)
       : state.cargoHoldPosition;
-    const targetRotation = state.cargoHoldRotation ?? cargo.lockedWorldRotation ?? getNodeWorldRotation(model.root);
+    const targetRotation = state.cargoHoldRotation ?? cargo.lockedWorldRotation ?? createCargoSpawnWorldRotation();
     // 跨设备接管的货物从原世界位姿插值接入本机锚点，目标位姿每帧动态追踪（如叉尖随叉移动）
     const pose = resolveCargoHandoffPose(cargo, targetPosition, targetRotation, deltaSeconds);
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, state.cargoBoundToFork ? null : state.cargoHoldScaling);
