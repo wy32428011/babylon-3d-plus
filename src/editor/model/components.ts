@@ -430,7 +430,12 @@ export type ChartMarkerComponent = {
   /** 缺省 ground 为旧版 XZ 平面；upright 将立起面板的旋转放入几何，实体保持标准 XYZ 轴。 */
   geometryBasis?: 'ground' | 'upright';
   screenName?: string;
-  contentType?: 'builtin' | 'screen';
+  contentType?: 'builtin' | 'screen' | 'video';
+  /** 视频使用可发布的 HTTP(S) 直链，播放实例不进入场景。 */
+  videoUrl?: string;
+  videoLoop?: boolean;
+  videoControls?: boolean;
+  videoFit?: 'contain' | 'cover';
   text?: string;
   fontSize?: number;
   marquee?: boolean;

@@ -2890,12 +2890,13 @@ export class SceneRuntime {
       if (!entity.components.chartMarker && (!screen || screen.renderMode !== 'iframe' || !screen.screenUrl)) continue;
       items.push({
         entityId,
-        name: entity.components.chartMarker?.screenName || entity.name,
+        name: markerStyle?.contentType === 'screen' ? marker?.screenName || entity.name : entity.name,
         chartMarker: Boolean(entity.components.chartMarker),
         markerStyle,
         markerText: markerStyle ? getChartMarkerText(markerStyle, this.syncedEntities.get(markerStyle.dataSourceEntityId), this.telemetryPreviewActive) : undefined,
         mesh,
-        ...(screen && markerStyle?.contentType !== 'builtin' ? {
+        ...(markerStyle?.contentType === 'video' ? { screenUrl: markerStyle.videoUrl || undefined } : {}),
+        ...(screen && (!markerStyle || markerStyle.contentType === 'screen') ? {
           projectId: screen.projectId,
           screenId: screen.screenId,
           screenUrl: screen.renderMode === 'iframe' ? screen.screenUrl : undefined,
@@ -3950,7 +3951,8 @@ export class SceneRuntime {
     const mesh = this.meshes.get(entity.id);
     if (!screen || !mesh || mesh.metadata?.editorMeshKind !== 'plane') return;
 
-    const thumbnailUrl = screen.thumbnailUrl;
+    // 视频模式保留大屏绑定数据，但不加载或展示其缩略图。
+    const thumbnailUrl = entity.components.chartMarker?.contentType === 'video' ? undefined : screen.thumbnailUrl;
     let textureEntry = this.dataPlatformScreenTextures.get(entity.id);
     if (textureEntry?.url !== thumbnailUrl) {
       textureEntry?.texture.dispose();

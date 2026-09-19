@@ -4,6 +4,7 @@ import { canEmbedChartMarkerScreen, CHART_MARKER_REFRESH_EVENT } from '../../sha
 import { useEffect, useRef } from 'react';
 import { Matrix, Scene, Vector3, type Mesh } from '@babylonjs/core';
 import type { SceneRuntime, DataPlatformScreenOverlayItem } from './SceneRuntime';
+import { createChartMarkerVideo } from './chartMarkerVideo';
 import { ChartMarkerDepthSurface, type ScreenPolygon } from './ChartMarkerDepthSurface';
 import { getVisibleChartMarkerPolygons, intersectScreenPolygons, type ProjectedScreenPoint } from './chartMarkerVisibility';
 import {
@@ -153,7 +154,8 @@ type OverlayEntry = {
   host: HTMLDivElement;
   clipHost: HTMLDivElement;
   iframe: HTMLIFrameElement | null;
-  video?: HTMLVideoElement;
+  videoContent?: ReturnType<typeof createChartMarkerVideo>;
+  inset: number;
   item: DataPlatformScreenOverlayItem;
   screenOrigin: string;
   screenUrl?: string;
@@ -167,7 +169,9 @@ type OverlayEntry = {
 
 function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayItem): OverlayEntry {
   const builtinMode = item.markerStyle?.contentType === 'builtin';
-  const factor = builtinMode ? 1 : 6;
+  const videoMode = item.markerStyle?.contentType === 'video' || item.alarmMediaType === 'video';
+  const factor = builtinMode || videoMode ? 1 : 6;
+  const inset = item.chartMarker ? (videoMode ? 3 : 16) : 0;
   const width = item.markerStyle ? item.markerStyle.width * factor : item.chartMarker ? 1920 : OVERLAY_BASE_SIZE_PX;
   const height = item.markerStyle ? item.markerStyle.height * factor : item.chartMarker ? 1080 : OVERLAY_BASE_SIZE_PX;
   const host = document.createElement('div');
@@ -176,7 +180,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
   if (item.chartMarker) host.style.boxShadow = 'inset 0 0 0 12px #58b9dc';
 
   const content = document.createElement('div');
-  content.style.cssText = `position:absolute;inset:${item.chartMarker ? 16 : 0}px;overflow:hidden`;
+  content.style.cssText = `position:absolute;inset:${inset}px;overflow:hidden`;
   const fallback = document.createElement('img');
   fallback.alt = '';
   fallback.draggable = false;
@@ -201,14 +205,13 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
   const builtin = builtinMode ? createChartMarkerContent(host) : undefined;
   if (builtin) content.style.display = 'none';
   let iframe: HTMLIFrameElement | null = null;
-  let video: HTMLVideoElement | undefined;
+  let videoContent: ReturnType<typeof createChartMarkerVideo> | undefined;
   let timeoutId: number | undefined;
   let loaded = false;
   const canEmbed = !item.chartMarker || canEmbedChartMarkerScreen();
   const showFallback = (): void => {
     if (loaded) return;
     if (iframe) iframe.style.visibility = 'hidden';
-    if (video) video.style.visibility = 'hidden';
     status.style.display = 'flex';
     message.textContent = '大屏暂未加载，请检查网络或页面访问权限后刷新内容';
   };
@@ -217,20 +220,17 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
     if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     entry.lastSelectionSignature = null;
     if (iframe) iframe.style.visibility = 'visible';
-    if (video) video.style.visibility = 'visible';
     fallback.style.display = 'none';
     status.style.display = 'none';
   };
-  if (item.screenUrl && item.alarmMediaType === 'video') {
-    video = document.createElement('video');
-    video.src = item.screenUrl;
-    video.controls = true; video.autoplay = true; video.muted = true; video.loop = true; video.playsInline = true;
-    video.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;visibility:hidden';
-    video.addEventListener('loadeddata', onLoad);
-    video.addEventListener('error', showFallback);
-    message.textContent = '视频加载中…';
-    content.append(video);
-    timeoutId = window.setTimeout(showFallback, IFRAME_FALLBACK_TIMEOUT_MS);
+  if (videoMode) {
+    status.style.display = fallback.style.display = 'none';
+    videoContent = createChartMarkerVideo(content, {
+      url: item.screenUrl ?? '',
+      loop: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoLoop : true,
+      controls: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoControls : true,
+      fit: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoFit : 'contain',
+    });
   } else if (item.screenUrl && canEmbed) {
     iframe = document.createElement('iframe');
     iframe.title = item.name || item.entityId;
@@ -256,7 +256,8 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
     builtin,
     clipHost,
     iframe,
-    video,
+    videoContent,
+    inset,
     item,
     screenOrigin: item.screenUrl ? new URL(item.screenUrl).origin : '',
     screenUrl: item.screenUrl,
@@ -268,7 +269,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       iframe?.removeEventListener('load', onLoad);
       iframe?.removeEventListener('error', showFallback);
-      if (video) { video.pause(); video.removeEventListener('loadeddata', onLoad); video.removeEventListener('error', showFallback); video.removeAttribute('src'); video.load(); }
+      videoContent?.dispose();
       builtin?.dispose();
       clipHost.remove();
     },
@@ -294,6 +295,7 @@ export type DataPlatformScreenOverlayProps = {
   runtime: SceneRuntime;
   canvas: HTMLCanvasElement | null;
   interactive?: boolean;
+  playbackActive?: boolean;
   selectedEntityIds?: readonly string[];
   onCommand?: (item: DataPlatformScreenOverlayItem, command: DataPlatformScreenCommand) => void;
 };
@@ -304,6 +306,7 @@ export function DataPlatformScreenOverlay({
   runtime,
   canvas,
   interactive = true,
+  playbackActive = true,
   selectedEntityIds = [],
   onCommand,
 }: DataPlatformScreenOverlayProps) {
@@ -312,9 +315,15 @@ export function DataPlatformScreenOverlay({
   const selectedEntityIdsRef = useRef<readonly string[]>(selectedEntityIds);
   const onCommandRef = useRef(onCommand);
   const interactiveRef = useRef(interactive);
+  const playbackActiveRef = useRef(playbackActive);
+  playbackActiveRef.current = playbackActive;
   interactiveRef.current = interactive;
   selectedEntityIdsRef.current = selectedEntityIds;
   onCommandRef.current = onCommand;
+
+  useEffect(() => {
+    if (!playbackActive) for (const entry of entriesRef.current.values()) entry.videoContent?.setPlayback(false, false);
+  }, [playbackActive]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -385,27 +394,37 @@ export function DataPlatformScreenOverlay({
         }
         if (item.markerStyle) {
           const style = item.markerStyle;
-          const factor = style.contentType === 'builtin' ? 1 : 6;
+          const factor = style.contentType === 'builtin' || entry.videoContent ? 1 : 6;
           entry.width = style.width * factor;
           entry.height = style.height * factor;
           entry.host.style.width = entry.width + 'px';
           entry.host.style.height = entry.height + 'px';
           entry.host.style.backgroundColor = style.contentType === 'builtin' && style.backgroundColor !== 'transparent' ? '#061b2b' : style.backgroundColor;
-          entry.host.style.boxShadow = style.contentType === 'builtin' ? 'none' : ('inset 0 0 0 12px ' + style.appearanceColor);
+          entry.host.style.boxShadow = style.contentType === 'builtin' ? 'none' : (`inset 0 0 0 ${entry.videoContent ? 2 : 12}px ` + style.appearanceColor);
           entry.builtin?.update(style, item.markerText ?? style.text);
+          if (entry.videoContent && style.contentType === 'video') entry.videoContent.update({
+            url: item.screenUrl ?? '', loop: style.videoLoop, controls: style.videoControls, fit: style.videoFit,
+          });
         }
         if (entry.iframe) {
           entry.iframe.style.pointerEvents = interactiveRef.current ? 'auto' : 'none';
           entry.iframe.title = item.name || item.entityId;
         }
-        if (entry.video) entry.video.style.pointerEvents = interactiveRef.current ? 'auto' : 'none';
+        entry.videoContent?.setInteractive(interactiveRef.current);
         postSelectionToScreen(entry, selectedEntityIdsRef.current);
         const corners = projectScreenCorners(scene, canvas, root, item.mesh, item.chartMarker);
         if (!corners) {
+          entry.videoContent?.setPlayback(playbackActiveRef.current, false);
           entry.host.style.display = 'none';
           continue;
         }
         const transform = createCssProjectiveMatrix(entry.width, entry.height, corners);
+        if (entry.videoContent) {
+          const rect = canvas.getBoundingClientRect();
+          const inView = !!transform && Math.max(...corners.map(p => p.x)) > 0 && Math.min(...corners.map(p => p.x)) < rect.width
+            && Math.max(...corners.map(p => p.y)) > 0 && Math.min(...corners.map(p => p.y)) < rect.height;
+          entry.videoContent.setPlayback(playbackActiveRef.current, inView);
+        }
         entry.host.style.display = transform ? 'block' : 'none';
         if (transform) {
           entry.host.style.transform = transform;
@@ -419,9 +438,9 @@ export function DataPlatformScreenOverlay({
               continue;
             }
             projectedMarkers.push({ id: item.entityId, corners });
-            // 空牌、错误提示和边框仍由 canvas 接收相机操作；只放行已加载网页的内容区。
-            if (interactiveRef.current && (entry.iframe?.style.visibility === 'visible' || entry.video?.style.visibility === 'visible')) {
-              const contentCorners = projectScreenCorners(scene, canvas, root, item.mesh, true, 16 / entry.width, 16 / entry.height);
+            // 仅放行网页、视频控件和播放/重试入口；空牌及边框仍交给场景操作。
+            if (interactiveRef.current && (entry.iframe?.style.visibility === 'visible' || entry.videoContent?.hasInteractiveContent())) {
+              const contentCorners = projectScreenCorners(scene, canvas, root, item.mesh, true, entry.inset / entry.width, entry.inset / entry.height);
               if (contentCorners) contentPolygons.set(item.entityId, contentCorners);
             }
           }

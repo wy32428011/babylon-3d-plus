@@ -836,6 +836,12 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 
 遮挡回归：`node --experimental-strip-types --test tests/editor/chartMarkerVisibility.test.mjs`；`node scripts/smoke-chart-marker-occlusion.mjs` 验证部分/完全遮挡、模型前后关系、视角变化、交叉立标、跨域点击阻挡、空牌交互及分散立标像素读取范围，截图保存到 `output/playwright/chart-marker-occlusion/`。
 
+POI 视频立标：在“图表面板 → 关联类型”选择“视频”，输入 HTTP(S) 视频直链，失焦或按 Enter 提交。支持循环播放、控制条开关及完整显示/铺满裁剪；默认静音、循环、显示控制条。编辑态显示占位信息且不请求视频，运行或发布 Viewer 场景就绪后尝试自动播放，可通过控制条开启声音；浏览器阻止播放时提供“点击播放”，网络或解码错误可重试。关闭控制条后正常播放区域保留场景操作，播放/重试入口仍可操作。视频保持现有立标的空间变换、模型遮挡与边框点击事件；手动暂停不会被逐帧刷新覆盖，离开视野或标签页后台暂停，返回时仅恢复此前应播放的内容。隐藏、删除、停止运行、切换类型/地址及场景卸载会释放媒体资源，再次显示从头加载。
+
+视频 URL 和设置随场景、SOURCE 与 DIST 保存，切换关联类型保留原大屏绑定及视频设置。视频文件由外部服务器提供，不随发布包下载上传，播放端需能访问该地址；HTTPS 页面应使用兼容的 HTTPS 视频源。使用浏览器支持编码的 MP4/WebM 直链，视频网站观看页面及 RTSP/HLS/FLV 监控流不作为首期通用支持范围。URL 会保存在场景中，请勿包含账号密码或长期敏感凭据。新增能力需升级编辑器、重新构建 Viewer 并重新发布数字孪生，旧发布包不会自动更新。
+
+视频回归：`node --test tests/editor/chartMarkerVideo.test.mjs`；完成 `npm run build` 后运行 `node scripts/smoke-chart-marker-video.mjs`，使用 MDN CC0 WebM 样片（可传入本地 WebM 文件路径）验证真实解码、编辑/运行切换、策略拦截、暂停恢复、错误处理和构建后的独立 Viewer，结果位于 `output/playwright/chart-marker-video/`。随后运行 `node node_modules/electron/cli.js tests/digitalTwin/chartMarkerVideoPublish.integration.mjs` 校验实际 SOURCE/DIST ZIP；本地固定场景验证不代替现场视频源及中台线上部署验收。
+
 ## POI 报警管理器
 
 1. 在 POI 库点击“报警管理器”或拖入 Scene，选中后配置 `POIAlarmSpawnerComponent`。目标 `Size` 支持 0–64 个槽位，调整数量保留已有槽位；从模型库拖入设备模型。`ENTITY` 可再限定具体场景设备，未限定时监听该模型全部实例；`MODEL` 始终监听该模型全部实例。不会因配置目标而创建新的设备。
