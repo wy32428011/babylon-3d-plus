@@ -12,7 +12,7 @@ MQTT broker ──topic 路由──┐
                           │     └→ SpecializedTelemetryRuntime.applyFrame (每帧)
 参数化 (modelParameters / telemetryBinding / dataDriven) ─┐        ├→ conveyorDriver / rgvDriver / stackerDriver / shuttleDriver / liftDriver
                                                         ├→ 各 driver 的 applyToModel
-fetch (LocatorFetchRuntime, 事件驱动) ────────────────────┘        └→ 货物表 stacker/conveyor/rgv/shuttle/liftCargoMeshes (全局共享)
+fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ──────────┘        └→ 货物表 stacker/conveyor/rgv/shuttle/liftCargoMeshes (全局共享)
                                                                           └→ 门面仲裁交接 adoptGlobalCargoByTask / placeCargoIntoConveyorPlatform / deliverRgvCargoToConveyorColumn / deliverLiftCargoToConveyorLayer
 ```
 
@@ -34,10 +34,13 @@ fetch (LocatorFetchRuntime, 事件驱动) ────────────�
 
 ### fetch 链路（LocatorFetchRuntime + SceneRuntime）
 
-- 场景级 `FetchConfig{url, apiKey}`（SceneDocument.ts:256-264）。
-- **纯事件驱动，无周期轮询**：① 运行预览开始一次全量 `handleFetchDriveEvent`（SceneRuntime.ts:926）；② stacker 放货完成触发单排 `handleFetchRowSync`（:947）。
-- 请求 `fetchInventoryRecords`（:971-1005）：POST `{rows}`，响应 `data.records[].result[]`。
-- 乱序防护：`latestFetchRequestByRow` 代际戳（:719-720, :960）。
+- 场景级 `FetchConfig{url, apiKey, syncIntervalMs}`（SceneDocument.ts:264-277）。`syncIntervalMs`（毫秒，默认 60000）为定时全量同步间隔，`0` 表示关闭定时、仅运行预览开始时同步一次。
+- **三个触发源**：
+  1. 运行预览开始一次全量：`handleFetchDriveEvent`（SceneRuntime.ts:1012），同时按 `syncIntervalMs` 启动定时器（`startFetchSyncTimer` :1144，幂等重启）。
+  2. 事件驱动单排：stacker 放货完成触发 `handleFetchRowSync`（:1051）；响应应用后解除格口抑制并销毁保留货箱。
+  3. 定时全量：`runScheduledFetchSync`（:1160）复用 ① 的全量体 `runFetchFullSync`（:1025）；**在途 fetch 操作计数非 0 时跳过本轮**，避免抢走单排请求的代际戳导致抑制格口/保留货清算丢失。
+- 请求 `fetchInventoryRecords`（:1080-1120）：POST `{rows}`，响应 `data.records[].result[]`；定时路径的失败提示一次性去重（`reportFetchFailure` :1133），成功响应或重新启表后复位，单排/初始化路径仍逐次提示。
+- 乱序防护：`latestFetchRequestByRow` 代际戳（声明 :782-783，打戳与校验见 `runFetchFullSync` :1025-1048）。
 
 ### 参数注入
 
@@ -46,9 +49,9 @@ fetch (LocatorFetchRuntime, 事件驱动) ────────────�
 
 ### 驱动生命周期
 
-- 注册：`drivers` 数组（SpecializedTelemetryRuntime.ts:60-79），每帧 `applyFrame`（:83-124），由 `SceneRuntime.applyDeviceTelemetryFrame`（SceneRuntime.ts:4567，`telemetryPreviewActive` 门控）调用。
-- 开始预览：`beginTelemetryPreview`(:1097) + 基线捕获 `captureReadyTelemetryPreviewBaselines`（SceneRuntime.ts:4578）。
-- 结束预览：`endTelemetryPreview`(:1114) → 销毁全部货物(:1131) → fetch 清批(:1133) → 恢复基线 → 重置三类遥测状态(:1143-1166)。
+- 注册：`drivers` 数组（SpecializedTelemetryRuntime.ts:60-79），每帧 `applyFrame`（:83-124），由 `SceneRuntime.applyDeviceTelemetryFrame`（SceneRuntime.ts:5143，`telemetryPreviewActive` 门控）调用。
+- 开始预览：`beginTelemetryPreview`(:1261) + 基线捕获 `captureReadyTelemetryPreviewBaselines`（SceneRuntime.ts:5167）。
+- 结束预览：`endTelemetryPreview`(:1278) → **先停 fetch 定时器**（`stopFetchSyncTimer` :1280，必须早于 `hadPreviewState` 早退与 `latestFetchRequestByRow.clear()`：清表后若 tick 重写代际，在途响应会被放行、批次在编辑态复活）→ 销毁全部货物(:1297) → fetch 清批(:1298-1301) → 恢复基线(:1305-1309) → 重置三类遥测状态(:1310-1314)。
 
 ### 共享状态与交接门面
 
@@ -267,22 +270,26 @@ Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管�
 **共享实例策略**：带脚本的 shelf 走 **owned-container 独占**（`resolveModelAssetSharedInstancingPolicy`，SharedModelAssetCache.ts:157-180）；仅无脚本纯静态模型才 shared-instance。
 
 ### 数据源
-**不消费 MQTT**。泊位货物状态全部来自 HTTP fetch；MQTT 仅驱动 stacker，stacker 的 `front_x/front_y/front_z` 经 `findLocatorByDevice`（SceneRuntime.ts:3541-3560）按 `deviceAssetCode + rowNumber + 列/层范围` 命中货格。
+**不消费 MQTT**。泊位货物状态全部来自 HTTP fetch；MQTT 仅驱动 stacker，stacker 的 `front_x/front_y/front_z` 经 `findLocatorByDevice`（SceneRuntime.ts:3861）按 `deviceAssetCode + rowNumber + 列/层范围` 命中货格。
 
 ### fetch 响应驱动
 - 记录格式 `FetchContainerRecord`（LocatorFetchRuntime.ts:16-28）：`containerCode/containerType/isEmpty/row/column/layer/tier/stackingRow/stackingColumn/stackingLayer`。
 - `applyRecords`(:89-135)：按 `rowNumber` 过滤 + `!isEmpty` + 排除抑制格口；`matchRule`(:138-151) 按 `attributeName`（空则比 `containerType`）匹配 `ModelGeneratorRule` → 目标模板，缺省 `defaultTarget`，无生成器回退内置 cube。
-- 映射：`column/layer` → `getLocatorBoxWorldMatrix`（SceneRuntime.ts:3602-3619）→ 格口底面中心世界矩阵；越界跳过(:298-311)。
+- 映射：`column/layer` → `getLocatorBoxWorldMatrix`（SceneRuntime.ts:3953）→ 格口底面中心世界矩阵；越界跳过(:298-311)。
 - 渲染：按 `targetSignature` 分组合批（`syncBatches` :161-188），逐 mesh 抽顶点烘焙（`createBatch` :191-250），`thinInstanceSetBuffer` 全量重建(:299-325)。
 
 ### 动画与时序
-货架本体无动画（脚本 onUpdate 仅参数变化时重应用）。fetch 货物显隐为**瞬时**全量重建 thinInstance buffer，无过渡。时序纯事件驱动：预览开始一次全量 + stacker 放货单排同步。
+货架本体无动画（脚本 onUpdate 仅参数变化时重应用）。fetch 货物显隐为**瞬时**更新 thinInstance buffer，无过渡；数据未变时按 `targetSignature` 命中已有批次只重写矩阵，不重建 mesh、不闪烁。时序 = 预览开始一次全量 + stacker 放货单排同步 + 按 `syncIntervalMs` 的定时全量（`0` 关闭）。
 
 ### 状态机
-格口态 = fetch 渲染（record 有/无） ∪ `suppressedCellKeys`（LocatorFetchRuntime.ts:69，stacker 取放期间抑制） ∪ `fetchKeptCargoByRow` 保留货（SceneRuntime.ts:723-724）。无"锁定"态。
+格口态 = fetch 渲染（record 有/无） ∪ `suppressedCellKeys`（LocatorFetchRuntime.ts:69，stacker 取放期间抑制） ∪ `fetchKeptCargoByRow` 保留货（SceneRuntime.ts:793）。无"锁定"态。
 
 ### 交接（与 stacker 联动）
 取货：command 1 + movement 1/3 伸叉瞬间 `beginStackerFetch`（stackerDriver.ts:743-787）刷货并 `suppressFetchCellForLocator`(:770)。放货：command 3/4 锁 `frontCargoFetchRow`(:682-691) → 解绑落箱位 → `completeStackerPlace` → 保留货 → 单排 fetch 拉回 → 解除抑制 → 销毁保留货。
+
+**格口抑制的解除有两条路径**（抑制集合无 TTL，仅在运行预览期有效）：
+1. **单排同步全清**：放货完成的单排同步响应应用后 `clearSuppressedCells()`（SceneRuntime.ts:1070），整批抑制一次性解除。
+2. **数据确认逐格解除**：任何 fetch 响应应用时，若某抑制格口在本排最新 records 中无记录，说明服务端已确认该格为空、设备交接完成，该格抑制自动解除（`LocatorFetchRuntime.applyRecords` 的 `releaseAbsentSuppressedCells`）。取货不留存排号、不触发单排同步，其抑制靠这条路径解除，否则该格会永久屏蔽后续入库的新货。**该排仍存在待清算保留货箱（`fetchKeptCargoByRow` 非空）时禁用路径 2**——此刻服务端尚未确认放货结果，"本排无该格记录"不可信，解除会与保留货箱双显。抑制集合变化触发的重放（`suppressCell` / `clearSuppressedCells`）恒不解除，沿用旧数据重画。
 
 ### 扩展点
 新 fetch 字段 → 加 `FetchContainerRecord`，`matchRule` 的 `attributeName` 可直接引用新字段配规则，无需改匹配代码；新泊位渲染 → `LocatorFetchRuntime.syncBatches/createBatch` + `SceneRuntime.handleFetchDriveEvent/handleFetchRowSync`；新维度映射 → `builtInSlotBinding` 声明。

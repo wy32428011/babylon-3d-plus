@@ -264,11 +264,19 @@ export type SceneSettings = {
 export type FetchConfig = {
   url: string;
   apiKey: string;
+  /** 定时全量库存同步间隔（毫秒）；0 表示关闭定时，仅在进入运行预览时同步一次。 */
+  syncIntervalMs: number;
 };
+
+/** 定时全量同步间隔取值边界；0 保留为"关闭定时"语义，上限 1 小时。 */
+export const FETCH_SYNC_INTERVAL_MIN_MS = 0;
+export const FETCH_SYNC_INTERVAL_MAX_MS = 3_600_000;
+export const DEFAULT_FETCH_SYNC_INTERVAL_MS = 60_000;
 
 export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   url: '',
   apiKey: '',
+  syncIntervalMs: DEFAULT_FETCH_SYNC_INTERVAL_MS,
 };
 
 export type MqttAdapterConfig =
@@ -1015,7 +1023,18 @@ export function sanitizeFetchConfig(config: unknown): FetchConfig {
   const obj = config as Record<string, unknown>;
   const url = typeof obj.url === 'string' ? obj.url.trim().slice(0, 2048) : '';
   const apiKey = typeof obj.apiKey === 'string' ? obj.apiKey.trim().slice(0, 256) : '';
-  return { url, apiKey };
+  return { url, apiKey, syncIntervalMs: sanitizeFetchSyncIntervalMs(obj.syncIntervalMs) };
+}
+
+/** 归一化 fetch 定时同步间隔：非数值/非法回退默认，越界收敛到边界，0 保留为"关闭定时"。 */
+export function sanitizeFetchSyncIntervalMs(value: unknown): number {
+  if (typeof value !== 'number') return DEFAULT_FETCH_SYNC_INTERVAL_MS;
+  return clampFiniteNumber(
+    Math.trunc(value),
+    FETCH_SYNC_INTERVAL_MIN_MS,
+    FETCH_SYNC_INTERVAL_MAX_MS,
+    DEFAULT_FETCH_SYNC_INTERVAL_MS,
+  );
 }
 
 /** 归一化场景 MQTT 配置，地址为空但 IP 存在时自动补齐默认 WebSocket 地址。 */

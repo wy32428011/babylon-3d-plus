@@ -23,15 +23,15 @@
 | G1 | 生成器回归纯模板库 | `ModelGeneratorComponent` 只保留 `defaultTarget` / `rules`，删除 `fetchBindings`、`dataSource` 与 `metadataTtlSeconds`（死配置，依据见 §4.2） |
 | G2 | 定位线框担负 fetch 触发与渲染调用 | 定位线框新增 fetch 数据驱动配置（启用开关 + 货箱生成器），运行预览时由定位线框自身发起请求、匹配规则、驱动 thinInstance 渲染 |
 | G3 | 绑定方向全局统一 | MQTT 设备 `telemetryBinding.cargoGeneratorId`、Fetch 定位线框 `locator.fetchDrive.cargoGeneratorId`，均为"消费方 → 生成器"；生成器不再持有任何外向指针 |
-| G4 | 按排过滤 + 两级请求 | 定位线框只渲染本排数据；初始化一次全量请求按排分发，堆垛机放货/取货完成触发该排单排同步（§6.2）；起始列等现有字段继续参与库位映射 |
+| G4 | 按排过滤 + 三级请求 | 定位线框只渲染本排数据；初始化一次全量请求按排分发，堆垛机放货/取货完成触发该排单排同步，另按 `fetchConfig.syncIntervalMs` 定时全量（§6.2）；起始列等现有字段继续参与库位映射 |
 
 ### 1.3 非目标
 
-- `fetchConfig`（url / apiKey）保持**全局场景配置**（工具栏"配置 Fetch 请求"对话框），不搬到定位线框。
+- `fetchConfig`（url / apiKey / syncIntervalMs）保持**全局场景配置**（工具栏"配置 Fetch 请求"对话框），不搬到定位线框。
 - 请求协议不变：POST、`X-API-Key`、`data.records` 结构保持现状；`rows` 参数语义已与服务端确认（不传 = 全量返回，传入 = 按排返回）。
 - thinInstance 合批渲染管线、资产加载管线（`loadModelTemplateForFetch`）不变。
 - MQTT 链路（`telemetryBinding` / `deviceTelemetry` / 货箱交接）不变；仅放货/取货完成处新增单排同步触发分支（§6.3）。
-- 手动刷新 / 轮询不做：事件驱动覆盖主要同步路径，手动全量刷新按钮列为后续增强（§10 O1）。
+- 手动全量刷新按钮不做（§10 O1）；轮询由后期追加的定时全量承担：间隔随 `fetchConfig.syncIntervalMs` 配置（默认 60000，`0` 关闭），触发源见 §6.2-3。
 
 ---
 
@@ -92,7 +92,7 @@
 | 生成器职责 | 模板库 + fetch 调度（触发 + 绑定渲染目标） | **纯模板库**（defaultTarget + rules） |
 | fetch 绑定方向 | 生成器 `fetchBindings[]` → 定位线框 | 定位线框 `fetchDrive.cargoGeneratorId` → 生成器 |
 | 数据源区分 | 生成器 `dataSource` 字段 | 删除；差异只体现在**消费方如何调用规则**（MQTT 快照字段 vs fetch record.containerType） |
-| fetch 触发编排 | 生成器（每个 fetch 生成器一次全量请求） | 定位线框驱动：初始化一次全量按排分发；放货/取货完成单排同步（§6.2） |
+| fetch 触发编排 | 生成器（每个 fetch 生成器一次全量请求） | 定位线框驱动：初始化一次全量按排分发；放货/取货完成单排同步；按 `syncIntervalMs` 定时全量（§6.2） |
 | 数据范围 | 全部 records 渲染到全部绑定线框 | 每个定位线框按自身 `rowNumber` 过滤 records |
 | 多生成器 | fetchBindings 各自指向线框，语义混乱 | 任意多生成器，被设备/定位线框自由引用，风格与 MQTT 统一 |
 
@@ -232,16 +232,22 @@ applyRecords(records, locatorEntry, locatorComponent, generatorComponent | null,
 3. **删除 per-binding 循环**：每个 record 只产生一个实例（自身线框），`CargoInstance` 的 `locatorAssetId` 字段删除，矩阵直接由 `getLocatorBoxWorldMatrix(自身, column, layer)` 计算，Identity 兜底分支删除。
 4. `matchRule` 保持私有实现（fetch record 非 `DeviceTelemetrySnapshot`，不复用 `resolveModelGeneratorTargetFromSnapshot`）；`loadModelTemplateForFetch`（SceneRuntime.ts:612-655）原样保留并改名 `loadModelTemplateForLocatorFetch` 之类，签名不变。
 
-### 6.2 请求编排：初始化全量 + 事件驱动单排同步
+### 6.2 请求编排：初始化全量 + 事件驱动单排同步 + 定时全量
 
-服务端语义已确认：**请求体 `rows` 不传/空数组 = 返回全量数据；传入排号 = 只返回该排**。据此分两级：
+服务端语义已确认：**请求体 `rows` 不传/空数组 = 返回全量数据；传入排号 = 只返回该排**。据此分三级：
 
-1. **初始化全量同步**（进入运行预览，`SceneViewPanel.tsx:878` 调用点改名）：
-   - `SceneRuntime.handleFetchDriveEvent(fetchConfig)`：无 fetchDrive 定位线框时直接返回；否则只发**一次**全量请求（`{ rows: [] }`）。
+1. **初始化全量同步**（进入运行预览，`SceneViewPanel.tsx:2173`）：
+   - `SceneRuntime.handleFetchDriveEvent(fetchConfig)`：无 fetchDrive 定位线框时直接返回；否则只发**一次**全量请求（`{ rows: [] }`），并按 `fetchConfig.syncIntervalMs` 启动定时器。
    - 响应按 `record.row` 分组，分发到各 `LocatorFetchRuntime.applyRecords`；本排无数据的定位线框收到空数组并清空已有批次。
 2. **事件驱动单排同步**：`SceneRuntime.handleFetchRowSync(rowNumber)`：
    - 请求体 `{ rows: [String(rowNumber)] }`，响应只分发给该排的 fetchDrive 定位线框（同排多台共享一次请求）。
    - 触发源：堆垛机放货/取货完成（§6.3）；后续可扩展手动刷新入口（§10 O1）。
+3. **定时全量同步**：`SceneRuntime.runScheduledFetchSync` → 复用第 1 级的全量体 `runFetchFullSync`。
+   - 间隔 `fetchConfig.syncIntervalMs`（毫秒，默认 60000，`0` 关闭定时）；运行预览期间配置不可改（`guardRuntimePreviewMutation`），故启动时读取一次即可，重复调用 `handleFetchDriveEvent` 幂等重启。
+   - **避让规则**：`fetchInFlightOperations` 覆盖"请求 + 响应应用"整段，计数非 0 时跳过本轮。单排同步的响应应用后会解除格口抑制并销毁保留货箱（§6.3），若定时全量在此窗口抢走代际戳，单排响应被丢弃 → 抑制不解除、滞留货不销毁，库位卡死。
+   - 失败提示一次性去重（`reportFetchFailure`），成功响应或重新启表后复位；定时路径静默重试，单排/初始化路径仍逐次提示。
+   - 定时器在 `endTelemetryPreview` 清理，且必须排在该方法的 `hadPreviewState` 早退与 `latestFetchRequestByRow.clear()` **之前**（清表后 tick 重写代际会让在途响应被放行）。
+   - 浏览器后台节流可能导致 tick 晚于间隔触发：间隔是最小间隔、尽力而为，不保证精确周期。
 3. **请求函数上移**：HTTP 逻辑从 `ModelGeneratorFetchRuntime` 抽出为 SceneRuntime 私有 helper（如 `fetchInventoryRecords(fetchConfig, rows)`），失败日志沿用 `pushLog`；`LocatorFetchRuntime` 不再持有 `fetchConfig`。
 4. **乱序防护**：每次请求携带递增代际戳，响应仅在代际最新时应用，避免初始化全量与单排同步并发时旧数据覆盖新状态。
 5. `SceneRuntime.ts:2678-2683` 的建/销逻辑从 `syncModelGeneratorEntity` 移到 `syncLocatorEntity`：`fetchDrive?.enabled` 时创建 `LocatorFetchRuntime`，否则 dispose 并移除。`syncModelGeneratorEntity` 中的对应分支删除。
@@ -252,7 +258,10 @@ applyRecords(records, locatorEntry, locatorComponent, generatorComponent | null,
 原则：**启用 fetchDrive 的定位线框，其库位货物的唯一渲染来源是 fetch 数据**；MQTT 只驱动设备运动与叉上货物。否则放货完成后 MQTT 货箱留在库位（现状）会与 fetch 渲染的同一件货双重显示。
 
 - **放货完成锚点**：`applyStackerForkCargoMotion` 中 `cargo.placedLocatorKey = snapshot.targetLocationKey`（SceneRuntime.ts:3778-3781）。目标定位线框启用 fetchDrive 时：**跳过 `placedLocatorKey` 赋值**（货箱不再留库位），并触发 `handleFetchRowSync(locator.rowNumber)`；该 MQTT 货箱保留到单排同步响应应用时再销毁，避免网络延迟造成视觉空窗。
-- **取货完成**：同样触发目标排单排同步，被取货物随 fetch 响应从渲染中移除；取货完成的命令沿检测按同一模式挂接（实现时对齐 `getStackerCargoPlacingProgress` 的命令判定）。
+- **取货完成**：**不触发单排同步**（实现与 `beginStackerFetch` 注释一致：取货不留存排号，同步不由取货完成触发）。源格口在伸叉瞬间被 `suppressFetchCellForLocator` 抑制，货物视觉转由设备侧渲染，货架格口即表现为空；让取货触发同步并不安全——服务端此刻常未更新，返回"该格仍有货"会在解除抑制后与叉上货物双显。抑制的解除见下条。
+- **格口抑制的解除**（抑制集合只在运行预览期有效，无 TTL）：
+  1. 放货完成的单排同步响应应用后 `clearSuppressedCells()` 整批解除；
+  2. 任何 fetch 响应应用时，本排最新 records 中无记录的抑制格口逐格自动解除（`LocatorFetchRuntime.applyRecords` 的 `releaseAbsentSuppressedCells`）——覆盖取货路径，以及"外部往该格入库"的可见性；该排仍有待清算保留货箱（`fetchKeptCargoByRow` 非空）时禁用，此刻服务端尚未确认放货结果，"本排无该格记录"不可信。抑制集合变化触发的重放恒不解除。
 - **未启用 fetchDrive 的定位线框**：现有 MQTT 落位/交接语义完全不变。
 
 ### 6.4 生成器组件查找
@@ -325,5 +334,8 @@ applyRecords(records, locatorEntry, locatorComponent, generatorComponent | null,
 | --- | --- | --- |
 | R1 `record.row` 匹配语义 | `ContainerInfo.row` 为 string，与 `rowNumber`（number）的对应关系需与后端确认（前导零、多排写法如 "1,2"）；`rows` 请求参数语义已确认（不传 = 全量，传入 = 按排） | 本期按 `String(row).trim() === String(rowNumber)` 严格匹配；确认后如需多值再扩展 |
 | R2 初始化与单排同步乱序 | 放货完成瞬间若初始化全量响应尚未返回，旧数据可能覆盖新状态 | 请求携带递增代际戳，过期响应直接丢弃（§6.2-4） |
-| O1 手动刷新 / 轮询 | 事件驱动（放货/取货完成）已覆盖主要库存变化路径，但仍存在外部改库存的盲区 | 本期不做；后续可在工具栏加"全量刷新"按钮，直接重走初始化全量路径 |
+| O1 手动刷新 / 轮询 | 事件驱动（放货/取货完成）已覆盖主要库存变化路径，但仍存在外部改库存的盲区 | **已实现定时全量**：`fetchConfig.syncIntervalMs`（默认 60000，`0` 关闭）驱动，编辑器预览与数字孪生发布包 Viewer 都生效；手动刷新按钮仍不做 |
+| R3 定时 tick 抢走单排代际 | 放货瞬间若定时全量恰好发出，单排响应会被代际校验丢弃 → `clearSuppressedCells()` 不执行（格口永久抑制）、`disposeFetchKeptCargoForRow()` 不执行（MQTT 货箱滞留） | 在途 fetch 操作计数非 0 时跳过本轮 tick（§6.2-3）；计数必须覆盖"请求 + 响应应用"整段，只包 `fetch` 不足以关掉窗口 |
+| R4 单排失败后的残留清算 | 单排请求失败时，保留货箱与整排抑制要等该排下一次放货才清算 | **已缓解**：任何 fetch 响应应用时，本排最新 records 中无记录的抑制格口自动解除（数据确认逐格解除，见 §6.3）；该排仍有待清算保留货箱时禁用该解除，避免与保留货箱双显。取货不再触发单排同步，其抑制完全依赖这条路径 |
+| R5 取货抑制残留 | 取货只抑制源格口、不触发同步；若一直等不到"该格已空"的响应，该格会持续屏蔽后续入库新货 | 已由 R4 的数据确认解除覆盖：服务端确认该格空即解除；服务端始终返回该格有货则说明货确实还在，抑制本就正确 |
 | O2 遥测中断后的滞留货箱 | MQTT 货箱销毁为事件驱动，遥测整体中断时货物滞留（现状即如此，与删除 TTL 无关——TTL 本就无逻辑消费） | 本期不做；如需时间兜底，基于 `telemetryBinding.staleAfterMs` 另行设计 |

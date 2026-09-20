@@ -8,6 +8,7 @@ type FetchDriveRuntime = {
 /**
  * 发布包内的地址作为初始值；数据中台设置了项目级地址时才实时覆盖。
  * 数字孪生 Viewer 不继承编辑器填写的 API Key；公开 DIST 包也会在生成时剥离该字段。
+ * 定时同步间隔沿用发布包内的场景配置（逐字段枚举，避免将来新增字段被动下发）。
  */
 export function resolvePublishedFetchConfig(
   publishedFetchConfig: FetchConfig,
@@ -16,6 +17,7 @@ export function resolvePublishedFetchConfig(
   return {
     url: runtimeConfig?.apiBaseUrl ?? publishedFetchConfig.url,
     apiKey: '',
+    syncIntervalMs: publishedFetchConfig.syncIntervalMs,
   };
 }
 

@@ -93,9 +93,11 @@ export class LocatorFetchRuntime {
     generatorComponent: ModelGeneratorComponent | null,
     getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
     loadModelTemplate: LoadModelTemplate,
+    options: { releaseAbsentSuppressedCells?: boolean } = {},
   ): Promise<void> {
     if (this.disposed) return;
 
+    const releaseAbsentSuppressedCells = options.releaseAbsentSuppressedCells === true;
     this.lastApplyContext = {
       records,
       locatorEntry,
@@ -106,9 +108,19 @@ export class LocatorFetchRuntime {
     };
 
     const rowKey = String(locatorComponent.rowNumber).trim();
-    const ownRecords = records.filter(
-      (record) => String(record.row ?? '').trim() === rowKey
-        && !record.isEmpty
+    const rowRecords = records.filter((record) => String(record.row ?? '').trim() === rowKey);
+    // 服务端已确认本排无货的抑制格口视为设备交接已完成，解除抑制；否则该格口会永久屏蔽后续入库的新货
+    if (releaseAbsentSuppressedCells && this.suppressedCellKeys.size > 0) {
+      const occupiedCellKeys = new Set(
+        rowRecords.filter((record) => !record.isEmpty)
+          .map((record) => createFetchCellKey(record.column, record.layer)),
+      );
+      for (const key of [...this.suppressedCellKeys]) {
+        if (!occupiedCellKeys.has(key)) this.suppressedCellKeys.delete(key);
+      }
+    }
+    const ownRecords = rowRecords.filter(
+      (record) => !record.isEmpty
         && !this.suppressedCellKeys.has(createFetchCellKey(record.column, record.layer)),
     );
 
@@ -359,6 +371,8 @@ export class LocatorFetchRuntime {
       context.generatorComponent,
       context.getLocatorBoxWorldMatrix,
       context.loadModelTemplate,
+      // 重放沿用上次数据，不做"无记录即解除"判定：否则 suppressCell 后的立即重放会把刚建立的抑制解除
+      { releaseAbsentSuppressedCells: false },
     );
   }
 

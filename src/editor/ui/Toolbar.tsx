@@ -316,6 +316,19 @@ export function Toolbar(props: ToolbarProps) {
     }));
   }
 
+  /** 将 fetch 定时同步间隔转换为稳定非负整数（毫秒）；0 表示关闭定时，异常输入保持原值。 */
+  function handleFetchSyncIntervalChange(rawValue: string): void {
+    if (rawValue === '') return;
+
+    const intervalMs = Number(rawValue);
+    if (!Number.isFinite(intervalMs)) return;
+
+    setFetchDraft((current) => ({
+      ...current,
+      syncIntervalMs: Math.max(0, Math.trunc(intervalMs)),
+    }));
+  }
+
   /** 将当前测试的物理清理串行化，供字段变化后的快速重测等待。 */
   function queueMqttConnectionTestCancellation(): Promise<void> {
     const previousHandle = mqttConnectionTestHandleRef.current;
@@ -987,7 +1000,7 @@ export function Toolbar(props: ToolbarProps) {
             }}
           >
             <h3>Fetch 配置</h3>
-            <p className="muted">配置 fetch 数据源的基础请求地址和 API Key。</p>
+            <p className="muted">配置 fetch 数据源的基础请求地址、API Key 与定时全量同步间隔。</p>
             <label className="fetch-config-dialog-row">
               <span>请求地址</span>
               <input
@@ -1008,6 +1021,18 @@ export function Toolbar(props: ToolbarProps) {
                 onChange={(event) => setFetchDraft({ ...fetchDraft, apiKey: event.target.value })}
               />
             </label>
+            <label className="fetch-config-dialog-row">
+              <span>同步间隔(ms)</span>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={fetchDraft.syncIntervalMs}
+                placeholder="60000"
+                onChange={(event) => handleFetchSyncIntervalChange(event.target.value)}
+              />
+            </label>
+            <p className="muted">默认 60000（约 1 分钟）；填 0 表示只在进入运行预览时同步一次。</p>
             <div className="fetch-config-dialog-actions">
               <button type="button" onClick={() => setFetchConfigDialogOpen(false)}>取消</button>
               <button className="fetch-config-dialog-primary" type="submit">保存</button>

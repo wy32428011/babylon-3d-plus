@@ -5663,7 +5663,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
       return {
         ...result,
-        logs: prependLog(state.logs, `Fetch 配置已保存：${fetchConfig.url || '未设置地址'}`),
+        logs: prependLog(
+          state.logs,
+          `Fetch 配置已保存：${fetchConfig.url || '未设置地址'}，同步间隔 ${fetchConfig.syncIntervalMs > 0 ? `${fetchConfig.syncIntervalMs}ms` : '仅预览时同步一次'}`,
+        ),
       };
     });
   },

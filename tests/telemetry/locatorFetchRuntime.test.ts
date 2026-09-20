@@ -197,3 +197,98 @@ test('GLB 镜像模板：批次 mesh 继承源 sideOrientation（CW），索引�
     engine.dispose();
   }
 });
+
+/** 等一拍宏任务：suppressCell 触发的重放是 fire-and-forget，避免与后续断言竞争。 */
+const flushReplay = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+const rejectTemplateLoad = () => Promise.reject(new Error('内置几何体目标不应走模型模板加载'));
+
+test('服务端确认该格已空后解除抑制：该格后续入库重新可见', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const runtime = new LocatorFetchRuntime(scene, 'loc1');
+    await runtime.applyRecords(
+      [createRecord(3, 2)], locatorEntry, locatorComponent, null, () => Matrix.Identity(), rejectTemplateLoad,
+    );
+
+    runtime.suppressCell(3, 2);
+    await flushReplay();
+    assert.equal(findBatchMeshes(scene).length, 0, '设备接管该格口期间不渲染 fetch 货物');
+
+    // 服务端确认该格已空（本排无该格记录）→ 视为交接完成，解除抑制
+    await runtime.applyRecords(
+      [], locatorEntry, locatorComponent, null, () => Matrix.Identity(), rejectTemplateLoad,
+      { releaseAbsentSuppressedCells: true },
+    );
+    await runtime.applyRecords(
+      [createRecord(3, 2)], locatorEntry, locatorComponent, null, () => Matrix.Identity(), rejectTemplateLoad,
+      { releaseAbsentSuppressedCells: true },
+    );
+
+    const batchMeshes = findBatchMeshes(scene);
+    assert.equal(batchMeshes.length, 1);
+    assert.equal(batchMeshes[0].thinInstanceCount, 1, '解除抑制后该格新入库货物必须重新渲染');
+    runtime.dispose();
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
+test('该排仍有待清算保留货箱时，服务端空数据不解除抑制', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const runtime = new LocatorFetchRuntime(scene, 'loc1');
+    await runtime.applyRecords(
+      [createRecord(3, 2)], locatorEntry, locatorComponent, null, () => Matrix.Identity(), rejectTemplateLoad,
+    );
+
+    runtime.suppressCell(3, 2);
+    await flushReplay();
+
+    // 放货完成瞬间：本排存在保留货箱、单排同步未回，服务端此刻的空数据不可信
+    await runtime.applyRecords(
+      [], locatorEntry, locatorComponent, null, () => Matrix.Identity(), rejectTemplateLoad,
+      { releaseAbsentSuppressedCells: false },
+    );
+    await runtime.applyRecords(
+      [createRecord(3, 2)], locatorEntry, locatorComponent, null, () => Matrix.Identity(), rejectTemplateLoad,
+      { releaseAbsentSuppressedCells: false },
+    );
+
+    assert.equal(findBatchMeshes(scene).length, 0, '待清算期间解除抑制会与保留货箱双显');
+    runtime.dispose();
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
+test('抑制时的重放沿用旧数据，不会按“本排无记录”误解除抑制', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const runtime = new LocatorFetchRuntime(scene, 'loc1');
+    // 旧数据：本排没有任何记录
+    await runtime.applyRecords(
+      [], locatorEntry, locatorComponent, null, () => Matrix.Identity(), rejectTemplateLoad,
+    );
+
+    runtime.suppressCell(3, 2);
+    await flushReplay();
+
+    // 若重放错误地按“无记录即解除”判定，此处会渲染出接手期间的货物
+    await runtime.applyRecords(
+      [createRecord(3, 2)], locatorEntry, locatorComponent, null, () => Matrix.Identity(), rejectTemplateLoad,
+      { releaseAbsentSuppressedCells: true },
+    );
+
+    assert.equal(findBatchMeshes(scene).length, 0, '重放不得解除抑制');
+    runtime.dispose();
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});

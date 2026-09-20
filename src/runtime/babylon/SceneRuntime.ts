@@ -81,6 +81,7 @@ import {
   getSceneSkyboxEntity,
   getSceneSkyboxSettings,
   isPointInsideSkyboxSphere,
+  sanitizeFetchSyncIntervalMs,
   type FetchConfig,
   type SceneDocument,
   type SceneEnvironmentSettings,
@@ -782,6 +783,12 @@ export class SceneRuntime {
   private readonly latestFetchRequestByRow = new Map<number, number>();
   /** 运行预览开始时捕获的 fetch 配置，供事件驱动的单排同步复用。 */
   private fetchConfigSnapshot: FetchConfig | null = null;
+  /** 定时全量同步定时器；由 handleFetchDriveEvent 启动，endTelemetryPreview 停止。 */
+  private fetchSyncTimer: ReturnType<typeof setInterval> | null = null;
+  /** 在途 fetch 操作计数（覆盖请求与响应应用两段）：非 0 时定时 tick 跳过本轮。 */
+  private fetchInFlightOperations = 0;
+  /** 定时同步失败提示去重标志；成功响应或重新启表后复位。 */
+  private fetchSyncFailureReported = false;
   /** 已放货到 fetch 驱动定位线框、等待单排同步响应后再销毁的 MQTT 货箱（按排号分组）。 */
   private readonly fetchKeptCargoByRow = new Map<number, Set<string>>();
   private readonly lights = new Map<string, Light>();
@@ -1001,24 +1008,42 @@ export class SceneRuntime {
     }
   }
 
-  /** 进入运行预览时执行一次全量库存同步；无 fetch 驱动定位线框时直接返回。 */
+  /** 进入运行预览时执行一次全量库存同步，并按配置启动定时全量同步；无 fetch 驱动定位线框时直接返回。 */
   async handleFetchDriveEvent(fetchConfig: FetchConfig): Promise<void> {
     this.fetchConfigSnapshot = fetchConfig;
     const targets = this.collectFetchDriveLocators();
-    if (targets.length === 0) return;
-
-    const generation = ++this.fetchRequestGeneration;
-    for (const target of targets) {
-      this.latestFetchRequestByRow.set(target.locatorComponent.rowNumber, generation);
+    if (targets.length === 0) {
+      this.stopFetchSyncTimer();
+      return;
     }
 
-    const records = await this.fetchInventoryRecords(fetchConfig, []);
-    if (records === null) return;
+    this.startFetchSyncTimer(fetchConfig);
+    await this.runFetchFullSync(fetchConfig, targets);
+  }
 
-    for (const target of targets) {
-      // 全量响应到达时该排可能已有更新的单排请求，跳过避免旧数据覆盖新状态
-      if (this.latestFetchRequestByRow.get(target.locatorComponent.rowNumber) !== generation) continue;
-      this.applyFetchRecordsToLocator(records, target);
+  /** 全量库存同步体：一次全量请求 + 按排代际校验分发；初始化与定时 tick 共用。 */
+  private async runFetchFullSync(
+    fetchConfig: FetchConfig,
+    targets: Array<{ entityId: string; locatorEntry: LocatorRuntimeEntry; locatorComponent: LocatorComponent }>,
+    options: { quietFailure?: boolean } = {},
+  ): Promise<void> {
+    const release = this.beginFetchOperation();
+    try {
+      const generation = ++this.fetchRequestGeneration;
+      for (const target of targets) {
+        this.latestFetchRequestByRow.set(target.locatorComponent.rowNumber, generation);
+      }
+
+      const records = await this.fetchInventoryRecords(fetchConfig, [], options.quietFailure === true);
+      if (records === null) return;
+
+      for (const target of targets) {
+        // 全量响应到达时该排可能已有更新的单排请求，跳过避免旧数据覆盖新状态
+        if (this.latestFetchRequestByRow.get(target.locatorComponent.rowNumber) !== generation) continue;
+        this.applyFetchRecordsToLocator(records, target);
+      }
+    } finally {
+      release();
     }
   }
 
@@ -1034,20 +1059,25 @@ export class SceneRuntime {
     this.latestFetchRequestByRow.set(rowNumber, generation);
 
     void (async () => {
-      const records = await this.fetchInventoryRecords(fetchConfig, [String(rowNumber)]);
-      if (records === null) return;
-      if (this.latestFetchRequestByRow.get(rowNumber) !== generation) return;
-      for (const target of targets) {
-        this.applyFetchRecordsToLocator(records, target);
-        // 响应应用后再解除格口抑制：此时 records 已反映取/放结果，解除不会闪出旧货物
-        this.locatorFetchRuntimes.get(target.entityId)?.clearSuppressedCells();
+      const release = this.beginFetchOperation();
+      try {
+        const records = await this.fetchInventoryRecords(fetchConfig, [String(rowNumber)]);
+        if (records === null) return;
+        if (this.latestFetchRequestByRow.get(rowNumber) !== generation) return;
+        for (const target of targets) {
+          this.applyFetchRecordsToLocator(records, target);
+          // 响应应用后再解除格口抑制：此时 records 已反映取/放结果，解除不会闪出旧货物
+          this.locatorFetchRuntimes.get(target.entityId)?.clearSuppressedCells();
+        }
+        this.disposeFetchKeptCargoForRow(rowNumber);
+      } finally {
+        release();
       }
-      this.disposeFetchKeptCargoForRow(rowNumber);
     })();
   }
 
   /** 统一发 fetch 库存请求：dataflow 接口忽略 rows 始终全量返回，按排过滤在客户端完成；失败时记日志并返回 null。 */
-  private async fetchInventoryRecords(fetchConfig: FetchConfig, rows: string[]): Promise<FetchContainerRecord[] | null> {
+  private async fetchInventoryRecords(fetchConfig: FetchConfig, rows: string[], quietFailure = false): Promise<FetchContainerRecord[] | null> {
     if (!fetchConfig.url) return null;
 
     try {
@@ -1061,7 +1091,7 @@ export class SceneRuntime {
       });
 
       if (!response.ok) {
-        this.pushLog(`Fetch 请求失败：HTTP ${response.status}`);
+        this.reportFetchFailure(`Fetch 请求失败：HTTP ${response.status}`, quietFailure);
         return null;
       }
 
@@ -1071,19 +1101,70 @@ export class SceneRuntime {
       };
       const groups = payload.data?.records;
       if (!Array.isArray(groups)) {
-        this.pushLog('Fetch 响应缺少 data.records。');
+        this.reportFetchFailure('Fetch 响应缺少 data.records。', quietFailure);
         return null;
       }
       const records: FetchContainerRecord[] = [];
       for (const group of groups) {
         if (Array.isArray(group?.result)) records.push(...group.result);
       }
+      // 任一请求成功即视为链路恢复，允许下一轮定时失败重新提示
+      this.fetchSyncFailureReported = false;
       return records;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.pushLog(`Fetch 处理异常：${message}`);
+      this.reportFetchFailure(`Fetch 处理异常：${message}`, quietFailure);
       return null;
     }
+  }
+
+  /** 标记一次 fetch 操作在途；返回的释放函数必须放在 finally 中调用，保证计数成对。 */
+  private beginFetchOperation(): () => void {
+    this.fetchInFlightOperations += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.fetchInFlightOperations -= 1;
+    };
+  }
+
+  /** fetch 失败提示：定时路径只提示一次，成功响应或重新启表后复位，避免每分钟刷屏。 */
+  private reportFetchFailure(message: string, quiet: boolean): void {
+    if (!quiet) {
+      this.pushLog(message);
+      return;
+    }
+    if (this.fetchSyncFailureReported) return;
+    this.fetchSyncFailureReported = true;
+    this.pushLog(`${message}（定时同步将持续重试，后续相同失败不再提示）`);
+  }
+
+  /** 按 syncIntervalMs 启动（或重启）定时全量同步；间隔 ≤ 0 表示关闭定时、仅在预览开始时同步一次。 */
+  private startFetchSyncTimer(fetchConfig: FetchConfig): void {
+    this.stopFetchSyncTimer();
+    this.fetchSyncFailureReported = false;
+    const intervalMs = sanitizeFetchSyncIntervalMs(fetchConfig.syncIntervalMs);
+    if (intervalMs <= 0) return;
+    this.fetchSyncTimer = setInterval(() => { void this.runScheduledFetchSync(); }, intervalMs);
+  }
+
+  /** 停止定时全量同步；幂等。 */
+  private stopFetchSyncTimer(): void {
+    if (this.fetchSyncTimer === null) return;
+    clearInterval(this.fetchSyncTimer);
+    this.fetchSyncTimer = null;
+  }
+
+  /** 定时 tick：在途请求（尤其单排同步）未结束时跳过本轮，避免抢走代际戳致抑制解除与保留货清算丢失。 */
+  private async runScheduledFetchSync(): Promise<void> {
+    if (this.disposed || this.fetchSyncTimer === null) return;
+    const fetchConfig = this.fetchConfigSnapshot;
+    if (!fetchConfig?.url) return;
+    if (this.fetchInFlightOperations > 0) return;
+    const targets = this.collectFetchDriveLocators();
+    if (targets.length === 0) return;
+    await this.runFetchFullSync(fetchConfig, targets, { quietFailure: true });
   }
 
   /** 收集当前启用了 fetch 数据驱动的定位线框及其运行时快照。 */
@@ -1117,6 +1198,8 @@ export class SceneRuntime {
       ? this.modelGenerators.get(generatorId)?.component ?? null
       : null;
 
+    // 该排仍有等待单排同步清算的保留货箱时服务端尚未确认放货结果，"本排无该格记录"不可信，抑制保持
+    const releaseAbsentSuppressedCells = (this.fetchKeptCargoByRow.get(target.locatorComponent.rowNumber)?.size ?? 0) === 0;
     void fetchRuntime.applyRecords(
       records,
       target.locatorEntry,
@@ -1124,6 +1207,7 @@ export class SceneRuntime {
       generatorComponent,
       (locator, column, layer) => this.getLocatorBoxWorldMatrix(locator, column, layer),
       (modelTarget) => this.loadModelTemplateForFetch(modelTarget),
+      { releaseAbsentSuppressedCells },
     );
   }
 
@@ -1195,6 +1279,9 @@ export class SceneRuntime {
 
   /** 结束 MQTT 运行预览；该方法幂等，按驱动关闭、运行态清理、模型恢复的顺序回到编辑态。 */
   endTelemetryPreview(): void {
+    // 停表必须先于早退与代际表清理：tick 会重写 latestFetchRequestByRow，清表后再停会让在途响应被放行、批次在编辑态复活
+    this.stopFetchSyncTimer();
+    this.fetchSyncFailureReported = false;
     const hadPreviewState = this.telemetryPreviewActive
       || [...this.models.values()].some((model) => model.telemetryPreviewBaseline)
       || [...this.generatedOutputOwners.values()].some((owner) => (
