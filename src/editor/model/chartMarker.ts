@@ -12,6 +12,10 @@ export const CHART_MARKER_DEFAULTS: Readonly<Required<ChartMarkerComponent>> = O
   geometryBasis: 'upright',
   screenName: '',
   contentType: 'builtin',
+  videoUrl: '',
+  videoLoop: true,
+  videoControls: true,
+  videoFit: 'contain',
   text: '图表立标',
   fontSize: 36,
   marquee: false,
@@ -153,9 +157,23 @@ const NUMBER_LIMITS = {
 } as const;
 const ENUM_VALUES = {
   geometryBasis: ['ground', 'upright'],
-  contentType: ['builtin', 'screen'], appearance: ['line', 'column', 'none'],
+  contentType: ['builtin', 'screen', 'video'], videoFit: ['contain', 'cover'], appearance: ['line', 'column', 'none'],
   driveMode: ['none', 'data'], clickAction: ['none', 'focus', 'refresh'],
 } as const;
+
+/** 允许未配置状态和带查询参数的直链，拒绝本机路径、临时地址及内嵌账号密码。 */
+export function normalizeChartMarkerVideoUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (trimmed.length > 4096) throw new Error('视频地址不能超过 4096 个字符');
+  try {
+    const url = new URL(trimmed);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.href.length > 4096) throw new Error();
+    return url.href;
+  } catch {
+    throw new Error('视频地址须为不含账号密码的 HTTP(S) 视频直链');
+  }
+}
 
 /** 严格校验场景或属性更新输入；保留缺省字段，返回独立组件，非法字段抛出错误。 */
 export function normalizeChartMarker(value: unknown): ChartMarkerComponent {
@@ -170,6 +188,11 @@ export function normalizeChartMarker(value: unknown): ChartMarkerComponent {
     if (!('value' in descriptor)) throw new Error('图表立标字段不允许访问器: ' + key);
     const field = descriptor.value as unknown;
     if (field === undefined) continue;
+    if (key === 'videoUrl') {
+      if (typeof field !== 'string') throw new Error('视频地址必须为字符串');
+      normalized.videoUrl = normalizeChartMarkerVideoUrl(field);
+      continue;
+    }
     if (key === 'clickEvents') {
       normalized.clickEvents = normalizeClickEvents(field);
       continue;

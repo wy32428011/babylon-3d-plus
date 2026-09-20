@@ -2812,6 +2812,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         />
         {overlayViewport && overlayRuntime ? (
           <DataPlatformScreenOverlay
+            playbackActive={isRuntimePreview}
             canvas={canvasRef.current}
             interactive={isRuntimePreview}
             onCommand={handleDataPlatformScreenCommand}

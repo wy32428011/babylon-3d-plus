@@ -1232,7 +1232,7 @@ export function PlayerApp() {
   }, [sceneFullscreen]);
 
   return (
-    <main className="player-root" ref={playerRootRef} style={{ backgroundColor }}>
+    <main className={`player-root${isDigitalTwin ? ' is-digital-twin' : ''}`} ref={playerRootRef} style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
       {phase === 'ready' && viewportRef.current && runtimeRef.current ? (
         <DataPlatformScreenOverlay

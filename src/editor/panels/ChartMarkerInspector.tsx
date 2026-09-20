@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'r
 import type { Entity } from '../model/Entity';
 import { ChartMarkerEventsInspector } from './ChartMarkerEventsInspector';
 import type { ChartMarkerComponent } from '../model/components';
-import { resolveChartMarker } from '../model/chartMarker';
+import { normalizeChartMarkerVideoUrl, resolveChartMarker } from '../model/chartMarker';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { useEditorStore } from '../store/editorStore';
 import { SearchableSelect } from '../ui/SearchableSelect';
@@ -77,6 +77,23 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
   const entities = useEditorStore((state) => state.scene.entities);
   const marker = resolveChartMarker((alarmAppearance ? entity.components.alarmManager?.marker : entity.components.chartMarker) ?? {});
   const screen = entity.components.dataPlatformScreen;
+  const [videoUrlDraft, setVideoUrlDraft] = useState(marker.videoUrl);
+  const [videoUrlError, setVideoUrlError] = useState('');
+  useEffect(() => {
+    setVideoUrlDraft(marker.videoUrl);
+    setVideoUrlError('');
+  }, [entity.id, marker.videoUrl]);
+  function commitVideoUrl(value: string): void {
+    if (disabled) return;
+    try {
+      const videoUrl = normalizeChartMarkerVideoUrl(value);
+      setVideoUrlDraft(videoUrl);
+      setVideoUrlError('');
+      commit({ videoUrl });
+    } catch (cause) {
+      setVideoUrlError(cause instanceof Error ? cause.message : '视频地址无效');
+    }
+  }
   const modelSources = Object.values(entities).filter((item) => item.components.modelAsset);
 
   useEffect(() => {
@@ -242,12 +259,29 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
         <legend>图表面板</legend>
         {!alarmAppearance ? <label className="inspector-row">
           <span>关联类型</span>
-          <select value={marker.contentType} onChange={(event) => commit({ contentType: event.target.value as ChartMarkerComponent['contentType'] })}>
+          <select aria-label="关联类型" value={marker.contentType} onChange={(event) => commit({ contentType: event.target.value as ChartMarkerComponent['contentType'] })}>
             <option value="builtin">内置样式</option>
             <option value="screen">数据中台大屏</option>
+            <option value="video">视频</option>
           </select>
         </label> : null}
-        <label className="inspector-row">
+        {!alarmAppearance && marker.contentType === 'video' ? <>
+          <label className="inspector-row">
+            <span>视频 URL</span>
+            <input type="url" value={videoUrlDraft} maxLength={4096} placeholder="https://example.com/video.mp4"
+              aria-invalid={!!videoUrlError} onChange={event => setVideoUrlDraft(event.target.value)}
+              onBlur={event => commitVideoUrl(event.currentTarget.value)} onKeyDown={event => {
+                if (event.key === 'Enter') event.currentTarget.blur();
+                if (event.key === 'Escape') { setVideoUrlDraft(marker.videoUrl); setVideoUrlError(''); }
+              }} />
+          </label>
+          {videoUrlError ? <p className="chart-marker-error" role="alert">{videoUrlError}</p> : null}
+          <label className="inspector-row"><span>循环播放</span><input type="checkbox" checked={marker.videoLoop} onChange={event => commit({ videoLoop: event.target.checked })} /></label>
+          <label className="inspector-row"><span>显示控制条</span><input type="checkbox" checked={marker.videoControls} onChange={event => commit({ videoControls: event.target.checked })} /></label>
+          <label className="inspector-row"><span>画面适配</span><select value={marker.videoFit} onChange={event => commit({ videoFit: event.target.value as 'contain' | 'cover' })}><option value="contain">完整显示</option><option value="cover">铺满裁剪</option></select></label>
+          <p className="muted">运行或发布后静音自动播放，可通过控制条开启声音。支持浏览器可解码的 HTTP(S) 视频直链；视频文件不随发布包上传，播放端需能访问该地址。请勿填写含长期凭据的地址。</p>
+        </> : null}
+        {marker.contentType !== 'video' || alarmAppearance ? <><label className="inspector-row">
           <span>文本内容</span>
           <input type="text" maxLength={4096} value={marker.text} onChange={(event) => commit({ text: event.target.value })} />
         </label>
@@ -255,7 +289,7 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
         <label className="inspector-row">
           <span>开启跑马灯</span>
           <input type="checkbox" checked={marker.marquee} onChange={(event) => commit({ marquee: event.target.checked })} />
-        </label>
+        </label></> : null}
         <div className={`chart-marker-background${backgroundDragOver ? ' is-drag-over' : ''}`}
           aria-label="图表立标背景图片槽位"
           aria-disabled={disabled}
@@ -314,7 +348,7 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
           <span>面向摄像机</span>
           <input type="checkbox" checked={marker.faceCamera} onChange={(event) => commit({ faceCamera: event.target.checked })} />
         </label>
-        {!alarmAppearance ? <div
+        {!alarmAppearance && marker.contentType !== 'video' ? <div
           className={`chart-marker-screen-slot${dragOver ? ' is-drag-over' : ''}`}
           aria-label="图表立标大屏槽位"
           aria-disabled={disabled}
@@ -331,7 +365,7 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
           <strong>{screen ? marker.screenName || '已绑定大屏' : '将图表库大屏拖到这里'}</strong>
           <span>{screen ? '拖入其他大屏可替换内容' : '拖入后自动切换为数据中台大屏'}</span>
         </div> : null}
-        {!alarmAppearance && screen ? (
+        {!alarmAppearance && marker.contentType !== 'video' && screen ? (
           <div className="chart-marker-actions">
             <button type="button" onClick={() => window.dispatchEvent(new CustomEvent(CHART_MARKER_REFRESH_EVENT, { detail: entity.id }))}>刷新内容</button>
             <button type="button" onClick={() => { bind(entity.id, null); setError(''); }}>清空大屏</button>

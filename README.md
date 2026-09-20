@@ -14,7 +14,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 
 ## 当前功能
 
-- 区域视角：场景属性新增独立的“区域视角”列表，支持保存多个视角、定位、重命名、更新为当前视角和删除，并支持撤销/重做。调整已保存视角时先定位，再旋转、平移或缩放相机，最后点击“更新为当前视角”；更新与重命名保留稳定 ID。每个场景最多 256 个视角，名称最长 80 字且不可重复，保存透视/正交投影和完整轨道位姿；原有初始视角与场景级可视距离独立保留。
+- 区域视角：场景属性新增独立的“区域视角”列表，支持保存多个视角、定位、重命名、更新为当前视角、拖拽排序、上移/下移和删除，并支持撤销/重做。按住名称左侧手柄拖到目标视角的上方或下方，插入线提示落点，松开鼠标即可调整顺序；一次拖拽可一次撤销，也可使用“上移 / 下移”按钮。保存并重新打开场景后顺序保留，重新发布后大屏区域视角下拉框沿用该顺序。调整已保存视角时先定位，再旋转、平移或缩放相机，最后点击“更新为当前视角”；排序、更新与重命名保留稳定 ID。每个场景最多 256 个视角，名称最长 80 字且不可重复，保存透视/正交投影和完整轨道位姿；原有初始视角与场景级可视距离独立保留。
 
 - 区域视角随场景文件及 SOURCE/DIST 保存。大屏组件库中的“区域视角下拉框”读取当前 Viewer 实际加载版本的视角，选择后切换相机；修改本地视角后需要保存、重新发布数字孪生并重新加载大屏。切换会停止占用相机的巡检、漫游与相机回放，保留实时数据和设备动画。手动调整相机后清除下拉选中状态，可再次选择原视角恢复。
 
@@ -555,7 +555,7 @@ npm run build
 - 2026-09-02：Toolbar 新增场景全屏按钮（运行/停止旁），`F11` 同步切换；全屏时隐藏 Hierarchy/Inspector/Project/Console，Scene 画布铺满窗口并请求系统全屏，失败时退化为窗口内最大化。运行预览可继续停止场景；发布 Viewer 右上角提供相同入口。`Esc` 或再次点击退出，返回首页前会先退出全屏。
 - 2026-09-01：数字孪生 Project 图表库接入已绑定数据中台项目的大屏配置，只自动分页同步完整大屏卡片，不解析大屏内部图表；未绑定项目不发起请求且清空跨项目展示，网络失败时保留旧项目索引并提供重试入口。
 - 2026-08-28：数据中台普通/组合模型改为 Sidecar 增量同步，打开场景先关联本地缓存且不等待后台下载；内容未变化时保持稳定 `assetRevision`，只对真实运行时变化的模型执行选择性刷新，避免重复加载和重新合批。
-- 2026-08-28：发布后的数字孪生 Viewer 默认隐藏自动巡检与手动漫游浮窗；两者只能由大屏组件对应按钮发送的 `startAutoPatrol` / `startManualRoam` 命令打开，并保持互斥显示。鼠标左右键组合仅切换运行状态层，状态层继续每秒刷新 Babylon FPS；普通独立 Web 部署和编辑器运行预览保持原有显示行为。
+- 2026-08-28：发布后的数字孪生 Viewer 默认隐藏自动巡检与手动漫游浮窗；两者只能由大屏组件对应按钮发送的 `startAutoPatrol` / `startManualRoam` 命令打开，并保持互斥显示。两个浮窗在桌面和窄屏下均位于右下角，展开和收起时保持位置，触屏漫游动作按钮向上避让；升级后需重新发布数字孪生并刷新大屏生效。鼠标左右键组合仅切换运行状态层，状态层继续每秒刷新 Babylon FPS；普通独立 Web 部署和编辑器运行预览保持原有显示行为。
 - 2026-08-28：自动巡检取消场景障碍与地面可达性检测，编辑录点、运行预览和发布 Viewer 均允许路线直接穿过模型。
 - 2026-08-27：加快打开场景后的环境模型加载：环境 GLB 不再挤占设备模型 4 路并发，会话内同源环境只解析一次；`editor-asset://` 对 GLB/贴图启用 ETag 协商缓存；视口创建时预热 Draco WASM；发布 Viewer 设备场景可先就绪，环境后台显现。可用 `npm run optimize:environment-glb` 把厂区 PNG 转成 KTX2。
 - 2026-08-27：场景未摆放手动漫游 POI 时，运行预览和发布 Viewer 不再显示漫游面板，也不对外暴露 `startManualRoam`；只有摆放出生点后才开放人物漫游。
@@ -837,6 +837,12 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 背景回归：`node --test tests/editor/chartMarkerBackground.test.mjs tests/digitalTwin/syncedImageRead.test.mjs`；`npm run build:electron` 后执行 `node tests/editor/chartMarkerBackground.integration.mjs`，使用真实 Electron preload/主进程读取夹具验证各格式拖入、无色切换、撤销重做和保存重开；`node tests/editor/chartMarkerTransparency.integration.mjs` 验证透明背景、半透明图片、前后模型遮挡及动态内容。截图保存到 `output/playwright/chart-marker-background/` 和 `output/playwright/chart-marker-transparency/`。
 
 遮挡回归：`node --experimental-strip-types --test tests/editor/chartMarkerVisibility.test.mjs`；`node scripts/smoke-chart-marker-occlusion.mjs` 验证部分/完全遮挡、模型前后关系、视角变化、交叉立标、跨域点击阻挡、空牌交互及分散立标像素读取范围，截图保存到 `output/playwright/chart-marker-occlusion/`。
+
+POI 视频立标：在“图表面板 → 关联类型”选择“视频”，输入 HTTP(S) 视频直链，失焦或按 Enter 提交。支持循环播放、控制条开关及完整显示/铺满裁剪；默认静音、循环、显示控制条。编辑态显示占位信息且不请求视频，运行或发布 Viewer 场景就绪后尝试自动播放，可通过控制条开启声音；浏览器阻止播放时提供“点击播放”，网络或解码错误可重试。关闭控制条后正常播放区域保留场景操作，播放/重试入口仍可操作。视频保持现有立标的空间变换、模型遮挡与边框点击事件；手动暂停不会被逐帧刷新覆盖，离开视野或标签页后台暂停，返回时仅恢复此前应播放的内容。隐藏、删除、停止运行、切换类型/地址及场景卸载会释放媒体资源，再次显示从头加载。
+
+视频 URL 和设置随场景、SOURCE 与 DIST 保存，切换关联类型保留原大屏绑定及视频设置。视频文件由外部服务器提供，不随发布包下载上传，播放端需能访问该地址；HTTPS 页面应使用兼容的 HTTPS 视频源。使用浏览器支持编码的 MP4/WebM 直链，视频网站观看页面及 RTSP/HLS/FLV 监控流不作为首期通用支持范围。URL 会保存在场景中，请勿包含账号密码或长期敏感凭据。新增能力需升级编辑器、重新构建 Viewer 并重新发布数字孪生，旧发布包不会自动更新。
+
+视频回归：`node --test tests/editor/chartMarkerVideo.test.mjs`；完成 `npm run build` 后运行 `node scripts/smoke-chart-marker-video.mjs`，使用 MDN CC0 WebM 样片（可传入本地 WebM 文件路径）验证真实解码、编辑/运行切换、策略拦截、暂停恢复、错误处理和构建后的独立 Viewer，结果位于 `output/playwright/chart-marker-video/`。随后运行 `node node_modules/electron/cli.js tests/digitalTwin/chartMarkerVideoPublish.integration.mjs` 校验实际 SOURCE/DIST ZIP；本地固定场景验证不代替现场视频源及中台线上部署验收。
 
 ## POI 报警管理器
 
