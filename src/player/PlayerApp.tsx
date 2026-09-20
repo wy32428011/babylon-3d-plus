@@ -4,6 +4,8 @@ import { CHART_MARKER_REFRESH_EVENT } from '../shared/chartMarkerEmbed';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { deserializeScene } from '../editor/project/SceneSerializer';
 import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '../runtime/assets/editorAssetUrl';
+import { fetchRuntimeAsset } from '../runtime/assets/runtimeAssetFetch';
+import { installPublishedViewerCache } from './publishedBabylonCache';
 import { createBabylonViewport, isSoftwareWebGLFallbackAllowed, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../runtime/babylon/cameraControlStandard';
@@ -129,9 +131,9 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 以 no-store 方式读取 JSON，避免部署配置刷新后仍命中浏览器缓存。 */
+/** 入口配置始终读取网络；只有已确认发布版本的静态文件允许持久缓存。 */
 async function fetchJson(url: URL, signal: AbortSignal): Promise<unknown> {
-  const response = await fetch(url, { cache: 'no-store', signal });
+  const response = await fetchRuntimeAsset(url.href, { cache: 'no-store', signal });
   if (!response.ok) throw new Error(`读取 ${url.pathname} 失败：HTTP ${response.status}。`);
   return JSON.parse(await readUtf8ResponseText(response, `文件 ${url.pathname}`)) as unknown;
 }
@@ -178,9 +180,9 @@ function applyDigitalTwinRuntimeConfig(
     },
   };
 }
-/** 以 no-store 方式读取场景文本并保留 SceneSerializer 的统一校验入口。 */
+/** 按已确认的发布版本读取场景，保留 SceneSerializer 的统一校验入口。 */
 async function fetchText(url: URL, signal: AbortSignal): Promise<string> {
-  const response = await fetch(url, { cache: 'no-store', signal });
+  const response = await fetchRuntimeAsset(url.href, { cache: 'no-store', signal });
   if (!response.ok) throw new Error(`读取 ${url.pathname} 失败：HTTP ${response.status}。`);
   return readUtf8ResponseText(response, `文件 ${url.pathname}`);
 }
@@ -322,6 +324,7 @@ export function PlayerApp() {
 
     const abortController = new AbortController();
     let disposed = false;
+    let publishedCache: ReturnType<typeof installPublishedViewerCache> = null;
     let viewport: BabylonViewport | null = null;
     let runtime: SceneRuntime | null = null;
     let autoPatrolPlayback: AutoPatrolPlaybackController | null = null;
@@ -438,6 +441,7 @@ export function PlayerApp() {
         const projectRuntimeConfig = await fetchDigitalTwinRuntimeConfig(baseConfig, abortController.signal);
         const parsedConfig = applyDigitalTwinRuntimeConfig(baseConfig, projectRuntimeConfig);
         if (disposed || initialLoadFailed) return;
+        publishedCache = installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href);
         interactionController = new DigitalTwinInteractionController({
           parentWindow: window.parent,
           viewerOrigin: window.location.origin,
@@ -501,6 +505,7 @@ export function PlayerApp() {
           initialSensitivity: sceneDocument.sceneSettings.sensitivity,
         });
         viewportRef.current = viewport;
+        publishedCache?.attach(viewport.scene);
         applySceneBackground(viewport, parsedConfig.page.backgroundColor);
         viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
         viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
@@ -976,6 +981,7 @@ export function PlayerApp() {
         runtime?.dispose();
         viewport?.dispose();
         clearDeploymentAssetManifest();
+        publishedCache?.dispose();
       }
     };
 
@@ -1021,6 +1027,7 @@ export function PlayerApp() {
       runtime?.dispose();
       viewport?.dispose();
       clearDeploymentAssetManifest();
+      publishedCache?.dispose();
     };
   }, [pauseHistoryReplay]);
 

@@ -1132,6 +1132,7 @@ async function run() {
     const selectedDistEntries = await readZipEntries(mock.getUploadedPackage(SELECTED_PROJECT_REQUEST_ID, 'DIST'));
     const selectedRuntimeConfig = JSON.parse(selectedDistEntries.get('runtime-config.json').toString('utf8'));
     assert.equal(selectedRuntimeConfig.page.title, '发布集成测试项目');
+    assert.match(selectedRuntimeConfig.cacheRevision, /^[0-9a-f-]{36}$/, 'DIST 保留发布时生成的持久缓存版本标识');
     const selectedDistScene = JSON.parse(selectedDistEntries.get('project/scene.json').toString('utf8'));
     const selectedDistManifest = JSON.parse(selectedDistEntries.get('project/asset-manifest.json').toString('utf8'));
     const cadAssets = selectedDistManifest.assets.filter((asset) => asset.kind === 'cad');

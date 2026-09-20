@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
 import { getSceneShadowBakeErrorContract, getSceneShadowBakeSignatureContract } from '../shared/sceneShadowBakeContract.js';
 import { promises as fs } from 'node:fs';
@@ -1256,6 +1256,8 @@ function createDisabledSceneMqttConfig(): PlainObject {
 function createRuntimeConfig(exportName: string, mqtt: PlainObject): PlainObject {
   return {
     version: 1,
+    // 每次生成发布包更新；页面刷新只读取这个小配置以确认缓存版本。
+    cacheRevision: randomUUID(),
     page: {
       title: exportName,
       loadingText: '场景加载中...',
