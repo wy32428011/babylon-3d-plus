@@ -1,4 +1,5 @@
 import * as BabylonCore from '@babylonjs/core';
+import { fetchRuntimeAsset } from '../assets/runtimeAssetFetch';
 import type { TransformNode } from '@babylonjs/core';
 import type * as TypeScriptModule from 'typescript';
 import type { ModelAssetComponent, ModelScriptAsset } from '../../editor/model/components';
@@ -307,7 +308,7 @@ async function fetchScriptText(scriptAsset: ModelScriptAsset, assetRevision: str
   }
   scriptLoadDiagnostics.readRequests += 1;
   const request = (async () => {
-    const response = await fetch(url);
+    const response = await fetchRuntimeAsset(url);
     if (!response.ok) throw new Error(`无法读取脚本：${response.status}`);
     return readUtf8ResponseText(response, `模型脚本 ${scriptAsset.name}`);
   })();

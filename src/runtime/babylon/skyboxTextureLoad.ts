@@ -1,4 +1,5 @@
 import { MAX_SKYBOX_DECODE_SOURCE_BYTES } from './skyboxDecodedValidation.ts';
+import { fetchRuntimeAsset } from '../assets/runtimeAssetFetch.ts';
 
 type DisposableTexture = { dispose(): void; onDisposeObservable: { addOnce(callback: () => void): unknown } };
 type TextureLoadOptions<T> = {
@@ -26,7 +27,7 @@ export async function readSkyboxTextureBlob(url: string, signal: AbortSignal,
   const limit = Math.min(maxBytes, MAX_SKYBOX_DECODE_SOURCE_BYTES);
   if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('天空盒读取上限必须是正整数。');
   if (signal.aborted) throw abortError();
-  const response = await fetch(url, { signal });
+  const response = await fetchRuntimeAsset(url, { signal }, onProgress, limit);
   const tooLarge = () => new Error(`天空盒文件超过读取上限（${limit === MAX_SKYBOX_DECODE_SOURCE_BYTES ? '512 MiB' : `${limit} 字节`}）。`);
   const lengthHeader = response.headers.get('content-length')?.trim();
   const declaredLength = lengthHeader && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : null;
