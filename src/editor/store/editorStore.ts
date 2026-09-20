@@ -571,6 +571,8 @@ type EditorState = {
   requestRegionView: (kind: RegionViewRequest['kind'], name: string, regionViewId?: string) => void;
   consumeRegionViewRequest: (requestId: string, camera?: SceneRegionCamera, error?: string) => void;
   renameRegionView: (id: string, name: string) => void;
+  moveRegionView: (id: string, direction: 'up' | 'down') => void;
+  reorderRegionView: (id: string, targetId: string, position: 'before' | 'after') => void;
   deleteRegionView: (id: string) => void;
   consumeCameraPoseSaveRequest: (requestId: string, pose: SceneCameraPose) => void;
   requestCameraReset: () => void;
@@ -3502,6 +3504,31 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         return { ...executeCommand(state.scene, state.history, updateSceneRegionViewsCommand(views, next, '重命名区域视角')),
           regionViewMessage: `已重命名：${name.trim()}` };
       } catch (error) { return { regionViewMessage: error instanceof Error ? error.message : '重命名失败' }; }
+    });
+  },
+  moveRegionView: (id, direction) => {
+    const views = get().scene.sceneSettings.regionViews;
+    const index = views.findIndex(view => view.id === id);
+    const target = views[index + (direction === 'up' ? -1 : 1)];
+    if (index < 0 || !target) return;
+    get().reorderRegionView(id, target.id, direction === 'up' ? 'before' : 'after');
+  },
+  reorderRegionView: (id, targetId, position) => {
+    set(state => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '调整区域视角顺序');
+      if (state.regionViewRequest) return state;
+      const views = state.scene.sceneSettings.regionViews;
+      const index = views.findIndex(view => view.id === id);
+      const targetIndex = views.findIndex(view => view.id === targetId);
+      if (index < 0 || targetIndex < 0 || index === targetIndex) return state;
+      const insertionIndex = targetIndex + (position === 'after' ? 1 : 0) - (index < targetIndex ? 1 : 0);
+      if (insertionIndex === index) return state;
+      const next = [...views];
+      next.splice(index, 1);
+      next.splice(insertionIndex, 0, views[index]);
+      const label = `调整区域视角顺序：${views[index].name}`;
+      return { ...executeCommand(state.scene, state.history, updateSceneRegionViewsCommand(views, next, label)),
+        regionViewMessage: `${label}，请保存场景` };
     });
   },
   deleteRegionView: id => {

@@ -18,6 +18,30 @@ body,
 .player-root {
   position: relative;
 }
+.player-root.is-digital-twin {
+  --player-control-inset: 14px;
+}
+/* 数字孪生的两个浮窗互斥显示，共用右下角锚点。 */
+.player-root.is-digital-twin .manual-roam-controls,
+.player-root.is-digital-twin .auto-patrol-controls {
+  top: auto;
+  right: var(--player-control-inset);
+  bottom: var(--player-control-inset);
+  left: auto;
+  max-height: calc(100% - 2 * var(--player-control-inset));
+}
+.player-root.is-digital-twin .manual-roam-controls {
+  overflow: auto;
+}
+/* 触屏动作按钮向上避让右下角收起后的漫游浮窗。 */
+.player-root.is-digital-twin .manual-roam-touch-actions {
+  margin-bottom: 44px;
+}
+@media (max-width: 520px) {
+  .player-root.is-digital-twin {
+    --player-control-inset: 8px;
+  }
+}
 .player-root:fullscreen,
 .player-root:-webkit-full-screen {
   width: 100vw;
