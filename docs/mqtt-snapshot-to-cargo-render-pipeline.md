@@ -180,7 +180,7 @@ export const dataDriven = { device: { devType: 'conveyor' }, cargo: { travel: { 
 | `syncModelGeneratorResolvedTarget()` | 目标签名比对：命中复用，未命中异步 `ImportMesh` 加载 GLB（含单位换算 + .model.ts 脚本）挂到货箱 root |
 | `ensureGeneratedCargoFallback()` | 无生成器/加载失败 → `MeshBuilder.CreateBox` 内置立方体 |
 
-模板缓存按生成器实例隔离，多生成器互不串扰。
+模板缓存按生成器实例隔离，多生成器互不串扰。场景默认生成器只改 `sceneSettings`、不触发实体全量同步，须由 `SceneViewPanel` 的 sceneSettings 同步 effect 调用 `SceneRuntime.syncDefaultCargoGenerator()` 显式推送；运行时每帧重新解析回退，字段更新后货箱下一帧即换模板。
 
 ### 5.2 各设备货箱独立
 

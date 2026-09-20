@@ -3399,6 +3399,11 @@ export class SceneRuntime {
     this.environmentRuntime.sync(environment);
   }
 
+  /** 单独同步场景级默认模型生成器：该设置只改 sceneSettings，不触发实体全量同步，须由编辑器显式推送。 */
+  syncDefaultCargoGenerator(defaultCargoGeneratorId: string | null): void {
+    this.defaultCargoGeneratorId = defaultCargoGeneratorId ?? null;
+  }
+
   /** 单独同步场景级阴影，避免 Inspector 调参触发全场实体重建。 */
   syncShadows(settings: SceneDocument['sceneSettings']['shadows'], document = this.shadowDocument): void {
     if (document) this.shadowDocument = document;
