@@ -17,7 +17,7 @@ export function resolvePublishedFetchConfig(
   return {
     url: runtimeConfig?.apiBaseUrl ?? publishedFetchConfig.url,
     apiKey: '',
-    syncIntervalMs: publishedFetchConfig.syncIntervalMs,
+    syncIntervalSeconds: publishedFetchConfig.syncIntervalSeconds,
   };
 }
 

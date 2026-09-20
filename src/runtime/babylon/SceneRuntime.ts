@@ -81,7 +81,7 @@ import {
   getSceneSkyboxEntity,
   getSceneSkyboxSettings,
   isPointInsideSkyboxSphere,
-  sanitizeFetchSyncIntervalMs,
+  sanitizeFetchSyncIntervalSeconds,
   type FetchConfig,
   type SceneDocument,
   type SceneEnvironmentSettings,
@@ -1140,13 +1140,13 @@ export class SceneRuntime {
     this.pushLog(`${message}（定时同步将持续重试，后续相同失败不再提示）`);
   }
 
-  /** 按 syncIntervalMs 启动（或重启）定时全量同步；间隔 ≤ 0 表示关闭定时、仅在预览开始时同步一次。 */
+  /** 按 syncIntervalSeconds 启动（或重启）定时全量同步；0 表示关闭定时、仅在预览开始时同步一次。 */
   private startFetchSyncTimer(fetchConfig: FetchConfig): void {
     this.stopFetchSyncTimer();
     this.fetchSyncFailureReported = false;
-    const intervalMs = sanitizeFetchSyncIntervalMs(fetchConfig.syncIntervalMs);
-    if (intervalMs <= 0) return;
-    this.fetchSyncTimer = setInterval(() => { void this.runScheduledFetchSync(); }, intervalMs);
+    const intervalSeconds = sanitizeFetchSyncIntervalSeconds(fetchConfig.syncIntervalSeconds);
+    if (intervalSeconds <= 0) return;
+    this.fetchSyncTimer = setInterval(() => { void this.runScheduledFetchSync(); }, intervalSeconds * 1000);
   }
 
   /** 停止定时全量同步；幂等。 */

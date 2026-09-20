@@ -316,16 +316,16 @@ export function Toolbar(props: ToolbarProps) {
     }));
   }
 
-  /** 将 fetch 定时同步间隔转换为稳定非负整数（毫秒）；0 表示关闭定时，异常输入保持原值。 */
+  /** 将 fetch 定时同步间隔（秒）转换为稳定非负整数；0 表示关闭定时，异常输入保持原值。 */
   function handleFetchSyncIntervalChange(rawValue: string): void {
     if (rawValue === '') return;
 
-    const intervalMs = Number(rawValue);
-    if (!Number.isFinite(intervalMs)) return;
+    const intervalSeconds = Number(rawValue);
+    if (!Number.isFinite(intervalSeconds)) return;
 
     setFetchDraft((current) => ({
       ...current,
-      syncIntervalMs: Math.max(0, Math.trunc(intervalMs)),
+      syncIntervalSeconds: Math.max(0, Math.trunc(intervalSeconds)),
     }));
   }
 
@@ -1022,17 +1022,17 @@ export function Toolbar(props: ToolbarProps) {
               />
             </label>
             <label className="fetch-config-dialog-row">
-              <span>同步间隔(ms)</span>
+              <span>同步间隔(秒)</span>
               <input
                 type="number"
                 min="0"
-                step="1000"
-                value={fetchDraft.syncIntervalMs}
-                placeholder="60000"
+                step="1"
+                value={fetchDraft.syncIntervalSeconds}
+                placeholder="60"
                 onChange={(event) => handleFetchSyncIntervalChange(event.target.value)}
               />
             </label>
-            <p className="muted">默认 60000（约 1 分钟）；填 0 表示只在进入运行预览时同步一次。</p>
+            <p className="muted">默认 60 秒；最小 10 秒，填 0 表示只在进入运行预览时同步一次。</p>
             <div className="fetch-config-dialog-actions">
               <button type="button" onClick={() => setFetchConfigDialogOpen(false)}>取消</button>
               <button className="fetch-config-dialog-primary" type="submit">保存</button>

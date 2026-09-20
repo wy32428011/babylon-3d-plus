@@ -34,9 +34,9 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### fetch 链路（LocatorFetchRuntime + SceneRuntime）
 
-- 场景级 `FetchConfig{url, apiKey, syncIntervalMs}`（SceneDocument.ts:264-277）。`syncIntervalMs`（毫秒，默认 60000）为定时全量同步间隔，`0` 表示关闭定时、仅运行预览开始时同步一次。
+- 场景级 `FetchConfig{url, apiKey, syncIntervalSeconds}`（SceneDocument.ts:264-277）。`syncIntervalSeconds`（秒，默认 60、最小 10）为定时全量同步间隔，`0` 表示关闭定时、仅运行预览开始时同步一次。
 - **三个触发源**：
-  1. 运行预览开始一次全量：`handleFetchDriveEvent`（SceneRuntime.ts:1012），同时按 `syncIntervalMs` 启动定时器（`startFetchSyncTimer` :1144，幂等重启）。
+  1. 运行预览开始一次全量：`handleFetchDriveEvent`（SceneRuntime.ts:1012），同时按 `syncIntervalSeconds` 启动定时器（`startFetchSyncTimer` :1144，幂等重启）。
   2. 事件驱动单排：stacker 放货完成触发 `handleFetchRowSync`（:1051）；响应应用后解除格口抑制并销毁保留货箱。
   3. 定时全量：`runScheduledFetchSync`（:1160）复用 ① 的全量体 `runFetchFullSync`（:1025）；**在途 fetch 操作计数非 0 时跳过本轮**，避免抢走单排请求的代际戳导致抑制格口/保留货清算丢失。
 - 请求 `fetchInventoryRecords`（:1080-1120）：POST `{rows}`，响应 `data.records[].result[]`；定时路径的失败提示一次性去重（`reportFetchFailure` :1133），成功响应或重新启表后复位，单排/初始化路径仍逐次提示。
@@ -279,7 +279,7 @@ Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管�
 - 渲染：按 `targetSignature` 分组合批（`syncBatches` :161-188），逐 mesh 抽顶点烘焙（`createBatch` :191-250），`thinInstanceSetBuffer` 全量重建(:299-325)。
 
 ### 动画与时序
-货架本体无动画（脚本 onUpdate 仅参数变化时重应用）。fetch 货物显隐为**瞬时**更新 thinInstance buffer，无过渡；数据未变时按 `targetSignature` 命中已有批次只重写矩阵，不重建 mesh、不闪烁。时序 = 预览开始一次全量 + stacker 放货单排同步 + 按 `syncIntervalMs` 的定时全量（`0` 关闭）。
+货架本体无动画（脚本 onUpdate 仅参数变化时重应用）。fetch 货物显隐为**瞬时**更新 thinInstance buffer，无过渡；数据未变时按 `targetSignature` 命中已有批次只重写矩阵，不重建 mesh、不闪烁。时序 = 预览开始一次全量 + stacker 放货单排同步 + 按 `syncIntervalSeconds` 的定时全量（秒，默认 60、最小 10，`0` 关闭）。
 
 ### 状态机
 格口态 = fetch 渲染（record 有/无） ∪ `suppressedCellKeys`（LocatorFetchRuntime.ts:69，stacker 取放期间抑制） ∪ `fetchKeptCargoByRow` 保留货（SceneRuntime.ts:793）。无"锁定"态。
