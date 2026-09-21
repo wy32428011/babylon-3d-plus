@@ -1,4 +1,5 @@
 import { collectAlarmIndependentEntityIds } from './alarmManager';
+import { collectDigitalTwinEffectTargetIds } from './digitalTwinEffect';
 import type { Entity } from './Entity';
 import { createEntityHierarchyStateMap, type EntityHierarchyState } from './entityHierarchy';
 import type { ModelAssetComponent } from './components';
@@ -147,8 +148,8 @@ export function createEditModeModelThinInstancePlan(
   const referencedSourceIds = collectReferencedModelArraySourceIds(scene);
   const hierarchyStateByEntityId = createEntityHierarchyStateMap(scene.entityIds, scene.entities);
   const builtInSlotHostIds = collectBuiltInSlotHostIds(scene);
-  const alarmIndependentIds = collectAlarmIndependentEntityIds(scene);
-  const motionExcludedModelArrayEntityIds = new Set([...collectMotionExcludedModelArrayEntityIds(scene), ...alarmIndependentIds]);
+  const independentIds = new Set([...collectAlarmIndependentEntityIds(scene), ...collectDigitalTwinEffectTargetIds(scene)]);
+  const motionExcludedModelArrayEntityIds = new Set([...collectMotionExcludedModelArrayEntityIds(scene), ...independentIds]);
   const groups = new Map<string, Entity[]>();
 
   for (const entityId of scene.entityIds) {
@@ -159,7 +160,7 @@ export function createEditModeModelThinInstancePlan(
       || !modelAsset
       || entity.components.modelArrayInstance
       || entity.childrenIds.length > 0
-      || alarmIndependentIds.has(entityId)
+      || independentIds.has(entityId)
       || builtInSlotHostIds.has(entityId)
     ) {
       continue;

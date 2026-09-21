@@ -1,0 +1,40 @@
+.digital-twin-effect-inspector .digital-twin-effect-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.digital-twin-effect-inspector textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  font: inherit;
+  font-family: Consolas, monospace;
+}
+
+.digital-twin-effect-inspector summary {
+  cursor: pointer;
+}
+
+.digital-twin-effect-inspector .number-row,
+.digital-twin-effect-inspector .inspector-row {
+  grid-template-columns: minmax(110px, 40%) minmax(0, 1fr);
+}
+
+.digital-twin-effect-inspector .number-row > span,
+.digital-twin-effect-inspector .inspector-row > span {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.digital-twin-effect-inspector .digital-twin-effect-error {
+  color: #ff9e9e;
+  overflow-wrap: anywhere;
+}
+
+.environment-building-effect-drop { display: grid; gap: 10px; padding: 12px; border: 1px dashed #666; color: #b9c6d0; }
+.environment-building-effect-drop.active { border-color: #22dfff; background: #17323b; }
+.environment-building-effect-drop[aria-disabled="true"] { opacity: 0.6; }

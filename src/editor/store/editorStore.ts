@@ -606,7 +606,7 @@ type EditorState = {
   createAutoPatrol: (placementPosition?: Vector3Data) => void;
   createManualRoamSpawn: (placementPosition?: Vector3Data) => void;
   setManualRoamAvatar: (entityId: string, avatar: ManualRoamAvatar | null) => void;
-  createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data) => void;
+  createPoiEffect: (effectKind: PoiEffectKind, placementPosition?: Vector3Data, targetEntityId?: string) => void;
   createChartMarker: (placementPosition?: Vector3Data) => void;
   createAlarmManager: (placementPosition?: Vector3Data) => void;
   updateAlarmManager: (entityId: string, patch: Partial<AlarmManagerComponent>) => void;
@@ -1559,7 +1559,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
     ...(entity.components.clickEventBinding ? { clickEventBinding: cloneClickEventBindingComponent(entity.components.clickEventBinding) } : {}),
     ...(entity.components.telemetryBinding ? { telemetryBinding: cloneJsonValue(entity.components.telemetryBinding) } : {}),
-    ...(entity.components.poiEffect ? { poiEffect: { ...entity.components.poiEffect } } : {}),
+    ...(entity.components.poiEffect ? { poiEffect: cloneJsonValue(entity.components.poiEffect) } : {}),
     ...(entity.components.autoPatrol ? { autoPatrol: cloneAutoPatrolComponent(entity.components.autoPatrol) } : {}),
     ...(entity.components.manualRoamSpawn ? { manualRoamSpawn: cloneJsonValue(entity.components.manualRoamSpawn) } : {}),
     ...(entity.components.camera ? { camera: { ...entity.components.camera } } : {}),
@@ -1912,6 +1912,10 @@ function prepareEntityClipboardPaste(
   for (const entity of entities) {
     for (const slot of entity.components.alarmManager?.targets ?? []) {
       slot.entityId = duplicatedIdBySourceId.get(slot.entityId) ?? slot.entityId;
+    }
+    const effectVisual = entity.components.poiEffect?.visual;
+    if (effectVisual?.targetEntityId) {
+      effectVisual.targetEntityId = duplicatedIdBySourceId.get(effectVisual.targetEntityId) ?? effectVisual.targetEntityId;
     }
     const events = entity.components.chartMarker?.clickEvents;
     if (!events) continue;
@@ -4119,8 +4123,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     return accepted;
   },
   /** 创建可撤销的 POI 内置 EFF 实体，并把新实体设为当前选择。 */
-  createPoiEffect: (effectKind, placementPosition) => {
+  createPoiEffect: (effectKind, placementPosition, targetEntityId) => {
     const entity = createPoiEffectEntity(effectKind, sanitizeVector3(placementPosition));
+    if (entity.components.poiEffect?.visual && targetEntityId) entity.components.poiEffect.visual.targetEntityId = targetEntityId;
     const command = createEntityCommand(entity);
 
     set((state) => {

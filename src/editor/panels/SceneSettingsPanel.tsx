@@ -1,3 +1,4 @@
+import { EnvironmentBuildingEffectPanel } from './EnvironmentBuildingEffectPanel';
 import { getSceneShadowBakeSignature } from '../model/sceneShadowBake';
 import { RegionViewsPanel } from './RegionViewsPanel';
 import {
@@ -1051,6 +1052,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         ) : (
           <p className="muted">从项目环境库选择厂房或周边地理环境 GLB，首次应用会自动居中并落地。</p>
         )}
+
+        <EnvironmentBuildingEffectPanel disabled={props.readOnly || environmentLoading || environmentAdjustmentActive} />
 
         <div className="scene-effect-section">
           <span className="scene-effect-title">预设效果</span>

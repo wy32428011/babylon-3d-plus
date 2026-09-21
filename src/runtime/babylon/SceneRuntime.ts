@@ -1,7 +1,9 @@
+import { ENVIRONMENT_EFFECT_TARGET_ID } from '../../editor/model/environmentBuildingEffect';
 import { createStackerFocusView, getStackerFocusWorldBounds } from './stackerFocusBounds';
 import { AlarmManagerRuntime, type AlarmActivation } from './AlarmManagerRuntime';
 import { executeModelParameterBindings } from './modelParameterBindingExecution';
 import { collectAlarmIndependentEntityIds } from '../../editor/model/alarmManager';
+import { collectDigitalTwinEffectTargetIds } from '../../editor/model/digitalTwinEffect';
 import { getChartMarkerClickEvents } from '../../editor/model/chartMarker';
 import { ChartMarkerPresentation, getChartMarkerStyle, getChartMarkerText } from './ChartMarkerPresentation';
 import '@babylonjs/loaders';
@@ -873,7 +875,15 @@ export class SceneRuntime {
     private readonly onModelLoadProgress?: (progress: SceneRuntimeModelLoadProgress) => void,
   ) {
     this.modelSelectionOutlineLayer = createSceneSelectionHighlightLayer(scene, undefined, this.pushLog);
-    this.poiEffectRuntime = new PoiEffectRuntime(scene);
+    this.poiEffectRuntime = new PoiEffectRuntime(scene, id => {
+      if (id === ENVIRONMENT_EFFECT_TARGET_ID) return this.environmentRuntime?.getBuildingEffectTarget() ?? null;
+      // 直接解析已加载实体，不扫描场景；异步模型就绪后运行时自动补绑定。
+      if (!this.isEntityVisible(id)) return null;
+      const model = this.models.get(id);
+      // 薄实例合批共享几何，不能将一个实例的效果施加到整批。
+      if (model?.modelArrayBatch) return null;
+      return this.meshes.get(id) ?? model?.root ?? null;
+    }, () => this.telemetryPreviewActive);
     this.shadowRuntime = new SceneShadowRuntime(scene);
     this.lightMarkerRuntime = new EditorLightMarkerRuntime(scene);
     this.autoPatrolMarkerRuntime = new EditorAutoPatrolRuntime(scene);
@@ -886,6 +896,7 @@ export class SceneRuntime {
     });
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog, () => this.notifyModelLoadProgressChanged());
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
+      withBuildingEffectMutation: mutate => this.poiEffectRuntime.withTargetMutation(ENVIRONMENT_EFFECT_TARGET_ID, mutate),
       // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
       loadAssetContainer: (rootUrl, fileName, signal) => {
         return this.loadEnvironmentAssetContainer(rootUrl, fileName, signal);
@@ -3056,8 +3067,8 @@ export class SceneRuntime {
     for (const [key, failure] of this.modelReadinessErrors) {
       if (!failure.entityIds.some(entityId => document.entities[entityId]?.components.modelAsset)) this.modelReadinessErrors.delete(key);
     }
-    const alarmIds = collectAlarmIndependentEntityIds(document);
-    const overrides = [...alarmIds].filter(id => document.entities[id]?.components.modelArrayInstance);
+    const independentIds = new Set([...collectAlarmIndependentEntityIds(document), ...collectDigitalTwinEffectTargetIds(document)]);
+    const overrides = [...independentIds].filter(id => document.entities[id]?.components.modelArrayInstance);
     if (overrides.length) {
       const entities = { ...document.entities };
       for (const id of overrides) { const components = { ...entities[id].components }; delete components.modelArrayInstance; entities[id] = { ...entities[id], components }; }
@@ -3290,7 +3301,7 @@ export class SceneRuntime {
     const meshRenderer = entity.components.meshRenderer;
     if (primitiveMesh && meshRenderer) {
       this.applyMeshInteractivity(primitiveMesh, entity.id);
-      this.applyPrimitiveMeshAppearance(primitiveMesh, meshRenderer, selected);
+      this.poiEffectRuntime.withTargetMutation(entity.id, () => this.applyPrimitiveMeshAppearance(primitiveMesh, meshRenderer, selected));
     }
 
     if (entity.components.skybox) this.syncSkyboxEntity(entity, selected);
@@ -4032,7 +4043,7 @@ export class SceneRuntime {
     this.applyTransform(mesh, entity.components.transform);
     this.applyMeshInteractivity(mesh, entity.id);
 
-    this.applyPrimitiveMeshAppearance(mesh, meshRenderer, selected);
+    this.poiEffectRuntime.withTargetMutation(entity.id, () => this.applyPrimitiveMeshAppearance(mesh, meshRenderer, selected));
     if (entity.components.chartMarker) this.chartMarkerPresentation.update(mesh, entity.components.chartMarker, this.isEntityVisible(entity.id));
     else this.chartMarkerPresentation.remove(mesh);
   }

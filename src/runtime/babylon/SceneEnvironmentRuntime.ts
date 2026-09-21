@@ -62,6 +62,8 @@ export type SceneEnvironmentRuntimeOptions = {
   onAssetContainerSettled?: (container: AssetContainer) => void;
   onSnapshot?: (snapshot: EnvironmentRuntimeSnapshot) => void;
   pushLog?: (message: string) => void;
+  /** 修改环境真实材质或切换根节点前，暂时释放模型特效覆盖。 */
+  withBuildingEffectMutation?: (mutate: () => void) => void;
 };
 
 type EnvironmentMaterialBaseline = {
@@ -177,6 +179,14 @@ export class SceneEnvironmentRuntime {
   ) {}
 
   getShadowBakeSurfaces(): ShadowBakeSurface[] { return this.current?.shadowSurfaces ?? []; }
+
+  /** 环境绑定独立于 Hierarchy 实体；隐藏仍返回根节点，保留特效动画进度。 */
+  getBuildingEffectTarget(): TransformNode | null { return this.current?.contentRoot ?? null; }
+
+  private withBuildingEffectMutation(mutate: () => void): void {
+    if (this.options.withBuildingEffectMutation) this.options.withBuildingEffectMutation(mutate);
+    else mutate();
+  }
 
   /** 静态结果换成普通原色纹理；稳定帧不注册材质插件或阴影绑定回调。 */
   async syncShadows(settings: SceneShadowSettings): Promise<void> {
@@ -297,24 +307,28 @@ export class SceneEnvironmentRuntime {
         assignments.set(surface.mesh, material);
       }
       if (entry.disposed || sequence !== this.shadowSequence) return;
-      for (const surface of entry.shadowSurfaces) {
-        const baked = bakedByKey.get(surface.key);
-        if (baked?.kind === 'shadow-mask') {
-          applyGroundShadowUv(surface.mesh, baked.uvBounds); entry.shadowUvMeshes.add(surface.mesh as Mesh);
-        } else if (surface.mesh instanceof Mesh && entry.shadowUvMeshes.delete(surface.mesh)) {
-          if (surface.originalShadowUv) surface.mesh.setVerticesData(VertexBuffer.UV3Kind, surface.originalShadowUv, false, 2);
-          else surface.mesh.removeVerticesData(VertexBuffer.UV3Kind);
+      const commit = () => {
+        for (const surface of entry.shadowSurfaces) {
+          const baked = bakedByKey.get(surface.key);
+          if (baked?.kind === 'shadow-mask') {
+            applyGroundShadowUv(surface.mesh, baked.uvBounds); entry.shadowUvMeshes.add(surface.mesh as Mesh);
+          } else if (surface.mesh instanceof Mesh && entry.shadowUvMeshes.delete(surface.mesh)) {
+            if (surface.originalShadowUv) surface.mesh.setVerticesData(VertexBuffer.UV3Kind, surface.originalShadowUv, false, 2);
+            else surface.mesh.removeVerticesData(VertexBuffer.UV3Kind);
+          }
+          surface.mesh.material = assignments.get(surface.mesh) ?? null;
+          surface.mesh.useVertexColors = baked && baked.kind !== 'shadow-mask' ? false : surface.useVertexColors;
+          surface.mesh.receiveShadows = Boolean(realtime);
         }
-        surface.mesh.material = assignments.get(surface.mesh) ?? null;
-        surface.mesh.useVertexColors = baked && baked.kind !== 'shadow-mask' ? false : surface.useVertexColors;
-        surface.mesh.receiveShadows = Boolean(realtime);
-      }
-      for (const material of entry.shadowMaterials) material.dispose(false, false);
-      for (const texture of entry.shadowTextures) texture.dispose();
-      entry.shadowMaterials = materials.splice(0); entry.shadowTextures = textures.splice(0);
-      entry.shadowMaterialBaselines = baselines;
-      entry.shadowPresentationKey = key;
-      this.applyEntryPresentation(entry, entry.settings);
+        for (const material of entry.shadowMaterials) material.dispose(false, false);
+        for (const texture of entry.shadowTextures) texture.dispose();
+        entry.shadowMaterials = materials.splice(0); entry.shadowTextures = textures.splice(0);
+        entry.shadowMaterialBaselines = baselines;
+        entry.shadowPresentationKey = key;
+        this.applyEntryMaterialOpacity(entry, entry.settings.opacity);
+      };
+      if (entry === this.current) this.withBuildingEffectMutation(commit);
+      else commit();
     } finally {
       for (const material of materials) material.dispose(false, false);
       for (const texture of textures) texture.dispose();
@@ -445,8 +459,10 @@ export class SceneEnvironmentRuntime {
 
   clear(): void {
     this.cancelPendingLoad();
-    this.disposeEntry(this.current);
-    this.current = null;
+    this.withBuildingEffectMutation(() => {
+      this.disposeEntry(this.current);
+      this.current = null;
+    });
     this.adjustmentActive = false;
     this.disposeAdjustmentBounds();
     this.emitSnapshot({
@@ -492,13 +508,16 @@ export class SceneEnvironmentRuntime {
       await this.applyLatestShadowPresentation(candidate, signal);
       if (sequence !== this.loadSequence) throw createAbortError();
       const previous = this.current;
-      this.current = candidate;
-      candidate = null;
-      this.disposeEntry(previous);
-      this.applyEntryEnabledState(this.current);
+      const next = candidate;
+      this.withBuildingEffectMutation(() => {
+        this.current = next;
+        candidate = null;
+        this.disposeEntry(previous);
+        this.applyEntryEnabledState(next);
+      });
       this.refreshAdjustmentBounds();
 
-      const snapshot = this.createReadySnapshot(this.current, applyOptions.requestId);
+      const snapshot = this.createReadySnapshot(next, applyOptions.requestId);
       this.emitSnapshot(snapshot);
       return {
         environment: resolvedEnvironment,
@@ -701,10 +720,18 @@ export class SceneEnvironmentRuntime {
   }
 
   private applyEntryPresentation(entry: EnvironmentRuntimeEntry, environment: SceneEnvironmentSettings): void {
-    const ghostMode = environment.opacity < 1;
+    const applyOpacity = () => this.applyEntryMaterialOpacity(entry, environment.opacity);
+    if (entry !== this.current) applyOpacity();
+    else if (entry.settings.opacity !== environment.opacity) this.withBuildingEffectMutation(applyOpacity);
+    entry.settings = environment;
+    this.applyEntryEnabledState(entry);
+  }
+
+  private applyEntryMaterialOpacity(entry: EnvironmentRuntimeEntry, opacity: number): void {
+    const ghostMode = opacity < 1;
     for (const baseline of entry.materialBaselines) {
       baseline.material.unfreeze();
-      baseline.material.alpha = baseline.alpha * environment.opacity;
+      baseline.material.alpha = baseline.alpha * opacity;
       baseline.material.transparencyMode = ghostMode
         ? Material.MATERIAL_ALPHABLEND
         : baseline.transparencyMode;
@@ -718,15 +745,13 @@ export class SceneEnvironmentRuntime {
     for (const material of entry.shadowMaterials) {
       const baseline = entry.shadowMaterialBaselines.get(material);
       material.unfreeze();
-      material.alpha = (baseline?.alpha ?? 1) * environment.opacity;
+      material.alpha = (baseline?.alpha ?? 1) * opacity;
       material.transparencyMode = ghostMode ? Material.MATERIAL_ALPHABLEND : (baseline?.transparencyMode ?? Material.MATERIAL_OPAQUE);
       material.disableDepthWrite = ghostMode || (baseline?.disableDepthWrite ?? false);
       material.forceDepthWrite = !ghostMode && (baseline?.forceDepthWrite ?? false);
       material.needDepthPrePass = !ghostMode && (baseline?.needDepthPrePass ?? false);
       material.freeze(); material.markDirty(true);
     }
-    entry.settings = environment;
-    this.applyEntryEnabledState(entry);
   }
 
   private applyEntryEnabledState(entry: EnvironmentRuntimeEntry): void {

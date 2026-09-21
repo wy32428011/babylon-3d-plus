@@ -1,3 +1,5 @@
+import { DIGITAL_TWIN_EFFECT_DEFINITIONS, createDefaultDigitalTwinEffectConfig, isDigitalTwinEffectKind, sanitizeDigitalTwinEffectConfig } from './digitalTwinEffect';
+import { createDefaultLightWallFence, sanitizeLightWallFence } from './lightWallFence';
 import type { PoiEffectComponent, PoiEffectKind } from './components';
 
 /** POI 库支持的内置 EFF 类型，稳定值会写入场景文件。 */
@@ -18,6 +20,8 @@ export const POI_EFFECT_KINDS = [
   'cargo-target-frame',
   'conveyor-direction',
   'evacuation-route',
+  'light-wall-fence',
+  ...DIGITAL_TWIN_EFFECT_DEFINITIONS.map(definition => definition.kind),
 ] as const satisfies readonly PoiEffectKind[];
 
 export const POI_EFFECT_INTENSITY_MIN = 0.1;
@@ -36,7 +40,7 @@ export type PoiEffectDefinition = {
   defaults: Omit<PoiEffectComponent, 'effectKind'>;
 };
 
-/** 16 个工业数字孪生 EFF 的唯一预设登记表。 */
+/** 工业数字孪生 EFF 的唯一预设登记表。 */
 export const POI_EFFECT_DEFINITIONS: readonly PoiEffectDefinition[] = [
   createDefinition('alarm-pulse', '报警脉冲光圈', '告警定位', 'ring', '#ff3b30', '#ffb3ad', 1.3, 1.2, 1),
   createDefinition('warning-beacon', '旋转警示灯', '设备告警', 'marker', '#ff3b30', '#ffb000', 1.4, 1.2, 1),
@@ -54,7 +58,12 @@ export const POI_EFFECT_DEFINITIONS: readonly PoiEffectDefinition[] = [
   createDefinition('cargo-target-frame', '货物目标定位框', '仓储定位', 'cube', '#ffc928', '#fff2a1', 1.2, 0.8, 0.8),
   createDefinition('conveyor-direction', '输送方向箭头', '输送流向', 'panel', '#39d8ff', '#bdf7ff', 1.1, 1, 1),
   createDefinition('evacuation-route', '疏散路线', '安全引导', 'person', '#36e36d', '#d4ffdf', 1.2, 1, 1),
+  createDefinition('light-wall-fence', '光墙围栏', '建筑外围 · 动态发光', 'cube', '#22dfff', '#a8f5ff', 1, 1, 1),
+  ...DIGITAL_TWIN_EFFECT_DEFINITIONS.map(definition => createDefinition(definition.kind, definition.name, definition.category, 'ring', definition.kind === 'flame' ? '#ff6600' : '#22dfff', definition.kind === 'flame' ? '#ffdd44' : '#96f4ff', 1, 1, 1)),
 ];
+
+const LEGACY_HIDDEN_KINDS = new Set(['radar-scan', 'locator-beam', 'fire', 'smoke', 'pipeline-flow-particles', 'pipeline-flow-arrows', 'moving-double-arrow', 'conveyor-direction']);
+export const VISIBLE_POI_EFFECT_DEFINITIONS = POI_EFFECT_DEFINITIONS.filter(definition => !LEGACY_HIDDEN_KINDS.has(definition.kind));
 
 const POI_EFFECT_DEFINITION_BY_KIND = new Map(
   POI_EFFECT_DEFINITIONS.map((definition) => [definition.kind, definition] as const),
@@ -104,6 +113,8 @@ export function createDefaultPoiEffectComponent(kind: PoiEffectKind): PoiEffectC
   return {
     effectKind: definition.kind,
     ...definition.defaults,
+    ...(isDigitalTwinEffectKind(kind) ? { visual: createDefaultDigitalTwinEffectConfig(kind) } : {}),
+    ...(kind === 'light-wall-fence' ? { lightWall: createDefaultLightWallFence() } : {}),
   };
 }
 
@@ -113,10 +124,12 @@ export function sanitizePoiEffectComponent(component: PoiEffectComponent): PoiEf
   return {
     effectKind: definition.kind,
     enabled: component.enabled !== false,
+    ...(isDigitalTwinEffectKind(definition.kind) ? { visual: sanitizeDigitalTwinEffectConfig(component.visual, definition.kind) } : {}),
+    ...(definition.kind === 'light-wall-fence' ? { lightWall: sanitizeLightWallFence(component.lightWall) } : {}),
     primaryColor: sanitizeHexColor(component.primaryColor, definition.defaults.primaryColor),
     secondaryColor: sanitizeHexColor(component.secondaryColor, definition.defaults.secondaryColor),
     intensity: clampFinite(component.intensity, POI_EFFECT_INTENSITY_MIN, POI_EFFECT_INTENSITY_MAX, definition.defaults.intensity),
-    speed: clampFinite(component.speed, POI_EFFECT_SPEED_MIN, POI_EFFECT_SPEED_MAX, definition.defaults.speed),
+    speed: clampFinite(component.speed, definition.kind === 'light-wall-fence' || isDigitalTwinEffectKind(definition.kind) ? 0 : POI_EFFECT_SPEED_MIN, POI_EFFECT_SPEED_MAX, definition.defaults.speed),
     density: clampFinite(component.density, POI_EFFECT_DENSITY_MIN, POI_EFFECT_DENSITY_MAX, definition.defaults.density),
   };
 }

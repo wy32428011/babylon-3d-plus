@@ -6,6 +6,7 @@ import { resolveAlarmTrigger, resolveAlarmTargets, resolveAlarmDeviceBinding, ty
 import { deviceTelemetryStore } from '../mqtt/deviceTelemetry';
 import { ChartMarkerPresentation, getChartMarkerStyle } from './ChartMarkerPresentation';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
+import { suspendTargetModelEffects } from './effects/TargetModelEffects';
 import { createDefaultPoiEffectComponent } from '../../editor/model/poiEffect';
 import type { DataPlatformScreenOverlayItem } from './SceneRuntime';
 import type { RuntimeWorldBounds } from './runtimeNodeGeometry';
@@ -21,12 +22,14 @@ type Host = {
   report: (message: string) => void;
 };
 type ActiveAlarm = { manager: Entity; target: Entity; trigger: AlarmTriggerKind; root: TransformNode; marker?: Mesh; markerMaterial?: StandardMaterial; style: DataPlatformScreenOverlayItem['markerStyle']; appearance?: TransformNode; disposeAppearance?: () => void; generation: number };
-type Tint = { original: Material | null; replacement: Material; mesh: AbstractMesh; proxy?: Mesh; originalEnabled: boolean; color: string };
+type Tint = { original: Material | null; replacement: Material; mesh: AbstractMesh; proxy?: Mesh; originalEnabled: boolean; color: string; releaseModelEffectLease: () => void };
+const STATIC_EMISSIVE_STRENGTH = 0.35;
+const ALARM_BREATHING_PERIOD_MS = 1600;
 
 /** 颜色只覆盖当前设备的运行时材质；解除、停止预览与删除均恢复原材质引用。 */
 export class AlarmColorOverrides {
   private readonly entries = new Map<AbstractMesh, Tint>();
-  apply(desired: ReadonlyMap<AbstractMesh, string>): void {
+  apply(desired: ReadonlyMap<AbstractMesh, string>, activeAlarms?: ReadonlySet<AbstractMesh>, breathingStrength = STATIC_EMISSIVE_STRENGTH): void {
     for (const [mesh, entry] of this.entries) {
       if (desired.has(mesh) && !mesh.isDisposed()) continue;
       if (!mesh.isDisposed()) {
@@ -36,16 +39,18 @@ export class AlarmColorOverrides {
       entry.proxy?.dispose(false, false);
       entry.replacement.dispose(false, false);
       this.entries.delete(mesh);
+      entry.releaseModelEffectLease();
     }
     for (const [mesh, color] of desired) {
       if (mesh.isDisposed()) continue;
       let entry = this.entries.get(mesh);
       if (!entry) {
+        const releaseModelEffectLease = suspendTargetModelEffects(mesh);
         const original = mesh.material;
         const material = new StandardMaterial(mesh.name + '_alarmColor', mesh.getScene());
         if (original) { material.alpha = original.alpha; material.backFaceCulling = original.backFaceCulling; }
         material.diffuseColor = Color3.FromHexString(color);
-        material.emissiveColor = Color3.FromHexString(color).scale(0.35);
+        material.emissiveColor = Color3.FromHexString(color).scale(STATIC_EMISSIVE_STRENGTH);
         let proxy: Mesh | undefined;
         const originalEnabled = mesh.isEnabled(false);
         if (mesh instanceof InstancedMesh) {
@@ -56,12 +61,15 @@ export class AlarmColorOverrides {
           proxy.setEnabled(originalEnabled);
           mesh.setEnabled(false);
         } else mesh.material = material;
-        entry = { original, replacement: material, mesh, proxy, originalEnabled, color };
+        entry = { original, replacement: material, mesh, proxy, originalEnabled, color, releaseModelEffectLease };
         this.entries.set(mesh, entry);
       }
       const material = entry.replacement as StandardMaterial;
       material.diffuseColor = Color3.FromHexString(color);
-      material.emissiveColor = Color3.FromHexString(color).scale(0.35);
+      // 仅活动报警目标改变自发光强度；普通状态色和共享原材质保持原行为。
+      const emissiveStrength = activeAlarms?.has(mesh) && Number.isFinite(breathingStrength)
+        ? Math.max(0, Math.min(1, breathingStrength)) : STATIC_EMISSIVE_STRENGTH;
+      material.emissiveColor = Color3.FromHexString(color).scale(emissiveStrength);
       if (entry.proxy) {
         entry.proxy.position.copyFrom(mesh.position); entry.proxy.scaling.copyFrom(mesh.scaling);
         entry.proxy.rotation.copyFrom(mesh.rotation); entry.proxy.rotationQuaternion = mesh.rotationQuaternion?.clone() ?? null;
@@ -84,6 +92,7 @@ export class AlarmManagerRuntime {
   private readonly reportedLoadErrors = new Set<string>();
   private loadAbort = new AbortController();
   private desiredColors = new Map<AbstractMesh, string>();
+  private breathingMeshes = new Set<AbstractMesh>();
   private lastEvaluation = -Infinity;
   private generation = 0;
   private disposed = false;
@@ -101,7 +110,9 @@ export class AlarmManagerRuntime {
   update(now = Date.now()): void {
     if (this.disposed) return;
     if (now - this.lastEvaluation >= 250) { this.evaluate(now); this.lastEvaluation = now; }
-    this.colors.apply(this.desiredColors);
+    const phase = Number.isFinite(now) ? (now % ALARM_BREATHING_PERIOD_MS) / ALARM_BREATHING_PERIOD_MS : 0;
+    const breathingStrength = STATIC_EMISSIVE_STRENGTH + (1 - STATIC_EMISSIVE_STRENGTH) * (0.5 - 0.5 * Math.cos(phase * Math.PI * 2));
+    this.colors.apply(this.desiredColors, this.breathingMeshes, breathingStrength);
     const effectIds = new Set<string>();
     for (const [key, entry] of this.active) {
       const c = entry.manager.components.alarmManager!;
@@ -127,6 +138,7 @@ export class AlarmManagerRuntime {
   private evaluate(now: number): void {
     const desired = new Set<string>();
     const colors = new Map<AbstractMesh, string>();
+    const breathingMeshes = new Set<AbstractMesh>();
     for (const { entity: manager, targets } of this.managers) {
       if (!this.host.visible(manager.id)) continue;
       const c = manager.components.alarmManager!;
@@ -142,7 +154,10 @@ export class AlarmManagerRuntime {
         if (!meshes.length) continue;
         const key = manager.id + ':alarm:' + target.id;
         desired.add(key);
-        for (const mesh of meshes) if (!colors.has(mesh)) colors.set(mesh, c.overrideColor);
+        for (const mesh of meshes) {
+          if (!colors.has(mesh)) colors.set(mesh, c.overrideColor);
+          breathingMeshes.add(mesh);
+        }
         const existing = this.active.get(key);
         if (!existing || existing.trigger !== trigger) {
           if (existing) existing.trigger = trigger;
@@ -155,6 +170,7 @@ export class AlarmManagerRuntime {
     }
     for (const [key, entry] of this.active) if (!desired.has(key)) this.removeEntry(key, entry);
     this.desiredColors = colors;
+    this.breathingMeshes = breathingMeshes;
   }
 
   private createEntry(key: string, manager: Entity, target: Entity, trigger: AlarmTriggerKind): void {
@@ -240,7 +256,7 @@ export class AlarmManagerRuntime {
   reset(): void {
     this.generation += 1;
     this.loadAbort.abort(); this.loadAbort = new AbortController(); this.reportedLoadErrors.clear();
-    this.colors.clear(); this.desiredColors.clear();
+    this.colors.clear(); this.desiredColors.clear(); this.breathingMeshes.clear();
     for (const [key, entry] of this.active) this.removeEntry(key, entry);
     this.effects.disposeMissing(new Set());
     for (const container of this.loadedContainers) container.dispose();

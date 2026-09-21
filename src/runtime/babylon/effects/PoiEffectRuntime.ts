@@ -1,3 +1,7 @@
+import { isDigitalTwinEffectKind } from '../../../editor/model/digitalTwinEffect';
+import { SpatialEffects, supportsSpatialEffect } from './SpatialEffects';
+import { TargetModelEffects } from './TargetModelEffects';
+import { SceneEnvironmentEffects } from './SceneEnvironmentEffects';
 import {
   Color3,
   Color4,
@@ -10,12 +14,15 @@ import {
   Texture,
   TransformNode,
   Vector3,
+  type Material,
+  type AbstractMesh,
   type Nullable,
   type Observer,
 } from '@babylonjs/core';
 import type { Entity } from '../../../editor/model/Entity';
 import type { PoiEffectComponent, PoiEffectKind, TransformComponent } from '../../../editor/model/components';
 import { sanitizePoiEffectComponent } from '../../../editor/model/poiEffect';
+import { LightWallFence } from './LightWallFence';
 
 /** 与 SceneRuntime 拾取逻辑保持一致的实体 metadata 字段。 */
 const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
@@ -30,9 +37,11 @@ const PARTICLE_TEXTURE_SIZE = 48;
 
 type PoiResources = {
   meshes: Mesh[];
-  materials: StandardMaterial[];
+  materials: Material[];
   particleSystems: ParticleSystem[];
   textures: Texture[];
+  lightWall: LightWallFence | null;
+  spatial: SpatialEffects | null;
 };
 
 type PoiEntry = {
@@ -40,6 +49,7 @@ type PoiEntry = {
   pickMesh: Mesh;
   pickMaterial: StandardMaterial;
   signature: string;
+  kind: PoiEffectKind;
   resources: PoiResources;
   visible: boolean;
   pickable: boolean;
@@ -66,9 +76,14 @@ type ParticleSpec = {
 export class PoiEffectRuntime {
   private readonly entries = new Map<string, PoiEntry>();
   private readonly beforeRenderObserver: Nullable<Observer<Scene>>;
+  private readonly targetEffects: TargetModelEffects;
+  private readonly environmentEffects: SceneEnvironmentEffects;
+  private previousFrameTime: number | null = null;
 
   /** 创建运行时并注册唯一 before-render 观察者。 */
-  constructor(private readonly scene: Scene) {
+  constructor(private readonly scene: Scene, private readonly resolveTarget: (id: string) => TransformNode | AbstractMesh | null = () => null, canFollow: () => boolean = () => false) {
+    this.targetEffects = new TargetModelEffects(scene, resolveTarget);
+    this.environmentEffects = new SceneEnvironmentEffects(scene, resolveTarget, canFollow);
     this.beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => this.animate());
   }
 
@@ -88,8 +103,8 @@ export class PoiEffectRuntime {
     entry.visible = visible;
     entry.pickable = pickable;
     entry.selected = selected;
+    entry.kind = component.effectKind;
     entry.root.setEnabled(visible);
-    this.applyPickState(entry);
 
     if (entry.signature !== signature) {
       this.disposeResources(entry.resources);
@@ -97,11 +112,24 @@ export class PoiEffectRuntime {
       entry.signature = signature;
       entry.particlesActive = false;
     }
+    entry.resources.lightWall?.update(component);
+    entry.resources.spatial?.setActive(visible && component.enabled);
+    entry.resources.spatial?.updatePlaybackSpeed(component.speed);
+    this.targetEffects.sync(entity.id, component, visible && component.enabled);
+    this.environmentEffects.sync(entity.id, component, visible && component.enabled);
+    this.applyPickState(entry);
     this.applyParticlePlayback(entry, visible && component.enabled);
+  }
+
+  /** 在模型外观更新期间释放覆盖，避免将文档改动写到临时克隆材质。 */
+  withTargetMutation(targetId: string, mutate: () => void): void {
+    this.targetEffects.withTargetMutation(targetId, mutate);
   }
 
   /** 释放同步集合中已经缺失的实体。 */
   disposeMissing(ids: Set<string>): void {
+    this.targetEffects.disposeMissing(ids);
+    this.environmentEffects.disposeMissing(ids);
     for (const id of Array.from(this.entries.keys())) {
       if (!ids.has(id)) this.disposeEntity(id);
     }
@@ -112,9 +140,11 @@ export class PoiEffectRuntime {
     return id ? this.entries.get(id)?.root ?? null : null;
   }
 
-  /** 获取拾取目标：稳定透明拾取壳 Mesh。 */
+  /** 光墙直接拾取实际侧壁，其他效果使用稳定透明拾取壳。 */
   getPickMesh(id: string | null): Mesh | null {
-    return id ? this.entries.get(id)?.pickMesh ?? null : null;
+    if (!id) return null;
+    const entry = this.entries.get(id);
+    return entry?.resources.lightWall?.mesh ?? entry?.pickMesh ?? null;
   }
 
   /** 返回参与场景聚焦和阵列计算的可见几何；无视觉资源时回退透明拾取壳。 */
@@ -122,6 +152,7 @@ export class PoiEffectRuntime {
     if (!id) return [];
     const entry = this.entries.get(id);
     if (!entry) return [];
+    if (entry.resources.lightWall) return [entry.resources.lightWall.mesh];
     const visualMeshes = entry.resources.meshes.filter((mesh) => mesh.isVisible);
     return visualMeshes.length > 0 ? [...visualMeshes, entry.pickMesh] : [entry.pickMesh];
   }
@@ -172,6 +203,8 @@ export class PoiEffectRuntime {
   /** 严格释放所有 Mesh、Material、ParticleSystem、Texture 和 Observer。 */
   dispose(): void {
     if (this.beforeRenderObserver) this.scene.onBeforeRenderObservable.remove(this.beforeRenderObserver);
+    this.targetEffects.dispose();
+    this.environmentEffects.dispose();
     for (const id of Array.from(this.entries.keys())) this.disposeEntity(id);
   }
 
@@ -194,6 +227,7 @@ export class PoiEffectRuntime {
       pickMesh,
       pickMaterial,
       signature: '',
+      kind: 'alarm-pulse',
       resources: this.emptyResources(),
       visible: true,
       pickable: true,
@@ -207,10 +241,10 @@ export class PoiEffectRuntime {
 
   /** 创建空资源桶。 */
   private emptyResources(): PoiResources {
-    return { meshes: [], materials: [], particleSystems: [], textures: [] };
+    return { meshes: [], materials: [], particleSystems: [], textures: [], lightWall: null, spatial: null };
   }
 
-  /** 按类型创建 16 种可区分效果。 */
+  /** 按类型创建可区分效果。 */
   private createEffect(id: string, component: PoiEffectComponent, root: TransformNode): PoiResources {
     const resources = this.emptyResources();
     const kind = component.effectKind;
@@ -218,7 +252,17 @@ export class PoiEffectRuntime {
     const secondary = component.secondaryColor;
     const intensity = component.intensity;
 
-    if (kind === 'alarm-pulse') {
+    if (supportsSpatialEffect(kind)) {
+      const spatial = new SpatialEffects(id, this.scene, root, component, this.resolveTarget);
+      resources.spatial = spatial;
+      resources.meshes = spatial.meshes;
+      resources.materials = spatial.materials;
+    } else if (kind === 'light-wall-fence') {
+      const lightWall = new LightWallFence(id, this.scene, root, component);
+      resources.lightWall = lightWall;
+      resources.meshes.push(lightWall.mesh);
+      resources.materials.push(lightWall.material);
+    } else if (kind === 'alarm-pulse') {
       this.addTorus(resources, root, `${id}_alarm_outer`, primary, 1.1, 0.03, 'pulse', 0);
       this.addTorus(resources, root, `${id}_alarm_inner`, secondary, 0.65, 0.025, 'pulse', 0.35);
     } else if (kind === 'warning-beacon') {
@@ -292,7 +336,7 @@ export class PoiEffectRuntime {
 
     for (const mesh of resources.meshes) {
       mesh.isPickable = false;
-      if (mesh.material instanceof StandardMaterial) {
+      if (!resources.spatial && mesh.material instanceof StandardMaterial) {
         const baseAlpha = typeof mesh.metadata?.baseAlpha === 'number' ? mesh.metadata.baseAlpha : mesh.material.alpha;
         const scaledAlpha = Math.min(1, Math.max(0.02, baseAlpha * component.intensity));
         mesh.metadata = { ...(mesh.metadata ?? {}), baseAlpha: scaledAlpha };
@@ -569,8 +613,18 @@ export class PoiEffectRuntime {
   /** 单一 before-render 动画入口。 */
   private animate(): void {
     const time = this.now() * 0.001;
+    // 切回隐藏标签页后不追赶长时间间隔，避免流动相位突然跳变。
+    const deltaSeconds = this.previousFrameTime === null ? 0 : Math.max(0, Math.min(0.1, time - this.previousFrameTime));
+    this.previousFrameTime = time;
+    this.targetEffects.tick(deltaSeconds);
+    this.environmentEffects.tick(deltaSeconds);
     for (const entry of this.entries.values()) {
       if (!entry.visible) continue;
+      if (entry.resources.spatial) { entry.resources.spatial.tick(deltaSeconds); continue; }
+      if (entry.resources.lightWall) {
+        entry.resources.lightWall.animate(deltaSeconds);
+        continue;
+      }
       const speed = this.readSpeed(entry.signature);
       const localTime = time * speed + entry.seed;
       for (const mesh of entry.resources.meshes) this.animateMesh(mesh, localTime);
@@ -623,6 +677,26 @@ export class PoiEffectRuntime {
 
   /** 应用拾取壳的显隐、可拾取和选中状态。 */
   private applyPickState(entry: PoiEntry): void {
+    if (entry.resources.spatial) {
+      entry.pickMesh.isVisible = entry.selected && entry.visible;
+      entry.pickMesh.isPickable = entry.visible && entry.pickable;
+      for (const mesh of entry.resources.meshes) {
+        mesh.isPickable = entry.visible && entry.pickable;
+        mesh.metadata = { ...(mesh.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: entry.pickMesh.metadata[EDITOR_ENTITY_ID_METADATA_KEY] };
+      }
+      return;
+    }
+    if (entry.kind === 'light-wall-fence') {
+      const wall = entry.resources.lightWall?.mesh;
+      // 围栏中心通常是建筑；禁用后也不显示辅助壳，实体仍可通过层级选中和 Gizmo 编辑。
+      entry.pickMesh.isVisible = false;
+      entry.pickMesh.isPickable = false;
+      if (wall) {
+        wall.isVisible = entry.visible;
+        wall.isPickable = entry.visible && entry.pickable;
+      }
+      return;
+    }
     entry.pickMesh.isVisible = entry.visible;
     entry.pickMesh.isPickable = entry.visible && entry.pickable;
     entry.pickMesh.visibility = entry.selected ? SELECTED_PICK_ALPHA : PICK_ALPHA;
@@ -645,6 +719,11 @@ export class PoiEffectRuntime {
 
   /** 生成组件签名，作为内部资源重建边界。 */
   private createSignature(component: PoiEffectComponent): string {
+    if (supportsSpatialEffect(component.effectKind)) return JSON.stringify({ ...component, speed: 0 });
+    if (isDigitalTwinEffectKind(component.effectKind)) return JSON.stringify(component);
+    if (component.effectKind === 'light-wall-fence') {
+      return JSON.stringify([component.effectKind, component.enabled, component.lightWall?.height, component.lightWall?.points]);
+    }
     return [component.effectKind, component.enabled ? '1' : '0', component.primaryColor, component.secondaryColor, component.intensity.toFixed(3), component.speed.toFixed(3), component.density.toFixed(3)].join('|');
   }
 
@@ -667,6 +746,12 @@ export class PoiEffectRuntime {
 
   /** 严格释放资源桶内容。 */
   private disposeResources(resources: PoiResources): void {
+    resources.lightWall = null;
+    if (resources.spatial) {
+      resources.spatial.dispose();
+      resources.spatial = null;
+      resources.meshes = []; resources.materials = [];
+    }
     for (const system of resources.particleSystems.splice(0)) {
       system.stop();
       system.dispose(false);

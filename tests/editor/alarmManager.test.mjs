@@ -141,12 +141,61 @@ test('运行时报警边沿、颜色隔离、立标与解除清理', async () =>
     assert.equal(runtime.getOverlayItems().length, 1);
     assert.ok(runtime.getOverlayItems()[0].mesh.material);
     assert.equal(runtime.isActive(manager.id, model.id), true);
+    const activeMaterial = mesh.material;
+    const firstIntensity = activeMaterial.emissiveColor.r;
+    runtime.update(1016);
+    assert.equal(mesh.material, activeMaterial, '逐帧呼吸不能重建材质');
+    assert.notEqual(mesh.material.emissiveColor.r, firstIntensity, '在250ms条件评估间隔内仍应逐帧呼吸');
+    assert.ok(Math.abs(mesh.material.emissiveColor.r - firstIntensity) < 0.05, '相邻帧亮度应连续平滑');
+    assert.equal(other.material, material, '正常设备不能被报警材质污染');
     runtime.update(1500); assert.equal(events.length, 1);
     deviceTelemetryStore.upsert({ ...snapshot, receivedAt: 1800, fields: { runningState: 'idle' }, sourceId: 'default', deviceType: 'device', assetCode: model.id, sequence: 2, topic: 'test', sourceTimestamp: null });
     runtime.update(1800);
     assert.equal(mesh.material, material); assert.equal(runtime.getOverlayItems().length, 0);
     assert.equal(runtime.isActive(manager.id, model.id), false);
+    assert.equal(scene.materials.includes(activeMaterial), false, '报警解除应释放呼吸覆盖材质');
+    deviceTelemetryStore.upsert({ ...snapshot, receivedAt: 2100, sourceId: 'default', deviceType: 'device', assetCode: model.id, sequence: 3, topic: 'test', sourceTimestamp: null });
+    runtime.update(2100);
+    assert.equal(runtime.isActive(manager.id, model.id), true);
+    const restartedMaterial = mesh.material;
+    runtime.reset();
+    assert.equal(mesh.material, material, '停止预览应还原原材质');
+    assert.equal(scene.materials.includes(restartedMaterial), false);
+    assert.equal(runtime.isActive(manager.id, model.id), false);
   } finally { runtime.dispose(); deviceTelemetryStore.clear(); scene.dispose(); engine.dispose(); }
+});
+
+test('报警呼吸只影响活动集合，普通状态色保持静态且实例隔离可还原', async () => {
+  const { NullEngine, Scene, MeshBuilder, StandardMaterial } = await import('@babylonjs/core');
+  const { AlarmColorOverrides } = await server.ssrLoadModule('/src/runtime/babylon/AlarmManagerRuntime.ts');
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const target = MeshBuilder.CreateBox('pulse-target', {}, scene);
+  const idle = MeshBuilder.CreateBox('idle-target', {}, scene);
+  const original = new StandardMaterial('shared-original', scene);
+  target.material = idle.material = original;
+  const instance = target.createInstance('pulse-instance');
+  const tint = new AlarmColorOverrides();
+  try {
+    const desired = new Map([[target, '#ff0000'], [idle, '#00ff00'], [instance, '#ff0000']]);
+    const active = new Set([target, instance]);
+    tint.apply(desired, active, 0.9);
+    const targetMaterial = target.material;
+    const proxy = scene.meshes.find(mesh => mesh.name === 'pulse-instance_alarm');
+    assert.ok(Math.abs(targetMaterial.emissiveColor.r - 0.9) < 0.000001);
+    assert.ok(Math.abs(idle.material.emissiveColor.g - 0.35) < 0.000001);
+    assert.ok(Math.abs(proxy.material.emissiveColor.r - 0.9) < 0.000001);
+    tint.apply(desired, active, 0.4);
+    assert.equal(target.material, targetMaterial);
+    assert.ok(Math.abs(target.material.emissiveColor.r - 0.4) < 0.000001);
+    assert.ok(Math.abs(idle.material.emissiveColor.g - 0.35) < 0.000001);
+    assert.deepEqual(original.emissiveColor.asArray(), [0, 0, 0]);
+    tint.apply(desired);
+    assert.ok(Math.abs(target.material.emissiveColor.r - 0.35) < 0.000001, '没有active集合时保持旧静态颜色行为');
+    tint.clear();
+    assert.equal(target.material, original); assert.equal(idle.material, original);
+    assert.equal(instance.material, original); assert.equal(instance.isEnabled(), true);
+    assert.equal(proxy.isDisposed(), true); assert.equal(scene.materials.includes(targetMaterial), false);
+  } finally { tint.clear(); scene.dispose(); engine.dispose(); }
 });
 
 test('CUSTOM PROPERTY 原始 MQTT 多设备边沿、绑定覆盖、隐藏与解除保持一致', async () => {

@@ -1,0 +1,19 @@
+.inspector-panel-compact-model .light-wall-inspector .number-row,
+.inspector-panel-compact-model .light-wall-inspector .inspector-row {
+  grid-template-columns: 135px minmax(0, 1fr);
+}
+
+.light-wall-inspector textarea {
+  margin-top: 6px;
+  padding: 8px;
+  color: inherit;
+  background: #202020;
+  border: 1px solid #555;
+  border-radius: 2px;
+  font: inherit;
+  line-height: 1.6;
+}
+
+.light-wall-inspector [role='alert'] {
+  color: #ffad93;
+}

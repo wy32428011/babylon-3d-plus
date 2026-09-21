@@ -1,3 +1,4 @@
+import type { DigitalTwinEffectConfig, DigitalTwinEffectKind } from './digitalTwinEffect';
 import type { DataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type { AlarmManagerComponent } from './alarmManager';
 import type { Vector3Data } from './math';
@@ -241,11 +242,20 @@ export type PoiEffectKind =
   | 'moving-double-arrow'
   | 'cargo-target-frame'
   | 'conveyor-direction'
-  | 'evacuation-route';
+  | 'evacuation-route'
+  | 'light-wall-fence'
+  | DigitalTwinEffectKind;
+
+export type LightWallFencePoint = { x: number; z: number };
+
+/** 围栏局部 X/Z 平面轮廓，首尾由运行时闭合，高度以米计。 */
+export type LightWallFenceConfig = { height: number; opacity: number; points: LightWallFencePoint[] };
 
 /** EFF 实体只持久化可编辑参数，Babylon 运行时资源不进入场景文件。 */
 export type PoiEffectComponent = {
   effectKind: PoiEffectKind;
+  lightWall?: LightWallFenceConfig;
+  visual?: DigitalTwinEffectConfig;
   enabled: boolean;
   primaryColor: string;
   secondaryColor: string;

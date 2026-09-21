@@ -3,7 +3,7 @@ import autoPatrolThumbnailUrl from '../../assets/images/auto-patrol.png';
 import { BUILT_IN_IMAGE_ASSETS } from '../../assets/imageAssets';
 import { formatBuiltInMeshBaseDimensionsMeters } from '../model/builtInMeshGeometry';
 import type { LightKind, MeshKind } from '../model/components';
-import { POI_EFFECT_DEFINITIONS } from '../model/poiEffect';
+import { POI_EFFECT_DEFINITIONS, VISIBLE_POI_EFFECT_DEFINITIONS } from '../model/poiEffect';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/sceneUnits';
 import type { AssetEntry, BuiltInAssetDragPayload, ProjectSkyboxAssetEntry } from './AssetDatabase';
 import { formatSkyboxFileSize } from './skyboxAssets';
@@ -77,6 +77,16 @@ export const BUILT_IN_MODEL_LIBRARY_ITEMS: BuiltInProjectLibraryItem[] = [
   { id: 'builtin-hemispheric-light', name: '半球光', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'hemispheric' } },
   { id: 'builtin-directional-light', name: '方向光', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'directional' } },
   { id: 'builtin-point-light', name: '点光源', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'point' } },
+];
+
+/** 示意图中的业务交互复用已有组件；卡片副标题明确实际创建入口。 */
+const EXISTING_EFFECT_COMPONENT_ITEMS: BuiltInProjectLibraryItem[] = [
+  { id: 'effect-status-color', name: '状态变色', icon: 'cube', subtitle: '设备状态 · 报警管理器', builtIn: { kind: 'alarm-manager' } },
+  { id: 'effect-alarm-breathing', name: '告警呼吸', icon: 'ring', subtitle: '设备状态 · 报警管理器', builtIn: { kind: 'alarm-manager' } },
+  { id: 'effect-poi-label', name: 'POI 悬浮标签', icon: 'marker', subtitle: '交互信息 · 图表立标', builtIn: { kind: 'chart-marker' } },
+  { id: 'effect-callout', name: '引线标注', icon: 'marker', subtitle: '交互信息 · 图表立标线形外观', builtIn: { kind: 'chart-marker' } },
+  { id: 'effect-info-card', name: '点击信息卡', icon: 'panel', subtitle: '交互信息 · 点击事件绑定', builtIn: { kind: 'click-event-binding' } },
+  { id: 'effect-camera-flight', name: '镜头飞行', icon: 'ring', subtitle: '镜头动画 · 自动巡检', thumbnailUrl: autoPatrolThumbnailUrl, builtIn: { kind: 'auto-patrol' } },
 ];
 
 export const PROJECT_LIBRARIES: ProjectLibrary[] = [
@@ -177,16 +187,19 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
   },
 ];
 
-/** 将全部 EFF 预设转成特效库可点击、可拖拽的内置资源卡片。 */
+/** 隐藏旧版入口；加载和编辑旧场景仍由完整定义表提供兼容。 */
 export function createPoiEffectLibraryItems(): BuiltInProjectLibraryItem[] {
-  return POI_EFFECT_DEFINITIONS.map((definition) => ({
-    id: `poi-eff-${definition.kind}`,
-    name: definition.name,
-    icon: definition.icon,
-    subtitle: `EFF · ${definition.subtitle}`,
-    hasStatusBadge: true,
-    builtIn: { kind: 'poi-effect', effectKind: definition.kind },
-  }));
+  return [
+    ...VISIBLE_POI_EFFECT_DEFINITIONS.map((definition): BuiltInProjectLibraryItem => ({
+      id: `poi-eff-${definition.kind}`,
+      name: definition.name,
+      icon: definition.icon,
+      subtitle: `EFF · ${definition.subtitle}`,
+      hasStatusBadge: true,
+      builtIn: { kind: 'poi-effect', effectKind: definition.kind },
+    })),
+    ...EXISTING_EFFECT_COMPONENT_ITEMS,
+  ];
 }
 
 /** 将内置图片资产转成 Project 图片库卡片展示数据。 */

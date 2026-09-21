@@ -1,3 +1,4 @@
+import { isDigitalTwinEffectKind, validateDigitalTwinEffectConfig, type DigitalTwinEffectConfig } from '../model/digitalTwinEffect';
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import { normalizeAlarmManager } from '../model/alarmManager';
 import { normalizeModelSourceSnapshot } from '../model/modelSourceSnapshot';
@@ -47,6 +48,8 @@ import {
 import { sanitizeClickEventBindingComponent } from '../model/clickEventBinding';
 import type { Vector3Data } from '../model/math';
 import { ENTITY_NAME_MAX_LENGTH, MODEL_ARRAY_ITEM_COUNT_MAX } from '../model/modelArray';
+import { LIGHT_WALL_MAX_POINTS, validateLightWallPoints } from '../model/lightWallFence';
+import type { LightWallFenceConfig } from '../model/components';
 import { isPoiEffectHexColor, isPoiEffectKind, sanitizePoiEffectComponent } from '../model/poiEffect';
 import { sanitizeAutoPatrolComponent } from '../model/autoPatrolInspection';
 import { normalizeModelParameterConfig, restoreModelParameterValues } from '../model/modelParameters';
@@ -900,7 +903,29 @@ function normalizePoiEffect(value: unknown): PoiEffectComponent {
     throwUnsupportedSceneFileError();
   }
 
+  let visual: DigitalTwinEffectConfig | undefined;
+  if (isDigitalTwinEffectKind(poiEffect.effectKind) && poiEffect.visual !== undefined) {
+    try { validateDigitalTwinEffectConfig(poiEffect.visual, poiEffect.effectKind); }
+    catch { throwUnsupportedSceneFileError(); }
+    visual = poiEffect.visual as DigitalTwinEffectConfig;
+  }
+  let lightWall: LightWallFenceConfig | undefined;
+  if (poiEffect.effectKind === 'light-wall-fence' && poiEffect.lightWall !== undefined) {
+    const config = assertPlainObject(poiEffect.lightWall);
+    const points = assertArray(config.points);
+    if (points.length > LIGHT_WALL_MAX_POINTS) throwUnsupportedSceneFileError();
+    lightWall = {
+      height: assertFiniteNumber(config.height), opacity: assertFiniteNumber(config.opacity),
+      points: points.map(value => {
+        const point = assertPlainObject(value);
+        return { x: assertFiniteNumber(point.x), z: assertFiniteNumber(point.z) };
+      }),
+    };
+    if (validateLightWallPoints(lightWall.points)) throwUnsupportedSceneFileError();
+  }
   return sanitizePoiEffectComponent({
+    ...(lightWall ? { lightWall } : {}),
+    ...(visual ? { visual } : {}),
     effectKind: poiEffect.effectKind,
     enabled: assertOptionalBoolean(poiEffect.enabled, true),
     primaryColor: poiEffect.primaryColor,
