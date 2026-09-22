@@ -449,8 +449,13 @@ export class SpatialEffects {
       mover.mesh.position.copyFrom(sample.point);
       mover.mesh.position.y += 0.055;
       if (mover.arrow) {
-        const up = Math.abs(sample.tangent.y) > 0.99 ? Vector3.Right() : Vector3.Up();
-        mover.mesh.rotationQuaternion = Quaternion.FromLookDirectionLH(sample.tangent, up);
+        // 箭头尖端沿局部 +Z，旋转基的 +Z 必须与路径切线一致。
+        // 斜坡和竖直路径先构造正交 up，避免非正交输入造成偏转和形变。
+        const referenceUp = Math.abs(sample.tangent.y) > 0.99 ? Vector3.Right() : Vector3.Up();
+        const right = Vector3.Cross(referenceUp, sample.tangent).normalize();
+        const up = Vector3.Cross(sample.tangent, right).normalize();
+        mover.mesh.rotationQuaternion ??= Quaternion.Identity();
+        Quaternion.FromLookDirectionRHToRef(sample.tangent, up, mover.mesh.rotationQuaternion);
       }
     }
     if (this.trail && !this.config.targetEntityId) {

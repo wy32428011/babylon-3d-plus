@@ -147,6 +147,64 @@ test('同一实例原位调速暂停并恢复，保留资源与当前相位', t 
   assert.equal(shader._floats.time, resumedPhase);
 });
 
+function arrowHeading(mesh) {
+  const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+  const tip = Vector3.FromArray(positions, 4 * 3);
+  const tail = Vector3.FromArray(positions, 0).add(Vector3.FromArray(positions, 2 * 3)).scale(0.5);
+  const world = mesh.computeWorldMatrix(true);
+  return Vector3.TransformCoordinates(tip, world).subtract(Vector3.TransformCoordinates(tail, world)).normalize();
+}
+
+test('流动箭头的真实尖端指向与前进方向一致', t => {
+  const { create } = harness(t);
+  const effect = create('flow-arrows', { visual: { points: [{ x: 0, y: 0, z: 0 }, { x: 8, y: 0, z: 0 }], amount: 2 } });
+  const arrow = effect.meshes.find(mesh => mesh.metadata?.effectRole === 'moving-arrow');
+  arrow.computeWorldMatrix(true);
+  const before = arrow.getAbsolutePosition().clone();
+  effect.tick(0.1);
+  arrow.computeWorldMatrix(true);
+  const displacement = arrow.getAbsolutePosition().subtract(before).normalize();
+  assert.ok(Vector3.Dot(arrowHeading(arrow), displacement) > 0.9999,
+    `箭头尖端方向 ${arrowHeading(arrow).asArray()} 与实际位移 ${displacement.asArray()} 相反`);
+});
+
+test('流动箭头在反向、斜坡、竖直及父变换下始终朝实际位移方向', t => {
+  const { create, root } = harness(t);
+  const directions = [[8, 0, 0], [-8, 0, 0], [0, 0, 8], [0, 0, -8], [0, 8, 0], [0, -8, 0], [6, 3, 4], [-4, -3, 6], [0.05, 6, 0.1]];
+  for (const transformed of [false, true]) {
+    root.position.set(20, -3, 7);
+    root.rotation.set(...(transformed ? [0.4, -0.8, 0.3] : [0, 0, 0]));
+    root.scaling.set(...(transformed ? [-2, 0.7, 3] : [1, 1, 1]));
+    for (const [x, y, z] of directions) {
+      const effect = create('flow-arrows', { visual: { points: [{ x: 1, y: 2, z: 3 }, { x: 1 + x, y: 2 + y, z: 3 + z }], amount: 2 } });
+      const arrow = effect.meshes.find(mesh => mesh.metadata?.effectRole === 'moving-arrow');
+      arrow.computeWorldMatrix(true);
+      const before = arrow.getAbsolutePosition().clone();
+      effect.tick(0.1); arrow.computeWorldMatrix(true);
+      const direction = arrow.getAbsolutePosition().subtract(before).normalize();
+      assert.ok(Vector3.Dot(arrowHeading(arrow), direction) > 0.9999, `方向=${[x, y, z]} 父变换=${transformed}`);
+      assert.ok(Math.abs(arrow.rotationQuaternion.length() - 1) < 0.000001, '斜坡旋转基必须正交，不能扭曲箭头');
+      effect.dispose();
+    }
+  }
+});
+
+test('流动箭头经过折线拐弯后更新尖端朝向，暂停保留旋转', t => {
+  const { create } = harness(t);
+  const effect = create('flow-arrows', { visual: { duration: 1, points: [{ x: 0, y: 0, z: 0 }, { x: 4, y: 0, z: 0 }, { x: 4, y: 0, z: 4 }], amount: 2 } });
+  const arrow = effect.meshes.find(mesh => mesh.metadata?.effectRole === 'moving-arrow');
+  effect.tick(0.2);
+  assert.ok(Vector3.Dot(arrowHeading(arrow), Vector3.Right()) > 0.9999);
+  effect.tick(0.25); effect.tick(0.15);
+  assert.ok(Vector3.Dot(arrowHeading(arrow), Vector3.Forward()) > 0.9999);
+  const before = arrow.getAbsolutePosition().clone();
+  effect.tick(0.05); arrow.computeWorldMatrix(true);
+  assert.ok(Vector3.Dot(arrowHeading(arrow), arrow.getAbsolutePosition().subtract(before).normalize()) > 0.9999);
+  const rotation = arrow.rotationQuaternion.asArray();
+  effect.updatePlaybackSpeed(0); effect.tick(0.25);
+  assert.deepEqual(arrow.rotationQuaternion.asArray(), rotation);
+});
+
 test('真实运动拖尾使用目标世界坐标转换到特效局部，历史长度有界', t => {
   const { scene, root, create } = harness(t);
   root.position.set(100, 0, 0);
