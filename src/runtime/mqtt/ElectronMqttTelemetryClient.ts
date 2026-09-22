@@ -1,5 +1,6 @@
 import {
   deviceTelemetryStore,
+  dispatchDeviceSpawnMessages,
   parseDeviceTelemetryMessage,
   type DeviceTelemetryStore,
   type MqttSubscriptionConfig,
@@ -184,6 +185,8 @@ export class ElectronMqttTelemetryClient {
     if (!this.isMessageForCurrentConfig(event)) return;
 
     try {
+      const spawnSourceId = event.subscription.adapter?.sourceId ?? event.sourceId;
+      if (dispatchDeviceSpawnMessages(event.topic, event.payloadText, spawnSourceId)) return;
       const snapshot = parseDeviceTelemetryMessage(
         event.topic,
         event.payloadText,

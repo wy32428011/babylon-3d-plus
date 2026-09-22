@@ -248,6 +248,11 @@ import {
 } from './telemetry/specialized/SpecializedTelemetryRuntime';
 import type { SpecializedTelemetryHost } from './telemetry/specialized/types';
 import {
+  DeviceSpawnerRuntime,
+  createSpawnedDeviceKey,
+  type DeviceSpawnerConfig,
+} from './telemetry/spawner/DeviceSpawnerRuntime';
+import {
   STACKER_CARGO_COLOR,
   STACKER_CARGO_EMISSIVE_COLOR,
   STACKER_CARGO_SIZE,
@@ -289,6 +294,7 @@ const FALLBACK_MATERIAL_COLOR = '#8ab4f8';
 const LOCATOR_EDGE_COLOR = '#19c7d4';
 const MODEL_GENERATOR_MARKER_COLOR = '#19c7d4';
 const MODEL_GENERATOR_MARKER_ALPHA = 0.65;
+const DEVICE_SPAWNER_MARKER_COLOR = '#f2a33c';
 const LOCATOR_SURFACE_ALPHA = 0.025;
 const SELECTED_LOCATOR_SURFACE_ALPHA = 0.08;
 const LOCATOR_CONTIGUOUS_EPSILON = 1e-6;
@@ -431,6 +437,12 @@ type ModelArrayParameterVariantRuntimeEntry = {
 };
 
 type ModelGeneratorMarkerRuntimeEntry = {
+  mesh: Mesh;
+  material: StandardMaterial;
+};
+
+type DeviceSpawnerMarkerRuntimeEntry = {
+  root: TransformNode;
   mesh: Mesh;
   material: StandardMaterial;
 };
@@ -776,6 +788,11 @@ export class SceneRuntime {
     node: TransformNode;
   } | null = null;
   private readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
+  /** 设备产生器标记（编辑态可视），按实体 ID 组织。 */
+  private readonly deviceSpawnerMarkers = new Map<string, DeviceSpawnerMarkerRuntimeEntry>();
+  /** MQTT 消息驱动生成的动态设备实例，键为 spawnerCode + assetCode。 */
+  private readonly spawnedDeviceModels = new Map<string, ModelRuntimeEntry>();
+  private readonly deviceSpawnerRuntime: DeviceSpawnerRuntime;
   /** 场景级默认模型生成器实体 ID，syncDocument 时从文档快照刷新。 */
   private defaultCargoGeneratorId: string | null = null;
   private readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
@@ -912,6 +929,11 @@ export class SceneRuntime {
       pushLog: this.pushLog,
     });
     this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(scene, this.createSpecializedTelemetryHost());
+    this.deviceSpawnerRuntime = new DeviceSpawnerRuntime({
+      pushLog: (message) => this.pushLog(message),
+      spawnDeviceInstance: (spawner, assetCode) => this.spawnDeviceInstance(spawner, assetCode),
+      disposeDeviceInstance: (key) => this.disposeSpawnedDeviceModel(key),
+    });
     this.groupTransformPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
       this.flushGroupTranslationPreview();
       this.flushGroupRotationPreview();
@@ -939,6 +961,9 @@ export class SceneRuntime {
         }
         for (const [entityId, proxy] of this.modelArrayTelemetryProxies.entries()) {
           models.push({ entityId, model: proxy });
+        }
+        for (const [key, model] of this.spawnedDeviceModels.entries()) {
+          models.push({ entityId: `spawned:${key}`, model });
         }
         return models;
       },
@@ -1290,6 +1315,8 @@ export class SceneRuntime {
     this.updateAllExternalScriptRuntimeContexts('runtime', null);
     this.clearModelGeneratorLoadFailureCache();
     this.syncAllModelGeneratorPresentations();
+    this.syncDeviceSpawnerMarkerVisibility();
+    this.configureDeviceSpawnersFromDocument();
     this.refreshAllBuiltInSlotRenderability();
   }
 
@@ -1298,6 +1325,9 @@ export class SceneRuntime {
     // 停表必须先于早退与代际表清理：tick 会重写 latestFetchRequestByRow，清表后再停会让在途响应被放行、批次在编辑态复活
     this.stopFetchSyncTimer();
     this.fetchSyncFailureReported = false;
+    // 动态设备实例不依赖基线恢复，无论预览态标志如何都先统一销毁并退订消息。
+    this.deviceSpawnerRuntime.disposeAll();
+    this.syncDeviceSpawnerMarkerVisibility();
     const hadPreviewState = this.telemetryPreviewActive
       || [...this.models.values()].some((model) => model.telemetryPreviewBaseline)
       || [...this.generatedOutputOwners.values()].some((owner) => (
@@ -1421,6 +1451,7 @@ export class SceneRuntime {
       this.cadReferences.get(entityId)?.root ??
       this.models.get(entityId)?.root ??
       this.modelGenerators.get(entityId)?.markerRoot ??
+      this.deviceSpawnerMarkers.get(entityId)?.root ??
       this.poiEffectRuntime.getGizmoTarget(entityId) ??
       this.lightMarkerRuntime.getGizmoTarget(entityId) ??
       this.autoPatrolMarkerRuntime.getRouteGizmoTarget(entityId) ??
@@ -2644,6 +2675,9 @@ export class SceneRuntime {
     const modelGenerator = this.modelGenerators.get(entityId);
     if (modelGenerator) return this.getModelGeneratorWorldBounds(modelGenerator);
 
+    const deviceSpawnerMarker = this.deviceSpawnerMarkers.get(entityId);
+    if (deviceSpawnerMarker) return getMeshWorldBounds(deviceSpawnerMarker.mesh);
+
     const light = this.lights.get(entityId);
     if (light) return this.getLightWorldBounds(light);
 
@@ -3121,6 +3155,9 @@ export class SceneRuntime {
     const modelGeneratorIds = new Set(
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.modelGenerator)),
     );
+    const deviceSpawnerIds = new Set(
+      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.deviceSpawner)),
+    );
     if (forceModelArrayResync) {
       for (const modelId of modelIds) dirtyModelArraySourceIds.add(modelId);
     }
@@ -3195,6 +3232,11 @@ export class SceneRuntime {
     for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
       if (!modelGeneratorIds.has(entityId)) {
         this.disposeModelGenerator(entityId, modelGenerator);
+      }
+    }
+    for (const entityId of [...this.deviceSpawnerMarkers.keys()]) {
+      if (!deviceSpawnerIds.has(entityId)) {
+        this.disposeDeviceSpawnerMarker(entityId);
       }
     }
 
@@ -3680,6 +3722,10 @@ export class SceneRuntime {
     for (const [entityId, modelGenerator] of this.modelGenerators.entries()) {
       this.disposeModelGenerator(entityId, modelGenerator);
     }
+    this.deviceSpawnerRuntime.disposeAll();
+    for (const entityId of [...this.deviceSpawnerMarkers.keys()]) {
+      this.disposeDeviceSpawnerMarker(entityId);
+    }
     this.poiEffectRuntime.dispose();
     this.specializedTelemetryRuntime.dispose();
     for (const [entityId, light] of this.lights.entries()) {
@@ -3762,6 +3808,10 @@ export class SceneRuntime {
 
     if (entity.components.modelGenerator) {
       this.syncModelGeneratorEntity(entity, selected);
+    }
+
+    if (entity.components.deviceSpawner) {
+      this.syncDeviceSpawnerEntity(entity, selected);
     }
 
     if (entity.components.poiEffect) {
@@ -5202,6 +5252,7 @@ export class SceneRuntime {
       if (diagnosticsFinished !== null) this.telemetryOuterStages.baselineMs = performance.now() - diagnosticsFinished;
       const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
       this.specializedTelemetryRuntime.applyFrame(deltaSeconds);
+      this.deviceSpawnerRuntime.applyFrame(Date.now());
       const alarmsStarted = startedAt !== null ? performance.now() : null;
       for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(false);
       this.alarmRuntime.update();
@@ -6445,6 +6496,230 @@ export class SceneRuntime {
     this.modelGenerators.delete(entityId);
   }
 
+  // ===== 设备产生器（deviceSpawner）=====
+
+  /** 同步设备产生器编辑态标记；实例产生逻辑仅在运行预览时由 DeviceSpawnerRuntime 驱动。 */
+  private syncDeviceSpawnerEntity(entity: Entity, selected: boolean): void {
+    if (!entity.components.deviceSpawner) return;
+
+    let marker = this.deviceSpawnerMarkers.get(entity.id);
+    if (!marker) {
+      const root = new TransformNode(`${entity.id}_deviceSpawnerMarkerRoot`, this.scene);
+      const mesh = MeshBuilder.CreateBox(`${entity.id}_deviceSpawnerMarker`, { size: 0.8 }, this.scene);
+      const material = new StandardMaterial(`${entity.id}_deviceSpawnerMarkerMaterial`, this.scene);
+      material.disableLighting = true;
+      material.wireframe = true;
+      material.alpha = MODEL_GENERATOR_MARKER_ALPHA;
+      material.diffuseColor = Color3.FromHexString(DEVICE_SPAWNER_MARKER_COLOR);
+      material.emissiveColor = Color3.FromHexString(DEVICE_SPAWNER_MARKER_COLOR);
+      mesh.parent = root;
+      mesh.position.y = 0.4;
+      mesh.material = material;
+      mesh.metadata = { ...(mesh.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: entity.id };
+      marker = { root, mesh, material };
+      this.deviceSpawnerMarkers.set(entity.id, marker);
+    }
+
+    this.applyTransform(marker.root, entity.components.transform);
+    const visible = this.isEntityVisible(entity.id);
+    const showMarker = visible && !this.telemetryPreviewActive;
+    marker.root.setEnabled(visible);
+    marker.mesh.isVisible = showMarker;
+    marker.mesh.isPickable = showMarker && this.isEntityScenePickable(entity.id);
+    marker.material.alpha = selected ? 1 : MODEL_GENERATOR_MARKER_ALPHA;
+  }
+
+  /** 释放设备产生器编辑态标记。 */
+  private disposeDeviceSpawnerMarker(entityId: string): void {
+    const marker = this.deviceSpawnerMarkers.get(entityId);
+    if (!marker) return;
+    marker.material.dispose();
+    marker.mesh.dispose();
+    marker.root.dispose();
+    this.deviceSpawnerMarkers.delete(entityId);
+  }
+
+  /** 预览态切换时刷新全部产生器标记显隐（运行态隐藏编辑标记）。 */
+  private syncDeviceSpawnerMarkerVisibility(): void {
+    for (const [entityId, marker] of this.deviceSpawnerMarkers.entries()) {
+      const visible = this.isEntityVisible(entityId);
+      const showMarker = visible && !this.telemetryPreviewActive;
+      marker.root.setEnabled(visible);
+      marker.mesh.isVisible = showMarker;
+      marker.mesh.isPickable = showMarker && this.isEntityScenePickable(entityId);
+    }
+  }
+
+  /** 运行预览开始时从文档解析产生器配置并注册；模板无效的产生器跳过并提示。 */
+  private configureDeviceSpawnersFromDocument(): void {
+    const document = this.shadowDocument;
+    if (!document) return;
+
+    const configs: DeviceSpawnerConfig[] = [];
+    for (const entityId of document.entityIds) {
+      const entity = document.entities[entityId];
+      const component = entity?.components.deviceSpawner;
+      if (!entity || !component || !component.spawnerCode) continue;
+      const templateEntity = component.templateEntityId ? document.entities[component.templateEntityId] : undefined;
+      if (!templateEntity?.components.modelAsset) {
+        this.pushLog(`设备产生器“${entity.name}”未绑定有效模板实例，本次预览不生效。`);
+        continue;
+      }
+      const deviceType = (
+        templateEntity.components.telemetryBinding?.deviceType
+        || templateEntity.components.modelAsset.dataDrivenConfig?.device.devType
+        || ''
+      ).trim().toLowerCase();
+      configs.push({
+        entityId,
+        entityName: entity.name,
+        spawnerCode: component.spawnerCode,
+        templateEntityId: templateEntity.id,
+        timeoutSeconds: component.timeoutSeconds,
+        deviceType,
+      });
+    }
+    this.deviceSpawnerRuntime.configure(configs);
+  }
+
+  /** 基于模板实体派生一台动态设备实例；模板模型未加载完成时返回 false，等待下一条消息重试。 */
+  private spawnDeviceInstance(spawner: DeviceSpawnerConfig, assetCode: string): boolean {
+    const key = createSpawnedDeviceKey(spawner.spawnerCode, assetCode);
+    if (this.spawnedDeviceModels.has(key)) return true;
+
+    const templateEntity = this.shadowDocument?.entities[spawner.templateEntityId];
+    const templateModelAsset = templateEntity?.components.modelAsset;
+    const templateModel = this.models.get(spawner.templateEntityId);
+    if (!templateEntity || !templateModelAsset || !templateModel?.assetHandle) return false;
+
+    // 拷贝模板参数，assetCode 由消息提供；绑定 assetCode 显式覆盖，防止指向模板自身编号。
+    const modelAsset: ModelAssetComponent = {
+      ...(JSON.parse(JSON.stringify(templateModelAsset)) as Omit<ModelAssetComponent, 'assetCode'>),
+      assetCode,
+    };
+    const templateBinding = templateEntity.components.telemetryBinding;
+    const telemetryBinding: TelemetryBindingComponent | null = templateBinding
+      ? { ...(JSON.parse(JSON.stringify(templateBinding)) as TelemetryBindingComponent), assetCode }
+      : null;
+    // 合成实体快照供驱动读取参数（shuttle/stacker 经 entitySnapshot 取 parameterValues）。
+    const entitySnapshot: Entity = {
+      ...(JSON.parse(JSON.stringify(templateEntity)) as Entity),
+      id: `spawned:${key}`,
+      components: {
+        ...(JSON.parse(JSON.stringify(templateEntity.components)) as Entity['components']),
+        modelAsset,
+        ...(telemetryBinding ? { telemetryBinding } : {}),
+      },
+    };
+
+    const root = new TransformNode(`spawnedDevice_${spawner.spawnerCode}_${assetCode}`, this.scene);
+    root.position = templateModel.root.getAbsolutePosition().clone();
+    const contentRoot = new TransformNode(`spawnedDevice_${spawner.spawnerCode}_${assetCode}_content`, this.scene);
+    contentRoot.parent = root;
+    this.applyModelUnitScale(contentRoot, modelAsset.unitScaleToMeters);
+
+    const modelLoadToken = ++this.modelLoadSequence;
+    const model: ModelRuntimeEntry = {
+      sourceUrl: modelAsset.sourceUrl,
+      assetRevision: modelAsset.assetRevision ?? null,
+      assetSignature: this.createModelAssetSignature(modelAsset),
+      entitySnapshot,
+      assetCode,
+      telemetryBinding,
+      stackerCapable: isStackerModelAsset(modelAsset),
+      conveyorCapable: isConveyorModelAsset(modelAsset),
+      rgvCapable: isRgvModelAsset(modelAsset),
+      liftCapable: isLiftModelAsset(modelAsset),
+      root,
+      contentRoot,
+      assetHandle: null,
+      meshes: [],
+      modelArraySuspendedMeshes: new Set(),
+      modelArrayBatch: null,
+      modelArraySourceSignature: '',
+      modelArrayFailureSignature: '',
+      highlighted: false,
+      loadToken: modelLoadToken,
+      cancelLoad: null,
+      parameterSignature: '',
+      parameterBaseline: new Map(),
+      textureCache: new Map(),
+      externalScriptRuntime: null,
+      externalScriptSignature: '',
+      externalScriptStarting: false,
+      measurementReady: false,
+      stackerTelemetry: createStackerTelemetryState(root),
+      conveyorTelemetry: createConveyorTelemetryState(),
+      rgvTelemetry: createRgvTelemetryState(root),
+      shuttleTelemetry: createShuttleTelemetryState(root),
+      liftTelemetry: createLiftTelemetryState(root),
+      stackerTelemetryReady: false,
+      telemetryPreviewBaseline: null,
+    };
+    this.spawnedDeviceModels.set(key, model);
+
+    void this.loadModelRuntimeAssets(modelAsset, model.assetSignature)
+      .then((loadedAssets) => {
+        if (this.spawnedDeviceModels.get(key) !== model || model.loadToken !== modelLoadToken) {
+          loadedAssets.handle.dispose();
+          return;
+        }
+
+        model.assetHandle = loadedAssets.handle;
+        if (loadedAssets.kind === 'owned-container') {
+          model.meshes = loadedAssets.meshes;
+          this.parentTopLevelModelNodes(model, loadedAssets.transformNodes);
+        } else {
+          for (const rootNode of loadedAssets.rootNodes) {
+            rootNode.parent = model.contentRoot;
+          }
+        }
+
+        this.refreshSpawnedDeviceModelMeshes(model, spawner);
+        this.normalizeModelContentOrigin(model);
+        this.applyModelAssetParameters(modelAsset, model);
+        this.syncModelAssetExternalScripts(modelAsset, model, (current) => {
+          if (this.spawnedDeviceModels.get(key) !== current) return;
+          this.refreshSpawnedDeviceModelMeshes(current, spawner);
+        });
+      })
+      .catch((error: unknown) => {
+        if (this.spawnedDeviceModels.get(key) !== model) return;
+        this.disposeSpawnedDeviceModel(key);
+        this.deviceSpawnerRuntime.dropInstance(key);
+        const message = error instanceof Error ? error.message : String(error);
+        this.pushLog(`设备产生器实例加载失败（${assetCode}）：${message}`);
+      });
+
+    return true;
+  }
+
+  /** 收集动态实例网格并禁止拾取；动态实例不进入编辑选择。 */
+  private refreshSpawnedDeviceModelMeshes(model: ModelRuntimeEntry, spawner: DeviceSpawnerConfig): void {
+    this.refreshModelMeshes(model, {
+      deviceSpawnerSpawned: true,
+      spawnerEntityId: spawner.entityId,
+    });
+    for (const mesh of model.meshes) {
+      mesh.isPickable = false;
+    }
+  }
+
+  /** 销毁一台动态设备实例；负载中的异步加载通过 loadToken 失效自行丢弃。 */
+  private disposeSpawnedDeviceModel(key: string): void {
+    const model = this.spawnedDeviceModels.get(key);
+    if (!model) return;
+    this.spawnedDeviceModels.delete(key);
+    model.loadToken += 1;
+    model.externalScriptRuntime?.dispose();
+    for (const texture of model.textureCache.values()) {
+      texture.dispose();
+    }
+    model.assetHandle?.dispose();
+    model.contentRoot.dispose();
+    model.root.dispose();
+  }
+
   private disposeLight(entityId: string, light: Light): void {
     this.shadowRuntime.removeLight(entityId);
     this.lightMarkerRuntime.disposeEntity(entityId);
@@ -6471,6 +6746,7 @@ export class SceneRuntime {
         || this.models.has(entityId)
         || this.modelArrayInstanceEntities.has(entityId)
         || this.modelGenerators.has(entityId)
+        || this.deviceSpawnerMarkers.has(entityId)
         || this.poiEffectRuntime.has(entityId)
         || this.lightMarkerRuntime.has(entityId)
         || this.autoPatrolMarkerRuntime.has(entityId)
@@ -8313,6 +8589,9 @@ export class SceneRuntime {
       if (owner.output?.kind === 'model' && owner.output.model.externalScriptRuntime === runtime) {
         return owner.output.model;
       }
+    }
+    for (const model of this.spawnedDeviceModels.values()) {
+      if (model.externalScriptRuntime === runtime) return model;
     }
     return null;
   }

@@ -27,6 +27,7 @@ import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
 import { findBuiltInSlotEntities } from '../model/builtInSlotBinding';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
+import { DeviceSpawnerInspector } from './DeviceSpawnerInspector';
 import { ClickEventBindingInspector } from './ClickEventBindingInspector';
 import { LocatorInspector } from './LocatorInspector';
 import { PoiEffectInspector } from './PoiEffectInspector';
@@ -364,12 +365,13 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const light = selectedEntity.components.light;
   const modelAsset = selectedEntity.components.modelAsset;
   const modelGenerator = selectedEntity.components.modelGenerator;
+  const deviceSpawner = selectedEntity.components.deviceSpawner;
   const clickEventBinding = selectedEntity.components.clickEventBinding;
   const poiEffect = selectedEntity.components.poiEffect;
   const autoPatrol = selectedEntity.components.autoPatrol;
   const manualRoamSpawn = selectedEntity.components.manualRoamSpawn;
   const isCompactModelInspector = Boolean(
-    modelAsset || meshRenderer || skybox || modelGenerator || clickEventBinding || poiEffect || autoPatrol || manualRoamSpawn || locator,
+    modelAsset || meshRenderer || skybox || modelGenerator || deviceSpawner || clickEventBinding || poiEffect || autoPatrol || manualRoamSpawn || locator,
   );
   const isBuiltInBound = Boolean(locator?.builtInBinding);
   const builtInSlotEntities = modelAsset ? findBuiltInSlotEntities(scene, selectedEntity.id) : [];
@@ -382,7 +384,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
 
   return (
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
-      <h2>{modelGenerator ? '模型生成器' : clickEventBinding ? '点击事件绑定' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : manualRoamSpawn ? '手动漫游' : 'Inspector'}</h2>
+      <h2>{modelGenerator ? '模型生成器' : deviceSpawner ? '设备产生器' : clickEventBinding ? '点击事件绑定' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : manualRoamSpawn ? '手动漫游' : 'Inspector'}</h2>
       <label className="inspector-row">
         <span>{selectedEntity.components.alarmManager ? 'POI名称' : poiEffect ? '特效名称' : modelGenerator || clickEventBinding || autoPatrol || selectedEntity.components.chartMarker ? 'POI名称' : '名称'}</span>
         <input
@@ -430,6 +432,17 @@ export function InspectorPanel(props: InspectorPanelProps) {
       ) : null}
       {modelGenerator ? (
         <ModelGeneratorInspector component={modelGenerator} disabled={isLocked} />
+      ) : null}
+      {deviceSpawner ? (
+        <fieldset className="transform-fieldset" aria-label="设备产生器标记提示">
+          <legend>重要提示</legend>
+          <p className="muted model-generator-global-note">
+            注意：此标记位置仅用于编辑设备产生器配置；动态实例的初始位置取模板实体位置。
+          </p>
+        </fieldset>
+      ) : null}
+      {deviceSpawner ? (
+        <DeviceSpawnerInspector component={deviceSpawner} disabled={isLocked} />
       ) : null}
       {clickEventBinding ? (
         <fieldset className="transform-fieldset" aria-label="点击事件绑定标记提示">

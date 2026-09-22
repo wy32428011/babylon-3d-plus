@@ -47,6 +47,7 @@ import {
   sanitizeModelGeneratorTarget,
 } from '../model/modelGenerator';
 import { sanitizeClickEventBindingComponent } from '../model/clickEventBinding';
+import { sanitizeDeviceSpawnerComponent } from '../model/deviceSpawner';
 import type { Vector3Data } from '../model/math';
 import { ENTITY_NAME_MAX_LENGTH, MODEL_ARRAY_ITEM_COUNT_MAX } from '../model/modelArray';
 import { LIGHT_WALL_MAX_POINTS, validateLightWallPoints } from '../model/lightWallFence';
@@ -625,6 +626,12 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
 
   if ('modelGenerator' in components && components.modelGenerator !== undefined) {
     normalized.modelGenerator = normalizeModelGenerator(components.modelGenerator);
+  }
+
+  if ('deviceSpawner' in components && components.deviceSpawner !== undefined) {
+    const deviceSpawner = sanitizeDeviceSpawnerComponent(components.deviceSpawner);
+    if (!deviceSpawner) throwUnsupportedSceneFileError();
+    normalized.deviceSpawner = deviceSpawner;
   }
 
   if ('telemetryBinding' in components && components.telemetryBinding !== undefined) {

@@ -212,6 +212,19 @@ export type ModelGeneratorComponent = {
   rules: ModelGeneratorRule[];
 };
 
+/**
+ * 设备产生器组件：运行预览时按 MQTT 消息（s=spawnerCode）动态克隆模板实体生成设备实例，
+ * 超时无消息或收到下线点位后销毁。模型与参数全部从模板实体派生，assetCode 由消息 e 字段提供。
+ */
+export type DeviceSpawnerComponent = {
+  /** 产生器 id，与消息 s 字段严格匹配。 */
+  spawnerCode: string;
+  /** 场景模板实例 id（带 modelAsset 的设备实体）；模板自身不参与驱动。 */
+  templateEntityId: string | null;
+  /** 无消息自动销毁超时（秒）。 */
+  timeoutSeconds: number;
+};
+
 export type CameraComponent = {
   fov: number;
   near: number;
@@ -489,6 +502,8 @@ export type EntityComponents = {
   modelArray?: ModelArrayComponent;
   modelArrayInstance?: ModelArrayInstanceComponent;
   modelGenerator?: ModelGeneratorComponent;
+  /** 设备产生器：MQTT 消息驱动动态克隆模板实例（AGV/穿梭车等编辑期数量不确定的设备）。 */
+  deviceSpawner?: DeviceSpawnerComponent;
   telemetryBinding?: TelemetryBindingComponent;
   camera?: CameraComponent;
   light?: LightComponent;

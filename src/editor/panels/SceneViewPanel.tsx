@@ -372,6 +372,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const createLocator = useEditorStore((state) => state.createLocator);
   const createLight = useEditorStore((state) => state.createLight);
   const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
+  const createDeviceSpawner = useEditorStore((state) => state.createDeviceSpawner);
   const createAutoPatrol = useEditorStore((state) => state.createAutoPatrol);
   const createManualRoamSpawn = useEditorStore((state) => state.createManualRoamSpawn);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
@@ -1103,6 +1104,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     if (builtInAsset.kind === 'model-generator') {
       createModelGenerator(placementPosition);
+      return;
+    }
+
+    if (builtInAsset.kind === 'device-spawner') {
+      createDeviceSpawner(placementPosition);
       return;
     }
 

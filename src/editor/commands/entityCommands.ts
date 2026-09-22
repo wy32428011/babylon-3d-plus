@@ -4,6 +4,7 @@ import type {
   AutoPatrolComponent,
   CadReferenceComponent,
   ClickEventBindingComponent,
+  DeviceSpawnerComponent,
   LightComponent,
   LocatorComponent,
   MeshRendererComponent,
@@ -610,6 +611,20 @@ export function updateClickEventBindingCommand(
   };
 }
 
+/** 更新设备产生器完整配置，所有 Inspector 编辑都通过同一条可撤销命令提交。 */
+export function updateDeviceSpawnerCommand(
+  entityId: string,
+  before: DeviceSpawnerComponent,
+  after: DeviceSpawnerComponent,
+  label = '更新设备产生器',
+): Command {
+  return {
+    label,
+    execute: (scene) => updateDeviceSpawner(scene, entityId, after),
+    undo: (scene) => updateDeviceSpawner(scene, entityId, before),
+  };
+}
+
 function moveEntitiesToFolder(scene: SceneDocument, entityIds: string[], targetFolderId: string | null): SceneDocument {
   const targetFolder = targetFolderId ? scene.entities[targetFolderId] : null;
   if (targetFolderId && !targetFolder?.isFolder) return scene;
@@ -1112,6 +1127,30 @@ function updateModelGenerator(
         components: {
           ...entity.components,
           modelGenerator,
+        },
+      },
+    },
+  };
+}
+
+/** 将设备产生器组件替换为已校验的不可变快照。 */
+function updateDeviceSpawner(
+  scene: SceneDocument,
+  entityId: string,
+  deviceSpawner: DeviceSpawnerComponent,
+): SceneDocument {
+  const entity = scene.entities[entityId];
+  if (!entity?.components.deviceSpawner) return scene;
+
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [entityId]: {
+        ...entity,
+        components: {
+          ...entity.components,
+          deviceSpawner,
         },
       },
     },

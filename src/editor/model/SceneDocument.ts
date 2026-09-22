@@ -7,6 +7,7 @@ import type { Entity } from './Entity';
 import type { Vector3Data } from './math';
 import type { ModelParameterConfig } from './modelParameters';
 import { createDefaultModelGeneratorComponent } from './modelGenerator';
+import { createDefaultDeviceSpawner } from './deviceSpawner';
 import { createDefaultPoiEffectComponent, getPoiEffectDefinition } from './poiEffect';
 import { createDefaultAutoPatrolComponent } from './autoPatrolInspection';
 import { createDefaultClickEventBindingComponent } from './clickEventBinding';
@@ -1320,6 +1321,28 @@ export function createModelGeneratorEntity(position: Vector3Data = vector3()): E
         scale: vector3(1, 1, 1),
       },
       modelGenerator: createDefaultModelGeneratorComponent(),
+    },
+  };
+}
+
+/** 创建一个设备产生器实体，默认空配置；运行预览时按 MQTT 消息克隆模板实例。 */
+export function createDeviceSpawnerEntity(position: Vector3Data = vector3()): Entity {
+  const id = createId('entity');
+
+  return {
+    id,
+    name: '设备产生器',
+    visible: true,
+    locked: false,
+    parentId: null,
+    childrenIds: [],
+    components: {
+      transform: {
+        position: vector3(position.x, position.y, position.z),
+        rotation: vector3(),
+        scale: vector3(1, 1, 1),
+      },
+      deviceSpawner: createDefaultDeviceSpawner(),
     },
   };
 }

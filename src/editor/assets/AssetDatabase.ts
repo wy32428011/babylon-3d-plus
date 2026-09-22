@@ -80,6 +80,7 @@ export type ImageAssetDragPayload = Pick<BuiltInImageAsset, 'id' | 'name' | 'ref
 
 export type BuiltInAssetDragPayload =
   | { kind: 'model-generator' }
+  | { kind: 'device-spawner' }
   | { kind: 'auto-patrol' }
   | { kind: 'manual-roam-spawn' }
   | { kind: 'click-event-binding' }
@@ -379,6 +380,10 @@ export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetD
 
     if (payload.kind === 'model-generator') {
       return { kind: 'model-generator' };
+    }
+
+    if (payload.kind === 'device-spawner') {
+      return { kind: 'device-spawner' };
     }
 
     if (payload.kind === 'auto-patrol') {

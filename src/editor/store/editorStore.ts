@@ -37,6 +37,7 @@ import {
   updateMeshRendererCommand,
   updateModelAssetCodeCommand,
   updateModelGeneratorCommand,
+  updateDeviceSpawnerCommand,
   updateClickEventBindingCommand,
   updatePoiEffectCommand,
   updateModelParameterValuesCommand,
@@ -67,6 +68,7 @@ import type {
   ClickEventBindingComponent,
   ChartMarkerComponent,
   DataPlatformScreenComponent,
+  DeviceSpawnerComponent,
   LightComponent,
   LightKind,
   LocatorComponent,
@@ -124,6 +126,7 @@ import {
   createMeshEntity,
   createModelEntity,
   createModelGeneratorEntity,
+  createDeviceSpawnerEntity,
   createPoiEffectEntity,
   createSkyboxComponent,
   createSkyboxEntity,
@@ -208,6 +211,7 @@ import {
   createModelGeneratorTargetFromAsset,
   sanitizeModelGeneratorComponent,
 } from '../model/modelGenerator';
+import { sanitizeDeviceSpawnerComponent } from '../model/deviceSpawner';
 import {
   cloneClickEventBindingComponent,
   sanitizeClickEventBindingComponent,
@@ -609,6 +613,7 @@ type EditorState = {
   clearSceneTheme: () => void;
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
   createModelGenerator: (placementPosition?: Vector3Data) => void;
+  createDeviceSpawner: (placementPosition?: Vector3Data) => void;
   createAutoPatrol: (placementPosition?: Vector3Data) => void;
   createManualRoamSpawn: (placementPosition?: Vector3Data) => void;
   setManualRoamAvatar: (entityId: string, avatar: ManualRoamAvatar | null) => void;
@@ -661,6 +666,7 @@ type EditorState = {
   updateSelectedLight: (patch: Partial<LightComponent>) => void;
   updateSelectedModelAssetCode: (assetCode: string) => void;
   updateSelectedModelGenerator: (component: ModelGeneratorComponent, label?: string) => void;
+  updateSelectedDeviceSpawner: (component: DeviceSpawnerComponent, label?: string) => void;
   updateSelectedClickEventBinding: (component: ClickEventBindingComponent, label?: string) => void;
   updateSelectedPoiEffect: (component: PoiEffectComponent, label?: string) => void;
   updateSelectedAutoPatrol: (component: AutoPatrolComponent, label?: string) => void;
@@ -1560,6 +1566,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
       : {}),
     ...(entity.components.alarmManager ? { alarmManager: cloneJsonValue(entity.components.alarmManager) } : {}),
     ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
+    ...(entity.components.deviceSpawner ? { deviceSpawner: cloneJsonValue(entity.components.deviceSpawner) } : {}),
     ...(entity.components.clickEventBinding ? { clickEventBinding: cloneClickEventBindingComponent(entity.components.clickEventBinding) } : {}),
     ...(entity.components.telemetryBinding ? { telemetryBinding: cloneJsonValue(entity.components.telemetryBinding) } : {}),
     ...(entity.components.poiEffect ? { poiEffect: cloneJsonValue(entity.components.poiEffect) } : {}),
@@ -2280,6 +2287,14 @@ function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[]): Scene
       components = {
         ...components,
         locator: { ...locator, fetchDrive: { ...locator.fetchDrive, cargoGeneratorId: undefined } },
+      };
+    }
+
+    const deviceSpawner = components.deviceSpawner;
+    if (deviceSpawner?.templateEntityId && deletingIds.has(deviceSpawner.templateEntityId)) {
+      components = {
+        ...components,
+        deviceSpawner: { ...deviceSpawner, templateEntityId: null },
       };
     }
 
@@ -4055,6 +4070,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
+  createDeviceSpawner: (placementPosition) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建设备产生器');
+
+      const baseEntity = createDeviceSpawnerEntity(sanitizeVector3(placementPosition));
+      const entity = { ...baseEntity, name: createNextEntityName(state.scene, '设备产生器') };
+      const command = createEntityCommand(entity);
+      const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
+      return {
+        ...result,
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        logs: prependLog(state.logs, command.label),
+      };
+    });
+  },
   createAlarmManager: (placementPosition) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建报警管理器');
@@ -5233,6 +5265,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (areJsonValuesEqual(before, after)) return state;
 
       const command = updateModelGeneratorCommand(entity.id, before, after, label);
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
+    });
+  },
+  /** 更新选中设备产生器的完整配置快照，并通过命令历史支持撤销和重做。 */
+  updateSelectedDeviceSpawner: (component, label = '更新设备产生器') => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
+      const entity = getSelectedEntity(state);
+      const current = entity?.components.deviceSpawner;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !current) return state;
+
+      const normalized = sanitizeDeviceSpawnerComponent(component);
+      if (!normalized) return state;
+      const before = JSON.parse(JSON.stringify(current)) as DeviceSpawnerComponent;
+      const after = JSON.parse(JSON.stringify(normalized)) as DeviceSpawnerComponent;
+      if (areJsonValuesEqual(before, after)) return state;
+
+      const command = updateDeviceSpawnerCommand(entity.id, before, after, label);
       const result = executeCommand(state.scene, state.history, command);
       return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
     });
