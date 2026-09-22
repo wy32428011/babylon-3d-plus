@@ -1,3 +1,4 @@
+import { normalizeLightSettings } from '../model/lightSettings';
 import { isDigitalTwinEffectKind, validateDigitalTwinEffectConfig, type DigitalTwinEffectConfig } from '../model/digitalTwinEffect';
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import { normalizeAlarmManager } from '../model/alarmManager';
@@ -335,6 +336,7 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
   const shadows = settings.shadows === undefined ? undefined : assertPlainObject(settings.shadows);
 
   return sanitizeSceneSettings({
+    theme: settings.theme as SceneSettings['theme'],
     // 统一校验器负责隔离坏项并报告；缺失字段兼容历史场景。
     regionViews: settings.regionViews as SceneSettings['regionViews'],
     camera: {
@@ -1343,10 +1345,7 @@ function normalizeLight(value: unknown): EntityComponents['light'] {
     throwUnsupportedSceneFileError();
   }
 
-  return {
-    lightKind: lightKind as LightKind,
-    intensity: assertFiniteNumber(light.intensity),
-  };
+  return normalizeLightSettings({ ...light, lightKind, intensity: assertFiniteNumber(light.intensity) });
 }
 
 function validateEntityHierarchy(entityIds: string[], entities: Record<string, Entity>): void {

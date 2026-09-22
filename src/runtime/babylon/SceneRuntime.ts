@@ -1,3 +1,4 @@
+import { SceneThemeRuntime } from './SceneThemeRuntime';
 import { ENVIRONMENT_EFFECT_TARGET_ID } from '../../editor/model/environmentBuildingEffect';
 import { createStackerFocusView, getStackerFocusWorldBounds } from './stackerFocusBounds';
 import { AlarmManagerRuntime, type AlarmActivation } from './AlarmManagerRuntime';
@@ -822,6 +823,9 @@ export class SceneRuntime {
   private readonly modelArrayVariantRenderRestoreObserver: Nullable<Observer<Scene>>;
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
+  private readonly themeRuntime: SceneThemeRuntime;
+  private themeSignature = '';
+  private themeActive = false;
   private readonly shadowRuntime: SceneShadowRuntime;
   private readonly skyboxRuntime: SceneSkyboxRuntime;
   private readonly environmentRuntime: SceneEnvironmentRuntime;
@@ -885,6 +889,7 @@ export class SceneRuntime {
       return this.meshes.get(id) ?? model?.root ?? null;
     }, () => this.telemetryPreviewActive);
     this.shadowRuntime = new SceneShadowRuntime(scene);
+    this.themeRuntime = new SceneThemeRuntime(scene);
     this.lightMarkerRuntime = new EditorLightMarkerRuntime(scene);
     this.autoPatrolMarkerRuntime = new EditorAutoPatrolRuntime(scene);
     this.manualRoamSpawnRuntime = new EditorManualRoamSpawnRuntime(scene, this.pushLog);
@@ -3078,6 +3083,7 @@ export class SceneRuntime {
     this.alarmManagerIds.clear();
     for (const id of document.entityIds) if (document.entities[id]?.components.alarmManager) this.alarmManagerIds.add(id);
     this.defaultCargoGeneratorId = document.sceneSettings.defaultCargoGeneratorId ?? null;
+    this.syncTheme(document);
     this.syncShadows(document.sceneSettings.shadows, document);
     const previousEntityStates = new Map(this.entityStates);
     const previousHighlightedEntityIds = mergeSceneRuntimeHighlightEntityIds(
@@ -3375,7 +3381,7 @@ export class SceneRuntime {
 
     const light = this.lights.get(entity.id);
     if (light) {
-      light.setEnabled(this.isEntityVisible(entity.id));
+      light.setEnabled(this.isEntityVisible(entity.id) && (!this.themeActive || light instanceof PointLight));
       this.shadowRuntime.syncLight(entity.id, light);
     }
     if (light && entity.components.light) {
@@ -3503,6 +3509,29 @@ export class SceneRuntime {
     this.defaultCargoGeneratorId = defaultCargoGeneratorId ?? null;
   }
 
+  /** 主题只更新全局显示及灯光，不重载模型，不修改实体文档。 */
+  syncTheme(document: SceneDocument): void {
+    const { theme, shadows } = document.sceneSettings;
+    const signature = JSON.stringify([theme ?? null, shadows.sunAzimuthDegrees, shadows.sunElevationDegrees, shadows.sunIntensity, shadows.fillIntensity, shadows.iblIntensityMax]);
+    if (signature === this.themeSignature) return;
+    this.themeSignature = signature;
+    if (this.themeActive !== Boolean(theme)) this.shadowRuntime.prepareThemeChange();
+    this.themeActive = Boolean(theme);
+    this.poiEffectRuntime.setSceneTheme(this.themeActive, theme?.glowIntensity ?? null);
+    const environmentIntensity = theme ? Math.min(theme.environmentIntensity, shadows.iblIntensityMax) : 0;
+    this.themeRuntime.sync(theme ? { ...theme, environmentIntensity } : null, shadows);
+    this.shadowRuntime.setThemeLight(this.themeRuntime.mainLight);
+    this.skyboxRuntime.setThemeOverrides(theme ? { visible: theme.skyboxVisible, intensity: environmentIntensity } : null);
+    this.poiEffectRuntime.setThemeFog(theme ?? null);
+    void this.environmentRuntime.setLightingMode(theme?.environmentLighting ?? 'original').catch(error => {
+      this.pushLog('环境主题应用失败：' + (error instanceof Error ? error.message : String(error)));
+    });
+    for (const [id, light] of this.lights) {
+      light.setEnabled(this.isEntityVisible(id) && (!this.themeActive || light instanceof PointLight));
+      this.shadowRuntime.syncLight(id, light);
+    }
+  }
+
   /** 单独同步场景级阴影，避免 Inspector 调参触发全场实体重建。 */
   syncShadows(settings: SceneDocument['sceneSettings']['shadows'], document = this.shadowDocument): void {
     if (document) this.shadowDocument = document;
@@ -3607,6 +3636,7 @@ export class SceneRuntime {
     this.entityGroupGizmoProxy = null;
     this.modelArrayGizmoProxy?.node.dispose(false, false);
     this.modelArrayGizmoProxy = null;
+    this.themeRuntime.dispose();
     this.environmentRuntime.dispose();
     this.environmentAssetCache.dispose();
     this.environmentLoadScheduler.dispose();
@@ -5108,7 +5138,12 @@ export class SceneRuntime {
     }
 
     light.intensity = lightComponent.intensity;
-    light.setEnabled(this.isEntityVisible(entity.id));
+    light.diffuse = Color3.FromHexString(lightComponent.color ?? '#ffffff');
+    light.specular = light.diffuse.clone();
+    light.range = lightComponent.range ?? Number.MAX_VALUE;
+    light.metadata = { ...light.metadata, nightBehavior: lightComponent.nightBehavior ?? 'dim' };
+    if (light instanceof HemisphericLight) light.groundColor = Color3.FromHexString(lightComponent.groundColor ?? '#000000');
+    light.setEnabled(this.isEntityVisible(entity.id) && (!this.themeActive || light instanceof PointLight));
     this.shadowRuntime.syncLight(entity.id, light);
     this.lightMarkerRuntime.sync(
       entity,

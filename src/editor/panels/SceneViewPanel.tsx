@@ -84,6 +84,7 @@ import {
 import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import { getLightEditorCapabilities } from '../model/lightEditor';
+import { SCENE_THEME_DRAG_MIME_TYPE, SCENE_THEME_PRESET_ID } from '../model/sceneTheme';
 import {
   AUTO_PATROL_EYE_HEIGHT_METERS,
   createAutoPatrolWaypointFromWorldPose,
@@ -1001,6 +1002,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   function handleCanvasDragOver(event: DragEvent<HTMLCanvasElement>): void {
     if (isRuntimePreview) return;
 
+    if (event.dataTransfer.types.includes(SCENE_THEME_DRAG_MIME_TYPE)) {
+      event.preventDefault();
+      const state = useEditorStore.getState();
+      event.dataTransfer.dropEffect = isScenePreparationActive() || state.shadowBakeStatus.phase === 'baking' ? 'none' : 'copy';
+      return;
+    }
+
     if (event.dataTransfer.types.includes(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE)) {
       event.preventDefault();
       const entityId = runtimeRef.current?.pickEntityIdAtCanvasPoint(event.clientX, event.clientY, event.currentTarget);
@@ -1019,11 +1027,23 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     event.dataTransfer.dropEffect = 'copy';
   }
 
-  /** 在鼠标释放位置把模型资产或内置资源投射到地面平面并创建场景实体。 */
+  /** 主题直接应用到场景，其余模型资产或内置资源按落点放置。 */
   function handleCanvasDrop(event: DragEvent<HTMLCanvasElement>): void {
     if (isRuntimePreview) {
       event.preventDefault();
       clickSnapshotRef.current = null;
+      return;
+    }
+
+    if (event.dataTransfer.types.includes(SCENE_THEME_DRAG_MIME_TYPE)) {
+      event.preventDefault();
+      clickSnapshotRef.current = null;
+      const state = useEditorStore.getState();
+      if (isScenePreparationActive() || state.runtimeMode !== 'edit' || state.shadowBakeStatus.phase === 'baking') return;
+      if (event.dataTransfer.getData(SCENE_THEME_DRAG_MIME_TYPE) === SCENE_THEME_PRESET_ID) {
+        state.applySceneTheme();
+        state.selectEntity(null);
+      }
       return;
     }
 
@@ -2522,6 +2542,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
     if (sceneRuntimeStartupDeferred) return;
     runtime.syncDefaultCargoGenerator(sceneDocument.sceneSettings.defaultCargoGeneratorId);
+    runtime.syncTheme(sceneDocument);
     runtime.syncShadows(sceneDocument.sceneSettings.shadows, sceneDocument);
     runtime.syncSkybox(sceneDocument);
     if (!environmentApplyRequest && !environmentAdjustmentActive) {

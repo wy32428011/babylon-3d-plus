@@ -1,3 +1,5 @@
+import { createTechBlueNightTheme, normalizeSceneTheme, TECH_BLUE_NIGHT_SHADOWS, type SceneThemeSettings } from '../model/sceneTheme';
+import { updateSceneThemeCommand } from '../commands/sceneThemeCommands';
 import { mergeSceneModelAssetUpdate as mergeModelAssetUpdate } from '../assets/mergeModelAssetUpdate';
 import { restoreFailedSceneResources, type FailedSceneResources } from '../assets/restoreFailedSceneResources';
 import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../model/alarmManager';
@@ -82,6 +84,7 @@ import type {
 } from '../model/components';
 import type { Entity } from '../model/Entity';
 import { resolveLightTransformTool } from '../model/lightEditor';
+import { normalizeLightSettings } from '../model/lightSettings';
 import { STANDARD_CAMERA_VIEW_LABELS } from '../model/cameraOrientation';
 import {
   collectEntitySubtreeIds,
@@ -601,6 +604,9 @@ type EditorState = {
   consumeGroupInspectorTransformRequest: (requestId: string) => void;
   createMesh: (meshKind: MeshKind, placementPosition?: Vector3Data) => void;
   createLocator: (placementPosition?: Vector3Data) => void;
+  applySceneTheme: () => void;
+  updateSceneTheme: (patch: Partial<SceneThemeSettings>) => void;
+  clearSceneTheme: () => void;
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
   createModelGenerator: (placementPosition?: Vector3Data) => void;
   createAutoPatrol: (placementPosition?: Vector3Data) => void;
@@ -946,10 +952,7 @@ function cloneCadReference(cadReference: CadReferenceComponent): CadReferenceCom
 }
 
 function cloneLight(light: LightComponent): LightComponent {
-  return {
-    lightKind: light.lightKind,
-    intensity: light.intensity,
-  };
+  return { ...light };
 }
 
 function cloneModelAsset(modelAsset: ModelAssetComponent): ModelAssetComponent {
@@ -2921,6 +2924,39 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         trajectoryVisible: visible,
         logs: prependLog(state.logs, visible ? '显示输送线货物轨迹。' : '隐藏输送线货物轨迹。'),
       };
+    });
+  },
+  applySceneTheme: () => {
+    set(state => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '应用场景主题');
+      const settings = state.scene.sceneSettings;
+      const before = { theme: settings.theme ?? null, shadows: settings.shadows };
+      const after = { theme: createTechBlueNightTheme(), shadows: { ...settings.shadows, ...TECH_BLUE_NIGHT_SHADOWS } };
+      if (JSON.stringify(before) === JSON.stringify(after)) return state;
+      return { ...executeCommand(state.scene, state.history, updateSceneThemeCommand(before, after, '应用科技蓝夜景')),
+        logs: prependLog(state.logs, '已应用科技蓝夜景，场景属性可继续微调；局部作业灯按位置放置。') };
+    });
+  },
+  updateSceneTheme: patch => {
+    set(state => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '调整场景主题');
+      const settings = state.scene.sceneSettings;
+      if (!settings.theme) return state;
+      let theme: SceneThemeSettings | null;
+      try { theme = normalizeSceneTheme({ ...settings.theme, ...patch }); }
+      catch (error) { return { logs: prependLog(state.logs, error instanceof Error ? error.message : String(error)) }; }
+      if (JSON.stringify(theme) === JSON.stringify(settings.theme)) return state;
+      return { ...executeCommand(state.scene, state.history, updateSceneThemeCommand(
+        { theme: settings.theme, shadows: settings.shadows }, { theme, shadows: settings.shadows }, '调整场景主题')) };
+    });
+  },
+  clearSceneTheme: () => {
+    set(state => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '停用场景主题');
+      const settings = state.scene.sceneSettings;
+      if (!settings.theme) return state;
+      return { ...executeCommand(state.scene, state.history, updateSceneThemeCommand(
+        { theme: settings.theme, shadows: settings.shadows }, { theme: null, shadows: settings.shadows }, '停用场景主题')) };
     });
   },
   renameScene: (name) => {
@@ -5140,14 +5176,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const light = entity?.components.light;
       if (!isRuntimeEntityEditable(state.scene, entity) || !light) return state;
 
-      const before = cloneLight(light);
-      const after: LightComponent = {
+      const before = { ...light };
+      const after = normalizeLightSettings({
         ...before,
         ...patch,
         intensity: patch.intensity === undefined ? before.intensity : sanitizePositiveNumber(patch.intensity, before.intensity),
-      };
+      });
 
-      if (before.lightKind === after.lightKind && before.intensity === after.intensity) return state;
+      if (
+        before.lightKind === after.lightKind && before.intensity === after.intensity &&
+        before.color === after.color && before.groundColor === after.groundColor &&
+        before.range === after.range && before.nightBehavior === after.nightBehavior
+      ) return state;
 
       const command = updateLightCommand(entity.id, before, after);
       const result = executeCommand(state.scene, state.history, command);

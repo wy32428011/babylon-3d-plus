@@ -1,6 +1,7 @@
 import { EnvironmentBuildingEffectPanel } from './EnvironmentBuildingEffectPanel';
 import { getSceneShadowBakeSignature } from '../model/sceneShadowBake';
 import { RegionViewsPanel } from './RegionViewsPanel';
+import { SceneThemePanel } from './SceneThemePanel';
 import {
   useEffect,
   useMemo,
@@ -120,6 +121,10 @@ const SHADOW_SLIDER_ROWS: Array<{
   { key: 'fillIntensity', label: '补光强度', min: SCENE_SHADOW_FILL_INTENSITY_MIN, max: SCENE_SHADOW_FILL_INTENSITY_MAX, step: 0.05, title: '阴影开启时压低编辑器半球补光，让方向光阴影更清楚' },
   { key: 'iblIntensityMax', label: '环境上限', min: SCENE_SHADOW_IBL_INTENSITY_MAX_MIN, max: SCENE_SHADOW_IBL_INTENSITY_MAX_MAX, step: 0.05, title: '阴影开启时限制天空盒环境光强度上限' },
 ];
+
+const THEME_LIGHTING_SLIDER_KEYS = new Set<SceneShadowSliderKey>([
+  'sunAzimuthDegrees', 'sunElevationDegrees', 'sunIntensity', 'fillIntensity', 'iblIntensityMax',
+]);
 
 function parseFiniteNumber(rawValue: string): number | null {
   if (rawValue === '') return null;
@@ -640,6 +645,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
 
       <RegionViewsPanel readOnly={props.readOnly} />
 
+      <SceneThemePanel readOnly={props.readOnly} />
+
       <fieldset className="transform-fieldset">
         <legend>相机运动幅度（统一标准）</legend>
         <p className="muted">
@@ -742,7 +749,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             onChange={(event) => updateShadowSettings({ catcherEnabled: event.target.checked })}
           />
         </label>}
-        {SHADOW_SLIDER_ROWS.filter((row) => !bakedMode || row.key === 'sunAzimuthDegrees' || row.key === 'sunElevationDegrees').map((row) => (
+        {SHADOW_SLIDER_ROWS.filter((row) => !bakedMode || row.key === 'sunAzimuthDegrees' || row.key === 'sunElevationDegrees'
+          || (Boolean(scene.sceneSettings.theme) && THEME_LIGHTING_SLIDER_KEYS.has(row.key))).map((row) => (
           <label className="scene-slider-row" key={row.key} title={row.title}>
             <span>{row.label}</span>
             <input
@@ -750,7 +758,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
               max={row.max}
               step={row.step}
               type="range"
-              disabled={props.readOnly || !shadows.enabled}
+              disabled={props.readOnly || (!shadows.enabled && !(scene.sceneSettings.theme && THEME_LIGHTING_SLIDER_KEYS.has(row.key)))}
               value={shadows[row.key]}
               onChange={(event) => handleShadowSliderChange(row.key, event.target.value)}
             />
@@ -759,7 +767,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
               max={row.max}
               step={row.step}
               type="number"
-              disabled={props.readOnly || !shadows.enabled}
+              disabled={props.readOnly || (!shadows.enabled && !(scene.sceneSettings.theme && THEME_LIGHTING_SLIDER_KEYS.has(row.key)))}
               value={shadows[row.key]}
               onChange={(event) => handleShadowSliderChange(row.key, event.target.value)}
               title={row.title}

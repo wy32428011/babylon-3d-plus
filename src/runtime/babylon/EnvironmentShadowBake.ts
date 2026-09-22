@@ -205,8 +205,7 @@ async function bakeUvEnvironmentShadows(
     for (const plan of plans) {
       cancelled(signal);
       const target = new RenderTargetTexture('__BakeUvTarget', { width: plan.width, height: plan.height }, scene, false);
-      const material = cloneEnvironmentMaterial(plan.material, '__BakeMaterial');
-      if (!material) throw new Error(`不能克隆环境材质「${plan.material.name}」。`);
+      const material = createEnvironmentColorBakeMaterial(plan.material);
       target.renderList = plan.surfaces.map(surface => surface.mesh); target.clearColor = new Color4(0, 0, 0, 0);
       target.renderParticles = false; target.renderSprites = false; target.ignoreCameraViewport = true;
       target.activeCamera = scene.activeCamera;
@@ -405,6 +404,23 @@ export async function bakeEnvironmentShadows(scene: Scene, surfaces: ShadowBakeS
 
   progress?.('正在合成静态阴影…');
   return bakeUvEnvironmentShadows(scene, selected, [...devices, ...selected.map(surface => surface.mesh)], settings, signature, signal);
+}
+
+/** 颜色烘焙只合入原色和指定太阳阴影，不能把主题灯光重复烘入颜色贴图。 */
+export function createEnvironmentColorBakeMaterial(source: BakeMaterial): BakeMaterial {
+  const material = cloneEnvironmentMaterial(source, '__BakeMaterial') as BakeMaterial | null;
+  if (!material) throw new Error(`不能克隆环境材质「${source.name}」。`);
+  material.unfreeze();
+  if (material instanceof PBRMaterial) {
+    material.unlit = true;
+    material.disableLighting = true;
+  } else if (!material.disableLighting) {
+    material.disableLighting = true;
+    material.emissiveColor = material.diffuseColor.clone();
+    material.useEmissiveAsIllumination = false;
+    material.linkEmissiveWithDiffuse = false;
+  }
+  return material;
 }
 
 export function createBakedEnvironmentMaterial(source: BakeMaterial, texture: Texture): BakeMaterial {

@@ -169,6 +169,7 @@ export class SceneShadowRuntime {
   private readonly meshTransformObservers = new Map<AbstractMesh, Observer<TransformNode>>();
   private readonly meshSyncObserver: Nullable<Observer<Scene>>;
   private readonly catcher: Mesh;
+  private themeLight: DirectionalLight | null = null;
   private autoSun: DirectionalLight | null = null;
   private primaryLight: DirectionalLight | null = null;
   private primaryGenerator: ShadowGenerator | null = null;
@@ -191,6 +192,14 @@ export class SceneShadowRuntime {
       if (!this.isCachedProfile()) this.updateShadowDistance();
       this.applyFillLightPolicy();
     });
+  }
+
+  prepareThemeChange(): void { this.restoreFillLightPolicy(); }
+
+  setThemeLight(light: DirectionalLight | null): void {
+    if (this.themeLight === light) return;
+    this.themeLight = light;
+    this.refreshPrimary();
   }
 
   /** 仅把可见方向光作为主阴影光；点光/半球光不建立方阴影，避免厂房尺度下阴影不可见。 */
@@ -343,7 +352,7 @@ export class SceneShadowRuntime {
   private refreshPrimary(): void {
     if (this.disposed) return;
     if (!this.settings.enabled || this.settings.mode !== 'realtime') return;
-    const entityLight = this.firstEnabledDirectional();
+    const entityLight = this.themeLight && !this.themeLight.isDisposed() ? this.themeLight : this.firstEnabledDirectional();
     if (entityLight) {
       if (this.autoSun && this.autoSun !== entityLight) this.disposeAutoSun();
       this.bindPrimaryLight(entityLight);
@@ -563,6 +572,7 @@ export class SceneShadowRuntime {
 
   /** 压低不投影的半球补光和过强 IBL，让方向光阴影有足够对比。 */
   private applyFillLightPolicy(): void {
+    if (this.themeLight) return;
     if (this.disposed) return;
     if (!this.settings.enabled || this.settings.mode !== 'realtime') {
       this.restoreFillLightPolicy();

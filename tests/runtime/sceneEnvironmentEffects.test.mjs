@@ -20,6 +20,7 @@ const hooks = registerHooks({
 });
 const { SceneEnvironmentEffects } = await import('../../src/runtime/babylon/effects/SceneEnvironmentEffects.ts');
 const { createDefaultPoiEffectComponent } = await import('../../src/editor/model/poiEffect.ts');
+const { createTechBlueNightTheme } = await import('../../src/editor/model/sceneTheme.ts');
 hooks.deregister();
 const { NullEngine, Scene, ArcRotateCamera, Vector3, MeshBuilder, HemisphericLight } = await import('@babylonjs/core');
 function setup(t) {
@@ -73,3 +74,58 @@ test('昼夜效果激活期间编辑灯光，关闭后保留新配置', t => {
   effects.sync('day',config,false);effects.tick(.1);
   assert.equal(light.intensity,2);assert.equal(scene.environmentIntensity,.6);
 });
+
+
+test('作业灯保持亮度，固定夜景接管旧昼夜，停用主题后恢复昼夜能力', t => {
+ const {scene,effects}=setup(t);
+ const fill=new HemisphericLight('fill',Vector3.Up(),scene);fill.intensity=1;
+ const work=new HemisphericLight('work',Vector3.Up(),scene);work.intensity=1.5;work.metadata={nightBehavior:'keep'};
+ const day=createDefaultPoiEffectComponent('day-night');day.visual.progress=1;
+ effects.sync('day',day,true);effects.tick(.1);
+ assert.ok(fill.intensity<.1);assert.equal(work.intensity,1.5);
+ effects.setThemeActive(true);fill.intensity=.42;scene.environmentIntensity=.3;effects.tick(.1);
+ assert.equal(fill.intensity,.42);assert.equal(scene.environmentIntensity,.3);assert.equal(work.intensity,1.5);
+ effects.setThemeActive(false);effects.tick(.1);assert.ok(fill.intensity<.05);assert.equal(work.intensity,1.5);
+});
+test('显式雾组件关闭后恢复最新的主题雾而非旧场景雾', t => {
+  const { scene, effects } = setup(t);
+  const fog = createDefaultPoiEffectComponent('environment-fog');
+  effects.sync('fog', fog, true);
+  effects.tick(.1);
+  effects.setThemeFog({ ...createTechBlueNightTheme(), fogStart: 180, fogEnd: 700 });
+  effects.tick(.1);
+  effects.setThemeFog({ ...createTechBlueNightTheme(), fogStart: 220, fogEnd: 900 });
+  effects.sync('fog', fog, false);
+  effects.tick(.1);
+  assert.equal(scene.fogStart, 220);
+  assert.equal(scene.fogEnd, 900);
+});
+
+for (const order of ['fog-theme-clear-theme-clear-fog', 'fog-theme-clear-fog-clear-theme', 'theme-fog-clear-theme-clear-fog']) {
+  test('雾组件和主题按任意顺序释放后恢复唯一原始基线：' + order, t => {
+    const { scene, effects } = setup(t);
+    scene.fogStart = 11;
+    scene.fogEnd = 1111;
+    scene.fogDensity = 0.01;
+    const initial = { mode: scene.fogMode, color: scene.fogColor.asArray(), start: scene.fogStart, end: scene.fogEnd, density: scene.fogDensity };
+    const fog = createDefaultPoiEffectComponent('environment-fog');
+    const theme = { ...createTechBlueNightTheme(), fogEnabled: false };
+    const startFog = () => { effects.sync('fog', fog, true); effects.tick(.1); };
+    const stopFog = () => { effects.sync('fog', fog, false); effects.tick(.1); };
+    const startTheme = () => { effects.setThemeFog(theme); effects.tick(.1); };
+    const stopTheme = () => { effects.setThemeFog(null); effects.tick(.1); };
+    if (order.startsWith('theme')) { startTheme(); startFog(); }
+    else { startFog(); startTheme(); }
+    assert.equal(scene.fogMode, Scene.FOGMODE_LINEAR, '显式雾优先于主题关闭雾的设置');
+    if (order.includes('clear-fog-clear-theme')) {
+      stopFog();
+      assert.equal(scene.fogMode, Scene.FOGMODE_NONE, '关闭显式雾后恢复主题无雾状态');
+      stopTheme();
+    } else {
+      stopTheme();
+      assert.equal(scene.fogMode, Scene.FOGMODE_LINEAR, '停用主题不能提前移除显式雾');
+      stopFog();
+    }
+    assert.deepEqual({ mode: scene.fogMode, color: scene.fogColor.asArray(), start: scene.fogStart, end: scene.fogEnd, density: scene.fogDensity }, initial);
+  });
+}

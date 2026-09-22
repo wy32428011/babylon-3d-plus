@@ -93,6 +93,12 @@ function getEntityKey(target: SceneSkyboxRuntimeTarget): string {
 
 /** 管理可移动球形 HDR/EXR 天空盒、异步纹理替换和 PBR 环境照明。 */
 export class SceneSkyboxRuntime {
+  private themeOverrides: { visible: boolean; intensity: number } | null = null;
+  setThemeOverrides(value: { visible: boolean; intensity: number } | null): void {
+    this.themeOverrides = value;
+    if (this.active && this.desired) this.applyTarget(this.active, this.desired);
+  }
+
   private active: ActiveSkybox | null = null;
   private pending: PendingSkybox | null = null;
   private desired: SceneSkyboxRuntimeTarget | null = null;
@@ -363,9 +369,9 @@ export class SceneSkyboxRuntime {
     active.mesh.rotation = new Vector3(transform.rotation.x, transform.rotation.y, transform.rotation.z);
     const scale = normalizeSkyboxSphereScale(transform.scale);
     active.mesh.scaling = new Vector3(scale.x, scale.y, scale.z);
-    active.mesh.setEnabled(target.visible);
-    active.mesh.isPickable = target.visible && target.pickable && Boolean(target.entityId);
-    this.syncSelectionHighlight(active.mesh, target.visible && target.selected);
+    active.mesh.setEnabled(target.visible && (this.themeOverrides?.visible ?? true));
+    active.mesh.isPickable = target.visible && (this.themeOverrides?.visible ?? true) && target.pickable && Boolean(target.entityId);
+    this.syncSelectionHighlight(active.mesh, target.visible && (this.themeOverrides?.visible ?? true) && target.selected);
 
     const rotationY = degreesToRadians(target.skybox.rotationDegrees);
     if (active.texture && active.texture.rotationY !== rotationY) {
@@ -378,10 +384,10 @@ export class SceneSkyboxRuntime {
 
     if (active.texture && target.visible) {
       this.scene.environmentTexture = active.texture;
-      this.scene.environmentIntensity = target.skybox.intensity;
+      this.scene.environmentIntensity = this.themeOverrides?.intensity ?? target.skybox.intensity;
     } else if (this.scene.environmentTexture === active.texture) {
       this.scene.environmentTexture = null;
-      this.scene.environmentIntensity = DEFAULT_ENVIRONMENT_INTENSITY;
+      this.scene.environmentIntensity = this.themeOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY;
     }
   }
 
@@ -397,7 +403,7 @@ export class SceneSkyboxRuntime {
     if (!active) {
       if (resetScene) {
         this.scene.environmentTexture = null;
-        this.scene.environmentIntensity = DEFAULT_ENVIRONMENT_INTENSITY;
+        this.scene.environmentIntensity = this.themeOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY;
       }
       return;
     }
@@ -405,7 +411,7 @@ export class SceneSkyboxRuntime {
     this.active = null;
     if (resetScene && this.scene.environmentTexture === active.texture) {
       this.scene.environmentTexture = null;
-      this.scene.environmentIntensity = DEFAULT_ENVIRONMENT_INTENSITY;
+      this.scene.environmentIntensity = this.themeOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY;
     }
     this.clearSelectionHighlight();
     active.mesh.dispose(false, true);

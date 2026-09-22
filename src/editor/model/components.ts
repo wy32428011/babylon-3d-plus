@@ -223,6 +223,12 @@ export type LightKind = 'hemispheric' | 'directional' | 'point';
 export type LightComponent = {
   lightKind: LightKind;
   intensity: number;
+  /** 缺少颜色和范围时沿用 Babylon 的既有默认值。 */
+  color?: string;
+  groundColor?: string;
+  range?: number;
+  /** 作业灯可在昼夜变化时保持亮度，旧灯光继续随环境变暗。 */
+  nightBehavior?: 'dim' | 'keep';
 };
 
 /** POI 库内置 EFF 的稳定类型集合。 */

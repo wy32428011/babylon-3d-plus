@@ -20,6 +20,7 @@ import {
   type Observer,
 } from '@babylonjs/core';
 import type { Entity } from '../../../editor/model/Entity';
+import type { SceneThemeSettings } from '../../../editor/model/sceneTheme';
 import type { PoiEffectComponent, PoiEffectKind, TransformComponent } from '../../../editor/model/components';
 import { sanitizePoiEffectComponent } from '../../../editor/model/poiEffect';
 import { LightWallFence } from './LightWallFence';
@@ -86,6 +87,13 @@ export class PoiEffectRuntime {
     this.environmentEffects = new SceneEnvironmentEffects(scene, resolveTarget, canFollow);
     this.beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => this.animate());
   }
+
+  setSceneTheme(active: boolean, glowIntensity: number | null): void {
+    this.environmentEffects.setThemeActive(active);
+    this.targetEffects.setGlowIntensity(glowIntensity);
+  }
+
+  setThemeFog(theme: SceneThemeSettings | null): void { this.environmentEffects.setThemeFog(theme); }
 
   /** 同步单个 POI 实体；组件签名变化时只重建该实体内部资源。 */
   sync(entity: Entity, selected: boolean, visible: boolean, pickable: boolean): void {

@@ -73,6 +73,7 @@ import {
   isBuiltInProjectLibraryItem,
   isImportedProjectLibraryItem,
   isSyncedImageProjectLibraryItem,
+  isSceneThemeProjectLibraryItem,
   type ProjectLibraryItem,
   type ProjectLibraryKey,
 } from '../assets/projectLibrary';
@@ -90,6 +91,7 @@ import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE } from '../assets/dataPlatfor
 import { setSyncedImageAssets } from '../../assets/syncedImageAssets';
 import { useEditorStore } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
+import { isTechBlueNightThemeAdjusted, SCENE_THEME_DRAG_MIME_TYPE } from '../model/sceneTheme';
 
 type LibraryStatus = {
   message: string;
@@ -270,6 +272,9 @@ type ProjectPanelProps = {
 };
 
 export function ProjectPanel(props: ProjectPanelProps) {
+  const applySceneTheme = useEditorStore(state => state.applySceneTheme);
+  const runtimeMode = useEditorStore(state => state.runtimeMode);
+  const shadowBakePhase = useEditorStore(state => state.shadowBakeStatus.phase);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const refreshModelInstancesFromAssets = useEditorStore((state) => state.refreshModelInstancesFromAssets);
   const requestEnvironmentApply = useEditorStore((state) => state.requestEnvironmentApply);
@@ -1901,6 +1906,13 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   function handleResourceCardClick(item: ProjectLibraryItem): void {
     if (props.readOnly) return;
+    if (isSceneThemeProjectLibraryItem(item)) {
+      if (runtimeMode === 'edit' && shadowBakePhase !== 'baking') {
+        applySceneTheme();
+        useEditorStore.getState().selectEntity(null);
+      }
+      return;
+    }
     if (isDataPlatformChartLibraryItem(item)) return;
 
     if (isBuiltInProjectLibraryItem(item)) {
@@ -1978,6 +1990,14 @@ export function ProjectPanel(props: ProjectPanelProps) {
   function handleResourceCardDragStart(event: DragEvent<HTMLButtonElement>, item: ProjectLibraryItem): void {
     if (props.readOnly) {
       event.preventDefault();
+      return;
+    }
+
+    if (isSceneThemeProjectLibraryItem(item)) {
+      if (runtimeMode !== 'edit' || shadowBakePhase === 'baking') { event.preventDefault(); return; }
+      event.dataTransfer.effectAllowed = 'copy';
+      event.dataTransfer.setData(SCENE_THEME_DRAG_MIME_TYPE, item.sceneThemePresetId);
+      event.dataTransfer.setData('text/plain', item.name);
       return;
     }
 
@@ -2276,15 +2296,22 @@ export function ProjectPanel(props: ProjectPanelProps) {
           const isEnvironmentLibrary = activeLibrary.key === 'environment';
           const isSyncedImage = isSyncedImageProjectLibraryItem(item);
           const isSyncedChart = isDataPlatformChartLibraryItem(item);
-          const isActionableItem = ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset || isSyncedChart);
+          const isTheme = isSceneThemeProjectLibraryItem(item);
+          const currentTheme = sceneDocument.sceneSettings.theme;
+          const isCurrentTheme = isTheme && currentTheme?.presetId === item.sceneThemePresetId;
+          const themeStatus = isCurrentTheme && currentTheme
+            ? isTechBlueNightThemeAdjusted(currentTheme, sceneDocument.sceneSettings.shadows) ? '当前使用 · 已调整' : '当前使用'
+            : item.subtitle;
+          const isActionableItem = ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset || isSyncedChart || isTheme);
+          const isCardDisabled = props.readOnly || !isActionableItem || (isTheme && (runtimeMode !== 'edit' || shadowBakePhase === 'baking'));
 
           return (
             <ResourceCard
               className={isImportedAsset && item.asset.kind === 'skybox' ? 'skybox-resource-card' : undefined}
-              disabled={props.readOnly || !isActionableItem}
-              draggable={!props.readOnly && isActionableItem}
-              focused={item.id === focusedAssetId}
-              item={item}
+              disabled={isCardDisabled}
+              draggable={!isCardDisabled}
+              focused={item.id === focusedAssetId || isCurrentTheme}
+              item={isTheme ? { ...item, subtitle: themeStatus } : item}
               key={item.id}
               library={activeLibrary}
               onClick={() => handleResourceCardClick(item)}
@@ -2297,7 +2324,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
                 }
               }}
               title={
-                isBuiltInItem
+                isTheme
+                  ? `点击应用或拖入场景：${item.name}，应用后可在场景属性中微调`
+                  : isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`
                   : isSyncedChart
                     ? `数据中台同步大屏：${item.name}，拖到图表立标或其大屏槽位`

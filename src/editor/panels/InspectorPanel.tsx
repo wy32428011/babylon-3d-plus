@@ -5,6 +5,7 @@ import { getBuiltInMeshMeterDescription } from '../model/builtInMeshGeometry';
 import type { DataPlatformScreenRenderMode, LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
 import { getLightEditorCapabilities, getLightTransformFieldLabel } from '../model/lightEditor';
+import { WARM_WORK_LIGHT_SETTINGS } from '../model/lightSettings';
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import {
@@ -596,6 +597,64 @@ export function InspectorPanel(props: InspectorPanelProps) {
               value={light.intensity}
               onChange={(event) => handleLightIntensityChange(event.target.value)}
             />
+          </label>
+          <label className="inspector-row">
+            <span>{light.lightKind === 'hemispheric' ? '上方颜色' : '灯光颜色'}</span>
+            <input
+              type="color"
+              disabled={isLocked}
+              value={light.color ?? '#ffffff'}
+              onChange={(event) => updateSelectedLight({ color: event.target.value })}
+            />
+          </label>
+          {light.lightKind === 'hemispheric' ? (
+            <label className="inspector-row">
+              <span>地面方向颜色</span>
+              <input
+                type="color"
+                disabled={isLocked}
+                value={light.groundColor ?? '#000000'}
+                onChange={(event) => updateSelectedLight({ groundColor: event.target.value })}
+              />
+            </label>
+          ) : null}
+          {light.lightKind === 'point' ? (
+            <>
+              <label className="number-row">
+                <span>照射范围 (m)</span>
+                <input
+                  type="number"
+                  disabled={isLocked}
+                  min="0.1"
+                  step="1"
+                  placeholder="无限制"
+                  value={light.range ?? ''}
+                  onChange={(event) => {
+                    const raw = event.target.value;
+                    if (raw === '') {
+                      updateSelectedLight({ range: undefined });
+                      return;
+                    }
+                    const range = Number(raw);
+                    if (Number.isFinite(range) && range > 0) updateSelectedLight({ range });
+                  }}
+                />
+              </label>
+              <button type="button" disabled={isLocked} onClick={() => updateSelectedLight(WARM_WORK_LIGHT_SETTINGS)}>
+                暖白作业灯
+              </button>
+            </>
+          ) : null}
+          <label className="inspector-row">
+            <span>夜间行为</span>
+            <select
+              value={light.nightBehavior ?? 'dim'}
+              disabled={isLocked}
+              onChange={(event) => updateSelectedLight({ nightBehavior: event.target.value as 'dim' | 'keep' })}
+            >
+              <option value="dim">随昼夜变化变暗</option>
+              <option value="keep">保持作业照明亮度</option>
+            </select>
           </label>
         </fieldset>
       ) : null}

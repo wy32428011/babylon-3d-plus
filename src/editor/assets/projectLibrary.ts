@@ -1,3 +1,5 @@
+import techBlueNightThumbnailUrl from '../../assets/images/tech-blue-night.svg';
+import { SCENE_THEME_PRESET_ID } from '../model/sceneTheme';
 import type { BuiltInImageAsset } from '../../assets/imageAssets';
 import autoPatrolThumbnailUrl from '../../assets/images/auto-patrol.png';
 import { BUILT_IN_IMAGE_ASSETS } from '../../assets/imageAssets';
@@ -27,6 +29,10 @@ export type ImportedProjectLibraryItem = ProjectLibraryItemBase & {
   asset: AssetEntry | ProjectSkyboxAssetEntry;
 };
 
+export type SceneThemeProjectLibraryItem = ProjectLibraryItemBase & {
+  sceneThemePresetId: typeof SCENE_THEME_PRESET_ID;
+};
+
 export type PlaceholderProjectLibraryItem = ProjectLibraryItemBase;
 
 /** 图片库内置图片卡片，保存可拖拽的内置图片资产元数据。 */
@@ -39,7 +45,7 @@ export type SyncedImageProjectLibraryItem = ProjectLibraryItemBase & {
   syncedImage: SyncedImageAssetEntry;
 };
 
-export type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | BuiltInImageProjectLibraryItem | SyncedImageProjectLibraryItem | PlaceholderProjectLibraryItem;
+export type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | BuiltInImageProjectLibraryItem | SyncedImageProjectLibraryItem | SceneThemeProjectLibraryItem | PlaceholderProjectLibraryItem;
 
 export type ProjectLibrary = {
   key: ProjectLibraryKey;
@@ -129,7 +135,7 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     searchLabel: '主题名称',
     searchPlaceholder: '请输入主题名称...',
     items: [
-      { id: 'theme-tech-blue', name: '科技蓝主题', icon: 'panel' },
+      { id: 'theme-tech-blue', name: '科技蓝夜景', icon: 'panel', subtitle: '冷蓝底光 · 清晰夜景', thumbnailUrl: techBlueNightThumbnailUrl, sceneThemePresetId: SCENE_THEME_PRESET_ID },
       { id: 'theme-dark-city', name: '暗色城市', icon: 'ring' },
       { id: 'theme-energy', name: '能源监控', icon: 'marker' },
       { id: 'theme-command', name: '指挥中心', icon: 'panel' },
@@ -254,6 +260,11 @@ export function createSkyboxLibraryItems(skyboxAssets: ProjectSkyboxAssetEntry[]
       subtitle: formatSkyboxLibrarySubtitle(asset),
       asset,
     }));
+}
+
+/** 主题卡片应用场景配置，不创建层级实体。 */
+export function isSceneThemeProjectLibraryItem(item: ProjectLibraryItem): item is SceneThemeProjectLibraryItem {
+  return 'sceneThemePresetId' in item && item.sceneThemePresetId === SCENE_THEME_PRESET_ID;
 }
 
 /** 判断资源库卡片是否对应可直接创建的内置对象。 */

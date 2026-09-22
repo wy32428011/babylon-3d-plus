@@ -73,6 +73,12 @@ type EnvironmentMaterialBaseline = {
   disableDepthWrite: boolean;
   forceDepthWrite: boolean;
   needDepthPrePass: boolean;
+  lighting: {
+    disableLighting: boolean;
+    emissiveColor: Color3;
+    useEmissiveAsIllumination: boolean;
+    linkEmissiveWithDiffuse: boolean;
+  } | null;
 };
 
 type EnvironmentRuntimeEntry = {
@@ -164,6 +170,7 @@ export class SceneEnvironmentRuntime {
   private shadowSettings: SceneShadowSettings | null = null;
   private shadowSequence = 0;
   private shadowKey = 'original';
+  private lightingMode: 'original' | 'scene' = 'original';
   private snapshot: EnvironmentRuntimeSnapshot = {
     phase: 'idle',
     requestId: null,
@@ -188,11 +195,49 @@ export class SceneEnvironmentRuntime {
     else mutate();
   }
 
+  /** 切换环境工作材质的受光模式；保留原始材质基线，不重新加载模型。 */
+  async setLightingMode(mode: 'original' | 'scene'): Promise<void> {
+    if (this.lightingMode === mode && this.shadowKey !== '') return;
+    this.lightingMode = mode;
+    const sequence = ++this.shadowSequence;
+    this.shadowKey = '';
+    try {
+      if (this.current) await this.applyShadowPresentation(this.current, sequence);
+      if (sequence === this.shadowSequence) this.shadowKey = this.getShadowPresentationKey();
+    } catch (error) {
+      if (sequence === this.shadowSequence) this.shadowKey = '';
+      throw error;
+    }
+  }
+
+  private getShadowPresentationKey(): string {
+    const settings = this.shadowSettings;
+    const shadow = settings?.enabled && settings.mode === 'realtime' ? 'realtime'
+      : settings?.enabled && settings.bake ? `baked:${settings.bake.signature}:${settings.bake.createdAt}` : 'original';
+    return `${this.lightingMode}:${shadow}`;
+  }
+
+  private applyMaterialLighting(material: Material, baseline: EnvironmentMaterialBaseline | undefined,
+    mode: 'original' | 'scene'): void {
+    const lighting = baseline?.lighting;
+    if (!lighting) return;
+    material.unfreeze();
+    if (material instanceof PBRMaterial) {
+      material.unlit = mode === 'original';
+      material.disableLighting = mode === 'original';
+    } else if (material instanceof StandardMaterial) {
+      const isolated = mode === 'original' && !lighting.disableLighting;
+      material.disableLighting = mode === 'original';
+      material.emissiveColor.copyFrom(isolated ? material.diffuseColor : lighting.emissiveColor);
+      material.useEmissiveAsIllumination = isolated ? false : lighting.useEmissiveAsIllumination;
+      material.linkEmissiveWithDiffuse = isolated ? false : lighting.linkEmissiveWithDiffuse;
+    }
+  }
+
   /** 静态结果换成普通原色纹理；稳定帧不注册材质插件或阴影绑定回调。 */
   async syncShadows(settings: SceneShadowSettings): Promise<void> {
     this.shadowSettings = settings;
-    const key = settings.enabled && settings.mode === 'realtime' ? 'realtime'
-      : settings.enabled && settings.bake ? `baked:${settings.bake.signature}:${settings.bake.createdAt}` : 'original';
+    const key = this.getShadowPresentationKey();
     if (key === this.shadowKey) return;
     this.shadowKey = key;
     const sequence = ++this.shadowSequence;
@@ -202,9 +247,10 @@ export class SceneEnvironmentRuntime {
 
   private async applyShadowPresentation(entry: EnvironmentRuntimeEntry, sequence: number): Promise<void> {
     const settings = this.shadowSettings;
+    const lightingMode = this.lightingMode;
     const realtime = settings?.enabled && settings.mode === 'realtime';
     const bake = settings?.enabled && settings.mode !== 'realtime' ? settings.bake : null;
-    const key = realtime ? 'realtime' : bake ? `baked:${bake.signature}:${bake.createdAt}` : 'original';
+    const key = this.getShadowPresentationKey();
     if (entry.shadowPresentationKey === key) return;
     const materials: Material[] = [], textures: Texture[] = [];
     const assignments = new Map<AbstractMesh, Material | null>();
@@ -228,7 +274,9 @@ export class SceneEnvironmentRuntime {
       if (source instanceof MultiMaterial && material instanceof MultiMaterial) {
         material.subMaterials = source.subMaterials.map(child => child ? cloneRealtime(child) : null);
       } else if (material instanceof PBRMaterial || material instanceof StandardMaterial) {
-        new EnvironmentShadowMaterialPlugin(material);
+        this.applyMaterialLighting(material, baselines.get(material), lightingMode);
+        // 受光模式使用 Babylon 自身的光照与阴影，隔离模式才需要额外阴影采样。
+        if (lightingMode === 'original') new EnvironmentShadowMaterialPlugin(material);
       }
       return material;
     };
@@ -244,6 +292,7 @@ export class SceneEnvironmentRuntime {
       } else if (material instanceof PBRMaterial || material instanceof StandardMaterial) {
         if (material.lightmapTexture || material.getActiveTextures().some(item => item.coordinatesIndex === 2)) throw new Error(`地面材质「${source.name}」已使用光照贴图或第三套 UV，请先整理其纹理配置。`);
         material.lightmapTexture = texture; material.useLightmapAsShadowmap = true;
+        this.applyMaterialLighting(material, baselines.get(material), lightingMode);
       } else throw new Error(`地面材质「${source.name}」不支持静态阴影遮罩。`);
       return material;
     };
@@ -299,7 +348,14 @@ export class SceneEnvironmentRuntime {
           texture.uOffset = -minU * texture.uScale; texture.vOffset = -minV * texture.vScale;
           texture.wrapU = Texture.CLAMP_ADDRESSMODE; texture.wrapV = Texture.CLAMP_ADDRESSMODE;
           texture.anisotropicFilteringLevel = sourceTexture?.anisotropicFilteringLevel ?? 4;
-          material = createBakedEnvironmentMaterial(surface.material, texture);
+          const bakedMaterial = createBakedEnvironmentMaterial(surface.material, texture);
+          if (lightingMode === 'scene') {
+            // 旧颜色烘焙已合入阴影与自发光，继续作为底色接受新灯光，避免丢失旧阴影。
+            bakedMaterial.disableLighting = false;
+            if (bakedMaterial instanceof PBRMaterial) bakedMaterial.unlit = false;
+            bakedMaterial.emissiveColor = Color3.Black();
+          }
+          material = bakedMaterial;
           materials.push(material);
           recordBaseline(material, surface.material);
           copies.set(surface.material, material); bakedSources.set(surface.material, baked);
@@ -308,6 +364,7 @@ export class SceneEnvironmentRuntime {
       }
       if (entry.disposed || sequence !== this.shadowSequence) return;
       const commit = () => {
+        for (const baseline of entry.materialBaselines) this.applyMaterialLighting(baseline.material, baseline, lightingMode);
         for (const surface of entry.shadowSurfaces) {
           const baked = bakedByKey.get(surface.key);
           if (baked?.kind === 'shadow-mask') {
@@ -574,20 +631,7 @@ export class SceneEnvironmentRuntime {
         mesh.metadata = { ...metadata, editorEnvironmentMesh: true };
       }
       const transformNodes = [...new Set<TransformNode>([root, contentRoot, ...allImportedNodes])];
-      // 环境底座独立显示，不能因编辑光源变黑或使冻结材质沿用失效的光照状态。
-      // 这里只修改环境工作容器的材质副本，保留设备模型和源资源的光照行为。
-      for (const material of container.materials) {
-        material.unfreeze();
-        if (material instanceof PBRMaterial) {
-          material.unlit = true;
-          material.disableLighting = true;
-        } else if (material instanceof StandardMaterial && !material.disableLighting) {
-          material.disableLighting = true;
-          material.emissiveColor = material.diffuseColor.clone();
-          material.useEmissiveAsIllumination = false;
-          material.linkEmissiveWithDiffuse = false;
-        }
-      }
+      // 在隔离修改之前记录工作容器基线，使主题切换能恢复原始自发光配置。
       const materialBaselines = container.materials.map((material) => ({
         material,
         alpha: material.alpha,
@@ -595,6 +639,12 @@ export class SceneEnvironmentRuntime {
         disableDepthWrite: material.disableDepthWrite,
         forceDepthWrite: material.forceDepthWrite,
         needDepthPrePass: material.needDepthPrePass,
+        lighting: material instanceof PBRMaterial || material instanceof StandardMaterial ? {
+          disableLighting: material.disableLighting,
+          emissiveColor: material.emissiveColor.clone(),
+          useEmissiveAsIllumination: material instanceof StandardMaterial && material.useEmissiveAsIllumination,
+          linkEmissiveWithDiffuse: material instanceof StandardMaterial && material.linkEmissiveWithDiffuse,
+        } : null,
       }));
 
       return {

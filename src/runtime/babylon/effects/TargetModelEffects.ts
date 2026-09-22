@@ -127,6 +127,11 @@ export class TargetModelEffects {
   private readonly owners = new Map<AbstractMesh, string>();
   private refreshSeconds = 0;
   private glow: GlowLayer | null = null;
+  private glowIntensity = 1;
+  setGlowIntensity(value: number | null): void {
+    this.glowIntensity = value ?? 1;
+    if (this.glow) this.glow.intensity = this.glowIntensity;
+  }
   constructor(private readonly scene: Scene, private readonly resolveTarget: (id: string) => TransformNode | AbstractMesh | null) {}
 
   sync(id: string, component: PoiEffectComponent, active: boolean): void {
@@ -274,6 +279,7 @@ export class TargetModelEffects {
     }
     if (kind === 'model-emissive' && mesh instanceof Mesh) {
       this.glow ??= new GlowLayer('digitalTwinModelGlow', this.scene, { blurKernelSize: 32 });
+      this.glow.intensity = this.glowIntensity;
       this.glow.addIncludedOnlyMesh(mesh);
     }
     return state;

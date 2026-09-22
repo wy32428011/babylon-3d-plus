@@ -1,5 +1,6 @@
 import { ArcRotateCamera, Color3, Scene, Vector3, type AbstractMesh, type Light, type TransformNode } from '@babylonjs/core';
 import type { PoiEffectComponent } from '../../../editor/model/components';
+import type { SceneThemeSettings } from '../../../editor/model/sceneTheme';
 
 type Entry = { component: PoiEffectComponent; active: boolean; time: number };
 type CameraPose = { camera: ArcRotateCamera; alpha: number; beta: number; radius: number; target: Vector3 };
@@ -9,6 +10,18 @@ export const supportsSceneEnvironmentEffect = (kind: string) => environmentKinds
 /** 仅拥有自己开启的全局效果；失效时恢复进入前状态，多个同类实例按登记顺序互斥。 */
 export class SceneEnvironmentEffects {
   private readonly entries = new Map<string, Entry>();
+  private fixedTheme = false;
+  /** 固定主题接管昼夜；显式雾组件仍可覆盖主题的雾，停用后恢复最新主题值。 */
+  setThemeActive(active: boolean): void {
+    this.fixedTheme = active;
+    if (active) this.restoreLight();
+  }
+  private themeFog: Pick<SceneThemeSettings, 'fogEnabled' | 'fogColor' | 'fogStart' | 'fogEnd'> | null = null;
+  /** 雾只在此处保存一份原始基线；显式组件优先，主题次之，全部停用才恢复。 */
+  setThemeFog(theme: SceneThemeSettings | null): void {
+    this.themeFog = theme ? { fogEnabled: theme.fogEnabled, fogColor: theme.fogColor, fogStart: theme.fogStart, fogEnd: theme.fogEnd } : null;
+    this.syncFog();
+  }
   private fogBaseline: { mode: number; color: Color3; start: number; end: number; density: number } | null = null;
   private lightBaseline: { environment: number; lastEnvironment: number; lights: Map<Light, { baseline: number; lastApplied: number }> } | null = null;
   private followId: string | null = null;
@@ -27,17 +40,9 @@ export class SceneEnvironmentEffects {
 
   tick(deltaSeconds: number): void {
     const first = (kind: string) => [...this.entries].find(([, e]) => e.active && e.component.enabled && e.component.effectKind === kind);
-    const fog = first('environment-fog')?.[1];
-    if (fog?.component.visual) {
-      this.fogBaseline ??= { mode: this.scene.fogMode, color: this.scene.fogColor.clone(), start: this.scene.fogStart, end: this.scene.fogEnd, density: this.scene.fogDensity };
-      const v = fog.component.visual;
-      this.scene.fogMode = v.opacity > 0 ? Scene.FOGMODE_LINEAR : Scene.FOGMODE_NONE;
-      this.scene.fogColor = Color3.FromHexString(fog.component.primaryColor);
-      this.scene.fogStart = v.radius;
-      this.scene.fogEnd = v.radius + v.height / Math.max(0.001, v.opacity);
-    } else this.restoreFog();
+    this.syncFog();
 
-    const day = first('day-night')?.[1];
+    const day = this.fixedTheme ? undefined : first('day-night')?.[1];
     if (day?.component.visual) {
       this.lightBaseline ??= { environment: this.scene.environmentIntensity, lastEnvironment: this.scene.environmentIntensity, lights: new Map() };
       const v = day.component.visual;
@@ -49,6 +54,11 @@ export class SceneEnvironmentEffects {
       this.scene.environmentIntensity = this.lightBaseline.environment * factor;
       this.lightBaseline.lastEnvironment = this.scene.environmentIntensity;
       for (const light of this.scene.lights) {
+        if (light.metadata?.nightBehavior === 'keep') {
+          const previous = this.lightBaseline.lights.get(light);
+          if (previous) { if (Math.abs(light.intensity - previous.lastApplied) < 0.000001) light.intensity = previous.baseline; this.lightBaseline.lights.delete(light); }
+          continue;
+        }
         let state = this.lightBaseline.lights.get(light);
         if (!state) { state = { baseline: light.intensity, lastApplied: light.intensity }; this.lightBaseline.lights.set(light, state); }
         if (Math.abs(light.intensity - state.lastApplied) > 0.000001) state.baseline = light.intensity;
@@ -92,6 +102,23 @@ export class SceneEnvironmentEffects {
     }
     this.followId = null; this.followBaseline = null; this.lastFollowPose = null; this.followSuspended = false;
   }
+  private syncFog(): void {
+    const fog = [...this.entries.values()].find(entry => entry.active && entry.component.enabled && entry.component.effectKind === 'environment-fog');
+    const visual = fog?.component.visual;
+    if (!visual && !this.themeFog) { this.restoreFog(); return; }
+    this.fogBaseline ??= { mode: this.scene.fogMode, color: this.scene.fogColor.clone(), start: this.scene.fogStart, end: this.scene.fogEnd, density: this.scene.fogDensity };
+    if (visual && fog) {
+      this.scene.fogMode = visual.opacity > 0 ? Scene.FOGMODE_LINEAR : Scene.FOGMODE_NONE;
+      this.scene.fogColor = Color3.FromHexString(fog.component.primaryColor);
+      this.scene.fogStart = visual.radius;
+      this.scene.fogEnd = visual.radius + visual.height / Math.max(0.001, visual.opacity);
+    } else if (this.themeFog) {
+      this.scene.fogMode = this.themeFog.fogEnabled ? Scene.FOGMODE_LINEAR : Scene.FOGMODE_NONE;
+      this.scene.fogColor = Color3.FromHexString(this.themeFog.fogColor);
+      this.scene.fogStart = this.themeFog.fogStart;
+      this.scene.fogEnd = this.themeFog.fogEnd;
+    }
+  }
   private restoreFog(): void {
     if (!this.fogBaseline) return;
     const b = this.fogBaseline;
@@ -105,5 +132,5 @@ export class SceneEnvironmentEffects {
     this.lightBaseline = null;
   }
   disposeMissing(ids: Set<string>): void { for (const id of this.entries.keys()) if (!ids.has(id)) this.entries.delete(id); }
-  dispose(): void { this.entries.clear(); this.restoreFollow(); this.restoreFog(); this.restoreLight(); }
+  dispose(): void { this.entries.clear(); this.themeFog = null; this.restoreFollow(); this.restoreFog(); this.restoreLight(); }
 }

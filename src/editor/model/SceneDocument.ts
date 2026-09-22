@@ -1,3 +1,4 @@
+import { normalizeSceneTheme, type SceneThemeSettings } from './sceneTheme';
 import { createId } from '../../shared/ids';
 import { normalizeSceneRegionViews, type SceneRegionView } from './sceneRegionViews';
 import { sanitizeSceneShadowBake, type SceneShadowBakeSnapshot } from './sceneShadowBake';
@@ -249,6 +250,7 @@ export type SceneEnvironmentSettingsInput = Omit<
 >>;
 
 export type SceneSettings = {
+  theme?: SceneThemeSettings | null;
   camera: SceneCameraSettings;
   regionViews: SceneRegionView[];
   sensitivity: SceneSensitivitySettings;
@@ -322,6 +324,7 @@ export const DEFAULT_MQTT_CONFIG: MqttConfig = {
 };
 
 export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
+  theme: null,
   regionViews: [],
   camera: {
     savedPose: null,
@@ -941,6 +944,7 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
       pan: sanitizeSceneSensitivityValue(settings.sensitivity.pan),
       rotate: sanitizeSceneSensitivityValue(settings.sensitivity.rotate),
     },
+    theme: normalizeSceneTheme(settings.theme),
     environment: sanitizeSceneEnvironment(settings.environment),
     skybox: sanitizeSceneSkybox(settings.skybox),
     shadows: sanitizeSceneShadowSettings(settings.shadows),

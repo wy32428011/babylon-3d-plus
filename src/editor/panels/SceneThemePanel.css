@@ -1,0 +1,44 @@
+.scene-theme-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.scene-theme-state {
+  padding: 2px 7px;
+  border: 1px solid #396780;
+  border-radius: 4px;
+  color: #a1e4f6;
+  font-size: 11px;
+}
+
+.scene-theme-group {
+  border-top: 1px solid var(--border-color, #39424c);
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.scene-theme-group > summary {
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.scene-theme-color-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.scene-theme-color-value input[type='color'] {
+  flex: 0 0 38px;
+  width: 38px;
+  height: 25px;
+  padding: 2px;
+}
+
+.scene-theme-color-value code {
+  font-size: 11px;
+}
