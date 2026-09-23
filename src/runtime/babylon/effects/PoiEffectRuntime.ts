@@ -51,6 +51,7 @@ type PoiResources = {
 };
 
 type PoiEntry = {
+  ownerId: string;
   root: TransformNode;
   pickMesh: Mesh;
   pickMaterial: StandardMaterial;
@@ -94,7 +95,7 @@ export class PoiEffectRuntime {
     this.targetEffects = new TargetModelEffects(scene, this.resolveTarget, alarmAppearance);
     this.environmentEffects = new SceneEnvironmentEffects(scene, this.resolveTarget, canFollow);
     this.bindings = new EffectBindingRuntime(scene, { resolveNode, isRunning: canFollow,
-      apply: (entity, selected, visible, pickable) => this.syncResolved(entity, selected, visible, pickable),
+      apply: (entity, selected, visible, pickable, ownerId) => this.syncResolved(entity, selected, visible, pickable, ownerId),
       remove: id => { this.disposeEntity(id); const remaining = new Set(this.entries.keys()); this.targetEffects.disposeMissing(remaining); this.environmentEffects.disposeMissing(remaining); },
       getRoot: id => this.entries.get(id)?.root ?? null,
       cameraStatus: id => this.environmentEffects.getStatus(id).status,
@@ -127,7 +128,7 @@ export class PoiEffectRuntime {
     this.syncResolved(entity, selected, visible, pickable);
   }
 
-  private syncResolved(entity: Entity, selected: boolean, visible: boolean, pickable: boolean): void {
+  private syncResolved(entity: Entity, selected: boolean, visible: boolean, pickable: boolean, ownerId = entity.id): void {
     const raw = entity.components.poiEffect;
     if (!raw) {
       this.disposeEntity(entity.id);
@@ -137,6 +138,7 @@ export class PoiEffectRuntime {
     const component = sanitizePoiEffectComponent(raw);
     const signature = this.createSignature(component);
     const entry = this.ensureEntry(entity.id);
+    entry.ownerId = ownerId;
 
     this.applyTransform(entry.root, entity.components.transform);
     entry.visible = visible;
@@ -158,7 +160,10 @@ export class PoiEffectRuntime {
     this.targetEffects.sync(entity.id, component, visible && component.enabled);
     this.environmentEffects.sync(entity.id, component, visible && component.enabled);
     registerEffectFollowResume(entity.id, component.effectKind === 'target-follow' ? () => this.environmentEffects.resume(entity.id) : null);
+    // 所有派生效果的拾取仍指向唯一编辑实体，不向层级泄露运行 ID。
+    entry.pickMesh.metadata = {...entry.pickMesh.metadata, [EDITOR_ENTITY_ID_METADATA_KEY]:ownerId};
     this.applyPickState(entry);
+    for (const mesh of entry.resources.meshes) mesh.metadata = {...mesh.metadata, [EDITOR_ENTITY_ID_METADATA_KEY]:ownerId};
     this.applyParticlePlayback(entry, visible && component.enabled);
   }
 
@@ -194,9 +199,12 @@ export class PoiEffectRuntime {
     if (!id) return [];
     const entry = this.entries.get(id);
     if (!entry) return [];
-    if (entry.resources.lightWall) return [entry.resources.lightWall.mesh];
-    const visualMeshes = entry.resources.meshes.filter((mesh) => mesh.isVisible);
-    return visualMeshes.length > 0 ? [...visualMeshes, entry.pickMesh] : [entry.pickMesh];
+    const related = [...this.entries.values()].filter(value => value.ownerId === id);
+    return (related.length ? related : [entry]).flatMap(value => {
+      if (value.resources.lightWall) return [value.resources.lightWall.mesh];
+      const visible = value.resources.meshes.filter(mesh => mesh.isVisible && mesh.isEnabled());
+      return visible.length ? [...visible, value.pickMesh] : [value.pickMesh];
+    });
   }
 
   /**
@@ -212,13 +220,15 @@ export class PoiEffectRuntime {
     const entry = this.entries.get(id);
     if (!entry) return null;
 
-    const visibleMeshes = entry.resources.meshes.filter((mesh) => (
+    const related = [...this.entries.values()].filter(value => value.ownerId === id);
+    const meshes = (related.length ? related : [entry]).flatMap(value => value.resources.meshes);
+    const visibleMeshes = meshes.filter((mesh) => (
       !mesh.isDisposed()
       && mesh.isVisible
       && mesh.visibility > 0
       && mesh.getTotalVertices() > 0
     ));
-    const effectBoundsMeshes = entry.resources.meshes.filter((mesh) => {
+    const effectBoundsMeshes = meshes.filter((mesh) => {
       const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
       return !mesh.isDisposed()
         && mesh.isVisible
@@ -266,6 +276,7 @@ export class PoiEffectRuntime {
     pickMesh.metadata = { ...(pickMesh.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: id };
 
     const entry: PoiEntry = {
+      ownerId: id,
       root,
       pickMesh,
       pickMaterial,

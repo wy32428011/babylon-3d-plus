@@ -16,3 +16,15 @@
 .effect-vector input { width: 100%; min-width: 0; box-sizing: border-box; height: 24px; padding: 0 6px; border: 1px solid #555; color: #d7d7d7; background: #1e1e1e; }
 .effect-parameter-rows textarea { display: block; width: 100%; box-sizing: border-box; font: 12px/1.5 Consolas, monospace; resize: vertical; border: 1px solid #555; color: #d7d7d7; background: #1e1e1e; }
 .effect-configuration button { margin: 4px 4px 4px 0; white-space: normal; }
+
+.effect-entity-options { display: grid; gap: 7px; max-height: 240px; overflow-y: auto; padding: 8px; border: 1px solid #454545; border-radius: 4px; }
+.effect-entity-options label { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.effect-entity-options input { flex: 0 0 auto; }
+.effect-entity-options span, .effect-bound-entities span { overflow-wrap: anywhere; }
+.effect-bound-entities { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 4px; }
+.effect-bound-entities li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.effect-bound-entities button { flex: 0 0 auto; }
+
+.effect-target-diagnostics { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; max-height: 320px; overflow-y: auto; overflow-wrap: anywhere; }
+.effect-target-diagnostics li + li { border-top: 1px solid #454545; padding-top: 8px; }
+.effect-target-diagnostics p { margin: 4px 0; }

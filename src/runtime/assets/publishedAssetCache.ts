@@ -6,8 +6,9 @@ export interface PublishedCacheStore {
   put(key: string, value: unknown, bytes: number): Promise<void>;
   close?(): void;
 }
+export type PublishedResourceIdentity = { sha256: string; size: number };
 type CacheOptions = { baseUrl: string; revision: string; assetBase: string; documentUrls: string[]; store?: PublishedCacheStore;
-  verifyRevision?: () => Promise<void> };
+  verifyRevision?: () => Promise<void>; resources?: ReadonlyMap<string, PublishedResourceIdentity> };
 export type AssetReadProgress = (loaded: number, total: number | null) => void;
 type CachedResponse = { blob: Blob; type: string };
 
@@ -20,6 +21,7 @@ export class PublishedAssetCache {
   private readonly documents: Set<string>;
   private readonly store: PublishedCacheStore;
   private readonly verifyRevision?: () => Promise<void>;
+  private readonly resources?: ReadonlyMap<string, PublishedResourceIdentity>;
   private readonly controller = new AbortController();
   private storageAvailable = true;
 
@@ -30,6 +32,7 @@ export class PublishedAssetCache {
     this.documents = new Set(options.documentUrls.map(url => new URL(url, this.base).href));
     this.store = options.store ?? new IndexedDbPublishedCacheStore();
     this.verifyRevision = options.verifyRevision;
+    this.resources = options.resources;
   }
 
   accepts(source: string): boolean {
@@ -37,6 +40,7 @@ export class PublishedAssetCache {
       const url = new URL(source, this.base);
       if (!['http:', 'https:'].includes(url.protocol) || url.origin !== this.base.origin || url.username || url.password) return false;
       url.hash = '';
+      if (this.resources) return this.resources.has(this.resourceUrl(url));
       return this.documents.has(url.href) || (url.origin === this.assetBase.origin
         && this.assetBase.pathname !== this.base.pathname && this.assetBase.pathname.startsWith(this.base.pathname)
         && url.pathname.startsWith(this.assetBase.pathname));
@@ -78,6 +82,11 @@ export class PublishedAssetCache {
     const blob = await (stream ? new Response(stream).blob() : response.blob());
     if (maxBytes !== undefined && blob.size > maxBytes) throw new Error(`资源超过读取上限（${maxBytes} 字节）。`);
     signal.throwIfAborted();
+    const identity = this.resources?.get(this.resourceUrl(url));
+    if (identity && (blob.size !== identity.size
+      || await hashSkyboxContent(new Uint8Array(await blob.arrayBuffer())) !== identity.sha256)) {
+      throw new Error('发布资源与清单不一致，可能已重新发布，请重新加载场景。');
+    }
     // 稳定发布地址可能在下载途中被新版本替换，校验后才允许写入旧版本的缓存空间。
     await this.verifyRevision?.();
     signal.throwIfAborted();
@@ -105,6 +114,11 @@ export class PublishedAssetCache {
 
   private response(record: CachedResponse): Response {
     return new Response(record.blob, { headers: { 'Content-Type': record.type, 'Content-Length': String(record.blob.size) } });
+  }
+
+  private resourceUrl(url: URL): string {
+    const resource = new URL(url); resource.search = ''; resource.hash = '';
+    return resource.href;
   }
 
   private async read(key: string): Promise<unknown> {

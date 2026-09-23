@@ -151,6 +151,50 @@ test('旧无 configuration 场景读写不自动注入 V2，保留原有特效�
   for (const id of before.entityIds) { assert.deepEqual(reopened.entities[id].components.poiEffect, before.entities[id].components.poiEffect); assert.equal(Object.hasOwn(reopened.entities[id].components.poiEffect, 'configuration'), false); }
 });
 
+test('多对象和同类型全部绑定支持保存重开及撤销，复制只映射本批实体 ID', () => {
+  for (const copyMode of ['effect-only', 'partial', 'all']) {
+    const scene = createEmptySceneDocument('多模型绑定保存与复制');
+    const first = createMeshEntity('cube'), second = createMeshEntity('cube'), external = createMeshEntity('cube');
+    const effect = createPoiEffectEntity('model-outline');
+    effect.components.poiEffect.configuration = configured(effect.components.poiEffect, first.id);
+    const target = effect.components.poiEffect.configuration.target;
+    target.entityIds = [first.id, second.id, external.id]; target.selection = 'all';
+    target.model.identity.resourceId = first.id;
+    effect.components.poiEffect.configuration.data.sourceId = first.id;
+    append(scene, [first, second, external, effect]);
+    store.setState({ scene, history: createCommandHistory(), hierarchySelectionIds: [], entityClipboard: null });
+    const original = structuredClone(effect.components.poiEffect);
+    assert.deepEqual(deserializeScene(serializeScene(scene)).entities[effect.id].components.poiEffect, original);
+    const ids = copyMode === 'effect-only' ? [effect.id] : copyMode === 'partial' ? [first.id, effect.id] : [first.id, second.id, effect.id];
+    store.getState().selectHierarchyEntities(ids, effect.id); store.getState().copySelectedEntities(); store.getState().pasteEntityClipboard();
+    const after = store.getState().scene, copies = after.entityIds.filter(id => !scene.entities[id]).map(id => after.entities[id]);
+    const copiedEffect = copies.find(entity => entity.components.poiEffect);
+    assert.ok(copiedEffect);
+    const copiedModels = copies.filter(entity => entity.components.meshRenderer);
+    const expectedIds = [copiedModels[0]?.id ?? first.id, copiedModels[1]?.id ?? second.id, external.id];
+    const configuration = copiedEffect.components.poiEffect.configuration;
+    assert.deepEqual(configuration.target.entityIds, expectedIds, copyMode);
+    assert.equal(configuration.target.entityId, expectedIds[0]);
+    assert.notEqual(configuration.target.entityIds, target.entityIds, '复制后的列表不能共享引用');
+    assert.deepEqual(configuration.target.model, target.model, '模型资源业务标识不能映射为新实体 ID');
+    assert.equal(configuration.data.sourceId, first.id); assert.equal(configuration.target.assetCode, '000317');
+    const content = serializeScene(after);
+    assert.deepEqual(deserializeScene(content).entities[copiedEffect.id].components.poiEffect, copiedEffect.components.poiEffect);
+    store.getState().undo(); assert.equal(store.getState().scene.entities[copiedEffect.id], undefined);
+    store.getState().redo(); assert.deepEqual(store.getState().scene.entities[copiedEffect.id].components.poiEffect, copiedEffect.components.poiEffect);
+    assert.deepEqual(store.getState().scene.entities[effect.id].components.poiEffect, original, '复制不能修改原特效');
+    assert.equal(store.getState().loadSceneFromContent(content, '多对象绑定重开'), true);
+    assert.deepEqual(store.getState().scene.entities[copiedEffect.id].components.poiEffect.configuration.target.entityIds, expectedIds);
+  }
+  for (const kind of ['model-outline', 'motion-trail']) {
+    const effect = createPoiEffectEntity(kind), configuration = configured(effect.components.poiEffect, 'legacy-target');
+    Object.assign(configuration.target, { mode: 'model', entityId: null, entityIds: [], selection: 'all', instanceSource: 'all' });
+    effect.components.poiEffect.configuration = configuration;
+    const scene = createEmptySceneDocument('同类型全部绑定'); append(scene, [effect]);
+    assert.deepEqual(deserializeScene(serializeScene(scene)).entities[effect.id].components.poiEffect.configuration, configuration, kind);
+  }
+});
+
 test('导入拒绝非法版本、原型键和特效专用 rows，不以归一化悄悄丢弃非法内容', () => {
   const scene = createEmptySceneDocument('拒绝非法 V2'), target = createMeshEntity('cube'), effect = createPoiEffectEntity('region-level');
   effect.components.poiEffect.configuration = configured(effect.components.poiEffect, target.id); append(scene, [target, effect]);

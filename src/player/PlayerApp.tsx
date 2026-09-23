@@ -326,7 +326,7 @@ export function PlayerApp() {
 
     const abortController = new AbortController();
     let disposed = false;
-    let publishedCache: ReturnType<typeof installPublishedViewerCache> = null;
+    let publishedCache: Awaited<ReturnType<typeof installPublishedViewerCache>> = null;
     let viewport: BabylonViewport | null = null;
     let runtime: SceneRuntime | null = null;
     let autoPatrolPlayback: AutoPatrolPlaybackController | null = null;
@@ -444,7 +444,8 @@ export function PlayerApp() {
         const parsedConfig = applyDigitalTwinRuntimeConfig(baseConfig, projectRuntimeConfig);
         if (disposed || initialLoadFailed) return;
         configureEffectDataTransport({ apiBaseUrl: projectRuntimeConfig?.apiBaseUrl });
-        publishedCache = installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href);
+        publishedCache = await installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href, abortController.signal);
+        if (disposed || initialLoadFailed) { publishedCache?.dispose(); publishedCache = null; return; }
         interactionController = new DigitalTwinInteractionController({
           parentWindow: window.parent,
           viewerOrigin: window.location.origin,
@@ -478,7 +479,7 @@ export function PlayerApp() {
         const assetBaseUrl = new URL(parsedConfig.paths.assetBase, document.baseURI);
         const manifestUrl = new URL(parsedConfig.paths.assetManifest, document.baseURI);
         startupStage = '读取资源清单';
-        const manifestMappings = parseDeploymentAssetManifest(await fetchJson(manifestUrl, abortController.signal), assetBaseUrl);
+        const manifestMappings = parseDeploymentAssetManifest(publishedCache?.assetManifest ?? await fetchJson(manifestUrl, abortController.signal), assetBaseUrl);
         if (disposed || initialLoadFailed) return;
         installDeploymentAssetManifest(manifestMappings);
         setStartupPercent(20);
@@ -486,6 +487,8 @@ export function PlayerApp() {
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         startupStage = '读取场景文档';
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
+        await publishedCache?.verifyDocuments();
+        if (disposed || initialLoadFailed) return;
         setViewportScreen(sceneDocument.sceneSettings.viewportScreen);
         const digitalTwinAssetIndex = buildDigitalTwinAssetIndex(sceneDocument);
         const digitalTwinSlotIndex = buildDigitalTwinSlotIndex(sceneDocument);

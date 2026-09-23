@@ -9,6 +9,7 @@ import type { IDecodedData } from '@babylonjs/core/Materials/Textures/ktx2decode
 import { PublishedAssetCache } from '../runtime/assets/publishedAssetCache';
 import { installPublishedAssetCache } from '../runtime/assets/runtimeAssetFetch';
 import type { PlayerRuntimeConfig } from './runtimeConfig';
+import { loadPublishedCacheVersion, verifyPublishedCacheVersion } from './publishedCacheVersion';
 
 function isMeshData(value: unknown): value is MeshData {
   if (!value || typeof value !== 'object') return false;
@@ -84,24 +85,22 @@ class PublishedOfflineProvider implements IOfflineProvider {
   }
 }
 
-export function installPublishedViewerCache(config: PlayerRuntimeConfig, baseUrl: string): {
-  cache: PublishedAssetCache; attach(scene: Scene): void; dispose(): void;
-} | null {
-  // 没有版本标识的旧包保持实时读取，不能猜测版本后永久缓存同名资源。
-  if (!config.cacheRevision) return null;
+export async function installPublishedViewerCache(config: PlayerRuntimeConfig, baseUrl: string, signal: AbortSignal = new AbortController().signal): Promise<{
+  cache: PublishedAssetCache; assetManifest?: unknown; verifyDocuments(): Promise<void>; attach(scene: Scene): void; dispose(): void;
+} | null> {
+  const version = await loadPublishedCacheVersion(config, baseUrl, signal);
+  if (!version) return null;
+  signal.throwIfAborted();
   const revisionController = new AbortController();
   let verifying: Promise<void> | null = null;
   const verifyRevision = () => {
-    verifying ??= (async () => {
-      const response = await fetch(new URL('./runtime-config.json', baseUrl), { cache: 'no-store', signal: revisionController.signal });
-      if (!response.ok) throw new Error(`核对发布版本失败：HTTP ${response.status}。`);
-      const latest = await response.json() as { cacheRevision?: string };
-      if (latest.cacheRevision !== config.cacheRevision) throw new Error('加载期间发布版本已变更，请重新加载场景。');
-    })().finally(() => { verifying = null; });
+    verifying ??= verifyPublishedCacheVersion(config, baseUrl, version, revisionController.signal)
+      .finally(() => { verifying = null; });
     return verifying;
   };
-  const cache = new PublishedAssetCache({ baseUrl, revision: config.cacheRevision, assetBase: new URL(config.paths.assetBase, baseUrl).href,
-    documentUrls: [config.paths.scene, config.paths.assetManifest].map(url => new URL(url, baseUrl).href), verifyRevision });
+  const cache = new PublishedAssetCache({ baseUrl, revision: version.revision, resources: version.resources, assetBase: new URL(config.paths.assetBase, baseUrl).href,
+    documentUrls: version.resources ? [] : [config.paths.scene, config.paths.assetManifest].map(url => new URL(url, baseUrl).href),
+    verifyRevision: version.resources ? undefined : verifyRevision });
   const restoreFetch = installPublishedAssetCache(cache);
   const provider = new PublishedOfflineProvider(cache);
   const previousFactory = AbstractEngine.OfflineProviderFactory;
@@ -132,7 +131,7 @@ export function installPublishedViewerCache(config: PlayerRuntimeConfig, baseUrl
   };
   KTX2Decoder.prototype.decode = ktx;
   return {
-    cache,
+    cache, assetManifest: version.assetManifest, verifyDocuments: verifyRevision,
     attach(scene) { scene.getEngine().enableOfflineSupport = true; scene.offlineProvider = provider; },
     dispose() {
       revisionController.abort();

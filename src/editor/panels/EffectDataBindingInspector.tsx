@@ -84,6 +84,7 @@ export function EffectDataBindingInspector({ component, configuration, disabled,
   const scene = useEditorStore(state => state.scene); const selectedId = scene.selectedEntityId;
   const saved = JSON.stringify(configuration.data), targetSignature = JSON.stringify(configuration.target);
   const [draft, setDraft] = useState(() => clone(configuration.data));
+  const [probeTargetId, setProbeTargetId] = useState('');
   const [error, setError] = useState(''); const [result, setResult] = useState<EffectDataResult | null>(null);
   const [issues, setIssues] = useState<string[]>([]); const [busy, setBusy] = useState(false);
   const [pendingEnums, setPendingEnums] = useState<Record<string, boolean>>({});
@@ -108,14 +109,17 @@ export function EffectDataBindingInspector({ component, configuration, disabled,
   const sinkKeys = new Set(sinkOptions.map(option => option.value));
   const hasChanges = JSON.stringify(draft) !== saved;
   const resolution = useMemo(() => resolveEffectTargets(scene, configuration.target, component.effectKind), [scene, targetSignature, component.effectKind]);
-  const sceneIdentity = resolution.status === 'resolved' && resolution.ids.length === 1 ? effectDeviceIdentity(scene.entities[resolution.ids[0]]) : null;
+  const multipleTargets = component.effectKind !== 'target-follow' && (configuration.target.selection === 'all' || (configuration.target.entityIds?.length ?? 0) > 1);
+  const probeCandidates = resolution.candidates.filter(candidate => !!scene.entities[candidate.id] && !!effectDeviceIdentity(scene.entities[candidate.id]));
+  const selectedProbeId = probeCandidates.some(candidate=>candidate.id === probeTargetId) ? probeTargetId : '';
+  const sceneIdentity = multipleTargets && selectedProbeId ? effectDeviceIdentity(scene.entities[selectedProbeId]) : resolution.status === 'resolved' && resolution.ids.length === 1 ? effectDeviceIdentity(scene.entities[resolution.ids[0]]) : null;
   const target = configuration.target;
   // 只有资产编号的完整设备三元组可以脱离实例测试，容器编号不能当作设备号查询。
   const configuredIdentity: EffectDeviceIdentity | null = ['model', 'device'].includes(target.mode)
     && (target.instanceKey ?? 'assetCode') === 'assetCode' && target.sourceId.trim() && target.deviceType.trim() && target.assetCode.trim()
     ? { sourceId: target.sourceId.trim(), deviceType: target.deviceType.trim().toLowerCase(), assetCode: target.assetCode.trim() } : null;
   const diagnostic = useSyncExternalStore(subscribeEffectDiagnostics, () => getEffectDiagnostic(selectedId ?? ''), () => undefined);
-  const runtimeIdentity = diagnostic?.bindingSignature === targetSignature
+  const runtimeIdentity = !multipleTargets && diagnostic?.bindingSignature === targetSignature
     ? draft.inheritFrom === 'carrier' ? diagnostic.carrierIdentity : diagnostic.targetIdentity : null;
   const identity: EffectDeviceIdentity | null = runtimeIdentity ?? (draft.inheritFrom === 'carrier' ? null : configuredIdentity ?? sceneIdentity);
   const identitySignature = JSON.stringify(identity);
@@ -126,6 +130,7 @@ export function EffectDataBindingInspector({ component, configuration, disabled,
   function cancelProbe(): void { const current = probe.current; if (!current) return; current.cancelled = true; if (current.timer) clearTimeout(current.timer); current.runtime.dispose(); probe.current = null; }
   useEffect(() => { cancelProbe(); setBusy(false); setResult(null); setIssues([]); setError(''); setPendingEnums({}); setDraft(clone(configuration.data)); }, [selectedId, saved, component.effectKind]);
   useEffect(() => { cancelProbe(); setBusy(false); setResult(null); setIssues([]); setError(''); }, [targetSignature, identitySignature, disabled]);
+  useEffect(() => { setProbeTargetId(''); }, [targetSignature, selectedId]);
   useEffect(() => () => cancelProbe(), []);
 
   function edit(patch: Partial<EffectDataBinding>): void { cancelProbe(); setBusy(false); setResult(null); setIssues([]); setError(''); setDraft(value => ({ ...value, ...patch })); }
@@ -145,7 +150,7 @@ export function EffectDataBindingInspector({ component, configuration, disabled,
   function testData(): void {
     if (disabled || busy || hasPendingEnums || draft.mode === 'none') return;
     try { validateDraft(draft, sinkKeys, hasRegionPolygons); } catch (cause) { setError(cause instanceof Error ? cause.message : '数据配置无效。'); return; }
-    if (draft.mode === 'inherit' && !identity) { setError(resolution.status === 'ambiguous' || resolution.ids.length > 1 ? '测试继承绑定需要唯一目标，请先按资产编号限定设备。' : '目标尚无完整设备数据身份；可填写目标数据源、协议设备类型和资产编号后测试，容器编号不能代替设备号。'); return; }
+    if (draft.mode === 'inherit' && !identity) { setError(multipleTargets && probeCandidates.length > 0 && draft.inheritFrom !== 'carrier' ? '请先选择一个试取数目标；运行时仍为每个模型分别继承数据，不会改变多目标绑定。' : !multipleTargets && resolution.status === 'ambiguous' ? '测试继承绑定需要唯一目标，请先按资产编号限定设备。' : '目标尚无完整设备数据身份；可填写目标数据源、协议设备类型和资产编号后测试，容器编号不能代替设备号。'); return; }
     cancelProbe(); setError(''); setBusy(true); setResult(null); setIssues([]);
     const current: Probe = { runtime: new EffectDataRuntime({ maxEntries: 1, maxConcurrent: 1 }), cancelled: false }; probe.current = current;
     const deadline = Date.now() + (draft.mode === 'http' ? draft.http.timeoutMs + 500 : 10000);
@@ -172,10 +177,14 @@ export function EffectDataBindingInspector({ component, configuration, disabled,
     </select></label>
     {draft.mode === 'none' ? <p className="muted">使用当前特效参数，无需数据源。切换来源后可配置字段映射和条件触发。</p> : <>
       {draft.mode === 'inherit' && <>
-        {component.effectKind === 'target-follow' && <label className="inspector-row"><span>继承身份</span><select aria-label="继承数据身份" disabled={disabled} value={draft.inheritFrom ?? 'target'} onChange={event => edit({ inheritFrom: event.target.value as 'target' | 'carrier' })}><option value="target">目标自身设备</option><option value="carrier">承载目标的设备</option></select></label>}
+        {multipleTargets && <><p className="muted">每个目标分别继承各自设备身份的数据，映射、触发与过期状态分别计算。试取数只检查下面选择的一个目标，不改变绑定范围。</p>
+          {draft.inheritFrom !== 'carrier' && probeCandidates.length > 0 && <label className="inspector-row"><span>试取数目标</span><select aria-label="多模型试取数目标" disabled={disabled} value={selectedProbeId} onChange={event=>setProbeTargetId(event.target.value)}><option value="">请选择一个已存在的模型</option>{probeCandidates.map(candidate=><option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.assetCode}</option>)}</select></label>}
+        </>}
+        {['model','device'].includes(configuration.target.mode) && <label className="inspector-row"><span>继承身份</span><select aria-label="继承数据身份" disabled={disabled} value={draft.inheritFrom ?? 'target'} onChange={event => edit({ inheritFrom: event.target.value as 'target' | 'carrier' })}><option value="target">目标自身设备</option><option value="carrier">承载目标的设备</option></select></label>}
         <p className="muted">{identity ? `继承：${identity.sourceId} / ${identity.deviceType} / ${identity.assetCode}` : draft.inheritFrom === 'carrier' ? '承载设备身份由生成器在运行时提供；未生成前可使用独立 MQTT 或 HTTP 明确填写设备身份测试。' : '完整的目标数据源、协议类型、资产编号可在模型生成前测试；运行时优先使用实际匹配实例身份。'}</p>
       </>}
       {draft.mode === 'mqtt' && <>
+        {multipleTargets && <p className="muted">独立 MQTT 绑定使用这里填写的同一设备数据，应用于全部目标；逐模型取数请选择继承目标模型 MQTT。</p>}
         <label className="inspector-row"><span>MQTT 数据源</span><input aria-label="MQTT 数据源" list={`${inputId}-sources`} disabled={disabled} value={draft.sourceId} maxLength={200} onChange={event => edit({ sourceId: event.target.value })} /></label>
         <datalist id={`${inputId}-sources`}>{sources.map(source => <option key={source} value={source} />)}</datalist>
         {text('协议设备类型', draft.deviceType, value => edit({ deviceType: value }), '例如 rgv', 64)}

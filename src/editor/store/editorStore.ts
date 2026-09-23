@@ -1933,6 +1933,7 @@ function prepareEntityClipboardPaste(
     }
     const effectTarget = entity.components.poiEffect?.configuration?.target;
     if (effectTarget?.entityId) effectTarget.entityId = duplicatedIdBySourceId.get(effectTarget.entityId) ?? effectTarget.entityId;
+    if (effectTarget?.entityIds) effectTarget.entityIds = effectTarget.entityIds.map(id => duplicatedIdBySourceId.get(id) ?? id);
     if (effectTarget?.generatorId) effectTarget.generatorId = duplicatedIdBySourceId.get(effectTarget.generatorId) ?? effectTarget.generatorId;
     if (effectTarget?.model?.entityIds) effectTarget.model.entityIds = effectTarget.model.entityIds.map(id => duplicatedIdBySourceId.get(id) ?? id);
     const effectVisual = entity.components.poiEffect?.visual;

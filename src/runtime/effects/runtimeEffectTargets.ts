@@ -34,7 +34,7 @@ export function resolveRuntimeEffectTargets(
   scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
   binding: EffectTargetBinding,
   generated: readonly EffectRuntimeTarget[],
-  session: { selectedId?: string | null; lockedKey?: string | null } = {},
+  session: { selectedId?: string | null; lockedKey?: string | null; multiple?: boolean; follow?: boolean } = {},
 ): RuntimeEffectResolution {
   const result = (status: RuntimeEffectResolution['status'], targets: EffectRuntimeTarget[], matches: EffectRuntimeTarget[], message: string): RuntimeEffectResolution => ({
     status, ids: targets.map(t => t.id), targets, message,
@@ -62,6 +62,11 @@ export function resolveRuntimeEffectTargets(
   });
   if (!matches.length) return result('missing-target', [], [], '模型类型已绑定，等待运行时实例');
   const ready = matches.filter(t => t.state === 'ready');
+  if (session.multiple) {
+    if (matches.length > (binding.maxTargets ?? 32)) return result('limit', [], matches, `匹配数量 ${matches.length} 超过配置上限`);
+    if (ready.length) return result('resolved', ready, matches, `已匹配 ${ready.length} 个可用目标${ready.length < matches.length ? `；${matches.length-ready.length} 个目标等待加载或恢复` : ''}`);
+    return result(matches.some(t=>t.state==='error') ? 'error' : 'loading', [], matches, '等待匹配的模型加载或恢复显示');
+  }
   const selected = session.selectedId ? ready.find(t => t.id === session.selectedId && (!session.lockedKey || runtimeTargetLockKey(t) === session.lockedKey)) : undefined;
   if (selected) return result('resolved', [selected], matches, '已选择运行时目标');
   const locked = session.lockedKey ? matches.filter(t => runtimeTargetLockKey(t) === session.lockedKey) : [];
@@ -73,7 +78,7 @@ export function resolveRuntimeEffectTargets(
     return result('missing-target', [], matches, '等待已锁定业务对象重新生成；可清除选择以重新定位');
   }
   if (matches.length > (binding.maxTargets ?? 32)) return result('limit', [], matches, `匹配数量 ${matches.length} 超过配置上限`);
-  if (binding.followSelection === 'manual' || matches.length > 1) return result('ambiguous', [], matches, '请选择运行时实例，或用数据源和编号进一步限定');
+  if (session.follow !== false && binding.followSelection === 'manual' || matches.length > 1) return result('ambiguous', [], matches, '请选择运行时实例，或用数据源和编号进一步限定');
   if (ready.length === 1) return result('resolved', ready, matches, '已匹配运行时目标');
   return result(matches[0].state === 'error' ? 'error' : 'loading', [], matches, matches[0].message || '等待目标模型加载或恢复显示');
 }

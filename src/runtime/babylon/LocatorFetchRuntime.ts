@@ -395,7 +395,7 @@ export class LocatorFetchRuntime {
         && prior.target.model.sourceUrl === instance.target.modelAsset.sourceUrl && prior.target.model.sourcePath === instance.target.modelAsset.sourcePath;
       next.set(id, { target: {
         id, name: instance.target.displayName + ' ' + instance.cargoCode, origin: 'generated',
-        model: effectReferenceFromGeneratorTarget(instance.target), identity: null,
+        model: effectReferenceFromGeneratorTarget(instance.target), identity: null, modelEffectsSupported: false,
         ...(instance.containerCode ? { containerCode: instance.containerCode } : {}),
         generatorId, generation: sameOutput ? prior!.target.generation : generation, state: 'loading',
       }, matrix: null });

@@ -43,7 +43,7 @@ try {
   const started = performance.now();
   configureLocalBabylonDecoders();
   const config = parsePlayerRuntimeConfig(await (await fetch('./runtime-config.json', {cache:'no-store'})).json());
-  const cache = installPublishedViewerCache(config, new URL('./', location.href).href);
+  const cache = await installPublishedViewerCache(config, new URL('./', location.href).href);
   const engine = new Engine(document.querySelector('canvas'), true, {preserveDrawingBuffer:true});
   const scene = new Scene(engine);
   cache?.attach(scene);

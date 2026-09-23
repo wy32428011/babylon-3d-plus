@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { PublishedAssetCache, type PublishedCacheStore } from '../../src/runtime/assets/publishedAssetCache.ts';
 import { installPublishedAssetCache } from '../../src/runtime/assets/runtimeAssetFetch.ts';
 import { readSkyboxTextureBlob } from '../../src/runtime/babylon/skyboxTextureLoad.ts';
@@ -182,4 +183,30 @@ test('并发缓存操作一起失败时只降级一次并继续完成全部网�
   assert.equal(warning.mock.callCount(), 1);
   assert.equal(cache.metrics.storageFailures, 1);
   cache.dispose();
+});
+
+
+test('旧格式清单只缓存列出的模型和天空盒，下载内容必须匹配哈希后才能跨会话复用', async t => {
+  const store = memoryStore();
+  const base = 'http://viewer.test/a/';
+  const modelUrl = base + 'project/assets/model.glb';
+  const skyboxUrl = base + 'project/assets/sky.hdr';
+  const resources = new Map([modelUrl, skyboxUrl].map(url => [url, { size: 3, sha256: createHash('sha256').update('old').digest('hex') }]));
+  const create = () => new PublishedAssetCache({baseUrl:base, revision:'legacy', assetBase:'project/assets/', documentUrls:[], store, resources});
+  let contents = 'bad'; let downloads = 0;
+  t.mock.method(globalThis, 'fetch', async () => { downloads++; return new Response(contents); });
+  const first = create();
+  assert.equal(first.accepts(base + 'project/scene.json'), false);
+  assert.equal(first.accepts(base + 'project/assets/unlisted.glb'), false);
+  assert.equal(first.accepts(skyboxUrl + '?assetRevision=hash&skyboxResolution=256'), true);
+  await assert.rejects(first.fetch(modelUrl), /资源与清单不一致/);
+  contents = 'old';
+  assert.equal(await (await first.fetch(modelUrl)).text(), 'old');
+  first.dispose();
+  const refreshed = create();
+  assert.equal(await (await refreshed.fetch(modelUrl)).text(), 'old');
+  assert.equal(downloads, 2, '不缓存坏文件，正确文件刷新后无需再次下载');
+  contents = 'new-release';
+  await assert.rejects(refreshed.fetch(skyboxUrl), /资源与清单不一致/);
+  refreshed.dispose();
 });

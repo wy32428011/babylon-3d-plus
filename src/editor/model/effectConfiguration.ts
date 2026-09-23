@@ -14,6 +14,8 @@ export type EffectModelReference = {
 export type EffectTargetBinding = {
   mode: 'entity' | 'environment' | 'model' | 'device' | 'point';
   entityId: string | null;
+  /** 明确选择的场景实体；缺省时兼容旧单个 entityId，空数组表示清空绑定。 */
+  entityIds?: string[];
   model: EffectModelReference | null;
   sourceId: string;
   deviceType: string;
@@ -95,6 +97,7 @@ export type EffectDiagnostic = {
   targetIdentity?: EffectDeviceIdentity | null;
   carrierIdentity?: EffectDeviceIdentity | null;
   bindingSignature?: string;
+  targetStates?: Array<{id: string; name: string; status: EffectDiagnosticStatus; message: string; identity: EffectDeviceIdentity | null}>;
 };
 
 export type EffectTargetCandidate = {
@@ -118,4 +121,5 @@ export type EffectRuntimeTarget = {
   state: 'loading' | 'ready' | 'hidden' | 'error';
   generation: string | number;
   message?: string;
+  modelEffectsSupported?: boolean;
 };

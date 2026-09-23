@@ -400,3 +400,58 @@ test('生成前显式完整身份可HTTP取数，跟随仍等待真正模型',as
   assert.equal(requests.length,1);assert.equal(requests[0].assetCode,'000317');assert.equal(getEffectDiagnostic('fx').status,'missing-target');
   assert.equal(getEffectDiagnostic('fx').fields.speed,2);assert.ok(h.camera.target.equals(initial));
 });
+
+const derived=id=>'fx::effect-target::'+id;
+function multiTarget(c,ids){c.target.mode='entity';c.target.entityId=ids[0]??null;c.target.entityIds=ids;c.target.selection='all';}
+test('多个模型独立继承数据，顺序变化和移除不会重建幸存对象，拾取归属同一编辑实体',t=>{
+  const h=harness(t);h.model('a','A');h.model('b','B');
+  const fx=h.effect('path-reveal',c=>{multiTarget(c,['a','b']);mqtt(c);c.data.mappings=[mapping('velocity','speed'),mapping('color','primaryColor')];});
+  h.telemetry('A',{velocity:1,color:'#ff0000'});h.telemetry('B',{velocity:2,color:'#00ff00'});h.sync(fx);frames(h);
+  const a=h.meshes(derived('a')),b=h.meshes(derived('b'));assert.ok(a.length&&b.length);
+  assert.equal(h.runtime.entries.get(derived('a')).resources.spatial.playbackSpeed,1);assert.equal(h.runtime.entries.get(derived('b')).resources.spatial.playbackSpeed,2);
+  assert.ok([...a,...b].every(m=>m.metadata.editorEntityId==='fx'));
+  assert.equal(getEffectDiagnostic('fx').targetStates.length,2);assert.equal(getEffectDiagnostic('fx').identity,null);
+  const reordered=structuredClone(fx);reordered.components.poiEffect.configuration.target.entityIds=['b','a'];h.sync(reordered);
+  assert.deepEqual(h.meshes(derived('a')),a);assert.deepEqual(h.meshes(derived('b')),b);
+  const saved=JSON.stringify(h.document);h.telemetry('B',{velocity:3,color:'#0000ff'});frames(h);
+  assert.equal(h.runtime.entries.get(derived('a')).resources.spatial.playbackSpeed,1);assert.equal(h.runtime.entries.get(derived('b')).resources.spatial.playbackSpeed,3);assert.equal(JSON.stringify(h.document),saved);
+  const removed=structuredClone(fx);multiTarget(removed.components.poiEffect.configuration,['b']);h.sync(removed);
+  assert.equal(h.runtime.has(derived('a')),false);assert.ok(a.every(m=>m.isDisposed()));assert.deepEqual(h.meshes(derived('b')),b);
+  h.runtime.disposeMissing(new Set());assert.equal(h.runtime.entries.size,0);assert.equal(getEffectDiagnostic('fx'),undefined);
+});
+test('多模型表面覆盖隔离共享材质，移除一个只恢复对应模型',t=>{
+  const h=harness(t),a=h.model('a','A'),b=h.model('b','B'),c=h.model('c','C');
+  const original=new StandardMaterial('shared-original',h.scene);for(const model of [a,b,c])model.body.material=original;
+  const fx=h.effect('xray',config=>multiTarget(config,['a','b']));h.sync(fx);frames(h);
+  assert.notEqual(a.body.material,original);assert.notEqual(b.body.material,original);assert.notEqual(a.body.material,b.body.material);assert.equal(c.body.material,original);
+  const kept=b.body.material,removed=structuredClone(fx);multiTarget(removed.components.poiEffect.configuration,['b']);h.sync(removed);frames(h);
+  assert.equal(a.body.material,original);assert.equal(b.body.material,kept);assert.equal(c.body.material,original);
+  h.runtime.disposeMissing(new Set());assert.equal(b.body.material,original);assert.equal(original.isDisposed?.()??false,false);
+});
+test('同类型全部匹配包含延迟生成实例，各目标独立轨迹并清理，加载中不阻塞其他模型',t=>{
+  const h=harness(t),a=h.model('a','A','plant-a','C:/generated/box.glb');a.entity.components.modelAsset.sourceUrl=generatedType.sourceUrl;h.replace(a.entity);
+  const fx=h.effect('motion-trail',c=>{c.target.mode='model';c.target.model=generatedType;c.target.selection='all';});h.sync(fx);frames(h);
+  const original=h.runtime.entries.get(derived('a')).resources.spatial;
+  const generated=addGenerated(h,'generated','0001',20,'loading');frames(h);assert.equal(h.runtime.has(derived('generated')),false);assert.equal(h.runtime.entries.get(derived('a')).resources.spatial,original);
+  generated.descriptor.state='ready';frames(h);assert.ok(h.runtime.has(derived('generated')));assert.notEqual(h.runtime.entries.get(derived('generated')).resources.spatial,original);
+  h.generated.splice(0);generated.node.dispose();frames(h);assert.equal(h.runtime.has(derived('generated')),false);assert.equal(h.runtime.entries.get(derived('a')).resources.spatial,original);
+});
+test('共享薄实例不被表面特效整批误改，独立生成模型仍可正常应用',t=>{
+  const h=harness(t);const a=addGenerated(h,'thin','C1',5),b=addGenerated(h,'normal','C2',10);a.descriptor.modelEffectsSupported=false;
+  const fx=h.effect('xray',c=>{c.target.mode='model';c.target.model=generatedType;c.target.selection='all';});h.sync(fx);frames(h);
+  const states=getEffectDiagnostic('fx').targetStates;assert.equal(states.find(s=>s.id==='thin').status,'invalid');assert.match(states.find(s=>s.id==='thin').message,/薄实例/);
+  assert.notEqual(states.find(s=>s.id==='normal').status,'invalid');
+});
+
+test('切换为场景雾时旧多目标配置不会创建多个全局效果',t=>{
+ const h=harness(t);h.model('a','A');h.model('b','B');
+ const fx=h.effect('environment-fog',c=>multiTarget(c,['a','b']));h.sync(fx);frames(h);
+ assert.equal(h.runtime.entries.size,1);assert.ok(h.runtime.has('fx'));
+});
+
+test('多目标部件锚点失败只报告对应对象，正常目标继续运行',t=>{
+ const h=harness(t);h.model('a','A');h.model('b','B');
+ const fx=h.effect('breathing-ring',c=>{multiTarget(c,['a','b']);c.target.anchor='node';c.target.nodePath='a_body';});h.sync(fx);frames(h);
+ const d=getEffectDiagnostic('fx');assert.equal(d.targetStates.find(s=>s.id==='b').status,'invalid');assert.match(d.targetStates.find(s=>s.id==='b').message,/部件/);
+ assert.equal(d.targetStates.find(s=>s.id==='a').status,'static');assert.ok(h.meshes(derived('a')).some(m=>m.isEnabled()));
+});

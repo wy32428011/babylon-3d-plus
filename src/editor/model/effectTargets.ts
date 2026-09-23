@@ -50,14 +50,22 @@ export function resolveEffectTargets(scene: Pick<SceneDocument, 'entityIds' | 'e
     candidates: ids.map(id => ({ id, name: scene.entities[id]?.name ?? '环境模型', assetCode: effectDeviceIdentity(scene.entities[id])?.assetCode ?? '' })), message });
   if (target.mode === 'point') return result('resolved', [], '使用特效自身坐标');
   if (target.mode === 'environment') return scene.sceneSettings?.environment ? result('resolved', [ENVIRONMENT_EFFECT_TARGET_ID], '已匹配环境模型') : result('missing-target', [], '等待环境模型');
-  if (target.mode === 'entity') return target.entityId && scene.entities[target.entityId]
-    ? result('resolved', [target.entityId], '已匹配场景对象') : result(target.entityId ? 'missing-target' : 'unbound', [], '请选择目标对象');
+  if (target.mode === 'entity') {
+    const configured = [...new Set(target.entityIds ?? (target.entityId ? [target.entityId] : []))];
+    const ids = configured.filter(id=>!!scene.entities[id]);
+    if (!configured.length) return result('unbound', [], '请选择目标对象');
+    if (effectKind === 'target-follow' && configured.length>1) return result('ambiguous', ids, '相机同时只能跟随一个目标，请选择单个对象或按类型在运行时选择');
+    if (configured.length>target.maxTargets) return result('limit', ids.slice(0,target.maxTargets+1), `指定目标数量 ${configured.length} 超过配置上限 ${target.maxTargets}`);
+    const missing = configured.length - ids.length;
+    return result(ids.length ? 'resolved' : 'missing-target', ids, `已匹配 ${ids.length} 个对象${missing ? `；${missing} 个目标不存在，保留其绑定` : ''}`);
+  }
   if (target.mode === 'model' && !target.model) return result('unbound', [], '请从模型库拖入资源模板');
-  const needsSingle=target.selection==='single'||effectKind==='target-follow'||effectKind==='motion-trail';
+  const needsSingle=target.selection==='single'||effectKind==='target-follow';
   if (target.mode === 'device' && (!target.deviceType || needsSingle&&!target.assetCode)) return result('unbound', [], needsSingle?'请填写协议设备类型和资产编号':'请填写协议设备类型');
   const {reference, ambiguous} = resolveEffectModelReference(scene, target.model);
   if (ambiguous) return result('ambiguous',[],'模板参考对象已指向不同资源，请重新从模型库选择');
   const matches = scene.entityIds.filter(id => {
+    if (target.instanceSource === 'generated' || target.generatorId) return false;
     const entity = scene.entities[id];
     if (!entity?.components.modelAsset || entity.components.poiEffect) return false;
     if (target.mode === 'model' && !matchesEffectModel(entity, reference!)) return false;

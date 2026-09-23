@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
 
 const [scenePath, modelPath] = process.argv.slice(2);
+const legacy = process.argv.includes('--legacy');
 if (!scenePath || !modelPath) throw new Error('用法：node scripts/smoke-published-viewer-cache.mjs <已有发布scene.json> <含Draco的GLB>');
 const source = JSON.parse(await readFile(scenePath, 'utf8'));
 const model = await readFile(modelPath);
+const skyboxUrl = 'editor-asset://local/project%2Fassets%2Fsky.hdr';
+// 小型有效 Radiance HDR，使用不同颜色的像素验证实际天空盒上传。
+const skybox = Buffer.concat([Buffer.from('#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 8 +X 16\n'),
+  ...Array.from({length:8}, (_,row) => Buffer.from([2,2,0,16,144,32+row*12,144,128-row*8,144,64,144,129]))]);
 const logicalUrl = 'editor-asset://local/project%2Fassets%2Fmodel.glb';
 const scene = structuredClone(source);
 // 从合法发布文档构造只有一个无业务绑定模型的最小夹具，源场景不写回。
@@ -16,18 +22,21 @@ scene.scene.entities = { model: { id: 'model', name: '缓存验收模型', isFol
     transform: { position: { x: 0,y: 0,z: 0 }, rotation: { x: 0,y: 0,z: 0 }, scale: { x: 1,y: 1,z: 1 } },
     modelAsset: { sourcePath: logicalUrl, sourceUrl: logicalUrl, assetRevision: 'fixture', lengthUnit: 'meter', unitScaleToMeters: 1 },
   } } };
-scene.scene.entityIds = ['model']; scene.scene.selectedEntityId = null;
+scene.scene.entities.skybox = { id:'skybox', name:'缓存验收天空盒', isFolder:false, visible:true, locked:false, parentId:null, childrenIds:[], components:{
+  transform:{position:{x:0,y:0,z:0},rotation:{x:0,y:0,z:0},scale:{x:1,y:1,z:1}},
+  skybox:{packagePath:'editor-asset://local/project%2Fassets%2F',sourcePath:skyboxUrl,sourceUrl:skyboxUrl,format:'hdr',resolution:256,intensity:0.5,assetRevision:'fixture'} } };
+scene.scene.entityIds = ['model','skybox']; scene.scene.selectedEntityId = null;
 scene.scene.fetchConfig = {url:'',apiKey:''};
 scene.scene.sceneSettings = { camera: { savedPose: { alpha: -Math.PI/3, beta: Math.PI/3, radius: 6, target: {x:0,y:0,z:0} },
   savedOrientation: 'orbit', savedProjection: 'perspective', viewDistance: 1000 } };
 const mqtt = { enabled:false,ip:'',address:'',topic:'',subscriptions:[],simulatorEnabled:false,simulatorAssetCode:'',simulatorScenario:'cycle',simulatorIntervalMs:500 };
 scene.scene.mqttConfig = mqtt;
 let revision = 'release-1';
-const template = path.resolve('dist-viewer-template');
-const output = path.resolve('output/playwright/published-viewer-cache');
+const template = path.resolve(process.env.VIEWER_TEMPLATE_DIR ?? 'dist-viewer-template');
+const output = path.resolve('output/playwright/published-viewer-cache' + (legacy ? '-legacy' : ''));
 await mkdir(output, {recursive:true});
 const counts = new Map();
-const config = () => ({version:2,cacheRevision:revision,page:{title:'发布缓存验收',loadingText:'场景加载中...',backgroundColor:'#141414'},
+const config = () => ({version:2,...(legacy ? {} : {cacheRevision:revision}),page:{title:'发布缓存验收',loadingText:'场景加载中...',backgroundColor:'#141414'},
   paths:{scene:'./project/scene.json',assetManifest:'./project/asset-manifest.json',assetBase:'./project/assets/'},
   viewer:{showGrid:false,allowCameraControl:true,showStatusOverlay:false},mqtt,
   digitalTwin:{projectId:'9001',runtimeConfigEndpoint:'/api/runtime-config'} });
@@ -35,6 +44,7 @@ const server = createServer((request,response)=>{ void (async()=>{
   const pathname = decodeURIComponent(new URL(request.url,'http://fixture').pathname);
   counts.set(pathname,(counts.get(pathname)??0)+1);
   response.setHeader('Cache-Control','no-store');
+  if(pathname==='/bigscreen') { response.setHeader('Content-Type','text/html'); response.end('<!doctype html><iframe title="数字孪生" style="width:980px;height:680px;border:0" sandbox="allow-scripts allow-same-origin" src="/published/?performance=1"></iframe>'); return; }
   if(pathname==='/favicon.ico') { response.statusCode=204; response.end(); return; }
   if(pathname==='/api/runtime-config') {
     response.setHeader('Content-Type','application/json');
@@ -44,8 +54,9 @@ const server = createServer((request,response)=>{ void (async()=>{
   const relative=pathname.slice('/published/'.length)||'index.html';
   if(relative==='runtime-config.json') { response.setHeader('Content-Type','application/json');response.end(JSON.stringify(config()));return; }
   if(relative==='project/scene.json') {response.setHeader('Content-Type','application/json');response.end(JSON.stringify(scene));return;}
-  if(relative==='project/asset-manifest.json') {response.setHeader('Content-Type','application/json');response.end(JSON.stringify({version:1,assets:{[logicalUrl]:'model.glb'}}));return;}
+  if(relative==='project/asset-manifest.json') {response.setHeader('Content-Type','application/json');response.end(JSON.stringify({version:1,assets:[{logicalUrl,path:'model.glb',size:model.length,sha256:createHash('sha256').update(model).digest('hex')},{logicalUrl:skyboxUrl,path:'sky.hdr',size:skybox.length,sha256:createHash('sha256').update(skybox).digest('hex')},{logicalUrl:'editor-asset://local/release.txt',path:'release.txt',size:revision.length,sha256:createHash('sha256').update(revision).digest('hex')}]}));return;}
   if(relative==='project/assets/model.glb') {response.setHeader('Content-Type','model/gltf-binary');response.end(model);return;}
+  if(relative==='project/assets/sky.hdr') {response.setHeader('Content-Type','application/octet-stream');response.end(skybox);return;}
   const file=path.resolve(template,relative);
   assert.ok(file.startsWith(template+path.sep));
   const types={'.html':'text/html','.js':'text/javascript','.css':'text/css','.wasm':'application/wasm','.png':'image/png','.svg':'image/svg+xml'};
@@ -58,7 +69,8 @@ try {
   const context=await browser.newContext({viewport:{width:1000,height:700}});
   const page=await context.newPage();
   page.setDefaultTimeout(120000);
-  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  page.on('console', message => { if(message.type()==='error') console.error(message.text()); });
+  const errors=[];page.on('pageerror',error=>{ errors.push(error.message); console.error(error.message); });
   await page.addInitScript(()=>{
     window.decodedReads=0;
     window.decodedWrites=0;
@@ -74,24 +86,26 @@ try {
       return key===undefined?put.call(this,value):put.call(this,value,key);
     };
   });
-  const url=`http://127.0.0.1:${server.address().port}/published/?performance=1`;
+  const url=`http://127.0.0.1:${server.address().port}/bigscreen`;
   const samples=[];
+  const viewer = page.frameLocator('iframe');
+  const viewerFrame = () => page.frames().find(frame => frame.url().includes('/published/'));
   for(const [name,version,downloads] of [['cold','release-1',1],['refresh','release-1',1],['republish','release-2',2],['rollback','release-1',2]]) {
     revision=version;
     if(samples.length)await page.reload();else await page.goto(url);
-    await page.locator('.player-performance').waitFor({state:'visible'});
-    await page.getByRole('progressbar').waitFor({state:'detached'});
-    assert.equal(await page.locator('.player-status-blocked').count(),0);
-    const decodedReads=await page.evaluate(()=>window.decodedReads);
-    const decodedWrites=await page.evaluate(()=>window.decodedWrites);
-    if(name==='refresh'||name==='rollback')assert.ok(decodedReads>0,'实际发布Viewer应读取已解码数据');
-    if(name==='refresh'||name==='rollback')assert.equal(decodedWrites,0,'已缓存压缩网格不应重新解码写入');
-    for(const resource of ['project/scene.json','project/asset-manifest.json','project/assets/model.glb']) {
+    await viewer.locator('.player-performance').waitFor({state:'visible'});
+    await viewer.getByRole('progressbar').waitFor({state:'detached'});
+    assert.equal(await viewer.locator('.player-status-blocked').count(),0,await viewer.locator('body').innerText());
+    const decodedReads=await viewerFrame().evaluate(()=>window.decodedReads);
+    const decodedWrites=await viewerFrame().evaluate(()=>window.decodedWrites);
+    for(const resource of legacy ? ['project/assets/model.glb','project/assets/sky.hdr'] : ['project/scene.json','project/asset-manifest.json','project/assets/model.glb','project/assets/sky.hdr']) {
       assert.equal(counts.get('/published/'+resource),downloads,resource);
     }
+    if(name==='refresh'||name==='rollback')assert.ok(decodedReads>0,'实际发布Viewer应读取已解码数据');
+    if(name==='refresh'||name==='rollback')assert.equal(decodedWrites,0,'已缓存压缩网格不应重新解码写入');
     assert.equal(counts.get('/api/runtime-config'),samples.length+1,'实时项目配置必须每次读取');
     await page.screenshot({path:path.join(output,name+'.png')});
-    const sample={name,decodedReads,decodedWrites,modelDownloads:counts.get('/published/project/assets/model.glb'),runtimeConfigReads:counts.get('/api/runtime-config')};
+    const sample={name,decodedReads,decodedWrites,modelDownloads:counts.get('/published/project/assets/model.glb'),skyboxDownloads:counts.get('/published/project/assets/sky.hdr'),runtimeConfigReads:counts.get('/api/runtime-config')};
     samples.push(sample);console.log(JSON.stringify(sample));
   }
 
@@ -101,9 +115,9 @@ try {
     IDBDatabase.prototype.transaction = function() { throw new DOMException('测试存储不可用', 'InvalidStateError'); };
   });
   await page.reload();
-  await page.locator('.player-performance').waitFor({state:'visible'});
-  await page.getByRole('progressbar').waitFor({state:'detached'});
-  assert.equal(await page.locator('.player-status-blocked').count(),0);
+  await viewer.locator('.player-performance').waitFor({state:'visible'});
+  await viewer.getByRole('progressbar').waitFor({state:'detached'});
+  assert.equal(await viewer.locator('.player-status-blocked').count(),0,await viewer.locator('body').innerText());
   assert.equal(warnings.length,1,'缓存故障只警告一次');
   assert.equal(counts.get('/published/project/assets/model.glb'),3,'缓存故障回退正常网络加载');
   await page.screenshot({path:path.join(output,'storage-unavailable.png')});
@@ -112,8 +126,8 @@ try {
   recovered.setDefaultTimeout(120000);
   recovered.on('pageerror',error=>errors.push(error.message));
   await recovered.goto(url);
-  await recovered.locator('.player-performance').waitFor({state:'visible'});
-  await recovered.getByRole('progressbar').waitFor({state:'detached'});
+  await recovered.frameLocator('iframe').locator('.player-performance').waitFor({state:'visible'});
+  await recovered.frameLocator('iframe').getByRole('progressbar').waitFor({state:'detached'});
   assert.equal(counts.get('/published/project/assets/model.glb'),3,'故障降级不删除已有缓存');
   samples.push({name:'storage-recovered',modelDownloads:3});
   await recovered.close();

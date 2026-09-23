@@ -50,10 +50,11 @@ export function sanitizeEffectConfiguration(value: unknown, component: PoiEffect
   for (const definition of getEffectParameterDefinitions(component.effectKind)) if (Object.prototype.hasOwnProperty.call(p, definition.key)) parameters[definition.key] = sanitizeEffectParameter(p[definition.key], definition);
   return { version: 2, target: {
     mode: choice(t.mode, ['entity','environment','model','device','point'], defaults.target.mode), entityId: text(t.entityId) || null,
+    ...(Array.isArray(t.entityIds) ? {entityIds:[...new Set(t.entityIds.map(id=>text(id)).filter(Boolean))].slice(0,64)} : {}),
     model: model ? { name: text(model.name), sourceUrl: text(model.sourceUrl, 2048), sourcePath: text(model.sourcePath, 2048), deviceType: text(model.deviceType),
       ...(Array.isArray(model.entityIds)?{entityIds:model.entityIds.slice(0,64).map(id=>text(id)).filter(Boolean)}:{}),
       ...(identity && text(identity.sourceKey) && text(identity.resourceId) ? { identity: { sourceKey: text(identity.sourceKey), kind: choice(identity.kind, ['model','combo'], 'model'), resourceId: text(identity.resourceId), modelPath: text(identity.modelPath, 1024) } } : {}) } : null,
-    sourceId: text(t.sourceId), deviceType: text(t.deviceType).toLowerCase(), assetCode: text(t.assetCode), selection: ['target-follow','motion-trail'].includes(component.effectKind)?'single':choice(t.selection,['single','all'],'single'),
+    sourceId: text(t.sourceId), deviceType: text(t.deviceType).toLowerCase(), assetCode: text(t.assetCode), selection: component.effectKind==='target-follow'?'single':choice(t.selection,['single','all'],'single'),
     ...(t.instanceSource !== undefined ? {instanceSource: choice<'all'|'scene'|'generated'>(t.instanceSource,['all','scene','generated'],'all')} : {}),
     ...(t.generatorId !== undefined ? {generatorId: text(t.generatorId) || null} : {}),
     ...(t.instanceKey !== undefined ? {instanceKey: choice<'assetCode'|'containerCode'|'carrierAssetCode'>(t.instanceKey,['assetCode','containerCode','carrierAssetCode'],'assetCode')} : {}),
@@ -73,6 +74,7 @@ export function sanitizeEffectConfiguration(value: unknown, component: PoiEffect
 export function validateEffectConfiguration(value: unknown, kind?: string): void {
   if (!object(value) || value.version !== 2 || !safeEffectJson(value)) throw new Error('特效扩展配置格式无效或超过安全范围。');
   if (!object(value.target) || !object(value.data) || !object(value.parameters)) throw new Error('特效扩展配置缺少目标、数据或参数。');
+  if (value.target.entityIds !== undefined && (!Array.isArray(value.target.entityIds) || value.target.entityIds.length > 64 || value.target.entityIds.some(id=>typeof id !== 'string' || !id.trim() || id.length>200))) throw new Error('特效指定目标必须是最多 64 个有效实体 ID。');
   if(kind)for(const definition of getEffectParameterDefinitions(kind)){if(Object.prototype.hasOwnProperty.call(value.parameters,definition.key)){const error=definition.validate?.(value.parameters[definition.key]);if(error)throw new Error(error);}}
   if (!['entity','environment','model','device','point'].includes(String(value.target.mode)) || !['none','inherit','mqtt','http'].includes(String(value.data.mode))) throw new Error('特效目标或数据模式无效。');
 }

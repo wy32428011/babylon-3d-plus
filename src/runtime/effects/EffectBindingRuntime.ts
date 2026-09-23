@@ -19,7 +19,7 @@ type Anchor = { node: TransformNode; sourceId: string; config: EffectConfigurati
 type Host = {
   resolveNode: (id: string) => TransformNode | AbstractMesh | null;
   isRunning: () => boolean;
-  apply: (entity: Entity, selected: boolean, visible: boolean, pickable: boolean) => void;
+  apply: (entity: Entity, selected: boolean, visible: boolean, pickable: boolean, ownerId?: string) => void;
   remove: (id: string) => void;
   getRoot: (id: string) => TransformNode | null;
   cameraStatus?: (id: string) => string;
@@ -92,19 +92,23 @@ export class EffectBindingRuntime {
       input.targetSignature = bindingSignature; input.selectedId = null; input.lockedKey = null; input.lockedId = null; input.resolutionKey = '';
     }
     const runtimeFollow = authored.effectKind === 'target-follow' && ['model','device'].includes(configuration.target.mode);
+    const global = ['environment-fog','day-night'].includes(authored.effectKind);
+    const runtimeBinding = ['model','device'].includes(configuration.target.mode) && !global;
+    const multiple = !global && authored.effectKind !== 'target-follow' && (configuration.target.mode === 'entity'
+      ? Array.isArray(configuration.target.entityIds) : runtimeBinding && configuration.target.selection === 'all');
     registerEffectFollowSelection(input.entity.id, runtimeFollow ? targetId => {
       if (!this.host.isRunning()) return;
       if (targetId && !input.resolution?.candidates.some(candidate => candidate.id === targetId && (!('state' in candidate) || candidate.state === 'ready'))) return;
       input.selectedId = targetId; input.lockedKey = null; input.lockedId = null; input.resolutionKey = '';
       this.evaluate(input); this.updateAnchors(); this.retainData();
     } : null);
-    const key = this.revision + ':' + bindingSignature;
+    const key = this.revision + ':' + authored.effectKind + ':' + bindingSignature;
     if (input.resolutionKey !== key) {
-      input.resolution = runtimeFollow
-        ? resolveRuntimeEffectTargets(this.document, configuration.target, this.runtimeTargets, {selectedId: input.selectedId, lockedKey: input.lockedKey})
-        : resolveEffectTargets(this.document, configuration.target, authored.effectKind);
+      input.resolution = runtimeBinding
+        ? resolveRuntimeEffectTargets(this.document, configuration.target, this.runtimeTargets, {selectedId: runtimeFollow ? input.selectedId : null, lockedKey: runtimeFollow ? input.lockedKey : null, multiple, follow:runtimeFollow})
+        : resolveEffectTargets(this.document, global ? {...configuration.target,mode:'point'} : configuration.target, authored.effectKind);
       input.resolutionKey = key;
-      if ('targets' in input.resolution && input.resolution.targets.length === 1) {
+      if (runtimeFollow && 'targets' in input.resolution && input.resolution.targets.length === 1) {
         input.lockedKey = runtimeTargetLockKey(input.resolution.targets[0]); input.lockedId = input.resolution.targets[0].id;
         input.selectedId = null;
       }
@@ -115,10 +119,16 @@ export class EffectBindingRuntime {
       message: resolution.message, candidates, identity: null, updatedAt: null, fields: {} };
     const ids = resolution.status === 'resolved' ? (resolution.ids.length ? resolution.ids : ['']) : [];
     const wanted = new Set<string>();
+    const targetStates: NonNullable<EffectDiagnostic['targetStates']> = [];
     input.waitingDataKey = '';
     let selectedDescriptor: EffectRuntimeTarget | undefined;
+    // 多目标使用稳定的派生 ID，原实体只保留编辑锚点；候选排序或增减不重建幸存目标。
+    if (multiple && ids.length) {
+      if (input.slots.has(input.entity.id)) { this.removeSlot(input.entity.id); input.slots.delete(input.entity.id); }
+      this.host.apply({...input.entity, components:{...input.entity.components,poiEffect:{...authored,enabled:false,visual:authored.visual ? {...authored.visual,targetEntityId:null}:undefined}}},input.selected,input.visible,input.pickable);
+    }
     for (let index = 0; index < ids.length; index++) {
-      const targetId = ids[index], id = index === 0 ? input.entity.id : `${input.entity.id}::effect-target::${targetId}`;
+      const targetId = ids[index], id = multiple ? `${input.entity.id}::effect-target::${targetId}` : index === 0 ? input.entity.id : `${input.entity.id}::effect-target::${targetId}`;
       wanted.add(id);
       const descriptor = 'targets' in resolution ? resolution.targets.find(target => target.id === targetId) : undefined;
       selectedDescriptor = descriptor;
@@ -127,7 +137,8 @@ export class EffectBindingRuntime {
       const identityKey = JSON.stringify([targetId,descriptor?.generation,identity,configuration.data.mode,configuration.data.inheritFrom,configuration.data.sourceId,configuration.data.deviceType,configuration.data.assetCode,configuration.data.http]);
       let slot = input.slots.get(id);
       if (!slot || slot.identity !== identityKey) { slot = { trigger: createEffectTriggerState(), previous: null, identity: identityKey, paused: false, dataKey: '', resultKey: '' }; input.slots.set(id, slot); }
-      const requesting=this.host.isRunning() && input.visible && authored.enabled;
+      const unsupported = MODEL_EFFECT_KINDS.has(authored.effectKind) && descriptor?.modelEffectsSupported === false;
+      const requesting=this.host.isRunning() && input.visible && authored.enabled && !unsupported;
       const result = this.data.read(configuration.data, identity, requesting);
       if(result.key && slot.resultKey && result.key!==slot.resultKey){slot.previous=null;slot.trigger=createEffectTriggerState();}
       if(result.key)slot.resultKey=result.key;
@@ -150,7 +161,7 @@ export class EffectBindingRuntime {
       const trigger = evaluateEffectTrigger(configuration.data, result, slot.trigger); slot.trigger = trigger.state;
       const runningData = configuration.data.mode !== 'none' && this.host.isRunning();
       slot.paused = runningData && missing && configuration.data.missing === 'pause';
-      const active = authored.enabled && projected.enabled && (!runningData || trigger.active) && !(runningData && missing && (configuration.data.missing === 'hide' || !slot.previous));
+      const active = !unsupported && authored.enabled && projected.enabled && (!runningData || trigger.active) && !(runningData && missing && (configuration.data.missing === 'hide' || !slot.previous));
       projected = { ...projected, enabled: active, speed: slot.paused ? 0 : projected.speed,
         visual: projected.visual ? { ...projected.visual, targetEntityId: targetId || null } : undefined };
       const material = MODEL_EFFECT_KINDS.has(authored.effectKind);
@@ -168,7 +179,7 @@ export class EffectBindingRuntime {
         for(const [key, previous] of this.anchors)if(previous.entryId===id){previous.node.dispose();this.anchors.delete(key);}
       }
       if(authored.effectKind==='cargo-target-frame'&&targetId){const node=this.host.resolveNode(targetId);if(!node||!node.isEnabled())projected={...projected,enabled:false};}
-      this.host.apply({ ...input.entity, id, components: { ...input.entity.components, poiEffect: projected } }, input.selected && index === 0, input.visible, input.pickable && index === 0);
+      this.host.apply({ ...input.entity, id, components: { ...input.entity.components, poiEffect: projected } }, input.selected, input.visible, input.pickable, input.entity.id);
       const node = targetId ? this.host.resolveNode(targetId) : null;
       diagnostic = { status: targetId && !node ? 'loading' : mapped.issues.length || trigger.issue ? 'invalid' : result.status === 'missing' ? 'waiting' : result.status,
         message: targetId && !node ? '目标已匹配，等待模型加载' : [...mapped.issues, ...(trigger.issue ? [trigger.issue] : []), result.message].filter(Boolean).join('；'),
@@ -176,6 +187,10 @@ export class EffectBindingRuntime {
       const modelStatus=material?this.host.modelStatus?.(id):null;
       if(modelStatus&&['loading','occupied','invalid'].includes(modelStatus.status)&&!missing)diagnostic={...diagnostic,status:modelStatus.status==='occupied'?'paused':modelStatus.status as 'loading'|'invalid',message:modelStatus.message};
       if(runningData&&!missing&&!active)diagnostic={...diagnostic,status:'paused',message:trigger.active?'数据映射已关闭此特效':'触发条件未满足'};
+      if (unsupported) diagnostic = {...diagnostic,status:'invalid',message:'该目标是共享薄实例，模型表面特效需要独立模型；可使用光圈、粒子、拖尾等空间效果'};
+      const targetAnchorIssue = [...this.anchors.values()].find(anchor=>anchor.entryId === id && anchor.issue)?.issue;
+      if (targetAnchorIssue) diagnostic = {...diagnostic,status:'invalid',message:targetAnchorIssue};
+      targetStates.push({id:targetId,name:descriptor?.name ?? this.document.entities[targetId]?.name ?? '环境模型',status:diagnostic.status,message:diagnostic.message,identity});
     }
     for (const id of input.slots.keys()) if (!wanted.has(id)) { this.removeSlot(id); input.slots.delete(id); }
     if (!wanted.size) {
@@ -199,12 +214,19 @@ export class EffectBindingRuntime {
     }
     if (cameraStatus === 'paused' || cameraStatus === 'occupied') diagnostic = { ...diagnostic, status: 'paused', message: cameraStatus === 'paused' ? '镜头已由用户接管，可点击恢复跟随' : '另一个镜头组件正在控制相机' };
     const anchorIssue=[...this.anchors.values()].find(anchor=>input.slots.has(anchor.entryId)&&anchor.issue)?.issue;
-    if(anchorIssue)diagnostic={...diagnostic,status:'invalid',message:anchorIssue};
+    if(anchorIssue&&!multiple)diagnostic={...diagnostic,status:'invalid',message:anchorIssue};
+    if (multiple && targetStates.length) {
+      const pending = candidates.length-targetStates.length;
+      const issues=targetStates.filter(target=>['invalid','error','stale','waiting','loading','paused'].includes(target.status));
+      diagnostic={...diagnostic,identity:null,fields:{},status:issues.length ? issues[0].status : diagnostic.status,
+        message:`已绑定 ${targetStates.length} 个模型${pending>0 ? `，${pending} 个等待加载或恢复` : ''}${issues.length ? `；${issues.length} 个目标需检查，可展开逐目标诊断` : '，各目标独立运行'}`};
+    }
     publishEffectDiagnostic(input.entity.id, { ...diagnostic,
       effectKind: this.host.isRunning() && input.visible && authored.enabled ? authored.effectKind : undefined,
       effectName:input.entity.name, selectedTargetId:ids[0] || input.lockedId || null, bindingSignature,
       targetIdentity:selectedDescriptor?.identity ?? effectDeviceIdentity(this.document.entities[ids[0]]),
       carrierIdentity:selectedDescriptor?.carrierIdentity ?? null,
+      ...(multiple ? {targetStates} : {}),
     });
   }
   private updateAnchors(): void {
