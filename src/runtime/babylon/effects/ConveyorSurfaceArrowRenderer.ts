@@ -6,8 +6,22 @@ import type { ModelRuntimeEntry } from '../SceneRuntime';
 import { getModelTransformNodes, getNodeMeshes, isFiniteVector3 } from '../runtimeNodeGeometry';
 import { readConveyorCargoTravelConfig } from '../telemetry/specialized/specializedModelAssets';
 
+import { CONVEYOR_ARROW_GLSL } from './ConveyorArrowShaders';
+
 const EPSILON = 1e-8;
 const DEFAULT_SURFACE_PATTERN = /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i;
+const ARROW_STYLE_UNIFORMS = {
+  'conveyor-direction': 0,
+  'moving-double-arrow': 1,
+  'pipeline-flow-arrows': 2,
+  'flow-arrows': 3,
+  'conveyor-arrow-single': 4,
+  'conveyor-arrow-chevron': 5,
+  'conveyor-arrow-segmented': 6,
+  'conveyor-arrow-ribbon': 7,
+  'conveyor-arrow-double': 8,
+  'conveyor-arrow-speed': 9,
+} as const;
 
 const vertexSource = `
 precision highp float;
@@ -32,24 +46,80 @@ uniform float arrowWidth;
 uniform float spacing;
 uniform float phase;
 uniform float direction;
+uniform float arrowStyle;
+uniform float breathingFactor;
+${CONVEYOR_ARROW_GLSL}
 float segmentDistance(vec2 point, vec2 start, vec2 end) {
   vec2 span = end - start;
   float progress = clamp(dot(point - start, span) / max(dot(span, span), 0.000001), 0.0, 1.0);
   return length(point - start - span * progress);
 }
+float singleChevronDistance(vec2 point) {
+  float arm = segmentDistance(point, vec2(-arrowLength * 0.5, arrowWidth * 0.5), vec2(arrowLength * 0.5, 0.0));
+  return arm - min(arrowLength, arrowWidth) * 0.065;
+}
+float doubleChevronDistance(vec2 point) {
+  float trailing = segmentDistance(point, vec2(-arrowLength * 0.5, arrowWidth * 0.5), vec2(arrowLength * 0.08, 0.0));
+  float leading = segmentDistance(point, vec2(-arrowLength * 0.08, arrowWidth * 0.5), vec2(arrowLength * 0.5, 0.0));
+  return min(trailing, leading) - min(arrowLength, arrowWidth) * 0.06;
+}
+float rectangleDistance(vec2 point, vec2 center, vec2 halfSize) {
+  vec2 delta = abs(point - center) - halfSize;
+  return length(max(delta, 0.0)) + min(max(delta.x, delta.y), 0.0);
+}
+float pipelineArrowDistance(vec2 point) {
+  // 对应旧管线箭头的长柄与实心三角头，不需要额外几何。
+  float headStart = arrowLength * 0.03;
+  float tip = arrowLength * 0.5;
+  vec2 base = vec2(headStart, arrowWidth * 0.5);
+  float triangle = min(segmentDistance(point, base, vec2(tip, 0.0)), segmentDistance(point, vec2(headStart, -arrowWidth * 0.5), base));
+  float headWidth = arrowWidth * 0.5 * (tip - point.x) / (tip - headStart);
+  bool insideHead = point.x >= headStart && point.x <= tip && point.y <= headWidth;
+  float head = insideHead ? -triangle : triangle;
+  float shaft = rectangleDistance(point, vec2(-arrowLength * 0.2, 0.0), vec2(arrowLength * 0.3, arrowWidth * 0.16));
+  return min(head, shaft);
+}
+float flowArrowDistance(vec2 point) {
+  // 沿用 SpatialEffects 六顶点宽带箭头的轮廓比例，保留尾部凹口，区别于细折线。
+  vec2 innerCenter = vec2(arrowLength * 0.10869565, 0.0);
+  vec2 outerCenter = vec2(arrowLength * 0.5, 0.0);
+  vec2 innerTail = vec2(-arrowLength * 0.5, arrowWidth * 0.5);
+  vec2 outerTail = vec2(-arrowLength * 0.19565217, arrowWidth * 0.5);
+  float edge = min(min(segmentDistance(point, innerCenter, innerTail), segmentDistance(point, outerCenter, outerTail)), segmentDistance(point, innerTail, outerTail));
+  float acrossFraction = point.y / arrowWidth;
+  float innerX = arrowLength * (0.10869565 - 1.2173913 * acrossFraction);
+  float outerX = arrowLength * (0.5 - 1.39130434 * acrossFraction);
+  bool inside = point.y <= arrowWidth * 0.5 && point.x >= innerX && point.x <= outerX;
+  return inside ? -edge : edge;
+}
 void main(void) {
+  if (arrowStyle > 3.5) {
+    vec2 uv = vec2(direction < 0.0 ? 1.0-vUV.x : vUV.x, 0.5+(vUV.y-0.5)*stripWidth/arrowWidth);
+    float style = arrowStyle-4.0;
+    bool repeated = (style > 0.5 && style < 2.5) || (style > 3.5 && style < 4.5);
+    float count = repeated ? clamp(floor(stripLength/spacing+0.5),1.0,32.0) : 5.0;
+    vec4 color = renderConveyorArrow(uv,vec2(stripLength,arrowWidth),style,count,phase,arrowColor,arrowColor,1.0,opacity*breathingFactor);
+    if (color.a < 0.001) discard;
+    gl_FragColor = color;
+    return;
+  }
   // 在米空间中绘制重复箭头；同一方向符号同时控制朝向和相位移动。
   float along = (vUV.x - 0.5) * stripLength;
   float across = abs((vUV.y - 0.5) * stripWidth);
   float x = mod(along * direction - phase + spacing * 0.5, spacing) - spacing * 0.5;
-  // 对两条斜臂取距离场生成无柄 >，柔边仅在当前平面内发光，不穿透货物。
-  float distanceToArm = segmentDistance(vec2(x, across), vec2(-arrowLength * 0.5, arrowWidth * 0.5), vec2(arrowLength * 0.5, 0.0));
-  float stroke = min(arrowLength, arrowWidth) * 0.09;
-  float core = 1.0 - smoothstep(stroke * 0.6, stroke, distanceToArm);
-  float halo = (1.0 - smoothstep(stroke, stroke * 2.8, distanceToArm)) * 0.28;
-  float alpha = max(core, halo) * opacity;
+  vec2 point = vec2(x, across);
+  float shapeDistance;
+  if (arrowStyle < 0.5) shapeDistance = singleChevronDistance(point);
+  else if (arrowStyle < 1.5) shapeDistance = doubleChevronDistance(point);
+  else if (arrowStyle < 2.5) shapeDistance = pipelineArrowDistance(point);
+  else shapeDistance = flowArrowDistance(point);
+  float softness = min(arrowLength, arrowWidth) * 0.025;
+  float core = 1.0 - smoothstep(0.0, softness, shapeDistance);
+  float halo = (1.0 - smoothstep(0.0, softness * 5.0, shapeDistance)) * 0.28;
+  // 呼吸主要调制透明度，少量调制亮度；零透明度与黑色仍严格为零。
+  float alpha = max(core, halo) * opacity * breathingFactor;
   if (alpha < 0.001) discard;
-  gl_FragColor = vec4(arrowColor * (1.0 + core * 0.15), alpha);
+  gl_FragColor = vec4(arrowColor * (1.0 + core * 0.15) * mix(0.9, 1.0, breathingFactor), alpha);
 }`;
 
 type Bounds = { minimum: Vector3; maximum: Vector3 };
@@ -72,6 +142,7 @@ type ArrowEntry = {
   material: ShaderMaterial;
   surface: SurfaceCache | null;
   phase: number;
+  breathingPhase: number;
 };
 
 function validMatrix(matrix: Matrix): boolean {
@@ -217,7 +288,17 @@ export class ConveyorSurfaceArrowRenderer {
       this.remove(entityId);
       return null;
     }
-    const entry = this.entries.get(entityId) ?? this.createEntry(entityId);
+    const existing = this.entries.get(entityId);
+    // 大场景默认开启箭头时，尚未运行的设备不分配材质、装饰节点或遍历几何。
+    if (!visible || direction === 0 || config.opacity <= 0) {
+      if (existing) {
+        existing.mesh.setEnabled(false);
+        existing.material.setFloat('opacity', config.opacity);
+        existing.material.setColor3('arrowColor', Color3.FromHexString(config.color));
+      }
+      return null;
+    }
+    const entry = existing ?? this.createEntry(entityId);
     entry.mesh.setEnabled(false);
     const host = model.telemetryProxySource ?? model;
     if (host.root.isDisposed() || model.root.isDisposed()) return '输送线模型已释放。';
@@ -264,20 +345,30 @@ export class ConveyorSurfaceArrowRenderer {
       center.x, center.y, center.z, 1,
     );
     entry.root.freezeWorldMatrix(local.multiply(frame));
-    if (visible && direction !== 0 && config.opacity > 0) {
-      const delta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
-      entry.phase = (entry.phase + config.speed * delta) % config.spacing;
-      entry.material.setFloat('phase', entry.phase);
-      entry.material.setFloat('direction', direction);
-      entry.material.setFloat('stripLength', length);
-      entry.material.setFloat('stripWidth', width);
-      entry.material.setFloat('arrowLength', config.arrowLength);
-      entry.material.setFloat('arrowWidth', Math.min(config.arrowWidth, width));
-      entry.material.setFloat('spacing', config.spacing);
-      entry.material.setFloat('opacity', config.opacity);
-      entry.material.setColor3('arrowColor', Color3.FromHexString(config.color));
-      entry.mesh.setEnabled(true);
-    }
+    const delta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+    // 两个有界时钟互不依赖：速度为零只暂停流动，关闭呼吸也不影响流动。
+    // 新六款使用与独立 EFF 一致的视觉倍率，间距只控制重复数量；旧款保留米/秒语义。
+    const styled = ARROW_STYLE_UNIFORMS[config.style] >= 4;
+    const period = styled ? 1 : config.spacing;
+    const rate = styled ? config.speed * 0.65 : config.speed;
+    entry.phase %= period;
+    if (rate > 0) entry.phase = (entry.phase + (delta % (period / rate)) * rate) % period;
+    entry.breathingPhase = (entry.breathingPhase + (delta % config.breathingPeriod) / config.breathingPeriod) % 1;
+    const strength = config.breathingEnabled ? config.breathingStrength : 0;
+    const breathingFactor = 1 - strength * (1 - Math.cos(entry.breathingPhase * Math.PI * 2)) * .5;
+    entry.material.setFloat('phase', entry.phase);
+    entry.material.setFloat('direction', direction);
+    entry.material.setFloat('arrowStyle', ARROW_STYLE_UNIFORMS[config.style] ?? 0);
+    entry.material.setFloat('breathingPhase', entry.breathingPhase);
+    entry.material.setFloat('breathingFactor', breathingFactor);
+    entry.material.setFloat('stripLength', length);
+    entry.material.setFloat('stripWidth', width);
+    entry.material.setFloat('arrowLength', config.arrowLength);
+    entry.material.setFloat('arrowWidth', Math.min(config.arrowWidth, width));
+    entry.material.setFloat('spacing', config.spacing);
+    entry.material.setFloat('opacity', config.opacity);
+    entry.material.setColor3('arrowColor', Color3.FromHexString(config.color));
+    entry.mesh.setEnabled(true);
     return null;
   }
 
@@ -305,14 +396,14 @@ export class ConveyorSurfaceArrowRenderer {
     const material = new ShaderMaterial(`__conveyorSurfaceArrowsMaterial_${entityId}`, this.scene,
       { vertexSource, fragmentSource }, {
         attributes: ['position', 'uv'],
-        uniforms: ['worldViewProjection', 'arrowColor', 'opacity', 'stripLength', 'stripWidth', 'arrowLength', 'arrowWidth', 'spacing', 'phase', 'direction'],
+        uniforms: ['worldViewProjection', 'arrowColor', 'opacity', 'stripLength', 'stripWidth', 'arrowLength', 'arrowWidth', 'spacing', 'phase', 'direction', 'arrowStyle', 'breathingFactor'],
         needAlphaBlending: true,
       });
     material.backFaceCulling = false;
     material.disableDepthWrite = true;
     material.depthFunction = Constants.LEQUAL;
     mesh.material = material;
-    const entry = { root, mesh, material, surface: null, phase: 0 };
+    const entry = { root, mesh, material, surface: null, phase: 0, breathingPhase: 0 };
     this.entries.set(entityId, entry);
     return entry;
   }

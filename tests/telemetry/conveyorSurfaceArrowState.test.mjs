@@ -47,3 +47,30 @@ test('本地正向校准与货物同源，错配轴保留现有回退语义', ()
   assert.equal(resolve(snapshot(1), { trajectoryDirection: '-z' }).direction, 1);
   assert.equal(resolve(snapshot(1), { trajectoryDirection: '-z', config: { ...config, axis: 'z' } }).direction, -1);
 });
+
+const pointBinding = { mode: 'point', field: 'motor.direction', forwardValue: 'F', reverseValue: 'R', stopValue: 'S' };
+test('精确点位自定义正反停，忽略原movement，未命中隐藏', () => {
+  for (const [value, direction] of [['F', 1], ['R', -1], ['S', 0], ['unknown', 0]]) {
+    const result = resolve(snapshot(2, { fields: { movement_x: 2, 'motor.direction': value } }), { directionBinding: pointBinding });
+    assert.equal(result.direction, direction, String(value));
+  }
+  assert.equal(resolve(snapshot(1), { directionBinding: pointBinding }).status, 'missing');
+  assert.equal(resolve(snapshot(1, { fields: { 'motor.direction': 'unknown' } }), { directionBinding: pointBinding }).status, 'unmatched');
+});
+
+test('点位值保留前导零，数字/布尔以标量文本比较，不对字符串作数值转换', () => {
+  const numeric = { ...pointBinding, forwardValue: '01', reverseValue: '1', stopValue: 'false' };
+  for (const [value, expected] of [['01', 1], [1, -1], ['1', -1], [false, 0]]) {
+    assert.equal(resolve(snapshot(0, { fields: { 'motor.direction': value } }), { directionBinding: numeric }).direction, expected);
+  }
+});
+
+test('配置空值/冲突时不猜方向，自定义映射仍遵守故障与过期', () => {
+  const data = snapshot(1, { fields: { 'motor.direction': 'F' } });
+  for (const directionBinding of [{ ...pointBinding, field: '' }, { ...pointBinding, reverseValue: 'F' }, { ...pointBinding, stopValue: '' }]) {
+    assert.equal(resolve(data, { directionBinding }).status, 'invalid');
+  }
+  assert.equal(resolve(data, { directionBinding: pointBinding, now: 14000 }).status, 'stale');
+  assert.equal(resolve({ ...data, faulted: true }, { directionBinding: pointBinding }).status, 'faulted');
+  assert.equal(resolve(data, { directionBinding: pointBinding, trajectoryDirection: '-x' }).direction, -1);
+});

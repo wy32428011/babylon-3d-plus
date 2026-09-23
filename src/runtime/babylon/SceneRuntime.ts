@@ -3161,7 +3161,13 @@ export class SceneRuntime {
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
     this.shadowDocument = document;
-    const hasSurfaceArrows = document.entityIds.some(id => document.entities[id]?.components.telemetryBinding?.surfaceArrows?.enabled);
+    const hasSurfaceArrows = document.entityIds.some(id => {
+      const components = document.entities[id]?.components;
+      if (!components?.modelAsset || components.telemetryBinding?.surfaceArrows?.enabled === false) return false;
+      return components.telemetryBinding?.deviceType === 'conveyor'
+        || components.modelAsset.dataDrivenConfig?.device.devType === 'conveyor'
+        || isConveyorModelAsset(components.modelAsset);
+    });
     if (this.hasConveyorSurfaceArrows && !hasSurfaceArrows) this.conveyorSurfaceArrowSystem.clear();
     this.hasConveyorSurfaceArrows = hasSurfaceArrows;
     for (const [key, failure] of this.modelReadinessErrors) {
@@ -5309,13 +5315,10 @@ export class SceneRuntime {
 
   /** 箭头同时覆盖编辑预览和运行态，失效状态也更新，避免停机或断流后残留。 */
   private updateConveyorSurfaceArrows(): void {
-    // 无新功能的旧场景不增加逐帧全模型收集。标志随场景配置同步更新。
+    // 没有启用箭头的输送线时跳过逐帧收集；缺省开启，显式关闭保留。
     if (!this.hasConveyorSurfaceArrows) return;
     const models = [...this.specializedTelemetryRuntime.host.collectModels()];
-    if (!models.some(({ model }) => model.telemetryBinding?.surfaceArrows)) {
-      this.conveyorSurfaceArrowSystem.clear();
-      return;
-    }
+
     const delta = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
     this.conveyorSurfaceArrowSystem.tick(models.map(({ entityId, model }) => ({
       entityId, model,
@@ -7528,7 +7531,7 @@ export class SceneRuntime {
       const binding = instanceEntity.components.telemetryBinding;
       // 无显式绑定的实例与真实模型一致：按 assetCode 走默认绑定解析，不得跳过代理创建。
       // 禁用遥测仍可进行箭头编辑预览；专用绑定解析继续阻止其真实设备驱动。
-      if (!modelAsset || (binding?.enabled === false && !binding.surfaceArrows?.enabled)) continue;
+      if (!modelAsset || (binding?.enabled === false && binding.surfaceArrows?.enabled === false)) continue;
       // devType 归一化在导入边界已统一小写；文件名关键词识别兜底未声明 devType 的旧包。
       const devType = modelAsset.dataDrivenConfig?.device?.devType?.trim().toLowerCase();
       if (devType !== 'conveyor' && !isConveyorModelAsset(modelAsset)) continue;

@@ -86,3 +86,44 @@ test('自带箭头保留优先权，显式关闭原参数后可使用通用箭�
   h.system.tick([h.entry('a', a)], true, .1, 11000);
   assert.equal(h.calls.get('a').visible, true);
 });
+
+test('旧缺省输送线默认显示，显式关闭保持，非输送线不生成默认特效', t => {
+  const h = harness(t), a = h.model('001'), b = h.model('002'), c = h.model('003');
+  delete a.telemetryBinding.surfaceArrows;
+  b.telemetryBinding.surfaceArrows.enabled = false;
+  delete c.telemetryBinding.surfaceArrows; c.telemetryBinding.deviceType = 'stacker';
+  h.push('001', 1); h.push('002', 1);
+  h.system.tick([h.entry('a', a), h.entry('b', b), { ...h.entry('c', c), deviceType: 'stacker' }], true, .1, 11000);
+  assert.deepEqual(h.calls.get('a'), { direction: 1, visible: true });
+  assert.equal(h.calls.has('b'), false);
+  assert.equal(h.calls.has('c'), false);
+});
+
+test('实例自定义点位映射穿过System，阵列设备仍各自匹配', t => {
+  const h = harness(t), a = h.model('001');
+  a.telemetryBinding.surfaceArrows.directionBinding = { mode: 'point', field: 'lineDirection', forwardValue: 'go', reverseValue: 'back', stopValue: 'wait' };
+  h.push('001', 1, 'default', 10000, { lineDirection: 'back' });
+  h.system.tick([h.entry('a', a)], true, .1, 11000);
+  assert.deepEqual(h.calls.get('a'), { direction: -1, visible: true });
+});
+
+test('大量默认开启设备在空闲编辑态不解析行程或扫描自带箭头，预览停止仍隐藏', t => {
+  const h = harness(t); let travelReads = 0, geometryReads = 0;
+  const entries = Array.from({ length: 1000 }, (_, index) => {
+    const model = h.model(String(index));
+    model.externalScriptRuntime = { getDataDrivenConfigs: () => { travelReads++; return []; } };
+    model.contentRoot.getChildMeshes = () => { geometryReads++; return []; };
+    return h.entry(String(index), model);
+  });
+  for (let frame = 0; frame < 5; frame++) h.system.tick(entries, false, .016);
+  assert.equal(travelReads, 0);
+  assert.equal(geometryReads, 0);
+  session.setPreview('0', 1);
+  h.system.tick(entries, false, .016);
+  assert.equal(h.calls.get('0').visible, true);
+  assert.equal(travelReads, 1); assert.equal(geometryReads, 1);
+  session.setPreview('0', 0);
+  h.system.tick(entries, false, .016);
+  assert.equal(h.calls.get('0').visible, false);
+  assert.equal(travelReads, 1); assert.equal(geometryReads, 1);
+});

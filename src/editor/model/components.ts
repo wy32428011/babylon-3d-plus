@@ -265,7 +265,14 @@ export type PoiEffectKind =
   | 'conveyor-direction'
   | 'evacuation-route'
   | 'light-wall-fence'
+  | ConveyorArrowEffectKind
   | DigitalTwinEffectKind;
+
+export type ConveyorArrowEffectKind = 'conveyor-arrow-single' | 'conveyor-arrow-chevron' | 'conveyor-arrow-segmented'
+  | 'conveyor-arrow-ribbon' | 'conveyor-arrow-double' | 'conveyor-arrow-speed';
+
+/** 局部 X/Z 平面的输送方向箭头，尺寸单位为米。 */
+export type ConveyorArrowEffectConfig = { length: number; width: number; opacity: number; count: number; reverse: boolean };
 
 export type LightWallFencePoint = { x: number; z: number };
 
@@ -277,6 +284,7 @@ export type PoiEffectComponent = {
   effectKind: PoiEffectKind;
   configuration?: EffectConfiguration;
   lightWall?: LightWallFenceConfig;
+  conveyorArrow?: ConveyorArrowEffectConfig;
   visual?: DigitalTwinEffectConfig;
   enabled: boolean;
   primaryColor: string;

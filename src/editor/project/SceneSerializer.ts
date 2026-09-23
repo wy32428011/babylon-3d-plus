@@ -1,3 +1,5 @@
+import { isConveyorArrowEffectKind } from '../model/conveyorArrowEffect';
+import type { ConveyorArrowEffectConfig } from '../model/components';
 import { validateEffectConfiguration } from '../model/effectConfigurationValidation';
 import type { EffectConfiguration } from '../model/effectConfiguration';
 import { normalizeCompositionInstance } from '../composition/composition';
@@ -940,7 +942,15 @@ function normalizePoiEffect(value: unknown): PoiEffectComponent {
     };
     if (validateLightWallPoints(lightWall.points)) throwUnsupportedSceneFileError();
   }
+  let conveyorArrow: ConveyorArrowEffectConfig | undefined;
+  if (isConveyorArrowEffectKind(poiEffect.effectKind) && poiEffect.conveyorArrow !== undefined) {
+    const config = assertPlainObject(poiEffect.conveyorArrow);
+    conveyorArrow = { length: assertFiniteNumber(config.length), width: assertFiniteNumber(config.width),
+      opacity: assertFiniteNumber(config.opacity), count: assertFiniteNumber(config.count), reverse: assertOptionalBoolean(config.reverse, false) };
+    if (typeof config.reverse !== 'boolean' || !Number.isInteger(conveyorArrow.count)) throwUnsupportedSceneFileError();
+  }
   return sanitizePoiEffectComponent({
+    ...(conveyorArrow ? { conveyorArrow } : {}),
     ...(lightWall ? { lightWall } : {}),
     ...(visual ? { visual } : {}),
     ...(poiEffect.configuration ? { configuration: poiEffect.configuration as EffectConfiguration } : {}),

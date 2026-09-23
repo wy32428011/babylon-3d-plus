@@ -29,6 +29,8 @@ import type { SceneThemeSettings } from '../../../editor/model/sceneTheme';
 import type { PoiEffectComponent, PoiEffectKind, TransformComponent } from '../../../editor/model/components';
 import { sanitizePoiEffectComponent } from '../../../editor/model/poiEffect';
 import { LightWallFence } from './LightWallFence';
+import { ConveyorArrowEffect } from './ConveyorArrowEffect';
+import { isConveyorArrowEffectKind } from '../../../editor/model/conveyorArrowEffect';
 
 /** 与 SceneRuntime 拾取逻辑保持一致的实体 metadata 字段。 */
 const EDITOR_ENTITY_ID_METADATA_KEY = 'editorEntityId';
@@ -47,6 +49,7 @@ type PoiResources = {
   particleSystems: ParticleSystem[];
   textures: Texture[];
   lightWall: LightWallFence | null;
+  conveyorArrow: ConveyorArrowEffect | null;
   spatial: (Pick<SpatialEffects, 'meshes' | 'materials' | 'tick' | 'setActive' | 'dispose'> & { update?: (component: PoiEffectComponent) => void; updatePlaybackSpeed?: (speed: number) => void }) | null;
 };
 
@@ -154,6 +157,8 @@ export class PoiEffectRuntime {
       entry.particlesActive = false;
     }
     entry.resources.lightWall?.update(component);
+    entry.resources.conveyorArrow?.update(component);
+    entry.resources.conveyorArrow?.setActive(visible && component.enabled);
     entry.resources.spatial?.setActive(visible && component.enabled);
     entry.resources.spatial?.update?.(component);
     entry.resources.spatial?.updatePlaybackSpeed?.(component.speed);
@@ -187,11 +192,11 @@ export class PoiEffectRuntime {
     return id ? this.entries.get(id)?.root ?? null : null;
   }
 
-  /** 光墙直接拾取实际侧壁，其他效果使用稳定透明拾取壳。 */
+  /** 光墙与箭头直接拾取实际几何，其他效果使用稳定透明拾取壳。 */
   getPickMesh(id: string | null): Mesh | null {
     if (!id) return null;
     const entry = this.entries.get(id);
-    return entry?.resources.lightWall?.mesh ?? entry?.pickMesh ?? null;
+    return entry?.resources.conveyorArrow?.mesh ?? entry?.resources.lightWall?.mesh ?? entry?.pickMesh ?? null;
   }
 
   /** 返回参与场景聚焦和阵列计算的可见几何；无视觉资源时回退透明拾取壳。 */
@@ -201,6 +206,7 @@ export class PoiEffectRuntime {
     if (!entry) return [];
     const related = [...this.entries.values()].filter(value => value.ownerId === id);
     return (related.length ? related : [entry]).flatMap(value => {
+      if (value.resources.conveyorArrow) return [value.resources.conveyorArrow.mesh];
       if (value.resources.lightWall) return [value.resources.lightWall.mesh];
       const visible = value.resources.meshes.filter(mesh => mesh.isVisible && mesh.isEnabled());
       return visible.length ? [...visible, value.pickMesh] : [value.pickMesh];
@@ -295,7 +301,7 @@ export class PoiEffectRuntime {
 
   /** 创建空资源桶。 */
   private emptyResources(): PoiResources {
-    return { meshes: [], materials: [], particleSystems: [], textures: [], lightWall: null, spatial: null };
+    return { meshes: [], materials: [], particleSystems: [], textures: [], lightWall: null, conveyorArrow: null, spatial: null };
   }
 
   /** 按类型创建可区分效果。 */
@@ -306,7 +312,12 @@ export class PoiEffectRuntime {
     const secondary = component.secondaryColor;
     const intensity = component.intensity;
 
-    if (component.configuration && Object.keys(component.configuration.parameters).length > 0 && supportsConfiguredLegacyEffect(kind)) {
+    if (isConveyorArrowEffectKind(kind)) {
+      const arrow = new ConveyorArrowEffect(id, this.scene, root, component);
+      resources.conveyorArrow = arrow;
+      resources.meshes.push(arrow.mesh);
+      resources.materials.push(arrow.material);
+    } else if (component.configuration && Object.keys(component.configuration.parameters).length > 0 && supportsConfiguredLegacyEffect(kind)) {
       const spatial = new ConfiguredLegacyEffects(id, this.scene, root, component, this.resolveTarget);
       resources.spatial = spatial; resources.meshes = spatial.meshes; resources.materials = spatial.materials;
     } else if (supportsSpatialEffect(kind)) {
@@ -678,6 +689,7 @@ export class PoiEffectRuntime {
     this.environmentEffects.tick(deltaSeconds);
     for (const entry of this.entries.values()) {
       if (!entry.visible) continue;
+      if (entry.resources.conveyorArrow) { entry.resources.conveyorArrow.tick(deltaSeconds); continue; }
       if (entry.resources.spatial) { entry.resources.spatial.tick(deltaSeconds); continue; }
       if (entry.resources.lightWall) {
         entry.resources.lightWall.animate(deltaSeconds);
@@ -735,6 +747,13 @@ export class PoiEffectRuntime {
 
   /** 应用拾取壳的显隐、可拾取和选中状态。 */
   private applyPickState(entry: PoiEntry): void {
+    if (isConveyorArrowEffectKind(entry.kind)) {
+      entry.pickMesh.isVisible = false;
+      entry.pickMesh.isPickable = false;
+      const arrow = entry.resources.conveyorArrow?.mesh;
+      if (arrow) { arrow.isVisible = entry.visible; arrow.isPickable = entry.visible && entry.pickable; }
+      return;
+    }
     if (entry.resources.spatial) {
       entry.pickMesh.isVisible = entry.selected && entry.visible;
       entry.pickMesh.isPickable = entry.visible && entry.pickable;
@@ -777,6 +796,7 @@ export class PoiEffectRuntime {
 
   /** 生成组件签名，作为内部资源重建边界。 */
   private createSignature(component: PoiEffectComponent): string {
+    if (isConveyorArrowEffectKind(component.effectKind)) return component.effectKind + (component.enabled ? '|on' : '|off');
     if (component.configuration && supportsConfiguredLegacyEffect(component.effectKind) && !Object.keys(component.configuration.parameters).length) return JSON.stringify(component);
     if (component.configuration && component.effectKind !== 'light-wall-fence') return component.effectKind + (component.enabled ? '|v2-on' : '|v2-off');
     if (supportsSpatialEffect(component.effectKind)) return JSON.stringify({ ...component, speed: 0 });
@@ -807,6 +827,11 @@ export class PoiEffectRuntime {
 
   /** 严格释放资源桶内容。 */
   private disposeResources(resources: PoiResources): void {
+    if (resources.conveyorArrow) {
+      resources.conveyorArrow.dispose();
+      resources.conveyorArrow = null;
+      resources.meshes = []; resources.materials = [];
+    }
     resources.lightWall = null;
     if (resources.spatial) {
       resources.spatial.dispose();

@@ -23,6 +23,10 @@
 
 环境绑定回归：`node --test tests/editor/environmentBuildingEffect.integration.test.mjs tests/runtime/environmentBuildingEffect.test.mjs`、`node scripts/smoke-environment-building-effect.mjs`。后者使用真实 GLB 和编辑器界面验证拖放、选择、8 种切换、像素、无额外 GLB 请求、保存重开与清除撤销，输出在 `output/environment-building-effect/`。完成构建后运行 `node node_modules/electron/cli.js tests/digitalTwin/environmentBuildingEffectPackages.integration.mjs` 核对双包资源与绑定，再运行 `node scripts/smoke-environment-building-effect-viewer.mjs` 验证实际 DIST Viewer 中的环境 GLB、材质编译和可见像素。
 
+## 输送方向箭头
+
+参考输送线方向示意图新增六种独立预设：单一直线箭头、连续箭头流向、分段式箭头、宽幅带式箭头、双列前进箭头、高速流动箭头。卡片带轮廓预览，可拖入场景或设备“表面箭头”样式框，详见[输送方向箭头配置和发布](conveyor-arrow-effects.md)。
+
 ## 示意图 01：建筑与模型外观
 
 | 编号 | 示意图能力 | 组件 / 入口 | 使用条件 |
@@ -106,7 +110,7 @@
 - 环境雾和昼夜是场景级效果。镜头飞行、目标跟随、手动漫游都可能控制相机，应在运行预览按目标操作流程检查相互切换。
 - 新版火焰、烟雾、雷达、定位光柱和路径箭头拥有新的稳定类型 ID。界面不再展示旧入口，但旧场景中的旧类型仍可以读取、运行和删除，在类型选择框显示“旧版”。切换到新类型时应用新类型默认值，应重新调整参数。
 
-隐藏的旧类型为 `radar-scan`、`locator-beam`、`fire`、`smoke`、`pipeline-flow-particles`、`pipeline-flow-arrows`、`moving-double-arrow` 和 `conveyor-direction`。保留兼容读取不会批量删除用户场景内已有实体。
+隐藏的旧类型为 `radar-scan`、`locator-beam`、`fire`、`smoke` 和 `pipeline-flow-particles`。`pipeline-flow-arrows`、`moving-double-arrow` 和 `conveyor-direction` 已恢复特效库入口，与 `flow-arrows` 一起可拖入输送线的“表面箭头”样式框；该拖放只替换模型配置，不新建特效实体。保留兼容读取不会批量删除用户场景内已有实体。
 
 自定义 Shader / Node 材质保留原样；模型材质效果当前支持 Standard / PBR / MultiMaterial。
 

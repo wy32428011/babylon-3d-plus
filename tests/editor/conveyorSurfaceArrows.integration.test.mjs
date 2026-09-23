@@ -28,6 +28,9 @@ await writeFile(entry, [
   "export { createDefaultConveyorSurfaceArrowsConfig } from '../../src/editor/model/conveyorSurfaceArrows.ts';",
   "export { normalizeTelemetryBindingComponent } from '../../src/editor/model/telemetryBinding.ts';",
   "export { conveyorSurfaceArrowSession } from '../../src/runtime/conveyorSurfaceArrowSession.ts';",
+  "export { readConveyorSurfaceArrowStyleDrop } from '../../src/editor/assets/conveyorSurfaceArrowDrag.ts';",
+  "export { BUILT_IN_ASSET_DRAG_MIME_TYPE, encodeBuiltInAssetDragPayload } from '../../src/editor/assets/AssetDatabase.ts';",
+  "export { getConveyorSurfaceArrowDirectionError } from '../../src/editor/model/conveyorSurfaceArrows.ts';",
 ].join('\n'));
 await build({
   configFile: false, publicDir: false, logLevel: 'silent',
@@ -39,6 +42,8 @@ const {
   useEditorStore, createEmptySceneDocument, createModelEntity, createCommandHistory,
   serializeScene, deserializeScene, createDefaultConveyorSurfaceArrowsConfig,
   normalizeTelemetryBindingComponent, conveyorSurfaceArrowSession,
+  readConveyorSurfaceArrowStyleDrop, BUILT_IN_ASSET_DRAG_MIME_TYPE,
+  encodeBuiltInAssetDragPayload, getConveyorSurfaceArrowDirectionError,
 } = await import(pathToFileURL(path.join(temporaryRoot, 'ssr/modules.mjs')).href);
 store = useEditorStore;
 originalState = store.getState();
@@ -95,7 +100,7 @@ test('保存重开、关闭状态及旧场景缺省配置兼容，临时预览�
   assert.equal(configured.speed, 0);
   const legacy = JSON.parse(content);
   delete legacy.scene.entities[id].components.telemetryBinding.surfaceArrows;
-  assert.equal(deserializeScene(JSON.stringify(legacy)).entities[id].components.telemetryBinding.surfaceArrows, undefined);
+  assert.deepEqual(deserializeScene(JSON.stringify(legacy)).entities[id].components.telemetryBinding.surfaceArrows, createDefaultConveyorSurfaceArrowsConfig());
 });
 
 test('复制后的表面箭头配置可以独立编辑，恢复模型默认绑定可撤销', () => {
@@ -112,7 +117,7 @@ test('复制后的表面箭头配置可以独立编辑，恢复模型默认绑�
   assert.equal(selectedBinding().surfaceArrows.color, '#aabbcc');
   const copyConfig = structuredClone(selectedBinding());
   store.getState().restoreSelectedTelemetryBindingDefault();
-  assert.equal(selectedBinding().surfaceArrows, undefined);
+  assert.deepEqual(selectedBinding().surfaceArrows, createDefaultConveyorSurfaceArrowsConfig());
   store.getState().undo();
   assert.deepEqual(selectedBinding(), copyConfig);
 });
@@ -126,4 +131,64 @@ test('运行预览阻止配置修改，保持原场景和命令历史', () => {
   store.getState().restoreSelectedTelemetryBindingDefault();
   assert.deepEqual(store.getState().scene, before);
   assert.equal(store.getState().history.undoStack.length, count);
+});
+
+test('新输送线及旧缺省字段默认开启呼吸箭头，显式关闭保留且其他设备不受影响', () => {
+  assert.equal(selectedBinding().surfaceArrows.enabled, true);
+  assert.equal(selectedBinding().surfaceArrows.breathingEnabled, true);
+  assert.equal(selectedBinding().surfaceArrows.style, 'conveyor-direction');
+  assert.equal(normalizeTelemetryBindingComponent({ deviceType: 'rgv' }).surfaceArrows, undefined);
+  configure({ enabled: false });
+  assert.equal(selectedBinding().surfaceArrows.enabled, false);
+});
+
+test('箭头拖拽只改样式，可撤销重做且不新增实体；呼吸和点位字符串完整保存', () => {
+  const directionBinding = { mode: 'point', field: '00017', forwardValue: '01', reverseValue: '02', stopValue: '00' };
+  configure({ color: '#112233', length: 6, breathingEnabled: false, breathingPeriod: 2.7, breathingStrength: 0, directionBinding });
+  const before = structuredClone(selectedBinding().surfaceArrows);
+  const beforeIds = [...store.getState().scene.entityIds];
+  const count = store.getState().history.undoStack.length;
+  const payload = encodeBuiltInAssetDragPayload({ kind: 'poi-effect', effectKind: 'moving-double-arrow' });
+  const style = readConveyorSurfaceArrowStyleDrop({ types: [BUILT_IN_ASSET_DRAG_MIME_TYPE], files: { length: 0 }, getData: () => payload });
+  assert.equal(style, 'moving-double-arrow');
+  store.getState().updateSelectedTelemetryBinding({ ...selectedBinding(), surfaceArrows: { ...before, style } });
+  assert.deepEqual(store.getState().scene.entityIds, beforeIds);
+  assert.equal(store.getState().history.undoStack.length, count + 1);
+  assert.deepEqual(selectedBinding().surfaceArrows, { ...before, style });
+  store.getState().undo();
+  assert.deepEqual(selectedBinding().surfaceArrows, before);
+  store.getState().redo();
+  const scene = store.getState().scene;
+  const reopened = deserializeScene(serializeScene(scene)).entities[scene.selectedEntityId].components.telemetryBinding.surfaceArrows;
+  assert.deepEqual(reopened, { ...before, style });
+  assert.deepEqual(reopened.directionBinding, directionBinding);
+  assert.equal(reopened.breathingEnabled, false);
+  assert.equal(reopened.breathingStrength, 0);
+});
+
+test('自定义点位空值和冲突保持原配置并报告校验，不静默回退模型默认映射', () => {
+  const directionBinding = { mode: 'point', field: '', forwardValue: '01', reverseValue: '01', stopValue: '00' };
+  configure({ directionBinding });
+  assert.deepEqual(selectedBinding().surfaceArrows.directionBinding, directionBinding);
+  assert.match(getConveyorSurfaceArrowDirectionError(selectedBinding().surfaceArrows.directionBinding), /点位/);
+  configure({ directionBinding: { ...directionBinding, field: 'movement_x' } });
+  assert.match(getConveyorSurfaceArrowDirectionError(selectedBinding().surfaceArrows.directionBinding), /互不相同/);
+  const scene = store.getState().scene;
+  const reopened = deserializeScene(serializeScene(scene)).entities[scene.selectedEntityId].components.telemetryBinding.surfaceArrows;
+  assert.deepEqual(reopened.directionBinding, { ...directionBinding, field: 'movement_x' });
+});
+
+test('重开同一场景保留场景和实体 ID，但生成新的会话供表单草稿与预览隔离', () => {
+  configure({ directionBinding: { mode: 'point', field: '00017', forwardValue: '01', reverseValue: '02', stopValue: '00' } });
+  const before = store.getState();
+  const sceneId = before.scene.id;
+  const entityId = before.scene.selectedEntityId;
+  const beforeSession = before.sceneSessionId;
+  const content = serializeScene(before.scene);
+  assert.equal(store.getState().loadSceneFromContent(content, '同一场景重新打开.scene.json'), true);
+  assert.equal(store.getState().scene.id, sceneId);
+  assert.ok(store.getState().scene.entities[entityId]);
+  assert.notEqual(store.getState().sceneSessionId, beforeSession);
+  assert.deepEqual(store.getState().scene.entities[entityId].components.telemetryBinding.surfaceArrows,
+    before.scene.entities[entityId].components.telemetryBinding.surfaceArrows);
 });

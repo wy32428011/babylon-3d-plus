@@ -1,3 +1,4 @@
+import { getConveyorArrowThumbnail } from './conveyorArrowThumbnails';
 import techBlueNightThumbnailUrl from '../../assets/images/tech-blue-night.svg';
 import { SCENE_THEME_PRESET_ID } from '../model/sceneTheme';
 import type { BuiltInImageAsset } from '../../assets/imageAssets';
@@ -202,6 +203,7 @@ export function createPoiEffectLibraryItems(): BuiltInProjectLibraryItem[] {
       id: `poi-eff-${definition.kind}`,
       name: definition.name,
       icon: definition.icon,
+      thumbnailUrl: getConveyorArrowThumbnail(definition.kind),
       subtitle: `EFF · ${definition.subtitle}`,
       hasStatusBadge: true,
       builtIn: { kind: 'poi-effect', effectKind: definition.kind },

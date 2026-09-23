@@ -1,4 +1,4 @@
-import { normalizeConveyorSurfaceArrowsConfig, type ConveyorSurfaceArrowsConfig } from './conveyorSurfaceArrows';
+import { createDefaultConveyorSurfaceArrowsConfig, normalizeConveyorSurfaceArrowsConfig, type ConveyorSurfaceArrowsConfig } from './conveyorSurfaceArrows';
 
 export const DEFAULT_TELEMETRY_EXPECTED_INTERVAL_MS = 500;
 export const TELEMETRY_CONFIG_MAX_DEPTH = 8;
@@ -214,6 +214,7 @@ export function createDefaultTelemetryBinding(deviceType: string): TelemetryBind
     enabled: true,
     sourceId: 'default',
     deviceType: normalizeTelemetryDeviceType(deviceType, 'device') ?? 'device',
+    ...(normalizeTelemetryDeviceType(deviceType) === 'conveyor' ? { surfaceArrows: createDefaultConveyorSurfaceArrowsConfig() } : {}),
     expectedIntervalMs,
     staleAfterMs: createTelemetryStaleAfterMs(expectedIntervalMs),
   };
@@ -231,7 +232,8 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
   const columnBindings = normalizeColumnBindings(value.columnBindings);
   const incomingLayerBindings = normalizeColumnBindings(value.incomingLayerBindings);
   const outgoingLayerBindings = normalizeColumnBindings(value.outgoingLayerBindings);
-  const surfaceArrows = normalizeConveyorSurfaceArrowsConfig(value.surfaceArrows);
+  const surfaceArrows = normalizeConveyorSurfaceArrowsConfig(value.surfaceArrows)
+    ?? (deviceType === 'conveyor' ? createDefaultConveyorSurfaceArrowsConfig() : undefined);
   return {
     enabled: typeof value.enabled === 'boolean' ? value.enabled : true,
     sourceId: normalizeString(value.sourceId, 'default'),

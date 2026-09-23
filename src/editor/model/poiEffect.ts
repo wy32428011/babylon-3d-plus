@@ -1,3 +1,4 @@
+import { CONVEYOR_ARROW_EFFECT_KINDS, createDefaultConveyorArrowEffect, isConveyorArrowEffectKind, sanitizeConveyorArrowEffect } from './conveyorArrowEffect';
 import { sanitizeEffectConfiguration } from './effectConfigurationValidation';
 import { DIGITAL_TWIN_EFFECT_DEFINITIONS, createDefaultDigitalTwinEffectConfig, isDigitalTwinEffectKind, sanitizeDigitalTwinEffectConfig } from './digitalTwinEffect';
 import { createDefaultLightWallFence, sanitizeLightWallFence } from './lightWallFence';
@@ -22,6 +23,7 @@ export const POI_EFFECT_KINDS = [
   'conveyor-direction',
   'evacuation-route',
   'light-wall-fence',
+  ...CONVEYOR_ARROW_EFFECT_KINDS,
   ...DIGITAL_TWIN_EFFECT_DEFINITIONS.map(definition => definition.kind),
 ] as const satisfies readonly PoiEffectKind[];
 
@@ -60,10 +62,16 @@ export const POI_EFFECT_DEFINITIONS: readonly PoiEffectDefinition[] = [
   createDefinition('conveyor-direction', '输送方向箭头', '输送流向', 'panel', '#39d8ff', '#bdf7ff', 1.1, 1, 1),
   createDefinition('evacuation-route', '疏散路线', '安全引导', 'person', '#36e36d', '#d4ffdf', 1.2, 1, 1),
   createDefinition('light-wall-fence', '光墙围栏', '建筑外围 · 动态发光', 'cube', '#22dfff', '#a8f5ff', 1, 1, 1),
+  createDefinition('conveyor-arrow-single', '单一直线箭头', '简洁直线 · 输送方向', 'panel', '#20dfff', '#c5faff', 1.2, 1, 1),
+  createDefinition('conveyor-arrow-chevron', '连续箭头流向', '连续折箭 · 流动指示', 'panel', '#20dfff', '#c5faff', 1.2, 1, 1),
+  createDefinition('conveyor-arrow-segmented', '分段式箭头', '分段节奏 · 区段引导', 'panel', '#20dfff', '#c5faff', 1.2, 1, 1),
+  createDefinition('conveyor-arrow-ribbon', '宽幅带式箭头', '宽幅光带 · 网格纹理', 'panel', '#20dfff', '#c5faff', 1.2, 1, 1),
+  createDefinition('conveyor-arrow-double', '双列前进箭头', '平行双列 · 多通道', 'panel', '#20dfff', '#c5faff', 1.2, 1, 1),
+  createDefinition('conveyor-arrow-speed', '高速流动箭头', '动态流线 · 高速输送', 'panel', '#20dfff', '#c5faff', 1.2, 2, 1),
   ...DIGITAL_TWIN_EFFECT_DEFINITIONS.map(definition => createDefinition(definition.kind, definition.name, definition.category, 'ring', definition.kind === 'flame' ? '#ff6600' : '#22dfff', definition.kind === 'flame' ? '#ffdd44' : '#96f4ff', 1, 1, 1)),
 ];
 
-const LEGACY_HIDDEN_KINDS = new Set(['radar-scan', 'locator-beam', 'fire', 'smoke', 'pipeline-flow-particles', 'pipeline-flow-arrows', 'moving-double-arrow', 'conveyor-direction']);
+const LEGACY_HIDDEN_KINDS = new Set(['radar-scan', 'locator-beam', 'fire', 'smoke', 'pipeline-flow-particles']);
 export const VISIBLE_POI_EFFECT_DEFINITIONS = POI_EFFECT_DEFINITIONS.filter(definition => !LEGACY_HIDDEN_KINDS.has(definition.kind));
 
 const POI_EFFECT_DEFINITION_BY_KIND = new Map(
@@ -116,6 +124,7 @@ export function createDefaultPoiEffectComponent(kind: PoiEffectKind): PoiEffectC
     ...definition.defaults,
     ...(isDigitalTwinEffectKind(kind) ? { visual: createDefaultDigitalTwinEffectConfig(kind) } : {}),
     ...(kind === 'light-wall-fence' ? { lightWall: createDefaultLightWallFence() } : {}),
+    ...(isConveyorArrowEffectKind(kind) ? { conveyorArrow: createDefaultConveyorArrowEffect(kind) } : {}),
   };
 }
 
@@ -128,10 +137,11 @@ export function sanitizePoiEffectComponent(component: PoiEffectComponent): PoiEf
     ...(component.configuration ? { configuration: sanitizeEffectConfiguration(component.configuration, component) } : {}),
     ...((isDigitalTwinEffectKind(definition.kind) || component.configuration) ? { visual: sanitizeDigitalTwinEffectConfig(component.visual, definition.kind) } : {}),
     ...(definition.kind === 'light-wall-fence' ? { lightWall: sanitizeLightWallFence(component.lightWall) } : {}),
+    ...(isConveyorArrowEffectKind(definition.kind) ? { conveyorArrow: sanitizeConveyorArrowEffect(component.conveyorArrow, definition.kind) } : {}),
     primaryColor: sanitizeHexColor(component.primaryColor, definition.defaults.primaryColor),
     secondaryColor: sanitizeHexColor(component.secondaryColor, definition.defaults.secondaryColor),
     intensity: clampFinite(component.intensity, POI_EFFECT_INTENSITY_MIN, POI_EFFECT_INTENSITY_MAX, definition.defaults.intensity),
-    speed: clampFinite(component.speed, definition.kind === 'light-wall-fence' || isDigitalTwinEffectKind(definition.kind) ? 0 : POI_EFFECT_SPEED_MIN, POI_EFFECT_SPEED_MAX, definition.defaults.speed),
+    speed: clampFinite(component.speed, definition.kind === 'light-wall-fence' || isConveyorArrowEffectKind(definition.kind) || isDigitalTwinEffectKind(definition.kind) ? 0 : POI_EFFECT_SPEED_MIN, POI_EFFECT_SPEED_MAX, definition.defaults.speed),
     density: clampFinite(component.density, POI_EFFECT_DENSITY_MIN, POI_EFFECT_DENSITY_MAX, definition.defaults.density),
   };
 }

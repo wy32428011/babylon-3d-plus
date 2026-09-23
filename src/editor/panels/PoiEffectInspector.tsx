@@ -1,3 +1,5 @@
+import { ConveyorArrowEffectInspector } from './ConveyorArrowEffectInspector';
+import { isConveyorArrowEffectKind } from '../model/conveyorArrowEffect';
 import { EffectConfigurationInspector } from './EffectConfigurationInspector';
 import { EffectPathDrawingControls } from './EffectPathDrawingControls';
 import { ENVIRONMENT_EFFECT_TARGET_ID, isEnvironmentBuildingEffectKind } from '../model/environmentBuildingEffect';
@@ -62,6 +64,7 @@ export function PoiEffectInspector({ component, disabled = false }: PoiEffectIns
   const updateSelectedPoiEffect = useEditorStore((state) => state.updateSelectedPoiEffect);
   const controlsDisabled = disabled;
   const isDigitalTwinEffect = isDigitalTwinEffectKind(component.effectKind);
+  const isConveyorArrow = isConveyorArrowEffectKind(component.effectKind);
   const legacyDefinition = !VISIBLE_POI_EFFECT_DEFINITIONS.some(item => item.kind === component.effectKind)
     ? POI_EFFECT_DEFINITIONS.find(item => item.kind === component.effectKind) : undefined;
   const selectedEntityId = useEditorStore((state) => state.scene.selectedEntityId);
@@ -101,7 +104,7 @@ export function PoiEffectInspector({ component, disabled = false }: PoiEffectIns
   /** 更新强度、速度、密度等数值字段，并在写入前夹紧到定义范围。 */
   function handleNumberChange(field: NumberFieldConfig, valueText: string): void {
     if (valueText === '') return;
-    const min = isDigitalTwinEffect && field.key === 'speed' ? 0 : field.min;
+    const min = (isDigitalTwinEffect || isConveyorArrow) && field.key === 'speed' ? 0 : field.min;
     const value = clampEffectNumber(Number(valueText), min, field.max, component[field.key]);
     commitComponent({ ...component, [field.key]: value }, field.commitLabel);
   }
@@ -140,13 +143,13 @@ export function PoiEffectInspector({ component, disabled = false }: PoiEffectIns
         <input disabled={controlsDisabled} type="color" value={component.secondaryColor} onChange={handleSecondaryColorChange} />
       </label>
 
-      {NUMBER_FIELDS.filter(field => !isDigitalTwinEffect || isCommonEffectFieldVisible(component.effectKind, field.key)).map((field) => (
+      {NUMBER_FIELDS.filter(field => isConveyorArrow ? field.key !== 'density' : !isDigitalTwinEffect || isCommonEffectFieldVisible(component.effectKind, field.key)).map((field) => (
         <label className="number-row" key={field.key}>
           <span>{field.label}</span>
           <input
             disabled={controlsDisabled}
             max={field.max}
-            min={isDigitalTwinEffect && field.key === 'speed' ? 0 : field.min}
+            min={(isDigitalTwinEffect || isConveyorArrow) && field.key === 'speed' ? 0 : field.min}
             step={field.step}
             type="number"
             value={component[field.key]}
@@ -155,6 +158,7 @@ export function PoiEffectInspector({ component, disabled = false }: PoiEffectIns
         </label>
       ))}
 
+      {isConveyorArrow && <ConveyorArrowEffectInspector component={component} disabled={controlsDisabled} onChange={commitComponent} />}
       {isDigitalTwinEffect && <DigitalTwinEffectInspector key={`${selectedEntityId}:${component.effectKind}`} component={component} disabled={controlsDisabled} onChange={commitComponent} />}
       <p className="muted">
         {component.visual?.targetEntityId === ENVIRONMENT_EFFECT_TARGET_ID

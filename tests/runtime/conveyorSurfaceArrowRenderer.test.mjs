@@ -213,3 +213,109 @@ test('z 行走轴和 thinInstance 几何使用单机范围，不含整批矩阵�
   near(Vector3.Distance(point(mesh, -.5), point(mesh, .5)), .96);
   near(Vector3.Distance(point(mesh, 0, -.5), point(mesh, 0, .5)), 6);
 });
+
+test('四种内置样式使用独立 shader 分支且切换仅更新 uniform，不重建网格或材质', t => {
+  const { scene, model, renderer, config } = setup(t);
+  const styles = ['conveyor-direction', 'moving-double-arrow', 'pipeline-flow-arrows', 'flow-arrows'];
+  let mesh, material;
+  for (const [index, style] of styles.entries()) {
+    config.style = style;
+    renderer.update('one', model, config, 1, 0, true);
+    mesh ??= arrow(scene); material ??= mesh.material;
+    assert.equal(arrow(scene), mesh);
+    assert.equal(mesh.material, material);
+    assert.equal(material._floats.arrowStyle, index);
+  }
+  const shader = material.shaderPath.fragmentSource;
+  assert.match(shader, /singleChevronDistance/);
+  assert.match(shader, /doubleChevronDistance/);
+  assert.match(shader, /pipelineArrowDistance/);
+  assert.match(shader, /flowArrowDistance/);
+  assert.match(shader, /arrowStyle\s*<\s*0\.5/);
+  assert.match(shader, /arrowStyle\s*<\s*1\.5/);
+  assert.match(shader, /arrowStyle\s*<\s*2\.5/);
+});
+
+test('默认呼吸独立于流动速度，半周期亮度到30%，完整周期回到100%', t => {
+  const { scene, model, renderer, config } = setup(t);
+  Object.assign(config, { speed: 0, breathingEnabled: true, breathingPeriod: 1.8, breathingStrength: .7 });
+  renderer.update('one', model, config, 1, 0, true);
+  const material = arrow(scene).material;
+  near(material._floats.breathingPhase, 0); near(material._floats.breathingFactor, 1);
+  const flowPhase = material._floats.phase;
+  renderer.update('one', model, config, 1, .9, true);
+  near(material._floats.phase, flowPhase);
+  near(material._floats.breathingPhase, .5); near(material._floats.breathingFactor, .3);
+  renderer.update('one', model, config, -1, .9, true);
+  near(material._floats.breathingPhase, 0); near(material._floats.breathingFactor, 1);
+  assert.equal(material._floats.direction, -1);
+});
+
+test('呼吸强度和开关立即生效且周期相位有界，流动仍独立继续', t => {
+  const { scene, model, renderer, config } = setup(t);
+  Object.assign(config, { breathingEnabled: true, breathingPeriod: 2, breathingStrength: .7 });
+  renderer.update('one', model, config, 1, 0, true);
+  const material = arrow(scene).material;
+  renderer.update('one', model, config, 1, 1, true);
+  near(material._floats.breathingFactor, .3);
+  config.breathingStrength = .4;
+  renderer.update('one', model, config, 1, 0, true);
+  near(material._floats.breathingFactor, .6);
+  config.breathingEnabled = false;
+  renderer.update('one', model, config, 1, .15, true);
+  near(material._floats.breathingFactor, 1);
+  config.breathingEnabled = true; config.breathingStrength = 0;
+  renderer.update('one', model, config, 1, .15, true);
+  near(material._floats.breathingFactor, 1);
+  const beforeFlow = material._floats.phase;
+  renderer.update('one', model, config, 1, 1000000.1, true);
+  assert.ok(material._floats.breathingPhase >= 0 && material._floats.breathingPhase < 1);
+  assert.ok(material._floats.phase >= 0 && material._floats.phase < config.spacing);
+  assert.notEqual(material._floats.phase, beforeFlow);
+  config.speed = 1; config.spacing = .9;
+  renderer.update('wrap', model, config, 1, .8, true);
+  config.speed = 0; config.spacing = .5;
+  renderer.update('wrap', model, config, 1, 0, true);
+  near(arrow(scene, 'wrap').material._floats.phase, .3);
+});
+
+test('呼吸不抬高零透明度和黑色，静止流动仍按原样支持隐藏与恢复', t => {
+  const { scene, model, renderer, config } = setup(t);
+  Object.assign(config, { speed: 0, breathingEnabled: true, breathingPeriod: 2, breathingStrength: .7 });
+  renderer.update('one', model, config, 1, 0, true);
+  const mesh = arrow(scene), material = mesh.material;
+  config.opacity = 0; config.color = '#000000';
+  renderer.update('one', model, config, 1, 1, true);
+  assert.equal(material._floats.opacity, 0);
+  assert.equal(mesh.isEnabled(), false);
+  assert.deepEqual(material._colors3.arrowColor.asArray(), [0, 0, 0]);
+  config.opacity = .5;
+  renderer.update('one', model, config, 1, 0, true);
+  assert.equal(mesh.isEnabled(), true);
+  near(material._floats.opacity, .5);
+  renderer.update('one', model, config, 0, .1, true);
+  assert.equal(mesh.isEnabled(), false);
+});
+
+test('100条未运行实例不创建 mesh、root、材质且不测量，已有资源隐藏复用', t => {
+  const { scene, model, renderer, config } = setup(t);
+  const initial = [scene.meshes.length, scene.transformNodes.length, scene.materials.length];
+  const originalTraversal = model.root.getChildTransformNodes;
+  model.root.getChildTransformNodes = () => { throw new Error('未运行实例不应遍历模型节点'); };
+  for (let i = 0; i < 100; i += 1) {
+    assert.equal(renderer.update(`stop-${i}`, model, config, 0, .1, true), null);
+    assert.equal(renderer.update(`hidden-${i}`, model, config, 1, .1, false), null);
+    assert.equal(renderer.update(`transparent-${i}`, model, { ...config, opacity: 0 }, 1, .1, true), null);
+  }
+  assert.deepEqual([scene.meshes.length, scene.transformNodes.length, scene.materials.length], initial);
+  model.root.getChildTransformNodes = originalTraversal;
+  renderer.update('one', model, config, 1, 0, true);
+  const mesh = arrow(scene), material = mesh.material;
+  model.root.getChildTransformNodes = () => { throw new Error('已隐藏实例不应重新测量'); };
+  model.parameterSignature = 'changed-while-hidden';
+  renderer.update('one', model, config, 0, .1, true);
+  assert.equal(mesh.isEnabled(), false);
+  model.root.getChildTransformNodes = originalTraversal;
+  renderer.update('one', model, config, 1, 0, true);
+  assert.equal(arrow(scene), mesh); assert.equal(mesh.material, material); assert.equal(mesh.isEnabled(), true);
+});

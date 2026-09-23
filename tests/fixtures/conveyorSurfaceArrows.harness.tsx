@@ -34,7 +34,7 @@ Object.assign(window, { conveyorArrowHarness: {
   save: () => serializeScene(useEditorStore.getState().scene),
   reopen: (content: string) => useEditorStore.getState().loadSceneFromContent(content, '表面箭头重开.scene.json'),
   current: () => { const state = useEditorStore.getState().scene; return state.entities[state.selectedEntityId ?? state.entityIds[0]]; },
-  visual: () => arrows().map(mesh => ({ name: mesh.name, enabled: mesh.isEnabled(), ready: mesh.isReady(true),
+  visual: () => arrows().map(mesh => ({ id: mesh.uniqueId, materialId: mesh.material?.uniqueId, name: mesh.name, enabled: mesh.isEnabled(), ready: mesh.isReady(true),
     vertices: mesh.getTotalVertices(), material: mesh.material?.getClassName(),
     uniforms: (mesh.material as unknown as { _floats: Record<string, number> })._floats,
     bounds: { min: mesh.getBoundingInfo().boundingBox.minimumWorld.asArray(), max: mesh.getBoundingInfo().boundingBox.maximumWorld.asArray() } })),

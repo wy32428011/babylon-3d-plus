@@ -4,22 +4,24 @@ import { registerHooks } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import ts from 'typescript';
 
-const root = new URL('../../src/', import.meta.url);
+const root = new URL('../../', import.meta.url);
 const hooks = registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith('.') && context.parentURL?.startsWith(root.href)) {
       const candidate = new URL(specifier, context.parentURL);
       if (!existsSync(candidate) && existsSync(new URL(candidate.href + '.ts'))) return next(candidate.href + '.ts', context);
+      if (!existsSync(candidate) && candidate.pathname.endsWith('.js') && existsSync(new URL(candidate.href.replace(/\.js$/, '.ts')))) return next(candidate.href.replace(/\.js$/, '.ts'), context);
     }
     return next(specifier, context);
   },
   load(url, context, next) {
-    if (url.startsWith(root.href) && url.endsWith('.ts')) return { format: 'module', shortCircuit: true, source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };
+    if (url.startsWith(root.href) && !url.includes('/node_modules/') && url.endsWith('.ts')) return { format: 'module', shortCircuit: true, source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };
     return next(url, context);
   },
 });
 const model = await import('../../src/editor/model/digitalTwinEffect.ts');
 const poi = await import('../../src/editor/model/poiEffect.ts');
+const registry = await import('../../src/editor/model/effectParameterRegistry.ts');
 hooks.deregister();
 
 test('新建生长特效默认完整单次播放，已有循环和显示上限保持用户配置', () => {
@@ -42,9 +44,19 @@ test('新版特效都有独立默认值，旧入口隐藏但旧场景类型保�
     assert.equal(poi.sanitizePoiEffectComponent({ ...b, speed: 0 }).speed, 0);
     assert.equal(poi.isPoiEffectKind(definition.kind), true);
   }
-  for (const kind of ['radar-scan', 'locator-beam', 'fire', 'smoke', 'pipeline-flow-arrows', 'moving-double-arrow']) {
+  for (const kind of ['radar-scan', 'locator-beam', 'fire', 'smoke', 'pipeline-flow-particles']) {
     assert.equal(poi.isPoiEffectKind(kind), true);
     assert.equal(poi.VISIBLE_POI_EFFECT_DEFINITIONS.some(x => x.kind === kind), false);
+  }
+});
+
+test('输送线可选的十种内置箭头均有库入口，其余旧特效继续隐藏', () => {
+  assert.equal(poi.VISIBLE_POI_EFFECT_DEFINITIONS.length, 55);
+  const counts = poi.VISIBLE_POI_EFFECT_DEFINITIONS.map(item => registry.getEffectParameterDefinitions(item.kind).length);
+  assert.equal(counts.filter(count => count > 0).length, 46);
+  assert.equal(counts.reduce((sum, count) => sum + count, 0), 330);
+  for (const kind of ['conveyor-direction', 'moving-double-arrow', 'pipeline-flow-arrows', 'flow-arrows', 'conveyor-arrow-single', 'conveyor-arrow-chevron', 'conveyor-arrow-segmented', 'conveyor-arrow-ribbon', 'conveyor-arrow-double', 'conveyor-arrow-speed']) {
+    assert.equal(poi.VISIBLE_POI_EFFECT_DEFINITIONS.filter(x => x.kind === kind).length, 1);
   }
 });
 

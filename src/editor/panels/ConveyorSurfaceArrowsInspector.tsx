@@ -1,11 +1,18 @@
+import { isConveyorArrowEffectKind } from '../model/conveyorArrowEffect';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import {
   createDefaultConveyorSurfaceArrowsConfig,
+  CONVEYOR_SURFACE_ARROW_STYLES,
+  isConveyorSurfaceArrowStyle,
   normalizeConveyorSurfaceArrowsConfig,
   type ConveyorSurfaceArrowsConfig,
 } from '../model/conveyorSurfaceArrows';
 import { useEditorStore } from '../store/editorStore';
 import { conveyorSurfaceArrowSession, type ConveyorSurfaceArrowPreview } from '../../runtime/conveyorSurfaceArrowSession';
+import { BUILT_IN_ASSET_DRAG_MIME_TYPE } from '../assets/AssetDatabase';
+import { readConveyorSurfaceArrowStyleDrop } from '../assets/conveyorSurfaceArrowDrag';
+import { getPoiEffectDefinition } from '../model/poiEffect';
+import { ConveyorSurfaceArrowDirectionInspector } from './ConveyorSurfaceArrowDirectionInspector';
 
 type Props = {
   entityId: string;
@@ -44,7 +51,7 @@ function NumberField(props: NumberFieldProps) {
 export function ConveyorSurfaceArrowsInspector(props: Props) {
   const config = props.config ?? createDefaultConveyorSurfaceArrowsConfig();
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
-  const sceneId = useEditorStore((state) => state.scene.id);
+  const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
   const preview = useSyncExternalStore(
     conveyorSurfaceArrowSession.subscribe,
     () => conveyorSurfaceArrowSession.getPreview(props.entityId),
@@ -56,14 +63,18 @@ export function ConveyorSurfaceArrowsInspector(props: Props) {
     () => '',
   );
   const [surfaceNode, setSurfaceNode] = useState(config.surfaceNode);
+  const [dragActive, setDragActive] = useState(false);
+  const [dropMessage, setDropMessage] = useState('');
 
-  useEffect(() => { setSurfaceNode(config.surfaceNode); }, [props.entityId, config.surfaceNode]);
+  useEffect(() => { setSurfaceNode(config.surfaceNode); }, [props.entityId, sceneSessionId, config.surfaceNode]);
+  useEffect(() => { setDragActive(false); setDropMessage(''); }, [props.entityId, sceneSessionId]);
   useEffect(() => {
     conveyorSurfaceArrowSession.setPreview(props.entityId, null);
     return () => { conveyorSurfaceArrowSession.setPreview(props.entityId, null); };
-  }, [props.entityId, sceneId, runtimeMode, config.enabled]);
+  }, [props.entityId, sceneSessionId, runtimeMode, config.enabled]);
 
   function commit(patch: Partial<ConveyorSurfaceArrowsConfig>): void {
+    if (props.disabled || runtimeMode !== 'edit') return;
     const next = normalizeConveyorSurfaceArrowsConfig({ ...config, ...patch });
     if (next) props.onChange(next);
   }
@@ -74,20 +85,56 @@ export function ConveyorSurfaceArrowsInspector(props: Props) {
     }
   }
 
-  const disabled = props.disabled || !config.enabled;
+  const editingDisabled = props.disabled || runtimeMode !== 'edit';
+  const disabled = editingDisabled || !config.enabled;
   const previewDisabled = disabled || runtimeMode !== 'edit';
   const numberProps = { disabled };
+  const fullStripStyle = isConveyorArrowEffectKind(config.style);
+  const repeatedStyle = !fullStripStyle || ['conveyor-arrow-chevron', 'conveyor-arrow-segmented', 'conveyor-arrow-double'].includes(config.style);
 
   return (
     <fieldset className="transform-fieldset" data-testid="conveyor-surface-arrows">
       <legend>表面箭头</legend>
       <label className="mqtt-config-dialog-checkbox">
-        <input type="checkbox" disabled={props.disabled} checked={config.enabled} onChange={(event) => commit({ enabled: event.target.checked })} />
+        <input type="checkbox" disabled={editingDisabled} checked={config.enabled} onChange={(event) => commit({ enabled: event.target.checked })} />
         启用表面箭头
       </label>
-      <p className="muted">正向校准：模型局部 {props.trajectoryDirection.startsWith('-') ? props.trajectoryDirection : `+${props.trajectoryDirection}`}。行走轴以模型声明为准，“轨迹方向”应与行走轴匹配。运行时继承本模型设备绑定和方向映射，停止、故障或数据过期时隐藏。</p>
+      <p className="muted">默认开启呼吸箭头。正向校准：模型局部 {props.trajectoryDirection.startsWith('-') ? props.trajectoryDirection : `+${props.trajectoryDirection}`}。行走轴以模型声明为准，“轨迹方向”应与行走轴匹配。运行时继承本模型设备身份，方向可沿用模型或指定 MQTT 点位；停止、故障或数据过期时隐藏。</p>
       {config.enabled ? (
         <>
+          <div
+            data-testid="conveyor-surface-arrow-style-drop"
+            className={dragActive ? 'model-generator-target-slot model-generator-target-slot-active' : 'model-generator-target-slot'}
+            aria-label="箭头样式拖放区"
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              const accepted = !disabled && event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE)
+                && !event.dataTransfer.types.includes('Files');
+              event.dataTransfer.dropEffect = accepted ? 'copy' : 'none';
+              setDragActive(accepted);
+            }}
+            onDragLeave={(event) => {
+              if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragActive(false);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setDragActive(false);
+              const style = readConveyorSurfaceArrowStyleDrop(event.dataTransfer, disabled);
+              if (style) {
+                commit({ style });
+                setDropMessage(`已应用${getPoiEffectDefinition(style).name}样式`);
+              } else if (!disabled) setDropMessage('仅接受特效库中的箭头样式，包括六种输送箭头及原有四种箭头。');
+            }}
+          >
+            <span className="model-generator-target-text" style={{ gridColumn: '1 / -1' }}><strong>箭头样式：{getPoiEffectDefinition(config.style).name}</strong><small>从特效库拖入箭头卡片；保留颜色、尺寸和方向绑定</small></span>
+          </div>
+          <label className="inspector-row"><span>箭头样式</span><select aria-label="箭头样式" disabled={disabled} value={config.style} onChange={(event) => {
+            if (isConveyorSurfaceArrowStyle(event.target.value)) commit({ style: event.target.value });
+          }}>{CONVEYOR_SURFACE_ARROW_STYLES.map(style => <option key={style} value={style}>{getPoiEffectDefinition(style).name}</option>)}</select></label>
+          {dropMessage ? <p className="muted" role="status">{dropMessage}</p> : null}
+          <ConveyorSurfaceArrowDirectionInspector key={`${sceneSessionId}:${props.entityId}`} value={config.directionBinding} disabled={disabled} onChange={(directionBinding) => commit({ directionBinding })} />
           <label className="inspector-row">
             <span>输送面部件</span>
             <input
@@ -112,11 +159,14 @@ export function ConveyorSurfaceArrowsInspector(props: Props) {
             <summary>箭头外观与动画</summary>
             <label className="inspector-row"><span>箭头颜色</span><input type="color" disabled={disabled} value={config.color} onChange={(event) => commit({ color: event.target.value })} /></label>
             <NumberField {...numberProps} label="透明度" value={config.opacity} min={0} max={1} step={0.05} onChange={(opacity) => commit({ opacity })} />
-            <NumberField {...numberProps} label="箭头长度(m)" value={config.arrowLength} min={0.02} max={100} onChange={(arrowLength) => commit({ arrowLength })} />
+            {!fullStripStyle && <NumberField {...numberProps} label="箭头长度(m)" value={config.arrowLength} min={0.02} max={100} onChange={(arrowLength) => commit({ arrowLength })} />}
             <NumberField {...numberProps} label="箭头宽度(m)" value={config.arrowWidth} min={0.02} max={100} onChange={(arrowWidth) => commit({ arrowWidth })} />
-            <NumberField {...numberProps} label="中心间距(m)" value={config.spacing} min={config.arrowLength + 0.02} max={10000} onChange={(spacing) => commit({ spacing })} />
-            <NumberField {...numberProps} label="流动速度(m/s)" value={config.speed} min={0} max={100} onChange={(speed) => commit({ speed })} />
-            <p className="muted">中心间距至少比箭头长度大 0.02 米。速度仅影响视觉动画，0 为静止显示；设备停止时仍隐藏。</p>
+            {repeatedStyle && <NumberField {...numberProps} label={fullStripStyle ? "目标间距(m)" : "中心间距(m)"} value={config.spacing} min={fullStripStyle ? 0.04 : config.arrowLength + 0.02} max={10000} onChange={(spacing) => commit({ spacing })} />}
+            <NumberField {...numberProps} label={fullStripStyle ? "流动速度（倍率）" : "流动速度(m/s)"} value={config.speed} min={0} max={100} onChange={(speed) => commit({ speed })} />
+            <label className="mqtt-config-dialog-checkbox"><input type="checkbox" disabled={disabled} checked={config.breathingEnabled} onChange={(event) => commit({ breathingEnabled: event.target.checked })} />启用呼吸效果</label>
+            <NumberField {...numberProps} disabled={disabled || !config.breathingEnabled} label="呼吸周期(s)" value={config.breathingPeriod} min={0.25} max={30} step={0.05} onChange={(breathingPeriod) => commit({ breathingPeriod })} />
+            <NumberField {...numberProps} disabled={disabled || !config.breathingEnabled} label="呼吸强度" value={config.breathingStrength} min={0} max={1} step={0.05} onChange={(breathingStrength) => commit({ breathingStrength })} />
+            <p className="muted">{fullStripStyle ? '整体长度由“覆盖范围与位置”控制；连续、分段和双列样式按目标间距均匀排列，最多 32 个。流动速度为视觉倍率。' : '中心间距至少比箭头长度大 0.02 米。速度仅影响视觉动画。'}速度为 0 时停止流动；关闭呼吸后完全静止，设备停止时仍隐藏。</p>
           </details>
           <div className="telemetry-runtime-diagnostics">
             <strong>编辑预览</strong>
