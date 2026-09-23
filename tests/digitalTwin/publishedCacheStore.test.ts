@@ -183,3 +183,16 @@ test('缓存数据读取完成后即可返回，批量 LRU 写入只锁 metadata
   await flushMicrotasks();
   context.mock.timers.tick(60_000);
 });
+
+test('完整发布原始文件独立存储且不参与逐条 LRU 淘汰', async context => {
+  const { transactions } = databaseHarness(context);
+  const store = new IndexedDbPublishedCacheStore({ databaseName: 'release-test', evict: false, maxEntryBytes: 1024 });
+  const write = store.put('chunk', new Blob(['model']), 5);
+  await flushMicrotasks();
+  const transaction = transactions[0];
+  assert.equal(transaction.requests.some(item => item.operation === 'getAll'), false);
+  assert.equal(transaction.requests.filter(item => item.operation === 'put').length, 2);
+  transaction.finished = true; transaction.oncomplete?.();
+  await write;
+  store.close();
+});

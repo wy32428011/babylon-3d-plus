@@ -13,6 +13,7 @@ import {
   type DeploymentCopyFile,
 } from './deploymentExportFileSystem.js';
 import { createAssetManifestContent, prepareDeploymentExport } from './deploymentExportScene.js';
+import { createDeploymentReleaseCacheManifest, RELEASE_CACHE_MANIFEST_PATH } from './deploymentReleaseCacheManifest.js';
 import type { DeploymentSkyboxCacheContext, DeploymentSkyboxValidationCache } from './deploymentSkyboxCache.js';
 import { bindSourceResourceIntegrity, type SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
 
@@ -23,6 +24,7 @@ const GENERATED_TEMPLATE_PATHS = new Set([
   'runtime-config.json',
   'project/scene.json',
   'project/asset-manifest.json',
+  RELEASE_CACHE_MANIFEST_PATH,
 ]);
 
 export type BuildDigitalTwinDistPackageOptions = {
@@ -97,7 +99,11 @@ export async function buildDigitalTwinDistPackage(
     );
 
     options.onProgress?.('正在生成项目级运行配置入口…', 80);
-    await writeGeneratedFiles(stagingRoot, prepared, copiedAssets, options.projectId, options.signal);
+    const cacheRevision = await writeGeneratedFiles(stagingRoot, prepared, copiedAssets, options.projectId, options.signal);
+    options.onProgress?.('正在生成发布资源缓存清单…', 83);
+    const cacheManifest = await createDeploymentReleaseCacheManifest(stagingRoot, cacheRevision, options.signal);
+    await fs.writeFile(resolveDeploymentDestination(stagingRoot, RELEASE_CACHE_MANIFEST_PATH),
+      `${JSON.stringify(cacheManifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', signal: options.signal });
     options.onProgress?.('正在压缩 dist ZIP…', 86);
     await archiveDirectoryContents(stagingRoot, archivePath, options.signal);
     const stat = await fs.stat(archivePath);
@@ -161,10 +167,11 @@ async function writeGeneratedFiles(
   copiedAssets: DeploymentCopiedFile[],
   projectId: string,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<string> {
   throwIfDeploymentExportAborted(signal);
   const runtimeConfig = JSON.parse(prepared.runtimeConfigContent) as Record<string, unknown>;
   runtimeConfig.version = 2;
+  runtimeConfig.cacheManifest = RELEASE_CACHE_MANIFEST_PATH;
   runtimeConfig.digitalTwin = {
     projectId,
     runtimeConfigEndpoint: '/api/v1/digital-twin/runtime-config/detail',
@@ -181,6 +188,8 @@ async function writeGeneratedFiles(
     await fs.mkdir(path.dirname(destination), { recursive: true });
     await fs.writeFile(destination, file.content, { encoding: 'utf8', flag: 'wx' });
   }
+  if (typeof runtimeConfig.cacheRevision !== 'string') throw new Error('发布运行配置缺少缓存版本标识。');
+  return runtimeConfig.cacheRevision;
 }
 
 async function archiveDirectoryContents(stagingRoot: string, archivePath: string, signal: AbortSignal): Promise<void> {

@@ -7,6 +7,8 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import { deserializeScene } from '../editor/project/SceneSerializer';
 import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '../runtime/assets/editorAssetUrl';
 import { fetchRuntimeAsset } from '../runtime/assets/runtimeAssetFetch';
+import type { PublishedReleaseCacheState } from './publishedReleasePrefetch';
+import { PublishedCacheStatus } from './PublishedCacheStatus';
 import { installPublishedViewerCache } from './publishedBabylonCache';
 import { createBabylonViewport, isSoftwareWebGLFallbackAllowed, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
@@ -243,6 +245,7 @@ export function PlayerApp() {
   /** 首次场景加载全部结算后置位：后续按需加载（如 MQTT 货物模板）不再重新弹出全屏蒙版。 */
   const [initialLoadCompleted, setInitialLoadCompleted] = useState(false);
   const [initialLoadNotice, setInitialLoadNotice] = useState('');
+  const [releaseCacheState, setReleaseCacheState] = useState<PublishedReleaseCacheState | null>(null);
   const initialLoadMonitorRef = useRef<(() => void) | null>(null);
   /** 首次场景加载是否仍在途：驱动超时兜底与蒙版显示。 */
   const initialLoadingInProgress = phase !== 'blocked' && !initialLoadCompleted;
@@ -357,6 +360,7 @@ export function PlayerApp() {
       setInitialLoadCompleted(true);
       if (initialLoadMonitorRef.current === checkInitialLoad) initialLoadMonitorRef.current = null;
       interactionController?.markInitialLoadComplete();
+      publishedCache?.prefetch();
     }, {
       // 缓慢加载持续等待；只有真实资源及首帧成功后才放行巡检。
       onSettled: () => autoPatrolStartGate.markReady(),
@@ -444,7 +448,8 @@ export function PlayerApp() {
         const parsedConfig = applyDigitalTwinRuntimeConfig(baseConfig, projectRuntimeConfig);
         if (disposed || initialLoadFailed) return;
         configureEffectDataTransport({ apiBaseUrl: projectRuntimeConfig?.apiBaseUrl });
-        publishedCache = await installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href, abortController.signal);
+        publishedCache = await installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href, abortController.signal,
+          state => { if (!disposed) setReleaseCacheState(state); });
         if (disposed || initialLoadFailed) { publishedCache?.dispose(); publishedCache = null; return; }
         interactionController = new DigitalTwinInteractionController({
           parentWindow: window.parent,
@@ -1300,6 +1305,7 @@ export function PlayerApp() {
           percent={loadingMask.percent}
         />
       ) : null}
+      {initialLoadCompleted && releaseCacheState ? <PublishedCacheStatus state={releaseCacheState} /> : null}
       {performanceEnabled && phase === 'ready' ? (
         <section className="player-performance" aria-label="场景性能诊断">
           <div className="player-performance-heading">

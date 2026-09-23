@@ -11,6 +11,7 @@ import { assertNoSensitiveRuntimeConfig, isSensitiveRuntimeConfigKey } from './r
 export type PlayerRuntimeConfig = {
   version: 1 | 2;
   cacheRevision?: string;
+  cacheManifest?: string;
   page: {
     title: string;
     loadingText: string;
@@ -263,9 +264,12 @@ export function parsePlayerRuntimeConfig(value: unknown): PlayerRuntimeConfig {
   const isDigitalTwin = config.version === 2;
   if (config.version !== 1 && !isDigitalTwin) throw new Error('runtime-config.version 仅支持 1 或 2。');
   assertKeys(config, ['version', 'page', 'paths', 'viewer', 'mqtt',
-    ...(isDigitalTwin ? ['digitalTwin'] : []), ...('cacheRevision' in config ? ['cacheRevision'] : [])], 'runtime-config');
+    ...(isDigitalTwin ? ['digitalTwin'] : []), ...('cacheRevision' in config ? ['cacheRevision'] : []), ...('cacheManifest' in config ? ['cacheManifest'] : [])], 'runtime-config');
   const cacheRevision = 'cacheRevision' in config ? assertString(config.cacheRevision, 'runtime-config.cacheRevision', 128) : undefined;
   if (cacheRevision && !/^[a-zA-Z0-9_-]+$/.test(cacheRevision)) throw new Error('runtime-config.cacheRevision 格式无效。');
+
+  const cacheManifest = 'cacheManifest' in config ? assertString(config.cacheManifest, 'runtime-config.cacheManifest', 128) : undefined;
+  if (cacheManifest && (cacheManifest !== 'release-cache-manifest.json' || !cacheRevision)) throw new Error('runtime-config.cacheManifest 必须引用本次发布的完整缓存清单。');
 
   const page = assertObject(config.page, 'runtime-config.page');
   const paths = assertObject(config.paths, 'runtime-config.paths');
@@ -291,6 +295,7 @@ export function parsePlayerRuntimeConfig(value: unknown): PlayerRuntimeConfig {
   return {
     version: config.version as 1 | 2,
     ...(cacheRevision ? { cacheRevision } : {}),
+    ...(cacheManifest ? { cacheManifest } : {}),
     page: {
       title: assertString(page.title, 'runtime-config.page.title', 256),
       loadingText: assertString(page.loadingText, 'runtime-config.page.loadingText', 200),

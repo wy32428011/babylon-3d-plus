@@ -9,15 +9,19 @@ const TRANSACTION_IDLE_TIMEOUT_MS = 30_000;
 const TOUCH_BATCH_DELAY_MS = 100;
 type Metadata = { key: string; bytes: number; usedAt: number };
 type WatchRequest = <T>(request: IDBRequest<T>, onSuccess?: (result: T) => void) => void;
+type StoreOptions = { databaseName?: string; evict?: boolean; maxEntryBytes?: number };
 
 /** 数据与 LRU 元信息分表；大数据只读不持有写锁，访问时间单独合并更新。 */
 export class IndexedDbPublishedCacheStore implements PublishedCacheStore {
+  private readonly options: StoreOptions;
   private database: Promise<IDBDatabase> | null = null;
   private closed = false;
   private readonly activeOperations = new Set<(error: Error) => void>();
   private readonly pendingTouches = new Map<string, number>();
   private touchTimer: ReturnType<typeof setTimeout> | null = null;
   private touchWarningReported = false;
+
+  constructor(options: StoreOptions = {}) { this.options = options; }
 
   private open(): Promise<IDBDatabase> {
     if (this.closed) return Promise.reject(new Error('发布缓存已关闭。'));
@@ -31,7 +35,7 @@ export class IndexedDbPublishedCacheStore implements PublishedCacheStore {
       const timer = setTimeout(() => fail(new Error('打开发布缓存超时。')), OPEN_TIMEOUT_MS);
       this.activeOperations.add(fail);
       let request: IDBOpenDBRequest;
-      try { request = indexedDB.open(PUBLISHED_CACHE_DATABASE, 1); }
+      try { request = indexedDB.open(this.options.databaseName ?? PUBLISHED_CACHE_DATABASE, 1); }
       catch (error) { fail(error); return; }
       request.onupgradeneeded = () => {
         request.result.createObjectStore('values');
@@ -59,13 +63,22 @@ export class IndexedDbPublishedCacheStore implements PublishedCacheStore {
   }
 
   async put(key: string, value: unknown, bytes: number): Promise<void> {
-    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > PUBLISHED_CACHE_MAX_ENTRY_BYTES) return;
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > (this.options.maxEntryBytes ?? PUBLISHED_CACHE_MAX_ENTRY_BYTES)) {
+      if (this.options.evict === false) throw new Error('发布缓存数据块大小无效。');
+      return;
+    }
     const database = await this.open();
     // 淘汰前提交本页已命中的时间，避免刚读过的条目因批处理窗口被误删。
     await this.flushTouches(database);
     await this.transaction(database, ['values', 'metadata'], 'readwrite', (transaction, _setResult, watch) => {
       const metadata = transaction.objectStore('metadata');
       const values = transaction.objectStore('values');
+      // 完整发布的原始文件分块保存且按整个版本清理，不能被解码缓存的 LRU 拆散。
+      if (this.options.evict === false) {
+        watch(values.put(value, key));
+        watch(metadata.put({ key, bytes, usedAt: Date.now() } satisfies Metadata));
+        return;
+      }
       watch(metadata.getAll(), (records: Metadata[]) => {
         const entries = records.filter(entry => entry.key !== key).sort((a, b) => a.usedAt - b.usedAt);
         let total = bytes + entries.reduce((sum, entry) => sum + entry.bytes, 0);
@@ -78,6 +91,33 @@ export class IndexedDbPublishedCacheStore implements PublishedCacheStore {
         watch(values.put(value, key));
         watch(metadata.put({ key, bytes, usedAt: Date.now() } satisfies Metadata));
       });
+    });
+  }
+
+  async delete(key: string): Promise<void> {
+    this.pendingTouches.delete(key);
+    const database = await this.open();
+    await this.transaction(database, ['values', 'metadata'], 'readwrite', (transaction, _setResult, watch) => {
+      watch(transaction.objectStore('values').delete(key));
+      watch(transaction.objectStore('metadata').delete(key));
+    });
+  }
+
+  async keys(): Promise<string[]> {
+    const database = await this.open();
+    return await this.transaction(database, ['metadata'], 'readonly', (transaction, setResult, watch) => {
+      watch(transaction.objectStore('metadata').getAllKeys(), setResult);
+    }) as string[];
+  }
+
+  /** 整个发布版本在持有排他租约时清理，避免 deleteDatabase 的不可取消 blocked 请求。 */
+  async clear(): Promise<void> {
+    this.pendingTouches.clear();
+    if (this.touchTimer !== null) { clearTimeout(this.touchTimer); this.touchTimer = null; }
+    const database = await this.open();
+    await this.transaction(database, ['values', 'metadata'], 'readwrite', (transaction, _setResult, watch) => {
+      watch(transaction.objectStore('values').clear());
+      watch(transaction.objectStore('metadata').clear());
     });
   }
 

@@ -9,6 +9,8 @@ import type { IDecodedData } from '@babylonjs/core/Materials/Textures/ktx2decode
 import { PublishedAssetCache } from '../runtime/assets/publishedAssetCache';
 import { installPublishedAssetCache } from '../runtime/assets/runtimeAssetFetch';
 import type { PlayerRuntimeConfig } from './runtimeConfig';
+import { preparePublishedReleaseCache } from './publishedReleaseCache';
+import type { PublishedReleaseCacheState } from './publishedReleasePrefetch';
 import { loadPublishedCacheVersion, verifyPublishedCacheVersion } from './publishedCacheVersion';
 
 function isMeshData(value: unknown): value is MeshData {
@@ -85,8 +87,9 @@ class PublishedOfflineProvider implements IOfflineProvider {
   }
 }
 
-export async function installPublishedViewerCache(config: PlayerRuntimeConfig, baseUrl: string, signal: AbortSignal = new AbortController().signal): Promise<{
-  cache: PublishedAssetCache; assetManifest?: unknown; verifyDocuments(): Promise<void>; attach(scene: Scene): void; dispose(): void;
+export async function installPublishedViewerCache(config: PlayerRuntimeConfig, baseUrl: string, signal: AbortSignal = new AbortController().signal,
+  onState?: (state: PublishedReleaseCacheState) => void): Promise<{
+  cache: PublishedAssetCache; assetManifest?: unknown; verifyDocuments(): Promise<void>; prefetch(): void; attach(scene: Scene): void; dispose(): void;
 } | null> {
   const version = await loadPublishedCacheVersion(config, baseUrl, signal);
   if (!version) return null;
@@ -98,7 +101,9 @@ export async function installPublishedViewerCache(config: PlayerRuntimeConfig, b
       .finally(() => { verifying = null; });
     return verifying;
   };
-  const cache = new PublishedAssetCache({ baseUrl, revision: version.revision, resources: version.resources, assetBase: new URL(config.paths.assetBase, baseUrl).href,
+  const release = await preparePublishedReleaseCache(config, baseUrl, signal, onState);
+  if (signal.aborted) { release?.dispose(); signal.throwIfAborted(); }
+  const cache = new PublishedAssetCache({ baseUrl, revision: version.revision, resources: release?.resources ?? version.resources, rawStore: release?.rawStore, assetBase: new URL(config.paths.assetBase, baseUrl).href,
     documentUrls: version.resources ? [] : [config.paths.scene, config.paths.assetManifest].map(url => new URL(url, baseUrl).href),
     verifyRevision: version.resources ? undefined : verifyRevision });
   const restoreFetch = installPublishedAssetCache(cache);
@@ -132,6 +137,7 @@ export async function installPublishedViewerCache(config: PlayerRuntimeConfig, b
   KTX2Decoder.prototype.decode = ktx;
   return {
     cache, assetManifest: version.assetManifest, verifyDocuments: verifyRevision,
+    prefetch() { release?.prefetch(cache, verifyRevision); },
     attach(scene) { scene.getEngine().enableOfflineSupport = true; scene.offlineProvider = provider; },
     dispose() {
       revisionController.abort();
@@ -139,7 +145,7 @@ export async function installPublishedViewerCache(config: PlayerRuntimeConfig, b
       if (DracoDecoder.prototype.decodeMeshToMeshDataAsync === draco) DracoDecoder.prototype.decodeMeshToMeshDataAsync = originalDraco;
       if (MeshoptCompression.prototype.decodeGltfBufferAsync === meshopt) MeshoptCompression.prototype.decodeGltfBufferAsync = originalMeshopt;
       if (KTX2Decoder.prototype.decode === ktx) KTX2Decoder.prototype.decode = originalKtx;
-      restoreFetch(); provider.dispose(); cache.dispose();
+      restoreFetch(); provider.dispose(); cache.dispose(); release?.dispose();
     },
   };
 }

@@ -210,3 +210,24 @@ test('旧格式清单只缓存列出的模型和天空盒，下载内容必须�
   await assert.rejects(refreshed.fetch(skyboxUrl), /资源与清单不一致/);
   refreshed.dispose();
 });
+
+test('完整缓存预热与原生资源读取合并下载，持久内容损坏时重新获取', async t => {
+  const store = memoryStore();
+  const url = 'https://viewer.test/release/project/assets/model.glb';
+  const resources = new Map([[url, { size: 3, sha256: createHash('sha256').update('abc').digest('hex') }]]);
+  let downloads = 0;
+  t.mock.method(globalThis, 'fetch', async () => { downloads++; await new Promise(resolve => setTimeout(resolve, 5)); return new Response('abc'); });
+  const cache = new PublishedAssetCache({ baseUrl: 'https://viewer.test/release/', revision: 'r1', assetBase: 'project/assets/', documentUrls: [], resources, rawStore: store });
+  const loaded = await Promise.all([cache.fetch(url), cache.fetch(url + '?assetRevision=1')]);
+  assert.deepEqual(await Promise.all(loaded.map(response => response.text())), ['abc', 'abc']);
+  assert.equal(downloads, 1);
+  assert.equal(await cache.hasResource(url), true);
+  const get = store.get;
+  store.get = async key => {
+    const record = await get(key) as { blob?: Blob } | undefined;
+    return record?.blob ? { ...record, blob: new Blob(['bad']) } : record;
+  };
+  assert.equal(await (await cache.fetch(url)).text(), 'abc');
+  assert.equal(downloads, 2);
+  cache.dispose();
+});
