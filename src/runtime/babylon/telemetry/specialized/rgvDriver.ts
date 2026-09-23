@@ -18,6 +18,7 @@ import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from '../../r
 import { readIntegerField, readStringField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
+import { publishRgvMotionFrame } from '../rgvMotionState';
 import { isConveyorRuntimeModel } from './specializedModelAssets';
 import {
   createCargoHandoffState,
@@ -39,6 +40,9 @@ import {
 /** 列候选仲裁偏好：取货对齐持有该 task 货物的 conveyor，放货对齐正在等待该 task 的 conveyor。 */
 type RgvColumnPreference = { task: string; mode: 'fetch' | 'place' };
 
+type RgvTransferMotion = { column: number; task: string; mode: 'fetch' | 'place'; velocity: number };
+type RgvMotionState = { initialized: boolean; deviceIdentity: string | null; front: RgvTransferMotion | null; back: RgvTransferMotion | null };
+
 /**
  * RGV（有轨穿梭车）遥测驱动：列号 → 列绑定实体投影定位车体；
  * go_column（WCS 目标列）非 0 时优先于 front_y/back_y 当前列作为行走目标，保证行车动画连续；
@@ -49,6 +53,8 @@ type RgvColumnPreference = { task: string; mode: 'fetch' | 'place' };
  * （conveyor task 订阅/广播状态仲裁，起转锁列即尝试交付，停转边沿兜底）；无等待方时保持停转销毁语义。
  */
 export class RgvTelemetryDriver {
+  // resetRgvTelemetryState 原地清理状态但替换位置基准，以该基准作为会话边界。
+  private readonly motionStates = new WeakMap<Vector3, RgvMotionState>();
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
 
   private get scene(): Scene {
@@ -65,18 +71,35 @@ export class RgvTelemetryDriver {
 
   /** 对单台 RGV 应用车体行走和前后工位货箱交接的遥测驱动。 */
   applyToModel(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
+    deltaSeconds = Number.isFinite(deltaSeconds) && deltaSeconds > 0 ? deltaSeconds : 0;
+    const motion = this.getRgvMotionState(model);
+    const deviceIdentity = JSON.stringify([snapshot.sourceId, snapshot.deviceType, snapshot.assetCode]);
+    if (motion.deviceIdentity !== deviceIdentity) {
+      // 重新绑定设备只清除箭头会话，不重置既有设备与货物驱动状态。
+      motion.initialized = false;
+      motion.front = null;
+      motion.back = null;
+      motion.deviceIdentity = deviceIdentity;
+    }
     this.reportRgvRuntimeState(snapshot);
     writeDeviceTelemetryMetadata(model, snapshot);
-    this.applyRgvTravelMotion(model, snapshot, deltaSeconds);
+    const travel = this.applyRgvTravelMotion(model, snapshot, deltaSeconds);
     this.applyRgvNodeMotionOffsets(model);
     this.applyRgvForkCargoMotion(model, snapshot, 'front', deltaSeconds);
     this.applyRgvForkCargoMotion(model, snapshot, 'back', deltaSeconds);
+    publishRgvMotionFrame(model, this.scene.getFrameId(), snapshot.faulted ? 0 : deltaSeconds, {
+      travel: motion.initialized ? travel : 0,
+      front: (motion.front?.velocity ?? 0) * deltaSeconds,
+      back: (motion.back?.velocity ?? 0) * deltaSeconds,
+    });
+    motion.initialized = true;
   }
 
   // ===== 车体行走 =====
 
   /** 列信号驱动车体沿行走轴（模型局部 Z）移动；command 活动期间以活动侧列号为准。 */
-  private applyRgvTravelMotion(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
+  private applyRgvTravelMotion(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): number {
+    let continuousDisplacement = 0;
     const state = model.rgvTelemetry;
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
     state.rootPosition ??= state.rootBasePosition.clone();
@@ -130,7 +153,15 @@ export class RgvTelemetryDriver {
       } else {
         const speed = this.readRgvDataDrivenNumber(model, ['motion', 'travel', 'speed'])
           ?? RGV_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND;
+        const before = state.rootPosition;
+        const beforeConstrained = this.constrainRgvTravelPosition(model, before, travelAxis);
         state.rootPosition = moveVectorTowards(state.rootPosition, state.travelTargetPosition, speed * deltaSeconds);
+        // 仅采样连续行走；未知目标仍保留原驱动行为，但不展示沿旧目标的箭头。
+        if (authoritativeColumn !== null && authoritativeColumn === state.travelTargetColumn
+          && Vector3.DistanceSquared(before, beforeConstrained) <= 1e-12) {
+          const after = this.constrainRgvTravelPosition(model, state.rootPosition, travelAxis);
+          continuousDisplacement = Vector3.Dot(after.subtract(before), travelAxis);
+        }
         if (Vector3.DistanceSquared(state.rootPosition, state.travelTargetPosition) <= 1e-12) {
           state.travelTargetPosition = null;
         }
@@ -138,6 +169,7 @@ export class RgvTelemetryDriver {
     }
 
     state.rootPosition = this.constrainRgvTravelPosition(model, state.rootPosition, travelAxis);
+    return continuousDisplacement;
   }
 
   /**
@@ -341,6 +373,14 @@ export class RgvTelemetryDriver {
     const task = normalizeCargoTask(readIntegerField(snapshot.fields, side === 'front' ? 'front_task' : 'back_task'));
     const lastCommand = side === 'front' ? state.frontLastCommand : state.backLastCommand;
     const lastMovementZ = side === 'front' ? state.frontLastMovementZ : state.backLastMovementZ;
+    const motion = this.getRgvMotionState(model);
+    const transfer = motion[side];
+    const mode = command === 1 || command === 3 ? 'fetch' : command === 2 ? 'place' : null;
+    const rollerRunning = movementZ === 1 || movementZ === 2;
+    if (snapshot.faulted || !rollerRunning || !mode || column === null
+      || (transfer && (transfer.column !== column || transfer.mode !== mode || transfer.task !== task))) {
+      motion[side] = null;
+    }
 
     if (!snapshot.faulted) {
       // command 0→1/3 边沿：取货起始，先销毁同侧旧货箱
@@ -356,7 +396,7 @@ export class RgvTelemetryDriver {
         if (command === 1 || command === 3) {
           this.beginRgvFetchTransfer(model, side, column, task, containerCode);
         } else if (command === 2) {
-          this.beginRgvPlaceTransfer(model, side, column);
+          this.beginRgvPlaceTransfer(model, side, column, task);
           // 起转锁列即仲裁交付：等待方已就绪则当场释放货物，不再等停转边沿
           this.tryDeliverRgvPlaceCargo(model, side, column ?? state.travelTargetColumn);
         }
@@ -388,6 +428,8 @@ export class RgvTelemetryDriver {
       }
     }
 
+    // 旧协议的其他非零编码仍由原货物驱动处理，箭头仅接受明确的正/反转状态。
+    if (!rollerRunning) motion[side] = null;
     this.updateRgvCargoPose(model, snapshot, side, deltaSeconds);
 
     if (side === 'front') {
@@ -402,6 +444,7 @@ export class RgvTelemetryDriver {
   /** 取货起转锁列：清理同侧旧货箱，在车体朝向列设备一侧的侧缘刷出货箱等待移入。 */
   private beginRgvFetchTransfer(model: ModelRuntimeEntry, side: RgvForkSide, column: number | null, task: string, containerCode: string): void {
     const state = model.rgvTelemetry;
+    this.getRgvMotionState(model)[side] = null;
     this.disposeRgvForkCargo(model, side);
 
     if (column === null) {
@@ -424,6 +467,7 @@ export class RgvTelemetryDriver {
       pose.position,
       this.state.rgvCargoMeshes.get(cargoKey)?.lockedWorldRotation ?? null,
     );
+    this.lockRgvTransferMotion(model, side, column, task, 'fetch', pose.position, edgePose.position);
     if (side === 'front') {
       state.frontCargoKey = cargoKey;
       state.frontCargoHoldPosition = edgePose.position;
@@ -440,7 +484,8 @@ export class RgvTelemetryDriver {
   }
 
   /** 放货起转锁列：以车体朝向列设备一侧的侧缘作为货箱移出终点；车上无货时忽略。 */
-  private beginRgvPlaceTransfer(model: ModelRuntimeEntry, side: RgvForkSide, column: number | null): void {
+  private beginRgvPlaceTransfer(model: ModelRuntimeEntry, side: RgvForkSide, column: number | null, task: string): void {
+    this.getRgvMotionState(model)[side] = null;
     const cargoKey = this.getRgvForkCargoKey(model, side);
     if (!cargoKey) return;
     if (column === null) {
@@ -462,6 +507,7 @@ export class RgvTelemetryDriver {
       pose.position,
       this.state.rgvCargoMeshes.get(cargoKey)?.lockedWorldRotation ?? null,
     );
+    this.lockRgvTransferMotion(model, side, column, task, 'place', pose.position, edgePose.position);
     if (side === 'front') {
       state.frontCargoHoldPosition = edgePose.position;
       state.frontCargoHoldRotation = edgePose.rotation;
@@ -648,6 +694,37 @@ export class RgvTelemetryDriver {
       lateralAxis.scale(edgeCoordinate - Vector3.Dot(station.position, lateralAxis)),
     );
     return { position, rotation: station.rotation };
+  }
+
+  /** 方向只在原有交接仲裁成功后锁定；外部接管清空货物引用不会清空此动作状态。 */
+  private lockRgvTransferMotion(
+    model: ModelRuntimeEntry,
+    side: RgvForkSide,
+    column: number,
+    task: string,
+    mode: 'fetch' | 'place',
+    columnPosition: Vector3,
+    edgePosition: Vector3,
+  ): void {
+    const station = this.getRgvStationPose(model, side, null).position;
+    const lateralAxis = getHorizontalModelAxis(model.root, 'x');
+    const columnOffset = Vector3.Dot(columnPosition.subtract(station), lateralAxis);
+    const transferDistance = Vector3.Dot(edgePosition.subtract(station), lateralAxis);
+    if (!Number.isFinite(columnOffset) || Math.abs(columnOffset) <= 1e-7
+      || !Number.isFinite(transferDistance) || Math.abs(transferDistance) <= 1e-7) return;
+    this.getRgvMotionState(model)[side] = {
+      column, task, mode,
+      velocity: transferDistance * (mode === 'fetch' ? -1 : 1) / RGV_CARGO_TRANSFER_SECONDS,
+    };
+  }
+
+  private getRgvMotionState(model: ModelRuntimeEntry): RgvMotionState {
+    let motion = this.motionStates.get(model.rgvTelemetry.rootBasePosition);
+    if (!motion) {
+      motion = { initialized: false, deviceIdentity: null, front: null, back: null };
+      this.motionStates.set(model.rgvTelemetry.rootBasePosition, motion);
+    }
+    return motion;
   }
 
   // ===== 列绑定解析 =====

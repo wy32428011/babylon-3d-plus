@@ -122,6 +122,9 @@ void main(void) {
   gl_FragColor = vec4(arrowColor * (1.0 + core * 0.15) * mix(0.9, 1.0, breathingFactor), alpha);
 }`;
 
+// 设备运动箭头共用同一套样式和材质程序，挂点几何由各设备独立解析。
+export { vertexSource as SURFACE_ARROW_VERTEX_SOURCE, fragmentSource as SURFACE_ARROW_FRAGMENT_SOURCE, ARROW_STYLE_UNIFORMS };
+
 type Bounds = { minimum: Vector3; maximum: Vector3 };
 type MeshBoundsCache = { mesh: AbstractMesh; matrix: Matrix | null; bounds: Bounds | null; transformed: Bounds | null };
 type SurfaceCache = {

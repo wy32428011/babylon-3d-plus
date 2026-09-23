@@ -26,7 +26,7 @@ function fixture() {
   const runtime = Object.create(SceneRuntime.prototype);
   Object.assign(runtime, {
     scene, models: new Map(), meshes: new Map(), locators: new Map(), cadReferences: new Map(),
-    modelGenerators: new Map(), lights: new Map(), syncedEntities: new Map(),
+    modelGenerators: new Map(), deviceSpawnerMarkers: new Map(), lights: new Map(), syncedEntities: new Map(),
     manualRoamSpawnRuntime: { getWorldBoundsMeshes: () => [] },
     clickEventBindingRuntime: { getWorldBoundsMeshes: () => [] },
     poiEffectRuntime: { getWorldBoundsMeshes: () => [], hasEntity: () => false },
@@ -207,14 +207,16 @@ test('加载、参数脚本初始化期间不把机身范围误报为就绪', ()
   } finally { f.close(); }
 });
 
-test('堆垛机生成下部近景锚点和模型相对侧视方向，普通模型不附带专用视角', () => {
+test('堆垛机生成下部近景锚点和模型相对端面平视方向，普通模型不附带专用视角', () => {
   const f = fixture();
   try {
     const initial = f.runtime.getEntitiesFocusBounds(['stacker']);
-    assert.ok(initial.focusView.target.y > 0 && initial.focusView.target.y < 1.5);
+    assert.ok(initial.focusView.target.y > 1.5 && initial.focusView.target.y < 2.5);
     assert.equal(initial.center.y, 5, '机身包围盒仍保留完整中心，仅相机取景使用下部锚点');
-    assert.ok(initial.focusView.beta > Math.PI * 0.44);
-    assert.equal(initial.focusView.maxRadiusMeters, 5);
+    assert.equal(initial.focusView.beta, Math.PI / 2, '镜头与目标等高，不再俯视梯子端面');
+    assert.ok(Math.abs(Math.cos(initial.focusView.alpha)) < 1e-6, '正对沿行走轴的窄端面');
+    assert.ok(Math.sin(initial.focusView.alpha) > 0.999999, '从局部 +Z 梯笼一端观察');
+    assert.equal(initial.focusView.maxRadiusMeters, 8);
     f.root.rotation.y = Math.PI / 2;
     f.root.position.set(10, 2, 4);
     const rotated = f.runtime.getEntitiesFocusBounds(['stacker']);

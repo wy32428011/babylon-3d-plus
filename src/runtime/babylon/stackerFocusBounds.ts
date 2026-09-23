@@ -8,22 +8,22 @@ import { STACKER_FALLBACK_FIXED_NODE_NAMES, STACKER_FALLBACK_TRAVEL_NODE_NAMES }
 
 const BODY_PATTERN = /dingbuhuagui|dingbu|dibu|lizhu|dianji|caozuotai|xiang|huocha|顶部|底部|立柱|电机|操作台|载货|货叉|机身|主体/i;
 
-/** 参考图采用机身侧面的小俯角近景；只对堆垛机放宽聚焦距离上限到 5m。 */
+/** 参考图采用梯笼所在端面的正向平视近景；方向随模型世界旋转变化。 */
 export function createStackerFocusView(
   model: ModelRuntimeEntry,
   bounds: RuntimeWorldBounds,
 ): Pick<SceneCameraPose, 'target' | 'alpha' | 'beta'> & { maxRadiusMeters: number } {
   const center = bounds.minimum.add(bounds.maximum).scale(0.5);
   const size = bounds.maximum.subtract(bounds.minimum);
-  // 以机身横向尺寸限制下部锚点高度，避免高立柱把近景重新拉回机身中段。
-  center.y = bounds.minimum.y + Math.min(size.y, Math.hypot(size.x, size.z)) * 0.3;
+  // 锚点抬到梯笼中部；仍按机身横向尺寸限高，避免高立柱把镜头带到整机中段。
+  center.y = bounds.minimum.y + Math.min(size.y, Math.hypot(size.x, size.z)) * 0.65;
   model.root.computeWorldMatrix(true);
-  const side = model.root.getDirection(new Vector3(-1, 0, 0));
+  const front = model.root.getDirection(new Vector3(0, 0, 1));
   return {
     target: { x: center.x, y: center.y, z: center.z },
-    alpha: Math.atan2(side.z, side.x) - Math.PI / 18,
-    beta: Math.PI * 85 / 180,
-    maxRadiusMeters: 5,
+    alpha: Math.atan2(front.z, front.x),
+    beta: Math.PI / 2,
+    maxRadiusMeters: 8,
   };
 }
 

@@ -10,6 +10,8 @@ import { useEditorStore } from '../store/editorStore';
 import type { SceneDocument } from '../model/SceneDocument';
 import { SearchableSelect } from '../ui/SearchableSelect';
 import { ConveyorSurfaceArrowsInspector } from './ConveyorSurfaceArrowsInspector';
+import { StackerMotionArrowsInspector } from './StackerMotionArrowsInspector';
+import { RgvMotionArrowsInspector } from './RgvMotionArrowsInspector';
 
 /** RGV 列绑定/提升机层绑定共用的目标选项：除自身外的 conveyor 设备。 */
 function buildConveyorTargetOptions(scene: SceneDocument, excludeEntityId: string): { id: string; name: string }[] {
@@ -537,16 +539,32 @@ function LiftLayerBindingsEditor(props: {
         </>
       ) : null}
       {binding.deviceType === 'stacker' ? (
-        <label className="number-row">
-          <span>货物竖直间隙(m)</span>
-          <input
-            type="number"
+        <>
+          <label className="number-row">
+            <span>货物竖直间隙(m)</span>
+            <input
+              type="number"
+              disabled={props.disabled}
+              step="0.005"
+              value={binding.stackerCargoGapY ?? 0}
+              onChange={(event) => commit({ stackerCargoGapY: Number(event.target.value) })}
+            />
+          </label>
+          <StackerMotionArrowsInspector
+            entityId={props.entityId}
+            config={binding.stackerMotionArrows}
             disabled={props.disabled}
-            step="0.005"
-            value={binding.stackerCargoGapY ?? 0}
-            onChange={(event) => commit({ stackerCargoGapY: Number(event.target.value) })}
+            onChange={(stackerMotionArrows) => commit({ stackerMotionArrows })}
           />
-        </label>
+        </>
+      ) : null}
+      {binding.deviceType === 'rgv' ? (
+        <RgvMotionArrowsInspector
+          entityId={props.entityId}
+          config={binding.rgvMotionArrows}
+          disabled={props.disabled}
+          onChange={(rgvMotionArrows) => commit({ rgvMotionArrows })}
+        />
       ) : null}
       <TelemetryRuntimeDiagnosticsView entityId={props.entityId} binding={binding} modelAssetCode={props.modelAssetCode} />
       <SpecializedDataDrivenSummary config={props.dataDrivenConfig} />

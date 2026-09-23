@@ -239,7 +239,7 @@ function getFocusCameraPose(
 
 
 /**
- * 透视默认聚焦包围盒中心并斜上方 45° 观察；模型可指定目标、角度和距离上限（普通 3m、堆垛机 5m）。正交保持当前方向。
+ * 透视默认聚焦包围盒中心并斜上方 45° 观察；模型可指定目标、角度和距离上限（普通 3m、堆垛机 8m）。正交保持当前方向。
  */
 export function focusArcRotateCameraOnBounds(
   camera: ArcRotateCamera,

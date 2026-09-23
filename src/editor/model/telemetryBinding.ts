@@ -1,4 +1,6 @@
 import { createDefaultConveyorSurfaceArrowsConfig, normalizeConveyorSurfaceArrowsConfig, type ConveyorSurfaceArrowsConfig } from './conveyorSurfaceArrows';
+import { normalizeStackerMotionArrowsConfig, type StackerMotionArrowsConfig } from './stackerMotionArrows';
+import { normalizeRgvMotionArrowsConfig, type RgvMotionArrowsConfig } from './rgvMotionArrows';
 
 export const DEFAULT_TELEMETRY_EXPECTED_INTERVAL_MS = 500;
 export const TELEMETRY_CONFIG_MAX_DEPTH = 8;
@@ -57,6 +59,10 @@ export type TelemetryBindingComponent = {
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
   /** 输送线专用：实例表面箭头配置；缺省不启用，实时方向和编辑预览不保存在此处。 */
   surfaceArrows?: ConveyorSurfaceArrowsConfig;
+  /** 堆垛机专用：行走、升降及双货叉的箭头外观；缺省不启用，实时运动与预览不保存。 */
+  stackerMotionArrows?: StackerMotionArrowsConfig;
+  /** RGV 专用：固定轨道行走及前后工位箭头；缺省不启用，实时运动与预览不保存。 */
+  rgvMotionArrows?: RgvMotionArrowsConfig;
   /** 输送线专用：停线且光电无货时自动销毁货物；未勾选时货物滞留，等下游订阅推送取走或新 task 复用。缺省关闭。 */
   cargoAutoDispose?: boolean;
   /** 输送线专用：起点设备——探测点未触及上游设备时允许自行创建货箱；缺省关闭。 */
@@ -234,6 +240,8 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
   const outgoingLayerBindings = normalizeColumnBindings(value.outgoingLayerBindings);
   const surfaceArrows = normalizeConveyorSurfaceArrowsConfig(value.surfaceArrows)
     ?? (deviceType === 'conveyor' ? createDefaultConveyorSurfaceArrowsConfig() : undefined);
+  const stackerMotionArrows = normalizeStackerMotionArrowsConfig(value.stackerMotionArrows);
+  const rgvMotionArrows = normalizeRgvMotionArrowsConfig(value.rgvMotionArrows);
   return {
     enabled: typeof value.enabled === 'boolean' ? value.enabled : true,
     sourceId: normalizeString(value.sourceId, 'default'),
@@ -246,6 +254,8 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     ...(incomingLayerBindings ? { incomingLayerBindings } : {}),
     ...(outgoingLayerBindings ? { outgoingLayerBindings } : {}),
     ...(surfaceArrows ? { surfaceArrows } : {}),
+    ...(stackerMotionArrows ? { stackerMotionArrows } : {}),
+    ...(rgvMotionArrows ? { rgvMotionArrows } : {}),
     ...(normalizeTrajectoryDirection(value.trajectoryDirection) ? { trajectoryDirection: value.trajectoryDirection as TelemetryBindingComponent['trajectoryDirection'] } : {}),
     ...(typeof value.cargoAutoDispose === 'boolean' ? { cargoAutoDispose: value.cargoAutoDispose } : {}),
     ...(typeof value.cargoOriginDevice === 'boolean' ? { cargoOriginDevice: value.cargoOriginDevice } : {}),

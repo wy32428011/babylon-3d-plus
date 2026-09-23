@@ -101,11 +101,11 @@ test('发布 Viewer 的货格点击继续保留单格取景方向和距离倍率
   assert.equal(options.radiusScale, CLICK_EVENT_FOCUS_RADIUS_SCALE);
 });
 
-test('堆垛机参考取景：对准下部机构、接近平视并使用5米上限，各入口一致', () => {
+test('堆垛机参考取景：对准下部机构、端面平视并使用8米上限，各入口一致', () => {
   const engine = new NullEngine({ renderWidth: 900, renderHeight: 540 });
   const scene = new Scene(engine);
   const bounds = { center: { x: 0, y: 6, z: 0 }, radiusMeters: 6.4,
-    focusView: { target: { x: 0, y: 1.2, z: 0 }, alpha: -Math.PI * 100 / 180, beta: Math.PI * 85 / 180, maxRadiusMeters: 5 } };
+    focusView: { target: { x: 0, y: 2.8, z: 0 }, alpha: Math.PI / 2, beta: Math.PI / 2, maxRadiusMeters: 8 } };
   let expected: number[] | undefined;
   try {
     for (const entry of ['editor', 'preview', 'viewer'] as const) {
@@ -117,10 +117,10 @@ test('堆垛机参考取景：对准下部机构、接近平视并使用5米上�
         focusArcRotateCameraViewOnBounds(controller, camera, engine, bounds, options);
         now = CLICK_EVENT_FOCUS_DURATION_MS;
         scene.activeCamera = camera; scene.render();
-        assert.ok(camera.target.y > 0.5 && camera.target.y < 2, '目标应下移到载货台和底座上方');
-        assert.ok(camera.beta > Math.PI * 0.44 && camera.beta < Math.PI / 2, '采用小俯角，避免45度俯视');
-        assert.ok(camera.radius === 5, '高机身的下部取景使用5米上限');
-        assert.ok(Math.abs(Math.atan2(Math.sin(camera.alpha - bounds.focusView.alpha), Math.cos(camera.alpha - bounds.focusView.alpha))) < 1e-6, '从模型侧面轻微斜看');
+        assert.ok(camera.target.y > 2 && camera.target.y < 3, '目标应落在下部梯笼中段');
+        assert.equal(camera.beta, Math.PI / 2, '正向平视梯笼端面');
+        assert.ok(camera.radius === 8, '端面取景留出梯笼与底座的观察距离');
+        assert.ok(Math.abs(Math.atan2(Math.sin(camera.alpha - bounds.focusView.alpha), Math.cos(camera.alpha - bounds.focusView.alpha))) < 1e-6, '保持模型正面方向，不增加水平偏转');
         const pose = [...camera.target.asArray(), camera.alpha, camera.beta, camera.radius];
         if (expected) {
           for (let i = 0; i < pose.length; i++) {

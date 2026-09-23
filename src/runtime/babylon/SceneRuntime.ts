@@ -95,6 +95,10 @@ import { readUtf8ResponseText } from '../../shared/text/strictUtf8';
 import type { TelemetryBindingComponent } from '../../editor/model/telemetryBinding';
 import { ConveyorSurfaceArrowRenderer } from './effects/ConveyorSurfaceArrowRenderer';
 import { ConveyorSurfaceArrowSystem } from './telemetry/ConveyorSurfaceArrowSystem';
+import { StackerMotionArrowSystem } from './telemetry/StackerMotionArrowSystem';
+import { StackerMotionArrowRenderer } from './effects/StackerMotionArrowRenderer';
+import { RgvMotionArrowSystem } from './telemetry/RgvMotionArrowSystem';
+import { RgvMotionArrowRenderer } from './effects/RgvMotionArrowRenderer';
 import {
   createModelGeneratorTargetSignature,
   createRuntimeModelAssetFromTarget,
@@ -847,6 +851,10 @@ export class SceneRuntime {
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
   private readonly conveyorSurfaceArrowSystem: ConveyorSurfaceArrowSystem;
+  private readonly stackerMotionArrowSystem: StackerMotionArrowSystem;
+  private hasStackerMotionArrows = false;
+  private readonly rgvMotionArrowSystem: RgvMotionArrowSystem;
+  private hasRgvMotionArrows = false;
   private hasConveyorSurfaceArrows = false;
   private readonly themeRuntime: SceneThemeRuntime;
   private themeSignature = '';
@@ -951,6 +959,8 @@ export class SceneRuntime {
     });
     this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(scene, this.createSpecializedTelemetryHost());
     this.conveyorSurfaceArrowSystem = new ConveyorSurfaceArrowSystem(new ConveyorSurfaceArrowRenderer(scene));
+    this.stackerMotionArrowSystem = new StackerMotionArrowSystem(new StackerMotionArrowRenderer(scene));
+    this.rgvMotionArrowSystem = new RgvMotionArrowSystem(new RgvMotionArrowRenderer(scene));
     this.deviceSpawnerRuntime = new DeviceSpawnerRuntime({
       pushLog: (message) => this.pushLog(message),
       spawnDeviceInstance: (spawner, assetCode) => this.spawnDeviceInstance(spawner, assetCode),
@@ -969,6 +979,8 @@ export class SceneRuntime {
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => {
       this.applyDeviceTelemetryFrame();
       this.updateConveyorSurfaceArrows();
+      this.updateStackerMotionArrows();
+      this.updateRgvMotionArrows();
     });
     // 跟随相机应读取本帧设备/货物运动处理后的最终位置。
     this.poiEffectRuntime.moveFrameObserverToEnd();
@@ -1362,6 +1374,8 @@ export class SceneRuntime {
     this.clearFolderGroupGizmoTarget();
     this.telemetryPreviewActive = true;
     this.conveyorSurfaceArrowSystem.clear();
+    this.stackerMotionArrowSystem.clear();
+    this.rgvMotionArrowSystem.clear();
     this.lightMarkerRuntime.setPreviewActive(true);
     this.autoPatrolMarkerRuntime.setPreviewActive(true);
     this.manualRoamSpawnRuntime.setPreviewActive(true);
@@ -1392,6 +1406,8 @@ export class SceneRuntime {
 
     this.telemetryPreviewActive = false;
     this.conveyorSurfaceArrowSystem.clear();
+    this.stackerMotionArrowSystem.clear();
+    this.rgvMotionArrowSystem.clear();
     this.alarmRuntime.reset();
     for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(this.isEntityVisible(id));
     this.lightMarkerRuntime.setPreviewActive(false);
@@ -3170,6 +3186,12 @@ export class SceneRuntime {
     });
     if (this.hasConveyorSurfaceArrows && !hasSurfaceArrows) this.conveyorSurfaceArrowSystem.clear();
     this.hasConveyorSurfaceArrows = hasSurfaceArrows;
+    const hasStackerArrows = document.entityIds.some(id => document.entities[id]?.components.telemetryBinding?.stackerMotionArrows?.enabled);
+    if (this.hasStackerMotionArrows && !hasStackerArrows) this.stackerMotionArrowSystem.clear();
+    this.hasStackerMotionArrows = hasStackerArrows;
+    const hasRgvArrows = document.entityIds.some(id => document.entities[id]?.components.telemetryBinding?.rgvMotionArrows?.enabled);
+    if (this.hasRgvMotionArrows && !hasRgvArrows) this.rgvMotionArrowSystem.clear();
+    this.hasRgvMotionArrows = hasRgvArrows;
     for (const [key, failure] of this.modelReadinessErrors) {
       if (!failure.entityIds.some(entityId => document.entities[entityId]?.components.modelAsset)) this.modelReadinessErrors.delete(key);
     }
@@ -3799,6 +3821,8 @@ export class SceneRuntime {
     for (const node of this.effectPoseNodes.values()) node.dispose();
     this.effectPoseNodes.clear();
     this.conveyorSurfaceArrowSystem.dispose();
+    this.stackerMotionArrowSystem.dispose();
+    this.rgvMotionArrowSystem.dispose();
     this.specializedTelemetryRuntime.dispose();
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
@@ -5325,6 +5349,26 @@ export class SceneRuntime {
       deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model),
       visible: this.isEntityVisible(entityId),
     })), this.telemetryPreviewActive, delta);
+  }
+
+  /** 读取本帧已执行的四路运动，只在显式启用堆垛机箭头时收集实例。 */
+  private updateStackerMotionArrows(): void {
+    if (!this.hasStackerMotionArrows) return;
+    const models = [...this.specializedTelemetryRuntime.host.collectModels()];
+    const delta = Math.min(.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
+    this.stackerMotionArrowSystem.tick(models.map(({ entityId, model }) => ({
+      entityId, model, deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model), visible: this.isEntityVisible(entityId),
+    })), this.telemetryPreviewActive, delta, this.scene.getFrameId());
+  }
+
+  /** RGV 三路箭头与设备共用类型解析；没有配置时跳过逐帧收集。 */
+  private updateRgvMotionArrows(): void {
+    if (!this.hasRgvMotionArrows) return;
+    const models = [...this.specializedTelemetryRuntime.host.collectModels()];
+    const delta = Math.min(.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
+    this.rgvMotionArrowSystem.tick(models.map(({ entityId, model }) => ({
+      entityId, model, deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model), visible: this.isEntityVisible(entityId),
+    })), this.telemetryPreviewActive, delta, this.scene.getFrameId());
   }
 
   /** 每帧把最新 MQTT 设备遥测分发到对应设备运行时。 */

@@ -30,6 +30,7 @@ import {
   type StackerTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
+import { publishStackerMotionFrame } from '../stackerMotionState';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   createCargoHandoffState,
@@ -77,6 +78,8 @@ export class StackerTelemetryDriver {
 
   /** 对单台 stacker 应用根节点、载货台和前后叉的遥测驱动；移动目标优先取 to_x/to_y/to_z 目标货格，缺省回退 front_x/front_y/front_z 当前库位。 */
   applyToModel(model: ModelRuntimeEntry, snapshot: StackerTelemetrySnapshot, deltaSeconds: number): void {
+    // 异常帧间隔不能传入插值，否则 NaN/Infinity 会污染后续遥测运行态。
+    deltaSeconds = Number.isFinite(deltaSeconds) && deltaSeconds > 0 ? deltaSeconds : 0;
     const state = model.stackerTelemetry;
     const frontCell = this.resolveStackerFrontCell(snapshot);
     this.reportStackerRuntimeState(snapshot);
@@ -96,6 +99,15 @@ export class StackerTelemetryDriver {
     // front_ 跟踪：首帧直接吸附到上报库位；后续跳变表示设备转场，快速收尾取/放动作并收叉，收回前冻结平移/升降
     this.trackStackerFrontCellChange(model, frontCell.key, frontCell.cell, frontOffsets ?? targetOffsets, frontCommand, backCommand);
 
+    // 从吸附/相位校正之后开始采样；先钳制采样基准，排除轨道或升降范围变化产生的纠偏。
+    const motionTravelAxis = getHorizontalModelAxis(model.root, 'z');
+    const previousTravelPosition = this.constrainStackerTravelPosition(model, state.rootPosition ?? state.rootBasePosition, motionTravelAxis);
+    const previousTravel = Vector3.Dot(previousTravelPosition, motionTravelAxis);
+    const previousLift = this.clampStackerLiftOffset(model, state.liftOffset);
+    const previousFrontFork = state.frontForkOffset;
+    const previousBackFork = state.backForkOffset;
+    const bodyMotionAllowed = !state.forkCatchUp && targetOffsets !== null;
+
     if (state.forkCatchUp) {
       this.applyStackerForkCatchUpRetract(model, snapshot, deltaSeconds);
     } else {
@@ -106,6 +118,14 @@ export class StackerTelemetryDriver {
     this.applyStackerNodeMotionOffsets(model);
     this.applyStackerCargoMotion(model, snapshot, frontCell.cell?.locator ?? null, frontCell.cell?.supportPosition ?? null, deltaSeconds, frontCommand, backCommand);
     this.writeStackerTelemetryMetadata(model, snapshot, frontCell.cell?.locator ?? null);
+    publishStackerMotionFrame(model, this.scene.getFrameId(), snapshot.faulted ? 0 : deltaSeconds, {
+      travel: bodyMotionAllowed
+        ? Vector3.Dot(state.rootPosition ?? state.rootBasePosition, motionTravelAxis) - previousTravel
+        : 0,
+      lift: bodyMotionAllowed ? state.liftOffset - previousLift : 0,
+      frontFork: state.frontForkOffset - previousFrontFork,
+      backFork: state.backForkOffset - previousBackFork,
+    });
   }
 
   /**
