@@ -1,3 +1,5 @@
+import { RuntimeFollowControls } from '../shared/ui/RuntimeFollowControls';
+import { configureEffectDataTransport } from '../runtime/effects/EffectDataRuntime';
 import type { AlarmActivation } from '../runtime/babylon/AlarmManagerRuntime';
 import { executeChartMarkerClick } from '../runtime/babylon/chartMarkerClick';
 import { CHART_MARKER_REFRESH_EVENT } from '../shared/chartMarkerEmbed';
@@ -441,6 +443,7 @@ export function PlayerApp() {
         const projectRuntimeConfig = await fetchDigitalTwinRuntimeConfig(baseConfig, abortController.signal);
         const parsedConfig = applyDigitalTwinRuntimeConfig(baseConfig, projectRuntimeConfig);
         if (disposed || initialLoadFailed) return;
+        configureEffectDataTransport({ apiBaseUrl: projectRuntimeConfig?.apiBaseUrl });
         publishedCache = installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href);
         interactionController = new DigitalTwinInteractionController({
           parentWindow: window.parent,
@@ -982,6 +985,7 @@ export function PlayerApp() {
         viewport?.dispose();
         clearDeploymentAssetManifest();
         publishedCache?.dispose();
+      configureEffectDataTransport(null);
       }
     };
 
@@ -1258,6 +1262,7 @@ export function PlayerApp() {
           selectedEntityIds={viewerSelectedEntityIds}
         />
       ) : null}
+      {phase === 'ready' ? <RuntimeFollowControls /> : null}
       {phase === 'ready' && manualRoamControlsVisible && config?.viewer.allowCameraControl && hasManualRoamSpawn ? (
         <ManualRoamControls
           snapshot={manualRoamSnapshot}

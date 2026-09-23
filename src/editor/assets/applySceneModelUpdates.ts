@@ -1,3 +1,5 @@
+import { collectEffectModelReferences } from '../../../electron/shared/effectDeploymentReferences';
+import { matchesModelTypeReference } from '../../../electron/shared/modelTypeIdentity';
 import type { ProjectModelAssetEntry } from '../../../electron/types';
 import { getClickEventModelResourceKey } from '../../../electron/shared/clickEventModelIdentity';
 import { collectPublishModelReferences } from '../../../electron/shared/publishModelRecovery';
@@ -58,6 +60,7 @@ export function applySceneModelUpdates(
   const next = structuredClone(scene);
   const byUrl = new Map(replacements.flatMap(replacement => replacement.sourceUrls.map(url => [url, replacement.asset] as const)));
   const { models, devices } = collectPublishModelReferences(next);
+  const previousTypes = models.map(reference => ({ ...reference.asset }));
   const templates = new Map<ProjectModelAssetEntry, ModelAssetTemplate>();
   const warnings = new Set<string>();
   let updatedCount = 0;
@@ -94,6 +97,18 @@ export function applySceneModelUpdates(
     if (asset.thumbnailUrl) device.thumbnailUrl = asset.thumbnailUrl;
     else delete device.thumbnailUrl;
     if (JSON.stringify(device) !== before) updatedCount++;
+  }
+  // 只有实际生产者的同资源更新才迁移类型引用；改生成器规则不会隐式改绑特效。
+  for (const reference of collectEffectModelReferences(next)) {
+    const previous = previousTypes.find(asset => byUrl.has(String(asset.sourceUrl)) && matchesModelTypeReference(asset, reference));
+    const asset = previous ? byUrl.get(String(previous.sourceUrl)) : undefined;
+    const template = asset ? templates.get(asset) : undefined;
+    if (!asset || !template) continue;
+    const before = JSON.stringify(reference);
+    reference.sourcePath = asset.path;
+    reference.sourceUrl = asset.sourceUrl;
+    if (template.dataPlatformModel) reference.identity = structuredClone(template.dataPlatformModel);
+    if (JSON.stringify(reference) !== before) updatedCount++;
   }
   // 新版新增 motion 时，实体配置不变，但不能继续复用不支持运动的旧合批实例。
   const updatedUrls = new Set(replacements.map(replacement => replacement.asset.sourceUrl));

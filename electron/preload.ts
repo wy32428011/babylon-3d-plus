@@ -94,6 +94,14 @@ ipcRenderer.on('data-platform:deepLinkOpen', (_event: IpcRendererEvent, payload:
 });
 
 contextBridge.exposeInMainWorld('editorApi', {
+  importCompositionPackage: () => ipcRenderer.invoke('composition:import'),
+  exportCompositionPackage: (id: string) => ipcRenderer.invoke('composition:export', id),
+  loadComposition: (id: string, revision?: string) => ipcRenderer.invoke('composition:load', id, revision),
+  listCompositions: () => ipcRenderer.invoke('composition:list'),
+  saveComposition: (request: import('./shared/compositionTypes.js').CompositionSaveRequest) => ipcRenderer.invoke('composition:save', request),
+  cancelCompositionSync: () => ipcRenderer.invoke('composition:cancel'),
+  syncCompositions: () => ipcRenderer.invoke('composition:sync'),
+  restoreComposition: (id: string, revision: string) => ipcRenderer.invoke('composition:restore', id, revision),
   version: '0.1.0',
   saveScene: (request: SaveSceneRequest): Promise<SaveSceneResult> => ipcRenderer.invoke('scene:save', request),
   loadScene: (): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:load'),
@@ -102,6 +110,8 @@ contextBridge.exposeInMainWorld('editorApi', {
   readTextFile: (request: ReadTextFileRequest): Promise<ReadTextFileResult> => ipcRenderer.invoke('file:readText', request),
   scanAssets: (): Promise<AssetEntry[]> => ipcRenderer.invoke('assets:scan'),
   getRecentWorkspaces: (): Promise<RecentWorkspacesResult> => ipcRenderer.invoke('project:getRecentWorkspaces'),
+  fetchEffectData: (request: import('./shared/effectDataContract.js').EffectDataRequest): Promise<unknown> => ipcRenderer.invoke('effect-data:fetch', request),
+  cancelEffectData: (requestId: string): Promise<boolean> => ipcRenderer.invoke('effect-data:cancel', requestId),
   getDataPlatformConfig: (): Promise<DataPlatformConfig> => ipcRenderer.invoke('data-platform:getConfig'),
   saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> =>
     ipcRenderer.invoke('data-platform:saveConfig', request),

@@ -1,0 +1,58 @@
+import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { createServer } from 'vite';
+import { chromium } from 'playwright';
+
+const output = path.resolve('output/playwright/generated-follow'); await mkdir(output, { recursive: true });
+const positions = new Float32Array([-1,-1,-1,1,-1,-1,1,1,-1,-1,1,-1,-1,-1,1,1,-1,1,1,1,1,-1,1,1]);
+const indices = new Uint16Array([0,2,1,0,3,2,4,5,6,4,6,7,0,1,5,0,5,4,3,7,6,3,6,2,1,2,6,1,6,5,0,4,7,0,7,3]);
+const binary = Buffer.concat([Buffer.from(positions.buffer), Buffer.from(indices.buffer)]);
+const gltf = { asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ name: 'Cargo', mesh: 0 }], meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1, material: 0 }] }], materials: [{ pbrMetallicRoughness: { baseColorFactor: [.1,.7,1,1], metallicFactor: 0, roughnessFactor: 1 } }], buffers: [{ byteLength: binary.length, uri: 'data:application/octet-stream;base64,' + binary.toString('base64') }], bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: positions.byteLength }, { buffer: 0, byteOffset: positions.byteLength, byteLength: indices.byteLength }], accessors: [{ bufferView: 0, componentType: 5126, count: 8, type: 'VEC3', min: [-1,-1,-1], max: [1,1,1] }, { bufferView: 1, componentType: 5123, count: 36, type: 'SCALAR' }] };
+const server = await createServer({ server: { host: '127.0.0.1', port: 53167, strictPort: true, hmr: { port: 53167 } } });
+let browser; const errors = [], results = [];
+try {
+  await server.listen(); await server.watcher.close();
+  browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets'] });
+  const page = await browser.newPage({ viewport: { width: 1140, height: 1000 } });
+  page.on('pageerror', error => errors.push(error.message));
+  await page.route('**/__generated_cargo__.gltf', route => route.fulfill({ contentType: 'model/gltf+json', body: JSON.stringify(gltf) }));
+  const html = await server.transformIndexHtml('/__generated_follow__', '<!doctype html><html><body style="background:#111;color:#eee"><script type="module" src="/tests/fixtures/generatedFollow.harness.ts"></script></body></html>');
+  await page.route('**/__generated_follow__', route => route.fulfill({ contentType: 'text/html', body: html }));
+  await page.goto(server.resolvedUrls.local[0] + '__generated_follow__', { waitUntil: 'commit' });
+  await page.waitForFunction(() => window.generatedFollow?.state().diagnostic, null, { timeout: 180000 });
+  results.push(await page.evaluate(() => window.generatedFollow.state()));
+  assert.equal(results[0].targets.length, 0);
+  await page.getByRole('button', { name: '生成 000317', exact: true }).click();
+  await page.waitForFunction(() => window.generatedFollow.state().targets[0]?.state === 'ready', null, { timeout: 45000 });
+  await page.waitForFunction(() => Math.abs(window.generatedFollow.state().camera[0] - 6) < .05, null, { timeout: 20000 });
+  const initial = await page.evaluate(() => window.generatedFollow.state()); results.push(initial);
+  assert.equal(initial.targets[0].model.deviceType, 'cargo'); assert.equal(initial.targets[0].identity, null); assert.equal(initial.targets[0].carrierIdentity.assetCode, 'carrier-001');
+  await page.getByRole('button', { name: '移动到 12', exact: true }).click();
+  await page.waitForFunction(() => Math.abs(window.generatedFollow.state().camera[0] - 12) < .05); results.push(await page.evaluate(() => window.generatedFollow.state()));
+  await page.screenshot({ path: path.join(output, 'following.png') });
+  await page.getByRole('button', { name: '销毁', exact: true }).click(); await page.waitForFunction(() => window.generatedFollow.state().targets.length === 0); results.push(await page.evaluate(() => window.generatedFollow.state()));
+  await page.getByRole('button', { name: '生成 000317', exact: true }).click(); await page.waitForFunction(() => window.generatedFollow.state().targets[0]?.state === 'ready' && Math.abs(window.generatedFollow.state().camera[0] - 6) < .05); const rebuilt = await page.evaluate(() => window.generatedFollow.state()); results.push(rebuilt);
+  assert.notEqual(rebuilt.targets[0].id, initial.targets[0].id);
+  await page.getByRole('button', { name: '停止预览', exact: true }).click(); await page.waitForFunction(() => window.generatedFollow.state().targets.length === 0);
+  await page.evaluate(() => window.generatedFollow.dispose());
+  let column = 1, present = true;
+  await page.route('**/__inventory__', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: { records: [{ result: present ? [{ containerCode: '000317', containerType: 'box', isEmpty: false, row: '1', column, layer: 1, tier: 0, stackingRow: '1', stackingColumn: column, stackingLayer: 1 }] : [] }] } }) }));
+  await page.route('**/__generated_follow__?mode=fetch', route => route.fulfill({ contentType: 'text/html', body: html }));
+  await page.goto(server.resolvedUrls.local[0] + '__generated_follow__?mode=fetch');
+  await page.waitForFunction(() => window.generatedFollow?.state().diagnostic);
+  await page.getByRole('button', { name: '同步库存', exact: true }).click();
+  await page.waitForFunction(() => window.generatedFollow.state().targets[0]?.state === 'ready' && window.generatedFollow.state().diagnostic?.selectedTargetId?.startsWith('runtime-fetch:'));
+  const fetched = await page.evaluate(() => window.generatedFollow.state()); results.push(fetched); assert.ok(fetched.targets[0].id.startsWith('runtime-fetch:'));
+  column = 3; await page.getByRole('button', { name: '同步库存', exact: true }).click();
+  await page.waitForFunction(previousX => Math.abs(window.generatedFollow.state().camera[0] - previousX) > 1, fetched.camera[0]); results.push(await page.evaluate(() => window.generatedFollow.state()));
+  await writeFile(path.join(output, 'fetch.scene.json'), await page.evaluate(() => window.generatedFollow.save()));
+  await writeFile(path.join(output, 'cargo.gltf'), JSON.stringify(gltf));
+  await page.screenshot({ path: path.join(output, 'fetch-following.png') });
+  present = false; await page.getByRole('button', { name: '同步库存', exact: true }).click(); await page.waitForFunction(() => window.generatedFollow.state().targets.length === 0);
+  present = true; await page.getByRole('button', { name: '同步库存', exact: true }).click(); await page.waitForFunction(() => window.generatedFollow.state().targets[0]?.state === 'ready');
+  await page.evaluate(() => window.generatedFollow.dispose()); assert.deepEqual(errors, []);
+  await writeFile(path.join(output, 'result.json'), JSON.stringify({ passed: true, results, errors }, null, 2));
+  console.log(JSON.stringify({ passed: true, stages: results.length, errors }));
+} catch (error) { await writeFile(path.join(output, 'failure.json'), JSON.stringify({ message: error.message, results, errors }, null, 2)); throw error; }
+finally { await browser?.close(); await server.close(); }

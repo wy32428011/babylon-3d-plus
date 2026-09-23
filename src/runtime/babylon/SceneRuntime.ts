@@ -139,6 +139,8 @@ import {
 import { resolveModelTextureAssetUrl } from '../assets/modelTextureAssetUrl';
 import { intersectWorldRayWithModelDisplayBounds } from './modelPickBounds';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
+import type { EffectRuntimeTarget } from '../../editor/model/effectConfiguration';
+import { describeGeneratedEffectTarget } from './GeneratedEffectTargets';
 import {
   captureModelTelemetryPreviewBaseline,
   restoreModelTelemetryPreviewBaseline,
@@ -459,6 +461,7 @@ export type GeneratedOutputOwnerRuntimeEntry = {
   component: ModelGeneratorComponent;
   output: ModelGeneratorOutputRuntimeEntry | null;
   activeTargetSignature: string | null;
+  activeModelTarget?: Extract<ModelGeneratorTarget, { kind: 'model' }> | null;
   loadToken: number;
   failedTargetSignatures: Set<string>;
   reportedLoadFailureKeys: Set<string>;
@@ -821,6 +824,7 @@ export class SceneRuntime {
   private readonly groupTransformPreviewObserver: Nullable<Observer<Scene>>;
   private readonly modelArrayVariantRenderSuppressionObserver: Nullable<Observer<Scene>>;
   private readonly modelArrayVariantRenderRestoreObserver: Nullable<Observer<Scene>>;
+  private readonly effectPoseNodes = new Map<string, TransformNode>();
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
   private readonly themeRuntime: SceneThemeRuntime;
@@ -881,13 +885,25 @@ export class SceneRuntime {
     this.modelSelectionOutlineLayer = createSceneSelectionHighlightLayer(scene, undefined, this.pushLog);
     this.poiEffectRuntime = new PoiEffectRuntime(scene, id => {
       if (id === ENVIRONMENT_EFFECT_TARGET_ID) return this.environmentRuntime?.getBuildingEffectTarget() ?? null;
+      const generated = this.resolveGeneratedEffectTargetNode(id);
+      if (generated) return generated;
       // 直接解析已加载实体，不扫描场景；异步模型就绪后运行时自动补绑定。
       if (!this.isEntityVisible(id)) return null;
       const model = this.models.get(id);
       // 薄实例合批共享几何，不能将一个实例的效果施加到整批。
-      if (model?.modelArrayBatch) return null;
+      if (model?.modelArrayBatch || this.syncedEntities.get(id)?.components.modelArrayInstance) {
+        const bounds = this.getEntityWorldBounds(id);
+        if (!bounds) return null;
+        let node = this.effectPoseNodes.get(id);
+        if (!node) { node = new TransformNode(id + '_effectPose', scene); this.effectPoseNodes.set(id, node); }
+        const entity = this.syncedEntities.get(id);
+        if (model) { model.root.computeWorldMatrix(true); node.position.copyFrom(model.root.getAbsolutePosition()); node.rotationQuaternion ??= Quaternion.Identity(); model.root.getWorldMatrix().decompose(node.scaling, node.rotationQuaternion); }
+        else if (entity) { const pose = entity.components.transform; node.position.copyFromFloats(pose.position.x,pose.position.y,pose.position.z); node.rotation.copyFromFloats(pose.rotation.x,pose.rotation.y,pose.rotation.z); node.scaling.copyFromFloats(pose.scale.x,pose.scale.y,pose.scale.z); }
+        node.metadata = { effectBounds: bounds };
+        return node;
+      }
       return this.meshes.get(id) ?? model?.root ?? null;
-    }, () => this.telemetryPreviewActive);
+    }, () => this.telemetryPreviewActive, false, { getRuntimeTargets: () => this.getRuntimeEffectTargets() });
     this.shadowRuntime = new SceneShadowRuntime(scene);
     this.themeRuntime = new SceneThemeRuntime(scene);
     this.lightMarkerRuntime = new EditorLightMarkerRuntime(scene);
@@ -895,6 +911,7 @@ export class SceneRuntime {
     this.manualRoamSpawnRuntime = new EditorManualRoamSpawnRuntime(scene, this.pushLog);
     this.clickEventBindingRuntime = new EditorClickEventBindingRuntime(scene);
     this.alarmRuntime = new AlarmManagerRuntime(scene, {
+      node: id => this.meshes.get(id) ?? this.models.get(id)?.root ?? null,
       meshes: id => this.models.get(id)?.meshes ?? (this.meshes.has(id) ? [this.meshes.get(id)!] : []),
       bounds: id => this.getEntityWorldBounds(id), visible: id => this.isEntityVisible(id),
       activate: event => this.onAlarmActivated?.(event), report: message => this.pushLog(message),
@@ -923,6 +940,35 @@ export class SceneRuntime {
       this.restoreSuppressedModelArrayVariantHostsAfterRender();
     });
     this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
+    // 跟随相机应读取本帧设备/货物运动处理后的最终位置。
+    this.poiEffectRuntime.moveFrameObserverToEnd();
+  }
+
+  /** 运行态目录按绑定器节流读取；普通编辑实体仍由绑定器从文档解析。 */
+  private getRuntimeEffectTargets(): readonly EffectRuntimeTarget[] {
+    if (!this.telemetryPreviewActive) return [];
+    const targets: EffectRuntimeTarget[] = [];
+    for (const owner of this.generatedOutputOwners.values()) {
+      const target = describeGeneratedEffectTarget(owner);
+      if (target) targets.push(target);
+    }
+    for (const runtime of this.locatorFetchRuntimes.values()) targets.push(...runtime.getEffectTargets());
+    return targets;
+  }
+
+  private resolveGeneratedEffectTargetNode(id: string): TransformNode | null {
+    if (!this.telemetryPreviewActive) return null;
+    const owner = this.generatedOutputOwners.get(id);
+    if (owner) {
+      if (describeGeneratedEffectTarget(owner)?.state !== 'ready' || owner.output?.kind !== 'model') return null;
+      return owner.output.model.root;
+    }
+    if (!id.startsWith('runtime-fetch:')) return null;
+    for (const runtime of this.locatorFetchRuntimes.values()) {
+      const node = runtime.resolveEffectTargetNode(id);
+      if (node) return node;
+    }
+    return null;
   }
 
   /** 构造专用遥测门面所需的宿主委托对象。 */
@@ -1223,7 +1269,7 @@ export class SceneRuntime {
       generatorComponent,
       (locator, column, layer) => this.getLocatorBoxWorldMatrix(locator, column, layer),
       (modelTarget) => this.loadModelTemplateForFetch(modelTarget),
-      { releaseAbsentSuppressedCells },
+      { releaseAbsentSuppressedCells, generatorId: generatorId ?? null },
     );
   }
 
@@ -1440,6 +1486,7 @@ export class SceneRuntime {
     groupId: string,
     entityIds: readonly string[],
     tool: 'translate' | 'rotate' = 'translate',
+    compositionPivot?: Vector3Data,
   ): TransformNode | null {
     const uniqueEntityIds = [...new Set(entityIds)].filter((entityId) => Boolean(entityId));
     if (uniqueEntityIds.length === 0) {
@@ -1476,7 +1523,8 @@ export class SceneRuntime {
     }
 
     proxy.node.setEnabled(true);
-    proxy.node.position.copyFromFloats(bounds.center.x, bounds.center.y, bounds.center.z);
+    const pivot = compositionPivot ?? bounds.center;
+    proxy.node.position.copyFromFloats(pivot.x, pivot.y, pivot.z);
     proxy.node.rotationQuaternion = null;
     proxy.node.rotation.copyFromFloats(0, 0, 0);
     proxy.node.scaling.copyFromFloats(1, 1, 1);
@@ -3083,6 +3131,8 @@ export class SceneRuntime {
     this.alarmManagerIds.clear();
     for (const id of document.entityIds) if (document.entities[id]?.components.alarmManager) this.alarmManagerIds.add(id);
     this.defaultCargoGeneratorId = document.sceneSettings.defaultCargoGeneratorId ?? null;
+    this.poiEffectRuntime.setDocument(document);
+    for (const [id, node] of this.effectPoseNodes) if (!document.entities[id]) { node.dispose(); this.effectPoseNodes.delete(id); }
     this.syncTheme(document);
     this.syncShadows(document.sceneSettings.shadows, document);
     const previousEntityStates = new Map(this.entityStates);
@@ -3681,6 +3731,8 @@ export class SceneRuntime {
       this.disposeModelGenerator(entityId, modelGenerator);
     }
     this.poiEffectRuntime.dispose();
+    for (const node of this.effectPoseNodes.values()) node.dispose();
+    this.effectPoseNodes.clear();
     this.specializedTelemetryRuntime.dispose();
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
@@ -4916,6 +4968,7 @@ export class SceneRuntime {
   ): void {
     runtimeEntry.activeSnapshot = resolution.snapshot;
     const target = resolution.target;
+    runtimeEntry.activeModelTarget = target?.kind === 'model' ? target : null;
     if (!target) {
       if (runtimeEntry.activeTargetSignature !== null || runtimeEntry.output) {
         runtimeEntry.loadToken += 1;
@@ -5369,6 +5422,8 @@ export class SceneRuntime {
     if (cargo.outputOwner) {
       cargo.outputOwner.component = component;
       cargo.outputOwner.activeSnapshot = snapshot;
+      cargo.outputOwner.metadata.containerCode = cargo.containerCode;
+      cargo.outputOwner.metadata.generatorEntityId = cargo.generatorEntityId;
       return cargo.outputOwner;
     }
 
@@ -5392,6 +5447,7 @@ export class SceneRuntime {
         cargoKind: kind,
         sourceAssetCode: cargo.assetCode,
         containerCode: cargo.containerCode,
+        generatorEntityId: cargo.generatorEntityId,
       },
       onTerminalLoadFailure: () => {
         if (cargo.outputOwner === owner) this.ensureGeneratedCargoFallback(cargo, kind);

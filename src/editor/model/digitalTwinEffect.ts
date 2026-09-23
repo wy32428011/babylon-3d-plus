@@ -1,3 +1,4 @@
+import { resolveEffectTargets } from './effectTargets';
 import type { SceneDocument } from './SceneDocument';
 import { validateLightWallPoints } from './lightWallFence';
 
@@ -136,7 +137,15 @@ export function sanitizeDigitalTwinEffectConfig(value: Partial<DigitalTwinEffect
 export function collectDigitalTwinEffectTargetIds(scene: Pick<SceneDocument, 'entityIds' | 'entities'>): Set<string> {
   const independentIds = new Set<string>();
   for (const id of scene.entityIds) {
-    const targetId = scene.entities[id]?.components.poiEffect?.visual?.targetEntityId;
+    const effect = scene.entities[id]?.components.poiEffect;
+    if (effect?.configuration) {
+      if (MODEL_EFFECT_KINDS.has(effect.effectKind)) {
+        const targets = resolveEffectTargets(scene, effect.configuration.target, effect.effectKind);
+        if (targets.status === 'resolved') for (const target of targets.ids) independentIds.add(target);
+      }
+      continue;
+    }
+    const targetId = effect?.visual?.targetEntityId;
     // 禁用和隐藏特效仍保留独立目标，切换效果时不改变模型加载拓扑。
     if (targetId) independentIds.add(targetId);
   }

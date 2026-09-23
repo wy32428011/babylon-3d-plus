@@ -1,3 +1,10 @@
+import { RuntimeFollowControls } from '../../shared/ui/RuntimeFollowControls';
+import { Color3, Constants, MeshBuilder, StandardMaterial, TransformNode, Vector3 } from '@babylonjs/core';
+import { appendEffectPathDrawingPoint, cancelEffectPathDrawing, getEffectPathDrawing, setEffectPathDrawingError, subscribeEffectPathDrawing } from '../model/effectPathDrawing';
+import { CompositionEditStatus } from '../composition/CompositionControls';
+import { COMPOSITION_DRAG, findCompositionRoot } from '../composition/composition';
+import { placeComposition } from '../composition/compositionActions';
+import type { CompositionLibraryApi } from '../../../electron/shared/compositionTypes';
 import { shouldValidateSceneModelResources } from '../assets/sceneModelSyncTransaction';
 import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
 import { executeChartMarkerClick } from '../../runtime/babylon/chartMarkerClick';
@@ -86,7 +93,6 @@ import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import { getLightEditorCapabilities } from '../model/lightEditor';
 import { SCENE_THEME_DRAG_MIME_TYPE, SCENE_THEME_PRESET_ID } from '../model/sceneTheme';
 import {
-  AUTO_PATROL_EYE_HEIGHT_METERS,
   createAutoPatrolWaypointFromWorldPose,
   getAutoPatrolWaypointWorldPose,
   validateAutoPatrolRoute,
@@ -296,6 +302,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const performanceRunSessionRef = useRef<EditorPerformanceRunSession | null>(null);
   const sceneFocusPerformanceRef = useRef<SceneFocusPerformanceMetrics | null>(null);
   const clickSnapshotRef = useRef<SceneModelSelectionPointerSnapshot | null>(null);
+  const effectDrawingPointerRef = useRef<number | null>(null);
+  const effectDrawing = useSyncExternalStore(subscribeEffectPathDrawing, getEffectPathDrawing, getEffectPathDrawing);
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
   const editRuntimeSceneDocumentRef = useRef<SceneDocument | null>(null);
   const editModeThinInstancePlanRef = useRef<EditModeModelThinInstancePlan | null>(null);
@@ -344,6 +352,56 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const runtimePerformanceEnabled = useEditorStore((state) => state.runtimePerformanceEnabled);
   const selectedEntityId = useEditorStore((state) => state.scene.selectedEntityId);
   const hierarchySelectionIds = useEditorStore((state) => state.hierarchySelectionIds);
+
+  useEffect(() => () => cancelEffectPathDrawing(), [sceneSessionId]);
+  useEffect(() => {
+    if (!effectDrawing) return;
+    const entity = sceneDocument.entities[effectDrawing.entityId];
+    if (runtimeMode !== 'edit' || selectedEntityId !== effectDrawing.entityId || !entity || entity.locked || entity.components.poiEffect?.effectKind !== effectDrawing.effectKind) cancelEffectPathDrawing();
+  }, [effectDrawing, runtimeMode, selectedEntityId, sceneDocument.entities]);
+  useEffect(() => {
+    if (!effectDrawing) {
+      const pointerId = effectDrawingPointerRef.current;
+      const canvas = canvasRef.current;
+      if (pointerId !== null && canvas?.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+      effectDrawingPointerRef.current = null;
+      return;
+    }
+    clickSnapshotRef.current = null;
+    gizmoRef.current?.cancelActiveDrag();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || !getEffectPathDrawing()) return;
+      event.preventDefault(); event.stopImmediatePropagation(); cancelEffectPathDrawing();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [effectDrawing?.entityId]);
+
+  // 绘制预览只挂在真实特效根节点下；草稿变动、切场景和取消均释放自有资源。
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const target = effectDrawing ? runtimeRef.current?.getGizmoTargetByEntityId(effectDrawing.entityId) : null;
+    if (!effectDrawing || !viewport || !target || target.isDisposed() || !effectDrawing.points.length) return;
+    const previewRoot = new TransformNode('__effectPathDrawingPreview', viewport.scene);
+    previewRoot.parent = target;
+    const tint = effectDrawing.error ? new Color3(1, .3, .2) : new Color3(.15, .85, 1);
+    const material = new StandardMaterial('__effectPathDrawingMaterial', viewport.scene);
+    material.disableLighting = true; material.emissiveColor = tint; material.disableDepthWrite = true; material.depthFunction = Constants.ALWAYS;
+    const points = effectDrawing.points.map(point => new Vector3(point.local.x, point.local.y, point.local.z));
+    target.computeWorldMatrix(true);
+    const scale = target.absoluteScaling;
+    const diameter = .3 / Math.max(.001, Math.abs(scale.x), Math.abs(scale.y), Math.abs(scale.z));
+    const markers = points.map((point, index) => {
+      const marker = MeshBuilder.CreateSphere('__effectPathDrawingPoint_' + index, { diameter, segments: 6 }, viewport.scene);
+      marker.parent = previewRoot; marker.position.copyFrom(point); marker.material = material;
+      marker.isPickable = false; marker.renderingGroupId = 3; marker.metadata = { editorOverlay: true, effectPathDrawing: true };
+      return marker;
+    });
+    const closed = effectDrawing.mode !== 'path' || sceneDocument.entities[effectDrawing.entityId]?.components.poiEffect?.configuration?.parameters.closed === true;
+    const line = points.length >= 2 ? MeshBuilder.CreateTube('__effectPathDrawingLine', { path: closed && points.length >= 3 ? [...points, points[0]] : points, radius: diameter / 7, tessellation: 6 }, viewport.scene) : null;
+    if (line) { line.parent = previewRoot; line.material = material; line.isPickable = false; line.renderingGroupId = 3; line.metadata = { editorOverlay: true, effectPathDrawing: true }; }
+    return () => { line?.dispose(false, false); for (const marker of markers) marker.dispose(false, false); material.dispose(); previewRoot.dispose(); };
+  }, [effectDrawing, viewportCamera, sceneSessionId, sceneDocument.entities]);
   const transformTool = useEditorStore((state) => state.transformTool);
   const transformSpace = useEditorStore((state) => state.transformSpace);
   const snapSettings = useEditorStore((state) => state.snapSettings);
@@ -630,6 +688,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         groupSelection.groupId,
         groupSelection.entityIds,
         groupTool,
+        groupSelection.selectionIds.length === 1 && state.scene.entities[groupSelection.selectionIds[0]]?.composition ? state.scene.entities[groupSelection.selectionIds[0]].components.transform.position : undefined,
       );
       gizmo.attachToGroupTarget(target, groupSelection.groupId, {
         rotationAxes: containsManualRoamSpawn ? ['y'] : undefined,
@@ -775,6 +834,38 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   ]);
 
   /** 记录主指针左键按下位置与 Ctrl/Cmd 状态，用于区分多选点击和相机拖拽。 */
+  function handleEffectPathPointerDownCapture(event: PointerEvent<HTMLCanvasElement>): void {
+    const drawing = getEffectPathDrawing();
+    if (!drawing || event.button !== 0 || runtimeModeRef.current !== 'edit') return;
+    event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation();
+    clickSnapshotRef.current = null;
+    effectDrawingPointerRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const runtime = runtimeRef.current;
+    const target = runtime?.getGizmoTargetByEntityId(drawing.entityId);
+    const world = runtime?.getGroundPointAtCanvasPoint(event.clientX, event.clientY, event.currentTarget);
+    if (!target || target.isDisposed() || !world) { setEffectPathDrawingError('无法取得地面落点，请调整视角或等待特效加载。'); return; }
+    const matrix = target.computeWorldMatrix(true);
+    if (Math.abs(matrix.determinant()) < 1e-12) { setEffectPathDrawingError('特效缩放过小或为零，无法转换局部坐标。'); return; }
+    const local = Vector3.TransformCoordinates(new Vector3(world.x, world.y, world.z), matrix.clone().invert());
+    if (drawing.mode === 'wall') {
+      const elevation = useEditorStore.getState().scene.entities[drawing.entityId]?.components.poiEffect?.configuration?.parameters.elevation;
+      local.y = typeof elevation === 'number' && Number.isFinite(elevation) ? elevation : 0;
+    }
+    const displayed = Vector3.TransformCoordinates(local, matrix);
+    appendEffectPathDrawingPoint({ x: displayed.x, y: displayed.y, z: displayed.z }, { x: local.x, y: local.y, z: local.z });
+  }
+  function handleEffectPathPointerMoveCapture(event: PointerEvent<HTMLCanvasElement>): void {
+    if (effectDrawingPointerRef.current !== event.pointerId) return;
+    event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation();
+  }
+  function handleEffectPathPointerUpCapture(event: PointerEvent<HTMLCanvasElement>): void {
+    if (effectDrawingPointerRef.current !== event.pointerId) return;
+    event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation();
+    effectDrawingPointerRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
   function handleCanvasPointerDown(event: PointerEvent<HTMLCanvasElement>): void {
     if (gizmoRef.current?.isPointerUsingGizmo()) {
       clickSnapshotRef.current = null;
@@ -983,10 +1074,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (isRuntimePreview && pickedEntityId) {
       autoPatrolPlaybackRef.current?.triggerManualEventsForTarget(pickedEntityId);
     }
-    selectEntity(pickedEntityId);
+    const compositionState = useEditorStore.getState();
+    const compositionRoot = pickedEntityId ? findCompositionRoot(compositionState.scene, pickedEntityId) : null;
+    selectEntity(compositionRoot && compositionState.compositionEditRootId !== compositionRoot ? compositionRoot : pickedEntityId);
   }
   /** 指针流程被浏览器取消时丢弃点击快照，并取消尚未完成的 Shift 阵列拖拽。 */
   function handleCanvasPointerCancel(): void {
+    effectDrawingPointerRef.current = null;
     clickSnapshotRef.current = null;
     gizmoRef.current?.cancelActiveDrag();
   }
@@ -1018,6 +1112,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     }
 
     const hasSupportedPayload =
+      event.dataTransfer.types.includes(COMPOSITION_DRAG) ||
       event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE) ||
       event.dataTransfer.types.includes(SKYBOX_ASSET_DRAG_MIME_TYPE) ||
       event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE);
@@ -1065,6 +1160,23 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       event.currentTarget,
     ) ?? { x: 0, y: 0, z: 0 };
 
+    const compositionPayload = event.dataTransfer.getData(COMPOSITION_DRAG);
+    if (compositionPayload) {
+      event.preventDefault(); clickSnapshotRef.current = null;
+      const session = useEditorStore.getState().sceneSessionId;
+      let payload: {id:string;revision?:string};
+      try {
+        if (compositionPayload.length > 4096) throw new Error('组合拖拽信息过长。');
+        payload = compositionPayload.startsWith('{') ? JSON.parse(compositionPayload) : {id:compositionPayload};
+        if (typeof payload.id !== 'string' || (payload.revision !== undefined && typeof payload.revision !== 'string')) throw new Error('组合拖拽信息无效。');
+      } catch (error) { useEditorStore.getState().pushLog(String(error)); return; }
+      void (window.editorApi as unknown as CompositionLibraryApi).loadComposition(payload.id, payload.revision).then(entry => {
+        if (useEditorStore.getState().sceneSessionId !== session) return;
+        if (!entry) throw new Error('组合卡片已不存在，请刷新资源库。');
+        placeComposition(entry, placementPosition);
+      }).catch(e => useEditorStore.getState().pushLog(String(e.message ?? e)));
+      return;
+    }
     const rawSkyboxPayload = event.dataTransfer.getData(SKYBOX_ASSET_DRAG_MIME_TYPE);
     const skyboxAsset = decodeSkyboxAssetDragPayload(rawSkyboxPayload);
     if (skyboxAsset) {
@@ -2120,7 +2232,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (Math.abs(targetRotation[request.axis] - currentRotation[request.axis]) <= 1e-9) return;
 
       const deltaMatrix = createEntityGroupRotationDeltaMatrix(
-        spatialInfo.center,
+        selection.selectionIds.length === 1 && state.scene.entities[selection.selectionIds[0]]?.composition ? state.scene.entities[selection.selectionIds[0]].components.transform.position : spatialInfo.center,
         currentRotation,
         targetRotation,
       );
@@ -2290,11 +2402,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (viewport && pose && entity && component && !autoPatrolCameraRequest.waypointId) {
         const previousWaypoint = component.waypoints.at(-1);
         if (previousWaypoint) {
+          // 与实际录制使用同一视角，避免固定眼高把不同楼层的节点误判为过近。
           const capturedWaypoint = createAutoPatrolWaypointFromWorldPose(
             pose,
             entity.components.transform,
-            undefined,
-            { eyeHeightMeters: AUTO_PATROL_EYE_HEIGHT_METERS },
           );
           const proximityIssue = validateAutoPatrolRoute(
             { waypoints: [previousWaypoint, capturedWaypoint] },
@@ -2818,13 +2929,23 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
   return (
     <section className={isRuntimePreview ? 'scene-panel scene-panel-preview' : 'scene-panel'}>
-      <h2>Scene</h2>
+      <h2 className="scene-title"><span>Scene</span><CompositionEditStatus /></h2>
       <div className={isRuntimePreview ? 'scene-viewport scene-viewport-preview' : 'scene-viewport'}>
         <canvas
           ref={canvasRef}
           className="scene-canvas"
           onDragOver={handleCanvasDragOver}
+          onDoubleClick={event => {
+            if (isRuntimePreview) return;
+            const id = runtimeRef.current?.pickEntityIdAtCanvasPoint(event.clientX, event.clientY, event.currentTarget);
+            const state = useEditorStore.getState(), root = id ? findCompositionRoot(state.scene, id) : null;
+            if (root) { state.setCompositionEditRoot(root); state.selectEntity(id!); }
+          }}
           onDrop={handleCanvasDrop}
+          onPointerDownCapture={handleEffectPathPointerDownCapture}
+          onPointerMoveCapture={handleEffectPathPointerMoveCapture}
+          onPointerUpCapture={handleEffectPathPointerUpCapture}
+          onDoubleClickCapture={event => { if (getEffectPathDrawing()) { event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation(); } }}
           onPointerDown={handleCanvasPointerDown}
           onPointerMove={handleCanvasPointerMove}
           onPointerUp={handleCanvasPointerUp}
@@ -2873,6 +2994,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           }}
           orientation={cameraOrientation}
         />
+        {isRuntimePreview ? <RuntimeFollowControls /> : null}
         {isRuntimePreview && hasManualRoamSpawn ? (
           <ManualRoamControls
             snapshot={manualRoamSnapshot}

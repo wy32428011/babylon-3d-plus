@@ -1,3 +1,5 @@
+import { collectEffectModelReferences } from './effectDeploymentReferences.js';
+import { matchesModelTypeReference } from './modelTypeIdentity.js';
 import type { DigitalTwinModelRecoveryResult, ProjectModelAssetEntry } from '../types.js';
 import { collectPublishModelReferences } from './publishModelRecovery.js';
 import { getClickEventModelResourceKey } from './clickEventModelIdentity.js';
@@ -11,6 +13,7 @@ export function applyPublishModelIdentityReplacements(sceneContent: string, reco
   if (!recovery.replacements.length) return sceneContent;
   const document = JSON.parse(sceneContent);
   const { models, devices } = collectPublishModelReferences(document.scene);
+  const previousTypes = models.map(reference => ({ ...reference.asset }));
   const replacements = new Map<string, ProjectModelAssetEntry>();
   for (const replacement of recovery.replacements) for (const url of replacement.sourceUrls) {
     const prior = replacements.get(url);
@@ -58,6 +61,14 @@ export function applyPublishModelIdentityReplacements(sceneContent: string, reco
     migrateOwner(device, replacement, true);
     device.dataPlatformModel = targetIdentity(replacement);
     delete device.sourceSnapshot;
+  }
+  for (const reference of collectEffectModelReferences(document.scene)) {
+    const previous = previousTypes.find(asset => used.has(String(asset.sourceUrl)) && matchesModelTypeReference(asset, reference));
+    const replacement = previous && used.has(String(previous.sourceUrl)) ? replacements.get(String(previous.sourceUrl)) : undefined;
+    if (!replacement) continue;
+    reference.sourcePath = replacement.path;
+    reference.sourceUrl = replacement.sourceUrl;
+    reference.identity = targetIdentity(replacement);
   }
   return JSON.stringify(document);
 }

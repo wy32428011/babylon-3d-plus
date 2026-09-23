@@ -6,10 +6,15 @@ import { MeshBuilder, NullEngine, Scene, ShaderMaterial, TransformNode, Vector3,
 import ts from 'typescript';
 
 const sourceUrl = new URL('../../src/runtime/babylon/effects/SpatialEffects.ts', import.meta.url);
+const shaderUrl = new URL('../../src/runtime/babylon/effects/SpatialEffectShaders.ts', import.meta.url);
 const hooks = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === './SpatialEffectShaders') return { url: shaderUrl.href, shortCircuit: true };
+    return nextResolve(specifier, context);
+  },
   load(url, context, nextLoad) {
-    if (url === sourceUrl.href) {
-      return { format: 'module', shortCircuit: true, source: ts.transpileModule(readFileSync(sourceUrl, 'utf8'), {
+    if (url === sourceUrl.href || url === shaderUrl.href) {
+      return { format: 'module', shortCircuit: true, source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), {
         compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
       }).outputText };
     }

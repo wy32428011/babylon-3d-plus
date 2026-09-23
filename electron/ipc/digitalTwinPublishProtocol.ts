@@ -17,6 +17,7 @@ export type DigitalTwinResourceKey = {
 };
 
 export type DigitalTwinResourceIds = {
+  compositionVersions?: Array<{ id: string; revision: string; contentSha256: string }>;
   modelIds: string[];
   envModelIds: string[];
   comboModelIds: string[];
@@ -47,12 +48,13 @@ export function parseDataPlatformResourceKey(value: string): DigitalTwinResource
 
 /** 扫描一个或多个场景文件，收集发布接口所需的三类共享资源 ID。 */
 export function collectDigitalTwinResourceIds(sceneContents: readonly string[]): DigitalTwinResourceIds {
+  const compositionVersions = new Map<string, { id: string; revision: string; contentSha256: string }>();
   const modelIds = new Set<string>();
   const envModelIds = new Set<string>();
   const comboModelIds = new Set<string>();
   let visited = 0;
 
-  const visit = (value: unknown, fieldName: string | null = null): void => {
+  const visit = (value: unknown, fieldName: string | null = null, owner?: Record<string, unknown>): void => {
     visited += 1;
     if (visited > 1_000_000) throw new Error('场景结构过大，无法完成资源引用扫描。');
     if (typeof value === 'string') {
@@ -65,16 +67,24 @@ export function collectDigitalTwinResourceIds(sceneContents: readonly string[]):
       return;
     }
     if (Array.isArray(value)) {
-      for (const item of value) visit(item, fieldName);
+      for (const item of value) visit(item, fieldName, owner);
       return;
     }
     if (isPlainObject(value)) {
+      if (value.schemaVersion === 1 && ((fieldName === 'composition' && owner?.isFolder === true) || (fieldName === 'compositionResource' && owner?.composition === true))) {
+        if (typeof value.resourceId !== 'string' || !/^[1-9]\d{0,19}$/.test(value.resourceId) || typeof value.revision !== 'string' || !/^[A-Za-z0-9-]{1,100}$/.test(value.revision)) throw new Error('组合尚未同步中台，请先同步组合库后发布。');
+        const contentSha256 = fieldName === 'composition' ? value.contentSha256 : owner?.contentSha256;
+        if (typeof contentSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(contentSha256)) throw new Error('组合缺少固定版本内容摘要，请重新保存组合。');
+        const key = value.resourceId + ':' + value.revision, previous = compositionVersions.get(key);
+        if (previous && previous.contentSha256 !== contentSha256) throw new Error('同一组合版本的内容摘要不一致。');
+        compositionVersions.set(key, { id: value.resourceId, revision: value.revision, contentSha256 });
+      }
       if (value.source === 'data-platform' && value.resourceType === 'ENV_MODEL') {
         const resourceId = typeof value.dataPlatformResourceId === 'string' ? value.dataPlatformResourceId.trim() : '';
         if (!/^[1-9]\d{0,63}$/.test(resourceId)) throw new Error('场景中的数据中台环境模型 ID 无效。');
         envModelIds.add(resourceId);
       }
-      for (const [childKey, child] of Object.entries(value)) visit(child, childKey);
+      for (const [childKey, child] of Object.entries(value)) visit(child, childKey, value);
     }
   };
 
@@ -91,6 +101,7 @@ export function collectDigitalTwinResourceIds(sceneContents: readonly string[]):
 
   const sortIds = (values: Set<string>): string[] => [...values].sort(compareDecimalStrings);
   return {
+    ...(compositionVersions.size ? { compositionVersions: [...compositionVersions.values()].sort((a,b) => (a.id + a.revision).localeCompare(b.id + b.revision)) } : {}),
     modelIds: sortIds(modelIds),
     envModelIds: sortIds(envModelIds),
     comboModelIds: sortIds(comboModelIds),

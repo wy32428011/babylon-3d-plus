@@ -1,3 +1,4 @@
+import { cancelCompositionSync } from './compositionRemote.js';
 import { app, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import { clearProjectAssetStoreSession } from './projectAssetStore.js';
 import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';
@@ -295,6 +296,7 @@ export function registerDataPlatformIpc(): void {
     if (isDigitalTwinPublishActive()) throw new Error('数字孪生发布正在进行，完成或取消发布后才能返回首页。');
     if (projectClosing) throw new Error('正在关闭当前项目，请稍后重试。');
     projectClosing = true;
+    cancelCompositionSync();
     try {
       resetScenePublishScope();
       for (const controller of projectMetadataControllers) controller.abort();

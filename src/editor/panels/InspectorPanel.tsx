@@ -1,3 +1,4 @@
+import { CompositionInspector } from '../composition/CompositionControls';
 import { AlarmManagerInspector } from './AlarmManagerInspector';
 import { ChartMarkerInspector } from './ChartMarkerInspector';
 import { useEffect, useState, type KeyboardEvent } from 'react';
@@ -256,6 +257,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     return (
       <section className="panel inspector-panel">
         <h2>Inspector</h2>
+        <CompositionInspector entityId={selectedEntity.id} readOnly={isLocked} />
         {isSingleFolder ? (
           <label className="inspector-row">
             <span>名称</span>

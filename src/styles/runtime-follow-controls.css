@@ -1,0 +1,43 @@
+.runtime-follow-controls {
+  position: absolute;
+  z-index: 18;
+  top: 56px;
+  left: 14px;
+  width: min(316px, calc(100% - 28px));
+  color: #deedf8;
+  background: rgba(15, 29, 40, .96);
+  border: 1px solid #365d70;
+  border-radius: 8px;
+  font: 12px/1.5 system-ui, sans-serif;
+  box-shadow: 0 6px 20px #0005;
+}
+.runtime-follow-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.runtime-follow-content { padding: 0 12px 10px; max-height: min(420px, 55vh); overflow-y: auto; }
+.runtime-follow-item { padding: 10px 0; border-top: 1px solid #355061; }
+.runtime-follow-item p { margin: 6px 0; overflow-wrap: anywhere; }
+.runtime-follow-item label { display: grid; gap: 4px; }
+.runtime-follow-item select {
+  width: 100%; min-width: 0; color: #deedf8; background: #182b38;
+  border: 1px solid #486879; border-radius: 4px; padding: 5px;
+}
+.runtime-follow-actions { display: flex; gap: 6px; margin-top: 8px; }
+.runtime-follow-actions button {
+  padding: 5px 8px; color: #deedf8; background: #203b4c;
+  border: 1px solid #486879; border-radius: 4px; cursor: pointer;
+}
+.runtime-follow-actions button:disabled { opacity: .45; cursor: default; }
+.runtime-follow-controls button:focus-visible, .runtime-follow-controls select:focus-visible { outline: 2px solid #5bc7ed; outline-offset: 2px; }
+.runtime-follow-hint { color: #acc2d0; margin: 4px 0 0; }
+@media (max-width: 640px) {
+  .runtime-follow-controls { top: 50px; left: 8px; width: min(280px, calc(100% - 16px)); }
+}

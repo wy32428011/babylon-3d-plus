@@ -1,3 +1,4 @@
+import { sanitizeEffectConfiguration } from './effectConfigurationValidation';
 import { DIGITAL_TWIN_EFFECT_DEFINITIONS, createDefaultDigitalTwinEffectConfig, isDigitalTwinEffectKind, sanitizeDigitalTwinEffectConfig } from './digitalTwinEffect';
 import { createDefaultLightWallFence, sanitizeLightWallFence } from './lightWallFence';
 import type { PoiEffectComponent, PoiEffectKind } from './components';
@@ -124,7 +125,8 @@ export function sanitizePoiEffectComponent(component: PoiEffectComponent): PoiEf
   return {
     effectKind: definition.kind,
     enabled: component.enabled !== false,
-    ...(isDigitalTwinEffectKind(definition.kind) ? { visual: sanitizeDigitalTwinEffectConfig(component.visual, definition.kind) } : {}),
+    ...(component.configuration ? { configuration: sanitizeEffectConfiguration(component.configuration, component) } : {}),
+    ...((isDigitalTwinEffectKind(definition.kind) || component.configuration) ? { visual: sanitizeDigitalTwinEffectConfig(component.visual, definition.kind) } : {}),
     ...(definition.kind === 'light-wall-fence' ? { lightWall: sanitizeLightWallFence(component.lightWall) } : {}),
     primaryColor: sanitizeHexColor(component.primaryColor, definition.defaults.primaryColor),
     secondaryColor: sanitizeHexColor(component.secondaryColor, definition.defaults.secondaryColor),

@@ -1,3 +1,4 @@
+import { compositionDescendants } from '../composition/composition';
 import { createTechBlueNightTheme, normalizeSceneTheme, TECH_BLUE_NIGHT_SHADOWS, type SceneThemeSettings } from '../model/sceneTheme';
 import { updateSceneThemeCommand } from '../commands/sceneThemeCommands';
 import { mergeSceneModelAssetUpdate as mergeModelAssetUpdate } from '../assets/mergeModelAssetUpdate';
@@ -157,7 +158,6 @@ import {
 } from '../model/manualRoamSpawn';
 import type { Vector3Data } from '../model/math';
 import {
-  AUTO_PATROL_EYE_HEIGHT_METERS,
   AUTO_PATROL_MAX_WAYPOINTS,
   cloneAutoPatrolComponent,
   createAutoPatrolWaypointFromWorldPose,
@@ -479,6 +479,11 @@ const ENTITY_ARRAY_DIRECTION_VECTORS: Record<EntityArrayDirection, Vector3Data> 
 };
 
 type EditorState = {
+  compositionEditRootId: string | null;
+  compositionSaveRequest: { id: string; sceneSessionId: string; ids: string[] } | null;
+  requestCompositionSave: () => void;
+  setCompositionEditRoot: (id: string | null) => void;
+  commitCompositionEdit: (before: SceneDocument, after: SceneDocument, label: string) => boolean;
   scene: SceneDocument;
   sceneSessionId: string;
   persistedSceneContent: string;
@@ -725,6 +730,8 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     runtimePerformanceEnabled: false,
     shadowBakeRequest: null,
     shadowBakeStatus: { phase: 'idle', message: null },
+    compositionEditRootId: null,
+    compositionSaveRequest: null,
     persistedSceneContent: serializeScene(scene),
     history: createCommandHistory(),
     latestSceneResourceTransaction: null,
@@ -1872,6 +1879,7 @@ function prepareEntityClipboardPaste(
         const folder: Entity = {
           ...source,
           id: duplicatedId,
+          ...(source.composition ? { composition: { ...source.composition, instanceId: createId('composition') } } : {}),
           name: createUniqueEntityName(existingNames, source.name),
           isFolder: true,
           parentId: duplicatedParentId,
@@ -1916,6 +1924,10 @@ function prepareEntityClipboardPaste(
     for (const slot of entity.components.alarmManager?.targets ?? []) {
       slot.entityId = duplicatedIdBySourceId.get(slot.entityId) ?? slot.entityId;
     }
+    const effectTarget = entity.components.poiEffect?.configuration?.target;
+    if (effectTarget?.entityId) effectTarget.entityId = duplicatedIdBySourceId.get(effectTarget.entityId) ?? effectTarget.entityId;
+    if (effectTarget?.generatorId) effectTarget.generatorId = duplicatedIdBySourceId.get(effectTarget.generatorId) ?? effectTarget.generatorId;
+    if (effectTarget?.model?.entityIds) effectTarget.model.entityIds = effectTarget.model.entityIds.map(id => duplicatedIdBySourceId.get(id) ?? id);
     const effectVisual = entity.components.poiEffect?.visual;
     if (effectVisual?.targetEntityId) {
       effectVisual.targetEntityId = duplicatedIdBySourceId.get(effectVisual.targetEntityId) ?? effectVisual.targetEntityId;
@@ -3713,11 +3725,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
 
       const before = cloneAutoPatrolComponent(current);
+      // 录制保留当前取景；第一人称眼高只在播放切换视角时应用。
       const captured = createAutoPatrolWaypointFromWorldPose(
         pose,
         entity.components.transform,
         request.waypointId ?? undefined,
-        { eyeHeightMeters: AUTO_PATROL_EYE_HEIGHT_METERS },
       );
       let selectedWaypointId = captured.id;
       let waypoints: AutoPatrolWaypoint[];
@@ -4857,6 +4869,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     return commitResult;
   },
+  compositionEditRootId: null,
+  compositionSaveRequest: null,
+  requestCompositionSave: () => set(state => state.runtimeMode !== 'edit' ? state : { compositionSaveRequest: { id: createId('composition_save'), sceneSessionId: state.sceneSessionId, ids: getUnlockedSelectionIds(state) } }),
+  setCompositionEditRoot: (id) => set({ compositionEditRootId: id }),
+  commitCompositionEdit: (before, after, label) => {
+    let committed = false;
+    set(state => {
+      if (state.runtimeMode !== 'edit' || state.scene !== before) return state;
+      const result = executeCommand(state.scene, state.history, updateSceneDocumentCommand(label, () => after));
+      committed = true;
+      return { ...result, hierarchySelectionIds: after.selectedEntityId === before.selectedEntityId ? sanitizeHierarchySelection(after, state.hierarchySelectionIds) : after.selectedEntityId ? [after.selectedEntityId] : [], logs: prependLog(state.logs, label) };
+    });
+    return committed;
+  },
   groupSelectedEntities: () => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '群组对象');
@@ -5012,7 +5038,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           logs: prependLog(state.logs, command.label),
         };
       }
-      const deletingIds = getUnlockedSelectionIds(state);
+      const originalDeletingIds = getUnlockedSelectionIds(state);
+      const deletingIds = [...new Set(originalDeletingIds.flatMap(id => state.scene.entities[id]?.composition
+        ? compositionDescendants(state.scene, [id]).map(e => e.id) : [id]))];
+      if (deletingIds.some(id => isEntityEffectivelyLocked(state.scene.entities, state.scene.entities[id]))) return state;
       if (deletingIds.length === 0) return state;
 
       const command = updateSceneDocumentCommand('删除对象', (scene) => deleteEntitiesInScene(scene, deletingIds));

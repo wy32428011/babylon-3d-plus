@@ -1,3 +1,4 @@
+import { collectEffectModelReferences } from '../shared/effectDeploymentReferences.js';
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -164,7 +165,7 @@ export async function createSourceResourcePlan(bundles: readonly SourceResourceB
   }
 
   /** 同一实例若把同名包的两版本拼接在一起，无法确定完整运行语义，必须指出具体字段。 */
-  function validateModelReferences(value: unknown, location = 'scene', field = ''): void {
+  function validateModelReferences(value: unknown, location = 'scene', field = '', effectMetadata = new WeakSet(collectEffectModelReferences(value))): void {
     if (typeof value === 'string' && (value.startsWith(LOCAL_URL) || PATH_FIELDS.has(field) || URL_FIELDS.has(field))) {
       const found = reference(value);
       if (found && (!found.kind || ((URL_FIELDS.has(field) || ['sourcePath', 'scriptPaths', 'metadataPath', 'thumbnailPath'].includes(field)) && found.kind !== 'file'))) {
@@ -174,6 +175,7 @@ export async function createSourceResourcePlan(bundles: readonly SourceResourceB
     }
     if (!value || typeof value !== 'object') return;
     const object = value as Record<string, unknown>;
+    if (effectMetadata.has(object)) return;
     const source = typeof object.sourcePath === 'string' ? reference(object.sourcePath) : null;
     if (source && /\.(glb|gltf)$/i.test(source.destination)) {
       const visit = (child: unknown, field: string, at: string): void => {
@@ -185,7 +187,7 @@ export async function createSourceResourcePlan(bundles: readonly SourceResourceB
       };
       visit(object, '', location);
     }
-    for (const [name, child] of Object.entries(object)) validateModelReferences(child, `${location}.${name}`, Array.isArray(value) ? field : name);
+    for (const [name, child] of Object.entries(object)) validateModelReferences(child, `${location}.${name}`, Array.isArray(value) ? field : name, effectMetadata);
   }
   /** 仅逆向映射本清单分配的目录，用于验证改名没有改变烘焙依赖的资源语义。 */
   function originalReference(value: string): string {

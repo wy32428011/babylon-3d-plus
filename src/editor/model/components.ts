@@ -1,3 +1,5 @@
+import type { EffectConfiguration } from './effectConfiguration';
+import type { CompositionResourceReference } from '../../../electron/shared/compositionTypes';
 import type { DigitalTwinEffectConfig, DigitalTwinEffectKind } from './digitalTwinEffect';
 import type { DataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type { AlarmManagerComponent } from './alarmManager';
@@ -125,7 +127,7 @@ export type ModelScriptAsset = {
 };
 
 /** 发布工程包固定的完整模型包内容版本，后台同步不得替换。 */
-export type ModelSourceSnapshot = { contentSha256: string };
+export type ModelSourceSnapshot = { contentSha256: string; composition?: true; compositionResource?: CompositionResourceReference };
 
 /** 可复用的模型资产模板，不包含实例级 assetCode。 */
 export type ModelAssetTemplate = {
@@ -260,6 +262,7 @@ export type LightWallFenceConfig = { height: number; opacity: number; points: Li
 /** EFF 实体只持久化可编辑参数，Babylon 运行时资源不进入场景文件。 */
 export type PoiEffectComponent = {
   effectKind: PoiEffectKind;
+  configuration?: EffectConfiguration;
   lightWall?: LightWallFenceConfig;
   visual?: DigitalTwinEffectConfig;
   enabled: boolean;

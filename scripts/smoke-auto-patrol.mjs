@@ -14,7 +14,7 @@ const server = await createServer({
 function assertVectorClose(actual, expected, message) {
   assert.ok(actual, message);
   for (const axis of ['x', 'y', 'z']) {
-    assert.ok(Math.abs(actual[axis] - expected[axis]) <= 1e-6, `${message} ${axis}`);
+    assert.ok(Math.abs(actual[axis] - expected[axis]) <= 1e-6, `${message} ${axis}: ${actual[axis]} != ${expected[axis]}`);
   }
 }
 
@@ -28,6 +28,8 @@ try {
   } = await server.ssrLoadModule('/src/editor/model/SceneDocument.ts');
   const {
     cloneAutoPatrolComponent,
+    getAutoPatrolWaypointWorldPose,
+    getSceneCameraPosition,
   } = await server.ssrLoadModule('/src/editor/model/autoPatrol.ts');
   const { serializeScene, deserializeScene } = await server.ssrLoadModule('/src/editor/project/SceneSerializer.ts');
   const { SceneRuntime } = await server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts');
@@ -53,6 +55,33 @@ try {
   assert.equal(state.scene.entities[firstRouteId].name, '自动巡检');
   assert.deepEqual(state.scene.entities[firstRouteId].components.transform.scale, { x: 1, y: 1, z: 1 });
 
+  // 非零路线原点和旋转下仍须完整还原当前世界取景。
+  useEditorStore.setState((current) => ({
+    scene: {
+      ...current.scene,
+      entities: {
+        ...current.scene.entities,
+        [firstRouteId]: {
+          ...current.scene.entities[firstRouteId],
+          components: {
+            ...current.scene.entities[firstRouteId].components,
+            transform: {
+              position: { x: 10, y: 3, z: -5 },
+              rotation: { x: 0.12, y: 0.7, z: -0.08 },
+              scale: { x: 1, y: 1, z: 1 },
+            },
+          },
+        },
+      },
+    },
+  }));
+  const assertWaypointPose = (sceneDocument, index, expected, message) => {
+    const route = sceneDocument.entities[firstRouteId];
+    const actual = getAutoPatrolWaypointWorldPose(route.components.autoPatrol.waypoints[index], route.components.transform);
+    assertVectorClose(getSceneCameraPosition(actual), getSceneCameraPosition(expected), `${message}相机位置`);
+    assertVectorClose(actual.target, expected.target, `${message}观察目标`);
+  };
+
   const captures = [
     { alpha: 0.4, beta: 1.1, radius: 30, target: { x: 2, y: 3, z: 4 } },
     { alpha: 1.7, beta: 0.8, radius: 18, target: { x: 20, y: 6, z: -12 } },
@@ -63,6 +92,8 @@ try {
     const request = useEditorStore.getState().autoPatrolCameraRequest;
     assert.equal(request?.kind, 'capture');
     useEditorStore.getState().consumeAutoPatrolCameraRequest(request.id, pose);
+    const capturedScene = useEditorStore.getState().scene;
+    assertWaypointPose(capturedScene, capturedScene.entities[firstRouteId].components.autoPatrol.waypoints.length - 1, pose, '录制保留当前');
   }
 
   state = useEditorStore.getState();
@@ -82,15 +113,21 @@ try {
   useEditorStore.getState().requestAutoPatrolCapture();
   const overwriteRequest = useEditorStore.getState().autoPatrolCameraRequest;
   assert.equal(overwriteRequest?.kind, 'capture');
+  const overwritePose = { alpha: 2.1, beta: 1.2, radius: 24, target: { x: -8, y: 4, z: 16 } };
   useEditorStore.getState().consumeAutoPatrolCameraRequest(
     overwriteRequest.id,
-    { alpha: 2.1, beta: 1.2, radius: 24, target: { x: -8, y: 4, z: 16 } },
+    overwritePose,
   );
   firstComponent = useEditorStore.getState().scene.entities[firstRouteId].components.autoPatrol;
   assert.equal(firstComponent.waypoints.length, 2);
   assert.equal(firstComponent.waypoints[0].id, overwriteWaypointId);
   assert.equal(firstComponent.waypoints[0].travelDurationSeconds, 3);
   assert.equal(firstComponent.waypoints[0].dwellSeconds, 2);
+  assertWaypointPose(useEditorStore.getState().scene, 0, overwritePose, '覆盖保留当前');
+  useEditorStore.getState().undo();
+  assertWaypointPose(useEditorStore.getState().scene, 0, captures[0], '撤销恢复原');
+  useEditorStore.getState().redo();
+  assertWaypointPose(useEditorStore.getState().scene, 0, overwritePose, '重做恢复覆盖');
 
   useEditorStore.getState().updateSelectedAutoPatrol({ ...firstComponent, autoStart: true }, '设置自动启动');
   assert.equal(useEditorStore.getState().scene.entities[firstRouteId].components.autoPatrol.autoStart, true);
@@ -132,6 +169,8 @@ try {
   parsed.scene.entities[firstRouteId].components.autoPatrol.autoStart = true;
   parsed.scene.entities[secondRouteId].components.autoPatrol.autoStart = true;
   const restored = deserializeScene(JSON.stringify(parsed));
+  assertWaypointPose(restored, 0, overwritePose, '保存重开保留覆盖');
+  assertWaypointPose(restored, 1, captures[1], '保存重开保留新增');
   assert.deepEqual(restored.entities[secondRouteId].components.transform.scale, { x: 1, y: 1, z: 1 });
   const autoStartRoutes = restored.entityIds.filter((entityId) => restored.entities[entityId]?.components.autoPatrol?.autoStart);
   assert.equal(autoStartRoutes.length, 1);

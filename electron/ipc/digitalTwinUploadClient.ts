@@ -99,7 +99,7 @@ export type DigitalTwinPreparePayload = {
 
 export type DigitalTwinResourceSnapshot = {
   resourceSnapshotToken: string; resourceRevision: string;
-  resources: Array<{ kind: 'model' | 'combo' | 'environment'; resourceId: string; revision: string;
+  resources: Array<{ kind: 'model' | 'combo' | 'environment' | 'composition'; resourceId: string; revision: string;
     files: Array<{ role: string; fileName: string; fileUrl: string; fileId: string; sha256: string; size: string }> }>;
 };
 

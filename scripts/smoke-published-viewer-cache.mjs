@@ -55,7 +55,8 @@ let browser;
 try {
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   browser=await chromium.launch({executablePath:process.env.CHROME_PATH??'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true});
-  const page=await browser.newPage({viewport:{width:1000,height:700}});
+  const context=await browser.newContext({viewport:{width:1000,height:700}});
+  const page=await context.newPage();
   page.setDefaultTimeout(120000);
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.addInitScript(()=>{
@@ -93,6 +94,29 @@ try {
     const sample={name,decodedReads,decodedWrites,modelDownloads:counts.get('/published/project/assets/model.glb'),runtimeConfigReads:counts.get('/api/runtime-config')};
     samples.push(sample);console.log(JSON.stringify(sample));
   }
+
+  const warnings = [];
+  page.on('console', message => { if(message.type()==='warning' && message.text().includes('持久缓存不可用')) warnings.push(message.text()); });
+  await page.addInitScript(() => {
+    IDBDatabase.prototype.transaction = function() { throw new DOMException('测试存储不可用', 'InvalidStateError'); };
+  });
+  await page.reload();
+  await page.locator('.player-performance').waitFor({state:'visible'});
+  await page.getByRole('progressbar').waitFor({state:'detached'});
+  assert.equal(await page.locator('.player-status-blocked').count(),0);
+  assert.equal(warnings.length,1,'缓存故障只警告一次');
+  assert.equal(counts.get('/published/project/assets/model.glb'),3,'缓存故障回退正常网络加载');
+  await page.screenshot({path:path.join(output,'storage-unavailable.png')});
+  samples.push({name:'storage-unavailable',warnings:warnings.length,modelDownloads:3});
+  const recovered = await page.context().newPage();
+  recovered.setDefaultTimeout(120000);
+  recovered.on('pageerror',error=>errors.push(error.message));
+  await recovered.goto(url);
+  await recovered.locator('.player-performance').waitFor({state:'visible'});
+  await recovered.getByRole('progressbar').waitFor({state:'detached'});
+  assert.equal(counts.get('/published/project/assets/model.glb'),3,'故障降级不删除已有缓存');
+  samples.push({name:'storage-recovered',modelDownloads:3});
+  await recovered.close();
   assert.deepEqual(errors,[]);
   await writeFile(path.join(output,'report.json'),JSON.stringify({samples,errors},null,2));
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

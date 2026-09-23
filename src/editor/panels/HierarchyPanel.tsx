@@ -1,3 +1,4 @@
+import { COMPOSITION_SELECTION_DRAG } from '../composition/composition';
 import {
   useEffect,
   useLayoutEffect,
@@ -435,6 +436,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
 
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData(HIERARCHY_DRAG_MIME_TYPE, JSON.stringify({ ids }));
+    event.dataTransfer.setData(COMPOSITION_SELECTION_DRAG, JSON.stringify({ ids, sessionId: useEditorStore.getState().sceneSessionId }));
     event.dataTransfer.setData('text/plain', ids.map((entityId) => entities[entityId]?.name).filter(Boolean).join(', '));
   }
 
@@ -763,6 +765,8 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
             <span>群组对象</span>
             <kbd>Ctrl+G</kbd>
           </button>
+          <button className="hierarchy-context-menu-item" disabled={!canMutateRuntimeSelection} role="menuitem" type="button"
+            onClick={() => runContextMenuAction(() => useEditorStore.getState().requestCompositionSave())}>保存为组合模型</button>
           <button
             className="hierarchy-context-menu-item"
             disabled={!canUngroup}

@@ -1,0 +1,18 @@
+.effect-data-inspector { min-width: 0; }
+.effect-data-inspector details { margin: 8px 0; }
+.effect-data-inspector summary { cursor: pointer; font-weight: 600; padding: 5px 0; }
+.effect-data-inspector .inspector-row, .effect-data-inspector .number-row { display: grid; grid-template-columns: minmax(100px, 40%) minmax(0, 1fr); min-width: 0; align-items: center; gap: 8px; }
+.effect-data-inspector .inspector-row > span, .effect-data-inspector .number-row > span { max-width: none; width: auto; overflow-wrap: anywhere; }
+.effect-data-inspector input, .effect-data-inspector select, .effect-data-inspector textarea { min-width: 0; max-width: 100%; }
+.effect-data-inspector textarea { display: block; box-sizing: border-box; width: 100%; resize: vertical; font: 11px/1.5 monospace; }
+.effect-data-mapping { padding: 8px; border: 1px solid #304359; border-radius: 4px; margin: 7px 0; }
+.effect-data-line, .effect-data-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.effect-data-line { justify-content: space-between; margin-bottom: 4px; }
+.effect-data-actions { margin-top: 10px; }
+.effect-data-two-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.effect-data-two-columns .number-row { display: flex; flex-direction: column; align-items: stretch; }
+.effect-data-checkbox { display: flex; align-items: flex-start; gap: 6px; margin: 8px 0; }
+.effect-data-diagnostic { margin-top: 8px; padding: 8px; background: #15202c; border-radius: 4px; overflow-wrap: anywhere; }
+.effect-data-diagnostic p, .effect-data-inspector .muted { font-size: 11px; line-height: 1.5; }
+.effect-data-diagnostic pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; font-size: 11px; margin-bottom: 0; }
+.effect-data-error { color: #ffb1a8; font-size: 11px; line-height: 1.5; }

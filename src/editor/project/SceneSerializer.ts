@@ -1,3 +1,6 @@
+import { validateEffectConfiguration } from '../model/effectConfigurationValidation';
+import type { EffectConfiguration } from '../model/effectConfiguration';
+import { normalizeCompositionInstance } from '../composition/composition';
 import { normalizeLightSettings } from '../model/lightSettings';
 import { isDigitalTwinEffectKind, validateDigitalTwinEffectConfig, type DigitalTwinEffectConfig } from '../model/digitalTwinEffect';
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
@@ -553,7 +556,7 @@ function normalizeEntity(value: unknown): Entity {
   const isFolder = assertOptionalBoolean(entity.isFolder, false);
   const components = normalizeComponents(entity.components, id);
 
-  if (isFolder && hasRuntimeComponent(components)) {
+  if ((entity.composition !== undefined && !isFolder) || (isFolder && hasRuntimeComponent(components))) {
     throwUnsupportedSceneFileError();
   }
 
@@ -561,6 +564,8 @@ function normalizeEntity(value: unknown): Entity {
     id,
     name: assertString(entity.name),
     isFolder,
+    ...(entity.composition !== undefined ? { composition: normalizeCompositionInstance(entity.composition, components.transform) } : {}),
+    ...(entity.compositionNodeId !== undefined ? { compositionNodeId: assertString(entity.compositionNodeId) } : {}),
     visible: assertOptionalBoolean(entity.visible, true),
     locked: assertOptionalBoolean(entity.locked, false),
     parentId: assertNullableString(entity.parentId),
@@ -905,8 +910,11 @@ function normalizePoiEffect(value: unknown): PoiEffectComponent {
     throwUnsupportedSceneFileError();
   }
 
+  if (poiEffect.configuration !== undefined) {
+    try { validateEffectConfiguration(poiEffect.configuration, poiEffect.effectKind); } catch { throwUnsupportedSceneFileError(); }
+  }
   let visual: DigitalTwinEffectConfig | undefined;
-  if (isDigitalTwinEffectKind(poiEffect.effectKind) && poiEffect.visual !== undefined) {
+  if ((isDigitalTwinEffectKind(poiEffect.effectKind) || poiEffect.configuration) && poiEffect.visual !== undefined) {
     try { validateDigitalTwinEffectConfig(poiEffect.visual, poiEffect.effectKind); }
     catch { throwUnsupportedSceneFileError(); }
     visual = poiEffect.visual as DigitalTwinEffectConfig;
@@ -928,6 +936,7 @@ function normalizePoiEffect(value: unknown): PoiEffectComponent {
   return sanitizePoiEffectComponent({
     ...(lightWall ? { lightWall } : {}),
     ...(visual ? { visual } : {}),
+    ...(poiEffect.configuration ? { configuration: poiEffect.configuration as EffectConfiguration } : {}),
     effectKind: poiEffect.effectKind,
     enabled: assertOptionalBoolean(poiEffect.enabled, true),
     primaryColor: poiEffect.primaryColor,

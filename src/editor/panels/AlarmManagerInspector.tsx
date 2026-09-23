@@ -1,9 +1,9 @@
 import { useEffect, useState, type DragEvent } from 'react';
 import type { Entity } from '../model/Entity';
 import type { ChartMarkerThemeScreen, ModelGeneratorTarget } from '../model/components';
-import { ALARM_MAX_TARGETS, normalizeAlarmManager, resizeAlarmTargets, type AlarmManagerComponent } from '../model/alarmManager';
+import { ALARM_MAX_TARGETS, isAlarmAppearanceEffectKind, normalizeAlarmManager, resizeAlarmTargets, type AlarmManagerComponent } from '../model/alarmManager';
 import { createModelGeneratorTargetFromAsset } from '../model/modelGenerator';
-import { decodeModelAssetDragPayload, MODEL_ASSET_DRAG_MIME_TYPE } from '../assets/AssetDatabase';
+import { decodeModelAssetDragPayload, MODEL_ASSET_DRAG_MIME_TYPE, BUILT_IN_ASSET_DRAG_MIME_TYPE, decodeBuiltInAssetDragPayload } from '../assets/AssetDatabase';
 import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
 import { useEditorStore } from '../store/editorStore';
 import { SearchableSelect } from '../ui/SearchableSelect';
@@ -11,6 +11,7 @@ import { AlarmCustomPropertyDiagnostics } from './AlarmCustomPropertyDiagnostics
 import { ChartMarkerInspector } from './ChartMarkerInspector';
 import type { DataPlatformChartAssetEntry } from '../assets/dataPlatformChartLibrary';
 import '../../styles/alarm-manager.css';
+import { createDefaultPoiEffectComponent, getPoiEffectDefinition } from '../model/poiEffect';
 
 type AlarmChartApi = {
   listDataPlatformCharts?: () => Promise<{ charts: DataPlatformChartAssetEntry[] }>;
@@ -34,6 +35,27 @@ function ModelSlot({ label, value, disabled, onChange }: { label: string; value:
       onDragLeave={event => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setOver(false); }} onDrop={drop}>
       <span className="model-generator-target-text"><strong>{value?.displayName || '从模型库拖入模型'}</strong></span>
       <button className="model-generator-clear-button" type="button" disabled={disabled || !value} aria-label={'清空' + label} onClick={() => onChange(null)}>×</button>
+    </div>
+    {error ? <p role="alert" className="chart-marker-error">{error}</p> : null}
+  </div>;
+}
+
+function EffectSlot({ config, disabled, onChange }: { config: AlarmManagerComponent; disabled: boolean; onChange: (patch: Partial<AlarmManagerComponent>) => void }) {
+  const [over, setOver] = useState(false);
+  const [error, setError] = useState('');
+  const value = config.appearanceEffect;
+  return <div>
+    <div className={'alarm-model-slot model-generator-target-slot' + (over ? ' model-generator-target-slot-active' : '')} role="group" aria-label="报警外观特效"
+      onDragOver={event => { event.preventDefault(); event.stopPropagation(); const accepted = !disabled && event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE); event.dataTransfer.dropEffect = accepted ? 'copy' : 'none'; setOver(accepted); }}
+      onDragLeave={event => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setOver(false); }}
+      onDrop={event => {
+        event.preventDefault(); event.stopPropagation(); setOver(false); if (disabled) return;
+        const payload = decodeBuiltInAssetDragPayload(event.dataTransfer.getData(BUILT_IN_ASSET_DRAG_MIME_TYPE));
+        if (payload?.kind !== 'poi-effect' || !isAlarmAppearanceEffectKind(payload.effectKind)) { setError('请从特效库拖入可依附设备的 EFF 特效；场景环境、镜头和业务组件入口不适用。'); return; }
+        setError(''); onChange({ appearanceEffect: createDefaultPoiEffectComponent(payload.effectKind), appearanceModel: null });
+      }}>
+      <span className="model-generator-target-text"><strong>{value ? getPoiEffectDefinition(value.effectKind).name : config.appearanceModel ? config.appearanceModel.displayName + '（旧版模型外观）' : '从特效库拖入特效'}</strong></span>
+      <button className="model-generator-clear-button" type="button" disabled={disabled || (!value && !config.appearanceModel)} aria-label="清空报警外观特效" onClick={() => { setError(''); onChange({ appearanceEffect: null, appearanceModel: null }); }}>×</button>
     </div>
     {error ? <p role="alert" className="chart-marker-error">{error}</p> : null}
   </div>;
@@ -108,8 +130,8 @@ export function AlarmManagerInspector({ entity, disabled }: { entity: Entity; di
         {c.warehouseAlarm ? <p className="muted">已启用仓库告警，命中自定义条件时优先使用仓库告警主题；只需普通火警时可关闭仓库告警。</p> : null}
       </>}
       <label className="inspector-row"><span>覆盖颜色</span><input type="color" value={c.overrideColor} onChange={event => commit({ overrideColor: event.target.value })} /></label>
-      <div className="inspector-row"><span>外观模型</span><ModelSlot label="报警外观模型" value={c.appearanceModel} disabled={disabled} onChange={appearanceModel => commit({ appearanceModel })} /></div>
-      <p className="muted">外观模型为空时使用内置火焰；报警解除后自动移除并恢复设备颜色。</p>
+      <div className="inspector-row"><span>外观特效</span><EffectSlot config={c} disabled={disabled} onChange={commit} /></div>
+      <p className="muted">从特效库拖入 EFF；报警时依附到各自绑定设备并随设备移动，解除后自动移除。为空时使用内置火焰；模型表面特效优先显示自身外观。</p>
       {themeField('告警主题', 'theme')}
       <label className="inspector-row"><span>显示图表立标</span><input type="checkbox" checked={c.showMarker} onChange={event => commit({ showMarker: event.target.checked })} /></label>
       {c.showMarker ? <>

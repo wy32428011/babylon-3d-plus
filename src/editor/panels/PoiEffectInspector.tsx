@@ -1,3 +1,5 @@
+import { EffectConfigurationInspector } from './EffectConfigurationInspector';
+import { EffectPathDrawingControls } from './EffectPathDrawingControls';
 import { ENVIRONMENT_EFFECT_TARGET_ID, isEnvironmentBuildingEffectKind } from '../model/environmentBuildingEffect';
 import { LightWallFenceInspector } from './LightWallFenceInspector';
 import { DigitalTwinEffectInspector } from './DigitalTwinEffectInspector';
@@ -77,6 +79,7 @@ export function PoiEffectInspector({ component, disabled = false }: PoiEffectIns
     if (component.visual?.targetEntityId === ENVIRONMENT_EFFECT_TARGET_ID && isEnvironmentBuildingEffectKind(nextKind) && next.visual) {
       next.visual.targetEntityId = ENVIRONMENT_EFFECT_TARGET_ID;
     }
+    if (component.configuration) next.configuration = { ...component.configuration, parameters: {} };
     commitComponent(next, '切换特效类型');
   }
 
@@ -159,6 +162,8 @@ export function PoiEffectInspector({ component, disabled = false }: PoiEffectIns
           : '坐标约定：Position = 锚点，Rotation = 方向，Scale = 范围。'}
       </p>
       </>}
+      <EffectConfigurationInspector key={`${selectedEntityId}:${component.effectKind}`} component={component} disabled={controlsDisabled} onChange={commitComponent} />
+      {selectedEntityId && <EffectPathDrawingControls entityId={selectedEntityId} component={component} disabled={controlsDisabled} onChange={commitComponent} />}
     </fieldset>
   );
 }
