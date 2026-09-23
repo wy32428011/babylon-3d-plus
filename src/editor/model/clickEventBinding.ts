@@ -87,6 +87,14 @@ export function createDefaultClickEventBindingComponent(): ClickEventBindingComp
   };
 }
 
+/**
+ * 创建生成器实体（模型生成器/设备产生器）默认的点击事件绑定。
+ * 作用域是生成器产物本身，不需要设备类型槽位；事件留空表示尚未接管产物点击。
+ */
+export function createGeneratorClickEventBindingComponent(): ClickEventBindingComponent {
+  return { deviceSlots: [], events: [] };
+}
+
 /** 从导入模型资产创建设备类型条目；内置基础网格没有模型包来源，不接受。 */
 export function createClickEventBindingDeviceTypeFromAsset(
   asset: ClickEventBindingSourceAsset,
@@ -257,12 +265,15 @@ export type ClickEventBindingPickedCell = {
   layer: number;
 };
 
-/** 运行/发布态点击决策：场景存在已注册设备类型的绑定时点击行为全接管。screen 为发布 Viewer 可请求宿主切换的大屏标识。 */
+/**
+ * 运行/发布态点击决策：场景存在已注册设备类型的绑定时点击行为全接管。screen 为发布 Viewer 可请求宿主切换的大屏标识。
+ * reportAssetCode 用于实体自身取不到资产编号的场合（生成器产物）：命中实体不是 modelAsset 载体时覆盖上报编号。
+ */
 export type ClickEventBindingClickResolution =
   | { kind: 'pass-through' }
   | { kind: 'clear' }
   | { kind: 'ignore' }
-  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[]; highlightExcludeFixedTrack?: boolean; chartId?: string; screen?: { projectId: string; screenId: string } }
+  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[]; highlightExcludeFixedTrack?: boolean; chartId?: string; screen?: { projectId: string; screenId: string }; reportAssetCode?: string }
   | {
     kind: 'trigger-cell';
     entityId: string;
@@ -271,6 +282,7 @@ export type ClickEventBindingClickResolution =
     effects: ClickEventBindingEffect[];
     chartId?: string;
     screen?: { projectId: string; screenId: string };
+    reportAssetCode?: string;
   };
 
 /**
@@ -322,16 +334,52 @@ export function resolveClickEventBindingClick(
 
   const matchedEvent = hit.component.events.find((event) => event.eventType === 'click');
   if (!matchedEvent) return { kind: 'ignore' };
+  return createClickEventTriggerResolution(matchedEvent, pickedEntityId);
+}
+
+/** 把一条点击事件配置展开为 trigger 决议，效果参数按需带上。 */
+function createClickEventTriggerResolution(
+  event: ClickEventBindingEvent,
+  entityId: string,
+  reportAssetCode?: string,
+): ClickEventBindingClickResolution {
   return {
     kind: 'trigger',
-    entityId: pickedEntityId,
-    effects: matchedEvent.effects,
-    ...(matchedEvent.highlight?.excludeFixedTrack === true ? { highlightExcludeFixedTrack: true } : {}),
-    ...(matchedEvent.chart ? { chartId: matchedEvent.chart.id } : {}),
-    ...(matchedEvent.chart?.projectId && matchedEvent.chart.screenId
-      ? { screen: { projectId: matchedEvent.chart.projectId, screenId: matchedEvent.chart.screenId } }
+    entityId,
+    effects: event.effects,
+    ...(event.highlight?.excludeFixedTrack === true ? { highlightExcludeFixedTrack: true } : {}),
+    ...(event.chart ? { chartId: event.chart.id } : {}),
+    ...(event.chart?.projectId && event.chart.screenId
+      ? { screen: { projectId: event.chart.projectId, screenId: event.chart.screenId } }
       : {}),
+    ...(reportAssetCode ? { reportAssetCode } : {}),
   };
+}
+
+/** 生成器产物（货箱或动态设备实例）的运行态点击命中；由 SceneRuntime 拾取提供。 */
+export type GeneratedUnitClickHit = {
+  /** 携带 clickEventBinding 的生成器实体：模型生成器或设备产生器。 */
+  bindingEntityId: string;
+  /** 上报给宿主页面的资产编号：产物自身编号，或货箱的宿主设备编号。 */
+  assetCode: string;
+  /** 高亮与聚焦目标：货箱取宿主设备实体，动态设备实例取合成实体 id。 */
+  highlightEntityId: string;
+};
+
+/**
+ * 判定生成器产物的点击行为：生成器未配置绑定或未配置点击事件时返回 null，点击回落到常规拾取。
+ * 生成器绑定的作用域就是本生成器产物，不需要设备类型槽位注册。
+ */
+export function resolveGeneratedUnitClick(
+  scene: SceneDocument,
+  hit: GeneratedUnitClickHit,
+): ClickEventBindingClickResolution | null {
+  const component = scene.entities[hit.bindingEntityId]?.components.clickEventBinding;
+  if (!component) return null;
+  const matchedEvent = component.events.find((event) => event.eventType === 'click');
+  if (!matchedEvent) return null;
+  const assetCode = hit.assetCode.trim();
+  return createClickEventTriggerResolution(matchedEvent, hit.highlightEntityId, assetCode || undefined);
 }
 
 /** 命中后需通知宿主页面的点击事件载荷：模型资产编号、货格库位（点击单元时的 排-列-层）与 show-chart 图表id。 */
@@ -351,7 +399,9 @@ export function buildClickEventAssetClickedPayload(
 ): ClickEventAssetClickedPayload | null {
   if (resolution.kind !== 'trigger' && resolution.kind !== 'trigger-cell') return null;
   if (!resolution.effects.includes('show-chart')) return null;
-  const assetCode = scene.entities[resolution.entityId]?.components.modelAsset?.assetCode?.trim();
+  // 生成器产物的上报编号来自拾取上下文（产物自身或宿主设备），不落在命中实体的 modelAsset 上。
+  const assetCode = resolution.reportAssetCode?.trim()
+    || scene.entities[resolution.entityId]?.components.modelAsset?.assetCode?.trim();
   return {
     ...(assetCode ? { assetCode } : {}),
     ...(resolution.kind === 'trigger-cell' ? { slot: { ...resolution.cell } } : {}),

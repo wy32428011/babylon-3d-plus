@@ -770,7 +770,12 @@ export function PlayerApp() {
               entityId = cellHit.hostEntityId;
               pickedCell = { locatorEntityId: cellHit.locatorEntityId, row: cellHit.row, column: cellHit.column, layer: cellHit.layer };
             }
-            handleModelClick(entityId, pickedCell);
+            // 生成器产物（货箱/动态设备实例）按真实几何命中优先；常规命中只是包围盒兜底时按距离比较。
+            const generatedHit = runtime.pickGeneratedUnitClickTargetAtCanvasPoint(clientX, clientY, canvas);
+            const generatedUnit = generatedHit && (!modelHit || !modelHit.precise || generatedHit.distance < modelHit.distance)
+              ? generatedHit.hit
+              : null;
+            handleModelClick(entityId, pickedCell, { generatedUnit });
           },
           onDragStarted: () => {
             if (parsedConfig.viewer.allowCameraControl) notifyManualInput();

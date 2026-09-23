@@ -56,6 +56,7 @@
     "smoke:shelf-instancing": "node scripts/smoke-shelf-shared-instancing.mjs",
     "smoke:persisted-scene-batching": "node scripts/smoke-persisted-scene-batching.mjs",
     "smoke:device-spawner": "node scripts/smoke-device-spawner.mjs",
+    "smoke:generated-cargo-click": "node scripts/smoke-generated-cargo-click.mjs",
     "smoke:scene-capacity": "node scripts/smoke-static-model-instancing-policy.mjs && node scripts/smoke-asset-load-scheduler.mjs && node scripts/smoke-scene-capacity.mjs && npm run smoke:persisted-scene-batching && npm run smoke:editor-performance",
     "smoke:gpu": "npm run build && node scripts/smoke-gpu-acceleration.mjs",
     "smoke:viewer:gpu": "node scripts/smoke-viewer-gpu-contract.mjs",

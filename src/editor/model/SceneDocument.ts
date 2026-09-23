@@ -10,7 +10,7 @@ import { createDefaultModelGeneratorComponent } from './modelGenerator';
 import { createDefaultDeviceSpawner } from './deviceSpawner';
 import { createDefaultPoiEffectComponent, getPoiEffectDefinition } from './poiEffect';
 import { createDefaultAutoPatrolComponent } from './autoPatrolInspection';
-import { createDefaultClickEventBindingComponent } from './clickEventBinding';
+import { createDefaultClickEventBindingComponent, createGeneratorClickEventBindingComponent } from './clickEventBinding';
 import { createDefaultModelParameterValues } from './modelParameters';
 import {
   DEFAULT_MODEL_LENGTH_UNIT_INFO,
@@ -1321,6 +1321,7 @@ export function createModelGeneratorEntity(position: Vector3Data = vector3()): E
         scale: vector3(1, 1, 1),
       },
       modelGenerator: createDefaultModelGeneratorComponent(),
+      clickEventBinding: createGeneratorClickEventBindingComponent(),
     },
   };
 }
@@ -1343,6 +1344,7 @@ export function createDeviceSpawnerEntity(position: Vector3Data = vector3()): En
         scale: vector3(1, 1, 1),
       },
       deviceSpawner: createDefaultDeviceSpawner(),
+      clickEventBinding: createGeneratorClickEventBindingComponent(),
     },
   };
 }

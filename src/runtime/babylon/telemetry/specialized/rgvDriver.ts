@@ -579,7 +579,9 @@ export class RgvTelemetryDriver {
     const holdRotation = side === 'front' ? state.frontCargoHoldRotation : state.backCargoHoldRotation;
     const progress = side === 'front' ? state.frontTransferProgress : state.backTransferProgress;
 
-    this.host.syncGeneratedCargoVisual(cargo, 'rgv', snapshot, this.host.resolveCargoGeneratorForModel(model));
+    this.host.syncGeneratedCargoVisual(
+      cargo, 'rgv', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
+    );
     const station = this.getRgvStationPose(model, side, cargo.lockedWorldRotation);
     let targetPosition = station.position;
     let targetRotation = station.rotation;

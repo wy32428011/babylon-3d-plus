@@ -39,6 +39,7 @@ import {
   CLICK_EVENT_FOCUS_DURATION_MS,
   CLICK_EVENT_FOCUS_RADIUS_SCALE,
   resolveClickEventBindingClick,
+  resolveGeneratedUnitClick,
   type ClickEventBindingPickedCell,
 } from '../model/clickEventBinding';
 import {
@@ -959,6 +960,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           event.currentTarget,
         ) ?? null
       : null;
+    const previewGeneratedHit = isRuntimePreview
+      ? runtimeRef.current?.pickGeneratedUnitClickTargetAtCanvasPoint(
+          selectionClick.clientX,
+          selectionClick.clientY,
+          event.currentTarget,
+        ) ?? null
+      : null;
     let pickedEntityId = isRuntimePreview
       ? previewModelHit?.entityId ?? null
       : runtimeRef.current?.pickEntityIdAtCanvasPoint(
@@ -999,7 +1007,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     // 点未注册模型无效果，点空白清除选中与单格高亮；Ctrl 多选同样被吞。
     if (isRuntimePreview) {
       const state = useEditorStore.getState();
-      const resolution = resolveClickEventBindingClick(state.scene, pickedEntityId, pickedCell);
+      // 生成器产物按真实几何命中优先；常规命中只是包围盒兜底时按距离比较。
+      const generatedUnit = previewGeneratedHit
+        && (!previewModelHit || !previewModelHit.precise || previewGeneratedHit.distance < previewModelHit.distance)
+        ? previewGeneratedHit.hit
+        : null;
+      const resolution = (generatedUnit ? resolveGeneratedUnitClick(state.scene, generatedUnit) : null)
+        ?? resolveClickEventBindingClick(state.scene, pickedEntityId, pickedCell);
       if (resolution.kind !== 'pass-through') {
         // 命中 show-chart 效果时向宿主页面发送点击事件；编辑器无握手流程，用固定会话标识 + 通配 origin（仅开发预览）。
         const assetClickedPayload = buildClickEventAssetClickedPayload(state.scene, resolution);
@@ -1038,20 +1052,39 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         } else if (resolution.kind === 'trigger') {
           runtimeRef.current?.setLocalSlotHighlight('', null);
           state.setEnvironmentAdjustmentActive(false);
+          // 生成产物的高亮目标可能是没有文档实体的动态设备实例合成 id，走运行时高亮而非编辑器选区。
+          const hasEntityTarget = state.scene.entities[resolution.entityId] !== undefined;
           if (resolution.effects.includes('highlight')) {
             runtimeRef.current?.setClickHighlightTrackExclusion(
               resolution.highlightExcludeFixedTrack ? [resolution.entityId] : [],
             );
-            state.selectEntity(resolution.entityId);
+            if (hasEntityTarget) {
+              runtimeRef.current?.setLocalHighlightEntityIds([]);
+              state.selectEntity(resolution.entityId);
+            } else {
+              runtimeRef.current?.setLocalHighlightEntityIds([resolution.entityId]);
+            }
           }
           if (resolution.effects.includes('focus')) {
-            state.requestSceneFocusForSelection([resolution.entityId], {
-              animate: true,
-              durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
-            });
+            if (hasEntityTarget) {
+              state.requestSceneFocusForSelection([resolution.entityId], {
+                animate: true,
+                durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
+              });
+            } else {
+              const bounds = runtimeRef.current?.getEntitiesFocusBounds([resolution.entityId]);
+              if (bounds) {
+                manualRoamRef.current?.setEnabled(false);
+                viewportRef.current?.focusOnBounds(bounds, {
+                  animate: true,
+                  durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
+                });
+              }
+            }
           }
         } else if (resolution.kind === 'clear') {
           runtimeRef.current?.setLocalSlotHighlight('', null);
+          runtimeRef.current?.setLocalHighlightEntityIds([]);
           state.selectEntity(null);
         }
         return;

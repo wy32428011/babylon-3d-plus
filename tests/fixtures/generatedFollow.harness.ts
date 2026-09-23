@@ -18,7 +18,7 @@ new HemisphericLight('light', new Vector3(0, 1, 0), scene); MeshBuilder.CreateGr
 const runtime = new SceneRuntime(scene);
 const methods = runtime as unknown as {
   getRuntimeEffectTargets(): readonly EffectRuntimeTarget[];
-  syncGeneratedCargoVisual(cargo: GeneratedCargoRuntimeEntry, kind: string, snapshot: DeviceTelemetrySnapshot, generator: unknown): void;
+  syncGeneratedCargoVisual(cargo: GeneratedCargoRuntimeEntry, kind: string, snapshot: DeviceTelemetrySnapshot, generator: unknown, hostEntityId: string): void;
   disposeGeneratedCargo(cargo: GeneratedCargoRuntimeEntry): void;
 };
 const path = 'C:/generated-follow/cargo.gltf', sourceUrl = 'editor-asset://local/' + encodeURIComponent(path);
@@ -48,7 +48,7 @@ const remove = () => { if (cargo) methods.disposeGeneratedCargo(cargo); cargo = 
 addButton('生成 000317', () => {
   remove(); cargo = { root: new TransformNode('generated-cargo', scene), assetCode: 'carrier-001', containerCode: '000317', task: 'task-1', outputOwner: null, fallback: null, generatorEntityId: null, handoff: null, axialLengthCache: null, lockedWorldRotation: null };
   cargo.root.position.x = 6;
-  methods.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, { entityId: 'cargo-generator', component: generator });
+  methods.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, { entityId: 'cargo-generator', component: generator }, 'carrier-001-host');
 });
 addButton('移动到 12', () => { if (cargo) cargo.root.position.x = 12; });
 addButton('销毁', remove);

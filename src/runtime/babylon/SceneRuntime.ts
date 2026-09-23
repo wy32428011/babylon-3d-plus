@@ -5,6 +5,7 @@ import { AlarmManagerRuntime, type AlarmActivation } from './AlarmManagerRuntime
 import { executeModelParameterBindings } from './modelParameterBindingExecution';
 import { collectAlarmIndependentEntityIds } from '../../editor/model/alarmManager';
 import { collectDigitalTwinEffectTargetIds } from '../../editor/model/digitalTwinEffect';
+import type { GeneratedUnitClickHit } from '../../editor/model/clickEventBinding';
 import { getChartMarkerClickEvents } from '../../editor/model/chartMarker';
 import { ChartMarkerPresentation, getChartMarkerStyle, getChartMarkerText } from './ChartMarkerPresentation';
 import '@babylonjs/loaders';
@@ -261,7 +262,9 @@ import {
 import type { SpecializedTelemetryHost } from './telemetry/specialized/types';
 import {
   DeviceSpawnerRuntime,
+  createSpawnedDeviceEntityId,
   createSpawnedDeviceKey,
+  parseSpawnedDeviceEntityId,
   type DeviceSpawnerConfig,
 } from './telemetry/spawner/DeviceSpawnerRuntime';
 import {
@@ -777,6 +780,35 @@ function isChainConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
   return false;
 }
 
+/**
+ * 从生成物网格元数据解析点击命中；非生成物或缺关键字段返回 null。
+ * 动态设备实例自带资产编号，上报自身；货箱没有编号，上报承运它的宿主设备。
+ */
+function readGeneratedUnitClickTarget(mesh: AbstractMesh): GeneratedUnitClickHit | null {
+  const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
+  if (!metadata) return null;
+
+  const spawnerEntityId = typeof metadata.spawnerEntityId === 'string' ? metadata.spawnerEntityId : '';
+  if (spawnerEntityId) {
+    const spawnedEntityId = typeof metadata.spawnedEntityId === 'string' ? metadata.spawnedEntityId : '';
+    if (!spawnedEntityId) return null;
+    return {
+      bindingEntityId: spawnerEntityId,
+      assetCode: typeof metadata.spawnedAssetCode === 'string' ? metadata.spawnedAssetCode : '',
+      highlightEntityId: spawnedEntityId,
+    };
+  }
+
+  const generatorEntityId = typeof metadata.generatorEntityId === 'string' ? metadata.generatorEntityId : '';
+  if (!generatorEntityId) return null;
+  return {
+    bindingEntityId: generatorEntityId,
+    assetCode: typeof metadata.sourceAssetCode === 'string' ? metadata.sourceAssetCode : '',
+    // 宿主缺失时留空：高亮与会话聚焦对空 id 安全跳过，不误打到生成器标记本身。
+    highlightEntityId: typeof metadata.hostEntityId === 'string' ? metadata.hostEntityId : '',
+  };
+}
+
 export class SceneRuntime {
   private readonly parameterTextureAssignments = new WeakMap<Material, ParameterTextureAssignment>();
   private readonly unavailableParameterTextures = new WeakSet<Texture>();
@@ -1068,7 +1100,8 @@ export class SceneRuntime {
       getGeneratedCargoFallbackSpec: (kind) => this.getGeneratedCargoFallbackSpec(kind),
       ensureGeneratedCargoFallback: (cargo, kind) => this.ensureGeneratedCargoFallback(cargo, kind),
       ensureGeneratedCargoOutputOwner: (cargo, kind, component, snapshot) => this.ensureGeneratedCargoOutputOwner(cargo, kind, component, snapshot),
-      syncGeneratedCargoVisual: (cargo, kind, snapshot, generator) => this.syncGeneratedCargoVisual(cargo, kind, snapshot, generator),
+      syncGeneratedCargoVisual: (cargo, kind, snapshot, generator, hostEntityId) =>
+        this.syncGeneratedCargoVisual(cargo, kind, snapshot, generator, hostEntityId),
       setGeneratedCargoRootPose: (cargo, position, rotation, scaling) => this.setGeneratedCargoRootPose(cargo, position, rotation, scaling),
       disposeGeneratedCargo: (cargo) => this.disposeGeneratedCargo(cargo),
       getModelWorldBounds: (model) => this.getModelWorldBounds(model),
@@ -2153,6 +2186,36 @@ export class SceneRuntime {
     return this.pickSceneEntityHitAtCanvasPoint(clientX, clientY, canvas, 'runtime-model');
   }
 
+  /**
+   * 运行态拾取生成器产物（货箱或动态设备实例）用于点击事件绑定。
+   * 单独一条链路：产物不带 editorEntityId，常规实体拾取会按元数据把它们过滤掉。
+   * 未配置点击事件的生成器产物也会被拾取到，由调用方在决策阶段回落到常规点击。
+   */
+  pickGeneratedUnitClickTargetAtCanvasPoint(
+    clientX: number,
+    clientY: number,
+    canvas: HTMLCanvasElement,
+  ): { hit: GeneratedUnitClickHit; distance: number } | null {
+    // 没有生成器配置点击事件时，不为普通点击增加一次全场景射线检测。
+    if (!this.hasGeneratedUnitClickBinding()) return null;
+    const point = this.getCanvasPickPoint(clientX, clientY, canvas);
+    if (!point) return null;
+    const picks = this.scene.multiPick(point.x, point.y, (mesh) => (
+      !mesh.isDisposed()
+      && mesh.isEnabled()
+      && mesh.isVisible
+      && mesh.visibility > 0
+      && mesh.isPickable
+      && readGeneratedUnitClickTarget(mesh) !== null
+    )) ?? [];
+    picks.sort((left, right) => left.distance - right.distance);
+    for (const picked of picks) {
+      const hit = picked.pickedMesh ? readGeneratedUnitClickTarget(picked.pickedMesh) : null;
+      if (hit) return { hit, distance: picked.distance };
+    }
+    return null;
+  }
+
   /** 运行态点击立标正文：按真实几何深度拾取，前景模型和其他立标都能阻挡点击。 */
   pickChartMarkerAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): string | null {
     // 没有已配置动作的可见立标时，不为普通模型点击增加一次全场景射线检测。
@@ -2666,7 +2729,7 @@ export class SceneRuntime {
     const complete = this.getEntitiesWorldBounds(entityIds);
     const uniqueIds = [...new Set(entityIds)];
     if (!complete?.geometryReady || uniqueIds.length !== 1) return complete;
-    const model = this.models.get(uniqueIds[0]);
+    const model = this.resolveRuntimeModelByEntityId(uniqueIds[0]);
     if (!model) return complete;
     const bounds = getStackerFocusWorldBounds(model);
     if (!bounds) return complete;
@@ -2826,6 +2889,11 @@ export class SceneRuntime {
       return !model.modelArrayBatch || model.modelArrayBatch.hasEntityId(entityId);
     }
 
+    const spawnedModel = this.resolveSpawnedDeviceModel(entityId);
+    if (spawnedModel) {
+      return Boolean(spawnedModel.assetHandle) && spawnedModel.stackerTelemetryReady;
+    }
+
     const modelArrayInstance = this.modelArrayInstanceEntities.get(entityId);
     if (modelArrayInstance) {
       const renderModel = this.resolveModelArrayRenderModel(modelArrayInstance);
@@ -2887,7 +2955,7 @@ export class SceneRuntime {
       return this.getModelArrayInstanceWorldBounds(modelArrayInstance, modelArrayRenderModel);
     }
 
-    const model = this.models.get(entityId);
+    const model = this.resolveRuntimeModelByEntityId(entityId);
     if (model) return this.getModelWorldBounds(model);
 
     const modelGenerator = this.modelGenerators.get(entityId);
@@ -3398,7 +3466,10 @@ export class SceneRuntime {
       document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.manualRoamSpawn)),
     );
     const clickEventBindingIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.clickEventBinding)),
+      document.entityIds.filter((entityId) => {
+        const entity = document.entities[entityId];
+        return Boolean(entity && this.isClickEventBindingMarkerEntity(entity));
+      }),
     );
     const previewSourceId = this.entityArrayPreview?.sourceEntityId;
     if (previewSourceId && this.poiEffectRuntime.has(previewSourceId) && !poiEffectIds.has(previewSourceId)) {
@@ -3549,7 +3620,7 @@ export class SceneRuntime {
     if (entity.components.light && !this.lightMarkerRuntime.isComplete(entity)) return false;
     if (entity.components.autoPatrol && !this.autoPatrolMarkerRuntime.isComplete(entity)) return false;
     if (entity.components.manualRoamSpawn && !this.manualRoamSpawnRuntime.isComplete(entity)) return false;
-    if (entity.components.clickEventBinding && !this.clickEventBindingRuntime.isComplete(entity)) return false;
+    if (this.isClickEventBindingMarkerEntity(entity) && !this.clickEventBindingRuntime.isComplete(entity)) return false;
     return true;
   }
 
@@ -3635,7 +3706,7 @@ export class SceneRuntime {
       );
     }
 
-    if (entity.components.clickEventBinding) {
+    if (this.isClickEventBindingMarkerEntity(entity)) {
       this.clickEventBindingRuntime.syncPresentation(
         entity,
         selected,
@@ -4067,7 +4138,7 @@ export class SceneRuntime {
       );
     }
 
-    if (entity.components.clickEventBinding) {
+    if (this.isClickEventBindingMarkerEntity(entity)) {
       this.clickEventBindingRuntime.sync(
         entity,
         selected,
@@ -5442,7 +5513,8 @@ export class SceneRuntime {
           material.diffuseColor = this.readColor(meshRenderer.materialColor);
           mesh.material = material;
           mesh.parent = memberRoot;
-          mesh.isPickable = false;
+          mesh.metadata = { ...(mesh.metadata ?? {}), ...runtimeEntry.metadata };
+          mesh.isPickable = true;
           members.push({ nodeId: node.id, memberRoot, model: null, mesh, material, arrayBatch: null });
           continue;
         }
@@ -5880,6 +5952,7 @@ export class SceneRuntime {
     mesh.parent = cargo.root;
     mesh.position.y = spec.size.y / 2;
     mesh.material = material;
+    // 回退 Box 是「模板不可用」占位，不代表任何可点击的生成模板，保持不可拾取。
     mesh.isPickable = false;
     mesh.metadata = {
       ...(mesh.metadata ?? {}),
@@ -5908,10 +5981,17 @@ export class SceneRuntime {
     snapshot: DeviceTelemetrySnapshot,
   ): GeneratedOutputOwnerRuntimeEntry {
     if (cargo.outputOwner) {
+      const metadata = cargo.outputOwner.metadata;
+      // 跨设备接管时宿主会变，元数据变化后必须重新下发到已加载网格，否则点击会报旧宿主。
+      const metadataChanged = metadata.containerCode !== cargo.containerCode
+        || metadata.generatorEntityId !== cargo.generatorEntityId
+        || metadata.hostEntityId !== cargo.hostEntityId;
       cargo.outputOwner.component = component;
       cargo.outputOwner.activeSnapshot = snapshot;
-      cargo.outputOwner.metadata.containerCode = cargo.containerCode;
-      cargo.outputOwner.metadata.generatorEntityId = cargo.generatorEntityId;
+      metadata.containerCode = cargo.containerCode;
+      metadata.generatorEntityId = cargo.generatorEntityId;
+      metadata.hostEntityId = cargo.hostEntityId;
+      if (metadataChanged) this.applyGeneratedOutputMetadata(cargo.outputOwner);
       return cargo.outputOwner;
     }
 
@@ -5936,6 +6016,7 @@ export class SceneRuntime {
         sourceAssetCode: cargo.assetCode,
         containerCode: cargo.containerCode,
         generatorEntityId: cargo.generatorEntityId,
+        hostEntityId: cargo.hostEntityId,
       },
       onTerminalLoadFailure: () => {
         if (cargo.outputOwner === owner) this.ensureGeneratedCargoFallback(cargo, kind);
@@ -5946,13 +6027,38 @@ export class SceneRuntime {
     return owner;
   }
 
+  /** 把 owner 的最新元数据下发到已加载的产物网格；生成物拾取只读网格元数据。 */
+  private applyGeneratedOutputMetadata(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
+    const output = runtimeEntry.output;
+    if (!output) return;
+    const apply = (mesh: AbstractMesh | null | undefined): void => {
+      if (!mesh || mesh.isDisposed()) return;
+      mesh.metadata = { ...(mesh.metadata ?? {}), ...runtimeEntry.metadata };
+    };
+    if (output.kind === 'mesh') {
+      apply(output.mesh);
+      return;
+    }
+    if (output.kind === 'model') {
+      for (const mesh of output.model.meshes) apply(mesh);
+      return;
+    }
+    for (const member of output.members) {
+      for (const mesh of member.model?.meshes ?? []) apply(mesh);
+      apply(member.mesh);
+    }
+  }
+
   /** 根据设备绑定的生成器规则同步普通货物外观；无可用模板时回退旧版 Box。 */
   private syncGeneratedCargoVisual(
     cargo: GeneratedCargoRuntimeEntry,
     kind: GeneratedCargoKind,
     snapshot: DeviceTelemetrySnapshot,
     generator: ModelGeneratorRuntimeEntry | null,
+    hostEntityId: string,
   ): void {
+    // 宿主随接管变化：每帧刷新，保证点击货箱回落上报的是当前承运设备的编号。
+    cargo.hostEntityId = hostEntityId;
     cargo.generatorEntityId = generator?.entityId ?? null;
     const component = generator?.component ?? null;
     const resolution = component ? resolveModelGeneratorTargetFromSnapshot(component, snapshot) : null;
@@ -6040,7 +6146,7 @@ export class SceneRuntime {
       ...runtimeEntry.metadata,
       ...(runtimeEntry.editorEntityId ? { [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.editorEntityId } : {}),
     };
-    mesh.isPickable = runtimeEntry.editorEntityId !== null;
+    mesh.isPickable = true;
 
     return {
       kind: 'mesh',
@@ -7209,14 +7315,19 @@ export class SceneRuntime {
     return true;
   }
 
-  /** 收集动态实例网格并禁止拾取；动态实例不进入编辑选择。 */
+  /**
+   * 收集动态实例网格并补齐生成器产物点击元数据。
+   * 实例始终不进入编辑选择（缺 editorEntityId），可拾取只为生成器产物点击链路服务。
+   */
   private refreshSpawnedDeviceModelMeshes(model: ModelRuntimeEntry, spawner: DeviceSpawnerConfig): void {
     this.refreshModelMeshes(model, {
       deviceSpawnerSpawned: true,
       spawnerEntityId: spawner.entityId,
+      spawnedEntityId: createSpawnedDeviceEntityId(spawner.spawnerCode, model.assetCode),
+      spawnedAssetCode: model.assetCode,
     });
     for (const mesh of model.meshes) {
-      mesh.isPickable = false;
+      mesh.isPickable = true;
     }
   }
 
@@ -7285,6 +7396,40 @@ export class SceneRuntime {
     // 内置货格绑定期间位置由货架驱动，场景内点击穿透到货架。
     if (this.syncedEntities.get(entityId)?.components.locator?.builtInBinding) return false;
     return true;
+  }
+
+  /**
+   * 点击事件绑定是否按 POI 标记呈现：生成器实体（模型生成器/设备产生器）自带的绑定
+   * 作用域是它的产物，不生成全场匹配标记，也不参与标记的完整性与销毁管理。
+   */
+  private isClickEventBindingMarkerEntity(entity: Entity): boolean {
+    if (!entity.components.clickEventBinding) return false;
+    return !entity.components.modelGenerator && !entity.components.deviceSpawner;
+  }
+
+  /** 任意生成器实体配置了点击事件才需要做生成物拾取，否则普通点击可跳过这次全场景射线。 */
+  private hasGeneratedUnitClickBinding(): boolean {
+    const document = this.shadowDocument;
+    if (!document) return false;
+    for (const entityId of document.entityIds) {
+      const components = document.entities[entityId]?.components;
+      if (!components?.modelGenerator && !components?.deviceSpawner) continue;
+      if (components.clickEventBinding?.events.some((event) => event.eventType === 'click')) return true;
+    }
+    return false;
+  }
+
+  /** 动态设备实例没有文档实体，用合成 id 反查实例模型；非合成 id 返回 null。 */
+  private resolveSpawnedDeviceModel(entityId: string): ModelRuntimeEntry | null {
+    const key = parseSpawnedDeviceEntityId(entityId);
+    return key ? this.spawnedDeviceModels.get(key) ?? null : null;
+  }
+
+  /** 运行态模型查找：文档实体模型优先，其次是动态设备实例的合成实体 id。 */
+  private resolveRuntimeModelByEntityId(entityId: string): ModelRuntimeEntry | null {
+    const model = this.models.get(entityId);
+    if (model) return model;
+    return this.resolveSpawnedDeviceModel(entityId);
   }
 
   /** 运行预览和发布 Viewer 的只读选择只要求模型可见，不继承 authoring lock。 */
@@ -7426,11 +7571,15 @@ export class SceneRuntime {
     runtimeEntry.marker.material.emissiveColor = Color3.FromHexString(MODEL_GENERATOR_MARKER_COLOR);
   }
 
-  /** 统一同步生成输出可视状态；运行时自动货物始终不可拾取。 */
+  /**
+   * 统一同步生成输出可视状态。
+   * 生成产物一律可拾取：常规实体拾取按元数据里的 editorEntityId 过滤，产物本来就不带，
+   * 可拾取只为生成器产物点击链路服务；组合里的阵列成员由 thinInstance 批次承载，暂不开放。
+   */
   private applyGeneratedOutputPresentation(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     if (runtimeEntry.output?.kind === 'mesh') {
       runtimeEntry.output.mesh.isVisible = true;
-      runtimeEntry.output.mesh.isPickable = false;
+      runtimeEntry.output.mesh.isPickable = true;
       runtimeEntry.output.material.diffuseColor = this.readColor(runtimeEntry.output.target.materialColor);
       runtimeEntry.output.material.emissiveColor = Color3.Black();
       return;
@@ -7440,7 +7589,7 @@ export class SceneRuntime {
       runtimeEntry.output.model.root.setEnabled(true);
       this.applyModelSelection(runtimeEntry.output.model, false);
       for (const mesh of runtimeEntry.output.model.meshes) {
-        mesh.isPickable = false;
+        mesh.isPickable = true;
       }
       this.updateModelGeneratorOutputRuntimeContext(runtimeEntry);
       return;
@@ -7451,12 +7600,12 @@ export class SceneRuntime {
         if (member.model) {
           member.model.root.setEnabled(true);
           for (const mesh of member.model.meshes) {
-            mesh.isPickable = false;
+            mesh.isPickable = true;
           }
         }
         if (member.mesh) {
           member.mesh.isVisible = true;
-          member.mesh.isPickable = false;
+          member.mesh.isPickable = true;
         }
         if (member.arrayBatch) {
           for (const mesh of member.arrayBatch.meshes) {
@@ -7920,14 +8069,14 @@ export class SceneRuntime {
     this.refreshModelMeshes(model, { [EDITOR_ENTITY_ID_METADATA_KEY]: entity.id });
   }
 
-  /** 收集模型脚本在稳定根节点下创建的额外 Mesh，并补齐生成器拾取元数据。 */
+  /** 收集模型脚本在稳定根节点下创建的额外 Mesh，并补齐生成器产物点击元数据。 */
   private refreshModelGeneratorModelMeshes(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     if (runtimeEntry.output?.kind === 'composition') {
       for (const member of runtimeEntry.output.members) {
         if (!member.model) continue;
-        this.refreshModelMeshes(member.model, {});
+        this.refreshModelMeshes(member.model, runtimeEntry.metadata);
         for (const mesh of member.model.meshes) {
-          mesh.isPickable = false;
+          mesh.isPickable = true;
         }
       }
       return;
@@ -7938,10 +8087,9 @@ export class SceneRuntime {
       ...runtimeEntry.metadata,
       ...(runtimeEntry.editorEntityId ? { [EDITOR_ENTITY_ID_METADATA_KEY]: runtimeEntry.editorEntityId } : {}),
     });
-    if (!runtimeEntry.editorEntityId) {
-      for (const mesh of model.meshes) {
-        mesh.isPickable = false;
-      }
+    // 生成器产物没有 editorEntityId，常规实体拾取会按元数据过滤掉；放开可拾取只为生成物点击链路服务。
+    for (const mesh of model.meshes) {
+      mesh.isPickable = true;
     }
   }
 
@@ -9589,6 +9737,16 @@ export class SceneRuntime {
         const meshes = model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
         const highlightMeshes = this.clickHighlightExcludeTrackEntityIds.has(entityId)
           ? excludeFixedTrackMeshes(meshes, getFixedTrackNodes(model, this.scene))
+          : meshes;
+        if (highlightMeshes.length > 0) selectedModelGroups.push(highlightMeshes);
+      }
+
+      // 动态设备实例没有文档实体，选中状态不经 applyModelSelection 维护，按合成 id 直接命中。
+      const spawnedModel = this.resolveSpawnedDeviceModel(entityId);
+      if (spawnedModel && !spawnedModel.modelArrayBatch) {
+        const meshes = spawnedModel.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
+        const highlightMeshes = this.clickHighlightExcludeTrackEntityIds.has(entityId)
+          ? excludeFixedTrackMeshes(meshes, getFixedTrackNodes(spawnedModel, this.scene))
           : meshes;
         if (highlightMeshes.length > 0) selectedModelGroups.push(highlightMeshes);
       }

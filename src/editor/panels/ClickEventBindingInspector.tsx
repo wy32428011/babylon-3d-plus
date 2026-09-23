@@ -26,6 +26,11 @@ import { createId } from '../../shared/ids';
 type ClickEventBindingInspectorProps = {
   component: ClickEventBindingComponent;
   disabled?: boolean;
+  /**
+   * marker：独立 POI，运行态按设备类型在全场匹配命中；
+   * generator：挂在模型生成器/设备产生器上，作用域是本生成器的产物，不需要设备类型槽位。
+   */
+  variant?: 'marker' | 'generator';
 };
 
 const EFFECT_OPTIONS: readonly { value: ClickEventBindingEffect; label: string }[] = [
@@ -67,9 +72,14 @@ function readChartFromDrop(event: DragEvent<HTMLElement>): ClickEventBindingEven
 }
 
 /** 渲染并编辑点击事件绑定；运行/发布态命中的设备执行高亮、聚焦和大屏展示效果。 */
-export function ClickEventBindingInspector({ component, disabled = false }: ClickEventBindingInspectorProps) {
+export function ClickEventBindingInspector({
+  component,
+  disabled = false,
+  variant = 'marker',
+}: ClickEventBindingInspectorProps) {
   const updateSelectedClickEventBinding = useEditorStore((state) => state.updateSelectedClickEventBinding);
   const [activeDropZone, setActiveDropZone] = useState<string | null>(null);
+  const isGeneratorVariant = variant === 'generator';
 
   /** 提交完整不可变组件，由 Store 统一校验并写入撤销历史。 */
   function commitComponent(nextComponent: ClickEventBindingComponent, label: string): void {
@@ -343,25 +353,36 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
     <fieldset className="transform-fieldset model-generator-fieldset">
       <legend>点击事件绑定</legend>
 
-      <p className="muted">在运行预览或发布 Viewer 中，点击列表中设备类型的任意实例时，对该设备执行勾选的效果。</p>
+      {isGeneratorVariant ? (
+        <p className="muted">
+          在运行预览或发布 Viewer 中，点击本生成器产生的任意单位时执行勾选的效果。
+          单位自身带资产编号时上报自身编号（设备产生器克隆的设备）；否则上报宿主设备编号（货箱取 conveyor/RGV 等载体）。
+        </p>
+      ) : (
+        <p className="muted">在运行预览或发布 Viewer 中，点击列表中设备类型的任意实例时，对该设备执行勾选的效果。</p>
+      )}
 
-      <div className="model-generator-section-header">
-        <span>设备类型</span>
-        <button
-          disabled={disabled || component.deviceSlots.length >= CLICK_EVENT_BINDING_MAX_DEVICE_TYPES}
-          onClick={addSlot}
-          title="添加设备类型"
-          type="button"
-        >
-          +
-        </button>
-      </div>
+      {isGeneratorVariant ? null : (
+        <>
+          <div className="model-generator-section-header">
+            <span>设备类型</span>
+            <button
+              disabled={disabled || component.deviceSlots.length >= CLICK_EVENT_BINDING_MAX_DEVICE_TYPES}
+              onClick={addSlot}
+              title="添加设备类型"
+              type="button"
+            >
+              +
+            </button>
+          </div>
 
-      {component.deviceSlots.length === 0 ? (
-        <p className="muted model-generator-empty-hint">暂无设备类型；点击 + 添加单元，再从模型库拖入模型。</p>
-      ) : null}
+          {component.deviceSlots.length === 0 ? (
+            <p className="muted model-generator-empty-hint">暂无设备类型；点击 + 添加单元，再从模型库拖入模型。</p>
+          ) : null}
 
-      {component.deviceSlots.map((slot, index) => renderDeviceSlot(slot, index))}
+          {component.deviceSlots.map((slot, index) => renderDeviceSlot(slot, index))}
+        </>
+      )}
 
       <div className="model-generator-section-header">
         <span>事件列表</span>
@@ -395,21 +416,24 @@ export function ClickEventBindingInspector({ component, disabled = false }: Clic
             </button>
           </div>
 
-          <label className="inspector-row">
-            <span>事件类型</span>
-            <select
-              disabled={disabled}
-              value={bindingEvent.eventType}
-              onChange={(event) => updateBindingEvent(
-                eventIndex,
-                { ...bindingEvent, eventType: event.target.value as ClickEventBindingEventType },
-                '更新事件类型',
-              )}
-            >
-              <option value="click">点击</option>
-              <option value="click-cell">点击单元</option>
-            </select>
-          </label>
+          {/* 生成器产物没有货格概念，事件类型固定为整单位点击。 */}
+          {isGeneratorVariant ? null : (
+            <label className="inspector-row">
+              <span>事件类型</span>
+              <select
+                disabled={disabled}
+                value={bindingEvent.eventType}
+                onChange={(event) => updateBindingEvent(
+                  eventIndex,
+                  { ...bindingEvent, eventType: event.target.value as ClickEventBindingEventType },
+                  '更新事件类型',
+                )}
+              >
+                <option value="click">点击</option>
+                <option value="click-cell">点击单元</option>
+              </select>
+            </label>
+          )}
 
           <div className="inspector-row">
             <span>事件效果</span>

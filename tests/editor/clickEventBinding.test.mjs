@@ -60,7 +60,9 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
   const {
     buildClickEventAssetClickedPayload,
     createDefaultClickEventBindingComponent,
+    createGeneratorClickEventBindingComponent,
     resolveClickEventBindingClick,
+    resolveGeneratedUnitClick,
     sanitizeClickEventBindingComponent,
   } = await server.ssrLoadModule('/src/editor/model/clickEventBinding.ts');
 
@@ -315,5 +317,106 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
       createBindingEntity('binding-1', createBindingComponent({ deviceSlots: [registeredSlot(REGISTERED_URL)] })),
     );
     assert.equal(buildClickEventAssetClickedPayload(noChartScene, resolveClickEventBindingClick(noChartScene, 'stacker-1')), null);
+  });
+
+  await t.test('生成器默认绑定不带设备类型也不带事件', () => {
+    assert.deepEqual(createGeneratorClickEventBindingComponent(), { deviceSlots: [], events: [] });
+    // 生成器绑定不参与「按设备类型全场接管」，只有明确配了事件才会接管产物点击。
+    const scene = createScene(
+      createModelEntity('stacker-1', REGISTERED_URL),
+      createBindingEntity('generator-1', createGeneratorClickEventBindingComponent()),
+    );
+    assert.deepEqual(resolveClickEventBindingClick(scene, 'stacker-1'), { kind: 'pass-through' });
+  });
+
+  await t.test('生成器产物命中：货箱报宿主设备编号并高亮宿主，动态设备报自身编号', () => {
+    const generatorScene = createScene(
+      createBindingEntity('generator-1', createBindingComponent({
+        deviceSlots: [],
+        events: [{ id: 'event-1', eventType: 'click', effects: ['highlight', 'focus'] }],
+      })),
+    );
+    // 货箱没有自己的资产编号：上报并高亮承运它的宿主设备实体。
+    assert.deepEqual(
+      resolveGeneratedUnitClick(generatorScene, {
+        bindingEntityId: 'generator-1',
+        assetCode: '001005',
+        highlightEntityId: 'conveyor-1',
+      }),
+      { kind: 'trigger', entityId: 'conveyor-1', effects: ['highlight', 'focus'], reportAssetCode: '001005' },
+    );
+    // 动态设备实例自带编号：上报自身，高亮目标是实例合成 id。
+    const spawned = resolveGeneratedUnitClick(generatorScene, {
+      bindingEntityId: 'generator-1',
+      assetCode: 'AGV-77',
+      highlightEntityId: 'spawned:spawn-1 AGV-77',
+    });
+    assert.equal(spawned.kind, 'trigger');
+    if (spawned.kind !== 'trigger') return;
+    assert.equal(spawned.entityId, 'spawned:spawn-1 AGV-77');
+    assert.equal(spawned.reportAssetCode, 'AGV-77');
+  });
+
+  await t.test('生成器未配绑定或未配 click 事件时返回 null，点击回落到常规拾取', () => {
+    const noComponent = createScene(createModelEntity('stacker-1', REGISTERED_URL));
+    assert.equal(resolveGeneratedUnitClick(noComponent, {
+      bindingEntityId: 'generator-1', assetCode: '001005', highlightEntityId: 'conveyor-1',
+    }), null);
+
+    const noEvent = createScene(createBindingEntity('generator-1', createGeneratorClickEventBindingComponent()));
+    assert.equal(resolveGeneratedUnitClick(noEvent, {
+      bindingEntityId: 'generator-1', assetCode: '001005', highlightEntityId: 'conveyor-1',
+    }), null);
+
+    // click-cell 事件对产物无效，只有 click 才接管。
+    const cellOnly = createScene(createBindingEntity('generator-1', createBindingComponent({
+      deviceSlots: [],
+      events: [{ id: 'event-1', eventType: 'click-cell', effects: ['highlight'] }],
+    })));
+    assert.equal(resolveGeneratedUnitClick(cellOnly, {
+      bindingEntityId: 'generator-1', assetCode: '001005', highlightEntityId: 'conveyor-1',
+    }), null);
+  });
+
+  await t.test('产物点击透传忽略固定轨道参数与图表参数', () => {
+    const scene = createScene(createBindingEntity('generator-1', createBindingComponent({
+      deviceSlots: [],
+      events: [{
+        id: 'event-1',
+        eventType: 'click',
+        effects: ['highlight', 'show-chart'],
+        highlight: { excludeFixedTrack: true },
+        chart: { id: 'chart-9', projectId: 'project-9', screenId: 'screen-9', name: '演示大屏' },
+      }],
+    })));
+    const resolution = resolveGeneratedUnitClick(scene, {
+      bindingEntityId: 'generator-1', assetCode: '001005', highlightEntityId: 'conveyor-1',
+    });
+    assert.equal(resolution.kind, 'trigger');
+    if (resolution.kind !== 'trigger') return;
+    assert.equal(resolution.highlightExcludeFixedTrack, true);
+    assert.equal(resolution.chartId, 'chart-9');
+    assert.deepEqual(resolution.screen, { projectId: 'project-9', screenId: 'screen-9' });
+  });
+
+  await t.test('show-chart 载荷优先使用产物上报编号，覆盖命中实体的 modelAsset 编号', () => {
+    // highlightEntityId 是宿主设备实体：它自己的 assetCode 与产物上报编号不是一回事。
+    const scene = createScene(
+      { id: 'conveyor-1', name: 'conveyor-1', components: { modelAsset: { sourceUrl: OTHER_URL, assetCode: '999999' } } },
+      createBindingEntity('generator-1', createBindingComponent({
+        deviceSlots: [],
+        events: [{ id: 'event-1', eventType: 'click', effects: ['show-chart'], chart: { id: 'chart-9', name: '演示大屏' } }],
+      })),
+    );
+    const resolution = resolveGeneratedUnitClick(scene, {
+      bindingEntityId: 'generator-1', assetCode: '001005', highlightEntityId: 'conveyor-1',
+    });
+    assert.deepEqual(buildClickEventAssetClickedPayload(scene, resolution), { assetCode: '001005', chartId: 'chart-9' });
+
+    // 动态设备实例的合成 id 不是场景实体，上报编号只能来自 reportAssetCode。
+    const spawned = resolveGeneratedUnitClick(scene, {
+      bindingEntityId: 'generator-1', assetCode: 'AGV-77', highlightEntityId: 'spawned:spawn-1',
+    });
+    assert.deepEqual(buildClickEventAssetClickedPayload(scene, spawned), { assetCode: 'AGV-77', chartId: 'chart-9' });
   });
 });

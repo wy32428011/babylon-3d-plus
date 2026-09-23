@@ -346,7 +346,9 @@ export class ConveyorTelemetryDriver {
     }
     state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, minOffset, maxOffset);
 
-    this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));
+    this.host.syncGeneratedCargoVisual(
+      cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
+    );
     const pose = resolveCargoHandoffPose(
       cargo,
       this.getConveyorCargoPosition(model, plan.travelContext, state.cargoTravelOffset),

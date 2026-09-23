@@ -159,3 +159,70 @@ test('highlight 忽略固定轨道参数随点击透传，其余分支清空排�
   plain.handler('model', null, { focus: false });
   assert.deepEqual(plain.trackExclusions, [[]]);
 });
+
+/** 生成器实体自带的绑定：无设备类型槽位，只按产物命中接管。 */
+function generatorFixture(events: unknown[] | null) {
+  const scene = {
+    entities: {
+      host: { id: 'host', components: { modelAsset: { sourceUrl: 'editor-asset://local/conveyor.glb', assetCode: '999999' } } },
+      ...(events ? { generator: { id: 'generator', components: {
+        modelGenerator: { defaultTarget: null, rules: [] },
+        clickEventBinding: { deviceSlots: [], events },
+      } } } : {}),
+    },
+  } as unknown as SceneDocument;
+  const selections: string[][] = [];
+  const focuses: unknown[] = [];
+  const emitted: unknown[] = [];
+  const handler = createViewerModelClickHandler(scene, {
+    updateSelection: (ids) => selections.push([...ids]),
+    setSlotHighlight: () => {},
+    focusTarget: (id, cell) => focuses.push({ id, cell }),
+    triggerManualEvents: () => {},
+    setHighlightExcludeTrack: () => {},
+    emitAssetClicked: (payload) => emitted.push(payload),
+  });
+  return { handler, selections, focuses, emitted, scene };
+}
+
+test('生成器产物命中：货箱高亮宿主设备并上报宿主编号，而不是宿主自己的 modelAsset 编号', () => {
+  const f = generatorFixture([{
+    eventType: 'click',
+    effects: ['highlight', 'focus', 'show-chart'],
+    chart: { id: 'chart-cargo', name: '货物大屏' },
+  }]);
+  f.handler(null, null, {
+    generatedUnit: { bindingEntityId: 'generator', assetCode: '001005', highlightEntityId: 'host' },
+  });
+  assert.deepEqual(f.selections, [['host']]);
+  assert.deepEqual(f.focuses, [{ id: 'host', cell: undefined }]);
+  assert.deepEqual(f.emitted, [{ assetCode: '001005', chartId: 'chart-cargo' }]);
+});
+
+test('生成器产物命中：动态设备实例上报自身编号并高亮合成实体 id', () => {
+  const f = generatorFixture([{ eventType: 'click', effects: ['highlight', 'show-chart'], chart: { id: 'chart-agv', name: 'AGV 大屏' } }]);
+  f.handler(null, null, {
+    generatedUnit: { bindingEntityId: 'generator', assetCode: 'AGV-77', highlightEntityId: 'spawned:spawn-1' },
+  });
+  assert.deepEqual(f.selections, [['spawned:spawn-1']]);
+  assert.deepEqual(f.emitted, [{ assetCode: 'AGV-77', chartId: 'chart-agv' }]);
+});
+
+test('生成器未配置点击事件时产物命中回落到常规点击', () => {
+  // 只配了 click-cell 的生成器绑定不接管产物点击，产物所在位置没有实体时走默认清空选区。
+  const f = generatorFixture([{ eventType: 'click-cell', effects: ['highlight'] }]);
+  f.handler('host', null, {
+    generatedUnit: { bindingEntityId: 'generator', assetCode: '001005', highlightEntityId: 'host' },
+  });
+  assert.deepEqual(f.selections, [['host']]);
+  assert.deepEqual(f.emitted, []);
+});
+
+test('生成器实体不存在绑定组件时产物命中回落到默认点击（清空选区）', () => {
+  const f = generatorFixture(null);
+  f.handler(null, null, {
+    generatedUnit: { bindingEntityId: 'generator', assetCode: '001005', highlightEntityId: 'host' },
+  });
+  assert.deepEqual(f.selections, [[]]);
+  assert.deepEqual(f.emitted, []);
+});

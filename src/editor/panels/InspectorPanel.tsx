@@ -375,6 +375,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const isCompactModelInspector = Boolean(
     modelAsset || meshRenderer || skybox || modelGenerator || deviceSpawner || clickEventBinding || poiEffect || autoPatrol || manualRoamSpawn || locator,
   );
+  const isGeneratorEntity = Boolean(modelGenerator || deviceSpawner);
   const isBuiltInBound = Boolean(locator?.builtInBinding);
   const builtInSlotEntities = modelAsset ? findBuiltInSlotEntities(scene, selectedEntity.id) : [];
   const transformDisabled = isLocked || isBuiltInBound;
@@ -446,7 +447,11 @@ export function InspectorPanel(props: InspectorPanelProps) {
       {deviceSpawner ? (
         <DeviceSpawnerInspector component={deviceSpawner} disabled={isLocked} />
       ) : null}
-      {clickEventBinding ? (
+      {/* 生成器自带的绑定作用域是它的产物，不参与全场设备类型匹配，因此不与 POI 标记共用说明与渲染分支。 */}
+      {isGeneratorEntity && clickEventBinding ? (
+        <ClickEventBindingInspector component={clickEventBinding} disabled={isLocked} variant="generator" />
+      ) : null}
+      {!isGeneratorEntity && clickEventBinding ? (
         <fieldset className="transform-fieldset" aria-label="点击事件绑定标记提示">
           <legend>重要提示</legend>
           <p className="muted model-generator-global-note">
@@ -454,7 +459,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
           </p>
         </fieldset>
       ) : null}
-      {clickEventBinding ? (
+      {!isGeneratorEntity && clickEventBinding ? (
         <ClickEventBindingInspector component={clickEventBinding} disabled={isLocked} />
       ) : null}
       {poiEffect ? (

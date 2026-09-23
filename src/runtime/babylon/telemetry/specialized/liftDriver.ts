@@ -326,7 +326,9 @@ export class LiftTelemetryDriver {
       return;
     }
 
-    this.host.syncGeneratedCargoVisual(cargo, 'lift', snapshot, this.host.resolveCargoGeneratorForModel(model));
+    this.host.syncGeneratedCargoVisual(
+      cargo, 'lift', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
+    );
     const station = this.getLiftStationPose(model, cargo.lockedWorldRotation);
     let targetPosition = station.position;
     if (!state.cargoOnBoard && state.cargoHoldPosition) {
