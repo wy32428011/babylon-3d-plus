@@ -9,6 +9,7 @@ import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticSnapsh
 import { useEditorStore } from '../store/editorStore';
 import type { SceneDocument } from '../model/SceneDocument';
 import { SearchableSelect } from '../ui/SearchableSelect';
+import { ConveyorSurfaceArrowsInspector } from './ConveyorSurfaceArrowsInspector';
 
 /** RGV 列绑定/提升机层绑定共用的目标选项：除自身外的 conveyor 设备。 */
 function buildConveyorTargetOptions(scene: SceneDocument, excludeEntityId: string): { id: string; name: string }[] {
@@ -526,6 +527,13 @@ function LiftLayerBindingsEditor(props: {
             />
             起点设备（探测点无上游设备时自行创建货箱）
           </label>
+          <ConveyorSurfaceArrowsInspector
+            entityId={props.entityId}
+            config={binding.surfaceArrows}
+            disabled={props.disabled}
+            trajectoryDirection={binding.trajectoryDirection ?? 'x'}
+            onChange={(surfaceArrows) => commit({ surfaceArrows })}
+          />
         </>
       ) : null}
       {binding.deviceType === 'stacker' ? (

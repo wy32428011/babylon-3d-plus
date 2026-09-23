@@ -1,3 +1,5 @@
+import { normalizeConveyorSurfaceArrowsConfig, type ConveyorSurfaceArrowsConfig } from './conveyorSurfaceArrows';
+
 export const DEFAULT_TELEMETRY_EXPECTED_INTERVAL_MS = 500;
 export const TELEMETRY_CONFIG_MAX_DEPTH = 8;
 export const TELEMETRY_COLLECTION_MAX_ITEMS = 128;
@@ -51,8 +53,10 @@ export type TelemetryBindingComponent = {
   incomingLayerBindings?: Record<string, string[]>;
   /** 提升机专用：送料层号(十进制正整数字符串) → 送料 conveyor 实体 ID 列表；reference_upper_step=2 时按 level_upper 选层；仅 deviceType === 'lift' 时有意义。 */
   outgoingLayerBindings?: Record<string, string[]>;
-  /** 输送线专用：货物运行轨迹方向（仅编辑态可视化, 非运行时遥测）。 */
+  /** 输送线专用：模型局部正向校准，同时供货物行走、编辑轨迹和表面箭头使用。 */
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
+  /** 输送线专用：实例表面箭头配置；缺省不启用，实时方向和编辑预览不保存在此处。 */
+  surfaceArrows?: ConveyorSurfaceArrowsConfig;
   /** 输送线专用：停线且光电无货时自动销毁货物；未勾选时货物滞留，等下游订阅推送取走或新 task 复用。缺省关闭。 */
   cargoAutoDispose?: boolean;
   /** 输送线专用：起点设备——探测点未触及上游设备时允许自行创建货箱；缺省关闭。 */
@@ -227,6 +231,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
   const columnBindings = normalizeColumnBindings(value.columnBindings);
   const incomingLayerBindings = normalizeColumnBindings(value.incomingLayerBindings);
   const outgoingLayerBindings = normalizeColumnBindings(value.outgoingLayerBindings);
+  const surfaceArrows = normalizeConveyorSurfaceArrowsConfig(value.surfaceArrows);
   return {
     enabled: typeof value.enabled === 'boolean' ? value.enabled : true,
     sourceId: normalizeString(value.sourceId, 'default'),
@@ -238,6 +243,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     ...(columnBindings ? { columnBindings } : {}),
     ...(incomingLayerBindings ? { incomingLayerBindings } : {}),
     ...(outgoingLayerBindings ? { outgoingLayerBindings } : {}),
+    ...(surfaceArrows ? { surfaceArrows } : {}),
     ...(normalizeTrajectoryDirection(value.trajectoryDirection) ? { trajectoryDirection: value.trajectoryDirection as TelemetryBindingComponent['trajectoryDirection'] } : {}),
     ...(typeof value.cargoAutoDispose === 'boolean' ? { cargoAutoDispose: value.cargoAutoDispose } : {}),
     ...(typeof value.cargoOriginDevice === 'boolean' ? { cargoOriginDevice: value.cargoOriginDevice } : {}),

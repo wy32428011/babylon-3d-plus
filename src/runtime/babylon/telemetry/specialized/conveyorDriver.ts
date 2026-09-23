@@ -22,6 +22,7 @@ import {
   type DeviceTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
 import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
+import { readConveyorMotionSignal, resolveConveyorTrajectoryForwardSign } from '../conveyorMotionSignal';
 import { resolveLocatorCellSupportWorldPosition } from '../stackerStorageLocation';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
 import { readConveyorCargoSignalFields, readConveyorCargoSurfaceOffset, readConveyorCargoTravelConfig, isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
@@ -867,25 +868,7 @@ export class ConveyorTelemetryDriver {
 
   /** 按 cargo.travel.fields 读取输送线方向，支持模型脚本自定义 actionMap。 */
   private readConveyorMotionDirection(snapshot: DeviceTelemetrySnapshot, config: ConveyorCargoTravelConfig): number {
-    for (const field of config.fields) {
-      const fieldValue = readNumberField(snapshot.fields, field);
-      if (fieldValue === null) continue;
-
-      const mappedValue = config.actionMap[String(Math.trunc(fieldValue))];
-      if (Number.isFinite(mappedValue)) return mappedValue;
-      return this.readConveyorMovementDirection(fieldValue);
-    }
-
-    return 0;
-  }
-
-  /** 输送线 movement_x 编码：0 静止，1 正向，2 反向，正负数做现场兼容兜底。 */
-  private readConveyorMovementDirection(value: number | null): number {
-    if (value === 1) return 1;
-    if (value === 2) return -1;
-    if (value !== null && value > 0) return 1;
-    if (value !== null && value < 0) return -1;
-    return 0;
+    return readConveyorMotionSignal(snapshot.fields, config).direction;
   }
 
   /** 查找 cargo.travel 声明的行程节点，优先精确名称，失败后按 fallbackPattern 兜底。 */
@@ -1218,10 +1201,7 @@ export class ConveyorTelemetryDriver {
    * 同向返回 1：正转时偏移量沿行走轴正向增加；反向返回 -1。模型整体旋转不影响判定。
    */
   private readConveyorTrajectoryForwardSign(model: ModelRuntimeEntry, travelAxisName: 'x' | 'z'): 1 | -1 {
-    const direction = model.telemetryBinding?.trajectoryDirection ?? 'x';
-    const negative = direction.startsWith('-');
-    const axisName = negative ? direction.slice(1) : direction;
-    return axisName === travelAxisName ? (negative ? -1 : 1) : 1;
+    return resolveConveyorTrajectoryForwardSign(model.telemetryBinding?.trajectoryDirection, travelAxisName);
   }
 
   /** 输送线故障做节流日志，实时字段仍完整写入 metadata；info 类状态不进编辑器 Console。 */

@@ -93,6 +93,8 @@ import { LocatorFetchRuntime, type FetchContainerRecord } from './LocatorFetchRu
 import { createId } from '../../shared/ids';
 import { readUtf8ResponseText } from '../../shared/text/strictUtf8';
 import type { TelemetryBindingComponent } from '../../editor/model/telemetryBinding';
+import { ConveyorSurfaceArrowRenderer } from './effects/ConveyorSurfaceArrowRenderer';
+import { ConveyorSurfaceArrowSystem } from './telemetry/ConveyorSurfaceArrowSystem';
 import {
   createModelGeneratorTargetSignature,
   createRuntimeModelAssetFromTarget,
@@ -844,6 +846,8 @@ export class SceneRuntime {
   private readonly effectPoseNodes = new Map<string, TransformNode>();
   private readonly poiEffectRuntime: PoiEffectRuntime;
   private readonly specializedTelemetryRuntime: SpecializedTelemetryRuntime;
+  private readonly conveyorSurfaceArrowSystem: ConveyorSurfaceArrowSystem;
+  private hasConveyorSurfaceArrows = false;
   private readonly themeRuntime: SceneThemeRuntime;
   private themeSignature = '';
   private themeActive = false;
@@ -946,6 +950,7 @@ export class SceneRuntime {
       pushLog: this.pushLog,
     });
     this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(scene, this.createSpecializedTelemetryHost());
+    this.conveyorSurfaceArrowSystem = new ConveyorSurfaceArrowSystem(new ConveyorSurfaceArrowRenderer(scene));
     this.deviceSpawnerRuntime = new DeviceSpawnerRuntime({
       pushLog: (message) => this.pushLog(message),
       spawnDeviceInstance: (spawner, assetCode) => this.spawnDeviceInstance(spawner, assetCode),
@@ -961,7 +966,10 @@ export class SceneRuntime {
     this.modelArrayVariantRenderRestoreObserver = this.scene.onAfterRenderObservable.add(() => {
       this.restoreSuppressedModelArrayVariantHostsAfterRender();
     });
-    this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => this.applyDeviceTelemetryFrame());
+    this.telemetryObserver = this.scene.onBeforeRenderObservable.add(() => {
+      this.applyDeviceTelemetryFrame();
+      this.updateConveyorSurfaceArrows();
+    });
     // 跟随相机应读取本帧设备/货物运动处理后的最终位置。
     this.poiEffectRuntime.moveFrameObserverToEnd();
   }
@@ -1353,6 +1361,7 @@ export class SceneRuntime {
     this.clearEntityArrayPreview();
     this.clearFolderGroupGizmoTarget();
     this.telemetryPreviewActive = true;
+    this.conveyorSurfaceArrowSystem.clear();
     this.lightMarkerRuntime.setPreviewActive(true);
     this.autoPatrolMarkerRuntime.setPreviewActive(true);
     this.manualRoamSpawnRuntime.setPreviewActive(true);
@@ -1382,6 +1391,7 @@ export class SceneRuntime {
     if (!hadPreviewState) return;
 
     this.telemetryPreviewActive = false;
+    this.conveyorSurfaceArrowSystem.clear();
     this.alarmRuntime.reset();
     for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(this.isEntityVisible(id));
     this.lightMarkerRuntime.setPreviewActive(false);
@@ -3151,6 +3161,9 @@ export class SceneRuntime {
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
     this.shadowDocument = document;
+    const hasSurfaceArrows = document.entityIds.some(id => document.entities[id]?.components.telemetryBinding?.surfaceArrows?.enabled);
+    if (this.hasConveyorSurfaceArrows && !hasSurfaceArrows) this.conveyorSurfaceArrowSystem.clear();
+    this.hasConveyorSurfaceArrows = hasSurfaceArrows;
     for (const [key, failure] of this.modelReadinessErrors) {
       if (!failure.entityIds.some(entityId => document.entities[entityId]?.components.modelAsset)) this.modelReadinessErrors.delete(key);
     }
@@ -3779,6 +3792,7 @@ export class SceneRuntime {
     this.poiEffectRuntime.dispose();
     for (const node of this.effectPoseNodes.values()) node.dispose();
     this.effectPoseNodes.clear();
+    this.conveyorSurfaceArrowSystem.dispose();
     this.specializedTelemetryRuntime.dispose();
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
@@ -5291,6 +5305,23 @@ export class SceneRuntime {
       lastFrameTimeMs: this.telemetryFrameTimeMs,
       maxFrameTimeMs: this.telemetryMaxFrameTimeMs,
     };
+  }
+
+  /** 箭头同时覆盖编辑预览和运行态，失效状态也更新，避免停机或断流后残留。 */
+  private updateConveyorSurfaceArrows(): void {
+    // 无新功能的旧场景不增加逐帧全模型收集。标志随场景配置同步更新。
+    if (!this.hasConveyorSurfaceArrows) return;
+    const models = [...this.specializedTelemetryRuntime.host.collectModels()];
+    if (!models.some(({ model }) => model.telemetryBinding?.surfaceArrows)) {
+      this.conveyorSurfaceArrowSystem.clear();
+      return;
+    }
+    const delta = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
+    this.conveyorSurfaceArrowSystem.tick(models.map(({ entityId, model }) => ({
+      entityId, model,
+      deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model),
+      visible: this.isEntityVisible(entityId),
+    })), this.telemetryPreviewActive, delta);
   }
 
   /** 每帧把最新 MQTT 设备遥测分发到对应设备运行时。 */
@@ -7496,7 +7527,8 @@ export class SceneRuntime {
       const modelAsset = instanceEntity.components.modelAsset;
       const binding = instanceEntity.components.telemetryBinding;
       // 无显式绑定的实例与真实模型一致：按 assetCode 走默认绑定解析，不得跳过代理创建。
-      if (!modelAsset || binding?.enabled === false) continue;
+      // 禁用遥测仍可进行箭头编辑预览；专用绑定解析继续阻止其真实设备驱动。
+      if (!modelAsset || (binding?.enabled === false && !binding.surfaceArrows?.enabled)) continue;
       // devType 归一化在导入边界已统一小写；文件名关键词识别兜底未声明 devType 的旧包。
       const devType = modelAsset.dataDrivenConfig?.device?.devType?.trim().toLowerCase();
       if (devType !== 'conveyor' && !isConveyorModelAsset(modelAsset)) continue;
