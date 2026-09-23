@@ -42,8 +42,8 @@ export type ConveyorSurfaceArrowsConfig = {
 export function createDefaultConveyorSurfaceArrowsConfig(): ConveyorSurfaceArrowsConfig {
   return {
     enabled: true,
-    style: 'conveyor-direction',
-    breathingEnabled: true,
+    style: 'moving-double-arrow',
+    breathingEnabled: false,
     breathingPeriod: 1.8,
     breathingStrength: 0.7,
     directionBinding: { mode: 'model', field: 'movement_x', forwardValue: '1', reverseValue: '2', stopValue: '0' },

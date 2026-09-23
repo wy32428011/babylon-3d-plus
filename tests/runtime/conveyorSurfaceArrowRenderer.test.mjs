@@ -236,7 +236,7 @@ test('四种内置样式使用独立 shader 分支且切换仅更新 uniform，�
   assert.match(shader, /arrowStyle\s*<\s*2\.5/);
 });
 
-test('默认呼吸独立于流动速度，半周期亮度到30%，完整周期回到100%', t => {
+test('启用呼吸后独立于流动速度，半周期亮度到30%，完整周期回到100%', t => {
   const { scene, model, renderer, config } = setup(t);
   Object.assign(config, { speed: 0, breathingEnabled: true, breathingPeriod: 1.8, breathingStrength: .7 });
   renderer.update('one', model, config, 1, 0, true);

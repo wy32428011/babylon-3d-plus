@@ -133,10 +133,10 @@ test('运行预览阻止配置修改，保持原场景和命令历史', () => {
   assert.equal(store.getState().history.undoStack.length, count);
 });
 
-test('新输送线及旧缺省字段默认开启呼吸箭头，显式关闭保留且其他设备不受影响', () => {
+test('新输送线及旧缺省字段默认开启移动双箭头并关闭呼吸，显式关闭保留且其他设备不受影响', () => {
   assert.equal(selectedBinding().surfaceArrows.enabled, true);
-  assert.equal(selectedBinding().surfaceArrows.breathingEnabled, true);
-  assert.equal(selectedBinding().surfaceArrows.style, 'conveyor-direction');
+  assert.equal(selectedBinding().surfaceArrows.breathingEnabled, false);
+  assert.equal(selectedBinding().surfaceArrows.style, 'moving-double-arrow');
   assert.equal(normalizeTelemetryBindingComponent({ deviceType: 'rgv' }).surfaceArrows, undefined);
   configure({ enabled: false });
   assert.equal(selectedBinding().surfaceArrows.enabled, false);
@@ -144,7 +144,7 @@ test('新输送线及旧缺省字段默认开启呼吸箭头，显式关闭保�
 
 test('箭头拖拽只改样式，可撤销重做且不新增实体；呼吸和点位字符串完整保存', () => {
   const directionBinding = { mode: 'point', field: '00017', forwardValue: '01', reverseValue: '02', stopValue: '00' };
-  configure({ color: '#112233', length: 6, breathingEnabled: false, breathingPeriod: 2.7, breathingStrength: 0, directionBinding });
+  configure({ style: 'conveyor-direction', color: '#112233', length: 6, breathingEnabled: false, breathingPeriod: 2.7, breathingStrength: 0, directionBinding });
   const before = structuredClone(selectedBinding().surfaceArrows);
   const beforeIds = [...store.getState().scene.entityIds];
   const count = store.getState().history.undoStack.length;

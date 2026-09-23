@@ -90,8 +90,8 @@ async function run() {
     const { serializeScene, deserializeScene, createDefaultConveyorSurfaceArrowsConfig } = await loadSceneSerializer();
     const defaults = createDefaultConveyorSurfaceArrowsConfig();
     assert.equal(defaults.enabled, true, '输送线箭头缺省开启');
-    assert.equal(defaults.style, 'conveyor-direction');
-    assert.equal(defaults.breathingEnabled, true);
+    assert.equal(defaults.style, 'moving-double-arrow');
+    assert.equal(defaults.breathingEnabled, false);
     assert.deepEqual(defaults.directionBinding, { mode: 'model', field: 'movement_x', forwardValue: '1', reverseValue: '2', stopValue: '0' });
     const projectRoot = path.join(root, 'project');
     await localizeModelResources(document, projectRoot, authorizeAssetFile);

@@ -99,7 +99,7 @@ export function ConveyorSurfaceArrowsInspector(props: Props) {
         <input type="checkbox" disabled={editingDisabled} checked={config.enabled} onChange={(event) => commit({ enabled: event.target.checked })} />
         启用表面箭头
       </label>
-      <p className="muted">默认开启呼吸箭头。正向校准：模型局部 {props.trajectoryDirection.startsWith('-') ? props.trajectoryDirection : `+${props.trajectoryDirection}`}。行走轴以模型声明为准，“轨迹方向”应与行走轴匹配。运行时继承本模型设备身份，方向可沿用模型或指定 MQTT 点位；停止、故障或数据过期时隐藏。</p>
+      <p className="muted">默认使用移动双箭头，呼吸效果默认关闭。正向校准：模型局部 {props.trajectoryDirection.startsWith('-') ? props.trajectoryDirection : `+${props.trajectoryDirection}`}。行走轴以模型声明为准，“轨迹方向”应与行走轴匹配。运行时继承本模型设备身份，方向可沿用模型或指定 MQTT 点位；停止、故障或数据过期时隐藏。</p>
       {config.enabled ? (
         <>
           <div

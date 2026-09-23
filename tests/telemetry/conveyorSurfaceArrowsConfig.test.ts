@@ -14,8 +14,8 @@ test('默认启用表面箭头，默认配置及点位映射实例互相独立',
   assert.equal(first.surfaceNode, '');
   first.color = '#ffffff';
   assert.equal(second.color, '#39d8ff');
-  assert.equal(first.style, 'conveyor-direction');
-  assert.equal(first.breathingEnabled, true);
+  assert.equal(first.style, 'moving-double-arrow');
+  assert.equal(first.breathingEnabled, false);
   assert.deepEqual(second.directionBinding, { mode: 'model', field: 'movement_x', forwardValue: '1', reverseValue: '2', stopValue: '0' });
   first.directionBinding.field = 'other';
   assert.equal(second.directionBinding.field, 'movement_x');
@@ -63,14 +63,14 @@ test('非有限数字回退并限制负尺寸、透明度和箭头中心间距',
 
 test('样式呼吸和自定义值保留，旧对象默认补齐，非法样式只回退内置箭头', () => {
   const normalized = normalizeConveyorSurfaceArrowsConfig({
-    style: 'moving-double-arrow', breathingEnabled: false, breathingStrength: 0, breathingPeriod: 2.5,
+    style: 'conveyor-direction', breathingEnabled: true, breathingStrength: 0, breathingPeriod: 2.5,
     directionBinding: { mode: 'point', field: 'motor.direction', forwardValue: '001', reverseValue: '002', stopValue: '000' },
   })!;
-  assert.equal(normalized.style, 'moving-double-arrow');
-  assert.equal(normalized.breathingEnabled, false);
+  assert.equal(normalized.style, 'conveyor-direction');
+  assert.equal(normalized.breathingEnabled, true);
   assert.equal(normalized.breathingStrength, 0);
   assert.equal(normalized.directionBinding.forwardValue, '001');
   assert.deepEqual(normalizeConveyorSurfaceArrowsConfig(normalized), normalized);
-  assert.equal(normalizeConveyorSurfaceArrowsConfig({ style: 'fire' })?.style, 'conveyor-direction');
+  assert.equal(normalizeConveyorSurfaceArrowsConfig({ style: 'fire' })?.style, 'moving-double-arrow');
   assert.match(getConveyorSurfaceArrowDirectionError({ mode: 'point', field: 'direction', forwardValue: '1', reverseValue: '1 ', stopValue: '0' })!, /互不相同/);
 });
