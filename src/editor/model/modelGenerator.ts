@@ -5,6 +5,7 @@ import type {
   ModelAssetComponent,
   ModelAssetTemplate,
   ModelGeneratorComponent,
+  ModelGeneratorCompositionTarget,
   ModelGeneratorModelTarget,
   ModelGeneratorRule,
   ModelGeneratorTarget,
@@ -234,6 +235,22 @@ export function createMeshModelGeneratorTarget(meshKind: MeshKind, displayName?:
   };
 }
 
+/** 从组合资源库条目创建 kind:composition 目标，revision 在拖入时钉死。 */
+export function createModelGeneratorTargetFromComposition(
+  entry: { id: string; revision: string; name: string; thumbnailUrl?: string; memberCount?: number },
+): ModelGeneratorCompositionTarget {
+  return {
+    kind: 'composition',
+    libraryId: entry.id,
+    revision: entry.revision,
+    displayName: entry.name.trim() || '组合模型',
+    ...(entry.thumbnailUrl?.startsWith(AUTHORIZED_MODEL_GENERATOR_ASSET_URL_PREFIX) ? { thumbnailUrl: entry.thumbnailUrl } : {}),
+    ...(typeof entry.memberCount === 'number' && Number.isInteger(entry.memberCount) && entry.memberCount >= 0
+      ? { memberCount: entry.memberCount }
+      : {}),
+  };
+}
+
 /** 深拷贝模型生成器目标，避免目标模板在调用方之间共享引用。 */
 export function cloneModelGeneratorTarget(target: ModelGeneratorTarget): ModelGeneratorTarget {
   return cloneJsonValue(target);
@@ -278,6 +295,23 @@ export function sanitizeModelGeneratorTarget(value: unknown): ModelGeneratorTarg
     };
   }
 
+  if (value.kind === 'composition') {
+    const libraryId = sanitizeId(value.libraryId);
+    const revision = sanitizeId(value.revision);
+    if (!libraryId || !revision) return null;
+    const thumbnailUrl = sanitizeText(value.thumbnailUrl, 1024);
+    return {
+      kind: 'composition',
+      libraryId,
+      revision,
+      displayName: sanitizeDisplayName(value.displayName, '组合模型'),
+      ...(thumbnailUrl && isAuthorizedEditorAssetUrl(thumbnailUrl) ? { thumbnailUrl } : {}),
+      ...(typeof value.memberCount === 'number' && Number.isInteger(value.memberCount) && value.memberCount >= 0
+        ? { memberCount: value.memberCount }
+        : {}),
+    };
+  }
+
   return null;
 }
 
@@ -315,6 +349,14 @@ export function createModelGeneratorTargetSignature(target: ModelGeneratorTarget
       kind: target.kind,
       meshKind: target.meshKind,
       materialColor: target.materialColor,
+    });
+  }
+
+  if (target.kind === 'composition') {
+    return JSON.stringify({
+      kind: target.kind,
+      libraryId: target.libraryId,
+      revision: target.revision,
     });
   }
 

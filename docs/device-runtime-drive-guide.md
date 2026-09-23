@@ -385,6 +385,28 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 
 ---
 
+## 8. 模型生成器组合货物模板（kind:'composition'）
+
+模型生成器除 `kind:'model'`（单 GLB）/`kind:'mesh'`（内置几何体）外，支持拖入组合资源库条目作为货物模板。
+
+### 数据与绑定语义
+
+- 目标仅存引用 `{ kind:'composition', libraryId, revision, displayName, thumbnailUrl? }`（components.ts），**不内嵌组合定义**；revision 拖入时钉死，组合库更新不影响已保存场景，需重新拖入才升级。
+- 参数固化在组合包 `composition.json`（capture 时写入成员 modelAsset.parameterValues），生成器侧无实体、不可调参；改参数路径 = 场景放实例调参 → 另存新 revision → 重新拖入。
+- sanitize 对未知/非法 kind 返回 null（modelGenerator.ts），旧版编辑器打开含组合目标的场景回退内置 Box，不崩溃；场景版本仍为 3。
+- 签名 = `JSON.stringify({kind, libraryId, revision})`，revision 变即新签名，设备侧 `failedTargetSignatures` 与 fetch 侧批次分组的现有按签名去重/失败缓存自动生效。
+
+### 运行时链路
+
+- 组合定义经 `window.editorApi.loadComposition(libraryId, revision)` 异步加载，模块级 Promise 缓存（`composition/compositionCargoCache.ts`，inflight 去重），预览开始/停止时随 `clearModelGeneratorLoadFailureCache` 清空。
+- 成员层级由 `composition/compositionCargoBuilder.ts` 的 `buildCompositionNodeTree` 建树（节点 transform 即相对组合 frame 的局部量），compositionRoot 挂 cargo root 下随 `setGeneratedCargoRootPose` 移动。
+- **设备货物路径**：`loadModelGeneratorCompositionOutput`（SceneRuntime）逐成员加载——modelAsset 成员复用 `loadModelRuntimeAssets` + `applyModelUnitScale` + `applyModelAssetParameters`（**不做** normalizeModelContentOrigin，保留相对结构；**不执行**成员 .model.ts 脚本）；meshRenderer 成员建内置几何体；modelArrayInstance 成员展开为 `EntityArrayThinInstanceBatch`（源成员强制独占容器加载——共享 InstancedMesh 不能作批次几何源；实例矩阵 = 各成员节点相对 cargo root 的构建时刻局部矩阵，batch 网格挂组合根随动；源成员原始 Mesh 移出 scene 仅由批次承载；实例数 ≤256）。加载失败走现有 `handleModelGeneratorLoadFailure` 链回退 Box。
+- **fetch thinInstance 路径**：`loadModelTemplateForFetch`（SceneRuntime）composition 分支建树后逐成员加载，阵列成员按 `mesh.clone()`（共享 Geometry）展开，整树包围盒底部中心统一锚定原点（与单模型同语义）；`LocatorFetchRuntime.extractTemplateParts` 逐 mesh 烘焙世界矩阵，多成员零改动。阵列展开阈值保护：实例总数 ≤256 / parts ≤1024，超限记日志回退。
+- 组合货物不产生 Effect/POI 目标（`prepareEffectTargets`/`describeGeneratedEffectTarget` 对非 model 跳过）。
+- 组合内某成员模型包缺失 → 整组合同步失败统一回退（保守策略，不部分渲染）。
+
+---
+
 ## 扩展检查清单
 
 ### 改已有设备行为

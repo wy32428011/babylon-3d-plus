@@ -293,12 +293,12 @@ export class LocatorFetchRuntime {
     }
   }
 
-  /** 根据 target 类型加载模板 mesh：model target 走资产加载管线，mesh target 创建内置几何体。 */
+  /** 根据 target 类型加载模板 mesh：model/composition target 走注入的资产加载管线，mesh target 创建内置几何体。 */
   private async loadTemplateMesh(
     target: ModelGeneratorTarget,
     loadModelTemplate: LoadModelTemplate,
   ): Promise<{ meshes: Mesh[]; dispose: () => void } | null> {
-    if (target.kind === 'model') {
+    if (target.kind !== 'mesh') {
       return loadModelTemplate(target);
     }
 

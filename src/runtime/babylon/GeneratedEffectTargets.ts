@@ -13,7 +13,7 @@ type GeneratedTargetOwner = {
   output: { kind: 'mesh' } | { kind: 'model'; model: {
     root: TransformNode; assetHandle: unknown; meshes: AbstractMesh[]; externalScriptStarting: boolean;
     readinessError?: string; externalScriptRuntime?: { getInitializationError(): string | null } | null;
-  } } | null;
+  } } | { kind: 'composition' } | null;
   metadata: Record<string, unknown>;
   activeSnapshot: DeviceTelemetrySnapshot | null;
   readinessError?: string;

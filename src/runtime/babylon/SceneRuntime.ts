@@ -98,8 +98,16 @@ import { ConveyorSurfaceArrowSystem } from './telemetry/ConveyorSurfaceArrowSyst
 import {
   createModelGeneratorTargetSignature,
   createRuntimeModelAssetFromTarget,
+  sanitizeModelAssetTemplate,
 } from '../../editor/model/modelGenerator';
 import { resolveModelGeneratorTargetFromSnapshot } from './modelGeneratorRuntime';
+import {
+  buildCompositionNodeTree,
+  readCompositionNodeArraySourceId,
+  readCompositionNodeMeshRenderer,
+  type CompositionNodeTree,
+} from './composition/compositionCargoBuilder';
+import { clearCompositionCache, getCompositionLibraryEntry } from './composition/compositionCargoCache';
 import {
   CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET,
   consumeCadReferenceParseResult,
@@ -463,7 +471,29 @@ type ModelGeneratorModelOutputRuntimeEntry = {
   model: ModelRuntimeEntry;
 };
 
-type ModelGeneratorOutputRuntimeEntry = ModelGeneratorMeshOutputRuntimeEntry | ModelGeneratorModelOutputRuntimeEntry;
+/** 组合输出的单个成员：模型（可带阵列批次）或内置网格，挂在组合层级树的对应节点下。 */
+type ModelGeneratorCompositionMemberRuntimeEntry = {
+  nodeId: string;
+  memberRoot: TransformNode;
+  model: ModelRuntimeEntry | null;
+  mesh: Mesh | null;
+  material: StandardMaterial | null;
+  arrayBatch: EntityArrayThinInstanceBatch | null;
+};
+
+type ModelGeneratorCompositionOutputRuntimeEntry = {
+  kind: 'composition';
+  tree: CompositionNodeTree;
+  members: ModelGeneratorCompositionMemberRuntimeEntry[];
+};
+
+type ModelGeneratorOutputRuntimeEntry = ModelGeneratorMeshOutputRuntimeEntry | ModelGeneratorModelOutputRuntimeEntry | ModelGeneratorCompositionOutputRuntimeEntry;
+
+/** 组合内单个阵列组的实例上限（含源成员自身），防止异常组合数据撑爆矩阵缓冲。 */
+const COMPOSITION_ARRAY_MAX_INSTANCES = 256;
+
+/** fetch 组合模板展开后的 Mesh 总数上限，防止阵列克隆制造超大顶点烘焙。 */
+const COMPOSITION_FETCH_MAX_PARTS = 1024;
 
 /** 可复用生成输出宿主，统一承载仓储货物和普通设备货物的异步模型生命周期。 */
 export type GeneratedOutputOwnerRuntimeEntry = {
@@ -1047,6 +1077,7 @@ export class SceneRuntime {
 
   /** 为 fetch thinInstance 加载模型模板：走完整资产加载管线并应用单位换算。 */
   private async loadModelTemplateForFetch(target: ModelGeneratorTarget): Promise<{ meshes: Mesh[]; dispose: () => void } | null> {
+    if (target.kind === 'composition') return this.loadCompositionTemplateForFetch(target);
     if (target.kind !== 'model') return null;
 
     const modelAsset = createRuntimeModelAssetFromTarget(target, 'FETCH_TMPL');
@@ -1099,6 +1130,135 @@ export class SceneRuntime {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.pushLog(`Fetch 模板模型加载失败：${message}`);
+      return null;
+    }
+  }
+
+  /**
+   * 为 fetch thinInstance 加载组合模板：成员模型独占容器加载并应用单位换算，
+   * 阵列实例按成员相对矩阵展开为克隆网格，整树包围盒底部中心锚定到原点。
+   */
+  private async loadCompositionTemplateForFetch(
+    target: Extract<ModelGeneratorTarget, { kind: 'composition' }>,
+  ): Promise<{ meshes: Mesh[]; dispose: () => void } | null> {
+    try {
+      const entry = await getCompositionLibraryEntry(target.libraryId, target.revision);
+      const tree = buildCompositionNodeTree(entry.definition, this.scene, '_fetch_tmpl_comp');
+      const containers: AssetContainer[] = [];
+      const meshes: Mesh[] = [];
+
+      const arrayInstanceIdsBySource = new Map<string, string[]>();
+      for (const node of entry.definition.nodes) {
+        if (node.visible === false) continue;
+        const sourceId = readCompositionNodeArraySourceId(node);
+        if (!sourceId) continue;
+        const list = arrayInstanceIdsBySource.get(sourceId);
+        if (list) list.push(node.id);
+        else arrayInstanceIdsBySource.set(sourceId, [node.id]);
+      }
+
+      try {
+        for (const node of entry.definition.nodes) {
+          if (node.visible === false) continue;
+          const memberRoot = tree.nodes.get(node.id);
+          if (!memberRoot) continue;
+          if (readCompositionNodeArraySourceId(node)) continue;
+
+          const memberName = `_fetch_tmpl_comp_${sanitizeBabylonName(node.id)}`;
+          const meshRenderer = readCompositionNodeMeshRenderer(node);
+          if (meshRenderer) {
+            const mesh = this.createModelGeneratorMesh(memberName, meshRenderer.meshKind);
+            const material = new StandardMaterial(`${memberName}_material`, this.scene);
+            material.diffuseColor = this.readColor(meshRenderer.materialColor);
+            mesh.material = material;
+            mesh.parent = memberRoot;
+            meshes.push(mesh);
+            continue;
+          }
+
+          const template = sanitizeModelAssetTemplate(node.components.modelAsset);
+          if (!template) continue;
+          const { rootUrl, fileName } = this.splitAssetUrl(
+            this.resolveVersionedRuntimeAssetUrl(template.sourceUrl, template.assetRevision),
+          );
+          const container = await this.loadAssetContainer(rootUrl, fileName);
+          containers.push(container);
+          container.addAllToScene();
+
+          const scaleNode = new TransformNode(`${memberName}_scale`, this.scene);
+          scaleNode.scaling = new Vector3(template.unitScaleToMeters, template.unitScaleToMeters, template.unitScaleToMeters);
+          scaleNode.parent = memberRoot;
+          for (const rootNode of container.rootNodes) {
+            rootNode.parent = scaleNode;
+          }
+
+          // GLB 的 meshes[0] 通常是无几何的 __root__ 节点，须过滤出真正有顶点的 mesh
+          const memberMeshes = container.meshes.filter((mesh): mesh is Mesh => mesh instanceof Mesh && mesh.getTotalVertices() > 0);
+          const instanceNodeIds = arrayInstanceIdsBySource.get(node.id) ?? [];
+          if (instanceNodeIds.length === 0) {
+            meshes.push(...memberMeshes);
+            continue;
+          }
+
+          const replicaNodeIds = [node.id, ...instanceNodeIds];
+          if (replicaNodeIds.length > COMPOSITION_ARRAY_MAX_INSTANCES) {
+            throw new Error(`组合阵列实例数 ${replicaNodeIds.length} 超过 ${COMPOSITION_ARRAY_MAX_INSTANCES} 上限。`);
+          }
+          if (meshes.length + memberMeshes.length * replicaNodeIds.length > COMPOSITION_FETCH_MAX_PARTS) {
+            throw new Error(`组合模板展开后 Mesh 数量超过 ${COMPOSITION_FETCH_MAX_PARTS} 上限。`);
+          }
+
+          tree.root.computeWorldMatrix(true);
+          const inverseSourceWorld = memberRoot.getWorldMatrix().clone();
+          inverseSourceWorld.invert();
+          meshes.push(...memberMeshes);
+          for (const replicaNodeId of instanceNodeIds) {
+            const replicaRoot = tree.nodes.get(replicaNodeId);
+            if (!replicaRoot) throw new Error('组合阵列实例节点缺失。');
+            for (const sourceMesh of memberMeshes) {
+              sourceMesh.computeWorldMatrix(true);
+              const local = sourceMesh.getWorldMatrix().multiply(inverseSourceWorld);
+              const scale = new Vector3();
+              const rotation = new Quaternion();
+              const translation = new Vector3();
+              if (!local.decompose(scale, rotation, translation)) {
+                throw new Error('组合阵列实例矩阵无法分解为 TRS。');
+              }
+              const clone = sourceMesh.clone(`${sourceMesh.name}_replica_${sanitizeBabylonName(replicaNodeId)}`, null, true);
+              if (!clone) throw new Error('组合阵列实例克隆失败。');
+              clone.parent = replicaRoot;
+              clone.position.copyFrom(translation);
+              clone.rotationQuaternion = null;
+              clone.rotation.copyFrom(rotation.toEulerAngles());
+              clone.scaling.copyFrom(scale);
+              meshes.push(clone);
+            }
+          }
+        }
+
+        if (meshes.length === 0) throw new Error(`组合“${entry.name}”没有可渲染成员。`);
+
+        // 与单模型模板同语义：整树包围盒底部中心平移到原点，getLocatorBoxWorldMatrix 格口矩阵平移即底面中心。
+        const anchorNode = new TransformNode('_fetch_tmpl_comp_anchor', this.scene);
+        tree.root.parent = anchorNode;
+        const bottomCenter = getMeshesWorldBottomCenter(meshes);
+        if (bottomCenter) anchorNode.position = bottomCenter.scale(-1);
+
+        return {
+          meshes,
+          dispose: () => {
+            for (const container of containers) container.dispose();
+            anchorNode.dispose();
+          },
+        };
+      } catch (error) {
+        for (const container of containers) container.dispose();
+        tree.dispose();
+        throw error;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.pushLog(`Fetch 组合模板加载失败：${message}`);
       return null;
     }
   }
@@ -5012,6 +5172,7 @@ export class SceneRuntime {
 
   /** 在编辑态与运行态切换时允许全部生成输出重新尝试失败目标。 */
   private clearModelGeneratorLoadFailureCache(): void {
+    clearCompositionCache();
     for (const owner of this.generatedOutputOwners.values()) {
       owner.failedTargetSignatures.clear();
       owner.readinessError = undefined;
@@ -5078,33 +5239,27 @@ export class SceneRuntime {
       return;
     }
 
-    this.loadModelGeneratorModelOutput(runtimeEntry, target, targetSignature, resolution);
-  }
-
-  /** 异步加载生成器导入模型输出；过期 token 的容器会立即丢弃。 */
-  private loadModelGeneratorModelOutput(
-    runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
-    target: Extract<ModelGeneratorTarget, { kind: 'model' }>,
-    targetSignature: string,
-    resolution: ResolvedModelGeneratorTarget,
-  ): void {
-    const modelAsset = createRuntimeModelAssetFromTarget(
-      target,
-      runtimeEntry.runtimeAssetCode,
-    );
-    if (!modelAsset) {
-      this.handleModelGeneratorLoadFailure(runtimeEntry, targetSignature, resolution, new Error('目标模型快照无效'));
+    if (target.kind === 'composition') {
+      this.loadModelGeneratorCompositionOutput(runtimeEntry, target, targetSignature, resolution);
       return;
     }
 
-    const modelRoot = new TransformNode(`${runtimeEntry.entityId}_generatedModelRoot`, this.scene);
-    const contentRoot = new TransformNode(`${runtimeEntry.entityId}_generatedModelContentRoot`, this.scene);
-    modelRoot.parent = runtimeEntry.root;
+    this.loadModelGeneratorModelOutput(runtimeEntry, target, targetSignature, resolution);
+  }
+
+  /** 创建生成输出的模型运行时条目：稳定根挂到指定父节点，内容根只做单位换算。 */
+  private createGeneratedModelRuntimeEntry(
+    namePrefix: string,
+    parentNode: TransformNode,
+    modelAsset: ModelAssetComponent,
+  ): ModelRuntimeEntry {
+    const modelRoot = new TransformNode(`${namePrefix}_generatedModelRoot`, this.scene);
+    const contentRoot = new TransformNode(`${namePrefix}_generatedModelContentRoot`, this.scene);
+    modelRoot.parent = parentNode;
     contentRoot.parent = modelRoot;
     this.applyModelUnitScale(contentRoot, modelAsset.unitScaleToMeters);
 
-    const modelLoadToken = ++this.modelLoadSequence;
-    const model: ModelRuntimeEntry = {
+    return {
       sourceUrl: modelAsset.sourceUrl,
       assetRevision: modelAsset.assetRevision ?? null,
       assetSignature: this.createModelAssetSignature(modelAsset),
@@ -5124,7 +5279,7 @@ export class SceneRuntime {
       modelArraySourceSignature: '',
       modelArrayFailureSignature: '',
       highlighted: false,
-      loadToken: modelLoadToken,
+      loadToken: ++this.modelLoadSequence,
       cancelLoad: null,
       parameterSignature: '',
       parameterBaseline: new Map(),
@@ -5141,6 +5296,25 @@ export class SceneRuntime {
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
+  }
+
+  /** 异步加载生成器导入模型输出；过期 token 的容器会立即丢弃。 */
+  private loadModelGeneratorModelOutput(
+    runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
+    target: Extract<ModelGeneratorTarget, { kind: 'model' }>,
+    targetSignature: string,
+    resolution: ResolvedModelGeneratorTarget,
+  ): void {
+    const modelAsset = createRuntimeModelAssetFromTarget(
+      target,
+      runtimeEntry.runtimeAssetCode,
+    );
+    if (!modelAsset) {
+      this.handleModelGeneratorLoadFailure(runtimeEntry, targetSignature, resolution, new Error('目标模型快照无效'));
+      return;
+    }
+
+    const model = this.createGeneratedModelRuntimeEntry(runtimeEntry.entityId, runtimeEntry.root, modelAsset);
     runtimeEntry.output = { kind: 'model', model };
     const generatorLoadToken = runtimeEntry.loadToken;
     this.applyGeneratedOutputPresentation(runtimeEntry);
@@ -5190,6 +5364,238 @@ export class SceneRuntime {
         this.disposeModelGeneratorOutput(activeEntry);
         this.handleModelGeneratorLoadFailure(activeEntry, targetSignature, resolution, error);
       });
+  }
+
+  /** 异步加载组合资源库生成输出；成员模型并行加载，任一成员失败则整组回退。 */
+  private loadModelGeneratorCompositionOutput(
+    runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
+    target: Extract<ModelGeneratorTarget, { kind: 'composition' }>,
+    targetSignature: string,
+    resolution: ResolvedModelGeneratorTarget,
+  ): void {
+    const generatorLoadToken = runtimeEntry.loadToken;
+    void this.buildCompositionGeneratorOutput(runtimeEntry, target)
+      .then((output) => {
+        const activeEntry = this.generatedOutputOwners.get(runtimeEntry.entityId);
+        if (
+          !activeEntry
+          || activeEntry.loadToken !== generatorLoadToken
+          || activeEntry.activeTargetSignature !== targetSignature
+        ) {
+          this.disposeModelGeneratorOutputValue(output);
+          return;
+        }
+
+        activeEntry.output = output;
+        this.applyGeneratedOutputPresentation(activeEntry);
+      })
+      .catch((error) => {
+        const activeEntry = this.generatedOutputOwners.get(runtimeEntry.entityId);
+        if (
+          !activeEntry
+          || activeEntry.loadToken !== generatorLoadToken
+          || activeEntry.activeTargetSignature !== targetSignature
+        ) return;
+
+        this.handleModelGeneratorLoadFailure(activeEntry, targetSignature, resolution, error);
+      });
+  }
+
+  /**
+   * 构建组合生成输出：层级树挂到生成器稳定根下，成员保持组合内相对结构，
+   * 不做原点归一、不执行成员脚本；阵列实例成员由 thinInstance 批次承载。
+   */
+  private async buildCompositionGeneratorOutput(
+    runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
+    target: Extract<ModelGeneratorTarget, { kind: 'composition' }>,
+  ): Promise<ModelGeneratorCompositionOutputRuntimeEntry> {
+    const entry = await getCompositionLibraryEntry(target.libraryId, target.revision);
+    const namePrefix = `${runtimeEntry.entityId}_generatedComposition`;
+    const tree = buildCompositionNodeTree(entry.definition, this.scene, namePrefix);
+    tree.root.parent = runtimeEntry.root;
+    const members: ModelGeneratorCompositionMemberRuntimeEntry[] = [];
+    const output: ModelGeneratorCompositionOutputRuntimeEntry = { kind: 'composition', tree, members };
+
+    try {
+      const arrayInstanceIdsBySource = new Map<string, string[]>();
+      for (const node of entry.definition.nodes) {
+        if (node.visible === false) continue;
+        const sourceId = readCompositionNodeArraySourceId(node);
+        if (!sourceId) continue;
+        const list = arrayInstanceIdsBySource.get(sourceId);
+        if (list) list.push(node.id);
+        else arrayInstanceIdsBySource.set(sourceId, [node.id]);
+      }
+
+      const modelLoads: Promise<void>[] = [];
+      for (const node of entry.definition.nodes) {
+        if (node.visible === false) continue;
+        const memberRoot = tree.nodes.get(node.id);
+        if (!memberRoot) continue;
+        if (readCompositionNodeArraySourceId(node)) continue;
+
+        const meshRenderer = readCompositionNodeMeshRenderer(node);
+        if (meshRenderer) {
+          const memberName = `${namePrefix}_${sanitizeBabylonName(node.id)}`;
+          const mesh = this.createModelGeneratorMesh(memberName, meshRenderer.meshKind);
+          const material = new StandardMaterial(`${memberName}_material`, this.scene);
+          material.diffuseColor = this.readColor(meshRenderer.materialColor);
+          mesh.material = material;
+          mesh.parent = memberRoot;
+          mesh.isPickable = false;
+          members.push({ nodeId: node.id, memberRoot, model: null, mesh, material, arrayBatch: null });
+          continue;
+        }
+
+        const template = sanitizeModelAssetTemplate(node.components.modelAsset);
+        if (!template) continue;
+        const modelAsset: ModelAssetComponent = { assetCode: '', ...template };
+        const memberName = `${namePrefix}_${sanitizeBabylonName(node.id)}`;
+        const model = this.createGeneratedModelRuntimeEntry(memberName, memberRoot, modelAsset);
+        const member: ModelGeneratorCompositionMemberRuntimeEntry = {
+          nodeId: node.id,
+          memberRoot,
+          model,
+          mesh: null,
+          material: null,
+          arrayBatch: null,
+        };
+        members.push(member);
+        modelLoads.push(this.loadCompositionMemberModel(
+          modelAsset,
+          model,
+          member,
+          arrayInstanceIdsBySource.get(node.id) ?? [],
+          tree,
+          runtimeEntry.root,
+        ));
+      }
+
+      if (members.length === 0) throw new Error(`组合“${entry.name}”没有可渲染成员。`);
+      await Promise.all(modelLoads);
+      return output;
+    } catch (error) {
+      this.disposeModelGeneratorOutputValue(output);
+      throw error;
+    }
+  }
+
+  /** 加载组合成员模型并挂到成员节点；阵列源成员强制独占容器（共享实例不能作为批次几何源）。 */
+  private async loadCompositionMemberModel(
+    modelAsset: ModelAssetComponent,
+    model: ModelRuntimeEntry,
+    member: ModelGeneratorCompositionMemberRuntimeEntry,
+    arrayInstanceNodeIds: string[],
+    tree: CompositionNodeTree,
+    cargoRoot: TransformNode,
+  ): Promise<void> {
+    if (arrayInstanceNodeIds.length > 0) {
+      const { rootUrl, fileName } = this.splitAssetUrl(
+        this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
+      );
+      const container = await this.loadAssetContainer(rootUrl, fileName);
+      try {
+        container.addAllToScene();
+        model.assetHandle = {
+          kind: 'owned-container',
+          animationGroups: container.animationGroups,
+          dispose: () => container.dispose(),
+        };
+        model.meshes = container.meshes;
+        this.parentTopLevelModelNodes(model, container.transformNodes);
+      } catch (error) {
+        container.dispose();
+        throw error;
+      }
+    } else {
+      const loadedAssets = await this.loadModelRuntimeAssets(modelAsset, model.assetSignature);
+      model.assetHandle = loadedAssets.handle;
+      if (loadedAssets.kind === 'owned-container') {
+        model.meshes = loadedAssets.meshes;
+        this.parentTopLevelModelNodes(model, loadedAssets.transformNodes);
+      } else {
+        for (const rootNode of loadedAssets.rootNodes) {
+          rootNode.parent = model.contentRoot;
+        }
+      }
+    }
+
+    this.refreshModelMeshes(model, {});
+    this.applyModelAssetParameters(modelAsset, model);
+
+    if (arrayInstanceNodeIds.length > 0) {
+      this.createCompositionArrayBatch(member, arrayInstanceNodeIds, tree, cargoRoot);
+    }
+  }
+
+  /**
+   * 为组合内阵列组创建 thinInstance 批次：批次网格挂到组合根下随货物移动，
+   * 实例矩阵取各成员节点相对货物根的局部矩阵（构建时刻固化，组合层级此后不再形变）。
+   */
+  private createCompositionArrayBatch(
+    member: ModelGeneratorCompositionMemberRuntimeEntry,
+    instanceNodeIds: string[],
+    tree: CompositionNodeTree,
+    cargoRoot: TransformNode,
+  ): void {
+    const model = member.model;
+    if (!model) return;
+    const sourceMeshes = model.meshes.filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
+    if (sourceMeshes.length === 0) throw new Error('组合阵列源成员没有可渲染 Mesh。');
+
+    const allNodeIds = [member.nodeId, ...instanceNodeIds];
+    if (allNodeIds.length > COMPOSITION_ARRAY_MAX_INSTANCES) {
+      throw new Error(`组合阵列实例数 ${allNodeIds.length} 超过 ${COMPOSITION_ARRAY_MAX_INSTANCES} 上限。`);
+    }
+
+    cargoRoot.computeWorldMatrix(true);
+    const inverseCargoRoot = cargoRoot.getWorldMatrix().clone();
+    inverseCargoRoot.invert();
+    const sourceNode = tree.nodes.get(member.nodeId);
+    if (!sourceNode) throw new Error('组合阵列源成员节点缺失。');
+    const sourceWorld = sourceNode.getWorldMatrix().clone();
+
+    const instances = allNodeIds.map((nodeId) => {
+      const node = tree.nodes.get(nodeId);
+      if (!node) throw new Error('组合阵列实例节点缺失。');
+      const local = node.getWorldMatrix().multiply(inverseCargoRoot);
+      const scale = new Vector3();
+      const rotation = new Quaternion();
+      const translation = new Vector3();
+      if (!local.decompose(scale, rotation, translation)) {
+        throw new Error('组合阵列实例矩阵无法分解为 TRS。');
+      }
+      const euler = rotation.toEulerAngles();
+      return {
+        entityId: nodeId,
+        transform: {
+          position: { x: translation.x, y: translation.y, z: translation.z },
+          rotation: { x: euler.x, y: euler.y, z: euler.z },
+          scale: { x: scale.x, y: scale.y, z: scale.z },
+        },
+        pickable: false,
+      };
+    });
+
+    const batch = EntityArrayThinInstanceBatch.create(member.nodeId, sourceMeshes, {
+      interactive: false,
+      namePrefix: '__compositionArrayThinInstance',
+    });
+    if (!batch) throw new Error('组合阵列源成员几何不支持批量实例。');
+    if (!batch.updateEntityTransforms(sourceWorld, instances)) {
+      batch.dispose();
+      throw new Error('组合阵列实例矩阵提交失败。');
+    }
+
+    for (const mesh of batch.meshes) {
+      mesh.parent = tree.root;
+      mesh.isPickable = false;
+    }
+    member.arrayBatch = batch;
+    // 源成员几何已由批次承载（含源自身实例），原始 Mesh 退出场景避免重复渲染。
+    for (const mesh of model.meshes) {
+      if (!mesh.isDisposed()) this.scene.removeMesh(mesh);
+    }
   }
 
   /** 记录一次模型加载失败；规则覆盖模型失败时在同一有效信号下回退共享生成模板。 */
@@ -6548,15 +6954,8 @@ export class SceneRuntime {
     runtimeEntry.output = null;
   }
 
-  /** 释放任意生成器派生输出。 */
-  private disposeModelGeneratorOutputValue(output: ModelGeneratorOutputRuntimeEntry): void {
-    if (output.kind === 'mesh') {
-      output.material.dispose();
-      output.mesh.dispose();
-      return;
-    }
-
-    const model = output.model;
+  /** 释放单个生成模型条目，普通生成模型与组合成员模型共用。 */
+  private disposeGeneratedModelEntry(model: ModelRuntimeEntry): void {
     model.telemetryPreviewBaseline = null;
     this.applyModelSelection(model, false);
     model.externalScriptRuntime?.dispose();
@@ -6566,6 +6965,35 @@ export class SceneRuntime {
     model.assetHandle?.dispose();
     model.contentRoot.dispose();
     model.root.dispose();
+  }
+
+  /** 释放任意生成器派生输出。 */
+  private disposeModelGeneratorOutputValue(output: ModelGeneratorOutputRuntimeEntry): void {
+    if (output.kind === 'mesh') {
+      output.material.dispose();
+      output.mesh.dispose();
+      return;
+    }
+
+    if (output.kind === 'composition') {
+      for (const member of output.members) {
+        if (member.arrayBatch) {
+          // 批次网格挂在组合根下，先脱离父级避免 tree.dispose 递归二次释放共享 Geometry。
+          for (const mesh of member.arrayBatch.meshes) mesh.parent = null;
+          member.arrayBatch.dispose();
+        }
+        if (member.model) this.disposeGeneratedModelEntry(member.model);
+        member.material?.dispose();
+        if (member.mesh) {
+          member.mesh.parent = null;
+          member.mesh.dispose();
+        }
+      }
+      output.tree.dispose();
+      return;
+    }
+
+    this.disposeGeneratedModelEntry(output.model);
   }
 
   /** 释放模型生成器配置标记、独立输出根节点、以其为模板的货物和异步资源。 */
@@ -7015,6 +7443,27 @@ export class SceneRuntime {
         mesh.isPickable = false;
       }
       this.updateModelGeneratorOutputRuntimeContext(runtimeEntry);
+      return;
+    }
+
+    if (runtimeEntry.output?.kind === 'composition') {
+      for (const member of runtimeEntry.output.members) {
+        if (member.model) {
+          member.model.root.setEnabled(true);
+          for (const mesh of member.model.meshes) {
+            mesh.isPickable = false;
+          }
+        }
+        if (member.mesh) {
+          member.mesh.isVisible = true;
+          member.mesh.isPickable = false;
+        }
+        if (member.arrayBatch) {
+          for (const mesh of member.arrayBatch.meshes) {
+            mesh.isPickable = false;
+          }
+        }
+      }
     }
   }
 
@@ -7473,6 +7922,16 @@ export class SceneRuntime {
 
   /** 收集模型脚本在稳定根节点下创建的额外 Mesh，并补齐生成器拾取元数据。 */
   private refreshModelGeneratorModelMeshes(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
+    if (runtimeEntry.output?.kind === 'composition') {
+      for (const member of runtimeEntry.output.members) {
+        if (!member.model) continue;
+        this.refreshModelMeshes(member.model, {});
+        for (const mesh of member.model.meshes) {
+          mesh.isPickable = false;
+        }
+      }
+      return;
+    }
     if (runtimeEntry.output?.kind !== 'model') return;
     const model = runtimeEntry.output.model;
     this.refreshModelMeshes(model, {

@@ -1107,7 +1107,13 @@ export class ConveyorTelemetryDriver {
 
     const nodes = output.kind === 'mesh'
       ? [output.mesh]
-      : output.model.contentRoot.getChildMeshes(false).filter(isMeasurableModelMesh);
+      : output.kind === 'model'
+        ? output.model.contentRoot.getChildMeshes(false).filter(isMeasurableModelMesh)
+        : output.members.flatMap((member) => [
+            ...(member.model ? member.model.contentRoot.getChildMeshes(false) : []),
+            ...(member.mesh ? [member.mesh] : []),
+            ...(member.arrayBatch ? member.arrayBatch.meshes : []),
+          ]).filter(isMeasurableModelMesh);
     if (nodes.length === 0) return fallbackLength;
 
     cargo.root.computeWorldMatrix(true);

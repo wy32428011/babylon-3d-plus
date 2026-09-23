@@ -2,7 +2,7 @@ import { RuntimeFollowControls } from '../../shared/ui/RuntimeFollowControls';
 import { Color3, Constants, MeshBuilder, StandardMaterial, TransformNode, Vector3 } from '@babylonjs/core';
 import { appendEffectPathDrawingPoint, cancelEffectPathDrawing, getEffectPathDrawing, setEffectPathDrawingError, subscribeEffectPathDrawing } from '../model/effectPathDrawing';
 import { CompositionEditStatus } from '../composition/CompositionControls';
-import { COMPOSITION_DRAG, findCompositionRoot } from '../composition/composition';
+import { COMPOSITION_DRAG, findCompositionRoot, parseCompositionDragPayload } from '../composition/composition';
 import { placeComposition } from '../composition/compositionActions';
 import type { CompositionLibraryApi } from '../../../electron/shared/compositionTypes';
 import { shouldValidateSceneModelResources } from '../assets/sceneModelSyncTransaction';
@@ -1167,9 +1167,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const session = useEditorStore.getState().sceneSessionId;
       let payload: {id:string;revision?:string};
       try {
-        if (compositionPayload.length > 4096) throw new Error('组合拖拽信息过长。');
-        payload = compositionPayload.startsWith('{') ? JSON.parse(compositionPayload) : {id:compositionPayload};
-        if (typeof payload.id !== 'string' || (payload.revision !== undefined && typeof payload.revision !== 'string')) throw new Error('组合拖拽信息无效。');
+        payload = parseCompositionDragPayload(compositionPayload);
       } catch (error) { useEditorStore.getState().pushLog(String(error)); return; }
       void (window.editorApi as unknown as CompositionLibraryApi).loadComposition(payload.id, payload.revision).then(entry => {
         if (useEditorStore.getState().sceneSessionId !== session) return;
