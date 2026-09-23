@@ -1,4 +1,4 @@
-import type { ChartMarkerComponent, ChartMarkerThemeScreen, ModelGeneratorTarget } from './components';
+import type { ChartMarkerComponent, ChartMarkerThemeScreen, ModelGeneratorTarget, PoiEffectComponent, PoiEffectKind } from './components';
 import type { Entity } from './Entity';
 import type { SceneDocument } from './SceneDocument';
 import type { Vector3Data } from './math';
@@ -6,6 +6,7 @@ import { DEFAULT_TELEMETRY_SOURCE_ID, type DeviceTelemetrySnapshot } from '../..
 import { createId } from '../../shared/ids';
 import { CHART_MARKER_DEFAULTS, normalizeChartMarker, normalizeChartMarkerThemeScreen } from './chartMarker';
 import { sanitizeModelGeneratorTarget } from './modelGenerator';
+import { isPoiEffectKind, sanitizePoiEffectComponent } from './poiEffect';
 
 export type AlarmTarget = { id: string; model: ModelGeneratorTarget | null; entityId: string };
 export type AlarmManagerComponent = {
@@ -14,7 +15,9 @@ export type AlarmManagerComponent = {
   customProperty: string;
   customValue: string;
   overrideColor: string;
+  /** 兼容旧场景；新配置从特效库选择 appearanceEffect。 */
   appearanceModel: ModelGeneratorTarget | null;
+  appearanceEffect: PoiEffectComponent | null;
   theme: ChartMarkerThemeScreen | null;
   showMarker: boolean;
   markerCategory: string;
@@ -29,11 +32,16 @@ export type AlarmManagerComponent = {
   targets: AlarmTarget[];
 };
 
+/** 场景雾、昼夜和镜头跟随不能作为设备局部外观。 */
+export function isAlarmAppearanceEffectKind(value: unknown): value is PoiEffectKind {
+  return isPoiEffectKind(value) && !['environment-fog', 'day-night', 'target-follow'].includes(value);
+}
+
 export const ALARM_MAX_TARGETS = 64;
 export function createDefaultAlarmManager(): AlarmManagerComponent {
   return {
     listenProperty: 'RUNNING STATE', runningState: 'running', customProperty: 'fireAlarm', customValue: 'true',
-    overrideColor: '#ff1717', appearanceModel: null, theme: null, showMarker: false,
+    overrideColor: '#ff1717', appearanceModel: null, appearanceEffect: null, theme: null, showMarker: false,
     markerCategory: '人员', associationType: 'chart', markerScreen: null, contentUrl: '',
     marker: { ...CHART_MARKER_DEFAULTS, text: '报警', driveMode: 'none', clickEvents: [] },
     warehouseAlarm: true, warehouseTheme: null, focusCamera: true, targetType: 'ENTITY', targets: [],
@@ -82,7 +90,14 @@ export function normalizeAlarmManager(value: unknown): AlarmManagerComponent {
   c.markerCategory = text(c.markerCategory, 128);
   c.contentUrl = normalizeAlarmContentUrl(c.contentUrl);
   c.marker = normalizeChartMarker(c.marker);
-  c.appearanceModel = model(c.appearanceModel);
+  if (c.appearanceEffect !== null) {
+    const effect = record(c.appearanceEffect);
+    if (!isAlarmAppearanceEffectKind(effect.effectKind)) throw new Error('请选择可依附设备的 EFF 特效');
+    c.appearanceEffect = sanitizePoiEffectComponent(effect as unknown as PoiEffectComponent);
+    // 实际目标由报警绑定决定，不能将库预设中的其它实体引用带入报警外观。
+    if (c.appearanceEffect.visual) c.appearanceEffect.visual.targetEntityId = null;
+  }
+  c.appearanceModel = c.appearanceEffect ? null : model(c.appearanceModel);
   for (const key of ['theme', 'warehouseTheme', 'markerScreen'] as const) c[key] = c[key] === null ? null : normalizeChartMarkerThemeScreen(c[key]);
   if (!Array.isArray(c.targets) || c.targets.length > ALARM_MAX_TARGETS) throw new Error('目标数量超过 64');
   const ids = new Set<string>();

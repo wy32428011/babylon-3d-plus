@@ -1,3 +1,4 @@
+import { createModelTypeIdentityFromAsset } from '../../../electron/shared/modelTypeIdentity';
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type {
   MeshKind,
@@ -24,6 +25,7 @@ type ModelGeneratorSourceAsset = {
   kind: string;
   libraryKind?: 'model' | 'environment';
   assetRevision?: string;
+  dataPlatformSourceKey?: string;
   thumbnailUrl?: string;
   packagePath?: string;
   displayName?: string;
@@ -180,8 +182,10 @@ function createModelAssetTemplateFromAsset(asset: ModelGeneratorSourceAsset): Mo
   const scriptAssets = sanitizeModelScriptAssets(asset.scriptAssets);
   const parameterScriptMetadata = sanitizeJsonArray(asset.parameterScriptMetadata);
   const animationScriptMetadata = sanitizeJsonArray(asset.animationScriptMetadata);
+  const dataPlatformModel = createModelTypeIdentityFromAsset(asset);
 
   return {
+    ...(dataPlatformModel ? { dataPlatformModel } : {}),
     sourcePath: asset.path,
     sourceUrl: asset.sourceUrl,
     ...(asset.assetRevision ? { assetRevision: asset.assetRevision } : {}),

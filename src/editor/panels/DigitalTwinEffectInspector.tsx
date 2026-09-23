@@ -150,7 +150,7 @@ export function DigitalTwinEffectInspector({ component, disabled, onChange }: Pr
 
   return <div className="digital-twin-effect-inspector">
     <p className="muted">{definition.category} · {definition.description}</p>
-    {fields.includes('targetEntityId') && <>
+    {!component.configuration && fields.includes('targetEntityId') && <>
       <label className="inspector-row"><span>绑定目标</span>
         <select aria-label="特效绑定目标" disabled={disabled} value={config.targetEntityId ?? ''}
           onChange={event => commit({ targetEntityId: event.target.value || null }, '更新特效绑定目标')}>

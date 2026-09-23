@@ -23,6 +23,7 @@ type DigitalTwinSourceEnvironmentRelinkModule = typeof import('./digitalTwinSour
 type SceneShadowBakeContractModule = typeof import('../shared/sceneShadowBakeContract.js');
 const { captureSceneShadowBakeRelocation, getSceneShadowBakeSignatureContract } = require(`../shared/sceneShadowBakeContract${runtimeExtension}`) as SceneShadowBakeContractModule;
 const { stripCadReferencesFromSceneFile } = require(`./sceneCadReferenceSanitizer${runtimeExtension}`) as typeof import('./sceneCadReferenceSanitizer.js');
+const { collectEffectModelReferences, relocateLegacyEffectModelReferences } = require('../shared/effectDeploymentReferences' + runtimeExtension) as typeof import('../shared/effectDeploymentReferences.js');
 const { createSourceResourcePlan } = require(`./digitalTwinSourceResourcePlan${runtimeExtension}`) as typeof import('./digitalTwinSourceResourcePlan.js');
 const { copyDeploymentFiles } = require(`./deploymentExportFileSystem${runtimeExtension}`) as DeploymentExportFileSystemModule;
 const {
@@ -174,6 +175,7 @@ export async function buildDigitalTwinSourcePackage(
       options.preparedSceneContents,
     );
     const scenes = scenesResult.snapshots;
+    for (const scene of scenes) relocateLegacyEffectModelReferences(scene.parsed);
     const cadBundleMap = await prepareSourceSceneCadFiles(scenes.map(scene => scene.parsed),
       projectRoot, sharedResourcesRoot, legacyWorkspaceRoot, options.signal, options.isAuthorizedCadFile);
     const restoreRelocatedBakes = new Map(scenes.map(scene => [scene, captureSceneShadowBakeRelocation(scene.parsed.scene)]));
@@ -224,7 +226,7 @@ export async function buildDigitalTwinSourcePackage(
     const bundles = resourcePlan.bundles;
     for (const scene of scenes) {
       resourcePlan.validateModelReferences(scene.parsed, scene.relativePath);
-      const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap, resourcePlan);
+      const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap, resourcePlan, new WeakSet(collectEffectModelReferences(scene.parsed)));
       const restoreBake = restoreRelocatedBakes.get(scene);
       if (isPlainObject(portableScene) && restoreBake) {
         // 内容指纹已确认版本；先逆向验证本次目标分配，再更新纯位置变化后的签名。
@@ -664,6 +666,7 @@ function collectResourceBundles(
   for (const cadBundle of cadBundleMap.values()) registerBundle(cadBundle);
   for (const platformBundle of platformImageBundleMap.values()) registerBundle(platformBundle);
   for (const skyboxBundle of stableSkyboxBundles.values()) registerBundle(skyboxBundle);
+  const effectMetadata = new WeakSet(sceneValues.flatMap(collectEffectModelReferences));
 
   let visited = 0;
   const visit = (value: unknown, fieldName: string | null = null): void => {
@@ -699,6 +702,7 @@ function collectResourceBundles(
       return;
     }
     if (isPlainObject(value)) {
+      if (effectMetadata.has(value)) return;
       const stableSkybox = stableSkyboxObjects.has(value);
       for (const [childKey, child] of Object.entries(value)) {
         if (stableSkybox && STABLE_SKYBOX_PATH_FIELDS.has(childKey)) continue;
@@ -803,6 +807,8 @@ function resolveResourceBundle(
   let bundleEnd = segments.length;
   if (library === 'models') {
     bundleEnd = segments[assetsIndex + 2]?.toLowerCase() === 'combomodels' ? assetsIndex + 4 : assetsIndex + 3;
+  } else if (library === 'compositions') {
+    bundleEnd = assetsIndex + 4;
   } else if (library === 'environments' || library === 'skyboxes') {
     bundleEnd = assetsIndex + 3;
   }
@@ -811,7 +817,7 @@ function resolveResourceBundle(
   const pathRoot = path.parse(normalized).root;
   const assetRelativeSegments = segments.slice(assetsIndex, bundleEnd);
   let sourceRoot: string;
-  if (bundleEnd === segments.length && !['models', 'environments', 'skyboxes'].includes(library)) {
+  if (bundleEnd === segments.length && !['models', 'environments', 'skyboxes', 'compositions'].includes(library)) {
     sourceRoot = normalized;
   } else {
     const prefixSegments = normalized.slice(pathRoot.length).split(path.sep).filter(Boolean);
@@ -834,6 +840,7 @@ function rewriteSceneToPortableAssets(
   key: string | null = null,
   platformImageBundleMap: ReadonlyMap<string, PlatformImageBundle> = new Map(),
   resourcePlan?: SourceResourcePlan,
+  effectMetadata = new WeakSet<object>(),
 ): unknown {
   if (typeof value === 'string') {
     const isReference = value.startsWith(LOCAL_ASSET_URL_PREFIX)
@@ -862,14 +869,22 @@ function rewriteSceneToPortableAssets(
   }
   if (Array.isArray(value)) {
     if (key && PATH_ARRAY_KEYS.has(key)) {
-      return value.map((item) => rewriteSceneToPortableAssets(item, key, platformImageBundleMap, resourcePlan));
+      return value.map((item) => rewriteSceneToPortableAssets(item, key, platformImageBundleMap, resourcePlan, effectMetadata));
     }
     return value.map((item) => rewriteSceneToPortableAssets(item, key, platformImageBundleMap, resourcePlan));
   }
   if (!isPlainObject(value)) return value;
+  if (effectMetadata.has(value)) {
+    const model = { ...value };
+    for (const field of ['sourcePath', 'sourceUrl']) {
+      const source = typeof value[field] === 'string' ? resourcePlan?.reference(value[field] as string) : null;
+      if (source?.kind === 'file') model[field] = field === 'sourceUrl' ? LOCAL_ASSET_URL_PREFIX + encodeURIComponent(source.destination) + source.suffix : source.destination;
+    }
+    return model;
+  }
   const rewritten = Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
     childKey,
-    rewriteSceneToPortableAssets(childValue, childKey, platformImageBundleMap, resourcePlan),
+    rewriteSceneToPortableAssets(childValue, childKey, platformImageBundleMap, resourcePlan, effectMetadata),
   ]));
   const model = typeof value.sourcePath === 'string' ? resourcePlan?.reference(value.sourcePath) : null;
   if (model && /^Assets\/Models\//i.test(model.destination) && /\.(glb|gltf)$/i.test(model.destination)) {
@@ -914,7 +929,7 @@ function toPortableAssetReference(value: string): string | null {
     const relativePath = segments.slice(environmentCachePath.revisionEndIndex).join('/');
     return relativePath ? `${packagePath}/${relativePath}` : packagePath;
   }
-  const match = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images)(?:\/.*|$))/i.exec(normalized);
+  const match = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions)(?:\/.*|$))/i.exec(normalized);
   return match ? path.posix.normalize(match[1]) : null;
 }
 

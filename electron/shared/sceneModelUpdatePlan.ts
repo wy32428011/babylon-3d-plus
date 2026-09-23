@@ -130,6 +130,7 @@ export function planSceneModelUpdates(scene: unknown, sourceKey: string, options
   const plan = new Map<string, SceneModelUpdateItem>();
   const blocked = new Set<string>();
   for (const asset of references) {
+    if (asset.sourceSnapshot && typeof asset.sourceSnapshot === 'object' && (asset.sourceSnapshot as Record<string, unknown>).composition === true) continue;
     const pathKey = getClickEventModelResourceKey(asset.sourceUrl);
     const [pathKind, pathId] = pathKey?.split(':') ?? [];
     const resourceKey = pathKey ? `${pathKind}:${pathId}` : undefined;

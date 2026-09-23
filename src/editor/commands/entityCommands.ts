@@ -1,3 +1,4 @@
+import { updateCompositionFrames } from '../composition/composition';
 import type { Command } from './Command';
 import { executeCommand, type CommandHistory } from './CommandHistory';
 import type {
@@ -740,8 +741,8 @@ function createEntityPositionsCommand(
   const uniqueEntityIds = [...new Set(entityIds)];
   return {
     label: '移动选中对象',
-    execute: (scene) => updateEntityPositions(scene, uniqueEntityIds, afterPositions),
-    undo: (scene) => updateEntityPositions(scene, uniqueEntityIds, beforePositions),
+    execute: (scene) => updateCompositionFrames(scene, updateEntityPositions(scene, uniqueEntityIds, afterPositions), uniqueEntityIds),
+    undo: (scene) => updateCompositionFrames(scene, updateEntityPositions(scene, uniqueEntityIds, beforePositions), uniqueEntityIds),
   };
 }
 
@@ -762,8 +763,8 @@ function createEntityTransformsCommand(
   }
   return {
     label,
-    execute: (scene) => updateEntityTransforms(scene, uniqueEntityIds, afterSnapshots),
-    undo: (scene) => updateEntityTransforms(scene, uniqueEntityIds, beforeSnapshots),
+    execute: (scene) => updateCompositionFrames(scene, updateEntityTransforms(scene, uniqueEntityIds, afterSnapshots), uniqueEntityIds),
+    undo: (scene) => updateCompositionFrames(scene, updateEntityTransforms(scene, uniqueEntityIds, beforeSnapshots), uniqueEntityIds),
   };
 }
 

@@ -24,9 +24,10 @@ const hooks = registerHooks({
   },
 });
 let TargetModelEffects;
+let suspendTargetModelEffects;
 let AlarmColorOverrides;
 try {
-  ({ TargetModelEffects } = await import(new URL('runtime/babylon/effects/TargetModelEffects.ts', root).href));
+  ({ TargetModelEffects, suspendTargetModelEffects } = await import(new URL('runtime/babylon/effects/TargetModelEffects.ts', root).href));
   ({ AlarmColorOverrides } = await import(new URL('runtime/babylon/AlarmManagerRuntime.ts', root).href));
 }
 finally { hooks.deregister(); }
@@ -272,5 +273,27 @@ test('报警期间模型效果保持挂起，呼吸更新不重建，解除后�
   }
   alarms.clear(); assert.equal(mesh.material, original);
   runtime.tick(0.3); assert.notEqual(mesh.material, original); assert.equal(mesh.material.alpha, 0.3);
+  runtime.dispose(); assert.equal(mesh.material, original);
+});
+
+test('报警选用模型表面特效时接管常驻特效，解除恢复常驻效果及真实原材质', t => {
+  const { runtime, target, mesh, original, scene } = harness(t);
+  const alarmEffects = new TargetModelEffects(scene, () => target, true);
+  t.after(() => alarmEffects.dispose());
+  runtime.sync('normal', component('xray'), true);
+  assert.equal(mesh.material.alpha, 0.3);
+  const release = suspendTargetModelEffects(mesh);
+  try {
+    assert.equal(mesh.material, original);
+    alarmEffects.sync('alarm', component('hologram'), true);
+    const appearance = mesh.material;
+    assert.equal(appearance.wireframe, true);
+    for (let i = 0; i < 10; i++) { runtime.tick(0.3); alarmEffects.tick(0.3); assert.equal(mesh.material, appearance); }
+    alarmEffects.disposeMissing(new Set());
+    assert.equal(mesh.material, original);
+    assert.equal(scene.materials.includes(appearance), false);
+  } finally { alarmEffects.dispose(); release(); }
+  runtime.tick(0.3);
+  assert.equal(mesh.material.alpha, 0.3);
   runtime.dispose(); assert.equal(mesh.material, original);
 });

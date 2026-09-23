@@ -166,3 +166,20 @@ test('额度不足只降级缓存，POST 与自定义请求头不缓存', async 
     assert.deepEqual(seen[3].headers, { Accept: 'application/json' });
   } finally { cache.dispose(); globalThis.fetch = original; }
 });
+
+test('并发缓存操作一起失败时只降级一次并继续完成全部网络加载', async context => {
+  let fail!: (error: Error) => void;
+  const pending = new Promise<never>((_resolve, reject) => { fail = reject; });
+  const store: PublishedCacheStore = { get: () => pending, async put() {} };
+  const warning = context.mock.method(console, 'warn', () => undefined);
+  const network = context.mock.method(globalThis, 'fetch', async () => new Response('model'));
+  const cache = session(store);
+  const requests = Array.from({ length: 8 }, (_, index) => cache.fetch('http://viewer.test/a/project/assets/' + index + '.glb'));
+  fail(new Error('发布缓存读写超时。'));
+  const responses = await Promise.all(requests);
+  assert.deepEqual(await Promise.all(responses.map(response => response.text())), Array(8).fill('model'));
+  assert.equal(network.mock.callCount(), 8);
+  assert.equal(warning.mock.callCount(), 1);
+  assert.equal(cache.metrics.storageFailures, 1);
+  cache.dispose();
+});

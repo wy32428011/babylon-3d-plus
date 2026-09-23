@@ -1,3 +1,4 @@
+import { normalizeEffectDeploymentReferences } from '../shared/effectDeploymentReferences.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
 import { getSceneShadowBakeErrorContract, getSceneShadowBakeSignatureContract } from '../shared/sceneShadowBakeContract.js';
@@ -178,6 +179,7 @@ export async function prepareDeploymentExport(
     if (skippedCadCount > 0) warnings.push(`发布包已跳过 ${skippedCadCount} 个 CAD 参考图及其 DXF 文件。`);
   }
   const scene = requirePlainObject(sceneFile.scene, '场景内容');
+
   const shadowBakeError = getSceneShadowBakeErrorContract(scene);
   if (shadowBakeError) throw new Error(shadowBakeError);
   const shadowSettings = isPlainObject(scene.sceneSettings) && isPlainObject(scene.sceneSettings.shadows)
@@ -237,6 +239,7 @@ export async function prepareDeploymentExport(
     warnings,
   );
 
+  normalizeEffectDeploymentReferences(scene, sourceUrlMap);
   rewriteModelReferences(resolvedModels, sourceUrlMap);
   rewriteClickEventBindingReferences(resolvedClickEventBindings, sourceUrlMap);
   rewriteEnvironmentReferences(resolvedEnvironments, sourceUrlMap);
@@ -247,6 +250,11 @@ export async function prepareDeploymentExport(
   scene.mqttConfig = createDisabledSceneMqttConfig();
   const runtimeMqttConfig = createRuntimeMqttConfig(originalMqttConfig, warnings);
   removeOptionalEditorOnlyUrls(scene);
+  if (isPlainObject(scene.entities)) for (const entity of Object.values(scene.entities)) {
+    if (isPlainObject(entity) && isPlainObject(entity.composition)) delete entity.composition.packagePath;
+    if (isPlainObject(entity) && isPlainObject(entity.components) && isPlainObject(entity.components.modelAsset)
+      && isPlainObject(entity.components.modelAsset.sourceSnapshot)) delete entity.components.modelAsset.sourceSnapshot.compositionResource;
+  }
   // 只迁移已验证结果的签名；资源 URL 换成部署路径不代表几何或布局发生变化。
   if (validBake) validBake.signature = getSceneShadowBakeSignatureContract(scene);
   assertNoLocalMachinePaths(sceneFile);

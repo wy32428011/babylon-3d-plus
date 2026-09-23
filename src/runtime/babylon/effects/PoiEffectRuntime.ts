@@ -1,3 +1,8 @@
+import type { EffectRuntimeTarget } from '../../../editor/model/effectConfiguration';
+import { registerEffectFollowResume } from '../../effects/effectDiagnostics';
+import type { SceneDocument } from '../../../editor/model/SceneDocument';
+import { EffectBindingRuntime } from '../../effects/EffectBindingRuntime';
+import { ConfiguredLegacyEffects, supportsConfiguredLegacyEffect } from './ConfiguredLegacyEffects';
 import { isDigitalTwinEffectKind } from '../../../editor/model/digitalTwinEffect';
 import { SpatialEffects, supportsSpatialEffect } from './SpatialEffects';
 import { TargetModelEffects } from './TargetModelEffects';
@@ -42,7 +47,7 @@ type PoiResources = {
   particleSystems: ParticleSystem[];
   textures: Texture[];
   lightWall: LightWallFence | null;
-  spatial: SpatialEffects | null;
+  spatial: (Pick<SpatialEffects, 'meshes' | 'materials' | 'tick' | 'setActive' | 'dispose'> & { update?: (component: PoiEffectComponent) => void; updatePlaybackSpeed?: (speed: number) => void }) | null;
 };
 
 type PoiEntry = {
@@ -76,15 +81,26 @@ type ParticleSpec = {
 /** Babylon POI/EFF 运行时：负责实体映射、稳定拾取壳、内部视觉资源、动画与严格释放。 */
 export class PoiEffectRuntime {
   private readonly entries = new Map<string, PoiEntry>();
-  private readonly beforeRenderObserver: Nullable<Observer<Scene>>;
+  private beforeRenderObserver: Nullable<Observer<Scene>>;
   private readonly targetEffects: TargetModelEffects;
   private readonly environmentEffects: SceneEnvironmentEffects;
+  private readonly bindings: EffectBindingRuntime;
+  private readonly resolveTarget: (id: string) => TransformNode | AbstractMesh | null;
   private previousFrameTime: number | null = null;
 
   /** 创建运行时并注册唯一 before-render 观察者。 */
-  constructor(private readonly scene: Scene, private readonly resolveTarget: (id: string) => TransformNode | AbstractMesh | null = () => null, canFollow: () => boolean = () => false) {
-    this.targetEffects = new TargetModelEffects(scene, resolveTarget);
-    this.environmentEffects = new SceneEnvironmentEffects(scene, resolveTarget, canFollow);
+  constructor(private readonly scene: Scene, resolveNode: (id: string) => TransformNode | AbstractMesh | null = () => null, canFollow: () => boolean = () => false, alarmAppearance = false, options: { getRuntimeTargets?: () => readonly EffectRuntimeTarget[] } = {}) {
+    this.resolveTarget = id => this.bindings?.resolveAnchor(id) ?? resolveNode(id);
+    this.targetEffects = new TargetModelEffects(scene, this.resolveTarget, alarmAppearance);
+    this.environmentEffects = new SceneEnvironmentEffects(scene, this.resolveTarget, canFollow);
+    this.bindings = new EffectBindingRuntime(scene, { resolveNode, isRunning: canFollow,
+      apply: (entity, selected, visible, pickable) => this.syncResolved(entity, selected, visible, pickable),
+      remove: id => { this.disposeEntity(id); const remaining = new Set(this.entries.keys()); this.targetEffects.disposeMissing(remaining); this.environmentEffects.disposeMissing(remaining); },
+      getRoot: id => this.entries.get(id)?.root ?? null,
+      cameraStatus: id => this.environmentEffects.getStatus(id).status,
+      modelStatus: id => this.targetEffects.getStatus(id),
+      getRuntimeTargets: options.getRuntimeTargets,
+    });
     this.beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => this.animate());
   }
 
@@ -95,8 +111,23 @@ export class PoiEffectRuntime {
 
   setThemeFog(theme: SceneThemeSettings | null): void { this.environmentEffects.setThemeFog(theme); }
 
+  /** 放在设备运动回调之后，跟随读取同一帧的最终位置。 */
+  moveFrameObserverToEnd(): void {
+    if (this.beforeRenderObserver) this.scene.onBeforeRenderObservable.remove(this.beforeRenderObserver);
+    this.beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => this.animate());
+  }
+
+  setDocument(document: SceneDocument): void { this.bindings.setDocument(document); }
+  resumeFollow(id: string): void { this.environmentEffects.resume(id); }
+
   /** 同步单个 POI 实体；组件签名变化时只重建该实体内部资源。 */
   sync(entity: Entity, selected: boolean, visible: boolean, pickable: boolean): void {
+    if (entity.components.poiEffect?.configuration) { this.bindings.sync(entity, selected, visible, pickable); return; }
+    this.bindings.detach(entity.id);
+    this.syncResolved(entity, selected, visible, pickable);
+  }
+
+  private syncResolved(entity: Entity, selected: boolean, visible: boolean, pickable: boolean): void {
     const raw = entity.components.poiEffect;
     if (!raw) {
       this.disposeEntity(entity.id);
@@ -122,9 +153,11 @@ export class PoiEffectRuntime {
     }
     entry.resources.lightWall?.update(component);
     entry.resources.spatial?.setActive(visible && component.enabled);
-    entry.resources.spatial?.updatePlaybackSpeed(component.speed);
+    entry.resources.spatial?.update?.(component);
+    entry.resources.spatial?.updatePlaybackSpeed?.(component.speed);
     this.targetEffects.sync(entity.id, component, visible && component.enabled);
     this.environmentEffects.sync(entity.id, component, visible && component.enabled);
+    registerEffectFollowResume(entity.id, component.effectKind === 'target-follow' ? () => this.environmentEffects.resume(entity.id) : null);
     this.applyPickState(entry);
     this.applyParticlePlayback(entry, visible && component.enabled);
   }
@@ -136,6 +169,7 @@ export class PoiEffectRuntime {
 
   /** 释放同步集合中已经缺失的实体。 */
   disposeMissing(ids: Set<string>): void {
+    ids = this.bindings.disposeMissing(ids);
     this.targetEffects.disposeMissing(ids);
     this.environmentEffects.disposeMissing(ids);
     for (const id of Array.from(this.entries.keys())) {
@@ -211,6 +245,7 @@ export class PoiEffectRuntime {
   /** 严格释放所有 Mesh、Material、ParticleSystem、Texture 和 Observer。 */
   dispose(): void {
     if (this.beforeRenderObserver) this.scene.onBeforeRenderObservable.remove(this.beforeRenderObserver);
+    this.bindings.dispose();
     this.targetEffects.dispose();
     this.environmentEffects.dispose();
     for (const id of Array.from(this.entries.keys())) this.disposeEntity(id);
@@ -260,7 +295,10 @@ export class PoiEffectRuntime {
     const secondary = component.secondaryColor;
     const intensity = component.intensity;
 
-    if (supportsSpatialEffect(kind)) {
+    if (component.configuration && Object.keys(component.configuration.parameters).length > 0 && supportsConfiguredLegacyEffect(kind)) {
+      const spatial = new ConfiguredLegacyEffects(id, this.scene, root, component, this.resolveTarget);
+      resources.spatial = spatial; resources.meshes = spatial.meshes; resources.materials = spatial.materials;
+    } else if (supportsSpatialEffect(kind)) {
       const spatial = new SpatialEffects(id, this.scene, root, component, this.resolveTarget);
       resources.spatial = spatial;
       resources.meshes = spatial.meshes;
@@ -624,6 +662,7 @@ export class PoiEffectRuntime {
     // 切回隐藏标签页后不追赶长时间间隔，避免流动相位突然跳变。
     const deltaSeconds = this.previousFrameTime === null ? 0 : Math.max(0, Math.min(0.1, time - this.previousFrameTime));
     this.previousFrameTime = time;
+    this.bindings.tick(deltaSeconds);
     this.targetEffects.tick(deltaSeconds);
     this.environmentEffects.tick(deltaSeconds);
     for (const entry of this.entries.values()) {
@@ -727,6 +766,8 @@ export class PoiEffectRuntime {
 
   /** 生成组件签名，作为内部资源重建边界。 */
   private createSignature(component: PoiEffectComponent): string {
+    if (component.configuration && supportsConfiguredLegacyEffect(component.effectKind) && !Object.keys(component.configuration.parameters).length) return JSON.stringify(component);
+    if (component.configuration && component.effectKind !== 'light-wall-fence') return component.effectKind + (component.enabled ? '|v2-on' : '|v2-off');
     if (supportsSpatialEffect(component.effectKind)) return JSON.stringify({ ...component, speed: 0 });
     if (isDigitalTwinEffectKind(component.effectKind)) return JSON.stringify(component);
     if (component.effectKind === 'light-wall-fence') {
@@ -750,6 +791,7 @@ export class PoiEffectRuntime {
     entry.pickMaterial.dispose();
     entry.root.dispose(false, true);
     this.entries.delete(id);
+    registerEffectFollowResume(id, null);
   }
 
   /** 严格释放资源桶内容。 */

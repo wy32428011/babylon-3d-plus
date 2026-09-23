@@ -88,8 +88,9 @@ test('Store 创建、属性修改、撤销重做、复制及预览只读', async
     useEditorStore.getState().createAlarmManager({ x: 1, y: 2, z: 3 });
     const id = useEditorStore.getState().scene.selectedEntityId;
     assert.ok(id);
-    useEditorStore.getState().updateAlarmManager(id, { overrideColor: '#009900', targets: alarm.resizeAlarmTargets([], 2), listenProperty: 'CUSTOM PROPERTY', customProperty: 'fire.signal', customValue: '1' });
+    useEditorStore.getState().updateAlarmManager(id, { appearanceEffect: { effectKind: 'alarm-pulse' }, overrideColor: '#009900', targets: alarm.resizeAlarmTargets([], 2), listenProperty: 'CUSTOM PROPERTY', customProperty: 'fire.signal', customValue: '1' });
     assert.equal(useEditorStore.getState().scene.entities[id].components.alarmManager.overrideColor, '#009900');
+    assert.equal(useEditorStore.getState().scene.entities[id].components.alarmManager.appearanceEffect.effectKind, 'alarm-pulse');
     useEditorStore.getState().undo();
     assert.equal(useEditorStore.getState().scene.entities[id].components.alarmManager.targets.length, 0);
     useEditorStore.getState().redo();
@@ -233,5 +234,60 @@ test('CUSTOM PROPERTY 原始 MQTT 多设备边沿、绑定覆盖、隐藏与解�
     signal('MQTT-B', undefined, 3400); assert.equal(runtime.isActive(manager.id, second.id), false);
     assert.equal(meshes.get(second.id).material, material);
     signal('MQTT-B', 1, 3700); runtime.update(5000); assert.equal(runtime.isActive(manager.id, second.id), false);
+  } finally { runtime.dispose(); deviceTelemetryStore.clear(); scene.dispose(); engine.dispose(); }
+});
+
+test('报警外观保存特效配置，旧模型外观兼容，拒绝非附着型特效', () => {
+  const c = alarm.normalizeAlarmManager({ ...alarm.createDefaultAlarmManager(), appearanceEffect: { effectKind: 'alarm-pulse', primaryColor: '#123456' } });
+  assert.equal(c.appearanceEffect?.effectKind, 'alarm-pulse');
+  assert.equal(c.appearanceEffect.primaryColor, '#123456');
+  const manager = alarm.createAlarmManagerEntity({ x: 0, y: 0, z: 0 });
+  manager.components.alarmManager = c;
+  const doc = { ...createEmptySceneDocument('外观保存'), entityIds: [manager.id], entities: { [manager.id]: manager } };
+  assert.deepEqual(deserializeScene(serializeScene(doc)).entities[manager.id].components.alarmManager.appearanceEffect, c.appearanceEffect);
+  for (const effectKind of ['invalid', 'environment-fog', 'day-night', 'target-follow']) assert.throws(() => alarm.normalizeAlarmManager({ ...c, appearanceEffect: { effectKind } }));
+  const legacyModel = { kind: 'mesh', meshKind: 'sphere', displayName: '旧外观', materialColor: '#ff0000' };
+  const legacy = alarm.normalizeAlarmManager({ appearanceModel: legacyModel });
+  assert.deepEqual(legacy.appearanceModel, legacyModel);
+  assert.equal(legacy.appearanceEffect, null);
+  assert.equal(alarm.normalizeAlarmManager({ ...c, appearanceModel: target }).appearanceModel, null);
+});
+
+test('报警特效按设备独立附着、逐帧跟随、隐藏解除释放并恢复模型外观', async () => {
+  const { NullEngine, Scene, MeshBuilder, StandardMaterial, FreeCamera, Vector3, TransformNode } = await import('@babylonjs/core');
+  const { AlarmManagerRuntime } = await server.ssrLoadModule('/src/runtime/babylon/AlarmManagerRuntime.ts');
+  const { deviceTelemetryStore } = await server.ssrLoadModule('/src/runtime/mqtt/deviceTelemetry.ts');
+  const engine = new NullEngine(), scene = new Scene(engine);
+  new FreeCamera('camera', new Vector3(0, 2, -10), scene);
+  const root = new TransformNode('device-root', scene);
+  const mesh = MeshBuilder.CreateBox('device', {}, scene); mesh.parent = root;
+  const normal = MeshBuilder.CreateBox('normal', {}, scene);
+  const material = new StandardMaterial('original', scene); mesh.material = normal.material = material;
+  const manager = alarm.createAlarmManagerEntity({ x: 100, y: 0, z: 100 });
+  manager.components.alarmManager = alarm.normalizeAlarmManager({ ...manager.components.alarmManager, targets: [{ id: 'slot', model: null, entityId: model.id }], appearanceEffect: { effectKind: 'alarm-pulse' } });
+  const doc = { ...createEmptySceneDocument('外观运行'), entityIds: [manager.id, model.id], entities: { [manager.id]: manager, [model.id]: model } };
+  let visible = true;
+  const runtime = new AlarmManagerRuntime(scene, { meshes: () => [mesh], node: () => root, visible: () => visible, bounds: () => { mesh.computeWorldMatrix(true); const b = mesh.getBoundingInfo().boundingBox; return { minimum: b.minimumWorld, maximum: b.maximumWorld }; }, activate: () => {}, report: message => { throw new Error(message); } });
+  const signal = now => deviceTelemetryStore.upsert({ ...snapshot, receivedAt: now, sourceId: 'default', deviceType: 'device', assetCode: model.id, sequence: now, topic: 'test', sourceTimestamp: null });
+  const key = manager.id + ':alarm:' + model.id;
+  try {
+    runtime.sync(doc); signal(1000); runtime.update(1000);
+    const effectRoot = scene.getTransformNodeByName(key + '_poiEffectRoot');
+    assert.ok(effectRoot, '所选特效应生成运行时外观');
+    assert.equal(scene.particleSystems.length, 0, '选择光圈不应回退成火焰');
+    assert.equal(effectRoot.position.x, 0);
+    root.position.x = 7; root.rotation.y = Math.PI / 2; runtime.update(1016);
+    assert.equal(effectRoot.position.x, 7, '移动目标后下一帧跟随');
+    assert.ok(Math.abs(effectRoot.rotationQuaternion.y) > 0.7, '随目标世界旋转');
+    assert.equal(normal.material, material);
+    visible = false; runtime.update(1300);
+    assert.equal(effectRoot.isDisposed(), true); assert.equal(mesh.material, material);
+    visible = true;
+    manager.components.alarmManager = alarm.normalizeAlarmManager({ ...manager.components.alarmManager, appearanceEffect: { effectKind: 'hologram' } });
+    runtime.sync(doc); signal(1600); runtime.update(1600); scene.render();
+    assert.equal(mesh.material.wireframe, true, '模型表面特效不能被报警着色暂停');
+    assert.equal(normal.material, material);
+    runtime.reset(); assert.equal(mesh.material, material);
+    assert.equal(scene.transformNodes.some(node => node.name === key + '_poiEffectRoot'), false);
   } finally { runtime.dispose(); deviceTelemetryStore.clear(); scene.dispose(); engine.dispose(); }
 });

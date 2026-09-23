@@ -1,3 +1,5 @@
+import { COMPOSITION_SELECTION_DRAG } from '../composition/composition';
+import { CompositionLibrary } from '../composition/CompositionLibrary';
 import { applyAvailableSceneModelUpdates } from '../assets/applySceneModelUpdates';
 import { runSceneModelSyncTransaction, getSceneModelPublishSession, subscribeSceneModelPublishOperation } from '../assets/sceneModelSyncTransaction';
 import { deserializeScene, serializeScene } from '../project/SceneSerializer';
@@ -336,6 +338,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
       && sceneSessionIdRef.current === expectedSceneSessionId;
   }, []);
   const [activeLibraryKey, setActiveLibraryKey] = useState<ProjectLibraryKey>('model');
+  const compositionSaveRequest = useEditorStore(state => state.compositionSaveRequest);
+  useEffect(() => { if (compositionSaveRequest) setActiveLibraryKey('composition'); }, [compositionSaveRequest]);
   const [libraryFilterText, setLibraryFilterText] = useState('');
   const [modelDeviceTypeFilter, setModelDeviceTypeFilter] = useState('');
   const [projectAssets, setProjectAssets] = useState<ProjectModelAssetEntry[]>([]);
@@ -2146,6 +2150,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
               aria-pressed={isActive}
               className={isActive ? 'library-tab active' : 'library-tab'}
               key={library.key}
+              onDragEnter={event => {
+                if (!props.readOnly && library.key === 'composition' && event.dataTransfer.types.includes(COMPOSITION_SELECTION_DRAG)) {
+                  setActiveLibraryKey('composition'); setLibraryFilterText('');
+                }
+              }}
               onClick={() => {
                 setActiveLibraryKey(library.key);
                 setLibraryFilterText('');
@@ -2159,6 +2168,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         })}
       </nav>
 
+      {activeLibrary.key === 'composition' ? <CompositionLibrary readOnly={props.readOnly} search={libraryFilterText} onSearchChange={setLibraryFilterText} /> : <>
       <div className="library-filter-row" aria-label={`${activeLibrary.label}筛选`}>
         <label className="library-filter-label" htmlFor="project-library-search">
           {activeLibrary.searchLabel}
@@ -2505,6 +2515,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       ) : null}
 
       </div>
+      </>}
     </section>
   );
 }

@@ -1,0 +1,68 @@
+import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { createServer } from 'vite';
+import { chromium } from 'playwright';
+const output = path.resolve('output/playwright/effect-path-drawing'); await mkdir(output, { recursive: true });
+const server = await createServer({ server: { host: '127.0.0.1', port: 53149, strictPort: true, hmr: { port: 53149 } } });
+let browser, page; const errors = [], checks = [];
+try {
+  await server.listen(); await server.watcher.close();
+  browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets'] });
+  page = await browser.newPage({ viewport: { width: 1300, height: 850 } }); page.setDefaultTimeout(30000);
+  page.on('pageerror', error => errors.push(error.message)); page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  const html = await server.transformIndexHtml('/__effect_path__', '<!doctype html><html><head><meta charset="utf-8"></head><body><div id="root"></div><script type="module" src="/tests/fixtures/effectPathDrawing.harness.tsx"></script></body></html>');
+  await page.route('**/__effect_path__', route => route.fulfill({ contentType: 'text/html', body: html }));
+  await page.goto(server.resolvedUrls.local[0] + '__effect_path__', { waitUntil: 'commit' });
+  await page.waitForFunction(() => window.effectDrawingHarness?.effectRoot(), null, { timeout: 180000 });
+  await page.evaluate(() => window.effectDrawingHarness.camera());
+  const frame = await page.evaluate(() => window.effectDrawingHarness.scene().getFrameId()); await page.waitForFunction(frame => window.effectDrawingHarness.scene().getFrameId() > frame + 10, frame);
+  const original = await page.evaluate(() => window.effectDrawingHarness.current());
+  const worlds = [{ x: -5, y: 0, z: -3 }, { x: 5, y: 0, z: -3 }, { x: 5, y: 0, z: 5 }, { x: -5, y: 0, z: 5 }];
+  const clickWorld = async point => { const xy = await page.evaluate(point => window.effectDrawingHarness.project(point), point); await page.mouse.click(xy.x, xy.y); };
+  await page.getByRole('button', { name: '场景绘制', exact: true }).click();
+  for (const point of worlds.slice(0, 3)) await clickWorld(point);
+  await page.waitForFunction(() => window.effectDrawingHarness.drawing()?.points.length === 3 && window.effectDrawingHarness.previewCount() === 4);
+  assert.deepEqual(await page.evaluate(() => window.effectDrawingHarness.current()), original);
+  assert.equal(await page.evaluate(() => window.effectDrawingHarness.store.getState().scene.selectedEntityId), await page.evaluate(() => window.effectDrawingHarness.entityId));
+  await page.getByRole('button', { name: '撤销绘制点', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.effectDrawingHarness.drawing().points.length), 2);
+  await clickWorld(worlds[2]);
+  await page.screenshot({ path: path.join(output, 'drawing-preview.png') });
+  await page.getByRole('button', { name: '应用绘制', exact: true }).click();
+  await page.waitForFunction(() => !window.effectDrawingHarness.drawing() && window.effectDrawingHarness.previewCount() === 0);
+  const points = await page.evaluate(() => window.effectDrawingHarness.current().visual.points);
+  for (let index = 0; index < 3; index++) {
+    const expected = await page.evaluate(point => window.effectDrawingHarness.local(point), worlds[index]);
+    assert.ok(Math.hypot(points[index].x - expected[0], points[index].y - expected[1], points[index].z - expected[2]) < .03, '地面点击正确逆变换为旋转缩放后的局部坐标');
+  }
+  await page.evaluate(() => window.effectDrawingHarness.store.getState().undo());
+  assert.deepEqual(await page.evaluate(() => window.effectDrawingHarness.current()), original); checks.push('capture-keeps-selection', 'local-transform', 'temporary-preview-cleanup', 'one-step-undo');
+  await page.getByRole('button', { name: '场景绘制', exact: true }).click(); await clickWorld(worlds[0]); await page.keyboard.press('Escape');
+  await page.waitForFunction(() => !window.effectDrawingHarness.drawing() && window.effectDrawingHarness.previewCount() === 0); checks.push('escape-cancel');
+  await page.evaluate(() => window.effectDrawingHarness.setKind('light-wall-fence'));
+  await page.getByRole('button', { name: '场景绘制', exact: true }).click();
+  for (const point of worlds) await clickWorld(point);
+  await page.getByRole('button', { name: '应用绘制', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.effectDrawingHarness.current().lightWall.points.length), 4); checks.push('wall-drawing');
+  await page.evaluate(() => window.effectDrawingHarness.setKind('region-level'));
+  await page.getByLabel('绘制区域 ID').fill('warehouse-A');
+  await page.getByRole('button', { name: '场景绘制', exact: true }).click(); for (const point of worlds) await clickWorld(point);
+  await page.getByRole('button', { name: '应用绘制', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.effectDrawingHarness.current().configuration.parameters.regions[0].id), 'warehouse-A'); checks.push('region-drawing');
+  await page.getByRole('button', { name: '场景绘制', exact: true }).click(); await clickWorld(worlds[0]);
+  await page.evaluate(() => window.effectDrawingHarness.store.getState().selectEntity(null));
+  await page.waitForFunction(() => !window.effectDrawingHarness.drawing() && window.effectDrawingHarness.previewCount() === 0); checks.push('selection-cancel');
+  await page.evaluate(() => window.effectDrawingHarness.store.getState().selectEntity(window.effectDrawingHarness.entityId));
+  await page.getByRole('button', { name: '场景绘制', exact: true }).click(); await clickWorld(worlds[0]);
+  const readiness = await page.evaluate(() => window.effectDrawingHarness.store.getState().startRuntimePreview()); assert.equal(readiness.ok, true, JSON.stringify(readiness));
+  await page.waitForFunction(() => !window.effectDrawingHarness.drawing() && window.effectDrawingHarness.previewCount() === 0); checks.push('runtime-preview-cancel');
+  await page.evaluate(() => { const h = window.effectDrawingHarness; h.store.getState().stopRuntimePreview(); h.store.getState().selectEntity(h.entityId); });
+  await page.getByRole('button', { name: '场景绘制', exact: true }).click(); await clickWorld(worlds[0]);
+  await page.evaluate(() => window.effectDrawingHarness.reopen());
+  await page.waitForFunction(() => !window.effectDrawingHarness.drawing() && window.effectDrawingHarness.previewCount() === 0); checks.push('scene-session-cancel');
+  await page.evaluate(() => window.effectDrawingHarness.dispose()); assert.deepEqual(errors, []);
+  await writeFile(path.join(output, 'result.json'), JSON.stringify({ passed: true, checks, errors, localPoints: points }, null, 2));
+  console.log(JSON.stringify({ passed: true, checks, errors }));
+} catch (error) { if (page) await page.screenshot({ path: path.join(output, 'failure.png') }); throw error; }
+finally { await browser?.close(); await server.close(); }

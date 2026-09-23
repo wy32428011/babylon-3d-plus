@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 
 const outputDir = path.resolve('output/playwright/alarm-manager');
 await mkdir(outputDir, { recursive: true });
-const server = await createServer({
+const server = await createServer({ cacheDir: path.join(outputDir, 'vite-cache'),
   server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false },
 });
 let browser;

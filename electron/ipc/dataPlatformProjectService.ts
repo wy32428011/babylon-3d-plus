@@ -1,3 +1,4 @@
+import { recoverSceneCompositions } from './compositionSceneRecovery.js';
 import { validateSceneModelResourceReferences } from './sceneModelResourceValidation.js';
 import { includeSceneModelPackageVariants } from './sceneModelPackageVariants.js';
 import { resolveDataPlatformProjectLocation } from './dataPlatformProjectLocation.js';
@@ -395,6 +396,10 @@ export async function prepareLocalSceneResources(
     setSharedProjectAssetRoot(sharedRoot);
     setSharedProjectEnvironmentRoot(sharedRoot);
     controller.signal.throwIfAborted();
+    if (latest && scene) {
+      const recovered = await recoverSceneCompositions(scene, sharedRoot, expectedProjectRoot, baseUrl, controller.signal);
+      assertSceneContext(); scene = recovered.scene; issues.push(...recovered.issues);
+    }
     const hasBoundSource = expectedBinding && createDataPlatformSourceKey(expectedBinding.metadata.baseUrl) === sourceKey;
     const modelPlan = latest ? planSceneModelUpdates(scene, sourceKey, {
       allowSourceRebind: !!hasBoundSource,

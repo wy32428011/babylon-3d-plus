@@ -95,7 +95,7 @@ type ScenePreparation = { targetToken: string; expiresAt: number; scenes: Publis
 const scenePreparations = new Map<string, ScenePreparation>();
 
 function snapshotModelFiles(snapshot?: DigitalTwinResourceSnapshot): ModelSnapshotExpectedFile[] | undefined {
-  return snapshot?.resources.flatMap(resource => resource.kind === 'environment' ? [] : resource.files.map(file => ({
+  return snapshot?.resources.flatMap(resource => (resource.kind === 'environment' || resource.kind === 'composition') ? [] : resource.files.map(file => ({
     kind: resource.kind as 'model' | 'combo', resourceId: resource.resourceId, role: file.role,
     fileUrl: file.fileUrl, sha256: file.sha256, size: file.size,
   })));
@@ -123,7 +123,12 @@ export async function prepareDigitalTwinPublishSceneSnapshots(request: DigitalTw
   let resourceSnapshotToken: string | undefined;
   let resourceSnapshot: DigitalTwinResourceSnapshot | undefined;
   try {
-    const snapshot = await client.captureResourceSnapshot(target.metadata.projectId, collectDigitalTwinResourceIds(scenes.map(s => s.sceneContent)), signal);
+    const requestedResources = collectDigitalTwinResourceIds(scenes.map(s => s.sceneContent));
+    const snapshot = await client.captureResourceSnapshot(target.metadata.projectId, requestedResources, signal);
+    for (const reference of requestedResources.compositionVersions ?? []) {
+      const captured = snapshot.resources.find(r => r.kind === 'composition' && r.resourceId === reference.id + ':' + reference.revision);
+      if (!captured || captured.revision !== reference.contentSha256) throw new Error('数据中台未确认组合固定版本内容，请升级中台或重新同步组合。');
+    }
     resourceRevision = snapshot.resourceRevision;
     resourceSnapshotToken = snapshot.resourceSnapshotToken;
     resourceSnapshot = snapshot;
@@ -134,7 +139,7 @@ export async function prepareDigitalTwinPublishSceneSnapshots(request: DigitalTw
   }
   if (resourceSnapshot) {
     await synchronizeSnapshotModels(target.metadata.baseUrl, resolveDataPlatformBindingSharedResourcesRoot(target.projectRoot, target.metadata),
-      resourceSnapshot.resources.flatMap(resource => resource.kind === 'environment' ? []
+      resourceSnapshot.resources.flatMap(resource => (resource.kind === 'environment' || resource.kind === 'composition') ? []
         : [{ kind: resource.kind as 'model' | 'combo', resourceId: resource.resourceId }]), signal, resourceSnapshot);
   }
   await assertPublishTargetCurrent(target);
@@ -558,6 +563,7 @@ export async function publishDigitalTwin(
         resourceSnapshotToken: prepared?.preparation.resourceSnapshotToken,
         confirmResourceBindings: validated.confirmResourceBindings,
         ...resourceIds,
+        envModelIds: [...new Set([...resourceIds.envModelIds, ...(resourceIds.compositionVersions ?? []).map(v => v.id)])],
         sourcePackage: {
           fileName: sourcePackage.fileName,
           fileSize: sourcePackage.fileSize,

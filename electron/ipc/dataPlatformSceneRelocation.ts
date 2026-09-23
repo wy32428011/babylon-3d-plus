@@ -56,10 +56,10 @@ function rewriteSceneAssetUrl(value: string, editorRoot: string): string {
 
 function rewriteSceneAssetPath(value: string, editorRoot: string): string | null {
   const normalized = value.trim().replace(/\\/g, '/');
-  const match = normalized.match(/(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images)(?:\/.*|$))/i);
+  const match = normalized.match(/(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions)(?:\/.*|$))/i);
   if (!match) return null;
   const relativeAssetPath = path.posix.normalize(match[1]);
-  if (!/^Assets\/(?:Models|Environments|Skyboxes|Cad|Images)(?:\/|$)/i.test(relativeAssetPath)) return null;
+  if (!/^Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions)(?:\/|$)/i.test(relativeAssetPath)) return null;
   const targetPath = path.resolve(editorRoot, ...relativeAssetPath.split('/'));
   return isPathInside(editorRoot, targetPath) ? targetPath : null;
 }

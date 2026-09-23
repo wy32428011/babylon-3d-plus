@@ -120,8 +120,10 @@ export class PublishedAssetCache {
   }
 
   private storageFailure(error: unknown): void {
+    if (!this.storageAvailable || this.controller.signal.aborted) return;
     this.storageAvailable = false;
     this.metrics.storageFailures++;
+    this.store.close?.();
     console.warn('[Viewer cache] 持久缓存不可用，本次继续正常加载。', error);
   }
 

@@ -6,9 +6,14 @@ import {
   Matrix,
   Mesh,
   Scene,
+  TransformNode,
+  Quaternion,
+  Vector3,
   VertexData,
 } from '@babylonjs/core';
 import type { LocatorComponent, ModelGeneratorComponent, ModelGeneratorRule, ModelGeneratorTarget } from '../../editor/model/components';
+import type { EffectRuntimeTarget } from '../../editor/model/effectConfiguration';
+import { effectReferenceFromGeneratorTarget } from './GeneratedEffectTargets';
 import type { LocatorRuntimeEntry } from './SceneRuntime';
 import { createMeshModelGeneratorTarget, createModelGeneratorTargetSignature } from '../../editor/model/modelGenerator';
 
@@ -29,6 +34,7 @@ export type FetchContainerRecord = {
 
 type CargoInstance = {
   cargoCode: string;
+  containerCode: string;
   targetSignature: string;
   target: ModelGeneratorTarget;
   column: number;
@@ -37,6 +43,8 @@ type CargoInstance = {
 
 type GetLocatorBoxWorldMatrix = (locator: LocatorRuntimeEntry, column: number, layer: number) => Matrix | null;
 type LoadModelTemplate = (target: ModelGeneratorTarget) => Promise<{ meshes: Mesh[]; dispose: () => void } | null>;
+
+type EffectInstanceEntry = { target: EffectRuntimeTarget; matrix: Matrix | null; batch?: ThinInstanceBatch; localBounds?: { minimum: Vector3; maximum: Vector3 } };
 
 type ThinInstanceBatch = {
   meshes: Mesh[];
@@ -51,6 +59,7 @@ type ApplyRecordsContext = {
   generatorComponent: ModelGeneratorComponent | null;
   getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix;
   loadModelTemplate: LoadModelTemplate;
+  generatorId: string | null;
 };
 
 /** fetch 渲染格口键，用于设备接管渲染期间的格口抑制。 */
@@ -70,6 +79,9 @@ export class LocatorFetchRuntime {
   private lastApplyContext: ApplyRecordsContext | null = null;
   private disposed = false;
   private missingGeneratorReported = false;
+  private applyGeneration = 0;
+  private effectTargets = new Map<string, EffectInstanceEntry>();
+  private readonly effectPoseNodes = new Map<string, { node: TransformNode; usedAt: number }>();
 
   private readonly scene: Scene;
   private readonly locatorEntityId: string;
@@ -93,9 +105,10 @@ export class LocatorFetchRuntime {
     generatorComponent: ModelGeneratorComponent | null,
     getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
     loadModelTemplate: LoadModelTemplate,
-    options: { releaseAbsentSuppressedCells?: boolean } = {},
+    options: { releaseAbsentSuppressedCells?: boolean; generatorId?: string | null } = {},
   ): Promise<void> {
     if (this.disposed) return;
+    const generation = ++this.applyGeneration;
 
     const releaseAbsentSuppressedCells = options.releaseAbsentSuppressedCells === true;
     this.lastApplyContext = {
@@ -105,6 +118,7 @@ export class LocatorFetchRuntime {
       generatorComponent,
       getLocatorBoxWorldMatrix,
       loadModelTemplate,
+      generatorId: options.generatorId ?? null,
     };
 
     const rowKey = String(locatorComponent.rowNumber).trim();
@@ -135,6 +149,7 @@ export class LocatorFetchRuntime {
       if (!target) continue;
 
       nextInstances.push({
+        containerCode: typeof record.containerCode === 'string' ? record.containerCode.trim() : '',
         cargoCode: record.containerCode || `${record.containerType}_${record.column}_${record.layer}`,
         targetSignature: createModelGeneratorTargetSignature(target),
         target,
@@ -143,7 +158,8 @@ export class LocatorFetchRuntime {
       });
     }
 
-    await this.syncBatches(nextInstances, locatorEntry, getLocatorBoxWorldMatrix, loadModelTemplate);
+    this.prepareEffectTargets(nextInstances, options.generatorId ?? null, generation);
+    await this.syncBatches(nextInstances, locatorEntry, getLocatorBoxWorldMatrix, loadModelTemplate, generation);
   }
 
   /** 按规则顺序匹配记录字段；属性名留空默认比较 containerType。 */
@@ -175,6 +191,7 @@ export class LocatorFetchRuntime {
     locatorEntry: LocatorRuntimeEntry,
     getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
     loadModelTemplate: LoadModelTemplate,
+    generation: number,
   ): Promise<void> {
     const groups = new Map<string, CargoInstance[]>();
     for (const instance of instances) {
@@ -190,11 +207,12 @@ export class LocatorFetchRuntime {
     }
 
     for (const [signature, group] of groups) {
+      if (this.disposed || generation !== this.applyGeneration) return;
       const existing = this.batches.get(signature);
       if (existing) {
         this.updateBatchMatrices(existing, group, locatorEntry, getLocatorBoxWorldMatrix);
       } else {
-        await this.createBatch(signature, group, locatorEntry, getLocatorBoxWorldMatrix, loadModelTemplate);
+        await this.createBatch(signature, group, locatorEntry, getLocatorBoxWorldMatrix, loadModelTemplate, generation);
       }
     }
   }
@@ -206,11 +224,23 @@ export class LocatorFetchRuntime {
     locatorEntry: LocatorRuntimeEntry,
     getLocatorBoxWorldMatrix: GetLocatorBoxWorldMatrix,
     loadModelTemplate: LoadModelTemplate,
+    generation: number,
   ): Promise<void> {
     const target = instances[0].target;
 
-    const template = await this.loadTemplateMesh(target, loadModelTemplate);
+    let template: Awaited<ReturnType<LocatorFetchRuntime['loadTemplateMesh']>>;
+    try { template = await this.loadTemplateMesh(target, loadModelTemplate); }
+    catch (error) {
+      if (generation === this.applyGeneration && !this.disposed) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.markEffectTargetsFailed(instances, message);
+        this.onPushLog(`创建 thinInstance batch 失败：${message}`);
+      }
+      return;
+    }
+    if (this.disposed || generation !== this.applyGeneration) { template?.dispose(); return; }
     if (!template) {
+      this.markEffectTargetsFailed(instances, '无法获取目标模型几何');
       this.onPushLog(`创建 thinInstance batch 失败：无法获取目标模型几何 (${target.kind})`);
       return;
     }
@@ -221,6 +251,7 @@ export class LocatorFetchRuntime {
       const parts = this.extractTemplateParts(template.meshes);
       if (parts.length === 0) {
         template.dispose();
+        this.markEffectTargetsFailed(instances, '目标模型无顶点数据');
         this.onPushLog(`创建 thinInstance batch 失败：目标模型无顶点数据 (${target.kind})`);
         return;
       }
@@ -257,6 +288,7 @@ export class LocatorFetchRuntime {
     } catch (error) {
       template.dispose();
       const message = error instanceof Error ? error.message : String(error);
+      this.markEffectTargetsFailed(instances, message);
       this.onPushLog(`创建 thinInstance batch 失败：${message}`);
     }
   }
@@ -317,9 +349,22 @@ export class LocatorFetchRuntime {
     batch.instances = instances;
 
     const matrices: Matrix[] = [];
+    let localBounds: { minimum: Vector3; maximum: Vector3 } | undefined;
+    for (const mesh of batch.meshes) {
+      const bounds = mesh.geometry?.extend; if (!bounds) continue;
+      localBounds = localBounds ? { minimum: Vector3.Minimize(localBounds.minimum, bounds.minimum), maximum: Vector3.Maximize(localBounds.maximum, bounds.maximum) } : { minimum: bounds.minimum.clone(), maximum: bounds.maximum.clone() };
+    }
     for (const instance of instances) {
       const worldMatrix = getLocatorBoxWorldMatrix(locatorEntry, instance.column, instance.layer);
       if (worldMatrix) matrices.push(worldMatrix);
+      const effect = this.effectTargets.get(this.effectTargetId(instance));
+      if (effect) {
+        effect.matrix = worldMatrix?.clone() ?? null;
+        effect.localBounds = localBounds;
+        effect.batch = batch;
+        effect.target.state = worldMatrix ? 'ready' : 'error';
+        effect.target.message = worldMatrix ? undefined : '库存格口坐标无效';
+      }
     }
 
     const enabled = matrices.length > 0;
@@ -336,8 +381,87 @@ export class LocatorFetchRuntime {
     }
   }
 
+  private effectTargetId(instance: CargoInstance): string {
+    return 'runtime-fetch:' + encodeURIComponent(this.locatorEntityId) + ':' + instance.column + ':' + instance.layer + ':' + encodeURIComponent(instance.cargoCode);
+  }
+
+  private prepareEffectTargets(instances: CargoInstance[], generatorId: string | null, generation: number): void {
+    const next = new Map<string, EffectInstanceEntry>();
+    for (const instance of instances) {
+      if (instance.target.kind !== 'model') continue;
+      const id = this.effectTargetId(instance);
+      const prior = this.effectTargets.get(id);
+      const sameOutput = this.batches.has(instance.targetSignature) && prior?.target.generatorId === generatorId
+        && prior.target.model.sourceUrl === instance.target.modelAsset.sourceUrl && prior.target.model.sourcePath === instance.target.modelAsset.sourcePath;
+      next.set(id, { target: {
+        id, name: instance.target.displayName + ' ' + instance.cargoCode, origin: 'generated',
+        model: effectReferenceFromGeneratorTarget(instance.target), identity: null,
+        ...(instance.containerCode ? { containerCode: instance.containerCode } : {}),
+        generatorId, generation: sameOutput ? prior!.target.generation : generation, state: 'loading',
+      }, matrix: null });
+    }
+    this.effectTargets = next;
+    for (const [id, pose] of this.effectPoseNodes) {
+      if (next.has(id)) continue;
+      pose.node.dispose(); this.effectPoseNodes.delete(id);
+    }
+  }
+
+  private markEffectTargetsFailed(instances: CargoInstance[], message: string): void {
+    for (const instance of instances) {
+      const effect = this.effectTargets.get(this.effectTargetId(instance));
+      if (!effect) continue;
+      effect.target.state = 'error'; effect.target.message = message; effect.matrix = null;
+    }
+  }
+
+  /** 仅返回渲染实例的只读描述，不为库存列表分配 Babylon 节点。 */
+  getEffectTargets(): readonly EffectRuntimeTarget[] {
+    const now = Date.now();
+    for (const [id, pose] of this.effectPoseNodes) {
+      if (now - pose.usedAt <= 1000 && this.effectTargets.has(id)) continue;
+      pose.node.dispose(); this.effectPoseNodes.delete(id);
+    }
+    return [...this.effectTargets.values()].map(entry => {
+      if (entry.target.state === 'ready' || entry.target.state === 'hidden') entry.target.state = this.isEffectInstanceVisible(entry) ? 'ready' : 'hidden';
+      return entry.target;
+    });
+  }
+
+  private isEffectInstanceVisible(entry: EffectInstanceEntry): boolean {
+    return !!entry.batch?.meshes.some(mesh => !mesh.isDisposed() && mesh.isEnabled() && mesh.isVisible && mesh.visibility > 0);
+  }
+
+  /** 只为实际跟随的实例建立轻量位姿，矩阵使用当前批次已经提交的世界矩阵。 */
+  resolveEffectTargetNode(id: string): TransformNode | null {
+    const entry = this.effectTargets.get(id);
+    if (!entry?.matrix || (entry.target.state !== 'ready' && entry.target.state !== 'hidden') || !this.isEffectInstanceVisible(entry)) return null;
+    let pose = this.effectPoseNodes.get(id);
+    if (!pose) {
+      const node = new TransformNode(id + '_effectPose', this.scene);
+      node.doNotSerialize = true; node.rotationQuaternion = Quaternion.Identity();
+      pose = { node, usedAt: Date.now() }; this.effectPoseNodes.set(id, pose);
+    }
+    pose.usedAt = Date.now();
+    entry.matrix.decompose(pose.node.scaling, pose.node.rotationQuaternion!, pose.node.position);
+    pose.node.computeWorldMatrix(true);
+    if (entry.localBounds) {
+      let minimum = new Vector3(Infinity, Infinity, Infinity), maximum = new Vector3(-Infinity, -Infinity, -Infinity);
+      for (const x of [entry.localBounds.minimum.x, entry.localBounds.maximum.x]) for (const y of [entry.localBounds.minimum.y, entry.localBounds.maximum.y]) for (const z of [entry.localBounds.minimum.z, entry.localBounds.maximum.z]) {
+        const point = Vector3.TransformCoordinates(new Vector3(x, y, z), entry.matrix);
+        minimum = Vector3.Minimize(minimum, point); maximum = Vector3.Maximize(maximum, point);
+      }
+      pose.node.metadata = { effectBounds: { minimum, maximum } };
+    }
+    return pose.node;
+  }
+
   /** 清空全部 thinInstance batch；退出运行预览回编辑态时调用，runtime 本身保留复用 */
   clearAllBatches(): void {
+    this.applyGeneration += 1;
+    this.effectTargets.clear();
+    for (const { node } of this.effectPoseNodes.values()) node.dispose();
+    this.effectPoseNodes.clear();
     this.suppressedCellKeys.clear();
     this.lastApplyContext = null;
     for (const signature of [...this.batches.keys()]) {
@@ -372,7 +496,7 @@ export class LocatorFetchRuntime {
       context.getLocatorBoxWorldMatrix,
       context.loadModelTemplate,
       // 重放沿用上次数据，不做"无记录即解除"判定：否则 suppressCell 后的立即重放会把刚建立的抑制解除
-      { releaseAbsentSuppressedCells: false },
+      { releaseAbsentSuppressedCells: false, generatorId: context.generatorId },
     );
   }
 

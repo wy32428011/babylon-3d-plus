@@ -1,3 +1,4 @@
+import { registerCompositionIpc } from './ipc/compositionIpc.js';
 import { app, BrowserWindow, protocol } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -5,6 +6,7 @@ import { createAssetFileByteStream } from './shared/assetFileByteStream.js';
 import { fileURLToPath } from 'node:url';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
+import { registerEffectDataIpc } from './ipc/effectDataIpc.js';
 import { registerDataPlatformIpc } from './ipc/dataPlatformIpc.js';
 import { disposeDataPlatformChartSync } from './ipc/dataPlatformChartSync.js';
 import { findDataPlatformDeepLink, parseDataPlatformDeepLink, type DataPlatformDeepLink } from './deepLink.js';
@@ -255,6 +257,8 @@ function registerEditorAssetProtocol(): void {
 if (hasSingleInstanceLock) app.whenReady().then(() => {
   registerEditorAssetProtocol();
   registerProjectIpc();
+  registerCompositionIpc();
+  registerEffectDataIpc();
   registerDataPlatformIpc();
   registerAssetIpc();
   registerMqttIpc();

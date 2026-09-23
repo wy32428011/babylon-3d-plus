@@ -269,7 +269,7 @@ class ResourceResolver {
       }
     }
     if (this.project) {
-      const assets = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images)(?:\/.*|$))/i.exec(normalized);
+      const assets = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions)(?:\/.*|$))/i.exec(normalized);
       // 固定版本共享包只能按完整版本结构恢复，不能退回项目内同名的可变包。
       if (assets && !/\/(?:SharedResources|scene-model-versions)\//i.test(normalized)) add(path.join(this.project, ...assets[1].split('/')), this.project);
     }

@@ -1,0 +1,80 @@
+import assert from 'node:assert/strict';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import path from 'node:path';
+import electron from 'electron';
+import unzipper from 'unzipper';
+
+const {app}=electron;
+const output=path.resolve('output/generated-follow');
+await mkdir(output,{recursive:true});
+const temporary=await mkdtemp(path.join(output,'packages-'));
+app.setPath('userData',path.join(temporary,'user-data'));
+app.getAppPath=()=>process.cwd();
+const controller=new AbortController();
+const assetUrl=value=>'editor-asset://local/'+encodeURIComponent(value);
+const digest=value=>createHash('sha256').update(value).digest('hex');
+async function cleanup(){
+  const root=await realpath(output), target=await realpath(temporary), relative=path.relative(root,target);
+  if(!relative||relative.startsWith('..')||path.isAbsolute(relative)||!path.basename(target).startsWith('packages-'))throw new Error('测试清理路径校验失败');
+  await rm(target,{recursive:true,force:true});
+}
+const deadline=setTimeout(()=>{controller.abort();console.error('运行时生成模型发布验证超时');void cleanup().finally(()=>app.exit(1));},120000);
+async function run(){let code=1;try{
+  const {buildDigitalTwinSourcePackage}=await import('../../dist-electron/ipc/digitalTwinSourcePackage.js');
+  const {buildDigitalTwinDistPackage}=await import('../../dist-electron/ipc/digitalTwinDistPackage.js');
+  const {relocateDataPlatformScene}=await import('../../dist-electron/ipc/dataPlatformSceneRelocation.js');
+  const {authorizeAssetFile}=await import('../../dist-electron/ipc/assetRegistry.js');
+  const {matchesModelTypeReference}=await import('../../dist-electron/shared/modelTypeIdentity.js');
+  const original=JSON.parse(await readFile('output/effect-configuration/editor-binding.scene.json','utf8'));
+  const effect=structuredClone(Object.values(original.scene.entities).find(value=>value.components.poiEffect?.effectKind==='target-follow'));
+  const sampleModel=Object.values(original.scene.entities).find(value=>value.components.modelAsset);
+  assert.ok(effect&&sampleModel);
+  const projectRoot=path.join(temporary,'project'),projectModel=path.join(projectRoot,'Assets','Models','generated-device.glb');
+  await mkdir(path.dirname(projectModel),{recursive:true});await copyFile('output/effect-configuration/device.glb',projectModel);authorizeAssetFile(projectModel);
+  const template={...structuredClone(sampleModel.components.modelAsset),sourcePath:projectModel,sourceUrl:assetUrl(projectModel)};
+  delete template.assetCode;delete template.dataPlatformModel;
+  const generator={...structuredClone(sampleModel),id:'runtime-generator',name:'运行时生产者',parentId:null,children:[],components:{modelGenerator:{defaultTarget:{kind:'model',assetId:'generated-type',displayName:'生成设备',modelAsset:template},rules:[]}}};
+  const modelRef={name:'生成设备',sourcePath:projectModel,sourceUrl:assetUrl(projectModel)};
+  Object.assign(effect.components.poiEffect.configuration.target,{mode:'model',model:modelRef});
+  effect.parentId=null;effect.children=[];
+  const orphan=structuredClone(effect);orphan.id='orphan-follow';orphan.name='等待尚未配置的生产者';
+  const orphanPath=path.join(path.dirname(projectModel),'not-generated.glb');
+  orphan.components.poiEffect.configuration.target.model={name:'尚未生成',sourcePath:orphanPath,sourceUrl:assetUrl(orphanPath)};
+  const sceneFile=path.join(projectRoot,'Scenes','main.scene.json');
+  const document={...original,scene:{...original.scene,entities:{[effect.id]:effect,[generator.id]:generator,[orphan.id]:orphan},entityIds:[effect.id,generator.id,orphan.id],rootIds:[effect.id,generator.id,orphan.id]}};
+  const content=JSON.stringify(document);await mkdir(path.dirname(sceneFile),{recursive:true});await writeFile(sceneFile,content,'utf8');
+  const source=await buildDigitalTwinSourcePackage({projectRoot,sharedResourcesRoot:path.join(temporary,'shared'),entrySceneFilePath:sceneFile,outputRoot:path.join(temporary,'source'),signal:controller.signal,manifest:{projectId:'123',projectName:'运行时生成跟随验证',editorProjectId:null,baseVersionId:null,resourceRevision:'1'},isPlatformImageReference:()=>false,findSyncedImageForReference:async()=>null,skyboxCacheDependencies:{getSharedProjectSkyboxRoot:()=>null}});
+  const dist=await buildDigitalTwinDistPackage({projectId:'123',publishName:'运行时生成跟随验证',sceneContent:source.entrySceneContent,sourceResourceFiles:source.resourceFiles,outputRoot:path.join(temporary,'dist'),signal:controller.signal});
+  const sourceZip=await unzipper.Open.file(source.filePath),distZip=await unzipper.Open.file(dist.filePath);
+  const readScene=async(zip,name)=>JSON.parse((await zip.files.find(file=>file.path.replace(/\\/g,'/')===name).buffer()).toString('utf8'));
+  const sourceScene=await readScene(sourceZip,'Scenes/main.scene.json'),distScene=await readScene(distZip,'project/scene.json');
+  const ref=doc=>doc.scene.entities[effect.id].components.poiEffect.configuration.target.model;
+  const producer=doc=>doc.scene.entities[generator.id].components.modelGenerator.defaultTarget.modelAsset;
+  assert.equal(Object.values(document.scene.entities).some(entity=>entity.components.modelAsset),false,'编辑场景零模型实例');
+  for(const doc of [sourceScene,distScene]){
+    assert.equal(ref(doc).sourcePath,producer(doc).sourcePath,'筛选类型和实际生产者共享搬迁路径');
+    assert.equal(ref(doc).sourceUrl,producer(doc).sourceUrl);
+    assert.equal(matchesModelTypeReference(producer(doc),ref(doc)),true);
+    assert.equal(ref(doc).entityIds,undefined,'新类型不生成编辑实体依赖');
+  }
+  const movedRoot=path.join(temporary,'reopened-project');
+  const reopened=relocateDataPlatformScene(sourceScene,movedRoot);
+  assert.ok(producer(reopened).sourcePath.startsWith(movedRoot));
+  assert.equal(matchesModelTypeReference(producer(reopened),ref(reopened)),true,'SOURCE 换目录后生产者与类型仍一致');
+  assert.equal(sourceScene.scene.entities[orphan.id].components.poiEffect.configuration.target.model.sourcePath,orphanPath,'SOURCE 保留未生成类型编辑信息');
+  assert.equal(distScene.scene.entities[orphan.id].components.poiEffect.configuration.target.model.sourcePath,'');
+  assert.equal(distScene.scene.entities[orphan.id].components.poiEffect.configuration.target.model.sourceUrl,'');
+  const sourceGlbs=sourceZip.files.filter(file=>file.type!=='Directory'&&/\.glb$/i.test(file.path));
+  const distGlbs=distZip.files.filter(file=>file.path.replace(/\\/g,'/').startsWith('project/assets/')&&/\.glb$/i.test(file.path));
+  assert.equal(sourceGlbs.length,1);assert.equal(distGlbs.length,1);
+  assert.equal(digest(await sourceGlbs[0].buffer()),digest(await readFile(projectModel)));
+  assert.equal(digest(await distGlbs[0].buffer()),digest(await readFile(projectModel)));
+  assert.equal(source.resourceFiles.some(file=>file.sourcePath.includes('not-generated')),false);
+  assert.equal(await readFile(sceneFile,'utf8'),content,'发布不修改编辑文件');
+  await copyFile(source.filePath,path.join(output,'generated-source.zip'));await copyFile(dist.filePath,path.join(output,'generated-dist.zip'));
+  await writeFile(path.join(output,'generated-dist.scene.json'),JSON.stringify(distScene,null,2));
+  const report={ok:true,sceneInstances:0,sourceGlbs:1,distGlbs:1,checks:['generator-only-template','no-edit-instance-dependency','SOURCE-shared-resource-rewrite','SOURCE-moved-root-reopen','DIST-shared-resource-rewrite','metadata-only-does-not-load-or-copy','orphan-DIST-no-local-path','source-not-mutated']};
+  await writeFile(path.join(output,'packages-result.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));code=0;
+}catch(error){console.error(error);}finally{clearTimeout(deadline);try{await cleanup();}catch(error){console.error(error);code=1;}app.exit(code);}}
+app.whenReady().then(run).catch(error=>{console.error(error);app.exit(1);});

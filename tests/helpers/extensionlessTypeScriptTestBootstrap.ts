@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
@@ -106,6 +107,10 @@ function rewriteCompiledModuleSpecifiers(directory: string): void {
     const rewritten = source.replace(
       MODULE_SPECIFIER_PATTERN,
       (match, prefix: string, quote: string, specifier: string) => {
+        if (specifier.startsWith('@babylonjs/')) {
+          const target = createRequire(join(process.cwd(), 'package.json')).resolve(specifier);
+          return `${prefix}${quote}${pathToFileURL(target).href}${quote}`;
+        }
         if (!specifier.startsWith('.')) return match;
         if (STATIC_ASSET_PATTERN.test(specifier)) {
           return `${prefix}"data:text/javascript,export default %22%22"`;

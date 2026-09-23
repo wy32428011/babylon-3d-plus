@@ -593,7 +593,7 @@ export function AutoPatrolInspector({
         </button>
       </div>
       <p className="muted auto-patrol-capture-hint">
-        选中路线后按 F1 追加当前视角；选中节点后按 F1 覆盖该节点。
+        选中路线后按 F1 追加当前视角；选中节点后按 F1 覆盖该节点。录制保留当前相机高度、朝向和观察距离。
       </p>
       {routeIssues.length > 0 ? (
         <ul className="auto-patrol-validation-list" aria-label="路线校验结果">

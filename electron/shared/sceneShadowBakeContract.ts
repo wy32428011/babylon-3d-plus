@@ -136,7 +136,7 @@ function normalizeShadowAssetLocations(value: unknown): unknown {
     reference = reference.replace(/\\/g, '/').replace(/\/$/, '');
     const cache = /(?:^|\/)\.babylon-editor\/data-platform-cache\/environments\/[^/]+\/([^/]+)\/[^/]+(?:\/(.*))?$/i.exec(reference);
     if (cache) return `Assets/Environments/Env-${cache[1]}${cache[2] ? `/${cache[2]}` : ''}`;
-    const asset = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images)(?:\/.*|$))/i.exec(reference);
+    const asset = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions)(?:\/.*|$))/i.exec(reference);
     return asset ? asset[1] : value;
   }
   if (Array.isArray(value)) return value.map(normalizeShadowAssetLocations);

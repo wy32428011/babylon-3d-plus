@@ -1,4 +1,4 @@
-import { AbstractMesh, AssetContainer, Color3, InstancedMesh, Material, Mesh, MeshBuilder, Scene, SceneLoader, StandardMaterial, TransformNode, Vector3 } from '@babylonjs/core';
+import { AbstractMesh, AssetContainer, Color3, InstancedMesh, Material, Mesh, MeshBuilder, Scene, SceneLoader, StandardMaterial, TransformNode, Vector3, Quaternion } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
 import type { ChartMarkerThemeScreen } from '../../editor/model/components';
@@ -7,6 +7,7 @@ import { deviceTelemetryStore } from '../mqtt/deviceTelemetry';
 import { ChartMarkerPresentation, getChartMarkerStyle } from './ChartMarkerPresentation';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
 import { suspendTargetModelEffects } from './effects/TargetModelEffects';
+import { MODEL_EFFECT_KINDS } from '../../editor/model/digitalTwinEffect';
 import { createDefaultPoiEffectComponent } from '../../editor/model/poiEffect';
 import type { DataPlatformScreenOverlayItem } from './SceneRuntime';
 import type { RuntimeWorldBounds } from './runtimeNodeGeometry';
@@ -16,12 +17,13 @@ import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 export type AlarmActivation = { managerId: string; targetId: string; focusCamera: boolean; theme: ChartMarkerThemeScreen | null };
 type Host = {
   meshes: (id: string) => readonly AbstractMesh[];
+  node?: (id: string) => TransformNode | AbstractMesh | null;
   bounds: (id: string) => RuntimeWorldBounds | null;
   visible: (id: string) => boolean;
   activate: (event: AlarmActivation) => void;
   report: (message: string) => void;
 };
-type ActiveAlarm = { manager: Entity; target: Entity; trigger: AlarmTriggerKind; root: TransformNode; marker?: Mesh; markerMaterial?: StandardMaterial; style: DataPlatformScreenOverlayItem['markerStyle']; appearance?: TransformNode; disposeAppearance?: () => void; generation: number };
+type ActiveAlarm = { manager: Entity; target: Entity; trigger: AlarmTriggerKind; root: TransformNode; marker?: Mesh; markerMaterial?: StandardMaterial; style: DataPlatformScreenOverlayItem['markerStyle']; appearance?: TransformNode; disposeAppearance?: () => void; generation: number; modelEffectLeases: Map<AbstractMesh, () => void> };
 type Tint = { original: Material | null; replacement: Material; mesh: AbstractMesh; proxy?: Mesh; originalEnabled: boolean; color: string; releaseModelEffectLease: () => void };
 const STATIC_EMISSIVE_STRENGTH = 0.35;
 const ALARM_BREATHING_PERIOD_MS = 1600;
@@ -97,7 +99,9 @@ export class AlarmManagerRuntime {
   private generation = 0;
   private disposed = false;
 
-  constructor(private readonly scene: Scene, private readonly host: Host) { this.effects = new PoiEffectRuntime(scene); }
+  constructor(private readonly scene: Scene, private readonly host: Host) {
+    this.effects = new PoiEffectRuntime(scene, id => this.host.node?.(id) ?? this.host.meshes(id)[0] ?? null, () => false, true);
+  }
 
   sync(document: SceneDocument): void {
     this.reset();
@@ -124,12 +128,21 @@ export class AlarmManagerRuntime {
         entry.marker.position.set(center.x, bounds.maximum.y + 1, center.z);
         this.presentation.update(entry.marker, c.marker, true, true);
       }
-      if (!c.appearanceModel) {
+      if (c.appearanceEffect || !c.appearanceModel) {
         effectIds.add(key);
+        const effect = c.appearanceEffect ?? createDefaultPoiEffectComponent('fire');
+        const emitFromTop = ['fire', 'flame', 'smoke', 'smoke-plume', 'sparks', 'steam-leak', 'gas-leak', 'water-jet', 'warning-beacon'].includes(effect.effectKind);
         this.effects.sync({ ...entry.target, id: key, components: {
-          transform: { position: { x: center.x, y: bounds.maximum.y, z: center.z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
-          poiEffect: createDefaultPoiEffectComponent('fire'),
+          transform: { position: { x: center.x, y: emitFromTop ? bounds.maximum.y : bounds.minimum.y, z: center.z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+          poiEffect: effect.visual ? { ...effect, visual: { ...effect.visual, targetEntityId: entry.target.id } } : effect,
         } }, false, true, false);
+        // 使用目标真实世界姿态，包含父级变换和运行时移动；预设尺寸继续以米计，避免重复应用 GLB 单位缩放。
+        const node = this.host.node?.(entry.target.id) ?? this.host.meshes(entry.target.id)[0];
+        const root = this.effects.getGizmoTarget(key);
+        if (node && root) {
+          root.rotationQuaternion ??= Quaternion.Identity();
+          node.computeWorldMatrix(true).decompose(undefined, root.rotationQuaternion);
+        }
       }
     }
     this.effects.disposeMissing(effectIds);
@@ -139,6 +152,7 @@ export class AlarmManagerRuntime {
     const desired = new Set<string>();
     const colors = new Map<AbstractMesh, string>();
     const breathingMeshes = new Set<AbstractMesh>();
+    const modelAppearanceMeshes = new Set<AbstractMesh>();
     for (const { entity: manager, targets } of this.managers) {
       if (!this.host.visible(manager.id)) continue;
       const c = manager.components.alarmManager!;
@@ -164,18 +178,28 @@ export class AlarmManagerRuntime {
           else this.createEntry(key, manager, target, trigger);
           if (!newTarget || trigger === 'warehouse') { newTarget = target.id; newTrigger = trigger; }
         }
+        if (c.appearanceEffect && MODEL_EFFECT_KINDS.has(c.appearanceEffect.effectKind)) {
+          const leases = this.active.get(key)!.modelEffectLeases;
+          for (const [mesh, release] of leases) if (!meshes.includes(mesh) || mesh.isDisposed()) { release(); leases.delete(mesh); }
+          for (const mesh of meshes) {
+            modelAppearanceMeshes.add(mesh);
+            if (!leases.has(mesh)) leases.set(mesh, suspendTargetModelEffects(mesh));
+          }
+        }
       }
       if (newTarget) this.host.activate({ managerId: manager.id, targetId: newTarget, focusCamera: c.focusCamera,
         theme: newTrigger === 'warehouse' ? c.warehouseTheme ?? c.theme : c.theme });
     }
     for (const [key, entry] of this.active) if (!desired.has(key)) this.removeEntry(key, entry);
+    this.effects.disposeMissing(new Set(this.active.keys()));
+    for (const mesh of modelAppearanceMeshes) colors.delete(mesh);
     this.desiredColors = colors;
     this.breathingMeshes = breathingMeshes;
   }
 
   private createEntry(key: string, manager: Entity, target: Entity, trigger: AlarmTriggerKind): void {
     const c = manager.components.alarmManager!;
-    const entry: ActiveAlarm = { manager, target, trigger, root: new TransformNode(key, this.scene), generation: this.generation,
+    const entry: ActiveAlarm = { manager, target, trigger, root: new TransformNode(key, this.scene), generation: this.generation, modelEffectLeases: new Map(),
       style: getChartMarkerStyle({ ...c.marker, contentType: c.associationType === 'builtin' ? 'builtin' : 'screen' }) };
     this.active.set(key, entry);
     if (c.showMarker) {
@@ -189,7 +213,7 @@ export class AlarmManagerRuntime {
       entry.markerMaterial.backFaceCulling = false;
       entry.marker.material = entry.markerMaterial;
     }
-    if (c.appearanceModel?.kind === 'mesh') {
+    if (!c.appearanceEffect && c.appearanceModel?.kind === 'mesh') {
       const target = c.appearanceModel;
       const mesh = target.meshKind === 'sphere' ? MeshBuilder.CreateSphere(key + '_appearance', {}, this.scene)
         : target.meshKind === 'plane' ? MeshBuilder.CreatePlane(key + '_appearance', {}, this.scene)
@@ -199,7 +223,7 @@ export class AlarmManagerRuntime {
       mesh.material = material; mesh.parent = entry.root; mesh.isPickable = false;
       entry.disposeAppearance = () => { mesh.dispose(); material.dispose(); };
     }
-    if (c.appearanceModel?.kind === 'model') {
+    if (!c.appearanceEffect && c.appearanceModel?.kind === 'model') {
       const asset = c.appearanceModel.modelAsset;
       const url = asset.sourceUrl;
       const cacheKey = url + ':' + (asset.assetRevision ?? '');
@@ -249,6 +273,8 @@ export class AlarmManagerRuntime {
 
   private removeEntry(key: string, entry: ActiveAlarm): void {
     this.active.delete(key);
+    for (const release of entry.modelEffectLeases.values()) release();
+    entry.modelEffectLeases.clear();
     if (entry.marker) { this.presentation.remove(entry.marker); entry.marker.dispose(); }
     entry.markerMaterial?.dispose();
     entry.disposeAppearance?.(); entry.root.dispose();

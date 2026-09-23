@@ -601,6 +601,14 @@ type DeploymentExportRevealRequest = {
 };
 interface Window {
   editorApi: {
+    loadComposition: import('../electron/shared/compositionTypes').CompositionLibraryApi['loadComposition'];
+    listCompositions: import('../electron/shared/compositionTypes').CompositionLibraryApi['listCompositions'];
+    saveComposition: import('../electron/shared/compositionTypes').CompositionLibraryApi['saveComposition'];
+    syncCompositions: import('../electron/shared/compositionTypes').CompositionLibraryApi['syncCompositions'];
+    cancelCompositionSync: import('../electron/shared/compositionTypes').CompositionLibraryApi['cancelCompositionSync'];
+    restoreComposition: import('../electron/shared/compositionTypes').CompositionLibraryApi['restoreComposition'];
+    importCompositionPackage: import('../electron/shared/compositionTypes').CompositionLibraryApi['importCompositionPackage'];
+    exportCompositionPackage: import('../electron/shared/compositionTypes').CompositionLibraryApi['exportCompositionPackage'];
     version: string;
     saveScene: (request: SaveSceneRequest) => Promise<SaveSceneResult>;
     loadScene: () => Promise<LoadSceneResult>;
@@ -609,6 +617,8 @@ interface Window {
     readTextFile: (request: ReadTextFileRequest) => Promise<ReadTextFileResult>;
     scanAssets: () => Promise<AssetEntry[]>;
     getRecentWorkspaces: () => Promise<RecentWorkspacesResult>;
+    fetchEffectData?: (request: import('../electron/shared/effectDataContract').EffectDataRequest) => Promise<unknown>;
+    cancelEffectData?: (requestId: string) => Promise<boolean>;
     getDataPlatformConfig: () => Promise<DataPlatformConfig>;
     saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest) => Promise<DataPlatformConfig>;
     selectDataPlatformWorkspace: () => Promise<DataPlatformWorkspaceSelectionResult>;

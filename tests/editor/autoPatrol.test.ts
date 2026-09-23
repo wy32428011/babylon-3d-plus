@@ -66,7 +66,7 @@ test('自动巡检默认配置符合已确认的产品规则', () => {
   assert.equal(AUTO_PATROL_MIN_WAYPOINTS, 2);
 });
 
-test('F1 可按路线原点固定 1.7m 人眼高度并保持观察方向', () => {
+test('显式指定眼高时可按路线原点固定 1.7m 并保持观察方向', () => {
   const worldPose = createSceneCameraPose({ x: 4, y: 12, z: 8 }, { x: 4, y: 12, z: 18 });
   const waypoint = createAutoPatrolWaypointFromWorldPose(worldPose, ROUTE_TRANSFORM, 'eye-height', {
     eyeHeightMeters: AUTO_PATROL_EYE_HEIGHT_METERS,

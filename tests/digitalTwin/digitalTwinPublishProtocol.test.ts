@@ -61,3 +61,20 @@ test('结构化数据中台环境模型身份直接进入发布资源 ID', () =>
   })]);
   assert.deepEqual(ids.envModelIds, ['9007199254740993']);
 });
+
+test('组合根和解组成员按相同固定版本去重，并提交内容摘要', () => {
+  const identity={schemaVersion:1,libraryId:'library',revision:'version-1',resourceId:'2053001280000000001',resourceType:'ENV_MODEL',packagePath:'Assets/Compositions/library/version-1'};
+  const contentSha256='a'.repeat(64);
+  const scene={entities:{root:{isFolder:true,composition:{...identity,instanceId:'instance',contentSha256}},member:{components:{modelAsset:{sourceSnapshot:{contentSha256,composition:true,compositionResource:identity}}}}}};
+  const result=collectDigitalTwinResourceIds([JSON.stringify({version:5,scene})]);
+  assert.deepEqual(result.compositionVersions,[{id:identity.resourceId,revision:identity.revision,contentSha256}]);
+  assert.deepEqual(result.envModelIds,[]);
+});
+
+test('组合发布拒绝未同步身份和同版本不同摘要', () => {
+  const composition={schemaVersion:1,instanceId:'instance',libraryId:'library',revision:'version-1',contentSha256:'a'.repeat(64)};
+  assert.throws(()=>collectDigitalTwinResourceIds([JSON.stringify({scene:{entities:{root:{isFolder:true,composition}}}})]),/尚未同步/);
+  const first={isFolder:true,composition:{...composition,resourceId:'1'}};
+  const second={isFolder:true,composition:{...first.composition,contentSha256:'b'.repeat(64)}};
+  assert.throws(()=>collectDigitalTwinResourceIds([JSON.stringify({scene:{entities:{first,second}}})]),/摘要不一致/);
+});
